@@ -3,7 +3,7 @@ $source = Join-Path $PSScriptRoot 'setup-vps-ssh.ps1'
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
 if($errors.Count) { throw 'Parser failed' }
-$wanted=@('Convert-SshArgument','Initialize-ManagedOutput','Start-ManagedComponent','Stop-ManagedComponent','Open-ServerDesktop','Invoke-CodexSession','Start-CodexTerminal','Start-RemoteCodex','Install-AgentApplications','Start-ProjectWindowsBridge','Get-ManagedComponentState','Select-ExecutionMode','Connect-ProjectFolders')
+$wanted=@('Convert-SshArgument','Initialize-ManagedOutput','Start-ManagedComponent','Stop-ManagedComponent','Open-ServerDesktop','Invoke-CodexSession','Start-CodexTerminal','Start-RemoteCodex','Install-AgentApplications','Show-ServerApplications','Start-ProjectWindowsBridge','Get-ManagedComponentState','Select-ExecutionMode','Connect-ProjectFolders')
 foreach($function in $ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst]},$true)) {
     if($function.Name -in $wanted) { Invoke-Expression $function.Extent.Text.Replace('$PSScriptRoot', ("'" + $PSScriptRoot.Replace("'", "''") + "'")) }
 }
@@ -20,12 +20,19 @@ try {
     $component=Start-ManagedComponent $child @() 'desktop'
     Stop-ManagedComponent $component
     $marker=Join-Path $fixture 'drain-complete.txt'
-    [IO.File]::WriteAllText($child, 'param([string]$Marker); Write-Output ''{"state":"connected"}''; for($i=0;$i -lt 10000;$i++){Write-Output ''{"state":"disconnected"}''}; if([Console]::ReadLine() -ne ''stop''){exit 9}; [IO.File]::WriteAllText($Marker,''done'')',(New-Object Text.UTF8Encoding($true)))
+    $script:setupLogDirectory=$fixture
+    [IO.File]::WriteAllText($child, 'param([string]$Marker); [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false); Write-Output ''{"state":"connected"}''; for($i=0;$i -lt 10000;$i++){Write-Output ''{"state":"disconnected"}'';[Console]::Error.WriteLine(''fixture stderr drain'')}; if([Console]::ReadLine() -ne ''stop''){exit 9}; [IO.File]::WriteAllText($Marker,''done'')',(New-Object Text.UTF8Encoding($true)))
     $component=Start-ManagedComponent $child @('-Marker',$marker) 'connected'
     Stop-ManagedComponent $component
     if(-not(Test-Path -LiteralPath $marker)){throw 'Managed GUI status pipe blocked after readiness'}
+    if([IO.File]::ReadAllText($component.LogPath) -notmatch '\[err\] fixture stderr drain'){throw 'Managed stderr was not logged after readiness'}
+    [IO.File]::WriteAllText($child, '[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false);[Console]::Error.WriteLine(''REMOTEAGENTS_DESKTOP_READY=127.0.0.1:43389'');[Console]::Error.WriteLine(''Рабочий стол (проверка): fixture socket metadata mismatch'');exit 7',(New-Object Text.UTF8Encoding($true)))
+    $failure=$null
+    try{Start-ManagedComponent $child @() 'desktop'|Out-Null}catch{$failure=$_.Exception.Message}
+    if(!$failure -or $failure -notmatch 'кодом 7' -or $failure -notmatch 'Рабочий стол \(проверка\): fixture socket metadata mismatch' -or $failure -notmatch 'Журнал:'){throw 'Managed stderr failure cause/log path lost, Unicode changed or stderr accepted as readiness'}
+    $script:setupLogDirectory=$null
     $script:calls=New-Object Collections.Generic.List[object]
-    $script:stops=0; $script:components=0; $script:prepareFail=$false; $script:needAuth=$true; $script:authFail=$false; $script:authChoice='2';$script:executionChoice='1'
+    $script:stops=0; $script:components=0; $script:prepareFail=$false; $script:needAuth=$true; $script:authFail=$false; $script:authChoice='2';$script:executionChoice='2'
     function Invoke-ProfileSsh([string[]]$Arguments,[string]$PublicKey,[string]$InputText) {
         $script:calls.Add([pscustomobject]@{Arguments=$Arguments;InputText=$InputText})
         if($InputText) { [IO.File]::WriteAllText((Join-Path $fixture 'public-payload.sh'),$InputText,(New-Object Text.UTF8Encoding($false))); if($script:prepareFail){return 41};return 0 }
@@ -83,7 +90,7 @@ try {
     $script:prepareFail=$false;$script:needAuth=$true;$script:authFail=$true;$script:authChoice='1';$before=$script:stops
     $failed=$false;try{Start-CodexTerminal}catch{$failed=$true}
     if(-not $failed -or $script:stops -ne ($before+1)){throw 'Browser cleanup on auth failure failed'}
-    $script:needAuth=$false;$script:authFail=$false;$script:executionChoice='2';$script:metadataWrites=0;$before=$script:components;$script:calls.Clear()
+    $script:needAuth=$false;$script:authFail=$false;$script:executionChoice='1';$script:metadataWrites=0;$before=$script:components;$script:calls.Clear()
     Start-CodexTerminal
     $serverChat=@($script:calls|Where-Object {$_.Arguments[-1] -match 'codex-session chat'})
     if($script:components -ne $before -or $metadata.executionMode -ne '2' -or $script:metadataWrites -ne 1 -or $serverChat[0].Arguments[-1] -notmatch 'enabled=false'){throw 'Server mode isolation/persistence failed'}
@@ -106,9 +113,12 @@ try {
         if($LASTEXITCODE){throw 'Selected GUI bundle Bash syntax failed'}
     }
     function Connect-ProjectFolders {param($Agents,$Sessions)}
+    function Request-VpsVpnSetup { }
     $script:desktopOpens=0;$script:terminalOpens=0
     function Open-ServerDesktop {$script:desktopOpens++}
     function Start-CodexTerminal {$script:terminalOpens++}
+    function Initialize-ServerWorkspace {}
+    function Get-SavedProjectNames {return @()}
     function Read-Host([string]$Question) {
         if($Question -like 'Выберите 1, 2 или 3*'){return $script:appChoice}
         if($Question -like 'Что открыть?*'){return $script:serverActions.Dequeue()}
@@ -116,11 +126,36 @@ try {
         throw 'Unexpected menu prompt'
     }
     foreach($choice in @('1','2','3','0')) {
+        $metadata|Add-Member -NotePropertyName agentApplications -NotePropertyValue $choice -Force
         $script:appChoice=$choice;$script:serverActions.Clear();$script:calls.Clear();$before=$script:desktopOpens
-        foreach($action in @('1','0')){$script:serverActions.Enqueue($action)}
+        foreach($action in @('6','1','0')){$script:serverActions.Enqueue($action)}
         Start-RemoteCodex
-        if($script:desktopOpens -ne ($before+1) -or $script:terminalOpens -ne 0 -or $script:calls.Count -ne [int]($choice -ne '0')){throw ('GUI-first menu/optional no-install failed: '+$choice)}
+        if($script:desktopOpens -ne ($before+1) -or $script:terminalOpens -ne 0 -or $script:calls.Count -ne 1){throw ('RDP-first menu secretly installed/probed apps before action: '+$choice)}
     }
+    # Run the real read-only probe against package-query fixtures, with no server.
+    $probe=$script:calls[-1].InputText
+    $probeFile=Join-Path $fixture 'status-probe.sh'
+    $prefix=@'
+dpkg-query() {
+    case "$1" in -W) ;; *) return 2 ;; esac
+    case "$PROBE_STATE" in
+        installed) printf 'install ok installed' ;;
+        partial) printf 'deinstall ok config-files' ;;
+        missing) return 1 ;;
+    esac
+}
+PROBE_STATE=$1
+'@
+    [IO.File]::WriteAllText($probeFile, ($prefix+"`n"+$probe).Replace("`r`n","`n"),(New-Object Text.UTF8Encoding($false)))
+    foreach($state in @('installed','partial','missing')) {
+        $output=@(& 'C:\Program Files\Git\bin\bash.exe' ($probeFile.Replace('\','/')) $state)
+        if($LASTEXITCODE){throw ('Status probe failed: '+$state)}
+        $expected=if($state -eq 'installed'){'установлено'}else{'не установлено'}
+        foreach($label in @('Codex — приложение','Claude — приложение','Рабочий стол (XFCE)')) {
+            if($output -notcontains ('  '+$label+': '+$expected)){throw ('Incorrect status for '+$label+': '+$state)}
+        }
+    }
+    Write-Output 'PASS: read-only component probe distinguishes installed, partial and missing packages; refresh menu works.'
     Write-Output 'PASS: PS5.1 parser/managed child/Unicode/desktop; CLI mode/auth cleanup; GUI Codex/Claude/both/no-install selection and Bash payloads. No SSH, RDP or real keys.'
 } finally {
     $resolved=[IO.Path]::GetFullPath($fixture)

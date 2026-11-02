@@ -13,7 +13,7 @@ function New-RemoteAgentHandoff {
     if(-not [IO.File]::Exists($source)){throw 'Не хватает модуля передачи проекта агенту. Скопируйте полный комплект.'}
     $base='/home/remoteagents/.local/share/codex-remote'
     $directory='/home/remoteagents/.local/share/remote-agent-handoff/'+$ProjectId+'/'+$HostId
-    $data=[ordered]@{schema=1;projectId=$ProjectId;hostId=$HostId;deviceLabel=$DeviceLabel;serverWorkspace=('/home/remoteagents/work/projects/'+$ProjectId);windowsReplica=$ReplicaPath;socketPath=('/home/remoteagents/.local/state/codex-remote/'+$DeviceLabel+'.sock');agents=$Agents;allowShell=$AllowShell}
+    $data=[ordered]@{schema=1;projectId=$ProjectId;hostId=$HostId;deviceLabel=$DeviceLabel;deviceName=[Environment]::MachineName;serverWorkspace=('/home/remoteagents/work/projects/'+$ProjectId);windowsReplica=$ReplicaPath;socketPath=('/home/remoteagents/.local/state/codex-remote/'+$DeviceLabel+'.sock');agents=$Agents;allowShell=$AllowShell}
     $encoded=[Convert]::ToBase64String([IO.File]::ReadAllBytes($source))
     $metadata=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($data|ConvertTo-Json -Compress)))
     $script=@'

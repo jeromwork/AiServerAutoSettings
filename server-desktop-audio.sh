@@ -21,13 +21,15 @@ for path in list(base.rglob('*')) + [Path('/etc/systemd/system/remoteagents-desk
     assert not stat.S_ISLNK(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022, 'Unsafe audio file metadata'
 assert (base/'.remoteagents-managed').read_text().strip() == 'desktop-ssh-v2'
 AUDIO_TRUST
-packages=(pipewire pipewire-pulse wireplumber pipewire-module-xrdp pulseaudio-utils)
+packages=(pipewire pipewire-pulse wireplumber pipewire-module-xrdp pulseaudio-utils pavucontrol)
 missing=0
 for package in "${packages[@]}"; do
   [[ $(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || :) == 'install ok installed' ]] || missing=1
 done
 if (( missing )); then
   export DEBIAN_FRONTEND=noninteractive
+  # Package hooks must not restart the active desktop or disconnect RDP.
+  export NEEDRESTART_MODE=l
   apt-get update
   # Refuse any replacement/removal of an existing sound stack.
   apt-get install -y --no-install-recommends --no-remove "${packages[@]}"
@@ -71,19 +73,27 @@ try:
     start(['/usr/bin/pipewire-pulse', '-c', '/usr/share/pipewire/pipewire-pulse.conf'])
     wait_for(['/usr/bin/pactl', 'info'])
     start(['/usr/bin/wireplumber'])
-    # Output only: the Windows microphone stays disabled.
+    # Publish playback and the redirected Windows microphone for dictation.
     start(['/usr/bin/pw-cli', '-m', '-d', 'load-module', 'libpipewire-module-xrdp',
-           'sink.node.latency=2048', 'sink.stream.props={node.name=xrdp-sink}'])
+           'sink.node.latency=2048', 'sink.stream.props={node.name=xrdp-sink}',
+           'source.stream.props={node.name=xrdp-source}'])
     for _ in range(100):
         sinks = wait_for(['/usr/bin/pactl', 'list', 'short', 'sinks'])
         if any('xrdp-sink' in line for line in sinks.splitlines()): break
         time.sleep(0.1)
     else: raise RuntimeError('xrdp audio sink is missing')
     subprocess.run(['/usr/bin/pactl', 'set-default-sink', 'xrdp-sink'], check=True)
+    for _ in range(100):
+        sources = wait_for(['/usr/bin/pactl', 'list', 'short', 'sources'])
+        if any(line.split()[1:2] == ['xrdp-source'] for line in sources.splitlines()): break
+        time.sleep(0.1)
+    else: raise RuntimeError('xrdp microphone source is missing')
+    subprocess.run(['/usr/bin/pactl', 'set-default-source', 'xrdp-source'], check=True)
+    subprocess.run(['/usr/bin/pactl', 'set-source-mute', 'xrdp-source', '0'], check=True)
     # libpulse clients on the already-running XFCE display discover this socket.
     subprocess.run(['/usr/bin/xprop', '-root', '-f', 'PULSE_SERVER', '8s', '-set',
                     'PULSE_SERVER', os.environ['PULSE_SERVER']], check=True)
-    ready.write_text('xrdp-sink\n')
+    ready.write_text('xrdp-sink\nxrdp-source\n')
     while all(child.poll() is None for child in children): time.sleep(1)
     raise RuntimeError('Audio worker stopped')
 finally:
@@ -135,8 +145,10 @@ config.read_string(text)
 assert config.get('Desktop','chansrvport') == '/run/remoteagents-desktop-clipboard/xrdp_chansrv_socket_98'
 assert config.get('Globals','port').startswith('unix://')
 updated=re.sub(r'(?m)^rdpsnd=(?:false|true)$', 'rdpsnd=true', text)
+updated=re.sub(r'(?m)^drdynvc=(?:false|true)$', 'drdynvc=true', updated)
 checked=configparser.ConfigParser(); checked.read_string(updated)
 assert checked.getboolean('Channels','rdpsnd')
+assert checked.getboolean('Channels','drdynvc')
 if updated != text: path.write_text(updated)
 path=base/'session.py'
 text=path.read_text()
@@ -145,6 +157,19 @@ if line not in text:
     assert 'env = os.environ.copy()' in text
     path.write_text(text.replace('env = os.environ.copy()', 'env = os.environ.copy()\n'+line, 1))
 AUDIO_CONFIG
+# Existing XFCE processes cannot inherit newly added session environment variables.
+# libpulse also reads the per-user client configuration for future connections.
+runuser -u "$server_user" -- python3 -I - <<'AUDIO_CLIENT'
+from pathlib import Path
+folder = Path.home()/'.config'/'pulse'
+folder.mkdir(parents=True, exist_ok=True)
+path = folder/'client.conf'
+if path.is_symlink(): raise RuntimeError('Refusing symlinked PulseAudio client configuration')
+text = path.read_text() if path.exists() else ''
+lines = [line for line in text.splitlines() if line.partition('=')[0].strip() != 'default-server']
+lines.append('default-server = unix:/run/remoteagents-desktop-audio/pulse/native')
+path.write_text('\n'.join(lines)+'\n')
+AUDIO_CLIENT
 systemd-analyze verify /etc/systemd/system/remoteagents-desktop-audio.service
 systemctl daemon-reload
 if (( changed )) && systemctl is-active --quiet remoteagents-desktop-audio.service; then
@@ -158,4 +183,5 @@ for attempt in {1..100}; do
 done
 [[ -f /run/remoteagents-desktop-audio/audio.ready ]] || { echo 'Audio is not ready. The existing desktop was preserved.' >&2; exit 12; }
 runuser -u "$server_user" -- env PULSE_SERVER=unix:/run/remoteagents-desktop-audio/pulse/native pactl list short sinks | grep -q 'xrdp-sink'
-echo 'AUDIO_READY=xrdp-sink; reconnect RDP and reopen audio playback if needed'
+runuser -u "$server_user" -- env PULSE_SERVER=unix:/run/remoteagents-desktop-audio/pulse/native pactl list short sources | awk '{print $2}' | grep -qx 'xrdp-source'
+echo 'AUDIO_READY=xrdp-sink,xrdp-source; reconnect RDP and reopen the dictation application'

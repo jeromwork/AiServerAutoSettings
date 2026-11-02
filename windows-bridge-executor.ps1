@@ -1,12 +1,14 @@
 # Windows PowerShell 5.1. Private parent stdin supplies token and selected folder.
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+. (Join-Path $PSScriptRoot 'Windows.Paths.ps1')
 Add-Type -TypeDefinition @'
 using System;
 using System.Diagnostics;
 using System.Text;
 public class BridgeProcess : IDisposable {
     public Process Process;
+    public string TaskId;
     public bool Truncated;
     readonly StringBuilder output = new StringBuilder();
     public BridgeProcess(string command, string cwd) : this(command, cwd, null, false) { }
@@ -66,6 +68,31 @@ $device = [string]$config.device
 $parentProcess = [Diagnostics.Process]::GetProcessById([int]$config.parent_pid)
 $processes = @{}
 $quit = $false
+$environmentMutex = New-Object Threading.Mutex($false, ('Global\RemoteAgents.Environment.'+[Security.Principal.WindowsIdentity]::GetCurrent().User.Value))
+$leaseRoot=Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'RemoteAgents\environment'
+[void][IO.Directory]::CreateDirectory($leaseRoot)
+foreach($node in @($leaseRoot,(Split-Path $leaseRoot -Parent))){if((Get-Item -LiteralPath $node).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Linked environment state denied.'}}
+$leasePath=Join-Path $leaseRoot 'operations.json'
+function Update-Environment([string]$Id,[string]$TaskId,[Diagnostics.Process]$Process,[switch]$Remove) {
+    try {$acquired=$environmentMutex.WaitOne(5000)}catch [Threading.AbandonedMutexException]{$acquired=$true}
+    if(!$acquired){throw 'Environment coordination timeout.'}
+    try {
+        $entries=@()
+        if(Test-Path -LiteralPath $leasePath){
+            if((Get-Item -LiteralPath $leasePath).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Linked environment state denied.'}
+            $record=[IO.File]::ReadAllText($leasePath)|ConvertFrom-Json
+            if($record.schema -ne 1){throw 'Invalid environment coordination state.'}
+            foreach($entry in $record.operations){
+                try {$live=[Diagnostics.Process]::GetProcessById([int]$entry.pid)}catch [ArgumentException]{continue}
+                try {if(!$live.HasExited -and $live.StartTime.ToUniversalTime().Ticks -eq [long]$entry.started){$entries+=@($entry)}}finally{$live.Dispose()}
+            }
+        }
+        if(!$Remove -and @($entries|Where-Object{$_.taskId -cne $TaskId}).Count){throw 'Target environment busy in another task. Finish/stop that task before reassigning it.'}
+        $entries=@($entries|Where-Object{$_.id -cne $Id})
+        if(!$Remove){$entries+=@(@{id=$Id;taskId=$TaskId;pid=$Process.Id;started=$Process.StartTime.ToUniversalTime().Ticks})}
+        [IO.File]::WriteAllText($leasePath,(@{schema=1;operations=$entries}|ConvertTo-Json -Depth 5 -Compress),(New-Object Text.UTF8Encoding($false)))
+    } finally {$environmentMutex.ReleaseMutex()}
+}
 
 function Workspace-Path([string]$relative) {
     if ([string]::IsNullOrEmpty($relative)) { $relative = '.' }
@@ -76,8 +103,9 @@ function Workspace-Path([string]$relative) {
     while ($walk.Length -ge $root.Length) {
         $part = [IO.Path]::GetFileName($walk)
         if ($part -match '(?i)^(\.env($|\.)|\.ssh$|\.aws$|\.codex$|\.claude$|\.git$|auth\.json$|.*credential.*|.*secret.*|.*token.*|id_(rsa|ed25519|ecdsa)(\..*)?$|.*\.(pem|key|pfx|p12)$)') { throw 'Sensitive path denied.' }
-        if ([IO.File]::Exists($walk) -or [IO.Directory]::Exists($walk)) {
-            if (([IO.File]::GetAttributes($walk) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Reparse paths are denied.' }
+        $walkIO=ConvertTo-RemoteAgentsIOPath $walk
+        if ([IO.File]::Exists($walkIO) -or [IO.Directory]::Exists($walkIO)) {
+            if (([IO.File]::GetAttributes($walkIO) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Reparse paths are denied.' }
         }
         if ($walk -eq $root) { break }
         $walk = [IO.Path]::GetDirectoryName($walk)
@@ -122,9 +150,17 @@ function New-TrackedProcess($values) {
     if ($processes.Count -ge 8) { throw 'Process limit reached; stop old tracked processes.' }
     $cwd = Workspace-Path ([string]$values.cwd)
     if (-not [IO.Directory]::Exists($cwd)) { throw 'Command directory does not exist.' }
-    Assert-SyncBarrier
-    $item = New-Object BridgeProcess ([string]$values.command), $cwd
+    $taskId=[string]$values.taskId
+    if(!$taskId -and !$config.enforce_target){$taskId='legacy-'+$PID}
+    if($taskId -cnotmatch '^[a-z0-9][a-z0-9_-]{0,63}$'){throw 'Explicit taskId required for environment coordination.'}
     $id = [Guid]::NewGuid().ToString('N')
+    Update-Environment $id $taskId ([Diagnostics.Process]::GetCurrentProcess())
+    try {
+        Assert-SyncBarrier
+        $item = New-Object BridgeProcess ([string]$values.command), $cwd
+        $item.TaskId=$taskId
+        Update-Environment $id $taskId $item.Process
+    } catch {if($item){$item.Dispose()};Update-Environment $id '' $null -Remove;throw}
     $processes[$id] = $item
     return @{ id = $id; item = $item }
 }
@@ -134,6 +170,10 @@ function Dispatch($request) {
     $difference = 0
     for ($i = 0; $i -lt $secret.Length; $i++) { $difference = $difference -bor ([int][char]$request.token[$i] -bxor [int][char]$secret[$i]) }
     if ($difference -ne 0) { throw 'Unauthorized.' }
+    if($config.enforce_target){
+        $binding=$request.binding
+        if(!$binding -or $binding.projectId -cne [string]$syncGuard.project_id -or $binding.hostId -cne [string]$syncGuard.host_id -or $binding.deviceLabel -cne $device -or ![string]::Equals([string]$binding.windowsReplica,$root,[StringComparison]::OrdinalIgnoreCase)){throw 'Explicit target binding mismatch; restart MCP and use the device catalog.'}
+    }
     $values = $request.args
     switch ([string]$request.op) {
         'status' {
@@ -146,22 +186,22 @@ function Dispatch($request) {
         }
         'list' {
             $target = Workspace-Path ([string]$values.path)
-            $entries = @(Get-ChildItem -LiteralPath $target -Force | Select-Object -First 200 | ForEach-Object {
+            $entries = @(Get-ChildItem -LiteralPath (ConvertTo-RemoteAgentsIOPath $target) -Force | Select-Object -First 200 | ForEach-Object {
                 try { $null = Workspace-Path ([IO.Path]::Combine([string]$values.path, $_.Name)); @{ name = $_.Name; directory = $_.PSIsContainer; length = $(if ($_.PSIsContainer) { 0 } else { $_.Length }) } } catch { }
             })
             return @{ ok = $true; entries = $entries; limit = 200 }
         }
         'read' {
             $target = Workspace-Path ([string]$values.path)
-            if ((Get-Item -LiteralPath $target).Length -gt 65536) { throw 'File exceeds 64 KiB.' }
-            return @{ ok = $true; content = [IO.File]::ReadAllText($target, [Text.Encoding]::UTF8) }
+            if ((Get-Item -LiteralPath (ConvertTo-RemoteAgentsIOPath $target)).Length -gt 65536) { throw 'File exceeds 64 KiB.' }
+            return @{ ok = $true; content = [IO.File]::ReadAllText((ConvertTo-RemoteAgentsIOPath $target), [Text.Encoding]::UTF8) }
         }
         'write' {
             if ($serverOwned) { throw 'Windows file mutations are disabled for the server-owned replica; edit the VPS workspace.' }
             $target = Workspace-Path ([string]$values.path)
             $content = [string]$values.content
             if ([Text.Encoding]::UTF8.GetByteCount($content) -gt 65536) { throw 'Content exceeds 64 KiB.' }
-            [IO.File]::WriteAllText($target, $content, (New-Object Text.UTF8Encoding $false))
+            [IO.File]::WriteAllText((ConvertTo-RemoteAgentsIOPath $target), $content, (New-Object Text.UTF8Encoding $false))
             return @{ ok = $true; bytes = [Text.Encoding]::UTF8.GetByteCount($content) }
         }
         'command' {
@@ -175,7 +215,7 @@ function Dispatch($request) {
                 # Flush async line callbacks once the process is known to have ended.
                 $tracked.item.Process.WaitForExit()
                 return @{ ok = $true; exit_code = $tracked.item.Process.ExitCode; timed_out = -not $finished; output = $tracked.item.Read(); output_limit_chars = 32768 }
-            } finally { $tracked.item.Dispose(); $processes.Remove($tracked.id) }
+            } finally { $tracked.item.Dispose(); $processes.Remove($tracked.id);Update-Environment $tracked.id '' $null -Remove }
         }
         'process_start' {
             $tracked = New-TrackedProcess $values
@@ -185,12 +225,16 @@ function Dispatch($request) {
             $id = [string]$values.id
             if (-not $processes.ContainsKey($id)) { throw 'Unknown bridge process.' }
             $item = $processes[$id]
+            if($config.enforce_target -and $values.taskId -cne $item.TaskId){throw 'Tracked process belongs to another task.'}
+            if($item.Process.HasExited){Update-Environment $id '' $null -Remove}
             return @{ ok = $true; running = -not $item.Process.HasExited; exit_code = $(if ($item.Process.HasExited) { $item.Process.ExitCode } else { $null }); output = $item.Read(); output_limit_chars = 32768 }
         }
         'process_stop' {
             $id = [string]$values.id
             if (-not $processes.ContainsKey($id)) { throw 'Unknown bridge process.' }
+            if($config.enforce_target -and $values.taskId -cne $processes[$id].TaskId){throw 'Tracked process belongs to another task.'}
             $processes[$id].Dispose(); $processes.Remove($id)
+            Update-Environment $id '' $null -Remove
             return @{ ok = $true; stopped = $true }
         }
         'shutdown' { $script:quit = $true; return @{ ok = $true; stopped = $true } }
@@ -234,6 +278,7 @@ try {
     }
 } finally {
     $listener.Stop()
-    foreach ($item in @($processes.Values)) { $item.Dispose() }
+    foreach ($id in @($processes.Keys)) { $processes[$id].Dispose();Update-Environment $id '' $null -Remove }
+    $environmentMutex.Dispose()
     $secret = $null; $config = $null
 }

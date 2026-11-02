@@ -59,6 +59,31 @@ class GitScopeTests(unittest.TestCase):
         self.assertNotIn('src/index.js',self.snapshot())
         self.assertIn('!/src/index.js',(self.root/'.stignore').read_text('utf-8').splitlines())
 
+    def test_human_shortcut_preserves_canonical_identity_and_refuses_conflict(self):
+        links=self.base/'visible-projects'
+        alias=sync.project_shortcut(self.base,'p-fixture','Public Project',links)
+        self.assertEqual(alias.resolve(),self.root)
+        self.assertTrue((self.root/'src/index.js').exists())
+        self.assertEqual(alias,sync.project_shortcut(self.base,'p-fixture','Different computer folder',links))
+        alias.unlink();alias.mkdir()
+        alternative=sync.project_shortcut(self.base,'p-fixture','Public Project',links)
+        self.assertNotEqual(alias,alternative);self.assertTrue(alias.is_dir());self.assertEqual(alternative.resolve(),self.root)
+
+    def test_literal_bracket_route_paths_are_escaped_and_roundtrip(self):
+        route='app/[id]/[version].tsx';self.write(route)
+        self.paths.append(route);self.document['files']=[{'path':p} for p in self.paths]
+        self.manifest.write_text(json.dumps(self.document),'utf-8')
+        self.assertIn(route,self.snapshot())
+        encoded=sync.escape_ignore_path(route)
+        self.assertIn('!/'+encoded,(self.root/'.stignore').read_text('utf-8').splitlines())
+        self.assertEqual(route,sync.unescape_ignore_path(encoded))
+        self.assertIn(route,self.snapshot())
+        (self.root/route).unlink();self.assertNotIn(route,self.snapshot())
+        self.assertIn('!/'+encoded,(self.root/'.stignore').read_text('utf-8').splitlines())
+        for value in ('app/[id].tsx','app/a*','app/a?','app/../x.tsx'):
+            with self.assertRaises(ValueError):
+                decoded=sync.unescape_ignore_path(value);sync.safe_relative(decoded,['.'])
+
     def test_denied_tracked_paths_and_noncanonical_scope_rejected(self):
         for value in ['node_modules/a.js','build/a.ts','src/auth.json','src/key.pem','./src/a.js','src//a.js','src/../a.js','src/a\n.js']:
             with self.subTest(value=value),self.assertRaises(ValueError):sync.safe_relative(value,['.'])
@@ -104,7 +129,47 @@ class GitScopeTests(unittest.TestCase):
         folder=ET.parse(state/'config.xml').getroot().find('folder')
         self.assertEqual('sendonly',folder.attrib['type'])
         self.assertEqual('true',folder.attrib['paused'])
+        self.assertEqual('3600',folder.attrib['rescanIntervalS'])
+        self.assertEqual('true',folder.attrib['fsWatcherEnabled'])
         self.assertIn('!/src/index.js',(workspace/'.stignore').read_text('utf-8').splitlines())
+
+    def test_seed_progress_receipt_and_resume_identity(self):
+        records=[dict(path=p,size=(self.root/p).stat().st_size,sha256=sync.digest(self.root/p)) for p in self.paths]
+        self.document['files']=records;self.manifest.write_text(json.dumps(self.document),'utf-8')
+        archive=self.base/'seed.zip'
+        with zipfile.ZipFile(archive,'w') as output:
+            for path in self.paths:output.write(self.root/path,path)
+        args=SimpleNamespace(base=str(self.base/'target'),project='p-fixture',host='h-fixture',manifest=str(self.manifest),archive=str(archive))
+        errors=io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(errors):sync.seed(args)
+        updates=[json.loads(line.split('=',1)[1]) for line in errors.getvalue().splitlines()]
+        self.assertEqual(0,updates[0]['doneBytes'])
+        self.assertEqual(sum(f['size'] for f in records),updates[-1]['doneBytes'])
+        self.assertEqual(updates[-1]['doneBytes'],updates[-1]['totalBytes'])
+        receipt=self.manifest.parent/'seed-receipt.json'
+        self.assertTrue(receipt.is_file());self.assertFalse((Path(args.base)/args.project/'seed-receipt.json').exists())
+        status=io.StringIO()
+        with contextlib.redirect_stdout(status):sync.seed_status(args)
+        self.assertEqual('seeded',status.getvalue().strip())
+        args.host='wrong-host'
+        with self.assertRaises(ValueError):sync.seed_status(args)
+        args.host='h-fixture';self.manifest.write_text('{}','utf-8')
+        with self.assertRaises(ValueError):sync.seed_status(args)
+        self.assertEqual('public fixture',(Path(args.base)/args.project/'src/index.js').read_text())
+
+    def test_bad_seed_and_racing_destination_are_not_published(self):
+        self.document['files']=[dict(path=p,size=(self.root/p).stat().st_size,sha256='0'*64) for p in self.paths]
+        self.manifest.write_text(json.dumps(self.document),'utf-8');archive=self.base/'seed.zip'
+        with zipfile.ZipFile(archive,'w') as output:
+            for path in self.paths:output.write(self.root/path,path)
+        args=SimpleNamespace(base=str(self.base/'target'),project='p-fixture',host='h-fixture',manifest=str(self.manifest),archive=str(archive))
+        with contextlib.redirect_stderr(io.StringIO()),self.assertRaises(ValueError):sync.seed(args)
+        self.assertFalse((Path(args.base)/args.project).exists())
+        self.assertFalse((self.manifest.parent/'seed-receipt.json').exists())
+        stage=self.base/'stage';stage.mkdir();(stage/'file.txt').write_text('synthetic')
+        destination=self.base/'existing';destination.mkdir()
+        with self.assertRaises(OSError):sync.publish_directory(stage,destination)
+        self.assertEqual([],list(destination.iterdir()));self.assertTrue((stage/'file.txt').exists())
 
 class FolderScopeTests(unittest.TestCase):
     write=GitScopeTests.write

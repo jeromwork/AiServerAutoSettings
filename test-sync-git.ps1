@@ -10,6 +10,9 @@ try {
     [IO.File]::WriteAllText($emptyIgnore,'')
     [IO.File]::WriteAllText($env:GIT_CONFIG_GLOBAL,"[core]`n excludesfile = $($emptyIgnore.Replace('\','/'))`n autocrlf = false`n")
     & git -C $source init -q; if($LASTEXITCODE){throw 'git init failed'}
+    # An unreachable arbitrary Git host must not be contacted for local seed.
+    & git -C $source remote add origin https://git.example.invalid/team/project.git
+    if($LASTEXITCODE){throw 'git remote fixture failed'}
     [IO.File]::WriteAllText("$source\.gitignore","ignored.js`n")
     [IO.File]::WriteAllText("$source\src\tracked.js",'tracked')
     [IO.File]::WriteAllText("$source\src\deleted.js",'deleted')
@@ -30,7 +33,14 @@ try {
     if(($inventory.path -join ',') -cne '.gitignore,src/new.py,src/tracked.js'){throw ('Git scope incorrect: '+($inventory.path -join ','))}
     $binding=New-RemoteSyncProject -DataDir "$fixture\state" -ProjectId demo -HostId host1 -SourcePath $source -ScopeMode git
     if($binding.allowedRoots.Count -ne 1 -or $binding.allowedRoots[0] -ne '.'){throw 'Root scope incorrect'}
-    $seed=Export-RemoteSyncSeed "$fixture\state" demo host1
+    $realInvokeGit=${function:Invoke-SyncGit};$gitDeadlines=New-Object 'Collections.Generic.List[int]'
+    function Invoke-SyncGit([string]$Root,[string[]]$Arguments,[int]$TimeoutMilliseconds=15000,[int]$MaxOutputCharacters=16777216) {
+        $gitDeadlines.Add($TimeoutMilliseconds)
+        & $realInvokeGit $Root $Arguments $TimeoutMilliseconds $MaxOutputCharacters
+    }
+    try {$seed=Export-RemoteSyncSeed "$fixture\state" demo host1}
+    finally {Set-Item Function:\Invoke-SyncGit $realInvokeGit}
+    if($gitDeadlines.Count -ne 2 -or @($gitDeadlines|Where-Object {$_ -ne 60000}).Count){throw 'Seed Git deadline did not reach both local inspections'}
     $manifest=Get-Content -LiteralPath $seed.manifestPath -Raw|ConvertFrom-Json
     if($manifest.scopeMode -ne 'git' -or $manifest.gitPaths.Count -ne 3){throw 'Git manifest missing'}
     $blocked=$false;try{Export-RemoteSyncSeed "$fixture\state" demo host1|Out-Null}catch{$blocked=$true}
@@ -43,7 +53,59 @@ try {
     if(!(Test-RemoteSyncBarrier "$fixture\state" demo host1 $seed.manifestPath $health).ready){throw 'Git barrier failed'}
     [IO.File]::WriteAllText("$($binding.replicaPath)\src\extra.js",'extra')
     if((Test-RemoteSyncBarrier "$fixture\state" demo host1 $seed.manifestPath $health).ready){throw 'Extra file accepted'}
-    'PASS: Git tracked/new/ignored/deleted/deny/nested scope, seed, repeat, root guard and barrier'
+    # Reproduce the actual launcher: hidden PS5.1, an OPEN control stdin pipe,
+    # and a background Console.ReadLine. Git must have its own closed stdin.
+    $childCode=@'
+$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
+Add-Type -TypeDefinition 'using System;using System.Threading;public class PipeReader {public static void Start(){var t=new Thread(()=>Console.ReadLine());t.IsBackground=true;t.Start();}}'
+[PipeReader]::Start()
+. (Join-Path $env:RA_TEST_MODULE 'Sync.Workspace.ps1')
+$result=Invoke-SyncGit $env:RA_TEST_SOURCE @('rev-parse','--show-toplevel') 3000
+if(!$result){throw 'Empty Git result'}
+[Console]::WriteLine('GIT_PIPE_OK')
+'@
+    $childInfo=New-Object Diagnostics.ProcessStartInfo
+    $childInfo.FileName=Join-Path $PSHOME powershell.exe
+    $childInfo.Arguments='-NoProfile -EncodedCommand '+[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childCode))
+    $childInfo.EnvironmentVariables['RA_TEST_MODULE']=$PSScriptRoot;$childInfo.EnvironmentVariables['RA_TEST_SOURCE']=$source
+    $childInfo.UseShellExecute=$false;$childInfo.CreateNoWindow=$true
+    $childInfo.RedirectStandardInput=$true;$childInfo.RedirectStandardOutput=$true;$childInfo.RedirectStandardError=$true
+    $child=[Diagnostics.Process]::Start($childInfo);$childHandle=$child.Handle
+    try {
+        $childOut=$child.StandardOutput.ReadToEndAsync();$childErr=$child.StandardError.ReadToEndAsync()
+        if(!$child.WaitForExit(12000)){throw 'Managed Git hung on the control input pipe'}
+        if($child.ExitCode -ne 0 -or $childOut.Result.Trim() -cne 'GIT_PIPE_OK'){throw ('Managed Git failed: '+$childErr.Result)}
+    }finally{if(!$child.HasExited){$child.Kill();$child.WaitForExit()};$child.Dispose()}
+    # Exercise real redirected pipes and process cleanup, not a mocked timeout.
+    $fakeGit=Join-Path $fixture 'slow-git.exe'
+    Add-Type -OutputAssembly $fakeGit -OutputType ConsoleApplication -TypeDefinition @'
+using System;using System.IO;using System.Threading;
+public class SyncGitFailureFixture {
+    public static int Main() {
+        File.WriteAllText(Environment.GetEnvironmentVariable("RA_GIT_TEST_PID"), System.Diagnostics.Process.GetCurrentProcess().Id.ToString());
+        Console.Error.WriteLine("fixture-private-remote-must-not-appear");
+        var mode=Environment.GetEnvironmentVariable("RA_GIT_TEST_MODE");
+        if(mode=="failure")return 23;
+        Console.Write(mode=="overflow" ? new string('x',8192) : "src/partial.js\0");Console.Out.Flush();
+        Thread.Sleep(10000);return 0;
+    }
+}
+'@
+    $previousGit=$script:SyncGitExecutable;$previousPID=$env:RA_GIT_TEST_PID;$previousMode=$env:RA_GIT_TEST_MODE
+    try {
+        $script:SyncGitExecutable=$fakeGit;$env:RA_GIT_TEST_PID=Join-Path $fixture 'child-pid'
+        foreach($mode in @('timeout','overflow','failure')) {
+            $env:RA_GIT_TEST_MODE=$mode;$message='';$partial=@();$timer=[Diagnostics.Stopwatch]::StartNew()
+            try {$partial=@(Invoke-SyncGit $source @('ls-files','--cached','-z') 1000 1024)}catch{$message=$_.Exception.Message}
+            if(!$message -or $message -notmatch 'git ls-files' -or $message -match 'fixture-private-remote' -or $partial.Count){throw 'Git failure was partial, unlabelled or exposed stderr'}
+            if($mode -eq 'timeout' -and ($message -notmatch '1000 ms' -or $timer.Elapsed.TotalSeconds -gt 5)){throw 'Git timeout was not bounded or lost its deadline'}
+            if($mode -eq 'overflow' -and $message -notmatch 'output limit'){throw 'Oversized Git output accepted'}
+            if($mode -eq 'failure' -and $message -notmatch 'exit 23'){throw 'Git exit code missing'}
+            $childPID=[int][IO.File]::ReadAllText($env:RA_GIT_TEST_PID)
+            if(Get-Process -Id $childPID -ErrorAction SilentlyContinue){throw 'Failed Git process was left running'}
+        }
+    } finally {$script:SyncGitExecutable=$previousGit;$env:RA_GIT_TEST_PID=$previousPID;$env:RA_GIT_TEST_MODE=$previousMode}
+    'PASS: local Git seed without hosting access; scope/barrier; seed deadline; managed stdin regression; native timeout/overflow/exit diagnostics and process cleanup'
 } finally {
     $env:GIT_CONFIG_GLOBAL=$oldGitConfig
     $resolved=[IO.Path]::GetFullPath($fixture)

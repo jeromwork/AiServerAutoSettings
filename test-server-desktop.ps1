@@ -10,6 +10,12 @@ if (-not [IO.File]::Exists($shell)) { throw 'Git Bash is required for the offlin
 if ($LASTEXITCODE -ne 0) { throw 'Bootstrap shell syntax failed.' }
 & $shell -n (Join-Path $PSScriptRoot 'server-desktop-audio.sh')
 if ($LASTEXITCODE -ne 0) { throw 'Audio bootstrap shell syntax failed.' }
+# Dictation requires a capture source and the dynamic RDP audio-input channel.
+$audioText = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'server-desktop-audio.sh'))
+foreach ($required in @('source.stream.props={node.name=xrdp-source}', "'set-default-source', 'xrdp-source'", "'set-source-mute', 'xrdp-source', '0'", "checked.getboolean('Channels','drdynvc')", 'xrdp microphone source is missing')) {
+    if (-not $audioText.Contains($required)) { throw "Missing dictation setup: $required" }
+}
+if ([IO.File]::ReadAllText($bootstrap) -notmatch '(?m)^drdynvc=true\r?$') { throw 'Dynamic microphone channel is disabled.' }
 # Stock xrdp hit-tests children in insertion order: its logo is before buttons.
 # Explicit logo bounds must therefore stay clear of the session and buttons.
 $bootstrapText = [IO.File]::ReadAllText($bootstrap)
@@ -67,7 +73,7 @@ public class PublicDesktopFixture {
     if ($freePort -lt 1 -or $freePort -gt 65535) { throw 'Invalid loopback port.' }
     Write-DesktopRdpFile $rdp 12345 'remoteagents'
     $content = [IO.File]::ReadAllText($rdp)
-    foreach ($required in @('full address:s:127.0.0.1:12345','username:s:remoteagents','authentication level:i:2','redirectclipboard:i:1','prompt for credentials:i:0','enablecredsspsupport:i:0','audiomode:i:0','audiocapturemode:i:0')) {
+    foreach ($required in @('full address:s:127.0.0.1:12345','username:s:remoteagents','authentication level:i:2','redirectclipboard:i:1','prompt for credentials:i:0','enablecredsspsupport:i:0','audiomode:i:0','audiocapturemode:i:1')) {
         if (-not $content.Contains($required)) { throw "Missing RDP setting $required" }
     }
     if ($content -match 'password 51|authentication level:i:0') { throw 'Unsafe RDP file.' }

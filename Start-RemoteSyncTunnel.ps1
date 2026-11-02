@@ -14,6 +14,7 @@ param(
     [switch]$ManagedSession
 )
 $ErrorActionPreference='Stop'
+[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
 function Convert-NativeArgument([string]$Value) {
     $escaped=[regex]::Replace($Value,'(\\*)"','$1$1\"')
     $escaped=[regex]::Replace($escaped,'(\\+)$','$1$1')

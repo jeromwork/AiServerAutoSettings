@@ -1,9 +1,23 @@
-# Windows PowerShell 5.1. No network or process is started by dot-sourcing.
+﻿# Windows PowerShell 5.1. No network or process is started by dot-sourcing.
+. (Join-Path $PSScriptRoot 'Windows.Paths.ps1')
 Set-StrictMode -Version 2
-function Get-SyncSHA256([string]$LiteralPath) {
-    $stream=[IO.File]::OpenRead($LiteralPath)
+function Write-SyncProgress([scriptblock]$Progress,[string]$Stage,[string]$Message,[long]$DoneBytes=-1,[long]$TotalBytes=-1,[int]$DoneFiles=-1,[int]$TotalFiles=-1) {
+    if($Progress){& $Progress ([pscustomobject]@{stage=$Stage;message=$Message;doneBytes=$DoneBytes;totalBytes=$TotalBytes;doneFiles=$DoneFiles;totalFiles=$TotalFiles}) | Out-Null}
+}
+function Get-SyncSHA256([string]$LiteralPath,[scriptblock]$OnChunk) {
+    $stream=[IO.File]::OpenRead((ConvertTo-RemoteAgentsIOPath $LiteralPath))
     $hash=[Security.Cryptography.SHA256]::Create()
-    try { [BitConverter]::ToString($hash.ComputeHash($stream)).Replace('-','').ToLowerInvariant() }
+    try {
+        if(!$OnChunk){return [BitConverter]::ToString($hash.ComputeHash($stream)).Replace('-','').ToLowerInvariant()}
+        $buffer=New-Object byte[] 1048576;$clock=[Diagnostics.Stopwatch]::StartNew();$last=-1000L
+        while(($read=$stream.Read($buffer,0,$buffer.Length)) -gt 0){
+            [void]$hash.TransformBlock($buffer,0,$read,$buffer,0)
+            if($clock.ElapsedMilliseconds-$last -ge 1000){& $OnChunk $stream.Position $stream.Length | Out-Null;$last=$clock.ElapsedMilliseconds}
+        }
+        [void]$hash.TransformFinalBlock([byte[]]@(),0,0)
+        & $OnChunk $stream.Length $stream.Length | Out-Null
+        [BitConverter]::ToString($hash.Hash).Replace('-','').ToLowerInvariant()
+    }
     finally { $hash.Dispose();$stream.Dispose() }
 }
 function Assert-SyncId([string]$Value) {
@@ -18,7 +32,7 @@ function Test-SyncDenied([string]$Name) {
 }
 function Get-SyncGitExecutable {
     [CmdletBinding()]
-    param([string]$DataDir,[string]$DownloadedArchive,[switch]$ForcePortable)
+    param([string]$DataDir,[string]$DownloadedArchive,[switch]$ForcePortable,[switch]$InstalledOnly)
     if(!$ForcePortable) {
         $cached=Get-Variable SyncGitExecutable -Scope Script -ErrorAction SilentlyContinue
         if($cached -and (Test-Path -LiteralPath $cached.Value -PathType Leaf)){
@@ -60,6 +74,7 @@ function Get-SyncGitExecutable {
         if($installed.archiveSHA256 -cne $sha -or $installed.executableSHA256 -cne (Get-SyncSHA256 $executable)){throw 'Portable Git verification failed'}
         $script:SyncGitExecutable=$executable;$script:SyncGitExecutableSHA256=$installed.executableSHA256;return $executable
     }
+    if($InstalledOnly){return $null}
     New-Item -ItemType Directory -Path $parent -Force|Out-Null
     $stage=Join-Path $parent ('install-'+[guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $stage|Out-Null
@@ -103,110 +118,142 @@ function Get-SyncGitExecutable {
     }
 }
 function Invoke-SyncGit([string]$Root,[string[]]$Arguments,[int]$TimeoutMilliseconds=15000,[int]$MaxOutputCharacters=16777216) {
+    # Never echo arbitrary arguments, Git stderr, remote URLs or account configuration.
+    $operation='local Git inspection'
+    if($Arguments.Count -and $Arguments[0] -eq 'rev-parse'){$operation='repository inspection (git rev-parse)'}
+    if($Arguments.Count -and $Arguments[0] -eq 'ls-files'){$operation='local file enumeration (git ls-files)'}
+    $timeoutMessage="Local Git timed out: $operation; limit $TimeoutMilliseconds ms. No Git hosting login was requested."
     $git=Get-SyncGitExecutable
     $start=New-Object Diagnostics.ProcessStartInfo
     $start.FileName=$git;$start.UseShellExecute=$false;$start.CreateNoWindow=$true
-    $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+    # The managed launcher has a background reader on its control stdin pipe.
+    # Git for Windows must not inherit that pipe: startup can block even for
+    # rev-parse while the launcher waits for commands. Local plumbing needs EOF.
+    $start.RedirectStandardInput=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
     $start.StandardOutputEncoding=New-Object Text.UTF8Encoding($false)
+    $start.StandardErrorEncoding=New-Object Text.UTF8Encoding($false)
     # Paths enter the process through WorkingDirectory, never command text.
     $start.WorkingDirectory=$Root
     $start.Arguments='-c core.fsmonitor=false '+($Arguments -join ' ')
-    $process=New-Object Diagnostics.Process;$process.StartInfo=$start
+    $process=New-Object Diagnostics.Process;$process.StartInfo=$start;$started=$false
     try {
-        [void]$process.Start();$errorTask=$process.StandardError.ReadToEndAsync();$clock=[Diagnostics.Stopwatch]::StartNew()
+        [void]$process.Start();$started=$true;$processHandle=$process.Handle;$process.StandardInput.Close()
+        $errorTask=$process.StandardError.ReadToEndAsync();$clock=[Diagnostics.Stopwatch]::StartNew()
         $buffer=New-Object char[] 4096;$outputBuilder=New-Object Text.StringBuilder
         while($true) {
             $remaining=$TimeoutMilliseconds-[int]$clock.ElapsedMilliseconds
-            if($remaining -le 0){$process.Kill();throw 'Git scope command timed out'}
+            if($remaining -le 0){throw $timeoutMessage}
             $readTask=$process.StandardOutput.ReadAsync($buffer,0,$buffer.Length)
-            if(!$readTask.Wait($remaining)){$process.Kill();throw 'Git scope command timed out'}
+            if(!$readTask.Wait($remaining)){throw $timeoutMessage}
             $read=$readTask.GetAwaiter().GetResult();if(!$read){break}
-            if($outputBuilder.Length+$read -gt $MaxOutputCharacters){$process.Kill();throw 'Git scope output limit exceeded'}
+            if($outputBuilder.Length+$read -gt $MaxOutputCharacters){throw "Git scope output limit exceeded: $operation"}
             [void]$outputBuilder.Append($buffer,0,$read)
         }
         $remaining=[Math]::Max(1,$TimeoutMilliseconds-[int]$clock.ElapsedMilliseconds)
-        if(!$process.WaitForExit($remaining)){ $process.Kill();throw 'Git scope command timed out' }
+        if(!$process.WaitForExit($remaining)){throw $timeoutMessage}
         $output=$outputBuilder.ToString();$errorText=$errorTask.GetAwaiter().GetResult()
-        if($process.ExitCode -ne 0){throw 'Git scope could not be inspected'}
-        if($errorText){throw 'Git scope could not be fully inspected; resolve Git warnings before seed'}
+        if($process.ExitCode -ne 0){throw "Git scope could not be inspected: $operation; exit $($process.ExitCode)"}
+        if($errorText){throw "Git scope could not be fully inspected: $operation; resolve Git warnings before seed"}
         return $output
-    } finally { $process.Dispose() }
+    } finally {
+        if($started -and !$process.HasExited){try{$process.Kill();[void]$process.WaitForExit(1000)}catch{}}
+        $process.Dispose()
+    }
 }
-function Get-SyncGitPaths([string]$Root) {
+function Get-SyncGitPaths([string]$Root,[int]$TimeoutMilliseconds=15000,[scriptblock]$Progress) {
     $base=[IO.Path]::GetFullPath($Root).TrimEnd('\')
-    $top=(Invoke-SyncGit $base @('rev-parse','--show-toplevel')).Trim().Replace('/','\').TrimEnd('\')
+    Write-SyncProgress $Progress 'git' 'Проверяем локальный Git и корень репозитория'
+    $top=(Invoke-SyncGit $base @('rev-parse','--show-toplevel') $TimeoutMilliseconds).Trim().Replace('/','\').TrimEnd('\')
     if(![string]::Equals($base,$top,[StringComparison]::OrdinalIgnoreCase)){throw 'Select the exact Git repository root, not its parent or a subfolder'}
-    $paths=(Invoke-SyncGit $base @('ls-files','--cached','--others','--exclude-standard','-z')).Split([char]0)
-    $safe=New-Object 'Collections.Generic.List[string]'
+    $paths=(Invoke-SyncGit $base @('ls-files','--cached','--others','--exclude-standard','-z') $TimeoutMilliseconds).Split([char]0)
+    $safe=New-Object 'Collections.Generic.List[string]';$baseIO=ConvertTo-RemoteAgentsIOPath $base
+    $clock=[Diagnostics.Stopwatch]::StartNew();$last=-1000L;$visited=0
     foreach($path in $paths) {
+        $visited++
+        if($clock.ElapsedMilliseconds-$last -ge 1000){Write-SyncProgress $Progress 'scope' 'Проверяем состав и исключения проекта' -DoneFiles $visited -TotalFiles $paths.Count;$last=$clock.ElapsedMilliseconds}
         if(!$path){continue}
         if($path -match '(^/|:|\\|(^|/)\.\.?(/|$))'){throw 'Unsafe Git path'}
-        $parts=$path.Split('/');$denied=$false;$candidate=$base
+        $parts=$path.Split('/');$denied=$false;$candidate=$baseIO
         foreach($part in $parts) {
             if(Test-SyncDenied $part){$denied=$true;break}
-            $candidate=Join-Path $candidate $part
-            if(!(Test-Path -LiteralPath $candidate)){ $denied=$true;break }
-            $entry=Get-Item -LiteralPath $candidate -Force -ErrorAction Stop
+            $candidate=[IO.Path]::Combine($candidate,$part)
+            $entry=[IO.FileInfo]::new($candidate)
+            if(!$entry.Exists -and ![IO.Directory]::Exists($candidate)){ $denied=$true;break }
             if($entry.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Reparse Git entry forbidden'}
-            if($entry.PSIsContainer -and (Test-Path -LiteralPath (Join-Path $candidate '.git'))){$denied=$true;break}
+            if($entry.Attributes -band [IO.FileAttributes]::Directory){$marker=[IO.Path]::Combine($candidate,'.git');if([IO.Directory]::Exists($marker) -or [IO.File]::Exists($marker)){$denied=$true;break}}
         }
-        if(!$denied -and !(Get-Item -LiteralPath $candidate -Force).PSIsContainer){$safe.Add($path)}
+        if(!$denied -and !($entry.Attributes -band [IO.FileAttributes]::Directory)){$safe.Add($path)}
     }
     @($safe | Sort-Object -Unique)
 }
-function Get-SyncGitInventory([string]$Root,[switch]$Hash) {
-    $paths=@(Get-SyncGitPaths $Root)
+function Get-SyncGitInventory([string]$Root,[switch]$Hash,[int]$TimeoutMilliseconds=15000,[scriptblock]$Progress) {
+    $paths=@(Get-SyncGitPaths $Root $TimeoutMilliseconds $Progress)
     if(!$paths.Count){return @()}
-    @(Get-SyncInventory -Root $Root -AllowedRoots $paths -Hash:$Hash -GitSourceTypes)
+    @(Get-SyncInventory -Root $Root -AllowedRoots $paths -Hash:$Hash -GitSourceTypes -Progress $Progress)
 }
 function Get-SyncInventory {
-    param([Parameter(Mandatory)][string]$Root,[Parameter(Mandatory)][string[]]$AllowedRoots,[switch]$Hash,[switch]$WholeRoot,[switch]$GitSourceTypes)
-    $base=[IO.Path]::GetFullPath($Root).TrimEnd('\')
-    $rootItem=Get-Item -LiteralPath $base -Force -ErrorAction Stop
-    if ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Reparse root forbidden' }
+    param([Parameter(Mandatory)][string]$Root,[Parameter(Mandatory)][string[]]$AllowedRoots,[switch]$Hash,[switch]$WholeRoot,[switch]$GitSourceTypes,[scriptblock]$Progress)
+    $base=ConvertFrom-RemoteAgentsIOPath ([IO.Path]::GetFullPath((ConvertTo-RemoteAgentsIOPath $Root)).TrimEnd('\'))
+    $baseIO=ConvertTo-RemoteAgentsIOPath $base
+    $rootAttributes=[IO.File]::GetAttributes($baseIO)
+    if ($rootAttributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Reparse root forbidden' }
+    if(!($rootAttributes -band [IO.FileAttributes]::Directory)){throw 'Inventory root must be a directory'}
     $seen=@{}; $items=New-Object 'System.Collections.Generic.List[object]'
+    $progressClock=[Diagnostics.Stopwatch]::StartNew();$lastProgress=-1000L;[long]$processedBytes=0
     foreach($allowed in $AllowedRoots) {
         if($WholeRoot -and $allowed -eq '.') {
-            $candidate=$base;$parts=@()
+            $candidate=$baseIO;$parts=@()
         } else {
         if (!$allowed -or $allowed -match '(^[\\/]|:|\*|\?|(^|[\\/])\.\.?([\\/]|$))') { throw 'Allowlist requires explicit relative paths' }
         $parts=$allowed -split '[\\/]'
         foreach($part in $parts) { if (Test-SyncDenied $part) { throw 'Denied allowlist path' } }
-        $candidate=$base
+        $candidate=$baseIO
         foreach($part in $parts) {
-            $candidate=Join-Path $candidate $part
-            $entry=Get-Item -LiteralPath $candidate -Force -ErrorAction Stop
-            if($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Reparse path forbidden' }
+            $candidate=[IO.Path]::Combine($candidate,$part)
+            if([IO.File]::GetAttributes($candidate) -band [IO.FileAttributes]::ReparsePoint) { throw 'Reparse path forbidden' }
         }
         }
         $pending=New-Object 'System.Collections.Generic.Stack[string]'; $pending.Push($candidate)
         while($pending.Count) {
-            $path=$pending.Pop(); $entry=Get-Item -LiteralPath $path -Force -ErrorAction Stop
-            if(Test-SyncDenied $entry.Name) { continue }
-            if($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Reparse entry forbidden' }
-            if($entry.PSIsContainer) {
-                if($WholeRoot -and $path -ne $base -and (Test-Path -LiteralPath (Join-Path $path '.git'))){continue}
-                foreach($child in Get-ChildItem -LiteralPath $path -Force -ErrorAction Stop) {
-                    if(!(Test-SyncDenied $child.Name)) { $pending.Push($child.FullName) }
+            if($progressClock.ElapsedMilliseconds-$lastProgress -ge 1000){Write-SyncProgress $Progress 'inventory' 'Проверяем файлы и контрольные суммы' -DoneBytes $processedBytes -DoneFiles $items.Count;$lastProgress=$progressClock.ElapsedMilliseconds}
+            $path=$pending.Pop()
+            if(Test-SyncDenied ([IO.Path]::GetFileName($path))) { continue }
+            $attributes=[IO.File]::GetAttributes($path)
+            if($attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Reparse entry forbidden' }
+            if($attributes -band [IO.FileAttributes]::Directory) {
+                $marker=[IO.Path]::Combine($path,'.git')
+                if($WholeRoot -and $path -ne $baseIO -and ([IO.Directory]::Exists($marker) -or [IO.File]::Exists($marker))){continue}
+                foreach($child in [IO.Directory]::EnumerateFileSystemEntries($path)) {
+                    if(!(Test-SyncDenied ([IO.Path]::GetFileName($child)))) { $pending.Push($child) }
                 }
                 continue
             }
+            $entry=[IO.FileInfo]::new($path)
             # Fail closed: only source/text/assets explicitly suitable for project transfer.
             $sourceExtension=$entry.Extension -match '(?i)^\.(php|js|mjs|cjs|jsx|ts|mts|cts|tsx|vue|json|lock|yaml|yml|xml|gradle|kts|kt|java|dart|css|scss|sass|less|html|md|txt|sql|graphql|gql|sh|ps1|bat|cmd|properties|toml|ini|png|jpg|jpeg|gif|webp|svg|woff2?|ttf)$'
             if($GitSourceTypes -and $entry.Extension -match '(?i)^\.(py|go|rs|c|h|cpp|hpp|cs|rb|swift)$'){$sourceExtension=$true}
             if(!$sourceExtension -and $entry.Name -notin @('artisan','gradlew','Dockerfile','Makefile','.editorconfig','.gitattributes','.gitignore','.node-version')) { continue }
-            $relative=$entry.FullName.Substring($base.Length+1).Replace('\','/')
+            $relative=$path.Substring($baseIO.Length+1).Replace('\','/')
             if($seen.ContainsKey($relative)) { continue }; $seen[$relative]=$true
             $record=[ordered]@{path=$relative;size=[long]$entry.Length}
-            if($Hash) { $record.sha256=Get-SyncSHA256 $entry.FullName }
+            if($Hash) {
+                # Small source files finish between normal inventory updates;
+                # do not allocate a 1-MiB chunk buffer/callback per tiny file.
+                $hashProgress=if($Progress -and $entry.Length -gt 1MB){{param($done,$total)
+                    if($progressClock.ElapsedMilliseconds-$lastProgress -ge 1000){Write-SyncProgress $Progress 'inventory' 'Проверяем файлы и контрольные суммы' -DoneBytes ($processedBytes+$done) -DoneFiles $items.Count; $lastProgress=$progressClock.ElapsedMilliseconds}
+                }}else{$null}
+                $record.sha256=Get-SyncSHA256 $entry.FullName $hashProgress
+            }
+            $processedBytes+=$entry.Length
             $items.Add([pscustomobject]$record)
         }
     }
+    Write-SyncProgress $Progress 'inventory' 'Проверка файлов завершена' $processedBytes $processedBytes $items.Count $items.Count
     @($items | Sort-Object -Property path)
 }
 function Write-SyncJson($Path,$Value) {
     $json=$Value | ConvertTo-Json -Depth 12
-    [IO.File]::WriteAllText($Path,$json,(New-Object Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllText((ConvertTo-RemoteAgentsIOPath $Path),$json,(New-Object Text.UTF8Encoding($false)))
 }
 function ConvertFrom-RemoteSyncProjectPaths {
     param([AllowEmptyString()][string]$Text)
@@ -253,7 +300,7 @@ function Get-RemoteSyncProjectMetadata {
         try {
             if(!(Test-Path -LiteralPath (Join-Path $root '.git'))){throw 'Git metadata requires an exact repository root'}
             $paths=(Invoke-SyncGit $root @('ls-files','--cached','--others','--exclude-standard','-z') ($MaxSeconds*1000)).Split([char]0)
-            $seenFiles=@{}
+            $seenFiles=@{};$checkedDirectories=@{}
             foreach($relative in $paths) {
                 if(!$relative){continue}
                 if($clock.Elapsed.TotalSeconds -ge $MaxSeconds){$reasons.Add('time-limit');break}
@@ -261,19 +308,21 @@ function Get-RemoteSyncProjectMetadata {
                 if($relative -match '(^/|:|\\|(^|/)\.\.?(/|$))'){$reasons.Add('unsafe-path');continue}
                 $safe=$true;$path=$root
                 foreach($part in $relative.Split('/')) {
-                    if(Test-SyncDenied $part){$safe=$false;break};$path=Join-Path $path $part
-                    if(!(Test-Path -LiteralPath $path)){$safe=$false;break}
-                    $entry=Get-Item -LiteralPath $path -Force -ErrorAction Stop
+                    if(Test-SyncDenied $part){$safe=$false;break};$path=[IO.Path]::Combine($path,$part)
+                    if($checkedDirectories.ContainsKey($path)){continue}
+                    $entry=[IO.FileInfo]::new($path)
+                    if(!$entry.Exists -and ![IO.Directory]::Exists($path)){$safe=$false;break}
                     if($entry.Attributes -band [IO.FileAttributes]::ReparsePoint){$safe=$false;break}
-                    if($entry.PSIsContainer) {
-                        if(Test-Path -LiteralPath (Join-Path $path '.git')){$safe=$false;break}
+                    if($entry.Attributes -band [IO.FileAttributes]::Directory) {
+                        if([IO.Directory]::Exists([IO.Path]::Combine($path,'.git')) -or [IO.File]::Exists([IO.Path]::Combine($path,'.git'))){$safe=$false;break}
                         if(!$directories.ContainsKey($path)) {
                             if($dirs -ge $MaxDirectories){$reasons.Add('directory-limit');$safe=$false;break}
                             $directories[$path]=$true;$dirs++
                         }
+                        $checkedDirectories[$path]=$true
                     }
                 }
-                if(!$safe -or $entry.PSIsContainer -or !(Test-RemoteSyncSourceFile $entry)){$excluded++;continue}
+                if(!$safe -or ($entry.Attributes -band [IO.FileAttributes]::Directory) -or !(Test-RemoteSyncSourceFile $entry)){$excluded++;continue}
                 if($seenFiles.ContainsKey($path)){continue};$seenFiles[$path]=$true
                 $files++;$bytes+=$entry.Length;if($entry.Length -gt $LargeFileBytes){$large++}
                 if($null -eq $latest -or $entry.LastWriteTimeUtc -gt $latest){$latest=$entry.LastWriteTimeUtc}
@@ -321,7 +370,20 @@ function Get-RemoteSyncSelection {
     [pscustomobject]@{schema=1;hostId=$HostId;projects=$projects;legacy=$true}
 }
 function Get-RemoteSyncProjectCandidate {
-    param([Parameter(Mandatory)][string]$SourcePath,[string]$DataDir,[string]$HostId,[switch]$Refresh,[ValidateRange(1,30)][int]$MaxSeconds=6)
+    param([Parameter(Mandatory)][string]$SourcePath,[string]$DataDir,[string]$HostId,[switch]$Refresh,[ValidateRange(1,30)][int]$MaxSeconds=6,[ValidateRange(1,30)][int]$MetadataMaxSeconds=3,[ValidateRange(1,1000000)][int]$MetadataMaxFiles=50000,[ValidateRange(1,100000)][int]$MetadataMaxDirectories=10000)
+    if($DataDir -and $HostId){
+        $path=[IO.Path]::GetFullPath($SourcePath).TrimEnd('\')
+        $rows=@((Get-RemoteSyncSelection $DataDir $HostId).projects|Where-Object{$_.sourcePath.TrimEnd('\') -eq $path})
+        if($rows.Count -eq 1){
+            $file=Join-Path (Get-SyncStatePath $DataDir $rows[0].projectId $HostId) 'project.json'
+            if(Test-Path -LiteralPath $file){
+                $binding=Get-SyncBinding $DataDir $rows[0].projectId $HostId
+                if($binding.PSObject.Properties.Name -contains 'subscription' -and $binding.subscription){
+                    return [pscustomobject]@{projectId=$binding.projectId;sourcePath=$path;name=$binding.projectId;scopeMode=$binding.scopeMode;kind='subscription';selected=[bool]$rows[0].selected;inventory=[pscustomobject]@{fileCount=0;bytes=0;lastSourceWriteUtc=$null;complete=$false;reasons=@('server-subscription');largeFileCount=0;excludedCount=0;cached=$false}}
+                }
+            }
+        }
+    }
     $clock=[Diagnostics.Stopwatch]::StartNew()
     $root=Assert-RemoteSyncProjectPath $SourcePath;$kind='folder';$mode='folder'
     if(Test-Path -LiteralPath (Join-Path $root '.git')) {
@@ -338,8 +400,8 @@ function Get-RemoteSyncProjectCandidate {
     }
     $id=$null;$selected=$false
     if($DataDir -and $HostId){$saved=Get-RemoteSyncSelection $DataDir $HostId;$match=@($saved.projects|Where-Object {$_.sourcePath.TrimEnd('\') -eq $root}|Select-Object -First 1);if($match.Count){$id=$match[0].projectId;$selected=[bool]$match[0].selected}}
-    $remaining=[Math]::Min(3,[Math]::Floor($MaxSeconds-$clock.Elapsed.TotalSeconds))
-    if($remaining -ge 1){$metadata=Get-RemoteSyncProjectMetadata $root -ScopeMode $mode -Refresh:$Refresh -MaxSeconds ([int]$remaining)}
+    $remaining=[Math]::Min($MetadataMaxSeconds,[Math]::Floor($MaxSeconds-$clock.Elapsed.TotalSeconds))
+    if($remaining -ge 1){$metadata=Get-RemoteSyncProjectMetadata $root -ScopeMode $mode -Refresh:$Refresh -MaxSeconds ([int]$remaining) -MaxFiles $MetadataMaxFiles -MaxDirectories $MetadataMaxDirectories}
     else {$metadata=[pscustomobject]@{fileCount=0;bytes=0;lastSourceWriteUtc=$null;complete=$false;reasons=@('time-limit');largeFileCount=0;excludedCount=0;visitedDirectories=0;visitedFiles=0;cached=$false}}
     [pscustomobject]@{projectId=$id;sourcePath=$root;name=[IO.Path]::GetFileName($root);scopeMode=$mode;kind=$kind;selected=$selected;inventory=$metadata}
 }
@@ -356,8 +418,10 @@ function Save-RemoteSyncSelection {
         $root=[IO.Path]::GetFullPath([string]$candidate.sourcePath).TrimEnd('\');if($seen.ContainsKey($root)){throw 'Duplicate project path'};$seen[$root]=$true
         $selected=[bool]$candidate.selected;$match=@($previous.projects|Where-Object {$_.sourcePath.TrimEnd('\') -eq $root}|Select-Object -First 1)
         $id=$null;$mode='folder';if($match.Count){$id=$match[0].projectId;$mode=$match[0].scopeMode}
-        if($selected){
-            $probe=Get-RemoteSyncProjectCandidate $root;if(!$match.Count){$mode=$probe.scopeMode}
+        $subscription=$false;$hasBinding=$false
+        if($match.Count -and (Test-Path -LiteralPath (Join-Path (Get-SyncStatePath $DataDir $id $HostId) 'project.json'))){$hasBinding=$true;$existing=Get-SyncBinding $DataDir $id $HostId;$subscription=$existing.PSObject.Properties.Name -contains 'subscription' -and $existing.subscription}
+        if($selected -and !$subscription){
+            $probe=Get-RemoteSyncProjectCandidate $root;if(!$hasBinding){$mode=$probe.scopeMode}
             $service=[IO.Path]::GetFullPath($DataDir).TrimEnd('\')
             if($root -eq $service -or $root.StartsWith($service+'\',[StringComparison]::OrdinalIgnoreCase) -or $service.StartsWith($root+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Project and service data folders must be disjoint'}
             foreach($other in $enabled){if($root -eq $other -or $root.StartsWith($other+'\',[StringComparison]::OrdinalIgnoreCase) -or $other.StartsWith($root+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Selected project folders overlap; choose a parent or its nested project'}}
@@ -406,6 +470,99 @@ function Find-RemoteSyncProjectCandidates {
     }
     [pscustomobject]@{rootPath=$root;candidates=$results.ToArray();complete=($reasons.Count -eq 0);reasons=@($reasons|Sort-Object -Unique);visitedDirectories=$visited}
 }
+function Get-RemoteSyncQuickSearchRoots {
+    param([string]$ProfilePath=$env:USERPROFILE,[string]$DocumentsPath=([Environment]::GetFolderPath('MyDocuments')),[string]$DesktopPath=([Environment]::GetFolderPath('Desktop')),[string[]]$DriveRoots)
+    $paths=New-Object 'Collections.Generic.List[string]'
+    $names=@('GitHub','GitLab','Git','repos','repositories','source','projects','work','dev','code','src','workspace','workspaces')
+    foreach($parent in @($ProfilePath,$DocumentsPath,$DesktopPath)){
+        if(!$parent){continue}
+        foreach($name in $names){$paths.Add((Join-Path $parent $name))}
+    }
+    if(!$PSBoundParameters.ContainsKey('DriveRoots')){
+        $DriveRoots=@([IO.DriveInfo]::GetDrives()|Where-Object{$_.DriveType -eq [IO.DriveType]::Fixed -and $_.IsReady}|ForEach-Object{$_.RootDirectory.FullName})
+    }
+    foreach($drive in $DriveRoots){foreach($name in $names){$paths.Add((Join-Path $drive $name))}}
+    $roots=New-Object 'Collections.Generic.List[string]'
+    # Only named project locations, never an entire profile or disk.
+    $seen=@{}
+    foreach($path in $paths){
+        if($seen.ContainsKey($path)){continue};$seen[$path]=$true
+        if(!(Test-Path -LiteralPath $path -PathType Container)){continue}
+        try{$safe=Assert-RemoteSyncProjectPath $path;$roots.Add($safe)}catch{continue}
+    }
+    $roots.ToArray()
+}
+function Find-RemoteSyncQuickRepositories {
+    param([string[]]$RootPaths,[string]$DataDir,[string]$HostId,[ValidateRange(1,30)][int]$MaxSeconds=15,[ValidateRange(1,100000)][int]$MaxDirectories=4000,[ValidateRange(1,1000)][int]$MaxProjects=100,[ValidateRange(1,12)][int]$MaxDepth=5)
+    $clock=[Diagnostics.Stopwatch]::StartNew();$queue=New-Object 'Collections.Generic.Queue[object]'
+    $results=New-Object 'Collections.Generic.List[object]';$reasons=New-Object 'Collections.Generic.List[string]';$seen=@{};$visited=0
+    if(!$PSBoundParameters.ContainsKey('RootPaths')){$RootPaths=@(Get-RemoteSyncQuickSearchRoots)}
+    $roots=New-Object 'Collections.Generic.List[string]'
+    foreach($root in @($RootPaths|Sort-Object Length)){
+        try{
+            $safe=Assert-RemoteSyncProjectPath $root
+            if(!@($roots|Where-Object{$safe -eq $_ -or $safe.StartsWith($_+'\',[StringComparison]::OrdinalIgnoreCase)}).Count){$roots.Add($safe)}
+        }catch{$reasons.Add('unavailable-root')}
+    }
+    $git=Get-SyncGitExecutable -InstalledOnly
+    if(!$git){return [pscustomobject]@{candidates=@();complete=$false;reasons=@('git-unavailable');visitedDirectories=0;rootPaths=$roots}}
+    $excluded=if($DataDir){[IO.Path]::GetFullPath($DataDir).TrimEnd('\')}else{$null}
+    foreach($root in $roots){$queue.Enqueue(@{path=$root;depth=0})}
+    # Discover paths first: expensive inventories of early siblings must not
+    # hide nested repositories. Reserve most of the budget for Git validation.
+    $discoverySeconds=[Math]::Min(6,$MaxSeconds/3.0)
+    while($queue.Count){
+        if($clock.Elapsed.TotalSeconds -ge $discoverySeconds){$reasons.Add('discovery-time-limit');break}
+        if($visited -ge $MaxDirectories){$reasons.Add('directory-limit');break}
+        $current=$queue.Dequeue();$path=$current.path
+        if($seen.ContainsKey($path)){continue};$seen[$path]=$true
+        if($excluded -and ($path -eq $excluded -or $path.StartsWith($excluded+'\',[StringComparison]::OrdinalIgnoreCase))){continue}
+        try{
+            if(Test-RemoteSyncSystemPath $path){continue}
+            $item=Get-Item -LiteralPath $path -Force -ErrorAction Stop
+            if(!$item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)){continue}
+            $visited++
+            $marker=Join-Path $path '.git'
+            if(Test-Path -LiteralPath $marker){
+                $gitMarker=Get-Item -LiteralPath $marker -Force
+                if(!($gitMarker.Attributes -band [IO.FileAttributes]::ReparsePoint)){
+                    $kind=if($gitMarker.PSIsContainer){'git'}else{'worktree'}
+                    # A shallow mtime hint prioritizes validation only. Never
+                    # present it as an ignore-aware source date in the result.
+                    $hint=$null;$count=0
+                    foreach($file in [IO.Directory]::EnumerateFiles($path)){
+                        if($count++ -ge 200 -or $clock.Elapsed.TotalSeconds -ge $discoverySeconds){break}
+                        $info=[IO.FileInfo]::new($file)
+                        if(!(Test-SyncDenied $info.Name) -and !($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -and (Test-RemoteSyncSourceFile $info)){
+                            if($null -eq $hint -or $info.LastWriteTimeUtc -gt $hint){$hint=$info.LastWriteTimeUtc}
+                        }
+                    }
+                    $results.Add([pscustomobject]@{projectId=$null;sourcePath=$path;name=[IO.Path]::GetFileName($path);scopeMode='git';kind=$kind;selected=$false;quickPriorityUtc=$hint;inventory=[pscustomobject]@{fileCount=0;bytes=0;lastSourceWriteUtc=$null;complete=$false;reasons=@('git-verification-pending');largeFileCount=0;excludedCount=0;cached=$false}})
+                    if($results.Count -ge $MaxProjects){$reasons.Add('project-limit');break}
+                }
+            }
+            # Nested repos are independently selectable; overlap is denied on save.
+            foreach($child in [IO.Directory]::EnumerateDirectories($path)){
+                if($clock.Elapsed.TotalSeconds -ge $discoverySeconds){$reasons.Add('discovery-time-limit');break}
+                if(Test-SyncDenied ([IO.Path]::GetFileName($child))){continue}
+                if($current.depth -ge $MaxDepth){$reasons.Add('depth-limit');continue}
+                if($visited+$queue.Count -ge $MaxDirectories){$reasons.Add('directory-limit');break}
+                $queue.Enqueue(@{path=$child;depth=$current.depth+1})
+            }
+        }catch{$reasons.Add('unreadable-repository-or-directory')}
+    }
+    $priority=@($results|Sort-Object @{Expression={if($_.kind -eq 'worktree'){1}else{0}}},@{Expression={if($_.quickPriorityUtc){[datetime]$_.quickPriorityUtc}else{[datetime]::MinValue}};Descending=$true},sourcePath)
+    foreach($row in $priority){
+        $seconds=[Math]::Min(4,[Math]::Floor($MaxSeconds-$clock.Elapsed.TotalSeconds))
+        if($seconds -lt 2){$reasons.Add('metadata-budget');break}
+        try{
+            $probe=Get-RemoteSyncProjectCandidate -SourcePath $row.sourcePath -DataDir $DataDir -HostId $HostId -MaxSeconds ([int]$seconds) -MetadataMaxSeconds 2 -MetadataMaxFiles 5000 -MetadataMaxDirectories 500
+            $row.kind=$probe.kind;$row.projectId=$probe.projectId;$row.scopeMode=$probe.scopeMode;$row.inventory=$probe.inventory
+        }catch{$reasons.Add('unreadable-repository')}
+    }
+    if(@($results|Where-Object{!$_.inventory.complete}).Count){$reasons.Add('metadata-incomplete')}
+    [pscustomobject]@{candidates=@($results|Sort-Object @{Expression={if($_.kind -eq 'worktree'){1}else{0}}},@{Expression={if($_.inventory.lastSourceWriteUtc){[datetime]$_.inventory.lastSourceWriteUtc}else{[datetime]::MinValue}};Descending=$true},sourcePath);complete=($reasons.Count -eq 0);reasons=@($reasons|Sort-Object -Unique);visitedDirectories=$visited;rootPaths=$roots}
+}
 function New-RemoteSyncProject {
     param([Parameter(Mandatory)][string]$DataDir,[Parameter(Mandatory)][string]$ProjectId,[Parameter(Mandatory)][string]$HostId,[Parameter(Mandatory)][string]$SourcePath,[string[]]$AllowedRoots,[ValidateSet('allowlist','git','folder')][string]$ScopeMode='allowlist')
     $state=Get-SyncStatePath $DataDir $ProjectId $HostId
@@ -421,6 +578,34 @@ function New-RemoteSyncProject {
     $binding=[ordered]@{schema=1;projectId=$ProjectId;hostId=$HostId;sourcePath=$source;replicaPath=$replica;allowedRoots=@($AllowedRoots);folderId="ra-$ProjectId";state='registered';fileCount=$inventory.Count;bytes=($inventory|Measure-Object size -Sum).Sum}
     if($ScopeMode -in @('git','folder')){$binding.scopeMode=$ScopeMode}
     Write-SyncJson (Join-Path $state 'project.json') $binding
+    [pscustomobject]$binding
+}
+function New-RemoteSyncSubscription {
+    param([Parameter(Mandatory)][string]$DataDir,[Parameter(Mandatory)][string]$ProjectId,[Parameter(Mandatory)][string]$HostId,[Parameter(Mandatory)]$ServerProject)
+    Assert-SyncId $ProjectId;Assert-SyncId $HostId
+    if($ServerProject.projectId -cne $ProjectId -or $ServerProject.scopeMode -notin @('allowlist','git','folder')){throw 'Explicit shared project identity and scope required'}
+    $state=Get-SyncStatePath $DataDir $ProjectId $HostId
+    $path=Join-Path $state 'project.json'
+    if(Test-Path -LiteralPath $path){
+        $existing=Get-SyncBinding $DataDir $ProjectId $HostId
+        if($existing.PSObject.Properties.Name -notcontains 'subscription' -or !$existing.subscription){throw 'Existing seed binding cannot be converted to subscription'}
+        if($existing.scopeMode -cne $ServerProject.scopeMode -or ($existing.allowedRoots -join '|') -cne ($ServerProject.allowedRoots -join '|')){throw 'Shared project scope changed; inspect binding'}
+        $selection=Get-RemoteSyncSelection $DataDir $HostId
+        foreach($row in $selection.projects){if($row.projectId -ceq $ProjectId){$row.selected=$true}}
+        Write-SyncJson (Join-Path $DataDir "sync\selections\$HostId.json") $selection
+        return $existing
+    }
+    $replica=[IO.Path]::GetFullPath((Join-Path $DataDir "workspaces\$ProjectId\$HostId"))
+    if(Test-Path -LiteralPath $replica){throw 'Existing replica requires inspection; refusing adoption'}
+    $binding=[ordered]@{schema=1;projectId=$ProjectId;hostId=$HostId;sourcePath=$replica;replicaPath=$replica;allowedRoots=@($ServerProject.allowedRoots);scopeMode=$ServerProject.scopeMode;folderId="ra-$ProjectId";state='registered';fileCount=0;bytes=0;subscription=$true}
+    [void][IO.Directory]::CreateDirectory($state)
+    [void][IO.Directory]::CreateDirectory((Join-Path $DataDir 'sync\selections'))
+    Write-SyncJson $path $binding
+    $selection=Get-RemoteSyncSelection $DataDir $HostId
+    if($ProjectId -notin @($selection.projects|ForEach-Object{$_.projectId})){
+        $selection.projects=@($selection.projects)+@([pscustomobject]@{projectId=$ProjectId;sourcePath=$replica;scopeMode=$ServerProject.scopeMode;selected=$true})
+    }else{foreach($row in $selection.projects){if($row.projectId -ceq $ProjectId){$row.selected=$true}}}
+    Write-SyncJson (Join-Path $DataDir "sync\selections\$HostId.json") $selection
     [pscustomobject]$binding
 }
 function Get-SyncBinding($DataDir,$ProjectId,$HostId) {
@@ -521,35 +706,105 @@ function Update-RemoteSyncRootProjects {
     }
     [pscustomobject]@{hasRoot=$true;rootPath=$found.rootPath;foundCount=$found.repositories.Count;addedCount=$added;existingCount=$reused;failedCount=$failures.Count;failures=$failures.ToArray();projects=$projects.ToArray();complete=($found.complete -and !$failures.Count);reasons=$found.reasons;visitedDirectories=$found.visitedDirectories;skippedDirectories=$found.skippedDirectories}
 }
+function Get-RemoteSyncPreparedSeed {
+    param([string]$DataDir,[string]$ProjectId,[string]$HostId,[scriptblock]$Progress,[string]$KnownArchiveHash)
+    $state=Get-SyncStatePath $DataDir $ProjectId $HostId
+    $archive=Join-Path $state 'seed.zip';$manifest=Join-Path $state 'seed-manifest.json';$index=Join-Path $state 'seed-index.json'
+    $archiveInfo=[IO.FileInfo]::new((ConvertTo-RemoteAgentsIOPath $archive))
+    if(!$archiveInfo.Exists -or ![IO.File]::Exists((ConvertTo-RemoteAgentsIOPath $manifest))){throw 'Prepared seed is incomplete; existing files preserved'}
+    if($archiveInfo.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Reparse archive forbidden'}
+    if([IO.File]::GetAttributes((ConvertTo-RemoteAgentsIOPath $manifest)) -band [IO.FileAttributes]::ReparsePoint){throw 'Reparse manifest forbidden'}
+    $document=[IO.File]::ReadAllText((ConvertTo-RemoteAgentsIOPath $manifest))|ConvertFrom-Json
+    if($document.projectId -cne $ProjectId -or $document.hostId -cne $HostId){throw 'Prepared seed identity mismatch'}
+    $manifestHash=Get-SyncSHA256 $manifest
+    $cached=$null
+    if([IO.File]::Exists((ConvertTo-RemoteAgentsIOPath $index))){
+        if([IO.File]::GetAttributes((ConvertTo-RemoteAgentsIOPath $index)) -band [IO.FileAttributes]::ReparsePoint){throw 'Reparse seed index forbidden'}
+        try{$cached=[IO.File]::ReadAllText((ConvertTo-RemoteAgentsIOPath $index))|ConvertFrom-Json}catch{$cached=$null}
+    }
+    $reuse=$false
+    if($cached){
+        try{$reuse=$cached.schema -eq 1 -and $cached.projectId -ceq $ProjectId -and $cached.hostId -ceq $HostId -and $cached.manifestHash -ceq $manifestHash -and $cached.archiveBytes -eq $archiveInfo.Length -and $cached.archiveWriteTicks -eq $archiveInfo.LastWriteTimeUtc.Ticks -and $cached.archiveHash -cmatch '^[a-f0-9]{64}$'}catch{$reuse=$false}
+    }
+    if($KnownArchiveHash){$archiveHash=$KnownArchiveHash;$reuse=$false}
+    elseif($reuse){$archiveHash=$cached.archiveHash;Write-SyncProgress $Progress 'archive-index' 'Готовый архив не изменился; используем сохранённый индекс SHA-256'}
+    else{$checksumProgress={param($done,$total) Write-SyncProgress $Progress 'archive-checksum' 'Проверяем готовый архив' $done $total};$archiveHash=Get-SyncSHA256 $archive $checksumProgress}
+    if(!$reuse){
+        $temporary=Join-Path $state ('index-'+[guid]::NewGuid().ToString('N')+'.pending')
+        try{
+            Write-SyncJson $temporary @{schema=1;projectId=$ProjectId;hostId=$HostId;manifestHash=$manifestHash;archiveBytes=$archiveInfo.Length;archiveWriteTicks=$archiveInfo.LastWriteTimeUtc.Ticks;archiveHash=$archiveHash}
+            if([IO.File]::Exists((ConvertTo-RemoteAgentsIOPath $index))){[IO.File]::Replace((ConvertTo-RemoteAgentsIOPath $temporary),(ConvertTo-RemoteAgentsIOPath $index),[NullString]::Value)}
+            else{[IO.File]::Move((ConvertTo-RemoteAgentsIOPath $temporary),(ConvertTo-RemoteAgentsIOPath $index))}
+        }finally{if([IO.File]::Exists((ConvertTo-RemoteAgentsIOPath $temporary))){[IO.File]::Delete((ConvertTo-RemoteAgentsIOPath $temporary))}}
+    }
+    # This cache only skips a redundant LOCAL read of an immutable seed archive.
+    # The receiver still verifies its complete SHA256, and readiness still hashes
+    # live files. Metadata-only reuse must never bypass either of those barriers.
+    [pscustomobject]@{archivePath=$archive;manifestPath=$manifest;sha256=$archiveHash;fileCount=@($document.files).Count;archiveBytes=$archiveInfo.Length;cached=$reuse}
+}
 function Export-RemoteSyncSeed {
-    param([string]$DataDir,[string]$ProjectId,[string]$HostId)
+    param([string]$DataDir,[string]$ProjectId,[string]$HostId,[scriptblock]$Progress)
     $binding=Get-SyncBinding $DataDir $ProjectId $HostId
+    if($binding.PSObject.Properties.Name -contains 'subscription' -and $binding.subscription){throw 'Receive-only subscriptions cannot seed server sources'}
     $state=Get-SyncStatePath $DataDir $ProjectId $HostId
     $gitMode=$binding.PSObject.Properties.Name -contains 'scopeMode' -and $binding.scopeMode -eq 'git'
     $folderMode=$binding.PSObject.Properties.Name -contains 'scopeMode' -and $binding.scopeMode -eq 'folder'
     if($folderMode -and (Test-Path -LiteralPath (Join-Path $binding.sourcePath '.git'))){throw 'Folder project became a Git repository; review its scope before seeding'}
-    if($gitMode){$files=@(Get-SyncGitInventory $binding.sourcePath -Hash)}else{$files=@(Get-SyncInventory $binding.sourcePath $binding.allowedRoots -Hash -WholeRoot:$folderMode -GitSourceTypes:$folderMode)}
+    # A complete initial seed is not a bounded discovery estimate. Allow cold/large
+    # local Git enumeration a minute; discovery callers retain their short limits.
+    if($gitMode){$files=@(Get-SyncGitInventory $binding.sourcePath -Hash -TimeoutMilliseconds 60000 -Progress $Progress)}else{$files=@(Get-SyncInventory $binding.sourcePath $binding.allowedRoots -Hash -WholeRoot:$folderMode -GitSourceTypes:$folderMode -Progress $Progress)}
     if(!$files.Count) { throw 'No allowed files' }
     Add-Type -AssemblyName System.IO.Compression
     $archive=Join-Path $state 'seed.zip'
-    if(Test-Path -LiteralPath $archive) { throw 'Seed archive exists; do not overwrite' }
-    $stream=[IO.File]::Open($archive,[IO.FileMode]::CreateNew)
+    $manifest=Join-Path $state 'seed-manifest.json'
+    if(Test-Path -LiteralPath $manifest) { throw 'Seed archive exists; do not overwrite' }
+    # An interrupted older build has no committed manifest. Preserve its archive
+    # under a new name, never mistake it for a resumable complete seed.
+    if(Test-Path -LiteralPath $archive){Move-Item -LiteralPath $archive -Destination (Join-Path $state ('seed-incomplete-'+[guid]::NewGuid().ToString('N')+'.zip'))}
+    $pending=Join-Path $state ('seed-building-'+[guid]::NewGuid().ToString('N')+'.zip')
+    $pendingManifest=Join-Path $state ('seed-manifest-'+[guid]::NewGuid().ToString('N')+'.pending')
+    [long]$totalBytes=($files | Measure-Object size -Sum).Sum;[long]$doneBytes=0;$doneFiles=0
+    $clock=[Diagnostics.Stopwatch]::StartNew();$last=-1000L
+    Write-SyncProgress $Progress 'archive' 'Создаём архив разрешённых файлов' 0 $totalBytes 0 $files.Count
+    $stream=[IO.File]::Open((ConvertTo-RemoteAgentsIOPath $pending),[IO.FileMode]::CreateNew)
     $zip=New-Object IO.Compression.ZipArchive($stream,[IO.Compression.ZipArchiveMode]::Create)
+    $buffer=New-Object byte[] 1048576
     try {
+      try {
         foreach($file in $files) {
             $full=Join-Path $binding.sourcePath $file.path
             # Recheck scope immediately before open; source must be quiescent during seed.
-            $check=@(Get-SyncInventory $binding.sourcePath @($file.path) -Hash -GitSourceTypes:($gitMode -or $folderMode))
-            if($check.Count -ne 1 -or $check[0].sha256 -ne $file.sha256) { throw 'Source changed during seed' }
-            $entry=$zip.CreateEntry($file.path); $dest=$entry.Open(); $input=[IO.File]::OpenRead($full)
-            try { $input.CopyTo($dest) } finally { $input.Dispose(); $dest.Dispose() }
+            $check=@(Get-SyncInventory $binding.sourcePath @($file.path) -GitSourceTypes:($gitMode -or $folderMode))
+            if($check.Count -ne 1 -or $check[0].size -ne $file.size) { throw 'Source changed during seed' }
+            $entry=$zip.CreateEntry($file.path); $dest=$entry.Open(); $input=[IO.File]::OpenRead((ConvertTo-RemoteAgentsIOPath $full))
+            $hash=[Security.Cryptography.SHA256]::Create()
+            try {
+                while(($read=$input.Read($buffer,0,$buffer.Length)) -gt 0){
+                    $dest.Write($buffer,0,$read);[void]$hash.TransformBlock($buffer,0,$read,$buffer,0);$doneBytes+=$read
+                    if($clock.ElapsedMilliseconds-$last -ge 1000){Write-SyncProgress $Progress 'archive' 'Создаём архив разрешённых файлов' $doneBytes $totalBytes $doneFiles $files.Count;$last=$clock.ElapsedMilliseconds}
+                }
+                [void]$hash.TransformFinalBlock([byte[]]@(),0,0)
+                if([BitConverter]::ToString($hash.Hash).Replace('-','').ToLowerInvariant() -cne $file.sha256){throw 'Source changed during seed'}
+            } finally {$hash.Dispose();$input.Dispose();$dest.Dispose()}
+            $doneFiles++
         }
-    } finally { $zip.Dispose();$stream.Dispose() }
-    $snapshot=[ordered]@{schema=1;projectId=$ProjectId;hostId=$HostId;snapshotId=[guid]::NewGuid().ToString('N');allowedRoots=@($binding.allowedRoots);files=$files}
-    if($gitMode){$snapshot.scopeMode='git';$snapshot.gitPaths=@($files | ForEach-Object {$_.path})}
-    if($folderMode){$snapshot.scopeMode='folder'}
-    $manifest=Join-Path $state 'seed-manifest.json'; Write-SyncJson $manifest $snapshot
-    [pscustomobject]@{archivePath=$archive;manifestPath=$manifest;sha256=(Get-SyncSHA256 $archive);fileCount=$files.Count}
+      } finally { $zip.Dispose();$stream.Dispose() }
+      $snapshot=[ordered]@{schema=1;projectId=$ProjectId;hostId=$HostId;snapshotId=[guid]::NewGuid().ToString('N');allowedRoots=@($binding.allowedRoots);files=$files}
+      if($gitMode){$snapshot.scopeMode='git';$snapshot.gitPaths=@($files | ForEach-Object {$_.path})}
+      if($folderMode){$snapshot.scopeMode='folder'}
+      Write-SyncJson $pendingManifest $snapshot
+      [IO.File]::Move((ConvertTo-RemoteAgentsIOPath $pending),(ConvertTo-RemoteAgentsIOPath $archive));[IO.File]::Move((ConvertTo-RemoteAgentsIOPath $pendingManifest),(ConvertTo-RemoteAgentsIOPath $manifest))
+    } finally {
+      # Only unique staging files allocated by this invocation, inside own state.
+      foreach($temporary in @($pending,$pendingManifest)){
+          if([IO.Path]::GetDirectoryName($temporary) -cne [IO.Path]::GetFullPath($state)){throw 'Unsafe seed staging path'}
+          if([IO.File]::Exists((ConvertTo-RemoteAgentsIOPath $temporary))){[IO.File]::Delete((ConvertTo-RemoteAgentsIOPath $temporary))}
+      }
+    }
+    Write-SyncProgress $Progress 'archive' 'Архив подготовлен' $totalBytes $totalBytes $files.Count $files.Count
+    $checksumProgress={param($done,$total) Write-SyncProgress $Progress 'archive-checksum' 'Проверяем готовый архив' $done $total}
+    $prepared=Get-RemoteSyncPreparedSeed $DataDir $ProjectId $HostId -Progress $Progress -KnownArchiveHash (Get-SyncSHA256 $archive $checksumProgress)
+    $prepared | Add-Member -NotePropertyName sourceBytes -NotePropertyValue $totalBytes -PassThru
 }
 function Get-RemoteSyncStatus {
     param([string]$DataDir,[string]$ProjectId,[string]$HostId)
@@ -557,18 +812,18 @@ function Get-RemoteSyncStatus {
     [pscustomobject]@{projectId=$ProjectId;hostId=$HostId;replicaPath=$binding.replicaPath;state=$binding.state;ready=$false;reason='Runtime health and current snapshot required'}
 }
 function Test-RemoteSyncBarrier {
-    param([string]$DataDir,[string]$ProjectId,[string]$HostId,[string]$SnapshotPath,[scriptblock]$HealthProbe)
+    param([string]$DataDir,[string]$ProjectId,[string]$HostId,[string]$SnapshotPath,[scriptblock]$HealthProbe,[scriptblock]$Progress)
     $binding=Get-SyncBinding $DataDir $ProjectId $HostId
     $result=[ordered]@{ready=$false;projectId=$ProjectId;hostId=$HostId;replicaPath=$binding.replicaPath;reason='No live health probe';snapshotId=$null}
     if(!$HealthProbe) { return [pscustomobject]$result }
     try {
         $health=& $HealthProbe
         if(!$health.connected -or $health.state -ne 'idle' -or $health.needTotalItems -ne 0 -or $health.pullErrors -ne 0 -or $health.receiveOnlyTotalItems -ne 0) { throw 'Sync disconnected, pending, conflicted or locally modified' }
-        $snapshot=Get-Content -LiteralPath $SnapshotPath -Raw | ConvertFrom-Json
+        $snapshot=Get-Content -LiteralPath (ConvertTo-RemoteAgentsIOPath $SnapshotPath) -Raw | ConvertFrom-Json
         if($snapshot.projectId -cne $ProjectId -or $snapshot.hostId -cne $HostId) { throw 'Snapshot host/project mismatch' }
         $gitMode=$binding.PSObject.Properties.Name -contains 'scopeMode' -and $binding.scopeMode -eq 'git'
         $folderMode=$binding.PSObject.Properties.Name -contains 'scopeMode' -and $binding.scopeMode -eq 'folder'
-        $actual=@(Get-SyncInventory $binding.replicaPath $binding.allowedRoots -Hash -WholeRoot:($gitMode -or $folderMode) -GitSourceTypes:($gitMode -or $folderMode))
+        $actual=@(Get-SyncInventory $binding.replicaPath $binding.allowedRoots -Hash -WholeRoot:($gitMode -or $folderMode) -GitSourceTypes:($gitMode -or $folderMode) -Progress $Progress)
         $expected=@($snapshot.files)
         if($actual.Count -ne $expected.Count) { throw 'Snapshot file count mismatch' }
         $index=@{}; foreach($file in $actual) { $index[$file.path]=$file }

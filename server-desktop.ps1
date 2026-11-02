@@ -5,9 +5,11 @@ param(
     [string]$SSHConfig, [string]$KnownHostsFile, [string]$AskpassExecutable,
     [ValidateRange(1,65535)][int]$SSHPort = 22,
     [string]$ServerUser = 'remoteagents',
-    [switch]$Prepare, [switch]$SetDesktopPassword, [switch]$ManagedSession
+    [switch]$Prepare, [switch]$SetDesktopPassword, [switch]$ManagedSession,
+    [ValidateSet('0','1','2','3')][string]$AgentApplications = '0'
 )
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
 
 function Convert-DesktopSshArgument([string]$Value) {
     $escaped = [regex]::Replace($Value, '(\\*)"', '$1$1\"')
@@ -35,12 +37,16 @@ function Invoke-DesktopSsh([string[]]$Arguments, [byte[]]$InputBytes = @()) {
     $start.RedirectStandardInput = $true
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
+    $start.StandardOutputEncoding = New-Object Text.UTF8Encoding($false)
+    $start.StandardErrorEncoding = New-Object Text.UTF8Encoding($false)
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $start
     $started = $false
     try {
         if (-not $process.Start()) { throw 'SSH did not start.' }
         $started = $true
+        # Retain the native handle while asynchronous streams drain (PS5.1).
+        $processHandle = $process.Handle
         $outputTask = $process.StandardOutput.ReadToEndAsync()
         $errorTask = $process.StandardError.ReadToEndAsync()
         if ($InputBytes.Length) {
@@ -140,7 +146,7 @@ redirectdrives:i:0
 redirectprinters:i:0
 drivestoredirect:s:
 audiomode:i:0
-audiocapturemode:i:0
+audiocapturemode:i:1
 screen mode id:i:2
 use multimon:i:0
 dynamic resolution:i:1
@@ -187,18 +193,25 @@ try {
         $audioBootstrap = Join-Path $PSScriptRoot 'server-desktop-audio.sh'
         if (-not [IO.File]::Exists($audioBootstrap)) { throw 'Не хватает компонента звука. Скопируйте весь комплект программы.' }
         $audioBytes = [Text.Encoding]::UTF8.GetBytes([IO.File]::ReadAllText($audioBootstrap).Replace("`r`n","`n"))
-        Write-Output 'Настройка звука: он будет слышен на этом компьютере; микрофон выключен.'
+        Write-Output 'Настройка звука и микрофона этого компьютера для диктовки на сервере.'
         $audioResult = Invoke-DesktopSsh ($baseArgs + @($destination,"${privilege}bash -s -- $ServerUser")) $audioBytes
         if ($audioResult.ExitCode -ne 0) {
             Write-Output 'Звук пока не настроен; рабочий стол сохранён. Повторите подключение позднее.'
             Write-Output $audioResult.Error
         } else {
-            Write-Output 'Звук сервера подготовлен. Если старое приложение молчит, заново откройте воспроизведение.'
+            Write-Output 'Звук и микрофон подготовлены. После подключения заново откройте приложение для диктовки.'
         }
     }
     $phase = 'проверка сервера'
     $ready = Invoke-DesktopSsh ($baseArgs + @($destination,"${privilege}python3 /usr/local/lib/remoteagents-desktop/check.py"))
     Assert-DesktopSshResult $ready
+    if ($AgentApplications -ne '0') {
+        $launchPath = Join-Path $PSScriptRoot 'server-desktop-onboarding.py'
+        $launchBytes = [Text.Encoding]::UTF8.GetBytes([IO.File]::ReadAllText($launchPath).Replace("`r`n","`n"))
+        $launchCommand = "${privilege}runuser -u $ServerUser -- env HOME=/home/$ServerUser python3 -I - $AgentApplications"
+        $launched = Invoke-DesktopSsh ($baseArgs + @($destination,$launchCommand)) $launchBytes
+        if ($launched.ExitCode -ne 0) { Write-Output 'Приложение не открылось автоматически. Используйте ярлык Codex/Claude на рабочем столе сервера.' }
+    }
     $phase = 'SSH-подключение'
     $certificate = Invoke-DesktopSsh ($baseArgs + @($destination,"${privilege}openssl x509 -in /usr/local/lib/remoteagents-desktop/tls/cert.pem -noout -fingerprint -sha256"))
     Assert-DesktopSshResult $certificate

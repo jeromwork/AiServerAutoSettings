@@ -2,12 +2,13 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$ProfileDirectory,
-    [ValidateSet('Choose', 'Separate', 'CorporateSplit')][string]$NetworkMode = 'Choose',
     [switch]$PrepareOnly,
+    [switch]$ClientOnly,
     [ValidateRange(30, 1800)][int]$InstallTimeoutSeconds = 900
 )
 
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $releasePage = 'https://github.com/amnezia-vpn/amnezia-client/releases/latest'
 
 function Get-AmneziaInstallRoot {
@@ -61,10 +62,37 @@ function Get-AmneziaInstallerHelp([string]$InstallerPath, [string]$LogDirectory)
     $out = Join-Path $LogDirectory 'help.stdout.txt'
     $err = Join-Path $LogDirectory 'help.stderr.txt'
     $process = Start-Process -FilePath $InstallerPath -ArgumentList '--help' -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
+    # PS5.1 can lose ExitCode after WaitForExit unless the handle is retained.
+    $processHandle = $process.Handle
     if (-not $process.WaitForExit(30000)) { return [pscustomobject]@{ TimedOut = $true; Supported = $false; ExitCode = $null } }
     $process.Refresh()
     $text = [IO.File]::ReadAllText($out) + [Environment]::NewLine + [IO.File]::ReadAllText($err)
     return [pscustomobject]@{ TimedOut = $false; Supported = ($process.ExitCode -eq 0 -and (Test-AmneziaCliHelp $text)); ExitCode = $process.ExitCode }
+}
+
+function Invoke-AmneziaInteractiveInstall([string]$InstallerPath, [int]$TimeoutSeconds) {
+    if ((Get-AuthenticodeSignature -LiteralPath $InstallerPath).Status -ne 'Valid') { throw 'Подпись установщика не подтверждена.' }
+    Write-Host 'Откроется мастер Amnezia для Windows. Завершите установку в его окне.'
+    $process = Start-Process -FilePath $InstallerPath -WindowStyle Normal -PassThru
+    $processHandle = $process.Handle
+    if (-not (Wait-AmneziaInstallProcess $process $TimeoutSeconds)) { return [pscustomobject]@{ TimedOut=$true; Completed=$false; ExitCode=$null; Error=$null } }
+    $process.Refresh()
+    return [pscustomobject]@{ TimedOut=$false; Completed=$true; ExitCode=$process.ExitCode; Error=$null }
+}
+
+function Wait-AmneziaInstallProcess($Process, [int]$TimeoutSeconds) {
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $shown = $false
+    try {
+        while (-not $Process.WaitForExit(250)) {
+            if ($clock.Elapsed.TotalSeconds -ge $TimeoutSeconds) { return $false }
+            $position = [int]([Math]::Floor($clock.ElapsedMilliseconds / 250) % 21)
+            $bar = (' '*$position) + '====' + (' '*(20-$position))
+            Write-Host -NoNewline ("`rНа компьютере: установка Amnezia [{0}] {1:mm\:ss}" -f $bar, $clock.Elapsed)
+            $shown = $true
+        }
+        return $true
+    } finally { if ($shown) { Write-Host '' } }
 }
 
 function Invoke-AmneziaElevatedInstall([string]$InstallerPath, [string]$Root, [string]$LogDirectory, [int]$TimeoutSeconds) {
@@ -84,6 +112,7 @@ try {
     if ((Get-AuthenticodeSignature -LiteralPath $job.Installer).Status -ne 'Valid' -or
         (Get-FileHash -LiteralPath $job.Installer -Algorithm SHA256).Hash -ine $job.Hash) { throw 'Signature/hash changed before elevated install.' }
     $process = Start-Process -FilePath $job.Installer -ArgumentList $job.Arguments -WindowStyle Hidden -RedirectStandardOutput $job.Out -RedirectStandardError $job.Err -PassThru
+    $processHandle = $process.Handle
     # The caller has a bounded wait. Do not kill a live installer or close its log pipes on timeout.
     [void]$process.WaitForExit()
     $process.Refresh()
@@ -97,7 +126,8 @@ catch { $result = @{ Completed = $false; ExitCode = $null; Error = $_.Exception.
     $powerShellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     Write-Host 'Подтвердите стандартный запрос Windows (UAC). Мастер установки заполнять не потребуется.'
     $process = Start-Process -FilePath $powerShellPath -ArgumentList ('-NoProfile -NonInteractive -EncodedCommand ' + $encoded) -Verb RunAs -WindowStyle Hidden -PassThru
-    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) { return [pscustomobject]@{ TimedOut = $true; Completed = $false; ExitCode = $null; Error = 'Installer still running' } }
+    $processHandle = $process.Handle
+    if (-not (Wait-AmneziaInstallProcess $process $TimeoutSeconds)) { return [pscustomobject]@{ TimedOut = $true; Completed = $false; ExitCode = $null; Error = 'Installer still running' } }
     if (-not (Test-Path -LiteralPath $job.Result -PathType Leaf)) { throw 'Повышенный процесс не записал результат. Установка не подтверждена.' }
     $result = [IO.File]::ReadAllText($job.Result) | ConvertFrom-Json
     return [pscustomobject]@{ TimedOut = $false; Completed = $result.Completed; ExitCode = $result.ExitCode; Error = $result.Error }
@@ -120,7 +150,12 @@ function Get-AmneziaServerMetadata([string]$Directory) {
         $loginName -notmatch '\A[A-Za-z_][A-Za-z0-9_.-]{0,63}\$?\z') {
         throw 'В профиле некорректный адрес IPv4/имя сервера или SSH-пользователь. Проверьте подключение в главном меню.'
     }
-    return [pscustomobject]@{ Address = $address; Login = $loginName }
+    $keyDirectory = [IO.Path]::GetFullPath($Directory)
+    if ($metadata.activeKey -and $metadata.activeKey -cne 'legacy') {
+        if ([string]$metadata.activeKey -cnotmatch '\Akey-[a-f0-9]{32}\z') { throw 'Некорректный профиль SSH-ключа.' }
+        $keyDirectory = Join-Path (Join-Path $keyDirectory 'keysets') $metadata.activeKey
+    }
+    return [pscustomobject]@{ Address = $address; Login = $loginName; KeyPath = (Join-Path $keyDirectory 'id_ed25519') }
 }
 
 function Install-AmneziaClient {
@@ -146,9 +181,28 @@ function Install-AmneziaClient {
             -not $assetUri.AbsolutePath.StartsWith('/amnezia-vpn/amnezia-client/releases/download/')) {
             throw 'Неожиданный адрес загрузки.'
         }
-        [void][IO.Directory]::CreateDirectory($downloadDirectory)
-        Write-Host 'Загружаю официальный AmneziaVPN для автоматической установки...'
-        Invoke-WebRequest -Uri $assetUri.AbsoluteUri -Headers $headers -UseBasicParsing -OutFile $installerPath -TimeoutSec 600
+        Write-Host ('Для VPN на ноутбуке нужен клиент Amnezia для Windows ({0:N0} МБ). Серверные пакеты скачивает сам сервер.' -f ([double]$asset.size / 1MB))
+        do { $choice = (Read-Host '1 — установить клиент на Windows; 2 — пропустить; Enter — 2').Trim() } until ($choice -in @('', '1', '2'))
+        if ($choice -ne '1') { return (New-AmneziaResult 'ClientInstallSkipped' 0 $null $null) }
+        # Reuse a previous download only when it matches this release's digest.
+        $cached = $null
+        if ($asset.digest -match '\Asha256:([a-fA-F0-9]{64})\z') {
+            $releaseHash = $Matches[1]
+            foreach ($directory in @(Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Directory -Filter 'RemoteAgents-Amnezia-*')) {
+                $candidate = Join-Path $directory.FullName 'AmneziaVPN-official.exe'
+                if ([IO.File]::Exists($candidate) -and (Get-Item -LiteralPath $candidate).Length -eq [long]$asset.size -and
+                    (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash -ieq $releaseHash) { $cached = $candidate; break }
+            }
+        }
+        if ($cached) {
+            $installerPath = $cached
+            $downloadDirectory = Split-Path -Parent $cached
+            Write-Host 'Используем уже скачанный установщик Amnezia.'
+        } else {
+            [void][IO.Directory]::CreateDirectory($downloadDirectory)
+            Write-Host 'Скачиваем клиент Amnezia на Windows...'
+            Save-AmneziaInstaller -Uri $assetUri.AbsoluteUri -Headers $headers -OutFile $installerPath -ExpectedSize ([long]$asset.size) -TimeoutSec 600
+        }
         if ((Get-Item -LiteralPath $installerPath).Length -ne [long]$asset.size) { throw 'Загрузка неполная.' }
         if ($asset.digest -match '\Asha256:([a-fA-F0-9]{64})\z') {
             $expectedHash = $Matches[1]
@@ -161,9 +215,13 @@ function Install-AmneziaClient {
         if (Get-AmneziaBusyInstaller) { return (New-AmneziaResult 'InstallInProgress' 2 $null $downloadDirectory) }
         $helpResult = Get-AmneziaInstallerHelp $installerPath $downloadDirectory
         if ($helpResult.TimedOut) { return (New-AmneziaResult 'InstallStillRunning' 4 $null $downloadDirectory) }
-        if (-not $helpResult.Supported) { throw 'Этот выпуск не подтвердил необходимые параметры unattended через --help. Установка не запущена.' }
         if (Get-AmneziaBusyInstaller) { return (New-AmneziaResult 'InstallInProgress' 2 $null $downloadDirectory) }
-        $installer = Invoke-AmneziaElevatedInstall $installerPath (Get-AmneziaInstallRoot) $downloadDirectory $InstallTimeoutSeconds
+        if ($helpResult.Supported) {
+            $installer = Invoke-AmneziaElevatedInstall $installerPath (Get-AmneziaInstallRoot) $downloadDirectory $InstallTimeoutSeconds
+        } else {
+            if ($ClientOnly) { throw 'Тихая установка не поддерживается этим выпуском. Мастер вручную не запускается.' }
+            $installer = Invoke-AmneziaInteractiveInstall $installerPath $InstallTimeoutSeconds
+        }
         if ($installer.TimedOut) { return (New-AmneziaResult 'InstallStillRunning' 4 $null $downloadDirectory) }
         if (-not $installer.Completed -or $installer.ExitCode -ne 0) { throw ('Установщик не подтвердил успех (код: {0}). {1}' -f $installer.ExitCode, $installer.Error) }
         $installed = Get-AmneziaClientState
@@ -173,10 +231,10 @@ function Install-AmneziaClient {
     catch {
         Write-Host 'Автоматическая установка не завершилась.' -ForegroundColor Yellow
         Write-Host ('Причина: {0}' -f $_.Exception.Message)
-        Write-Host 'Скачайте Windows x64 EXE, установите AmneziaVPN в стандартную папку и повторите этот пункт меню.'
-        Write-Host 'Проверка загрузки или подписи не отключается. Другой VPN вместо Amnezia не устанавливается.'
+        if ($ClientOnly) { Write-Host 'Автоматическая подготовка VPN пропущена. Можно повторить пункт VPN позже.' }
+        else { Write-Host 'Скачайте Windows x64 EXE, установите AmneziaVPN в стандартную папку и повторите этот пункт меню.' }
         Write-Host ('Журналы (если загрузка началась): {0}' -f $downloadDirectory)
-        if (-not (Get-AmneziaBusyInstaller)) { Start-Process -FilePath $releasePage | Out-Null }
+        if (-not $ClientOnly -and -not (Get-AmneziaBusyInstaller)) { Start-Process -FilePath $releasePage | Out-Null }
         return (New-AmneziaResult 'NeedsManualClientInstall' 3 $null $downloadDirectory)
     }
     finally {
@@ -185,8 +243,29 @@ function Install-AmneziaClient {
     }
 }
 
+function Save-AmneziaInstaller([string]$Uri, $Headers, [string]$OutFile, [long]$ExpectedSize, [int]$TimeoutSec) {
+    $client = New-Object Net.WebClient
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $ProgressPreference = 'Continue'
+    try {
+        foreach ($header in $Headers.Keys) { $client.Headers[$header] = $Headers[$header] }
+        $task = $client.DownloadFileTaskAsync([uri]$Uri, $OutFile)
+        while (-not $task.IsCompleted) {
+            if ($clock.Elapsed.TotalSeconds -gt $TimeoutSec) { $client.CancelAsync(); throw 'Истекло время загрузки клиента Amnezia.' }
+            $size = if ([IO.File]::Exists($OutFile)) { (Get-Item -LiteralPath $OutFile).Length } else { 0 }
+            $percent = if ($ExpectedSize -gt 0) { [int][Math]::Min(99, [Math]::Floor(100.0*$size/$ExpectedSize)) } else { -1 }
+            Write-Progress -Id 41 -Activity 'На компьютере: загрузка клиента Amnezia' -Status ('{0:N1} / {1:N1} МБ' -f ($size/1MB), ($ExpectedSize/1MB)) -PercentComplete $percent
+            Start-Sleep -Milliseconds 200
+        }
+        $task.GetAwaiter().GetResult() | Out-Null
+    } finally {
+        Write-Progress -Id 41 -Activity 'На компьютере: загрузка клиента Amnezia' -Completed
+        $client.Dispose()
+    }
+}
+
 function New-AmneziaResult([string]$Status, [int]$ExitCode, [string]$ClientPath, [string]$InstallerLog) {
-    return [pscustomobject]@{ Status = $Status; ExitCode = $ExitCode; ClientPath = $ClientPath; Mode = $NetworkMode; ServerVerified = $false; InstallerLog = $InstallerLog }
+    return [pscustomobject]@{ Status = $Status; ExitCode = $ExitCode; ClientPath = $ClientPath; ServerVerified = $false; InstallerLog = $InstallerLog }
 }
 
 function Open-AmneziaClient {
@@ -199,8 +278,7 @@ function Open-AmneziaClient {
         if ((Get-AuthenticodeSignature -LiteralPath $result.ClientPath).Status -ne 'Valid') { throw 'Подпись клиента перед запуском не подтверждена.' }
         Start-Process -FilePath $result.ClientPath | Out-Null
         $result.Status = 'GuiOpened'
-        Write-Host 'Открыт AmneziaVPN. Теперь выберите + -> Свой сервер и выполните показанные шаги.' -ForegroundColor Cyan
-        Write-Host 'VPS ещё не настроен этим помощником. Пароль/ключ вводите только в приложении; подключение VPN не включается автоматически.'
+        Write-Host 'Открыт AmneziaVPN. Выберите «Свой сервер».' -ForegroundColor Cyan
     }
     elseif ($result.Status -in @('InstallInProgress', 'InstallStillRunning')) {
         Write-Host 'Установщик Amnezia ещё работает (или открыт мастер). Завершите его и повторите пункт; второй процесс не запускается.' -ForegroundColor Yellow
@@ -210,38 +288,11 @@ function Open-AmneziaClient {
     return $result
 }
 
-function Show-AmneziaSteps($Server, [string]$Mode) {
-    Write-Host ''
-    Write-Host 'AmneziaVPN: подготовка официального приложения' -ForegroundColor Cyan
-    Write-Host '1. В приложении: + (или Начать) -> Self-hosted VPN / Свой сервер.'
-    Write-Host ('2. Адрес: {0}; SSH-пользователь: {1}; порт SSH: 22.' -f $Server.Address, $Server.Login)
-    Write-Host '3. Выберите SSH-ключ в самом AmneziaVPN. Ключ этого подключения находится в папке профиля, файл id_ed25519.'
-    Write-Host ('   Папка профиля: {0}' -f [IO.Path]::GetFullPath($ProfileDirectory))
-    Write-Host '   Секреты вводите только в AmneziaVPN. Этот помощник ключи не открывает и в приложение не передаёт.'
-    Write-Host '   Нужен root или sudo без пароля. Ограниченный пользователь для агентов не подходит; не расширяйте ему права ради VPN.'
-    Write-Host '   Если приложение не принимает существующий ключ, не включайте парольный SSH-вход: остановитесь и разберите ошибку.'
-    Write-Host '4. Для нового VPN выберите Автоматически (AmneziaWG), затем дождитесь результата в приложении.'
-    Write-Host '   На сервере с уже установленной Amnezia: Пропустить настройку -> Управление -> Проверить установленные службы.'
-    Write-Host '5. До нажатия Подключиться настройте выбранный ниже режим. Автоподключение пока оставьте выключенным.'
-    if ($Mode -eq 'Separate') {
-        Write-Host 'Режим: по очереди (рекомендуется). Корпоративный OpenVPN отключён, пока подключена Amnezia.'
-        Write-Host 'Перед включением OpenVPN отключите Amnezia. Перед включением Amnezia отключите OpenVPN.'
-    }
-    else {
-        Write-Host 'Режим: совместно с OpenVPN — настройка вручную; совместимость не гарантируется.' -ForegroundColor Yellow
-        Write-Host 'Получите у администратора корпоративные IPv4-подсети, адреса VPN-шлюза и DNS.'
-        Write-Host 'В Amnezia: разделение по сайтам/IP -> Только адреса из списка через VPN.'
-        Write-Host 'Добавьте только нужные внешние IPv4-адреса/сети. Корпоративные сети, DNS, шлюз OpenVPN и адрес VPS в список не включайте.'
-        Write-Host 'В OpenVPN должны быть согласованные с администратором маршруты только к корпоративным ресурсам и рабочий DNS.'
-        Write-Host 'Если OpenVPN забирает весь интернет/меняет DNS, остановитесь: попросите администратора дать split-tunnel профиль.'
-        Write-Host 'Просто исключить openvpn.exe недостаточно. Разделение по приложениям Windows умеет только обход VPN выбранными программами.'
-        Write-Host 'Проверьте рабочий ресурс, обычный сайт и SSH к VPS. При сбое отключите Amnezia и используйте режим по очереди.'
-    }
-    Write-Host 'Это сервер VPN для вашего Windows. Не устанавливайте на VPS клиентский VPN и не меняйте его основной маршрут.'
-    Write-Host 'Агенты на VPS продолжают работать через его обычный интернет. RDP/VNC наружу не открывайте.'
-    Write-Host 'При firewall/ограничениях хостинга разрешается только выбранный приложением порт VPN; SSH-правила не меняйте.'
-    Write-Host 'Готовность сервера и соединения проверяет AmneziaVPN. Этот помощник не подключается к VPS.'
-    Write-Host ('Подробные шаги и официальные источники: {0}' -f (Join-Path $PSScriptRoot 'AMNEZIA.txt'))
+function Show-AmneziaSteps($Server) {
+    Write-Host ('Amnezia: свой сервер {0}, пользователь {1}, SSH-порт 22.' -f $Server.Address, $Server.Login)
+    Write-Host ('Ключ: {0}' -f $Server.KeyPath)
+    Write-Host 'Выберите автоматическую настройку AmneziaWG. Для уже настроенного сервера пропустите повторную установку.'
+    Write-Host 'Пароль вводите в Amnezia. Подробности — в AMNEZIA.txt.'
 }
 
 $server = Get-AmneziaServerMetadata $ProfileDirectory
@@ -249,22 +300,7 @@ if (-not [Environment]::Is64BitOperatingSystem -or [Environment]::OSVersion.Plat
     [Environment]::OSVersion.Version.Build -lt 17763) {
     throw 'Нужна 64-разрядная Windows 10 (1809+) или Windows 11.'
 }
-if ($NetworkMode -eq 'Choose') {
-    if ($PrepareOnly) { $NetworkMode = 'Separate' }
-    else {
-        Write-Host ''
-        Write-Host '1 — Amnezia и корпоративный OpenVPN по очереди (рекомендуется)'
-        Write-Host '2 — Совместно: ручная настройка разделённых маршрутов с администратором'
-        Write-Host '0 — Вернуться без запуска Amnezia'
-        $choice = Read-Host 'Выберите режим; Enter — 1'
-        if ($choice -eq '0') { return (New-AmneziaResult 'Cancelled' 0 $null $null) }
-        if ($choice -eq '2') { $NetworkMode = 'CorporateSplit' }
-        elseif ([string]::IsNullOrWhiteSpace($choice) -or $choice -eq '1') { $NetworkMode = 'Separate' }
-        else { throw 'Выберите 1, 2 или 0.' }
-    }
-}
-
-Show-AmneziaSteps $server $NetworkMode
+if (-not $ClientOnly) { Show-AmneziaSteps $server }
 if ($PrepareOnly) {
     $client = Get-AmneziaClientState
     $path = $null
@@ -280,6 +316,7 @@ try {
         Write-Host 'Другой помощник Amnezia уже выполняется. Завершите его и повторите пункт.' -ForegroundColor Yellow
         return (New-AmneziaResult 'InstallInProgress' 2 $null $null)
     }
+    if ($ClientOnly) { return (Install-AmneziaClient) }
     return (Open-AmneziaClient)
 }
 finally { if ($locked) { $mutex.ReleaseMutex() }; $mutex.Dispose() }

@@ -22,6 +22,7 @@ param(
     [switch]$ManagedSession
 )
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
 $ProgressPreference = 'SilentlyContinue'
 function Quote-Windows([string]$value) {
     # CommandLineToArgvW-compatible quoting; never pass secret in these arguments.
@@ -105,7 +106,7 @@ $token = ([BitConverter]::ToString($tokenBytes)).Replace('-','').ToLowerInvarian
 $executor = $null; $ssh = $null
 try {
     $executor = Start-PrivateProcess 'powershell.exe' @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'windows-bridge-executor.ps1'))
-    $localConfig = @{ token = $token; workspace = [IO.Path]::GetFullPath($Workspace); device = $DeviceLabel; allow_shell = [bool]$AllowShell; parent_pid = $PID; server_owned = [bool]$ServerOwnedReplica; sync_guard = @{ path=$SyncGuardPath; data_dir=$SyncDataDir; project_id=$ProjectId; host_id=$HostId } } | ConvertTo-Json -Depth 4 -Compress
+    $localConfig = @{ token = $token; workspace = [IO.Path]::GetFullPath($Workspace); device = $DeviceLabel; allow_shell = [bool]$AllowShell; parent_pid = $PID; server_owned = [bool]$ServerOwnedReplica; enforce_target=[bool]$ServerOwnedReplica; sync_guard = @{ path=$SyncGuardPath; data_dir=$SyncDataDir; project_id=$ProjectId; host_id=$HostId } } | ConvertTo-Json -Depth 4 -Compress
     $executor.StandardInput.WriteLine($localConfig); $executor.StandardInput.Flush(); $localConfig = $null
     $ready = (Await-Line $executor 20) | ConvertFrom-Json
     if ($ready.state -ne 'ready') { throw 'Windows executor did not initialize.' }
@@ -127,7 +128,7 @@ try {
         try {
             $ssh = Start-PrivateProcess $SSHExecutable $sshArgs -ForSSH
             $sshErrors = $ssh.StandardError.ReadToEndAsync()
-            $ssh.StandardInput.WriteLine((@{ token = $token; port = $remotePort; device = $DeviceLabel } | ConvertTo-Json -Compress)); $ssh.StandardInput.Flush()
+            $ssh.StandardInput.WriteLine((@{ token = $token; port = $remotePort; device = $DeviceLabel; deviceLabel=$DeviceLabel; projectId=$ProjectId; hostId=$HostId; windowsReplica=[IO.Path]::GetFullPath($Workspace) } | ConvertTo-Json -Compress)); $ssh.StandardInput.Flush()
             $remoteReady = (Await-Line $ssh 25) | ConvertFrom-Json
             if ($remoteReady.state -ne 'connected') { throw 'Remote bridge session was not ready.' }
             $attempt = 0
@@ -155,7 +156,7 @@ try {
             $client = New-Object Net.Sockets.TcpClient
             $client.Connect('127.0.0.1',[int]$ready.port)
             $stream = $client.GetStream(); $stream.WriteTimeout = 1000
-            $payload = [Text.Encoding]::UTF8.GetBytes((@{ token = $token; op = 'shutdown'; args = @{} } | ConvertTo-Json -Compress) + "`n")
+            $payload = [Text.Encoding]::UTF8.GetBytes((@{ token = $token; op = 'shutdown'; args = @{};binding=@{projectId=$ProjectId;hostId=$HostId;deviceLabel=$DeviceLabel;windowsReplica=[IO.Path]::GetFullPath($Workspace)} } | ConvertTo-Json -Depth 4 -Compress) + "`n")
             $stream.Write($payload,0,$payload.Length); $client.Close()
             $null = $executor.WaitForExit(5000)
         } catch { }

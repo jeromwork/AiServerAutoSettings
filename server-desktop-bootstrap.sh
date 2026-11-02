@@ -179,16 +179,20 @@ DESKTOP_CLIPBOARD_UNIT
   systemd-analyze verify /etc/systemd/system/remoteagents-desktop-clipboard.service
   systemctl daemon-reload
   systemctl enable --now remoteagents-desktop-clipboard.service
+  # chansrv can recreate/chmod its listener after an RDP connection (0660).
+  # Revalidate only our owned private sockets and restore 0600 on rerun,
+  # without restarting the clipboard worker or the existing desktop session.
+  runuser -u "$server_user" -- python3 -I "$install_dir/clipboard-socket.py"
   python3 -I - "$server_user" <<'DESKTOP_CLIPBOARD_READY'
 import configparser, os, pwd, stat, subprocess, sys
 from pathlib import Path
 uid = pwd.getpwnam(sys.argv[1]).pw_uid
 folder = Path('/run/remoteagents-desktop-clipboard')
 info = folder.lstat()
-assert stat.S_ISDIR(info.st_mode) and info.st_uid == uid and stat.S_IMODE(info.st_mode) == 0o700
+assert stat.S_ISDIR(info.st_mode) and info.st_uid == uid and stat.S_IMODE(info.st_mode) == 0o700, 'Clipboard private directory metadata mismatch'
 for name in ('xrdp_chansrv_socket_98', 'xrdpapi_98'):
     info = (folder / name).lstat()
-    assert stat.S_ISSOCK(info.st_mode) and info.st_uid == uid and stat.S_IMODE(info.st_mode) == 0o600
+    assert stat.S_ISSOCK(info.st_mode) and info.st_uid == uid and stat.S_IMODE(info.st_mode) == 0o600, 'Clipboard private socket metadata mismatch: ' + name
 pid = int(subprocess.check_output(['systemctl','show','remoteagents-desktop-clipboard','-p','MainPID','--value']))
 assert pid > 0 and Path('/proc',str(pid)).stat().st_uid == uid
 assert os.stat('/proc/self/ns/net').st_ino != os.stat(f'/proc/{pid}/ns/net').st_ino
@@ -390,7 +394,7 @@ EnableSyslog=false
 cliprdr=true
 rdpdr=false
 rdpsnd=true
-drdynvc=false
+drdynvc=true
 [Desktop]
 name=Desktop (SSH)
 lib=libvnc.so
@@ -442,7 +446,7 @@ PrivateNetwork=yes
 RestrictAddressFamilies=AF_UNIX AF_INET
 NoNewPrivileges=true
 ExecStartPre=/usr/bin/python3 -I $install_dir/namespace-guard.py
-ExecStart=/usr/bin/x11vnc -display :98 -auth /run/remoteagents-desktop-x/Xauthority -forever -shared -nopw -listen 127.0.0.1 -rfbport 5901 -rfbportv6 0 -noipv6 -no6 -noxdamage -quiet
+ExecStart=/usr/bin/x11vnc -display :98 -auth /run/remoteagents-desktop-x/Xauthority -forever -shared -nopw -listen 127.0.0.1 -rfbport 5901 -rfbportv6 0 -noipv6 -no6 -noxdamage -nomodtweak -quiet
 Restart=on-failure
 RestartSec=2
 [Install]

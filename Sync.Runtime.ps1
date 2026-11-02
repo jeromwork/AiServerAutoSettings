@@ -51,7 +51,7 @@ function Initialize-RemoteSyncWorker {
         $generate= & $Executable generate --home $workerHome 2>&1
         if($LASTEXITCODE -ne 0) { throw 'Syncthing generate failed' }
     }
-    [xml]$xml=[IO.File]::ReadAllText($config)
+    [xml]$xml=[IO.File]::ReadAllText((ConvertTo-RemoteAgentsIOPath $config))
     $localId=$xml.configuration.SelectSingleNode('device').GetAttribute('id')
     if(!$PeerDeviceId) { return [pscustomobject]@{deviceId=$localId;home=$workerHome;configured=$false} }
     foreach($folder in @($xml.configuration.SelectNodes('folder'))) { [void]$xml.configuration.RemoveChild($folder) }
@@ -68,7 +68,7 @@ function Initialize-RemoteSyncWorker {
     Set-SyncXmlText $xml $peer 'address' "tcp://127.0.0.1:$PeerTunnelPort"
     Set-SyncXmlText $xml $peer 'autoAcceptFolders' 'false'
     [void]$xml.configuration.AppendChild($peer)
-    $folder=$xml.CreateElement('folder');$folder.SetAttribute('id',$binding.folderId);$folder.SetAttribute('path',$binding.replicaPath);$folder.SetAttribute('type','receiveonly');$folder.SetAttribute('paused','true');$folder.SetAttribute('rescanIntervalS','60');$folder.SetAttribute('fsWatcherEnabled','true')
+    $folder=$xml.CreateElement('folder');$folder.SetAttribute('id',$binding.folderId);$folder.SetAttribute('path',$binding.replicaPath);$folder.SetAttribute('type','receiveonly');$folder.SetAttribute('paused','true');$folder.SetAttribute('rescanIntervalS','3600');$folder.SetAttribute('fsWatcherEnabled','true')
     foreach($id in @($localId,$PeerDeviceId)){$dev=$xml.CreateElement('device');$dev.SetAttribute('id',$id);[void]$folder.AppendChild($dev)}
     $versioning=$xml.CreateElement('versioning');$versioning.SetAttribute('type','simple');$param=$xml.CreateElement('param');$param.SetAttribute('key','keep');$param.SetAttribute('val','10');[void]$versioning.AppendChild($param);[void]$folder.AppendChild($versioning)
     [void]$xml.configuration.AppendChild($folder)
@@ -77,11 +77,11 @@ function Initialize-RemoteSyncWorker {
     $ignores=@('(?i).env*','(?i)env.example','(?i)*credential*','(?i)*token*','(?i)*secret*','(?i)*private*','(?i)*.pem','(?i)*.key','(?i)*.keystore','(?i)*.jks','(?i)*.p8','(?i)*.p12','(?i)google-services*.json','(?i)GoogleService-Info.plist','auth.json','.git','.tools','.ssh','.codex','.claude','node_modules','vendor','.gradle','.next','.cache','build','dist','target','coverage','logs','log','cache','caches','uploads','storage','android-sdk','local.properties','config.php','*.db','*.sqlite*','*.log')
     $wholeRootMode=$binding.PSObject.Properties.Name -contains 'scopeMode' -and $binding.scopeMode -in @('git','folder')
     if($wholeRootMode){$ignores+='!/**'}else{
-        foreach($root in $binding.allowedRoots) { $relative=$root.Replace('\','/');$ignores+='!/'+$relative;$ignores+='!/'+$relative+'/**' }
+        foreach($root in $binding.allowedRoots) { $relative=$root.Replace('\','/').Replace('[','|[').Replace(']','|]');$ignores+='!/'+$relative;$ignores+='!/'+$relative+'/**' }
     }
     $ignores+='*'
-    [IO.File]::WriteAllLines((Join-Path $binding.replicaPath '.stignore'),$ignores,(New-Object Text.UTF8Encoding($false)))
-    $xml.Save($config)
+    [IO.File]::WriteAllLines((ConvertTo-RemoteAgentsIOPath (Join-Path $binding.replicaPath '.stignore')),$ignores,(New-Object Text.UTF8Encoding($false)))
+    $xml.Save((ConvertTo-RemoteAgentsIOPath $config))
     Write-SyncJson (Join-Path $state 'runtime.json') @{guiPort=$GuiPort;home=$workerHome;peerDeviceId=$PeerDeviceId;localDeviceId=$localId;executable=$Executable;listenPort=$ListenPort;peerTunnelPort=$PeerTunnelPort}
     [pscustomobject]@{deviceId=$localId;home=$workerHome;paused=$true;replicaPath=$binding.replicaPath}
 }
@@ -101,7 +101,10 @@ function Get-RemoteSyncLiveHealth {
     $status=Invoke-SyncLocalApi $runtime GET ('db/status?folder='+$binding.folderId) $null
     $connections=Invoke-SyncLocalApi $runtime GET 'system/connections' $null
     $peer=$connections.connections.PSObject.Properties[$runtime.peerDeviceId]
-    [pscustomobject]@{connected=($null -ne $peer -and $peer.Value.connected);state=$status.state;sequence=$status.sequence;needTotalItems=$status.needTotalItems;pullErrors=$status.pullErrors;receiveOnlyTotalItems=$status.receiveOnlyTotalItems}
+    $result=[ordered]@{connected=($null -ne $peer -and $peer.Value.connected);state=$status.state;sequence=$status.sequence;needTotalItems=$status.needTotalItems;pullErrors=$status.pullErrors;receiveOnlyTotalItems=$status.receiveOnlyTotalItems}
+    foreach($name in @('globalBytes','needBytes','localBytes','globalFiles','needFiles')){if($status.PSObject.Properties.Name -contains $name){$result[$name]=[long]$status.$name}}
+    if($null -ne $peer -and $peer.Value.PSObject.Properties.Name -contains 'inBytesTotal'){$result.receivedBytes=[long]$peer.Value.inBytesTotal}
+    [pscustomobject]$result
 }
 function Start-RemoteSyncWorker {
     param([string]$DataDir,[string]$ProjectId,[string]$HostId)
@@ -121,5 +124,5 @@ function Resume-RemoteSyncFolder {
     $state=Get-SyncStatePath $DataDir $ProjectId $HostId
     $runtime=Get-Content -LiteralPath (Join-Path $state 'runtime.json') -Raw|ConvertFrom-Json
     $binding=Get-SyncBinding $DataDir $ProjectId $HostId
-    Invoke-SyncLocalApi $runtime PATCH ('config/folders/'+$binding.folderId) @{paused=$false} | Out-Null
+    Invoke-SyncLocalApi $runtime PATCH ('config/folders/'+$binding.folderId) @{paused=$false;rescanIntervalS=3600;fsWatcherEnabled=$true} | Out-Null
 }

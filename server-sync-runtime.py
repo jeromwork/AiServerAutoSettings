@@ -5,6 +5,7 @@ from pathlib import Path
 
 def main():
     p=argparse.ArgumentParser();p.add_argument('action',choices=['identity','configure','start','resume','stop','health','scan']);p.add_argument('--state',required=True);p.add_argument('--binary',required=True);p.add_argument('--project',required=True);p.add_argument('--host',required=True);p.add_argument('--workspace',required=True);p.add_argument('--manifest');p.add_argument('--peer');p.add_argument('--listen',type=int,required=True);p.add_argument('--tunnel',type=int,required=True);p.add_argument('--gui',type=int,required=True)
+    p.add_argument('--operation-timeout',type=int,default=10)
     a=p.parse_args()
     if os.getuid()==0:raise ValueError('Nonroot required')
     for value in (a.project,a.host):
@@ -34,7 +35,7 @@ def main():
         for name in ('globalAnnounceEnabled','localAnnounceEnabled','relaysEnabled','natEnabled','startBrowser','crashReportingEnabled'):put(options,name,'false')
         put(options,'autoUpgradeIntervalH','0');put(options,'urAccepted','-1');put(options,'listenAddress',f'tcp://127.0.0.1:{a.listen}');put(root.find('gui'),'address',f'127.0.0.1:{a.gui}')
         peer=ET.SubElement(root,'device',{'id':a.peer,'name':'approved-peer'});put(peer,'address',f'tcp://127.0.0.1:{a.tunnel}');put(peer,'autoAcceptFolders','false')
-        folder=ET.SubElement(root,'folder',{'id':'ra-'+a.project,'path':str(workspace),'type':'sendonly','paused':'true','rescanIntervalS':'60','fsWatcherEnabled':'true'})
+        folder=ET.SubElement(root,'folder',{'id':'ra-'+a.project,'path':str(workspace),'type':'sendonly','paused':'true','rescanIntervalS':'3600','fsWatcherEnabled':'true'})
         for value in (local,a.peer):ET.SubElement(folder,'device',{'id':value})
         # Share seed/snapshot policy; Git metadata stays outside the source tree.
         spec=importlib.util.spec_from_file_location('sync_policy',Path(__file__).with_name('server-sync.py'))
@@ -45,9 +46,13 @@ def main():
             path=file['path']
             policy.safe_relative(path,manifest['allowedRoots']);policy.check_parents(workspace/path)
             if policy.nested_repository(workspace,workspace/path):raise ValueError('Nested Git repository forbidden')
-            ignores.append('!/'+path)
+            ignores.append('!/'+policy.escape_ignore_path(path))
         if manifest.get('scopeMode')=='git':policy.git_scope(manifest,a.manifest,workspace)
-        ignores.append('*');policy.check_parents(workspace/'.stignore');(workspace/'.stignore').write_text('\n'.join(ignores)+'\n','utf-8')
+        ignores.append('*');policy.check_parents(workspace/'.stignore')
+        # Another send-only subscription may already announce newer server files.
+        # Its current source policy is shared; attaching must not reset it to seed.
+        if not (workspace/'.stignore').exists():
+            (workspace/'.stignore').write_text('\n'.join(ignores)+'\n','utf-8')
         tree.write(config,encoding='utf-8',xml_declaration=True);os.chmod(config,0o600)
         marker.write_text(json.dumps({'projectId':a.project,'hostId':a.host,'peer':a.peer}),'utf-8')
         print(json.dumps({'ok':True,'deviceId':local,'paused':True}));return
@@ -57,9 +62,9 @@ def main():
     def request(route,method='GET',body=None):
         data=None if body is None else json.dumps(body).encode()
         req=urllib.request.Request(f'http://127.0.0.1:{a.gui}/rest/'+route,data=data,method=method,headers={'X-API-Key':key,'Content-Type':'application/json'})
-        with urllib.request.urlopen(req,timeout=10) as response:
+        with urllib.request.urlopen(req,timeout=max(1,min(43200,a.operation_timeout))) as response:
             raw=response.read();return json.loads(raw) if raw else {}
-    if a.action=='resume':request('config/folders/ra-'+a.project,'PATCH',{'paused':False});print('{"ok":true}')
+    if a.action=='resume':request('config/folders/ra-'+a.project,'PATCH',{'paused':False,'rescanIntervalS':3600,'fsWatcherEnabled':True});print('{"ok":true}')
     elif a.action=='stop':request('system/shutdown','POST',{});print('{"ok":true}')
     elif a.action=='scan':request('db/scan?folder=ra-'+a.project,'POST');print('{"ok":true}')
     else:

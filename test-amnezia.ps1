@@ -15,7 +15,7 @@ $profile = Join-Path $fixture 'profile.json'
 try {
     $before = (Get-FileHash -LiteralPath $profile).Hash
     $first = & $helper -ProfileDirectory $fixture -PrepareOnly 6>$null
-    $second = & $helper -ProfileDirectory $fixture -PrepareOnly -NetworkMode CorporateSplit 6>$null
+    $second = & $helper -ProfileDirectory $fixture -PrepareOnly 6>$null
     Assert ($first.Status -eq 'Prepared' -and $second.Status -eq 'Prepared' -and -not $second.ServerVerified) 'PrepareOnly results failed'
     Assert ((Get-FileHash -LiteralPath $profile).Hash -eq $before -and @(Get-ChildItem -LiteralPath $fixture).Count -eq 1) 'PrepareOnly changed profile directory'
     foreach ($statement in $ast.EndBlock.Statements) {
@@ -24,7 +24,8 @@ try {
     $realHelp = (Get-Command Get-AmneziaInstallerHelp).ScriptBlock
     $realElevated = (Get-Command Invoke-AmneziaElevatedInstall).ScriptBlock
     $realBusy = (Get-Command Get-AmneziaBusyInstaller).ScriptBlock
-    $NetworkMode = 'Separate'; $InstallTimeoutSeconds = 30
+    $realSaveInstaller = (Get-Command Save-AmneziaInstaller).ScriptBlock
+    $InstallTimeoutSeconds = 30
     $releasePage = 'https://github.com/amnezia-vpn/amnezia-client/releases/latest'
     $script:helpText = "Commands:`nin, install - install default packages`n--root <directory>`n--accept-licenses`n--default-answer`n--confirm-command"
     Assert (Test-AmneziaCliHelp $script:helpText) 'Valid CLI help rejected'
@@ -53,7 +54,7 @@ try {
         name='AmneziaVPN_5.0.3.0_windows_x64.exe'; browser_download_url='https://github.com/amnezia-vpn/amnezia-client/releases/download/5.0.3.0/AmneziaVPN_5.0.3.0_windows_x64.exe'; size=3
         digest='sha256:039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81'
     }) } }
-    function Invoke-WebRequest { param($Uri,$Headers,[switch]$UseBasicParsing,$OutFile,$TimeoutSec); [IO.File]::WriteAllBytes($OutFile, [byte[]]@(1,2,3)); $script:createdInstallers.Add($OutFile) }
+    function Save-AmneziaInstaller { param($Uri,$Headers,$OutFile,$ExpectedSize,$TimeoutSec); [IO.File]::WriteAllBytes($OutFile, [byte[]]@(1,2,3)); $script:createdInstallers.Add($OutFile) }
     function Start-Process {
         param($FilePath,$ArgumentList,$WindowStyle,$RedirectStandardOutput,$RedirectStandardError,[switch]$PassThru,$Verb)
         $script:launched.Add([string]$FilePath)
@@ -68,7 +69,10 @@ try {
     }
     function Get-AmneziaInstallerHelp { $script:helpCalls++; return [pscustomobject]@{ TimedOut=$script:helpTimeout; Supported=$script:helpSupported; ExitCode=0 } }
     function Invoke-AmneziaElevatedInstall { $script:installCalls++; if ($script:postHealthy) { $script:clientState='Healthy' }; return [pscustomobject]@{TimedOut=$script:installTimeout;Completed=$script:installCompleted;ExitCode=$script:installCode;Error='mock failure'} }
+    function Invoke-AmneziaInteractiveInstall { $script:manualCalls++; if ($script:postHealthy) { $script:clientState='Healthy' }; return [pscustomobject]@{TimedOut=$script:installTimeout;Completed=$true;ExitCode=0;Error=$null} }
+    function Read-Host { return $script:downloadChoice }
     function Reset-Mocks {
+        $script:downloadChoice='1'; $script:manualCalls=0
         $script:clientState='Missing'; $script:busy=$false; $script:signature='Valid'; $script:signatureCalls=0; $script:rejectElevated=$false
         $script:downloads=0; $script:helpCalls=0; $script:installCalls=0; $script:helpTimeout=$false; $script:helpSupported=$true
         $script:installTimeout=$false; $script:installCompleted=$true; $script:installCode=0; $script:postHealthy=$true
@@ -88,8 +92,12 @@ try {
     $result = Install-AmneziaClient 6>$null
     Assert ($result.Status -eq 'InstallStillRunning' -and $script:installCalls -eq 0 -and $script:launched.Count -eq 0) 'Help timeout proceeded to install'
     Reset-Mocks; $script:helpSupported=$false
-    $result = Install-AmneziaClient 6>$null
-    Assert ($result.Status -eq 'NeedsManualClientInstall' -and $script:installCalls -eq 0) 'Unsupported CLI proceeded to install'
+    $result = Open-AmneziaClient 6>$null
+    Assert ($result.Status -eq 'GuiOpened' -and $script:installCalls -eq 0 -and $script:manualCalls -eq 1) 'Unsupported CLI did not use the interactive fallback'
+    Reset-Mocks; $script:downloadChoice=''
+    $createdBefore = $script:createdInstallers.Count
+    $result = Open-AmneziaClient 6>$null
+    Assert ($result.Status -eq 'ClientInstallSkipped' -and $script:createdInstallers.Count -eq $createdBefore -and $script:installCalls -eq 0 -and $script:launched.Count -eq 0) 'Default choice downloaded or installed the Windows client'
     Reset-Mocks; $script:signature='NotSigned'
     $result = Install-AmneziaClient 6>$null
     Assert ($result.Status -eq 'NeedsManualClientInstall' -and $script:helpCalls -eq 0 -and $script:installCalls -eq 0) 'Untrusted installer was run'
@@ -107,6 +115,9 @@ try {
     Assert ($result.Status -eq 'GuiOpened' -and $script:installCalls -eq 1 -and -not $result.ServerVerified) 'Successful install did not open client'
     # Exercise the real help runner and real elevated wrapper; every native launch is mocked.
     $binary = Join-Path $fixture 'AmneziaVPN-official.exe'; [IO.File]::WriteAllBytes($binary, [byte[]]@(1,2,3))
+    $localDownload = Join-Path $fixture 'download-fixture.exe'
+    & $realSaveInstaller -Uri ([uri]$binary).AbsoluteUri -Headers @{} -OutFile $localDownload -ExpectedSize 3 -TimeoutSec 5
+    Assert ((Get-FileHash -LiteralPath $localDownload).Hash -eq (Get-FileHash -LiteralPath $binary).Hash) 'Download progress wrapper changed file contents'
     Reset-Mocks
     $result = & $realHelp $binary $fixture
     Assert ($result.Supported -and -not $result.TimedOut) 'Real help runner failed'

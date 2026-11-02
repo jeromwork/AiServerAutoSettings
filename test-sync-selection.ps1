@@ -51,6 +51,11 @@ try {
     Assert-Test ($binding.scopeMode -eq 'folder' -and $binding.allowedRoots[0] -eq '.') 'Folder binding schema wrong'
     $repeat=Save-RemoteSyncSelection $data local $candidates
     Assert-Test ($repeat.projects[0].projectId -eq $id -and @(Get-RemoteSyncProjects $data).Count -eq 1) 'Repeated save duplicated registration'
+    $candidateId=$repeat.projects[1].projectId
+    Assert-Test (!(Test-Path -LiteralPath (Join-Path (Get-SyncStatePath $data $candidateId local) 'project.json'))) 'Unchecked candidate unexpectedly has a binding'
+    $candidates[1].selected=$true;Save-RemoteSyncSelection $data local $candidates|Out-Null
+    Assert-Test ((Get-SyncBinding $data $candidateId local).projectId -ceq $candidateId) 'Selecting a saved unbound candidate failed'
+    $candidates[1].selected=$false;Save-RemoteSyncSelection $data local $candidates|Out-Null
     $omitted=Save-RemoteSyncSelection $data local @()
     Assert-Test ($omitted.projects[0].selected) 'Omitted saved row was silently unchecked'
     $seed=Export-RemoteSyncSeed $data $id local
@@ -59,7 +64,7 @@ try {
     New-Item -ItemType Directory -Path $binding.replicaPath -Force|Out-Null
     [IO.File]::WriteAllText((Join-Path $binding.replicaPath 'keep.txt'),'preserve')
     $candidates[0].selected=$false;Save-RemoteSyncSelection $data local $candidates|Out-Null
-    Assert-Test (!(Get-RemoteSyncSelection $data local).projects[0].selected -and (Test-Path -LiteralPath $binding.replicaPath) -and @(Get-RemoteSyncProjects $data).Count -eq 1) 'Uncheck deleted binding or replica'
+    Assert-Test (!(Get-RemoteSyncSelection $data local).projects[0].selected -and (Test-Path -LiteralPath $binding.replicaPath) -and @(Get-RemoteSyncProjects $data).Count -eq 2) 'Uncheck deleted binding or replica'
     $before=[IO.File]::ReadAllText((Join-Path $data 'sync\selections\local.json'))
     $overlap=@([pscustomobject]@{sourcePath=$source;selected=$true},[pscustomobject]@{sourcePath=(Join-Path $source 'nested');selected=$true})
     Assert-Throws {Save-RemoteSyncSelection $data local $overlap} 'Overlapping roots accepted'

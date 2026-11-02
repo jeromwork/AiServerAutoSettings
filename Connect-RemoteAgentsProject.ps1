@@ -1,6 +1,7 @@
 ﻿[CmdletBinding()]
 param([Parameter(Mandatory=$true)][string]$DataDir,[Parameter(Mandatory=$true)][string]$ProjectId,[Parameter(Mandatory=$true)][string]$HostId,[switch]$ManagedSession)
 $ErrorActionPreference='Stop'
+[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
 if(-not $ManagedSession){throw 'Подключайте проект из основной программы.'}
 if($ProjectId -notmatch '\A[a-z0-9][a-z0-9_-]{0,63}\z' -or $HostId -notmatch '\A[a-z0-9][a-z0-9_-]{0,63}\z'){throw 'Неверная привязка проекта.'}
 # Reuse the installer's bounded managed-process lifecycle, without executing its wizard.
@@ -34,9 +35,14 @@ $tunnel={param($request)
     $tunnels.Add($component)
     [pscustomobject]@{ok=$true;processId=$component.Process.Id}
 }.GetNewClosure()
+$progress={param($update)
+    if([ProjectManagedControl]::StopRequested){throw 'Подключение остановлено; подготовленные данные сохранены. Повторите пункт 13.'}
+    $record=[ordered]@{state='project-progress';stage=[string]$update.stage;message=[string]$update.message;doneBytes=[long]$update.doneBytes;totalBytes=[long]$update.totalBytes;doneFiles=[int]$update.doneFiles;totalFiles=[int]$update.totalFiles}
+    [Console]::WriteLine(($record|ConvertTo-Json -Compress -Depth 4))
+}
 try{
-    $barrier=Connect-RemoteSyncProject -DataDir $DataDir -ProjectId $ProjectId -HostId $HostId -SSHTransport $transport -TunnelHook $tunnel
-    if(-not $barrier.ready -or -not $barrier.fresh){throw 'Рабочая копия ещё не совпадает с сервером. Повторите подключение; исходная папка не изменена.'}
+    $barrier=Connect-RemoteSyncProject -DataDir $DataDir -ProjectId $ProjectId -HostId $HostId -SSHTransport $transport -TunnelHook $tunnel -Progress $progress
+    if(-not $barrier.ready -or -not $barrier.fresh){throw ('Рабочая копия ещё не совпадает с сервером: '+$barrier.reason+'. Повторите пункт 13; исходная папка не изменена.')}
     $barrier|Add-Member -NotePropertyName state -NotePropertyValue 'project-ready' -Force
     [Console]::WriteLine(($barrier|ConvertTo-Json -Compress))
     while(-not [ProjectManagedControl]::StopRequested){Start-Sleep -Milliseconds 200}

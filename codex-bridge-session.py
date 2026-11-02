@@ -44,6 +44,15 @@ def serve(path, config, parent_stdin):
             else:
                 raise ValueError("device already connected")
     server = socket.socket(socket.AF_UNIX)
+    def forward(request):
+        request = dict(request, token=config['token'])
+        payload = json.dumps(request, separators=(',', ':')).encode()+b'\n'
+        if len(payload)>MAX:
+            raise ValueError('Request too large')
+        with socket.create_connection(('127.0.0.1', port), timeout=5) as remote:
+            remote.settimeout(100)
+            remote.sendall(payload)
+            return read_line(remote.makefile('rb'))
     try:
         server.bind(path)
         os.chmod(path, 0o600)
@@ -59,16 +68,12 @@ def serve(path, config, parent_stdin):
                 client.settimeout(100)
                 try:
                     request = json.loads(read_line(client.makefile("rb")))
-                    if not isinstance(request, dict) or set(request) - {"op", "args"}:
+                    if not isinstance(request, dict) or set(request) - {"op", "args", "binding"}:
                         raise ValueError("invalid request")
-                    request["token"] = config["token"]
-                    payload = json.dumps(request, separators=(",", ":")).encode() + b"\n"
-                    if len(payload) > MAX:
-                        raise ValueError("request too large")
-                    with socket.create_connection(("127.0.0.1", port), timeout=5) as remote:
-                        remote.settimeout(100)
-                        remote.sendall(payload)
-                        result = read_line(remote.makefile("rb"))
+                    expected=request.get('binding')
+                    if config.get('hostId') and expected != {key:config.get(key) for key in ('projectId','hostId','deviceLabel','windowsReplica')}:
+                        raise ValueError('Explicit target binding required')
+                    result=forward(request)
                     client.sendall(result)
                 except Exception:
                     # Never leak token, command, paths, or upstream exception text.

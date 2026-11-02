@@ -1,6 +1,22 @@
 ﻿[CmdletBinding()]
-param([string]$ServerAddress, [string]$Login, [string]$ProfileName, [string]$DataDir, [switch]$Launcher)
+param([string]$ServerAddress, [string]$Login, [string]$ProfileName, [string]$DataDir, [switch]$Launcher, [switch]$DetailedOutput, [switch]$ConnectionSettings)
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+function Select-SetupOutputMode([switch]$Detailed, [switch]$Prompt) {
+    $script:setupDetailed = [bool]$Detailed
+    if ($Prompt) {
+        Write-Host 'Вывод: 1 — кратко, подробности в файл; 2 — подробности также в окне.'
+        do {
+            $choice = (Read-Host 'Введите 1 или 2 и нажмите Enter; пустой Enter — кратко').Trim()
+            if ($choice -notin @('', '1', '2')) { Write-Host 'Нужно ввести 1 или 2. Enter без цифры выбирает краткий режим.' }
+        } until ($choice -in @('', '1', '2'))
+        $script:setupDetailed = ($choice -eq '2')
+    }
+    if ($script:setupDetailed) { Write-Host 'Выбран подробный режим: технические сообщения — в окне и в журнале.' }
+    else { Write-Host 'Выбран краткий режим: в окне — этапы и индикаторы, технические сообщения — в журнале.' }
+    Write-Host 'Этот режим действует до закрытия программы. Дальше — выбор сервера.'
+    Write-Host ''
+}
 function Protect-NewDirectory([string]$Path) {
     # Called only for directories newly created by this script.
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
@@ -71,7 +87,7 @@ function Test-WindowsRuntime {
         throw 'Сначала обновите Клиент OpenSSH до версии 8.6 или новее: он нужен для безопасного окна пароля. Это клиент, служба SSH-сервера Windows не требуется.'
     }
 }
-function Invoke-ProfileSsh([string[]]$Arguments, [string]$PublicKey, [string]$InputText) {
+function Invoke-ProfileSsh([string[]]$Arguments, [string]$PublicKey, [string]$InputText, [string]$OutputPath, [string]$Activity) {
     Initialize-PasswordWindow
     $eventName = 'Local\RemoteAgents.Askpass.' + [guid]::NewGuid().ToString('N')
     $eventSecurity = New-Object Security.AccessControl.EventWaitHandleSecurity
@@ -90,10 +106,37 @@ function Invoke-ProfileSsh([string[]]$Arguments, [string]$PublicKey, [string]$In
     if ($PublicKey -and $InputText) { throw 'Нельзя одновременно передать два источника настройки.' }
     $payload = if ($InputText) { $InputText } else { $PublicKey }
     $start.RedirectStandardInput = [bool]$payload
+    $start.RedirectStandardOutput = ([bool]$OutputPath -or [bool]$Activity)
+    $start.RedirectStandardError = [bool]$Activity
+    if ($Activity) {
+        $start.StandardOutputEncoding = New-Object Text.UTF8Encoding($false)
+        $start.StandardErrorEncoding = New-Object Text.UTF8Encoding($false)
+    }
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $start
+    $outputFile = $null
+    $processStarted = $false
+    $log = $null
+    $streams = @()
     try {
+        if ($Activity) {
+            if (-not $script:setupLogDirectory) { throw 'Не подготовлена папка журналов установки.' }
+            $logPath = Join-Path $script:setupLogDirectory ((Get-Date -Format 'HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0,8) + '.log')
+            $log = New-Object IO.StreamWriter($logPath,$false,(New-Object Text.UTF8Encoding($false)))
+            $log.AutoFlush = $true
+            $log.WriteLine($Activity)
+            Write-Host $Activity
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            $lastProgress = -1000
+        }
+        if ($OutputPath) { $outputFile = [IO.File]::Open($OutputPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write) }
         [void]$process.Start()
+        $processStarted = $true
+        if ($OutputPath) { $outputTask = $process.StandardOutput.BaseStream.CopyToAsync($outputFile) }
+        if ($Activity) {
+            if (-not $OutputPath) { $streams += @{ Reader=$process.StandardOutput; Task=$process.StandardOutput.ReadLineAsync(); Label='out' } }
+            $streams += @{ Reader=$process.StandardError; Task=$process.StandardError.ReadLineAsync(); Label='err' }
+        }
         if ($payload) {
             # .NET Framework / Windows PowerShell 5.1 has no StandardInputEncoding.
             # Write bytes directly: no BOM, no StreamWriter encoding or CRLF conversion.
@@ -102,12 +145,48 @@ function Invoke-ProfileSsh([string[]]$Arguments, [string]$PublicKey, [string]$In
             $process.StandardInput.BaseStream.Flush()
             $process.StandardInput.Close()
         }
-        while (-not $process.WaitForExit(100)) {
+        while ($true) {
+            $received = $false
+            foreach ($stream in $streams) {
+                if ($stream.Task -and $stream.Task.IsCompleted) {
+                    $line = $stream.Task.GetAwaiter().GetResult()
+                    if ($null -eq $line) { $stream.Task = $null }
+                    else {
+                        $log.WriteLine(('[' + $stream.Label + '] ' + $line))
+                        if ($script:setupDetailed) { Write-Host $line }
+                        $stream.Task = $stream.Reader.ReadLineAsync()
+                        $received = $true
+                    }
+                }
+            }
+            $exited = $process.HasExited
+            if ($exited -and -not @($streams | Where-Object { $null -ne $_.Task }).Count) { break }
+            if ($Activity -and -not $script:setupDetailed -and $clock.ElapsedMilliseconds - $lastProgress -ge 250) {
+                $lastProgress = $clock.ElapsedMilliseconds
+                $position = [int]([Math]::Floor($clock.ElapsedMilliseconds / 250) % 21)
+                $bar = (' ' * $position) + '====' + (' ' * (20-$position))
+                Write-Host -NoNewline ("`r[{0}] выполняется на сервере, {1:mm\:ss}" -f $bar, $clock.Elapsed)
+            }
             if ($cancelled.WaitOne(0)) { if (-not $process.HasExited) { $process.Kill() }; $process.WaitForExit(); throw 'Ввод отменён. Данные подключения сохранены.' }
+            if (-not $received) { Start-Sleep -Milliseconds 50 }
         }
         if ($cancelled.WaitOne(0)) { throw 'Ввод отменён или вопрос подключения не поддерживается. Данные сохранены.' }
+        if ($OutputPath) { $outputTask.GetAwaiter().GetResult() | Out-Null }
+        if ($log) {
+            $log.WriteLine(('Exit code: ' + $process.ExitCode))
+            if (-not $script:setupDetailed) { Write-Host ("`r[{0}] {1}                                  " -f ('='*24), $(if ($process.ExitCode -eq 0) { 'Готово' } else { 'Ошибка' })) }
+            if ($process.ExitCode -ne 0) { Write-Host ('Подробности: ' + $logPath) }
+        }
         return $process.ExitCode
-    } finally { $process.Dispose(); $cancelled.Dispose() }
+    } finally {
+        if ($Activity -and $processStarted -and -not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
+        if ($log) { $log.Dispose() }
+        if ($OutputPath -and $outputFile) {
+            if ($processStarted -and -not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
+            $outputFile.Dispose()
+        }
+        $process.Dispose(); $cancelled.Dispose()
+    }
 }
 function Save-ProfileMetadata($Value, [string]$Path) {
     $temporary = $Path + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
@@ -123,8 +202,15 @@ function Get-KeyDirectory([string]$Slot) {
     return Join-Path (Join-Path $profileDirectory 'keysets') $Slot
 }
 function Test-SavedConnection([string]$PrivatePath) {
-    $arguments = $common + @('-i', $PrivatePath, '-o', 'IdentitiesOnly=yes', '-o', 'PubkeyAuthentication=yes', '-o', 'PreferredAuthentications=publickey', '-o', 'PasswordAuthentication=no', '-o', 'KbdInteractiveAuthentication=no', $ServerAddress, 'set -eu; id; cat /etc/os-release; uname -m')
+    $arguments = $common + @('-i', $PrivatePath, '-o', 'IdentitiesOnly=yes', '-o', 'PubkeyAuthentication=yes', '-o', 'PreferredAuthentications=publickey', '-o', 'PasswordAuthentication=no', '-o', 'KbdInteractiveAuthentication=no', $ServerAddress, 'set -eu; . /etc/os-release; printf "SSH OK: %s (%s)\n" "$PRETTY_NAME" "$(uname -m)"')
     return (Invoke-ProfileSsh -Arguments $arguments)
+}
+function Assert-SupportedServer {
+    $probe = 'set -eu; . /etc/os-release; if [ "$ID:$VERSION_ID:$(uname -m)" != "ubuntu:24.04:x86_64" ]; then printf "Supported installer target: Ubuntu 24.04 LTS x86_64. Detected: %s %s %s\n" "$ID" "$VERSION_ID" "$(uname -m)" >&2; exit 44; fi'
+    $arguments = $common + @('-i',$keyPath,'-o','IdentitiesOnly=yes','-o','PubkeyAuthentication=yes','-o','PreferredAuthentications=publickey','-o','PasswordAuthentication=no','-o','KbdInteractiveAuthentication=no','-T',$ServerAddress,$probe)
+    if ((Invoke-ProfileSsh -Arguments $arguments) -ne 0) {
+        throw 'Полный установщик поддерживает только Ubuntu 24.04 LTS x86_64. Проверка не пройдена; установка приложений не запускалась.'
+    }
 }
 function Confirm-Action([string]$Question, [switch]$DefaultNo) {
     $hint = if ($DefaultNo) { ' Да/Нет; Enter — Нет' } else { ' Да/Нет; Enter — Да' }
@@ -152,7 +238,10 @@ function Stop-ManagedComponent($Component) {
             $Component.Process.StandardInput.Close()
             if (-not $Component.Process.WaitForExit(10000)) { $Component.Process.Kill(); $Component.Process.WaitForExit() }
         }
-    } finally { $Component.Process.Dispose(); $Component.CancelEvent.Dispose() }
+    } finally {
+        if($Component.PSObject.Properties.Name -contains 'Output' -and $Component.Output -and $Component.Output.PSObject.Methods.Name -contains 'Close'){$Component.Output.Close()}
+        $Component.Process.Dispose(); $Component.CancelEvent.Dispose()
+    }
 }
 function Initialize-ManagedOutput {
     if ('RemoteAgents.BoundedStatusReader' -as [type]) { return }
@@ -160,17 +249,47 @@ function Initialize-ManagedOutput {
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
+using System.Text;
 namespace RemoteAgents {
+    public sealed class ConsoleStatusLine : IDisposable {
+        bool active; int previousWidth;
+        public bool Write(string text, bool newStage) {
+            try {
+                if(Console.IsOutputRedirected)return false;
+                int width=Math.Min(Console.BufferWidth,Console.WindowWidth)-1;
+                if(width<8)return false;
+                if(newStage)End();
+                string visible=text.Length>width ? text.Substring(0,width-3)+"..." : text;
+                Console.Write("\r"+visible.PadRight(Math.Min(width,Math.Max(previousWidth,visible.Length))));
+                previousWidth=visible.Length;active=true;return true;
+            } catch(IOException) { return false; } catch(InvalidOperationException) { return false; }
+        }
+        public void End() { if(active) { try { Console.WriteLine(); } catch(IOException) { } active=false;previousWidth=0; } }
+        public void Dispose() { End(); }
+    }
     public sealed class BoundedStatusReader {
         readonly Queue<string> lines = new Queue<string>();
         readonly object gate = new object();
-        bool complete;
+        bool outputComplete, errorComplete;
+        readonly StringBuilder errors = new StringBuilder();
+        readonly StringBuilder recent = new StringBuilder();
+        StreamWriter log;
         readonly string expected;
         string readyLine;
-        public BoundedStatusReader(Process process, string readyState) { expected=readyState; process.OutputDataReceived += Receive; }
-        void Receive(object sender, DataReceivedEventArgs args) {
+        public BoundedStatusReader(Process process, string readyState, string logPath) {
+            expected=readyState;
+            if (!String.IsNullOrEmpty(logPath)) { log=new StreamWriter(logPath,false,new UTF8Encoding(false)); log.AutoFlush=true; }
+            process.OutputDataReceived += (sender,args) => Receive(args,false);
+            process.ErrorDataReceived += (sender,args) => Receive(args,true);
+        }
+        void Receive(DataReceivedEventArgs args, bool error) {
             lock (gate) {
-                if (args.Data == null) { complete = true; return; }
+                if (args.Data == null) { if(error) errorComplete=true; else outputComplete=true; return; }
+                string line=args.Data.Length <= 4096 ? args.Data : args.Data.Substring(0,4096);
+                if(log!=null) { try { log.WriteLine((error ? "[err] " : "[out] ")+line); } catch(IOException) { try { log.Dispose(); } catch(IOException) { } log=null; } }
+                recent.AppendLine(line); if(recent.Length>16384) recent.Remove(0,recent.Length-16384);
+                if(error) { errors.AppendLine(line); if(errors.Length>16384) errors.Remove(0,errors.Length-16384); return; }
                 if (readyLine == null && (
                     (expected == "browser" && args.Data.StartsWith("REMOTEAGENTS_BROWSER_READY=http://127.0.0.1:")) ||
                     (expected == "desktop" && System.Text.RegularExpressions.Regex.IsMatch(args.Data, @"\AREMOTEAGENTS_DESKTOP_READY=127\.0\.0\.1:[0-9]+\z")) ||
@@ -182,7 +301,9 @@ namespace RemoteAgents {
         }
         public string Take() { lock (gate) { return lines.Count == 0 ? null : lines.Dequeue(); } }
         public string ReadyLine { get { lock (gate) { return readyLine; } } }
-        public bool Complete { get { lock (gate) { return complete; } } }
+        public bool Complete { get { lock (gate) { return outputComplete && errorComplete; } } }
+        public string FailureDetails { get { lock(gate) { return (errors.Length>0 ? errors : recent).ToString().Trim(); } } }
+        public void Close() { lock(gate) { if(log!=null) { try { log.Dispose(); } catch(IOException) { } log=null; } } }
     }
 }
 "@
@@ -201,17 +322,32 @@ function Start-ManagedComponent([string]$File, [string[]]$Parameters, [string]$R
     $info.CreateNoWindow = $true
     $info.RedirectStandardInput = $true
     $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $info.StandardOutputEncoding = New-Object Text.UTF8Encoding($false)
+    $info.StandardErrorEncoding = New-Object Text.UTF8Encoding($false)
     $info.EnvironmentVariables['REMOTE_AGENTS_ASKPASS_CANCEL'] = $eventName
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $info
     Initialize-ManagedOutput
-    $reader = New-Object RemoteAgents.BoundedStatusReader($process,$ReadyState)
-    $component = [pscustomobject]@{ Process=$process; CancelEvent=$event; Output=$reader; State='starting' }
+    $logPath=$null
+    $logDirectoryState=Get-Variable setupLogDirectory -Scope Script -ErrorAction SilentlyContinue
+    if($logDirectoryState -and $logDirectoryState.Value){
+        $logPath=Join-Path $logDirectoryState.Value ((Get-Date -Format 'HHmmss')+'-'+[IO.Path]::GetFileNameWithoutExtension($File)+'-'+[guid]::NewGuid().ToString('N').Substring(0,8)+'.log')
+    }
+    $reader = New-Object RemoteAgents.BoundedStatusReader($process,$ReadyState,$logPath)
+    $progressLine=New-Object RemoteAgents.ConsoleStatusLine
+    $progressRefreshSeconds=if([Console]::IsOutputRedirected){5}else{1}
+    $component = [pscustomobject]@{ Process=$process; CancelEvent=$event; Output=$reader; State='starting';LogPath=$logPath }
     try {
         [void]$process.Start()
+        $processHandle=$process.Handle
         $clock = [Diagnostics.Stopwatch]::StartNew()
         $process.BeginOutputReadLine()
-        while ($clock.Elapsed.TotalMinutes -lt 20) {
+        $process.BeginErrorReadLine()
+        $limitSeconds=if($ReadyState -eq 'project-ready'){43200}else{1200}
+        $lastActivity=0.0;$lastPrinted=-5.0;$lastProgress=$null;$progressStage='';$progressMessage='';$stageStarted=0.0;$stageBaseBytes=0L
+        while ($clock.Elapsed.TotalSeconds -lt $limitSeconds) {
+            $changed=$false
             if ($event.WaitOne(0)) { throw 'Ввод отменён. Подключение сохранено.' }
             $line = $reader.ReadyLine
             if ($null -eq $line) { $line = $reader.Take() }
@@ -220,12 +356,49 @@ function Start-ManagedComponent([string]$File, [string[]]$Parameters, [string]$R
                 if ($ReadyState -eq 'desktop' -and $line -match '\AREMOTEAGENTS_DESKTOP_READY=127\.0\.0\.1:[0-9]+\z') { $component.State='ready'; return $component }
                 try { $status = $line | ConvertFrom-Json -ErrorAction Stop } catch { $status = $null }
                 if ($status -and $status.state -eq $ReadyState) { $component.State=$ReadyState; return $component }
+                if($ReadyState -eq 'project-ready' -and $status -and $status.state -eq 'project-progress'){
+                    $lastActivity=$clock.Elapsed.TotalSeconds;$lastProgress=$status
+                    $stage=[string]$status.stage;$message=([string]$status.message -replace '[\x00-\x1f\x7f]',' ')
+                    if($message.Length -gt 220){$message=$message.Substring(0,220)}
+                    if($stage -cne $progressStage){$stageStarted=$clock.Elapsed.TotalSeconds;$stageBaseBytes=[Math]::Max(0,[long]$status.doneBytes);$changed=$true}
+                    if($message -cne $progressMessage){$changed=$true}
+                    $progressStage=$stage;$progressMessage=$message
+                }
             }
-            if ($process.HasExited -and $reader.Complete) { throw ('Компонент завершился с кодом ' + $process.ExitCode + '. Посмотрите сообщение выше.') }
+            if($lastProgress -and ($changed -or $clock.Elapsed.TotalSeconds-$lastPrinted -ge $progressRefreshSeconds)){
+                $details='';$stageSeconds=[Math]::Max(0,$clock.Elapsed.TotalSeconds-$stageStarted)
+                if($lastProgress.totalBytes -gt 0 -and $lastProgress.doneBytes -ge 0){
+                    $percent=[Math]::Min(100,[Math]::Floor(100.0*$lastProgress.doneBytes/$lastProgress.totalBytes))
+                    $details=': '+$percent+'% ('+('{0:N1} / {1:N1} МБ' -f ($lastProgress.doneBytes/1MB),($lastProgress.totalBytes/1MB))+')'
+                    if($stageSeconds -gt 1 -and $lastProgress.doneBytes -gt $stageBaseBytes){
+                        $speed=($lastProgress.doneBytes-$stageBaseBytes)/$stageSeconds
+                        $details+='; '+('{0:N1} МБ/с' -f ($speed/1MB))
+                        if($lastProgress.doneBytes -lt $lastProgress.totalBytes){$eta=[TimeSpan]::FromSeconds(($lastProgress.totalBytes-$lastProgress.doneBytes)/$speed);$details+='; осталось примерно '+$eta.ToString('hh\:mm\:ss')}
+                    }
+                }elseif($lastProgress.doneBytes -ge 0){$details=': проверено '+('{0:N1} МБ' -f ($lastProgress.doneBytes/1MB))}
+                if($lastProgress.totalFiles -gt 0){$details+='; файлов '+$lastProgress.doneFiles+'/'+$lastProgress.totalFiles}
+                elseif($lastProgress.doneFiles -ge 0){$details+='; файлов '+$lastProgress.doneFiles}
+                $elapsed=[TimeSpan]::FromSeconds($stageSeconds)
+                $display=$progressMessage+$details+'; этап '+$elapsed.ToString('hh\:mm\:ss')
+                if(!$progressLine.Write($display,$changed)){Write-Host $display}
+                $lastPrinted=$clock.Elapsed.TotalSeconds
+            }
+            if ($process.HasExited -and $reader.Complete) {
+                $message='Компонент завершился с кодом '+$process.ExitCode+'.'
+                if($reader.FailureDetails){$message+="`n"+$reader.FailureDetails}
+                if($logPath){$message+="`nЖурнал: "+$logPath}
+                throw $message
+            }
+            if($ReadyState -eq 'project-ready' -and $clock.Elapsed.TotalSeconds-$lastActivity -gt 300){
+                $message='Нет ответа компонента 5 минут. Последний этап: '+$progressMessage+'. Повторите пункт 13; подготовленные данные сохранены.'
+                if($logPath){$message+="`nЖурнал: "+$logPath}
+                throw $message
+            }
             Start-Sleep -Milliseconds 50
         }
         throw 'Ожидание подключения завершилось. Повторите запуск; прежние данные сохранены.'
     } catch { Stop-ManagedComponent $component; throw }
+    finally { $progressLine.Dispose() }
 }
 function Get-ManagedComponentState($Component) {
     if (-not $Component -or $Component.Process.HasExited) { return 'stopped' }
@@ -236,9 +409,11 @@ function Get-ManagedComponentState($Component) {
     return $Component.State
 }
 function Get-ProjectClientContext {
+    param([switch]$ExistingOnly)
     $localData = [Environment]::GetFolderPath('LocalApplicationData')
     if (-not $localData) { throw 'Не найдена папка данных Windows. Подключение проектов пока недоступно; режим сервера работает.' }
     $clientRoot = Join-Path $localData 'RemoteAgents'
+    if($ExistingOnly -and !(Test-Path -LiteralPath (Join-Path $clientRoot 'computer.json') -PathType Leaf)){return $null}
     if (-not (Test-Path -LiteralPath $clientRoot)) { [IO.Directory]::CreateDirectory($clientRoot) | Out-Null; Protect-NewDirectory $clientRoot }
     $clientPath = Join-Path $clientRoot 'computer.json'
     if (Test-Path -LiteralPath $clientPath -PathType Leaf) {
@@ -250,6 +425,7 @@ function Get-ProjectClientContext {
     }
     $projectRoot = Join-Path $profileDirectory 'project-connections'
     $projectData = Join-Path $projectRoot $client.id
+    if($ExistingOnly -and !(Test-Path -LiteralPath $projectData -PathType Container)){return $null}
     foreach ($directory in @($projectRoot,$projectData)) {
         if (-not (Test-Path -LiteralPath $directory)) { [IO.Directory]::CreateDirectory($directory) | Out-Null; Protect-NewDirectory $directory }
     }
@@ -279,7 +455,7 @@ check_marker_path /var/lib/remote-agents/windows-mcp
 runuser -u remoteagents -- env HOME=/home/remoteagents bash -c 'umask 077; mkdir -p "$HOME/.local/share/codex-remote" "$HOME/.local/state/codex-remote"'
 '@
     $payload = $payload.Replace("`r`n","`n") + "`n"
-    foreach ($name in @('codex-windows-bridge.py','codex-bridge-session.py')) {
+    foreach ($name in @('codex-windows-bridge.py','codex-bridge-session.py','server_node_catalog.py')) {
         $source = Join-Path $PSScriptRoot $name
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw 'Не хватает серверного компонента подключения Windows. Скопируйте полный комплект.' }
         $encoded = [Convert]::ToBase64String([IO.File]::ReadAllBytes($source))
@@ -291,14 +467,14 @@ runuser -u remoteagents -- env HOME=/home/remoteagents bash -c 'umask 077; mkdir
     $payload += "umask 022`n: > '$marker'`n"
     $payload += $handoff.RemoteScript
     $arguments = $common + @('-i',$keyPath,'-o','IdentitiesOnly=yes','-o','PubkeyAuthentication=yes','-o','PreferredAuthentications=publickey','-o','PasswordAuthentication=no','-o','KbdInteractiveAuthentication=no','-T',$ServerAddress,'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi')
-    if ((Invoke-ProfileSsh -Arguments $arguments -InputText $payload) -ne 0) { throw 'Подключение Windows не подготовлено. Прежние файлы сохранены; причину смотрите выше.' }
+    if ((Invoke-ProfileSsh -Arguments $arguments -InputText $payload -Activity 'На сервере: подготовка соединения с Windows') -ne 0) { throw 'Подключение Windows не подготовлено. Прежние файлы сохранены; причину смотрите в журнале.' }
     $parameters = @('-VPSHost',$ServerAddress,'-VPSUser',$Login,'-IdentityFile',$keyPath,'-Workspace',$ReplicaPath,'-DeviceLabel',$label,'-KnownHostsFile',$knownHostsPath,'-SSHConfig',$configPath,'-SSHExecutable',$script:sshExecutable,'-ServerUser','remoteagents','-RemoteBase','/home/remoteagents/.local/share/codex-remote','-SocketPath',$registration.SocketPath,'-AskpassExecutable',$script:askpassExecutable,'-ManagedSession')
     $parameters += @('-ServerOwnedReplica','-SyncGuardPath',(Join-Path $PSScriptRoot 'Invoke-RemoteSyncGuard.ps1'),'-SyncDataDir',$SyncDataDir,'-ProjectId',$ProjectId,'-HostId',$ClientId)
     if ($AllowShell) { $parameters += '-AllowShell' }
     $component=Start-ManagedComponent (Join-Path $PSScriptRoot 'Start-CodexWindowsBridge.ps1') $parameters 'connected'
     try {
         Write-Host 'Проверяем инструменты Windows на временном файле: два изменения сервера и новая проверка синхронизации.'
-        if ((Invoke-ProfileSsh -Arguments $arguments -InputText $handoff.SmokeScript) -ne 0) { throw 'Проверка инструментов Windows не пройдена. Настройка агенту пока не передана.' }
+        if ((Invoke-ProfileSsh -Arguments $arguments -InputText $handoff.SmokeScript -Activity 'Проверка соединения сервера с Windows') -ne 0) { throw 'Проверка инструментов Windows не пройдена. Настройка агенту пока не передана.' }
     } catch { Stop-ManagedComponent $component; throw }
     $component | Add-Member -NotePropertyName Handoff -NotePropertyValue $handoff -Force
     Write-Host 'Подключение Windows подготовлено. Это проверка транспорта; модель ещё не запускалась.'
@@ -310,28 +486,68 @@ function Initialize-ProjectModule {
         param($root)
         . (Join-Path $root 'Sync.Workspace.ps1')
         . (Join-Path $root 'Sync.Runtime.ps1')
+        . (Join-Path $root 'Sync.Orchestrator.ps1')
         . (Join-Path $root 'Select-RemoteAgentsProjects.ps1')
         Export-ModuleMember -Function *
     }) -Global -Force
 }
 function Select-ExecutionMode {
-    Write-Host 'Где выполнять команды проекта?'
-    Write-Host '1. На этом компьютере — через отдельную рабочую копию'
-    Write-Host '2. На сервере — без подключения папок Windows'
-    $saved = if ($metadata.executionMode -in @('1','2')) { [string]$metadata.executionMode } else { '' }
+    Write-Host ''
+    Write-Host '=== Режим работы агента ==='
+    Write-Host '1. Автономный сервер'
+    Write-Host '2. Сервер управляет этим компьютером'
+    Write-Host 'В режиме 2 подключаются проекты и инструменты именно этого компьютера.'
+    # Keep persisted values compatible: internal 1=Windows, 2=server.
+    $saved = if ($metadata.executionMode -eq '1') { '2' } else { '1' }
     do {
-        $question = if ($saved) { 'Место работы: 1 или 2; Enter — ' + $saved } else { 'Место работы: введите 1 или 2' }
-        $mode=(Read-Host $question).Trim()
-        if (-not $mode -and $saved) { $mode=$saved }
-    } until ($mode -in @('1','2'))
-    $metadata | Add-Member -NotePropertyName executionMode -NotePropertyValue $mode -Force
-    Save-ProfileMetadata $metadata $metadataPath
+        $choice=(Read-Host ('Место работы: 1 или 2; Enter — ' + $saved)).Trim()
+        if (-not $choice) { $choice=$saved }
+    } until ($choice -in @('1','2'))
+    $mode=if($choice -eq '1'){'2'}else{'1'}
+    if ($metadata.executionMode -ne $mode) {
+        $metadata | Add-Member -NotePropertyName executionMode -NotePropertyValue $mode -Force
+        Save-ProfileMetadata $metadata $metadataPath
+    }
     return $mode
 }
 function Add-ProjectFolder($Context) {
+    Write-Host '1. Выбрать папки этого компьютера и создать серверные копии'
+    Write-Host '2. Подключить существующий серверный проект к этому компьютеру'
+    Write-Host '3. Повторно подключить проекты, ранее выбранные на этом ПК'
+    Write-Host '0. Отмена'
+    $hasSaved=@((Get-RemoteSyncSelection $Context.DataDir $Context.ClientId).projects|Where-Object{$_.selected}).Count -gt 0
+    $default=if($hasSaved){'3'}else{'1'}
+    do {
+        $choice=(Read-Host ('Проекты: 1, 2, 3 или 0; Enter — '+$default)).Trim();if(!$choice){$choice=$default}
+        if($choice -eq '3' -and !$hasSaved){
+            Write-Host 'На этом компьютере пока нет выбранных проектов. Для новой папки выберите 1, для общего проекта на VPS — 2.'
+            $choice=''
+        }
+    }until($choice -in @('0','1','2','3'))
+    if($choice -eq '0'){return [pscustomobject]@{cancelled=$true}}
+    if($choice -eq '3'){return [pscustomobject]@{cancelled=$false}}
+    if($choice -eq '2'){
+        $dataDir=$Context.DataDir
+        $connection=[IO.File]::ReadAllText((Join-Path $dataDir 'ssh-transport.json'))|ConvertFrom-Json
+        $moduleRoot=$PSScriptRoot
+        $transport={param($request)& (Join-Path $moduleRoot 'Invoke-RemoteAgentsSsh.ps1') -Request $request -Connection $connection -DataDir $dataDir}.GetNewClosure()
+        $projects=@(Get-RemoteSyncServerProjects -SSHTransport $transport)
+        if(!$projects.Count){Write-Host 'Нет зарегистрированных серверных проектов. На первом ПК подключите проект, затем повторите здесь.';return [pscustomobject]@{cancelled=$true}}
+        for($i=0;$i -lt $projects.Count;$i++){Write-Host (('{0}. ID={1}; {2}' -f ($i+1),$projects[$i].projectId,$projects[$i].serverPath))}
+        $index=0;$answer=Read-Host 'Номер проекта; Enter — отмена'
+        if(![int]::TryParse($answer,[ref]$index) -or $index -lt 1 -or $index -gt $projects.Count){return [pscustomobject]@{cancelled=$true}}
+        $project=$projects[$index-1]
+        Write-Host ('Выбрано: projectId='+$project.projectId+'; hostId='+$Context.ClientId+'; '+$project.serverPath)
+        if(!(Confirm-Action 'Присоединиться к этому ID? Исходники берутся только с VPS в отдельную receive-only копию; локальная папка не передаётся.' -DefaultNo)){return [pscustomobject]@{cancelled=$true}}
+        New-RemoteSyncSubscription -DataDir $Context.DataDir -ProjectId $project.projectId -HostId $Context.ClientId -ServerProject $project|Out-Null
+        return [pscustomobject]@{cancelled=$false}
+    }
     return Show-RemoteSyncProjectSelection -DataDir $Context.DataDir -HostId $Context.ClientId
 }
-function Connect-ProjectFolders([string]$Agents, $Sessions) {
+function Connect-ProjectFolders([string]$Agents, $Sessions, [switch]$ReuseSelection, [switch]$RefreshAgentRegistration) {
+    # Agent installation is optional; Windows control is selected by the mode,
+    # not by whether this BAT installed the already available applications.
+    if($Agents -eq '0'){$Agents='3'}
     Initialize-ProjectModule
     $context=Get-ProjectClientContext
     $transport=[pscustomobject]@{
@@ -340,7 +556,7 @@ function Connect-ProjectFolders([string]$Agents, $Sessions) {
         arguments=@($common + @('-i',$keyPath,'-o','IdentitiesOnly=yes','-o','PubkeyAuthentication=yes','-o','PreferredAuthentications=publickey','-o','PasswordAuthentication=no','-o','KbdInteractiveAuthentication=no','-T',$ServerAddress))
     }
     Save-ProfileMetadata $transport (Join-Path $context.DataDir 'ssh-transport.json')
-    $selectionResult=Add-ProjectFolder $context
+    $selectionResult=if($ReuseSelection){[pscustomobject]@{cancelled=$false}}else{Add-ProjectFolder $context}
     if($selectionResult.cancelled){Write-Host 'Выбор отменён. Перенос не запущен.';return}
     $selection=Get-RemoteSyncSelection -DataDir $context.DataDir -HostId $context.ClientId
     $enabledIds=@($selection.projects|Where-Object{$_.selected}|ForEach-Object{$_.projectId})
@@ -348,11 +564,25 @@ function Connect-ProjectFolders([string]$Agents, $Sessions) {
     foreach($sessionId in @($Sessions.Keys)){
         if($sessionId -notin $enabledIds){Stop-ManagedComponent $Sessions[$sessionId].Bridge;Stop-ManagedComponent $Sessions[$sessionId].Sync;$Sessions.Remove($sessionId)}
     }
+    if($enabledIds.Count){Write-Host 'Локальные папки подключаются без входа в GitHub/GitLab. Доступ для fetch/push на сервере настраивается отдельно.'}
     while ($true) {
         $projects=@(Get-RemoteSyncProjects -DataDir $context.DataDir | Where-Object { $_.hostId -eq $context.ClientId -and $_.projectId -in $enabledIds }|Sort-Object sourcePath)
         if(!$projects.Count){Write-Host 'Ни один проект не выбран. Перенос не запущен.';return}
         foreach ($project in $projects) {
-            if ($Sessions.ContainsKey($project.projectId) -and (Get-ManagedComponentState $Sessions[$project.projectId].Sync) -ne 'stopped' -and (-not $Sessions[$project.projectId].Bridge -or (Get-ManagedComponentState $Sessions[$project.projectId].Bridge) -ne 'stopped')) { Write-Host 'Подключение этой папки уже запущено.'; continue }
+            if ($Sessions.ContainsKey($project.projectId) -and (Get-ManagedComponentState $Sessions[$project.projectId].Sync) -ne 'stopped') {
+                $existingSession=$Sessions[$project.projectId]
+                $bridgeReady=$existingSession.Bridge -and (Get-ManagedComponentState $existingSession.Bridge) -ne 'stopped'
+                $sameAgents=$existingSession.PSObject.Properties.Name -notcontains 'Agents' -or $existingSession.Agents -eq $Agents
+                if($bridgeReady -and $sameAgents -and !$RefreshAgentRegistration){Write-Host 'Подключение этой папки уже запущено.';continue}
+                # Add/reconfigure MCP without stopping an already working sync.
+                Stop-ManagedComponent $existingSession.Bridge;$existingSession.Bridge=$null
+                try {
+                    $allowShell=$true
+                    $existingSession.Bridge=Start-ProjectWindowsBridge $project.projectId $context.ClientId $project.replicaPath ([bool]$allowShell) $context.DataDir $Agents
+                    $existingSession|Add-Member -NotePropertyName Agents -NotePropertyValue $Agents -Force
+                }catch{Write-Host ('Синхронизация сохранена, но MCP пока не подключён: '+$_.Exception.Message)}
+                continue
+            }
             if ($Sessions.ContainsKey($project.projectId)) { Stop-ManagedComponent $Sessions[$project.projectId].Bridge; Stop-ManagedComponent $Sessions[$project.projectId].Sync; $Sessions.Remove($project.projectId) }
             $sync=$null;$bridge=$null
             try {
@@ -360,44 +590,96 @@ function Connect-ProjectFolders([string]$Agents, $Sessions) {
                 $sync=Start-ManagedComponent (Join-Path $PSScriptRoot 'Connect-RemoteAgentsProject.ps1') @('-DataDir',$context.DataDir,'-ProjectId',$project.projectId,'-HostId',$context.ClientId,'-ManagedSession') 'project-ready'
                 $ready=$sync.Output.ReadyLine | ConvertFrom-Json
                 if (-not $ready.ready -or -not $ready.fresh -or $ready.projectId -ne $project.projectId -or $ready.hostId -ne $context.ClientId -or -not [string]::Equals($ready.replicaPath,$project.replicaPath,[StringComparison]::OrdinalIgnoreCase)) { throw 'Рабочая копия ещё не подтверждена.' }
-                $allowShell=Confirm-Action 'Разрешить выбранному серверному агенту выполнять команды настройки проекта в Windows и безопасную проверку временного файла? Команды работают с вашими правами.' -DefaultNo
-                $bridge=Start-ProjectWindowsBridge $project.projectId $context.ClientId $ready.replicaPath ([bool]$allowShell) $context.DataDir $Agents
-                $Sessions[$project.projectId]=[pscustomobject]@{Sync=$sync;Bridge=$bridge}
+                if($Agents -in @('1','2','3')){
+                    $allowShell=$true
+                    $bridge=Start-ProjectWindowsBridge $project.projectId $context.ClientId $ready.replicaPath ([bool]$allowShell) $context.DataDir $Agents
+                }
+                $Sessions[$project.projectId]=[pscustomobject]@{Sync=$sync;Bridge=$bridge;Agents=$Agents}
                 Write-Host ('Проект «'+[IO.Path]::GetFileName($project.sourcePath)+'» подключён.')
-                Write-Host 'На рабочем столе сервера откройте «Начать настройку проекта»: выберите указанную папку и вставьте готовое первое сообщение в чат.'
-                Write-Host 'Для Claude используйте вкладку Code. В Codex перезапустите MCP в настройках. Подключение Windows работает, пока эта программа открыта.'
+                Write-Host ('Привязка: projectId='+$project.projectId+'; hostId='+$context.ClientId+'; компьютер='+[Environment]::MachineName)
+                Write-Host ('Отдельная принимающая копия Windows: '+$ready.replicaPath)
+                if($Agents -eq '0'){Write-Host 'Синхронизация подключена без установки агентов и без команд Windows. Агент и MCP можно подготовить позже отдельным пунктом меню.'}
+                else {
+                    Write-Host 'На рабочем столе сервера откройте «Начать настройку проекта» и выберите указанную папку в агенте. Инструкции подключения добавлены в проект автоматически.'
+                    Write-Host 'Для Claude используйте вкладку Code. В Codex перезапустите MCP в настройках; после обновления моста создайте новую сессию, чтобы обновились схемы с projectId/hostId/taskId. Старые вызовы без цели отклоняются. Подключение Windows работает, пока эта программа открыта.'
+                }
             } catch { Stop-ManagedComponent $bridge; Stop-ManagedComponent $sync; Write-Host ('Папка не подключена: '+$_.Exception.Message) }
         }
         return
     }
 }
 function Request-VpsVpnSetup {
+    Write-Host ''
+    Write-Host '=== Необязательная настройка VPN ==='
     Write-Host 'Настроить Amnezia VPN?'
+    Write-Host 'Действующий VPN не отключается. Amnezia автоматически не подключается.'
     Write-Host '1. Да'
     Write-Host '2. Нет'
     do {
         $vpnChoice = (Read-Host 'Выберите 1 или 2; Enter — нет').Trim()
     } until ($vpnChoice -in @('', '1', '2'))
-    if ($vpnChoice -eq '1') { Open-VpsVpn }
+    if ($vpnChoice -eq '1') {
+        try { Open-VpsVpn }
+        catch { Write-Host ('VPN пока не настроен: ' + $_.Exception.Message) }
+    }
+    Write-Host '=== Конец этапа VPN ==='
+    Write-Host ''
 }
 function Open-VpsVpn {
     $vpnHook = Join-Path $PSScriptRoot 'setup-amnezia.ps1'
     if (-not [IO.File]::Exists($vpnHook)) { throw 'Не хватает компонента VPN. Скопируйте весь комплект программы.' }
-    $vpnResult = & $vpnHook -ProfileDirectory $profileDirectory
-    if ($vpnResult.Status -eq 'GuiOpened') {
-        Write-Host 'Продолжите настройку сервера в окне AmneziaVPN. Приложения сервера работают отдельно.'
+    $vpnResult = & $vpnHook -ProfileDirectory $profileDirectory -ClientOnly
+    if ($vpnResult.Status -eq 'ClientInstallSkipped') {
+        Write-Host 'Amnezia пропущена. Продолжаем настройку приложений сервера.'
+        return
+    }
+    if ($vpnResult.Status -eq 'ClientReady') {
+        if ($profileId -notmatch '\A[a-f0-9]{32}\z' -or $ServerAddress -notmatch '\A[a-zA-Z0-9][a-zA-Z0-9.-]{0,252}\z') { throw 'Неверный профиль VPN.' }
+        $serverScript = Join-Path $PSScriptRoot 'server-amnezia.sh'
+        $payload = [IO.File]::ReadAllText($serverScript).Replace("`r`n", "`n").TrimStart([char]0xFEFF)
+        $directory = Join-Path $profileDirectory 'vpn'
+        if (-not [IO.Directory]::Exists($directory)) { [void][IO.Directory]::CreateDirectory($directory); Protect-NewDirectory $directory }
+        $temporary = Join-Path $directory ([guid]::NewGuid().ToString('N') + '.conf')
+        $vpnSsh = $common + @('-i',$keyPath,'-o','IdentitiesOnly=yes','-o','PubkeyAuthentication=yes','-o','PreferredAuthentications=publickey','-o','PasswordAuthentication=no','-o','KbdInteractiveAuthentication=no')
+        $command = 'if [ "$(id -u)" -eq 0 ]; then exec bash -s -- ' + $ServerAddress + ' ' + $profileId + '; else exec sudo -n bash -s -- ' + $ServerAddress + ' ' + $profileId + '; fi'
+        Write-Host 'Настраиваем AmneziaWG на сервере. Все серверные пакеты скачиваются на VPS.'
+        try {
+            if ((Invoke-ProfileSsh -Arguments ($vpnSsh + @('-T',$ServerAddress,$command)) -InputText $payload -OutputPath $temporary -Activity 'На сервере: установка и настройка AmneziaWG') -ne 0) { throw 'Сервер VPN пока не настроен; подробности в журнале.' }
+            $config = [IO.File]::ReadAllText($temporary)
+            if ($config.Length -gt 16384 -or $config -notmatch '(?m)^\[Interface\]' -or $config -notmatch '(?m)^Endpoint = ') { throw 'Сервер не вернул ожидаемую конфигурацию VPN.' }
+            $savedConfig = Join-Path $directory 'amnezia.conf'
+            [IO.File]::WriteAllText($savedConfig, $config, (New-Object Text.UTF8Encoding($false)))
+            if ((Get-AuthenticodeSignature -LiteralPath $vpnResult.ClientPath).Status -ne 'Valid') { throw 'Подпись клиента Amnezia не подтверждена.' }
+            # Import only the dedicated VPN peer, never server SSH credentials.
+            $arguments = '--import ' + (Convert-SshArgument $config)
+            Start-Process -FilePath $vpnResult.ClientPath -ArgumentList $arguments | Out-Null
+            Write-Host 'Сервер AmneziaWG настроен, профиль передан клиенту автоматически.'
+            Write-Host 'Для включения VPN используйте кнопку подключения в Amnezia. Настройки заполнять не нужно.'
+        } finally { if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) } }
+    } else {
+        Write-Host 'Amnezia пока не готова. Можно вернуться к ней через пункт VPN в меню.'
     }
 }
 function Open-ServerDesktop {
+    param([switch]$KeepOpen, [ValidateSet('0','1','2','3')][string]$Agents = '0')
     if (-not (Get-Command mstsc.exe -CommandType Application -ErrorAction SilentlyContinue)) {
         throw 'Для рабочего стола нужен компонент Windows «Подключение к удалённому рабочему столу» (mstsc). Чат Codex можно открыть без него.'
     }
     $desktopHook = Join-Path $PSScriptRoot 'server-desktop.ps1'
     if (-not (Test-Path -LiteralPath $desktopHook -PathType Leaf)) { throw 'Не хватает компонента рабочего стола. Скопируйте весь комплект программы.' }
     $desktopParameters = @('-VPSHost',$ServerAddress,'-VPSUser',$Login,'-IdentityFile',$keyPath,'-SSHExecutable',$script:sshExecutable,'-SSHConfig',$configPath,'-KnownHostsFile',$knownHostsPath,'-ServerUser','remoteagents','-Prepare','-ManagedSession','-AskpassExecutable',$script:askpassExecutable)
+    $desktopParameters += @('-AgentApplications',$Agents)
     Write-Host 'Подготавливаем рабочий стол сервера. При первом запуске это может занять несколько минут.'
     Write-Host 'Рабочий стол открывается через SSH; отдельный пароль не нужен. Если появится выбор сеанса — нажмите OK.'
     $desktop = Start-ManagedComponent $desktopHook $desktopParameters 'desktop'
+    if ($KeepOpen) {
+        Write-Host 'Рабочий стол открыт. Установщик и RDP могут оставаться открытыми одновременно.'
+        if ($Agents -ne '0') {
+            Write-Host 'Открывается выбранный агент. Если вход ещё не выполнен, войдите в официальном окне приложения/браузера сервера.'
+            Write-Host 'Дальнейшие шаги — ярлык «Начать здесь — вход и проект» на рабочем столе.'
+        }
+        return $desktop
+    }
     try {
         Write-Host 'Рабочий стол открыт через защищённое соединение.'
         do { $closeDesktop = (Read-Host 'Введите 0, чтобы закрыть соединение и вернуться. Enter оставляет его открытым').Trim() } until ($closeDesktop -eq '0')
@@ -423,55 +705,165 @@ function Install-AgentApplications([string]$Choice) {
     $agentSsh = $common + @('-i',$keyPath,'-o','IdentitiesOnly=yes','-o','PubkeyAuthentication=yes','-o','PreferredAuthentications=publickey','-o','PasswordAuthentication=no','-o','KbdInteractiveAuthentication=no')
     Write-Host 'Проверяем выбранные приложения. Готовые используем повторно; недостающие установим.'
     $command = 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi'
-    if ((Invoke-ProfileSsh -Arguments ($agentSsh + @('-T',$ServerAddress,$command)) -InputText $payload) -ne 0) { throw 'Приложения пока не готовы. Причина выше; можно повторить без удаления данных.' }
+    if ((Invoke-ProfileSsh -Arguments ($agentSsh + @('-T',$ServerAddress,$command)) -InputText $payload -Activity 'На сервере: установка выбранных агентов') -ne 0) { throw 'Приложения пока не готовы. Причина в журнале; можно повторить без удаления данных.' }
+}
+function Show-ServerApplications {
+    Write-Host ''
+    Write-Host 'На выбранном сервере:'
+    $payload = @'
+set -eu
+package_state() {
+    label=$1
+    package=$2
+    if ! command -v dpkg-query >/dev/null 2>&1; then
+        printf '  %s: не удалось проверить\n' "$label"
+    elif [ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true)" = 'install ok installed' ]; then
+        printf '  %s: установлено\n' "$label"
+    else
+        printf '  %s: не установлено\n' "$label"
+    fi
+}
+binary_state() {
+    if [ -x "$2" ]; then printf '  %s: установлено\n' "$1"
+    else printf '  %s: не установлено\n' "$1"; fi
+}
+package_state 'Codex — приложение' chatgpt
+codex_path=$(command -v codex || true)
+binary_state 'Codex — терминал' "$codex_path"
+package_state 'Claude — приложение' claude-desktop
+binary_state 'Claude Code — терминал' /home/remoteagents/.local/bin/claude
+package_state 'Рабочий стол (XFCE)' xfce4-session
+'@
+    $statusSsh = $common + @('-i',$keyPath,'-o','IdentitiesOnly=yes','-o','PubkeyAuthentication=yes','-o','PreferredAuthentications=publickey','-o','PasswordAuthentication=no','-o','KbdInteractiveAuthentication=no')
+    $command = 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi'
+    if ((Invoke-ProfileSsh -Arguments ($statusSsh + @('-T',$ServerAddress,$command)) -InputText $payload) -ne 0) {
+        Write-Host 'Состояние компонентов не удалось проверить. Отсутствие проверки не означает, что они не установлены.'
+    } else {
+        Write-Host 'Вход в аккаунты и работоспособность здесь не проверяются.'
+    }
+}
+function Initialize-ServerWorkspace {
+    $source=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'server-agent-user-v1.sh')).Replace("`r`n","`n").TrimStart([char]0xFEFF)
+    $payload="set -e`nbash -s <<'REMOTEAGENTS_ACCOUNT'`n$source`nREMOTEAGENTS_ACCOUNT`n"
+    $payload+=(@('missing=0','for tool in python3 git curl; do command -v "$tool" >/dev/null 2>&1 || missing=1; done','[ "$(dpkg-query -W -f=''${Status}'' ca-certificates 2>/dev/null || true)" = "install ok installed" ] || missing=1','if [ "$missing" = 1 ]; then','export DEBIAN_FRONTEND=noninteractive','apt-get update','apt-get install -y --no-install-recommends --no-remove python3 git curl ca-certificates','fi') -join "`n")+"`n"
+    $arguments=$common+@('-i',$keyPath,'-o','IdentitiesOnly=yes','-o','PasswordAuthentication=no','-o','KbdInteractiveAuthentication=no','-T',$ServerAddress,'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi')
+    if((Invoke-ProfileSsh -Arguments $arguments -InputText $payload -Activity 'Проверка служебной среды сервера') -ne 0){throw 'Служебная среда пока не подготовлена; подробности в журнале.'}
+}
+function Get-SavedProjectNames {
+    Initialize-ProjectModule
+    $context=Get-ProjectClientContext -ExistingOnly
+    if(!$context){return @()}
+    @((Get-RemoteSyncSelection $context.DataDir $context.ClientId).projects|Where-Object{$_.selected}|ForEach-Object{[IO.Path]::GetFileName($_.sourcePath.TrimEnd('\','/'))})
+}
+function Select-AgentApplications {
+    Write-Host '1. Codex; 2. Claude; 3. Оба приложения; 0. Назад без установки'
+    $saved=if($metadata.agentApplications -in @('1','2','3')){[string]$metadata.agentApplications}else{'1'}
+    do{$choice=(Read-Host ('Какие приложения установить/проверить? Enter — '+$saved)).Trim();if(!$choice){$choice=$saved}}until($choice -in @('0','1','2','3'))
+    return $choice
+}
+function Open-ServerAgentApplications([ValidateSet('1','2','3')][string]$Agents) {
+    $payload=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'server-desktop-onboarding.py')).Replace("`r`n","`n")
+    $command='if [ "$(id -u)" -eq 0 ]; then exec runuser -u remoteagents -- env HOME=/home/remoteagents python3 -I - '+$Agents+'; elif [ "$(id -un)" = remoteagents ]; then exec env HOME=/home/remoteagents python3 -I - '+$Agents+'; else exec sudo -n -u remoteagents -- env HOME=/home/remoteagents python3 -I - '+$Agents+'; fi'
+    $arguments=$common+@('-i',$keyPath,'-o','IdentitiesOnly=yes','-o','PasswordAuthentication=no','-o','KbdInteractiveAuthentication=no','-T',$ServerAddress,$command)
+    if((Invoke-ProfileSsh -Arguments $arguments -InputText $payload -Activity 'Открываем выбранное приложение в рабочем столе') -ne 0){throw 'Приложение не открылось. Его установку можно проверить пунктом 11.'}
 }
 function Start-RemoteCodex {
-    Write-Host ''
-    Write-Host 'Какие приложения подготовить на сервере?'
-    Write-Host '1. Codex — приложение'
-    Write-Host '2. Claude — приложение'
-    Write-Host '3. Оба приложения'
-    Write-Host '0. Только рабочий стол, без установки приложений'
-    $savedAgents = if ($metadata.agentApplications -in @('1','2','3')) { [string]$metadata.agentApplications } else { '1' }
-    do { $agents = (Read-Host ('Выберите 1, 2 или 3; Enter — ' + $savedAgents)).Trim(); if (-not $agents) { $agents=$savedAgents } } until ($agents -in @('0','1','2','3'))
-    if ($agents -ne '0') {
-        Install-AgentApplications $agents
-        $metadata | Add-Member -NotePropertyName agentApplications -NotePropertyValue $agents -Force
-        Save-ProfileMetadata $metadata $metadataPath
-        $script:setupOutcome = 'applications-ready'
-        Write-Host 'Приложения готовы. Откройте ярлык на рабочем столе сервера и войдите в свой аккаунт.'
-    }
-    $sessions=@{}
-    $mode=if ($agents -eq '0') { '2' } else { Select-ExecutionMode }
+    # Compatibility entry name. Returning users choose an action before any app install.
+    $agents=if($metadata.agentApplications -in @('1','2','3')){[string]$metadata.agentApplications}else{'0'}
+    $mode=if($metadata.executionMode -in @('1','2')){[string]$metadata.executionMode}else{'2'}
+    $sessions=@{};$desktop=$null;$workspaceReady=$false;$advanced=$false
+    $previews=New-Object 'Collections.Generic.List[object]'
     try {
-      if ($mode -eq '1') { Connect-ProjectFolders $agents $sessions }
-      else { Write-Host 'Работа на сервере: папки Windows и мост не подключаются.' }
-      while ($true) {
+      while($true){
         Write-Host ''
-        Write-Host '1. Рабочий стол сервера — открыть приложения'
-        if ($agents -in @('1','3')) { Write-Host '2. Дополнительно: Codex в терминале' }
-        if ($mode -eq '1') { Write-Host '3. Подключить папки проектов / посмотреть состояние'; Write-Host '4. Отключить папки и управление Windows' }
-        Write-Host '5. VPN на этом сервере — Amnezia'
+        Write-Host '=== Работа с сервером ==='
+        Write-Host '1. Открыть рабочий стол RDP (Enter)'
+        if($agents -ne '0'){Write-Host '2. Открыть выбранный Codex/Claude на рабочем столе'}
+        Write-Host '3. Добавить папки / изменить выбор проектов'
+        $savedNames=@()
+        try{$savedNames=@(Get-SavedProjectNames)}catch{Write-Host 'Список сохранённых проектов пока недоступен; рабочий стол можно открыть.'}
+        $savedLabel=$savedNames -join ', ';if($savedLabel.Length -gt 100){$savedLabel=$savedLabel.Substring(0,97)+'…'}
+        Write-Host ('13. Подключить сохранённые папки ('+$savedNames.Count+'): '+$(if($savedLabel){$savedLabel}else{'пока нет'}))
+        if($sessions.Count){Write-Host ('4. Отключить папки и управление этим ПК ('+$sessions.Count+')')}
+        Write-Host '11. Установить / настроить Codex и Claude'
+        Write-Host ('10. '+$(if($advanced){'Свернуть дополнительные действия'}else{'Дополнительно: компоненты, режим, localhost, VPN'}))
+        if($advanced){
+            Write-Host '6. Проверить установленные компоненты'
+            Write-Host '7. Режим: автономный сервер / управление этим ПК'
+            Write-Host '9. Открыть localhost сервера в браузере через SSH'
+            Write-Host '5. Amnezia VPN'
+            if($agents -in @('1','3')){Write-Host '12. Codex в терминале'}
+        }
+        if($desktop){Write-Host '8. Отключить RDP (приложения остаются на сервере)'}
         Write-Host '0. Вернуться к списку серверов'
-        $action = (Read-Host 'Что открыть? Enter — рабочий стол').Trim()
-        if (-not $action) { $action='1' }
-        if ($action -eq '0') { return }
-        if ($action -eq '1') {
-            try { Open-ServerDesktop }
-            catch { Write-Host 'Рабочий стол не открыт. Повторите подключение.'; Write-Host ('Подробности: ' + $_.Exception.Message) }
+        $action=(Read-Host 'Что открыть? Enter — рабочий стол').Trim();if(!$action){$action='1'}
+        if($action -eq '0'){return}
+        if($action -eq '10'){$advanced=!$advanced;continue}
+        if($action -eq '6'){Show-ServerApplications}
+        if($action -eq '11'){
+            $choice=Select-AgentApplications
+            if($choice -ne '0'){
+                try{
+                    if(!$workspaceReady){Initialize-ServerWorkspace;$workspaceReady=$true}
+                    Install-AgentApplications $choice;Show-ServerApplications
+                    $agents=$choice;$workspaceReady=$true
+                    $metadata|Add-Member -NotePropertyName agentApplications -NotePropertyValue $agents -Force
+                    Save-ProfileMetadata $metadata $metadataPath;$script:setupOutcome='applications-ready'
+                    Write-Host 'Приложения подготовлены. Пункт 2 откроет их; вход выполняется в официальном окне.'
+                    if($sessions.Count){Connect-ProjectFolders $agents $sessions -ReuseSelection -RefreshAgentRegistration}
+                }catch{Write-Host ('Приложения пока не подготовлены: '+$_.Exception.Message)}
+            }
         }
-        if ($action -eq '2' -and $agents -in @('1','3')) { Start-CodexTerminal -ServerTerminalOnly }
-        if ($action -eq '5') {
-            try { Open-VpsVpn } catch { Write-Host ('VPN пока не настроен: ' + $_.Exception.Message) }
+        if($action -in @('1','2','3','13')){
+            try{
+                if(!$workspaceReady){Initialize-ServerWorkspace;$workspaceReady=$true}
+                if($action -in @('1','2')){
+                    if($mode -eq '1' -and $savedNames.Count -gt 0 -and !$sessions.Count){Connect-ProjectFolders $agents $sessions -ReuseSelection}
+                    if($desktop -and $desktop.Process -and !$desktop.Process.HasExited){
+                        if($action -eq '2' -and $agents -ne '0'){Open-ServerAgentApplications $agents}
+                        else{Write-Host 'RDP уже открыт; переключитесь в окно рабочего стола.'}
+                    }else{
+                        if($desktop){Stop-ManagedComponent $desktop;$desktop=$null}
+                        $launch=if($action -eq '2'){$agents}else{'0'}
+                        $desktop=Open-ServerDesktop -KeepOpen -Agents $launch
+                    }
+                }else{
+                    $mode='1';$metadata|Add-Member -NotePropertyName executionMode -NotePropertyValue $mode -Force
+                    Save-ProfileMetadata $metadata $metadataPath
+                    Connect-ProjectFolders $agents $sessions -ReuseSelection:($action -eq '13')
+                }
+            }catch{Write-Host ('Действие пока не завершено: '+$_.Exception.Message)}
         }
-        if ($action -eq '3' -and $mode -eq '1') { Connect-ProjectFolders $agents $sessions }
-        if ($action -eq '4' -and $mode -eq '1') {
-            foreach ($session in $sessions.Values) { Stop-ManagedComponent $session.Bridge; Stop-ManagedComponent $session.Sync }
-            $sessions.Clear(); Write-Host 'Windows отключён. Серверные файлы и исходная папка сохранены.'
+        if($action -eq '12' -and $agents -in @('1','3')){Start-CodexTerminal -ServerTerminalOnly}
+        if($action -eq '5'){Request-VpsVpnSetup}
+        if($action -eq '7'){
+            $mode=Select-ExecutionMode
+            if($mode -eq '2'){
+                foreach($session in $sessions.Values){Stop-ManagedComponent $session.Bridge;Stop-ManagedComponent $session.Sync}
+                $sessions.Clear();Write-Host 'Автономный режим: папки этого ПК отключены.'
+            }else{Write-Host 'Пункт 3 — добавить папки, пункт 13 — подключить сохранённые.'}
+        }
+        if($action -eq '4'){
+            foreach($session in $sessions.Values){Stop-ManagedComponent $session.Bridge;Stop-ManagedComponent $session.Sync}
+            $sessions.Clear();Write-Host 'Папки отключены. Серверные файлы и исходные папки сохранены.'
+        }
+        if($action -eq '8' -and $desktop){Stop-ManagedComponent $desktop;$desktop=$null}
+        if($action -eq '9'){
+            $port=0;$answer=Read-Host 'Порт сервиса на VPS (например 3801); Enter — отмена'
+            if([int]::TryParse($answer,[ref]$port) -and $port -ge 1024 -and $port -le 65535){
+                try{
+                    $preview=Start-ManagedComponent (Join-Path $PSScriptRoot 'Start-RemotePreview.ps1') @('-VPSHost',$ServerAddress,'-VPSUser',$Login,'-IdentityFile',$keyPath,'-KnownHostsFile',$knownHostsPath,'-SSHConfig',$configPath,'-SSHExecutable',$script:sshExecutable,'-AskpassExecutable',$script:askpassExecutable,'-ServerPort',[string]$port,'-ManagedSession') 'preview'
+                    $previews.Add($preview);$address=($preview.Output.ReadyLine|ConvertFrom-Json).url
+                    Write-Host ('SSH-проброс открыт: '+$address+' → VPS 127.0.0.1:'+$port+'. Сам сервис ещё не проверен.')
+                    Start-Process $address
+                }catch{Write-Host ('Просмотр не открыт: '+$_.Exception.Message)}
+            }
         }
       }
-    } finally {
-        foreach ($session in $sessions.Values) { Stop-ManagedComponent $session.Bridge; Stop-ManagedComponent $session.Sync }
+    }finally{
+        foreach($preview in $previews){Stop-ManagedComponent $preview}
+        Stop-ManagedComponent $desktop
+        foreach($session in $sessions.Values){Stop-ManagedComponent $session.Bridge;Stop-ManagedComponent $session.Sync}
     }
 }
 function Start-CodexTerminal {
@@ -487,7 +879,7 @@ function Start-CodexTerminal {
     try { $deviceLabel = 'win-' + [BitConverter]::ToString($deviceHash.ComputeHash([Text.Encoding]::UTF8.GetBytes($profileId))).Replace('-','').ToLowerInvariant().Substring(0,28) }
     finally { $deviceHash.Dispose() }
     $bundle = ''
-    foreach ($pythonFile in @('codex-windows-bridge.py','codex-bridge-session.py')) {
+    foreach ($pythonFile in @('codex-windows-bridge.py','codex-bridge-session.py','server_node_catalog.py')) {
         $pythonPath = Join-Path $PSScriptRoot $pythonFile
         if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) { throw ('Не хватает компонента ' + $pythonFile + '. Скопируйте весь комплект.') }
         $encoded = [Convert]::ToBase64String([IO.File]::ReadAllBytes($pythonPath))
@@ -499,21 +891,12 @@ function Start-CodexTerminal {
         $bootstrap += "check_root_path `"`$state/windows-mcp/windows-$deviceLabel`"`n: > `"`$state/windows-mcp/windows-$deviceLabel`"`n"
     }
     $prepareCommand = 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi'
-    $prepareCode = Invoke-ProfileSsh -Arguments ($codexSsh + @('-T', $ServerAddress, $prepareCommand)) -InputText $bootstrap
+    $prepareCode = Invoke-ProfileSsh -Arguments ($codexSsh + @('-T', $ServerAddress, $prepareCommand)) -InputText $bootstrap -Activity 'На сервере: подготовка Codex'
     if ($prepareCode -ne 0) { throw ('Codex пока не подготовлен. Причина выше; код ' + $prepareCode + '. Подключение и прежние данные сохранены.') }
     $script:setupOutcome = 'codex-installed'
     if ($ServerTerminalOnly) { $executionMode='2'; Write-Host 'Терминал работает с файлами сервера. Подключённые проекты Windows остаются доступны в приложении Codex.' }
     else {
-    Write-Host ''
-    Write-Host 'Где выполнять работу? Сам Codex в обоих случаях работает на сервере.'
-    Write-Host '1. На этом компьютере через соединение с Windows'
-    Write-Host '2. На сервере'
-    $savedMode = if ($metadata.executionMode -in @('1','2')) { [string]$metadata.executionMode } else { '2' }
-    do { $executionMode = (Read-Host ('Место работы: 1 или 2; Enter — ' + $savedMode)).Trim(); if (-not $executionMode) { $executionMode=$savedMode } } until ($executionMode -in @('1','2'))
-    if ($metadata.executionMode -ne $executionMode) {
-        $metadata | Add-Member -NotePropertyName executionMode -NotePropertyValue $executionMode -Force
-        Save-ProfileMetadata $metadata $metadataPath
-    }
+    $executionMode = Select-ExecutionMode
     }
     if ((Invoke-CodexSession 'status') -ne 0) {
         Write-Host ''
@@ -553,10 +936,10 @@ function Start-CodexTerminal {
     }
     $bridgeHook = Join-Path $PSScriptRoot 'Start-CodexWindowsBridge.ps1'
     if (-not (Test-Path -LiteralPath $bridgeHook -PathType Leaf)) { throw 'Не хватает компонента связи с Windows. Скопируйте весь комплект программы.' }
-    Write-Host 'Соединяем Codex с выбранной папкой Windows. Команды Windows требуют отдельного разрешения.'
+    Write-Host 'Соединяем Codex с выбранной папкой Windows. Команды работают с правами вашего пользователя Windows.'
     $bridgeParameters = @('-VPSHost',$ServerAddress,'-VPSUser',$Login,'-IdentityFile',$keyPath,'-Workspace',$workspace,'-DeviceLabel',$deviceLabel,'-KnownHostsFile',$knownHostsPath,'-SSHConfig',$configPath,'-SSHExecutable',$script:sshExecutable,'-ServerUser','remoteagents','-RemoteBase','/home/remoteagents/.local/share/codex-remote','-SocketPath',('/home/remoteagents/.local/state/codex-remote/' + $deviceLabel + '.sock'),'-AskpassExecutable',$script:askpassExecutable,'-ManagedSession')
     Write-Host 'Разрешённые команды работают с вашими правами Windows, включая доступные вам сеть и другие папки.'
-    if (Confirm-Action 'Разрешить Codex запускать команды на этом компьютере?' -DefaultNo) { $bridgeParameters += '-AllowShell' }
+    $bridgeParameters += '-AllowShell'
     $bridge = Start-ManagedComponent $bridgeHook $bridgeParameters 'connected'
     } else {
         Write-Host 'Рабочая папка на сервере: /home/remoteagents/work. Соединение с папками Windows не запускается.'
@@ -570,7 +953,7 @@ function Start-CodexTerminal {
     } finally { Stop-ManagedComponent $bridge }
 }
 function Start-ConnectionSetup {
-param([string]$ServerAddress, [string]$Login, [string]$ProfileName, [string]$DataDir)
+param([string]$ServerAddress, [string]$Login, [string]$ProfileName, [string]$DataDir, [switch]$ConnectionSettings)
 $script:setupOutcome = 'stopped'
 $script:setupExitCode = 0
 $script:askpassExecutable = $null
@@ -583,7 +966,7 @@ try {
     }
     if (-not [IO.Path]::IsPathRooted($DataDir)) { throw 'Параметр -DataDir должен содержать полный путь к папке, например D:\My SSH State.' }
     $DataDir = [IO.Path]::GetFullPath($DataDir)
-    Write-Host 'Подключим этот компьютер к вашему серверу.'
+    Write-Host 'Подключение к серверу.'
     Write-Host 'Пароли вводите здесь, не отправляйте их в чат.'
     Write-Host ''
     Write-Host 'Этап 1. Выберите сервер'
@@ -615,12 +998,17 @@ try {
             Write-Host ('  {0}. {1} — {2}' -f ($i + 1), $safeName, $safeAddress)
         }
         Write-Host '  0. Добавить новый сервер'
+        Write-Host '  Для обслуживания SSH: M и номер, например M1.'
         do {
-            $answer = Read-Host 'Введите номер сервера или 0 для нового'
+            $answer = (Read-Host 'Номер сервера; Enter — 1; 0 — новый').Trim()
+            if(!$answer){$answer='1'}
+            $maintenance=($answer -match '^[mMьЬ]([0-9]+)$')
+            if($maintenance){$answer=$Matches[1]}
             $number = -1
             $validChoice = [int]::TryParse($answer, [ref]$number) -and $number -ge 0 -and $number -le $available.Count
             if (-not $validChoice) { Write-Host 'Введите номер из списка или 0 для нового сервера.' }
         } until ($validChoice)
+        if($maintenance -and $number -gt 0){$ConnectionSettings=$true}
         if ($number -gt 0) { $selected = $available[$number - 1] }
     }
     if ($selected) {
@@ -685,7 +1073,7 @@ try {
     $hasPrivate = Test-Path -LiteralPath $keyPath -PathType Leaf
     $hasPublic = Test-Path -LiteralPath $publicPath -PathType Leaf
     $action = '1'
-    if ($selected) {
+    if ($selected -and $ConnectionSettings) {
         Write-Host '1. Продолжить (Enter)'
         Write-Host '2. Настроить подключение заново'
         Write-Host '3. Изменить пароль защиты подключения'
@@ -734,12 +1122,11 @@ try {
         $usePending = $true
     } elseif ($selected) {
         if ($hasPrivate -and $hasPublic) {
-            Write-Host 'Проверим сохранённый вход. Пароль защиты вводится в отдельном окне.'
-            Write-Host 'Если появится окно проверки сервера, сверьте код с панелью хостинга. Не уверены — «Отмена».'
+            Write-Host 'Проверяем сохранённый SSH-вход. Если нужен пароль защиты ключа, появится отдельное окно.'
             if ((Test-SavedConnection $keyPath) -eq 0) {
                 Write-Host ('Готово: вход на сервер проверен. Сервер: ' + $displayName)
             $script:setupOutcome = 'verified'
-            Request-VpsVpnSetup
+            Assert-SupportedServer
             Start-RemoteCodex
             return
             }
@@ -819,7 +1206,7 @@ try {
     }
     Write-Host ('Готово: вход на сервер проверен. Сервер: ' + $displayName)
     $script:setupOutcome = 'verified'
-    Request-VpsVpnSetup
+    Assert-SupportedServer
     Start-RemoteCodex
 } catch {
     Write-Host ''
@@ -843,14 +1230,23 @@ function Show-SetupResult {
         'error' { Write-Host 'Ошибка: настройка не завершена. Причина показана выше.' }
         default { Write-Host 'Настройка остановлена. Пояснение показано выше.' }
     }
-    Write-Host 'Выбранные приложения устанавливаются на сервер. VPN Windows не изменяется.'
+    Write-Host 'Вход в аккаунты и готовность задач подтверждаются отдельно в выбранном приложении.'
 }
 
+Select-SetupOutputMode -Detailed:$DetailedOutput -Prompt:($Launcher -and -not $PSBoundParameters.ContainsKey('DetailedOutput'))
+$logRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'RemoteAgents'
+if (-not [IO.Directory]::Exists($logRoot)) { [void][IO.Directory]::CreateDirectory($logRoot); Protect-NewDirectory $logRoot }
+$logsRoot = Join-Path $logRoot 'logs'
+if (-not [IO.Directory]::Exists($logsRoot)) { [void][IO.Directory]::CreateDirectory($logsRoot); Protect-NewDirectory $logsRoot }
+$script:setupLogDirectory = Join-Path $logsRoot ((Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0,8))
+[void][IO.Directory]::CreateDirectory($script:setupLogDirectory)
+Protect-NewDirectory $script:setupLogDirectory
+Write-Host ('Подробные журналы: ' + $script:setupLogDirectory)
 $nextServerAddress = $ServerAddress
 $nextLogin = $Login
 $nextProfileName = $ProfileName
 do {
-    Start-ConnectionSetup -ServerAddress $nextServerAddress -Login $nextLogin -ProfileName $nextProfileName -DataDir $DataDir
+    Start-ConnectionSetup -ServerAddress $nextServerAddress -Login $nextLogin -ProfileName $nextProfileName -DataDir $DataDir -ConnectionSettings:$ConnectionSettings
     Show-SetupResult
     if (-not $Launcher) { break }
     Write-Host ''

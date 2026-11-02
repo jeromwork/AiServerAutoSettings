@@ -5,6 +5,8 @@ import json
 import os
 import socket
 import sys
+from pathlib import Path
+import server_node_catalog as catalog_api
 
 MAX = 262144
 
@@ -24,13 +26,18 @@ TOOLS = [
     ("windows_process_poll", "Read bounded output and state of a development process started by this bridge.", schema({"id": STR}, ["id"]), True),
     ("windows_process_stop", "Stop a development process and its child processes started by this bridge.", schema({"id": STR}, ["id"]), False),
 ]
+TASK_TOOLS={'windows_command','windows_process_start','windows_process_poll','windows_process_stop'}
+TOOLS=[(name, description, schema(dict(inputs['properties'],taskId=STR), inputs['required']) if name in TASK_TOOLS else inputs, readonly) for name,description,inputs,readonly in TOOLS]
 
 
-def exchange(path, op, args):
+def exchange(path, op, args, binding=None, timeout=100):
     with socket.socket(socket.AF_UNIX) as conn:
-        conn.settimeout(100)
+        conn.settimeout(timeout)
         conn.connect(os.path.expanduser(path))
-        payload = json.dumps({"op": op, "args": args}, separators=(",", ":")).encode() + b"\n"
+        request = {"op": op, "args": args}
+        if binding is not None:
+            request['binding'] = {key: binding[key] for key in ('projectId', 'hostId', 'deviceLabel', 'windowsReplica')}
+        payload = json.dumps(request, separators=(",", ":")).encode() + b"\n"
         if len(payload) > MAX:
             raise ValueError("request too large")
         conn.sendall(payload)
@@ -40,7 +47,7 @@ def exchange(path, op, args):
         return json.loads(raw)
 
 
-def dispatch(message, path):
+def dispatch(message, path, catalog=None):
     method = message.get("method")
     params = message.get("params", {})
     if method == "initialize":
@@ -51,13 +58,52 @@ def dispatch(message, path):
     if method == "ping":
         return {}
     if method == "tools/list":
-        return {"tools": [{"name": name, "description": description, "inputSchema": inputs, "annotations": {"readOnlyHint": readonly, "openWorldHint": not readonly}} for name, description, inputs, readonly in TOOLS]}
+        tools = []
+        for name, description, inputs, readonly in TOOLS:
+            if catalog:
+                inputs = schema(dict(inputs['properties'], projectId=STR, hostId=STR), inputs['required']+['projectId','hostId']+(['taskId'] if name in TASK_TOOLS else []))
+                description += ' Requires exact projectId and hostId from windows_devices; never falls back to another node.'
+            tools.append({"name": name, "description": description, "inputSchema": inputs, "annotations": {"readOnlyHint": readonly, "openWorldHint": not readonly}})
+        if catalog:
+            tools.append({'name':'windows_devices','description':'List registered Windows bindings, names, live availability and discovered capabilities. Sleeping/disconnected devices are unavailable; executable discovery does not prove SDK/VPN functionality.', 'inputSchema':schema({'projectId':STR}), 'annotations':{'readOnlyHint':True}})
+        return {"tools":tools}
     if method == "tools/call":
+        if catalog and params.get('name') == 'windows_devices':
+            values = params.get('arguments', {})
+            if not isinstance(values, dict) or set(values)-{'projectId'} or ('projectId' in values and not catalog_api.IDENT.fullmatch(values['projectId'])):
+                raise ValueError('Invalid project filter')
+            devices = []
+            for record in catalog_api.records(catalog, Path.home()):
+                if values.get('projectId') and record['projectId'] != values['projectId']:
+                    continue
+                row = {key:record[key] for key in ('projectId','hostId','deviceName','serverWorkspace','windowsReplica')}
+                row['projectName']=record.get('projectName',record['projectId'])
+                row.update(available=False, capabilities={}, shell_enabled=False)
+                try:
+                    status = exchange(record['socketPath'], 'status', {}, record, timeout=3)
+                    if catalog_api.matches(record, status):
+                        row.update(available=True, capabilities=status.get('capabilities',{}), shell_enabled=status.get('shell_enabled',False))
+                except Exception:
+                    pass
+                devices.append(row)
+            return {'content':[{'type':'text','text':json.dumps({'ok':True,'devices':devices},ensure_ascii=False)}]}
         tool = next((tool for tool in TOOLS if tool[0] == params.get("name")), None)
         if not tool:
             raise ValueError("unknown tool")
         values = params.get("arguments", {})
+        binding = None
+        if catalog:
+            if not isinstance(values, dict) or any(not isinstance(values.get(key), str) or not catalog_api.IDENT.fullmatch(values[key]) for key in ('projectId','hostId')):
+                raise ValueError('Explicit projectId and hostId required')
+            candidates = [r for r in catalog_api.records(catalog, Path.home()) if r['projectId']==values['projectId'] and r['hostId']==values['hostId']]
+            if len(candidates)!=1:
+                return {'content':[{'type':'text','text':'{"ok":false,"error":"Exact target is not registered; no fallback"}'}], 'isError':True}
+            binding = candidates[0]
+            path = binding['socketPath']
+            values = {key:value for key,value in values.items() if key not in ('projectId','hostId')}
         spec = tool[2]
+        if catalog and tool[0] in TASK_TOOLS and not catalog_api.IDENT.fullmatch(values.get('taskId','')):
+            raise ValueError('Explicit taskId required')
         if not isinstance(values, dict) or set(values) - set(spec["properties"]) or any(key not in values for key in spec["required"]):
             raise ValueError("invalid tool arguments")
         for key, value in values.items():
@@ -67,7 +113,11 @@ def dispatch(message, path):
             if kind == "integer" and (type(value) is not int or not 1 <= value <= 60):
                 raise ValueError("invalid timeout")
         try:
-            result = exchange(path, tool[0].removeprefix("windows_"), values)
+            if binding and not catalog_api.matches(binding, exchange(path, 'status', {}, binding, timeout=3)):
+                raise ValueError('Target binding mismatch')
+            result = exchange(path, tool[0].removeprefix("windows_"), values, binding)
+            if binding:
+                result['target'] = {'projectId':binding['projectId'],'hostId':binding['hostId']}
         except Exception:
             result = {"ok": False, "error": "Windows bridge disconnected; start or reconnect the Windows bridge."}
         return {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}], "isError": not result.get("ok", False)}
@@ -76,7 +126,9 @@ def dispatch(message, path):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--socket", required=True)
+    group=parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--socket")
+    group.add_argument("--catalog")
     args = parser.parse_args()
     while True:
         raw = sys.stdin.buffer.readline(MAX + 1)
@@ -91,7 +143,7 @@ def main():
                 raise ValueError("invalid request")
             if "id" not in message:
                 continue
-            response = {"jsonrpc": "2.0", "id": message["id"], "result": dispatch(message, args.socket)}
+            response = {"jsonrpc": "2.0", "id": message["id"], "result": dispatch(message, args.socket, args.catalog)}
         except LookupError:
             response = {"jsonrpc": "2.0", "id": message.get("id"), "error": {"code": -32601, "message": "Method not found"}}
         except Exception:

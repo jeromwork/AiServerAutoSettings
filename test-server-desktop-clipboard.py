@@ -12,6 +12,11 @@ import re
 import shlex
 import sys
 import unittest
+import os
+import socket
+import stat
+import subprocess
+import tempfile
 
 SOURCE = Path(sys.argv.pop(1)) if len(sys.argv) > 1 else Path(__file__).with_name('server-desktop-bootstrap.sh')
 TEXT = SOURCE.read_text(encoding='utf-8')
@@ -47,6 +52,28 @@ def unit_values(text):
 
 
 class ClipboardContract(unittest.TestCase):
+    @unittest.skipUnless(os.name=='posix','Real owner-local Unix socket metadata')
+    def test_reconnect_restores_recreated_socket_permissions_without_restart(self):
+        helper=heredoc('DESKTOP_CLIPBOARD_SOCKET').replace("Path('/run/remoteagents-desktop-clipboard')",'Path(sys.argv[1])')
+        with tempfile.TemporaryDirectory(prefix='clipboard-permissions-') as temporary:
+            folder=Path(temporary);folder.chmod(0o700)
+            sockets=[]
+            try:
+                for name in ('xrdp_chansrv_socket_98','xrdpapi_98'):
+                    endpoint=socket.socket(socket.AF_UNIX);endpoint.bind(str(folder/name));sockets.append(endpoint)
+                    (folder/name).chmod(0o660)
+                for _ in range(2):
+                    (folder/'xrdp_chansrv_socket_98').chmod(0o660)
+                    subprocess.run([sys.executable,'-I','-',str(folder)],input=helper,text=True,check=True,capture_output=True,timeout=10)
+                    self.assertTrue(all(stat.S_IMODE((folder/name).lstat().st_mode)==0o600 for name in ('xrdp_chansrv_socket_98','xrdpapi_98')))
+                self.assertEqual(stat.S_IMODE(folder.stat().st_mode),0o700)
+            finally:
+                for endpoint in sockets:endpoint.close()
+        enable=TEXT.index('systemctl enable --now remoteagents-desktop-clipboard.service')
+        repair=TEXT.index('runuser -u "$server_user" -- python3 -I "$install_dir/clipboard-socket.py"',enable)
+        check=TEXT.index("<<'DESKTOP_CLIPBOARD_READY'",enable)
+        self.assertLess(repair,check)
+
     def test_configuration_keeps_text_and_disables_file_transfer(self):
         cfg = ini(heredoc('DESKTOP_CLIPBOARD_CONFIG'))
         self.assertEqual(cfg['Globals']['ListenAddress'], '127.0.0.1', 'This exact value selects AF_UNIX in chansrv 0.9.24')

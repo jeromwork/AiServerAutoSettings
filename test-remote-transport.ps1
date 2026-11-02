@@ -1,4 +1,5 @@
 ﻿$ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot 'Windows.Paths.ps1')
 $root=Join-Path $PSScriptRoot ('transport fixture '+[guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($root)|Out-Null
 function Assert($Condition,[string]$Message){if(-not $Condition){throw $Message}}
@@ -11,14 +12,18 @@ class Program {static void Main(string[] args){
   if(mode=="tunnel"){Console.WriteLine("REMOTEAGENTS_SYNC_TUNNEL_READY");Console.In.ReadToEnd();return;}
   if(mode=="upload"){using(var f=File.Create(Environment.GetEnvironmentVariable("REMOTEAGENTS_TEST_FILE")))Console.OpenStandardInput().CopyTo(f);return;}
   if(mode=="download"){Console.OpenStandardOutput().Write(new byte[]{0,255,10,128},0,4);return;}
+  var capture=Environment.GetEnvironmentVariable("REMOTEAGENTS_TEST_FILE");
+  if(mode=="exec"&&!String.IsNullOrEmpty(capture))File.WriteAllText(capture,args[args.Length-1],new UTF8Encoding(false));
   Console.OutputEncoding=new UTF8Encoding(false);Console.Write("UTF8: Привет\n");
 }}
 '@
     $c=[pscustomobject]@{sshExecutable=$exe;askpassExecutable='unused';arguments=@('-F','config with spaces','example.com')}
     $env:REMOTEAGENTS_TEST_MODE='exec'
-    $r=& (Join-Path $PSScriptRoot 'Invoke-RemoteAgentsSsh.ps1') -Request @{action='exec';command='printf public';timeoutSec=5} -Connection $c -DataDir $root
+    $env:REMOTEAGENTS_TEST_FILE=Join-Path $root 'captured-command.txt'
+    $r=& (Join-Path $PSScriptRoot 'Invoke-RemoteAgentsSsh.ps1') -Request @{action='exec';command="# fixture CRLF`r`nset -eu`r`nprintf public`r`n";longRunning=$true;timeoutSec=5} -Connection $c -DataDir $root
     Assert (@($r).Count -eq 1 -and $r -is [pscustomobject] -and $r.exitCode -eq 0 -and $r.stdout -eq "UTF8: Привет`n") 'UTF8 exec failed'
-    $bytes=[Text.Encoding]::UTF8.GetBytes("Привет`npublic`n")
+    Assert (![IO.File]::ReadAllText($env:REMOTEAGENTS_TEST_FILE).Contains("`r")) 'CRLF was transmitted inside the server Bash command'
+    $bytes=[Text.Encoding]::UTF8.GetBytes("Привет`r`npublic`0`r`n")
     $file=Join-Path $root 'seed.zip';[IO.File]::WriteAllBytes($file,$bytes)
     $env:REMOTEAGENTS_TEST_MODE='upload';$env:REMOTEAGENTS_TEST_FILE=Join-Path $root 'received.bin'
     $remote='/home/remoteagents/.local/share/remote-agents-sync/p-test/h-test/seed.zip'
@@ -28,6 +33,19 @@ class Program {static void Main(string[] args){
     $name='snapshot-'+[guid]::NewGuid().ToString('N')+'.json';$file=Join-Path $root $name
     $r=& (Join-Path $PSScriptRoot 'Invoke-RemoteAgentsSsh.ps1') -Request @{action='download';localPath=$file;remotePath=('/home/remoteagents/.local/share/remote-agents-sync/p-test/h-test/'+$name);timeoutSec=5} -Connection $c -DataDir $root
     Assert ([Convert]::ToBase64String([IO.File]::ReadAllBytes($file)) -eq 'AP8KgA==') 'Binary download changed bytes'
+    # Real PS5.1 FileStream transfer into a long nested installer state path.
+    $deep=Join-Path $root ('d'*(270-$root.Length-1))
+    [void][IO.Directory]::CreateDirectory((ConvertTo-RemoteAgentsIOPath $deep))
+    $longFile=Join-Path $deep ('snapshot-'+[guid]::NewGuid().ToString('N')+'.json')
+    $r=& "$PSScriptRoot\Invoke-RemoteAgentsSsh.ps1" -Request @{action='download';localPath=$longFile;remotePath=('/home/remoteagents/.local/share/remote-agents-sync/p-test/h-test/'+[IO.Path]::GetFileName($longFile));timeoutSec=5} -Connection $c -DataDir $root
+    Assert ($r.exitCode -eq 0 -and [Convert]::ToBase64String([IO.File]::ReadAllBytes((ConvertTo-RemoteAgentsIOPath $longFile))) -eq 'AP8KgA==') 'Long snapshot download failed'
+    $longSeed=Join-Path $deep 'seed.zip';[IO.File]::WriteAllBytes((ConvertTo-RemoteAgentsIOPath $longSeed),$bytes)
+    $env:REMOTEAGENTS_TEST_MODE='upload'
+    $r=& "$PSScriptRoot\Invoke-RemoteAgentsSsh.ps1" -Request @{action='upload';localPath=$longSeed;remotePath=$remote;timeoutSec=5} -Connection $c -DataDir $root
+    Assert ($r.exitCode -eq 0 -and [Convert]::ToBase64String([IO.File]::ReadAllBytes($env:REMOTEAGENTS_TEST_FILE)) -eq [Convert]::ToBase64String($bytes)) 'Long archive upload failed'
+    $denied=$false
+    try{& "$PSScriptRoot\Invoke-RemoteAgentsSsh.ps1" -Request @{action='upload';localPath=('\\?\'+$root+'\..\outside\seed.zip');remotePath=$remote;timeoutSec=5} -Connection $c -DataDir $root|Out-Null}catch{$denied=$_.Exception.Message -like '*вне данных проекта*'}
+    Assert $denied 'Extended path bypassed transfer scope normalization'
     $env:REMOTEAGENTS_TEST_MODE='tunnel'
     $info=New-Object Diagnostics.ProcessStartInfo
     $info.FileName=Join-Path $PSHOME 'powershell.exe'
@@ -40,7 +58,7 @@ class Program {static void Main(string[] args){
         Assert ($p.WaitForExit(10000) -and $p.ExitCode -eq 0) 'Tunnel stop failed'
     }finally{if(-not $p.HasExited){$p.Kill();$p.WaitForExit()};$p.Dispose()}
     # The real standalone project entry uses fake orchestration, real native transport/tunnel.
-    foreach($name in @('Connect-RemoteAgentsProject.ps1','Invoke-RemoteAgentsSsh.ps1','Start-RemoteSyncTunnel.ps1','Invoke-RemoteSyncGuard.ps1','setup-vps-ssh.ps1')){[IO.File]::Copy((Join-Path $PSScriptRoot $name),(Join-Path $root $name))}
+    foreach($name in @('Connect-RemoteAgentsProject.ps1','Invoke-RemoteAgentsSsh.ps1','Windows.Paths.ps1','Start-RemoteSyncTunnel.ps1','Invoke-RemoteSyncGuard.ps1','setup-vps-ssh.ps1')){[IO.File]::Copy((Join-Path $PSScriptRoot $name),(Join-Path $root $name))}
     [IO.File]::WriteAllText((Join-Path $root 'Sync.Workspace.ps1'),'# fixture')
     [IO.File]::WriteAllText((Join-Path $root 'Sync.Runtime.ps1'),'function Stop-RemoteSyncWorker {param($DataDir,$ProjectId,$HostId)}')
     $fixture=@'
@@ -80,5 +98,5 @@ param($DataDir,$ProjectId,$HostId,$SSHTransport,$TimeoutSec)
     'PASS: Windows PS5.1 native UTF8/LF, binary upload/download, path spaces, managed tunnel ready/stop; no SSH/network.'
 }finally{
     Remove-Item Env:REMOTEAGENTS_TEST_MODE,Env:REMOTEAGENTS_TEST_FILE -ErrorAction SilentlyContinue
-    if([IO.Path]::GetDirectoryName($root) -eq $PSScriptRoot){Remove-Item -LiteralPath $root -Recurse -Force}
+    if([IO.Path]::GetDirectoryName($root) -eq $PSScriptRoot){Remove-Item -LiteralPath (ConvertTo-RemoteAgentsIOPath $root) -Recurse -Force}
 }
