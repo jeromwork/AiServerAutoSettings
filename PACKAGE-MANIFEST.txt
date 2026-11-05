@@ -2,7 +2,6 @@
 .gitignore
 01-setup-ssh.cmd
 Agent.Handoff.ps1
-AMNEZIA.txt
 codex-bridge-session.py
 codex-windows-bridge.py
 Connect-RemoteAgentsProject.ps1
@@ -17,7 +16,7 @@ README.md
 Select-RemoteAgentsProjects.ps1
 server-agent-handoff.py
 server-agent-user-v1.sh
-server-amnezia.sh
+server-happ.sh
 server-browser-bootstrap.sh
 server-browser.ps1
 server-chatgpt.sh
@@ -33,7 +32,7 @@ server-install-sync.sh
 server-sync-runtime.py
 server-sync.py
 server_node_catalog.py
-setup-amnezia.ps1
+setup-happ.ps1
 setup-vps-ssh.ps1
 ssh-password-ui.cs
 Start-CodexWindowsBridge.ps1
@@ -47,8 +46,7 @@ Windows.Paths.ps1
 test-agent-handoff.ps1
 test-agent-handoff.py
 test-agent-instructions.py
-test-amnezia-prompt.ps1
-test-amnezia.ps1
+test-happ-prompt.ps1
 test-codex-bootstrap.sh
 test-codex-launcher.ps1
 test-multi-node.py
@@ -62,7 +60,6 @@ test-project-menu.ps1
 test-ps51-stdin.ps1
 test-quick-entry.ps1
 test-remote-transport.ps1
-test-server-amnezia.ps1
 test-server-browser.ps1
 test-server-browser.py
 test-server-chatgpt.sh
@@ -91,3 +88,10 @@ test-windows-bridge-sync.ps1
 test-windows-bridge.py
 test-windows-tcp-relay.ps1
 windows-bridge-executor.ps1
+Remote.Chat.ps1
+server-chat.ps1
+server-happier.sh
+test-remote-chat.ps1
+REMOTE-CHAT.md
+REMOTE-CHAT-VERIFICATION.md
+HAPP-IMPORT.bat

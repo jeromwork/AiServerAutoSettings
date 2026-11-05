@@ -1,0 +1,47 @@
+{
+  "log": {
+    "loglevel": "debug"
+  },
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "port": 10898,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "188.114.97.3",
+            "port": 443,
+            "users": [
+              {
+                "encryption": "none",
+                "id": "e01d4719-5cf6-4bf5-a001-3d7c900bcbdf"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "vpn.corenetai.ru"
+        },
+        "xhttpSettings": {
+          "path": "/vless-xhttp",
+          "mode": "packet-up"
+        }
+      },
+      "tag": "proxy"
+    }
+  ]
+}

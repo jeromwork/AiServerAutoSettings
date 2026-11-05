@@ -36,11 +36,9 @@
 - `test-sync-subscription.ps1` и `test-sync-selection.ps1`: две host-подписки одного ID, re-enable/reuse, отсутствие seed-export/upload, отказ отсутствующему серверному проекту, сохранённый невыбранный кандидат без project.json и последующий выбор, сохранение областей и границ исходной папки.
 - `test-agent-instructions.py`: 4 проверки сохранности правил, атомарного обновления, отказа неоднозначному блоку и двух handoff с общими инструкциями без implicit last-host. `test-agent-handoff.HandoffTests` и настоящий локальный fixture MCP/broker/Windows executor также прошли.
 - `test-preview.ps1`: настоящий управляемый PS5.1-процесс с fixture SSH, замена занятого локального порта, точный loopback forward, StrictHostKeyChecking, остановка. Готовность HTTP-сервиса не заявляется.
-- Повторно прошли `test-agent-handoff.ps1`, `test-sync-workspace.ps1`, `test-sync-git.ps1`, `test-sync-common-root.ps1`, `test-sync-secret-fence.ps1`, `test-project-menu.ps1`, `test-windows-bridge-sync.ps1`, `test-server-desktop.ps1`, `test-server-requirements.ps1`, `test-codex-launcher.ps1`, `test-ps51-stdin.ps1`, `test-remote-transport.ps1`, `test-amnezia.ps1`, `test-amnezia-prompt.ps1`, `test-server-amnezia.ps1`. Проверки Amnezia используют mocks; действующий VPN не трогают.
 - Python-проверки Windows bridge + native task execution + fixture handoff: 8/8. Linux policy/catalog/scope: 19/19 плюс deletion regression. `test-server-desktop-onboarding.py` прошёл отдельно.
 - `test-portable-package.ps1`: 37 runtime-компонентов, manifest, PS5.1-синтаксис и privacy fence. `git diff --check` прошёл. Новые runtime/test-файлы перечислены в manifest. Commit/push не выполнялись.
 
-Первый общий прогон из Python встретил недоступный Get-FileHash из-за унаследованного окружения модулей; прямые запуски двух Amnezia-тестов в PS5.1 прошли. Один нагруженный fixture-прогон handoff превысил свой 45-секундный таймаут; последовательный повтор и полный native набор прошли. Production-таймауты ради этого не увеличивались.
 
 Осталась физическая приёмка двух Windows-компьютеров через один VPS, официальный вход пользователя и настоящая сессия модели. Результаты выше не подтверждают модельную авторизацию, реальные SDK/USB/эмулятор, звук или VPN-совместимость. Минимальный следующий проход описан в [CONTINUE.md](CONTINUE.md).
 
@@ -60,7 +58,6 @@
 - `test-remote-transport.ps1`: Windows argv, UTF-8/LF, бинарная передача, пути с пробелами и жизненный цикл туннеля со stub-процессом, без SSH.
 - `test-server-browser.ps1`: настоящий Windows argv roundtrip и локальный порт. Исправлена только упаковочная ошибка теста: под PS5.1 JSON-массив нельзя дополнительно оборачивать в `@()`; runtime-код не менялся.
 - `test-server-desktop.ps1`: синтаксис Bash, компиляция .NET-пробы, аргументы, stdin, RDP-настройки (включая параметры звука) и loopback. Реальный RDP-сеанс и звук не проверялись.
-- `test-amnezia.ps1`: безопасные mocks подписи, загрузки, повторного запуска, таймаута, выхода, состояния службы и UAC worker. Реальный VPN не устанавливался.
 - `test-sync-git-prerequisite.ps1 -Archive <официальный MinGit ZIP>`: закреплённый portable Git, запуск без PATH, reuse, отказ при подмене и ошибке SHA256.
 - `test-sync-runtime.ps1 -Archive <официальный Syncthing ZIP>` и `test-sync-git-runtime.ps1 -Archive <официальный Syncthing ZIP>`: настоящий локальный процесс Syncthing, закрытый API, Git-область и отказ при недоступном peer. ZIP использованы вне репозитория и не входят в поставку.
 - `python test-server-sync-git.py`: 13 проверок, 2 пропущены из-за платформенных условий Windows.

@@ -1,5 +1,5 @@
 ﻿[CmdletBinding()]
-param([string]$ServerAddress, [string]$Login, [string]$ProfileName, [string]$DataDir, [switch]$Launcher, [switch]$DetailedOutput, [switch]$ConnectionSettings)
+param([string]$ServerAddress, [string]$Login, [string]$ProfileName, [string]$DataDir, [switch]$Launcher, [switch]$DetailedOutput, [switch]$ConnectionSettings, [ValidateRange(0,65535)][int]$SSHPort=0, [string]$SSHJumpHost, [string]$SSHJumpConfig)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 function Select-SetupOutputMode([switch]$Detailed, [switch]$Prompt) {
@@ -201,8 +201,85 @@ function Get-KeyDirectory([string]$Slot) {
     if ($Slot -notmatch '\Akey-[a-f0-9]{32}\z') { throw 'Нужна помощь с сохранённым подключением: неверное имя комплекта.' }
     return Join-Path (Join-Path $profileDirectory 'keysets') $Slot
 }
+function Get-SshTransportConfig([int]$Port, [string]$JumpHost, [string]$JumpConfig) {
+    if ($Port -lt 1 -or $Port -gt 65535) { throw 'Неверный порт SSH.' }
+    $config = "# RemoteAgents transport`nHost *`n    Port $Port`n    ConnectTimeout 10`n    ConnectionAttempts 1`n"
+    if ($JumpHost) {
+        if ($JumpHost -notmatch '\A[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\z') { throw 'Неверное имя запасного SSH-подключения.' }
+        foreach ($path in @($JumpConfig, $script:sshExecutable)) {
+            if (-not [IO.Path]::IsPathRooted($path) -or $path -match '["%&|<>^\x00-\x1f\x7f]') { throw 'Неверный путь настроек запасного подключения.' }
+        }
+        # The relay checks its own known_hosts and never forwards the SSH agent.
+        $config += ('    ProxyCommand "{0}" -F "{1}" -o BatchMode=yes -o StrictHostKeyChecking=yes -o ForwardAgent=no -o ConnectTimeout=8 -o ConnectionAttempts=1 -W %h:%p {2}' -f $script:sshExecutable.Replace('\','/'), $JumpConfig.Replace('\','/'), $JumpHost) + "`n"
+    }
+    return $config
+}
+
+function Select-SshTransport([string]$Address, [string]$User, [int[]]$Ports, [string]$JumpHost, [string]$JumpConfig, [string]$ProfileDirectory) {
+    if ($JumpHost) { [void](Get-SshTransportConfig $Ports[0] $JumpHost $JumpConfig) }
+    $ready = @(Test-SshEndpoint -Address $Address -User $User -Ports $Ports | Where-Object { $_.Ready })
+    if ($ready.Count) { return [pscustomobject]@{ Port=$ready[0].Port; Config=(Get-SshTransportConfig $ready[0].Port); ViaJump=$false } }
+    if (-not $JumpHost) { throw 'Не удалось начать авторизацию SSH на проверенных портах. Это не ошибка пароля. Проверьте доступность SSH на сервере или настройте запасной маршрут параметром -SSHJumpHost.' }
+    if (-not (Test-Path -LiteralPath $JumpConfig -PathType Leaf)) { throw 'Не найден файл настроек запасного SSH-подключения. Укажите его параметром -SSHJumpConfig.' }
+    Write-Host 'Прямое соединение недоступно. Проверяем запасной маршрут…'
+    $probeConfig = Join-Path $ProfileDirectory ('transport-probe-' + [guid]::NewGuid().ToString('N') + '.conf')
+    try {
+        [IO.File]::WriteAllText($probeConfig, (Get-SshTransportConfig $Ports[0] $JumpHost $JumpConfig), (New-Object Text.UTF8Encoding($false)))
+        $ready = @(Test-SshEndpoint -Address $Address -User $User -Ports $Ports -TransportConfig $probeConfig | Where-Object { $_.Ready })
+        if (-not $ready.Count) { throw 'Не удалось подключиться ни напрямую, ни через запасной маршрут. Проверьте доступность промежуточного сервера. Сохранённые данные не изменены.' }
+        return [pscustomobject]@{ Port=$ready[0].Port; Config=(Get-SshTransportConfig $ready[0].Port $JumpHost $JumpConfig); ViaJump=$true }
+    } finally {
+        if (Test-Path -LiteralPath $probeConfig) { Remove-Item -LiteralPath $probeConfig -Force }
+    }
+}
+
+function Test-SshEndpoint([string]$Address, [string]$User, [int[]]$Ports, [string]$TransportConfig='NUL') {
+    $checks=New-Object Collections.ArrayList
+    $clock=[Diagnostics.Stopwatch]::StartNew()
+    try {
+    foreach($Port in $Ports){
+    # Credential-free diagnostic only. Trust is checked separately by the real
+    # connection against the profile's known_hosts; this probe saves no keys.
+    $arguments=@('-F',$TransportConfig,'-vv','-T','-p',[string]$Port,'-l',$User,
+        '-o','ConnectTimeout=10','-o','ConnectionAttempts=1','-o','BatchMode=yes',
+        '-o','IdentityAgent=none','-o','IdentityFile=none','-o','CertificateFile=none',
+        '-o','PubkeyAuthentication=no','-o','PasswordAuthentication=no',
+        '-o','KbdInteractiveAuthentication=no','-o','PreferredAuthentications=none',
+        '-o','StrictHostKeyChecking=no','-o','UserKnownHostsFile=NUL',
+        '-o','GlobalKnownHostsFile=none','-o','UpdateHostKeys=no',
+        '-o','ForwardAgent=no','-o','ClearAllForwardings=yes',$Address,'exit 0')
+    $info=New-Object Diagnostics.ProcessStartInfo
+    $info.FileName=$script:sshExecutable
+    $info.Arguments=(@($arguments|ForEach-Object{Convert-SshArgument $_}) -join ' ')
+    $info.UseShellExecute=$false
+    $info.CreateNoWindow=$true
+    $info.RedirectStandardOutput=$true
+    $info.RedirectStandardError=$true
+    $process=New-Object Diagnostics.Process
+    $process.StartInfo=$info
+        try {[void]$process.Start()}catch{$process.Dispose();throw}
+        [void]$checks.Add([pscustomobject]@{Port=$Port;Process=$process;Stdout=$process.StandardOutput.ReadToEndAsync();Stderr=$process.StandardError.ReadToEndAsync()})
+    }
+    while($clock.ElapsedMilliseconds -lt 10000 -and @($checks|Where-Object{!$_.Process.HasExited}).Count){Start-Sleep -Milliseconds 25}
+    foreach($check in $checks){
+        $process=$check.Process
+        $finished=$process.HasExited
+        if(!$finished){$process.Kill();[void]$process.WaitForExit(1000)}
+        $detail=if($check.Stderr.Wait(1000)){$check.Stderr.GetAwaiter().GetResult()}else{'Diagnostic output unavailable after timeout.'}
+        if($script:setupLogDirectory){
+            [IO.File]::WriteAllText((Join-Path $script:setupLogDirectory ('ssh-port-'+$check.Port+'-'+[guid]::NewGuid().ToString('N')+'.log')),$detail)
+        }
+        [pscustomobject]@{Port=$check.Port;Ready=($finished -and ($process.ExitCode -eq 0 -or $detail -match 'Authentications that can continue:'));TimedOut=(!$finished);Detail=$detail}
+    }
+    } finally {
+        foreach($check in $checks){
+            if(!$check.Process.HasExited){$check.Process.Kill()}
+            $check.Process.Dispose()
+        }
+    }
+}
 function Test-SavedConnection([string]$PrivatePath) {
-    $arguments = $common + @('-i', $PrivatePath, '-o', 'IdentitiesOnly=yes', '-o', 'PubkeyAuthentication=yes', '-o', 'PreferredAuthentications=publickey', '-o', 'PasswordAuthentication=no', '-o', 'KbdInteractiveAuthentication=no', $ServerAddress, 'set -eu; . /etc/os-release; printf "SSH OK: %s (%s)\n" "$PRETTY_NAME" "$(uname -m)"')
+    $arguments = @($common|ForEach-Object{if($_ -eq 'BatchMode=no'){'BatchMode=yes'}else{$_}}) + @('-i', $PrivatePath, '-o', 'IdentitiesOnly=yes', '-o', 'PubkeyAuthentication=yes', '-o', 'PreferredAuthentications=publickey', '-o', 'PasswordAuthentication=no', '-o', 'KbdInteractiveAuthentication=no', $ServerAddress, 'set -eu; . /etc/os-release; printf "SSH OK: %s (%s)\n" "$PRETTY_NAME" "$(uname -m)"')
     return (Invoke-ProfileSsh -Arguments $arguments)
 }
 function Assert-SupportedServer {
@@ -352,6 +429,11 @@ function Start-ManagedComponent([string]$File, [string[]]$Parameters, [string]$R
             $line = $reader.ReadyLine
             if ($null -eq $line) { $line = $reader.Take() }
             if ($null -ne $line) {
+                if($ReadyState -eq 'desktop' -and $line.StartsWith('REMOTEAGENTS_DESKTOP_PROGRESS=')){
+                    $progressMessage=$line.Substring('REMOTEAGENTS_DESKTOP_PROGRESS='.Length)
+                    $progressMessage=$progressMessage -replace '[\x00-\x1f\x7f]',' '
+                    $changed=$true
+                }
                 if ($ReadyState -eq 'browser' -and $line.StartsWith('REMOTEAGENTS_BROWSER_READY=http://127.0.0.1:')) { $component.State='ready'; return $component }
                 if ($ReadyState -eq 'desktop' -and $line -match '\AREMOTEAGENTS_DESKTOP_READY=127\.0\.0\.1:[0-9]+\z') { $component.State='ready'; return $component }
                 try { $status = $line | ConvertFrom-Json -ErrorAction Stop } catch { $status = $null }
@@ -380,6 +462,12 @@ function Start-ManagedComponent([string]$File, [string[]]$Parameters, [string]$R
                 elseif($lastProgress.doneFiles -ge 0){$details+='; файлов '+$lastProgress.doneFiles}
                 $elapsed=[TimeSpan]::FromSeconds($stageSeconds)
                 $display=$progressMessage+$details+'; этап '+$elapsed.ToString('hh\:mm\:ss')
+                if(!$progressLine.Write($display,$changed)){Write-Host $display}
+                $lastPrinted=$clock.Elapsed.TotalSeconds
+            }
+            if($ReadyState -eq 'desktop' -and ($changed -or $clock.Elapsed.TotalSeconds-$lastPrinted -ge $progressRefreshSeconds)){
+                $message=if($progressMessage){$progressMessage}else{'Запускаем подготовку рабочего стола'}
+                $display=$message+' — прошло '+$clock.Elapsed.ToString('mm\:ss')+'. Ожидаем завершения этапа.'
                 if(!$progressLine.Write($display,$changed)){Write-Host $display}
                 $lastPrinted=$clock.Elapsed.TotalSeconds
             }
@@ -468,7 +556,7 @@ runuser -u remoteagents -- env HOME=/home/remoteagents bash -c 'umask 077; mkdir
     $payload += $handoff.RemoteScript
     $arguments = $common + @('-i',$keyPath,'-o','IdentitiesOnly=yes','-o','PubkeyAuthentication=yes','-o','PreferredAuthentications=publickey','-o','PasswordAuthentication=no','-o','KbdInteractiveAuthentication=no','-T',$ServerAddress,'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi')
     if ((Invoke-ProfileSsh -Arguments $arguments -InputText $payload -Activity 'На сервере: подготовка соединения с Windows') -ne 0) { throw 'Подключение Windows не подготовлено. Прежние файлы сохранены; причину смотрите в журнале.' }
-    $parameters = @('-VPSHost',$ServerAddress,'-VPSUser',$Login,'-IdentityFile',$keyPath,'-Workspace',$ReplicaPath,'-DeviceLabel',$label,'-KnownHostsFile',$knownHostsPath,'-SSHConfig',$configPath,'-SSHExecutable',$script:sshExecutable,'-ServerUser','remoteagents','-RemoteBase','/home/remoteagents/.local/share/codex-remote','-SocketPath',$registration.SocketPath,'-AskpassExecutable',$script:askpassExecutable,'-ManagedSession')
+    $parameters = @('-VPSHost',$ServerAddress,'-VPSUser',$Login,'-IdentityFile',$keyPath,'-SSHPort',[string]$SSHPort,'-Workspace',$ReplicaPath,'-DeviceLabel',$label,'-KnownHostsFile',$knownHostsPath,'-SSHConfig',$configPath,'-SSHExecutable',$script:sshExecutable,'-ServerUser','remoteagents','-RemoteBase','/home/remoteagents/.local/share/codex-remote','-SocketPath',$registration.SocketPath,'-AskpassExecutable',$script:askpassExecutable,'-ManagedSession')
     $parameters += @('-ServerOwnedReplica','-SyncGuardPath',(Join-Path $PSScriptRoot 'Invoke-RemoteSyncGuard.ps1'),'-SyncDataDir',$SyncDataDir,'-ProjectId',$ProjectId,'-HostId',$ClientId)
     if ($AllowShell) { $parameters += '-AllowShell' }
     $component=Start-ManagedComponent (Join-Path $PSScriptRoot 'Start-CodexWindowsBridge.ps1') $parameters 'connected'
@@ -567,7 +655,7 @@ function Connect-ProjectFolders([string]$Agents, $Sessions, [switch]$ReuseSelect
     if($enabledIds.Count){Write-Host 'Локальные папки подключаются без входа в GitHub/GitLab. Доступ для fetch/push на сервере настраивается отдельно.'}
     while ($true) {
         $projects=@(Get-RemoteSyncProjects -DataDir $context.DataDir | Where-Object { $_.hostId -eq $context.ClientId -and $_.projectId -in $enabledIds }|Sort-Object sourcePath)
-        if(!$projects.Count){Write-Host 'Ни один проект не выбран. Перенос не запущен.';return}
+        if(!$projects.Count){Write-Host 'Папки ещё не выбраны. Сначала выберите пункт 3 — «Добавить папки / изменить выбор проектов». Затем пункт 13 подключит сохранённые папки.';return}
         foreach ($project in $projects) {
             if ($Sessions.ContainsKey($project.projectId) -and (Get-ManagedComponentState $Sessions[$project.projectId].Sync) -ne 'stopped') {
                 $existingSession=$Sessions[$project.projectId]
@@ -611,8 +699,8 @@ function Connect-ProjectFolders([string]$Agents, $Sessions, [switch]$ReuseSelect
 function Request-VpsVpnSetup {
     Write-Host ''
     Write-Host '=== Необязательная настройка VPN ==='
-    Write-Host 'Настроить Amnezia VPN?'
-    Write-Host 'Действующий VPN не отключается. Amnezia автоматически не подключается.'
+    Write-Host 'Настроить HAPP VPN?'
+    Write-Host 'Настроим сервер VLESS/REALITY и скопируем подключение для HAPP. VPN включается вами в HAPP.'
     Write-Host '1. Да'
     Write-Host '2. Нет'
     do {
@@ -626,39 +714,11 @@ function Request-VpsVpnSetup {
     Write-Host ''
 }
 function Open-VpsVpn {
-    $vpnHook = Join-Path $PSScriptRoot 'setup-amnezia.ps1'
-    if (-not [IO.File]::Exists($vpnHook)) { throw 'Не хватает компонента VPN. Скопируйте весь комплект программы.' }
-    $vpnResult = & $vpnHook -ProfileDirectory $profileDirectory -ClientOnly
-    if ($vpnResult.Status -eq 'ClientInstallSkipped') {
-        Write-Host 'Amnezia пропущена. Продолжаем настройку приложений сервера.'
-        return
-    }
-    if ($vpnResult.Status -eq 'ClientReady') {
-        if ($profileId -notmatch '\A[a-f0-9]{32}\z' -or $ServerAddress -notmatch '\A[a-zA-Z0-9][a-zA-Z0-9.-]{0,252}\z') { throw 'Неверный профиль VPN.' }
-        $serverScript = Join-Path $PSScriptRoot 'server-amnezia.sh'
-        $payload = [IO.File]::ReadAllText($serverScript).Replace("`r`n", "`n").TrimStart([char]0xFEFF)
-        $directory = Join-Path $profileDirectory 'vpn'
-        if (-not [IO.Directory]::Exists($directory)) { [void][IO.Directory]::CreateDirectory($directory); Protect-NewDirectory $directory }
-        $temporary = Join-Path $directory ([guid]::NewGuid().ToString('N') + '.conf')
-        $vpnSsh = $common + @('-i',$keyPath,'-o','IdentitiesOnly=yes','-o','PubkeyAuthentication=yes','-o','PreferredAuthentications=publickey','-o','PasswordAuthentication=no','-o','KbdInteractiveAuthentication=no')
-        $command = 'if [ "$(id -u)" -eq 0 ]; then exec bash -s -- ' + $ServerAddress + ' ' + $profileId + '; else exec sudo -n bash -s -- ' + $ServerAddress + ' ' + $profileId + '; fi'
-        Write-Host 'Настраиваем AmneziaWG на сервере. Все серверные пакеты скачиваются на VPS.'
-        try {
-            if ((Invoke-ProfileSsh -Arguments ($vpnSsh + @('-T',$ServerAddress,$command)) -InputText $payload -OutputPath $temporary -Activity 'На сервере: установка и настройка AmneziaWG') -ne 0) { throw 'Сервер VPN пока не настроен; подробности в журнале.' }
-            $config = [IO.File]::ReadAllText($temporary)
-            if ($config.Length -gt 16384 -or $config -notmatch '(?m)^\[Interface\]' -or $config -notmatch '(?m)^Endpoint = ') { throw 'Сервер не вернул ожидаемую конфигурацию VPN.' }
-            $savedConfig = Join-Path $directory 'amnezia.conf'
-            [IO.File]::WriteAllText($savedConfig, $config, (New-Object Text.UTF8Encoding($false)))
-            if ((Get-AuthenticodeSignature -LiteralPath $vpnResult.ClientPath).Status -ne 'Valid') { throw 'Подпись клиента Amnezia не подтверждена.' }
-            # Import only the dedicated VPN peer, never server SSH credentials.
-            $arguments = '--import ' + (Convert-SshArgument $config)
-            Start-Process -FilePath $vpnResult.ClientPath -ArgumentList $arguments | Out-Null
-            Write-Host 'Сервер AmneziaWG настроен, профиль передан клиенту автоматически.'
-            Write-Host 'Для включения VPN используйте кнопку подключения в Amnezia. Настройки заполнять не нужно.'
-        } finally { if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) } }
-    } else {
-        Write-Host 'Amnezia пока не готова. Можно вернуться к ней через пункт VPN в меню.'
-    }
+    $vpnHook = Join-Path $PSScriptRoot 'setup-happ.ps1'
+    if (-not [IO.File]::Exists($vpnHook)) { throw 'Не хватает компонента HAPP. Скопируйте весь комплект программы.' }
+    & $vpnHook -ProfileDirectory $profileDirectory -ServerAddress $ServerAddress -Login $Login `
+        -IdentityFile $keyPath -KnownHostsFile $knownHostsPath -SSHConfig $configPath `
+        -SSHExecutable $script:sshExecutable -SSHPort $SSHPort
 }
 function Open-ServerDesktop {
     param([switch]$KeepOpen, [ValidateSet('0','1','2','3')][string]$Agents = '0')
@@ -671,6 +731,7 @@ function Open-ServerDesktop {
     $desktopParameters += @('-AgentApplications',$Agents)
     Write-Host 'Подготавливаем рабочий стол сервера. При первом запуске это может занять несколько минут.'
     Write-Host 'Рабочий стол открывается через SSH; отдельный пароль не нужен. Если появится выбор сеанса — нажмите OK.'
+    $desktopParameters += @('-SSHPort',[string]$SSHPort)
     $desktop = Start-ManagedComponent $desktopHook $desktopParameters 'desktop'
     if ($KeepOpen) {
         Write-Host 'Рабочий стол открыт. Установщик и RDP могут оставаться открытыми одновременно.'
@@ -767,6 +828,140 @@ function Open-ServerAgentApplications([ValidateSet('1','2','3')][string]$Agents)
     $arguments=$common+@('-i',$keyPath,'-o','IdentitiesOnly=yes','-o','PasswordAuthentication=no','-o','KbdInteractiveAuthentication=no','-T',$ServerAddress,$command)
     if((Invoke-ProfileSsh -Arguments $arguments -InputText $payload -Activity 'Открываем выбранное приложение в рабочем столе') -ne 0){throw 'Приложение не открылось. Его установку можно проверить пунктом 11.'}
 }
+function Install-RemoteChat {
+    param([ValidateSet('1','2','3')][string]$Agents,[string]$ChatUser='remoteagents')
+    . (Join-Path $PSScriptRoot 'Remote.Chat.ps1')
+    if(!(Test-RemoteChatUser $ChatUser)){throw 'Недопустимая настройка общих чатов сервера.'}
+    $steps=@([pscustomobject]@{File='server-agent-user-v1.sh';User='remoteagents'},[pscustomobject]@{File='server-happier.sh';User=$ChatUser})
+    if($Agents -in @('1','3')){$steps+=[pscustomobject]@{File='server-codex-v1.sh';User='remoteagents'}}
+    if($Agents -in @('2','3')){$steps+=[pscustomobject]@{File='server-claude-code.sh';User=$ChatUser}}
+    $payload="set -e`n"
+    foreach($step in $steps){
+        $path=Join-Path $PSScriptRoot $step.File
+        if(!(Test-Path -LiteralPath $path -PathType Leaf)){throw ('Не хватает '+$step.File+'. Скопируйте весь комплект.')}
+        $source=[IO.File]::ReadAllText($path).Replace("`r`n","`n").TrimStart([char]0xFEFF)
+        $delimiter='REMOTE_CHAT_'+[guid]::NewGuid().ToString('N')
+        $payload+="bash -s -- $($step.User) <<'$delimiter'`n$source`n$delimiter`n"
+    }
+    $argsList=$common+@('-i',$keyPath,'-o','IdentitiesOnly=yes','-o','BatchMode=yes','-T',$ServerAddress,'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi')
+    Write-Host 'Устанавливаем чаты без RDP. Загрузка и установка выполняются на сервере.'
+    Write-Host 'Готовые компоненты используем повторно. Вход в аккаунты откроется отдельно.'
+    if((Invoke-ProfileSsh -Arguments $argsList -InputText $payload -Activity 'На сервере: Happier и выбранные агенты') -ne 0){throw 'Установка чатов не завершена. Данные сохранены; причину смотрите в журнале.'}
+}
+function Open-RemoteChat([string]$ChatUser='remoteagents') {
+    . (Join-Path $PSScriptRoot 'Remote.Chat.ps1')
+    if(!(Test-RemoteChatUser $ChatUser)){throw 'Недопустимый профиль чатов.'}
+    $parameters=@('-NoProfile','-STA','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'server-chat.ps1'),'-VPSHost',$ServerAddress,'-VPSUser',$Login,'-IdentityFile',$keyPath,'-KnownHostsFile',$knownHostsPath,'-SSHConfig',$configPath,'-SSHExecutable',$script:sshExecutable,'-SSHPort',[string]$SSHPort,'-ChatUser',$ChatUser)
+    $info=New-Object Diagnostics.ProcessStartInfo
+    $info.FileName=Join-Path $PSHOME 'powershell.exe'
+    $info.Arguments=(@($parameters|ForEach-Object{Convert-SshArgument $_}) -join ' ')
+    $info.UseShellExecute=$false;$info.CreateNoWindow=$true
+    # Sign-in is deliberately separate from installer logs and managed readers.
+    [void][Diagnostics.Process]::Start($info)
+    $desktopFolder=[Environment]::GetFolderPath('Desktop')
+    if($desktopFolder -and [IO.Directory]::Exists($desktopFolder)){
+        $shortcut=Join-Path $desktopFolder 'Чаты Codex и Claude.url'
+        if(![IO.File]::Exists($shortcut)){[IO.File]::WriteAllText($shortcut,"[InternetShortcut]`r`nURL=https://cloud.happier.dev/`r`n",(New-Object Text.UTF8Encoding($false)))}
+    }
+    Start-Process 'https://cloud.happier.dev/'
+    Write-Host 'Открыты браузер и окно подключения. При первом входе подтвердите сервер в браузере.'
+    Write-Host 'На другом компьютере откройте cloud.happier.dev и войдите в тот же аккаунт Happier.'
+    Write-Host 'Чаты продолжают работать после закрытия установщика. Управление папками Windows требует открытого подключения папок.'
+}
+function Manage-ProjectFoldersMenu {
+    param($Sessions, [ref]$Agents)
+    Initialize-ProjectModule
+    $context = Get-ProjectClientContext
+    while($true){
+        $savedNames=@()
+        try{$savedNames=@(Get-SavedProjectNames)}catch{}
+        $menuStatus = if($Sessions.Count){'АКТИВНА (' + $Sessions.Count + ' папок)'}else{'Остановлена'}
+        $cmEnabled = Test-Path 'HKCU:\Software\Classes\Directory\shell\AiServerSync'
+        $cmStatus = if($cmEnabled){'Включено'}else{'Выключено'}
+
+        Write-Host ''
+        Write-Host '=== Управление синхронизацией папок ==='
+        Write-Host ('Текущий статус: ' + $menuStatus)
+        Write-Host ('Сохранённые папки (' + $savedNames.Count + '): ' + $(if($savedNames.Count){$savedNames -join ', '}else{'нет'}))
+        Write-Host ('Контекстное меню в Проводнике: ' + $cmStatus)
+        Write-Host ''
+        Write-Host '1. Подключить корневую папку с проектами (окно обзора / ввод пути)'
+        Write-Host '2. Включить пункт в контекстном меню Windows («Синхронизировать с AI-сервером»)'
+        Write-Host '3. Отключить пункт в контекстном меню Windows'
+        Write-Host '4. Запустить / переподключить синхронизацию сохранённых папок'
+        Write-Host '5. Отключить синхронизацию папок'
+        Write-Host '0. Назад в главное меню'
+        $opt = (Read-Host 'Выберите действие (0-5)').Trim()
+        if($opt -eq '0' -or !$opt){break}
+        if($opt -eq '1'){
+            Write-Host ''
+            Write-Host 'Укажите корневую папку с вашими проектами.'
+            Write-Host 'Нажмите Enter для выбора папки через графическое окно (Проводник),'
+            Write-Host 'или вставьте полный путь к папке вручную:'
+            $target = (Read-Host 'Путь к папке (Enter — обзор)').Trim()
+            if(!$target){
+                try {
+                    Add-Type -AssemblyName System.Windows.Forms
+                    $picker = New-Object Windows.Forms.FolderBrowserDialog
+                    $picker.Description = 'Выберите корневую папку с проектами для синхронизации с AI-сервером'
+                    $picker.ShowNewFolderButton = $false
+                    if (Test-Path -LiteralPath (Join-Path $env:USERPROFILE 'Documents')) {
+                        $picker.SelectedPath = (Join-Path $env:USERPROFILE 'Documents')
+                    }
+                    $res = $picker.ShowDialog()
+                    if ($res -eq [Windows.Forms.DialogResult]::OK -and $picker.SelectedPath) {
+                        $target = $picker.SelectedPath
+                    } else {
+                        Write-Host 'Выбор папки отменён.'
+                        continue
+                    }
+                } catch {
+                    $target = (Read-Host 'Введите путь к папке вручную').Trim()
+                    if (!$target) { continue }
+                }
+            }
+            $target = $target.Trim('"', "'")
+            if(Test-Path -LiteralPath $target -PathType Container){
+                Write-Host ('Сканируем проекты внутри ' + $target + '...')
+                $cands = Find-RemoteSyncProjectCandidates -RootPath $target -MaxDepth 3 -MaxSeconds 15
+                $found = $cands.candidates
+                if(!$found -or $found.Count -eq 0){
+                    $cands2 = @(Get-RemoteSyncProjectCandidates -Paths @($target) -DataDir $context.DataDir -HostId $context.ClientId)
+                    if($cands2.Count){$found = $cands2}
+                }
+                if($found -and $found.Count -gt 0){
+                    Write-Host ('Найдено проектов: ' + $found.Count + ':')
+                    foreach($p in $found){
+                        $p.selected = $true
+                        Write-Host ('  + ' + $p.name + ' [' + $p.kind + ']: ' + $p.sourcePath)
+                    }
+                    Save-RemoteSyncSelection -DataDir $context.DataDir -HostId $context.ClientId -Candidates $found | Out-Null
+                    Write-Host 'Все проекты подготовлены с фильтрацией .gitignore и безопасности!'
+                    Write-Host 'Запускаем синхронизацию...'
+                    Connect-ProjectFolders $Agents.Value $Sessions -ReuseSelection
+                } else {
+                    Write-Host 'В указанной папке не найдено подходящих проектов.'
+                }
+            } else {
+                Write-Host ('Папка ' + $target + ' не найдена.')
+            }
+        }
+        if($opt -eq '2'){
+            & (Join-Path $PSScriptRoot 'Sync-ContextMenu.ps1') -Action Enable
+        }
+        if($opt -eq '3'){
+            & (Join-Path $PSScriptRoot 'Sync-ContextMenu.ps1') -Action Disable
+        }
+        if($opt -eq '4'){
+            Connect-ProjectFolders $Agents.Value $Sessions -ReuseSelection
+        }
+        if($opt -eq '5'){
+            foreach($session in $Sessions.Values){Stop-ManagedComponent $session.Bridge;Stop-ManagedComponent $session.Sync}
+            $Sessions.Clear();Write-Host 'Синхронизация папок остановлена. Файлы сохранены.'
+        }
+    }
+}
+
 function Start-RemoteCodex {
     # Compatibility entry name. Returning users choose an action before any app install.
     $agents=if($metadata.agentApplications -in @('1','2','3')){[string]$metadata.agentApplications}else{'0'}
@@ -779,19 +974,18 @@ function Start-RemoteCodex {
         Write-Host '=== Работа с сервером ==='
         Write-Host '1. Открыть рабочий стол RDP (Enter)'
         if($agents -ne '0'){Write-Host '2. Открыть выбранный Codex/Claude на рабочем столе'}
-        Write-Host '3. Добавить папки / изменить выбор проектов'
         $savedNames=@()
-        try{$savedNames=@(Get-SavedProjectNames)}catch{Write-Host 'Список сохранённых проектов пока недоступен; рабочий стол можно открыть.'}
-        $savedLabel=$savedNames -join ', ';if($savedLabel.Length -gt 100){$savedLabel=$savedLabel.Substring(0,97)+'…'}
-        Write-Host ('13. Подключить сохранённые папки ('+$savedNames.Count+'): '+$(if($savedLabel){$savedLabel}else{'пока нет'}))
-        if($sessions.Count){Write-Host ('4. Отключить папки и управление этим ПК ('+$sessions.Count+')')}
+        try{$savedNames=@(Get-SavedProjectNames)}catch{}
+        $syncStatus = if($sessions.Count){'активно (' + $sessions.Count + ')'}elseif($savedNames.Count){'папок: ' + $savedNames.Count}else{'не настроено'}
+        Write-Host ('3. Управление папками проектов (синхронизация) [' + $syncStatus + ']')
         Write-Host '11. Установить / настроить Codex и Claude'
+        Write-Host '14. Чаты Codex и Claude в браузере — без RDP (установить / открыть)'
         Write-Host ('10. '+$(if($advanced){'Свернуть дополнительные действия'}else{'Дополнительно: компоненты, режим, localhost, VPN'}))
         if($advanced){
             Write-Host '6. Проверить установленные компоненты'
             Write-Host '7. Режим: автономный сервер / управление этим ПК'
             Write-Host '9. Открыть localhost сервера в браузере через SSH'
-            Write-Host '5. Amnezia VPN'
+            Write-Host '5. HAPP VPN'
             if($agents -in @('1','3')){Write-Host '12. Codex в терминале'}
         }
         if($desktop){Write-Host '8. Отключить RDP (приложения остаются на сервере)'}
@@ -800,6 +994,23 @@ function Start-RemoteCodex {
         if($action -eq '0'){return}
         if($action -eq '10'){$advanced=!$advanced;continue}
         if($action -eq '6'){Show-ServerApplications}
+        if($action -eq '14'){
+            try{
+                $chatUser='remoteagents'
+                $profiles=if($metadata.PSObject.Properties.Name -contains 'chatProfiles'){@($metadata.chatProfiles)}else{@()}
+                if($chatUser -notin $profiles){
+                    Write-Host 'Какие агенты нужны для чатов? Графический рабочий стол устанавливать не нужно.'
+                    Write-Host '1. Codex; 2. Claude; 3. Оба (Enter); 0. Отмена'
+                    do{$choice=(Read-Host 'Выберите агентов; Enter — оба').Trim();if(!$choice){$choice='3'}}until($choice -in @('0','1','2','3'))
+                    if($choice -eq '0'){continue}
+                    Install-RemoteChat -Agents $choice -ChatUser $chatUser
+                    $metadata|Add-Member -NotePropertyName chatProfiles -NotePropertyValue (@($profiles)+@($chatUser)) -Force
+                    Save-ProfileMetadata $metadata $metadataPath
+                }
+                Open-RemoteChat $chatUser
+            }catch{Write-Host ('Чаты пока не открыты: '+$_.Exception.Message)}
+            continue
+        }
         if($action -eq '11'){
             $choice=Select-AgentApplications
             if($choice -ne '0'){
@@ -814,7 +1025,16 @@ function Start-RemoteCodex {
                 }catch{Write-Host ('Приложения пока не подготовлены: '+$_.Exception.Message)}
             }
         }
-        if($action -in @('1','2','3','13')){
+        if($action -eq '3'){
+            try{
+                if(!$workspaceReady){Initialize-ServerWorkspace;$workspaceReady=$true}
+                $mode='1';$metadata|Add-Member -NotePropertyName executionMode -NotePropertyValue $mode -Force
+                Save-ProfileMetadata $metadata $metadataPath
+                Manage-ProjectFoldersMenu $sessions ([ref]$agents)
+            }catch{Write-Host ('Управление папками: '+$_.Exception.Message)}
+            continue
+        }
+        if($action -in @('1','2','13')){
             try{
                 if(!$workspaceReady){Initialize-ServerWorkspace;$workspaceReady=$true}
                 if($action -in @('1','2')){
@@ -910,6 +1130,7 @@ function Start-CodexTerminal {
             $browserHook = Join-Path $PSScriptRoot 'server-browser.ps1'
             if (-not (Test-Path -LiteralPath $browserHook -PathType Leaf)) { throw 'Не хватает компонента браузера server-browser.ps1. Скопируйте полный комплект.' }
             $browserParameters = @('-VPSHost',$ServerAddress,'-VPSUser',$Login,'-IdentityFile',$keyPath,'-SSHExecutable',$script:sshExecutable,'-SSHConfig',$configPath,'-KnownHostsFile',$knownHostsPath,'-ServerUser','remoteagents','-Prepare','-ManagedSession','-AskpassExecutable',$script:askpassExecutable)
+            $browserParameters += @('-SSHPort',[string]$SSHPort)
             $browser = Start-ManagedComponent $browserHook $browserParameters 'browser'
             Write-Host 'В следующем шаге появятся ссылка и одноразовый код. Откройте ссылку в браузере сервера и введите там код.'
         } else {
@@ -937,7 +1158,7 @@ function Start-CodexTerminal {
     $bridgeHook = Join-Path $PSScriptRoot 'Start-CodexWindowsBridge.ps1'
     if (-not (Test-Path -LiteralPath $bridgeHook -PathType Leaf)) { throw 'Не хватает компонента связи с Windows. Скопируйте весь комплект программы.' }
     Write-Host 'Соединяем Codex с выбранной папкой Windows. Команды работают с правами вашего пользователя Windows.'
-    $bridgeParameters = @('-VPSHost',$ServerAddress,'-VPSUser',$Login,'-IdentityFile',$keyPath,'-Workspace',$workspace,'-DeviceLabel',$deviceLabel,'-KnownHostsFile',$knownHostsPath,'-SSHConfig',$configPath,'-SSHExecutable',$script:sshExecutable,'-ServerUser','remoteagents','-RemoteBase','/home/remoteagents/.local/share/codex-remote','-SocketPath',('/home/remoteagents/.local/state/codex-remote/' + $deviceLabel + '.sock'),'-AskpassExecutable',$script:askpassExecutable,'-ManagedSession')
+    $bridgeParameters = @('-VPSHost',$ServerAddress,'-VPSUser',$Login,'-IdentityFile',$keyPath,'-SSHPort',[string]$SSHPort,'-Workspace',$workspace,'-DeviceLabel',$deviceLabel,'-KnownHostsFile',$knownHostsPath,'-SSHConfig',$configPath,'-SSHExecutable',$script:sshExecutable,'-ServerUser','remoteagents','-RemoteBase','/home/remoteagents/.local/share/codex-remote','-SocketPath',('/home/remoteagents/.local/state/codex-remote/' + $deviceLabel + '.sock'),'-AskpassExecutable',$script:askpassExecutable,'-ManagedSession')
     Write-Host 'Разрешённые команды работают с вашими правами Windows, включая доступные вам сеть и другие папки.'
     $bridgeParameters += '-AllowShell'
     $bridge = Start-ManagedComponent $bridgeHook $bridgeParameters 'connected'
@@ -953,7 +1174,7 @@ function Start-CodexTerminal {
     } finally { Stop-ManagedComponent $bridge }
 }
 function Start-ConnectionSetup {
-param([string]$ServerAddress, [string]$Login, [string]$ProfileName, [string]$DataDir, [switch]$ConnectionSettings)
+param([string]$ServerAddress, [string]$Login, [string]$ProfileName, [string]$DataDir, [switch]$ConnectionSettings, [ValidateRange(0,65535)][int]$SSHPort=0, [string]$SSHJumpHost, [string]$SSHJumpConfig)
 $script:setupOutcome = 'stopped'
 $script:setupExitCode = 0
 $script:askpassExecutable = $null
@@ -986,6 +1207,7 @@ try {
         }
     }
     $selected = $null
+    $removeSelected = $false
     $displayName = $null
     if ($ProfileName) {
         $matches = @($available | Where-Object { $_.Id -ceq $ProfileName -or $_.Name -ceq $ProfileName })
@@ -998,10 +1220,13 @@ try {
             Write-Host ('  {0}. {1} — {2}' -f ($i + 1), $safeName, $safeAddress)
         }
         Write-Host '  0. Добавить новый сервер'
+        Write-Host '  Полностью удалить подключение с компьютера: D и номер, например D2.'
         Write-Host '  Для обслуживания SSH: M и номер, например M1.'
         do {
             $answer = (Read-Host 'Номер сервера; Enter — 1; 0 — новый').Trim()
             if(!$answer){$answer='1'}
+            $removeSelected=($answer -match '^[dDдДвВуУ]\s*([1-9][0-9]*)$')
+            if($removeSelected){$answer=$Matches[1]}
             $maintenance=($answer -match '^[mMьЬ]([0-9]+)$')
             if($maintenance){$answer=$Matches[1]}
             $number = -1
@@ -1059,9 +1284,16 @@ try {
         $metadata = [pscustomobject]$newMetadata
         Save-ProfileMetadata $metadata $metadataPath
     }
-    # Explicit empty configuration isolates user and system SSH configuration.
+    # Accept only generated transport settings, never an arbitrary ProxyCommand.
+    # Validate the previous saved route before applying any new CLI settings.
     if (Test-Path -LiteralPath $configPath) {
-        if ((Get-Item -LiteralPath $configPath).Length -ne 0) { throw 'Нужна помощь с настройками подключения. Для безопасности остановлено; данные сохранены.' }
+        $savedConfig=[IO.File]::ReadAllText($configPath)
+        $isGenerated=$savedConfig -match '\A# RemoteAgents transport\r?\nHost \*\r?\n    Port [0-9]{1,5}\r?\n    ConnectTimeout 10\r?\n    ConnectionAttempts 1\r?\n\z'
+        if ($savedConfig -and -not $isGenerated -and $metadata.sshJumpHost) {
+            $expectedConfig=Get-SshTransportConfig ([int]$metadata.sshPort) ([string]$metadata.sshJumpHost) ([string]$metadata.sshJumpConfig)
+            $isGenerated=$savedConfig.Replace("`r`n","`n") -ceq $expectedConfig
+        }
+        if ($savedConfig -and -not $isGenerated) { throw 'Нужна помощь с настройками подключения. Для безопасности остановлено; данные сохранены.' }
     } else { [IO.File]::WriteAllText($configPath, '') }
     if (-not (Test-Path -LiteralPath $knownHostsPath)) { [IO.File]::WriteAllText($knownHostsPath, '') }
     $knownHostsOption = 'UserKnownHostsFile="' + $knownHostsPath.Replace('\', '/') + '"'
@@ -1072,13 +1304,13 @@ try {
     $publicPath = Join-Path $activeDirectory 'id_ed25519.pub'
     $hasPrivate = Test-Path -LiteralPath $keyPath -PathType Leaf
     $hasPublic = Test-Path -LiteralPath $publicPath -PathType Leaf
-    $action = '1'
+    $action = if($removeSelected){'4'}else{'1'}
     if ($selected -and $ConnectionSettings) {
         Write-Host '1. Продолжить (Enter)'
         Write-Host '2. Настроить подключение заново'
         Write-Host '3. Изменить пароль защиты подключения'
-        Write-Host '4. Убрать сервер из списка'
-        Write-Host '5. Настроить VPN Amnezia'
+        Write-Host '4. Полностью удалить подключение с компьютера'
+        Write-Host '5. Настроить VPN HAPP'
         Write-Host '0. Выход'
         do {
             $action = (Read-Host 'Что сделать').Trim()
@@ -1086,17 +1318,47 @@ try {
         } until ($action -in @('0','1','2','3','4','5'))
         if ($action -eq '0') { Write-Host 'Данные сохранены. Можно вернуться позже.'; return }
     }
-    if ($action -eq '5') { Open-VpsVpn; return }
+
     if ($action -eq '4') {
-        Write-Host 'Уберём сервер только из списка. Сам сервер и файлы подключения останутся.'
-        if (Confirm-Action 'Убрать этот сервер из списка?' -DefaultNo) {
-            $metadata | Add-Member -NotePropertyName hiddenFromList -NotePropertyValue $true -Force
-            Save-ProfileMetadata $metadata $metadataPath
-            Write-Host 'Сервер убран из списка. Сохранённые файлы оставлены на компьютере.'
+        Write-Host 'Будут удалены запись, настройки и все локальные ключи этого подключения. VPS у хостинга эта команда не удаляет.'
+        if ($removeSelected -or (Confirm-Action 'Полностью удалить это подключение с компьютера?' -DefaultNo)) {
+            $deleteRoot=[IO.Path]::GetFullPath($DataDir).TrimEnd('\','/')
+            $deleteTarget=[IO.Path]::GetFullPath($profileDirectory).TrimEnd('\','/')
+            if($profileId -notmatch '\A[A-Za-z0-9][A-Za-z0-9_-]{0,63}\z' -or
+                ![string]::Equals([IO.Path]::GetDirectoryName($deleteTarget),$deleteRoot,[StringComparison]::OrdinalIgnoreCase) -or
+                ![string]::Equals([IO.Path]::GetFileName($deleteTarget),$profileId,[StringComparison]::OrdinalIgnoreCase)){
+                throw 'Удаление остановлено: папка подключения находится вне папки профилей.'
+            }
+            $deleteItems=@(Get-Item -LiteralPath $deleteTarget -Force)+@(Get-ChildItem -LiteralPath $deleteTarget -Recurse -Force)
+            if(@($deleteItems|Where-Object{$_.Attributes -band [IO.FileAttributes]::ReparsePoint}).Count){
+                throw 'Удаление остановлено: в папке подключения обнаружена файловая ссылка.'
+            }
+            Remove-Item -LiteralPath $deleteTarget -Recurse -Force -ErrorAction Stop
+            Write-Host 'Подключение, его настройки и локальные ключи полностью удалены.'
             $script:setupOutcome = 'removed'
         } else { Write-Host 'Ничего не изменено.' }
         return
     }
+    $explicitPort=$SSHPort
+    if (-not $SSHJumpHost) { $SSHJumpHost=[string]$metadata.sshJumpHost }
+    if (-not $SSHJumpConfig) { $SSHJumpConfig=[string]$metadata.sshJumpConfig }
+    if ($SSHJumpHost -and -not $SSHJumpConfig) { $SSHJumpConfig=Join-Path ([Environment]::GetFolderPath('UserProfile')) '.ssh\config' }
+    if(!$SSHPort -and $metadata.sshPort){$SSHPort=[int]$metadata.sshPort}
+    if($SSHPort -lt 0 -or $SSHPort -gt 65535){throw 'Неверный сохранённый порт SSH.'}
+    $ports=if($explicitPort){@($explicitPort)}elseif($SSHPort){@($SSHPort)+@(22,443,2222,2022|Where-Object{$_ -ne $SSHPort})}else{@(22,443,2222,2022)}
+    Write-Host 'Проверяем доступность сервера…'
+    $transport=Select-SshTransport -Address $ServerAddress -User $Login -Ports $ports -JumpHost $SSHJumpHost -JumpConfig $SSHJumpConfig -ProfileDirectory $profileDirectory
+    $SSHPort=$transport.Port
+    if ($transport.ViaJump) { Write-Host 'Запасной маршрут доступен. Подключаемся.' }
+    else { Write-Host 'Прямое соединение доступно. Подключаемся.' }
+    [IO.File]::WriteAllText($configPath,$transport.Config,(New-Object Text.UTF8Encoding($false)))
+    $metadata|Add-Member -NotePropertyName sshPort -NotePropertyValue $SSHPort -Force
+    if ($SSHJumpHost) {
+        $metadata|Add-Member -NotePropertyName sshJumpHost -NotePropertyValue $SSHJumpHost -Force
+        $metadata|Add-Member -NotePropertyName sshJumpConfig -NotePropertyValue $SSHJumpConfig -Force
+    }
+    Save-ProfileMetadata $metadata $metadataPath
+    if ($action -eq '5') { Open-VpsVpn; return }
     if ($action -eq '3') {
         if (-not $hasPrivate -or -not $hasPublic) { throw 'Сохранённое подключение неполное. Выберите «Настроить подключение заново».' }
         Write-Host 'Это пароль защиты подключения, не пароль сервера.'
@@ -1122,7 +1384,7 @@ try {
         $usePending = $true
     } elseif ($selected) {
         if ($hasPrivate -and $hasPublic) {
-            Write-Host 'Проверяем сохранённый SSH-вход. Если нужен пароль защиты ключа, появится отдельное окно.'
+            Write-Host 'Проверяем сохранённый вход.'
             if ((Test-SavedConnection $keyPath) -eq 0) {
                 Write-Host ('Готово: вход на сервер проверен. Сервер: ' + $displayName)
             $script:setupOutcome = 'verified'
@@ -1130,11 +1392,10 @@ try {
             Start-RemoteCodex
             return
             }
-            if (-not (Confirm-Action 'Сохранённый вход пока не работает. Продолжить настройку с паролем сервера?')) { return }
-            $usePending = [bool]$metadata.pendingKey
+            Write-Host 'Для восстановления подключения потребуется пароль сервера.'
+            $usePending = $true
         } else {
-            Write-Host 'Файлы подключения отсутствуют или неполные. Существующие файлы не удаляются.'
-            if (-not (Confirm-Action 'Продолжить незавершённую настройку или создать отдельное новое подключение?')) { return }
+            Write-Host ('Для входа потребуется пароль пользователя {0}.' -f $Login)
             $usePending = $true
         }
     }
@@ -1173,10 +1434,16 @@ try {
     $hasPublic = Test-Path -LiteralPath $publicPath -PathType Leaf
     if ($hasPrivate -ne $hasPublic) { throw 'Подключение неполное. Повторите запуск и выберите настройку заново; файлы сохранены.' }
     if (-not $hasPrivate) {
-        Write-Host 'При запросе Enter passphrase задайте отдельный пароль защиты подключения и повторите его. Это не пароль сервера.'
-        Write-Host 'Можно нажать Enter дважды и оставить эту защиту без пароля. Тогда особенно важно никому не передавать файлы подключения.'
-        & $script:keygenExecutable -t ed25519 -f $keyPath -C ('remoteagents-' + $profileId)
-        if ($LASTEXITCODE -ne 0) { throw 'Подготовить подключение не удалось. Созданные файлы сохранены; повторный запуск предложит продолжение.' }
+        $keyInfo=New-Object Diagnostics.ProcessStartInfo
+        $keyInfo.FileName=$script:keygenExecutable
+        $keyInfo.UseShellExecute=$false
+        $keyInfo.CreateNoWindow=$true
+        $keyInfo.Arguments=(@(@('-q','-t','ed25519','-N','','-f',$keyPath,'-C',('remoteagents-'+$profileId))|ForEach-Object{Convert-SshArgument $_}) -join ' ')
+        $keyProcess=[Diagnostics.Process]::Start($keyInfo)
+        try {
+            if(!$keyProcess.WaitForExit(10000)){$keyProcess.Kill();throw 'Подготовка подключения превысила время ожидания.'}
+            if($keyProcess.ExitCode -ne 0){throw 'Не удалось подготовить подключение. Повторите запуск.'}
+        } finally {$keyProcess.Dispose()}
     }
     # Read public contents only. The private file is handled exclusively by native tools.
     $publicKey = [IO.File]::ReadAllText($publicPath).TrimEnd([char[]]"`r`n")
@@ -1190,10 +1457,9 @@ try {
     $installCommand = 'set -eu; umask 077; IFS= read -r key; key=$(printf ''%s'' "$key" | tr -d ''\r''); case "$key" in ''ssh-ed25519 ''*) ;; *) exit 20 ;; esac; dir="$HOME/.ssh"; mkdir -p "$dir"; chmod 700 "$dir"; touch "$dir/authorized_keys"; chmod 600 "$dir/authorized_keys"; if ! grep -qxF -- "$key" "$dir/authorized_keys"; then if [ -s "$dir/authorized_keys" ]; then printf ''\n'' >> "$dir/authorized_keys"; fi; printf ''%s\n'' "$key" >> "$dir/authorized_keys"; fi'
     $installArgs = $common + @('-o', 'PubkeyAuthentication=no', '-o', 'PasswordAuthentication=yes', '-o', 'KbdInteractiveAuthentication=yes', '-o', 'PreferredAuthentications=password,keyboard-interactive', $ServerAddress, $installCommand)
     $installExitCode = Invoke-ProfileSsh -Arguments $installArgs -PublicKey $publicKey
-    if ($installExitCode -ne 0) { throw ('Вход не завершён. Нужен пароль пользователя сервера (сейчас: {0}), не панели хостинга и не защиты подключения. Проверьте письмо или панель хостинга; если пароль неизвестен — сбросьте его через хостинг. Причиной отказа также может быть запрет входа по паролю. Технические подробности выше; код {1}.' -f $Login, $installExitCode) }
+    if ($installExitCode -ne 0) { throw ('SSH-вход пользователя {0} не завершён; код {1}. Это может быть обрыв соединения или отказ авторизации. Один код выхода не означает неверный пароль. Техническая причина показана выше.' -f $Login, $installExitCode) }
     Write-Host ''
     Write-Host 'Этап 4. Проверка подключения'
-    Write-Host 'Если откроется окно защиты подключения, введите её пароль. Пароль сервера здесь не нужен.'
     Write-Host 'Ниже появятся сведения о сервере.'
     $verifyExitCode = Test-SavedConnection $keyPath
     if ($verifyExitCode -ne 0) { throw 'Посмотрите сообщение выше: проверка подключения не прошла. Прежний вход по паролю сохранён.' }
@@ -1226,7 +1492,7 @@ function Show-SetupResult {
         'codex-ready' { Write-Host 'Codex установлен, вход в аккаунт проверен. Чат можно открыть повторным выбором сервера.' }
         'applications-ready' { Write-Host 'Выбранные приложения готовы на сервере. Вход в аккаунты выполняется в их окнах.' }
         'changed' { Write-Host 'Защита подключения изменена. Вход после изменения не проверялся.' }
-        'removed' { Write-Host 'Сервер убран из списка. VPS и файлы подключения сохранены.' }
+        'removed' { Write-Host 'Подключение полностью удалено с компьютера.' }
         'error' { Write-Host 'Ошибка: настройка не завершена. Причина показана выше.' }
         default { Write-Host 'Настройка остановлена. Пояснение показано выше.' }
     }
@@ -1246,14 +1512,15 @@ $nextServerAddress = $ServerAddress
 $nextLogin = $Login
 $nextProfileName = $ProfileName
 do {
-    Start-ConnectionSetup -ServerAddress $nextServerAddress -Login $nextLogin -ProfileName $nextProfileName -DataDir $DataDir -ConnectionSettings:$ConnectionSettings
+    Start-ConnectionSetup -ServerAddress $nextServerAddress -Login $nextLogin -ProfileName $nextProfileName -DataDir $DataDir -ConnectionSettings:$ConnectionSettings -SSHPort $SSHPort -SSHJumpHost $SSHJumpHost -SSHJumpConfig $SSHJumpConfig
     Show-SetupResult
     if (-not $Launcher) { break }
     Write-Host ''
     Write-Host '1. Вернуться к списку серверов'
     Write-Host '0. Закрыть окно'
     do {
-        $nextAction = (Read-Host 'Введите 1 или 0. Enter оставляет окно открытым').Trim()
+        $nextAction = (Read-Host 'Enter — вернуться к списку; 0 — закрыть окно').Trim()
+        if(!$nextAction){$nextAction='1'}
         if ($nextAction -notin @('0', '1')) { Write-Host 'Окно остаётся открытым. Для закрытия введите 0.' }
     } until ($nextAction -in @('0', '1'))
     if ($nextAction -eq '0') { break }

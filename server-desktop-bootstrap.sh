@@ -529,7 +529,8 @@ python3 -m py_compile "$install_dir/session.py" "$install_dir/socket-mode.py" "$
 systemd-analyze verify /etc/systemd/system/remoteagents-desktop-{x,vnc,rdp}.service
 systemctl daemon-reload
 systemctl try-restart remoteagents-desktop-x.service
-systemctl reset-failed remoteagents-desktop-x.service remoteagents-desktop-vnc.service remoteagents-desktop-rdp.service
+# On first installation these units have no loaded/failed state yet.
+systemctl reset-failed remoteagents-desktop-x.service remoteagents-desktop-vnc.service remoteagents-desktop-rdp.service 2>/dev/null || true
 systemctl enable --now remoteagents-desktop-x.service remoteagents-desktop-vnc.service remoteagents-desktop-rdp.service
 for attempt in {1..25}; do
   if python3 "$install_dir/check.py"; then

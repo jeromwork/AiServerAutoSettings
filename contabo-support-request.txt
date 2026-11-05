@@ -1,0 +1,15 @@
+Subject: VPS vmi3710592 - SSH authentication stalls and VNC closes before RFB banner
+
+Hello Contabo Support,
+
+Please help diagnose and restore access to VPS vmi3710592, IPv4 109.199.110.63.
+
+SSH on TCP port 22 accepts connections. SSH key exchange and SSH2_MSG_SERVICE_ACCEPT complete successfully. The client sends the initial user authentication request (packet type 50), but receives no reply within our hard 15-second diagnostic timeout. Earlier checks observed the server closing the connection after approximately 20 seconds. The customer reports the same connection issue from both their desktop and laptop. Whether those devices used different networks has not been verified.
+
+The customer panel shows VNC as Enabled at 169.58.12.240:63110. Our latest direct TCP/RFB probe connected successfully, but the endpoint closed the connection before sending an RFB protocol banner, after 2.69 seconds. No RFB version or security types were received. No password or security-type selection was sent. RealVNC Viewer also reported that the connection closed unexpectedly.
+
+The customer clicked Reboot in the panel. We cannot independently confirm that this operation completed because the guest OS remains inaccessible. Two subsequent SSH checks still stalled after the initial authentication request, and the latest VNC check still closed before the RFB banner.
+
+The precise cause is unknown. Please confirm whether the reboot operation completed, check the VM and host console/backend VNC service, and investigate SSH availability so that access can be restored. We are requesting diagnosis and restoration of access, without rebuilding/reinstalling the VPS or resetting passwords.
+
+Thank you.

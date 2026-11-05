@@ -2,9 +2,10 @@
 param()
 $ErrorActionPreference='Stop'
 $root=$PSScriptRoot
-$required=@('01-setup-ssh.cmd','setup-vps-ssh.ps1','ssh-password-ui.cs','Select-RemoteAgentsProjects.ps1','Connect-RemoteAgentsProject.ps1','Sync.Workspace.ps1','Sync.Runtime.ps1','Sync.Orchestrator.ps1','Start-RemoteSyncTunnel.ps1','Invoke-RemoteAgentsSsh.ps1','Invoke-RemoteSyncGuard.ps1','Agent.Handoff.ps1','server-agent-handoff.py','server-sync.py','server-sync-runtime.py','server-install-sync.sh','server-desktop.ps1','server-desktop-bootstrap.sh','server-desktop-audio.sh','server-browser.ps1','server-browser-bootstrap.sh','server-agent-user-v1.sh','server-codex-v1.sh','server-chatgpt.sh','server-claude-code.sh','server-claude-desktop.sh','server-devtools.sh','setup-amnezia.ps1','Get-CodexWindowsBridgeRegistration.ps1','Start-CodexWindowsBridge.ps1','windows-bridge-executor.ps1','codex-windows-bridge.py','codex-bridge-session.py')
-$required+=@('project-console-input.cs','server_node_catalog.py','Start-RemotePreview.ps1','server-desktop-onboarding.py','server-amnezia.sh')
+$required=@('01-setup-ssh.cmd','setup-vps-ssh.ps1','ssh-password-ui.cs','Select-RemoteAgentsProjects.ps1','Connect-RemoteAgentsProject.ps1','Sync.Workspace.ps1','Sync.Runtime.ps1','Sync.Orchestrator.ps1','Start-RemoteSyncTunnel.ps1','Invoke-RemoteAgentsSsh.ps1','Invoke-RemoteSyncGuard.ps1','Agent.Handoff.ps1','server-agent-handoff.py','server-sync.py','server-sync-runtime.py','server-install-sync.sh','server-desktop.ps1','server-desktop-bootstrap.sh','server-desktop-audio.sh','server-browser.ps1','server-browser-bootstrap.sh','server-agent-user-v1.sh','server-codex-v1.sh','server-chatgpt.sh','server-claude-code.sh','server-claude-desktop.sh','server-devtools.sh','setup-happ.ps1','Get-CodexWindowsBridgeRegistration.ps1','Start-CodexWindowsBridge.ps1','windows-bridge-executor.ps1','codex-windows-bridge.py','codex-bridge-session.py')
+$required+=@('project-console-input.cs','server_node_catalog.py','Start-RemotePreview.ps1','server-desktop-onboarding.py','server-happ.sh')
 $required+='Windows.Paths.ps1'
+$required+=@('Remote.Chat.ps1','server-chat.ps1','server-happier.sh')
 foreach($name in $required){if(!(Test-Path -LiteralPath (Join-Path $root $name) -PathType Leaf)){throw "Missing runtime source: $name"}}
 $files=@(Get-ChildItem -LiteralPath $root -File)
 foreach($file in $files){

@@ -1,0 +1,28 @@
+VPN-ON.bat  - persistent VPN-only Windows Firewall policy.
+VPN-OFF.bat - restore the firewall policy saved immediately before activation.
+VPN-STATUS.bat - inspect the current protection rules.
+
+All scripts request Windows administrator permission. No credentials are read.
+Keep these BAT files and VpnLock.ps1 together. OFF works offline.
+
+First activation requires HAPP connected to the managed server, split
+tunneling disabled, and a successful exit-IP check. The HAPP service signature
+is verified. Existing VPN applications and their settings are not changed.
+
+Protection applies to the entire PC and survives reboot. The only outbound
+exceptions are the selected tunnel, TCP transport to
+the fixed server/port, and Windows DHCP lease renewal. Other outbound allow
+rules are disabled. IPv6 outside the selected tunnel has no allow exception.
+No external DNS exception is created. A failed ON operation never silently
+restores direct internet. OFF is the explicit recovery operation.
+
+OFF restores the complete pre-activation firewall snapshot. Firewall changes
+made by other applications while protection was active are also rolled back.
+The backup is under ProgramData\RemoteAgents-VpnLock with restricted access.
+Windows Firewall is not disabled or reset to factory settings.
+
+An administrator, organization policy, third-party network filters, or another
+application with administrative permissions can change/bypass these rules.
+Verify VPN disconnection, application exit and reboot before provider login.
+Existing open connections are not evidence that new connections are protected.
+This feature does not guarantee that a website will accept the server IP.

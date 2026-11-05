@@ -9,8 +9,6 @@ source /etc/os-release
 [[ $ID == ubuntu && $VERSION_ID == 24.04 && $(dpkg --print-architecture) == amd64 ]] || exit 4
 server_home=$(getent passwd "$server_user" | cut -d: -f6)
 [[ $(id -u "$server_user") != 0 && $server_home == /home/"$server_user" ]] || exit 5
-version=26.1027.30824
-sha=4e139a44f7c917a643f2dd014ad32298dd30aec6d324d323524b190f7667684c
 base=/opt/remote-agents/chatgpt-installer
 # Validate all privileged destinations before trusting or replacing cached files.
 python3 -I - "$base" <<'TRUST'
@@ -31,22 +29,23 @@ for text in ('/etc/default/chatgpt','/etc/apt/sources.list.d/chatgpt.sources','/
    for child in p.rglob('*'): check(child)
 TRUST
 install -d -m 0755 "$base"
-package="$base/chatgpt_${version}_amd64.deb"
-if [[ ! -f $package ]] || ! printf '%s  %s\n' "$sha" "$package" | sha256sum -c --status; then
+# The official latest URL is mutable: never compare it to an old release hash.
+# HTTPS authenticates the download source; package metadata checks its identity.
+# Existing installations are reused; updates belong to the application's updater.
+if [[ $(dpkg-query -W -f='${Status}' chatgpt 2>/dev/null || true) != 'install ok installed' ]]; then
  stage=$(mktemp -d /tmp/remoteagents-chatgpt-install.XXXXXXXX)
  chmod 0700 "$stage"
  trap 'rm -rf -- "$stage"' EXIT
- curl -q --fail --location --silent --show-error --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 15 --max-time 600 \
+ echo 'Скачиваем приложение Codex с сайта OpenAI прямо на сервер...'
+ curl -q --fail --location --show-error --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 10 --max-time 600 \
   https://persistent.oaistatic.com/codex-app-prod/linux/deb/latest/chatgpt_amd64.deb -o "$stage/chatgpt.deb"
- printf '%s  %s\n' "$sha" "$stage/chatgpt.deb" | sha256sum -c
- [[ $(dpkg-deb -f "$stage/chatgpt.deb" Package) == chatgpt && $(dpkg-deb -f "$stage/chatgpt.deb" Version) == "$version" && $(dpkg-deb -f "$stage/chatgpt.deb" Architecture) == amd64 ]] || exit 6
- install -m 0644 "$stage/chatgpt.deb" "$package"
-fi
-if [[ $(dpkg-query -W -f='${Status}:${Version}' chatgpt 2>/dev/null || true) != "install ok installed:$version" ]]; then
+ [[ $(dpkg-deb -f "$stage/chatgpt.deb" Package) == chatgpt && $(dpkg-deb -f "$stage/chatgpt.deb" Architecture) == amd64 ]] || { echo 'Скачанный пакет не является приложением Codex для этой системы.' >&2; exit 6; }
+ echo 'Устанавливаем приложение Codex...'
  export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l
  apt-get update
- apt-get install -y "$package"
+ apt-get install -y "$stage/chatgpt.deb"
 fi
+[[ $(dpkg-query -W -f='${Status}' chatgpt) == 'install ok installed' ]] && command -v chatgpt >/dev/null
 # Create a shortcut as its owner, never write into a user-controlled tree as root.
 runuser -u "$server_user" -- env HOME="$server_home" python3 -I - "$server_home" <<'SHORTCUT'
 import os,stat,sys

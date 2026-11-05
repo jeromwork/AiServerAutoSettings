@@ -2,7 +2,7 @@
 $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'setup-vps-ssh.ps1'),[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'Setup parser failed'}
-foreach($name in @('Start-RemoteCodex','Start-ConnectionSetup','Initialize-ServerWorkspace')){
+foreach($name in @('Start-RemoteCodex','Start-ConnectionSetup','Initialize-ServerWorkspace','Get-SshTransportConfig','Select-SshTransport')){
     $node=$ast.Find({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)
     . ([scriptblock]::Create($node.Extent.Text.Replace('$PSScriptRoot',("'"+$PSScriptRoot.Replace("'","''")+"'"))))
 }
@@ -58,6 +58,7 @@ try {
     [IO.File]::WriteAllText((Join-Path $directory 'profile.json'),(@{version=1;profile=$id;displayName='Fixture';serverAddress='fixture.invalid';login='root';activeKey='fixture'}|ConvertTo-Json))
     foreach($name in @('id_ed25519','id_ed25519.pub','known_hosts','ssh_config')){[IO.File]::WriteAllText((Join-Path $directory $name),'')}
     function Test-WindowsRuntime {}
+    function Test-SshEndpoint {param($Address,$User,$Ports);foreach($Port in $Ports){[pscustomobject]@{Port=$Port;Ready=$true;TimedOut=$false}}}
     function Get-KeyDirectory {param($Slot);$directory}
     function Test-SavedConnection {param($Key);$script:sshChecks++;return 0}
     function Assert-SupportedServer {$script:osChecks++}
@@ -70,7 +71,84 @@ try {
     Assert ($script:menus -eq 1 -and $script:sshChecks -eq 1 -and $script:osChecks -eq 1 -and !$script:answers.Count) 'Enter server selection did not directly reach action menu'
     $script:answers.Enqueue('M1');$script:answers.Enqueue('0');Start-ConnectionSetup -DataDir $profiles
     Assert ($script:menus -eq 1 -and $script:sshChecks -eq 1 -and !$script:answers.Count) 'Explicit SSH maintenance did not preserve old flow'
-    Microsoft.PowerShell.Utility\Write-Output 'PASS: warm server Enter -> RDP without app installer/mode gate; independent folder edit/reconnect, sync-only -> explicit agent upgrade, persistent desktop, saved labels, opt-in SSH maintenance and baseline Bash syntax'
+    $script:probed=New-Object 'Collections.Generic.List[int]'
+    function Test-SshEndpoint {param($Address,$User,$Ports);foreach($Port in $Ports){$script:probed.Add($Port);[pscustomobject]@{Port=$Port;Ready=($Port -eq 443);TimedOut=($Port -eq 22)}}}
+    function Save-ProfileMetadata {param($Metadata,$Path);[IO.File]::WriteAllText($Path,($Metadata|ConvertTo-Json))}
+    $script:answers.Enqueue('');Start-ConnectionSetup -DataDir $profiles
+    Assert (($script:probed -join ',') -eq '22,443,2222,2022' -and $script:menus -eq 2) 'Failed port 22 did not fall back to SSH on 443'
+    $saved=[IO.File]::ReadAllText((Join-Path $directory 'profile.json'))|ConvertFrom-Json
+    Assert ($saved.sshPort -eq 443) 'Working SSH port was not persisted'
+    Assert ([IO.File]::ReadAllText((Join-Path $directory 'ssh_config')) -match 'Port 443') 'Child SSH processes will not inherit the selected port'
+    $script:probed.Clear();$script:answers.Enqueue('');Start-ConnectionSetup -DataDir $profiles
+    Assert (($script:probed -join ',') -eq '443,22,2222,2022' -and $script:menus -eq 3) 'Saved port did not retain priority alongside fallback ports'
+    $saved.sshPort=0
+    Save-ProfileMetadata $saved (Join-Path $directory 'profile.json')
+    function Test-SshEndpoint {param($Address,$User,$Ports);foreach($Port in $Ports){$script:probed.Add($Port);[pscustomobject]@{Port=$Port;Ready=($Port -eq 2022);TimedOut=($Port -ne 2022)}}}
+    $script:probed.Clear();$script:answers.Enqueue('');Start-ConnectionSetup -DataDir $profiles
+    Assert (($script:probed -join ',') -eq '22,443,2222,2022' -and $script:menus -eq 4) 'Additional SSH ports were not checked in order'
+    $saved=[IO.File]::ReadAllText((Join-Path $directory 'profile.json'))|ConvertFrom-Json
+    Assert ($saved.sshPort -eq 2022) 'Additional working port was not persisted'
+    # A blocked direct route must switch all components to the verified relay.
+    $script:sshExecutable=Join-Path $env:WINDIR 'System32\OpenSSH\ssh.exe'
+    $relayConfig=Join-Path $fixture 'relay config.conf'
+    [IO.File]::WriteAllText($relayConfig,'Host fixture-relay')
+    $script:routes=New-Object 'Collections.Generic.List[string]'
+    function Test-SshEndpoint {
+        param($Address,$User,$Ports,$TransportConfig='NUL')
+        $script:routes.Add($TransportConfig)
+        if ($TransportConfig -ne 'NUL') {
+            $probe=[IO.File]::ReadAllText($TransportConfig)
+            Assert ($probe -match 'StrictHostKeyChecking=yes' -and $probe.Contains($relayConfig.Replace('\','/'))) 'Relay probe omitted pinned host trust or its quoted config path'
+        }
+        foreach($Port in $Ports){$script:probed.Add($Port);[pscustomobject]@{Port=$Port;Ready=($TransportConfig -ne 'NUL' -and $Port -eq 443);TimedOut=$true}}
+    }
+    $script:answers.Enqueue('');Start-ConnectionSetup -DataDir $profiles -SSHJumpHost fixture-relay -SSHJumpConfig $relayConfig
+    Assert ($script:menus -eq 5 -and $script:routes.Count -eq 2 -and $script:routes[0] -eq 'NUL') 'Blocked direct SSH did not fall back exactly once'
+    $saved=[IO.File]::ReadAllText((Join-Path $directory 'profile.json'))|ConvertFrom-Json
+    Assert ($saved.sshJumpHost -eq 'fixture-relay' -and $saved.sshJumpConfig -eq $relayConfig -and $saved.sshPort -eq 443) 'Relay settings were not persisted'
+    $routedConfig=[IO.File]::ReadAllText((Join-Path $directory 'ssh_config'))
+    Assert ($routedConfig -match 'ProxyCommand .* -W %h:%p fixture-relay' -and $routedConfig -match 'Port 443') 'Desktop and child components did not inherit the selected relay'
+    Assert (@(Get-ChildItem -LiteralPath $directory -Filter 'transport-probe-*').Count -eq 0) 'Temporary relay config leaked'
+    $script:routes.Clear();$script:probed.Clear();$script:answers.Enqueue('');Start-ConnectionSetup -DataDir $profiles -SSHPort 443
+    Assert ($script:menus -eq 6 -and $script:routes.Count -eq 2 -and ($script:probed -join ',') -eq '443,443') 'Saved relay route or explicit port failed on a repeated launch'
+    # Failed routes must preserve the last working configuration and metadata.
+    function Test-SshEndpoint {param($Address,$User,$Ports,$TransportConfig='NUL');foreach($Port in $Ports){[pscustomobject]@{Port=$Port;Ready=$false;TimedOut=$true}}}
+    $before=[IO.File]::ReadAllText((Join-Path $directory 'profile.json'))
+    $script:answers.Enqueue('');Start-ConnectionSetup -DataDir $profiles
+    Assert ($script:menus -eq 6 -and $script:setupOutcome -eq 'error') 'Unavailable relay was reported as successful'
+    Assert ([IO.File]::ReadAllText((Join-Path $directory 'ssh_config')) -ceq $routedConfig) 'Failed routes replaced the working config'
+    Assert ([IO.File]::ReadAllText((Join-Path $directory 'profile.json')) -ceq $before) 'Failed routes changed the saved metadata'
+    Assert (@(Get-ChildItem -LiteralPath $directory -Filter 'transport-probe-*').Count -eq 0) 'Failed relay probe config leaked'
+    # Reject unexpected executable content before any SSH process is started.
+    $script:tamperSshCalls=0
+    function Test-SshEndpoint {$script:tamperSshCalls++;throw 'Tampered config reached SSH'}
+    [IO.File]::WriteAllText((Join-Path $directory 'ssh_config'),$routedConfig.Replace(' -W %h:%p ',' -o ProxyCommand=unexpected -W %h:%p '))
+    $script:answers.Enqueue('');Start-ConnectionSetup -DataDir $profiles
+    Assert ($script:menus -eq 6 -and $script:tamperSshCalls -eq 0 -and $script:setupOutcome -eq 'error') 'Unexpected proxy command was accepted'
+    [IO.File]::WriteAllText((Join-Path $directory 'ssh_config'),$routedConfig)
+    # A recovered direct route takes precedence and retains the backup settings.
+    $script:routes.Clear()
+    function Test-SshEndpoint {
+        param($Address,$User,$Ports,$TransportConfig='NUL');$script:routes.Add($TransportConfig)
+        foreach($Port in $Ports){[pscustomobject]@{Port=$Port;Ready=($Port -eq 22);TimedOut=$false}}
+    }
+    $script:answers.Enqueue('');Start-ConnectionSetup -DataDir $profiles
+    Assert ($script:menus -eq 7 -and $script:routes.Count -eq 1 -and $script:routes[0] -eq 'NUL') 'Recovered direct route still used the relay'
+    Assert ([IO.File]::ReadAllText((Join-Path $directory 'ssh_config')) -notmatch 'ProxyCommand') 'Recovered direct route kept the proxy command'
+    $saved=[IO.File]::ReadAllText((Join-Path $directory 'profile.json'))|ConvertFrom-Json
+    Assert ($saved.sshJumpHost -eq 'fixture-relay' -and $saved.sshPort -eq 22) 'Direct recovery lost the saved backup'
+    foreach($badAlias in @('-bad','relay another','relay;command')) {
+        $rejected=$false
+        try { Get-SshTransportConfig 443 $badAlias $relayConfig | Out-Null } catch { $rejected=$true }
+        Assert $rejected 'Unsafe relay alias accepted'
+    }
+    $script:probed.Clear();$script:answers.Enqueue('M1');$script:answers.Enqueue('0');Start-ConnectionSetup -DataDir $profiles
+    Assert ($script:probed.Count -eq 0) 'Offline maintenance unexpectedly attempted a network connection'
+    function Confirm-Action {param($Question,[switch]$DefaultNo);throw 'Direct deletion must not ask for confirmation'}
+    $script:answers.Enqueue('д1');Start-ConnectionSetup -DataDir $profiles
+    Assert (!(Test-Path -LiteralPath $directory) -and $script:probed.Count -eq 0) 'Direct removal did not delete the complete profile offline'
+    Assert (Test-Path -LiteralPath $profiles) 'Removal deleted the profiles root'
+    Microsoft.PowerShell.Utility\Write-Output 'PASS: warm entry, SSH relay fallback and saved repeat launch, direct recovery, failed-route preservation, proxy validation, offline maintenance and baseline Bash syntax'
 }finally{
     $resolved=[IO.Path]::GetFullPath($fixture);$temp=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\'
     if(!$resolved.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase)){throw 'Unsafe quick-entry fixture cleanup'}

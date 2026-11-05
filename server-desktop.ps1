@@ -183,14 +183,19 @@ try {
         '-o','IdentitiesOnly=yes','-o','ConnectTimeout=15','-o','ServerAliveInterval=30','-o','ServerAliveCountMax=3')
     $destination = "$VPSUser@$VPSHost"
     $privilege = if ($VPSUser -eq 'root') { '' } else { 'sudo -n ' }
-    if ($Prepare) {
+    $ready = Invoke-DesktopSsh ($baseArgs + @($destination,"${privilege}python3 /usr/local/lib/remoteagents-desktop/check.py && { systemctl is-active --quiet remoteagents-desktop-audio.service || printf 'AUDIO_SETUP_REQUIRED\n'; }"))
+    if ($Prepare -and $ready.ExitCode -ne 0) {
         $phase = 'подготовка сервера'
+        [Console]::WriteLine('REMOTEAGENTS_DESKTOP_PROGRESS=Установка и настройка пакетов рабочего стола')
         $bootstrap = Join-Path $PSScriptRoot 'server-desktop-bootstrap.sh'
         $bytes = [Text.Encoding]::UTF8.GetBytes([IO.File]::ReadAllText($bootstrap).Replace("`r`n","`n"))
         Write-Output 'Подготовка рабочего стола сервера (первая установка может занять несколько минут)...'
         $prepared = Invoke-DesktopSsh ($baseArgs + @($destination,"${privilege}bash -s -- $ServerUser")) $bytes
         Assert-DesktopSshResult $prepared
+    }
+    if($Prepare -and ($ready.ExitCode -ne 0 -or $ready.Output -match 'AUDIO_SETUP_REQUIRED')){
         $audioBootstrap = Join-Path $PSScriptRoot 'server-desktop-audio.sh'
+        [Console]::WriteLine('REMOTEAGENTS_DESKTOP_PROGRESS=Настройка звука и микрофона')
         if (-not [IO.File]::Exists($audioBootstrap)) { throw 'Не хватает компонента звука. Скопируйте весь комплект программы.' }
         $audioBytes = [Text.Encoding]::UTF8.GetBytes([IO.File]::ReadAllText($audioBootstrap).Replace("`r`n","`n"))
         Write-Output 'Настройка звука и микрофона этого компьютера для диктовки на сервере.'
@@ -203,7 +208,8 @@ try {
         }
     }
     $phase = 'проверка сервера'
-    $ready = Invoke-DesktopSsh ($baseArgs + @($destination,"${privilege}python3 /usr/local/lib/remoteagents-desktop/check.py"))
+    [Console]::WriteLine('REMOTEAGENTS_DESKTOP_PROGRESS=Проверка готовности рабочего стола')
+    if($ready.ExitCode -ne 0){$ready = Invoke-DesktopSsh ($baseArgs + @($destination,"${privilege}python3 /usr/local/lib/remoteagents-desktop/check.py"))}
     Assert-DesktopSshResult $ready
     if ($AgentApplications -ne '0') {
         $launchPath = Join-Path $PSScriptRoot 'server-desktop-onboarding.py'
@@ -213,6 +219,7 @@ try {
         if ($launched.ExitCode -ne 0) { Write-Output 'Приложение не открылось автоматически. Используйте ярлык Codex/Claude на рабочем столе сервера.' }
     }
     $phase = 'SSH-подключение'
+    [Console]::WriteLine('REMOTEAGENTS_DESKTOP_PROGRESS=Подключение к рабочему столу')
     $certificate = Invoke-DesktopSsh ($baseArgs + @($destination,"${privilege}openssl x509 -in /usr/local/lib/remoteagents-desktop/tls/cert.pem -noout -fingerprint -sha256"))
     Assert-DesktopSshResult $certificate
     $fingerprint = ($certificate.Output.Trim() -split '=')[-1].Replace(':','')
@@ -237,6 +244,7 @@ try {
     Write-Output 'Windows может показать сертификат сервера. В окне Desktop (SSH) нажмите OK: пароль Linux не нужен.'
     $mstsc = Join-Path $env:WINDIR 'System32\mstsc.exe'
     $phase = 'открытие рабочего стола'
+    [Console]::WriteLine('REMOTEAGENTS_DESKTOP_PROGRESS=Открытие окна рабочего стола Windows')
     Start-Process -FilePath $mstsc -ArgumentList ((Convert-DesktopSshArgument $rdpFile) + ' /public') | Out-Null
     if ($ManagedSession) {
         [Console]::Out.WriteLine("REMOTEAGENTS_DESKTOP_READY=127.0.0.1:$port")

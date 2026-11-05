@@ -139,4 +139,4 @@ runuser -u "$user" -- env HOME="$home" "$binary" --version
 # A result, not a substitute for the checks performed on every run. Never contains credentials.
 printf '{"schema":1,"bootstrap":1,"codexVersion":"%s","user":"remoteagents","work":"/home/remoteagents/work"}\n' "$version" > "$state/status.json.tmp"
 mv "$state/status.json.tmp" "$state/status.json"
-echo '7/7 Codex is installed and runs without root. Account sign-in is the next step.'
+echo '7/7 Codex CLI (terminal only) is installed and runs without root. The desktop application is installed separately.'
