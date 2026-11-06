@@ -63,6 +63,8 @@ exec "$@"
     $crlf="python3 - <<'PYUSERS'`r`nprint('crlf-ok')`r`nPYUSERS`r`n"
     Assert ((Convert-DiskRemoteText $crlf) -notmatch "`r") 'remote text must not contain CR'
     Assert ((Convert-DiskRemoteText $crlf | bash) -ceq 'crlf-ok') 'CRLF here-document must run in bash'
+    $names=@(ConvertFrom-DiskJsonList '["first_user","second_user"]')
+    Assert ($names.Count -eq 2 -and $names[1] -ceq 'second_user') 'JSON list must stay separate items'
     Assert ((Get-DiskServerCommand $payload $false '') -ceq $payload) 'ordinary login must stay unchanged'
     $built=Get-DiskServerCommand $payload $true 'fixture_user'
     Assert ($built.StartsWith("runuser -u 'fixture_user' -- bash -c '")) 'root wrapper'

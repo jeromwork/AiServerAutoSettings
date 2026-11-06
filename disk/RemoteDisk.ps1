@@ -86,6 +86,8 @@ function Get-DiskServerCommand([string]$RemoteCommand,[bool]$RootLogin,[string]$
     Assert-DiskServerUser $User
     'runuser -u '+(Quote-DiskShell $User)+' -- bash -c '+(Quote-DiskShell $RemoteCommand)
 }
+# PowerShell 5.1 returns a JSON array as one pipeline object; PowerShell 7 enumerates it.
+function ConvertFrom-DiskJsonList([string]$Json) { $list=ConvertFrom-Json $Json;foreach($item in $list){$item} }
 function Select-DiskServerUser {
     $script:ServerLoginIsRoot=$script:Connection.login -eq 'root'
     if(-not $script:ServerLoginIsRoot){return}
@@ -104,7 +106,7 @@ print(json.dumps([p.pw_name for p in pwd.getpwall()
     and os.path.basename(p.pw_shell) not in ('nologin', 'false', 'sync', 'shutdown', 'halt')]))
 PYUSERS
 '@
-    $users=@((Complete-DiskSsh (Start-DiskSsh $query -DiscoverUsers))|ConvertFrom-Json)
+    $users=@(ConvertFrom-DiskJsonList (Complete-DiskSsh (Start-DiskSsh $query -DiscoverUsers)))
     if(-not $users.Count){throw 'На сервере нет обычного пользователя с UID >= 1000, рабочей оболочкой и домашним каталогом. Пользователи автоматически не создаются.'}
     if($requested){
         if($requested -cnotin $users){throw 'Указанный serverUser не является доступным обычным пользователем сервера.'}
