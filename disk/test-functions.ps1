@@ -44,71 +44,12 @@ try {
     Assert (@(Get-ChildItem $script:Sent).Count -eq 1) 'local journal retained'
     'PASS independent journal: first record, redaction, offline queue, retry and local retention'
 }finally{Remove-Item -LiteralPath $temp -Recurse -Force}
-# No privilege change: a temporary runuser shim executes bash as the current user.
-$temp=Join-Path ([IO.Path]::GetTempPath()) ('disk-command-'+[guid]::NewGuid().ToString('N'))
-$oldPath=$env:PATH;$oldHome=$env:HOME
-try {
-    [void](New-Item -ItemType Directory -Path $temp)
-    $shim=Join-Path $temp 'runuser'
-    @'
-#!/usr/bin/env bash
-set -eu
-[ "$1" = "-u" ] && [ "$2" = "fixture_user" ] && [ "$3" = "--" ]
-shift 3
-exec "$@"
-'@ | Set-Content -LiteralPath $shim -Encoding utf8NoBOM
-    & chmod +x $shim
-    $env:PATH=$temp+[IO.Path]::PathSeparator+$oldPath;$env:HOME=$temp
-    $payload='printf "%s\n" "a b" "single'+"'"+'quote" ''$HOME; $(touch injected)''; printf "%s\n" "$HOME"; cat'
-    $crlf="python3 - <<'PYUSERS'`r`nprint('crlf-ok')`r`nPYUSERS`r`n"
-    Assert ((Convert-DiskRemoteText $crlf) -notmatch "`r") 'remote text must not contain CR'
-    Assert ((Convert-DiskRemoteText $crlf | bash) -ceq 'crlf-ok') 'CRLF here-document must run in bash'
-    $names=@(ConvertFrom-DiskJsonList '["first_user","second_user"]')
-    Assert ($names.Count -eq 2 -and $names[1] -ceq 'second_user') 'JSON list must stay separate items'
-    Assert ((Get-DiskServerCommand $payload $false '') -ceq $payload) 'ordinary login must stay unchanged'
-    $built=Get-DiskServerCommand $payload $true 'fixture_user'
-    Assert ($built.StartsWith("runuser -u 'fixture_user' -- bash -c '")) 'root wrapper'
-    $actual=@('stdin value' | & bash -c $built)
-    Assert ($LASTEXITCODE -eq 0) 'shim arguments'
-    Assert (($actual -join "`n") -ceq (@('a b',"single'quote",'$HOME; $(touch injected)',$temp,'stdin value') -join "`n")) 'shell escaping, HOME and stdin'
-    Assert (-not (Test-Path (Join-Path (Get-Location) 'injected'))) 'no injection'
-    foreach($bad in @('','root','nobody','-option','bad.name','user name',"user'quote",'user"quote',"user`n",'user;id',('a'*33))){
-        $rejected=$false
-        try{Get-DiskServerCommand 'true' $true $bad}catch{$rejected=$true}
-        Assert $rejected ('invalid server user: '+$bad)
-    }
-    'PASS server command: nonroot unchanged, root runuser shim, quoting, HOME, stdin, invalid users'
-}finally{
-    $env:PATH=$oldPath;$env:HOME=$oldHome
-    Remove-Item -LiteralPath $temp -Recurse -Force
-}
-# Selection tests do not query a machine or open WinForms.
-& {
-    $script:SelectionStages=@();$script:SelectionSaved=$false
-    function Write-DiskLog($Stage,$Message){$script:SelectionStages+=@($Stage)}
-    function Save-DiskConfig {$script:SelectionSaved=$true}
-    function Start-DiskSsh { 'synthetic job' }
-    function Complete-DiskSsh { $script:CandidateJson }
-    $script:Connection=[pscustomobject]@{login='root'}
-    $script:Config=[pscustomobject]@{serverUser='config_user'}
-    $script:CandidateJson='["config_user","argument_user"]'
-    $ServerUser='argument_user'
-    Select-DiskServerUser
-    Assert ($script:EffectiveServerUser -eq 'argument_user') 'parameter precedence'
-    $ServerUser=''
-    $script:Config.serverUser='config_user'
-    Select-DiskServerUser
-    Assert ($script:EffectiveServerUser -eq 'config_user') 'config fallback'
-    $script:Config=[pscustomobject]@{}
-    $script:SelectionStages=@();$script:SelectionSaved=$false
-    $script:CandidateJson='["single_user"]'
-    Select-DiskServerUser
-    Assert ($script:EffectiveServerUser -eq 'single_user' -and $script:SelectionSaved -and 'serverUser.auto' -in $script:SelectionStages) 'auto user logged and saved'
-    $script:Config=[pscustomobject]@{};$script:CandidateJson='[]'
-    $rejected=$false;try{Select-DiskServerUser}catch{$rejected=$_.Exception.Message -like '*нет обычного пользователя*'}
-    Assert $rejected 'no user error'
-    $script:Connection.login='regular_user';$ServerUser='bad user'
-    Select-DiskServerUser
-    Assert (-not $script:ServerLoginIsRoot) 'ordinary login ignores root-only setting'
-    'PASS user selection: parameter, config, auto logging and persistence, empty list, ordinary login'
-}
+# Remote commands retain LF line endings before they are passed to SSH.
+$RemoteCommand="printf 'crlf-ok\n'`r`nprintf 'done\n'`r`n"
+$normalized=Convert-DiskRemoteText $RemoteCommand
+Assert ($normalized -notmatch "`r") 'RemoteCommand must not contain CR after normalization'
+Assert ($normalized -ceq $RemoteCommand.Replace("`r`n","`n")) 'RemoteCommand must preserve content and LF'
+$source=Get-Content -LiteralPath "$PSScriptRoot/RemoteDisk.ps1" -Raw
+$codeWithoutLegacyComment=$source.Replace('# Legacy serverUser in config.json is ignored; commands use the SSH profile login.','')
+Assert ($codeWithoutLegacyComment -notmatch '(?i)runuser|serverUser') 'removed user switching must not appear in RemoteDisk code'
+'PASS SSH login policy: RemoteCommand CRLF normalization, no user switching or setting'

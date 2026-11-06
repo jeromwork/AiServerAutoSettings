@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 [CmdletBinding()]
-param([string]$Profile,[string]$ServerUser,[string]$Command='show',[string]$Path,[switch]$LibraryOnly)
+param([string]$Profile,[string]$Command='show',[string]$Path,[switch]$LibraryOnly)
 Set-StrictMode -Version 2
 $ErrorActionPreference='Stop'
 
@@ -69,72 +69,10 @@ function Select-DiskProfile {
     if(@($c.arguments)[-1] -ne $c.serverAddress){throw 'Unsupported profile arguments: destination must be last'}
     $script:Connection=$c
 }
-# Single boundary for every remote command, including journal workers and tunnels.
-$script:ServerLoginIsRoot=$false
-$script:EffectiveServerUser=''
-function Assert-DiskServerUser([string]$Name) {
-    if($Name -cnotmatch '\A[a-z_][a-z0-9_-]{0,31}\z' -or $Name -in @('root','nobody')){
-        throw 'Недопустимое имя обычного пользователя сервера.'
-    }
-}
-function Quote-DiskShell([string]$Value) {
-    $q=[string][char]39
-    $q+$Value.Replace($q,($q+'"'+$q+'"'+$q))+$q
-}
-function Get-DiskServerCommand([string]$RemoteCommand,[bool]$RootLogin,[string]$User) {
-    if(-not $RootLogin){return $RemoteCommand}
-    Assert-DiskServerUser $User
-    'runuser -u '+(Quote-DiskShell $User)+' -- bash -c '+(Quote-DiskShell $RemoteCommand)
-}
-# PowerShell 5.1 returns a JSON array as one pipeline object; PowerShell 7 enumerates it.
-function ConvertFrom-DiskJsonList([string]$Json) { $list=ConvertFrom-Json $Json;foreach($item in $list){$item} }
-function Select-DiskServerUser {
-    $script:ServerLoginIsRoot=$script:Connection.login -eq 'root'
-    if(-not $script:ServerLoginIsRoot){return}
-    $requested=$ServerUser
-    if(-not $requested -and $script:Config.PSObject.Properties['serverUser']){$requested=[string]$script:Config.serverUser}
-    if($requested){Assert-DiskServerUser $requested}
-    # Read-only discovery is the only command allowed before a target user exists.
-    $query=@'
-python3 - <<'PYUSERS'
-import json, os, pwd, re
-print(json.dumps([p.pw_name for p in pwd.getpwall()
-    if p.pw_uid >= 1000 and p.pw_name not in ('root', 'nobody')
-    and re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}', p.pw_name)
-    and os.path.isdir(p.pw_dir) and p.pw_dir != '/'
-    and os.path.isabs(p.pw_shell) and os.access(p.pw_shell, os.X_OK)
-    and os.path.basename(p.pw_shell) not in ('nologin', 'false', 'sync', 'shutdown', 'halt')]))
-PYUSERS
-'@
-    $users=@(ConvertFrom-DiskJsonList (Complete-DiskSsh (Start-DiskSsh $query -DiscoverUsers)))
-    if(-not $users.Count){throw 'На сервере нет обычного пользователя с UID >= 1000, рабочей оболочкой и домашним каталогом. Пользователи автоматически не создаются.'}
-    if($requested){
-        if($requested -cnotin $users){throw 'Указанный serverUser не является доступным обычным пользователем сервера.'}
-        $chosen=$requested
-    }elseif($users.Count -eq 1){
-        $chosen=$users[0];Write-DiskLog 'serverUser.auto' ('user='+$chosen)
-    }else{
-        $form=New-Object Windows.Forms.Form;$form.Text='Выберите пользователя сервера';$form.Width=500;$form.Height=260
-        $list=New-Object Windows.Forms.ListBox;$list.Dock='Fill'
-        foreach($user in $users){[void]$list.Items.Add($user)}
-        $ok=New-Object Windows.Forms.Button;$ok.Text='Выбрать';$ok.Dock='Bottom';$ok.DialogResult='OK'
-        $form.Controls.Add($list);$form.Controls.Add($ok);$form.AcceptButton=$ok
-        try{
-            if($form.ShowDialog() -ne 'OK' -or $list.SelectedIndex -lt 0){throw 'Выбор пользователя сервера отменён.'}
-            $chosen=[string]$list.SelectedItem
-        }finally{$form.Dispose()}
-    }
-    Assert-DiskServerUser $chosen
-    $script:EffectiveServerUser=$chosen
-    $script:Config|Add-Member -NotePropertyName serverUser -NotePropertyValue $chosen -Force
-    Save-DiskConfig
-    Write-DiskLog 'serverUser.selected' ('user='+$chosen)
-}
 # This script has CRLF on Windows; bash treats a stray CR as part of the command.
 function Convert-DiskRemoteText([string]$Text) { $Text.Replace("`r`n","`n").Replace("`r","`n") }
-function Start-DiskSsh([string]$RemoteCommand,[string]$InputText='', [string[]]$Extra=@(),[switch]$KeepOpen,[switch]$DiscoverUsers) {
+function Start-DiskSsh([string]$RemoteCommand,[string]$InputText='', [string[]]$Extra=@(),[switch]$KeepOpen) {
     $RemoteCommand=Convert-DiskRemoteText $RemoteCommand;$InputText=Convert-DiskRemoteText $InputText
-    if(-not $DiscoverUsers){$RemoteCommand=Get-DiskServerCommand $RemoteCommand $script:ServerLoginIsRoot $script:EffectiveServerUser}
     $c=$script:Connection
     $base=@($c.arguments)
     $args=@('-o','BatchMode=yes','-o','ConnectTimeout=8','-o','StrictHostKeyChecking=yes','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3')+ $Extra + $base + @($RemoteCommand)
@@ -181,10 +119,9 @@ function Send-DiskLogs([switch]$DrainOnly,[switch]$First) {
 }
 function Start-DiskLogWorker {
     # A separate PowerShell worker keeps delivery alive during downloads/bootstrap/UI stalls.
-    $script:LogWorker=Start-Job -ArgumentList $PSCommandPath,$script:Connection,$script:DiskHome,$script:HostName,$script:LogFile,$script:ServerLoginIsRoot,$script:EffectiveServerUser -ScriptBlock {
-        param($Source,$Connection,$DiskHome,$HostName,$MainLog,$RootLogin,$User)
+    $script:LogWorker=Start-Job -ArgumentList $PSCommandPath,$script:Connection,$script:DiskHome,$script:HostName,$script:LogFile -ScriptBlock {
+        param($Source,$Connection,$DiskHome,$HostName,$MainLog)
         . $Source -LibraryOnly
-        $script:ServerLoginIsRoot=$RootLogin;$script:EffectiveServerUser=$User
         $script:Connection=$Connection;$script:DiskHome=$DiskHome;$script:HostName=$HostName
         $script:LocalKey='';$script:RemoteKey=''
         $script:Queue=Join-Path $DiskHome 'logs\queue'
@@ -450,15 +387,12 @@ function Start-DiskApp {
         return
     }
     Select-DiskProfile
+    Write-DiskLog 'ssh.login' ('user='+$script:Connection.login)
     $script:ConfigFile=Join-Path $script:DiskHome 'config.json'
+    # Legacy serverUser in config.json is ignored; commands use the SSH profile login.
     if(Test-Path $script:ConfigFile){$script:Config=Get-Content $script:ConfigFile -Raw|ConvertFrom-Json}else{
         $script:Config=[pscustomobject]@{schema=1;listen=(Get-FreeDiskPort);gui=(Get-FreeDiskPort);forward=(Get-FreeDiskPort);remoteGui=(Get-FreeDiskPort);folders=@();contextMenu=$false};Save-DiskConfig
     }
-    try{Select-DiskServerUser}catch{
-        [Windows.Forms.MessageBox]::Show($_.Exception.Message,'RemoteDisk')|Out-Null
-        throw
-    }
-    # Resolve the owner before any remote writes, including the first journal.
     Send-DiskLogs -First
     if($script:Upload){try{[void](Complete-DiskSsh $script:Upload 15);Move-Item $script:Pending (Join-Path $script:Sent ([IO.Path]::GetFileName($script:Pending))) -Force}catch{};$script:Upload=$null}
     Start-DiskLogWorker
