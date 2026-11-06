@@ -1,26 +1,7 @@
-# Only reviewed source files belong in this repository.
-.env
-.env.*
-auth.json
-credentials*
-*.pem
-*.key
-*.p12
-*.p8
-*.jks
-*.keystore
-id_rsa*
-id_ed25519*
-profiles/
-data/
-state/
-downloads/
-cache/
-__pycache__/
-*.pyc
-*.exe
-*.zip
-*.log
-*.png
-*-fixture*/
-transport fixture */
+test-*.json
+My-server-HAPP.json
+Cloudflare-*.json
+bin/
+obj/
+publish/
+# .NET outputs

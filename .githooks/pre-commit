@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+scanner="${HOME}/.local/bin/gitleaks"
+if [ ! -x "$scanner" ]; then echo 'gitleaks missing: install it before committing' >&2; exit 1; fi
+"$scanner" protect --staged --redact --no-banner
