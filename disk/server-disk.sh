@@ -2,7 +2,7 @@
 # Private user process. Never sources project/runtime/handoff files.
 set -euo pipefail
 umask 077
-[ "$(id -u)" != 0 ] || { echo 'RemoteDisk requires a non-root SSH login' >&2; exit 1; }
+[ "$(id -u)" != 0 ] || { echo 'RemoteDisk must run as an ordinary user; a root SSH profile must use runuser' >&2; exit 1; }
 state="$HOME/.local/share/remote-disk"
 mkdir -p "$state"
 exec 9>"$state/bootstrap.lock"
