@@ -60,6 +60,9 @@ exec "$@"
     & chmod +x $shim
     $env:PATH=$temp+[IO.Path]::PathSeparator+$oldPath;$env:HOME=$temp
     $payload='printf "%s\n" "a b" "single'+"'"+'quote" ''$HOME; $(touch injected)''; printf "%s\n" "$HOME"; cat'
+    $crlf="python3 - <<'PYUSERS'`r`nprint('crlf-ok')`r`nPYUSERS`r`n"
+    Assert ((Convert-DiskRemoteText $crlf) -notmatch "`r") 'remote text must not contain CR'
+    Assert ((Convert-DiskRemoteText $crlf | bash) -ceq 'crlf-ok') 'CRLF here-document must run in bash'
     Assert ((Get-DiskServerCommand $payload $false '') -ceq $payload) 'ordinary login must stay unchanged'
     $built=Get-DiskServerCommand $payload $true 'fixture_user'
     Assert ($built.StartsWith("runuser -u 'fixture_user' -- bash -c '")) 'root wrapper'

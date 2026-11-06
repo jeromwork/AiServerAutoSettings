@@ -128,7 +128,10 @@ PYUSERS
     Save-DiskConfig
     Write-DiskLog 'serverUser.selected' ('user='+$chosen)
 }
+# This script has CRLF on Windows; bash treats a stray CR as part of the command.
+function Convert-DiskRemoteText([string]$Text) { $Text.Replace("`r`n","`n").Replace("`r","`n") }
 function Start-DiskSsh([string]$RemoteCommand,[string]$InputText='', [string[]]$Extra=@(),[switch]$KeepOpen,[switch]$DiscoverUsers) {
+    $RemoteCommand=Convert-DiskRemoteText $RemoteCommand;$InputText=Convert-DiskRemoteText $InputText
     if(-not $DiscoverUsers){$RemoteCommand=Get-DiskServerCommand $RemoteCommand $script:ServerLoginIsRoot $script:EffectiveServerUser}
     $c=$script:Connection
     $base=@($c.arguments)
