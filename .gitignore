@@ -1,7 +1,42 @@
+# Only reviewed source files belong in this repository.
+.env
+.env.*
+auth.json
+credentials*
+*.pem
+*.key
+*.p12
+*.p8
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+profiles/
+data/
+state/
+downloads/
+cache/
+__pycache__/
+*.pyc
+*.exe
+*.zip
+*.log
+*.png
+*-fixture*/
+transport fixture */
+
+# Personal VPN client configs and temporary network experiments
 test-*.json
 My-server-HAPP.json
 Cloudflare-*.json
+
+# .NET outputs
 bin/
 obj/
 publish/
-# .NET outputs
+
+# Sync runtime and private notes
+.stfolder/
+.stignore
+.stversions/
+contabo-support-request.txt
