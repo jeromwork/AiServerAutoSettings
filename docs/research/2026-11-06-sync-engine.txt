@@ -1,0 +1,59 @@
+Проверка 2026-11-06. Рекомендация: Syncthing v2.1.7 как отдельний дочерний процесс, доставка ресурсом portable .NET exe, распаковка в пользовательский каталог, серверный бинарник без root, связь исключительно через управляемый SSH tunnel.
+
+Размеры x64 в байтах (реально скачаны официальные latest release):
+Mutagen v0.18.1, 2025-02-24: Windows exe 13797376; Linux CLI 13193368; mutagen-agents.tar.gz 97228378 в КАЖДОМ пакете (одинаковый архив). Внутри Linux amd64 agent 7930008; Windows amd64 agent 8410112. Windows zip 102206512; Linux tar.gz 102172827. Агентный архив обязателен для штатного авторазвертывания; сам agent отдельно на сервере. Размер кастомного урезанного пакета не измерялся. Linux CLI не заменяет размер удаленного agent.
+Syncthing v2.1.7, 2026-10-21: Windows exe 34802944; Linux binary 34022872. Windows zip 14281765; Linux tar.gz 14046697.
+SHA256 всех четырех архивов совпал с официальными checksum-файлами. GPG/signatures отдельно не проверялись.
+
+Тест Mutagen test-mutagen.py:
+Два режима two-way-safe/two-way-resolved, две локальные папки, отдельные HOME и MUTAGEN_DATA_DIRECTORY, daemon run через собственный PID, --no-global-configuration. IPC Unix socket, TCP listener не требуется. Двунаправленное создание и удаление успешно в обоих режимах. Для воспроизводимого одновременного редактирования session pause, разные ALPHA/BETA, resume+flush.
+safe: ALPHA остается в a, BETA в b, sync list --long выводит конфликт; отдельные копии не создаются, изменения других файлов проходят. resolved: ALPHA оказывается в обоих, BETA потеряна, конфликтов нет.
+Дополнительный mutagen-auto.py: новые файлы в обе стороны, перезапись и удаление без flush после начального цикла, автоматическое отслеживание прошло. Старые данные не архивируются; в state archives метаданные согласованного дерева, не история содержимого. CLI help и configuration.proto не содержат механизма версий. Встроенного хранения версий нет.
+RSS Linux: 16408 KiB (16.02 MiB) в автоматическом тесте с активной локальной сессией; другой активный запуск 15968 KiB; после серии сессий 19540 KiB. Удаленный агент и SSH-процесс не измерялись.
+По документации safe при edit/delete сохраняет edit (возвращает удаленное); resolved всегда предпочитает alpha, даже если это alpha-delete против beta-edit. Этот частный edit/delete сценарий отдельно не запускался.
+
+Syncthing test-st-final.py: два отдельных процесса/состояния, TCP и GUI только 127.0.0.1 на случайных портах, relay/discovery/NAT/upgrades/reporting отключены, по одному sendreceive folder с simple keep=5 на обоих, rescan=1s, watcher выключен. Автоматический обмен через periodic scanner успешно, SSH не использовался. Конкуренция создана остановкой обоих собственных процессов после базовой синхронизации, записью разных текстов и перезапуском.
+Создание A->B, B->A; конфликт: ALPHA основной и BETA в conflict.sync-conflict-* на ОБОИХ; перезапись B-new на A-updated сохранила B-new на получателе; удаление A-new сохранило A-new в .stversions получателя. Итоговые пути и содержимое в syncthing-final-test.txt.
+RSS 29008 и 28760 KiB (28.33 и 28.09 MiB) на процесс, без SSH. Ранний тест 28728/28880 KiB. Это точечный RSS, не peak и не нагрузочный тест; размер каталога всего несколько маленьких файлов. Нельзя переносить на большие деревья.
+В промежуточном повторе была ошибочная проверка, требовавшая именно ALPHA в conflict-copy; победитель может быть любым по mtime/deviceID. Исправленная проверка требует множество ALPHA,BETA на обоих узлах; финальный тест прошел.
+Versioning по умолчанию выключен. Архивируются только изменения, пришедшие с другого устройства; локальные промежуточные записи до синхронизации не защищены. Конфликтные копии и архив версий — разные механизмы.
+
+Лицензии:
+Прочитан LICENSE именно v0.18.1 и отдельно sspl/LICENSE, pkg/mutagen/licenses.go, licenses_sspl.go; запущен mutagen legal официального Linux бинарника и сохранен полный вывод. Он явно сообщает наличие SSPL enhancements.
+Основное MIT, зависимости включают MIT/BSD-2/BSD-3/Apache-2/ISC, Go patent grant, Sun permission notice; полный список и тексты в mutagen-legal.txt. SSPL компоненты в sspl/: fanotify/platform linux, xxh128, zstd. Отдельные сторонние xxh3 BSD-2 и xxhash MIT не отменяют SSPL лицензии собственного адаптерного кода Mutagen.
+Встраивание не означает безусловно MIT. Официальный бинарник распространяется с SSPL-кодом: при передаче нужен соответствующий исходный код и уведомления; если продукт остается отдельным независимым произведением, aggregate exception может сохранить его лицензию. Для производного единого произведения действует copyleft. При предоставлении функциональности как услуги SSPL §13 требует Service Source Code (в том числе управляющее ПО и UI). Нельзя считать отдельный процесс автоматическим обходом §13. Для закрытого продукта предсказуемый вариант Mutagen — собственная сборка без --sspl и сохранение уведомлений permissive-компонентов, либо подходящая отдельная лицензия. Такая сборка и юридическая квалификация конкретной архитектуры продукта не проверены.
+Syncthing MPL-2.0: допускает отдельный бинарник внутри закрытого продукта, нужно сохранить notices, дать доступ к covered source и публиковать изменения MPL-файлов; не требует раскрывать независимые .NET-файлы. Полный аудит зависимостей Syncthing не проводился.
+
+Архитектура:
+Mutagen: локальный daemon плюс загружаемый user-space agent на VPS, SSH штатно, требует внешних OpenSSH ssh/scp на клиенте; root и новые сетевые listeners не нужны. Серверные файлы настоящие.
+Syncthing: по бинарнику и каталогу состояния на каждой стороне, SSH не нативный транспорт; управляемый туннель с localhost listen и статическим peer address, сервер должен разрешать TCP forwarding. Новых публичных портов не нужно; локальные TCP listeners остаются. Серверные файлы настоящие.
+Ни один не является управляемой .NET DLL. Один распространяемый exe можно сделать контейнером ресурсов, но во время работы движок извлекается в отдельный файл/процесс. Размеры не включают .NET runtime и реализацию/клиент SSH.
+
+Быстрый отсев альтернатив (без скачивания и практических замеров):
+Unison v2.54.0 от 2026-05-01, GPL-3.0-or-later, SSH и пользовательский бинарник на сервере, конфликты и backups. watch требует отдельного helper, polling repeat обходится без него. Не подтвержден как лучший для одного бинарника и закрытого встраивания; отдельное распространение допустимо с GPL/source обязательствами.
+rclone bisync: MIT, SFTP без установки ПО на сервере — плюс; циклическая команда вместо штатного realtime watcher, планировщик/повтор/восстановление и backup-dir нужно организовать. Официальная документация отмечает ограничения при изменениях в ходе запуска. Не подтвержден как лучший для постоянной активной синхронизации.
+
+Свежесть: GitHub repo API: Mutagen archived=false, pushed_at=2026-04-22; Syncthing archived=false, pushed_at=2026-11-05. Push не доказывает качество поддержки; последний stable Mutagen заметно старше.
+
+Не проверено: запуск Windows, .NET 10 single-file extraction/подпись/AV, реальный VPS/SSH и переподключения, память remote agent/туннеля, большие деревья, обрыв записи/диска/сети, ACL/symlinks/case collisions, полноценная гарантия отсутствия потери данных. Localhost:22 TCP доступен; существующая авторизованная SSH-сессия не подтверждена, ключи/существующие конфиги не читались.
+Что дописать к рекомендации: упаковку/распаковку, управление дочерним процессом и состоянием, SSH tunnel и reconnect, запуск server binary по SSH без root, REST API/pairing, явное включение versions с квотами, UI conflict/restore, сохранение локальных промежуточных версий при необходимости, лицензионные notices/source links.
+
+Источники:
+https://github.com/mutagen-io/mutagen/releases/tag/v0.18.1
+https://raw.githubusercontent.com/mutagen-io/mutagen/v0.18.1/LICENSE
+https://raw.githubusercontent.com/mutagen-io/mutagen/v0.18.1/sspl/LICENSE
+https://raw.githubusercontent.com/mutagen-io/mutagen/v0.18.1/pkg/mutagen/licenses.go
+https://raw.githubusercontent.com/mutagen-io/mutagen/v0.18.1/pkg/mutagen/licenses_sspl.go
+https://raw.githubusercontent.com/mutagen-io/mutagen/v0.18.1/pkg/synchronization/configuration.proto
+https://mutagen.io/documentation/synchronization/
+https://mutagen.io/documentation/introduction/daemon/
+https://mutagen.io/documentation/transports/ssh/
+https://github.com/syncthing/syncthing/releases/tag/v2.1.7
+https://raw.githubusercontent.com/syncthing/syncthing/v2.1.7/LICENSE
+https://docs.syncthing.net/users/versioning.html
+https://docs.syncthing.net/users/syncing.html
+https://docs.syncthing.net/users/tunneling.html
+https://github.com/bcpierce00/unison/releases/tag/v2.54.0
+https://raw.githubusercontent.com/bcpierce00/unison/v2.54.0/LICENSE
+https://rclone.org/bisync/
+https://rclone.org/licence/

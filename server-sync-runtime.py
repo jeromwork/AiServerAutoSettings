@@ -15,7 +15,7 @@ def main():
     if any(x.is_symlink() for x in (state,*state.parents)):raise ValueError('Symlink state')
     state.mkdir(mode=0o700,parents=True,exist_ok=True);os.chmod(state,0o700)
     config=state/'config.xml'
-    if not config.exists():subprocess.run([a.binary,'generate','--home',str(state)],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    if not config.exists():subprocess.run([a.binary,'generate','--home',str(state)]+(['--no-port-probing'] if a.mode=='bidirectional' else []),check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     tree=ET.parse(config);root=tree.getroot();local=root.find('device').attrib['id']
     if a.action=='identity':print(json.dumps({'deviceId':local}));return
     if a.action=='configure':
@@ -37,6 +37,13 @@ def main():
         peer=ET.SubElement(root,'device',{'id':a.peer,'name':'approved-peer'});put(peer,'address',f'tcp://127.0.0.1:{a.tunnel}');put(peer,'autoAcceptFolders','false')
         folder_type='sendreceive' if a.mode=='bidirectional' else 'sendonly'
         folder=ET.SubElement(root,'folder',{'id':'ra-'+a.project,'path':str(workspace),'type':folder_type,'paused':'true','rescanIntervalS':'3600','fsWatcherEnabled':'true'})
+        if a.mode=='bidirectional':
+            # Staggered coalesces rapid edits, potentially discarding the deleted
+            # file's last content. Simple keeps each received revision for 30 days.
+            versioning=ET.SubElement(folder,'versioning',{'type':'simple'})
+            ET.SubElement(versioning,'param',{'key':'keep','val':'2147483647'})
+            ET.SubElement(versioning,'param',{'key':'cleanoutDays','val':'30'})
+            ET.SubElement(versioning,'cleanupIntervalS',{}).text='3600'
         for value in (local,a.peer):ET.SubElement(folder,'device',{'id':value})
         # Share seed/snapshot policy; Git metadata stays outside the source tree.
         spec=importlib.util.spec_from_file_location('sync_policy',Path(__file__).with_name('server-sync.py'))
@@ -70,8 +77,10 @@ def main():
     elif a.action=='stop':request('system/shutdown','POST',{});print('{"ok":true}')
     elif a.action=='scan':request('db/scan?folder=ra-'+a.project,'POST');print('{"ok":true}')
     else:
+        # Actions after configure may omit --peer: use the persisted binding.
+        peer_id=a.peer or json.loads((state/'configured.json').read_text('utf-8'))['peer']
         status=request('db/status?folder=ra-'+a.project);connections=request('system/connections')
-        print(json.dumps({'connected':connections['connections'].get(a.peer,{}).get('connected',False),'state':status['state'],'needTotalItems':status['needTotalItems'],'pullErrors':status['pullErrors'],'sequence':status['sequence']}))
+        print(json.dumps({'connected':connections['connections'].get(peer_id,{}).get('connected',False),'state':status['state'],'needTotalItems':status['needTotalItems'],'pullErrors':status['pullErrors'],'sequence':status['sequence']}))
 if __name__=='__main__':
     try:main()
     except Exception:print('{"ok":false,"reason":"Sync runtime operation failed; inspect nonsecret state and ports"}');sys.exit(1)

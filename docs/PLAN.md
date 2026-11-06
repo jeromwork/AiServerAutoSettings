@@ -137,6 +137,6 @@
 
 | Роль | Модель |
 |---|---|
-| Выполнение этапов | Codex, `gpt-6-luna`, `reasoning_effort: high` |
+| Выполнение этапов | Codex, `gpt-6.1-sol`, `reasoning_effort: high` |
 | Вторая проверка сети и безопасности | Antigravity (`agent:agy`), `gemini-3.8-flash-high`; `gemini-4-argon-*` только для самых сложных случаев, расходует много токенов |
 | Постановка задач и приёмка | Claude, эта сессия |
