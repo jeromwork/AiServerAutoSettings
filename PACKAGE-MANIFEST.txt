@@ -1,6 +1,7 @@
 .gitattributes
 .gitignore
 01-setup-ssh.cmd
+03-control-this-computer.cmd
 Agent.Handoff.ps1
 codex-bridge-session.py
 codex-windows-bridge.py

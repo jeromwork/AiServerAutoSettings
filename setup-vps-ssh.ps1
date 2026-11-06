@@ -1,5 +1,5 @@
 ﻿[CmdletBinding()]
-param([string]$ServerAddress, [string]$Login, [string]$ProfileName, [string]$DataDir, [switch]$Launcher, [switch]$DetailedOutput, [switch]$ConnectionSettings, [ValidateRange(0,65535)][int]$SSHPort=0, [string]$SSHJumpHost, [string]$SSHJumpConfig)
+param([string]$ServerAddress, [string]$Login, [string]$ProfileName, [string]$DataDir, [switch]$Launcher, [switch]$DetailedOutput, [switch]$ConnectionSettings, [ValidateRange(0,65535)][int]$SSHPort=0, [string]$SSHJumpHost, [string]$SSHJumpConfig, [switch]$ConnectSaved)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 function Select-SetupOutputMode([switch]$Detailed, [switch]$Prompt) {
@@ -990,7 +990,7 @@ function Start-RemoteCodex {
         }
         if($desktop){Write-Host '8. Отключить RDP (приложения остаются на сервере)'}
         Write-Host '0. Вернуться к списку серверов'
-        $action=(Read-Host 'Что открыть? Enter — рабочий стол').Trim();if(!$action){$action='1'}
+        if($script:pendingMenuAction){$action=$script:pendingMenuAction;$script:pendingMenuAction=$null}else{$action=(Read-Host 'Что открыть? Enter — рабочий стол').Trim();if(!$action){$action='1'}}
         if($action -eq '0'){return}
         if($action -eq '10'){$advanced=!$advanced;continue}
         if($action -eq '6'){Show-ServerApplications}
@@ -1499,6 +1499,7 @@ function Show-SetupResult {
     Write-Host 'Вход в аккаунты и готовность задач подтверждаются отдельно в выбранном приложении.'
 }
 
+$script:pendingMenuAction=if($ConnectSaved){'13'}else{$null}
 Select-SetupOutputMode -Detailed:$DetailedOutput -Prompt:($Launcher -and -not $PSBoundParameters.ContainsKey('DetailedOutput'))
 $logRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'RemoteAgents'
 if (-not [IO.Directory]::Exists($logRoot)) { [void][IO.Directory]::CreateDirectory($logRoot); Protect-NewDirectory $logRoot }
