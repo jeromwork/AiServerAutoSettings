@@ -21,6 +21,39 @@ if a[0]=='mkdir':
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}',name): raise ValueError('Invalid folder name')
     p=Path.home()/'Disk'/name; safe(p); p.mkdir(parents=True,exist_ok=True)
     print(json.dumps({'path':str(p)})); sys.exit()
+if a[0]=='engine-windows':
+    import base64,re
+    cache=s/'cache'; safe(cache); cache.mkdir(exist_ok=True)
+    archive=cache/'syncthing-windows-amd64-v2.1.7.zip'; safe(archive)
+    size=14281765
+    sha='3ce7da770f546a8d02b65b2e7ee31f2a3b8b7c3f990ede045590cca4172ecfe1'
+    def valid():
+        if not archive.exists() or archive.stat().st_size!=size:return False
+        h=hashlib.sha256()
+        with archive.open('rb') as f:
+            for block in iter(lambda:f.read(262144),b''):h.update(block)
+        return h.hexdigest()==sha
+    if len(a)==2 and a[1]=='prepare':
+        if not valid():
+            part=cache/'engine.zip.part'; safe(part)
+            try:
+                with urllib.request.urlopen('https://github.com/syncthing/syncthing/releases/download/v2.1.7/syncthing-windows-amd64-v2.1.7.zip',timeout=30) as r, part.open('wb') as f:
+                    import shutil
+                    shutil.copyfileobj(r,f,262144)
+                part.replace(archive)
+                if not valid():
+                    archive.unlink(); raise ValueError('SHA256 mismatch')
+            finally:
+                if part.exists():part.unlink()
+        print(json.dumps({'size':size}));sys.exit()
+    if len(a)==4 and a[1]=='chunk' and all(re.fullmatch(r'[0-9]+',v) for v in a[2:]):
+        offset,length=map(int,a[2:])
+        if length>2097152 or offset>size or offset+length>size:raise ValueError('Invalid chunk range')
+        if not valid():raise ValueError('Run engine-windows prepare first')
+        with archive.open('rb') as f:
+            f.seek(offset);data=f.read(length)
+        print(base64.b64encode(data).decode('ascii'));sys.exit()
+    raise ValueError('Invalid engine-windows arguments')
 if a[0] != 'bootstrap': raise ValueError('Unknown action')
 if not binary.exists():
     if os.uname().machine!='x86_64': raise ValueError('Only linux-amd64 supported')

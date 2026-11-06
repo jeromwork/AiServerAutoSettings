@@ -3,6 +3,7 @@
 param([string]$Profile,[string]$Command='show',[string]$Path,[switch]$LibraryOnly)
 Set-StrictMode -Version 2
 $ErrorActionPreference='Stop'
+$ProgressPreference='SilentlyContinue'
 
 function Get-DiskIgnores {
     # server-sync.py DENIED + DENIED_EXT. Case-insensitive on both platforms.
@@ -24,7 +25,7 @@ function Quote-Native([string]$Value) {
     '"'+([regex]::Replace([regex]::Replace($Value,'(\\*)"','$1$1\"'),'(\\+)$','$1$1'))+'"'
 }
 function Protect-DiskText([string]$Text) {
-    # Never log profile contents, commands, stdout, REST bodies or arbitrary exception messages.
+    # Redact known keys and named secrets before writing any diagnostic text.
     $Text=[regex]::Replace($Text,'(?i)(api.?key|token|password|secret)([=: ]+)[^\s,;]+','$1$2[redacted]')
     foreach($k in @($script:LocalKey,$script:RemoteKey)){if($k){$Text=$Text.Replace($k,'[redacted]')}}
     $Text
@@ -157,16 +158,7 @@ function Get-FreeDiskPort {
 }
 function Initialize-DiskLocal {
     $binary=Join-Path $script:DiskHome 'bin\syncthing.exe'
-    if(-not (Test-Path -LiteralPath $binary)){
-        Write-DiskLog 'install.download'
-        [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
-        $zip=Join-Path $script:DiskHome 'syncthing.zip'
-        Invoke-WebRequest 'https://github.com/syncthing/syncthing/releases/download/v2.1.7/syncthing-windows-amd64-v2.1.7.zip' -OutFile $zip -UseBasicParsing
-        if((Get-FileHash $zip -Algorithm SHA256).Hash -ne '3CE7DA770F546A8D02B65B2E7EE31F2A3B8B7C3F990EDE045590CCA4172ECFE1'){throw 'SHA256 mismatch'}
-        $extract=Join-Path $script:DiskHome 'extract';Expand-Archive $zip $extract -Force
-        [void](New-Item -ItemType Directory -Path (Split-Path $binary) -Force)
-        Move-Item (Join-Path $extract 'syncthing-windows-amd64-v2.1.7\syncthing.exe') $binary -Force
-    }
+    if(-not (Test-Path -LiteralPath $binary)){throw 'Engine not installed'}
     $state=Join-Path $script:DiskHome 'state';$xmlPath=Join-Path $state 'config.xml'
     if(-not (Test-Path $xmlPath)){
         & $binary generate --home $state --no-port-probing *> $null
@@ -185,10 +177,145 @@ function Initialize-DiskLocal {
     throw 'Local Syncthing unavailable'
 }
 function Initialize-DiskRemote {
-    $scriptText=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'server-disk.sh'))
-    $cmd='set -eu; umask 077; mkdir -p "$HOME/.local/share/remote-disk"; cat > "$HOME/.local/share/remote-disk/server-disk.sh"; bash "$HOME/.local/share/remote-disk/server-disk.sh" bootstrap'
-    $r=(Complete-DiskSsh (Start-DiskSsh $cmd $scriptText) 120)|ConvertFrom-Json
+    if($script:Remote){return $true}
+    if(-not $script:RemoteInstall){
+        $scriptText=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'server-disk.sh'))
+        $cmd='set -eu; umask 077; mkdir -p "$HOME/.local/share/remote-disk"; cat > "$HOME/.local/share/remote-disk/server-disk.sh"; bash "$HOME/.local/share/remote-disk/server-disk.sh" bootstrap'
+        $script:RemoteInstall=Start-DiskSsh $cmd $scriptText
+        return $false
+    }
+    if(-not $script:RemoteInstall.p.HasExited -or -not $script:RemoteInstall.out.IsCompleted -or -not $script:RemoteInstall.err.IsCompleted){return $false}
+    $job=$script:RemoteInstall;$script:RemoteInstall=$null
+    $r=((Complete-DiskSsh $job 1).Replace("`r",''))|ConvertFrom-Json
     $script:RemoteKey=$r.apiKey;$script:Remote=$r
+    return $true
+}
+function Step-DiskInitialization {
+    if(-not $script:Remote){if(-not (Initialize-DiskRemote)){return $false}}
+    return (Step-DiskEngine)
+}
+function Get-DiskCurl { Join-Path $env:SystemRoot 'System32\curl.exe' }
+function Get-DiskPartSize {
+    if(Test-Path -LiteralPath $script:Install.part){return [long](Get-Item -LiteralPath $script:Install.part).Length}
+    return [long]0
+}
+function Set-DiskInstallStatus {
+    $i=$script:Install;$size=Get-DiskPartSize
+    $route='напрямую';if($i.route -eq 'server'){$route='через сервер'}
+    $culture=[Globalization.CultureInfo]::GetCultureInfo('ru-RU')
+    $script:LastStatus='Установка Syncthing: '+($size/1000000).ToString('0.0',$culture)+' из 14,3 МБ ('+$route+')'
+    if($script:Tray){$script:Tray.Text=$script:LastStatus.Substring(0,[Math]::Min(63,$script:LastStatus.Length))}
+    $now=[DateTime]::UtcNow
+    if(($now-$i.progress).TotalSeconds -ge 30){
+        Write-DiskLog 'engine.download.progress' ('path='+$i.route+' bytes='+$size+' bytesPerSecond='+[long](($size-$i.bytes)/[Math]::Max(1,($now-$i.progress).TotalSeconds)))
+        $i.progress=$now;$i.bytes=$size
+    }
+}
+function Set-DiskEngineFallback([string]$Reason) {
+    $script:Install.route='server';$script:Install.prepared=$false
+    Write-DiskLog 'engine.download.fallback' $Reason
+    Write-DiskLog 'engine.download.start' 'path=server'
+}
+function Test-DiskEngineArchive {
+    $i=$script:Install
+    if((Get-DiskPartSize) -ne $i.size){return $false}
+    if((Get-FileHash -LiteralPath $i.part -Algorithm SHA256).Hash -ne $i.hash){
+        Remove-Item -LiteralPath $i.part -Force
+        Write-DiskLog 'engine.hash.error' 'SHA256 mismatch; partial archive removed'
+        return $false
+    }
+    return $true
+}
+function Step-DiskEngine {
+    $binary=Join-Path $script:DiskHome 'bin\syncthing.exe'
+    if($script:EngineReady){return $true}
+    if(-not $script:Install){
+        $script:Install=@{part=(Join-Path $script:DiskHome 'syncthing.zip.part');size=14281765L;hash='3CE7DA770F546A8D02B65B2E7EE31F2A3B8B7C3F990EDE045590CCA4172ECFE1';route='direct';job=$null;worker=$null;failures=0;before=0L;prepared=$false;offset=0L;length=0;started=[DateTime]::UtcNow;progress=[DateTime]::UtcNow;bytes=0L}
+        Write-DiskLog 'engine.download.start' 'path=direct'
+    }
+    $i=$script:Install
+    Set-DiskInstallStatus
+    if($i.worker){
+        if($i.worker.State -in @('Running','NotStarted')){return $false}
+        $w=$i.worker;$i.worker=$null
+        try{if($w.State -ne 'Completed'){Receive-Job $w -ErrorAction Stop;throw 'Engine worker did not complete'};$result=Receive-Job $w -ErrorAction Stop;$script:LocalKey=[string]$result; $script:EngineReady=$true
+            Write-DiskLog 'engine.download.done' ('path='+$i.route) ([long]([DateTime]::UtcNow-$i.started).TotalMilliseconds)
+        }finally{Remove-Job $w -Force}
+        return $true
+    }
+    if($i.job){
+        if(-not $i.job.p.HasExited -or -not $i.job.out.IsCompleted -or -not $i.job.err.IsCompleted){return $false}
+        $j=$i.job;$i.job=$null
+        if($i.route -eq 'direct'){
+            $code=$j.p.ExitCode;$stderr=$j.err.Result
+            $size=Get-DiskPartSize
+            # A complete resumed file can yield curl 33/HTTP 416: verify before retrying.
+            if($size -eq $i.size){if(Test-DiskEngineArchive){$i.prepared=$true};return $false}
+            Write-DiskLog 'engine.download.retry' ('code='+$code+' stderr='+$stderr)
+            if($size -le $i.before){$i.failures++}else{$i.failures=0}
+            if($i.failures -ge 2){Set-DiskEngineFallback 'two attempts without growth'}
+        }else{
+            try{
+                $output=(Complete-DiskSsh $j 1).Replace("`r",'')
+                if(-not $i.prepared){
+                    $meta=$output|ConvertFrom-Json
+                    if([long]$meta.size -ne $i.size){throw 'Unexpected archive size'}
+                    $i.prepared=$true
+                }else{
+                    $chunk=[Convert]::FromBase64String($output)
+                    if($chunk.Length -ne $i.length){throw 'Short engine chunk'}
+                    if((Get-DiskPartSize) -ne $i.offset){throw 'Engine offset changed'}
+                    $f=[IO.File]::Open($i.part,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::Write)
+                    try{[void]$f.Seek($i.offset,[IO.SeekOrigin]::Begin);$f.Write($chunk,0,$chunk.Length)}catch{$f.SetLength($i.offset);throw}finally{$f.Dispose()}
+                }
+            }catch{Write-DiskLog 'engine.download.retry' ('path=server '+$_.Exception.GetType().Name+': '+$_.Exception.Message)}
+        }
+        return $false
+    }
+    if((Test-Path -LiteralPath $binary) -or (Test-DiskEngineArchive)){
+        # Extraction, process startup and REST readiness can block: run off the UI thread.
+        $i.worker=Start-Job -ArgumentList $PSCommandPath,$script:DiskHome,$script:Config -ScriptBlock {
+            param($source,$homePath,$config)
+            . $source -LibraryOnly
+            $script:DiskHome=$homePath;$script:Config=$config;$script:LocalKey='';$script:RemoteKey='';$script:HostName='engine'
+            $script:LogFile=Join-Path $homePath 'logs/engine.jsonl'
+            $binary=Join-Path $homePath 'bin/syncthing.exe'
+            if(-not (Test-Path -LiteralPath $binary)){
+                $zip=Join-Path $homePath 'syncthing.zip'
+                Move-Item -LiteralPath (Join-Path $homePath 'syncthing.zip.part') -Destination $zip -Force
+                $extract=Join-Path $homePath 'extract';Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
+                [void](New-Item -ItemType Directory -Path (Split-Path $binary) -Force)
+                Move-Item -LiteralPath (Join-Path $extract 'syncthing-windows-amd64-v2.1.7/syncthing.exe') -Destination $binary -Force
+            }
+            Initialize-DiskLocal
+            $script:LocalKey
+        }
+        return $false
+    }
+    if((Get-DiskPartSize) -gt $i.size){Remove-Item -LiteralPath $i.part -Force;Write-DiskLog 'engine.hash.error' 'Oversized partial archive removed'}
+    if($i.route -eq 'direct'){
+        $curl=Get-DiskCurl
+        if(-not (Test-Path -LiteralPath $curl)){Set-DiskEngineFallback 'System32 curl.exe unavailable';return $false}
+        $i.before=Get-DiskPartSize
+        $si=New-Object Diagnostics.ProcessStartInfo
+        $si.FileName=$curl;$si.Arguments='-fL --connect-timeout 15 --speed-time 30 --speed-limit 1024 -C - -o '+(Quote-Native $i.part)+' https://github.com/syncthing/syncthing/releases/download/v2.1.7/syncthing-windows-amd64-v2.1.7.zip'
+        $si.UseShellExecute=$false;$si.CreateNoWindow=$true;$si.RedirectStandardError=$true;$si.RedirectStandardOutput=$true
+        $p=New-Object Diagnostics.Process;$p.StartInfo=$si
+        try{[void]$p.Start();$i.job=@{p=$p;err=$p.StandardError.ReadToEndAsync();out=$p.StandardOutput.ReadToEndAsync()}}catch{Set-DiskEngineFallback $_.Exception.Message}
+    }else{
+        $cmd='bash "$HOME/.local/share/remote-disk/server-disk.sh" engine-windows '
+        if(-not $i.prepared){$cmd+='prepare'}else{
+            $i.offset=Get-DiskPartSize;$i.length=[int][Math]::Min(2097152,$i.size-$i.offset)
+            $cmd+='chunk '+$i.offset+' '+$i.length
+        }
+        $i.job=Start-DiskSsh $cmd
+    }
+    return $false
+}
+function Stop-DiskInstall {
+    $jobs=@($script:RemoteInstall);if($script:Install){$jobs+=@($script:Install.job)}
+    foreach($j in $jobs){if($j -and -not $j.p.HasExited){try{$j.p.Kill()}catch{}}}
+    if($script:Install -and $script:Install.worker){Stop-Job $script:Install.worker;Remove-Job $script:Install.worker -Force}
 }
 function Start-DiskTunnel {
     $c=$script:Config;$r=$script:Remote
@@ -331,6 +458,7 @@ function Add-DiskMenu($Menu,[string]$Text,[scriptblock]$Action) {
     $item=New-Object Windows.Forms.ToolStripMenuItem($Text);$item.add_Click($Action);[void]$Menu.Items.Add($item);$item
 }
 function Update-DiskState {
+    if(-not $script:EngineReady -and $script:Install){Set-DiskInstallStatus;return}
     $connected=$false;$lines=@();$states=@();$details=@()
     try{
         $con=Invoke-DiskApi local 'system/connections'
@@ -400,6 +528,7 @@ function Start-DiskApp {
     foreach($log in Get-ChildItem (Join-Path $script:DiskHome 'logs') -Filter 'session-*.jsonl'){
         if($log.FullName -ne $script:LogFile){Move-Item $log.FullName (Join-Path $script:Queue ($log.Name)) -Force}
     }
+    $script:Install=$null;$script:EngineReady=$false;$script:RemoteInstall=$null
     $script:Tunnel=$null;$script:Engine=$null;$script:Remote=$null;$script:PeerId='';$script:PreviousState='';$script:LastStatus='Нет подключения'
     $script:Tray=New-Object Windows.Forms.NotifyIcon;$script:Tray.Icon=New-DiskIcon offline;$script:Tray.Text='RemoteDisk: нет подключения';$script:Tray.Visible=$true
     $menu=New-Object Windows.Forms.ContextMenuStrip
@@ -446,21 +575,17 @@ function Start-DiskApp {
             if(-not $script:Tunnel -and $now -ge $script:Retry){
                 $script:Retry=$now.AddSeconds(30)
                 try{
-                    $watch=[Diagnostics.Stopwatch]::StartNew()
-                    try{$ips=[Net.Dns]::GetHostAddresses($script:Connection.serverAddress);Write-DiskLog 'dns' (($ips|ForEach-Object {$_.IPAddressToString}) -join ',') $watch.ElapsedMilliseconds}catch{Write-DiskLog 'dns.error' '' $watch.ElapsedMilliseconds}
-                    $tcp=New-Object Net.Sockets.TcpClient;$tcpPort=22
-                    $sshArgs=@($script:Connection.arguments);for($i=0;$i -lt $sshArgs.Count-1;$i++){if($sshArgs[$i] -eq '-p'){$tcpPort=[int]$sshArgs[$i+1]}}
-                    try{$task=$tcp.ConnectAsync($script:Connection.serverAddress,$tcpPort);if(-not $task.Wait(1500)){throw 'timeout'};Write-DiskLog 'tcp' ("port=$tcpPort connected")}catch{Write-DiskLog 'tcp.error' ("port=$tcpPort (route may use a fallback)")}finally{$tcp.Dispose()}
-                    Initialize-DiskRemote;Initialize-DiskLocal;Start-DiskTunnel
+                    if(-not (Step-DiskInitialization)){$script:Retry=$now;return}
+                    Start-DiskTunnel
                     Start-Sleep -Milliseconds 600;Connect-DiskDevices
                     if($Command -eq 'add' -and $Path){Invoke-DiskCommand @{command='add';path=$Path};$Command='show'}
-                }catch{Write-DiskLog 'initialize.error' $_.Exception.GetType().Name;if($script:Tunnel){try{$script:Tunnel.p.Kill()}catch{};$script:Tunnel=$null}}
+                }catch{Write-DiskLog 'initialize.error' ($_.Exception.GetType().Name+': '+$_.Exception.Message);if($script:Tunnel){try{$script:Tunnel.p.Kill()}catch{};$script:Tunnel=$null}}
             }
             Update-DiskState
-        }catch{Write-DiskLog 'tick.error' $_.Exception.GetType().Name}
+        }catch{Write-DiskLog 'tick.error' ($_.Exception.GetType().Name+': '+$_.Exception.Message)}
     })
     try{$timer.Start();[Windows.Forms.Application]::Run($script:Context)}finally{
-        $timer.Stop();$timer.Dispose();Write-DiskLog 'exit'
+        $timer.Stop();$timer.Dispose();Stop-DiskInstall;Write-DiskLog 'exit'
         if($script:Tunnel){try{$script:Tunnel.p.Kill()}catch{}}
         try{[void](Invoke-DiskApi local 'system/shutdown' POST)}catch{}
         Stop-Job $script:LogWorker;Remove-Job $script:LogWorker;Send-DiskLogs;$script:Tray.Visible=$false;$script:Tray.Dispose();$script:Pipe.Dispose();$script:Mutex.ReleaseMutex();$script:Mutex.Dispose()
