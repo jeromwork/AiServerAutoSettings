@@ -60,7 +60,7 @@ $temp=Join-Path ([IO.Path]::GetTempPath()) ('disk-engine-'+[guid]::NewGuid().ToS
 [void](New-Item -ItemType Directory -Path $temp -Force)
 try {
     $script:DiskHome=$temp;$script:LogFile=Join-Path $temp 'engine.jsonl';$script:HostName='test'
-    $script:LocalKey='';$script:RemoteKey='';$script:Tray=$null;$script:EngineReady=$false;$script:Install=$null
+    $script:LocalKey='';$script:RemoteKey='';$script:Tray=$null;$script:Install=$null
     $script:Remote=$null;$script:RemoteInstall=$null
     $shim=Join-Path $temp 'transport.py'
     $shimText=@'
@@ -78,7 +78,8 @@ if '-o' in args and '-C' in args:
     with (root/'curl-offsets').open('a') as f:f.write(str(p.stat().st_size if p.exists() else 0)+'\n')
     if mode=='resume':
         with p.open('ab') as f:f.write(b'abcd' if n==1 else b'efgh')
-    print('synthetic token=hidden',file=sys.stderr)
+    assert '-sS' in args
+    print('synthetic token=hidden '+('x'*800),file=sys.stderr)
     sys.exit(33 if n==2 and mode=='resume' else 18)
 cmd=args[-1]
 if ' bootstrap' in cmd:
@@ -123,6 +124,10 @@ else:
     Assert (Test-DiskEngineArchive) 'resumed archive hash'
     $offsets=@(Get-Content (Join-Path $temp 'curl-offsets'))
     Assert ($offsets.Count -eq 2 -and $offsets[0] -eq '0' -and $offsets[1] -eq '4') 'curl resumes existing partial file'
+    $retryRows=@(Get-Content $script:LogFile | ForEach-Object {$_|ConvertFrom-Json} | Where-Object {$_.stage -eq 'engine.download.retry'})
+    $stderrText=($retryRows[0].message -split ' stderr=',2)[1]
+    Assert ($stderrText.Length -eq 500) 'curl stderr capped at 500 characters'
+    'PASS curl: -sS, redacted stderr capped at 500 characters'
     'PASS engine direct: interrupted process resumed at byte 4; bootstrap once'
     Remove-Item $script:Install.part
     Remove-Item (Join-Path $temp 'curl-count'),(Join-Path $temp 'curl-offsets')
@@ -147,3 +152,99 @@ else:
     Stop-DiskInstall
     Remove-Item -LiteralPath $temp -Recurse -Force
 }
+
+# Exercise the connection-attempt code used by the real UI timer with a ready engine.
+. $PSScriptRoot/RemoteDisk.ps1 -LibraryOnly
+$source=Get-Content -LiteralPath "$PSScriptRoot/RemoteDisk.ps1" -Raw
+$tokens=$null;$parseErrors=$null
+$ast=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$parseErrors)
+$engineAst=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Step-DiskEngine'},$true)
+Assert ($engineAst.Extent.Text -notmatch 'Start-Job|Receive-Job|Remove-Job|engine.jsonl') 'installation must run on main thread'
+Assert ($source -match 'function Start-DiskLogWorker' -and $source -match 'Start-Job') 'delivery worker retained'
+$begin=$source.IndexOf('            if($script:Tunnel -and $script:Tunnel.p.HasExited)')
+$end=$source.IndexOf('            Update-DiskState',$begin)
+$attemptText=$source.Substring($begin,$end-$begin)
+foreach($stage in @('dns','dns.error','tcp','tcp.error')){
+    Assert (([regex]::Matches($attemptText,"Write-DiskLog '"+[regex]::Escape($stage)+"'")).Count -eq 1) "single $stage record site per connection attempt"
+}
+Assert ($attemptText.IndexOf("Write-DiskLog 'dns'") -gt $attemptText.IndexOf('Step-DiskInitialization')) 'diagnostics after installation polling'
+Assert ($attemptText.IndexOf("Write-DiskLog 'tcp'") -lt $attemptText.IndexOf('Start-DiskTunnel')) 'diagnostics before tunnel'
+$attempt=[scriptblock]::Create($attemptText)
+$temp=Join-Path ([IO.Path]::GetTempPath()) ('disk-reconnect-'+[guid]::NewGuid().ToString('N'))
+$listener=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,0)
+try {
+    [void](New-Item -ItemType Directory -Path (Join-Path $temp 'bin') -Force)
+    [IO.File]::WriteAllText((Join-Path $temp 'bin/syncthing.exe'),'synthetic')
+    $listener.Start();$port=$listener.LocalEndpoint.Port
+    $script:DiskHome=$temp;$script:LogFile=Join-Path $temp 'session.jsonl';$script:HostName='test'
+    $script:Remote=$null;$script:RemoteInstall=$null;$script:Install=$null;$script:Tunnel=$null
+    $script:LastStatus='Нет подключения';$script:Tray=$null;$script:Retry=[DateTime]::MinValue
+    $script:Connection=[pscustomobject]@{serverAddress='localhost';arguments=@('-p',"$port",'localhost')}
+    $script:Bootstraps=0;$script:LocalChecks=0;$script:Tunnels=0
+    $script:BootstrapPolls=0
+    function Start-DiskSsh($RemoteCommand,$InputText){
+        Assert ($RemoteCommand -match ' bootstrap') 'only bootstrap transport on ready installation'
+        $script:Bootstraps++
+        @{p=[pscustomobject]@{HasExited=$true};out=[pscustomobject]@{IsCompleted=$true};err=[pscustomobject]@{IsCompleted=$true}}
+    }
+    function Complete-DiskSsh($Job,$Timeout){'{"apiKey":"fake","listen":1,"gui":2,"reverse":3}'}
+    function Initialize-DiskLocal {$script:LocalChecks++;$script:LocalKey='local-fake'}
+    function Get-DiskCurl {throw 'download must not start'}
+    function Start-DiskTunnel {$script:Tunnels++;$script:Tunnel=@{p=[pscustomobject]@{HasExited=$false}}}
+    function Connect-DiskDevices {}
+    $Command='show';$Path=''
+    for($n=0;$n -lt 2;$n++){
+        $now=[DateTime]::UtcNow;& $attempt
+        Assert ($script:Tunnels -eq $n) 'bootstrap begins asynchronously before tunnel'
+        $now=[DateTime]::UtcNow;& $attempt
+        Assert ($script:Tunnels -eq $n+1) 'tunnel starts after bootstrap completes'
+        if($n -eq 0){
+            $script:Tunnel.p.HasExited=$true
+            $now=[DateTime]::UtcNow;& $attempt
+            Assert ($null -eq $script:Remote -and $null -eq $script:Tunnel) 'tunnel exit clears remote bootstrap cache'
+            $script:Retry=[DateTime]::MinValue
+        }
+    }
+    Assert ($script:Bootstraps -eq 2 -and $script:LocalChecks -eq 2) 'bootstrap and local engine checked again after exit'
+    Assert ($script:LastStatus -notmatch 'Установка' -and $null -eq $script:Install) 'ready engine has no installation status'
+    $rows=@(Get-Content $script:LogFile | ForEach-Object {$_|ConvertFrom-Json})
+    Assert (@($rows|Where-Object {$_.stage -like 'engine.download*'}).Count -eq 0) 'ready engine has no download journal'
+    foreach($stage in @('dns','tcp')){Assert (@($rows|Where-Object {$_.stage -eq $stage}).Count -eq 2) "$stage once per connection attempt"}
+    # The real initialize catch must invalidate bootstrap even before a tunnel exists.
+    function Initialize-DiskLocal {throw 'synthetic local failure'}
+    $script:Tunnel=$null;$script:Retry=[DateTime]::MinValue;$now=[DateTime]::UtcNow;& $attempt
+    Assert ($null -eq $script:Remote) 'initialize error clears remote bootstrap cache'
+    'PASS reconnect: ready engine checked twice, async bootstrap repeated after tunnel exit, no download/status; initialize error resets remote'
+    'PASS network: dns/tcp once per attempt after initialization; main-thread installation, delivery worker retained'
+}finally{
+    $listener.Stop();Stop-DiskInstall
+    Remove-Item -LiteralPath $temp -Recurse -Force
+}
+
+# A real small ZIP validates the hash -> extraction -> main-thread initialization path.
+. $PSScriptRoot/RemoteDisk.ps1 -LibraryOnly
+$temp=Join-Path ([IO.Path]::GetTempPath()) ('disk-extract-'+[guid]::NewGuid().ToString('N'))
+try {
+    $payload=Join-Path $temp 'payload/syncthing-windows-amd64-v2.1.7'
+    [void](New-Item -ItemType Directory -Path $payload -Force)
+    [IO.File]::WriteAllText((Join-Path $payload 'syncthing.exe'),'synthetic engine')
+    $zip=Join-Path $temp 'fixture.zip'
+    Compress-Archive -LiteralPath $payload -DestinationPath $zip
+    $part=Join-Path $temp 'syncthing.zip.part';Move-Item $zip $part
+    $script:DiskHome=$temp;$script:LogFile=Join-Path $temp 'session.jsonl';$script:HostName='test'
+    $script:Install=@{part=$part;size=[long](Get-Item $part).Length;hash=(Get-FileHash $part -Algorithm SHA256).Hash;route='direct';job=$null;started=[DateTime]::UtcNow;progress=[DateTime]::UtcNow;bytes=0L}
+    $script:Tray=$null;$script:RemoteInstall=$null;$script:LocalKey=''
+    $script:MainThread=[Threading.Thread]::CurrentThread.ManagedThreadId
+    function Initialize-DiskLocal {
+        Assert ([Threading.Thread]::CurrentThread.ManagedThreadId -eq $script:MainThread) 'local initialization on main thread'
+        Assert (Test-Path (Join-Path $script:DiskHome 'bin/syncthing.exe')) 'binary extracted before initialization'
+        $script:LocalKey='exact-local-key'
+    }
+    Assert (Step-DiskEngine) 'verified archive installed synchronously'
+    Assert ($script:LocalKey -ceq 'exact-local-key' -and $null -eq $script:Install) 'local key belongs to initializer; installation cleared'
+    [IO.File]::WriteAllText($part,'partial')
+    $script:Install=@{part=$part;job=$null}
+    Stop-DiskInstall
+    Assert ([IO.File]::ReadAllText($part) -ceq 'partial') 'stop preserves partial download'
+    'PASS extraction: real ZIP, SHA verification, main-thread initializer/key, stop preserves .part'
+}finally{Remove-Item -LiteralPath $temp -Recurse -Force}
