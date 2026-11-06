@@ -4,6 +4,7 @@ param([string]$Profile,[string]$Command='show',[string]$Path,[switch]$LibraryOnl
 Set-StrictMode -Version 2
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
+$script:LastInitError=''
 
 function Get-DiskIgnores {
     # server-sync.py DENIED + DENIED_EXT. Case-insensitive on both platforms.
@@ -203,8 +204,10 @@ function Set-DiskInstallStatus {
     $i=$script:Install;$size=Get-DiskPartSize
     $route='напрямую';if($i.route -eq 'server'){$route='через сервер'}
     $culture=[Globalization.CultureInfo]::GetCultureInfo('ru-RU')
+    if(-not $script:LastInitError){
     $script:LastStatus='Установка Syncthing: '+($size/1000000).ToString('0.0',$culture)+' из 14,3 МБ ('+$route+')'
     if($script:Tray){$script:Tray.Text=$script:LastStatus.Substring(0,[Math]::Min(63,$script:LastStatus.Length))}
+    }
     $now=[DateTime]::UtcNow
     if(($now-$i.progress).TotalSeconds -ge 30){
         Write-DiskLog 'engine.download.progress' ('path='+$i.route+' bytes='+$size+' bytesPerSecond='+[long](($size-$i.bytes)/[Math]::Max(1,($now-$i.progress).TotalSeconds)))
@@ -216,14 +219,50 @@ function Set-DiskEngineFallback([string]$Reason) {
     Write-DiskLog 'engine.download.fallback' $Reason
     Write-DiskLog 'engine.download.start' 'path=server'
 }
+function Get-DiskFileSha256([string]$Path) {
+    $sha=$null;$stream=$null
+    try {
+        $sha=[Security.Cryptography.SHA256]::Create()
+        $stream=[IO.File]::OpenRead($Path)
+        ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','')
+    }finally{if($stream){$stream.Dispose()};if($sha){$sha.Dispose()}}
+}
+function Expand-DiskEngineArchive([string]$Archive,[string]$Binary) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip=$null;$inputStream=$null;$outputStream=$null;$temp=$null
+    try {
+        $zip=[IO.Compression.ZipFile]::OpenRead($Archive)
+        $entry=$null
+        foreach($candidate in $zip.Entries){
+            if($candidate.FullName -ceq 'syncthing-windows-amd64-v2.1.7/syncthing.exe'){$entry=$candidate;break}
+        }
+        if(-not $entry){throw 'В архиве нет syncthing-windows-amd64-v2.1.7/syncthing.exe'}
+        [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($Binary))
+        $temp=$Binary+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
+        $inputStream=$entry.Open()
+        $outputStream=[IO.File]::Open($temp,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write)
+        $inputStream.CopyTo($outputStream)
+        $outputStream.Dispose();$outputStream=$null
+        $inputStream.Dispose();$inputStream=$null
+        # .NET Framework has no Move overwrite overload. Replace only the fixed destination.
+        if([IO.File]::Exists($Binary)){[IO.File]::Delete($Binary)}
+        [IO.File]::Move($temp,$Binary)
+        Write-DiskLog 'engine.extract.done' ('path='+$Binary)
+    }finally{
+        if($outputStream){$outputStream.Dispose()};if($inputStream){$inputStream.Dispose()}
+        if($zip){$zip.Dispose()}
+        if($temp -and [IO.File]::Exists($temp)){[IO.File]::Delete($temp)}
+    }
+}
 function Test-DiskEngineArchive {
     $i=$script:Install
     if((Get-DiskPartSize) -ne $i.size){return $false}
-    if((Get-FileHash -LiteralPath $i.part -Algorithm SHA256).Hash -ne $i.hash){
+    if((Get-DiskFileSha256 $i.part) -ne $i.hash){
         Remove-Item -LiteralPath $i.part -Force
         Write-DiskLog 'engine.hash.error' 'SHA256 mismatch; partial archive removed'
         return $false
     }
+    Write-DiskLog 'engine.hash.ok' ('path='+$i.part+' size='+$i.size)
     return $true
 }
 function Step-DiskEngine {
@@ -273,9 +312,7 @@ function Step-DiskEngine {
         # Keep the engine process owned by the main application, not a disposable job.
         $zip=Join-Path $script:DiskHome 'syncthing.zip'
         Move-Item -LiteralPath $i.part -Destination $zip -Force
-        $extract=Join-Path $script:DiskHome 'extract';Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
-        [void](New-Item -ItemType Directory -Path (Split-Path $binary) -Force)
-        Move-Item -LiteralPath (Join-Path $extract 'syncthing-windows-amd64-v2.1.7/syncthing.exe') -Destination $binary -Force
+        Expand-DiskEngineArchive $zip $binary
         Initialize-DiskLocal
         Write-DiskLog 'engine.download.done' ('path='+$i.route) ([long]([DateTime]::UtcNow-$i.started).TotalMilliseconds)
         $script:Install=$null
@@ -446,6 +483,14 @@ function Add-DiskMenu($Menu,[string]$Text,[scriptblock]$Action) {
     $item=New-Object Windows.Forms.ToolStripMenuItem($Text);$item.add_Click($Action);[void]$Menu.Items.Add($item);$item
 }
 function Update-DiskState {
+    if($script:LastInitError){
+        $script:LastStatus='Ошибка запуска: '+$script:LastInitError
+        if($script:Tray){
+            $old=$script:Tray.Icon;$script:Tray.Icon=New-DiskIcon error;if($old){$old.Dispose()}
+            $script:Tray.Text=$script:LastStatus.Substring(0,[Math]::Min(63,$script:LastStatus.Length))
+        }
+        return
+    }
     if($script:Install){Set-DiskInstallStatus;return}
     $connected=$false;$lines=@();$states=@();$details=@()
     try{
@@ -517,7 +562,7 @@ function Start-DiskApp {
         if($log.FullName -ne $script:LogFile){Move-Item $log.FullName (Join-Path $script:Queue ($log.Name)) -Force}
     }
     $script:Install=$null;$script:RemoteInstall=$null
-    $script:Tunnel=$null;$script:Engine=$null;$script:Remote=$null;$script:PeerId='';$script:PreviousState='';$script:LastStatus='Нет подключения'
+    $script:Tunnel=$null;$script:Engine=$null;$script:Remote=$null;$script:PeerId='';$script:PreviousState='';$script:LastInitError='';$script:LastStatus='Нет подключения'
     $script:Tray=New-Object Windows.Forms.NotifyIcon;$script:Tray.Icon=New-DiskIcon offline;$script:Tray.Text='RemoteDisk: нет подключения';$script:Tray.Visible=$true
     $menu=New-Object Windows.Forms.ContextMenuStrip
     $script:FolderMenu=Add-DiskMenu $menu 'Папки' {}
@@ -571,8 +616,9 @@ function Start-DiskApp {
                     try{$task=$tcp.ConnectAsync($script:Connection.serverAddress,$tcpPort);if(-not $task.Wait(1500)){throw 'timeout'};Write-DiskLog 'tcp' ("port=$tcpPort connected")}catch{Write-DiskLog 'tcp.error' ("port=$tcpPort (route may use a fallback)")}finally{$tcp.Dispose()}
                     Start-DiskTunnel
                     Start-Sleep -Milliseconds 600;Connect-DiskDevices
+                    $script:LastInitError=''
                     if($Command -eq 'add' -and $Path){Invoke-DiskCommand @{command='add';path=$Path};$Command='show'}
-                }catch{$script:Remote=$null;Write-DiskLog 'initialize.error' ($_.Exception.GetType().Name+': '+$_.Exception.Message);if($script:Tunnel){try{$script:Tunnel.p.Kill()}catch{};$script:Tunnel=$null}}
+                }catch{$script:LastInitError=Protect-DiskText $_.Exception.Message;$script:LastStatus='Ошибка запуска: '+$script:LastInitError;$script:Remote=$null;Write-DiskLog 'initialize.error' ($_.Exception.GetType().Name+': '+$_.Exception.Message);if($script:Tunnel){try{$script:Tunnel.p.Kill()}catch{};$script:Tunnel=$null}}
             }
             Update-DiskState
         }catch{Write-DiskLog 'tick.error' ($_.Exception.GetType().Name+': '+$_.Exception.Message)}

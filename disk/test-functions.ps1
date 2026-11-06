@@ -214,6 +214,15 @@ try {
     function Initialize-DiskLocal {throw 'synthetic local failure'}
     $script:Tunnel=$null;$script:Retry=[DateTime]::MinValue;$now=[DateTime]::UtcNow;& $attempt
     Assert ($null -eq $script:Remote) 'initialize error clears remote bootstrap cache'
+    $script:Tray=[pscustomobject]@{Icon=$null;Text=''}
+    function New-DiskIcon($State){Assert ($State -eq 'error') 'startup error icon';$null}
+    Update-DiskState
+    Assert ($script:LastStatus -eq 'Ошибка запуска: synthetic local failure') 'startup error visible'
+    Assert ($script:Tray.Text -eq $script:LastStatus -and $script:Tray.Text.Length -le 63) 'startup error tooltip'
+    $script:LastInitError=Protect-DiskText ('token=hidden '+('x'*100));Update-DiskState
+    Assert ($script:Tray.Text.Length -eq 63 -and $script:LastStatus -notmatch 'hidden') 'tooltip truncated and secret redacted'
+    $script:Tray=$null
+    'PASS startup error: status retained by Update-DiskState, red icon, redaction, tooltip <=63'
     'PASS reconnect: ready engine checked twice, async bootstrap repeated after tunnel exit, no download/status; initialize error resets remote'
     'PASS network: dns/tcp once per attempt after initialization; main-thread installation, delivery worker retained'
 }finally{
@@ -230,9 +239,15 @@ try {
     [IO.File]::WriteAllText((Join-Path $payload 'syncthing.exe'),'synthetic engine')
     $zip=Join-Path $temp 'fixture.zip'
     Compress-Archive -LiteralPath $payload -DestinationPath $zip
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $fixture=[IO.Compression.ZipFile]::Open($zip,[IO.Compression.ZipArchiveMode]::Update)
+    try {
+        $evil=$fixture.CreateEntry('../escape.txt');$writer=New-Object IO.StreamWriter($evil.Open())
+        try{$writer.Write('must not escape')}finally{$writer.Dispose()}
+    }finally{$fixture.Dispose()}
     $part=Join-Path $temp 'syncthing.zip.part';Move-Item $zip $part
     $script:DiskHome=$temp;$script:LogFile=Join-Path $temp 'session.jsonl';$script:HostName='test'
-    $script:Install=@{part=$part;size=[long](Get-Item $part).Length;hash=(Get-FileHash $part -Algorithm SHA256).Hash;route='direct';job=$null;started=[DateTime]::UtcNow;progress=[DateTime]::UtcNow;bytes=0L}
+    $script:Install=@{part=$part;size=[long](Get-Item $part).Length;hash=(Get-DiskFileSha256 $part);route='direct';job=$null;started=[DateTime]::UtcNow;progress=[DateTime]::UtcNow;bytes=0L}
     $script:Tray=$null;$script:RemoteInstall=$null;$script:LocalKey=''
     $script:MainThread=[Threading.Thread]::CurrentThread.ManagedThreadId
     function Initialize-DiskLocal {
@@ -240,7 +255,25 @@ try {
         Assert (Test-Path (Join-Path $script:DiskHome 'bin/syncthing.exe')) 'binary extracted before initialization'
         $script:LocalKey='exact-local-key'
     }
+    $known=Join-Path $temp 'known.bin';[IO.File]::WriteAllBytes($known,[Text.Encoding]::ASCII.GetBytes('abc'))
+    Assert ((Get-DiskFileSha256 $known) -ceq 'BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD') 'SHA256 known bytes'
+    [IO.File]::WriteAllBytes($known,[byte[]]@())
+    Assert ((Get-DiskFileSha256 $known) -ceq 'E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855') 'SHA256 empty bytes'
     Assert (Step-DiskEngine) 'verified archive installed synchronously'
+    $binary=Join-Path $temp 'bin/syncthing.exe'
+    Assert ([IO.File]::ReadAllText($binary) -ceq 'synthetic engine') 'exact ZIP payload'
+    Assert (-not (Test-Path (Join-Path $temp 'escape.txt'))) 'zip slip entry ignored'
+    Assert (@(Get-ChildItem (Join-Path $temp 'bin') -File).Count -eq 1) 'only binary extracted'
+    [IO.File]::WriteAllText($binary,'old engine')
+    Expand-DiskEngineArchive (Join-Path $temp 'syncthing.zip') $binary
+    Assert ([IO.File]::ReadAllText($binary) -ceq 'synthetic engine') 'existing binary replaced'
+    $missing=Join-Path $temp 'missing.zip'
+    $fixture=[IO.Compression.ZipFile]::Open($missing,[IO.Compression.ZipArchiveMode]::Create);$fixture.Dispose()
+    $rejected=$false;try{Expand-DiskEngineArchive $missing $binary}catch{$rejected=$_.Exception.Message -match 'syncthing.exe'}
+    Assert $rejected 'missing engine has clear error'
+    $journal=Get-Content $script:LogFile -Raw
+    Assert ($journal -match 'engine.hash.ok' -and $journal -match 'engine.extract.done') 'hash and extract success logged'
+    'PASS SHA256: known bytes and empty file; ZIP: traversal ignored, only engine, replacement, missing entry, success journal'
     Assert ($script:LocalKey -ceq 'exact-local-key' -and $null -eq $script:Install) 'local key belongs to initializer; installation cleared'
     [IO.File]::WriteAllText($part,'partial')
     $script:Install=@{part=$part;job=$null}
@@ -248,3 +281,13 @@ try {
     Assert ([IO.File]::ReadAllText($part) -ceq 'partial') 'stop preserves partial download'
     'PASS extraction: real ZIP, SHA verification, main-thread initializer/key, stop preserves .part'
 }finally{Remove-Item -LiteralPath $temp -Recurse -Force}
+
+$tokens=$null;$parseErrors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'RemoteDisk.ps1'),[ref]$tokens,[ref]$parseErrors)
+Assert ($parseErrors.Count -eq 0) 'RemoteDisk parser errors'
+$forbidden=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -in @('Get-FileHash','Expand-Archive','New-Guid','New-TemporaryFile','Format-Hex')},$true))
+Assert ($forbidden.Count -eq 0) 'no optional PowerShell function calls'
+'PASS static command ban; Parser errors: 0'
+$functions=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst]},$true)|ForEach-Object {$_.Name})
+$commands=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst]},$true)|ForEach-Object {$_.GetCommandName()}|Where-Object {$_ -and $_ -notin $functions}|Sort-Object -Unique)
+'Commands (excluding file functions): '+($commands -join ', ')
