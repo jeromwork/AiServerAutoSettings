@@ -96,3 +96,4 @@ test-remote-chat.ps1
 REMOTE-CHAT.md
 REMOTE-CHAT-VERIFICATION.md
 HAPP-IMPORT.bat
+04-disk.cmd
