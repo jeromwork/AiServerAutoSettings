@@ -40,3 +40,6 @@ publish/
 .stignore
 .stversions/
 contabo-support-request.txt
+
+# Happier uploads
+.happier/

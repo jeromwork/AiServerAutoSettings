@@ -1,1 +1,16 @@
-<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>WinExe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><EnableWindowsTargeting>true</EnableWindowsTargeting><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings><PublishSingleFile>true</PublishSingleFile><SelfContained>true</SelfContained><RuntimeIdentifier>win-x64</RuntimeIdentifier></PropertyGroup><ItemGroup><ProjectReference Include="..\RemoteAgents.Core\RemoteAgents.Core.csproj" /></ItemGroup></Project>
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><EnableWindowsTargeting>true</EnableWindowsTargeting><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings>
+    <PublishSingleFile>true</PublishSingleFile><SelfContained>true</SelfContained><RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile><IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract><DebugType>None</DebugType><DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\RemoteAgents.Core\RemoteAgents.Core.csproj" />
+    <EmbeddedResource Include="$(EngineBinary)" LogicalName="syncthing.exe" Condition="Exists('$(EngineBinary)')" />
+    <EmbeddedResource Include="../../server-sync.py;../../server-sync-runtime.py;../../server-install-sync.sh" LogicalName="%(Filename)%(Extension)" />
+    <EmbeddedResource Include="../../THIRD-PARTY-NOTICES.txt" LogicalName="THIRD-PARTY-NOTICES.txt" />
+  </ItemGroup>
+  <Target Name="RequireEngineResource" BeforeTargets="PrepareForBuild">
+    <Error Condition="!Exists('$(EngineBinary)')" Text="Supply -p:EngineBinary=/absolute/path/to/SHA256-verified/syncthing.exe (v2.1.7)." />
+  </Target>
+</Project>

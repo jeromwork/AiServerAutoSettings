@@ -18,7 +18,13 @@ public sealed class Journal
         this.root = root; host = hostId; this.rotationBytes = rotationBytes;
         Directory.CreateDirectory(root); Directory.CreateDirectory(QueuePath);
     }
-    static string Label(string value) => Regex.IsMatch(value, "^[a-z][a-z0-9_.-]{0,63}$") ? value : "redacted";
+    static readonly HashSet<string> Vocabulary = new(("app engine ipc runtime tray windows network ssh syncthing tunnel user setup logs " +
+        "start exit begin ok failed forward receive command rejected fatal verify load state poll unavailable upload deferred " +
+        "pause paused resumed disconnect files-preserved profile-import rates applied connect configured exclusions " +
+        "dns tcp resolved probe-failed connected profile-route authentication-denied host-key-rejected dns-failed connection-refused timeout forward-failed connection-reset broken-pipe unclassified-exit cancelled-or-timeout " +
+        "stdout stderr received observed event configure route reconnect-requested power suspend resume statuschange available " +
+        "synced transferring disconnected error conflict").Split(' '), StringComparer.Ordinal);
+    static string Label(string value) => Vocabulary.Contains(value) || Enum.GetNames<ThirdParty.EventType>().Any(n=>n.ToLowerInvariant()==value) ? value : "redacted";
     public void Write(string component, string action, string outcome, long durationMs = 0, int? exitCode = null, long? bytes = null)
     {
         var line = JsonSerializer.Serialize(new { time = DateTimeOffset.UtcNow, hostId = host, component = Label(component), action = Label(action), outcome = Label(outcome), durationMs, exitCode, bytes }) + "\n";

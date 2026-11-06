@@ -24,7 +24,7 @@ public sealed class JournalTests : IDisposable
     [Fact] public void SecretsAndContentsCannotEnterJournalOrDiagnostics()
     {
         var j = new Journal(root,"test-host",1);
-        string[] forbidden = ["X-API-Key: SECRET123", "password=letmein", "Bearer eyJtoken", "-----BEGIN PRIVATE KEY-----", "file contents\nprivate", "api_key=abc"];
+        string[] forbidden = ["X-API-Key: SECRET123", "password=letmein", "Bearer eyJtoken", "-----BEGIN PRIVATE KEY-----", "file contents\nprivate", "api_key=abc", "supersecrettoken123", "abcdef0123456789"]; // gitleaks:allow - fake values for the redaction test
         foreach(var s in forbidden) j.Write(s,s,s);
         File.WriteAllText(Path.Combine(root,"config.xml"),string.Join('\n',forbidden));
         var zip = j.CollectDiagnostics(Path.Combine(root,"diagnostics.zip"));

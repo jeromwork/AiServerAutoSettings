@@ -61,7 +61,7 @@ public static class ContextMenuLogic
     public static ContextCommand? Parse(IEnumerable<string> args)
     {
         var a = args.ToArray(); if (a.Length == 0) return null;
-        var allowed = new HashSet<string>(["--connect", "--status", "--pause", "--resume", "--disconnect", "--exclude", "--include", "--versions"]);
+        var allowed = new HashSet<string>(["--connect", "--status", "--pause", "--resume", "--disconnect", "--exclude", "--include", "--versions", "--log"]);
         return allowed.Contains(a[0]) && a.Length <= 2 ? new(a[0][2..], a.Length == 2 ? a[1] : null) : null;
     }
 }
