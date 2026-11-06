@@ -2,9 +2,6 @@ using System.Text.Json;
 namespace RemoteAgents.Core;
 
 public sealed record ProjectBinding(string ProjectId, string HostId, string ReplicaPath, string FolderId, string StateDirectory);
-public enum SyncState { Synced, Syncing, Disconnected, Paused, Error }
-public sealed record SyncStatus(SyncState State, double Percent, string? Error, string? LogPath);
-
 public static class SyncDiscovery
 {
     public static IReadOnlyList<ProjectBinding> Find(string dataDir)

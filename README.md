@@ -94,3 +94,7 @@ VPN для HAPP использует Xray с VLESS/REALITY на TCP 8443. Сер
 Установщик сам записывает инструкции для Codex и Claude, сохраняя прежние правила. Технический первый запрос вставлять не нужно. Для единственного доступного Windows-узла проекта агент выбирает его автоматически; при нескольких уточняет компьютер. В начале работы и при смене цели инструкции требуют показать «Проект: имя → Windows: компьютер». Цель относится к текущей задаче, а подключение другого RDP или ПК её не меняет. Существующий чат может потребовать обновления MCP; новый чат должен получить установленные инструкции.
 
 Для одной серверной копии на двух своих ПК используйте присоединение второго ПК к существующему проекту. Для проекта сына создайте отдельную привязку. Это выбранная схема общего аккаунта, без отдельных пользователей и изоляции файлов.
+
+## Windows sync app (release 1 work in progress)
+
+`app/RemoteAgents.Core` contains shared sync status, configuration, ignore policy, and context-menu command logic. Run `~/.dotnet/dotnet test app/RemoteAgents.Tests/RemoteAgents.Tests.csproj`. The tray publish target is `app/RemoteAgents.Tray` (`win-x64`, self-contained); PowerShell integration still needs completion.
