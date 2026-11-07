@@ -63,16 +63,14 @@ try {
     $step='Конфигурация движка';$fresh=-not (Test-Path -LiteralPath (Join-Path $state 'config.xml'))
     if($fresh){[void](Invoke-DiskProcess $tray @('syncthing','generate','--home',$state))};Read-DiskState
     $options=@{globalAnnounceEnabled=$false;localAnnounceEnabled=$false;relaysEnabled=$false;natEnabled=$false;autoUpgradeIntervalH=0;reconnectionIntervalS=10;listenAddresses=@(('tcp://127.0.0.1:'+(Get-DiskPort)));startBrowser=$false}
-    $running=$false;try{[void](Invoke-DiskApi 'system/status');$running=$true}catch{}
+    $running=$false;try{$running=[bool](Invoke-DiskApi 'system/status')}catch{}
     if($running){$options.Remove('listenAddresses');[void](Invoke-DiskApi 'config/options' PATCH $options)}else{
-        $node=$script:Engine.configuration.options
-        foreach($name in $options.Keys){$xmlName=$name;if($name -eq 'listenAddresses'){$xmlName='listenAddress'};foreach($old in @($node.SelectNodes($xmlName))){[void]$node.RemoveChild($old)};$child=$script:Engine.CreateElement($xmlName);$child.InnerText=([string]$options[$name]).ToLowerInvariant();[void]$node.AppendChild($child)}
         if($fresh){foreach($folder in @($script:Engine.configuration.SelectNodes('folder'))){[void]$script:Engine.configuration.RemoveChild($folder)};$script:Engine.configuration.gui.address='127.0.0.1:'+(Get-DiskPort)}
-        $script:Engine.Save((Join-Path $state 'config.xml'));Read-DiskState
+        Save-DiskState $options;Read-DiskState
     }
     Write-DiskUtf8 (Join-Path $script:DiskHome 'tray/syncthingtray.ini') (New-DiskIni $tray $state $script:Gui $script:ApiKey);Set-DiskRegistration $true
     $step='Запуск трея';$created=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=('"'+$tray+'" --wait')};if($created.ReturnValue -ne 0){throw 'Не удалось запустить трей'}
-    $local=$null;for($i=0;$i -lt 40;$i++){try{$local=Invoke-DiskApi 'system/status';break}catch{Start-Sleep -Milliseconds 250}};if(-not $local){throw 'Движок не запустился'}
+    $local=$null;for($i=0;$i -lt 40;$i++){try{$local=Invoke-DiskApi 'system/status';if($local.myID){break}}catch{};Start-Sleep -Milliseconds 250};if(-not $local.myID){throw 'Движок не запустился'}
     $step='Подключение устройств';[void](Invoke-DiskApi ('config/devices/'+$remote.deviceId) PUT @{deviceID=$remote.deviceId;name='RemoteDisk Server';addresses=@('tcp://127.0.0.1:22001');autoAcceptFolders=$false})
     [void](Invoke-DiskServer add-device @{deviceId=$local.myID;deviceName=$env:COMPUTERNAME} -Direct);Write-DiskUtf8 (Join-Path $script:DiskHome 'server.txt') $remote.deviceId
     $step='Проверка канала';Wait-DiskChannel

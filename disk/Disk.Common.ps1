@@ -40,15 +40,21 @@ function Invoke-DiskServer($Action,$Data=$null,[switch]$Direct,[string]$OutputFi
     $cmd='bash "$HOME/.local/share/remote-disk/server-disk.sh" '+$Action
     if($Data){$cmd+=' '+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($Data|ConvertTo-Json -Depth 20 -Compress)))}
     $text=Invoke-DiskSsh $cmd -Direct:$Direct -OutputFile $OutputFile
-    if(-not $OutputFile){$value=$text|ConvertFrom-Json;foreach($item in $value){$item}}
+    if(-not $OutputFile -and $text){$value=$text|ConvertFrom-Json;if($null -ne $value){foreach($item in $value){$item}}}
 }
 function Invoke-DiskApi($Route,$Method='GET',$Body=$null) {
     $args=@{Uri=('http://'+$script:Gui+'/rest/'+$Route);Method=$Method;Headers=@{'X-API-Key'=$script:ApiKey};TimeoutSec=5;UseBasicParsing=$true}
     if($null -ne $Body){$args.Body=[Text.Encoding]::UTF8.GetBytes(($Body|ConvertTo-Json -Depth 30 -Compress));$args.ContentType='application/json'}
-    try {Invoke-RestMethod @args}catch{throw 'REST Syncthing недоступен'}
+    try {$value=Invoke-RestMethod @args;foreach($item in $value){if($null -ne $item -and -not ($item -is [string] -and $item.Length -eq 0)){$item}}}catch{throw 'REST Syncthing недоступен'}
 }
 function Read-DiskState {
-    [xml]$script:Engine=[IO.File]::ReadAllText((Join-Path $script:DiskHome 'state/config.xml'));$script:Gui=[string]$script:Engine.configuration.gui.address;$script:ApiKey=[string]$script:Engine.configuration.gui.apikey
+    $script:Engine=New-Object Xml.XmlDocument;$script:Engine.PreserveWhitespace=$true;$script:Engine.LoadXml([IO.File]::ReadAllText((Join-Path $script:DiskHome 'state/config.xml')))
+    $script:Gui=[string]$script:Engine.configuration.gui.address;$script:ApiKey=[string]$script:Engine.configuration.gui.apikey
+}
+function Save-DiskState($Options) {
+    $node=$script:Engine.configuration.options
+    foreach($name in $Options.Keys){$xmlName=$name;if($name -eq 'listenAddresses'){$xmlName='listenAddress'};foreach($old in @($node.SelectNodes($xmlName))){[void]$node.RemoveChild($old)};$child=$script:Engine.CreateElement($xmlName);$child.InnerText=([string]$Options[$name]).ToLowerInvariant();[void]$node.AppendChild($child)}
+    $script:Engine.Save((Join-Path $script:DiskHome 'state/config.xml'))
 }
 function New-DiskIni($Tray,$State,$Gui,$ApiKey) {
     @('[General]','v=2.1.9','[tray]','connections\size=1','connections\1\label=RemoteDisk',('connections\1\syncthingUrl=http://'+$Gui),('connections\1\apiKey='+$ApiKey),'connections\1\autoConnect=true','connections\1\reconnectInterval=30','notifyOnDisconnect=false','notifyOnErrors=true','showSyncthingNotifications=true','[startup]','syncthingAutostart=true','useLibSyncthing=false',('syncthingPath='+$Tray.Replace('\','/')),('syncthingArgs="syncthing serve --home \"'+$State.Replace('\','/')+'\" --no-browser --no-restart"'),'considerLauncherForReconnect=true','showLauncherButton=false','') -join "`n"
