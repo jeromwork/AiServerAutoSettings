@@ -62,3 +62,6 @@ function Set-DiskDirectoryAcl([string]$FolderPath,[string]$Expected) {
     $sec.SetSecurityDescriptorSddlForm($Expected,'Access')
     $dir.SetAccessControl($sec)
 }
+function Test-DiskProcessStart([DateTime]$Actual,$Expected) {
+    $Actual.ToUniversalTime().Ticks -eq ([DateTime]$Expected).ToUniversalTime().Ticks
+}

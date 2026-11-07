@@ -60,8 +60,8 @@ $temp=Join-Path ([IO.Path]::GetTempPath()) ('disk-engine-'+[guid]::NewGuid().ToS
 [void](New-Item -ItemType Directory -Path $temp -Force)
 try {
     $script:DiskHome=$temp;$script:LogFile=Join-Path $temp 'engine.jsonl';$script:HostName='test'
-    $script:LocalKey='';$script:RemoteKey='';$script:Tray=$null;$script:Install=$null
-    $script:Remote=$null;$script:RemoteInstall=$null
+    $script:LocalKey='';$script:RemoteKey='';$script:Tray=$null;$script:EngineInstall=$null
+    $script:RemoteState=$null;$script:RemoteInstall=$null
     $shim=Join-Path $temp 'transport.py'
     $shimText=@'
 #!/usr/bin/env python3
@@ -111,16 +111,16 @@ else:
     'resume'|Set-Content (Join-Path $temp 'mode')
     # Successful remote bootstrap is retained across every installation tick.
     for($n=0;$n -lt 100;$n++){if(Initialize-DiskRemote){break};Start-Sleep -Milliseconds 20}
-    Assert ($null -ne $script:Remote) 'remote initialized'
+    Assert ($null -ne $script:RemoteState) 'remote initialized'
     1..5|ForEach-Object {Assert (Initialize-DiskRemote) 'remote stays initialized'}
     Assert (@(Get-Content (Join-Path $temp 'bootstrap-count')).Count -eq 1) 'bootstrap called once'
     function Initialize-DiskRemote {throw 'Remote bootstrap repeated after success'}
     'resume'|Set-Content (Join-Path $temp 'mode')
     [void](Step-DiskInitialization)
-    $script:Install.size=8L
+    $script:EngineInstall.size=8L
     $sha=[Security.Cryptography.SHA256]::Create()
-    $script:Install.hash=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::ASCII.GetBytes('abcdefgh')))).Replace('-','');$sha.Dispose()
-    Tick-Until { (Get-DiskPartSize) -eq 8 -and -not $script:Install.job }
+    $script:EngineInstall.hash=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::ASCII.GetBytes('abcdefgh')))).Replace('-','');$sha.Dispose()
+    Tick-Until { (Get-DiskPartSize) -eq 8 -and -not $script:EngineInstall.job }
     Assert (Test-DiskEngineArchive) 'resumed archive hash'
     $offsets=@(Get-Content (Join-Path $temp 'curl-offsets'))
     Assert ($offsets.Count -eq 2 -and $offsets[0] -eq '0' -and $offsets[1] -eq '4') 'curl resumes existing partial file'
@@ -129,22 +129,22 @@ else:
     Assert ($stderrText.Length -eq 500) 'curl stderr capped at 500 characters'
     'PASS curl: -sS, redacted stderr capped at 500 characters'
     'PASS engine direct: interrupted process resumed at byte 4; bootstrap once'
-    Remove-Item $script:Install.part
+    Remove-Item $script:EngineInstall.part
     Remove-Item (Join-Path $temp 'curl-count'),(Join-Path $temp 'curl-offsets')
     'stall'|Set-Content (Join-Path $temp 'mode')
-    $script:Install.failures=0;$script:Install.prepared=$false
-    Tick-Until { $script:Install.route -eq 'server' }
+    $script:EngineInstall.failures=0;$script:EngineInstall.prepared=$false
+    Tick-Until { $script:EngineInstall.route -eq 'server' }
     Assert (@(Get-Content (Join-Path $temp 'curl-offsets')).Count -eq 2) 'fallback after two stalled processes'
-    Tick-Until { (Get-DiskPartSize) -eq 8 -and -not $script:Install.job }
+    Tick-Until { (Get-DiskPartSize) -eq 8 -and -not $script:EngineInstall.job }
     Assert (Test-DiskEngineArchive) 'CRLF base64 decoded with correct SHA'
     $offsets=@(Get-Content (Join-Path $temp 'chunks'))
     Assert ($offsets.Count -eq 2 -and $offsets[0] -eq '0' -and $offsets[1] -eq '0') 'failed chunk retries same offset'
     Assert ($script:LastStatus -match 'через сервер' -and $script:LastStatus.Length -le 63) 'honest installation status'
-    $script:Install.hash='BAD'
+    $script:EngineInstall.hash='BAD'
     Assert (-not (Test-DiskEngineArchive)) 'bad SHA rejected'
-    Assert (-not (Test-Path $script:Install.part)) 'bad SHA partial removed'
+    Assert (-not (Test-Path $script:EngineInstall.part)) 'bad SHA partial removed'
     [void](Step-DiskInitialization)
-    Assert ($script:Install.offset -eq 0 -and $script:Install.job) 'restart from zero after bad SHA'
+    Assert ($script:EngineInstall.offset -eq 0 -and $script:EngineInstall.job) 'restart from zero after bad SHA'
     $log=Get-Content $script:LogFile -Raw
     Assert ($log -match 'engine.hash.error' -and $log -notmatch 'token=hidden') 'hash error logged and secrets redacted'
     'PASS engine fallback: two stalls, SSH chunk retry at same offset, CRLF base64, bad SHA deletion, status'
@@ -177,7 +177,7 @@ try {
     [IO.File]::WriteAllText((Join-Path $temp 'bin/syncthing.exe'),'synthetic')
     $listener.Start();$port=$listener.LocalEndpoint.Port
     $script:DiskHome=$temp;$script:LogFile=Join-Path $temp 'session.jsonl';$script:HostName='test'
-    $script:Remote=$null;$script:RemoteInstall=$null;$script:Install=$null;$script:Tunnel=$null
+    $script:RemoteState=$null;$script:RemoteInstall=$null;$script:EngineInstall=$null;$script:Tunnel=$null
     $script:LastStatus='Нет подключения';$script:Tray=$null;$script:Retry=[DateTime]::MinValue
     $script:Connection=[pscustomobject]@{serverAddress='localhost';arguments=@('-p',"$port",'localhost')}
     $script:Bootstraps=0;$script:LocalChecks=0;$script:Tunnels=0
@@ -202,19 +202,19 @@ try {
         if($n -eq 0){
             $script:Tunnel.p.HasExited=$true
             $now=[DateTime]::UtcNow;& $attempt
-            Assert ($null -eq $script:Remote -and $null -eq $script:Tunnel) 'tunnel exit clears remote bootstrap cache'
+            Assert ($null -eq $script:RemoteState -and $null -eq $script:Tunnel) 'tunnel exit clears remote bootstrap cache'
             $script:Retry=[DateTime]::MinValue
         }
     }
     Assert ($script:Bootstraps -eq 2 -and $script:LocalChecks -eq 2) 'bootstrap and local engine checked again after exit'
-    Assert ($script:LastStatus -notmatch 'Установка' -and $null -eq $script:Install) 'ready engine has no installation status'
+    Assert ($script:LastStatus -notmatch 'Установка' -and $null -eq $script:EngineInstall) 'ready engine has no installation status'
     $rows=@(Get-Content $script:LogFile | ForEach-Object {$_|ConvertFrom-Json})
     Assert (@($rows|Where-Object {$_.stage -like 'engine.download*'}).Count -eq 0) 'ready engine has no download journal'
     foreach($stage in @('dns','tcp')){Assert (@($rows|Where-Object {$_.stage -eq $stage}).Count -eq 2) "$stage once per connection attempt"}
     # The real initialize catch must invalidate bootstrap even before a tunnel exists.
     function Initialize-DiskLocal {throw 'synthetic local failure'}
     $script:Tunnel=$null;$script:Retry=[DateTime]::MinValue;$now=[DateTime]::UtcNow;& $attempt
-    Assert ($null -eq $script:Remote) 'initialize error clears remote bootstrap cache'
+    Assert ($null -eq $script:RemoteState) 'initialize error clears remote bootstrap cache'
     $script:Tray=[pscustomobject]@{Icon=$null;Text=''}
     function New-DiskIcon($State){Assert ($State -eq 'error') 'startup error icon';$null}
     Update-DiskState
@@ -248,7 +248,7 @@ try {
     }finally{$fixture.Dispose()}
     $part=Join-Path $temp 'syncthing.zip.part';Move-Item $zip $part
     $script:DiskHome=$temp;$script:LogFile=Join-Path $temp 'session.jsonl';$script:HostName='test'
-    $script:Install=@{part=$part;size=[long](Get-Item $part).Length;hash=(Get-DiskFileSha256 $part);route='direct';job=$null;started=[DateTime]::UtcNow;progress=[DateTime]::UtcNow;bytes=0L}
+    $script:EngineInstall=@{part=$part;size=[long](Get-Item $part).Length;hash=(Get-DiskFileSha256 $part);route='direct';job=$null;started=[DateTime]::UtcNow;progress=[DateTime]::UtcNow;bytes=0L}
     $script:Tray=$null;$script:RemoteInstall=$null;$script:LocalKey=''
     $script:MainThread=[Threading.Thread]::CurrentThread.ManagedThreadId
     function Initialize-DiskLocal {
@@ -275,9 +275,9 @@ try {
     $journal=Get-Content $script:LogFile -Raw
     Assert ($journal -match 'engine.hash.ok' -and $journal -match 'engine.extract.done') 'hash and extract success logged'
     'PASS SHA256: known bytes and empty file; ZIP: traversal ignored, only engine, replacement, missing entry, success journal'
-    Assert ($script:LocalKey -ceq 'exact-local-key' -and $null -eq $script:Install) 'local key belongs to initializer; installation cleared'
+    Assert ($script:LocalKey -ceq 'exact-local-key' -and $null -eq $script:EngineInstall) 'local key belongs to initializer; installation cleared'
     [IO.File]::WriteAllText($part,'partial')
-    $script:Install=@{part=$part;job=$null}
+    $script:EngineInstall=@{part=$part;job=$null}
     Stop-DiskInstall
     Assert ([IO.File]::ReadAllText($part) -ceq 'partial') 'stop preserves partial download'
     'PASS extraction: real ZIP, SHA verification, main-thread initializer/key, stop preserves .part'
@@ -618,6 +618,179 @@ foreach($name in $production){
 $source=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'RemoteDisk.ps1'))
 Assert ($source -match 'HKCU:' -and $source -match 'LOCALAPPDATA') 'per-user installation/menu/autostart'
 'PASS privilege audit (static): per-user LOCALAPPDATA/HKCU, current-user processes, no machine-wide service/task/elevation or privilege APIs'
+
+
+. $PSScriptRoot/RemoteDisk.ps1 -LibraryOnly
+function Get-ParameterNames($Parameters) {if($null -ne $Parameters){@($Parameters|Where-Object {$null -ne $_}|ForEach-Object {$_.Name.VariablePath.UserPath})}}
+function Get-ScriptParameterCollisions($Tree,$ImportedNames=@()) {
+    $names=@($ImportedNames)
+    if($Tree.ParamBlock){$names+=Get-ParameterNames $Tree.ParamBlock.Parameters}
+    $refs=@($Tree.FindAll({param($n) $n -is [Management.Automation.Language.VariableExpressionAst] -and $n.VariablePath.UserPath -like 'script:*'},$true))
+    foreach($ref in $refs){if($ref.VariablePath.UserPath.Substring(7) -in $names){$ref.Extent.Text}}
+    foreach($scope in @($Tree.FindAll({param($n) $n -is [Management.Automation.Language.ScriptBlockAst] -and $null -ne $n.ParamBlock},$true))){
+        $parameters=Get-ParameterNames $scope.ParamBlock.Parameters
+        foreach($ref in @($scope.FindAll({param($n) $n -is [Management.Automation.Language.VariableExpressionAst] -and $n.VariablePath.UserPath -like 'script:*'},$true))){if($ref.VariablePath.UserPath.Substring(7) -in $parameters){$ref.Extent.Text}}
+    }
+    foreach($f in @($Tree.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst]},$true))){
+        $parameters=Get-ParameterNames $f.Parameters
+        foreach($ref in @($f.Body.FindAll({param($n) $n -is [Management.Automation.Language.VariableExpressionAst] -and $n.VariablePath.UserPath -like 'script:*'},$true))){if($ref.VariablePath.UserPath.Substring(7) -in $parameters){$f.Name+':'+$ref.Extent.Text}}
+    }
+}
+$entryTokens=$null;$entryErrors=$null
+$entryAst=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'RemoteDisk.ps1'),[ref]$entryTokens,[ref]$entryErrors)
+$entryNames=Get-ParameterNames $entryAst.ParamBlock.Parameters
+$stamp=[DateTime]::UtcNow
+Assert ((Test-DiskProcessStart $stamp $stamp.ToString('o')) -and (Test-DiskProcessStart $stamp $stamp) -and -not (Test-DiskProcessStart $stamp $stamp.AddSeconds(1))) 'PID start verification accepts JSON date/string without losing identity check'
+foreach($f in @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1')){
+    $tree=[Management.Automation.Language.Parser]::ParseFile($f.FullName,[ref]$entryTokens,[ref]$entryErrors)
+    Assert ($entryErrors.Count -eq 0) ('parser '+$f.Name)
+    Assert (@(Get-ScriptParameterCollisions $tree $entryNames).Count -eq 0) ('script/function/imported parameter collision in '+$f.Name)
+    foreach($n in @($tree.FindAll({param($n) $n -is [Management.Automation.Language.InvokeMemberExpressionAst]},$true))){
+        $target=$n.Expression
+        Assert (-not ($target -is [Management.Automation.Language.MemberExpressionAst] -and $target.Member -is [Management.Automation.Language.StringConstantExpressionAst] -and $n.Member -is [Management.Automation.Language.StringConstantExpressionAst] -and $target.Member.Value -eq 'StandardInput' -and $n.Member.Value -in @('Write','WriteLine','Flush'))) ('stdin StreamWriter use in '+$f.Name)
+    }
+    Assert (@($tree.FindAll({param($n) $n -is [Management.Automation.Language.MemberExpressionAst] -and $n.Member -is [Management.Automation.Language.StringConstantExpressionAst] -and $n.Member.Value -eq 'StandardInputEncoding'},$true)).Count -eq 0) ('unsupported stdin encoding API in '+$f.Name)
+    if($f.Name -eq 'Watch-Disk.ps1'){
+        $assignments=@($tree.FindAll({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left -is [Management.Automation.Language.VariableExpressionAst]},$true))
+        Assert (@($assignments|Where-Object {$_.Left.VariablePath.UserPath -in $entryNames}).Count -eq 0) 'watcher overwrites an imported CLI parameter'
+    }
+}
+$negative=[Management.Automation.Language.Parser]::ParseInput('param([switch]$Install); $script:INSTALL=$null; function F([string]$Path){$script:path}',[ref]$entryTokens,[ref]$entryErrors)
+Assert (@(Get-ScriptParameterCollisions $negative).Count -ge 2) 'collision guard catches script and function parameters case-insensitively'
+'PASS AST: CLI/imported/function parameters do not alias script state; watcher has no imported parameter assignments; stdin uses no StreamWriter or StandardInputEncoding'
+
+# Actual SSH transport function, local executable only: inspect raw stdin bytes.
+$temp=Join-Path ([IO.Path]::GetTempPath()) ('disk-stdin-'+[guid]::NewGuid().ToString('N'))
+try{
+    [void][IO.Directory]::CreateDirectory($temp)
+    $shim=Join-Path $temp 'ssh-shim'
+    [IO.File]::WriteAllText($shim,(@'
+#!/usr/bin/env python3
+import sys
+from pathlib import Path
+Path(__file__).with_suffix('.bytes').write_bytes(sys.stdin.buffer.read())
+sys.stdout.write('stdin-ok\r\n')
+'@).Replace("`r`n","`n"),(New-Object Text.UTF8Encoding($false)))
+    & chmod +x $shim
+    $script:Connection=[pscustomobject]@{sshExecutable=$shim;arguments=@('fixture.invalid')}
+    $script:LogFile=Join-Path $temp 'ssh.jsonl';$script:HostName='fixture';$script:LocalKey='';$script:RemoteKey=''
+    $inputText=[string][char]0xFEFF+"#!/usr/bin/env bash`r`nprintf 'Привет'`r`n"
+    $job=Start-DiskSsh "printf ok`r`n" $inputText
+    $reply=Complete-DiskSsh $job
+    $raw=[IO.File]::ReadAllBytes([IO.Path]::ChangeExtension($shim,'.bytes'))
+    $expected=(New-Object Text.UTF8Encoding($false)).GetBytes("#!/usr/bin/env bash`nprintf 'Привет'`n")
+    Assert ([Convert]::ToBase64String($raw) -ceq [Convert]::ToBase64String($expected)) 'exact UTF-8 stdin, no BOM, CRLF normalized'
+    Assert ($reply -ceq "stdin-ok`n") 'stdout CR removed'
+    $job.p.Dispose()
+    'PASS SSH stdin: actual BaseStream bytes, UTF-8 without BOM, leading legacy BOM removed, CRLF -> LF, Unicode preserved'
+}finally{Remove-Item -LiteralPath $temp -Recurse -Force}
+
+# Keep the real script param block, dispatcher, runtime, installer and tunnel setup.
+# Only Windows UI/registry/identity/process-launch and SSH boundaries are replaced.
+$temp=Join-Path ([IO.Path]::GetTempPath()) ('disk-entry-'+[guid]::NewGuid().ToString('N'))
+$trayProcess=$null
+try{
+    $source=Join-Path $temp 'source';[void][IO.Directory]::CreateDirectory($source)
+    $files=@('RemoteDisk.ps1','DiskLock.ps1','Set-DiskAcl.ps1','Watch-Disk.ps1','server-disk.sh')
+    foreach($name in $files){Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $source $name)}
+    $profilePath=Join-Path $temp 'profile.json'
+    Write-DiskJson $profilePath @{keyPath='fixture';knownHostsPath='fixture';configPath='fixture';serverAddress='fixture.invalid';login='fixture';sshExecutable='fixture';arguments=@('fixture.invalid')}
+    $bindings=@'
+function Get-DiskAclIdentity {[pscustomobject]@{User=[pscustomobject]@{Value=$env:DISK_ENTRY_SID}}}
+function Test-Path {param($LiteralPath,$Path,$PathType) $p=$LiteralPath;if(-not $p){$p=$Path};if($p -like 'HKCU:*'){return $false};if($PathType){Microsoft.PowerShell.Management\Test-Path -LiteralPath $p -PathType $PathType}else{Microsoft.PowerShell.Management\Test-Path -LiteralPath $p}}
+function New-Item {param($Path,$ItemType,[switch]$Force) if($Path -notlike 'HKCU:*'){throw 'unexpected New-Item'} }
+function New-ItemProperty {param($Path,$Name,$Value,[switch]$Force) [IO.File]::AppendAllText($env:DISK_ENTRY_REG,(@{kind='property';key=$Path;name=$Name;value=$Value}|ConvertTo-Json -Compress)+"`n")}
+function Set-Item {param($Path,$Value) [IO.File]::AppendAllText($env:DISK_ENTRY_REG,(@{kind='item';key=$Path;value=$Value}|ConvertTo-Json -Compress)+"`n")}
+function Invoke-CimMethod {
+    param($ClassName,$MethodName,$Arguments)
+    if($ClassName -ne 'Win32_Process' -or $MethodName -ne 'Create'){throw 'unexpected native launch'}
+    $si=New-Object Diagnostics.ProcessStartInfo;$si.FileName=$env:DISK_ENTRY_PWSH;$si.WorkingDirectory=$env:DISK_ENTRY_CWD
+    $app=Join-Path $script:DiskHome 'app/RemoteDisk.ps1'
+    $si.Arguments=(@('-NoProfile','-File',$app,'-Profile',$script:ProfileFile,'-Command','context-on')|ForEach-Object {Quote-Native $_}) -join ' '
+    $si.UseShellExecute=$false;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true
+    $si.EnvironmentVariables['DISK_ENTRY_CHILD']='1'
+    $p=New-Object Diagnostics.Process;$p.StartInfo=$si;[void]$p.Start()
+    Write-DiskJson $env:DISK_ENTRY_LAUNCH @{pid=$p.Id;started=$p.StartTime.ToUniversalTime().ToString('o');command=$Arguments.CommandLine}
+    [pscustomobject]@{ReturnValue=0;ProcessId=$p.Id}
+}
+function Start-DiskApp {
+    if($env:DISK_ENTRY_CHILD -ne '1'){throw 'installer entered tray branch'}
+    Write-DiskJson $env:DISK_ENTRY_MARKER @{pid=$PID;script=$PSCommandPath;install=[bool]$Install;files=@(Get-ChildItem -LiteralPath $PSScriptRoot -File|ForEach-Object {$_.Name})}
+    Start-Sleep -Seconds 30
+}
+function Start-DiskSsh($RemoteCommand,$InputText='', $Extra=@(),[switch]$KeepOpen){
+    $kind='tunnel';if($RemoteCommand -match ' bootstrap$'){$kind='bootstrap'}elseif($RemoteCommand -match ' device-port '){$kind='port'}
+    if($kind -eq 'bootstrap' -and -not $InputText.StartsWith('#!/usr/bin/env bash')){throw 'installed bootstrap asset missing'}
+    @{kind=$kind;p=[pscustomobject]@{HasExited=($kind -ne 'tunnel')};out=[pscustomobject]@{IsCompleted=$true};err=[pscustomobject]@{IsCompleted=$true};extra=$Extra}
+}
+function Complete-DiskSsh($Job,$Timeout){if($Job.kind -eq 'bootstrap'){'{"apiKey":"fixture","listen":23001,"gui":23002,"reverse":23003,"deviceId":"fixture"}'}elseif($Job.kind -eq 'port'){'{"reverse":23004}'}else{throw 'unexpected completion'}}
+function Invoke-DiskHeadlessAdd {
+    if($Remote -cne 'sample'){throw 'CLI -Remote changed during runtime initialization'}
+    $script:RemoteState=$null;$script:RemoteInstall=$null
+    if(Initialize-DiskRemote){throw 'bootstrap must start asynchronously'}
+    if(-not (Initialize-DiskRemote)){throw 'bootstrap not completed'}
+    Start-DiskTunnel
+    if($script:RemoteState -is [string] -or $script:RemoteState.reverse -ne 23004 -or $Remote -cne 'sample'){throw 'connection state aliases CLI string'}
+    Write-DiskJson $env:DISK_ENTRY_REMOTE @{remote=$Remote;reverse=$script:RemoteState.reverse;stateType=$script:RemoteState.GetType().FullName}
+}
+'@
+    $entry=Join-Path $source 'RemoteDisk.ps1';$text=[IO.File]::ReadAllText($entry)
+    $index=$text.LastIndexOf('if(-not $LibraryOnly){');Assert ($index -gt 0) 'entry dispatcher found'
+    [IO.File]::WriteAllText($entry,$text.Insert($index,$bindings+"`n"),(New-Object Text.UTF8Encoding($true)))
+    $appdata=Join-Path $temp 'appdata';$launch=Join-Path $temp 'launch.json';$marker=Join-Path $temp 'tray.json';$registry=Join-Path $temp 'registry.jsonl';$remoteResult=Join-Path $temp 'remote.json'
+    $emptyCwd=Join-Path $temp 'empty-cwd';[void][IO.Directory]::CreateDirectory($emptyCwd)
+    $environment=@{DISK_ENTRY_CWD=$emptyCwd;LOCALAPPDATA=$appdata;COMPUTERNAME='fixture';DISK_ENTRY_SID=('fixture-'+[guid]::NewGuid().ToString('N'));DISK_ENTRY_PWSH=(Join-Path $PSHOME 'pwsh');DISK_ENTRY_LAUNCH=$launch;DISK_ENTRY_MARKER=$marker;DISK_ENTRY_REG=$registry;DISK_ENTRY_REMOTE=$remoteResult;DISK_ENTRY_CHILD='0'}
+    function Invoke-EntryFixture($File,$TaskArguments,$Variables){
+        $si=New-Object Diagnostics.ProcessStartInfo;$si.FileName=Join-Path $PSHOME 'pwsh';$si.WorkingDirectory=$Variables['DISK_ENTRY_CWD']
+        $si.Arguments=(@(@('-NoProfile','-File',$File)+$TaskArguments)|ForEach-Object {Quote-Native $_}) -join ' '
+        $si.UseShellExecute=$false;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true
+        foreach($key in $Variables.Keys){$si.EnvironmentVariables[$key]=[string]$Variables[$key]}
+        $p=New-Object Diagnostics.Process;$p.StartInfo=$si;[void]$p.Start();$stdout=$p.StandardOutput.ReadToEndAsync();$stderr=$p.StandardError.ReadToEndAsync()
+        try{if(-not $p.WaitForExit(8000)){$p.Kill();$p.WaitForExit();throw 'entry script did not return promptly'};[pscustomobject]@{code=$p.ExitCode;output=$stdout.Result;error=$stderr.Result}}finally{$p.Dispose()}
+    }
+    $result=Invoke-EntryFixture $entry @('-Install','-Profile',$profilePath) $environment
+    Assert ($result.code -eq 0) ('real -Install entry failed: '+$result.error)
+    $spawn=Read-DiskJson $launch;Assert ($null -ne $spawn) 'installer launched copy'
+    $trayProcess=[Diagnostics.Process]::GetProcessById($spawn.pid)
+    Assert (-not $trayProcess.HasExited) 'installer returned while launched tray was still alive'
+    $deadline=[DateTime]::UtcNow.AddSeconds(5);while(-not (Test-Path -LiteralPath $marker) -and [DateTime]::UtcNow -lt $deadline){Start-Sleep -Milliseconds 50}
+    $child=Read-DiskJson $marker;Assert ($null -ne $child) 'installed copy entered its own startup'
+    $installed=Join-Path $appdata 'RemoteDisk/app';$installedEntry=Join-Path $installed 'RemoteDisk.ps1'
+    Assert ($child.pid -eq $spawn.pid -and $child.script -ceq $installedEntry -and -not $child.install) 'child runs from app without inherited -Install'
+    Assert ((@($child.files|Sort-Object) -join '|') -ceq (@($files|Sort-Object) -join '|')) 'exact installed asset list'
+    $reg=@(Get-Content -LiteralPath $registry|ForEach-Object {$_|ConvertFrom-Json})
+    $run=@($reg|Where-Object {$_.kind -eq 'property' -and $_.key -like '*CurrentVersion\Run'})
+    $context=@($reg|Where-Object {$_.kind -eq 'item' -and $_.key -like '*\command'})
+    Assert ($run.Count -eq 1 -and $context.Count -gt 0) 'autorun and context commands captured'
+    foreach($row in @($run)+@($context)) {Assert ($row.value.Contains($installedEntry) -and -not $row.value.Contains($source)) 'launch path uses app copy'}
+    Assert ($spawn.command.Contains($installedEntry) -and $spawn.command.Contains('-Command context-on')) 'detached launch uses installed script'
+    $trayProcess.Kill();$trayProcess.WaitForExit();$trayProcess.Dispose();$trayProcess=$null
+    Remove-Item -LiteralPath $source -Recurse -Force
+    foreach($file in @(Get-ChildItem -LiteralPath $installed -Filter '*.ps1')){
+        $t=$null;$e=$null;$tree=[Management.Automation.Language.Parser]::ParseFile($file.FullName,[ref]$t,[ref]$e)
+        foreach($cmd in @($tree.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Join-Path'},$true))){
+            $parts=@($cmd.CommandElements)
+            if($parts.Count -ge 3 -and $parts[1].Extent.Text -eq '$PSScriptRoot' -and $parts[2] -is [Management.Automation.Language.StringConstantExpressionAst] -and $parts[2].Value -match '\.(ps1|sh)$'){
+                Assert (Test-Path -LiteralPath (Join-Path $installed $parts[2].Value)) ('missing app dependency '+$parts[2].Value)
+            }
+        }
+    }
+    $result=Invoke-EntryFixture $installedEntry @('-Command','status') $environment
+    Assert ($result.code -eq 1 -and $result.output.Trim() -ceq '[]') ('standalone installed status: '+$result.error)
+    $result=Invoke-EntryFixture $installedEntry @('-Command','add','-Remote','sample','-Path',(Join-Path $temp 'local')) $environment
+    Assert ($result.code -eq 0) ('real -Remote entry failed: '+$result.error)
+    $state=Read-DiskJson $remoteResult
+    Assert ($state.remote -ceq 'sample' -and $state.reverse -eq 23004 -and $state.stateType -ceq 'System.Management.Automation.PSCustomObject') 'object connection state and CLI name stay separate'
+    'PASS real entry (no LibraryOnly, OS stubs): -Install installs and returns while tray child lives; parent never enters tray; app paths in autorun/context/launch'
+    'PASS installed copy: source removed, empty working directory; five assets and relative dependencies complete; standalone status and -Remote/bootstrap/tunnel entry work; state remains PSCustomObject'
+}finally{
+    if(-not $trayProcess -and (Test-Path -LiteralPath (Join-Path $temp 'launch.json'))){
+        $owned=Read-DiskJson (Join-Path $temp 'launch.json')
+        try{$candidate=[Diagnostics.Process]::GetProcessById($owned.pid);if([IO.File]::ReadAllText(('/proc/'+$owned.pid+'/cmdline')).Contains((Join-Path $temp 'appdata/RemoteDisk/app/RemoteDisk.ps1'))){$trayProcess=$candidate}else{$candidate.Dispose()}}catch{}
+    }
+    if($trayProcess){if(-not $trayProcess.HasExited){$trayProcess.Kill();$trayProcess.WaitForExit()};$trayProcess.Dispose()}
+    if(Test-Path -LiteralPath $temp){Remove-Item -LiteralPath $temp -Recurse -Force}
+}
 
 . $PSScriptRoot/RemoteDisk.ps1 -LibraryOnly
 $temp=Join-Path ([IO.Path]::GetTempPath()) ('disk-background-'+[guid]::NewGuid().ToString('N'))

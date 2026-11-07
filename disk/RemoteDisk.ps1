@@ -6,6 +6,7 @@ $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
 $script:LastInitError=''
 $script:ProfileFile='';$script:Tunnel=$null;$script:Safety=$null;$script:DiskHome=''
+$script:RemoteState=$null;$script:EngineInstall=$null
 $script:ServerJob=$null;$script:NextServerList=[DateTime]::MinValue;$script:ExitUnlock=$false;$script:PendingDisconnect=@();$script:ConflictScan=$null
 . (Join-Path $PSScriptRoot 'DiskLock.ps1')
 
@@ -233,7 +234,7 @@ function Select-DiskProfile {
     $script:Config|Add-Member -NotePropertyName profile -NotePropertyValue $script:ProfileFile -Force
 }
 # This script has CRLF on Windows; bash treats a stray CR as part of the command.
-function Convert-DiskRemoteText([string]$Text) { $Text.Replace("`r`n","`n").Replace("`r","`n") }
+function Convert-DiskRemoteText([string]$Text) { $Text.TrimStart([char]0xFEFF).Replace("`r`n","`n").Replace("`r","`n") }
 function Start-DiskSsh([string]$RemoteCommand,[string]$InputText='', [string[]]$Extra=@(),[switch]$KeepOpen) {
     $RemoteCommand=Convert-DiskRemoteText $RemoteCommand;$InputText=Convert-DiskRemoteText $InputText
     $c=$script:Connection
@@ -252,7 +253,12 @@ function Start-DiskSsh([string]$RemoteCommand,[string]$InputText='', [string[]]$
     $p=New-Object Diagnostics.Process;$p.StartInfo=$si
     [void]$p.Start()
     $out=$p.StandardOutput.ReadToEndAsync();$err=$p.StandardError.ReadToEndAsync()
-    if($InputText){$p.StandardInput.Write($InputText.Replace("`r`n","`n"))};if(-not $KeepOpen){$p.StandardInput.Close()}
+    if($InputText){
+        $bytes=(New-Object Text.UTF8Encoding($false)).GetBytes($InputText)
+        $p.StandardInput.BaseStream.Write($bytes,0,$bytes.Length)
+        $p.StandardInput.BaseStream.Flush()
+    }
+    if(-not $KeepOpen){$p.StandardInput.Close()}
     Write-DiskLog 'ssh.start' ('pid='+$p.Id)
     @{p=$p;out=$out;err=$err;started=[DateTime]::UtcNow}
 }
@@ -289,22 +295,22 @@ function Send-DiskLogs([switch]$DrainOnly,[switch]$First) {
 function Start-DiskLogWorker {
     # A separate PowerShell worker keeps delivery alive during downloads/bootstrap/UI stalls.
     $script:LogWorker=Start-Job -ArgumentList $PSCommandPath,$script:Connection,$script:DiskHome,$script:HostName,$script:LogFile -ScriptBlock {
-        param($Source,$Connection,$DiskHome,$HostName,$MainLog)
-        . $Source -LibraryOnly
-        $script:Connection=$Connection;$script:DiskHome=$DiskHome;$script:HostName=$HostName
+        param($WorkerSource,$WorkerConnection,$WorkerHome,$WorkerHost,$WorkerMainLog)
+        . $WorkerSource -LibraryOnly
+        $script:Connection=$WorkerConnection;$script:DiskHome=$WorkerHome;$script:HostName=$WorkerHost
         $script:LocalKey='';$script:RemoteKey=''
-        $script:Queue=Join-Path $DiskHome 'logs\queue'
-        $script:LogFile=Join-Path $DiskHome 'logs\delivery.jsonl'
+        $script:Queue=Join-Path $WorkerHome 'logs\queue'
+        $script:LogFile=Join-Path $WorkerHome 'logs\delivery.jsonl'
         while($true){
             try{
                 # Atomic remote replacement makes whole-session retries idempotent.
-                foreach($f in @(Get-ChildItem (Join-Path $DiskHome 'logs') -Filter '*.jsonl')){
+                foreach($f in @(Get-ChildItem (Join-Path $WorkerHome 'logs') -Filter '*.jsonl')){
                     if($f.Length){Copy-Item -LiteralPath $f.FullName -Destination (Join-Path $script:Queue $f.Name) -Force}
                 }
                 foreach($f in @(Get-ChildItem $script:Queue -Filter '*.jsonl'|Sort-Object LastWriteTimeUtc)){
                     try{
-                        $remote='umask 077; d="$HOME/.local/share/remote-disk/logs/'+$HostName+'"; mkdir -p "$d" && cat > "$d/'+$f.Name+'.tmp" && mv "$d/'+$f.Name+'.tmp" "$d/'+$f.Name+'"'
-                        [void](Complete-DiskSsh (Start-DiskSsh $remote ([IO.File]::ReadAllText($f.FullName))) 15)
+                        $deliveryCommand='umask 077; d="$HOME/.local/share/remote-disk/logs/'+$WorkerHost+'"; mkdir -p "$d" && cat > "$d/'+$f.Name+'.tmp" && mv "$d/'+$f.Name+'.tmp" "$d/'+$f.Name+'"'
+                        [void](Complete-DiskSsh (Start-DiskSsh $deliveryCommand ([IO.File]::ReadAllText($f.FullName))) 15)
                         Remove-Item -LiteralPath $f.FullName
                     }catch{Write-DiskLog 'delivery.retry';break}
                 }
@@ -398,7 +404,7 @@ function Initialize-DiskLocal {
     throw 'Local Syncthing unavailable'
 }
 function Initialize-DiskRemote {
-    if($script:Remote){return $true}
+    if($script:RemoteState){return $true}
     if(-not $script:RemoteInstall){
         $scriptText=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'server-disk.sh'))
         $upload='server-disk-'+[guid]::NewGuid().ToString('N')+'.tmp'
@@ -409,21 +415,21 @@ function Initialize-DiskRemote {
     if(-not $script:RemoteInstall.p.HasExited -or -not $script:RemoteInstall.out.IsCompleted -or -not $script:RemoteInstall.err.IsCompleted){return $false}
     $job=$script:RemoteInstall;$script:RemoteInstall=$null
     $r=((Complete-DiskSsh $job 1).Replace("`r",''))|ConvertFrom-Json
-    $script:RemoteKey=$r.apiKey;$script:Remote=$r
+    $script:RemoteKey=$r.apiKey;$script:RemoteState=$r
     return $true
 }
 function Step-DiskInitialization {
     if(-not (Test-DiskSafetyReady)){return $false}
-    if(-not $script:Remote){if(-not (Initialize-DiskRemote)){return $false}}
+    if(-not $script:RemoteState){if(-not (Initialize-DiskRemote)){return $false}}
     return (Step-DiskEngine)
 }
 function Get-DiskCurl { Join-Path $env:SystemRoot 'System32\curl.exe' }
 function Get-DiskPartSize {
-    if(Test-Path -LiteralPath $script:Install.part){return [long](Get-Item -LiteralPath $script:Install.part).Length}
+    if(Test-Path -LiteralPath $script:EngineInstall.part){return [long](Get-Item -LiteralPath $script:EngineInstall.part).Length}
     return [long]0
 }
 function Set-DiskInstallStatus {
-    $i=$script:Install;$size=Get-DiskPartSize
+    $i=$script:EngineInstall;$size=Get-DiskPartSize
     $route='напрямую';if($i.route -eq 'server'){$route='через сервер'}
     $culture=[Globalization.CultureInfo]::GetCultureInfo('ru-RU')
     if(-not $script:LastInitError){
@@ -437,7 +443,7 @@ function Set-DiskInstallStatus {
     }
 }
 function Set-DiskEngineFallback([string]$Reason) {
-    $script:Install.route='server';$script:Install.prepared=$false
+    $script:EngineInstall.route='server';$script:EngineInstall.prepared=$false
     Write-DiskLog 'engine.download.fallback' $Reason
     Write-DiskLog 'engine.download.start' 'path=server'
 }
@@ -477,7 +483,7 @@ function Expand-DiskEngineArchive([string]$Archive,[string]$Binary) {
     }
 }
 function Test-DiskEngineArchive {
-    $i=$script:Install
+    $i=$script:EngineInstall
     if((Get-DiskPartSize) -ne $i.size){return $false}
     if((Get-DiskFileSha256 $i.part) -ne $i.hash){
         Remove-Item -LiteralPath $i.part -Force
@@ -489,16 +495,16 @@ function Test-DiskEngineArchive {
 }
 function Step-DiskEngine {
     $binary=Join-Path $script:DiskHome 'bin\syncthing.exe'
-    if((Test-Path -LiteralPath $binary) -and (-not $script:Install -or -not $script:Install.job)){
+    if((Test-Path -LiteralPath $binary) -and (-not $script:EngineInstall -or -not $script:EngineInstall.job)){
         Initialize-DiskLocal
-        $script:Install=$null
+        $script:EngineInstall=$null
         return $true
     }
-    if(-not $script:Install){
-        $script:Install=@{part=(Join-Path $script:DiskHome 'syncthing.zip.part');size=14281765L;hash='3CE7DA770F546A8D02B65B2E7EE31F2A3B8B7C3F990EDE045590CCA4172ECFE1';route='direct';job=$null;failures=0;before=0L;prepared=$false;offset=0L;length=0;started=[DateTime]::UtcNow;progress=[DateTime]::UtcNow;bytes=0L}
+    if(-not $script:EngineInstall){
+        $script:EngineInstall=@{part=(Join-Path $script:DiskHome 'syncthing.zip.part');size=14281765L;hash='3CE7DA770F546A8D02B65B2E7EE31F2A3B8B7C3F990EDE045590CCA4172ECFE1';route='direct';job=$null;failures=0;before=0L;prepared=$false;offset=0L;length=0;started=[DateTime]::UtcNow;progress=[DateTime]::UtcNow;bytes=0L}
         Write-DiskLog 'engine.download.start' 'path=direct'
     }
-    $i=$script:Install
+    $i=$script:EngineInstall
     Set-DiskInstallStatus
     if($i.job){
         if(-not $i.job.p.HasExited -or -not $i.job.out.IsCompleted -or -not $i.job.err.IsCompleted){return $false}
@@ -537,7 +543,7 @@ function Step-DiskEngine {
         Expand-DiskEngineArchive $zip $binary
         Initialize-DiskLocal
         Write-DiskLog 'engine.download.done' ('path='+$i.route) ([long]([DateTime]::UtcNow-$i.started).TotalMilliseconds)
-        $script:Install=$null
+        $script:EngineInstall=$null
         return $true
     }
     if((Get-DiskPartSize) -gt $i.size){Remove-Item -LiteralPath $i.part -Force;Write-DiskLog 'engine.hash.error' 'Oversized partial archive removed'}
@@ -561,11 +567,11 @@ function Step-DiskEngine {
     return $false
 }
 function Stop-DiskInstall {
-    $jobs=@($script:RemoteInstall);if($script:Install){$jobs+=@($script:Install.job)}
+    $jobs=@($script:RemoteInstall);if($script:EngineInstall){$jobs+=@($script:EngineInstall.job)}
     foreach($j in $jobs){if($j -and -not $j.p.HasExited){try{$j.p.Kill()}catch{}}}
 }
 function Start-DiskTunnel {
-    $c=$script:Config;$r=$script:Remote
+    $c=$script:Config;$r=$script:RemoteState
     if($c.deviceName -notmatch '^[A-Za-z0-9_-]{1,128}$'){throw 'Invalid device name in config.json'}
     $portInfo=ConvertFrom-Json -InputObject (Complete-DiskSsh (Start-DiskSsh ('bash "$HOME/.local/share/remote-disk/server-disk.sh" device-port '+$c.deviceName)))
     $r.reverse=$portInfo.reverse
@@ -580,7 +586,7 @@ function Connect-DiskDevices {
     $script:Config|Add-Member -NotePropertyName serverId -NotePropertyValue $script:PeerId -Force;Save-DiskConfig
     foreach($side in @('local','remote')){
         $id=$script:PeerId;$port=$script:Config.forward
-        if($side -eq 'remote'){$id=$script:LocalId;$port=$script:Remote.reverse}
+        if($side -eq 'remote'){$id=$script:LocalId;$port=$script:RemoteState.reverse}
         [void](Invoke-DiskApi $side "config/devices/$id" 'PUT' @{deviceID=$id;name='RemoteDisk';addresses=@("tcp://127.0.0.1:$port");autoAcceptFolders=$false})
     }
     foreach($folder in $script:Config.folders){[void](Invoke-DiskApi local ('config/folders/'+$folder.id) PATCH @{versioning=@{type=''}});[void](Invoke-DiskApi remote ('config/folders/'+$folder.id) PATCH @{versioning=@{type=''}});Add-DiskGitExclude $folder.path;[void](Invoke-DiskServer 'exclude' @{name=(Get-DiskFolderName $folder)})}
@@ -679,7 +685,7 @@ function Set-DiskContext([bool]$Enabled) {
         if(Test-Path $base){Get-ChildItem $base|Where-Object {$_.PSChildName -like 'RemoteDisk*'}|Remove-Item -Recurse -Force}
     }
     if($Enabled){
-        $actions=@(@('add','Синхронизировать с сервером','Directory'))
+        $actions=,@('add','Синхронизировать с сервером','Directory')
         foreach($f in $script:Config.folders){
             foreach($a in @(@('show','Показать статус'),@('pause','Приостановить'),@('resume','Возобновить'),@('disconnect','Отключить с сохранением файлов'),@('exclude','Исключить'),@('include','Вернуть'))){
                 if(($a[0] -eq 'pause' -and $f.paused) -or ($a[0] -eq 'resume' -and -not $f.paused)){continue}
@@ -732,9 +738,9 @@ function Update-DiskState {
         }
         return
     }
-    if($script:Install){Set-DiskInstallStatus;return}
+    if($script:EngineInstall){Set-DiskInstallStatus;return}
     foreach($f in $script:Config.folders){
-        if($f.paused -and $f.resumeAt -and [DateTime]::Parse($f.resumeAt).ToUniversalTime() -le [DateTime]::UtcNow){Set-DiskPause $f 0}
+        if($f.paused -and $f.resumeAt -and ([DateTime]$f.resumeAt).ToUniversalTime() -le [DateTime]::UtcNow){Set-DiskPause $f 0}
     }
     if($script:Safety){Step-DiskConflictScan}
     $rows=@(Get-DiskSnapshot)
@@ -770,7 +776,7 @@ function Initialize-DiskRuntime {
     $script:HostName=[regex]::Replace([string]$env:COMPUTERNAME,'[^A-Za-z0-9_-]','_')
     if(-not $script:HostName){$script:HostName='device'}
     $script:LogFile=Join-Path $script:DiskHome ('logs/session-'+[guid]::NewGuid().ToString('N')+'.jsonl')
-    $script:LocalKey='';$script:RemoteKey='';$script:Connection=$null;$script:Upload=$null;$script:LogWorker=$null;$script:Install=$null;$script:RemoteInstall=$null
+    $script:LocalKey='';$script:RemoteKey='';$script:Connection=$null;$script:Upload=$null;$script:LogWorker=$null;$script:EngineInstall=$null;$script:RemoteInstall=$null
     $script:ConfigFile=Join-Path $script:DiskHome 'config.json'
     Write-DiskLog 'start' ('command='+$Command)
     if(Test-Path -LiteralPath $script:ConfigFile){$script:Config=Get-Content -LiteralPath $script:ConfigFile -Raw -Encoding UTF8|ConvertFrom-Json}else{
@@ -806,7 +812,7 @@ function Send-DiskRequest($Request) {
 }
 function Invoke-DiskHeadlessAdd {
     # A running app owns its config and tunnel; ask it to perform the same operation.
-    $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;$script:PipeName='RemoteDisk-'+$sid
+    $sid=(Get-DiskAclIdentity).User.Value;$script:PipeName='RemoteDisk-'+$sid
     $created=$false;$lock=New-Object Threading.Mutex($true,('Local\'+$script:PipeName),[ref]$created)
     try{
         if(-not $created){Send-DiskRequest @{command='add';path=$Path;remote=$Remote;merge=[bool]$Merge};return}
@@ -820,7 +826,7 @@ function Invoke-DiskHeadlessAdd {
         Select-DiskProfile;Save-DiskConfig
         Write-DiskLog 'ssh.login' ('user='+$script:Connection.login)
         Send-DiskLogs -First;Start-DiskLogWorker
-        $script:Remote=$null;$script:RemoteInstall=$null;$script:Install=$null;$script:Tray=$null
+        $script:RemoteState=$null;$script:RemoteInstall=$null;$script:EngineInstall=$null;$script:Tray=$null
         while(-not (Step-DiskInitialization)){Start-Sleep -Milliseconds 150}
         Start-DiskTunnel;Wait-DiskTunnel;Connect-DiskDevices
         Add-DiskFolder $folderPath $Remote ([bool]$Merge)
@@ -845,7 +851,7 @@ function Install-DiskApp {
     $command=Get-DiskLaunchCommand
     New-ItemProperty $key RemoteDisk -Value $command -Force|Out-Null
     # Gracefully stop an earlier copy before starting the installed app.
-    $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;$script:PipeName='RemoteDisk-'+$sid
+    $sid=(Get-DiskAclIdentity).User.Value;$script:PipeName='RemoteDisk-'+$sid
     $existing=$null
     if([Threading.Mutex]::TryOpenExisting(('Local\'+$script:PipeName),[ref]$existing)){
         try{Send-DiskRequest @{command='exit';path=''};if(-not $existing.WaitOne(10000)){throw 'RemoteDisk is still shutting down'};$existing.ReleaseMutex()}finally{$existing.Dispose()}
@@ -886,7 +892,7 @@ function Invoke-DiskUnlock([string]$RemoteName='') {
     if(-not $folders.Count){throw 'Нет подключённых папок для разблокировки'}
     Request-DiskUnlock $script:DiskHome $folders
     $jobs=@()
-    $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;$script:PipeName='RemoteDisk-'+$sid
+    $sid=(Get-DiskAclIdentity).User.Value;$script:PipeName='RemoteDisk-'+$sid
     $existing=$null
     if([Threading.Mutex]::TryOpenExisting(('Local\'+$script:PipeName),[ref]$existing)){
         try{Send-DiskRequest @{command='unlock';path='';remote=$RemoteName}}finally{$existing.Dispose()}
@@ -955,7 +961,7 @@ function Step-DiskServerJobs($Rows) {
     $script:ServerJob=@{action=$action;ssh=(Start-DiskSsh $cmd)};$script:NextServerList=[DateTime]::UtcNow.AddSeconds(30)
 }
 function Start-DiskApp {
-    $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $sid=(Get-DiskAclIdentity).User.Value
     $script:PipeName='RemoteDisk-'+$sid
     $created=$false;$script:Mutex=New-Object Threading.Mutex($true,('Local\'+$script:PipeName),[ref]$created)
     if(-not $created){
@@ -978,8 +984,8 @@ function Start-DiskApp {
     foreach($log in Get-ChildItem (Join-Path $script:DiskHome 'logs') -Filter 'session-*.jsonl'){
         if($log.FullName -ne $script:LogFile){Move-Item $log.FullName (Join-Path $script:Queue ($log.Name)) -Force}
     }
-    $script:Install=$null;$script:RemoteInstall=$null
-    $script:Tunnel=$null;$script:Engine=$null;$script:Remote=$null;$script:PeerId='';$script:PreviousState='';$script:LastInitError='';$script:LastStatus='Нет подключения'
+    $script:EngineInstall=$null;$script:RemoteInstall=$null
+    $script:Tunnel=$null;$script:Engine=$null;$script:RemoteState=$null;$script:PeerId='';$script:PreviousState='';$script:LastInitError='';$script:LastStatus='Нет подключения'
     $script:Tray=New-Object Windows.Forms.NotifyIcon;$script:Tray.Icon=New-DiskIcon offline;$script:Tray.Text='RemoteDisk: нет подключения';$script:Tray.Visible=$true
     $menu=New-Object Windows.Forms.ContextMenuStrip
     $script:FolderMenu=Add-DiskMenu $menu 'Папки' {}
@@ -1025,7 +1031,7 @@ function Start-DiskApp {
                 }
                 $reader.Dispose();$script:Pipe.Dispose();New-DiskPipe
             }
-            if($script:Tunnel -and $script:Tunnel.p.HasExited){try{[void](Complete-DiskSsh $script:Tunnel 1)}catch{};$script:Tunnel=$null;$script:Remote=$null;$script:Retry=$now.AddSeconds(5)}
+            if($script:Tunnel -and $script:Tunnel.p.HasExited){try{[void](Complete-DiskSsh $script:Tunnel 1)}catch{};$script:Tunnel=$null;$script:RemoteState=$null;$script:Retry=$now.AddSeconds(5)}
             if(-not $script:Tunnel -and $now -ge $script:Retry){
                 $script:Retry=$now.AddSeconds(30)
                 try{
@@ -1039,7 +1045,7 @@ function Start-DiskApp {
                     Wait-DiskTunnel;Connect-DiskDevices
                     $script:LastInitError=''
                     if($Command -eq 'add' -and $Path){Invoke-DiskCommand @{command='add';path=$Path};$Command='show'}
-                }catch{$script:LastInitError=Protect-DiskText $_.Exception.Message;$script:LastStatus='Ошибка запуска: '+$script:LastInitError;$script:Remote=$null;Write-DiskLog 'initialize.error' ($_.Exception.GetType().Name+': '+$_.Exception.Message);if($script:Tunnel){try{$script:Tunnel.p.Kill()}catch{};$script:Tunnel=$null}}
+                }catch{$script:LastInitError=Protect-DiskText $_.Exception.Message;$script:LastStatus='Ошибка запуска: '+$script:LastInitError;$script:RemoteState=$null;Write-DiskLog 'initialize.error' ($_.Exception.GetType().Name+': '+$_.Exception.Message);if($script:Tunnel){try{$script:Tunnel.p.Kill()}catch{};$script:Tunnel=$null}}
             }
             Complete-DiskDisconnects
             Update-DiskState
@@ -1063,7 +1069,7 @@ if(-not $LibraryOnly){
         if($Command -eq 'unlock'){Invoke-DiskUnlock $Remote;return}
         if($Uninstall){
             Remove-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' RemoteDisk -ErrorAction SilentlyContinue
-            $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;$script:PipeName='RemoteDisk-'+$sid
+            $sid=(Get-DiskAclIdentity).User.Value;$script:PipeName='RemoteDisk-'+$sid
             $existing=$null
             if([Threading.Mutex]::TryOpenExisting(('Local\'+$script:PipeName),[ref]$existing)){try{Send-DiskRequest @{command='context-off';path=''};Send-DiskRequest @{command='exit-unlock';path=''};if(-not $existing.WaitOne(30000)){throw 'RemoteDisk is still unlocking'};$existing.ReleaseMutex()}finally{$existing.Dispose()}}else{Set-DiskContext $false}
             if(@($script:Config.folders).Count){Invoke-DiskUnlock};Write-DiskLog 'uninstall';return

@@ -104,8 +104,21 @@ class DiskFixture(m.Fixture):
             if winner=='server-edited':
                 (server['workspace']/name).write_text('canonical-server-bytes')
                 self.scan(server)
-            result=subprocess.run(['bash',str(HERE/'server-disk.sh'),'resolve',data],env=server['env'],capture_output=True,text=True,check=True,timeout=30)
-            actions=json.loads(result.stdout)['actions']
+            resolved={}
+            retryable=('Conflict provenance not yet indexed; retry','Server edit not yet indexed; retry','Server file changed during conflict resolution; retry')
+            def resolve_indexed():
+                result=subprocess.run(['bash',str(HERE/'server-disk.sh'),'resolve',data],env=server['env'],capture_output=True,text=True,timeout=30)
+                if result.returncode==0:
+                    resolved['actions']=json.loads(result.stdout)['actions'];return True
+                diagnostic=result.stderr
+                for side in self.sides:diagnostic=diagnostic.replace(side['key'],'[redacted]')
+                resolved['error']=diagnostic[-1500:]
+                # Production also retries these explicit safety refusals on its next tick.
+                m.require(any(reason in diagnostic for reason in retryable),'resolver failed: '+resolved['error'])
+                return False
+            try:self.wait(resolve_indexed,'resolver waits for indexed, unchanged files',limit=60)
+            except AssertionError as exc:raise AssertionError(str(exc)+' '+resolved.get('error','')) from exc
+            actions=resolved['actions']
             expected_action='discard-client' if winner=='server' else ('discard-obsolete-server' if winner=='server-edited' else 'restore-server')
             m.require(actions and all(x['action']==expected_action for x in actions),'wrong conflict resolution action')
             self.scan();self.wait(lambda:self.both(name,'canonical-server-bytes') and all(not list(s['workspace'].glob('*.sync-conflict-*')) for s in self.sides) and self.settled(),'canonical server convergence',limit=180)

@@ -51,7 +51,7 @@ try{
             try{
                 if($tunnelId -ne $channel.tunnelPid -or $tunnelStarted -ne $channel.tunnelStarted){
                     if($tunnel){$tunnel.Dispose()};$tunnel=[Diagnostics.Process]::GetProcessById($channel.tunnelPid)
-                    if($tunnel.StartTime.ToUniversalTime().ToString('o') -ne $channel.tunnelStarted){throw 'Tunnel PID reused'}
+                    if(-not (Test-DiskProcessStart $tunnel.StartTime $channel.tunnelStarted)){throw 'Tunnel PID reused'}
                     [DiskSafetySignals]::Watch($tunnel);$tunnelId=$channel.tunnelPid;$tunnelStarted=$channel.tunnelStarted
                 }
                 $alive=-not $tunnel.HasExited
@@ -60,8 +60,8 @@ try{
                     $p=$con.connections.PSObject.Properties[$channel.serverId];$localConnected=$null -ne $p -and $p.Value.connected
                     if($localConnected){
                         $script:RemoteKey=$channel.remoteKey
-                        $remote=Invoke-DiskApi remote 'system/connections';$status=Invoke-DiskApi remote 'system/status'
-                        $p=$remote.connections.PSObject.Properties[$channel.localId]
+                        $remoteConnections=Invoke-DiskApi remote 'system/connections';$status=Invoke-DiskApi remote 'system/status'
+                        $p=$remoteConnections.connections.PSObject.Properties[$channel.localId]
                         $remoteConfirmed=$status.myID -eq $channel.serverId -and $null -ne $p -and $p.Value.connected
                     }
                 }
