@@ -4,11 +4,13 @@ import hashlib
 import json
 import os
 import pwd
+import re
 from pathlib import Path
 import socket
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 import server_node_catalog as catalog
 
@@ -164,5 +166,45 @@ if(!$c.control_only -or !$c.enforce_target -or $c.project_id -ne 'control' -or $
             self.assertEqual(result['profile']['hostId'],'host-one');self.assertEqual(result['profile']['port'],2222)
             self.assertEqual(result['label'],'win-'+hashlib.sha256(b'control/host-one').hexdigest()[:28]);self.assertNotIn('ClearAllForwardings',json.dumps(result['arguments']))
             self.assertEqual(result['arguments'][-2: ],['tester@example.invalid','bash -s'])
+
+    def test_supervisor_helpers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            script=f"""
+. './Start-WindowsControl.ps1' -LibraryOnly
+$log='{tmp}/control.log';[IO.File]::WriteAllBytes($log,(New-Object byte[] 1048577))
+Write-ControlLog $log 'after rotation'
+$config='{tmp}/config.json';Save-ControlConfig $config 'agent' '/p/профиль.json';$read=Read-ControlConfig $config
+$missing=Read-ControlConfig '{tmp}/none.json'
+$first=New-Object Threading.Mutex($false,'control-test-{os.getpid()}')
+$held=Test-ControlLock $first
+@{{old=(Test-Path ($log+'.old'));text=(Get-Content $log -Raw);user=$read.agentUser;profile=$read.profile;empty=$missing.profile;held=$held}}|ConvertTo-Json
+"""
+            result=json.loads(subprocess.check_output([str(PWSH),'-NoProfile','-Command',script],cwd=ROOT,env=dict(os.environ,HOME=tmp)))
+            self.assertTrue(result['old']);self.assertIn('after rotation',result['text']);self.assertLess(len(result['text']),100)
+            self.assertEqual((result['user'],result['profile'],result['empty']),('agent','/p/профиль.json',''));self.assertTrue(result['held'])
+
+    def test_install_copies_all_dependencies(self):
+        source=(ROOT/'Start-WindowsControl.ps1').read_text(encoding='utf-8-sig')
+        names=re.search(r"foreach\(\$name in @\(([^)]*)\)\)",source).group(1)
+        for name in ('Start-WindowsControl.ps1','Start-CodexWindowsBridge.ps1','windows-bridge-executor.ps1','Windows.Paths.ps1','server-control.sh','codex-windows-bridge.py','codex-bridge-session.py','server_node_catalog.py'):
+            self.assertIn("'"+name+"'",names);self.assertTrue((ROOT/name).exists(),name)
+
+    def test_bridge_survives_five_failures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home=Path(tmp);bin_dir=home/'bin';bin_dir.mkdir();count=home/'count';log=home/'control.log'
+            for name in ('key','known','config'):(home/name).write_text('x')
+            shim=bin_dir/'powershell.exe';shim.write_text('#!/bin/sh\nexec "'+str(PWSH)+'" "$@"\n');shim.chmod(0o755)
+            ssh=bin_dir/'ssh-fail';ssh.write_text('#!/bin/sh\necho x >> "'+str(count)+'"\necho denied >&2\nexit 255\n');ssh.chmod(0o755)
+            stage=home/'stage';stage.mkdir();(stage/'Start-CodexWindowsBridge.ps1').write_bytes((ROOT/'Start-CodexWindowsBridge.ps1').read_bytes())
+            (stage/'windows-bridge-executor.ps1').write_text('[void][Console]::In.ReadLine();[Console]::Out.WriteLine(\'{"state":"ready","port":1}\');[Console]::Out.Flush();Start-Sleep 120')
+            process=subprocess.Popen([str(PWSH),'-NoProfile','-File',str(stage/'Start-CodexWindowsBridge.ps1'),'-VPSHost','example.invalid','-VPSUser','tester','-IdentityFile',str(home/'key'),'-KnownHostsFile',str(home/'known'),'-SSHConfig',str(home/'config'),'-SSHExecutable',str(ssh),'-Workspace',tmp,'-SocketPath','/tmp/none.sock','-ProjectId','control','-HostId','host-one','-ControlOnly','-RetryForever','-LogFile',str(log)],cwd=ROOT,env=dict(os.environ,HOME=tmp,PATH=str(bin_dir)+os.pathsep+os.environ['PATH']),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            try:
+                deadline=time.time()+90
+                while time.time()<deadline and process.poll() is None and (not count.exists() or len(count.read_text().split())<7):time.sleep(0.5)
+                self.assertIsNone(process.poll(),'bridge must keep retrying')
+                self.assertGreaterEqual(len(count.read_text().split()),7)
+                self.assertIn('bridge.disconnected',log.read_text())
+            finally:
+                process.kill();process.wait()
 
 if __name__=='__main__': unittest.main(verbosity=2)

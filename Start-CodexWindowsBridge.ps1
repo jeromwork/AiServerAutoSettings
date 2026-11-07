@@ -20,7 +20,9 @@ param(
     [string]$SyncDataDir,
     [ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$')][string]$ProjectId,
     [ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$')][string]$HostId,
-    [switch]$ManagedSession
+    [switch]$ManagedSession,
+    [switch]$RetryForever,
+    [string]$LogFile
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
@@ -47,6 +49,7 @@ public static class BridgeManagedControl {
 }
 function Is-Stopping { return $ManagedSession -and [BridgeManagedControl]::StopRequested }
 function Write-BridgeStatus([string]$state, [string]$message) {
+    if ($LogFile) { try { [IO.File]::AppendAllText($LogFile, ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' bridge.' + $state + ' ' + $message + "`r`n")) } catch { } }
     if ($ManagedSession) { [Console]::WriteLine((@{state=$state;device=$DeviceLabel;message=$message} | ConvertTo-Json -Compress)) }
     else { Write-Host $message }
 }
@@ -155,8 +158,8 @@ try {
                 Write-BridgeStatus 'disconnected' ('Bridge disconnected. ' + $detail)
             }
         } finally { Stop-PrivateProcess $ssh; $ssh = $null }
-        if ($attempt -ge 5 -and -not (Is-Stopping)) { throw 'Bridge failed five times. Check uploaded bridge files, remote user, verified host key and SSH forwarding permissions.' }
-        if (-not $executor.HasExited -and -not (Is-Stopping)) { Start-Sleep -Seconds ([Math]::Min(10, 2 + $attempt)) }
+        if ($attempt -ge 5 -and -not $RetryForever -and -not (Is-Stopping)) { throw 'Bridge failed five times. Check uploaded bridge files, remote user, verified host key and SSH forwarding permissions.' }
+        if (-not $executor.HasExited -and -not (Is-Stopping)) { Start-Sleep -Seconds ([Math]::Min($(if ($RetryForever) { 30 } else { 10 }), 2 + $attempt)) }
     }
     if (-not (Is-Stopping)) { throw 'Windows executor stopped.' }
 } finally {

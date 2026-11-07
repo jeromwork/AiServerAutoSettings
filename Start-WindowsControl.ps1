@@ -1,5 +1,5 @@
 ﻿[CmdletBinding()]
-param([string]$Profile,[string]$AgentUser,[switch]$LibraryOnly)
+param([string]$Profile,[string]$AgentUser,[switch]$LibraryOnly,[switch]$Install,[switch]$Uninstall)
 $ErrorActionPreference='Stop'
 function Convert-ControlLF([string]$Text) { $Text.Replace("`r`n","`n").Replace("`r","`n") }
 function Quote-ControlNative([string]$Text) { '"'+([regex]::Replace([regex]::Replace($Text,'(\\*)"','$1$1\"'),'(\\+)$','$1$1'))+'"' }
@@ -15,7 +15,7 @@ function Read-ControlProfile([string]$Path) {
         }
     }
     $source=Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
-    $result=@{hostId=(Split-Path (Split-Path ([IO.Path]::GetFullPath($Path)) -Parent) -Leaf);port=22}
+    $result=@{hostId=(Split-Path (Split-Path ([IO.Path]::GetFullPath($Path)) -Parent) -Leaf);port=22;profilePath=[IO.Path]::GetFullPath($Path)}
     foreach($field in @('sshExecutable','serverAddress','login','keyPath','knownHostsPath','configPath')) {
         if(-not $source.PSObject.Properties[$field] -or -not $source.$field){throw "В профиле отсутствует $field"}
         $result[$field]=[string]$source.$field
@@ -66,23 +66,89 @@ function Invoke-ControlPrepare($Connection,[string]$Payload) {
         $last | ConvertFrom-Json
     } finally {$p.Dispose()}
 }
+function Write-ControlLog([string]$Path,[string]$Message) {
+    try {
+        if((Test-Path -LiteralPath $Path) -and (Get-Item -LiteralPath $Path).Length -gt 1048576){Move-Item -LiteralPath $Path -Destination ($Path+'.old') -Force}
+        [IO.File]::AppendAllText($Path,((Get-Date -Format 'yyyy-MM-dd HH:mm:ss')+' '+$Message+"`r`n"))
+    } catch {}
+}
+function Read-ControlConfig([string]$Path) {
+    if(Test-Path -LiteralPath $Path){Get-Content -LiteralPath $Path -Raw|ConvertFrom-Json}else{[pscustomobject]@{agentUser='';profile=''}}
+}
+function Save-ControlConfig([string]$Path,[string]$User,[string]$ProfilePath) {
+    @{schema=1;agentUser=$User;profile=$ProfilePath}|ConvertTo-Json|Set-Content -LiteralPath $Path -Encoding UTF8
+}
+function Test-ControlLock($Lock) {
+    try {$Lock.WaitOne(0)} catch [Threading.AbandonedMutexException] {$true}
+}
+function Stop-ControlInstance([string]$PidFile) {
+    if(-not (Test-Path -LiteralPath $PidFile)){return}
+    $id=0
+    if([int]::TryParse((Get-Content -LiteralPath $PidFile -Raw).Trim(),[ref]$id)){
+        $found=Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction SilentlyContinue
+        if($found -and [string]$found.CommandLine -match 'Start-WindowsControl\.ps1'){& taskkill.exe /T /F /PID $id *> $null}
+    }
+    Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
+}
 if($LibraryOnly){return}
-$transcript=$false
-try {
-    $base=Join-Path $env:LOCALAPPDATA 'RemoteAgents/control'
-    $workspace=Join-Path $base 'workspace';$logs=Join-Path $base 'logs'
-    [void][IO.Directory]::CreateDirectory($workspace);[void][IO.Directory]::CreateDirectory($logs)
-    Start-Transcript -Path (Join-Path $logs ('control-'+(Get-Date -Format 'yyyyMMdd-HHmmss-fff')+'.log')) | Out-Null;$transcript=$true
-    Write-Host 'Чтение SSH-профиля'
+$base=Join-Path $env:LOCALAPPDATA 'RemoteAgents/control'
+$workspace=Join-Path $base 'workspace';$logs=Join-Path $base 'logs';$app=Join-Path $base 'app'
+[void][IO.Directory]::CreateDirectory($workspace);[void][IO.Directory]::CreateDirectory($logs)
+$logFile=Join-Path $logs 'control.log';$pidFile=Join-Path $base 'control.pid';$configPath=Join-Path $base 'config.json'
+$runKey='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+if($Uninstall){
+    Remove-ItemProperty -Path $runKey -Name RemoteAgentsControl -ErrorAction SilentlyContinue
+    Stop-ControlInstance $pidFile
+    Write-ControlLog $logFile 'uninstall'
+    Write-Host 'Автозапуск снят, мост остановлен.'
+    return
+}
+if($Install){
+    $config=Read-ControlConfig $configPath
+    if(-not $Profile){$Profile=$config.profile}
+    if(-not $AgentUser){$AgentUser=$config.agentUser}
     $connection=Read-ControlProfile $Profile
-    Write-Host ('Профиль: '+$connection.hostId)
-    $configPath=Join-Path $base 'config.json'
-    if(-not $AgentUser -and (Test-Path -LiteralPath $configPath)){$AgentUser=(Get-Content -LiteralPath $configPath -Raw|ConvertFrom-Json).agentUser}
-    $label=Get-ControlLabel $connection.hostId
-    Write-Host 'Подготовка сервера'
-    $remote=Invoke-ControlPrepare $connection (New-ControlPayload $connection $label $workspace $AgentUser)
-    if($remote.user -cnotmatch '^[a-z_][a-z0-9_-]*$' -or $remote.home -cnotmatch '^(/[a-zA-Z0-9._-]+)+$'){throw 'Сервер вернул неверного пользователя или HOME'}
-    @{schema=1;agentUser=$remote.user}|ConvertTo-Json|Set-Content -LiteralPath $configPath -Encoding UTF8
-    Write-Host 'Подключение моста: команды агентов выполняются с вашими правами Windows, Ctrl+C отключает.'
-    & (Join-Path $PSScriptRoot 'Start-CodexWindowsBridge.ps1') -VPSHost $connection.serverAddress -VPSUser $connection.login -IdentityFile $connection.keyPath -SSHPort $connection.port -SSHExecutable $connection.sshExecutable -SSHConfig $connection.configPath -KnownHostsFile $connection.knownHostsPath -ServerUser $remote.user -RemoteBase ($remote.home+'/.local/share/codex-remote') -SocketPath ($remote.home+'/.local/state/codex-remote/'+$label+'.sock') -Workspace $workspace -DeviceLabel $label -ProjectId control -HostId $connection.hostId -AllowShell -ControlOnly
-} catch {Write-Host ('Ошибка: '+$_.Exception.Message);throw} finally {if($transcript){Stop-Transcript|Out-Null}}
+    Save-ControlConfig $configPath $AgentUser $connection.profilePath
+    [void][IO.Directory]::CreateDirectory($app)
+    foreach($name in @('Start-WindowsControl.ps1','Start-CodexWindowsBridge.ps1','windows-bridge-executor.ps1','Windows.Paths.ps1','server-control.sh','codex-windows-bridge.py','codex-bridge-session.py','server_node_catalog.py')){
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $app $name) -Force
+    }
+    Stop-ControlInstance $pidFile
+    $command='powershell.exe -NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "'+(Join-Path $app 'Start-WindowsControl.ps1')+'"'
+    Set-ItemProperty -Path $runKey -Name RemoteAgentsControl -Value $command
+    $mark=(Get-Date).AddSeconds(-1)
+    $started=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$command}
+    if($started.ReturnValue -ne 0){throw ('Не удалось запустить мост: '+$started.ReturnValue)}
+    Write-ControlLog $logFile 'install'
+    Write-Host 'Мост установлен: работает без окна и запускается при входе в Windows.'
+    Write-Host ('Журнал: '+$logFile)
+    for($i=0;$i -lt 45;$i++){
+        Start-Sleep -Seconds 1
+        if((Test-Path -LiteralPath $logFile) -and (Get-Item -LiteralPath $logFile).LastWriteTime -gt $mark -and ((Get-Content -LiteralPath $logFile -Tail 3) -join ' ') -match 'bridge\.connected'){Write-Host 'Связь с сервером есть.';return}
+    }
+    Write-Host 'Связь пока не установилась, мост продолжает попытки. Смотрите журнал.'
+    return
+}
+$lock=New-Object Threading.Mutex($false,'Local\RemoteAgentsControl')
+if(-not (Test-ControlLock $lock)){Write-ControlLog $logFile 'already running';return}
+Set-Content -LiteralPath $pidFile -Value $PID -Encoding ASCII
+Write-ControlLog $logFile ('start pid='+$PID)
+while($true){
+    try {
+        $config=Read-ControlConfig $configPath
+        $connection=Read-ControlProfile $(if($Profile){$Profile}else{$config.profile})
+        $user=$(if($AgentUser){$AgentUser}else{$config.agentUser})
+        $label=Get-ControlLabel $connection.hostId
+        Write-ControlLog $logFile 'prepare server'
+        $remote=Invoke-ControlPrepare $connection (New-ControlPayload $connection $label $workspace $user)
+        if($remote.user -cnotmatch '^[a-z_][a-z0-9_-]*$' -or $remote.home -cnotmatch '^(/[a-zA-Z0-9._-]+)+$'){throw 'Сервер вернул неверного пользователя или HOME'}
+        Save-ControlConfig $configPath $remote.user $connection.profilePath
+        Write-Host 'Подключение моста: команды агентов выполняются с вашими правами Windows.'
+        & (Join-Path $PSScriptRoot 'Start-CodexWindowsBridge.ps1') -VPSHost $connection.serverAddress -VPSUser $connection.login -IdentityFile $connection.keyPath -SSHPort $connection.port -SSHExecutable $connection.sshExecutable -SSHConfig $connection.configPath -KnownHostsFile $connection.knownHostsPath -ServerUser $remote.user -RemoteBase ($remote.home+'/.local/share/codex-remote') -SocketPath ($remote.home+'/.local/state/codex-remote/'+$label+'.sock') -Workspace $workspace -DeviceLabel $label -ProjectId control -HostId $connection.hostId -AllowShell -ControlOnly -RetryForever -LogFile $logFile
+        Write-ControlLog $logFile 'bridge returned'
+    } catch {
+        Write-Host ('Ошибка: '+$_.Exception.Message)
+        Write-ControlLog $logFile ('error '+$_.Exception.Message)
+    }
+    Start-Sleep -Seconds 15
+}
