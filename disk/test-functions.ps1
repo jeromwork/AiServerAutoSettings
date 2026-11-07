@@ -15,9 +15,9 @@ Assert ((Get-DiskRelative '/tmp/root' '/tmp/root/child.txt') -eq 'child.txt') 'r
 $rejected=$false;try{Get-DiskRelative '/tmp/root' '/tmp/root-other/file'}catch{$rejected=$true};Assert $rejected 'escape rejection'
 Assert ((Quote-Native 'a b') -eq '"a b"') 'native quote'
 $f=New-DiskFolder 'id' '/tmp/path' 'local' 'peer'
-Assert ($f.paused -and $f.type -eq 'sendreceive' -and $f.versioning.params.keep -eq '2147483647' -and $f.versioning.params.cleanoutDays -eq '30') 'folder policy'
+Assert ($f.paused -and $f.type -eq 'sendreceive' -and $f.versioning.type -eq '') 'folder policy'
 if($Export){@{folder=$f;ignores=@(Get-DiskIgnores)}|ConvertTo-Json -Depth 20|Set-Content -LiteralPath $Export -Encoding utf8}
-'PASS pure functions: states, retention, redaction, path boundary, quoting'
+'PASS pure functions: states, no-versioning, redaction, path boundary, quoting'
 $temp=Join-Path ([IO.Path]::GetTempPath()) ('disk-functions-'+[guid]::NewGuid().ToString('N'))
 try {
     $script:Queue=Join-Path $temp 'queue';$script:Sent=Join-Path $temp 'sent'
@@ -192,6 +192,7 @@ try {
     function Get-DiskCurl {throw 'download must not start'}
     function Start-DiskTunnel {$script:Tunnels++;$script:Tunnel=@{p=[pscustomobject]@{HasExited=$false}}}
     function Connect-DiskDevices {}
+    function Wait-DiskTunnel {}
     $Command='show';$Path=''
     for($n=0;$n -lt 2;$n++){
         $now=[DateTime]::UtcNow;& $attempt
@@ -290,9 +291,9 @@ try {
     [void](New-Item -ItemType Directory -Path $temp -Force)
     $script:LogFile=Join-Path $temp 'config.jsonl';$script:HostName='test'
     $script:LocalKey='';$script:RemoteKey=''
-    $archive='/tmp/sync-eval.hGIBPT/syncthing-linux-amd64-v2.1.7.tar.gz'
+    $archive=[string]$env:REMOTE_DISK_TEST_ARCHIVE
     $configPath=Join-Path $temp 'config.xml'
-    if(Test-Path -LiteralPath $archive){
+    if($archive -and (Test-Path -LiteralPath $archive)){
         & tar -xzf $archive -C $temp
         Assert ($LASTEXITCODE -eq 0) 'fixture extraction'
         & (Join-Path $temp 'syncthing-linux-amd64-v2.1.7/syncthing') generate --home $temp --no-port-probing *> $null
@@ -320,7 +321,7 @@ try {
     foreach($password in $exact.SelectNodes('//encryptionPassword')){
         Assert ($password.InnerText -ceq '') 'generated encryptionPassword strictly empty'
     }
-    if(Test-Path -LiteralPath $archive){
+    if($archive -and (Test-Path -LiteralPath $archive)){
         & (Join-Path $temp 'syncthing-linux-amd64-v2.1.7/syncthing') generate --home $temp --no-port-probing *> $null
         Assert ($LASTEXITCODE -eq 0) 'real Syncthing parses saved config without starting'
     }
@@ -422,3 +423,165 @@ if(Get-Command ssh -ErrorAction SilentlyContinue){
         'PASS tunnel: actual ssh -G localforward and remoteforward'
     } finally {Remove-Item $temp -Recurse -Force}
 } else {'SKIP tunnel ssh -G: ssh unavailable'}
+
+. $PSScriptRoot/RemoteDisk.ps1 -LibraryOnly
+Assert ((Get-DiskOrigin 'git@code.example:owner/repo.git') -ceq (Get-DiskOrigin 'https://user:access-token@code.example/owner/repo.git?token=hidden#fragment')) 'ssh/https identity'
+Assert ((Get-DiskOrigin 'ssh://git@code.example/owner/repo.git') -ceq 'code.example/owner/repo') 'ssh URL identity'
+Assert ((Protect-DiskText 'https://user:access-token@code.example/owner/repo?auth=hidden') -notmatch 'access-token|hidden|user:') 'URL credentials redacted'
+Assert ((Get-DiskFolderId 'project') -ceq 'disk-afecd539173947f63a62b248') 'stable SHA256 ID'
+foreach($name in @('../x','x/y','x\y','x..y',"x`r`ny",'CON','x.',' x')){$failed=$false;try{[void](Test-DiskName $name)}catch{$failed=$true};Assert $failed ('invalid name '+$name)}
+Assert ((Test-DiskName 'Проект 1') -ceq 'Проект 1') 'Unicode name'
+$db=[pscustomobject]@{state='syncing';needTotalItems=1;pullErrors=1}
+Assert ((Get-DiskStatus $true $false $db $false) -eq 'syncing') 'stale pullErrors during retry is not red'
+Assert ((Get-DiskStatus $true $false $db $true) -eq 'conflict') 'conflict rename has priority'
+$db.state='idle';Assert ((Get-DiskStatus $true $false $db $false) -eq 'error') 'idle pull failure remains error'
+'PASS identity/origin: stable SHA256, strict names, ssh=https, URL credentials redacted; conflict retry has no false error'
+$temp=Join-Path ([IO.Path]::GetTempPath()) ('disk-preflight-'+[guid]::NewGuid().ToString('N'))
+try{
+    [void][IO.Directory]::CreateDirectory($temp)
+    $script:Config=[pscustomobject]@{folders=@();contextMenu=$false};$script:LocalId='local';$script:PeerId='server'
+    $script:RemoteCalls=0
+    function Invoke-DiskServer($Action,$Data){$script:RemoteCalls++;[pscustomobject]@{hasFiles=$true;path='/not-created';id=(Get-DiskFolderId 'project')}}
+    [IO.File]::WriteAllText((Join-Path $temp '.stignore'),'custom')
+    $failed=$false;try{Add-DiskFolder $temp 'project'}catch{$failed=$_.Exception.Message -match 'Existing .stignore'}
+    Assert ($failed -and $script:RemoteCalls -eq 0) 'ignore check before all server calls'
+    [IO.File]::WriteAllLines((Join-Path $temp '.stignore'),@(Get-DiskIgnores))
+    [IO.File]::WriteAllText((Join-Path $temp 'local.txt'),'local')
+    $failed=$false;try{Add-DiskFolder $temp 'project'}catch{$failed=$_.Exception.Message -match '-Merge'}
+    Assert ($failed -and $script:RemoteCalls -eq 1 -and $script:Config.folders.Count -eq 0) 'nonempty refusal does not attach'
+    Assert (@(Get-ChildItem $temp -Force).Count -eq 2) 'nonempty refusal creates no local artifacts'
+    $script:Config.folders=@([pscustomobject]@{id=(Get-DiskFolderId 'project');name='project';path='/already-connected';remotePath='/remote/project'})
+    $failed=$false;try{Add-DiskFolder $temp 'project'}catch{$failed=$_.Exception.Message -match '/already-connected'}
+    Assert ($failed -and $script:RemoteCalls -eq 1) 'duplicate ID reports connected path before server calls'
+    'PASS preflight: own .stignore reusable, foreign ignore before server, nonempty without -Merge unchanged, duplicate ID reports path'
+}finally{Remove-Item -LiteralPath $temp -Recurse -Force}
+
+# The production readiness loop tolerates a port that becomes ready after several polls.
+. $PSScriptRoot/RemoteDisk.ps1 -LibraryOnly
+$script:Tunnel=@{p=[pscustomobject]@{HasExited=$false}};$script:PollCount=0
+function Invoke-DiskApi($Side,$Route){$script:PollCount++;if($script:PollCount -lt 3){throw 'not listening yet'};@{ping='pong'}}
+Wait-DiskTunnel 2
+Assert ($script:PollCount -eq 3) 'short polling waits for readiness'
+$script:Tunnel.p.HasExited=$true;$failed=$false;try{Wait-DiskTunnel 1}catch{$failed=$true};Assert $failed 'exited tunnel refused'
+Assert ((Get-DiskStatusExitCode @([pscustomobject]@{state='offline';serverConnected=$false})) -ne 0) 'offline exit code'
+Assert ((Get-DiskStatusExitCode @()) -ne 0) 'empty selection is not success'
+'PASS tunnel readiness: delayed port polling, exited tunnel refused; offline/empty status exit nonzero'
+
+. $PSScriptRoot/RemoteDisk.ps1 -LibraryOnly
+$temp=Join-Path ([IO.Path]::GetTempPath()) ('disk-git-'+[guid]::NewGuid().ToString('N'))
+try{
+    [void][IO.Directory]::CreateDirectory($temp)
+    Assert ((Get-DiskLocalOrigin $temp) -ceq '') 'plain folder origin is empty'
+    Add-DiskGitExclude $temp
+    Assert (-not (Test-Path (Join-Path $temp 'info'))) 'no git artifacts in plain folder'
+    $repo=Join-Path $temp 'главный repo';[void][IO.Directory]::CreateDirectory($repo)
+    [void](Invoke-DiskGit $repo @('init','-b','main'))
+    [IO.File]::WriteAllText((Join-Path $repo 'tracked.txt'),'base')
+    [void](Invoke-DiskGit $repo @('add','tracked.txt'))
+    [void](Invoke-DiskGit $repo @('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture'))
+    $tree=Join-Path $temp 'work tree'
+    [void](Invoke-DiskGit $repo @('worktree','add','-b','feature',$tree))
+    Assert (Test-Path -LiteralPath (Join-Path $tree '.git') -PathType Leaf) 'real worktree created'
+    $exclude=Invoke-DiskGit $repo @('rev-parse','--git-path','info/exclude')
+    if(-not [IO.Path]::IsPathRooted($exclude)){$exclude=Join-Path $repo $exclude}
+    [IO.File]::AppendAllText($exclude,"`r`n# keep custom`r`ncustom-local`r`n")
+    foreach($folder in @($repo,$tree)){
+        Add-DiskGitExclude $folder;Add-DiskGitExclude $folder
+        foreach($service in @('.stignore','.stfolder','.stversions','sample.sync-conflict-test.txt')){[IO.File]::WriteAllText((Join-Path $folder $service),'service')}
+        Assert ((Invoke-DiskGit $folder @('status','--porcelain','--untracked-files=all')) -ceq '') 'client git clean from service files'
+    }
+    $text=[IO.File]::ReadAllText($exclude)
+    Assert ($text.Contains("# keep custom`r`ncustom-local`r`n")) 'existing exclude bytes preserved'
+    foreach($pattern in @('.stignore','.stfolder','.stversions','*.sync-conflict-*')){Assert (@((Convert-DiskRemoteText $text) -split "`n"|Where-Object {$_ -ceq $pattern}).Count -eq 1) 'exclude idempotent'}
+    'PASS local git: no-git folder, Unicode/spaces, real clone/worktree exclude path, CRLF/custom entries preserved, no duplicates, service files invisible'
+}finally{Remove-Item -LiteralPath $temp -Recurse -Force}
+
+. $PSScriptRoot/RemoteDisk.ps1 -LibraryOnly
+foreach($eventName in @('start','Suspend','Resume','exit')){
+    $plan=Get-DiskSafetyPlan $eventName $true $true $true $true $false
+    Assert ($plan.lock -and $plan.pause) ('fail-closed event '+$eventName)
+}
+$plan=Get-DiskSafetyPlan 'poll' $true $true $true $true $false
+Assert (-not $plan.lock -and -not $plan.pause -and -not $plan.error) 'bilateral proof and verified unlocked ACL permits sync'
+foreach($missing in @('tunnel','local','remote')){
+    $plan=Get-DiskSafetyPlan 'poll' ($missing -ne 'tunnel') ($missing -ne 'local') ($missing -ne 'remote') $true $false
+    Assert ($plan.lock -and $plan.pause) ('lost '+$missing+' must lock and pause')
+}
+$plan=Get-DiskSafetyPlan 'poll' $true $true $true $false $false
+Assert (-not $plan.lock -and $plan.pause) 'unlock must be verified BEFORE engine resume'
+$plan=Get-DiskSafetyPlan 'poll' $true $true $true $true $true
+Assert ($plan.error -and $plan.pause) 'icacls failure is never success'
+# Linux cannot apply NTFS ACL; this shim captures precisely the production process arguments.
+$captured=@(Get-DiskAclArguments '/tmp/local folder/project' '/tmp/state/acl payload')
+Assert (($captured -join '|') -ceq '/tmp/local folder|/restore|/tmp/state/acl payload|/L|/Q') 'exact icacls arguments'
+Assert (@($captured|Where-Object {$_ -in @('/deny','/remove:d','/reset','/grant','/T')}).Count -eq 0) 'no destructive ACL switches or tree-wide replacement'
+$worker=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'Set-DiskAcl.ps1'))
+Assert ($worker -match '65878' -and $worker -match 'CommonAce' -and $worker -match 'GetSddlForm' -and $worker -match 'WaitForExit\(100\)') 'exact write/delete mask, DACL verification, async icacls polling'
+$watch=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'Watch-Disk.ps1'))
+Assert ($watch -match 'PowerModeChanged\+=Power' -and $watch -match 'PowerModes.Suspend' -and $watch -match 'PowerModes.Resume' -and $watch -match 'p.Exited\+=Lost') 'immediate .NET power/tunnel event signals'
+Assert ($watch -match "'versioning'=|versioning=@\{type=''\}" -and $watch -match 'remoteConfirmed') 'safety controls engine writes and requires remote proof'
+'PASS ACL policy: start/connected/lost/Suspend/Resume/icacls-failure/exit; bilateral proof; pause before ACL, verify unlock before resume'
+'PASS ACL arguments (stub): parent | /restore | payload | /L | /Q; no /deny, /remove:d, /reset or /T; mask 65878, disk recovery, DACL verification'
+foreach($f in @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1')){
+    $tokens=$null;$errors=$null;[void][Management.Automation.Language.Parser]::ParseFile($f.FullName,[ref]$tokens,[ref]$errors)
+    Assert ($errors.Count -eq 0) ('parser '+$f.Name)
+}
+'PASS all PowerShell parsers; NTFS ACL application is NOT tested on Linux'
+
+. $PSScriptRoot/RemoteDisk.ps1 -LibraryOnly
+$temp=Join-Path ([IO.Path]::GetTempPath()) ('disk-icacls-'+[guid]::NewGuid().ToString('N'))
+try{
+    [void][IO.Directory]::CreateDirectory($temp)
+    $shim=Join-Path $temp 'icacls-shim'
+    $code=@'
+#!/usr/bin/env python3
+import sys,json
+from pathlib import Path
+Path(__file__).with_suffix('.args').write_text(json.dumps(sys.argv[1:]))
+sys.exit(7 if '--fail' in sys.argv else 0)
+'@
+    [IO.File]::WriteAllText($shim,$code.Replace("`r`n","`n"),(New-Object Text.UTF8Encoding($false)))
+    & chmod +x $shim
+    function Get-DiskIcaclsExecutable {$shim}
+    $job=Start-DiskIcaclsProcess '/tmp/local folder/project' '/tmp/state/acl payload'
+    while(-not $job.p.WaitForExit(50)){}
+    Assert ($job.p.ExitCode -eq 0) 'ACL stub process success'
+    $arguments=Read-DiskJson ([IO.Path]::ChangeExtension($shim,'.args'))
+    Assert (($arguments -join '|') -ceq '/tmp/local folder|/restore|/tmp/state/acl payload|/L|/Q') 'actual launched icacls exact argv and quoting'
+    $job.p.Dispose()
+    $job=Start-DiskIcaclsProcess '/tmp/local folder/project' '--fail'
+    while(-not $job.p.WaitForExit(50)){}
+    Assert ($job.p.ExitCode -eq 7) 'ACL failed exit remains failed'
+    $job.p.Dispose()
+    'PASS icacls process stub: exact argv/space quoting, asynchronous polling, nonzero exit preserved; no NTFS operation performed'
+}finally{Remove-Item -LiteralPath $temp -Recurse -Force}
+
+. $PSScriptRoot/RemoteDisk.ps1 -LibraryOnly
+$temp=Join-Path ([IO.Path]::GetTempPath()) ('disk-background-'+[guid]::NewGuid().ToString('N'))
+try{
+    [void][IO.Directory]::CreateDirectory($temp)
+    $script:DiskHome=$temp;$script:Safety=[pscustomobject]@{HasExited=$false}
+    $script:LocalKey='';$script:RemoteKey=''
+    $script:Config=[pscustomobject]@{serverId='server';folders=@([pscustomobject]@{id='old-random-id';path=$temp;remotePath='/remote/legacy'})}
+    function Invoke-DiskApi($Side,$Route){
+        switch($Route){
+            'system/connections' {[pscustomobject]@{connections=[pscustomobject]@{server=[pscustomobject]@{connected=$true}}}}
+            'config/folders' {[pscustomobject]@{id='old-random-id';paused=$false}}
+            'stats/folder' {[pscustomobject]@{}}
+            'db/status?folder=old-random-id' {[pscustomobject]@{state='idle';stateChanged='fixture';needBytes=0;needFiles=0;needDirectories=0;needDeletes=0;needTotalItems=0;pullErrors=0}}
+            'db/completion?folder=old-random-id&device=server' {[pscustomobject]@{needBytes=0;needItems=0;needDeletes=0;completion=100}}
+            default {throw ('Unexpected API '+$Route)}
+        }
+    }
+    function Get-ChildItem {throw 'The UI must not walk a large tree'}
+    $rows=@(Get-DiskSnapshot)
+    Assert ($rows[0].state -eq 'syncing') 'unknown background scan cannot claim synced'
+    $cache=Join-Path $temp 'conflict-scan.json'
+    Write-DiskJson $cache @{folders=@(@{id='old-random-id';conflict=$false});error=''}
+    $rows=@(Get-DiskSnapshot);Assert ($rows[0].state -eq 'synced') 'verified cache permits synced'
+    Write-DiskJson $cache @{folders=@(@{id='old-random-id';conflict=$true});error=''}
+    $rows=@(Get-DiskSnapshot);Assert ($rows[0].state -eq 'conflict') 'cached conflict visible'
+    Write-DiskJson $cache @{folders=@();error='scan failed'}
+    $rows=@(Get-DiskSnapshot);Assert ($rows[0].state -eq 'error') 'failed background scan is error'
+    'PASS background scan: no UI tree walk, unknown is syncing, verified/conflict/error states; legacy random ID supported'
+}finally{Remove-Item -LiteralPath $temp -Recurse -Force}
