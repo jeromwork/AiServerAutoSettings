@@ -291,3 +291,18 @@ Assert ($forbidden.Count -eq 0) 'no optional PowerShell function calls'
 $functions=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst]},$true)|ForEach-Object {$_.Name})
 $commands=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst]},$true)|ForEach-Object {$_.GetCommandName()}|Where-Object {$_ -and $_ -notin $functions}|Sort-Object -Unique)
 'Commands (excluding file functions): '+($commands -join ', ')
+
+# Exercise actual tunnel argument construction using OpenSSH configuration output.
+. $PSScriptRoot/RemoteDisk.ps1 -LibraryOnly
+if(Get-Command ssh -ErrorAction SilentlyContinue){
+    $temp=Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory $temp)
+    try {
+        $script:LogFile=Join-Path $temp 'test.jsonl';$script:HostName='test'
+        $script:Connection=[pscustomobject]@{sshExecutable=(Get-Command ssh).Source;arguments=@('-F','/dev/null','-o','cLeArAlLfOrWaRdInGs=YeS','example.invalid')}
+        $job=Start-DiskSsh '' '' @('-G','-L','18080:localhost:80','-R','18081:localhost:81')
+        $output=Complete-DiskSsh $job
+        Assert ($output -match '(?m)^localforward ' -and $output -match '(?m)^remoteforward ') 'ssh -G retains both tunnel forwards'
+        'PASS tunnel: actual ssh -G localforward and remoteforward'
+    } finally {Remove-Item $temp -Recurse -Force}
+} else {'SKIP tunnel ssh -G: ssh unavailable'}

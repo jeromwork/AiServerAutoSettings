@@ -77,6 +77,12 @@ function Start-DiskSsh([string]$RemoteCommand,[string]$InputText='', [string[]]$
     $RemoteCommand=Convert-DiskRemoteText $RemoteCommand;$InputText=Convert-DiskRemoteText $InputText
     $c=$script:Connection
     $base=@($c.arguments)
+    if ($Extra.Count -gt 0) {
+        $base=@(for($i=0;$i -lt $base.Count;$i++) {
+            if ($base[$i] -ieq '-o' -and $i+1 -lt $base.Count -and $base[$i+1] -ieq 'ClearAllForwardings=yes') {$i++;continue}
+            $base[$i]
+        })
+    }
     $args=@('-o','BatchMode=yes','-o','ConnectTimeout=8','-o','StrictHostKeyChecking=yes','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3')+ $Extra + $base + @($RemoteCommand)
     $si=New-Object Diagnostics.ProcessStartInfo
     $si.FileName=$c.sshExecutable;$si.Arguments=(@($args|ForEach-Object {Quote-Native ([string]$_)}) -join ' ')
