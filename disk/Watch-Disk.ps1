@@ -97,7 +97,8 @@ try{
                 if($job.process.ExitCode -ne 0 -or -not $result -or -not $result.ok){
                     $aclError='ACL operation failed, exit '+$job.process.ExitCode
                     if($result -and -not $result.ok -and $result.error){$aclError=$result.error}
-                    $result=[pscustomobject]@{ok=$false;locked=$null;error=$aclError;time=[DateTime]::UtcNow.ToString('o')}
+                    $skipped=$null;if($result -and $result.PSObject.Properties['skippedReparsePoints']){$skipped=$result.skippedReparsePoints}
+                    $result=[pscustomobject]@{ok=$false;locked=$null;skippedReparsePoints=$skipped;error=$aclError;time=[DateTime]::UtcNow.ToString('o')}
                     Write-DiskJson ($record+'.result') $result
                 }
                 $checked[$folder.id]=@{locked=$job.locked;ok=($null -ne $result -and $result.ok -and $job.process.ExitCode -eq 0)}

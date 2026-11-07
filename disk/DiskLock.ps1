@@ -4,9 +4,6 @@ function Get-DiskSafetyPlan([string]$Event,[bool]$Tunnel,[bool]$LocalConnected,[
     $lock=$Event -in @('start','Suspend','Resume','exit') -or -not ($Tunnel -and $LocalConnected -and $RemoteConfirmed)
     [pscustomobject]@{lock=$lock;pause=($lock -or -not $AclVerified -or $AclFailed);error=$AclFailed}
 }
-function Get-DiskAclArguments([string]$FolderPath,[string]$AclFile) {
-    @([IO.Path]::GetDirectoryName($FolderPath),'/restore',$AclFile,'/L','/Q')
-}
 function Get-DiskLockRecord([string]$HomePath,$Folder) {
     if($Folder.id -notmatch '^[A-Za-z0-9_-]+$'){throw 'Invalid folder ID in ACL record'}
     Join-Path $HomePath ('locks/'+$Folder.id+'.json')
@@ -25,7 +22,8 @@ function Write-DiskJson([string]$File,$Value) {
     if([IO.File]::Exists($File)){[IO.File]::Replace($temp,$File,[NullString]::Value)}else{[IO.File]::Move($temp,$File)}
 }
 function Read-DiskRawAcl([string]$FolderPath) {
-    $acl=Get-Acl -LiteralPath $FolderPath
+    $item=Get-Item -LiteralPath $FolderPath -Force
+    $acl=$item.GetAccessControl('Access')
     New-Object Security.AccessControl.RawSecurityDescriptor($acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access))
 }
 function Test-DiskOwnAce($Ace,[string]$Sid) {
@@ -56,11 +54,11 @@ function Start-DiskAclProcess([string]$HomePath,$Folder,[bool]$Locked) {
 function Request-DiskUnlock([string]$HomePath,$Folders) {
     foreach($folder in $Folders){Write-DiskJson ((Get-DiskLockRecord $HomePath $folder)+'.unlock') @{requested=[DateTime]::UtcNow.ToString('o')}}
 }
-function Get-DiskIcaclsExecutable { Join-Path $env:SystemRoot 'System32/icacls.exe' }
-function Start-DiskIcaclsProcess([string]$FolderPath,[string]$AclFile) {
-    $si=New-Object Diagnostics.ProcessStartInfo;$si.FileName=Get-DiskIcaclsExecutable
-    $si.Arguments=(@(Get-DiskAclArguments $FolderPath $AclFile)|ForEach-Object {'"'+([regex]::Replace([regex]::Replace($_,'(\\*)"','$1$1\"'),'(\\+)$','$1$1'))+'"'}) -join ' '
-    $si.UseShellExecute=$false;$si.CreateNoWindow=$true;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true
-    $p=New-Object Diagnostics.Process;$p.StartInfo=$si;[void]$p.Start()
-    @{p=$p;out=$p.StandardOutput.ReadToEndAsync();err=$p.StandardError.ReadToEndAsync()}
+function Get-DiskAclIdentity { [Security.Principal.WindowsIdentity]::GetCurrent() }
+function Set-DiskDirectoryAcl([string]$FolderPath,[string]$Expected) {
+    # Access-only DACL update uses the owner's WRITE_DAC, without restore privileges.
+    $dir=New-Object IO.DirectoryInfo($FolderPath)
+    $sec=New-Object Security.AccessControl.DirectorySecurity
+    $sec.SetSecurityDescriptorSddlForm($Expected,'Access')
+    $dir.SetAccessControl($sec)
 }

@@ -2,14 +2,14 @@
 param([Parameter(Mandatory=$true)][string]$FolderPath,[Parameter(Mandatory=$true)][string]$RecordPath,[ValidateSet('lock','unlock')][string]$Mode)
 Set-StrictMode -Version 2;$ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'DiskLock.ps1')
-$mutex=$null;$held=$false;$payload=$RecordPath+'.acl';$process=$null
+$mutex=$null;$held=$false;$skippedReparsePoints=0
 try{
     $mutex=New-Object Threading.Mutex($false,('Local\RemoteDiskAcl-'+[IO.Path]::GetFileNameWithoutExtension($RecordPath)))
     try{$held=$mutex.WaitOne()}catch [Threading.AbandonedMutexException]{$held=$true}
     $FolderPath=[IO.Path]::GetFullPath($FolderPath).TrimEnd('\')
     if($FolderPath -match '[\r\n]'){throw 'Newlines in ACL path are not supported'}
     if((Get-Item -LiteralPath $FolderPath -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'ACL root is a reparse point'}
-    $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $sid=(Get-DiskAclIdentity).User.Value
     $raw=Read-DiskRawAcl $FolderPath;$record=Read-DiskJson $RecordPath
     if($record -and ($record.path -cne $FolderPath -or $record.sid -ne $sid)){throw 'ACL recovery record does not match path/user'}
     if(-not $record -and $Mode -eq 'lock'){
@@ -28,21 +28,16 @@ try{
             for($i=0;$i -lt $raw.DiscretionaryAcl.Count;$i++){if(Test-DiskOwnAce $raw.DiscretionaryAcl[$i] $sid){$raw.DiscretionaryAcl.RemoveAce($i);break}}
         }
         $expected=$raw.GetSddlForm('Access')
-        # icacls /deny would remove allow bits; /remove:d would delete unrelated denies.
-        # /restore applies the CURRENT DACL with precisely one managed ACE added/removed.
-        [IO.File]::WriteAllText($payload,([IO.Path]::GetFileName($FolderPath)+"`r`n"+$expected+"`r`n"),[Text.Encoding]::Unicode)
-        $job=Start-DiskIcaclsProcess $FolderPath $payload;$process=$job.p
-        while(-not $process.WaitForExit(100)){} # Worker only; UI/controller keep running.
-        if($process.ExitCode -ne 0){throw ('icacls exit '+$process.ExitCode)}
+        Set-DiskDirectoryAcl $FolderPath $expected
         if((Read-DiskRawAcl $FolderPath).GetSddlForm('Access') -cne $expected){throw 'ACL verification failed: DACL differs; other rights must be preserved'}
         # Audit inherited results in both directions; a partial unlock is not success.
-        $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+        $identity=Get-DiskAclIdentity
         $subjects=@($sid)+@($identity.Groups|ForEach-Object {$_.Value})
         $queue=New-Object 'System.Collections.Generic.Queue[string]';$queue.Enqueue($FolderPath)
         while($queue.Count){
             $dir=$queue.Dequeue();$parentRaw=Read-DiskRawAcl $dir
             foreach($child in @(Get-ChildItem -LiteralPath $dir -Force)){
-                if($child.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'ACL cannot verify a reparse point'}
+                if($child.Attributes -band [IO.FileAttributes]::ReparsePoint){$skippedReparsePoints++;continue}
                 $acl=Get-Acl -LiteralPath $child.FullName;$denied=$false
                 foreach($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){
                     if($rule.IdentityReference.Value -eq $sid -and $rule.AccessControlType -eq 'Deny' -and ([int]$rule.FileSystemRights -band 65878) -eq 65878){$denied=$true}
@@ -64,12 +59,11 @@ try{
         }
         if($Mode -eq 'unlock'){Remove-Item -LiteralPath $RecordPath -Force}
     }
-    Write-DiskJson ($RecordPath+'.result') @{ok=$true;locked=($Mode -eq 'lock');error='';time=[DateTime]::UtcNow.ToString('o')}
+    Write-DiskJson ($RecordPath+'.result') @{ok=$true;locked=($Mode -eq 'lock');skippedReparsePoints=$skippedReparsePoints;error='';time=[DateTime]::UtcNow.ToString('o')}
     exit 0
 }catch{
-    Write-DiskJson ($RecordPath+'.result') @{ok=$false;locked=$null;error=$_.Exception.Message;time=[DateTime]::UtcNow.ToString('o')}
+    Write-DiskJson ($RecordPath+'.result') @{ok=$false;locked=$null;skippedReparsePoints=$skippedReparsePoints;error=$_.Exception.Message;time=[DateTime]::UtcNow.ToString('o')}
     exit 1
 }finally{
-    if($process){$process.Dispose()};Remove-Item -LiteralPath $payload -Force -ErrorAction SilentlyContinue
     if($held){$mutex.ReleaseMutex()};if($mutex){$mutex.Dispose()}
 }

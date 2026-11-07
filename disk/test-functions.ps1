@@ -510,51 +510,114 @@ foreach($missing in @('tunnel','local','remote')){
 $plan=Get-DiskSafetyPlan 'poll' $true $true $true $false $false
 Assert (-not $plan.lock -and $plan.pause) 'unlock must be verified BEFORE engine resume'
 $plan=Get-DiskSafetyPlan 'poll' $true $true $true $true $true
-Assert ($plan.error -and $plan.pause) 'icacls failure is never success'
-# Linux cannot apply NTFS ACL; this shim captures precisely the production process arguments.
-$captured=@(Get-DiskAclArguments '/tmp/local folder/project' '/tmp/state/acl payload')
-Assert (($captured -join '|') -ceq '/tmp/local folder|/restore|/tmp/state/acl payload|/L|/Q') 'exact icacls arguments'
-Assert (@($captured|Where-Object {$_ -in @('/deny','/remove:d','/reset','/grant','/T')}).Count -eq 0) 'no destructive ACL switches or tree-wide replacement'
+Assert ($plan.error -and $plan.pause) 'DACL application failure is never success'
 $worker=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'Set-DiskAcl.ps1'))
-Assert ($worker -match '65878' -and $worker -match 'CommonAce' -and $worker -match 'GetSddlForm' -and $worker -match 'WaitForExit\(100\)') 'exact write/delete mask, DACL verification, async icacls polling'
+Assert ($worker -match '65878' -and $worker -match 'CommonAce' -and $worker -match 'GetSddlForm' -and $worker -match 'Set-DiskDirectoryAcl') 'managed ACE calculation and DACL readback retained'
 $watch=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'Watch-Disk.ps1'))
 Assert ($watch -match 'PowerModeChanged\+=Power' -and $watch -match 'PowerModes.Suspend' -and $watch -match 'PowerModes.Resume' -and $watch -match 'p.Exited\+=Lost') 'immediate .NET power/tunnel event signals'
 Assert ($watch -match "'versioning'=|versioning=@\{type=''\}" -and $watch -match 'remoteConfirmed') 'safety controls engine writes and requires remote proof'
-'PASS ACL policy: start/connected/lost/Suspend/Resume/icacls-failure/exit; bilateral proof; pause before ACL, verify unlock before resume'
-'PASS ACL arguments (stub): parent | /restore | payload | /L | /Q; no /deny, /remove:d, /reset or /T; mask 65878, disk recovery, DACL verification'
+'PASS ACL policy: start/connected/lost/Suspend/Resume/DACL-failure/exit; bilateral proof; pause before ACL, verify unlock before resume'
 foreach($f in @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1')){
     $tokens=$null;$errors=$null;[void][Management.Automation.Language.Parser]::ParseFile($f.FullName,[ref]$tokens,[ref]$errors)
     Assert ($errors.Count -eq 0) ('parser '+$f.Name)
 }
 'PASS all PowerShell parsers; NTFS ACL application is NOT tested on Linux'
 
+
+# Run the unchanged worker flow with only Windows ACL boundaries replaced on Linux.
 . $PSScriptRoot/RemoteDisk.ps1 -LibraryOnly
-$temp=Join-Path ([IO.Path]::GetTempPath()) ('disk-icacls-'+[guid]::NewGuid().ToString('N'))
+$temp=Join-Path ([IO.Path]::GetTempPath()) ('disk-dacl-'+[guid]::NewGuid().ToString('N'))
 try{
-    [void][IO.Directory]::CreateDirectory($temp)
-    $shim=Join-Path $temp 'icacls-shim'
-    $code=@'
-#!/usr/bin/env python3
-import sys,json
-from pathlib import Path
-Path(__file__).with_suffix('.args').write_text(json.dumps(sys.argv[1:]))
-sys.exit(7 if '--fail' in sys.argv else 0)
+    $root=Join-Path $temp 'Папка test';$target=Join-Path $temp 'outside-target'
+    [void][IO.Directory]::CreateDirectory($root);[void][IO.Directory]::CreateDirectory($target)
+    [IO.File]::WriteAllText((Join-Path $root 'regular.txt'),'fixture')
+    [IO.File]::WriteAllText((Join-Path $target 'outside.txt'),'target must not be audited')
+    & ln -s $target (Join-Path $root 'directory-link');Assert ($LASTEXITCODE -eq 0) 'directory link fixture'
+    & ln -s (Join-Path $target 'outside.txt') (Join-Path $root 'file-link');Assert ($LASTEXITCODE -eq 0) 'file link fixture'
+    & ln -s $root (Join-Path $temp 'root-link');Assert ($LASTEXITCODE -eq 0) 'root link fixture'
+    $boundary=@'
+$script:Applied=$false
+function Get-DiskAclIdentity {[pscustomobject]@{User=[pscustomobject]@{Value='fixture-user'};Groups=@()}}
+function Read-DiskRawAcl($FolderPath){
+    if($FolderPath -match '(directory-link|file-link|outside-target)'){throw 'Link target ACL was read'}
+    $raw=[pscustomobject]@{DiscretionaryAcl=@()}
+    $raw|Add-Member ScriptMethod GetSddlForm {
+        param($Section)
+        if([string]$Section -ne 'Access'){throw 'Read must use Access only'}
+        if($script:Applied -and $env:DISK_DACL_FAULT -eq 'readback'){'unexpected-dacl'}else{'expected-dacl'}
+    }
+    $raw
+}
+function Get-Acl($LiteralPath){
+    if([IO.Path]::GetFileName($LiteralPath) -ne 'regular.txt'){throw 'Unexpected child ACL read'}
+    $acl=[pscustomobject]@{}
+    $acl|Add-Member ScriptMethod GetAccessRules {param($Explicit,$Inherited,$Type) @()}
+    $acl
+}
+function New-Object {
+    param([string]$TypeName,[object[]]$ArgumentList)
+    if($TypeName -eq 'IO.DirectoryInfo'){
+        $dir=[pscustomobject]@{FullName=[string]$ArgumentList[0]}
+        $dir|Add-Member ScriptMethod SetAccessControl {
+            param($Security)
+            if(-not (Test-Path -LiteralPath $RecordPath)){throw 'Intent missing before DACL mutation'}
+            Write-DiskJson $env:DISK_DACL_CAPTURE @{path=$this.FullName;expected=$Security.Expected;section=$Security.Section;intent=$true}
+            if($env:DISK_DACL_FAULT -eq 'apply'){throw 'synthetic DACL apply failure'}
+            $script:Applied=$true
+        }
+        return $dir
+    }
+    if($TypeName -eq 'Security.AccessControl.DirectorySecurity'){
+        $sec=[pscustomobject]@{Expected='';Section=''}
+        $sec|Add-Member ScriptMethod SetSecurityDescriptorSddlForm {param($Expected,$Section) $this.Expected=$Expected;$this.Section=[string]$Section}
+        return $sec
+    }
+    if($null -ne $ArgumentList -and $ArgumentList.Count){Microsoft.PowerShell.Utility\New-Object -TypeName $TypeName -ArgumentList $ArgumentList}
+    else{Microsoft.PowerShell.Utility\New-Object -TypeName $TypeName}
+}
 '@
-    [IO.File]::WriteAllText($shim,$code.Replace("`r`n","`n"),(New-Object Text.UTF8Encoding($false)))
-    & chmod +x $shim
-    function Get-DiskIcaclsExecutable {$shim}
-    $job=Start-DiskIcaclsProcess '/tmp/local folder/project' '/tmp/state/acl payload'
-    while(-not $job.p.WaitForExit(50)){}
-    Assert ($job.p.ExitCode -eq 0) 'ACL stub process success'
-    $arguments=Read-DiskJson ([IO.Path]::ChangeExtension($shim,'.args'))
-    Assert (($arguments -join '|') -ceq '/tmp/local folder|/restore|/tmp/state/acl payload|/L|/Q') 'actual launched icacls exact argv and quoting'
-    $job.p.Dispose()
-    $job=Start-DiskIcaclsProcess '/tmp/local folder/project' '--fail'
-    while(-not $job.p.WaitForExit(50)){}
-    Assert ($job.p.ExitCode -eq 7) 'ACL failed exit remains failed'
-    $job.p.Dispose()
-    'PASS icacls process stub: exact argv/space quoting, asynchronous polling, nonzero exit preserved; no NTFS operation performed'
+    $library=Join-Path $PSScriptRoot 'DiskLock.ps1'
+    $workerText=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'Set-DiskAcl.ps1'))
+    $workerText=$workerText.Replace(". (Join-Path `$PSScriptRoot 'DiskLock.ps1')",(". '"+$library.Replace("'","''")+"'`n"+$boundary))
+    $workerCopy=Join-Path $temp 'worker.ps1'
+    [IO.File]::WriteAllText($workerCopy,$workerText,(New-Object Text.UTF8Encoding($true)))
+    $savedFault=$env:DISK_DACL_FAULT;$savedCapture=$env:DISK_DACL_CAPTURE
+    try{
+        foreach($case in @('ok','apply','readback','root')){
+            $record=Join-Path $temp ($case+'.json');$capture=Join-Path $temp ($case+'.capture')
+            $path=$root;if($case -eq 'root'){$path=Join-Path $temp 'root-link'}
+            Write-DiskJson $record @{path=$path;sid='fixture-user';baseline=0;before='expected-dacl'}
+            $env:DISK_DACL_FAULT=$case;$env:DISK_DACL_CAPTURE=$capture
+            & (Join-Path $PSHOME 'pwsh') -NoProfile -File $workerCopy -FolderPath $path -RecordPath $record -Mode unlock
+            $code=$LASTEXITCODE;$result=Read-DiskJson ($record+'.result')
+            if($case -eq 'ok'){
+                Assert ($code -eq 0 -and $result.ok -and -not $result.locked) ('DACL worker success: code='+$code+' error='+$result.error)
+                Assert ($result.skippedReparsePoints -eq 2) 'both reparse points counted exactly once'
+                Assert (-not (Test-Path -LiteralPath $record)) 'verified unlock removes intent'
+                $applied=Read-DiskJson $capture
+                Assert ($applied.path -ceq $root -and $applied.expected -ceq 'expected-dacl' -and $applied.section -ceq 'Access' -and $applied.intent) 'DirectoryInfo/DirectorySecurity expected Access-only DACL and durable intent'
+            }else{
+                Assert ($code -ne 0 -and -not $result.ok -and $null -eq $result.locked) ('failed DACL is not success: '+$case)
+                Assert (Test-Path -LiteralPath $record) 'failure preserves recovery intent'
+                if($case -eq 'apply'){Assert ($result.error -match 'synthetic DACL apply failure') 'apply exception recorded'}
+                if($case -eq 'readback'){Assert ($result.error -match 'DACL differs') 'readback mismatch recorded'}
+                if($case -eq 'root'){Assert ($result.error -match 'root is a reparse point' -and -not (Test-Path $capture)) 'root link refused before applying DACL'}
+            }
+        }
+    }finally{$env:DISK_DACL_FAULT=$savedFault;$env:DISK_DACL_CAPTURE=$savedCapture}
+    'PASS DACL worker (Windows API stubs): DirectoryInfo.SetAccessControl, Access only, expected SDDL, durable intent, readback, apply failure and mismatch recorded'
+    'PASS reparse audit: two nested links counted once, no ACL/content reads or traversal of targets; root link refused'
 }finally{Remove-Item -LiteralPath $temp -Recurse -Force}
+
+# Normal Windows flows must not introduce machine-wide installation or elevation.
+$production=@('RemoteDisk.ps1','DiskLock.ps1','Set-DiskAcl.ps1','Watch-Disk.ps1')
+foreach($name in $production){
+    $source=[IO.File]::ReadAllText((Join-Path $PSScriptRoot $name))
+    Assert ($source -notmatch '(?i)HKLM:|HKEY_LOCAL_MACHINE|SeRestorePrivilege|SeBackupPrivilege|AdjustTokenPrivileges|\-Verb\s+RunAs|#requires\s+-RunAsAdministrator|New-Service|Set-Service|Register-ScheduledTask') ('no required elevation in '+$name)
+}
+$source=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'RemoteDisk.ps1'))
+Assert ($source -match 'HKCU:' -and $source -match 'LOCALAPPDATA') 'per-user installation/menu/autostart'
+'PASS privilege audit (static): per-user LOCALAPPDATA/HKCU, current-user processes, no machine-wide service/task/elevation or privilege APIs'
 
 . $PSScriptRoot/RemoteDisk.ps1 -LibraryOnly
 $temp=Join-Path ([IO.Path]::GetTempPath()) ('disk-background-'+[guid]::NewGuid().ToString('N'))
