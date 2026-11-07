@@ -49,13 +49,14 @@ function Invoke-ControlPrepare($Connection,[string]$Payload) {
     $si.Arguments=((Get-ControlSshArguments $Connection | ForEach-Object {Quote-ControlNative ([string]$_)}) -join ' ')
     $si.UseShellExecute=$false;$si.CreateNoWindow=$true
     $si.RedirectStandardInput=$true;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true
-    $si.StandardInputEncoding=New-Object Text.UTF8Encoding($false)
     $p=New-Object Diagnostics.Process;$p.StartInfo=$si
     try {
         $deadline=[DateTime]::UtcNow.AddSeconds(60)
         [void]$p.Start();$out=$p.StandardOutput.ReadToEndAsync();$err=$p.StandardError.ReadToEndAsync()
-        $write=$p.StandardInput.WriteAsync((Convert-ControlLF $Payload))
+        $bytes=(New-Object Text.UTF8Encoding($false)).GetBytes((Convert-ControlLF $Payload))
+        $write=$p.StandardInput.BaseStream.WriteAsync($bytes,0,$bytes.Length)
         if(-not $write.Wait(60000)){$p.Kill();throw 'Таймаут передачи серверу (60 с)'}
+        $p.StandardInput.BaseStream.Flush()
         $p.StandardInput.Close()
         if(-not $p.WaitForExit([Math]::Max(1,[int]($deadline-[DateTime]::UtcNow).TotalMilliseconds))){$p.Kill();throw 'Таймаут подготовки сервера (60 с)'}
         $stderr=Convert-ControlLF $err.Result

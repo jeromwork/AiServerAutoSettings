@@ -20,6 +20,32 @@ class ControlTests(unittest.TestCase):
         label='win-'+'a'*28
         return dict(projectId='control',hostId='host-one',deviceLabel=label,windowsReplica=r'C:\Control Workspace',serverWorkspace=str(home/'work/projects/control'),socketPath=str(home/'.local/state/codex-remote'/(label+'.sock')),allowShell=True)
 
+    def test_no_standard_input_encoding(self):
+        for name in ('Start-WindowsControl.ps1','disk/RemoteDisk.ps1','Start-CodexWindowsBridge.ps1'):
+            with self.subTest(script=name):
+                self.assertNotIn('StandardInputEncoding',(ROOT/name).read_text(encoding='utf-8-sig'))
+
+    def test_prepare_utf8_stdin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home=Path(tmp);shim=home/'ssh-shim';capture=home/'stdin.bin'
+            shim.write_text('#!/usr/bin/env python3\nimport os, sys\nfrom pathlib import Path\nPath(os.environ["CONTROL_STDIN_CAPTURE"]).write_bytes(sys.stdin.buffer.read())\nprint(\'{"user":"tester","home":"/home/tester"}\')\n')
+            shim.chmod(0o700)
+            payload='Привет, сервер!\r\nРусский текст: ёжик.\rКонец\n'
+            encoded=base64.b64encode(payload.encode('utf-8')).decode('ascii')
+            script="""
+. './Start-WindowsControl.ps1' -LibraryOnly
+# A non-UTF-8 console must not affect bytes written to SSH stdin.
+[Console]::InputEncoding=[Text.Encoding]::ASCII
+[Console]::OutputEncoding=[Text.Encoding]::ASCII
+$c=[pscustomobject]@{sshExecutable=$env:CONTROL_SSH_SHIM;configPath='config';keyPath='key';port=22;knownHostsPath='known';login='tester';serverAddress='example.invalid'}
+$payload=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__PAYLOAD__'))
+Invoke-ControlPrepare $c $payload | ConvertTo-Json -Compress
+""".replace('__PAYLOAD__',encoded)
+            env=dict(os.environ,HOME=tmp,CONTROL_SSH_SHIM=str(shim),CONTROL_STDIN_CAPTURE=str(capture))
+            result=json.loads(subprocess.check_output([str(PWSH),'-NoProfile','-Command',script],cwd=ROOT,env=env,timeout=70))
+            self.assertEqual(result,dict(user='tester',home='/home/tester'))
+            self.assertEqual(capture.read_bytes(),payload.replace('\r\n','\n').replace('\r','\n').encode('utf-8'))
+
     def test_catalog(self):
         with tempfile.TemporaryDirectory() as tmp:
             home=Path(tmp); data=self.record(home)
