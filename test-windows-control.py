@@ -23,7 +23,7 @@ class ControlTests(unittest.TestCase):
         return dict(projectId='control',hostId='host-one',deviceLabel=label,windowsReplica=r'C:\Control Workspace',serverWorkspace=str(home/'work/projects/control'),socketPath=str(home/'.local/state/codex-remote'/(label+'.sock')),allowShell=True)
 
     def test_no_standard_input_encoding(self):
-        for name in ('Start-WindowsControl.ps1','disk/RemoteDisk.ps1','Start-CodexWindowsBridge.ps1'):
+        for name in ('Start-WindowsControl.ps1','disk/Disk.Common.ps1','Start-CodexWindowsBridge.ps1'):
             with self.subTest(script=name):
                 self.assertNotIn('StandardInputEncoding',(ROOT/name).read_text(encoding='utf-8-sig'))
 

@@ -100,3 +100,12 @@ HAPP-IMPORT.bat
 Start-WindowsControl.ps1
 server-control.sh
 test-windows-control.py
+disk/Install-RemoteDisk.ps1
+disk/Add-RemoteDiskFolder.ps1
+disk/Disk.Common.ps1
+disk/server-disk.sh
+disk/stignore.txt
+disk/legacy-ignores.sha256
+disk/README.md
+disk/test-disk.py
+disk/test-install.ps1

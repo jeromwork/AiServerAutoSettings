@@ -102,3 +102,7 @@ VPN для HAPP использует Xray с VLESS/REALITY на TCP 8443. Сер
 ## Отдельное управление Windows
 
 Запустите `05-control.cmd` один раз: выберите сохранённый SSH-профиль, и MCP-мост управления компьютером установится в `%LOCALAPPDATA%\RemoteAgents\control\app`, будет работать без окна, запускаться при входе в Windows и переподключаться бесконечно. Синхронизация и агенты не устанавливаются. Можно указать `-Profile <путь>` и `-AgentUser <пользователь сервера>` (при входе root). Журнал: `%LOCALAPPDATA%\RemoteAgents\control\logs\control.log`. Команды агентов выполняются с вашими правами Windows. Отключить: `05-control.cmd -Uninstall`.
+
+## Синхронизация папок RemoteDisk
+
+`04-disk.cmd` устанавливает Syncthing Tray и канал sing-box для папок `~/Disk/<имя>` на сервере. Добавляйте папки через контекстное меню Windows или `disk/Add-RemoteDiskFolder.ps1`. [Установка и проверки](disk/README.md).
