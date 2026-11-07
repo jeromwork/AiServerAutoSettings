@@ -164,11 +164,23 @@ function Get-FreeDiskPort {
     $s=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,0);$s.Start();$v=$s.LocalEndpoint.Port;$s.Stop();$v
 }
 function Set-DiskEngineConfig([string]$Path,[string]$Listen,[string]$Gui,[bool]$First) {
-    [xml]$xml=[IO.File]::ReadAllText($Path)
+    $xml=New-Object Xml.XmlDocument
+    $xml.PreserveWhitespace=$true
+    $xml.LoadXml([IO.File]::ReadAllText($Path))
     $options=$xml.SelectSingleNode('/configuration/options')
     $guiNode=$xml.SelectSingleNode('/configuration/gui')
     if($null -eq $options -or $null -eq $guiNode){throw 'Syncthing config.xml must contain configuration/options and configuration/gui; engine not started'}
     $changed=New-Object 'System.Collections.Generic.List[string]'
+    # Repair whitespace introduced by earlier indented saves; retain attributes.
+    foreach($node in $xml.SelectNodes('//encryptionPassword | //*[not(*) and not(@value)]')){
+        $value=$node.InnerText
+        if($value.Length -gt 0 -and [string]::IsNullOrWhiteSpace($value) -and
+            ($node.Name -eq 'encryptionPassword' -or
+                (-not $node.HasAttribute('value') -and $value -match '[\r\n]'))){
+            $node.InnerText=''
+            if(-not $changed.Contains($node.Name)){$changed.Add($node.Name)}
+        }
+    }
     $values=[ordered]@{globalAnnounceEnabled='false';localAnnounceEnabled='false';relaysEnabled='false';natEnabled='false';startBrowser='false';crashReportingEnabled='false';autoUpgradeIntervalH='0';urAccepted='-1';listenAddress="tcp://127.0.0.1:$Listen"}
     foreach($key in $values.Keys){
         $nodes=$options.SelectNodes($key)

@@ -314,6 +314,52 @@ try {
         Assert ($xml.SelectSingleNode('/configuration/options/'+$pair[0]).InnerText -ceq $pair[1]) "safe $($pair[0])"
     }
     Assert ($xml.SelectSingleNode('/configuration/gui/address').InnerText -ceq '127.0.0.1:22112') 'safe GUI'
+    # Inspect with whitespace preserved: the [xml] cast would hide this defect.
+    $exact=New-Object Xml.XmlDocument;$exact.PreserveWhitespace=$true
+    $exact.LoadXml([IO.File]::ReadAllText($configPath))
+    foreach($password in $exact.SelectNodes('//encryptionPassword')){
+        Assert ($password.InnerText -ceq '') 'generated encryptionPassword strictly empty'
+    }
+    if(Test-Path -LiteralPath $archive){
+        & (Join-Path $temp 'syncthing-linux-amd64-v2.1.7/syncthing') generate --home $temp --no-port-probing *> $null
+        Assert ($LASTEXITCODE -eq 0) 'real Syncthing parses saved config without starting'
+    }
+    # Both defaults and existing folders must be repaired on ordinary runs.
+    $exact.LoadXml([IO.File]::ReadAllText($configPath))
+    $folder=$exact.CreateElement('folder');[void]$exact.DocumentElement.AppendChild($folder)
+    $defaults=$exact.SelectSingleNode('/configuration/defaults/folder')
+    foreach($parent in @($folder,$defaults)){
+        $password=$exact.CreateElement('encryptionPassword');$password.SetAttribute('test','keep')
+        $password.InnerText="`n        ";[void]$parent.AppendChild($password)
+    }
+    $real=$exact.CreateElement('encryptionPassword');$real.InnerText='abc';[void]$folder.AppendChild($real)
+    foreach($name in @('emptyLeaf','spaceLeaf','valueLeaf')){
+        $leaf=$exact.CreateElement($name);$leaf.InnerText="`n        "
+        if($name -eq 'spaceLeaf'){$leaf.InnerText='   '}
+        if($name -eq 'valueLeaf'){$leaf.SetAttribute('value','keep')}
+        [void]$folder.AppendChild($leaf)
+    }
+    $exact.Save($configPath)
+    Set-DiskEngineConfig $configPath '22111' '22112' $false
+    $exact.LoadXml([IO.File]::ReadAllText($configPath))
+    foreach($password in $exact.SelectNodes('//encryptionPassword[@test]')){
+        Assert ($password.InnerText -ceq '' -and $password.GetAttribute('test') -ceq 'keep') 'whitespace password repaired, attributes kept'
+    }
+    Assert ($exact.SelectSingleNode('//encryptionPassword[not(@test)]/text()[.="abc"]').Value -ceq 'abc') 'real password preserved'
+    Assert ($exact.SelectSingleNode('//emptyLeaf').InnerText -ceq '') 'multiline whitespace leaf repaired'
+    Assert ($exact.SelectSingleNode('//spaceLeaf').InnerText -ceq '   ') 'single line whitespace retained'
+    Assert ($exact.SelectSingleNode('//valueLeaf').InnerText -ceq "`n        ") 'value attribute leaf retained'
+    $repairBytes=[Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath))
+    $repairStamp=[IO.File]::GetLastWriteTimeUtc($configPath)
+    Set-DiskEngineConfig $configPath '22111' '22112' $false
+    Assert ([Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -ceq $repairBytes) 'repair idempotent bytes'
+    Assert ([IO.File]::GetLastWriteTimeUtc($configPath) -eq $repairStamp) 'repair idempotent timestamp'
+    Assert ((Get-Content $script:LogFile -Raw) -match 'encryptionPassword') 'password repair key logged'
+    # Restore the real generated fixture for the existing folder lifecycle tests.
+    [void]$exact.DocumentElement.RemoveChild($exact.SelectSingleNode('/configuration/folder'))
+    $exact.Save($configPath)
+    [xml]$xml=[IO.File]::ReadAllText($configPath)
+    'PASS empty config values: generated XML, Syncthing parse, folder/defaults repair, real password, attributes, idempotence'
     $marker=Join-Path $temp 'remote-disk-configured'
     Assert (Test-Path $marker) 'marker after successful save'
     $bytes=[Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath))
@@ -352,6 +398,11 @@ $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot
 Assert ($parseErrors.Count -eq 0) 'RemoteDisk parser errors'
 $forbidden=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -in @('Get-FileHash','Expand-Archive','New-Guid','New-TemporaryFile','Format-Hex')},$true))
 Assert ($forbidden.Count -eq 0) 'no optional PowerShell function calls'
+$configFunction=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Set-DiskEngineConfig'},$true))[0]
+Assert ($configFunction.Extent.Text -notmatch '\[xml\]\s*\$xml\s*=') 'no XML cast for saved document'
+$testTokens=$null;$testErrors=$null
+[void][Management.Automation.Language.Parser]::ParseFile($PSCommandPath,[ref]$testTokens,[ref]$testErrors)
+Assert ($testErrors.Count -eq 0) 'test-functions parser errors'
 'PASS static command ban; Parser errors: 0'
 $functions=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst]},$true)|ForEach-Object {$_.Name})
 $commands=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst]},$true)|ForEach-Object {$_.GetCommandName()}|Where-Object {$_ -and $_ -notin $functions}|Sort-Object -Unique)
