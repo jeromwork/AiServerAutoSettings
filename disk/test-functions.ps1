@@ -282,6 +282,71 @@ try {
     'PASS extraction: real ZIP, SHA verification, main-thread initializer/key, stop preserves .part'
 }finally{Remove-Item -LiteralPath $temp -Recurse -Force}
 
+
+# Real Syncthing 2.1.7 generate fixture: no root folder, StrictMode 2.
+. $PSScriptRoot/RemoteDisk.ps1 -LibraryOnly
+$temp=Join-Path ([IO.Path]::GetTempPath()) ('disk-config-'+[guid]::NewGuid().ToString('N'))
+try {
+    [void](New-Item -ItemType Directory -Path $temp -Force)
+    $script:LogFile=Join-Path $temp 'config.jsonl';$script:HostName='test'
+    $script:LocalKey='';$script:RemoteKey=''
+    $archive='/tmp/sync-eval.hGIBPT/syncthing-linux-amd64-v2.1.7.tar.gz'
+    $configPath=Join-Path $temp 'config.xml'
+    if(Test-Path -LiteralPath $archive){
+        & tar -xzf $archive -C $temp
+        Assert ($LASTEXITCODE -eq 0) 'fixture extraction'
+        & (Join-Path $temp 'syncthing-linux-amd64-v2.1.7/syncthing') generate --home $temp --no-port-probing *> $null
+        Assert ($LASTEXITCODE -eq 0) 'real syncthing generate'
+        'PASS fixture: real syncthing 2.1.7 generate'
+    } else {
+        [IO.File]::WriteAllText($configPath,'<configuration version="37"><device id="fixture"/><gui enabled="true"><address>127.0.0.1:8384</address><apikey>fixture</apikey></gui><ldap/><options><listenAddress>default</listenAddress><globalAnnounceEnabled>true</globalAnnounceEnabled><localAnnounceEnabled>true</localAnnounceEnabled><relaysEnabled>true</relaysEnabled><natEnabled>true</natEnabled><startBrowser>true</startBrowser><crashReportingEnabled>true</crashReportingEnabled><autoUpgradeIntervalH>12</autoUpgradeIntervalH><urAccepted>0</urAccepted></options><defaults><folder/><device/></defaults></configuration>')
+        'PASS fixture: fallback structure device, gui, ldap, options, defaults'
+    }
+    [xml]$xml=[IO.File]::ReadAllText($configPath)
+    Assert ($xml.SelectNodes('/configuration/folder').Count -eq 0) 'generated config has no root folder'
+    $unsafe=[IO.File]::ReadAllText($configPath)
+    Set-DiskEngineConfig $configPath '22111' '22112' $true
+    [xml]$xml=[IO.File]::ReadAllText($configPath)
+    foreach($key in @('globalAnnounceEnabled','localAnnounceEnabled','relaysEnabled','natEnabled','startBrowser','crashReportingEnabled')){
+        Assert ($xml.SelectSingleNode('/configuration/options/'+$key).InnerText -ceq 'false') "safe $key"
+    }
+    foreach($pair in @(@('autoUpgradeIntervalH','0'),@('urAccepted','-1'),@('listenAddress','tcp://127.0.0.1:22111'))){
+        Assert ($xml.SelectSingleNode('/configuration/options/'+$pair[0]).InnerText -ceq $pair[1]) "safe $($pair[0])"
+    }
+    Assert ($xml.SelectSingleNode('/configuration/gui/address').InnerText -ceq '127.0.0.1:22112') 'safe GUI'
+    $marker=Join-Path $temp 'remote-disk-configured'
+    Assert (Test-Path $marker) 'marker after successful save'
+    $bytes=[Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath))
+    $stamp=[IO.File]::GetLastWriteTimeUtc($configPath)
+    Set-DiskEngineConfig $configPath '22111' '22112' $false
+    Assert (([Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath))) -ceq $bytes) 'idempotent bytes'
+    Assert ([IO.File]::GetLastWriteTimeUtc($configPath) -eq $stamp) 'idempotent timestamp'
+    [void]$xml.DocumentElement.AppendChild($xml.CreateElement('folder'));$xml.Save($configPath)
+    Set-DiskEngineConfig $configPath '22111' '22112' (-not (Test-Path $marker))
+    [xml]$xml=[IO.File]::ReadAllText($configPath)
+    Assert ($xml.SelectNodes('/configuration/folder').Count -eq 1) 'marked user folder preserved'
+    Remove-Item $marker
+    Set-DiskEngineConfig $configPath '22111' '22112' (-not (Test-Path $marker))
+    [xml]$xml=[IO.File]::ReadAllText($configPath)
+    Assert ($xml.SelectNodes('/configuration/folder').Count -eq 0) 'first setup removes folder'
+    $option=$xml.SelectSingleNode('/configuration/options/startBrowser');[void]$option.ParentNode.RemoveChild($option);$xml.Save($configPath)
+    Set-DiskEngineConfig $configPath '22111' '22112' $false
+    [xml]$xml=[IO.File]::ReadAllText($configPath)
+    Assert ($xml.SelectSingleNode('/configuration/options/startBrowser').InnerText -ceq 'false') 'missing option created'
+    foreach($required in @('options','gui')){
+        [xml]$broken=$unsafe;$node=$broken.SelectSingleNode('/configuration/'+$required);[void]$node.ParentNode.RemoveChild($node);$broken.Save($configPath)
+        Remove-Item $marker -ErrorAction SilentlyContinue
+        $before=[IO.File]::ReadAllText($configPath)
+        $failed=$false;try{Set-DiskEngineConfig $configPath '22111' '22112' $true}catch{$failed=$_.Exception.Message -match 'configuration/options and configuration/gui'}
+        Assert $failed "missing $required rejected"
+        Assert (([IO.File]::ReadAllText($configPath)) -ceq $before) 'invalid config unchanged'
+        Assert (-not (Test-Path $marker)) 'failure creates no marker'
+    }
+    $journal=Get-Content $script:LogFile -Raw
+    Assert ($journal -match 'engine.config.applied' -and $journal -notmatch 'apikey') 'changed keys logged without apikey'
+    'PASS safe config: existing unsafe XML, idempotent bytes/time, folder marker, missing option, missing options/gui rejected'
+} finally {Remove-Item -LiteralPath $temp -Recurse -Force}
+
 $tokens=$null;$parseErrors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'RemoteDisk.ps1'),[ref]$tokens,[ref]$parseErrors)
 Assert ($parseErrors.Count -eq 0) 'RemoteDisk parser errors'

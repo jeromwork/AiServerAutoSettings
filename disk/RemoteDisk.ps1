@@ -163,6 +163,39 @@ function Invoke-DiskApi([string]$Side,[string]$Route,[string]$Method='GET',$Body
 function Get-FreeDiskPort {
     $s=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,0);$s.Start();$v=$s.LocalEndpoint.Port;$s.Stop();$v
 }
+function Set-DiskEngineConfig([string]$Path,[string]$Listen,[string]$Gui,[bool]$First) {
+    [xml]$xml=[IO.File]::ReadAllText($Path)
+    $options=$xml.SelectSingleNode('/configuration/options')
+    $guiNode=$xml.SelectSingleNode('/configuration/gui')
+    if($null -eq $options -or $null -eq $guiNode){throw 'Syncthing config.xml must contain configuration/options and configuration/gui; engine not started'}
+    $changed=New-Object 'System.Collections.Generic.List[string]'
+    $values=[ordered]@{globalAnnounceEnabled='false';localAnnounceEnabled='false';relaysEnabled='false';natEnabled='false';startBrowser='false';crashReportingEnabled='false';autoUpgradeIntervalH='0';urAccepted='-1';listenAddress="tcp://127.0.0.1:$Listen"}
+    foreach($key in $values.Keys){
+        $nodes=$options.SelectNodes($key)
+        if($nodes.Count -ne 1 -or $nodes[0].InnerText -cne $values[$key]){
+            foreach($node in $nodes){[void]$options.RemoveChild($node)}
+            $node=$xml.CreateElement($key);$node.InnerText=$values[$key];[void]$options.AppendChild($node)
+            $changed.Add("options/$key")
+        }
+    }
+    $address=$guiNode.SelectSingleNode('address')
+    if($null -eq $address){$address=$xml.CreateElement('address');[void]$guiNode.AppendChild($address)}
+    if($address.InnerText -cne "127.0.0.1:$Gui"){$address.InnerText="127.0.0.1:$Gui";$changed.Add('gui/address')}
+    if($First){
+        $folders=$xml.SelectNodes('/configuration/folder')
+        foreach($folder in $folders){[void]$folder.ParentNode.RemoveChild($folder)}
+        if($folders.Count){$changed.Add('folder')}
+    }
+    if($changed.Count){
+        $temp=$Path+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
+        try {
+            $xml.Save($temp)
+            [IO.File]::Replace($temp,$Path,[NullString]::Value)
+        } finally {if(Test-Path -LiteralPath $temp){Remove-Item -LiteralPath $temp -Force}}
+        Write-DiskLog 'engine.config.applied' ($changed -join ', ')
+    }
+    if($First){[IO.File]::WriteAllText((Join-Path ([IO.Path]::GetDirectoryName($Path)) 'remote-disk-configured'),'configured')}
+}
 function Initialize-DiskLocal {
     $binary=Join-Path $script:DiskHome 'bin\syncthing.exe'
     if(-not (Test-Path -LiteralPath $binary)){throw 'Engine not installed'}
@@ -170,15 +203,17 @@ function Initialize-DiskLocal {
     if(-not (Test-Path $xmlPath)){
         & $binary generate --home $state --no-port-probing *> $null
         if($LASTEXITCODE){throw 'Syncthing generate failed'}
-        [xml]$xml=Get-Content $xmlPath
-        foreach($f in @($xml.configuration.folder)){[void]$xml.configuration.RemoveChild($f)}
-        $opt=$xml.configuration.options
-        foreach($n in @('globalAnnounceEnabled','localAnnounceEnabled','relaysEnabled','natEnabled','startBrowser','crashReportingEnabled')){$opt.$n='false'}
-        $opt.autoUpgradeIntervalH='0';$opt.urAccepted='-1';$opt.listenAddress="tcp://127.0.0.1:$($script:Config.listen)"
-        $xml.configuration.gui.address="127.0.0.1:$($script:Config.gui)";$xml.Save($xmlPath)
     }
-    [xml]$xml=Get-Content $xmlPath;$script:LocalKey=[string]$xml.configuration.gui.apikey
+    [xml]$xml=[IO.File]::ReadAllText($xmlPath)
+    $keyNode=$xml.SelectSingleNode('/configuration/gui/apikey')
+    $script:LocalKey='';if($null -ne $keyNode){$script:LocalKey=$keyNode.InnerText}
     try{[void](Invoke-DiskApi local 'system/ping');return}catch{}
+    $first=-not (Test-Path -LiteralPath (Join-Path $state 'remote-disk-configured'))
+    Set-DiskEngineConfig $xmlPath ([string]$script:Config.listen) ([string]$script:Config.gui) $first
+    [xml]$xml=[IO.File]::ReadAllText($xmlPath)
+    $keyNode=$xml.SelectSingleNode('/configuration/gui/apikey')
+    if($null -eq $keyNode){throw 'Syncthing config.xml has no gui/apikey; engine not started'}
+    $script:LocalKey=$keyNode.InnerText
     $script:Engine=Start-Process $binary -ArgumentList @('serve','--home',(Quote-Native $state),'--no-browser','--no-restart','--no-upgrade') -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $script:DiskHome 'syncthing.stdout.log') -RedirectStandardError (Join-Path $script:DiskHome 'syncthing.stderr.log')
     for($i=0;$i -lt 60;$i++){try{[void](Invoke-DiskApi local 'system/ping');Write-DiskLog 'syncthing.ready';return}catch{Start-Sleep -Milliseconds 200}}
     throw 'Local Syncthing unavailable'
