@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Two Syncthing 2.1.7 peers in disposable homes; total deadline includes all checks."""
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -18,6 +19,7 @@ START = time.monotonic()
 DEADLINE = START + 120
 HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 SIDES = []
+CHECKS = []
 sys.stdout.reconfigure(line_buffering=True)
 
 
@@ -32,18 +34,64 @@ def remaining():
     return value
 
 
-def run(args, env=None, ok=True, limit=15):
+def kill_group(process):
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def test_engines():
+    states = {os.fsencode(side['state']) for side in SIDES}
+    pids = []
+    for cmdline in Path('/proc').glob('[0-9]*/cmdline'):
+        try:
+            args = cmdline.read_bytes().split(b'\0')
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            continue
+        if args[0].rsplit(b'/', 1)[-1] == b'syncthing' and any(
+                (arg == b'--home' and value in states) or
+                (arg.startswith(b'--home=') and arg[7:] in states)
+                for arg, value in zip(args, args[1:])):
+            pids.append(int(cmdline.parent.name))
+    return pids
+
+
+def stop_engines():
+    end = min(DEADLINE, time.monotonic() + 5)
+    while pids := test_engines():
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if time.monotonic() >= end:
+            break
+        time.sleep(.02)
+    require(not test_engines(), 'test engines remain after cleanup')
+    print('engine cleanup: no test syncthing processes')
+
+
+def run(args, env=None, ok=True, limit=15, title=None):
+    before = time.monotonic()
     process = subprocess.Popen(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    if title:
+        CHECKS.append(process)
+    command = 'server-disk.sh ' + args[2] if args[:2] == ['bash', str(HERE / 'server-disk.sh')] else Path(args[0]).name
     try:
         stdout, stderr = process.communicate(timeout=min(limit, remaining()))
-        require(not ok or process.returncode == 0, f'command failed: {Path(args[0]).name}, exit {process.returncode} (output suppressed)')
+        last = stderr.decode(errors='replace').strip().splitlines()
+        require(not ok or process.returncode == 0, f'command failed: {command}, exit {process.returncode}: {last[-1][:300] if last else "(no stderr)"}')
         return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+    except subprocess.TimeoutExpired as error:
+        last = (error.stderr or b'').decode(errors='replace').strip().splitlines()
+        raise RuntimeError(f'command timed out: {command}: {last[-1][:300] if last else "(no stderr)"}') from error
     finally:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        kill_group(process)
         process.wait(timeout=1)
+        if title:
+            CHECKS.remove(process)
+            print(f'{title}: exit {process.returncode}, {time.monotonic() - before:.2f}s')
 
 
 def server(side, action, data=None, ok=True):
@@ -217,19 +265,20 @@ def main():
     try:
         with tempfile.TemporaryDirectory(prefix='disk-test-') as tmp:
             root = Path(tmp)
-            try:
-                exercise(root, archive)
-                for title, args in [('install', [str(Path.home() / '.cache/pwsh-test/pwsh'), '-NoProfile', '-File', str(HERE / 'test-install.ps1')]), ('windows-control', ['python3', '-B', str(HERE.parent / 'test-windows-control.py')]), ('bash syntax', ['bash', '-n', str(HERE / 'server-disk.sh')])]:
-                    before = time.monotonic(); run(args, dict(os.environ, HOME=tmp, PYTHONDONTWRITEBYTECODE='1'), limit=remaining())
-                    print(f'{title}: exit 0, {time.monotonic() - before:.2f}s')
-            finally:
-                for side in SIDES:
-                    pid = side['state'] / 'syncthing.pid'
-                    if pid.exists():
-                        try:
-                            os.killpg(int(pid.read_text()), signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                checks = []
+                try:
+                    for title, args in [('install', [str(Path.home() / '.cache/pwsh-test/pwsh'), '-NoProfile', '-File', str(HERE / 'test-install.ps1')]), ('windows-control', ['python3', '-B', str(HERE.parent / 'test-windows-control.py')]), ('bash syntax', ['bash', '-n', str(HERE / 'server-disk.sh')])]:
+                        checks.append(pool.submit(run, args, dict(os.environ, HOME=tmp, PYTHONDONTWRITEBYTECODE='1'), limit=remaining(), title=title))
+                    before = time.monotonic(); exercise(root, archive)
+                    print(f'engine checks: exit 0, {time.monotonic() - before:.2f}s')
+                    for check in checks:
+                        check.result(timeout=remaining())
+                finally:
+                    signal.setitimer(signal.ITIMER_REAL, 0)
+                    for process in list(CHECKS):
+                        kill_group(process)
+                    stop_engines()
         remaining()
         print(f'total: exit 0, {time.monotonic() - START:.2f}s (limit 120s)')
     finally:
@@ -241,5 +290,7 @@ if __name__ == '__main__':
         main()
     except Exception as error:
         message = str(error) if isinstance(error, RuntimeError) else type(error).__name__
+        if isinstance(error.__context__, RuntimeError):
+            message = f'{error.__context__}; cleanup: {message}'
         print(f'FAIL: {message}; {time.monotonic() - START:.2f}s', file=sys.stderr)
         sys.exit(1)

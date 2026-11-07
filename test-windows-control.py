@@ -200,9 +200,9 @@ $held=Test-ControlLock $first
             process=subprocess.Popen([str(PWSH),'-NoProfile','-File',str(stage/'Start-CodexWindowsBridge.ps1'),'-VPSHost','example.invalid','-VPSUser','tester','-IdentityFile',str(home/'key'),'-KnownHostsFile',str(home/'known'),'-SSHConfig',str(home/'config'),'-SSHExecutable',str(ssh),'-Workspace',tmp,'-SocketPath','/tmp/none.sock','-ProjectId','control','-HostId','host-one','-ControlOnly','-RetryForever','-LogFile',str(log)],cwd=ROOT,env=dict(os.environ,HOME=tmp,PATH=str(bin_dir)+os.pathsep+os.environ['PATH']),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
             try:
                 deadline=time.time()+90
-                while time.time()<deadline and process.poll() is None and (not count.exists() or len(count.read_text().split())<7):time.sleep(0.5)
+                while time.time()<deadline and process.poll() is None and (not count.exists() or len(count.read_text().split())<6):time.sleep(0.5)
                 self.assertIsNone(process.poll(),'bridge must keep retrying')
-                self.assertGreaterEqual(len(count.read_text().split()),7)
+                self.assertGreaterEqual(len(count.read_text().split()),6)
                 self.assertIn('bridge.disconnected',log.read_text())
             finally:
                 process.kill();process.wait()

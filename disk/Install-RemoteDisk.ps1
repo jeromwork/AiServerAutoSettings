@@ -21,6 +21,26 @@ function Install-DiskBinary($Url,$Hash,$Directory,$Name) {
     }finally{Remove-Item -LiteralPath $tmp -Recurse -Force}
 }
 function Get-DiskPort {$socket=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,0);$socket.Start();try{$socket.LocalEndpoint.Port}finally{$socket.Stop()}}
+function Wait-DiskChannel {
+    $watch=[Diagnostics.Stopwatch]::StartNew()
+    while($watch.ElapsedMilliseconds -lt 30000){
+        $client=New-Object Net.Sockets.TcpClient
+        try{
+            $connect=$client.ConnectAsync('127.0.0.1',2222)
+            if($connect.Wait([int][Math]::Max(1,[Math]::Min(1000,30000-$watch.ElapsedMilliseconds)))){
+                $stream=$client.GetStream();$bytes=New-Object byte[] 4;$count=0
+                while($count -lt 4 -and $watch.ElapsedMilliseconds -lt 30000){
+                    $read=$stream.ReadAsync($bytes,$count,4-$count)
+                    if(-not $read.Wait([int][Math]::Max(1,[Math]::Min(1000,30000-$watch.ElapsedMilliseconds)))){break}
+                    if($read.Result -eq 0){break};$count+=$read.Result
+                }
+                if($count -eq 4 -and [Text.Encoding]::ASCII.GetString($bytes) -ceq 'SSH-'){return}
+            }
+        }catch{}finally{$client.Dispose()}
+        if($watch.ElapsedMilliseconds -lt 30000){Start-Sleep -Milliseconds ([int][Math]::Min(250,30000-$watch.ElapsedMilliseconds))}
+    }
+    throw 'Канал не поднялся: нет баннера SSH на 127.0.0.1:2222 за 30 с. Трей и настройки сохранены; повторите установку.'
+}
 $step='Подготовка'
 try {
     if($Uninstall){Set-DiskRegistration $false;Stop-ScheduledTask -TaskName RemoteDiskChannel -ErrorAction SilentlyContinue;Unregister-ScheduledTask -TaskName RemoteDiskChannel -Confirm:$false -ErrorAction SilentlyContinue;Write-DiskLog 'Удаление автозапуска';Write-Output 'Автозапуск, задача и меню удалены. Пользовательские файлы сохранены.';return}
@@ -55,5 +75,6 @@ try {
     $local=$null;for($i=0;$i -lt 40;$i++){try{$local=Invoke-DiskApi 'system/status';break}catch{Start-Sleep -Milliseconds 250}};if(-not $local){throw 'Движок не запустился'}
     $step='Подключение устройств';[void](Invoke-DiskApi ('config/devices/'+$remote.deviceId) PUT @{deviceID=$remote.deviceId;name='RemoteDisk Server';addresses=@('tcp://127.0.0.1:22001');autoAcceptFolders=$false})
     [void](Invoke-DiskServer add-device @{deviceId=$local.myID;deviceName=$env:COMPUTERNAME} -Direct);Write-DiskUtf8 (Join-Path $script:DiskHome 'server.txt') $remote.deviceId
+    $step='Проверка канала';Wait-DiskChannel
     Write-DiskLog 'Установка';Write-Output 'RemoteDisk установлен. Добавляйте папки через контекстное меню.'
-}catch{Write-DiskLog $step $_;Write-Error 'Установка RemoteDisk не выполнена. Проверьте SSH-профиль, доступ к серверу и загрузкам.';exit 1}
+}catch{Write-DiskLog $step $_;Write-Error ('Установка RemoteDisk не выполнена: '+$_.Exception.Message+' Проверьте SSH-профиль, доступ к серверу и загрузкам.') -ErrorAction Continue;exit 1}

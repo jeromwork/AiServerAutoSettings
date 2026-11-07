@@ -20,7 +20,7 @@ function Invoke-DiskProcess($Exe,$Arguments,[string]$InputText='',[string]$Outpu
         $bytes=[Text.Encoding]::UTF8.GetBytes($InputText.Replace("`r",''));$write=$p.StandardInput.BaseStream.WriteAsync($bytes,0,$bytes.Length)
         if(-not $write.Wait(15000)){throw 'Таймаут ввода'};$p.StandardInput.Close()
         if(-not $p.WaitForExit(45000)){$p.Kill();throw 'Таймаут команды'};$out.GetAwaiter().GetResult() | Out-Null
-        if($p.ExitCode -ne 0){$reason='Внешняя команда не выполнена';if($err.Result -match 'Чужой .stignore'){$reason='Чужой .stignore на сервере: сохраните и удалите его вручную'}elseif($err.Result -match 'требуется -Merge'){$reason='Обе папки непустые: требуется -Merge'};throw ($reason+' (код выхода '+$p.ExitCode+')')}
+        if($p.ExitCode -ne 0){$reason='Внешняя команда не выполнена';if($p.ExitCode -eq 255 -and [IO.Path]::GetFileNameWithoutExtension($Exe) -ieq 'ssh'){$reason='Нет связи с сервером'}elseif($err.Result -match 'Чужой .stignore'){$reason='Чужой .stignore на сервере: сохраните и удалите его вручную'}elseif($err.Result -match 'требуется -Merge'){$reason='Обе папки непустые: требуется -Merge'};throw ($reason+' (код выхода '+$p.ExitCode+')')}
         if(-not $OutputFile){$out.Result.TrimStart([char]0xFEFF).Trim()}
     }finally{if($file){$file.Dispose()};if($p.Id -and -not $p.HasExited){$p.Kill()};$p.Dispose()}
 }
@@ -54,7 +54,7 @@ function New-DiskIni($Tray,$State,$Gui,$ApiKey) {
     @('[General]','v=2.1.9','[tray]','connections\size=1','connections\1\label=RemoteDisk',('connections\1\syncthingUrl=http://'+$Gui),('connections\1\apiKey='+$ApiKey),'connections\1\autoConnect=true','connections\1\reconnectInterval=30','notifyOnDisconnect=false','notifyOnErrors=true','showSyncthingNotifications=true','[startup]','syncthingAutostart=true','useLibSyncthing=false',('syncthingPath='+$Tray.Replace('\','/')),('syncthingArgs="syncthing serve --home \"'+$State.Replace('\','/')+'\" --no-browser --no-restart"'),'considerLauncherForReconnect=true','showLauncherButton=false','') -join "`n"
 }
 function New-DiskHop([string]$Text) {
-    $values=@{};foreach($line in $Text -split "`n"){if($line -match '^(hostname|user|identityfile|port) (.+)$' -and -not $values.ContainsKey($Matches[1])){$values[$Matches[1]]=$Matches[2].Trim('"')}}
+    $values=@{};foreach($line in $Text.Replace("`r",'') -split "`n"){if($line -match '^(hostname|user|identityfile|port) (.+)$' -and -not $values.ContainsKey($Matches[1])){$values[$Matches[1]]=$Matches[2].Trim('"')}}
     foreach($k in @('hostname','user','identityfile')){if(-not $values[$k]){throw 'Неполный профиль промежуточного хоста'}}
     $profileHome=[Environment]::GetFolderPath('UserProfile');if($env:USERPROFILE){$profileHome=$env:USERPROFILE};$key=$values.identityfile.Replace('%d',$profileHome)
     if($key -match '^~(?=[\\/]|$)'){$key=$profileHome+$key.Substring(1)}

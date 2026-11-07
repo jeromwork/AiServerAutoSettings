@@ -12,6 +12,8 @@ try {
     Assert ($captured.Count -eq 0 -and $bytes[0] -eq 91 -and $bytes -notcontains 13) 'UTF8 without BOM or CR, silent write'
     $hop=New-DiskHop "hostname hop.invalid`nuser tester`nidentityfile C:/Test User/key`nidentityfile ignored`nport 2200"
     Assert ($hop.server -eq 'hop.invalid' -and $hop.server_port -eq 2200 -and $hop.private_key_path -eq 'C:/Test User/key') 'SSH profile'
+    $hop=New-DiskHop "hostname hop.invalid`r`nuser tester`r`nidentityfile `"C:/Test User/key`"`r`nidentityfile ignored`r`nport 2200`r`n"
+    Assert ($hop.server -ceq 'hop.invalid' -and $hop.user -ceq 'tester' -and $hop.server_port -eq 2200 -and $hop.private_key_path -ceq 'C:/Test User/key' -and $hop.private_key_path -notmatch '[\x00-\x1f\x7f]') 'CRLF SSH values have no control characters'
     $oldProfile=$env:USERPROFILE;try{$env:USERPROFILE='C:\Users\Test User';foreach($key in @('~/.ssh/key','~\.ssh\key','%d/.ssh/key','%d\.ssh\key')){$hop=New-DiskHop ("hostname hop.invalid`nuser tester`nidentityfile "+$key+"`nport 22");Assert ($hop.private_key_path.Replace('\','/') -eq 'C:/Users/Test User/.ssh/key') 'Expanded identityfile'}}finally{$env:USERPROFILE=$oldProfile}
     $script:DiskHome=Join-Path $tmp 'RemoteDisk';$profile=Join-Path $tmp 'profile.json';$connection=@{sshExecutable='ssh';arguments=@('test');serverAddress='test.invalid';login='root';keyPath='unused';knownHostsPath='unused';configPath='unused'}
     Write-DiskUtf8 $profile ($connection|ConvertTo-Json);$refused=$false;try{Read-DiskProfile $profile}catch{$refused=$_.Exception.Message -eq 'SSH-профиль должен входить как рабочий пользователь, не root'};Assert $refused 'Root profile rejected'
