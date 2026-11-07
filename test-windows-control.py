@@ -1,0 +1,142 @@
+"""Isolated standalone-control checks: no real user state or Windows commands."""
+import base64
+import hashlib
+import json
+import os
+import pwd
+from pathlib import Path
+import socket
+import subprocess
+import tempfile
+import threading
+import unittest
+import server_node_catalog as catalog
+
+ROOT=Path(__file__).resolve().parent
+PWSH=Path(pwd.getpwuid(os.getuid()).pw_dir)/'.cache/pwsh-test/pwsh'
+
+class ControlTests(unittest.TestCase):
+    def record(self,home):
+        label='win-'+'a'*28
+        return dict(projectId='control',hostId='host-one',deviceLabel=label,windowsReplica=r'C:\Control Workspace',serverWorkspace=str(home/'work/projects/control'),socketPath=str(home/'.local/state/codex-remote'/(label+'.sock')),allowShell=True)
+
+    def test_catalog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home=Path(tmp); data=self.record(home)
+            normal=dict(ok=True,device=data['deviceLabel'],workspace=data['windowsReplica'],sync_guard=dict(required=True,project_id='control',host_id='host-one'),file_mutations_enabled=False)
+            control=dict(ok=True,device=data['deviceLabel'],workspace=data['windowsReplica'],control_only=True,project_id='control',host_id='host-one')
+            self.assertTrue(catalog.matches(data,normal));self.assertFalse(catalog.matches(data,control))
+            data['controlOnly']=True
+            self.assertTrue(catalog.matches(data,control));self.assertFalse(catalog.matches(data,normal))
+            for key in ('ok','device','workspace','control_only','project_id','host_id'):
+                bad=dict(control);bad[key]=False;self.assertFalse(catalog.matches(data,bad),key)
+            directory=home/'catalog';catalog.register(directory,data,str(home))
+            self.assertTrue(catalog.records(directory,str(home))[0]['controlOnly'])
+            data['controlOnly']=False;catalog.register(directory,data,str(home));self.assertNotIn('controlOnly',catalog.records(directory,str(home))[0])
+
+    def test_prepare_nonroot(self):
+        self.assertNotEqual(os.getuid(),0,'run these tests as an ordinary user')
+        with tempfile.TemporaryDirectory() as tmp:
+            home=Path(tmp); bin=home/'.local/bin';bin.mkdir(parents=True)
+            (home/'.codex').mkdir()
+            for name,config in [('claude','.claude.json'),('codex','.codex/config.toml')]:
+                file=bin/name
+                file.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$HOME/'+name+'.calls"\nprintf remote-agents-nodes > "$HOME/'+config+'"\n')
+                file.chmod(0o700)
+            data=self.record(home);data.update(deviceName='TEST-PC',controlOnly=True)
+            directory=home/'.local/share/remote-agents-nodes'; other=dict(data,hostId='other-host')
+            catalog.register(directory,other,str(home));other_file=directory/'other-host/control.json';before=other_file.read_bytes()
+            env=dict(os.environ,HOME=str(home),PATH=str(bin)+':/usr/bin:/bin')
+            # Feed CRLF sources through the exact shared launcher normalizer.
+            with tempfile.TemporaryDirectory() as stage:
+                stage=Path(stage)
+                for name in ('codex-windows-bridge.py','codex-bridge-session.py','server_node_catalog.py','server-control.sh'):
+                    (stage/name).write_bytes((ROOT/name).read_bytes().replace(b'\n',b'\r\n'))
+                (stage/'Start-WindowsControl.ps1').write_bytes((ROOT/'Start-WindowsControl.ps1').read_bytes())
+                command=". '"+str(stage/'Start-WindowsControl.ps1')+"' -LibraryOnly; $env:COMPUTERNAME='TEST-PC'; New-ControlPayload ([pscustomobject]@{hostId='host-one'}) '"+data['deviceLabel']+"' '"+data['windowsReplica']+"' ''"
+                payload=subprocess.check_output([str(PWSH),'-NoProfile','-Command',command],env=env)
+            self.assertNotIn(b'\r',payload)
+            for attempt in range(2):
+                result=subprocess.run(['bash','-s'],input=payload,env=env,capture_output=True,check=True)
+                last=json.loads(result.stdout.splitlines()[-1]);self.assertEqual(last['home'],str(home));self.assertEqual(last['user'],subprocess.check_output(['id','-un'],text=True).strip())
+            for name in ('claude','codex'):
+                self.assertEqual(len((home/(name+'.calls')).read_text().splitlines()),1)
+                self.assertIn('mcp add',(home/(name+'.calls')).read_text())
+            for name in ('codex-windows-bridge.py','codex-bridge-session.py','server_node_catalog.py'):
+                file=home/'.local/share/codex-remote'/name
+                self.assertEqual(file.stat().st_mode & 0o777,0o600);self.assertNotIn(b'\r',file.read_bytes())
+            record=json.loads((directory/'host-one/control.json').read_text());catalog.validate(record,str(home));self.assertTrue(record['controlOnly'])
+            self.assertEqual(other_file.read_bytes(),before);self.assertFalse((home/'work/projects/control').exists())
+
+    def test_real_session_binding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home=Path(tmp);home.chmod(0o700);path=home/'session.sock'
+            tcp=socket.socket();tcp.bind(('localhost',0));tcp.listen()
+            binding=dict(projectId='control',hostId='host-one',deviceLabel='win-'+'a'*28,windowsReplica=r'C:\Control Workspace')
+            seen=[]
+            def respond():
+                conn,_=tcp.accept()
+                with conn:
+                    frame=json.loads(conn.makefile('rb').readline());seen.append(frame);conn.sendall(b'{"ok":true}\n')
+            thread=threading.Thread(target=respond,daemon=True);thread.start()
+            env=dict(os.environ,HOME=tmp)
+            process=subprocess.Popen(['python3',str(ROOT/'codex-bridge-session.py'),'--socket',str(path)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env)
+            try:
+                config=dict(binding,token='a'*64,port=tcp.getsockname()[1],device=binding['deviceLabel'])
+                process.stdin.write(json.dumps(config).encode()+b'\n');process.stdin.flush()
+                self.assertEqual(json.loads(process.stdout.readline())['state'],'connected')
+                def request(data):
+                    with socket.socket(socket.AF_UNIX) as conn:
+                        conn.connect(str(path));conn.sendall(json.dumps(data).encode()+b'\n');return json.loads(conn.makefile('rb').readline())
+                self.assertFalse(request(dict(op='status',args={}))['ok'])
+                self.assertTrue(request(dict(op='status',args={},binding=binding))['ok'])
+                thread.join(3);self.assertEqual(seen[0]['binding'],binding)
+            finally:
+                process.stdin.close();process.wait(timeout=5);process.stdout.close();process.stderr.close();tcp.close()
+
+    def test_executor_control_strictmode(self):
+        script=r'''
+Set-StrictMode -Version Latest
+$source=Get-Content './windows-bridge-executor.ps1' -Raw
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)
+$dispatch=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Dispatch'},$true)
+Invoke-Expression $dispatch.Extent.Text
+$config=[pscustomobject]@{control_only=$true;project_id='control';host_id='host-one';enforce_target=$true}
+$begin=$source.IndexOf('$controlOnly =');$end=$source.IndexOf('$syncState =',$begin)
+Invoke-Expression $source.Substring($begin,$end-$begin)
+$secret='a'*64;$device='test-device';$root='C:\Control';$allowShell=$true;$processes=@{}
+$binding=[pscustomobject]@{projectId='control';hostId='host-one';deviceLabel=$device;windowsReplica=$root}
+$request=[pscustomobject]@{token=$secret;op='status';args=@{};binding=$binding}
+$status=Dispatch $request
+if(!$status.control_only -or $status.project_id -ne 'control' -or $status.host_id -ne 'host-one' -or $status.sync_guard.required){throw 'Invalid control status'}
+$denied=$false
+try {Dispatch ([pscustomobject]@{token=$secret;op='status';args=@{}})} catch {$denied=$true}
+if(!$denied){throw 'Missing binding accepted'}
+$binding.hostId='wrong';$denied=$false
+try {Dispatch $request} catch {$denied=$true}
+if(!$denied){throw 'Wrong binding accepted'}
+# Actual new launcher config block must build valid properties on both PS versions.
+$launch=Get-Content './Start-CodexWindowsBridge.ps1' -Raw
+$start=$launch.IndexOf('    if ($ControlOnly) {');$end=$launch.IndexOf('    $executor.StandardInput.WriteLine',$start)
+$ControlOnly=$true;$ProjectId='control';$HostId='host-one';$localConfig='{"enforce_target":false}'
+Invoke-Expression $launch.Substring($start,$end-$start)
+$c=$localConfig|ConvertFrom-Json
+if(!$c.control_only -or !$c.enforce_target -or $c.project_id -ne 'control' -or $c.host_id -ne 'host-one'){throw 'Invalid launcher config'}
+'PASS StrictMode: absent sync_guard, status identity, binding required, launcher localConfig'
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            output=subprocess.check_output([str(PWSH),'-NoProfile','-Command',script],cwd=ROOT,env=dict(os.environ,HOME=tmp),text=True)
+            self.assertIn('PASS StrictMode',output)
+
+    def test_powershell_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home=Path(tmp);profile=home/'host-one/ssh-transport.json';profile.parent.mkdir()
+            profile.write_text(json.dumps(dict(sshExecutable='ssh',serverAddress='example.invalid',login='tester',keyPath='key',knownHostsPath='known',configPath='config',arguments=['-o','ClearAllForwardings=yes','-p','2222','example.invalid'])))
+            script=". './Start-WindowsControl.ps1' -LibraryOnly; $c=Read-ControlProfile '"+str(profile)+"'; @{profile=$c;label=(Get-ControlLabel $c.hostId);arguments=@(Get-ControlSshArguments $c)}|ConvertTo-Json -Depth 5 -Compress"
+            result=json.loads(subprocess.check_output([str(PWSH),'-NoProfile','-Command',script],cwd=ROOT,env=dict(os.environ,HOME=tmp)))
+            self.assertEqual(result['profile']['hostId'],'host-one');self.assertEqual(result['profile']['port'],2222)
+            self.assertEqual(result['label'],'win-'+hashlib.sha256(b'control/host-one').hexdigest()[:28]);self.assertNotIn('ClearAllForwardings',json.dumps(result['arguments']))
+            self.assertEqual(result['arguments'][-2: ],['tester@example.invalid','bash -s'])
+
+if __name__=='__main__': unittest.main(verbosity=2)

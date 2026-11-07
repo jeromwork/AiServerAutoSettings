@@ -40,6 +40,8 @@ def register(directory, data, home):
     host_directory.mkdir(mode=0o700,exist_ok=True)
     path = safe(host_directory/(data['projectId']+'.json'))
     record = {key: data[key] for key in ('projectId', 'hostId', 'deviceLabel', 'socketPath', 'serverWorkspace', 'windowsReplica', 'allowShell')}
+    if data.get('controlOnly') is True:
+        record['controlOnly'] = True
     record['deviceName'] = str(data.get('deviceName', data['hostId']))[:80]
     record['projectName'] = str(data.get('projectName',data['projectId']))[:120]
     if path.exists():
@@ -70,6 +72,12 @@ def records(directory, home):
 
 
 def matches(data, status):
+    if data.get('controlOnly') is True:
+        return (status.get('ok') is True and status.get('device') == data['deviceLabel']
+                and isinstance(status.get('workspace'), str)
+                and status.get('workspace', '').casefold().rstrip('\\') == data['windowsReplica'].casefold().rstrip('\\')
+                and status.get('control_only') is True and status.get('project_id') == data['projectId']
+                and status.get('host_id') == data['hostId'])
     guard = status.get('sync_guard', {})
     return (status.get('ok') is True and status.get('device') == data['deviceLabel']
             and status.get('workspace', '').casefold().rstrip('\\') == data['windowsReplica'].casefold().rstrip('\\')

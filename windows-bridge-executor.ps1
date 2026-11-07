@@ -62,7 +62,9 @@ if (-not [IO.Directory]::Exists($root)) { throw 'Selected workspace does not exi
 $secret = [string]$config.token
 $allowShell = $config.allow_shell -eq $true
 $serverOwned = $config.server_owned -eq $true
-$syncGuard = $config.sync_guard
+$controlOnly = $config.PSObject.Properties['control_only'] -and $config.control_only -eq $true
+$syncGuard = if ($config.PSObject.Properties['sync_guard']) { $config.sync_guard } else { @{path='';data_dir='';project_id='';host_id=''} }
+if ($controlOnly) { $syncGuard=@{path='';data_dir='';project_id=[string]$config.project_id;host_id=[string]$config.host_id} }
 $syncState = 'not_checked'
 $device = [string]$config.device
 $parentProcess = [Diagnostics.Process]::GetProcessById([int]$config.parent_pid)
@@ -114,6 +116,7 @@ function Workspace-Path([string]$relative) {
 }
 
 function Assert-SyncBarrier {
+    if ($controlOnly) { return }
     if (-not $serverOwned) { return }
     $script:syncState = 'denied'
     if (-not $syncGuard -or -not $syncGuard.path -or -not $syncGuard.data_dir -or -not $syncGuard.project_id -or -not $syncGuard.host_id) { throw 'Sync barrier unavailable; execution denied.' }
@@ -182,6 +185,7 @@ function Dispatch($request) {
                 $found = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
                 $capabilities[$name] = @{ available = $null -ne $found; path = $(if ($found) { $found.Source } else { $null }) }
             }
+            if ($controlOnly) { return @{ok=$true;device=$device;platform='windows';workspace=$root;shell_enabled=$allowShell;control_only=$true;project_id=[string]$config.project_id;host_id=[string]$config.host_id;file_mutations_enabled=$true;sync_guard=@{required=$false};capabilities=$capabilities;active_processes=$processes.Count} }
             return @{ ok = $true; device = $device; platform = 'windows'; workspace = $root; shell_enabled = $allowShell; file_mutations_enabled = -not $serverOwned; sync_guard = @{ required=$serverOwned; project_id=[string]$syncGuard.project_id; host_id=[string]$syncGuard.host_id; state=$syncState }; capabilities = $capabilities; active_processes = $processes.Count; notes = 'Capabilities are executable discovery only; ADB devices, VPN routes and remote SSH have not been tested. A sync preflight confirms the snapshot before process start; it does not freeze subsequent server edits.' }
         }
         'list' {

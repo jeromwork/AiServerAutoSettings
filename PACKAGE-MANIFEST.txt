@@ -97,3 +97,7 @@ REMOTE-CHAT.md
 REMOTE-CHAT-VERIFICATION.md
 HAPP-IMPORT.bat
 04-disk.cmd
+05-control.cmd
+Start-WindowsControl.ps1
+server-control.sh
+test-windows-control.py

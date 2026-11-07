@@ -98,3 +98,7 @@ VPN для HAPP использует Xray с VLESS/REALITY на TCP 8443. Сер
 ## Windows sync app (release 1 work in progress)
 
 `app/RemoteAgents.Core` contains shared sync status, configuration, ignore policy, and context-menu command logic. Run `~/.dotnet/dotnet test app/RemoteAgents.Tests/RemoteAgents.Tests.csproj`. The tray publish target is `app/RemoteAgents.Tray` (`win-x64`, self-contained); PowerShell integration still needs completion.
+
+## Отдельное управление Windows
+
+Запустите `05-control.cmd`: выберите сохранённый SSH-профиль, чтобы подключить только MCP-мост управления компьютером, без синхронизации и установки агентов. Можно указать `-Profile <путь>` и `-AgentUser <пользователь сервера>` (при входе root). Рабочая папка и журналы находятся в `%LOCALAPPDATA%\RemoteAgents\control`. Команды агентов выполняются с вашими правами Windows; Ctrl+C отключает мост.

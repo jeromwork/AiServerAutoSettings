@@ -15,6 +15,7 @@ param(
     [switch]$AllowShell,
     [string]$AskpassExecutable,
     [switch]$ServerOwnedReplica,
+    [switch]$ControlOnly,
     [string]$SyncGuardPath,
     [string]$SyncDataDir,
     [ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$')][string]$ProjectId,
@@ -87,7 +88,8 @@ if (-not (Test-Path -LiteralPath $IdentityFile -PathType Leaf)) { throw 'SSH ide
 if ($SSHConfig -and -not (Test-Path -LiteralPath $SSHConfig -PathType Leaf)) { throw 'SSH config path does not exist.' }
 if ($AskpassExecutable -and -not (Test-Path -LiteralPath $AskpassExecutable -PathType Leaf)) { throw 'Askpass helper path does not exist.' }
 if (-not (Test-Path -LiteralPath $Workspace -PathType Container)) { throw 'Select an existing workspace folder.' }
-if (($SyncGuardPath -or $SyncDataDir -or $ProjectId -or $HostId) -and -not $ServerOwnedReplica) { throw 'Sync binding requires ServerOwnedReplica mode.' }
+if ($ControlOnly -and ($ServerOwnedReplica -or $SyncGuardPath -or $SyncDataDir -or -not $ProjectId -or -not $HostId)) { throw 'ControlOnly requires identity without sync mode.' }
+if (($SyncGuardPath -or $SyncDataDir -or $ProjectId -or $HostId) -and -not $ServerOwnedReplica -and -not $ControlOnly) { throw 'Sync binding requires ServerOwnedReplica mode.' }
 if ($SyncGuardPath) {
     if (-not $SyncDataDir -or -not $ProjectId -or -not $HostId) { throw 'Sync guard requires DataDir, ProjectId and HostId.' }
     $SyncGuardPath = [IO.Path]::GetFullPath($SyncGuardPath)
@@ -107,6 +109,14 @@ $executor = $null; $ssh = $null
 try {
     $executor = Start-PrivateProcess 'powershell.exe' @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'windows-bridge-executor.ps1'))
     $localConfig = @{ token = $token; workspace = [IO.Path]::GetFullPath($Workspace); device = $DeviceLabel; allow_shell = [bool]$AllowShell; parent_pid = $PID; server_owned = [bool]$ServerOwnedReplica; enforce_target=[bool]$ServerOwnedReplica; sync_guard = @{ path=$SyncGuardPath; data_dir=$SyncDataDir; project_id=$ProjectId; host_id=$HostId } } | ConvertTo-Json -Depth 4 -Compress
+    if ($ControlOnly) {
+        $controlConfig=$localConfig | ConvertFrom-Json
+        $controlConfig | Add-Member -NotePropertyName control_only -NotePropertyValue $true
+        $controlConfig | Add-Member -NotePropertyName project_id -NotePropertyValue $ProjectId
+        $controlConfig | Add-Member -NotePropertyName host_id -NotePropertyValue $HostId
+        $controlConfig.enforce_target=$true
+        $localConfig=$controlConfig | ConvertTo-Json -Depth 4 -Compress
+    }
     $executor.StandardInput.WriteLine($localConfig); $executor.StandardInput.Flush(); $localConfig = $null
     $ready = (Await-Line $executor 20) | ConvertFrom-Json
     if ($ready.state -ne 'ready') { throw 'Windows executor did not initialize.' }
