@@ -30,7 +30,7 @@ class DiskFixture(m.Fixture):
             m.require(tree.findtext('gui/address')==f"127.0.0.1:{data['gui']}",'GUI listener')
         for i,s in enumerate(self.sides):
             peer=self.sides[1-i];s['peer']=peer['identity']
-            self.api(s,'config/devices/'+s['peer'],'PUT',dict(deviceID=s['peer'],addresses=[f"tcp://127.0.0.1:{peer['listen']}"],autoAcceptFolders=False))
+            self.api(s,'config/devices/'+s['peer'],'PUT',dict(deviceID=s['peer'],addresses=[f"tcp://127.0.0.1:{peer['listen']}"],autoAcceptFolders=False,paused=True))
             f=dict(policy['folder']);f.update(id='ra-'+m.PROJECT,path=str(s['workspace']),devices=[dict(deviceID=s['identity']),dict(deviceID=s['peer'])])
             self.api(s,'config/folders/'+f['id'],'PUT',f)
             # Same as RemoteDisk: local file or remote REST while paused.
@@ -48,6 +48,16 @@ class DiskFixture(m.Fixture):
         result=subprocess.run(['bash',str(HERE/'server-disk.sh'),'bootstrap','--archive',str(self.archive)],env=s['env'],capture_output=True,text=True,check=True,timeout=30)
         m.require(json.loads(result.stdout)['deviceId']==s['identity'],'identity changed')
         s['stopped']=False
+    def k5(self):
+        # Do not dial a peer before both sides trust each other and have indexed their
+        # initial files: an early rejected connection otherwise enters dial backoff.
+        for side in self.sides:self.start(side)
+        for side in self.sides:self.call(side,'resume')
+        self.wait(lambda:all((lambda db:db['state']=='idle' and db['localFiles']>=1)(self.api(side,'db/status?folder=ra-'+m.PROJECT)) for side in self.sides),'initial local scans before connection')
+        for side in self.sides:self.api(side,'config/devices/'+side['peer'],'PATCH',dict(paused=False))
+        self.wait(lambda:all(self.call(side,'health')['connected'] for side in self.sides),'bilateral initial connection')
+        self.wait(lambda:all(self.both(f'initial-{i}.txt',f'initial-{i}') for i in range(2)) and self.settled(),'initial union and indexed convergence')
+        m.require(all(not list((side['workspace']/'.stversions').rglob('*')) for side in self.sides),'initial files archived/deleted')
     def k7(self):
         a,b=self.sides
         self.wait(lambda:self.call(a,'health')['connected'],'before disconnect')
@@ -441,7 +451,84 @@ Add-DiskFolder $LocalPath 'upload'
     def close(self):
         super().close()
         for proxy in getattr(self,'proxies',[]):proxy.shutdown();proxy.server_close()
+def log_delivery_checks():
+    """Real PS transport and receiver, replacing only SSH/network with a local process."""
+    pwsh=Path.home()/'.cache/pwsh-test/pwsh'
+    with tempfile.TemporaryDirectory(prefix='remote-disk-logs-') as temp:
+        root=Path(temp);server=root/'server';server.mkdir()
+        counter=root/'ssh-count';fail=root/'fail';shim=root/'ssh.py'
+        shim.write_text("""#!/usr/bin/env python3
+import os,sys,subprocess
+from pathlib import Path
+root=Path(__file__).parent
+with (root/'ssh-count').open('a') as f:f.write('1\\n')
+data=sys.stdin.buffer.read()
+if (root/'fail').exists():
+    print('synthetic token=do-not-leak',file=sys.stderr);sys.exit(44)
+result=subprocess.run(['bash','-c',sys.argv[-1]],input=data,env=dict(os.environ,HOME=str(root/'server')))
+sys.exit(result.returncode)
+""")
+        shim.chmod(0o700)
+        driver=root/'send.ps1'
+        driver.write_text("""param($Library,$DataRoot,$Transport,$DeviceName)
+. $Library -LibraryOnly
+$script:DiskHome=$DataRoot;$script:Queue=Join-Path $DataRoot 'logs/queue'
+[void][IO.Directory]::CreateDirectory($script:Queue)
+$script:HostName=$DeviceName;$script:LocalKey='';$script:RemoteKey=''
+$script:LogFile=Join-Path $DataRoot 'logs/delivery.jsonl'
+$script:Connection=[pscustomobject]@{sshExecutable=$Transport;arguments=@('fixture.invalid')}
+Send-DiskLogs
+""")
+        clients={name:root/name for name in ('client-a','client-b')}
+        for name,home in clients.items():
+            logs=home/'logs';logs.mkdir(parents=True)
+            for i in range(3):(logs/f'session-{i}.jsonl').write_text(json.dumps(dict(stage='test',message=f'{name}-{i}'))+'\n')
+        def count():return counter.read_text().count('1') if counter.exists() else 0
+        def send(name):
+            result=subprocess.run([str(pwsh),'-NoProfile','-File',str(driver),'-Library',str(HERE/'RemoteDisk.ps1'),'-DataRoot',str(clients[name]),'-Transport',str(shim),'-DeviceName',name],capture_output=True,text=True,timeout=25)
+            m.require(result.returncode==0,'log cycle failed: '+result.stderr[-1500:])
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=2) as pool:list(pool.map(send,clients))
+        m.require(count()==2,'expected one SSH for three changed files per computer')
+        remote=server/'.local/share/remote-disk/logs'
+        for name,home in clients.items():
+            for file in (home/'logs').glob('*.jsonl'):m.require((remote/name/file.name).read_bytes()==file.read_bytes(),'multi-host log contents changed')
+            m.require(not (home/'logs/delivery.jsonl').exists(),'successful delivery wrote its own journal')
+            m.require(not list((home/'logs/queue').glob('*')),'acknowledged batch remains queued')
+        before=count();send('client-a');send('client-b')
+        m.require(count()==before,'unchanged persisted sessions caused SSH after process restart')
+        local=clients['client-a']/'logs/session-0.jsonl'
+        stamp=local.stat().st_mtime
+        local.write_text(local.read_text().replace('client-a-0','client-a-X'))
+        os.utime(local,(stamp,stamp+1));send('client-a')
+        m.require(count()==before+1 and (remote/'client-a'/local.name).read_bytes()==local.read_bytes(),'same-size changed file not delivered')
+        os.utime(local,(stamp,stamp+2));send('client-a')
+        m.require(count()==before+2,'mtime-only modification not delivered')
+        # Interrupted delivery is durable, and a later source write cannot alter its snapshot.
+        local.write_text('{"stage":"test","message":"offline snapshot"}\n');fail.touch();send('client-a')
+        pending=clients['client-a']/'logs/queue/pending.json'
+        snapshot=pending.read_bytes();send('client-a')
+        m.require(pending.read_bytes()==snapshot,'retry changed the pending snapshot')
+        journal=clients['client-a']/'logs/delivery.jsonl'
+        m.require('do-not-leak' not in journal.read_text(),'SSH failure leaked named secret')
+        local.write_text('{"stage":"test","message":"written while offline"}\n')
+        fail.unlink();send('client-a')
+        m.require(not pending.exists() and 'offline snapshot' in (remote/'client-a'/local.name).read_text(),'retry not acknowledged atomically')
+        send('client-a');send('client-a');before=count();send('client-a')
+        m.require(count()==before and (remote/'client-a'/local.name).read_bytes()==local.read_bytes(),'successful delivery self-feeds, or concurrent source edit lost')
+        # Cleanup applies to old/start-only/empty sessions on both sides without touching other hosts.
+        for base in (clients['client-a']/'logs',remote/'client-a'):
+            (base/'session-empty.jsonl').write_text('')
+            (base/'session-start.jsonl').write_text('{"stage":"start"}\n')
+            old=base/'session-old.jsonl';old.write_text('{"stage":"test"}\n');os.utime(old,(time.time()-8*86400,)*2)
+        local.write_text('{"stage":"test","message":"retention trigger"}\n');send('client-a')
+        for base in (clients['client-a']/'logs',remote/'client-a'):
+            m.require(all(not (base/f'session-{kind}.jsonl').exists() for kind in ('empty','start','old')),'retention left old/empty session')
+        m.require((remote/'client-b/session-0.jsonl').exists(),'retention removed another computer journal')
+        print('PASS real journal transport/receiver: two computers, one SSH batches changes, persisted no-op after restart, size/mtime detection, durable failed retry/ack, no success feedback or secret, seven-day/empty cleanup on both sides',flush=True)
+
 def main():
+    log_delivery_checks()
     m.LABELS[2]='K2 edits/deletions both directions; no version directories'
     m.LABELS[3]='K3 server resolves both conflict winners without copies or extra directories'
     policy=json.loads(Path(sys.argv[2]).read_text(encoding='utf-8-sig'))

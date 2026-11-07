@@ -6,7 +6,7 @@ $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
 $script:LastInitError=''
 $script:ProfileFile='';$script:Tunnel=$null;$script:Safety=$null;$script:DiskHome=''
-$script:RemoteState=$null;$script:EngineInstall=$null
+$script:RemoteState=$null;$script:EngineInstall=$null;$script:PendingLogStart=$null
 $script:ServerJob=$null;$script:NextServerList=[DateTime]::MinValue;$script:ExitUnlock=$false;$script:PendingDisconnect=@();$script:ConflictScan=$null
 . (Join-Path $PSScriptRoot 'DiskLock.ps1')
 
@@ -200,6 +200,9 @@ function Get-DiskRelative([string]$Root,[string]$Item) {
 }
 function Write-DiskLog([string]$Stage,[string]$Message='',[long]$Duration=0) {
     $row=@{time=[DateTime]::UtcNow.ToString('o');stage=$Stage;durationMs=$Duration;hostId=$script:HostName;message=(Protect-DiskText $Message)} | ConvertTo-Json -Compress
+    # Short commands with no useful events leave no empty/start-only session behind.
+    if($Stage -eq 'start'){$script:PendingLogStart=$row;return}
+    if($script:PendingLogStart){$row=$script:PendingLogStart+"`n"+$row;$script:PendingLogStart=$null}
     [IO.File]::AppendAllText($script:LogFile,$row+"`n",(New-Object Text.UTF8Encoding($false)))
 }
 function Save-DiskConfig {
@@ -235,7 +238,7 @@ function Select-DiskProfile {
 }
 # This script has CRLF on Windows; bash treats a stray CR as part of the command.
 function Convert-DiskRemoteText([string]$Text) { $Text.TrimStart([char]0xFEFF).Replace("`r`n","`n").Replace("`r","`n") }
-function Start-DiskSsh([string]$RemoteCommand,[string]$InputText='', [string[]]$Extra=@(),[switch]$KeepOpen) {
+function Start-DiskSsh([string]$RemoteCommand,[string]$InputText='', [string[]]$Extra=@(),[switch]$KeepOpen,[switch]$QuietSuccess) {
     $RemoteCommand=Convert-DiskRemoteText $RemoteCommand;$InputText=Convert-DiskRemoteText $InputText
     $c=$script:Connection
     $base=@($c.arguments)
@@ -259,63 +262,112 @@ function Start-DiskSsh([string]$RemoteCommand,[string]$InputText='', [string[]]$
         $p.StandardInput.BaseStream.Flush()
     }
     if(-not $KeepOpen){$p.StandardInput.Close()}
-    Write-DiskLog 'ssh.start' ('pid='+$p.Id)
-    @{p=$p;out=$out;err=$err;started=[DateTime]::UtcNow}
+    if(-not $QuietSuccess){Write-DiskLog 'ssh.start' ('pid='+$p.Id)}
+    @{p=$p;out=$out;err=$err;started=[DateTime]::UtcNow;quiet=[bool]$QuietSuccess}
 }
 function Complete-DiskSsh($Job,[int]$Timeout=30) {
     if(-not $Job.p.WaitForExit($Timeout*1000)){$Job.p.Kill();$Job.p.WaitForExit();Write-DiskLog 'ssh.timeout';throw 'SSH timeout'}
     $stderr=Protect-DiskText $Job.err.Result
-    Write-DiskLog 'ssh.exit' ('code='+$Job.p.ExitCode+' stderr='+$stderr) ([long]([DateTime]::UtcNow-$Job.started).TotalMilliseconds)
+    if(-not $Job.ContainsKey('quiet') -or -not $Job.quiet -or $Job.p.ExitCode -ne 0){Write-DiskLog 'ssh.exit' ('code='+$Job.p.ExitCode+' stderr='+$stderr) ([long]([DateTime]::UtcNow-$Job.started).TotalMilliseconds)}
     if($Job.p.ExitCode -ne 0){throw 'SSH failed; inspect journal'}
     Convert-DiskRemoteText $Job.out.Result
 }
-function Send-DiskLogs([switch]$DrainOnly,[switch]$First) {
-    if($script:Upload){
-        if(-not $script:Upload.p.HasExited){
-            if(([DateTime]::UtcNow-$script:Upload.started).TotalSeconds -gt 15){$script:Upload.p.Kill()}
-            return
+function Remove-DiskExpiredLogs([string]$LogRoot) {
+    foreach($dir in @($LogRoot,(Join-Path $LogRoot 'queue'),(Join-Path $LogRoot 'sent'))){
+        if(-not [IO.Directory]::Exists($dir)){continue}
+        foreach($file in @(Get-ChildItem -LiteralPath $dir -Filter '*.jsonl' -File)){
+            $empty=$file.Length -eq 0
+            if(-not $empty -and $file.Name -like 'session-*'){
+                $stream=New-Object IO.FileStream($file.FullName,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+                $reader=New-Object IO.StreamReader($stream)
+                try{$first=$reader.ReadLine();$second=$reader.ReadLine();$empty=($null -eq $second -and ($first|ConvertFrom-Json).stage -eq 'start')}catch{}finally{$reader.Dispose()}
+            }
+            if($empty -or ($file.LastWriteTimeUtc -lt [DateTime]::UtcNow.AddDays(-7) -and ($file.Name -like 'session-*' -or $dir -ne $LogRoot))){Remove-Item -LiteralPath $file.FullName -Force}
         }
-        try{[void](Complete-DiskSsh $script:Upload 1);Move-Item -LiteralPath $script:Pending -Destination (Join-Path $script:Sent ([IO.Path]::GetFileName($script:Pending))) -Force}catch{}
-        $script:Upload=$null
-        Get-ChildItem -LiteralPath $script:Sent -Filter '*.jsonl' | Where-Object {$_.LastWriteTimeUtc -lt [DateTime]::UtcNow.AddDays(-30)} | Remove-Item -Force
     }
-    if($DrainOnly -or -not $script:Connection){return}
-    # Immutable batch, atomic remote replace: retries cannot duplicate or lose a batch.
-    $pending=@(Get-ChildItem -LiteralPath $script:Queue -Filter '*.jsonl'|Sort-Object Name|Select-Object -First 1)
-    if($First -or -not $pending.Count){
-        $script:Pending=Join-Path $script:Queue (([guid]::NewGuid().ToString('N'))+'.jsonl')
-        Copy-Item -LiteralPath $script:LogFile -Destination $script:Pending
-        # Rotate active journal only after the durable copy exists.
-        [IO.File]::WriteAllText($script:LogFile,'')
-    }else{$script:Pending=$pending[0].FullName}
-    $name=[IO.Path]::GetFileName($script:Pending)
-    $remote='umask 077; d="$HOME/.local/share/remote-disk/logs/'+$script:HostName+'"; mkdir -p "$d" && cat > "$d/'+$name+'.tmp" && mv "$d/'+$name+'.tmp" "$d/'+$name+'"'
-    $script:Upload=Start-DiskSsh $remote ([IO.File]::ReadAllText($script:Pending))
+}
+function Read-DiskLogBytes([string]$LogPath) {
+    $stream=New-Object IO.FileStream($LogPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    $buffer=New-Object IO.MemoryStream
+    try{$stream.CopyTo($buffer);[Convert]::ToBase64String($buffer.ToArray())}finally{$buffer.Dispose();$stream.Dispose()}
+}
+function Get-DiskLogReceiver {
+    # Inline stdlib receiver also works before server bootstrap has installed any files.
+    $code=@'
+import os,sys,json,base64,re,time
+from pathlib import Path
+batch=json.load(sys.stdin)
+assert re.fullmatch(r'[A-Za-z0-9_-]+',batch['host'])
+root=Path.home()/'.local/share/remote-disk/logs'/batch['host']
+assert not any(p.is_symlink() for p in (root,*root.parents))
+root.mkdir(parents=True,exist_ok=True,mode=0o700)
+for entry in batch['files']:
+    name=entry['name']
+    assert re.fullmatch(r'[A-Za-z0-9_.-]+\.jsonl',name) and not name.startswith('.')
+    dest=root/name;tmp=root/(name+'.tmp')
+    assert not dest.is_symlink() and not tmp.is_symlink()
+    with tmp.open('wb') as f:f.write(base64.b64decode(entry['data'],validate=True))
+    tmp.chmod(0o600);tmp.replace(dest)
+    stamp=entry['modified'];os.utime(dest,(stamp,stamp))
+for file in root.glob('*.jsonl'):
+    if file.is_symlink():continue
+    empty=file.stat().st_size==0
+    if not empty and file.name.startswith('session-'):
+        try:
+            with file.open(encoding='utf-8-sig') as f:
+                first=f.readline();second=f.readline()
+            empty=not second and json.loads(first).get('stage')=='start'
+        except (ValueError,OSError):pass
+    if empty or (file.name.startswith('session-') and file.stat().st_mtime<time.time()-7*86400):file.unlink()
+print('ok')
+'@
+    $encoded=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Convert-DiskRemoteText $code)))
+    'umask 077; python3 -c "import base64;exec(base64.b64decode('+[char]39+$encoded+[char]39+'))"'
+}
+function Send-DiskLogs([switch]$DrainOnly,[switch]$First) {
+    if(-not $script:Connection){return}
+    $logs=Join-Path $script:DiskHome 'logs';Remove-DiskExpiredLogs $logs
+    $statePath=Join-Path $logs 'delivery-state.json';$pendingPath=Join-Path $script:Queue 'pending.json'
+    $state=Read-DiskJson $statePath
+    if(-not $state){$state=[pscustomobject]@{files=[pscustomobject]@{};delivery='ready'}}
+    $batch=Read-DiskJson $pendingPath
+    if(-not $batch -and -not $DrainOnly){
+        $changed=@()
+        foreach($dir in @($logs,$script:Queue)){
+            foreach($file in @(Get-ChildItem -LiteralPath $dir -Filter '*.jsonl' -File)){
+                $stamp=[string]$file.Length+':'+$file.LastWriteTimeUtc.Ticks
+                $old=$state.files.PSObject.Properties[$file.Name]
+                if($old -and $old.Value -ceq $stamp -and $dir -eq $logs){continue}
+                $changed+=@{name=$file.Name;stamp=$stamp;data=(Read-DiskLogBytes $file.FullName);modified=[long]($file.LastWriteTimeUtc-(New-Object DateTime(1970,1,1,0,0,0,[DateTimeKind]::Utc))).TotalSeconds;queued=($dir -eq $script:Queue)}
+            }
+        }
+        if(-not $changed.Count){return}
+        $batch=[pscustomobject]@{host=$script:HostName;files=@($changed)};Write-DiskJson $pendingPath $batch
+    }
+    if(-not $batch){return}
+    try{
+        $ack=Complete-DiskSsh (Start-DiskSsh (Get-DiskLogReceiver) ($batch|ConvertTo-Json -Depth 8 -Compress) -QuietSuccess) 15
+        if($ack.Trim() -cne 'ok'){throw 'Journal delivery not acknowledged'}
+        foreach($file in $batch.files){$state.files|Add-Member -NotePropertyName $file.name -NotePropertyValue $file.stamp -Force}
+        if($state.delivery -ne 'ready'){Write-DiskLog 'delivery.recovered';$state.delivery='ready'}
+        Write-DiskJson $statePath $state
+        foreach($file in $batch.files){if($file.queued){Remove-Item -LiteralPath (Join-Path $script:Queue $file.name) -Force -ErrorAction SilentlyContinue}}
+        Remove-Item -LiteralPath $pendingPath -Force
+    }catch{
+        if($state.delivery -ne 'offline'){Write-DiskLog 'delivery.retry' $_.Exception.GetType().Name;$state.delivery='offline';Write-DiskJson $statePath $state}
+    }
 }
 function Start-DiskLogWorker {
-    # A separate PowerShell worker keeps delivery alive during downloads/bootstrap/UI stalls.
-    $script:LogWorker=Start-Job -ArgumentList $PSCommandPath,$script:Connection,$script:DiskHome,$script:HostName,$script:LogFile -ScriptBlock {
-        param($WorkerSource,$WorkerConnection,$WorkerHome,$WorkerHost,$WorkerMainLog)
+    # Delivery never runs inside the UI timer. One batch/SSH per 30-second cycle.
+    $script:LogWorker=Start-Job -ArgumentList $PSCommandPath,$script:Connection,$script:DiskHome,$script:HostName -ScriptBlock {
+        param($WorkerSource,$WorkerConnection,$WorkerHome,$WorkerHost)
         . $WorkerSource -LibraryOnly
         $script:Connection=$WorkerConnection;$script:DiskHome=$WorkerHome;$script:HostName=$WorkerHost
-        $script:LocalKey='';$script:RemoteKey=''
-        $script:Queue=Join-Path $WorkerHome 'logs\queue'
-        $script:LogFile=Join-Path $WorkerHome 'logs\delivery.jsonl'
+        $script:LocalKey='';$script:RemoteKey='';$script:Queue=Join-Path $WorkerHome 'logs/queue'
+        $script:LogFile=Join-Path $WorkerHome 'logs/delivery.jsonl'
         while($true){
-            try{
-                # Atomic remote replacement makes whole-session retries idempotent.
-                foreach($f in @(Get-ChildItem (Join-Path $WorkerHome 'logs') -Filter '*.jsonl')){
-                    if($f.Length){Copy-Item -LiteralPath $f.FullName -Destination (Join-Path $script:Queue $f.Name) -Force}
-                }
-                foreach($f in @(Get-ChildItem $script:Queue -Filter '*.jsonl'|Sort-Object LastWriteTimeUtc)){
-                    try{
-                        $deliveryCommand='umask 077; d="$HOME/.local/share/remote-disk/logs/'+$WorkerHost+'"; mkdir -p "$d" && cat > "$d/'+$f.Name+'.tmp" && mv "$d/'+$f.Name+'.tmp" "$d/'+$f.Name+'"'
-                        [void](Complete-DiskSsh (Start-DiskSsh $deliveryCommand ([IO.File]::ReadAllText($f.FullName))) 15)
-                        Remove-Item -LiteralPath $f.FullName
-                    }catch{Write-DiskLog 'delivery.retry';break}
-                }
-            }catch{Write-DiskLog 'delivery.error' $_.Exception.GetType().Name}
             Start-Sleep -Seconds 30
+            try{Send-DiskLogs}catch{Write-DiskLog 'delivery.error' $_.Exception.GetType().Name}
         }
     }
 }
@@ -583,7 +635,7 @@ function Connect-DiskDevices {
     $l=Invoke-DiskApi local 'system/status';$r=Invoke-DiskApi remote 'system/status'
     $script:LocalId=$l.myID;$script:PeerId=$r.myID
     if($script:Safety){Write-DiskJson (Join-Path $script:DiskHome 'safety-channel.json') @{localId=$script:LocalId;serverId=$script:PeerId;remoteKey=$script:RemoteKey;tunnelPid=$script:Tunnel.p.Id;tunnelStarted=$script:Tunnel.p.StartTime.ToUniversalTime().ToString('o')}}
-    $script:Config|Add-Member -NotePropertyName serverId -NotePropertyValue $script:PeerId -Force;Save-DiskConfig
+    if(-not $script:Config.PSObject.Properties['serverId'] -or $script:Config.serverId -cne $script:PeerId){$script:Config|Add-Member -NotePropertyName serverId -NotePropertyValue $script:PeerId -Force;Save-DiskConfig}
     foreach($side in @('local','remote')){
         $id=$script:PeerId;$port=$script:Config.forward
         if($side -eq 'remote'){$id=$script:LocalId;$port=$script:RemoteState.reverse}
@@ -591,12 +643,12 @@ function Connect-DiskDevices {
     }
     foreach($folder in $script:Config.folders){[void](Invoke-DiskApi local ('config/folders/'+$folder.id) PATCH @{versioning=@{type=''}});[void](Invoke-DiskApi remote ('config/folders/'+$folder.id) PATCH @{versioning=@{type=''}});Add-DiskGitExclude $folder.path;[void](Invoke-DiskServer 'exclude' @{name=(Get-DiskFolderName $folder)})}
 }
-function Set-DiskPause($Folder,[int]$Minutes) {
+function Set-DiskPause($Folder,[int]$Minutes,[switch]$DeferSave) {
     $paused=$Minutes -ne 0
     [void](Invoke-DiskApi local ('config/folders/'+$Folder.id) PATCH @{paused=($paused -or $null -ne $script:Safety)})
     $Folder.paused=$paused;$Folder.resumeAt=''
     if($Minutes -gt 0){$Folder.resumeAt=[DateTime]::UtcNow.AddMinutes($Minutes).ToString('o')}
-    Save-DiskConfig;if($script:Config.contextMenu){Set-DiskContext $true};Write-DiskLog 'folder.pause' ("id="+$Folder.id+" paused="+$paused)
+    if(-not $DeferSave){Save-DiskConfig;Update-DiskContext};Write-DiskLog 'folder.pause' ("id="+$Folder.id+" paused="+$paused)
 }
 function Add-DiskFolder([string]$FolderPath,[string]$RemoteName='',[bool]$AllowMerge=$false) {
     $interactive=-not $RemoteName
@@ -635,10 +687,10 @@ function Add-DiskFolder([string]$FolderPath,[string]$RemoteName='',[bool]$AllowM
     [void](Invoke-DiskApi local "config/folders/$id" PUT $lf)
     $applied=Invoke-DiskApi local "config/folders/$id"
     if(-not $applied.paused -or $applied.type -ne 'sendreceive' -or $applied.versioning.type -ne ''){throw 'Local folder verification failed; folder remains paused'}
-    $entry=[pscustomobject]@{id=$id;name=$RemoteName;path=$FolderPath;remotePath=$remote.path;paused=$true;resumeAt='';excluded=@()}
+    $entry=[pscustomobject]@{id=$id;name=$RemoteName;path=$FolderPath;remotePath=$remote.path;paused=$false;resumeAt='';excluded=@()}
     $script:Config.folders=@($script:Config.folders)+@($entry);Save-DiskConfig
-    Set-DiskPause $entry 0
-    if($script:Config.contextMenu){Set-DiskContext $true}
+    Set-DiskPause $entry 0 -DeferSave
+    Update-DiskContext
     Write-DiskLog 'folder.add' ('id='+$id)
 }
 function Set-DiskExclusion($Folder,[string]$Item,[bool]$Exclude) {
@@ -647,7 +699,7 @@ function Set-DiskExclusion($Folder,[string]$Item,[bool]$Exclude) {
     if($Exclude){$Folder.excluded=@($Folder.excluded)+@($pattern)|Select-Object -Unique}else{$Folder.excluded=@($Folder.excluded|Where-Object {$_ -ne $pattern})}
     # Per-side ignores: exclusion is local and never creates an unignore rule overriding protection.
     $rules=@(Get-DiskIgnores)+@($Folder.excluded)
-    [void](Invoke-DiskApi local ('db/ignores?folder='+$Folder.id) POST @{ignore=$rules});Save-DiskConfig;if($script:Config.contextMenu){Set-DiskContext $true}
+    [void](Invoke-DiskApi local ('db/ignores?folder='+$Folder.id) POST @{ignore=$rules});Save-DiskConfig;Update-DiskContext
 }
 function Invoke-DiskCommand($Request) {
     try{
@@ -679,43 +731,56 @@ function New-DiskPipe {
     $script:Pipe=New-Object IO.Pipes.NamedPipeServerStream($script:PipeName,[IO.Pipes.PipeDirection]::InOut,1,[IO.Pipes.PipeTransmissionMode]::Byte,[IO.Pipes.PipeOptions]::Asynchronous)
     $script:PipeWait=$script:Pipe.BeginWaitForConnection($null,$null)
 }
-function Set-DiskContext([bool]$Enabled) {
+function Get-DiskContextItems($Folders,[string]$LaunchCommand) {
+    # Pure Explorer menu plan: no registry, filesystem, config writes or app copying.
+    $actions=,@('add','Синхронизировать с сервером','Directory')
+    foreach($f in $Folders){
+        foreach($a in @(@('show','Показать статус'),@('pause','Приостановить'),@('resume','Возобновить'),@('disconnect','Отключить с сохранением файлов'),@('exclude','Исключить'),@('include','Вернуть'))){
+            if(($a[0] -eq 'pause' -and $f.paused) -or ($a[0] -eq 'resume' -and -not $f.paused)){continue}
+            foreach($type in @('Directory','*')){if($type -eq '*' -and $a[0] -in @('pause','resume','disconnect')){continue};$actions+=,@($a[0],$a[1],$type,$f)}
+        }
+    }
+    foreach($a in $actions){
+        $key='RemoteDisk_'+$a[0];$query=''
+        if($a.Count -gt 3){
+            $f=$a[3];$key+='_'+$f.id;$query='System.ItemPathDisplay:="'+$f.path+'"'
+            if($a[0] -in @('exclude','include')){
+                $query='System.ItemPathDisplay:~<"'+$f.path+'\"'
+                $excluded=@($f.excluded|ForEach-Object {'System.ItemPathDisplay:="'+$f.path+'\'+$_.TrimStart('/').Replace('/','\')+'"'})
+                if($a[0] -eq 'include'){if(-not $excluded.Count){continue};$query='('+($excluded -join ' OR ')+')'}elseif($excluded.Count){$query+=' AND NOT ('+($excluded -join ' OR ')+')'}
+            }
+        }elseif(@($Folders).Count){$query=(@($Folders|ForEach-Object {'NOT (System.ItemPathDisplay:="'+$_.path+'" OR System.ItemPathDisplay:~<"'+$_.path+'\")'}) -join ' AND ')}
+        [pscustomobject]@{type=$a[2];key=$key;caption=$a[1];appliesTo=$query;command=$LaunchCommand+' -Command '+$a[0]+' -Path "%1"'}
+    }
+}
+function Get-DiskRegistryRoot { [Microsoft.Win32.Registry]::CurrentUser }
+function Write-DiskContext($Items) {
+    $registry=Get-DiskRegistryRoot
     foreach($type in @('Directory','*')){
-        $base="HKCU:\Software\Classes\$type\shell"
-        if(Test-Path $base){Get-ChildItem $base|Where-Object {$_.PSChildName -like 'RemoteDisk*'}|Remove-Item -Recurse -Force}
-    }
-    if($Enabled){
-        $actions=,@('add','Синхронизировать с сервером','Directory')
-        foreach($f in $script:Config.folders){
-            foreach($a in @(@('show','Показать статус'),@('pause','Приостановить'),@('resume','Возобновить'),@('disconnect','Отключить с сохранением файлов'),@('exclude','Исключить'),@('include','Вернуть'))){
-                if(($a[0] -eq 'pause' -and $f.paused) -or ($a[0] -eq 'resume' -and -not $f.paused)){continue}
-                foreach($type in @('Directory','*')){if($type -eq '*' -and $a[0] -in @('pause','resume','disconnect')){continue};$actions+=,@($a[0],$a[1],$type,$f.path,$f.id)}
+        $path='Software\Classes\'+$type+'\shell'
+        $shell=$registry.OpenSubKey($path,$true)
+        if(-not $shell -and @($Items|Where-Object {$_.type -eq $type}).Count){$shell=$registry.CreateSubKey($path)}
+        if(-not $shell){continue}
+        try{
+            foreach($name in $shell.GetSubKeyNames()){if($name.StartsWith('RemoteDisk',[StringComparison]::OrdinalIgnoreCase)){$shell.DeleteSubKeyTree($name)}}
+            foreach($item in @($Items|Where-Object {$_.type -eq $type})){
+                $key=$shell.CreateSubKey($item.key)
+                try{
+                    $key.SetValue('',$item.caption)
+                    if($item.appliesTo){$key.SetValue('AppliesTo',$item.appliesTo)}
+                    $commandKey=$key.CreateSubKey('command')
+                    try{$commandKey.SetValue('',$item.command)}finally{$commandKey.Dispose()}
+                }finally{$key.Dispose()}
             }
-        }
-        foreach($a in $actions){
-            $key='HKCU:\Software\Classes\'+$a[2]+'\shell\RemoteDisk_'+$a[0]
-            if($a.Count -gt 3){$key+='_'+$a[4]}
-            [void](New-Item $key -Force);Set-Item $key $a[1]
-            if($a.Count -gt 3){
-                $query='System.ItemPathDisplay:="'+$a[3]+'"'
-                if($a[0] -in @('exclude','include')){
-                    $query='System.ItemPathDisplay:~<"'+$a[3]+'\"'
-                    $folder=@($script:Config.folders|Where-Object {$_.id -eq $a[4]})[0]
-                    $excludedQueries=@($folder.excluded|ForEach-Object {'System.ItemPathDisplay:="'+$a[3]+'\'+$_.TrimStart('/').Replace('/','\')+'"'})
-                    if($a[0] -eq 'include'){
-                        if(-not $excludedQueries.Count){Remove-Item $key -Recurse -Force;continue}
-                        $query='(' + ($excludedQueries -join ' OR ') + ')'
-                    }elseif($excludedQueries.Count){$query+=' AND NOT ('+($excludedQueries -join ' OR ')+')'}
-                }
-                New-ItemProperty $key AppliesTo -Value $query -Force|Out-Null
-            }
-            if($a[0] -eq 'add' -and $script:Config.folders.Count){$query=(@($script:Config.folders|ForEach-Object {'NOT (System.ItemPathDisplay:="'+$_.path+'" OR System.ItemPathDisplay:~<"'+$_.path+'\")'}) -join ' AND ');New-ItemProperty $key AppliesTo -Value $query -Force|Out-Null}
-            [void](New-Item ($key+'\command') -Force)
-            $cmd=(Get-DiskLaunchCommand)+' -Command '+$a[0]+' -Path "%1"'
-            Set-Item ($key+'\command') $cmd
-        }
+        }finally{$shell.Dispose()}
     }
-    $script:Config.contextMenu=$Enabled;Save-DiskConfig
+}
+function Update-DiskContext {
+    if($script:Config.contextMenu){Write-DiskContext @(Get-DiskContextItems @($script:Config.folders) (Get-DiskLaunchCommand -ExistingCopy))}
+}
+function Set-DiskContext([bool]$Enabled) {
+    if($script:Config.contextMenu -ne $Enabled){$script:Config.contextMenu=$Enabled;Save-DiskConfig}
+    if($Enabled){Update-DiskContext}else{Write-DiskContext @()}
 }
 function New-DiskIcon([string]$State) {
     $colors=@{synced='ForestGreen';syncing='DodgerBlue';paused='Goldenrod';offline='Gray';error='Red';conflict='DarkViolet'}
@@ -739,9 +804,12 @@ function Update-DiskState {
         return
     }
     if($script:EngineInstall){Set-DiskInstallStatus;return}
-    foreach($f in $script:Config.folders){
-        if($f.paused -and $f.resumeAt -and ([DateTime]$f.resumeAt).ToUniversalTime() -le [DateTime]::UtcNow){Set-DiskPause $f 0}
-    }
+    $resumed=$false
+    try{
+        foreach($f in $script:Config.folders){
+            if($f.paused -and $f.resumeAt -and ([DateTime]$f.resumeAt).ToUniversalTime() -le [DateTime]::UtcNow){Set-DiskPause $f 0 -DeferSave;$resumed=$true}
+        }
+    }finally{if($resumed){Save-DiskConfig;Update-DiskContext}}
     if($script:Safety){Step-DiskConflictScan}
     $rows=@(Get-DiskSnapshot)
     if($script:Safety){Step-DiskServerJobs $rows}
@@ -776,7 +844,7 @@ function Initialize-DiskRuntime {
     $script:HostName=[regex]::Replace([string]$env:COMPUTERNAME,'[^A-Za-z0-9_-]','_')
     if(-not $script:HostName){$script:HostName='device'}
     $script:LogFile=Join-Path $script:DiskHome ('logs/session-'+[guid]::NewGuid().ToString('N')+'.jsonl')
-    $script:LocalKey='';$script:RemoteKey='';$script:Connection=$null;$script:Upload=$null;$script:LogWorker=$null;$script:EngineInstall=$null;$script:RemoteInstall=$null
+    $script:LocalKey='';$script:RemoteKey='';$script:Connection=$null;$script:LogWorker=$null;$script:EngineInstall=$null;$script:RemoteInstall=$null
     $script:ConfigFile=Join-Path $script:DiskHome 'config.json'
     Write-DiskLog 'start' ('command='+$Command)
     if(Test-Path -LiteralPath $script:ConfigFile){$script:Config=Get-Content -LiteralPath $script:ConfigFile -Raw -Encoding UTF8|ConvertFrom-Json}else{
@@ -794,8 +862,10 @@ function Get-DiskAppPath {
     }
     Join-Path $app 'RemoteDisk.ps1'
 }
-function Get-DiskLaunchCommand {
-    $cmd='powershell.exe -NoLogo -NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File '+(Quote-Native (Get-DiskAppPath))
+function Get-DiskLaunchCommand([switch]$ExistingCopy) {
+    $appPath=Join-Path $script:DiskHome 'app/RemoteDisk.ps1'
+    if(-not $ExistingCopy -or -not [IO.File]::Exists($appPath)){$appPath=Get-DiskAppPath}
+    $cmd='powershell.exe -NoLogo -NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File '+(Quote-Native $appPath)
     if($script:ProfileFile){$cmd+=' -Profile '+(Quote-Native $script:ProfileFile)}
     $cmd
 }
@@ -836,7 +906,7 @@ function Invoke-DiskHeadlessAdd {
             if($script:Tunnel){try{$script:Tunnel.p.Kill()}catch{}}
             Stop-DiskInstall
             if($script:LogWorker){Stop-Job $script:LogWorker;Remove-Job $script:LogWorker}
-            if($script:Connection){try{Send-DiskLogs;if($script:Upload){[void](Complete-DiskSsh $script:Upload 15);Send-DiskLogs -DrainOnly}}catch{}}
+            if($script:Connection){try{Send-DiskLogs}catch{}}
             $lock.ReleaseMutex()
         };$lock.Dispose()
     }
@@ -918,7 +988,7 @@ function Complete-DiskDisconnects {
         [void](Invoke-DiskApi local ('config/folders/'+$folder.id) DELETE)
         $script:Config.folders=@($script:Config.folders|Where-Object {$_.id -ne $folder.id});Save-DiskConfig
         $script:PendingDisconnect=@($script:PendingDisconnect|Where-Object {$_.id -ne $folder.id})
-        if($script:Config.contextMenu){Set-DiskContext $true}
+        Update-DiskContext
     }
 }
 function Step-DiskConflictScan {
@@ -978,12 +1048,7 @@ function Start-DiskApp {
     Save-DiskConfig
     if($Command -eq 'context-on'){Set-DiskContext $true;$Command='show'}
     Send-DiskLogs -First
-    if($script:Upload){try{[void](Complete-DiskSsh $script:Upload 15);Move-Item $script:Pending (Join-Path $script:Sent ([IO.Path]::GetFileName($script:Pending))) -Force}catch{};$script:Upload=$null}
     Start-DiskLogWorker
-    # Recover batches from prior sessions, including a crash before rotation.
-    foreach($log in Get-ChildItem (Join-Path $script:DiskHome 'logs') -Filter 'session-*.jsonl'){
-        if($log.FullName -ne $script:LogFile){Move-Item $log.FullName (Join-Path $script:Queue ($log.Name)) -Force}
-    }
     $script:EngineInstall=$null;$script:RemoteInstall=$null
     $script:Tunnel=$null;$script:Engine=$null;$script:RemoteState=$null;$script:PeerId='';$script:PreviousState='';$script:LastInitError='';$script:LastStatus='Нет подключения'
     $script:Tray=New-Object Windows.Forms.NotifyIcon;$script:Tray.Icon=New-DiskIcon offline;$script:Tray.Text='RemoteDisk: нет подключения';$script:Tray.Visible=$true
@@ -991,7 +1056,7 @@ function Start-DiskApp {
     $script:FolderMenu=Add-DiskMenu $menu 'Папки' {}
     [void](Add-DiskMenu $menu 'Добавить папку' {Invoke-DiskCommand @{command='add';path=''}})
     foreach($pair in @(@('Пауза на 30 минут',30),@('Пауза на 2 часа',120),@('Пауза до включения',-1),@('Возобновить',0))){
-        $item=Add-DiskMenu $menu $pair[0] {param($sender,$event) foreach($f in $script:Config.folders){try{Set-DiskPause $f ([int]$sender.Tag)}catch{Write-DiskLog 'pause.error'}}};$item.Tag=$pair[1]
+        $item=Add-DiskMenu $menu $pair[0] {param($sender,$event) $changed=$false;foreach($f in $script:Config.folders){try{Set-DiskPause $f ([int]$sender.Tag) -DeferSave;$changed=$true}catch{Write-DiskLog 'pause.error'}};if($changed){Save-DiskConfig;Update-DiskContext}};$item.Tag=$pair[1]
     }
     [void](Add-DiskMenu $menu 'Ошибки, конфликты и статус' {[Windows.Forms.MessageBox]::Show($script:LastStatus,'RemoteDisk')|Out-Null})
     foreach($f in $script:Config.folders){$folderPath=$f.path;$item=Add-DiskMenu $menu ('Открыть '+(Split-Path $folderPath -Leaf)) {param($sender,$event) Start-Process explorer.exe -ArgumentList (Quote-Native $sender.Tag)};$item.Tag=$folderPath}
@@ -1012,10 +1077,11 @@ function Start-DiskApp {
     [void](Add-DiskMenu $menu 'Выход' {$script:Context.ExitThread()})
     $script:Tray.ContextMenuStrip=$menu;$script:Tray.add_DoubleClick({[Windows.Forms.MessageBox]::Show($script:LastStatus,'RemoteDisk')|Out-Null})
     New-DiskPipe
-    $script:LastUpload=[DateTime]::MinValue;$script:Retry=[DateTime]::MinValue;$script:LastTick=[DateTime]::UtcNow
+    $script:Retry=[DateTime]::MinValue;$script:LastTick=[DateTime]::UtcNow
     $script:Context=New-Object Windows.Forms.ApplicationContext
     $timer=New-Object Windows.Forms.Timer;$timer.Interval=4000
     $timer.add_Tick({
+        $tickWatch=[Diagnostics.Stopwatch]::StartNew()
         try{
             $now=[DateTime]::UtcNow
             if(($now-$script:LastTick).TotalSeconds -gt 20){Write-DiskLog 'power.resume' 'Timer gap detected'};$script:LastTick=$now
@@ -1050,6 +1116,7 @@ function Start-DiskApp {
             Complete-DiskDisconnects
             Update-DiskState
         }catch{Write-DiskLog 'tick.error' ($_.Exception.GetType().Name+': '+$_.Exception.Message)}
+        finally{if($tickWatch.ElapsedMilliseconds -gt 5000){Write-DiskLog 'tick.slow' '' $tickWatch.ElapsedMilliseconds}}
     })
     try{$timer.Start();[Windows.Forms.Application]::Run($script:Context)}finally{
         $timer.Stop();$timer.Dispose();$aclFailure=$null

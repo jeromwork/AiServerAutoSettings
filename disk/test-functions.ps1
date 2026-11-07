@@ -20,29 +20,48 @@ if($Export){@{folder=$f;ignores=@(Get-DiskIgnores)}|ConvertTo-Json -Depth 20|Set
 'PASS pure functions: states, no-versioning, redaction, path boundary, quoting'
 $temp=Join-Path ([IO.Path]::GetTempPath()) ('disk-functions-'+[guid]::NewGuid().ToString('N'))
 try {
-    $script:Queue=Join-Path $temp 'queue';$script:Sent=Join-Path $temp 'sent'
-    [void](New-Item -ItemType Directory -Path $script:Queue,$script:Sent -Force)
-    $script:LogFile=Join-Path $temp 'active.jsonl';$script:HostName='synthetic-host'
-    $script:Upload=$null;$script:Connection=[pscustomobject]@{test=$true}
+    $script:DiskHome=$temp;$script:Queue=Join-Path $temp 'logs/queue';$script:Sent=Join-Path $temp 'logs/sent'
+    [void][IO.Directory]::CreateDirectory($script:Queue);[void][IO.Directory]::CreateDirectory($script:Sent)
+    $script:LogFile=Join-Path $temp 'logs/session-active.jsonl';$script:HostName='synthetic-host'
+    $script:Connection=[pscustomobject]@{test=$true};$script:Calls=0
     Write-DiskLog 'start' 'apiKey=unsafe synthetic-key'
-    function Start-DiskSsh($RemoteCommand,$InputText){
-        $script:Captured=$InputText
+    Assert (-not [IO.File]::Exists($script:LogFile)) 'start-only commands must not create session files'
+    Write-DiskLog 'test' 'token=unsafe'
+    function Start-DiskSsh($RemoteCommand,$InputText,[switch]$QuietSuccess){
+        Assert $QuietSuccess 'delivery must suppress successful SSH events'
+        $script:Calls++;$script:Captured=$InputText
         @{p=[pscustomobject]@{HasExited=$true};started=[DateTime]::UtcNow}
     }
     $script:FailUpload=$true
-    function Complete-DiskSsh($Job,$Timeout){if($script:FailUpload){throw 'Synthetic offline'};''}
+    function Complete-DiskSsh($Job,$Timeout){if($script:FailUpload){throw 'Synthetic offline'};'ok'}
     Send-DiskLogs -First
     $captured=$script:Captured|ConvertFrom-Json
-    Assert ($captured.stage -eq 'start' -and $captured.message -notmatch 'unsafe|synthetic-key') 'first log and redaction'
-    $pending=$script:Pending
+    $rows=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($captured.files[0].data)) -split "`n"|Where-Object {$_}|ForEach-Object {$_|ConvertFrom-Json}
+    Assert ($rows[0].stage -eq 'start' -and $rows[0].message -notmatch 'unsafe|synthetic-key') 'first log and redaction'
+    $pending=Join-Path $script:Queue 'pending.json';$bytes=[IO.File]::ReadAllText($pending)
     Send-DiskLogs -DrainOnly
-    Assert (Test-Path $pending) 'offline queue preserved without Syncthing'
-    $script:FailUpload=$false
+    Assert ([IO.File]::ReadAllText($pending) -ceq $bytes) 'offline immutable queue preserved'
+    $script:FailUpload=$false;Send-DiskLogs
+    Assert (-not [IO.File]::Exists($pending)) 'acknowledged batch removed'
+    Assert ([IO.File]::Exists($script:LogFile)) 'whole local session retained'
+    # A recovery state change is useful once; after delivery idle cycles do no work.
+    Send-DiskLogs;$before=$script:Calls;Send-DiskLogs;Send-DiskLogs
+    Assert ($script:Calls -eq $before) 'unchanged files must not launch SSH'
+    $state=Read-DiskJson (Join-Path $temp 'logs/delivery-state.json')
+    Assert ($state.files.PSObject.Properties['session-active.jsonl']) 'acknowledged size/mtime persisted on disk'
+    [IO.File]::AppendAllText($script:LogFile,'{}')
+    [IO.File]::WriteAllText((Join-Path $temp 'logs/safety.jsonl'),'{}')
     Send-DiskLogs
-    Send-DiskLogs -DrainOnly
-    Assert (-not (Test-Path $pending)) 'acknowledged batch moved'
-    Assert (@(Get-ChildItem $script:Sent).Count -eq 1) 'local journal retained'
-    'PASS independent journal: first record, redaction, offline queue, retry and local retention'
+    Assert ($script:Calls -eq $before+1 -and @(($script:Captured|ConvertFrom-Json).files).Count -eq 2) 'one SSH batches all modified files'
+    # Same size but changed timestamp must also send; a fresh reader uses persisted state.
+    [IO.File]::SetLastWriteTimeUtc($script:LogFile,[DateTime]::UtcNow.AddSeconds(-10));Send-DiskLogs
+    Assert ($script:Calls -eq $before+2) 'mtime-only change detected'
+    $old=Join-Path $temp 'logs/session-old.jsonl';[IO.File]::WriteAllText($old,'{}');[IO.File]::SetLastWriteTimeUtc($old,[DateTime]::UtcNow.AddDays(-8))
+    $empty=Join-Path $temp 'logs/session-empty.jsonl';[IO.File]::WriteAllText($empty,'')
+    $startOnly=Join-Path $temp 'logs/session-start.jsonl';[IO.File]::WriteAllText($startOnly,'{"stage":"start"}'+"`n")
+    Remove-DiskExpiredLogs (Join-Path $temp 'logs')
+    Assert (-not [IO.File]::Exists($old) -and -not [IO.File]::Exists($empty) -and -not [IO.File]::Exists($startOnly)) 'expired, empty and legacy start-only sessions removed'
+    'PASS independent journal: lazy sessions, redaction, durable immutable retry/ack, persisted size/mtime, unchanged cycles launch no SSH, one batch for all changes, seven-day/empty retention'
 }finally{Remove-Item -LiteralPath $temp -Recurse -Force}
 # Remote commands retain LF line endings before they are passed to SSH.
 $RemoteCommand="printf 'crlf-ok\n'`r`nprintf 'done\n'`r`n"
@@ -685,6 +704,86 @@ sys.stdout.write('stdin-ok\r\n')
     'PASS SSH stdin: actual BaseStream bytes, UTF-8 without BOM, leading legacy BOM removed, CRLF -> LF, Unicode preserved'
 }finally{Remove-Item -LiteralPath $temp -Recurse -Force}
 
+# Literal registry API test: unrelated keys survive, no provider expansion or app copies.
+. $PSScriptRoot/RemoteDisk.ps1 -LibraryOnly
+$registryBoundary=@'
+function New-FixtureRegistryKey([string]$KeyPath) {
+    $key=[pscustomobject]@{KeyPath=$KeyPath}
+    $key|Add-Member ScriptMethod OpenSubKey {param($Subkey,$Writable) New-FixtureRegistryKey ($this.KeyPath+'\'+$Subkey)}
+    $key|Add-Member ScriptMethod CreateSubKey {param($Subkey) New-FixtureRegistryKey ($this.KeyPath+'\'+$Subkey)}
+    $key|Add-Member ScriptMethod GetSubKeyNames {@('RemoteDisk_old','RemoteDiskObsolete','OtherApp')}
+    $key|Add-Member ScriptMethod DeleteSubKeyTree {param($Subkey) [IO.File]::AppendAllText($env:DISK_ENTRY_REG,(@{kind='delete';key=$this.KeyPath+'\'+$Subkey}|ConvertTo-Json -Compress)+"`n")}
+    $key|Add-Member ScriptMethod SetValue {param($Name,$Value) [IO.File]::AppendAllText($env:DISK_ENTRY_REG,(@{kind='item';key=$this.KeyPath;name=$Name;value=$Value}|ConvertTo-Json -Compress)+"`n")}
+    $key|Add-Member ScriptMethod Dispose {}
+    $key
+}
+function Get-DiskRegistryRoot {New-FixtureRegistryKey 'HKCU:'}
+'@
+. ([scriptblock]::Create($registryBoundary))
+$temp=Join-Path ([IO.Path]::GetTempPath()) ('disk-context-'+[guid]::NewGuid().ToString('N'))
+$savedRegistry=$env:DISK_ENTRY_REG
+try{
+    [void][IO.Directory]::CreateDirectory($temp);$env:DISK_ENTRY_REG=Join-Path $temp 'registry.jsonl'
+    $folders=@([pscustomobject]@{id='one';path='C:\Work\one';paused=$false;resumeAt='';excluded=@('/cache')},[pscustomobject]@{id='two';path='D:\two';paused=$true;resumeAt='';excluded=@()})
+    $items=@(Get-DiskContextItems $folders 'installed-command')
+    Assert (@($items|Where-Object {$_.key -eq 'RemoteDisk_include_one'}).Count -eq 2) 'include only actual exclusions'
+    Assert (@($items|Where-Object {$_.key -eq 'RemoteDisk_include_two'}).Count -eq 0) 'no empty include menu'
+    Assert (@($items|Where-Object {$_.key -eq 'RemoteDisk_pause_one'}).Count -eq 1 -and @($items|Where-Object {$_.key -eq 'RemoteDisk_resume_two'}).Count -eq 1) 'pause menu plan'
+    $add=@($items|Where-Object {$_.key -eq 'RemoteDisk_add'})[0]
+    Assert ($add.appliesTo.Contains('C:\Work\one') -and $add.appliesTo.Contains('D:\two')) 'add hides connected paths'
+    Write-DiskContext $items
+    $rows=@(Get-Content -LiteralPath $env:DISK_ENTRY_REG|ForEach-Object {$_|ConvertFrom-Json})
+    Assert (@($rows|Where-Object {$_.kind -eq 'delete'}).Count -eq 4) 'only own keys deleted in the two literal shell roots'
+    foreach($row in $rows){Assert ($row.key -match '^HKCU:\\Software\\Classes\\(Directory|\*)\\shell\\RemoteDisk') 'only literal shell/RemoteDisk keys touched'}
+    $commandRows=@($rows|Where-Object {$_.key.EndsWith('\command')})
+    Assert ($commandRows.Count -eq $items.Count) 'all commands written'
+    $script:DiskHome=$temp;[void][IO.Directory]::CreateDirectory((Join-Path $temp 'app'))
+    [IO.File]::WriteAllText((Join-Path $temp 'app/RemoteDisk.ps1'),'fixture')
+    function Get-DiskAppPath {throw 'Menu refresh must not recopy an existing installed app'}
+    $launch=Get-DiskLaunchCommand -ExistingCopy
+    Assert ($launch.Contains((Join-Path $temp 'app/RemoteDisk.ps1'))) 'menu reuses installed launch path without copying'
+    $script:Config=[pscustomobject]@{folders=$folders;contextMenu=$true};$script:Saves=0;$script:MenuUpdates=0
+    function Save-DiskConfig {$script:Saves++}
+    function Update-DiskContext {$script:MenuUpdates++}
+    function Invoke-DiskApi {}
+    function Write-DiskLog {}
+    Set-DiskPause $folders[0] -1
+    Assert ($script:Saves -eq 1 -and $script:MenuUpdates -eq 1) 'pause persists and refreshes exactly once'
+    Set-DiskPause $folders[0] 0 -DeferSave
+    Assert ($script:Saves -eq 1 -and $script:MenuUpdates -eq 1) 'add can defer duplicate persistence/menu'
+    $source=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'RemoteDisk.ps1'))
+    $t=$null;$e=$null;$tree=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$t,[ref]$e)
+    $addAst=$tree.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Add-DiskFolder'},$true)
+    Assert (([regex]::Matches($addAst.Extent.Text,'Save-DiskConfig')).Count -eq 1 -and ([regex]::Matches($addAst.Extent.Text,'Update-DiskContext')).Count -eq 1 -and $addAst.Extent.Text.Contains('-DeferSave')) 'add persists and refreshes once'
+    $tickStart=$source.IndexOf('    $timer.add_Tick({');$tickEnd=$source.IndexOf('    try{$timer.Start()', $tickStart)
+    # Execute the actual timer callback with an artificial elapsed duration; return must run finally.
+    $callback=$tree.Find({param($n) $n -is [Management.Automation.Language.InvokeMemberExpressionAst] -and $n.Member.Extent.Text -eq 'add_Tick'},$true).Arguments[0].ScriptBlock
+    $tickText=$callback.Extent.Text
+    $tickText=$tickText.Substring(1,$tickText.Length-2).Replace('$tickWatch=[Diagnostics.Stopwatch]::StartNew()','$tickWatch=[pscustomobject]@{ElapsedMilliseconds=5001}')
+    $script:LastTick=[DateTime]::UtcNow;$script:PipeWait=[pscustomobject]@{IsCompleted=$false};$script:Tunnel=$null;$script:Retry=[DateTime]::MinValue
+    function Step-DiskInitialization {$false}
+    function Write-DiskLog($Stage,$Message='',$Duration=0){$script:TickEvent=@{stage=$Stage;duration=$Duration}}
+    & ([scriptblock]::Create($tickText))
+    Assert ($script:TickEvent.stage -eq 'tick.slow' -and $script:TickEvent.duration -eq 5001) 'slow tick duration on early return'
+    'PASS context registry (API stubs): pure menu plan, two literal roots including *, only RemoteDisk keys deleted; one save/refresh per pause/add; tick.slow records elapsed time even on return'
+}finally{$env:DISK_ENTRY_REG=$savedRegistry;Remove-Item -LiteralPath $temp -Recurse -Force}
+# Reject provider commands whose registry paths can contain a wildcard, including variable paths.
+foreach($file in @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1')){
+    $t=$null;$e=$null;$tree=[Management.Automation.Language.Parser]::ParseFile($file.FullName,[ref]$t,[ref]$e)
+    foreach($cmd in @($tree.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -in @('Test-Path','Get-ChildItem','Set-Item','New-Item','New-ItemProperty','Remove-Item')},$true))){
+        Assert ($cmd.Extent.Text -notmatch '(?i)(?:HKCU:|Registry::)[^''"\r\n]*\*') ('literal registry wildcard in '+$file.Name)
+    }
+    foreach($fn in @($tree.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst]},$true))){
+        $text=$fn.Extent.Text
+        if($text -match '(?i)HKCU:|Registry::'){
+            $providers=@($fn.Body.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -in @('Test-Path','Get-ChildItem','Set-Item','New-Item','New-ItemProperty','Remove-Item')},$true))
+            Assert (-not ($text -match '(?is)Classes.*\*|\*.*Classes' -and $providers.Count)) ('registry provider wildcard in '+$file.Name+':'+$fn.Name)
+        }
+    }
+}
+'PASS static registry audit: no wildcard registry-provider operations in disk/*.ps1'
+
+. $PSScriptRoot/RemoteDisk.ps1 -LibraryOnly
 # Keep the real script param block, dispatcher, runtime, installer and tunnel setup.
 # Only Windows UI/registry/identity/process-launch and SSH boundaries are replaced.
 $temp=Join-Path ([IO.Path]::GetTempPath()) ('disk-entry-'+[guid]::NewGuid().ToString('N'))
@@ -695,7 +794,7 @@ try{
     foreach($name in $files){Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $source $name)}
     $profilePath=Join-Path $temp 'profile.json'
     Write-DiskJson $profilePath @{keyPath='fixture';knownHostsPath='fixture';configPath='fixture';serverAddress='fixture.invalid';login='fixture';sshExecutable='fixture';arguments=@('fixture.invalid')}
-    $bindings=@'
+    $bindings=$registryBoundary+@'
 function Get-DiskAclIdentity {[pscustomobject]@{User=[pscustomobject]@{Value=$env:DISK_ENTRY_SID}}}
 function Test-Path {param($LiteralPath,$Path,$PathType) $p=$LiteralPath;if(-not $p){$p=$Path};if($p -like 'HKCU:*'){return $false};if($PathType){Microsoft.PowerShell.Management\Test-Path -LiteralPath $p -PathType $PathType}else{Microsoft.PowerShell.Management\Test-Path -LiteralPath $p}}
 function New-Item {param($Path,$ItemType,[switch]$Force) if($Path -notlike 'HKCU:*'){throw 'unexpected New-Item'} }
@@ -775,12 +874,14 @@ function Invoke-DiskHeadlessAdd {
             }
         }
     }
+    $sessions=@(Get-ChildItem -LiteralPath (Join-Path $appdata 'RemoteDisk/logs') -Filter 'session-*.jsonl').Count
     $result=Invoke-EntryFixture $installedEntry @('-Command','status') $environment
     Assert ($result.code -eq 1 -and $result.output.Trim() -ceq '[]') ('standalone installed status: '+$result.error)
     $result=Invoke-EntryFixture $installedEntry @('-Command','add','-Remote','sample','-Path',(Join-Path $temp 'local')) $environment
     Assert ($result.code -eq 0) ('real -Remote entry failed: '+$result.error)
     $state=Read-DiskJson $remoteResult
     Assert ($state.remote -ceq 'sample' -and $state.reverse -eq 23004 -and $state.stateType -ceq 'System.Management.Automation.PSCustomObject') 'object connection state and CLI name stay separate'
+    Assert (@(Get-ChildItem -LiteralPath (Join-Path $appdata 'RemoteDisk/logs') -Filter 'session-*.jsonl').Count -eq $sessions) 'quiet status/add -Remote entries create no start-only sessions'
     'PASS real entry (no LibraryOnly, OS stubs): -Install installs and returns while tray child lives; parent never enters tray; app paths in autorun/context/launch'
     'PASS installed copy: source removed, empty working directory; five assets and relative dependencies complete; standalone status and -Remote/bootstrap/tunnel entry work; state remains PSCustomObject'
 }finally{
