@@ -100,11 +100,12 @@ class CatalogTests(unittest.TestCase):
 
     def test_inventory_is_live_and_never_reroutes_missing_or_wrong_target(self):
         def exchange(path,op,args,binding=None,timeout=100):
-            if path==self.data[1]['socketPath']:raise ConnectionError('asleep')
+            if path==self.data[1]['socketPath']:raise FileNotFoundError('asleep')
             return self.status(self.data[0]) if op=='status' else {'ok':True,'output':'home only'}
         with patch.object(adapter,'exchange',side_effect=exchange) as transport:
             rows=self.call('windows_devices',{})['devices']
             self.assertEqual([row['available'] for row in rows],[True,False])
+            self.assertNotIn('offlineReason',rows[0]);self.assertIn('не запущен',rows[1]['offlineReason'])
             values={'projectId':'p-shared','hostId':'laptop','taskId':'build','command':'test'}
             self.assertFalse(self.call('windows_command',values)['ok'])
             self.assertFalse(self.call('windows_command',dict(values,hostId='unregistered'))['ok'])

@@ -83,8 +83,14 @@ def dispatch(message, path, catalog=None):
                     status = exchange(record['socketPath'], 'status', {}, record, timeout=3)
                     if catalog_api.matches(record, status):
                         row.update(available=True, capabilities=status.get('capabilities',{}), shell_enabled=status.get('shell_enabled',False))
-                except Exception:
-                    pass
+                    else:
+                        row['offlineReason'] = 'Мост ответил, но это другой компьютер или другая привязка'
+                except (FileNotFoundError, ConnectionRefusedError):
+                    row['offlineReason'] = 'Мост на компьютере не запущен или нет связи с сервером'
+                except socket.timeout:
+                    row['offlineReason'] = 'Мост не ответил за 3 секунды'
+                except Exception as error:
+                    row['offlineReason'] = 'Ошибка связи с мостом: ' + type(error).__name__
                 devices.append(row)
             return {'content':[{'type':'text','text':json.dumps({'ok':True,'devices':devices},ensure_ascii=False)}]}
         tool = next((tool for tool in TOOLS if tool[0] == params.get("name")), None)

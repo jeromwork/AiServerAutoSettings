@@ -69,7 +69,7 @@ try {
         Save-DiskState $options;Read-DiskState
     }
     Write-DiskUtf8 (Join-Path $script:DiskHome 'tray/syncthingtray.ini') (New-DiskIni $tray $state $script:Gui $script:ApiKey);Set-DiskRegistration $true
-    $step='Запуск трея';$created=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=('"'+$tray+'" --wait')};if($created.ReturnValue -ne 0){throw 'Не удалось запустить трей'}
+    $step='Запуск трея';Get-Process -Name syncthingtray -ErrorAction SilentlyContinue|Where-Object {$_.Path -and [IO.Path]::GetFullPath($_.Path) -ieq [IO.Path]::GetFullPath($tray)}|ForEach-Object {Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue;[void]$_.WaitForExit(10000)};$created=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=('"'+$tray+'" --wait')};if($created.ReturnValue -ne 0){throw 'Не удалось запустить трей'}
     $local=$null;for($i=0;$i -lt 40;$i++){try{$local=Invoke-DiskApi 'system/status';if($local.myID){break}}catch{};Start-Sleep -Milliseconds 250};if(-not $local.myID){throw 'Движок не запустился'}
     $step='Подключение устройств';[void](Invoke-DiskApi ('config/devices/'+$remote.deviceId) PUT @{deviceID=$remote.deviceId;name='RemoteDisk Server';addresses=@('tcp://127.0.0.1:22001');autoAcceptFolders=$false})
     [void](Invoke-DiskServer add-device @{deviceId=$local.myID;deviceName=$env:COMPUTERNAME} -Direct);Write-DiskUtf8 (Join-Path $script:DiskHome 'server.txt') $remote.deviceId
