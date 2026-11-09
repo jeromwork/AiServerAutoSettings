@@ -43,9 +43,11 @@ function Invoke-DiskServer($Action,$Data=$null,[switch]$Direct,[string]$OutputFi
     if(-not $OutputFile -and $text){$value=$text|ConvertFrom-Json;if($null -ne $value){foreach($item in $value){$item}}}
 }
 function Invoke-DiskApi($Route,$Method='GET',$Body=$null) {
+    if(-not $script:DiskHome){$script:DiskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk'}
+    if(-not $script:Gui -or -not $script:ApiKey){Read-DiskState}
     $args=@{Uri=('http://'+$script:Gui+'/rest/'+$Route);Method=$Method;Headers=@{'X-API-Key'=$script:ApiKey};TimeoutSec=5;UseBasicParsing=$true}
     if($null -ne $Body){$args.Body=[Text.Encoding]::UTF8.GetBytes(($Body|ConvertTo-Json -Depth 30 -Compress));$args.ContentType='application/json'}
-    try {$value=Invoke-RestMethod @args;foreach($item in $value){if($null -ne $item -and -not ($item -is [string] -and $item.Length -eq 0)){$item}}}catch{throw 'REST Syncthing недоступен'}
+    try {$value=Invoke-RestMethod @args;foreach($item in $value){if($null -ne $item -and -not ($item -is [string] -and $item.Length -eq 0)){$item}}}catch{throw ('REST Syncthing недоступен ('+$script:Gui+'); проверьте запущенный RemoteDisk и state/config.xml')}
 }
 function Read-DiskState {
     $script:Engine=New-Object Xml.XmlDocument;$script:Engine.PreserveWhitespace=$true;$script:Engine.LoadXml([IO.File]::ReadAllText((Join-Path $script:DiskHome 'state/config.xml')))
@@ -79,4 +81,89 @@ function Test-DiskIgnores($Path,[switch]$Write) {
         }
     }
     if($Write){if(Test-Path -LiteralPath $file){[IO.File]::SetAttributes($file,([IO.File]::GetAttributes($file) -band (-bnot [IO.FileAttributes]::Hidden)))};try{Write-DiskUtf8 $file $rules}finally{if(Test-Path -LiteralPath $file){[IO.File]::SetAttributes($file,([IO.File]::GetAttributes($file) -bor [IO.FileAttributes]::Hidden))}}}
+}
+function Assert-DiskFreePath([string]$Path,$Folders) {
+    $full=[IO.Path]::GetFullPath($Path).TrimEnd('\','/')
+    for($part=$full;$part;$part=[IO.Path]::GetDirectoryName($part)){
+        if(Test-Path -LiteralPath $part){if([IO.File]::GetAttributes($part) -band [IO.FileAttributes]::ReparsePoint){throw 'Ссылки в пути запрещены'}}
+    }
+    foreach($folder in $Folders){
+        $other=[IO.Path]::GetFullPath($folder.path).TrimEnd('\','/')
+        if($full -ieq $other -or $full.StartsWith($other+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or $other.StartsWith($full+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw 'папка занята: пересечение с Syncthing'}
+    }
+    if(Test-Path -LiteralPath $full){
+        if(-not (Get-Item -LiteralPath $full).PSIsContainer -or @(Get-ChildItem -LiteralPath $full -Force).Count){throw 'папка занята'}
+    }
+}
+# Base folder like Yandex Disk: %USERPROFILE%\Disk unless the owner chose another one.
+function Get-DiskBase {
+    $saved=Join-Path $script:DiskHome 'base.txt'
+    if(Test-Path -LiteralPath $saved){return [IO.File]::ReadAllText($saved).Trim()}
+    Join-Path $env:USERPROFILE 'Disk'
+}
+function Copy-DiskTree([string]$From,[string]$To) {
+    [void][IO.Directory]::CreateDirectory($To);$dir=New-Object IO.DirectoryInfo($From)
+    foreach($item in $dir.GetFileSystemInfos()){
+        if($item.Attributes -band [IO.FileAttributes]::ReparsePoint){throw ('Ссылки в папке запрещены: '+$item.FullName)}
+        $target=Join-Path $To $item.Name
+        if($item -is [IO.DirectoryInfo]){Copy-DiskTree $item.FullName $target}else{[IO.File]::Copy($item.FullName,$target);[IO.File]::SetLastWriteTimeUtc($target,$item.LastWriteTimeUtc)}
+        [IO.File]::SetAttributes($target,$item.Attributes)
+    }
+    [IO.Directory]::SetLastWriteTimeUtc($To,$dir.LastWriteTimeUtc)
+}
+function Get-DiskTreeList([string]$Path) {
+    @(Get-ChildItem -LiteralPath $Path -Recurse -Force|ForEach-Object {$_.FullName.Substring($Path.Length)+'|'+$(if($_.PSIsContainer){'d'}else{$_.Length})}|Sort-Object) -join "`n"
+}
+function Move-DiskFolder([string]$FolderId,[string]$Destination,[switch]$Copy) {
+    $route='config/folders/'+[Uri]::EscapeDataString($FolderId)
+    $folder=Invoke-DiskApi $route;$old=[IO.Path]::GetFullPath($folder.path).TrimEnd('\','/');$Destination=[IO.Path]::GetFullPath($Destination).TrimEnd('\','/')
+    if($old -ieq $Destination){return 'Папка уже на месте'}
+    if($Destination.StartsWith($old+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw 'Нельзя перенести папку внутрь неё самой'}
+    $others=@(Invoke-DiskApi 'config/folders'|Where-Object {$_.id -cne $FolderId})
+    Assert-DiskFreePath $Destination $others
+    if([IO.Path]::GetPathRoot($old) -ine [IO.Path]::GetPathRoot($Destination)){$Copy=$true}
+    $source=Get-Item -LiteralPath $old
+    for($part=$source;$null -ne $part;$part=$part.Parent){if($part.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Ссылки в пути запрещены'}}
+    $paused=[bool]$folder.paused
+    $events=@(Invoke-DiskApi 'events?since=0&limit=1&timeout=1');$since=0;if($events.Count){$since=$events[-1].id}
+    [void](Invoke-DiskApi $route PATCH @{paused=$true})
+    $ready=$false
+    for($i=0;$i -lt 8;$i++){
+        $events=@(Invoke-DiskApi ('events?since='+$since+'&timeout=1'))
+        if(@($events|Where-Object {$_.type -eq 'FolderPaused' -and $_.data.id -ceq $FolderId}).Count){$ready=$true;break}
+        if($paused -and (Invoke-DiskApi 'config/insync').configInSync -and (Invoke-DiskApi ('db/status?folder='+[Uri]::EscapeDataString($FolderId))).state -eq ''){$ready=$true;break}
+    }
+    if(-not $ready){throw 'Не подтверждена пауза: перенос отменён, папка оставлена на паузе'}
+    Assert-DiskFreePath $Destination $others
+    [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($Destination))
+    if(Test-Path -LiteralPath $Destination){[IO.Directory]::Delete($Destination,$false)} # empty only
+    if($Copy){
+        # Another volume: copy, verify, then remove the source. A failed copy leaves the source intact.
+        try{Copy-DiskTree $old $Destination;if((Get-DiskTreeList $old) -cne (Get-DiskTreeList $Destination)){throw 'Копия не совпадает с исходной папкой'}}
+        catch{if(Test-Path -LiteralPath $Destination){Remove-Item -LiteralPath $Destination -Recurse -Force};throw}
+        Remove-Item -LiteralPath $old -Recurse -Force
+    }else{[IO.Directory]::Move($old,$Destination)}
+    # On API failure leave paused; files are safe at Destination. Rerun path PATCH manually.
+    [void](Invoke-DiskApi $route PATCH @{path=$Destination})
+    [void](Invoke-DiskApi $route PATCH @{paused=$paused})
+    'Перенесено: '+$Destination
+}
+# Changing the base moves every server folder lying directly in the previous base.
+function Set-DiskBase([string]$Path) {
+    $new=[IO.Path]::GetFullPath($Path).TrimEnd('\','/');$saved=Join-Path $script:DiskHome 'base.txt'
+    $old=@('C:\work');if(Test-Path -LiteralPath $saved){$old=@([IO.File]::ReadAllText($saved).Trim())} # C:\work was the earlier default
+    $old=@($old|ForEach-Object {[IO.Path]::GetFullPath($_).TrimEnd('\','/')}|Where-Object {$_ -ine $new})
+    $server=Join-Path $script:DiskHome 'server.txt'
+    if($old.Count -and (Test-Path -LiteralPath $server)){
+        $peer=[IO.File]::ReadAllText($server).Trim();$failed=@()
+        foreach($folder in @(Invoke-DiskApi 'config/folders')){
+            if(-not @($folder.devices|Where-Object {$_.deviceID -ceq $peer}).Count){continue}
+            $path=[IO.Path]::GetFullPath($folder.path).TrimEnd('\','/')
+            if([IO.Path]::GetDirectoryName($path) -notin $old){continue}
+            try{Write-Output (Move-DiskFolder $folder.id (Join-Path $new ([IO.Path]::GetFileName($path))));Write-DiskLog ('Переезд базы: '+$folder.label)}
+            catch{Write-DiskLog ('Переезд базы: '+$folder.label) $_;$failed+=($folder.label+': '+$_.Exception.Message)}
+        }
+        if($failed.Count){throw ('Не перенесены: '+($failed -join '; ')+'. Прежняя база сохранена; устраните причину и повторите')}
+    }
+    [void][IO.Directory]::CreateDirectory($new);Write-DiskUtf8 $saved $new
 }

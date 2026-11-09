@@ -20,13 +20,15 @@ def ignores(p,write=False):
     if f.exists() and f.read_bytes()!=rules:
         normalized='\n'.join(f.read_text(encoding='utf-8-sig').splitlines())+'\n'
         if hashlib.sha256(normalized.encode()).hexdigest() not in (here/'legacy-ignores.sha256').read_text().splitlines():raise ValueError('Чужой .stignore: сохраните и удалите его вручную перед подключением')
-    if write:f.write_bytes(rules)
+    if write and (not f.exists() or f.read_bytes()!=rules):f.write_bytes(rules)
 def git(p,*args):
     r=subprocess.run(['git','-C',str(p),*args],capture_output=True,text=True,timeout=5);return r.stdout.strip() if r.returncode==0 else ''
 def exclude_git(p):
     value=git(p,'rev-parse','--git-path','info/exclude')
     if not value:return
-    target=Path(value);target=target if target.is_absolute() else p/target;safe(target);target.parent.mkdir(parents=True,exist_ok=True)
+    target=Path(value);target=target if target.is_absolute() else p/target;safe(target)
+    if not target.resolve().is_relative_to((Path.home()/'Disk').resolve()):return
+    target.parent.mkdir(parents=True,exist_ok=True)
     old=target.read_text() if target.exists() else '';missing=[x for x in ('.stignore','.stfolder','*.sync-conflict-*') if x not in old.splitlines()]
     if missing:target.write_text(old+('\n' if old and not old.endswith('\n') else '')+'\n'.join(missing)+'\n')
 def channel(data):
@@ -51,10 +53,43 @@ def ensure_cron():
         content=old.stdout+(b'\n' if old.stdout and not old.stdout.endswith(b'\n') else b'')+line+b'\n'
         subprocess.run(['crontab','-'],input=content,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=5)
     except (OSError,subprocess.SubprocessError):pass
+def reconcile(api,identity):
+    disk=Path.home()/'Disk';safe(disk)
+    folders=api('config/folders');devices=[d['deviceID'] for d in api('config/devices') if d['deviceID']!=identity]
+    if not disk.exists() or not devices:return
+    for p in sorted(disk.iterdir()):
+        if not p.is_dir() or p.is_symlink():continue
+        try:
+            folder_path(p.name)
+            matches=[f for f in folders if f['path'].rstrip('/')==str(p)]
+            if len(matches)>1:raise ValueError('Несколько ID для одной папки')
+            current=matches[0] if matches else None
+            folder_id=current['id'] if current else fid(p.name)
+            if any(f['id']==folder_id and f['path'].rstrip('/')!=str(p) for f in folders):raise ValueError('ID занят')
+            ignores(p)
+            if not current:
+                current=api('config/defaults/folder');current.update(id=folder_id,label=p.name,path=str(p),type='sendreceive',paused=False,devices=[dict(deviceID=identity)],maxConflicts=10,rescanIntervalS=60,fsWatcherEnabled=True)
+            missing=[d for d in devices if not any(x['deviceID']==d for x in current['devices'])]
+            ignores(p,True);exclude_git(p)
+            if missing or not matches:
+                current['devices'] += [dict(deviceID=d) for d in missing]
+                api('config/folders/'+folder_id,'PUT',current)
+        except ValueError as e:print('RemoteDisk: '+p.name+': '+str(e),file=sys.stderr)
+
 def main():
     for path in (s,cfg,binary,s/'ports.json',s/'bootstrap.lock',s/'syncthing.log',s/'syncthing.pid'):safe(path)
-    if action not in ('list','attach','detach','add-device','channel-config','bootstrap'):raise ValueError('Неизвестная команда')
+    if action not in ('list','attach','detach','add-device','channel-config','bootstrap','reconcile','install-auto'):raise ValueError('Неизвестная команда')
     data=json.loads(base64.b64decode(a[1],validate=True)) if len(a)==2 else {}
+    if action=='install-auto':
+        units=Path.home()/'.config/systemd/user';safe(units);units.mkdir(parents=True,exist_ok=True)
+        script=s/'server-disk.sh'
+        if not script.exists():raise ValueError('Сначала скопируйте server-disk.sh в ~/.local/share/remote-disk')
+        for unit in ('remote-disk-folders.service','remote-disk-folders.timer'):safe(units/unit)
+        (units/'remote-disk-folders.service').write_text('[Unit]\nDescription=RemoteDisk folder discovery\n[Service]\nType=oneshot\nExecStart=/bin/bash "%h/.local/share/remote-disk/server-disk.sh" reconcile\n')
+        (units/'remote-disk-folders.timer').write_text('[Unit]\nDescription=Discover RemoteDisk folders every 30s\n[Timer]\nOnStartupSec=10\nOnUnitInactiveSec=30\n[Install]\nWantedBy=timers.target\n')
+        subprocess.run(['systemctl','--user','daemon-reload'],check=True)
+        subprocess.run(['systemctl','--user','enable','--now','remote-disk-folders.timer'],check=True)
+        print('{}');return
     if action=='channel-config':print(json.dumps(channel(data)));return
     if action=='list':
         disk=Path.home()/'Disk';safe(disk);root=E.parse(cfg).getroot() if cfg.exists() else E.Element('configuration');rows=[]
@@ -116,7 +151,10 @@ def main():
         if not identity:raise ValueError('Движок не запустился')
         api('config/options','PATCH',dict(globalAnnounceEnabled=False,localAnnounceEnabled=False,relaysEnabled=False,natEnabled=False,autoUpgradeIntervalH=0,reconnectionIntervalS=10))
         if action=='add-device':
-            api('config/devices/'+data['deviceId'],'PUT',dict(deviceID=data['deviceId'],name=data.get('deviceName','RemoteDisk'),addresses=data.get('addresses',['dynamic']),autoAcceptFolders=False));print('{}');return
+            api('config/devices/'+data['deviceId'],'PUT',dict(deviceID=data['deviceId'],name=data.get('deviceName','RemoteDisk'),addresses=data.get('addresses',['dynamic']),autoAcceptFolders=False))
+        if action in ('reconcile','bootstrap','add-device'):
+            reconcile(api,identity)
+        if action=='add-device':print('{}');return
         if action in ('attach','detach'):
             folders=api('config/folders');matches=[f for f in folders if f['path'].rstrip('/')==str(p)]
             if len(matches)>1:raise ValueError('Несколько ID для одной папки')

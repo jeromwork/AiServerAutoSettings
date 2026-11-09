@@ -23,6 +23,7 @@ try {
     Assert ($script:Engine.PreserveWhitespace -and $script:Engine.configuration.folder.OuterXml -ceq $before -and $saved.Contains('<encryptionPassword></encryptionPassword>') -and -not $saved.Contains('&#xD;') -and $saved.Replace($script:Engine.configuration.options.OuterXml,'<options><natEnabled>true</natEnabled></options>') -ceq $xml) 'XML save preserves empty passwords and unrelated document'
     Assert ($script:Engine.configuration.options.natEnabled -ceq 'false' -and $script:Engine.configuration.options.listenAddress -ceq 'tcp://127.0.0.1:22000') 'XML options updated and appended'
     function Invoke-RestMethod {Write-Output -NoEnumerate $script:ApiResponse}
+    $script:Gui=$null;$script:ApiKey=$null;$script:ApiResponse=[pscustomobject]@{myID='lazy'};$null=Invoke-DiskApi 'system/status';Assert ($script:Gui -eq '127.0.0.1:8384' -and $script:ApiKey -eq 'test') 'CLI lazily loads engine state'
     $script:Gui='127.0.0.1:8384';$script:ApiResponse=@([pscustomobject]@{id='first';path='first'},[pscustomobject]@{id='second';path='second'});$captured=@(Invoke-DiskApi 'config/folders');Assert ($captured.Count -eq 2 -and $captured[0].id -ceq 'first' -and $captured[1].id -ceq 'second') 'PS5 REST array is emitted as individual folders'
     foreach($case in @(@{value=@();count=0},@{value=$null;count=0},@{value='';count=0},@{value=$false;count=1},@{value=0;count=1},@{value=[pscustomobject]@{myID='local'};count=1})){$script:ApiResponse=$case.value;$captured=@(Invoke-DiskApi 'system/status');Assert ($captured.Count -eq $case.count -and ($case.count -eq 0 -or [object]::ReferenceEquals($captured[0],$case.value))) 'REST empty array, empty response and scalar object'}
     function Invoke-DiskSsh {param($Command,[switch]$Direct,$OutputFile) $script:ServerResponse}
@@ -36,6 +37,10 @@ try {
     Write-DiskLog 'Native test' $nativeFailure;$log=Join-Path $script:DiskHome 'install.log';$text=[IO.File]::ReadAllText($log)
     Assert ($text -match '^\d{4}-\d\d-\d\dT' -and $text.Contains('[Native test]') -and $text.Contains('код выхода 4') -and $text.Contains('Disk.Common.ps1') -and -not $text.Contains($secret)) 'Failure log: time, step, reason, position, no stderr'
     [IO.File]::WriteAllText($log,('x'*(256KB+1)));Write-DiskLog 'Install test';Assert ((Get-Item -LiteralPath $log).Length -lt 256KB -and [IO.File]::ReadAllText($log).Contains('[Install test] Успех')) 'Log rotation and success'
+    $oldProfile=$env:USERPROFILE;try{$env:USERPROFILE=Join-Path $tmp 'Test User';Assert ((Get-DiskBase) -eq (Join-Path $tmp 'Test User/Disk')) 'Default base is the profile Disk folder'}finally{$env:USERPROFILE=$oldProfile}
+    $free=Join-Path $tmp 'free';Assert-DiskFreePath $free @();[void][IO.Directory]::CreateDirectory($free);Assert-DiskFreePath $free @()
+    [void][IO.Directory]::CreateDirectory((Join-Path $free '.git'));$blocked=$false;try{Assert-DiskFreePath $free @()}catch{$blocked=$_.Exception.Message -eq 'папка занята'};Assert $blocked 'Git-only folder is occupied'
+    $blocked=$false;try{Assert-DiskFreePath (Join-Path $tmp 'nested') @(@{path=$tmp})}catch{$blocked=$true};Assert $blocked 'Nested Syncthing paths refused'
     $folder=Join-Path $tmp 'folder';[void][IO.Directory]::CreateDirectory($folder);$ignore=Join-Path $folder '.stignore';[IO.File]::WriteAllText($ignore,'foreign-policy');$refused=$false
     try{Test-DiskIgnores $folder}catch{$refused=$_.Exception.Message.Contains('Чужой .stignore')};Assert ($refused -and [IO.File]::ReadAllText($ignore) -eq 'foreign-policy') 'Foreign ignores refused'
     Remove-Item -LiteralPath $ignore -Force;Test-DiskIgnores $folder -Write;Test-DiskIgnores $folder -Write

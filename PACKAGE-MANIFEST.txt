@@ -109,3 +109,10 @@ disk/legacy-ignores.sha256
 disk/README.md
 disk/test-disk.py
 disk/test-install.ps1
+SETUP.cmd
+Setup-All.ps1
+OPENVPN-FIX.cmd
+Fix-OpenVpnAdapter.ps1
+disk/Sync-RemoteDiskFolders.ps1
+disk/Enable-RemoteDiskFolders.ps1
+disk/Move-RemoteDiskFolder.ps1

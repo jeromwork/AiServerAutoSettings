@@ -254,6 +254,67 @@ def exercise(root, archive):
     f = api(b, 'config/folders/' + b['id']); old = b['id']; api(b, 'config/folders/' + old, 'DELETE')
     f['id'] = 'legacy-project'; api(b, 'config/folders/legacy-project', 'PUT', f)
     require(server(b, 'attach', dict(name='project', deviceId=a['deviceId'], localHasFiles=False))['id'] == 'legacy-project', 'legacy ID retained')
+    # Server discovery + actual Windows companion scripts against both real engines.
+    auto = a['home'] / 'Disk/AutoTest'; auto.mkdir(); (auto/'hello.txt').write_text('auto')
+    outside = a['home']/'outside'; outside.mkdir(); (outside/'keep.txt').write_text('untouched')
+    (a['home']/'Disk/Linked').symlink_to(outside, target_is_directory=True)
+    foreign = a['home']/'Disk/Foreign'; foreign.mkdir(); (foreign/'.stignore').write_text('custom')
+    server(a, 'reconcile'); server(a, 'reconcile')
+    row = next(f for f in api(a, 'config/folders') if f['label']=='AutoTest'); aid=row['id']
+    require(any(d['deviceID']==b['deviceId'] for d in row['devices']), 'auto shared')
+    require(not any(f['label'] in ('Foreign','Linked') for f in api(a,'config/folders')), 'foreign policy and symlink skipped')
+    require(list(outside.iterdir())==[outside/'keep.txt'], 'outside Disk untouched')
+    wait(lambda: aid in api(b,'cluster/pending/folders'), 'pending automatic offer')
+    appdata=b['home']/'appdata'; local=appdata/'RemoteDisk'; (local/'state').mkdir(parents=True)
+    (local/'state/config.xml').write_bytes((b['state']/'config.xml').read_bytes())
+    (local/'server.txt').write_text(a['deviceId'])
+    base=b['home']/'work'; base.mkdir(); target=base/'AutoTest'; target.mkdir(); (target/'.git').mkdir()
+    ps=str(Path.home()/'.cache/pwsh-test/pwsh')
+    env=dict(b['env'],LOCALAPPDATA=str(appdata))
+    (local/'base.txt').write_text(str(base))
+    def accept():
+        run([ps,'-NoProfile','-File',str(HERE/'Sync-RemoteDiskFolders.ps1')],env,limit=12)
+    accept()
+    require(api(b,'config/defaults/folder')['path']==str(base), 'tray default path follows the saved base')
+    require(not any(f['id']==aid for f in api(b,'config/folders')) and (target/'.git').is_dir(), 'occupied git-only folder stays pending')
+    (target/'.git').rmdir(); accept(); accept()
+    require(len([f for f in api(b,'config/folders') if f['id']==aid])==1, 'accept idempotent')
+    wait(lambda: (target/'hello.txt').exists(), 'automatic folder transfer')
+    moved=base/'MovedAutoTest'
+    run([ps,'-NoProfile','-File',str(HERE/'Move-RemoteDiskFolder.ps1'),'-FolderId',aid,'-Destination',str(moved)],env,limit=15)
+    require((moved/'hello.txt').read_text()=='auto' and not target.exists(), 'local move keeps content')
+    require(api(b,'config/folders/'+aid)['path']==str(moved) and not api(b,'config/folders/'+aid)['paused'], 'move keeps ID and resumes')
+    (auto/'after.txt').write_text('after move'); api(a,'db/scan?folder='+aid,'POST')
+    wait(lambda:(moved/'after.txt').exists(), 'sync after move')
+    require((auto/'hello.txt').read_text()=='auto', 'server content preserved by move')
+    occupied=base/'Busy'; occupied.mkdir(); (occupied/'keep.txt').write_text('keep')
+    refused=run([ps,'-NoProfile','-File',str(HERE/'Move-RemoteDiskFolder.ps1'),'-FolderId',aid,'-Destination',str(occupied)],env,ok=False,limit=10)
+    require(refused.returncode!=0 and (occupied/'keep.txt').read_text()=='keep' and (moved/'hello.txt').exists(), 'occupied move rejected without altering files')
+    api(b,'config/folders/'+aid,'PATCH',dict(paused=True))
+    moved_again=base/'MovedPaused'
+    run([ps,'-NoProfile','-File',str(HERE/'Move-RemoteDiskFolder.ps1'),'-FolderId',aid,'-Destination',str(moved_again)],env,limit=15)
+    require(api(b,'config/folders/'+aid)['paused'] and (moved_again/'hello.txt').exists(), 'original pause retained on move')
+    # Changing the base moves server folders from the old base, like Yandex Disk.
+    base2=b['home']/'Disk2'; stamp=(moved_again/'hello.txt').stat().st_mtime_ns
+    common=str(HERE/'Disk.Common.ps1').replace("'","''")
+    def rebase(path):
+        return run([ps,'-NoProfile','-Command',f"$ErrorActionPreference='Stop';. '{common}';$script:DiskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk';Set-DiskBase '{path}'"],env,limit=20)
+    rebase(base2); rebase(base2)
+    relocated=base2/'MovedPaused'
+    require(api(b,'config/folders/'+aid)['path']==str(relocated) and (relocated/'hello.txt').read_text()=='auto' and not moved_again.exists(), 'base change moves folders')
+    require((local/'base.txt').read_text()==str(base2) and api(b,'config/folders/'+aid)['paused'], 'base saved, pause kept')
+    copied=base2/'Copied'
+    run([ps,'-NoProfile','-File',str(HERE/'Move-RemoteDiskFolder.ps1'),'-FolderId',aid,'-Destination',str(copied),'-Copy'],env,limit=15)
+    require((copied/'hello.txt').read_text()=='auto' and (copied/'hello.txt').stat().st_mtime_ns//10**7==stamp//10**7 and (copied/'.stignore').exists() and not relocated.exists(), 'copy move across volumes keeps files and times')
+    require(api(b,'config/folders/'+aid)['path']==str(copied), 'copy move updates path')
+    refused=run([ps,'-NoProfile','-File',str(HERE/'Move-RemoteDiskFolder.ps1'),'-FolderId',aid,'-Destination',str(copied/'inner'),'-Copy'],env,ok=False,limit=10)
+    require(refused.returncode!=0 and not (copied/'inner').exists(), 'move into itself refused')
+
+    # A newly registered peer gets all existing managed folders without manual attach.
+    api(a,'config/folders/'+aid,'PATCH',dict(devices=[dict(deviceID=a['deviceId'])]))
+    server(a,'add-device',dict(deviceId=b['deviceId'],addresses=[f"tcp://127.0.0.1:{b['listen']}"]))
+    require(any(d['deviceID']==b['deviceId'] for d in api(a,'config/folders/'+aid)['devices']), 'registration reconciles existing folders')
+    print('auto discovery, occupied-path guard, accept, move and resumed transfer: exit 0')
     print('engine 2.1.7: attach/detach, transfer, exclusions, conflict, offline writes: exit 0')
 
 
