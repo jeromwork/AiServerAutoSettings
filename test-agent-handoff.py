@@ -44,7 +44,7 @@ class HandoffTests(unittest.TestCase):
         handoff.validate(data)
         directory = handoff.handoff_directory(data)
         message = handoff.prompt(data, directory)
-        for required in (data["projectId"], data["hostId"], data["windowsReplica"], "windows_status", "windows_command", "НОВЫЙ sync_barrier", "НЕ запуск модели", "не делай push/PR"):
+        for required in (data["projectId"], data["hostId"], data["windowsReplica"], "windows_status", "windows_command", "НОВЫЙ sync_barrier", "НЕ запуск модели", "не делай push/PR", "exclusive=true", "выполняются параллельно", "чужие poll/stop отклоняются"):
             self.assertIn(required, message)
         for name, value in (("projectId", "../outside"), ("serverWorkspace", "/tmp/other"), ("socketPath", "/tmp/unbound.sock"), ("agents", "0"), ("windowsReplica", "relative")):
             invalid = dict(data, **{name: value})

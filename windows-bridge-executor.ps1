@@ -69,13 +69,16 @@ $syncState = 'not_checked'
 $device = [string]$config.device
 $parentProcess = [Diagnostics.Process]::GetProcessById([int]$config.parent_pid)
 $processes = @{}
+$completed = @{}
+$pendingCommands = @{}
 $quit = $false
 $environmentMutex = New-Object Threading.Mutex($false, ('Global\RemoteAgents.Environment.'+[Security.Principal.WindowsIdentity]::GetCurrent().User.Value))
 $leaseRoot=Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'RemoteAgents\environment'
 [void][IO.Directory]::CreateDirectory($leaseRoot)
 foreach($node in @($leaseRoot,(Split-Path $leaseRoot -Parent))){if((Get-Item -LiteralPath $node).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Linked environment state denied.'}}
 $leasePath=Join-Path $leaseRoot 'operations.json'
-function Update-Environment([string]$Id,[string]$TaskId,[Diagnostics.Process]$Process,[switch]$Remove) {
+# Schema 1 is retained for rolling upgrades. Missing exclusive means legacy exclusive.
+function Update-Environment([string]$Id,[string]$TaskId,[Diagnostics.Process]$Process,[switch]$Remove,[bool]$Exclusive=$false,[string]$Operation='process_start') {
     try {$acquired=$environmentMutex.WaitOne(5000)}catch [Threading.AbandonedMutexException]{$acquired=$true}
     if(!$acquired){throw 'Environment coordination timeout.'}
     try {
@@ -89,11 +92,59 @@ function Update-Environment([string]$Id,[string]$TaskId,[Diagnostics.Process]$Pr
                 try {if(!$live.HasExited -and $live.StartTime.ToUniversalTime().Ticks -eq [long]$entry.started){$entries+=@($entry)}}finally{$live.Dispose()}
             }
         }
-        if(!$Remove -and @($entries|Where-Object{$_.taskId -cne $TaskId}).Count){throw 'Target environment busy in another task. Finish/stop that task before reassigning it.'}
+        $previous=@($entries|Where-Object{$_.id -ceq $Id})
         $entries=@($entries|Where-Object{$_.id -cne $Id})
-        if(!$Remove){$entries+=@(@{id=$Id;taskId=$TaskId;pid=$Process.Id;started=$Process.StartTime.ToUniversalTime().Ticks})}
+        if(!$Remove){
+            $blockers=@($entries|Where-Object{
+                $_.taskId -cne $TaskId -and ($Exclusive -or !$_.PSObject.Properties['exclusive'] -or $_.exclusive -eq $true)
+            })
+            if($blockers.Count){
+                $owner=$blockers[0]
+                # Only validated metadata crosses MCP; never reflect a command or arbitrary state text.
+                $ownerTask=if([string]$owner.taskId -cmatch '^[a-z0-9][a-z0-9_-]{0,63}$'){[string]$owner.taskId}else{'unknown'}
+                $kind=if($owner.PSObject.Properties['operation'] -and $owner.operation -in @('command','process_start')){[string]$owner.operation}else{'legacy'}
+                $since=if($owner.PSObject.Properties['began']){([DateTime]::new([long]$owner.began,[DateTimeKind]::Utc)).ToString('o')}else{([DateTime]::new([long]$owner.started,[DateTimeKind]::Utc)).ToString('o')}
+                throw "Target environment busy: taskId=$ownerTask operation=$kind started=$since"
+            }
+            if(@($entries|Where-Object{$_.taskId -ceq $TaskId}).Count -ge 8){throw 'Live process limit reached for taskId (8).'}
+            if($entries.Count -ge 64){throw 'Global live process limit reached (64).'}
+            $began=if($previous.Count -and $previous[0].PSObject.Properties['began']){[long]$previous[0].began}else{[DateTime]::UtcNow.Ticks}
+            $entries+=@(@{id=$Id;taskId=$TaskId;pid=$Process.Id;started=$Process.StartTime.ToUniversalTime().Ticks;began=$began;operation=$Operation;exclusive=$Exclusive})
+        }
         [IO.File]::WriteAllText($leasePath,(@{schema=1;operations=$entries}|ConvertTo-Json -Depth 5 -Compress),(New-Object Text.UTF8Encoding($false)))
     } finally {$environmentMutex.ReleaseMutex()}
+}
+
+function Process-Result($item) {
+    $running=-not $item.Process.HasExited
+    if(!$running){$item.Process.WaitForExit()} # Flush async output callbacks.
+    return @{ok=$true;running=$running;exit_code=$(if(!$running){$item.Process.ExitCode}else{$null});output=$item.Read();output_limit_chars=32768}
+}
+
+function Clear-FinishedProcesses {
+    foreach($id in @($processes.Keys)){
+        if(!$pendingCommands.ContainsKey($id) -and $processes[$id].Process.HasExited){
+            $item=$processes[$id]
+            $completed[$id]=@{TaskId=$item.TaskId;Finished=[DateTime]::UtcNow;Result=(Process-Result $item)}
+            $item.Dispose();$processes.Remove($id)
+            Update-Environment $id '' $null -Remove
+        }
+    }
+    foreach($id in @($completed.Keys)){
+        if($completed[$id].Finished -lt [DateTime]::UtcNow.AddMinutes(-5)){$completed.Remove($id)}
+    }
+    # At most 64 retained results (2,097,152 output characters), separate from live process slots.
+    while($completed.Count -gt 64){
+        $oldest=$completed.Keys|Sort-Object {$completed[$_].Finished}|Select-Object -First 1
+        $completed.Remove($oldest)
+    }
+}
+
+function Request-TaskId($values) {
+    $taskId=[string]$values.taskId
+    if(!$taskId -and !$config.enforce_target){$taskId='legacy-'+$PID}
+    if($taskId -cnotmatch '^[a-z0-9][a-z0-9_-]{0,63}$'){throw 'Explicit taskId required for environment coordination.'}
+    return $taskId
 }
 
 function Workspace-Path([string]$relative) {
@@ -147,22 +198,25 @@ function Assert-SyncBarrier {
     } finally { if ($guard) { $guard.Dispose() } }
 }
 
-function New-TrackedProcess($values) {
+function New-TrackedProcess($values,[string]$Operation='process_start') {
     if (-not $allowShell) { throw 'Shell is disabled; reconnect with owner-authorized AllowShell.' }
     if ([string]::IsNullOrWhiteSpace([string]$values.command) -or ([string]$values.command).Length -gt 16384) { throw 'Invalid command length.' }
-    if ($processes.Count -ge 8) { throw 'Process limit reached; stop old tracked processes.' }
+    Clear-FinishedProcesses
+    $exclusive=$false
+    if($null -ne $values.exclusive){
+        if($values.exclusive -isnot [bool]){throw 'exclusive must be a boolean.'}
+        $exclusive=$values.exclusive
+    }
     $cwd = Workspace-Path ([string]$values.cwd)
     if (-not [IO.Directory]::Exists($cwd)) { throw 'Command directory does not exist.' }
-    $taskId=[string]$values.taskId
-    if(!$taskId -and !$config.enforce_target){$taskId='legacy-'+$PID}
-    if($taskId -cnotmatch '^[a-z0-9][a-z0-9_-]{0,63}$'){throw 'Explicit taskId required for environment coordination.'}
+    $taskId=Request-TaskId $values
     $id = [Guid]::NewGuid().ToString('N')
-    Update-Environment $id $taskId ([Diagnostics.Process]::GetCurrentProcess())
+    Update-Environment $id $taskId ([Diagnostics.Process]::GetCurrentProcess()) -Exclusive $exclusive -Operation $Operation
     try {
         Assert-SyncBarrier
         $item = New-Object BridgeProcess ([string]$values.command), $cwd
         $item.TaskId=$taskId
-        Update-Environment $id $taskId $item.Process
+        Update-Environment $id $taskId $item.Process -Exclusive $exclusive -Operation $Operation
     } catch {if($item){$item.Dispose()};Update-Environment $id '' $null -Remove;throw}
     $processes[$id] = $item
     return @{ id = $id; item = $item }
@@ -185,8 +239,8 @@ function Dispatch($request) {
                 $found = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
                 $capabilities[$name] = @{ available = $null -ne $found; path = $(if ($found) { $found.Source } else { $null }) }
             }
-            if ($controlOnly) { return @{ok=$true;device=$device;platform='windows';workspace=$root;shell_enabled=$allowShell;control_only=$true;project_id=[string]$config.project_id;host_id=[string]$config.host_id;file_mutations_enabled=$true;sync_guard=@{required=$false};capabilities=$capabilities;active_processes=$processes.Count} }
-            return @{ ok = $true; device = $device; platform = 'windows'; workspace = $root; shell_enabled = $allowShell; file_mutations_enabled = -not $serverOwned; sync_guard = @{ required=$serverOwned; project_id=[string]$syncGuard.project_id; host_id=[string]$syncGuard.host_id; state=$syncState }; capabilities = $capabilities; active_processes = $processes.Count; notes = 'Capabilities are executable discovery only; ADB devices, VPN routes and remote SSH have not been tested. A sync preflight confirms the snapshot before process start; it does not freeze subsequent server edits.' }
+            if ($controlOnly) { return @{ok=$true;device=$device;platform='windows';workspace=$root;shell_enabled=$allowShell;control_only=$true;project_id=[string]$config.project_id;host_id=[string]$config.host_id;file_mutations_enabled=$true;sync_guard=@{required=$false};capabilities=$capabilities;coordination=@{exclusive=$true;per_task_limit=8;global_limit=64;completed_ttl_seconds=300};active_processes=$processes.Count} }
+            return @{ ok = $true; device = $device; platform = 'windows'; workspace = $root; shell_enabled = $allowShell; file_mutations_enabled = -not $serverOwned; sync_guard = @{ required=$serverOwned; project_id=[string]$syncGuard.project_id; host_id=[string]$syncGuard.host_id; state=$syncState }; capabilities = $capabilities; coordination=@{exclusive=$true;per_task_limit=8;global_limit=64;completed_ttl_seconds=300};active_processes = $processes.Count; notes = 'Capabilities are executable discovery only; ADB devices, VPN routes and remote SSH have not been tested. A sync preflight confirms the snapshot before process start; it does not freeze subsequent server edits.' }
         }
         'list' {
             $target = Workspace-Path ([string]$values.path)
@@ -212,14 +266,9 @@ function Dispatch($request) {
             $timeout = 30
             if ($null -ne $values.timeout_seconds) { $timeout = [int]$values.timeout_seconds }
             if ($timeout -lt 1 -or $timeout -gt 60) { throw 'Timeout must be 1..60 seconds.' }
-            $tracked = New-TrackedProcess $values
-            try {
-                $finished = $tracked.item.Process.WaitForExit($timeout * 1000)
-                if (-not $finished) { $tracked.item.Stop() }
-                # Flush async line callbacks once the process is known to have ended.
-                $tracked.item.Process.WaitForExit()
-                return @{ ok = $true; exit_code = $tracked.item.Process.ExitCode; timed_out = -not $finished; output = $tracked.item.Read(); output_limit_chars = 32768 }
-            } finally { $tracked.item.Dispose(); $processes.Remove($tracked.id);Update-Environment $tracked.id '' $null -Remove }
+            $tracked = New-TrackedProcess $values 'command'
+            # The event loop holds this connection while accepting other agents' requests.
+            return @{deferred=$true;id=$tracked.id;deadline=[DateTime]::UtcNow.AddSeconds($timeout)}
         }
         'process_start' {
             $tracked = New-TrackedProcess $values
@@ -227,61 +276,119 @@ function Dispatch($request) {
         }
         'process_poll' {
             $id = [string]$values.id
-            if (-not $processes.ContainsKey($id)) { throw 'Unknown bridge process.' }
-            $item = $processes[$id]
-            if($config.enforce_target -and $values.taskId -cne $item.TaskId){throw 'Tracked process belongs to another task.'}
-            if($item.Process.HasExited){Update-Environment $id '' $null -Remove}
-            return @{ ok = $true; running = -not $item.Process.HasExited; exit_code = $(if ($item.Process.HasExited) { $item.Process.ExitCode } else { $null }); output = $item.Read(); output_limit_chars = 32768 }
+            $taskId=Request-TaskId $values
+            if($processes.ContainsKey($id)){
+                $item=$processes[$id]
+                if($taskId -cne $item.TaskId){throw 'Tracked process belongs to another task.'}
+                $result=Process-Result $item
+                if(!$result.running -and !$pendingCommands.ContainsKey($id)){
+                    $item.Dispose();$processes.Remove($id)
+                    Update-Environment $id '' $null -Remove
+                }
+                return $result
+            }
+            if(!$completed.ContainsKey($id)){throw 'Unknown bridge process (or completed output expired/read).'}
+            if($taskId -cne $completed[$id].TaskId){throw 'Tracked process belongs to another task.'}
+            $result=$completed[$id].Result;$completed.Remove($id)
+            return $result
         }
         'process_stop' {
             $id = [string]$values.id
-            if (-not $processes.ContainsKey($id)) { throw 'Unknown bridge process.' }
-            if($config.enforce_target -and $values.taskId -cne $processes[$id].TaskId){throw 'Tracked process belongs to another task.'}
-            $processes[$id].Dispose(); $processes.Remove($id)
-            Update-Environment $id '' $null -Remove
-            return @{ ok = $true; stopped = $true }
+            $taskId=Request-TaskId $values
+            if($processes.ContainsKey($id)){
+                if($taskId -cne $processes[$id].TaskId){throw 'Tracked process belongs to another task.'}
+                if($pendingCommands.ContainsKey($id)){throw 'Synchronous command cannot be stopped by process_stop.'}
+                $processes[$id].Dispose();$processes.Remove($id)
+                Update-Environment $id '' $null -Remove
+            }elseif($completed.ContainsKey($id)){
+                if($taskId -cne $completed[$id].TaskId){throw 'Tracked process belongs to another task.'}
+                $completed.Remove($id)
+            }else{throw 'Unknown bridge process (or completed output expired/read).'}
+            return @{ok=$true;stopped=$true}
         }
         'shutdown' { $script:quit = $true; return @{ ok = $true; stopped = $true } }
         default { throw 'Unknown operation.' }
     }
 }
 
+function Send-Response($client,$response) {
+    try {
+        $json=$response|ConvertTo-Json -Depth 12 -Compress
+        $json=$json.Replace($secret,'[redacted]')
+        $answer=[Text.Encoding]::UTF8.GetBytes($json+"`n")
+        if($answer.Length -gt 262144){$answer=[Text.Encoding]::UTF8.GetBytes('{"ok":false,"error":"Response exceeds limit"}'+"`n")}
+        $client.GetStream().Write($answer,0,$answer.Length)
+    } finally {$client.Close()}
+}
+
+function Complete-Commands {
+    foreach($id in @($pendingCommands.Keys)){
+        $pending=$pendingCommands[$id];$item=$processes[$id]
+        $finished=$item.Process.HasExited
+        if(!$finished -and [DateTime]::UtcNow -lt $pending.deadline){continue}
+        try {
+            if(!$finished){$item.Stop()}
+            $result=Process-Result $item
+            $result.Remove('running');$result.timed_out=-not $finished
+        }catch{
+            $result=@{ok=$false;error='Command completion failed.'}
+        }finally{
+            $item.Dispose();$processes.Remove($id);$pendingCommands.Remove($id)
+            Update-Environment $id '' $null -Remove
+        }
+        # Release the lease and slot before the caller receives the final result.
+        try{Send-Response $pending.client $result}catch{}
+    }
+}
+
 $listener = New-Object Net.Sockets.TcpListener ([Net.IPAddress]::Loopback), 0
+# Partial frames are read incrementally so a slow/disconnected client cannot stall commands.
+$frames=@{}
 try {
     $null = Workspace-Path '.'
-    $listener.Start(4)
+    $listener.Start(128)
     @{ state = 'ready'; port = $listener.LocalEndpoint.Port; device = $device } | ConvertTo-Json -Compress | ForEach-Object { [Console]::WriteLine($_) }
     while (-not $quit) {
-        if (-not $listener.Pending()) {
-            if ($parentProcess.HasExited) { break }
-            Start-Sleep -Milliseconds 50
-            continue
-        }
-        $client = $listener.AcceptTcpClient()
-        try {
-            $stream = $client.GetStream(); $stream.ReadTimeout = 5000; $stream.WriteTimeout = 5000
-            $bytes = New-Object 'Collections.Generic.List[byte]'
-            $readDeadline = [DateTime]::UtcNow.AddSeconds(5)
-            while ($true) {
-                if ([DateTime]::UtcNow -ge $readDeadline) { throw 'Frame read timed out.' }
-                $value = $stream.ReadByte()
-                if ($value -eq -1) { throw 'Incomplete frame.' }
-                if ($value -eq 10) { break }
-                if ($bytes.Count -ge 262144) { throw 'Frame too large.' }
-                $bytes.Add([byte]$value)
+        if ($parentProcess.HasExited) { break }
+        Complete-Commands
+        Clear-FinishedProcesses
+        if($listener.Pending()){
+            $client=$listener.AcceptTcpClient()
+            if($frames.Count+$pendingCommands.Count -ge 128){$client.Close()}else{
+                $stream=$client.GetStream();$stream.WriteTimeout=1000
+                $frames[[Guid]::NewGuid().ToString('N')]=@{client=$client;stream=$stream;bytes=(New-Object 'Collections.Generic.List[byte]');deadline=[DateTime]::UtcNow.AddSeconds(5)}
             }
-            try { $request = [Text.Encoding]::UTF8.GetString($bytes.ToArray()) | ConvertFrom-Json; $response = Dispatch $request }
-            catch { $response = @{ ok = $false; error = 'Request rejected: ' + $_.Exception.Message } }
-            $json = $response | ConvertTo-Json -Depth 12 -Compress
-            # Token may not be reflected even if an explicitly requested command prints it.
-            $json = $json.Replace($secret, '[redacted]')
-            $answer = [Text.Encoding]::UTF8.GetBytes($json + "`n")
-            if ($answer.Length -gt 262144) { $answer = [Text.Encoding]::UTF8.GetBytes('{"ok":false,"error":"Response exceeds limit"}' + "`n") }
-            $stream.Write($answer, 0, $answer.Length)
-        } catch { } finally { $client.Close() }
+        }
+        foreach($frameId in @($frames.Keys)){
+            $frame=$frames[$frameId];$keep=$true
+            try {
+                if([DateTime]::UtcNow -ge $frame.deadline){throw 'Frame read timed out.'}
+                # Poll detects EOF even when DataAvailable is false.
+                if($frame.client.Client.Poll(0,[Net.Sockets.SelectMode]::SelectRead) -and $frame.client.Client.Available -eq 0){throw 'Incomplete frame.'}
+                while($frame.stream.DataAvailable){
+                    $value=$frame.stream.ReadByte()
+                    if($value -eq -1){throw 'Incomplete frame.'}
+                    if($value -eq 10){
+                        $keep=$false
+                        try{$request=[Text.Encoding]::UTF8.GetString($frame.bytes.ToArray())|ConvertFrom-Json;$response=Dispatch $request}
+                        catch{$response=@{ok=$false;error='Request rejected: '+$_.Exception.Message}}
+                        if($response.deferred){
+                            $pendingCommands[$response.id]=@{client=$frame.client;deadline=$response.deadline}
+                        }else{Send-Response $frame.client $response}
+                        break
+                    }
+                    if($frame.bytes.Count -ge 262144){throw 'Frame too large.'}
+                    $frame.bytes.Add([byte]$value)
+                }
+            }catch{$keep=$false;$frame.client.Close()}
+            if(!$keep){$frames.Remove($frameId)}
+        }
+        Start-Sleep -Milliseconds 10
     }
 } finally {
     $listener.Stop()
+    foreach($frame in $frames.Values){$frame.client.Close()}
+    foreach($pending in $pendingCommands.Values){$pending.client.Close()}
     foreach ($id in @($processes.Keys)) { $processes[$id].Dispose();Update-Environment $id '' $null -Remove }
     $environmentMutex.Dispose()
     $secret = $null; $config = $null
