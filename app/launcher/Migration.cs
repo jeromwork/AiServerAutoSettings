@@ -6,8 +6,23 @@ using System.Windows.Forms;
 
 namespace RemoteAgents.Launcher
 {
+    internal sealed class MigrationFailureException : IOException
+    {
+        internal MigrationFailureException(string message) : base(message) { }
+    }
     internal static class Migration
     {
+        internal static string FailureMessage(string home)
+        {
+            try {
+                string path = Path.Combine(home, "state", "migration-error.json");
+                if (File.Exists(path)) {
+                    string message = Json.Str(Json.Read(path), "message");
+                    if (message.Length > 0 && message.Length <= 12000) return message;
+                }
+            } catch { }
+            return "Переход не выполнен. Причина записана в logs\\migration.log; подробности транспорта — в state\\migration-probe\\logs\\transport.log.";
+        }
         static string Script(string home, string name)
         {
             if (name == "Rollback.ps1") {
@@ -66,7 +81,7 @@ namespace RemoteAgents.Launcher
                     } catch { }
                 };
                 timer.Start(); form.ShowDialog();
-                if (process.ExitCode != 0) throw new IOException("Переход не завершён; смотрите migration.log");
+                if (process.ExitCode != 0) throw new MigrationFailureException(FailureMessage(home));
             }
         }
         public static void Rollback(string home)

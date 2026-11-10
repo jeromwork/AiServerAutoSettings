@@ -60,15 +60,16 @@ function Get-TransportErrorDetail($ErrorRecord) {
     $text=if($m -match '[А-Яа-яЁё]' -and $m -notmatch '[A-Za-z0-9+/_=-]{12,}'){$m}else{$e.GetType().FullName}
     $text+' @'+(Split-Path -Leaf ([string]$ErrorRecord.InvocationInfo.ScriptName))+':'+$ErrorRecord.InvocationInfo.ScriptLineNumber
 }
-function Write-TransportLog([string]$Root,[string]$Event,[string]$Detail='') {
-    # Only event codes: exceptions may contain short passwords that regex redaction cannot identify.
-    $allowed=@('start','ready','switch','probe-ok','probe-failed','network-change','restart','api-failed','process-failed','memory-invalid','network-unavailable','stop','fatal')
+function Write-TransportLog([string]$Root,[string]$Event,$Detail='') {
+    # Structured process diagnostics are sanitized with the loaded credential values before logging.
+    $allowed=@('start','ready','switch','probe-ok','probe-failed','network-change','restart','api-failed','process-failed','memory-invalid','network-unavailable','stop','fatal','legacy-unsupported')
     if($Event -notin $allowed){$Event='process-failed'}
     $dir=Join-Path $Root 'logs';[void][IO.Directory]::CreateDirectory($dir);$path=Join-Path $dir 'transport.log'
     if([IO.File]::Exists($path) -and (Get-Item -LiteralPath $path).Length -ge 1MB){Move-Item -LiteralPath $path -Destination ($path+'.1') -Force}
     $line=[DateTime]::UtcNow.ToString('o')+' '+$Event
-    # Принимается только подробность формата Get-TransportErrorDetail; произвольный текст отбрасывается.
-    if($Detail -match '^(.+) @[\w.-]+:\d+$'){$head=$Matches[1];if($head -match '^[A-Za-z0-9_.]+$' -or ($head -match '[А-Яа-яЁё]' -and $head -notmatch '[A-Za-z0-9+/_=-]{12,}')){$line+=' '+$Detail}}
+    # Plain exception text is rejected; callers supply a sanitized diagnostic or safe script location.
+    if($Detail -is [pscustomobject] -and $Detail.PSObject.Properties['reason']){$line+=' '+(Format-TransportDiagnostic $Detail)}
+    elseif($Detail -match '^(.+) @[\w.-]+:\d+$'){$head=$Matches[1];if($head -match '^[A-Za-z0-9_.]+$' -or ($head -match '[А-Яа-яЁё]' -and $head -notmatch '[A-Za-z0-9+/_=-]{12,}')){$line+=' '+$Detail}}
     [IO.File]::AppendAllText($path,($line+"`n"),(New-Object Text.UTF8Encoding($false)))
 }
 function Quote-Transport([string]$Value) {'"'+[regex]::Replace([regex]::Replace($Value,'(\\*)"','$1$1\"'),'(\\+)$','$1$1')+'"'}
@@ -77,16 +78,18 @@ function Get-TransportPowerShell {
     (Get-Process -Id $PID).Path
 }
 function Start-TransportProcess([string]$Exe,[string[]]$Arguments,[switch]$Probe) {
+    Initialize-TransportDiagnostics
     $si=New-Object Diagnostics.ProcessStartInfo;$si.FileName=$Exe
     $si.Arguments=(@($Arguments|ForEach-Object {Quote-Transport (Convert-TransportLF $_)})) -join ' '
     $si.UseShellExecute=$false;$si.CreateNoWindow=$true;$si.StandardOutputEncoding=New-Object Text.UTF8Encoding($false);$si.RedirectStandardInput=$true;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true
     $p=New-Object Diagnostics.Process;$p.StartInfo=$si
     try{
         [void]$p.Start();$p.StandardInput.Close()
-        $err=$p.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null);$out=$null
+        $errBuffer=New-Object RemoteAgents.TransportErrorBuffer
+        $err=$p.StandardError.BaseStream.CopyToAsync($errBuffer);$out=$null
         if(-not $Probe){$out=$p.StandardOutput.BaseStream.CopyToAsync([IO.Stream]::Null)}
-        [pscustomobject]@{Process=$p;ErrorDrain=$err;OutputDrain=$out}
-    }catch{try{if(-not $p.HasExited){$p.Kill();[void]$p.WaitForExit(2000)}}catch{};$p.Dispose();throw 'Не удалось запустить дочерний процесс'}
+        [pscustomobject]@{Process=$p;ErrorDrain=$err;ErrorBuffer=$errBuffer;OutputDrain=$out}
+    }catch{try{if(-not $p.HasExited){$p.Kill();[void]$p.WaitForExit(2000)}}catch{};$p.Dispose();$ex=New-Object Exception('Не удалось запустить дочерний процесс');$ex.Data['transportDiagnostic']=New-TransportDiagnostic $null 'process' 'start-failed';throw $ex}
 }
 function Stop-TransportProcess($Child) {
     if(-not $Child){return};$p=$Child.Process
@@ -121,6 +124,8 @@ function Read-TransportSettings([string]$Root) {
     foreach($k in @('sshPort','syncPort','probePortBase','socksPortBase','apiPort')){if([int]$s[$k] -lt 1 -or [int]$s[$k] -gt 65535){throw 'Неверный порт transport'}}
     foreach($k in @('activeProbeBytes','rankProbeBytes','activeIntervalSec','meteredActiveIntervalSec','rankIntervalSec','rankConcurrency','topOnMetered','stallSeconds','probeTimeoutSec','restartDelaySec')){if([double]$s[$k] -le 0){throw 'Параметры transport должны быть положительными'}}
     if([string]$s.metered -notin @('auto','true','false','True','False')){throw 'Неверный metered'}
+    $issues=@(Import-TransportLegacyRoutes $t $channel $channelPath $profile)
+    foreach($issue in $issues){Write-TransportLog $Root 'legacy-unsupported' (New-TransportDiagnostic $null $issue.id $issue.reason)}
     Assert-TransportLists $t
     [pscustomobject]@{Options=$s;Transport=$t;Profile=$profile;Channel=$channel;Vpn=(Get-TransportValue $config 'vpn' ([pscustomobject]@{enabled=$false}))}
 }
@@ -158,24 +163,29 @@ function Convert-TransportHop([string]$Text) {
 function Assert-TransportName([string]$Name) {if($Name -notmatch '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$'){throw 'Имя пути: только буквы, цифры, _ и -'}}
 function Get-TransportCandidates($Settings,[string]$Root) {
     $p=$Settings.Profile;$t=$Settings.Transport;$o=$Settings.Options;$out=New-Object Collections.ArrayList;$c=New-Object Collections.ArrayList;$tunnels=New-Object Collections.ArrayList
+    Add-TransportLegacyCandidates $Settings $out $c
     $vless=@($Settings.Channel.outbounds|Where-Object {$_.type -eq 'vless'}|Select-Object -First 1)
-    if($vless.Count -ne 1){throw 'В существующем канале нет VLESS сервера'}
+    $v=$null
+    if($vless.Count){
     $v=Copy-TransportObject $vless[0];$v.tag='vless-direct';$v.server=$p.serverAddress
     if($v.PSObject.Properties['detour']){$v.PSObject.Properties.Remove('detour')}
     [void]$out.Add($v);[void]$c.Add([pscustomobject]@{tag=$v.tag;port=0})
+    }
     $ssh=@{type='ssh';tag='singbox-ssh-direct';server=$p.serverAddress;server_port=(Get-TransportServerPort $p);user=$p.login;private_key_path=$p.keyPath}
     $saved=@($Settings.Channel.outbounds|Where-Object {$_.type -eq 'ssh' -and $_.server -eq $p.serverAddress}|Select-Object -First 1)
     if($saved.Count){$ssh=Copy-TransportObject $saved[0];$ssh.tag='singbox-ssh-direct';if($ssh.PSObject.Properties['detour']){$ssh.PSObject.Properties.Remove('detour')}}
     if(-not $ssh.host_key){$hk=@(Get-TransportHostKeys $p.sshExecutable $p.serverAddress $p.knownHostsPath);if($ssh -is [hashtable]){$ssh.host_key=$hk}else{$ssh|Add-Member -Force host_key $hk}}
     [void]$out.Add($ssh);[void]$c.Add([pscustomobject]@{tag=$ssh.tag;port=0})
     foreach($relay in @($t.relays)){
-        if($null -eq $relay -or -not (Test-TransportEnabled $relay)){continue};Assert-TransportName $relay.name
+        if($null -eq $relay -or $relay.legacyOutbound -or -not (Test-TransportEnabled $relay)){continue};Assert-TransportName $relay.name
         if(-not (Get-TransportValue $relay 'host' $relay.server) -or [int]$relay.port -lt 1 -or [int]$relay.port -gt 65535){throw 'Неполный ретранслятор'}
+        if(-not $v){throw 'Для relay нужен VLESS старого канала'}
         $r=Copy-TransportObject $v;$r.tag='vless-relay-'+$relay.name;$r.server=(Get-TransportValue $relay 'host' $relay.server);$r.server_port=[int]$relay.port
         [void]$out.Add($r);[void]$c.Add([pscustomobject]@{tag=$r.tag;port=0})
     }
     foreach($hop in @($t.hops)){
-        if($null -eq $hop -or -not (Test-TransportEnabled $hop)){continue};Assert-TransportName $hop.name
+        if($null -eq $hop -or $hop.legacyOutbound -or -not (Test-TransportEnabled $hop)){continue};Assert-TransportName $hop.name
+        if(-not $v){throw 'Для hop нужен VLESS старого канала'}
         if(-not (Get-TransportValue $hop 'ssh' $hop.alias) -or (Get-TransportValue $hop 'ssh' $hop.alias) -match '^[\-]|[\r\n]'){throw 'Неверный SSH-алиас'}
         $ha=@('-n','-G');if($hop.configPath){$ha+=@('-F',[string]$hop.configPath)};$ha+=[string](Get-TransportValue $hop 'ssh' $hop.alias)
         $hopText=Invoke-TransportText $p.sshExecutable $ha;$h=Convert-TransportHop $hopText;$h.tag='hop-'+$hop.name
@@ -190,7 +200,7 @@ function Get-TransportCandidates($Settings,[string]$Root) {
         [void]$out.Add($r);[void]$c.Add([pscustomobject]@{tag=$r.tag;port=0})
     }
     foreach($entry in @($t.entries)){
-        if($null -eq $entry -or -not (Test-TransportEnabled $entry)){continue};Assert-TransportName $entry.name
+        if($null -eq $entry -or $entry.legacyOutbound -or -not (Test-TransportEnabled $entry)){continue};Assert-TransportName $entry.name
         $e=Read-TransportJson (Join-Path $Root ('secrets/entries/'+$entry.name+'.json'));$x=$e.secrets;$name=$entry.name
         foreach($f in @('server','sni','cover','ports','secrets')){if(-not $e.$f){throw 'Неполный client.json узла'}}
         $tls=@{enabled=$true;server_name=$e.sni;insecure=[bool]$e.insecure}
@@ -232,7 +242,7 @@ function Get-TransportCandidates($Settings,[string]$Root) {
     }
     if($o.openSsh){
         foreach($hop in @($t.hops)){
-            if($null -eq $hop -or -not (Test-TransportEnabled $hop)){continue}
+            if($null -eq $hop -or $hop.legacyOutbound -or -not (Test-TransportEnabled $hop)){continue}
             $port=[int]$o.socksPortBase+$tunnels.Count;$tag='openssh-jump-'+$hop.name
             [void]$out.Add(@{type='socks';tag=$tag;server='127.0.0.1';server_port=$port;version='5'})
             [void]$c.Add([pscustomobject]@{tag=$tag;port=0})
@@ -257,11 +267,12 @@ function Get-TransportCandidates($Settings,[string]$Root) {
     # Отключённый узел не требует SSH или кэша секретов, но остаётся виден в трее.
     foreach($group in @('entries','relays','hops','cdn')){foreach($item in @($t.$group)){
         if($null -eq $item -or (Test-TransportEnabled $item)){continue}
-        $disabled=@();switch($group){
+        $disabled=@();if($item.legacyOutbound){$disabled+=('legacy-'+$item.name)}else{switch($group){
             'entries' {$kinds=@('hy2','hy2obfs','tuic','trojan','reality','shadowtls','ws-direct','ws-cdn');if($item.kinds){$kinds=@($item.kinds)};foreach($k in $kinds){$disabled+=($k+'-'+$item.name)}}
             'relays' {$disabled+=('vless-relay-'+$item.name)}
             'hops' {$disabled+=('vless-sshhop-'+$item.name);if($o.openSsh){$disabled+=('openssh-jump-'+$item.name)}}
             'cdn' {$disabled+=('cdn-'+$item.name)}
+        }
         }
         foreach($tag in $disabled){$meta=Get-TransportCandidateInfo $tag $t;[void]$all.Add([pscustomobject]@{tag=$tag;port=0;title=$meta.title;kind=$meta.kind;via=$meta.via;enabled=$false;tunCapable=$false})}
     }}
@@ -291,7 +302,7 @@ function New-TransportConfig($Settings,$Paths,[string]$Secret,[string]$DefaultTa
     }
     $outs+=@{type='socks';tag='unavailable';server='127.0.0.1';server_port=1;version='5'}
     $outs+=@{type='selector';tag='active';outbounds=$tags;default=$DefaultTag;interrupt_exist_connections=$false}
-    @{log=@{disabled=$true};inbounds=$in;outbounds=$outs;route=@{rules=$rules;final='active';auto_detect_interface=[bool]$o.bindPhysical};experimental=@{clash_api=@{external_controller=('127.0.0.1:'+$o.apiPort);secret=$Secret}}}
+    @{log=@{disabled=$false;level='error';timestamp=$false};inbounds=$in;outbounds=$outs;route=@{rules=$rules;final='active';auto_detect_interface=[bool]$o.bindPhysical};experimental=@{clash_api=@{external_controller=('127.0.0.1:'+$o.apiPort);secret=$Secret}}}
 }
 function Get-TransportSecret([string]$Root) {
     $file=Join-Path $Root 'state/transport-secret.json'
@@ -378,6 +389,10 @@ function Receive-TransportProbe($Probe) {
         if($dt -gt 0){$s.kbps=[math]::Round($s.bytes/1KB/$dt,2)}
     }elseif($completed){$s.state='fail'}
     elseif($elapsed -ge $s.timeout){if($s.bytes -gt 0){$s.state='slow'}else{$s.state='fail'}}
+    if($s.state -ne 'pending' -and $Probe.PSObject.Properties['child']){
+        $reason='short-read';if($elapsed -ge $s.timeout){$reason='timeout'}elseif($s.state -eq 'frozen'){$reason='stalled'}elseif($s.state -eq 'ok'){$reason='ok'}
+        $s|Add-Member -Force diagnostic (New-TransportDiagnostic $Probe.child $Probe.tag $reason)
+    }
     $s.state -ne 'pending'
 }
 function Stop-TransportProbe($Probe) {
@@ -391,7 +406,7 @@ function Get-TransportBest($Rows,[string[]]$Allowed=@(),[switch]$Remembered) {
 function Get-TransportRankTags($Rows,$Candidates,$Options,$Metered) {
     if($Metered -eq $false){return @($Candidates|ForEach-Object {$_.tag})}
     # Неизвестная стоимость тоже экономная; память имеет приоритет над непроверенными.
-    @($Rows|Where-Object {$_.enabled -ne $false}|Sort-Object @{Expression={if($_.state -in @('ok','remembered')){0}else{1}}},@{Expression={if($null -eq $_.kbps){-1}else{[double]$_.kbps}};Descending=$true},tag|Select-Object -First ([int]$Options.topOnMetered)|ForEach-Object {$_.tag})
+    @($Rows|Where-Object {$_.enabled -ne $false}|Sort-Object @{Expression={if($_.state -in @('ok','remembered')){0}elseif($_.tag -like 'legacy-*'){1}else{2}}},@{Expression={if($null -eq $_.kbps){-1}else{[double]$_.kbps}};Descending=$true},tag|Select-Object -First ([int]$Options.topOnMetered)|ForEach-Object {$_.tag})
 }
 function Get-TransportFingerprint([string]$GatewayMac,[string]$ProfileName) {
     $text=(Convert-TransportLF $GatewayMac).Trim().Replace(':','').Replace('-','').ToUpperInvariant()+"`n"+(Convert-TransportLF $ProfileName).Trim()
@@ -450,6 +465,7 @@ function Assert-TransportLists($Transport) {
         if($null -eq $item){continue};Assert-TransportName $item.name
         if($names.ContainsKey($item.name)){throw 'Имена узлов должны быть уникальны во всех списках'};$names[$item.name]=$true
         if((Get-TransportValue $item 'enabled' $true) -isnot [bool]){throw 'enabled должен быть boolean'}
+        if($item.legacyOutbound){if(-not $item.legacyChannelPath){throw 'Нет пути старого канала'};continue}
         if($group -in @('entries','hops')){$ssh=Get-TransportValue $item 'ssh' $item.alias;if(-not $ssh -or $ssh -match '^[\-]|[\r\n]'){throw 'Неверный SSH-алиас'}}
         if($group -eq 'entries'){foreach($kind in @($item.kinds)){if($null -ne $kind -and $kind -notin @('hy2','hy2obfs','tuic','trojan','reality','shadowtls','ws-direct','ws-cdn')){throw 'Неизвестный kind'}}}
         if($group -eq 'relays'){if(-not (Get-TransportValue $item 'host' $item.server) -or [int]$item.port -lt 1 -or [int]$item.port -gt 65535){throw 'Неверный relay'}}
@@ -476,6 +492,11 @@ function Get-TransportCandidateInfo([string]$Tag,$Transport) {
             $kind=$Matches[1];$via=$Matches[2];$title=$null
             $labels=@{hy2='Hysteria2';hy2obfs='Hysteria2 + Salamander';tuic='TUIC';trojan='Trojan';reality='Reality';shadowtls='ShadowTLS';'ws-direct'='WebSocket';'ws-cdn'='VLESS-WS через домен'};$label=$labels[$kind];break
         }
+    }
+    if($Tag -match '^legacy-(.+)$'){
+        $name=$Matches[1];$item=@($Transport.hops)+@($Transport.relays)+@($Transport.entries)|Where-Object {$_.name -eq $name}|Select-Object -First 1
+        $kind='legacy';$via=$name;$title='Путь старого канала'
+        if($item -and (Test-TransportEnabled $item)){try{$chain=@(Get-TransportLegacyChain (Read-TransportJson $item.legacyChannelPath) $item.legacyOutbound);$label=([string]$chain[0].type).ToUpperInvariant();$title=$label+' из старого канала';if(@($chain|Select-Object -Skip 1|Where-Object {$_.type -eq 'ssh'}).Count){$title=$label+' через SSH-переход'}}catch{$title='Путь старого канала (требует проверки)'}}
     }
     if(-not $title){$title=$label+' через '+$via}
     [pscustomobject]@{kind=$kind;via=$via;title=$title}
@@ -514,13 +535,21 @@ function Get-TransportRevision([string]$Root) {
     # Содержимое, а не mtime: Syncthing/атомарная замена и одинаковая длина не скрывают изменение.
     $config=Read-TransportJson (Join-Path $Root 'config.json');$files=@()
     foreach($field in @('profilePath','channelPath')){if($config.transport.$field){$files+=[string]$config.transport.$field}}
+    foreach($group in @('hops','relays','entries')){foreach($item in @($config.transport.$group)){if($item.legacyChannelPath){$files+=[string]$item.legacyChannelPath}}}
+    $files=@($files|Select-Object -Unique)
     $cache=Join-Path $Root 'secrets/entries';if(Test-Path -LiteralPath $cache){$files+=@(Get-ChildItem -LiteralPath $cache -Filter '*.json'|Sort-Object Name|ForEach-Object {$_.FullName})}
     $sha=[Security.Cryptography.SHA256]::Create()
     try{$text=(ConvertTo-Json -InputObject $config.transport -Depth 40 -Compress)+"`n"+((@($files|ForEach-Object {$_+"`n"+(Convert-TransportLF ([IO.File]::ReadAllText($_)))})) -join "`n");[Convert]::ToBase64String($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))}finally{$sha.Dispose()}
 }
 function Test-TransportConfigFile([string]$Exe,[string]$File) {
     $check=Start-TransportProcess $Exe @('check','-c',$File)
-    try{if(-not $check.Process.WaitForExit(15000) -or $check.Process.ExitCode -ne 0){throw 'sing-box отклонил конфигурацию'}}finally{Stop-TransportProcess $check}
+    try{
+        $done=$check.Process.WaitForExit(15000)
+        if(-not $done -or $check.Process.ExitCode -ne 0){
+            $reason='config-rejected';if(-not $done){$reason='timeout'}
+            $ex=New-Object Exception('sing-box отклонил конфигурацию');$ex.Data['transportDiagnostic']=New-TransportDiagnostic $check 'sing-box-check' $reason;throw $ex
+        }
+    }finally{Stop-TransportProcess $check}
 }
 
 function Get-VpnOptions($Settings) {
@@ -718,7 +747,7 @@ function Sync-TransportEntryCache($Settings,[string]$Root) {
     # Новые entries загружаются в background reload, не блокируя pin/API.
     # Старый кэш обновляет только явная Update-Entries.ps1; host keys не принимаются автоматически.
     foreach($entry in @($Settings.Transport.entries)){
-        if(-not $entry -or -not (Test-TransportEnabled $entry)){continue}
+        if(-not $entry -or $entry.legacyOutbound -or -not (Test-TransportEnabled $entry)){continue}
         $file=Join-Path $Root ('secrets/entries/'+$entry.name+'.json');if(Test-Path -LiteralPath $file){continue}
         $args=@('-n','-T','-o','BatchMode=yes','-o','ConnectTimeout=10','-o','StrictHostKeyChecking=yes')
         if($entry.configPath){$args+=@('-F',[string]$entry.configPath)}
@@ -728,4 +757,171 @@ function Sync-TransportEntryCache($Settings,[string]$Root) {
         foreach($field in @('server','sni','cover','ports','secrets')){if(-not $data.$field){throw 'Неполный client.json'}}
         Write-TransportJson $file $data -Private
     }
+}
+
+# References only: credentials and the complete detour graph remain in the legacy channel.
+function Get-TransportLegacyChain($Channel,[string]$Tag) {
+    $seen=@{};$chain=@();$current=$Tag
+    while($current){
+        if($seen.ContainsKey($current)){throw 'legacy-cycle'};$seen[$current]=$true
+        $matches=@($Channel.outbounds|Where-Object {$_.tag -ceq $current})
+        if($matches.Count -ne 1){throw 'legacy-missing-or-duplicate'};$node=$matches[0]
+        if($node.type -notin @('vless','ssh','socks','http','hysteria2','tuic','trojan','shadowsocks','shadowtls','direct')){throw 'legacy-unsupported-type'}
+        # Resolver/route dependencies outside outbounds cannot be copied faithfully in isolation.
+        if($node.domain_resolver -or $node.routing_mark -or $node.bind_interface -or $node.inet4_bind_address -or $node.inet6_bind_address){throw 'legacy-external-dependency'}
+        $chain+=,$node;$current=[string]$node.detour
+    }
+    $chain
+}
+function Expand-TransportLegacyRoot($Channel,[string]$Tag,[hashtable]$Seen) {
+    if($Seen.ContainsKey($Tag)){if($Seen[$Tag] -eq 1){throw 'legacy-selector-cycle'};return};$Seen[$Tag]=1
+    $nodes=@($Channel.outbounds|Where-Object {$_.tag -ceq $Tag})
+    if($nodes.Count -ne 1){throw 'legacy-missing-or-duplicate'};$node=$nodes[0]
+    if($node.type -in @('selector','urltest')){
+        foreach($child in @($node.outbounds)){Expand-TransportLegacyRoot $Channel $child $Seen}
+    }else{$Tag}
+    $Seen[$Tag]=2
+}
+function Import-TransportLegacyRoutes($Transport,$Channel,[string]$ChannelPath,$Profile) {
+    foreach($group in @('entries','hops','relays')){if(-not $Transport.PSObject.Properties[$group]){$Transport|Add-Member $group @()}}
+    $file=[IO.Path]::GetFullPath($ChannelPath);$roots=@();$issues=@()
+    # Only routes serving the old SSH/sync inputs; helper SSH outbounds are not server endpoints.
+    foreach($rule in @($Channel.route.rules)){
+        if($rule.outbound -and (-not $rule.inbound -or @($rule.inbound|Where-Object {$_ -in @('ssh','sync')}).Count)){$roots+=,[string]$rule.outbound}
+    }
+    if($Channel.route.final){$roots+=,[string]$Channel.route.final}
+    if(-not $roots.Count){
+        $deps=@($Channel.outbounds|ForEach-Object {if($_.detour){[string]$_.detour}})
+        $roots=@($Channel.outbounds|Where-Object {$_.tag -and $_.tag -notin $deps -and $_.type -notin @('direct','block','dns')}|ForEach-Object {[string]$_.tag})
+    }
+    $leaves=@();$seen=@{}
+    foreach($tag in $roots){try{$leaves+=@(Expand-TransportLegacyRoot $Channel $tag $seen)}catch{$issues+=,[pscustomobject]@{id=(Get-TransportFingerprint 'legacy' ($file+"`n"+$tag)).Substring(0,20);reason='legacy-selector-invalid'}}}
+    foreach($tag in @($leaves|Select-Object -Unique)){
+        $id=(Get-TransportFingerprint 'legacy' ($file+"`n"+$tag)).Substring(0,20);$name='old-'+$id
+        try{
+            $chain=@(Get-TransportLegacyChain $Channel $tag)
+            if(-not $chain.Count -or $chain[0].type -in @('direct','shadowtls')){throw 'legacy-unsupported-root'}
+            $firstVless=@($Channel.outbounds|Where-Object {$_.type -eq 'vless'}|Select-Object -First 1)
+            $firstSsh=@($Channel.outbounds|Where-Object {$_.type -eq 'ssh' -and $_.server -eq $Profile.serverAddress}|Select-Object -First 1)
+            if($Profile -and -not $chain[0].detour -and $chain[0].server -eq $Profile.serverAddress -and (($firstSsh.Count -and $chain[0].tag -ceq $firstSsh[0].tag) -or ($firstVless.Count -and $chain[0].tag -ceq $firstVless[0].tag))){continue}
+            $group='entries'
+            if(@($chain|Select-Object -Skip 1|Where-Object {$_.type -eq 'ssh'}).Count){$group='hops'}
+            elseif($chain.Count -gt 1){$group='relays'}
+            $found=@();foreach($list in @('entries','hops','relays')){$found+=@($Transport.$list|Where-Object {$_.legacyOutbound -ceq $tag -and $_.legacyChannelPath -eq $file})}
+            if($found.Count){continue} # Do not overwrite enabled, names or any user edits.
+            foreach($list in @('entries','hops','relays','cdn')){if(@($Transport.$list|Where-Object {$_.name -eq $name}).Count){throw 'legacy-name-conflict'}}
+            $item=[pscustomobject]@{name=$name;legacyChannelPath=$file;legacyOutbound=$tag;enabled=$true}
+            $Transport|Add-Member -Force $group (@($Transport.$group)+@($item))
+        }catch{
+            $reason=[string]$_.Exception.Message;if($reason -notmatch '^legacy-[a-z-]+$'){$reason='legacy-invalid'}
+            $issues+=,[pscustomobject]@{id=$id;reason=$reason}
+        }
+    }
+    $issues
+}
+function Add-TransportLegacyCandidates($Settings,$Out,$Candidates) {
+    $added=@{}
+    foreach($group in @('hops','relays','entries')){foreach($item in @($Settings.Transport.$group)){
+        if(-not $item.legacyOutbound -or -not (Test-TransportEnabled $item)){continue}
+        $channel=Read-TransportJson $item.legacyChannelPath
+        $chain=@(Get-TransportLegacyChain $channel $item.legacyOutbound);$tags=@{}
+        foreach($node in $chain){$tags[[string]$node.tag]='legacy-node-'+(Get-TransportFingerprint 'legacy' ($item.legacyChannelPath+"`n"+$node.tag)).Substring(0,20)}
+        # Candidate tag is stable across import/reload; dependency tags can be shared.
+        $tags[[string]$chain[0].tag]='legacy-'+$item.name
+        foreach($node in $chain){
+            $copy=Copy-TransportObject $node;$copy.tag=$tags[[string]$node.tag]
+            if($copy.detour){$copy.detour=$tags[[string]$node.detour]}
+            foreach($key in @('private_key_path')){if($copy.$key -and -not [IO.Path]::IsPathRooted($copy.$key)){$copy.$key=Join-Path (Split-Path $item.legacyChannelPath -Parent) $copy.$key}}
+            if(-not $added.ContainsKey($copy.tag)){[void]$Out.Add($copy);$added[$copy.tag]=$true}
+        }
+        [void]$Candidates.Add([pscustomobject]@{tag=('legacy-'+$item.name);port=0})
+    }}
+}
+
+function Initialize-TransportDiagnostics {
+    if('RemoteAgents.TransportErrorBuffer' -as [type]){return}
+    Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Text;
+namespace RemoteAgents {
+ public sealed class TransportErrorBuffer : Stream {
+  readonly object gate = new object();
+  readonly byte[] first = new byte[2048], recent = new byte[8192];
+  int firstCount, recentCount; bool firstDone;
+  public override void Write(byte[] b, int o, int n) {
+   lock(gate) {
+    for(int i=o;i<o+n;i++) {
+     if(!firstDone) { if(firstCount<first.Length) first[firstCount++]=b[i]; if(b[i]==10 || firstCount==first.Length) firstDone=true; }
+     if(recentCount==recent.Length) {Buffer.BlockCopy(recent,4096,recent,0,4096);recentCount=4096;}
+     recent[recentCount++]=b[i];
+    }
+   }
+  }
+  public string Snapshot() {lock(gate) return Encoding.UTF8.GetString(first,0,firstCount)+"\n"+Encoding.UTF8.GetString(recent,0,recentCount);}
+  public override bool CanRead {get{return false;}} public override bool CanSeek {get{return false;}} public override bool CanWrite {get{return true;}}
+  public override long Length {get{return 0;}} public override long Position {get{return 0;}set{throw new NotSupportedException();}}
+  public override void Flush() {} public override int Read(byte[] b,int o,int n){throw new NotSupportedException();}
+  public override long Seek(long o,SeekOrigin s){throw new NotSupportedException();} public override void SetLength(long v){throw new NotSupportedException();}
+ }
+}
+'@
+}
+function Get-TransportSecretValues($Value,[string]$Name='',[bool]$Sensitive=$false) {
+    if($null -eq $Value){return}
+    $sensitiveValue=$Sensitive -or $Name -match '(?i)password|secret|token|uuid|private_key|passphrase|short_id'
+    if($Value -is [string]){if($sensitiveValue -and $Value){$Value};return}
+    if($Value -is [Collections.IDictionary]){foreach($k in $Value.Keys){Get-TransportSecretValues $Value[$k] ([string]$k) $sensitiveValue}}
+    elseif($Value -is [array]){foreach($v in $Value){Get-TransportSecretValues $v $Name $sensitiveValue}}
+    elseif($Value -is [pscustomobject]){foreach($p in $Value.PSObject.Properties){Get-TransportSecretValues $p.Value $p.Name $sensitiveValue}}
+}
+function Protect-TransportDiagnostic([string]$Text,$Settings) {
+    # Redact known values BEFORE generic patterns, including short passwords.
+    foreach($value in @(Get-TransportSecretValues $Settings|Sort-Object Length -Descending)){
+        if($value){$Text=$Text.Replace([string]$value,'<redacted>')}
+    }
+    $Text=$Text -replace '\x1b\[[0-9;]*m',''
+    $Text=$Text -replace '(?i)((?:password|token|secret|passphrase|private_key|uuid)\s*[=:]\s*)[^\s,;]+','$1<redacted>'
+    Protect-TransportText $Text
+}
+function New-TransportDiagnostic($Child,[string]$Candidate,[string]$Reason,$Settings=$null) {
+    $code=$null;$line=''
+    if($Child){
+        try{if($Child.Process.HasExited){$code=$Child.Process.ExitCode;[void]$Child.ErrorDrain.Wait(500)}}catch{}
+        if($Child.PSObject.Properties['ErrorBuffer']){
+            $lines=@((Convert-TransportLF $Child.ErrorBuffer.Snapshot()) -split "`n"|Where-Object {$_.Trim()})
+            if($lines.Count){$line=$lines[0]}
+        }
+    }
+    # Error kind remains explicit even when stderr is empty or has been redacted.
+    if($line -match '(?i)timed? out|timeout|deadline'){$Reason='timeout'}
+    elseif($line -match '(?i)refused'){$Reason='connection-refused'}
+    elseif($line -match '(?i)unreachable|no route'){$Reason='network-unreachable'}
+    elseif($line -match '(?i)permission denied|authentication failed'){$Reason='authentication-failed'}
+    [pscustomobject]@{candidate=$(if($Candidate -match '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,95}$'){$Candidate}else{'invalid-tag'});reason=$Reason;exitCode=$code;stderr=(Protect-TransportDiagnostic $line $Settings)}
+}
+function Format-TransportDiagnostic($Detail) {
+    'candidate='+$Detail.candidate+' reason='+$Detail.reason+' exit='+$(if($null -eq $Detail.exitCode){'running/unknown'}else{[string]$Detail.exitCode})+' stderr='+$Detail.stderr+$(if($Detail.engineStderr){' sing-box='+$Detail.engineStderr}else{''})
+}
+
+function Get-TransportDiagnosticContext($Settings,[string]$Root) {
+    $values=@($Settings)
+    $apiSecret=Join-Path $Root 'state/transport-secret.json';if(Test-Path $apiSecret){$values+=,(Read-TransportJson $apiSecret)}
+    foreach($group in @('entries','hops','relays')){foreach($item in @($Settings.Transport.$group)){
+        if($item.legacyChannelPath -and (Test-Path $item.legacyChannelPath)){$values+=,(Read-TransportJson $item.legacyChannelPath)}
+    }}
+    $dir=Join-Path $Root 'secrets/entries'
+    if(Test-Path $dir){foreach($file in @(Get-ChildItem -LiteralPath $dir -Filter '*.json')){$values+=,(Read-TransportJson $file.FullName)}}
+    $values
+}
+function Get-TransportEngineDiagnostic($Engine,[string]$Candidate,$Context) {
+    if(-not $Engine -or -not $Engine.ErrorBuffer){return $null}
+    $lines=@((Convert-TransportLF $Engine.ErrorBuffer.Snapshot()) -split "`n"|Where-Object {($_.Contains('['+$Candidate+']') -or $_.Contains('[probe-'+$Candidate+']'))})
+    if(-not $lines.Count){return $null}
+    $detail=New-TransportDiagnostic $null $Candidate 'transport-error'
+    $detail.stderr=Protect-TransportDiagnostic $lines[0] $Context
+    if($detail.stderr -match '(?i)timed? out|timeout|deadline'){$detail.reason='timeout'}
+    elseif($detail.stderr -match '(?i)refused'){$detail.reason='connection-refused'}
+    elseif($detail.stderr -match '(?i)unreachable|no route'){$detail.reason='network-unreachable'}
+    $detail
 }

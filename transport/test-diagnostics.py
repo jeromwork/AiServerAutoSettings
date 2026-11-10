@@ -18,6 +18,38 @@ def executable(path, source):
 
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_bounded_stderr_captures_first_line_exit_and_short_secret(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); child = root/'failure'
+            executable(child, "import os,sys\nos.write(2,b'Connection refused: pw aa bb\\r\\n'+b'x'*1048576)\nsys.exit(42)\n")
+            script = root/'test.ps1'
+            script.write_text("""param($Common,$Exe,$Root)
+. $Common
+$child=Start-TransportProcess $Exe @()
+try{
+    if(-not $child.Process.WaitForExit(10000)){throw 'stderr pipe blocked'}
+    $d=New-TransportDiagnostic $child 'legacy-fixture' 'process-exited' ([pscustomobject]@{password='pw';secrets=@{hy2='aa';trojan='bb'}})
+    Write-TransportLog $Root 'process-failed' $d
+    if($child.ErrorBuffer.Snapshot().Length -gt 11000){throw 'unbounded stderr'}
+    $bytes=[Text.Encoding]::UTF8.GetBytes("`nERROR inbound/direct[probe-legacy-fixture]: dial tcp: i/o timeout password=pw`n")
+    $child.ErrorBuffer.Write($bytes,0,$bytes.Length)
+    $engine=Get-TransportEngineDiagnostic $child 'legacy-fixture' ([pscustomobject]@{password='pw';secrets=@{hy2='aa';trojan='bb'}})
+    if(-not $engine -or $engine.reason -ne 'timeout'){throw 'sing-box probe reason lost'}
+    Write-TransportLog $Root 'probe-failed' $engine
+}finally{Stop-TransportProcess $child}
+""", encoding='utf-8-sig')
+            result = subprocess.run([PWSH,'-NoProfile','-NonInteractive','-File',str(script),
+                                     '-Common',str(ROOT/'transport/Transport.Common.ps1'),
+                                     '-Exe',str(child),'-Root',tmp], stdin=subprocess.DEVNULL, capture_output=True, timeout=45)
+            self.assertEqual(result.returncode,0,result.stderr.decode())
+            log=(root/'logs/transport.log').read_text()
+            self.assertIn('candidate=legacy-fixture reason=connection-refused exit=42 stderr=Connection refused: <redacted> <redacted> <redacted>',log)
+            self.assertNotIn('pw',log)
+            self.assertNotIn('aa',log)
+            self.assertNotIn('bb',log)
+            self.assertIn('probe-failed candidate=legacy-fixture reason=timeout',log)
+            self.assertIn('dial tcp: i/o timeout password=<redacted>',log)
+
     def test_update_entries_does_not_echo_invalid_secret_json(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); ssh = root/'ssh'

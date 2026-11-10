@@ -162,17 +162,44 @@
               ]
             },
             "description": "Отсутствие или [] означает все доступные типы"
+          },
+          "legacyChannelPath": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Read-only reference to the original sing-box channel; no copied credentials."
+          },
+          "legacyOutbound": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "anyOf": [
           {
             "required": [
-              "ssh"
-            ]
+              "name"
+            ],
+            "anyOf": [
+              {
+                "required": [
+                  "ssh"
+                ]
+              },
+              {
+                "required": [
+                  "alias"
+                ]
+              }
+            ],
+            "not": {
+              "required": [
+                "legacyOutbound"
+              ]
+            }
           },
           {
             "required": [
-              "alias"
+              "legacyOutbound",
+              "legacyChannelPath"
             ]
           }
         ]
@@ -219,17 +246,44 @@
             "type": "string",
             "minLength": 1,
             "pattern": "^(?!-)[^\\r\\n]+$"
+          },
+          "legacyChannelPath": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Read-only reference to the original sing-box channel; no copied credentials."
+          },
+          "legacyOutbound": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "anyOf": [
           {
             "required": [
-              "ssh"
-            ]
+              "name"
+            ],
+            "anyOf": [
+              {
+                "required": [
+                  "ssh"
+                ]
+              },
+              {
+                "required": [
+                  "alias"
+                ]
+              }
+            ],
+            "not": {
+              "required": [
+                "legacyOutbound"
+              ]
+            }
           },
           {
             "required": [
-              "alias"
+              "legacyOutbound",
+              "legacyChannelPath"
             ]
           }
         ]
@@ -242,8 +296,7 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
-          "name",
-          "port"
+          "name"
         ],
         "properties": {
           "name": {
@@ -267,17 +320,45 @@
           "host": {
             "type": "string",
             "minLength": 1
+          },
+          "legacyChannelPath": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Read-only reference to the original sing-box channel; no copied credentials."
+          },
+          "legacyOutbound": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "anyOf": [
           {
             "required": [
-              "host"
-            ]
+              "name",
+              "port"
+            ],
+            "anyOf": [
+              {
+                "required": [
+                  "host"
+                ]
+              },
+              {
+                "required": [
+                  "server"
+                ]
+              }
+            ],
+            "not": {
+              "required": [
+                "legacyOutbound"
+              ]
+            }
           },
           {
             "required": [
-              "server"
+              "legacyOutbound",
+              "legacyChannelPath"
             ]
           }
         ]

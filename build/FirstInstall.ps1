@@ -23,6 +23,7 @@ function Invoke-InstallChild([string]$Bundle,[string]$Script,[string[]]$Argument
 }
 function Invoke-FirstInstall([string]$Root,[string]$Bundle,[string]$Address,[string]$User) {
     # Existing migration is kept intact, including its independent network watchdog.
+    $failure=Join-Path $Root 'state/migration-error.json';if(Test-Path $failure){Remove-Item -LiteralPath $failure -Force}
     Write-MigrationLog $Root 'setup.start'
     $profile=Find-InstallProfile $Root
     if(-not $profile){
@@ -44,4 +45,4 @@ function Invoke-FirstInstall([string]$Root,[string]$Bundle,[string]$Address,[str
 if($LibraryOnly){return}
 $default=Join-Path $env:LOCALAPPDATA 'RemoteAgents'
 if([IO.Path]::GetFullPath($LauncherHome).TrimEnd('\') -ine [IO.Path]::GetFullPath($default).TrimEnd('\')){throw 'Рабочая установка только в основном Home; изолированный Home не меняет компьютер'}
-try{Invoke-FirstInstall $LauncherHome (Split-Path $PSScriptRoot -Parent) $ServerAddress $Login}catch{Write-MigrationLog $LauncherHome 'setup.failed';throw 'Установка не завершена; смотрите локальные журналы SSH, диска и моста'}
+try{Invoke-FirstInstall $LauncherHome (Split-Path $PSScriptRoot -Parent) $ServerAddress $Login}catch{Save-MigrationFailure $LauncherHome $_;Write-MigrationLog $LauncherHome 'setup.failed';throw 'Установка не завершена; смотрите локальные журналы SSH, диска и моста'}

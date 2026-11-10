@@ -54,12 +54,12 @@ namespace RemoteAgents.Launcher
                 "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-ExecutionPolicy", "Bypass", "-File",
                 Path.Combine(engine.Folder(engine.Current), "build", "FirstInstall.ps1"), "-Home", home, "-ServerAddress", address, "-Login", login
             })) { UseShellExecute = false, CreateNoWindow = true };
-            using (var process = Process.Start(psi)) using (var form = new Form { Text = "RemoteAgents — установка", Width = 560, Height = 150, StartPosition = FormStartPosition.CenterScreen })
+            using (var process = Process.Start(psi)) using (var form = new Form { Text = "RemoteAgents — переход", Width = 560, Height = 150, StartPosition = FormStartPosition.CenterScreen })
             using (var timer = new System.Windows.Forms.Timer { Interval = 500 }) {
                 form.Controls.Add(new Label { Dock = DockStyle.Fill, Padding = new Padding(16), Text = "Настраиваем SSH, диск и управление.\r\nЕсли открыт запрос SSH, проверьте сервер и введите пароль." });
                 bool done = false; form.FormClosing += (s,e) => { if (!done) e.Cancel = true; };
                 timer.Tick += (s,e) => { if (process.HasExited) { done = true; form.Close(); } }; timer.Start(); form.ShowDialog();
-                if (process.ExitCode != 0) throw new IOException("Установка не завершена");
+                if (process.ExitCode != 0) throw new MigrationFailureException(Migration.FailureMessage(home));
             }
         }
         public static void UninstallVpn(string home)

@@ -2,10 +2,10 @@
 # Small Windows adapters are deliberately replaceable in offline tests.
 . (Join-Path (Split-Path $PSScriptRoot -Parent) 'transport/Transport.Common.ps1')
 function Get-MigrationStatePath([string]$Root){Join-Path $Root 'state/migration.json'}
-function Write-MigrationLog([string]$Root,[string]$Event){
+function Write-MigrationLog([string]$Root,[string]$Event,[string]$Detail=''){
     $dir=Join-Path $Root 'logs';[void][IO.Directory]::CreateDirectory($dir);$file=Join-Path $dir 'migration.log'
     if((Test-Path $file) -and (Get-Item $file).Length -gt 1MB){Move-Item $file ($file+'.1') -Force}
-    [IO.File]::AppendAllText($file,([DateTime]::UtcNow.ToString('o')+' '+$Event+"`n"),(New-Object Text.UTF8Encoding($false)))
+    [IO.File]::AppendAllText($file,([DateTime]::UtcNow.ToString('o')+' '+$Event+$(if($Detail){' '+$Detail}else{''})+"`n"),(New-Object Text.UTF8Encoding($false)))
 }
 function Invoke-MigrationLock([string]$Root,[scriptblock]$Body,[int]$TimeoutMs=1000){
     $mutex=New-Object Threading.Mutex($false,('Global\RemoteAgentsMigration-'+(Get-TransportFingerprint 'migration' (Get-TransportHome $Root).ToLowerInvariant())))
@@ -36,6 +36,9 @@ function Import-MigrationConfig([string]$Root,[string]$DiskHome){
         if($sync.Count -ne 1){throw 'Не определён вход синхронизации'}
         Set-MigrationDefault $t syncPort ([int]$sync[0].listen_port);Set-MigrationDefault $t sshPort 2222
         foreach($key in @('entries','relays','hops','cdn')){Set-MigrationDefault $t $key @()}
+        $issues=@(Import-TransportLegacyRoutes $t $channel $t.channelPath (Read-TransportJson $t.profilePath))
+        foreach($issue in $issues){Write-MigrationLog $Root 'import.unsupported' ($issue.id+' '+$issue.reason)}
+        if($issues.Count){throw 'Старый канал содержит неподдерживаемый путь; переход отменён, прежний канал сохранён. См. migration.log'}
         Set-MigrationDefault $t routeSsh $true;Set-MigrationDefault $t takeOverChannel $true
         Set-MigrationDefault $c disk ([pscustomobject]@{});Set-MigrationDefault $c.disk home $DiskHome
         Set-MigrationDefault $c components ([pscustomobject]@{})
@@ -260,6 +263,10 @@ function Wait-MigrationTransport([string]$Root,[int]$Timeout=180){
 function Invoke-MigrationPreflight([string]$Root,[string]$Bundle,$Config){
     $probe=Join-Path $Root 'state/migration-probe';[void][IO.Directory]::CreateDirectory($probe)
     $copy=Copy-TransportObject $Config
+    # The migration must not skip the only working legacy path on a metered/unknown network.
+    $copy.transport|Add-Member -Force metered 'false'
+    $copy.transport|Add-Member -Force rankProbeBytes 65536
+    $copy.transport|Add-Member -Force rankConcurrency 4
     # Reserve a disjoint block for inbounds, ranking probes and local SSH socks. Fail if occupied.
     $listeners=@();$ports=@()
     try{
@@ -284,6 +291,9 @@ function Invoke-MigrationPreflight([string]$Root,[string]$Bundle,$Config){
         Wait-MigrationTransport $probe
         if(-not (Test-MigrationSsh $probe $ports[0])){throw 'SSH на временном входе не прошёл'}
         Write-MigrationLog $Root 'preflight.ok'
+    }catch{
+        $message=Write-MigrationPreflightFailure $Root $probe
+        throw $message
     }finally{
         [IO.File]::WriteAllText($stop,'stop');if($child){[void]$child.Process.WaitForExit(10000)};Stop-TransportProcess $child
     }
@@ -320,6 +330,7 @@ function Invoke-MigrationTransition([string]$Root,[string]$Bundle,[string]$DiskH
         if($old.phase -in @('accepted','pending')){Write-MigrationLog $Root 'install.already';Start-MigrationDetached (Join-Path $Root 'RemoteAgents.exe') @('--tray','--home',$Root);return}
         if($old.phase -in @('preparing','activating','rolling-back')){Invoke-MigrationRollback $Root $old.session}
     }
+    $failure=Join-Path $Root 'state/migration-error.json';if(Test-Path $failure){Remove-Item -LiteralPath $failure -Force}
     Write-MigrationLog $Root 'import.start'
     $config=Import-MigrationConfig $Root $DiskHome
     $profiles=@();if($config.transport.routeSsh){$profiles=@(Get-MigrationProfiles $config)}
@@ -404,4 +415,31 @@ function Confirm-Migration([string]$Root,[switch]$Explicit,[string]$Observer='')
         try{Unregister-MigrationRollback $state.names.rollbackTask}catch{$state.phase='pending';Write-TransportJson $file $state -Durable;throw}
         Write-MigrationLog $Root 'install.accepted'
     }else{Write-TransportJson $file $state -Durable}
+}
+
+function Write-MigrationPreflightFailure([string]$Root,[string]$Probe) {
+    $file=Join-Path $Probe 'status/transport.json';$parts=@();$status=$null
+    if(Test-Path $file){$status=Read-TransportJson $file}
+    foreach($row in @($status.candidates)){
+        if($null -eq $row){continue}
+        $reason=if($row.diagnostic){Format-TransportDiagnostic $row.diagnostic}else{'candidate='+$row.tag+' reason='+$row.state+' (проба не завершена)'}
+        Write-MigrationLog $Root 'preflight.candidate' $reason
+        $parts+=($row.title+': '+$(if($row.diagnostic){$row.diagnostic.reason}else{$row.state}))
+    }
+    if(-not $parts.Count){$parts+= $(if($status.error){[string]$status.error}else{'нет статуса транспорта; см. state/migration-probe/logs/transport.log'})}
+    $prefix='Нет рабочего пути к серверу: '
+    if($status.ok){$prefix='Транспорт нашёл путь, но SSH на временном входе не прошёл: '}
+    elseif(@($status.candidates|Where-Object {$_.state -eq 'ok'}).Count){$prefix='Есть проверенный путь, но выбранный режим транспорта недоступен: '}
+    $message=$prefix+($parts -join '; ')+'. Прежний канал не остановлен.'
+    Write-TransportJson (Join-Path $Root 'state/migration-error.json') @{message=$message;phase='preflight';updatedAt=[DateTime]::UtcNow.ToString('o')}
+    Write-MigrationLog $Root 'preflight.failed' $message
+    $message
+}
+
+function Save-MigrationFailure([string]$Root,$Record) {
+    $path=Join-Path $Root 'state/migration-error.json'
+    if(Test-Path $path){return}
+    $message='Переход не выполнен: '+(Get-TransportErrorDetail $Record)+'. См. logs/migration.log.'
+    Write-TransportJson $path @{message=$message;phase='failed';updatedAt=[DateTime]::UtcNow.ToString('o')}
+    Write-MigrationLog $Root 'command.reason' $message
 }

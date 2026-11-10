@@ -361,5 +361,6 @@ try{
     Write-TransportJson (Join-Path $work 'status/transport.json') @{ok=$true;updatedAt=[DateTime]::UtcNow.AddMinutes(1).ToString('o');candidates=@()}
     $futureStatus=(& (Join-Path $PSScriptRoot 'Get-TransportStatus.ps1') -Home $work) -join "`n"
     Assert ($futureStatus.Contains('статус устарел') -and -not $futureStatus.Contains('соединение проверено')) 'будущий статус после перевода часов не считается проверенной связью'
+    & (Join-Path $PSScriptRoot 'test-legacy-import.ps1') -SingBox $SingBox
     Write-Output ('OK: '+$count+' проверок без сети')
 }finally{Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue}

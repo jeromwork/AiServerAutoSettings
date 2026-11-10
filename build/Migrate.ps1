@@ -24,4 +24,4 @@ try{
             Invoke-MigrationTransition $root $bundle $DiskHome $names ([bool]$DryRun)
         }
     }
-}catch{Write-MigrationLog $root 'command.failed';Write-Error 'Переход не выполнен; см. logs/migration.log (без секретов).';exit 1}
+}catch{Save-MigrationFailure $root $_;Write-MigrationLog $root 'command.failed';Write-Error 'Переход не выполнен; см. logs/migration.log (без секретов).';exit 1}

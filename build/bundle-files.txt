@@ -19,6 +19,7 @@ server-install-sync.sh
 # Includes optional launcher path/VPN commands as the transport module is delivered.
 transport/*.ps1
 transport/*.json
+transport/fixtures/legacy-hop.json
 # Server bootstrap entry/*.sh stays in source until server rollback acceptance.
 disk/Install-RemoteDisk.ps1
 disk/Disk.Common.ps1

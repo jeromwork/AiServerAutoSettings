@@ -108,6 +108,9 @@ namespace RemoteAgents.Launcher
                 }
                 if (restart) StartLauncher(Path.Combine(home, Product.ExeName), home, true);
                 return 0;
+            } catch (MigrationFailureException ex) {
+                if (log != null) log.Write("migration.failed");
+                MessageBox.Show(ex.Message, "RemoteAgents — переход", MessageBoxButtons.OK, MessageBoxIcon.Error); return 1;
             } catch { if (log != null) log.Write("launcher.fatal"); if (recovery) return 1; MessageBox.Show("Действие не выполнено. Проверьте logs\\launcher.log в папке RemoteAgents. Обновление могло быть отклонено самопроверкой или ещё проходить проверку здоровья.", "RemoteAgents"); return 1; }
         }
         static bool WaitMutex(Mutex mutex, int timeout) { try { return mutex.WaitOne(timeout); } catch (AbandonedMutexException) { return true; } }

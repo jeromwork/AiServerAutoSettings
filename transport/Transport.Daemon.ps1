@@ -5,6 +5,7 @@ param([Alias('Home')][string]$TransportHome=(Join-Path $env:LOCALAPPDATA 'Remote
 $root=(Get-TransportHome $TransportHome);$engine=$null;$tunnelChildren=@{};$probes=@{};$rows=@();$active=$null;$confirmed=$false;$errorText='Запуск';$network=$null;$memory=$null;$secret=$null
 $parent=$null;$mutex=$null;$locked=$false;$settings=$null;$paths=$null;$rankPending=$false;$rankTags=@();$rankQueue=$null;$exitCode=0
 $pin=[pscustomobject]@{mode='auto';tag=$null};$nextControl=[DateTime]::MinValue;$revision='';$reloadJob=$null;$reloadError=$null;$failedRevision=$null;$pendingRevision=$null;$nextReload=[DateTime]::MinValue
+$diagnosticContext=$null
 $lastStatus=[DateTime]::MinValue;$nextActive=[DateTime]::MinValue;$nextRank=[DateTime]::MinValue;$nextNetwork=[DateTime]::MinValue;$retryAt=[DateTime]::MinValue
 function Test-TransportStop {
     try{if([IO.File]::Exists((Join-Path $root 'stop')) -or [IO.File]::Exists((Join-Path $root 'state/transport.stop'))){return $true}}catch{}
@@ -50,7 +51,9 @@ function Start-DaemonProbe($Candidate,[long]$Bytes,[string]$Purpose) {
     catch{
         $row=$rows|Where-Object {$_.tag -eq $Candidate.tag}|Select-Object -First 1;$row.state='fail';$row.kbps=$null;$row.checkedAt=[DateTime]::UtcNow.ToString('o')
         if($Candidate.tag -eq $active){Fail-TransportActive (-not $rankPending)}
-        Write-TransportLog $root 'process-failed'
+        $detail=New-TransportDiagnostic $null $Candidate.tag 'probe-start-failed'
+        $row|Add-Member -Force diagnostic $detail
+        Write-TransportLog $root 'process-failed' $detail
     }
 }
 function Start-TransportRanking {
@@ -98,6 +101,7 @@ try{
     Write-TransportLog $root 'start'
     if($ParentPid -gt 0){$parent=[Diagnostics.Process]::GetProcessById($ParentPid);[void]$parent.Handle}
     $settings=Read-TransportSettings $root;Sync-TransportEntryCache $settings $root;$paths=Get-TransportCandidates $settings $root;$secret=Get-TransportSecret $root;$memory=Read-TransportMemory $root
+    $diagnosticContext=@(Get-TransportDiagnosticContext $settings $root)
     $network=Get-TransportNetwork;$metered=Get-TransportMetered $settings.Options
     $rows=@(Get-TransportRemembered $memory $network.id $paths.AllCandidates)
     $pin=Read-TransportPin $root;$active=Get-TransportSelection $pin $rows $paths.Candidates;$revision=Get-TransportRevision $root
@@ -148,6 +152,7 @@ try{
                     }
                 }
                 Stop-TransportProcess $engine;$engine=$null;$settings=$result.Settings;$paths=$result.Paths;$revision=$result.Revision
+                $diagnosticContext=@(Get-TransportDiagnosticContext $settings $root)
                 $rows=@(Get-TransportRemembered $memory $network.id $paths.AllCandidates)
                 $active=Get-TransportSelection $pin $rows $paths.Candidates $active;$confirmed=$false;$retryAt=$now
                 Start-TransportEngine -Validated;$reloadError=$null;$errorText='Конфиг применён; ожидается проверка пути'
@@ -178,6 +183,9 @@ try{
             }elseif($costChanged){Stop-TransportProbes;$rankPending=$false;$rankQueue=$null;$nextRank=$now;$nextActive=$now}
         }
         if($engine -and $engine.Process.HasExited){
+            $detail=New-TransportDiagnostic $engine 'sing-box' 'process-exited' $diagnosticContext
+            Write-TransportLog $root 'process-failed' $detail
+            foreach($row in $rows){if($row.enabled){$perRow=Copy-TransportObject $detail;$perRow.candidate=$row.tag;$row|Add-Member -Force diagnostic $perRow}}
             Stop-TransportProbes;$rankPending=$false;$rankQueue=$null;Stop-TransportProcess $engine;$engine=$null;$confirmed=$false;$errorText='sing-box завершился, ожидается перезапуск'
             foreach($child in @($tunnelChildren.Values)){Stop-TransportProcess $child};$tunnelChildren.Clear()
             foreach($row in $rows){if($row.state -eq 'ok'){$row.state='remembered'}}
@@ -186,21 +194,27 @@ try{
         if(-not $engine -and $now -ge $retryAt){
             try{Start-TransportEngine;$errorText='Ожидается проверка пути'}
             catch{
+                $detail=$_.Exception.Data['transportDiagnostic']
+                if(-not $detail){$detail=New-TransportDiagnostic $null 'sing-box' 'engine-start-failed'}
+                $detail.stderr=Protect-TransportDiagnostic $detail.stderr $diagnosticContext
+                foreach($row in $rows){if($row.enabled){$perRow=Copy-TransportObject $detail;$perRow.candidate=$row.tag;$row|Add-Member -Force diagnostic $perRow}}
+                Write-TransportLog $root 'process-failed' $detail
                 Stop-TransportProcess $engine;$engine=$null;foreach($child in @($tunnelChildren.Values)){Stop-TransportProcess $child};$tunnelChildren.Clear()
-                $confirmed=$false;$errorText='Не удалось запустить транспорт; проверьте конфиг и физическую сеть';Write-TransportLog $root 'process-failed'
+                $confirmed=$false;$errorText='Не удалось запустить транспорт; проверьте конфиг и физическую сеть'
                 $retryAt=$now.AddSeconds([double]$settings.Options.restartDelaySec)
             }
         }
         if($engine){
             foreach($tunnel in $paths.Tunnels){
                 if($tunnelChildren.ContainsKey($tunnel.tag) -and $tunnelChildren[$tunnel.tag].Process.HasExited){
+                    $detail=New-TransportDiagnostic $tunnelChildren[$tunnel.tag] $tunnel.tag 'process-exited' $diagnosticContext
+                    Write-TransportLog $root 'process-failed' $detail
                     Stop-TransportProcess $tunnelChildren[$tunnel.tag];$tunnelChildren.Remove($tunnel.tag)
-                    $row=$rows|Where-Object {$_.tag -eq $tunnel.tag}|Select-Object -First 1;$row.state='fail';$row.kbps=$null
+                    $row=$rows|Where-Object {$_.tag -eq $tunnel.tag}|Select-Object -First 1;$row.state='fail';$row.kbps=$null;$row|Add-Member -Force diagnostic $detail
                     if($active -eq $tunnel.tag){Fail-TransportActive}
-                    Write-TransportLog $root 'process-failed'
                 }
                 if(-not $tunnelChildren.ContainsKey($tunnel.tag) -and $now -ge $retryAt){
-                    try{$a=@($tunnel.arguments);if($settings.Options.bindPhysical -and $tunnel.bind){$a+=@('-b',[string]$network.ip)};$tunnelChildren[$tunnel.tag]=Start-TransportProcess $settings.Profile.sshExecutable ($a+@($tunnel.target))}catch{Write-TransportLog $root 'process-failed'}
+                    try{$a=@($tunnel.arguments);if($settings.Options.bindPhysical -and $tunnel.bind){$a+=@('-b',[string]$network.ip)};$tunnelChildren[$tunnel.tag]=Start-TransportProcess $settings.Profile.sshExecutable ($a+@($tunnel.target))}catch{Write-TransportLog $root 'process-failed' (New-TransportDiagnostic $null $tunnel.tag 'tunnel-start-failed')}
                     $retryAt=$now.AddSeconds([double]$settings.Options.restartDelaySec)
                 }
             }
@@ -210,13 +224,19 @@ try{
                     $result=$probe.state;$row=$rows|Where-Object {$_.tag -eq $tag}|Select-Object -First 1
                     # Скорость задаёт рейтинг (равные объёмы); проба активного пути меньше и только подтверждает живость.
                     $row.state=$result.state;if($probe.purpose -ne 'active' -or $result.state -ne 'ok' -or $null -eq $row.kbps){$row.kbps=$result.kbps};$row.checkedAt=$now.ToString('o')
+                    $detail=New-TransportDiagnostic $probe.child $tag $result.diagnostic.reason $diagnosticContext
+                    if($result.state -ne 'ok'){
+                        $underlying=Get-TransportEngineDiagnostic $engine $tag $diagnosticContext
+                        if($underlying){$detail|Add-Member engineStderr $underlying.stderr;$detail.reason=$underlying.reason}
+                    }
+                    $row|Add-Member -Force diagnostic $detail
                     Stop-TransportProbe $probe;$probes.Remove($tag)
                     if($result.state -eq 'ok'){
-                        Write-TransportLog $root 'probe-ok'
+                        Write-TransportLog $root 'probe-ok' $detail
                         if($tag -eq $active){$confirmed=$true;$errorText=$null}
                         elseif(-not $confirmed){[void](Switch-TransportActive $tag $true)}
                     }else{
-                        Write-TransportLog $root 'probe-failed'
+                        Write-TransportLog $root 'probe-failed' $detail
                         if($tag -eq $active){
                             Fail-TransportActive ($probe.purpose -eq 'active' -or -not $rankPending)
                         }
@@ -245,7 +265,7 @@ try{
     $exitCode=1
     # Текст чужого исключения может содержать адрес/пароль — публикуем только категорию.
     $errorText='Ошибка транспорта: проверьте настройки, файлы профиля и бинарные файлы'
-    if($locked){Write-TransportLog $root 'fatal' (Get-TransportErrorDetail $_)}else{Write-Error 'Транспорт уже запущен или блокировка недоступна' -ErrorAction Continue}
+    if($locked){Write-TransportLog $root 'fatal' (Get-TransportErrorDetail $_);Write-TransportLog $root 'process-failed' (New-TransportDiagnostic $null 'transport' 'initialization-failed')}else{Write-Error 'Транспорт уже запущен или блокировка недоступна' -ErrorAction Continue}
 }finally{
     if($reloadJob){Stop-Job $reloadJob;Remove-Job $reloadJob -Force}
     Stop-TransportProbes
