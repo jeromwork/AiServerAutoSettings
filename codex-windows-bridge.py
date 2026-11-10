@@ -5,7 +5,11 @@ import json
 import os
 import socket
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+# Resolve the bundled sibling even when the client starts Python with -I.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import server_node_catalog as catalog_api
 
 MAX = 262144
@@ -21,9 +25,9 @@ TOOLS = [
     ("windows_list", "List immediate entries under the selected workspace; secret and reparse paths are denied.", schema({"path": STR}), True),
     ("windows_read", "Read UTF-8 text under the selected workspace (max 64 KiB). Secret/reparse paths are denied.", schema({"path": STR}, ["path"]), True),
     ("windows_write", "Write UTF-8 text under the selected workspace (max 64 KiB). Secret/reparse paths are denied.", schema({"path": STR, "content": STR}, ["path", "content"]), False),
-    ("windows_command", "Run an explicitly requested PowerShell command on Windows as the signed-in user. Shell must be enabled by owner; full user access, SSH/VPN/ADB available if installed. Never read secrets. Maximum 60 seconds.", schema({"command": STR, "cwd": STR, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 60}}, ["command"]), False),
-    ("windows_process_start", "Start an explicitly requested development command on Windows, tracked until this bridge stops. Full user shell permission required. Returns a process id for poll/stop.", schema({"command": STR, "cwd": STR}, ["command"]), False),
-    ("windows_process_poll", "Read bounded output and state of a development process started by this bridge.", schema({"id": STR}, ["id"]), True),
+    ("windows_command", "Run an explicitly requested PowerShell command on Windows as the signed-in user. Shell must be enabled by owner; full user access, SSH/VPN/ADB available if installed. Never read secrets. Maximum 60 seconds. Tasks run concurrently. Set exclusive=true for installation, environment transitions, network/service changes or reboot; refuses immediately if another task is active.", schema({"command": STR, "cwd": STR, "exclusive": {"type": "boolean"}, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 60}}, ["command"]), False),
+    ("windows_process_start", "Start an explicitly requested development command on Windows, tracked until this bridge stops. Tasks run concurrently; set exclusive=true for installation, environment transitions, network/service changes or reboot. Exclusive refuses immediately if another task is active. Full user shell permission required. Returns a process id for poll/stop.", schema({"command": STR, "cwd": STR, "exclusive": {"type": "boolean"}}, ["command"]), False),
+    ("windows_process_poll", "Read bounded output and state of this task's process. Completed output is consumed on first read, expires after 300 seconds, and may be evicted after 64 retained results.", schema({"id": STR}, ["id"]), True),
     ("windows_process_stop", "Stop a development process and its child processes started by this bridge.", schema({"id": STR}, ["id"]), False),
 ]
 TASK_TOOLS={'windows_command','windows_process_start','windows_process_poll','windows_process_stop'}
@@ -41,7 +45,8 @@ def exchange(path, op, args, binding=None, timeout=100):
         if len(payload) > MAX:
             raise ValueError("request too large")
         conn.sendall(payload)
-        raw = conn.makefile("rb").readline(MAX + 1)
+        with conn.makefile("rb") as stream:
+            raw = stream.readline(MAX + 1)
         if len(raw) > MAX or not raw.endswith(b"\n"):
             raise ValueError("invalid response")
         return json.loads(raw)
@@ -54,7 +59,7 @@ def dispatch(message, path, catalog=None):
         version = params.get("protocolVersion")
         if version not in {"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}:
             version = "2025-11-25"
-        return {"protocolVersion": version, "capabilities": {"tools": {}}, "serverInfo": {"name": "windows-bridge", "version": "1.0.0"}, "instructions": "Only execute Windows shell when explicitly requested by the owner. Windows VPN/SSH keys stay on Windows. File tools are workspace-limited; shell runs as the Windows user."}
+        return {"protocolVersion": version, "capabilities": {"tools": {}}, "serverInfo": {"name": "windows-bridge", "version": "1.1.0"}, "instructions": "Only execute Windows shell when explicitly requested by the owner. Windows VPN/SSH keys stay on Windows. File tools are workspace-limited; shell runs as the Windows user."}
     if method == "ping":
         return {}
     if method == "tools/list":
@@ -116,11 +121,19 @@ def dispatch(message, path, catalog=None):
             kind = spec["properties"][key]["type"]
             if kind == "string" and not isinstance(value, str):
                 raise ValueError("invalid argument type")
+            if kind == "boolean" and type(value) is not bool:
+                raise ValueError("invalid exclusive flag")
             if kind == "integer" and (type(value) is not int or not 1 <= value <= 60):
                 raise ValueError("invalid timeout")
         try:
-            if binding and not catalog_api.matches(binding, exchange(path, 'status', {}, binding, timeout=3)):
+            status = None
+            if binding or values.get('exclusive') is True:
+                status = exchange(path, 'status', {}, binding, timeout=3)
+            if binding and not catalog_api.matches(binding, status):
                 raise ValueError('Target binding mismatch')
+            if values.get('exclusive') is True and status.get('coordination', {}).get('exclusive') is not True:
+                result = {"ok": False, "error": "Executor does not advertise exclusive support; update/restart the Windows bridge before requesting exclusive."}
+                return {"content": [{"type": "text", "text": json.dumps(result)}], "isError": True}
             result = exchange(path, tool[0].removeprefix("windows_"), values, binding)
             if binding:
                 result['target'] = {'projectId':binding['projectId'],'hostId':binding['hostId']}
@@ -136,25 +149,48 @@ def main():
     group.add_argument("--socket")
     group.add_argument("--catalog")
     args = parser.parse_args()
-    while True:
-        raw = sys.stdin.buffer.readline(MAX + 1)
-        if not raw:
-            return 0
-        message = None
+    output_lock = threading.Lock()
+    slots = threading.BoundedSemaphore(64)
+
+    def respond(message, release_slot=False):
         try:
-            if len(raw) > MAX or not raw.endswith(b"\n"):
-                return 1
-            message = json.loads(raw)
-            if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
-                raise ValueError("invalid request")
-            if "id" not in message:
-                continue
             response = {"jsonrpc": "2.0", "id": message["id"], "result": dispatch(message, args.socket, args.catalog)}
         except LookupError:
-            response = {"jsonrpc": "2.0", "id": message.get("id"), "error": {"code": -32601, "message": "Method not found"}}
+            response = {"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32601, "message": "Method not found"}}
         except Exception:
-            response = {"jsonrpc": "2.0", "id": message.get("id") if isinstance(message, dict) else None, "error": {"code": -32602, "message": "Invalid request or parameters"}}
-        print(json.dumps(response, ensure_ascii=False, separators=(",", ":")), flush=True)
+            response = {"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32602, "message": "Invalid request or parameters"}}
+        finally:
+            if release_slot:
+                slots.release()
+        emit(response)
+
+    def emit(response):
+        with output_lock:
+            print(json.dumps(response, ensure_ascii=False, separators=(",", ":")), flush=True)
+
+    with ThreadPoolExecutor(max_workers=64) as workers:
+        while True:
+            raw = sys.stdin.buffer.readline(MAX + 1)
+            if not raw:
+                return 0
+            message = None
+            try:
+                if len(raw) > MAX or not raw.endswith(b"\n"):
+                    return 1
+                message = json.loads(raw)
+                if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
+                    raise ValueError("invalid request")
+                if "id" not in message:
+                    continue
+                # Keep protocol setup synchronous; only tool calls may complete out of order.
+                if message.get('method') != 'tools/call':
+                    respond(message)
+                elif slots.acquire(blocking=False):
+                    workers.submit(respond, message, True)
+                else:
+                    emit({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32000, "message": "Too many concurrent bridge requests (64)"}})
+            except Exception:
+                emit({"jsonrpc": "2.0", "id": message.get("id") if isinstance(message, dict) else None, "error": {"code": -32602, "message": "Invalid request or parameters"}})
 
 
 if __name__ == "__main__":

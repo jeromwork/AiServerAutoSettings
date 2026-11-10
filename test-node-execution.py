@@ -39,7 +39,7 @@ class TaskExecutionTests(unittest.TestCase):
                 self.assertFalse(call(a,'status',binding=dict(a['binding'],hostId='wrong'))['ok'])
                 self.assertTrue(call(a,'status')['ok'])
                 self.assertFalse(call(a,'command',{'command':'Write-Output forbidden'})['ok'])
-                background=call(a,'process_start',{'command':'Start-Sleep -Seconds 30','taskId':'emulator-task'})
+                background=call(a,'process_start',{'command':'Start-Sleep -Seconds 30','taskId':'emulator-task','exclusive':True})
                 self.assertTrue(background['ok'],background)
                 companion=call(a,'command',{'command':"Write-Output 'companion-build'",'taskId':'emulator-task'})
                 self.assertTrue(companion['ok'],companion);self.assertIn('companion-build',companion['output'])
