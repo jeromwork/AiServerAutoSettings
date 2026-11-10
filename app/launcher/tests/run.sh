@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo=$(cd "$here/../../.." && pwd)
+dotnet=${DOTNET:-$HOME/.dotnet/dotnet}
+testdir=$(mktemp -d /tmp/remoteagents-launcher-tests.XXXXXX)
+trap 'rm -rf "$testdir"' EXIT
+pwsh=${PWSH:-$HOME/.cache/pwsh-test/pwsh}
+LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -File "$here/test-migrate.ps1" -TestHome "$testdir/migrate"
+python3 "$here/test_build.py"
+"$dotnet" run --project "$here/PortableTests.csproj" -c Release -- "$testdir/core"
+"$repo/build/make-bundle.sh" 20261109.235959-test "$testdir/bundles"
+"$dotnet" build "$repo/app/launcher/RemoteAgents.Launcher.csproj" -c Release -p:BundlePath="$testdir/bundles/20261109.235959-test.zip" --nologo
+"$dotnet" publish "$repo/app/launcher/RemoteAgents.Launcher.csproj" -c Release -p:BundlePath="$testdir/bundles/20261109.235959-test.zip" -o "$testdir/publish" --nologo
+python3 - "$testdir/publish" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+assert (p/'RemoteAgents.exe').read_bytes()[:2] == b'MZ'
+assert not list(p.glob('*.dll')), 'Unexpected runtime dependencies'
+print('PASS: net48 build/publish; PE EXE exists; no DLL dependencies')
+PY

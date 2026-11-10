@@ -1,0 +1,186 @@
+{
+  "schema": 1,
+  "components": [
+    {
+      "name": "transport",
+      "title": "Связь с сервером",
+      "exe": "powershell.exe",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "{bundle}\\transport\\Transport.Daemon.ps1",
+        "-Home",
+        "{home}",
+        "-ParentPid",
+        "{pid}"
+      ],
+      "cwd": "{bundle}",
+      "restart": "always",
+      "healthFile": "status/transport.json",
+      "healthMaxAgeSec": 15,
+      "enabledByDefault": true,
+      "critical": true
+    },
+    {
+      "name": "disk",
+      "title": "Диск",
+      "exe": "powershell.exe",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "{bundle}\\disk\\Disk.Status.ps1",
+        "-Home",
+        "{home}",
+        "-ParentPid",
+        "{pid}"
+      ],
+      "cwd": "{bundle}",
+      "restart": "always",
+      "healthFile": "status/disk.json",
+      "healthMaxAgeSec": 30,
+      "enabledByDefault": false,
+      "critical": false,
+      "menu": [
+        {
+          "title": "Открыть папку Disk",
+          "exe": "powershell.exe",
+          "args": [
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            "{bundle}\\disk\\Disk.Status.ps1",
+            "-Home",
+            "{home}",
+            "-Action",
+            "Open"
+          ]
+        },
+        {
+          "title": "Пауза синхронизации на 30 мин",
+          "exe": "powershell.exe",
+          "args": [
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            "{bundle}\\disk\\Disk.Status.ps1",
+            "-Home",
+            "{home}",
+            "-Action",
+            "Pause30"
+          ]
+        },
+        {
+          "title": "Пауза синхронизации на 2 ч",
+          "exe": "powershell.exe",
+          "args": [
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            "{bundle}\\disk\\Disk.Status.ps1",
+            "-Home",
+            "{home}",
+            "-Action",
+            "Pause120"
+          ]
+        },
+        {
+          "title": "Пауза синхронизации до включения",
+          "exe": "powershell.exe",
+          "args": [
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            "{bundle}\\disk\\Disk.Status.ps1",
+            "-Home",
+            "{home}",
+            "-Action",
+            "Pause"
+          ]
+        },
+        {
+          "title": "Продолжить",
+          "exe": "powershell.exe",
+          "args": [
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            "{bundle}\\disk\\Disk.Status.ps1",
+            "-Home",
+            "{home}",
+            "-Action",
+            "Resume"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "control",
+      "title": "Управление компьютером",
+      "exe": "powershell.exe",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "{bundle}\\control\\Control.Status.ps1",
+        "-Home",
+        "{home}",
+        "-ParentPid",
+        "{pid}"
+      ],
+      "cwd": "{bundle}",
+      "restart": "always",
+      "healthFile": "status/control.json",
+      "healthMaxAgeSec": 30,
+      "enabledByDefault": false,
+      "critical": false
+    },
+    {
+      "name": "vpn",
+      "title": "VPN (весь трафик)",
+      "exe": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "{bundle}\\transport\\Vpn.Tun.ps1",
+        "-Home",
+        "{home}",
+        "-ParentPid",
+        "{pid}"
+      ],
+      "cwd": "{bundle}",
+      "restart": "never",
+      "healthFile": "status/vpn.json",
+      "healthMaxAgeSec": 180,
+      "enabledByDefault": false,
+      "critical": false,
+      "commandManaged": true,
+      "stopFile": "state/vpn.stop"
+    }
+  ],
+  "menu": [],
+  "binaries": []
+}

@@ -33,7 +33,12 @@ function Read-DiskProfile([string]$Profile) {
 }
 function Invoke-DiskSsh($Command,[switch]$Direct,[string]$InputText='',[string]$OutputFile='') {
     $c=$script:Connection;$args=@('-o','BatchMode=yes','-o','ConnectTimeout=8','-o','StrictHostKeyChecking=yes')
-    if($Direct){$args+=@($c.arguments)}else{$args+=@('-F','NUL','-p','2222','-i',$c.keyPath,'-o',('HostKeyAlias='+$c.serverAddress),'-o',('UserKnownHostsFile='+$c.knownHostsPath),'-o','IdentitiesOnly=yes',($c.login+'@127.0.0.1'))}
+    $localPort=2222
+    if($c.configPath -and (Test-Path -LiteralPath $c.configPath)){
+        $managed=[regex]::Match([IO.File]::ReadAllText($c.configPath),'(?ms)^# BEGIN RemoteAgents transport [^\r\n]+\r?\n(.*?)^# END RemoteAgents transport [^\r\n]+')
+        if($managed.Success -and $managed.Groups[1].Value -match ('(?m)^Host "'+[regex]::Escape($c.serverAddress)+'"\r?$') -and $managed.Groups[1].Value -match '(?m)^    Port (\d+)\r?$'){$localPort=[int]$Matches[1]}
+    }
+    if($Direct){$args+=@($c.arguments)}else{$args+=@('-F','NUL','-p',[string]$localPort,'-i',$c.keyPath,'-o',('HostKeyAlias='+$c.serverAddress),'-o',('UserKnownHostsFile="'+$c.knownHostsPath.Replace('\','/')+'"'),'-o','IdentitiesOnly=yes',($c.login+'@127.0.0.1'))}
     Invoke-DiskProcess $c.sshExecutable ($args+@($Command)) $InputText $OutputFile
 }
 function Invoke-DiskServer($Action,$Data=$null,[switch]$Direct,[string]$OutputFile='') {

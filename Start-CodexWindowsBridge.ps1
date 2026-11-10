@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory=$true)][ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9.:-]*$')][string]$VPSHost,
     [Parameter(Mandatory=$true)][ValidatePattern('^[a-z_][a-z0-9_-]*$')][string]$VPSUser,
@@ -110,7 +110,8 @@ $token = ([BitConverter]::ToString($tokenBytes)).Replace('-','').ToLowerInvarian
 [Array]::Clear($tokenBytes,0,$tokenBytes.Length)
 $executor = $null; $ssh = $null
 try {
-    $executor = Start-PrivateProcess 'powershell.exe' @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'windows-bridge-executor.ps1'))
+    $executorExe='powershell.exe';if($env:OS -eq 'Windows_NT'){$executorExe=Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'}
+    $executor = Start-PrivateProcess $executorExe @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'windows-bridge-executor.ps1'))
     $localConfig = @{ token = $token; workspace = [IO.Path]::GetFullPath($Workspace); device = $DeviceLabel; allow_shell = [bool]$AllowShell; parent_pid = $PID; server_owned = [bool]$ServerOwnedReplica; enforce_target=[bool]$ServerOwnedReplica; sync_guard = @{ path=$SyncGuardPath; data_dir=$SyncDataDir; project_id=$ProjectId; host_id=$HostId } } | ConvertTo-Json -Depth 4 -Compress
     if ($ControlOnly) {
         $controlConfig=$localConfig | ConvertFrom-Json
@@ -135,7 +136,7 @@ try {
             $command = 'if [ "$(id -u)" -eq 0 ]; then exec runuser -u ' + $ServerUser + ' -- ' + $command + '; else exec sudo -n -u ' + $ServerUser + ' -- ' + $command + '; fi'
         } else { $command = 'exec ' + $command }
         $batchMode = $(if ($AskpassExecutable) { 'BatchMode=no' } else { 'BatchMode=yes' })
-        $sshArgs = @('-T','-p',[string]$SSHPort,'-i',$IdentityFile,'-o',$batchMode,'-o','IdentitiesOnly=yes','-o','StrictHostKeyChecking=yes','-o',('UserKnownHostsFile=' + $KnownHostsFile),'-o','ExitOnForwardFailure=yes','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3','-o','ConnectTimeout=10')
+        $sshArgs = @('-T','-p',[string]$SSHPort,'-i',$IdentityFile,'-o',$batchMode,'-o','IdentitiesOnly=yes','-o','StrictHostKeyChecking=yes','-o',('UserKnownHostsFile="' + $KnownHostsFile.Replace('\','/') + '"'),'-o','ExitOnForwardFailure=yes','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3','-o','ConnectTimeout=10')
         if ($SSHConfig) { $sshArgs += @('-F',$SSHConfig) } else { $sshArgs += @('-F','NUL') }
         $sshArgs += @('-R',('127.0.0.1:' + $remotePort + ':127.0.0.1:' + $ready.port),($VPSUser + '@' + $VPSHost),$command)
         try {

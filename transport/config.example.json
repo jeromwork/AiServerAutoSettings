@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "transport": {
+    "profilePath": "C:\\Users\\Alice\\AppData\\Local\\RemoteAgents\\ssh-profiles\\example\\project-connections\\example\\ssh-transport.json",
+    "channelPath": "C:\\Users\\Alice\\AppData\\Local\\RemoteDisk\\channel\\config.json",
+    "singBoxPath": "C:\\Users\\Alice\\AppData\\Local\\RemoteAgents\\bundle\\example\\transport\\sing-box.exe",
+    "sshPort": 2222,
+    "syncPort": 22001,
+    "apiPort": 29090,
+    "probePortBase": 26000,
+    "socksPortBase": 28000,
+    "bindPhysical": true,
+    "openSsh": true,
+    "metered": "auto",
+    "activeProbeBytes": 65536,
+    "rankProbeBytes": 262144,
+    "activeIntervalSec": 120,
+    "meteredActiveIntervalSec": 300,
+    "rankIntervalSec": 1800,
+    "topOnMetered": 3,
+    "stallSeconds": 5,
+    "probeTimeoutSec": 45,
+    "restartDelaySec": 3,
+    "entries": [
+      {
+        "name": "edge",
+        "ssh": "entry-example",
+        "enabled": true
+      }
+    ],
+    "relays": [
+      {
+        "name": "relay",
+        "port": 8443,
+        "host": "203.0.113.30",
+        "enabled": true
+      }
+    ],
+    "hops": [
+      {
+        "name": "jump",
+        "ssh": "jump-example",
+        "enabled": true
+      }
+    ],
+    "cdn": [
+      {
+        "name": "cdn-example",
+        "domain": "cdn.example.com",
+        "entry": "edge",
+        "enabled": false
+      }
+    ],
+    "disabledTags": []
+  },
+  "vpn": {
+    "enabled": false,
+    "excludeCidrs": [],
+    "checkUrl": "https://example.com/",
+    "dnsServer": "1.1.1.1"
+  }
+}

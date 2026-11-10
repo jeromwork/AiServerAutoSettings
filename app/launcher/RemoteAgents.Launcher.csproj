@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <OutputType>WinExe</OutputType>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>RemoteAgents</AssemblyName>
+    <RootNamespace>RemoteAgents.Launcher</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Version>1.2.0</Version>
+    <AssemblyVersion>1.2.0.0</AssemblyVersion>
+    <FileVersion>1.2.0.0</FileVersion>
+    <GenerateBindingRedirectsOutputType>false</GenerateBindingRedirectsOutputType>
+    <AutoGenerateBindingRedirects>false</AutoGenerateBindingRedirects>
+    <DebugType>none</DebugType>
+    <EnableDefaultEmbeddedResourceItems>false</EnableDefaultEmbeddedResourceItems>
+    <BundlePath Condition="'$(BundlePath)' == ''">$(MSBuildThisFileDirectory)../../build/out/initial-bundle.zip</BundlePath>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="Microsoft.CSharp" />
+    <Reference Include="System.Xml" />
+    <Reference Include="System.Web.Extensions" />
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
+    <EmbeddedResource Include="$(BundlePath)" LogicalName="RemoteAgents.InitialBundle.zip" Condition="Exists('$(BundlePath)')" />
+    <Compile Remove="tests/**/*.cs" />
+  </ItemGroup>
+  <Target Name="RequireBundleOnPublish" BeforeTargets="Publish">
+    <Error Condition="!Exists('$(BundlePath)')" Text="Сначала соберите начальный бандл: build/build-exe.sh" />
+  </Target>
+</Project>

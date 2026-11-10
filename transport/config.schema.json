@@ -1,0 +1,348 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Фрагмент: схема значения config.json.transport. Версия всего config.json задаётся лаунчером.",
+  "title": "RemoteAgents transport",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "profilePath": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Путь ssh-transport.json; иначе RemoteDisk/profile.txt"
+    },
+    "channelPath": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Существующий config.json канала: VLESS и override_port входа sync"
+    },
+    "singBoxPath": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Путь sing-box 1.14.4; по умолчанию рядом с модулем"
+    },
+    "bindPhysical": {
+      "type": "boolean",
+      "default": true
+    },
+    "openSsh": {
+      "type": "boolean",
+      "default": true
+    },
+    "metered": {
+      "enum": [
+        "auto",
+        "true",
+        "false",
+        true,
+        false
+      ],
+      "default": "auto"
+    },
+    "sshPort": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535,
+      "default": 2222
+    },
+    "syncPort": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535,
+      "default": 22001
+    },
+    "probePortBase": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535,
+      "default": 26000
+    },
+    "socksPortBase": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535,
+      "default": 28000
+    },
+    "apiPort": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535,
+      "default": 29090
+    },
+    "activeProbeBytes": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 65536
+    },
+    "rankProbeBytes": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 262144
+    },
+    "activeIntervalSec": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 120
+    },
+    "meteredActiveIntervalSec": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 300
+    },
+    "rankIntervalSec": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1800
+    },
+    "topOnMetered": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 3
+    },
+    "stallSeconds": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 5
+    },
+    "probeTimeoutSec": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 45
+    },
+    "restartDelaySec": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 3
+    },
+    "entries": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$"
+          },
+          "alias": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^(?!-)[^\\r\\n]+$",
+            "description": "Совместимость с задачей A; используйте ssh"
+          },
+          "configPath": {
+            "type": "string",
+            "minLength": 1
+          },
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "ssh": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^(?!-)[^\\r\\n]+$"
+          },
+          "kinds": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "hy2",
+                "hy2obfs",
+                "tuic",
+                "trojan",
+                "reality",
+                "shadowtls",
+                "ws-direct",
+                "ws-cdn"
+              ]
+            },
+            "description": "Отсутствие или [] означает все доступные типы"
+          }
+        },
+        "anyOf": [
+          {
+            "required": [
+              "ssh"
+            ]
+          },
+          {
+            "required": [
+              "alias"
+            ]
+          }
+        ]
+      }
+    },
+    "hops": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$"
+          },
+          "alias": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^(?!-)[^\\r\\n]+$",
+            "description": "Совместимость с задачей A; используйте ssh"
+          },
+          "configPath": {
+            "type": "string",
+            "minLength": 1
+          },
+          "hostKey": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "description": "Публичные OpenSSH host keys; не отпечатки SHA256"
+          },
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "ssh": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^(?!-)[^\\r\\n]+$"
+          }
+        },
+        "anyOf": [
+          {
+            "required": [
+              "ssh"
+            ]
+          },
+          {
+            "required": [
+              "alias"
+            ]
+          }
+        ]
+      }
+    },
+    "relays": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "port"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$"
+          },
+          "server": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Совместимость с задачей A; используйте host"
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "host": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "anyOf": [
+          {
+            "required": [
+              "host"
+            ]
+          },
+          {
+            "required": [
+              "server"
+            ]
+          }
+        ]
+      }
+    },
+    "cdn": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "domain",
+          "entry"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$"
+          },
+          "domain": {
+            "type": "string",
+            "pattern": "^(?=.{1,253}$)[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?$"
+          },
+          "entry": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$"
+          },
+          "path": {
+            "type": "string",
+            "pattern": "^/[^\r\n]*$"
+          },
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      }
+    },
+    "disabledTags": {
+      "type": "array",
+      "default": [],
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,95}$"
+      }
+    },
+    "rankConcurrency": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 16,
+      "default": 1,
+      "description": "Сколько путей проверять одновременно при рейтинге. 1 — точная скорость каждого пути."
+    },
+    "routeSsh": {
+      "type": "boolean",
+      "default": false,
+      "description": "Применяется только явным переходом build/Migrate.ps1; обратимо."
+    },
+    "takeOverChannel": {
+      "type": "boolean",
+      "default": false,
+      "description": "Применяется только явным переходом build/Migrate.ps1; обратимо."
+    }
+  }
+}

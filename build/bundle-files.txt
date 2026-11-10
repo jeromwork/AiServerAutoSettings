@@ -1,0 +1,40 @@
+# Allowlist, relative to repository root; optional globs start with ?.
+# Never add profiles, configs with credentials, binary downloads or the former app projects.
+Start-WindowsControl.ps1
+Start-CodexWindowsBridge.ps1
+windows-bridge-executor.ps1
+Windows.Paths.ps1
+server-control.sh
+codex-windows-bridge.py
+codex-bridge-session.py
+server_node_catalog.py
+Invoke-RemoteSyncGuard.ps1
+Sync.Runtime.ps1
+Sync.Workspace.ps1
+Sync.Orchestrator.ps1
+Invoke-RemoteAgentsSsh.ps1
+server-sync.py
+server-sync-runtime.py
+server-install-sync.sh
+# Includes optional launcher path/VPN commands as the transport module is delivered.
+transport/*.ps1
+transport/*.json
+# Server bootstrap entry/*.sh stays in source until server rollback acceptance.
+disk/Install-RemoteDisk.ps1
+disk/Disk.Common.ps1
+disk/Add-RemoteDiskFolder.ps1
+disk/Sync-RemoteDiskFolders.ps1
+disk/Enable-RemoteDiskFolders.ps1
+disk/Move-RemoteDiskFolder.ps1
+disk/server-disk.sh
+disk/stignore.txt
+disk/legacy-ignores.sha256
+build/components.json => components.json
+build/selftest.ps1 => selftest.ps1
+
+# Launcher integration and independent rollback (no user data).
+disk/Disk.Status.ps1
+app/launcher/control/Control.Status.ps1 => control/Control.Status.ps1
+build/Migrate.Common.ps1
+build/Migrate.ps1
+build/Rollback.ps1

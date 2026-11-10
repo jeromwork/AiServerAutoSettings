@@ -48,6 +48,41 @@ Invoke-ControlPrepare $c $payload | ConvertTo-Json -Compress
             self.assertEqual(result,dict(user='tester',home='/home/tester'))
             self.assertEqual(capture.read_bytes(),payload.replace('\r\n','\n').replace('\r','\n').encode('utf-8'))
 
+    def test_migration_bridge_live_roundtrip(self):
+        # Exercise the actual embedded probe with an isolated public catalog and broker socket.
+        import shutil
+        import sys
+        import types
+        code = subprocess.check_output([str(PWSH), '-NoProfile', '-NonInteractive', '-Command',
+            ". './build/Migrate.Common.ps1'; Get-MigrationBridgeProbe"], cwd=ROOT).decode('utf-8-sig')
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp); record = self.record(home); record['controlOnly'] = True
+            base = home / '.local/share/codex-remote'; base.mkdir(parents=True)
+            for name in ('codex-windows-bridge.py', 'server_node_catalog.py'):
+                shutil.copyfile(ROOT/name, base/name)
+            catalog.register(home/'.local/share/remote-agents-nodes', record, str(home))
+            endpoint = Path(record['socketPath']); endpoint.parent.mkdir(parents=True)
+            for valid in (True, False):
+                with socket.socket(socket.AF_UNIX) as server:
+                    server.bind(str(endpoint)); server.listen(1); server.settimeout(5)
+                    captured = []
+                    def reply():
+                        with server.accept()[0] as client:
+                            captured.append(json.loads(client.makefile('rb').readline()))
+                            status = dict(ok=True, device=record['deviceLabel'], workspace=record['windowsReplica'],
+                                control_only=True, project_id='control', host_id='host-one' if valid else 'other-host')
+                            client.sendall(json.dumps(status).encode()+b'\n')
+                    thread = threading.Thread(target=reply); thread.start()
+                    expected = base64.b64encode(json.dumps(dict(hostId='host-one', workspace=record['windowsReplica'])).encode()).decode()
+                    bootstrap = "import pwd,types,sys;home_dir=sys.argv[1];pwd.getpwuid=lambda uid:types.SimpleNamespace(pw_dir=home_dir);sys.argv=sys.argv[1:];exec("+repr(code)+")"
+                    result = subprocess.run([sys.executable, '-c', bootstrap, str(home), expected], capture_output=True, timeout=10)
+                    thread.join(5)
+                    self.assertEqual(result.returncode == 0, valid, result.stderr.decode())
+                    self.assertEqual(captured[0]['op'], 'status')
+                    self.assertEqual(captured[0]['binding']['hostId'], 'host-one')
+                    self.assertNotIn('token', captured[0])
+                endpoint.unlink()
+
     def test_catalog(self):
         with tempfile.TemporaryDirectory() as tmp:
             home=Path(tmp); data=self.record(home)

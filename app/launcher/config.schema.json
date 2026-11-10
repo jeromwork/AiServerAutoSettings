@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RemoteAgents launcher configuration",
+  "type": "object",
+  "required": [
+    "schema",
+    "version",
+    "components",
+    "update"
+  ],
+  "properties": {
+    "schema": {
+      "const": 1
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "components": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "update": {
+      "type": "object",
+      "properties": {
+        "sshExe": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "remoteDir": {
+          "type": "string"
+        },
+        "viaLocalPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "hostKeyAlias": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Разрешить только ручную проверку обновлений на сервере"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

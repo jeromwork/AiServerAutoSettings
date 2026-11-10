@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "version": 1,
+  "components": {
+    "transport": {
+      "enabled": true
+    },
+    "disk": {
+      "enabled": false
+    },
+    "control": {
+      "enabled": false
+    },
+    "vpn": {
+      "enabled": false
+    }
+  },
+  "update": {
+    "remoteDir": "~/.local/share/remote-agents/dist",
+    "enabled": false
+  }
+}
