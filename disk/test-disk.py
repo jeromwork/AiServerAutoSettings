@@ -216,7 +216,7 @@ def exercise(root, archive):
         server(side, 'attach', data)
         server(side, 'attach', data)
         f = api(side, 'config/folders/' + side['id'])
-        require(f['maxConflicts'] == 10 and not f['paused'] and len(f['devices']) == 2, 'repeat attachment')
+        require(f['maxConflicts'] == -1 and f['versioning']['type'] == 'staggered' and f['versioning']['params']['maxAge'] == '0' and not f['paused'] and len(f['devices']) == 2, 'repeat attachment')
         api(side, 'config/folders/' + side['id'], 'PATCH', dict(paused=True))
         server(side, 'attach', data)
         require(api(side, 'config/folders/' + side['id'])['paused'], 'pause preserved')

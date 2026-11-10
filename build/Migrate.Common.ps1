@@ -42,7 +42,7 @@ function Import-MigrationConfig([string]$Root,[string]$DiskHome){
         Set-MigrationDefault $t routeSsh $true;Set-MigrationDefault $t takeOverChannel $true
         Set-MigrationDefault $c disk ([pscustomobject]@{});Set-MigrationDefault $c.disk home $DiskHome
         Set-MigrationDefault $c components ([pscustomobject]@{})
-        foreach($name in @('transport','disk','control')){Set-MigrationDefault $c.components $name ([pscustomobject]@{});$c.components.$name|Add-Member -Force enabled $true}
+        foreach($name in @('transport','disk','control')){Set-MigrationDefault $c.components $name ([pscustomobject]@{});$on=$true;if($name -eq 'control' -and $c.bridge -and $c.bridge.enabled -eq $false){$on=$false};$c.components.$name|Add-Member -Force enabled $on}
     }
     Read-TransportJson (Join-Path $Root 'config.json')
 }
@@ -227,8 +227,10 @@ expected = json.loads(base64.b64decode(sys.argv[1]))
 record = next(r for r in bridge['catalog_api'].records(home / '.local/share/remote-agents-nodes', home) if r['projectId'] == 'control' and r['hostId'] == expected['hostId'])
 assert record['windowsReplica'].casefold().rstrip('\\') == expected['workspace'].casefold().rstrip('\\')
 assert record.get('controlOnly') is True
+if 'allowShell' in expected: assert bool(record.get('allowShell')) == expected['allowShell']
 status = bridge['exchange'](record['socketPath'], 'status', {}, record, timeout=5)
 assert bridge['catalog_api'].matches(record, status)
+if 'allowShell' in expected: assert bool(status.get('shell_enabled')) == expected['allowShell']
 print('migration-bridge-ok')
 '@
 }
@@ -250,10 +252,12 @@ function Test-MigrationBridge([string]$Root){
 }
 function Test-MigrationHealth([string]$Root){
     $config=Read-TransportJson (Join-Path $Root 'config.json')
-    if(-not (Test-MigrationFresh $Root transport) -or -not (Test-MigrationFresh $Root disk) -or -not (Test-MigrationFresh $Root control)){return $false}
+    if(-not (Test-MigrationFresh $Root transport) -or -not (Test-MigrationFresh $Root disk)){return $false}
+    $bridgeEnabled= -not ($config.bridge -and $config.bridge.enabled -eq $false)
+    if($bridgeEnabled -and -not (Test-MigrationFresh $Root control)){return $false}
     $disk=Read-TransportJson (Join-Path $Root 'status/disk.json');if(-not $disk.connected){return $false}
     if(-not (Test-MigrationSsh $Root ([int]$config.transport.sshPort))){return $false}
-    Test-MigrationBridge $Root
+    if($bridgeEnabled){Test-MigrationBridge $Root}else{$true}
 }
 function Wait-MigrationTransport([string]$Root,[int]$Timeout=180){
     $deadline=[DateTime]::UtcNow.AddSeconds($Timeout)

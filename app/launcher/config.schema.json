@@ -69,6 +69,39 @@
         "webappUrl": {
           "type": "string",
           "format": "uri"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        }
+      },
+      "additionalProperties": false
+    },
+    "bridge": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "allowShell": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "wizard": {
+      "type": "object",
+      "properties": {
+        "configured": {
+          "type": "boolean",
+          "description": "UI intent only; never a health check"
+        },
+        "localCatalog": {
+          "type": "object",
+          "description": "Public per-device overlay; credentials remain in secrets"
         }
       },
       "additionalProperties": false

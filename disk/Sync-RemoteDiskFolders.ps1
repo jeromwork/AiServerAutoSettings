@@ -34,7 +34,7 @@ try {
             Test-DiskIgnores $target -Write
             $folder=Invoke-DiskApi 'config/defaults/folder'
             $folder.id=$id;$folder.label=$name;$folder.path=$target;$folder.type='sendreceive';$folder.paused=$true
-            $folder.devices=@(@{deviceID=$peer});$folder.maxConflicts=10
+            $folder.devices=@(@{deviceID=$peer});$folder.maxConflicts=-1;$folder|Add-Member -Force versioning @{type='staggered';params=@{maxAge='0';cleanInterval='3600'}}
             [void](Invoke-DiskApi ('config/folders/'+[Uri]::EscapeDataString($id)) PUT $folder)
             [void](Invoke-DiskApi ('config/folders/'+[Uri]::EscapeDataString($id)) PATCH @{paused=$false})
             Write-DiskLog ('Автоподключение: '+$name)

@@ -6,7 +6,8 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {pathToFileURL} from 'node:url';
-import {connectAccount,normalizeKey} from './server-account.mjs';
+import {connectAccount as connectRaw,normalizeKey,listAccounts,accountLabel} from './server-account.mjs';
+const connectAccount=(input,...args)=>connectRaw({serverUrl:'https://api.example.invalid',webappUrl:'https://web.example.invalid',...input},...args);
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'happier-accounts-test-'));
 const packageRoot=process.env.HAPPIER_TEST_PACKAGE_ROOT || path.dirname(fs.realpathSync(path.join(os.homedir(),'.local/bin/happier')));
 const protocol=await import(pathToFileURL(path.join(packageRoot,'node_modules/@happier-dev/protocol/dist/index.js')));
@@ -44,9 +45,15 @@ try {
     const one=await connectAccount({key},vendor,api,service,root);
     const bytes=fs.readFileSync(path.join(services.get(one.account).dir,'fixture-credentials.json'));
     check(!bytes.includes(key));check(stores.size===1 && one.ok);
+    check(listAccounts(root).accounts[0].label.startsWith('Без имени '));
+    await connectAccount({key,label:'Мой аккаунт'},vendor,api,service,root);
+    check(listAccounts(root).accounts[0].label==='Мой аккаунт');
+    assert.throws(()=>accountLabel('bad\r\nlabel'));checks++;
     const again=await connectAccount({key:key+'\r\n'},vendor,api,service,root);
     check(again.account===one.account && accounts.size===1 && stores.size===1);
     check(fs.readFileSync(path.join(services.get(one.account).dir,'fixture-credentials.json')).equals(bytes));
+    await assert.rejects(connectAccount({key,expectedAccount:'b'.repeat(64),label:'someone else'},vendor,api,service,root));checks++;
+    check(listAccounts(root).accounts[0].label==='Мой аккаунт');
     const machine=services.get(one.account).machine;
     const two=await connectAccount({key:Buffer.alloc(32,8).toString('base64url')},vendor,api,service,root);
     check(two.account!==one.account && accounts.size===2 && stores.size===2 && services.size===2);
@@ -61,6 +68,8 @@ try {
     let denied=false;
     try{await connectAccount({key},vendor,async()=>({features:{auth:{login:{keyChallenge:{enabled:false}}}}}),service,root);}catch{denied=true;}
     check(denied && services.size===2 && stores.size===2);
+    await assert.rejects(connectAccount({key:Buffer.alloc(32,9).toString('base64url')},vendor,async()=>({features:{auth:{login:{keyChallenge:{enabled:false}}}}}),service,root));
+    check(listAccounts(root).accounts.length===2);
     let renewal=false;
     await connectAccount({key},vendor,async(route,body,token)=>{
         if(route==='/v1/machines' && token){renewal=true;throw Error('expired');}
@@ -73,7 +82,7 @@ try {
         import {connectAccount,loadVendor} from ${JSON.stringify(pathToFileURL(path.resolve('accounts/server-account.mjs')).href)};
         import assert from 'node:assert/strict';
         const home=process.env.HOME;
-        const value=await connectAccount({key:Buffer.alloc(32,3).toString('base64url')},()=>loadVendor(${JSON.stringify(packageRoot)}),async r=>r==='/v1/features'?{}:{token:'fixture-token'},async(id,dir)=>{
+        const value=await connectAccount({key:Buffer.alloc(32,3).toString('base64url'),serverUrl:'https://api.example.invalid',webappUrl:'https://web.example.invalid'},()=>loadVendor(${JSON.stringify(packageRoot)}),async r=>r==='/v1/features'?{}:{token:'fixture-token'},async(id,dir)=>{
             const {persistence}=await loadVendor(${JSON.stringify(packageRoot)});
             const stored=await persistence.readCredentials();assert.equal(stored.encryption.type,'dataKey');assert.equal(stored.token,'fixture-token');
             assert.ok(dir.startsWith(home+'/secrets/'));

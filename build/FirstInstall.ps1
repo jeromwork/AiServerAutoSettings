@@ -15,10 +15,12 @@ function Find-InstallProfile([string]$Root) {
 }
 function Invoke-InstallChild([string]$Bundle,[string]$Script,[string[]]$Arguments) {
     $psi=New-Object Diagnostics.ProcessStartInfo
-    $psi.FileName=Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
-    $psi.Arguments=(@('-NoLogo','-NoProfile','-NonInteractive','-STA','-ExecutionPolicy','Bypass','-File',(Join-Path $Bundle $Script))+$Arguments|ForEach-Object {Quote-Transport ([string]$_)}) -join ' '
-    $psi.UseShellExecute=$false;$psi.CreateNoWindow=$true
+    $psi.FileName=Get-TransportPowerShell
+    $sta=@();if($env:OS -eq 'Windows_NT'){$sta=@('-STA')}
+    $psi.Arguments=(@('-NoLogo','-NoProfile','-NonInteractive')+$sta+@('-ExecutionPolicy','Bypass','-File',(Join-Path $Bundle $Script))+$Arguments|ForEach-Object {Quote-Transport ([string]$_)}) -join ' '
+    $psi.UseShellExecute=$false;$psi.CreateNoWindow=$true;$psi.RedirectStandardOutput=$true;$psi.RedirectStandardError=$true
     $p=[Diagnostics.Process]::Start($psi)
+    $out=$p.StandardOutput.BaseStream.CopyToAsync([IO.Stream]::Null);$err=$p.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
     try{if(-not $p.WaitForExit(900000)){$p.Kill();throw 'Таймаут установки'};if($p.ExitCode -ne 0){throw 'Шаг установки не выполнен'}}finally{$p.Dispose()}
 }
 function Invoke-FirstInstall([string]$Root,[string]$Bundle,[string]$Address,[string]$User) {

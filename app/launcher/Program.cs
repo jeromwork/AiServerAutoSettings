@@ -72,7 +72,7 @@ namespace RemoteAgents.Launcher
                             }
                             string target = Path.Combine(home, Product.ExeName);
                             bool external = !Path.GetFullPath(Exe).Equals(target, StringComparison.OrdinalIgnoreCase);
-                            bool command = args.Any(a => new[] { "--exit", "--uninstall", "--logs", "--rollback", "--restart-components", "--check-updates", "--confirm-install" }.Contains(a));
+                            bool command = args.Any(a => new[] { "--exit", "--uninstall", "--logs", "--rollback", "--restart-components", "--check-updates", "--confirm-install", "--settings" }.Contains(a));
                             // --tray with --home is also the isolated development/smoke entry point.
                             bool install = external && !command && !(args.Contains("--tray") && args.Contains("--home"));
                             if (install) {
@@ -82,7 +82,7 @@ namespace RemoteAgents.Launcher
                                     var engine = new UpdateEngine(home, Version);
                                     int comparison = File.Exists(target) ? UpgradeInstaller.Compare(Version, bundle, FileVersionInfo.GetVersionInfo(target).FileVersion, engine.Current) : 1;
                                     if (comparison == 0) {
-                                        if (args.Contains("--install") || (!Product.IsVpn && !args.Contains("--home") && FirstInstall.Required(home))) { migrate(); return 0; }
+                                        if (args.Contains("--install") || (!args.Contains("--home") && FirstInstall.Required(home))) { migrate(); return 0; }
                                         if (!owned) Forward(name, new[] { "--show", "--setup-check" }); else launch(target, false);
                                         return 0;
                                     }
@@ -92,11 +92,11 @@ namespace RemoteAgents.Launcher
                                     try {
                                         UpgradeInstaller.Apply(home, Exe, zip, Version, comparison < 0, f => External.SelfTest(f, home, CancellationToken.None));
                                     } catch { if (File.Exists(target)) launch(target, false); throw; }
-                                    if (args.Contains("--install") || (!args.Contains("--home") && (Product.IsVpn || FirstInstall.Required(home)))) { migrate(); return 0; }
+                                    if (args.Contains("--install") || (!args.Contains("--home") && FirstInstall.Required(home))) { migrate(); return 0; }
                                     launch(target, true); log.Write("install.upgrade.ok"); return 0;
                                 } finally { if (File.Exists(zip)) File.Delete(zip); }
                             }
-                            if (args.Contains("--install") || (!external && args.Length == 0 && !Product.IsVpn && FirstInstall.Required(home))) { migrate(); return 0; }
+                            if (args.Contains("--install") || (!external && args.Length == 0 && FirstInstall.Required(home))) { migrate(); return 0; }
                             if (!owned) { Forward(name, args.Contains("--uninstall") ? new[] { "--exit" } : args.Length == 0 ? new[] { "--show", "--setup-check" } : args); log.Write("ipc.forward.ok"); return 0; }
                         } finally { if (installOwned) installer.ReleaseMutex(); }
                     }

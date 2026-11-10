@@ -4,6 +4,7 @@ $ErrorActionPreference='Stop'
 $repo=Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent
 . (Join-Path $repo 'accounts/Account.ps1') -LibraryOnly
 $root=Join-Path $TestHome 'RemoteAgents';[void][IO.Directory]::CreateDirectory((Join-Path $root 'secrets'))
+[IO.File]::WriteAllText((Join-Path $root 'config.json'),'{"schema":1,"happier":{"serverUrl":"https://api.example.invalid","webappUrl":"https://web.example.invalid","label":"Мой аккаунт"}}')
 $count=0
 function Assert($ok,$name){if(-not $ok){throw ('FAIL '+$name)};$script:count++}
 $script:testKey=[Convert]::ToBase64String([byte[]](1..32))
@@ -16,8 +17,8 @@ function Invoke-DiskSsh($Command,[switch]$Direct,[string]$InputText,[int]$Timeou
     if($Command -eq 'bash -s'){Assert (-not $InputText.Contains($script:testKey)) 'public bootstrap contains no key';return ''}
     if($script:fail){throw 'fake SSH offline'}
     $request=$InputText|ConvertFrom-Json
-    Assert ($request.key -ceq $script:testKey -and $request.serverUrl -eq 'https://api.happier.dev') 'key only in private stdin; CRLF normalized'
-    '{"schema":1,"ok":true,"account":"'+('a'*64)+'","web":"https://cloud.happier.dev"}'+"`r`n"
+    Assert ($request.key -ceq $script:testKey -and $request.serverUrl -eq 'https://api.example.invalid') 'key only in private stdin; CRLF normalized'
+    '{"schema":1,"ok":true,"account":"'+('a'*64)+'","web":"https://web.example.invalid"}'+"`r`n"
 }
 Connect-HappierAccount $root
 $state=[IO.File]::ReadAllText((Join-Path $root 'state/happier-account.json'))|ConvertFrom-Json

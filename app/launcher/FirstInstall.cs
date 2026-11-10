@@ -12,6 +12,8 @@ namespace RemoteAgents.Launcher
     {
         internal static bool Required(string home)
         {
+            string config = Path.Combine(home,"config.json");
+            if(Product.IsVpn && File.Exists(config) && Json.Bool(Json.Map(Json.Get(Json.Read(config),"wizard")),"configured")) return false;
             string state = Path.Combine(home, "state", "migration.json");
             return !File.Exists(state) || new[] { "rolled-back", "error" }.Contains(Json.Str(Json.Read(state), "phase"));
         }
@@ -27,39 +29,15 @@ namespace RemoteAgents.Launcher
         {
             if (!Path.GetFullPath(home).TrimEnd('\\').Equals(Path.GetFullPath(Program.DefaultHome).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)) throw new IOException("Установка с Run доступна только в основном Home; используйте --tray --home для изоляции");
             Application.EnableVisualStyles();
-            if (Product.IsVpn) {
+            var engine = new UpdateEngine(home, Program.Version);
+            string config = Path.Combine(home,"config.json");
+            bool configured = File.Exists(config) && Json.Bool(Json.Map(Json.Get(Json.Read(config),"wizard")),"configured");
+            if(configured && !Product.IsVpn) SetupWizard.Display(home,engine.Folder(engine.Current),false,6,true);
+            else SetupWizard.Display(home, engine.Folder(engine.Current), true);
+            if (Product.IsVpn && Json.Bool(Json.Map(Json.Get(new Configuration(home).Data,"wizard")),"configured")) {
                 using (var key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run"))
                     key.SetValue("RemoteVPN", Files.Quote(Path.Combine(home, Product.ExeName)) + " --tray --home " + Files.Quote(home));
                 Program.StartLauncher(Path.Combine(home, Product.ExeName), home, true);
-                if (!HasProfile(home)) MessageBox.Show("Для VPN установите и настройте RemoteAgents.exe. VPN включается только из меню, с подтверждением UAC.", "RemoteVPN");
-                return;
-            }
-            string address = "", login = "";
-            if (!HasProfile(home)) {
-                using (var form = new Form { Text = "RemoteAgents — первый запуск", Width = 520, Height = 240, StartPosition = FormStartPosition.CenterScreen }) {
-                    var server = new TextBox { Left = 160, Top = 25, Width = 320 };
-                    var user = new TextBox { Left = 160, Top = 65, Width = 320, Text = "root" };
-                    form.Controls.Add(new Label { Left = 20, Top = 28, Width = 135, Text = "Адрес сервера" }); form.Controls.Add(server);
-                    form.Controls.Add(new Label { Left = 20, Top = 68, Width = 135, Text = "Пользователь" }); form.Controls.Add(user);
-                    form.Controls.Add(new Label { Left = 20, Top = 105, Width = 460, Height = 40, Text = "Пароль и проверка ключа сервера — в следующем защищённом окне SSH. Пароль не сохраняется." });
-                    var next = new Button { Left = 330, Top = 155, Width = 150, Text = "Настроить", DialogResult = DialogResult.OK };
-                    form.Controls.Add(next); form.AcceptButton = next;
-                    if (form.ShowDialog() != DialogResult.OK) return;
-                    address = server.Text.Trim(); login = user.Text.Trim();
-                    if (address.Length == 0 || login.Length == 0) throw new ArgumentException();
-                }
-            }
-            var engine = new UpdateEngine(home, Program.Version);
-            var psi = new ProcessStartInfo(Files.Executable("powershell.exe"), Files.Arguments(new[] {
-                "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-ExecutionPolicy", "Bypass", "-File",
-                Path.Combine(engine.Folder(engine.Current), "build", "FirstInstall.ps1"), "-Home", home, "-ServerAddress", address, "-Login", login
-            })) { UseShellExecute = false, CreateNoWindow = true };
-            using (var process = Process.Start(psi)) using (var form = new Form { Text = "RemoteAgents — переход", Width = 560, Height = 150, StartPosition = FormStartPosition.CenterScreen })
-            using (var timer = new System.Windows.Forms.Timer { Interval = 500 }) {
-                form.Controls.Add(new Label { Dock = DockStyle.Fill, Padding = new Padding(16), Text = "Настраиваем SSH, диск и управление.\r\nЕсли открыт запрос SSH, проверьте сервер и введите пароль." });
-                bool done = false; form.FormClosing += (s,e) => { if (!done) e.Cancel = true; };
-                timer.Tick += (s,e) => { if (process.HasExited) { done = true; form.Close(); } }; timer.Start(); form.ShowDialog();
-                if (process.ExitCode != 0) throw new MigrationFailureException(Migration.FailureMessage(home));
             }
         }
         public static void UninstallVpn(string home)
