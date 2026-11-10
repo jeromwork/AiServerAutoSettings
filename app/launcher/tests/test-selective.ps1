@@ -60,7 +60,22 @@ Test-DiskIgnores $folder -Write
 Assert ([IO.File]::ReadAllText((Join-Path $folder '.stignore')).EndsWith("*`n")) 'legacy helper preserves managed selective policy'
 Set-ProjectSelection $f @()
 Assert (-not $script:paused -and (Test-Path (Join-Path $folder '.env'))) 'repeat deselection idempotent'
+[IO.File]::WriteAllText((Join-Path $folder 'only-here.txt'),'local, never uploaded')
+$script:removedReceipt=$false
+Set-ProjectSelection $f @() -KeepLocal @('only-here.txt')
+Assert ((Test-Path (Join-Path $folder 'only-here.txt')) -and -not $script:removedReceipt) 'unchecked local-only content remains, no server receipt needed'
+Assert ([IO.File]::ReadAllText((Join-Path $folder '.stignore')).EndsWith("*`n")) 'unchecked local-only content is excluded before resume'
 [IO.File]::WriteAllText((Join-Path $folder '.stignore'),'// RemoteDisk selective v1'+"`n!/**`n")
 $failed=$false;try{Test-DiskIgnores $folder -Write}catch{$failed=$true}
 Assert $failed 'forged managed comment does not bypass policy validation'
+$detached=Join-Path $TestHome 'detached';[void][IO.Directory]::CreateDirectory($detached)
+[IO.File]::WriteAllText((Join-Path $detached 'keep.txt'),'preserve local files')
+Initialize-ProjectSelection $detached @('first.txt')
+Initialize-ProjectSelection $detached @('second.txt')
+Assert ([IO.File]::ReadAllText((Join-Path $detached '.stignore')).Contains('!/second.txt')) 'detached project can change an existing trusted selective policy before attach'
+Assert ([IO.File]::ReadAllText((Join-Path $detached 'keep.txt')) -eq 'preserve local files') 'initial policy change never deletes local content'
+$policy=Get-SelectionPolicyFile $detached;$receipt=[IO.File]::ReadAllText($policy)
+[IO.File]::WriteAllText((Join-Path $detached '.stignore'),'foreign-policy')
+$failed=$false;try{Initialize-ProjectSelection $detached @('third.txt')}catch{$failed=$true}
+Assert ($failed -and [IO.File]::ReadAllText($policy) -ceq $receipt -and [IO.File]::ReadAllText((Join-Path $detached '.stignore')) -ceq 'foreign-policy') 'foreign policy is rejected before replacing its trust receipt'
 Write-Output ('OK: '+$count+' selective checks (fixtures; CRLF, policy, unsafe deletion, retry)')

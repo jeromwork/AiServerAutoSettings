@@ -154,6 +154,8 @@ function Move-DiskFolder([string]$FolderId,[string]$Destination,[switch]$Copy) {
         catch{if(Test-Path -LiteralPath $Destination){Remove-Item -LiteralPath $Destination -Recurse -Force};throw}
         Remove-Item -LiteralPath $old -Recurse -Force
     }else{[IO.Directory]::Move($old,$Destination)}
+    # A selective policy belongs to its path; carry its trusted receipt with a managed move.
+    if(Get-Command Get-SelectionPolicyFile -ErrorAction SilentlyContinue){$policy=Get-SelectionPolicyFile $old;if(Test-Path -LiteralPath $policy){Save-SelectionPolicy $Destination ([IO.File]::ReadAllText($policy))}}
     # On API failure leave paused; files are safe at Destination. Rerun path PATCH manually.
     [void](Invoke-DiskApi $route PATCH @{path=$Destination})
     [void](Invoke-DiskApi $route PATCH @{paused=$paused})
@@ -162,7 +164,7 @@ function Move-DiskFolder([string]$FolderId,[string]$Destination,[switch]$Copy) {
 # Changing the base moves every server folder lying directly in the previous base.
 function Set-DiskBase([string]$Path) {
     $new=[IO.Path]::GetFullPath($Path).TrimEnd('\','/');$saved=Join-Path $script:DiskHome 'base.txt'
-    $old=@('C:\work');if(Test-Path -LiteralPath $saved){$old=@([IO.File]::ReadAllText($saved).Trim())} # C:\work was the earlier default
+    $old=@((Get-DiskBase))
     $old=@($old|ForEach-Object {[IO.Path]::GetFullPath($_).TrimEnd('\','/')}|Where-Object {$_ -ine $new})
     $server=Join-Path $script:DiskHome 'server.txt'
     if($old.Count -and (Test-Path -LiteralPath $server)){

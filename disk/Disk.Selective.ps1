@@ -54,7 +54,7 @@ function Get-SelectionFiles([string]$Root,[string]$Relative='') {
         if($entry.PSIsContainer){Get-SelectionFiles $Root $rel}else{$rel}
     }
 }
-function Set-ProjectSelection($Folder,[string[]]$Paths) {
+function Set-ProjectSelection($Folder,[string[]]$Paths,[string[]]$KeepLocal=@()) {
     $id=[Uri]::EscapeDataString($Folder.id);$root=$Folder.path
     for($part=[IO.Path]::GetFullPath($root);$part;$part=[IO.Path]::GetDirectoryName($part)){
         if((Test-Path -LiteralPath $part) -and ([IO.File]::GetAttributes($part) -band [IO.FileAttributes]::ReparsePoint)){throw 'Ссылки в пути запрещены'}
@@ -70,7 +70,7 @@ function Set-ProjectSelection($Folder,[string[]]$Paths) {
         if($actual -cne $expected){Test-DiskIgnores $root}
     }
     $rules=New-SelectionIgnores $Paths
-    $remove=@(Get-SelectionFiles $root|Where-Object { -not ('.' -in $Paths) -and -not (Test-SelectionIncluded $_ $Paths) })
+    $remove=@(Get-SelectionFiles $root|Where-Object { -not ('.' -in $Paths) -and -not (Test-SelectionIncluded $_ $Paths) -and $_ -cnotin $KeepLocal })
     if($remove.Count){
         # Force a scan first; a stale idle status is not proof that current files reached the server.
         [void](Invoke-DiskApi ('db/scan?folder='+$id) POST)
@@ -141,4 +141,17 @@ function Write-SelectionAtomic([string]$File,[string]$Text) {
         try{$bytes=[Text.Encoding]::UTF8.GetBytes($Text.Replace("`r",''));$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
         if([IO.File]::Exists($File)){[IO.File]::Replace($temp,$File,$backup)}else{[IO.File]::Move($temp,$File)}
     }finally{if([IO.File]::Exists($temp)){[IO.File]::Delete($temp)};if([IO.File]::Exists($backup)){[IO.File]::Delete($backup)}}
+}
+
+function Initialize-ProjectSelection([string]$Root,[string[]]$Paths) {
+    # Validate the old trusted policy BEFORE replacing its receipt. A detached
+    # project may already carry a different, valid selective policy from J.
+    Test-DiskIgnores $Root
+    $rules=New-SelectionIgnores $Paths
+    $marker=Join-Path $Root '.stfolder';[void][IO.Directory]::CreateDirectory($marker)
+    Save-SelectionPolicy $Root $rules
+    $ignore=Join-Path $Root '.stignore'
+    if(Test-Path -LiteralPath $ignore){[IO.File]::SetAttributes($ignore,([IO.File]::GetAttributes($ignore) -band (-bnot [IO.FileAttributes]::Hidden)))}
+    Write-SelectionAtomic $ignore $rules
+    [IO.File]::SetAttributes($ignore,([IO.File]::GetAttributes($ignore) -bor [IO.FileAttributes]::Hidden))
 }

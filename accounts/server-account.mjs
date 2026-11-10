@@ -23,13 +23,15 @@ function safeDirectory(dir) {
     fs.mkdirSync(dir,{recursive:true,mode:0o700});
 }
 export async function connectAccount(input, vendor, api, service, home=os.homedir()) {
+    const label=accountLabel(input.label || '');
     const seed=normalizeKey(input.key);
     const signing=crypto.createPrivateKey({key:Buffer.concat([Buffer.from('302e020100300506032b657004220420','hex'),seed]),format:'der',type:'pkcs8'});
     const pub=crypto.createPublicKey(signing).export({format:'der',type:'spki'}).subarray(-32);
-    const endpoint=new URL(input.serverUrl || 'https://api.happier.dev');
-    const web=new URL(input.webappUrl || 'https://cloud.happier.dev');
+    const endpoint=new URL(input.serverUrl);
+    const web=new URL(input.webappUrl);
     if(endpoint.protocol!=='https:' || web.protocol!=='https:' || endpoint.username || endpoint.password || web.username || web.password || endpoint.pathname!=='/' || web.pathname!=='/' || endpoint.search || web.search || endpoint.hash || web.hash) throw Error('url');
     const id=crypto.createHash('sha256').update(pub).update(endpoint.origin).digest('hex');
+    if(input.expectedAccount && input.expectedAccount!==id)throw Error('account-key-mismatch');
     const dir=path.join(home,'secrets','happier','accounts',id);
     safeDirectory(dir);
     // Persist no recovery secret on the server; only vendor-derived terminal credentials.
@@ -62,7 +64,35 @@ export async function connectAccount(input, vendor, api, service, home=os.homedi
         catch { await persistence.writeCredentialsTokenOnly({token}); }
     }
     await service(id,dir);
-    return {schema:1,ok:true,account:id,web:web.origin};
+    const catalog=path.join(home,'.config','remoteagents','accounts');safeDirectory(catalog);
+    const metadata=path.join(catalog,id+'.json');
+    if(fs.existsSync(metadata) && fs.lstatSync(metadata).isSymbolicLink()) throw Error('symlink');
+    const previous=fs.existsSync(metadata)?JSON.parse(fs.readFileSync(metadata,'utf8').replace(/\r/g,'')):{};
+    const name=label || previous.label || 'Без имени '+id.slice(0,8);
+    const temporary=metadata+'.'+crypto.randomUUID()+'.tmp';
+    try { fs.writeFileSync(temporary,JSON.stringify({schema:1,account:id,label:name,serverUrl:endpoint.origin,webappUrl:web.origin})+'\n',{mode:0o600,flag:'wx'});fs.renameSync(temporary,metadata); }
+    finally { if(fs.existsSync(temporary))fs.unlinkSync(temporary); }
+    return {schema:1,ok:true,account:id,label:name,web:web.origin};
+}
+export function accountLabel(value) {
+    if(typeof value!=='string' || value.length>80 || /[\x00-\x1f\x7f]/.test(value)) throw Error('label');
+    return value.trim();
+}
+export function listAccounts(home=os.homedir()) {
+    const secrets=path.join(home,'secrets','happier','accounts'), catalog=path.join(home,'.config','remoteagents','accounts');
+    if(!fs.existsSync(secrets))return {schema:1,accounts:[]};
+    if(fs.lstatSync(secrets).isSymbolicLink())throw Error('symlink');
+    const accounts=[];
+    for(const id of fs.readdirSync(secrets).sort()) {
+        if(!/^[a-f0-9]{64}$/.test(id) || fs.lstatSync(path.join(secrets,id)).isSymbolicLink())continue;
+        const f=path.join(catalog,id+'.json');let data={};
+        const unit=path.join(home,'.config/systemd/user','remoteagents-happier-'+id+'.service');
+        // A failed key challenge may leave an empty private directory; it is not an account.
+        if(!fs.existsSync(f) && !fs.existsSync(unit))continue;
+        if(fs.existsSync(f) && !fs.lstatSync(f).isSymbolicLink())data=JSON.parse(fs.readFileSync(f,'utf8').replace(/\r/g,''));
+        accounts.push({account:id,label:accountLabel(data.label || 'Без имени '+id.slice(0,8)),serverUrl:data.serverUrl || '',webappUrl:data.webappUrl || ''});
+    }
+    return {schema:1,accounts};
 }
 export async function loadVendor(root) {
     const files=fs.readdirSync(path.join(root,'package-dist'));
@@ -74,9 +104,27 @@ export async function loadVendor(root) {
     if(!persistence) throw Error('vendor');
     return {protocol,persistence};
 }
+async function inspectAccount(id,home=os.homedir()) {
+    if(!/^[a-f0-9]{64}$/.test(id))throw Error('account');
+    const file=path.join(home,'.config/remoteagents/accounts',id+'.json');
+    const metadata=JSON.parse(fs.readFileSync(file,'utf8').replace(/\r/g,''));
+    const running=spawnSync('systemctl',['--user','is-active','--quiet','remoteagents-happier-'+id+'.service'],{stdio:'ignore',timeout:10000});
+    if(running.status!==0)return {ok:false};
+    process.env.HAPPIER_HOME_DIR=path.join(home,'secrets/happier/accounts',id);
+    const {persistence}=await loadVendor(path.dirname(fs.realpathSync(path.join(home,'.local/bin/happier'))));
+    const credentials=await persistence.readCredentials(),settings=await persistence.readSettings();
+    if(!credentials?.token || !settings?.machineId)return {ok:false};
+    const endpoint=new URL(metadata.serverUrl);
+    if(endpoint.protocol!=='https:' || endpoint.username || endpoint.password || endpoint.pathname!=='/')throw Error('url');
+    const response=await fetch(endpoint.origin+'/v1/machines',{headers:{Authorization:'Bearer '+credentials.token},signal:AbortSignal.timeout(10000)});
+    if(!response.ok)return {ok:false};const machines=await response.json();
+    return {ok:Array.isArray(machines) && machines.some(m=>m.id===settings.machineId && m.active===true)};
+}
 async function main() {
     let raw=''; for await(const chunk of process.stdin) {raw+=chunk;if(raw.length>8192) throw Error('input');}
     const input=JSON.parse(raw.replace(/\r/g,''));
+    if(input.action==='inspect'){process.stdout.write(JSON.stringify(await inspectAccount(input.account))+'\n');return;}
+    if(input.action==='list'){process.stdout.write(JSON.stringify(listAccounts())+'\n');return;}
     const binary=fs.realpathSync(path.join(os.homedir(),'.local/bin/happier'));
     const root=path.dirname(binary);
     // Fail closed on unsupported package layouts; never invent a credential format.

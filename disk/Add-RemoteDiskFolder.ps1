@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 [CmdletBinding()]
-param([Parameter(Mandatory=$true)][string]$Path,[string]$Remote,[switch]$Merge)
+param([Parameter(Mandatory=$true)][string]$Path,[string]$Remote,[switch]$Merge,[switch]$ManagedSelection)
 . (Join-Path $PSScriptRoot 'Disk.Common.ps1')
 $script:DiskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk';$interactive=-not $Remote
 $step='Проверка локальной папки'
@@ -8,7 +8,7 @@ try {
     Read-DiskProfile '';Read-DiskState;$Path=[IO.Path]::GetFullPath($Path);$item=Get-Item -LiteralPath $Path
     if(-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Нужна обычная папка'}
     for($parent=$item;$null -ne $parent;$parent=$parent.Parent){if($parent.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Ссылки в пути запрещены'}}
-    $step='Список серверных папок';Test-DiskIgnores $Path;$folders=@(Invoke-DiskServer list);$name=Split-Path $Path -Leaf
+    $step='Список серверных папок';if(-not $ManagedSelection){Test-DiskIgnores $Path};$folders=@(Invoke-DiskServer list);$name=Split-Path $Path -Leaf
     if($interactive){
         Add-Type -AssemblyName System.Windows.Forms
         $same=@($folders|Where-Object {$_.name -ceq $name})
@@ -25,8 +25,8 @@ try {
     $sha=[Security.Cryptography.SHA256]::Create();try{$id='disk-'+([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes('folder:'+$Remote))).Replace('-','').ToLowerInvariant()).Substring(0,24)}finally{$sha.Dispose()};if($target.Count){$id=$target[0].id}
     if($match.Count -and $match[0].id -cne $id){throw 'Локальная папка уже связана с другим ID'};if(@($existing|Where-Object {$_.id -ceq $id -and $_.path.TrimEnd('\','/') -ine $Path.TrimEnd('\','/')}).Count){throw 'Эта серверная папка уже подключена в другом месте'}
     if(-not $match.Count -and $has -and $target.Count -and $target[0].hasFiles -and -not $Merge){if(-not $interactive){throw 'Обе папки непустые: требуется -Merge'};if([Windows.Forms.MessageBox]::Show('Обе папки непустые. Объединить содержимое?','RemoteDisk','YesNo','Warning') -ne 'Yes'){return};$Merge=$true}
-    $step='Подключение папки на сервере';[void](Invoke-DiskServer attach @{name=$Remote;deviceId=$local.myID;localHasFiles=$has;merge=[bool]$Merge});Test-DiskIgnores $Path -Write
+    $step='Подключение папки на сервере';[void](Invoke-DiskServer attach @{name=$Remote;deviceId=$local.myID;localHasFiles=$has;merge=[bool]$Merge});if(-not $ManagedSelection){Test-DiskIgnores $Path -Write}
     if($match.Count){$folder=$match[0]}else{$folder=@{id=$id;label=$Remote;path=$Path;type='sendreceive';paused=$true;rescanIntervalS=60;fsWatcherEnabled=$true;devices=@(@{deviceID=$local.myID})}}
-    $folder.maxConflicts=10;if(-not @($folder.devices|Where-Object {$_.deviceID -ceq $peer}).Count){$folder.devices+=@(@{deviceID=$peer})}
+    $folder.maxConflicts=-1;$versioning=@{type='staggered';params=@{maxAge='0';cleanInterval='3600'}};if($folder -is [Collections.IDictionary]){$folder.versioning=$versioning}else{$folder|Add-Member -Force versioning $versioning};if(-not @($folder.devices|Where-Object {$_.deviceID -ceq $peer}).Count){$folder.devices+=@(@{deviceID=$peer})}
     $step='Подключение локальной папки';[void](Invoke-DiskApi ('config/folders/'+$id) PUT $folder);if(-not $match.Count){[void](Invoke-DiskApi ('config/folders/'+$id) PATCH @{paused=$false})};Write-DiskLog 'Подключение папки';Write-Output 'Папка подключена. Передача продолжается в фоне.'
 }catch{Write-DiskLog $step $_;if($interactive){Add-Type -AssemblyName System.Windows.Forms;[void][Windows.Forms.MessageBox]::Show($_.Exception.Message,'RemoteDisk')};Write-Error $_.Exception.Message;exit 1}

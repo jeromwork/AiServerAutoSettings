@@ -50,7 +50,7 @@ namespace RemoteAgents.Launcher
             readyForCommands = true;
             timer.Tick += (s, e) => Tick(); timer.Start();
             dispatch.BeginInvoke(new Action(() => { Handle(args); DrainCommands(); Tick();
-                if (!Product.IsVpn && Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome), StringComparison.OrdinalIgnoreCase)) { actionBusy=true; try { Safe(() => AccountDiskSetup.Ensure(home, engine.Folder(engine.Current))); } finally { actionBusy=false; } }
+
             }));
         }
         void Bootstrap()
@@ -140,12 +140,13 @@ namespace RemoteAgents.Launcher
             }
             foreach (var a in definition.Menu) { var action = a; menu.Items.Add(a.Title, null, (s, e) => RunAction(action)); }
             menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("Настройки…", null, (s,e) => ShowSettings()).Enabled = !actionBusy && !busy && !MigrationPending();
             if (!Product.IsVpn) {
                 string accountState=Path.Combine(home,"state","happier-account.json");
                 if(File.Exists(accountState)) { var last=Json.Read(accountState);menu.Items.Add(Json.Bool(last,"ok")?"Happier: последняя проверка "+Json.Str(last,"updatedUtc"):"Happier: подключение не подтверждено").Enabled=false; }
                 menu.Items.Add("Резервные ключи Happier", null, (s,e) => Safe(() => Open(Path.Combine(home,"secrets"))));
-                menu.Items.Add("Аккаунт Happier…", null, (s,e) => SetupFeature(true)).Enabled = !actionBusy && !busy;
-                menu.Items.Add("Выбрать папки и файлы…", null, (s,e) => SetupFeature(false)).Enabled = !actionBusy && !busy;
+                menu.Items.Add("Аккаунт Happier…", null, (s,e) => ShowSettings(3)).Enabled = !actionBusy && !busy;
+                menu.Items.Add("Выбрать папки и файлы…", null, (s,e) => ShowSettings(2)).Enabled = !actionBusy && !busy;
             }
             if (!Product.IsVpn) menu.Items.Add("Открыть папку Disk", null, (s, e) => Safe(() => {
                 string saved = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteDisk", "base.txt");
@@ -165,12 +166,17 @@ namespace RemoteAgents.Launcher
             menu.Items.Add("Выход", null, (s, e) => ExitThread());
             var old = icon.ContextMenuStrip; icon.ContextMenuStrip = menu; if (old != null) old.Dispose();
         }
-        void SetupFeature(bool account)
+        void ShowSettings(int section = 0)
         {
-            if (actionBusy || busy || closing) return; actionBusy = true;
-            try { if(account) AccountDiskSetup.Account(home,engine.Folder(engine.Current),true); else AccountDiskSetup.Disk(home,engine.Folder(engine.Current)); }
-            catch { log.Write("setup.feature.failed"); MessageBox.Show("Настройка не завершена. Проверьте SSH, ключ аккаунта и синхронизацию. Неподтверждённые локальные файлы сохранены. Повторите действие из меню.","RemoteAgents"); }
-            finally { actionBusy=false; }
+            if (actionBusy || busy || closing || MigrationPending()) return; actionBusy = true;
+            try { SetupWizard.Display(home,engine.Folder(engine.Current),false,section); }
+            catch { log.Write("setup.feature.failed"); MessageBox.Show("Настройка не завершена. Проверьте журнал нужного шага.","RemoteAgents"); }
+            finally {
+                try {var latest=new Configuration(home).Data;config.Data.Clear();foreach(var pair in latest)config.Data[pair.Key]=pair.Value;
+                    foreach(var runtime in runtimes.Where(r=>!r.Definition.CommandManaged)) {bool enabled=config.Enabled(runtime.Definition);if(runtime.Enabled!=enabled)runtime.SetEnabled(enabled);}
+                } catch {log.Write("setup.config.refresh.failed");}
+                actionBusy=false;
+            }
         }
         void ShowStatus()
         {
@@ -433,6 +439,7 @@ namespace RemoteAgents.Launcher
         void Handle(string[] args)
         {
             Safe(() => {
+                if (args.Contains("--settings")) { ShowSettings(); return; }
                 if (args.Contains("--confirm-install")) { CheckMigration(true); return; }
                 if (args.Contains("--exit") || args.Contains("--uninstall")) { installStop = args.Contains("--install-stop"); ExitThread(); return; }
                 if (args.Contains("--restart-components")) { if (busy || actionBusy) throw new InvalidOperationException(); LoadComponents(); }
@@ -440,7 +447,7 @@ namespace RemoteAgents.Launcher
                 if (args.Contains("--logs")) Open(Path.Combine(home, "logs"));
                 if (args.Length == 0 || args.Contains("--show")) ShowStatus();
                 if (args.Contains("--setup-check") && !Product.IsVpn && !actionBusy && !busy && Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome), StringComparison.OrdinalIgnoreCase)) {
-                    actionBusy=true;try {AccountDiskSetup.Ensure(home,engine.Folder(engine.Current));} finally {actionBusy=false;}
+                    if(FirstInstall.Required(home)) ShowSettings();
                 }
             });
         }

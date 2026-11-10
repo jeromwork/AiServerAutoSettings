@@ -20,7 +20,12 @@
     "enabled": false
   },
   "happier": {
-    "serverUrl": "https://api.happier.dev",
-    "webappUrl": "https://cloud.happier.dev"
+    "serverUrl": "https://happier-api.example.invalid",
+    "webappUrl": "https://happier-web.example.invalid",
+    "label": "Мой аккаунт"
+  },
+  "bridge": {
+    "enabled": false,
+    "allowShell": false
   }
 }

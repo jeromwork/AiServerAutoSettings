@@ -70,8 +70,7 @@ def make(version, outdir, launcher=None, product="RemoteAgents"):
                 raise ValueError('Повтор файла: ' + name)
             contents[name] = data
     if product == 'RemoteVPN':
-        # Independent bundle storage; only VPN modules ship in this executable.
-        contents = {k:v for k,v in contents.items() if k.startswith('transport/') or k == 'selftest.ps1'}
+        # Both products ship shared setup; only runtime supervision differs.
         contents['components.json'] = (ROOT/'build/components-vpn.json').read_bytes()
         contents['product.txt'] = b'RemoteVPN\n'
     contents['bundle-version.txt'] = (version + '\n').encode()

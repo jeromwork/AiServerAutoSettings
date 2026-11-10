@@ -3,6 +3,7 @@
 param([Alias('Home')][string]$LauncherHome,[ValidateSet('Tree','Apply')][string]$Action='Tree',[string]$SelectionFile)
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Disk.Common.ps1')
+. (Join-Path $PSScriptRoot 'Disk.Union.ps1')
 $script:DiskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk'
 try{
     Write-DiskLog ('Выбор синхронизации: '+$Action)
@@ -25,20 +26,37 @@ try{
         }
         if($Action -eq 'Tree'){
             $tree=Invoke-DiskServer tree
+            $union=Get-DiskUnion $tree (Get-DiskBase)
             $selection=Read-DiskSelection
-            if($null -eq $selection){$selection=@{schema=1;paths=@($tree.folders|ForEach-Object {$_.name})}}
-            @{tree=$tree;selection=$selection}|ConvertTo-Json -Depth 30 -Compress
+            if($null -eq $selection){$selection=@{schema=1;paths=@($union.rows|Where-Object {$_.path -notmatch '/' -and $_.kind -eq 'directory'}|ForEach-Object {$_.path})}}
+            @{tree=$tree;union=$union;selection=$selection}|ConvertTo-Json -Depth 30 -Compress
         }else{
             $selection=[IO.File]::ReadAllText($SelectionFile).Replace("`r",'')|ConvertFrom-Json
             if($selection.schema -ne 1){throw 'Неверный формат выбора'}
             $paths=@(Get-SelectionPaths $selection)
+            $union=Get-DiskUnion (Invoke-DiskServer tree) (Get-DiskBase)
+            foreach($row in @($union.rows|Where-Object {$_.kind -eq 'file' -and $_.path -notmatch '/'})){if(Test-SelectionIncluded $row.path $paths){throw 'Файлы в корне Disk сначала поместите в папку проекта; исходный файл сохранён'}}
             Read-DiskState
+            # Save policy before attaching: unselected local content must never be offered to the server.
+            foreach($project in @($union.rows|Where-Object {$_.path -notmatch '/' -and $_.kind -eq 'directory' -and $_.presence -ne 'server'})){
+                $chosen=@(Get-ProjectSelection $project.path $selection)
+                if(-not $chosen.Count){continue}
+                $projectPath=Join-Path (Get-DiskBase) $project.path
+                $known=@(Invoke-DiskApi 'config/folders'|Where-Object {[IO.Path]::GetFullPath($_.path) -ieq [IO.Path]::GetFullPath($projectPath)})
+                if(-not $known.Count){
+                    Initialize-ProjectSelection $projectPath $chosen
+                    & (Join-Path $PSScriptRoot 'Add-RemoteDiskFolder.ps1') -Path $projectPath -Remote $project.path -Merge -ManagedSelection
+                    if(-not $?){throw 'Не удалось подключить локальную папку'}
+                }
+            }
             $peer=[IO.File]::ReadAllText((Join-Path $script:DiskHome 'server.txt')).Trim()
             foreach($folder in @(Invoke-DiskApi 'config/folders')){
                 if(-not @($folder.devices|Where-Object {$_.deviceID -ceq $peer}).Count){continue}
                 $expected=[IO.Path]::GetFullPath((Join-Path (Get-DiskBase) $folder.label))
                 if([IO.Path]::GetFullPath($folder.path) -ine $expected){throw 'Сначала перенесите проект в Disk'}
-                Set-ProjectSelection $folder @(Get-ProjectSelection $folder.label $selection)
+                if($folder.maxConflicts -ne -1 -or $folder.versioning.type -ne 'staggered' -or [string]$folder.versioning.params.maxAge -ne '0'){[void](Invoke-DiskApi ('config/folders/'+[Uri]::EscapeDataString($folder.id)) PATCH @{maxConflicts=-1;versioning=@{type='staggered';params=@{maxAge='0';cleanInterval='3600'}}})}
+                $keep=@($union.rows|Where-Object {$_.presence -eq 'local' -and $_.kind -eq 'file' -and $_.path.StartsWith($folder.label+'/',[StringComparison]::Ordinal)}|ForEach-Object {$_.path.Substring($folder.label.Length+1)})
+                Set-ProjectSelection $folder @(Get-ProjectSelection $folder.label $selection) -KeepLocal $keep
             }
             Write-DiskUtf8 (Join-Path $script:DiskHome 'selection.json') (@{schema=1;paths=$paths}|ConvertTo-Json -Depth 20 -Compress)
             @{ok=$true}|ConvertTo-Json -Compress

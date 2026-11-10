@@ -52,5 +52,11 @@ accounts/Account.ps1
 accounts/server-account.mjs
 disk/Disk.Selective.ps1
 disk/Select-Disk.ps1
-server-happier.sh
 accounts/bootstrap.sh
+
+# Unified wizard and public server-side user settings.
+build/Wizard.ps1
+build/Wizard.Common.ps1
+build/server-wizard.sh
+transport/server-transport-catalog.py
+disk/Disk.Union.ps1

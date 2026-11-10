@@ -44,7 +44,7 @@ for name,key in [('codex-windows-bridge.py','CONTROL_BRIDGE'),('codex-bridge-ses
 sys.path.insert(0,str(base))
 from server_node_catalog import register
 data=json.loads(base64.b64decode(os.environ['CONTROL_DATA']))
-data.update(controlOnly=True,allowShell=True,projectName='Управление компьютером',serverWorkspace=str(home/'work/projects/control'),socketPath=str(home/'.local/state/codex-remote'/(data['deviceLabel']+'.sock')))
+data.update(controlOnly=True,allowShell=bool(data.get('allowShell',False)),projectName='Управление компьютером',serverWorkspace=str(home/'work/projects/control'),socketPath=str(home/'.local/state/codex-remote'/(data['deviceLabel']+'.sock')))
 register(home/'.local/share/remote-agents-nodes',data,str(home))
 PYCODE
 echo 'Регистрация MCP' >&2

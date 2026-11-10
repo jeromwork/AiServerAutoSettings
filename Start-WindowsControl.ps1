@@ -37,8 +37,14 @@ function Get-ControlLabel([string]$HostId) {
 function Get-ControlSshArguments($Connection) {
     @('-F',$Connection.configPath,'-i',$Connection.keyPath,'-p',[string]$Connection.port,'-o','IdentitiesOnly=yes','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o',('UserKnownHostsFile="'+$Connection.knownHostsPath.Replace('\','/')+'"'),'-T',($Connection.login+'@'+$Connection.serverAddress),'bash -s')
 }
+function Get-ControlAllowShell {
+    $root=$LauncherHome;if(-not $root){if(-not $env:LOCALAPPDATA){return $false};$root=Join-Path $env:LOCALAPPDATA 'RemoteAgents'}
+    $file=Join-Path $root 'config.json'
+    if(Test-Path -LiteralPath $file){$c=Get-Content -LiteralPath $file -Raw -Encoding UTF8|ConvertFrom-Json;return ($c.bridge.allowShell -eq $true)}
+    return $false
+}
 function New-ControlPayload($Connection,[string]$Label,[string]$Workspace,[string]$User) {
-    $data=@{projectId='control';hostId=$Connection.hostId;deviceLabel=$Label;deviceName=$env:COMPUTERNAME;windowsReplica=$Workspace}|ConvertTo-Json -Compress
+    $data=@{projectId='control';hostId=$Connection.hostId;deviceLabel=$Label;deviceName=$env:COMPUTERNAME;windowsReplica=$Workspace;allowShell=(Get-ControlAllowShell)}|ConvertTo-Json -Compress
     $values=@{CONTROL_USER=$User;CONTROL_DATA=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($data))}
     foreach($pair in @(@('CONTROL_BRIDGE','codex-windows-bridge.py'),@('CONTROL_SESSION','codex-bridge-session.py'),@('CONTROL_CATALOG','server_node_catalog.py'))) {
         $values[$pair[0]]=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Convert-ControlLF ([IO.File]::ReadAllText((Join-Path $PSScriptRoot $pair[1]))))))
@@ -120,7 +126,7 @@ if($Install){
     if(-not $Profile){$Profile=$config.profile}
     if(-not $AgentUser){$AgentUser=$config.agentUser}
     $connection=Read-ControlProfile $Profile
-    if(-not $LauncherHome){Save-ControlConfig $configPath $AgentUser $connection.profilePath}
+    Save-ControlConfig $configPath $AgentUser $connection.profilePath
     if(-not $LauncherHome){
     [void][IO.Directory]::CreateDirectory($app)
     foreach($name in @('Start-WindowsControl.ps1','Start-CodexWindowsBridge.ps1','windows-bridge-executor.ps1','Windows.Paths.ps1','server-control.sh','codex-windows-bridge.py','codex-bridge-session.py','server_node_catalog.py')){
@@ -167,9 +173,9 @@ while($true){
         Write-ControlLog $logFile 'prepare server'
         $remote=Invoke-ControlPrepare $connection (New-ControlPayload $connection $label $workspace $user)
         if($remote.user -cnotmatch '^[a-z_][a-z0-9_-]*$' -or $remote.home -cnotmatch '^(/[a-zA-Z0-9._-]+)+$'){throw 'Сервер вернул неверного пользователя или HOME'}
-        if(-not $LauncherHome){Save-ControlConfig $configPath $remote.user $connection.profilePath}
+        Save-ControlConfig $configPath $remote.user $connection.profilePath
         Write-Host 'Подключение моста: команды агентов выполняются с вашими правами Windows.'
-        & (Join-Path $PSScriptRoot 'Start-CodexWindowsBridge.ps1') -VPSHost $connection.serverAddress -VPSUser $connection.login -IdentityFile $connection.keyPath -SSHPort $connection.port -SSHExecutable $connection.sshExecutable -SSHConfig $connection.configPath -KnownHostsFile $connection.knownHostsPath -ServerUser $remote.user -RemoteBase ($remote.home+'/.local/share/codex-remote') -SocketPath ($remote.home+'/.local/state/codex-remote/'+$label+'.sock') -Workspace $workspace -DeviceLabel $label -ProjectId control -HostId $connection.hostId -AllowShell -ControlOnly -RetryForever -LogFile $logFile -HealthFile (Join-Path $base 'heartbeat.json')
+        & (Join-Path $PSScriptRoot 'Start-CodexWindowsBridge.ps1') -VPSHost $connection.serverAddress -VPSUser $connection.login -IdentityFile $connection.keyPath -SSHPort $connection.port -SSHExecutable $connection.sshExecutable -SSHConfig $connection.configPath -KnownHostsFile $connection.knownHostsPath -ServerUser $remote.user -RemoteBase ($remote.home+'/.local/share/codex-remote') -SocketPath ($remote.home+'/.local/state/codex-remote/'+$label+'.sock') -Workspace $workspace -DeviceLabel $label -ProjectId control -HostId $connection.hostId -AllowShell:(Get-ControlAllowShell) -ControlOnly -RetryForever -LogFile $logFile -HealthFile (Join-Path $base 'heartbeat.json')
         Write-ControlLog $logFile 'bridge returned'
     } catch {
         Write-Host ('Ошибка: '+$_.Exception.Message)

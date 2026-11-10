@@ -54,7 +54,22 @@ try {
     $step='Установка канала';Install-DiskBinary 'https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-windows-amd64.zip' '99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df' channel sing-box.exe
     $step='Конфигурация канала';$request=@{server=$script:Connection.serverAddress};$transport=[IO.File]::ReadAllText($script:Connection.configPath)
     if($transport -match '(?im)^\s*ProxyCommand\s+(.+)$'){$proxy=$Matches[1];if($proxy -notmatch '-W\s+%h:%p\s+([\w.-]+)\s*$'){throw 'Неизвестный формат промежуточного подключения'};$alias=$Matches[1];if($proxy -notmatch '-F\s+"([^"]+)"'){throw 'Нет конфигурации промежуточного хоста'};$request.hop=New-DiskHop (Invoke-DiskProcess $script:Connection.sshExecutable @('-G','-F',$Matches[1],$alias))}
-    $config=Join-Path $channel 'config.json';Invoke-DiskServer channel-config $request -Direct -OutputFile ($config+'.tmp');[void](Convert-DiskChannel ([IO.File]::ReadAllText($config+'.tmp')));Move-Item -LiteralPath ($config+'.tmp') -Destination $config -Force
+    $config=Join-Path $channel 'config.json'
+    # Preserve a working legacy channel (including H detours); installation is not a reset.
+    if(-not (Test-Path -LiteralPath $config)){
+        $hasChannel=Invoke-DiskSsh 'test -r /etc/sing-box/config.json && echo yes || echo no' -Direct
+        if($hasChannel.Trim() -eq 'yes'){
+            Invoke-DiskServer channel-config $request -Direct -OutputFile ($config+'.tmp')
+            [void](Convert-DiskChannel ([IO.File]::ReadAllText($config+'.tmp')));Move-Item -LiteralPath ($config+'.tmp') -Destination $config -Force
+        }else{
+            . (Join-Path (Split-Path $PSScriptRoot -Parent) 'transport/Transport.Common.ps1')
+            $p=$script:Connection
+            $outbound=@{type='ssh';tag='server';server=$p.serverAddress;server_port=(Get-TransportServerPort $p);user=$p.login;private_key_path=$p.keyPath;host_key=@(Get-TransportHostKeys $p.sshExecutable $p.serverAddress $p.knownHostsPath)}
+            $inbounds=@(@{type='direct';tag='ssh';listen='127.0.0.1';listen_port=2222;network='tcp';override_address='127.0.0.1';override_port=(Get-TransportServerPort $p)},@{type='direct';tag='sync';listen='127.0.0.1';listen_port=22001;network='tcp';override_address='127.0.0.1';override_port=[int]$remote.listen})
+            if(-not $remote.listen){throw 'Сервер не сообщил порт Syncthing'}
+            Write-TransportJson $config @{log=@{disabled=$true};inbounds=$inbounds;outbounds=@($outbound);route=@{final='server';auto_detect_interface=$true}}
+        }
+    }
     $step='Задача канала';$user=[Security.Principal.WindowsIdentity]::GetCurrent().Name;$action=New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32/conhost.exe') -Argument ('--headless "'+(Join-Path $channel 'sing-box.exe')+'" run -c "'+$config+'"')
     $triggers=@((New-ScheduledTaskTrigger -AtLogOn -User $user),(New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)))
     $settings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries

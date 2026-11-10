@@ -10,6 +10,8 @@ LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -NonInteractive -File "$here/te
 LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -NonInteractive -File "$here/test-first-install.ps1" -TestHome "$testdir/wizard" < /dev/null
 LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -NonInteractive -File "$here/test-selective.ps1" -TestHome "$testdir/selective" < /dev/null
 LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -NonInteractive -File "$here/test-account.ps1" -TestHome "$testdir/accounts" < /dev/null
+LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -NonInteractive -File "$here/test-wizard.ps1" -TestHome "$testdir/setup-wizard" < /dev/null
+python3 "$repo/transport/test-server-catalog.py"
 node "$repo/accounts/test-accounts.mjs"
 python3 "$here/test_build.py"
 python3 "$here/test_bridge_health.py"
