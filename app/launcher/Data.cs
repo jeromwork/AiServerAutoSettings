@@ -159,6 +159,13 @@ namespace RemoteAgents.Launcher
                     var map = Json.Map(Json.Get(Data, "components")); var item = Json.Map(Json.Get(map, c.Name)); item["enabled"] = enabled; map[c.Name] = item; Data["components"] = map; Save();
             }
         }
+        public void SetHappier(string serverUrl, string webappUrl)
+        {
+            using(var lease=Lock(PathName)) {
+                var latest=File.Exists(PathName)?Json.Read(PathName):Data;
+                latest["happier"]=new {serverUrl,webappUrl};Json.Write(PathName,latest);
+            }
+        }
         sealed class Lease : IDisposable {
             readonly System.Threading.Mutex mutex;
             public Lease(string path) {

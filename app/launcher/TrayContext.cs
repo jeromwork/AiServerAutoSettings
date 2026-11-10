@@ -49,7 +49,9 @@ namespace RemoteAgents.Launcher
             }
             readyForCommands = true;
             timer.Tick += (s, e) => Tick(); timer.Start();
-            dispatch.BeginInvoke(new Action(() => { Handle(args); DrainCommands(); Tick(); }));
+            dispatch.BeginInvoke(new Action(() => { Handle(args); DrainCommands(); Tick();
+                if (!Product.IsVpn && Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome), StringComparison.OrdinalIgnoreCase)) { actionBusy=true; try { Safe(() => AccountDiskSetup.Ensure(home, engine.Folder(engine.Current))); } finally { actionBusy=false; } }
+            }));
         }
         void Bootstrap()
         {
@@ -138,6 +140,13 @@ namespace RemoteAgents.Launcher
             }
             foreach (var a in definition.Menu) { var action = a; menu.Items.Add(a.Title, null, (s, e) => RunAction(action)); }
             menu.Items.Add(new ToolStripSeparator());
+            if (!Product.IsVpn) {
+                string accountState=Path.Combine(home,"state","happier-account.json");
+                if(File.Exists(accountState)) { var last=Json.Read(accountState);menu.Items.Add(Json.Bool(last,"ok")?"Happier: последняя проверка "+Json.Str(last,"updatedUtc"):"Happier: подключение не подтверждено").Enabled=false; }
+                menu.Items.Add("Резервные ключи Happier", null, (s,e) => Safe(() => Open(Path.Combine(home,"secrets"))));
+                menu.Items.Add("Аккаунт Happier…", null, (s,e) => SetupFeature(true)).Enabled = !actionBusy && !busy;
+                menu.Items.Add("Выбрать папки и файлы…", null, (s,e) => SetupFeature(false)).Enabled = !actionBusy && !busy;
+            }
             if (!Product.IsVpn) menu.Items.Add("Открыть папку Disk", null, (s, e) => Safe(() => {
                 string saved = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteDisk", "base.txt");
                 string path = Files.ReadLine(saved); if (path.Length == 0) path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Disk"); Open(path);
@@ -155,6 +164,13 @@ namespace RemoteAgents.Launcher
             menu.Items.Add("Перезапустить компоненты", null, (s, e) => Safe(LoadComponents)).Enabled = !busy && !actionBusy;
             menu.Items.Add("Выход", null, (s, e) => ExitThread());
             var old = icon.ContextMenuStrip; icon.ContextMenuStrip = menu; if (old != null) old.Dispose();
+        }
+        void SetupFeature(bool account)
+        {
+            if (actionBusy || busy || closing) return; actionBusy = true;
+            try { if(account) AccountDiskSetup.Account(home,engine.Folder(engine.Current),true); else AccountDiskSetup.Disk(home,engine.Folder(engine.Current)); }
+            catch { log.Write("setup.feature.failed"); MessageBox.Show("Настройка не завершена. Проверьте SSH, ключ аккаунта и синхронизацию. Неподтверждённые локальные файлы сохранены. Повторите действие из меню.","RemoteAgents"); }
+            finally { actionBusy=false; }
         }
         void ShowStatus()
         {
@@ -423,6 +439,9 @@ namespace RemoteAgents.Launcher
                 if (args.Contains("--rollback")) { if (busy || actionBusy || MigrationPending()) throw new InvalidOperationException(); engine.Rollback(); LoadComponents(); log.Write("update.rollback.manual"); }
                 if (args.Contains("--logs")) Open(Path.Combine(home, "logs"));
                 if (args.Length == 0 || args.Contains("--show")) ShowStatus();
+                if (args.Contains("--setup-check") && !Product.IsVpn && !actionBusy && !busy && Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome), StringComparison.OrdinalIgnoreCase)) {
+                    actionBusy=true;try {AccountDiskSetup.Ensure(home,engine.Folder(engine.Current));} finally {actionBusy=false;}
+                }
             });
         }
         void Safe(Action action) { try { action(); } catch { log.Write("user.command.failed"); MessageBox.Show("Действие не выполнено. Подробности состояния — в папке RemoteAgents и журнале лаунчера.", "RemoteAgents"); } }

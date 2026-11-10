@@ -11,7 +11,7 @@ function Write-DiskLog($Step,$Failure=$null) {
     }catch{}
 }
 function Quote-Disk([string]$Value) {'"'+[regex]::Replace([regex]::Replace($Value,'(\\*)"','$1$1\"'),'(\\+)$','$1$1')+'"'}
-function Invoke-DiskProcess($Exe,$Arguments,[string]$InputText='',[string]$OutputFile='') {
+function Invoke-DiskProcess($Exe,$Arguments,[string]$InputText='',[string]$OutputFile='',[int]$TimeoutSeconds=45) {
     $si=New-Object Diagnostics.ProcessStartInfo;$si.FileName=$Exe;$si.Arguments=($Arguments|ForEach-Object {Quote-Disk ([string]$_)}) -join ' '
     $si.UseShellExecute=$false;$si.CreateNoWindow=$true;$si.RedirectStandardInput=$true;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true;$si.StandardOutputEncoding=New-Object Text.UTF8Encoding($false)
     $p=New-Object Diagnostics.Process;$p.StartInfo=$si;$file=$null
@@ -19,9 +19,9 @@ function Invoke-DiskProcess($Exe,$Arguments,[string]$InputText='',[string]$Outpu
         if($OutputFile){$file=[IO.File]::Create($OutputFile);$out=$p.StandardOutput.BaseStream.CopyToAsync($file)}else{$out=$p.StandardOutput.ReadToEndAsync()}
         $bytes=[Text.Encoding]::UTF8.GetBytes($InputText.Replace("`r",''));$write=$p.StandardInput.BaseStream.WriteAsync($bytes,0,$bytes.Length)
         if(-not $write.Wait(15000)){throw 'Таймаут ввода'};$p.StandardInput.Close()
-        if(-not $p.WaitForExit(45000)){$p.Kill();throw 'Таймаут команды'};$out.GetAwaiter().GetResult() | Out-Null
+        if(-not $p.WaitForExit($TimeoutSeconds*1000)){$p.Kill();throw 'Таймаут команды'};$out.GetAwaiter().GetResult() | Out-Null
         if($p.ExitCode -ne 0){$reason='Внешняя команда не выполнена';if($p.ExitCode -eq 255 -and [IO.Path]::GetFileNameWithoutExtension($Exe) -ieq 'ssh'){$reason='Нет связи с сервером'}elseif($err.Result -match 'Чужой .stignore'){$reason='Чужой .stignore на сервере: сохраните и удалите его вручную'}elseif($err.Result -match 'требуется -Merge'){$reason='Обе папки непустые: требуется -Merge'};throw ($reason+' (код выхода '+$p.ExitCode+')')}
-        if(-not $OutputFile){$out.Result.TrimStart([char]0xFEFF).Trim()}
+        if(-not $OutputFile){$out.Result.Replace("`r",'').TrimStart([char]0xFEFF).Trim()}
     }finally{if($file){$file.Dispose()};if($p.Id -and -not $p.HasExited){$p.Kill()};$p.Dispose()}
 }
 function Read-DiskProfile([string]$Profile) {
@@ -31,7 +31,7 @@ function Read-DiskProfile([string]$Profile) {
     foreach($f in @('sshExecutable','arguments','serverAddress','login','keyPath','knownHostsPath','configPath')){if(-not $script:Connection.$f){throw 'Неполный SSH-профиль'}}
     if($script:Connection.login.Trim() -ieq 'root'){throw 'SSH-профиль должен входить как рабочий пользователь, не root'}
 }
-function Invoke-DiskSsh($Command,[switch]$Direct,[string]$InputText='',[string]$OutputFile='') {
+function Invoke-DiskSsh($Command,[switch]$Direct,[string]$InputText='',[string]$OutputFile='',[int]$TimeoutSeconds=45) {
     $c=$script:Connection;$args=@('-o','BatchMode=yes','-o','ConnectTimeout=8','-o','StrictHostKeyChecking=yes')
     $localPort=2222
     if($c.configPath -and (Test-Path -LiteralPath $c.configPath)){
@@ -39,12 +39,16 @@ function Invoke-DiskSsh($Command,[switch]$Direct,[string]$InputText='',[string]$
         if($managed.Success -and $managed.Groups[1].Value -match ('(?m)^Host "'+[regex]::Escape($c.serverAddress)+'"\r?$') -and $managed.Groups[1].Value -match '(?m)^    Port (\d+)\r?$'){$localPort=[int]$Matches[1]}
     }
     if($Direct){$args+=@($c.arguments)}else{$args+=@('-F','NUL','-p',[string]$localPort,'-i',$c.keyPath,'-o',('HostKeyAlias='+$c.serverAddress),'-o',('UserKnownHostsFile="'+$c.knownHostsPath.Replace('\','/')+'"'),'-o','IdentitiesOnly=yes',($c.login+'@127.0.0.1'))}
-    Invoke-DiskProcess $c.sshExecutable ($args+@($Command)) $InputText $OutputFile
+    Invoke-DiskProcess $c.sshExecutable ($args+@($Command)) $InputText $OutputFile -TimeoutSeconds $TimeoutSeconds
 }
 function Invoke-DiskServer($Action,$Data=$null,[switch]$Direct,[string]$OutputFile='') {
     $cmd='bash "$HOME/.local/share/remote-disk/server-disk.sh" '+$Action
-    if($Data){$cmd+=' '+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($Data|ConvertTo-Json -Depth 20 -Compress)))}
-    $text=Invoke-DiskSsh $cmd -Direct:$Direct -OutputFile $OutputFile
+    $inputText=''
+    if($Data){
+        $encoded=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($Data|ConvertTo-Json -Depth 20 -Compress)))
+        if($Action -eq 'verify-selection'){$cmd+=' --stdin';$inputText=$encoded}else{$cmd+=' '+$encoded}
+    }
+    $text=Invoke-DiskSsh $cmd -Direct:$Direct -OutputFile $OutputFile -InputText $inputText
     if(-not $OutputFile -and $text){$value=$text|ConvertFrom-Json;if($null -ne $value){foreach($item in $value){$item}}}
 }
 function Invoke-DiskApi($Route,$Method='GET',$Body=$null) {
@@ -76,15 +80,17 @@ function New-DiskHop([string]$Text) {
 function Convert-DiskChannel([string]$Text) {$c=$Text|ConvertFrom-Json;if($c.route.final -ne 'server' -or @($c.inbounds).Count -ne 2){throw 'Неверная конфигурация канала'};$c|ConvertTo-Json -Depth 20 -Compress}
 function Test-DiskIgnores($Path,[switch]$Write) {
     $file=Join-Path $Path '.stignore';$rules=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'stignore.txt'))
+    $managed='';if(Get-Command Get-SelectionPolicyFile -ErrorAction SilentlyContinue){$policy=Get-SelectionPolicyFile $Path;if(Test-Path -LiteralPath $policy){$managed=[IO.File]::ReadAllText($policy).Replace("`r",'')}}
     if(Test-Path -LiteralPath $file){
         if([IO.File]::GetAttributes($file) -band [IO.FileAttributes]::ReparsePoint){throw 'Ссылка .stignore запрещена'}
         $old=[IO.File]::ReadAllText($file)
-        if([Convert]::ToBase64String([IO.File]::ReadAllBytes($file)) -cne [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $PSScriptRoot 'stignore.txt')))){
+        if($old.Replace("`r",'').TrimEnd("`n") -cne $rules.Replace("`r",'').TrimEnd("`n") -and $old.Replace("`r",'') -cne $managed -and [Convert]::ToBase64String([IO.File]::ReadAllBytes($file)) -cne [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $PSScriptRoot 'stignore.txt')))){
             $normalized=($old.TrimEnd("`r","`n").Replace("`r`n","`n")+"`n");$sha=[Security.Cryptography.SHA256]::Create()
             try{$hash=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($normalized)))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
             if($hash -cnotin [IO.File]::ReadAllLines((Join-Path $PSScriptRoot 'legacy-ignores.sha256'))){throw 'Чужой .stignore: сохраните и удалите его вручную перед подключением'}
         }
     }
+    if($managed){$rules=$managed}
     if($Write){if(Test-Path -LiteralPath $file){[IO.File]::SetAttributes($file,([IO.File]::GetAttributes($file) -band (-bnot [IO.FileAttributes]::Hidden)))};try{Write-DiskUtf8 $file $rules}finally{if(Test-Path -LiteralPath $file){[IO.File]::SetAttributes($file,([IO.File]::GetAttributes($file) -bor [IO.FileAttributes]::Hidden))}}}
 }
 function Assert-DiskFreePath([string]$Path,$Folders) {
@@ -172,3 +178,5 @@ function Set-DiskBase([string]$Path) {
     }
     [void][IO.Directory]::CreateDirectory($new);Write-DiskUtf8 $saved $new
 }
+
+$selective=Join-Path $PSScriptRoot 'Disk.Selective.ps1';if(Test-Path -LiteralPath $selective){. $selective}

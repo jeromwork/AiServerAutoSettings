@@ -19,6 +19,8 @@ try {
         $offer=$entry.Value.offeredBy.PSObject.Properties|Where-Object {$_.Name -ceq $peer}
         if(-not $offer){continue}
         $name=[string]$offer.Value.label;$id=$entry.Name
+        $selection=Read-DiskSelection;$selected=@(Get-ProjectSelection $name $selection)
+        if($null -ne $selection -and -not $selected.Count){continue}
         try {
             if($name.Length -gt 128 -or $name -notmatch '^[\p{L}\p{N}_][\p{L}\p{N}_. -]*$' -or $name.Contains('..') -or $name -match '[ .]$|^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)'){throw 'Недопустимое имя папки'}
             $target=[IO.Path]::GetFullPath((Join-Path $BasePath $name))
@@ -28,6 +30,7 @@ try {
             [void][IO.Directory]::CreateDirectory($target)
             # Recheck immediately before writing policy/configuration.
             Assert-DiskFreePath $target $folders
+            if($null -ne $selection){Save-SelectionPolicy $target (New-SelectionIgnores $selected)}
             Test-DiskIgnores $target -Write
             $folder=Invoke-DiskApi 'config/defaults/folder'
             $folder.id=$id;$folder.label=$name;$folder.path=$target;$folder.type='sendreceive';$folder.paused=$true

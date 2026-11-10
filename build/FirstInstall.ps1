@@ -37,6 +37,10 @@ function Invoke-FirstInstall([string]$Root,[string]$Bundle,[string]$Address,[str
     [void](Invoke-TransportText $p.sshExecutable (@('-o','BatchMode=yes','-o','ConnectTimeout=10','-o','StrictHostKeyChecking=yes')+@($p.arguments)+@('true')))
     Write-MigrationLog $Root 'setup.ssh.verified'
     $diskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk'
+    if(-not (Test-Path (Join-Path $diskHome 'state/config.xml')) -and -not (Test-Path (Join-Path $diskHome 'selection.json'))){
+        [void][IO.Directory]::CreateDirectory($diskHome)
+        Write-TransportJson (Join-Path $diskHome 'selection.json') @{schema=1;paths=@()}
+    }
     if(-not (Test-Path (Join-Path $diskHome 'state/config.xml')) -or -not (Test-Path (Join-Path $diskHome 'channel/config.json')) -or -not (Test-Path (Join-Path $env:LOCALAPPDATA 'RemoteAgents/control/config.json')) -or -not (Get-MigrationRun 'RemoteAgentsControl')){
         Invoke-InstallChild $Bundle 'Setup-All.ps1' @('-Profile',$profile,'-LauncherSetup')
     }

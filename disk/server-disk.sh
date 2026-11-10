@@ -2,8 +2,8 @@
 set -euo pipefail
 umask 077
 export REMOTE_DISK_SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
-python3 - "$@" <<'PY'
-import os,sys,json,subprocess,hashlib,tarfile,urllib.request,time,socket,base64,re,fcntl,xml.etree.ElementTree as E
+python3 - "$@" 3<&0 <<'PY'
+import os,sys,json,subprocess,hashlib,tarfile,urllib.request,time,socket,base64,re,fcntl,fnmatch,xml.etree.ElementTree as E
 from pathlib import Path
 s=Path.home()/'.local/share/remote-disk'; cfg=s/'config.xml'; binary=s/'bin/syncthing'; here=Path(os.environ['REMOTE_DISK_SCRIPT_DIR'])
 a=sys.argv[1:] or ['bootstrap']; action=a[0]
@@ -17,7 +17,7 @@ def fid(name):return 'disk-'+hashlib.sha256(('folder:'+name).encode()).hexdigest
 def has_files(p):return p.exists() and any(x.name not in {'.git','.stignore','.stfolder','.stversions'} for x in p.iterdir())
 def ignores(p,write=False):
     f=p/'.stignore';safe(f);rules=(here/'stignore.txt').read_bytes()
-    if f.exists() and f.read_bytes()!=rules:
+    if f.exists() and f.read_text(encoding='utf-8-sig').replace('\r','').rstrip('\n')!=rules.decode('utf-8-sig').replace('\r','').rstrip('\n'):
         normalized='\n'.join(f.read_text(encoding='utf-8-sig').splitlines())+'\n'
         if hashlib.sha256(normalized.encode()).hexdigest() not in (here/'legacy-ignores.sha256').read_text().splitlines():raise ValueError('Чужой .stignore: сохраните и удалите его вручную перед подключением')
     if write and (not f.exists() or f.read_bytes()!=rules):f.write_bytes(rules)
@@ -76,10 +76,23 @@ def reconcile(api,identity):
                 api('config/folders/'+folder_id,'PUT',current)
         except ValueError as e:print('RemoteDisk: '+p.name+': '+str(e),file=sys.stderr)
 
+def selectable(relative):
+    patterns=[x[4:] for x in (here/'stignore.txt').read_text().splitlines() if x.startswith('(?i)')]
+    return all(part not in ('.stignore','.stfolder','.stversions') and not any(fnmatch.fnmatchcase(part.lower(),pat.lower()) for pat in patterns) for part in relative.split('/'))
+def relative_path(root,value):
+    if not isinstance(value,str) or not value or value.startswith('/') or any(x in ('','.','..') for x in value.split('/')) or '\\' in value:raise ValueError('Недопустимый путь')
+    p=root.joinpath(*value.split('/'));safe(p)
+    if not selectable(value):raise ValueError('Защищённый путь')
+    return p
+
 def main():
     for path in (s,cfg,binary,s/'ports.json',s/'bootstrap.lock',s/'syncthing.log',s/'syncthing.pid'):safe(path)
-    if action not in ('list','attach','detach','add-device','channel-config','bootstrap','reconcile','install-auto'):raise ValueError('Неизвестная команда')
-    data=json.loads(base64.b64decode(a[1],validate=True)) if len(a)==2 else {}
+    if action not in ('list','attach','detach','add-device','channel-config','bootstrap','reconcile','install-auto','tree','verify-selection'):raise ValueError('Неизвестная команда')
+    payload=a[1] if len(a)==2 else None
+    if payload=='--stdin':
+        with os.fdopen(3,'r') as stream:payload=stream.read(8*1024*1024+1).replace('\r','').strip()
+        if len(payload)>8*1024*1024:raise ValueError('Запрос слишком велик')
+    data=json.loads(base64.b64decode(payload,validate=True)) if payload else {}
     if action=='install-auto':
         units=Path.home()/'.config/systemd/user';safe(units);units.mkdir(parents=True,exist_ok=True)
         script=s/'server-disk.sh'
@@ -91,7 +104,7 @@ def main():
         subprocess.run(['systemctl','--user','enable','--now','remote-disk-folders.timer'],check=True)
         print('{}');return
     if action=='channel-config':print(json.dumps(channel(data)));return
-    if action=='list':
+    if action in ('list','tree'):
         disk=Path.home()/'Disk';safe(disk);root=E.parse(cfg).getroot() if cfg.exists() else E.Element('configuration');rows=[]
         for p in sorted(disk.iterdir()) if disk.exists() else []:
             if not p.is_dir() or p.is_symlink():continue
@@ -100,6 +113,22 @@ def main():
             ids=[f.get('id') for f in root.findall('folder') if f.get('path','').rstrip('/')==str(p)]
             if len(ids)>1:raise ValueError('Несколько ID для одной папки')
             rows.append(dict(name=p.name,id=ids[0] if ids else fid(p.name),hasFiles=has_files(p)))
+        if action=='tree':
+            entries=[]
+            def walk(root,rel=''):
+                for child in sorted(root.iterdir()):
+                    value=(rel+'/' if rel else '')+child.name
+                    if child.is_symlink() or not selectable(value):continue
+                    # Names Windows/Syncthing cannot represent are not offered as selectable.
+                    if any(c in child.name for c in '<>:"\\|?*') or re.search(r'[\x00-\x1f]',child.name) or child.name.endswith((' ','.')):continue
+                    if re.match(r'(?i)^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)',child.name):continue
+                    if not child.is_dir() and not child.is_file():continue
+                    entries.append(dict(path=value,directory=child.is_dir()))
+                    if len(entries)>20000:raise ValueError('Дерево слишком велико')
+                    if child.is_dir():walk(child,value)
+            for row in rows:
+                walk(folder_path(row['name']),row['name'])
+            print(json.dumps(dict(schema=1,folders=rows,entries=entries)));return
         print(json.dumps(rows));return
     if action in ('attach','detach'):
         p=folder_path(data['name'])
@@ -150,6 +179,19 @@ def main():
                 time.sleep(.1)
         if not identity:raise ValueError('Движок не запустился')
         api('config/options','PATCH',dict(globalAnnounceEnabled=False,localAnnounceEnabled=False,relaysEnabled=False,natEnabled=False,autoUpgradeIntervalH=0,reconnectionIntervalS=10))
+        if action=='verify-selection':
+            p=folder_path(data['name']);folder_id=data['id']
+            folder=api('config/folders/'+urllib.parse.quote(folder_id,safe=''))
+            if folder['path'].rstrip('/')!=str(p):raise ValueError('Папка не совпадает')
+            status=api('db/status?folder='+urllib.parse.quote(folder_id,safe=''))
+            completion=api('db/completion?folder='+urllib.parse.quote(folder_id,safe='')+'&device='+urllib.parse.quote(data['deviceId'],safe=''))
+            if status.get('state')!='idle' or any(status.get(k,-1)!=0 for k in ('needBytes','needTotalItems','pullErrors')) or completion.get('completion')!=100 or any(completion.get(k,-1)!=0 for k in ('needBytes','needItems')):raise ValueError('Сервер ещё не синхронизирован')
+            hashes={}
+            for value in data['paths']:
+                f=relative_path(p,value)
+                if not f.is_file():raise ValueError('Нет серверной копии')
+                with f.open('rb') as stream:hashes[value]=hashlib.file_digest(stream,'sha256').hexdigest()
+            print(json.dumps(dict(ok=True,hashes=hashes)));return
         if action=='add-device':
             api('config/devices/'+data['deviceId'],'PUT',dict(deviceID=data['deviceId'],name=data.get('deviceName','RemoteDisk'),addresses=data.get('addresses',['dynamic']),autoAcceptFolders=False))
         if action in ('reconcile','bootstrap','add-device'):

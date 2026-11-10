@@ -58,6 +58,20 @@
         }
       },
       "additionalProperties": true
+    },
+    "happier": {
+      "type": "object",
+      "properties": {
+        "serverUrl": {
+          "type": "string",
+          "format": "uri"
+        },
+        "webappUrl": {
+          "type": "string",
+          "format": "uri"
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": true

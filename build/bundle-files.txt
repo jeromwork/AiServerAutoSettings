@@ -46,3 +46,11 @@ Setup-All.ps1
 build/FirstInstall.ps1
 
 disk/Disk.Engine.ps1
+
+# Accounts and device-local selective Syncthing policy.
+accounts/Account.ps1
+accounts/server-account.mjs
+disk/Disk.Selective.ps1
+disk/Select-Disk.ps1
+server-happier.sh
+accounts/bootstrap.sh

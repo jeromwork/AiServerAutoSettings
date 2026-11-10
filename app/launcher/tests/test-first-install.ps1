@@ -23,9 +23,13 @@ function Invoke-InstallChild($Bundle,$Script,$Arguments){
 }
 Invoke-FirstInstall $root $repo 'example.invalid' 'tester'
 Assert (($script:steps -join ',') -eq 'setup-vps-ssh.ps1,verify,Setup-All.ps1,build/Migrate.ps1') 'clean machine runs setup then real SSH then disk/control then rollback migration'
+$selectionPath=Join-Path $TestHome 'RemoteDisk/selection.json'
+Assert (([IO.File]::ReadAllText($selectionPath)|ConvertFrom-Json).schema -eq 1 -and @(([IO.File]::ReadAllText($selectionPath)|ConvertFrom-Json).paths).Count -eq 0) 'clean wizard defaults to server-only before autoaccept'
+[IO.File]::WriteAllText($selectionPath,'{"schema":1,"paths":["project/src"]}'+"`r`n")
 $script:steps.Clear()
 Invoke-FirstInstall $root $repo '' ''
 Assert (-not $script:steps.Contains('setup-vps-ssh.ps1')) 'shared profile never prompts credentials again'
+Assert (([IO.File]::ReadAllText($selectionPath)|ConvertFrom-Json).paths[0] -eq 'project/src') 'rerun preserves existing selective choice (CRLF)'
 $disk=Join-Path $TestHome 'RemoteDisk/state';$control=Join-Path $TestHome 'RemoteAgents/control'
 [void][IO.Directory]::CreateDirectory((Join-Path $TestHome 'RemoteDisk/channel'));[IO.File]::WriteAllText((Join-Path $TestHome 'RemoteDisk/channel/config.json'),'{}')
 [void][IO.Directory]::CreateDirectory($disk);[void][IO.Directory]::CreateDirectory($control)

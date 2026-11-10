@@ -8,6 +8,9 @@ trap 'rm -rf "$testdir"' EXIT
 pwsh=${PWSH:-$HOME/.cache/pwsh-test/pwsh}
 LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -NonInteractive -File "$here/test-migrate.ps1" -TestHome "$testdir/migrate" < /dev/null
 LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -NonInteractive -File "$here/test-first-install.ps1" -TestHome "$testdir/wizard" < /dev/null
+LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -NonInteractive -File "$here/test-selective.ps1" -TestHome "$testdir/selective" < /dev/null
+LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -NonInteractive -File "$here/test-account.ps1" -TestHome "$testdir/accounts" < /dev/null
+node "$repo/accounts/test-accounts.mjs"
 python3 "$here/test_build.py"
 python3 "$here/test_bridge_health.py"
 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -- "$testdir/core"

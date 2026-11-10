@@ -18,5 +18,9 @@
   "update": {
     "remoteDir": "~/.local/share/remote-agents/dist",
     "enabled": false
+  },
+  "happier": {
+    "serverUrl": "https://api.happier.dev",
+    "webappUrl": "https://cloud.happier.dev"
   }
 }
