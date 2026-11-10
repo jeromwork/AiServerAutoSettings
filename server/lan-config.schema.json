@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RemoteAgents restricted LAN settings",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "version", "enabled", "ready", "static", "subnets", "table", "priority", "dns"],
+  "properties": {
+    "$schema": {"const": "../config.schema.json"},
+    "version": {"const": 1},
+    "enabled": {"type": "boolean"},
+    "ready": {"type": "boolean"},
+    "static": {"$ref": "#/$defs/subnets"},
+    "subnets": {"$ref": "#/$defs/subnets"},
+    "table": {"type": "integer", "minimum": 42000, "maximum": 42063},
+    "priority": {"type": "integer", "minimum": 1000, "maximum": 1063},
+    "dns": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["domain", "server"],
+          "properties": {
+            "domain": {"type": "string", "minLength": 3, "maxLength": 253},
+            "server": {"type": "string", "format": "ipv4"}
+          }
+        }
+      ]
+    },
+    "ip_url": {"type": "string", "pattern": "^https://", "maxLength": 2048},
+    "baseline": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  },
+  "$defs": {
+    "subnets": {
+      "description": "Canonical RFC1918 IPv4 CIDRs only; lan_vpn.networks validates address semantics.",
+      "type": "array", "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[0-9.]+/[0-9]{1,2}$"}
+    }
+  }
+}
