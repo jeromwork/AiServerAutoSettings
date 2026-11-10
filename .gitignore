@@ -44,3 +44,8 @@ contabo-support-request.txt
 # Happier uploads
 .happier/
 /.happier/uploads/
+
+# Deliverable pair is deliberately versionable and synchronized.
+!/release/
+!/release/*.exe
+!/release/Start.cmd

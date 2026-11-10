@@ -38,3 +38,10 @@ app/launcher/control/Control.Status.ps1 => control/Control.Status.ps1
 build/Migrate.Common.ps1
 build/Migrate.ps1
 build/Rollback.ps1
+
+setup-vps-ssh.ps1
+ssh-password-ui.cs
+Setup-All.ps1
+build/FirstInstall.ps1
+
+disk/Disk.Engine.ps1

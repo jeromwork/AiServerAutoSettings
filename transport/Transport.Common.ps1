@@ -551,12 +551,7 @@ function Get-VpnOwnedProcessIds([string]$Root,$Snapshot) {
 }
 function Find-VpnConflicts($Snapshot,[int[]]$OwnProcessIds=@(),[string]$OwnInterface='') {
     $items=New-Object Collections.ArrayList
-    foreach($proc in @($Snapshot.Processes)){
-        $name=[string](Get-TransportValue $proc 'Name' $proc.ProcessName)
-        if($name -match '^(?i:Happ.*|v2ray.*|xray.*|sing-box.*|clash.*|nekoray.*|hiddify.*|wireguard.*|amnezia.*)(?:\.exe)?$' -and [int]$proc.ProcessId -notin $OwnProcessIds){
-            [void]$items.Add([pscustomobject]@{kind='process';name=$name;path=[string]$proc.ExecutablePath;detail=('PID '+$proc.ProcessId)})
-        }
-    }
+    $hints=@($Snapshot.Processes|Where-Object {([string]$_.Name) -match '^(?i:Happ|v2ray|xray|sing-box|clash|nekoray|hiddify|wireguard|amnezia)' -and [int]$_.ProcessId -notin $OwnProcessIds}|ForEach-Object {[string]$_.Name}) -join ', '
     foreach($adapter in @($Snapshot.Adapters)){
         $text=$adapter.Name+' '+$adapter.InterfaceDescription
         if($adapter.Status -eq 'Up' -and $adapter.Name -ne $OwnInterface -and $text -match '(?i)TUN|Wintun|WireGuard|TAP' -and $text -notmatch '(?i)OpenVPN|Tailscale'){
@@ -564,13 +559,19 @@ function Find-VpnConflicts($Snapshot,[int[]]$OwnProcessIds=@(),[string]$OwnInter
         }
     }
     foreach($route in @($Snapshot.Routes)){
-        if($route.DestinationPrefix -notin @('0.0.0.0/1','128.0.0.0/1')){continue}
+        if($route.DestinationPrefix -notin @('0.0.0.0/1','128.0.0.0/1','0.0.0.0/0','::/0')){continue}
         $adapter=$Snapshot.Adapters|Where-Object {$_.ifIndex -eq $route.InterfaceIndex}|Select-Object -First 1
         if($adapter -and ($adapter.Name -eq $OwnInterface -or ($adapter.Name+' '+$adapter.InterfaceDescription) -match '(?i)OpenVPN|Tailscale')){continue}
+        if($route.DestinationPrefix -in @('0.0.0.0/0','::/0')){
+            if(-not $adapter -or $adapter.Status -ne 'Up'){continue}
+            $text=$adapter.Name+' '+$adapter.InterfaceDescription
+            $virtual=($adapter.HardwareInterface -eq $false -or $adapter.Virtual -eq $true -or $text -match '(?i)TUN|Wintun|WireGuard|TAP|Happ|xray|VPN|virtual')
+            if(-not $virtual){continue}
+        }
         $name=[string]$route.InterfaceAlias;if($adapter){$name=$adapter.Name}
         [void]$items.Add([pscustomobject]@{kind='route';name=$name;path='';detail=($route.DestinationPrefix+' via '+$route.NextHop+' (ifIndex '+$route.InterfaceIndex+')')})
     }
-    [pscustomobject]@{conflict=($items.Count -gt 0);items=@($items.ToArray())}
+    [pscustomobject]@{conflict=($items.Count -gt 0);items=@($items.ToArray());processHints=$hints}
 }
 function ConvertTo-VpnHostCidr([string]$Address) {
     $ip=$null;if(-not [Net.IPAddress]::TryParse($Address,[ref]$ip)){throw 'Адрес узла не является IP'}

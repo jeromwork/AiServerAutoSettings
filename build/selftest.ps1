@@ -4,7 +4,7 @@ param([Parameter(Mandatory=$true)][Alias('Home')][string]$LauncherHome)
 $ErrorActionPreference='Stop'
 try {
     if($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -lt 1){throw 'Самопроверка требует Windows PowerShell 5.1'}
-    foreach($name in @('components.json','bundle-version.txt','bundle-files.txt','Start-WindowsControl.ps1','disk/Disk.Common.ps1')) {
+    foreach($name in @('components.json','bundle-version.txt','bundle-files.txt')) {
         if(-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $name) -PathType Leaf)){throw 'Нет обязательного файла'}
     }
     foreach($name in [IO.File]::ReadAllLines((Join-Path $PSScriptRoot 'bundle-files.txt'))) {

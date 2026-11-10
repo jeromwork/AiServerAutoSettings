@@ -22,7 +22,8 @@ param(
     [ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$')][string]$HostId,
     [switch]$ManagedSession,
     [switch]$RetryForever,
-    [string]$LogFile
+    [string]$LogFile,
+    [string]$HealthFile
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
@@ -142,12 +143,31 @@ try {
         try {
             $ssh = Start-PrivateProcess $SSHExecutable $sshArgs -ForSSH
             $sshErrors = $ssh.StandardError.ReadToEndAsync()
-            $ssh.StandardInput.WriteLine((@{ token = $token; port = $remotePort; device = $DeviceLabel; deviceLabel=$DeviceLabel; projectId=$ProjectId; hostId=$HostId; windowsReplica=[IO.Path]::GetFullPath($Workspace) } | ConvertTo-Json -Compress)); $ssh.StandardInput.Flush()
+            $ssh.StandardInput.WriteLine((@{ heartbeat=$true;controlOnly=[bool]$ControlOnly; token = $token; port = $remotePort; device = $DeviceLabel; deviceLabel=$DeviceLabel; projectId=$ProjectId; hostId=$HostId; windowsReplica=[IO.Path]::GetFullPath($Workspace) } | ConvertTo-Json -Compress)); $ssh.StandardInput.Flush()
             $remoteReady = (Await-Line $ssh 25) | ConvertFrom-Json
             if ($remoteReady.state -ne 'connected') { throw 'Remote bridge session was not ready.' }
             $attempt = 0
             Write-BridgeStatus 'connected' ('Connected: ' + $DeviceLabel + '. Codex can use the Windows MCP tools. Ctrl+C disconnects and stops tracked processes.')
-            while (-not $ssh.HasExited -and -not $executor.HasExited -and -not (Is-Stopping)) { Start-Sleep -Milliseconds 250 }
+            # SSH keepalive proves the server responds, not that reverse forwarding works.
+            # Drain broker stdout continuously; only authenticated status round trips renew health.
+            $heartbeat=$ssh.StandardOutput.ReadLineAsync();$lastHeartbeat=[Diagnostics.Stopwatch]::StartNew()
+            while (-not $ssh.HasExited -and -not $executor.HasExited -and -not (Is-Stopping)) {
+                if($heartbeat.IsCompleted){
+                    if(-not $heartbeat.Result){throw 'Bridge heartbeat stream ended'}
+                    $event=$heartbeat.Result|ConvertFrom-Json
+                    if($event.state -eq 'heartbeat'){
+                        $lastHeartbeat.Restart()
+                        if($HealthFile){
+                            $record=@{ok=$true;pid=$PID;updatedAt=[DateTime]::UtcNow.ToString('o')}|ConvertTo-Json -Compress
+                            $tmp=$HealthFile+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
+                            try{[IO.File]::WriteAllText($tmp,$record,(New-Object Text.UTF8Encoding($false)));if(Test-Path $HealthFile){[IO.File]::Replace($tmp,$HealthFile,$null)}else{[IO.File]::Move($tmp,$HealthFile)}}finally{if(Test-Path $tmp){Remove-Item $tmp -Force}}
+                        }
+                    }
+                    $heartbeat=$ssh.StandardOutput.ReadLineAsync()
+                }
+                if($lastHeartbeat.Elapsed.TotalSeconds -ge 75){throw 'Reverse forwarding heartbeat timed out'}
+                Start-Sleep -Milliseconds 250
+            }
             if (-not (Is-Stopping) -and -not $executor.HasExited) { throw 'SSH connection ended; reconnecting the Windows bridge.' }
         } catch {
             if (-not (Is-Stopping)) {

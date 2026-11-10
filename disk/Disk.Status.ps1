@@ -1,7 +1,7 @@
 ﻿#requires -Version 5.1
 [CmdletBinding()]
 param([Alias('Home')][string]$LauncherHome=(Join-Path $env:LOCALAPPDATA 'RemoteAgents'),[int]$ParentPid=0,
-      [ValidateSet('Status','Open','Pause30','Pause120','Pause','Resume')][string]$Action='Status',[string]$ExpectedUntil,[switch]$Once,[switch]$LibraryOnly)
+      [ValidateSet('Status','Open','Pause30','Pause120','Pause','Resume','Web','Add')][string]$Action='Status',[string]$ExpectedUntil,[switch]$Once,[switch]$LibraryOnly)
 . (Join-Path $PSScriptRoot 'Disk.Common.ps1')
 . (Join-Path (Split-Path $PSScriptRoot -Parent) 'transport/Transport.Common.ps1')
 function Initialize-DiskMonitor([string]$Root) {
@@ -9,12 +9,7 @@ function Initialize-DiskMonitor([string]$Root) {
     $config=Join-Path $Root 'config.json'
     if(Test-Path -LiteralPath $config){$c=Read-TransportJson $config;if($c.disk.home){$script:DiskHome=[string]$c.disk.home}}
 }
-function Start-DiskTray {
-    $tray=Join-Path $script:DiskHome 'tray/syncthingtray.exe'
-    if(-not (Test-Path -LiteralPath $tray)){return}
-    $found=@(Get-Process -Name syncthingtray -ErrorAction SilentlyContinue|Where-Object {try{$_.Path -and [IO.Path]::GetFullPath($_.Path) -ieq [IO.Path]::GetFullPath($tray)}catch{$false}})
-    if(-not $found.Count){$created=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=((Quote-Disk $tray)+' --wait')};if($created.ReturnValue -ne 0){throw 'Трей не запущен'}}
-}
+. (Join-Path $PSScriptRoot 'Disk.Engine.ps1')
 function Write-DiskMonitorLog([string]$Event) {
     try{$dir=Join-Path $script:MonitorHome 'logs';[void][IO.Directory]::CreateDirectory($dir);$file=Join-Path $dir 'disk.log';if((Test-Path $file) -and (Get-Item $file).Length -ge 1MB){Move-Item $file ($file+'.1') -Force};[IO.File]::AppendAllText($file,([DateTime]::UtcNow.ToString('o')+' '+$Event+"`n"),(New-Object Text.UTF8Encoding($false)))}catch{}
 }
@@ -24,11 +19,11 @@ function Set-DiskResumeTask($Until) {
     if(-not $Until){if(Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue){Unregister-ScheduledTask -TaskName $name -Confirm:$false};return}
     # Keep a private added copy: a later bundle cleanup cannot remove the timed resume command.
     $sourceRoot=Split-Path $PSScriptRoot -Parent
-    $hashes=@('disk/Disk.Status.ps1','disk/Disk.Common.ps1','transport/Transport.Common.ps1')|ForEach-Object {(Get-FileHash -LiteralPath (Join-Path $sourceRoot $_) -Algorithm SHA256).Hash}
+    $hashes=@('disk/Disk.Status.ps1','disk/Disk.Common.ps1','disk/Disk.Engine.ps1','transport/Transport.Common.ps1')|ForEach-Object {(Get-FileHash -LiteralPath (Join-Path $sourceRoot $_) -Algorithm SHA256).Hash}
     $sha=[Security.Cryptography.SHA256]::Create();try{$hash=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(($hashes -join ''))))).Replace('-','').Substring(0,24)}finally{$sha.Dispose()}
     $app=Join-Path $script:MonitorHome ('disk-commands/'+$hash)
     foreach($part in @('disk','transport')){[void][IO.Directory]::CreateDirectory((Join-Path $app $part))}
-    foreach($path in @('disk/Disk.Status.ps1','disk/Disk.Common.ps1','transport/Transport.Common.ps1')){
+    foreach($path in @('disk/Disk.Status.ps1','disk/Disk.Common.ps1','disk/Disk.Engine.ps1','transport/Transport.Common.ps1')){
         $source=Join-Path $sourceRoot $path;$target=Join-Path $app $path
         if(-not (Test-Path $target) -or (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash){Copy-Item -LiteralPath $source -Destination $target -Force}
     }
@@ -103,18 +98,43 @@ function Get-DiskMonitorStatus {
 if($LibraryOnly){return}
 Initialize-DiskMonitor $LauncherHome
 if($Action -eq 'Open'){Start-Process explorer.exe -ArgumentList (Quote-Disk (Get-DiskBase));return}
+if($Action -eq 'Web'){Read-DiskState;Start-Process ('http://'+$script:Gui);return}
+if($Action -eq 'Add'){
+    Add-Type -AssemblyName System.Windows.Forms
+    $picker=New-Object Windows.Forms.FolderBrowserDialog
+    try{if($picker.ShowDialog() -eq 'OK'){& (Join-Path $PSScriptRoot 'Add-RemoteDiskFolder.ps1') -Path $picker.SelectedPath}}finally{$picker.Dispose()}
+    return
+}
 if($Action -ne 'Status'){
     Set-DiskPause $Action -Expected $ExpectedUntil;return
 }
 Write-DiskMonitorLog 'start';$lastDiskState=''
 $parent=$null;if($ParentPid -gt 0){$parent=[Diagnostics.Process]::GetProcessById($ParentPid);[void]$parent.Handle}
+$engineMutex=New-Object Threading.Mutex($false,('Global\RemoteAgentsDiskEngine-'+(Get-TransportFingerprint 'engine' $script:DiskHome.ToLowerInvariant())))
+$engineOwned=$false
+try {
+try{$engineOwned=$engineMutex.WaitOne(0)}catch [Threading.AbandonedMutexException]{$engineOwned=$true}
+if(-not $engineOwned){throw 'Надзор Syncthing уже работает'}
+$script:DiskEngine=$null
+# Upgrades from the earlier accepted launcher still have its independent GUI tray.
+# Its persisted migration snapshot already contains the original Run command for rollback.
+$migrationFile=Join-Path $LauncherHome 'state/migration.json'
+if(Test-Path $migrationFile){
+    $migration=Read-TransportJson $migrationFile
+    if($migration.phase -in @('accepted','pending') -and -not $migration.dryRun){Stop-DiskEngineProcesses $script:DiskHome}
+}
 do {
-    try{Start-DiskTray}catch{}
+    try{Start-DiskHeadless}catch{Write-DiskMonitorLog 'engine.start.failed'}
     $pauseFile=Join-Path $LauncherHome 'state/disk-pause.json'
     try{if(Test-Path -LiteralPath $pauseFile){$pause=Read-TransportJson $pauseFile;if($pause.until -and (Convert-TransportUtc $pause.until) -le [DateTime]::UtcNow){Set-DiskPause Resume}}}catch{}
-    $status=Get-DiskMonitorStatus;Write-TransportJson (Join-Path $LauncherHome 'status/disk.json') $status
+    $status=Get-DiskMonitorStatus
+    if(-not $script:DiskEngine -or $script:DiskEngine.HasExited){$status.ok=$false;$status.summary='Syncthing не запущен под надзором'}
+    Write-TransportJson (Join-Path $LauncherHome 'status/disk.json') $status
     $state=[string]$status.summary;if($state -cne $lastDiskState){Write-DiskMonitorLog ('status '+$state);$lastDiskState=$state}
     if($Once){break}
     for($i=0;$i -lt 10;$i++){if(($parent -and $parent.HasExited) -or (Test-Path -LiteralPath (Join-Path $LauncherHome 'stop'))){return};Start-Sleep -Seconds 1}
 }while($true)
-# The independently created tray deliberately survives monitor/launcher exit.
+}finally{
+    if($script:DiskEngine){try{if(-not $script:DiskEngine.HasExited){$script:DiskEngine.Kill();[void]$script:DiskEngine.WaitForExit(10000)}}finally{$script:DiskEngine.Dispose()}}
+    if($engineOwned){$engineMutex.ReleaseMutex()};$engineMutex.Dispose()
+}

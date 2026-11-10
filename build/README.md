@@ -1,13 +1,15 @@
 # Сборка лаунчера (этапы 2–3)
 
-`./build/build-exe.sh` — собрать на Linux один `build/out/RemoteAgents.exe` для скачивания и ручной установки поверх.
+`./build/build-exe.sh` — собрать на Linux пару `release/RemoteAgents.exe`, `release/RemoteVPN.exe` и `release/Start.cmd` для первого запуска и ручного обновления поверх.
+`build/out/` — промежуточные файлы; у вариантов независимые встроенные бандлы и runtime-состояние обновления.
 `./build/publish.sh` — опционально опубликовать EXE/архив в dist текущего пользователя на сервере; клиенты сами не проверяют обновления.
 Нужны Python 3, bash, git и `~/.dotnet/dotnet` (SDK 10). Коммиты и push скрипты не делают.
 
 `./build/build-exe.sh` оставляет в `build/out/`:
 
-- `RemoteAgents.exe` — один EXE .NET Framework 4.8 с начальным архивом модулей;
-- `initial-bundle.zip` — архив, вшитый в этот EXE;
+- `RemoteAgents.exe`, `RemoteVPN.exe` — два варианта одного проекта .NET Framework 4.8;
+- `<Product>/<version>.zip`, `<Product>/publish/` — встроенный бандл и результат publish каждого варианта;
+- `initial-bundle.zip` — совместимый путь к бандлу RemoteAgents;
 - `<версия>.zip` и `bundle.zip` — OTA-архив с модулями и новым EXE для самообновления.
 
 `./build/make-bundle.sh <версия> <каталог> [--launcher <exe>]` собирает только архив.

@@ -15,24 +15,37 @@ function Get-ControlMonitorStatus([string]$Root) {
         $p=Get-CimInstance Win32_Process -Filter "ProcessId=$id"|Where-Object {$_.ProcessId -eq $id -and $_.CommandLine -match 'Start-WindowsControl\.ps1'}|Select-Object -First 1
         if(-not $p){return $result}
         $result.processAlive=$true;$result.summary='Управление: нет связи'
-        $events=@(Get-Content -LiteralPath (Join-Path $base 'logs/control.log') -Encoding UTF8 -Tail 200|Where-Object {$_ -match 'bridge\.(connected|disconnected)|bridge returned|^.{19} (start pid=|error |prepare server)'})
-        $last=$events|Select-Object -Last 1
-        if($last -notmatch '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) bridge\.connected'){return $result}
-        $contact=[DateTime]::ParseExact($Matches[1],'yyyy-MM-dd HH:mm:ss',[Globalization.CultureInfo]::InvariantCulture)
-        $result.lastContact=$contact.ToUniversalTime().ToString('o')
-        if($contact -lt ([DateTime]$p.CreationDate).AddSeconds(-2)){return $result}
-        # A historic connected log alone is insufficient: require its live SSH child and socket.
-        $children=@(Get-CimInstance Win32_Process -Filter "ParentProcessId=$id"|Where-Object {$_.ParentProcessId -eq $id -and $_.Name -match '^ssh(?:\.exe)?$' -and $_.CommandLine -match '(?:^|\s)"?-R'})
-        foreach($child in $children){
-            if(@(Get-NetTCPConnection -OwningProcess $child.ProcessId -State Established -ErrorAction SilentlyContinue).Count){$result.ok=$true;$result.summary='Управление включено';break}
+        $heartbeat=Read-TransportJson (Join-Path $base 'heartbeat.json')
+        $contact=Convert-TransportUtc $heartbeat.updatedAt
+        $result.lastContact=$contact.ToString('o')
+        $age=([DateTime]::UtcNow-$contact).TotalSeconds
+        # The broker has authenticated status through server -> reverse SSH -> executor.
+        # Match the current root process: a prior session cannot renew this one.
+        if($heartbeat.ok -and [int]$heartbeat.pid -eq $id -and $age -ge -5 -and $age -le 40 -and $contact -ge ([DateTime]$p.CreationDate).ToUniversalTime().AddSeconds(-2)){
+            $result.ok=$true;$result.summary='Управление включено'
         }
     }catch{$result.ok=$false;$result.summary='Управление: нет данных'}
     $result
 }
+function Restart-ManagedControl([string]$Root){
+    & (Join-Path $bundle 'Start-WindowsControl.ps1') -Install -LauncherHome $Root *> $null
+}
+function Update-ControlSupervision([string]$Root,$Status,$State,[DateTime]$Now){
+    if($Status.ok){$State.failures=0}else{$State.failures++}
+    if($State.failures -lt 3 -or $Now -lt $State.nextRestart){return}
+    # Only the managed bridge belongs to this launcher. No action on a legacy/foreign PID.
+    if(Test-Path (Join-Path $Root 'managed-control/control.pid')){
+        try{Restart-ManagedControl $Root}catch{}
+    }
+    $State.failures=0;$State.nextRestart=$Now.AddSeconds(120)
+}
 if($LibraryOnly){return}
 $parent=$null;if($ParentPid -gt 0){$parent=[Diagnostics.Process]::GetProcessById($ParentPid);[void]$parent.Handle}
+$supervision=@{failures=0;nextRestart=[DateTime]::UtcNow.AddSeconds(90)}
 do {
-    Write-TransportJson (Join-Path $LauncherHome 'status/control.json') (Get-ControlMonitorStatus $LauncherHome)
+    $status=Get-ControlMonitorStatus $LauncherHome
+    Update-ControlSupervision $LauncherHome $status $supervision ([DateTime]::UtcNow)
+    Write-TransportJson (Join-Path $LauncherHome 'status/control.json') $status
     if($Once){break}
     for($i=0;$i -lt 10;$i++){if(($parent -and $parent.HasExited) -or (Test-Path -LiteralPath (Join-Path $LauncherHome 'stop'))){return};Start-Sleep -Seconds 1}
 }while($true)

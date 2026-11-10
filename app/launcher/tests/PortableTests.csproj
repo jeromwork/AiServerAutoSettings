@@ -3,6 +3,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <OutputType>Exe</OutputType>
     <DefineConstants>PORTABLE_TEST</DefineConstants>
+    <DefineConstants Condition="'$(ProductName)' == 'RemoteVPN'">PORTABLE_TEST;REMOTE_VPN</DefineConstants>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <NoWarn>SYSLIB0014;SYSLIB0057;CA1416</NoWarn>
   </PropertyGroup>

@@ -42,7 +42,7 @@ namespace RemoteAgents.Launcher
             pipeWorker = Task.Run(() => Listen(pipeName, sid));
             try {
                 engine.Recover(); Bootstrap();
-                icon = new NotifyIcon { Visible = true, Icon = red, Text = "RemoteAgents: запуск" };
+                icon = new NotifyIcon { Visible = true, Icon = red, Text = Product.Name + ": запуск" };
                 icon.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowStatus(); }; LoadComponents();
             } catch {
                 stop.Cancel(); lock (pipeGate) { if (server != null) server.Dispose(); } throw;
@@ -64,6 +64,11 @@ namespace RemoteAgents.Launcher
             } finally { if (File.Exists(zip)) File.Delete(zip); }
         }
 
+        bool VpnModulesReady()
+        {
+            // Disabled VPN is a valid installation; updates must never trigger UAC or require TUN.
+            return runtimes.Any(r => r.Definition.Critical) ? runtimes.Where(r => r.Definition.Critical).All(r => r.Healthy) : File.Exists(TransportScript("Vpn.Tun.ps1")) && File.Exists(TransportScript("Test-VpnConflict.ps1"));
+        }
         void LoadComponents()
         {
             foreach (var r in runtimes) r.Dispose(); runtimes.Clear();
@@ -80,7 +85,7 @@ namespace RemoteAgents.Launcher
             try {
                 TryDeleteOld(); foreach (var r in runtimes) r.Tick();
                 var critical = runtimes.Where(r => r.Definition.Critical).ToArray();
-                bool all = critical.Length > 0 && critical.All(r => r.Healthy);
+                bool all = Product.IsVpn ? VpnModulesReady() : critical.Length > 0 && critical.All(r => r.Healthy);
                 string result = engine.Observe(all);
                 string image = UpgradeInstaller.ObserveImage(home, engine, all, result);
                 if (image == "rollback") { log.Write("launcher.rollback"); RestartRequested = true; ExitThread(); return; }
@@ -88,8 +93,12 @@ namespace RemoteAgents.Launcher
                 if (result == "accepted") { log.Write("update.accepted"); updateSummary = "обновление проверено"; }
                 int count = critical.Count(r => r.Healthy); icon.Icon = all ? green : count > 0 ? yellow : red;
                 var transport = StatusView.Read(home, "transport", maxAgeSec: 15);
-                icon.Text = StatusView.Tooltip(transport); RefreshMenu(); WriteStatus();
-                if (DateTime.UtcNow >= nextMigrationCheck) CheckMigration(false);
+                if (Product.IsVpn) {
+                    var vpnStatus = StatusView.Read(home, "vpn", maxAgeSec: 15);
+                    icon.Icon = Json.Bool(vpnStatus, "ok") && Json.Str(vpnStatus, "state") == "on" ? green : yellow;
+                    string text = "RemoteVPN: " + StatusView.Summary(vpnStatus); icon.Text = text.Length > 63 ? text.Substring(0, 62) + "…" : text;
+                } else icon.Text = StatusView.Tooltip(transport); RefreshMenu(); WriteStatus();
+                if (!Product.IsVpn && DateTime.UtcNow >= nextMigrationCheck) CheckMigration(false);
                 if (serverUpdateRequested && !engine.Pending && !busy && TrySelfUpdate()) return;
             } catch { log.Write("supervisor.tick.failed"); icon.Icon = red; }
             finally { ticking = false; }
@@ -107,10 +116,10 @@ namespace RemoteAgents.Launcher
         }
         void WriteStatus()
         {
-            Json.Write(Path.Combine(home, "status", "launcher.json"), new { schema = 1, pid = Process.GetCurrentProcess().Id, launcherVersion = Program.Version, bundleVersion = engine.Current,
+            Json.Write(Path.Combine(home, "status", Product.StatusName), new { schema = 1, pid = Process.GetCurrentProcess().Id, launcherVersion = Program.Version, bundleVersion = engine.Current,
                 previousVersion = engine.Previous, pending = engine.Pending, running = !closing, updatedUtc = DateTime.UtcNow.ToString("o"), update = updateSummary,
-                ok = !closing && runtimes.Any(r => r.Definition.Critical) && runtimes.Where(r => r.Definition.Critical).All(r => r.Healthy), components = runtimes.Select(r => r.Snapshot()).ToArray() });
-            if ((!closing || (!RestartRequested && !installStop)) && File.Exists(LauncherRecovery.Intent(home))) File.Delete(LauncherRecovery.Intent(home));
+                ok = !closing && (Product.IsVpn ? VpnModulesReady() : runtimes.Any(r => r.Definition.Critical) && runtimes.Where(r => r.Definition.Critical).All(r => r.Healthy)), components = runtimes.Select(r => r.Snapshot()).ToArray() });
+            if (!Product.IsVpn && (!closing || (!RestartRequested && !installStop)) && File.Exists(LauncherRecovery.Intent(home))) File.Delete(LauncherRecovery.Intent(home));
         }
         void RefreshMenu()
         {
@@ -129,15 +138,15 @@ namespace RemoteAgents.Launcher
             }
             foreach (var a in definition.Menu) { var action = a; menu.Items.Add(a.Title, null, (s, e) => RunAction(action)); }
             menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add("Открыть папку Disk", null, (s, e) => Safe(() => {
+            if (!Product.IsVpn) menu.Items.Add("Открыть папку Disk", null, (s, e) => Safe(() => {
                 string saved = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteDisk", "base.txt");
                 string path = Files.ReadLine(saved); if (path.Length == 0) path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Disk"); Open(path);
             }));
-            var check = menu.Items.Add("Проверить обновления на сервере", null, (s, e) => CheckUpdates()); check.Enabled = Json.Bool(config.Update, "enabled") && !busy && !actionBusy && !engine.Pending && !MigrationPending();
+            var check = menu.Items.Add("Проверить обновления на сервере", null, (s, e) => CheckUpdates()); check.Enabled = !Product.IsVpn && Json.Bool(config.Update, "enabled") && !busy && !actionBusy && !engine.Pending && !MigrationPending();
             check.ToolTipText = "Только вручную и при update.enabled=true в config.json";
             menu.Items.Add(updateSummary).Enabled = false;
             string migrationFile = Path.Combine(home, "state", "migration.json");
-            if (File.Exists(migrationFile)) {
+            if (!Product.IsVpn && File.Exists(migrationFile)) {
                 string phase = Json.Str(Json.Read(migrationFile), "phase");
                 menu.Items.Add("Переход: " + (phase == "pending" ? "проверка связи; откат через 10 минут" : phase == "accepted" ? "подтверждён" : phase)).Enabled = false;
                 if (phase == "pending") menu.Items.Add("Подтвердить установку (проверить связь)", null, (s, e) => CheckMigration(true));
@@ -185,7 +194,7 @@ namespace RemoteAgents.Launcher
             nodes.DropDownItems.Add("Открыть настройки", null, (s, e) => Safe(() => Process.Start(new ProcessStartInfo("notepad.exe", Files.Quote(config.PathName)) { UseShellExecute = true })));
             var list = new ToolStripMenuItem("Список путей") { Enabled = !actionBusy };
             list.Click += (s, e) => ScriptCommand("Edit-Transport.ps1", new[] { "-List" }, true);
-            if (!File.Exists(TransportScript("Edit-Transport.ps1"))) Unavailable(list); nodes.DropDownItems.Add(list); menu.Items.Add(nodes);
+            if (!File.Exists(TransportScript("Edit-Transport.ps1"))) Unavailable(list); nodes.DropDownItems.Add(list); if (!Product.IsVpn) menu.Items.Add(nodes);
             var vpn = runtimes.FirstOrDefault(r => r.Definition.Name == "vpn");
             var vpnItem = new ToolStripMenuItem("VPN (весь трафик)") { Checked = vpn != null && vpn.Enabled, Enabled = !actionBusy };
             vpnItem.ToolTipText = StatusView.Summary(StatusView.Read(home, "vpn", maxAgeSec: 15));
@@ -203,13 +212,14 @@ namespace RemoteAgents.Launcher
             networkRow.Text = "Сеть: " + StatusView.Network(status) + "; лимитная: " + StatusView.Metered(status);
             errorRow.Text = "Связь: " + Json.Str(status, "error"); errorRow.Visible = Json.Str(status, "error").Length > 0;
             configErrorRow.Text = "Настройки: " + Json.Str(status, "configError"); configErrorRow.Visible = Json.Str(status, "configError").Length > 0;
+            diskRow.Visible = bridgeRow.Visible = !Product.IsVpn; pathsMenu.Visible = !Product.IsVpn;
             diskRow.Text = "Диск: " + StatusView.Summary(StatusView.Read(home, "disk"));
             bridgeRow.Text = "Мост: " + StatusView.Summary(StatusView.Read(home, "control"));
             vpnRow.Text = "VPN: " + StatusView.Summary(StatusView.Read(home, "vpn", maxAgeSec: 15));
             var vpn = runtimes.FirstOrDefault(r => r.Definition.Name == "vpn");
             vpnToggle.Checked = vpn != null && vpn.Enabled;
             bool vpnInstalled = vpn != null && File.Exists(TransportScript("Vpn.Tun.ps1")) && File.Exists(TransportScript("Test-VpnConflict.ps1"));
-            vpnToggle.Enabled = !actionBusy && vpnInstalled;
+            vpnToggle.Enabled = !actionBusy && vpnInstalled; vpnToggle.Visible = vpnRow.Visible = Product.IsVpn;
             vpnToggle.ToolTipText = vpnInstalled ? StatusView.Summary(StatusView.Read(home, "vpn", maxAgeSec: 15)) : "модуль не установлен";
             bool installed = File.Exists(TransportScript("Set-TransportPath.ps1"));
             foreach (ToolStripItem entry in pathsMenu.DropDownItems) {
@@ -265,6 +275,9 @@ namespace RemoteAgents.Launcher
         {
             if (actionBusy || closing) return; actionBusy = true;
             try {
+                if (Product.IsVpn && !Json.Bool(StatusView.Read(home, "transport", maxAgeSec: 15), "ok")) {
+                    MessageBox.Show("Для VPN нужна проверенная связь с сервером. Установите и запустите RemoteAgents.exe; дождитесь подключения.", "RemoteVPN"); return;
+                }
                 while (!closing) {
                     var result = Json.Map(Json.Parse(await Task.Run(() => CaptureScript("Test-VpnConflict.ps1", new string[0]))));
                     if (closing) return;
@@ -356,13 +369,13 @@ namespace RemoteAgents.Launcher
             string path = Path.Combine(engine.Folder(engine.Current), ".launcher-manifest.json");
             if (!File.Exists(path)) return false;
             var m = Manifest.Parse(File.ReadAllText(path)); if (m.LauncherVersion.Length == 0 || Files.Compare(m.LauncherVersion, Program.Version) <= 0) return false;
-            string source = Path.Combine(engine.Folder(engine.Current), "RemoteAgents.exe");
+            string source = Path.Combine(engine.Folder(engine.Current), Product.ExeName);
             if (!File.Exists(source) || !Files.Hash(source).Equals(m.LauncherHash, StringComparison.OrdinalIgnoreCase) ||
                 Files.Compare(FileVersionInfo.GetVersionInfo(source).FileVersion, m.LauncherVersion) != 0) { log.Write("launcher.update.invalid"); return false; }
-            string target = Program.Exe, old = Path.Combine(Path.GetDirectoryName(target), "RemoteAgents.old.exe"), temp = target + ".new";
+            string target = Program.Exe, old = Path.Combine(Path.GetDirectoryName(target), Product.Name + ".old.exe"), temp = target + ".new";
             if (File.Exists(old)) return false; // previous image is still exiting
             try {
-                if (LauncherRecovery.Accepted(home)) Files.Atomic(LauncherRecovery.Intent(home), "restart\n");
+                if (!Product.IsVpn && LauncherRecovery.Accepted(home)) Files.Atomic(LauncherRecovery.Intent(home), "restart\n");
                 File.Copy(source, temp, true);
                 using (var flush = new FileStream(temp, FileMode.Open, FileAccess.Write, FileShare.Read)) flush.Flush(true);
                 File.Move(target, old);
@@ -372,7 +385,7 @@ namespace RemoteAgents.Launcher
         }
         void TryDeleteOld()
         {
-            foreach (string name in new[] { "RemoteAgents.old.exe", "RemoteAgents.exe.retired" })
+            foreach (string name in new[] { Product.Name + ".old.exe", Product.ExeName + ".retired" })
                 try { string old = Path.Combine(Path.GetDirectoryName(Program.Exe), name); if (File.Exists(old)) File.Delete(old); } catch { }
         }
         void Listen(string name, SecurityIdentifier sid)

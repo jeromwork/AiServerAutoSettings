@@ -31,7 +31,7 @@ namespace RemoteAgents.Launcher
         public readonly string Home, Root; readonly string launcherVersion;
         readonly Func<DateTime> now;
         public UpdateEngine(string home, string launcherVersion, Func<DateTime> clock = null)
-        { Home = home; Root = Path.Combine(home, "bundle"); this.launcherVersion = launcherVersion; now = clock ?? (() => DateTime.UtcNow); Directory.CreateDirectory(Root); }
+        { Home = home; Root = Path.Combine(home, Product.BundleDirectory); this.launcherVersion = launcherVersion; now = clock ?? (() => DateTime.UtcNow); Directory.CreateDirectory(Root); }
         public string Current { get { var s = Files.ReadLine(Path.Combine(Root, "current.txt")); return s.Length == 0 ? "" : Files.SafeVersion(s); } }
         public string Previous { get { var s = Files.ReadLine(Path.Combine(Root, "previous.txt")); return s.Length == 0 ? "" : Files.SafeVersion(s); } }
         public string Folder(string version) { return Path.Combine(Root, Files.SafeVersion(version)); }
@@ -52,7 +52,7 @@ namespace RemoteAgents.Launcher
                 if (Directory.Exists(tmp)) Directory.Delete(tmp, true); Directory.CreateDirectory(tmp);
                 Extract(part, tmp); var definition = BundleDefinition.Load(tmp); binaries(definition, tmp); token.ThrowIfCancellationRequested();
                 if (m.LauncherVersion.Length > 0) {
-                    var exe = Path.Combine(tmp, "RemoteAgents.exe");
+                    var exe = Path.Combine(tmp, Product.ExeName);
                     if (!File.Exists(exe) || !Files.Hash(exe).Equals(m.LauncherHash, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Проверка лаунчера не прошла");
                 }
                 if (File.Exists(Path.Combine(tmp, "selftest.ps1")) && !selftest(tmp)) { MarkBad(m.Version); throw new InvalidDataException("Самопроверка бандла не прошла"); }

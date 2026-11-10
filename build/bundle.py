@@ -39,7 +39,7 @@ def put_atomic(path, data, mode=0o644):
         if os.path.exists(temp):
             os.unlink(temp)
 
-def make(version, outdir, launcher=None):
+def make(version, outdir, launcher=None, product="RemoteAgents"):
     safe_version(version)
     outdir = Path(outdir).resolve()
     outdir.mkdir(parents=True, exist_ok=True)
@@ -69,6 +69,11 @@ def make(version, outdir, launcher=None):
             if name in contents:
                 raise ValueError('Повтор файла: ' + name)
             contents[name] = data
+    if product == 'RemoteVPN':
+        # Independent bundle storage; only VPN modules ship in this executable.
+        contents = {k:v for k,v in contents.items() if k.startswith('transport/') or k == 'selftest.ps1'}
+        contents['components.json'] = (ROOT/'build/components-vpn.json').read_bytes()
+        contents['product.txt'] = b'RemoteVPN\n'
     contents['bundle-version.txt'] = (version + '\n').encode()
     if launcher:
         contents['RemoteAgents.exe'] = Path(launcher).read_bytes()
@@ -164,7 +169,7 @@ def main():
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest='command', required=True)
     b = sub.add_parser('make')
-    b.add_argument('version'); b.add_argument('outdir'); b.add_argument('--launcher')
+    b.add_argument('version'); b.add_argument('outdir'); b.add_argument('--launcher'); b.add_argument('--product', choices=['RemoteAgents','RemoteVPN'], default='RemoteAgents')
     a = sub.add_parser('attach')
     a.add_argument('archive'); a.add_argument('launcher'); a.add_argument('output')
     d = sub.add_parser('publish')
@@ -172,7 +177,7 @@ def main():
     d.add_argument('--min-launcher', default='1.0.0'); d.add_argument('--launcher')
     a = p.parse_args()
     if a.command == 'make':
-        make(a.version, a.outdir, a.launcher)
+        make(a.version, a.outdir, a.launcher, a.product)
     elif a.command == 'attach':
         attach_launcher(a.archive, a.launcher, a.output)
     else:

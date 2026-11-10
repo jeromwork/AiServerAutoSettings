@@ -7,6 +7,8 @@ import select
 import socket
 import stat
 import sys
+import time
+from server_node_catalog import matches
 
 MAX = 262144
 
@@ -18,7 +20,7 @@ def read_line(stream, limit=MAX):
     return data
 
 
-def serve(path, config, parent_stdin):
+def serve(path, config, parent_stdin, heartbeat_interval=15, heartbeat_timeout=5):
     if not isinstance(config.get("token"), str) or len(config["token"]) != 64:
         raise ValueError("invalid session token")
     port = config.get("port")
@@ -44,13 +46,13 @@ def serve(path, config, parent_stdin):
             else:
                 raise ValueError("device already connected")
     server = socket.socket(socket.AF_UNIX)
-    def forward(request):
+    def forward(request, timeout=100):
         request = dict(request, token=config['token'])
         payload = json.dumps(request, separators=(',', ':')).encode()+b'\n'
         if len(payload)>MAX:
             raise ValueError('Request too large')
         with socket.create_connection(('127.0.0.1', port), timeout=5) as remote:
-            remote.settimeout(100)
+            remote.settimeout(timeout)
             remote.sendall(payload)
             return read_line(remote.makefile('rb'))
     try:
@@ -58,8 +60,28 @@ def serve(path, config, parent_stdin):
         os.chmod(path, 0o600)
         server.listen(4)
         print(json.dumps({"state": "connected", "device": config.get("device", "windows")}), flush=True)
+        next_heartbeat = time.monotonic()
+        failures = 0
         while True:
-            ready, _, _ = select.select([server, parent_stdin], [], [])
+            if config.get('heartbeat') and time.monotonic() >= next_heartbeat:
+                try:
+                    binding = {key:config.get(key) for key in ('projectId','hostId','deviceLabel','windowsReplica')}
+                    reply = json.loads(forward(dict(op='status', args={}, binding=binding), heartbeat_timeout))
+                    if reply.get('ok') is not True:
+                        raise ValueError('heartbeat refused')
+                    if config.get('hostId') and not matches(config, reply):
+                        raise ValueError('heartbeat binding mismatch')
+                    failures = 0
+                    print('{"state":"heartbeat"}', flush=True)
+                except Exception:
+                    failures += 1
+                    print('{"state":"unavailable"}', flush=True)
+                    if failures >= 3:
+                        raise ConnectionError('reverse forwarding heartbeat failed')
+                next_heartbeat = time.monotonic() + heartbeat_interval
+            ready, _, _ = select.select([server, parent_stdin], [], [], max(0, next_heartbeat-time.monotonic()) if config.get('heartbeat') else None)
+            if not ready:
+                continue
             if parent_stdin in ready:
                 # EOF means Windows launcher/SSH disappeared; no persistent secret.
                 break

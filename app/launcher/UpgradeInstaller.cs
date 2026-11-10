@@ -35,12 +35,12 @@ namespace RemoteAgents.Launcher
         public static void Apply(string home, string sourceExe, string zip, string launcherVersion, bool downgrade, Func<string, bool> selftest)
         {
             string migration = Path.Combine(home, "state", "migration.json");
-            if (File.Exists(migration) && new[] { "preparing", "activating", "pending", "rolling-back" }.Contains(Json.Str(Json.Read(migration), "phase"))) throw new InvalidOperationException("Сначала завершите переход компьютера");
+            if (!Product.IsVpn && File.Exists(migration) && new[] { "preparing", "activating", "pending", "rolling-back" }.Contains(Json.Str(Json.Read(migration), "phase"))) throw new InvalidOperationException("Сначала завершите переход компьютера");
             var engine = new UpdateEngine(home, launcherVersion); engine.Recover();
             if (engine.Pending) throw new InvalidOperationException("Предыдущее обновление ещё проверяется");
             string version = BundleVersion(zip), old = engine.Current;
-            string target = Path.Combine(home, "RemoteAgents.exe"), backup = Path.Combine(home, "RemoteAgents.previous.exe");
-            if (File.Exists(Path.Combine(home, "bundle", "exe-upgrade.json"))) throw new InvalidOperationException("Лаунчер ещё проверяется");
+            string target = Path.Combine(home, Product.ExeName), backup = Path.Combine(home, Product.Name + ".previous.exe");
+            if (File.Exists(Path.Combine(engine.Root, "exe-upgrade.json"))) throw new InvalidOperationException("Лаунчер ещё проверяется");
             if (version != old) {
                 var manifest = Manifest.Parse(Json.Encode(new { version, file = "embedded.zip", sha256 = Files.Hash(zip), size = new FileInfo(zip).Length, minLauncher = launcherVersion }));
                 string ready = engine.Prepare(manifest, p => File.Copy(zip, p, true), selftest,
@@ -70,7 +70,7 @@ namespace RemoteAgents.Launcher
         {
             string tmp = target + ".install.tmp", retired = target + ".retired";
             string home = Path.GetDirectoryName(target);
-            if (Path.GetFileName(target).Equals("RemoteAgents.exe", StringComparison.OrdinalIgnoreCase) && LauncherRecovery.Accepted(home)) Files.Atomic(LauncherRecovery.Intent(home), "restart\n");
+            if (Path.GetFileName(target).Equals(Product.ExeName, StringComparison.OrdinalIgnoreCase) && !Product.IsVpn && LauncherRecovery.Accepted(home)) Files.Atomic(LauncherRecovery.Intent(home), "restart\n");
             File.Copy(source, tmp, true);
             using (var flush = new FileStream(tmp, FileMode.Open, FileAccess.Write, FileShare.Read)) flush.Flush(true);
             try {
@@ -90,9 +90,9 @@ namespace RemoteAgents.Launcher
         public static bool RecoverImage(string home, Func<string, bool> valid = null)
         {
             valid = valid ?? (path => { try { AssemblyName.GetAssemblyName(path); return true; } catch { return false; } });
-            string target = Path.Combine(home, "RemoteAgents.exe");
+            string target = Path.Combine(home, Product.ExeName);
             if (File.Exists(target) && valid(target)) return false;
-            string source = new[] { target + ".retired", Path.Combine(home, "RemoteAgents.old.exe"), Path.Combine(home, "RemoteAgents.previous.exe"), target + ".install.tmp", target + ".new" }.FirstOrDefault(path => File.Exists(path) && valid(path));
+            string source = new[] { target + ".retired", Path.Combine(home, Product.Name + ".old.exe"), Path.Combine(home, Product.Name + ".previous.exe"), target + ".install.tmp", target + ".new" }.FirstOrDefault(path => File.Exists(path) && valid(path));
             if (source == null) throw new IOException("Нет исправного образа для восстановления");
             string temp = target + ".recovery." + Guid.NewGuid().ToString("N") + ".tmp";
             try {
@@ -109,10 +109,10 @@ namespace RemoteAgents.Launcher
             if (!DateTime.TryParse(Json.Str(p, "startedUtc"), null, System.Globalization.DateTimeStyles.RoundtripKind, out start)) throw new InvalidDataException();
             bool expired = ((utcNow ?? DateTime.UtcNow) - start.ToUniversalTime()).TotalSeconds >= 120;
             if (bundleResult == "rollback" || expired || engine.Current != Json.Str(p, "version")) {
-                string backup = Path.Combine(home, "RemoteAgents.previous.exe");
+                string backup = Path.Combine(home, Product.Name + ".previous.exe");
                 if (!File.Exists(backup) || !Files.Hash(backup).Equals(Json.Str(p, "previousHash"), StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Нет прежнего EXE");
                 if (engine.Pending) engine.Rollback();
-                ReplaceImage(backup, Path.Combine(home, "RemoteAgents.exe")); File.Delete(record); return "rollback";
+                ReplaceImage(backup, Path.Combine(home, Product.ExeName)); File.Delete(record); return "rollback";
             }
             if (healthy && !engine.Pending) { File.Delete(record); return "accepted"; }
             return "";

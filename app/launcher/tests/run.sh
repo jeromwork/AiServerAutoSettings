@@ -6,9 +6,12 @@ dotnet=${DOTNET:-$HOME/.dotnet/dotnet}
 testdir=$(mktemp -d /tmp/remoteagents-launcher-tests.XXXXXX)
 trap 'rm -rf "$testdir"' EXIT
 pwsh=${PWSH:-$HOME/.cache/pwsh-test/pwsh}
-LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -File "$here/test-migrate.ps1" -TestHome "$testdir/migrate"
+LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -NonInteractive -File "$here/test-migrate.ps1" -TestHome "$testdir/migrate" < /dev/null
+LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -NonInteractive -File "$here/test-first-install.ps1" -TestHome "$testdir/wizard" < /dev/null
 python3 "$here/test_build.py"
+python3 "$here/test_bridge_health.py"
 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -- "$testdir/core"
+"$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ProductName=RemoteVPN -- "$testdir/core-vpn"
 "$repo/build/make-bundle.sh" 20261109.235959-test "$testdir/bundles"
 "$dotnet" build "$repo/app/launcher/RemoteAgents.Launcher.csproj" -c Release -p:BundlePath="$testdir/bundles/20261109.235959-test.zip" --nologo
 "$dotnet" publish "$repo/app/launcher/RemoteAgents.Launcher.csproj" -c Release -p:BundlePath="$testdir/bundles/20261109.235959-test.zip" -o "$testdir/publish" --nologo

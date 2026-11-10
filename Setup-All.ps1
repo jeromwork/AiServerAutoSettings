@@ -2,7 +2,7 @@
 # Одна точка входа: SSH-профиль, диск (трей и синхронизация), мост управления (MCP).
 # Повторный запуск безопасен: каждый шаг сохраняет существующие настройки.
 [CmdletBinding()]
-param([string]$Profile,[string]$DiskUser='remoteagents')
+param([string]$Profile,[string]$DiskUser='remoteagents',[switch]$LauncherSetup)
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'disk\Disk.Common.ps1')
 function Write-Step([string]$Text) {Write-Host '';Write-Host ('=== '+$Text+' ===') -ForegroundColor Cyan}
@@ -63,10 +63,12 @@ $results['Вход для диска']='готово'
 
 Write-Step '3. Диск: трей Syncthing и синхронизация папок'
 $code=Invoke-Child 'disk\Install-RemoteDisk.ps1' @('-Profile',$diskProfile)
+if($LauncherSetup -and $code -ne 0){throw 'Установка диска не выполнена'}
 $results['Диск и трей']=$(if($code -eq 0){'готово'}else{'ОШИБКА (код '+$code+'), см. выше и %LOCALAPPDATA%\RemoteDisk\install.log'})
 
 Write-Step '4. Управление компьютером (MCP-мост)'
-$code=Invoke-Child 'Start-WindowsControl.ps1' @('-Install','-Profile',$Profile)
+$code=Invoke-Child 'Start-WindowsControl.ps1' @('-Install','-Profile',$Profile,'-AgentUser',$(if($root.login -eq 'root'){$DiskUser}else{$root.login}))
+if($LauncherSetup -and $code -ne 0){throw 'Установка моста не выполнена'}
 $results['Мост управления']=$(if($code -eq 0){'готово'}else{'ОШИБКА (код '+$code+'), см. %LOCALAPPDATA%\RemoteAgents\control\logs\control.log'})
 
 Write-Step 'Итог'

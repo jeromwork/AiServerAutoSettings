@@ -13,6 +13,18 @@ using System.Web.Script.Serialization;
 
 namespace RemoteAgents.Launcher
 {
+    internal static class Product
+    {
+#if REMOTE_VPN
+        public static bool IsVpn { get { return true; } }
+#else
+        public static bool IsVpn { get { return false; } }
+#endif
+        public static string Name { get { return IsVpn ? "RemoteVPN" : "RemoteAgents"; } }
+        public static string ExeName { get { return Name + ".exe"; } }
+        public static string BundleDirectory { get { return IsVpn ? "vpn-bundle" : "bundle"; } }
+        public static string StatusName { get { return IsVpn ? "vpn-launcher.json" : "launcher.json"; } }
+    }
     // Framework serializer keeps the distributable a single EXE, without JSON packages.
 #if !PORTABLE_TEST
     internal static class Json
@@ -104,7 +116,7 @@ namespace RemoteAgents.Launcher
     internal sealed class Journal
     {
         readonly string file; readonly object gate = new object();
-        public Journal(string home) { Directory.CreateDirectory(Path.Combine(home, "logs")); file = Path.Combine(home, "logs", "launcher.log"); }
+        public Journal(string home) { Directory.CreateDirectory(Path.Combine(home, "logs")); file = Path.Combine(home, "logs", Product.IsVpn ? "vpn-launcher.log" : "launcher.log"); }
         // Event codes and validated component identifiers only; no exception messages, SSH arguments, status text or URLs.
         public void Write(string code)
         {
@@ -122,7 +134,9 @@ namespace RemoteAgents.Launcher
         public readonly string PathName; public readonly Dictionary<string, object> Data;
         public Configuration(string home)
         {
-            PathName = Path.Combine(home, "config.json"); Data = File.Exists(PathName) ? Json.Read(PathName) : new Dictionary<string, object>();
+            PathName = Path.Combine(home, "config.json");
+            using (var lease = Lock(PathName)) {
+            Data = File.Exists(PathName) ? Json.Read(PathName) : new Dictionary<string, object>();
             bool changed = false;
             if (!Data.ContainsKey("schema")) { Data["schema"] = 1; changed = true; }
             if (!Data.ContainsKey("version")) { Data["version"] = 1; changed = true; }
@@ -130,6 +144,7 @@ namespace RemoteAgents.Launcher
             if (!Data.ContainsKey("update")) { Data["update"] = new Dictionary<string, object> { { "enabled", false }, { "remoteDir", "~/.local/share/remote-agents/dist" } }; changed = true; }
             if (Json.Int(Data, "schema", 0) != 1) throw new InvalidDataException("Неизвестная схема настроек");
             if (changed) Save();
+            }
         }
         Configuration(Dictionary<string, object> data) { Data = data; }
         public static Configuration ForUpdate(string json) { return new Configuration(new Dictionary<string, object> { { "update", Json.Parse(json) } }); }
@@ -139,17 +154,23 @@ namespace RemoteAgents.Launcher
         {
             // Same per-home mutex as Edit-Transport/Set-VpnEnabled; refresh first so a tray toggle
             // cannot overwrite nodes just edited in Notepad or by the transport module.
-            string fingerprint;
-            using (var sha = SHA256.Create()) fingerprint = BitConverter.ToString(sha.ComputeHash(Files.Utf8.GetBytes("CONFIG\n" + System.IO.Path.GetDirectoryName(PathName).ToLowerInvariant()))).Replace("-", "").ToLowerInvariant();
-            using (var mutex = new System.Threading.Mutex(false, "Global\\RemoteAgentsConfig-" + fingerprint)) {
-                bool owned; try { owned = mutex.WaitOne(5000); } catch (System.Threading.AbandonedMutexException) { owned = true; }
-                if (!owned) throw new IOException("Конфиг занят");
-                try {
+            using (var lease = Lock(PathName)) {
                     if (File.Exists(PathName)) { var latest = Json.Read(PathName); Data.Clear(); foreach (var pair in latest) Data[pair.Key] = pair.Value; }
                     var map = Json.Map(Json.Get(Data, "components")); var item = Json.Map(Json.Get(map, c.Name)); item["enabled"] = enabled; map[c.Name] = item; Data["components"] = map; Save();
-                } finally { mutex.ReleaseMutex(); }
             }
         }
+        sealed class Lease : IDisposable {
+            readonly System.Threading.Mutex mutex;
+            public Lease(string path) {
+                string fingerprint;
+                using (var sha = SHA256.Create()) fingerprint = BitConverter.ToString(sha.ComputeHash(Files.Utf8.GetBytes("CONFIG\n" + System.IO.Path.GetDirectoryName(path).ToLowerInvariant()))).Replace("-", "").ToLowerInvariant();
+                mutex = new System.Threading.Mutex(false, "Global\\RemoteAgentsConfig-" + fingerprint);
+                bool owned; try { owned = mutex.WaitOne(5000); } catch (System.Threading.AbandonedMutexException) { owned = true; }
+                if (!owned) { mutex.Dispose(); throw new IOException("Конфиг занят"); }
+            }
+            public void Dispose() { mutex.ReleaseMutex(); mutex.Dispose(); }
+        }
+        static IDisposable Lock(string path) { return new Lease(path); }
         public void Save() { Json.Write(PathName, Data); }
     }
     internal sealed class MenuAction

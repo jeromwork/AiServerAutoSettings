@@ -5,14 +5,18 @@ repo=$(cd "$here/.." && pwd)
 version=${REMOTEAGENTS_BUNDLE_VERSION:-$(date -u +%Y%m%d.%H%M%S)-$(git -C "$repo" rev-parse --short HEAD)}
 out=${REMOTEAGENTS_BUILD_OUT:-$here/out}
 dotnet=${DOTNET:-$HOME/.dotnet/dotnet}
-mkdir -p "$out"
+mkdir -p "$out" "$repo/release"
 out=$(cd "$out" && pwd)
-"$here/make-bundle.sh" "$version" "$out"
-cp "$out/$version.zip" "$out/initial-bundle.zip"
-"$dotnet" publish "$repo/app/launcher/RemoteAgents.Launcher.csproj" -c Release -p:BundlePath="$out/initial-bundle.zip" -o "$out/publish"
-cp "$out/publish/RemoteAgents.exe" "$out/RemoteAgents.exe"
-test -s "$out/RemoteAgents.exe"
-# OTA includes the freshly built launcher; its own embedded ZIP contains modules only.
-python3 "$here/bundle.py" attach "$out/initial-bundle.zip" "$out/RemoteAgents.exe" "$out/$version.zip"
+for product in RemoteAgents RemoteVPN; do
+  mkdir -p "$out/$product"
+  "$here/make-bundle.sh" "$version" "$out/$product" --product "$product"
+  if [[ "$product" == RemoteAgents ]]; then cp "$out/$product/$version.zip" "$out/initial-bundle.zip"; fi
+  "$dotnet" publish "$repo/app/launcher/RemoteAgents.Launcher.csproj" -c Release -p:ProductName="$product" -p:BundlePath="$out/$product/$version.zip" -o "$out/$product/publish"
+  cp "$out/$product/publish/$product.exe" "$out/$product.exe"
+  cp "$out/$product.exe" "$repo/release/$product.exe"
+done
+# Preserve the existing optional SSH update distribution for the server product.
+python3 "$here/bundle.py" attach "$out/RemoteAgents/$version.zip" "$out/RemoteAgents.exe" "$out/$version.zip"
 cp "$out/$version.zip" "$out/bundle.zip"
-sha256sum "$out/RemoteAgents.exe" "$out/$version.zip"
+cp "$here/Start.cmd" "$repo/release/Start.cmd"
+sha256sum "$repo/release/RemoteAgents.exe" "$repo/release/RemoteVPN.exe"

@@ -229,11 +229,21 @@ try{
             [pscustomobject]@{DestinationPrefix='0.0.0.0/1';InterfaceIndex=1;NextHop='198.51.100.9'},
             [pscustomobject]@{DestinationPrefix='128.0.0.0/1';InterfaceIndex=3;NextHop='0.0.0.0'})}
     $conf=Find-VpnConflicts $snap @(11) 'RemoteAgents-TUN'
-    Assert ($conf.conflict -and $conf.items.Count -eq 4) 'конфликты: чужие процессы, адаптер и маршрут'
+    Assert ($conf.conflict -and $conf.items.Count -eq 2) 'конфликты: только адаптер и маршрут'
     Assert (@($conf.items|Where-Object {$_.name -in @('OpenVPN','Tailscale','RemoteAgents-TUN')}).Count -eq 0) 'OpenVPN/Tailscale/наш адаптер не конфликтуют'
-    Assert (($conf.items|Where-Object {$_.name -eq 'sing-box.exe'}).path -eq 'C:\foreign\sing-box.exe') 'чужой sing-box не исключён по имени'
+    Assert (@($conf.items|Where-Object {$_.kind -eq 'process'}).Count -eq 0) 'процессы служат лишь подсказкой имени'
     $empty=[pscustomobject]@{Processes=@();Adapters=@();Routes=@()}
     Assert (-not (Find-VpnConflicts $empty).conflict) 'нет конфликтов на пустом снимке'
+    $idle=[pscustomobject]@{Processes=@([pscustomobject]@{Name='sing-box.exe';ProcessId=71;ExecutablePath='C:\Local\RemoteDisk\channel\sing-box.exe'},[pscustomobject]@{Name='AmneziaVPN-service.exe';ProcessId=72});Adapters=@();Routes=@()}
+    Assert (-not (Find-VpnConflicts $idle).conflict) 'старый канал и Amnezia-служба без туннеля не конфликт'
+    foreach($name in @('happ-default-tun','happ-xray')){
+        $happ=[pscustomobject]@{Processes=$idle.Processes;Adapters=@([pscustomobject]@{ifIndex=9;Name=$name;Status='Up';InterfaceDescription=$(if($name -eq 'happ-default-tun'){'SocksTunnel Tunnel'}else{'Happ Virtual Adapter'});HardwareInterface=$false});Routes=@([pscustomobject]@{DestinationPrefix='0.0.0.0/0';InterfaceIndex=9;NextHop='0.0.0.0'})}
+        Assert ((Find-VpnConflicts $happ).conflict) ('реальный Happ default через '+$name)
+        $happ.Routes=@([pscustomobject]@{DestinationPrefix='0.0.0.0/1';InterfaceIndex=9;NextHop='0.0.0.0'},[pscustomobject]@{DestinationPrefix='128.0.0.0/1';InterfaceIndex=9;NextHop='0.0.0.0'})
+        Assert ((Find-VpnConflicts $happ).conflict) ('split-default через '+$name)
+    }
+    $physical=[pscustomobject]@{Processes=$idle.Processes;Adapters=@([pscustomobject]@{ifIndex=5;Name='Ethernet';Status='Up';HardwareInterface=$true;Virtual=$false;InterfaceDescription='Ethernet'});Routes=@([pscustomobject]@{DestinationPrefix='0.0.0.0/0';InterfaceIndex=5;NextHop='192.0.2.1'})}
+    Assert (-not (Find-VpnConflicts $physical).conflict) 'физический default с VPN-службой не конфликт'
     $settings|Add-Member Vpn ([pscustomobject]@{enabled=$false;excludeCidrs=@('198.51.100.0/24')})
     $realText=${function:Invoke-TransportText}
     try{function Invoke-TransportText($Exe,$Arguments){$script:fakeHop}

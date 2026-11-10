@@ -27,7 +27,7 @@ namespace RemoteAgents.Launcher
             if (!Path.GetFullPath(home).TrimEnd('\\').Equals(Path.GetFullPath(DefaultHome).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)) {
                 using (var sha = System.Security.Cryptography.SHA256.Create()) suffix = "." + BitConverter.ToString(sha.ComputeHash(Files.Utf8.GetBytes(Path.GetFullPath(home).TrimEnd('\\').ToUpperInvariant()))).Replace("-", "").Substring(0, 24);
             }
-            return "RemoteAgents.Launcher." + sid.Value + suffix;
+            return Product.Name + ".Launcher." + sid.Value + suffix;
         }
         [STAThread] static int Main(string[] args)
         {
@@ -42,9 +42,10 @@ namespace RemoteAgents.Launcher
                 if (test != null) { AttachConsole(0xFFFFFFFF); return UpdateSelfTests.Run(Path.GetFullPath(test)); }
                 string home = Path.GetFullPath(Option(args, "--home") ?? DefaultHome);
                 Directory.CreateDirectory(home); log = new Journal(home); log.Write("launcher.start");
+                if (Product.IsVpn && recovery) return 0;
                 if (args.Contains("--recovery-host")) return Migration.RunRecoveryHost(home);
                 if (recovery && !LauncherRecovery.Requested(home)) return 0;
-                if (args.Contains("--uninstall")) { Migration.Rollback(home); log.Write("uninstall.ok"); return 0; }
+                if (args.Contains("--uninstall")) { if (Product.IsVpn) FirstInstall.UninstallVpn(home); else Migration.Rollback(home); log.Write("uninstall.ok"); return 0; }
                 var sid = WindowsIdentity.GetCurrent().User; string name = InstanceName(home, sid);
                 var security = new MutexSecurity(); security.AddAccessRule(new MutexAccessRule(sid, MutexRights.FullControl, AccessControlType.Allow));
                 bool created, owned = false, restart = false;
@@ -61,7 +62,7 @@ namespace RemoteAgents.Launcher
                         Action migrate = () => {
                             // Migrate.ps1 stops the tray only after its independent watchdog and preflight.
                             if (owned) { mutex.ReleaseMutex(); owned = false; }
-                            installer.ReleaseMutex(); installOwned = false; Migration.Start(home);
+                            installer.ReleaseMutex(); installOwned = false; FirstInstall.Start(home);
                         };
                         try {
                             owned = WaitMutex(mutex, 0);
@@ -69,7 +70,7 @@ namespace RemoteAgents.Launcher
                                 if (owned) { mutex.ReleaseMutex(); owned = false; }
                                 return 0;
                             }
-                            string target = Path.Combine(home, "RemoteAgents.exe");
+                            string target = Path.Combine(home, Product.ExeName);
                             bool external = !Path.GetFullPath(Exe).Equals(target, StringComparison.OrdinalIgnoreCase);
                             bool command = args.Any(a => new[] { "--exit", "--uninstall", "--logs", "--rollback", "--restart-components", "--check-updates", "--confirm-install" }.Contains(a));
                             // --tray with --home is also the isolated development/smoke entry point.
@@ -81,21 +82,21 @@ namespace RemoteAgents.Launcher
                                     var engine = new UpdateEngine(home, Version);
                                     int comparison = File.Exists(target) ? UpgradeInstaller.Compare(Version, bundle, FileVersionInfo.GetVersionInfo(target).FileVersion, engine.Current) : 1;
                                     if (comparison == 0) {
-                                        if (args.Contains("--install")) { migrate(); return 0; }
+                                        if (args.Contains("--install") || (!Product.IsVpn && !args.Contains("--home") && FirstInstall.Required(home))) { migrate(); return 0; }
                                         if (!owned) Forward(name, new[] { "--show" }); else launch(target, false);
                                         return 0;
                                     }
                                     if (comparison < 0 && MessageBox.Show("Запущена более старая версия RemoteAgents. Выполнить откат лаунчера и бандла?", "RemoteAgents — откат", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return 0;
-                                    if (LauncherRecovery.Accepted(home)) Files.Atomic(LauncherRecovery.Intent(home), "restart\n");
+                                    if (!Product.IsVpn && LauncherRecovery.Accepted(home)) Files.Atomic(LauncherRecovery.Intent(home), "restart\n");
                                     if (!owned) { StopInstalled(name, target, home, mutex, log); owned = true; }
                                     try {
                                         UpgradeInstaller.Apply(home, Exe, zip, Version, comparison < 0, f => External.SelfTest(f, home, CancellationToken.None));
                                     } catch { if (File.Exists(target)) launch(target, false); throw; }
-                                    if (args.Contains("--install") || (!args.Contains("--home") && !File.Exists(Path.Combine(home, "state", "migration.json")))) { migrate(); return 0; }
+                                    if (args.Contains("--install") || (!args.Contains("--home") && (Product.IsVpn || FirstInstall.Required(home)))) { migrate(); return 0; }
                                     launch(target, true); log.Write("install.upgrade.ok"); return 0;
                                 } finally { if (File.Exists(zip)) File.Delete(zip); }
                             }
-                            if (args.Contains("--install")) { migrate(); return 0; }
+                            if (args.Contains("--install") || (!external && args.Length == 0 && !Product.IsVpn && FirstInstall.Required(home))) { migrate(); return 0; }
                             if (!owned) { Forward(name, args.Contains("--uninstall") ? new[] { "--exit" } : args); log.Write("ipc.forward.ok"); return 0; }
                         } finally { if (installOwned) installer.ReleaseMutex(); }
                     }
@@ -105,7 +106,7 @@ namespace RemoteAgents.Launcher
                         using (var context = new TrayContext(home, log, name, sid, args)) { Application.Run(context); restart = context.RestartRequested; }
                     } finally { if (owned) { mutex.ReleaseMutex(); owned = false; } }
                 }
-                if (restart) StartLauncher(Path.Combine(home, "RemoteAgents.exe"), home, true);
+                if (restart) StartLauncher(Path.Combine(home, Product.ExeName), home, true);
                 return 0;
             } catch { if (log != null) log.Write("launcher.fatal"); if (recovery) return 1; MessageBox.Show("Действие не выполнено. Проверьте logs\\launcher.log в папке RemoteAgents. Обновление могло быть отклонено самопроверкой или ещё проходить проверку здоровья.", "RemoteAgents"); return 1; }
         }
@@ -115,7 +116,7 @@ namespace RemoteAgents.Launcher
             int pid = 0;
             try { var identity = Forward(name, new[] { "--identify" }); if (Path.GetFullPath(Json.Str(identity, "home")).Equals(home, StringComparison.OrdinalIgnoreCase)) pid = Json.Int(identity, "pid", 0); } catch { }
             // Compatibility with the original one-way pipe: identify the installed image, never an arbitrary PID.
-            if (pid == 0) foreach (var p in Process.GetProcessesByName("RemoteAgents")) using (p) { try { if (p.Id != Process.GetCurrentProcess().Id && p.MainModule.FileName.Equals(target, StringComparison.OrdinalIgnoreCase)) { pid = p.Id; break; } } catch { } }
+            if (pid == 0) foreach (var p in Process.GetProcessesByName(Product.Name)) using (p) { try { if (p.Id != Process.GetCurrentProcess().Id && p.MainModule.FileName.Equals(target, StringComparison.OrdinalIgnoreCase)) { pid = p.Id; break; } } catch { } }
             try { Forward(name, new[] { "--exit", "--install-stop" }); } catch { log.Write("install.shutdown.ipc.failed"); }
             if (WaitMutex(mutex, 20000)) return;
             if (pid == 0) throw new IOException("Не удалось определить экземпляр");

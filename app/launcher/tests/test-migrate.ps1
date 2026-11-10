@@ -88,6 +88,7 @@ function Start-MigrationDetached($Exe,$Arguments){[void]$script:events.Add('star
 function Wait-MigrationTransport($Root,$Timeout){[void]$script:events.Add('transport-ready')}
 function Test-MigrationSsh($Root,$Port){$true}
 function Start-MigrationControl($Root,$Bundle,$State){[void]$script:events.Add('start-control')}
+function Stop-MigrationDisk($DiskRoot){$script:lastDiskRoot=$DiskRoot;[void]$script:events.Add('stop-disk')}
 function Stop-MigrationControl($Root){[void]$script:events.Add('stop-control')}
 function Start-MigrationRun($Command){[void]$script:events.Add('restore-process')}
 function Test-MigrationHealth($Root){$script:health}
@@ -102,6 +103,7 @@ Assert (-not $script:events.Contains('suspend') -and -not $script:events.Contain
 $script:failPreflight=$false;$script:events.Clear()
 Invoke-MigrationTransition $root $repo $disk $names
 $state=Read-TransportJson (Get-MigrationStatePath $root)
+Assert ($state.diskHome -eq $disk) 'rollback records disk state home independently of config'
 Assert ($state.phase -eq 'pending' -and $script:runs.Disk -eq $null -and $script:runs.Launcher) 'migration pending and autostart transfer'
 Assert ($script:events.IndexOf('watchdog') -lt $script:events.IndexOf('preflight') -and $script:events.IndexOf('preflight') -lt $script:events.IndexOf('suspend') -and $script:events.IndexOf('suspend') -lt $script:events.IndexOf('start-launcher')) 'watchdog before preflight before channel cutover'
 $count=$script:events.Count;Invoke-MigrationTransition $root $repo $disk $names
@@ -123,6 +125,7 @@ Invoke-MigrationRollback $root $state.session
 Assert ((Read-TransportJson (Get-MigrationStatePath $root)).phase -eq 'accepted') 'late watchdog cannot roll back accepted session'
 $script:failRestore=$true
 try{Invoke-MigrationRollback $root -Force;throw 'Expected incomplete rollback'}catch{Assert ($_.Exception.Message -match 'Откат неполный') 'rollback failure explicit and retryable'}
+Assert ($script:lastDiskRoot -eq $disk) 'rollback restores recorded disk home'
 Assert ($script:runs.Disk -eq 'old-disk' -and $script:runs.Control -eq 'old-control') 'rollback continues independent restorations after failure'
 $script:failRestore=$false;Invoke-MigrationRollback $root -Force
 Assert ((Read-TransportJson (Get-MigrationStatePath $root)).phase -eq 'rolled-back' -and -not $script:runs.Launcher) 'uninstall same rollback without waiting'
@@ -176,15 +179,15 @@ $originalProfile.configPath=$ssh;Write-TransportJson $fixtureProfile $originalPr
 . (Join-Path $repo 'app/launcher/control/Control.Status.ps1') -LibraryOnly
 $controlBase=Join-Path $env:LOCALAPPDATA 'RemoteAgents/control';[void][IO.Directory]::CreateDirectory((Join-Path $controlBase 'logs'))
 [IO.File]::WriteAllText((Join-Path $controlBase 'control.pid'),'12345')
-$script:rootProcess=$true;$script:socketLive=$true;$script:created=(Get-Date).AddMinutes(-2)
-function Get-CimInstance($ClassName){if($script:rootProcess){[pscustomobject]@{ProcessId=12345;ParentProcessId=0;CommandLine='powershell -File Start-WindowsControl.ps1';Name='powershell.exe';CreationDate=$script:created};[pscustomobject]@{ProcessId=12346;ParentProcessId=12345;Name='ssh.exe';CommandLine='ssh.exe -R 127.0.0.1:111:127.0.0.1:222';CreationDate=$script:created}}}
-function Get-NetTCPConnection($OwningProcess,$State){if($script:socketLive){[pscustomobject]@{State='Established'}}}
-$log=Join-Path $controlBase 'logs/control.log'
-[IO.File]::WriteAllText($log,((Get-Date).ToString('yyyy-MM-dd HH:mm:ss')+' bridge.connected synthetic'))
-Assert ((Get-ControlMonitorStatus $root).ok) 'control requires live root, child SSH socket and connected log'
-$script:socketLive=$false;Assert (-not (Get-ControlMonitorStatus $root).ok) 'historic bridge log alone is not green'
-$script:socketLive=$true;[IO.File]::AppendAllText($log,"`r`n"+(Get-Date).ToString('yyyy-MM-dd HH:mm:ss')+' bridge.disconnected synthetic')
-Assert (-not (Get-ControlMonitorStatus $root).ok) 'later disconnect invalidates successful contact'
+$script:rootProcess=$true;$script:created=(Get-Date).AddMinutes(-2)
+function Get-CimInstance($ClassName){if($script:rootProcess){[pscustomobject]@{ProcessId=12345;ParentProcessId=0;CommandLine='powershell -File Start-WindowsControl.ps1';Name='powershell.exe';CreationDate=$script:created}}}
+$beat=Join-Path $controlBase 'heartbeat.json'
+Write-TransportJson $beat @{ok=$true;pid=12345;updatedAt=[DateTime]::UtcNow.ToString('o')}
+Assert ((Get-ControlMonitorStatus $root).ok) 'control authenticated heartbeat matches current PID'
+Write-TransportJson $beat @{ok=$true;pid=12345;updatedAt=[DateTime]::UtcNow.AddSeconds(-41).ToString('o')}
+Assert (-not (Get-ControlMonitorStatus $root).ok) 'live process and historic connected event cannot mask expired heartbeat'
+Write-TransportJson $beat @{ok=$true;pid=999;updatedAt=[DateTime]::UtcNow.ToString('o')}
+Assert (-not (Get-ControlMonitorStatus $root).ok) 'heartbeat from prior bridge PID rejected'
 $script:rootProcess=$false;Assert ((Get-ControlMonitorStatus $root).summary -eq 'Управление выключено') 'control absent process'
 Write-Output ('OK FINAL: '+$script:passed+' migration/status checks (fixtures).')
 
@@ -210,3 +213,24 @@ Write-Output ('OK COMPLETE: '+$script:passed+' migration/status checks (fixtures
 Write-TransportJson (Join-Path $root 'status/transport.json') @{ok=$true;updatedAt=[DateTime]::UtcNow.ToString('o');configError='fixture invalid reload'}
 Assert (-not (Test-MigrationFresh $root transport)) 'pending install rejects old healthy engine after invalid config reload'
 Write-Output ('OK TOTAL: '+$script:passed+' migration/status checks (fixtures).')
+
+$supervised=Join-Path $TestHome 'supervised';[void][IO.Directory]::CreateDirectory((Join-Path $supervised 'managed-control'))
+[IO.File]::WriteAllText((Join-Path $supervised 'managed-control/control.pid'),'12345')
+$script:restarts=0
+function Restart-ManagedControl($Root){Assert ($Root -eq $supervised) 'supervisor restarts only own Home';$script:restarts++}
+$now=[DateTime]::UtcNow;$sv=@{failures=0;nextRestart=$now}
+1..2|ForEach-Object {Update-ControlSupervision $supervised @{ok=$false} $sv $now}
+Assert ($script:restarts -eq 0) 'two health failures do not restart bridge'
+Update-ControlSupervision $supervised @{ok=$true} $sv $now
+Assert ($sv.failures -eq 0) 'successful roundtrip resets consecutive failure count'
+1..3|ForEach-Object {Update-ControlSupervision $supervised @{ok=$false} $sv $now}
+Assert ($script:restarts -eq 1) 'three health failures restart managed bridge'
+1..5|ForEach-Object {Update-ControlSupervision $supervised @{ok=$false} $sv $now.AddSeconds(30)}
+Assert ($script:restarts -eq 1) 'restart cooldown prevents bridge churn'
+Update-ControlSupervision $supervised @{ok=$false} $sv $now.AddSeconds(121)
+Assert ($script:restarts -eq 2) 'failed reconnect can retry after cooldown'
+Remove-Item (Join-Path $supervised 'managed-control/control.pid')
+$sv=@{failures=0;nextRestart=$now}
+1..3|ForEach-Object {Update-ControlSupervision $supervised @{ok=$false} $sv $now}
+Assert ($script:restarts -eq 2) 'unmanaged legacy bridge is never stopped by supervisor'
+Write-Output ('OK G TOTAL: '+$script:passed+' migration/status/supervision checks (fixtures).')

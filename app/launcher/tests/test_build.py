@@ -107,6 +107,24 @@ class PackagingTests(unittest.TestCase):
             self.assertEqual(ota.read('RemoteAgents.exe'), exe.read_bytes())
             self.assertIn('RemoteAgents.exe', ota.read('bundle-files.txt').decode().splitlines())
 
+    def test_two_products_and_release_not_ignored(self):
+        vpn = bundle.make('20261109.123456-test', self.root/'vpn', product='RemoteVPN')
+        with zipfile.ZipFile(self.zip) as agents, zipfile.ZipFile(vpn) as other:
+            a = json.loads(agents.read('components.json').decode('utf-8-sig'))
+            v = json.loads(other.read('components.json').decode('utf-8-sig'))
+            self.assertEqual([c['name'] for c in a['components']], ['transport','disk','control'])
+            self.assertEqual([c['name'] for c in v['components']], ['vpn'])
+            self.assertFalse(any(n.startswith(('disk/','control/','build/')) for n in other.namelist()))
+            self.assertIn('build/FirstInstall.ps1', agents.namelist())
+            self.assertIn('setup-vps-ssh.ps1', agents.namelist())
+            self.assertIn('ssh-password-ui.cs', agents.namelist())
+        for name in ('RemoteAgents.exe','RemoteVPN.exe','Start.cmd'):
+            result = subprocess.run(['git','check-ignore','-q','release/'+name],cwd=ROOT)
+            self.assertEqual(result.returncode, 1, name)
+        rules = (ROOT/'disk/stignore.txt').read_text()
+        self.assertNotIn('release', rules.lower())
+        self.assertEqual(len((ROOT/'build/Start.cmd').read_text().splitlines()),3)
+
     def test_invalid_versions(self):
         for version in ('../escape', '1..2', '1.', 'v1', '1/newline\n'):
             with self.assertRaises(ValueError):

@@ -90,7 +90,12 @@ function Stop-ControlInstance([string]$PidFile,[switch]$KeepPid) {
     $id=0
     if([int]::TryParse((Get-Content -LiteralPath $PidFile -Raw).Trim(),[ref]$id)){
         $found=Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction SilentlyContinue
-        if($found -and [string]$found.CommandLine -match 'Start-WindowsControl\.ps1'){& taskkill.exe /T /F /PID $id *> $null}
+        if($found -and [string]$found.CommandLine -match 'Start-WindowsControl\.ps1'){
+            & taskkill.exe /T /F /PID $id *> $null
+            if($LASTEXITCODE -ne 0){throw 'Не удалось остановить прежний мост'}
+            $wait=$null;try{$wait=[Diagnostics.Process]::GetProcessById($id)}catch [ArgumentException]{}
+            if($wait){try{if(-not $wait.WaitForExit(10000)){throw 'Прежний мост ещё работает'}}finally{$wait.Dispose()}}
+        }
     }
     if(-not $KeepPid){Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue}
 }
@@ -164,7 +169,7 @@ while($true){
         if($remote.user -cnotmatch '^[a-z_][a-z0-9_-]*$' -or $remote.home -cnotmatch '^(/[a-zA-Z0-9._-]+)+$'){throw 'Сервер вернул неверного пользователя или HOME'}
         if(-not $LauncherHome){Save-ControlConfig $configPath $remote.user $connection.profilePath}
         Write-Host 'Подключение моста: команды агентов выполняются с вашими правами Windows.'
-        & (Join-Path $PSScriptRoot 'Start-CodexWindowsBridge.ps1') -VPSHost $connection.serverAddress -VPSUser $connection.login -IdentityFile $connection.keyPath -SSHPort $connection.port -SSHExecutable $connection.sshExecutable -SSHConfig $connection.configPath -KnownHostsFile $connection.knownHostsPath -ServerUser $remote.user -RemoteBase ($remote.home+'/.local/share/codex-remote') -SocketPath ($remote.home+'/.local/state/codex-remote/'+$label+'.sock') -Workspace $workspace -DeviceLabel $label -ProjectId control -HostId $connection.hostId -AllowShell -ControlOnly -RetryForever -LogFile $logFile
+        & (Join-Path $PSScriptRoot 'Start-CodexWindowsBridge.ps1') -VPSHost $connection.serverAddress -VPSUser $connection.login -IdentityFile $connection.keyPath -SSHPort $connection.port -SSHExecutable $connection.sshExecutable -SSHConfig $connection.configPath -KnownHostsFile $connection.knownHostsPath -ServerUser $remote.user -RemoteBase ($remote.home+'/.local/share/codex-remote') -SocketPath ($remote.home+'/.local/state/codex-remote/'+$label+'.sock') -Workspace $workspace -DeviceLabel $label -ProjectId control -HostId $connection.hostId -AllowShell -ControlOnly -RetryForever -LogFile $logFile -HealthFile (Join-Path $base 'heartbeat.json')
         Write-ControlLog $logFile 'bridge returned'
     } catch {
         Write-Host ('Ошибка: '+$_.Exception.Message)

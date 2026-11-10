@@ -1,5 +1,5 @@
 ﻿[CmdletBinding()]
-param([string]$ServerAddress, [string]$Login, [string]$ProfileName, [string]$DataDir, [switch]$Launcher, [switch]$DetailedOutput, [switch]$ConnectionSettings, [ValidateRange(0,65535)][int]$SSHPort=0, [string]$SSHJumpHost, [string]$SSHJumpConfig, [switch]$ConnectSaved)
+param([string]$ServerAddress, [string]$Login, [string]$ProfileName, [string]$DataDir, [switch]$Launcher, [switch]$DetailedOutput, [switch]$ConnectionSettings, [ValidateRange(0,65535)][int]$SSHPort=0, [string]$SSHJumpHost, [string]$SSHJumpConfig, [switch]$ConnectSaved, [switch]$SetupOnly)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 function Select-SetupOutputMode([switch]$Detailed, [switch]$Prompt) {
@@ -963,6 +963,13 @@ function Manage-ProjectFoldersMenu {
 }
 
 function Start-RemoteCodex {
+    if($SetupOnly){
+        # Export the same connection contract without opening project/app menus.
+        $context=Get-ProjectClientContext
+        $transport=[pscustomobject]@{sshExecutable=$script:sshExecutable;serverAddress=$ServerAddress;login=$Login;keyPath=$keyPath;knownHostsPath=$knownHostsPath;configPath=$configPath;arguments=@($common+@('-p',[string]$SSHPort,'-i',$keyPath,'-o','IdentitiesOnly=yes','-o','BatchMode=yes','-T',$ServerAddress))}
+        Save-ProfileMetadata $transport (Join-Path $context.DataDir 'ssh-transport.json')
+        return
+    }
     # Compatibility entry name. Returning users choose an action before any app install.
     $agents=if($metadata.agentApplications -in @('1','2','3')){[string]$metadata.agentApplications}else{'0'}
     $mode=if($metadata.executionMode -in @('1','2')){[string]$metadata.executionMode}else{'2'}

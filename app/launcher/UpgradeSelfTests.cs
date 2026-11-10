@@ -16,30 +16,38 @@ namespace RemoteAgents.Launcher
         {
             Directory.CreateDirectory(root);
             string work = Path.Combine(root, "upgrade-" + Guid.NewGuid().ToString("N")), home = Path.Combine(work, "home");
-            Directory.CreateDirectory(home); var checks = new List<string>(); Process tray = null; string phase = "initialize";
+            Directory.CreateDirectory(home);
+            string neighborExe = Path.Combine(home, Product.IsVpn ? "RemoteAgents.exe" : "RemoteVPN.exe");
+            string neighborBundle = Path.Combine(home, Product.IsVpn ? "bundle" : "vpn-bundle", "current.txt");
+            Files.Atomic(neighborExe, "neighbor-image"); Files.Atomic(neighborBundle, "neighbor-version");
+            var checks = new List<string>(); Process tray = null; string phase = "initialize";
             Action<string, bool> check = (name, ok) => { phase = name; if (!ok) throw new InvalidOperationException(); checks.Add(name); };
             try {
-                string source = Path.Combine(work, "downloaded", "RemoteAgents.exe"); Directory.CreateDirectory(Path.GetDirectoryName(source)); File.Copy(Program.Exe, source);
+                check("product-identity", Program.InstanceName(home, WindowsIdentity.GetCurrent().User).StartsWith(Product.Name + ".Launcher."));
+                string source = Path.Combine(work, "downloaded", Product.ExeName); Directory.CreateDirectory(Path.GetDirectoryName(source)); File.Copy(Program.Exe, source);
                 string oldZip = Fixture(work, "0.0.1", true), newZip = Fixture(work, "0.0.2", true), badZip = Fixture(work, "0.0.3", false);
                 phase = "install-old"; UpgradeInstaller.Apply(home, source, oldZip, Program.Version, false, f => External.SelfTest(f, home, CancellationToken.None));
-                string target = Path.Combine(home, "RemoteAgents.exe");
+                string target = Path.Combine(home, Product.ExeName);
                 string cfg = "{\r\n\"schema\":1,\"version\":1,\"components\":{},\"update\":{\"enabled\":false},\"transport\":{\"keep\":true}}\r\n";
                 File.WriteAllText(Path.Combine(home, "config.json"), cfg, Files.Utf8);
                 foreach (string directory in new[] { "state", "secrets", "logs" }) { Directory.CreateDirectory(Path.Combine(home, directory)); File.WriteAllText(Path.Combine(home, directory, "preserve.txt"), "preserve\r\n", Files.Utf8); }
                 phase = "old-tray"; tray = Start(target, home); Wait(() => Healthy(home, "0.0.1"), 20000);
                 check("old-tray-real-process", !tray.HasExited);
+                if (!Product.IsVpn) {
                 Json.Write(Path.Combine(home, "state", "migration.json"), new { phase = "accepted" });
                 phase = "recovery-skips-running-tray";
                 using (var host = Process.Start(new ProcessStartInfo(source, "--recovery-host --home " + Files.Quote(home)) { UseShellExecute = false }))
                     check("recovery-keeps-single-tray", host.WaitForExit(10000) && host.ExitCode == 0 && !tray.HasExited);
                 phase = "recovery-after-tray-crash"; int crashedPid = tray.Id; tray.Kill(); tray.WaitForExit(); tray.Dispose(); tray = null;
                 using (var host = Process.Start(new ProcessStartInfo(source, "--recovery-host --home " + Files.Quote(home)) { UseShellExecute = false })) {
-                    Wait(() => { try { return Healthy(home, "0.0.1") && Json.Int(Json.Read(Path.Combine(home, "status", "launcher.json")), "pid", 0) != crashedPid; } catch { return false; } }, 20000);
-                    tray = Process.GetProcessById(Json.Int(Json.Read(Path.Combine(home, "status", "launcher.json")), "pid", 0));
+                    Wait(() => { try { return Healthy(home, "0.0.1") && Json.Int(Json.Read(Path.Combine(home, "status", Product.StatusName)), "pid", 0) != crashedPid; } catch { return false; } }, 20000);
+                    tray = Process.GetProcessById(Json.Int(Json.Read(Path.Combine(home, "status", Product.StatusName)), "pid", 0));
                     check("recovery-restarts-crashed-tray", !tray.HasExited && !host.HasExited);
                     Stop(home, target); if (!tray.WaitForExit(10000) || !host.WaitForExit(10000)) throw new IOException();
                     tray.Dispose(); tray = null;
                 }
+                }
+                if (tray != null) { Stop(home, target); tray.WaitForExit(10000); tray.Dispose(); }
                 tray = Start(target, home); Wait(() => Healthy(home, "0.0.1"), 20000);
                 string configHash = Files.Hash(Path.Combine(home, "config.json"));
                 phase = "graceful-stop"; Stop(home, target); check("old-process-exited", tray.WaitForExit(10000)); tray.Dispose(); tray = null;
@@ -60,14 +68,15 @@ namespace RemoteAgents.Launcher
                 phase = "real-120-second-rollback"; Wait(() => e.Current == "0.0.2" && !e.Pending && !File.Exists(Path.Combine(e.Root, "exe-upgrade.json")), 150000);
                 check("real-health-deadline", watch.Elapsed.TotalSeconds >= 118);
                 check("unhealthy-version-rejected", e.IsBad("0.0.3"));
+                check("neighbor-product-untouched", File.ReadAllText(neighborExe) == "neighbor-image" && Files.ReadLine(neighborBundle) == "neighbor-version");
                 phase = "restored-tray"; Wait(() => Healthy(home, "0.0.2"), 20000);
                 check("rollback-restarts-tray", Healthy(home, "0.0.2"));
                 check("rollback-preserves-config-state", Files.Hash(Path.Combine(home, "config.json")) == configHash && File.ReadAllText(Path.Combine(home, "state", "preserve.txt")) == "preserve\r\n");
-                Json.Write(Path.Combine(root, "selftest-upgrade-result.json"), new { ok = true, tests = checks.ToArray(), count = checks.Count, home }); return 0;
+                Json.Write(Path.Combine(root, (Product.IsVpn ? "selftest-upgrade-vpn-result.json" : "selftest-upgrade-result.json")), new { ok = true, tests = checks.ToArray(), count = checks.Count, home }); return 0;
             } catch {
-                Json.Write(Path.Combine(root, "selftest-upgrade-result.json"), new { ok = false, failed = phase, tests = checks.ToArray(), count = checks.Count, home }); return 1;
+                Json.Write(Path.Combine(root, (Product.IsVpn ? "selftest-upgrade-vpn-result.json" : "selftest-upgrade-result.json")), new { ok = false, failed = phase, tests = checks.ToArray(), count = checks.Count, home }); return 1;
             } finally {
-                try { Stop(home, Path.Combine(home, "RemoteAgents.exe")); } catch { }
+                try { Stop(home, Path.Combine(home, Product.ExeName)); } catch { }
                 if (tray != null) { try { if (!tray.WaitForExit(10000)) { using (var kill = Process.Start(new ProcessStartInfo("taskkill.exe", "/PID " + tray.Id + " /T /F") { UseShellExecute = false, CreateNoWindow = true })) kill.WaitForExit(10000); } } catch { } tray.Dispose(); }
             }
         }
@@ -75,7 +84,7 @@ namespace RemoteAgents.Launcher
         { return Process.Start(new ProcessStartInfo(exe, "--tray --home " + Files.Quote(home)) { UseShellExecute = false }); }
         static bool Healthy(string home, string version)
         {
-            try { var s = Json.Read(Path.Combine(home, "status", "launcher.json")); return Json.Str(s, "bundleVersion") == version && Json.Bool(s, "ok") && Json.Bool(s, "running"); } catch { return false; }
+            try { var s = Json.Read(Path.Combine(home, "status", Product.StatusName)); return Json.Str(s, "bundleVersion") == version && Json.Bool(s, "ok") && Json.Bool(s, "running"); } catch { return false; }
         }
         static void Stop(string home, string target)
         {

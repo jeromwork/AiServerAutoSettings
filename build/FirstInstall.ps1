@@ -1,0 +1,47 @@
+﻿#requires -Version 5.1
+[CmdletBinding()]
+param([Alias('Home')][string]$LauncherHome,[string]$ServerAddress,[string]$Login,[switch]$LibraryOnly)
+$ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot 'Migrate.Common.ps1')
+function Find-InstallProfile([string]$Root) {
+    $config=Join-Path $Root 'config.json'
+    if(Test-Path $config){$c=Read-TransportJson $config;if($c.transport.profilePath){return [string]$c.transport.profilePath}}
+    $saved=Join-Path $env:LOCALAPPDATA 'RemoteDisk/profile.txt'
+    if(Test-Path $saved){return [IO.File]::ReadAllText($saved).Trim()}
+    $files=@(Get-ChildItem -Path (Join-Path $Root 'ssh-profiles/*/project-connections/*/ssh-transport.json') -File -ErrorAction SilentlyContinue)
+    if($files.Count -eq 1){return $files[0].FullName}
+    if($files.Count -gt 1){throw 'Несколько профилей: задайте transport.profilePath в config.json'}
+    return ''
+}
+function Invoke-InstallChild([string]$Bundle,[string]$Script,[string[]]$Arguments) {
+    $psi=New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName=Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+    $psi.Arguments=(@('-NoLogo','-NoProfile','-NonInteractive','-STA','-ExecutionPolicy','Bypass','-File',(Join-Path $Bundle $Script))+$Arguments|ForEach-Object {Quote-Transport ([string]$_)}) -join ' '
+    $psi.UseShellExecute=$false;$psi.CreateNoWindow=$true
+    $p=[Diagnostics.Process]::Start($psi)
+    try{if(-not $p.WaitForExit(900000)){$p.Kill();throw 'Таймаут установки'};if($p.ExitCode -ne 0){throw 'Шаг установки не выполнен'}}finally{$p.Dispose()}
+}
+function Invoke-FirstInstall([string]$Root,[string]$Bundle,[string]$Address,[string]$User) {
+    # Existing migration is kept intact, including its independent network watchdog.
+    Write-MigrationLog $Root 'setup.start'
+    $profile=Find-InstallProfile $Root
+    if(-not $profile){
+        if(-not $Address -or -not $User){throw 'Нужны адрес сервера и пользователь'}
+        Invoke-InstallChild $Bundle 'setup-vps-ssh.ps1' @('-ServerAddress',$Address,'-Login',$User,'-ProfileName',$Address,'-DataDir',(Join-Path $Root 'ssh-profiles'),'-SetupOnly')
+        $profile=Find-InstallProfile $Root
+        if(-not $profile){throw 'Ключ SSH не настроен'}
+    }
+    # Always prove saved credentials work; config presence is not a completion marker.
+    $p=Read-TransportJson $profile
+    [void](Invoke-TransportText $p.sshExecutable (@('-o','BatchMode=yes','-o','ConnectTimeout=10','-o','StrictHostKeyChecking=yes')+@($p.arguments)+@('true')))
+    Write-MigrationLog $Root 'setup.ssh.verified'
+    $diskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk'
+    if(-not (Test-Path (Join-Path $diskHome 'state/config.xml')) -or -not (Test-Path (Join-Path $diskHome 'channel/config.json')) -or -not (Test-Path (Join-Path $env:LOCALAPPDATA 'RemoteAgents/control/config.json')) -or -not (Get-MigrationRun 'RemoteAgentsControl')){
+        Invoke-InstallChild $Bundle 'Setup-All.ps1' @('-Profile',$profile,'-LauncherSetup')
+    }
+    Invoke-InstallChild $Bundle 'build/Migrate.ps1' @('-Home',$Root)
+}
+if($LibraryOnly){return}
+$default=Join-Path $env:LOCALAPPDATA 'RemoteAgents'
+if([IO.Path]::GetFullPath($LauncherHome).TrimEnd('\') -ine [IO.Path]::GetFullPath($default).TrimEnd('\')){throw 'Рабочая установка только в основном Home; изолированный Home не меняет компьютер'}
+try{Invoke-FirstInstall $LauncherHome (Split-Path $PSScriptRoot -Parent) $ServerAddress $Login}catch{Write-MigrationLog $LauncherHome 'setup.failed';throw 'Установка не завершена; смотрите локальные журналы SSH, диска и моста'}

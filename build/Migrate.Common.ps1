@@ -106,7 +106,7 @@ function Start-MigrationRun([string]$Command){
 function Register-MigrationRollback([string]$Root,[string]$Bundle,$State){
     # Recovery code must outlive bundle cleanup and a damaged current components.json.
     $recovery=Join-Path $Root ('state/migration-recovery/'+$State.session)
-    foreach($part in @('build/Rollback.ps1','build/Migrate.Common.ps1','transport/Transport.Common.ps1')){
+    foreach($part in @('build/Rollback.ps1','build/Migrate.Common.ps1','transport/Transport.Common.ps1','disk/Disk.Engine.ps1')){
         $target=Join-Path $recovery $part;[void][IO.Directory]::CreateDirectory((Split-Path $target -Parent));Copy-Item -LiteralPath (Join-Path $Bundle $part) -Destination $target -Force
     }
     $user=[Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -187,6 +187,10 @@ function Stop-MigrationControl([string]$Root){
             if($p -and $p.CommandLine -match 'Start-WindowsControl\.ps1' -and ([string]$p.CommandLine).IndexOf($Root,[StringComparison]::OrdinalIgnoreCase) -ge 0){& "$env:SystemRoot/System32/taskkill.exe" /T /F /PID $id *> $null}
         }
     }
+}
+function Stop-MigrationDisk([string]$DiskRoot){
+    . (Join-Path (Split-Path $PSScriptRoot -Parent) 'disk/Disk.Engine.ps1')
+    Stop-DiskEngineProcesses $DiskRoot
 }
 function Start-MigrationControl([string]$Root,[string]$Bundle,$State){
     # Existing -Uninstall stops only the old control PID and removes its Run value.
@@ -322,13 +326,16 @@ function Invoke-MigrationTransition([string]$Root,[string]$Bundle,[string]$DiskH
     $snapshot=Get-MigrationTask $Names.channelTask
     # Refuse shared fixed-port startup if channel ownership has not been requested.
     if(-not $config.transport.takeOverChannel -and ($snapshot.enabled -or $snapshot.running)){throw 'Канал работает: требуется takeOverChannel=true'}
-    $state=[pscustomobject]@{schema=1;session=[Guid]::NewGuid().ToString('N');phase='preparing';names=$Names;diskRun=(Get-MigrationRun $Names.diskRun);controlRun=(Get-MigrationRun $Names.controlRun);launcherRun=(Get-MigrationRun $Names.launcherRun);channel=$snapshot;profiles=@($profiles);sshPort=[int]$config.transport.sshPort;startedAt=[DateTime]::UtcNow.ToString('o');greenSince=$null;lastHealthyAt=$null;dryRun=$DryRun;controlChanged=$false;channelChanged=$false;diskChanged=$false;launcherChanged=$false;launcherTouched=$false}
+    $state=[pscustomobject]@{schema=1;session=[Guid]::NewGuid().ToString('N');phase='preparing';names=$Names;diskHome=$DiskHome;diskRun=(Get-MigrationRun $Names.diskRun);controlRun=(Get-MigrationRun $Names.controlRun);launcherRun=(Get-MigrationRun $Names.launcherRun);channel=$snapshot;profiles=@($profiles);sshPort=[int]$config.transport.sshPort;startedAt=[DateTime]::UtcNow.ToString('o');greenSince=$null;lastHealthyAt=$null;dryRun=$DryRun;controlChanged=$false;channelChanged=$false;diskChanged=$false;launcherChanged=$false;launcherTouched=$false}
     Write-TransportJson $statePath $state -Durable
     Write-MigrationLog $Root 'watchdog.register'
     Register-MigrationRollback $Root $Bundle $state # Must succeed before touching running services.
     try{
         Write-MigrationLog $Root 'preflight.start'
         Invoke-MigrationPreflight $Root $Bundle $config
+        $state.diskChanged=$true;Write-TransportJson $statePath $state -Durable
+        Set-MigrationRun $Names.diskRun $null
+        Stop-MigrationDisk $DiskHome
         $state.launcherTouched=$true;Write-TransportJson $statePath $state -Durable
         Stop-MigrationLauncher $Root
         Merge-MigrationProbeMemory $Root
@@ -367,7 +374,7 @@ function Invoke-MigrationRollback([string]$Root,[string]$Session='',[switch]$For
     foreach($p in @($state.profiles)){try{Set-MigrationSshBlock $p.path $Root $p.server $state.sshPort -Remove -OriginallyAbsent:($p.PSObject.Properties['existed'] -and -not $p.existed)}catch{$failed=$true;Write-MigrationLog $Root 'rollback.ssh.failed'}}
     if($state.controlChanged){try{Stop-MigrationControl $Root;Set-MigrationRun $state.names.controlRun $state.controlRun;Start-MigrationRun $state.controlRun}catch{$failed=$true;Write-MigrationLog $Root 'rollback.control.failed'}}
     if($state.channelChanged){try{Restore-MigrationChannel $state.names.channelTask $state.channel}catch{$failed=$true;Write-MigrationLog $Root 'rollback.channel.failed'}}
-    if($state.diskChanged){try{Set-MigrationRun $state.names.diskRun $state.diskRun;if($state.diskRun){Start-MigrationRun $state.diskRun}}catch{$failed=$true;Write-MigrationLog $Root 'rollback.disk.failed'}}
+    if($state.diskChanged){try{$diskRoot=Join-Path $env:LOCALAPPDATA 'RemoteDisk';if($state.PSObject.Properties['diskHome'] -and $state.diskHome){$diskRoot=[string]$state.diskHome};Stop-MigrationDisk $diskRoot;Set-MigrationRun $state.names.diskRun $state.diskRun;if($state.diskRun){Start-MigrationRun $state.diskRun}}catch{$failed=$true;Write-MigrationLog $Root 'rollback.disk.failed'}}
     if($state.launcherChanged){try{$oldRun=$state.launcherRun;if($oldRun -and $oldRun.IndexOf((Join-Path $Root 'RemoteAgents.exe'),[StringComparison]::OrdinalIgnoreCase) -ge 0){$oldRun=$null};Set-MigrationRun $state.names.launcherRun $oldRun}catch{$failed=$true;Write-MigrationLog $Root 'rollback.run.failed'}}
     # Disable supervised transport on later manual starts, without overwriting other config keys.
     try{Update-MigrationConfig $Root {param($c) foreach($name in @('transport','disk','control')){if($c.components.$name){$c.components.$name|Add-Member -Force enabled $false}}}}catch{$failed=$true}
