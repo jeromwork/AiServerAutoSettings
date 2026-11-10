@@ -49,7 +49,9 @@ try {
     await connectAccount({key,label:'Мой аккаунт'},vendor,api,service,root);
     check(listAccounts(root).accounts[0].label==='Мой аккаунт');
     assert.throws(()=>accountLabel('bad\r\nlabel'));checks++;
+    fs.chmodSync(services.get(one.account).dir,0o755);
     const again=await connectAccount({key:key+'\r\n'},vendor,api,service,root);
+    check((fs.statSync(services.get(one.account).dir).mode & 0o777)===0o700);
     check(again.account===one.account && accounts.size===1 && stores.size===1);
     check(fs.readFileSync(path.join(services.get(one.account).dir,'fixture-credentials.json')).equals(bytes));
     await assert.rejects(connectAccount({key,expectedAccount:'b'.repeat(64),label:'someone else'},vendor,api,service,root));checks++;

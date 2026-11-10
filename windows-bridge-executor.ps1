@@ -1,4 +1,4 @@
-# Windows PowerShell 5.1. Private parent stdin supplies token and selected folder.
+﻿# Windows PowerShell 5.1. Private parent stdin supplies token and selected folder.
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 . (Join-Path $PSScriptRoot 'Windows.Paths.ps1')
@@ -111,7 +111,12 @@ function Update-Environment([string]$Id,[string]$TaskId,[Diagnostics.Process]$Pr
             $began=if($previous.Count -and $previous[0].PSObject.Properties['began']){[long]$previous[0].began}else{[DateTime]::UtcNow.Ticks}
             $entries+=@(@{id=$Id;taskId=$TaskId;pid=$Process.Id;started=$Process.StartTime.ToUniversalTime().Ticks;began=$began;operation=$Operation;exclusive=$Exclusive})
         }
-        [IO.File]::WriteAllText($leasePath,(@{schema=1;operations=$entries}|ConvertTo-Json -Depth 5 -Compress),(New-Object Text.UTF8Encoding($false)))
+        $temp=$leasePath+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
+        try{
+            $stream=New-Object IO.FileStream($temp,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+            try{$bytes=[Text.Encoding]::UTF8.GetBytes((@{schema=1;operations=$entries}|ConvertTo-Json -Depth 5 -Compress));$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
+            if([IO.File]::Exists($leasePath)){[IO.File]::Replace($temp,$leasePath,($temp+'.old'))}else{[IO.File]::Move($temp,$leasePath)}
+        }finally{if([IO.File]::Exists($temp)){[IO.File]::Delete($temp)};if([IO.File]::Exists($temp+'.old')){[IO.File]::Delete($temp+'.old')}}
     } finally {$environmentMutex.ReleaseMutex()}
 }
 

@@ -3,7 +3,7 @@ set -euo pipefail
 umask 077
 export REMOTE_DISK_SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 python3 - "$@" 3<&0 <<'PY'
-import os,sys,json,subprocess,hashlib,tarfile,urllib.request,time,socket,base64,re,fcntl,fnmatch,xml.etree.ElementTree as E
+import os,sys,json,subprocess,hashlib,tempfile,tarfile,urllib.request,time,socket,base64,re,fcntl,fnmatch,xml.etree.ElementTree as E
 from pathlib import Path
 s=Path.home()/'.local/share/remote-disk'; cfg=s/'config.xml'; binary=s/'bin/syncthing'; here=Path(os.environ['REMOTE_DISK_SCRIPT_DIR'])
 a=sys.argv[1:] or ['bootstrap']; action=a[0]
@@ -20,7 +20,14 @@ def ignores(p,write=False):
     if f.exists() and f.read_text(encoding='utf-8-sig').replace('\r','').rstrip('\n')!=rules.decode('utf-8-sig').replace('\r','').rstrip('\n'):
         normalized='\n'.join(f.read_text(encoding='utf-8-sig').splitlines())+'\n'
         if hashlib.sha256(normalized.encode()).hexdigest() not in (here/'legacy-ignores.sha256').read_text().splitlines():raise ValueError('Чужой .stignore: сохраните и удалите его вручную перед подключением')
-    if write and (not f.exists() or f.read_bytes()!=rules):f.write_bytes(rules)
+    if write and (not f.exists() or f.read_bytes()!=rules):
+        marker=p/'.stfolder';safe(marker);marker.mkdir(exist_ok=True)
+        fd,tmp=tempfile.mkstemp(dir=marker)
+        try:
+            with os.fdopen(fd,'wb') as out:out.write(rules);out.flush();os.fsync(out.fileno())
+            os.replace(tmp,f)
+        finally:
+            if os.path.exists(tmp):os.unlink(tmp)
 def git(p,*args):
     r=subprocess.run(['git','-C',str(p),*args],capture_output=True,text=True,timeout=5);return r.stdout.strip() if r.returncode==0 else ''
 def exclude_git(p):

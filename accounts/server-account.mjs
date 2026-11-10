@@ -21,6 +21,8 @@ export function normalizeKey(value) {
 function safeDirectory(dir) {
     for(let p=dir;;p=path.dirname(p)) { if(fs.existsSync(p) && fs.lstatSync(p).isSymbolicLink()) throw Error('symlink'); if(path.dirname(p)===p) break; }
     fs.mkdirSync(dir,{recursive:true,mode:0o700});
+    // mkdir's mode is ignored for an existing directory. Repair permissive installs.
+    fs.chmodSync(dir,0o700);
 }
 export async function connectAccount(input, vendor, api, service, home=os.homedir()) {
     const label=accountLabel(input.label || '');

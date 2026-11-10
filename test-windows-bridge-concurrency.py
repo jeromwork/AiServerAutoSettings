@@ -191,6 +191,33 @@ class ExecutorConcurrencyTests(unittest.TestCase):
             self.assertLess(time.monotonic(), deadline, 'Command did not start')
             time.sleep(.02)
 
+    def test_killed_lease_writer_preserves_live_exclusive_owner(self):
+        self.start(task='owner', exclusive=True)
+        before = self.lease.read_bytes()
+        source = self.stage / 'windows-bridge-executor.ps1'
+        text = source.read_text()
+        point = "            if([IO.File]::Exists($leasePath)){[IO.File]::Replace"
+        self.assertIn(point, text)
+        text = text.replace(point,
+            "            if($TaskId -ceq 'owner'){[IO.File]::WriteAllText($leasePath+'.staged','yes');Start-Sleep -Seconds 30}\n" + point)
+        source.write_bytes(text.replace('\n', '\r\n').encode())
+        writer = self.launch()
+        pending = self.open_request('process_start', dict(taskId='owner', command='Write-Output never'), node=writer)
+        try:
+            self.wait_file(Path(str(self.lease) + '.staged'))
+            self.assertEqual(self.lease.read_bytes(), before, 'Uncommitted write damaged the shared ledger')
+            writer['process'].kill(); writer['process'].wait(5)
+        finally:
+            pending.close()
+            if writer['process'].poll() is None:
+                writer['process'].kill(); writer['process'].wait(5)
+            for stream in ('stdin', 'stdout', 'stderr'):
+                writer['process'].__getattribute__(stream).close()
+            self.nodes.remove(writer)
+        refused = self.call('process_start', dict(taskId='outsider', command='Write-Output forbidden'))
+        self.assertFalse(refused['ok'])
+        self.assertIn('taskId=owner', refused['error'])
+
     def test_two_commands_on_same_executor_overlap_and_partial_frame_does_not_stall(self):
         partial = socket.create_connection(('127.0.0.1', self.node['port']))
         self.addCleanup(partial.close); partial.sendall(b'{')

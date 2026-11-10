@@ -305,7 +305,7 @@ def exercise(root, archive):
     require((local/'base.txt').read_text()==str(base2) and api(b,'config/folders/'+aid)['paused'], 'base saved, pause kept')
     copied=base2/'Copied'
     run([ps,'-NoProfile','-File',str(HERE/'Move-RemoteDiskFolder.ps1'),'-FolderId',aid,'-Destination',str(copied),'-Copy'],env,limit=15)
-    require((copied/'hello.txt').read_text()=='auto' and (copied/'hello.txt').stat().st_mtime_ns//10**7==stamp//10**7 and (copied/'.stignore').exists() and not relocated.exists(), 'copy move across volumes keeps files and times')
+    require((copied/'hello.txt').read_text()=='auto' and (copied/'hello.txt').stat().st_mtime_ns//10**7==stamp//10**7 and (copied/'.stignore').exists() and (relocated/'hello.txt').read_text()=='auto', 'copy move across volumes keeps files, times and recovery source')
     require(api(b,'config/folders/'+aid)['path']==str(copied), 'copy move updates path')
     refused=run([ps,'-NoProfile','-File',str(HERE/'Move-RemoteDiskFolder.ps1'),'-FolderId',aid,'-Destination',str(copied/'inner'),'-Copy'],env,ok=False,limit=10)
     require(refused.returncode!=0 and not (copied/'inner').exists(), 'move into itself refused')

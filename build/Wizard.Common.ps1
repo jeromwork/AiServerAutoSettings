@@ -38,7 +38,8 @@ function Send-WizardHelpers([string]$Root,[string]$Bundle) {
         $bytes=[Text.Encoding]::UTF8.GetBytes((Convert-TransportLF ([IO.File]::ReadAllText((Join-Path $Bundle $key)))))
         $bridgeHelper=$key -in @('codex-windows-bridge.py','codex-bridge-session.py','server_node_catalog.py')
         if($bridgeHelper){$upload+='if [ ! -f "'+$dest+'" ]; then '+"`n"}
-        $upload+='mkdir -p "'+$directory+'"; test ! -L "'+$dest+'"; printf %s '+[Convert]::ToBase64String($bytes)+' | base64 -d > "'+$dest+'.tmp"; mv -f -- "'+$dest+'.tmp" "'+$dest+'"'+"`n"
+        $temp=$dest+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
+        $upload+='mkdir -p "'+$directory+'"; test ! -L "'+$dest+'"; printf %s '+[Convert]::ToBase64String($bytes)+' | base64 -d > "'+$temp+'"; mv -f -- "'+$temp+'" "'+$dest+'"'+"`n"
         if($bridgeHelper){$upload+='fi'+"`n"}
     }
     [void](Invoke-WizardSsh $Root 'bash -s' $upload)
@@ -86,6 +87,84 @@ function Get-WizardPublicTransport($Transport) {
         $out|Add-Member $g $rows
     };return $out
 }
+function Register-WizardRollback([string]$Root,[string]$Bundle,[string]$Kind,[string]$Session,[string]$Task) {
+    # Recovery is independent of both the UI and the prunable current bundle.
+    $recovery=Join-Path $Root ('state/wizard-recovery/'+$Session)
+    foreach($name in @('build/Wizard.ps1','build/Wizard.Common.ps1','build/FirstInstall.ps1','build/Migrate.Common.ps1','transport/Transport.Common.ps1','disk/Disk.Common.ps1','disk/Disk.Union.ps1','disk/Disk.Selective.ps1','disk/stignore.txt','disk/legacy-ignores.sha256')){
+        $dest=Join-Path $recovery $name;[void][IO.Directory]::CreateDirectory((Split-Path $dest -Parent))
+        Copy-Item -LiteralPath (Join-Path $Bundle $name) -Destination $dest
+    }
+    $args=@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $recovery 'build/Wizard.ps1'),'-Home',$Root,'-Action',('Rollback'+$Kind),'-Session',$Session)
+    $action=New-ScheduledTaskAction -Execute (Get-TransportPowerShell) -Argument (($args|ForEach-Object {Quote-Transport $_}) -join ' ')
+    $user=[Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $principal=New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+    $settings=New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+    Register-ScheduledTask -TaskName $Task -Action $action -Trigger @((New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(3)),(New-ScheduledTaskTrigger -AtLogOn -User $user)) -Principal $principal -Settings $settings -Force|Out-Null
+    $registered=Get-MigrationTask $Task
+    if(-not $registered.exists -or -not $registered.enabled){throw 'Не зарегистрирован независимый откат настроек'}
+}
+function Get-WizardBridgeCommand([string]$Root,[string]$Run) {
+    if($Run){return $Run}
+    # A manually started bridge may have no Run entry; retain its actual command too.
+    foreach($base in @((Join-Path $Root 'managed-control'),(Join-Path $env:LOCALAPPDATA 'RemoteAgents/control'))){
+        $pidFile=Join-Path $base 'control.pid';if(-not (Test-Path $pidFile)){continue}
+        $id=0;if(-not [int]::TryParse([IO.File]::ReadAllText($pidFile).Trim(),[ref]$id)){continue}
+        $process=Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction Stop
+        if($process -and $process.CommandLine -match 'Start-WindowsControl\.ps1'){return [string]$process.CommandLine}
+    }
+    return ''
+}
+function Undo-WizardBridge([string]$Root,[string]$Session) {
+    $file=Join-Path $Root 'state/wizard-bridge.json';if(-not (Test-Path $file)){return}
+    $receipt=Read-TransportJson $file;if($receipt.session -cne $Session){return}
+    # Restore intent first, so the launcher cannot restart the rejected version.
+    Update-MigrationConfig $Root {param($c)
+        if($null -ne $receipt.bridge){$c|Add-Member -Force bridge $receipt.bridge}else{$c.PSObject.Properties.Remove('bridge')}
+        if($null -ne $receipt.control){Set-MigrationDefault $c components ([pscustomobject]@{});$c.components|Add-Member -Force control $receipt.control}else{if($c.components){$c.components.PSObject.Properties.Remove('control')}}
+    }
+    Stop-MigrationControl $Root
+    $config=Join-Path $env:LOCALAPPDATA 'RemoteAgents/control/config.json'
+    if($null -ne $receipt.controlConfig){Write-TransportJson $config $receipt.controlConfig -Durable}else{if(Test-Path $config){Remove-Item -LiteralPath $config -Force}}
+    Set-MigrationRun 'RemoteAgentsControl' $receipt.run
+    $command=$receipt.run;if($receipt.command){$command=$receipt.command};Start-MigrationRun $command
+    Remove-Item -LiteralPath $file -Force
+    Unregister-ScheduledTask -TaskName $receipt.task -Confirm:$false -ErrorAction SilentlyContinue
+}
+function Set-WizardBridge([string]$Root,[string]$Bundle,[bool]$Enabled,[bool]$Shell) {
+    $file=Join-Path $Root 'state/wizard-bridge.json'
+    if(Test-Path $file){throw 'Есть незавершённая настройка моста; дождитесь отката'}
+    $config=Read-TransportJson (Join-Path $Root 'config.json')
+    # Prove the requested policy without changing the currently working intent.
+    if($Enabled -and (Test-WizardBridge $Root) -and $config.bridge -and $config.bridge.enabled -eq $Enabled -and $config.bridge.allowShell -eq $Shell){return}
+    $task='RemoteAgents bridge rollback '+(Get-TransportFingerprint 'settings' $Root.ToLowerInvariant()).Substring(0,16)
+    $session=[guid]::NewGuid().ToString('N');$oldControl=$null
+    $oldFile=Join-Path $env:LOCALAPPDATA 'RemoteAgents/control/config.json';if(Test-Path $oldFile){$oldControl=Read-TransportJson $oldFile}
+    $run=Get-MigrationRun 'RemoteAgentsControl';$command=Get-WizardBridgeCommand $Root $run
+    Write-TransportJson $file @{schema=1;session=$session;task=$task;bridge=$config.bridge;control=$config.components.control;run=$run;command=$command;controlConfig=$oldControl} -Private -Durable
+    try{Register-WizardRollback $Root $Bundle Bridge $session $task}catch{Remove-Item -LiteralPath $file -Force;throw}
+    try{
+        Update-MigrationConfig $Root {param($c)
+            $c|Add-Member -Force bridge ([pscustomobject]@{enabled=$Enabled;allowShell=$Shell})
+            Set-MigrationDefault $c components ([pscustomobject]@{});Set-MigrationDefault $c.components control ([pscustomobject]@{});$c.components.control|Add-Member -Force enabled $Enabled
+        }
+        # The old and managed executors share a mutex. Stop the old owner only
+        # after recovery is armed, and restore its exact Run command on failure.
+        Invoke-InstallChild $Bundle 'Start-WindowsControl.ps1' @('-Uninstall','-KeepState')
+        $args=@('-LauncherHome',$Root)
+        if($Enabled){$args+=@('-Install','-Profile',(Find-InstallProfile $Root))}else{$args+=@('-Uninstall')}
+        Invoke-InstallChild $Bundle 'Start-WindowsControl.ps1' $args
+        if($Enabled -and -not (Test-WizardBridge $Root)){throw 'Новый мост не подтверждён; прежние настройки восстанавливаются'}
+        Remove-Item -LiteralPath $file -Force
+        Unregister-ScheduledTask -TaskName $task -Confirm:$false
+    }catch{Undo-WizardBridge $Root $session;throw}
+}
+function Test-WizardNetworkManaged([string]$Root) {
+    if(Test-MigrationFresh $Root transport){return $true}
+    $state=Get-MigrationStatePath $Root
+    # A dead heartbeat must never turn off preflight/rollback for an installed PC.
+    if(Test-Path $state){if((Read-TransportJson $state).phase -in @('accepted','pending','activating')){return $true}}
+    return $false
+}
 function Test-WizardNetworkProof([string]$Root,[DateTime]$Mark) {
     $status=Join-Path $Root 'status/transport.json'
     if(-not (Test-Path $status) -or (Get-Item $status).LastWriteTimeUtc -le $Mark -or -not (Test-MigrationFresh $Root transport)){return $false}
@@ -96,17 +175,14 @@ function Test-WizardNetworkProof([string]$Root,[DateTime]$Mark) {
 }
 function Set-WizardNetwork([string]$Root,[string]$Bundle,$Transport) {
     # Separate ports and real SSH check BEFORE touching the working daemon.
+    if(Test-Path (Join-Path $Root 'state/wizard-network.json')){throw 'Есть незавершённая настройка связи; дождитесь отката'}
     $candidate=Read-TransportJson (Join-Path $Root 'config.json');$candidate|Add-Member -Force transport $Transport
     Invoke-MigrationPreflight $Root $Bundle $candidate
     $file=Join-Path $Root 'state/wizard-network.json';$session=[guid]::NewGuid().ToString('N')
     $previous=(Read-TransportJson (Join-Path $Root 'config.json')).transport
     $task='RemoteAgents settings rollback '+(Get-TransportFingerprint 'settings' $Root.ToLowerInvariant()).Substring(0,16)
     Write-TransportJson $file @{schema=1;session=$session;previous=$previous;task=$task} -Private -Durable
-    $exe=Get-TransportPowerShell
-    $args=@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $Bundle 'build/Wizard.ps1'),'-Home',$Root,'-Action','RollbackNetwork','-Session',$session)
-    $action=New-ScheduledTaskAction -Execute $exe -Argument (($args|ForEach-Object {Quote-Transport $_}) -join ' ')
-    $principal=New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
-    Register-ScheduledTask -TaskName $task -Action $action -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(3)) -Principal $principal -Settings (New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 5)) -Force|Out-Null
+    try{Register-WizardRollback $Root $Bundle Network $session $task}catch{Remove-Item -LiteralPath $file -Force;throw}
     try{
         $mark=[DateTime]::UtcNow
         Update-MigrationConfig $Root {param($c) $c|Add-Member -Force transport $Transport}
@@ -192,7 +268,7 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
                 [void](Invoke-WizardSsh $Root 'python3 "$HOME/.local/share/remoteagents-wizard/server-transport-catalog.py" put' $payload)
             }
             try{
-                if(Test-MigrationFresh $Root transport){Set-WizardNetwork $Root $Bundle $t}
+                if(Test-WizardNetworkManaged $Root){Set-WizardNetwork $Root $Bundle $t}
                 else{Update-MigrationConfig $Root {param($c) $c|Add-Member -Force transport $t}}
             }catch{
                 if($Request.shared){
@@ -264,14 +340,8 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             }
         }
         'Bridge' {
-            $enabled=[bool]$Request.enabled;$shell=[bool]$Request.shell
-            Update-MigrationConfig $Root {param($c) $c|Add-Member -Force bridge ([pscustomobject]@{enabled=$enabled;allowShell=$shell})}
-            Update-MigrationConfig $Root {param($c) Set-MigrationDefault $c components ([pscustomobject]@{});Set-MigrationDefault $c.components control ([pscustomobject]@{});$c.components.control|Add-Member -Force enabled $enabled}
-            if($enabled -and (Test-WizardBridge $Root)){return @{ok=$true;summary='Мост и разрешение shell уже проверены; работающий процесс сохранён'}}
-            $args=@('-LauncherHome',$Root);if($enabled){$args+=@('-Install','-Profile',(Find-InstallProfile $Root))}else{$args+=@('-Uninstall')}
-            Invoke-InstallChild $Bundle 'Start-WindowsControl.ps1' $args
-            if($enabled -and -not (Test-WizardBridge $Root)){throw 'Мост пока не подтверждён аутентифицированной проверкой; смотрите журнал моста'}
-            return @{ok=$true;summary=$(if($enabled){'Мост проверен'}else{'Запрос выключения выполнен'})}
+            Set-WizardBridge $Root $Bundle ([bool]$Request.enabled) ([bool]$Request.shell)
+            return @{ok=$true;summary=$(if($Request.enabled){'Мост и разрешение shell проверены'}else{'Запрос выключения выполнен'})}
         }
         'Vpn' {
             $previous=(Read-TransportJson (Join-Path $Root 'config.json')).vpn
@@ -333,4 +403,14 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
         }
         default {throw 'Неизвестный шаг мастера'}
     }
+}
+
+function Invoke-WizardLock([string]$Root,[scriptblock]$Body,[int]$TimeoutMs=1000) {
+    $mutex=New-Object Threading.Mutex($false,('Global\RemoteAgentsSettings-'+(Get-TransportFingerprint 'settings' $Root.ToLowerInvariant())))
+    $locked=$false
+    try{
+        try{$locked=$mutex.WaitOne($TimeoutMs)}catch [Threading.AbandonedMutexException]{$locked=$true}
+        if(-not $locked){throw 'Настройки уже применяются; повторите после завершения'}
+        & $Body
+    }finally{if($locked){$mutex.ReleaseMutex()};$mutex.Dispose()}
 }

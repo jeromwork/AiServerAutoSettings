@@ -77,6 +77,30 @@ class PortLeakTests(unittest.TestCase):
         result, _ = leak.repair(cfg)
         self.assertEqual(result['route']['rules'][-1], private)
 
+    def test_inbound_constraints_cannot_keep_client_bypasses(self):
+        for inbound in ([], ['tun-in', 'vless-in'], ['vless-in']):
+            cfg = config()
+            cfg['route']['rules'] = [
+                {'inbound': inbound, 'port': [22, 80], 'outbound': 'direct-out'},
+                {'inbound': inbound, 'ip_cidr': ['203.0.113.0/24'], 'outbound': 'direct-out'}]
+            result, changes = leak.repair(cfg)
+            self.assertEqual(len(changes), 2)
+            for rule in result['route']['rules']:
+                if 'ip_cidr' in rule or 22 in rule.get('port', []):
+                    self.assertEqual(rule['inbound'], ['tun-in'])
+            self.assertEqual(leak.repair(result), (result, []))
+            self.assertEqual(result['route']['rules'][-1 if inbound == ['vless-in'] else 1]['port'], [80])
+
+    def test_logical_or_inverted_client_rules_fail_before_apply(self):
+        for rule in [
+            {'type': 'logical', 'mode': 'or', 'rules': [{'port': [22]}, {'source_port': [22]}]},
+            {'port': [80], 'invert': True},
+            {'ip_is_private': True, 'invert': True}]:
+            cfg = config()
+            cfg['route']['rules'] = [dict(rule, outbound='direct-out')]
+            with self.assertRaises(leak.lan.Error):
+                leak.repair(cfg)
+
     def test_repaired_fixture_passes_real_singbox_check(self):
         source = config()
         source['route']['rules'].append({'ip_cidr': ['203.0.113.0/24'], 'outbound': 'direct-out'})

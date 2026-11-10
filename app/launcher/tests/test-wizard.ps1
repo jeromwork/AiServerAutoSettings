@@ -126,4 +126,39 @@ Assert ($output.Count -eq 0) 'real child stdout/stderr cannot contaminate wizard
 [IO.File]::WriteAllText($child,'[Console]::Error.WriteLine("private-fixture-marker");exit 7')
 $errorText='';try{Invoke-InstallChild $TestHome 'child.ps1' @()}catch{$errorText=$_.Exception.Message}
 Assert ($errorText -and -not $errorText.Contains('private-fixture-marker')) 'real child error is generic and contains no stderr'
+# Stale health on a managed installation must not bypass network preflight.
+function Test-MigrationFresh($Root,$Name){$false}
+Write-TransportJson (Get-MigrationStatePath $root) @{phase='accepted'}
+Assert (Test-WizardNetworkManaged $root) 'accepted installation keeps network safety when heartbeat is stale'
+$script:networkPreflight=0
+function Set-WizardNetwork($Root,$Bundle,$Transport){$script:networkPreflight++;throw 'preflight refused'}
+Throws {Invoke-WizardStep $root $repo 'Connection' ([pscustomobject]@{catalog=$server;shared=$false})} 'stale installed network still runs preflight and rejects bad candidate'
+Assert ($script:networkPreflight -eq 1) 'network transaction chosen without healthy heartbeat'
+$pidFolder=Join-Path $root 'managed-control';[void][IO.Directory]::CreateDirectory($pidFolder)
+[IO.File]::WriteAllText((Join-Path $pidFolder 'control.pid'),'12345')
+function Get-CimInstance($ClassName,$Filter,$ErrorAction){[pscustomobject]@{CommandLine='powershell -File Start-WindowsControl.ps1 -Profile manual-fixture'}}
+Assert ((Get-WizardBridgeCommand $root '') -eq 'powershell -File Start-WindowsControl.ps1 -Profile manual-fixture') 'manual bridge without Run has a recovery launch command'
+Remove-Item -LiteralPath (Join-Path $pidFolder 'control.pid')
+# Failure during bridge replacement restores config, Run and the old launch command.
+$config=Read-TransportJson (Join-Path $root 'config.json')
+$config|Add-Member -Force bridge ([pscustomobject]@{enabled=$true;allowShell=$true})
+$config.components|Add-Member -Force control ([pscustomobject]@{enabled=$true;custom='retain'})
+Write-TransportJson (Join-Path $root 'config.json') $config
+$script:armed=$false;$script:restoredRun='';$script:restarted='';$script:stopped=0;$script:installCalls=0
+function Get-MigrationRun($Name){'previous bridge command'}
+function Set-MigrationRun($Name,$Value){$script:restoredRun=$Value}
+function Start-MigrationRun($Command){$script:restarted=$Command}
+function Stop-MigrationControl($Root){$script:stopped++}
+function Test-WizardBridge($Root){$false}
+function Register-WizardRollback($Root,$Bundle,$Kind,$Session,$Task){$script:armed=$true;Assert ($Kind -eq 'Bridge' -and (Test-Path (Join-Path $Root 'state/wizard-bridge.json'))) 'bridge snapshot precedes independent rollback registration'}
+function Invoke-InstallChild($Bundle,$Script,$Arguments){Assert $script:armed 'bridge cannot stop before rollback is armed';$script:installCalls++;throw 'install failed'}
+Throws {Invoke-WizardStep $root $repo 'Bridge' ([pscustomobject]@{enabled=$true;shell=$false})} 'failed bridge install is rejected'
+$config=Read-TransportJson (Join-Path $root 'config.json')
+Assert ($config.bridge.allowShell -and $config.components.control.custom -eq 'retain' -and $config.components.control.enabled) 'failed bridge change restores old permissions and component intent'
+Assert ($script:restoredRun -eq 'previous bridge command' -and $script:restarted -eq 'previous bridge command' -and $script:stopped -eq 1) 'rollback restarts exact previous bridge command'
+Assert (-not (Test-Path (Join-Path $root 'state/wizard-bridge.json'))) 'completed bridge rollback is idempotent'
+$script:armed=$false;$script:installCalls=0
+function Register-WizardRollback($Root,$Bundle,$Kind,$Session,$Task){throw 'scheduler refused'}
+Throws {Invoke-WizardStep $root $repo 'Bridge' ([pscustomobject]@{enabled=$false;shell=$false})} 'rollback registration failure blocks bridge mutation'
+Assert ($script:installCalls -eq 0 -and (Read-TransportJson (Join-Path $root 'config.json')).bridge.enabled -and -not (Test-Path (Join-Path $root 'state/wizard-bridge.json'))) 'scheduler failure leaves working bridge untouched and allows retry'
 Write-Output ('OK: '+$count+' wizard/model/catalog/union/rollback checks (fake SSH, no Windows)')

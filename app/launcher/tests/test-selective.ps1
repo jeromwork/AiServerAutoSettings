@@ -78,4 +78,48 @@ $policy=Get-SelectionPolicyFile $detached;$receipt=[IO.File]::ReadAllText($polic
 [IO.File]::WriteAllText((Join-Path $detached '.stignore'),'foreign-policy')
 $failed=$false;try{Initialize-ProjectSelection $detached @('third.txt')}catch{$failed=$true}
 Assert ($failed -and [IO.File]::ReadAllText($policy) -ceq $receipt -and [IO.File]::ReadAllText((Join-Path $detached '.stignore')) -ceq 'foreign-policy') 'foreign policy is rejected before replacing its trust receipt'
+# Replace-by-rename between initial hashing and deletion must preserve the new version.
+$race=Join-Path $TestHome 'race';[void][IO.Directory]::CreateDirectory((Join-Path $race '.stfolder'))
+[IO.File]::WriteAllText((Join-Path $race 'keep.txt'),'latest')
+$script:fixtureFolder=$race;$f.path=$race
+$script:atomicWriter=(Get-Command Write-SelectionAtomic).ScriptBlock
+function Write-SelectionAtomic([string]$File,[string]$Text){
+    & $script:atomicWriter $File $Text
+    if($File -eq (Join-Path $script:fixtureFolder '.stignore')){
+        [IO.File]::Move((Join-Path $script:fixtureFolder 'keep.txt'),(Join-Path $script:fixtureFolder '.stfolder/previous'))
+        [IO.File]::WriteAllText((Join-Path $script:fixtureFolder 'keep.txt'),'new unuploaded version')
+    }
+}
+$failed=$false;try{Set-ProjectSelection $f @()}catch{$failed=$true}
+Assert ($failed -and [IO.File]::ReadAllText((Join-Path $race 'keep.txt')) -ceq 'new unuploaded version') 'atomic editor replacement after receipt is never deleted'
+Assert (-not $script:paused) 'replacement failure safely resumes ignored folder'
+Set-Item Function:Write-SelectionAtomic $script:atomicWriter
+# A repeated legacy helper call must use the same atomic writer for an active ignore.
+$script:atomicCalls=0
+function Write-SelectionAtomic([string]$File,[string]$Text){$script:atomicCalls++;& $script:atomicWriter $File $Text}
+Test-DiskIgnores $race -Write
+Assert ($script:atomicCalls -eq 1) 'legacy ignore refresh is atomic'
+Set-Item Function:Write-SelectionAtomic $script:atomicWriter
+# The move verification must detect equal-size corruption, and keep original files even on success.
+$source=Join-Path $TestHome 'move-source';$dest=Join-Path $TestHome 'move-destination'
+[void][IO.Directory]::CreateDirectory($source);[IO.File]::WriteAllText((Join-Path $source 'file.txt'),'original')
+$script:movedFolder=[pscustomobject]@{id='move';path=$source;paused=$false}
+$script:moved=$false
+function Invoke-DiskApi($Route,$Method='GET',$Body=$null){
+    if($Route -eq 'config/folders'){return $script:movedFolder}
+    if($Route -eq 'config/folders/move'){
+        if($Method -eq 'PATCH'){if($Body.ContainsKey('path')){$script:moved=$true;$script:movedFolder.path=$Body.path};return}
+        return $script:movedFolder
+    }
+    if($Route -like 'events*'){return [pscustomobject]@{id=1;type='FolderPaused';data=@{id='move'}}}
+    throw 'unexpected move API'
+}
+$script:realCopy=(Get-Command Copy-DiskTree).ScriptBlock
+function Copy-DiskTree([string]$From,[string]$To){& $script:realCopy $From $To;[IO.File]::WriteAllText((Join-Path $To 'file.txt'),'corrupt!')}
+$failed=$false;try{Move-DiskFolder move $dest -Copy}catch{$failed=$true}
+Assert ($failed -and -not $script:moved -and [IO.File]::ReadAllText((Join-Path $source 'file.txt')) -ceq 'original' -and [IO.File]::ReadAllText((Join-Path $dest 'file.txt')) -ceq 'corrupt!') 'same-size corrupted copy blocks path switch and preserves both trees'
+Remove-Item -LiteralPath $dest -Recurse -Force
+Set-Item Function:Copy-DiskTree $script:realCopy
+[void](Move-DiskFolder move $dest -Copy)
+Assert ($script:moved -and [IO.File]::ReadAllText((Join-Path $dest 'file.txt')) -ceq 'original' -and [IO.File]::ReadAllText((Join-Path $source 'file.txt')) -ceq 'original') 'cross-volume copy keeps recovery source after switching engine path'
 Write-Output ('OK: '+$count+' selective checks (fixtures; CRLF, policy, unsafe deletion, retry)')

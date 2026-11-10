@@ -91,7 +91,7 @@ function Test-DiskIgnores($Path,[switch]$Write) {
         }
     }
     if($managed){$rules=$managed}
-    if($Write){if(Test-Path -LiteralPath $file){[IO.File]::SetAttributes($file,([IO.File]::GetAttributes($file) -band (-bnot [IO.FileAttributes]::Hidden)))};try{Write-DiskUtf8 $file $rules}finally{if(Test-Path -LiteralPath $file){[IO.File]::SetAttributes($file,([IO.File]::GetAttributes($file) -bor [IO.FileAttributes]::Hidden))}}}
+    if($Write){if(Test-Path -LiteralPath $file){[IO.File]::SetAttributes($file,([IO.File]::GetAttributes($file) -band (-bnot [IO.FileAttributes]::Hidden)))};try{if(-not [IO.Directory]::Exists((Join-Path $Path '.stfolder'))){[void][IO.Directory]::CreateDirectory((Join-Path $Path '.stfolder'))};Write-SelectionAtomic $file $rules}finally{if(Test-Path -LiteralPath $file){[IO.File]::SetAttributes($file,([IO.File]::GetAttributes($file) -bor [IO.FileAttributes]::Hidden))}}}
 }
 function Assert-DiskFreePath([string]$Path,$Folders) {
     $full=[IO.Path]::GetFullPath($Path).TrimEnd('\','/')
@@ -123,7 +123,7 @@ function Copy-DiskTree([string]$From,[string]$To) {
     [IO.Directory]::SetLastWriteTimeUtc($To,$dir.LastWriteTimeUtc)
 }
 function Get-DiskTreeList([string]$Path) {
-    @(Get-ChildItem -LiteralPath $Path -Recurse -Force|ForEach-Object {$_.FullName.Substring($Path.Length)+'|'+$(if($_.PSIsContainer){'d'}else{$_.Length})}|Sort-Object) -join "`n"
+    @(Get-ChildItem -LiteralPath $Path -Recurse -Force|ForEach-Object {$_.FullName.Substring($Path.Length)+'|'+$(if($_.PSIsContainer){'d'}else{(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash})}|Sort-Object) -join "`n"
 }
 function Move-DiskFolder([string]$FolderId,[string]$Destination,[switch]$Copy) {
     $route='config/folders/'+[Uri]::EscapeDataString($FolderId)
@@ -149,17 +149,19 @@ function Move-DiskFolder([string]$FolderId,[string]$Destination,[switch]$Copy) {
     [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($Destination))
     if(Test-Path -LiteralPath $Destination){[IO.Directory]::Delete($Destination,$false)} # empty only
     if($Copy){
-        # Another volume: copy, verify, then remove the source. A failed copy leaves the source intact.
+        # Another volume: verify content, but retain the recovery source because editors remain live.
         try{Copy-DiskTree $old $Destination;if((Get-DiskTreeList $old) -cne (Get-DiskTreeList $Destination)){throw 'Копия не совпадает с исходной папкой'}}
-        catch{if(Test-Path -LiteralPath $Destination){Remove-Item -LiteralPath $Destination -Recurse -Force};throw}
-        Remove-Item -LiteralPath $old -Recurse -Force
+        catch{throw ('Копия не проверена. Исходная папка и неполная копия сохранены: '+$old+'; '+$Destination+'. Проверьте их перед повторным переносом')}
+        # Editors are not suspended by a Syncthing pause. Keep the source as a
+        # recovery copy, including files created/changed during the copy.
+        Write-DiskLog ('Исходная копия после переноса сохранена: '+$old)
     }else{[IO.Directory]::Move($old,$Destination)}
     # A selective policy belongs to its path; carry its trusted receipt with a managed move.
     if(Get-Command Get-SelectionPolicyFile -ErrorAction SilentlyContinue){$policy=Get-SelectionPolicyFile $old;if(Test-Path -LiteralPath $policy){Save-SelectionPolicy $Destination ([IO.File]::ReadAllText($policy))}}
     # On API failure leave paused; files are safe at Destination. Rerun path PATCH manually.
     [void](Invoke-DiskApi $route PATCH @{path=$Destination})
     [void](Invoke-DiskApi $route PATCH @{paused=$paused})
-    'Перенесено: '+$Destination
+    $summary='Перенесено: '+$Destination;if($Copy){$summary+='; исходная копия сохранена: '+$old};$summary
 }
 # Changing the base moves every server folder lying directly in the previous base.
 function Set-DiskBase([string]$Path) {

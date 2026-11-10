@@ -26,9 +26,14 @@ def repair(config):
     rules, changes = [], []
     for index, original in enumerate(config.get('route', {}).get('rules', [])):
         rule = dict(original)
-        if rule.get('outbound') != 'direct-out' or 'inbound' in rule:
+        inbound = rule.get('inbound') or []
+        inbound = inbound if isinstance(inbound, list) else [inbound]
+        if rule.get('outbound') != 'direct-out' or inbound == ['tun-in']:
             rules.append(rule)
             continue
+        # Nested and inverted matches cannot be split using ordinary AND semantics.
+        lan.require(rule.get('type') != 'logical' and not rule.get('invert'),
+                    'Логическое/инвертированное direct-out требует ручной проверки.')
         # A later public-address direct exception can bypass fixed port rules.
         # Preserve all destination values, but reserve this exception for server
         # traffic too. Never put its addresses into diff/log metadata.
@@ -41,8 +46,9 @@ def repair(config):
             private = list(lan.PRIVATE) + [ipaddress.ip_network('fc00::/7')]
             if any(not any(n.version == p.version and n.subnet_of(p) for p in private) for n in nets):
                 rule['inbound'] = ['tun-in']
-                rules.append(rule)
-                changes.append({'ruleIndex': index, 'selector': 'ip_cidr', 'addressCount': len(nets), 'inbound': ['tun-in']})
+                if not inbound or 'tun-in' in inbound:
+                    rules.append(rule)
+                changes.append({'ruleIndex': index, 'selector': 'ip_cidr', 'addressCount': len(nets), 'inbound': ['tun-in'], 'removed': bool(inbound and 'tun-in' not in inbound)})
                 continue
         selectors = [k for k in ('port', 'source_port') if k in rule]
         if len(selectors) != 1:
@@ -59,13 +65,14 @@ def repair(config):
             continue
         limited = dict(rule, inbound=['tun-in'])
         limited[key] = affected
-        rules.append(limited)
+        if not inbound or 'tun-in' in inbound:
+            rules.append(limited)
         rest = [v for v in values if v not in PORTS]
         if rest:
             remaining = dict(rule)
             remaining[key] = rest
             rules.append(remaining)
-        changes.append({'ruleIndex': index, 'selector': key, 'ports': affected, 'inbound': ['tun-in']})
+        changes.append({'ruleIndex': index, 'selector': key, 'ports': affected, 'inbound': ['tun-in'], 'removed': bool(inbound and 'tun-in' not in inbound)})
     lan.require(config.get('route', {}).get('final') == 'proxy-out', 'Ожидается final=proxy-out.')
     lan.require(any(i.get('tag') == 'tun-in' and i.get('type') == 'tun' for i in config.get('inbounds', [])),
                 'Нет tun-in.')
@@ -75,8 +82,8 @@ def repair(config):
 
 def show_diff(changes, reverse=False):
     for change in changes:
-        old = {change['selector']: change.get('ports', '<addresses hidden>'), 'outbound': 'direct-out', 'inbound': '(any)'}
-        new = dict(old, inbound=['tun-in'])
+        old = {change['selector']: change.get('ports', '<addresses hidden>'), 'outbound': 'direct-out', 'inbound': '(not server-only)'}
+        new = {'removed': True} if change.get('removed') else dict(old, inbound=['tun-in'])
         print('@@ route.rules[' + str(change['ruleIndex']) + '] (семантический diff) @@', flush=True)
         print('- ' + json.dumps(new if reverse else old), flush=True)
         print('+ ' + json.dumps(old if reverse else new), flush=True)

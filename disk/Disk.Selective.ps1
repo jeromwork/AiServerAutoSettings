@@ -97,7 +97,7 @@ function Set-ProjectSelection($Folder,[string[]]$Paths,[string[]]$KeepLocal=@())
         try{
             foreach($rel in $remove){
                 $file=Join-Path $root $rel
-                $stream=[IO.File]::Open($file,'Open','Read',([IO.FileShare]::Read -bor [IO.FileShare]::Delete));[void]$handles.Add(@{stream=$stream;file=$file})
+                $stream=[IO.File]::Open($file,'Open','Read',([IO.FileShare]::Read -bor [IO.FileShare]::Delete));[void]$handles.Add(@{stream=$stream;file=$file;relative=$rel})
                 $sha=[Security.Cryptography.SHA256]::Create();try{$hash=([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
                 $remote=$receipt.hashes.PSObject.Properties[$rel]
                 if(-not $remote -or $hash -cne [string]$remote.Value){throw 'Локальная версия ещё не подтверждена на сервере'}
@@ -105,7 +105,12 @@ function Set-ProjectSelection($Folder,[string[]]$Paths,[string[]]$KeepLocal=@())
             if(Test-Path -LiteralPath $ignore){[IO.File]::SetAttributes($ignore,([IO.File]::GetAttributes($ignore) -band (-bnot [IO.FileAttributes]::Hidden)))}
             Save-SelectionPolicy $root $rules
             Write-SelectionAtomic $ignore $rules
-            foreach($entry in $handles){[IO.File]::Delete($entry.file)}
+            foreach($entry in $handles){
+                # A writer may atomically replace the pathname while the verified
+                # handle is open. Evacuate first, then verify the actual moved file.
+                # Staging under .stfolder is never synchronized or touched by editors.
+                Remove-SelectionVerified $entry.file $receipt.hashes.PSObject.Properties[$entry.relative].Value $root
+            }
         }finally{foreach($entry in $handles){$entry.stream.Dispose()}}
         # Empty ancestors may be removed; protected files and selected empty directories remain.
         foreach($dir in @(Get-ChildItem -LiteralPath $root -Directory -Recurse -Force|Sort-Object FullName -Descending)){
@@ -154,4 +159,28 @@ function Initialize-ProjectSelection([string]$Root,[string[]]$Paths) {
     if(Test-Path -LiteralPath $ignore){[IO.File]::SetAttributes($ignore,([IO.File]::GetAttributes($ignore) -band (-bnot [IO.FileAttributes]::Hidden)))}
     Write-SelectionAtomic $ignore $rules
     [IO.File]::SetAttributes($ignore,([IO.File]::GetAttributes($ignore) -bor [IO.FileAttributes]::Hidden))
+}
+
+function Remove-SelectionVerified([string]$File,[string]$Hash,[string]$Root) {
+    $marker=Join-Path $Root '.stfolder'
+    if(-not [IO.Directory]::Exists($marker) -or ([IO.File]::GetAttributes($marker) -band [IO.FileAttributes]::ReparsePoint)){throw 'Нет безопасного маркера папки Syncthing'}
+    $staged=Join-Path $marker ('deselected-'+[guid]::NewGuid().ToString('N'))
+    [IO.File]::Move($File,$staged)
+    $verified=$false
+    try{
+        $stream=[IO.File]::Open($staged,'Open','Read','Read')
+        try{
+            $sha=[Security.Cryptography.SHA256]::Create()
+            try{$actual=([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+            if($actual -cne $Hash){throw 'Файл изменился после проверки; новая версия сохранена'}
+            $verified=$true
+        }finally{$stream.Dispose()}
+        [IO.File]::Delete($staged)
+    }finally{
+        if(-not $verified -and [IO.File]::Exists($staged)){
+            # Never overwrite a version concurrently recreated at the original path.
+            if(-not (Test-Path -LiteralPath $File)){[IO.File]::Move($staged,$File)}
+            else{Write-DiskLog ('Новая версия сохранена: '+$staged)}
+        }
+    }
 }
