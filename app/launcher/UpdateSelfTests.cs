@@ -172,6 +172,10 @@ namespace RemoteAgents.Launcher
                 var u3 = Archive(work, "22.0.0");
                 Reject("upgrade-failed-selftest", () => UpgradeInstaller.Apply(upgradeHome, image, Path.Combine(work, u3.FileName), "1.1.0", false, f => false));
                 Check("upgrade-failed-selftest-keeps-image", ue.Current == u1.Version && File.ReadAllText(installedImage) == "old-image");
+                // Unfinished first setup: a version marked bad earlier is reinstalled and accepted at once, without a rollback deadline.
+                UpgradeInstaller.Apply(upgradeHome, image, Path.Combine(work, u3.FileName), "1.1.0", false, f => true, default(CancellationToken), accept: true);
+                Check("first-setup-accepts-bad-version-without-deadline", ue.Current == u3.Version && ue.Previous == u1.Version && !ue.Pending && !File.Exists(Path.Combine(ue.Root, "exe-upgrade.json")) && File.ReadAllText(installedImage) == "new-image");
+                Check("first-setup-accepted-no-rollback", ue.Observe(false) == "" && UpgradeInstaller.ObserveImage(upgradeHome, ue, false, "", DateTime.UtcNow.AddSeconds(121)) == "" && ue.Current == u3.Version);
                 var u4 = Archive(work, "23.0.0");
                 UpgradeInstaller.Apply(upgradeHome, image, Path.Combine(work, u4.FileName), "1.1.0", false, f => true);
                 string accepted = ue.Observe(true);

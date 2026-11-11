@@ -160,7 +160,7 @@ namespace RemoteAgents.Launcher
                 Append("Программа подготовлена. Можно продолжить настройку.");
                 if(tracked.Count>0 || pendingAccount)operationTimer.Start();
             } catch(OperationCanceledException) {if(!IsDisposed && !closingRequested)PreparationState(false);}
-            catch {new Journal(home).Write("bundle.bootstrap.failed");if(!IsDisposed && !closingRequested)PreparationState(false);}
+            catch(Exception e) {new Journal(home).Write("bundle.bootstrap.failed "+e.GetType().Name+": "+e.Message.Replace("\r"," ").Replace("\n"," "));if(!IsDisposed && !closingRequested)PreparationState(false);}
             finally {preparing=false;if(!IsDisposed)progress.Style=ProgressBarStyle.Continuous;}
         }
         void SelectPage(int index)

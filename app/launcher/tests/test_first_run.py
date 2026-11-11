@@ -47,7 +47,7 @@ class FirstRunTests(unittest.TestCase):
         self.assertIn('if(IsDisposed || closingRequested)return', preparation)
         self.assertNotIn('MessageBox', preparation)
         self.assertIn('if(prepare!=null && bundle==null){await Prepare();return;}', wizard)
-        self.assertIn('token, downgrade || old.Length==0', source('UpgradeInstaller.cs'))
+        self.assertIn('token, downgrade || accept || old.Length==0', source('UpgradeInstaller.cs'))
 
     def test_unfinished_close_exits_before_showing_tray(self):
         tray = source('TrayContext.cs')

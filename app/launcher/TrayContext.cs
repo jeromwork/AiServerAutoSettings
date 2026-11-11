@@ -92,7 +92,8 @@ namespace RemoteAgents.Launcher
                     if(current==version && File.Exists(target) && Files.Hash(target)==Files.Hash(installSource)) {
                         BundleDefinition.Load(engine.Folder(current));installSource=null;log.Write("bundle.bootstrap.resume");return;
                     }
-                    UpgradeInstaller.Apply(home,installSource,zip,Program.Version,false,f=>External.SelfTest(f,home,stop.Token),stop.Token);
+                    // Unfinished first setup has no healthy components to wait for; a 120 s deadline would roll the new EXE back.
+                    UpgradeInstaller.Apply(home,installSource,zip,Program.Version,false,f=>External.SelfTest(f,home,stop.Token),stop.Token,accept:true);
                     installSource=null;log.Write("bundle.bootstrap.ok");return;
                 }
                 var manifest = Manifest.Parse(Json.Encode(new { version, file = "embedded.zip", sha256 = Files.Hash(zip), size = new FileInfo(zip).Length, minLauncher = Program.Version }));
