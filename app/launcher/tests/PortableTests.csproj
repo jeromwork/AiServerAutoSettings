@@ -10,6 +10,8 @@
   <ItemGroup>
     <Compile Include="PortableJson.cs" />
     <Compile Include="DiskTreeTests.cs" />
+    <Compile Include="ProxyRelayTests.cs" />
+    <Compile Include="../ProxyRelay.cs" Link="ProxyRelay.cs" />
     <Compile Include="../UpgradeInstaller.cs" Link="UpgradeInstaller.cs" />
     <Compile Include="../StatusView.cs" Link="StatusView.cs" />
     <Compile Include="../Data.cs" Link="Data.cs" />

@@ -24,8 +24,13 @@ password=any(a.startswith('PreferredAuthentications=password') for a in args)
 if password and 'PreferredAuthentications=password,keyboard-interactive' not in args:sys.exit(201)
 payload=sys.stdin.read().replace('\r','')
 with (home/'calls.jsonl').open('a') as f:f.write(json.dumps({'user':user,'password':password,'payload':payload,'args':args})+'\n')
+pc=[a for a in args if a.startswith('ProxyCommand=')]
+kind='direct' if not pc else (('hoppw' if 'PubkeyAuthentication=no' in pc[0] else 'hop') if ' -W ' in pc[0] else 'proxy')
+if kind in os.environ.get('RA_TEST_BLOCK','').split(','):sys.stderr.write('Connection timed out during banner exchange\r\n');sys.exit(255)
 if os.environ.get('RA_TEST_DENY')=='1':sys.exit(255)
-if args[-1]=='true':sys.exit(0 if (home/'installed').exists() else 255)
+if args[-1]=='true':
+ if (home/'installed').exists():sys.exit(0)
+ sys.stderr.write('remoteagents@x: Permission denied (publickey).\r\n');sys.exit(255)
 if 'ra_user' in args[-1]:
  if not password and args[args.index('-i')+1]!=os.environ.get('RA_TEST_GOOD_KEY',''):sys.exit(255)
  if os.environ.get('RA_TEST_HELPER_FAIL')=='1':sys.stderr.write('useradd: cannot lock /etc/passwd\r\n');sys.exit(1)
@@ -100,7 +105,76 @@ $message='';try{[void](Connect-WizardServer $keyRoot $repo ([pscustomobject]@{ad
 Assert ($message -clike 'Ни один ключ не подошёл. Выберите файл ключа, которым вы входите на сервер, или введите пароль (если вход по паролю на сервере разрешён)') 'final error explains keys and password'
 $live=[IO.File]::ReadAllText($script:WizardProgressFile)
 Assert ($live.Contains('id_ecdsa… ✗ защищён паролем') -and $live.Contains('id_rsa… ✗ не подошёл')) 'passphrase key skipped with a clear message'
-$env:RA_TEST_SSH=$TestHome;$script:WizardProgressFile=Join-Path $TestHome 'live.jsonl'
+# Routes: direct, local proxy (exe relay), SSH hop. Probing is short and the first route that reaches SSH wins.
+$routeHome=Join-Path $TestHome 'routes';[void][IO.Directory]::CreateDirectory($routeHome);$env:RA_TEST_GOOD_KEY=[IO.Path]::GetFullPath($chosen)
+$hopKey=Join-Path $keyHome 'hopkey';[void](Invoke-DiskProcess $keygen @('-q','-t','ed25519','-N','','-f',$hopKey))
+$hopBody=(([IO.File]::ReadAllText($hopKey)) -split "`n"|Where-Object {$_ -and $_ -notmatch '-----'}) -join ''
+function New-RouteRoot([string]$Name){
+    $r=Join-Path $routeHome $Name;[void][IO.Directory]::CreateDirectory($r);Write-TransportJson (Join-Path $r 'config.json') @{schema=1;version=1;transport=@{};components=@{}}
+    $d=Join-Path $routeHome ($Name+'-ssh');[void][IO.Directory]::CreateDirectory($d);$env:RA_TEST_SSH=$d;$script:WizardProgressFile=Join-Path $d 'live.jsonl';$r
+}
+function Get-RouteCalls{@([IO.File]::ReadAllLines((Join-Path $env:RA_TEST_SSH 'calls.jsonl'))|ForEach-Object {ConvertFrom-Json $_})}
+function Get-ProxyOption($Call){@($Call.args|Where-Object {$_ -like 'ProxyCommand=*'})}
+$proxy=[pscustomobject]@{type='socks';host='127.0.0.1';port=10808}
+$hop=[pscustomobject]@{name='jump';ssh='jumper@hop.example.invalid:2222';keyFile=$hopKey}
+$base=@{login='root';keyFile=$chosen;passwordPipe='';askpassExecutable='C:\Program Files\RemoteAgents\RemoteAgents.exe'}
+# 1. Direct is blocked, the proxy works.
+$rr=New-RouteRoot 'proxy';$env:RA_TEST_BLOCK='direct'
+$f=Connect-WizardServer $rr $repo ([pscustomobject]($base+@{address='route1.example.invalid';proxy=$proxy}))
+$rc=Get-RouteCalls;$live=[IO.File]::ReadAllText($script:WizardProgressFile)
+Assert ((Get-ProxyOption $rc[0]).Count -eq 0 -and $rc[0].args -contains 'ConnectTimeout=8') 'direct is probed first with a short timeout'
+$po=@(Get-ProxyOption $rc[1])
+Assert ($po.Count -eq 1 -and $po[0].Contains('--proxy-connect socks 127.0.0.1 10808 %h %p') -and $po[0].Contains('RemoteAgents.exe')) 'proxy route passes the relay with host, port and %h %p to ssh'
+Assert ($live.Contains('напрямую… ✗') -and $live.Contains('через локальный прокси 127.0.0.1:10808… ✓')) 'live progress shows direct failing and the proxy working'
+Assert (@($rc|Where-Object {(Get-ProxyOption $_).Count -eq 0}).Count -eq 1 -and @($rc|Where-Object {$_.user -ceq 'remoteagents' -and (Get-ProxyOption $_).Count -eq 1}).Count -ge 2) 'direct is not retried after a proxy success; later calls use the proxy'
+$text=[IO.File]::ReadAllText($f);Assert (-not $text.Contains('ProxyCommand') -and -not $text.Contains('10808') -and -not $text.Contains('proxy-connect')) 'saved profile does not bake in the proxy'
+$cfg=Read-TransportJson (Join-Path $rr 'config.json')
+Assert ($cfg.wizard.serverRoute.used -ceq 'proxy' -and $cfg.wizard.serverRoute.proxy.host -ceq '127.0.0.1' -and $cfg.wizard.serverRoute.proxy.port -eq 10808 -and $cfg.wizard.serverRoute.proxy.type -ceq 'socks') 'working route and proxy fields are saved for prefill'
+# 2. Direct and proxy are blocked, the SSH hop works; its key is only a path.
+$rr=New-RouteRoot 'hop';$env:RA_TEST_BLOCK='direct,proxy'
+$f=Connect-WizardServer $rr $repo ([pscustomobject]($base+@{address='route2.example.invalid';proxy=$proxy;hop=$hop}))
+$rc=Get-RouteCalls;$live=[IO.File]::ReadAllText($script:WizardProgressFile)
+$last=@(Get-ProxyOption $rc[-1])
+Assert ($last.Count -eq 1 -and $last[0].Contains('-W %h:%p') -and $last[0].Contains('-l jumper') -and $last[0].Contains('-p 2222') -and $last[0].Contains('hop.example.invalid') -and $last[0].Contains('IdentitiesOnly=yes') -and $last[0].Contains($hopKey)) 'hop route is a pass-through ssh -W with its own login, port and key file'
+Assert ($rc[-1].args -contains $env:RA_TEST_GOOD_KEY -or $rc[-1].args[[array]::IndexOf([string[]]$rc[-1].args,'-i')+1] -ceq (Read-TransportJson $f).keyPath) 'the final login to the target still uses the target key, not the hop key'
+Assert ($live.Contains('напрямую… ✗') -and $live.Contains('прокси 127.0.0.1:10808… ✗') -and $live.Contains('промежуточный сервер jumper@hop.example.invalid:2222… ✓')) 'direct failure leads to the next route, then the hop'
+foreach($t in @($live,[IO.File]::ReadAllText($f),[IO.File]::ReadAllText((Join-Path $rr 'config.json')))){Assert (-not $t.Contains($hopBody.Substring(0,40)) -and -not $t.Contains('PRIVATE KEY') -and -not $t.Contains('ProxyCommand')) 'hop key contents and route options are not logged or saved'}
+$cfg=Read-TransportJson (Join-Path $rr 'config.json')
+Assert ($cfg.wizard.serverRoute.used -ceq 'hop' -and $cfg.wizard.serverRoute.hop.name -ceq 'jump' -and $cfg.wizard.serverRoute.hop.ssh -ceq 'jumper@hop.example.invalid:2222' -and $cfg.wizard.serverRoute.hop.keyFile -ceq $hopKey) 'hop saved with transport hops[] names (name, ssh) and key path'
+# 2b. Hop key rejected/unreachable, password route works: the password exists only as a pipe name, in a hop-only environment.
+$rr=New-RouteRoot 'hoppw';$env:RA_TEST_BLOCK='direct,hop'
+$pipeName='RemoteAgents.Password.'+[guid]::NewGuid().ToString('N');$secret='hop-secret-password-value'
+$f=Connect-WizardServer $rr $repo ([pscustomobject]($base+@{address='route2b.example.invalid';hop=[pscustomobject]@{name='jump';ssh='jumper@hop.example.invalid';keyFile=$hopKey;passwordPipe=$pipeName}}))
+$rc=Get-RouteCalls;$live=[IO.File]::ReadAllText($script:WizardProgressFile);$last=@(Get-ProxyOption $rc[-1])
+$hopCalls=@($rc|Where-Object {(Get-ProxyOption $_).Count -eq 1})
+$firstHop=@(Get-ProxyOption $hopCalls[0])[0]
+Assert ($firstHop.Contains($hopKey) -and $firstHop.Contains('BatchMode=yes') -and -not $firstHop.Contains('PubkeyAuthentication=no')) 'key hop route is tried before the password route'
+Assert ($last[0].Contains('PubkeyAuthentication=no') -and $last[0].Contains('PreferredAuthentications=password,keyboard-interactive') -and $last[0].Contains('BatchMode=no') -and $last[0].Contains('REMOTEAGENTS_PASSWORD_PIPE='+$pipeName) -and $last[0].Contains('SSH_ASKPASS_REQUIRE=force') -and $last[0].Contains('SSH_ASKPASS=C:\Program Files\RemoteAgents\RemoteAgents.exe')) 'password hop route asks the askpass relay through its own pipe, set only for the inner ssh'
+Assert ($live.Contains('(пароль)… ✓')) 'password hop route is reported working'
+foreach($t in @($live,[IO.File]::ReadAllText($f),[IO.File]::ReadAllText((Join-Path $rr 'config.json')))){Assert (-not $t.Contains($secret) -and -not $t.Contains($pipeName)) 'hop password and pipe name never in progress, profile or config'}
+Assert (-not ([IO.File]::ReadAllText((Join-Path $env:RA_TEST_SSH 'calls.jsonl'))).Contains($secret)) 'hop password never on a command line'
+Assert (-not ([IO.File]::ReadAllText((Join-Path $rr 'config.json'))).Contains('passwordPipe') -and (Read-TransportJson (Join-Path $rr 'config.json')).wizard.serverRoute.hop.ssh -ceq 'jumper@hop.example.invalid') 'only non-secret hop fields are remembered'
+Throws {Connect-WizardServer (New-RouteRoot 'badpipe') $repo ([pscustomobject]($base+@{address='route2c.example.invalid';hop=[pscustomobject]@{ssh='jumper@hop.example.invalid';passwordPipe='x" & calc'}}))} 'malformed pipe name is rejected'
+# 3. Hop key falls back to the standard keys of this user when no file is chosen.
+$rr=New-RouteRoot 'hopdefault';$env:RA_TEST_BLOCK='direct'
+[void](Connect-WizardServer $rr $repo ([pscustomobject]($base+@{address='route3.example.invalid';hop=[pscustomobject]@{ssh='hop.example.invalid'}})))
+$std=Join-Path $sshDir 'id_ed25519';$po=@(Get-ProxyOption (Get-RouteCalls)[-1])
+Assert ($po[0].Contains($std) -and -not $po[0].Contains('-l ')) 'hop without a chosen key uses ~/.ssh keys; login is optional'
+# 4. Nothing reaches the server.
+$rr=New-RouteRoot 'none';$env:RA_TEST_BLOCK='direct,proxy,hop';$message=''
+try{[void](Connect-WizardServer $rr $repo ([pscustomobject]($base+@{address='route4.example.invalid';proxy=$proxy;hop=$hop})))}catch{$message=$_.Exception.Message}
+Assert ($message -like 'Сервер не ответил по SSH ни одним из способов*') 'all routes failing is reported honestly'
+Assert ($message.Contains('TUN') -and $message.Contains('«Повторить»') -and $message.Contains('«смешанный»') -and $message.Contains('Локальный прокси')) 'all-failed message offers an enabled TUN VPN, Повторить and explains mixed mode'
+Assert (-not (Get-ChildItem $rr -Recurse -Filter ssh-transport.json) -and -not (Read-TransportJson (Join-Path $rr 'config.json')).wizard) 'failed routes save nothing'
+# 5. Direct only, blocked by DPI: the provider message; a real key rejection keeps the key message.
+$rr=New-RouteRoot 'direct';$env:RA_TEST_BLOCK='direct';$message=''
+try{[void](Connect-WizardServer $rr $repo ([pscustomobject]($base+@{address='route5.example.invalid'})))}catch{$message=$_.Exception.Message}
+Assert ($message -clike 'Сервер не ответил по SSH: похоже, провайдер блокирует прямое подключение.*Happ*') 'no banner on direct: provider-blocking message instead of the key message'
+Assert ($message.Contains('TUN') -and $message.Contains('«Повторить»') -and $message.Contains('смешанный')) 'provider message offers TUN VPN and Повторить and explains mixed mode'
+$rr=New-RouteRoot 'denied';$env:RA_TEST_BLOCK='';$env:RA_TEST_GOOD_KEY='';$message=''
+try{[void](Connect-WizardServer $rr $repo ([pscustomobject]@{address='route6.example.invalid';login='root';passwordPipe='';askpassExecutable='x'}))}catch{$message=$_.Exception.Message}
+Assert ($message -clike 'Ни один ключ не подошёл*') ('Permission denied keeps the key message: '+$message)
+$env:RA_TEST_BLOCK='';$env:RA_TEST_SSH=$TestHome;$script:WizardProgressFile=Join-Path $TestHome 'live.jsonl'
 # The disk decision is asked only when a disk is installed.
 [void][IO.Directory]::CreateDirectory((Join-Path $TestHome 'RemoteDisk/state'));Write-DiskUtf8 (Join-Path $TestHome 'RemoteDisk/state/config.xml') '<configuration/>'
 [void](Connect-WizardServer $root $repo $other)

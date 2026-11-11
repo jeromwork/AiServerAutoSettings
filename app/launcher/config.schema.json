@@ -119,6 +119,10 @@
         "skipLan": {
           "type": "boolean"
         },
+        "serverRoute": {
+          "type": "object",
+          "description": "Last working way to reach the server in the wizard (non-secret): used, proxy{type,host,port}, hop{name,ssh,hostKey,keyFile}"
+        },
         "pendingProfile": {
           "type": "string",
           "description": "Chosen server; active transport is kept until successful network preflight"

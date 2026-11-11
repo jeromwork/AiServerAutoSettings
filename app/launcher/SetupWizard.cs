@@ -28,6 +28,7 @@ namespace RemoteAgents.Launcher
         readonly int[] order = {0,1,8,4,2,3,6,5,7};
         bool activationRequested, lastSuccess, reconnectDisk, serverChanged, repairingServer; int currentPage;
         readonly bool[] applied = new bool[9], dirty = new bool[9];
+        ComboBox routeProxyType; TextBox routeProxy, routeHop, routeHopPort, routeHopUser, routeHopPassword, routeHopKey; Label routeHint;
         TextBox address, login, password, keyFile, diskBase, label, accountKey, api, web, vpnCheck, vpnDns;
         CheckBox installMissing, shared, bridge, shell, vpn;
         RadioButton haveAccount, newAccount; Panel newKeyPanel; TextBox newKeyText; Button openHappier; Label accountKeyCaption;
@@ -203,7 +204,43 @@ namespace RemoteAgents.Launcher
             password.Enabled=host.Length==0;originalAddress=host;originalLogin=user;
             installMissing=Check(0,"Установить недостающие службы сервера",242,true);
             inventory=Hint(0,"Root используется только для создания рабочего пользователя remoteagents.",50,90);Technical(0,inventory);
-            More(0,285);
+            ServerRoutes(config);
+            More(0,392);
+        }
+        // «Как подключаться»: direct first, then the optional local proxy and SSH hop; empty rows are not used. Saved route is prefilled.
+        void ServerRoutes(Dictionary<string,object> config)
+        {
+            var route=Json.Map(Json.Get(Json.Map(Json.Get(config,"wizard")),"serverRoute"));var px=Json.Map(Json.Get(route,"proxy"));var hop=Json.Map(Json.Get(route,"hop"));
+            Hint(0,"Как подключаться: сначала напрямую, затем (если указано) по порядку:",274,21);
+            sections[0].Controls.Add(new Label {Left=16,Top=301,Width=150,Height=21,Text="2. Локальный прокси"});
+            routeProxyType=new ComboBox {Left=170,Top=297,Width=76,DropDownStyle=ComboBoxStyle.DropDownList};routeProxyType.Items.AddRange(new object[]{"SOCKS5","HTTP"});routeProxyType.SelectedIndex=Json.Str(px,"type")=="http"?1:0;sections[0].Controls.Add(routeProxyType);
+            routeProxy=new TextBox {Left=252,Top=297,Width=339,Text=Json.Str(px,"host").Length>0?Json.Str(px,"host")+":"+Json.Str(px,"port"):"127.0.0.1:"};sections[0].Controls.Add(routeProxy);
+            sections[0].Controls.Add(new Label {Left=16,Top=331,Width=150,Height=21,Text="3. Через SSH-сервер"});
+            string ssh=Json.Str(hop,"ssh"),hopUser="",hopPort="22";int at=ssh.IndexOf('@');if(at>=0){hopUser=ssh.Substring(0,at);ssh=ssh.Substring(at+1);}int colon=ssh.LastIndexOf(':');if(colon>=0){hopPort=ssh.Substring(colon+1);ssh=ssh.Substring(0,colon);}
+            routeHop=new TextBox {Left=170,Top=327,Width=170,Text=ssh};sections[0].Controls.Add(routeHop);
+            routeHopPort=new TextBox {Left=346,Top=327,Width=44,Text=hopPort};sections[0].Controls.Add(routeHopPort);
+            routeHopUser=new TextBox {Left=396,Top=327,Width=195,Text=hopUser};sections[0].Controls.Add(routeHopUser);
+            sections[0].Controls.Add(new Label {Left=16,Top=361,Width=150,Height=21,Text="   пароль или ключ"});
+            routeHopPassword=new TextBox {Left=170,Top=357,Width=170,UseSystemPasswordChar=true};sections[0].Controls.Add(routeHopPassword);
+            routeHopKey=new TextBox {Left=346,Top=357,Width=145,ReadOnly=true,Text=Json.Str(hop,"keyFile")};sections[0].Controls.Add(routeHopKey);
+            Button(0,"Ключ…",355,()=>{string dir=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),".ssh");using(var d=new OpenFileDialog {Title="Файл ключа промежуточного сервера",InitialDirectory=Directory.Exists(dir)?dir:"",CheckFileExists=true})if(d.ShowDialog(this)==DialogResult.OK)routeHopKey.Text=d.FileName;return Task.FromResult(0);},497,94);
+            // «Повторить» re-runs the route sequence (direct first) without clearing any field.
+            var retry=new Button {Left=146,Top=392,Width=110,Height=29,Text="Повторить"};retry.Click+=async(a,e)=>{if(!busy){await ExecuteSection(0);if(lastSuccess){await ContinueServerRepair();await FinishAutomatically();}}};sections[0].Controls.Add(retry);
+            routeHint=new Label {Left=16,Top=426,Width=575,Height=64,ForeColor=Color.Firebrick,Visible=false,Text="Прямое подключение не удалось. Включите любой VPN в режиме TUN (OpenVPN, WireGuard…) и нажмите «Повторить», либо заполните способ 2 или 3. Режим «смешанный» (только прокси) ssh не проводит: для него используйте «Локальный прокси»."};sections[0].Controls.Add(routeHint);
+        }
+        object ProxyRequest()
+        {
+            string text=routeProxy.Text.Trim();int colon=text.LastIndexOf(':');string host=colon<0?text:text.Substring(0,colon).Trim(),port=colon<0?"":text.Substring(colon+1).Trim();
+            if(host.Length==0 || (colon>=0 && port.Length==0 && text=="127.0.0.1:"))return null;
+            int number;if(!int.TryParse(port,out number) || number<1 || number>65535)throw new IOException("Адрес локального прокси: хост:порт, например 127.0.0.1:10808");
+            return new {type=routeProxyType.SelectedIndex==1?"http":"socks",host,port=number};
+        }
+        object HopRequest(PasswordRelay relay)
+        {
+            string host=routeHop.Text.Trim();if(host.Length==0)return null;
+            int port;if(!int.TryParse(routeHopPort.Text.Trim().Length==0?"22":routeHopPort.Text.Trim(),out port) || port<1 || port>65535)throw new IOException("Порт промежуточного сервера: число 1–65535");
+            string user=routeHopUser.Text.Trim();
+            return new {name="hop",ssh=(user.Length>0?user+"@":"")+host+(port!=22?":"+port:""),keyFile=routeHopKey.Text,passwordPipe=relay.Name};
         }
         void InvalidateServer()
         {
@@ -537,9 +574,12 @@ namespace RemoteAgents.Launcher
                 Dictionary<string,object> result;
                 switch(index) {
                     case 0:
-                        using(var relay=new PasswordRelay(password.Text)) {
+                        // The hop password also goes only through a one-use in-memory pipe (several ssh sessions); it is never saved.
+                        using(var relay=new PasswordRelay(password.Text))using(var hopRelay=new PasswordRelay(routeHopPassword.Text,16)) {
                             password.Clear();
-                            result=await Run("Server",new {address=address.Text.Trim(),login=login.Text.Trim(),installMissing=installMissing.Checked,keyFile=keyFile.Text,passwordPipe=relay.Name,askpassExecutable=Program.Exe});
+                            try {result=await Run("Server",new {address=address.Text.Trim(),login=login.Text.Trim(),installMissing=installMissing.Checked,keyFile=keyFile.Text,passwordPipe=relay.Name,askpassExecutable=Program.Exe,proxy=ProxyRequest(),hop=HopRequest(hopRelay)});}
+                            catch(Exception e) {if(e.Message.Contains("Сервер не ответил по SSH")){routeHint.Visible=true;routeProxy.Focus();}throw;}
+                            routeHopPassword.Clear();routeHint.Visible=false;
                         }
                         var saved=new Configuration(home).Data;var profile=Json.Read(Json.Text(Json.Map(Json.Get(saved,"wizard")),"pendingProfile",Json.Str(Json.Map(Json.Get(saved,"transport")),"profilePath")));login.Text=Json.Str(profile,"login");originalAddress=address.Text.Trim();originalLogin=login.Text.Trim();password.Enabled=false;
                         inventory.Text="SSH: проверен\r\n"+string.Join("\r\n",new[]{"disk","happier","bridge","catalog"}.Select(k=>(k=="disk"?"Диск-сервер":k=="happier"?"Happier (программа)":k=="bridge"?"Серверная часть моста":"Каталог узлов")+": "+(Json.Bool(result,k)?"обнаружен / проверен":"отсутствует или не отвечает")));

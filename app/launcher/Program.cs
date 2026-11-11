@@ -31,6 +31,8 @@ namespace RemoteAgents.Launcher
         }
         [STAThread] static int Main(string[] args)
         {
+            // Before askpass: ssh may carry a password pipe in its environment while running this relay as ProxyCommand.
+            if(args.Length>0 && args[0]=="--proxy-connect")return ProxyRelay.Run(args);
             string passwordPipe=Environment.GetEnvironmentVariable("REMOTEAGENTS_PASSWORD_PIPE");
             if(!string.IsNullOrEmpty(passwordPipe))return PasswordRelay.Answer(passwordPipe);
             Journal log = null;
