@@ -23,7 +23,7 @@ namespace RemoteAgents.Launcher
         readonly Label lastLine = new Label { Dock = DockStyle.Fill, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
         readonly Button back = new Button { Text = "Назад", Width = 88 }, next = new Button { Text = "Далее", Width = 88 }, close = new Button { Text = "Закрыть", Width = 88 };
         readonly ProgressBar progress = new ProgressBar { Dock = DockStyle.Bottom, Height = 4 };
-        readonly string[] titles = { "Сервер", "Связь", "Диск", "Happier", "Мост", "VPN", "ЛВС", "Итог" };
+        readonly string[] titles = { "Сервер", "Связь", "Диск", "Happier", "Мост", "VPN", "Локальная сеть", "Итог" };
         readonly string[] results = Enumerable.Repeat("Ещё не проверено", 8).ToArray();
         readonly int[] order = {0,1,4,2,3,6,5,7};
         bool activationRequested, lastSuccess, reconnectDisk, serverChanged, repairingServer; int currentPage;
@@ -68,7 +68,8 @@ namespace RemoteAgents.Launcher
         {
             this.home = home; this.bundle = bundle; this.first = first; initializing=true;
             AutoScaleDimensions=new SizeF(96,96); AutoScaleMode=AutoScaleMode.Dpi;
-            Text = "RemoteAgents — " + (first ? "настройка" : "Настройки"); ClientSize=new Size(624,441);
+            Text = "RemoteAgents — " + (first ? "настройка" : "Настройки"); ClientSize=new Size(780,460);
+            if(!first)titles[7]="Состояние";
             FormBorderStyle=FormBorderStyle.FixedDialog; MaximizeBox=false; StartPosition=FormStartPosition.CenterScreen;
             Font=new Font("Segoe UI",9F);
             var bar=new FlowLayoutPanel {Dock=DockStyle.Bottom,Height=42,FlowDirection=FlowDirection.RightToLeft,Padding=new Padding(5)};
@@ -76,14 +77,17 @@ namespace RemoteAgents.Launcher
             var logbar=new Panel {Dock=DockStyle.Bottom,Height=29,Padding=new Padding(8,0,5,0)};
             var showLog=new Button {Text="Журнал",Dock=DockStyle.Right,Width=88};showLog.Click+=(a,b)=>ShowJournal();
             logbar.Controls.Add(lastLine);logbar.Controls.Add(showLog);
-            Controls.Add(pages);Controls.Add(steps);Controls.Add(progress);Controls.Add(logbar);Controls.Add(bar);
+            var divider=new Label {Dock=DockStyle.Left,Width=1,BackColor=SystemColors.ControlDark};
+            Controls.Add(pages);Controls.Add(divider);Controls.Add(steps);Controls.Add(progress);Controls.Add(logbar);Controls.Add(bar);
             var config=new Configuration(home).Data;
             for(int i=0;i<8;i++) {
                 sections[i]=new Panel {Dock=DockStyle.Fill,AutoScroll=true};pages.Controls.Add(sections[i]);
                 details[i]=new Panel {Width=575,Height=420,AutoScroll=true};
             }
             ServerPage(config);ConnectionPage();DiskPage();AccountPage(config);BridgePage(config);VpnPage(config);LanPage();SummaryPage();
-            steps.Initialize(titles,order);
+            steps.Initialize(titles,order);steps.Available=i=>WizardStep.CanOpen(i,currentPage,first,applied,order);
+            // Settings: free clicking, the main button applies the open section. First run: walk with «Далее».
+            back.Visible=first;
             for(int i=0;i<7;i++) {int section=i;
                 foreach(Control c in sections[i].Controls.Cast<Control>().Concat(details[i].Controls.Cast<Control>())) {
                     var t=c as TextBox;if(t!=null)t.TextChanged+=(a,b)=>Changed(section);
@@ -93,13 +97,14 @@ namespace RemoteAgents.Launcher
             nodes.CellValueChanged+=(a,b)=>Changed(1);nodes.UserAddedRow+=(a,b)=>Changed(1);
             tree.AfterCheck+=(a,b)=> {if(!changingTree)Changed(2);};
             address.TextChanged+=(a,b)=>InvalidateServer();login.TextChanged+=(a,b)=>InvalidateServer();
-            steps.SelectedIndexChanged+=(a,b)=>SelectPage(steps.SelectedIndex);
+            steps.SectionRequested+=i=> {if(WizardStep.CanOpen(i,currentPage,first,applied,order))SelectPage(i);else{steps.Section=currentPage;Append("Сначала завершите или пропустите раздел «"+titles[currentPage]+"»");}};
             back.Click+=(a,b)=>Navigate(-1);
             next.Click+=async(a,b)=> {
-                int completed=steps.SelectedIndex;
+                int completed=steps.Section;
                 await ExecuteCurrent();
                 if(!lastSuccess || closingRequested)return;
                 if(completed==0 && serverChanged){repairingServer=true;serverChanged=false;}
+                if(!first){if(completed==0 && repairingServer){Navigate(1);await ContinueServerRepair();}return;}
                 if(completed==7){DialogResult=DialogResult.OK;Close();return;}
                 Navigate(1);await ContinueServerRepair();await FinishAutomatically();
             };
@@ -112,23 +117,22 @@ namespace RemoteAgents.Launcher
         void SelectPage(int index)
         {
             if(index<0 || index>7)return;
-            if(first && index<7 && applied[index]){steps.SelectedIndex=currentPage;return;}
-            if(steps.SelectedIndex!=index){steps.SelectedIndex=index;return;}
-            currentPage=index;sections[index].BringToFront();back.Enabled=!busy && Array.IndexOf(order,index)>0;
-            next.Text=index==7?"Готово":"Далее";RefreshSummary();
+            currentPage=index;steps.Section=index;sections[index].BringToFront();back.Enabled=!busy && Array.IndexOf(order,index)>0;
+            next.Text=first?(index==7?"Готово":"Далее"):(index==7?"Проверить":"Применить");RefreshSummary();
         }
         void Navigate(int direction)
         {
-            int n=Array.IndexOf(order,steps.SelectedIndex)+direction;
+            // Forward in first run skips ready sections; back always opens the previous one.
+            int n=Array.IndexOf(order,steps.Section)+direction;
             while(n>=0 && n<order.Length) {
-                int i=order[n];if(!first || i==7 || !applied[i]){SelectPage(i);return;}n+=direction;
+                int i=order[n];if(!first || direction<0 || i==7 || !applied[i]){SelectPage(i);return;}n+=direction;
             }
         }
         async Task ContinueServerRepair()
         {
             // Reapply known settings in priority order; stop whenever an explicit data/file choice is needed.
             while(repairingServer && !closingRequested) {
-                int index=steps.SelectedIndex;
+                int index=steps.Section;
                 if(index==2 || index==6 || index==7 || (index==5 && vpn.Checked))return;
                 if(index==3 && (api.Text.Length==0 || web.Text.Length==0 || label.Text.Length==0))return;
                 if(index!=1 && index!=4 && index!=3 && index!=5)return;
@@ -136,7 +140,7 @@ namespace RemoteAgents.Launcher
             }
         }
         async Task FinishAutomatically()
-        {if(first && steps.SelectedIndex==7 && lastSuccess && !closingRequested){await ExecuteCurrent();if(lastSuccess){DialogResult=DialogResult.OK;Close();}}}
+        {if(first && steps.Section==7 && lastSuccess && !closingRequested){await ExecuteCurrent();if(lastSuccess){DialogResult=DialogResult.OK;Close();}}}
         Label Hint(int page,string text,int top=12,int height=44)
         {var c=new Label {Left=16,Top=top,Width=585,Height=height,Text=text};sections[page].Controls.Add(c);return c;}
         void Question(int page,string text)
@@ -213,7 +217,7 @@ namespace RemoteAgents.Launcher
             foreach(Control c in sections[2].Controls)if(Convert.ToString(c.Tag)=="reconnect" || Convert.ToString(c.Tag)=="keep")c.Visible=warning;
         }
         async Task Skip(string step,int index)
-        {var result=await Run("Skip",new {step});applied[index]=true;dirty[index]=false;results[index]=Json.Str(result,"summary");Append(results[index]);Navigate(1);}
+        {var result=await Run("Skip",new {step});applied[index]=true;dirty[index]=false;results[index]=Json.Str(result,"summary");Append(results[index]);if(first)Navigate(1);}
         void AccountPage(Dictionary<string,object> config)
         {
             var settings=Json.Map(Json.Get(config,"happier"));Question(3,"Подключить свой аккаунт Happier?");
@@ -257,13 +261,14 @@ namespace RemoteAgents.Launcher
         {
             if(summary!=null)summary.Text=string.Join("\r\n",order.Where(i=>i!=7).Select(i=>titles[i]+": "+(results[i].Length>72?results[i].Substring(0,69)+"…":results[i])));
             for(int i=0;i<8;i++){if(states[i]!=null){states[i].Text=results[i];states[i].ForeColor=results[i].StartsWith("Ошибка")?Color.Firebrick:SystemColors.ControlText;}steps.Mark(i,(i<7 && applied[i])?"✓":results[i].StartsWith("Ошибка")?"✗":"…");}
+            steps.Invalidate();
             RefreshDiskWarning();
         }
         void Append(string text)
         {
             journal.AppendText(DateTime.Now.ToString("HH:mm:ss")+" "+text+"\r\n");lastLine.Text=text;
             lastLine.ForeColor=text.StartsWith("Ошибка") || text.Contains(" ✗")?Color.Firebrick:SystemColors.ControlText;
-            if(states[steps.SelectedIndex]!=null)states[steps.SelectedIndex].Text=text;
+            if(states[steps.Section]!=null)states[steps.Section].Text=text;
         }
         async Task Inspect()
         {
@@ -284,9 +289,9 @@ namespace RemoteAgents.Launcher
         {
             lastSuccess=false;busy=true;stepCancellation=new CancellationTokenSource();steps.Enabled=false;pages.Enabled=false;foreach(var panel in details)panel.Enabled=false;back.Enabled=next.Enabled=false;close.Enabled=true;progress.Style=ProgressBarStyle.Marquee;
             try {await action();lastSuccess=true;}
-            catch(OperationCanceledException) {if(steps.SelectedIndex<7)applied[steps.SelectedIndex]=false;results[steps.SelectedIndex]="Шаг отменён; готовность не подтверждена";Append(results[steps.SelectedIndex]);}
-            catch(Exception e) {if(steps.SelectedIndex==0)password.Enabled=true;if(steps.SelectedIndex<7)applied[steps.SelectedIndex]=false;results[steps.SelectedIndex]="Ошибка: "+e.Message;Append(results[steps.SelectedIndex]);}
-            finally {busy=false;foreach(var panel in details)panel.Enabled=true;stepCancellation.Dispose();stepCancellation=null;steps.Enabled=pages.Enabled=close.Enabled=next.Enabled=true;back.Enabled=steps.SelectedIndex>0;next.Enabled=true;progress.Style=ProgressBarStyle.Continuous;RefreshSummary();if(closingRequested)Close();}
+            catch(OperationCanceledException) {if(steps.Section<7)applied[steps.Section]=false;results[steps.Section]="Шаг отменён; готовность не подтверждена";Append(results[steps.Section]);}
+            catch(Exception e) {if(steps.Section==0)password.Enabled=true;if(steps.Section<7)applied[steps.Section]=false;results[steps.Section]="Ошибка: "+e.Message;Append(results[steps.Section]);}
+            finally {busy=false;foreach(var panel in details)panel.Enabled=true;stepCancellation.Dispose();stepCancellation=null;steps.Enabled=pages.Enabled=close.Enabled=next.Enabled=true;back.Enabled=Array.IndexOf(order,steps.Section)>0;next.Enabled=true;progress.Style=ProgressBarStyle.Continuous;RefreshSummary();if(closingRequested)Close();}
         }
         async Task<Dictionary<string,object>> Run(string action, object request)
         {
@@ -402,7 +407,7 @@ namespace RemoteAgents.Launcher
         }
         async Task ExecuteCurrent()
         {
-            int index=steps.SelectedIndex;bool operationReady=true;
+            int index=steps.Section;bool operationReady=true;
             await Guard(async()=> {
                 Dictionary<string,object> result;
                 switch(index) {
@@ -457,14 +462,33 @@ namespace RemoteAgents.Launcher
             lastSuccess=lastSuccess && operationReady;
         }
     }
-    internal sealed class WizardNavigation : FlowLayoutPanel
+    // Left list of settings sections with a ✓/✗/… mark; the wizard decides which clicks are allowed.
+    internal sealed class WizardNavigation : ListBox
     {
-        readonly Button[] tabs=new Button[8];int selected;
-        internal event EventHandler SelectedIndexChanged;
-        internal int SelectedIndex {get{return selected;}set{if(selected==value)return;selected=value;if(SelectedIndexChanged!=null)SelectedIndexChanged(this,EventArgs.Empty);}}
-        internal WizardNavigation(){Dock=DockStyle.Top;Height=39;Padding=new Padding(5,3,0,0);WrapContents=false;}
-        internal void Initialize(string[] titles,int[] order){foreach(int i in order){int index=i;var b=new Button {Text=titles[i]+" …",Width=i==3?80:71,Height=28,Margin=new Padding(1),FlatStyle=FlatStyle.Flat};b.Tag=titles[i];b.Click+=(a,e)=>SelectedIndex=index;tabs[i]=b;Controls.Add(b);}}
-        internal void Mark(int i,string mark){if(tabs[i]!=null){tabs[i].Text=Convert.ToString(tabs[i].Tag)+" "+mark;tabs[i].BackColor=i==selected?SystemColors.ControlLight:SystemColors.Control;}}
+        int[] order=new int[0];string[] titles=new string[0];readonly string[] marks=Enumerable.Repeat("…",8).ToArray();bool syncing;
+        internal Func<int,bool> Available=i=>true;
+        internal event Action<int> SectionRequested;
+        internal WizardNavigation(){Dock=DockStyle.Left;Width=150;DrawMode=DrawMode.OwnerDrawFixed;IntegralHeight=false;BorderStyle=BorderStyle.None;BackColor=SystemColors.Control;ItemHeight=30;}
+        internal int Section
+        {
+            get{return SelectedIndex<0?0:order[SelectedIndex];}
+            set{int row=Array.IndexOf(order,value);if(row==SelectedIndex)return;syncing=true;try{SelectedIndex=row;}finally{syncing=false;}}
+        }
+        internal void Initialize(string[] titles,int[] order){this.titles=titles;this.order=order;BeginUpdate();Items.Clear();foreach(int i in order)Items.Add(titles[i]);EndUpdate();}
+        internal void Mark(int i,string mark){marks[i]=mark;}
+        protected override void OnFontChanged(EventArgs e){base.OnFontChanged(e);ItemHeight=Math.Max(24,Font.Height*2);}
+        protected override void OnSelectedIndexChanged(EventArgs e){base.OnSelectedIndexChanged(e);Invalidate();if(!syncing && SelectedIndex>=0 && SectionRequested!=null)SectionRequested(order[SelectedIndex]);}
+        protected override void OnDrawItem(DrawItemEventArgs e)
+        {
+            if(e.Index<0 || e.Index>=order.Length)return;
+            int i=order[e.Index];bool chosen=e.Index==SelectedIndex;bool open=chosen || Available(i);
+            using(var fill=new SolidBrush(chosen?SystemColors.Highlight:BackColor))e.Graphics.FillRectangle(fill,e.Bounds);
+            Color fore=chosen?SystemColors.HighlightText:open && Enabled?ForeColor:SystemColors.GrayText;
+            Color markColor=chosen?fore:marks[i]=="✓"?Color.ForestGreen:marks[i]=="✗"?Color.Firebrick:SystemColors.GrayText;
+            int pad=e.Bounds.Height/3,markWidth=e.Bounds.Height;
+            TextRenderer.DrawText(e.Graphics,titles[i],Font,new Rectangle(e.Bounds.Left+pad,e.Bounds.Top,e.Bounds.Width-pad-markWidth,e.Bounds.Height),fore,TextFormatFlags.VerticalCenter|TextFormatFlags.Left|TextFormatFlags.EndEllipsis|TextFormatFlags.NoPrefix);
+            TextRenderer.DrawText(e.Graphics,marks[i],Font,new Rectangle(e.Bounds.Right-markWidth,e.Bounds.Top,markWidth,e.Bounds.Height),markColor,TextFormatFlags.VerticalCenter|TextFormatFlags.HorizontalCenter|TextFormatFlags.NoPrefix);
+        }
     }
 
 }

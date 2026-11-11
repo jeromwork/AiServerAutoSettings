@@ -7,6 +7,14 @@ namespace RemoteAgents.Launcher
 {
     internal static class WizardStep
     {
+        // First run: ready sections and the first unfinished one open; later ones wait. Settings: everything opens.
+        internal static bool CanOpen(int section, int current, bool first, bool[] applied, int[] order)
+        {
+            if (!first || section == current) return true;
+            if (section < applied.Length && applied[section]) return true;
+            foreach (int i in order) { if (i == section) return true; if (i < applied.Length && !applied[i]) return false; }
+            return false;
+        }
         internal static int Timeout(string action) { return action == "DiskTree" ? 60000 : action == "Disk" ? 300000 : 120000; }
         // Shared by real external steps and the portable process tests. NativeJob owns the process tree.
         internal static int Wait(Process process, string output, int timeoutMs, long maxBytes, CancellationToken token)

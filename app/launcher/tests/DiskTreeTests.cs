@@ -29,6 +29,11 @@ namespace RemoteAgents.Launcher
             bool refused=false;try{s.Set("project/a", false);}catch(IOException){refused=true;}
             Check(refused && s.Paths.SequenceEqual(new[] {"project"}), "truncation cannot silently unselect omitted siblings");
             s.Set("project",false);Check(s.Paths.Length==0, "truncated parent can be unchecked as a whole");
+            int[] order={0,1,4,2,3,6,5,7};var done=new[]{true,false,false,false,true,false,false};
+            Check(WizardStep.CanOpen(0,1,true,done,order) && WizardStep.CanOpen(4,1,true,done,order), "first run reopens completed sections");
+            Check(WizardStep.CanOpen(1,4,true,done,order) && !WizardStep.CanOpen(2,1,true,done,order) && !WizardStep.CanOpen(7,1,true,done,order), "first run blocks sections after the first unfinished one");
+            Check(WizardStep.CanOpen(2,1,false,done,order) && WizardStep.CanOpen(7,1,false,done,order), "settings open any section");
+            Check(WizardStep.CanOpen(7,5,true,Enumerable.Repeat(true,7).ToArray(),order), "summary opens once all sections are ready");
             Check(WizardStep.Timeout("DiskTree")==60000 && WizardStep.Timeout("Catalog")==120000 && WizardStep.Timeout("Disk")==300000, "step-specific deadlines");
             // Real portable processes exercise the exact wait used by External.Run. NativeJob's Windows tree kill is a live check.
             for(int mode=0;mode<2;mode++) {
