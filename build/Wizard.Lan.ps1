@@ -10,6 +10,8 @@ function Get-WizardLanPayload([string]$File) {
         if($trim -match '^(?:--)?(ca|cert|key|auth-user-pass|tls-auth|tls-crypt|tls-crypt-v2)(?:\s+(.*))?$'){
             $kind=$Matches[1];$value=[string]$Matches[2]
             if($value -eq '[inline]'){$lines.Add($line);continue}
+            # Bare auth-user-pass: the window asks the LAN login/password; the server stores them root-only.
+            if($kind -eq 'auth-user-pass' -and -not $value.Trim()){$lines.Add('auth-user-pass');continue}
             # Only files next to the selected profile. No traversal, shell expansions or absolute paths.
             if($value -notmatch '^(?:"([^"/\\]+)"|''([^''/\\]+)''|([^\s/\\]+))(?:\s+([01]))?$'){throw ('Для '+$kind+' нужен файл рядом с .ovpn; интерактивный ввод не поддерживается')}
             $name=($Matches[1]+$Matches[2]+$Matches[3]);$direction=$Matches[4]
@@ -25,16 +27,16 @@ function Get-WizardLanPayload([string]$File) {
     }
     return ($lines -join "`n")+"`n"
 }
-function Send-WizardLan([string]$Root,[string]$Bundle,[string]$File) {
+function Send-WizardLan([string]$Root,[string]$Bundle,[string]$File,[string]$Name='') {
     # The server importer requires inline secrets; references are resolved in memory, never logged.
     $payload=Get-WizardLanPayload $File
-    $name='l'+(Get-TransportFingerprint 'lan' ([IO.Path]::GetFileNameWithoutExtension($File))).Substring(0,6)
+    $name=$Name;if(-not $name){$name='l'+(Get-TransportFingerprint 'lan' ([IO.Path]::GetFileNameWithoutExtension($File))).Substring(0,6)}
     Write-WizardProgress 'Копирую профиль локальной сети на сервер…'
     $upload='set -eu; umask 077; dir="$HOME/.config/remoteagents/lan/'+$name+'"; test ! -L "$dir"; mkdir -p "$dir"; chmod 700 "$dir"; test ! -L "$dir/profile.ovpn"; '+"`n"
     $data=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload));$temp=[guid]::NewGuid().ToString('N')
     $upload+='printf %s '+$data+' | base64 -d > "$dir/.'+$temp+'"; chmod 600 "$dir/.'+$temp+'"; mv -f "$dir/.'+$temp+'" "$dir/profile.ovpn"'+"`n"
     $upload+='mkdir -p "$HOME/.local/share/remoteagents-lan/server"'+"`n"
-    foreach($fileName in @('lan-vpn.sh','lan_vpn.py')){
+    foreach($fileName in @('lan-vpn.sh','lan_vpn.py','lan-config.schema.json')){
         $bytes=[Text.Encoding]::UTF8.GetBytes((Convert-TransportLF ([IO.File]::ReadAllText((Join-Path $Bundle ('server/'+$fileName))))))
         $upload+='test ! -L "$HOME/.local/share/remoteagents-lan/server/'+$fileName+'"; printf %s '+[Convert]::ToBase64String($bytes)+' | base64 -d > "$HOME/.local/share/remoteagents-lan/server/.'+$temp+'"; mv -f "$HOME/.local/share/remoteagents-lan/server/.'+$temp+'" "$HOME/.local/share/remoteagents-lan/server/'+$fileName+'"'+"`n"
     }

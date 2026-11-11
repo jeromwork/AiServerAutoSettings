@@ -86,7 +86,10 @@ namespace RemoteAgents.Launcher
                 case "Inspect": return 300 * 1000;   // server, account and bridge probes ~210 s
                 case "Activate": return 180 * 1000;  // migration itself runs detached
                 case "DiskTree": case "AccountList": return 180 * 1000; // helper upload 60 s + listing 60 s
-                default: return 120 * 1000;          // Catalog, Lan
+                case "Proxy": return 420 * 1000;     // root probe 20 s + apply 180 s + confirm in a new SSH 120 s
+                case "Lan": return 480 * 1000;       // root probe 20 s + add (may install OpenVPN) 300 s + test/confirm 120 s
+                case "LanRemove": return 240 * 1000; // root probe 20 s + remove 180 s
+                default: return 120 * 1000;          // Catalog, NetStatus, AdminProbe
             }
         }
         // Shared by real external steps and the portable process tests. NativeJob owns the process tree.

@@ -12,26 +12,26 @@ using System.Windows.Forms;
 namespace RemoteAgents.Launcher
 {
     // One UI and one production step dispatcher for first run and tray settings, in both EXEs.
-    internal sealed class SetupWizard : Form
+    internal sealed partial class SetupWizard : Form
     {
         readonly string home, bundle; readonly bool first;
         readonly WizardNavigation steps = new WizardNavigation();
         readonly Panel pages = new Panel { Dock = DockStyle.Fill };
-        readonly Panel[] sections = new Panel[8], details = new Panel[8];
-        readonly Label[] states = new Label[8];
+        readonly Panel[] sections = new Panel[9], details = new Panel[9];
+        readonly Label[] states = new Label[9];
         readonly TextBox journal = new TextBox { Dock = DockStyle.Fill, ReadOnly = true, Multiline = true, ScrollBars = ScrollBars.Vertical };
         readonly Label lastLine = new Label { Dock = DockStyle.Fill, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
         readonly Button back = new Button { Text = "Назад", Width = 88 }, next = new Button { Text = "Далее", Width = 88 }, close = new Button { Text = "Закрыть", Width = 88 };
         readonly ProgressBar progress = new ProgressBar { Dock = DockStyle.Bottom, Height = 4 };
-        readonly string[] titles = { "Сервер", "Связь", "Диск", "Happier", "Мост", "VPN", "Локальная сеть", "Итог" };
-        readonly string[] results = Enumerable.Repeat("Ещё не проверено", 8).ToArray();
-        readonly int[] order = {0,1,4,2,3,6,5,7};
+        readonly string[] titles = { "Сервер", "Связь", "Диск", "Happier", "Мост", "VPN", "Локальные сети", "Итог", "Выход в интернет" };
+        readonly string[] results = Enumerable.Repeat("Ещё не проверено", 9).ToArray();
+        readonly int[] order = {0,1,8,4,2,3,6,5,7};
         bool activationRequested, lastSuccess, reconnectDisk, serverChanged, repairingServer; int currentPage;
-        readonly bool[] applied = new bool[7], dirty = new bool[7];
+        readonly bool[] applied = new bool[9], dirty = new bool[9];
         TextBox address, login, password, diskBase, label, accountKey, api, web, vpnCheck, vpnDns;
         CheckBox installMissing, shared, bridge, shell, vpn, create;
         DataGridView nodes; TreeView tree; ListBox accounts; Label inventory, accountHint, summary, diskWarning;
-        string originalAddress, originalLogin, lanFile = "", lanCommand = "";
+        string originalAddress, originalLogin, lanCommand = "";
         Dictionary<string, object> expectedCatalog; Dictionary<string, object>[] accountRows = new Dictionary<string, object>[0];
         DiskTreeSelection selection = new DiskTreeSelection(new string[0]);
         CancellationTokenSource stepCancellation; bool closingRequested;
@@ -94,15 +94,15 @@ namespace RemoteAgents.Launcher
             var divider=new Label {Dock=DockStyle.Left,Width=1,BackColor=SystemColors.ControlDark};
             Controls.Add(pages);Controls.Add(divider);Controls.Add(steps);Controls.Add(progress);Controls.Add(logbar);Controls.Add(bar);
             var config=new Configuration(home).Data;
-            for(int i=0;i<8;i++) {
+            for(int i=0;i<sections.Length;i++) {
                 sections[i]=new Panel {Dock=DockStyle.Fill,AutoScroll=true};pages.Controls.Add(sections[i]);
                 details[i]=new Panel {Width=575,Height=420,AutoScroll=true};
             }
-            ServerPage(config);ConnectionPage();DiskPage();AccountPage(config);BridgePage(config);VpnPage(config);LanPage();SummaryPage();
+            ServerPage(config);ConnectionPage();DiskPage();AccountPage(config);BridgePage(config);VpnPage(config);LanPage();SummaryPage();ProxyPage(config);
             steps.Initialize(titles,order);steps.Available=i=>WizardStep.CanOpen(i,currentPage,first,applied,order);
             // Settings: free clicking, the main button applies the open section. First run: walk with «Далее».
             back.Visible=first;
-            for(int i=0;i<7;i++) {int section=i;
+            foreach(int i in order.Where(x=>x!=7)) {int section=i;
                 foreach(Control c in sections[i].Controls.Cast<Control>().Concat(details[i].Controls.Cast<Control>())) {
                     var t=c as TextBox;if(t!=null)t.TextChanged+=(a,b)=>Changed(section);
                     var check=c as CheckBox;if(check!=null)check.CheckedChanged+=(a,b)=>Changed(section);
@@ -130,7 +130,7 @@ namespace RemoteAgents.Launcher
         }
         void SelectPage(int index)
         {
-            if(index<0 || index>7)return;
+            if(index<0 || index>=sections.Length)return;
             currentPage=index;steps.Section=index;sections[index].BringToFront();back.Enabled=!busy && Array.IndexOf(order,index)>0;
             next.Text=first?(index==7?(legacy?"Начать переход":"Готово"):"Далее"):(index==7?"Проверить":"Применить");RefreshSummary();
         }
@@ -196,7 +196,7 @@ namespace RemoteAgents.Launcher
             if(initializing || busy)return;serverChanged=address.Text.Trim()!=originalAddress || login.Text.Trim()!=originalLogin;
             password.Enabled=true;password.Clear();
             if(serverChanged){for(int i=1;i<6;i++){applied[i]=false;results[i]="Нужно проверить для нового сервера";}catalogLoaded=treeLoaded=false;accountRows=new Dictionary<string,object>[0];
-                api.Clear();web.Clear();accountKey.Clear();accounts.Items.Clear();lanCommand=lanFile="";applied[6]=false;results[6]="Не настроена (необязательно)";expectedCatalog=null;nodes.Rows.Clear();
+                api.Clear();web.Clear();accountKey.Clear();accounts.Items.Clear();lanCommand=proxyCommand="";applied[6]=applied[8]=false;results[6]=results[8]="Нужно проверить для нового сервера";expectedCatalog=null;nodes.Rows.Clear();
                 RefreshDiskWarning();RefreshSummary();}
         }
         void ConnectionPage()
@@ -261,20 +261,12 @@ namespace RemoteAgents.Launcher
             foreach(Control control in sections[5].Controls.Cast<Control>().Where(cn=>cn.Top==20 || cn.Top==85).ToArray())Technical(5,control);
             Technical(5,vpnCheck,vpnDns);More(5,210);
         }
-        void LanPage()
-        {
-            Question(6,"Есть ли локальная сеть по OpenVPN?");Hint(6,"Профиль копируется на сервер. Локальную сеть включает администратор сервера; сеть Windows этот шаг не меняет.",86,65);
-            Button(6,"Выбрать файл .ovpn…",160,async()=>{using(var d=new OpenFileDialog {Filter="OpenVPN (*.ovpn)|*.ovpn",CheckFileExists=true})if(d.ShowDialog(this)==DialogResult.OK){lanFile=d.FileName;}if(lanFile.Length>0){var result=await Run("Lan",new {file=lanFile});lanCommand=Json.Str(result,"command");results[6]=Json.Str(result,"summary");Append(results[6]);RefreshSummary();}});
-            Button(6,"Пропустить",200,()=>Skip("Lan",6));
-            Button(6,"Скопировать команду",240,()=>{if(lanCommand.Length==0)throw new IOException("Сначала отправьте профиль кнопкой «Далее»");Clipboard.SetText(lanCommand);Append("Команда скопирована. При выполнении она запросит HTTPS-адрес проверки IP.");return Task.FromResult(0);});
-            var state=Path.Combine(home,"state","lan-upload.json");if(File.Exists(state)){var receipt=Json.Read(state);if(Json.Str(receipt,"profile")==Json.Str(Json.Map(Json.Get(new Configuration(home).Data,"transport")),"profilePath"))lanCommand=Json.Str(receipt,"command");}
-        }
         void SummaryPage(){Question(7,"Настройка завершена?");summary=Hint(7,"",85,235);}
         void Changed(int index){if(busy || initializing)return;dirty[index]=true;applied[index]=false;results[index]="Есть неприменённые изменения";RefreshSummary();}
         void RefreshSummary()
         {
             if(summary!=null)summary.Text=string.Join("\r\n",order.Where(i=>i!=7).Select(i=>titles[i]+": "+(results[i].Length>72?results[i].Substring(0,69)+"…":results[i])));
-            for(int i=0;i<8;i++){if(states[i]!=null){states[i].Text=results[i];states[i].ForeColor=results[i].StartsWith("Ошибка")?Color.Firebrick:SystemColors.ControlText;}steps.Mark(i,(i<7 && applied[i])?"✓":results[i].StartsWith("Ошибка")?"✗":"…");}
+            for(int i=0;i<sections.Length;i++){if(states[i]!=null){states[i].Text=results[i];states[i].ForeColor=results[i].StartsWith("Ошибка")?Color.Firebrick:SystemColors.ControlText;}steps.Mark(i,(i!=7 && applied[i])?"✓":results[i].StartsWith("Ошибка")?"✗":"…");}
             steps.Invalidate();
             RefreshDiskWarning();
         }
@@ -298,7 +290,7 @@ namespace RemoteAgents.Launcher
                 if(!migrationRunning)results[7]=failed.Length>0?"Ошибка: прошлый переход не выполнен. "+failed:legacy?"Найдена прежняя установка. «Готово» запустит переход с проверкой и автоматическим откатом":results[7];
                 var services=Json.Map(Json.Get(server,"services"));if(api.Text.Length==0)api.Text=Json.Str(services,"serverUrl");if(web.Text.Length==0)web.Text=Json.Str(services,"webappUrl");
                 var wizard=Json.Map(Json.Get(new Configuration(home).Data,"wizard"));
-                applied[6]=lanCommand.Length>0 || Json.Bool(wizard,"skipLan") || Json.Bool(wizard,"configured");results[6]=lanCommand.Length>0?"Профиль отправлен; включение на сервере":"Не настроена (необязательно)";
+                InspectNetwork(wizard);
                 password.Enabled=!applied[0];
             });
         }
@@ -306,8 +298,8 @@ namespace RemoteAgents.Launcher
         {
             lastSuccess=false;busy=true;stepCancellation=new CancellationTokenSource();steps.Enabled=false;pages.Enabled=false;foreach(var panel in details)panel.Enabled=false;back.Enabled=next.Enabled=false;close.Enabled=true;progress.Style=ProgressBarStyle.Marquee;
             try {await action();lastSuccess=true;}
-            catch(OperationCanceledException) {if(steps.Section<7)applied[steps.Section]=false;results[steps.Section]="Шаг отменён; готовность не подтверждена";Append(results[steps.Section]);}
-            catch(Exception e) {if(steps.Section==0)password.Enabled=true;if(steps.Section<7)applied[steps.Section]=false;results[steps.Section]="Ошибка: "+e.Message;Append(results[steps.Section]);}
+            catch(OperationCanceledException) {if(steps.Section!=7)applied[steps.Section]=false;results[steps.Section]="Шаг отменён; готовность не подтверждена";Append(results[steps.Section]);}
+            catch(Exception e) {if(steps.Section==0)password.Enabled=true;if(steps.Section!=7)applied[steps.Section]=false;results[steps.Section]="Ошибка: "+e.Message;Append(results[steps.Section]);}
             finally {busy=false;foreach(var panel in details)panel.Enabled=true;stepCancellation.Dispose();stepCancellation=null;steps.Enabled=pages.Enabled=close.Enabled=true;back.Enabled=Array.IndexOf(order,steps.Section)>0;next.Enabled=!migrationRunning;progress.Style=ProgressBarStyle.Continuous;RefreshSummary();if(closingRequested)Close();}
         }
         void WatchMigration(DateTime activation)
@@ -326,7 +318,7 @@ namespace RemoteAgents.Launcher
         }
         async Task<Dictionary<string,object>> Run(string action, object request)
         {
-            string message=action=="Server"?"Подключаюсь к серверу "+address.Text.Trim()+"…":action=="Catalog"?"Загружаю узлы с сервера…":action=="DiskTree"?"Загружаю проекты Disk…":action=="Connection"?"Проверяю варианты связи…":action=="Bridge"?"Настраиваю и проверяю мост…":action=="Inspect"?"Проверяю текущее состояние в фоне…":action=="Lan"?"Копирую профиль локальной сети на сервер…":action=="Account"?"Подключаю Happier…":action=="Disk"?"Применяю выбор проектов…":action=="Vpn"?"Проверяю настройки VPN…":"Завершаю настройку…";
+            string message=action=="Server"?"Подключаюсь к серверу "+address.Text.Trim()+"…":action=="Catalog"?"Загружаю узлы с сервера…":action=="DiskTree"?"Загружаю проекты Disk…":action=="Connection"?"Проверяю варианты связи…":action=="Bridge"?"Настраиваю и проверяю мост…":action=="Inspect"?"Проверяю текущее состояние в фоне…":action=="Lan"?"Подключаю локальную сеть…":action=="Proxy"?"Настраиваю выход сервера в интернет…":action=="NetStatus"?"Проверяю состояние сетей сервера…":action=="AdminProbe"?"Проверяю права root на сервере…":action=="LanRemove"?"Удаляю локальную сеть…":action=="Account"?"Подключаю Happier…":action=="Disk"?"Применяю выбор проектов…":action=="Vpn"?"Проверяю настройки VPN…":"Завершаю настройку…";
             Append(message);
             string requestFile=Path.Combine(home,"state","wizard-request-"+Guid.NewGuid().ToString("N")+".json"), output=requestFile+".out", live=requestFile+".progress";
             try {
@@ -475,10 +467,8 @@ namespace RemoteAgents.Launcher
                         }
                         create.Checked=false;break;
                     case 4:result=await Run("Bridge",new {enabled=bridge.Checked,shell=shell.Checked});break;
-                    case 6:
-                        if(lanCommand.Length>0){result=new Dictionary<string,object>{{"summary","Файл на сервере ✓; включение выполняет администратор"}};break;}
-                        if(lanFile.Length==0){result=new Dictionary<string,object>{{"summary","Локальная сеть пропущена"}};break;}
-                        result=await Run("Lan",new {file=lanFile});lanCommand=Json.Str(result,"command");break;
+                    case 6:result=await ExecuteLan();break;
+                    case 8:result=await ExecuteProxy();break;
                     case 5:result=await Run("Vpn",new {enabled=vpn.Checked,checkUrl=vpnCheck.Text.Trim(),dnsServer=vpnDns.Text.Trim()});break;
                     default:
                         if(dirty.Any(v=>v))throw new IOException("Сначала примените изменённые разделы: итог проверяет сохранённые настройки");
@@ -499,7 +489,7 @@ namespace RemoteAgents.Launcher
     // Left list of settings sections with a ✓/✗/… mark; the wizard decides which clicks are allowed.
     internal sealed class WizardNavigation : ListBox
     {
-        int[] order=new int[0];string[] titles=new string[0];readonly string[] marks=Enumerable.Repeat("…",8).ToArray();bool syncing;
+        int[] order=new int[0];string[] titles=new string[0];readonly string[] marks=Enumerable.Repeat("…",9).ToArray();bool syncing;
         internal Func<int,bool> Available=i=>true;
         internal event Action<int> SectionRequested;
         internal WizardNavigation(){Dock=DockStyle.Left;Width=150;DrawMode=DrawMode.OwnerDrawFixed;IntegralHeight=false;BorderStyle=BorderStyle.None;BackColor=SystemColors.Control;ItemHeight=30;}

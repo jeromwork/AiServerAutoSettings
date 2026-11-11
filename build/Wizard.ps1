@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 [CmdletBinding()]
-param([Alias('Home')][string]$LauncherHome,[ValidateSet('Server','Lan','Skip','Catalog','Connection','DiskTree','Disk','AccountList','Account','Bridge','Vpn','Inspect','Activate','RollbackNetwork','RollbackBridge')][string]$Action,[string]$RequestFile,[string]$Session,[string]$ProgressFile)
+param([Alias('Home')][string]$LauncherHome,[ValidateSet('Server','Lan','LanRemove','NetStatus','AdminProbe','Proxy','Skip','Catalog','Connection','DiskTree','Disk','AccountList','Account','Bridge','Vpn','Inspect','Activate','RollbackNetwork','RollbackBridge')][string]$Action,[string]$RequestFile,[string]$Session,[string]$ProgressFile)
 $ErrorActionPreference='Stop'
 # Machine-readable JSON must preserve filenames on non-Russian Windows too.
 [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)

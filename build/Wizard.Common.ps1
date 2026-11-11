@@ -4,6 +4,7 @@
 . (Join-Path (Split-Path $PSScriptRoot -Parent) 'disk/Disk.Union.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Server.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Lan.ps1')
+. (Join-Path $PSScriptRoot 'Wizard.Network.ps1')
 # All state is observed again. This model is also exercised with fake SSH on Linux.
 function Get-WizardPlan($Server,$Local) {
     @(
@@ -257,7 +258,11 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             if(-not $server.userManager){throw 'Нет user systemd. Администратору сервера: sudo loginctl enable-linger <пользователь>; sudo systemctl start user@<uid>.service. Затем повторите шаг'}
             return $server
         }
-        'Lan' {return Send-WizardLan $Root $Bundle ([string]$Request.file)}
+        'Lan' {if($Request.host){return Add-WizardLan $Root $Bundle $Request};return Send-WizardLan $Root $Bundle ([string]$Request.file)}
+        'LanRemove' {return Remove-WizardLan $Root $Bundle $Request}
+        'NetStatus' {return Get-WizardNetStatus $Root}
+        'AdminProbe' {return @{mode=(Get-WizardAdminMode $Root ([pscustomobject]@{}))}}
+        'Proxy' {return Set-WizardProxy $Root $Bundle $Request}
         'Catalog' {Write-WizardProgress 'Загружаю узлы с сервера…';return Get-WizardCatalog $Root $Bundle}
         'Connection' {
             $server=Get-WizardCatalog $Root $Bundle;$local=$Request.catalog
@@ -309,9 +314,10 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             return @{ok=$true;summary=('Работает через '+$active)}
         }
         'Skip' {
-            if($Request.step -notin @('Disk','Happier','Lan')){throw 'Обязательный шаг нельзя пропустить'}
+            if($Request.step -notin @('Disk','Happier','Lan','Proxy')){throw 'Обязательный шаг нельзя пропустить'}
             if($Request.step -eq 'Disk' -and (Read-TransportJson (Join-Path $Root 'config.json')).wizard.diskPreviousProfile){Suspend-WizardDisk $Root $Bundle}
             Update-MigrationConfig $Root {param($c) Set-MigrationDefault $c wizard ([pscustomobject]@{});$c.wizard|Add-Member -Force ('skip'+$Request.step) $true;if($Request.step -eq 'Disk' -and $c.wizard.diskPreviousProfile){$c.wizard|Add-Member -Force diskKeepPrevious $true}}
+            if($Request.step -eq 'Proxy'){return @{ok=$true;summary='Пропущено: сервер выходит в интернет как сейчас, прокси не менялся'}}
             return @{ok=$true;summary='Пропущено по вашему выбору'}
         }
         'DiskTree' {

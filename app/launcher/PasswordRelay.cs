@@ -13,21 +13,25 @@ namespace RemoteAgents.Launcher
     {
         readonly NamedPipeServerStream server;
         internal readonly string Name;
-        internal PasswordRelay(string password)
+        // uses>1: one root/sudo password for one operation (several SSH sessions), still memory only.
+        internal PasswordRelay(string password, int uses = 1)
         {
             if(string.IsNullOrEmpty(password)){Name="";return;}
             Name="RemoteAgents.Password."+Guid.NewGuid().ToString("N");
             var security=new PipeSecurity();security.SetAccessRuleProtection(true,false);
             security.AddAccessRule(new PipeAccessRule(WindowsIdentity.GetCurrent().User,PipeAccessRights.FullControl,AccessControlType.Allow));
             server=new NamedPipeServerStream(Name,PipeDirection.Out,1,PipeTransmissionMode.Byte,PipeOptions.Asynchronous,4096,4096,security);
-            _ = Serve(password);
+            _ = Serve(password, Math.Max(1, uses));
         }
-        async Task Serve(string password)
+        async Task Serve(string password, int uses)
         {
             try {
-                await server.WaitForConnectionAsync();
-                using(var writer=new StreamWriter(server,new UTF8Encoding(false),4096,true)){await writer.WriteLineAsync(password);await writer.FlushAsync();}
-            }catch(ObjectDisposedException){}catch(IOException){}
+                for(int i=0;i<uses;i++) {
+                    await server.WaitForConnectionAsync();
+                    using(var writer=new StreamWriter(server,new UTF8Encoding(false),4096,true)){await writer.WriteLineAsync(password);await writer.FlushAsync();}
+                    server.WaitForPipeDrain();server.Disconnect();
+                }
+            }catch(ObjectDisposedException){}catch(IOException){}catch(InvalidOperationException){}
             finally{password=null;}
         }
         internal static int Answer(string name)
