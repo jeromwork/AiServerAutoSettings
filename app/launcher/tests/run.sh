@@ -14,6 +14,7 @@ LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -NonInteractive -File "$here/te
 LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -NonInteractive -File "$here/test-wizard-account.ps1" -TestHome "$testdir/wizard-account" < /dev/null
 LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -NonInteractive -File "$here/test-navpane.ps1" -TestHome "$testdir/navpane" < /dev/null
 LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -NonInteractive -File "$here/test-network.ps1" -TestHome "$testdir/network" < /dev/null
+LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -NonInteractive -File "$here/test-invite-account.ps1" -TestHome "$testdir/invite-account" < /dev/null
 python3 -m unittest discover -s "$repo/server/tests"
 python3 "$repo/disk/test-tree.py"
 python3 "$repo/transport/test-server-catalog.py"
