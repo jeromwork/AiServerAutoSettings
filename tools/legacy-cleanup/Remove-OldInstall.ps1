@@ -24,8 +24,8 @@ function Invoke-Native([string]$Exe, [string[]]$A) {
     [pscustomobject]@{ code = $LASTEXITCODE; out = (@($o | ForEach-Object { [string]$_ }) -join "`r`n") }
 }
 function Get-TaskNames { @('RemoteDiskChannel', 'RemoteDiskFolders') + @(Get-ScheduledTask -TaskPath '\' -TaskName 'RemoteAgents*' -ErrorAction SilentlyContinue | ForEach-Object { $_.TaskName }) }
-function Get-Val([string]$K, [string]$N) { $k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($K); if ($k) { try { $v = $k.GetValue($N, $null, 'DoNotExpandEnvironmentNames'); if ($null -ne $v) { [pscustomobject]@{ key = $K; name = $N; value = $v; kind = [string]$k.GetValueKind($N) } } } finally { $k.Dispose() } } }
-function Remove-Val([string]$K, [string]$N) { $k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($K, $true); if ($k) { try { $k.DeleteValue($N, $false) } finally { $k.Dispose() } } }
+function Get-Val([string]$K, [string]$N) { $h = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($K); if ($h) { try { $v = $h.GetValue($N, $null, 'DoNotExpandEnvironmentNames'); if ($null -ne $v) { [pscustomobject]@{ key = $K; name = $N; value = $v; kind = [string]$h.GetValueKind($N) } } } finally { $h.Dispose() } } }
+function Remove-Val([string]$K, [string]$N) { $h = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($K, $true); if ($h) { try { $h.DeleteValue($N, $false) } finally { $h.Dispose() } } }
 function Get-Parent { try { [int](Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId } catch { 0 } }
 function Get-Procs { @(Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID }) }
 if ($Adapter) { . ([IO.Path]::GetFullPath($Adapter)) }
