@@ -29,6 +29,8 @@ function Connect-WizardInvite([string]$Root,$Request) {
                 try{[void](Invoke-WizardLogin $p $p.login 'true');$ok=$true}catch{
                     if($_.Exception.Message -like '*Ключ хоста*'){throw}
                 }
+                if(-not $ok -and $Request.refresh -and $Request.deferProof){$ok=$true}
+                if(-not $ok -and $Request.refresh){continue}
                 if(-not $ok){
                     if([DateTimeOffset]::Parse([string]$invite.expiresUtc) -le [DateTimeOffset]::UtcNow){throw 'Срок приглашения истёк. Попросите администратора создать новое'}
                     Write-DiskUtf8 $pass ([string]$invite.passKey);Protect-TransportPath $pass
@@ -88,7 +90,7 @@ function Connect-WizardInviteAccount([string]$Root,[string]$Bundle,$Request) {
 function Initialize-WizardInvite([string]$Root,$Request) {
     $invite=Read-TransportJson ([string]$Request.path)
     if($invite.schema -ne 1){throw 'Неизвестная схема приглашения. Попросите новое приглашение'}
-    if([string]$invite.id -cnotmatch '\A[a-f0-9]{32}\z' -or [string]$invite.serverAddress -notmatch '\A[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}\z' -or [string]$invite.workerUser -notmatch '\A[a-z_][a-z0-9_-]{0,31}\z' -or [string]$invite.enrollUser -notmatch '\A[a-z_][a-z0-9_-]{0,31}\z'){throw 'Повреждённое приглашение'}
+    if([string]$invite.id -cnotmatch '\A[a-f0-9]{32}\z' -or [string]$invite.serverAddress -notmatch '\A[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}\z' -or [string]$invite.workerUser -notmatch '\A[a-z_][a-z0-9_-]{0,31}\z' -or (-not $Request.refresh -and [string]$invite.enrollUser -notmatch '\A[a-z_][a-z0-9_-]{0,31}\z')){throw 'Повреждённое приглашение'}
     $port=[int]$invite.serverPort;if($port -lt 1 -or $port -gt 65535){throw 'Некорректный порт приглашения'}
     $id=(Get-TransportFingerprint ([string]$invite.serverAddress+':'+$port) ([string]$invite.workerUser)).Substring(0,20)
     $dir=Join-Path $Root ('ssh-profiles/'+$id+'/project-connections/control')
@@ -103,6 +105,7 @@ function Initialize-WizardInvite([string]$Root,$Request) {
     }
     if(-not $pins.Count){throw 'Приглашение не содержит ключей хоста'}
     Write-DiskUtf8 $p.knownHostsPath (($pins -join "`n")+"`n")
+    if($Request.refresh){$p.keyPath=[string]$Request.keyPath;if(-not (Test-Path -LiteralPath $p.keyPath)){throw 'Нет собственного ключа компьютера'}}
     if(-not (Test-Path -LiteralPath $p.keyPath)){
         $keygen=@(Get-Command ssh-keygen -CommandType Application -ErrorAction Stop)[0].Source
         [void](Invoke-DiskProcess $keygen @('-q','-t','ed25519','-N','','-f',$p.keyPath));Protect-TransportPath $p.keyPath

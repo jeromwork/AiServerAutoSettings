@@ -48,7 +48,12 @@ namespace RemoteAgents.Launcher
                 string home = Path.GetFullPath(Option(args, "--home") ?? DefaultHome);
                 Directory.CreateDirectory(home); log = new Journal(home); log.Write("launcher.start");
                 if (args.Contains("--uninstall")) { if (Product.IsVpn) FirstInstall.UninstallVpn(home); else Uninstall.Run(home); log.Write("uninstall.ok"); return 0; }
-                if(!Product.IsVpn && !args.Contains("--exit") && !args.Contains("--tray")) {
+                System.Collections.Generic.Dictionary<string,byte[]> refreshFiles=null;
+                if(!Product.IsVpn && !args.Contains("--tray") && !args.Contains("--exit")){
+                    var overlay=InvitationOverlay.Read(Exe);
+                    if(overlay!=null && new Invitation(Json.Map(Json.Parse(System.Text.Encoding.UTF8.GetString(overlay["invite.rainvite"])))).IsRefresh)refreshFiles=overlay;
+                }
+                if(refreshFiles==null && !Product.IsVpn && !args.Contains("--exit") && !args.Contains("--tray")) {
                     try{bool embedded=InvitationOverlay.Stage(home,Exe);
                         string invitation=embedded?null:Invitation.Find(args,Path.GetDirectoryName(Exe));
                         if(embedded)args=args.Concat(new[]{"--setup-check"}).ToArray();
@@ -75,6 +80,12 @@ namespace RemoteAgents.Launcher
                         try {
                             owned = WaitMutex(mutex, 0);
                             string target = Path.Combine(home, Product.ExeName);
+                            if(refreshFiles!=null){
+                                if(!File.Exists(target))throw new IOException("Этот компьютер ещё не подключён. Попросите приглашение для регистрации.");
+                                if(!owned){StopInstalled(name,target,home,mutex,log);owned=true;}
+                                try{RefreshPackage.Apply(home,refreshFiles);}
+                                catch(Exception e){launch(target,false);MessageBox.Show(e.Message,"RemoteAgents — обновление связи");return 1;}
+                            }
                             bool external = !Path.GetFullPath(Exe).Equals(target, StringComparison.OrdinalIgnoreCase);
                             bool command = args.Any(a => new[] { "--exit", "--uninstall", "--logs", "--rollback", "--restart-components", "--check-updates", "--settings" }.Contains(a));
                             // --tray with --home is also the isolated development/smoke entry point.

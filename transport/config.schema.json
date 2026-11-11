@@ -337,6 +337,11 @@
     "inviteBootstrap": {
       "type": "boolean",
       "description": "Temporary HTTPS/TUN bootstrap before the invited device has its own authorized SSH key"
+    },
+    "cacheRoot": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Локальный каталог неизменяемого снимка кэшей после доверенного обновления"
     }
   }
 }

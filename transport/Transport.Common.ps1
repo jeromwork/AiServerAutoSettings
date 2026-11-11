@@ -132,7 +132,7 @@ function Get-TransportSshArguments($Profile,[int]$Port) {
     $nullConfig='NUL';if($env:OS -ne 'Windows_NT'){$nullConfig='/dev/null'}
     $bootstrapProxy=if($Profile.inviteProxyCommand){'ProxyCommand='+[string]$Profile.inviteProxyCommand}else{'ProxyCommand=none'}
     @('-n','-T','-F',$nullConfig,'-p',[string]$Port,'-i',[string]$Profile.keyPath,'-l',[string]$Profile.login,
-      '-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','StrictHostKeyChecking=yes','-o',('UserKnownHostsFile="'+$Profile.knownHostsPath.Replace('\','/')+'"'),
+      '-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','GlobalKnownHostsFile=none','-o','StrictHostKeyChecking=yes','-o',('UserKnownHostsFile="'+$Profile.knownHostsPath.Replace('\','/')+'"'),
       '-o',('HostKeyAlias='+$Profile.serverAddress),'-o',$bootstrapProxy,'-o','ProxyJump=none','-o','ConnectTimeout=10','-o','ConnectionAttempts=1','-o','LogLevel=ERROR')
 }
 function Get-TransportServerPort($Profile) {
@@ -199,7 +199,7 @@ function Get-TransportCandidates($Settings,[string]$Root) {
     }
     foreach($entry in @($t.entries)){
         if($null -eq $entry -or -not (Test-TransportEnabled $entry)){continue};Assert-TransportName $entry.name
-        $e=Read-TransportJson (Join-Path $Root ('secrets/entries/'+$entry.name+'.json'));$x=$e.secrets;$name=$entry.name
+        $e=Read-TransportJson (Join-Path (Get-TransportCacheRoot $Settings $Root) ('secrets/entries/'+$entry.name+'.json'));$x=$e.secrets;$name=$entry.name
         foreach($f in @('server','sni','cover','ports','secrets')){if(-not $e.$f){throw 'Неполный client.json узла'}}
         $tls=@{enabled=$true;server_name=$e.sni;insecure=[bool]$e.insecure}
         $list=@(
@@ -222,7 +222,7 @@ function Get-TransportCandidates($Settings,[string]$Root) {
     }
     foreach($cdn in @($t.cdn)){
         if($null -eq $cdn -or -not (Test-TransportEnabled $cdn)){continue}
-        $e=Read-TransportJson (Join-Path $Root ('secrets/entries/'+$cdn.entry+'.json'));$x=$e.secrets
+        $e=Read-TransportJson (Join-Path (Get-TransportCacheRoot $Settings $Root) ('secrets/entries/'+$cdn.entry+'.json'));$x=$e.secrets
         if(-not $x.ws_uuid -or -not $x.ws_path){throw 'Узел не содержит WebSocket'}
         $r=@{type='vless';tag=('cdn-'+$cdn.name);server=$cdn.domain;server_port=443;uuid=$x.ws_uuid;
             tls=@{enabled=$true;server_name=$cdn.domain;alpn=@('http/1.1');utls=@{enabled=$true;fingerprint='chrome'}};
@@ -527,7 +527,7 @@ function Get-TransportRevision([string]$Root) {
     $config=Read-TransportJson (Join-Path $Root 'config.json');$files=@()
     foreach($field in @('profilePath','channelPath')){if($config.transport.$field){$files+=[string]$config.transport.$field}}
     $files=@($files|Select-Object -Unique)
-    $cache=Join-Path $Root 'secrets/entries';if(Test-Path -LiteralPath $cache){$files+=@(Get-ChildItem -LiteralPath $cache -Filter '*.json'|Sort-Object Name|ForEach-Object {$_.FullName})}
+    $cache=Join-Path (Get-TransportValue $config.transport 'cacheRoot' $Root) 'secrets/entries';if(Test-Path -LiteralPath $cache){$files+=@(Get-ChildItem -LiteralPath $cache -Filter '*.json'|Sort-Object Name|ForEach-Object {$_.FullName})}
     $sha=[Security.Cryptography.SHA256]::Create()
     try{$text=(ConvertTo-Json -InputObject $config.transport -Depth 40 -Compress)+"`n"+((@($files|ForEach-Object {$_+"`n"+(Convert-TransportLF ([IO.File]::ReadAllText($_)))})) -join "`n");[Convert]::ToBase64String($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))}finally{$sha.Dispose()}
 }
@@ -610,7 +610,7 @@ function Get-VpnExclusions($Settings,$Paths,$Snapshot,[hashtable]$Resolved=@{},[
     foreach($relay in @($Settings.Transport.relays)){if($relay){$hosts+=Get-TransportValue $relay 'host' $relay.server}}
     foreach($cdn in @($Settings.Transport.cdn)){if($cdn){$hosts+=$cdn.domain}}
     foreach($entry in @($Settings.Transport.entries)){
-        if(-not $entry -or -not $Root){continue};$cache=Join-Path $Root ('secrets/entries/'+$entry.name+'.json')
+        if(-not $entry -or -not $Root){continue};$cache=Join-Path (Get-TransportCacheRoot $Settings $Root) ('secrets/entries/'+$entry.name+'.json')
         # Root задаётся параметром ниже: отключённый узел также исключается из TUN.
         if($Root -and (Test-Path -LiteralPath $cache)){$hosts+=(Read-TransportJson $cache).server}
     }
@@ -743,7 +743,7 @@ function Sync-TransportEntryCache($Settings,[string]$Root) {
     # Старый кэш обновляет только явная Update-Entries.ps1; host keys не принимаются автоматически.
     foreach($entry in @($Settings.Transport.entries)){
         if(-not $entry -or -not (Test-TransportEnabled $entry)){continue}
-        $file=Join-Path $Root ('secrets/entries/'+$entry.name+'.json');if(Test-Path -LiteralPath $file){continue}
+        $file=Join-Path (Get-TransportCacheRoot $Settings $Root) ('secrets/entries/'+$entry.name+'.json');if(Test-Path -LiteralPath $file){continue}
         $args=@('-n','-T','-o','BatchMode=yes','-o','ConnectTimeout=10','-o','StrictHostKeyChecking=yes')
         if($entry.configPath){$args+=@('-F',[string]$entry.configPath)}
         $alias=Get-TransportValue $entry 'ssh' $entry.alias
@@ -846,4 +846,8 @@ function Get-VpnTransportState([string]$Root,$Settings) {
     $status=Read-TransportJson (Join-Path $Root 'status/transport.json')
     if(-not $status.ok -or ([DateTime]::UtcNow-(Convert-TransportUtc $status.updatedAt)).TotalSeconds -gt 15){throw 'Транспорт ещё не проверен'}
     return $status
+}
+
+function Get-TransportCacheRoot($Settings,[string]$Root) {
+    Get-TransportValue $Settings.Transport 'cacheRoot' $Root
 }

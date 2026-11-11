@@ -30,7 +30,9 @@ pwsh=${PWSH:-$HOME/.cache/pwsh-test/pwsh}
 ) > "$testdir/offline.log" 2>&1 &
 offline_pid=$!
 (
-  timeout 120 python3 -m unittest discover -s "$repo/server/tests"
+  for suite in "$repo"/server/tests/test_*.py; do
+    timeout 120 python3 -m unittest discover -s "$repo/server/tests" -p "$(basename "$suite")"
+  done
 ) > "$testdir/server.log" 2>&1 &
 server_pid=$!
 trap 'kill "$offline_pid" "$server_pid" 2>/dev/null || true; rm -rf "$testdir"' EXIT
@@ -44,8 +46,8 @@ trap 'rm -rf "$testdir"' EXIT
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -- "$testdir/core"
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ProductName=RemoteVPN -- "$testdir/core-vpn"
 timeout 120 "$repo/build/make-bundle.sh" 20261109.235959-test "$testdir/bundles"
-timeout 120 "$dotnet" build "$repo/app/launcher/RemoteAgents.Launcher.csproj" -c Release -p:BundlePath="$testdir/bundles/20261109.235959-test.zip" --nologo
-timeout 120 "$dotnet" publish "$repo/app/launcher/RemoteAgents.Launcher.csproj" -c Release -p:BundlePath="$testdir/bundles/20261109.235959-test.zip" -o "$testdir/publish" --nologo
+timeout 300 "$dotnet" build "$repo/app/launcher/RemoteAgents.Launcher.csproj" -c Release -p:BundlePath="$testdir/bundles/20261109.235959-test.zip" --nologo
+timeout 300 "$dotnet" publish "$repo/app/launcher/RemoteAgents.Launcher.csproj" -c Release -p:BundlePath="$testdir/bundles/20261109.235959-test.zip" -o "$testdir/publish" --nologo
 timeout 120 python3 - "$testdir/publish" <<'PY'
 from pathlib import Path
 import sys

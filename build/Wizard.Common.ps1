@@ -4,6 +4,7 @@
 . (Join-Path (Split-Path $PSScriptRoot -Parent) 'disk/Disk.Union.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Server.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Invite.ps1')
+. (Join-Path $PSScriptRoot 'Wizard.Refresh.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Lan.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Network.ps1')
 # All state is observed again. This model is also exercised with fake SSH on Linux.
@@ -185,7 +186,7 @@ function Get-WizardPublicTransport($Transport) {
 function Register-WizardRollback([string]$Root,[string]$Bundle,[string]$Kind,[string]$Session,[string]$Task) {
     # Recovery is independent of both the UI and the prunable current bundle.
     $recovery=Join-Path $Root ('state/wizard-recovery/'+$Session)
-    foreach($name in @('build/Wizard.ps1','build/Wizard.Common.ps1','build/Wizard.Server.ps1','build/Wizard.Lan.ps1','build/Setup.Common.ps1','transport/Transport.Common.ps1','disk/Disk.Common.ps1','disk/Disk.Union.ps1','disk/Disk.Selective.ps1','disk/stignore.txt','disk/stignore-previous.sha256')){
+    foreach($name in @('build/Wizard.ps1','build/Wizard.Common.ps1','build/Wizard.Server.ps1','build/Wizard.Invite.ps1','build/Wizard.Refresh.ps1','build/Wizard.Network.ps1','build/Wizard.Lan.ps1','build/Setup.Common.ps1','transport/Transport.Common.ps1','disk/Disk.Common.ps1','disk/Disk.Union.ps1','disk/Disk.Selective.ps1','disk/stignore.txt','disk/stignore-previous.sha256')){
         $dest=Join-Path $recovery $name;[void][IO.Directory]::CreateDirectory((Split-Path $dest -Parent))
         Copy-Item -LiteralPath (Join-Path $Bundle $name) -Destination $dest
     }
@@ -293,7 +294,16 @@ function Set-WizardNetwork([string]$Root,[string]$Bundle,$Transport) {
 function Undo-WizardNetwork([string]$Root,[string]$Session) {
     $file=Join-Path $Root 'state/wizard-network.json';if(-not (Test-Path $file)){return}
     $receipt=Read-TransportJson $file;if($receipt.session -cne $Session){return}
-    Update-LauncherConfig $Root {param($c) $c|Add-Member -Force transport $receipt.previous}
+    if($receipt.pin){Write-TransportJson (Join-Path $Root 'state/transport-pin.json') $receipt.pin -Private}
+    if($receipt.profileFile){Write-TransportJson ([string]$receipt.profileFile) $receipt.profile -Private}
+    Update-LauncherConfig $Root {param($c)
+        $c|Add-Member -Force transport $receipt.previous
+        if($receipt.profileFile){
+            if($receipt.vpn){$c|Add-Member -Force vpn $receipt.vpn}else{$c.PSObject.Properties.Remove('vpn')}
+            if($receipt.serverRoute){$c.wizard|Add-Member -Force serverRoute $receipt.serverRoute}else{if($c.wizard){$c.wizard.PSObject.Properties.Remove('serverRoute')}}
+        }
+    }
+    foreach($path in @($receipt.refreshReceipt,$receipt.versionFile)){if($path -and (Test-Path $path)){Remove-Item -LiteralPath $path -Force}}
     Remove-Item -LiteralPath $file -Force
     Unregister-ScheduledTask -TaskName $receipt.task -Confirm:$false -ErrorAction SilentlyContinue
 }
@@ -312,6 +322,8 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
     $diskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk';$script:DiskHome=$diskHome
     switch($Action){
         'InvitePrepare' {return Prepare-WizardInvite $Root $Bundle $Request}
+        'InviteRefresh' {return Update-WizardInviteSettings $Root $Bundle $Request}
+        'InviteSync' {return Sync-WizardInviteSettings $Root $Bundle $Request}
         'InviteVerify' {[void](Invoke-WizardSsh $Root 'true');return @{ok=$true}}
         'InviteDisk' {return Invoke-WizardStep $Root $Bundle 'Disk' ([pscustomobject]@{base=(Get-DiskBase);paths=@($Request.paths)})}
         'InviteEnroll' {return Connect-WizardInvite $Root $Request}

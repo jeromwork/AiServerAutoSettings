@@ -6,6 +6,7 @@ accounts or sudoers; tests run the same enrollment transaction under one UID.
 """
 import argparse
 import base64
+import hashlib
 import contextlib
 import datetime as dt
 import fcntl
@@ -181,12 +182,151 @@ def enroll(c, ident, raw):
                 os.close(fd)
         finally:
             os.close(parent)
+        data['deviceKey'] = key
         data.update(status='used', usedUtc=dt.datetime.now(dt.timezone.utc).isoformat())
         data.pop('reservedKey', None)
         save(p, data)
         remove_pass(c, ident)
         event(c, 'enroll.ok')
     return {'ok': True, 'id': ident}
+
+
+@contextlib.contextmanager
+def worker_file(c, path):
+    """No root path traversal through worker-controlled symlinks/hardlinks."""
+    path = Path(path)
+    parent = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in path.parent.parts[1:]:
+            try:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            except FileNotFoundError:
+                os.mkdir(part, mode=0o700, dir_fd=parent)
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                if not c.get('sandbox'):
+                    user = pwd.getpwnam(c['workerUser'])
+                    os.fchown(child, user.pw_uid, user.pw_gid)
+            os.close(parent)
+            parent = child
+        fd = os.open(path.name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+        try:
+            require(os.fstat(fd).st_nlink == 1, 'Файл не должен быть hardlink')
+            os.fchmod(fd, 0o600)
+            yield fd
+            os.fsync(fd)
+            if not c.get('sandbox'):
+                user = pwd.getpwnam(c['workerUser'])
+                os.fchown(fd, user.pw_uid, user.pw_gid)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent)
+
+
+def devices(c):
+    auth = Path(c['workerAuthorizedKeys'])
+    rows = []
+    records = [load(p) for p in Path(c['stateDir']).glob('*.json')]
+    with worker_file(c, auth) as fd:
+        with os.fdopen(os.dup(fd)) as source:
+            lines = source.read().splitlines()
+    for line in lines:
+        match = re.fullmatch(r'(ssh-ed25519 [A-Za-z0-9+/=]+) ra-device:([^\r\n]+)', line)
+        if not match:
+            continue
+        key, name = match.groups()
+        key = public_key(key.encode())
+        digest = hashlib.sha256(base64.b64decode(key.split()[1])).digest()
+        fingerprint = 'SHA256:' + base64.b64encode(digest).decode().rstrip('=')
+        # Full fingerprint-derived id remains stable across invitations/names.
+        ident = hashlib.sha256(base64.b64decode(key.split()[1])).hexdigest()[:32]
+        matches = [r for r in records if r.get('deviceKey') == key]
+        if not matches:
+            matches = [r for r in records if r.get('name') == name and r.get('status') == 'used']
+        registered = matches[0].get('usedUtc', '') if len(matches) == 1 else ''
+        rows.append(dict(id=ident, name=name, fingerprint=fingerprint, registeredUtc=registered, publicKey=key))
+    return rows
+
+
+def device(c, selector):
+    rows = [r for r in devices(c) if selector in (r['id'], r['name'])]
+    require(len(rows) == 1, 'Компьютер не найден или имя неоднозначно; используйте id из invite devices')
+    return rows[0]
+
+
+def revoke_device(c, selector):
+    with locked(c):
+        row = device(c, selector)
+        with worker_file(c, c['workerAuthorizedKeys']) as fd:
+            with os.fdopen(os.dup(fd)) as source:
+                lines = source.read().splitlines()
+            target = row['publicKey'] + ' ra-device:' + row['name']
+            data = ''.join(line + '\n' for line in lines if line != target).encode()
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, data)
+            os.ftruncate(fd, len(data))
+        event(c, 'device.revoke.ok')
+    print('Компьютер отключён: ' + row['id'])
+
+
+def settings(c, vpn=None):
+    vpn = vpn or ('on' if c.get('vpnBootstrap') else 'off')
+    initial, files = bootstrap(c, vpn)
+    data = dict(schema=1, type='settings', serverAddress=c['serverAddress'], serverPort=c['serverPort'],
+                workerUser=c['workerUser'], hostKeys=c['hostKeys'], routes=routes(c), vpn=vpn, bootstrap=initial)
+    return data, files
+
+
+def sync_settings(c):
+    data, _ = settings(c)
+    home = Path(pwd.getpwnam(c['workerUser']).pw_dir)
+    path = home / '.config/remoteagents/invite-settings.json'
+    if c.get('sandbox'):
+        path = Path(c.get('settingsFile', Path(c['stateDir']) / 'worker-home/.config/remoteagents/invite-settings.json'))
+    raw = (json.dumps(data, ensure_ascii=False) + '\n').encode()
+    require(len(raw) <= 1024*1024, 'Снимок настроек превышает 1 МиБ')
+    with locked(c), worker_file(c, path) as fd:
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, raw)
+        os.ftruncate(fd, len(raw))
+    event(c, 'settings.publish.ok')
+
+
+def refresh(c, args):
+    require(0 < args.hours <= 720, 'Срок: больше нуля, максимум 720 часов')
+    with locked(c):
+        row = device(c, args.device)
+        data, files = settings(c)
+        data.update(type='refresh', id=secrets.token_hex(16), name=row['name'], deviceId=row['id'],
+                    deviceKey=row['publicKey'], expiresUtc=dt.datetime.fromtimestamp(time.time()+args.hours*3600, dt.timezone.utc).isoformat())
+        exe = Path(c['releaseExe']).read_bytes()
+        require(overlay.read(exe) is None, 'Используйте чистый release EXE')
+        files['invite.rainvite'] = (json.dumps(data, ensure_ascii=False)+'\n').encode()
+        require(len(files['invite.rainvite']) <= 1024*1024, 'Снимок обновления превышает 1 МиБ')
+        output = Path(c['outputDir'])
+        output.mkdir(parents=True, exist_ok=True, mode=0o700)
+        filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', row['name']).rstrip(' .') or row['id']
+        archive = output / ('RemoteAgents-update-'+filename+'-'+data['id'][:8]+'.exe')
+        with archive.open('xb') as f:
+            os.chmod(archive, 0o600)
+            f.write(overlay.attach(exe, files))
+    event(c, 'refresh.ok')
+    print('Обновление секретное. Передавайте только владельцу этого компьютера; ключи хоста доверены администратором.')
+    print(archive)
+    publish(c, args.publish, archive, dt.datetime.fromisoformat(data['expiresUtc']).timestamp())
+
+
+def publish(c, name, archive, expiry):
+    if not name:
+        return
+    node = c['publishNodes'][name]
+    payload = json.dumps({'expiresEpoch': expiry}).encode() + b'\n' + archive.read_bytes()
+    if node.get('ssh'):
+        url = run(['ssh', '-F', node['sshConfig'], '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', node['ssh'],
+                   shlex.join(['remoteagents', 'invite', 'receive', '--node', name])], input=payload).decode().strip()
+    else:
+        url = receive(c, name, io.BytesIO(payload))
+    print(url)
 
 
 def provision(c):
@@ -336,15 +476,8 @@ def create(c, args):
     event(c, 'create.ok')
     print('EXE секретный, как пароль. Передавайте только получателю. После регистрации удалите исходные копии EXE.')
     print(str(archive))
-    if args.publish:
-        node = c['publishNodes'][args.publish]
-        payload = json.dumps({'expiresEpoch': expiry}).encode() + b'\n' + archive.read_bytes()
-        if node.get('ssh'):
-            url = run(['ssh', '-F', node['sshConfig'], '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', node['ssh'],
-                       shlex.join(['remoteagents', 'invite', 'receive', '--node', args.publish])], input=payload).decode().strip()
-        else:
-            url = receive(c, args.publish, io.BytesIO(payload))
-        print(url)
+    publish(c, args.publish, archive, expiry)
+    sync_settings(c)
 
 
 def receive(c, name, stream):
@@ -429,6 +562,13 @@ def main():
     p.add_argument('--vpn', choices=('on', 'off'), default='on')
     p.add_argument('--publish')
     sub.add_parser('list')
+    sub.add_parser('sync')
+    sub.add_parser('devices')
+    sub.add_parser('revoke-device').add_argument('device')
+    p = sub.add_parser('refresh')
+    p.add_argument('--device', required=True)
+    p.add_argument('--hours', type=float, default=24)
+    p.add_argument('--publish')
     for verb in ('revoke', 'enroll'):
         sub.add_parser(verb).add_argument('id')
     for verb in ('serve', 'receive'):
@@ -437,6 +577,17 @@ def main():
     c = config(a.config, administrative=a.cmd not in ('receive', 'serve'))
     if a.cmd == 'create':
         create(c, a)
+    elif a.cmd == 'refresh':
+        refresh(c, a)
+    elif a.cmd == 'sync':
+        sync_settings(c)
+        print('Настройки опубликованы для зарегистрированных компьютеров')
+    elif a.cmd == 'devices':
+        with locked(c):
+            for row in devices(c):
+                print(json.dumps({k: v for k, v in row.items() if k != 'publicKey'}, ensure_ascii=False))
+    elif a.cmd == 'revoke-device':
+        revoke_device(c, a.device)
     elif a.cmd == 'enroll':
         signal.alarm(20)
         print(json.dumps(enroll(c, a.id, sys.stdin.buffer.read(2049)), ensure_ascii=False))

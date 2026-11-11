@@ -270,6 +270,11 @@
         }
       },
       "additionalProperties": false
+    },
+    "settingsFile": {
+      "type": "string",
+      "pattern": "^/",
+      "description": "Только sandbox: путь публикации в одноразовом HOME"
     }
   },
   "additionalProperties": false

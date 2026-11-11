@@ -35,6 +35,7 @@ namespace RemoteAgents.Launcher
                 case "Account": case "ResumeAccount": return 420 * 1000; // helpers 60 s + status 60 s + Account.ps1 child 300 s
                 case "Operation": return 60 * 1000;  // one short status call
                 case "Disk": return 2100 * 1000;     // old disk detach 120 s + install 900 s + apply 900 s
+                case "InviteRefresh": case "InviteSync": return 900 * 1000;
                 case "Connection": return 900 * 1000; // catalog/helpers/initialize ~400 s + preflight ~75 s + proof 120 s
                 case "Bridge": return 900 * 1000;    // two bridge children 300 s each + live probes
                 case "Vpn": return 600 * 1000;       // TUN child 420 s (may wait for UAC)

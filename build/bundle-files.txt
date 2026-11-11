@@ -69,3 +69,5 @@ disk/Disk.Binary.ps1
 disk/Disk.NavPane.ps1
 
 build/Wizard.Invite.ps1
+
+build/Wizard.Refresh.ps1

@@ -32,6 +32,7 @@ namespace RemoteAgents.Launcher
         DateTime settingsWritten = DateTime.MinValue;
         // Detached server installs started by the wizard (state/server-operations.json).
         DateTime nextOperationCheck = DateTime.MinValue; bool operationChecking, operationsActive; string operationTip = "";
+        DateTime nextInviteSync=DateTime.MinValue;bool inviteConnected;
         string updateSummary = "обновления устанавливаются вручную из нового EXE";
         public bool RestartRequested { get; private set; }
         public TrayContext(string home, Journal log, string pipeName, SecurityIdentifier sid, string[] args)
@@ -44,6 +45,9 @@ namespace RemoteAgents.Launcher
             try {
                 icon = new NotifyIcon { Visible = true, Icon = yellow, Text = Product.Name + ": запускается…" };
                 engine.Recover(); Bootstrap();
+                if(!Product.IsVpn && !File.Exists(Path.Combine(home,"state","invite-device.json")) && Directory.Exists(Path.Combine(home,"state")) && Directory.GetFiles(Path.Combine(home,"state"),"invite-used-*.json").Length>0){
+                    try{RefreshPackage.RememberDevice(home,Environment.MachineName);}catch{log.Write("invite.identity.migrate.failed");}
+                }
                 icon.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowStatus(); }; LoadComponents();
             } catch {
                 stop.Cancel(); lock (pipeGate) { if (server != null) server.Dispose(); }
@@ -108,6 +112,7 @@ namespace RemoteAgents.Launcher
                 if (operationTip.Length > 0) icon.Text = operationTip.Length > 63 ? operationTip.Substring(0, 62) + "…" : operationTip;
                 if (DateTime.UtcNow >= nextOperationCheck) CheckOperations();
                 RefreshMenu(); WriteStatus();
+                CheckInviteSettings();
                 if (serverUpdateRequested && !engine.Pending && !busy && TrySelfUpdate()) return;
             } catch { log.Write("supervisor.tick.failed"); icon.Icon = red; }
             finally { ticking = false; }
@@ -145,6 +150,20 @@ namespace RemoteAgents.Launcher
             } catch (OperationCanceledException) { } catch (Exception) { log.Write("operations.check.failed"); }
             finally { operationChecking = false; }
         }
+        async void CheckInviteSettings()
+        {
+            if(Product.IsVpn || !File.Exists(Path.Combine(home,"state","invite-device.json")) || Invitation.Pending(home))return;
+            bool connected=Json.Bool(StatusView.Read(home,"transport",maxAgeSec:15),"ok");
+            if(connected && !inviteConnected)nextInviteSync=DateTime.MinValue;
+            inviteConnected=connected;
+            if(actionBusy || busy || closing || DateTime.UtcNow<nextInviteSync)return;
+            actionBusy=true;nextInviteSync=DateTime.UtcNow.AddMinutes(5);
+            try{
+                var result=await Task.Run(()=>ServerOperations.Invoke(home,engine.Folder(engine.Current),"InviteSync",new {askpassExecutable=Program.Exe},stop.Token));
+                log.Write(Json.Bool(result,"changed")?"invite.settings.updated":"invite.settings.current");
+            }catch(OperationCanceledException){}catch{log.Write("invite.settings.unavailable");}
+            finally{actionBusy=false;ReloadSettings();}
+        }
         void WriteStatus()
         {
             Json.Write(Path.Combine(home, "status", Product.StatusName), new { schema = 1, pid = Process.GetCurrentProcess().Id, launcherVersion = Program.Version, bundleVersion = engine.Current,
@@ -168,6 +187,12 @@ namespace RemoteAgents.Launcher
             }
             foreach (var a in definition.Menu) { var action = a; menu.Items.Add(a.Title, null, (s, e) => RunAction(action)); }
             menu.Items.Add(new ToolStripSeparator());
+            string deviceFile=Path.Combine(home,"state","invite-device.json");
+            if(!Product.IsVpn && File.Exists(deviceFile) && !Json.Bool(StatusView.Read(home,"transport",maxAgeSec:15),"ok")){
+                var lost=new ToolStripMenuItem("Связь потеряна — получить обновление") {ForeColor=Color.Firebrick};
+                lost.Click+=(s,e)=>Safe(()=>{var d=Json.Read(deviceFile);string code=Json.Str(d,"name")+" / "+Json.Str(d,"id");Clipboard.SetText(code);MessageBox.Show("Попросите администратора выдать обновление для компьютера «"+Json.Str(d,"name")+"».\r\nКод устройства скопирован: "+code+"\r\nЗапустите выданный администратором EXE на этом компьютере.","RemoteAgents — связь потеряна");});
+                menu.Items.Add(lost);
+            }
             menu.Items.Add("Настройки…", null, (s,e) => ShowSettings()).Enabled = !actionBusy && !busy;
             if (!Product.IsVpn) {
                 string accountState=Path.Combine(home,"state","happier-account.json");

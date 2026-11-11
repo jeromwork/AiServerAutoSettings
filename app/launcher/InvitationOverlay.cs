@@ -61,6 +61,7 @@ namespace RemoteAgents.Launcher
         {
             var files=Read(source);if(files==null)return false;
             var invite=new Invitation(Json.Map(Json.Parse(Encoding.UTF8.GetString(files["invite.rainvite"]))));
+            if(invite.IsRefresh)throw new IOException("Запустите файл обновления обычным двойным щелчком.");
             string receipt=Path.Combine(home,"state","invite-used-"+Json.Str(invite.Data,"id")+".json");
             // Do not overwrite a durable enrollment receipt after interruption.
             if(Invitation.Pending(home)) {

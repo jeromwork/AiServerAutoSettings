@@ -27,7 +27,7 @@ function New-WizardRoutes($Request,$Profile) {
     if($hop -and $hop.ssh){
         $m=[regex]::Match([string]$hop.ssh,'\A(?:([a-z_][a-z0-9_-]{0,31})@)?([a-zA-Z0-9][a-zA-Z0-9.-]{0,252})(?::(\d{1,5}))?\z')
         if(-not $m.Success){throw 'Укажите промежуточный сервер как логин@адрес[:порт]'}
-        $known=(Join-Path (Split-Path $Profile.keyPath -Parent) 'known_hosts-hop').Replace('\','/')
+        $known=(Join-Path (Split-Path $Profile.knownHostsPath -Parent) 'known_hosts-hop').Replace('\','/')
         if($Request.strictHostKey){
             if([string]$hop.hostKey -cnotmatch '\A(ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa) [A-Za-z0-9+/=]+\z'){throw 'Ключ хоста промежуточного сервера отсутствует или повреждён'}
             $hopPort=if($m.Groups[3].Success){[int]$m.Groups[3].Value}else{22};$hopHost=$m.Groups[2].Value
@@ -75,7 +75,7 @@ function Save-WizardRoute([string]$Root,$Request,$Profile) {
     if($Request.hop -and $Request.hop.ssh){
         $h=[ordered]@{name=$(if($Request.hop.name){[string]$Request.hop.name}else{'hop'});ssh=[string]$Request.hop.ssh}
         if($r.kind -eq 'hop' -and $r.key){$h.keyFile=[string]$r.key}elseif($Request.hop.keyFile){$h.keyFile=[string]$Request.hop.keyFile}
-        $kh=Join-Path (Split-Path $Profile.keyPath -Parent) 'known_hosts-hop'
+        $kh=Join-Path (Split-Path $Profile.knownHostsPath -Parent) 'known_hosts-hop'
         if(Test-Path -LiteralPath $kh){$line=@([IO.File]::ReadAllLines($kh)|Where-Object {$_ -and -not $_.StartsWith('#')})|Select-Object -First 1;if($line){$f=$line -split '\s+';if($f.Count -ge 3){$h.hostKey=$f[1]+' '+$f[2]}}}
         $route.hop=[pscustomobject]$h
     }

@@ -74,6 +74,7 @@ namespace RemoteAgents.Launcher
                 }else await Step("InviteVerify",new {},"Проверяю вход своим ключом…");
                 // Receipt is durable first: interruption during deletion resumes using our own key.
                 Invitation.Consume(home,state);
+                RefreshPackage.RememberDevice(home,Json.Str(state,"name"));
                 var catalog=await Step("Catalog",new {},"Загружаю настройки связи…");
                 await Step("Connection",new {catalog,shared=false},"Настраиваю и проверяю связь…");
                 await Step("Bridge",new {enabled=true,shell=true},"Подключаю и проверяю мост…");

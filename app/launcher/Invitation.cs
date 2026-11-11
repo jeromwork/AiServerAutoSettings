@@ -14,24 +14,32 @@ namespace RemoteAgents.Launcher
         {
             Data=data;
             Need(!(Json.Get(data,"schema") is string) && Json.Int(data,"schema",0)==1,"Неизвестная схема приглашения. Попросите новое приглашение.");
-            Need(data.Keys.All(k=>new[]{"schema","id","name","serverAddress","serverPort","workerUser","enrollUser","hostKeys","routes","expiresUtc","happier","folders","passKey","happierAccount","vpn","bootstrap"}.Contains(k)),"Неизвестные поля приглашения.");
+            Need(data.Keys.All(k=>new[]{"schema","id","name","serverAddress","serverPort","workerUser","enrollUser","hostKeys","routes","expiresUtc","happier","folders","passKey","happierAccount","vpn","bootstrap","type","deviceKey","deviceId"}.Contains(k)),"Неизвестные поля приглашения.");
             string name=Json.Str(data,"name");Need(name.Length>0 && name.Length<=80 && !name.Any(char.IsControl),"Неверное имя приглашения.");
             Match("id","^[a-f0-9]{32}$"); Match("serverAddress","^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$");
-            Match("workerUser","^[a-z_][a-z0-9_-]{0,31}$"); Match("enrollUser","^[a-z_][a-z0-9_-]{0,31}$");
+            Match("workerUser","^[a-z_][a-z0-9_-]{0,31}$"); if(!IsRefresh)Match("enrollUser","^[a-z_][a-z0-9_-]{0,31}$");
             int port=Json.Int(data,"serverPort",0);Need(!(Json.Get(data,"serverPort") is string) && port>0 && port<=65535,"Неверный порт приглашения.");
             DateTimeOffset expiry;Need(DateTimeOffset.TryParse(Json.Str(data,"expiresUtc"),CultureInfo.InvariantCulture,DateTimeStyles.RoundtripKind,out expiry),"Неверный срок приглашения.");
             Need(!(Json.Get(data,"hostKeys") is string) && !(Json.Get(data,"routes") is string) && !(Json.Get(data,"folders") is string),"Повреждена схема списков приглашения.");
             var keys=Json.Strings(Json.Get(data,"hostKeys"));Need(keys.Length>0 && keys.All(HostKey),"Нет корректных ключей хоста в приглашении.");
             Need(!data.ContainsKey("vpn") || new[]{"on","off"}.Contains(Json.Str(data,"vpn")),"Неверный режим VPN.");
             if(data.ContainsKey("bootstrap"))Need(Json.Int(Json.Map(Json.Get(Json.Map(Json.Get(data,"bootstrap")),"catalog")),"schema",0)==1,"Нет каталога связи приглашения.");
-            string mode=Json.Str(data,"happier");Need(mode=="same" || Regex.IsMatch(mode,@"\Anew:[^\x00-\x1f\x7f]{1,80}\z"),"Неверный выбор Happier.");
+            if(IsRefresh){
+                Need(!data.ContainsKey("passKey") && !data.ContainsKey("enrollUser"),"Обновление не должно содержать пропуск регистрации.");
+                Match("deviceId","^[a-f0-9]{32}$");
+                Need(Regex.IsMatch(Json.Str(data,"deviceKey"),@"\Assh-ed25519 [A-Za-z0-9+/=]+\z"),"Нет ключа устройства в обновлении.");
+                Need(data.ContainsKey("bootstrap"),"Нет настроек связи в обновлении.");
+            }
+            Need(!data.ContainsKey("type") || Json.Str(data,"type")=="refresh","Неизвестный тип нагрузки.");
+            string mode=IsRefresh?"same":Json.Str(data,"happier");Need(mode=="same" || Regex.IsMatch(mode,@"\Anew:[^\x00-\x1f\x7f]{1,80}\z"),"Неверный выбор Happier.");
             foreach(string folder in Json.Strings(Json.Get(data,"folders")))Need(folder.Length>0 && folder.Split('/').All(x=>x.Length>0 && x!="." && x!=".." && x.IndexOfAny(new[]{'\\',':','\r','\n','\0'})<0),"Недопустимая папка приглашения.");
             var routes=Json.Array(Json.Get(data,"routes"));Need(routes.Length>0,"Нет маршрутов приглашения.");
             foreach(var item in routes){var r=Json.Map(item);string kind=Json.Str(r,"kind");Need(kind=="direct" || kind=="proxy" || kind=="hop","Неизвестный маршрут приглашения.");
                 if(kind=="proxy"){var p=Json.Map(Json.Get(r,"proxy"));Need((Json.Str(p,"type")=="socks" || Json.Str(p,"type")=="http") && Regex.IsMatch(Json.Str(p,"host"),@"\A[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}\z") && Json.Int(p,"port",0)>0 && Json.Int(p,"port",0)<=65535,"Повреждён маршрут прокси.");}
                 if(kind=="hop"){var h=Json.Map(Json.Get(r,"hop"));Need(Regex.IsMatch(Json.Str(h,"ssh"),@"\A(?:[a-z_][a-z0-9_-]{0,31}@)?[a-zA-Z0-9][a-zA-Z0-9.-]{0,252}(?::\d{1,5})?\z") && HostKey(Json.Str(h,"hostKey")),"Нет корректного адреса или ключа промежуточного сервера.");}}
-            Need(Json.Str(data,"passKey").StartsWith("-----BEGIN OPENSSH PRIVATE KEY-----",StringComparison.Ordinal),"Повреждён пропуск приглашения.");
+            if(!IsRefresh)Need(Json.Str(data,"passKey").StartsWith("-----BEGIN OPENSSH PRIVATE KEY-----",StringComparison.Ordinal),"Повреждён пропуск приглашения.");
         }
+        internal bool IsRefresh {get{return Json.Str(Data,"type")=="refresh";}}
         static bool HostKey(string value){return Regex.IsMatch(value,@"\A(ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa) [A-Za-z0-9+/=]+\z");}
         void Match(string field,string pattern){Need(Regex.IsMatch(Json.Str(Data,field),@"\A(?:"+pattern.TrimStart('^').TrimEnd('$')+@")\z"),"Повреждено поле приглашения: "+field);}
         static void Need(bool condition,string message){if(!condition)throw new InvalidDataException(message);}
@@ -49,7 +57,7 @@ namespace RemoteAgents.Launcher
 #if !PORTABLE_TEST
         internal static void Stage(string home,string source)
         {
-            var invite=Read(source);AccountDiskSetup.ProtectSecrets(home);
+            var invite=Read(source);Need(!invite.IsRefresh,"Запустите персональный EXE обновления.");AccountDiskSetup.ProtectSecrets(home);
             StageData(home,invite,source,false);
         }
         internal static void StageData(string home,Invitation invite,string source,bool embedded)
