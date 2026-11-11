@@ -30,8 +30,8 @@ $out = & (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File (Join-Path
 $code = $LASTEXITCODE; Write-Host $out
 $bad = @()
 if ($code -ne 0) { $bad += "код $code" }
-foreach ($w in @('задача планировщика: RemoteDiskChannel', 'значение реестра: RemoteDisk', 'значение реестра: RemoteAgents', 'CLSID', 'PID 101', 'PID 102', 'PID 103', ('копию: ' + (Join-Path $L 'RemoteDisk')), 'RemoteAgents.exe', 'config.json', 'control', 'Режим просмотра')) { if (-not $out.Contains($w)) { $bad += "нет «$w»" } }
-foreach ($w in @('RemoteDiskFolders', 'PID 201', 'PID 202', ('копию: ' + (Join-Path $L 'RemoteAgents/ssh-profiles')), ('копию: ' + $env:USERPROFILE))) { if ($out.Contains($w)) { $bad += "лишнее «$w»" } }
+foreach ($w in @('задача планировщика: RemoteDiskChannel', 'значение реестра: RemoteDisk', 'значение реестра: RemoteAgents', 'CLSID', 'PID 101', 'PID 102', 'PID 103', ('копию: ' + (Join-Path $L 'RemoteDisk')), 'RemoteAgents.exe', 'config.json', 'control', ('копию: ' + (Join-Path $L 'RemoteAgents/ssh-profiles')), 'Режим просмотра')) { if (-not $out.Contains($w)) { $bad += "нет «$w»" } }
+foreach ($w in @('RemoteDiskFolders', 'PID 201', 'PID 202', ('копию: ' + $env:USERPROFILE))) { if ($out.Contains($w)) { $bad += "лишнее «$w»" } }
 if ((& $tree) -ne $before) { $bad += 'файлы изменены' }
 Remove-Item -Recurse -Force $root
 if ($bad.Count) { Write-Host ('SMOKE FAIL: ' + ($bad -join '; ')) -ForegroundColor Red; exit 1 }

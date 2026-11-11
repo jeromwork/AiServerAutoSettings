@@ -4,7 +4,8 @@
 # Показывает план и спрашивает «Удалить? (да/нет)». -Plan: только план. -Yes: без вопроса.
 # Ничего не удаляет: папки, XML задач, .reg и значения автозапуска уходят в
 # %LOCALAPPDATA%\RemoteAgents-old-backup-<время>\ (manifest.json), откат: Restore-OldInstall.cmd.
-# Никогда не трогает ~\.ssh, %LOCALAPPDATA%\RemoteAgents\ssh-profiles (ключ сервера) и папку Disk.
+# Никогда не трогает ~\.ssh и папку Disk. Старые ключи сервера (ssh-profiles) тоже уходят в копию;
+# в конце печатается путь ключа, который можно выбрать в новом мастере («Файл ключа…»).
 # Коды: 0 готово/нечего делать, 1 часть шагов не удалась, 2 отменено, 3 ошибка.
 param([switch]$Plan, [switch]$Yes, [string]$Adapter)
 $ErrorActionPreference = 'Stop'
@@ -36,14 +37,14 @@ try {
     $runs = @($Values | ForEach-Object { Get-Val $_[0] $_[1] })
     $keys = @($RegKeys | Where-Object { (Invoke-Native 'reg.exe' @('query', $_)).code -eq 0 })
     $base = Join-Path $U 'Disk'; $bt = Join-Path $Disk 'base.txt'; if (Test-Path -LiteralPath $bt) { $base = ([IO.File]::ReadAllText($bt)).Trim([char]0xFEFF, ' ', "`r", "`n") }
-    $keep = Join-Path $Agents 'ssh-profiles'; $protect = @($base, (Join-Path $U '.ssh'), $keep)
+    $protect = @($base, (Join-Path $U '.ssh'))
     # Всё, что запущено из RemoteAgents/RemoteDisk или ссылается на них, кроме себя, своего окна и запущенного из Disk (release\RemoteAgents.exe).
     $roots = @(((N $Agents) + '\'), ((N $Disk) + '\')); $self = @($PID, (Get-Parent))
     $procs = @(Get-Procs | Where-Object {
         $e = ''; if ($_.ExecutablePath) { $e = (N $_.ExecutablePath) }; $c = ([string]$_.CommandLine).Replace('/', '\').ToLowerInvariant()
         $self -notcontains [int]$_.ProcessId -and -not ($e -and (Test-Under $_.ExecutablePath $base)) -and @($roots | Where-Object { $e.StartsWith($_) -or $c.Contains($_) }).Count })
     $folders = @(); $skipped = @()
-    $cands = @($Disk) + @(Get-ChildItem -LiteralPath $Agents -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'ssh-profiles' } | ForEach-Object { $_.FullName })
+    $cands = @($Disk) + @(Get-ChildItem -LiteralPath $Agents -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
     foreach ($f in $cands) {
         if (-not (Test-Path -LiteralPath $f)) { continue }
         if (@($protect | Where-Object { (Test-Under $_ $f) -or (Test-Under $f $_) }).Count) { $skipped += $f } else { $folders += $f }
@@ -54,7 +55,7 @@ try {
     foreach ($k in $keys) { Write-Host ('  ключ реестра (меню/значок Disk): ' + $k) }
     foreach ($p in $procs) { Write-Host ('  процесс: PID ' + $p.ProcessId + ' ' + $p.Name) }
     foreach ($f in $folders) { Write-Host ('  перенос в копию: ' + $f) }
-    foreach ($f in $skipped) { Write-Host ('  папку НЕ переношу (внутри или рядом Disk/.ssh/ssh-profiles): ' + $f) -ForegroundColor Yellow }
+    foreach ($f in $skipped) { Write-Host ('  папку НЕ переношу (внутри или рядом Disk/.ssh): ' + $f) -ForegroundColor Yellow }
     Write-Host ('Не трогаю: ' + ($protect -join ', ') + ', OpenVPN.') -ForegroundColor Cyan
     if (-not ($tasks.Count + $runs.Count + $keys.Count + $procs.Count + $folders.Count)) { Write-Host 'Старая установка не найдена — удалять нечего.' -ForegroundColor Green; exit 0 }
     if ($Plan) { Write-Host 'Режим просмотра: ничего не изменено.' -ForegroundColor Yellow; exit 0 }
@@ -90,6 +91,7 @@ try {
         if ($err) { $fail++; Log ('ОШИБКА, перенос ' + $f + ' (файлы заняты?): ' + $err) } else { $m.folders += [pscustomobject]@{ path = $f; backup = $to }; Save; Log ('Перенесено: ' + $f) }
     }
     Save; Log ('Резервная копия: ' + $B)
+    foreach ($k in @(Get-ChildItem -LiteralPath $B -Recurse -File -Filter 'id_ed25519' -ErrorAction SilentlyContinue)) { Log ('Ключ для входа на сервер (в мастере «Файл ключа…»): ' + $k.FullName) }
     if ($fail) { Log ('Ошибок: ' + $fail + '. Повторный запуск безопасен; вернуть всё: Restore-OldInstall.cmd'); exit 1 }
     Write-Host 'Готово. Теперь запустите release\RemoteAgents.exe. Если не заработает: Restore-OldInstall.cmd.' -ForegroundColor Green
     exit 0
