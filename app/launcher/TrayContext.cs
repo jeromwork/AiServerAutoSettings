@@ -223,7 +223,11 @@ namespace RemoteAgents.Launcher
                 for(int i=0;i<20 && !closing;i++){
                     await Task.Delay(15000,stop.Token);
                     var critical=runtimes.Where(r=>r.Definition.Critical).ToArray();
-                    if(critical.Length>0 && critical.All(r=>r.Healthy))return;
+                    if(critical.Length>0 && critical.All(r=>r.Healthy)){
+                        var wizard=Json.Map(Json.Get(config.Data,"wizard"));var vpn=runtimes.FirstOrDefault(r=>r.Definition.Name=="vpn");
+                        if(vpn!=null && Json.Bool(wizard,"inviteVpnWanted") && !vpn.Healthy)CheckVpn(vpn);
+                        return;
+                    }
                 }
                 if(!closing){log.Write("setup.health.unconfirmed");icon.ShowBalloonTip(10000,Product.Name,"Связь с сервером не подтверждена за 5 минут. Состояние — в меню значка; изменить — «Настройки…».",ToolTipIcon.Warning);}
             }catch(OperationCanceledException){}
@@ -311,7 +315,7 @@ namespace RemoteAgents.Launcher
             var vpn = runtimes.FirstOrDefault(r => r.Definition.Name == "vpn");
             vpnToggle.Checked = vpn != null && vpn.Enabled;
             bool vpnInstalled = vpn != null && File.Exists(TransportScript("Vpn.Tun.ps1")) && File.Exists(TransportScript("Test-VpnConflict.ps1"));
-            vpnToggle.Enabled = !actionBusy && vpnInstalled; vpnToggle.Visible = vpnRow.Visible = Product.IsVpn;
+            vpnToggle.Enabled = !actionBusy && vpnInstalled; vpnToggle.Visible = vpnRow.Visible = Product.IsVpn || Json.Bool(Json.Map(Json.Get(config.Data,"wizard")),"inviteVpn");
             vpnToggle.ToolTipText = vpnInstalled ? StatusView.Summary(StatusView.Read(home, "vpn", maxAgeSec: 15)) : "модуль не установлен";
             bool installed = File.Exists(TransportScript("Set-TransportPath.ps1"));
             foreach (ToolStripItem entry in pathsMenu.DropDownItems) {
@@ -374,7 +378,7 @@ namespace RemoteAgents.Launcher
                     if (!(Json.Get(result, "conflict") is bool) || !(items is System.Collections.IEnumerable) || items is string || items is System.Collections.IDictionary) throw new InvalidDataException();
                     if (!Json.Bool(result, "conflict")) {
                         if (vpn.Definition.CommandManaged) {
-                            config.SetEnabled(vpn.Definition, true);
+                            config.SetInviteVpnIntent(true);config.SetEnabled(vpn.Definition, true);
                             await Task.Run(() => CaptureScript("Vpn.Tun.ps1", new[] { "-Enable", "-ParentPid", Process.GetCurrentProcess().Id.ToString() }));
                         } else EnableRuntime(vpn, true);
                         return;
@@ -391,12 +395,12 @@ namespace RemoteAgents.Launcher
         {
             if (!vpn.Definition.CommandManaged) { Safe(() => EnableRuntime(vpn, false)); return; }
             if (actionBusy || closing) return; actionBusy = true;
-            try { config.SetEnabled(vpn.Definition, false); await Task.Run(() => CaptureScript("Vpn.Tun.ps1", new[] { "-Disable" })); }
+            try { config.SetInviteVpnIntent(false);config.SetEnabled(vpn.Definition, false); await Task.Run(() => CaptureScript("Vpn.Tun.ps1", new[] { "-Disable" })); }
             catch (OperationCanceledException) { }
             catch { if (!closing) MessageBox.Show("Запрос выключения VPN не выполнен. Проверьте статус и журналы; выключение ещё не подтверждено.", "RemoteAgents"); }
             finally { actionBusy = false; if (!closing) RefreshMenu(); }
         }
-        static bool VpnConflictDialog(string found)
+        internal static bool VpnConflictDialog(string found)
         {
             using (var form = new Form { Text = "RemoteAgents — другой VPN", Width = 640, Height = 290, StartPosition = FormStartPosition.CenterScreen, MinimizeBox = false, MaximizeBox = false }) {
                 var text = new TextBox { Multiline = true, ReadOnly = true, Dock = DockStyle.Fill, ScrollBars = ScrollBars.Vertical, Text = "У вас уже работает VPN: " + (found.Length == 0 ? "нет данных о названии" : found) + ". Чтобы включить VPN RemoteAgents, отключите его сами. Если хотите остаться на нём — нажмите «Оставить как есть»." };

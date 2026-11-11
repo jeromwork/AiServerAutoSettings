@@ -186,6 +186,31 @@
       "healthMaxAgeSec": 30,
       "enabledByDefault": false,
       "critical": false
+    },
+    {
+      "name": "vpn",
+      "title": "VPN (весь трафик)",
+      "exe": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "{bundle}\\transport\\Vpn.Tun.ps1",
+        "-Home",
+        "{home}",
+        "-ParentPid",
+        "{pid}"
+      ],
+      "cwd": "{bundle}",
+      "restart": "never",
+      "healthFile": "status/vpn.json",
+      "healthMaxAgeSec": 180,
+      "enabledByDefault": false,
+      "critical": false,
+      "commandManaged": true,
+      "stopFile": "state/vpn.stop"
     }
   ],
   "menu": [],

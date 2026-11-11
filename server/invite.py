@@ -25,7 +25,12 @@ import subprocess
 import sys
 import tempfile
 import time
-import zipfile
+import importlib.util
+
+# Installed beside this module; explicit loading also supports isolated test imports.
+_spec = importlib.util.spec_from_file_location("invite_overlay", Path(__file__).with_name("invite_overlay.py"))
+overlay = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(overlay)
 
 DEFAULT_CONFIG = '/etc/remoteagents/invite/config.json'
 
@@ -243,6 +248,48 @@ def routes(c):
     return result
 
 
+def bootstrap(c, vpn):
+    # The exact public catalog used by Get-WizardCatalog; no network or live writes.
+    source = c.get('catalogFile') or str(Path(pwd.getpwnam(c['workerUser']).pw_dir) / '.config/remoteagents/transport-catalog.json')
+    catalog = load(source)
+    helper = Path(__file__).resolve().parents[1] / 'transport/server-transport-catalog.py'
+    # Installation copies this validator alongside invite.py.
+    if not helper.exists():
+        helper = Path(__file__).with_name('server-transport-catalog.py')
+    spec = importlib.util.spec_from_file_location('invite_catalog', helper)
+    validator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(validator)
+    catalog = validator.validate(catalog)
+    result = {'catalog': catalog}
+    files = {}
+    if vpn == 'on':
+        settings = c['vpnBootstrap']
+        require(Path(settings['channelFile']).stat().st_mode & 0o077 == 0, 'Канал VPN должен иметь права 0600')
+        result.update(channel=load(settings['channelFile']), entries={}, hops={}, vpn=settings['vpn'])
+        from urllib.parse import urlsplit
+        import ipaddress
+        url = urlsplit(result['vpn']['checkUrl'])
+        require(url.scheme == 'https' and url.hostname and not url.username, 'Нужен свой HTTPS-адрес проверки VPN')
+        ipaddress.ip_address(result['vpn']['dnsServer'])
+        for row in catalog['entries']:
+            if row.get('enabled', True):
+                path = Path(settings['entryFiles'][row['name']])
+                require(path.stat().st_mode & 0o077 == 0, 'Кэш узла VPN должен иметь права 0600')
+                result['entries'][row['name']] = load(path)
+        for row in catalog['hops']:
+            if row.get('enabled', True):
+                hop = dict(settings['hops'][row['name']])
+                path = Path(hop.pop('keyFile'))
+                require(path.stat().st_mode & 0o077 == 0, 'Ключ SSH-перехода должен иметь права 0600')
+                require(re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}', hop['host']) and re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}', hop['user']) and 1 <= hop['port'] <= 65535 and row.get('hostKey'), 'Неверные переносимые настройки перехода')
+                hop['privateKey'] = path.read_text().replace('\r', '')
+                result['hops'][row['name']] = hop
+        binary = Path(settings['singBoxExe']).read_bytes()
+        require(binary[:2] == b'MZ', 'Нужен sing-box.exe для Windows')
+        files['sing-box.exe'] = binary
+    return result, files
+
+
 def create(c, args):
     require(0 < args.hours <= 720, 'Срок: больше нуля, максимум 720 часов')
     require(0 < len(args.name) <= 80 and not re.search(r'[\x00-\x1f\x7f]', args.name), 'Некорректное имя')
@@ -251,13 +298,15 @@ def create(c, args):
     require(all(re.fullmatch(r'[\w .-]+(?:/[\w .-]+)*', f) and all(x not in ('.', '..') for x in f.split('/')) for f in folders), 'Недопустимая папка')
     exe = Path(c['releaseExe'])
     require(exe.is_file() and exe.read_bytes()[:2] == b'MZ', 'Нет release/RemoteAgents.exe; сначала соберите EXE')
+    require(overlay.read(exe.read_bytes()) is None, 'Используйте чистый release EXE без приглашения')
     resolved_routes = routes(c)
+    initial, payload_files = bootstrap(c, args.vpn)
     ident = secrets.token_hex(16)
     expiry = time.time() + args.hours * 3600
     stamp = dt.datetime.fromtimestamp(expiry, dt.timezone.utc)
     invite = dict(schema=1, id=ident, name=args.name, serverAddress=c['serverAddress'], serverPort=c['serverPort'],
                   hostKeys=c['hostKeys'], workerUser=c['workerUser'], enrollUser=c['enrollUser'], routes=resolved_routes,
-                  expiresUtc=stamp.isoformat(), happier=args.happier, folders=folders, happierAccount=c.get('happierAccount', ''))
+                  expiresUtc=stamp.isoformat(), happier=args.happier, folders=folders, happierAccount=c.get('happierAccount', ''), vpn=args.vpn, bootstrap=initial)
     output = Path(c['outputDir'])
     output.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(output, 0o700)
@@ -276,13 +325,16 @@ def create(c, args):
         save(entry(c, ident), dict(id=ident, name=args.name, expiresEpoch=expiry, expiresUtc=invite['expiresUtc'], status='open'))
         auth = Path(c['enrollAuthorizedKeys'])
         save(auth, (auth.read_text() if auth.exists() else '') + line, 0o644 if not c.get('sandbox') else 0o600)
-        archive = output / (ident + '.zip')
+        filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', args.name).rstrip(' .') or ident
+        archive = output / ('RemoteAgents-' + filename + '-' + ident[:8] + '.exe')
+        payload_files['invite.rainvite'] = (json.dumps(invite, ensure_ascii=False) + '\n').encode()
+        require(len(payload_files['invite.rainvite']) <= 1024 * 1024, 'Снимок приглашения превышает 1 МиБ')
+        image = overlay.attach(exe.read_bytes(), payload_files)
         fd = os.open(archive, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, 'wb') as f, zipfile.ZipFile(f, 'w', zipfile.ZIP_DEFLATED) as z:
-            z.write(exe, 'RemoteAgents.exe')
-            z.writestr('invite.rainvite', json.dumps(invite, ensure_ascii=False) + '\n')
+        with os.fdopen(fd, 'wb') as f:
+            f.write(image)
     event(c, 'create.ok')
-    print('ZIP секретный, как пароль. Передавайте только получателю. После регистрации удалите копии ZIP.')
+    print('EXE секретный, как пароль. Передавайте только получателю. После регистрации удалите исходные копии EXE.')
     print(str(archive))
     if args.publish:
         node = c['publishNodes'][args.publish]
@@ -303,12 +355,13 @@ def receive(c, name, stream):
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     token = secrets.token_hex(32)
     payload = stream.read(128 * 1024 * 1024 + 1)
-    require(len(payload) <= 128 * 1024 * 1024 and payload.startswith(b'PK'), 'Некорректный ZIP')
-    with open(root / (token + '.zip'), 'xb') as f:
+    require(len(payload) <= 128 * 1024 * 1024 and payload.startswith(b'MZ'), 'Некорректный EXE')
+    require(overlay.read(payload) is not None, 'В EXE нет приглашения')
+    with open(root / (token + '.exe'), 'xb') as f:
         os.chmod(f.name, 0o600)
         f.write(payload)
     save(root / (token + '.json'), header)
-    return node['baseUrl'].rstrip('/') + '/' + token + '.zip'
+    return node['baseUrl'].rstrip('/') + '/' + token + '.exe'
 
 
 class Downloads(http.server.BaseHTTPRequestHandler):
@@ -316,7 +369,7 @@ class Downloads(http.server.BaseHTTPRequestHandler):
         pass  # URL is a bearer secret; never log it.
 
     def do_GET(self):
-        match = re.fullmatch(r'/([a-f0-9]{64})\.zip', self.path)
+        match = re.fullmatch(r'/([a-f0-9]{64})\.exe', self.path)
         if not match:
             self.send_error(404)
             return
@@ -324,7 +377,7 @@ class Downloads(http.server.BaseHTTPRequestHandler):
         token = match[1]
         with (root / 'download.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            src = root / (token + '.zip')
+            src = root / (token + '.exe')
             meta = root / (token + '.json')
             if not src.exists() or not meta.exists() or load(meta)['expiresEpoch'] <= time.time():
                 src.unlink(missing_ok=True)
@@ -337,10 +390,10 @@ class Downloads(http.server.BaseHTTPRequestHandler):
             meta.unlink()
         with f:
             self.send_response(200)
-            self.send_header('Content-Type', 'application/zip')
+            self.send_header('Content-Type', 'application/vnd.microsoft.portable-executable')
             self.send_header('Content-Length', str(os.fstat(f.fileno()).st_size))
             self.send_header('Cache-Control', 'no-store')
-            self.send_header('Content-Disposition', 'attachment; filename="RemoteAgents-invite.zip"')
+            self.send_header('Content-Disposition', 'attachment; filename="RemoteAgents-invite.exe"')
             self.end_headers()
             with contextlib.suppress(BrokenPipeError, ConnectionResetError):
                 shutil.copyfileobj(f, self.wfile)
@@ -359,7 +412,7 @@ def serve(c, name):
             fcntl.flock(lock, fcntl.LOCK_EX)
             for meta in root.glob('*.json'):
                 if load(meta)['expiresEpoch'] <= time.time():
-                    meta.with_suffix('.zip').unlink(missing_ok=True)
+                    meta.with_suffix('.exe').unlink(missing_ok=True)
                     meta.unlink(missing_ok=True)
 
 
@@ -373,6 +426,7 @@ def main():
     p.add_argument('--hours', type=float, default=24)
     p.add_argument('--happier', default='same')
     p.add_argument('--folders', default='')
+    p.add_argument('--vpn', choices=('on', 'off'), default='on')
     p.add_argument('--publish')
     sub.add_parser('list')
     for verb in ('revoke', 'enroll'):

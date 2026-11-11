@@ -41,7 +41,7 @@ try{
     if($action -eq 'Generate'){
         # Только чтение системы и генерация, без запуска TUN/задач/UAC.
         $snapshot=Get-VpnSnapshot;$paths=Get-TransportCandidates $settings $root;$net=Get-TransportNetwork
-        $status=Read-TransportJson (Join-Path $root 'status/transport.json')
+        $status=Get-VpnTransportState $root $settings
         $exclude=Get-VpnExclusions $settings $paths $snapshot -Root $root
         $cfg=New-VpnTunConfig $settings $paths $status.active $exclude $net.interface
         if(-not $OutputConfig){$OutputConfig=Join-Path $root 'state/vpn-generated.json'}
@@ -57,8 +57,7 @@ try{
         $conflict=Find-VpnConflicts $snapshot $own
         if($conflict.conflict){Write-VpnStatus $root $false $false 'conflict' $conflict 'Найден другой VPN; отключите его самостоятельно или оставьте наш VPN выключенным';return}
         if(@($snapshot.Adapters|Where-Object {$_.Name -eq $v.interfaceName}).Count){throw 'Имя TUN уже занято; существующий интерфейс не трогаем'}
-        $paths=Get-TransportCandidates $settings $root;$net=Get-TransportNetwork;$status=Read-TransportJson (Join-Path $root 'status/transport.json')
-        if(-not $status.ok -or ([DateTime]::UtcNow-(Convert-TransportUtc $status.updatedAt)).TotalSeconds -gt 15){throw 'Транспорт ещё не проверен'}
+        $paths=Get-TransportCandidates $settings $root;$net=Get-TransportNetwork;$status=Get-VpnTransportState $root $settings
         $exclude=Get-VpnExclusions $settings $paths $snapshot -Root $root
         $cfg=New-VpnTunConfig $settings $paths $status.active $exclude $net.interface
         $preflight=Join-Path $root 'state/vpn-preflight.json';Write-TransportJson $preflight $cfg -Private;Test-TransportConfigFile $settings.Options.singBoxPath $preflight
@@ -96,8 +95,7 @@ try{
     while($true){
         $settings=Read-TransportSettings $root;$v=Get-VpnOptions $settings
         if(-not $v.enabled -or (Test-Path -LiteralPath $stopFile) -or (Test-Path -LiteralPath (Join-Path $root 'stop')) -or ($parent -and $parent.HasExited)){break}
-        $status=Read-TransportJson (Join-Path $root 'status/transport.json')
-        if(-not $status.ok -or ([DateTime]::UtcNow-(Convert-TransportUtc $status.updatedAt)).TotalSeconds -gt 15){throw 'Путь транспорта потерял проверенное состояние'}
+        $status=Get-VpnTransportState $root $settings
         $revision=(Get-TransportRevision $root)+(ConvertTo-Json -InputObject $v -Depth 20 -Compress)
         if(-not $child -or $lastTag -ne $status.active -or $lastRevision -ne $revision -or [DateTime]::UtcNow -ge $nextCheck){
             $snapshot=Get-VpnSnapshot;$own=@(Get-VpnOwnedProcessIds $root $snapshot);$ownInterface='';if($child){$ownInterface=$v.interfaceName}
@@ -128,7 +126,7 @@ try{
             $lastTag=$status.active;$lastRevision=$revision;$nextCheck=[DateTime]::UtcNow.AddSeconds(30)
         }
         if($child.Process.HasExited){throw 'TUN неожиданно завершился'}
-        Write-VpnStatus $root $true $true 'on' $conflict 'Системный VPN проверен; трафик идёт через выбранный путь'
+        Write-VpnStatus $root $true $true 'on' $conflict $(if($settings.Transport.inviteBootstrap){'Начальный VPN: TUN, DNS и HTTPS проверены; регистрация SSH ещё не выполнена'}else{'Системный VPN проверен; трафик идёт через выбранный путь'})
         Start-Sleep -Seconds 1
     }
 }catch{

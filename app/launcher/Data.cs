@@ -143,6 +143,14 @@ namespace RemoteAgents.Launcher
                     var map = Json.Map(Json.Get(Data, "components")); var item = Json.Map(Json.Get(map, c.Name)); item["enabled"] = enabled; map[c.Name] = item; Data["components"] = map; Save();
             }
         }
+        public void SetInviteVpnIntent(bool enabled)
+        {
+            using(var lease=Lock(PathName)) {
+                var latest=File.Exists(PathName)?Json.Read(PathName):Data;
+                var wizard=Json.Map(Json.Get(latest,"wizard"));
+                if(Json.Bool(wizard,"inviteVpn")){wizard["inviteVpnWanted"]=enabled;latest["wizard"]=wizard;Json.Write(PathName,latest);}
+            }
+        }
         public void SetHappier(string serverUrl, string webappUrl)
         {
             using(var lease=Lock(PathName)) {

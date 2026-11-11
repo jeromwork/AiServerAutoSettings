@@ -29,7 +29,7 @@ namespace RemoteAgents.Launcher
             }
             return Product.Name + ".Launcher." + sid.Value + suffix;
         }
-        [STAThread] static int Main(string[] args)
+        [STAThread] internal static int Run(string[] args)
         {
             // Before askpass: ssh may carry a password pipe in its environment while running this relay as ProxyCommand.
             if(args.Length>0 && args[0]=="--invite-hop")return InviteHop.Run(args);
@@ -49,7 +49,9 @@ namespace RemoteAgents.Launcher
                 Directory.CreateDirectory(home); log = new Journal(home); log.Write("launcher.start");
                 if (args.Contains("--uninstall")) { if (Product.IsVpn) FirstInstall.UninstallVpn(home); else Uninstall.Run(home); log.Write("uninstall.ok"); return 0; }
                 if(!Product.IsVpn && !args.Contains("--exit") && !args.Contains("--tray")) {
-                    try{string invitation=Invitation.Find(args,Path.GetDirectoryName(Exe));
+                    try{bool embedded=InvitationOverlay.Stage(home,Exe);
+                        string invitation=embedded?null:Invitation.Find(args,Path.GetDirectoryName(Exe));
+                        if(embedded)args=args.Concat(new[]{"--setup-check"}).ToArray();
                         if(invitation!=null){Invitation.Stage(home,invitation);args=args.Concat(new[]{"--setup-check"}).ToArray();}
                     }catch(Exception e){MessageBox.Show(e.Message,"RemoteAgents — приглашение");return 1;}
                 }

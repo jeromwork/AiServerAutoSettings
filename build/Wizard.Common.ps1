@@ -311,6 +311,7 @@ function Test-WizardBridge([string]$Root) {
 function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Request) {
     $diskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk';$script:DiskHome=$diskHome
     switch($Action){
+        'InvitePrepare' {return Prepare-WizardInvite $Root $Bundle $Request}
         'InviteVerify' {[void](Invoke-WizardSsh $Root 'true');return @{ok=$true}}
         'InviteDisk' {return Invoke-WizardStep $Root $Bundle 'Disk' ([pscustomobject]@{base=(Get-DiskBase);paths=@($Request.paths)})}
         'InviteEnroll' {return Connect-WizardInvite $Root $Request}
@@ -380,6 +381,7 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
                 if($script:WizardPendingDisk){return @{ok=$false;pending='disk';operation=$script:WizardPendingDisk;summary=(Get-WizardOperationText $script:WizardPendingDisk 'установка сервера диска')+'. «Связь» проверится автоматически'}}
                 throw
             }
+            if($t.inviteBootstrap){Update-LauncherConfig $Root {param($c) $c.transport.PSObject.Properties.Remove('inviteBootstrap');$c.transport|Add-Member -Force openSsh $true;$c.vpn.PSObject.Properties.Remove('bootstrapTag')}}
             $overlay=[pscustomobject]@{schema=1}
             foreach($g in @('entries','hops','relays','cdn')){
                 $different=@();foreach($row in @($local.$g)){

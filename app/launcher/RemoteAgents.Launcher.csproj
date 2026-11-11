@@ -2,6 +2,7 @@
   <PropertyGroup>
     <TargetFramework>net48</TargetFramework>
     <OutputType>WinExe</OutputType>
+    <StartupObject>RemoteAgents.Launcher.EntryPoint</StartupObject>
     <UseWindowsForms>true</UseWindowsForms>
     <ProductName Condition="'$(ProductName)' == ''">RemoteAgents</ProductName>
     <AssemblyName>$(ProductName)</AssemblyName>

@@ -21,5 +21,18 @@
     }
   ],
   "publishNodes": {},
-  "version": 1
+  "version": 1,
+  "catalogFile": "/home/workuser/.config/remoteagents/transport-catalog.json",
+  "vpnBootstrap": {
+    "channelFile": "/root/invite-secrets/channel.json",
+    "entryFiles": {
+      "entry1": "/root/invite-secrets/entry1.json"
+    },
+    "hops": {},
+    "singBoxExe": "/opt/remoteagents/vendor/sing-box.exe",
+    "vpn": {
+      "checkUrl": "https://check.example.invalid/",
+      "dnsServer": "192.0.2.53"
+    }
+  }
 }

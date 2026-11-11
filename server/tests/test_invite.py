@@ -30,7 +30,17 @@ spec.loader.exec_module(invite)
 
 
 def command(args, **kw):
-    return subprocess.run([str(x) for x in args], capture_output=True, timeout=60, **kw)
+    return subprocess.run([str(x) for x in args], capture_output=True, timeout=kw.pop("timeout", 60), **kw)
+
+
+_portable_built = False
+def build_portable():
+    global _portable_built
+    if not _portable_built:
+        result = command([Path.home()/'.dotnet/dotnet', 'build', ROOT/'app/launcher/tests/PortableTests.csproj', '-c', 'Release', '--nologo'], timeout=300)
+        if result.returncode:
+            raise AssertionError(result.stdout.decode()+result.stderr.decode())
+        _portable_built = True
 
 
 def free_port():
@@ -50,14 +60,20 @@ class Bench:
         assert command(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', self.own]).returncode == 0
         self.pub = self.own.with_suffix('.pub').read_bytes()
         self.exe = self.dir / 'RemoteAgents.exe'
-        self.exe.write_bytes(b'MZ-test-unchanged-exe')
+        self.exe.write_bytes((ROOT / 'release/RemoteAgents.exe').read_bytes())
+        self.catalog = self.dir / 'catalog.json'
+        self.catalog.write_text(json.dumps(dict(schema=1, entries=[], hops=[], relays=[dict(name='fixture', host='127.0.0.1', port=self.port)], cdn=[])))
+        self.channel = self.dir / 'channel.json'
+        self.channel.write_text(json.dumps(dict(inbounds=[dict(tag='sync', override_port=23456)], outbounds=[])))
+        self.channel.chmod(0o600)
         self.cfg = self.dir / 'config.json'
         self.c = dict(schema=1, version=1, sandbox=True, serverAddress='127.0.0.1', serverPort=self.port,
                       hostKeys=[' '.join(self.key.with_suffix('.pub').read_text().split()[:2])],
                       workerUser=self.user, enrollUser=self.user, enrollHelper=str(self.dir / 'enroll'),
                       workerAuthorizedKeys=str(self.dir / 'worker_keys'), enrollAuthorizedKeys=str(self.dir / 'pass_keys'),
                       stateDir=str(self.dir / 'invites'), outputDir=str(self.dir / 'zips'), releaseExe=str(self.exe),
-                      routes=[dict(kind='direct')], publishNodes={})
+                      routes=[dict(kind='direct')], publishNodes={}, catalogFile=str(self.catalog),
+                      vpnBootstrap=dict(channelFile=str(self.channel), entryFiles={}, hops={}, singBoxExe=str(self.exe), vpn=dict(checkUrl='https://fixture.example.invalid/', dnsServer='192.0.2.53')))
         self.cfg.write_text(json.dumps(self.c))
         self.known = self.dir / 'known_hosts'
         self.known.write_text('[127.0.0.1]:' + str(self.port) + ' ' + self.c['hostKeys'][0] + '\n')
@@ -107,9 +123,11 @@ LogLevel DEBUG1
         p = self.cli('create', '--name', 'Ноутбук', *extra)
         assert p.returncode == 0, p.stdout.decode() + p.stderr.decode()
         archive = Path(p.stdout.decode().splitlines()[1])
-        with zipfile.ZipFile(archive) as z:
-            assert z.read('RemoteAgents.exe') == self.exe.read_bytes()
-            obj = json.loads(z.read('invite.rainvite'))
+        image = archive.read_bytes()
+        assert image[:len(self.exe.read_bytes())] == self.exe.read_bytes()
+        files = invite.overlay.read(image)
+        obj = json.loads(files['invite.rainvite'])
+        assert archive.suffix == '.exe'
         key = self.dir / ('pass-' + obj['id'])
         key.write_text(obj['passKey'])
         key.chmod(0o600)
@@ -165,7 +183,7 @@ class InviteTests(unittest.TestCase):
         listing = self.b.cli('list').stdout
         self.assertIn(b'used', listing)
         self.assertNotIn(b'PRIVATE', listing)
-        print('PASS invite: one use; CRLF ed25519; own-key login; ZIP EXE unchanged; secret permissions')
+        print('PASS invite: one use; CRLF ed25519; own-key login; single EXE; release prefix unchanged; secret permissions')
 
     def test_two_concurrent_exactly_one(self):
         _, key, _ = self.b.create()
@@ -245,7 +263,9 @@ class InviteTests(unittest.TestCase):
     def test_publish_one_get_expiry(self):
         self.b.c['publishNodes']['local'] = dict(directory=str(self.b.dir / 'downloads'), baseUrl='https://download.example.invalid/invites')
         c = self.b.c
-        payload = json.dumps({'expiresEpoch': time.time()+30}).encode() + b'\nPK-test'
+        _, _, image = self.b.create()
+        body = image.read_bytes()
+        payload = json.dumps({'expiresEpoch': time.time()+30}).encode() + b'\n' + body
         url = invite.receive(c, 'local', io.BytesIO(payload))
         token = url.rsplit('/', 1)[1]
         server = invite.http.server.ThreadingHTTPServer(('127.0.0.1', 0), invite.Downloads)
@@ -257,21 +277,22 @@ class InviteTests(unittest.TestCase):
         local = 'http://127.0.0.1:' + str(server.server_address[1]) + '/' + token
         # Ignore inherited proxies: this client talks only to loopback.
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        self.assertEqual(opener.open(local).read(), b'PK-test')
+        response = opener.open(local)
+        self.assertEqual(response.headers['Content-Type'], 'application/vnd.microsoft.portable-executable')
+        self.assertEqual(response.read(), body)
         with self.assertRaises(urllib.error.HTTPError):
             opener.open(local)
         self.assertFalse((Path(server.directory) / token).exists())
         url = invite.receive(c, 'local', io.BytesIO(payload))
         token = url.rsplit('/', 1)[1]
-        invite.save(Path(server.directory) / token.replace('.zip', '.json'), {'expiresEpoch': time.time()-1})
+        invite.save(Path(server.directory) / token.replace('.exe', '.json'), {'expiresEpoch': time.time()-1})
         with self.assertRaises(urllib.error.HTTPError):
             opener.open(local.rsplit('/', 1)[0]+'/'+token)
         self.assertFalse((Path(server.directory) / token).exists())
 
     def test_exe_production_invite_flow_real_sshd(self):
         dotnet = Path.home() / '.dotnet/dotnet'
-        build = command([dotnet, 'build', ROOT / 'app/launcher/tests/PortableTests.csproj', '-c', 'Release', '--nologo'])
-        self.assertEqual(build.returncode, 0, build.stdout.decode()+build.stderr.decode())
+        build_portable()
         proxy = socketserver.ThreadingTCPServer(('127.0.0.1', 0), Proxy)
         proxy.daemon_threads = True
         proxy.target_port = self.b.port
@@ -286,9 +307,10 @@ class InviteTests(unittest.TestCase):
         self.b.c['serverAddress'] = '127.0.0.2'  # no listener: direct route refuses
         self.b.c['routes'].append(dict(kind='proxy', proxy=dict(type='http', host='127.0.0.1', port=proxy.server_address[1])))
         self.b.cfg.write_text(json.dumps(self.b.c))
-        obj, _, _ = self.b.create()
+        obj, _, _ = self.b.create('--folders', 'Project,Project/docs')
         path = self.b.dir / 'invite.rainvite'
         # Full CRLF invitation and pass key exercise the Windows->Linux boundary.
+        obj['passKey'] = obj['passKey'].replace('\n', '\r\n')
         path.write_bytes(json.dumps(obj, ensure_ascii=False, indent=2).replace('\n', '\r\n').encode())
         script = ROOT / 'app/launcher/tests/test-invite.ps1'
         pwsh = Path.home() / '.cache/pwsh-test/pwsh'
@@ -323,15 +345,85 @@ class InviteTests(unittest.TestCase):
 
     def test_production_invite_through_key_hop(self):
         Path(self.b.c['workerAuthorizedKeys']).write_bytes(self.b.pub)
-        self.b.c['routes'] = [dict(kind='hop', hop=dict(name='fixture', ssh=self.b.user+'@127.0.0.1:'+str(self.b.port), hostKey=self.b.c['hostKeys'][0], keyFile=str(self.b.own)))]
+        self.b.c['routes'] = [dict(kind='direct'), dict(kind='hop', hop=dict(name='fixture', ssh=self.b.user+'@127.0.0.1:'+str(self.b.port), hostKey=self.b.c['hostKeys'][0], keyFile=str(self.b.own)))]
         self.b.cfg.write_text(json.dumps(self.b.c))
         obj, _, _ = self.b.create()
-        self.assertIn('privateKey', obj['routes'][0]['hop'])
-        self.assertNotIn('keyFile', obj['routes'][0]['hop'])
+        self.assertIn('privateKey', obj['routes'][1]['hop'])
+        self.assertNotIn('keyFile', obj['routes'][1]['hop'])
         path = self.b.dir / 'hop.rainvite'
         path.write_text(json.dumps(obj))
         result = command([Path.home()/'.cache/pwsh-test/pwsh', '-NoProfile', '-NonInteractive', '-File',
-                          ROOT/'app/launcher/tests/test-invite.ps1', '-TestHome', self.b.dir/'hop-client', '-InvitePath', path])
+                          ROOT/'app/launcher/tests/test-invite.ps1', '-TestHome', self.b.dir/'hop-client', '-InvitePath', path, '-DirectBlocked'])
+        self.assertEqual(result.returncode, 0, result.stdout.decode()+result.stderr.decode())
+        self.assertEqual(invite.load(invite.entry(self.b.c, obj['id']))['status'], 'used')
+        print(result.stdout.decode().strip())
+
+    def test_net48_exe_entry_with_overlay(self):
+        # Build the real production entry, then execute it through the local CLR.
+        # It only reads itself; it never initializes HOME, WinForms, network or services.
+        bundles = self.b.dir/'bundles'
+        result = command([ROOT/'build/make-bundle.sh', '20261111.000001-invite-smoke', bundles])
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        result = command([Path.home()/'.dotnet/dotnet', 'build', ROOT/'app/launcher/RemoteAgents.Launcher.csproj', '-c', 'Release', '--nologo',
+                          '-p:BundlePath='+str(bundles/'20261111.000001-invite-smoke.zip'), '-o', self.b.dir/'launcher'], timeout=300)
+        self.assertEqual(result.returncode, 0, result.stdout.decode()+result.stderr.decode())
+        self.b.exe.write_bytes((self.b.dir/'launcher/RemoteAgents.exe').read_bytes())
+        _, _, image = self.b.create()
+        original = image.read_bytes()
+        cases = [(self.b.exe, 0), (image, 0)]
+        for name, data in [('cut.exe', original[:-1]), ('changed.exe', original[:-80]+bytes([original[-80]^1])+original[-79:])]:
+            file = self.b.dir/name
+            file.write_bytes(data)
+            cases.append((file, 2))
+        for index, (source, expected) in enumerate(cases):
+            # Isolate each application identity: no canonical sibling image for CLR binding.
+            directory = self.b.dir/('entry-'+str(index))
+            directory.mkdir()
+            file = directory/'Personal.exe'
+            file.write_bytes(source.read_bytes())
+            file.with_suffix('.runtimeconfig.json').write_text(json.dumps({'runtimeOptions':{'tfm':'net10.0','framework':{'name':'Microsoft.NETCore.App','version':'10.0.0'}}}))
+            result = command([Path.home()/'.dotnet/dotnet', file, '--selftest-invite-overlay'])
+            self.assertEqual(result.returncode, expected, result.stderr.decode())
+        print('PASS: actual net48 EXE entry via CLR: plain/overlay run; modified/truncated refused (4 processes; no WinForms or TUN)')
+
+    def test_overlay_damage_plain_exe_and_vpn_off(self):
+        obj, _, path = self.b.create()
+        image = path.read_bytes()
+        self.assertEqual(invite.overlay.read(self.b.exe.read_bytes()), None)
+        self.assertEqual(obj['vpn'], 'on')
+        self.assertEqual(obj['bootstrap']['catalog']['relays'][0]['name'], 'fixture')
+        self.assertIn('sing-box.exe', invite.overlay.read(image))
+        end = len(self.b.exe.read_bytes())
+        for index in (end, end+17, len(image)-56, len(image)-48, len(image)-1, 100):
+            damaged = bytearray(image)
+            damaged[index] ^= 1
+            with self.subTest(index=index), self.assertRaises((ValueError, zipfile.BadZipFile)):
+                invite.overlay.read(bytes(damaged))
+        for amount in (1, 16, 55, 56, 70, len(image)-end-1):
+            with self.subTest(cut=amount), self.assertRaises(ValueError):
+                invite.overlay.read(image[:-amount])
+        off, _, path = self.b.create('--vpn', 'off')
+        self.assertEqual(off['vpn'], 'off')
+        self.assertNotIn('sing-box.exe', invite.overlay.read(path.read_bytes()))
+        self.assertEqual(off['bootstrap']['catalog'], obj['bootstrap']['catalog'])
+        self.assertNotIn('channel', off['bootstrap'])
+        print('PASS overlay: unchanged PE; 6 substitutions; 6 truncations; VPN on/off payload; catalog snapshot')
+
+    def test_overlay_csharp_and_clr_loader(self):
+        build_portable()
+        _, _, path = self.b.create()
+        image = path.read_bytes()
+        directory = self.b.dir/'overlay'
+        directory.mkdir()
+        (directory/'good.exe').write_bytes(image)
+        (directory/'plain.exe').write_bytes(self.b.exe.read_bytes())
+        for n, cut in enumerate((1, 16, 55, 56, 70, len(image)-len(self.b.exe.read_bytes())-1)):
+            (directory/f'bad-cut-{n}.exe').write_bytes(image[:-cut])
+        for n, index in enumerate((len(self.b.exe.read_bytes()), len(self.b.exe.read_bytes())+17, len(image)-56, len(image)-48, len(image)-1, 100)):
+            damaged = bytearray(image)
+            damaged[index] ^= 1
+            (directory/f'bad-flip-{n}.exe').write_bytes(damaged)
+        result = command([Path.home()/'.dotnet/dotnet', ROOT/'app/launcher/tests/bin/Release/net10.0/PortableTests.dll', '--overlay', directory])
         self.assertEqual(result.returncode, 0, result.stdout.decode()+result.stderr.decode())
         print(result.stdout.decode().strip())
 

@@ -12,6 +12,8 @@ cli=$3
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 install -d -m 755 -- "$prefix" "$(dirname -- "$cli")"
 install -m 644 -- "$here/invite.py" "$prefix/invite.py"
+install -m 644 -- "$here/invite_overlay.py" "$prefix/invite_overlay.py"
+install -m 644 -- "$here/../transport/server-transport-catalog.py" "$prefix/server-transport-catalog.py"
 # Absolute paths are emitted with POSIX shell quoting by Python, not interpolated code.
 python3 - "$prefix/invite.py" "$config" "$cli" <<'PY'
 import os, shlex, sys

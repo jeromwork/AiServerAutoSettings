@@ -192,6 +192,84 @@
         },
         "additionalProperties": false
       }
+    },
+    "catalogFile": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "vpnBootstrap": {
+      "type": "object",
+      "required": [
+        "channelFile",
+        "entryFiles",
+        "singBoxExe",
+        "vpn"
+      ],
+      "properties": {
+        "channelFile": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "entryFiles": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^/"
+          }
+        },
+        "hops": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "host",
+              "user",
+              "port",
+              "keyFile"
+            ],
+            "properties": {
+              "host": {
+                "type": "string"
+              },
+              "user": {
+                "type": "string"
+              },
+              "port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              },
+              "keyFile": {
+                "type": "string",
+                "pattern": "^/"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "singBoxExe": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "vpn": {
+          "type": "object",
+          "required": [
+            "checkUrl",
+            "dnsServer"
+          ],
+          "properties": {
+            "checkUrl": {
+              "type": "string",
+              "pattern": "^https://"
+            },
+            "dnsServer": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

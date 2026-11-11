@@ -112,8 +112,9 @@ class PackagingTests(unittest.TestCase):
         with zipfile.ZipFile(self.zip) as agents, zipfile.ZipFile(vpn) as other:
             a = json.loads(agents.read('components.json').decode('utf-8-sig'))
             v = json.loads(other.read('components.json').decode('utf-8-sig'))
-            self.assertEqual([c['name'] for c in a['components']], ['transport','disk','control'])
+            self.assertEqual([c['name'] for c in a['components']], ['transport','disk','control','vpn'])
             self.assertEqual([c['name'] for c in v['components']], ['vpn'])
+            self.assertEqual(a['components'][-1], v['components'][0], 'same command-managed VPN component in the single-file installer')
             self.assertIn('build/Wizard.ps1', other.namelist())
             self.assertIn('disk/Select-Disk.ps1', other.namelist())
             self.assertIn('build/Setup.Common.ps1', agents.namelist())

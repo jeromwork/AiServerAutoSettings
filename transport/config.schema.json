@@ -333,6 +333,10 @@
       "maximum": 16,
       "default": 1,
       "description": "Сколько путей проверять одновременно при рейтинге. 1 — точная скорость каждого пути."
+    },
+    "inviteBootstrap": {
+      "type": "boolean",
+      "description": "Temporary HTTPS/TUN bootstrap before the invited device has its own authorized SSH key"
     }
   }
 }

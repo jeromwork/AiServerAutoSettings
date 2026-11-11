@@ -653,7 +653,7 @@ function New-VpnTunConfig($Settings,$Paths,[string]$SelectedTag,[string[]]$Exclu
     # Выбор уменьшает число реализаций стека; превосходство на реальной сети ещё не проверено.
     @{log=@{disabled=$true};inbounds=@(@{type='tun';tag='vpn-tun';interface_name=$v.interfaceName;address=@($v.address);stack='system';auto_route=$true;strict_route=$false;route_exclude_address=@($ExcludeCidrs)});
       outbounds=$outs;route=@{auto_detect_interface=$true;default_interface=$Interface;default_domain_resolver='bootstrap';final='vpn-active';rules=@(
-        @{inbound=@('vpn-tun');network='tcp';port=22;ip_cidr=@($v.probeAddress+'/32');action='route';outbound='vpn-active';override_address='127.0.0.1';override_port=22},
+        @{inbound=@('vpn-tun');network='tcp';port=@(22,(Get-TransportServerPort $Settings.Profile))|Select-Object -Unique;ip_cidr=@($v.probeAddress+'/32');action='route';outbound='vpn-active';override_address=$Settings.Profile.serverAddress;override_port=(Get-TransportServerPort $Settings.Profile)},
         @{protocol='dns';action='hijack-dns'})};
       dns=@{servers=@(@{type='udp';tag='bootstrap';server=$v.dnsServer;bind_interface=$Interface},@{type='https';tag='vpn-dns';server=$v.dnsServer;detour='vpn-active'});final='vpn-dns'}}
 }
@@ -670,6 +670,9 @@ function Set-VpnEnabled([string]$Root,[bool]$Enabled) {
         try{$locked=$mutex.WaitOne(5000)}catch [Threading.AbandonedMutexException]{$locked=$true};if(-not $locked){throw 'Конфиг занят'}
         $file=Join-Path $Root 'config.json';$config=Read-TransportJson $file
         if(-not $config.vpn){$config|Add-Member -Force vpn ([pscustomobject]@{})};$config.vpn|Add-Member -Force enabled $Enabled
+        if(-not $config.components){$config|Add-Member -Force components ([pscustomobject]@{})}
+        if(-not $config.components.vpn){$config.components|Add-Member -Force vpn ([pscustomobject]@{})}
+        $config.components.vpn|Add-Member -Force enabled $Enabled
         Write-TransportJson $file $config
     }finally{if($locked){$mutex.ReleaseMutex()};$mutex.Dispose()}
 }
@@ -691,6 +694,7 @@ function Assert-VpnTunRoute([string]$Address,[int]$InterfaceIndex) {
 }
 function Test-VpnThroughTun($Settings,$Adapter) {
     $v=Get-VpnOptions $Settings
+    if(-not $Settings.Transport.inviteBootstrap){
     Assert-VpnTunRoute $v.probeAddress $Adapter.ifIndex
     # SSH с закреплённым host key проверяет сервер через TUN (synthetic IP -> server loopback),
     # 64 КиБ дополнительно обнаруживают зависание после первых пакетов.
@@ -704,6 +708,7 @@ function Test-VpnThroughTun($Settings,$Adapter) {
         while(-not (Receive-TransportProbe $probe)){Start-Sleep -Milliseconds 100}
         if($probe.state.state -ne 'ok'){throw 'Сервер через TUN не прошёл проверку'}
     }finally{Stop-TransportProcess $child;try{if($copy){[void]$copy.Wait(1000)}}catch{};$sink.Dispose()}
+    }
     $uri=[Uri]$v.checkUrl
     $addresses=@([Net.Dns]::GetHostAddresses($uri.DnsSafeHost));if(-not $addresses.Count){throw 'DNS через VPN не отвечает'}
     # WebRequest может выбрать любой из A/AAAA: все результаты должны маршрутизироваться через наш TUN.
@@ -832,4 +837,13 @@ function Get-TransportEngineDiagnostic($Engine,[string]$Candidate,$Context) {
     elseif($detail.stderr -match '(?i)refused'){$detail.reason='connection-refused'}
     elseif($detail.stderr -match '(?i)unreachable|no route'){$detail.reason='network-unreachable'}
     $detail
+}
+
+# Bootstrap has no registered SSH key yet. Its tag was checked by HTTPS through
+# a temporary local proxy; Worker still verifies DNS/HTTPS and routes through TUN.
+function Get-VpnTransportState([string]$Root,$Settings) {
+    if($Settings.Transport.inviteBootstrap -and $Settings.Vpn.bootstrapTag){return [pscustomobject]@{active=[string]$Settings.Vpn.bootstrapTag;bootstrap=$true}}
+    $status=Read-TransportJson (Join-Path $Root 'status/transport.json')
+    if(-not $status.ok -or ([DateTime]::UtcNow-(Convert-TransportUtc $status.updatedAt)).TotalSeconds -gt 15){throw 'Транспорт ещё не проверен'}
+    return $status
 }

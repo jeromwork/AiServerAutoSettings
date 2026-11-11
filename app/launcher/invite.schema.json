@@ -143,6 +143,44 @@
     },
     "happierAccount": {
       "type": "string"
+    },
+    "vpn": {
+      "enum": [
+        "on",
+        "off"
+      ]
+    },
+    "bootstrap": {
+      "type": "object",
+      "required": [
+        "catalog"
+      ],
+      "properties": {
+        "catalog": {
+          "type": "object",
+          "required": [
+            "schema"
+          ],
+          "properties": {
+            "schema": {
+              "const": 1
+            }
+          }
+        },
+        "channel": {
+          "type": "object"
+        },
+        "entries": {
+          "type": "object"
+        },
+        "hops": {
+          "type": "object"
+        },
+        "vpn": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false
