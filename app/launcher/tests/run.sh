@@ -18,6 +18,7 @@ LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -NonInteractive -File "$repo/tr
 python3 -m unittest discover -s "$repo/server/tests"
 python3 "$repo/disk/test-tree.py"
 python3 "$repo/transport/test-server-catalog.py"
+python3 "$repo/transport/test-transport-liveness.py" "$pwsh"
 node "$repo/accounts/test-accounts.mjs"
 python3 "$here/test_build.py"
 python3 "$here/test_first_run.py"

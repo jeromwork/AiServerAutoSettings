@@ -26,6 +26,12 @@ payload=sys.stdin.read().replace('\r','')
 with (home/'calls.jsonl').open('a') as f:f.write(json.dumps({'user':user,'password':password,'payload':payload,'args':args})+'\n')
 pc=[a for a in args if a.startswith('ProxyCommand=')]
 kind='direct' if not pc else (('hoppw' if 'PubkeyAuthentication=no' in pc[0] else 'hop') if ' -W ' in pc[0] else 'proxy')
+import time
+wait=dict(x.split(':') for x in os.environ.get('RA_TEST_DELAY','').split(',') if x)
+if kind in wait:time.sleep(float(wait[kind]))
+if kind in os.environ.get('RA_TEST_HANG','').split(','):
+ with (home/'hang.pids').open('a') as f:f.write(str(os.getpid())+'\n')
+ time.sleep(120)
 if kind in os.environ.get('RA_TEST_BLOCK','').split(','):sys.stderr.write('Connection timed out during banner exchange\r\n');sys.exit(255)
 if os.environ.get('RA_TEST_DENY')=='1':sys.exit(255)
 if args[-1]=='true':
@@ -105,7 +111,7 @@ $message='';try{[void](Connect-WizardServer $keyRoot $repo ([pscustomobject]@{ad
 Assert ($message -clike 'Ни один ключ не подошёл. Выберите файл ключа, которым вы входите на сервер, или введите пароль (если вход по паролю на сервере разрешён)') 'final error explains keys and password'
 $live=[IO.File]::ReadAllText($script:WizardProgressFile)
 Assert ($live.Contains('id_ecdsa… ✗ защищён паролем') -and $live.Contains('id_rsa… ✗ не подошёл')) 'passphrase key skipped with a clear message'
-# Routes: direct, local proxy (exe relay), SSH hop. Probing is short and the first route that reaches SSH wins.
+# Routes: direct, local proxy (exe relay), SSH hop. All are probed at once; the first in that order that reaches SSH wins.
 $routeHome=Join-Path $TestHome 'routes';[void][IO.Directory]::CreateDirectory($routeHome);$env:RA_TEST_GOOD_KEY=[IO.Path]::GetFullPath($chosen)
 $hopKey=Join-Path $keyHome 'hopkey';[void](Invoke-DiskProcess $keygen @('-q','-t','ed25519','-N','','-f',$hopKey))
 $hopBody=(([IO.File]::ReadAllText($hopKey)) -split "`n"|Where-Object {$_ -and $_ -notmatch '-----'}) -join ''
@@ -123,8 +129,9 @@ $base=@{login='root';keyFile=$chosen;passwordPipe='';askpassExecutable=$askpass}
 $rr=New-RouteRoot 'proxy';$env:RA_TEST_BLOCK='direct'
 $f=Connect-WizardServer $rr $repo ([pscustomobject]($base+@{address='route1.example.invalid';proxy=$proxy}))
 $rc=Get-RouteCalls;$live=[IO.File]::ReadAllText($script:WizardProgressFile)
-Assert ((Get-ProxyOption $rc[0]).Count -eq 0 -and $rc[0].args -contains 'ConnectTimeout=8') 'direct is probed first with a short timeout'
-$po=@(Get-ProxyOption $rc[1])
+$dc=@($rc|Where-Object {(Get-ProxyOption $_).Count -eq 0})
+Assert ($dc.Count -eq 1 -and $dc[0].args -contains 'ConnectTimeout=8') 'direct is probed with a short connect timeout'
+$po=@(Get-ProxyOption @($rc|Where-Object {(Get-ProxyOption $_).Count -eq 1})[0])
 Assert ($po.Count -eq 1 -and $po[0].Contains('--proxy-connect socks 127.0.0.1 10808 %h %p') -and $po[0].Contains('RemoteAgents.exe')) 'proxy route passes the relay with host, port and %h %p to ssh'
 Assert ($live.Contains('напрямую… ✗') -and $live.Contains('через локальный прокси 127.0.0.1:10808… ✓')) 'live progress shows direct failing and the proxy working'
 Assert (@($rc|Where-Object {(Get-ProxyOption $_).Count -eq 0}).Count -eq 1 -and @($rc|Where-Object {$_.user -ceq 'remoteagents' -and (Get-ProxyOption $_).Count -eq 1}).Count -ge 2) 'direct is not retried after a proxy success; later calls use the proxy'
@@ -154,8 +161,8 @@ $pipeName='RemoteAgents.Password.'+[guid]::NewGuid().ToString('N');$secret='hop-
 $f=Connect-WizardServer $rr $repo ([pscustomobject]($base+@{address='route2b.example.invalid';hop=[pscustomobject]@{name='jump';ssh='jumper@hop.example.invalid';keyFile=$hopKey;passwordPipe=$pipeName}}))
 $rc=Get-RouteCalls;$live=[IO.File]::ReadAllText($script:WizardProgressFile);$last=@(Get-ProxyOption $rc[-1])
 $hopCalls=@($rc|Where-Object {(Get-ProxyOption $_).Count -eq 1})
-$firstHop=@(Get-ProxyOption $hopCalls[0])[0]
-Assert ($firstHop.Contains($hopKey) -and $firstHop.Contains('BatchMode=yes') -and -not $firstHop.Contains('PubkeyAuthentication=no')) 'key hop route is tried before the password route'
+$keyHop=@($hopCalls|ForEach-Object {@(Get-ProxyOption $_)[0]}|Where-Object {-not $_.Contains('PubkeyAuthentication=no')})
+Assert ($keyHop.Count -ge 1 -and $keyHop[0].Contains($hopKey) -and $keyHop[0].Contains('BatchMode=yes')) 'key hop route is probed besides the password route'
 Assert ($last[0].Contains('PubkeyAuthentication=no') -and $last[0].Contains('PreferredAuthentications=password,keyboard-interactive') -and $last[0].Contains('BatchMode=no') -and $last[0].Contains('REMOTEAGENTS_PASSWORD_PIPE='+$pipeName) -and $last[0].Contains('SSH_ASKPASS_REQUIRE=force') -and $last[0].Contains('SSH_ASKPASS='+$askpass)) 'password hop route asks the askpass relay through its own pipe, set only for the inner ssh'
 Assert ($live.Contains('(пароль)… ✓')) 'password hop route is reported working'
 foreach($t in @($live,[IO.File]::ReadAllText($f),[IO.File]::ReadAllText((Join-Path $rr 'config.json')))){Assert (-not $t.Contains($secret) -and -not $t.Contains($pipeName)) 'hop password and pipe name never in progress, profile or config'}
@@ -173,6 +180,27 @@ try{[void](Connect-WizardServer $rr $repo ([pscustomobject]($base+@{address='rou
 Assert ($message -like 'Сервер не ответил по SSH ни одним из способов*') 'all routes failing is reported honestly'
 Assert ($message.Contains('TUN') -and $message.Contains('«Повторить»') -and $message.Contains('«смешанный»') -and $message.Contains('Локальный прокси')) 'all-failed message offers an enabled TUN VPN, Повторить and explains mixed mode'
 Assert (-not (Get-ChildItem $rr -Recurse -Filter ssh-transport.json) -and -not (Read-TransportJson (Join-Path $rr 'config.json')).wizard) 'failed routes save nothing'
+# 4b. Parallel probes: silent direct and proxy cost one timeout in total, not one each; the working hop wins and the rest are killed.
+$script:WizardProbeTimeout=8
+$rr=New-RouteRoot 'parallel';$env:RA_TEST_BLOCK='';$env:RA_TEST_HANG='direct,proxy';$watch=[Diagnostics.Stopwatch]::StartNew()
+[void](Connect-WizardServer $rr $repo ([pscustomobject]($base+@{address='route7.example.invalid';proxy=$proxy;hop=$hop})))
+$watch.Stop();$live=[IO.File]::ReadAllText($script:WizardProgressFile)
+Assert ((Read-TransportJson (Join-Path $rr 'config.json')).wizard.serverRoute.used -ceq 'hop') 'silent direct and proxy, working hop: the hop is chosen'
+Assert ($watch.Elapsed.TotalSeconds -lt $script:WizardProbeTimeout) ('hop chosen within one probe timeout, not the sum of timeouts: '+[int]$watch.Elapsed.TotalSeconds+' s')
+Assert ($live.Contains('напрямую… не дождался') -and $live.Contains('10808… не дождался') -and $live.Contains('jumper@hop.example.invalid:2222… ✓')) 'one line per route; unanswered routes are reported as stopped'
+$hung=@([IO.File]::ReadAllLines((Join-Path $env:RA_TEST_SSH 'hang.pids'))|Where-Object {$_})
+Assert ($hung.Count -eq 2 -and -not @($hung|Where-Object {Get-Process -Id ([int]$_) -ErrorAction SilentlyContinue})) 'unfinished probe processes are killed after the choice'
+# 4c. Direct and hop both work: direct wins although it answers after the hop (within the grace period).
+$rr=New-RouteRoot 'both';$env:RA_TEST_HANG='';$env:RA_TEST_DELAY='direct:1'
+[void](Connect-WizardServer $rr $repo ([pscustomobject]($base+@{address='route8.example.invalid';hop=$hop})))
+Assert ((Read-TransportJson (Join-Path $rr 'config.json')).wizard.serverRoute.used -ceq 'direct') 'direct and hop both alive: direct is chosen'
+# 4d. Nothing answers: the same clear error, after one timeout rather than one per route.
+$rr=New-RouteRoot 'silent';$env:RA_TEST_DELAY='';$env:RA_TEST_HANG='direct,proxy,hop';$message='';$watch=[Diagnostics.Stopwatch]::StartNew()
+try{[void](Connect-WizardServer $rr $repo ([pscustomobject]($base+@{address='route9.example.invalid';proxy=$proxy;hop=$hop})))}catch{$message=$_.Exception.Message}
+$watch.Stop();$live=[IO.File]::ReadAllText($script:WizardProgressFile)
+Assert ($message -like 'Сервер не ответил по SSH ни одним из способов*' -and $live.Contains('напрямую… ✗ нет ответа за 8 с')) 'all routes silent: the existing clear error, each route marked'
+Assert ($watch.Elapsed.TotalSeconds -lt 1.5*$script:WizardProbeTimeout) ('all routes silent: one timeout in total, not three: '+[int]$watch.Elapsed.TotalSeconds+' s')
+$env:RA_TEST_HANG='';$script:WizardProbeTimeout=30
 # 5. Direct only, blocked by DPI: the provider message; a real key rejection keeps the key message.
 $rr=New-RouteRoot 'direct';$env:RA_TEST_BLOCK='direct';$message=''
 try{[void](Connect-WizardServer $rr $repo ([pscustomobject]($base+@{address='route5.example.invalid'})))}catch{$message=$_.Exception.Message}

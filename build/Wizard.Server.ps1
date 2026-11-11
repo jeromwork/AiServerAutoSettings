@@ -36,17 +36,51 @@ function New-WizardRoutes($Request,$Profile) {
     }
     ,$routes
 }
+# Route probes run at once, each in its own ssh process: a blocked route costs one timeout in total, not one per route.
+# The limit stays generous (a hop through a DPI filter sometimes needs 15-20 s); tests lower it.
+$script:WizardProbeTimeout=30;$script:WizardProbeGrace=3
+function Start-WizardProbe($Profile,[string]$Worker,$Route) {
+    # 'true' as the worker, as Invoke-WizardLogin does. A password hop has its own ProxyCommand environment; the relay pipe serves one askpass at a time.
+    $si=New-Object Diagnostics.ProcessStartInfo;$si.FileName=$Profile.sshExecutable
+    $si.Arguments=((@(Get-WizardLoginArguments $Profile $Worker)+@($Route.options)+@('-o','BatchMode=yes','-o','StrictHostKeyChecking=accept-new',$Profile.serverAddress,'true'))|ForEach-Object {Quote-Disk ([string]$_)}) -join ' '
+    $si.UseShellExecute=$false;$si.CreateNoWindow=$true;$si.RedirectStandardInput=$true;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true
+    $p=New-Object Diagnostics.Process;$p.StartInfo=$si
+    try{[void]$p.Start();$p.StandardInput.Close()}catch{$p.Dispose();return [pscustomobject]@{Route=$Route;Process=$null;Err=$null;State='fail';Why='нет связи'}}
+    [void]$p.StandardOutput.ReadToEndAsync()
+    [pscustomobject]@{Route=$Route;Process=$p;Err=$p.StandardError.ReadToEndAsync();State='pending';Why=''}
+}
+function Receive-WizardProbe($Probe) {
+    if($Probe.State -ne 'pending' -or -not $Probe.Process.HasExited){return}
+    [void]$Probe.Process.WaitForExit();$code=$Probe.Process.ExitCode;$err='';try{if($Probe.Err.Wait(2000)){$err=[string]$Probe.Err.Result}}catch{}
+    # As Invoke-DiskProcess: success or a key rejection by the server ("Сервер отклонил вход") means the route reaches SSH.
+    if($code -eq 0 -or ($code -eq 255 -and $err -match 'Permission denied')){$Probe.State='ok';return}
+    $Probe.State='fail'
+    if($code -eq 255 -and $err -match $script:WizardNoBannerPattern){$Probe.Why='сервер не ответил по SSH'}else{$Probe.Why='нет связи'}
+}
 function Select-WizardRoute($Profile,[string]$Worker,$Routes) {
-    # With only the direct route nothing is probed. Otherwise each route gets a short probe (8 s) and the first that reaches SSH wins.
+    # With only the direct route nothing is probed. Otherwise all routes are probed in parallel; one progress line per route, then ✓/✗ as each answers.
+    # Several working routes: list order wins (direct > proxy > hop); a later one is taken once no earlier one is pending, or WizardProbeGrace s after the first success.
     $script:WizardRoute=$Routes[0];$script:WizardNoBanner=$false;$script:WizardReached=$false
     if($Routes.Count -lt 2){return}
-    foreach($r in $Routes){
-        $script:WizardRoute=$r;$why='';$ok=$false
-        Write-WizardProgress ('Проверяю: '+$r.title+'…')
-        try{[void](Invoke-WizardLogin $Profile $Worker 'true' -Timeout 30);$ok=$true}catch{$e=[string]$_.Exception.Message;if($e -like '*Сервер отклонил вход*'){$ok=$true}else{$why=if($e -like '*баннер*'){'сервер не ответил по SSH'}else{'нет связи'}}}
-        if($ok){Write-WizardProgress ('Проверяю: '+$r.title+'… ✓');$script:WizardReached=$true;return}
-        Write-WizardProgress ('Проверяю: '+$r.title+'… ✗ '+$why)
-    }
+    $probes=@();$chosen=$null
+    try{
+        foreach($r in $Routes){Write-WizardProgress ('Проверяю: '+$r.title+'…');$q=Start-WizardProbe $Profile $Worker $r;$probes+=$q;if($q.State -eq 'fail'){Write-WizardProgress ('Проверяю: '+$r.title+'… ✗ '+$q.Why)}}
+        $deadline=[DateTime]::UtcNow.AddSeconds($script:WizardProbeTimeout);$firstOk=$null
+        while($true){
+            foreach($q in $probes){
+                if($q.State -ne 'pending'){continue};Receive-WizardProbe $q
+                if($q.State -eq 'ok'){Write-WizardProgress ('Проверяю: '+$q.Route.title+'… ✓');if(-not $firstOk){$firstOk=[DateTime]::UtcNow}}
+                elseif($q.State -eq 'fail'){Write-WizardProgress ('Проверяю: '+$q.Route.title+'… ✗ '+$q.Why)}
+            }
+            $now=[DateTime]::UtcNow;$expired=$now -ge $deadline;$best=$null;$earlier=$false
+            foreach($q in $probes){if($q.State -eq 'ok'){$best=$q;break};if($q.State -eq 'pending'){$earlier=$true}}
+            if($best -and (-not $earlier -or $expired -or ($now-$firstOk).TotalSeconds -ge $script:WizardProbeGrace)){$chosen=$best;break}
+            if($expired -or -not @($probes|Where-Object {$_.State -eq 'pending'}).Count){break}
+            Start-Sleep -Milliseconds 100
+        }
+        foreach($q in $probes){if($q.State -eq 'pending'){Write-WizardProgress ('Проверяю: '+$q.Route.title+$(if($chosen){'… не дождался: выбран другой способ'}else{'… ✗ нет ответа за '+$script:WizardProbeTimeout+' с'}))}}
+    }finally{foreach($q in $probes){if($q.Process){Stop-TransportProcess ([pscustomobject]@{Process=$q.Process})}}}
+    if($chosen){$script:WizardRoute=$chosen.Route;$script:WizardReached=$true;return}
     $script:WizardNoBanner=$true;throw 'Сервер не ответил по SSH ни одним из способов (напрямую, через прокси, через промежуточный сервер). Проверьте прокси и промежуточный сервер или включите любой VPN в режиме TUN (OpenVPN, WireGuard…) и нажмите «Повторить». Режим «смешанный» (только прокси) ssh сам не проводит: для него нужен маршрут «Локальный прокси»'
 }
 function Save-WizardRoute([string]$Root,$Request,$Profile) {
@@ -68,9 +102,12 @@ function Save-WizardRoute([string]$Root,$Request,$Profile) {
     $value=[pscustomobject]$route
     Update-LauncherConfig $Root {param($c) Set-ConfigDefault $c wizard ([pscustomobject]@{});$c.wizard|Add-Member -Force serverRoute $value}
 }
+function Get-WizardLoginArguments($Profile,[string]$User) {
+    @('-F',$Profile.configPath,'-T','-l',$User,'-i',$Profile.keyPath,'-o','IdentitiesOnly=yes','-o','ConnectTimeout=8','-o','ConnectionAttempts=1','-o',('UserKnownHostsFile="'+$Profile.knownHostsPath.Replace('\','/')+'"'),'-o','GlobalKnownHostsFile=none','-o','ForwardAgent=no','-o','ClearAllForwardings=yes')
+}
 function Invoke-WizardLogin($Profile,[string]$User,[string]$Command,[string]$InputText='', $Credential=$null,[int]$Timeout=45) {
     # Via an SSH hop a login is usually 3-5 s but spikes to ~20 s were measured; short limits failed working routes.
-    $args=@('-F',$Profile.configPath,'-T','-l',$User,'-i',$Profile.keyPath,'-o','IdentitiesOnly=yes','-o','ConnectTimeout=8','-o','ConnectionAttempts=1','-o',('UserKnownHostsFile="'+$Profile.knownHostsPath.Replace('\','/')+'"'),'-o','GlobalKnownHostsFile=none','-o','ForwardAgent=no','-o','ClearAllForwardings=yes')
+    $args=@(Get-WizardLoginArguments $Profile $User)
     # Route options precede the destination; the profile itself stays independent of the route.
     if($script:WizardRoute){$args+=@($script:WizardRoute.options)}
     if(-not $Credential){
