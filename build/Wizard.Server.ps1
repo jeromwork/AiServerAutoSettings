@@ -28,6 +28,12 @@ function New-WizardRoutes($Request,$Profile) {
         $m=[regex]::Match([string]$hop.ssh,'\A(?:([a-z_][a-z0-9_-]{0,31})@)?([a-zA-Z0-9][a-zA-Z0-9.-]{0,252})(?::(\d{1,5}))?\z')
         if(-not $m.Success){throw 'Укажите промежуточный сервер как логин@адрес[:порт]'}
         $known=(Join-Path (Split-Path $Profile.keyPath -Parent) 'known_hosts-hop').Replace('\','/')
+        if($Request.strictHostKey){
+            if([string]$hop.hostKey -cnotmatch '\A(ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa) [A-Za-z0-9+/=]+\z'){throw 'Ключ хоста промежуточного сервера отсутствует или повреждён'}
+            $hopPort=if($m.Groups[3].Success){[int]$m.Groups[3].Value}else{22};$hopHost=$m.Groups[2].Value
+            if($hopPort -ne 22){$hopHost='['+$hopHost+']:'+$hopPort}
+            Write-DiskUtf8 $known ($hopHost+' '+$hop.hostKey+"`n")
+        }
         $keys=@(Get-WizardHopKeys ([string]$hop.keyFile));if(-not $keys.Count -and -not $hop.passwordPipe){$keys=@('')}
         # Key routes first (BatchMode), then one password route. The password never appears here: the inner ssh asks this exe (askpass)
         # for it through the one-use in-memory pipe, whose random name is set only for that inner ssh (cmd `set`), so the target's own prompts keep their own pipe.
@@ -38,7 +44,8 @@ function New-WizardRoutes($Request,$Profile) {
             $t=@((Quote-Disk $Profile.sshExecutable),'-q','-F',(Quote-Disk $Profile.configPath))
             if($v.key){$t+=@('-i',(Quote-Disk $v.key),'-o','IdentitiesOnly=yes')}
             if($v.password){$t+=@('-o','BatchMode=no','-o','NumberOfPasswordPrompts=1','-o','PreferredAuthentications=password,keyboard-interactive','-o','KbdInteractiveAuthentication=yes','-o','PubkeyAuthentication=no')}else{$t+=@('-o','BatchMode=yes')}
-            $t+=@('-o','ConnectTimeout=8','-o','StrictHostKeyChecking=accept-new','-o',('UserKnownHostsFile="'+$known+'"'),'-o','GlobalKnownHostsFile=none','-o','ForwardAgent=no')
+            $hopStrict=if($Request.strictHostKey){'StrictHostKeyChecking=yes'}else{'StrictHostKeyChecking=accept-new'}
+            $t+=@('-o','ConnectTimeout=8','-o',$hopStrict,'-o',('UserKnownHostsFile="'+$known+'"'),'-o','GlobalKnownHostsFile=none','-o','ForwardAgent=no')
             if($m.Groups[1].Success){$t+=@('-l',$m.Groups[1].Value)};if($m.Groups[3].Success){$t+=@('-p',$m.Groups[3].Value)}
             $t+=@('-W','%h:%p',$m.Groups[2].Value)
             $line=$t -join ' '
@@ -79,8 +86,9 @@ function Invoke-WizardLogin($Profile,[string]$User,[string]$Command,[string]$Inp
     $args=@('-F',$Profile.configPath,'-T','-l',$User,'-i',$Profile.keyPath,'-o','IdentitiesOnly=yes','-o','ConnectTimeout=8','-o','ConnectionAttempts=1','-o',('UserKnownHostsFile="'+$Profile.knownHostsPath.Replace('\','/')+'"'),'-o','GlobalKnownHostsFile=none','-o','ForwardAgent=no','-o','ClearAllForwardings=yes')
     # The chosen route (direct / local proxy / SSH hop) applies to this step's SSH calls only; it is never written into the saved profile.
     if($script:WizardRoute){$args+=@($script:WizardRoute.options)}
+    $strict=if($Profile.strictHostKey){'StrictHostKeyChecking=yes'}else{'StrictHostKeyChecking=accept-new'}
     if(-not $Credential){
-        try{return Invoke-DiskProcess $Profile.sshExecutable ($args+@('-o','BatchMode=yes','-o','StrictHostKeyChecking=accept-new',$Profile.serverAddress,$Command)) $InputText -TimeoutSeconds $Timeout}
+        try{return Invoke-DiskProcess $Profile.sshExecutable ($args+@('-o','BatchMode=yes','-o',$strict,$Profile.serverAddress,$Command)) $InputText -TimeoutSeconds $Timeout}
         catch{$m=[string]$_.Exception.Message;if($m -like '*SSH-баннера*'){$script:WizardNoBanner=$true}elseif($m -like '*отклонил вход*'){$script:WizardReached=$true};throw}
     }
     $si=New-Object Diagnostics.ProcessStartInfo

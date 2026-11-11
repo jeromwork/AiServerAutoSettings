@@ -197,11 +197,16 @@ namespace RemoteAgents.Launcher
             if(actionBusy || busy || closing )return;
             // Configured: never a window. Problems are shown by the tray icon, the menu and one balloon.
             bool configured=false;try{configured=Configured();}catch{log.Write("setup.config.read.failed");}
-            if(configured){if(Product.IsVpn)Safe(RegisterVpnRun);else WatchHealth();return;}
+            if(configured && !Invitation.Pending(home)){if(Product.IsVpn)Safe(RegisterVpnRun);else WatchHealth();return;}
             actionBusy=true;
             try {
                 // Let supervised components publish their first live observation without showing a window.
                 await Task.Delay(3000,stop.Token);
+                if(!Product.IsVpn && Invitation.Pending(home)){
+                    bool manual=InviteWindow.Display(home,engine.Folder(engine.Current));
+                    if(manual)SetupWizard.Display(home,engine.Folder(engine.Current),true);
+                    return;
+                }
                 string outcome=await SetupWizard.CheckOnLaunch(home,engine.Folder(engine.Current));
                 // null: setup still incomplete; "": everything already ready, nothing changed.
                 if(Product.IsVpn && outcome!=null)RegisterVpnRun();

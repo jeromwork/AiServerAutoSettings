@@ -32,6 +32,7 @@ namespace RemoteAgents.Launcher
         [STAThread] static int Main(string[] args)
         {
             // Before askpass: ssh may carry a password pipe in its environment while running this relay as ProxyCommand.
+            if(args.Length>0 && args[0]=="--invite-hop")return InviteHop.Run(args);
             if(args.Length>0 && args[0]=="--proxy-connect")return ProxyRelay.Run(args);
             string passwordPipe=Environment.GetEnvironmentVariable("REMOTEAGENTS_PASSWORD_PIPE");
             if(!string.IsNullOrEmpty(passwordPipe))return PasswordRelay.Answer(passwordPipe);
@@ -47,6 +48,11 @@ namespace RemoteAgents.Launcher
                 string home = Path.GetFullPath(Option(args, "--home") ?? DefaultHome);
                 Directory.CreateDirectory(home); log = new Journal(home); log.Write("launcher.start");
                 if (args.Contains("--uninstall")) { if (Product.IsVpn) FirstInstall.UninstallVpn(home); else Uninstall.Run(home); log.Write("uninstall.ok"); return 0; }
+                if(!Product.IsVpn && !args.Contains("--exit") && !args.Contains("--tray")) {
+                    try{string invitation=Invitation.Find(args,Path.GetDirectoryName(Exe));
+                        if(invitation!=null){Invitation.Stage(home,invitation);args=args.Concat(new[]{"--setup-check"}).ToArray();}
+                    }catch(Exception e){MessageBox.Show(e.Message,"RemoteAgents — приглашение");return 1;}
+                }
                 var sid = WindowsIdentity.GetCurrent().User; string name = InstanceName(home, sid);
                 var security = new MutexSecurity(); security.AddAccessRule(new MutexAccessRule(sid, MutexRights.FullControl, AccessControlType.Allow));
                 bool created, owned = false, restart = false;

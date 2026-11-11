@@ -130,9 +130,10 @@ function Read-TransportSettings([string]$Root) {
 function Get-TransportSshArguments($Profile,[int]$Port) {
     # Явные параметры профиля исключают ProxyCommand/forwarding/RemoteCommand из пользовательского config.
     $nullConfig='NUL';if($env:OS -ne 'Windows_NT'){$nullConfig='/dev/null'}
+    $bootstrapProxy=if($Profile.inviteProxyCommand){'ProxyCommand='+[string]$Profile.inviteProxyCommand}else{'ProxyCommand=none'}
     @('-n','-T','-F',$nullConfig,'-p',[string]$Port,'-i',[string]$Profile.keyPath,'-l',[string]$Profile.login,
       '-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','StrictHostKeyChecking=yes','-o',('UserKnownHostsFile="'+$Profile.knownHostsPath.Replace('\','/')+'"'),
-      '-o',('HostKeyAlias='+$Profile.serverAddress),'-o','ProxyCommand=none','-o','ProxyJump=none','-o','ConnectTimeout=10','-o','ConnectionAttempts=1','-o','LogLevel=ERROR')
+      '-o',('HostKeyAlias='+$Profile.serverAddress),'-o',$bootstrapProxy,'-o','ProxyJump=none','-o','ConnectTimeout=10','-o','ConnectionAttempts=1','-o','LogLevel=ERROR')
 }
 function Get-TransportServerPort($Profile) {
     $a=@($Profile.arguments);$at=[array]::IndexOf($a,'-p')
@@ -247,7 +248,7 @@ function Get-TransportCandidates($Settings,[string]$Root) {
             if($hop.configPath){$proxy+=@('-F',[string]$hop.configPath)}
             $proxy+=@('-W','%h:%p',[string](Get-TransportValue $hop 'ssh' $hop.alias))
             $command=(@($proxy|ForEach-Object {Quote-Transport $_})) -join ' '
-            $a=@(Get-TransportSshArguments $p (Get-TransportServerPort $p))|ForEach-Object {if($_ -eq 'ProxyCommand=none'){'ProxyCommand='+$command}else{$_}}
+            $a=@(Get-TransportSshArguments $p (Get-TransportServerPort $p))|ForEach-Object {if($_ -like 'ProxyCommand=*'){'ProxyCommand='+$command}else{$_}}
             $a+=@('-N','-o','ExitOnForwardFailure=yes','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=2','-D',('127.0.0.1:'+$port))
             [void]$tunnels.Add([pscustomobject]@{tag=$tag;arguments=$a;target=$p.serverAddress;bind=$false})
         }

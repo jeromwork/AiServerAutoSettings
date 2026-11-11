@@ -204,6 +204,14 @@ namespace RemoteAgents.Launcher
             password.Enabled=host.Length==0;originalAddress=host;originalLogin=user;
             installMissing=Check(0,"Установить недостающие службы сервера",242,true);
             inventory=Hint(0,"Root используется только для создания рабочего пользователя remoteagents.",50,90);Technical(0,inventory);
+            if(!Product.IsVpn){
+                var inviteLink=new LinkLabel {Left=16,Top=478,Width=560,Height=26,Text="Открыть приглашение… (можно перетащить или вставить путь Ctrl+V)"};sections[0].Controls.Add(inviteLink);
+                Action<string> openInvite=path=>{try{Invitation.Stage(home,path.Trim('"'));InviteWindow.Display(home,bundle);if(!Invitation.Pending(home)){DialogResult=DialogResult.OK;Close();}}catch(Exception e){Append(e.Message);}};
+                inviteLink.LinkClicked+=(a,b)=>{using(var d=new OpenFileDialog {Filter="Приглашение|*.rainvite",CheckFileExists=true})if(d.ShowDialog(this)==DialogResult.OK)openInvite(d.FileName);};
+                AllowDrop=true;DragEnter+=(a,b)=>{if(b.Data.GetDataPresent(DataFormats.FileDrop))b.Effect=DragDropEffects.Copy;};
+                DragDrop+=(a,b)=>{var paths=b.Data.GetData(DataFormats.FileDrop) as string[];if(!busy && paths!=null && paths.Length==1 && paths[0].EndsWith(".rainvite",StringComparison.OrdinalIgnoreCase))openInvite(paths[0]);};
+                KeyPreview=true;KeyDown+=(a,b)=>{if(!busy && steps.Section==0 && b.Control && b.KeyCode==Keys.V && Clipboard.ContainsText()){string path=Clipboard.GetText().Trim().Trim('"');if(path.EndsWith(".rainvite",StringComparison.OrdinalIgnoreCase) && File.Exists(path)){b.SuppressKeyPress=true;openInvite(path);}}};
+            }
             ServerRoutes(config);
             More(0,392);
         }

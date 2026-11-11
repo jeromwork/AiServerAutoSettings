@@ -28,6 +28,8 @@ namespace RemoteAgents.Launcher
         internal static int Timeout(string action)
         {
             switch (action) {
+                case "InviteDisk": return 2100 * 1000;
+                case "InviteEnroll": case "InviteAccount": return 420 * 1000;
                 case "Server": return 420 * 1000;    // key/password login ~100 s + helpers 60 s + start/catalog 120 s + 2 observations 120 s
                 case "Account": case "ResumeAccount": return 420 * 1000; // helpers 60 s + status 60 s + Account.ps1 child 300 s
                 case "Operation": return 60 * 1000;  // one short status call

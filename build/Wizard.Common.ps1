@@ -3,6 +3,7 @@
 . (Join-Path (Split-Path $PSScriptRoot -Parent) 'disk/Disk.Common.ps1')
 . (Join-Path (Split-Path $PSScriptRoot -Parent) 'disk/Disk.Union.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Server.ps1')
+. (Join-Path $PSScriptRoot 'Wizard.Invite.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Lan.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Network.ps1')
 # All state is observed again. This model is also exercised with fake SSH on Linux.
@@ -310,6 +311,10 @@ function Test-WizardBridge([string]$Root) {
 function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Request) {
     $diskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk';$script:DiskHome=$diskHome
     switch($Action){
+        'InviteVerify' {[void](Invoke-WizardSsh $Root 'true');return @{ok=$true}}
+        'InviteDisk' {return Invoke-WizardStep $Root $Bundle 'Disk' ([pscustomobject]@{base=(Get-DiskBase);paths=@($Request.paths)})}
+        'InviteEnroll' {return Connect-WizardInvite $Root $Request}
+        'InviteAccount' {return Connect-WizardInviteAccount $Root $Bundle $Request}
         'Server' {
             $profile=Connect-WizardServer $Root $Bundle $Request
             Write-WizardProgress 'Проверяю службы сервера…'
