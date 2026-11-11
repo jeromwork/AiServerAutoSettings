@@ -197,7 +197,7 @@ namespace RemoteAgents.Launcher
             if(actionBusy || busy || closing )return;
             // Configured: never a window. Problems are shown by the tray icon, the menu and one balloon.
             bool configured=false;try{configured=Configured();}catch{log.Write("setup.config.read.failed");}
-            if(configured && !Invitation.Pending(home)){if(Product.IsVpn)Safe(RegisterVpnRun);else WatchHealth();return;}
+            if(configured && (Product.IsVpn || !Invitation.Pending(home))){if(Product.IsVpn)Safe(RegisterVpnRun);else WatchHealth();return;}
             actionBusy=true;
             try {
                 // Let supervised components publish their first live observation without showing a window.
