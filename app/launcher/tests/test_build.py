@@ -116,7 +116,8 @@ class PackagingTests(unittest.TestCase):
             self.assertEqual([c['name'] for c in v['components']], ['vpn'])
             self.assertIn('build/Wizard.ps1', other.namelist())
             self.assertIn('disk/Select-Disk.ps1', other.namelist())
-            self.assertIn('build/FirstInstall.ps1', agents.namelist())
+            self.assertIn('build/Setup.Common.ps1', agents.namelist())
+            self.assertIn('build/Uninstall.ps1', agents.namelist())
             self.assertIn('setup-vps-ssh.ps1', agents.namelist())
             self.assertIn('ssh-password-ui.cs', agents.namelist())
         for name in ('RemoteAgents.exe','RemoteVPN.exe','Start.cmd'):

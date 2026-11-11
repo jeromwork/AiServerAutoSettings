@@ -44,10 +44,9 @@ namespace RemoteAgents.Launcher
         DiskTreeSelection selection = new DiskTreeSelection(new string[0]);
         CancellationTokenSource stepCancellation; bool closingRequested;
         bool busy, changingTree, treeLoaded, catalogLoaded, initializing;
-        bool legacy, migrationRunning, migrationHandover; System.Windows.Forms.Timer migrationTimer; string migrationText = "";
 
         protected override void Dispose(bool disposing)
-        {if(disposing){operationTimer.Dispose();pollCancellation.Dispose();if(migrationTimer!=null)migrationTimer.Dispose();foreach(var panel in details)if(panel!=null)panel.Dispose();journal.Dispose();}base.Dispose(disposing);}
+        {if(disposing){operationTimer.Dispose();pollCancellation.Dispose();foreach(var panel in details)if(panel!=null)panel.Dispose();journal.Dispose();}base.Dispose(disposing);}
         static string LeaseName(string home)
         {using(var sha=SHA256.Create())return "Global\\RemoteAgents.Wizard."+BitConverter.ToString(sha.ComputeHash(Files.Utf8.GetBytes(Path.GetFullPath(home).ToLowerInvariant()))).Replace("-", "");}
         internal static bool Display(string home, string bundle, bool first, int section = 0, bool activate = false)
@@ -71,10 +70,10 @@ namespace RemoteAgents.Launcher
                 await form.Inspect();
                 // At boot the transport may publish its first live status later than this check:
                 // when only «Связь» is open, look once more before showing anything.
-                if(!form.applied[1] && !form.legacy && Enumerable.Range(0,6).All(i=>i==1 || form.applied[i])){await Task.Delay(20000);await form.Inspect();}
+                if(!form.applied[1] && Enumerable.Range(0,6).All(i=>i==1 || form.applied[i])){await Task.Delay(20000);await form.Inspect();}
                 // The optional LAN step alone never opens the window.
                 bool required=Enumerable.Range(0,6).All(i=>form.applied[i]);
-                if(required && !form.legacy){
+                if(required){
                     // Everything is verified: record it without a window.
                     form.SelectPage(7);await form.ExecuteCurrent();
                     if(form.lastSuccess)return "Настройка завершена. Приложение работает в трее.";
@@ -82,7 +81,7 @@ namespace RemoteAgents.Launcher
                 }
                 form.SelectPage(required?7:form.order.First(i=>i<6 && !form.applied[i]));
                 if(form.ShowDialog()!=DialogResult.OK)return null;
-                return form.migrationHandover?"":"Настройка завершена. Приложение работает в трее.";
+                return "Настройка завершена. Приложение работает в трее.";
             }}finally{lease.ReleaseMutex();}
             }
         }
@@ -129,7 +128,7 @@ namespace RemoteAgents.Launcher
                 if(!lastSuccess || closingRequested)return;
                 if(completed==0 && serverChanged){repairingServer=true;serverChanged=false;}
                 if(!first){if(completed==0 && repairingServer){Navigate(1);await ContinueServerRepair();}return;}
-                if(completed==7){if(!migrationRunning){DialogResult=DialogResult.OK;Close();}return;}
+                if(completed==7){DialogResult=DialogResult.OK;Close();return;}
                 Navigate(1);await ContinueServerRepair();await FinishAutomatically();
             };
             close.Click+=(a,b)=>Close();
@@ -144,9 +143,9 @@ namespace RemoteAgents.Launcher
         void SelectPage(int index)
         {
             if(index<0 || index>=sections.Length)return;
-            showingInstall=false;if(!busy)next.Enabled=!migrationRunning;
+            showingInstall=false;if(!busy)next.Enabled=true;
             currentPage=index;steps.Section=index;sections[index].BringToFront();back.Enabled=!busy && Array.IndexOf(order,index)>0;
-            next.Text=first?(index==7?(legacy?"Начать переход":"Готово"):"Далее"):(index==7?"Проверить":"Применить");RefreshSummary();
+            next.Text=first?(index==7?"Готово":"Далее"):(index==7?"Проверить":"Применить");RefreshSummary();
         }
         void Navigate(int direction)
         {
@@ -168,7 +167,7 @@ namespace RemoteAgents.Launcher
             }
         }
         async Task FinishAutomatically()
-        {if(first && steps.Section==7 && lastSuccess && !closingRequested){await ExecuteCurrent();if(lastSuccess && !migrationRunning){DialogResult=DialogResult.OK;Close();}}}
+        {if(first && steps.Section==7 && lastSuccess && !closingRequested){await ExecuteCurrent();if(lastSuccess){DialogResult=DialogResult.OK;Close();}}}
         Label Hint(int page,string text,int top=12,int height=44)
         {var c=new Label {Left=16,Top=top,Width=585,Height=height,Text=text};sections[page].Controls.Add(c);return c;}
         void Question(int page,string text)
@@ -195,7 +194,6 @@ namespace RemoteAgents.Launcher
         {
             Question(0,"К какому серверу подключиться?");string host="",user="root";
             try {string profile=Json.Text(Json.Map(Json.Get(config,"wizard")),"pendingProfile",Json.Str(Json.Map(Json.Get(config,"transport")),"profilePath"));
-                if(profile.Length==0)profile=Files.ReadLine(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"RemoteDisk","profile.txt"));
                 if(profile.Length==0){string dir=Path.Combine(home,"ssh-profiles");if(Directory.Exists(dir)){var found=Directory.GetFiles(dir,"ssh-transport.json",SearchOption.AllDirectories);if(found.Length==1)profile=found[0];}}
                 if(File.Exists(profile)){var p=Json.Read(profile);host=Json.Str(p,"serverAddress");user=Json.Str(p,"login");}
             }catch{}
@@ -282,8 +280,8 @@ namespace RemoteAgents.Launcher
         void BridgePage(Dictionary<string,object> config)
         {
             var c=Json.Map(Json.Get(config,"bridge"));Question(4,"Разрешить агенту управлять этим ПК?");
-            bool legacy=Json.Bool(Json.Map(Json.Get(Json.Map(Json.Get(config,"components")),"control")),"enabled") || File.Exists(Path.Combine(home,"control","config.json"));
-            bridge=Check(4,"Включить мост",95,Json.Bool(c,"enabled",legacy || !Json.Map(Json.Get(config,"components")).ContainsKey("control")));shell=Check(4,"Разрешить выполнение команд (shell)",135,Json.Bool(c,"allowShell",c.Count==0 && legacy));
+            bool controlOn=Json.Bool(Json.Map(Json.Get(Json.Map(Json.Get(config,"components")),"control")),"enabled");
+            bridge=Check(4,"Включить мост",95,Json.Bool(c,"enabled",controlOn || !Json.Map(Json.Get(config,"components")).ContainsKey("control")));shell=Check(4,"Разрешить выполнение команд (shell)",135,Json.Bool(c,"allowShell",c.Count==0 && controlOn));
             var info=Hint(4,"Разрешение shell позволяет выполнять команды от вашего имени. Настройка применяется на компьютере и на сервере. Изменение защищено независимым откатом.",12,100);Technical(4,info);More(4,195);
         }
         void VpnPage(Dictionary<string,object> config)
@@ -318,10 +316,7 @@ namespace RemoteAgents.Launcher
                 var server=Json.Map(Json.Get(result,"server"));
                 results[0]=applied[0]?"Подключено ✓":Json.Text(server,"reason","Укажите сервер и проверьте вход");
                 var current=StatusView.Read(home,"transport",maxAgeSec:15);
-                legacy=Json.Bool(result,"legacy");
-                results[1]=legacy?(applied[1]?"Сейчас работает прежняя связь; новая проверяется при переходе (шаг «Итог»)":"Сервер недоступен по SSH"):applied[1]?"Работает через "+StatusView.Title(current):"Нет рабочего пути: "+Json.Text(current,"error","нет свежей проверки выбранного сервера");
-                string failed=Json.Str(result,"migrationError");
-                if(!migrationRunning)results[7]=failed.Length>0?"Ошибка: прошлый переход не выполнен. "+failed:legacy?"Найдена прежняя установка. «Готово» запустит переход с проверкой и автоматическим откатом":results[7];
+                results[1]=applied[1]?"Работает через "+StatusView.Title(current):"Нет рабочего пути: "+Json.Text(current,"error","нет свежей проверки выбранного сервера");
                 var services=Json.Map(Json.Get(server,"services"));if(api.Text.Length==0)api.Text=Json.Str(services,"serverUrl");if(web.Text.Length==0)web.Text=Json.Str(services,"webappUrl");
                 pendingAccount=Json.Bool(result,"pendingAccount");TrackServer(Json.Map(Json.Get(server,"operations")));
                 var wizard=Json.Map(Json.Get(new Configuration(home).Data,"wizard"));
@@ -336,21 +331,7 @@ namespace RemoteAgents.Launcher
             try {await action();lastSuccess=true;}
             catch(OperationCanceledException) {if(page!=7)applied[page]=false;results[page]="Шаг отменён; готовность не подтверждена";Append(results[page]);}
             catch(Exception e) {if(page==0)password.Enabled=true;if(page!=7)applied[page]=false;results[page]="Ошибка: "+e.Message;Append(results[page]);}
-            finally {busy=false;foreach(var panel in details)panel.Enabled=true;stepCancellation.Dispose();stepCancellation=null;steps.Enabled=pages.Enabled=close.Enabled=true;back.Enabled=Array.IndexOf(order,steps.Section)>0;next.Enabled=!migrationRunning && !showingInstall;progress.Style=ProgressBarStyle.Continuous;RefreshSummary();if(closingRequested)Close();}
-        }
-        void WatchMigration(DateTime activation)
-        {
-            // Migrate.ps1 runs detached from this window and the tray: only its state files are read.
-            migrationRunning=true;next.Enabled=false;migrationText="";
-            migrationTimer=new System.Windows.Forms.Timer {Interval=1000};
-            migrationTimer.Tick+=(a,b)=>{
-                var p=MigrationProgress.Read(home,activation);
-                if(p.Text!=migrationText){migrationText=p.Text;results[7]=(p.Failed?"Ошибка: ":"")+p.Text;Append(results[7]);RefreshSummary();}
-                if(p.Failed){migrationTimer.Stop();migrationRunning=false;activationRequested=false;next.Enabled=true;return;}
-                // The migration stops this tray next and restarts it; leave quietly so it can exit.
-                if(p.Handover){migrationTimer.Stop();migrationHandover=true;DialogResult=DialogResult.OK;Close();}
-            };
-            migrationTimer.Start();
+            finally {busy=false;foreach(var panel in details)panel.Enabled=true;stepCancellation.Dispose();stepCancellation=null;steps.Enabled=pages.Enabled=close.Enabled=true;back.Enabled=Array.IndexOf(order,steps.Section)>0;next.Enabled=!showingInstall;progress.Style=ProgressBarStyle.Continuous;RefreshSummary();if(closingRequested)Close();}
         }
         async Task<Dictionary<string,object>> Run(string action, object request, CancellationToken? quiet = null)
         {
@@ -465,7 +446,7 @@ namespace RemoteAgents.Launcher
             if(!wizard.ContainsKey("localCatalog"))local=Json.Map(Json.Get(config,"transport"));
             foreach(string group in new[]{"entries","hops","relays","cdn"}) {
                 var rows=Json.Array(Json.Get(catalog,group)).Select(Json.Map).ToList();
-                foreach(var row in Json.Array(Json.Get(local,group)).Select(Json.Map).Where(r=>Json.Str(r,"legacyOutbound").Length==0)){var clean=new Dictionary<string,object>(row);clean.Remove("configPath");if(!clean.ContainsKey("ssh") && clean.ContainsKey("alias")){clean["ssh"]=clean["alias"];clean.Remove("alias");}if(!clean.ContainsKey("host") && clean.ContainsKey("server")){clean["host"]=clean["server"];clean.Remove("server");}rows.RemoveAll(r=>Json.Str(r,"name")==Json.Str(row,"name"));rows.Add(clean);}
+                foreach(var row in Json.Array(Json.Get(local,group)).Select(Json.Map)){var clean=new Dictionary<string,object>(row);clean.Remove("configPath");if(!clean.ContainsKey("ssh") && clean.ContainsKey("alias")){clean["ssh"]=clean["alias"];clean.Remove("alias");}if(!clean.ContainsKey("host") && clean.ContainsKey("server")){clean["host"]=clean["server"];clean.Remove("server");}rows.RemoveAll(r=>Json.Str(r,"name")==Json.Str(row,"name"));rows.Add(clean);}
                 foreach(var row in rows){int index=nodes.Rows.Add(CatalogTitle(group),Json.Str(row,"name"),Json.Text(row,"ssh",Json.Text(row,"host",Json.Str(row,"domain"))),Json.Str(row,"port"),Json.Str(row,"entry"),Json.Bool(row,"enabled",true));nodes.Rows[index].Tag=row;}
             }
             Append("Каталог получен с сервера; секреты не загружались в таблицу.");
@@ -596,7 +577,6 @@ namespace RemoteAgents.Launcher
                         if(!configured && !activationRequested){result=await Run("Activate",new {});activationRequested=true;}
                         else {result=await Run("Inspect",new {});if(!Json.Bool(result,"ok"))throw new IOException("Есть неготовые шаги. Проверьте связь и разделы с отметкой …");}
                         results[7]=Json.Text(result,"summary","Настройки сохранены");Append(results[7]);
-                        if(Json.Bool(result,"migration"))WatchMigration(DateTime.UtcNow);
                         return;
                 }
                 operationReady=ApplyResult(index,result);

@@ -2,7 +2,7 @@
   "version": 1,
   "transport": {
     "profilePath": "C:\\Users\\Alice\\AppData\\Local\\RemoteAgents\\ssh-profiles\\example\\project-connections\\example\\ssh-transport.json",
-    "channelPath": "C:\\Users\\Alice\\AppData\\Local\\RemoteDisk\\channel\\config.json",
+    "channelPath": "C:\\Users\\Alice\\AppData\\Local\\RemoteAgents\\state\\wizard-channel-0123456789abcdef.json",
     "singBoxPath": "C:\\Users\\Alice\\AppData\\Local\\RemoteAgents\\bundle\\example\\transport\\sing-box.exe",
     "sshPort": 2222,
     "syncPort": 22001,

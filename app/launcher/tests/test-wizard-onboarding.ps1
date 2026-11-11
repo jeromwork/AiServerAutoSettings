@@ -100,7 +100,7 @@ $script:probes=0
 function Get-WizardCatalog($Root,$Bundle){[pscustomobject]@{schema=1;entries=@();hops=@();relays=@();cdn=@()}}
 function Initialize-WizardTransport($Root,$Bundle,$Transport){}
 function Test-WizardNetworkManaged($Root){$false}
-function Invoke-MigrationPreflight($Root,$Bundle,$Config){$script:probes++;Assert ($Config.transport.profilePath -ceq $c.wizard.pendingProfile) 'new connection probes staged server'}
+function Invoke-TransportPreflight($Root,$Bundle,$Config){$script:probes++;Assert ($Config.transport.profilePath -ceq $c.wizard.pendingProfile) 'new connection probes staged server'}
 [void](Invoke-WizardStep $root $repo 'Connection' ([pscustomobject]@{catalog=(Get-WizardCatalog x x);shared=$false}))
 $updated=Read-TransportJson (Join-Path $root 'config.json')
 Assert ($script:probes -eq 1 -and -not $updated.wizard.pendingProfile -and $updated.transport.profilePath -ceq $c.wizard.pendingProfile) 'only verified connection commits new active server'

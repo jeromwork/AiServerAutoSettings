@@ -48,13 +48,13 @@ Invoke-ControlPrepare $c $payload | ConvertTo-Json -Compress
             self.assertEqual(result,dict(user='tester',home='/home/tester'))
             self.assertEqual(capture.read_bytes(),payload.replace('\r\n','\n').replace('\r','\n').encode('utf-8'))
 
-    def test_migration_bridge_live_roundtrip(self):
+    def test_bridge_probe_live_roundtrip(self):
         # Exercise the actual embedded probe with an isolated public catalog and broker socket.
         import shutil
         import sys
         import types
         code = subprocess.check_output([str(PWSH), '-NoProfile', '-NonInteractive', '-Command',
-            ". './build/Migrate.Common.ps1'; Get-MigrationBridgeProbe"], cwd=ROOT).decode('utf-8-sig')
+            ". './build/Setup.Common.ps1'; Get-BridgeProbe"], cwd=ROOT).decode('utf-8-sig')
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp); record = self.record(home); record['controlOnly'] = True
             base = home / '.local/share/codex-remote'; base.mkdir(parents=True)

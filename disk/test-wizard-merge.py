@@ -17,7 +17,7 @@ try:
             side=dict(home=home,env=dict(os.environ,HOME=str(home)),state=home/'.local/share/remote-disk',folder=home/'Disk/project')
             t.SIDES.append(side)
             side.update(json.loads(t.run(['bash',str(t.HERE/'server-disk.sh'),'bootstrap','--archive',str(archive)],side['env']).stdout))
-            for name in ('server-disk.sh','stignore.txt','legacy-ignores.sha256'):shutil.copyfile(t.HERE/name,side['state']/name)
+            for name in ('server-disk.sh','stignore.txt','stignore-previous.sha256'):shutil.copyfile(t.HERE/name,side['state']/name)
             xml=E.parse(side['state']/'config.xml');side.update(gui=xml.findtext('gui/address').rsplit(':',1)[1],key=xml.findtext('gui/apikey'))
             side['folder'].mkdir(parents=True)
             (side['folder']/'same-name.txt').write_text('initial-server' if i==0 else 'initial-local')

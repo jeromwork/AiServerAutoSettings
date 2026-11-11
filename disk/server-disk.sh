@@ -19,7 +19,7 @@ def ignores(p,write=False):
     f=p/'.stignore';safe(f);rules=(here/'stignore.txt').read_bytes()
     if f.exists() and f.read_text(encoding='utf-8-sig').replace('\r','').rstrip('\n')!=rules.decode('utf-8-sig').replace('\r','').rstrip('\n'):
         normalized='\n'.join(f.read_text(encoding='utf-8-sig').splitlines())+'\n'
-        if hashlib.sha256(normalized.encode()).hexdigest() not in (here/'legacy-ignores.sha256').read_text().splitlines():raise ValueError('Чужой .stignore: сохраните и удалите его вручную перед подключением')
+        if hashlib.sha256(normalized.encode()).hexdigest() not in (here/'stignore-previous.sha256').read_text().splitlines():raise ValueError('Чужой .stignore: сохраните и удалите его вручную перед подключением')
     if write and (not f.exists() or f.read_bytes()!=rules):
         marker=p/'.stfolder';safe(marker);marker.mkdir(exist_ok=True)
         fd,tmp=tempfile.mkstemp(dir=marker)

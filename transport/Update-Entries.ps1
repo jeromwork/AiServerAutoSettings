@@ -7,10 +7,9 @@ try{
     if(-not $t){throw 'Нет transport'}
     $exe='ssh.exe'
     if($t.profilePath){$p=Read-TransportJson $t.profilePath;$exe=$p.sshExecutable}
-    elseif($env:LOCALAPPDATA){$saved=Join-Path $env:LOCALAPPDATA 'RemoteDisk/profile.txt';if(Test-Path -LiteralPath $saved){$p=Read-TransportJson ((Convert-TransportLF ([IO.File]::ReadAllText($saved))).Trim());$exe=$p.sshExecutable}}
     $count=0
     foreach($entry in @($t.entries)){
-        if($null -eq $entry -or $entry.legacyOutbound -or -not (Test-TransportEnabled $entry)){continue};Assert-TransportName $entry.name
+        if($null -eq $entry -or -not (Test-TransportEnabled $entry)){continue};Assert-TransportName $entry.name
         if(-not (Get-TransportValue $entry 'ssh' $entry.alias) -or (Get-TransportValue $entry 'ssh' $entry.alias) -match '^[\-]|[\r\n]'){throw 'Неверный SSH-алиас'}
         $a=@('-n','-T','-o','BatchMode=yes','-o','ConnectTimeout=10','-o','StrictHostKeyChecking=yes')
         if($entry.configPath){$a+=@('-F',[string]$entry.configPath)}

@@ -29,7 +29,7 @@ function Start-DiskHeadless {
     if(-not (Test-Path $exe)){throw 'Syncthing не установлен'}
     if($script:DiskEngine -and -not $script:DiskEngine.HasExited){return}
     # Never adopt an unowned engine or create a second process for the same state.
-    if(@(Get-DiskEngineProcesses $script:DiskHome).Count){throw 'Остался прежний Syncthing: требуется переход с откатом'}
+    if(@(Get-DiskEngineProcesses $script:DiskHome).Count){throw 'С этим состоянием уже работает другой Syncthing; закройте его и повторите'}
     $si=New-Object Diagnostics.ProcessStartInfo
     $si.FileName=$exe;$si.Arguments=(@('syncthing','serve','--home',(Join-Path $script:DiskHome 'state'),'--no-browser','--no-restart')|ForEach-Object {Quote-Disk $_}) -join ' '
     $si.UseShellExecute=$false;$si.CreateNoWindow=$true

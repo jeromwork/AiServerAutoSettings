@@ -82,13 +82,11 @@ Throws {Get-DiskUnion $collision $base 'Project'} 'case collision fails before s
 $collision=Copy-TransportObject $tree;$collision.entries[0].directory=$true
 Throws {Get-DiskUnion $collision $base 'Project'} 'file-directory conflict remains intact'
 function Initialize-WizardTransport($Root,$Bundle,$Transport){}
-function Invoke-MigrationPreflight($Root,$Bundle,$Config){}
-# First setup connection persists public settings; it does not replace H's old channel refs.
-function Test-MigrationFresh($Root,$Name){$false}
-$config=Read-TransportJson (Join-Path $root 'config.json');$config.transport|Add-Member hops @([pscustomobject]@{name='old';legacyOutbound='via-hop';legacyChannelPath='local-only.json';enabled=$true});Write-TransportJson (Join-Path $root 'config.json') $config
+function Invoke-TransportPreflight($Root,$Bundle,$Config){}
+# First setup connection persists public settings.
+function Test-StatusFresh($Root,$Name){$false}
 [void](Invoke-WizardStep $root $repo 'Connection' ([pscustomobject]@{catalog=$merged;shared=$false}))
 $config=Read-TransportJson (Join-Path $root 'config.json')
-Assert ($config.transport.hops[0].legacyOutbound -eq 'via-hop') 'legacy H references preserved locally'
 Assert (-not $config.transport.relays[0].enabled) 'new local catalog is applied by shared step dispatcher'
 Assert ($config.wizard.localCatalog.relays[0].name -eq 'my-node') 'local overlay survives next refresh'
 $before=[IO.File]::ReadAllText((Join-Path $root 'config.json'))
@@ -109,13 +107,11 @@ $config=Read-TransportJson (Join-Path $root 'config.json')
 Assert ($config.transport.marker -eq 'original' -and $config.wizard.localCatalog.relays[0].name -eq 'my-node') 'rollback restores network and keeps unrelated settings'
 Assert (-not (Test-Path $receipt)) 'rollback is idempotent and clears receipt'
 Undo-WizardNetwork $root 'fixture'
-function Test-MigrationFresh($Root,$Name){$Name -in @('transport','disk')}
-function Test-MigrationSsh($Root,$Port){$true}
+function Test-StatusFresh($Root,$Name){$Name -in @('transport','disk')}
+function Test-LocalSsh($Root,$Port){$true}
 $config=Read-TransportJson (Join-Path $root 'config.json');$config|Add-Member -Force bridge ([pscustomobject]@{enabled=$false;allowShell=$false});Write-TransportJson (Join-Path $root 'config.json') $config
 Write-TransportJson (Join-Path $root 'status/disk.json') @{connected=$true}
-Assert (Test-MigrationHealth $root) 'explicitly disabled bridge does not block real migration health requirements'
 $config.bridge.enabled=$true;Write-TransportJson (Join-Path $root 'config.json') $config
-Assert (-not (Test-MigrationHealth $root)) 'enabled bridge needs fresh evidence'
 $mark=[DateTime]::UtcNow.AddSeconds(-2)
 Write-TransportJson (Join-Path $root 'status/transport.json') @{ok=$true;configRevision='previous-configuration'}
 Assert (-not (Test-WizardNetworkProof $root $mark)) 'old configuration heartbeat cannot commit settings'
@@ -134,9 +130,9 @@ Assert ($output.Count -eq 0) 'real child stdout/stderr cannot contaminate wizard
 $errorText='';try{Invoke-InstallChild $TestHome 'child.ps1' @()}catch{$errorText=$_.Exception.Message}
 Assert ($errorText -and -not $errorText.Contains('private-fixture-marker')) 'real child error is generic and contains no stderr'
 # Stale health on a managed installation must not bypass network preflight.
-function Test-MigrationFresh($Root,$Name){$false}
-Write-TransportJson (Get-MigrationStatePath $root) @{phase='accepted'}
-Assert (Test-WizardNetworkManaged $root) 'accepted installation keeps network safety when heartbeat is stale'
+function Test-StatusFresh($Root,$Name){$false}
+$config=Read-TransportJson (Join-Path $root 'config.json');$config|Add-Member -Force wizard ([pscustomobject]@{configured=$true});Write-TransportJson (Join-Path $root 'config.json') $config
+Assert (Test-WizardNetworkManaged $root) 'configured installation keeps network safety when heartbeat is stale'
 $script:networkPreflight=0
 function Set-WizardNetwork($Root,$Bundle,$Transport){$script:networkPreflight++;throw 'preflight refused'}
 Throws {Invoke-WizardStep $root $repo 'Connection' ([pscustomobject]@{catalog=$server;shared=$false})} 'stale installed network still runs preflight and rejects bad candidate'
@@ -152,10 +148,10 @@ $config|Add-Member -Force bridge ([pscustomobject]@{enabled=$true;allowShell=$tr
 $config.components|Add-Member -Force control ([pscustomobject]@{enabled=$true;custom='retain'})
 Write-TransportJson (Join-Path $root 'config.json') $config
 $script:armed=$false;$script:restoredRun='';$script:restarted='';$script:stopped=0;$script:installCalls=0
-function Get-MigrationRun($Name){'previous bridge command'}
-function Set-MigrationRun($Name,$Value){$script:restoredRun=$Value}
-function Start-MigrationRun($Command){$script:restarted=$Command}
-function Stop-MigrationControl($Root){$script:stopped++}
+function Get-RunValue($Name){'previous bridge command'}
+function Set-RunValue($Name,$Value){$script:restoredRun=$Value}
+function Start-RunCommand($Command){$script:restarted=$Command}
+function Stop-ManagedControl($Root){$script:stopped++}
 function Test-WizardBridge($Root){$false}
 function Register-WizardRollback($Root,$Bundle,$Kind,$Session,$Task){$script:armed=$true;Assert ($Kind -eq 'Bridge' -and (Test-Path (Join-Path $Root 'state/wizard-bridge.json'))) 'bridge snapshot precedes independent rollback registration'}
 function Invoke-InstallChild($Bundle,$Script,$Arguments){Assert $script:armed 'bridge cannot stop before rollback is armed';$script:installCalls++;throw 'install failed'}
@@ -168,45 +164,18 @@ $script:armed=$false;$script:installCalls=0
 function Register-WizardRollback($Root,$Bundle,$Kind,$Session,$Task){throw 'scheduler refused'}
 Throws {Invoke-WizardStep $root $repo 'Bridge' ([pscustomobject]@{enabled=$false;shell=$false})} 'rollback registration failure blocks bridge mutation'
 Assert ($script:installCalls -eq 0 -and (Read-TransportJson (Join-Path $root 'config.json')).bridge.enabled -and -not (Test-Path (Join-Path $root 'state/wizard-bridge.json'))) 'scheduler failure leaves working bridge untouched and allows retry'
-# Old installation (RemoteDiskChannel present, no migration yet): the summary launches Migrate.ps1
-# detached (WMI, outside the wizard/tray job) and does not wait for production ports the old channel holds.
-$legacyRoot=Join-Path $TestHome 'legacy';[void][IO.Directory]::CreateDirectory((Join-Path $legacyRoot 'state'))
-Write-TransportJson (Join-Path $legacyRoot 'config.json') @{schema=1;version=1;components=@{};transport=@{}}
-Write-TransportJson (Join-Path $legacyRoot 'state/migration-error.json') @{message='old attempt';phase='preflight';updatedAt='2026-11-10T00:00:00Z'}
-function Get-ScheduledTask {}
-$script:channelTask=$true
-function Get-MigrationTask($Name){Assert ($Name -eq 'RemoteDiskChannel') 'legacy detection reads only the old channel task';[pscustomobject]@{exists=$script:channelTask;enabled=$true;running=$true}}
+# The summary needs a live proven connection and never starts a background process.
+$freshRoot=Join-Path $TestHome 'fresh';[void][IO.Directory]::CreateDirectory((Join-Path $freshRoot 'state'))
+Write-TransportJson (Join-Path $freshRoot 'config.json') @{schema=1;version=1;components=@{};transport=@{}}
 $script:detached=@()
-function Start-MigrationDetached($Exe,$Arguments){$script:detached+=,@{exe=$Exe;args=@($Arguments)}}
-function Invoke-InstallChild($Bundle,$Script,$Arguments){throw ('legacy activation must not run a child: '+$Script)}
-function Test-WizardNetworkProof($Root,$Mark){throw 'legacy branch must not wait for a fresh production status'}
-function Test-WizardBridge($Root){throw 'legacy branch leaves bridge acceptance to Migrate.ps1'}
-$r=Invoke-WizardStep $legacyRoot $repo 'Activate' ([pscustomobject]@{})
-Assert ($r.migration -and $r.ok -and $script:detached.Count -eq 1) 'legacy summary starts exactly one migration and returns at once'
-$call=$script:detached[0]
-Assert ($call.exe -eq (Get-TransportPowerShell) -and ($call.args -contains (Join-Path $repo 'build/Migrate.ps1')) -and $call.args[$call.args.IndexOf('-Home')+1] -eq $legacyRoot -and ($call.args -contains '-NonInteractive')) 'Migrate.ps1 is launched through the detached WMI helper with this Home'
-$c=Read-TransportJson (Join-Path $legacyRoot 'config.json')
-Assert ($c.wizard.migrationRequested -and -not $c.wizard.configured) 'setup is marked configured only by migration acceptance'
-Assert (-not (Test-Path (Join-Path $legacyRoot 'state/migration-error.json'))) 'stale migration error cleared before the new attempt'
+function Start-SetupDetached($Exe,$Arguments){$script:detached+=,@{exe=$Exe;args=@($Arguments)}}
+function Invoke-InstallChild($Bundle,$Script,$Arguments){throw ('summary must not run a child: '+$Script)}
+function Test-WizardNetworkProof($Root,$Mark){$false}
+Throws {Invoke-WizardStep $freshRoot $repo 'Activate' ([pscustomobject]@{})} 'summary without a proven connection is refused'
+Assert ($script:detached.Count -eq 0) 'summary never starts a background process'
 function Get-WizardServer($Root,$Bundle){[pscustomobject]@{ssh=$true;disk=$true;happier=$true;bridge=$true;catalog=$true;userManager=$true}}
 function Test-WizardBridge($Root){$true}
-$inspect=Invoke-WizardStep $legacyRoot $repo 'Inspect' ([pscustomobject]@{})
-Assert ($inspect.legacy -and $inspect.steps[1].ready) 'legacy connection is ready by SSH; production proof comes from Migrate preflight'
-foreach($phase in @('preparing','activating','pending','rolling-back')){
-    Write-TransportJson (Join-Path $legacyRoot 'state/migration.json') @{phase=$phase;startedAt=[DateTime]::UtcNow.ToString('o')}
-    Throws {Invoke-WizardStep $legacyRoot $repo 'Activate' ([pscustomobject]@{})} ('no second migration while '+$phase)
-}
-Assert ($script:detached.Count -eq 1) 'running migration is never started twice'
-Write-TransportJson (Join-Path $legacyRoot 'state/migration.json') @{phase='rolled-back';startedAt=[DateTime]::UtcNow.ToString('o')}
-Write-TransportJson (Join-Path $legacyRoot 'state/migration-error.json') @{message='Нет рабочего пути к серверу: fixture';phase='preflight';updatedAt=[DateTime]::UtcNow.ToString('o')}
-$inspect=Invoke-WizardStep $legacyRoot $repo 'Inspect' ([pscustomobject]@{})
-Assert ($inspect.legacy -and $inspect.migrationError -like 'Нет рабочего пути*') 'after rollback the reason is shown and a retry stays on the legacy branch'
-[void](Invoke-WizardStep $legacyRoot $repo 'Activate' ([pscustomobject]@{}))
-Assert ($script:detached.Count -eq 2) 'retry after rollback launches a new detached migration'
-Write-TransportJson (Join-Path $legacyRoot 'state/migration.json') @{phase='accepted';startedAt=[DateTime]::UtcNow.ToString('o')}
-Assert (-not (Test-WizardLegacy $legacyRoot)) 'after acceptance the disabled old task no longer holds the new components'
-Remove-Item -LiteralPath (Join-Path $legacyRoot 'state/migration.json')
-$script:channelTask=$false
-Assert (-not (Test-WizardLegacy $legacyRoot)) 'no old channel task: normal branch'
-Remove-Item Function:Get-ScheduledTask
-Write-Output ('OK: '+$count+' wizard/model/catalog/union/rollback/legacy checks (fake SSH, no Windows)')
+$inspect=Invoke-WizardStep $freshRoot $repo 'Inspect' ([pscustomobject]@{})
+Assert (-not $inspect.steps[1].ready) 'connection needs a live proof'
+Assert (-not (Read-TransportJson (Join-Path $freshRoot 'config.json')).wizard.configured) 'unproven summary leaves setup unfinished'
+Write-Output ('OK: '+$count+' wizard/model/catalog/union/rollback checks (fake SSH, no Windows)')

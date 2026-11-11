@@ -28,12 +28,12 @@ class DiagnosticsTests(unittest.TestCase):
 $child=Start-TransportProcess $Exe @()
 try{
     if(-not $child.Process.WaitForExit(10000)){throw 'stderr pipe blocked'}
-    $d=New-TransportDiagnostic $child 'legacy-fixture' 'process-exited' ([pscustomobject]@{password='pw';secrets=@{hy2='aa';trojan='bb'}})
+    $d=New-TransportDiagnostic $child 'entry-fixture' 'process-exited' ([pscustomobject]@{password='pw';secrets=@{hy2='aa';trojan='bb'}})
     Write-TransportLog $Root 'process-failed' $d
     if($child.ErrorBuffer.Snapshot().Length -gt 11000){throw 'unbounded stderr'}
-    $bytes=[Text.Encoding]::UTF8.GetBytes("`nERROR inbound/direct[probe-legacy-fixture]: dial tcp: i/o timeout password=pw`n")
+    $bytes=[Text.Encoding]::UTF8.GetBytes("`nERROR inbound/direct[probe-entry-fixture]: dial tcp: i/o timeout password=pw`n")
     $child.ErrorBuffer.Write($bytes,0,$bytes.Length)
-    $engine=Get-TransportEngineDiagnostic $child 'legacy-fixture' ([pscustomobject]@{password='pw';secrets=@{hy2='aa';trojan='bb'}})
+    $engine=Get-TransportEngineDiagnostic $child 'entry-fixture' ([pscustomobject]@{password='pw';secrets=@{hy2='aa';trojan='bb'}})
     if(-not $engine -or $engine.reason -ne 'timeout'){throw 'sing-box probe reason lost'}
     Write-TransportLog $Root 'probe-failed' $engine
 }finally{Stop-TransportProcess $child}
@@ -43,11 +43,11 @@ try{
                                      '-Exe',str(child),'-Root',tmp], stdin=subprocess.DEVNULL, capture_output=True, timeout=45)
             self.assertEqual(result.returncode,0,result.stderr.decode())
             log=(root/'logs/transport.log').read_text()
-            self.assertIn('candidate=legacy-fixture reason=connection-refused exit=42 stderr=Connection refused: <redacted> <redacted> <redacted>',log)
+            self.assertIn('candidate=entry-fixture reason=connection-refused exit=42 stderr=Connection refused: <redacted> <redacted> <redacted>',log)
             self.assertNotIn('pw',log)
             self.assertNotIn('aa',log)
             self.assertNotIn('bb',log)
-            self.assertIn('probe-failed candidate=legacy-fixture reason=timeout',log)
+            self.assertIn('probe-failed candidate=entry-fixture reason=timeout',log)
             self.assertIn('dial tcp: i/o timeout password=<redacted>',log)
 
     def test_update_entries_does_not_echo_invalid_secret_json(self):
@@ -63,7 +63,7 @@ try{
 
     def test_diagnostic_uses_private_config_and_reaps_processes(self):
         with tempfile.TemporaryDirectory(prefix='diagnostic Пользователь ') as tmp:
-            root = Path(tmp); disk = root/'RemoteDisk'; channel = disk/'channel'; channel.mkdir(parents=True)
+            root = Path(tmp); disk = root/'RemoteAgents'; channel = disk/'transport-bin'; channel.mkdir(parents=True)
             ssh = root/'ssh'; sb = channel/'sing-box.exe'; capture = root/'capture.json'; ledger = root/'children'
             executable(ssh, """import os,sys,time
 from pathlib import Path
@@ -83,8 +83,8 @@ while True: time.sleep(.1)
 """)
             profile = root/'profile.json'
             profile.write_text(json.dumps(dict(sshExecutable=str(ssh), arguments=['-p','22','tester@example.invalid'], serverAddress='example.invalid', login='tester', keyPath=str(root/'unused key'), knownHostsPath=str(root/'known hosts'), configPath=str(root/'unused config'))))
-            (disk/'profile.txt').write_text(str(profile)+'\r\n')
-            (channel/'config.json').write_text(json.dumps(dict(outbounds=[dict(type='vless', tag='server', server='example.invalid', server_port=443, uuid='00000000-0000-4000-8000-000000000001'),dict(type='ssh', tag='old', server='example.invalid', server_port=22, user='tester', private_key_path=str(root/'key'), host_key=['ssh-ed25519 test-fixture'])])))
+            (disk/'config.json').write_text(json.dumps(dict(transport=dict(profilePath=str(profile), channelPath=str(disk/'channel.json'), singBoxPath=str(sb))))+'\r\n')
+            (disk/'channel.json').write_text(json.dumps(dict(outbounds=[dict(type='vless', tag='server', server='example.invalid', server_port=443, uuid='00000000-0000-4000-8000-000000000001'),dict(type='ssh', tag='old', server='example.invalid', server_port=22, user='tester', private_key_path=str(root/'key'), host_key=['ssh-ed25519 test-fixture'])])))
             env=dict(os.environ, LOCALAPPDATA=tmp, USERPROFILE=tmp, TEMP=tmp, DIAGNOSTIC_CAPTURE=str(capture), DIAGNOSTIC_CHILDREN=str(ledger))
             result=subprocess.run([PWSH, '-NoProfile', '-NonInteractive', '-File', str(ROOT/'transport/Test-Transports.ps1'), '-ProbeBytes','32','-AliveBytes','16','-ProbeSeconds','1','-SpeedBytes','64','-SpeedSeconds','1'], capture_output=True, env=env, timeout=30)
             self.assertEqual(result.returncode,0,result.stderr.decode())

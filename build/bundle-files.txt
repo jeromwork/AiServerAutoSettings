@@ -19,31 +19,26 @@ server-install-sync.sh
 # Includes optional launcher path/VPN commands as the transport module is delivered.
 transport/*.ps1
 transport/*.json
-transport/fixtures/legacy-hop.json
 # Server bootstrap entry/*.sh stays in source until server rollback acceptance.
 disk/Install-RemoteDisk.ps1
 disk/Disk.Common.ps1
 disk/Add-RemoteDiskFolder.ps1
 disk/Sync-RemoteDiskFolders.ps1
-disk/Enable-RemoteDiskFolders.ps1
 disk/Move-RemoteDiskFolder.ps1
 disk/server-disk.sh
 disk/stignore.txt
-disk/legacy-ignores.sha256
+disk/stignore-previous.sha256
 build/components.json => components.json
 build/selftest.ps1 => selftest.ps1
 
-# Launcher integration and independent rollback (no user data).
+# Launcher integration and uninstall (no user data).
 disk/Disk.Status.ps1
 app/launcher/control/Control.Status.ps1 => control/Control.Status.ps1
-build/Migrate.Common.ps1
-build/Migrate.ps1
-build/Rollback.ps1
+build/Setup.Common.ps1
+build/Uninstall.ps1
 
 setup-vps-ssh.ps1
 ssh-password-ui.cs
-Setup-All.ps1
-build/FirstInstall.ps1
 
 disk/Disk.Engine.ps1
 

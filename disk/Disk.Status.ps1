@@ -116,13 +116,6 @@ try {
 try{$engineOwned=$engineMutex.WaitOne(0)}catch [Threading.AbandonedMutexException]{$engineOwned=$true}
 if(-not $engineOwned){throw 'Надзор Syncthing уже работает'}
 $script:DiskEngine=$null
-# Upgrades from the earlier accepted launcher still have its independent GUI tray.
-# Its persisted migration snapshot already contains the original Run command for rollback.
-$migrationFile=Join-Path $LauncherHome 'state/migration.json'
-if(Test-Path $migrationFile){
-    $migration=Read-TransportJson $migrationFile
-    if($migration.phase -in @('accepted','pending') -and -not $migration.dryRun){Stop-DiskEngineProcesses $script:DiskHome}
-}
 do {
     if(Test-Path (Join-Path $LauncherHome 'state/disk-reconfigure')){
         Write-TransportJson (Join-Path $LauncherHome 'status/disk.json') @{ok=$false;summary='Диск отключён для смены сервера; файлы сохранены';updatedAt=[DateTime]::UtcNow.ToString('o')}

@@ -33,7 +33,7 @@ function Restart-ManagedControl([string]$Root){
 function Update-ControlSupervision([string]$Root,$Status,$State,[DateTime]$Now){
     if($Status.ok){$State.failures=0}else{$State.failures++}
     if($State.failures -lt 3 -or $Now -lt $State.nextRestart){return}
-    # Only the managed bridge belongs to this launcher. No action on a legacy/foreign PID.
+    # Only the managed bridge belongs to this launcher. No action on a foreign PID.
     if(Test-Path (Join-Path $Root 'managed-control/control.pid')){
         try{Restart-ManagedControl $Root}catch{}
     }

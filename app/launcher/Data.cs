@@ -97,22 +97,6 @@ namespace RemoteAgents.Launcher
         public static string Quote(string s) { return "\"" + Regex.Replace(Regex.Replace(s, "(\\\\*)\"", "$1$1\\\""), "(\\\\+)$", "$1$1") + "\""; }
         public static string Arguments(IEnumerable<string> args) { return string.Join(" ", args.Select(Quote)); }
     }
-    internal static class LauncherRecovery
-    {
-        public static string Intent(string home) { return Path.Combine(home, "state", "launcher-restart-after-upgrade"); }
-        public static bool Accepted(string home)
-        { try { return Json.Str(Json.Read(Path.Combine(home, "state", "migration.json")), "phase") == "accepted"; } catch { return false; } }
-        public static bool Requested(string home)
-        {
-            try {
-                if (!Accepted(home)) return false;
-                if (File.Exists(Intent(home))) return true;
-                string status = Path.Combine(home, "status", "launcher.json");
-                // Only an explicit, persisted graceful exit suppresses recovery.
-                return !File.Exists(status) || Json.Bool(Json.Read(status), "running", true);
-            } catch { return false; }
-        }
-    }
     internal sealed class Journal
     {
         readonly string file; readonly object gate = new object();

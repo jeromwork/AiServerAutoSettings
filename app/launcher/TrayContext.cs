@@ -29,13 +29,9 @@ namespace RemoteAgents.Launcher
         readonly object pipeGate = new object(); NamedPipeServerStream server; Task worker, pipeWorker;
         readonly ConcurrentQueue<string[]> commands = new ConcurrentQueue<string[]>(); volatile bool readyForCommands;
         BundleDefinition definition; bool busy, closing, ticking, actionBusy, serverUpdateRequested, installStop;
-        readonly string migrationObserver = Guid.NewGuid().ToString("N");
         DateTime settingsWritten = DateTime.MinValue;
-        DateTime nextMigrationCheck = DateTime.MinValue; bool migrationChecking;
         // Detached server installs started by the wizard (state/server-operations.json).
         DateTime nextOperationCheck = DateTime.MinValue; bool operationChecking, operationsActive; string operationTip = "";
-        // Old installation before migration: the old channel owns the production ports.
-        readonly bool legacyHold;
         string updateSummary = "обновления устанавливаются вручную из нового EXE";
         public bool RestartRequested { get; private set; }
         public TrayContext(string home, Journal log, string pipeName, SecurityIdentifier sid, string[] args)
@@ -43,11 +39,6 @@ namespace RemoteAgents.Launcher
             this.home = home; this.log = log; dispatch.CreateControl(); var unused = dispatch.Handle;
             Directory.CreateDirectory(Path.Combine(home, "status"));
             config = new Configuration(home); engine = new UpdateEngine(home, Program.Version);
-            if (!Product.IsVpn) {
-                string phase = ""; try { string state = Path.Combine(home, "state", "migration.json"); if (File.Exists(state)) phase = Json.Str(Json.Read(state), "phase"); } catch { }
-                legacyHold = LegacyInstall.Hold(LegacyInstall.ChannelTaskExists(), phase);
-                if (legacyHold) log.Write("legacy.hold");
-            }
             // Accept secondary launches while first-install selftest / binary downloads are still running.
             pipeWorker = Task.Run(() => Listen(pipeName, sid));
             try {
@@ -94,8 +85,7 @@ namespace RemoteAgents.Launcher
             if (vpn != null && !File.Exists(Path.Combine(home, "status", "vpn.json")) && File.Exists(TransportScript("Vpn.Tun.ps1"))) RunAction(new MenuAction { Exe = vpn.Exe, Args = vpn.Args });
             RefreshMenu();
         }
-        bool Held(Component c) { return LegacyInstall.Held(legacyHold, c.Name); }
-        bool Wanted(Component c) { return !Held(c) && config.Enabled(c); }
+        bool Wanted(Component c) { return config.Enabled(c); }
         void Tick()
         {
             if (closing || ticking) return; ticking = true;
@@ -103,10 +93,8 @@ namespace RemoteAgents.Launcher
                 TryDeleteOld(); ReloadSettings(); foreach (var r in runtimes) r.Tick();
                 var critical = runtimes.Where(r => r.Definition.Critical).ToArray();
                 bool all = Product.IsVpn ? VpnModulesReady() : critical.Length > 0 && critical.All(r => r.Healthy);
-                // Before migration nothing new may run, so health is not judged; Migrate.ps1 restarts the
-                // bundle health window at cutover.
-                string result = legacyHold ? "" : engine.Observe(all);
-                string image = legacyHold ? "" : UpgradeInstaller.ObserveImage(home, engine, all, result);
+                string result = engine.Observe(all);
+                string image = UpgradeInstaller.ObserveImage(home, engine, all, result);
                 if (image == "rollback") { log.Write("launcher.rollback"); RestartRequested = true; ExitThread(); return; }
                 if (result == "rollback") { log.Write("update.rollback"); updateSummary = "обновление откачено: здоровье не подтверждено"; LoadComponents(); foreach (var r in runtimes) r.Tick(); all = false; }
                 if (result == "accepted") { log.Write("update.accepted"); updateSummary = "обновление проверено"; }
@@ -117,11 +105,9 @@ namespace RemoteAgents.Launcher
                     icon.Icon = Json.Bool(vpnStatus, "ok") && Json.Str(vpnStatus, "state") == "on" ? green : yellow;
                     string text = "RemoteVPN: " + StatusView.Summary(vpnStatus); icon.Text = text.Length > 63 ? text.Substring(0, 62) + "…" : text;
                 } else icon.Text = StatusView.Tooltip(transport);
-                if (legacyHold) { icon.Icon = yellow; icon.Text = "RemoteAgents: прежняя связь; ждёт перехода"; }
                 if (operationTip.Length > 0) icon.Text = operationTip.Length > 63 ? operationTip.Substring(0, 62) + "…" : operationTip;
                 if (DateTime.UtcNow >= nextOperationCheck) CheckOperations();
                 RefreshMenu(); WriteStatus();
-                if (!Product.IsVpn && DateTime.UtcNow >= nextMigrationCheck) CheckMigration(false);
                 if (serverUpdateRequested && !engine.Pending && !busy && TrySelfUpdate()) return;
             } catch { log.Write("supervisor.tick.failed"); icon.Icon = red; }
             finally { ticking = false; }
@@ -159,23 +145,11 @@ namespace RemoteAgents.Launcher
             } catch (OperationCanceledException) { } catch (Exception) { log.Write("operations.check.failed"); }
             finally { operationChecking = false; }
         }
-        async void CheckMigration(bool confirm)
-        {
-            if (migrationChecking || closing || !File.Exists(Path.Combine(home, "state", "migration.json"))) return;
-            var state = Json.Read(Path.Combine(home, "state", "migration.json"));
-            if (Json.Str(state, "phase") != "pending" || Json.Bool(state, "dryRun")) return;
-            migrationChecking = true; nextMigrationCheck = DateTime.UtcNow.AddSeconds(10);
-            try { await Task.Run(() => Migration.Check(home, confirm, migrationObserver, stop.Token)); }
-            catch (OperationCanceledException) { }
-            catch { log.Write("migration.check.failed"); }
-            finally { migrationChecking = false; }
-        }
         void WriteStatus()
         {
             Json.Write(Path.Combine(home, "status", Product.StatusName), new { schema = 1, pid = Process.GetCurrentProcess().Id, launcherVersion = Program.Version, bundleVersion = engine.Current,
                 previousVersion = engine.Previous, pending = engine.Pending, running = !closing, updatedUtc = DateTime.UtcNow.ToString("o"), update = updateSummary,
                 ok = !closing && (Product.IsVpn ? VpnModulesReady() : runtimes.Any(r => r.Definition.Critical) && runtimes.Where(r => r.Definition.Critical).All(r => r.Healthy)), components = runtimes.Select(r => r.Snapshot()).ToArray() });
-            if (!Product.IsVpn && (!closing || (!RestartRequested && !installStop)) && File.Exists(LauncherRecovery.Intent(home))) File.Delete(LauncherRecovery.Intent(home));
         }
         void RefreshMenu()
         {
@@ -188,52 +162,39 @@ namespace RemoteAgents.Launcher
                 var item = new ToolStripMenuItem(r.Definition.Title + ": " + (r.Enabled ? (r.Healthy ? "работает; " : "нет связи; ") : "выключен; ") + r.Summary);
                 bool on = r.Definition.Name == "control" ? Json.Bool(StatusView.Read(home, "control", maxAgeSec: 30), "processAlive") : r.Enabled;
                 var toggle = new ToolStripMenuItem(on ? "Выключить" : "Включить");
-                toggle.Click += (s, e) => Safe(() => EnableRuntime(r, !on)); toggle.Enabled = !Held(r.Definition); if (r.Definition.Name != "disk") item.DropDownItems.Add(toggle);
-                if (Held(r.Definition)) item.Text = r.Definition.Title + ": ждёт перехода (работает прежняя установка)";
+                toggle.Click += (s, e) => Safe(() => EnableRuntime(r, !on)); if (r.Definition.Name != "disk") item.DropDownItems.Add(toggle);
                 foreach (var action in r.Definition.Menu) { var a = action; item.DropDownItems.Add(a.Title, null, (s, e) => RunAction(a)); }
                 menu.Items.Add(item);
             }
             foreach (var a in definition.Menu) { var action = a; menu.Items.Add(a.Title, null, (s, e) => RunAction(action)); }
             menu.Items.Add(new ToolStripSeparator());
-            if (legacyHold) menu.Items.Add("Прежняя установка работает. Новая связь включится после перехода: «Настройки…» → «Итог»").Enabled = false;
-            menu.Items.Add("Настройки…", null, (s,e) => ShowSettings()).Enabled = !actionBusy && !busy && !MigrationPending();
+            menu.Items.Add("Настройки…", null, (s,e) => ShowSettings()).Enabled = !actionBusy && !busy;
             if (!Product.IsVpn) {
                 string accountState=Path.Combine(home,"state","happier-account.json");
                 if(File.Exists(accountState)) { var last=Json.Read(accountState);menu.Items.Add(Json.Bool(last,"ok")?"Happier: последняя проверка "+Json.Str(last,"updatedUtc"):"Happier: подключение не подтверждено").Enabled=false; }
                 menu.Items.Add("Резервные ключи Happier", null, (s,e) => Safe(() => Open(Path.Combine(home,"secrets"))));
-                menu.Items.Add("Аккаунт Happier…", null, (s,e) => ShowSettings(3)).Enabled = !actionBusy && !busy && !MigrationPending();
-                menu.Items.Add("Выбрать папки и файлы…", null, (s,e) => ShowSettings(2)).Enabled = !actionBusy && !busy && !MigrationPending();
+                menu.Items.Add("Аккаунт Happier…", null, (s,e) => ShowSettings(3)).Enabled = !actionBusy && !busy;
+                menu.Items.Add("Выбрать папки и файлы…", null, (s,e) => ShowSettings(2)).Enabled = !actionBusy && !busy;
             }
             if (!Product.IsVpn) menu.Items.Add("Открыть папку Disk", null, (s, e) => Safe(() => {
                 string saved = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteDisk", "base.txt");
                 string path = Files.ReadLine(saved); if (path.Length == 0) path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Disk"); Open(path);
             }));
-            var check = menu.Items.Add("Проверить обновления на сервере", null, (s, e) => CheckUpdates()); check.Enabled = !Product.IsVpn && Json.Bool(config.Update, "enabled") && !busy && !actionBusy && !engine.Pending && !MigrationPending();
+            var check = menu.Items.Add("Проверить обновления на сервере", null, (s, e) => CheckUpdates()); check.Enabled = !Product.IsVpn && Json.Bool(config.Update, "enabled") && !busy && !actionBusy && !engine.Pending;
             check.ToolTipText = "Только вручную и при update.enabled=true в config.json";
             menu.Items.Add(updateSummary).Enabled = false;
-            string migrationFile = Path.Combine(home, "state", "migration.json");
-            if (!Product.IsVpn && File.Exists(migrationFile)) {
-                string phase = Json.Str(Json.Read(migrationFile), "phase");
-                menu.Items.Add("Переход: " + (phase == "pending" ? "проверка связи; откат через 10 минут" : phase == "accepted" ? "подтверждён" : phase)).Enabled = false;
-                if (phase == "pending") menu.Items.Add("Подтвердить установку (проверить связь)", null, (s, e) => CheckMigration(true));
-            }
             menu.Items.Add("Журналы", null, (s, e) => Open(Path.Combine(home, "logs")));
             menu.Items.Add("Перезапустить компоненты", null, (s, e) => Safe(LoadComponents)).Enabled = !busy && !actionBusy;
             menu.Items.Add("Выход", null, (s, e) => ExitThread());
             var old = icon.ContextMenuStrip; icon.ContextMenuStrip = menu; if (old != null) old.Dispose();
         }
-        // An installation accepted by the earlier migration flow is configured too: no window at boot.
         bool Configured()
-        {
-            if (Json.Bool(Json.Map(Json.Get(new Configuration(home).Data, "wizard")), "configured")) return true;
-            string state = Path.Combine(home, "state", "migration.json");
-            return !Product.IsVpn && File.Exists(state) && Json.Str(Json.Read(state), "phase") == "accepted";
-        }
+        { return Json.Bool(Json.Map(Json.Get(new Configuration(home).Data, "wizard")), "configured"); }
         void RegisterVpnRun()
         { using(var run=Microsoft.Win32.Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run"))run.SetValue("RemoteVPN",Files.Quote(Path.Combine(home,Product.ExeName))+" --tray --home "+Files.Quote(home)); }
         async void CheckSetup()
         {
-            if(actionBusy || busy || closing || MigrationPending())return;
+            if(actionBusy || busy || closing )return;
             // Configured: never a window. Problems are shown by the tray icon, the menu and one balloon.
             bool configured=false;try{configured=Configured();}catch{log.Write("setup.config.read.failed");}
             if(configured){if(Product.IsVpn)Safe(RegisterVpnRun);else WatchHealth();return;}
@@ -271,9 +232,7 @@ namespace RemoteAgents.Launcher
         }
         void ShowSettings(int section = 0)
         {
-            // A running migration owns the network and the tray; settings wait for its result.
             if (actionBusy || busy || closing) return;
-            if (MigrationPending()) { MessageBox.Show("Идёт переход на новую связь. Настройки будут доступны после его подтверждения или отката (не дольше 10 минут).", "RemoteAgents"); return; }
             actionBusy = true;
             try { SetupWizard.Display(home,engine.Folder(engine.Current),false,section); }
             catch { log.Write("setup.feature.failed"); MessageBox.Show("Настройка не завершена. Проверьте журнал нужного шага.","RemoteAgents"); }
@@ -362,7 +321,6 @@ namespace RemoteAgents.Launcher
         }
         void EnableRuntime(ComponentRuntime runtime, bool enabled)
         {
-            if (enabled && Held(runtime.Definition)) { MessageBox.Show("Работает прежняя установка: компонент включится после перехода («Настройки…» → «Итог»).", "RemoteAgents"); return; }
             if (enabled && runtime.Definition.Elevated) {
                 using (var task = new ElevatedTask(home, runtime.Definition.Name)) if (!task.Registered) {
                     if (MessageBox.Show("Компонент «" + runtime.Definition.Title + "» требует прав администратора. Сейчас Windows запросит разрешение создать задачу планировщика с наивысшими правами. Лаунчер продолжит работать с обычными правами. Создать задачу?", "RemoteAgents", MessageBoxButtons.YesNo, MessageBoxIcon.Information, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
@@ -370,10 +328,7 @@ namespace RemoteAgents.Launcher
                 }
             }
             if (runtime.Definition.Name == "control") {
-                var statePath = Path.Combine(home, "state", "migration.json");
-                bool managed = File.Exists(statePath) && Json.Bool(Json.Read(statePath), "controlChanged");
-                var args = new List<string> { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", Path.Combine(engine.Folder(engine.Current), "Start-WindowsControl.ps1"), enabled ? "-Install" : "-Uninstall" };
-                if (managed) { args.Add("-LauncherHome"); args.Add(home); }
+                var args = new List<string> { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", Path.Combine(engine.Folder(engine.Current), "Start-WindowsControl.ps1"), enabled ? "-Install" : "-Uninstall", "-LauncherHome", home };
                 // Install uses CIM for the long-lived bridge; let the lifecycle command finish independently.
                 Process.Start(new ProcessStartInfo(Files.Executable("powershell.exe"), Files.Arguments(args)) { UseShellExecute = false, CreateNoWindow = true });
                 config.SetEnabled(runtime.Definition, true); if (!runtime.Enabled) runtime.SetEnabled(true); RefreshMenu(); return;
@@ -452,14 +407,9 @@ namespace RemoteAgents.Launcher
             var form = new Form { Text = "RemoteAgents — " + title, Width = 760, Height = 480, StartPosition = FormStartPosition.CenterScreen };
             form.Controls.Add(new TextBox { Text = text.Length == 0 ? "нет данных" : text, ReadOnly = true, Multiline = true, ScrollBars = ScrollBars.Both, WordWrap = false, Dock = DockStyle.Fill }); form.Show();
         }
-        bool MigrationPending()
-        {
-            string file = Path.Combine(home, "state", "migration.json");
-            return File.Exists(file) && new[] { "preparing", "activating", "pending", "rolling-back" }.Contains(Json.Str(Json.Read(file), "phase"));
-        }
         void CheckUpdates()
         {
-            if (busy || actionBusy || closing || engine.Pending || MigrationPending() || !Json.Bool(config.Update, "enabled")) return; busy = true; updateSummary = "проверка обновлений";
+            if (busy || actionBusy || closing || engine.Pending  || !Json.Bool(config.Update, "enabled")) return; busy = true; updateSummary = "проверка обновлений";
             RefreshMenu();
             // Freeze the config snapshot before moving work off the UI thread.
             var snapshot = Json.Encode(config.Update);
@@ -504,7 +454,6 @@ namespace RemoteAgents.Launcher
             string target = Program.Exe, old = Path.Combine(Path.GetDirectoryName(target), Product.Name + ".old.exe"), temp = target + ".new";
             if (File.Exists(old)) return false; // previous image is still exiting
             try {
-                if (!Product.IsVpn && LauncherRecovery.Accepted(home)) Files.Atomic(LauncherRecovery.Intent(home), "restart\n");
                 File.Copy(source, temp, true);
                 using (var flush = new FileStream(temp, FileMode.Open, FileAccess.Write, FileShare.Read)) flush.Flush(true);
                 File.Move(target, old);
@@ -547,10 +496,9 @@ namespace RemoteAgents.Launcher
         {
             Safe(() => {
                 if (args.Contains("--settings")) { ShowSettings(); return; }
-                if (args.Contains("--confirm-install")) { CheckMigration(true); return; }
                 if (args.Contains("--exit") || args.Contains("--uninstall")) { installStop = args.Contains("--install-stop"); ExitThread(); return; }
                 if (args.Contains("--restart-components")) { if (busy || actionBusy) throw new InvalidOperationException(); LoadComponents(); }
-                if (args.Contains("--rollback")) { if (busy || actionBusy || MigrationPending()) throw new InvalidOperationException(); engine.Rollback(); LoadComponents(); log.Write("update.rollback.manual"); }
+                if (args.Contains("--rollback")) { if (busy || actionBusy ) throw new InvalidOperationException(); engine.Rollback(); LoadComponents(); log.Write("update.rollback.manual"); }
                 if (args.Contains("--logs")) Open(Path.Combine(home, "logs"));
                 if (args.Contains("--show")) ShowStatus();
                 if (args.Contains("--setup-check")) CheckSetup();

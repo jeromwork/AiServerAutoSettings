@@ -17,14 +17,17 @@ param(
     [int]$SpeedBytes=6000000,                   # потолок трафика на путь в фазе скорости (на мобильном уменьшать)
     [int]$SpeedSeconds=10,
     [string[]]$Only=@(),                        # проверить только эти пути (маски, например 'ws-*')
-    [string]$OutFile=''
+    [string]$OutFile='',
+    [Alias('Home')][string]$TransportHome=(Join-Path $env:LOCALAPPDATA 'RemoteAgents')
 )
 . (Join-Path $PSScriptRoot 'Transport.Common.ps1')
 $ErrorActionPreference='Stop'
 [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
-$home_=Join-Path $env:LOCALAPPDATA 'RemoteDisk'
-$singbox=Join-Path $home_ 'channel\sing-box.exe'
-$profPath=[IO.File]::ReadAllText((Join-Path $home_ 'profile.txt')).Trim()
+$home_=$TransportHome
+$settings=(Read-TransportJson (Join-Path $home_ 'config.json')).transport
+if(-not $settings.profilePath -or -not $settings.channelPath -or -not $settings.singBoxPath){throw 'Нет transport.profilePath, channelPath или singBoxPath в config.json: сначала пройдите шаг «Связь» мастера'}
+$singbox=[string]$settings.singBoxPath
+$profPath=[string]$settings.profilePath
 $prof=[IO.File]::ReadAllText($profPath)|ConvertFrom-Json
 $server=$prof.serverAddress
 $work=Join-Path $env:TEMP ('rd-transports-'+[guid]::NewGuid().ToString('N').Substring(0,8))
@@ -38,7 +41,7 @@ $wifi=$null
 try{$r=Find-NetRoute -RemoteIPAddress $server -ErrorAction Stop|Select-Object -First 1;$def=Get-NetRoute -DestinationPrefix '0.0.0.0/0'|Sort-Object {$_.RouteMetric+(Get-NetIPInterface -InterfaceIndex $_.InterfaceIndex -AddressFamily IPv4).InterfaceMetric}|Where-Object {(Get-NetAdapter -InterfaceIndex $_.InterfaceIndex).InterfaceDescription -notmatch 'TUN|Tunnel|TAP|Wintun|OpenVPN|Tailscale|Hyper-V'}|Select-Object -First 1;$wifi=(Get-NetIPAddress -InterfaceIndex $def.InterfaceIndex -AddressFamily IPv4|Select-Object -First 1).IPAddress}catch{}
 
 # Пути через sing-box: исходящие берутся из действующего канала, ретрансляторы и прыжки добавляются.
-$channel=[IO.File]::ReadAllText((Join-Path $home_ 'channel\config.json'))|ConvertFrom-Json
+$channel=Read-TransportJson ([string]$settings.channelPath)
 $vless=$channel.outbounds|Where-Object {$_.type -eq 'vless'}|Select-Object -First 1
 function Copy-Out($o){$o|ConvertTo-Json -Depth 20|ConvertFrom-Json}
 $out=@();$paths=[ordered]@{};$port=25000

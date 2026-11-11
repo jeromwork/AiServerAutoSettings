@@ -28,7 +28,7 @@ try:
             t.SIDES.append(side)
             result=t.run(['bash',str(t.HERE/'server-disk.sh'),'bootstrap','--archive',str(archive)],side['env'])
             side.update(json.loads(result.stdout))
-            for name in ('server-disk.sh','stignore.txt','legacy-ignores.sha256'):shutil.copyfile(t.HERE/name,side['state']/name)
+            for name in ('server-disk.sh','stignore.txt','stignore-previous.sha256'):shutil.copyfile(t.HERE/name,side['state']/name)
             config=E.parse(side['state']/'config.xml')
             side.update(gui=config.findtext('gui/address').rsplit(':',1)[1],key=config.findtext('gui/apikey'))
         a,b=t.SIDES

@@ -105,7 +105,7 @@ disk/Add-RemoteDiskFolder.ps1
 disk/Disk.Common.ps1
 disk/server-disk.sh
 disk/stignore.txt
-disk/legacy-ignores.sha256
+disk/stignore-previous.sha256
 disk/README.md
 disk/test-disk.py
 disk/test-install.ps1
@@ -114,5 +114,4 @@ Setup-All.ps1
 OPENVPN-FIX.cmd
 Fix-OpenVpnAdapter.ps1
 disk/Sync-RemoteDiskFolders.ps1
-disk/Enable-RemoteDiskFolders.ps1
 disk/Move-RemoteDiskFolder.ps1

@@ -24,10 +24,6 @@ function Read-ControlProfile([string]$Path) {
     for($i=0;$i -lt $arguments.Count;$i++) {if($arguments[$i] -ceq '-p') {if($i+1 -ge $arguments.Count){throw 'Нет порта после -p'};$result.port=[int]$arguments[++$i]}}
     if($result.port -lt 1 -or $result.port -gt 65535){throw 'Недопустимый SSH-порт'}
     if($result.hostId -cnotmatch '^[a-z0-9][a-z0-9_-]{0,63}$'){throw 'Недопустимый hostId профиля'}
-    # Managed launcher route must also override the legacy explicit -p argument.
-    $sshText='';if($result.configPath -and (Test-Path -LiteralPath $result.configPath)){$sshText=[IO.File]::ReadAllText($result.configPath)}
-    $managed=[regex]::Match($sshText,'(?ms)^# BEGIN RemoteAgents transport [^\r\n]+\r?\n(.*?)^# END RemoteAgents transport [^\r\n]+')
-    if($managed.Success -and $managed.Groups[1].Value -match ('(?m)^Host "'+[regex]::Escape($result.serverAddress)+'"\r?$') -and $managed.Groups[1].Value -match '(?m)^    Port (\d+)\r?$'){$result.port=[int]$Matches[1]}
     [pscustomobject]$result
 }
 function Get-ControlLabel([string]$HostId) {

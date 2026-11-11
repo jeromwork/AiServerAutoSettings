@@ -34,10 +34,9 @@ function Read-DiskProfile([string]$Profile) {
 function Invoke-DiskSsh($Command,[switch]$Direct,[string]$InputText='',[string]$OutputFile='',[int]$TimeoutSeconds=45) {
     $c=$script:Connection;$args=@('-o','BatchMode=yes','-o','ConnectTimeout=8','-o','StrictHostKeyChecking=yes')
     $localPort=2222
-    if($c.configPath -and (Test-Path -LiteralPath $c.configPath)){
-        $managed=[regex]::Match([IO.File]::ReadAllText($c.configPath),'(?ms)^# BEGIN RemoteAgents transport [^\r\n]+\r?\n(.*?)^# END RemoteAgents transport [^\r\n]+')
-        if($managed.Success -and $managed.Groups[1].Value -match ('(?m)^Host "'+[regex]::Escape($c.serverAddress)+'"\r?$') -and $managed.Groups[1].Value -match '(?m)^    Port (\d+)\r?$'){$localPort=[int]$Matches[1]}
-    }
+    # The launcher's transport serves the server SSH on its configured local port.
+    $launcher=Join-Path $env:LOCALAPPDATA 'RemoteAgents/config.json'
+    if(Test-Path -LiteralPath $launcher){try{$port=[int](Get-Content -LiteralPath $launcher -Raw -Encoding UTF8|ConvertFrom-Json).transport.sshPort;if($port -ge 1 -and $port -le 65535){$localPort=$port}}catch{}}
     if($Direct){$args+=@($c.arguments)}else{$args+=@('-F','NUL','-p',[string]$localPort,'-i',$c.keyPath,'-o',('HostKeyAlias='+$c.serverAddress),'-o',('UserKnownHostsFile="'+$c.knownHostsPath.Replace('\','/')+'"'),'-o','IdentitiesOnly=yes',($c.login+'@127.0.0.1'))}
     Invoke-DiskProcess $c.sshExecutable ($args+@($Command)) $InputText $OutputFile -TimeoutSeconds $TimeoutSeconds
 }
@@ -81,14 +80,6 @@ function Save-DiskState($Options) {
 function New-DiskIni($Tray,$State,$Gui,$ApiKey) {
     @('[General]','v=2.1.9','[tray]','connections\size=1','connections\1\label=RemoteDisk',('connections\1\syncthingUrl=http://'+$Gui),('connections\1\apiKey='+$ApiKey),'connections\1\autoConnect=true','connections\1\reconnectInterval=30','notifyOnDisconnect=false','notifyOnErrors=true','showSyncthingNotifications=true','[startup]','syncthingAutostart=true','useLibSyncthing=false',('syncthingPath='+$Tray.Replace('\','/')),('syncthingArgs="syncthing serve --home \"'+$State.Replace('\','/')+'\" --no-browser --no-restart"'),'considerLauncherForReconnect=true','showLauncherButton=false','') -join "`n"
 }
-function New-DiskHop([string]$Text) {
-    $values=@{};foreach($line in $Text.Replace("`r",'') -split "`n"){if($line -match '^(hostname|user|identityfile|port) (.+)$' -and -not $values.ContainsKey($Matches[1])){$values[$Matches[1]]=$Matches[2].Trim('"')}}
-    foreach($k in @('hostname','user','identityfile')){if(-not $values[$k]){throw 'Неполный профиль промежуточного хоста'}}
-    $profileHome=[Environment]::GetFolderPath('UserProfile');if($env:USERPROFILE){$profileHome=$env:USERPROFILE};$key=$values.identityfile.Replace('%d',$profileHome)
-    if($key -match '^~(?=[\\/]|$)'){$key=$profileHome+$key.Substring(1)}
-    @{server=$values.hostname;server_port=[int]$values.port;user=$values.user;private_key_path=$key}
-}
-function Convert-DiskChannel([string]$Text) {$c=$Text|ConvertFrom-Json;if($c.route.final -ne 'server' -or @($c.inbounds).Count -ne 2){throw 'Неверная конфигурация канала'};$c|ConvertTo-Json -Depth 20 -Compress}
 function Test-DiskIgnores($Path,[switch]$Write) {
     $file=Join-Path $Path '.stignore';$rules=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'stignore.txt'))
     $managed='';if(Get-Command Get-SelectionPolicyFile -ErrorAction SilentlyContinue){$policy=Get-SelectionPolicyFile $Path;if(Test-Path -LiteralPath $policy){$managed=[IO.File]::ReadAllText($policy).Replace("`r",'')}}
@@ -98,7 +89,7 @@ function Test-DiskIgnores($Path,[switch]$Write) {
         if($old.Replace("`r",'').TrimEnd("`n") -cne $rules.Replace("`r",'').TrimEnd("`n") -and $old.Replace("`r",'') -cne $managed -and [Convert]::ToBase64String([IO.File]::ReadAllBytes($file)) -cne [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $PSScriptRoot 'stignore.txt')))){
             $normalized=($old.TrimEnd("`r","`n").Replace("`r`n","`n")+"`n");$sha=[Security.Cryptography.SHA256]::Create()
             try{$hash=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($normalized)))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
-            if($hash -cnotin [IO.File]::ReadAllLines((Join-Path $PSScriptRoot 'legacy-ignores.sha256'))){throw 'Чужой .stignore: сохраните и удалите его вручную перед подключением'}
+            if($hash -cnotin [IO.File]::ReadAllLines((Join-Path $PSScriptRoot 'stignore-previous.sha256'))){throw 'Чужой .stignore: сохраните и удалите его вручную перед подключением'}
         }
     }
     if($managed){$rules=$managed}

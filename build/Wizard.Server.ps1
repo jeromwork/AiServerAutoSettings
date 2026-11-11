@@ -1,6 +1,5 @@
 ﻿#requires -Version 5.1
-# The interactive legacy installer cannot be embedded without opening its console/askpass UI.
-# Reuse its OpenSSH/key/profile contract; the wizard supplies a one-use in-memory askpass.
+# setup-vps-ssh.ps1 creates the OpenSSH key and profile; the wizard supplies a one-use in-memory askpass.
 function Write-WizardProgress([string]$Text) {
     if($script:WizardProgressFile){[IO.File]::AppendAllText($script:WizardProgressFile,((@{text=$Text}|ConvertTo-Json -Compress)+"`n"),(New-Object Text.UTF8Encoding($false)))}
 }
@@ -34,7 +33,7 @@ function Connect-WizardServer([string]$Root,[string]$Bundle,$Request) {
     $old=Find-InstallProfile $Root;$previous=$null
     if($old -and (Test-Path $old)){$previous=Read-TransportJson $old}
     if($previous -and $previous.serverAddress -ceq $address -and $previous.login -ceq $user){
-        try{[void](Invoke-WizardSsh $Root 'true' '' 10);Update-MigrationConfig $Root {param($c) if(-not $c.transport.profilePath -and -not $c.wizard.pendingProfile){Set-MigrationDefault $c transport ([pscustomobject]@{});$c.transport|Add-Member -Force profilePath $old}};return $old}catch{}
+        try{[void](Invoke-WizardSsh $Root 'true' '' 10);Update-LauncherConfig $Root {param($c) if(-not $c.transport.profilePath -and -not $c.wizard.pendingProfile){Set-ConfigDefault $c transport ([pscustomobject]@{});$c.transport|Add-Member -Force profilePath $old}};return $old}catch{}
     }
     $id=(Get-TransportFingerprint $address $user).Substring(0,20)
     $dir=Join-Path $Root ('ssh-profiles/'+$id+'/project-connections/control')
@@ -72,16 +71,16 @@ function Connect-WizardServer([string]$Root,[string]$Bundle,$Request) {
     $changed=$previous -and ($previous.serverAddress -cne $address -or $previous.login -cne $worker)
     $diskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk'
     $diskInstalled=(Test-Path (Join-Path $diskHome 'state/config.xml')) -or (Test-Path (Join-Path $diskHome 'profile.txt'))
-    Update-MigrationConfig $Root {param($c)
+    Update-LauncherConfig $Root {param($c)
         if($changed){
-            Set-MigrationDefault $c wizard ([pscustomobject]@{})
+            Set-ConfigDefault $c wizard ([pscustomobject]@{})
             if(-not $c.wizard.diskPreviousProfile -and $diskInstalled){$c.wizard|Add-Member -Force diskPreviousProfile $old}
             $c.wizard|Add-Member -Force configured $false
             $c.wizard.PSObject.Properties.Remove('localCatalog')
             foreach($flag in @('skipDisk','skipHappier','skipLan','diskKeepPrevious')){$c.wizard.PSObject.Properties.Remove($flag)}
             # Preserve other product settings, but never reuse another server's nodes or keys.
             $c.wizard|Add-Member -Force pendingProfile $file
-        }else{Set-MigrationDefault $c transport ([pscustomobject]@{});$c.transport|Add-Member -Force profilePath $file}
+        }else{Set-ConfigDefault $c transport ([pscustomobject]@{});$c.transport|Add-Member -Force profilePath $file}
     }
     if($changed){
         foreach($name in @('happier-account.json')){$state=Join-Path $Root ('state/'+$name);if(Test-Path $state){Move-Item $state ($state+'.previous-'+[guid]::NewGuid().ToString('N'))}}
@@ -93,16 +92,9 @@ function Initialize-WizardTransport([string]$Root,[string]$Bundle,$Transport) {
     $config=Read-TransportJson (Join-Path $Root 'config.json')
     $profile=Find-InstallProfile $Root;$p=Read-TransportJson $profile
     if(-not $Transport.profilePath){$Transport|Add-Member -Force profilePath $profile}
-    # Preserve the existing H channel only when it belongs to this same server.
-    $diskProfile=Join-Path $env:LOCALAPPDATA 'RemoteDisk/profile.txt'
-    $legacy=Join-Path $env:LOCALAPPDATA 'RemoteDisk/channel/config.json'
-    if(-not $Transport.channelPath -and -not $config.wizard.diskPreviousProfile -and (Test-Path $diskProfile) -and (Test-Path $legacy)){
-        $dp=Read-TransportJson ([IO.File]::ReadAllText($diskProfile).Trim())
-        if($dp.serverAddress -ceq $p.serverAddress -and $dp.login -ceq $p.login){$Transport|Add-Member -Force channelPath $legacy}
-    }
     if(-not $Transport.channelPath){
         $file=Join-Path $Root ('state/wizard-channel-'+(Get-TransportFingerprint $p.serverAddress $p.login).Substring(0,16)+'.json')
-        # Reuse the existing server channel exporter when the owner already has VLESS.
+        # The server exports its VLESS channel when it has one.
         Send-WizardHelpers $Root $Bundle
         $hasVless=Invoke-WizardSsh $Root 'test -r /etc/sing-box/config.json && echo yes || echo no'
         if($hasVless.Trim() -eq 'yes'){

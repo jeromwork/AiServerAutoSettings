@@ -111,7 +111,7 @@ function Set-WizardProxy([string]$Root,[string]$Bundle,$Request) {
     if(-not [int]::TryParse([string]$Request.port,[ref]$port) -or $port -lt 1 -or $port -gt 65535){throw 'Порт прокси: число 1–65535'}
     $url=Assert-WizardCheckUrl ([string]$Request.ipCheckUrl)
     $secret=Get-WizardProxySecret $Root;$auth=[bool]([string]$secret.username)
-    Update-MigrationConfig $Root {param($c) Set-MigrationDefault $c proxy ([pscustomobject]@{});$c.proxy|Add-Member -Force type $type;$c.proxy|Add-Member -Force server $server;$c.proxy|Add-Member -Force port $port;$c.proxy|Add-Member -Force ipCheckUrl $url;$c.proxy|Add-Member -Force confirmed $false}
+    Update-LauncherConfig $Root {param($c) Set-ConfigDefault $c proxy ([pscustomobject]@{});$c.proxy|Add-Member -Force type $type;$c.proxy|Add-Member -Force server $server;$c.proxy|Add-Member -Force port $port;$c.proxy|Add-Member -Force ipCheckUrl $url;$c.proxy|Add-Member -Force confirmed $false}
     $arguments='apply --type '+$type+' --server '+$server+' --port '+$port+' --ip-check-url '+(ConvertTo-WizardShell $url)
     $mode=[string]$Request.mode;if(-not $mode){$mode=Get-WizardAdminMode $Root $Request}
     if($mode -eq 'command'){
@@ -126,7 +126,7 @@ function Set-WizardProxy([string]$Root,[string]$Bundle,$Request) {
     # Confirm runs over a NEW SSH connection: it proves the server is still reachable.
     Write-WizardProgress 'Проверяю новое SSH-соединение и подтверждаю…'
     [void](Invoke-WizardAdmin $Root $Request $mode ('exec '+$script:WizardNetBin+'/proxy-out/proxy-out.sh confirm --ssh-checked') 120)
-    Update-MigrationConfig $Root {param($c) $c.proxy|Add-Member -Force confirmed $true;Set-MigrationDefault $c wizard ([pscustomobject]@{});$c.wizard.PSObject.Properties.Remove('skipProxy')}
+    Update-LauncherConfig $Root {param($c) $c.proxy|Add-Member -Force confirmed $true;Set-ConfigDefault $c wizard ([pscustomobject]@{});$c.wizard.PSObject.Properties.Remove('skipProxy')}
     return @{ok=$true;mode=$mode;summary='Подключён ✓: сервер выходит в интернет через этот прокси (проверено)'}
 }
 function Get-WizardLanName([string]$Name,[string]$File) {
@@ -171,8 +171,8 @@ function Add-WizardLan([string]$Root,[string]$Bundle,$Request) {
     return @{ok=$true;mode=$mode;name=$name;summary=('Сеть «'+$name+'» подключена ✓ (компьютер в сети отвечает, интернет — через прокси)')}
 }
 function Save-WizardLanEntry([string]$Root,[string]$Name,[string]$Kind,[string]$File,[string]$HostAddress,[string]$Port) {
-    Update-MigrationConfig $Root {param($c)
-        Set-MigrationDefault $c lan ([pscustomobject]@{})
+    Update-LauncherConfig $Root {param($c)
+        Set-ConfigDefault $c lan ([pscustomobject]@{})
         $rows=@(@($c.lan.connections)|Where-Object {$_ -and $_.name -cne $Name})
         $rows+=@([pscustomobject]@{name=$Name;kind=$Kind;file=[IO.Path]::GetFileName($File);host=$HostAddress;port=$Port})
         $c.lan|Add-Member -Force connections $rows
@@ -185,7 +185,7 @@ function Remove-WizardLan([string]$Root,[string]$Bundle,$Request) {
     if($mode -eq 'command'){return @{ok=$false;mode=$mode;command=('sudo '+$bin+' remove '+$name);summary='Удаление выполняет администратор: скопируйте команду'}}
     Write-WizardProgress ('Отключаю и удаляю сеть «'+$name+'» на сервере…')
     [void](Invoke-WizardAdmin $Root $Request $mode ('if [ -x '+$bin+' ]; then exec '+$bin+' remove '+$name+'; fi') 180)
-    Update-MigrationConfig $Root {param($c) if($c.lan){$c.lan|Add-Member -Force connections @(@($c.lan.connections)|Where-Object {$_ -and $_.name -cne $name})}}
+    Update-LauncherConfig $Root {param($c) if($c.lan){$c.lan|Add-Member -Force connections @(@($c.lan.connections)|Where-Object {$_ -and $_.name -cne $name})}}
     return @{ok=$true;mode=$mode;summary=('Сеть «'+$name+'» отключена и удалена')}
 }
 function Get-WizardNetStatus([string]$Root) {

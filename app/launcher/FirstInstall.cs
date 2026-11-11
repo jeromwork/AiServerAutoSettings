@@ -13,15 +13,12 @@ namespace RemoteAgents.Launcher
         internal static bool Required(string home)
         {
             string config = Path.Combine(home,"config.json");
-            if(File.Exists(config) && Json.Bool(Json.Map(Json.Get(Json.Read(config),"wizard")),"configured")) return false;
-            string state = Path.Combine(home, "state", "migration.json");
-            return !File.Exists(state) || new[] { "rolled-back", "error" }.Contains(Json.Str(Json.Read(state), "phase"));
+            return !(File.Exists(config) && Json.Bool(Json.Map(Json.Get(Json.Read(config),"wizard")),"configured"));
         }
         internal static bool HasProfile(string home)
         {
             string file = Path.Combine(home, "config.json");
             if (File.Exists(file) && Json.Str(Json.Map(Json.Get(Json.Read(file), "transport")), "profilePath").Length > 0) return true;
-            if (File.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteDisk", "profile.txt"))) return true;
             string profiles = Path.Combine(home, "ssh-profiles");
             return Directory.Exists(profiles) && Directory.GetFiles(profiles, "ssh-transport.json", SearchOption.AllDirectories).Length > 0;
         }

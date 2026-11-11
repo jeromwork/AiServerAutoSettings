@@ -34,8 +34,6 @@ namespace RemoteAgents.Launcher
         }
         public static void Apply(string home, string sourceExe, string zip, string launcherVersion, bool downgrade, Func<string, bool> selftest)
         {
-            string migration = Path.Combine(home, "state", "migration.json");
-            if (!Product.IsVpn && File.Exists(migration) && new[] { "preparing", "activating", "pending", "rolling-back" }.Contains(Json.Str(Json.Read(migration), "phase"))) throw new InvalidOperationException("Сначала завершите переход компьютера");
             var engine = new UpdateEngine(home, launcherVersion); engine.Recover();
             if (engine.Pending) throw new InvalidOperationException("Предыдущее обновление ещё проверяется");
             string version = BundleVersion(zip), old = engine.Current;
@@ -69,8 +67,6 @@ namespace RemoteAgents.Launcher
         public static void ReplaceImage(string source, string target)
         {
             string tmp = target + ".install.tmp", retired = target + ".retired";
-            string home = Path.GetDirectoryName(target);
-            if (Path.GetFileName(target).Equals(Product.ExeName, StringComparison.OrdinalIgnoreCase) && !Product.IsVpn && LauncherRecovery.Accepted(home)) Files.Atomic(LauncherRecovery.Intent(home), "restart\n");
             File.Copy(source, tmp, true);
             using (var flush = new FileStream(tmp, FileMode.Open, FileAccess.Write, FileShare.Read)) flush.Flush(true);
             try {
@@ -86,21 +82,6 @@ namespace RemoteAgents.Launcher
                 try { File.Move(tmp, target); }
                 catch { if (File.Exists(retired)) File.Move(retired, target); throw; }
             } finally { if (File.Exists(tmp)) File.Delete(tmp); }
-        }
-        public static bool RecoverImage(string home, Func<string, bool> valid = null)
-        {
-            valid = valid ?? (path => { try { AssemblyName.GetAssemblyName(path); return true; } catch { return false; } });
-            string target = Path.Combine(home, Product.ExeName);
-            if (File.Exists(target) && valid(target)) return false;
-            string source = new[] { target + ".retired", Path.Combine(home, Product.Name + ".old.exe"), Path.Combine(home, Product.Name + ".previous.exe"), target + ".install.tmp", target + ".new" }.FirstOrDefault(path => File.Exists(path) && valid(path));
-            if (source == null) throw new IOException("Нет исправного образа для восстановления");
-            string temp = target + ".recovery." + Guid.NewGuid().ToString("N") + ".tmp";
-            try {
-                File.Copy(source, temp);
-                using (var flush = new FileStream(temp, FileMode.Open, FileAccess.Write, FileShare.Read)) flush.Flush(true);
-                if (File.Exists(target)) File.Replace(temp, target, null); else File.Move(temp, target);
-            } finally { if (File.Exists(temp)) File.Delete(temp); }
-            return true;
         }
         public static string ObserveImage(string home, UpdateEngine engine, bool healthy, string bundleResult, DateTime? utcNow = null)
         {

@@ -33,7 +33,7 @@ namespace RemoteAgents.Launcher
         {
             string passwordPipe=Environment.GetEnvironmentVariable("REMOTEAGENTS_PASSWORD_PIPE");
             if(!string.IsNullOrEmpty(passwordPipe))return PasswordRelay.Answer(passwordPipe);
-            Journal log = null; bool recovery = args.Contains("--recover-launcher") || args.Contains("--recovery-host");
+            Journal log = null;
             try {
                 // Test modes never create or lock the real user's home.
                 string elevated = Option(args, "--elevated-component");
@@ -44,10 +44,7 @@ namespace RemoteAgents.Launcher
                 if (test != null) { AttachConsole(0xFFFFFFFF); return UpdateSelfTests.Run(Path.GetFullPath(test)); }
                 string home = Path.GetFullPath(Option(args, "--home") ?? DefaultHome);
                 Directory.CreateDirectory(home); log = new Journal(home); log.Write("launcher.start");
-                if (Product.IsVpn && recovery) return 0;
-                if (args.Contains("--recovery-host")) return Migration.RunRecoveryHost(home);
-                if (recovery && !LauncherRecovery.Requested(home)) return 0;
-                if (args.Contains("--uninstall")) { if (Product.IsVpn) FirstInstall.UninstallVpn(home); else Migration.Rollback(home); log.Write("uninstall.ok"); return 0; }
+                if (args.Contains("--uninstall")) { if (Product.IsVpn) FirstInstall.UninstallVpn(home); else Uninstall.Run(home); log.Write("uninstall.ok"); return 0; }
                 var sid = WindowsIdentity.GetCurrent().User; string name = InstanceName(home, sid);
                 var security = new MutexSecurity(); security.AddAccessRule(new MutexAccessRule(sid, MutexRights.FullControl, AccessControlType.Allow));
                 bool created, owned = false, restart = false;
@@ -55,26 +52,21 @@ namespace RemoteAgents.Launcher
                     // Serialize downloaded installers independently of the running tray's mutex.
                     using (var installer = new Mutex(false, "Global\\" + name + ".Install", out created, security)) {
                         bool installOwned = WaitMutex(installer, 0);
-                        if (!installOwned) { if (recovery) return 0; throw new InvalidOperationException("Установка уже выполняется"); }
+                        if (!installOwned) throw new InvalidOperationException("Установка уже выполняется");
                         Action<string, bool> launch = (path, after) => {
                             if (owned) { mutex.ReleaseMutex(); owned = false; }
                             installer.ReleaseMutex(); installOwned = false;
                             StartLauncher(path, home, after);
                         };
-                        Action migrate = () => {
-                            // Migrate.ps1 stops the tray only after its independent watchdog and preflight.
+                        Action firstRun = () => {
                             if (owned) { mutex.ReleaseMutex(); owned = false; }
                             installer.ReleaseMutex(); installOwned = false; FirstInstall.Start(home);
                         };
                         try {
                             owned = WaitMutex(mutex, 0);
-                            if (recovery && (!owned || !LauncherRecovery.Requested(home))) {
-                                if (owned) { mutex.ReleaseMutex(); owned = false; }
-                                return 0;
-                            }
                             string target = Path.Combine(home, Product.ExeName);
                             bool external = !Path.GetFullPath(Exe).Equals(target, StringComparison.OrdinalIgnoreCase);
-                            bool command = args.Any(a => new[] { "--exit", "--uninstall", "--logs", "--rollback", "--restart-components", "--check-updates", "--confirm-install", "--settings" }.Contains(a));
+                            bool command = args.Any(a => new[] { "--exit", "--uninstall", "--logs", "--rollback", "--restart-components", "--check-updates", "--settings" }.Contains(a));
                             // --tray with --home is also the isolated development/smoke entry point.
                             bool install = external && !command && !(args.Contains("--tray") && args.Contains("--home"));
                             if (install) {
@@ -84,21 +76,20 @@ namespace RemoteAgents.Launcher
                                     var engine = new UpdateEngine(home, Version);
                                     int comparison = File.Exists(target) ? UpgradeInstaller.Compare(Version, bundle, FileVersionInfo.GetVersionInfo(target).FileVersion, engine.Current) : 1;
                                     if (comparison == 0) {
-                                        if (args.Contains("--install") || (!args.Contains("--home") && FirstInstall.Required(home))) { migrate(); return 0; }
+                                        if (args.Contains("--install") || (!args.Contains("--home") && FirstInstall.Required(home))) { firstRun(); return 0; }
                                         if (!owned) Forward(name, new[] { "--setup-check" }); else launch(target, false);
                                         return 0;
                                     }
                                     if (comparison < 0 && MessageBox.Show("Запущена более старая версия RemoteAgents. Выполнить откат лаунчера и бандла?", "RemoteAgents — откат", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return 0;
-                                    if (!Product.IsVpn && LauncherRecovery.Accepted(home)) Files.Atomic(LauncherRecovery.Intent(home), "restart\n");
                                     if (!owned) { StopInstalled(name, target, home, mutex, log); owned = true; }
                                     try {
                                         UpgradeInstaller.Apply(home, Exe, zip, Version, comparison < 0, f => External.SelfTest(f, home, CancellationToken.None));
                                     } catch { if (File.Exists(target)) launch(target, false); throw; }
-                                    if (args.Contains("--install") || (!args.Contains("--home") && FirstInstall.Required(home))) { migrate(); return 0; }
+                                    if (args.Contains("--install") || (!args.Contains("--home") && FirstInstall.Required(home))) { firstRun(); return 0; }
                                     launch(target, true); log.Write("install.upgrade.ok"); return 0;
                                 } finally { if (File.Exists(zip)) File.Delete(zip); }
                             }
-                            if (args.Contains("--install") || (!external && args.Length == 0 && FirstInstall.Required(home))) { migrate(); return 0; }
+                            if (args.Contains("--install") || (!external && args.Length == 0 && FirstInstall.Required(home))) { firstRun(); return 0; }
                             if (!owned) { Forward(name, args.Contains("--uninstall") ? new[] { "--exit" } : args.Length == 0 ? new[] { "--setup-check" } : args); log.Write("ipc.forward.ok"); return 0; }
                         } finally { if (installOwned) installer.ReleaseMutex(); }
                     }
@@ -110,10 +101,7 @@ namespace RemoteAgents.Launcher
                 }
                 if (restart) StartLauncher(Path.Combine(home, Product.ExeName), home, true);
                 return 0;
-            } catch (MigrationFailureException ex) {
-                if (log != null) log.Write("migration.failed");
-                MessageBox.Show(ex.Message, "RemoteAgents — переход", MessageBoxButtons.OK, MessageBoxIcon.Error); return 1;
-            } catch { if (log != null) log.Write("launcher.fatal"); if (recovery) return 1; MessageBox.Show("Действие не выполнено. Проверьте logs\\launcher.log в папке RemoteAgents. Обновление могло быть отклонено самопроверкой или ещё проходить проверку здоровья.", "RemoteAgents"); return 1; }
+            } catch { if (log != null) log.Write("launcher.fatal"); MessageBox.Show("Действие не выполнено. Проверьте logs\\launcher.log в папке RemoteAgents. Обновление могло быть отклонено самопроверкой или ещё проходить проверку здоровья.", "RemoteAgents"); return 1; }
         }
         static bool WaitMutex(Mutex mutex, int timeout) { try { return mutex.WaitOne(timeout); } catch (AbandonedMutexException) { return true; } }
         internal static void StopInstalled(string name, string target, string home, Mutex mutex, Journal log)

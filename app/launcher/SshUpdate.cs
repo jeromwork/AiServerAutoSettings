@@ -50,7 +50,6 @@ namespace RemoteAgents.Launcher
                         .Select(p => Path.Combine(p, "ssh-transport.json")).FirstOrDefault(File.Exists);
                     if (found != null) break;
                 }
-                if (found == null) { string saved = Path.Combine(local, "RemoteDisk", "profile.txt"); if (File.Exists(saved)) { var p = Files.ReadLine(saved); if (File.Exists(p)) found = p; } }
                 if (found == null) throw new InvalidDataException("Нет SSH-профиля");
                 profile = Json.Read(found); args = Json.Strings(Json.Get(profile, "arguments"));
             }
@@ -67,16 +66,6 @@ namespace RemoteAgents.Launcher
             }
             if (string.IsNullOrWhiteSpace(target) || target.Contains("\n") || target.Contains("\r")) throw new InvalidDataException("Нет адреса SSH");
             int port = Json.Int(update, "viaLocalPort", 0);
-            // Imported legacy argv contains -p 22: honor the actual managed profile route.
-            // Explicit updater argv continues to use its own viaLocalPort setting.
-            string profileConfig = Json.Str(profile, "configPath"), profileServer = Json.Str(profile, "serverAddress");
-            if (port == 0 && profileServer.Length > 0 && File.Exists(profileConfig)) {
-                foreach (Match block in Regex.Matches(File.ReadAllText(profileConfig), @"(?ms)^# BEGIN RemoteAgents transport [^\r\n]+\r?\n(.*?)^# END RemoteAgents transport [^\r\n]+")) {
-                    if (!Regex.IsMatch(block.Groups[1].Value, "(?m)^Host \"" + Regex.Escape(profileServer) + "\"\\r?$")) continue;
-                    var localPort = Regex.Match(block.Groups[1].Value, @"(?m)^    Port (\d+)\r?$");
-                    if (localPort.Success) { port = int.Parse(localPort.Groups[1].Value); break; }
-                }
-            }
             if (port != 0) {
                 if (port < 1 || port > 65535) throw new InvalidDataException("Неверный локальный порт");
                 int at = target.LastIndexOf('@'); string user = at >= 0 ? target.Substring(0, at + 1) : "";

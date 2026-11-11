@@ -33,20 +33,6 @@ namespace RemoteAgents.Launcher
                 foreach (string directory in new[] { "state", "secrets", "logs" }) { Directory.CreateDirectory(Path.Combine(home, directory)); File.WriteAllText(Path.Combine(home, directory, "preserve.txt"), "preserve\r\n", Files.Utf8); }
                 phase = "old-tray"; tray = Start(target, home); Wait(() => Healthy(home, "0.0.1"), 20000);
                 check("old-tray-real-process", !tray.HasExited);
-                if (!Product.IsVpn) {
-                Json.Write(Path.Combine(home, "state", "migration.json"), new { phase = "accepted" });
-                phase = "recovery-skips-running-tray";
-                using (var host = Process.Start(new ProcessStartInfo(source, "--recovery-host --home " + Files.Quote(home)) { UseShellExecute = false }))
-                    check("recovery-keeps-single-tray", host.WaitForExit(10000) && host.ExitCode == 0 && !tray.HasExited);
-                phase = "recovery-after-tray-crash"; int crashedPid = tray.Id; tray.Kill(); tray.WaitForExit(); tray.Dispose(); tray = null;
-                using (var host = Process.Start(new ProcessStartInfo(source, "--recovery-host --home " + Files.Quote(home)) { UseShellExecute = false })) {
-                    Wait(() => { try { return Healthy(home, "0.0.1") && Json.Int(Json.Read(Path.Combine(home, "status", Product.StatusName)), "pid", 0) != crashedPid; } catch { return false; } }, 20000);
-                    tray = Process.GetProcessById(Json.Int(Json.Read(Path.Combine(home, "status", Product.StatusName)), "pid", 0));
-                    check("recovery-restarts-crashed-tray", !tray.HasExited && !host.HasExited);
-                    Stop(home, target); if (!tray.WaitForExit(10000) || !host.WaitForExit(10000)) throw new IOException();
-                    tray.Dispose(); tray = null;
-                }
-                }
                 if (tray != null) { Stop(home, target); tray.WaitForExit(10000); tray.Dispose(); }
                 tray = Start(target, home); Wait(() => Healthy(home, "0.0.1"), 20000);
                 string configHash = Files.Hash(Path.Combine(home, "config.json"));

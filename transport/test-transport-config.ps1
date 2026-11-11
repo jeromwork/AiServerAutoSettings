@@ -234,7 +234,7 @@ try{
     Assert (@($conf.items|Where-Object {$_.kind -eq 'process'}).Count -eq 0) 'процессы служат лишь подсказкой имени'
     $empty=[pscustomobject]@{Processes=@();Adapters=@();Routes=@()}
     Assert (-not (Find-VpnConflicts $empty).conflict) 'нет конфликтов на пустом снимке'
-    $idle=[pscustomobject]@{Processes=@([pscustomobject]@{Name='sing-box.exe';ProcessId=71;ExecutablePath='C:\Local\RemoteDisk\channel\sing-box.exe'},[pscustomobject]@{Name='AmneziaVPN-service.exe';ProcessId=72});Adapters=@();Routes=@()}
+    $idle=[pscustomobject]@{Processes=@([pscustomobject]@{Name='sing-box.exe';ProcessId=71;ExecutablePath='C:\Local\Tools\sing-box.exe'},[pscustomobject]@{Name='AmneziaVPN-service.exe';ProcessId=72});Adapters=@();Routes=@()}
     Assert (-not (Find-VpnConflicts $idle).conflict) 'старый канал и Amnezia-служба без туннеля не конфликт'
     foreach($name in @('happ-default-tun','happ-xray')){
         $happ=[pscustomobject]@{Processes=$idle.Processes;Adapters=@([pscustomobject]@{ifIndex=9;Name=$name;Status='Up';InterfaceDescription=$(if($name -eq 'happ-default-tun'){'SocksTunnel Tunnel'}else{'Happ Virtual Adapter'});HardwareInterface=$false});Routes=@([pscustomobject]@{DestinationPrefix='0.0.0.0/0';InterfaceIndex=9;NextHop='0.0.0.0'})}
@@ -361,6 +361,5 @@ try{
     Write-TransportJson (Join-Path $work 'status/transport.json') @{ok=$true;updatedAt=[DateTime]::UtcNow.AddMinutes(1).ToString('o');candidates=@()}
     $futureStatus=(& (Join-Path $PSScriptRoot 'Get-TransportStatus.ps1') -Home $work) -join "`n"
     Assert ($futureStatus.Contains('статус устарел') -and -not $futureStatus.Contains('соединение проверено')) 'будущий статус после перевода часов не считается проверенной связью'
-    & (Join-Path $PSScriptRoot 'test-legacy-import.ps1') -SingBox $SingBox
     Write-Output ('OK: '+$count+' проверок без сети')
 }finally{Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue}

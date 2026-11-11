@@ -49,9 +49,9 @@ function Send-WizardLan([string]$Root,[string]$Bundle,[string]$File,[string]$Nam
 }
 function Suspend-WizardDisk([string]$Root,[string]$Bundle) {
     $hold=Join-Path $Root 'state/disk-reconfigure';Write-DiskUtf8 $hold 'Old disk disconnected; data preserved'
-    Update-MigrationConfig $Root {param($c) Set-MigrationDefault $c components ([pscustomobject]@{});Set-MigrationDefault $c.components disk ([pscustomobject]@{});$c.components.disk|Add-Member -Force enabled $false}
+    Update-LauncherConfig $Root {param($c) Set-ConfigDefault $c components ([pscustomobject]@{});Set-ConfigDefault $c.components disk ([pscustomobject]@{});$c.components.disk|Add-Member -Force enabled $false}
     Invoke-InstallChild $Bundle 'disk/Install-RemoteDisk.ps1' @('-Uninstall') -TimeoutSeconds 120
-    Stop-MigrationDisk (Join-Path $env:LOCALAPPDATA 'RemoteDisk')
+    Stop-ManagedDisk (Join-Path $env:LOCALAPPDATA 'RemoteDisk')
 }
 function Resolve-WizardDiskServer([string]$Root,[string]$Bundle,$Request) {
     $c=Read-TransportJson (Join-Path $Root 'config.json')
@@ -63,8 +63,8 @@ function Resolve-WizardDiskServer([string]$Root,[string]$Bundle,$Request) {
     # Stop all old owners before archiving state. Never delete or move project data.
     Suspend-WizardDisk $Root $Bundle
     $archive=Join-Path $disk ('previous-'+[guid]::NewGuid().ToString('N'));[void][IO.Directory]::CreateDirectory($archive)
-    foreach($item in @('state','channel','selection.json','profile.txt','server.txt','base.txt')){
+    foreach($item in @('state','selection.json','profile.txt','server.txt','base.txt')){
         $path=Join-Path $disk $item;if(Test-Path -LiteralPath $path){Move-Item -LiteralPath $path -Destination (Join-Path $archive $item)}
     }
-    Update-MigrationConfig $Root {param($config) $config.wizard.PSObject.Properties.Remove('diskPreviousProfile');$config.wizard.PSObject.Properties.Remove('diskKeepPrevious')}
+    Update-LauncherConfig $Root {param($config) $config.wizard.PSObject.Properties.Remove('diskPreviousProfile');$config.wizard.PSObject.Properties.Remove('diskKeepPrevious')}
 }

@@ -8,12 +8,12 @@
     "profilePath": {
       "type": "string",
       "minLength": 1,
-      "description": "Путь ssh-transport.json; иначе RemoteDisk/profile.txt"
+      "description": "Путь ssh-transport.json, созданного мастером (шаг «Сервер»)"
     },
     "channelPath": {
       "type": "string",
       "minLength": 1,
-      "description": "Существующий config.json канала: VLESS и override_port входа sync"
+      "description": "Config.json канала, полученный мастером с сервера: VLESS и override_port входа sync"
     },
     "singBoxPath": {
       "type": "string",
@@ -162,44 +162,17 @@
               ]
             },
             "description": "Отсутствие или [] означает все доступные типы"
-          },
-          "legacyChannelPath": {
-            "type": "string",
-            "minLength": 1,
-            "description": "Read-only reference to the original sing-box channel; no copied credentials."
-          },
-          "legacyOutbound": {
-            "type": "string",
-            "minLength": 1
           }
         },
         "anyOf": [
           {
             "required": [
-              "name"
-            ],
-            "anyOf": [
-              {
-                "required": [
-                  "ssh"
-                ]
-              },
-              {
-                "required": [
-                  "alias"
-                ]
-              }
-            ],
-            "not": {
-              "required": [
-                "legacyOutbound"
-              ]
-            }
+              "ssh"
+            ]
           },
           {
             "required": [
-              "legacyOutbound",
-              "legacyChannelPath"
+              "alias"
             ]
           }
         ]
@@ -246,44 +219,17 @@
             "type": "string",
             "minLength": 1,
             "pattern": "^(?!-)[^\\r\\n]+$"
-          },
-          "legacyChannelPath": {
-            "type": "string",
-            "minLength": 1,
-            "description": "Read-only reference to the original sing-box channel; no copied credentials."
-          },
-          "legacyOutbound": {
-            "type": "string",
-            "minLength": 1
           }
         },
         "anyOf": [
           {
             "required": [
-              "name"
-            ],
-            "anyOf": [
-              {
-                "required": [
-                  "ssh"
-                ]
-              },
-              {
-                "required": [
-                  "alias"
-                ]
-              }
-            ],
-            "not": {
-              "required": [
-                "legacyOutbound"
-              ]
-            }
+              "ssh"
+            ]
           },
           {
             "required": [
-              "legacyOutbound",
-              "legacyChannelPath"
+              "alias"
             ]
           }
         ]
@@ -296,7 +242,8 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
-          "name"
+          "name",
+          "port"
         ],
         "properties": {
           "name": {
@@ -320,45 +267,17 @@
           "host": {
             "type": "string",
             "minLength": 1
-          },
-          "legacyChannelPath": {
-            "type": "string",
-            "minLength": 1,
-            "description": "Read-only reference to the original sing-box channel; no copied credentials."
-          },
-          "legacyOutbound": {
-            "type": "string",
-            "minLength": 1
           }
         },
         "anyOf": [
           {
             "required": [
-              "name",
-              "port"
-            ],
-            "anyOf": [
-              {
-                "required": [
-                  "host"
-                ]
-              },
-              {
-                "required": [
-                  "server"
-                ]
-              }
-            ],
-            "not": {
-              "required": [
-                "legacyOutbound"
-              ]
-            }
+              "host"
+            ]
           },
           {
             "required": [
-              "legacyOutbound",
-              "legacyChannelPath"
+              "server"
             ]
           }
         ]
@@ -414,16 +333,6 @@
       "maximum": 16,
       "default": 1,
       "description": "Сколько путей проверять одновременно при рейтинге. 1 — точная скорость каждого пути."
-    },
-    "routeSsh": {
-      "type": "boolean",
-      "default": false,
-      "description": "Применяется только явным переходом build/Migrate.ps1; обратимо."
-    },
-    "takeOverChannel": {
-      "type": "boolean",
-      "default": false,
-      "description": "Применяется только явным переходом build/Migrate.ps1; обратимо."
     }
   }
 }
