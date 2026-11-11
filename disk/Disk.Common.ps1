@@ -41,10 +41,21 @@ function Invoke-DiskSsh($Command,[switch]$Direct,[string]$InputText='',[string]$
     if($Direct){$args+=@($c.arguments)}else{$args+=@('-F','NUL','-p',[string]$localPort,'-i',$c.keyPath,'-o',('HostKeyAlias='+$c.serverAddress),'-o',('UserKnownHostsFile="'+$c.knownHostsPath.Replace('\','/')+'"'),'-o','IdentitiesOnly=yes',($c.login+'@127.0.0.1'))}
     Invoke-DiskProcess $c.sshExecutable ($args+@($Command)) $InputText $OutputFile -TimeoutSeconds $TimeoutSeconds
 }
+function Get-DiskTreeCommand([string]$RelativePath='') {
+    $command='bash "$HOME/.local/share/remote-disk/server-disk.sh" tree'
+    if($RelativePath){
+        Assert-SelectionPath $RelativePath
+        # Quote a literal argument for the remote POSIX shell (names may contain apostrophes).
+        $quote=[string][char]39;$escape=$quote+'"'+$quote+'"'+$quote
+        $command+=' '+$quote+$RelativePath.Replace($quote,$escape)+$quote
+    }
+    $command
+}
 function Invoke-DiskServer($Action,$Data=$null,[switch]$Direct,[string]$OutputFile='') {
     $cmd='bash "$HOME/.local/share/remote-disk/server-disk.sh" '+$Action
     $inputText=''
-    if($Data){
+    if($Action -eq 'tree'){$cmd=Get-DiskTreeCommand ([string]$Data.path)}
+    elseif($Data){
         $encoded=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($Data|ConvertTo-Json -Depth 20 -Compress)))
         if($Action -eq 'verify-selection'){$cmd+=' --stdin';$inputText=$encoded}else{$cmd+=' '+$encoded}
     }

@@ -233,7 +233,7 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             if($Request.installMissing){
                 Send-WizardHelpers $Root $Bundle
                 $flags=@([int](-not $server.disk),[int](-not $server.happier),[int](-not $server.catalog)) -join ' '
-                try{[void](Invoke-WizardSsh $Root ('bash "$HOME/.local/share/remoteagents-wizard/server-wizard.sh" repair '+$flags) '' 1200)}catch{
+                try{[void](Invoke-WizardSsh $Root ('bash "$HOME/.local/share/remoteagents-wizard/server-wizard.sh" repair '+$flags) '' 110)}catch{
                     $observed=Get-WizardServer $Root $Bundle
                     if(-not $observed.userManager){throw 'Нет user systemd. Администратору: sudo loginctl enable-linger <пользователь>; sudo systemctl start user@<uid>.service. Повторите проверку'}
                     throw 'Установка не завершена. Нужны curl, tar, flock, python3, systemd и доступ к официальным загрузкам; проверьте сервер и повторите шаг'
@@ -292,9 +292,11 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
         }
         'DiskTree' {
             Send-WizardHelpers $Root $Bundle
-            $server=ConvertFrom-Json (Invoke-WizardSsh $Root 'bash "$HOME/.local/share/remote-disk/server-disk.sh" tree')
+            $relative=[string]$Request.path
+            $command=Get-DiskTreeCommand $relative
+            $server=ConvertFrom-Json (Convert-TransportLF (Invoke-WizardSsh $Root $command))
             $base=[string]$Request.base;if(-not $base){$base=Get-DiskBase}
-            $union=Get-DiskUnion $server $base;$selection=Read-DiskSelection
+            $union=Get-DiskUnion $server $base $relative;$selection=Read-DiskSelection
             if($null -eq $selection){$selection=@{schema=1;paths=@($union.rows|Where-Object {$_.path -notmatch '/' -and $_.kind -eq 'directory'}|ForEach-Object {$_.path})}}
             return @{union=$union;selection=$selection;base=$base}
         }

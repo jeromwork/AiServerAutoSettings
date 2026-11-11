@@ -29,7 +29,9 @@ namespace RemoteAgents.Launcher
         CheckBox installMissing, shared, bridge, shell, vpn, create;
         DataGridView nodes; TreeView tree; ListBox accounts; Label inventory, accountHint, summary;
         Dictionary<string, object> expectedCatalog; Dictionary<string, object>[] accountRows = new Dictionary<string, object>[0];
-        string[] absentSelection = new string[0]; bool busy, changingTree, treeLoaded, catalogLoaded;
+        DiskTreeSelection selection = new DiskTreeSelection(new string[0]);
+        CancellationTokenSource stepCancellation; bool closingRequested;
+        bool busy, changingTree, treeLoaded, catalogLoaded;
 
         internal static bool Display(string home, string bundle, bool first, int section = 0, bool activate = false)
         {
@@ -62,7 +64,7 @@ namespace RemoteAgents.Launcher
                 }
             }
             nodes.CellValueChanged+=(s,e)=>Changed(1);nodes.UserAddedRow+=(s,e)=>Changed(1);
-            tree.AfterCheck+=(s,e)=>Changed(2);
+            tree.AfterCheck+=(s,e)=> {if(!changingTree)Changed(2);};
             steps.SelectedIndexChanged += async (s,e) => { sections[steps.SelectedIndex].BringToFront(); back.Enabled = steps.SelectedIndex > 0; next.Enabled = steps.SelectedIndex < 6; apply.Text = steps.SelectedIndex == 6 ? "Проверить итог / запустить" : "Проверить / применить"; RefreshSummary();
                 if(!busy && steps.SelectedIndex==1 && !catalogLoaded)await Guard(LoadCatalog);
                 if(!busy && steps.SelectedIndex==2 && !treeLoaded)await Guard(LoadTree);
@@ -71,8 +73,11 @@ namespace RemoteAgents.Launcher
             back.Click += (s,e) => { if (steps.SelectedIndex > 0) steps.SelectedIndex--; };
             next.Click += (s,e) => { if (steps.SelectedIndex < 6) steps.SelectedIndex++; };
             apply.Click += async (s,e) => await ExecuteCurrent();
-            close.Click += (s,e) => { DialogResult = DialogResult.Cancel; Close(); };
-            FormClosing += (s,e) => { if (busy) e.Cancel = true; };
+            close.Click += (s,e) => Close();
+            FormClosing += (s,e) => {
+                if (busy) { e.Cancel = true; closingRequested = true; Append("Отмена текущего шага…"); stepCancellation.Cancel(); }
+                else DialogResult = DialogResult.Cancel;
+            };
             if(activate) Shown += async (s,e) => await Guard(async()=> {var result=await Run("Activate",new {});activationRequested=true;results[6]=Json.Str(result,"summary");Append(results[6]);});
             Append("Каждый шаг проверяет состояние заново. Пароль вводится только в защищённом окне SSH и не сохраняется. Журналы: " + Path.Combine(home,"logs"));
         }
@@ -121,7 +126,20 @@ namespace RemoteAgents.Launcher
             Button(2,"Обновить объединённое дерево",185,LoadTree);
             tree=new TreeView {Left=18,Top=228,Width=690,Height=320,CheckBoxes=true,Anchor=AnchorStyles.Top|AnchorStyles.Left|AnchorStyles.Right};sections[2].Controls.Add(tree);
             diskBase.TextChanged+=(s,e)=>treeLoaded=false;
-            tree.AfterCheck+=(s,e)=> {if(changingTree)return;changingTree=true;if(Convert.ToString(e.Node.Tag).Length==0){e.Node.Checked=false;changingTree=false;return;}CheckChildren(e.Node,e.Node.Checked);for(var p=e.Node.Parent;p!=null;p=p.Parent)p.Checked=false;changingTree=false;MarkPartial();};
+            tree.AfterCheck+=(s,e)=> {
+                if(changingTree)return;
+                string path=Convert.ToString(e.Node.Tag);
+                try {if(path.Length>0)selection.Set(path,e.Node.Checked);}
+                catch(Exception error) {Append(error.Message);}
+                RefreshTreeChecks();
+            };
+            tree.BeforeExpand+=async (s,e)=> {
+                if(e.Node.Nodes.Count!=1 || e.Node.Nodes[0].Tag!=null)return;
+                e.Cancel=true;if(busy)return;
+                var node=e.Node;
+                await Guard(async()=> {await LoadChildren(node);node.Expand();});
+            };
+            Button(2,"Пропустить диск",558,()=> {results[2]="Диск пропущен; настройка не подтверждена";Append(results[2]);steps.SelectedIndex=3;return Task.FromResult(0);});
         }
         void AccountPage(Dictionary<string,object> config)
         {
@@ -164,10 +182,11 @@ namespace RemoteAgents.Launcher
         void Append(string text) {journal.AppendText(DateTime.Now.ToString("HH:mm:ss")+" "+text+"\r\n");}
         async Task Guard(Func<Task> action)
         {
-            busy=true;steps.Enabled=false;pages.Enabled=false;apply.Enabled=back.Enabled=next.Enabled=close.Enabled=false;progress.Style=ProgressBarStyle.Marquee;
+            busy=true;stepCancellation=new CancellationTokenSource();steps.Enabled=false;pages.Enabled=false;apply.Enabled=back.Enabled=next.Enabled=false;close.Enabled=true;progress.Style=ProgressBarStyle.Marquee;
             try {await action();}
+            catch(OperationCanceledException) {if(steps.SelectedIndex<6)applied[steps.SelectedIndex]=false;results[steps.SelectedIndex]="Шаг отменён; готовность не подтверждена";Append(results[steps.SelectedIndex]);}
             catch(Exception e) {if(steps.SelectedIndex<6)applied[steps.SelectedIndex]=false;results[steps.SelectedIndex]="Ошибка: "+e.Message;Append(results[steps.SelectedIndex]);}
-            finally {busy=false;steps.Enabled=pages.Enabled=apply.Enabled=close.Enabled=true;back.Enabled=steps.SelectedIndex>0;next.Enabled=steps.SelectedIndex<6;progress.Style=ProgressBarStyle.Continuous;RefreshSummary();}
+            finally {busy=false;stepCancellation.Dispose();stepCancellation=null;steps.Enabled=pages.Enabled=apply.Enabled=close.Enabled=true;back.Enabled=steps.SelectedIndex>0;next.Enabled=steps.SelectedIndex<6;progress.Style=ProgressBarStyle.Continuous;RefreshSummary();if(closingRequested)Close();}
         }
         async Task<Dictionary<string,object>> Run(string action, object request)
         {
@@ -176,7 +195,11 @@ namespace RemoteAgents.Launcher
             try {
                 Json.Write(requestFile,request);
                 var args=new[]{"-NoLogo","-NoProfile","-NonInteractive","-STA","-ExecutionPolicy","Bypass","-File",Path.Combine(bundle,"build","Wizard.ps1"),"-Home",home,"-Action",action,"-RequestFile",requestFile};
-                int code=await Task.Run(()=>External.Run(Files.Executable("powershell.exe"),args,bundle,output,1500000,4*1024*1024,CancellationToken.None));
+                var token=stepCancellation.Token;
+                int code;
+                try {code=await Task.Run(()=>External.Run(Files.Executable("powershell.exe"),args,bundle,output,WizardStep.Timeout(action),4*1024*1024,token));}
+                catch(OperationCanceledException) {new Journal(home).Write("wizard."+action+".cancelled");throw;}
+                catch(TimeoutException) {new Journal(home).Write("wizard."+action+".timeout");throw;}
                 Dictionary<string,object> response;
                 try {response=Json.Map(Json.Parse(Files.LF(External.ReadPowerShellOutput(output))));}
                 catch {throw new IOException("Шаг не вернул результат (код "+code+"). Проверьте журнал соответствующего модуля и повторите");}
@@ -217,25 +240,45 @@ namespace RemoteAgents.Launcher
             }return map;
         }
         static IEnumerable<TreeNode> All(TreeNodeCollection nodes) {foreach(TreeNode n in nodes){yield return n;foreach(var child in All(n.Nodes))yield return child;}}
-        static void CheckChildren(TreeNode n,bool value){n.Checked=value;foreach(TreeNode c in n.Nodes)CheckChildren(c,value);}
-        void MarkPartial(){foreach(var n in All(tree.Nodes))n.ForeColor=!n.Checked && All(n.Nodes).Any(c=>c.Checked)?Color.DarkOrange:SystemColors.WindowText;}
+        void MarkPartial(){foreach(var n in All(tree.Nodes))if(n.Tag!=null)n.ForeColor=selection.Partial((string)n.Tag)?Color.DarkOrange:SystemColors.WindowText;}
+        void RefreshTreeChecks()
+        {
+            changingTree=true;
+            try {foreach(var n in All(tree.Nodes))n.Checked=n.Tag!=null && Convert.ToString(n.Tag).Length>0 && selection.Includes((string)n.Tag);MarkPartial();}
+            finally{changingTree=false;}
+        }
+        void AddTreeLevel(Dictionary<string,object> union, TreeNode parent)
+        {
+            string prefix=parent==null?"":(string)parent.Tag;
+            var children=new List<TreeNode>();
+            foreach(var r in Json.Array(Json.Get(union,"rows"))) {
+                var row=Json.Map(r);string path=Json.Str(row,"path"),presence=Json.Str(row,"presence");int slash=path.LastIndexOf('/');
+                string actualParent=slash<0?"":path.Substring(0,slash);
+                if(actualParent!=prefix)throw new InvalidDataException("Сервер вернул другой уровень дерева");
+                string mark=presence=="both"?"в обоих":presence=="local"?"только здесь":"только на сервере";
+                if(Json.Bool(union,"truncated"))mark=presence=="both"?"в обоих":"обнаружено "+(presence=="local"?"здесь":"на сервере")+" (список неполный)";
+                var n=new TreeNode((slash<0?path:path.Substring(slash+1))+" — "+mark){Tag=path};
+                if(slash<0 && Json.Str(row,"kind")=="file"){n.Tag="";n.Text+=" — поместите в папку проекта для синхронизации";}
+                if(Json.Str(row,"kind")=="directory" && Json.Bool(row,"hasChildren"))n.Nodes.Add(new TreeNode("Загрузка при раскрытии…"));
+                children.Add(n);
+            }
+            selection.Level(prefix,children.Where(n=>Convert.ToString(n.Tag).Length>0).Select(n=>(string)n.Tag),Json.Bool(union,"truncated"));
+            var target=parent==null?tree.Nodes:parent.Nodes;
+            target.Clear();target.AddRange(children.ToArray());RefreshTreeChecks();
+            if(Json.Bool(union,"truncated"))Append("Показана часть большой папки. Отметка папки включает скрытые элементы. Для частичного выбора снимите всю папку, затем отметьте нужные видимые элементы.");
+        }
         async Task LoadTree()
         {
-            var data=await Run("DiskTree",new { @base=diskBase.Text.Trim() });var union=Json.Map(Json.Get(data,"union"));var selected=Json.Strings(Json.Get(Json.Map(Json.Get(data,"selection")),"paths"));
-            tree.Nodes.Clear();var dict=new Dictionary<string,TreeNode>(StringComparer.Ordinal);changingTree=true;
-            try {
-                foreach(var r in Json.Array(Json.Get(union,"rows"))) {
-                    var row=Json.Map(r);string path=Json.Str(row,"path"),presence=Json.Str(row,"presence");int slash=path.LastIndexOf('/');TreeNode parent=null;
-                    if(slash>=0 && !dict.TryGetValue(path.Substring(0,slash),out parent))throw new InvalidDataException("Неполное дерево сервера");
-                    string mark=presence=="both"?"в обоих":presence=="local"?"только здесь":"только на сервере";
-                    var n=new TreeNode((slash<0?path:path.Substring(slash+1))+" — "+mark){Tag=path};if(parent==null)tree.Nodes.Add(n);else parent.Nodes.Add(n);dict.Add(path,n);
-                    bool loose=slash<0 && Json.Str(row,"kind")=="file";
-                    if(loose){n.Tag="";n.Text+=" — поместите в папку проекта для синхронизации";}
-                    n.Checked=!loose && selected.Any(p=>path==p || path.StartsWith(p+"/",StringComparison.Ordinal));
-                }
-                absentSelection=selected.Where(p=>!dict.ContainsKey(p)).ToArray();treeLoaded=true;MarkPartial();
-            }finally{changingTree=false;}
-            Append("Показано объединение сервера и ПК. В обоих местах означает наличие пути, а не совпадение содержимого.");
+            treeLoaded=false;
+            var data=await Run("DiskTree",new { @base=diskBase.Text.Trim(),path="" });
+            selection=new DiskTreeSelection(Json.Strings(Json.Get(Json.Map(Json.Get(data,"selection")),"paths")));
+            changingTree=true;try {AddTreeLevel(Json.Map(Json.Get(data,"union")),null);treeLoaded=true;}finally{changingTree=false;}
+            Append("Загружен корень Disk. Дети папки загружаются при раскрытии. Наличие в обоих местах не подтверждает совпадение содержимого.");
+        }
+        async Task LoadChildren(TreeNode parent)
+        {
+            var data=await Run("DiskTree",new { @base=diskBase.Text.Trim(),path=(string)parent.Tag });
+            changingTree=true;try {AddTreeLevel(Json.Map(Json.Get(data,"union")),parent);}finally{changingTree=false;}
         }
         async Task LoadAccounts()
         {
@@ -266,7 +309,7 @@ namespace RemoteAgents.Launcher
                         result=await Run("Connection",new {catalog=ReadCatalog(),expected=expectedCatalog,shared=shared.Checked});break;
                     case 2:
                         if(!treeLoaded){await LoadTree();return;}
-                        var paths=All(tree.Nodes).Where(n=>Convert.ToString(n.Tag).Length>0 && n.Checked && (n.Parent==null || !n.Parent.Checked)).Select(n=>(string)n.Tag).Concat(absentSelection).Distinct().ToArray();
+                        var paths=selection.Paths;
                         result=await Run("Disk",new {@base=diskBase.Text.Trim(),paths});break;
                     case 3:
                         string apiOrigin=Origin(api.Text),webOrigin=Origin(web.Text);if(string.IsNullOrWhiteSpace(label.Text))throw new IOException("Укажите имя своего аккаунта");

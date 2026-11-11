@@ -85,9 +85,9 @@ def reconcile(api,identity):
                 api('config/folders/'+folder_id,'PUT',current)
         except ValueError as e:print('RemoteDisk: '+p.name+': '+str(e),file=sys.stderr)
 
+patterns=[x[4:].lower() for x in (here/'stignore.txt').read_text(encoding='utf-8-sig').splitlines() if x.startswith('(?i)')]
 def selectable(relative):
-    patterns=[x[4:] for x in (here/'stignore.txt').read_text().splitlines() if x.startswith('(?i)')]
-    return all(part not in ('.stignore','.stfolder','.stversions') and not any(fnmatch.fnmatchcase(part.lower(),pat.lower()) for pat in patterns) for part in relative.split('/'))
+    return all(part.lower() not in ('.stignore','.stfolder','.stversions') and not any(fnmatch.fnmatchcase(part.lower(),pat.lower()) for pat in patterns) for part in relative.split('/'))
 def relative_path(root,value):
     if not isinstance(value,str) or not value or value.startswith('/') or any(x in ('','.','..') for x in value.split('/')) or '\\' in value:raise ValueError('Недопустимый путь')
     p=root.joinpath(*value.split('/'));safe(p)
@@ -101,7 +101,7 @@ def main():
     if payload=='--stdin':
         with os.fdopen(3,'r') as stream:payload=stream.read(8*1024*1024+1).replace('\r','').strip()
         if len(payload)>8*1024*1024:raise ValueError('Запрос слишком велик')
-    data=json.loads(base64.b64decode(payload,validate=True)) if payload else {}
+    data={} if action=='tree' else (json.loads(base64.b64decode(payload,validate=True)) if payload else {})
     if action=='install-auto':
         units=Path.home()/'.config/systemd/user';safe(units);units.mkdir(parents=True,exist_ok=True)
         script=s/'server-disk.sh'
@@ -113,7 +113,39 @@ def main():
         subprocess.run(['systemctl','--user','enable','--now','remote-disk-folders.timer'],check=True)
         print('{}');return
     if action=='channel-config':print(json.dumps(channel(data)));return
-    if action in ('list','tree'):
+    if action=='tree':
+        disk=Path.home()/'Disk';safe(disk)
+        relative=(payload or '').replace('\r','').rstrip('\n')
+        directory=relative_path(disk,relative) if relative else disk
+        if relative:folder_path(relative.split('/')[0])
+        limit=2000
+        def children(parent,prefix):
+            if not parent.exists():return
+            if not parent.is_dir():raise ValueError('Ожидалась папка')
+            # scandir stays bounded in memory and never descends into project sources.
+            with os.scandir(parent) as stream:
+                for child in stream:
+                    value=(prefix+'/' if prefix else '')+child.name
+                    if child.is_symlink() or not selectable(value):continue
+                    if any(c in child.name for c in '<>:"\\|?*') or re.search(r'[\x00-\x1f]',child.name) or child.name.endswith((' ','.')):continue
+                    if re.match(r'(?i)^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)',child.name):continue
+                    if not prefix and child.is_dir(follow_symlinks=False):
+                        try:folder_path(child.name)
+                        except ValueError:continue
+                    if child.is_dir(follow_symlinks=False) or child.is_file(follow_symlinks=False):yield child,value
+        entries=[];truncated=False
+        for child,value in children(directory,relative):
+            if len(entries)>=limit:truncated=True;break
+            is_dir=child.is_dir(follow_symlinks=False)
+            has_children=False
+            if is_dir:
+                iterator=children(Path(child.path),value)
+                try:has_children=next(iterator,None) is not None
+                finally:iterator.close()
+            entries.append(dict(path=value,directory=is_dir,hasChildren=has_children))
+        entries.sort(key=lambda x:x['path'])
+        print(json.dumps(dict(schema=1,parent=relative,folders=[],entries=entries,truncated=truncated)));return
+    if action=='list':
         disk=Path.home()/'Disk';safe(disk);root=E.parse(cfg).getroot() if cfg.exists() else E.Element('configuration');rows=[]
         for p in sorted(disk.iterdir()) if disk.exists() else []:
             if not p.is_dir() or p.is_symlink():continue
@@ -122,22 +154,6 @@ def main():
             ids=[f.get('id') for f in root.findall('folder') if f.get('path','').rstrip('/')==str(p)]
             if len(ids)>1:raise ValueError('Несколько ID для одной папки')
             rows.append(dict(name=p.name,id=ids[0] if ids else fid(p.name),hasFiles=has_files(p)))
-        if action=='tree':
-            entries=[]
-            def walk(root,rel=''):
-                for child in sorted(root.iterdir()):
-                    value=(rel+'/' if rel else '')+child.name
-                    if child.is_symlink() or not selectable(value):continue
-                    # Names Windows/Syncthing cannot represent are not offered as selectable.
-                    if any(c in child.name for c in '<>:"\\|?*') or re.search(r'[\x00-\x1f]',child.name) or child.name.endswith((' ','.')):continue
-                    if re.match(r'(?i)^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)',child.name):continue
-                    if not child.is_dir() and not child.is_file():continue
-                    entries.append(dict(path=value,directory=child.is_dir()))
-                    if len(entries)>20000:raise ValueError('Дерево слишком велико')
-                    if child.is_dir():walk(child,value)
-            for row in rows:
-                walk(folder_path(row['name']),row['name'])
-            print(json.dumps(dict(schema=1,folders=rows,entries=entries)));return
         print(json.dumps(rows));return
     if action in ('attach','detach'):
         p=folder_path(data['name'])
@@ -195,12 +211,14 @@ def main():
             status=api('db/status?folder='+urllib.parse.quote(folder_id,safe=''))
             completion=api('db/completion?folder='+urllib.parse.quote(folder_id,safe='')+'&device='+urllib.parse.quote(data['deviceId'],safe=''))
             if status.get('state')!='idle' or any(status.get(k,-1)!=0 for k in ('needBytes','needTotalItems','pullErrors')) or completion.get('completion')!=100 or any(completion.get(k,-1)!=0 for k in ('needBytes','needItems')):raise ValueError('Сервер ещё не синхронизирован')
-            hashes={}
+            hashes={};missing=[]
             for value in data['paths']:
                 f=relative_path(p,value)
+                if not f.exists() and data.get('allowMissing'):
+                    missing.append(value);continue
                 if not f.is_file():raise ValueError('Нет серверной копии')
                 with f.open('rb') as stream:hashes[value]=hashlib.file_digest(stream,'sha256').hexdigest()
-            print(json.dumps(dict(ok=True,hashes=hashes)));return
+            print(json.dumps(dict(ok=True,hashes=hashes,missing=missing)));return
         if action=='add-device':
             api('config/devices/'+data['deviceId'],'PUT',dict(deviceID=data['deviceId'],name=data.get('deviceName','RemoteDisk'),addresses=data.get('addresses',['dynamic']),autoAcceptFolders=False))
         if action in ('reconcile','bootstrap','add-device'):

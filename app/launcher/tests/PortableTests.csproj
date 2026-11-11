@@ -9,6 +9,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="PortableJson.cs" />
+    <Compile Include="DiskTreeTests.cs" />
     <Compile Include="../UpgradeInstaller.cs" Link="UpgradeInstaller.cs" />
     <Compile Include="../StatusView.cs" Link="StatusView.cs" />
     <Compile Include="../Data.cs" Link="Data.cs" />
@@ -16,5 +17,7 @@
     <Compile Include="../UpdateSelfTests.cs" Link="UpdateSelfTests.cs" />
     <Compile Include="../SshUpdate.cs" Link="SshUpdate.cs" />
     <Compile Include="../NativeJob.cs" Link="NativeJob.cs" />
+    <Compile Include="../WizardStep.cs" Link="WizardStep.cs" />
+    <Compile Include="../DiskTreeSelection.cs" Link="DiskTreeSelection.cs" />
   </ItemGroup>
 </Project>

@@ -7,6 +7,7 @@ $lock=$null
 try {
     $lock=[IO.File]::Open((Join-Path $script:DiskHome 'folders.lock'),'OpenOrCreate','ReadWrite','None')
     Read-DiskState
+    Resume-InterruptedSelection
     if(-not $BasePath){$BasePath=Get-DiskBase};$BasePath=[IO.Path]::GetFullPath($BasePath);[void][IO.Directory]::CreateDirectory($BasePath)
     # Manual accept in the tray offers the same base.
     $defaults=Invoke-DiskApi 'config/defaults/folder';if($defaults.path -cne $BasePath){[void](Invoke-DiskApi 'config/defaults/folder' PATCH @{path=$BasePath})}

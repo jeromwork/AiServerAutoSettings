@@ -62,20 +62,25 @@ $base=Join-Path $TestHome 'Disk';[void][IO.Directory]::CreateDirectory((Join-Pat
 [IO.File]::WriteAllText((Join-Path $base 'Project/.env'),'never enumerate')
 [void][IO.Directory]::CreateDirectory((Join-Path $base 'LocalOnly'))
 $tree=ConvertFrom-Json ('{"folders":[{"name":"Project"},{"name":"ServerOnly"}],"entries":[{"path":"Project/both.txt","directory":false},{"path":"Project/remote.txt","directory":false}]}'+"`r`n")
-$union=Get-DiskUnion $tree $base
+$rootTree=ConvertFrom-Json ('{"folders":[{"name":"Project","hasChildren":true},{"name":"ServerOnly","hasChildren":false}],"entries":[]}'+"`r`n")
+$rootUnion=Get-DiskUnion $rootTree $base
+Assert (@($rootUnion.rows|Where-Object {$_.path -match '/'}).Count -eq 0) 'initial inventory is root only'
+Assert (@($rootUnion.rows|Where-Object {$_.path -ceq 'Project' -and $_.hasChildren -and $_.presence -eq 'both'}).Count -eq 1) 'root union has lazy child flag'
+$tree.folders=@()
+$union=Get-DiskUnion $tree $base 'Project'
 Assert (@($union.rows|Where-Object {$_.path -ceq 'Project/both.txt' -and $_.presence -eq 'both'}).Count -eq 1) 'both marker'
 Assert (@($union.rows|Where-Object {$_.path -ceq 'Project/local.txt' -and $_.presence -eq 'local'}).Count -eq 1) 'local-only marker'
 Assert (@($union.rows|Where-Object {$_.path -ceq 'Project/remote.txt' -and $_.presence -eq 'server'}).Count -eq 1) 'server-only marker'
-Assert (@($union.rows|Where-Object {$_.path -ceq 'LocalOnly' -and $_.presence -eq 'local'}).Count -eq 1) 'local-only project included'
-Assert (@($union.rows|Where-Object {$_.path -ceq 'ServerOnly' -and $_.presence -eq 'server'}).Count -eq 1) 'server-only project included'
+Assert (@($rootUnion.rows|Where-Object {$_.path -ceq 'LocalOnly' -and $_.presence -eq 'local'}).Count -eq 1) 'local-only project included'
+Assert (@($rootUnion.rows|Where-Object {$_.path -ceq 'ServerOnly' -and $_.presence -eq 'server'}).Count -eq 1) 'server-only project included'
 Assert (@($union.rows|Where-Object {$_.path -ceq 'Project/empty' -and $_.kind -eq 'directory'}).Count -eq 1) 'empty local directory included'
 Assert (@($union.rows|Where-Object {$_.path -like '*.env*'}).Count -eq 0) 'secrets excluded from union'
-Assert (@($union.rows|Where-Object {$_.path -ceq 'loose.txt' -and $_.presence -eq 'local' -and $_.kind -eq 'file'}).Count -eq 1) 'loose root files are visible and never silently omitted'
+Assert (@($rootUnion.rows|Where-Object {$_.path -ceq 'loose.txt' -and $_.presence -eq 'local' -and $_.kind -eq 'file'}).Count -eq 1) 'loose root files are visible and never silently omitted'
 Assert ([IO.File]::ReadAllText((Join-Path $base 'Project/local.txt')) -ceq 'preserve me') 'tree does not modify local files'
 $collision=Copy-TransportObject $tree;$collision.entries[0].path='Project/BOTH.txt'
-Throws {Get-DiskUnion $collision $base} 'case collision fails before syncing to Windows'
+Throws {Get-DiskUnion $collision $base 'Project'} 'case collision fails before syncing to Windows'
 $collision=Copy-TransportObject $tree;$collision.entries[0].directory=$true
-Throws {Get-DiskUnion $collision $base} 'file-directory conflict remains intact'
+Throws {Get-DiskUnion $collision $base 'Project'} 'file-directory conflict remains intact'
 # First setup connection persists public settings; it does not replace H's old channel refs.
 function Test-MigrationFresh($Root,$Name){$false}
 $config=Read-TransportJson (Join-Path $root 'config.json');$config.transport|Add-Member hops @([pscustomobject]@{name='old';legacyOutbound='via-hop';legacyChannelPath='local-only.json';enabled=$true});Write-TransportJson (Join-Path $root 'config.json') $config

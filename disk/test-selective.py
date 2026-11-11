@@ -72,8 +72,13 @@ Set-ProjectSelection $folder $Chosen
         check(not (b['folder']/'other.txt').exists(),'unselected root excluded')
         check(not (b['folder']/'src/deep/.env').exists() and not (b['folder']/'src/deep/node_modules').exists(),'mandatory exclusions before includes')
         check((b['folder']/'x[a]{b}.txt').read_text()=='literal','literal glob chars in real engine')
-        tree=t.server(a,'tree')
+        tree=json.loads(t.run(['bash',str(t.HERE/'server-disk.sh'),'tree','project/src/deep'],a['env']).stdout)
         check(any(x['path']=='project/src/deep/chosen.txt' for x in tree['entries']) and not any(x['path'].endswith('.env') for x in tree['entries']),'SSH tree excludes secret entries')
+        # One-level inventory must still preserve an unchecked local-only file on Apply.
+        (b['folder']/'only-here.txt').write_text('never sent')
+        apply(['src/deep','one.txt','x[a]{b}.txt'])
+        check((b['folder']/'only-here.txt').read_text()=='never sent','remote missing receipt retains unchecked local-only content')
+        check(not (a['folder']/'only-here.txt').exists(),'unchecked local-only file stays ignored')
         # Disable the peer and create a newer local version: absolutely no deletion.
         t.api(b,'config/devices/'+a['deviceId'],'PATCH',dict(paused=True))
         t.wait(lambda:not t.api(b,'system/connections')['connections'].get(a['deviceId'],{}).get('connected'),'disconnected')

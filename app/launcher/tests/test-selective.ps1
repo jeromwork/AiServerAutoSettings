@@ -31,7 +31,7 @@ $script:phase='idle';$script:need=0;$script:serverMatches=$true;$script:paused=$
 function Invoke-DiskApi($Route,$Method='GET',$Body=$null){
     if($Route -like 'db/scan*'){return}
     if($Route -eq 'config/folders/fixture'){
-        if($Method -eq 'PATCH'){$script:paused=$Body.paused;return};return [pscustomobject]@{paused=$script:paused}
+        if($Method -eq 'PATCH'){$script:paused=$Body.paused;return};return [pscustomobject]@{paused=$script:paused;path=$script:fixtureFolder}
     }
     if($Route -eq 'system/status'){return [pscustomobject]@{myID='local'}}
     if($Route -like 'db/status*'){return [pscustomobject]@{state=$(if($script:paused){''}else{$script:phase});needBytes=$script:need;needTotalItems=0;pullErrors=0;receiveOnlyChangedBytes=0;receiveOnlyTotalItems=0}}
@@ -65,6 +65,24 @@ $script:removedReceipt=$false
 Set-ProjectSelection $f @() -KeepLocal @('only-here.txt')
 Assert ((Test-Path (Join-Path $folder 'only-here.txt')) -and -not $script:removedReceipt) 'unchecked local-only content remains, no server receipt needed'
 Assert ([IO.File]::ReadAllText((Join-Path $folder '.stignore')).EndsWith("*`n")) 'unchecked local-only content is excluded before resume'
+$pauseReceipt=(Get-SelectionPolicyFile $folder)+'.paused.json'
+$localOnly=Join-Path $folder 'only-here.txt'
+[IO.File]::Move($localOnly,(Get-SelectionStagedFile $localOnly $folder))
+Write-SelectionState $pauseReceipt ((@{id='fixture';path=$folder;paths=@('only-here.txt')}|ConvertTo-Json -Compress)+"`r`n")
+$script:paused=$true
+Resume-InterruptedSelection
+Assert (-not $script:paused -and -not (Test-Path $pauseReceipt) -and (Test-Path (Join-Path $folder 'only-here.txt'))) 'interrupted verification move restores local file and resumes (CRLF receipt)'
+Resume-InterruptedSelection
+Assert (-not $script:paused) 'interrupted pause recovery is idempotent'
+Write-SelectionState $pauseReceipt (@{id='fixture';path=(Join-Path $folder 'different')}|ConvertTo-Json -Compress)
+$script:paused=$true;$failed=$false;try{Resume-InterruptedSelection}catch{$failed=$true}
+Assert ($failed -and $script:paused -and (Test-Path $pauseReceipt)) 'changed project path blocks automatic resume'
+[IO.File]::Delete($pauseReceipt);$script:paused=$false
+$script:realSelectionFiles=(Get-Command Get-SelectionFiles).ScriptBlock
+function Get-SelectionFiles {throw 'full-folder selection must not enumerate descendants'}
+Set-ProjectSelection $f @('.')
+Assert (-not $script:paused -and (Test-Path (Join-Path $folder 'only-here.txt'))) 'unopened whole project applies without recursive inventory'
+Set-Item Function:Get-SelectionFiles $script:realSelectionFiles
 [IO.File]::WriteAllText((Join-Path $folder '.stignore'),'// RemoteDisk selective v1'+"`n!/**`n")
 $failed=$false;try{Test-DiskIgnores $folder -Write}catch{$failed=$true}
 Assert $failed 'forged managed comment does not bypass policy validation'

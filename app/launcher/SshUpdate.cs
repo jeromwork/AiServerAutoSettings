@@ -16,15 +16,7 @@ namespace RemoteAgents.Launcher
         {
             token.ThrowIfCancellationRequested();
             using (var job = new NativeJob()) using (var process = job.StartRedirected(exe, args, cwd, output)) {
-                var watch = Stopwatch.StartNew();
-                while (!process.WaitForExit(100)) {
-                    token.ThrowIfCancellationRequested();
-                    if (watch.ElapsedMilliseconds > timeoutMs) throw new IOException("Внешняя команда не завершилась");
-                    if (output != null && new FileInfo(output).Length > maxBytes) throw new IOException("Вывод команды слишком велик");
-                }
-                token.ThrowIfCancellationRequested();
-                if (output != null && new FileInfo(output).Length > maxBytes) throw new IOException("Вывод команды слишком велик");
-                return process.ExitCode;
+                return WizardStep.Wait(process, output, timeoutMs, maxBytes, token);
             }
         }
         [System.Runtime.InteropServices.DllImport("kernel32.dll")] static extern uint GetOEMCP();

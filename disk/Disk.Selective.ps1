@@ -10,12 +10,12 @@ function Get-SelectionPaths($Selection) {
 function Test-SelectionIncluded([string]$Path,$Paths) {
     foreach($p in @($Paths)){if($Path -ceq $p -or $Path.StartsWith($p+'/',[StringComparison]::Ordinal)){return $true}};return $false
 }
+# Cache once per process; a tree level must not reopen stignore for every entry.
+$script:SelectionProtectedPatterns=@([IO.File]::ReadAllLines((Join-Path $PSScriptRoot 'stignore.txt'))|Where-Object {$_.StartsWith('(?i)')}|ForEach-Object {$_.Substring(4)})
 function Test-SelectionProtected([string]$Path) {
     foreach($part in $Path.Split('/')){
         if($part -in @('.stignore','.stfolder','.stversions')){return $true}
-        foreach($line in [IO.File]::ReadAllLines((Join-Path $PSScriptRoot 'stignore.txt'))){
-            if($line.StartsWith('(?i)')){if($part -like $line.Substring(4)){return $true}}
-        }
+        foreach($pattern in $script:SelectionProtectedPatterns){if($part -like $pattern){return $true}}
     };return $false
 }
 function Escape-SelectionPattern([string]$Path) { [regex]::Replace($Path,'[\[\]{}!#]', {param($m) '\'+$m.Value}) }
@@ -70,13 +70,18 @@ function Set-ProjectSelection($Folder,[string[]]$Paths,[string[]]$KeepLocal=@())
         if($actual -cne $expected){Test-DiskIgnores $root}
     }
     $rules=New-SelectionIgnores $Paths
-    $remove=@(Get-SelectionFiles $root|Where-Object { -not ('.' -in $Paths) -and -not (Test-SelectionIncluded $_ $Paths) -and $_ -cnotin $KeepLocal })
+    $remove=@()
+    if('.' -notin $Paths){$remove=@(Get-SelectionFiles $root|Where-Object { -not (Test-SelectionIncluded $_ $Paths) -and $_ -cnotin $KeepLocal })}
     if($remove.Count){
         # Force a scan first; a stale idle status is not proof that current files reached the server.
         [void](Invoke-DiskApi ('db/scan?folder='+$id) POST)
         Assert-SelectionSynced (Invoke-DiskApi ('db/status?folder='+$id))
     }
     $route='config/folders/'+$id
+    # The scheduled companion holds the same folders.lock. If PowerShell is killed,
+    # it resumes only this previously running folder; old/new ignores are atomic.
+    $pauseReceipt=(Get-SelectionPolicyFile $root)+'.paused.json'
+    Write-SelectionState $pauseReceipt (@{id=$Folder.id;path=$root;paths=$remove}|ConvertTo-Json -Compress)
     [void](Invoke-DiskApi $route PATCH @{paused=$true})
     # Wait for actual engine suspension before touching files or ignores.
     $paused=$false
@@ -88,8 +93,10 @@ function Set-ProjectSelection($Folder,[string[]]$Paths,[string[]]$KeepLocal=@())
     try{
         if($remove.Count){
             $device=(Invoke-DiskApi 'system/status').myID
-            $receipt=Invoke-DiskServer verify-selection @{name=$Folder.label;id=$Folder.id;deviceId=$device;paths=$remove}
+            $receipt=Invoke-DiskServer verify-selection @{name=$Folder.label;id=$Folder.id;deviceId=$device;paths=$remove;allowMissing=$true}
             if(-not $receipt.ok){throw 'Серверная копия не подтверждена'}
+            # Missing remote files are local-only. Keep them ignored, exactly as before lazy inventory.
+            $remove=@($remove|Where-Object {$_ -cnotin @($receipt.missing)})
         }
         # Ignore first, delete second. A crash cannot publish a deletion to the server.
         # File handles deny writes; retain all handles until hashes match and ignores are installed.
@@ -113,12 +120,12 @@ function Set-ProjectSelection($Folder,[string[]]$Paths,[string[]]$KeepLocal=@())
             }
         }finally{foreach($entry in $handles){$entry.stream.Dispose()}}
         # Empty ancestors may be removed; protected files and selected empty directories remain.
-        foreach($dir in @(Get-ChildItem -LiteralPath $root -Directory -Recurse -Force|Sort-Object FullName -Descending)){
+        if('.' -notin $Paths){foreach($dir in @(Get-ChildItem -LiteralPath $root -Directory -Recurse -Force|Sort-Object FullName -Descending)){
             $rel=$dir.FullName.Substring($root.TrimEnd('\','/').Length+1).Replace('\','/')
             if($dir.Attributes -band [IO.FileAttributes]::ReparsePoint){continue}
             if(-not (Test-SelectionProtected $rel) -and -not ('.' -in $Paths) -and -not (Test-SelectionIncluded $rel $Paths) -and @(Get-ChildItem -LiteralPath $dir.FullName -Force).Count -eq 0){[IO.Directory]::Delete($dir.FullName,$false)}
-        }
-    }finally{[void](Invoke-DiskApi $route PATCH @{paused=$false})}
+        }}
+    }finally{[void](Invoke-DiskApi $route PATCH @{paused=$false});[IO.File]::Delete($pauseReceipt)}
 }
 
 function Get-SelectionPolicyFile([string]$Path) {
@@ -127,7 +134,36 @@ function Get-SelectionPolicyFile([string]$Path) {
     Join-Path $script:DiskHome ('selection-policies/'+$id+'.txt')
 }
 function Save-SelectionPolicy([string]$Path,[string]$Rules) {
-    $file=Get-SelectionPolicyFile $Path;[void][IO.Directory]::CreateDirectory((Split-Path $file -Parent))
+    Write-SelectionState (Get-SelectionPolicyFile $Path) $Rules
+}
+function Resume-InterruptedSelection {
+    $directory=Join-Path $script:DiskHome 'selection-policies'
+    if(-not (Test-Path -LiteralPath $directory)){return}
+    foreach($file in @(Get-ChildItem -LiteralPath $directory -Filter '*.paused.json' -File)){
+        $receipt=[IO.File]::ReadAllText($file.FullName).Replace("`r",'')|ConvertFrom-Json
+        $folder=Invoke-DiskApi ('config/folders/'+[Uri]::EscapeDataString([string]$receipt.id))
+        if([IO.Path]::GetFullPath($folder.path) -cne [IO.Path]::GetFullPath([string]$receipt.path)){throw 'Путь прерванного выбора изменился; проверьте журнал диска'}
+        # A kill can interrupt the verification move. Return staged files before resuming;
+        # if an editor recreated the source, keep both versions and log the recovery copy.
+        foreach($relative in @($receipt.paths)){
+            Assert-SelectionPath ([string]$relative)
+            $source=Join-Path $receipt.path ([string]$relative);$staged=Get-SelectionStagedFile $source $receipt.path
+            foreach($value in @($source,$staged)){
+                for($p=$value;$p;$p=[IO.Path]::GetDirectoryName($p)){
+                    if((Test-Path -LiteralPath $p) -and ([IO.File]::GetAttributes($p) -band [IO.FileAttributes]::ReparsePoint)){throw 'Ссылки в прерванном выборе запрещены'}
+                }
+            }
+            if([IO.File]::Exists($staged)){
+                if(-not (Test-Path -LiteralPath $source)){[IO.File]::Move($staged,$source)}
+                else{Write-DiskLog ('Прерванный выбор: копия сохранена '+$staged)}
+            }
+        }
+        [void](Invoke-DiskApi ('config/folders/'+[Uri]::EscapeDataString([string]$receipt.id)) PATCH @{paused=$false})
+        [IO.File]::Delete($file.FullName);Write-DiskLog 'Прерванный выбор: синхронизация продолжена'
+    }
+}
+function Write-SelectionState([string]$file,[string]$Rules) {
+    [void][IO.Directory]::CreateDirectory((Split-Path $file -Parent))
     $temp=$file+'.'+[guid]::NewGuid().ToString('N')+'.tmp';$backup=$temp+'.old'
     try{
         $stream=New-Object IO.FileStream($temp,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
@@ -161,10 +197,13 @@ function Initialize-ProjectSelection([string]$Root,[string[]]$Paths) {
     [IO.File]::SetAttributes($ignore,([IO.File]::GetAttributes($ignore) -bor [IO.FileAttributes]::Hidden))
 }
 
+function Get-SelectionStagedFile([string]$File,[string]$Root) {
+    Join-Path (Join-Path $Root '.stfolder') ('deselected-'+[IO.Path]::GetFileNameWithoutExtension((Get-SelectionPolicyFile $File)))
+}
 function Remove-SelectionVerified([string]$File,[string]$Hash,[string]$Root) {
     $marker=Join-Path $Root '.stfolder'
     if(-not [IO.Directory]::Exists($marker) -or ([IO.File]::GetAttributes($marker) -band [IO.FileAttributes]::ReparsePoint)){throw 'Нет безопасного маркера папки Syncthing'}
-    $staged=Join-Path $marker ('deselected-'+[guid]::NewGuid().ToString('N'))
+    $staged=Get-SelectionStagedFile $File $Root
     [IO.File]::Move($File,$staged)
     $verified=$false
     try{
