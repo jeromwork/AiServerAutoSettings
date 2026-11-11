@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "serverAddress": "server.example.invalid",
+  "serverPort": 22,
+  "hostKeys": [
+    "ssh-ed25519 REPLACE_WITH_SERVER_HOST_PUBLIC_KEY"
+  ],
+  "workerUser": "workuser",
+  "workerAuthorizedKeys": "/home/workuser/.ssh/authorized_keys",
+  "enrollUser": "ra-enroll",
+  "enrollHome": "/var/lib/ra-enroll",
+  "enrollAuthorizedKeys": "/var/lib/ra-enroll/.ssh/authorized_keys",
+  "stateDir": "/var/lib/remoteagents/invites",
+  "outputDir": "/var/lib/remoteagents/invite-downloads",
+  "releaseExe": "/opt/remoteagents/release/RemoteAgents.exe",
+  "enrollHelper": "/usr/local/lib/remoteagents/enroll",
+  "sudoersFile": "/etc/sudoers.d/remoteagents-enroll",
+  "routes": [
+    {
+      "kind": "direct"
+    }
+  ],
+  "publishNodes": {},
+  "version": 1
+}

@@ -1,0 +1,198 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RemoteAgents invite server settings",
+  "type": "object",
+  "required": [
+    "schema",
+    "version",
+    "serverAddress",
+    "serverPort",
+    "hostKeys",
+    "workerUser",
+    "enrollUser",
+    "routes",
+    "workerAuthorizedKeys",
+    "enrollHome",
+    "enrollAuthorizedKeys",
+    "stateDir",
+    "outputDir",
+    "releaseExe",
+    "enrollHelper",
+    "sudoersFile"
+  ],
+  "properties": {
+    "workerAuthorizedKeys": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "enrollHome": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "enrollAuthorizedKeys": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "stateDir": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "outputDir": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "releaseExe": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "enrollHelper": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "sudoersFile": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "schema": {
+      "const": 1
+    },
+    "version": {
+      "const": 1
+    },
+    "serverAddress": {
+      "type": "string",
+      "minLength": 1
+    },
+    "serverPort": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "hostKeys": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    },
+    "workerUser": {
+      "type": "string",
+      "pattern": "^[a-z_][a-z0-9_-]{0,31}$"
+    },
+    "enrollUser": {
+      "type": "string",
+      "pattern": "^[a-z_][a-z0-9_-]{0,31}$"
+    },
+    "routes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "direct",
+              "proxy",
+              "hop"
+            ]
+          },
+          "proxy": {
+            "type": "object",
+            "required": [
+              "type",
+              "host",
+              "port"
+            ],
+            "properties": {
+              "type": {
+                "enum": [
+                  "socks",
+                  "http"
+                ]
+              },
+              "host": {
+                "type": "string",
+                "minLength": 1
+              },
+              "port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              }
+            },
+            "additionalProperties": false
+          },
+          "hop": {
+            "type": "object",
+            "required": [
+              "ssh",
+              "hostKey"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "ssh": {
+                "type": "string"
+              },
+              "hostKey": {
+                "type": "string"
+              },
+              "keyFile": {
+                "type": "string"
+              },
+              "passwordFile": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "happierAccount": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "sandbox": {
+      "type": "boolean"
+    },
+    "publishNodes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "baseUrl"
+        ],
+        "properties": {
+          "directory": {
+            "type": "string"
+          },
+          "baseUrl": {
+            "type": "string"
+          },
+          "listenHost": {
+            "type": "string"
+          },
+          "ssh": {
+            "type": "string"
+          },
+          "sshConfig": {
+            "type": "string"
+          },
+          "listenPort": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

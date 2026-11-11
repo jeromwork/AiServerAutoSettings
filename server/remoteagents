@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+if [[ "${1:-}" != invite ]]; then echo 'Использование: remoteagents invite ...' >&2; exit 2; fi
+shift
+exec python3 -I "$here/invite.py" "$@"
