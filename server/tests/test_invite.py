@@ -335,6 +335,18 @@ class InviteTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout.decode()+result.stderr.decode())
         print(result.stdout.decode().strip())
 
+    def test_publisher_needs_no_root_or_identity_provisioning(self):
+        from unittest.mock import patch
+        public = dict(self.b.c, sandbox=False)
+        self.b.cfg.write_text(json.dumps(public))
+        trusted = type('Stat', (), {'st_uid': os.getuid(), 'st_mode': 0o100600})()
+        with patch.object(invite.Path, 'stat', return_value=trusted):
+            c = invite.config(self.b.cfg, administrative=False)
+        self.assertEqual(c['publishNodes'], {})
+        # Same settings cannot be used to bypass administrative enrollment checks.
+        with self.assertRaises(invite.Error):
+            invite.config(self.b.cfg, administrative=True)
+
     def test_production_provision_idempotent_mock_only(self):
         from unittest.mock import patch
         c = dict(self.b.c, sandbox=False, enrollHome=str(self.b.dir / 'service'), sudoersFile=str(self.b.dir / 'sudoers'))

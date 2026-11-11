@@ -65,7 +65,7 @@ def load(path):
     return json.loads(Path(path).read_text(encoding='utf-8-sig').replace('\r', ''))
 
 
-def config(path):
+def config(path, administrative=True):
     c = load(path)
     require(c.get('schema') == 1 and c.get('version') == 1, 'Неизвестная схема настроек')
     require(isinstance(c.get('sandbox', False), bool), 'sandbox должен быть логическим значением')
@@ -81,11 +81,13 @@ def config(path):
         require(re.fullmatch(r'(ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa) [A-Za-z0-9+/=]+', key), 'Некорректный ключ хоста')
     require(isinstance(c.get('routes'), list) and c['routes'], 'Настройте маршруты')
     if not c.get('sandbox'):
-        require(c['workerUser'] != c['enrollUser'] and c['workerUser'] != 'root' and c['enrollUser'] != 'root', 'Служебный и рабочий пользователь должны быть разными, не root')
-        require(os.geteuid() == 0, 'Команду выполняет администратор сервера (root)')
+        if administrative:
+            require(c['workerUser'] != c['enrollUser'] and c['workerUser'] != 'root' and c['enrollUser'] != 'root', 'Служебный и рабочий пользователь должны быть разными, не root')
+            require(os.geteuid() == 0, 'Команду выполняет администратор сервера (root)')
+        trusted_owner = 0 if administrative else os.geteuid()
         # sudo helper always reads this root-owned file, never caller-controlled env.
         for p in (Path(path), *Path(path).resolve().parents):
-            require(p.stat().st_uid == 0 and p.stat().st_mode & 0o022 == 0, 'Конфиг и предки должны принадлежать root без записи другим')
+            require(p.stat().st_uid in (0, trusted_owner) and p.stat().st_mode & 0o022 == 0, 'Конфиг и предки должны принадлежать доверенному владельцу без записи другим')
     return c
 
 
@@ -378,7 +380,7 @@ def main():
     for verb in ('serve', 'receive'):
         sub.add_parser(verb).add_argument('--node', required=True)
     a = parser.parse_args()
-    c = config(a.config)
+    c = config(a.config, administrative=a.cmd not in ('receive', 'serve'))
     if a.cmd == 'create':
         create(c, a)
     elif a.cmd == 'enroll':
