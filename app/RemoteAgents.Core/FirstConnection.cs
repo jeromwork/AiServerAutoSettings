@@ -23,7 +23,7 @@ public sealed class FirstConnection(SshTransport ssh,Journal journal)
         var xml=XDocument.Load(Path.Combine(folder.Home,"config.xml")); string localId=xml.Root!.Element("device")!.Attribute("id")!.Value;
         string q(string s)=>SshTransport.Quote(s);
         var state=q(folder.ServerState);
-        // Refuse every existing state directory, so neither legacy workers nor interrupted setup get overwritten.
+        // Refuse every existing state directory, so neither running workers nor interrupted setup get overwritten.
         await Check("test \"$(id -u)\" -ne 0 && umask 077 && mkdir -- "+state);
         foreach(var name in new[]{"server-sync.py","server-sync-runtime.py","server-install-sync.sh"}) await Check("umask 077; cat > "+q(folder.ServerState+"/"+name),resource(name));
         await Check("bash "+q(folder.ServerState+"/server-install-sync.sh")+" "+q(folder.ServerState+"/bin"));
