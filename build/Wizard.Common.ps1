@@ -351,6 +351,7 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             Invoke-InstallChild $Bundle 'disk/Select-Disk.ps1' @('-Home',$Root,'-Action','Apply','-SelectionFile',$choice) -TimeoutSeconds 900
             Update-MigrationConfig $Root {param($c) if($c.wizard){$c.wizard.PSObject.Properties.Remove('skipDisk')};Set-MigrationDefault $c components ([pscustomobject]@{});Set-MigrationDefault $c.components disk ([pscustomobject]@{});$c.components.disk|Add-Member -Force enabled $true}
             $hold=Join-Path $Root 'state/disk-reconfigure';if(Test-Path $hold){Remove-Item -LiteralPath $hold}
+            try{Install-DiskNavPane $base}catch{Write-DiskLog 'Значок Disk в Проводнике' $_} # cosmetic: never fails the Disk step
             return @{ok=$true;summary='Выбор применён; передача файлов продолжается. Это ещё не подтверждение завершённой синхронизации'}
         }
         'AccountList' {

@@ -88,6 +88,7 @@ function Start-MigrationDetached($Exe,$Arguments){[void]$script:events.Add('star
 function Wait-MigrationTransport($Root,$Timeout){[void]$script:events.Add('transport-ready')}
 function Test-MigrationSsh($Root,$Port){$true}
 function Start-MigrationControl($Root,$Bundle,$State){[void]$script:events.Add('start-control')}
+function Remove-MigrationNavPane{[void]$script:events.Add('remove-navpane')}
 function Stop-MigrationDisk($DiskRoot){$script:lastDiskRoot=$DiskRoot;[void]$script:events.Add('stop-disk')}
 function Stop-MigrationControl($Root){[void]$script:events.Add('stop-control')}
 function Start-MigrationRun($Command){[void]$script:events.Add('restore-process')}
@@ -131,6 +132,7 @@ $script:failRestore=$true
 try{Invoke-MigrationRollback $root -Force;throw 'Expected incomplete rollback'}catch{Assert ($_.Exception.Message -match 'Откат неполный') 'rollback failure explicit and retryable'}
 Assert ($script:lastDiskRoot -eq $disk) 'rollback restores recorded disk home'
 Assert ($script:runs.Disk -eq 'old-disk' -and $script:runs.Control -eq 'old-control') 'rollback continues independent restorations after failure'
+Assert ($script:events.Contains('remove-navpane')) 'rollback removes the Explorer Disk entry'
 $script:failRestore=$false;Invoke-MigrationRollback $root -Force
 Assert ((Read-TransportJson (Get-MigrationStatePath $root)).phase -eq 'rolled-back' -and -not $script:runs.Launcher) 'uninstall same rollback without waiting'
 Assert ([IO.File]::ReadAllText($ssh) -ceq $original) 'rollback restores SSH without touching other hosts'
