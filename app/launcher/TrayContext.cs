@@ -32,6 +32,8 @@ namespace RemoteAgents.Launcher
         readonly string migrationObserver = Guid.NewGuid().ToString("N");
         DateTime settingsWritten = DateTime.MinValue;
         DateTime nextMigrationCheck = DateTime.MinValue; bool migrationChecking;
+        // Detached server installs started by the wizard (state/server-operations.json).
+        DateTime nextOperationCheck = DateTime.MinValue; bool operationChecking, operationsActive; string operationTip = "";
         // Old installation before migration: the old channel owns the production ports.
         readonly bool legacyHold;
         string updateSummary = "обновления устанавливаются вручную из нового EXE";
@@ -116,11 +118,46 @@ namespace RemoteAgents.Launcher
                     string text = "RemoteVPN: " + StatusView.Summary(vpnStatus); icon.Text = text.Length > 63 ? text.Substring(0, 62) + "…" : text;
                 } else icon.Text = StatusView.Tooltip(transport);
                 if (legacyHold) { icon.Icon = yellow; icon.Text = "RemoteAgents: прежняя связь; ждёт перехода"; }
+                if (operationTip.Length > 0) icon.Text = operationTip.Length > 63 ? operationTip.Substring(0, 62) + "…" : operationTip;
+                if (DateTime.UtcNow >= nextOperationCheck) CheckOperations();
                 RefreshMenu(); WriteStatus();
                 if (!Product.IsVpn && DateTime.UtcNow >= nextMigrationCheck) CheckMigration(false);
                 if (serverUpdateRequested && !engine.Pending && !busy && TrySelfUpdate()) return;
             } catch { log.Write("supervisor.tick.failed"); icon.Icon = red; }
             finally { ticking = false; }
+        }
+        // Tooltip «Идёт установка: x из y» and a «Готово» balloon. While the wizard window is closed the tray
+        // follows the installs itself (short status call every 15 s) and connects a saved Happier key.
+        async void CheckOperations()
+        {
+            if (operationChecking || closing) return; operationChecking = true; nextOperationCheck = DateTime.UtcNow.AddSeconds(15);
+            try {
+                var state = ServerOperations.Load(home); var list = ServerOperations.FromState(state);
+                bool windowPolls = (DateTime.UtcNow - ServerOperations.Updated(state)).TotalSeconds < 30;
+                if (ServerOperations.Active(list) && !windowPolls && !actionBusy && engine.Current.Length != 0) {
+                    string bundle = engine.Folder(engine.Current); var tracked = Json.Strings(Json.Get(state, "tracked"));
+                    var names = tracked.Concat(Json.Bool(state, "pendingAccount") ? new[] { "happier" } : new string[0]).Distinct().ToArray();
+                    var result = await Task.Run(() => ServerOperations.Invoke(home, bundle, "Operation", new { operations = names }, stop.Token));
+                    var operations = Json.Map(Json.Get(result, "operations")); bool pending = Json.Bool(result, "pendingAccount");
+                    if (pending && Json.Str(Json.Map(Json.Get(operations, "happier")), "state") == "finished") {
+                        try {
+                            var account = await Task.Run(() => ServerOperations.Invoke(home, bundle, "ResumeAccount", new { }, stop.Token));
+                            if (Json.Bool(account, "ok")) { pending = false; icon.ShowBalloonTip(5000, Product.Name, "Happier: " + Json.Text(account, "summary", "аккаунт подключён"), ToolTipIcon.Info); }
+                        } catch (OperationCanceledException) { throw; } catch (Exception) { log.Write("operations.account.failed"); pending = false; icon.ShowBalloonTip(10000, Product.Name, "Happier: аккаунт не подключён. Откройте «Настройки» → Happier.", ToolTipIcon.Warning); }
+                    }
+                    ServerOperations.Save(home, tracked, operations, pending);
+                    list = ServerOperations.FromState(ServerOperations.Load(home));
+                }
+                bool active = ServerOperations.Active(list);
+                operationTip = active ? ServerOperations.Tooltip(list) : "";
+                if (operationsActive && !active) {
+                    var failed = list.Where(o => o.State == "failed").ToArray();
+                    if (failed.Length == 0) icon.ShowBalloonTip(5000, Product.Name, "Готово: установка на сервере завершена", ToolTipIcon.Info);
+                    else icon.ShowBalloonTip(10000, Product.Name, failed[0].Title + ": " + ServerOperations.Line(failed[0]) + ". «Повторить» — в «Настройки» → «Установка».", ToolTipIcon.Warning);
+                }
+                operationsActive = active;
+            } catch (OperationCanceledException) { } catch (Exception) { log.Write("operations.check.failed"); }
+            finally { operationChecking = false; }
         }
         async void CheckMigration(bool confirm)
         {

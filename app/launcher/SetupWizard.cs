@@ -29,7 +29,15 @@ namespace RemoteAgents.Launcher
         bool activationRequested, lastSuccess, reconnectDisk, serverChanged, repairingServer; int currentPage;
         readonly bool[] applied = new bool[7], dirty = new bool[7];
         TextBox address, login, password, diskBase, label, accountKey, api, web, vpnCheck, vpnDns;
-        CheckBox installMissing, shared, bridge, shell, vpn, create;
+        CheckBox installMissing, shared, bridge, shell, vpn;
+        RadioButton haveAccount, newAccount; Panel newKeyPanel; TextBox newKeyText; Button openHappier; Label accountKeyCaption;
+        // Long server installs run detached on the server; sections wait (⏳) without blocking the next ones.
+        readonly Dictionary<int,string> waiting = new Dictionary<int,string>();
+        readonly List<string> tracked = new List<string>(); Dictionary<string,object> lastOperations = new Dictionary<string,object>();
+        readonly Panel installPanel = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
+        readonly System.Windows.Forms.Timer operationTimer = new System.Windows.Forms.Timer { Interval = 12000 };
+        readonly CancellationTokenSource pollCancellation = new CancellationTokenSource();
+        bool pendingAccount, polling, showingInstall, resumeAccount, retryConnection;
         DataGridView nodes; TreeView tree; ListBox accounts; Label inventory, accountHint, summary, diskWarning;
         string originalAddress, originalLogin, lanFile = "", lanCommand = "";
         Dictionary<string, object> expectedCatalog; Dictionary<string, object>[] accountRows = new Dictionary<string, object>[0];
@@ -39,7 +47,7 @@ namespace RemoteAgents.Launcher
         bool legacy, migrationRunning, migrationHandover; System.Windows.Forms.Timer migrationTimer; string migrationText = "";
 
         protected override void Dispose(bool disposing)
-        {if(disposing){if(migrationTimer!=null)migrationTimer.Dispose();foreach(var panel in details)if(panel!=null)panel.Dispose();journal.Dispose();}base.Dispose(disposing);}
+        {if(disposing){operationTimer.Dispose();pollCancellation.Dispose();if(migrationTimer!=null)migrationTimer.Dispose();foreach(var panel in details)if(panel!=null)panel.Dispose();journal.Dispose();}base.Dispose(disposing);}
         static string LeaseName(string home)
         {using(var sha=SHA256.Create())return "Global\\RemoteAgents.Wizard."+BitConverter.ToString(sha.ComputeHash(Files.Utf8.GetBytes(Path.GetFullPath(home).ToLowerInvariant()))).Replace("-", "");}
         internal static bool Display(string home, string bundle, bool first, int section = 0, bool activate = false)
@@ -99,7 +107,9 @@ namespace RemoteAgents.Launcher
                 details[i]=new Panel {Width=575,Height=420,AutoScroll=true};
             }
             ServerPage(config);ConnectionPage();DiskPage();AccountPage(config);BridgePage(config);VpnPage(config);LanPage();SummaryPage();
-            steps.Initialize(titles,order);steps.Available=i=>WizardStep.CanOpen(i,currentPage,first,applied,order);
+            pages.Controls.Add(installPanel);
+            steps.Initialize(titles,order);steps.Available=i=>WizardStep.CanOpen(i,currentPage,first,WizardStep.Passable(applied,waiting.Keys),order);
+            steps.ExtraRequested+=ShowInstall;operationTimer.Tick+=async(a,b)=>await PollOperations();
             // Settings: free clicking, the main button applies the open section. First run: walk with «Далее».
             back.Visible=first;
             for(int i=0;i<7;i++) {int section=i;
@@ -111,7 +121,7 @@ namespace RemoteAgents.Launcher
             nodes.CellValueChanged+=(a,b)=>Changed(1);nodes.UserAddedRow+=(a,b)=>Changed(1);
             tree.AfterCheck+=(a,b)=> {if(!changingTree)Changed(2);};
             address.TextChanged+=(a,b)=>InvalidateServer();login.TextChanged+=(a,b)=>InvalidateServer();
-            steps.SectionRequested+=i=> {if(WizardStep.CanOpen(i,currentPage,first,applied,order))SelectPage(i);else{steps.Section=currentPage;Append("Сначала завершите или пропустите раздел «"+titles[currentPage]+"»");}};
+            steps.SectionRequested+=i=> {if(WizardStep.CanOpen(i,currentPage,first,WizardStep.Passable(applied,waiting.Keys),order))SelectPage(i);else{steps.Section=currentPage;Append("Сначала завершите или пропустите раздел «"+titles[currentPage]+"»");}};
             back.Click+=(a,b)=>Navigate(-1);
             next.Click+=async(a,b)=> {
                 int completed=steps.Section;
@@ -123,14 +133,18 @@ namespace RemoteAgents.Launcher
                 Navigate(1);await ContinueServerRepair();await FinishAutomatically();
             };
             close.Click+=(a,b)=>Close();
-            FormClosing+=(a,b)=> {if(busy){b.Cancel=true;closingRequested=true;Append("Отменяю текущую операцию…");stepCancellation.Cancel();}else if(DialogResult!=DialogResult.OK)DialogResult=DialogResult.Cancel;};
+            FormClosing+=(a,b)=> {operationTimer.Stop();pollCancellation.Cancel();if(busy){b.Cancel=true;closingRequested=true;Append("Отменяю текущую операцию…");stepCancellation.Cancel();}else if(DialogResult!=DialogResult.OK)DialogResult=DialogResult.Cancel;};
             Shown+=async(a,b)=> {if(!first)await Inspect();};
             initializing=false;SelectPage(0);
             Append("Готов к настройке. Пароль используется один раз и не сохраняется.");
+            // Reopened window: installs started earlier (even before closing the window or the PC).
+            var saved=ServerOperations.Load(home);tracked.AddRange(Json.Strings(Json.Get(saved,"tracked")));lastOperations=Json.Map(Json.Get(saved,"operations"));pendingAccount=Json.Bool(saved,"pendingAccount");
+            if(pendingAccount)waiting[3]="happier";RefreshInstall();if(tracked.Count>0 || pendingAccount)operationTimer.Start();
         }
         void SelectPage(int index)
         {
             if(index<0 || index>7)return;
+            showingInstall=false;if(!busy)next.Enabled=!migrationRunning;
             currentPage=index;steps.Section=index;sections[index].BringToFront();back.Enabled=!busy && Array.IndexOf(order,index)>0;
             next.Text=first?(index==7?(legacy?"Начать переход":"Готово"):"Далее"):(index==7?"Проверить":"Применить");RefreshSummary();
         }
@@ -235,17 +249,36 @@ namespace RemoteAgents.Launcher
         void AccountPage(Dictionary<string,object> config)
         {
             var settings=Json.Map(Json.Get(config,"happier"));Question(3,"Подключить свой аккаунт Happier?");
-            label=Field(3,"Имя аккаунта",83,Json.Str(settings,"label"));create=Check(3,"Создать новый аккаунт",135,false);accountKey=Field(3,"Ключ аккаунта (пусто — сохранённый)",170,"",true);
+            haveAccount=new RadioButton {Left=16,Top=82,Width=280,Height=24,Text="У меня уже есть аккаунт",Checked=true};
+            newAccount=new RadioButton {Left=300,Top=82,Width=280,Height=24,Text="Создать новый аккаунт"};
+            sections[3].Controls.Add(haveAccount);sections[3].Controls.Add(newAccount);
+            accountKeyCaption=Hint(3,"Секретный ключ аккаунта (пусто — сохранённый на этом компьютере)",112,21);
+            accountKey=new TextBox {Left=16,Top=134,Width=575,UseSystemPasswordChar=true};sections[3].Controls.Add(accountKey);
+            label=Field(3,"Имя аккаунта — чтобы различать аккаунты",160,Json.Str(settings,"label"));
             accounts=new ListBox {Left=16,Top=12,Width=570,Height=80};
             api=Field(3,"HTTPS API Happier",105,Json.Str(settings,"serverUrl"));web=Field(3,"HTTPS Web Happier",165,Json.Str(settings,"webappUrl"));
-            accountHint=Hint(3,"Ключ хранится в secrets. Для телефона используйте тот же ключ в Restore with Secret Key.",235,60);
-            // Move field captions together with their inputs into Details.
+            accountHint=Hint(3,"Ключ хранится только в secrets этого компьютера и передаётся на сервер через SSH stdin. Для телефона — тот же ключ (Happier → Restore with Secret Key). Если Happier на сервере ещё устанавливается, ключ можно ввести сразу: подключение применится само.",235,70);
+            // Technical fields and their captions live under «Подробнее…».
             foreach(Control c in sections[3].Controls.Cast<Control>().Where(c=>c is Label && (c.Top==105 || c.Top==165)).ToArray())Technical(3,c);
             Technical(3,accounts,api,web,accountHint);
             accounts.SelectedIndexChanged+=(a,b)=>{if(accounts.SelectedIndex<0)return;var r=accountRows[accounts.SelectedIndex];label.Text=Json.Str(r,"label");if(Json.Str(r,"serverUrl").Length>0)api.Text=Json.Str(r,"serverUrl");if(Json.Str(r,"webappUrl").Length>0)web.Text=Json.Str(r,"webappUrl");};
             var reload=new Button {Text="Получить аккаунты",Left=16,Top=310,Width=180};reload.Click+=async(a,b)=>{if(!busy)await Guard(LoadAccounts);};details[3].Controls.Add(reload);
-            create.CheckedChanged+=(a,b)=>accountKey.Enabled=!create.Checked;More(3,240);Button(3,"Пропустить",285,()=>Skip("Happier",3),16,120);
+            newAccount.CheckedChanged+=(a,b)=>{accountKey.Visible=accountKeyCaption.Visible=!newAccount.Checked;Changed(3);};
+            More(3,215);Button(3,"Пропустить",215,()=>Skip("Happier",3),150,110);
+            openHappier=new Button {Left=275,Top=215,Width=160,Height=29,Text="Открыть Happier",Visible=false};sections[3].Controls.Add(openHappier);
+            openHappier.Click+=(a,b)=>{try{Process.Start(new ProcessStartInfo(Origin(web.Text)){UseShellExecute=true});}catch(Exception e){Append("Ошибка: "+e.Message);}};
+            // A new key is shown once, right after creation; it is never written to the journal.
+            newKeyPanel=new Panel {Left=16,Top=250,Width=580,Height=92,Visible=false};sections[3].Controls.Add(newKeyPanel);
+            newKeyPanel.Controls.Add(new Label {Left=0,Top=0,Width=575,Height=36,Text="Сохраните ключ: он нужен для других компьютеров и телефона (Happier → Restore with Secret Key). Больше он не будет показан."});
+            newKeyText=new TextBox {Left=0,Top=40,Width=455,ReadOnly=true};newKeyPanel.Controls.Add(newKeyText);
+            var copy=new Button {Left=465,Top=38,Width=110,Height=27,Text="Скопировать"};newKeyPanel.Controls.Add(copy);
+            copy.Click+=(a,b)=>{if(newKeyText.Text.Length>0){Clipboard.SetText(newKeyText.Text);Append("Ключ скопирован в буфер обмена");}};
+            RefreshAccountButtons();
         }
+        void RefreshAccountButtons()
+        {if(openHappier!=null)openHappier.Visible=applied[3] && !waiting.ContainsKey(3) && web.Text.Trim().StartsWith("https://",StringComparison.OrdinalIgnoreCase);}
+        void ShowNewKey(string key)
+        {newKeyText.Text=key;newKeyPanel.Visible=true;}
         void BridgePage(Dictionary<string,object> config)
         {
             var c=Json.Map(Json.Get(config,"bridge"));Question(4,"Разрешить агенту управлять этим ПК?");
@@ -274,7 +307,8 @@ namespace RemoteAgents.Launcher
         void RefreshSummary()
         {
             if(summary!=null)summary.Text=string.Join("\r\n",order.Where(i=>i!=7).Select(i=>titles[i]+": "+(results[i].Length>72?results[i].Substring(0,69)+"…":results[i])));
-            for(int i=0;i<8;i++){if(states[i]!=null){states[i].Text=results[i];states[i].ForeColor=results[i].StartsWith("Ошибка")?Color.Firebrick:SystemColors.ControlText;}steps.Mark(i,(i<7 && applied[i])?"✓":results[i].StartsWith("Ошибка")?"✗":"…");}
+            for(int i=0;i<8;i++){if(states[i]!=null){states[i].Text=results[i];states[i].ForeColor=results[i].StartsWith("Ошибка")?Color.Firebrick:SystemColors.ControlText;}steps.Mark(i,(i<7 && applied[i])?"✓":waiting.ContainsKey(i)?"⏳":results[i].StartsWith("Ошибка")?"✗":"…");}
+            RefreshAccountButtons();
             steps.Invalidate();
             RefreshDiskWarning();
         }
@@ -297,18 +331,20 @@ namespace RemoteAgents.Launcher
                 string failed=Json.Str(result,"migrationError");
                 if(!migrationRunning)results[7]=failed.Length>0?"Ошибка: прошлый переход не выполнен. "+failed:legacy?"Найдена прежняя установка. «Готово» запустит переход с проверкой и автоматическим откатом":results[7];
                 var services=Json.Map(Json.Get(server,"services"));if(api.Text.Length==0)api.Text=Json.Str(services,"serverUrl");if(web.Text.Length==0)web.Text=Json.Str(services,"webappUrl");
+                pendingAccount=Json.Bool(result,"pendingAccount");TrackServer(Json.Map(Json.Get(server,"operations")));
                 var wizard=Json.Map(Json.Get(new Configuration(home).Data,"wizard"));
                 applied[6]=lanCommand.Length>0 || Json.Bool(wizard,"skipLan") || Json.Bool(wizard,"configured");results[6]=lanCommand.Length>0?"Профиль отправлен; включение на сервере":"Не настроена (необязательно)";
                 password.Enabled=!applied[0];
             });
         }
-        async Task Guard(Func<Task> action)
+        async Task Guard(Func<Task> action, int section = -1)
         {
+            int page=section<0?steps.Section:section;
             lastSuccess=false;busy=true;stepCancellation=new CancellationTokenSource();steps.Enabled=false;pages.Enabled=false;foreach(var panel in details)panel.Enabled=false;back.Enabled=next.Enabled=false;close.Enabled=true;progress.Style=ProgressBarStyle.Marquee;
             try {await action();lastSuccess=true;}
-            catch(OperationCanceledException) {if(steps.Section<7)applied[steps.Section]=false;results[steps.Section]="Шаг отменён; готовность не подтверждена";Append(results[steps.Section]);}
-            catch(Exception e) {if(steps.Section==0)password.Enabled=true;if(steps.Section<7)applied[steps.Section]=false;results[steps.Section]="Ошибка: "+e.Message;Append(results[steps.Section]);}
-            finally {busy=false;foreach(var panel in details)panel.Enabled=true;stepCancellation.Dispose();stepCancellation=null;steps.Enabled=pages.Enabled=close.Enabled=true;back.Enabled=Array.IndexOf(order,steps.Section)>0;next.Enabled=!migrationRunning;progress.Style=ProgressBarStyle.Continuous;RefreshSummary();if(closingRequested)Close();}
+            catch(OperationCanceledException) {if(page<7)applied[page]=false;results[page]="Шаг отменён; готовность не подтверждена";Append(results[page]);}
+            catch(Exception e) {if(page==0)password.Enabled=true;if(page<7)applied[page]=false;results[page]="Ошибка: "+e.Message;Append(results[page]);}
+            finally {busy=false;foreach(var panel in details)panel.Enabled=true;stepCancellation.Dispose();stepCancellation=null;steps.Enabled=pages.Enabled=close.Enabled=true;back.Enabled=Array.IndexOf(order,steps.Section)>0;next.Enabled=!migrationRunning && !showingInstall;progress.Style=ProgressBarStyle.Continuous;RefreshSummary();if(closingRequested)Close();}
         }
         void WatchMigration(DateTime activation)
         {
@@ -324,15 +360,15 @@ namespace RemoteAgents.Launcher
             };
             migrationTimer.Start();
         }
-        async Task<Dictionary<string,object>> Run(string action, object request)
+        async Task<Dictionary<string,object>> Run(string action, object request, CancellationToken? quiet = null)
         {
-            string message=action=="Server"?"Подключаюсь к серверу "+address.Text.Trim()+"…":action=="Catalog"?"Загружаю узлы с сервера…":action=="DiskTree"?"Загружаю проекты Disk…":action=="Connection"?"Проверяю варианты связи…":action=="Bridge"?"Настраиваю и проверяю мост…":action=="Inspect"?"Проверяю текущее состояние в фоне…":action=="Lan"?"Копирую профиль локальной сети на сервер…":action=="Account"?"Подключаю Happier…":action=="Disk"?"Применяю выбор проектов…":action=="Vpn"?"Проверяю настройки VPN…":"Завершаю настройку…";
-            Append(message);
+            string message=action=="Server"?"Подключаюсь к серверу "+address.Text.Trim()+"…":action=="Catalog"?"Загружаю узлы с сервера…":action=="DiskTree"?"Загружаю проекты Disk…":action=="Connection"?"Проверяю варианты связи…":action=="Bridge"?"Настраиваю и проверяю мост…":action=="Inspect"?"Проверяю текущее состояние в фоне…":action=="Lan"?"Копирую профиль локальной сети на сервер…":action=="Account"?"Подключаю Happier…":action=="ResumeAccount"?"Happier установлен: подключаю аккаунт…":action=="Disk"?"Применяю выбор проектов…":action=="Vpn"?"Проверяю настройки VPN…":"Завершаю настройку…";
+            if(quiet==null)Append(message);
             string requestFile=Path.Combine(home,"state","wizard-request-"+Guid.NewGuid().ToString("N")+".json"), output=requestFile+".out", live=requestFile+".progress";
             try {
                 Json.Write(requestFile,request);
                 var args=new[]{"-NoLogo","-NoProfile","-NonInteractive","-STA","-ExecutionPolicy","Bypass","-File",Path.Combine(bundle,"build","Wizard.ps1"),"-Home",home,"-Action",action,"-RequestFile",requestFile,"-ProgressFile",live};
-                var token=stepCancellation.Token;
+                var token=quiet ?? stepCancellation.Token;
                 int code;int readLines=0;
                 using(var poll=new System.Windows.Forms.Timer {Interval=150}) {
                 Action readProgress=()=>{try {if(!File.Exists(live))return;string text;using(var stream=new FileStream(live,FileMode.Open,FileAccess.Read,FileShare.ReadWrite))using(var reader=new StreamReader(stream,Files.Utf8)){text=reader.ReadToEnd();}var lines=Files.LF(text).Split('\n');while(readLines<lines.Length-1){var item=Json.Map(Json.Parse(lines[readLines++]));Append(Json.Str(item,"text"));}}catch(IOException){} };
@@ -348,6 +384,86 @@ namespace RemoteAgents.Launcher
                 if(code!=0 || !Json.Bool(response,"ok"))throw new IOException(Json.Text(response,"reason","Шаг не подтверждён: проверьте журнал и повторите")+". "+Json.Str(response,"remedy"));
                 return Json.Map(Json.Get(response,"result"));
             } finally {if(File.Exists(requestFile))File.Delete(requestFile);if(File.Exists(output))File.Delete(output);if(File.Exists(live))File.Delete(live);}
+        }
+        // Common result handling: ok — ready ✓; «pending» — waits for a detached server install (⏳),
+        // which does not block the next sections and completes by itself.
+        bool ApplyResult(int index, Dictionary<string,object> result)
+        {
+            bool ok=Json.Bool(result,"ok",true);string pending=Json.Str(result,"pending");
+            applied[index]=ok;dirty[index]=false;
+            if(pending.Length>0){waiting[index]=pending;TrackOperation(pending);}else waiting.Remove(index);
+            if(index==3){pendingAccount=pending=="happier";if(ok)newKeyPanel.Visible=newKeyText.Text.Length>0;}
+            results[index]=Json.Text(result,"summary",index==0?"Подключено ✓":"Готово: операция подтверждена")+(ok || pending.Length>0?"":" (ожидание, не готово)");Append(titles[index]+": "+results[index]);
+            RefreshInstall();
+            return ok || pending.Length>0;
+        }
+        // Server step / inspection: installs running on the server are tracked by their sections.
+        void TrackServer(Dictionary<string,object> operations)
+        {
+            foreach(var pair in new[]{new KeyValuePair<string,int>("disk",2),new KeyValuePair<string,int>("happier",3)}) {
+                var op=Json.Map(Json.Get(operations,pair.Key));if(Json.Str(op,"state")!="running")continue;
+                lastOperations[pair.Key]=op;TrackOperation(pair.Key);
+                if(!applied[pair.Value]){waiting[pair.Value]=pair.Key;results[pair.Value]=Json.Str(op,"text");}
+            }
+            if(pendingAccount){waiting[3]="happier";TrackOperation("happier");}
+            RefreshInstall();
+        }
+        // API for other sections (e.g. LAN): follow a detached server operation in «Установка».
+        internal void TrackOperation(string name)
+        {
+            if(name==ServerOperations.Account || tracked.Contains(name))return;
+            // A new batch replaces the list of already finished installs.
+            if(!ServerOperations.Active(ServerOperations.Parse(lastOperations,tracked,pendingAccount)))tracked.Clear();
+            tracked.Add(name);SaveOperations();RefreshInstall();operationTimer.Start();
+        }
+        void SaveOperations(){try{ServerOperations.Save(home,tracked,lastOperations,pendingAccount);}catch(Exception){}}
+        async Task PollOperations(string start = null)
+        {
+            if(polling || closingRequested || (tracked.Count==0 && !pendingAccount)){if(tracked.Count==0 && !pendingAccount)operationTimer.Stop();return;}
+            polling=true;
+            try {
+                var names=tracked.Concat(pendingAccount?new[]{"happier"}:new string[0]).Distinct().ToArray();
+                var result=await Run("Operation",new {operations=names,start},pollCancellation.Token);
+                lastOperations=Json.Map(Json.Get(result,"operations"));pendingAccount=Json.Bool(result,"pendingAccount");
+                // A restarted («Повторить») install makes its section wait again.
+                foreach(var pair in new[]{new KeyValuePair<string,int>("disk",2),new KeyValuePair<string,int>("happier",3)})if(Json.Str(Json.Map(Json.Get(lastOperations,pair.Key)),"state")=="running" && !applied[pair.Value])waiting[pair.Value]=pair.Key;
+                foreach(var pair in waiting.ToArray()) {
+                    var op=Json.Map(Json.Get(lastOperations,pair.Value));string state=Json.Str(op,"state");
+                    if(state=="running"){results[pair.Key]=Json.Str(op,"text")+(pair.Key==3 && pendingAccount?". Ключ сохранён: подключение применится автоматически":"");continue;}
+                    waiting.Remove(pair.Key);
+                    if(state=="failed"){results[pair.Key]=Json.Str(op,"text");applied[pair.Key]=false;continue;}
+                    if(pair.Key==3 && pendingAccount)resumeAccount=true;
+                    else if(pair.Key==1)retryConnection=true;
+                    else if(!applied[pair.Key])results[pair.Key]=pair.Key==3?"Happier установлен на сервере. Подключите аккаунт":"Сервер диска установлен. Выберите проекты";
+                }
+                SaveOperations();RefreshSummary();RefreshInstall();
+            } catch(OperationCanceledException) {}
+            catch(Exception e) {lastLine.Text="Состояние установки на сервере не получено: "+e.Message+". Повторю позже";}
+            finally {polling=false;}
+            // Dependent parts complete by themselves once the window is free.
+            if(!busy && !closingRequested && resumeAccount){resumeAccount=false;await Guard(async()=>{var r=await Run("ResumeAccount",new {});ApplyResult(3,r);},3);SaveOperations();RefreshInstall();}
+            if(!busy && !closingRequested && retryConnection){retryConnection=false;await ExecuteSection(1);}
+        }
+        void ShowInstall()
+        {showingInstall=true;installPanel.BringToFront();next.Enabled=false;RefreshInstall();}
+        void RefreshInstall()
+        {
+            var list=ServerOperations.Parse(lastOperations,tracked,pendingAccount);bool visible=ServerOperations.Visible(list);
+            steps.SetExtra(visible?"Установка":null,list.Any(o=>o.State=="failed")?"✗":"⏳");
+            if(!visible && showingInstall){SelectPage(currentPage);return;}
+            if(!visible)return;
+            installPanel.SuspendLayout();
+            foreach(Control c in installPanel.Controls.Cast<Control>().ToArray()){installPanel.Controls.Remove(c);c.Dispose();}
+            installPanel.Controls.Add(new Label {Left=16,Top=8,Width=585,Height=26,Text="Установка на сервере",Font=new Font(Font.FontFamily,12F,FontStyle.Bold)});
+            installPanel.Controls.Add(new Label {Left=16,Top=36,Width=585,Height=40,Text="Долгие операции идут на сервере. Окно можно свернуть или закрыть, компьютер — выключить: установка не прервётся. Пункт исчезнет, когда всё будет готово."});
+            int top=84;
+            foreach(var op in list) {
+                installPanel.Controls.Add(new Label {Left=16,Top=top,Width=585,Height=20,Text=op.Title,Font=new Font(Font,FontStyle.Bold)});
+                installPanel.Controls.Add(new Label {Left=16,Top=top+20,Width=op.State=="failed"?470:585,Height=36,Text=ServerOperations.Line(op),ForeColor=op.State=="failed"?Color.Firebrick:SystemColors.ControlText});
+                if(op.State=="failed" && op.Name!=ServerOperations.Account){string name=op.Name;var retry=new Button {Left=495,Top=top+18,Width=100,Height=27,Text="Повторить"};retry.Click+=async(a,b)=>await PollOperations(name);installPanel.Controls.Add(retry);}
+                top+=62;
+            }
+            installPanel.ResumeLayout();
         }
         async Task LoadCatalog()
         {
@@ -438,9 +554,10 @@ namespace RemoteAgents.Launcher
             Uri uri;if(!Uri.TryCreate(text.Trim(),UriKind.Absolute,out uri) || uri.Scheme!="https" || uri.UserInfo.Length>0 || uri.AbsolutePath!="/" || uri.Query.Length>0 || uri.Fragment.Length>0)throw new IOException("Укажите HTTPS-адрес Happier без пути, пароля и параметров");
             return uri.GetLeftPart(UriPartial.Authority);
         }
-        async Task ExecuteCurrent()
+        async Task ExecuteCurrent() {await ExecuteSection(steps.Section);}
+        async Task ExecuteSection(int index)
         {
-            int index=steps.Section;bool operationReady=true;
+            bool operationReady=true;
             await Guard(async()=> {
                 Dictionary<string,object> result;
                 switch(index) {
@@ -452,6 +569,7 @@ namespace RemoteAgents.Launcher
                         var saved=new Configuration(home).Data;var profile=Json.Read(Json.Text(Json.Map(Json.Get(saved,"wizard")),"pendingProfile",Json.Str(Json.Map(Json.Get(saved,"transport")),"profilePath")));login.Text=Json.Str(profile,"login");originalAddress=address.Text.Trim();originalLogin=login.Text.Trim();password.Enabled=false;
                         inventory.Text="SSH: проверен\r\n"+string.Join("\r\n",new[]{"disk","happier","bridge","catalog"}.Select(k=>(k=="disk"?"Диск-сервер":k=="happier"?"Happier (программа)":k=="bridge"?"Серверная часть моста":"Каталог узлов")+": "+(Json.Bool(result,k)?"обнаружен / проверен":"отсутствует или не отвечает")));
                         var services=Json.Map(Json.Get(result,"services"));if(api.Text.Length==0)api.Text=Json.Str(services,"serverUrl");if(web.Text.Length==0)web.Text=Json.Str(services,"webappUrl");
+                        TrackServer(Json.Map(Json.Get(result,"operations")));
 
                         break;
                     case 1:
@@ -461,19 +579,20 @@ namespace RemoteAgents.Launcher
                         if(!treeLoaded)await LoadTree();
                         var paths=selection.Paths;
                         result=await Run("Disk",new {@base=diskBase.Text.Trim(),paths,reconnect=reconnectDisk});break;
-                    case 3:
-                        string apiOrigin=Origin(api.Text),webOrigin=Origin(web.Text);if(string.IsNullOrWhiteSpace(label.Text))throw new IOException("Укажите имя своего аккаунта");
-                        string key=accountKey.Text.Trim();if(create.Checked){var bytes=new byte[32];using(var rng=RandomNumberGenerator.Create())rng.GetBytes(bytes);key=Convert.ToBase64String(bytes).TrimEnd('=').Replace('+','-').Replace('/','_');}
-                        string keyFile=Path.Combine(home,"secrets","happier-account.key");string previousKey=File.Exists(keyFile)?File.ReadAllText(keyFile):null;
-                        string expectedAccount=!create.Checked && accounts.SelectedIndex>=0?Json.Str(accountRows[accounts.SelectedIndex],"account"):"";
-                        try {
-                            if(key.Length>0){AccountDiskSetup.SaveKey(home,key);accountKey.Clear();}
-                            result=await Run("Account",new {label=label.Text.Trim(),serverUrl=apiOrigin,webappUrl=webOrigin,expectedAccount});
-                        } catch {
-                            if(key.Length>0) {Files.Atomic(Path.Combine(home,"secrets","happier-unconfirmed-"+Guid.NewGuid().ToString("N")+".key"),key+"\n");if(previousKey!=null)Files.Atomic(keyFile,previousKey);else if(File.Exists(keyFile))File.Delete(keyFile);}
+                    case 3: {
+                        string apiOrigin=Origin(api.Text),webOrigin=Origin(web.Text);if(string.IsNullOrWhiteSpace(label.Text))throw new IOException("Укажите имя аккаунта, чтобы различать аккаунты");
+                        bool create=newAccount.Checked;string key=create?HappierKey.Create():accountKey.Text.Trim();
+                        string expectedAccount=!create && accounts.SelectedIndex>=0?Json.Str(accountRows[accounts.SelectedIndex],"account"):"";
+                        // The key waits in secrets/happier-pending.key; Wizard.ps1 applies it now or after the install.
+                        if(key.Length>0){AccountDiskSetup.SaveKey(home,key,"happier-pending.key");accountKey.Clear();}
+                        try {result=await Run("Account",new {label=label.Text.Trim(),serverUrl=apiOrigin,webappUrl=webOrigin,expectedAccount});}
+                        catch {
+                            // A never shown new key must not be connected later by the automatic resume.
+                            if(create){foreach(var f in new[]{Path.Combine(home,"secrets","happier-pending.key"),Path.Combine(home,"state","happier-pending.json")})if(File.Exists(f))File.Delete(f);}
                             throw;
                         }
-                        create.Checked=false;break;
+                        if(create){ShowNewKey(key);haveAccount.Checked=true;}
+                        break; }
                     case 4:result=await Run("Bridge",new {enabled=bridge.Checked,shell=shell.Checked});break;
                     case 6:
                         if(lanCommand.Length>0){result=new Dictionary<string,object>{{"summary","Файл на сервере ✓; включение выполняет администратор"}};break;}
@@ -490,8 +609,7 @@ namespace RemoteAgents.Launcher
                         if(Json.Bool(result,"migration"))WatchMigration(DateTime.UtcNow);
                         return;
                 }
-                bool ok=Json.Bool(result,"ok",true);operationReady=ok;applied[index]=ok;dirty[index]=false;
-                results[index]=Json.Text(result,"summary",index==0?"Подключено ✓":"Готово: операция подтверждена")+(ok?"":" (ожидание, не готово)");Append(titles[index]+": "+results[index]);
+                operationReady=ApplyResult(index,result);
             });
             lastSuccess=lastSuccess && operationReady;
         }
@@ -500,28 +618,48 @@ namespace RemoteAgents.Launcher
     internal sealed class WizardNavigation : ListBox
     {
         int[] order=new int[0];string[] titles=new string[0];readonly string[] marks=Enumerable.Repeat("…",8).ToArray();bool syncing;
+        // Optional last row «Установка»: shown only while server installs run, wait or failed.
+        string extraTitle, extraMark="⏳";int lastSection;
         internal Func<int,bool> Available=i=>true;
         internal event Action<int> SectionRequested;
+        internal event Action ExtraRequested;
+        internal void SetExtra(string title,string mark)
+        {
+            if(title==extraTitle && mark==extraMark)return;
+            extraMark=mark;
+            if(title!=extraTitle){
+                extraTitle=title;bool chosen=SelectedIndex>=order.Length;syncing=true;
+                try{if(title==null){if(Items.Count>order.Length)Items.RemoveAt(order.Length);if(chosen)SelectedIndex=Array.IndexOf(order,lastSection);}else if(Items.Count==order.Length)Items.Add(title);}
+                finally{syncing=false;}
+            }
+            Invalidate();
+        }
         internal WizardNavigation(){Dock=DockStyle.Left;Width=150;DrawMode=DrawMode.OwnerDrawFixed;IntegralHeight=false;BorderStyle=BorderStyle.None;BackColor=SystemColors.Control;ItemHeight=30;}
         internal int Section
         {
-            get{return SelectedIndex<0?0:order[SelectedIndex];}
-            set{int row=Array.IndexOf(order,value);if(row==SelectedIndex)return;syncing=true;try{SelectedIndex=row;}finally{syncing=false;}}
+            get{return SelectedIndex<0?0:SelectedIndex>=order.Length?lastSection:order[SelectedIndex];}
+            set{lastSection=value;int row=Array.IndexOf(order,value);if(row==SelectedIndex)return;syncing=true;try{SelectedIndex=row;}finally{syncing=false;}}
         }
         internal void Initialize(string[] titles,int[] order){this.titles=titles;this.order=order;BeginUpdate();Items.Clear();foreach(int i in order)Items.Add(titles[i]);EndUpdate();}
         internal void Mark(int i,string mark){marks[i]=mark;}
         protected override void OnFontChanged(EventArgs e){base.OnFontChanged(e);ItemHeight=Math.Max(24,Font.Height*2);}
-        protected override void OnSelectedIndexChanged(EventArgs e){base.OnSelectedIndexChanged(e);Invalidate();if(!syncing && SelectedIndex>=0 && SectionRequested!=null)SectionRequested(order[SelectedIndex]);}
+        protected override void OnSelectedIndexChanged(EventArgs e)
+        {
+            base.OnSelectedIndexChanged(e);Invalidate();if(syncing || SelectedIndex<0)return;
+            if(SelectedIndex>=order.Length){if(ExtraRequested!=null)ExtraRequested();return;}
+            if(SectionRequested!=null)SectionRequested(order[SelectedIndex]);
+        }
         protected override void OnDrawItem(DrawItemEventArgs e)
         {
-            if(e.Index<0 || e.Index>=order.Length)return;
-            int i=order[e.Index];bool chosen=e.Index==SelectedIndex;bool open=chosen || Available(i);
+            if(e.Index<0 || e.Index>order.Length || (e.Index==order.Length && extraTitle==null))return;
+            bool extra=e.Index==order.Length;int i=extra?-1:order[e.Index];bool chosen=e.Index==SelectedIndex;bool open=chosen || extra || Available(i);
+            string title=extra?extraTitle:titles[i],mark=extra?extraMark:marks[i];
             using(var fill=new SolidBrush(chosen?SystemColors.Highlight:BackColor))e.Graphics.FillRectangle(fill,e.Bounds);
             Color fore=chosen?SystemColors.HighlightText:open && Enabled?ForeColor:SystemColors.GrayText;
-            Color markColor=chosen?fore:marks[i]=="✓"?Color.ForestGreen:marks[i]=="✗"?Color.Firebrick:SystemColors.GrayText;
+            Color markColor=chosen?fore:mark=="✓"?Color.ForestGreen:mark=="✗"?Color.Firebrick:mark=="⏳"?Color.DarkGoldenrod:SystemColors.GrayText;
             int pad=e.Bounds.Height/3,markWidth=e.Bounds.Height;
-            TextRenderer.DrawText(e.Graphics,titles[i],Font,new Rectangle(e.Bounds.Left+pad,e.Bounds.Top,e.Bounds.Width-pad-markWidth,e.Bounds.Height),fore,TextFormatFlags.VerticalCenter|TextFormatFlags.Left|TextFormatFlags.EndEllipsis|TextFormatFlags.NoPrefix);
-            TextRenderer.DrawText(e.Graphics,marks[i],Font,new Rectangle(e.Bounds.Right-markWidth,e.Bounds.Top,markWidth,e.Bounds.Height),markColor,TextFormatFlags.VerticalCenter|TextFormatFlags.HorizontalCenter|TextFormatFlags.NoPrefix);
+            TextRenderer.DrawText(e.Graphics,title,Font,new Rectangle(e.Bounds.Left+pad,e.Bounds.Top,e.Bounds.Width-pad-markWidth,e.Bounds.Height),fore,TextFormatFlags.VerticalCenter|TextFormatFlags.Left|TextFormatFlags.EndEllipsis|TextFormatFlags.NoPrefix);
+            TextRenderer.DrawText(e.Graphics,mark,Font,new Rectangle(e.Bounds.Right-markWidth,e.Bounds.Top,markWidth,e.Bounds.Height),markColor,TextFormatFlags.VerticalCenter|TextFormatFlags.HorizontalCenter|TextFormatFlags.NoPrefix);
         }
     }
 

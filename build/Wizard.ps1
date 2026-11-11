@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 [CmdletBinding()]
-param([Alias('Home')][string]$LauncherHome,[ValidateSet('Server','Lan','Skip','Catalog','Connection','DiskTree','Disk','AccountList','Account','Bridge','Vpn','Inspect','Activate','RollbackNetwork','RollbackBridge')][string]$Action,[string]$RequestFile,[string]$Session,[string]$ProgressFile)
+param([Alias('Home')][string]$LauncherHome,[ValidateSet('Server','Lan','Skip','Catalog','Connection','DiskTree','Disk','AccountList','Account','ResumeAccount','Operation','Bridge','Vpn','Inspect','Activate','RollbackNetwork','RollbackBridge')][string]$Action,[string]$RequestFile,[string]$Session,[string]$ProgressFile)
 $ErrorActionPreference='Stop'
 # Machine-readable JSON must preserve filenames on non-Russian Windows too.
 [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
@@ -16,7 +16,9 @@ try{
     if($Action -eq 'RollbackBridge'){Invoke-WizardLock $root {Undo-WizardBridge $root $Session} -TimeoutMs 30000;return}
     $request=[pscustomobject]@{};if($RequestFile){$request=Read-TransportJson $RequestFile}
     Write-MigrationLog $root ('wizard.'+$Action+'.start')
-    $result=Invoke-WizardLock $root {Invoke-WizardStep $root $bundle $Action $request}
+    # Status polling of detached server installs is read-only: it never waits for a running step.
+    if($Action -eq 'Operation'){$result=Invoke-WizardStep $root $bundle $Action $request}
+    else{$result=Invoke-WizardLock $root {Invoke-WizardStep $root $bundle $Action $request}}
     Write-MigrationLog $root ('wizard.'+$Action+'.complete')
     @{ok=$true;result=$result}|ConvertTo-Json -Depth 40 -Compress
 }catch{

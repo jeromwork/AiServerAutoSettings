@@ -49,7 +49,98 @@ function Send-WizardHelpers([string]$Root,[string]$Bundle) {
 function Get-WizardServer([string]$Root,[string]$Bundle) {
     # Read-only script is streamed, so observing a configured server installs nothing.
     $text=Invoke-WizardSsh $Root 'bash -s' ([IO.File]::ReadAllText((Join-Path $Bundle 'build/server-wizard.sh')))
-    $server=ConvertFrom-Json (Convert-TransportLF $text);$server|Add-Member -Force ssh $true;return $server
+    $server=ConvertFrom-Json (Convert-TransportLF $text);$server|Add-Member -Force ssh $true
+    if($server.operations){Add-WizardOperationText $server.operations}
+    return $server
+}
+function Add-WizardOperationText($Operations) {
+    foreach($p in @($Operations.PSObject.Properties)){$title=if($p.Name -eq 'disk'){'установка сервера диска'}else{'установка Happier'};$p.Value|Add-Member -Force text (Get-WizardOperationText $p.Value $title)}
+}
+function Get-WizardOperation([string]$Root,[string]$Bundle,[string]$Verb,[string[]]$Operations) {
+    # Long server installs run detached (server-wizard.sh start/run); the window only makes short calls.
+    foreach($op in $Operations){if($op -notin @('happier','disk')){throw 'Неизвестная операция сервера'}}
+    if($Verb -eq 'status'){
+        # Read-only and streamed: works before the helpers are uploaded.
+        $text=Invoke-WizardSsh $Root ('bash -s -- status '+($Operations -join ' ')) ([IO.File]::ReadAllText((Join-Path $Bundle 'build/server-wizard.sh'))) 30
+    }else{
+        $text=Invoke-WizardSsh $Root ('bash "$HOME/.local/share/remoteagents-wizard/server-wizard.sh" '+$Verb+' '+$Operations[0]) '' 60
+    }
+    return ConvertFrom-Json (Convert-TransportLF $text)
+}
+function Get-WizardOperationText($Status,[string]$Title) {
+    # Only observed facts: state, current step and elapsed time; no invented forecast.
+    $minutes=[int][Math]::Floor([double]$Status.elapsedSec/60)
+    $elapsed=if($minutes -lt 1){'меньше минуты'}else{[string]$minutes+' мин'}
+    switch([string]$Status.state){
+        'running' {
+            $stage=if([int]$Status.stages -gt 0){', этап '+[int]$Status.stage+' из '+[int]$Status.stages}else{''}
+            $step=if($Status.step){': '+$Status.step}else{''}
+            return 'Идёт '+$Title+' на сервере'+$stage+$step+' (прошло '+$elapsed+'). Можно настраивать дальше — раздел завершится сам'
+        }
+        'finished' {return ($Title.Substring(0,1).ToUpper()+$Title.Substring(1))+' на сервере завершена ('+$elapsed+')'}
+        'failed' {return 'Ошибка: '+$Title+' на сервере не выполнена: '+[string]$Status.reason+'. Повторите шаг'}
+        default {return ''}
+    }
+}
+function Get-WizardPendingAccount([string]$Root) {
+    $file=Join-Path $Root 'state/happier-pending.json'
+    if(Test-Path -LiteralPath $file){return Read-TransportJson $file};return $null
+}
+function Invoke-WizardAccount([string]$Root,[string]$Bundle,$Request,[bool]$Explicit) {
+    # The pending request is public; the key waits only in secrets/happier-pending.key.
+    $pendingFile=Join-Path $Root 'state/happier-pending.json'
+    $secrets=Join-Path $Root 'secrets';$keyFile=Join-Path $secrets 'happier-account.key';$pendingKey=Join-Path $secrets 'happier-pending.key'
+    if($Explicit){
+        if(-not $Request.label){throw 'Укажите имя аккаунта'}
+        if(-not (Test-Path -LiteralPath $pendingKey) -and -not (Test-Path -LiteralPath $keyFile)){throw 'Вставьте секретный ключ аккаунта или выберите «Создать новый аккаунт»'}
+        Write-TransportJson $pendingFile @{schema=1;label=[string]$Request.label;serverUrl=[string]$Request.serverUrl;webappUrl=[string]$Request.webappUrl;expectedAccount=[string]$Request.expectedAccount;requestedUtc=[DateTime]::UtcNow.ToString('o')}
+    }else{
+        $Request=Get-WizardPendingAccount $Root
+        if(-not $Request){return @{ok=$true;idle=$true;summary='Нет отложенного подключения Happier'}}
+    }
+    Send-WizardHelpers $Root $Bundle
+    # Explicit apply starts (or retries) the install; automatic resume only observes it.
+    if($Explicit){$op=Get-WizardOperation $Root $Bundle 'ensure' @('happier')}
+    else{
+        $op=(Get-WizardOperation $Root $Bundle 'status' @('happier')).happier
+        $installed=Invoke-WizardSsh $Root 'test -x "$HOME/.local/bin/happier" && systemctl --user show-environment >/dev/null 2>&1 && echo yes || echo no' '' 30
+        $op|Add-Member -Force ready ($installed.Trim() -eq 'yes' -and $op.state -ne 'running')
+    }
+    if(-not $op.ready){
+        if($op.state -eq 'failed'){throw ('Установка Happier на сервере не выполнена: '+[string]$op.reason+'. Нажмите «Применить», чтобы повторить; ключ сохранён')}
+        if($op.state -ne 'running'){throw 'Happier на сервере не установлен. Нажмите «Применить», чтобы установить; ключ сохранён'}
+        return @{ok=$false;pending='happier';operation=$op;summary=(Get-WizardOperationText $op 'установка Happier')+'. Подключение аккаунта применится автоматически'}
+    }
+    Write-WizardProgress 'Happier на сервере установлен. Подключаю аккаунт…'
+    $previousKey=$null;if(Test-Path -LiteralPath $keyFile){$previousKey=[IO.File]::ReadAllText($keyFile)}
+    $tried=Test-Path -LiteralPath $pendingKey
+    if($tried){
+        if($null -ne $previousKey){Write-DiskUtf8 (Join-Path $secrets ('happier-backup-'+[guid]::NewGuid().ToString('N')+'.key')) $previousKey}
+        Write-DiskUtf8 $keyFile ([IO.File]::ReadAllText($pendingKey))
+    }
+    $oldConfig=Read-TransportJson (Join-Path $Root 'config.json');$previous=$oldConfig.happier
+    $oldState=$null;$stateFile=Join-Path $Root 'state/happier-account.json';if(Test-Path $stateFile){$oldState=Read-TransportJson $stateFile}
+    try{
+        Update-MigrationConfig $Root {param($c) $c|Add-Member -Force happier ([pscustomobject]@{serverUrl=[string]$Request.serverUrl;webappUrl=[string]$Request.webappUrl;label=[string]$Request.label})}
+        Invoke-InstallChild $Bundle 'accounts/Account.ps1' @('-Home',$Root,'-ExpectedAccount',[string]$Request.expectedAccount) -TimeoutSeconds 300
+        Update-MigrationConfig $Root {param($c) if($c.wizard){$c.wizard.PSObject.Properties.Remove('skipHappier')}}
+        if($tried){Remove-Item -LiteralPath $pendingKey -Force}
+        Remove-Item -LiteralPath $pendingFile -Force
+        $result=Read-TransportJson $stateFile
+        $result|Add-Member -Force webappUrl ([string]$Request.webappUrl)
+        $result|Add-Member -Force summary ('Аккаунт «'+[string]$Request.label+'» подключён ✓')
+        return $result
+    }catch{
+        # The tried key is kept for recovery; the working one is restored.
+        if($tried){
+            Move-Item -LiteralPath $pendingKey -Destination (Join-Path $secrets ('happier-unconfirmed-'+[guid]::NewGuid().ToString('N')+'.key'))
+            if($null -ne $previousKey){Write-DiskUtf8 $keyFile $previousKey}elseif(Test-Path -LiteralPath $keyFile){Remove-Item -LiteralPath $keyFile -Force}
+        }
+        if(Test-Path -LiteralPath $pendingFile){Remove-Item -LiteralPath $pendingFile -Force}
+        Update-MigrationConfig $Root {param($c) if($null -ne $previous){$c|Add-Member -Force happier $previous}else{$c.PSObject.Properties.Remove('happier')}}
+        if($oldState -and $oldState.account){$oldState|Add-Member -Force ok $false;$oldState|Add-Member -Force summary 'Предыдущий аккаунт сохранён; повторите живую проверку после неудачной попытки';Write-TransportJson $stateFile $oldState}
+        throw
+    }
 }
 function Get-WizardCatalog([string]$Root,[string]$Bundle) {
     $source=Convert-TransportLF ([IO.File]::ReadAllText((Join-Path $Bundle 'transport/server-transport-catalog.py')))
@@ -245,16 +336,18 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
                 Write-WizardProgress 'Устанавливаю недостающие службы сервера…'
                 Send-WizardHelpers $Root $Bundle
                 $flags=@([int](-not $server.disk),[int](-not $server.happier),[int](-not $server.catalog)) -join ' '
-                # Happier/Disk installation downloads and builds on the server: keep the full repair budget.
-                # WizardStep.Timeout("Server") covers login + this child + the observations around it.
-                try{[void](Invoke-WizardSsh $Root ('bash "$HOME/.local/share/remoteagents-wizard/server-wizard.sh" repair '+$flags) '' 1200)}catch{
+                # Happier/Disk installs only START here, detached on the server (closing the window or
+                # the PC does not stop them); their sections follow them with short «status» calls.
+                try{[void](Invoke-WizardSsh $Root ('bash "$HOME/.local/share/remoteagents-wizard/server-wizard.sh" repair '+$flags) '' 120)}catch{
                     $observed=Get-WizardServer $Root $Bundle
                     if(-not $observed.userManager){throw 'Нет user systemd. Администратору: sudo loginctl enable-linger <пользователь>; sudo systemctl start user@<uid>.service. Повторите проверку'}
-                    throw 'Установка не завершена. Нужны curl, tar, flock, python3, systemd и доступ к официальным загрузкам; проверьте сервер и повторите шаг'
+                    throw 'Установка не запущена. Нужны curl, tar, flock, setsid, python3, systemd и доступ к официальным загрузкам; проверьте сервер и повторите шаг'
                 }
                 $server=Get-WizardServer $Root $Bundle
             }
             if(-not $server.userManager){throw 'Нет user systemd. Администратору сервера: sudo loginctl enable-linger <пользователь>; sudo systemctl start user@<uid>.service. Затем повторите шаг'}
+            $running=@(foreach($op in @('disk','happier')){if($server.operations -and $server.operations.$op.state -eq 'running'){$(if($op -eq 'disk'){'Диск'}else{'Happier'})}})
+            $server|Add-Member -Force summary ('Подключено ✓'+$(if($running.Count){'. На сервере устанавливается: '+($running -join ', ')+' — разделы завершатся сами'}else{''}))
             return $server
         }
         'Lan' {return Send-WizardLan $Root $Bundle ([string]$Request.file)}
@@ -283,6 +376,7 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
                 $payload=@{expected=$Request.expected;catalog=$local}|ConvertTo-Json -Depth 30 -Compress
                 [void](Invoke-WizardSsh $Root 'python3 "$HOME/.local/share/remoteagents-wizard/server-transport-catalog.py" put' $payload)
             }
+            $script:WizardPendingDisk=$null
             try{
                 if(Test-WizardNetworkManaged $Root){Initialize-WizardTransport $Root $Bundle $t;Set-WizardNetwork $Root $Bundle $t}
                 else{Initialize-WizardTransport $Root $Bundle $t;Invoke-MigrationPreflight $Root $Bundle ([pscustomobject]@{transport=$t});Update-MigrationConfig $Root {param($c) $c|Add-Member -Force transport $t}}
@@ -293,6 +387,8 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
                         [void](Invoke-WizardSsh $Root 'python3 "$HOME/.local/share/remoteagents-wizard/server-transport-catalog.py" put' $restore)
                     }catch{Write-MigrationLog $Root 'wizard.catalog.restore.failed'}
                 }
+                # The disk server is still installing (detached): wait without failing the section.
+                if($script:WizardPendingDisk){return @{ok=$false;pending='disk';operation=$script:WizardPendingDisk;summary=(Get-WizardOperationText $script:WizardPendingDisk 'установка сервера диска')+'. «Связь» проверится автоматически'}}
                 throw
             }
             $overlay=[pscustomobject]@{schema=1}
@@ -360,20 +456,15 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             $text=Invoke-WizardSsh $Root 'export PATH="$HOME/.local/share/remoteagents-accounts/node:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"; node "$HOME/.local/share/remoteagents-accounts/server-account.mjs"' '{"action":"list"}'
             return ConvertFrom-Json (Convert-TransportLF $text)
         }
-        'Account' {
-            if(-not $Request.label){throw 'Укажите имя аккаунта'}
-            $oldConfig=Read-TransportJson (Join-Path $Root 'config.json');$previous=$oldConfig.happier
-            $oldState=$null;$stateFile=Join-Path $Root 'state/happier-account.json';if(Test-Path $stateFile){$oldState=Read-TransportJson $stateFile}
-            try{
-                Update-MigrationConfig $Root {param($c) $c|Add-Member -Force happier ([pscustomobject]@{serverUrl=$Request.serverUrl;webappUrl=$Request.webappUrl;label=$Request.label})}
-                Invoke-InstallChild $Bundle 'accounts/Account.ps1' @('-Home',$Root,'-ExpectedAccount',[string]$Request.expectedAccount) -TimeoutSeconds 1500
-                Update-MigrationConfig $Root {param($c) if($c.wizard){$c.wizard.PSObject.Properties.Remove('skipHappier')}}
-                return Read-TransportJson (Join-Path $Root 'state/happier-account.json')
-            }catch{
-                Update-MigrationConfig $Root {param($c) if($null -ne $previous){$c|Add-Member -Force happier $previous}else{$c.PSObject.Properties.Remove('happier')}}
-                if($oldState -and $oldState.account){$oldState|Add-Member -Force ok $false;$oldState|Add-Member -Force summary 'Предыдущий аккаунт сохранён; повторите живую проверку после неудачной попытки';Write-TransportJson $stateFile $oldState}
-                throw
-            }
+        'Account' {return Invoke-WizardAccount $Root $Bundle $Request $true}
+        'ResumeAccount' {return Invoke-WizardAccount $Root $Bundle $null $false}
+        'Operation' {
+            $ops=@($Request.operations|Where-Object {$_})
+            # «Повторить» in the «Установка» list: an explicit restart of a failed detached install.
+            if($Request.start){Send-WizardHelpers $Root $Bundle;[void](Get-WizardOperation $Root $Bundle 'start' @([string]$Request.start))}
+            $status=Get-WizardOperation $Root $Bundle 'status' $ops
+            Add-WizardOperationText $status
+            return @{operations=$status;pendingAccount=[bool](Get-WizardPendingAccount $Root)}
         }
         'Bridge' {
             if((Read-TransportJson (Join-Path $Root 'config.json')).wizard.pendingProfile){throw 'Сначала проверьте связь с новым сервером на шаге «Связь»'}
@@ -444,7 +535,7 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             $phase=Get-WizardMigrationPhase $Root;$failure=''
             $errorFile=Join-Path $Root 'state/migration-error.json'
             if($phase -notin @('activating','pending','accepted') -and (Test-Path $errorFile)){$failure=[string](Read-TransportJson $errorFile).message}
-            return @{ok=(@($plan|Where-Object {-not $_.ready}).Count -eq 0);server=$server;steps=$plan;legacy=$legacy;migrationError=$failure;summary='Подключения проверены сейчас. Завершение передачи файлов видно в статусе Диска';phase=$(if($phase){$phase}else{'not-started'})}
+            return @{ok=(@($plan|Where-Object {-not $_.ready}).Count -eq 0);server=$server;steps=$plan;pendingAccount=[bool](Get-WizardPendingAccount $Root);legacy=$legacy;migrationError=$failure;summary='Подключения проверены сейчас. Завершение передачи файлов видно в статусе Диска';phase=$(if($phase){$phase}else{'not-started'})}
         }
         'Activate' {
             $config=Read-TransportJson (Join-Path $Root 'config.json')

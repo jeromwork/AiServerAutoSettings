@@ -109,8 +109,12 @@ function Initialize-WizardTransport([string]$Root,[string]$Bundle,$Transport) {
             $request=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((@{server=$p.serverAddress}|ConvertTo-Json -Compress)))
             $channel=ConvertFrom-Json (Convert-TransportLF (Invoke-WizardSsh $Root ('bash "$HOME/.local/share/remote-disk/server-disk.sh" channel-config '+$request)))
         }else{
-            $ports=ConvertFrom-Json (Convert-TransportLF (Invoke-WizardSsh $Root 'cat "$HOME/.local/share/remote-disk/ports.json"'))
-            if([int]$ports.listen -lt 1 -or [int]$ports.listen -gt 65535){throw 'Нет порта сервера Disk. Включите установку недостающего на шаге «Сервер» и повторите'}
+            $ports=ConvertFrom-Json (Convert-TransportLF (Invoke-WizardSsh $Root 'cat "$HOME/.local/share/remote-disk/ports.json" 2>/dev/null || echo "{}"'))
+            if([int]$ports.listen -lt 1 -or [int]$ports.listen -gt 65535){
+                $op=(Get-WizardOperation $Root $Bundle 'status' @('disk')).disk
+                if($op.state -eq 'running'){$script:WizardPendingDisk=$op;throw 'Сервер диска ещё устанавливается'}
+                throw 'Нет порта сервера Disk. Включите установку недостающего на шаге «Сервер» и повторите'
+            }
             $channel=@{inbounds=@(@{tag='sync';override_port=[int]$ports.listen});outbounds=@()}
         }
         Write-TransportJson $file $channel -Private

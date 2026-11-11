@@ -20,7 +20,10 @@ function Connect-HappierAccount([string]$Root) {
         $remote='$HOME/.local/share/remoteagents-accounts/'+$name;$temp=$remote+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
         $upload+='printf %s '+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($source))+' | base64 -d > "'+$temp+'"; mv -f -- "'+$temp+'" "'+$remote+'"'+"`n"
     }
-    [void](Invoke-DiskSsh 'bash -s' -InputText ($upload+'if ! test -x "$HOME/.local/bin/happier" || ! systemctl --user show-environment >/dev/null 2>&1; then bash "$HOME/.local/share/remoteagents-accounts/bootstrap.sh"; fi') -TimeoutSeconds 1200)
+    # Happier itself is installed by the detached server operation (server-wizard.sh start happier),
+    # never inside this short call.
+    $installed=Invoke-DiskSsh 'bash -s' -InputText ($upload+'if test -x "$HOME/.local/bin/happier" && systemctl --user show-environment >/dev/null 2>&1; then echo installed; fi') -TimeoutSeconds 60
+    if(([string]$installed).Replace("`r",'').Trim() -cne 'installed'){throw 'Happier на сервере ещё не установлен'}
     $settings=@{serverUrl='';webappUrl='';label=''}
     $config=Join-Path $Root 'config.json'
     if(Test-Path -LiteralPath $config){$c=[IO.File]::ReadAllText($config)|ConvertFrom-Json;foreach($k in @('serverUrl','webappUrl','label')){if($c.happier.$k){$settings[$k]=[string]$c.happier.$k}}}

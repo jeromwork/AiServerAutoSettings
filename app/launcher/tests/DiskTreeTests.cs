@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -34,8 +35,30 @@ namespace RemoteAgents.Launcher
             Check(WizardStep.CanOpen(1,4,true,done,order) && !WizardStep.CanOpen(2,1,true,done,order) && !WizardStep.CanOpen(7,1,true,done,order), "first run blocks sections after the first unfinished one");
             Check(WizardStep.CanOpen(2,1,false,done,order) && WizardStep.CanOpen(7,1,false,done,order), "settings open any section");
             Check(WizardStep.CanOpen(7,5,true,Enumerable.Repeat(true,7).ToArray(),order), "summary opens once all sections are ready");
-            // Budgets cover the slowest child: server repair 1200 s, Account.ps1 1500 s, disk install+apply 900+900 s.
-            Check(WizardStep.Timeout("Server")>=(1200+300)*1000 && WizardStep.Timeout("Account")>=(1500+60)*1000 && WizardStep.Timeout("Disk")>=(120+900+900)*1000, "step budgets cover their slowest child");
+            // A section waiting for a detached server install (⏳) does not block the next ones.
+            var before=new[]{true,true,true,false,true,false,false};var passable=WizardStep.Passable(before,new[]{3});
+            Check(WizardStep.CanOpen(6,3,true,passable,order) && !WizardStep.CanOpen(5,3,true,passable,order) && !WizardStep.CanOpen(6,3,true,before,order), "waiting Happier lets the next sections open");
+            // Budgets cover the slowest child: Account.ps1 300 s, disk install+apply 900+900 s. Server installs are
+            // detached: Server/Account calls stay short, status polling is one short SSH call.
+            Check(WizardStep.Timeout("Server")>=(100+60+120+120)*1000 && WizardStep.Timeout("Server")<=600*1000 && WizardStep.Timeout("Account")>=(300+60+60)*1000 && WizardStep.Timeout("Account")<=600*1000 && WizardStep.Timeout("ResumeAccount")==WizardStep.Timeout("Account") && WizardStep.Timeout("Operation")<=60*1000 && WizardStep.Timeout("Disk")>=(120+900+900)*1000, "step budgets cover their slowest child; long server installs are not waited for");
+            // Reference vector: Python base64.b32encode(bytes(range(1,33))); server-account.mjs normalizeKey accepts it.
+            Check(HappierKey.Format(Enumerable.Range(1,32).Select(i=>(byte)i).ToArray())=="AEBAG-BAFAY-DQQCI-KBMGA-2DQPC-AIREE-YUCUL-BOGAZ-DINRY-HI6D4-QA", "Happier key is grouped base32");
+            // «Установка» list: stage k/n and elapsed time, waiting account, failure reason; hidden when all done.
+            var ops=(Dictionary<string,object>)Json.Parse("{\"happier\":{\"state\":\"running\",\"stage\":2,\"stages\":3,\"step\":\"Скачиваю Happier\",\"elapsedSec\":185},\"disk\":{\"state\":\"failed\",\"reason\":\"curl: (28) timeout\"}}");
+            var list=ServerOperations.Parse(ops,new[]{"happier","disk"},true);
+            Check(ServerOperations.Line(list[0])=="⏳ этап 2 из 3: Скачиваю Happier, прошло 3 мин" && ServerOperations.Line(list[1])=="✗ ошибка: curl: (28) timeout" && ServerOperations.Line(list[2])=="ожидает: установка Happier", "install lines show stage, elapsed time and reason");
+            Check(ServerOperations.Active(list) && ServerOperations.Visible(list) && ServerOperations.Tooltip(list)=="Идёт установка: 0 из 3", "tooltip counts finished operations");
+            var dir=Path.Combine(Path.GetTempPath(),"ra-ops-"+Guid.NewGuid().ToString("N"));
+            try {
+                ServerOperations.Save(dir,new[]{"happier","disk"},ops,true);
+                var back=ServerOperations.FromState(ServerOperations.Load(dir));
+                Check(back.Count==3 && back[0].Stage==2 && back[1].State=="failed" && (DateTime.UtcNow-ServerOperations.Updated(ServerOperations.Load(dir))).TotalMinutes<1, "state survives closing the window");
+                var allDone=(Dictionary<string,object>)Json.Parse("{\"happier\":{\"state\":\"finished\"},\"disk\":{\"state\":\"finished\"}}");
+                var finished=ServerOperations.Parse(allDone,new[]{"happier","disk"},false);
+                Check(!ServerOperations.Active(finished) && !ServerOperations.Visible(finished) && ServerOperations.Line(finished[0])=="✓ готово", "item disappears when all installs are done");
+                Check(ServerOperations.Parse(allDone,new[]{"happier"},true)[1].State=="running", "finished Happier: account connection runs by itself");
+            } finally { if(Directory.Exists(dir))Directory.Delete(dir,true); }
+            Check(HappierKey.Create().Replace("-","").Length==52 && HappierKey.Create()!=HappierKey.Create(), "new keys are random 32-byte values");
             Check(WizardStep.Timeout("Connection")>=600*1000 && WizardStep.Timeout("Bridge")>=(300+300+120)*1000 && WizardStep.Timeout("Vpn")>420*1000 && WizardStep.Timeout("DiskTree")>=120*1000 && WizardStep.Timeout("Catalog")==120000, "step-specific deadlines");
             Check(LegacyInstall.Hold(true,"") && LegacyInstall.Hold(true,"rolled-back") && LegacyInstall.Hold(true,"preparing") && !LegacyInstall.Hold(true,"activating") && !LegacyInstall.Hold(true,"pending") && !LegacyInstall.Hold(true,"accepted") && !LegacyInstall.Hold(false,""), "old channel holds new components until cutover");
             Check(LegacyInstall.Held(true,"transport") && LegacyInstall.Held(true,"disk") && LegacyInstall.Held(true,"control") && !LegacyInstall.Held(true,"vpn") && !LegacyInstall.Held(false,"transport"), "only port/sync/bridge owners are held");

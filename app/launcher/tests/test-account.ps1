@@ -14,7 +14,7 @@ function Read-DiskProfile {$script:calls++}
 function Invoke-DiskSsh($Command,[switch]$Direct,[string]$InputText,[int]$TimeoutSeconds){
     Assert (-not $Direct) 'account uses configured transport path'
     Assert (-not $Command.Contains($script:testKey)) 'secret absent from SSH argv'
-    if($Command -eq 'bash -s'){Assert (-not $InputText.Contains($script:testKey)) 'public bootstrap contains no key';return ''}
+    if($Command -eq 'bash -s'){Assert (-not $InputText.Contains($script:testKey) -and -not $InputText.Contains('bootstrap.sh"; fi')) 'public helper upload contains no key and installs nothing';if($script:missing){return ''};return "installed`r`n"}
     if($script:fail){throw 'fake SSH offline'}
     $request=$InputText|ConvertFrom-Json
     Assert ($request.key -ceq $script:testKey -and $request.serverUrl -eq 'https://api.example.invalid') 'key only in private stdin; CRLF normalized'
@@ -26,6 +26,9 @@ Assert ($state.ok -and $state.updatedUtc) 'public status requires server success
 $before=[IO.File]::ReadAllBytes($keyFile)
 Connect-HappierAccount $root
 Assert ($script:calls -eq 2 -and [Convert]::ToBase64String([IO.File]::ReadAllBytes($keyFile)) -ceq [Convert]::ToBase64String($before)) 'repeated setup rereads profile and preserves recovery key'
+$script:missing=$true;$failed=$false;try{Connect-HappierAccount $root}catch{$failed=$_.Exception.Message.Contains('ещё не установлен')}
+Assert $failed 'not yet installed Happier is reported, never installed inside the short call'
+$script:missing=$false
 $script:fail=$true;$failed=$false;try{Connect-HappierAccount $root}catch{$failed=$true}
 Assert ($failed -and -not ([IO.File]::ReadAllText((Join-Path $root 'state/happier-account.json'))|ConvertFrom-Json).ok) 'SSH failure cannot reuse old success'
 Assert (-not ([IO.File]::ReadAllText((Join-Path $root 'logs/accounts.log'))).Contains($script:testKey) -and -not ([IO.File]::ReadAllText((Join-Path $root 'state/happier-account.json'))).Contains($script:testKey)) 'logs and public state contain no secret'
