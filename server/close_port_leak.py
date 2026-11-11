@@ -168,7 +168,7 @@ def main():
             lan.event('portleak', 'confirmed: proxy-out проверен; SSH/VLESS проверены владельцем', True)
             print('Port-leak подтверждён, таймер отката снят.')
             return
-        lan.require(not pending.exists() and not (lan.STATE / 'pending').exists(),
+        lan.require(not pending.exists() and not lan.network_pending(),
                     'Сначала подтвердите или откатите предыдущее изменение сети.')
         lan.require(args.ip_check_url, 'Нужен --ip-check-url (HTTPS, только IP в ответе).')
         before = lan.read(lan.SB)

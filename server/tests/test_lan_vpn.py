@@ -265,5 +265,118 @@ class SafetyTests(unittest.TestCase):
         self.assertTrue(all(not p['enabled'] for p in data.values()))
 
 
+class InternetNeverViaLanTests(unittest.TestCase):
+    """Owner requirement 1: Internet only via proxy-out, even if the LAN offers a gateway/DNS."""
+    def test_profile_and_push_cannot_become_default_route_or_dns(self):
+        client, nets = ImportTests.render(self)
+        for unsafe in ('redirect-gateway', 'dhcp-option', 'route 0.0.0.0', 'route-ipv6', 'pull-filter accept'):
+            self.assertNotIn('\n' + unsafe, '\n' + client.split('pull-filter ignore')[0])
+        for pushed in ('redirect-gateway', 'redirect-private', 'dhcp-option', 'dns', 'route-ipv6', 'ifconfig-ipv6', 'block-ipv6'):
+            self.assertIn('pull-filter ignore "' + pushed + '"', client)
+        self.assertIn('route-noexec\n', client)
+        self.assertTrue(all(lan.ipaddress.ip_network(n).is_private for n in nets))
+        env = {'route_network_1': '0.0.0.0', 'route_netmask_1': '0.0.0.0', 'route_network_2': '10.124.0.0',
+               'route_netmask_2': '255.255.0.0'}
+        self.assertEqual(lan.pushed_routes(env), ['10.124.0.0/16'])
+
+    def test_singbox_final_stays_proxy_out_and_lan_requires_it(self):
+        cfg = config()
+        cfg['outbounds'][0]['password'] = 'TEST_ONLY_PROXY_PASSWORD'
+        patched = lan.patch_singbox(cfg, [], ['10.123.0.0/16', '192.168.143.0/24'])
+        self.assertEqual(patched['route'], cfg['route'])
+        self.assertEqual(patched['outbounds'], cfg['outbounds'])
+        cfg['route']['final'] = 'direct-out'
+        with self.assertRaises(lan.Error):
+            lan.patch_singbox(cfg, [], ['10.123.0.0/16'])
+
+    def test_kernel_guard_drops_everything_but_lan_subnets(self):
+        rules = lan.nft_rules({'office': {'subnets': ['10.123.0.0/16']}})
+        for chain in ('output', 'egress'):
+            body = rules.split(' chain ' + chain + ' ')[1].split('\n }')[0]
+            self.assertIn('oifname "tun-lan-office" ip daddr { 10.123.0.0/16 } accept', body)
+            self.assertTrue(body.rstrip().endswith('oifname "tun-lan-*" drop'))
+
+
+class AuthAndMultiLanTests(unittest.TestCase):
+    def write(self, tmp, text):
+        source = Path(tmp) / 'p.ovpn'
+        source.write_text(text.replace('\n', '\r\n'))
+        return source
+
+    def test_interactive_auth_needs_credentials_and_is_inlined(self):
+        base = 'remote vpn.example.invalid 1194\n<ca>\nX\n</ca>\nauth-user-pass\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self.write(tmp, base)
+            with self.assertRaises(lan.Error) as error:
+                lan.import_client('office', source)
+            self.assertIn('логин и пароль', str(error.exception))
+            client, _ = lan.import_client('office', source, auth=('TEST_ONLY_LAN_USER', 'TEST_ONLY_LAN_PASS'))
+            self.assertIn('<auth-user-pass>\nTEST_ONLY_LAN_USER\nTEST_ONLY_LAN_PASS\n</auth-user-pass>', client)
+            self.assertNotIn('\nauth-user-pass\n', client)
+            for bad in [('u\n', 'p'), ('u', ''), ('</auth-user-pass>', 'p')]:
+                with self.assertRaises(lan.Error):
+                    lan.import_client('office', source, auth=bad)
+            self.assertNotIn('/', str(error.exception))
+
+    def test_auth_stdin_skips_sudo_line_and_marker(self):
+        args = type('A', (), {'auth_stdin': True, 'ask_auth': False})()
+        data = 'SUDO_LINE\r\n' + lan.MARKER + '\r\n' + json.dumps({'username': 'u', 'password': 'p w'}) + '\n'
+        with patch.object(lan.sys, 'stdin', io.StringIO(data)):
+            self.assertEqual(lan.read_auth(args), ('u', 'p w'))
+        with patch.object(lan.sys, 'stdin', io.StringIO('{"username":"u","password":"p"}')), self.assertRaises(lan.Error):
+            lan.read_auth(args)
+
+    def test_two_lans_have_separate_tables_and_guards(self):
+        rules = lan.nft_rules({'office': {'subnets': ['10.123.0.0/16']}, 'home': {'subnets': ['192.168.143.0/24']}})
+        self.assertIn('oifname "tun-lan-home" ip daddr { 192.168.143.0/24 } accept', rules)
+        self.assertNotIn('oifname "tun-lan-home" ip daddr { 10.123.0.0/16 }', rules)
+
+    def test_lan_cannot_shadow_server_networks(self):
+        routes = [{'dst': 'default', 'dev': 'eth0'}, {'dst': '172.17.0.0/16', 'dev': 'docker0'},
+                  {'dst': '10.124.0.0/16', 'dev': 'tun-lan-other'}]
+        def run(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, json.dumps(routes), '')
+        with tempfile.TemporaryDirectory() as tmp:
+            sb = Path(tmp) / 'c.json'
+            sb.write_text(json.dumps(config()))
+            with patch.object(lan, 'run', side_effect=run), patch.object(lan, 'SB', sb):
+                lan.local_conflicts(['10.123.0.0/16', '192.168.1.0/24'])
+                with self.assertRaises(lan.Error) as error:
+                    lan.local_conflicts(['172.16.0.0/12'])
+                self.assertIn('docker0', str(error.exception))
+                with self.assertRaises(lan.Error):
+                    lan.local_conflicts(['172.30.0.0/24'])  # sing-box TUN address
+                lan.local_conflicts(['10.124.0.0/16'])  # another LAN is checked by enable() separately
+
+    def test_any_pending_network_change_blocks_transaction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pending = Path(tmp) / 'proxy-out/pending'
+            pending.mkdir(parents=True)
+            with patch.object(lan, 'PENDING', (pending,)), patch.object(lan, 'run') as run, \
+                 patch.object(lan, 'STATE', Path(tmp) / 'lan'):
+                with self.assertRaises(lan.Error):
+                    lan.start_transaction('office', 'enable')
+                run.assert_not_called()
+
+    def test_public_status_has_no_secrets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state, public = Path(tmp) / 'state', Path(tmp) / 'public'
+            state.mkdir()
+            lan.save(state / 'office.json', {'ok': True, 'summary': 'test passed', 'updatedAt': 'x'})
+            data = {'enabled': True, 'ready': True, 'subnets': ['10.123.0.0/16'], 'baseline': 'HASH_NEVER_PUBLIC'}
+            with patch.object(lan, 'STATE', state), patch.object(lan, 'PUBLIC', public), \
+                 patch.object(lan, 'profiles', return_value={'office': data}):
+                lan.publish_lan()
+                text = (public / 'lan.json').read_text()
+                self.assertEqual((public / 'lan.json').stat().st_mode & 0o777, 0o644)
+                self.assertNotIn('HASH_NEVER_PUBLIC', text)
+                self.assertNotIn('10.123', text)
+                ok = subprocess.CompletedProcess([], 0, '', '')
+                with patch.object(lan, 'run', return_value=ok), contextlib.redirect_stdout(io.StringIO()) as out:
+                    lan.public_status()
+                row = json.loads(out.getvalue())
+                self.assertEqual((row['name'], row['active'], row['ok']), ('office', True, True))
+
+
 if __name__ == '__main__':
     unittest.main()

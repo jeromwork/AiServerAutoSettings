@@ -66,5 +66,9 @@ build/Wizard.Lan.ps1
 build/server-ssh-user.sh
 server/lan-vpn.sh
 server/lan_vpn.py
+server/lan-config.schema.json
+server/proxy-out.sh
+server/proxy_out.py
+build/Wizard.Network.ps1
 disk/Disk.Binary.ps1
 disk/Disk.NavPane.ps1

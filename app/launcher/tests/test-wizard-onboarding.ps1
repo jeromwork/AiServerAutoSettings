@@ -137,5 +137,5 @@ Assert ($script:uploads.Count -eq 2) 'invalid profile never partially uploads'
 [IO.File]::WriteAllText($ovpn,"key ../outside.key`r`n")
 Throws {Get-WizardLanPayload $ovpn} 'path traversal rejected'
 [IO.File]::WriteAllText($ovpn,"auth-user-pass`r`n")
-Throws {Get-WizardLanPayload $ovpn} 'interactive credentials rejected honestly'
+Assert ((Get-WizardLanPayload $ovpn).Trim() -ceq "auth-user-pass") 'interactive credentials kept for the window to ask (stored root-only on the server)'
 Write-Output ('OK: '+$count+' onboarding/LAN checks (fake SSH, real keygen and isolated bash, no Windows)')
