@@ -117,7 +117,8 @@ function Get-RouteCalls{@([IO.File]::ReadAllLines((Join-Path $env:RA_TEST_SSH 'c
 function Get-ProxyOption($Call){@($Call.args|Where-Object {$_ -like 'ProxyCommand=*'})}
 $proxy=[pscustomobject]@{type='socks';host='127.0.0.1';port=10808}
 $hop=[pscustomobject]@{name='jump';ssh='jumper@hop.example.invalid:2222';keyFile=$hopKey}
-$base=@{login='root';keyFile=$chosen;passwordPipe='';askpassExecutable='C:\Program Files\RemoteAgents\RemoteAgents.exe'}
+$askpass=Join-Path $routeHome 'Program Files/RemoteAgents/RemoteAgents.exe';[void][IO.Directory]::CreateDirectory((Split-Path $askpass -Parent));Write-DiskUtf8 $askpass 'fixture-only'
+$base=@{login='root';keyFile=$chosen;passwordPipe='';askpassExecutable=$askpass}
 # 1. Direct is blocked, the proxy works.
 $rr=New-RouteRoot 'proxy';$env:RA_TEST_BLOCK='direct'
 $f=Connect-WizardServer $rr $repo ([pscustomobject]($base+@{address='route1.example.invalid';proxy=$proxy}))
@@ -141,6 +142,12 @@ Assert ($live.Contains('напрямую… ✗') -and $live.Contains('прок�
 foreach($t in @($live,[IO.File]::ReadAllText($f),[IO.File]::ReadAllText((Join-Path $rr 'config.json')))){Assert (-not $t.Contains($hopBody.Substring(0,40)) -and -not $t.Contains('PRIVATE KEY') -and -not $t.Contains('ProxyCommand')) 'hop key contents and route options are not logged or saved'}
 $cfg=Read-TransportJson (Join-Path $rr 'config.json')
 Assert ($cfg.wizard.serverRoute.used -ceq 'hop' -and $cfg.wizard.serverRoute.hop.name -ceq 'jump' -and $cfg.wizard.serverRoute.hop.ssh -ceq 'jumper@hop.example.invalid:2222' -and $cfg.wizard.serverRoute.hop.keyFile -ceq $hopKey) 'hop saved with transport hops[] names (name, ssh) and key path'
+# A known_hosts file may contain several hops; save the selected endpoint's pinned key.
+$knownHop=Join-Path (Split-Path (Read-TransportJson $f).keyPath -Parent) 'known_hosts-hop'
+$hopPub=((Convert-TransportLF ([IO.File]::ReadAllText($hopKey+'.pub'))).Trim() -split '\s+')[0..1] -join ' '
+Write-DiskUtf8 $knownHop ("unrelated.example.invalid ssh-ed25519 Zml4dHVyZQ==`r`n[hop.example.invalid]:2222 "+$hopPub+"`r`n")
+Save-WizardRoute $rr ([pscustomobject]@{hop=$hop}) (Read-TransportJson $f)
+Assert ((Read-TransportJson (Join-Path $rr 'config.json')).wizard.serverRoute.hop.hostKey -ceq $hopPub) 'saved hop host key belongs to selected host and port, not first known_hosts line'
 # 2b. Hop key rejected/unreachable, password route works: the password exists only as a pipe name, in a hop-only environment.
 $rr=New-RouteRoot 'hoppw';$env:RA_TEST_BLOCK='direct,hop'
 $pipeName='RemoteAgents.Password.'+[guid]::NewGuid().ToString('N');$secret='hop-secret-password-value'
@@ -149,7 +156,7 @@ $rc=Get-RouteCalls;$live=[IO.File]::ReadAllText($script:WizardProgressFile);$las
 $hopCalls=@($rc|Where-Object {(Get-ProxyOption $_).Count -eq 1})
 $firstHop=@(Get-ProxyOption $hopCalls[0])[0]
 Assert ($firstHop.Contains($hopKey) -and $firstHop.Contains('BatchMode=yes') -and -not $firstHop.Contains('PubkeyAuthentication=no')) 'key hop route is tried before the password route'
-Assert ($last[0].Contains('PubkeyAuthentication=no') -and $last[0].Contains('PreferredAuthentications=password,keyboard-interactive') -and $last[0].Contains('BatchMode=no') -and $last[0].Contains('REMOTEAGENTS_PASSWORD_PIPE='+$pipeName) -and $last[0].Contains('SSH_ASKPASS_REQUIRE=force') -and $last[0].Contains('SSH_ASKPASS=C:\Program Files\RemoteAgents\RemoteAgents.exe')) 'password hop route asks the askpass relay through its own pipe, set only for the inner ssh'
+Assert ($last[0].Contains('PubkeyAuthentication=no') -and $last[0].Contains('PreferredAuthentications=password,keyboard-interactive') -and $last[0].Contains('BatchMode=no') -and $last[0].Contains('REMOTEAGENTS_PASSWORD_PIPE='+$pipeName) -and $last[0].Contains('SSH_ASKPASS_REQUIRE=force') -and $last[0].Contains('SSH_ASKPASS='+$askpass)) 'password hop route asks the askpass relay through its own pipe, set only for the inner ssh'
 Assert ($live.Contains('(пароль)… ✓')) 'password hop route is reported working'
 foreach($t in @($live,[IO.File]::ReadAllText($f),[IO.File]::ReadAllText((Join-Path $rr 'config.json')))){Assert (-not $t.Contains($secret) -and -not $t.Contains($pipeName)) 'hop password and pipe name never in progress, profile or config'}
 Assert (-not ([IO.File]::ReadAllText((Join-Path $env:RA_TEST_SSH 'calls.jsonl'))).Contains($secret)) 'hop password never on a command line'
@@ -203,8 +210,22 @@ function Invoke-WizardSsh($Root,$Command,$InputText='',$Timeout=60){
 Initialize-WizardTransport $root $repo $transport
 $channel=Read-TransportJson $transport.channelPath
 Assert ($transport.profilePath -ceq $c.wizard.pendingProfile -and $channel.inbounds[0].override_port -eq 34567) 'fresh connection uses selected profile and actual server sync port'
+Assert (-not $transport.PSObject.Properties['serverRoute']) 'direct initialization adds no personal transport overlay'
 Assert (@($channel.outbounds).Count -eq 0) 'clean server needs no fabricated VLESS endpoint or user value'
 Assert ((Invoke-DiskProcess '/usr/bin/stat' @('-c','%a',$transport.channelPath)) -eq '600') 'channel material uses private permissions'
+$personalConfig=Read-TransportJson (Join-Path $root 'config.json')
+$personalConfig.wizard|Add-Member -Force serverRoute ([pscustomobject]@{used='hop';hop=[pscustomobject]@{ssh='jumper@hop.example.invalid:2207';keyFile=$hopKey}})
+Write-TransportJson (Join-Path $root 'config.json') $personalConfig
+Initialize-WizardTransport $root $repo $transport
+Assert ($transport.serverRoute.used -eq 'hop' -and $transport.serverRoute.hop.keyFile -eq $hopKey) 'initializer places personal hop in local transport for isolated preflight'
+$personalConfig.wizard.serverRoute=[pscustomobject]@{used='proxy';proxy=$proxy}
+Write-TransportJson (Join-Path $root 'config.json') $personalConfig
+Initialize-WizardTransport $root $repo $transport
+Assert ($transport.serverRoute.used -eq 'proxy' -and $transport.serverRoute.proxyExecutable -eq (Join-Path $root 'RemoteAgents.exe')) 'proxy overlay keeps installed exe path when preflight runs in a temporary home'
+$personalConfig.wizard.serverRoute=[pscustomobject]@{used='direct'}
+Write-TransportJson (Join-Path $root 'config.json') $personalConfig
+Initialize-WizardTransport $root $repo $transport
+Assert (-not $transport.PSObject.Properties['serverRoute']) 'switching to direct removes previous personal overlay'
 # The shared downloader/preflight are replaced only in this unit fixture.
 $script:probes=0
 function Get-WizardCatalog($Root,$Bundle){[pscustomobject]@{schema=1;entries=@();hops=@();relays=@();cdn=@()}}

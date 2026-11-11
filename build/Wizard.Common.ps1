@@ -20,7 +20,8 @@ function Invoke-WizardSsh([string]$Root,[string]$Command,[string]$InputText='',[
     $profile=Find-InstallProfile $Root
     if(-not $profile){throw 'Настройте SSH на шаге «Сервер»'}
     $p=Read-TransportJson $profile
-    Invoke-DiskProcess $p.sshExecutable (@('-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=5')+@($p.arguments)+@($Command)) (Convert-TransportLF $InputText) -TimeoutSeconds $Timeout
+    $routeOptions=if($script:WizardRoute){@($script:WizardRoute.options)}else{@(Get-TransportSavedRouteOptions $Root $p)}
+    Invoke-DiskProcess $p.sshExecutable ($routeOptions+@('-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=5')+@($p.arguments)+@($Command)) (Convert-TransportLF $InputText) -TimeoutSeconds $Timeout
 }
 function Send-WizardHelpers([string]$Root,[string]$Bundle) {
     $upload='set -eu; umask 077;'+"`n"
@@ -177,7 +178,7 @@ function Merge-WizardCatalog($Server,$Local) {
 function Get-WizardPublicTransport($Transport) {
     $out=[pscustomobject]@{schema=1}
     foreach($g in @('entries','hops','relays','cdn')){
-        $rows=@();foreach($row in @($Transport.$g)){if($null -ne $row){$copy=$row|Select-Object * -ExcludeProperty configPath;$rows+=@($copy)}}
+        $rows=@();foreach($row in @($Transport.$g)){if($null -ne $row){$copy=$row|Select-Object * -ExcludeProperty configPath,keyFile,knownHostsPath;$rows+=@($copy)}}
         $out|Add-Member $g $rows
     };return $out
 }
@@ -347,8 +348,8 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             foreach($g in @('entries','hops','relays','cdn')){
                 $rows=@();foreach($row in @($local.$g)){
                     $copy=Copy-TransportObject $row
-                    $existing=@($t.$g|Where-Object {$_.name -ceq $row.name -and $_.configPath})
-                    if($existing.Count){$copy|Add-Member -Force configPath ([string]$existing[0].configPath)}
+                    $existing=@($t.$g|Where-Object {$_.name -ceq $row.name})
+                    if($existing.Count){foreach($field in @('configPath','keyFile','knownHostsPath')){if($existing[0].$field){$copy|Add-Member -Force $field ([string]$existing[0].$field)}}}
                     $rows+=@($copy)
                 }
                 $t|Add-Member -Force $g $rows

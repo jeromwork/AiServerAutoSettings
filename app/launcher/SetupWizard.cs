@@ -485,7 +485,7 @@ namespace RemoteAgents.Launcher
             if(!wizard.ContainsKey("localCatalog"))local=Json.Map(Json.Get(config,"transport"));
             foreach(string group in new[]{"entries","hops","relays","cdn"}) {
                 var rows=Json.Array(Json.Get(catalog,group)).Select(Json.Map).ToList();
-                foreach(var row in Json.Array(Json.Get(local,group)).Select(Json.Map)){var clean=new Dictionary<string,object>(row);clean.Remove("configPath");if(!clean.ContainsKey("ssh") && clean.ContainsKey("alias")){clean["ssh"]=clean["alias"];clean.Remove("alias");}if(!clean.ContainsKey("host") && clean.ContainsKey("server")){clean["host"]=clean["server"];clean.Remove("server");}rows.RemoveAll(r=>Json.Str(r,"name")==Json.Str(row,"name"));rows.Add(clean);}
+                foreach(var row in Json.Array(Json.Get(local,group)).Select(Json.Map)){var clean=new Dictionary<string,object>(row);clean.Remove("configPath");clean.Remove("keyFile");clean.Remove("knownHostsPath");if(!clean.ContainsKey("ssh") && clean.ContainsKey("alias")){clean["ssh"]=clean["alias"];clean.Remove("alias");}if(!clean.ContainsKey("host") && clean.ContainsKey("server")){clean["host"]=clean["server"];clean.Remove("server");}rows.RemoveAll(r=>Json.Str(r,"name")==Json.Str(row,"name"));rows.Add(clean);}
                 foreach(var row in rows){int index=nodes.Rows.Add(CatalogTitle(group),Json.Str(row,"name"),Json.Text(row,"ssh",Json.Text(row,"host",Json.Str(row,"domain"))),Json.Str(row,"port"),Json.Str(row,"entry"),Json.Bool(row,"enabled",true));nodes.Rows[index].Tag=row;}
             }
             Append("Каталог получен с сервера; секреты не загружались в таблицу.");

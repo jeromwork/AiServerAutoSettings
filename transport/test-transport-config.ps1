@@ -33,6 +33,56 @@ try{
     $options=@{sshPort=2222;syncPort=22001;probePortBase=26000;socksPortBase=28000;apiPort=29090;bindPhysical=$true;openSsh=$true;stallSeconds=5;probeTimeoutSec=45}
     $settings=[pscustomobject]@{Options=$options;Transport=$t;Profile=$p;Channel=(Copy-TransportObject $channel)}
     $paths=Get-TransportCandidates $settings $work
+    # Local hops accept a key path; sing-box uses the same private_key_path field as the target SSH.
+    $keyHop=Copy-TransportObject $t;$hopKey=Join-Path $work 'Пользователь с пробелом/hop key'
+    $keyHop.hops[0]|Add-Member keyFile $hopKey
+    $keySettings=[pscustomobject]@{Options=$options;Transport=$keyHop;Profile=$p;Channel=(Copy-TransportObject $channel)}
+    $keyPaths=Get-TransportCandidates $keySettings $work
+    $jump=@($keyPaths.Tunnels|Where-Object {$_.tag -eq 'openssh-jump-jump'})[0]
+    $pc=@($jump.arguments|Where-Object {$_ -like 'ProxyCommand=*'})[0]
+    Assert ($pc.Contains('"-i" "'+$hopKey+'"') -and $pc.Contains('IdentitiesOnly=yes') -and $pc.EndsWith('"jump-example"')) 'OpenSSH jump uses explicit hop key before destination'
+    Assert (($keyPaths.Outbounds|Where-Object {$_.tag -eq 'hop-jump'}).private_key_path -eq $hopKey) 'sing-box SSH hop overrides default identity with explicit key path'
+    Assert (($paths.Outbounds|Where-Object {$_.tag -eq 'hop-jump'}).private_key_path -eq $key) 'legacy hop still uses resolved default identity'
+    $personal=[pscustomobject]@{used='hop';hop=[pscustomobject]@{name='personal';ssh='jumper@hop.example.invalid:2207';keyFile=$hopKey;hostKey='unrelated-saved-key'}}
+    $overlay=Copy-TransportObject $settings
+    $overlay.Transport|Add-Member serverRoute $personal
+    $overlay.Profile|Add-Member configPath (Join-Path $work 'ssh.conf')
+    $before=ConvertTo-Json -InputObject $overlay.Transport -Depth 30 -Compress
+    $script:hopKnown='';$script:hopResolve=@()
+    function Get-TransportHostKeys($Ssh,$HostName,$KnownHosts){if($KnownHosts -like '*known_hosts-hop'){$script:hopKnown=$KnownHosts};'ssh-ed25519 fixture-pinned-hop-key'}
+    function Invoke-TransportText($Exe,$Arguments){$script:hopResolve=@($Arguments);$script:fakeHop}
+    $personalPaths=Get-TransportCandidates $overlay $work
+    Assert ((ConvertTo-Json -InputObject $overlay.Transport -Depth 30 -Compress) -ceq $before) 'personal overlay does not mutate public catalog lists'
+    Assert ($script:hopKnown -eq (Join-Path $work 'known_hosts-hop')) 'personal hop host key comes from known_hosts-hop'
+    $outHop=$personalPaths.Outbounds|Where-Object {$_.tag -eq 'hop-wizard-server-route'}
+    Assert ($outHop.private_key_path -eq $hopKey -and $outHop.host_key[0] -eq 'ssh-ed25519 fixture-pinned-hop-key') 'sing-box personal hop uses explicit key and pinned host key'
+    $jump=$personalPaths.Tunnels|Where-Object {$_.tag -eq 'openssh-jump-wizard-server-route'}
+    $pc=@($jump.arguments|Where-Object {$_ -like 'ProxyCommand=*'})[0]
+    Assert ($pc.Contains('"-i" "'+$hopKey+'"') -and $pc.Contains('known_hosts-hop') -and $pc.Contains('StrictHostKeyChecking=yes')) 'persistent personal OpenSSH hop pins its own known_hosts file'
+    Assert ($pc.Contains('"-l" "jumper"') -and $pc.Contains('"-p" "2207"') -and $pc.EndsWith('"hop.example.invalid"')) 'persistent hop separates endpoint login and port before destination'
+    Assert ($script:hopResolve[-1] -eq 'hop.example.invalid' -and $script:hopResolve -contains '2207' -and $script:hopResolve -contains $hopKey) 'ssh -G resolves the same explicit endpoint and identity'
+    $overlay.Transport.relays=@();$overlay.Transport.entries=@()
+    $overlay.Channel=[pscustomobject]@{outbounds=@();inbounds=@([pscustomobject]@{tag='sync';override_port=23456})}
+    # No VLESS on a fresh server: OpenSSH still carries bridge and disk.
+    $noVless=Get-TransportCandidates $overlay $work
+    Assert (@($noVless.Tunnels|Where-Object {$_.tag -eq 'openssh-jump-wizard-server-route'}).Count -eq 1) 'fresh SSH-only server keeps personal hop'
+    Assert (@($noVless.Candidates|Where-Object {$_.tag -like 'vless-sshhop-*'}).Count -eq 0) 'SSH-only channel has no fabricated VLESS hop'
+    $overlay.Transport.serverRoute=[pscustomobject]@{used='direct';hop=$personal.hop}
+    $direct=Get-TransportCandidates $overlay $work
+    Assert ($direct.Tunnels.Count -eq 2 -and @($direct.Candidates|Where-Object {$_.tag -like '*wizard-server-route*' -or $_.tag -eq 'openssh-proxy'}).Count -eq 0) 'direct route adds no personal candidate'
+    $helper=Join-Path $work 'RemoteAgents.exe';[IO.File]::WriteAllText($helper,'fixture-only')
+    $overlay.Transport.serverRoute=[pscustomobject]@{used='proxy';proxy=[pscustomobject]@{type='http';host='127.0.0.1';port=1080};proxyExecutable=$helper}
+    $proxyPaths=Get-TransportCandidates $overlay $work
+    $proxyTunnel=$proxyPaths.Tunnels|Where-Object {$_.tag -eq 'openssh-proxy'}
+    $pc=@($proxyTunnel.arguments|Where-Object {$_ -like 'ProxyCommand=*'})[0]
+    Assert ($pc.Contains('--proxy-connect http 127.0.0.1 1080 %h %p') -and $proxyTunnel.target -eq $p.serverAddress) 'persistent proxy uses local exe and target profile'
+    Assert (@($proxyPaths.Candidates|Where-Object {$_.tag -eq 'openssh-proxy'}).Count -eq 1) 'persistent proxy participates in transport selection'
+    Remove-Item $helper
+    $failed=$false;try{Get-TransportCandidates $overlay $work|Out-Null}catch{$failed=$_.Exception.Message -like '*RemoteAgents.exe*'}
+    Assert $failed 'persistent proxy without helper fails clearly'
+    $overlay.Transport.serverRoute=[pscustomobject]@{used='hop';hop=[pscustomobject]@{ssh='hop.example.invalid'}}
+    $failed=$false;try{Get-TransportCandidates $overlay $work|Out-Null}catch{$failed=$_.Exception.Message -like '*ключ для промежуточного сервера*'}
+    Assert $failed 'password-only personal hop cannot silently disappear from persistent transport'
     Set-Item function:Invoke-TransportText $realText;Set-Item function:Get-TransportHostKeys $realHostKeys
     $expected=@('vless-direct','singbox-ssh-direct','vless-relay-relay','vless-sshhop-jump','hy2-edge','hy2obfs-edge','tuic-edge','trojan-edge','reality-edge','shadowtls-edge','ws-direct-edge','ws-cdn-edge','openssh-direct','openssh-jump-jump')
     Assert ($paths.Candidates.Count -eq $expected.Count) 'число кандидатов'
@@ -122,6 +172,22 @@ try{
         Assert ($defaults.Options.bindPhysical -and $defaults.Options.activeProbeBytes -eq 65536 -and $defaults.Options.rankProbeBytes -eq 262144) 'реальные значения по умолчанию'
         Assert ($defaults.Options.activeIntervalSec -eq 120 -and $defaults.Options.meteredActiveIntervalSec -eq 300 -and $defaults.Options.rankIntervalSec -eq 1800) 'интервалы по умолчанию'
         Assert ($defaults.Options.topOnMetered -eq 3 -and $defaults.Options.apiPort -eq 29090) 'экономный режим и API по умолчанию'
+        $personalConfig=Read-TransportJson (Join-Path $work 'config.json')
+        $personalConfig|Add-Member wizard ([pscustomobject]@{serverRoute=$personal})
+        Write-TransportJson (Join-Path $work 'config.json') $personalConfig
+        $restored=Read-TransportSettings $work
+        Assert ($restored.Transport.serverRoute.used -eq 'hop' -and $restored.Transport.serverRoute.hop.keyFile -eq $hopKey) 'runtime restores old wizard route as local overlay'
+        Assert (-not (Read-TransportJson (Join-Path $work 'config.json')).transport.serverRoute) 'loading old route does not modify persisted settings'
+        $revision=Get-TransportRevision $work
+        $personalConfig.wizard.serverRoute=[pscustomobject]@{used='direct';hop=$personal.hop}
+        Write-TransportJson (Join-Path $work 'config.json') $personalConfig
+        Assert ((Get-TransportRevision $work) -ne $revision) 'route changes invalidate transport revision'
+        Assert (-not (Read-TransportSettings $work).Transport.serverRoute) 'direct wizard route adds no runtime overlay'
+        $personalConfig.transport|Add-Member serverRoute $personal
+        Write-TransportJson (Join-Path $work 'config.json') $personalConfig
+        Assert ((Read-TransportSettings $work).Transport.serverRoute.used -eq 'hop') 'verified transport overlay survives independent wizard selection'
+        $personalConfig.PSObject.Properties.Remove('wizard');$personalConfig.transport.PSObject.Properties.Remove('serverRoute')
+        Write-TransportJson (Join-Path $work 'config.json') $personalConfig
         $probeArgs=@(Get-TransportSshArguments $p 26000)
         Assert ('ProxyCommand=none' -in $probeArgs -and ('HostKeyAlias='+$p.serverAddress) -in $probeArgs -and $p.keyPath -in $probeArgs -and ('UserKnownHostsFile="'+$p.knownHostsPath.Replace('\','/')+'"') -in $probeArgs -and '-n' -in $probeArgs) 'SSH-проба использует свой профиль'
         if($keygen){Assert (@(Get-TransportHostKeys $keygen.Source $p.serverAddress $known).Count -eq 1) 'host key из known_hosts'}
