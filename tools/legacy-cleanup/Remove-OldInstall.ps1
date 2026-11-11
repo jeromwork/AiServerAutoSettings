@@ -53,7 +53,7 @@ try {
     foreach ($t in $tasks) { Write-Host ('  задача планировщика: ' + $t) }
     foreach ($r in $runs) { Write-Host ('  значение реестра: ' + $r.name + ' = ' + $r.value) }
     foreach ($k in $keys) { Write-Host ('  ключ реестра (меню/значок Disk): ' + $k) }
-    foreach ($p in $procs) { Write-Host ('  процесс: PID ' + $p.ProcessId + ' ' + $p.Name) }
+    foreach ($p in $procs) { Write-Host ('  процесс: PID ' + $p.ProcessId + ' ' + $p.Name + ' (' + $(if ($p.ExecutablePath) { $p.ExecutablePath } else { 'путь скрыт' }) + ')') }
     foreach ($f in $folders) { Write-Host ('  перенос в копию: ' + $f) }
     foreach ($f in $skipped) { Write-Host ('  папку НЕ переношу (внутри или рядом Disk/.ssh): ' + $f) -ForegroundColor Yellow }
     Write-Host ('Не трогаю: ' + ($protect -join ', ') + ', OpenVPN.') -ForegroundColor Cyan
