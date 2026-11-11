@@ -14,9 +14,9 @@ try {
     if (-not $B -or -not (Test-Path -LiteralPath (Join-Path $B 'manifest.json'))) { Write-Host 'Невосстановленная резервная копия не найдена.' -ForegroundColor Yellow; exit 4 }
     $m = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $B 'manifest.json') | ConvertFrom-Json
     Write-Host ('Восстановление из ' + $B) -ForegroundColor Cyan
-    foreach ($f in @($m.folders)) { Write-Host ('  папка ' + $f.path) }
+    foreach ($f in @($m.folders)) { Write-Host ('  ' + $f.path) }
     foreach ($k in @($m.regkeys)) { Write-Host ('  меню ' + $k.key) }
-    foreach ($r in @($m.runs)) { Write-Host ('  автозапуск ' + $r.name) }
+    foreach ($r in @($m.runs)) { Write-Host ('  значение ' + $r.name) }
     foreach ($t in @($m.tasks)) { Write-Host ('  задача ' + $t.name) }
     if (Get-Process -Name RemoteAgents -ErrorAction SilentlyContinue) { Write-Host 'Сначала закройте RemoteAgents.exe (значок в трее → Выход).' -ForegroundColor Yellow }
     if (-not $Yes -and @('да', 'д', 'yes', 'y', 'lf') -notcontains ([string](Read-Host 'Восстановить? (да/нет)')).Trim().ToLowerInvariant()) { Write-Host 'Отменено.'; exit 2 }
@@ -25,20 +25,24 @@ try {
         try {
             if (-not (Test-Path -LiteralPath (Join-Path $B $f.backup))) { Write-Host ('Уже возвращена: ' + $f.path); continue }
             # Папку, созданную новой программой, не удаляем, а отодвигаем в эту же копию.
-            if (Test-Path -LiteralPath $f.path) { $aside = Join-Path $B ('replaced-' + (Split-Path $f.path -Leaf) + '-' + (Get-Date -Format 'HHmmss')); [IO.Directory]::Move($f.path, $aside); Write-Host ('  текущая папка отодвинута в ' + $aside) -ForegroundColor Yellow }
-            [IO.Directory]::Move((Join-Path $B $f.backup), $f.path); Write-Host ('Папка возвращена: ' + $f.path)
+            if (Test-Path -LiteralPath $f.path) { $aside = Join-Path $B ('replaced-' + (Split-Path $f.path -Leaf) + '-' + (Get-Date -Format 'HHmmss')); Move-Item -LiteralPath $f.path -Destination $aside; Write-Host ('  текущая папка отодвинута в ' + $aside) -ForegroundColor Yellow }
+            [void][IO.Directory]::CreateDirectory((Split-Path $f.path)); Move-Item -LiteralPath (Join-Path $B $f.backup) -Destination $f.path; Write-Host ('Возвращено: ' + $f.path)
         } catch { $fail++; Write-Host ('ОШИБКА, папка ' + $f.path + ': ' + $_.Exception.Message) -ForegroundColor Red }
     }
     foreach ($k in @($m.regkeys)) { $r = Invoke-Native 'reg.exe' @('import', (Join-Path $B $k.file)); if ($r.code) { $fail++; Write-Host ('ОШИБКА, меню ' + $k.key + ': ' + $r.out) -ForegroundColor Red } }
-    $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Software\Microsoft\Windows\CurrentVersion\Run')
-    try { foreach ($r in @($m.runs)) { $key.SetValue($r.name, $r.value); Write-Host ('Автозапуск возвращён: ' + $r.name) } } finally { $key.Dispose() }
+    $run = 'Software\Microsoft\Windows\CurrentVersion\Run'
+    foreach ($r in @($m.runs)) {
+        $kp = $run; $kind = 'String'; if ($r.key) { $kp = $r.key }; if ($r.kind) { $kind = $r.kind }
+        $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($kp); try { $key.SetValue($r.name, $r.value, $kind) } finally { $key.Dispose() }
+        Write-Host ('Значение возвращено: ' + $r.name)
+    }
     foreach ($t in @($m.tasks)) {
         $r = Invoke-Native 'schtasks.exe' @('/Create', '/TN', $t.name, '/XML', (Join-Path $B $t.file), '/F')
         if ($r.code) { $fail++; Write-Host ('ОШИБКА, задача ' + $t.name + ': ' + $r.out) -ForegroundColor Red; continue }
         Write-Host ('Задача возвращена: ' + $t.name)
         if ($t.name -like 'RemoteDisk*') { [void](Invoke-Native 'schtasks.exe' @('/Run', '/TN', $t.name)) }
     }
-    foreach ($r in @($m.runs)) { [void](Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = [string]$r.value }) }
+    foreach ($r in @($m.runs | Where-Object { -not $_.key -or $_.key -like '*\Run' })) { [void](Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = [string]$r.value }) }
     if ($fail) { Write-Host ('Ошибок: ' + $fail + '. Исправьте причину и запустите снова с -Backup "' + $B + '".') -ForegroundColor Red; exit 1 }
     Set-Content -LiteralPath (Join-Path $B 'restored.txt') -Value (Get-Date).ToString('o')
     Write-Host 'Старая установка возвращена.' -ForegroundColor Green; exit 0

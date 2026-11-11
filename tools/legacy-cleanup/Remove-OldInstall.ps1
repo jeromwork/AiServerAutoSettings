@@ -1,60 +1,61 @@
 ﻿#requires -Version 5.1
-# ВРЕМЕННЫЙ одноразовый инструмент: убирает старую (до RemoteAgents.exe) установку RemoteAgents/RemoteDisk.
+# ВРЕМЕННЫЙ одноразовый инструмент: начисто убирает прежние установки RemoteAgents/RemoteDisk,
+# включая ранние тестовые RemoteAgents.exe в %LOCALAPPDATA%\RemoteAgents.
 # Показывает план и спрашивает «Удалить? (да/нет)». -Plan: только план. -Yes: без вопроса.
 # Ничего не удаляет: папки, XML задач, .reg и значения автозапуска уходят в
 # %LOCALAPPDATA%\RemoteAgents-old-backup-<время>\ (manifest.json), откат: Restore-OldInstall.cmd.
-# Никогда не трогает ~\.ssh, файлы папки Disk и файлы новой RemoteAgents.exe.
+# Никогда не трогает ~\.ssh, %LOCALAPPDATA%\RemoteAgents\ssh-profiles (ключ сервера) и папку Disk.
 # Коды: 0 готово/нечего делать, 1 часть шагов не удалась, 2 отменено, 3 ошибка.
 param([switch]$Plan, [switch]$Yes, [string]$Adapter)
 $ErrorActionPreference = 'Stop'
 $L = $env:LOCALAPPDATA; $U = $env:USERPROFILE
-$Disk = Join-Path $L 'RemoteDisk'; $Agents = Join-Path $L 'RemoteAgents'; $Control = Join-Path $Agents 'control'
-$RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run'
+$Disk = Join-Path $L 'RemoteDisk'; $Agents = Join-Path $L 'RemoteAgents'
+$RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run'; $NavGuid = '{5D8A825B-EDEA-4B5E-97FC-96ABDC8A78E9}'
+# Значения реестра (HKCU): автозапуск и скрытие значка Disk с рабочего стола (disk\Disk.NavPane.ps1)
+$Values = @(@('RemoteDisk', 'RemoteAgents', 'RemoteAgentsControl', 'RemoteVPN') | ForEach-Object { , @($RunKey, $_) }) + @(, @('Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel', $NavGuid))
 $RegKeys = @('HKCU\Software\Classes\Directory\shell\RemoteDisk_add',
     'HKCU\Software\Classes\Directory\shell\AiServerSync', 'HKCU\Software\Classes\Directory\shell\AiServerUnsync',
-    'HKCU\Software\Classes\Directory\Background\shell\AiServerSync', 'HKCU\Software\Classes\Directory\Background\shell\AiServerUnsync')
+    'HKCU\Software\Classes\Directory\Background\shell\AiServerSync', 'HKCU\Software\Classes\Directory\Background\shell\AiServerUnsync',
+    ('HKCU\Software\Classes\CLSID\' + $NavGuid), ('HKCU\Software\Classes\Wow6432Node\CLSID\' + $NavGuid),
+    ('HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace\' + $NavGuid))
 # Вызовы Windows (smoke-тест подменяет их через -Adapter)
 function Invoke-Native([string]$Exe, [string[]]$A) {
     $ErrorActionPreference = 'Continue'; $o = & (Join-Path $env:SystemRoot ('System32\' + $Exe)) @A 2>&1
     [pscustomobject]@{ code = $LASTEXITCODE; out = (@($o | ForEach-Object { [string]$_ }) -join "`r`n") }
 }
-function Get-TaskNames { @('RemoteDiskChannel', 'RemoteDiskFolders', 'RemoteAgents rollback') + @(Get-ScheduledTask -TaskPath '\' -TaskName 'RemoteAgents-Recovery-*' -ErrorAction SilentlyContinue | ForEach-Object { $_.TaskName }) }
-function Get-Run([string]$N) { $k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($RunKey); if ($k) { try { $k.GetValue($N) } finally { $k.Dispose() } } }
-function Remove-Run([string]$N) { $k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($RunKey, $true); if ($k) { try { $k.DeleteValue($N, $false) } finally { $k.Dispose() } } }
+function Get-TaskNames { @('RemoteDiskChannel', 'RemoteDiskFolders') + @(Get-ScheduledTask -TaskPath '\' -TaskName 'RemoteAgents*' -ErrorAction SilentlyContinue | ForEach-Object { $_.TaskName }) }
+function Get-Val([string]$K, [string]$N) { $k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($K); if ($k) { try { $v = $k.GetValue($N, $null, 'DoNotExpandEnvironmentNames'); if ($null -ne $v) { [pscustomobject]@{ key = $K; name = $N; value = $v; kind = [string]$k.GetValueKind($N) } } } finally { $k.Dispose() } } }
+function Remove-Val([string]$K, [string]$N) { $k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($K, $true); if ($k) { try { $k.DeleteValue($N, $false) } finally { $k.Dispose() } } }
+function Get-Parent { try { [int](Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId } catch { 0 } }
 function Get-Procs { @(Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID }) }
 if ($Adapter) { . ([IO.Path]::GetFullPath($Adapter)) }
 function N([string]$P) { ([IO.Path]::GetFullPath($P)).Replace('/', '\').TrimEnd('\').ToLowerInvariant() }
 function Test-Under([string]$Child, [string]$Parent) { $c = N $Child; $p = N $Parent; ($c -eq $p) -or $c.StartsWith($p + '\') }
 try {
-    # Новая программа живёт в том же %LOCALAPPDATA%\RemoteAgents и использует RemoteDisk: тогда общие папки не трогаем.
-    $new = Test-Path -LiteralPath (Join-Path $Agents 'RemoteAgents.exe')
-    $tasks = @(Get-TaskNames | Where-Object { (Invoke-Native 'schtasks.exe' @('/Query', '/TN', $_, '/XML')).code -eq 0 })
-    $runs = @()
-    $v = Get-Run 'RemoteDisk'; if ($v) { $runs += [pscustomobject]@{ name = 'RemoteDisk'; value = [string]$v } }
-    $v = [string](Get-Run 'RemoteAgentsControl') # мост новой программы (managed-control, -LauncherHome) не трогаем
-    if ($v -match 'Start-WindowsControl\.ps1' -and $v -notmatch 'managed-control|-LauncherHome') { $runs += [pscustomobject]@{ name = 'RemoteAgentsControl'; value = $v } }
+    $tasks = @(Get-TaskNames | Select-Object -Unique | Where-Object { (Invoke-Native 'schtasks.exe' @('/Query', '/TN', $_, '/XML')).code -eq 0 })
+    $runs = @($Values | ForEach-Object { Get-Val $_[0] $_[1] })
     $keys = @($RegKeys | Where-Object { (Invoke-Native 'reg.exe' @('query', $_)).code -eq 0 })
-    $tray = N (Join-Path (Join-Path $Disk 'tray') 'syncthingtray.exe'); $sb = N (Join-Path (Join-Path $Disk 'channel') 'sing-box.exe')
-    $ctl = N (Join-Path (Join-Path $Control 'app') 'Start-WindowsControl.ps1'); $diskApp = (N (Join-Path $Disk 'app')) + '\'
-    $procs = @(Get-Procs | Where-Object {
-        $e = ''; if ($_.ExecutablePath) { $e = N $_.ExecutablePath }; $c = ([string]$_.CommandLine).Replace('/', '\').ToLowerInvariant()
-        ($e -eq $tray -and (-not $new -or $c -notmatch '"?syncthing"?\s+"?serve')) -or ($e -eq $sb -and -not $new) -or $c.Contains($ctl) -or (-not $new -and $c.Contains($diskApp)) })
     $base = Join-Path $U 'Disk'; $bt = Join-Path $Disk 'base.txt'; if (Test-Path -LiteralPath $bt) { $base = ([IO.File]::ReadAllText($bt)).Trim([char]0xFEFF, ' ', "`r", "`n") }
-    $protect = @($base, (Join-Path $U '.ssh'), (Join-Path $Agents 'ssh-profiles'))
+    $keep = Join-Path $Agents 'ssh-profiles'; $protect = @($base, (Join-Path $U '.ssh'), $keep)
+    # Всё, что запущено из RemoteAgents/RemoteDisk или ссылается на них, кроме себя, своего окна и запущенного из Disk (release\RemoteAgents.exe).
+    $roots = @(((N $Agents) + '\'), ((N $Disk) + '\')); $self = @($PID, (Get-Parent))
+    $procs = @(Get-Procs | Where-Object {
+        $e = ''; if ($_.ExecutablePath) { $e = (N $_.ExecutablePath) }; $c = ([string]$_.CommandLine).Replace('/', '\').ToLowerInvariant()
+        $self -notcontains [int]$_.ProcessId -and -not ($e -and (Test-Under $_.ExecutablePath $base)) -and @($roots | Where-Object { $e.StartsWith($_) -or $c.Contains($_) }).Count })
     $folders = @(); $skipped = @()
-    foreach ($f in $(if ($new) { @(Join-Path $Control 'app') } else { @($Disk, $Control) })) {
+    $cands = @($Disk) + @(Get-ChildItem -LiteralPath $Agents -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'ssh-profiles' } | ForEach-Object { $_.FullName })
+    foreach ($f in $cands) {
         if (-not (Test-Path -LiteralPath $f)) { continue }
         if (@($protect | Where-Object { (Test-Under $_ $f) -or (Test-Under $f $_) }).Count) { $skipped += $f } else { $folders += $f }
     }
     Write-Host 'Старая установка RemoteAgents / RemoteDisk:' -ForegroundColor Cyan
-    if ($new) { Write-Host 'Найдена новая RemoteAgents.exe: общие с ней папки (RemoteDisk, control\config.json) оставляю.' -ForegroundColor Yellow }
     foreach ($t in $tasks) { Write-Host ('  задача планировщика: ' + $t) }
-    foreach ($r in $runs) { Write-Host ('  автозапуск: ' + $r.name + ' = ' + $r.value) }
-    foreach ($k in $keys) { Write-Host ('  меню Проводника: ' + $k) }
+    foreach ($r in $runs) { Write-Host ('  значение реестра: ' + $r.name + ' = ' + $r.value) }
+    foreach ($k in $keys) { Write-Host ('  ключ реестра (меню/значок Disk): ' + $k) }
     foreach ($p in $procs) { Write-Host ('  процесс: PID ' + $p.ProcessId + ' ' + $p.Name) }
-    foreach ($f in $folders) { Write-Host ('  папка (перенос в копию): ' + $f) }
+    foreach ($f in $folders) { Write-Host ('  перенос в копию: ' + $f) }
     foreach ($f in $skipped) { Write-Host ('  папку НЕ переношу (внутри или рядом Disk/.ssh/ssh-profiles): ' + $f) -ForegroundColor Yellow }
-    Write-Host ('Не трогаю: ' + ($protect -join ', ') + ', файлы новой RemoteAgents.exe, OpenVPN.') -ForegroundColor Cyan
+    Write-Host ('Не трогаю: ' + ($protect -join ', ') + ', OpenVPN.') -ForegroundColor Cyan
     if (-not ($tasks.Count + $runs.Count + $keys.Count + $procs.Count + $folders.Count)) { Write-Host 'Старая установка не найдена — удалять нечего.' -ForegroundColor Green; exit 0 }
     if ($Plan) { Write-Host 'Режим просмотра: ничего не изменено.' -ForegroundColor Yellow; exit 0 }
     if (-not $Yes -and @('да', 'д', 'yes', 'y', 'lf') -notcontains ([string](Read-Host 'Удалить? (да/нет)')).Trim().ToLowerInvariant()) { Write-Host 'Отменено, ничего не изменено.'; exit 2 }
@@ -73,7 +74,7 @@ try {
             $m.tasks += [pscustomobject]@{ name = $t; file = $file }; Save; Log ('Задача удалена: ' + $t)
         } catch { $fail++; Log ('ОШИБКА, задача ' + $t + ': ' + $_.Exception.Message) }
     }
-    foreach ($r in $runs) { try { Remove-Run $r.name; $m.runs += $r; Save; Log ('Автозапуск удалён: ' + $r.name) } catch { $fail++; Log ('ОШИБКА, автозапуск ' + $r.name + ': ' + $_.Exception.Message) } }
+    foreach ($r in $runs) { try { Remove-Val $r.key $r.name; $m.runs += $r; Save; Log ('Значение удалено: ' + $r.name) } catch { $fail++; Log ('ОШИБКА, значение ' + $r.name + ': ' + $_.Exception.Message) } }
     foreach ($p in $procs) { [void](Invoke-Native 'taskkill.exe' @('/T', '/F', '/PID', [string]$p.ProcessId)); Log ('Остановлен: PID ' + $p.ProcessId + ' ' + $p.Name) }
     if ($procs.Count) { Start-Sleep -Seconds 2 }
     foreach ($k in $keys) {
@@ -85,8 +86,8 @@ try {
     }
     foreach ($f in $folders) {
         $i++; $to = 'folder-' + $i + '-' + (Split-Path $f -Leaf); $err = $null
-        for ($a = 0; $a -lt 3; $a++) { try { [IO.Directory]::Move($f, (Join-Path $B $to)); $err = $null; break } catch { $err = $_.Exception.Message; Start-Sleep -Seconds 2 } }
-        if ($err) { $fail++; Log ('ОШИБКА, папка ' + $f + ' (файлы заняты?): ' + $err) } else { $m.folders += [pscustomobject]@{ path = $f; backup = $to }; Save; Log ('Папка перенесена: ' + $f) }
+        for ($a = 0; $a -lt 3; $a++) { try { Move-Item -LiteralPath $f -Destination (Join-Path $B $to); $err = $null; break } catch { $err = $_.Exception.Message; Start-Sleep -Seconds 2 } }
+        if ($err) { $fail++; Log ('ОШИБКА, перенос ' + $f + ' (файлы заняты?): ' + $err) } else { $m.folders += [pscustomobject]@{ path = $f; backup = $to }; Save; Log ('Перенесено: ' + $f) }
     }
     Save; Log ('Резервная копия: ' + $B)
     if ($fail) { Log ('Ошибок: ' + $fail + '. Повторный запуск безопасен; вернуть всё: Restore-OldInstall.cmd'); exit 1 }
