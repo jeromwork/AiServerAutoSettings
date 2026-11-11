@@ -30,9 +30,7 @@ pwsh=${PWSH:-$HOME/.cache/pwsh-test/pwsh}
 ) > "$testdir/offline.log" 2>&1 &
 offline_pid=$!
 (
-  for suite in "$repo"/server/tests/test_*.py; do
-    timeout 120 python3 -m unittest discover -s "$repo/server/tests" -p "$(basename "$suite")"
-  done
+  bash "$repo/server/tests/run.sh"
 ) > "$testdir/server.log" 2>&1 &
 server_pid=$!
 trap 'kill "$offline_pid" "$server_pid" 2>/dev/null || true; rm -rf "$testdir"' EXIT

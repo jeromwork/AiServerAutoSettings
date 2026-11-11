@@ -17,7 +17,7 @@ try{
         $text=Invoke-TransportText $exe ($a+@([string](Get-TransportValue $entry 'ssh' $entry.alias),'cat /opt/rd-entry/client.json'))
         $data=ConvertFrom-Json (Convert-TransportLF $text)
         foreach($field in @('server','sni','cover','ports','secrets')){if(-not $data.$field){throw 'Неполный client.json'}}
-        Write-TransportJson (Join-Path $TransportHome ('secrets/entries/'+$entry.name+'.json')) $data -Private;$count++
+        Write-TransportJson (Join-Path (Get-TransportValue $t 'cacheRoot' $TransportHome) ('secrets/entries/'+$entry.name+'.json')) $data -Private;$count++
     }
     Write-Output ('Обновлено узлов: '+$count+'. Секреты сохранены локально.')
 }catch{Write-Error 'Не удалось обновить узлы. Проверьте SSH-алиасы, known_hosts и формат client.json; содержимое ошибки скрыто.' -ErrorAction Continue;exit 1}

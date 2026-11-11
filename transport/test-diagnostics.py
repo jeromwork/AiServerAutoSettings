@@ -50,6 +50,25 @@ try{
             self.assertIn('probe-failed candidate=entry-fixture reason=timeout',log)
             self.assertIn('dial tcp: i/o timeout password=<redacted>',log)
 
+    def test_refresh_cache_secrets_remain_redacted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = root/'context.ps1'
+            script.write_text("""param($Common,$Root)
+. $Common
+$generation=Join-Path $Root 'generation'
+Write-TransportJson (Join-Path $generation 'secrets/entries/edge.json') @{secrets=@{hy2='refreshed-secret'}} -Private
+$settings=[pscustomobject]@{Transport=[pscustomobject]@{cacheRoot=$generation}}
+$context=@(Get-TransportDiagnosticContext $settings $Root)
+$text=Protect-TransportDiagnostic 'dial refused refreshed-secret' $context
+if($text.Contains('refreshed-secret')){throw 'refresh cache secret was not redacted'}
+if(-not $text.Contains('<redacted>')){throw 'no context from refresh cache'}
+""", encoding='utf-8-sig')
+            result = subprocess.run([PWSH,'-NoProfile','-NonInteractive','-File',str(script),
+                                     '-Common',str(ROOT/'transport/Transport.Common.ps1'),'-Root',tmp],
+                                     capture_output=True, timeout=45)
+            self.assertEqual(result.returncode,0,result.stderr.decode())
+
     def test_update_entries_does_not_echo_invalid_secret_json(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); ssh = root/'ssh'
@@ -60,6 +79,21 @@ try{
             result = subprocess.run([PWSH, '-NoProfile', '-NonInteractive', '-File', str(ROOT/'transport/Update-Entries.ps1'), '-Home', tmp], capture_output=True, timeout=20)
             self.assertNotEqual(result.returncode, 0)
             self.assertNotIn(marker.encode(), result.stdout+result.stderr)
+
+    def test_update_entries_writes_active_refresh_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); ssh = root/'ssh'
+            entry = dict(server='entry.invalid', sni='entry.invalid', cover='entry.invalid',
+                         ports=dict(hy2=443), secrets=dict(hy2='fixture-only'))
+            executable(ssh, 'print('+repr(json.dumps(entry))+')\n')
+            (root/'profile.json').write_text(json.dumps(dict(sshExecutable=str(ssh))))
+            (root/'config.json').write_text(json.dumps(dict(transport=dict(profilePath=str(root/'profile.json'),
+                cacheRoot=str(root/'generation'), entries=[dict(name='edge', ssh='edge')]))))
+            result = subprocess.run([PWSH,'-NoProfile','-NonInteractive','-File',str(ROOT/'transport/Update-Entries.ps1'),
+                                     '-Home',tmp], capture_output=True, timeout=20)
+            self.assertEqual(result.returncode,0,result.stderr.decode())
+            self.assertEqual(json.loads((root/'generation/secrets/entries/edge.json').read_text('utf-8-sig')),entry)
+            self.assertFalse((root/'secrets/entries/edge.json').exists())
 
     def test_diagnostic_uses_private_config_and_reaps_processes(self):
         with tempfile.TemporaryDirectory(prefix='diagnostic Пользователь ') as tmp:

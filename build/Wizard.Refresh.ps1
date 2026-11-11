@@ -109,6 +109,12 @@ function Update-WizardInviteSettings([string]$Root,[string]$Bundle,$Request) {
     $prepared=Initialize-WizardInvite $stage $r
     Update-LauncherConfig $stage {param($c) $c.transport|Add-Member -Force profilePath $prepared.file}
     Set-WizardRefreshSnapshot $stage $copy
+    if($Request.singBoxFile){
+        $bytes=[IO.File]::ReadAllBytes([string]$Request.singBoxFile)
+        if($bytes.Length -lt 2 -or $bytes[0] -ne 77 -or $bytes[1] -ne 90){throw 'Повреждена программа VPN в обновлении'}
+        $binary=Join-Path $stage 'sing-box.exe';[IO.File]::WriteAllBytes($binary,$bytes);Protect-TransportPath $binary
+        Update-LauncherConfig $stage {param($c) $c.transport|Add-Member -Force singBoxPath $binary}
+    }
     # First try every explicit route. If none connects, the transport preflight
     # must prove a new VPN/relay path with this same key before any live edit.
     try{[void](Connect-WizardInvite $stage $r)}catch{

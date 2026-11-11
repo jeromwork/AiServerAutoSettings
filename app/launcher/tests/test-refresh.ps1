@@ -1,5 +1,5 @@
 ﻿#requires -Version 5.1
-param([string]$TestHome,[string]$Payload,[string]$Profile,[string]$Mode='refresh')
+param([string]$TestHome,[string]$Payload,[string]$Profile,[string]$SingBoxFile,[string]$Mode='refresh')
 $ErrorActionPreference='Stop'
 $repo=Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent
 . (Join-Path $repo 'build/Wizard.Common.ps1')
@@ -22,7 +22,7 @@ function Invoke-TransportPreflight($Root,$Bundle,$Candidate){
     [void](Invoke-DiskProcess $p.sshExecutable (@($p.arguments)+@('true')) -TimeoutSeconds 10)
 }
 function Test-WizardNetworkProof($Root,$Mark){return (-not $script:proofFails)}
-$request=[pscustomobject]@{path=$Payload;askpassExecutable='fixture';offlineInstaller=($Mode -eq 'offline')}
+$request=[pscustomobject]@{path=$Payload;askpassExecutable='fixture';singBoxFile=$SingBoxFile;offlineInstaller=($Mode -eq 'offline')}
 $before=[IO.File]::ReadAllText((Join-Path $root 'config.json'));$oldProfile=[IO.File]::ReadAllText($Profile)
 if($Mode -in @('foreign','expired','untrusted')){
     if($Mode -eq 'untrusted'){$data.type='settings';$request=[pscustomobject]@{data=$data}}
@@ -42,6 +42,7 @@ if($Mode -in @('foreign','expired','untrusted')){
     Assert ($c.transport.relays[0].name -eq 'new' -and @($c.transport.relays).Count -eq 1) 'new route replaces removed route'
     Assert ($c.disk.folders[0] -eq 'Project/docs' -and $c.happier.label -eq 'kept' -and $c.bridge.enabled) 'Disk Happier bridge preserved'
     Assert ($c.vpn.enabled -and $c.vpn.dnsServer -eq '192.0.2.53' -and $c.vpn.excludeCidrs[0] -eq '192.0.2.0/24') 'VPN updates preserve local choice and exclusions'
+    if($SingBoxFile -and $Mode -ne 'sync'){Assert ((Get-FileHash $c.transport.singBoxPath).Hash -ceq (Get-FileHash $SingBoxFile).Hash) 'VPN executable staged without overwriting running binary'}
     Assert ($c.transport.profilePath -eq $Profile -and (Read-TransportJson $Profile).keyPath -eq $profileData.keyPath) 'stable shared profile and key'
     Assert ((Read-TransportPin $root).mode -eq 'auto') 'removed pinned path returns to automatic choice'
     Assert ($script:watchdog -eq 1) 'independent rollback armed'

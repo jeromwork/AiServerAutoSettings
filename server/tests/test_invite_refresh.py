@@ -47,7 +47,7 @@ class RefreshTests(unittest.TestCase):
         payload.write_bytes(json.dumps(data, ensure_ascii=False, indent=2).replace('\n', '\r\n').encode())
         result = command([Path.home()/'.cache/pwsh-test/pwsh', '-NoProfile', '-NonInteractive', '-File',
             ROOT/'app/launcher/tests/test-refresh.ps1', '-TestHome', self.b.dir/('client-'+mode),
-            '-Payload', payload, '-Profile', self.profile, '-Mode', mode], timeout=110)
+            '-Payload', payload, '-Profile', self.profile, '-SingBoxFile', self.b.exe, '-Mode', mode], timeout=110)
         self.assertEqual(result.returncode, 0, result.stdout.decode()+result.stderr.decode())
         print(result.stdout.decode().strip())
 
@@ -107,6 +107,11 @@ class RefreshTests(unittest.TestCase):
         self.assertTrue(row['registeredUtc'])
         self.assertTrue(row['fingerprint'].startswith('SHA256:'))
         self.assertNotIn('publicKey', row)
+        record = next(Path(self.b.c['stateDir']).glob('*.json'))
+        legacy = invite.load(record)
+        legacy.pop('deviceKey')
+        invite.save(record, legacy)
+        self.assertEqual(invite.devices(self.b.c)[0]['registeredUtc'], row['registeredUtc'])
         self.assertEqual(self.b.ssh(self.b.own, remote='true').returncode, 0)
         # Preserve unrelated authorized key/comment verbatim.
         auth = Path(self.b.c['workerAuthorizedKeys'])

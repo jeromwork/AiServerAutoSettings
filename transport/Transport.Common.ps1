@@ -823,7 +823,7 @@ function Format-TransportDiagnostic($Detail) {
 function Get-TransportDiagnosticContext($Settings,[string]$Root) {
     $values=@($Settings)
     $apiSecret=Join-Path $Root 'state/transport-secret.json';if(Test-Path $apiSecret){$values+=,(Read-TransportJson $apiSecret)}
-    $dir=Join-Path $Root 'secrets/entries'
+    $dir=Join-Path (Get-TransportCacheRoot $Settings $Root) 'secrets/entries'
     if(Test-Path $dir){foreach($file in @(Get-ChildItem -LiteralPath $dir -Filter '*.json')){$values+=,(Read-TransportJson $file.FullName)}}
     $values
 }

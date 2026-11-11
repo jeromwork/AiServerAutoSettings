@@ -31,10 +31,12 @@ namespace RemoteAgents.Launcher
                 string zip=Path.Combine(stage,"bundle.zip");UpgradeInstaller.ExtractEmbedded(zip);
                 string bundle=Path.Combine(stage,"bundle");ZipFile.ExtractToDirectory(zip,bundle);
                 string path=Path.Combine(stage,"refresh.json");Json.Write(path,data.Data);
+                string singBoxFile="";
+                if(files.ContainsKey("sing-box.exe")){singBoxFile=Path.Combine(stage,"sing-box.exe");File.WriteAllBytes(singBoxFile,files["sing-box.exe"]);}
                 // New helper comes from this EXE, even when installed bundle predates refresh.
                 string password=Json.Array(Json.Get(data.Data,"routes")).Select(x=>Json.Str(Json.Map(Json.Get(Json.Map(x),"hop")),"password")).FirstOrDefault(x=>x.Length>0)??"";
                 using(var relay=new PasswordRelay(password,32))
-                    ServerOperations.Invoke(home,bundle,"InviteRefresh",new {path,askpassExecutable=Path.Combine(home,Product.ExeName),hopPasswordPipe=relay.Name,offlineInstaller=true},CancellationToken.None);
+                    ServerOperations.Invoke(home,bundle,"InviteRefresh",new {path,singBoxFile,askpassExecutable=Path.Combine(home,Product.ExeName),hopPasswordPipe=relay.Name,offlineInstaller=true},CancellationToken.None);
                 RememberDevice(home,Json.Str(data.Data,"name"));
             }finally{try{Directory.Delete(stage,true);}catch(IOException){}catch(UnauthorizedAccessException){}}
         }
