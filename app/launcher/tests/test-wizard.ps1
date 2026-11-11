@@ -168,4 +168,45 @@ $script:armed=$false;$script:installCalls=0
 function Register-WizardRollback($Root,$Bundle,$Kind,$Session,$Task){throw 'scheduler refused'}
 Throws {Invoke-WizardStep $root $repo 'Bridge' ([pscustomobject]@{enabled=$false;shell=$false})} 'rollback registration failure blocks bridge mutation'
 Assert ($script:installCalls -eq 0 -and (Read-TransportJson (Join-Path $root 'config.json')).bridge.enabled -and -not (Test-Path (Join-Path $root 'state/wizard-bridge.json'))) 'scheduler failure leaves working bridge untouched and allows retry'
-Write-Output ('OK: '+$count+' wizard/model/catalog/union/rollback checks (fake SSH, no Windows)')
+# Old installation (RemoteDiskChannel present, no migration yet): the summary launches Migrate.ps1
+# detached (WMI, outside the wizard/tray job) and does not wait for production ports the old channel holds.
+$legacyRoot=Join-Path $TestHome 'legacy';[void][IO.Directory]::CreateDirectory((Join-Path $legacyRoot 'state'))
+Write-TransportJson (Join-Path $legacyRoot 'config.json') @{schema=1;version=1;components=@{};transport=@{}}
+Write-TransportJson (Join-Path $legacyRoot 'state/migration-error.json') @{message='old attempt';phase='preflight';updatedAt='2026-11-10T00:00:00Z'}
+function Get-ScheduledTask {}
+$script:channelTask=$true
+function Get-MigrationTask($Name){Assert ($Name -eq 'RemoteDiskChannel') 'legacy detection reads only the old channel task';[pscustomobject]@{exists=$script:channelTask;enabled=$true;running=$true}}
+$script:detached=@()
+function Start-MigrationDetached($Exe,$Arguments){$script:detached+=,@{exe=$Exe;args=@($Arguments)}}
+function Invoke-InstallChild($Bundle,$Script,$Arguments){throw ('legacy activation must not run a child: '+$Script)}
+function Test-WizardNetworkProof($Root,$Mark){throw 'legacy branch must not wait for a fresh production status'}
+function Test-WizardBridge($Root){throw 'legacy branch leaves bridge acceptance to Migrate.ps1'}
+$r=Invoke-WizardStep $legacyRoot $repo 'Activate' ([pscustomobject]@{})
+Assert ($r.migration -and $r.ok -and $script:detached.Count -eq 1) 'legacy summary starts exactly one migration and returns at once'
+$call=$script:detached[0]
+Assert ($call.exe -eq (Get-TransportPowerShell) -and ($call.args -contains (Join-Path $repo 'build/Migrate.ps1')) -and $call.args[$call.args.IndexOf('-Home')+1] -eq $legacyRoot -and ($call.args -contains '-NonInteractive')) 'Migrate.ps1 is launched through the detached WMI helper with this Home'
+$c=Read-TransportJson (Join-Path $legacyRoot 'config.json')
+Assert ($c.wizard.migrationRequested -and -not $c.wizard.configured) 'setup is marked configured only by migration acceptance'
+Assert (-not (Test-Path (Join-Path $legacyRoot 'state/migration-error.json'))) 'stale migration error cleared before the new attempt'
+function Get-WizardServer($Root,$Bundle){[pscustomobject]@{ssh=$true;disk=$true;happier=$true;bridge=$true;catalog=$true;userManager=$true}}
+function Test-WizardBridge($Root){$true}
+$inspect=Invoke-WizardStep $legacyRoot $repo 'Inspect' ([pscustomobject]@{})
+Assert ($inspect.legacy -and $inspect.steps[1].ready) 'legacy connection is ready by SSH; production proof comes from Migrate preflight'
+foreach($phase in @('preparing','activating','pending','rolling-back')){
+    Write-TransportJson (Join-Path $legacyRoot 'state/migration.json') @{phase=$phase;startedAt=[DateTime]::UtcNow.ToString('o')}
+    Throws {Invoke-WizardStep $legacyRoot $repo 'Activate' ([pscustomobject]@{})} ('no second migration while '+$phase)
+}
+Assert ($script:detached.Count -eq 1) 'running migration is never started twice'
+Write-TransportJson (Join-Path $legacyRoot 'state/migration.json') @{phase='rolled-back';startedAt=[DateTime]::UtcNow.ToString('o')}
+Write-TransportJson (Join-Path $legacyRoot 'state/migration-error.json') @{message='Нет рабочего пути к серверу: fixture';phase='preflight';updatedAt=[DateTime]::UtcNow.ToString('o')}
+$inspect=Invoke-WizardStep $legacyRoot $repo 'Inspect' ([pscustomobject]@{})
+Assert ($inspect.legacy -and $inspect.migrationError -like 'Нет рабочего пути*') 'after rollback the reason is shown and a retry stays on the legacy branch'
+[void](Invoke-WizardStep $legacyRoot $repo 'Activate' ([pscustomobject]@{}))
+Assert ($script:detached.Count -eq 2) 'retry after rollback launches a new detached migration'
+Write-TransportJson (Join-Path $legacyRoot 'state/migration.json') @{phase='accepted';startedAt=[DateTime]::UtcNow.ToString('o')}
+Assert (-not (Test-WizardLegacy $legacyRoot)) 'after acceptance the disabled old task no longer holds the new components'
+Remove-Item -LiteralPath (Join-Path $legacyRoot 'state/migration.json')
+$script:channelTask=$false
+Assert (-not (Test-WizardLegacy $legacyRoot)) 'no old channel task: normal branch'
+Remove-Item Function:Get-ScheduledTask
+Write-Output ('OK: '+$count+' wizard/model/catalog/union/rollback/legacy checks (fake SSH, no Windows)')

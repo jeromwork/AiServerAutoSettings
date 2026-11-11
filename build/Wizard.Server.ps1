@@ -8,7 +8,7 @@ function Invoke-WizardLogin($Profile,[string]$User,[string]$Command,[string]$Inp
     $args=@('-F',$Profile.configPath,'-T','-l',$User,'-i',$Profile.keyPath,'-o','IdentitiesOnly=yes','-o','ConnectTimeout=5','-o','ConnectionAttempts=1','-o',('UserKnownHostsFile="'+$Profile.knownHostsPath.Replace('\','/')+'"'),'-o','GlobalKnownHostsFile=none','-o','ForwardAgent=no','-o','ClearAllForwardings=yes')
     if(-not $Credential){return Invoke-DiskProcess $Profile.sshExecutable ($args+@('-o','BatchMode=yes','-o','StrictHostKeyChecking=accept-new',$Profile.serverAddress,$Command)) $InputText -TimeoutSeconds 20}
     $si=New-Object Diagnostics.ProcessStartInfo
-    $si.FileName=$Profile.sshExecutable;$si.Arguments=(($args+@('-o','BatchMode=no','-o','StrictHostKeyChecking=accept-new','-o','NumberOfPasswordPrompts=1','-o','PreferredAuthentications=password','-o','PubkeyAuthentication=no',$Profile.serverAddress,$Command))|ForEach-Object {Quote-Disk $_}) -join ' '
+    $si.FileName=$Profile.sshExecutable;$si.Arguments=(($args+@('-o','BatchMode=no','-o','StrictHostKeyChecking=accept-new','-o','NumberOfPasswordPrompts=1','-o','PreferredAuthentications=password,keyboard-interactive','-o','KbdInteractiveAuthentication=yes','-o','PubkeyAuthentication=no',$Profile.serverAddress,$Command))|ForEach-Object {Quote-Disk $_}) -join ' '
     $si.UseShellExecute=$false;$si.CreateNoWindow=$true;$si.RedirectStandardInput=$true;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true
     $si.EnvironmentVariables['SSH_ASKPASS']=[string]$Credential.askpassExecutable
     $si.EnvironmentVariables['SSH_ASKPASS_REQUIRE']='force';$si.EnvironmentVariables['DISPLAY']='remoteagents:0'
@@ -19,7 +19,12 @@ function Invoke-WizardLogin($Profile,[string]$User,[string]$Command,[string]$Inp
         $bytes=[Text.Encoding]::UTF8.GetBytes((Convert-TransportLF $InputText));$task=$p.StandardInput.BaseStream.WriteAsync($bytes,0,$bytes.Length)
         if(-not $task.Wait(5000)){throw 'Таймаут отправки SSH'};$p.StandardInput.Close()
         if(-not $p.WaitForExit(30000)){throw 'SSH не отвечает (таймаут 30 с)'}
-        if($p.ExitCode -ne 0){throw 'Вход по паролю не выполнен. Проверьте пароль; если root-вход по паролю запрещён, администратор должен разрешить ключ рабочего пользователя. Изменённый ключ сервера требует проверки known_hosts'}
+        # OpenSSH reports authentication/connection failures as 255; other codes come from the remote helper.
+        if($p.ExitCode -eq 255){throw 'Вход по паролю не выполнен. Проверьте пароль; если вход по паролю для этого логина запрещён, администратор должен разрешить ключ рабочего пользователя. Изменённый ключ сервера требует проверки known_hosts'}
+        if($p.ExitCode -ne 0){
+            $detail=(Protect-TransportText ((Convert-TransportLF $err.GetAwaiter().GetResult()).Trim())) -split "`n"|Where-Object {$_}|Select-Object -Last 3
+            throw ('Вход выполнен, но настройка рабочего пользователя на сервере не удалась (код '+$p.ExitCode+'): '+$(if($detail){($detail -join '; ')}else{'нет вывода'})+'. Нужны права root/sudo, useradd и systemd на сервере')
+        }
         return Convert-TransportLF $out.GetAwaiter().GetResult()
     }finally{if($p.Id -and -not $p.HasExited){$p.Kill()};$p.Dispose()}
 }
@@ -65,10 +70,12 @@ function Connect-WizardServer([string]$Root,[string]$Bundle,$Request) {
     $p|Add-Member arguments @('-F',$p.configPath,'-l',$worker,'-i',$p.keyPath,'-o','IdentitiesOnly=yes','-o',('UserKnownHostsFile="'+$p.knownHostsPath.Replace('\','/')+'"'),'-o','GlobalKnownHostsFile=none','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-T',$address)
     Write-TransportJson $file $p -Private
     $changed=$previous -and ($previous.serverAddress -cne $address -or $previous.login -cne $worker)
+    $diskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk'
+    $diskInstalled=(Test-Path (Join-Path $diskHome 'state/config.xml')) -or (Test-Path (Join-Path $diskHome 'profile.txt'))
     Update-MigrationConfig $Root {param($c)
         if($changed){
             Set-MigrationDefault $c wizard ([pscustomobject]@{})
-            if(-not $c.wizard.diskPreviousProfile){$c.wizard|Add-Member -Force diskPreviousProfile $old}
+            if(-not $c.wizard.diskPreviousProfile -and $diskInstalled){$c.wizard|Add-Member -Force diskPreviousProfile $old}
             $c.wizard|Add-Member -Force configured $false
             $c.wizard.PSObject.Properties.Remove('localCatalog')
             foreach($flag in @('skipDisk','skipHappier','skipLan','diskKeepPrevious')){$c.wizard.PSObject.Properties.Remove($flag)}

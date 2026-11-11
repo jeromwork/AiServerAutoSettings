@@ -74,6 +74,18 @@ Resume-InterruptedSelection
 Assert (-not $script:paused -and -not (Test-Path $pauseReceipt) -and (Test-Path (Join-Path $folder 'only-here.txt'))) 'interrupted verification move restores local file and resumes (CRLF receipt)'
 Resume-InterruptedSelection
 Assert (-not $script:paused) 'interrupted pause recovery is idempotent'
+# A leftover staged copy (editor recreated the source during an interrupted move) never blocks later deselection.
+$staged=Get-SelectionStagedFile $localOnly $folder
+[IO.File]::WriteAllText($staged,'interrupted copy');Write-SelectionState $pauseReceipt (@{id='fixture';path=$folder;paths=@('only-here.txt')}|ConvertTo-Json -Compress)
+$script:paused=$true;Resume-InterruptedSelection
+$recovered=@(Get-ChildItem -LiteralPath (Join-Path $folder '.stfolder') -Filter ((Split-Path $staged -Leaf)+'.recovered-*'))
+Assert (-not $script:paused -and -not (Test-Path $staged) -and $recovered.Count -eq 1 -and [IO.File]::ReadAllText($recovered[0].FullName) -ceq 'interrupted copy' -and [IO.File]::ReadAllText($localOnly) -ceq 'local, never uploaded') 'recovery keeps both versions under a unique name'
+[IO.File]::WriteAllText($staged,'stale staged copy')
+$hash=(Get-FileHash -LiteralPath $localOnly -Algorithm SHA256).Hash.ToLowerInvariant()
+Remove-SelectionVerified $localOnly $hash $folder
+$recovered=@(Get-ChildItem -LiteralPath (Join-Path $folder '.stfolder') -Filter ((Split-Path $staged -Leaf)+'.recovered-*'))
+Assert (-not (Test-Path $localOnly) -and -not (Test-Path $staged) -and $recovered.Count -eq 2) 'stale staged name is preserved aside, verified deselection still completes'
+[IO.File]::WriteAllText($localOnly,'local, never uploaded')
 Write-SelectionState $pauseReceipt (@{id='fixture';path=(Join-Path $folder 'different')}|ConvertTo-Json -Compress)
 $script:paused=$true;$failed=$false;try{Resume-InterruptedSelection}catch{$failed=$true}
 Assert ($failed -and $script:paused -and (Test-Path $pauseReceipt)) 'changed project path blocks automatic resume'

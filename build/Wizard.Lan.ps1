@@ -48,7 +48,7 @@ function Send-WizardLan([string]$Root,[string]$Bundle,[string]$File) {
 function Suspend-WizardDisk([string]$Root,[string]$Bundle) {
     $hold=Join-Path $Root 'state/disk-reconfigure';Write-DiskUtf8 $hold 'Old disk disconnected; data preserved'
     Update-MigrationConfig $Root {param($c) Set-MigrationDefault $c components ([pscustomobject]@{});Set-MigrationDefault $c.components disk ([pscustomobject]@{});$c.components.disk|Add-Member -Force enabled $false}
-    Invoke-InstallChild $Bundle 'disk/Install-RemoteDisk.ps1' @('-Uninstall')
+    Invoke-InstallChild $Bundle 'disk/Install-RemoteDisk.ps1' @('-Uninstall') -TimeoutSeconds 120
     Stop-MigrationDisk (Join-Path $env:LOCALAPPDATA 'RemoteDisk')
 }
 function Resolve-WizardDiskServer([string]$Root,[string]$Bundle,$Request) {

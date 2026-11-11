@@ -117,6 +117,42 @@ function Invoke-WizardSsh($Root,$Command,$InputText='',$Timeout=60){
         # The saved device policy is unchanged when the browser only loads children.
         self.assertFalse((self.home / 'local/RemoteDisk/selection.json').exists())
 
+    def test_local_project_with_server_invalid_name_expands_without_failing(self):
+        result = self.tree('My (copy)')
+        self.assertEqual((result['entries'], result['unsupportedName']), ([], 'My (copy)'))
+        local = self.home / 'Disk/My (copy)'
+        (local / 'sub').mkdir(parents=True, exist_ok=True)
+        (local / 'sub/a.txt').touch()
+        try:
+            command = '. ' + quote(ROOT / 'build/Wizard.Common.ps1') + ''';
+function Send-WizardHelpers($Root,$Bundle){};
+function Invoke-WizardSsh($Root,$Command,$InputText='',$Timeout=60){
+    Invoke-DiskProcess 'bash' @('-c',($Command.Replace('"$HOME/.local/share/remote-disk/server-disk.sh"',''' + quote(ROOT / 'disk/server-disk.sh').replace("'", '"') + '''))) -InputText $InputText -TimeoutSeconds $Timeout
+};'''
+            command += 'Invoke-WizardStep ' + quote(self.home / 'launcher') + ' ' + quote(ROOT)
+            command += " DiskTree ([pscustomobject]@{base=" + quote(self.home / 'Disk') + ";path='My (copy)'})|ConvertTo-Json -Depth 30 -Compress"
+            result = self.ps(command)
+            self.assertEqual([(r['path'], r['presence']) for r in result['union']['rows']], [('My (copy)/sub', 'local')])
+            self.assertEqual(result['unsupportedName'], 'My (copy)')
+        finally:
+            (local / 'sub/a.txt').unlink(); (local / 'sub').rmdir(); local.rmdir()
+
+    def test_install_placeholder_is_not_shown_as_an_empty_choice(self):
+        selection = self.home / 'local/RemoteDisk/selection.json'
+        selection.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            for text, expected in (('{"schema":1,"paths":[],"placeholder":true}', ['Project']), ('{"schema":1,"paths":[]}', [])):
+                with self.subTest(text=text):
+                    selection.write_text(text + '\r\n')
+                    command = '. ' + quote(ROOT / 'build/Wizard.Common.ps1') + ''';
+function Send-WizardHelpers($Root,$Bundle){};
+function Invoke-WizardSsh($Root,$Command,$InputText='',$Timeout=60){'{"schema":1,"parent":"","entries":[{"path":"Project","directory":true,"hasChildren":true}],"truncated":false}'};'''
+                    command += '$r=Invoke-WizardStep ' + quote(self.home / 'launcher') + ' ' + quote(ROOT)
+                    command += " DiskTree ([pscustomobject]@{base=" + quote(self.home / 'Disk') + ";path=''});@{paths=@($r.selection.paths)}|ConvertTo-Json -Compress"
+                    self.assertEqual(self.ps(command)['paths'], expected)
+        finally:
+            selection.unlink(missing_ok=True)
+
     def test_whole_unopened_selection_uses_existing_policy_format(self):
         result = self.ps('. ' + quote(ROOT / 'disk/Disk.Common.ps1') +
                          ';$s=\'{"schema":1,"paths":["Project"]}\'|ConvertFrom-Json;' +

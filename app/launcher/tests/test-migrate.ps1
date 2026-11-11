@@ -119,8 +119,12 @@ $state=Read-TransportJson (Get-MigrationStatePath $root);$state.greenSince=[Date
 Confirm-Migration $root -Observer 'new-launcher-session'
 Assert ((Read-TransportJson (Get-MigrationStatePath $root)).phase -eq 'pending') 'launcher restart resets three-minute green window'
 $state=Read-TransportJson (Get-MigrationStatePath $root);$state.greenSince=[DateTime]::UtcNow.AddSeconds(-181).ToString('o');$state.lastHealthyAt=[DateTime]::UtcNow.ToString('o');Write-TransportJson (Get-MigrationStatePath $root) $state
+Update-MigrationConfig $root {param($c) Set-MigrationDefault $c wizard ([pscustomobject]@{});$c.wizard|Add-Member -Force migrationRequested $true}
+Assert (-not (Read-TransportJson (Join-Path $root 'config.json')).wizard.configured) 'setup not configured while migration is pending'
 Confirm-Migration $root -Observer 'new-launcher-session'
 Assert ((Read-TransportJson (Get-MigrationStatePath $root)).phase -eq 'accepted' -and $script:events.Contains('unwatchdog')) 'three green minutes remove watchdog'
+$wizard=(Read-TransportJson (Join-Path $root 'config.json')).wizard
+Assert ($wizard.configured -and -not $wizard.migrationRequested) 'acceptance of a wizard-started migration completes the setup (no window on later launches)'
 Invoke-MigrationRollback $root $state.session
 Assert ((Read-TransportJson (Get-MigrationStatePath $root)).phase -eq 'accepted') 'late watchdog cannot roll back accepted session'
 $script:failRestore=$true

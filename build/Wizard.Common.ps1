@@ -151,10 +151,10 @@ function Set-WizardBridge([string]$Root,[string]$Bundle,[bool]$Enabled,[bool]$Sh
         }
         # The old and managed executors share a mutex. Stop the old owner only
         # after recovery is armed, and restore its exact Run command on failure.
-        Invoke-InstallChild $Bundle 'Start-WindowsControl.ps1' @('-Uninstall','-KeepState')
+        Invoke-InstallChild $Bundle 'Start-WindowsControl.ps1' @('-Uninstall','-KeepState') -TimeoutSeconds 300
         $args=@('-LauncherHome',$Root)
         if($Enabled){$args+=@('-Install','-Profile',(Find-InstallProfile $Root))}else{$args+=@('-Uninstall')}
-        Invoke-InstallChild $Bundle 'Start-WindowsControl.ps1' $args
+        Invoke-InstallChild $Bundle 'Start-WindowsControl.ps1' $args -TimeoutSeconds 300
         if($Enabled -and -not (Test-WizardBridge $Root)){throw 'Новый мост не подтверждён; прежние настройки восстанавливаются'}
         Remove-Item -LiteralPath $file -Force
         Unregister-ScheduledTask -TaskName $task -Confirm:$false
@@ -188,8 +188,8 @@ function Set-WizardNetwork([string]$Root,[string]$Bundle,$Transport) {
     try{
         $mark=[DateTime]::UtcNow
         Update-MigrationConfig $Root {param($c) $c|Add-Member -Force transport $Transport}
-        $healthy=$false
-        for($i=0;$i -lt 90;$i++){
+        $healthy=$false;$watch=[Diagnostics.Stopwatch]::StartNew()
+        while($watch.Elapsed.TotalSeconds -lt 120){
             if(Test-WizardNetworkProof $Root $mark){$healthy=$true;break}
             Start-Sleep -Seconds 1
         }
@@ -217,6 +217,23 @@ function Test-WizardBridge([string]$Root) {
         return $reply.Trim() -ceq 'migration-bridge-ok'
     }catch{return $false}
 }
+function Get-WizardMigrationPhase([string]$Root) {
+    $file=Get-MigrationStatePath $Root
+    if(Test-Path $file){return [string](Read-TransportJson $file).phase};return ''
+}
+function Test-WizardLegacy([string]$Root) {
+    # The old RemoteDisk channel task owns 127.0.0.1 production ports until Migrate.ps1 takes over.
+    # After cutover the task stays registered (disabled) for rollback; the migration phase decides.
+    if((Get-WizardMigrationPhase $Root) -in @('activating','pending','accepted')){return $false}
+    if(-not (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue)){return $false}
+    return [bool](Get-MigrationTask 'RemoteDiskChannel').exists
+}
+function Start-WizardMigration([string]$Root,[string]$Bundle) {
+    # WMI creates the process outside this job and outside the tray's process tree:
+    # neither closing the wizard nor Stop-MigrationLauncher (which stops the tray) can kill it.
+    Write-MigrationLog $Root 'wizard.migration.detached'
+    Start-MigrationDetached (Get-TransportPowerShell) @('-NoProfile','-NonInteractive','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',(Join-Path $Bundle 'build/Migrate.ps1'),'-Home',$Root)
+}
 function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Request) {
     $diskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk';$script:DiskHome=$diskHome
     switch($Action){
@@ -228,7 +245,9 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
                 Write-WizardProgress 'Устанавливаю недостающие службы сервера…'
                 Send-WizardHelpers $Root $Bundle
                 $flags=@([int](-not $server.disk),[int](-not $server.happier),[int](-not $server.catalog)) -join ' '
-                try{[void](Invoke-WizardSsh $Root ('bash "$HOME/.local/share/remoteagents-wizard/server-wizard.sh" repair '+$flags) '' 110)}catch{
+                # Happier/Disk installation downloads and builds on the server: keep the full repair budget.
+                # WizardStep.Timeout("Server") covers login + this child + the observations around it.
+                try{[void](Invoke-WizardSsh $Root ('bash "$HOME/.local/share/remoteagents-wizard/server-wizard.sh" repair '+$flags) '' 1200)}catch{
                     $observed=Get-WizardServer $Root $Bundle
                     if(-not $observed.userManager){throw 'Нет user systemd. Администратору: sudo loginctl enable-linger <пользователь>; sudo systemctl start user@<uid>.service. Повторите проверку'}
                     throw 'Установка не завершена. Нужны curl, tar, flock, python3, systemd и доступ к официальным загрузкам; проверьте сервер и повторите шаг'
@@ -303,8 +322,11 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             $base=[string]$Request.base;if(-not $base){$base=Get-DiskBase}
             $union=Get-DiskUnion $server $base $relative;$selection=Read-DiskSelection
             if($Request.fresh){$selection=@{schema=1;paths=@()}}
-            if($null -eq $selection){$selection=@{schema=1;paths=@($union.rows|Where-Object {$_.path -notmatch '/' -and $_.kind -eq 'directory'}|ForEach-Object {$_.path})}}
-            return @{union=$union;selection=$selection;base=$base}
+            # The install-time freeze placeholder is not a user choice: show the default again.
+            if($null -eq $selection -or $selection.placeholder){$selection=@{schema=1;paths=@($union.rows|Where-Object {$_.path -notmatch '/' -and $_.kind -eq 'directory'}|ForEach-Object {$_.path})}}
+            $result=@{union=$union;selection=$selection;base=$base}
+            if($server.unsupportedName){$result.unsupportedName=[string]$server.unsupportedName}
+            return $result
         }
         'Disk' {
             Resolve-WizardDiskServer $Root $Bundle $Request
@@ -321,11 +343,12 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             if(-not $needsInstall){try{Read-DiskState;$probe=Invoke-DiskApi 'system/status';$needsInstall= -not $probe.myID}catch{$needsInstall=$true}}
             if($needsInstall){
                 # Install starts the old autoaccept worker: freeze selection until explicit Apply below.
-                if(-not (Test-Path (Join-Path $diskHome 'selection.json'))){Write-TransportJson (Join-Path $diskHome 'selection.json') @{schema=1;paths=@()}}
-                Invoke-InstallChild $Bundle 'disk/Install-RemoteDisk.ps1' @('-Profile',$profile,'-ManagedTransport')
+                # The placeholder flag keeps it distinguishable from an explicit empty choice after an interruption.
+                if(-not (Test-Path (Join-Path $diskHome 'selection.json'))){Write-TransportJson (Join-Path $diskHome 'selection.json') @{schema=1;paths=@();placeholder=$true}}
+                Invoke-InstallChild $Bundle 'disk/Install-RemoteDisk.ps1' @('-Profile',$profile,'-ManagedTransport') -TimeoutSeconds 900
             }
             Read-DiskState;$local=Invoke-DiskApi 'system/status';if(-not $local.myID){throw 'Syncthing не отвечает; повторите установку диска'}
-            Invoke-InstallChild $Bundle 'disk/Select-Disk.ps1' @('-Home',$Root,'-Action','Apply','-SelectionFile',$choice)
+            Invoke-InstallChild $Bundle 'disk/Select-Disk.ps1' @('-Home',$Root,'-Action','Apply','-SelectionFile',$choice) -TimeoutSeconds 900
             Update-MigrationConfig $Root {param($c) if($c.wizard){$c.wizard.PSObject.Properties.Remove('skipDisk')};Set-MigrationDefault $c components ([pscustomobject]@{});Set-MigrationDefault $c.components disk ([pscustomobject]@{});$c.components.disk|Add-Member -Force enabled $true}
             $hold=Join-Path $Root 'state/disk-reconfigure';if(Test-Path $hold){Remove-Item -LiteralPath $hold}
             return @{ok=$true;summary='Выбор применён; передача файлов продолжается. Это ещё не подтверждение завершённой синхронизации'}
@@ -342,7 +365,7 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             $oldState=$null;$stateFile=Join-Path $Root 'state/happier-account.json';if(Test-Path $stateFile){$oldState=Read-TransportJson $stateFile}
             try{
                 Update-MigrationConfig $Root {param($c) $c|Add-Member -Force happier ([pscustomobject]@{serverUrl=$Request.serverUrl;webappUrl=$Request.webappUrl;label=$Request.label})}
-                Invoke-InstallChild $Bundle 'accounts/Account.ps1' @('-Home',$Root,'-ExpectedAccount',[string]$Request.expectedAccount)
+                Invoke-InstallChild $Bundle 'accounts/Account.ps1' @('-Home',$Root,'-ExpectedAccount',[string]$Request.expectedAccount) -TimeoutSeconds 1500
                 Update-MigrationConfig $Root {param($c) if($c.wizard){$c.wizard.PSObject.Properties.Remove('skipHappier')}}
                 return Read-TransportJson (Join-Path $Root 'state/happier-account.json')
             }catch{
@@ -373,10 +396,10 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
                 if($Request.enabled){
                     $conflict=ConvertFrom-Json (& (Join-Path $Bundle 'transport/Test-VpnConflict.ps1') -Home $Root|Out-String)
                     if($conflict.conflict){throw 'Работает другой VPN. Отключите его сами и повторите проверку; RemoteAgents не менял чужой VPN'}
-                    Invoke-InstallChild $Bundle 'transport/Vpn.Tun.ps1' @('-Home',$Root,'-Enable')
+                    Invoke-InstallChild $Bundle 'transport/Vpn.Tun.ps1' @('-Home',$Root,'-Enable') -TimeoutSeconds 420
                     return @{ok=$false;summary='Запрос VPN передан. Дождитесь живого статуса TUN; включение ещё не подтверждено'}
                 }
-                if($previous.enabled){Invoke-InstallChild $Bundle 'transport/Vpn.Tun.ps1' @('-Home',$Root,'-Disable')}
+                if($previous.enabled){Invoke-InstallChild $Bundle 'transport/Vpn.Tun.ps1' @('-Home',$Root,'-Disable') -TimeoutSeconds 420}
                 return @{ok=$true;summary='VPN выключен в настройках; состояние маршрутов — в живом статусе VPN'}
             }catch{
                 Update-MigrationConfig $Root {param($c) if($null -ne $previous){$c|Add-Member -Force vpn $previous}else{$c.PSObject.Properties.Remove('vpn')}}
@@ -403,25 +426,41 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
                     }catch{}
                 }
             }
+            # An interrupted install leaves the freeze placeholder: the disk choice is still open.
+            try{$saved=Read-DiskSelection;if($saved -and $saved.placeholder){$disk=$false}}catch{$disk=$false}
             $bridgeIntent=[bool]$config.bridge.enabled;if(-not $config.bridge){$bridgeIntent=[bool]$config.components.control.enabled -or (Test-Path (Join-Path $Root 'control/config.json')) -or -not $config.components.PSObject.Properties['control']}
-            $local=[pscustomobject]@{transport=(Test-WizardNetworkProof $Root ([DateTime]::UtcNow.AddSeconds(-15)));disk=$disk;account=$account;bridgeEnabled=$bridgeIntent;bridge=($server.ssh -and $bridgeIntent -and (Test-WizardBridge $Root));vpnEnabled=[bool]$config.vpn.enabled;vpn=(Test-MigrationFresh $Root vpn)}
+            # Old installation: the old channel holds the production ports and the tray keeps the new
+            # transport stopped. Migrate.ps1 performs its own preflight on separate ports, so a fresh
+            # production status cannot exist yet and is not required here.
+            $legacy=Test-WizardLegacy $Root
+            $transport=if($legacy){[bool]$server.ssh}else{Test-WizardNetworkProof $Root ([DateTime]::UtcNow.AddSeconds(-15))}
+            $local=[pscustomobject]@{transport=$transport;disk=$disk;account=$account;bridgeEnabled=$bridgeIntent;bridge=($server.ssh -and $bridgeIntent -and (Test-WizardBridge $Root));vpnEnabled=[bool]$config.vpn.enabled;vpn=(Test-MigrationFresh $Root vpn)}
             $plan=@(Get-WizardPlan $server $local)
             if($config.wizard.pendingProfile){foreach($i in @(1,2,3,4)){$plan[$i].ready=$false}}
             if($config.wizard.diskPreviousProfile){$plan[2].ready=[bool]$config.wizard.diskKeepPrevious}
             if($config.wizard.skipDisk -and -not $config.wizard.diskPreviousProfile){$plan[2].ready=$true}
             if($config.wizard.skipHappier){$plan[3].ready=$true}
-            return @{ok=(@($plan|Where-Object {-not $_.ready}).Count -eq 0);server=$server;steps=$plan;summary='Подключения проверены сейчас. Завершение передачи файлов видно в статусе Диска';phase=$(if(Test-Path (Get-MigrationStatePath $Root)){(Read-TransportJson (Get-MigrationStatePath $Root)).phase}else{'not-started'})}
+            $phase=Get-WizardMigrationPhase $Root;$failure=''
+            $errorFile=Join-Path $Root 'state/migration-error.json'
+            if($phase -notin @('activating','pending','accepted') -and (Test-Path $errorFile)){$failure=[string](Read-TransportJson $errorFile).message}
+            return @{ok=(@($plan|Where-Object {-not $_.ready}).Count -eq 0);server=$server;steps=$plan;legacy=$legacy;migrationError=$failure;summary='Подключения проверены сейчас. Завершение передачи файлов видно в статусе Диска';phase=$(if($phase){$phase}else{'not-started'})}
         }
         'Activate' {
             $config=Read-TransportJson (Join-Path $Root 'config.json')
+            if((Get-WizardMigrationPhase $Root) -in @('preparing','activating','pending','rolling-back')){throw 'Переход уже выполняется: дождитесь итога в трее. Независимый откат сработает через 10 минут, если связь не подтвердится'}
+            if(Test-WizardLegacy $Root){
+                # Old installation: Migrate.ps1 has its own preflight on separate ports, the
+                # 10-minute watchdog and the 3 green minutes acceptance. It stops this tray,
+                # so it must run outside the wizard/tray process tree and its kill-on-close job.
+                if($config.wizard.pendingProfile){throw 'Сначала проверьте связь с новым сервером на шаге «Связь»'}
+                $failure=Join-Path $Root 'state/migration-error.json';if(Test-Path $failure){Remove-Item -LiteralPath $failure -Force}
+                Update-MigrationConfig $Root {param($c) Set-MigrationDefault $c wizard ([pscustomobject]@{});$c.wizard|Add-Member -Force migrationRequested $true}
+                Start-WizardMigration $Root $Bundle
+                return @{ok=$true;migration=$true;startedAt=[DateTime]::UtcNow.ToString('o');summary='Переход запущен: проверяю новую связь на временных портах; прежняя связь работает'}
+            }
             if(-not (Test-WizardNetworkProof $Root ([DateTime]::UtcNow.AddSeconds(-15)))){throw 'Нет рабочего пути: дождитесь живой проверки связи в трее и повторите'}
             $bridgeIntent=if($config.bridge){[bool]$config.bridge.enabled}else{[bool]$config.components.control.enabled -or -not $config.components.PSObject.Properties['control']}
             if($bridgeIntent -and -not (Test-WizardBridge $Root)){throw 'Мост ещё не подтверждён: проверьте шаг «Мост» либо явно выключите его'}
-            $legacy=Get-MigrationTask 'RemoteDiskChannel'
-            if($legacy.exists -and -not (Test-Path (Get-MigrationStatePath $Root))){
-                Invoke-InstallChild $Bundle 'build/Migrate.ps1' @('-Home',$Root)
-                return @{ok=$true;summary='Переход запущен. Живое состояние и независимый откат отображаются в трее'}
-            }
             Set-MigrationRun 'RemoteAgents' ('"'+(Join-Path $Root 'RemoteAgents.exe')+'" --tray --home "'+$Root+'"')
             Update-MigrationConfig $Root {param($c) Set-MigrationDefault $c wizard ([pscustomobject]@{});$c.wizard|Add-Member -Force configured $true}
             return @{ok=$true;summary='Настройки сохранены. Связь проверена; приложение работает в трее'}

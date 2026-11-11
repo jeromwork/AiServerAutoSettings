@@ -34,7 +34,24 @@ namespace RemoteAgents.Launcher
             Check(WizardStep.CanOpen(1,4,true,done,order) && !WizardStep.CanOpen(2,1,true,done,order) && !WizardStep.CanOpen(7,1,true,done,order), "first run blocks sections after the first unfinished one");
             Check(WizardStep.CanOpen(2,1,false,done,order) && WizardStep.CanOpen(7,1,false,done,order), "settings open any section");
             Check(WizardStep.CanOpen(7,5,true,Enumerable.Repeat(true,7).ToArray(),order), "summary opens once all sections are ready");
-            Check(WizardStep.Timeout("DiskTree")==60000 && WizardStep.Timeout("Catalog")==120000 && WizardStep.Timeout("Disk")==300000, "step-specific deadlines");
+            // Budgets cover the slowest child: server repair 1200 s, Account.ps1 1500 s, disk install+apply 900+900 s.
+            Check(WizardStep.Timeout("Server")>=(1200+300)*1000 && WizardStep.Timeout("Account")>=(1500+60)*1000 && WizardStep.Timeout("Disk")>=(120+900+900)*1000, "step budgets cover their slowest child");
+            Check(WizardStep.Timeout("Connection")>=600*1000 && WizardStep.Timeout("Bridge")>=(300+300+120)*1000 && WizardStep.Timeout("Vpn")>420*1000 && WizardStep.Timeout("DiskTree")>=120*1000 && WizardStep.Timeout("Catalog")==120000, "step-specific deadlines");
+            Check(LegacyInstall.Hold(true,"") && LegacyInstall.Hold(true,"rolled-back") && LegacyInstall.Hold(true,"preparing") && !LegacyInstall.Hold(true,"activating") && !LegacyInstall.Hold(true,"pending") && !LegacyInstall.Hold(true,"accepted") && !LegacyInstall.Hold(false,""), "old channel holds new components until cutover");
+            Check(LegacyInstall.Held(true,"transport") && LegacyInstall.Held(true,"disk") && LegacyInstall.Held(true,"control") && !LegacyInstall.Held(true,"vpn") && !LegacyInstall.Held(false,"transport"), "only port/sync/bridge owners are held");
+            var t0=new DateTime(2026,11,11,10,0,0,DateTimeKind.Utc);
+            var p=MigrationProgress.Describe("rolled-back",t0.AddMinutes(-30),true,"old failure",t0.AddMinutes(-30),t0,t0.AddSeconds(3));
+            Check(!p.Failed && !p.Handover, "a previous attempt's rollback and error are not reported as the new result");
+            p=MigrationProgress.Describe("preparing",t0.AddSeconds(1),false,"",null,t0,t0.AddSeconds(30));
+            Check(!p.Failed && !p.Handover && p.Text.Contains("временных портах"), "preflight progress keeps window open");
+            p=MigrationProgress.Describe("preparing",t0.AddSeconds(1),true,"",null,t0,t0.AddSeconds(60));
+            Check(p.Handover && !p.Failed, "window leaves before migration stops the tray");
+            p=MigrationProgress.Describe("rolled-back",t0.AddSeconds(1),false,"Нет рабочего пути к серверу: x",t0.AddSeconds(50),t0,t0.AddSeconds(60));
+            Check(p.Failed && p.Text.Contains("Нет рабочего пути"), "preflight failure is shown with its reason");
+            p=MigrationProgress.Describe("",null,false,"Переход не выполнен: import",t0.AddSeconds(2),t0,t0.AddSeconds(5));
+            Check(p.Failed, "failure before state is written is shown");
+            p=MigrationProgress.Describe("",null,false,"",null,t0,t0.AddSeconds(120));
+            Check(p.Failed && p.Text.Contains("не начался"), "migration that never started is reported");
             // Real portable processes exercise the exact wait used by External.Run. NativeJob's Windows tree kill is a live check.
             for(int mode=0;mode<2;mode++) {
                 var psi=new ProcessStartInfo("/bin/sleep", "10") {UseShellExecute=false};
@@ -48,7 +65,7 @@ namespace RemoteAgents.Launcher
                     Check(interrupted && timer.ElapsedMilliseconds<2000 && process.HasExited,mode==0?"step timeout is bounded":"step cancellation is bounded");
                 }
             }
-            Console.WriteLine("OK: "+count+" lazy selection / step deadline checks (portable; Windows job kill requires Windows)");
+            Console.WriteLine("OK: "+count+" lazy selection / step deadline / legacy migration checks (portable; Windows job kill requires Windows)");
         }
     }
 }

@@ -36,9 +36,10 @@ namespace RemoteAgents.Launcher
         DiskTreeSelection selection = new DiskTreeSelection(new string[0]);
         CancellationTokenSource stepCancellation; bool closingRequested;
         bool busy, changingTree, treeLoaded, catalogLoaded, initializing;
+        bool legacy, migrationRunning, migrationHandover; System.Windows.Forms.Timer migrationTimer; string migrationText = "";
 
         protected override void Dispose(bool disposing)
-        {if(disposing){foreach(var panel in details)if(panel!=null)panel.Dispose();journal.Dispose();}base.Dispose(disposing);}
+        {if(disposing){if(migrationTimer!=null)migrationTimer.Dispose();foreach(var panel in details)if(panel!=null)panel.Dispose();journal.Dispose();}base.Dispose(disposing);}
         static string LeaseName(string home)
         {using(var sha=SHA256.Create())return "Global\\RemoteAgents.Wizard."+BitConverter.ToString(sha.ComputeHash(Files.Utf8.GetBytes(Path.GetFullPath(home).ToLowerInvariant()))).Replace("-", "");}
         internal static bool Display(string home, string bundle, bool first, int section = 0, bool activate = false)
@@ -50,17 +51,30 @@ namespace RemoteAgents.Launcher
                 finally { lease.ReleaseMutex(); }
             }
         }
-        // Inspect before showing anything: configured launches remain entirely in the tray.
-        internal static async Task<bool> CheckOnLaunch(string home, string bundle)
+        // Inspect before showing anything (only for a not yet configured PC; the tray never calls this
+        // once wizard.configured is set). Returns null: setup incomplete; "": ready, nothing changed;
+        // otherwise the balloon text describing the real change.
+        internal static async Task<string> CheckOnLaunch(string home, string bundle)
         {
             using(var lease=new Mutex(false,LeaseName(home))) {
-            bool owned;try{owned=lease.WaitOne(0);}catch(AbandonedMutexException){owned=true;}if(!owned)return false;
+            bool owned;try{owned=lease.WaitOne(0);}catch(AbandonedMutexException){owned=true;}if(!owned)return null;
             try {using(var form = new SetupWizard(home,bundle,true,false)) {
                 var handle=form.Handle;
                 await form.Inspect();
-                if(form.applied.All(v=>v)) return true;
-                form.SelectPage(form.order.First(i=>i<7 && !form.applied[i]));
-                return form.ShowDialog()==DialogResult.OK;
+                // At boot the transport may publish its first live status later than this check:
+                // when only «Связь» is open, look once more before showing anything.
+                if(!form.applied[1] && !form.legacy && Enumerable.Range(0,6).All(i=>i==1 || form.applied[i])){await Task.Delay(20000);await form.Inspect();}
+                // The optional LAN step alone never opens the window.
+                bool required=Enumerable.Range(0,6).All(i=>form.applied[i]);
+                if(required && !form.legacy){
+                    // Everything is verified: record it without a window.
+                    form.SelectPage(7);await form.ExecuteCurrent();
+                    if(form.lastSuccess)return "Настройка завершена. Приложение работает в трее.";
+                    // Not confirmed: show the summary with the reason instead of failing silently.
+                }
+                form.SelectPage(required?7:form.order.First(i=>i<6 && !form.applied[i]));
+                if(form.ShowDialog()!=DialogResult.OK)return null;
+                return form.migrationHandover?"":"Настройка завершена. Приложение работает в трее.";
             }}finally{lease.ReleaseMutex();}
             }
         }
@@ -105,7 +119,7 @@ namespace RemoteAgents.Launcher
                 if(!lastSuccess || closingRequested)return;
                 if(completed==0 && serverChanged){repairingServer=true;serverChanged=false;}
                 if(!first){if(completed==0 && repairingServer){Navigate(1);await ContinueServerRepair();}return;}
-                if(completed==7){DialogResult=DialogResult.OK;Close();return;}
+                if(completed==7){if(!migrationRunning){DialogResult=DialogResult.OK;Close();}return;}
                 Navigate(1);await ContinueServerRepair();await FinishAutomatically();
             };
             close.Click+=(a,b)=>Close();
@@ -118,7 +132,7 @@ namespace RemoteAgents.Launcher
         {
             if(index<0 || index>7)return;
             currentPage=index;steps.Section=index;sections[index].BringToFront();back.Enabled=!busy && Array.IndexOf(order,index)>0;
-            next.Text=first?(index==7?"Готово":"Далее"):(index==7?"Проверить":"Применить");RefreshSummary();
+            next.Text=first?(index==7?(legacy?"Начать переход":"Готово"):"Далее"):(index==7?"Проверить":"Применить");RefreshSummary();
         }
         void Navigate(int direction)
         {
@@ -140,7 +154,7 @@ namespace RemoteAgents.Launcher
             }
         }
         async Task FinishAutomatically()
-        {if(first && steps.Section==7 && lastSuccess && !closingRequested){await ExecuteCurrent();if(lastSuccess){DialogResult=DialogResult.OK;Close();}}}
+        {if(first && steps.Section==7 && lastSuccess && !closingRequested){await ExecuteCurrent();if(lastSuccess && !migrationRunning){DialogResult=DialogResult.OK;Close();}}}
         Label Hint(int page,string text,int top=12,int height=44)
         {var c=new Label {Left=16,Top=top,Width=585,Height=height,Text=text};sections[page].Controls.Add(c);return c;}
         void Question(int page,string text)
@@ -202,8 +216,8 @@ namespace RemoteAgents.Launcher
             Button(2,"Изменить…",100,()=>{using(var d=new FolderBrowserDialog {SelectedPath=diskBase.Text})if(d.ShowDialog(this)==DialogResult.OK){diskBase.Text=d.SelectedPath;treeLoaded=false;}return Task.FromResult(0);},480,115);
             tree=new TreeView {Left=16,Top=135,Width=580,Height=150,CheckBoxes=true};sections[2].Controls.Add(tree);
             diskWarning=Hint(2,"",135,66);diskWarning.Visible=false;
-            var reconnect=Button(2,"Отключить и подключить к новому",208,()=>{reconnectDisk=true;diskBase.Text=diskBase.Text+"-"+DateTime.Now.ToString("yyyyMMddHHmmss");RefreshDiskWarning();return Task.FromResult(0);});reconnect.Tag="reconnect";reconnect.Visible=false;
-            var keep=Button(2,"Оставить",245,()=>Skip("Disk",2));keep.Tag="keep";keep.Visible=false;
+            var reconnect=Button(2,"Отключить и подключить к новому",208,()=>{if(!reconnectDisk){reconnectDisk=true;diskBase.Text=diskBase.Text+"-"+DateTime.Now.ToString("yyyyMMddHHmmss");}RefreshDiskWarning();return Task.FromResult(0);});reconnect.Tag="reconnect";reconnect.Visible=false;
+            var keep=Button(2,"Остановить синхронизацию, файлы оставить",245,()=>Skip("Disk",2),16,300);keep.Tag="keep";keep.Visible=false;
             tree.AfterCheck+=(a,e)=>{if(changingTree)return;string path=Convert.ToString(e.Node.Tag);try{if(path.Length>0)selection.Set(path,e.Node.Checked);}catch(Exception error){Append(error.Message);}RefreshTreeChecks();};
             tree.BeforeExpand+=async(a,e)=>{if(e.Node.Nodes.Count!=1 || e.Node.Nodes[0].Tag!=null)return;e.Cancel=true;if(busy)return;var node=e.Node;await Guard(async()=>{await LoadChildren(node);node.Expand();});};
             Button(2,"Загрузить проекты",292,LoadTree,16,175);Button(2,"Пропустить",292,()=>Skip("Disk",2),204,110);More(2,292);sections[2].Controls[sections[2].Controls.Count-1].Left=330;
@@ -213,7 +227,7 @@ namespace RemoteAgents.Launcher
         void RefreshDiskWarning()
         {
             var wizard=Json.Map(Json.Get(new Configuration(home).Data,"wizard"));bool warning=!reconnectDisk && Json.Str(wizard,"diskPreviousProfile").Length>0;
-            diskWarning.Visible=warning;tree.Visible=!warning;diskWarning.Text="Диск был подключён к старому серверу. Новое подключение использует отдельную пустую папку; старые файлы останутся на ПК. «Оставить» отключит синхронизацию, сохранив файлы и прежние настройки.";
+            diskWarning.Visible=warning;tree.Visible=!warning;diskWarning.Text="Диск был подключён к старому серверу. «Отключить и подключить к новому» — новая пустая папка для нового сервера; старые файлы останутся на ПК. «Остановить синхронизацию, файлы оставить» — диск не синхронизируется, файлы и прежние настройки сохраняются.";
             foreach(Control c in sections[2].Controls)if(Convert.ToString(c.Tag)=="reconnect" || Convert.ToString(c.Tag)=="keep")c.Visible=warning;
         }
         async Task Skip(string step,int index)
@@ -278,7 +292,10 @@ namespace RemoteAgents.Launcher
                 var server=Json.Map(Json.Get(result,"server"));
                 results[0]=applied[0]?"Подключено ✓":Json.Text(server,"reason","Укажите сервер и проверьте вход");
                 var current=StatusView.Read(home,"transport",maxAgeSec:15);
-                results[1]=applied[1]?"Работает через "+StatusView.Title(current):"Нет рабочего пути: "+Json.Text(current,"error","нет свежей проверки выбранного сервера");
+                legacy=Json.Bool(result,"legacy");
+                results[1]=legacy?(applied[1]?"Сейчас работает прежняя связь; новая проверяется при переходе (шаг «Итог»)":"Сервер недоступен по SSH"):applied[1]?"Работает через "+StatusView.Title(current):"Нет рабочего пути: "+Json.Text(current,"error","нет свежей проверки выбранного сервера");
+                string failed=Json.Str(result,"migrationError");
+                if(!migrationRunning)results[7]=failed.Length>0?"Ошибка: прошлый переход не выполнен. "+failed:legacy?"Найдена прежняя установка. «Готово» запустит переход с проверкой и автоматическим откатом":results[7];
                 var services=Json.Map(Json.Get(server,"services"));if(api.Text.Length==0)api.Text=Json.Str(services,"serverUrl");if(web.Text.Length==0)web.Text=Json.Str(services,"webappUrl");
                 var wizard=Json.Map(Json.Get(new Configuration(home).Data,"wizard"));
                 applied[6]=lanCommand.Length>0 || Json.Bool(wizard,"skipLan") || Json.Bool(wizard,"configured");results[6]=lanCommand.Length>0?"Профиль отправлен; включение на сервере":"Не настроена (необязательно)";
@@ -291,7 +308,21 @@ namespace RemoteAgents.Launcher
             try {await action();lastSuccess=true;}
             catch(OperationCanceledException) {if(steps.Section<7)applied[steps.Section]=false;results[steps.Section]="Шаг отменён; готовность не подтверждена";Append(results[steps.Section]);}
             catch(Exception e) {if(steps.Section==0)password.Enabled=true;if(steps.Section<7)applied[steps.Section]=false;results[steps.Section]="Ошибка: "+e.Message;Append(results[steps.Section]);}
-            finally {busy=false;foreach(var panel in details)panel.Enabled=true;stepCancellation.Dispose();stepCancellation=null;steps.Enabled=pages.Enabled=close.Enabled=next.Enabled=true;back.Enabled=Array.IndexOf(order,steps.Section)>0;next.Enabled=true;progress.Style=ProgressBarStyle.Continuous;RefreshSummary();if(closingRequested)Close();}
+            finally {busy=false;foreach(var panel in details)panel.Enabled=true;stepCancellation.Dispose();stepCancellation=null;steps.Enabled=pages.Enabled=close.Enabled=true;back.Enabled=Array.IndexOf(order,steps.Section)>0;next.Enabled=!migrationRunning;progress.Style=ProgressBarStyle.Continuous;RefreshSummary();if(closingRequested)Close();}
+        }
+        void WatchMigration(DateTime activation)
+        {
+            // Migrate.ps1 runs detached from this window and the tray: only its state files are read.
+            migrationRunning=true;next.Enabled=false;migrationText="";
+            migrationTimer=new System.Windows.Forms.Timer {Interval=1000};
+            migrationTimer.Tick+=(a,b)=>{
+                var p=MigrationProgress.Read(home,activation);
+                if(p.Text!=migrationText){migrationText=p.Text;results[7]=(p.Failed?"Ошибка: ":"")+p.Text;Append(results[7]);RefreshSummary();}
+                if(p.Failed){migrationTimer.Stop();migrationRunning=false;activationRequested=false;next.Enabled=true;return;}
+                // The migration stops this tray next and restarts it; leave quietly so it can exit.
+                if(p.Handover){migrationTimer.Stop();migrationHandover=true;DialogResult=DialogResult.OK;Close();}
+            };
+            migrationTimer.Start();
         }
         async Task<Dictionary<string,object>> Run(string action, object request)
         {
@@ -392,6 +423,8 @@ namespace RemoteAgents.Launcher
         {
             var data=await Run("DiskTree",new { @base=diskBase.Text.Trim(),path=(string)parent.Tag });
             changingTree=true;try {AddTreeLevel(Json.Map(Json.Get(data,"union")),parent);}finally{changingTree=false;}
+            string rejected=Json.Str(data,"unsupportedName");
+            if(rejected.Length>0)Append("Имя «"+rejected+"» не подходит для сервера (допустимы буквы, цифры, пробел, точка, _ и -). Переименуйте папку, чтобы синхронизировать её; показано только локальное содержимое.");
         }
         async Task LoadAccounts()
         {
@@ -454,6 +487,7 @@ namespace RemoteAgents.Launcher
                         if(!configured && !activationRequested){result=await Run("Activate",new {});activationRequested=true;}
                         else {result=await Run("Inspect",new {});if(!Json.Bool(result,"ok"))throw new IOException("Есть неготовые шаги. Проверьте связь и разделы с отметкой …");}
                         results[7]=Json.Text(result,"summary","Настройки сохранены");Append(results[7]);
+                        if(Json.Bool(result,"migration"))WatchMigration(DateTime.UtcNow);
                         return;
                 }
                 bool ok=Json.Bool(result,"ok",true);operationReady=ok;applied[index]=ok;dirty[index]=false;

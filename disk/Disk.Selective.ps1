@@ -155,7 +155,7 @@ function Resume-InterruptedSelection {
             }
             if([IO.File]::Exists($staged)){
                 if(-not (Test-Path -LiteralPath $source)){[IO.File]::Move($staged,$source)}
-                else{Write-DiskLog ('Прерванный выбор: копия сохранена '+$staged)}
+                else{[void](Save-SelectionRecoveryCopy $staged 'Прерванный выбор: копия сохранена ')}
             }
         }
         [void](Invoke-DiskApi ('config/folders/'+[Uri]::EscapeDataString([string]$receipt.id)) PATCH @{paused=$false})
@@ -200,10 +200,17 @@ function Initialize-ProjectSelection([string]$Root,[string[]]$Paths) {
 function Get-SelectionStagedFile([string]$File,[string]$Root) {
     Join-Path (Join-Path $Root '.stfolder') ('deselected-'+[IO.Path]::GetFileNameWithoutExtension((Get-SelectionPolicyFile $File)))
 }
+function Save-SelectionRecoveryCopy([string]$Staged,[string]$Message) {
+    # The staged name is deterministic so an interrupted move can be found again. A kept
+    # version gets its own unique name, so it never blocks a later staging of the same path.
+    $keep=$Staged+'.recovered-'+[DateTime]::UtcNow.ToString('yyyyMMddHHmmss')+'-'+[guid]::NewGuid().ToString('N').Substring(0,8)
+    [IO.File]::Move($Staged,$keep);Write-DiskLog ($Message+$keep);return $keep
+}
 function Remove-SelectionVerified([string]$File,[string]$Hash,[string]$Root) {
     $marker=Join-Path $Root '.stfolder'
     if(-not [IO.Directory]::Exists($marker) -or ([IO.File]::GetAttributes($marker) -band [IO.FileAttributes]::ReparsePoint)){throw 'Нет безопасного маркера папки Syncthing'}
     $staged=Get-SelectionStagedFile $File $Root
+    if([IO.File]::Exists($staged)){[void](Save-SelectionRecoveryCopy $staged 'Прежняя копия выбора сохранена: ')}
     [IO.File]::Move($File,$staged)
     $verified=$false
     try{
@@ -219,7 +226,7 @@ function Remove-SelectionVerified([string]$File,[string]$Hash,[string]$Root) {
         if(-not $verified -and [IO.File]::Exists($staged)){
             # Never overwrite a version concurrently recreated at the original path.
             if(-not (Test-Path -LiteralPath $File)){[IO.File]::Move($staged,$File)}
-            else{Write-DiskLog ('Новая версия сохранена: '+$staged)}
+            else{[void](Save-SelectionRecoveryCopy $staged 'Новая версия сохранена: ')}
         }
     }
 }

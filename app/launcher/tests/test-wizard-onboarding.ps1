@@ -20,13 +20,15 @@ import os,sys,json
 from pathlib import Path
 args=sys.argv[1:];home=Path(os.environ['RA_TEST_SSH'])
 user=args[args.index('-l')+1]
-password='PreferredAuthentications=password' in args
+password=any(a.startswith('PreferredAuthentications=password') for a in args)
+if password and 'PreferredAuthentications=password,keyboard-interactive' not in args:sys.exit(201)
 payload=sys.stdin.read().replace('\r','')
 with (home/'calls.jsonl').open('a') as f:f.write(json.dumps({'user':user,'password':password,'payload':payload,'args':args})+'\n')
 if os.environ.get('RA_TEST_DENY')=='1':sys.exit(255)
 if args[-1]=='true':sys.exit(0 if (home/'installed').exists() else 255)
 if 'ra_user' in args[-1]:
  if not password:sys.exit(255)
+ if os.environ.get('RA_TEST_HELPER_FAIL')=='1':sys.stderr.write('useradd: cannot lock /etc/passwd\r\n');sys.exit(1)
  (home/'installed').touch();sys.exit(0)
 sys.exit(0)
 '@
@@ -55,11 +57,26 @@ $previous=[IO.File]::ReadAllText((Join-Path $root 'config.json'));$env:RA_TEST_D
 $other=[pscustomobject]@{address='other.example.invalid';login='root';passwordPipe='fixture-memory-channel';askpassExecutable='fixture-askpass'}
 Throws {Connect-WizardServer $root $repo $other} 'denied root password produces failure'
 Assert ([IO.File]::ReadAllText((Join-Path $root 'config.json')) -ceq $previous) 'denied bootstrap preserves previous active server'
-$env:RA_TEST_DENY='0'
+# Exit 255 is authentication/connection; any other code is the remote helper and is reported as such.
+$helper='IFS= read -r ra_user; IFS= read -r ra_key; export ra_user ra_key; bash -s'
+$message='';try{[void](Invoke-WizardLogin $p 'root' $helper "x`n" $request)}catch{$message=$_.Exception.Message}
+Assert ($message -like '*Проверьте пароль*') 'ssh 255 is reported as a login failure'
+$env:RA_TEST_DENY='0';$env:RA_TEST_HELPER_FAIL='1'
+$message='';try{[void](Invoke-WizardLogin $p 'root' $helper "x`n" $request)}catch{$message=$_.Exception.Message}
+Assert ($message -like '*код 1*' -and $message -like '*useradd*' -and $message -notlike '*Проверьте пароль*') 'remote helper failure is not reported as a wrong password'
+$env:RA_TEST_HELPER_FAIL='0'
+# The disk decision is asked only when a disk is installed.
+[void][IO.Directory]::CreateDirectory((Join-Path $TestHome 'RemoteDisk/state'));Write-DiskUtf8 (Join-Path $TestHome 'RemoteDisk/state/config.xml') '<configuration/>'
 [void](Connect-WizardServer $root $repo $other)
 $c=Read-TransportJson (Join-Path $root 'config.json')
 Assert ($c.wizard.diskPreviousProfile -ceq $file -and $c.wizard.pendingProfile -cne $file -and $c.transport.profilePath -ceq $file -and -not $c.wizard.configured) 'changed server records explicit disk decision and resets setup'
 Assert ((Find-InstallProfile $root) -ceq $c.wizard.pendingProfile) 'wizard uses staged profile while active transport stays unchanged'
+$noDisk=Join-Path $TestHome 'RemoteAgents-nodisk';[void][IO.Directory]::CreateDirectory($noDisk)
+Write-TransportJson (Join-Path $noDisk 'config.json') @{schema=1;version=1;transport=@{};components=@{}}
+$saved=$env:LOCALAPPDATA;$env:LOCALAPPDATA=Join-Path $TestHome 'empty-local'
+[void](Connect-WizardServer $noDisk $repo $request);[void](Connect-WizardServer $noDisk $repo $other)
+$env:LOCALAPPDATA=$saved;$nd=Read-TransportJson (Join-Path $noDisk 'config.json')
+Assert ($nd.wizard.pendingProfile -and -not $nd.wizard.diskPreviousProfile) 'server change without an installed disk asks no disk question'
 # Explicit reconnect refuses non-empty data before stopping any process or touching old files.
 $base=Join-Path $TestHome 'old-data';[void][IO.Directory]::CreateDirectory($base);Write-DiskUtf8 (Join-Path $base 'keep.txt') 'keep-local-files'
 Throws {Resolve-WizardDiskServer $root $repo ([pscustomobject]@{base=$base;reconnect=$true})} 'nonempty disk cannot be silently merged into new server'

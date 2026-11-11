@@ -419,6 +419,9 @@ function Confirm-Migration([string]$Root,[switch]$Explicit,[string]$Observer='')
         $state.phase='accepted';Write-TransportJson $file $state -Durable
         try{Unregister-MigrationRollback $state.names.rollbackTask}catch{$state.phase='pending';Write-TransportJson $file $state -Durable;throw}
         Write-MigrationLog $Root 'install.accepted'
+        # Started from the setup window on an old installation: acceptance completes the setup,
+        # so later launches stay in the tray without a window.
+        try{Update-MigrationConfig $Root {param($c) if($c.wizard -and $c.wizard.migrationRequested){$c.wizard|Add-Member -Force configured $true;$c.wizard.PSObject.Properties.Remove('migrationRequested')}}}catch{Write-MigrationLog $Root 'install.accepted.config-failed'}
     }else{Write-TransportJson $file $state -Durable}
 }
 
