@@ -1,12 +1,14 @@
 ﻿#requires -Version 5.1
 [CmdletBinding()]
-param([Alias('Home')][string]$LauncherHome,[ValidateSet('Server','Catalog','Connection','DiskTree','Disk','AccountList','Account','Bridge','Vpn','Inspect','Activate','RollbackNetwork','RollbackBridge')][string]$Action,[string]$RequestFile,[string]$Session)
+param([Alias('Home')][string]$LauncherHome,[ValidateSet('Server','Lan','Skip','Catalog','Connection','DiskTree','Disk','AccountList','Account','Bridge','Vpn','Inspect','Activate','RollbackNetwork','RollbackBridge')][string]$Action,[string]$RequestFile,[string]$Session,[string]$ProgressFile)
 $ErrorActionPreference='Stop'
 # Machine-readable JSON must preserve filenames on non-Russian Windows too.
 [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
-$wizardRootInput=$LauncherHome
+$wizardRootInput=$LauncherHome;$wizardProgressInput=$ProgressFile
 . (Join-Path $PSScriptRoot 'Wizard.Common.ps1')
 # FirstInstall's library parameters share dot-source scope; retain our CLI input.
+$script:WizardProgressFile=$wizardProgressInput
+$env:REMOTEAGENTS_WIZARD_PROGRESS=$wizardProgressInput
 $root=Get-TransportHome $wizardRootInput;$bundle=Split-Path $PSScriptRoot -Parent
 if($root -ine (Get-TransportHome (Join-Path $env:LOCALAPPDATA 'RemoteAgents'))){throw 'Настройка компьютера разрешена только в основном Home'}
 try{

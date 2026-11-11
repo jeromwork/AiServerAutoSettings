@@ -17,6 +17,50 @@ def quote(value):
 
 
 class WizardBoundaryTests(unittest.TestCase):
+    def test_root_helper_is_idempotent_with_isolated_server_commands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'bin').mkdir()
+            worker_home = root / 'worker'
+            mock = r"""#!/usr/bin/env python3
+import os,sys
+from pathlib import Path
+root=Path(os.environ['RA_FAKE_SERVER'])
+name=Path(sys.argv[0]).name
+args=sys.argv[1:]
+if name=='id':
+    if args==['-u']: print(0)
+    elif args==['-u','remoteagents']: print(1234)
+    elif args==['-gn','remoteagents']: print('remoteagents')
+    else: sys.exit(0 if (root/'created').exists() else 1)
+elif name=='getent': print('remoteagents:x:1234:1234::'+str(root/'worker')+':/bin/bash')
+elif name=='useradd':
+    with (root/'useradd-calls').open('a') as out:out.write('create\n')
+    (root/'worker').mkdir();(root/'created').touch()
+else:
+    with (root/'service-calls').open('a') as out:out.write(name+' '+str(args)+'\n')
+"""
+            for name in ('id', 'getent', 'useradd', 'chown', 'loginctl', 'systemctl'):
+                script = root / 'bin' / name
+                script.write_text(mock)
+                script.chmod(0o755)
+            env = dict(os.environ, RA_FAKE_SERVER=tmp,
+                       PATH=str(root/'bin')+os.pathsep+os.environ['PATH'],
+                       ra_user='remoteagents', ra_key='ssh-ed25519 Zml4dHVyZQ== fixture')
+            # Source includes CRLF as received from a Windows checkout, normalized at the boundary.
+            source = (ROOT/'build/server-ssh-user.sh').read_text().replace('\n', '\r\n').replace('\r', '')
+            for _ in range(2):
+                result = subprocess.run(['bash', '-s'], input=source, text=True, env=env,
+                                        capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, '')
+            self.assertEqual((root/'useradd-calls').read_text().splitlines(), ['create'])
+            keys = (worker_home/'.ssh/authorized_keys').read_text().splitlines()
+            self.assertEqual([k for k in keys if k], [env['ra_key']])
+            self.assertEqual((worker_home/'.ssh').stat().st_mode & 0o777, 0o700)
+            self.assertEqual((worker_home/'.ssh/authorized_keys').stat().st_mode & 0o777, 0o600)
+            self.assertIn('enable-linger', (root/'service-calls').read_text())
+
     def test_json_preserves_cyrillic_when_parent_console_is_ascii(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = dict(os.environ, LOCALAPPDATA=tmp, USERPROFILE=tmp)

@@ -60,3 +60,10 @@ build/Wizard.Common.ps1
 build/server-wizard.sh
 transport/server-transport-catalog.py
 disk/Disk.Union.ps1
+
+build/Wizard.Server.ps1
+build/Wizard.Lan.ps1
+build/server-ssh-user.sh
+server/lan-vpn.sh
+server/lan_vpn.py
+disk/Disk.Binary.ps1

@@ -271,6 +271,7 @@ function Invoke-MigrationPreflight([string]$Root,[string]$Bundle,$Config){
     $copy.transport|Add-Member -Force metered 'false'
     $copy.transport|Add-Member -Force rankProbeBytes 65536
     $copy.transport|Add-Member -Force rankConcurrency 4
+    if($env:REMOTEAGENTS_WIZARD_PROGRESS){$copy.transport|Add-Member -Force probeTimeoutSec 5;$copy.transport|Add-Member -Force stallSeconds 5}
     # Reserve a disjoint block for inbounds, ranking probes and local SSH socks. Fail if occupied.
     $listeners=@();$ports=@()
     try{
@@ -292,7 +293,7 @@ function Invoke-MigrationPreflight([string]$Root,[string]$Bundle,$Config){
     $child=$null
     try{
         $child=Start-TransportProcess (Get-TransportPowerShell) @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $Bundle 'transport/Transport.Daemon.ps1'),'-Home',$probe,'-ParentPid',[string]$PID)
-        Wait-MigrationTransport $probe
+        if($env:REMOTEAGENTS_WIZARD_PROGRESS){Wait-MigrationTransport $probe 45}else{Wait-MigrationTransport $probe}
         if(-not (Test-MigrationSsh $probe $ports[0])){throw 'SSH на временном входе не прошёл'}
         Write-MigrationLog $Root 'preflight.ok'
     }catch{

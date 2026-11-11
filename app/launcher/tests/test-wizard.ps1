@@ -81,6 +81,8 @@ $collision=Copy-TransportObject $tree;$collision.entries[0].path='Project/BOTH.t
 Throws {Get-DiskUnion $collision $base 'Project'} 'case collision fails before syncing to Windows'
 $collision=Copy-TransportObject $tree;$collision.entries[0].directory=$true
 Throws {Get-DiskUnion $collision $base 'Project'} 'file-directory conflict remains intact'
+function Initialize-WizardTransport($Root,$Bundle,$Transport){}
+function Invoke-MigrationPreflight($Root,$Bundle,$Config){}
 # First setup connection persists public settings; it does not replace H's old channel refs.
 function Test-MigrationFresh($Root,$Name){$false}
 $config=Read-TransportJson (Join-Path $root 'config.json');$config.transport|Add-Member hops @([pscustomobject]@{name='old';legacyOutbound='via-hop';legacyChannelPath='local-only.json';enabled=$true});Write-TransportJson (Join-Path $root 'config.json') $config

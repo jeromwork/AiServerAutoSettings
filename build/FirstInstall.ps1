@@ -5,7 +5,7 @@ $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Migrate.Common.ps1')
 function Find-InstallProfile([string]$Root) {
     $config=Join-Path $Root 'config.json'
-    if(Test-Path $config){$c=Read-TransportJson $config;if($c.transport.profilePath){return [string]$c.transport.profilePath}}
+    if(Test-Path $config){$c=Read-TransportJson $config;if($c.wizard.pendingProfile){return [string]$c.wizard.pendingProfile};if($c.transport.profilePath){return [string]$c.transport.profilePath}}
     $saved=Join-Path $env:LOCALAPPDATA 'RemoteDisk/profile.txt'
     if(Test-Path $saved){return [IO.File]::ReadAllText($saved).Trim()}
     $files=@(Get-ChildItem -Path (Join-Path $Root 'ssh-profiles/*/project-connections/*/ssh-transport.json') -File -ErrorAction SilentlyContinue)

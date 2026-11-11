@@ -30,6 +30,7 @@ namespace RemoteAgents.Launcher
         readonly ConcurrentQueue<string[]> commands = new ConcurrentQueue<string[]>(); volatile bool readyForCommands;
         BundleDefinition definition; bool busy, closing, ticking, actionBusy, serverUpdateRequested, installStop;
         readonly string migrationObserver = Guid.NewGuid().ToString("N");
+        DateTime settingsWritten = DateTime.MinValue;
         DateTime nextMigrationCheck = DateTime.MinValue; bool migrationChecking;
         string updateSummary = "обновления устанавливаются вручную из нового EXE";
         public bool RestartRequested { get; private set; }
@@ -41,8 +42,8 @@ namespace RemoteAgents.Launcher
             // Accept secondary launches while first-install selftest / binary downloads are still running.
             pipeWorker = Task.Run(() => Listen(pipeName, sid));
             try {
+                icon = new NotifyIcon { Visible = true, Icon = yellow, Text = Product.Name + ": запускается…" };
                 engine.Recover(); Bootstrap();
-                icon = new NotifyIcon { Visible = true, Icon = red, Text = Product.Name + ": запуск" };
                 icon.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowStatus(); }; LoadComponents();
             } catch {
                 stop.Cancel(); lock (pipeGate) { if (server != null) server.Dispose(); } throw;
@@ -50,6 +51,7 @@ namespace RemoteAgents.Launcher
             readyForCommands = true;
             timer.Tick += (s, e) => Tick(); timer.Start();
             dispatch.BeginInvoke(new Action(() => { Handle(args); DrainCommands(); Tick();
+                if(Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome),StringComparison.OrdinalIgnoreCase)) CheckSetup();
 
             }));
         }
@@ -85,7 +87,7 @@ namespace RemoteAgents.Launcher
         {
             if (closing || ticking) return; ticking = true;
             try {
-                TryDeleteOld(); foreach (var r in runtimes) r.Tick();
+                TryDeleteOld(); ReloadSettings(); foreach (var r in runtimes) r.Tick();
                 var critical = runtimes.Where(r => r.Definition.Critical).ToArray();
                 bool all = Product.IsVpn ? VpnModulesReady() : critical.Length > 0 && critical.All(r => r.Healthy);
                 string result = engine.Observe(all);
@@ -140,7 +142,7 @@ namespace RemoteAgents.Launcher
             }
             foreach (var a in definition.Menu) { var action = a; menu.Items.Add(a.Title, null, (s, e) => RunAction(action)); }
             menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add("Настройки…", null, (s,e) => ShowSettings()).Enabled = !actionBusy && !busy && !MigrationPending();
+            menu.Items.Add("Настройки…", null, (s,e) => ShowSettings()).Enabled = !actionBusy && !busy;
             if (!Product.IsVpn) {
                 string accountState=Path.Combine(home,"state","happier-account.json");
                 if(File.Exists(accountState)) { var last=Json.Read(accountState);menu.Items.Add(Json.Bool(last,"ok")?"Happier: последняя проверка "+Json.Str(last,"updatedUtc"):"Happier: подключение не подтверждено").Enabled=false; }
@@ -166,9 +168,29 @@ namespace RemoteAgents.Launcher
             menu.Items.Add("Выход", null, (s, e) => ExitThread());
             var old = icon.ContextMenuStrip; icon.ContextMenuStrip = menu; if (old != null) old.Dispose();
         }
+        async void CheckSetup()
+        {
+            if(actionBusy || busy || closing || MigrationPending())return;
+            actionBusy=true;
+            try {
+                // Let supervised components publish their first live observation without showing a window.
+                await Task.Delay(3000,stop.Token);
+                if(await SetupWizard.CheckOnLaunch(home,engine.Folder(engine.Current))) {
+                    if(Product.IsVpn){using(var run=Microsoft.Win32.Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run"))run.SetValue("RemoteVPN",Files.Quote(Path.Combine(home,Product.ExeName))+" --tray --home "+Files.Quote(home));}
+                    icon.ShowBalloonTip(5000,Product.Name,"Настройка проверена. Приложение работает в трее.",ToolTipIcon.Info);
+                }
+            }catch(OperationCanceledException){}catch{log.Write("setup.inspect.failed");}
+            finally{actionBusy=false;ReloadSettings();}
+        }
+        void ReloadSettings()
+        {
+            try {var file=Path.Combine(home,"config.json");var written=File.GetLastWriteTimeUtc(file);if(written==settingsWritten)return;var latest=new Configuration(home).Data;config.Data.Clear();foreach(var pair in latest)config.Data[pair.Key]=pair.Value;settingsWritten=written;
+                foreach(var runtime in runtimes.Where(r=>!r.Definition.CommandManaged)){bool enabled=config.Enabled(runtime.Definition);if(runtime.Enabled!=enabled)runtime.SetEnabled(enabled);}
+            }catch{log.Write("setup.config.refresh.failed");}
+        }
         void ShowSettings(int section = 0)
         {
-            if (actionBusy || busy || closing || MigrationPending()) return; actionBusy = true;
+            if (actionBusy || busy || closing) return; actionBusy = true;
             try { SetupWizard.Display(home,engine.Folder(engine.Current),false,section); }
             catch { log.Write("setup.feature.failed"); MessageBox.Show("Настройка не завершена. Проверьте журнал нужного шага.","RemoteAgents"); }
             finally {
@@ -445,10 +467,8 @@ namespace RemoteAgents.Launcher
                 if (args.Contains("--restart-components")) { if (busy || actionBusy) throw new InvalidOperationException(); LoadComponents(); }
                 if (args.Contains("--rollback")) { if (busy || actionBusy || MigrationPending()) throw new InvalidOperationException(); engine.Rollback(); LoadComponents(); log.Write("update.rollback.manual"); }
                 if (args.Contains("--logs")) Open(Path.Combine(home, "logs"));
-                if (args.Length == 0 || args.Contains("--show")) ShowStatus();
-                if (args.Contains("--setup-check") && !Product.IsVpn && !actionBusy && !busy && Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome), StringComparison.OrdinalIgnoreCase)) {
-                    if(FirstInstall.Required(home)) ShowSettings();
-                }
+                if (args.Contains("--show")) ShowStatus();
+                if (args.Contains("--setup-check")) CheckSetup();
             });
         }
         void Safe(Action action) { try { action(); } catch { log.Write("user.command.failed"); MessageBox.Show("Действие не выполнено. Подробности состояния — в папке RemoteAgents и журнале лаунчера.", "RemoteAgents"); } }
