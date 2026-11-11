@@ -125,7 +125,7 @@ namespace RemoteAgents.Launcher
             steps.SectionRequested+=i=> {if(WizardStep.CanOpen(i,currentPage,first,WizardStep.Passable(applied,waiting.Keys),order))SelectPage(i);else{steps.Section=currentPage;Append("Сначала завершите или пропустите раздел «"+titles[currentPage]+"»");}};
             back.Click+=(a,b)=>Navigate(-1);
             next.Click+=async(a,b)=> {
-                if(prepare!=null && bundle==null){await Prepare();return;}
+                if(prepare!=null && this.bundle==null){await Prepare();return;}
                 int completed=steps.Section;
                 await ExecuteCurrent();
                 if(!lastSuccess || closingRequested)return;

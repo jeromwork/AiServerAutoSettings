@@ -46,7 +46,8 @@ class FirstRunTests(unittest.TestCase):
         self.assertIn('if(preparing || closingRequested)return', preparation)
         self.assertIn('if(IsDisposed || closingRequested)return', preparation)
         self.assertNotIn('MessageBox', preparation)
-        self.assertIn('if(prepare!=null && bundle==null){await Prepare();return;}', wizard)
+        # The constructor parameter 'bundle' is always null for first setup; the click must read the field.
+        self.assertIn('if(prepare!=null && this.bundle==null){await Prepare();return;}', wizard)
         self.assertIn('token, downgrade || accept || old.Length==0', source('UpgradeInstaller.cs'))
 
     def test_unfinished_close_exits_before_showing_tray(self):
