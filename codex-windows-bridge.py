@@ -13,6 +13,33 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import server_node_catalog as catalog_api
 
 MAX = 262144
+MISMATCH = 'Мост ответил, но это другой компьютер или другая привязка'
+REASONS = {
+    'binding-mismatch': MISMATCH,
+    'windows-no-reply': 'Туннель к компьютеру есть, но мост на Windows не отвечает (перезапустите мост или RemoteAgents.exe)',
+    'windows-timeout': 'Туннель к компьютеру есть, но мост на Windows не ответил вовремя (компьютер занят или спит)',
+    'windows-invalid-reply': 'Мост на Windows прислал повреждённый ответ (перезапустите мост или RemoteAgents.exe)',
+    'tunnel-down': 'Сессия на сервере есть, но туннель к компьютеру закрыт (переподключите мост)',
+    'invalid-request': 'Сессия на сервере отклонила запрос как некорректный',
+    'busy': 'Сессия моста на сервере перегружена (64 одновременных запроса)',
+    'internal-error': 'Внутренняя ошибка сессии моста на сервере',
+}
+LEGACY = 'Мост не дал ответа (старая версия сессии)'
+
+
+def offline_reason(record, status):
+    """Honest Russian reason why a live status reply is unusable; None when it matches."""
+    if not isinstance(status, dict):
+        return 'Мост прислал непонятный ответ'
+    if status.get('ok') is True:
+        return None if catalog_api.matches(record, status) else MISMATCH
+    reason = status.get('reason')
+    if reason is None:
+        # Old session processes collapse every failure into this one generic frame.
+        if status.get('error') == 'Windows unavailable or invalid request':
+            return LEGACY
+        return 'Мост на Windows ответил ошибкой'
+    return REASONS.get(reason, 'Мост не дал ответа (причина: ' + (reason if isinstance(reason, str) and catalog_api.IDENT.fullmatch(reason) else 'неизвестна') + ')')
 
 
 def schema(properties=None, required=None):
@@ -86,10 +113,11 @@ def dispatch(message, path, catalog=None):
                 row.update(available=False, capabilities={}, shell_enabled=False)
                 try:
                     status = exchange(record['socketPath'], 'status', {}, record, timeout=3)
-                    if catalog_api.matches(record, status):
+                    reason = offline_reason(record, status)
+                    if reason is None:
                         row.update(available=True, capabilities=status.get('capabilities',{}), shell_enabled=status.get('shell_enabled',False))
                     else:
-                        row['offlineReason'] = 'Мост ответил, но это другой компьютер или другая привязка'
+                        row['offlineReason'] = reason
                 except (FileNotFoundError, ConnectionRefusedError):
                     row['offlineReason'] = 'Мост на компьютере не запущен или нет связи с сервером'
                 except socket.timeout:
@@ -129,8 +157,9 @@ def dispatch(message, path, catalog=None):
             status = None
             if binding or values.get('exclusive') is True:
                 status = exchange(path, 'status', {}, binding, timeout=3)
-            if binding and not catalog_api.matches(binding, status):
-                raise ValueError('Target binding mismatch')
+            reason = binding and offline_reason(binding, status)
+            if reason:
+                return {"content": [{"type": "text", "text": json.dumps({"ok": False, "error": "Windows bridge unavailable: " + reason}, ensure_ascii=False)}], "isError": True}
             if values.get('exclusive') is True and status.get('coordination', {}).get('exclusive') is not True:
                 result = {"ok": False, "error": "Executor does not advertise exclusive support; update/restart the Windows bridge before requesting exclusive."}
                 return {"content": [{"type": "text", "text": json.dumps(result)}], "isError": True}

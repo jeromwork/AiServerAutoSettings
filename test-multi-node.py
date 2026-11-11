@@ -118,6 +118,29 @@ class CatalogTests(unittest.TestCase):
             with self.assertRaises(ValueError):self.call('windows_command',{'command':'test'})
             with self.assertRaises(ValueError):self.call('windows_command',{'projectId':'p-shared','hostId':'home','command':'test'})
 
+    def test_inventory_reports_honest_reason_per_failure(self):
+        generic='Windows unavailable or invalid request'
+        cases=[
+            (self.status(self.data[1]),'другой компьютер'),
+            ({'ok':False,'error':generic,'reason':'binding-mismatch'},'другой компьютер'),
+            ({'ok':False,'error':generic,'reason':'windows-no-reply'},'мост на Windows не отвечает'),
+            ({'ok':False,'error':generic,'reason':'windows-timeout'},'не ответил вовремя'),
+            ({'ok':False,'error':generic,'reason':'tunnel-down'},'туннель к компьютеру закрыт'),
+            ({'ok':False,'error':generic,'reason':'invalid-request'},'некорректный'),
+            ({'ok':False,'error':generic},'старая версия сессии'),
+            ({'ok':False,'error':generic,'reason':'future-code'},'future-code'),
+            ({'ok':False,'error':generic,'reason':'/etc/secret path'},'неизвестна'),
+        ]
+        for status,expected in cases:
+            with self.subTest(status=status),patch.object(adapter,'exchange',return_value=status):
+                row=self.call('windows_devices',{'projectId':'p-shared'})['devices'][0]
+                self.assertFalse(row['available']);self.assertIn(expected,row['offlineReason'])
+                self.assertNotIn('/etc',row['offlineReason'])
+                result=self.call('windows_command',{'projectId':'p-shared','hostId':'home','taskId':'build','command':'test'})
+                self.assertFalse(result['ok']);self.assertIn(expected,result['error'])
+        no_reply=adapter.REASONS['windows-no-reply']
+        self.assertNotIn('другой компьютер',no_reply)
+
     def test_status_binding_mismatch_blocks_operation(self):
         with patch.object(adapter,'exchange',return_value=self.status(self.data[1])) as transport:
             result=self.call('windows_command',{'projectId':'p-shared','hostId':'home','taskId':'build','command':'test'})
@@ -176,6 +199,61 @@ class ConcurrentBrokerTests(unittest.TestCase):
                 self.assertFalse(errors,errors)
             finally:
                 for resource in resources:resource.close()
+
+    def test_broker_reports_machine_readable_reason_without_leaks(self):
+        binding={'projectId':'p-shared','hostId':'home','deviceLabel':'home','windowsReplica':'C:\\replica\\home'}
+        def run(behaviour,requests,forward_timeout=None):
+            with tempfile.TemporaryDirectory(prefix='ra-reason-') as temporary:
+                root=Path(temporary);root.chmod(0o700);resources=[];replies=[]
+                listener=socket.socket();listener.bind(('127.0.0.1',0));resources.append(listener)
+                port=listener.getsockname()[1]
+                if behaviour=='refused':listener.close()
+                else:
+                    listener.listen(4)
+                    def executor():
+                        try:
+                            conn,_=listener.accept()
+                        except OSError:return
+                        with conn:
+                            conn.makefile('rb').readline()
+                            if behaviour=='hang':time.sleep(1.5)
+                            elif behaviour=='garbage':conn.sendall(b'{"ok":true')
+                            # 'close' replies nothing, like a dead Windows executor.
+                    threading.Thread(target=executor,daemon=True).start()
+                control,stop=socket.socketpair();resources.extend((control,stop))
+                path=str(root/'home.sock')
+                config=dict(binding,token='s'*64,port=port)
+                patcher=patch.object(broker,'FORWARD_TIMEOUT',forward_timeout or 100);patcher.start()
+                thread=threading.Thread(target=lambda:broker.serve(path,config,control),daemon=True)
+                try:
+                    output=io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        thread.start();deadline=time.monotonic()+5
+                        # The socket file appears at bind(); wait until the broker listens.
+                        while 'connected' not in output.getvalue():
+                            if time.monotonic()>deadline:raise AssertionError('Broker unavailable')
+                            time.sleep(.02)
+                        for request in requests:
+                            with socket.socket(socket.AF_UNIX) as conn:
+                                conn.settimeout(5);conn.connect(path);conn.sendall(request)
+                                replies.append(conn.makefile('rb').readline())
+                        stop.send(b'stop');thread.join(5);self.assertFalse(thread.is_alive())
+                finally:
+                    patcher.stop()
+                    for resource in resources:resource.close()
+                return replies
+        good=json.dumps({'op':'status','args':{},'binding':binding}).encode()+b'\n'
+        wrong=json.dumps({'op':'status','args':{},'binding':dict(binding,hostId='laptop')}).encode()+b'\n'
+        cases=[('close',[good],'windows-no-reply'),('refused',[good],'tunnel-down'),('garbage',[good],'windows-invalid-reply'),
+               ('hang',[good],'windows-timeout'),('close',[wrong],'binding-mismatch'),('close',[b'not json\n'],'invalid-request'),
+               ('close',[b'{"op":"status","token":"x"}\n'],'invalid-request')]
+        for behaviour,requests,reason in cases:
+            with self.subTest(behaviour=behaviour,reason=reason):
+                raw=run(behaviour,requests,forward_timeout=.5 if behaviour=='hang' else None)[0]
+                reply=json.loads(raw)
+                self.assertEqual(reply,{'ok':False,'error':'Windows unavailable or invalid request','reason':reason})
+                self.assertNotIn(b's'*64,raw);self.assertNotIn(b'replica',raw)
+                self.assertIn(reason,adapter.REASONS)
 
 
 if __name__=='__main__':unittest.main()

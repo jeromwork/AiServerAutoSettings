@@ -151,7 +151,7 @@ Invoke-ControlPrepare $c $payload | ConvertTo-Json -Compress
                 def request(data):
                     with socket.socket(socket.AF_UNIX) as conn:
                         conn.connect(str(path));conn.sendall(json.dumps(data).encode()+b'\n');return json.loads(conn.makefile('rb').readline())
-                self.assertFalse(request(dict(op='status',args={}))['ok'])
+                self.assertEqual(request(dict(op='status',args={})),{'ok':False,'error':'Windows unavailable or invalid request','reason':'binding-mismatch'})
                 self.assertTrue(request(dict(op='status',args={},binding=binding))['ok'])
                 thread.join(3);self.assertEqual(seen[0]['binding'],binding)
             finally:

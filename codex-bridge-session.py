@@ -12,6 +12,19 @@ import threading
 from server_node_catalog import matches
 
 MAX = 262144
+FORWARD_TIMEOUT = 100  # seconds a Windows executor may take to answer
+
+
+class Refusal(Exception):
+    """Failure with a fixed machine-readable reason; carries no upstream text."""
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def refusal(reason, error="Windows unavailable or invalid request"):
+    # Fixed vocabulary only: never leak token, command, paths or exception text.
+    return json.dumps({"ok": False, "error": error, "reason": reason}, separators=(",", ":")).encode() + b"\n"
 
 
 def read_line(stream, limit=MAX):
@@ -61,21 +74,35 @@ def serve(path, config, parent_stdin, heartbeat_interval=15, heartbeat_timeout=5
                 raise ConnectionError('Session stopped')
             connections.add(conn)
 
-    def forward(request, timeout=100):
+    def forward(request, timeout=None):
         request = dict(request, token=config['token'])
         payload = json.dumps(request, separators=(',', ':')).encode()+b'\n'
         if len(payload)>MAX:
-            raise ValueError('Request too large')
-        with socket.create_connection(('127.0.0.1', port), timeout=5) as remote:
-            track(remote)
-            try:
-                remote.settimeout(timeout)
-                remote.sendall(payload)
-                with remote.makefile('rb') as stream:
-                    return read_line(stream)
-            finally:
-                with connection_lock:
-                    connections.discard(remote)
+            raise Refusal('invalid-request')
+        try:
+            with socket.create_connection(('127.0.0.1', port), timeout=5) as remote:
+                track(remote)
+                try:
+                    remote.settimeout(timeout or FORWARD_TIMEOUT)
+                    remote.sendall(payload)
+                    with remote.makefile('rb') as stream:
+                        reply = stream.readline(MAX + 1)
+                finally:
+                    with connection_lock:
+                        connections.discard(remote)
+        except socket.timeout:
+            raise Refusal('windows-timeout') from None
+        except ConnectionRefusedError:
+            # Reverse-forward port is not listening: the SSH tunnel is gone.
+            raise Refusal('tunnel-down') from None
+        except OSError:
+            raise Refusal('windows-no-reply') from None
+        if not reply:
+            # Tunnel accepted, but the Windows executor closed without a frame.
+            raise Refusal('windows-no-reply')
+        if len(reply) > MAX or not reply.endswith(b'\n'):
+            raise Refusal('windows-invalid-reply')
+        return reply
     def handle(client):
         nonlocal active_requests
         forwarding = False
@@ -83,21 +110,25 @@ def serve(path, config, parent_stdin, heartbeat_interval=15, heartbeat_timeout=5
             with client:
                 client.settimeout(100)
                 try:
-                    with client.makefile("rb") as stream:
-                        request = json.loads(read_line(stream))
+                    try:
+                        with client.makefile("rb") as stream:
+                            request = json.loads(read_line(stream))
+                    except (ValueError, OSError):
+                        raise Refusal('invalid-request') from None
                     if not isinstance(request, dict) or set(request) - {"op", "args", "binding"}:
-                        raise ValueError("invalid request")
+                        raise Refusal('invalid-request')
                     expected = request.get('binding')
                     if config.get('hostId') and expected != {key:config.get(key) for key in ('projectId','hostId','deviceLabel','windowsReplica')}:
-                        raise ValueError('Explicit target binding required')
+                        raise Refusal('binding-mismatch')
                     with connection_lock:
                         active_requests += 1
                         forwarding = True
                     client.sendall(forward(request))
-                except Exception:
+                except Exception as error:
                     # Never leak token, command, paths, or upstream exception text.
+                    reason = error.reason if isinstance(error, Refusal) else 'internal-error'
                     try:
-                        client.sendall(b'{"ok":false,"error":"Windows unavailable or invalid request"}\n')
+                        client.sendall(refusal(reason))
                     except OSError:
                         pass
         finally:
@@ -149,7 +180,7 @@ def serve(path, config, parent_stdin, heartbeat_interval=15, heartbeat_timeout=5
             if not slots.acquire(blocking=False):
                 try:
                     client.settimeout(1)
-                    client.sendall(b'{"ok":false,"error":"Too many concurrent bridge requests (64)"}\n')
+                    client.sendall(refusal('busy', 'Too many concurrent bridge requests (64)'))
                 finally:
                     client.close()
                 continue
