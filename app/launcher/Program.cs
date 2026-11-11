@@ -31,6 +31,8 @@ namespace RemoteAgents.Launcher
         }
         [STAThread] static int Main(string[] args)
         {
+            string passwordPipe=Environment.GetEnvironmentVariable("REMOTEAGENTS_PASSWORD_PIPE");
+            if(!string.IsNullOrEmpty(passwordPipe))return PasswordRelay.Answer(passwordPipe);
             Journal log = null; bool recovery = args.Contains("--recover-launcher") || args.Contains("--recovery-host");
             try {
                 // Test modes never create or lock the real user's home.
@@ -83,7 +85,7 @@ namespace RemoteAgents.Launcher
                                     int comparison = File.Exists(target) ? UpgradeInstaller.Compare(Version, bundle, FileVersionInfo.GetVersionInfo(target).FileVersion, engine.Current) : 1;
                                     if (comparison == 0) {
                                         if (args.Contains("--install") || (!args.Contains("--home") && FirstInstall.Required(home))) { migrate(); return 0; }
-                                        if (!owned) Forward(name, new[] { "--show", "--setup-check" }); else launch(target, false);
+                                        if (!owned) Forward(name, new[] { "--setup-check" }); else launch(target, false);
                                         return 0;
                                     }
                                     if (comparison < 0 && MessageBox.Show("Запущена более старая версия RemoteAgents. Выполнить откат лаунчера и бандла?", "RemoteAgents — откат", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return 0;
@@ -97,7 +99,7 @@ namespace RemoteAgents.Launcher
                                 } finally { if (File.Exists(zip)) File.Delete(zip); }
                             }
                             if (args.Contains("--install") || (!external && args.Length == 0 && FirstInstall.Required(home))) { migrate(); return 0; }
-                            if (!owned) { Forward(name, args.Contains("--uninstall") ? new[] { "--exit" } : args.Length == 0 ? new[] { "--show", "--setup-check" } : args); log.Write("ipc.forward.ok"); return 0; }
+                            if (!owned) { Forward(name, args.Contains("--uninstall") ? new[] { "--exit" } : args.Length == 0 ? new[] { "--setup-check" } : args); log.Write("ipc.forward.ok"); return 0; }
                         } finally { if (installOwned) installer.ReleaseMutex(); }
                     }
                     try {

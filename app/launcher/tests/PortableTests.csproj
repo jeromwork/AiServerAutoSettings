@@ -19,5 +19,6 @@
     <Compile Include="../NativeJob.cs" Link="NativeJob.cs" />
     <Compile Include="../WizardStep.cs" Link="WizardStep.cs" />
     <Compile Include="../DiskTreeSelection.cs" Link="DiskTreeSelection.cs" />
+    <Compile Include="../ServerOperations.cs" Link="ServerOperations.cs" />
   </ItemGroup>
 </Project>

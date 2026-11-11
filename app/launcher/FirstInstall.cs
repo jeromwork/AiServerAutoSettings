@@ -13,7 +13,7 @@ namespace RemoteAgents.Launcher
         internal static bool Required(string home)
         {
             string config = Path.Combine(home,"config.json");
-            if(Product.IsVpn && File.Exists(config) && Json.Bool(Json.Map(Json.Get(Json.Read(config),"wizard")),"configured")) return false;
+            if(File.Exists(config) && Json.Bool(Json.Map(Json.Get(Json.Read(config),"wizard")),"configured")) return false;
             string state = Path.Combine(home, "state", "migration.json");
             return !File.Exists(state) || new[] { "rolled-back", "error" }.Contains(Json.Str(Json.Read(state), "phase"));
         }
@@ -29,17 +29,9 @@ namespace RemoteAgents.Launcher
         {
             if (!Path.GetFullPath(home).TrimEnd('\\').Equals(Path.GetFullPath(Program.DefaultHome).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)) throw new IOException("Установка с Run доступна только в основном Home; используйте --tray --home для изоляции");
             Application.EnableVisualStyles();
-            var engine = new UpdateEngine(home, Program.Version);
-            string config = Path.Combine(home,"config.json");
-            bool configured = File.Exists(config) && Json.Bool(Json.Map(Json.Get(Json.Read(config),"wizard")),"configured");
-            if(configured && !Product.IsVpn) SetupWizard.Display(home,engine.Folder(engine.Current),false,6,true);
-            else SetupWizard.Display(home, engine.Folder(engine.Current), true);
-            if (Product.IsVpn && Json.Bool(Json.Map(Json.Get(new Configuration(home).Data,"wizard")),"configured")) {
-                using (var key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run"))
-                    key.SetValue("RemoteVPN", Files.Quote(Path.Combine(home, Product.ExeName)) + " --tray --home " + Files.Quote(home));
-                Program.StartLauncher(Path.Combine(home, Product.ExeName), home, true);
-            }
+            Program.StartLauncher(Path.Combine(home, Product.ExeName), home, false);
         }
+
         public static void UninstallVpn(string home)
         {
             try { Program.Forward(Program.InstanceName(home, System.Security.Principal.WindowsIdentity.GetCurrent().User), new[] { "--exit" }); } catch { }

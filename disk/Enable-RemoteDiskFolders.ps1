@@ -5,7 +5,7 @@ $ErrorActionPreference='Stop'
 if($Disable){Unregister-ScheduledTask -TaskName RemoteDiskFolders -Confirm:$false -ErrorAction SilentlyContinue;return}
 $app=Join-Path $env:LOCALAPPDATA 'RemoteDisk\app'
 [void][IO.Directory]::CreateDirectory($app)
-foreach($name in @('Disk.Common.ps1','Disk.Selective.ps1','Sync-RemoteDiskFolders.ps1','Move-RemoteDiskFolder.ps1','Enable-RemoteDiskFolders.ps1','stignore.txt','legacy-ignores.sha256')){
+foreach($name in @('Disk.Common.ps1','Disk.Selective.ps1','Disk.NavPane.ps1','Sync-RemoteDiskFolders.ps1','Move-RemoteDiskFolder.ps1','Enable-RemoteDiskFolders.ps1','stignore.txt','legacy-ignores.sha256')){
     $source=Join-Path $PSScriptRoot $name;$target=Join-Path $app $name
     if([IO.Path]::GetFullPath($source) -ine [IO.Path]::GetFullPath($target)){Copy-Item -LiteralPath $source -Destination $target -Force}
 }

@@ -45,8 +45,13 @@ function Fail-TransportActive([bool]$RequestRank=$true) {
     }
     if($RequestRank){$script:nextRank=[DateTime]::UtcNow}
 }
+function Write-DaemonWizardProgress([string]$Text) {
+    # Explicit opt-in only for the wizard's short-lived preflight. Never forward raw subprocess output.
+    if($env:REMOTEAGENTS_WIZARD_PROGRESS){try{[IO.File]::AppendAllText($env:REMOTEAGENTS_WIZARD_PROGRESS,((@{text=$Text}|ConvertTo-Json -Compress)+"`n"),(New-Object Text.UTF8Encoding($false)))}catch{}}
+}
 function Start-DaemonProbe($Candidate,[long]$Bytes,[string]$Purpose) {
     if($probes.ContainsKey($Candidate.tag)){return}
+    Write-DaemonWizardProgress ('Проверяю вариант связи: '+$Candidate.title+'… (до '+$settings.Options.probeTimeoutSec+' с)')
     try{$probes[$Candidate.tag]=Start-TransportProbe $settings.Profile $Candidate $Bytes $settings.Options $Purpose}
     catch{
         $row=$rows|Where-Object {$_.tag -eq $Candidate.tag}|Select-Object -First 1;$row.state='fail';$row.kbps=$null;$row.checkedAt=[DateTime]::UtcNow.ToString('o')
@@ -224,6 +229,8 @@ try{
                     $result=$probe.state;$row=$rows|Where-Object {$_.tag -eq $tag}|Select-Object -First 1
                     # Скорость задаёт рейтинг (равные объёмы); проба активного пути меньше и только подтверждает живость.
                     $row.state=$result.state;if($probe.purpose -ne 'active' -or $result.state -ne 'ok' -or $null -eq $row.kbps){$row.kbps=$result.kbps};$row.checkedAt=$now.ToString('o')
+                    $reason=if($result.diagnostic.reason -eq 'timeout'){'таймаут '+$settings.Options.probeTimeoutSec+' с'}elseif($result.diagnostic.reason -eq 'stalled'){'нет ответа'}else{'путь недоступен'}
+                    Write-DaemonWizardProgress ('Вариант связи: '+$row.title+$(if($result.state -eq 'ok'){' ✓'}else{' ✗ ('+$reason+')'}))
                     $detail=New-TransportDiagnostic $probe.child $tag $result.diagnostic.reason $diagnosticContext
                     if($result.state -ne 'ok'){
                         $underlying=Get-TransportEngineDiagnostic $engine $tag $diagnosticContext

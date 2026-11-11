@@ -109,7 +109,7 @@ function Start-MigrationRun([string]$Command){
 function Register-MigrationRollback([string]$Root,[string]$Bundle,$State){
     # Recovery code must outlive bundle cleanup and a damaged current components.json.
     $recovery=Join-Path $Root ('state/migration-recovery/'+$State.session)
-    foreach($part in @('build/Rollback.ps1','build/Migrate.Common.ps1','transport/Transport.Common.ps1','disk/Disk.Engine.ps1')){
+    foreach($part in @('build/Rollback.ps1','build/Migrate.Common.ps1','transport/Transport.Common.ps1','disk/Disk.Engine.ps1','disk/Disk.NavPane.ps1')){
         $target=Join-Path $recovery $part;[void][IO.Directory]::CreateDirectory((Split-Path $target -Parent));Copy-Item -LiteralPath (Join-Path $Bundle $part) -Destination $target -Force
     }
     $user=[Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -195,6 +195,10 @@ function Stop-MigrationDisk([string]$DiskRoot){
     . (Join-Path (Split-Path $PSScriptRoot -Parent) 'disk/Disk.Engine.ps1')
     Stop-DiskEngineProcesses $DiskRoot
 }
+function Remove-MigrationNavPane {
+    . (Join-Path (Split-Path $PSScriptRoot -Parent) 'disk/Disk.NavPane.ps1')
+    Remove-DiskNavPane
+}
 function Start-MigrationControl([string]$Root,[string]$Bundle,$State){
     # Existing -Uninstall stops only the old control PID and removes its Run value.
     & (Join-Path $Bundle 'Start-WindowsControl.ps1') -Uninstall -KeepState
@@ -271,6 +275,7 @@ function Invoke-MigrationPreflight([string]$Root,[string]$Bundle,$Config){
     $copy.transport|Add-Member -Force metered 'false'
     $copy.transport|Add-Member -Force rankProbeBytes 65536
     $copy.transport|Add-Member -Force rankConcurrency 4
+    if($env:REMOTEAGENTS_WIZARD_PROGRESS){$copy.transport|Add-Member -Force probeTimeoutSec 5;$copy.transport|Add-Member -Force stallSeconds 5}
     # Reserve a disjoint block for inbounds, ranking probes and local SSH socks. Fail if occupied.
     $listeners=@();$ports=@()
     try{
@@ -292,7 +297,7 @@ function Invoke-MigrationPreflight([string]$Root,[string]$Bundle,$Config){
     $child=$null
     try{
         $child=Start-TransportProcess (Get-TransportPowerShell) @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $Bundle 'transport/Transport.Daemon.ps1'),'-Home',$probe,'-ParentPid',[string]$PID)
-        Wait-MigrationTransport $probe
+        if($env:REMOTEAGENTS_WIZARD_PROGRESS){Wait-MigrationTransport $probe 45}else{Wait-MigrationTransport $probe}
         if(-not (Test-MigrationSsh $probe $ports[0])){throw 'SSH на временном входе не прошёл'}
         Write-MigrationLog $Root 'preflight.ok'
     }catch{
@@ -390,6 +395,7 @@ function Invoke-MigrationRollback([string]$Root,[string]$Session='',[switch]$For
     if($state.controlChanged){try{Stop-MigrationControl $Root;Set-MigrationRun $state.names.controlRun $state.controlRun;Start-MigrationRun $state.controlRun}catch{$failed=$true;Write-MigrationLog $Root 'rollback.control.failed'}}
     if($state.channelChanged){try{Restore-MigrationChannel $state.names.channelTask $state.channel}catch{$failed=$true;Write-MigrationLog $Root 'rollback.channel.failed'}}
     if($state.diskChanged){try{$diskRoot=Join-Path $env:LOCALAPPDATA 'RemoteDisk';if($state.PSObject.Properties['diskHome'] -and $state.diskHome){$diskRoot=[string]$state.diskHome};Stop-MigrationDisk $diskRoot;Set-MigrationRun $state.names.diskRun $state.diskRun;if($state.diskRun){Start-MigrationRun $state.diskRun}}catch{$failed=$true;Write-MigrationLog $Root 'rollback.disk.failed'}}
+    try{Remove-MigrationNavPane}catch{$failed=$true;Write-MigrationLog $Root 'rollback.navpane.failed'}
     if($state.launcherChanged){try{$oldRun=$state.launcherRun;if($oldRun -and $oldRun.IndexOf((Join-Path $Root 'RemoteAgents.exe'),[StringComparison]::OrdinalIgnoreCase) -ge 0){$oldRun=$null};Set-MigrationRun $state.names.launcherRun $oldRun}catch{$failed=$true;Write-MigrationLog $Root 'rollback.run.failed'}}
     # Disable supervised transport on later manual starts, without overwriting other config keys.
     try{Update-MigrationConfig $Root {param($c) foreach($name in @('transport','disk','control')){if($c.components.$name){$c.components.$name|Add-Member -Force enabled $false}}}}catch{$failed=$true}
@@ -418,6 +424,9 @@ function Confirm-Migration([string]$Root,[switch]$Explicit,[string]$Observer='')
         $state.phase='accepted';Write-TransportJson $file $state -Durable
         try{Unregister-MigrationRollback $state.names.rollbackTask}catch{$state.phase='pending';Write-TransportJson $file $state -Durable;throw}
         Write-MigrationLog $Root 'install.accepted'
+        # Started from the setup window on an old installation: acceptance completes the setup,
+        # so later launches stay in the tray without a window.
+        try{Update-MigrationConfig $Root {param($c) if($c.wizard -and $c.wizard.migrationRequested){$c.wizard|Add-Member -Force configured $true;$c.wizard.PSObject.Properties.Remove('migrationRequested')}}}catch{Write-MigrationLog $Root 'install.accepted.config-failed'}
     }else{Write-TransportJson $file $state -Durable}
 }
 

@@ -124,6 +124,10 @@ if(Test-Path $migrationFile){
     if($migration.phase -in @('accepted','pending') -and -not $migration.dryRun){Stop-DiskEngineProcesses $script:DiskHome}
 }
 do {
+    if(Test-Path (Join-Path $LauncherHome 'state/disk-reconfigure')){
+        Write-TransportJson (Join-Path $LauncherHome 'status/disk.json') @{ok=$false;summary='Диск отключён для смены сервера; файлы сохранены';updatedAt=[DateTime]::UtcNow.ToString('o')}
+        if($Once){break};Start-Sleep -Seconds 1;continue
+    }
     try{Start-DiskHeadless}catch{Write-DiskMonitorLog 'engine.start.failed'}
     $pauseFile=Join-Path $LauncherHome 'state/disk-pause.json'
     try{if(Test-Path -LiteralPath $pauseFile){$pause=Read-TransportJson $pauseFile;if($pause.until -and (Convert-TransportUtc $pause.until) -le [DateTime]::UtcNow){Set-DiskPause Resume}}}catch{}

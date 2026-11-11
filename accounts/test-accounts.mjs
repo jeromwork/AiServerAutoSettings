@@ -40,6 +40,8 @@ try {
     const seed=Buffer.alloc(32,7), key=seed.toString('base64url');
     check(normalizeKey(key+'\r\n').equals(seed));
     check(normalizeKey('AAAAA-AAAAA-AAAAA-AAAAA-AAAAA-AAAAA-AAAAA-AAAAA-AAAAA-AAAAA-AA').equals(Buffer.alloc(32)));
+    // Same vector as the launcher's HappierKey.Format test (shown once to the owner for the phone).
+    check(normalizeKey('AEBAG-BAFAY-DQQCI-KBMGA-2DQPC-AIREE-YUCUL-BOGAZ-DINRY-HI6D4-QA').equals(Buffer.from(Array.from({length:32},(_,i)=>i+1))));
     assert.throws(()=>normalizeKey('bad'));checks++;
     fs.writeFileSync(path.join(root,'shared-provider-marker'),'shared-native-auth');
     const one=await connectAccount({key},vendor,api,service,root);

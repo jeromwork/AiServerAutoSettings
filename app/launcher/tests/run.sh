@@ -11,12 +11,18 @@ LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -NonInteractive -File "$here/te
 LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -NonInteractive -File "$here/test-selective.ps1" -TestHome "$testdir/selective" < /dev/null
 LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -NonInteractive -File "$here/test-account.ps1" -TestHome "$testdir/accounts" < /dev/null
 LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -NonInteractive -File "$here/test-wizard.ps1" -TestHome "$testdir/setup-wizard" < /dev/null
+LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -NonInteractive -File "$here/test-wizard-onboarding.ps1" -TestHome "$testdir/onboarding" < /dev/null
+LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -NonInteractive -File "$here/test-wizard-account.ps1" -TestHome "$testdir/wizard-account" < /dev/null
+LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -NonInteractive -File "$here/test-navpane.ps1" -TestHome "$testdir/navpane" < /dev/null
+LOCALAPPDATA="$testdir/local" "$pwsh" -NoProfile -NonInteractive -File "$here/test-network.ps1" -TestHome "$testdir/network" < /dev/null
+python3 -m unittest discover -s "$repo/server/tests"
 python3 "$repo/disk/test-tree.py"
 python3 "$repo/transport/test-server-catalog.py"
 node "$repo/accounts/test-accounts.mjs"
 python3 "$here/test_build.py"
 python3 "$here/test_bridge_health.py"
 python3 "$here/test_wizard_boundary.py"
+python3 "$here/test_server_operations.py"
 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -- "$testdir/core"
 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ProductName=RemoteVPN -- "$testdir/core-vpn"
 "$repo/build/make-bundle.sh" 20261109.235959-test "$testdir/bundles"

@@ -28,6 +28,12 @@ SB = Path('/etc/sing-box/config.json')
 BIN = Path('/usr/local/lib/remoteagents/lan')
 LOG = Path('/var/log/remoteagents/lan.log')
 TABLE = 'remoteagents_lan'
+# World-readable, secret-free status for the settings window (no sudo needed to read).
+PUBLIC = Path('/var/lib/remoteagents-status')
+# Every owner-confirmed network transaction; only one may wait for confirm at a time.
+PENDING = (Path('/var/lib/remoteagents/lan/pending'), Path('/var/lib/remoteagents/port-leak/pending'),
+           Path('/var/lib/remoteagents/proxy-out/pending'))
+MARKER = '---remoteagents-stdin---'
 PRIVATE = tuple(ipaddress.ip_network(s) for s in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
 # OS interface name <= 15 bytes (tun-lan- is 8 bytes).
 NAME = re.compile(r'[a-z][a-z0-9]{0,6}\Z')
@@ -89,11 +95,20 @@ def parse_route(tokens):
     return networks([str(network)])
 
 
-def import_client(name, source, extra=()):
+def lan_credentials(username, password):
+    for value in (username, password):
+        require(isinstance(value, str) and 0 < len(value) <= 256 and
+                not any(c in value for c in '\r\n\x00') and not value.lstrip().startswith('<'),
+                'Некорректный логин/пароль ЛВС.')
+    return username, password
+
+
+def import_client(name, source, extra=(), auth=None):
     name_ok(name)
     text = Path(source).read_text(encoding='utf-8-sig').replace('\r\n', '\n').replace('\r', '\n')
     lines, subnets, block, payload = [], list(extra), None, []
     seen = set()
+    prompt = False
     for number, line in enumerate(text.splitlines(), 1):
         stripped = line.strip()
         if block:
@@ -128,6 +143,9 @@ def import_client(name, source, extra=()):
             require(len(args) == 2 and args[0] in ('accept', 'ignore', 'reject'), 'Некорректный pull-filter.')
         elif option in STRIP:
             continue
+        elif option == 'auth-user-pass' and not args:
+            # Interactive credentials: supplied by the owner (stdin/no-echo prompt), stored root-only inline.
+            prompt = True
         elif option in BLOCKS:
             require(args == ['[inline]'], 'Сертификаты/ключи/auth должны быть inline; внешние пути запрещены.')
         else:
@@ -143,6 +161,13 @@ def import_client(name, source, extra=()):
             # Double quotes, no shell interpretation: OpenVPN has its own parser.
             lines.append(option + ''.join(' "' + a.replace('\\', '\\\\').replace('"', '\\"') + '"' for a in args))
     require(block is None, 'Незакрытый inline-блок.')
+    if prompt or auth:
+        require(auth is not None, 'Профиль требует логин и пароль ЛВС: --auth-stdin или --ask-auth.')
+        require('auth-user-pass' not in seen or not prompt, 'Повторный auth-user-pass.')
+        start = lines.index('<auth-user-pass>') if 'auth-user-pass' in seen else None
+        if start is not None:
+            del lines[start:lines.index('</auth-user-pass>', start) + 1]
+        lines.extend(['<auth-user-pass>', *lan_credentials(*auth), '</auth-user-pass>'])
     require(any(l.startswith('remote ') for l in lines), 'В профиле отсутствует remote.')
     require('ca' in seen or any(l.startswith('peer-fingerprint ') for l in lines), 'Требуется inline CA.')
     # A profile cannot weaken server certificate role checking.
@@ -155,6 +180,8 @@ def import_client(name, source, extra=()):
                   'pull-filter ignore "route-ipv6"',
                   'pull-filter ignore "ifconfig-ipv6"',
                   'pull-filter ignore "block-ipv6"',
+                  # OpenVPN 2.6+/2.7 "dns" options (dns-updown) must never change server DNS.
+                  'pull-filter ignore "dns"',
                   'script-security 2',
                   'route-up "/usr/local/lib/remoteagents/lan/lan-vpn.sh _hook ' + name + '"',
                   'verb 0', 'mute 1'])
@@ -227,6 +254,36 @@ def exclusion_diff(before, after):
     return '\n'.join(result) + ('\n' if result else '')
 
 
+def network_pending():
+    return [str(p) for p in PENDING if p.exists()]
+
+
+def publish(name, value):
+    # Status for non-root readers: constants and booleans only, never secrets or addresses.
+    PUBLIC.mkdir(mode=0o755, parents=True, exist_ok=True)
+    os.chmod(PUBLIC, 0o755)
+    atomic(PUBLIC / (name + '.json'), json.dumps(value, ensure_ascii=False) + '\n', 0o644)
+
+
+def publish_lan():
+    rows = []
+    for name, data in profiles().items():
+        status = STATE / (name + '.json')
+        last = read(status) if status.exists() else {'ok': False, 'summary': 'не проверено', 'updatedAt': None}
+        rows.append({'name': name, 'enabled': data['enabled'], 'ready': data['ready'], 'ok': last['ok'],
+                     'summary': last['summary'], 'updatedAt': last['updatedAt']})
+    publish('lan', rows)
+
+
+def public_status():
+    path = PUBLIC / 'lan.json'
+    rows = read(path) if path.exists() else []
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, dict) and NAME.fullmatch(str(row.get('name', ''))):
+            row['active'] = run(['systemctl', 'is-active', '--quiet', service(row['name'])], check=False).returncode == 0
+            print(json.dumps(row, ensure_ascii=False))
+
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -275,6 +332,8 @@ def event(name, summary, ok=False):
         f.write(now() + ' ' + name + ' ' + summary + '\n')
     if NAME.fullmatch(name):
         save(STATE / (name + '.json'), {'ok': ok, 'summary': summary, 'updatedAt': now()})
+        with contextlib.suppress(Exception):
+            publish_lan()
 
 
 def profiles():
@@ -437,8 +496,8 @@ def baseline(url):
 
 
 def start_transaction(name, kind):
-    require(not Path('/var/lib/remoteagents/port-leak/pending').exists(), 'Есть неподтверждённое изменение port-leak.')
-    require(not (STATE / 'pending').exists(), 'Есть неподтверждённое изменение; confirm или rollback.')
+    require(not network_pending() and not (STATE / 'pending').exists(),
+            'Есть неподтверждённое изменение сети (ЛВС, прокси или port-leak); confirm или rollback.')
     pending = STATE / 'pending'
     staging = STATE / '.transaction'
     shutil.rmtree(staging, ignore_errors=True)
@@ -670,6 +729,7 @@ def enable(name, url):
             require(not any(ipaddress.ip_network(a).overlaps(ipaddress.ip_network(b))
                             for a in data['static'] for b in p['subnets']), 'Подсети разных ЛВС пересекаются.')
     preflight(data)
+    local_conflicts(data['static'])
     before_ip = baseline(url)
     start_transaction(name, 'enable')
     try:
@@ -690,6 +750,7 @@ def enable(name, url):
             if other != name:
                 require(not any(ipaddress.ip_network(a).overlaps(ipaddress.ip_network(b))
                                 for a in data['subnets'] for b in p['subnets']), 'Подсети разных ЛВС пересекаются.')
+        local_conflicts(data['subnets'])
         if data.get('dns'):
             dns_ip = ipaddress.IPv4Address(data['dns']['server'])
             require(any(dns_ip in ipaddress.ip_network(s) for s in data['subnets']), 'DNS-сервер должен входить в подсети ЛВС.')
@@ -711,6 +772,29 @@ def enable(name, url):
     except Exception:
         rollback()
         raise
+
+
+def local_conflicts(subnets):
+    # A LAN must never shadow the server's own networks (docker, provider private net,
+    # sing-box TUN): its policy rules would capture that traffic.
+    nets = [ipaddress.ip_network(s) for s in subnets]
+    for r in json.loads(run(['ip', '-j', '-4', 'route', 'show', 'table', 'main']).stdout or '[]'):
+        dst, dev = r.get('dst', 'default'), r.get('dev', '')
+        if dst == 'default' or dev.startswith('tun-lan-'):
+            continue
+        try:
+            local = ipaddress.ip_network(dst, strict=False)
+        except ValueError:
+            continue
+        require(not any(n.overlaps(local) for n in nets),
+                'Подсеть ЛВС пересекается с сетью сервера (интерфейс ' + (dev if re.fullmatch(r'[A-Za-z0-9_.@-]{1,15}', dev) else '?') + ').')
+    for inbound in read(SB).get('inbounds', []):
+        if inbound.get('type') == 'tun':
+            addresses = inbound.get('address', [])
+            for address in addresses if isinstance(addresses, list) else [addresses]:
+                with contextlib.suppress(ValueError, TypeError):
+                    require(not any(n.overlaps(ipaddress.ip_network(address, strict=False)) for n in nets),
+                            'Подсеть ЛВС пересекается с адресом TUN sing-box.')
 
 
 def audit_routes(name, data):
@@ -881,6 +965,23 @@ def watch():
         event(name, 'guard checked: nft/маршруты/процесс проверены; доступность хоста не проверялась', False)
 
 
+def read_auth(args):
+    if args.auth_stdin:
+        text = sys.stdin.read().replace('\r\n', '\n')
+        # sudo -S consumes its own line first; with NOPASSWD that line arrives here and is dropped.
+        require(MARKER + '\n' in text, 'Нет данных после маркера stdin.')
+        try:
+            data = json.loads(text.split(MARKER + '\n', 1)[1])
+        except ValueError:
+            raise Error('Некорректные данные stdin.') from None
+        require(isinstance(data, dict), 'Некорректные данные stdin.')
+        return lan_credentials(data.get('username'), data.get('password'))
+    if args.ask_auth:
+        import getpass
+        return lan_credentials(input('Логин ЛВС: ').strip(), getpass.getpass('Пароль ЛВС (не отображается): '))
+    return None
+
+
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description='Restricted LAN VPN; изменения сети выполняет только владелец.')
@@ -893,6 +994,9 @@ def main():
             p.add_argument('--subnet', action='append', default=[])
             p.add_argument('--dns-domain')
             p.add_argument('--dns-server')
+            auth = p.add_mutually_exclusive_group()
+            auth.add_argument('--auth-stdin', action='store_true', help='LAN login/password as JSON on stdin after the marker line')
+            auth.add_argument('--ask-auth', action='store_true', help='Ask LAN login/password without echo')
         p.add_argument('--ip-check-url', required=True, help='HTTPS endpoint returning one public IP; selected by owner')
     for command in ('disable', 'remove', 'confirm', 'test', '_hook', '_prestart', '_down'):
         p = sub.add_parser(command)
@@ -902,9 +1006,12 @@ def main():
         if command == 'test':
             p.add_argument('host')
             p.add_argument('port', nargs='?', type=int)
-    for command in ('list', 'status', 'rollback', '_watch', '_firewall', '_recover'):
+    for command in ('list', 'status', 'public-status', 'rollback', '_watch', '_firewall', '_recover'):
         sub.add_parser(command)
     args = parser.parse_args()
+    if args.cmd == 'public-status':
+        public_status()
+        return
     require(os.geteuid() == 0, 'Нужен sudo; агент не применяет изменения самостоятельно.')
     if hasattr(args, 'name'):
         name_ok(args.name)
@@ -938,10 +1045,10 @@ def main():
     with open(STATE.parent / 'network.lock', 'w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if args.cmd in ('add', 'enable'):
-            require(not (STATE / 'pending').exists() and not Path('/var/lib/remoteagents/port-leak/pending').exists(),
+            require(not network_pending() and not (STATE / 'pending').exists(),
                     'Сначала confirm или rollback предыдущего изменения сети.')
         if args.cmd == 'add':
-            client, static = import_client(args.name, args.ovpn, args.subnet)
+            client, static = import_client(args.name, args.ovpn, args.subnet, read_auth(args))
             require(bool(args.dns_domain) == bool(args.dns_server), 'Задайте обе опции --dns-domain и --dns-server.')
             dns = None
             if args.dns_domain:

@@ -117,7 +117,10 @@ def main():
         disk=Path.home()/'Disk';safe(disk)
         relative=(payload or '').replace('\r','').rstrip('\n')
         directory=relative_path(disk,relative) if relative else disk
-        if relative:folder_path(relative.split('/')[0])
+        if relative:
+            # A local-only project whose name the server cannot hold has no server side: list nothing, do not fail the level.
+            try:folder_path(relative.split('/')[0])
+            except ValueError:print(json.dumps(dict(schema=1,parent=relative,folders=[],entries=[],truncated=False,unsupportedName=relative.split('/')[0])));return
         limit=2000
         def children(parent,prefix):
             if not parent.exists():return

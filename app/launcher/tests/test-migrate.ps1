@@ -88,6 +88,7 @@ function Start-MigrationDetached($Exe,$Arguments){[void]$script:events.Add('star
 function Wait-MigrationTransport($Root,$Timeout){[void]$script:events.Add('transport-ready')}
 function Test-MigrationSsh($Root,$Port){$true}
 function Start-MigrationControl($Root,$Bundle,$State){[void]$script:events.Add('start-control')}
+function Remove-MigrationNavPane{[void]$script:events.Add('remove-navpane')}
 function Stop-MigrationDisk($DiskRoot){$script:lastDiskRoot=$DiskRoot;[void]$script:events.Add('stop-disk')}
 function Stop-MigrationControl($Root){[void]$script:events.Add('stop-control')}
 function Start-MigrationRun($Command){[void]$script:events.Add('restore-process')}
@@ -119,14 +120,19 @@ $state=Read-TransportJson (Get-MigrationStatePath $root);$state.greenSince=[Date
 Confirm-Migration $root -Observer 'new-launcher-session'
 Assert ((Read-TransportJson (Get-MigrationStatePath $root)).phase -eq 'pending') 'launcher restart resets three-minute green window'
 $state=Read-TransportJson (Get-MigrationStatePath $root);$state.greenSince=[DateTime]::UtcNow.AddSeconds(-181).ToString('o');$state.lastHealthyAt=[DateTime]::UtcNow.ToString('o');Write-TransportJson (Get-MigrationStatePath $root) $state
+Update-MigrationConfig $root {param($c) Set-MigrationDefault $c wizard ([pscustomobject]@{});$c.wizard|Add-Member -Force migrationRequested $true}
+Assert (-not (Read-TransportJson (Join-Path $root 'config.json')).wizard.configured) 'setup not configured while migration is pending'
 Confirm-Migration $root -Observer 'new-launcher-session'
 Assert ((Read-TransportJson (Get-MigrationStatePath $root)).phase -eq 'accepted' -and $script:events.Contains('unwatchdog')) 'three green minutes remove watchdog'
+$wizard=(Read-TransportJson (Join-Path $root 'config.json')).wizard
+Assert ($wizard.configured -and -not $wizard.migrationRequested) 'acceptance of a wizard-started migration completes the setup (no window on later launches)'
 Invoke-MigrationRollback $root $state.session
 Assert ((Read-TransportJson (Get-MigrationStatePath $root)).phase -eq 'accepted') 'late watchdog cannot roll back accepted session'
 $script:failRestore=$true
 try{Invoke-MigrationRollback $root -Force;throw 'Expected incomplete rollback'}catch{Assert ($_.Exception.Message -match 'Откат неполный') 'rollback failure explicit and retryable'}
 Assert ($script:lastDiskRoot -eq $disk) 'rollback restores recorded disk home'
 Assert ($script:runs.Disk -eq 'old-disk' -and $script:runs.Control -eq 'old-control') 'rollback continues independent restorations after failure'
+Assert ($script:events.Contains('remove-navpane')) 'rollback removes the Explorer Disk entry'
 $script:failRestore=$false;Invoke-MigrationRollback $root -Force
 Assert ((Read-TransportJson (Get-MigrationStatePath $root)).phase -eq 'rolled-back' -and -not $script:runs.Launcher) 'uninstall same rollback without waiting'
 Assert ([IO.File]::ReadAllText($ssh) -ceq $original) 'rollback restores SSH without touching other hosts'
