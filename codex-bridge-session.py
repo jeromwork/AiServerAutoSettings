@@ -9,6 +9,19 @@ import stat
 import sys
 
 MAX = 262144
+FORWARD_TIMEOUT = 100  # seconds a Windows executor may take to answer
+
+
+class Refusal(Exception):
+    """Failure with a fixed machine-readable reason; carries no upstream text."""
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def refusal(reason):
+    # Fixed vocabulary only: never leak token, command, paths or exception text.
+    return json.dumps({"ok": False, "error": "Windows unavailable or invalid request", "reason": reason}, separators=(",", ":")).encode() + b"\n"
 
 
 def read_line(stream, limit=MAX):
@@ -48,11 +61,25 @@ def serve(path, config, parent_stdin):
         request = dict(request, token=config['token'])
         payload = json.dumps(request, separators=(',', ':')).encode()+b'\n'
         if len(payload)>MAX:
-            raise ValueError('Request too large')
-        with socket.create_connection(('127.0.0.1', port), timeout=5) as remote:
-            remote.settimeout(100)
-            remote.sendall(payload)
-            return read_line(remote.makefile('rb'))
+            raise Refusal('invalid-request')
+        try:
+            with socket.create_connection(('127.0.0.1', port), timeout=5) as remote:
+                remote.settimeout(FORWARD_TIMEOUT)
+                remote.sendall(payload)
+                reply = remote.makefile('rb').readline(MAX + 1)
+        except socket.timeout:
+            raise Refusal('windows-timeout') from None
+        except ConnectionRefusedError:
+            # Reverse-forward port is not listening: the SSH tunnel is gone.
+            raise Refusal('tunnel-down') from None
+        except OSError:
+            raise Refusal('windows-no-reply') from None
+        if not reply:
+            # Tunnel accepted, but the Windows executor closed without a frame.
+            raise Refusal('windows-no-reply')
+        if len(reply) > MAX or not reply.endswith(b'\n'):
+            raise Refusal('windows-invalid-reply')
+        return reply
     try:
         server.bind(path)
         os.chmod(path, 0o600)
@@ -67,18 +94,22 @@ def serve(path, config, parent_stdin):
             with client:
                 client.settimeout(100)
                 try:
-                    request = json.loads(read_line(client.makefile("rb")))
+                    try:
+                        request = json.loads(read_line(client.makefile("rb")))
+                    except (ValueError, OSError):
+                        raise Refusal('invalid-request') from None
                     if not isinstance(request, dict) or set(request) - {"op", "args", "binding"}:
-                        raise ValueError("invalid request")
+                        raise Refusal('invalid-request')
                     expected=request.get('binding')
                     if config.get('hostId') and expected != {key:config.get(key) for key in ('projectId','hostId','deviceLabel','windowsReplica')}:
-                        raise ValueError('Explicit target binding required')
+                        raise Refusal('binding-mismatch')
                     result=forward(request)
                     client.sendall(result)
-                except Exception:
+                except Exception as error:
                     # Never leak token, command, paths, or upstream exception text.
+                    reason = error.reason if isinstance(error, Refusal) else 'internal-error'
                     try:
-                        client.sendall(b'{"ok":false,"error":"Windows unavailable or invalid request"}\n')
+                        client.sendall(refusal(reason))
                     except OSError:
                         pass
     finally:
