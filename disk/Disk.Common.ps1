@@ -192,6 +192,9 @@ function Set-DiskBase([string]$Path) {
         if($failed.Count){throw ('Не перенесены: '+($failed -join '; ')+'. Прежняя база сохранена; устраните причину и повторите')}
     }
     [void][IO.Directory]::CreateDirectory($new);Write-DiskUtf8 $saved $new
+    # An existing Explorer entry follows the new root; a failure leaves the base change intact.
+    if((Get-Command Test-DiskNavPane -ErrorAction SilentlyContinue) -and (Test-DiskNavPane $new).installed){try{Install-DiskNavPane $new}catch{Write-DiskLog 'Значок Disk в Проводнике' $_}}
 }
 
 $selective=Join-Path $PSScriptRoot 'Disk.Selective.ps1';if(Test-Path -LiteralPath $selective){. $selective}
+$navPane=Join-Path $PSScriptRoot 'Disk.NavPane.ps1';if(Test-Path -LiteralPath $navPane){. $navPane}

@@ -67,3 +67,4 @@ build/server-ssh-user.sh
 server/lan-vpn.sh
 server/lan_vpn.py
 disk/Disk.Binary.ps1
+disk/Disk.NavPane.ps1

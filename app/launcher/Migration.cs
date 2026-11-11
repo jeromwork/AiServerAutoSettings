@@ -92,7 +92,8 @@ namespace RemoteAgents.Launcher
                     if (value.IndexOf(Path.Combine(home, "RemoteAgents.exe"), StringComparison.OrdinalIgnoreCase) >= 0) key.DeleteValue("RemoteAgents", false);
                 }
                 try { Program.Forward(Program.InstanceName(home, System.Security.Principal.WindowsIdentity.GetCurrent().User), new[] { "--exit" }); } catch { }
-                return;
+                // Clean install has no migration to undo, but Rollback.ps1 -Uninstall still removes the Explorer Disk entry.
+                if (new UpdateEngine(home, Program.Version).Current.Length == 0) return;
             }
             string output = Path.Combine(home, "state", "uninstall-output.tmp"); Directory.CreateDirectory(Path.GetDirectoryName(output));
             try {
