@@ -22,6 +22,15 @@ namespace RemoteAgents.Launcher
         // A section waiting for a detached server install (⏳) does not block the sections after it.
         internal static bool[] Passable(bool[] applied, ICollection<int> waiting)
         { return applied.Select((ready, i) => ready || waiting.Contains(i)).ToArray(); }
+        internal static string ConnectionResult(Dictionary<string,object> config, Dictionary<string,object> status, bool ready, string previous)
+        {
+            bool configured=Configuration.Ready(config,new[]{"transport.profilePath","transport.channelPath"}) && Json.Str(Json.Map(Json.Get(config,"wizard")),"pendingProfile").Length==0;
+            if(!configured)return previous.StartsWith("Ошибка:")?previous:"Ещё не настроено. «Далее» проверит пути и сохранит рабочую связь";
+            if(ready)return "Работает через "+StatusView.Title(status);
+            string error=Json.Str(status,"error");
+            if(error.Length>0)return "Ошибка связи: "+error;
+            return previous.StartsWith("Ошибка:")?previous:"Ожидаю свежую проверку связи. «Далее» проверит пути";
+        }
         // Each budget covers the slowest child the action may run (child limits in Wizard.Common.ps1),
         // plus the observations around it. «Закрыть» cancels any step at once. Long server installs
         // (Happier, Syncthing) run detached on the server and are never inside these budgets.

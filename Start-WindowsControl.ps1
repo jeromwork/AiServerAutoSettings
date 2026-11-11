@@ -1,5 +1,5 @@
 ﻿[CmdletBinding()]
-param([string]$Profile,[string]$AgentUser,[switch]$LibraryOnly,[switch]$Install,[switch]$Uninstall,[string]$LauncherHome,[switch]$KeepState)
+param([string]$Profile,[string]$AgentUser,[switch]$LibraryOnly,[switch]$Install,[switch]$Uninstall,[string]$LauncherHome,[switch]$KeepState,[switch]$StopManaged)
 $ErrorActionPreference='Stop'
 function Convert-ControlLF([string]$Text) { $Text.Replace("`r`n","`n").Replace("`r","`n") }
 function Quote-ControlNative([string]$Text) { '"'+([regex]::Replace([regex]::Replace($Text,'(\\*)"','$1$1\"'),'(\\+)$','$1$1'))+'"' }
@@ -101,7 +101,27 @@ function Stop-ControlInstance([string]$PidFile,[switch]$KeepPid) {
     }
     if(-not $KeepPid){Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue}
 }
+# An unfinished wizard may stop only this Home's added bridge, never the original control installation.
+function Test-ManagedControlCommand([string]$Command,[string]$Root) {
+    $rootPath=[IO.Path]::GetFullPath($Root).TrimEnd('\','/').Replace('/','\')
+    $pattern='(?i)(?:^|\s)-File\s+"'+[regex]::Escape($rootPath+'\managed-control\app\')+'[^"\\]+\\Start-WindowsControl\.ps1"\s+-LauncherHome\s+"'+[regex]::Escape($rootPath)+'"(?=\s|$)'
+    $Command.Replace('/','\') -match $pattern
+}
+function Stop-ManagedControl([string]$Root) {
+    if(-not $Root){throw 'Для остановки управляемого моста нужен Home'}
+    $config=Join-Path $Root 'config.json'
+    if((Test-Path $config) -and (Get-Content -LiteralPath $config -Raw -Encoding UTF8|ConvertFrom-Json).wizard.configured){return}
+    $runKey='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    $run=Get-ItemProperty -Path $runKey -Name RemoteAgentsControl -ErrorAction SilentlyContinue
+    if($run -and (Test-ManagedControlCommand ([string]$run.RemoteAgentsControl) $Root)){Remove-ItemProperty -Path $runKey -Name RemoteAgentsControl -ErrorAction Stop}
+    $pidFile=Join-Path $Root 'managed-control/control.pid'
+    if(-not (Test-Path $pidFile)){return}
+    $id=0;if(-not [int]::TryParse((Get-Content -LiteralPath $pidFile -Raw).Trim(),[ref]$id)){return}
+    $found=Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction Stop
+    if($found -and (Test-ManagedControlCommand ([string]$found.CommandLine) $Root)){Stop-ControlInstance $pidFile}
+}
 if($LibraryOnly){return}
+if($StopManaged){Stop-ManagedControl $LauncherHome;return}
 $base=Join-Path $env:LOCALAPPDATA 'RemoteAgents/control'
 $originalBase=$base
 $workspace=Join-Path $base 'workspace'

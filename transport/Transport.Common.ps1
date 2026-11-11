@@ -213,6 +213,21 @@ function Get-TransportHostKeys([string]$Ssh,[string]$HostName,[string]$KnownHost
     }
     if(-not $keys.Count){throw 'Нет закреплённого host key'};$keys
 }
+# sing-box 1.14 passes this list to SSH negotiation before checking host_key.
+# Restrict negotiation to pinned key types; RSA key format stays ssh-rsa with SHA2 signatures.
+function Set-TransportHostKeyAlgorithms($Outbound) {
+    $algorithms=@(foreach($key in @($Outbound.host_key)){
+        $type=([string]$key).Trim() -split '\s+' | Select-Object -First 1
+        switch -Exact ($type){
+            'ssh-rsa' {'rsa-sha2-512';'rsa-sha2-256'}
+            {$_ -in @('ssh-ed25519','ecdsa-sha2-nistp256','ecdsa-sha2-nistp384','ecdsa-sha2-nistp521')} {$type}
+            default {throw 'Неподдерживаемый тип закреплённого SSH host key'}
+        }
+    })
+    $algorithms=@($algorithms|Select-Object -Unique)
+    if(-not $algorithms.Count){throw 'Нет закреплённого host key'}
+    if($Outbound -is [hashtable]){$Outbound.host_key_algorithms=$algorithms}else{$Outbound|Add-Member -Force host_key_algorithms $algorithms}
+}
 function Convert-TransportHop([string]$Text) {
     $g=@{};foreach($line in (Convert-TransportLF $Text) -split "`n"){
         if($line -match '^(hostname|user|identityfile|port) (.+)$' -and -not $g.ContainsKey($Matches[1])){$g[$Matches[1]]=$Matches[2].Trim('"')}
@@ -251,6 +266,7 @@ function Get-TransportCandidates($Settings,[string]$Root) {
     $saved=@($Settings.Channel.outbounds|Where-Object {$_.type -eq 'ssh' -and $_.server -eq $p.serverAddress}|Select-Object -First 1)
     if($saved.Count){$ssh=Copy-TransportObject $saved[0];$ssh.tag='singbox-ssh-direct';if($ssh.PSObject.Properties['detour']){$ssh.PSObject.Properties.Remove('detour')}}
     if(-not $ssh.host_key){$hk=@(Get-TransportHostKeys $p.sshExecutable $p.serverAddress $p.knownHostsPath);if($ssh -is [hashtable]){$ssh.host_key=$hk}else{$ssh|Add-Member -Force host_key $hk}}
+    Set-TransportHostKeyAlgorithms $ssh
     [void]$out.Add($ssh);[void]$c.Add([pscustomobject]@{tag=$ssh.tag;port=0})
     foreach($relay in @($t.relays)){
         if($null -eq $relay -or -not (Test-TransportEnabled $relay)){continue};Assert-TransportName $relay.name
@@ -276,6 +292,7 @@ function Get-TransportCandidates($Settings,[string]$Root) {
             $hostName=$h.server;if($h.server_port -ne 22){$hostName='['+$h.server+']:'+$h.server_port}
             $h.host_key=@(Get-TransportHostKeys $p.sshExecutable $hostName $known)
         }
+        Set-TransportHostKeyAlgorithms $h
         [void]$out.Add($h);$r=Copy-TransportObject $v;$r.tag='vless-sshhop-'+$hop.name;$r|Add-Member detour $h.tag
         [void]$out.Add($r);[void]$c.Add([pscustomobject]@{tag=$r.tag;port=0})
     }

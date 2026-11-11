@@ -52,4 +52,23 @@ Assert (@(Get-DiskEngineProcesses $script:DiskHome).Count -eq 2) 'inventory isol
 Stop-DiskEngineProcesses $script:DiskHome
 Assert (($script:stopped -join ',') -eq '1000002,1000001') 'stop ends GUI before embedded engine'
 Assert ($script:inventory.Count -eq 1 -and $script:inventory[0].ProcessId -eq 1000003) 'different Syncthing state untouched'
+# Managed bridge cleanup is scoped to this Home and never touches a configured installation.
+. (Join-Path $repo 'Start-WindowsControl.ps1') -LibraryOnly
+$command='powershell.exe -NoProfile -File "'+(Join-Path $root 'managed-control/app/version/Start-WindowsControl.ps1')+'" -LauncherHome "'+$root+'"'
+Assert (Test-ManagedControlCommand $command $root) 'owned bridge command matches exact Home'
+Assert (-not (Test-ManagedControlCommand $command ($root+'-other'))) 'different Home is not owned'
+Assert (-not (Test-ManagedControlCommand ($command.Replace('managed-control/app','control/app')) $root)) 'original control is not owned'
+$script:bridgeCommand=$command;$script:removedRun=0;$script:bridgeStopped=0
+function Get-ItemProperty($Path,$Name,$ErrorAction){[pscustomobject]@{RemoteAgentsControl=$script:bridgeCommand}}
+function Remove-ItemProperty($Path,$Name,$ErrorAction){$script:removedRun++}
+function Get-CimInstance($ClassName,$Filter,$ErrorAction){[pscustomobject]@{CommandLine=$script:bridgeCommand}}
+function Stop-ControlInstance($PidFile){$script:bridgeStopped++}
+$pidFile=Join-Path $root 'managed-control/control.pid';[void][IO.Directory]::CreateDirectory((Split-Path $pidFile -Parent));[IO.File]::WriteAllText($pidFile,'1000001')
+Write-TransportJson (Join-Path $root 'config.json') @{wizard=@{configured=$false}}
+Stop-ManagedControl $root
+Assert ($script:removedRun -eq 1 -and $script:bridgeStopped -eq 1) 'unfinished setup stops owned bridge and its Run entry'
+$script:bridgeCommand=$command.Replace($root,($root+'-other'));Stop-ManagedControl $root
+Assert ($script:removedRun -eq 1 -and $script:bridgeStopped -eq 1) 'foreign bridge and Run entry untouched'
+$script:bridgeCommand=$command;Write-TransportJson (Join-Path $root 'config.json') @{wizard=@{configured=$true}};Stop-ManagedControl $root
+Assert ($script:removedRun -eq 1 -and $script:bridgeStopped -eq 1) 'configured installation never stopped by first-run cleanup'
 Write-Output ('OK: '+$count+' setup/headless checks (fixtures)')

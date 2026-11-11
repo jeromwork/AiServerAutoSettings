@@ -32,7 +32,7 @@ namespace RemoteAgents.Launcher
             int l = Files.Compare(launcher, installedLauncher), b = Files.Compare(bundle, installedBundle);
             return l < 0 || b < 0 ? -1 : l > 0 || b > 0 ? 1 : 0;
         }
-        public static void Apply(string home, string sourceExe, string zip, string launcherVersion, bool downgrade, Func<string, bool> selftest)
+        public static void Apply(string home, string sourceExe, string zip, string launcherVersion, bool downgrade, Func<string, bool> selftest, CancellationToken token = default(CancellationToken))
         {
             var engine = new UpdateEngine(home, launcherVersion); engine.Recover();
             if (engine.Pending) throw new InvalidOperationException("Предыдущее обновление ещё проверяется");
@@ -42,12 +42,13 @@ namespace RemoteAgents.Launcher
             if (version != old) {
                 var manifest = Manifest.Parse(Json.Encode(new { version, file = "embedded.zip", sha256 = Files.Hash(zip), size = new FileInfo(zip).Length, minLauncher = launcherVersion }));
                 string ready = engine.Prepare(manifest, p => File.Copy(zip, p, true), selftest,
-                    (d, f) => UpdateEngine.InstallBinaries(d, f, home, CancellationToken.None), CancellationToken.None, downgrade);
+                    (d, f) => UpdateEngine.InstallBinaries(d, f, home, token), token, downgrade || old.Length==0);
                 if (ready == null) throw new InvalidDataException("Бандл отклонён");
             } else {
                 // Even a launcher-only release must check the installed modules before switching images.
                 if (!selftest(engine.Folder(old))) throw new InvalidDataException("Самопроверка бандла не прошла");
             }
+            token.ThrowIfCancellationRequested();
             bool hadExe = File.Exists(target);
             if (hadExe) File.Copy(target, backup, true);
             try {

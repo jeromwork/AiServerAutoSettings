@@ -14,7 +14,7 @@ namespace RemoteAgents.Launcher
     // One UI and one production step dispatcher for first run and tray settings, in both EXEs.
     internal sealed partial class SetupWizard : Form
     {
-        readonly string home, bundle; readonly bool first;
+        readonly string home; string bundle; readonly bool first; readonly Func<Task<string>> prepare; bool preparing;
         readonly WizardNavigation steps = new WizardNavigation();
         readonly Panel pages = new Panel { Dock = DockStyle.Fill };
         readonly Panel[] sections = new Panel[9], details = new Panel[9];
@@ -50,12 +50,12 @@ namespace RemoteAgents.Launcher
         {if(disposing){operationTimer.Dispose();pollCancellation.Dispose();foreach(var panel in details)if(panel!=null)panel.Dispose();journal.Dispose();}base.Dispose(disposing);}
         static string LeaseName(string home)
         {using(var sha=SHA256.Create())return "Global\\RemoteAgents.Wizard."+BitConverter.ToString(sha.ComputeHash(Files.Utf8.GetBytes(Path.GetFullPath(home).ToLowerInvariant()))).Replace("-", "");}
-        internal static bool Display(string home, string bundle, bool first, int section = 0, bool activate = false)
+        internal static bool Display(string home, string bundle, bool first, int section = 0, bool activate = false, Func<Task<string>> prepare = null)
         {
             using (var lease = new Mutex(false, LeaseName(home))) {
                 bool owned; try { owned = lease.WaitOne(0); } catch (AbandonedMutexException) { owned = true; }
                 if (!owned) return false;
-                try { using (var form = new SetupWizard(home, bundle, first, activate)) { form.SelectPage(section); return form.ShowDialog() == DialogResult.OK; } }
+                try { using (var form = new SetupWizard(home, bundle, first, activate, prepare)) { if(prepare==null)form.SelectPage(section); return form.ShowDialog() == DialogResult.OK; } }
                 finally { lease.ReleaseMutex(); }
             }
         }
@@ -86,9 +86,9 @@ namespace RemoteAgents.Launcher
             }}finally{lease.ReleaseMutex();}
             }
         }
-        internal SetupWizard(string home, string bundle, bool first, bool activate)
+        internal SetupWizard(string home, string bundle, bool first, bool activate, Func<Task<string>> prepare = null)
         {
-            this.home = home; this.bundle = bundle; this.first = first; initializing=true;
+            this.home = home; this.bundle = bundle; this.first = first; this.prepare = prepare; initializing=true;
             AutoScaleDimensions=new SizeF(96,96); AutoScaleMode=AutoScaleMode.Dpi;
             Text = "RemoteAgents — " + (first ? "настройка" : "Настройки"); ClientSize=new Size(780,460);
             if(!first)titles[7]="Состояние";
@@ -106,6 +106,7 @@ namespace RemoteAgents.Launcher
                 sections[i]=new Panel {Dock=DockStyle.Fill,AutoScroll=true};pages.Controls.Add(sections[i]);
                 details[i]=new Panel {Width=575,Height=420,AutoScroll=true};
             }
+            results[1]=WizardStep.ConnectionResult(config,new Dictionary<string,object>(),false,results[1]);
             ServerPage(config);ConnectionPage();DiskPage();AccountPage(config);BridgePage(config);VpnPage(config);LanPage();SummaryPage();ProxyPage(config);
             pages.Controls.Add(installPanel);
             steps.Initialize(titles,order);steps.Available=i=>WizardStep.CanOpen(i,currentPage,first,WizardStep.Passable(applied,waiting.Keys),order);
@@ -124,6 +125,7 @@ namespace RemoteAgents.Launcher
             steps.SectionRequested+=i=> {if(WizardStep.CanOpen(i,currentPage,first,WizardStep.Passable(applied,waiting.Keys),order))SelectPage(i);else{steps.Section=currentPage;Append("Сначала завершите или пропустите раздел «"+titles[currentPage]+"»");}};
             back.Click+=(a,b)=>Navigate(-1);
             next.Click+=async(a,b)=> {
+                if(prepare!=null && bundle==null){await Prepare();return;}
                 int completed=steps.Section;
                 await ExecuteCurrent();
                 if(!lastSuccess || closingRequested)return;
@@ -133,13 +135,33 @@ namespace RemoteAgents.Launcher
                 Navigate(1);await ContinueServerRepair();await FinishAutomatically();
             };
             close.Click+=(a,b)=>Close();
-            FormClosing+=(a,b)=> {operationTimer.Stop();pollCancellation.Cancel();if(busy){b.Cancel=true;closingRequested=true;Append("Отменяю текущую операцию…");stepCancellation.Cancel();}else if(DialogResult!=DialogResult.OK)DialogResult=DialogResult.Cancel;};
-            Shown+=async(a,b)=> {if(!first)await Inspect();};
+            FormClosing+=(a,b)=> {closingRequested=true;operationTimer.Stop();pollCancellation.Cancel();if(busy){b.Cancel=true;closingRequested=true;Append("Отменяю текущую операцию…");stepCancellation.Cancel();}else if(DialogResult!=DialogResult.OK)DialogResult=DialogResult.Cancel;};
+            Shown+=async(a,b)=> {if(prepare!=null)await Prepare();else if(!first)await Inspect();};
             initializing=false;SelectPage(0);
             Append("Готов к настройке. Пароль используется один раз и не сохраняется.");
             // Reopened window: installs started earlier (even before closing the window or the PC).
             var saved=ServerOperations.Load(home);tracked.AddRange(Json.Strings(Json.Get(saved,"tracked")));lastOperations=Json.Map(Json.Get(saved,"operations"));pendingAccount=Json.Bool(saved,"pendingAccount");
-            if(pendingAccount)waiting[3]="happier";RefreshInstall();if(tracked.Count>0 || pendingAccount)operationTimer.Start();
+            if(pendingAccount)waiting[3]="happier";RefreshInstall();if(prepare==null && (tracked.Count>0 || pendingAccount))operationTimer.Start();
+            if(prepare!=null)PreparationState(true);
+        }
+        void PreparationState(bool running)
+        {
+            steps.Enabled=pages.Enabled=back.Enabled=false;next.Enabled=!running;next.Text="Повторить";
+            progress.Style=running?ProgressBarStyle.Marquee:ProgressBarStyle.Continuous;
+            Append(running?"Подготавливаю программу…":"Ошибка подготовки: не удалось подготовить файлы программы. Проверьте доступ к интернету и нажмите «Повторить». Журнал: logs\\launcher.log");
+        }
+        async Task Prepare()
+        {
+            if(preparing || closingRequested)return;preparing=true;PreparationState(true);
+            try {
+                string ready=await prepare();
+                if(IsDisposed || closingRequested)return;
+                bundle=ready;steps.Enabled=pages.Enabled=true;SelectPage(currentPage);
+                Append("Программа подготовлена. Можно продолжить настройку.");
+                if(tracked.Count>0 || pendingAccount)operationTimer.Start();
+            } catch(OperationCanceledException) {if(!IsDisposed && !closingRequested)PreparationState(false);}
+            catch {new Journal(home).Write("bundle.bootstrap.failed");if(!IsDisposed && !closingRequested)PreparationState(false);}
+            finally {preparing=false;if(!IsDisposed)progress.Style=ProgressBarStyle.Continuous;}
         }
         void SelectPage(int index)
         {
@@ -351,11 +373,11 @@ namespace RemoteAgents.Launcher
         {
             await Guard(async()=>{
                 var result=await Run("Inspect",new {});var observations=Json.Array(Json.Get(result,"steps")).Select(Json.Map).ToArray();
-                for(int i=0;i<Math.Min(6,observations.Length);i++)if(!dirty[i]){applied[i]=Json.Bool(observations[i],"ready");results[i]=applied[i]?"Проверено сейчас ✓":"Требуется настройка или проверка";}
+                for(int i=0;i<Math.Min(6,observations.Length);i++)if(!dirty[i]){applied[i]=Json.Bool(observations[i],"ready");if(i!=1)results[i]=applied[i]?"Проверено сейчас ✓":"Требуется настройка или проверка";}
                 var server=Json.Map(Json.Get(result,"server"));
                 results[0]=applied[0]?"Подключено ✓":Json.Text(server,"reason","Укажите сервер и проверьте вход");
                 var current=StatusView.Read(home,"transport",maxAgeSec:15);
-                results[1]=applied[1]?"Работает через "+StatusView.Title(current):"Нет рабочего пути: "+Json.Text(current,"error","нет свежей проверки выбранного сервера");
+                results[1]=WizardStep.ConnectionResult(new Configuration(home).Data,current,applied[1],results[1]);
                 var services=Json.Map(Json.Get(server,"services"));if(api.Text.Length==0)api.Text=Json.Str(services,"serverUrl");if(web.Text.Length==0)web.Text=Json.Str(services,"webappUrl");
                 pendingAccount=Json.Bool(result,"pendingAccount");TrackServer(Json.Map(Json.Get(server,"operations")));
                 var wizard=Json.Map(Json.Get(new Configuration(home).Data,"wizard"));
@@ -431,7 +453,7 @@ namespace RemoteAgents.Launcher
         void SaveOperations(){try{ServerOperations.Save(home,tracked,lastOperations,pendingAccount);}catch(Exception){}}
         async Task PollOperations(string start = null)
         {
-            if(polling || closingRequested || (tracked.Count==0 && !pendingAccount)){if(tracked.Count==0 && !pendingAccount)operationTimer.Stop();return;}
+            if(bundle==null || polling || closingRequested || (tracked.Count==0 && !pendingAccount)){if(tracked.Count==0 && !pendingAccount)operationTimer.Stop();return;}
             polling=true;
             try {
                 var names=tracked.Concat(pendingAccount?new[]{"happier"}:new string[0]).Distinct().ToArray();

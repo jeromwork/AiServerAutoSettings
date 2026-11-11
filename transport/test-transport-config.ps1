@@ -33,6 +33,27 @@ try{
     $options=@{sshPort=2222;syncPort=22001;probePortBase=26000;socksPortBase=28000;apiPort=29090;bindPhysical=$true;openSsh=$true;stallSeconds=5;probeTimeoutSec=45}
     $settings=[pscustomobject]@{Options=$options;Transport=$t;Profile=$p;Channel=(Copy-TransportObject $channel)}
     $paths=Get-TransportCandidates $settings $work
+    foreach($tag in @('singbox-ssh-direct','hop-jump')){
+        $sshOut=$paths.Outbounds|Where-Object {$_.tag -eq $tag}
+        Assert (@($sshOut.host_key_algorithms).Count -eq 1 -and $sshOut.host_key_algorithms[0] -eq 'ssh-ed25519') ('SSH negotiates pinned ed25519 only: '+$tag)
+    }
+    foreach($type in @('ssh-ed25519','ecdsa-sha2-nistp256','ecdsa-sha2-nistp384','ecdsa-sha2-nistp521','ssh-rsa')){
+        foreach($object in @(@{host_key=@($type+' fixture')},[pscustomobject]@{host_key=@($type+' fixture')})){
+            Set-TransportHostKeyAlgorithms $object
+            $expectedAlgorithms=if($type -eq 'ssh-rsa'){'rsa-sha2-512,rsa-sha2-256'}else{$type}
+            Assert (($object.host_key_algorithms -join ',') -eq $expectedAlgorithms -and $object.host_key[0] -eq ($type+' fixture')) ('pinned key type for hashtable/PSCustomObject: '+$type)
+        }
+    }
+    $mixed=[pscustomobject]@{host_key=@("ssh-ed25519 fixture`r`n",'ecdsa-sha2-nistp256 fixture','ssh-ed25519 fixture','ssh-rsa fixture');host_key_algorithms=@('unrelated')}
+    Set-TransportHostKeyAlgorithms $mixed
+    Assert (($mixed.host_key_algorithms -join ',') -eq 'ssh-ed25519,ecdsa-sha2-nistp256,rsa-sha2-512,rsa-sha2-256') 'mixed pins deduplicate algorithms and replace stale preferences with CRLF input'
+    foreach($pins in @(@(),@('unknown fixture'))){
+        $rejected=$false;try{Set-TransportHostKeyAlgorithms @{host_key=$pins}}catch{$rejected=$true}
+        Assert $rejected 'empty/unknown pins fail closed'
+    }
+    $pinned=Copy-TransportObject $settings;$pinned.Channel.outbounds+=@([pscustomobject]@{type='ssh';tag='old-ssh';server=$p.serverAddress;host_key=@('ecdsa-sha2-nistp384 fixture');host_key_algorithms=@('ssh-ed25519')})
+    $pinnedPaths=Get-TransportCandidates $pinned $work
+    Assert ((($pinnedPaths.Outbounds|Where-Object {$_.tag -eq 'singbox-ssh-direct'}).host_key_algorithms -join ',') -eq 'ecdsa-sha2-nistp384') 'existing channel pins determine negotiation too'
     # Local hops accept a key path; sing-box uses the same private_key_path field as the target SSH.
     $keyHop=Copy-TransportObject $t;$hopKey=Join-Path $work 'Пользователь с пробелом/hop key'
     $keyHop.hops[0]|Add-Member keyFile $hopKey

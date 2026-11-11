@@ -23,7 +23,11 @@
       "healthFile": "status/transport.json",
       "healthMaxAgeSec": 15,
       "enabledByDefault": true,
-      "critical": true
+      "critical": true,
+      "requiresConfig": [
+        "transport.profilePath",
+        "transport.channelPath"
+      ]
     },
     {
       "name": "disk",
@@ -161,6 +165,9 @@
             "Add"
           ]
         }
+      ],
+      "requiresConfig": [
+        "components.disk.enabled"
       ]
     },
     {
@@ -185,7 +192,10 @@
       "healthFile": "status/control.json",
       "healthMaxAgeSec": 30,
       "enabledByDefault": false,
-      "critical": false
+      "critical": false,
+      "requiresConfig": [
+        "components.control.enabled"
+      ]
     }
   ],
   "menu": [],

@@ -134,6 +134,16 @@ namespace RemoteAgents.Launcher
         public static Configuration ForUpdate(string json) { return new Configuration(new Dictionary<string, object> { { "update", Json.Parse(json) } }); }
         public Dictionary<string, object> Update { get { return Json.Map(Json.Get(Data, "update")); } }
         public bool Enabled(Component c) { var map = Json.Map(Json.Get(Data, "components")); return Json.Bool(Json.Map(Json.Get(map, c.Name)), "enabled", c.Default); }
+        // Required fields are the component's setup contract, independent of enabled intent.
+        public bool Wanted(Component c)
+        { return Enabled(c) && Ready(Data,c.RequiredConfig); }
+        internal static bool Ready(Dictionary<string,object> data, string[] fields)
+        {
+            return fields.All(path=> {
+                object value=data;foreach(string part in path.Split('.'))value=Json.Get(Json.Map(value),part);
+                return value is bool ? (bool)value : value is string && !string.IsNullOrWhiteSpace((string)value);
+            });
+        }
         public void SetEnabled(Component c, bool enabled)
         {
             // Same per-home mutex as Edit-Transport/Set-VpnEnabled; refresh first so a tray toggle
@@ -171,13 +181,14 @@ namespace RemoteAgents.Launcher
     }
     internal sealed class Component
     {
-        public string Name, Title, Exe, Cwd, Restart, HealthFile, StopFile; public string[] Args; public bool Default, Critical, Elevated, CommandManaged; public int MaxAge; public MenuAction[] Menu;
+        public string Name, Title, Exe, Cwd, Restart, HealthFile, StopFile; public string[] Args, RequiredConfig; public bool Default, Critical, Elevated, CommandManaged; public int MaxAge; public MenuAction[] Menu;
         public static Component Read(object value)
         {
             var d = Json.Map(value); var c = new Component {
                 Name = Json.Str(d, "name"), Title = Json.Str(d, "title"), Exe = Json.Str(d, "exe"), Args = Json.Strings(Json.Get(d, "args")),
                 Cwd = Json.Text(d, "cwd", "{bundle}"), Restart = Json.Text(d, "restart", "never"), HealthFile = Json.Str(d, "healthFile"),
                 MaxAge = Json.Int(d, "healthMaxAgeSec", 90), Default = Json.Bool(d, "enabledByDefault"), Critical = Json.Bool(d, "critical"), Elevated = Json.Bool(d, "elevated"), CommandManaged = Json.Bool(d, "commandManaged"), StopFile = Json.Str(d, "stopFile"),
+                RequiredConfig = Json.Strings(Json.Get(d, "requiresConfig")),
                 Menu = Json.Array(Json.Get(d, "menu")).Select(MenuAction.Read).ToArray()
             };
             if (!Regex.IsMatch(c.Name, "^[a-z][a-z0-9_-]{0,63}$") || string.IsNullOrWhiteSpace(c.Exe) || (c.Restart != "always" && c.Restart != "never") || c.MaxAge < 1) throw new InvalidDataException("Неверный компонент");
