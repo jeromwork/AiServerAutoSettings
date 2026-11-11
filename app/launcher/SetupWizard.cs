@@ -28,7 +28,7 @@ namespace RemoteAgents.Launcher
         readonly int[] order = {0,1,8,4,2,3,6,5,7};
         bool activationRequested, lastSuccess, reconnectDisk, serverChanged, repairingServer; int currentPage;
         readonly bool[] applied = new bool[9], dirty = new bool[9];
-        TextBox address, login, password, diskBase, label, accountKey, api, web, vpnCheck, vpnDns;
+        TextBox address, login, password, keyFile, diskBase, label, accountKey, api, web, vpnCheck, vpnDns;
         CheckBox installMissing, shared, bridge, shell, vpn;
         RadioButton haveAccount, newAccount; Panel newKeyPanel; TextBox newKeyText; Button openHappier; Label accountKeyCaption;
         // Long server installs run detached on the server; sections wait (⏳) without blocking the next ones.
@@ -197,7 +197,9 @@ namespace RemoteAgents.Launcher
                 if(profile.Length==0){string dir=Path.Combine(home,"ssh-profiles");if(Directory.Exists(dir)){var found=Directory.GetFiles(dir,"ssh-transport.json",SearchOption.AllDirectories);if(found.Length==1)profile=found[0];}}
                 if(File.Exists(profile)){var p=Json.Read(profile);host=Json.Str(p,"serverAddress");user=Json.Str(p,"login");}
             }catch{}
-            address=Field(0,"Адрес",83,host);login=Field(0,"Логин",135,user);password=Field(0,"Пароль — только если ключ не работает",187,"",true);
+            address=Field(0,"Адрес",83,host);login=Field(0,"Логин",135,user);password=Field(0,"Вход: ключ этого компьютера → выбранный файл ключа → пароль",187,"",true);password.Width=250;
+            keyFile=new TextBox {Left=276,Top=209,Width=195,ReadOnly=true};sections[0].Controls.Add(keyFile);
+            Button(0,"Файл ключа…",207,()=>{string dir=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),".ssh");using(var d=new OpenFileDialog {Title="Файл закрытого ключа SSH",InitialDirectory=Directory.Exists(dir)?dir:"",CheckFileExists=true})if(d.ShowDialog(this)==DialogResult.OK)keyFile.Text=d.FileName;return Task.FromResult(0);},481,110);
             password.Enabled=host.Length==0;originalAddress=host;originalLogin=user;
             installMissing=Check(0,"Установить недостающие службы сервера",242,true);
             inventory=Hint(0,"Root используется только для создания рабочего пользователя remoteagents.",50,90);Technical(0,inventory);
@@ -537,7 +539,7 @@ namespace RemoteAgents.Launcher
                     case 0:
                         using(var relay=new PasswordRelay(password.Text)) {
                             password.Clear();
-                            result=await Run("Server",new {address=address.Text.Trim(),login=login.Text.Trim(),installMissing=installMissing.Checked,passwordPipe=relay.Name,askpassExecutable=Program.Exe});
+                            result=await Run("Server",new {address=address.Text.Trim(),login=login.Text.Trim(),installMissing=installMissing.Checked,keyFile=keyFile.Text,passwordPipe=relay.Name,askpassExecutable=Program.Exe});
                         }
                         var saved=new Configuration(home).Data;var profile=Json.Read(Json.Text(Json.Map(Json.Get(saved,"wizard")),"pendingProfile",Json.Str(Json.Map(Json.Get(saved,"transport")),"profilePath")));login.Text=Json.Str(profile,"login");originalAddress=address.Text.Trim();originalLogin=login.Text.Trim();password.Enabled=false;
                         inventory.Text="SSH: проверен\r\n"+string.Join("\r\n",new[]{"disk","happier","bridge","catalog"}.Select(k=>(k=="disk"?"Диск-сервер":k=="happier"?"Happier (программа)":k=="bridge"?"Серверная часть моста":"Каталог узлов")+": "+(Json.Bool(result,k)?"обнаружен / проверен":"отсутствует или не отвечает")));

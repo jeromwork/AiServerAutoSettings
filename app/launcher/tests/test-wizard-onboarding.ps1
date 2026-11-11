@@ -27,14 +27,14 @@ with (home/'calls.jsonl').open('a') as f:f.write(json.dumps({'user':user,'passwo
 if os.environ.get('RA_TEST_DENY')=='1':sys.exit(255)
 if args[-1]=='true':sys.exit(0 if (home/'installed').exists() else 255)
 if 'ra_user' in args[-1]:
- if not password:sys.exit(255)
+ if not password and args[args.index('-i')+1]!=os.environ.get('RA_TEST_GOOD_KEY',''):sys.exit(255)
  if os.environ.get('RA_TEST_HELPER_FAIL')=='1':sys.stderr.write('useradd: cannot lock /etc/passwd\r\n');sys.exit(1)
  (home/'installed').touch();sys.exit(0)
 sys.exit(0)
 '@
 Write-DiskUtf8 $fake $scriptText
 & chmod +x $fake
-$env:RA_TEST_SSH=$TestHome;$env:PATH=$bin+[IO.Path]::PathSeparator+$env:PATH
+$env:USERPROFILE=Join-Path $TestHome 'user';$env:RA_TEST_SSH=$TestHome;$env:PATH=$bin+[IO.Path]::PathSeparator+$env:PATH
 $request=[pscustomobject]@{address='fixture.example.invalid';login='root';passwordPipe='fixture-memory-channel';askpassExecutable='fixture-askpass'}
 $file=Connect-WizardServer $root $repo $request
 $p=Read-TransportJson $file
@@ -65,6 +65,42 @@ $env:RA_TEST_DENY='0';$env:RA_TEST_HELPER_FAIL='1'
 $message='';try{[void](Invoke-WizardLogin $p 'root' $helper "x`n" $request)}catch{$message=$_.Exception.Message}
 Assert ($message -like '*код 1*' -and $message -like '*useradd*' -and $message -notlike '*Проверьте пароль*') 'remote helper failure is not reported as a wrong password'
 $env:RA_TEST_HELPER_FAIL='0'
+# Existing keys: candidates are ordered, deduplicated and exclude this profile's own key.
+$keyHome=Join-Path $TestHome 'keys';$keyRoot=Join-Path $keyHome 'RemoteAgents';$sshDir=Join-Path $env:USERPROFILE '.ssh'
+foreach($d in @($sshDir,(Join-Path $keyRoot 'ssh-profiles/a/project-connections/control'),(Join-Path $keyRoot 'ssh-profiles/b/project-connections/control'))){[void][IO.Directory]::CreateDirectory($d)}
+Write-TransportJson (Join-Path $keyRoot 'config.json') @{schema=1;version=1;transport=@{};components=@{}}
+$keygen=@(Get-Command ssh-keygen -CommandType Application)[0].Source
+foreach($k in @((Join-Path $sshDir 'id_rsa'),(Join-Path $sshDir 'id_ed25519'),(Join-Path $keyRoot 'ssh-profiles/a/project-connections/control/id_ed25519'),(Join-Path $keyRoot 'ssh-profiles/b/project-connections/control/id_ed25519'),(Join-Path $keyHome 'chosen'))){[void](Invoke-DiskProcess $keygen @('-q','-t','ed25519','-N','','-f',$k))}
+[void](Invoke-DiskProcess $keygen @('-q','-t','ed25519','-N','fixture-passphrase','-f',(Join-Path $sshDir 'id_ecdsa')))
+$own=Join-Path $keyRoot 'ssh-profiles/b/project-connections/control/id_ed25519';$chosen=Join-Path $keyHome 'chosen'
+$order=@(Get-WizardKeyCandidates $keyRoot $own $chosen)
+$expected=@($chosen,(Join-Path $sshDir 'id_ed25519'),(Join-Path $sshDir 'id_ecdsa'),(Join-Path $sshDir 'id_rsa'),(Join-Path $keyRoot 'ssh-profiles/a/project-connections/control/id_ed25519'))|ForEach-Object {[IO.Path]::GetFullPath($_)}
+Assert (($order -join '|') -ceq ($expected -join '|')) 'key candidates: chosen file, ~/.ssh ed25519/ecdsa/rsa, other profiles; own key excluded'
+Assert (@(Get-WizardKeyCandidates $keyRoot $own (Join-Path $sshDir 'id_rsa')).Count -eq 4 -and @(Get-WizardKeyCandidates $keyRoot $own (Join-Path $sshDir 'id_rsa'))[0] -ceq [IO.Path]::GetFullPath((Join-Path $sshDir 'id_rsa'))) 'chosen standard key is first and not duplicated'
+Assert (@(Get-WizardKeyCandidates $keyRoot $own (Join-Path $keyHome 'absent')).Count -eq 4) 'missing files are skipped'
+# A fresh PC: only the chosen key opens root; it is tried first, then the app uses only its own key.
+$sshHome=Join-Path $keyHome 'ssh';[void][IO.Directory]::CreateDirectory($sshHome);$env:RA_TEST_SSH=$sshHome;$env:RA_TEST_GOOD_KEY=[IO.Path]::GetFullPath($chosen)
+$script:WizardProgressFile=Join-Path $keyHome 'live.jsonl'
+$keyRequest=[pscustomobject]@{address='keys.example.invalid';login='root';keyFile=($chosen+'.pub');passwordPipe=''}
+$kfile=Connect-WizardServer $keyRoot $repo $keyRequest;$kp=Read-TransportJson $kfile
+$kcalls=@([IO.File]::ReadAllLines((Join-Path $sshHome 'calls.jsonl'))|ForEach-Object {ConvertFrom-Json $_})
+$tried=@($kcalls|ForEach-Object {$_.args[[array]::IndexOf([string[]]$_.args,'-i')+1]}|Where-Object {$_ -cne $kp.keyPath})
+Assert ($tried.Count -eq 1 -and $tried[0] -ceq $env:RA_TEST_GOOD_KEY) 'chosen key file (given as .pub) is tried first and alone'
+Assert (@($kcalls|Where-Object {$_.password}).Count -eq 0 -and $kcalls[-1].user -ceq 'remoteagents' -and $kcalls[-1].args -contains $kp.keyPath) 'existing key bootstraps without password; worker verified with own key'
+$kc=@($kcalls|Where-Object {$_.args -contains $env:RA_TEST_GOOD_KEY})[0]
+Assert ($kc.args -contains 'BatchMode=yes' -and $kc.args -contains 'IdentitiesOnly=yes' -and $kc.args -contains 'StrictHostKeyChecking=accept-new' -and $kc.payload.Contains((Get-Content -Raw ($kp.keyPath+'.pub')).Trim())) 'existing key installs the per-profile key in batch mode with accept-new'
+$secret=[IO.File]::ReadAllText($chosen);$body=($secret -split "`n"|Where-Object {$_ -and $_ -notmatch '-----'}) -join ''
+$live=[IO.File]::ReadAllText($script:WizardProgressFile)
+Assert ($live.Contains('Пробую ключ '+$env:RA_TEST_GOOD_KEY.Replace('\','\\')) -and $live.Contains('✓')) 'live progress names the key path being tried'
+foreach($f in @($script:WizardProgressFile,$kfile,(Join-Path $keyRoot 'config.json'))){$t=[IO.File]::ReadAllText($f);Assert (-not $t.Contains($body.Substring(0,40)) -and -not $t.Contains('PRIVATE KEY')) ('no key contents in '+(Split-Path $f -Leaf))}
+Assert (-not ([IO.File]::ReadAllText($kfile)).Contains('chosen') -and $kp.keyPath -ceq (Join-Path (Split-Path $kfile -Parent) 'id_ed25519')) 'profile keeps only its own key'
+# Nothing works and no password: every candidate is attempted, protected keys are skipped with a reason.
+$env:RA_TEST_GOOD_KEY='';Remove-Item (Join-Path $sshHome 'installed')
+$message='';try{[void](Connect-WizardServer $keyRoot $repo ([pscustomobject]@{address='keys2.example.invalid';login='root';passwordPipe=''}))}catch{$message=$_.Exception.Message}
+Assert ($message -clike 'Ни один ключ не подошёл. Выберите файл ключа, которым вы входите на сервер, или введите пароль (если вход по паролю на сервере разрешён)') 'final error explains keys and password'
+$live=[IO.File]::ReadAllText($script:WizardProgressFile)
+Assert ($live.Contains('id_ecdsa… ✗ защищён паролем') -and $live.Contains('id_rsa… ✗ не подошёл')) 'passphrase key skipped with a clear message'
+$env:RA_TEST_SSH=$TestHome;$script:WizardProgressFile=Join-Path $TestHome 'live.jsonl'
 # The disk decision is asked only when a disk is installed.
 [void][IO.Directory]::CreateDirectory((Join-Path $TestHome 'RemoteDisk/state'));Write-DiskUtf8 (Join-Path $TestHome 'RemoteDisk/state/config.xml') '<configuration/>'
 [void](Connect-WizardServer $root $repo $other)

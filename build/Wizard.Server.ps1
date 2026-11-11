@@ -3,9 +3,9 @@
 function Write-WizardProgress([string]$Text) {
     if($script:WizardProgressFile){[IO.File]::AppendAllText($script:WizardProgressFile,((@{text=$Text}|ConvertTo-Json -Compress)+"`n"),(New-Object Text.UTF8Encoding($false)))}
 }
-function Invoke-WizardLogin($Profile,[string]$User,[string]$Command,[string]$InputText='', $Credential=$null) {
+function Invoke-WizardLogin($Profile,[string]$User,[string]$Command,[string]$InputText='', $Credential=$null,[int]$Timeout=20) {
     $args=@('-F',$Profile.configPath,'-T','-l',$User,'-i',$Profile.keyPath,'-o','IdentitiesOnly=yes','-o','ConnectTimeout=5','-o','ConnectionAttempts=1','-o',('UserKnownHostsFile="'+$Profile.knownHostsPath.Replace('\','/')+'"'),'-o','GlobalKnownHostsFile=none','-o','ForwardAgent=no','-o','ClearAllForwardings=yes')
-    if(-not $Credential){return Invoke-DiskProcess $Profile.sshExecutable ($args+@('-o','BatchMode=yes','-o','StrictHostKeyChecking=accept-new',$Profile.serverAddress,$Command)) $InputText -TimeoutSeconds 20}
+    if(-not $Credential){return Invoke-DiskProcess $Profile.sshExecutable ($args+@('-o','BatchMode=yes','-o','StrictHostKeyChecking=accept-new',$Profile.serverAddress,$Command)) $InputText -TimeoutSeconds $Timeout}
     $si=New-Object Diagnostics.ProcessStartInfo
     $si.FileName=$Profile.sshExecutable;$si.Arguments=(($args+@('-o','BatchMode=no','-o','StrictHostKeyChecking=accept-new','-o','NumberOfPasswordPrompts=1','-o','PreferredAuthentications=password,keyboard-interactive','-o','KbdInteractiveAuthentication=yes','-o','PubkeyAuthentication=no',$Profile.serverAddress,$Command))|ForEach-Object {Quote-Disk $_}) -join ' '
     $si.UseShellExecute=$false;$si.CreateNoWindow=$true;$si.RedirectStandardInput=$true;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true
@@ -26,6 +26,30 @@ function Invoke-WizardLogin($Profile,[string]$User,[string]$Command,[string]$Inp
         }
         return Convert-TransportLF $out.GetAwaiter().GetResult()
     }finally{if($p.Id -and -not $p.HasExited){$p.Kill()};$p.Dispose()}
+}
+function Get-WizardKeyCandidates([string]$Root,[string]$Own,[string]$Chosen) {
+    # Order: the chosen file, this user's standard OpenSSH keys, then keys of other RemoteAgents profiles.
+    $userHome=if($env:USERPROFILE){$env:USERPROFILE}else{$HOME};$list=@();if($Chosen){$list+=$Chosen}
+    $list+=@('id_ed25519','id_ecdsa','id_rsa')|ForEach-Object {Join-Path (Join-Path $userHome '.ssh') $_}
+    $profiles=Join-Path $Root 'ssh-profiles'
+    if(Test-Path -LiteralPath $profiles){$list+=@(Get-ChildItem -LiteralPath $profiles -Recurse -File -Filter 'id_ed25519'|Sort-Object FullName|ForEach-Object {$_.FullName})}
+    $seen=@{};$skip=[IO.Path]::GetFullPath($Own)
+    foreach($key in $list){$full=[IO.Path]::GetFullPath($key);if($full -eq $skip -or $seen.ContainsKey($full) -or -not (Test-Path -LiteralPath $full -PathType Leaf)){continue};$seen[$full]=1;$full}
+}
+function Connect-WizardExistingKey([string]$Root,$Profile,[string]$User,[string]$Command,[string]$Payload,[string]$Chosen) {
+    # Only key paths are passed to ssh; key contents are never read, shown or logged here.
+    if($Chosen -and $Chosen.EndsWith('.pub',[StringComparison]::OrdinalIgnoreCase)){$Chosen=$Chosen.Substring(0,$Chosen.Length-4)}
+    if($Chosen -and -not (Test-Path -LiteralPath $Chosen -PathType Leaf)){Write-WizardProgress ('Файл ключа не найден: '+$Chosen+' ✗')}
+    foreach($key in @(Get-WizardKeyCandidates $Root $Profile.keyPath $Chosen)){
+        Write-WizardProgress ('Пробую ключ '+$key+'…')
+        $q=$Profile.PSObject.Copy();$q.keyPath=$key;$e=''
+        try{[void](Invoke-WizardLogin $q $User $Command $Payload -Timeout 15);Write-WizardProgress ('Пробую ключ '+$key+'… ✓ ключ этого компьютера добавлен на сервер');return $true}catch{$e=[string]$_.Exception.Message}
+        $why='не подошёл'
+        if($e -notmatch 'код выхода 255'){$why=if($e -match 'код выхода'){'вход выполнен, но настройка рабочего пользователя не удалась'}else{'сервер не ответил вовремя'}}
+        else{try{$keygen=@(Get-Command ssh-keygen -CommandType Application -ErrorAction Stop)[0].Source;[void](Invoke-DiskProcess $keygen @('-y','-P','','-f',$key) -TimeoutSeconds 10)}catch{$why='защищён паролем (или не в формате OpenSSH), пропускаю'}}
+        Write-WizardProgress ('Пробую ключ '+$key+'… ✗ '+$why)
+    }
+    return $false
 }
 function Connect-WizardServer([string]$Root,[string]$Bundle,$Request) {
     $address=[string]$Request.address;$user=[string]$Request.login;if(-not $user){$user='root'}
@@ -58,9 +82,12 @@ function Connect-WizardServer([string]$Root,[string]$Bundle,$Request) {
         $payload=$worker+"`n"+$key+"`n"+$script
         # read public parameters first, then execute the same idempotent server helper.
         $command='IFS= read -r ra_user; IFS= read -r ra_key; export ra_user ra_key; bash -s'
-        try{[void](Invoke-WizardLogin $p $user $command $payload)}catch{
-            if(-not $Request.passwordPipe){throw 'Ключ не принят. Введите пароль в этом окне. Новый сервер запоминается при первом входе; изменение его ключа не принимается'}
-            Write-WizardProgress ('Вхожу как '+$user+' и настраиваю ключ рабочего пользователя…')
+        $done=$false;try{[void](Invoke-WizardLogin $p $user $command $payload);$done=$true}catch{}
+        # Any private key that already opens this login installs this computer's own key once; then only it is used.
+        if(-not $done){$done=Connect-WizardExistingKey $Root $p $user $command $payload ([string]$Request.keyFile)}
+        if(-not $done){
+            if(-not $Request.passwordPipe){throw 'Ни один ключ не подошёл. Выберите файл ключа, которым вы входите на сервер, или введите пароль (если вход по паролю на сервере разрешён)'}
+            Write-WizardProgress ('Вхожу как '+$user+' по паролю и настраиваю ключ рабочего пользователя…')
             [void](Invoke-WizardLogin $p $user $command $payload $Request)
         }
         [void](Invoke-WizardLogin $p $worker 'true')
