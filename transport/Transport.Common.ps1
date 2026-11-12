@@ -342,13 +342,15 @@ function Get-TransportCandidates($Settings,[string]$Root) {
             transport=@{type='ws';path=(Get-TransportValue $cdn 'path' $x.ws_path);headers=@{Host=$cdn.domain};max_early_data=2048;early_data_header_name='Sec-WebSocket-Protocol'}}
         [void]$out.Add($r);[void]$c.Add([pscustomobject]@{tag=$r.tag;port=0})
     }
+    # The saved route may be the daemon's own channel SOCKS (channel first): tunnels then go direct, never through themselves.
+    $ownChannel=($route -and $route.used -eq 'proxy' -and [string]$route.proxy.host -in @('127.0.0.1','localhost') -and [int]$route.proxy.port -eq [int]$o.channelSocksPort)
     # OpenSSH из профиля + SOCKS (-D): один туннель несёт и SSH, и Syncthing через selector.
     if($o.openSsh){
         $port=[int]$o.socksPortBase
         [void]$out.Add(@{type='socks';tag='openssh-direct';server='127.0.0.1';server_port=$port;version='5'})
         [void]$c.Add([pscustomobject]@{tag='openssh-direct';port=0})
         $serverPort=Get-TransportServerPort $p
-        $a=@(Get-TransportSshArguments $p $serverPort -UseRoute)+@('-N','-o','ExitOnForwardFailure=yes','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=2','-D',('127.0.0.1:'+$port))
+        $a=@(Get-TransportSshArguments $p $serverPort -UseRoute:(-not $ownChannel))+@('-N','-o','ExitOnForwardFailure=yes','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=2','-D',('127.0.0.1:'+$port))
         [void]$tunnels.Add([pscustomobject]@{tag='openssh-direct';arguments=$a;target=$p.serverAddress;bind=$true})
     }
     if($o.openSsh){
@@ -366,7 +368,6 @@ function Get-TransportCandidates($Settings,[string]$Root) {
         }
     }
     # A saved route through the daemon's own channel SOCKS entry must not become a daemon path: that is a loop.
-    $ownChannel=($route -and $route.used -eq 'proxy' -and [string]$route.proxy.host -in @('127.0.0.1','localhost') -and [int]$route.proxy.port -eq [int]$o.channelSocksPort)
     if($route -and $route.used -eq 'proxy' -and -not $ownChannel){
         if(-not $o.openSsh){throw 'Для выбранного локального прокси включите OpenSSH в настройках связи'}
         $port=[int]$o.socksPortBase+$tunnels.Count;$tag='openssh-proxy'
