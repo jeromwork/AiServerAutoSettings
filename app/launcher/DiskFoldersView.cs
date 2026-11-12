@@ -15,7 +15,7 @@ namespace RemoteAgents.Launcher
         readonly CheckBox all = new CheckBox { Text = "Все папки сервера, включая новые", AutoSize = true };
         readonly TreeView tree = new TreeView { Dock = DockStyle.Fill, HideSelection = false, CheckBoxes = true, ShowNodeToolTips = true, FullRowSelect = true, ShowLines = false, AccessibleName = "Папки синхронизации" };
         readonly ComboBox direction = DirectionBox();
-        readonly Label hint = new Label { Text = "Отмеченные папки есть и на сервере, и на этом компьютере. Снятые остаются только на сервере и не занимают место здесь.", AutoSize = true },
+        readonly Label hint = new Label { Text = "Снятие папки останавливает синхронизацию; файлы на компьютере остаются, их можно удалить вручную.", AutoSize = true },
             localPath = new Label { AutoSize = true },
             project = new Label { Text = "Выберите отмеченную папку", AutoSize = true },
             status = new Label { AutoSize = true, AccessibleName = "Статус выбранной папки" },
@@ -127,11 +127,11 @@ namespace RemoteAgents.Launcher
             c.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
             panel.Controls.Add(c, 0, row);
         }
-        internal void Initialize(DiskChoice choice, string basePath, bool allowSkip)
+        internal void Initialize(DiskChoice choice, string basePath, bool allowSkip, DiskChoice appliedChoice = null, IEnumerable<string> excluded = null)
         {
             NeedsExternalInventory = !choice.Chosen && choice.External.Count == 0;
             diskBase = basePath; localPath.Text = "Disk: " + diskBase; open.Enabled = diskBase.Length > 0;
-            Model = new DiskFoldersModel(choice); folders.Model = Model; folders.Loaded = false; tree.Nodes.Clear();
+            Model = new DiskFoldersModel(choice, appliedChoice, excluded); folders.Model = Model; folders.Loaded = false; tree.Nodes.Clear();
             skip.Visible = allowSkip; folders.RefreshExternal(); RefreshState();
         }
         internal void ShowExternalInventory(Dictionary<string, object> data)
@@ -145,7 +145,7 @@ namespace RemoteAgents.Launcher
             NeedsExternalInventory = false; folders.RefreshExternal(); RefreshState();
         }
         internal void AcceptProfile() { NeedsExternalInventory = false; }
-        internal void MarkApplied() { Model.MarkApplied(); folders.RefreshExternal(); RefreshState(); }
+        internal void MarkApplied() { Model.MarkApplied(ConfigProfile.DiskExclusions()); folders.RefreshExternal(); RefreshState(); }
         internal void AllowSkip(bool value) { skip.Visible = value; }
         internal void ShowTree(Dictionary<string, object> data) { folders.ShowRoot(data); RefreshState(); }
         internal void SetBusy(bool value) { busy = value; Enabled = !value; if (!value) RefreshState(); }

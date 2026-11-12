@@ -49,14 +49,21 @@ namespace RemoteAgents.Launcher
                 Check(read().HasKey && read().Visible && read().Label == "Мой аккаунт", "default vault key survives reopening without profile metadata");
                 SecretVault.Set(home, "happier-key", "");
                 Check(!read().Visible && !read().HasKey, "no Happier metadata or key hides block");
-                var creation = new HappierAccountCreation();
+                var creation = new HappierAccountCreation(home);
                 var ok = new SectionOutcome { Ok = true };
                 Check(creation.Complete(ok) == "", "same account has no creation notice");
                 creation.Remember("Семейный");
+                string noticeFile = Path.Combine(home, "state", "happier-created.json");
+                var savedNotice = Json.Read(noticeFile);
+                Check(savedNotice.Count == 2 && Json.Str(savedNotice, "label") == "Семейный" && Json.Int(savedNotice, "schema", 0) == 1, "only public label and schema are persisted");
                 Check(creation.Complete(new SectionOutcome { Pending = true, Operation = "happier" }) == "", "pending install is not announced as success");
-                Check(creation.Complete(new SectionOutcome()) == "", "failed attempt is not announced as success");
+                creation = new HappierAccountCreation(home); // New ConfigSession or tray after process restart.
+                Check(creation.Complete(new SectionOutcome { Pending = true }) == "" && File.Exists(noticeFile), "restart while pending retains notification");
+                Check(creation.Complete(new SectionOutcome()) == "" && File.Exists(noticeFile), "failed resume retains notification");
+                creation = new HappierAccountCreation(home);
                 Check(creation.Complete(ok) == "Создан новый аккаунт Happier \"Семейный\". Чтобы открыть его в браузере или на телефоне, нажмите «Копировать ключ» и войдите в Happier по секретному ключу", "success or delayed resume produces exact owner instructions");
-                Check(creation.Complete(ok) == "", "success notification only once");
+                Check(!File.Exists(noticeFile), "successful resume clears the persisted notice");
+                Check(new HappierAccountCreation(home).Complete(ok) == "" && creation.Complete(ok) == "", "notification is consumed once across sessions and tray");
                 creation.Remember("Другой");
                 Check(creation.Complete(ok).Contains("\"Другой\""), "next new account gets its own notice");
             } finally { Directory.Delete(home, true); }

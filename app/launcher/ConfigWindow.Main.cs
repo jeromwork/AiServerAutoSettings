@@ -147,7 +147,7 @@ namespace RemoteAgents.Launcher
             // Fixed text only: vault/clipboard/process exceptions must never reach journals or the UI.
             MessageBox.Show(this, message, Product.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
-        void ShowHappierAccountCreated(string message)
+        internal void ShowHappierAccountCreated(string message)
         {
             if (mainWindow) {
                 HideHappierKey(); RefreshHappierAccount();

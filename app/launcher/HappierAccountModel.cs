@@ -30,15 +30,26 @@ namespace RemoteAgents.Launcher
 
     internal sealed class HappierAccountCreation
     {
-        string label;
-        internal void Remember(string createdLabel) { label = createdLabel; }
-        // A pending server install is not a created account yet; notify once after Account/ResumeAccount succeeds.
+        readonly string file;
+        static readonly object gate = new object();
+        internal HappierAccountCreation(string home) { file = Path.Combine(home, "state", "happier-created.json"); }
+        internal void Remember(string createdLabel)
+        {
+            lock (gate) Json.Write(file, new Dictionary<string, object> { { "schema", 1 }, { "label", createdLabel } });
+        }
+        // Public local state survives Pending and process restart. Only success consumes the notice.
         internal string Complete(SectionOutcome outcome)
         {
-            if (!outcome.Ok || label == null) return "";
-            string message = "Создан новый аккаунт Happier \"" + label + "\". Чтобы открыть его в браузере или на телефоне, нажмите «Копировать ключ» и войдите в Happier по секретному ключу";
-            label = null;
-            return message;
+            if (!outcome.Ok) return "";
+            lock (gate) {
+                if (!File.Exists(file)) return "";
+                var saved = Json.Read(file);
+                if (Json.Int(saved, "schema", 0) != 1) return "";
+                string label = Json.Str(saved, "label");
+                string message = "Создан новый аккаунт Happier \"" + label + "\". Чтобы открыть его в браузере или на телефоне, нажмите «Копировать ключ» и войдите в Happier по секретному ключу";
+                File.Delete(file);
+                return message;
+            }
         }
     }
 }

@@ -300,6 +300,22 @@ namespace RemoteAgents.Launcher
             try { var m = Json.Map(Json.Get(Json.Read(AppliedFile(home)), "sections")); return m.ToDictionary(p => p.Key, p => Convert.ToString(p.Value, CultureInfo.InvariantCulture)); }
             catch (Exception) { return new Dictionary<string, string>(); }
         }
+        internal static DiskChoice AppliedDiskChoice(string home, Dictionary<string, object> profile)
+        {
+            string hash;
+            return Applied(home).TryGetValue(ConfigSections.Disk, out hash) && hash == ConfigSections.Hash(profile, ConfigSections.Disk)
+                ? DiskChoice.FromProfile(profile) : null;
+        }
+        // Read the disk's existing peer-scoped exclusions; All must not claim detached external projects.
+        internal static string[] DiskExclusions(string diskHome = null)
+        {
+            if (diskHome == null) diskHome = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteDisk");
+            try {
+                var saved = Json.Read(Path.Combine(diskHome, "external-exclusions.json"));
+                return Json.Int(saved, "schema", 0) == 1 && Json.Str(saved, "peer").Length > 0 && Json.Str(saved, "peer") == Files.ReadLine(Path.Combine(diskHome, "server.txt"))
+                    ? Json.Strings(Json.Get(saved, "names")) : new string[0];
+            } catch (Exception) { return new string[0]; }
+        }
         static readonly object appliedGate = new object();
         internal static void MarkApplied(string home, string section, string hash)
         {
@@ -684,14 +700,14 @@ namespace RemoteAgents.Launcher
         internal Action<string, SectionState, string> Report = delegate { };
         internal Action<string> Log = delegate { };
         internal Action<string> AccountCreated = delegate { };
-        readonly HappierAccountCreation accountCreation = new HappierAccountCreation();
+        readonly HappierAccountCreation accountCreation;
         internal Func<string, string, string> AskSecret = (name, why) => null;
         Dictionary<string, object> services = new Dictionary<string, object>();
         internal readonly ConcurrentDictionary<string, SectionOutcome> Outcomes = new ConcurrentDictionary<string, SectionOutcome>();
         static readonly object operationsGate = new object();
         internal ConfigSession(string home, Func<Task<string>> bundle, IDictionary<string, string> secrets = null, IDictionary<string, string> hints = null)
         {
-            this.home = home; bundleSource = bundle;
+            this.home = home; bundleSource = bundle; accountCreation = new HappierAccountCreation(home);
             this.secrets = new Dictionary<string, string>(secrets ?? new Dictionary<string, string>()); this.hints = new Dictionary<string, string>(hints ?? new Dictionary<string, string>());
         }
         internal void RebindBundle(string current) { bundle = current; }

@@ -70,7 +70,7 @@ namespace RemoteAgents.Launcher
         }
         static IEnumerable<TreeNode> All(TreeNodeCollection nodes) { foreach (TreeNode n in nodes) { yield return n; foreach (var child in All(n.Nodes)) yield return child; } }
         internal string SelectedPath { get { return Tree.SelectedNode == null ? "" : Tree.SelectedNode.Tag as string ?? ""; } }
-        internal DiskExternalChoice SelectedExternal { get { return Tree.SelectedNode == null ? null : Tree.SelectedNode.Tag as DiskExternalChoice; } }
+        internal DiskExternalChoice SelectedExternal { get { return Tree.SelectedNode == null ? null : Tree.SelectedNode.Tag as DiskExternalChoice ?? (Model == null ? null : Model.ExternalFor(SelectedPath)); } }
         internal string SelectedStatus { get { string value; return Tree.SelectedNode != null && statuses.TryGetValue(Tree.SelectedNode, out value) ? value : ""; } }
         internal void RefreshChecks()
         {

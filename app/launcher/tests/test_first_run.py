@@ -159,6 +159,18 @@ class FirstRunTests(unittest.TestCase):
         self.assertIn('outcome.Ok)', window.split('async Task ApplyFolders()', 1)[1].split('folders.MarkApplied()', 1)[0])
         self.assertIn('state == SectionState.Done', window.split('void Report(', 1)[1].split('folders.MarkApplied()', 1)[0])
 
+    def test_folder_review_wiring_and_honest_removal_hint(self):
+        view = source('DiskFoldersView.cs')
+        self.assertIn('Снятие папки останавливает синхронизацию; файлы на компьютере остаются, их можно удалить вручную.', view)
+        self.assertNotIn('не занимают место здесь', view)
+        tree = source('DiskFolderTree.cs')
+        self.assertIn('Model.ExternalFor(SelectedPath)', tree.split('internal DiskExternalChoice SelectedExternal', 1)[1].split('internal string SelectedStatus', 1)[0])
+        window = source('ConfigWindow.cs')
+        initialize = window.split('folders.Initialize(', 1)[1].split('foldersInitialized = true', 1)[0]
+        self.assertIn('ConfigProfile.AppliedDiskChoice(home, profile)', initialize)
+        self.assertIn('ConfigProfile.DiskExclusions(', initialize)
+        self.assertIn('Model.MarkApplied(ConfigProfile.DiskExclusions())', view)
+
     def test_disk_revert_uses_mutation_guard_and_counts_as_applying(self):
         window = source('ConfigWindow.cs')
         self.assertIn('ReadFolders(a) : Guard(a), Guard, () => running', window)

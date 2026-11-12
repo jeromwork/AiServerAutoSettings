@@ -181,7 +181,15 @@ namespace RemoteAgents.Launcher
                         try {
                             accountResuming = true;
                             var account = await Task.Run(() => ServerOperations.Invoke(home, bundle, "ResumeAccount", new { }, stop.Token));
-                            if (Json.Bool(account, "ok")) { pending = false; icon.ShowBalloonTip(5000, Product.Name, "Happier: " + Json.Text(account, "summary", "аккаунт подключён"), ToolTipIcon.Info); }
+                            if (Json.Bool(account, "ok")) {
+                                pending = false;
+                                string message = new HappierAccountCreation(home).Complete(SectionOutcome.From(account, "Аккаунт Happier подключён ✓"));
+                                if (message.Length > 0) {
+                                    ShowMain();
+                                    if (mainWindow != null && !mainWindow.IsDisposed) mainWindow.ShowHappierAccountCreated(message);
+                                    else MessageBox.Show(message + "\r\nКнопки аккаунта находятся в главном окне на вкладке «Сервис».", Product.Name, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                                } else icon.ShowBalloonTip(5000, Product.Name, "Happier: " + Json.Text(account, "summary", "аккаунт подключён"), ToolTipIcon.Info);
+                            }
                         } catch (OperationCanceledException) { throw; } catch (Exception) { log.Write("operations.account.failed"); pending = false; icon.ShowBalloonTip(10000, Product.Name, "Happier: аккаунт не подключён. Откройте «Подробно» → Happier.", ToolTipIcon.Warning); }
                         finally { accountResuming = false; }
                     }

@@ -22,23 +22,26 @@ namespace RemoteAgents.Launcher
         readonly Dictionary<string, string> directions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         string[] roots = new string[0]; bool rootLoaded, rootIncomplete;
         DiskChoice applied; DiskTreeSelection appliedSelection;
-        DiskTreeSelection previouslyChecked;
-        bool previouslyAll;
+        string[] manualPaths;
+        Dictionary<string, string> manualDirections;
+        readonly HashSet<string> excludedProjects = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         readonly List<DiskExternalChoice> removedExternal = new List<DiskExternalChoice>();
         readonly Dictionary<string, string> externalDirections = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         readonly Dictionary<string, string> externalStates = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         internal IEnumerable<DiskExternalChoice> ExternalRows { get { return External.Concat(removedExternal); } }
-        internal DiskFoldersModel(DiskChoice choice)
+        internal DiskFoldersModel(DiskChoice choice, DiskChoice appliedChoice = null, IEnumerable<string> excluded = null)
         {
             Mode = choice.All ? DiskFoldersMode.All : choice.Chosen && choice.Folders.Count == 0 && choice.External.Count == 0 ? DiskFoldersMode.None : DiskFoldersMode.Selected;
             Selection = new DiskTreeSelection(choice.Folders.Select(f => f.Path));
-            previouslyChecked = new DiskTreeSelection(choice.Folders.Select(f => f.Path)); previouslyAll = choice.All;
+            if (excluded != null) excludedProjects.UnionWith(excluded);
+            SetApplied(appliedChoice);
             foreach (var f in choice.Folders) directions[DiskChoice.Project(f.Path)] = choice.DirectionOf(f.Path);
             foreach (var e in choice.External) External.Add(Copy(e));
         }
         static DiskExternalChoice Copy(DiskExternalChoice e) { return new DiskExternalChoice { Path = e.Path, Remote = e.Remote, Direction = e.Direction }; }
         internal static string DirectionText(string value) { return value == DiskChoice.Send ? "Только отправлять на сервер" : value == DiskChoice.Receive ? "Только забирать с сервера" : "В обе стороны"; }
-        internal string DirectionOf(string path) { if (Mode == DiskFoldersMode.All) return DiskChoice.Both; string d; return directions.TryGetValue(DiskChoice.Project(path), out d) ? d : DiskChoice.Both; }
+        internal DiskExternalChoice ExternalFor(string path) { return ExternalRows.FirstOrDefault(e => string.Equals(e.Remote, DiskChoice.Project(path), StringComparison.OrdinalIgnoreCase)); }
+        internal string DirectionOf(string path) { var entry = ExternalFor(path); if (entry != null) return entry.Direction; if (Mode == DiskFoldersMode.All) return DiskChoice.Both; string d; return directions.TryGetValue(DiskChoice.Project(path), out d) ? d : DiskChoice.Both; }
         // Presence means an entry was observed, not that its contents have finished transferring.
         // A truncated union cannot establish absence on the other side. Direction must never promise a forbidden transfer.
         internal static string FolderStatus(bool isChecked, string presence, bool isApplied, string direction, bool truncated, bool wasChecked, string state = "")
@@ -59,22 +62,44 @@ namespace RemoteAgents.Launcher
         internal static string DirectionHint(string direction) { return direction == DiskChoice.Receive ? "↓ только забирать" : direction == DiskChoice.Send ? "↑ только отправлять" : ""; }
         internal string Status(string path)
         {
+            var entry = ExternalFor(path); if (entry != null) return ExternalStatus(entry);
             DiskFolderInfo info; if (!Items.TryGetValue(path, out info)) return "Наличие не проверено";
-            bool current = Includes(path) || Partial(path), confirmed = applied != null && (applied.All || appliedSelection.Includes(path)) && applied.DirectionOf(path) == DirectionOf(path);
-            return FolderStatus(current, info.Presence, confirmed, DirectionOf(path), info.Truncated, previouslyAll || previouslyChecked.Includes(path) || previouslyChecked.Partial(path));
+            bool current = Includes(path) || Partial(path), confirmed = applied != null && (applied.All && !excludedProjects.Contains(DiskChoice.Project(path)) || appliedSelection.Includes(path)) && applied.DirectionOf(path) == DirectionOf(path);
+            return FolderStatus(current, info.Presence, confirmed, DirectionOf(path), info.Truncated, WasChecked(path));
         }
         internal bool CanRevert(string path)
         {
             DiskFolderInfo info; string top = DiskChoice.Project(path);
-            return (Includes(top) || Partial(top)) && DirectionOf(top) == DiskChoice.Receive && Items.TryGetValue(top, out info) && info.LocalChanges > 0;
+            return ExternalFor(top) == null && (Includes(top) || Partial(top)) && DirectionOf(top) == DiskChoice.Receive && Items.TryGetValue(top, out info) && info.LocalChanges > 0;
         }
-        internal void MarkApplied()
+        void SetApplied(DiskChoice choice)
         {
-            applied = ToChoice(); appliedSelection = new DiskTreeSelection(applied.Folders.Select(f => f.Path)); previouslyAll = applied.All; previouslyChecked = new DiskTreeSelection(applied.Folders.Select(f => f.Path));
+            // Keep an immutable baseline, independent from pending checkbox/direction edits.
+            applied = choice == null ? null : DiskChoice.FromProfile(choice.WriteTo(new Dictionary<string, object>(), ""));
+            appliedSelection = new DiskTreeSelection(applied == null ? new string[0] : applied.Folders.Select(f => f.Path));
+        }
+        bool WasChecked(string path)
+        {
+            return applied != null && (applied.All && !excludedProjects.Contains(DiskChoice.Project(path)) || appliedSelection.Includes(path) || appliedSelection.Partial(path));
+        }
+        internal void MarkApplied(IEnumerable<string> excluded = null)
+        {
+            var choice = ToChoice();
+            if (excluded != null) { excludedProjects.Clear(); excludedProjects.UnionWith(excluded); }
+            else {
+                foreach (var entry in removedExternal)
+                    if (applied != null && applied.External.Any(e => string.Equals(e.Remote, entry.Remote, StringComparison.OrdinalIgnoreCase)) || externalStates.ContainsKey(entry.Path)) excludedProjects.Add(entry.Remote);
+                foreach (var folder in choice.Folders) excludedProjects.Remove(DiskChoice.Project(folder.Path));
+            }
+            SetApplied(choice);
             removedExternal.Clear();
         }
-        internal bool Includes(string path) { return Mode == DiskFoldersMode.All || Mode == DiskFoldersMode.Selected && Selection.Includes(path); }
-        internal bool Partial(string path) { return Mode == DiskFoldersMode.Selected && Selection.Partial(path); }
+        internal bool Includes(string path)
+        {
+            var entry = ExternalFor(path); if (entry != null) return IncludesExternal(entry);
+            return Mode == DiskFoldersMode.All ? !excludedProjects.Contains(DiskChoice.Project(path)) : Mode == DiskFoldersMode.Selected && Selection.Includes(path);
+        }
+        internal bool Partial(string path) { return ExternalFor(path) == null && Mode == DiskFoldersMode.Selected && Selection.Partial(path); }
         internal void Level(string parent, Dictionary<string, object> union)
         {
             var rows = Json.Array(Json.Get(union, "rows")).Select(Json.Map).ToArray();
@@ -94,29 +119,37 @@ namespace RemoteAgents.Launcher
         void SelectAllLoaded()
         {
             if (!rootLoaded || rootIncomplete) throw new IOException("Для изменения общего выбора загрузите полный список папок или снимите «Все папки сервера, включая новые» и отметьте нужные.");
-            foreach (string path in roots) Selection.Set(path, true);
+            ClearSelection(); directions.Clear();
+            foreach (string path in roots) if (ExternalFor(path) == null && !excludedProjects.Contains(path)) Selection.Set(path, true);
         }
         internal void SetMode(DiskFoldersMode mode)
         {
             if (mode == Mode) return;
-            // Explicit selective mode on an incomplete inventory starts empty; never silently discards hidden folders.
+            if (mode == DiskFoldersMode.All) {
+                manualPaths = Selection.Paths;
+                manualDirections = new Dictionary<string, string>(directions, StringComparer.OrdinalIgnoreCase);
+            }
             if (Mode == DiskFoldersMode.All && mode == DiskFoldersMode.Selected) {
-                if (rootLoaded && !rootIncomplete) SelectAllLoaded();
-                else ClearSelection();
+                if (manualPaths != null) {
+                    ClearSelection(); foreach (string path in manualPaths) Selection.Set(path, true);
+                    directions.Clear(); foreach (var pair in manualDirections) directions[pair.Key] = pair.Value;
+                } else if (rootLoaded && !rootIncomplete) SelectAllLoaded();
+                else { ClearSelection(); directions.Clear(); }
             }
             Mode = mode;
-            if (mode == DiskFoldersMode.All) { directions.Clear(); previouslyAll = true; }
-            if (mode == DiskFoldersMode.None) { ClearSelection(); External.Clear(); }
+            if (mode == DiskFoldersMode.None) { ClearSelection(); External.Clear(); manualPaths = null; manualDirections = null; }
         }
         internal void Set(string path, bool value)
         {
-            if (Mode == DiskFoldersMode.All) { if (value) return; SelectAllLoaded(); }
-            Selection.Set(path, value); if (value) previouslyChecked.Set(path, true); Mode = DiskFoldersMode.Selected;
+            var entry = ExternalFor(path); if (entry != null) { SetExternal(entry, value); return; }
+            if (Mode == DiskFoldersMode.All) { if (value && Includes(path)) return; SelectAllLoaded(); }
+            Selection.Set(path, value); Mode = DiskFoldersMode.Selected;
         }
         internal void SetDirection(string path, string direction)
         {
             if (!DiskChoice.Directions.Contains(direction)) throw new IOException("Выберите направление передачи файлов");
             if (!Includes(path) && !Partial(path)) throw new IOException("Сначала отметьте папку");
+            var entry = ExternalFor(path); if (entry != null) { entry.Direction = direction; return; }
             if (Mode == DiskFoldersMode.All && direction != DirectionOf(path)) { SelectAllLoaded(); Mode = DiskFoldersMode.Selected; }
             directions[DiskChoice.Project(path)] = direction;
         }
@@ -142,7 +175,8 @@ namespace RemoteAgents.Launcher
         internal void ExternalState(DiskExternalChoice entry, string state, string observedDirection = null) { externalStates[entry.Path] = state; externalDirections[entry.Path] = observedDirection ?? entry.Direction; }
         internal string ExternalStatus(DiskExternalChoice entry)
         {
-            if (!IncludesExternal(entry)) return FolderStatus(false, "", false, entry.Direction, false, true);
+            if (!IncludesExternal(entry)) return FolderStatus(false, "", false, entry.Direction, false,
+                applied != null && applied.External.Any(e => string.Equals(e.Remote, entry.Remote, StringComparison.OrdinalIgnoreCase)));
             string state, observedDirection; externalStates.TryGetValue(entry.Path, out state);
             if (!externalDirections.TryGetValue(entry.Path, out observedDirection) || observedDirection != entry.Direction) state = "";
             bool confirmed = applied != null && applied.External.Any(e => e.Path == entry.Path && e.Remote == entry.Remote && e.Direction == entry.Direction);
@@ -155,7 +189,7 @@ namespace RemoteAgents.Launcher
         internal DiskChoice ToChoice()
         {
             var choice = new DiskChoice { Chosen = true, All = Mode == DiskFoldersMode.All };
-            if (Mode == DiskFoldersMode.Selected) foreach (string p in Selection.Paths) choice.Folders.Add(new DiskFolderChoice { Path = p, Direction = DirectionOf(p) });
+            if (Mode == DiskFoldersMode.Selected) foreach (string p in Selection.Paths.Where(p => ExternalFor(p) == null)) choice.Folders.Add(new DiskFolderChoice { Path = p, Direction = DirectionOf(p) });
             foreach (var e in External) choice.External.Add(Copy(e));
             return choice;
         }

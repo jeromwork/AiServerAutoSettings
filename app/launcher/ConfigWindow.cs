@@ -440,7 +440,8 @@ namespace RemoteAgents.Launcher
             if (!foldersInitialized) {
                 var profile = ConfigProfile.Load(home); var disk = Json.Map(Json.Get(profile, "disk"));
                 foldersBase = Json.Text(disk, "base", ConfigSession.DiskBase());
-                folders.Initialize(DiskChoice.FromProfile(profile), foldersBase, !settings && folderStepRequired);
+                folders.Initialize(DiskChoice.FromProfile(profile), foldersBase, !settings && folderStepRequired,
+                    ConfigProfile.AppliedDiskChoice(home, profile), ConfigProfile.DiskExclusions());
                 foldersInitialized = true;
             }
             try { var tree = await RunFolderAction("DiskTree", new { @base = foldersBase, path = "" }); if (IsDisposed) return; folders.ShowTree(tree); }

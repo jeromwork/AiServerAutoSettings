@@ -98,8 +98,103 @@ namespace RemoteAgents.Launcher
             m.SetMode(DiskFoldersMode.All); m.SetMode(DiskFoldersMode.Selected); Check(m.IncludesExternal(e), "all-server toggle does not remove external folders");
             m.SetExternal(e, false); m.MarkApplied(); Check(!m.ExternalRows.Any(), "confirmed external removal hides empty computer branch");
         }
+        static void ReviewRegressions()
+        {
+            foreach (bool truncated in new[] { false, true }) {
+                var m = Model("{\"folders\":[{\"path\":\"Фото/Архив\",\"direction\":\"receive\"},\"Невидимый/Путь\"]}");
+                m.Level("", Level(Row("Фото") + "," + Row("Работа"), truncated));
+                string before = Json.Encode(m.ToChoice().WriteTo(new Dictionary<string, object>(), "C:\\Disk"));
+                m.SetMode(DiskFoldersMode.All);
+                Check(m.ToChoice().All && m.DirectionOf("Фото") == DiskChoice.Both, "all applies both temporarily");
+                // A refresh in All must not overwrite the saved manual directions or unloaded paths.
+                m.Level("", Level(Row("Фото", "send") + "," + Row("Работа"), truncated));
+                m.SetMode(DiskFoldersMode.Selected);
+                Check(Json.Encode(m.ToChoice().WriteTo(new Dictionary<string, object>(), "C:\\Disk")) == before,
+                    "all toggle restores exact manual subtrees and directions, truncated=" + truncated);
+            }
+            var fresh = Model("{\"folders\":[]}");
+            fresh.Level("", Level(Row("Фото").Replace("both", "server")));
+            fresh.Set("Фото", true); fresh.Set("Фото", false);
+            Check(fresh.Status("Фото") == "☁ Только на сервере", "cancelled uncommitted check never stages a disconnection");
+            fresh.SetMode(DiskFoldersMode.All); fresh.SetMode(DiskFoldersMode.Selected);
+            Check(fresh.Status("Фото") == "☁ Только на сервере", "cancelled all never stages a disconnection");
+            var external = Model("{\"folders\":\"all\",\"external\":[{\"path\":\"D:\\\\Фото\",\"remote\":\"Фото\",\"direction\":\"send\"}]}");
+            external.Level("", Level(Row("Фото").Replace("both", "server") + "," + Row("Работа")));
+            var entry = external.External.Single();
+            Check(external.DirectionOf("Фото") == DiskChoice.Send, "server alias uses external direction even in All");
+            Check(external.ExternalFor("фото/Архив") == entry && external.Includes("фото/Архив"), "external aliases resolve project names case-insensitively for lazy children");
+            external.SetDirection("Фото", DiskChoice.Receive);
+            Check(entry.Direction == DiskChoice.Receive && Roundtrip(external).External.Single().Direction == DiskChoice.Receive && external.Mode == DiskFoldersMode.All,
+                "server alias changes the actual external choice without expanding All");
+            external.MarkApplied(); external.ExternalState(entry, "syncing");
+            Check(external.Status("Фото") == external.ExternalStatus(entry), "server and external aliases share observed status");
+            external.Set("Фото", false);
+            Check(!external.Includes("Фото") && !external.IncludesExternal(entry) && !external.Partial("Фото") && external.Mode == DiskFoldersMode.All,
+                "unchecking server alias disables external only and overrides All");
+            Check(external.Status("Фото") == external.ExternalStatus(entry) && external.Status("Фото").Contains("Перестанет"), "both rows show pending removal");
+            external.SetExternal(entry, true);
+            Check(external.Includes("Фото") && external.DirectionOf("Фото") == DiskChoice.Receive, "external alias rechecks server alias without losing direction");
+            external.SetExternal(entry, false); external.MarkApplied();
+            Check(!external.Includes("Фото") && !external.Status("Фото").Contains("Скачивается") && !external.Status("Фото").Contains("Перестанет"),
+                "applied external removal remains excluded from All without claiming an imminent stop");
+            // An inventory outage / missing applied hash must not hide the handler's confirmed exclusion.
+            var withoutInventory = Model("{\"folders\":\"all\",\"external\":[{\"path\":\"D:\\\\Фото\",\"remote\":\"Фото\",\"direction\":\"send\"}]}");
+            withoutInventory.Level("", Level(Row("Фото").Replace("both", "server")));
+            withoutInventory.SetExternal(withoutInventory.External.Single(), false);
+            withoutInventory.MarkApplied(new[] { "Фото" });
+            Check(!withoutInventory.Includes("Фото") && withoutInventory.Status("Фото") == "☁ Только на сервере", "actual exclusion wins without a previous inventory or hash");
+            var cancelledExternal = Model("{\"folders\":\"all\"}");
+            cancelledExternal.AddExternal("D:\\Фото", "Фото", DiskChoice.Send);
+            cancelledExternal.SetExternal(cancelledExternal.External.Single(), false);
+            cancelledExternal.MarkApplied(new string[0]);
+            Check(cancelledExternal.Includes("Фото"), "cancelled external addition does not invent an exclusion");
+            external.SetMode(DiskFoldersMode.Selected);
+            Check(!Roundtrip(external).Paths.Contains("Фото"), "leaving All cannot implicitly reconnect the excluded external project");
+        }
+        static void RestartRegressions()
+        {
+            string home = Path.Combine(Path.GetTempPath(), "folders-restart-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(home);
+            try {
+                var profile = Profile("{\"folders\":[{\"path\":\"Фото\",\"direction\":\"receive\"},{\"path\":\"Работа\",\"direction\":\"send\"}]}");
+                ConfigProfile.Update(home, p => p["disk"] = profile["disk"]);
+                Action<DiskFoldersModel, string, string> verify = (model, photo, work) => {
+                    model.Level("", Level(Row("Фото", "receive").Replace("\"presence\":\"both\"", "\"presence\":\"server\"") + "," +
+                        Row("Работа", "send").Replace("\"presence\":\"both\"", "\"presence\":\"local\"")));
+                    Check(model.Status("Фото") == photo && model.Status("Работа") == work, "restart status: " + photo + "/" + work);
+                };
+                Func<DiskFoldersModel> reopen = () => {
+                    var p = ConfigProfile.Load(home);
+                    return new DiskFoldersModel(DiskChoice.FromProfile(p), ConfigProfile.AppliedDiskChoice(home, p));
+                };
+                verify(reopen(), "↓ Будет скачана", "↑ Будет отправлена");
+                ConfigProfile.MarkApplied(home, ConfigSections.Disk, ConfigSections.Hash(profile, ConfigSections.Disk));
+                verify(reopen(), "⟳ Скачивается", "⟳ Отправляется");
+                var confirmed = reopen(); verify(confirmed, "⟳ Скачивается", "⟳ Отправляется"); confirmed.Set("Фото", false);
+                Check(confirmed.Status("Фото").Contains("Перестанет"), "confirmed selection stages removal after restart");
+                ConfigProfile.Update(home, p => p["disk"] = Profile("{\"folders\":[\"Фото\",\"Работа\"]}")["disk"]);
+                verify(reopen(), "↓ Будет скачана", "↑ Будет отправлена");
+                ConfigProfile.MarkApplied(home, ConfigSections.Disk, null);
+                var unconfirmed = reopen(); verify(unconfirmed, "↓ Будет скачана", "↑ Будет отправлена"); unconfirmed.Set("Фото", false);
+                Check(unconfirmed.Status("Фото") == "☁ Только на сервере", "unapplied saved selection does not invent a previous connection");
+                ConfigProfile.Update(home, p => p["disk"] = Profile("{\"folders\":\"all\"}")["disk"]);
+                ConfigProfile.MarkApplied(home, ConfigSections.Disk, ConfigSections.Hash(ConfigProfile.Load(home), ConfigSections.Disk));
+                var diskHome = Path.Combine(home, "disk"); Directory.CreateDirectory(diskHome);
+                Files.Atomic(Path.Combine(diskHome, "server.txt"), "peer-a\n");
+                Json.Write(Path.Combine(diskHome, "external-exclusions.json"), new { schema = 1, peer = "peer-a", names = new[] { "Фото" } });
+                var all = ConfigProfile.Load(home);
+                var excluded = new DiskFoldersModel(DiskChoice.FromProfile(all), ConfigProfile.AppliedDiskChoice(home, all), ConfigProfile.DiskExclusions(diskHome));
+                excluded.Level("", Level(Row("Фото").Replace("both", "server") + "," + Row("Работа")));
+                Check(!excluded.Includes("Фото") && excluded.Status("Фото") == "☁ Только на сервере" && excluded.Includes("Работа"), "restart respects removed external exclusion in All");
+                excluded.Set("Фото", true);
+                Check(!excluded.ToChoice().All && excluded.Includes("Фото") && excluded.Status("Фото") == "↓ Будет скачана", "explicit reconnect under Disk stays pending until apply");
+                Files.Atomic(Path.Combine(diskHome, "server.txt"), "peer-b\n");
+                Check(ConfigProfile.DiskExclusions(diskHome).Length == 0, "another server does not inherit external exclusions");
+            } finally { Directory.Delete(home, true); }
+        }
         internal static void Run()
         {
+            ReviewRegressions(); RestartRegressions();
             StatusChecks();
             var absent = new Dictionary<string, object>();
             var c = DiskChoice.FromProfile(absent); var m = new DiskFoldersModel(c);
@@ -132,7 +227,7 @@ namespace RemoteAgents.Launcher
             m.SetDirection("Фото", DiskChoice.Receive); c = Roundtrip(m);
             Check(!c.All && c.Paths.Length == 2 && c.DirectionOf("Фото") == DiskChoice.Receive && c.DirectionOf("Работа") == DiskChoice.Both, "direction from all serializes a complete explicit choice");
             m.SetMode(DiskFoldersMode.All); m.SetMode(DiskFoldersMode.Selected);
-            Check(Roundtrip(m).DirectionOf("Фото") == DiskChoice.Both, "all resets project-specific directions before returning to selective mode");
+            Check(Roundtrip(m).DirectionOf("Фото") == DiskChoice.Receive, "all toggle restores project-specific directions");
             m = Model("{\"folders\":\"all\"}"); m.Level("", Level(Row("Фото", "receive")));
             Check(m.DirectionOf("Фото") == DiskChoice.Both && Roundtrip(m).All, "all displays the direction that its profile will actually apply");
             m = Model("{\"folders\":\"all\"}"); m.Level("", Level(Row("Фото"), true));

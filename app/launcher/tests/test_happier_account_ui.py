@@ -44,6 +44,12 @@ class HappierAccountUiTests(unittest.TestCase):
         self.assertIn('if (message.Length > 0) AccountCreated(message);', account)
         resume = session.split('internal async Task FollowPending', 1)[1]
         self.assertIn('NotifyAccountCreated(o);', resume)
+        self.assertIn('accountCreation = new HappierAccountCreation(home)', session)
+        tray = (LAUNCHER / 'TrayContext.cs').read_text()
+        resume_tray = tray.split('"ResumeAccount"', 1)[1].split('ServerOperations.Save(home', 1)[0]
+        self.assertLess(resume_tray.index('if (Json.Bool(account, "ok"))'), resume_tray.index('new HappierAccountCreation(home).Complete('))
+        self.assertIn('mainWindow.ShowHappierAccountCreated(message)', resume_tray)
+        self.assertIn('MessageBox.Show(message +', resume_tray)
         for line in account.splitlines():
             if 'Log(' in line:
                 self.assertNotIn('+ key', line)
