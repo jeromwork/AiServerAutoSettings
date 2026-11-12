@@ -39,7 +39,70 @@ def put_atomic(path, data, mode=0o644):
         if os.path.exists(temp):
             os.unlink(temp)
 
-def make(version, outdir, launcher=None, product="RemoteAgents"):
+PINS = ROOT / 'build/bundle-binaries.json'
+MAX_BINARY = 256 * 1024 * 1024
+
+def binary_cache():
+    return Path(os.environ.get('REMOTEAGENTS_BINARY_CACHE') or Path.home() / '.cache/remoteagents-build/binaries')
+
+def pinned(pins=None):
+    data = json.loads(Path(pins or PINS).read_text(encoding='utf-8-sig'))
+    rows = data.get('binaries') or []
+    for row in rows:
+        if not re.fullmatch(r'https://[^\s]+', row['url']) or not re.fullmatch(r'[0-9a-f]{64}', row['sha256']) \
+                or not re.fullmatch(r'[0-9a-f]{64}', row['memberSha256']) or not re.fullmatch(r'[a-z][a-z0-9/._-]{0,120}', row['target']) or '..' in row['target']:
+            raise ValueError('Неверная запись build/bundle-binaries.json: ' + row.get('name', '?'))
+    return rows
+
+def archive_path(row, cache=None):
+    return Path(cache or binary_cache()) / Path(row['url'].rsplit('/', 1)[1]).name
+
+def fetch(pins=None, cache=None):
+    """Download each pinned archive once; anything with another SHA-256 is deleted and refused."""
+    import urllib.request
+    for row in pinned(pins):
+        path = archive_path(row, cache)
+        if path.exists() and digest(path) == row['sha256']:
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_name(path.name + '.part')
+        try:
+            with urllib.request.urlopen(row['url'], timeout=60) as response, open(temp, 'wb') as out:
+                total = 0
+                for chunk in iter(lambda: response.read(1024 * 1024), b''):
+                    total += len(chunk)
+                    if total > MAX_BINARY:
+                        raise ValueError('Слишком большой файл: ' + row['url'])
+                    out.write(chunk)
+        except OSError as e:
+            raise SystemExit('Не удалось скачать ' + row['name'] + ' (' + row['url'] + '): ' + str(e) +
+                             '. Положите проверенный архив в ' + str(path) + ' или повторите с доступом к сети.')
+        if digest(temp) != row['sha256']:
+            temp.unlink()
+            raise SystemExit('SHA-256 ' + row['name'] + ' не совпал с build/bundle-binaries.json — файл удалён, сборка остановлена.')
+        os.replace(temp, path)
+        print('verified', path)
+
+def binary_contents(pins=None, cache=None):
+    """Pinned third-party binaries for the EXE's initial bundle; both hashes are checked again here."""
+    result = {}
+    for row in pinned(pins):
+        path = archive_path(row, cache)
+        if not path.exists():
+            raise ValueError('Нет ' + row['name'] + ' в кэше сборки (' + str(path) + '): выполните «python3 build/bundle.py fetch»')
+        if digest(path) != row['sha256']:
+            raise ValueError('SHA-256 архива ' + row['name'] + ' не совпал с build/bundle-binaries.json')
+        with zipfile.ZipFile(path) as z:
+            info = z.getinfo(row['member'])
+            if info.file_size > MAX_BINARY:
+                raise ValueError('Слишком большой файл ' + row['member'])
+            data = z.read(info)
+        if hashlib.sha256(data).hexdigest() != row['memberSha256']:
+            raise ValueError('SHA-256 ' + row['member'] + ' не совпал с build/bundle-binaries.json')
+        result[row['target']] = data
+    return result
+
+def make(version, outdir, launcher=None, product="RemoteAgents", binaries=False):
     safe_version(version)
     outdir = Path(outdir).resolve()
     outdir.mkdir(parents=True, exist_ok=True)
@@ -73,6 +136,11 @@ def make(version, outdir, launcher=None, product="RemoteAgents"):
         # Both products ship shared setup; only runtime supervision differs.
         contents['components.json'] = (ROOT/'build/components-vpn.json').read_bytes()
         contents['product.txt'] = b'RemoteVPN\n'
+    if binaries:
+        for name, data in binary_contents().items():
+            if name in contents:
+                raise ValueError('Повтор файла: ' + name)
+            contents[name] = data
     contents['bundle-version.txt'] = (version + '\n').encode()
     if launcher:
         contents['RemoteAgents.exe'] = Path(launcher).read_bytes()
@@ -103,7 +171,10 @@ def attach_launcher(archive, launcher, output):
     os.close(fd)
     try:
         with zipfile.ZipFile(archive) as source, zipfile.ZipFile(temp, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as dest:
-            names = set(source.namelist()) | {'RemoteAgents.exe'}
+            # SSH/OTA updates never carry the embedded third-party binaries: the first run copied them
+            # out of the initial bundle (transport-bin), an update must stay small.
+            pinned_targets = {row['target'] for row in pinned()}
+            names = (set(source.namelist()) - pinned_targets) | {'RemoteAgents.exe'}
             for name in sorted(names):
                 if name == 'RemoteAgents.exe':
                     data = Path(launcher).read_bytes()
@@ -169,6 +240,8 @@ def main():
     sub = p.add_subparsers(dest='command', required=True)
     b = sub.add_parser('make')
     b.add_argument('version'); b.add_argument('outdir'); b.add_argument('--launcher'); b.add_argument('--product', choices=['RemoteAgents','RemoteVPN'], default='RemoteAgents')
+    b.add_argument('--binaries', action='store_true', help='embed pinned binaries of build/bundle-binaries.json (EXE only)')
+    sub.add_parser('fetch')
     a = sub.add_parser('attach')
     a.add_argument('archive'); a.add_argument('launcher'); a.add_argument('output')
     d = sub.add_parser('publish')
@@ -176,7 +249,9 @@ def main():
     d.add_argument('--min-launcher', default='1.0.0'); d.add_argument('--launcher')
     a = p.parse_args()
     if a.command == 'make':
-        make(a.version, a.outdir, a.launcher, a.product)
+        make(a.version, a.outdir, a.launcher, a.product, a.binaries)
+    elif a.command == 'fetch':
+        fetch()
     elif a.command == 'attach':
         attach_launcher(a.archive, a.launcher, a.output)
     else:

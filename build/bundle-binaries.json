@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "comment": "Third-party binaries embedded into the EXE's initial bundle by build/build-exe.sh only (never from the repository, never in SSH/OTA updates). Each is downloaded once into the build cache and accepted only with both pinned SHA-256 values. sing-box: VPN-first before the first SSH (docs/CONFIG-ENGINE.md, Bootstrap).",
+  "binaries": [
+    {
+      "name": "sing-box",
+      "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-windows-amd64.zip",
+      "sha256": "99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df",
+      "member": "sing-box-1.14.4-windows-amd64/sing-box.exe",
+      "memberSha256": "8f30682ee198855440d2a7fe070d5d3653793b2d01bb8c85eea88f93bbe7c8b9",
+      "target": "transport/sing-box.exe"
+    }
+  ]
+}

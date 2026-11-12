@@ -29,6 +29,7 @@ disk/server-disk.sh
 disk/stignore.txt
 disk/stignore-previous.sha256
 build/components.json => components.json
+build/bundle-binaries.json
 build/selftest.ps1 => selftest.ps1
 
 # Launcher integration and uninstall (no user data).
@@ -68,6 +69,9 @@ build/Wizard.Network.ps1
 disk/Disk.Binary.ps1
 disk/Disk.NavPane.ps1
 
-build/Wizard.Invite.ps1
-
+# Config engine: resource locks, shared SSH session, VPN-first and key-only sync.
+build/Wizard.Engine.ps1
+build/Wizard.Session.ps1
+build/Wizard.SessionHost.ps1
+build/Wizard.Bootstrap.ps1
 build/Wizard.Refresh.ps1

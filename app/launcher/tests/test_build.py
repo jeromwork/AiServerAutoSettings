@@ -46,6 +46,58 @@ class PackagingTests(unittest.TestCase):
                     path = args[args.index('-File')+1].replace('{bundle}\\', '').replace('\\', '/')
                     self.assertIn(path, names)
 
+    def test_pinned_binaries_only_with_both_hashes_and_not_in_updates(self):
+        # build-exe.sh embeds pinned third-party binaries (sing-box for VPN-first) — verified twice, never in OTA.
+        cache = self.root / 'cache'; cache.mkdir()
+        member = b'MZ fixture sing-box'
+        archive = cache / 'fixture.zip'
+        with zipfile.ZipFile(archive, 'w') as z:
+            z.writestr('fixture/sing-box.exe', member)
+        row = dict(name='sing-box', url='https://example.invalid/fixture.zip', sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
+                   member='fixture/sing-box.exe', memberSha256=hashlib.sha256(member).hexdigest(), target='transport/sing-box.exe')
+        pins = self.root / 'pins.json'
+        def write(**change):
+            pins.write_text(json.dumps(dict(schema=1, binaries=[dict(row, **change)])))
+        write()
+        old, bundle.PINS = bundle.PINS, pins
+        os.environ['REMOTEAGENTS_BINARY_CACHE'] = str(cache)
+        try:
+            out = bundle.make('20261109.123457-test', self.root / 'with-binaries', binaries=True)
+            with zipfile.ZipFile(out) as z:
+                self.assertEqual(z.read('transport/sing-box.exe'), member)
+                self.assertIn('build/bundle-binaries.json', z.namelist())
+            ota = self.root / 'ota.zip'; exe = self.root / 'RemoteAgents.exe'; exe.write_bytes(b'MZ-test')
+            bundle.attach_launcher(out, exe, ota)
+            with zipfile.ZipFile(ota) as z:
+                self.assertNotIn('transport/sing-box.exe', z.namelist())
+                self.assertNotIn('transport/sing-box.exe', z.read('bundle-files.txt').decode())
+            write(memberSha256='0' * 64)
+            with self.assertRaises(ValueError):
+                bundle.make('20261109.123458-test', self.root / 'bad-member', binaries=True)
+            write(sha256='0' * 64)
+            with self.assertRaises(ValueError):
+                bundle.make('20261109.123459-test', self.root / 'bad-archive', binaries=True)
+            archive.unlink(); write()
+            with self.assertRaises(ValueError):
+                bundle.make('20261109.123500-test', self.root / 'missing', binaries=True)
+        finally:
+            bundle.PINS = old
+            del os.environ['REMOTEAGENTS_BINARY_CACHE']
+        real = json.loads((ROOT / 'build/bundle-binaries.json').read_text())
+        self.assertEqual(real['binaries'][0]['sha256'], '99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df')
+        self.assertIn(real['binaries'][0]['sha256'], (ROOT / 'build/Wizard.Server.ps1').read_text(encoding='utf-8-sig'))
+
+    def test_bundle_has_every_wizard_module(self):
+        # Every dot-sourced wizard library and the ConfigSync runtime copy must ship in the EXE bundle.
+        import re
+        engine = (ROOT / 'build/Wizard.Engine.ps1').read_text(encoding='utf-8-sig')
+        runtime = re.findall(r"'([a-z]+/[A-Za-z.-]+\.(?:ps1|py|txt|sha256))'", engine.split('function Get-WizardRuntimeFiles', 1)[1].split('}', 1)[0])
+        with zipfile.ZipFile(self.zip) as z:
+            names = set(z.namelist())
+        self.assertGreater(len(runtime), 10)
+        for name in runtime + [p.relative_to(ROOT).as_posix() for p in (ROOT / 'build').glob('Wizard*.ps1')]:
+            self.assertIn(name, names)
+
     def test_lf_and_ps51_encoding(self):
         with zipfile.ZipFile(self.zip) as z:
             for name in z.namelist():

@@ -7,9 +7,12 @@ out=${REMOTEAGENTS_BUILD_OUT:-$here/out}
 dotnet=${DOTNET:-$HOME/.dotnet/dotnet}
 mkdir -p "$out" "$repo/release"
 out=$(cd "$out" && pwd)
+# Pinned third-party binaries (build/bundle-binaries.json; sing-box for VPN-first before the first SSH):
+# downloaded once into the build cache, accepted only with the pinned SHA-256, embedded in the EXE only.
+python3 "$here/bundle.py" fetch
 for product in RemoteAgents RemoteVPN; do
   mkdir -p "$out/$product"
-  "$here/make-bundle.sh" "$version" "$out/$product" --product "$product"
+  "$here/make-bundle.sh" "$version" "$out/$product" --product "$product" --binaries
   if [[ "$product" == RemoteAgents ]]; then cp "$out/$product/$version.zip" "$out/initial-bundle.zip"; fi
   "$dotnet" publish "$repo/app/launcher/RemoteAgents.Launcher.csproj" -c Release -p:ProductName="$product" -p:BundlePath="$out/$product/$version.zip" -o "$out/$product/publish"
   cp "$out/$product/publish/$product.exe" "$out/$product.exe"

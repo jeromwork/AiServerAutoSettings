@@ -286,15 +286,24 @@ function Initialize-WizardTransport([string]$Root,[string]$Bundle,$Transport) {
     Ensure-WizardTransportBinary $Root $Bundle $Transport
 }
 function Ensure-WizardTransportBinary([string]$Root,[string]$Bundle,$Transport) {
-    if(-not $Transport.singBoxPath -or -not (Test-Path $Transport.singBoxPath)){
-        foreach($candidate in @((Join-Path $Root 'transport-bin/sing-box.exe'),(Join-Path $Bundle 'transport/sing-box.exe'),(Join-Path $Bundle 'transport-bin/sing-box.exe'))){
-            if(Test-Path -LiteralPath $candidate -PathType Leaf){$Transport|Add-Member -Force singBoxPath $candidate;return}
-        }
+    if($Transport.singBoxPath -and (Test-Path -LiteralPath ([string]$Transport.singBoxPath) -PathType Leaf)){return}
+    $stable=Join-Path $Root 'transport-bin/sing-box.exe'
+    # The EXE's initial bundle carries the pinned sing-box (build/bundle-binaries.json): VPN-first must work before
+    # any SSH and without GitHub. It is copied out of the bundle once, because bundle folders are pruned by updates.
+    $embedded=Join-Path $Bundle 'transport/sing-box.exe';$pins=Join-Path $Bundle 'build/bundle-binaries.json'
+    if(-not (Test-Path -LiteralPath $stable -PathType Leaf) -and (Test-Path -LiteralPath $embedded -PathType Leaf) -and (Test-Path -LiteralPath $pins -PathType Leaf)){
+        $expected=[string]@((Read-TransportJson $pins).binaries|Where-Object {$_.target -eq 'transport/sing-box.exe'})[0].memberSha256
+        if($expected -and (Get-FileHash -LiteralPath $embedded -Algorithm SHA256).Hash -ieq $expected){
+            [void][IO.Directory]::CreateDirectory((Split-Path $stable -Parent))
+            $temp=$stable+'.'+[guid]::NewGuid().ToString('N')+'.tmp';Copy-Item -LiteralPath $embedded -Destination $temp
+            Move-Item -LiteralPath $temp -Destination $stable -Force
+        }else{Write-SetupLog $Root 'transport.binary.embedded.mismatch'}
     }
-    if(-not $Transport.singBoxPath -or -not (Test-Path $Transport.singBoxPath)){
-        Write-WizardProgress 'Подготавливаю программу связи (загрузка с проверкой SHA-256)…'
+    if(Test-Path -LiteralPath $stable -PathType Leaf){$Transport|Add-Member -Force singBoxPath $stable;return}
+    Write-WizardProgress 'Подготавливаю программу связи (загрузка с проверкой SHA-256)…'
+    try{
         . (Join-Path $Bundle 'disk/Disk.Binary.ps1')
         Install-DiskBinary 'https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-windows-amd64.zip' '99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df' 'transport-bin' 'sing-box.exe' $Root
-        $Transport|Add-Member -Force singBoxPath (Join-Path $Root 'transport-bin/sing-box.exe')
-    }
+    }catch{throw 'Нет программы связи sing-box: в этой сборке EXE её нет, а загрузка с github.com не прошла. Скачайте полную сборку RemoteAgents.exe (с sing-box внутри) или откройте доступ к github.com и нажмите «Повторить»'}
+    $Transport|Add-Member -Force singBoxPath $stable
 }

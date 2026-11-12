@@ -181,8 +181,9 @@ function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request) {
         return @{ok=($state -eq 'on');vpn=$state;summary=$(if($state -eq 'on'){'Начальный VPN проверен до SSH'}else{'Начальный VPN не подтверждён; доступны обычные SSH-маршруты'})}
     }catch{
         Write-SetupLog $Root 'bootstrap.vpn.unavailable'
+        $reason=Protect-TransportText ([string]$_.Exception.Message)
         Set-VpnEnabled $Root $false
-        return @{ok=$false;vpn='unavailable';summary='Начальный VPN не поднят; проверьте локальную программу и данные конфига, затем повторите'}
+        return @{ok=$false;vpn='unavailable';summary=('Начальный VPN не поднят: '+$reason+'. Доступны обычные SSH-маршруты; исправьте и повторите')}
     }
 }
 function Get-WizardBootstrapVpnConflict([string]$Root,[string]$Bundle) {
