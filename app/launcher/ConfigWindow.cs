@@ -278,7 +278,7 @@ namespace RemoteAgents.Launcher
                 row.Set(state, text);
                 if (section == ConfigSections.Disk) {
                     diskApplying = state == SectionState.Running || state == SectionState.Pending;
-                    if (state == SectionState.Done) { folderStepRequired = false; folders.AllowSkip(false); }
+                    if (state == SectionState.Done) { folderStepRequired = false; folders.AllowSkip(false); if (foldersInitialized) folders.MarkApplied(); }
                     SetBusy(running);
                 }
             });
@@ -445,7 +445,7 @@ namespace RemoteAgents.Launcher
             try { var tree = await RunFolderAction("DiskTree", new { @base = foldersBase, path = "" }); if (IsDisposed) return; folders.ShowTree(tree); }
             catch (OperationCanceledException) { throw; }
             catch (Exception e) { Log("Папки не загружены: " + e.Message + ". Нажмите «Обновить список», чтобы попробовать снова."); }
-            if (folders.NeedsExternalInventory) {
+            if (folders.NeedsExternalInventory || folders.Model.External.Count > 0) {
                 try { var inventory = await RunFolderAction("DiskExternal", new { action = "list" }); if (IsDisposed) return; folders.ShowExternalInventory(inventory); }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception e) { Log("Список папок с компьютера не получен: " + e.Message); }
@@ -474,7 +474,7 @@ namespace RemoteAgents.Launcher
                 if (session.Outcomes.TryGetValue(ConfigSections.Disk, out outcome) && outcome.Ok) {
                     folderStepRequired = false; folderSkipped = false;
                     // The first-run step becomes a review of the applied choice; there is no longer anything to skip.
-                    folders.AllowSkip(false);
+                    folders.AllowSkip(false); folders.MarkApplied();
                 } else Log("Выбор сохранён, но ещё не применён. Проверьте журнал и нажмите «Применить» ещё раз.");
             });
         }
