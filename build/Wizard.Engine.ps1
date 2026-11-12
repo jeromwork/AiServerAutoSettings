@@ -37,22 +37,6 @@ function Invoke-WizardAction([string]$Root,[string]$Action,$Request,[scriptblock
 }
 
 function Start-WizardWorkingTransport([string]$Root,[string]$Bundle) {
-    # CopyToAsync needs one synchronized sink for both pipes and disposal after BOTH drains.
-    # A .NET helper avoids PowerShell callbacks without a runspace on the IO threads (PS 5.1).
-    if(-not ('RemoteAgents.WizardDaemonOutput' -as [type])){Add-Type -TypeDefinition @'
-using System.IO;
-using System.Threading.Tasks;
-namespace RemoteAgents {
- public static class WizardDaemonOutput {
-  public static async Task Drain(Stream stdout, Stream stderr, Stream file) {
-   using(var sink = Stream.Synchronized(file)) {
-    await Task.WhenAll(stdout.CopyToAsync(sink), stderr.CopyToAsync(sink)).ConfigureAwait(false);
-   }
-  }
- }
-}
-'@
-    }
     # The daemon's own per-Home mutex arbitrates with the tray supervisor.
     $stop=Join-Path $Root 'state/transport.stop';if(Test-Path $stop){Remove-Item -LiteralPath $stop -Force}
     $si=New-Object Diagnostics.ProcessStartInfo;$si.FileName=Get-TransportPowerShell
@@ -62,11 +46,14 @@ namespace RemoteAgents {
     $output=Join-Path $Root 'logs/transport-daemon.out';[void][IO.Directory]::CreateDirectory((Split-Path $output -Parent))
     # Restrict the raw diagnostic file before the child can write; only sanitized excerpts reach the UI.
     if(-not [IO.File]::Exists($output)){[IO.File]::WriteAllText($output,'')};Protect-TransportPath $output
-    $sink=New-Object IO.FileStream($output,[IO.FileMode]::Create,[IO.FileAccess]::Write,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    # Both pipes copy into one synchronized, unbuffered sink (bufferSize 1: every write reaches the file at once), so
+    # nothing needs disposing after the drains and no PowerShell callback runs on IO threads. No Add-Type here: on
+    # PS 5.1 it starts csc.exe (1-3 s) on the critical path of «Запустить»; the handle closes with this short process.
+    $sink=[IO.Stream]::Synchronized((New-Object IO.FileStream($output,[IO.FileMode]::Create,[IO.FileAccess]::Write,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete),1)))
     $started=[DateTime]::UtcNow
     try{
         [void]$child.Start()
-        $drain=[RemoteAgents.WizardDaemonOutput]::Drain($child.StandardOutput.BaseStream,$child.StandardError.BaseStream,$sink)
+        $drain=[Threading.Tasks.Task]::WhenAll([Threading.Tasks.Task[]]@($child.StandardOutput.BaseStream.CopyToAsync($sink),$child.StandardError.BaseStream.CopyToAsync($sink)))
         [pscustomobject]@{Process=$child;StartedAt=$started;OutputDrain=$drain}
     }catch{$sink.Dispose();$child.Dispose();throw}
 }

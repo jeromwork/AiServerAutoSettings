@@ -7,14 +7,15 @@ param([Alias('Home')][string]$TransportHome=(Join-Path $env:LOCALAPPDATA 'Remote
 $root=(Get-TransportHome $TransportHome);$engine=$null;$tunnelChildren=@{};$probes=@{};$rows=@();$active=$null;$confirmed=$false;$errorText='Запуск';$network=$null;$memory=$null;$secret=$null
 $parent=$null;$mutex=$null;$locked=$false;$settings=$null;$paths=$null;$rankPending=$false;$rankTags=@();$rankQueue=$null;$exitCode=0
 $pin=[pscustomobject]@{mode='auto';tag=$null};$nextControl=[DateTime]::MinValue;$revision='';$reloadJob=$null;$reloadError=$null;$failedRevision=$null;$pendingRevision=$null;$nextReload=[DateTime]::MinValue
-$diagnosticContext=$null
+$diagnosticContext=$null;$liveDeferred=@();$tunnelLiveAt=[DateTime]::MinValue;$daemonStarted=[DateTime]::Now
+try{$daemonStarted=(Get-Process -Id $PID).StartTime}catch{}
 $lastStatus=[DateTime]::MinValue;$nextActive=[DateTime]::MinValue;$nextRank=[DateTime]::MinValue;$nextNetwork=[DateTime]::MinValue;$retryAt=[DateTime]::MinValue;$nextLive=[DateTime]::MinValue
 function Test-TransportStop {
     try{if([IO.File]::Exists((Join-Path $root 'stop')) -or [IO.File]::Exists((Join-Path $root 'state/transport.stop'))){return $true}}catch{}
     if($parent){try{return $parent.HasExited}catch{return $true}};return $false
 }
 function Stop-TransportProbes {
-    foreach($probe in @($probes.Values)){Stop-TransportProbe $probe};$probes.Clear()
+    foreach($probe in @($probes.Values)){Stop-TransportProbe $probe};$probes.Clear();$script:liveDeferred=@()
 }
 function Publish-TransportStatus {
     $speed=$null;$row=$rows|Where-Object {$_.tag -eq $active}|Select-Object -First 1
@@ -66,7 +67,11 @@ function Start-DaemonProbe($Candidate,[long]$Bytes,[string]$Purpose) {
 function Start-TransportLiveness {
     # Пока нет подтверждённого пути, короткая проба живости (activeProbeBytes) идёт по всем кандидатам сразу:
     # мёртвые пути стоят один таймаут на всех, первый ответивший становится активным. Замер скорости (rank) — после.
-    foreach($c in $paths.Candidates){if(-not $probes.ContainsKey($c.tag)){Start-DaemonProbe $c ([long]$settings.Options.activeProbeBytes) 'live'}}
+    # OpenSSH -D candidates need their own login after the engine start: they keep the former 1 s pause.
+    $tunnels=@($paths.Tunnels|ForEach-Object {$_.tag})
+    foreach($c in $paths.Candidates){if(-not $probes.ContainsKey($c.tag)){
+        if($c.tag -in $tunnels -and [DateTime]::UtcNow -lt $tunnelLiveAt){$script:liveDeferred+=,$c}else{Start-DaemonProbe $c ([long]$settings.Options.activeProbeBytes) 'live'}
+    }}
     $interval=$settings.Options.activeIntervalSec;if($metered -ne $false){$interval=$settings.Options.meteredActiveIntervalSec}
     $script:nextLive=[DateTime]::UtcNow.AddSeconds([double]$interval)
 }
@@ -87,6 +92,16 @@ function Start-TransportRankNext {
     }
     $script:nextRank=[DateTime]::UtcNow.AddSeconds([double]$settings.Options.rankIntervalSec)
 }
+function Wait-TransportEngineReady([int]$Port,[int]$TimeoutMs) {
+    # sing-box 1.14 binds the Clash API after all inbounds: its listener means the probe ports accept connections.
+    # Listener table, not a connect: no stray connection, and no ~1 s refused-connect retries of Windows loopback.
+    $watch=[Diagnostics.Stopwatch]::StartNew()
+    while($watch.ElapsedMilliseconds -lt $TimeoutMs -and -not $engine.Process.HasExited){
+        try{if(@([Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()|Where-Object {$_.Port -eq $Port}).Count){return $true}}catch{return $false}
+        Start-Sleep -Milliseconds 50
+    }
+    return $false
+}
 function Start-TransportEngine([switch]$Validated) {
     $script:confirmed=$false
     $interface='';if($network -and $settings.Options.bindPhysical){$interface=[string]$network.interface}
@@ -103,7 +118,13 @@ function Start-TransportEngine([switch]$Validated) {
         if($settings.Options.bindPhysical -and $tunnel.bind){if(-not $network.ip){throw 'Нет физического IPv4 для OpenSSH'};$a+=@('-b',[string]$network.ip)}
         $script:tunnelChildren[$tunnel.tag]=Start-TransportProcess $settings.Profile.sshExecutable ($a+@([string]$tunnel.target))
     }
-    $script:nextRank=[DateTime]::UtcNow.AddSeconds(1);$script:nextActive=[DateTime]::UtcNow.AddSeconds(1);$script:nextLive=$script:nextActive;Write-TransportLog $root 'ready'
+    $script:tunnelLiveAt=[DateTime]::UtcNow.AddSeconds(1)
+    # Probes start as soon as sing-box listens (was a fixed 1 s pause, plus up to one 300 ms loop turn); the pause stays
+    # only when readiness is not visible within 3 s.
+    $ready=Wait-TransportEngineReady ([int]$settings.Options.apiPort) 3000
+    $at=if($ready){[DateTime]::MinValue}else{[DateTime]::UtcNow.AddSeconds(1)}
+    $script:nextRank=[DateTime]::UtcNow.AddSeconds(1);$script:nextActive=$at;$script:nextLive=$at;Write-TransportLog $root 'ready'
+    if($ready){Write-DaemonWizardProgress ('· модуль связи готов '+[int]([DateTime]::Now-$daemonStarted).TotalMilliseconds+' мс от запуска процесса')}
 }
 $metered=$null
 try{
@@ -120,6 +141,8 @@ try{
     $paths=Get-TransportCandidates $settings $root;$secret=Get-TransportSecret $root;$memory=Read-TransportMemory $root
     $diagnosticContext=@(Get-TransportDiagnosticContext $settings $root)
     $network=Get-TransportNetwork;$metered=Get-TransportMetered $settings.Options
+    # Just detected: the loop's 5 s network check need not repeat it before the engine starts (CIM on Windows).
+    $nextNetwork=[DateTime]::UtcNow.AddSeconds(5)
     $rows=@(Get-TransportRemembered $memory $network.id $paths.AllCandidates)
     $pin=Read-TransportPin $root;$active=Get-TransportSelection $pin $rows $paths.Candidates
     Publish-TransportStatus
@@ -262,6 +285,8 @@ try{
                         }
                     }
                     Save-TransportMemory $root $memory $network.id $rows
+                    # The result reaches status/transport.json in this turn, not up to 1 s later (Bootstrap waits on it).
+                    $lastStatus=[DateTime]::MinValue
                 }
             }
             if($rankPending){Start-TransportRankNext}
@@ -270,6 +295,7 @@ try{
                 if($best -and $best.tag -ne $active){[void](Switch-TransportActive $best.tag $true)}
                 Save-TransportMemory $root $memory $network.id $rows
             }
+            if($liveDeferred.Count -and $now -ge $tunnelLiveAt){foreach($c in $liveDeferred){Start-DaemonProbe $c ([long]$settings.Options.activeProbeBytes) 'live'};$liveDeferred=@()}
             # Живость — параллельно и раньше rank; rank (по очереди, делит канал) ждёт окончания проб живости.
             $live=@($probes.Values|Where-Object {$_.purpose -eq 'live'}).Count
             if(-not $confirmed -and -not $rankPending -and -not $live -and $pin.mode -eq 'auto' -and $now -ge $nextLive){Start-TransportLiveness;$live=@($probes.Values|Where-Object {$_.purpose -eq 'live'}).Count}
@@ -281,7 +307,9 @@ try{
             }
         }
         if($pin.mode -eq 'pinned' -and $pin.tag -notin @($paths.Candidates|ForEach-Object {$_.tag})){$confirmed=$false;$errorText='Закреплённый путь не работает: отключён или отсутствует'}
-        if(($now-$lastStatus).TotalSeconds -ge 1){Publish-TransportStatus};Start-Sleep -Milliseconds 300
+        if(($now-$lastStatus).TotalSeconds -ge 1){Publish-TransportStatus}
+        # While the first path is being proved, probe results are read every 100 ms instead of 300 ms.
+        Start-Sleep -Milliseconds $(if(-not $confirmed -and $probes.Count){100}else{300})
     }
     $errorText='Транспорт остановлен'
 }catch{

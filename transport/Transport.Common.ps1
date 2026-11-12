@@ -522,39 +522,7 @@ function Update-TransportProbeState($State,[long]$Bytes,[double]$Seconds,[bool]$
 }
 # Небольшой Stream нужен вместо PowerShell callback: CopyToAsync считает байты и время
 # на потоке .NET без задержек цикла демона, без файла и без накопления скачанного в памяти.
-function Initialize-TransportCounter {
-    if('RemoteAgents.TransportCounter' -as [type]){return}
-    Add-Type -TypeDefinition @'
-using System;
-using System.IO;
-using System.Diagnostics;
-namespace RemoteAgents {
- public sealed class TransportCounter : Stream {
-  readonly object gate = new object();
-  long count, first, last, firstBytes, gap;
-  public readonly long Started = Stopwatch.GetTimestamp();
-  public long[] Snapshot() { lock(gate) return new long[]{count,first,last,firstBytes,gap}; }
-  public override void Write(byte[] b,int o,int n) {
-   if(n==0) return;
-   long now=Stopwatch.GetTimestamp();
-   lock(gate) {
-    if(first==0) {first=now; firstBytes=n;} else gap=Math.Max(gap,now-last);
-    count+=n; last=now;
-   }
-  }
-  public override bool CanRead {get{return false;}}
-  public override bool CanSeek {get{return false;}}
-  public override bool CanWrite {get{return true;}}
-  public override long Length {get{lock(gate)return count;}}
-  public override long Position {get{return Length;}set{throw new NotSupportedException();}}
-  public override void Flush() {}
-  public override int Read(byte[] b,int o,int n){throw new NotSupportedException();}
-  public override long Seek(long o,SeekOrigin s){throw new NotSupportedException();}
-  public override void SetLength(long v){throw new NotSupportedException();}
- }
-}
-'@
-}
+function Initialize-TransportCounter {Initialize-TransportDiagnostics}
 function Start-TransportProbe($Profile,$Candidate,[long]$Bytes,$Options,[string]$Purpose) {
     Initialize-TransportCounter
     $a=@(Get-TransportSshArguments $Profile $Candidate.port)+@('127.0.0.1',('head -c '+$Bytes+' /dev/urandom'))
@@ -961,10 +929,12 @@ function Sync-TransportEntryCache($Settings,[string]$Root) {
 
 function Initialize-TransportDiagnostics {
     if('RemoteAgents.TransportErrorBuffer' -as [type]){return}
+    # Both helper streams (stderr buffer, probe counter) in ONE compilation: on PS 5.1 every Add-Type runs csc.exe.
     Add-Type -TypeDefinition @'
 using System;
 using System.IO;
 using System.Text;
+using System.Diagnostics;
 namespace RemoteAgents {
  public sealed class TransportErrorBuffer : Stream {
   readonly object gate = new object();
@@ -984,6 +954,29 @@ namespace RemoteAgents {
   public override long Length {get{return 0;}} public override long Position {get{return 0;}set{throw new NotSupportedException();}}
   public override void Flush() {} public override int Read(byte[] b,int o,int n){throw new NotSupportedException();}
   public override long Seek(long o,SeekOrigin s){throw new NotSupportedException();} public override void SetLength(long v){throw new NotSupportedException();}
+ }
+ public sealed class TransportCounter : Stream {
+  readonly object gate = new object();
+  long count, first, last, firstBytes, gap;
+  public readonly long Started = Stopwatch.GetTimestamp();
+  public long[] Snapshot() { lock(gate) return new long[]{count,first,last,firstBytes,gap}; }
+  public override void Write(byte[] b,int o,int n) {
+   if(n==0) return;
+   long now=Stopwatch.GetTimestamp();
+   lock(gate) {
+    if(first==0) {first=now; firstBytes=n;} else gap=Math.Max(gap,now-last);
+    count+=n; last=now;
+   }
+  }
+  public override bool CanRead {get{return false;}}
+  public override bool CanSeek {get{return false;}}
+  public override bool CanWrite {get{return true;}}
+  public override long Length {get{lock(gate)return count;}}
+  public override long Position {get{return Length;}set{throw new NotSupportedException();}}
+  public override void Flush() {}
+  public override int Read(byte[] b,int o,int n){throw new NotSupportedException();}
+  public override long Seek(long o,SeekOrigin s){throw new NotSupportedException();}
+  public override void SetLength(long v){throw new NotSupportedException();}
  }
 }
 '@

@@ -674,6 +674,8 @@ def main_channel(upgrade=False):
                               serverMs=result['serverMs'], sections={k: dict(ok=v['ok'], ms=v['endMs'] - v['startMs'], summary=v['summary']) for k, v in sections.items()},
                               relay=dict(stand.relay.stats), jammer=dict(stand.jammer.stats))
                 print(json.dumps(timing, ensure_ascii=False))
+                # Bootstrap's own trace («· » lines with stage times) — the owner's log of where the time went.
+                print(''.join(x for x in trace.splitlines(True) if x.startswith('[Bootstrap] ')), end='')
                 assert result['plan'][:3] == ['bootstrap', 'server', 'connection'], result['plan']
                 boot = result.get('bootstrap') or {}
                 assert boot.get('ok') is True and boot.get('vpn') == 'channel' and boot.get('channel') == 'vless-relay-relay', \
