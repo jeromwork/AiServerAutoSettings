@@ -9,11 +9,9 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="PortableJson.cs" />
-    <Compile Include="InvitationTests.cs" />
-    <Compile Include="OverlayTests.cs" />
-    <Compile Include="../InvitationOverlay.cs" Link="InvitationOverlay.cs" />
-    <Compile Include="../Invitation.cs" Link="Invitation.cs" />
     <Compile Include="DiskTreeTests.cs" />
+    <Compile Include="ConfigApplyTests.cs" />
+    <Compile Include="../ConfigApply.cs" Link="ConfigApply.cs" />
     <Compile Include="ProxyRelayTests.cs" />
     <Compile Include="../ProxyRelay.cs" Link="ProxyRelay.cs" />
     <Compile Include="../UpgradeInstaller.cs" Link="UpgradeInstaller.cs" />

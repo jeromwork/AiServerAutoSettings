@@ -35,9 +35,9 @@ class FirstRunTests(unittest.TestCase):
         self.assertIn('Shown+=async(a,b)=> {if(prepare!=null)await Prepare();', wizard)
         self.assertIn('steps.Enabled=pages.Enabled=back.Enabled=false;next.Enabled=!running', wizard)
         self.assertIn('if(bundle==null || polling', wizard)
-        self.assertIn('if(!Product.IsVpn && Invitation.Pending(home))', source('TrayContext.cs'))
-        self.assertIn('bool manual=InviteWindow.Display(home,null,prepare);', source('TrayContext.cs'))
-        self.assertIn('bundle=await prepare();', source('InviteWindow.cs'))
+        self.assertIn('bool manual=ConfigWindow.First(home,once);', source('TrayContext.cs'))
+        self.assertIn('if(manual && !closing)SetupWizard.Display(home,null,true,prepare:once);', source('TrayContext.cs'))
+        self.assertIn('if (prepare != null) preparing = prepare();', source('ConfigWindow.cs'))
         self.assertIn('worker=Task.Run(()=> {engine.Recover();Bootstrap();});await worker;', source('TrayContext.cs'))
 
     def test_preparation_failure_can_retry_or_close(self):
@@ -71,6 +71,20 @@ class FirstRunTests(unittest.TestCase):
         self.assertIn('form.Activate();return;', handle[gate:])
         self.assertLess(gate, handle.index('LoadComponents()'))
         self.assertLess(handle.index('args.Contains("--exit")'), gate)
+        self.assertIn('f is SetupWizard || f is ConfigWindow', handle[gate:])
+
+    def test_hand_start_shows_enable_window_not_autostart(self):
+        program = source('Program.cs')
+        self.assertIn('bool interactive = !args.Any(a => a.StartsWith("--", StringComparison.Ordinal));', program)
+        self.assertIn('if (!StartWindow.Confirm())', program)
+        self.assertIn('(started ? " --started" : "")', program)
+        self.assertIn('if (args.Contains("--started") && Configured()) Running();', source('TrayContext.cs'))
+
+    def test_invitations_removed(self):
+        for name in ['Program.cs', 'TrayContext.cs', 'SetupWizard.cs', 'EntryPoint.cs', 'UpgradeInstaller.cs', 'Data.cs']:
+            text = source(name)
+            for word in ['Invitation', 'InviteWindow', 'InviteHop', 'RefreshPackage', 'rainvite', 'invite-hop']:
+                self.assertNotIn(word, text, name + ': ' + word)
 
 
 if __name__ == '__main__':
