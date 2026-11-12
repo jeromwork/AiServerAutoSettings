@@ -255,6 +255,16 @@ class ConfigExportTests(unittest.TestCase):
             self.assertNotIn(value.splitlines()[0] if '\n' in value else value, text)
         print('PASS enc1: все секреты зашифрованы; CRLF-пароль; неверный пароль и подмена → отказ')
 
+    def test_generated_master_password(self):
+        import argparse, re as _re
+        args = argparse.Namespace(generate_master_password=True, master_password_stdin=False)
+        first, second = rc.master_password(args), rc.master_password(args)
+        self.assertRegex(first, r'^([a-z]+-){4}[1-9][0-9]$')
+        self.assertNotEqual(first, second)
+        with self.assertRaises(rc.Error):
+            rc.master_password(argparse.Namespace(generate_master_password=True, master_password_stdin=True))
+        print('PASS generated master password: readable, random, exclusive with stdin')
+
     def test_enc1_vector_matches_docs_and_openssl(self):
         salt = base64.b64decode(VECTOR['salt'])
         keys = rc.derive(VECTOR['password'], salt, VECTOR['iterations'])

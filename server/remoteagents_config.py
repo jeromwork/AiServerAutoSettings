@@ -656,7 +656,20 @@ def stamp_time(stamp):
 
 # ---------- команды ----------
 
+# Short readable words: the master password is said aloud or typed from another messenger.
+WORDS = ('kedr', 'luna', 'reka', 'tropa', 'veter', 'gora', 'sneg', 'more', 'lisa', 'zvezda', 'pole', 'dub', 'les', 'ozero',
+         'tuman', 'zarya', 'kamen', 'sokol', 'volna', 'iskra', 'svet', 'grom', 'list', 'mayak', 'parus', 'rosa', 'yablok', 'sova')
+
+
+def generated_password():
+    return '-'.join(secrets.choice(WORDS) for _ in range(4)) + '-' + str(secrets.randbelow(90) + 10)
+
+
 def master_password(args):
+    if getattr(args, 'generate_master_password', False):
+        require(not args.master_password_stdin, 'Выберите одно: --generate-master-password или --master-password-stdin')
+        _aes()
+        return generated_password()
     if not args.master_password_stdin:
         return None
     if sys.stdin.isatty():
@@ -773,6 +786,9 @@ def export(c, args, out=sys.stdout, err=sys.stderr):
     except Exception:
         err.write('Предупреждение: снимок автообновления не обновлён; выполните «remoteagents config sync».\n')
     err.write('Выдан конфиг ' + ident + ' «' + name + '». Ключ записан в authorized_keys с меткой ' + LABEL + ident + '.\n')
+    if getattr(args, 'generate_master_password', False):
+        # Shown once and never stored: pass it to the person separately from the config.
+        err.write('Мастер-пароль (показан один раз, нигде не сохранён): ' + master + '\n')
     if master:
         err.write('Секреты закрыты мастер-паролем. Пароль передавайте другим путём, не вместе с конфигом.\n')
     else:
@@ -923,6 +939,7 @@ def main(argv=None):
     p = sub.add_parser('export', help='выдать полный конфиг для ещё одного компьютера')
     p.add_argument('--name', required=True)
     p.add_argument('--master-password-stdin', action='store_true')
+    p.add_argument('--generate-master-password', action='store_true', help='придумать читаемый мастер-пароль и показать один раз')
     p.add_argument('--vpn', choices=('on', 'off'))
     p.add_argument('--happier', default='same')
     p.add_argument('--folders', default='')
