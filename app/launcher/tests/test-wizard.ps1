@@ -261,4 +261,41 @@ function Test-WizardBridge($Root){$true}
 $inspect=Invoke-WizardStep $freshRoot $repo 'Inspect' ([pscustomobject]@{})
 Assert (-not $inspect.steps[1].ready) 'connection needs a live proof'
 Assert (-not (Read-TransportJson (Join-Path $freshRoot 'config.json')).wizard.configured) 'unproven summary leaves setup unfinished'
+# Exercise the actual Disk dispatcher with offline children and saved receive/external state.
+& {
+    $savedLocal=$env:LOCALAPPDATA;$env:LOCALAPPDATA=Join-Path $TestHome 'disk-dispatch'
+    try{
+        $root=Join-Path $env:LOCALAPPDATA 'RemoteAgents';$disk=Join-Path $env:LOCALAPPDATA 'RemoteDisk'
+        [void][IO.Directory]::CreateDirectory((Join-Path $root 'state'))
+        [void][IO.Directory]::CreateDirectory((Join-Path $disk 'state'))
+        [void][IO.Directory]::CreateDirectory((Join-Path $disk 'tray'))
+        Write-TransportJson (Join-Path $root 'config.json') @{schema=1;components=@{}}
+        Write-DiskUtf8 (Join-Path $disk 'state/config.xml') '<fixture/>'
+        Write-DiskUtf8 (Join-Path $disk 'tray/syncthingtray.exe') 'fixture-only'
+        Write-DiskUtf8 (Join-Path $disk 'selection.json') ('{"schema":1,"paths":["Project"],"directions":{"Project":"receive"}}'+"`r`n")
+        Write-DiskUtf8 (Join-Path $disk 'external.json') ('{"schema":1,"items":[{"path":"D:\\Reports","remote":"Reports","direction":"send"}]}'+"`r`n")
+        function Send-WizardHelpers {}
+        function Get-WizardServer {@{disk=$true}}
+        function Resolve-WizardDiskServer {}
+        function Find-InstallProfile {'fixture-profile'}
+        function Read-DiskState {}
+        function Set-DiskBase {}
+        function Set-WizardDiskChannel {}
+        function Install-DiskNavPane {}
+        function Invoke-DiskApi($Route){if($Route -cne 'system/status'){throw ('unexpected '+$Route)};@{myID='LOCAL'}}
+        function Invoke-InstallChild($Bundle,$Script,$Arguments){
+            Assert ($Script -ceq 'disk/Select-Disk.ps1') 'Disk invokes only the selection child'
+            $script:diskPayload=Read-TransportJson $Arguments[5]
+        }
+        $request=[pscustomobject]@{base=(Join-Path $TestHome 'dispatch-Disk');paths=@('Project')}
+        [void](Invoke-WizardStep $root $repo 'Disk' $request)
+        Assert ($script:diskPayload.directions.Project -ceq 'receive') 'missing directions preserves receive'
+        Assert (@($script:diskPayload.external).Count -eq 1 -and $script:diskPayload.external[0].remote -ceq 'Reports' -and $script:diskPayload.external[0].direction -ceq 'send') 'missing external preserves saved attachment'
+        $request|Add-Member directions @{};$request|Add-Member external @()
+        [void](Invoke-WizardStep $root $repo 'Disk' $request)
+        Assert (@($script:diskPayload.directions.PSObject.Properties).Count -eq 0 -and @($script:diskPayload.external).Count -eq 0) 'explicit empty directions and external clears both'
+        [void](Invoke-WizardStep $root $repo 'Disk' @{base=$request.base;paths=@('Project');directions=@{Project='send'};external=@()})
+        Assert ($script:diskPayload.directions.Project -ceq 'send' -and @($script:diskPayload.external).Count -eq 0) 'dictionary request respects explicit fields'
+    }finally{$env:LOCALAPPDATA=$savedLocal}
+}
 Write-Output ('OK: '+$count+' wizard/model/catalog/union/rollback checks (fake SSH, no Windows)')

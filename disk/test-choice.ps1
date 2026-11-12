@@ -52,6 +52,7 @@ function Invoke-DiskApi($Route,$Method='GET',$Body=$null) {
 '@
 [IO.File]::AppendAllText((Join-Path $fixture 'Disk.Common.ps1'),$fake,(New-Object Text.UTF8Encoding($true)))
 . (Join-Path $fixture 'Disk.Common.ps1')
+. (Join-Path $fixture 'Disk.Union.ps1')
 $script:DiskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk';[void][IO.Directory]::CreateDirectory((Join-Path $script:DiskHome 'state'))
 [IO.File]::WriteAllText((Join-Path $script:DiskHome 'server.txt'),'PEER')
 [IO.File]::WriteAllText((Join-Path $script:DiskHome 'state/config.xml'),'<fixture/>')
@@ -79,7 +80,10 @@ try{
         Assert (@($global:Calls|Where-Object {$_.method -eq 'PATCH' -and $_.body.ContainsKey('type')}).Count -eq $before) ('idempotent type '+$pair[0])
     }
     Apply @('Project') @{Project='receive'}
-    $union=@{parent='';rows=@(@{path='Project';kind='directory'})};Add-DiskTreeState $union $base
+    $union=Get-DiskUnion (Invoke-DiskServer tree) $base
+    Assert ($union.rows[0] -is [pscustomobject] -and -not $union.rows[0].PSObject.Properties['direction']) 'real tree row initially has no direction'
+    Add-DiskTreeState $union $base
+    Add-DiskTreeState $union $base
     Assert ($union.rows[0].direction -ceq 'receive' -and $union.rows[0].localChanges -eq 3) 'tree direction and local changes'
     $reply=Invoke-DiskRevert 'Project'
     Assert ($reply.ok -and @($global:Calls|Where-Object {$_.method -eq 'POST' -and $_.route -ceq 'db/revert?folder=project'}).Count -eq 1) 'revert POST correct folder'
@@ -112,6 +116,12 @@ try{
     Apply @('Project') @{Project='receive'} @()
     Assert (-not $global:Folders.ContainsKey('reports') -and @(Read-DiskExternal).Count -eq 0) 'external removed from PC configuration'
     Assert ([IO.File]::ReadAllText((Join-Path $outside 'report.txt')) -ceq 'external local data') 'external removal keeps files'
+    $global:Pending=[pscustomobject]@{reports=[pscustomobject]@{offeredBy=[pscustomobject]@{PEER=[pscustomobject]@{label='Reports'}}}}
+    Apply @('.') @{Project='receive'} @()
+    Assert (-not $global:Folders.ContainsKey('reports') -and -not (Test-Path (Join-Path $base 'Reports'))) 'removed external stays excluded from all after its receipt is removed'
+    & (Join-Path $fixture 'Sync-RemoteDiskFolders.ps1')
+    Assert (-not $global:Folders.ContainsKey('reports')) 'removed external stays excluded on periodic sync'
+    $global:Pending=[pscustomobject]@{}
     $entry.direction='both';$global:ServerFolders[1].hasFiles=$true
     Reject {Apply @('Project') @{} @($entry)} 'Обе папки непустые'
     Assert (-not $global:Folders.ContainsKey('reports') -and [IO.File]::ReadAllText((Join-Path $outside 'report.txt')) -ceq 'external local data') 'occupied external error preserves files'
@@ -120,13 +130,33 @@ try{
     Reject {Sync-DiskExternal @(@{path=$link;remote='Linked';direction='both'}) $base} 'Ссылки в пути'
     Apply @() @{} @()
     Assert (-not $global:Folders.ContainsKey('project') -and (Test-Path (Join-Path $project 'local.txt'))) 'deselected project detached with files on disk'
+    $global:ServerFolders[0].id='different-id'
+    Reject {Apply @('Project') @{Project='receive'} @()} 'Обе папки непустые'
+    $global:ServerFolders[0].id='project'
+    [IO.File]::WriteAllText((Join-Path $script:DiskHome 'server.txt'),'OTHER-PEER')
+    Reject {Apply @('Project') @{Project='receive'} @()} 'Обе папки непустые'
+    [IO.File]::WriteAllText((Join-Path $script:DiskHome 'server.txt'),'PEER')
+    Apply @('Project') @{Project='receive'} @()
+    Assert ($global:Folders.project.path -eq $project -and $global:Folders.project.type -ceq 'receiveonly') 'same project reattaches without Merge'
+    Assert ([IO.File]::ReadAllText((Join-Path $project 'local.txt')) -ceq 'unsent local version') 'reattach preserves existing local data'
+    Apply @() @{} @()
     Assert ((Get-ProjectSelection 'Future' ([pscustomobject]@{paths=@('.')})) -ceq '.') 'all includes future projects'
     Assert (@(Get-ProjectSelection 'Future' ([pscustomobject]@{paths=@()})).Count -eq 0) 'none excludes future projects'
     $global:Pending=[pscustomobject]@{future=[pscustomobject]@{offeredBy=[pscustomobject]@{PEER=[pscustomobject]@{label='Future'}}}}
     $global:ServerFolders[0].hasFiles=$false
+    $rootFile=Join-Path $base 'readme.txt';[IO.File]::WriteAllText($rootFile,'root file stays local')
+    Reject {Apply @('readme.txt') @{} @()} 'Файлы в корне Disk'
     Apply @('.') @{} @()
     Assert ($global:Folders.future.type -ceq 'sendreceive' -and $global:Folders.future.path -eq (Join-Path $base 'Future')) 'all autoaccepts new project'
     Assert ((Read-DiskSelection).paths[0] -ceq '.') 'all policy persisted'
+    Assert ([IO.File]::ReadAllText($rootFile) -ceq 'root file stays local' -and -not @($global:Folders.Values|Where-Object {$_.path -eq $base -or $_.path -eq $rootFile}).Count) 'all ignores root files and never registers Disk root'
+    $global:Pending=[pscustomobject]@{reports=[pscustomobject]@{offeredBy=[pscustomobject]@{PEER=[pscustomobject]@{label='Reports'}}}}
+    Apply @('Project','Reports') @{Reports='send'} @()
+    Assert ($global:Folders.reports.path -eq (Join-Path $base 'Reports') -and $global:Folders.reports.type -ceq 'sendonly') 'explicit project choice can reconnect a removed external under Disk'
+    Apply @('.') @{Reports='send'} @()
+    Assert ($global:Folders.reports.type -ceq 'sendonly') 'explicit project choice clears exclusion for later all'
+    Assert ([IO.File]::ReadAllText((Join-Path $outside 'report.txt')) -ceq 'external local data' -and [IO.File]::ReadAllText($rootFile) -ceq 'root file stays local') 'explicit reconnect and repeated all keep external and root files'
+
     Assert (@($global:Calls|Where-Object {$_.route -like '*override*' -or $_.route -like '*reset*'}).Count -eq 0) 'no override/reset APIs'
     Write-Output ('PASS: DiskChoice PowerShell: '+$count+' checks (fake API, actual Select/Add/Sync, direction, revert, external)')
 }finally{$env:LOCALAPPDATA=$oldLocal}

@@ -504,7 +504,14 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             }
             [void][IO.Directory]::CreateDirectory($diskHome);[void][IO.Directory]::CreateDirectory($base)
             Write-DiskUtf8 (Join-Path $diskHome 'base.txt') $base
-            $choice=Join-Path $Root 'state/wizard-selection.json';Write-TransportJson $choice @{schema=1;paths=@($Request.paths);directions=$Request.directions;external=@($Request.external)}
+            # Older callers send only paths. Omitted fields preserve device choices; explicit empties clear them.
+            $savedSelection=Read-DiskSelection
+            $payload=@{schema=1;paths=@($Request.paths);directions=$savedSelection.directions;external=@(Read-DiskExternal)}
+            foreach($field in @('directions','external')){
+                $present=if($Request -is [Collections.IDictionary]){$Request.Contains($field)}else{$null -ne $Request.PSObject.Properties[$field]}
+                if($present){$payload[$field]=$Request.$field}
+            }
+            $choice=Join-Path $Root 'state/wizard-selection.json';Write-TransportJson $choice $payload
             $needsInstall= -not (Test-Path (Join-Path $diskHome 'state/config.xml')) -or -not (Test-Path (Join-Path $diskHome 'tray/syncthingtray.exe'))
             if(-not $needsInstall){try{Read-DiskState;$probe=Invoke-DiskApi 'system/status';$needsInstall= -not $probe.myID}catch{$needsInstall=$true}}
             if($needsInstall){

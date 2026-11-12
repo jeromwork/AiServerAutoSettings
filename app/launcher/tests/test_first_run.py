@@ -10,6 +10,14 @@ def source(name):
 
 
 class FirstRunTests(unittest.TestCase):
+    def test_detailed_disk_uses_profile_request_and_current_ui_paths(self):
+        wizard = source('SetupWizard.cs')
+        disk = wizard.split('case 2:', 1)[1].split('case 3:', 1)[0]
+        self.assertIn('ConfigRequests.Disk(ConfigProfile.Load(home)', disk)
+        for field in ('base', 'paths', 'reconnect'):
+            self.assertIn('diskRequest["' + field + '"]', disk)
+        self.assertIn('Run("Disk",diskRequest)', disk)
+
     def test_first_run_skips_synchronous_bootstrap(self):
         tray = source('TrayContext.cs')
         constructor = tray.split('public TrayContext(', 1)[1].split('void RunFirstSetup()', 1)[0]

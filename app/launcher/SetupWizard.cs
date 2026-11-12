@@ -551,7 +551,9 @@ namespace RemoteAgents.Launcher
                     case 2:
                         if(!folders.Loaded)await LoadTree();
                         var paths=folders.Selection.Paths;
-                        result=await Run("Disk",new {@base=diskBase.Text.Trim(),paths,reconnect=reconnectDisk});break;
+                        var diskRequest=ConfigRequests.Disk(ConfigProfile.Load(home),diskBase.Text.Trim(),paths);
+                        diskRequest["base"]=diskBase.Text.Trim();diskRequest["paths"]=paths;diskRequest["reconnect"]=reconnectDisk;
+                        result=await Run("Disk",diskRequest);break;
                     case 3: {
                         string apiOrigin=ConfigRequests.Origin(api.Text),webOrigin=ConfigRequests.Origin(web.Text);if(string.IsNullOrWhiteSpace(label.Text))throw new IOException("Укажите имя аккаунта, чтобы различать аккаунты");
                         bool create=newAccount.Checked;string key=create?HappierKey.Create():accountKey.Text.Trim();

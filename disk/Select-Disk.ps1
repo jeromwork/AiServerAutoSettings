@@ -30,7 +30,8 @@ try{
             $paths=@(Get-SelectionPaths $selection)
             foreach($project in $paths){if($project -cne '.'){[void](Get-DiskDirection $selection ($project.Split('/')[0]))}}
             $union=Get-DiskUnion (Invoke-DiskServer tree) (Get-DiskBase)
-            foreach($row in @($union.rows|Where-Object {$_.kind -eq 'file' -and $_.path -notmatch '/'})){if(Test-SelectionIncluded $row.path $paths){throw 'Файлы в корне Disk сначала поместите в папку проекта; исходный файл сохранён'}}
+            # All selects project directories only; loose root files remain local.
+            foreach($row in @($union.rows|Where-Object {$_.kind -eq 'file' -and $_.path -notmatch '/'})){if('.' -cnotin $paths -and (Test-SelectionIncluded $row.path $paths)){throw 'Файлы в корне Disk сначала поместите в папку проекта; исходный файл сохранён'}}
             Read-DiskState
             Resume-InterruptedSelection
             Sync-DiskExternal @($selection.external) (Get-DiskBase)
@@ -55,6 +56,8 @@ try{
                 if([IO.Path]::GetFullPath($folder.path) -ine $expected){continue} # External and foreign folders have their own ownership.
                 $chosen=@(Get-ProjectSelection $folder.label $selection)
                 if(-not $chosen.Count){
+                    # Persist the exact identity BEFORE unregistering, including after an interrupted apply.
+                    Save-DiskDetachedProject $folder $peer ([string](Invoke-DiskApi 'system/status').myID)
                     # Syncthing DELETE unregisters the folder on this device; it never deletes its contents.
                     [void](Invoke-DiskApi ('config/folders/'+[Uri]::EscapeDataString($folder.id)) DELETE)
                     continue
@@ -64,6 +67,10 @@ try{
                 Set-ProjectSelection $folder $chosen
             }
             Write-DiskUtf8 (Join-Path $script:DiskHome 'selection.json') (@{schema=1;paths=$paths;directions=$selection.directions;external=@($selection.external)}|ConvertTo-Json -Depth 20 -Compress)
+            # A successfully applied explicit project choice clears its automatic exclusion.
+            $explicit=@($paths|Where-Object {$_ -cne '.'}|ForEach-Object {$_.Split('/')[0]})
+            $excluded=@(Read-DiskExternalExclusions)
+            if(@($excluded|Where-Object {$_ -iin $explicit}).Count){Write-DiskExternalExclusions @($excluded|Where-Object {$_ -notin $explicit})}
             @{ok=$true}|ConvertTo-Json -Compress
         }
     }finally{$lock.Dispose()}

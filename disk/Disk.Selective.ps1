@@ -38,7 +38,11 @@ function Read-DiskSelection {
     return $null
 }
 function Get-ProjectSelection([string]$Name,$Selection) {
-    if($null -eq $Selection -or '.' -cin @($Selection.paths)){return @('.')}
+    if($null -eq $Selection -or '.' -cin @($Selection.paths)){
+        # All is automatic; a removed external project requires an explicit path choice.
+        if($Name -iin @(Read-DiskExternalExclusions)){return @()}
+        return @('.')
+    }
     $out=@();foreach($p in @(Get-SelectionPaths $Selection)){if($p -ceq $Name){return @('.')};if($p.StartsWith($Name+'/',[StringComparison]::Ordinal)){$out+=@($p.Substring($Name.Length+1))}};$out
 }
 function Assert-SelectionSynced($Status) {
@@ -97,6 +101,17 @@ function Get-SelectionPolicyFile([string]$Path) {
 }
 function Save-SelectionPolicy([string]$Path,[string]$Rules) {
     Write-SelectionState (Get-SelectionPolicyFile $Path) $Rules
+}
+# Device-local identity survives deselection; a policy receipt alone proves no folder identity.
+function Save-DiskDetachedProject($Folder,[string]$Peer,[string]$Device) {
+    $receipt=@{schema=1;path=[IO.Path]::GetFullPath($Folder.path);remote=[string]$Folder.label;id=[string]$Folder.id;peer=$Peer;device=$Device}
+    Write-SelectionState ((Get-SelectionPolicyFile $Folder.path)+'.detached.json') ($receipt|ConvertTo-Json -Compress)
+}
+function Test-DiskProjectReconnect([string]$Path,[string]$Remote,[string]$Id,[string]$Peer,[string]$Device) {
+    $file=(Get-SelectionPolicyFile $Path)+'.detached.json'
+    if(-not (Test-Path -LiteralPath $file)){return $false}
+    $saved=[IO.File]::ReadAllText($file).Replace("`r",'')|ConvertFrom-Json
+    return $saved.schema -eq 1 -and $saved.remote -ceq $Remote -and $saved.id -ceq $Id -and $saved.peer -ceq $Peer -and $saved.device -ceq $Device -and [IO.Path]::GetFullPath($saved.path).TrimEnd('\','/') -ieq [IO.Path]::GetFullPath($Path).TrimEnd('\','/')
 }
 function Resume-InterruptedSelection {
     $directory=Join-Path $script:DiskHome 'selection-policies'
@@ -206,6 +221,18 @@ function Assert-DiskPlainPath([string]$Path) {
         if((Test-Path -LiteralPath $part) -and ([IO.File]::GetAttributes($part) -band [IO.FileAttributes]::ReparsePoint)){throw ('Ссылки в пути запрещены: '+$Path)}
     }
 }
+function Read-DiskExternalExclusions {
+    $file=Join-Path $script:DiskHome 'external-exclusions.json'
+    if(-not (Test-Path -LiteralPath $file)){return}
+    $saved=[IO.File]::ReadAllText($file).Replace("`r",'')|ConvertFrom-Json
+    if($saved.schema -ne 1){throw 'Неизвестный формат исключений внешних папок'}
+    $peer=[IO.File]::ReadAllText((Join-Path $script:DiskHome 'server.txt')).Trim()
+    if($saved.peer -ceq $peer){@($saved.names)}
+}
+function Write-DiskExternalExclusions($Names) {
+    $peer=[IO.File]::ReadAllText((Join-Path $script:DiskHome 'server.txt')).Trim()
+    Write-SelectionState (Join-Path $script:DiskHome 'external-exclusions.json') (@{schema=1;peer=$peer;names=@($Names|Sort-Object -Unique)}|ConvertTo-Json -Compress)
+}
 function Read-DiskExternal {
     $file=Join-Path $script:DiskHome 'external.json'
     if(Test-Path -LiteralPath $file){
@@ -251,6 +278,8 @@ function Sync-DiskExternal($Desired,[string]$Base) {
     foreach($old in $saved){
         $keep=@($desiredItems|Where-Object {$_.remote -ceq $old.remote -and [IO.Path]::GetFullPath($_.path).TrimEnd('\','/') -ieq [IO.Path]::GetFullPath($old.path).TrimEnd('\','/')})
         if($keep.Count){continue}
+        # Save the exclusion BEFORE dropping the registration or external ownership receipt.
+        Write-DiskExternalExclusions (@(Read-DiskExternalExclusions)+@([string]$old.remote))
         foreach($folder in $folders|Where-Object {$_.label -ceq $old.remote -and [IO.Path]::GetFullPath($_.path).TrimEnd('\','/') -ieq [IO.Path]::GetFullPath($old.path).TrimEnd('\','/')}){
             [void](Invoke-DiskApi ('config/folders/'+[Uri]::EscapeDataString([string]$folder.id)) DELETE)
         }
@@ -300,7 +329,8 @@ function Add-DiskTreeState($Union,[string]$Base) {
         $expected=Join-Path $Base ([string]$row.path)
         $match=@($folders|Where-Object {[IO.Path]::GetFullPath($_.path).TrimEnd('\','/') -ieq [IO.Path]::GetFullPath($expected).TrimEnd('\','/')})
         if($match.Count -ne 1){continue}
-        $row.direction=Get-DiskTypeDirection $match[0].type;$row.localChanges=0
+        $row|Add-Member -Force -NotePropertyName direction -NotePropertyValue (Get-DiskTypeDirection $match[0].type)
+        $row|Add-Member -Force -NotePropertyName localChanges -NotePropertyValue 0
         if($row.direction -eq 'receive'){
             $status=Invoke-DiskApi ('db/status?folder='+[Uri]::EscapeDataString([string]$match[0].id))
             if($null -eq $status.receiveOnlyTotalItems){throw 'Syncthing не вернул число локальных правок receive-папки'}
