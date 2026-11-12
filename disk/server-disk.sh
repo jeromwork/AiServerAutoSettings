@@ -79,7 +79,8 @@ def reconcile(api,identity):
             ignores(p)
             if not current:
                 current=api('config/defaults/folder');current.update(id=folder_id,label=p.name,path=str(p),type='sendreceive',paused=False,devices=[dict(deviceID=identity)],maxConflicts=-1,versioning=dict(type='staggered',params=dict(maxAge='0',cleanInterval='3600')),rescanIntervalS=60,fsWatcherEnabled=True)
-            conflict_changed=current.get('maxConflicts')!=-1
+            conflict_changed=current.get('maxConflicts')!=-1 or current.get('type')!='sendreceive'
+            current['type']='sendreceive'
             current['maxConflicts']=-1
             missing=[d for d in devices if not any(x['deviceID']==d for x in current['devices'])]
             ignores(p,True);exclude_git(p)
@@ -244,7 +245,7 @@ def main():
                 current=current or dict(id=folder_id,label=data['name'],path=str(p),type='sendreceive',paused=False,devices=[dict(deviceID=identity)],rescanIntervalS=60,fsWatcherEnabled=True)
                 if not any(d['deviceID']==data['deviceId'] for d in current['devices']):current['devices'].append(dict(deviceID=data['deviceId']))
                 conflict_changed=current.get('maxConflicts')!=-1
-            current['maxConflicts']=-1;current['versioning']=dict(type='staggered',params=dict(maxAge='0',cleanInterval='3600'));api('config/folders/'+folder_id,'PUT',current)
+            current['type']='sendreceive';current['maxConflicts']=-1;current['versioning']=dict(type='staggered',params=dict(maxAge='0',cleanInterval='3600'));api('config/folders/'+folder_id,'PUT',current)
             print(json.dumps(dict(id=folder_id)));return
         if action=='bootstrap':ensure_cron()
         print(json.dumps(dict(deviceId=identity,listen=ports['listen'])))

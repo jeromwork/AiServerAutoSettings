@@ -66,6 +66,16 @@ namespace RemoteAgents.Launcher
         { return O(D("type", E("socks", "http"), "server", Host(), "port", N(1, 65535), "login", S(256), "password", Ref("proxy-out-password"), "checkUrl", Url()), "type", "server", "port"); }
         static Dictionary<string, object> Hop()
         { return O(D("host", Host(), "port", N(1, 65535), "user", User(), "hostKey", S(4096, 1, "^[^\\r\\n\\x00]+$"), "key", Ref("hop-key"), "password", Ref("hop-password")), "host", "user"); }
+        static Dictionary<string, object> DiskPath() { return S(1024, 1, "^[^\\\\<>:\"|?*\\x00-\\x1f]+$"); }
+        static Dictionary<string, object> DiskSchema()
+        {
+            var direction = E("both", "send", "receive");
+            // Strict objects: unlike the general section helper, folder entries have no hint field.
+            var folder = D("type", "object", "properties", D("path", DiskPath(), "direction", direction), "additionalProperties", false, "required", new[]{"path"});
+            var external = D("type", "object", "properties", D("path", S(1024, 3, @"^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/:<>""|?*\x00-\x1f]+[\\/][^\\/:<>""|?*\x00-\x1f]+(?:[\\/]|$))[^<>:""|?*\x00-\x1f]*$"), "remote", S(128, 1, @"^[^/\\<>:""|?*\x00-\x1f]+$"), "direction", direction), "additionalProperties", false, "required", new[]{"path", "remote"});
+            return O(D("base", S(1024, 1, "^[^\\r\\n\\x00]+$"),
+                "folders", D("oneOf", new object[]{ E("all"), A(D("oneOf", new object[]{ DiskPath(), folder })) }), "external", A(external)));
+        }
         internal static Dictionary<string, object> SchemaDocument()
         {
             var route = O(D("kind", E("direct", "proxy", "hop"), "proxy", Proxy(), "hop", Hop()), "kind");
@@ -88,7 +98,7 @@ namespace RemoteAgents.Launcher
                 "connection", O(D("enabled", B())),
                 "bridge", O(D("enabled", B(), "allowShell", B())),
                 "happier", O(D("mode", E("same", "new"), "account", S(64, 64, "^[a-f0-9]{64}$"), "label", S(80, 1), "serverUrl", Url(), "webappUrl", Url(), "key", Ref("happier-key"))),
-                "disk", O(D("base", S(1024, 1, "^[^\\r\\n\\x00]+$"), "folders", A(S(1024, 1, "^[^\\\\<>:\"|?*\\x00-\\x1f]+$")))),
+                "disk", DiskSchema(),
                 "vpn", O(D("enabled", B(), "checkUrl", Url(), "dnsServer", S(253, 1), "bootstrap", bootstrap)),
                 "proxyOut", Proxy(),
                 "lan", A(O(D("name", S(64, 1, "^[^/\\\\\\r\\n\\x00]+$"), "kind", E("openvpn"), "ovpn", Ref(),
@@ -148,6 +158,14 @@ namespace RemoteAgents.Launcher
         }
         static void Validate(object value, Dictionary<string, object> schema, string path)
         {
+            if (schema.ContainsKey("oneOf")) {
+                int matches = 0; string reason = "";
+                foreach (var variant in Json.Array(schema["oneOf"])) {
+                    try { Validate(value, Json.Map(variant), path); matches++; } catch (InvalidDataException ex) { reason = ex.Message; }
+                }
+                if (matches != 1) throw Bad("Неверный выбор " + path + ": " + reason);
+                return;
+            }
             object constant;
             if (schema.TryGetValue("const", out constant) && Json.Encode(value) != Json.Encode(constant)) throw Bad("Неизвестный формат или версия: " + path);
             string type = Json.Str(schema, "type");
@@ -202,14 +220,56 @@ namespace RemoteAgents.Launcher
                 string kind = Json.Str(row, "kind");
                 if ((kind != "proxy" && row.ContainsKey("proxy")) || (kind != "hop" && row.ContainsKey("hop"))) throw Bad("Поля маршрута не соответствуют kind");
             }
-            var folders = Json.Strings(Json.Get(Json.Map(Json.Get(profile, "disk")), "folders"));
+            var choice = DiskChoice.FromProfile(profile);
+            var folders = choice.Folders.Select(f => f.Path).ToArray();
             if (folders.Distinct(StringComparer.OrdinalIgnoreCase).Count() != folders.Length) throw Bad("Повторяющиеся папки Disk");
-            foreach (string f in folders) {
-                string[] parts = f.Split('/');
-                if (!Regex.IsMatch(parts[0], "^[\\p{L}\\p{N}_][\\p{L}\\p{N}_. -]{0,127}$") || parts[0].Contains("..")) throw Bad("Недопустимое имя проекта Disk");
-                foreach (string part in parts) if (part.Length == 0 || part.Length > 255 || part == "." || part == ".." || part.EndsWith(".") || part.EndsWith(" ") || Regex.IsMatch(part, "^(?i:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\\.|$)")) throw Bad("Недопустимый путь выбора Disk");
+            foreach (string f in folders) ValidateDiskPath(f);
+            var directions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var f in choice.Folders) CheckDiskDirection(directions, DiskChoice.Project(f.Path), f.Direction);
+            var disk = Json.Map(Json.Get(profile, "disk"));
+            string diskBase = Json.Str(disk, "base");
+            if (diskBase.Length == 0) diskBase = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Disk");
+            string normalizedBase = diskBase.Replace('/', '\\').TrimEnd('\\');
+            var externalPaths = new List<string>(); var remotes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var e in choice.External) {
+                ValidateDiskPath(e.Remote);
+                if (e.Remote.Contains("/")) throw Bad("disk.external.remote: нужно имя одной серверной папки");
+                CheckDiskDirection(directions, e.Remote, e.Direction);
+                if (!remotes.Add(e.Remote)) throw Bad("Повторяющаяся серверная папка disk.external: " + e.Remote);
+                string path = NormalizeWindowsPath(e.Path);
+                if (WindowsContains(normalizedBase, path) || WindowsContains(path, normalizedBase)) throw Bad("disk.external.path пересекается с корнем Disk: " + e.Path);
+                if (externalPaths.Any(p => WindowsContains(p, path) || WindowsContains(path, p))) throw Bad("Пересекающиеся пути disk.external: " + e.Path);
+                externalPaths.Add(path);
+                // Filesystem checks only apply to paths on this Windows computer. Runtime checks again before attachment.
+                if (Path.DirectorySeparatorChar == '\\') for (string p = path; !string.IsNullOrEmpty(p); p = Path.GetDirectoryName(p))
+                    if ((Directory.Exists(p) || File.Exists(p)) && (File.GetAttributes(p) & FileAttributes.ReparsePoint) != 0) throw Bad("Ссылки в disk.external.path запрещены");
             }
         }
+        static void ValidateDiskPath(string f)
+        {
+            string[] parts = f.Split('/');
+            if (!Regex.IsMatch(parts[0], "^[\\p{L}\\p{N}_][\\p{L}\\p{N}_. -]{0,127}$") || parts[0].Contains("..")) throw Bad("Недопустимое имя проекта Disk: " + f);
+            foreach (string part in parts) if (part.Length == 0 || part.Length > 255 || part == "." || part == ".." || part.EndsWith(".") || part.EndsWith(" ") || Regex.IsMatch(part, "[\\\\<>:\"|?*\\x00-\\x1f]|^(?i:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\\.|$)")) throw Bad("Недопустимый путь выбора Disk: " + f);
+        }
+        static void CheckDiskDirection(Dictionary<string, string> directions, string project, string direction)
+        {
+            string previous;
+            if (directions.TryGetValue(project, out previous) && previous != direction) throw Bad("Разные направления для проекта «" + project + "»: " + previous + " и " + direction + ". У проекта одно направление на этом компьютере");
+            directions[project] = direction;
+        }
+        internal static string NormalizeWindowsPath(string value)
+        {
+            string p = value.Replace('/', '\\');
+            bool drive = Regex.IsMatch(p, "^[a-zA-Z]:\\\\");
+            bool unc = Regex.IsMatch(p, "^\\\\\\\\[^\\\\]+\\\\[^\\\\]+(?:\\\\|$)");
+            if ((!drive && !unc) || p.StartsWith("\\\\?\\") || p.StartsWith("\\\\.\\") || Regex.IsMatch(p.Substring(drive ? 2 : 0), "[<>:\"|?*\\x00-\\x1f]")) throw Bad("disk.external.path: нужен абсолютный путь Windows");
+            string tail = p.Substring(drive ? 3 : 2).TrimEnd('\\');
+            var parts = drive && tail.Length == 0 ? new string[0] : tail.Split('\\');
+            if (parts.Any(x => x.Length == 0 || x == "." || x == ".." || x.EndsWith(".") || x.EndsWith(" ") || Regex.IsMatch(x, "^(?i:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\\.|$)"))) throw Bad("Недопустимый путь disk.external.path");
+            return drive && p.Length == 3 ? p : p.TrimEnd('\\');
+        }
+        static bool WindowsContains(string parent, string child)
+        { parent = parent.TrimEnd('\\'); child = child.TrimEnd('\\'); return string.Equals(parent, child, StringComparison.OrdinalIgnoreCase) || child.StartsWith(parent + "\\", StringComparison.OrdinalIgnoreCase); }
         internal static IEnumerable<Dictionary<string, object>> References(object value)
         {
             var map = value as Dictionary<string, object>;
@@ -367,9 +427,9 @@ namespace RemoteAgents.Launcher
             if (disk.ContainsKey("base") && oldDisk.ContainsKey("base") && !string.Equals(Json.Str(disk,"base").TrimEnd('\\','/'), Json.Str(oldDisk,"base").TrimEnd('\\','/'), StringComparison.OrdinalIgnoreCase))
                 result["disk"] = "сейчас корень «" + Json.Str(oldDisk,"base") + "» / в конфиге «" + Json.Str(disk,"base") + "»";
             if (disk.ContainsKey("folders")) {
-                var kept = new HashSet<string>(Json.Strings(disk["folders"]), StringComparer.OrdinalIgnoreCase);
-                var removed = Json.Strings(Json.Get(oldDisk, "folders")).Where(f => !kept.Any(k => string.Equals(f,k,StringComparison.OrdinalIgnoreCase) || f.StartsWith(k+"/",StringComparison.OrdinalIgnoreCase))).ToArray();
-                if (removed.Length > 0) result["disk"] = (result.ContainsKey("disk") ? result["disk"] + "; " : "") + "сейчас выбраны папки «" + string.Join(", ", removed) + "» / в конфиге они убраны";
+                var oldChoice = DiskChoice.FromProfile(before); var next = DiskChoice.FromProfile(p.Profile);
+                var removed = next.All ? new string[0] : oldChoice.All ? new[]{"все проекты (включая новые)"} : oldChoice.Paths.Where(f => !next.Paths.Any(k => string.Equals(f,k,StringComparison.OrdinalIgnoreCase) || f.StartsWith(k+"/",StringComparison.OrdinalIgnoreCase))).ToArray();
+                if (removed.Length > 0) result["disk"] = (result.ContainsKey("disk") ? result["disk"] + "; " : "") + "сейчас выбраны папки «" + string.Join(", ", removed) + "» / в конфиге они убраны; локальные файлы останутся";
             }
             var values = vault.Values.Concat(p.Locked ? (IEnumerable<string>)new string[0] : p.Secrets.Values).Where(v => v.Length > 0).Distinct().OrderByDescending(v => v.Length).ToArray();
             foreach (string section in result.Keys.ToArray()) result[section] = Scrub(result[section], values);

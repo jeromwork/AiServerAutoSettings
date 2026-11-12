@@ -377,6 +377,28 @@ class ConfigExportTests(unittest.TestCase):
         self.assertNotIn('Без утечек', texts['events'])
         print('PASS: ни stderr, ни журнал, ни записи, ни list не содержат секретов (%d проверенных строк)' % len(leaks))
 
+    def test_folder_choice_modes_and_directions(self):
+        for option, expected in [('all', 'all'), ('none', []),
+                                 ('A,B:send,C:receive', ['A', {'path': 'B', 'direction': 'send'}, {'path': 'C', 'direction': 'receive'}]),
+                                 ('Проект/docs:send,Проект/src:send', [{'path': 'Проект/docs', 'direction': 'send'}, {'path': 'Проект/src', 'direction': 'send'}])]:
+            with self.subTest(option=option):
+                config, _ = self.e.export('Папки', '--folders', option)
+                self.assertEqual(config['disk'], {'folders': expected})
+        config, _ = self.e.export('Спросить')
+        self.assertNotIn('disk', config)
+        self.assertEqual(rc.folders_list('A:both'), ['A'])
+        self.assertIsNone(rc.folders_list(None))
+        before = self.e.auth.read_text()
+        for text in ('A:send,A/docs:receive', 'A,a', 'A,,B', 'CON', 'A/../B', 'A:bad', 'A:send:receive',
+                     '/absolute', 'A\\B', 'A/aux.txt', 'bad..name', 'bad.', '1:receive,' , 'A\r\n'):
+            with self.subTest(text=text):
+                result = self.e.cli('export', '--name', 'Ошибка', '--folders', text)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.e.auth.read_text(), before, 'invalid choice cannot issue a key')
+        with self.assertRaises(Exception) as error:
+            rc.folders_list('Project:send,project/docs:receive')
+        self.assertIn('Разные направления', str(error.exception))
+
     def test_routes_and_vpn_bootstrap_sections(self):
         self.e.vpn()
         self.e.c['routes'] = [{'kind': 'direct'}, {'kind': 'proxy', 'proxy': {'type': 'socks', 'server': '127.0.0.1', 'port': 10808}},

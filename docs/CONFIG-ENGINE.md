@@ -26,10 +26,10 @@ Vpn повторяется один раз сразу после успешно�
 | `Connection` | Прежние `catalog`, `shared`, `expected`. `catalog` — публичная схема 1 (`entries/hops/relays/cdn`). При первом запуске запускает и оставляет **рабочий** daemon и требует свежий revision + настоящий SSH через локальный inbound. Не создаёт preflight-копию. При изменении установленной связи сохраняет прежние preflight/watchdog/rollback. От Syncthing не зависит. |
 | `Bridge` | Прежние `enabled`, `shell`; новое необязательное `deviceName`: 1–80 символов без управляющих символов. Для работающего моста переименование тоже сразу отправляется серверу: повторная регистрация существующего binding с новым именем, проверка чтением реестра. Shell и пути binding сохраняются. Имя записывается в `profile.device.name`. |
 | `Account` | Прежние поля. Дополнительно `mode:"same"`, необязательный публичный `account` — выбрать и живой проверкой подтвердить существующий серверный аккаунт, без recovery-ключа и без нового daemon. Неоднозначный выбор — отказ. Обычный запрос с ключом по-прежнему использует существующий Invoke-WizardAccount. |
-| `Disk` | Прежние `base`, `paths`, `reconnect`. Если серверный Syncthing ещё не готов, возвращает `ok:false,pending:"disk",operation,summary`; C запускает/наблюдает отсоединённую установку. D повторяет **Disk**, остальные разделы продолжают работу. После подготовки диска C отдельно добавляет настоящий sync inbound в канал и проверяет reload + SSH; Connection ожидания диска не содержит. |
+| `Disk` | `{base, paths: string[], directions: {"Проект":"send"|"receive"}, external: [{path,remote,direction}], reconnect}`. `paths:["."]` — все проекты, включая новые; `paths:[]` — никакие. `both` в directions опускается. Если серверный Syncthing ещё не готов, возвращает `ok:false,pending:"disk",operation,summary`; C запускает/наблюдает отсоединённую установку. D повторяет **Disk**, остальные разделы продолжают работу. После подготовки диска C отдельно добавляет настоящий sync inbound в канал и проверяет reload + SSH; Connection ожидания диска не содержит. |
 | `ConfigSync` | `{}`; необязательный `askpassExecutable` для пароля hop, по умолчанию установленный EXE. Снимок `config-sync.json` берётся только по доверенному SSH, собственным ключом; произвольный JSON запроса не применяется как доверенный снимок. Ответ `{ok, changed, summary}`. |
 
-Остальные действия и запросы сохранены. Действий InvitePrepare/Enroll/Verify/Disk/Account/Refresh/Sync больше нет; файлы приглашений, одноразовые ключи и offline refresh EXE движок не принимает.
+Остальные действия и запросы сохранены. Действий InvitePrepare/Enroll/Verify/Refresh/Sync больше нет; файлы приглашений, одноразовые ключи и offline refresh EXE движок не принимает.
 
 ### Материализация (стык A ↔ C)
 
@@ -108,3 +108,19 @@ ProgressFile остаётся UTF-8 JSONL: `{"text":"..."}`. После кажд
 
 **Имя компьютера при переподключении:** `Start-WindowsControl.ps1` при каждой регистрации берёт `-DeviceName`, иначе
 `profile.device.name` из `config.json` программы, иначе `COMPUTERNAME` — переподключение моста не возвращает `WIN-…`.
+
+## Выбор папок на компьютере
+
+`DiskChoice` — общая модель профиля, окна и трея. `ConfigSections.DiskChosen(profile)` означает наличие `disk.folders`, включая `[]`. Disk входит в план только при таком выборе либо непустом `disk.external`; один `disk.base` не запускает Disk. `DiskChoice.WriteTo` сохраняет отсутствие выбора, `all`, направления и внешние папки; `WithFolders`/`SyncFromSettings` сохраняют направления проектов при обновлении путей.
+
+UI сохраняет выбор в профиль через `ConfigProfile.Update`, затем применяет секцию Disk через ConfigSession/ConfigEngine. Прямые действия мастера:
+
+| Действие | Контракт |
+|---|---|
+| `DiskTree` | Прежний `{base,path,fresh}` → `{union,selection,base}`. У подключённых каталогов верхнего уровня `union.rows[]` дополнены `direction: both|send|receive`, `localChanges: int` (для receive — `receiveOnlyTotalItems` из `/rest/db/status`). Недоступность API не выдаётся за ноль правок. |
+| `DiskRevert` | `{path:"Проект"}` → `{ok,summary}`. Только зарегистрированный проект под текущей базой с типом receiveonly; POST `/rest/db/revert?folder=<id>`. Успех означает принятие запроса, завершения фоновой обработки не обещает. |
+| `DiskExternal` | `{action:"list"}` → `{items:[{path,remote,direction,state}]}`, state — состояние `/rest/db/status` (`idle`, `syncing`, `error` и др.), либо `paused`, `detached`, `unknown`. REST-ошибка возвращается вызывающему; отсутствие регистрации честно обозначается detached. Добавление и снятие — только через профиль и Disk. |
+
+Движок PATCH-ит тип локального проекта (`sendonly`/`receiveonly`/`sendreceive`) без снятия регистрации. Сервер остаётся sendreceive. Новые внешние папки подключаются неинтерактивно через Add-RemoteDiskFolder с Remote/ManagedSelection и Direction, без Merge. Две непустые папки дают ошибку с исходной причиной. Учёт внешних подключений — `RemoteDisk/external.json`, журнал записывается до Add и позволяет снять частично применённый выбор. `selection.json` сохраняет paths, directions, external; автоматическое подключение новых серверных предложений использует те же направления.
+
+Снятие целого проекта/внешней папки удаляет только локальную регистрацию Syncthing, содержимое остаётся. Снятие вложенных путей меняет управляемый `.stignore`, не удаляя локальные копии. Старые квитанции прерванного выбора восстанавливаются для совместимости. Изменения диска сериализованы `folders.lock`; DiskRevert также берёт ресурс disk мастера.

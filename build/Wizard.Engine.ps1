@@ -7,7 +7,7 @@ function Get-WizardResources([string]$Action,$Request) {
         'Connection' {return @('connection')}
         {$_ -in @('Bridge','RollbackBridge')} {return @('bridge')}
         {$_ -in @('Account','ResumeAccount')} {return @('account')}
-        {$_ -in @('Disk')} {return @('disk')}
+        {$_ -in @('Disk','DiskRevert')} {return @('disk')}
         {$_ -in @('Vpn','Bootstrap')} {return @('vpn')}
         {$_ -in @('Proxy','Lan','LanRemove')} {return @('server-network')}
         'Server' {return @('profile')}

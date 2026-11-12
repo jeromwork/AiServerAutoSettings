@@ -441,12 +441,84 @@
           "pattern": "^[^\\r\\n\\x00]+$(?![\\s\\S])"
         },
         "folders": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "all"
+              ]
+            },
+            {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024,
+                    "pattern": "^[^\\\\<>:\"|?*\\x00-\\x1f]+$(?![\\s\\S])"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 1024,
+                        "pattern": "^[^\\\\<>:\"|?*\\x00-\\x1f]+$(?![\\s\\S])"
+                      },
+                      "direction": {
+                        "type": "string",
+                        "enum": [
+                          "both",
+                          "send",
+                          "receive"
+                        ]
+                      }
+                    },
+                    "additionalProperties": false,
+                    "required": [
+                      "path"
+                    ]
+                  }
+                ]
+              },
+              "maxItems": 256,
+              "uniqueItems": true
+            }
+          ]
+        },
+        "external": {
           "type": "array",
           "items": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 1024,
-            "pattern": "^[^\\\\<>:\"|?*\\x00-\\x1f]+$(?![\\s\\S])"
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 3,
+                "maxLength": 1024,
+                "pattern": "^(?:[A-Za-z]:[\\\\/]|[\\\\/]{2}[^\\\\/:<>\"|?*\\x00-\\x1f]+[\\\\/][^\\\\/:<>\"|?*\\x00-\\x1f]+(?:[\\\\/]|$))[^<>:\"|?*\\x00-\\x1f]*$(?![\\s\\S])"
+              },
+              "remote": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[^/\\\\<>:\"|?*\\x00-\\x1f]+$(?![\\s\\S])"
+              },
+              "direction": {
+                "type": "string",
+                "enum": [
+                  "both",
+                  "send",
+                  "receive"
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "remote"
+            ]
           },
           "maxItems": 256,
           "uniqueItems": true

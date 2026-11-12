@@ -5,9 +5,10 @@ function Assert-SelectionPath([string]$Value) {
 }
 function Get-SelectionPaths($Selection) {
     $paths=@($Selection.paths|ForEach-Object {([string]$_).Replace("`r",'').TrimEnd('/') }|Sort-Object -Unique)
-    foreach($p in $paths){Assert-SelectionPath $p};$paths
+    foreach($p in $paths){if($p -cne '.'){Assert-SelectionPath $p}};$paths
 }
 function Test-SelectionIncluded([string]$Path,$Paths) {
+    if('.' -cin @($Paths)){return $true}
     foreach($p in @($Paths)){if($Path -ceq $p -or $Path.StartsWith($p+'/',[StringComparison]::Ordinal)){return $true}};return $false
 }
 # Cache once per process; a tree level must not reopen stignore for every entry.
@@ -37,7 +38,7 @@ function Read-DiskSelection {
     return $null
 }
 function Get-ProjectSelection([string]$Name,$Selection) {
-    if($null -eq $Selection){return @('.')}
+    if($null -eq $Selection -or '.' -cin @($Selection.paths)){return @('.')}
     $out=@();foreach($p in @(Get-SelectionPaths $Selection)){if($p -ceq $Name){return @('.')};if($p.StartsWith($Name+'/',[StringComparison]::Ordinal)){$out+=@($p.Substring($Name.Length+1))}};$out
 }
 function Assert-SelectionSynced($Status) {
@@ -70,61 +71,22 @@ function Set-ProjectSelection($Folder,[string[]]$Paths,[string[]]$KeepLocal=@())
         if($actual -cne $expected){Test-DiskIgnores $root}
     }
     $rules=New-SelectionIgnores $Paths
-    $remove=@()
-    if('.' -notin $Paths){$remove=@(Get-SelectionFiles $root|Where-Object { -not (Test-SelectionIncluded $_ $Paths) -and $_ -cnotin $KeepLocal })}
-    if($remove.Count){
-        # Force a scan first; a stale idle status is not proof that current files reached the server.
-        [void](Invoke-DiskApi ('db/scan?folder='+$id) POST)
-        Assert-SelectionSynced (Invoke-DiskApi ('db/status?folder='+$id))
-    }
+    if((Test-Path -LiteralPath $ignore) -and [IO.File]::ReadAllText($ignore).Replace("`r",'') -ceq $rules){return}
     $route='config/folders/'+$id
-    # The scheduled companion holds the same folders.lock. If PowerShell is killed,
-    # it resumes only this previously running folder; old/new ignores are atomic.
     $pauseReceipt=(Get-SelectionPolicyFile $root)+'.paused.json'
-    Write-SelectionState $pauseReceipt (@{id=$Folder.id;path=$root;paths=$remove}|ConvertTo-Json -Compress)
+    Write-SelectionState $pauseReceipt (@{id=$Folder.id;path=$root;paths=@()}|ConvertTo-Json -Compress)
     [void](Invoke-DiskApi $route PATCH @{paused=$true})
-    # Wait for actual engine suspension before touching files or ignores.
     $paused=$false
     for($i=0;$i -lt 30;$i++){
-        $s=Invoke-DiskApi ('db/status?folder='+$id)
-        if($s.state -eq '' -and (Invoke-DiskApi $route).paused){$paused=$true;break};Start-Sleep -Milliseconds 100
+        $status=Invoke-DiskApi ('db/status?folder='+$id)
+        if($status.state -eq '' -and (Invoke-DiskApi $route).paused){$paused=$true;break};Start-Sleep -Milliseconds 100
     }
     if(-not $paused){throw 'Пауза не подтверждена; файлы сохранены'}
     try{
-        if($remove.Count){
-            $device=(Invoke-DiskApi 'system/status').myID
-            $receipt=Invoke-DiskServer verify-selection @{name=$Folder.label;id=$Folder.id;deviceId=$device;paths=$remove;allowMissing=$true}
-            if(-not $receipt.ok){throw 'Серверная копия не подтверждена'}
-            # Missing remote files are local-only. Keep them ignored, exactly as before lazy inventory.
-            $remove=@($remove|Where-Object {$_ -cnotin @($receipt.missing)})
-        }
-        # Ignore first, delete second. A crash cannot publish a deletion to the server.
-        # File handles deny writes; retain all handles until hashes match and ignores are installed.
-        $handles=New-Object Collections.ArrayList
-        try{
-            foreach($rel in $remove){
-                $file=Join-Path $root $rel
-                $stream=[IO.File]::Open($file,'Open','Read',([IO.FileShare]::Read -bor [IO.FileShare]::Delete));[void]$handles.Add(@{stream=$stream;file=$file;relative=$rel})
-                $sha=[Security.Cryptography.SHA256]::Create();try{$hash=([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
-                $remote=$receipt.hashes.PSObject.Properties[$rel]
-                if(-not $remote -or $hash -cne [string]$remote.Value){throw 'Локальная версия ещё не подтверждена на сервере'}
-            }
-            if(Test-Path -LiteralPath $ignore){[IO.File]::SetAttributes($ignore,([IO.File]::GetAttributes($ignore) -band (-bnot [IO.FileAttributes]::Hidden)))}
-            Save-SelectionPolicy $root $rules
-            Write-SelectionAtomic $ignore $rules
-            foreach($entry in $handles){
-                # A writer may atomically replace the pathname while the verified
-                # handle is open. Evacuate first, then verify the actual moved file.
-                # Staging under .stfolder is never synchronized or touched by editors.
-                Remove-SelectionVerified $entry.file $receipt.hashes.PSObject.Properties[$entry.relative].Value $root
-            }
-        }finally{foreach($entry in $handles){$entry.stream.Dispose()}}
-        # Empty ancestors may be removed; protected files and selected empty directories remain.
-        if('.' -notin $Paths){foreach($dir in @(Get-ChildItem -LiteralPath $root -Directory -Recurse -Force|Sort-Object FullName -Descending)){
-            $rel=$dir.FullName.Substring($root.TrimEnd('\','/').Length+1).Replace('\','/')
-            if($dir.Attributes -band [IO.FileAttributes]::ReparsePoint){continue}
-            if(-not (Test-SelectionProtected $rel) -and -not ('.' -in $Paths) -and -not (Test-SelectionIncluded $rel $Paths) -and @(Get-ChildItem -LiteralPath $dir.FullName -Force).Count -eq 0){[IO.Directory]::Delete($dir.FullName,$false)}
-        }}
+        # Deselecting changes ignores only. Local files and empty directories remain, even with unsent edits.
+        if(Test-Path -LiteralPath $ignore){[IO.File]::SetAttributes($ignore,([IO.File]::GetAttributes($ignore) -band (-bnot [IO.FileAttributes]::Hidden)))}
+        Save-SelectionPolicy $root $rules
+        Write-SelectionAtomic $ignore $rules
     }finally{[void](Invoke-DiskApi $route PATCH @{paused=$false});[IO.File]::Delete($pauseReceipt)}
 }
 
@@ -206,27 +168,151 @@ function Save-SelectionRecoveryCopy([string]$Staged,[string]$Message) {
     $keep=$Staged+'.recovered-'+[DateTime]::UtcNow.ToString('yyyyMMddHHmmss')+'-'+[guid]::NewGuid().ToString('N').Substring(0,8)
     [IO.File]::Move($Staged,$keep);Write-DiskLog ($Message+$keep);return $keep
 }
-function Remove-SelectionVerified([string]$File,[string]$Hash,[string]$Root) {
-    $marker=Join-Path $Root '.stfolder'
-    if(-not [IO.Directory]::Exists($marker) -or ([IO.File]::GetAttributes($marker) -band [IO.FileAttributes]::ReparsePoint)){throw 'Нет безопасного маркера папки Syncthing'}
-    $staged=Get-SelectionStagedFile $File $Root
-    if([IO.File]::Exists($staged)){[void](Save-SelectionRecoveryCopy $staged 'Прежняя копия выбора сохранена: ')}
-    [IO.File]::Move($File,$staged)
-    $verified=$false
-    try{
-        $stream=[IO.File]::Open($staged,'Open','Read','Read')
-        try{
-            $sha=[Security.Cryptography.SHA256]::Create()
-            try{$actual=([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
-            if($actual -cne $Hash){throw 'Файл изменился после проверки; новая версия сохранена'}
-            $verified=$true
-        }finally{$stream.Dispose()}
-        [IO.File]::Delete($staged)
-    }finally{
-        if(-not $verified -and [IO.File]::Exists($staged)){
-            # Never overwrite a version concurrently recreated at the original path.
-            if(-not (Test-Path -LiteralPath $File)){[IO.File]::Move($staged,$File)}
-            else{[void](Save-SelectionRecoveryCopy $staged 'Новая версия сохранена: ')}
+
+# Device-only choices. Caller holds folders.lock for every mutation.
+function Get-DiskDirection($Selection,[string]$Project) {
+    $value=''
+    if($Selection -and $Selection.directions){
+        if($Selection.directions -is [Collections.IDictionary]){$value=[string]$Selection.directions[$Project]}
+        else{$property=$Selection.directions.PSObject.Properties[$Project];if($property){$value=[string]$property.Value}}
+    }
+    if(-not $value){return 'both'}
+    if($value -cnotin @('both','send','receive')){throw ('Недопустимое направление проекта '+$Project)}
+    $value
+}
+function Get-DiskFolderType([string]$Direction) {
+    switch -CaseSensitive ($Direction){'both' {'sendreceive'} 'send' {'sendonly'} 'receive' {'receiveonly'} default {throw 'Недопустимое направление Disk'}}
+}
+function Get-DiskTypeDirection([string]$Type) {
+    switch($Type){'sendreceive' {'both'} 'sendonly' {'send'} 'receiveonly' {'receive'} default {throw ('Неизвестный тип папки Syncthing: '+$Type)}}
+}
+function Set-DiskFolderDirection($Folder,[string]$Direction) {
+    $type=Get-DiskFolderType $Direction
+    if($Folder.type -cne $type){
+        # PATCH changes only the type. No deregistration, reset, override or data removal.
+        [void](Invoke-DiskApi ('config/folders/'+[Uri]::EscapeDataString([string]$Folder.id)) PATCH @{type=$type})
+        $Folder.type=$type
+    }
+}
+function Assert-DiskProjectName([string]$Name) {
+    if($Name.Length -gt 128 -or $Name -notmatch '^[\p{L}\p{N}_][\p{L}\p{N}_. -]*$' -or $Name.Contains('..') -or $Name -match '[ .]$|^(?i:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|$)'){throw ('Недопустимое имя серверной папки: '+$Name)}
+}
+function Test-DiskPathWithin([string]$Parent,[string]$Child) {
+    $p=[IO.Path]::GetFullPath($Parent).TrimEnd('\','/');$c=[IO.Path]::GetFullPath($Child).TrimEnd('\','/')
+    $c -ieq $p -or $c.StartsWith($p+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)
+}
+function Assert-DiskPlainPath([string]$Path) {
+    for($part=[IO.Path]::GetFullPath($Path);$part;$part=[IO.Path]::GetDirectoryName($part)){
+        if((Test-Path -LiteralPath $part) -and ([IO.File]::GetAttributes($part) -band [IO.FileAttributes]::ReparsePoint)){throw ('Ссылки в пути запрещены: '+$Path)}
+    }
+}
+function Read-DiskExternal {
+    $file=Join-Path $script:DiskHome 'external.json'
+    if(Test-Path -LiteralPath $file){
+        $saved=[IO.File]::ReadAllText($file).Replace("`r",'')|ConvertFrom-Json
+        if($saved.schema -ne 1){throw 'Неизвестный формат внешних папок'}
+        @($saved.items)
+    }
+}
+function Write-DiskExternal($Items) {
+    Write-SelectionState (Join-Path $script:DiskHome 'external.json') (@{schema=1;items=@($Items)}|ConvertTo-Json -Depth 20 -Compress)
+}
+function Assert-DiskExternalChoices($Items,[string]$Base) {
+    $paths=@();$remotes=@()
+    foreach($item in @($Items)){
+        if($null -eq $item){continue}
+        Assert-DiskProjectName ([string]$item.remote)
+        [void](Get-DiskFolderType $(if($item.direction){[string]$item.direction}else{'both'}))
+        if(-not [IO.Path]::IsPathRooted([string]$item.path) -or ($env:OS -eq 'Windows_NT' -and [string]$item.path -notmatch '^(?:[a-zA-Z]:[\\/]|\\\\[^\\]+\\[^\\]+)')){throw 'Внешняя папка: нужен абсолютный путь Windows'}
+        $path=[IO.Path]::GetFullPath([string]$item.path)
+        if((Test-DiskPathWithin $Base $path) -or (Test-DiskPathWithin $path $Base)){throw 'Внешняя папка пересекается с корнем Disk'}
+        Assert-DiskPlainPath $path
+        foreach($other in $paths){if((Test-DiskPathWithin $other $path) -or (Test-DiskPathWithin $path $other)){throw 'Пересекающиеся внешние папки'}}
+        if([string]$item.remote -iin $remotes){throw 'Серверная папка внешнего выбора повторяется'}
+        $paths+=@($path);$remotes+=@([string]$item.remote)
+    }
+}
+function Add-DiskManagedExternal($Item) {
+    & (Join-Path $PSScriptRoot 'Add-RemoteDiskFolder.ps1') -Path ([string]$Item.path) -Remote ([string]$Item.remote) -ManagedSelection -Direction ([string]$Item.direction)
+    if(-not $?){throw ('Не удалось подключить внешнюю папку '+$Item.remote)}
+}
+function Sync-DiskExternal($Desired,[string]$Base) {
+    $desiredItems=@($Desired|Where-Object {$null -ne $_})
+    Assert-DiskExternalChoices $desiredItems $Base
+    $saved=@(Read-DiskExternal);$folders=@(Invoke-DiskApi 'config/folders')
+    # Preflight identities and intersections before detaching anything.
+    foreach($item in $desiredItems){
+        foreach($folder in $folders){
+            $same=[IO.Path]::GetFullPath([string]$item.path).TrimEnd('\','/') -ieq [IO.Path]::GetFullPath([string]$folder.path).TrimEnd('\','/')
+            if($same -and $folder.label -cne [string]$item.remote){throw 'Внешняя папка уже связана с другим проектом'}
+            if(-not $same -and ((Test-DiskPathWithin $folder.path $item.path) -or (Test-DiskPathWithin $item.path $folder.path) -or $folder.label -ieq [string]$item.remote)){throw 'Серверная папка уже подключена в другом месте или пересекается с Syncthing'}
         }
     }
+    foreach($old in $saved){
+        $keep=@($desiredItems|Where-Object {$_.remote -ceq $old.remote -and [IO.Path]::GetFullPath($_.path).TrimEnd('\','/') -ieq [IO.Path]::GetFullPath($old.path).TrimEnd('\','/')})
+        if($keep.Count){continue}
+        foreach($folder in $folders|Where-Object {$_.label -ceq $old.remote -and [IO.Path]::GetFullPath($_.path).TrimEnd('\','/') -ieq [IO.Path]::GetFullPath($old.path).TrimEnd('\','/')}){
+            [void](Invoke-DiskApi ('config/folders/'+[Uri]::EscapeDataString([string]$folder.id)) DELETE)
+        }
+        $saved=@($saved|Where-Object {$_ -ne $old});Write-DiskExternal $saved
+    }
+    foreach($item in $desiredItems){
+        $direction='both';if($item.direction){$direction=[string]$item.direction}
+        $entry=[pscustomobject]@{path=[IO.Path]::GetFullPath([string]$item.path);remote=[string]$item.remote;direction=$direction}
+        $match=@(Invoke-DiskApi 'config/folders'|Where-Object {$_.label -ceq $entry.remote -and [IO.Path]::GetFullPath($_.path).TrimEnd('\','/') -ieq $entry.path.TrimEnd('\','/')})
+        if(-not $match.Count){
+            [void][IO.Directory]::CreateDirectory($entry.path)
+            Assert-DiskPlainPath $entry.path
+            # Journal ownership first: an interruption after Add must leave the folder removable.
+            $saved=@($saved|Where-Object {$_.remote -cne $entry.remote})+@($entry);Write-DiskExternal $saved
+            # Add validates occupied-folder conflicts before touching policy or server state; no implicit -Merge.
+            [void](Add-DiskManagedExternal $entry)
+            $match=@(Invoke-DiskApi 'config/folders'|Where-Object {$_.label -ceq $entry.remote -and [IO.Path]::GetFullPath($_.path).TrimEnd('\','/') -ieq $entry.path.TrimEnd('\','/')})
+            if($match.Count -ne 1){throw ('Syncthing не подтвердил внешнюю папку '+$entry.remote)}
+        }
+        # Receipt before policy/type updates makes interrupted additions removable on the next apply.
+        $saved=@($saved|Where-Object {$_.remote -cne $entry.remote})+@($entry);Write-DiskExternal $saved
+        Initialize-ProjectSelection $entry.path @('.')
+        Set-DiskFolderDirection $match[0] $direction
+    }
+}
+function Get-DiskExternalList {
+    $saved=@(Read-DiskExternal);if(-not $saved.Count){return}
+    Read-DiskState;$folders=@(Invoke-DiskApi 'config/folders')
+    foreach($item in $saved){
+        $match=@($folders|Where-Object {$_.label -ceq $item.remote -and [IO.Path]::GetFullPath($_.path).TrimEnd('\','/') -ieq [IO.Path]::GetFullPath($item.path).TrimEnd('\','/')})
+        $state='detached';$direction=[string]$item.direction
+        if($match.Count -eq 1){
+            $direction=Get-DiskTypeDirection $match[0].type
+            if($match[0].paused){$state='paused'}else{
+                $status=Invoke-DiskApi ('db/status?folder='+[Uri]::EscapeDataString([string]$match[0].id))
+                $state=[string]$status.state;if(-not $state){$state='unknown'}
+            }
+        }
+        @{path=[string]$item.path;remote=[string]$item.remote;direction=$direction;state=$state}
+    }
+}
+function Add-DiskTreeState($Union,[string]$Base) {
+    if($Union.parent){return}
+    if(-not (Test-Path -LiteralPath (Join-Path $script:DiskHome 'state/config.xml'))){return}
+    Read-DiskState;$folders=@(Invoke-DiskApi 'config/folders')
+    foreach($row in @($Union.rows|Where-Object {$_.kind -eq 'directory'})){
+        $expected=Join-Path $Base ([string]$row.path)
+        $match=@($folders|Where-Object {[IO.Path]::GetFullPath($_.path).TrimEnd('\','/') -ieq [IO.Path]::GetFullPath($expected).TrimEnd('\','/')})
+        if($match.Count -ne 1){continue}
+        $row.direction=Get-DiskTypeDirection $match[0].type;$row.localChanges=0
+        if($row.direction -eq 'receive'){
+            $status=Invoke-DiskApi ('db/status?folder='+[Uri]::EscapeDataString([string]$match[0].id))
+            if($null -eq $status.receiveOnlyTotalItems){throw 'Syncthing не вернул число локальных правок receive-папки'}
+            $row.localChanges=[long]$status.receiveOnlyTotalItems
+        }
+    }
+}
+function Invoke-DiskRevert([string]$Project) {
+    Assert-DiskProjectName $Project
+    Read-DiskState;$expected=Join-Path (Get-DiskBase) $Project
+    $match=@(Invoke-DiskApi 'config/folders'|Where-Object {[IO.Path]::GetFullPath($_.path).TrimEnd('\','/') -ieq [IO.Path]::GetFullPath($expected).TrimEnd('\','/')})
+    if($match.Count -ne 1 -or $match[0].type -cne 'receiveonly'){throw 'Откат доступен только подключённой папке «только забирать»'}
+    [void](Invoke-DiskApi ('db/revert?folder='+[Uri]::EscapeDataString([string]$match[0].id)) POST)
+    @{ok=$true;summary='Запрошен возврат локальных правок к серверной версии; обработка продолжается в фоне'}
 }

@@ -74,13 +74,14 @@ namespace RemoteAgents.Launcher
                 case Server: case Connection: return p.ContainsKey("server");
                 case Bridge: return p.ContainsKey("bridge") || Json.Str(Json.Map(Json.Get(p, "device")), "name").Length > 0;
                 case Account: return p.ContainsKey("happier");
-                case Disk: return p.ContainsKey("disk");
+                case Disk: return DiskChosen(p) || DiskChoice.FromProfile(p).External.Count > 0;
                 case Vpn: return vpn.Keys.Any(k => k != "bootstrap");
                 case Proxy: return p.ContainsKey("proxyOut");
                 case Lan: return p.ContainsKey("lan");
                 default: return false;
             }
         }
+        internal static bool DiskChosen(Dictionary<string, object> profile) { return DiskChoice.FromProfile(profile).Chosen; }
         // The part of the profile a section depends on; its hash decides «changed since last successful apply».
         internal static object Slice(Dictionary<string, object> p, string s)
         {
@@ -315,9 +316,11 @@ namespace RemoteAgents.Launcher
         }
         internal static Dictionary<string, object> WithFolders(Dictionary<string, object> profile, IEnumerable<string> folders, string diskBase)
         {
-            var p = new Dictionary<string, object>(profile); var disk = new Dictionary<string, object>(Json.Map(Json.Get(p, "disk")));
-            if (!disk.ContainsKey("base") && !string.IsNullOrEmpty(diskBase)) disk["base"] = diskBase;
-            disk["folders"] = folders.ToArray(); p["disk"] = disk; return p;
+            var choice = DiskChoice.FromProfile(profile);
+            var paths = folders.ToArray();
+            var next = new DiskChoice { Chosen = true, All = paths.Contains("."), External = choice.External };
+            if (!next.All) next.Folders = paths.Select(path => new DiskFolderChoice { Path = path, Direction = choice.DirectionOf(path) }).ToList();
+            return next.WriteTo(profile, diskBase);
         }
         // «Подробно» (the step-by-step sections) edit config.json; bring the same facts back into the profile so the
         // config stays the one description of the program. Sections never described are added only when really set.
@@ -350,7 +353,8 @@ namespace RemoteAgents.Launcher
                 p["lan"] = lans.Select(l => (object)(old.FirstOrDefault(o => Json.Str(o, "name") == Json.Str(l, "name")) ?? new Dictionary<string, object> { { "name", Json.Str(l, "name") }, { "kind", "openvpn" } })).ToArray();
             }
             if (!string.IsNullOrEmpty(diskBase) && (diskFolders != null || p.ContainsKey("disk"))) {
-                var d = new Dictionary<string, object>(Json.Map(Json.Get(p, "disk"))); d["base"] = diskBase; if (diskFolders != null) d["folders"] = diskFolders; p["disk"] = d;
+                if (diskFolders != null) p = WithFolders(p, diskFolders, diskBase);
+                var d = new Dictionary<string, object>(Json.Map(Json.Get(p, "disk"))); d["base"] = diskBase; p["disk"] = d;
             }
             if (!string.IsNullOrEmpty(serverAddress)) {
                 var s = new Dictionary<string, object>(Json.Map(Json.Get(p, "server"))); s["address"] = serverAddress; if (!string.IsNullOrEmpty(serverLogin)) s["login"] = serverLogin; p["server"] = s;
@@ -408,7 +412,11 @@ namespace RemoteAgents.Launcher
         internal static Dictionary<string, object> Disk(Dictionary<string, object> p, string defaultBase, string[] currentSelection)
         {
             var disk = Json.Map(Json.Get(p, "disk"));
-            return new Dictionary<string, object> { { "base", Json.Text(disk, "base", defaultBase) }, { "paths", disk.ContainsKey("folders") ? Json.Strings(Json.Get(disk, "folders")) : currentSelection ?? new string[0] }, { "reconnect", false } };
+            var choice = DiskChoice.FromProfile(p);
+            var directions = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            foreach (var folder in choice.Folders) if (folder.Direction != DiskChoice.Both) directions[DiskChoice.Project(folder.Path)] = folder.Direction;
+            return new Dictionary<string, object> { { "base", Json.Text(disk, "base", defaultBase) }, { "paths", choice.Chosen ? choice.Paths : currentSelection ?? new string[0] },
+                { "directions", directions }, { "external", choice.External.Select(e => (object)new Dictionary<string, object> { { "path", e.Path }, { "remote", e.Remote }, { "direction", e.Direction } }).ToArray() }, { "reconnect", false } };
         }
         internal static Dictionary<string, object> Vpn(Dictionary<string, object> p)
         {

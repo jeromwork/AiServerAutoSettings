@@ -44,17 +44,11 @@ function Invoke-DiskServer($Action,$Data,[switch]$Direct){
     if(-not $script:serverMatches){$hash='bad'}
     [pscustomobject]@{ok=$true;hashes=[pscustomobject]@{'keep.txt'=$hash}}
 }
-$original=[IO.File]::ReadAllText((Join-Path $folder '.stignore'))
-foreach($phase in @('scanning','syncing','error')){
-    $script:phase=$phase;$failed=$false;try{Set-ProjectSelection $f @()}catch{$failed=$true}
-    Assert ($failed -and (Test-Path (Join-Path $folder 'keep.txt'))) ('no deletion while '+$phase)
+foreach($phase in @('scanning','syncing','error','idle')){
+    $script:phase=$phase;$script:need=1
+    Set-ProjectSelection $f @()
+    Assert ((Test-Path (Join-Path $folder 'keep.txt')) -and (Test-Path (Join-Path $folder '.env')) -and -not $script:removedReceipt) ('deselection keeps unsent files while '+$phase)
 }
-$script:phase='idle';$script:need=1;$failed=$false;try{Set-ProjectSelection $f @()}catch{$failed=$true}
-Assert ($failed -and -not $script:removedReceipt -and [IO.File]::ReadAllText((Join-Path $folder '.stignore')) -eq $original) 'needBytes blocks before policy change'
-$script:need=0;$script:serverMatches=$false;$failed=$false;try{Set-ProjectSelection $f @()}catch{$failed=$true}
-Assert ($failed -and (Test-Path (Join-Path $folder 'keep.txt')) -and -not $script:paused) 'different server version retained and resumed'
-$script:serverMatches=$true;Set-ProjectSelection $f @()
-Assert (-not (Test-Path (Join-Path $folder 'keep.txt')) -and (Test-Path (Join-Path $folder '.env'))) 'verified copy removed, secret retained'
 Assert ([IO.File]::ReadAllText((Join-Path $folder '.stignore')).EndsWith("*`n") -and -not $script:paused) 'ignore installed before resumed engine'
 Test-DiskIgnores $folder -Write
 Assert ([IO.File]::ReadAllText((Join-Path $folder '.stignore')).EndsWith("*`n")) 'legacy helper preserves managed selective policy'
@@ -80,12 +74,6 @@ $staged=Get-SelectionStagedFile $localOnly $folder
 $script:paused=$true;Resume-InterruptedSelection
 $recovered=@(Get-ChildItem -LiteralPath (Join-Path $folder '.stfolder') -Filter ((Split-Path $staged -Leaf)+'.recovered-*'))
 Assert (-not $script:paused -and -not (Test-Path $staged) -and $recovered.Count -eq 1 -and [IO.File]::ReadAllText($recovered[0].FullName) -ceq 'interrupted copy' -and [IO.File]::ReadAllText($localOnly) -ceq 'local, never uploaded') 'recovery keeps both versions under a unique name'
-[IO.File]::WriteAllText($staged,'stale staged copy')
-$hash=(Get-FileHash -LiteralPath $localOnly -Algorithm SHA256).Hash.ToLowerInvariant()
-Remove-SelectionVerified $localOnly $hash $folder
-$recovered=@(Get-ChildItem -LiteralPath (Join-Path $folder '.stfolder') -Filter ((Split-Path $staged -Leaf)+'.recovered-*'))
-Assert (-not (Test-Path $localOnly) -and -not (Test-Path $staged) -and $recovered.Count -eq 2) 'stale staged name is preserved aside, verified deselection still completes'
-[IO.File]::WriteAllText($localOnly,'local, never uploaded')
 Write-SelectionState $pauseReceipt (@{id='fixture';path=(Join-Path $folder 'different')}|ConvertTo-Json -Compress)
 $script:paused=$true;$failed=$false;try{Resume-InterruptedSelection}catch{$failed=$true}
 Assert ($failed -and $script:paused -and (Test-Path $pauseReceipt)) 'changed project path blocks automatic resume'
@@ -121,7 +109,7 @@ function Write-SelectionAtomic([string]$File,[string]$Text){
     }
 }
 $failed=$false;try{Set-ProjectSelection $f @()}catch{$failed=$true}
-Assert ($failed -and [IO.File]::ReadAllText((Join-Path $race 'keep.txt')) -ceq 'new unuploaded version') 'atomic editor replacement after receipt is never deleted'
+Assert (-not $failed -and [IO.File]::ReadAllText((Join-Path $race 'keep.txt')) -ceq 'new unuploaded version') 'atomic editor replacement after receipt is never deleted'
 Assert (-not $script:paused) 'replacement failure safely resumes ignored folder'
 Set-Item Function:Write-SelectionAtomic $script:atomicWriter
 # A repeated legacy helper call must use the same atomic writer for an active ignore.
