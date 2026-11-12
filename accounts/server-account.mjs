@@ -80,11 +80,40 @@ export function accountLabel(value) {
     if(typeof value!=='string' || value.length>80 || /[\x00-\x1f\x7f]/.test(value)) throw Error('label');
     return value.trim();
 }
+// Happier's own install (happier.dev/install: ~/.happier, its own daemon) is the same account kind for the owner as
+// one connected by this program. Own code instead of the vendor reader is deliberate: importing the vendor package
+// against ~/.happier prunes its logs and chmods its files at module load, and this path must only read. The fields
+// are the vendor's: settings.json activeServerId/servers, servers/<id>/access.key (legacy ~/.happier/access.key)
+// {token,...}, servers/<id>/daemon.state.json {pid,machineId} (persistence readCredentials/readSettings/readDaemonState).
+function readJson(file) { try { return JSON.parse(fs.readFileSync(file,'utf8').replace(/^﻿/,'')); } catch { return null; } }
+export function nativeAccount(home=os.homedir()) {
+    const dir=path.join(home,'.happier');
+    const settings=readJson(path.join(dir,'settings.json')) || {};
+    const active=String(settings.activeServerId || 'cloud').trim();
+    if(!/^[A-Za-z0-9._-]{1,64}$/.test(active) || active==='.' || active==='..')return null;
+    const server=path.join(dir,'servers',active);
+    let keyFile=path.join(server,'access.key');
+    if(!fs.existsSync(keyFile) && active==='cloud')keyFile=path.join(dir,'access.key');
+    const credentials=readJson(keyFile);
+    if(typeof credentials?.token!=='string' || !credentials.token)return null;
+    let sub='';try{sub=String(JSON.parse(Buffer.from(credentials.token.split('.')[1],'base64url').toString('utf8')).sub || '');}catch{}
+    if(!sub)sub=String(settings.lastTokenSubByServerId?.[active] || '');
+    const profile=settings.servers?.[active] || {};
+    let serverUrl='',webappUrl='';
+    try{serverUrl=new URL(profile.serverUrl).origin;webappUrl=new URL(profile.webappUrl).origin;}catch{}
+    if(!sub || !serverUrl || !webappUrl)return null;
+    // Public and stable: the same Happier account on the same server keeps its id across token renewals and
+    // restarts; another login gets another id. Neither the token nor the account key leaves this process.
+    const account=crypto.createHash('sha256').update('happier-home\n'+serverUrl+'\n'+sub).digest('hex');
+    return {account,label:accountLabel('Happier сервера'),serverUrl,webappUrl,token:credentials.token,state:path.join(server,'daemon.state.json')};
+}
 export function listAccounts(home=os.homedir()) {
     const secrets=path.join(home,'secrets','happier','accounts'), catalog=path.join(home,'.config','remoteagents','accounts');
-    if(!fs.existsSync(secrets))return {schema:1,accounts:[]};
+    const native=nativeAccount(home);
+    const own=native?[{account:native.account,label:native.label,serverUrl:native.serverUrl,webappUrl:native.webappUrl}]:[];
+    if(!fs.existsSync(secrets))return {schema:1,accounts:own};
     if(fs.lstatSync(secrets).isSymbolicLink())throw Error('symlink');
-    const accounts=[];
+    const accounts=own;
     for(const id of fs.readdirSync(secrets).sort()) {
         if(!/^[a-f0-9]{64}$/.test(id) || fs.lstatSync(path.join(secrets,id)).isSymbolicLink())continue;
         const f=path.join(catalog,id+'.json');let data={};
@@ -106,8 +135,24 @@ export async function loadVendor(root) {
     if(!persistence) throw Error('vendor');
     return {protocol,persistence};
 }
-async function inspectAccount(id,home=os.homedir()) {
+// Health is the server's own view: this account's token lists the daemon's machine as active.
+async function machineActive(serverUrl,token,machineId,request) {
+    const endpoint=new URL(serverUrl);
+    if(endpoint.protocol!=='https:' || endpoint.username || endpoint.password || endpoint.pathname!=='/')throw Error('url');
+    const response=await request(endpoint.origin+'/v1/machines',{headers:{Authorization:'Bearer '+token},signal:AbortSignal.timeout(10000)});
+    if(!response.ok)return false;const machines=await response.json();
+    return Array.isArray(machines) && machines.some(m=>m.id===machineId && m.active===true);
+}
+export async function inspectAccount(id,home=os.homedir(),request=fetch) {
     if(!/^[a-f0-9]{64}$/.test(id))throw Error('account');
+    const native=nativeAccount(home);
+    if(native && native.account===id) {
+        // Happier's own daemon (its own unit/label): the live process from its state file, read only.
+        const daemon=readJson(native.state)||{},pid=daemon.pid,machineId=typeof daemon.machineId==='string'?daemon.machineId:'';
+        if(!Number.isInteger(pid) || pid<=1 || !machineId)return {ok:false};
+        try{process.kill(pid,0);if(!fs.readFileSync('/proc/'+pid+'/cmdline','utf8').split('\0').includes('daemon'))return {ok:false};}catch{return {ok:false};}
+        return {ok:await machineActive(native.serverUrl,native.token,machineId,request)};
+    }
     const file=path.join(home,'.config/remoteagents/accounts',id+'.json');
     const metadata=JSON.parse(fs.readFileSync(file,'utf8').replace(/\r/g,''));
     const running=spawnSync('systemctl',['--user','is-active','--quiet','remoteagents-happier-'+id+'.service'],{stdio:'ignore',timeout:10000});
@@ -116,11 +161,7 @@ async function inspectAccount(id,home=os.homedir()) {
     const {persistence}=await loadVendor(path.dirname(fs.realpathSync(path.join(home,'.local/bin/happier'))));
     const credentials=await persistence.readCredentials(),settings=await persistence.readSettings();
     if(!credentials?.token || !settings?.machineId)return {ok:false};
-    const endpoint=new URL(metadata.serverUrl);
-    if(endpoint.protocol!=='https:' || endpoint.username || endpoint.password || endpoint.pathname!=='/')throw Error('url');
-    const response=await fetch(endpoint.origin+'/v1/machines',{headers:{Authorization:'Bearer '+credentials.token},signal:AbortSignal.timeout(10000)});
-    if(!response.ok)return {ok:false};const machines=await response.json();
-    return {ok:Array.isArray(machines) && machines.some(m=>m.id===settings.machineId && m.active===true)};
+    return {ok:await machineActive(metadata.serverUrl,credentials.token,settings.machineId,request)};
 }
 async function main() {
     let raw=''; for await(const chunk of process.stdin) {raw+=chunk;if(raw.length>8192) throw Error('input');}

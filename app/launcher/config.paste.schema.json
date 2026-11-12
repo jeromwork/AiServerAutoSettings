@@ -374,6 +374,12 @@
             "new"
           ]
         },
+        "account": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$(?![\\s\\S])"
+        },
         "label": {
           "type": "string",
           "minLength": 1,

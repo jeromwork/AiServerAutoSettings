@@ -32,6 +32,10 @@ namespace RemoteAgents.Launcher
             foreach (string text in new[]{"", "[]", "null", "{\"kind\":\"remoteagents-config\",\"schema\":1,}", "{\"kind\":\"remoteagents-config\",\"schema\":1,\"schema\":1}", "{\"kind\":\"remoteagents-config\",\"schema\":1} trailing", "{'kind':'remoteagents-config','schema':1}"}) Reject(() => ConfigBundle.Parse(text), "invalid JSON");
             var newlineHost = Example(); Json.Map(newlineHost["server"])["address"] = "server.example.invalid\n";
             Reject(() => ConfigBundle.Parse(Json.Encode(newlineHost)),"trailing newline cannot bypass anchored schema pattern");
+            // happier.account: the public 64-hex id from the exporter (accounts/server-account.mjs list), nothing else.
+            var pinned = Example(); pinned["happier"] = ConfigBundle.D("mode", "same", "account", new string('a', 64));
+            Check(Json.Str(Json.Map(ConfigBundle.Parse(Json.Encode(pinned)).Profile["happier"]), "account") == new string('a', 64), "happier.account accepted");
+            foreach (string bad in new[]{new string('A', 64), new string('a', 63), new string('a', 64) + "\n", "Основной"}) { Json.Map(pinned["happier"])["account"] = bad; Reject(() => ConfigBundle.Parse(Json.Encode(pinned)), "happier.account " + bad.Length); }
             var literalPrefix = Example(); Json.Map(literalPrefix["secrets"])["server-key"] = "enc1:literal-plaintext";
             var literal = ConfigBundle.Parse(Json.Encode(literalPrefix));
             Check(ConfigBundle.Unlock(ConfigBundle.Parse(ConfigBundle.Pack(literal,"master")),"master").Secrets["server-key"] == "enc1:literal-plaintext","protected flag determines encryption, literal prefix roundtrips");

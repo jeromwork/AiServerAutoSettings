@@ -711,10 +711,62 @@ def folders_list(text):
     return folders
 
 
+ACCOUNT_RE = re.compile(r'[a-f0-9]{64}\Z')
+
+
+def happier_accounts(c):
+    """Аккаунты Happier рабочего пользователя: и программы, и обычной установки (~/.happier).
+
+    Список даёт тот же помощник, что и мастер на компьютере (accounts/server-account.mjs, действие list),
+    а не своя копия правил. От root — правами рабочего пользователя; код передаётся через stdin, поэтому
+    рабочему пользователю не нужен доступ к этой копии репозитория. Секретов в ответе помощника нет."""
+    home = Path((c.get('happier') or {}).get('home') or worker_home(c))
+    code = (ROOT / 'accounts/server-account.mjs').read_text(encoding='utf-8')
+    code += "\nprocess.stdout.write(JSON.stringify(listAccounts())+'\\n');\n"
+    path = ':'.join([str(home / '.local/share/remoteagents-accounts/node'), str(home / '.local/bin'), '/usr/local/bin', '/usr/bin', '/bin'])
+    owner = owner_of(c)
+    drop = dict(user=owner[0], group=owner[1], extra_groups=[]) if owner else {}
+    try:
+        p = subprocess.run(['node', '--input-type=module'], input=code.encode(), capture_output=True, timeout=30,
+                           env={'HOME': str(home), 'PATH': path, 'LANG': 'C.UTF-8'}, cwd='/', **drop)
+        require(p.returncode == 0, 'код ' + str(p.returncode))
+        rows = json.loads(p.stdout.decode('utf-8'))['accounts']
+        require(isinstance(rows, list) and all(isinstance(r, dict) and isinstance(r.get('account'), str) and ACCOUNT_RE.fullmatch(r['account'])
+                                               and isinstance(r.get('label'), str) for r in rows), 'неверный ответ')
+    except (Error, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
+        # Причина скрыта: вывод помощника не печатается. Без проверки «тот же аккаунт» не выдаётся.
+        raise Error('Не удалось проверить аккаунты Happier на сервере (нужен Node.js 22+ у рабочего пользователя). '
+                    'Конфиг не выдан; можно выдать с --happier new:Название')
+    return rows
+
+
+def happier_same(c, wanted):
+    """--happier same / same:<подпись или id>: id аккаунта для конфига или None, если он на сервере один.
+
+    Проверка до создания ключа: конфиг, который не пройдёт шаг «Аккаунт», не выдаётся (docs/CONFIG-SERVER.md)."""
+    rows = happier_accounts(c)
+    require(rows, 'На сервере нет аккаунта Happier: ни подключённого программой, ни обычной установки (~/.happier) с выполненным входом. '
+                  'Войдите в Happier на сервере («happier auth login») или выдайте конфиг с --happier new:Название')
+    label = (c.get('happier') or {}).get('account')
+    if not wanted and len(rows) > 1 and label:
+        wanted = label  # подпись из настроек выдачи выбирает аккаунт, только если их несколько
+    if wanted:
+        found = [r for r in rows if wanted in (r['account'], r['label'])]
+        names = '; '.join('«' + r['label'] + '» ' + r['account'] for r in rows)
+        require(len(found) == 1, ('Аккаунт Happier «' + wanted + '» ' + ('не найден' if not found else 'не однозначен') +
+                                  '. На сервере: ' + names + '. Укажите --happier same:<id>'))
+        return found[0]['account']
+    names = '; '.join('«' + r['label'] + '» ' + r['account'] for r in rows)
+    require(len(rows) == 1, 'На сервере несколько аккаунтов Happier: ' + names + '. Выберите: --happier same:<подпись или id>')
+    return None
+
+
 def export(c, args, out=sys.stdout, err=sys.stderr):
     name = clean_name(args.name)
-    require(args.happier == 'same' or re.fullmatch(r'new:.+', args.happier or ''), '--happier: same или new:Название')
+    require(re.fullmatch(r'same(:.+)?|new:.+', args.happier or ''), '--happier: same, same:<подпись или id> или new:Название')
     folders = folders_list(args.folders)
+    same = args.happier.startswith('same')
+    account = happier_same(c, args.happier[5:]) if same else None
     master = master_password(args)
     values = {}
     server, vpn = common_sections(c, values, args.vpn)
@@ -726,10 +778,12 @@ def export(c, args, out=sys.stdout, err=sys.stderr):
     if vpn:
         config['vpn'] = vpn
     happier = {key: value for key, value in (c.get('happier') or {}).items() if key in ('serverUrl', 'webappUrl')}
-    if args.happier == 'same':
+    if same:
         happier['mode'] = 'same'
         if (c.get('happier') or {}).get('account'):
             happier['label'] = clean_name(c['happier']['account'])
+        if account:
+            happier['account'] = account
     else:
         happier.update(mode='new', label=clean_name(args.happier[4:]))
     config['happier'] = happier
@@ -945,7 +999,7 @@ def main(argv=None):
     p.add_argument('--master-password-stdin', action='store_true')
     p.add_argument('--generate-master-password', action='store_true', help='придумать читаемый мастер-пароль и показать один раз')
     p.add_argument('--vpn', choices=('on', 'off', 'channel'))
-    p.add_argument('--happier', default='same')
+    p.add_argument('--happier', default='same', help='same | same:<подпись или id аккаунта> | new:Название')
     p.add_argument('--folders', default='')
     p.add_argument('--output')
     p = sub.add_parser('list', help='выданные конфиги и последний вход')

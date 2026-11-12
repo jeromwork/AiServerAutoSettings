@@ -52,6 +52,16 @@ def keygen(path):
     return ' '.join(Path(str(path) + '.pub').read_text().split()[:2])
 
 
+def native_happier(home):
+    """«Тот же аккаунт» выдаётся, только если на сервере есть аккаунт Happier: обычная установка со входом
+    (~/.happier, только файлы — без службы). Выдача ищет его в стенде (happier.home), не в настоящем HOME."""
+    (home / '.happier/servers/cloud').mkdir(parents=True, exist_ok=True)
+    (home / '.happier/settings.json').write_text(json.dumps(dict(schemaVersion=6, activeServerId='cloud', servers=dict(
+        cloud=dict(serverUrl='https://api.example.invalid', webappUrl='https://web.example.invalid')))))
+    (home / '.happier/servers/cloud/access.key').write_text(json.dumps({'token': 'e30.eyJzdWIiOiJzdGFuZCJ9.stand'}))
+    return {'home': str(home)}
+
+
 def write_sshd_conf(d, port, authorized, server_home, bindir):
     (d / 'sshd.conf').write_text(f'''ListenAddress 127.0.0.1
 Port {port}
@@ -109,7 +119,7 @@ def main():
         settings = dict(schema=1, version=1, serverAddress='127.0.0.1', serverPort=port, workerUser=USER, hostKeys=[host_pub],
                         workerAuthorizedKeys=str(authorized), stateDir=str(d / 'issued'), syncFile=str(conf_dir / 'config-sync.json'),
                         nodeCatalog=str(server_home / '.local/share/remote-agents-nodes'), catalogFile=str(catalog),
-                        authLog=[str(d / 'sshd.log')], routes=[{'kind': 'direct'}])
+                        authLog=[str(d / 'sshd.log')], routes=[{'kind': 'direct'}], happier=native_happier(server_home))
 
         def write_settings():
             export_cfg.write_text(json.dumps(settings, ensure_ascii=False))
@@ -615,7 +625,7 @@ def main_channel(upgrade=False):
                 settings = dict(schema=1, version=1, serverAddress='127.0.0.2', serverPort=stand.port, workerUser=USER, hostKeys=[stand.host_pub],
                                 workerAuthorizedKeys=str(stand.authorized), stateDir=str(d / 'issued'), syncFile=str(stand.conf_dir / 'config-sync.json'),
                                 nodeCatalog=str(stand.server_home / '.local/share/remote-agents-nodes'), catalogFile=str(stand.catalog),
-                                authLog=[str(d / 'sshd.log')], routes=[{'kind': 'direct'}],
+                                authLog=[str(d / 'sshd.log')], routes=[{'kind': 'direct'}], happier=native_happier(stand.server_home),
                                 vpnBootstrap=dict(channelFile=str(d / 'channel.json'), vpn=dict(checkUrl=f'https://{SNI}/generate_204', dnsServer='127.0.0.1')))
                 export_cfg.write_text(json.dumps(settings, ensure_ascii=False))
                 export_cfg.chmod(0o600)

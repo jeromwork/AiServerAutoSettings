@@ -48,6 +48,25 @@ def keygen(path):
     return ' '.join(Path(str(path) + '.pub').read_text().split()[:2])
 
 
+def native_happier(home, sub='acc-1'):
+    """Обычная установка Happier (~/.happier) со входом — подделка в стенде: только файлы, без службы."""
+    server = Path(home) / '.happier/servers/cloud'
+    server.mkdir(parents=True, exist_ok=True)
+    (Path(home) / '.happier/settings.json').write_text(json.dumps(dict(
+        schemaVersion=6, activeServerId='cloud', servers=dict(cloud=dict(serverUrl='https://api.example.invalid', webappUrl='https://web.example.invalid')))))
+    payload = base64.urlsafe_b64encode(json.dumps({'sub': sub}).encode()).decode().rstrip('=')
+    (server / 'access.key').write_text(json.dumps({'token': 'e30.' + payload + '.NATIVE-TOKEN'}))
+
+
+def program_account(home, ident, label):
+    """Аккаунт, подключённый программой: закрытый каталог + запись каталога аккаунтов."""
+    (Path(home) / 'secrets/happier/accounts' / ident).mkdir(parents=True)
+    catalog = Path(home) / '.config/remoteagents/accounts'
+    catalog.mkdir(parents=True, exist_ok=True)
+    (catalog / (ident + '.json')).write_text(json.dumps(dict(schema=1, account=ident, label=label, serverUrl='https://api.example.invalid',
+                                                             webappUrl='https://web.example.invalid')))
+
+
 class Env:
     """Изолированный сервер: настройки выдачи, authorized_keys, каталог связи, секреты VPN."""
 
@@ -78,8 +97,9 @@ class Env:
                       hostKeys=[self.host_pub], workerAuthorizedKeys=str(self.auth), stateDir=str(self.dir / 'state'),
                       syncFile=str(self.home / '.config/remoteagents/config-sync.json'),
                       nodeCatalog=str(self.home / '.local/share/remote-agents-nodes'), catalogFile=str(self.catalog),
-                      authLog=[str(self.log)], routes=[{'kind': 'direct'}])
+                      authLog=[str(self.log)], routes=[{'kind': 'direct'}], happier={'home': str(self.home)})
         self.c.update(extra)
+        native_happier(self.home)
         self.write()
 
     def private(self, name, text):
@@ -155,6 +175,59 @@ class ConfigExportTests(unittest.TestCase):
         self.assertEqual(list((self.e.home / '.ssh').iterdir()), [self.e.auth])  # временных файлов не осталось
         self.assertIn(ident, p.stderr.decode())
         print('PASS export: ed25519 из конфига = строка ra-config:<id> <название>; 0600; прежняя строка сохранена')
+
+    def test_happier_same_only_native_install(self):
+        rows = rc.happier_accounts(rc.settings(self.e.cfg))
+        self.assertEqual(len(rows), 1)
+        self.assertRegex(rows[0]['account'], r'^[a-f0-9]{64}$')
+        self.assertNotIn('NATIVE-TOKEN', json.dumps(rows))
+        config, p = self.e.export()
+        self.assertEqual(config['happier'], {'mode': 'same'})  # один аккаунт: выбирает шаг «Аккаунт», id не нужен
+        self.assertNotIn('NATIVE-TOKEN', p.stdout.decode() + p.stderr.decode())
+        print('PASS --happier same: Happier обычной установки виден выдаче, секретов в ответе нет')
+
+    def test_happier_same_refused_without_any_account(self):
+        import shutil
+        shutil.rmtree(self.e.home / '.happier')
+        self.e.auth.write_text('ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExisting existing@host\n')
+        p = self.e.cli('export', '--name', 'Без аккаунта')
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('нет аккаунта Happier', p.stderr.decode())
+        self.assertEqual(p.stdout, b'')
+        self.assertEqual(self.lines(), ['ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExisting existing@host'])  # ключ не создан
+        self.assertFalse((Path(rc.settings(self.e.cfg)['stateDir']) / 'config-events.log').exists())
+        config, _ = self.e.export('Новый', '--happier', 'new:Сын')  # новый аккаунт создаёт компьютер — проверка не нужна
+        self.assertEqual(config['happier'], {'mode': 'new', 'label': 'Сын'})
+        print('PASS --happier same без аккаунта на сервере: отказ до ключа; new: выдаётся')
+
+    def test_happier_same_native_and_program_needs_choice(self):
+        program = 'b' * 64
+        program_account(self.e.home, program, 'Второй')
+        rows = rc.happier_accounts(rc.settings(self.e.cfg))
+        self.assertEqual(len(rows), 2)
+        native = [r['account'] for r in rows if r['account'] != program][0]
+        p = self.e.cli('export', '--name', 'Двое')
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('несколько аккаунтов', p.stderr.decode())
+        self.assertIn(program, p.stderr.decode())
+        self.assertIn('same:', p.stderr.decode())
+        self.assertFalse(self.e.auth.exists() and 'ra-config:' in self.e.auth.read_text())
+        config, _ = self.e.export('По подписи', '--happier', 'same:Второй')
+        self.assertEqual(config['happier'], {'mode': 'same', 'account': program})
+        config, _ = self.e.export('По id', '--happier', 'same:' + native)
+        self.assertEqual(config['happier'], {'mode': 'same', 'account': native})
+        p = self.e.cli('export', '--name', 'Мимо', '--happier', 'same:Третий')
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('не найден', p.stderr.decode())
+        self.e.c['happier']['account'] = 'Второй'  # подпись из настроек выдачи выбирает однозначно
+        self.e.write()
+        config, _ = self.e.export('Из настроек')
+        self.assertEqual(config['happier'], {'mode': 'same', 'label': 'Второй', 'account': program})
+        program_account(self.e.home, 'c' * 64, 'Второй')
+        p = self.e.cli('export', '--name', 'Неоднозначно')
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('не однозначен', p.stderr.decode())
+        print('PASS --happier same: обычная установка + программный аккаунт — id в конфиге только при однозначном выборе')
 
     def test_new_authorized_keys_and_ssh_directory_created(self):
         self.e.auth.unlink(missing_ok=True)

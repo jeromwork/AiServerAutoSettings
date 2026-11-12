@@ -219,6 +219,9 @@ namespace RemoteAgents.Launcher
             Check(Json.Str(account, "serverUrl") == "https://api.example" && Json.Str(account, "label") == "Мой аккаунт", "Account request");
             var issued = Json.Map(Json.Parse("{\"happier\":{\"mode\":\"same\",\"serverUrl\":\"https://api.example\",\"webappUrl\":\"https://app.example\"}}"));
             Check(Json.Str(ConfigRequests.Account(issued, new Dictionary<string, object>(), new Dictionary<string, object>()), "mode") == "same", "same account without a key (server export) asks the engine to pick the existing account");
+            Check(!ConfigRequests.Account(issued, new Dictionary<string, object>(), new Dictionary<string, object>()).ContainsKey("account"), "one account on the server: no id needed");
+            Json.Map(issued["happier"])["account"] = new string('a', 64);
+            Check(Json.Str(ConfigRequests.Account(issued, new Dictionary<string, object>(), new Dictionary<string, object>()), "account") == new string('a', 64), "pinned account id reaches the engine (Connect-WizardProfileAccount)");
             Throws<IOException>(() => ConfigRequests.Account(new Dictionary<string, object> { { "happier", new Dictionary<string, object>() } }, new Dictionary<string, object>(), new Dictionary<string, object>()), "Happier without addresses refused clearly");
             var lan = ConfigRequests.Lan(home, p, Json.Map(Json.Parse("{\"lan\":{\"connections\":[{\"name\":\"old\"}]}}")));
             Check(lan.Item1.Length == 1 && Json.Str(lan.Item1[0], "name") == "office" && lan.Item2.SequenceEqual(new[] { "old" }), "LAN: add new, remove gone");

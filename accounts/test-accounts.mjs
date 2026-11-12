@@ -4,9 +4,9 @@ import path from 'node:path';
 import os from 'node:os';
 import http from 'node:http';
 import crypto from 'node:crypto';
-import {spawnSync} from 'node:child_process';
+import {spawnSync,spawn} from 'node:child_process';
 import {pathToFileURL} from 'node:url';
-import {connectAccount as connectRaw,normalizeKey,listAccounts,accountLabel} from './server-account.mjs';
+import {connectAccount as connectRaw,normalizeKey,listAccounts,accountLabel,inspectAccount} from './server-account.mjs';
 const connectAccount=(input,...args)=>connectRaw({serverUrl:'https://api.example.invalid',webappUrl:'https://web.example.invalid',...input},...args);
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'happier-accounts-test-'));
 const packageRoot=process.env.HAPPIER_TEST_PACKAGE_ROOT || path.dirname(fs.realpathSync(path.join(os.homedir(),'.local/bin/happier')));
@@ -94,5 +94,47 @@ try {
         assert.ok(value.ok);
     `],{env:{...process.env,HOME:path.join(root,'isolated-package')},encoding:'utf8',timeout:30000});
     check(child.status===0); // Never print vendor diagnostics, even on test failure.
-    console.log('OK: '+checks+' account checks (fake HTTP server; installed Happier protocol crypto; no live accounts)');
+    // Happier's own install (~/.happier, its own daemon): listed and inspected like a program account, read only.
+    const nativeHome=(base,sub,token='fake-token')=>{
+        const dir=path.join(base,'.happier','servers','cloud');fs.mkdirSync(dir,{recursive:true});
+        fs.writeFileSync(path.join(base,'.happier','settings.json'),JSON.stringify({schemaVersion:6,activeServerId:'cloud',servers:{cloud:{id:'cloud',serverUrl:'https://api.example.invalid/',webappUrl:'https://web.example.invalid'}},lastTokenSubByServerId:{cloud:sub}}));
+        const jwt=['e30',Buffer.from(JSON.stringify({sub})).toString('base64url'),token].join('.');
+        fs.writeFileSync(path.join(dir,'access.key'),JSON.stringify({token:jwt,encryption:{publicKey:'PUBLIC',machineKey:'NATIVE-MACHINE-KEY'}}),{mode:0o600});
+        return jwt;
+    };
+    const only=path.join(root,'native-only');
+    check(listAccounts(only).accounts.length===0); // no ~/.happier and no program accounts: nothing
+    nativeHome(only,'acc-1');
+    const listed=listAccounts(only).accounts;
+    check(listed.length===1 && /^[a-f0-9]{64}$/.test(listed[0].account) && listed[0].serverUrl==='https://api.example.invalid' && listed[0].webappUrl==='https://web.example.invalid');
+    const shown=JSON.stringify(listed);check(!shown.includes('fake-token') && !shown.includes('NATIVE-MACHINE-KEY') && !shown.includes('acc-1'));
+    nativeHome(only,'acc-1','renewed-token');check(listAccounts(only).accounts[0].account===listed[0].account); // stable across token renewal
+    nativeHome(only,'acc-2');check(listAccounts(only).accounts[0].account!==listed[0].account); // another login, another id
+    const jwt=nativeHome(only,'acc-1');
+    fs.rmSync(path.join(only,'.happier','servers','cloud','access.key'));check(listAccounts(only).accounts.length===0); // no credentials: not an account
+    fs.writeFileSync(path.join(only,'.happier','access.key'),JSON.stringify({token:jwt,secret:'LEGACY'}));check(listAccounts(only).accounts[0]?.account===listed[0].account); // legacy key file
+    nativeHome(only,'acc-1');
+    // Native + program accounts side by side; ids never collide.
+    nativeHome(root,'acc-1');
+    const mixed=listAccounts(root).accounts;
+    check(mixed.length===3 && mixed[0].account===listed[0].account && new Set(mixed.map(a=>a.account)).size===3 && mixed.some(a=>a.account===one.account));
+    // inspect: a live daemon process from its state file + the server lists its machine as active for this token.
+    const daemon=spawn(process.execPath,['-e','setTimeout(()=>{},60000)','daemon'],{stdio:'ignore'});
+    try {
+        const state=path.join(only,'.happier','servers','cloud','daemon.state.json');
+        fs.writeFileSync(state,JSON.stringify({pid:daemon.pid,machineId:'machine-1',controlToken:'CONTROL'}));
+        const before=fs.readdirSync(path.join(only,'.happier'),{recursive:true}).sort().map(f=>{const s=fs.statSync(path.join(only,'.happier',f));return f+':'+s.mtimeMs+':'+s.mode;}).join('|');
+        let seen='';const answer=active=>async(url,options)=>{seen=url+' '+options.headers.Authorization;return {ok:true,json:async()=>[{id:'machine-1',active}]};};
+        check((await inspectAccount(listed[0].account,only,answer(true))).ok===true && seen==='https://api.example.invalid/v1/machines Bearer '+jwt);
+        check((await inspectAccount(listed[0].account,only,answer(false))).ok===false); // daemon present but the server sees it offline
+        check((await inspectAccount(listed[0].account,only,async()=>({ok:false}))).ok===false); // expired/revoked token
+        fs.writeFileSync(state,JSON.stringify({pid:process.pid,machineId:'machine-1'}));
+        check((await inspectAccount(listed[0].account,only,answer(true))).ok===false); // pid alive but not a daemon
+        fs.writeFileSync(state,JSON.stringify({pid:daemon.pid,machineId:'machine-1'}));
+        const after=fs.readdirSync(path.join(only,'.happier'),{recursive:true}).sort().map(f=>{const s=fs.statSync(path.join(only,'.happier',f));return f+':'+s.mtimeMs+':'+s.mode;}).join('|');
+        check(before.replace(/daemon\.state\.json:[^|]*/,'')===after.replace(/daemon\.state\.json:[^|]*/,'')); // inspect wrote/chmodded nothing
+        daemon.kill();await new Promise(resolve=>daemon.once('exit',resolve));
+        check((await inspectAccount(listed[0].account,only,answer(true))).ok===false); // daemon stopped
+    } finally { daemon.kill(); }
+    console.log('OK: '+checks+' account checks (fake HTTP server; installed Happier protocol crypto; fake ~/.happier; no live accounts)');
 } finally {server.closeAllConnections();await new Promise(resolve=>server.close(resolve));fs.rmSync(root,{recursive:true,force:true});}

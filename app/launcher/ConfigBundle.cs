@@ -87,7 +87,7 @@ namespace RemoteAgents.Launcher
                     "hostKeys", A(S(4096, 1, "^[^\\r\\n\\x00]+$"), 32), "key", Ref("server-key"), "rootPassword", Ref("server-root-password"), "routes", A(route, 32))),
                 "connection", O(D("enabled", B())),
                 "bridge", O(D("enabled", B(), "allowShell", B())),
-                "happier", O(D("mode", E("same", "new"), "label", S(80, 1), "serverUrl", Url(), "webappUrl", Url(), "key", Ref("happier-key"))),
+                "happier", O(D("mode", E("same", "new"), "account", S(64, 64, "^[a-f0-9]{64}$"), "label", S(80, 1), "serverUrl", Url(), "webappUrl", Url(), "key", Ref("happier-key"))),
                 "disk", O(D("base", S(1024, 1, "^[^\\r\\n\\x00]+$"), "folders", A(S(1024, 1, "^[^\\\\<>:\"|?*\\x00-\\x1f]+$")))),
                 "vpn", O(D("enabled", B(), "checkUrl", Url(), "dnsServer", S(253, 1), "bootstrap", bootstrap)),
                 "proxyOut", Proxy(),
@@ -355,7 +355,7 @@ namespace RemoteAgents.Launcher
                 result["server"] = "сейчас " + Endpoint(oldServer) + " / в конфиге " + Endpoint(merged);
             }
             var oldAccount = Json.Map(Json.Get(before, "happier")); var account = Json.Map(Json.Get(p.Profile, "happier"));
-            bool different = new[]{"mode", "label", "serverUrl", "webappUrl"}.Any(k => account.ContainsKey(k) && oldAccount.ContainsKey(k) && Json.Encode(account[k]) != Json.Encode(oldAccount[k]));
+            bool different = new[]{"mode", "account", "label", "serverUrl", "webappUrl"}.Any(k => account.ContainsKey(k) && oldAccount.ContainsKey(k) && Json.Encode(account[k]) != Json.Encode(oldAccount[k]));
             string oldKey = Json.Str(Json.Map(Json.Get(oldAccount, "key")), "secret"), key = Json.Str(Json.Map(Json.Get(account, "key")), "secret");
             if (key.Length > 0 && oldAccount.Count > 0) {
                 if (oldKey != key) different = true;

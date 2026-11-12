@@ -409,6 +409,8 @@ namespace RemoteAgents.Launcher
             // «Тот же аккаунт» without a key (what `remoteagents config export` issues): the engine selects and live-checks
             // the server's existing account (docs/CONFIG-ENGINE.md, Account mode:"same"); no recovery key travels.
             if (Json.Str(h, "mode") != "new" && SecretName(Json.Get(h, "key")).Length == 0) request["mode"] = "same";
+            // Several accounts on the server: the exporter pins the public id (accounts/server-account.mjs list).
+            if (request.ContainsKey("mode") && Json.Str(h, "account").Length > 0) request["account"] = Json.Str(h, "account");
             return request;
         }
         internal static string IpCheckUrl(Dictionary<string, object> p, Dictionary<string, object> config)

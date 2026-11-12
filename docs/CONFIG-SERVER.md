@@ -25,7 +25,8 @@
    - `vpnBootstrap` — «VPN первым»: `channelFile` (JSON канала, 0600), `entryFiles`
      (имя узла каталога → его `client.json`, 0600, нужны все включённые), `hops` (имя перехода каталога →
      `host, port, user, keyFile`), `vpn {checkUrl, dnsServer}` — свой HTTPS-адрес проверки и DNS;
-   - `happier {account, serverUrl, webappUrl}` — необязательно;
+   - `happier {account, serverUrl, webappUrl, home}` — необязательно; `account` — подпись (при нескольких аккаунтах
+     на сервере выбирает один), `home` — где искать аккаунты (по умолчанию HOME рабочего пользователя);
    - необязательные пути: `workerAuthorizedKeys`, `stateDir`, `syncFile`, `nodeCatalog`, `authLog`.
 3. Запускать от root (читает секреты из `/root/...`, пишет в authorized_keys рабочего пользователя с его владельцем)
    или от самого рабочего пользователя, если все файлы ему доступны.
@@ -34,13 +35,18 @@
 
 ```sh
 remoteagents config export --name "Ноутбук сына" --master-password-stdin --output /root/laptop.json
-# необязательно: --vpn on|off|channel (по умолчанию on, если есть vpnBootstrap), --happier same|new:Имя (по умолчанию same),
+# необязательно: --vpn on|off|channel (по умолчанию on, если есть vpnBootstrap),
+#                --happier same|same:<подпись или id>|new:Имя (по умолчанию same),
 #                --folders "Проект,Проект/docs"
 ```
 
 Что происходит:
 
 1. Проверяются настройки и все файлы секретов (права 0600) — **до** создания ключа: при ошибке ничего не меняется.
+   Для `--happier same` проверяется, что на сервере есть аккаунт Happier (подключённый программой или обычная
+   установка `~/.happier` со входом; список — `accounts/server-account.mjs list`). Нет ни одного — отказ.
+   Несколько — нужен однозначный выбор (`--happier same:<подпись или id>` или подпись `happier.account` в настройках),
+   тогда его id пишется в конфиг как `happier.account`; иначе отказ со списком аккаунтов.
 2. `ssh-keygen` создаёт новую пару ed25519 (без пароля, во временном каталоге 0700, затем удаляется).
 3. Под `flock` (`<stateDir>/config.lock`) открытая часть дописывается в authorized_keys рабочего пользователя строкой
    `ssh-ed25519 AAAA… ra-config:<id> <название>` — через `O_APPEND` проверенного файла, поэтому параллельный `>>`
