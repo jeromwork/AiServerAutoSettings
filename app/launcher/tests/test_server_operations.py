@@ -1,6 +1,6 @@
 """Detached server operations (server-wizard.sh start/status/ensure/run) in a disposable HOME.
 
-Fake bootstrap scripts stand in for the Happier/Syncthing installers; nothing is downloaded."""
+Fake bootstrap scripts stand in for the Happier/Syncthing/Telegram installers; nothing is downloaded."""
 import json
 import os
 from pathlib import Path
@@ -18,16 +18,17 @@ while [ ! -f "$HOME/release-$1" ]; do sleep 0.05; done
 code=$(cat "$HOME/release-$1")
 if [ "$code" != 0 ]; then echo 'curl: (28) Connection timed out token=abc123 after 120000 ms' >&2; fi
 if [ "$1" = happier ] && [ "$code" = 0 ]; then mkdir -p "$HOME/.local/bin"; printf '#!/bin/sh\n' > "$HOME/.local/bin/happier"; chmod +x "$HOME/.local/bin/happier"; fi
+if [ "$1" = tg-gateway ] && [ "$code" = 0 ]; then touch "$HOME/gateway-ready"; fi
 exit "$code"
 """
 
 
 class ServerOperationTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix='ra-ops-')
+        self.tmp = tempfile.TemporaryDirectory(prefix='.test-ra-ops-', dir=ROOT)
         self.home = Path(self.tmp.name)
         h = self.home
-        for rel in ('.local/share/remoteagents-wizard', '.local/share/remoteagents-accounts', '.local/share/remote-disk', '.local/bin'):
+        for rel in ('.local/share/remoteagents-wizard', '.local/share/remoteagents-accounts', '.local/share/remote-disk', '.local/share/remoteagents-wizard/tg-gateway', '.local/opt/tg-gateway', '.local/bin'):
             (h / rel).mkdir(parents=True)
         # The window uploads LF; a CRLF checkout is normalized at that boundary.
         source = (ROOT / 'build/server-wizard.sh').read_bytes().replace(b'\r\n', b'\n')
@@ -36,6 +37,8 @@ class ServerOperationTests(unittest.TestCase):
         install.write_text(FAKE_INSTALL)
         (h / '.local/share/remoteagents-accounts/bootstrap.sh').write_text('exec bash "$HOME/fake-install.sh" happier\n')
         (h / '.local/share/remote-disk/server-disk.sh').write_text('[ "$1" = bootstrap ] || exit 9\nexec bash "$HOME/fake-install.sh" disk\n')
+        (h / '.local/share/remoteagents-wizard/tg-gateway/install.sh').write_text('exec bash "$HOME/fake-install.sh" tg-gateway\n')
+        (h / '.local/opt/tg-gateway/tg_gateway_setup.py').write_text('from pathlib import Path\nimport sys\nsys.exit(0 if (Path.home()/"gateway-ready").exists() else 1)\n')
         (h / '.local/share/remoteagents-wizard/server-transport-catalog.py').write_text('print("{}")\n')
         # The helper puts ~/.local/bin first in PATH. Fake systemd-run --scope records the unit and execs the command (fds inherited).
         (h / '.local/bin/systemctl').write_text('#!/bin/sh\nexit 0\n')
@@ -45,12 +48,12 @@ class ServerOperationTests(unittest.TestCase):
         self.env = dict(os.environ, HOME=str(h), PATH=os.environ['PATH'], XDG_RUNTIME_DIR=str(h))
 
     def tearDown(self):
-        for op in ('happier', 'disk'):
+        for op in ('happier', 'disk', 'tg-gateway'):
             release = self.home / ('release-' + op)
             if not release.exists():
                 release.write_text('0')
         deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and any(self.state(op)['state'] == 'running' for op in ('happier', 'disk')):
+        while time.monotonic() < deadline and any(self.state(op)['state'] == 'running' for op in ('happier', 'disk', 'tg-gateway')):
             time.sleep(0.05)
         self.tmp.cleanup()
 
@@ -120,14 +123,27 @@ class ServerOperationTests(unittest.TestCase):
         self.assertEqual(self.wait('disk', 'finished')['exitCode'], 0)
         self.assertEqual(len(self.runs('disk')), 2)
 
-    def test_repair_starts_both_and_returns_at_once(self):
+    def test_repair_starts_all_components_and_returns_at_once(self):
         # Without a user manager the plain setsid/nohup session is used.
         (self.home / '.local/bin/systemd-run').unlink()
         result = self.call('repair', '1', '1', '1')
         self.assertEqual(result['happier']['state'], 'running')
         self.assertEqual(result['disk']['state'], 'running')
+        self.assertEqual(result['tg-gateway']['state'], 'running')
         inspect = self.call('inspect', streamed=True)
         self.assertEqual(inspect['operations']['happier']['state'], 'running')
+
+    def test_gateway_ensure_readiness_failure_and_retry(self):
+        self.assertFalse(self.call('inspect')['tgGateway'])
+        self.assertEqual(self.call('ensure', 'tg-gateway')['state'], 'running')
+        (self.home / 'release-tg-gateway').write_text('7')
+        self.assertEqual(self.wait('tg-gateway', 'failed')['exitCode'], 7)
+        (self.home / 'release-tg-gateway').write_text('0')
+        self.call('ensure', 'tg-gateway')
+        self.wait('tg-gateway', 'finished')
+        self.assertTrue(self.call('inspect')['tgGateway'])
+        self.assertTrue(self.call('ensure', 'tg-gateway')['ready'])
+        self.assertEqual(len(self.runs('tg-gateway')), 2)
 
     def test_interrupted_operation_is_reported_failed(self):
         state = self.home / '.local/state/remoteagents-wizard'

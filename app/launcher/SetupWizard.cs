@@ -225,7 +225,7 @@ namespace RemoteAgents.Launcher
             Button(0,"Файл ключа…",207,()=>{string dir=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),".ssh");using(var d=new OpenFileDialog {Title="Файл закрытого ключа SSH",InitialDirectory=Directory.Exists(dir)?dir:"",CheckFileExists=true})if(d.ShowDialog(this)==DialogResult.OK)keyFile.Text=d.FileName;return Task.FromResult(0);},481,110);
             password.Enabled=host.Length==0;originalAddress=host;originalLogin=user;
             installMissing=Check(0,"Установить недостающие службы сервера",242,true);
-            inventory=Hint(0,"Root используется только для создания рабочего пользователя remoteagents.",50,90);Technical(0,inventory);
+            inventory=Hint(0,"Root используется только для создания рабочего пользователя remoteagents.",50,110);Technical(0,inventory);
             if(!Product.IsVpn){
                 var inviteLink=new LinkLabel {Left=16,Top=478,Width=560,Height=26,Text="Открыть приглашение… (можно перетащить или вставить путь Ctrl+V)"};sections[0].Controls.Add(inviteLink);
                 Action<string> openInvite=path=>{try{Invitation.Stage(home,path.Trim('"'));InviteWindow.Display(home,bundle);if(!Invitation.Pending(home)){DialogResult=DialogResult.OK;Close();}}catch(Exception e){Append(e.Message);}};
@@ -447,6 +447,8 @@ namespace RemoteAgents.Launcher
                 lastOperations[pair.Key]=op;TrackOperation(pair.Key);
                 if(!applied[pair.Value]){waiting[pair.Value]=pair.Key;results[pair.Value]=Json.Str(op,"text");}
             }
+            var gateway=Json.Map(Json.Get(operations,"tg-gateway"));
+            if(new[]{"running","failed"}.Contains(Json.Str(gateway,"state"))){lastOperations["tg-gateway"]=gateway;TrackOperation("tg-gateway");}
             if(pendingAccount){waiting[3]="happier";TrackOperation("happier");}
             RefreshInstall();
         }
@@ -612,7 +614,7 @@ namespace RemoteAgents.Launcher
                             routeHopPassword.Clear();routeHint.Visible=false;
                         }
                         var saved=new Configuration(home).Data;var profile=Json.Read(Json.Text(Json.Map(Json.Get(saved,"wizard")),"pendingProfile",Json.Str(Json.Map(Json.Get(saved,"transport")),"profilePath")));login.Text=Json.Str(profile,"login");originalAddress=address.Text.Trim();originalLogin=login.Text.Trim();password.Enabled=false;
-                        inventory.Text="SSH: проверен\r\n"+string.Join("\r\n",new[]{"disk","happier","bridge","catalog"}.Select(k=>(k=="disk"?"Диск-сервер":k=="happier"?"Happier (программа)":k=="bridge"?"Серверная часть моста":"Каталог узлов")+": "+(Json.Bool(result,k)?"обнаружен / проверен":"отсутствует или не отвечает")));
+                        inventory.Text="SSH: проверен\r\n"+string.Join("\r\n",new[]{"disk","happier","bridge","catalog","tgGateway"}.Select(k=>(k=="disk"?"Диск-сервер":k=="happier"?"Happier (программа)":k=="bridge"?"Серверная часть моста":k=="tgGateway"?"Шлюз Telegram":"Каталог узлов")+": "+(Json.Bool(result,k)?"обнаружен / проверен":"отсутствует или не отвечает")));
                         var services=Json.Map(Json.Get(result,"services"));if(api.Text.Length==0)api.Text=Json.Str(services,"serverUrl");if(web.Text.Length==0)web.Text=Json.Str(services,"webappUrl");
                         TrackServer(Json.Map(Json.Get(result,"operations")));
 

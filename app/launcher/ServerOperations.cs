@@ -19,7 +19,7 @@ namespace RemoteAgents.Launcher
     {
         internal const string Account = "account";
         static readonly Dictionary<string, string> titles = new Dictionary<string, string> {
-            { "happier", "Установка Happier" }, { "disk", "Сервер диска (Syncthing)" }, { Account, "Подключение аккаунта Happier" } };
+            { "happier", "Установка Happier" }, { "disk", "Сервер диска (Syncthing)" }, { "tg-gateway", "Шлюз Telegram" }, { Account, "Подключение аккаунта Happier" } };
         internal static string Title(string name) { string t; return titles.TryGetValue(name, out t) ? t : name; }
         internal static string StatePath(string home) { return Path.Combine(home, "state", "server-operations.json"); }
         internal static List<ServerOperation> Parse(Dictionary<string, object> operations, IEnumerable<string> tracked, bool pendingAccount)

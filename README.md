@@ -119,3 +119,5 @@ VPN для HAPP использует Xray с VLESS/REALITY на TCP 8443. Сер
 ## Синхронизация папок RemoteDisk
 
 `04-disk.cmd` устанавливает Syncthing Tray и канал sing-box для папок `~/Disk/<имя>` на сервере. Добавляйте папки через контекстное меню Windows или `disk/Add-RemoteDiskFolder.ps1`. [Установка и проверки](disk/README.md).
+
+Шлюз Telegram Bot API устанавливается мастером настройки сервера автоматически: [как выдать ключ клиенту](docs/TG-GATEWAY.md).

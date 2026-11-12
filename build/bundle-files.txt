@@ -71,3 +71,10 @@ disk/Disk.NavPane.ps1
 build/Wizard.Invite.ps1
 
 build/Wizard.Refresh.ps1
+
+# Telegram gateway: source only, never tls/ or state/.
+server/tg-gateway/gateway.py
+server/tg-gateway/tg_gateway_keys.py
+server/tg-gateway/tg_gateway_setup.py
+server/tg-gateway/install.sh
+server/tg-gateway/README.md

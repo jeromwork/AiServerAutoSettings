@@ -58,7 +58,7 @@ elif a[0]=='end':
   reason=reason or 'код '+str(code)
  s.update(finished=now(),exitCode=code,reason=reason);save(a[1],s)
 PYCODE
-valid_op() { case "${1:-}" in happier|disk) return 0;; *) echo 'Неизвестная операция' >&2; exit 2;; esac; }
+valid_op() { case "${1:-}" in happier|disk|tg-gateway) return 0;; *) echo 'Неизвестная операция' >&2; exit 2;; esac; }
 op_status() { python3 -c "$ops_py" status "$@"; }
 op_start() {
     # Lock is taken here and inherited by the detached runner: a second start sees it held.
@@ -78,9 +78,10 @@ op_start() {
     exec 9>&-
 }
 happier_ready() { test -x "$HOME/.local/bin/happier" && systemctl --user show-environment >/dev/null 2>&1; }
+gateway_ready() { python3 -I "$HOME/.local/opt/tg-gateway/tg_gateway_setup.py" --check >/dev/null 2>&1; }
 case "${1:-inspect}" in
 inspect)
-RA_OPS=$(op_status happier disk 2>/dev/null || echo '{}') python3 - <<'PYCODE'
+RA_OPS=$(op_status happier disk tg-gateway 2>/dev/null || echo '{}') python3 - <<'PYCODE'
 import json,os,subprocess,urllib.request,xml.etree.ElementTree as E
 from pathlib import Path
 h=Path.home()
@@ -91,6 +92,10 @@ disk=False
 try:
  c=E.parse(h/'.local/share/remote-disk/config.xml').getroot();g=c.find('gui');req=urllib.request.Request('http://'+g.findtext('address')+'/rest/system/status',headers={'X-API-Key':g.findtext('apikey')});disk=bool(json.load(urllib.request.urlopen(req,timeout=4)).get('myID'))
 except Exception:pass
+gateway=False
+try:
+ gateway=subprocess.run(['python3','-I',str(h/'.local/opt/tg-gateway/tg_gateway_setup.py'),'--check'],timeout=5,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
+except (OSError,subprocess.TimeoutExpired):pass
 settings={}
 f=h/'.config/remoteagents/services.json'
 if f.exists():
@@ -98,7 +103,7 @@ if f.exists():
  except Exception:pass
 try:ops=json.loads(os.environ.get('RA_OPS') or '{}')
 except Exception:ops={}
-print(json.dumps(dict(schema=1,user=os.environ.get('USER',''),root=os.getuid()==0,disk=disk,happier=(h/'.local/bin/happier').is_file(),userManager=active('default.target'),bridge=all((h/'.local/share/codex-remote'/n).is_file() for n in ['codex-windows-bridge.py','server_node_catalog.py']),catalog=(h/'.config/remoteagents/transport-catalog.json').is_file(),services={k:settings.get(k,'') for k in ['serverUrl','webappUrl']},operations=ops)))
+print(json.dumps(dict(schema=1,user=os.environ.get('USER',''),root=os.getuid()==0,disk=disk,tgGateway=gateway,happier=(h/'.local/bin/happier').is_file(),userManager=active('default.target'),bridge=all((h/'.local/share/codex-remote'/n).is_file() for n in ['codex-windows-bridge.py','server_node_catalog.py']),catalog=(h/'.config/remoteagents/transport-catalog.json').is_file(),services={k:settings.get(k,'') for k in ['serverUrl','webappUrl']},operations=ops)))
 PYCODE
 ;;
 status)
@@ -113,6 +118,7 @@ ensure)
 valid_op "${2:-}"
 ready=false
 if [ "$2" = happier ] && happier_ready && [ "$(op_status happier | python3 -c 'import json,sys;print(json.load(sys.stdin)["happier"]["state"])')" != running ]; then ready=true; fi
+if [ "$2" = tg-gateway ] && gateway_ready && [ "$(op_status tg-gateway | python3 -c 'import json,sys;print(json.load(sys.stdin)["tg-gateway"]["state"])')" != running ]; then ready=true; fi
 if [ "$ready" = false ]; then op_start "$2"; fi
 op_status "$2" | python3 -c 'import json,sys;r=json.load(sys.stdin)[sys.argv[1]];r["ready"]=sys.argv[2]=="true";print(json.dumps(r,ensure_ascii=False))' "$2" "$ready"
 ;;
@@ -122,6 +128,7 @@ export REMOTEAGENTS_STEP_FILE="$state_dir/$op.step"
 # Step file: "k/n text" — stage k of n, shown with the elapsed time (never an estimate).
 case "$op" in
 happier) command=(bash "$HOME/.local/share/remoteagents-accounts/bootstrap.sh");;
+tg-gateway) command=(bash "$HOME/.local/share/remoteagents-wizard/tg-gateway/install.sh"); printf '%s\n' '1/1 Устанавливаю шлюз Telegram и проверяю HTTPS' > "$REMOTEAGENTS_STEP_FILE";;
 disk) command=(bash "$HOME/.local/share/remote-disk/server-disk.sh" bootstrap); printf '%s\n' '1/1 Загружаю, проверяю и запускаю Syncthing' > "$REMOTEAGENTS_STEP_FILE";;
 esac
 if timeout 1800 "${command[@]}" 9>&-; then code=0; else code=$?; fi
@@ -134,8 +141,9 @@ for tool in python3 curl tar flock systemctl setsid; do command -v "$tool" >/dev
 # Long installs only start here; the window follows them with «status».
 if [ "${2:-1}" = 1 ]; then op_start disk; fi
 if [ "${3:-1}" = 1 ]; then op_start happier; fi
+if [ "${5:-1}" = 1 ]; then op_start tg-gateway; fi
 if [ "${4:-1}" = 1 ]; then python3 "$HOME/.local/share/remoteagents-wizard/server-transport-catalog.py" get >/dev/null; fi
-op_status happier disk
+op_status happier disk tg-gateway
 ;;
 *) exit 2;;
 esac

@@ -32,6 +32,9 @@ class PackagingTests(unittest.TestCase):
             self.assertIn('Start-WindowsControl.ps1', names)
             self.assertIn('disk/Install-RemoteDisk.ps1', names)
             self.assertIn('selftest.ps1', names)
+            for name in ('gateway.py', 'tg_gateway_keys.py', 'tg_gateway_setup.py', 'install.sh', 'README.md'):
+                self.assertIn('server/tg-gateway/' + name, names)
+            self.assertFalse(any(n.startswith(('server/tg-gateway/tls/', 'server/tg-gateway/state/')) for n in names))
             self.assertFalse(any(n.endswith(('.exe', '.dll', '.key', '.pem')) for n in names))
             self.assertFalse(any(n.startswith(('app/', 'profiles/')) for n in names))
             definition = json.loads(z.read('components.json').decode('utf-8-sig'))

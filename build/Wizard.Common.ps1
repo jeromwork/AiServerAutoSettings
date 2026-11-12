@@ -10,7 +10,7 @@
 # All state is observed again. This model is also exercised with fake SSH on Linux.
 function Get-WizardPlan($Server,$Local) {
     @(
-        @{id='server';ready=[bool]$Server.ssh;repair=(-not $Server.disk -or -not $Server.happier -or -not $Server.bridge -or -not $Server.catalog)}
+        @{id='server';ready=[bool]$Server.ssh;repair=(-not $Server.disk -or -not $Server.happier -or -not $Server.bridge -or -not $Server.catalog -or -not $Server.tgGateway)}
         @{id='connection';ready=[bool]$Local.transport}
         @{id='disk';ready=([bool]$Local.disk -and [bool]$Server.disk)}
         @{id='happier';ready=[bool]$Local.account}
@@ -31,6 +31,11 @@ function Send-WizardHelpers([string]$Root,[string]$Bundle) {
         'build/server-wizard.sh'='.local/share/remoteagents-wizard/server-wizard.sh'
         'transport/server-transport-catalog.py'='.local/share/remoteagents-wizard/server-transport-catalog.py'
         'accounts/server-account.mjs'='.local/share/remoteagents-accounts/server-account.mjs'
+        'server/tg-gateway/gateway.py'='.local/share/remoteagents-wizard/tg-gateway/gateway.py'
+        'server/tg-gateway/tg_gateway_keys.py'='.local/share/remoteagents-wizard/tg-gateway/tg_gateway_keys.py'
+        'server/tg-gateway/tg_gateway_setup.py'='.local/share/remoteagents-wizard/tg-gateway/tg_gateway_setup.py'
+        'server/tg-gateway/install.sh'='.local/share/remoteagents-wizard/tg-gateway/install.sh'
+        'server/tg-gateway/README.md'='.local/share/remoteagents-wizard/tg-gateway/README.md'
         'accounts/bootstrap.sh'='.local/share/remoteagents-accounts/bootstrap.sh'
         'disk/server-disk.sh'='.local/share/remote-disk/server-disk.sh'
         'disk/stignore.txt'='.local/share/remote-disk/stignore.txt'
@@ -58,11 +63,11 @@ function Get-WizardServer([string]$Root,[string]$Bundle) {
     return $server
 }
 function Add-WizardOperationText($Operations) {
-    foreach($p in @($Operations.PSObject.Properties)){$title=if($p.Name -eq 'disk'){'установка сервера диска'}else{'установка Happier'};$p.Value|Add-Member -Force text (Get-WizardOperationText $p.Value $title)}
+    foreach($p in @($Operations.PSObject.Properties)){$title=if($p.Name -eq 'disk'){'установка сервера диска'}elseif($p.Name -eq 'tg-gateway'){'установка шлюза Telegram'}else{'установка Happier'};$p.Value|Add-Member -Force text (Get-WizardOperationText $p.Value $title)}
 }
 function Get-WizardOperation([string]$Root,[string]$Bundle,[string]$Verb,[string[]]$Operations) {
     # Long server installs run detached (server-wizard.sh start/run); the window only makes short calls.
-    foreach($op in $Operations){if($op -notin @('happier','disk')){throw 'Неизвестная операция сервера'}}
+    foreach($op in $Operations){if($op -notin @('happier','disk','tg-gateway')){throw 'Неизвестная операция сервера'}}
     if($Verb -eq 'status'){
         # Read-only and streamed: works before the helpers are uploaded.
         $text=Invoke-WizardSsh $Root ('bash -s -- status '+($Operations -join ' ')) ([IO.File]::ReadAllText((Join-Path $Bundle 'build/server-wizard.sh'))) 30
@@ -336,8 +341,8 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             if($Request.installMissing){
                 Write-WizardProgress 'Устанавливаю недостающие службы сервера…'
                 Send-WizardHelpers $Root $Bundle
-                $flags=@([int](-not $server.disk),[int](-not $server.happier),[int](-not $server.catalog)) -join ' '
-                # Happier/Disk installs only START here, detached on the server (closing the window or
+                $flags=@([int](-not $server.disk),[int](-not $server.happier),[int](-not $server.catalog),[int](-not $server.tgGateway)) -join ' '
+                # Happier/Disk/Telegram gateway installs only START here, detached on the server (closing the window or
                 # the PC does not stop them); their sections follow them with short «status» calls.
                 try{[void](Invoke-WizardSsh $Root ('bash "$HOME/.local/share/remoteagents-wizard/server-wizard.sh" repair '+$flags) '' 120)}catch{
                     $observed=Get-WizardServer $Root $Bundle
@@ -347,7 +352,7 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
                 $server=Get-WizardServer $Root $Bundle
             }
             if(-not $server.userManager){throw 'Нет user systemd. Администратору сервера: sudo loginctl enable-linger <пользователь>; sudo systemctl start user@<uid>.service. Затем повторите шаг'}
-            $running=@(foreach($op in @('disk','happier')){if($server.operations -and $server.operations.$op.state -eq 'running'){$(if($op -eq 'disk'){'Диск'}else{'Happier'})}})
+            $running=@(foreach($op in @('disk','happier','tg-gateway')){if($server.operations -and $server.operations.$op.state -eq 'running'){$(if($op -eq 'disk'){'Диск'}elseif($op -eq 'tg-gateway'){'Шлюз Telegram'}else{'Happier'})}})
             $server|Add-Member -Force summary ('Подключено ✓'+$(if($running.Count){'. На сервере устанавливается: '+($running -join ', ')+' — разделы завершатся сами'}else{''}))
             return $server
         }
@@ -504,7 +509,7 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             }
         }
         'Inspect' {
-            $server=[pscustomobject]@{ssh=$false;disk=$false;happier=$false;bridge=$false;catalog=$false}
+            $server=[pscustomobject]@{ssh=$false;disk=$false;happier=$false;bridge=$false;catalog=$false;tgGateway=$false}
             try{$server=Get-WizardServer $Root $Bundle}catch{$server|Add-Member -Force reason (Protect-TransportText ([string]$_.Exception.Message))}
             $config=Read-TransportJson (Join-Path $Root 'config.json')
             $disk=$false

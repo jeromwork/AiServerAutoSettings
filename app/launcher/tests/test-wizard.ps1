@@ -8,7 +8,7 @@ $count=0
 function Assert($Value,[string]$Name){if(-not $Value){throw ('FAIL: '+$Name)};$script:count++}
 function Throws([scriptblock]$Body,[string]$Name){$failed=$false;try{& $Body}catch{$failed=$true};Assert $failed $Name}
 $empty=[pscustomobject]@{ssh=$false;disk=$false;happier=$false;bridge=$false;catalog=$false}
-$ready=[pscustomobject]@{ssh=$true;disk=$true;happier=$true;bridge=$true;catalog=$true}
+$ready=[pscustomobject]@{ssh=$true;disk=$true;happier=$true;bridge=$true;catalog=$true;tgGateway=$true}
 $clean=[pscustomobject]@{transport=$false;disk=$false;account=$false;bridgeEnabled=$false;vpnEnabled=$false}
 $local=[pscustomobject]@{transport=$true;disk=$true;account=$true;bridgeEnabled=$true;bridge=$true;vpnEnabled=$false}
 $p=@(Get-WizardPlan $empty $clean)
@@ -21,6 +21,9 @@ Assert (@($p|Where-Object {-not $_.ready}).Count -eq 0) 'repeat run observes hea
 $broken=Copy-TransportObject $ready;$broken.disk=$false
 $p=@(Get-WizardPlan $broken $local)
 Assert ($p[0].repair -and -not $p[2].ready -and $p[3].ready) 'partially broken server isolates disk repair'
+$broken=Copy-TransportObject $ready;$broken.tgGateway=$false
+$p=@(Get-WizardPlan $broken $local)
+Assert ($p[0].repair -and $p[2].ready -and $p[3].ready) 'missing Telegram gateway requires server repair without reinstalling healthy components'
 $local.bridge=$false;$p=@(Get-WizardPlan $ready $local)
 Assert (-not $p[4].ready -and $p[3].ready) 'dead bridge is never ready from a marker'
 # Public catalogs use existing transport schema. Both SSH input and server output include CRLF.
@@ -113,7 +116,7 @@ function Invoke-WizardSsh($Root,$Command,$InputText='',$Timeout=60){
     Assert (-not $InputText.Contains("`r")) 'cross-system payload is LF'
     if($script:offline){throw 'Нет связи с сервером'}
     if($Command -eq 'python3 -'){return (ConvertTo-Json -InputObject $server -Depth 30)+"`r`n"}
-    if($Command -eq 'bash -s'){return '{"schema":1,"disk":true,"happier":true,"bridge":true,"catalog":true,"userManager":true}'+"`r`n"}
+    if($Command -eq 'bash -s'){return '{"schema":1,"disk":true,"happier":true,"bridge":true,"catalog":true,"tgGateway":true,"userManager":true}'+"`r`n"}
     throw 'Unexpected fake SSH command'
 }
 $c=Get-WizardCatalog $root $repo
@@ -242,7 +245,7 @@ function Invoke-InstallChild($Bundle,$Script,$Arguments){throw ('summary must no
 function Test-WizardNetworkProof($Root,$Mark){$false}
 Throws {Invoke-WizardStep $freshRoot $repo 'Activate' ([pscustomobject]@{})} 'summary without a proven connection is refused'
 Assert ($script:detached.Count -eq 0) 'summary never starts a background process'
-function Get-WizardServer($Root,$Bundle){[pscustomobject]@{ssh=$true;disk=$true;happier=$true;bridge=$true;catalog=$true;userManager=$true}}
+function Get-WizardServer($Root,$Bundle){[pscustomobject]@{ssh=$true;disk=$true;happier=$true;bridge=$true;catalog=$true;tgGateway=$true;userManager=$true}}
 function Test-WizardBridge($Root){$true}
 $inspect=Invoke-WizardStep $freshRoot $repo 'Inspect' ([pscustomobject]@{})
 Assert (-not $inspect.steps[1].ready) 'connection needs a live proof'

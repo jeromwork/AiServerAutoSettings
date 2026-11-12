@@ -18,3 +18,6 @@ def cases(group):
 print('\n'.join(cases(suite)))
 PY
 )
+
+# Gateway owns its temporary HOME/systemd doubles and loopback 18xxx fixtures.
+timeout 300 python3 -m unittest discover -s "$repo/server/tg-gateway" -p 'test_*.py' -v
