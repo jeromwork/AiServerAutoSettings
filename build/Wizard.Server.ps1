@@ -33,13 +33,15 @@ function New-WizardRoutes($Request,$Profile) {
             }
         $keys=@(Get-WizardHopKeys ([string]$hop.keyFile))
         $variants=@($keys|ForEach-Object {@{key=$_;password=$false}})
-        if($hop.passwordPipe){$variants+=@{key='';password=$true}}
+        if($hop.passwordPipe -or $hop.invitePasswordFile){$variants+=@{key='';password=$true}}
         if(-not $variants.Count){throw 'Нужен ключ для промежуточного сервера: выберите файл ключа на шаге «Сервер»'}
         foreach($v in $variants){
             $h=[pscustomobject]@{ssh=[string]$hop.ssh;keyFile=$v.key}
             if($hop.hostKey){$h|Add-Member hostKey $hop.hostKey}
             if($hop.knownHostsPath){$h|Add-Member knownHostsPath $hop.knownHostsPath}
-            if($v.password){$h|Add-Member passwordPipe ([string]$hop.passwordPipe)}
+            if($v.password){
+                if($hop.invitePasswordFile){$h|Add-Member invitePasswordFile ([string]$hop.invitePasswordFile)}else{$h|Add-Member passwordPipe ([string]$hop.passwordPipe)}
+            }
             $opts=@(New-TransportRouteOptions ([pscustomobject]@{used='hop';hop=$h}) $Profile ([string]$Request.askpassExecutable) -AcceptNew:(-not $Request.strictHostKey))
             $routes+=@{kind='hop';title=('через промежуточный сервер '+$hop.ssh+$(if($v.password){' (пароль)'}else{''}));key=$v.key;password=$v.password;options=$opts}
         }

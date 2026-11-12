@@ -16,7 +16,13 @@ function Connect-WizardInvite([string]$Root,$Request) {
                 if(-not $hop.hostKey){throw 'Нет ключа промежуточного сервера'}
                 $hop|Add-Member -Force knownHostsPath (Join-Path $dir ('known_hosts-hop-'+$routeIndex))
                 if($hop.privateKey){$hopKey=Join-Path $Root ('secrets/invite-hop-'+$routeIndex);Write-DiskUtf8 $hopKey ([string]$hop.privateKey);Protect-TransportPath $hopKey;$hop|Add-Member -Force keyFile $hopKey}
-                if($hop.password){$hop|Add-Member -Force passwordPipe ([string]$Request.hopPasswordPipe)}
+                if($hop.password){
+                    $m=[regex]::Match([string]$hop.ssh,'\A([a-z_][a-z0-9_-]{0,31})@([a-zA-Z0-9][a-zA-Z0-9.-]{0,252})(?::(\d{1,5}))?\z')
+                    if(-not $m.Success){throw 'В приглашении нужен явный логин промежуточного сервера'}
+                    $hopSettings=Join-Path $Root ('secrets/invite-hop-'+$routeIndex+'.json')
+                    Write-TransportJson $hopSettings @{sshExecutable=$p.sshExecutable;configPath=$p.configPath;knownHostsPath=[string]$hop.knownHostsPath;host=$m.Groups[2].Value;port=$(if($m.Groups[3].Success){[int]$m.Groups[3].Value}else{22});user=$m.Groups[1].Value;password=[string]$hop.password} -Private
+                    $hop|Add-Member -Force invitePasswordFile $hopSettings
+                }
                 $r|Add-Member hop $hop
             }elseif($route.kind -ne 'direct'){throw 'Неизвестный маршрут приглашения'}
             $variants=New-WizardRoutes $r $p;$variants=@($variants|Where-Object {$_.kind -eq $route.kind})
@@ -59,13 +65,6 @@ function Connect-WizardInvite([string]$Root,$Request) {
                 if($ok){$chosenRequest=$r;break}
         }
         if(-not $ok){throw $lastReason}
-        if($script:WizardRoute.kind -eq 'hop' -and $chosenRequest.hop.password){
-            $m=[regex]::Match([string]$chosenRequest.hop.ssh,'\A(?:([a-z_][a-z0-9_-]{0,31})@)?([a-zA-Z0-9][a-zA-Z0-9.-]{0,252})(?::(\d{1,5}))?\z')
-            if(-not $m.Groups[1].Success){throw 'В приглашении нужен явный логин промежуточного сервера'}
-            $hopSettings=Join-Path $Root 'secrets/invite-hop.json'
-            Write-TransportJson $hopSettings @{sshExecutable=$p.sshExecutable;configPath=$p.configPath;knownHostsPath=[string]$chosenRequest.hop.knownHostsPath;host=$m.Groups[2].Value;port=$(if($m.Groups[3].Success){[int]$m.Groups[3].Value}else{22});user=$m.Groups[1].Value;password=[string]$chosenRequest.hop.password} -Private
-            $script:WizardRoute.options=@('-o',('ProxyCommand='+(Quote-Disk ([string]$Request.askpassExecutable))+' --invite-hop '+(Quote-Disk $hopSettings)+' %h %p'))
-        }
         $proxyOption=@($script:WizardRoute.options|Where-Object {$_ -like 'ProxyCommand=*'})
         if($proxyOption.Count){$p|Add-Member inviteProxyCommand ($proxyOption[0].Substring(13))}
         $p|Add-Member -Force arguments (@('-F',$p.configPath,'-p',[string]$port,'-l',$p.login,'-i',$p.keyPath,'-o','IdentitiesOnly=yes','-o',('UserKnownHostsFile="'+$p.knownHostsPath.Replace('\','/')+'"'),'-o','GlobalKnownHostsFile=none','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-o','ForwardAgent=no')+@($script:WizardRoute.options)+@('-T',$p.serverAddress))

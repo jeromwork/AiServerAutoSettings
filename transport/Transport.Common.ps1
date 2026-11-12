@@ -139,6 +139,10 @@ function New-TransportRouteOptions($Route,$Profile,[string]$ProxyExecutable='',[
         }
         'hop' {
             $hop=$Route.hop
+            if($hop.invitePasswordFile){
+                if(-not $ProxyExecutable -or -not (Test-Path -LiteralPath $ProxyExecutable -PathType Leaf)){throw 'Для маршрута приглашения нужен RemoteAgents.exe'}
+                return @('-o',('ProxyCommand='+(Quote-Transport $ProxyExecutable)+' --invite-hop '+(Quote-Transport ([string]$hop.invitePasswordFile))+' %h %p'))
+            }
             if(-not $hop.keyFile -and -not $hop.passwordPipe){throw 'Нужен ключ для промежуточного сервера: выберите файл ключа на шаге «Сервер»'}
             if([string]$hop.ssh -notmatch '\A(?:[a-z_][a-z0-9_-]{0,31}@)?[a-zA-Z0-9][a-zA-Z0-9.-]{0,252}(?::\d{1,5})?\z'){throw 'Укажите промежуточный сервер как логин@адрес[:порт]'}
             $known=Join-Path (Split-Path $Profile.knownHostsPath -Parent) 'known_hosts-hop'

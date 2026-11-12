@@ -23,6 +23,7 @@ pwsh=${PWSH:-$HOME/.cache/pwsh-test/pwsh}
   LOCALAPPDATA="$testdir/local" timeout 300 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-config.ps1" < /dev/null
   timeout 300 python3 "$repo/transport/test-transport-liveness.py" "$pwsh"
   timeout 300 python3 "$here/test_first_run.py"
+  LOCALAPPDATA="$testdir/local" timeout 300 "$pwsh" -NoProfile -NonInteractive -File "$here/test-invite-password.ps1" -TestHome "$testdir/invite-password" < /dev/null
   timeout 300 python3 "$repo/disk/test-tree.py"
   timeout 300 python3 "$repo/transport/test-server-catalog.py"
   timeout 300 node "$repo/accounts/test-accounts.mjs"
