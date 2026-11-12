@@ -89,7 +89,10 @@ function Start-TransportProcess([string]$Exe,[string[]]$Arguments,[switch]$Probe
         $err=$p.StandardError.BaseStream.CopyToAsync($errBuffer);$out=$null
         if(-not $Probe){$out=$p.StandardOutput.BaseStream.CopyToAsync([IO.Stream]::Null)}
         [pscustomobject]@{Process=$p;ErrorDrain=$err;ErrorBuffer=$errBuffer;OutputDrain=$out}
-    }catch{try{if(-not $p.HasExited){$p.Kill();[void]$p.WaitForExit(2000)}}catch{};$p.Dispose();$ex=New-Object Exception('Не удалось запустить дочерний процесс');$ex.Data['transportDiagnostic']=New-TransportDiagnostic $null 'process' 'start-failed';throw $ex}
+    }catch{try{if(-not $p.HasExited){$p.Kill();[void]$p.WaitForExit(2000)}}catch{};$p.Dispose();$ex=New-Object Exception('Не удалось запустить дочерний процесс');$reason='start-failed';$inner=$_.Exception
+        while($inner){if($inner -is [ComponentModel.Win32Exception] -and $inner.NativeErrorCode -in @(2,3)){$reason='executable-not-found';break};$inner=$inner.InnerException}
+        if($reason -eq 'executable-not-found'){$ex=New-Object Exception('Программа или файл запуска не найдены')}
+        $ex.Data['transportDiagnostic']=New-TransportDiagnostic $null 'process' $reason;throw $ex}
 }
 function Stop-TransportProcess($Child) {
     if(-not $Child){return};$p=$Child.Process
@@ -98,12 +101,14 @@ function Stop-TransportProcess($Child) {
         if(-not $p.HasExited){$p.Kill()};[void]$p.WaitForExit(2000)
     }}catch{}finally{$p.Dispose()}
 }
-function Invoke-TransportText([string]$Exe,[string[]]$Arguments) {
+function Invoke-TransportText([string]$Exe,[string[]]$Arguments,[int[]]$SuccessExitCodes=@(0)) {
     $c=Start-TransportProcess $Exe $Arguments -Probe
     try{
         $task=$c.Process.StandardOutput.ReadToEndAsync()
-        if(-not $c.Process.WaitForExit(15000)){throw 'Таймаут SSH'}
-        if($c.Process.ExitCode -ne 0){throw 'SSH не выполнен'}
+        $reason=$null;$message=''
+        if(-not $c.Process.WaitForExit(15000)){$reason='timeout';$message='Таймаут внешней команды'}
+        elseif($c.Process.ExitCode -notin $SuccessExitCodes){$reason='command-failed';$message='Внешняя команда не выполнена (код выхода '+$c.Process.ExitCode+')'}
+        if($reason){$ex=New-Object Exception($message);$ex.Data['transportDiagnostic']=New-TransportDiagnostic $null 'process' $reason;$ex.Data['transportDiagnostic'].exitCode=$(if($c.Process.HasExited){$c.Process.ExitCode}else{$null});throw $ex}
         Convert-TransportLF $task.GetAwaiter().GetResult()
     }finally{Stop-TransportProcess $c}
 }
@@ -199,7 +204,7 @@ function Read-TransportSettings([string]$Root) {
     foreach($k in @('activeProbeBytes','rankProbeBytes','activeIntervalSec','meteredActiveIntervalSec','rankIntervalSec','rankConcurrency','topOnMetered','stallSeconds','probeTimeoutSec','restartDelaySec')){if([double]$s[$k] -le 0){throw 'Параметры transport должны быть положительными'}}
     if([string]$s.metered -notin @('auto','true','false','True','False')){throw 'Неверный metered'}
     if(-not $t.serverRoute -and $config.wizard.serverRoute){$overlay=Get-TransportRouteOverlay $config.wizard.serverRoute $Root;if($overlay){$t|Add-Member -Force serverRoute $overlay}}
-    Assert-TransportLists $t
+    Assert-TransportLists $t -ForBuild
     [pscustomobject]@{Options=$s;Transport=$t;Profile=$profile;Channel=$channel;Vpn=(Get-TransportValue $config 'vpn' ([pscustomobject]@{enabled=$false}))}
 }
 function Get-TransportSshArguments($Profile,[int]$Port,[switch]$UseRoute) {
@@ -215,15 +220,16 @@ function Get-TransportServerPort($Profile) {
     if($at -ge 0 -and $at+1 -lt $a.Count){return [int]$a[$at+1]};return 22
 }
 function Get-TransportHostKeys([string]$Ssh,[string]$HostName,[string]$KnownHosts) {
+    if(-not [IO.File]::Exists($KnownHosts)){$ex=New-Object Exception('Нет файла закреплённых ключей хоста');$ex.Data['transportReason']='host-key-missing';throw $ex}
     $keygen='ssh-keygen.exe';$resolved=Get-Command $Ssh -ErrorAction SilentlyContinue
     if($resolved -and $resolved.Source){$keygen=Join-Path ([IO.Path]::GetDirectoryName($resolved.Source)) 'ssh-keygen.exe'}
     if($env:OS -ne 'Windows_NT'){$keygen='ssh-keygen'}
-    $text=Invoke-TransportText $keygen @('-F',$HostName,'-f',$KnownHosts)
+    $text=Invoke-TransportText $keygen @('-F',$HostName,'-f',$KnownHosts) @(0,1)
     $keys=@();foreach($line in $text -split "`n"){
         # CA/revoked строки требуют иного trust-policy: не трактуем как обычный ключ.
         if($line -match '^\S+\s+((?:ssh-|ecdsa-)[^ ]+\s+[A-Za-z0-9+/=]+)'){$keys+=$Matches[1]}
     }
-    if(-not $keys.Count){throw 'Нет закреплённого host key'};$keys
+    if(-not $keys.Count){$ex=New-Object Exception('Нет закреплённого ключа хоста');$ex.Data['transportReason']='host-key-missing';throw $ex};$keys
 }
 # sing-box 1.14 passes this list to SSH negotiation before checking host_key.
 # Restrict negotiation to pinned key types; RSA key format stays ssh-rsa with SHA2 signatures.
@@ -250,11 +256,30 @@ function Convert-TransportHop([string]$Text) {
     @{type='ssh';server=$g.hostname;server_port=[int]$g.port;user=$g.user;private_key_path=$key}
 }
 function Assert-TransportName([string]$Name) {if($Name -notmatch '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$'){throw 'Имя пути: только буквы, цифры, _ и -'}}
+function Assert-TransportHopKnownHosts($Hop) {
+    if($Hop.knownHostsPath -and -not [IO.File]::Exists([string]$Hop.knownHostsPath)){
+        $ex=New-Object Exception('Нет ключа хоста промежуточного сервера');$ex.Data['transportReason']='hop-host-key-missing';throw $ex
+    }
+}
+function Add-TransportCandidateFailure($Failures,[string]$Tag,$ErrorRecord,[string]$Root) {
+    $reason='candidate-build-failed'
+    $known=@('hop-host-key-missing','host-key-missing','executable-not-found','start-failed','command-failed','timeout')
+    $value=[string]$ErrorRecord.Exception.Data['transportReason']
+    if(-not $value){$value=[string]$ErrorRecord.Exception.Data['transportDiagnostic'].reason}
+    if($value -in $known){$reason=$value}
+    $detail=New-TransportDiagnostic $null $Tag $reason
+    $detail.exitCode=$ErrorRecord.Exception.Data['transportDiagnostic'].exitCode
+    $messages=@{'hop-host-key-missing'='Нет ключа хоста промежуточного сервера';'host-key-missing'='Нет закреплённого ключа хоста';'executable-not-found'='Программа или файл запуска не найдены';'start-failed'='Не удалось запустить дочерний процесс';'command-failed'='Внешняя команда завершилась с ошибкой';'timeout'='Таймаут внешней команды';'candidate-build-failed'='Не удалось построить кандидат'}
+    $detail.stderr=$messages[$reason]
+    [void]$Failures.Add([pscustomobject]@{tag=$detail.candidate;diagnostic=$detail})
+    Write-TransportLog $Root 'process-failed' $detail
+}
 function Get-TransportCandidates($Settings,[string]$Root) {
-    $p=$Settings.Profile;$t=Copy-TransportObject $Settings.Transport;$o=$Settings.Options;$out=New-Object Collections.ArrayList;$c=New-Object Collections.ArrayList;$tunnels=New-Object Collections.ArrayList
+    $p=$Settings.Profile;$t=Copy-TransportObject $Settings.Transport;$o=$Settings.Options;$out=New-Object Collections.ArrayList;$c=New-Object Collections.ArrayList;$tunnels=New-Object Collections.ArrayList;$failures=New-Object Collections.ArrayList
     # Personal route is a local overlay, kept outside the public server catalog.
     $route=$t.serverRoute
     if($route -and $route.used -ne 'direct' -and -not $p.routeProxyCommand){
+        try{
         $proxyExe=[string]$route.proxyExecutable;if(-not $proxyExe){$proxyExe=Join-Path $Root 'RemoteAgents.exe'}
         $routeOptions=@(New-TransportRouteOptions $route $p $proxyExe)
         if($route.used -eq 'hop'){
@@ -263,8 +288,15 @@ function Get-TransportCandidates($Settings,[string]$Root) {
             # A stable local name replaces a public homonym only inside this effective overlay.
             $hop|Add-Member -Force name 'wizard-server-route';$hop|Add-Member -Force enabled $true
             $hop|Add-Member -Force configPath ([string]$p.configPath)
-            $hop|Add-Member -Force knownHostsPath (Join-Path (Split-Path $p.knownHostsPath -Parent) 'known_hosts-hop')
+            if(-not $hop.knownHostsPath){$hop|Add-Member knownHostsPath (Join-Path (Split-Path $p.knownHostsPath -Parent) 'known_hosts-hop')}
             $t|Add-Member -Force hops (@($t.hops|Where-Object {$_ -and $_.name -ne $hop.name})+@($hop))
+        }
+        }catch{
+            if($route.used -eq 'hop'){
+                if(@($Settings.Channel.outbounds|Where-Object {$_.type -eq 'vless'}).Count){Add-TransportCandidateFailure $failures 'vless-sshhop-wizard-server-route' $_ $Root}
+                if($o.openSsh){Add-TransportCandidateFailure $failures 'openssh-jump-wizard-server-route' $_ $Root}
+            }else{Add-TransportCandidateFailure $failures 'openssh-proxy' $_ $Root}
+            $route=$null
         }
     }
     $vless=@($Settings.Channel.outbounds|Where-Object {$_.type -eq 'vless'}|Select-Object -First 1)
@@ -275,24 +307,28 @@ function Get-TransportCandidates($Settings,[string]$Root) {
     [void]$out.Add($v);[void]$c.Add([pscustomobject]@{tag=$v.tag;port=0})
     }
     if(-not $t.bootstrap -or ((Test-Path $p.knownHostsPath) -and (Get-Item $p.knownHostsPath).Length -gt 1)){
+    try{
     $ssh=@{type='ssh';tag='singbox-ssh-direct';server=$p.serverAddress;server_port=(Get-TransportServerPort $p);user=$p.login;private_key_path=$p.keyPath}
     $saved=@($Settings.Channel.outbounds|Where-Object {$_.type -eq 'ssh' -and $_.server -eq $p.serverAddress}|Select-Object -First 1)
     if($saved.Count){$ssh=Copy-TransportObject $saved[0];$ssh.tag='singbox-ssh-direct';if($ssh.PSObject.Properties['detour']){$ssh.PSObject.Properties.Remove('detour')}}
     if(-not $ssh.host_key){$hk=@(Get-TransportHostKeys $p.sshExecutable $p.serverAddress $p.knownHostsPath);if($ssh -is [hashtable]){$ssh.host_key=$hk}else{$ssh|Add-Member -Force host_key $hk}}
     Set-TransportHostKeyAlgorithms $ssh
     [void]$out.Add($ssh);[void]$c.Add([pscustomobject]@{tag=$ssh.tag;port=0})
+    }catch{Add-TransportCandidateFailure $failures 'singbox-ssh-direct' $_ $Root}
     }
     foreach($relay in @($t.relays)){
-        if($null -eq $relay -or -not (Test-TransportEnabled $relay)){continue};Assert-TransportName $relay.name
+        if($null -eq $relay -or -not (Test-TransportEnabled $relay)){continue};try{Assert-TransportName $relay.name;Assert-TransportCandidateSettings $relay 'relays' $t
         if(-not (Get-TransportValue $relay 'host' $relay.server) -or [int]$relay.port -lt 1 -or [int]$relay.port -gt 65535){throw 'Неполный ретранслятор'}
         if(-not $v){throw 'Для relay нужен VLESS канала сервера'}
         $r=Copy-TransportObject $v;$r.tag='vless-relay-'+$relay.name;$r.server=(Get-TransportValue $relay 'host' $relay.server);$r.server_port=[int]$relay.port
         [void]$out.Add($r);[void]$c.Add([pscustomobject]@{tag=$r.tag;port=0})
+    }catch{Add-TransportCandidateFailure $failures ('vless-relay-'+$relay.name) $_ $Root}
     }
     foreach($hop in @($t.hops)){
-        if($null -eq $hop -or -not (Test-TransportEnabled $hop)){continue};Assert-TransportName $hop.name
+        if($null -eq $hop -or -not (Test-TransportEnabled $hop)){continue};try{Assert-TransportName $hop.name;Assert-TransportCandidateSettings $hop 'hops' $t
         if(-not $v){continue}
         if(-not (Get-TransportValue $hop 'ssh' $hop.alias) -or (Get-TransportValue $hop 'ssh' $hop.alias) -match '^[\-]|[\r\n]'){throw 'Неверный SSH-алиас'}
+        Assert-TransportHopKnownHosts $hop
         $resolved=Get-TransportHopArguments $hop ([string]$hop.knownHostsPath)
         $ha=@('-n','-G')+@($resolved.options)+@($resolved.target)
         $hopText=Invoke-TransportText $p.sshExecutable $ha;$h=Convert-TransportHop $hopText;if($hop.keyFile){$h.private_key_path=[string]$hop.keyFile};$h.tag='hop-'+$hop.name
@@ -309,9 +345,10 @@ function Get-TransportCandidates($Settings,[string]$Root) {
         Set-TransportHostKeyAlgorithms $h
         [void]$out.Add($h);$r=Copy-TransportObject $v;$r.tag='vless-sshhop-'+$hop.name;$r|Add-Member detour $h.tag
         [void]$out.Add($r);[void]$c.Add([pscustomobject]@{tag=$r.tag;port=0})
+    }catch{Add-TransportCandidateFailure $failures ('vless-sshhop-'+$hop.name) $_ $Root}
     }
     foreach($entry in @($t.entries)){
-        if($null -eq $entry -or -not (Test-TransportEnabled $entry)){continue};Assert-TransportName $entry.name
+        if($null -eq $entry -or -not (Test-TransportEnabled $entry)){continue};try{Assert-TransportName $entry.name;Assert-TransportCandidateSettings $entry 'entries' $t
         $e=Read-TransportJson (Join-Path (Get-TransportCacheRoot $Settings $Root) ('secrets/entries/'+$entry.name+'.json'));$x=$e.secrets;$name=$entry.name
         foreach($f in @('server','sni','cover','ports','secrets')){if(-not $e.$f){throw 'Неполный client.json узла'}}
         $tls=@{enabled=$true;server_name=$e.sni;insecure=[bool]$e.insecure}
@@ -332,15 +369,22 @@ function Get-TransportCandidates($Settings,[string]$Root) {
             if($e.domain){$list+=@{type='vless';tag="ws-cdn-$name";server=$e.domain;server_port=443;uuid=$x.ws_uuid;tls=@{enabled=$true;server_name=$e.domain;alpn=@('http/1.1');utls=@{enabled=$true;fingerprint='chrome'}};transport=($ws+@{headers=@{Host=$e.domain}})}}
         }
         foreach($r in $list){$kind=$r.tag.Substring(0,$r.tag.Length-$name.Length-1);if($entry.kinds -and $kind -notin @($entry.kinds)){continue};[void]$out.Add($r);[void]$c.Add([pscustomobject]@{tag=$r.tag;port=0})}
+    }catch{
+        $kinds=@('hy2','hy2obfs','tuic','trojan','reality','shadowtls','ws-direct','ws-cdn');if($entry.kinds){$kinds=@($entry.kinds)}
+        foreach($kind in $kinds){Add-TransportCandidateFailure $failures ($kind+'-'+$entry.name) $_ $Root}
+    }
     }
     foreach($cdn in @($t.cdn)){
         if($null -eq $cdn -or -not (Test-TransportEnabled $cdn)){continue}
+        try{
+        Assert-TransportCandidateSettings $cdn 'cdn' $t
         $e=Read-TransportJson (Join-Path (Get-TransportCacheRoot $Settings $Root) ('secrets/entries/'+$cdn.entry+'.json'));$x=$e.secrets
         if(-not $x.ws_uuid -or -not $x.ws_path){throw 'Узел не содержит WebSocket'}
         $r=@{type='vless';tag=('cdn-'+$cdn.name);server=$cdn.domain;server_port=443;uuid=$x.ws_uuid;
             tls=@{enabled=$true;server_name=$cdn.domain;alpn=@('http/1.1');utls=@{enabled=$true;fingerprint='chrome'}};
             transport=@{type='ws';path=(Get-TransportValue $cdn 'path' $x.ws_path);headers=@{Host=$cdn.domain};max_early_data=2048;early_data_header_name='Sec-WebSocket-Protocol'}}
         [void]$out.Add($r);[void]$c.Add([pscustomobject]@{tag=$r.tag;port=0})
+    }catch{Add-TransportCandidateFailure $failures ('cdn-'+$cdn.name) $_ $Root}
     }
     # The saved route may be the daemon's own channel SOCKS (channel first): tunnels then go direct, never through themselves.
     $ownChannel=($route -and $route.used -eq 'proxy' -and [string]$route.proxy.host -in @('127.0.0.1','localhost') -and [int]$route.proxy.port -eq [int]$o.channelSocksPort)
@@ -356,26 +400,35 @@ function Get-TransportCandidates($Settings,[string]$Root) {
     if($o.openSsh){
         foreach($hop in @($t.hops)){
             if($null -eq $hop -or -not (Test-TransportEnabled $hop)){continue}
-            $port=[int]$o.socksPortBase+$tunnels.Count;$tag='openssh-jump-'+$hop.name
-            [void]$out.Add(@{type='socks';tag=$tag;server='127.0.0.1';server_port=$port;version='5'})
-            [void]$c.Add([pscustomobject]@{tag=$tag;port=0})
+            $tag='openssh-jump-'+$hop.name
+            try{
+            Assert-TransportCandidateSettings $hop 'hops' $t
+            Assert-TransportHopKnownHosts $hop
+            $port=[int]$o.socksPortBase+$tunnels.Count
             $resolved=Get-TransportHopArguments $hop ([string]$hop.knownHostsPath)
             $proxy=@([string]$p.sshExecutable)+@($resolved.options)+@('-W','%h:%p',$resolved.target)
             $command=(@($proxy|ForEach-Object {Quote-Transport $_})) -join ' '
             $a=@(Get-TransportSshArguments $p (Get-TransportServerPort $p))|ForEach-Object {if($_ -like 'ProxyCommand=*'){'ProxyCommand='+$command}else{$_}}
             $a+=@('-N','-o','ExitOnForwardFailure=yes','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=2','-D',('127.0.0.1:'+$port))
+            [void]$out.Add(@{type='socks';tag=$tag;server='127.0.0.1';server_port=$port;version='5'})
+            [void]$c.Add([pscustomobject]@{tag=$tag;port=0})
             [void]$tunnels.Add([pscustomobject]@{tag=$tag;arguments=$a;target=$p.serverAddress;bind=$false})
+            }catch{Add-TransportCandidateFailure $failures $tag $_ $Root}
         }
     }
     # A saved route through the daemon's own channel SOCKS entry must not become a daemon path: that is a loop.
     if($route -and $route.used -eq 'proxy' -and -not $ownChannel){
+        try{
         if(-not $o.openSsh){throw 'Для выбранного локального прокси включите OpenSSH в настройках связи'}
         $port=[int]$o.socksPortBase+$tunnels.Count;$tag='openssh-proxy'
-        [void]$out.Add(@{type='socks';tag=$tag;server='127.0.0.1';server_port=$port;version='5'})
-        [void]$c.Add([pscustomobject]@{tag=$tag;port=0})
+        $proxyExe=[string]$route.proxyExecutable;if(-not $proxyExe){$proxyExe=Join-Path $Root 'RemoteAgents.exe'}
+        $routeOptions=@(New-TransportRouteOptions $route $p $proxyExe)
         $a=@(Get-TransportSshArguments $p (Get-TransportServerPort $p))|ForEach-Object {if($_ -eq 'ProxyCommand=none'){$routeOptions[1]}else{$_}}
         $a+=@('-N','-o','ExitOnForwardFailure=yes','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=2','-D',('127.0.0.1:'+$port))
+        [void]$out.Add(@{type='socks';tag=$tag;server='127.0.0.1';server_port=$port;version='5'})
+        [void]$c.Add([pscustomobject]@{tag=$tag;port=0})
         [void]$tunnels.Add([pscustomobject]@{tag=$tag;arguments=$a;target=$p.serverAddress;bind=$false})
+    }catch{Add-TransportCandidateFailure $failures 'openssh-proxy' $_ $Root}
     }
     $tags=@{};$i=0;$all=New-Object Collections.ArrayList
     foreach($r in $out){if($tags.ContainsKey($r.tag)){throw 'Повтор имени пути'};$tags[$r.tag]=$true}
@@ -397,7 +450,12 @@ function Get-TransportCandidates($Settings,[string]$Root) {
         }
         foreach($tag in $disabled){$meta=Get-TransportCandidateInfo $tag $t;[void]$all.Add([pscustomobject]@{tag=$tag;port=0;title=$meta.title;kind=$meta.kind;via=$meta.via;enabled=$false;tunCapable=$false})}
     }}
-    $enabled=@($all.ToArray()|Where-Object {$_.enabled});$enabledTags=@($enabled|ForEach-Object {$_.tag})
+    foreach($failure in $failures){
+        $meta=Get-TransportCandidateInfo $failure.tag $t
+        [void]$all.Add([pscustomobject]@{tag=$failure.tag;port=0;title=$meta.title;kind=$meta.kind;via=$meta.via;enabled=($failure.tag -notin @($t.disabledTags));tunCapable=$false;buildFailed=$true;diagnostic=$failure.diagnostic})
+    }
+    $enabled=@($all.ToArray()|Where-Object {$_.enabled -and -not $_.buildFailed});$enabledTags=@($enabled|ForEach-Object {$_.tag})
+    if(-not $enabled.Count){throw 'Нет доступных кандидатов транспорта'}
     # Не оставляем выключенные внешние сокеты/SSH-туннели в рабочем процессе.
     $needed=@{};foreach($tag in $enabledTags){Add-TransportDependency $tag @($out.ToArray()) $needed}
     [pscustomobject]@{Outbounds=@($out.ToArray()|Where-Object {$needed.ContainsKey($_.tag)});Candidates=$enabled;AllCandidates=@($all.ToArray());Tunnels=@($tunnels.ToArray()|Where-Object {$_.tag -in $enabledTags})}
@@ -536,7 +594,7 @@ function Get-TransportBest($Rows,[string[]]$Allowed=@(),[switch]$Remembered) {
 function Get-TransportRankTags($Rows,$Candidates,$Options,$Metered) {
     if($Metered -eq $false){return @($Candidates|ForEach-Object {$_.tag})}
     # Неизвестная стоимость тоже экономная; память имеет приоритет над непроверенными.
-    @($Rows|Where-Object {$_.enabled -ne $false}|Sort-Object @{Expression={if($_.state -in @('ok','remembered')){0}else{1}}},@{Expression={if($null -eq $_.kbps){-1}else{[double]$_.kbps}};Descending=$true},tag|Select-Object -First ([int]$Options.topOnMetered)|ForEach-Object {$_.tag})
+    @($Rows|Where-Object {$_.enabled -ne $false -and $_.tag -in @($Candidates|ForEach-Object {$_.tag})}|Sort-Object @{Expression={if($_.state -in @('ok','remembered')){0}else{1}}},@{Expression={if($null -eq $_.kbps){-1}else{[double]$_.kbps}};Descending=$true},tag|Select-Object -First ([int]$Options.topOnMetered)|ForEach-Object {$_.tag})
 }
 function Get-TransportFingerprint([string]$GatewayMac,[string]$ProfileName) {
     $text=(Convert-TransportLF $GatewayMac).Trim().Replace(':','').Replace('-','').ToUpperInvariant()+"`n"+(Convert-TransportLF $ProfileName).Trim()
@@ -584,28 +642,34 @@ function Get-TransportRemembered($Memory,[string]$Network,$Candidates) {
         $state='unknown';$speed=$null;$checked=$null
         if($r){$state=$r.state;if($state -eq 'ok'){$state='remembered'};$speed=$r.kbps;$checked=$r.checkedAt}
         if($c.enabled -eq $false){$state='disabled';$speed=$null;$checked=$null}
-        [pscustomobject]@{tag=$c.tag;title=$c.title;kind=$c.kind;via=$c.via;enabled=($c.enabled -ne $false);state=$state;kbps=$speed;checkedAt=$checked}
+        if($c.buildFailed -and $c.enabled -ne $false){$state='fail';$speed=$null;$checked=[DateTime]::UtcNow.ToString('o')}
+        $row=[pscustomobject]@{tag=$c.tag;title=$c.title;kind=$c.kind;via=$c.via;enabled=($c.enabled -ne $false);state=$state;kbps=$speed;checkedAt=$checked}
+        if($c.buildFailed){$row|Add-Member diagnostic $c.diagnostic}
+        $row
     }
 }
 
 function Test-TransportEnabled($Item) {return ((Get-TransportValue $Item 'enabled' $true) -eq $true)}
-function Assert-TransportLists($Transport) {
+function Assert-TransportLists($Transport,[switch]$ForBuild) {
     $names=@{}
     foreach($group in @('entries','relays','hops','cdn')){foreach($item in @($Transport.$group)){
         if($null -eq $item){continue};Assert-TransportName $item.name
         if($names.ContainsKey($item.name)){throw 'Имена узлов должны быть уникальны во всех списках'};$names[$item.name]=$true
         if((Get-TransportValue $item 'enabled' $true) -isnot [bool]){throw 'enabled должен быть boolean'}
-        if($group -in @('entries','hops')){$ssh=Get-TransportValue $item 'ssh' $item.alias;if(-not $ssh -or $ssh -match '^[\-]|[\r\n]'){throw 'Неверный SSH-алиас'}}
-        if($group -eq 'hops'){foreach($field in @('keyFile','knownHostsPath')){if($item.$field -and ([string]$item.$field -match '[\r\n\x00]')){throw 'Неверный локальный путь промежуточного сервера'}}}
-        if($group -eq 'entries'){foreach($kind in @($item.kinds)){if($null -ne $kind -and $kind -notin @('hy2','hy2obfs','tuic','trojan','reality','shadowtls','ws-direct','ws-cdn')){throw 'Неизвестный kind'}}}
-        if($group -eq 'relays'){if(-not (Get-TransportValue $item 'host' $item.server) -or [int]$item.port -lt 1 -or [int]$item.port -gt 65535){throw 'Неверный relay'}}
-        if($group -eq 'cdn'){
-            if($item.domain -notmatch '^(?=.{1,253}$)[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?$'){throw 'Неверный домен CDN'}
-            if(-not @($Transport.entries|Where-Object {$_.name -eq $item.entry}).Count){throw 'Не найден узел CDN'}
-            if($item.path -and ($item.path -notmatch '^/' -or $item.path -match '[\r\n]')){throw 'Неверный путь CDN'}
-        }
+        if(-not $ForBuild){Assert-TransportCandidateSettings $item $group $Transport}
     }}
     foreach($tag in @($Transport.disabledTags)){if($null -ne $tag){Assert-TransportTag $tag}}
+}
+function Assert-TransportCandidateSettings($Item,[string]$Group,$Transport) {
+    if($group -in @('entries','hops')){$ssh=Get-TransportValue $item 'ssh' $item.alias;if(-not $ssh -or $ssh -match '^[\-]|[\r\n]'){throw 'Неверный SSH-алиас'}}
+    if($group -eq 'hops'){foreach($field in @('keyFile','knownHostsPath')){if($item.$field -and ([string]$item.$field -match '[\r\n\x00]')){throw 'Неверный локальный путь промежуточного сервера'}}}
+    if($group -eq 'entries'){foreach($kind in @($item.kinds)){if($null -ne $kind -and $kind -notin @('hy2','hy2obfs','tuic','trojan','reality','shadowtls','ws-direct','ws-cdn')){throw 'Неизвестный kind'}}}
+    if($group -eq 'relays'){if(-not (Get-TransportValue $item 'host' $item.server) -or [int]$item.port -lt 1 -or [int]$item.port -gt 65535){throw 'Неверный relay'}}
+    if($group -eq 'cdn'){
+        if($item.domain -notmatch '^(?=.{1,253}$)[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?$'){throw 'Неверный домен CDN'}
+        if(-not @($Transport.entries|Where-Object {$_.name -eq $item.entry}).Count){throw 'Не найден узел CDN'}
+        if($item.path -and ($item.path -notmatch '^/' -or $item.path -match '[\r\n]')){throw 'Неверный путь CDN'}
+    }
 }
 function Assert-TransportTag([string]$Tag) {if($Tag -notmatch '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,95}$' -or $Tag -eq 'unavailable'){throw 'Неверный tag'}}
 function Get-TransportCandidateInfo([string]$Tag,$Transport) {
@@ -883,6 +947,7 @@ function Sync-TransportEntryCache($Settings,[string]$Root) {
     foreach($entry in @($Settings.Transport.entries)){
         if(-not $entry -or -not (Test-TransportEnabled $entry)){continue}
         $file=Join-Path (Get-TransportCacheRoot $Settings $Root) ('secrets/entries/'+$entry.name+'.json');if(Test-Path -LiteralPath $file){continue}
+        try{
         $args=@('-n','-T','-o','BatchMode=yes','-o','ConnectTimeout=10','-o','StrictHostKeyChecking=yes')
         if($entry.configPath){$args+=@('-F',[string]$entry.configPath)}
         $alias=Get-TransportValue $entry 'ssh' $entry.alias
@@ -890,6 +955,7 @@ function Sync-TransportEntryCache($Settings,[string]$Root) {
         $data=ConvertFrom-Json (Convert-TransportLF $text)
         foreach($field in @('server','sni','cover','ports','secrets')){if(-not $data.$field){throw 'Неполный client.json'}}
         Write-TransportJson $file $data -Private
+        }catch{Write-TransportLog $Root 'process-failed' (New-TransportDiagnostic $null ('entry-'+$entry.name) 'entry-cache-unavailable')}
     }
 }
 
@@ -963,7 +1029,7 @@ function Get-TransportDiagnosticContext($Settings,[string]$Root) {
     $values=@($Settings)
     $apiSecret=Join-Path $Root 'state/transport-secret.json';if(Test-Path $apiSecret){$values+=,(Read-TransportJson $apiSecret)}
     $dir=Join-Path (Get-TransportCacheRoot $Settings $Root) 'secrets/entries'
-    if(Test-Path $dir){foreach($file in @(Get-ChildItem -LiteralPath $dir -Filter '*.json')){$values+=,(Read-TransportJson $file.FullName)}}
+    if(Test-Path $dir){foreach($file in @(Get-ChildItem -LiteralPath $dir -Filter '*.json')){try{$values+=,(Read-TransportJson $file.FullName)}catch{}}}
     $values
 }
 function Get-TransportEngineDiagnostic($Engine,[string]$Candidate,$Context) {

@@ -38,6 +38,7 @@ $profileFile=Join-Path $root 'profile-fixture.json';Write-TransportJson $profile
 $initial=@{channel=@{secret='vpn-channel'};catalog=@{schema=1;entries=@(@{name='fixture';ssh='fixture';kinds=@('hy2')});hops=@();relays=@(@{name='sparfum';host='192.0.2.10';port=8443});cdn=@()}}
 $script:wanted=$true
 function Reset {
+    Write-TransportJson (Join-Path $root 'secrets/materialized.json') @{schema=1;channelPath=$channel;entries=@{fixture=(Join-Path $root 'secrets/entries/fixture.json')}} -Private
     $script:events.Clear();if(Test-Path $conflictMark){Remove-Item $conflictMark}
     $status=Join-Path $root 'status/transport.json';if(Test-Path $status){Remove-Item $status}
     $vpn=@{checkUrl='https://fixture.example.invalid/';dnsServer='192.0.2.53'}
@@ -62,13 +63,46 @@ Assert (@($trace|Where-Object {$_ -match '^· канал поднят за [0-9]
 # The first «Связь» of this installation still runs as a first setup (Set-WizardInitialNetwork), not as a managed change.
 Assert (-not (Test-WizardNetworkManaged $root)) 'channel-first bootstrap is not a managed network yet'
 $r=Invoke-WizardStep $root $bundle 'Bootstrap' $request
-Assert ($r.ok -and $r.vpn -eq 'channel') 'repeated Bootstrap reuses the running daemon'
+Assert ($r.ok -and $r.vpn -eq 'channel' -and $r.skipped) 'repeated Bootstrap reuses the running daemon of this config revision'
+Update-LauncherConfig $root {param($c) $c.transport|Add-Member -Force metered 'true'}
+$r=Invoke-WizardStep $root $bundle 'Bootstrap' $request
+Assert ($r.ok -and -not $r.skipped) 'a fresh status of an earlier config revision cannot skip Bootstrap'
 # An earlier installation (wizard.configured, profile of an old key) does not skip the channel: on a network that cuts SSH
 # it is what fails. The pasted config's server and key replace the old profile.
 $script:wanted=$true;Reset
 $file=Join-Path $root 'config.json';$old=Read-TransportJson $file;$old|Add-Member -Force wizard ([pscustomobject]@{configured=$true});Write-TransportJson $file $old
 $r=Invoke-WizardStep $root $bundle 'Bootstrap' $request
 Assert ($r.ok -and $r.vpn -eq 'channel' -and -not $r.skipped -and (($script:events -join ',') -eq 'daemon')) 'an earlier configured installation does not skip the channel'
+# Upgrade: the new server profile must not inherit the old hop, catalog, disabled tags or staged cache.
+Reset
+$file=Join-Path $root 'config.json';$old=Read-TransportJson $file
+$serverKey=Join-Path $root 'secrets/server-key';Write-DiskUtf8 $serverKey 'fixture-key'
+$old.profile|Add-Member server ([pscustomobject]@{address='new.example.invalid';port=2022;login='worker';keyFile=$serverKey;hostKeys=@('ssh-ed25519 Zml4dHVyZQ==')})
+$stale=[pscustomobject]@{used='hop';hop=[pscustomobject]@{name='previous';ssh='old.example.invalid';keyFile=(Join-Path $root 'old-key')}}
+$old|Add-Member wizard ([pscustomobject]@{configured=$true;serverRoute=$stale})
+$old.transport|Add-Member serverRoute $stale
+$old.transport|Add-Member cacheRoot (Join-Path $root 'state/bootstrap-cache-previous')
+$old.transport|Add-Member channelFirst $true
+$old.transport|Add-Member disabledTags @('vless-direct')
+$old.transport|Add-Member entries @([pscustomobject]@{name='old-entry';ssh='old-entry'})
+$old.transport|Add-Member hops @([pscustomobject]@{name='wizard-server-route';ssh='old.example.invalid'})
+$old.transport|Add-Member relays @([pscustomobject]@{name='old-relay';host='old.example.invalid';port=443})
+$old.transport|Add-Member cdn @([pscustomobject]@{name='old-cdn';domain='old.example.invalid';entry='old-entry'})
+$old.transport|Add-Member sshPort 2233;$old.transport|Add-Member metered 'true';$old.transport|Add-Member rankConcurrency 2
+Write-TransportJson $file $old
+Write-TransportJson (Join-Path $root 'status/transport.json') @{ok=$true;active='old-channel';updatedAt=[DateTime]::UtcNow.ToString('o')}
+Write-TransportJson $channel @{inbounds=@(@{tag='sync';override_port=23456});outbounds=@(@{type='vless';tag='fixture';server='new.example.invalid';server_port=443;uuid='fixture'})} -Private
+$r=Invoke-WizardStep $root $bundle 'Bootstrap' $request
+$c=Read-TransportJson $file
+Assert ($r.ok -and $c.transport.profilePath -ne $profileFile -and (Read-TransportJson $c.transport.profilePath).serverAddress -eq 'new.example.invalid') 'upgrade prepares the pasted server profile'
+Assert (-not $c.transport.serverRoute -and -not $c.wizard.serverRoute) 'upgrade clears both sources of the previous personal route'
+Assert (-not $c.transport.disabledTags -and -not $c.transport.hops -and -not $c.transport.cdn -and $c.transport.entries[0].name -eq 'fixture' -and $c.transport.relays[0].name -eq 'sparfum') 'upgrade takes candidate catalog only from pasted config'
+Assert ($c.transport.sshPort -eq 2233 -and $c.transport.metered -eq 'true' -and $c.transport.rankConcurrency -eq 2 -and $c.transport.singBoxPath -eq $binary) 'upgrade keeps local ports, metering, rank policy and binary'
+Assert ($c.transport.cacheRoot -ne $old.transport.cacheRoot -and (Read-TransportJson (Join-Path $c.transport.cacheRoot 'secrets/entries/fixture.json')).server -eq 'fixture.example.invalid') 'new cache contains only current materialization'
+Assert (-not (Test-Path (Join-Path (Split-Path $c.transport.profilePath -Parent) 'known_hosts-hop'))) 'upgrade new profile has no previous hop pins'
+$upgradePaths=Get-TransportCandidates (Read-TransportSettings $root) $root
+Assert ('vless-relay-sparfum' -in @($upgradePaths.Candidates.tag) -and @($upgradePaths.AllCandidates|Where-Object {$_.tag -like '*wizard-server-route*'}).Count -eq 0) 'real candidate construction after upgrade keeps relay and has no old overlay'
+Write-TransportJson $channel @{inbounds=@(@{tag='sync';override_port=23456});outbounds=@()} -Private
 # No channel in the config: nothing starts.
 $script:wanted=$false;Reset
 $r=Invoke-WizardStep $root $bundle 'Bootstrap' $request
@@ -194,16 +228,17 @@ Assert ($r.ok -and $r.vpn -eq 'channel' -and $r.channel -eq 'vless-direct') 'mat
 # Channel first through an SSH hop of the catalog: the key comes from materialized.json, host keys from the catalog.
 $pinKey='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHopHostKeyFixtureHopHostKey0'
 $hopKey=Join-Path $root 'secrets/vpn-hop-fixture';Write-DiskUtf8 $hopKey "KEY`n"
-Write-TransportJson (Join-Path $root 'secrets/materialized.json') @{schema=1;channelPath=$channel;hops=@{vhop=@{name='vpn-hop-fixture';ssh='hopuser@127.0.0.1:2222';keyFile=$hopKey}}} -Private
+$hopManifest=@{schema=1;channelPath=$channel;entries=@{fixture=(Join-Path $root 'secrets/entries/fixture.json')};hops=@{vhop=@{name='vpn-hop-fixture';ssh='hopuser@127.0.0.1:2222';keyFile=$hopKey}}}
 $initial.channel=@{secret='vpn-channel'};$initial.catalog=@{schema=1;entries=@(@{name='fixture';ssh='fixture';kinds=@('hy2')});hops=@(@{name='vhop';ssh='vhop';hostKey=@($pinKey)});relays=@();cdn=@()}
 $initial.hops=@{vhop=@{host='127.0.0.1';port=2222;user='hopuser';key=@{secret='vpn-hop-vhop'}}}
 Reset
+Write-TransportJson (Join-Path $root 'secrets/materialized.json') $hopManifest -Private
 $r=Invoke-WizardStep $root $bundle 'Bootstrap' $request
 $hop=@((Read-TransportJson (Join-Path $root 'config.json')).transport.hops)[0]
 $conf=[IO.File]::ReadAllText([string]$hop.configPath)
 Assert ($r.ok -and $hop.ssh -eq 'vhop' -and $conf.Contains('Host vhop') -and $conf.Contains('Port 2222') -and $conf.Contains('User hopuser') -and $conf.Contains($hopKey) -and $conf.Contains('StrictHostKeyChecking yes')) 'channel hop alias mapped to the materialized key'
 Assert ([IO.File]::ReadAllText($hopKey+'.known_hosts').Trim() -ceq ('[127.0.0.1]:2222 '+$pinKey)) 'channel hop pinned to the catalog host key'
-Remove-Item -LiteralPath (Join-Path $root 'secrets/materialized.json');Reset
+Reset;Remove-Item -LiteralPath (Join-Path $root 'secrets/materialized.json')
 $r=Invoke-WizardStep $root $bundle 'Bootstrap' $request
 Assert (-not $r.ok -and $r.vpn -eq 'channel-failed') 'channel hop without its materialized key is an honest failure'
 
@@ -235,7 +270,7 @@ Assert (@((Get-TransportCandidates $own $root).Candidates|Where-Object {$_.tag -
 $pin='ssh-ed25519 Zml4dHVyZQ=='
 $key=Join-Path $root 'key';Write-DiskUtf8 $key 'fixture-key-never-used-by-stub'
 $listener=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,0);$listener.Start();$socks=[int]$listener.LocalEndpoint.Port
-Write-TransportJson (Join-Path $root 'config.json') @{schema=1;version=1;transport=@{channelFirst=$true;channelSocksPort=$socks}}
+Write-TransportJson (Join-Path $root 'config.json') @{schema=1;version=1;transport=@{channelFirst=$true;channelSocksPort=$socks;channelPath=$channel}}
 $script:routes=$null
 function Select-WizardRoute($Profile,$Worker,$Routes){$script:routes=$Routes;$script:WizardRoute=$Routes[0]}
 function Invoke-WizardLogin($Profile,$User,$Command,$InputText=''){return ''}
@@ -246,6 +281,7 @@ Assert ($script:routes.Count -eq 3 -and $script:routes[0].kind -eq 'proxy' -and 
 Assert ($script:routes[0].options[1] -like ('*--proxy-connect socks 127.0.0.1 '+$socks+' %h %p')) 'channel route is a SOCKS proxy to the daemon entry'
 Assert ($script:routes[1].kind -eq 'direct' -and $script:routes[2].title -like '*3128*') 'config routes follow in their order'
 $saved=(Read-TransportJson (Join-Path $root 'config.json')).wizard.serverRoute
+Assert ((Read-TransportSettings $root).Transport.serverRoute.used -eq 'proxy') 'Server route reaches the runtime transport overlay'
 Assert ($saved.used -eq 'proxy' -and $saved.proxy.type -eq 'socks' -and $saved.proxy.host -eq '127.0.0.1' -and $saved.proxy.port -eq $socks) 'chosen channel route saved as proxy'
 $p=Read-TransportJson $result.profile
 Assert ($p.routeProxyCommand -like ('*--proxy-connect socks 127.0.0.1 '+$socks+'*') -and [IO.File]::ReadAllText($p.configPath).Contains('ProxyCommand')) 'ProxyCommand kept in the profile and ssh.conf'

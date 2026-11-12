@@ -153,12 +153,26 @@ function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request,[int]$Time
     # Skipped only when the channel already works. An earlier installation (wizard.configured, an old daemon) does not
     # count: on a network that cuts SSH it is exactly what fails, so the channel replaces it.
     $socksPort=[int](Get-TransportValue $config.transport 'channelSocksPort' 2223)
-    if($config.transport.channelFirst -and (Test-StatusFresh $Root transport) -and (Test-WizardChannelPort $socksPort)){return @{ok=$true;skipped=$true;vpn='channel';summary='Канал до сервера уже работает'}}
+    $canReuse=$false
+    if($config.transport.channelFirst -and -not $config.transport.serverRoute -and -not $config.wizard.serverRoute -and ([string]$config.transport.cacheRoot).StartsWith((Join-Path $Root 'state/bootstrap-cache-'),[StringComparison]::OrdinalIgnoreCase)){
+        try{
+            $status=Read-TransportJson (Join-Path $Root 'status/transport.json');$server=$config.profile.server
+            $profile=Read-TransportJson ([string]$config.transport.profilePath)
+            $sameServer=(-not $server -or ($profile.serverAddress -ceq $server.address -and $profile.login -ceq $server.login -and (Get-TransportServerPort $profile) -eq [int](Get-TransportValue $server 'port' 22) -and $profile.keyPath -ceq (Get-WizardMaterializedServerKey $Root $config)))
+            $canReuse=($sameServer -and $status.configRevision -ceq (Get-TransportRevision $Root))
+        }catch{$canReuse=$false}
+    }
+    if($canReuse -and (Test-StatusFresh $Root transport) -and (Test-WizardChannelPort $socksPort)){return @{ok=$true;skipped=$true;vpn='channel';summary='Канал до сервера уже работает'}}
     # Channel first: no TUN and no UAC. The user-level transport daemon (sing-box) picks a working candidate itself;
     # its local SOCKS entry (channelSocksPort) carries the step «Сервер» and every later SSH as a 'proxy' route.
     try{
-        $t=Copy-TransportObject $config.transport
-        if(-not $t){$t=[pscustomobject]@{}}
+        # Carry only local preferences. Routes, catalog, cache and profile belong to the pasted server.
+        $t=[pscustomobject]@{}
+        foreach($field in @('singBoxPath','sshPort','channelSocksPort','syncPort','probePortBase','socksPortBase','apiPort','bindPhysical','metered','activeProbeBytes','rankProbeBytes','activeIntervalSec','meteredActiveIntervalSec','rankIntervalSec','rankConcurrency','topOnMetered','stallSeconds','probeTimeoutSec','restartDelaySec')){
+            if($null -ne $config.transport.$field){$t|Add-Member $field $config.transport.$field}
+        }
+        # Compatibility for a runtime-only profile without a portable server section.
+        if(-not $config.profile.server -and $config.transport.profilePath){$t|Add-Member profilePath $config.transport.profilePath}
         # The profile of the pasted config (its own key), not one left by an earlier installation.
         if($config.profile.server -or -not $t.profilePath){
             $s=$config.profile.server
@@ -179,6 +193,15 @@ function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request,[int]$Time
         $channel=[string]$manifest.channelPath;if(-not $channel){$channel=Join-Path $Root 'secrets/channel.json'}
         if(-not (Test-Path -LiteralPath $channel -PathType Leaf)){throw 'Материализуйте vpn.bootstrap.channel перед Bootstrap'}
         $t|Add-Member -Force channelPath $channel
+        # Never reuse another server's client.json, even when an entry has the same name.
+        # Only files named by this materialization may enter the new immutable cache.
+        $cache=Join-Path $Root ('state/bootstrap-cache-'+[guid]::NewGuid().ToString('N'))
+        foreach($entry in @($t.entries|Where-Object {$null -ne $_})){
+            $source=$null;if($manifest.entries){$source=$manifest.entries.PSObject.Properties[[string]$entry.name].Value}
+            if($source){Write-TransportJson (Join-Path $cache ('secrets/entries/'+$entry.name+'.json')) (Read-TransportJson ([string]$source)) -Private}
+            elseif($initial.entries -and $initial.entries.PSObject.Properties[[string]$entry.name]){throw 'Материализуйте данные VPN-узла перед Bootstrap'}
+        }
+        $t|Add-Member -Force cacheRoot $cache
         Set-WizardBootstrapHops $Root $t $initial $manifest
         Ensure-WizardTransportBinary $Root $Bundle $t
         # bootstrap: SSH is not proved yet (the step «Связь» removes the flag); openSsh stays at its default.
@@ -186,6 +209,7 @@ function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request,[int]$Time
         $t|Add-Member -Force bootstrap $true;$t|Add-Member -Force channelFirst $true;$t.PSObject.Properties.Remove('openSsh')
         Update-LauncherConfig $Root {param($c)
             $c|Add-Member -Force transport $t
+            if($c.wizard){$c.wizard.PSObject.Properties.Remove('serverRoute')}
             Set-ConfigDefault $c vpn ([pscustomobject]@{enabled=$false})
             foreach($field in @('checkUrl','dnsServer')){if($c.profile.vpn.$field){$c.vpn|Add-Member -Force $field $c.profile.vpn.$field}}
         }
