@@ -148,15 +148,19 @@ function Set-WizardBootstrapHops([string]$Root,$Transport,$Initial,$Manifest) {
 }
 function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request) {
     $config=Read-TransportJson (Join-Path $Root 'config.json');$initial=$config.profile.vpn.bootstrap
-    if(Test-WizardNetworkManaged $Root){return @{ok=$true;skipped=$true;vpn='unchanged';summary='Канал до сервера пропущен: сохранена действующая конфигурация'}}
     # A public catalog alone (config export --vpn off) is not a channel: nothing to start before SSH.
     if(-not $initial -or -not $initial.channel){return @{ok=$true;vpn='off';summary='Канал до сервера не задан'}}
+    # Skipped only when the channel already works. An earlier installation (wizard.configured, an old daemon) does not
+    # count: on a network that cuts SSH it is exactly what fails, so the channel replaces it.
+    $socksPort=[int](Get-TransportValue $config.transport 'channelSocksPort' 2223)
+    if($config.transport.channelFirst -and (Test-StatusFresh $Root transport) -and (Test-WizardChannelPort $socksPort)){return @{ok=$true;skipped=$true;vpn='channel';summary='Канал до сервера уже работает'}}
     # Channel first: no TUN and no UAC. The user-level transport daemon (sing-box) picks a working candidate itself;
     # its local SOCKS entry (channelSocksPort) carries the step «Сервер» and every later SSH as a 'proxy' route.
     try{
         $t=Copy-TransportObject $config.transport
         if(-not $t){$t=[pscustomobject]@{}}
-        if(-not $t.profilePath){
+        # The profile of the pasted config (its own key), not one left by an earlier installation.
+        if($config.profile.server -or -not $t.profilePath){
             $s=$config.profile.server
             $data=[pscustomobject]@{schema=1;serverAddress=$s.address;serverPort=$(if($s.port){[int]$s.port}else{22});workerUser=$s.login;hostKeys=@($s.hostKeys)}
             $key=Get-WizardMaterializedServerKey $Root $config
@@ -184,6 +188,7 @@ function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request) {
             Set-ConfigDefault $c vpn ([pscustomobject]@{enabled=$false})
             foreach($field in @('checkUrl','dnsServer')){if($c.profile.vpn.$field){$c.vpn|Add-Member -Force $field $c.profile.vpn.$field}}
         }
+        Stop-WizardOldTransport $Root
         Start-WizardWorkingTransport $Root $Bundle
         $tag=Wait-WizardChannel $Root ([int](Get-TransportValue $t 'channelSocksPort' 2223))
         return @{ok=$true;vpn='channel';channel=$tag;summary=('Канал до сервера поднят: '+$tag)}
@@ -192,6 +197,24 @@ function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request) {
         $reason=Protect-TransportText ([string]$_.Exception.Message)
         return @{ok=$false;vpn='channel-failed';summary=('Канал до сервера не поднят: '+$reason+'. Доступны обычные маршруты')}
     }
+}
+# A daemon already running for this Home (an earlier installation, maybe older code) holds the per-Home mutex,
+# so a new one would exit at once. Ask it to stop (state/transport.stop, read by the daemon) and wait for the mutex.
+function Stop-WizardOldTransport([string]$Root) {
+    $name='Global\RemoteAgentsTransport-'+(Get-TransportFingerprint 'local' ((Get-TransportHome $Root).ToLowerInvariant()))
+    $mutex=New-Object Threading.Mutex($false,$name);$stop=Join-Path $Root 'state/transport.stop'
+    try{
+        $free=$false;try{$free=$mutex.WaitOne(0)}catch [Threading.AbandonedMutexException]{$free=$true}
+        if($free){$mutex.ReleaseMutex();return}
+        Write-WizardProgress '· прежний модуль связи работает — останавливаю его'
+        [void][IO.Directory]::CreateDirectory((Split-Path $stop -Parent));[IO.File]::WriteAllText($stop,'channel-first')
+        for($i=0;$i -lt 30;$i++){
+            Start-Sleep -Milliseconds 500
+            try{$free=$mutex.WaitOne(0)}catch [Threading.AbandonedMutexException]{$free=$true}
+            if($free){$mutex.ReleaseMutex();Write-WizardProgress '· прежний модуль связи остановлен';return}
+        }
+        Write-WizardProgress '· прежний модуль связи не остановился за 15 с'
+    }finally{$mutex.Dispose()}
 }
 function Test-WizardChannelPort([int]$Port) {
     $client=New-Object Net.Sockets.TcpClient

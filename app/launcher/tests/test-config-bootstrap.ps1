@@ -62,6 +62,12 @@ Assert (@($trace|Where-Object {$_ -match '^· канал поднят за [0-9]
 Assert (-not (Test-WizardNetworkManaged $root)) 'channel-first bootstrap is not a managed network yet'
 $r=Invoke-WizardStep $root $bundle 'Bootstrap' $request
 Assert ($r.ok -and $r.vpn -eq 'channel') 'repeated Bootstrap reuses the running daemon'
+# An earlier installation (wizard.configured, profile of an old key) does not skip the channel: on a network that cuts SSH
+# it is what fails. The pasted config's server and key replace the old profile.
+$script:wanted=$true;Reset
+$file=Join-Path $root 'config.json';$old=Read-TransportJson $file;$old|Add-Member -Force wizard ([pscustomobject]@{configured=$true});Write-TransportJson $file $old
+$r=Invoke-WizardStep $root $bundle 'Bootstrap' $request
+Assert ($r.ok -and $r.vpn -eq 'channel' -and -not $r.skipped -and (($script:events -join ',') -eq 'daemon')) 'an earlier configured installation does not skip the channel'
 # No channel in the config: nothing starts.
 $script:wanted=$false;Reset
 $r=Invoke-WizardStep $root $bundle 'Bootstrap' $request
