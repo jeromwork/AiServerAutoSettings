@@ -63,7 +63,7 @@ namespace RemoteAgents.Launcher
     {
         readonly string home; readonly Func<Task<string>> prepare; string bundle; readonly bool settings;
         internal bool Manual { get; private set; }
-        readonly ToolTip tip = new ToolTip();
+        readonly ToolTip tip = new ToolTip(); bool pasting = true;
         readonly Panel header = new Panel { Dock = DockStyle.Top }, pastePanel = new Panel { Dock = DockStyle.Top, Height = 204 },
             rowsPanel = new Panel { Dock = DockStyle.Top, Visible = false, Padding = new Padding(16, 6, 16, 4) },
             foldersPanel = new Panel { Dock = DockStyle.Top, Height = 236, Visible = false, Padding = new Padding(16, 4, 16, 4) },
@@ -234,7 +234,8 @@ namespace RemoteAgents.Launcher
         }
         void Relayout()
         {
-            int height = header.Height + bottom.Height + (settings ? tabs.Height : pastePanel.Visible ? pastePanel.Height : 0);
+            // Not pastePanel.Visible: before the form is shown WinForms reports every child as hidden.
+            int height = header.Height + bottom.Height + (settings ? tabs.Height : pasting ? pastePanel.Height : 0);
             int visibleRows = rows.Values.Count(r => r.Visible); rowsPanel.Height = visibleRows * 24 + 12;
             if (rowsPanel.Visible) height += rowsPanel.Height;
             if (foldersPanel.Visible) height += foldersPanel.Height;
@@ -318,7 +319,7 @@ namespace RemoteAgents.Launcher
             session.Log = Log; session.Report = Report;
             session.AskSecret = (name, why) => { string value = null; Func<string> ask = () => SecretPrompt.Ask(this, name, why); value = InvokeRequired ? (string)Invoke(ask) : ask(); return value; };
             rowsPanel.Visible = true;
-            if (!settings) { pastePanel.Visible = false; header.Height = 44; header.Controls[1].Visible = false; ((Label)header.Controls[0]).Text = "Подключаю"; }
+            if (!settings) { pasting = false; pastePanel.Visible = false; header.Height = 44; header.Controls[1].Visible = false; ((Label)header.Controls[0]).Text = "Подключаю"; }
             await Bundle();
             var watch = Stopwatch.StartNew();
             var plan = forced ?? await session.Plan(cancel.Token);
