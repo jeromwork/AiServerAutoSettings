@@ -5,7 +5,7 @@
 . (Join-Path $PSScriptRoot 'Wizard.Server.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Engine.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Session.ps1')
-. (Join-Path $PSScriptRoot 'Wizard.Invite.ps1')
+. (Join-Path $PSScriptRoot 'Wizard.Bootstrap.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Refresh.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Lan.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Network.ps1')
@@ -52,19 +52,22 @@ function Send-WizardHelpers([string]$Root,[string]$Bundle) {
         $manifest+=@{source=$key;path=$files[$key];hash=$hash;keep=($key -in @('codex-windows-bridge.py','codex-bridge-session.py','server_node_catalog.py'))}
     }
     $probe=@'
-import json,sys,hashlib,os
+import json,sys,hashlib,os,base64
 from pathlib import Path
-rows=json.loads(sys.stdin.readline());missing=[]
+rows=json.loads(base64.b64decode("MANIFEST_BASE64"));missing=[]
 for row in rows:
  p=Path.home()/row['path']
  if any(x.is_symlink() for x in (p,*p.parents)):raise ValueError('symlink')
  if not p.is_file() or (not row['keep'] and hashlib.sha256(p.read_bytes()).hexdigest()!=row['hash']):missing.append(row['source'])
 print(json.dumps(missing))
 '@
-    $code=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($probe))
     $json=ConvertTo-Json -InputObject @($manifest) -Depth 5 -Compress
-    $reply=Invoke-WizardSsh $Root ('python3 -c ''import base64;exec(base64.b64decode("'+$code+'"))''') $json
-    $missing=@(ConvertFrom-Json (Convert-TransportLF $reply))
+    $probe=$probe.Replace('MANIFEST_BASE64',[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)))
+    $code=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($probe))
+    $reply=Invoke-WizardSsh $Root ('python3 -c ''import base64;exec(base64.b64decode("'+$code+'"))''')
+    if([string]::IsNullOrWhiteSpace($reply)){$reply=ConvertTo-Json -InputObject @($files.Keys) -Compress}
+    $received=ConvertFrom-Json (Convert-TransportLF $reply);$missing=@()
+    foreach($item in $received){if($null -ne $item){$missing+=[string]$item}}
     if(-not $missing.Count){return}
     foreach($key in $files.Keys){
         if($key -notin $missing){continue}
@@ -215,7 +218,7 @@ function Get-WizardPublicTransport($Transport) {
 function Register-WizardRollback([string]$Root,[string]$Bundle,[string]$Kind,[string]$Session,[string]$Task) {
     # Recovery is independent of both the UI and the prunable current bundle.
     $recovery=Join-Path $Root ('state/wizard-recovery/'+$Session)
-    foreach($name in @('build/Wizard.ps1','build/Wizard.Common.ps1','build/Wizard.Engine.ps1','build/Wizard.Session.ps1','build/Wizard.SessionHost.ps1','build/Wizard.Server.ps1','build/Wizard.Invite.ps1','build/Wizard.Refresh.ps1','build/Wizard.Network.ps1','build/Wizard.Lan.ps1','build/Setup.Common.ps1','transport/Transport.Common.ps1','disk/Disk.Common.ps1','disk/Disk.Union.ps1','disk/Disk.Selective.ps1','disk/stignore.txt','disk/stignore-previous.sha256')){
+    foreach($name in @(Get-WizardRuntimeFiles)){
         $dest=Join-Path $recovery $name;[void][IO.Directory]::CreateDirectory((Split-Path $dest -Parent))
         Copy-Item -LiteralPath (Join-Path $Bundle $name) -Destination $dest
     }
@@ -255,12 +258,13 @@ function Undo-WizardBridge([string]$Root,[string]$Session) {
     Remove-Item -LiteralPath $file -Force
     Unregister-ScheduledTask -TaskName $receipt.task -Confirm:$false -ErrorAction SilentlyContinue
 }
-function Set-WizardBridge([string]$Root,[string]$Bundle,[bool]$Enabled,[bool]$Shell) {
+function Set-WizardBridge([string]$Root,[string]$Bundle,[bool]$Enabled,[bool]$Shell,[string]$DeviceName='') {
+    if($DeviceName -and ($DeviceName.Length -gt 80 -or $DeviceName -match '[\x00-\x1f\x7f]')){throw 'Название компьютера: от 1 до 80 символов, без управляющих символов'}
     $file=Join-Path $Root 'state/wizard-bridge.json'
     if(Test-Path $file){throw 'Есть незавершённая настройка моста; дождитесь отката'}
     $config=Read-TransportJson (Join-Path $Root 'config.json')
     # Prove the requested policy without changing the currently working intent.
-    if($Enabled -and (Test-WizardBridge $Root) -and $config.bridge -and $config.bridge.enabled -eq $Enabled -and $config.bridge.allowShell -eq $Shell){return}
+    if($Enabled -and (Test-WizardBridge $Root) -and $config.bridge -and $config.bridge.enabled -eq $Enabled -and $config.bridge.allowShell -eq $Shell){if($DeviceName){Register-WizardDeviceName $Root $DeviceName};return}
     $task='RemoteAgents bridge rollback '+(Get-TransportFingerprint 'settings' $Root.ToLowerInvariant()).Substring(0,16)
     $session=[guid]::NewGuid().ToString('N');$oldControl=$null
     $controlFile=Join-Path $env:LOCALAPPDATA 'RemoteAgents/control/config.json';if(Test-Path $controlFile){$oldControl=Read-TransportJson $controlFile}
@@ -277,6 +281,7 @@ function Set-WizardBridge([string]$Root,[string]$Bundle,[bool]$Enabled,[bool]$Sh
         if($Enabled){$args+=@('-Install','-Profile',(Find-InstallProfile $Root))}else{$args+=@('-Uninstall')}
         Invoke-InstallChild $Bundle 'Start-WindowsControl.ps1' $args -TimeoutSeconds 300
         if($Enabled -and -not (Test-WizardBridge $Root)){throw 'Новый мост не подтверждён; прежние настройки восстанавливаются'}
+        if($Enabled -and $DeviceName){Register-WizardDeviceName $Root $DeviceName}
         Remove-Item -LiteralPath $file -Force
         Unregister-ScheduledTask -TaskName $task -Confirm:$false
     }catch{Undo-WizardBridge $Root $session;throw}
@@ -285,7 +290,11 @@ function Test-WizardNetworkManaged([string]$Root) {
     if(Test-StatusFresh $Root transport){return $true}
     # A dead heartbeat must never turn off preflight/rollback for an installed PC.
     $file=Join-Path $Root 'config.json'
-    if((Test-Path $file) -and (Read-TransportJson $file).wizard.configured){return $true}
+    if(Test-Path $file){
+        $c=Read-TransportJson $file
+        if($c.wizard.configured){return $true}
+        if(-not $c.transport.bootstrap -and $c.transport.channelPath -and ((Test-Path (Join-Path $Root 'state/transport-sing-box.json')) -or $c.wizard.pendingProfile)){return $true}
+    }
     return $false
 }
 function Test-WizardNetworkProof([string]$Root,[DateTime]$Mark) {
@@ -332,7 +341,7 @@ function Undo-WizardNetwork([string]$Root,[string]$Session) {
             if($receipt.serverRoute){$c.wizard|Add-Member -Force serverRoute $receipt.serverRoute}else{if($c.wizard){$c.wizard.PSObject.Properties.Remove('serverRoute')}}
         }
     }
-    foreach($path in @($receipt.refreshReceipt,$receipt.versionFile)){if($path -and (Test-Path $path)){Remove-Item -LiteralPath $path -Force}}
+    foreach($path in @($receipt.versionFile)){if($path -and (Test-Path $path)){Remove-Item -LiteralPath $path -Force}}
     Remove-Item -LiteralPath $file -Force
     Unregister-ScheduledTask -TaskName $receipt.task -Confirm:$false -ErrorAction SilentlyContinue
 }
@@ -350,13 +359,8 @@ function Test-WizardBridge([string]$Root) {
 function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Request) {
     $diskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk';$script:DiskHome=$diskHome
     switch($Action){
-        'InvitePrepare' {return Prepare-WizardInvite $Root $Bundle $Request}
-        'InviteRefresh' {return Update-WizardInviteSettings $Root $Bundle $Request}
-        'InviteSync' {return Sync-WizardInviteSettings $Root $Bundle $Request}
-        'InviteVerify' {[void](Invoke-WizardSsh $Root 'true');return @{ok=$true}}
-        'InviteDisk' {return Invoke-WizardStep $Root $Bundle 'Disk' ([pscustomobject]@{base=(Get-DiskBase);paths=@($Request.paths)})}
-        'InviteEnroll' {return Connect-WizardInvite $Root $Request}
-        'InviteAccount' {return Connect-WizardInviteAccount $Root $Bundle $Request}
+        'Bootstrap' {return Start-WizardBootstrap $Root $Bundle $Request}
+        'ConfigSync' {return Sync-WizardConfigSettings $Root $Bundle $Request}
         'Server' {
             $profile=Connect-WizardServer $Root $Bundle $Request
             Write-WizardProgress 'Проверяю службы сервера…'
@@ -377,6 +381,7 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             if(-not $server.userManager){throw 'Нет user systemd. Администратору сервера: sudo loginctl enable-linger <пользователь>; sudo systemctl start user@<uid>.service. Затем повторите шаг'}
             $running=@(foreach($op in @('disk','happier')){if($server.operations -and $server.operations.$op.state -eq 'running'){$(if($op -eq 'disk'){'Диск'}else{'Happier'})}})
             $server|Add-Member -Force summary ('Подключено ✓'+$(if($running.Count){'. На сервере устанавливается: '+($running -join ', ')+' — разделы завершатся сами'}else{''}))
+            if((Read-TransportJson (Join-Path $Root 'config.json')).profile){$server|Add-Member -Force configSync (Install-WizardConfigSync $Root $Bundle)}
             return $server
         }
         'Lan' {if($Request.host){return Add-WizardLan $Root $Bundle $Request};return Send-WizardLan $Root $Bundle ([string]$Request.file)}
@@ -456,6 +461,13 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             return $result
         }
         'Disk' {
+            Send-WizardHelpers $Root $Bundle
+            $server=Get-WizardServer $Root $Bundle
+            if(-not $server.disk){
+                $op=(Get-WizardOperation $Root $Bundle 'status' @('disk')).disk
+                if($op.state -ne 'running'){$op=(Get-WizardOperation $Root $Bundle 'start' @('disk')).disk}
+                return @{ok=$false;pending='disk';operation=$op;summary=(Get-WizardOperationText $op 'установка сервера диска')}
+            }
             Resolve-WizardDiskServer $Root $Bundle $Request
             $base=[IO.Path]::GetFullPath([string]$Request.base)
             $profile=Find-InstallProfile $Root
@@ -472,8 +484,9 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
                 # Freeze selection until the explicit Apply below.
                 # The placeholder flag keeps it distinguishable from an explicit empty choice after an interruption.
                 if(-not (Test-Path (Join-Path $diskHome 'selection.json'))){Write-TransportJson (Join-Path $diskHome 'selection.json') @{schema=1;paths=@();placeholder=$true}}
-                Invoke-InstallChild $Bundle 'disk/Install-RemoteDisk.ps1' @('-Profile',$profile) -TimeoutSeconds 900
+                Invoke-InstallChild $Bundle 'disk/Install-RemoteDisk.ps1' @('-Profile',$profile,'-HelpersReady') -TimeoutSeconds 900
             }
+            Set-WizardDiskChannel $Root
             Read-DiskState;$local=Invoke-DiskApi 'system/status';if(-not $local.myID){throw 'Syncthing не отвечает; повторите установку диска'}
             Invoke-InstallChild $Bundle 'disk/Select-Disk.ps1' @('-Home',$Root,'-Action','Apply','-SelectionFile',$choice) -TimeoutSeconds 900
             Update-LauncherConfig $Root {param($c) if($c.wizard){$c.wizard.PSObject.Properties.Remove('skipDisk')};Set-ConfigDefault $c components ([pscustomobject]@{});Set-ConfigDefault $c.components disk ([pscustomobject]@{});$c.components.disk|Add-Member -Force enabled $true}
@@ -487,7 +500,7 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             $text=Invoke-WizardSsh $Root 'export PATH="$HOME/.local/share/remoteagents-accounts/node:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"; node "$HOME/.local/share/remoteagents-accounts/server-account.mjs"' '{"action":"list"}'
             return ConvertFrom-Json (Convert-TransportLF $text)
         }
-        'Account' {return Invoke-WizardAccount $Root $Bundle $Request $true}
+        'Account' {if($Request.mode -eq 'same'){return Connect-WizardProfileAccount $Root $Bundle $Request};return Invoke-WizardAccount $Root $Bundle $Request $true}
         'ResumeAccount' {return Invoke-WizardAccount $Root $Bundle $null $false}
         'Operation' {
             $ops=@($Request.operations|Where-Object {$_})
@@ -499,7 +512,7 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
         }
         'Bridge' {
             if((Read-TransportJson (Join-Path $Root 'config.json')).wizard.pendingProfile){throw 'Сначала проверьте связь с новым сервером на шаге «Связь»'}
-            Set-WizardBridge $Root $Bundle ([bool]$Request.enabled) ([bool]$Request.shell)
+            Set-WizardBridge $Root $Bundle ([bool]$Request.enabled) ([bool]$Request.shell) ([string]$Request.deviceName)
             return @{ok=$true;summary=$(if($Request.enabled){'Мост и разрешение shell проверены'}else{'Запрос выключения выполнен'})}
         }
         'Vpn' {

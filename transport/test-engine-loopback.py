@@ -100,7 +100,7 @@ LogLevel VERBOSE
             text = text.replace('override_port=22};$rules+=', f'override_port={remote_port}'+'};$rules+=')
             common.write_text('\ufeff'+text)
         script = d/'run.ps1'
-        body = r'''
+        body = r"""
 $ErrorActionPreference='Stop'
 . (Join-Path $Repo 'build/Wizard.Common.ps1')
 $env:REMOTEAGENTS_WIZARD_SESSION=$(if($Baseline){'0'}else{'1'})
@@ -131,9 +131,32 @@ if($Baseline){
  if($first -cne $second){throw 'unchanged helper rewritten'}
  $peer2=Invoke-WizardSsh $Root 'printf %s "$SSH_CONNECTION"'
  if($peer -cne $peer2){throw 'control session changed'}
+ $remoteCode='import time,os,json;start=time.time();time.sleep(1);print(json.dumps(dict(begin=start,end=time.time(),peer=os.environ["SSH_CONNECTION"])))'
+ $encoded=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($remoteCode))
+ $remote='python3 -c ''import base64;exec(base64.b64decode("'+$encoded+'"))'''
+ $childCode='. '+("'"+(Join-Path $Repo 'build/Wizard.Common.ps1').Replace("'","''")+"'")+'; Invoke-WizardSsh '+("'"+$Root.Replace("'","''")+"'")+' '+("'"+$remote.Replace("'","''")+"'")
+ $children=@()
+ try{
+  foreach($n in @(1,2)){
+   $si=New-Object Diagnostics.ProcessStartInfo;$si.FileName=Get-TransportPowerShell
+   $si.Arguments=((@('-NoProfile','-NonInteractive','-Command',$childCode)|ForEach-Object {Quote-Transport $_}) -join ' ')
+   $si.UseShellExecute=$false;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true
+   $p=New-Object Diagnostics.Process;$p.StartInfo=$si;[void]$p.Start()
+   $children+=@{p=$p;out=$p.StandardOutput.ReadToEndAsync();err=$p.StandardError.ReadToEndAsync()}
+  }
+  $rows=@()
+  foreach($c in $children){if(-not $c.p.WaitForExit(20000) -or $c.p.ExitCode -ne 0){throw ('shared control child failed '+$c.err.GetAwaiter().GetResult())};$rows+=ConvertFrom-Json $c.out.GetAwaiter().GetResult()}
+  if($rows[0].peer -cne $peer -or $rows[1].peer -cne $peer){throw 'actions did not share one authenticated SSH connection'}
+  if(($rows|Measure-Object begin -Maximum).Maximum -ge ($rows|Measure-Object end -Minimum).Minimum){throw 'remote commands were serialized'}
+ }finally{foreach($c in $children){if(-not $c.p.HasExited){$c.p.Kill()};$c.p.Dispose()}}
+ [void](Invoke-WizardSsh $Root 'mkdir -p "$HOME/.local/share/remote-disk"; cat > "$HOME/.local/share/remote-disk/ports.json"' '{"listen":23456}')
+ Set-WizardDiskChannel $Root
+ $config=Read-TransportJson (Join-Path $Root 'config.json')
+ if(@((Read-TransportJson $config.transport.channelPath).inbounds|Where-Object {$_.tag -eq 'sync'}).Count -ne 1){throw 'late disk inbound missing'}
+
 }
 @{serverMs=$serverMs;connectionMs=$watch.ElapsedMilliseconds;ok=$true}|ConvertTo-Json -Compress
-'''
+"""
         header = f"param([string]$Repo={psq(args.repo)},[string]$Root={psq(root)},[string]$Login={psq(user)},[bool]$Baseline=${str(args.baseline).lower()})\n"
         # Record total immediately after Connection, excluding helper-cache assertions.
         body = body.replace("# Baseline returns", "$connectionMs=$watch.ElapsedMilliseconds\n# Baseline returns")
@@ -146,7 +169,7 @@ if($Baseline){
         if not args.baseline:
             lines = (d/'sshd.log').read_text()
             assert len(list((root/'state/wizard-control').glob('*/ready.json'))) == 1, lines
-            print('PASS: one authenticated SSH control session, helpers preserved by hash, live working transport proof')
+            print('PASS: one SSH session shared across processes; remote commands overlap; helpers unchanged; late disk inbound reload/proof')
     finally:
         (root/'stop').write_text('stop')
         for session in (root/'state/wizard-control').glob('*') if (root/'state/wizard-control').exists() else []:

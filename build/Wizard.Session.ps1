@@ -1,14 +1,17 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 # One authenticated SSH process per profile/pin/route generation, shared by action processes.
 # Private filesystem queue avoids a TCP listener and is supported by Windows PowerShell 5.1.
 function Get-WizardSessionWorker {
 @'
-import sys,json,base64,subprocess,threading,concurrent.futures
+import sys,json,base64,subprocess,threading,concurrent.futures,os,signal
 lock=threading.Lock()
 def run(row):
  try:
-  result=subprocess.run(['bash','-c',base64.b64decode(row['command']).decode()],input=base64.b64decode(row['input']),capture_output=True,timeout=row['timeout'])
-  reply=dict(id=row['id'],code=result.returncode,output=base64.b64encode(result.stdout).decode())
+  process=subprocess.Popen(['bash','-c',base64.b64decode(row['command']).decode()],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,start_new_session=True)
+  try:output,_=process.communicate(base64.b64decode(row['input']),timeout=row['timeout'])
+  except subprocess.TimeoutExpired:
+   os.killpg(process.pid,signal.SIGKILL);process.communicate(timeout=5);raise
+  reply=dict(id=row['id'],code=process.returncode,output=base64.b64encode(output).decode())
  except Exception:reply=dict(id=row['id'],code=124,output='')
  with lock:print(json.dumps(reply),flush=True)
 with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
@@ -20,6 +23,7 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
 function Invoke-WizardControlSession([string]$Root,$Profile,$Route,[string]$Command,[string]$InputText,[int]$Timeout) {
     $pins='';if(Test-Path $Profile.knownHostsPath){$pins=[IO.File]::ReadAllText($Profile.knownHostsPath)}
     $generation=(ConvertTo-Json -InputObject $Profile -Depth 30 -Compress)+$pins+(ConvertTo-Json -InputObject @($Route) -Depth 10 -Compress)
+    $generation+=(Get-WizardSessionWorker)
     $id=(Get-TransportFingerprint 'control-session' $generation).Substring(0,32)
     $dir=Join-Path $Root ('state/wizard-control/'+$id)
     [void][IO.Directory]::CreateDirectory($dir);Protect-TransportPath $dir

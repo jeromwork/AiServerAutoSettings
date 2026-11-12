@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 [CmdletBinding()]
-param([string]$Profile,[switch]$Uninstall)
+param([string]$Profile,[switch]$Uninstall,[switch]$HelpersReady)
 . (Join-Path $PSScriptRoot 'Disk.Common.ps1')
 $script:DiskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk';$tray=Join-Path $script:DiskHome 'tray/syncthingtray.exe';$state=Join-Path $script:DiskHome 'state'
 . (Join-Path $PSScriptRoot 'Disk.Binary.ps1')
@@ -31,7 +31,9 @@ try {
     $step='SSH-профиль и файлы';Read-DiskProfile $Profile
     Write-DiskUtf8 (Join-Path $script:DiskHome 'profile.txt') $script:ProfilePath
     $upload='set -eu; umask 077; mkdir -p "$HOME/.local/share/remote-disk"' + "`n"
+    if(-not $HelpersReady){
     foreach($name in @('server-disk.sh','stignore.txt','stignore-previous.sha256')){$data=[IO.File]::ReadAllText((Join-Path $PSScriptRoot $name)).Replace("`r",'');$upload+='printf %s '+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($data))+' | base64 -d > "$HOME/.local/share/remote-disk/'+$name+'"' + "`n"}
+    }
     $step='Bootstrap сервера';$remote=(Invoke-DiskSsh 'bash -s' -Direct -InputText ($upload+'bash "$HOME/.local/share/remote-disk/server-disk.sh" bootstrap'))|ConvertFrom-Json
     $step='Установка трея';Install-DiskBinary 'https://github.com/Martchus/syncthingtray/releases/download/v2.1.9/syncthingtray-2.1.9-x86_64-w64-mingw32.exe.zip' 'c20d74998cb84980b07cb00eca4c38d26643eaa69b8bef94f6841ded6c752cc5' tray syncthingtray.exe
     $step='Конфигурация движка';$fresh=-not (Test-Path -LiteralPath (Join-Path $state 'config.xml'))

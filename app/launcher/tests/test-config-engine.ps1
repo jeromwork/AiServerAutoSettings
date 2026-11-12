@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 param([string]$TestHome)
 $ErrorActionPreference='Stop'
 $repo=Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent
@@ -15,7 +15,9 @@ $script:WizardProgressFile=Join-Path $Root ($Action+'.jsonl')
 [IO.File]::WriteAllText((Join-Path $Root ($Action+'.ready')),'ready')
 $watch=[Diagnostics.Stopwatch]::StartNew()
 while(-not (Test-Path $Gate)){if($watch.Elapsed.TotalSeconds -gt 20){throw 'gate timeout'};Start-Sleep -Milliseconds 20}
+Write-SetupLog $Root ('wizard.'+$Action+'.start')
 Invoke-WizardAction $Root $Action ([pscustomobject]@{}) {
+    Write-SetupLog $Root ('wizard.'+$Action+'.body')
     $begin=[DateTime]::UtcNow.Ticks
     Start-Sleep -Milliseconds 900
     Update-LauncherConfig $Root {param($c) $c|Add-Member -Force $Action $true}

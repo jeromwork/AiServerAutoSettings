@@ -126,7 +126,7 @@ try{
             $lastTag=$status.active;$lastRevision=$revision;$nextCheck=[DateTime]::UtcNow.AddSeconds(30)
         }
         if($child.Process.HasExited){throw 'TUN неожиданно завершился'}
-        Write-VpnStatus $root $true $true 'on' $conflict $(if($settings.Transport.inviteBootstrap){'Начальный VPN: TUN, DNS и HTTPS проверены; регистрация SSH ещё не выполнена'}else{'Системный VPN проверен; трафик идёт через выбранный путь'})
+        Write-VpnStatus $root $true $true 'on' $conflict $(if($settings.Transport.bootstrap){'Начальный VPN: TUN, DNS и HTTPS проверены; SSH ещё не проверен'}else{'Системный VPN проверен; трафик идёт через выбранный путь'})
         Start-Sleep -Seconds 1
     }
 }catch{

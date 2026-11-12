@@ -1,8 +1,8 @@
 ﻿#requires -Version 5.1
 [CmdletBinding()]
-param([Alias('Home')][string]$LauncherHome,[ValidateSet('InviteRefresh','InviteSync','InvitePrepare','InviteVerify','InviteDisk','InviteEnroll','InviteAccount','Server','Lan','LanRemove','NetStatus','AdminProbe','Proxy','Skip','Catalog','Connection','DiskTree','Disk','AccountList','Account','ResumeAccount','Operation','Bridge','Vpn','Inspect','Activate','RollbackNetwork','RollbackBridge')][string]$Action,[string]$RequestFile,[string]$Session,[string]$ProgressFile)
+param([Alias('Home')][string]$LauncherHome,[ValidateSet('Bootstrap','ConfigSync','Server','Lan','LanRemove','NetStatus','AdminProbe','Proxy','Skip','Catalog','Connection','DiskTree','Disk','AccountList','Account','ResumeAccount','Operation','Bridge','Vpn','Inspect','Activate','RollbackNetwork','RollbackBridge')][string]$Action,[string]$RequestFile,[string]$Session,[string]$ProgressFile)
 $ErrorActionPreference='Stop'
-$env:REMOTEAGENTS_WIZARD_SESSION='1'
+$env:REMOTEAGENTS_WIZARD_SESSION=$(if($Action -in @('Proxy','Lan','LanRemove','AdminProbe')){'0'}else{'1'})
 # Machine-readable JSON must preserve filenames on non-Russian Windows too.
 [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
 $wizardRootInput=$LauncherHome;$wizardProgressInput=$ProgressFile

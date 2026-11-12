@@ -10,21 +10,24 @@ pwsh=${PWSH:-$HOME/.cache/pwsh-test/pwsh}
 # server group (it builds the same projects); independent offline checks overlap
 # SSH wait times. Every child is bounded; the outer caller may set a total limit.
 (
-  LOCALAPPDATA="$testdir/local" timeout 300 "$pwsh" -NoProfile -NonInteractive -File "$here/test-first-install.ps1" -TestHome "$testdir/wizard" < /dev/null
-  LOCALAPPDATA="$testdir/local" timeout 300 "$pwsh" -NoProfile -NonInteractive -File "$here/test-selective.ps1" -TestHome "$testdir/selective" < /dev/null
-  LOCALAPPDATA="$testdir/local" timeout 300 "$pwsh" -NoProfile -NonInteractive -File "$here/test-account.ps1" -TestHome "$testdir/accounts" < /dev/null
-  LOCALAPPDATA="$testdir/local" timeout 300 "$pwsh" -NoProfile -NonInteractive -File "$here/test-wizard.ps1" -TestHome "$testdir/setup-wizard" < /dev/null
-  LOCALAPPDATA="$testdir/local" timeout 300 "$pwsh" -NoProfile -NonInteractive -File "$here/test-wizard-onboarding.ps1" -TestHome "$testdir/onboarding" < /dev/null
-  LOCALAPPDATA="$testdir/local" timeout 300 "$pwsh" -NoProfile -NonInteractive -File "$here/test-wizard-account.ps1" -TestHome "$testdir/wizard-account" < /dev/null
-  LOCALAPPDATA="$testdir/local" timeout 300 "$pwsh" -NoProfile -NonInteractive -File "$here/test-navpane.ps1" -TestHome "$testdir/navpane" < /dev/null
-  LOCALAPPDATA="$testdir/local" timeout 300 "$pwsh" -NoProfile -NonInteractive -File "$here/test-network.ps1" -TestHome "$testdir/network" < /dev/null
-  LOCALAPPDATA="$testdir/local" timeout 300 "$pwsh" -NoProfile -NonInteractive -File "$here/test-invite-account.ps1" -TestHome "$testdir/invite-account" < /dev/null
-  LOCALAPPDATA="$testdir/local" timeout 300 "$pwsh" -NoProfile -NonInteractive -File "$here/test-invite-bootstrap.ps1" -TestHome "$testdir/invite-bootstrap" < /dev/null
-  LOCALAPPDATA="$testdir/local" timeout 300 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-config.ps1" < /dev/null
+  LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-first-install.ps1" -TestHome "$testdir/wizard" < /dev/null
+  LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-selective.ps1" -TestHome "$testdir/selective" < /dev/null
+  LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-account.ps1" -TestHome "$testdir/accounts" < /dev/null
+  LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-wizard.ps1" -TestHome "$testdir/setup-wizard" < /dev/null
+  LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-wizard-onboarding.ps1" -TestHome "$testdir/onboarding" < /dev/null
+  LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-wizard-account.ps1" -TestHome "$testdir/wizard-account" < /dev/null
+  LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-navpane.ps1" -TestHome "$testdir/navpane" < /dev/null
+  LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-network.ps1" -TestHome "$testdir/network" < /dev/null
+  LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-config-account.ps1" -TestHome "$testdir/invite-account" < /dev/null
+  LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-config-bootstrap.ps1" -TestHome "$testdir/invite-bootstrap" < /dev/null
+  LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-config.ps1" < /dev/null
   timeout 300 python3 "$repo/transport/test-transport-liveness.py" "$pwsh"
   timeout 300 python3 "$here/test_first_run.py"
-  LOCALAPPDATA="$testdir/local" timeout 300 "$pwsh" -NoProfile -NonInteractive -File "$here/test-invite-password.ps1" -TestHome "$testdir/invite-password" < /dev/null
+  LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-config-routes.ps1" -TestHome "$testdir/invite-password" < /dev/null
   timeout 300 python3 "$repo/disk/test-tree.py"
+  timeout 120 python3 "$repo/transport/test-engine-loopback.py" --without-disk
+  LOCALAPPDATA="$testdir/local" timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-config-engine.ps1" -TestHome "$testdir/config-engine" < /dev/null
+  LOCALAPPDATA="$testdir/local" timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-refresh.ps1" -TestHome "$testdir/config-refresh" < /dev/null
   timeout 300 python3 "$repo/transport/test-server-catalog.py"
   timeout 300 node "$repo/accounts/test-accounts.mjs"
   timeout 300 python3 "$here/test_build.py"
