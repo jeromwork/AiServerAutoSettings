@@ -12,26 +12,6 @@ using System.Windows.Forms;
 
 namespace RemoteAgents.Launcher
 {
-    // A configured program started by hand: one small window with a big «Включить» (never at Windows sign-in).
-    internal static class StartWindow
-    {
-        internal static bool Confirm()
-        {
-            using (var form = new Form { Text = Product.Name, StartPosition = FormStartPosition.CenterScreen, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false,
-                AutoScaleDimensions = new SizeF(96, 96), AutoScaleMode = AutoScaleMode.Dpi, Font = new Font("Segoe UI", 9F), ClientSize = new Size(340, 176), TopMost = true, KeyPreview = true }) {
-                form.Controls.Add(new Label { Left = 16, Top = 14, Width = 308, Height = 28, Text = Product.Name + " настроен", Font = new Font("Segoe UI", 13F, FontStyle.Bold) });
-                form.Controls.Add(new Label { Left = 16, Top = 46, Width = 308, Height = 36, Text = "Нажмите «Включить» — программа запустится и будет работать в трее (значок у часов)." });
-                var on = new Button { Left = 16, Top = 88, Width = 308, Height = 50, Text = "Включить", Font = new Font("Segoe UI", 14F, FontStyle.Bold), DialogResult = DialogResult.OK,
-                    BackColor = Color.FromArgb(0, 120, 212), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
-                on.FlatAppearance.BorderSize = 0; form.Controls.Add(on); form.AcceptButton = on;
-                var later = new LinkLabel { Left = 16, Top = 146, Width = 308, Height = 20, Text = "Не сейчас", TextAlign = ContentAlignment.MiddleCenter };
-                later.LinkClicked += (a, b) => form.DialogResult = DialogResult.Cancel; form.Controls.Add(later);
-                form.KeyDown += (a, b) => { if (b.KeyCode == Keys.Escape) form.DialogResult = DialogResult.Cancel; };
-                return form.ShowDialog() == DialogResult.OK;
-            }
-        }
-    }
-
     // One line per section: ⏳/✅/❌, a small bar while it runs, the current action and «Повторить» on failure.
     internal sealed class SectionRow : Panel
     {
@@ -59,9 +39,9 @@ namespace RemoteAgents.Launcher
     }
 
     // «Вставить конфиг» (first run) and the tray settings (tabs «Конфиг» / «Папки»). Both apply through ConfigSession.
-    internal sealed class ConfigWindow : Form
+    internal sealed partial class ConfigWindow : Form
     {
-        readonly string home; readonly Func<Task<string>> prepare; string bundle; readonly bool settings, foldersOnly;
+        readonly string home; readonly Func<Task<string>> prepare; string bundle; readonly bool settings, foldersOnly, mainWindow;
         internal bool Manual { get; private set; }
         readonly ToolTip tip = new ToolTip(); bool pasting = true;
         readonly Panel header = new Panel { Dock = DockStyle.Top }, pastePanel = new Panel { Dock = DockStyle.Top, Height = 204 },
@@ -93,14 +73,14 @@ namespace RemoteAgents.Launcher
                 form.ShowDialog();
             }
         }
-        ConfigWindow(string home, string bundle, Func<Task<string>> prepare, bool settings, bool foldersOnly = false)
+        ConfigWindow(string home, string bundle, Func<Task<string>> prepare, bool settings, bool foldersOnly = false, bool mainWindow = false)
         {
-            this.home = home; this.bundle = bundle; this.prepare = prepare; this.settings = settings; this.foldersOnly = foldersOnly;
+            this.home = home; this.bundle = bundle; this.prepare = prepare; this.settings = settings; this.foldersOnly = foldersOnly; this.mainWindow = mainWindow;
             AutoScaleDimensions = new SizeF(96, 96); AutoScaleMode = AutoScaleMode.Dpi; Font = new Font("Segoe UI", 9F);
             Text = Product.Name + (settings ? " — настройки" : " — подключение"); FormBorderStyle = FormBorderStyle.Sizable; MaximizeBox = true;
             StartPosition = FormStartPosition.CenterScreen; ClientSize = new Size(520, 300); TopMost = !settings; KeyPreview = true;
             start.FlatAppearance.BorderSize = 0;
-            folders = new DiskFoldersView(RunFolderAction, Guard, () => running, Log);
+            folders = new DiskFoldersView(RunFolderAction, a => mainWindow ? ReadFolders(a) : Guard(a), () => running, Log);
             folders.Apply = ApplyFolders;
             folders.Reload = LoadFolders;
             folders.Skip = async () => {
@@ -129,6 +109,7 @@ namespace RemoteAgents.Launcher
             close.Click += (a, b) => Close();
             done.Click += async (a, b) => await Finish();
             FormClosing += (a, b) => {
+                if (mainWindow && !allowUnload) { b.Cancel = true; Hide(); if (HiddenToTray != null) HiddenToTray(); return; }
                 if (running) { b.Cancel = true; closingRequested = true; Log("Отменяю текущую операцию…"); cancel.Cancel(); return; }
                 // ✕ after a run is «Готово»: closing must leave the program in the tray, not quit it with a half-finished setup.
                 // One attempt only; if the check fails the window stays with the reason, and the next ✕ closes it.
@@ -137,9 +118,11 @@ namespace RemoteAgents.Launcher
             };
             KeyDown += (a, b) => { if (b.KeyCode == Keys.Escape && !running) Close(); };
             Shown += (a, b) => Ready();
+            if (mainWindow) BuildMain();
             Relayout();
         }
-        protected override void Dispose(bool disposing) { if (disposing) { cancel.Cancel(); cancel.Dispose(); tip.Dispose(); } base.Dispose(disposing); }
+        bool resourcesDisposed;
+        protected override void Dispose(bool disposing) { if (disposing && !resourcesDisposed) { resourcesDisposed = true; cancel.Cancel(); cancel.Dispose(); tip.Dispose(); } base.Dispose(disposing); }
 
         void BuildPaste()
         {
@@ -205,7 +188,8 @@ namespace RemoteAgents.Launcher
             tabs.SelectedIndexChanged += async (a, b) => { if (Visible && FoldersSelected && (!foldersInitialized || !folders.Loaded)) await LoadFolders(); };
             RefreshConfigText();
         }
-        void RefreshConfigText() { try { configText.Text = ConfigText.Pretty(ConfigBundle.ExportForAi(home)); } catch (Exception e) { configText.Text = ""; Log("Конфиг не прочитан: " + e.Message); } }
+        string displayedConfigText = "";
+        void RefreshConfigText() { try { configText.Text = displayedConfigText = ConfigText.Pretty(ConfigBundle.ExportForAi(home)); } catch (Exception e) { configText.Text = displayedConfigText = ""; Log("Конфиг не прочитан: " + e.Message); } }
 
         async void Ready()
         {
@@ -255,9 +239,10 @@ namespace RemoteAgents.Launcher
             catch (Exception e) { new Journal(home).Write("bundle.bootstrap.failed " + e.GetType().Name); throw new IOException("Не удалось подготовить файлы программы. Проверьте доступ к интернету и нажмите «Запустить» ещё раз. Журнал: logs\\launcher.log"); }
             return bundle;
         }
-        bool FoldersSelected { get { return foldersOnly || tabs != null && tabs.SelectedIndex == 1; } }
+        bool FoldersSelected { get { return foldersOnly || tabs != null && tabs.SelectedTab != null && tabs.SelectedTab.Text == "Папки"; } }
         void Relayout()
         {
+            if (mainWindow) { if (!IsDisposed) LayoutMain(); return; }
             float scale = DeviceDpi / 96F;
             int visibleRows = rows.Values.Count(r => r.Visible);
             rowsPanel.Height = (int)((visibleRows * 24 + 12) * scale);
@@ -307,9 +292,12 @@ namespace RemoteAgents.Launcher
         }
         async Task Guard(Func<Task> action)
         {
-            if (running) return; SetBusy(true);
+            if (running) { ReportConflict(WindowModel.Conflict("действие в окне")); return; }
+            string conflict = mainWindow && MutationConflict != null ? MutationConflict() : "";
+            if (conflict.Length > 0) { ReportConflict(conflict); return; }
+            SetBusy(true);
             try { await action(); } catch (OperationCanceledException) { } catch (Exception e) { Log("Ошибка: " + e.Message); }
-            finally { SetBusy(false); if (closingRequested) Close(); }
+            finally { if (!IsDisposed) { SetBusy(false); if (closingRequested) Close(); } }
         }
 
         // Paste -> parse -> master password -> conflicts -> store -> plan -> run.
@@ -429,7 +417,22 @@ namespace RemoteAgents.Launcher
             await Bundle();
             return await Task.Run(() => WizardRunner.Run(home, bundle, action, request, cancel.Token, Log));
         }
-        async Task LoadFolders() { await Guard(LoadFoldersInner); }
+        async Task ReadFolders(Func<Task> action)
+        {
+            try { await action(); }
+            catch (OperationCanceledException) { }
+            catch (Exception e) { Log("Папки: " + e.Message); }
+        }
+        bool loadingFolders;
+        async Task LoadFolders()
+        {
+            if (loadingFolders) return;
+            loadingFolders = true;
+            try { await LoadFoldersInner(); }
+            catch (OperationCanceledException) { }
+            catch (Exception e) { Log("Папки не загружены: " + e.Message); }
+            finally { loadingFolders = false; }
+        }
         async Task LoadFoldersInner()
         {
             await Bundle();
@@ -439,11 +442,11 @@ namespace RemoteAgents.Launcher
                 folders.Initialize(DiskChoice.FromProfile(profile), foldersBase, !settings && folderStepRequired);
                 foldersInitialized = true;
             }
-            try { folders.ShowTree(await RunFolderAction("DiskTree", new { @base = foldersBase, path = "" })); }
+            try { var tree = await RunFolderAction("DiskTree", new { @base = foldersBase, path = "" }); if (IsDisposed) return; folders.ShowTree(tree); }
             catch (OperationCanceledException) { throw; }
             catch (Exception e) { Log("Папки не загружены: " + e.Message + ". Нажмите «Обновить список», чтобы попробовать снова."); }
             if (folders.NeedsExternalInventory) {
-                try { folders.ShowExternalInventory(await RunFolderAction("DiskExternal", new { action = "list" })); }
+                try { var inventory = await RunFolderAction("DiskExternal", new { action = "list" }); if (IsDisposed) return; folders.ShowExternalInventory(inventory); }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception e) { Log("Список папок с компьютера не получен: " + e.Message); }
             }
@@ -493,12 +496,15 @@ namespace RemoteAgents.Launcher
         {
             string name = deviceName.Text.Trim();
             if (name.Length == 0 || name.Length > 80 || name.Any(char.IsControl)) { Log("Название: от 1 до 80 символов."); return; }
-            ConfigProfile.Update(home, p => { p["device"] = ConfigProfile.WithDeviceName(p, name)["device"]; });
-            Log("Название компьютера: «" + name + "». Сообщаю серверу…");
-            await Guard(() => RunSession(session ?? new ConfigSession(home, Bundle), new List<string> { ConfigSections.Bridge }));
+            await Guard(async () => {
+                ConfigProfile.Update(home, p => { p["device"] = ConfigProfile.WithDeviceName(p, name)["device"]; });
+                Log("Название компьютера: «" + name + "». Сообщаю серверу…");
+                await RunSession(session ?? new ConfigSession(home, Bundle), new List<string> { ConfigSections.Bridge });
+            });
         }
         void Details()
         {
+            if (mainWindow) { OpenDetails(0); return; }
             if (running) return;
             try { SetupWizard.Display(home, bundle, false); ConfigSession.SyncFromSettings(home); RefreshConfigText(); foldersInitialized = false; }
             catch (Exception e) { Log("Ошибка: " + e.Message); }

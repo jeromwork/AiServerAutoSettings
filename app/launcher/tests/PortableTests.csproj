@@ -22,6 +22,8 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="PortableJson.cs" />
+    <Compile Include="WindowModelTests.cs" />
+    <Compile Include="../WindowModel.cs" Link="WindowModel.cs" />
     <Compile Include="ConfigBundleTests.cs" />
     <Compile Include="ConfigE2E.cs" />
     <Compile Include="../ConfigBundle.cs" Link="ConfigBundle.cs" />

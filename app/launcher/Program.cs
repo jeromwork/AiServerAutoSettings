@@ -58,7 +58,7 @@ namespace RemoteAgents.Launcher
                 var security = new MutexSecurity(); security.AddAccessRule(new MutexAccessRule(sid, MutexRights.FullControl, AccessControlType.Allow));
                 bool created, owned = false, restart = false;string firstInstallSource=null;
                 // A person started the EXE (not autostart/IPC/service commands): show that it runs.
-                bool interactive = !args.Any(a => a.StartsWith("--", StringComparison.Ordinal));
+                bool interactive = WindowModel.ShouldShow(args);
                 using (var mutex = new Mutex(false, "Global\\" + name, out created, security)) {
                     // Serialize downloaded installers independently of the running tray's mutex.
                     using (var installer = new Mutex(false, "Global\\" + name + ".Install", out created, security)) {
@@ -94,7 +94,7 @@ namespace RemoteAgents.Launcher
                                     if (comparison == 0) {
                                         if (args.Contains("--install") || (!args.Contains("--home") && FirstInstall.Required(home))) { firstRun(); return 0; }
                                         if (!owned) Forward(name, Started(new[] { "--setup-check" }, interactive));
-                                        else if (!interactive || FirstInstall.Required(home) || StartWindow.Confirm()) launch(target, false);
+                                        else launch(target, false);
                                         return 0;
                                     }
                                     if (comparison < 0 && MessageBox.Show("Запущена более старая версия RemoteAgents. Выполнить откат лаунчера и бандла?", "RemoteAgents — откат", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return 0;
@@ -107,17 +107,12 @@ namespace RemoteAgents.Launcher
                                 } finally { if (File.Exists(zip)) File.Delete(zip); }
                             }
                             if (firstInstallSource==null && (args.Contains("--install") || (!external && args.Length == 0 && FirstInstall.Required(home)))) { firstRun(); return 0; }
-                            if (!owned) { Forward(name, args.Contains("--uninstall") ? new[] { "--exit" } : args.Length == 0 ? Started(new[] { "--setup-check" }, interactive) : args); log.Write("ipc.forward.ok"); return 0; }
+                            if (!owned) { Forward(name, args.Contains("--uninstall") ? new[] { "--exit" } : WindowModel.ForwardArguments(args)); log.Write("ipc.forward.ok"); return 0; }
                         } finally { if (installOwned) installer.ReleaseMutex(); }
                     }
                     try {
                         if (args.Contains("--uninstall") || args.Contains("--exit")) return 0;
                         Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
-                        // Configured and started by hand: one small «Включить» window, never at Windows sign-in (--tray).
-                        if (interactive && firstInstallSource == null && !FirstInstall.Required(home)) {
-                            if (!StartWindow.Confirm()) { log.Write("launcher.start.declined"); return 0; }
-                            args = Started(args, true);
-                        }
                         using (var context = new TrayContext(home, log, name, sid, args, firstInstallSource)) { Application.Run(context); restart = context.RestartRequested; }
                     } finally { if (owned) { mutex.ReleaseMutex(); owned = false; } }
                 }
@@ -133,7 +128,8 @@ namespace RemoteAgents.Launcher
             // Compatibility with the original one-way pipe: identify the installed image, never an arbitrary PID.
             if (pid == 0) foreach (var p in Process.GetProcessesByName(Product.Name)) using (p) { try { if (p.Id != Process.GetCurrentProcess().Id && p.MainModule.FileName.Equals(target, StringComparison.OrdinalIgnoreCase)) { pid = p.Id; break; } } catch { } }
             try { Forward(name, new[] { "--exit", "--install-stop" }); } catch { log.Write("install.shutdown.ipc.failed"); }
-            if (WaitMutex(mutex, 20000)) return;
+            // Allow the owned bridge/Disk shutdown budget before last-resort termination.
+            if (WaitMutex(mutex, 60000)) return;
             if (pid == 0) throw new IOException("Не удалось определить экземпляр");
             using (var process = Process.GetProcessById(pid)) {
                 // Recheck identity immediately before last-resort tree termination (PID reuse).
@@ -146,11 +142,16 @@ namespace RemoteAgents.Launcher
         }
         public static void StartLauncher(string exe, string home, bool afterUpdate, bool started = false)
         { Process.Start(new ProcessStartInfo(exe, "--tray --home " + Files.Quote(home) + (afterUpdate ? " --after-update" : "") + (started ? " --started" : "")) { UseShellExecute = false, CreateNoWindow = true }); }
-        // «--started»: the tray shows «RemoteAgents работает, значок в трее» so people see it launched.
+        // Preserve a human launch across installation/relaunch; ordinary --tray/--after-update stay quiet.
         static string[] Started(string[] args, bool interactive) { return interactive && !args.Contains("--started") ? args.Concat(new[] { "--started" }).ToArray() : args; }
         [DllImport("kernel32.dll")] static extern bool AttachConsole(uint processId);
+        [DllImport("user32.dll")] static extern bool AllowSetForegroundWindow(uint processId);
         internal static System.Collections.Generic.Dictionary<string, object> Forward(string name, string[] args)
         {
+            // Windows grants foreground activation to the newly launched process. Transfer it to the existing instance.
+            if (WindowModel.ShouldShow(args)) {
+                try { var identity = Forward(name, new[] { "--identify" }); int pid = Json.Int(identity, "pid", 0); if (pid > 0) AllowSetForegroundWindow((uint)pid); } catch { }
+            }
             using (var pipe = new NamedPipeClientStream(".", name, args.Contains("--identify") ? PipeDirection.InOut : PipeDirection.Out, PipeOptions.Asynchronous)) {
                 pipe.Connect(10000);
                 using (var writer = new StreamWriter(pipe, Files.Utf8, 4096, true)) { writer.WriteLine(Json.Encode(args)); writer.Flush(); }

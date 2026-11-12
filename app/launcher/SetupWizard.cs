@@ -46,8 +46,9 @@ namespace RemoteAgents.Launcher
         CancellationTokenSource stepCancellation; bool closingRequested;
         bool busy, catalogLoaded, initializing;
 
+        bool resourcesDisposed;
         protected override void Dispose(bool disposing)
-        {if(disposing){operationTimer.Dispose();pollCancellation.Dispose();foreach(var panel in details)if(panel!=null)panel.Dispose();journal.Dispose();}base.Dispose(disposing);}
+        {if(disposing && !resourcesDisposed){resourcesDisposed=true;closingRequested=true;pollCancellation.Cancel();if(stepCancellation!=null)stepCancellation.Cancel();operationTimer.Dispose();pollCancellation.Dispose();foreach(var panel in details)if(panel!=null)panel.Dispose();journal.Dispose();}base.Dispose(disposing);}
         static string LeaseName(string home)
         {using(var sha=SHA256.Create())return "Global\\RemoteAgents.Wizard."+BitConverter.ToString(sha.ComputeHash(Files.Utf8.GetBytes(Path.GetFullPath(home).ToLowerInvariant()))).Replace("-", "");}
         internal static bool Display(string home, string bundle, bool first, int section = 0, bool activate = false, Func<Task<string>> prepare = null)
@@ -370,8 +371,10 @@ namespace RemoteAgents.Launcher
         }
         async Task Inspect()
         {
-            await Guard(async()=>{
-                var result=await Run("Inspect",new {});var observations=Json.Array(Json.Get(result,"steps")).Select(Json.Map).ToArray();
+            try {
+                var result=await Run("Inspect",new {},pollCancellation.Token);
+                if (IsDisposed || closingRequested || busy) return;
+                var observations=Json.Array(Json.Get(result,"steps")).Select(Json.Map).ToArray();
                 for(int i=0;i<Math.Min(6,observations.Length);i++)if(!dirty[i]){applied[i]=Json.Bool(observations[i],"ready");if(i!=1)results[i]=applied[i]?"Проверено сейчас ✓":"Требуется настройка или проверка";}
                 var server=Json.Map(Json.Get(result,"server"));
                 results[0]=applied[0]?"Подключено ✓":Json.Text(server,"reason","Укажите сервер и проверьте вход");
@@ -382,16 +385,18 @@ namespace RemoteAgents.Launcher
                 var wizard=Json.Map(Json.Get(new Configuration(home).Data,"wizard"));
                 InspectNetwork(wizard);
                 password.Enabled=!applied[0];
-            });
+            } catch (OperationCanceledException) { } catch (Exception e) { if (!IsDisposed) Append("Проверка состояния: " + e.Message); }
         }
         async Task Guard(Func<Task> action, int section = -1)
         {
+            if (IsDisposed || closingRequested) return;
+            if (MutationConflict != null) { string conflict = MutationConflict(); if (conflict.Length > 0) { Append(conflict); return; } }
             int page=section<0?steps.Section:section;
             lastSuccess=false;busy=true;stepCancellation=new CancellationTokenSource();steps.Enabled=false;pages.Enabled=false;foreach(var panel in details)panel.Enabled=false;back.Enabled=next.Enabled=false;close.Enabled=true;progress.Style=ProgressBarStyle.Marquee;
-            try {await action();lastSuccess=true;}
-            catch(OperationCanceledException) {if(page!=7)applied[page]=false;results[page]="Шаг отменён; готовность не подтверждена";Append(results[page]);}
-            catch(Exception e) {if(page==0)password.Enabled=true;if(page!=7)applied[page]=false;results[page]="Ошибка: "+e.Message;Append(results[page]);}
-            finally {busy=false;foreach(var panel in details)panel.Enabled=true;stepCancellation.Dispose();stepCancellation=null;steps.Enabled=pages.Enabled=close.Enabled=true;back.Enabled=Array.IndexOf(order,steps.Section)>0;next.Enabled=!showingInstall;progress.Style=ProgressBarStyle.Continuous;RefreshSummary();if(closingRequested)Close();}
+            try {await action();lastSuccess=true;if(SettingsApplied!=null && !IsDisposed)SettingsApplied();}
+            catch(OperationCanceledException) {if(!IsDisposed){if(page!=7)applied[page]=false;results[page]="Шаг отменён; готовность не подтверждена";Append(results[page]);}}
+            catch(Exception e) {if(!IsDisposed){if(page==0)password.Enabled=true;if(page!=7)applied[page]=false;results[page]="Ошибка: "+e.Message;Append(results[page]);}}
+            finally {busy=false;stepCancellation.Dispose();stepCancellation=null;if(!IsDisposed){foreach(var panel in details)panel.Enabled=true;steps.Enabled=pages.Enabled=close.Enabled=true;back.Enabled=Array.IndexOf(order,steps.Section)>0;next.Enabled=!showingInstall;progress.Style=ProgressBarStyle.Continuous;RefreshSummary();if(closingRequested)Close();}}
         }
         async Task<Dictionary<string,object>> Run(string action, object request, CancellationToken? quiet = null)
         {
