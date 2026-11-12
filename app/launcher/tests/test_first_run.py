@@ -139,6 +139,26 @@ class FirstRunTests(unittest.TestCase):
         self.assertNotIn('Install-WizardConfigSync', common)
         self.assertIn('Remove-LegacyConfigSyncTask $Root', common.split("'Server' {", 1)[1].split("'Lan' {", 1)[0])
 
+    def test_folder_hosts_share_checkbox_tree_and_apply_status(self):
+        window = source('ConfigWindow.cs')
+        self.assertEqual(window.count('new DiskFoldersView('), 1)
+        self.assertIn('foldersPanel.Controls.Add(folders)', window)
+        self.assertIn('foldersTab.Controls.Add(folders)', window)
+        self.assertIn('else if (id == "folders") ShowMain(true)', source('TrayContext.cs'))
+        self.assertIn('if (folders) mainWindow.OpenFolders()', source('TrayContext.cs'))
+        self.assertIn('tabs.TabPages.Add(foldersPage)', source('ConfigWindow.Main.cs'))
+        view = source('DiskFoldersView.cs')
+        self.assertIn('Все папки сервера, включая новые', view)
+        self.assertNotIn('RadioButton', view)
+        self.assertNotIn('ListView', view)
+        self.assertIn('TreeViewDrawMode.OwnerDrawText', source('DiskFolderTree.cs'))
+        self.assertIn('new TreeNode("С этого компьютера")', source('DiskFolderTree.cs'))
+        self.assertIn('TextFormatFlags.EndEllipsis', source('DiskFolderTree.cs'))
+        self.assertIn('Model.CanRevert(top)', view)
+        self.assertIn('skip.Visible = allowSkip', view)
+        self.assertIn('outcome.Ok)', window.split('async Task ApplyFolders()', 1)[1].split('folders.MarkApplied()', 1)[0])
+        self.assertIn('state == SectionState.Done', window.split('void Report(', 1)[1].split('folders.MarkApplied()', 1)[0])
+
     def test_disk_revert_uses_mutation_guard_and_counts_as_applying(self):
         window = source('ConfigWindow.cs')
         self.assertIn('ReadFolders(a) : Guard(a), Guard, () => running', window)

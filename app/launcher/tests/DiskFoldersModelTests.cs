@@ -18,8 +18,89 @@ namespace RemoteAgents.Launcher
         static DiskChoice Roundtrip(DiskFoldersModel model)
         { return DiskChoice.FromProfile(model.ToChoice().WriteTo(new Dictionary<string, object>(), "C:\\Disk")); }
         static bool Refused(Action action) { try { action(); return false; } catch (IOException) { return true; } catch (InvalidDataException) { return true; } }
+        static void StatusChecks()
+        {
+            const string both = "✓ На компьютере и на сервере", copies = "Не синхронизируется; копии на компьютере и сервере";
+            const string local = "🖥 Только на этом компьютере (не синхронизируется)", server = "☁ Только на сервере";
+            const string download = "↓ Будет скачана", downloading = "⟳ Скачивается", upload = "↑ Будет отправлена", uploading = "⟳ Отправляется";
+            const string noDownload = "☁ На сервере; получение отключено", noUpload = "🖥 На компьютере; отправка отключена";
+            const string incompleteLocal = "Обнаружена на компьютере; список неполный", incompleteServer = "Обнаружена на сервере; список неполный";
+            const string unknown = "Наличие не проверено", incompleteUnknown = "Наличие не проверено; список неполный";
+            const string removal = "Перестанет синхронизироваться; файлы на компьютере останутся";
+            // Independent truth table: columns both/send/receive before Apply, then both/send/receive after success.
+            var expected = new Dictionary<string, string[]> {
+                { "True/both/False", new[] { both, both, both, both, both, both } },
+                { "True/local/False", new[] { upload, upload, noUpload, uploading, uploading, noUpload } },
+                { "True/server/False", new[] { download, noDownload, download, downloading, noDownload, downloading } },
+                { "True//False", new[] { unknown, unknown, unknown, unknown, unknown, unknown } },
+                { "False/both/False", new[] { copies, copies, copies, copies, copies, copies } },
+                { "False/local/False", new[] { local, local, local, local, local, local } },
+                { "False/server/False", new[] { server, server, server, server, server, server } },
+                { "False//False", new[] { unknown, unknown, unknown, unknown, unknown, unknown } },
+                { "True/both/True", new[] { both, both, both, both, both, both } },
+                { "True/local/True", new[] { incompleteLocal, incompleteLocal, incompleteLocal, incompleteLocal, incompleteLocal, incompleteLocal } },
+                { "True/server/True", new[] { incompleteServer, incompleteServer, incompleteServer, incompleteServer, incompleteServer, incompleteServer } },
+                { "True//True", new[] { incompleteUnknown, incompleteUnknown, incompleteUnknown, incompleteUnknown, incompleteUnknown, incompleteUnknown } },
+                { "False/both/True", new[] { copies, copies, copies, copies, copies, copies } },
+                { "False/local/True", new[] { incompleteLocal, incompleteLocal, incompleteLocal, incompleteLocal, incompleteLocal, incompleteLocal } },
+                { "False/server/True", new[] { incompleteServer, incompleteServer, incompleteServer, incompleteServer, incompleteServer, incompleteServer } },
+                { "False//True", new[] { incompleteUnknown, incompleteUnknown, incompleteUnknown, incompleteUnknown, incompleteUnknown, incompleteUnknown } }
+            };
+            foreach (bool check in new[] { false, true }) foreach (string presence in new[] { "both", "local", "server", "" })
+            foreach (bool truncated in new[] { false, true }) foreach (bool applied in new[] { false, true })
+            for (int d = 0; d < DiskChoice.Directions.Length; d++) foreach (bool wasChecked in new[] { false, true }) {
+                string key = check + "/" + presence + "/" + truncated;
+                string want = !check && wasChecked ? removal : expected[key][(applied ? 3 : 0) + d];
+                Check(DiskFoldersModel.FolderStatus(check, presence, applied, DiskChoice.Directions[d], truncated, wasChecked) == want,
+                    "status matrix " + key + "/applied=" + applied + "/" + DiskChoice.Directions[d] + "/previous=" + wasChecked);
+            }
+            Check(DiskFoldersModel.FolderStatus(true, "both", true, DiskChoice.Receive, false, true, "syncing") == downloading, "observed progress wins over existence of both directories");
+            Check(DiskFoldersModel.FolderStatus(true, "local", true, DiskChoice.Send, true, true, "syncing") == uploading, "observed progress works with incomplete presence");
+            Check(DiskFoldersModel.FolderStatus(true, "server", false, DiskChoice.Receive, false, false, "syncing") == download, "stale progress cannot confirm an unapplied selection");
+            Check(DiskFoldersModel.DirectionHint(DiskChoice.Both) == "" && DiskFoldersModel.DirectionHint(DiskChoice.Receive) == "↓ только забирать" && DiskFoldersModel.DirectionHint(DiskChoice.Send) == "↑ только отправлять", "only one-way directions have a tree hint");
+
+            var m = Model("{\"folders\":[]}");
+            m.Level("", Level(Row("Фото").Replace("both", "server")));
+            Check(m.Status("Фото") == server, "unchecked server folder occupies no local space");
+            m.Set("Фото", true); Check(m.Status("Фото") == download, "checking only stages download");
+            Check(m.Status("Фото") == download, "saving or failed apply does not advance status");
+            m.MarkApplied(); Check(m.Status("Фото") == downloading, "successful apply advances pending transfer");
+            m.Level("", Level(Row("Фото"))); Check(m.Status("Фото") == both, "presence refresh ends directory transfer indicator");
+            m.Set("Фото", false); Check(m.Status("Фото") == removal, "unchecking promises to preserve files");
+            m.Set("Фото", true); Check(m.Status("Фото") == both, "rechecking cancels removal");
+            m.Set("Фото", false); m.MarkApplied(); Check(m.Status("Фото") == copies, "applied deselection no longer says will stop and acknowledges retained files");
+            m.Set("Фото", true); m.MarkApplied(); m.Level("Фото", Level(Row("Фото/А").Replace("both", "server") + "," + Row("Фото/Б")));
+            Check(m.Status("Фото/А") == downloading, "applied parent includes lazy descendants");
+            m.Set("Фото/А", false); Check(m.Status("Фото") == both && m.Partial("Фото"), "partial parent does not claim the whole folder will stop");
+            m.Set("Фото", true);
+            m.SetDirection("Фото", DiskChoice.Send); Check(m.Status("Фото/А") == noDownload, "one-way edit cannot promise forbidden download");
+            m.SetDirection("Фото", DiskChoice.Receive); Check(m.Status("Фото/А") == download, "changed direction requires another successful apply");
+            m.MarkApplied(); Check(m.Status("Фото/А") == downloading, "new direction confirmed on apply");
+            m.Level("Фото", Level(Row("Фото/А").Replace("both", "server"), true)); Check(m.Status("Фото/А") == incompleteServer, "incomplete inventory cannot prove absence");
+            m.Level("Фото", Level(Row("Фото/А").Replace("both", "server"))); Check(m.Status("Фото/А") == downloading, "complete refresh clears uncertainty");
+            m.Level("", Level(Row("Фото", "receive", 2))); Check(m.CanRevert("Фото/А"), "receive local changes expose warning for selected descendant");
+            m.SetDirection("Фото", DiskChoice.Both); Check(!m.CanRevert("Фото"), "both suppresses receive-only warning even with stale localChanges");
+            m.SetDirection("Фото", DiskChoice.Send); Check(!m.CanRevert("Фото"), "send suppresses receive-only warning");
+            m.SetDirection("Фото", DiskChoice.Receive); m.Set("Фото", false); Check(!m.CanRevert("Фото"), "unchecked folder cannot revert");
+            m.Set("Фото", true); m.Level("", Level(Row("Фото", "receive", 0))); Check(!m.CanRevert("Фото"), "no local changes means no warning");
+
+            m.AddExternal("D:\\Camera", "Камера", DiskChoice.Both); var e = m.External.Single();
+            Check(m.ExternalStatus(e) == "Будет подключена к синхронизации", "new external does not invent remote presence");
+            m.MarkApplied(); Check(m.ExternalStatus(e) == "Подключена; состояние передачи неизвестно", "apply alone cannot prove external completion");
+            m.ExternalState(e, "syncing"); Check(m.ExternalStatus(e) == downloading, "existing DiskExternal progress is displayed");
+            e.Direction = DiskChoice.Send; Check(m.ExternalStatus(e) == "Будет подключена к синхронизации", "direction edit ignores stale external progress");
+            e.Direction = DiskChoice.Both;
+            m.ExternalState(e, "idle"); Check(m.ExternalStatus(e) == "✓ Подключена к синхронизации", "idle external does not claim that all bytes match");
+            m.ExternalState(e, "paused"); Check(m.ExternalStatus(e) == "Синхронизация приостановлена", "paused external status");
+            m.ExternalState(e, "detached"); Check(m.ExternalStatus(e) == "Будет подключена к синхронизации", "detached external can be reattached");
+            m.SetExternal(e, false); Check(m.ExternalStatus(e) == removal && !Roundtrip(m).External.Any() && m.ExternalRows.Single() == e, "external uncheck stages removal but keeps a reversible tree row");
+            m.SetExternal(e, true); Check(Roundtrip(m).External.Single().Path == e.Path && m.ExternalRows.Count() == 1, "external recheck cancels staged removal");
+            m.SetMode(DiskFoldersMode.All); m.SetMode(DiskFoldersMode.Selected); Check(m.IncludesExternal(e), "all-server toggle does not remove external folders");
+            m.SetExternal(e, false); m.MarkApplied(); Check(!m.ExternalRows.Any(), "confirmed external removal hides empty computer branch");
+        }
         internal static void Run()
         {
+            StatusChecks();
             var absent = new Dictionary<string, object>();
             var c = DiskChoice.FromProfile(absent); var m = new DiskFoldersModel(c);
             Check(!c.Chosen && m.Mode == DiskFoldersMode.Selected, "missing choice prompts for folders");
