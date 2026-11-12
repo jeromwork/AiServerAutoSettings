@@ -325,8 +325,6 @@ function Set-WizardNetwork([string]$Root,[string]$Bundle,$Transport) {
     # Separate ports and real SSH check BEFORE touching the working daemon.
     if(Test-Path (Join-Path $Root 'state/wizard-network.json')){throw 'Есть незавершённая настройка связи; дождитесь отката'}
     $candidate=Read-TransportJson (Join-Path $Root 'config.json');$candidate|Add-Member -Force transport (Copy-TransportObject $Transport)
-    # The working daemon holds channelSocksPort; the isolated preflight daemon gets a free loopback port instead.
-    if($candidate.transport.channelFirst){$socket=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,0);$socket.Start();$free=[int]$socket.LocalEndpoint.Port;$socket.Stop();$candidate.transport|Add-Member -Force channelSocksPort $free}
     Invoke-TransportPreflight $Root $Bundle $candidate
     $file=Join-Path $Root 'state/wizard-network.json';$session=[guid]::NewGuid().ToString('N')
     $previous=(Read-TransportJson (Join-Path $Root 'config.json')).transport

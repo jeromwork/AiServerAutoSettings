@@ -18,6 +18,22 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(self.get(),self.empty)
         f=self.home/'.config/remoteagents/transport-catalog.json';before=f.stat().st_mtime_ns
         self.assertEqual(self.get(),self.empty);self.assertEqual(f.stat().st_mtime_ns,before)
+    def test_sync_reads_current_catalog_and_snapshot_in_one_call(self):
+        self.get()
+        snapshot={'kind':'remoteagents-config-sync','schema':1,'revision':'unchanged','config':{'secrets':{}}}
+        file=self.home/'.config/remoteagents/config-sync.json'
+        file.write_text(json.dumps(snapshot)+'\r\n')
+        changed={**self.empty,'relays':[{'name':'new','host':'relay.example.invalid','port':443}]}
+        self.assertEqual(self.call('put',{'expected':self.empty,'catalog':changed}).returncode,0)
+        p=self.call('sync');self.assertEqual(p.returncode,0,p.stderr)
+        self.assertEqual(json.loads(p.stdout),{'snapshot':snapshot,'catalog':changed})
+        file.unlink();p=self.call('sync');self.assertNotEqual(p.returncode,0)
+        self.assertIn('Снимок или каталог недоступен',p.stderr)
+    def test_sync_corrupt_snapshot_does_not_echo_secrets(self):
+        self.get();file=self.home/'.config/remoteagents/config-sync.json'
+        file.write_text('{"secret":"pw", BROKEN')
+        p=self.call('sync');self.assertNotEqual(p.returncode,0)
+        self.assertNotIn('pw',p.stdout+p.stderr);self.assertNotIn('BROKEN',p.stdout+p.stderr)
     def test_put_and_crlf(self):
         current=self.get();new={**current,'relays':[{'name':'my-relay','host':'relay.example.invalid','port':8443,'enabled':True}]}
         self.assertEqual(self.call('put',{'expected':current,'catalog':new}).returncode,0)

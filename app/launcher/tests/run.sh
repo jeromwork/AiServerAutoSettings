@@ -31,6 +31,8 @@ pwsh=${PWSH:-$HOME/.cache/pwsh-test/pwsh}
   LOCALAPPDATA="$testdir/local" timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-config-device.ps1" -TestHome "$testdir/config-device" < /dev/null
   LOCALAPPDATA="$testdir/local" timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-config-scheduler.ps1" -TestHome "$testdir/config-scheduler" < /dev/null
   LOCALAPPDATA="$testdir/local" timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-refresh.ps1" -TestHome "$testdir/config-refresh" < /dev/null
+  timeout 60 python3 "$here/test-config-sync.py"
+  timeout 120 python3 "$repo/transport/test-config-sync-preflight.py"
   timeout 120 python3 "$repo/transport/test-server-catalog.py"
   timeout 120 node "$repo/accounts/test-accounts.mjs"
   timeout 120 python3 "$here/test_build.py"

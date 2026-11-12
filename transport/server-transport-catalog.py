@@ -45,7 +45,7 @@ def main():
             # Compare-and-swap prevents overwriting another computer's edits.
             if request.get('expected')!=current: raise ValueError('catalog changed; refresh')
             current=validate(request['catalog'])
-        elif action!='get': raise ValueError('action')
+        elif action not in ('get','sync'): raise ValueError('action')
         if action=='put' or not file.exists():
             fd,tmp=tempfile.mkstemp(dir=directory)
             try:
@@ -53,7 +53,16 @@ def main():
                 os.chmod(tmp,0o600);os.replace(tmp,file)
             finally:
                 if os.path.exists(tmp): os.unlink(tmp)
+        if action=='sync':
+            snapshot=directory/'config-sync.json'
+            if snapshot.is_symlink(): raise ValueError('symlink')
+            with snapshot.open(encoding='utf-8-sig') as stream:
+                raw=stream.read(1048577)
+            if len(raw)>1048576: raise ValueError('snapshot too large')
+            current={'snapshot':json.loads(raw.replace('\r','')),'catalog':current}
         print(json.dumps(current,ensure_ascii=False))
 if __name__=='__main__':
     try: main()
-    except Exception: print('Каталог не сохранён: проверьте формат, права или обновите список.',file=sys.stderr);sys.exit(1)
+    except Exception:
+        message='Снимок или каталог недоступен: проверьте config-sync.json, формат и права.' if 'sync' in sys.argv[1:] else 'Каталог не сохранён: проверьте формат, права или обновите список.'
+        print(message,file=sys.stderr);sys.exit(1)
