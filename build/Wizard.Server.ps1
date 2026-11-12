@@ -12,9 +12,10 @@ function Write-WizardProgress([string]$Text) {
     }finally{if($locked){$mutex.ReleaseMutex()};$mutex.Dispose()}
 }
 # Detailed journal for «Скопировать журнал»: lines starting with «·» go only to the window journal, not to the section row.
-# Masked: UUIDs, long tokens without slashes, URL passwords; paths, options, addresses and ports stay readable.
+# Masked: UUIDs, long tokens without slashes, URL passwords and route commands (the route title is logged separately);
+# paths, other options, addresses and ports stay readable.
 function Protect-WizardTrace([string]$Text) {
-    $Text -replace '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}','<uuid>' -replace '[A-Za-z0-9+_=-]{32,}','<secret>' -replace '://[^/@\s]+@','://<auth>@'
+    $Text -replace '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}','<uuid>' -replace '[A-Za-z0-9+_=-]{32,}','<secret>' -replace '://[^/@\s]+@','://<auth>@' -replace 'ProxyCommand[= ][^"\r\n]*','<маршрут>'
 }
 function Write-WizardTrace([string]$Exe,[string]$Arguments,[string]$Code,[long]$Ms,[string]$Err) {
     if(-not $script:WizardProgressFile){return}
