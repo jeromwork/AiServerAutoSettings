@@ -2,6 +2,8 @@
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <OutputType>Exe</OutputType>
+    <StartupObject Condition="'$(ConfigTests)' == 'true'">RemoteAgents.Launcher.ConfigBundleTests</StartupObject>
+    <StartupObject Condition="'$(ConfigTests)' != 'true'">RemoteAgents.Launcher.TestEntry</StartupObject>
     <DefineConstants>PORTABLE_TEST</DefineConstants>
     <DefineConstants Condition="'$(ProductName)' == 'RemoteVPN'">PORTABLE_TEST;REMOTE_VPN</DefineConstants>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
@@ -9,6 +11,8 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="PortableJson.cs" />
+    <Compile Include="ConfigBundleTests.cs" />
+    <Compile Include="../ConfigBundle.cs" Link="ConfigBundle.cs" />
     <Compile Include="InvitationTests.cs" />
     <Compile Include="OverlayTests.cs" />
     <Compile Include="../InvitationOverlay.cs" Link="InvitationOverlay.cs" />
