@@ -92,7 +92,7 @@ def config(path, administrative=True):
             require(os.geteuid() == 0, 'Команду выполняет администратор сервера (root)')
         trusted_owner = 0 if administrative else os.geteuid()
         # sudo helper always reads this root-owned file, never caller-controlled env.
-        for p in (Path(path), *Path(path).resolve().parents):
+        for p in (Path(path), *Path(path).absolute().parents, *Path(path).resolve().parents):
             require(p.stat().st_uid in (0, trusted_owner) and p.stat().st_mode & 0o022 == 0, 'Конфиг и предки должны принадлежать доверенному владельцу без записи другим')
     return c
 
@@ -339,7 +339,9 @@ def provision(c):
     for source in (Path(__file__).resolve(), *Path(__file__).resolve().parents):
         require(source.stat().st_uid == 0 and source.stat().st_mode & 0o022 == 0, 'Сначала установите код в каталог root без записи другим')
     helper = Path(c['enrollHelper'])
-    require(helper.parent.stat().st_uid == 0 and helper.parent.stat().st_mode & 0o022 == 0, 'Каталог helper должен быть защищён root')
+    # A root-owned leaf can still be replaced by renaming its writable ancestor.
+    for parent in (helper.parent, *helper.parent.parents, *helper.parent.resolve().parents):
+        require(parent.stat().st_uid == 0 and parent.stat().st_mode & 0o022 == 0, 'Каталог helper и все предки должны быть защищены root')
     save(helper, '#!/bin/sh\n[ "$#" = 1 ] || exit 1\nexec /usr/bin/python3 -I ' + shlex.quote(str(Path(__file__).resolve())) + ' --config ' + shlex.quote(c['_file']) + ' enroll "$1"\n', 0o755)
     try:
         account = pwd.getpwnam(c['enrollUser'])
