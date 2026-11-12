@@ -98,6 +98,11 @@ $kcalls=@([IO.File]::ReadAllLines((Join-Path $sshHome 'calls.jsonl'))|ForEach-Ob
 $tried=@($kcalls|ForEach-Object {$_.args[[array]::IndexOf([string[]]$_.args,'-i')+1]}|Where-Object {$_ -cne $kp.keyPath})
 Assert ($tried.Count -eq 1 -and $tried[0] -ceq $env:RA_TEST_GOOD_KEY) 'chosen key file (given as .pub) is tried first and alone'
 Assert (@($kcalls|Where-Object {$_.password}).Count -eq 0 -and $kcalls[-1].user -ceq 'remoteagents' -and $kcalls[-1].args -contains $kp.keyPath) 'existing key bootstraps without password; worker verified with own key'
+# Config fields server.port and server.hostKeys on the same (clean VPS) path: pinned before the first login.
+$pin='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPortFixturePortFixturePortFixture00'
+$pfile=Connect-WizardServer $keyRoot $repo ([pscustomobject]@{address='keyport.example.invalid';login='root';port=2207;hostKeys=@($pin);keyFile=($chosen+'.pub');passwordPipe=''});$pp=Read-TransportJson $pfile
+Assert ([IO.File]::ReadAllText($pp.configPath).Contains('Port 2207') -and (Get-TransportServerPort $pp) -eq 2207) 'server.port reaches the SSH profile'
+Assert ([IO.File]::ReadAllText($pp.knownHostsPath).Contains('[keyport.example.invalid]:2207 '+$pin) -and $pp.strictHostKey) 'server.hostKeys pinned before the first login'
 $kc=@($kcalls|Where-Object {$_.args -contains $env:RA_TEST_GOOD_KEY})[0]
 Assert ($kc.args -contains 'BatchMode=yes' -and $kc.args -contains 'IdentitiesOnly=yes' -and $kc.args -contains 'StrictHostKeyChecking=accept-new' -and $kc.payload.Contains((Get-Content -Raw ($kp.keyPath+'.pub')).Trim())) 'existing key installs the per-profile key in batch mode with accept-new'
 $secret=[IO.File]::ReadAllText($chosen);$body=($secret -split "`n"|Where-Object {$_ -and $_ -notmatch '-----'}) -join ''

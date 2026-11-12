@@ -207,7 +207,15 @@ function Connect-WizardServer([string]$Root,[string]$Bundle,$Request) {
     $file=Join-Path $dir 'ssh-transport.json'
     $p=[pscustomobject]@{sshExecutable=@(Get-Command ssh -CommandType Application -ErrorAction Stop)[0].Source;serverAddress=$address;login=$user;keyPath=(Join-Path $dir 'id_ed25519');knownHostsPath=(Join-Path $dir 'known_hosts');configPath=(Join-Path $dir 'ssh.conf')}
     if($env:OS -eq 'Windows_NT'){$p.sshExecutable=@(Get-Command ssh.exe -CommandType Application -ErrorAction Stop)[0].Source}
-    Write-DiskUtf8 $p.configPath "Host *`n    Port 22`n    ConnectTimeout 5`n"
+    # Config fields server.port / server.hostKeys (docs/CONFIG.md) also on the root-password path of a clean VPS.
+    $port=22;if($Request.port){$port=[int]$Request.port;if($port -lt 1 -or $port -gt 65535){throw 'Некорректный порт сервера'}}
+    Write-DiskUtf8 $p.configPath ("Host *`n    Port "+$port+"`n    ConnectTimeout 5`n")
+    $pins=@();$target=if($port -eq 22){$address}else{'['+$address+']:'+$port}
+    foreach($key in @($Request.hostKeys|Where-Object {$_})){
+        if([string]$key -cnotmatch '\A(ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa) [A-Za-z0-9+/=]+\z'){throw 'Некорректный ключ хоста в конфиге'}
+        $pins+=($target+' '+$key);if($port -ne 22){$pins+=($address+' '+$key)}
+    }
+    if($pins.Count){Write-DiskUtf8 $p.knownHostsPath (($pins -join "`n")+"`n");$p|Add-Member -Force strictHostKey $true}
     if(-not (Test-Path $p.keyPath)){
         Write-WizardProgress 'Создаю ключ этого компьютера…'
         $keygen=@(Get-Command ssh-keygen -CommandType Application -ErrorAction Stop)[0].Source
@@ -236,7 +244,7 @@ function Connect-WizardServer([string]$Root,[string]$Bundle,$Request) {
         [void](Invoke-WizardLogin $p $worker 'true')
     }
     $p.login=$worker
-    $p|Add-Member arguments @('-F',$p.configPath,'-l',$worker,'-i',$p.keyPath,'-o','IdentitiesOnly=yes','-o',('UserKnownHostsFile="'+$p.knownHostsPath.Replace('\','/')+'"'),'-o','GlobalKnownHostsFile=none','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-T',$address)
+    $p|Add-Member arguments (@('-F',$p.configPath)+$(if($port -ne 22){@('-p',[string]$port)}else{@()})+@('-l',$worker,'-i',$p.keyPath,'-o','IdentitiesOnly=yes','-o',('UserKnownHostsFile="'+$p.knownHostsPath.Replace('\','/')+'"'),'-o','GlobalKnownHostsFile=none','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-T',$address))
     Write-TransportJson $file $p -Private
     # The personal route stays in config.json; it also supplies the local transport overlay.
     Save-WizardRoute $Root $Request $p
