@@ -11,6 +11,36 @@ function Write-WizardProgress([string]$Text) {
         [IO.File]::AppendAllText($script:WizardProgressFile,((@{text=$Text}|ConvertTo-Json -Compress)+"`n"),(New-Object Text.UTF8Encoding($false)))
     }finally{if($locked){$mutex.ReleaseMutex()};$mutex.Dispose()}
 }
+# Detailed journal for «Скопировать журнал»: lines starting with «·» go only to the window journal, not to the section row.
+# Masked: UUIDs, long tokens without slashes, URL passwords; paths, options, addresses and ports stay readable.
+function Protect-WizardTrace([string]$Text) {
+    $Text -replace '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}','<uuid>' -replace '[A-Za-z0-9+_=-]{32,}','<secret>' -replace '://[^/@\s]+@','://<auth>@'
+}
+function Write-WizardTrace([string]$Exe,[string]$Arguments,[string]$Code,[long]$Ms,[string]$Err) {
+    if(-not $script:WizardProgressFile){return}
+    $lines=@('· '+[IO.Path]::GetFileName($Exe)+' '+(Protect-WizardTrace $Arguments)+' → код '+$Code+', '+$Ms+' мс')
+    foreach($line in @((Convert-TransportLF $Err) -split "`n"|Where-Object {$_.Trim()}|Select-Object -Last 60)){$lines+=('·   '+(Protect-WizardTrace $line))}
+    Write-WizardProgress ($lines -join "`n")
+}
+# Why a direct SSH failed: no TCP at all, TCP without the SSH banner (a provider filter), or a banner (then it is SSH itself).
+function Test-WizardTcpBanner([string]$Address,[int]$Port) {
+    $c=New-Object Net.Sockets.TcpClient;$w=[Diagnostics.Stopwatch]::StartNew();$target='TCP '+$Address+':'+$Port+': '
+    try{
+        if(-not $c.ConnectAsync($Address,$Port).Wait(8000)){return $target+'соединения нет за 8 с (адрес недоступен или порт закрыт в этой сети)'}
+        $ms=$w.ElapsedMilliseconds;$s=$c.GetStream();$s.ReadTimeout=8000;$buf=New-Object byte[] 255
+        try{$n=$s.Read($buf,0,$buf.Length)}catch{return $target+'соединение есть ('+$ms+' мс), но SSH-баннер не пришёл за 8 с — сеть пропускает соединение и глушит SSH'}
+        if($n -le 0){return $target+'соединение есть ('+$ms+' мс), но его сразу закрыли'}
+        $target+'соединение '+$ms+' мс, баннер «'+([Text.Encoding]::ASCII.GetString($buf,0,$n).Trim())+'»'
+    }catch{$target+$_.Exception.GetBaseException().Message}finally{$c.Close()}
+}
+function Write-WizardEnvironment([string]$SshExecutable) {
+    if(-not $script:WizardProgressFile){return}
+    $ssh=try{[Diagnostics.FileVersionInfo]::GetVersionInfo($SshExecutable).ProductVersion}catch{'?'}
+    $nets=@([Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()|Where-Object {$_.OperationalStatus -eq 'Up' -and $_.NetworkInterfaceType -ne 'Loopback'}|ForEach-Object {
+        $g=@($_.GetIPProperties().GatewayAddresses|ForEach-Object {[string]$_.Address}) -join ','
+        $_.Name+' ('+$_.Description+')'+$(if($g){' шлюз '+$g}else{''})})
+    Write-WizardProgress ('· Windows '+[Environment]::OSVersion.Version+', PowerShell '+$PSVersionTable.PSVersion+', ssh '+$SshExecutable+' '+$ssh+"`n·   сети: "+($nets -join '; '))
+}
 # Messages and detection for a server that accepts TCP but never answers SSH (typically a provider filter).
 $script:WizardNoBannerPattern='banner exchange|kex_exchange_identification|Connection closed|Connection reset|timed out'
 $script:WizardNoBannerText='Сервер не ответил по SSH: похоже, провайдер блокирует прямое подключение. Включите любой VPN в режиме TUN (OpenVPN, WireGuard…) и нажмите «Повторить» либо укажите в списке «Как подключаться» локальный прокси (например, Happ в режиме «Смешанный») или промежуточный SSH-сервер. Режим «смешанный» (только прокси) ssh сам не проводит: для него нужен маршрут «Локальный прокси»'
@@ -143,7 +173,9 @@ function Invoke-WizardLogin($Profile,[string]$User,[string]$Command,[string]$Inp
     if($script:WizardRoute){$args+=@($script:WizardRoute.options)}
     $strict=if($Profile.strictHostKey){'StrictHostKeyChecking=yes'}else{'StrictHostKeyChecking=accept-new'}
     if(-not $Credential){
-        try{return Invoke-DiskProcess $Profile.sshExecutable ($args+@('-o','BatchMode=yes','-o',$strict,$Profile.serverAddress,$Command)) $InputText -TimeoutSeconds $Timeout}
+        # -v while the journal is traced: the window journal then shows each step of the SSH handshake.
+        $verbose=@(if($script:WizardProgressFile){'-v'})
+        try{return Invoke-DiskProcess $Profile.sshExecutable ($verbose+$args+@('-o','BatchMode=yes','-o',$strict,$Profile.serverAddress,$Command)) $InputText -TimeoutSeconds $Timeout}
         catch{$m=[string]$_.Exception.Message;if($m -like '*SSH-баннера*'){$script:WizardNoBanner=$true}elseif($m -like '*отклонил вход*'){$script:WizardReached=$true};throw}
     }
     $si=New-Object Diagnostics.ProcessStartInfo

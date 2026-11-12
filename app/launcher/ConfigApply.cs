@@ -701,7 +701,8 @@ namespace RemoteAgents.Launcher
         SectionOutcome RunSection(string s, CancellationToken token)
         {
             var p = ConfigProfile.Load(home); var config = new Configuration(home).Data; string hash = ConfigSections.Hash(p, s);
-            Action<string> progress = line => { Report(s, SectionState.Running, line); Log(ConfigSections.Title(s) + ": " + line); };
+            // «·» lines are the detailed trace (each SSH run, probes): journal only, the row keeps the current step.
+            Action<string> progress = line => { if (!line.StartsWith("·", StringComparison.Ordinal)) Report(s, SectionState.Running, line); Log(ConfigSections.Title(s) + ": " + line); };
             Func<string, object, Dictionary<string, object>> run = (action, request) => WizardRunner.Run(home, bundle, action, request, token, progress);
             SectionOutcome o;
             switch (s) {

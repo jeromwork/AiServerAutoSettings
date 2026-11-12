@@ -105,6 +105,10 @@ namespace RemoteAgents.Launcher
             foldersPanel.Controls.Add(tree);
             foldersPanel.Controls.Add(new Label { Dock = DockStyle.Top, Height = 40, Text = "Какие папки держать на этом компьютере? Отметьте нужные; снятие отметки файлы не удаляет. Выбор сохранится в конфиге." });
             bottom.Controls.Add(done); bottom.Controls.Add(new Label { Dock = DockStyle.Right, Width = 8 }); bottom.Controls.Add(close);
+            var copyLog = new Button { Text = "Скопировать журнал", Width = 150, Dock = DockStyle.Left };
+            tip.SetToolTip(copyLog, "Весь журнал в буфер — для чата с администратором или ИИ. Секреты в журнал не пишутся.");
+            copyLog.Click += (a, b) => { try { Clipboard.SetText(journal.TextLength > 0 ? journal.Text : "Журнал пуст"); Log("Журнал скопирован."); } catch (Exception e) { Log("Журнал не скопирован: " + e.Message); } };
+            bottom.Controls.Add(copyLog);
             if (settings) BuildSettings(); else BuildPaste();
             // Docking: the last added control is the outermost one.
             Controls.Add(journal); Controls.Add(foldersPanel); Controls.Add(rowsPanel);
@@ -250,7 +254,12 @@ namespace RemoteAgents.Launcher
         }
         void Log(string text)
         {
-            Ui(() => { journal.AppendText(DateTime.Now.ToString("HH:mm:ss") + " " + text + "\r\n"); if (!journal.Visible) { journal.Visible = true; Relayout(); } });
+            string line = DateTime.Now.ToString("HH:mm:ss") + " " + (text ?? "").Replace("\r\n", "\n").Replace("\n", "\r\n") + "\r\n";
+            Ui(() => {
+                journal.AppendText(line); if (!journal.Visible) { journal.Visible = true; Relayout(); }
+                // The same journal on disk, in case the window was closed before copying.
+                try { Directory.CreateDirectory(Path.Combine(home, "logs")); File.AppendAllText(Path.Combine(home, "logs", "config-window.log"), line, Files.Utf8); } catch (Exception) { }
+            });
         }
         void Report(string section, SectionState state, string text)
         {
@@ -317,6 +326,7 @@ namespace RemoteAgents.Launcher
         {
             session = next;
             session.Log = Log; session.Report = Report;
+            Log(Product.Name + " " + Program.Version + ", Windows " + Environment.OSVersion.Version + (Environment.Is64BitOperatingSystem ? " x64" : "") + ", " + TimeZoneInfo.Local.Id);
             session.AskSecret = (name, why) => { string value = null; Func<string> ask = () => SecretPrompt.Ask(this, name, why); value = InvokeRequired ? (string)Invoke(ask) : ask(); return value; };
             rowsPanel.Visible = true;
             if (!settings) { pasting = false; pastePanel.Visible = false; header.Height = 44; header.Controls[1].Visible = false; ((Label)header.Controls[0]).Text = "Подключаю"; }

@@ -29,6 +29,7 @@ function Connect-WizardSnapshot([string]$Root,$Request) {
     $prepared=Initialize-WizardSettingsProfile $Root $Request
     $data=$prepared.data;$p=$prepared.profile;$file=$prepared.file;$dir=Split-Path $file -Parent;$port=[int]$data.serverPort
     $ok=$false;$lastReason='Нет связи ни одним из маршрутов конфига';$chosenRequest=$null
+    Write-WizardEnvironment $p.sshExecutable
     try{
         $all=@();$routeIndex=0
         foreach($route in @($data.routes)){
@@ -69,6 +70,8 @@ function Connect-WizardSnapshot([string]$Root,$Request) {
                 try{[void](Invoke-WizardLogin $p $p.login 'true');$ok=$true}catch{
                     if($_.Exception.Message -like '*Ключ хоста*'){throw}
                     $lastReason='Маршрут «'+$variant.title+'»: '+$_.Exception.Message
+                    Write-WizardProgress ('· маршрут «'+$variant.title+'» не прошёл: '+$_.Exception.Message)
+                    if($variant.kind -eq 'direct' -and -not @($variant.options).Count){Write-WizardProgress ('· '+(Test-WizardTcpBanner $p.serverAddress $port))}
                 }
                 if(-not $ok -and $Request.deferProof){$ok=$true}
                 if($ok){$chosenRequest=$r;break}
