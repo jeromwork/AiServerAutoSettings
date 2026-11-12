@@ -55,8 +55,15 @@ function Wait-WizardWorkingProof([string]$Root,[DateTime]$Mark,[int]$Timeout=120
 }
 function Set-WizardInitialNetwork([string]$Root,[string]$Bundle,$Transport) {
     $previous=(Read-TransportJson (Join-Path $Root 'config.json')).transport;$mark=[DateTime]::UtcNow
+    # Channel first: the new transport keeps the channel entry and the relays it was raised through.
+    if($previous.channelFirst){
+        foreach($field in @('channelFirst','channelSocksPort')){if($null -ne $previous.$field -and $null -eq $Transport.$field){$Transport|Add-Member -Force $field $previous.$field}}
+        if(-not @($Transport.relays|Where-Object {$null -ne $_}).Count -and @($previous.relays|Where-Object {$null -ne $_}).Count){$Transport|Add-Member -Force relays @($previous.relays|Where-Object {$null -ne $_})}
+    }
     try{
         Update-LauncherConfig $Root {param($c) $c|Add-Member -Force transport $Transport}
+        # A running daemon (same Home mutex) re-reads the changed config itself: the new process exits at once and
+        # the working one restarts only sing-box after a background check, so the channel SOCKS entry is gone briefly.
         Start-WizardWorkingTransport $Root $Bundle
         Wait-WizardWorkingProof $Root $mark
     }catch{

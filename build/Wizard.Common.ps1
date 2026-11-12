@@ -25,8 +25,21 @@ function Invoke-WizardSsh([string]$Root,[string]$Command,[string]$InputText='',[
     if(-not $profile){throw 'Настройте SSH на шаге «Сервер»'}
     $p=Read-TransportJson $profile
     $routeOptions=if($script:WizardRoute){@($script:WizardRoute.options)}else{@(Get-TransportSavedRouteOptions $Root $p)}
-    if($env:REMOTEAGENTS_WIZARD_SESSION -eq '1'){return Invoke-WizardControlSession $Root $p $routeOptions $Command $InputText $Timeout}
-    Invoke-DiskProcess $p.sshExecutable ($routeOptions+@('-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=5')+@($p.arguments)+@($Command)) (Convert-TransportLF $InputText) -TimeoutSeconds $Timeout
+    $run={
+        if($env:REMOTEAGENTS_WIZARD_SESSION -eq '1'){return Invoke-WizardControlSession $Root $p $routeOptions $Command $InputText $Timeout}
+        Invoke-DiskProcess $p.sshExecutable ($routeOptions+@('-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=5')+@($p.arguments)+@($Command)) (Convert-TransportLF $InputText) -TimeoutSeconds $Timeout
+    }
+    try{return & $run}catch{
+        # Channel first: the daemon briefly restarts sing-box when «Связь» rewrites config.transport, and
+        # parallel sections lose their SSH through the channel SOCKS entry. One repeat after 3 s, only for an
+        # SSH connection failure (ssh code 255; for the shared control session: session not started/interrupted).
+        $message=[string]$_.Exception.Message
+        if($message -notlike '*(код выхода 255)*' -and $message -notlike 'Управляющий SSH-сеанс не запущен*' -and $message -notlike 'Управляющий SSH-сеанс прерван*'){throw}
+        $config=Join-Path $Root 'config.json'
+        if(-not (Test-Path -LiteralPath $config) -or -not (Read-TransportJson $config).transport.channelFirst){throw}
+        Start-Sleep -Seconds 3
+        return & $run
+    }
 }
 function Send-WizardHelpers([string]$Root,[string]$Bundle) {
     $upload='set -eu; umask 077;'+"`n"
@@ -287,11 +300,12 @@ function Set-WizardBridge([string]$Root,[string]$Bundle,[bool]$Enabled,[bool]$Sh
     }catch{Undo-WizardBridge $Root $session;throw}
 }
 function Test-WizardNetworkManaged([string]$Root) {
+    $file=Join-Path $Root 'config.json';$c=$null;if(Test-Path $file){$c=Read-TransportJson $file}
+    # Channel-first Bootstrap runs the daemon before the first «Связь»: its fresh status is not an installed network yet.
+    if($c -and -not $c.wizard.configured -and $c.transport.channelFirst -and $c.transport.bootstrap){return $false}
     if(Test-StatusFresh $Root transport){return $true}
     # A dead heartbeat must never turn off preflight/rollback for an installed PC.
-    $file=Join-Path $Root 'config.json'
-    if(Test-Path $file){
-        $c=Read-TransportJson $file
+    if($c){
         if($c.wizard.configured){return $true}
         if(-not $c.transport.bootstrap -and $c.transport.channelPath -and ((Test-Path (Join-Path $Root 'state/transport-sing-box.json')) -or $c.wizard.pendingProfile)){return $true}
     }
@@ -308,7 +322,9 @@ function Test-WizardNetworkProof([string]$Root,[DateTime]$Mark) {
 function Set-WizardNetwork([string]$Root,[string]$Bundle,$Transport) {
     # Separate ports and real SSH check BEFORE touching the working daemon.
     if(Test-Path (Join-Path $Root 'state/wizard-network.json')){throw 'Есть незавершённая настройка связи; дождитесь отката'}
-    $candidate=Read-TransportJson (Join-Path $Root 'config.json');$candidate|Add-Member -Force transport $Transport
+    $candidate=Read-TransportJson (Join-Path $Root 'config.json');$candidate|Add-Member -Force transport (Copy-TransportObject $Transport)
+    # The working daemon holds channelSocksPort; the isolated preflight daemon gets a free loopback port instead.
+    if($candidate.transport.channelFirst){$socket=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,0);$socket.Start();$free=[int]$socket.LocalEndpoint.Port;$socket.Stop();$candidate.transport|Add-Member -Force channelSocksPort $free}
     Invoke-TransportPreflight $Root $Bundle $candidate
     $file=Join-Path $Root 'state/wizard-network.json';$session=[guid]::NewGuid().ToString('N')
     $previous=(Read-TransportJson (Join-Path $Root 'config.json')).transport

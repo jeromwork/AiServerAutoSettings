@@ -31,9 +31,15 @@ function Connect-WizardSnapshot([string]$Root,$Request) {
     $ok=$false;$lastReason='Нет связи ни одним из маршрутов конфига';$chosenRequest=$null
     Write-WizardEnvironment $p.sshExecutable
     try{
-        $all=@();$routeIndex=0
-        foreach($route in @($data.routes)){
-            $routeIndex++
+        $all=@();$routeIndex=0;$routes=@($data.routes|Where-Object {$null -ne $_})
+        # Channel first: the transport daemon's local SOCKS entry is tried before the routes of the config.
+        $launcher=Read-TransportJson (Join-Path $Root 'config.json')
+        if($launcher.transport.channelFirst){
+            $channelPort=[int](Get-TransportValue $launcher.transport 'channelSocksPort' 2223)
+            if(Test-WizardChannelPort $channelPort){$routes=@([pscustomobject]@{kind='proxy';channel=$true;proxy=[pscustomobject]@{type='socks';host='127.0.0.1';port=$channelPort}})+$routes}
+        }
+        foreach($route in $routes){
+            if(-not $route.channel){$routeIndex++}
             $r=[pscustomobject]@{askpassExecutable=[string]$Request.askpassExecutable;strictHostKey=[bool]$p.strictHostKey}
             if($route.kind -eq 'proxy'){$r|Add-Member proxy $route.proxy}
             elseif($route.kind -eq 'hop'){
@@ -52,6 +58,7 @@ function Connect-WizardSnapshot([string]$Root,$Request) {
             }elseif($route.kind -ne 'direct'){throw 'Неизвестный маршрут конфига'}
             $variants=New-WizardRoutes $r $p;$variants=@($variants|Where-Object {$_.kind -eq $route.kind})
             foreach($variant in $variants){
+                if($route.channel){$variant.title='через канал'}
                 $config=Read-TransportJson (Join-Path $Root 'config.json')
                 if($variant.kind -eq 'direct' -and $config.transport.bootstrap -and (Test-StatusFresh $Root vpn)){
                     $settings=Read-TransportSettings $Root;$address=(Get-VpnOptions $settings).probeAddress
@@ -141,12 +148,12 @@ function Set-WizardBootstrapHops([string]$Root,$Transport,$Initial,$Manifest) {
 }
 function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request) {
     $config=Read-TransportJson (Join-Path $Root 'config.json');$initial=$config.profile.vpn.bootstrap
-    if(Test-WizardNetworkManaged $Root){return @{ok=$true;skipped=$true;vpn='unchanged';summary='Начальный VPN пропущен: сохранена действующая конфигурация'}}
-    # A public catalog alone (config export --vpn off) is not a VPN: nothing to start before SSH.
-    if(-not $initial -or -not $initial.channel){return @{ok=$true;vpn='off';summary='Начальный VPN не задан'}}
+    if(Test-WizardNetworkManaged $Root){return @{ok=$true;skipped=$true;vpn='unchanged';summary='Канал до сервера пропущен: сохранена действующая конфигурация'}}
+    # A public catalog alone (config export --vpn off) is not a channel: nothing to start before SSH.
+    if(-not $initial -or -not $initial.channel){return @{ok=$true;vpn='off';summary='Канал до сервера не задан'}}
+    # Channel first: no TUN and no UAC. The user-level transport daemon (sing-box) picks a working candidate itself;
+    # its local SOCKS entry (channelSocksPort) carries the step «Сервер» and every later SSH as a 'proxy' route.
     try{
-        $conflict=Get-WizardBootstrapVpnConflict $Root $Bundle
-        if($conflict.conflict){return @{ok=$false;vpn='conflict';summary='Работает другой VPN; отключите его перед начальной настройкой';found=[string]$conflict.processHints}}
         $t=Copy-TransportObject $config.transport
         if(-not $t){$t=[pscustomobject]@{}}
         if(-not $t.profilePath){
@@ -170,62 +177,48 @@ function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request) {
         $t|Add-Member -Force channelPath $channel
         Set-WizardBootstrapHops $Root $t $initial $manifest
         Ensure-WizardTransportBinary $Root $Bundle $t
-        $t|Add-Member -Force bootstrap $true;$t|Add-Member -Force openSsh $false
+        # bootstrap: SSH is not proved yet (the step «Связь» removes the flag); openSsh stays at its default.
+        $t|Add-Member -Force bootstrap $true;$t|Add-Member -Force channelFirst $true;$t.PSObject.Properties.Remove('openSsh')
         Update-LauncherConfig $Root {param($c)
             $c|Add-Member -Force transport $t
             Set-ConfigDefault $c vpn ([pscustomobject]@{enabled=$false})
             foreach($field in @('checkUrl','dnsServer')){if($c.profile.vpn.$field){$c.vpn|Add-Member -Force $field $c.profile.vpn.$field}}
         }
-        $tag=Select-WizardBootstrapInternetPath $Root
-        Update-LauncherConfig $Root {param($c) $c.vpn|Add-Member -Force bootstrapTag $tag}
-        Set-VpnEnabled $Root $true
-        Start-WizardBootstrapTun $Root $Bundle ([int]$Request.parentPid)
-        $state=Wait-WizardBootstrapTun $Root
-        if($state -ne 'on'){Set-VpnEnabled $Root $false}
-        return @{ok=($state -eq 'on');vpn=$state;summary=$(if($state -eq 'on'){'Начальный VPN проверен до SSH'}else{'Начальный VPN не подтверждён; доступны обычные SSH-маршруты'})}
+        Start-WizardWorkingTransport $Root $Bundle
+        $tag=Wait-WizardChannel $Root ([int](Get-TransportValue $t 'channelSocksPort' 2223))
+        return @{ok=$true;vpn='channel';channel=$tag;summary=('Канал до сервера поднят: '+$tag)}
     }catch{
-        Write-SetupLog $Root 'bootstrap.vpn.unavailable'
+        Write-SetupLog $Root 'bootstrap.channel.unavailable'
         $reason=Protect-TransportText ([string]$_.Exception.Message)
-        Set-VpnEnabled $Root $false
-        return @{ok=$false;vpn='unavailable';summary=('Начальный VPN не поднят: '+$reason+'. Доступны обычные SSH-маршруты; исправьте и повторите')}
+        return @{ok=$false;vpn='channel-failed';summary=('Канал до сервера не поднят: '+$reason+'. Доступны обычные маршруты')}
     }
 }
-function Get-WizardBootstrapVpnConflict([string]$Root,[string]$Bundle) {
-    ConvertFrom-Json (& (Join-Path $Bundle 'transport/Test-VpnConflict.ps1') -Home $Root|Out-String)
+function Test-WizardChannelPort([int]$Port) {
+    $client=New-Object Net.Sockets.TcpClient
+    try{return ($client.ConnectAsync('127.0.0.1',$Port).Wait(1000) -and $client.Connected)}catch{return $false}finally{$client.Close()}
 }
-function Start-WizardBootstrapTun([string]$Root,[string]$Bundle,[int]$ParentPid=0) {
-    Invoke-InstallChild $Bundle 'transport/Vpn.Tun.ps1' @('-Home',$Root,'-Enable','-ParentPid',[string]$ParentPid) -TimeoutSeconds 420
-}
-function Wait-WizardBootstrapTun([string]$Root) {
-    for($n=0;$n -lt 60;$n++){
-        $file=Join-Path $Root 'status/vpn.json'
-        if(Test-Path $file){$status=Read-TransportJson $file;if($status.state -in @('error','conflict','rolled-back')){return [string]$status.state};if((Test-StatusFresh $Root vpn) -and $status.state -eq 'on'){return 'on'}}
+# The daemon's own status (status/transport.json of the current config revision) names the active candidate.
+function Wait-WizardChannel([string]$Root,[int]$Port,[int]$TimeoutSeconds=45) {
+    $watch=[Diagnostics.Stopwatch]::StartNew();$file=Join-Path $Root 'status/transport.json';$listed=$false;$last=''
+    while($true){
+        $status=$null;$revision=$null
+        try{if(Test-Path -LiteralPath $file){$status=Read-TransportJson $file;$revision=Get-TransportRevision $Root}}catch{$status=$null}
+        if($status -and $status.configRevision -ceq $revision){
+            if(-not $listed -and @($status.candidates|Where-Object {$null -ne $_}).Count){
+                Write-WizardProgress ('· кандидаты канала: '+((@($status.candidates|Where-Object {$_ -and $_.enabled -ne $false}|ForEach-Object {[string]$_.tag})) -join ', '));$listed=$true
+            }
+            if($status.error){$last=[string]$status.error}
+            if($status.active -and (Test-StatusFresh $Root transport) -and (Test-WizardChannelPort $Port)){
+                Write-WizardProgress ('· выбран кандидат канала: '+[string]$status.active)
+                Write-WizardProgress ('· канал поднят за '+$watch.ElapsedMilliseconds+' мс')
+                return [string]$status.active
+            }
+        }
+        if($watch.Elapsed.TotalSeconds -ge $TimeoutSeconds){break}
         Start-Sleep -Seconds 1
     }
-    return 'unconfirmed'
-}
-function Select-WizardBootstrapInternetPath([string]$Root) {
-    $settings=Read-TransportSettings $Root;$paths=Get-TransportCandidates $settings $Root
-    foreach($candidate in @($paths.Candidates)){
-        if(-not (Test-TransportInternetPath $candidate.tag $paths.Outbounds)){continue}
-        if(Test-WizardBootstrapInternetPath $Root $settings $paths $candidate.tag){return [string]$candidate.tag}
-    }
-    throw 'Нет пути с проверенным HTTPS для начального VPN'
-}
-function Test-WizardBootstrapInternetPath([string]$Root,$Settings,$Paths,[string]$Tag) {
-    $socket=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,0);$socket.Start();$port=$socket.LocalEndpoint.Port;$socket.Stop()
-    $net=Get-TransportNetwork;$exclude=@();$cfg=New-VpnTunConfig $Settings $Paths $Tag $exclude $net.interface
-    # Preflight uses only a loopback HTTP proxy. No network routes before TUN/watchdog.
-    $cfg.inbounds=@(@{type='http';tag='bootstrap-check';listen='127.0.0.1';listen_port=$port})
-    $file=Join-Path $Root 'state/bootstrap-internet-check.json';$child=$null
-    try {
-        Write-TransportJson $file $cfg -Private;Test-TransportConfigFile $Settings.Options.singBoxPath $file
-        $child=Start-TransportProcess $Settings.Options.singBoxPath @('run','-c',$file)
-        Start-Sleep -Milliseconds 500
-        $uri=[Uri](Get-VpnOptions $Settings).checkUrl
-        $req=[Net.HttpWebRequest]::Create($uri);$req.Proxy=New-Object Net.WebProxy('http://127.0.0.1:'+$port);$req.Timeout=10000;$req.AllowAutoRedirect=$false
-        $response=$req.GetResponse();try{return ([int]$response.StatusCode -ge 200 -and [int]$response.StatusCode -lt 300)}finally{$response.Dispose()}
-    }catch{return $false}finally{Stop-TransportProcess $child}
+    Write-WizardProgress ('· канал не поднят за '+$TimeoutSeconds+' с')
+    throw ('нет рабочего кандидата за '+$TimeoutSeconds+' с'+$(if($last){' ('+$last+')'}else{''}))
 }
 function Connect-WizardProfileServer([string]$Root,$Request) {
     $config=Read-TransportJson (Join-Path $Root 'config.json');$server=$config.profile.server
