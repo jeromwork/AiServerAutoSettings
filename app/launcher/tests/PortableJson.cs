@@ -31,6 +31,6 @@ namespace RemoteAgents.Launcher
     }
     internal static class TestEntry
     {
-        static int Main(string[] args) { if(args.Length>0 && args[0]=="--overlay")return OverlayTests.Run(args[1]); if(args.Length>0 && args[0]=="--proxy-connect")return ProxyRelay.Run(args); InvitationTests.Run(); DiskTreeTests.Run(); ProxyRelayTests.Run(); int code = UpdateSelfTests.Run(args[0]); Console.WriteLine(File.ReadAllText(Path.Combine(args[0], "selftest-result.json"))); return code; }
+        static int Main(string[] args) { if(args.Length>0 && args[0]=="--proxy-connect")return ProxyRelay.Run(args); DiskTreeTests.Run(); ConfigApplyTests.Run(); ProxyRelayTests.Run(); int code = UpdateSelfTests.Run(args[0]); Console.WriteLine(File.ReadAllText(Path.Combine(args[0], "selftest-result.json"))); return code; }
     }
 }

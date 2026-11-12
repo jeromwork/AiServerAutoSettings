@@ -6,9 +6,10 @@ using System.Threading;
 
 namespace RemoteAgents.Launcher
 {
-    // Persistent password hop: only an ACL-protected file path appears in ProxyCommand.
-    // The password remains in this process and the existing askpass named pipe.
-    internal static class InviteHop
+    // Persistent password hop for a configured route (ssh ProxyCommand «--hop-relay <file> %h %p»):
+    // only an ACL-protected file path appears in ProxyCommand; the password stays in this process
+    // and the existing askpass named pipe.
+    internal static class HopRelay
     {
         internal static int Run(string[] args)
         {

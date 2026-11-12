@@ -32,7 +32,8 @@ namespace RemoteAgents.Launcher
         DateTime settingsWritten = DateTime.MinValue;
         // Detached server installs started by the wizard (state/server-operations.json).
         DateTime nextOperationCheck = DateTime.MinValue; bool operationChecking, operationsActive; string operationTip = "";
-        DateTime nextInviteSync=DateTime.MinValue;bool inviteConnected;
+        // Periodic refresh of addresses / host keys / VPN with this computer's own key (action «Sync», stream C).
+        DateTime nextSync=DateTime.MinValue;bool syncConnected;
         string updateSummary = "обновления устанавливаются вручную из нового EXE";
         public bool RestartRequested { get; private set; }
         public TrayContext(string home, Journal log, string pipeName, SecurityIdentifier sid, string[] args, string installSource = null)
@@ -47,9 +48,6 @@ namespace RemoteAgents.Launcher
                 icon = new NotifyIcon { Visible = !firstSetup, Icon = yellow, Text = Product.Name + ": запускается…" };
                 icon.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowStatus(); };
                 if (!firstSetup) { engine.Recover(); Bootstrap(); LoadComponents(); }
-                if(!Product.IsVpn && !File.Exists(Path.Combine(home,"state","invite-device.json")) && Directory.Exists(Path.Combine(home,"state")) && Directory.GetFiles(Path.Combine(home,"state"),"invite-used-*.json").Length>0){
-                    try{RefreshPackage.RememberDevice(home,Environment.MachineName);}catch{log.Write("invite.identity.migrate.failed");}
-                }
             } catch {
                 stop.Cancel(); lock (pipeGate) { if (server != null) server.Dispose(); }
                 if (icon != null) { icon.Visible = false; icon.Dispose(); }
@@ -74,14 +72,17 @@ namespace RemoteAgents.Launcher
                     if(closing)throw new OperationCanceledException();
                     ReloadSettings();LoadComponents();return engine.Folder(engine.Current);
                 };
-                if(!Product.IsVpn && Invitation.Pending(home)) {
-                    bool manual=InviteWindow.Display(home,null,prepare);
-                    if(manual)SetupWizard.Display(home,engine.Current.Length>0?engine.Folder(engine.Current):null,true,prepare:prepare);
+                // One preparation for both windows: «Пройти по шагам» reuses the bundle the config window prepared.
+                Task<string> prepared=null;
+                Func<Task<string>> once=()=>{if(prepared==null || prepared.IsFaulted || prepared.IsCanceled)prepared=prepare();return prepared;};
+                if(!Product.IsVpn) {
+                    bool manual=ConfigWindow.First(home,once);
+                    if(manual && !closing)SetupWizard.Display(home,null,true,prepare:once);
                 } else SetupWizard.Display(home,null,true,prepare:prepare);
             } finally {actionBusy=false;}
             if(closing)return;
             if(FirstInstall.Required(home)){ExitThread();return;}
-            ReloadSettings();icon.Visible=true;readyForCommands=true;
+            ReloadSettings();icon.Visible=true;readyForCommands=true;Running();
             if(Product.IsVpn)Safe(RegisterVpnRun);
             DrainCommands();Tick();
         }
@@ -149,7 +150,7 @@ namespace RemoteAgents.Launcher
                 if (operationTip.Length > 0) icon.Text = operationTip.Length > 63 ? operationTip.Substring(0, 62) + "…" : operationTip;
                 if (DateTime.UtcNow >= nextOperationCheck) CheckOperations();
                 RefreshMenu(); WriteStatus();
-                CheckInviteSettings();
+                CheckSync();
                 if (serverUpdateRequested && !engine.Pending && !busy && TrySelfUpdate()) return;
             } catch { log.Write("supervisor.tick.failed"); icon.Icon = red; }
             finally { ticking = false; }
@@ -187,18 +188,19 @@ namespace RemoteAgents.Launcher
             } catch (OperationCanceledException) { } catch (Exception) { log.Write("operations.check.failed"); }
             finally { operationChecking = false; }
         }
-        async void CheckInviteSettings()
+        // Every 5 minutes (and right after the connection comes back) — only for a program set up from a config.
+        async void CheckSync()
         {
-            if(Product.IsVpn || !File.Exists(Path.Combine(home,"state","invite-device.json")) || Invitation.Pending(home))return;
+            if(Product.IsVpn || !Json.Bool(Json.Map(Json.Get(config.Data,"wizard")),"configured") || !Json.Map(Json.Get(config.Data,"profile")).ContainsKey("server"))return;
             bool connected=Json.Bool(StatusView.Read(home,"transport",maxAgeSec:15),"ok");
-            if(connected && !inviteConnected)nextInviteSync=DateTime.MinValue;
-            inviteConnected=connected;
-            if(actionBusy || busy || closing || DateTime.UtcNow<nextInviteSync)return;
-            actionBusy=true;nextInviteSync=DateTime.UtcNow.AddMinutes(5);
+            if(connected && !syncConnected)nextSync=DateTime.MinValue;
+            syncConnected=connected;
+            if(actionBusy || busy || closing || DateTime.UtcNow<nextSync)return;
+            actionBusy=true;nextSync=DateTime.UtcNow.AddMinutes(5);
             try{
-                var result=await Task.Run(()=>ServerOperations.Invoke(home,engine.Folder(engine.Current),"InviteSync",new {askpassExecutable=Program.Exe},stop.Token));
-                log.Write(Json.Bool(result,"changed")?"invite.settings.updated":"invite.settings.current");
-            }catch(OperationCanceledException){}catch{log.Write("invite.settings.unavailable");}
+                var result=await Task.Run(()=>ServerOperations.Invoke(home,engine.Folder(engine.Current),"Sync",new {askpassExecutable=Program.Exe},stop.Token));
+                log.Write(Json.Bool(result,"changed")?"config.sync.updated":"config.sync.current");
+            }catch(OperationCanceledException){}catch{log.Write("config.sync.unavailable");}
             finally{actionBusy=false;ReloadSettings();}
         }
         void WriteStatus()
@@ -224,19 +226,19 @@ namespace RemoteAgents.Launcher
             }
             foreach (var a in definition.Menu) { var action = a; menu.Items.Add(a.Title, null, (s, e) => RunAction(action)); }
             menu.Items.Add(new ToolStripSeparator());
-            string deviceFile=Path.Combine(home,"state","invite-device.json");
-            if(!Product.IsVpn && File.Exists(deviceFile) && !Json.Bool(StatusView.Read(home,"transport",maxAgeSec:15),"ok")){
-                var lost=new ToolStripMenuItem("Связь потеряна — получить обновление") {ForeColor=Color.Firebrick};
-                lost.Click+=(s,e)=>Safe(()=>{var d=Json.Read(deviceFile);string code=Json.Str(d,"name")+" / "+Json.Str(d,"id");Clipboard.SetText(code);MessageBox.Show("Попросите администратора выдать обновление для компьютера «"+Json.Str(d,"name")+"».\r\nКод устройства скопирован: "+code+"\r\nЗапустите выданный администратором EXE на этом компьютере.","RemoteAgents — связь потеряна");});
+            if(!Product.IsVpn && Json.Map(Json.Get(config.Data,"profile")).Count>0 && !Json.Bool(StatusView.Read(home,"transport",maxAgeSec:15),"ok")){
+                // No separate refresh files: a new config from the administrator restores the connection.
+                var lost=new ToolStripMenuItem("Нет связи — вставить новый конфиг…") {ForeColor=Color.Firebrick};
+                lost.Click+=(s,e)=>ShowConfig(false);lost.Enabled=!actionBusy && !busy;
                 menu.Items.Add(lost);
             }
-            menu.Items.Add("Настройки…", null, (s,e) => ShowSettings()).Enabled = !actionBusy && !busy;
+            menu.Items.Add("Настройки…", null, (s,e) => {if(Product.IsVpn)ShowSettings();else ShowConfig(false);}).Enabled = !actionBusy && !busy;
             if (!Product.IsVpn) {
                 string accountState=Path.Combine(home,"state","happier-account.json");
                 if(File.Exists(accountState)) { var last=Json.Read(accountState);menu.Items.Add(Json.Bool(last,"ok")?"Happier: последняя проверка "+Json.Str(last,"updatedUtc"):"Happier: подключение не подтверждено").Enabled=false; }
                 menu.Items.Add("Резервные ключи Happier", null, (s,e) => Safe(() => Open(Path.Combine(home,"secrets"))));
                 menu.Items.Add("Аккаунт Happier…", null, (s,e) => ShowSettings(3)).Enabled = !actionBusy && !busy;
-                menu.Items.Add("Выбрать папки и файлы…", null, (s,e) => ShowSettings(2)).Enabled = !actionBusy && !busy;
+                menu.Items.Add("Выбрать папки и файлы…", null, (s,e) => ShowConfig(true)).Enabled = !actionBusy && !busy;
             }
             if (!Product.IsVpn) menu.Items.Add("Открыть папку Disk", null, (s, e) => Safe(() => {
                 string saved = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteDisk", "base.txt");
@@ -259,14 +261,16 @@ namespace RemoteAgents.Launcher
             if(actionBusy || busy || closing )return;
             // Configured: never a window. Problems are shown by the tray icon, the menu and one balloon.
             bool configured=false;try{configured=Configured();}catch{log.Write("setup.config.read.failed");}
-            if(configured && (Product.IsVpn || !Invitation.Pending(home))){if(Product.IsVpn)Safe(RegisterVpnRun);else WatchHealth();return;}
+            if(configured){if(Product.IsVpn)Safe(RegisterVpnRun);else WatchHealth();return;}
             actionBusy=true;
             try {
                 // Let supervised components publish their first live observation without showing a window.
                 await Task.Delay(3000,stop.Token);
-                if(!Product.IsVpn && Invitation.Pending(home)){
-                    bool manual=InviteWindow.Display(home,engine.Folder(engine.Current));
-                    if(manual)SetupWizard.Display(home,engine.Folder(engine.Current),true);
+                if(!Product.IsVpn){
+                    // Not configured: the paste window (it resumes a config pasted earlier; «Пройти по шагам» stays available).
+                    string bundle=engine.Folder(engine.Current);
+                    if(ConfigWindow.First(home,()=>Task.FromResult(bundle)) && !closing)SetupWizard.Display(home,bundle,true);
+                    if(!closing && Configured())Running();
                     return;
                 }
                 string outcome=await SetupWizard.CheckOnLaunch(home,engine.Folder(engine.Current));
@@ -286,8 +290,9 @@ namespace RemoteAgents.Launcher
                     await Task.Delay(15000,stop.Token);
                     var critical=runtimes.Where(r=>r.Definition.Critical).ToArray();
                     if(critical.Length>0 && critical.All(r=>r.Healthy)){
-                        var wizard=Json.Map(Json.Get(config.Data,"wizard"));var vpn=runtimes.FirstOrDefault(r=>r.Definition.Name=="vpn");
-                        if(vpn!=null && Json.Bool(wizard,"inviteVpnWanted") && !vpn.Healthy)CheckVpn(vpn);
+                        var vpn=runtimes.FirstOrDefault(r=>r.Definition.Name=="vpn");
+                        var wantedVpn=Json.Map(Json.Get(Json.Map(Json.Get(config.Data,"profile")),"vpn"));
+                        if(vpn!=null && Json.Bool(wantedVpn,"enabled") && !vpn.Healthy)CheckVpn(vpn);
                         return;
                     }
                 }
@@ -305,7 +310,7 @@ namespace RemoteAgents.Launcher
         {
             if (actionBusy || busy || closing) return;
             actionBusy = true;
-            try { SetupWizard.Display(home,engine.Folder(engine.Current),false,section); }
+            try { SetupWizard.Display(home,engine.Folder(engine.Current),false,section); if(!Product.IsVpn)ConfigSession.SyncFromSettings(home); }
             catch { log.Write("setup.feature.failed"); MessageBox.Show("Настройка не завершена. Проверьте журнал нужного шага.","RemoteAgents"); }
             finally {
                 try {var latest=new Configuration(home).Data;config.Data.Clear();foreach(var pair in latest)config.Data[pair.Key]=pair.Value;
@@ -314,6 +319,23 @@ namespace RemoteAgents.Launcher
                 actionBusy=false;
             }
         }
+        // Settings from the tray: tabs «Конфиг» / «Папки», name, «Подробно» (the step-by-step sections).
+        void ShowConfig(bool foldersTab)
+        {
+            if (actionBusy || busy || closing) return;
+            actionBusy = true;
+            try { ConfigWindow.Settings(home,engine.Folder(engine.Current),foldersTab); }
+            catch { log.Write("setup.config.failed"); MessageBox.Show("Настройка не завершена. Подробности — в журнале окна и logs\\launcher.log.","RemoteAgents"); }
+            finally {
+                try {var latest=new Configuration(home).Data;config.Data.Clear();foreach(var pair in latest)config.Data[pair.Key]=pair.Value;
+                    foreach(var runtime in runtimes.Where(r=>!r.Definition.CommandManaged)) {bool enabled=Wanted(runtime.Definition);if(runtime.Enabled!=enabled)runtime.SetEnabled(enabled);}
+                } catch {log.Write("setup.config.refresh.failed");}
+                actionBusy=false;
+            }
+        }
+        // People must see that the program started (it lives in the tray, not in a window).
+        void Running()
+        { if(!closing && icon.Visible)icon.ShowBalloonTip(8000,Product.Name,Product.Name+" работает, значок в трее",ToolTipIcon.Info); }
         void ShowStatus()
         {
             RefreshMenu(); SetForegroundWindow(dispatch.Handle); icon.ContextMenuStrip.Show(Cursor.Position);
@@ -377,7 +399,7 @@ namespace RemoteAgents.Launcher
             var vpn = runtimes.FirstOrDefault(r => r.Definition.Name == "vpn");
             vpnToggle.Checked = vpn != null && vpn.Enabled;
             bool vpnInstalled = vpn != null && File.Exists(TransportScript("Vpn.Tun.ps1")) && File.Exists(TransportScript("Test-VpnConflict.ps1"));
-            vpnToggle.Enabled = !actionBusy && vpnInstalled; vpnToggle.Visible = vpnRow.Visible = Product.IsVpn || Json.Bool(Json.Map(Json.Get(config.Data,"wizard")),"inviteVpn");
+            vpnToggle.Enabled = !actionBusy && vpnInstalled; vpnToggle.Visible = vpnRow.Visible = Product.IsVpn || Json.Map(Json.Get(config.Data,"profile")).ContainsKey("vpn");
             vpnToggle.ToolTipText = vpnInstalled ? StatusView.Summary(StatusView.Read(home, "vpn", maxAgeSec: 15)) : "модуль не установлен";
             bool installed = File.Exists(TransportScript("Set-TransportPath.ps1"));
             foreach (ToolStripItem entry in pathsMenu.DropDownItems) {
@@ -440,7 +462,7 @@ namespace RemoteAgents.Launcher
                     if (!(Json.Get(result, "conflict") is bool) || !(items is System.Collections.IEnumerable) || items is string || items is System.Collections.IDictionary) throw new InvalidDataException();
                     if (!Json.Bool(result, "conflict")) {
                         if (vpn.Definition.CommandManaged) {
-                            config.SetInviteVpnIntent(true);config.SetEnabled(vpn.Definition, true);
+                            config.SetVpnIntent(true);config.SetEnabled(vpn.Definition, true);
                             await Task.Run(() => CaptureScript("Vpn.Tun.ps1", new[] { "-Enable", "-ParentPid", Process.GetCurrentProcess().Id.ToString() }));
                         } else EnableRuntime(vpn, true);
                         return;
@@ -457,7 +479,7 @@ namespace RemoteAgents.Launcher
         {
             if (!vpn.Definition.CommandManaged) { Safe(() => EnableRuntime(vpn, false)); return; }
             if (actionBusy || closing) return; actionBusy = true;
-            try { config.SetInviteVpnIntent(false);config.SetEnabled(vpn.Definition, false); await Task.Run(() => CaptureScript("Vpn.Tun.ps1", new[] { "-Disable" })); }
+            try { config.SetVpnIntent(false);config.SetEnabled(vpn.Definition, false); await Task.Run(() => CaptureScript("Vpn.Tun.ps1", new[] { "-Disable" })); }
             catch (OperationCanceledException) { }
             catch { if (!closing) MessageBox.Show("Запрос выключения VPN не выполнен. Проверьте статус и журналы; выключение ещё не подтверждено.", "RemoteAgents"); }
             finally { actionBusy = false; if (!closing) RefreshMenu(); }
@@ -566,9 +588,10 @@ namespace RemoteAgents.Launcher
         void Handle(string[] args)
         {
             Safe(() => {
-                if (args.Contains("--exit") || args.Contains("--uninstall")) { installStop = args.Contains("--install-stop");foreach(var form in Application.OpenForms.OfType<SetupWizard>().ToArray())form.Close();ExitThread();return; }
-                if(firstSetup && !icon.Visible){foreach(var form in Application.OpenForms.OfType<SetupWizard>())form.Activate();return;}
-                if (args.Contains("--settings")) { ShowSettings(); return; }
+                if (args.Contains("--exit") || args.Contains("--uninstall")) { installStop = args.Contains("--install-stop");foreach(var form in Application.OpenForms.Cast<Form>().Where(f=>f is SetupWizard || f is ConfigWindow).ToArray())form.Close();ExitThread();return; }
+                if(firstSetup && !icon.Visible){foreach(var form in Application.OpenForms.Cast<Form>().Where(f=>f is SetupWizard || f is ConfigWindow).ToArray())form.Activate();return;}
+                if (args.Contains("--settings")) { if(Product.IsVpn)ShowSettings();else ShowConfig(false); return; }
+                if (args.Contains("--started") && Configured()) Running();
                 if (args.Contains("--restart-components")) { if (busy || actionBusy) throw new InvalidOperationException(); LoadComponents(); }
                 if (args.Contains("--rollback")) { if (busy || actionBusy ) throw new InvalidOperationException(); engine.Rollback(); LoadComponents(); log.Write("update.rollback.manual"); }
                 if (args.Contains("--logs")) Open(Path.Combine(home, "logs"));
