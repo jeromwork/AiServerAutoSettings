@@ -285,8 +285,12 @@ def catalog_validator():
     return module.validate
 
 
-def vpn_section(c, values, vpn_on):
-    """VPN первым: публичный каталог + секреты канала/узлов/переходов."""
+def vpn_section(c, values, mode):
+    """Публичный каталог + секреты канала/узлов/переходов.
+
+    mode: 'on' — VPN первым (vpn.enabled=true); 'channel' — канал первым: те же секреты, vpn.enabled=false
+    (компьютер поднимает демон связи без TUN, docs/TASK-CHANNEL.md); 'off' — только публичный каталог."""
+    with_secrets = mode in ('on', 'channel')
     explicit = c.get('catalogFile')
     source = Path(explicit or worker_home(c) / '.config/remoteagents/transport-catalog.json')
     bootstrap = {}
@@ -297,7 +301,7 @@ def vpn_section(c, values, vpn_on):
             raise Error('Каталог связи не прошёл проверку схемы: ' + str(source))
     settings_ = c.get('vpnBootstrap')
     if not settings_:
-        require(not vpn_on, 'Для --vpn on нужен раздел vpnBootstrap в настройках выдачи (или выдайте с --vpn off)')
+        require(not with_secrets, 'Для --vpn on/channel нужен раздел vpnBootstrap в настройках выдачи (или выдайте с --vpn off)')
         return {'enabled': False, 'bootstrap': bootstrap} if bootstrap else None
     require(set(settings_) <= {'channelFile', 'entryFiles', 'hops', 'vpn'}, 'vpnBootstrap: channelFile, entryFiles, hops, vpn')
     vpn = settings_.get('vpn') or {}
@@ -309,8 +313,8 @@ def vpn_section(c, values, vpn_on):
         ipaddress.ip_address(vpn.get('dnsServer', ''))
     except ValueError:
         raise Error('vpnBootstrap.vpn.dnsServer: IP-адрес DNS')
-    section = {'enabled': bool(vpn_on), 'checkUrl': vpn['checkUrl'], 'dnsServer': vpn['dnsServer']}
-    if vpn_on:
+    section = {'enabled': mode == 'on', 'checkUrl': vpn['checkUrl'], 'dnsServer': vpn['dnsServer']}
+    if with_secrets:
         channel = private_file(settings_['channelFile'], 'Канал VPN')
         json.loads(channel)
         values['vpn-channel'] = channel.strip()
@@ -341,10 +345,10 @@ def vpn_section(c, values, vpn_on):
     return section
 
 
-def common_sections(c, values, vpn_on):
+def common_sections(c, values, mode):
     server = {'address': c['serverAddress'], 'port': c['serverPort'], 'login': c['workerUser'],
               'hostKeys': host_keys(c), 'routes': server_routes(c, values)}
-    vpn = vpn_section(c, values, vpn_on)
+    vpn = vpn_section(c, values, mode)
     return server, vpn
 
 
@@ -713,7 +717,7 @@ def export(c, args, out=sys.stdout, err=sys.stderr):
     folders = folders_list(args.folders)
     master = master_password(args)
     values = {}
-    server, vpn = common_sections(c, values, args.vpn == 'on')
+    server, vpn = common_sections(c, values, args.vpn)
     ident = secrets.token_hex(8)
     private, public = keypair(c, ident)
     values = {'server-key': private, **values}
@@ -883,7 +887,7 @@ def revoke(c, ident, out=sys.stdout, err=sys.stderr):
 
 def sync_document(c):
     values = {}
-    server, vpn = common_sections(c, values, bool(c.get('vpnBootstrap')))
+    server, vpn = common_sections(c, values, 'on' if c.get('vpnBootstrap') else 'off')
     config = {'kind': CONFIG_KIND, 'schema': 1, 'server': server}
     if vpn:
         vpn.pop('enabled', None)  # включать ли VPN — выбор самого компьютера
@@ -940,7 +944,7 @@ def main(argv=None):
     p.add_argument('--name', required=True)
     p.add_argument('--master-password-stdin', action='store_true')
     p.add_argument('--generate-master-password', action='store_true', help='придумать читаемый мастер-пароль и показать один раз')
-    p.add_argument('--vpn', choices=('on', 'off'))
+    p.add_argument('--vpn', choices=('on', 'off', 'channel'))
     p.add_argument('--happier', default='same')
     p.add_argument('--folders', default='')
     p.add_argument('--output')

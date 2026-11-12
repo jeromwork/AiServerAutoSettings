@@ -83,7 +83,7 @@ namespace RemoteAgents.Launcher
         DiskFolderTree folders; string foldersBase = "";
         TabControl tabs; TextBox configText; Button apply, folderApply;
         readonly CancellationTokenSource cancel = new CancellationTokenSource();
-        Task<string> preparing; ConfigSession session; bool running, closingRequested; string defaultName;
+        Task<string> preparing; ConfigSession session; bool running, closingRequested, filling, replaceOnPaste; string defaultName;
 
         internal static bool First(string home, Func<Task<string>> prepare)
         { using (var form = new ConfigWindow(home, null, prepare, false)) { form.ShowDialog(); return form.Manual; } }
@@ -156,6 +156,10 @@ namespace RemoteAgents.Launcher
             openFile.LinkClicked += (a, b) => { using (var d = new OpenFileDialog { Filter = "Конфиг RemoteAgents (*.json)|*.json|Все файлы|*.*", CheckFileExists = true }) if (d.ShowDialog(this) == DialogResult.OK) LoadFile(d.FileName); };
             steps.LinkClicked += (a, b) => { if (running) return; Manual = true; Close(); };
             start.Click += async (a, b) => await StartFromText(input.Text);
+            // A config filled in automatically is replaced as a whole by the first paste; any own edit ends that.
+            input.Enter += (a, b) => { if (replaceOnPaste) BeginInvoke((Action)(() => { if (replaceOnPaste) input.SelectAll(); })); };
+            input.KeyDown += (a, b) => { if (replaceOnPaste && ((b.Control && b.KeyCode == Keys.V) || (b.Shift && b.KeyCode == Keys.Insert))) input.SelectAll(); };
+            input.TextChanged += (a, b) => { if (!filling) replaceOnPaste = false; };
             AcceptButton = null;
         }
         void BuildSettings()
@@ -198,12 +202,16 @@ namespace RemoteAgents.Launcher
             // Bundle extraction starts at once and overlaps with pasting.
             if (prepare != null) preparing = prepare();
             string beside = ConfigSource.FindBeside(Path.GetDirectoryName(Program.Exe));
-            if (beside != null) { LoadFile(beside); Hint("Найден конфиг рядом с программой: " + Path.GetFileName(beside) + ". Нажмите «Запустить»."); }
-            else if (ConfigProfile.Load(home).Count > 0) {
-                try { input.Text = ConfigText.Pretty(ConfigBundle.ExportForAi(home)); Hint("Конфиг уже вставлялся раньше — нажмите «Запустить», чтобы продолжить настройку."); } catch (Exception) { }
-            }
+            filling = true;
+            try {
+                if (beside != null) { LoadFile(beside); Hint("Найден конфиг рядом с программой: " + Path.GetFileName(beside) + ". Нажмите «Запустить»."); }
+                else if (ConfigProfile.Load(home).Count > 0) {
+                    try { input.Text = ConfigText.Pretty(ConfigBundle.ExportForAi(home)); Hint("Конфиг уже вставлялся раньше — нажмите «Запустить», чтобы продолжить настройку."); } catch (Exception) { }
+                }
+            } finally { filling = false; }
+            replaceOnPaste = input.TextLength > 0;
             string name = ConfigProfile.DeviceName(ConfigProfile.Load(home)); if (name.Length > 0) deviceName.Text = defaultName = name;
-            input.Focus();
+            input.Focus(); if (replaceOnPaste) input.SelectAll();
         }
         void Hint(string text, bool error = false)
         {
@@ -265,7 +273,7 @@ namespace RemoteAgents.Launcher
         {
             Ui(() => {
                 SectionRow row; if (!rows.TryGetValue(section == ConfigSections.Bootstrap ? ConfigSections.Server : section, out row)) return;
-                if (section == ConfigSections.Bootstrap) { text = "VPN первым: " + text; if (state == SectionState.Done || state == SectionState.Failed) state = SectionState.Waiting; }
+                if (section == ConfigSections.Bootstrap) { text = "Канал: " + text; if (state == SectionState.Done || state == SectionState.Failed) state = SectionState.Waiting; }
                 row.Set(state, text);
             });
         }
@@ -318,7 +326,8 @@ namespace RemoteAgents.Launcher
                 var kept = parsed.Profile.Keys.Where(ConfigSections.Known).Where(k => !accept.Contains(k)).ToArray();
                 if (kept.Length > 0) Log("Оставлено как есть: " + string.Join(", ", kept));
                 ConfigBundle.Store(home, parsed, accept);
-                Log("Конфиг принят" + (parsed.Missing.Length > 0 ? "; пустых секретов: " + parsed.Missing.Length + " (спрошу по одному)" : "") + ".");
+                Log("Конфиг принят" + (parsed.Missing.Length > 0 ? "; пустые секреты: " + string.Join(", ", parsed.Missing) + " (спрошу по одному)" : "") + ".");
+                Log(ConfigText.Overview(parsed.Profile));
                 await RunSession(new ConfigSession(home, Bundle, parsed.Secrets, parsed.Hints), null);
             });
         }

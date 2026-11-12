@@ -36,7 +36,7 @@ namespace RemoteAgents.Launcher
 
         internal static void Run()
         {
-            Plan(); Engine(); Conflicts(); Ai(); Sources(); Requests(); Profiles();
+            Plan(); Channel(); Engine(); Conflicts(); Ai(); Sources(); Requests(); Profiles();
             Console.WriteLine("OK: " + count + " config engine checks (plan by difference, parallel order, conflicts, AI copy without secrets, sources)");
         }
         static void Plan()
@@ -69,6 +69,24 @@ namespace RemoteAgents.Launcher
             var ready = ConfigPlan.Ready(inspect, config, p);
             Check(ready[ConfigSections.Server] && !ready[ConfigSections.Connection] && ready[ConfigSections.Account] && ready[ConfigSections.Proxy] && ready[ConfigSections.Lan] && ready[ConfigSections.Bootstrap], "Inspect ids map to sections");
             Check(!ConfigPlan.Ready(inspect, Json.Map(Json.Parse("{}")), p)[ConfigSections.Lan], "a LAN missing on this computer is not ready");
+        }
+        // docs/TASK-CHANNEL.md: `config export --vpn channel` = vpn.enabled:false + bootstrap.channel -> «Канал до сервера».
+        static void Channel()
+        {
+            var channel = Json.Map(Json.Parse("{\"device\":{\"name\":\"Комп\"},\"server\":{\"address\":\"203.0.113.10\",\"routes\":[{\"kind\":\"direct\"}],\"key\":{\"secret\":\"server-key\"}},\r\n" +
+                "\"vpn\":{\"enabled\":false,\"checkUrl\":\"https://check.example/ip\",\"dnsServer\":\"192.0.2.53\",\"bootstrap\":{\"catalog\":{\"schema\":1,\"entries\":[],\"hops\":[],\"relays\":[{\"name\":\"sparfum\",\"host\":\"192.0.2.7\",\"port\":8443}],\"cdn\":[]},\r\n" +
+                "\"channel\":{\"secret\":\"vpn-channel\"},\"entries\":{},\"hops\":{}}}}"));
+            var plan = ConfigPlan.Build(channel, new Dictionary<string, string>(), new Dictionary<string, bool>());
+            Check(plan.Count >= 2 && plan[0] == ConfigSections.Bootstrap && plan[1] == ConfigSections.Server, "vpn.enabled:false with bootstrap.channel plans Bootstrap first, then Server: " + string.Join(",", plan));
+            var catalogOnly = Clone(channel); ((Dictionary<string, object>)((Dictionary<string, object>)catalogOnly["vpn"])["bootstrap"]).Remove("channel");
+            Check(!ConfigPlan.Build(catalogOnly, new Dictionary<string, string>(), new Dictionary<string, bool>()).Contains(ConfigSections.Bootstrap), "a public catalog without a channel plans no Bootstrap");
+            Check(ConfigSections.Title(ConfigSections.Bootstrap) == "Канал до сервера", "Bootstrap row title");
+            Check(ConfigText.Overview(channel) == "устройство: Комп; маршруты: direct; канал первым: sparfum", "accepted-config line: " + ConfigText.Overview(channel));
+            Check(ConfigText.Overview(catalogOnly).EndsWith("канал первым: нет") && ConfigText.Overview(Profile()) == "устройство: Ноутбук сына; маршруты: direct, proxy, hop; канал первым: да", "accepted-config line without channel / without names");
+            string token = new string('A', 20) + "+/_=-" + new string('z', 15);
+            string excerpt = WizardRunner.Excerpt("Ошибка\r\n\tключ " + token + " конец\r\n" + new string('я', 400));
+            Check(!excerpt.Contains(token.Substring(0, 20)) && excerpt.StartsWith("Ошибка ключ <secret> конец ") && excerpt.Length == 300 && !excerpt.Contains("\n"), "unreadable output: one line, key-like runs masked, 300 chars");
+            Check(WizardRunner.Excerpt(null) == "" && WizardRunner.Excerpt(" \r\n ") == "", "empty output gives an empty excerpt");
         }
         static void Engine()
         {

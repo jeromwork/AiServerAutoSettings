@@ -9,6 +9,7 @@ using System.Linq;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -33,7 +34,7 @@ namespace RemoteAgents.Launcher
         internal static string Title(string s)
         {
             switch (s) {
-                case Bootstrap: return "VPN первым"; case Server: return "Сервер"; case Connection: return "Связь"; case Bridge: return "Мост";
+                case Bootstrap: return "Канал до сервера"; case Server: return "Сервер"; case Connection: return "Связь"; case Bridge: return "Мост";
                 case Account: return "Happier"; case Disk: return "Диск"; case Vpn: return "VPN"; case Proxy: return "Прокси сервера"; case Lan: return "Локальные сети";
                 default: return s;
             }
@@ -68,7 +69,7 @@ namespace RemoteAgents.Launcher
         {
             var vpn = Json.Map(Json.Get(p, "vpn"));
             switch (s) {
-                case Bootstrap: return Json.Map(Json.Get(vpn, "bootstrap")).ContainsKey("channel"); // a public catalog alone needs no VPN-first
+                case Bootstrap: return Json.Map(Json.Get(vpn, "bootstrap")).ContainsKey("channel"); // a public catalog alone needs no channel first
                 case Server: case Connection: return p.ContainsKey("server");
                 case Bridge: return p.ContainsKey("bridge") || Json.Str(Json.Map(Json.Get(p, "device")), "name").Length > 0;
                 case Account: return p.ContainsKey("happier");
@@ -248,12 +249,25 @@ namespace RemoteAgents.Launcher
                     catch (TimeoutException) { new Journal(home).Write("wizard." + action + ".timeout"); throw; }
                 }
                 read();
-                Dictionary<string, object> response;
-                try { response = Json.Map(Json.Parse(Files.LF(External.ReadPowerShellOutput(output)))); }
-                catch (Exception) { throw new IOException("Шаг не вернул результат (код " + code + "). Проверьте журнал соответствующего модуля и повторите"); }
+                Dictionary<string, object> response; string raw = "";
+                try { raw = Files.LF(External.ReadPowerShellOutput(output)); response = Json.Map(Json.Parse(raw)); }
+                catch (Exception) {
+                    // The raw output stays in logs/ for the journal; the message carries a masked one-line excerpt.
+                    try { string logs = Path.Combine(home, "logs"); Directory.CreateDirectory(logs); if (File.Exists(output)) File.Copy(output, Path.Combine(logs, "wizard-" + action + "-" + DateTime.Now.ToString("HHmmss", CultureInfo.InvariantCulture) + ".out"), true); }
+                    catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { }
+                    string excerpt = Excerpt(raw);
+                    throw new IOException("Шаг не вернул результат (код " + code + "). Проверьте журнал соответствующего модуля и повторите" + (excerpt.Length > 0 ? ". Вывод шага: «" + excerpt + "»" : ". Вывод шага пуст"));
+                }
                 if (code != 0 || !Json.Bool(response, "ok")) throw new IOException((Json.Text(response, "reason", "Шаг не подтверждён: проверьте журнал и повторите") + ". " + Json.Str(response, "remedy")).Trim());
                 return Json.Map(Json.Get(response, "result"));
             } finally { foreach (string f in new[] { requestFile, output, live }) try { if (File.Exists(f)) File.Delete(f); } catch (IOException) { } }
+        }
+        // Unreadable step output for the error text: one line, long key-like runs masked before the 300-character cut.
+        internal static string Excerpt(string text)
+        {
+            string line = Regex.Replace(text ?? "", "\\s+", " ").Trim();
+            line = Regex.Replace(line, "[A-Za-z0-9+/_=-]{32,}", "<secret>");
+            return line.Length > 300 ? line.Substring(0, 300) : line;
         }
     }
 
@@ -510,6 +524,19 @@ namespace RemoteAgents.Launcher
     // and escapes <, >, &, ' as <…; inside JSON strings they are safe as plain characters).
     internal static class ConfigText
     {
+        // One journal line after «Конфиг принят»: what the pasted profile describes (no secrets).
+        internal static string Overview(Dictionary<string, object> p)
+        {
+            string device = ConfigProfile.DeviceName(p);
+            var kinds = Json.Array(Json.Get(Json.Map(Json.Get(p, "server")), "routes")).Select(r => Json.Str(Json.Map(r), "kind")).Where(k => k.Length > 0).ToArray();
+            var bootstrap = Json.Map(Json.Get(Json.Map(Json.Get(p, "vpn")), "bootstrap")); string channel = "нет";
+            if (bootstrap.ContainsKey("channel")) {
+                var names = Json.Array(Json.Get(Json.Map(Json.Get(bootstrap, "catalog")), "relays")).Select(r => Json.Str(Json.Map(r), "name"))
+                    .Concat(Json.Map(Json.Get(bootstrap, "entries")).Keys).Where(n => n.Length > 0).Distinct().ToArray();
+                channel = names.Length > 0 ? string.Join(", ", names) : "да";
+            }
+            return "устройство: " + (device.Length > 0 ? device : "не задано") + "; маршруты: " + (kinds.Length > 0 ? string.Join(", ", kinds) : "нет") + "; канал первым: " + channel;
+        }
         internal static string Pretty(string json)
         {
             var text = new StringBuilder(); int depth = 0; bool inString = false;
@@ -706,7 +733,7 @@ namespace RemoteAgents.Launcher
             Func<string, object, Dictionary<string, object>> run = (action, request) => WizardRunner.Run(home, bundle, action, request, token, progress);
             SectionOutcome o;
             switch (s) {
-                case ConfigSections.Bootstrap: o = SectionOutcome.From(run("Bootstrap", new { }), "VPN для первого подключения включён"); break;
+                case ConfigSections.Bootstrap: o = SectionOutcome.From(run("Bootstrap", new { }), "Канал до сервера поднят"); break;
                 case ConfigSections.Server: o = Server(p, run); break;
                 case ConfigSections.Connection: {
                     var catalog = run("Catalog", new { });

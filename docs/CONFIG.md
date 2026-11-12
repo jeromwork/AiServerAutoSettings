@@ -96,6 +96,11 @@ BOM и переводы строк CRLF допустимы. Комментари
 | `secrets.kdf.salt` | Base64 случайной соли 16–64 байта; экспорт создаёт 32 байта. |
 | `secrets.check` | Зашифрованная строка `remoteagents` для проверки мастер-пароля. |
 
+**Канал первым.** `vpn.enabled=false` вместе с `vpn.bootstrap.channel` (выдаёт `remoteagents config export --vpn channel`):
+раздел «Канал до сервера» не включает TUN и не просит UAC, а запускает демон связи (sing-box от имени пользователя); тот сам выбирает
+рабочего кандидата — прямой VLESS или через промежуточный сервер из `catalog.relays`. SSH шага «Сервер» и дальше идёт через его
+локальный SOCKS-вход `127.0.0.1:<transport.channelSocksPort>` (по умолчанию 2223); в `config.json` ставится `transport.channelFirst=true`.
+
 В `config.json` программы уже есть служебные `schema`, `version`, `transport`, `wizard` и т. п. Их нельзя вставлять
 как переносимый конфиг. Переносимое желаемое состояние хранится там в `profile`, без раздела `secrets`.
 
