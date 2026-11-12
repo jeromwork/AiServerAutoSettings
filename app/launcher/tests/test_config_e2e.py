@@ -536,12 +536,73 @@ def build_harness():
     run([DOTNET, 'build', REPO / 'app/launcher/tests/PortableTests.csproj', '-c', 'Release', '-p:ConfigE2E=true', '--nologo', '-v:q'], timeout=300)
 
 
-def main_channel():
-    """Full scenario «канал первым». Needs streams A (engine) and B (`config export --vpn channel`)."""
+def write_old_installation(root, d, stand, knobs):
+    """An earlier RemoteAgents on this computer, as found on the owner's Windows: set up by the wizard through an SSH hop.
+    Old profile ssh-profiles/<id1>/project-connections/control with known_hosts and known_hosts-hop; transport and wizard
+    keep serverRoute used=hop in Save-WizardRoute's form (name, ssh, keyFile, hostKey); transport.hops is empty."""
+    old = root / 'ssh-profiles' / secrets.token_hex(10) / 'project-connections/control'
+    old.mkdir(parents=True)
+    keygen(old / 'id_ed25519')
+    hop_key = d / 'old-hop-key'
+    keygen(hop_key)
+    hop_ssh = f'{USER}@127.0.0.1:{stand.port}'
+    (old / 'known_hosts').write_text(f'[127.0.0.2]:{stand.port} {stand.host_pub}\n127.0.0.2 {stand.host_pub}\n')
+    (old / 'known_hosts-hop').write_text(f'[127.0.0.1]:{stand.port} {stand.host_pub}\n')
+    (old / 'ssh.conf').write_text(f'Host *\n    Port {stand.port}\n    ConnectTimeout 5\n')
+    profile = dict(sshExecutable=shutil.which('ssh'), serverAddress='127.0.0.2', login=USER, keyPath=str(old / 'id_ed25519'),
+                   knownHostsPath=str(old / 'known_hosts'), configPath=str(old / 'ssh.conf'), strictHostKey=True, arguments=['-p', str(stand.port)])
+    (old / 'ssh-transport.json').write_text(json.dumps(profile))
+    channel = root / 'state' / ('wizard-channel-' + secrets.token_hex(8) + '.json')
+    channel.parent.mkdir(parents=True)
+    channel.write_text(json.dumps(stand.channel))
+    route = dict(used='hop', hop=dict(name='hop', ssh=hop_ssh, keyFile=str(hop_key), hostKey=stand.host_pub))
+    transport = dict(knobs, profilePath=str(old / 'ssh-transport.json'), channelPath=str(channel), serverRoute=route,
+                     hops=[], entries=[], relays=[], cdn=[], openSsh=True)
+    (root / 'config.json').write_text(json.dumps(dict(schema=1, version=1, components={}, transport=transport,
+                                                      wizard=dict(configured=True, serverRoute=route), vpn=dict(enabled=False))))
+    return old
+
+
+def daemon_fatal(root):
+    log = root / 'logs/transport.log'
+    return [x for x in (log.read_text(encoding='utf-8-sig', errors='replace').splitlines() if log.exists() else []) if ' fatal' in x]
+
+
+def run_engine_watched(cmd, env, root):
+    """The harness's --run, stopped right after Bootstrap if the transport daemon died (`fatal` in logs/transport.log):
+    with a dead daemon there is no channel, and Server would only wait for the jammer's timeout."""
+    t0 = time.monotonic()
+    proc = subprocess.Popen([str(x) for x in cmd], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = [], []
+    for stream, sink in ((proc.stdout, out), (proc.stderr, err)):
+        threading.Thread(target=lambda s=stream, k=sink: k.extend(x.decode(errors='replace') for x in s), daemon=True).start()
+    bootstrap_s = None
+    while proc.poll() is None:
+        if time.monotonic() - t0 > 400:
+            proc.kill()
+            raise AssertionError('apply: timeout')
+        if bootstrap_s is None and any(x.startswith('[Bootstrap] ') for x in err):
+            bootstrap_s = round(time.monotonic() - t0, 1)
+        if bootstrap_s is not None and daemon_fatal(root):
+            proc.kill()
+            status = root / 'status/transport.json'
+            status = json.loads(status.read_text(encoding='utf-8-sig')) if status.exists() else {}
+            raise AssertionError('transport daemon fatal; Bootstrap ended after %.1f s without a channel\n' % bootstrap_s
+                                 + 'logs/transport.log:\n  ' + '\n  '.join(daemon_fatal(root)[-3:])
+                                 + '\nstatus/transport.json: configRevision=%r candidates=%r active=%r\n' % (status.get('configRevision'), status.get('candidates'), status.get('active'))
+                                 + ''.join(x for x in err if x.startswith('[Bootstrap] ')))
+        time.sleep(.3)
+    time.sleep(.3)
+    return subprocess.CompletedProcess(cmd, proc.returncode, ''.join(out).encode(), ''.join(err).encode())
+
+
+def main_channel(upgrade=False):
+    """Full scenario «канал первым». Needs streams A (engine) and B (`config export --vpn channel`).
+    upgrade=True (channel-upgrade): the same config pasted over an earlier installation that used an SSH hop."""
     started = time.monotonic()
     os.umask(0o022)
     build_harness()
-    with tempfile.TemporaryDirectory(prefix='ra-channel-e2e-', delete=not os.environ.get('RA_E2E_KEEP')) as tmp:
+    with tempfile.TemporaryDirectory(prefix='ra-channel-upgrade-' if upgrade else 'ra-channel-e2e-', delete=not os.environ.get('RA_E2E_KEEP')) as tmp:
         d = Path(tmp)
         local = d / 'local'
         root = local / 'RemoteAgents'
@@ -582,9 +643,12 @@ def main_channel():
 
                 # Stand-only transport knobs (unprivileged ports, Linux sing-box); everything else comes from the config.
                 socks_port = free_port()
-                (root / 'config.json').write_text(json.dumps(dict(schema=1, version=1, components={}, transport=dict(
-                    singBoxPath=str(SING_BOX), bindPhysical=False, metered='false', probeTimeoutSec=8, stallSeconds=3,
-                    sshPort=free_port(), syncPort=free_port(), apiPort=free_port(), channelSocksPort=socks_port))))
+                knobs = dict(singBoxPath=str(SING_BOX), bindPhysical=False, metered='false', probeTimeoutSec=8, stallSeconds=3,
+                             sshPort=free_port(), syncPort=free_port(), apiPort=free_port(), channelSocksPort=socks_port)
+                if upgrade:
+                    old_profile = write_old_installation(root, d, stand, knobs)
+                else:
+                    (root / 'config.json').write_text(json.dumps(dict(schema=1, version=1, components={}, transport=knobs)))
                 # RemoteAgents.exe of the stand: the program's own --proxy-connect (ProxyRelay) for the `proxy` route.
                 exe = root / 'RemoteAgents.exe'
                 exe.write_text(f'#!/bin/sh\nexec "{DOTNET}" "{HARNESS}" "$@"\n')
@@ -596,7 +660,10 @@ def main_channel():
 
                 # 3. «Запустить»: Bootstrap → Server → Connection/... at once.
                 jammed_before = stand.jammer.stats['connections']
-                p = run([DOTNET, HARNESS, '--run', root, REPO, PWSH], env=env, check=False, timeout=400)
+                if upgrade:
+                    p = run_engine_watched([DOTNET, HARNESS, '--run', root, REPO, PWSH], env, root)
+                else:
+                    p = run([DOTNET, HARNESS, '--run', root, REPO, PWSH], env=env, check=False, timeout=400)
                 trace = p.stderr.decode(errors='replace')
                 try:
                     result = json.loads(p.stdout.decode().strip().splitlines()[-1])
@@ -631,6 +698,11 @@ def main_channel():
                 status = json.loads((root / 'status/transport.json').read_text(encoding='utf-8-sig'))
                 assert status.get('active') == 'vless-relay-relay', status.get('active')
                 assert stand.relay.stats['connections'] > 0, 'traffic must pass the relay'
+                if upgrade:
+                    # The earlier installation's hop is not carried into the channel's daemon; it never died.
+                    assert not daemon_fatal(root), daemon_fatal(root)
+                    assert (config['transport'].get('serverRoute') or {}).get('used') != 'hop', config['transport'].get('serverRoute')
+                    assert not str(config['transport']['profilePath']).startswith(str(old_profile.parent.parent.parent)), 'profile of the pasted config'
 
                 # 4. Live SSH login with the issued key, as saved (ProxyCommand through the channel).
                 t = time.monotonic()
@@ -639,8 +711,8 @@ def main_channel():
                 timing.update(loginMs=round((time.monotonic() - t) * 1000), jammedConnections=stand.jammer.stats['connections'] - jammed_before,
                               totalSeconds=round(time.monotonic() - started, 1))
                 print(json.dumps(timing, ensure_ascii=False))
-                print('PASS: channel first — jammed direct SSH, Bootstrap on vless-relay-relay (no TUN/UAC), '
-                      'Server via proxy 127.0.0.1:channelSocksPort, Connection ok, login with the issued key')
+                print('PASS: channel first' + (' over an earlier hop installation' if upgrade else '') + ' — jammed direct SSH, '
+                      'Bootstrap on vless-relay-relay (no TUN/UAC), Server via proxy 127.0.0.1:channelSocksPort, Connection ok, login with the issued key')
         finally:
             (root / 'stop').write_text('stop')
             (root / 'state').mkdir(exist_ok=True)
@@ -661,6 +733,8 @@ def _ms(sections, name):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='CONFIG end-to-end stand')
-    parser.add_argument('--scenario', choices=('config', 'channel', 'channel-parts'), default=os.environ.get('RA_E2E_SCENARIO') or 'config',
-                        help='config (default, as before) | channel («канал первым», needs streams A+B) | channel-parts (its building blocks)')
-    {'config': main, 'channel': main_channel, 'channel-parts': channel_parts}[parser.parse_args().scenario]()
+    parser.add_argument('--scenario', choices=('config', 'channel', 'channel-upgrade', 'channel-parts'), default=os.environ.get('RA_E2E_SCENARIO') or 'config',
+                        help='config (default, as before) | channel («канал первым», needs streams A+B) | '
+                             'channel-upgrade (the same over an earlier hop installation) | channel-parts (its building blocks)')
+    {'config': main, 'channel': main_channel, 'channel-upgrade': lambda: main_channel(upgrade=True),
+     'channel-parts': channel_parts}[parser.parse_args().scenario]()
