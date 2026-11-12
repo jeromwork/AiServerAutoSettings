@@ -55,7 +55,8 @@ namespace RemoteAgents.Launcher
         {
             var p = new Dictionary<string, object>(profile); var disk = new Dictionary<string, object>(Json.Map(Json.Get(p, "disk")));
             if (!disk.ContainsKey("base") && !string.IsNullOrEmpty(diskBase)) disk["base"] = diskBase;
-            if (All) disk["folders"] = "all";
+            if (!Chosen) disk.Remove("folders");
+            else if (All) disk["folders"] = "all";
             else disk["folders"] = Folders.Select(f => f.Direction == Both ? (object)f.Path
                 : new Dictionary<string, object> { { "path", f.Path }, { "direction", f.Direction } }).ToArray();
             if (External.Count > 0) disk["external"] = External.Select(e => (object)new Dictionary<string, object> { { "path", e.Path }, { "remote", e.Remote }, { "direction", e.Direction } }).ToArray();

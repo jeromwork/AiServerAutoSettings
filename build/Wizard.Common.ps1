@@ -474,9 +474,18 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             if($Request.fresh){$selection=@{schema=1;paths=@()}}
             # The install-time freeze placeholder is not a user choice: show the default again.
             if($null -eq $selection -or $selection.placeholder){$selection=@{schema=1;paths=@($union.rows|Where-Object {$_.path -notmatch '/' -and $_.kind -eq 'directory'}|ForEach-Object {$_.path})}}
+            Add-DiskTreeState $union $base
             $result=@{union=$union;selection=$selection;base=$base}
             if($server.unsupportedName){$result.unsupportedName=[string]$server.unsupportedName}
             return $result
+        }
+        'DiskRevert' {
+            $lock=[IO.File]::Open((Join-Path $diskHome 'folders.lock'),'OpenOrCreate','ReadWrite','None')
+            try{return Invoke-DiskRevert ([string]$Request.path)}finally{$lock.Dispose()}
+        }
+        'DiskExternal' {
+            if($Request.action -cne 'list'){throw 'DiskExternal поддерживает только action=list'}
+            return @{items=@(Get-DiskExternalList)}
         }
         'Disk' {
             Send-WizardHelpers $Root $Bundle
@@ -495,7 +504,7 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             }
             [void][IO.Directory]::CreateDirectory($diskHome);[void][IO.Directory]::CreateDirectory($base)
             Write-DiskUtf8 (Join-Path $diskHome 'base.txt') $base
-            $choice=Join-Path $Root 'state/wizard-selection.json';Write-TransportJson $choice @{schema=1;paths=@($Request.paths)}
+            $choice=Join-Path $Root 'state/wizard-selection.json';Write-TransportJson $choice @{schema=1;paths=@($Request.paths);directions=$Request.directions;external=@($Request.external)}
             $needsInstall= -not (Test-Path (Join-Path $diskHome 'state/config.xml')) -or -not (Test-Path (Join-Path $diskHome 'tray/syncthingtray.exe'))
             if(-not $needsInstall){try{Read-DiskState;$probe=Invoke-DiskApi 'system/status';$needsInstall= -not $probe.myID}catch{$needsInstall=$true}}
             if($needsInstall){

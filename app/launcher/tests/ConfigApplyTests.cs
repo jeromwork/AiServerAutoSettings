@@ -36,6 +36,7 @@ namespace RemoteAgents.Launcher
 
         internal static void Run()
         {
+            DiskChoiceTests.Run();
             Plan(); Channel(); Engine(); Conflicts(); Ai(); Sources(); Requests(); Profiles();
             Console.WriteLine("OK: " + count + " config engine checks (plan by difference, parallel order, conflicts, AI copy without secrets, sources)");
         }

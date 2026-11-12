@@ -705,10 +705,34 @@ def keypair(c, ident):
 
 
 def folders_list(text):
-    folders = [f for f in (text.split(',') if text else []) if f]
-    for f in folders:
-        require(re.fullmatch(r'[\w .-]+(?:/[\w .-]+)*', f) and all(x.strip() not in ('', '.', '..') for x in f.split('/')), 'Недопустимая папка: ' + f)
-    return folders
+    # None/legacy empty default = let the receiving application ask the owner.
+    if text is None or text == '':
+        return None
+    if text == 'all':
+        return 'all'
+    if text == 'none':
+        return []
+    rows, paths, directions = [], set(), {}
+    for item in text.split(','):
+        path, separator, direction = item.partition(':')
+        direction = direction if separator else 'both'
+        require(direction in ('both', 'send', 'receive'), 'Направление папки: both, send или receive (' + item + ')')
+        parts = path.split('/')
+        require(len(path) <= 1024 and re.fullmatch(r'[^\\<>:"|?*\x00-\x1f]+', path) and
+                re.fullmatch(r'[^\W]|_', parts[0][0:1]) and
+                re.fullmatch(r'[\w .-]{1,128}', parts[0]) and '..' not in parts[0] and
+                all(0 < len(x) <= 255 and x not in ('.', '..') and not x.endswith(('.', ' ')) and
+                    not re.match(r'(?i)^(con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)', x) for x in parts),
+                'Недопустимая папка: ' + path)
+        folded, project = path.casefold(), parts[0].casefold()
+        require(folded not in paths, 'Повторяющаяся папка: ' + path)
+        require(project not in directions or directions[project] == direction,
+                'Разные направления для проекта «' + parts[0] + '»: у проекта одно направление на компьютере')
+        paths.add(folded)
+        directions[project] = direction
+        rows.append(path if direction == 'both' else {'path': path, 'direction': direction})
+    require(len(rows) <= 256, 'Слишком много папок (максимум 256)')
+    return rows
 
 
 ACCOUNT_RE = re.compile(r'[a-f0-9]{64}\Z')
@@ -788,7 +812,7 @@ def export(c, args, out=sys.stdout, err=sys.stderr):
         happier.update(mode='new', label=clean_name(args.happier[4:]))
     config['happier'] = happier
     config['bridge'] = {'enabled': True, 'allowShell': False}
-    if folders:
+    if folders is not None:
         config['disk'] = {'folders': folders}
     config['secrets'] = protect(values, master) if master else values
     text = json.dumps(config, ensure_ascii=False, indent=2) + '\n'
@@ -1000,7 +1024,7 @@ def main(argv=None):
     p.add_argument('--generate-master-password', action='store_true', help='придумать читаемый мастер-пароль и показать один раз')
     p.add_argument('--vpn', choices=('on', 'off', 'channel'))
     p.add_argument('--happier', default='same', help='same | same:<подпись или id аккаунта> | new:Название')
-    p.add_argument('--folders', default='')
+    p.add_argument('--folders', help='all | none | A,B:send,C:receive; без флага программа спросит владельца')
     p.add_argument('--output')
     p = sub.add_parser('list', help='выданные конфиги и последний вход')
     p.add_argument('--json', action='store_true')

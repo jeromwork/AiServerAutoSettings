@@ -15,11 +15,14 @@ try {
     # Native auto-accept cannot enforce the occupied-directory policy.
     $device=Invoke-DiskApi ('config/devices/'+$peer)
     if($device.autoAcceptFolders){[void](Invoke-DiskApi ('config/devices/'+$peer) PATCH @{autoAcceptFolders=$false})}
+    $external=@(Read-DiskExternal)
     $pending=Invoke-DiskApi 'cluster/pending/folders'
     foreach($entry in $pending.PSObject.Properties){
         $offer=$entry.Value.offeredBy.PSObject.Properties|Where-Object {$_.Name -ceq $peer}
         if(-not $offer){continue}
         $name=[string]$offer.Value.label;$id=$entry.Name
+        # A detached external choice must not be accepted under Disk by the all-projects policy.
+        if(@($external|Where-Object {$_.remote -ieq $name}).Count){continue}
         $selection=Read-DiskSelection;$selected=@(Get-ProjectSelection $name $selection)
         if($null -ne $selection -and -not $selected.Count){continue}
         try {
@@ -34,7 +37,7 @@ try {
             if($null -ne $selection){Save-SelectionPolicy $target (New-SelectionIgnores $selected)}
             Test-DiskIgnores $target -Write
             $folder=Invoke-DiskApi 'config/defaults/folder'
-            $folder.id=$id;$folder.label=$name;$folder.path=$target;$folder.type='sendreceive';$folder.paused=$true
+            $folder.id=$id;$folder.label=$name;$folder.path=$target;$folder.type=Get-DiskFolderType (Get-DiskDirection $selection $name);$folder.paused=$true
             $folder.devices=@(@{deviceID=$peer});$folder.maxConflicts=-1;$folder|Add-Member -Force versioning @{type='staggered';params=@{maxAge='0';cleanInterval='3600'}}
             [void](Invoke-DiskApi ('config/folders/'+[Uri]::EscapeDataString($id)) PUT $folder)
             [void](Invoke-DiskApi ('config/folders/'+[Uri]::EscapeDataString($id)) PATCH @{paused=$false})

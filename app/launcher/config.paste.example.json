@@ -36,7 +36,17 @@
   "disk": {
     "folders": [
       "Проект",
-      "Документы"
+      {
+        "path": "Документы",
+        "direction": "receive"
+      }
+    ],
+    "external": [
+      {
+        "path": "D:\\Отчёты",
+        "remote": "Отчёты",
+        "direction": "send"
+      }
     ]
   },
   "vpn": {

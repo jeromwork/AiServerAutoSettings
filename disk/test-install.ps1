@@ -45,12 +45,12 @@ try {
     Remove-Item -LiteralPath $ignore -Force;Test-DiskIgnores $folder -Write;Test-DiskIgnores $folder -Write
     Assert ([IO.File]::ReadAllText($ignore) -ceq [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'stignore.txt'))) 'Canonical ignores'
     Write-DiskUtf8 (Join-Path $folder 'file.txt') 'existing';Write-DiskUtf8 (Join-Path $script:DiskHome 'server.txt') 'peer'
-    $script:LocalFolder=[pscustomobject]@{id='repeat';path=$folder;devices=@(@{deviceID='local'},@{deviceID='peer'});maxConflicts=10};$script:Attachments=0;$script:LocalWrites=0
+    $script:LocalFolder=[pscustomobject]@{id='repeat';path=$folder;type='sendreceive';devices=@(@{deviceID='local'},@{deviceID='peer'});maxConflicts=10};$script:Attachments=0;$script:LocalWrites=0
     function Read-DiskProfile {param($Profile)};function Read-DiskState {}
     function Invoke-DiskServer {param($Action,$Data) if($Action -eq 'list'){[pscustomobject]@{name='project';id='repeat';hasFiles=$true}}else{$script:Attachments++;Assert ($Data.localHasFiles -and -not $Data.merge) 'Repeat attach needs no merge';@{id='repeat'}}}
     function Invoke-RestMethod {param($Uri) switch -Wildcard ($Uri){'*/system/status' {[pscustomobject]@{myID='local'}} '*/config/folders' {Write-Output -NoEnumerate @([pscustomobject]@{id='unrelated';path=(Join-Path $tmp 'other')},$script:LocalFolder)} default {$script:LocalWrites++}}}
     $tokens=$null;$errors=$null;$addAst=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'Add-RemoteDiskFolder.ps1'),[ref]$tokens,[ref]$errors);$body=$addAst.EndBlock.Statements|Where-Object {$_ -is [Management.Automation.Language.TryStatementAst]}
-    $Path=$folder;$Remote='project';$Merge=$false;$interactive=$false;1..2|ForEach-Object {$null=& ([scriptblock]::Create($body.Extent.Text))};Assert ($script:Attachments -eq 2 -and $script:LocalWrites -eq 2) 'Nonempty local folder reconnects without merge'
+    $Path=$folder;$Remote='project';$Merge=$false;$Direction='both';$interactive=$false;1..2|ForEach-Object {$null=& ([scriptblock]::Create($body.Extent.Text))};Assert ($script:Attachments -eq 2 -and $script:LocalWrites -eq 2) 'Nonempty local folder reconnects without merge'
     . (Join-Path $PSScriptRoot 'Disk.Binary.ps1')
     function Invoke-WebRequest {param($Uri,$OutFile,[switch]$UseBasicParsing,$TimeoutSec) Copy-Item -LiteralPath $script:Archive -Destination $OutFile;$script:Downloads++}
     function Get-Process {param($Name,$ErrorAction) $script:FakeProcesses}

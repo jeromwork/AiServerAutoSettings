@@ -20,6 +20,7 @@ namespace RemoteAgents.Launcher
         }
         internal static void Run()
         {
+            DiskChoiceTests.Run();
             var valid = Example();
             var p = ConfigBundle.Parse(Json.Encode(valid));
             Check(!p.Locked && p.Missing.Length == 0 && !p.Profile.ContainsKey("secrets"), "public profile separate");
