@@ -199,6 +199,8 @@ namespace RemoteAgents.Launcher
             Check(Json.Strings(Json.Get(disk, "paths")).SequenceEqual(new[] { "Проекты", "Документы" }) && Json.Str(disk, "base") == "C:\\Users\\user\\Disk", "Disk from profile folders");
             var account = ConfigRequests.Account(p, new Dictionary<string, object>(), new Dictionary<string, object>());
             Check(Json.Str(account, "serverUrl") == "https://api.example" && Json.Str(account, "label") == "Мой аккаунт", "Account request");
+            var issued = Json.Map(Json.Parse("{\"happier\":{\"mode\":\"same\",\"serverUrl\":\"https://api.example\",\"webappUrl\":\"https://app.example\"}}"));
+            Check(Json.Str(ConfigRequests.Account(issued, new Dictionary<string, object>(), new Dictionary<string, object>()), "mode") == "same", "same account without a key (server export) asks the engine to pick the existing account");
             Throws<IOException>(() => ConfigRequests.Account(new Dictionary<string, object> { { "happier", new Dictionary<string, object>() } }, new Dictionary<string, object>(), new Dictionary<string, object>()), "Happier without addresses refused clearly");
             var lan = ConfigRequests.Lan(home, p, Json.Map(Json.Parse("{\"lan\":{\"connections\":[{\"name\":\"old\"}]}}")));
             Check(lan.Item1.Length == 1 && Json.Str(lan.Item1[0], "name") == "office" && lan.Item2.SequenceEqual(new[] { "old" }), "LAN: add new, remove gone");

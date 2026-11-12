@@ -391,7 +391,11 @@ namespace RemoteAgents.Launcher
             string api = Json.Text(h, "serverUrl", Json.Text(saved, "serverUrl", Json.Str(services, "serverUrl"))), web = Json.Text(h, "webappUrl", Json.Text(saved, "webappUrl", Json.Str(services, "webappUrl")));
             if (api.Length == 0 || web.Length == 0) throw new IOException("Нет адресов Happier: укажите happier.serverUrl и happier.webappUrl или дождитесь установки Happier на сервере");
             string label = Json.Text(h, "label", ConfigProfile.DeviceName(p)); if (label.Length == 0) label = "Мой аккаунт";
-            return new Dictionary<string, object> { { "label", label }, { "serverUrl", Origin(api) }, { "webappUrl", Origin(web) }, { "expectedAccount", "" } };
+            var request = new Dictionary<string, object> { { "label", label }, { "serverUrl", Origin(api) }, { "webappUrl", Origin(web) }, { "expectedAccount", "" } };
+            // «Тот же аккаунт» without a key (what `remoteagents config export` issues): the engine selects and live-checks
+            // the server's existing account (docs/CONFIG-ENGINE.md, Account mode:"same"); no recovery key travels.
+            if (Json.Str(h, "mode") != "new" && SecretName(Json.Get(h, "key")).Length == 0) request["mode"] = "same";
+            return request;
         }
         internal static string IpCheckUrl(Dictionary<string, object> p, Dictionary<string, object> config)
         { return Json.Text(Json.Map(Json.Get(p, "proxyOut")), "checkUrl", Json.Text(Json.Map(Json.Get(config, "proxy")), "ipCheckUrl", Json.Str(Json.Map(Json.Get(p, "vpn")), "checkUrl"))); }
