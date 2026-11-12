@@ -83,7 +83,7 @@ function Set-WizardInitialNetwork([string]$Root,[string]$Bundle,$Transport) {
     $previous=(Read-TransportJson (Join-Path $Root 'config.json')).transport;$mark=[DateTime]::UtcNow
     # Channel first: the new transport keeps the channel entry and the relays it was raised through.
     if($previous.channelFirst){
-        foreach($field in @('channelFirst','channelSocksPort','probeTimeoutSec')){if($null -ne $previous.$field -and $null -eq $Transport.$field){$Transport|Add-Member -Force $field $previous.$field}}
+        foreach($field in @('channelFirst','channelSocksPort','channelSshAddress','probeTimeoutSec')){if($null -ne $previous.$field -and $null -eq $Transport.$field){$Transport|Add-Member -Force $field $previous.$field}}
         if(-not @($Transport.relays|Where-Object {$null -ne $_}).Count -and @($previous.relays|Where-Object {$null -ne $_}).Count){$Transport|Add-Member -Force relays @($previous.relays|Where-Object {$null -ne $_})}
     }
     try{

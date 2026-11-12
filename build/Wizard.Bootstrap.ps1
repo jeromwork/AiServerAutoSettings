@@ -35,8 +35,10 @@ function Connect-WizardSnapshot([string]$Root,$Request) {
         # Channel first: the transport daemon's local SOCKS entry is tried before the routes of the config.
         $launcher=Read-TransportJson (Join-Path $Root 'config.json')
         if($launcher.transport.channelFirst){
-            $channelPort=[int](Get-TransportValue $launcher.transport 'channelSocksPort' 2223)
-            if(Test-WizardChannelPort $channelPort){$routes=@([pscustomobject]@{kind='proxy';channel=$true;proxy=[pscustomobject]@{type='socks';host='127.0.0.1';port=$channelPort}})+$routes}
+            # ssh goes straight to the daemon's SSH entry (HostName + HostKeyAlias, like the VPN route), not through a ProxyCommand:
+            # Windows OpenSSH stalled the .NET --proxy-connect helper mid key exchange («Комп», 12.11.2026), a plain TCP target did not.
+            $channelAddress=[string](Get-TransportValue $launcher.transport 'channelSshAddress' '127.0.0.2')
+            if(Test-WizardChannelPort $port $channelAddress){$routes=@([pscustomobject]@{kind='direct';channel=$true;address=$channelAddress})+$routes}
         }
         foreach($route in $routes){
             if(-not $route.channel){$routeIndex++}
@@ -58,9 +60,9 @@ function Connect-WizardSnapshot([string]$Root,$Request) {
             }elseif($route.kind -ne 'direct'){throw 'Неизвестный маршрут конфига'}
             $variants=New-WizardRoutes $r $p;$variants=@($variants|Where-Object {$_.kind -eq $route.kind})
             foreach($variant in $variants){
-                if($route.channel){$variant.title='через канал'}
+                if($route.channel){$variant.title='через канал';$variant.options=@('-o',('HostName='+$route.address),'-o',('HostKeyAlias='+$p.serverAddress))}
                 $config=Read-TransportJson (Join-Path $Root 'config.json')
-                if($variant.kind -eq 'direct' -and $config.transport.bootstrap -and (Test-StatusFresh $Root vpn)){
+                if($variant.kind -eq 'direct' -and -not $route.channel -and $config.transport.bootstrap -and (Test-StatusFresh $Root vpn)){
                     $settings=Read-TransportSettings $Root;$address=(Get-VpnOptions $settings).probeAddress
                     $variant.options=@('-o',('HostName='+$address),'-o',('HostKeyAlias='+$p.serverAddress))
                 }
@@ -161,16 +163,18 @@ function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request,[int]$Time
             $sameServer=(-not $server -or ($profile.serverAddress -ceq $server.address -and $profile.login -ceq $server.login -and (Get-TransportServerPort $profile) -eq [int](Get-TransportValue $server 'port' 22) -and $profile.keyPath -ceq (Get-WizardMaterializedServerKey $Root $config)))
             # Reuse only a channel the daemon has proved (ok + active): an open SOCKS port over an unproved path hangs SSH.
             $canReuse=($sameServer -and $status.ok -eq $true -and $status.active -and $status.configRevision -ceq (Get-TransportRevision $Root))
+            # A daemon of an older build has no channel SSH entry: then it is replaced, not reused.
+            $canReuse=($canReuse -and (Test-WizardChannelPort (Get-TransportServerPort $profile) ([string](Get-TransportValue $config.transport 'channelSshAddress' '127.0.0.2'))))
         }catch{$canReuse=$false}
     }
     if($canReuse -and (Test-StatusFresh $Root transport) -and (Test-WizardChannelPort $socksPort)){return @{ok=$true;skipped=$true;vpn='channel';summary='Канал до сервера уже работает'}}
     # Channel first: no TUN and no UAC. The user-level transport daemon (sing-box) picks a working candidate itself;
-    # its local SOCKS entry (channelSocksPort) carries the step «Сервер» and every later SSH as a 'proxy' route.
+    # its loopback SSH entry (channelSshAddress, the server's port) carries the step «Сервер» and every later SSH (HostName + HostKeyAlias).
     try{
         $prepare=[Diagnostics.Stopwatch]::StartNew()
         # Carry only local preferences. Routes, catalog, cache and profile belong to the pasted server.
         $t=[pscustomobject]@{}
-        foreach($field in @('singBoxPath','sshPort','channelSocksPort','syncPort','probePortBase','socksPortBase','apiPort','bindPhysical','metered','activeProbeBytes','rankProbeBytes','activeIntervalSec','meteredActiveIntervalSec','rankIntervalSec','rankConcurrency','topOnMetered','stallSeconds','probeTimeoutSec','restartDelaySec')){
+        foreach($field in @('singBoxPath','sshPort','channelSocksPort','channelSshAddress','syncPort','probePortBase','socksPortBase','apiPort','bindPhysical','metered','activeProbeBytes','rankProbeBytes','activeIntervalSec','meteredActiveIntervalSec','rankIntervalSec','rankConcurrency','topOnMetered','stallSeconds','probeTimeoutSec','restartDelaySec')){
             if($null -ne $config.transport.$field){$t|Add-Member $field $config.transport.$field}
         }
         # Compatibility for a runtime-only profile without a portable server section.
@@ -205,6 +209,7 @@ function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request,[int]$Time
         }
         $t|Add-Member -Force cacheRoot $cache
         Set-WizardBootstrapHops $Root $t $initial $manifest
+        $t|Add-Member -Force channelSshAddress (Find-WizardChannelAddress (Get-TransportServerPort (Read-TransportJson ([string]$t.profilePath))) ([string]$t.channelSshAddress))
         Ensure-WizardTransportBinary $Root $Bundle $t
         # bootstrap: SSH is not proved yet (the step «Связь» removes the flag); openSsh stays at its default.
         if($null -eq $t.probeTimeoutSec){$t|Add-Member -Force probeTimeoutSec 12}
@@ -244,9 +249,19 @@ function Stop-WizardOldTransport([string]$Root) {
         Write-WizardProgress '· прежний модуль связи не остановился за 15 с'
     }finally{$mutex.Dispose()}
 }
-function Test-WizardChannelPort([int]$Port) {
+# The channel SSH entry keeps the server's port on its own loopback address. A local sshd on 0.0.0.0:<port> or an earlier
+# daemon may hold that pair, and sing-box would then not start at all: take the first address that binds now.
+function Find-WizardChannelAddress([int]$Port,[string]$Preferred) {
+    $random=@(1..6|ForEach-Object {'127.0.'+(Get-Random -Minimum 1 -Maximum 255)+'.'+(Get-Random -Minimum 2 -Maximum 255)})
+    foreach($address in @(@($Preferred,'127.0.0.2')+$random|Where-Object {$_ -match '\A127\.\d{1,3}\.\d{1,3}\.\d{1,3}\z' -and $_ -ne '127.0.0.1'}|Select-Object -Unique)){
+        $listener=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Parse($address),$Port)
+        try{$listener.Start();return $address}catch{}finally{$listener.Stop()}
+    }
+    throw ('Нет свободного локального адреса для входа канала (порт '+$Port+')')
+}
+function Test-WizardChannelPort([int]$Port,[string]$Address='127.0.0.1') {
     $client=New-Object Net.Sockets.TcpClient
-    try{return ($client.ConnectAsync('127.0.0.1',$Port).Wait(1000) -and $client.Connected)}catch{return $false}finally{$client.Close()}
+    try{return ($client.ConnectAsync($Address,$Port).Wait(1000) -and $client.Connected)}catch{return $false}finally{$client.Close()}
 }
 # The daemon's own status (status/transport.json of the current config revision) names the active candidate.
 function Get-WizardChannelFailure([string]$Root,[DateTime]$StartedAt,$Daemon) {

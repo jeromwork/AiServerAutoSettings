@@ -29,12 +29,13 @@ function Start-WizardWorkingTransport($Root,$Bundle){
     [void]$script:events.Add('daemon')
     if(-not $script:daemonOk){return}
     if(-not $script:listener){$script:listener=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,$channelPort);$script:listener.Start()}
+    if(-not $script:sshEntry){$script:sshEntry=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Parse([string]$c.transport.channelSshAddress),(Get-TransportServerPort (Read-TransportJson ([string]$c.transport.profilePath))));$script:sshEntry.Start()}
     Write-TransportJson (Join-Path $Root 'status/transport.json') ([ordered]@{configRevision=(Get-TransportRevision $Root);summary='fixture';ok=$true;active='vless-relay-sparfum';candidates=@(@{tag='vless-direct';enabled=$true},@{tag='vless-relay-sparfum';enabled=$true});updatedAt=[DateTime]::UtcNow.ToString('o');error=$null})
 }
 $channel=Join-Path $root 'secrets/channel.json';Write-TransportJson $channel @{inbounds=@(@{tag='sync';override_port=23456});outbounds=@()} -Private
 Write-TransportJson (Join-Path $root 'secrets/entries/fixture.json') @{server='fixture.example.invalid'} -Private
 $binary=Join-Path $root 'sing-box.exe';Write-DiskUtf8 $binary 'fixture'
-$profileFile=Join-Path $root 'profile-fixture.json';Write-TransportJson $profileFile @{serverAddress='server.invalid';login='worker'} -Private
+$profileFile=Join-Path $root 'profile-fixture.json';Write-TransportJson $profileFile @{serverAddress='server.invalid';login='worker';arguments=@('-p',[string](Get-FreePort))} -Private
 $initial=@{channel=@{secret='vpn-channel'};catalog=@{schema=1;entries=@(@{name='fixture';ssh='fixture';kinds=@('hy2')});hops=@();relays=@(@{name='sparfum';host='192.0.2.10';port=8443});cdn=@()}}
 $script:wanted=$true
 function Reset {
@@ -254,6 +255,8 @@ $in=@($cfg.inbounds|Where-Object {$_.tag -eq 'channel-socks'})
 Assert ($in.Count -eq 1 -and $in[0].type -eq 'mixed' -and $in[0].listen -eq '127.0.0.1' -and $in[0].listen_port -eq 2223) 'channel-socks inbound by contract'
 Assert ($cfg.route.rules[0].inbound[0] -eq 'channel-socks' -and $cfg.route.rules[0].action -eq 'route-options' -and $cfg.route.rules[0].override_address -eq '127.0.0.1' -and $cfg.route.rules[0].override_port -eq 2022) 'first rule overrides the target to the server sshd'
 Assert ($cfg.route.rules[1].inbound[0] -eq 'channel-socks' -and $cfg.route.rules[1].outbound -eq 'active') 'second rule sends the channel through the active path'
+$in=@($cfg.inbounds|Where-Object {$_.tag -eq 'channel-ssh'});$rule=@($cfg.route.rules|Where-Object {$_.inbound[0] -eq 'channel-ssh'})
+Assert ($in.Count -eq 1 -and $in[0].type -eq 'direct' -and $in[0].listen -eq '127.0.0.2' -and $in[0].listen_port -eq 2022 -and $in[0].override_address -eq '127.0.0.1' -and $in[0].override_port -eq 2022 -and $rule.Count -eq 1 -and $rule[0].outbound -eq 'active') 'channel SSH entry: own loopback address, server port, active path'
 if(Test-Path '/usr/bin/sing-box'){
     $file=Join-Path $root 'state/channel-check.json';Write-TransportJson $file $cfg -Private
     Test-TransportConfigFile '/usr/bin/sing-box' $file;$script:checks++
@@ -262,6 +265,7 @@ $settings.Transport=[pscustomobject]@{}
 Assert (-not @((New-TransportConfig $settings $paths 'fixture-secret' 'unavailable').inbounds|Where-Object {$_.tag -eq 'channel-socks'}).Count) 'no channel entry without channelFirst'
 $options.channelSocksPort=2222;$settings.Transport=[pscustomobject]@{channelFirst=$true}
 $bad=$false;try{New-TransportConfig $settings $paths 'x' ''|Out-Null}catch{$bad=$true};Assert $bad 'channel port conflict rejected';$options.channelSocksPort=2223
+$settings.Profile=[pscustomobject]@{arguments=@('-p','2222')};[void](New-TransportConfig $settings $paths 'x' '');$script:checks++;$settings.Profile=[pscustomobject]@{arguments=@('-p','2022')}
 $helper=Join-Path $root 'RemoteAgents.exe';Write-DiskUtf8 $helper 'fixture'
 $profile=[pscustomobject]@{sshExecutable='ssh';serverAddress='server.invalid';login='worker';keyPath=(Join-Path $root 'key');knownHostsPath=(Join-Path $root 'missing-known-hosts');arguments=@('-p','22')}
 $own=[pscustomobject]@{Options=$options;Profile=$profile;Channel=[pscustomobject]@{outbounds=@()};Transport=[pscustomobject]@{bootstrap=$true;serverRoute=[pscustomobject]@{used='proxy';proxy=[pscustomobject]@{type='socks';host='127.0.0.1';port=2223};proxyExecutable=$helper}}}
@@ -269,29 +273,28 @@ Assert (-not @((Get-TransportCandidates $own $root).Candidates|Where-Object {$_.
 $own.Transport.serverRoute.proxy.port=1080
 Assert (@((Get-TransportCandidates $own $root).Candidates|Where-Object {$_.tag -eq 'openssh-proxy'}).Count -eq 1) 'another local proxy stays a daemon path'
 
-# Step «Сервер»: the channel route comes first, before the routes of the config, and is saved as a proxy route.
+# Step «Сервер»: the channel route comes first, before the routes of the config: ssh straight to the daemon SSH entry.
 $pin='ssh-ed25519 Zml4dHVyZQ=='
 $key=Join-Path $root 'key';Write-DiskUtf8 $key 'fixture-key-never-used-by-stub'
-$listener=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,0);$listener.Start();$socks=[int]$listener.LocalEndpoint.Port
-Write-TransportJson (Join-Path $root 'config.json') @{schema=1;version=1;transport=@{channelFirst=$true;channelSocksPort=$socks;channelPath=$channel}}
+$listener=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Parse('127.0.0.2'),0);$listener.Start();$serverPort=[int]$listener.LocalEndpoint.Port
+Write-TransportJson (Join-Path $root 'config.json') @{schema=1;version=1;transport=@{channelFirst=$true;channelPath=$channel}}
 $script:routes=$null
 function Select-WizardRoute($Profile,$Worker,$Routes){$script:routes=$Routes;$script:WizardRoute=$Routes[0]}
 function Invoke-WizardLogin($Profile,$User,$Command,$InputText=''){return ''}
 function Get-TransportHostKeys($Ssh,$HostName,$KnownHosts){return $pin}
-$data=@{schema=1;serverAddress='server.invalid';serverPort=22;workerUser='worker';hostKeys=@($pin);routes=@(@{kind='direct'},@{kind='proxy';proxy=@{type='http';host='127.0.0.1';port=3128}})}
+$data=@{schema=1;serverAddress='server.invalid';serverPort=$serverPort;workerUser='worker';hostKeys=@($pin);routes=@(@{kind='direct'},@{kind='proxy';proxy=@{type='http';host='127.0.0.1';port=3128}})}
 $result=Connect-WizardSnapshot $root ([pscustomobject]@{data=(Copy-TransportObject $data);keyPath=$key;askpassExecutable=$helper})
-Assert ($script:routes.Count -eq 3 -and $script:routes[0].kind -eq 'proxy' -and $script:routes[0].title -ceq 'через канал') 'channel route first, titled by contract'
-Assert ($script:routes[0].options[1] -like ('*--proxy-connect socks 127.0.0.1 '+$socks+' %h %p')) 'channel route is a SOCKS proxy to the daemon entry'
-Assert ($script:routes[1].kind -eq 'direct' -and $script:routes[2].title -like '*3128*') 'config routes follow in their order'
+Assert ($script:routes.Count -eq 3 -and $script:routes[0].kind -eq 'direct' -and $script:routes[0].title -ceq 'через канал') 'channel route first, titled by contract'
+Assert ((@($script:routes[0].options) -join ' ') -ceq '-o HostName=127.0.0.2 -o HostKeyAlias=server.invalid') 'channel route: ssh straight to the daemon SSH entry, no ProxyCommand'
+Assert ($script:routes[1].kind -eq 'direct' -and -not @($script:routes[1].options).Count -and $script:routes[2].title -like '*3128*') 'config routes follow in their order'
 $saved=(Read-TransportJson (Join-Path $root 'config.json')).wizard.serverRoute
-Assert ((Read-TransportSettings $root).Transport.serverRoute.used -eq 'proxy') 'Server route reaches the runtime transport overlay'
-Assert ($saved.used -eq 'proxy' -and $saved.proxy.type -eq 'socks' -and $saved.proxy.host -eq '127.0.0.1' -and $saved.proxy.port -eq $socks) 'chosen channel route saved as proxy'
-$p=Read-TransportJson $result.profile
-Assert ($p.routeProxyCommand -like ('*--proxy-connect socks 127.0.0.1 '+$socks+'*') -and [IO.File]::ReadAllText($p.configPath).Contains('ProxyCommand')) 'ProxyCommand kept in the profile and ssh.conf'
+Assert ($saved.used -eq 'direct' -and -not $saved.proxy) 'chosen channel route saved as direct'
+$p=Read-TransportJson $result.profile;$conf=[IO.File]::ReadAllText($p.configPath)
+Assert (-not $p.routeProxyCommand -and $conf.Contains('HostName 127.0.0.2') -and $conf.Contains('HostKeyAlias server.invalid') -and -not $conf.Contains('ProxyCommand') -and (@($p.arguments) -join ' ').Contains('HostName=127.0.0.2')) 'profile and ssh.conf lead to the channel SSH entry'
 $listener.Stop()
 $result=Connect-WizardSnapshot $root ([pscustomobject]@{data=(Copy-TransportObject $data);keyPath=$key;askpassExecutable=$helper})
 Assert ($script:routes.Count -eq 2 -and $script:routes[0].kind -eq 'direct') 'a silent channel port adds no route'
-if($script:listener){$script:listener.Stop()}
+if($script:listener){$script:listener.Stop()};if($script:sshEntry){$script:sshEntry.Stop()}
 
 # Honest SSH reason: a banner came, then the network cut SSH after the handshake.
 $fake=Join-Path $TestHome 'fake-ssh';[void][IO.Directory]::CreateDirectory($fake)

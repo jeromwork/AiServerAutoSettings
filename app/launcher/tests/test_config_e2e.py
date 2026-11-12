@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import pwd
+import re
 import secrets
 import shutil
 import socket
@@ -688,11 +689,14 @@ def main_channel(upgrade=False):
 
                 config = json.loads((root / 'config.json').read_text(encoding='utf-8-sig'))
                 route = config['wizard']['serverRoute']
-                assert route['used'] == 'proxy' and route['proxy'] == dict(type='socks', host='127.0.0.1', port=socks_port), route
+                assert route['used'] == 'direct' and 'proxy' not in route, route
                 assert config['transport'].get('channelFirst') is True, 'transport.channelFirst'
                 assert config['transport'].get('channelSocksPort', socks_port) == socks_port, 'channelSocksPort kept by «Связь»'
                 profile = json.loads(Path(config['transport']['profilePath']).read_text(encoding='utf-8-sig'))
-                assert f'--proxy-connect socks 127.0.0.1 {socks_port}' in profile.get('routeProxyCommand', ''), 'SSH goes through the channel'
+                # The stand's jammer holds 127.0.0.2:P (the server address), so Bootstrap must have taken another loopback address.
+                entry = re.search(r'HostName=(127\.\d+\.\d+\.\d+)', ' '.join(profile['arguments']))
+                assert entry and entry.group(1) == config['transport']['channelSshAddress'] != '127.0.0.2' and not profile.get('routeProxyCommand'), \
+                    ('SSH goes to the channel SSH entry', profile['arguments'], config['transport'].get('channelSshAddress'))
                 # No TUN, no UAC: neither the TUN worker, its session/config, nor the old internet preflight ran.
                 for name in ('state/vpn-session.json', 'state/vpn-sing-box.json', 'state/bootstrap-internet-check.json', 'state/vpn-owner.json'):
                     assert not (root / name).exists(), name + ': TUN path must not run'
@@ -714,7 +718,7 @@ def main_channel(upgrade=False):
                               totalSeconds=round(time.monotonic() - started, 1))
                 print(json.dumps(timing, ensure_ascii=False))
                 print('PASS: channel first' + (' over an earlier hop installation' if upgrade else '') + ' — jammed direct SSH, '
-                      'Bootstrap on vless-relay-relay (no TUN/UAC), Server via proxy 127.0.0.1:channelSocksPort, Connection ok, login with the issued key')
+                      'Bootstrap on vless-relay-relay (no TUN/UAC), Server via the channel SSH entry (free 127.x, server port), Connection ok, login with the issued key')
         finally:
             (root / 'stop').write_text('stop')
             (root / 'state').mkdir(exist_ok=True)

@@ -117,6 +117,8 @@ function Invoke-TransportPreflight([string]$Root,[string]$Bundle,$Config){
         for($i=0;$i -lt 3;$i++){$socket=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,0);$socket.Start();$listeners+=,$socket;$ports+=([int]$socket.LocalEndpoint.Port)}
         $copy.transport|Add-Member -Force sshPort $ports[0];$copy.transport|Add-Member -Force syncPort $ports[1];$copy.transport|Add-Member -Force apiPort $ports[2]
         $copy.transport|Add-Member -Force probePortBase 34000;$copy.transport|Add-Member -Force socksPortBase 36000
+        # The working daemon holds channelSshAddress:<server port>; the preflight one takes another loopback address.
+        if($copy.transport.channelFirst){$copy.transport|Add-Member -Force channelSshAddress ('127.0.'+(Get-Random -Minimum 1 -Maximum 255)+'.'+(Get-Random -Minimum 2 -Maximum 255))}
         Write-TransportJson (Join-Path $probe 'config.json') $copy
         foreach($name in @('transport-pin.json','transport-memory.json')){
             $source=Join-Path $Root ('state/'+$name);$target=Join-Path $probe ('state/'+$name)

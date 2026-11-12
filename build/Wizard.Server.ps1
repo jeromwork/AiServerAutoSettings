@@ -155,6 +155,8 @@ function Select-WizardRoute($Profile,[string]$Worker,$Routes) {
         foreach($line in @((Convert-TransportLF $err) -split "`n"|Where-Object {$_.Trim()}|Select-Object -Last 8)){Write-WizardProgress ('·   '+$q.Route.title+': '+(Protect-WizardTrace $line))}
         $m=[regex]::Match((@($q.Route.options) -join ' '),'--proxy-connect\s+socks\s+(?:127\.0\.0\.1|localhost)\s+(\d+)')
         if($m.Success){Write-WizardProgress ('· '+(Test-WizardSocksBanner ([int]$m.Groups[1].Value) $Profile.serverAddress (Get-TransportServerPort $Profile)))}
+        $h=[regex]::Match((@($q.Route.options) -join ' '),'HostName=(127\.\d+\.\d+\.\d+)')
+        if($h.Success){Write-WizardProgress ('· '+(Test-WizardTcpBanner $h.Groups[1].Value (Get-TransportServerPort $Profile)))}
     }
 
     if($Profile.strictHostKey -and @($probes|Where-Object {$_.Why -like 'Ключ хоста*'}).Count){throw 'Ключ хоста не совпал с конфигом или known_hosts. Попросите администратора проверить ключ сервера'}

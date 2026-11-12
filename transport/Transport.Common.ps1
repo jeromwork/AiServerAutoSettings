@@ -197,10 +197,11 @@ function Read-TransportSettings([string]$Root) {
     $channelPath=[string]$t.channelPath
     if(-not $channelPath){throw 'Нет transport.channelPath в config.json'}
     $channel=Read-TransportJson $channelPath
-    $defaults=@{sshPort=2222;channelSocksPort=2223;syncPort=22001;probePortBase=26000;socksPortBase=28000;apiPort=29090;bindPhysical=$true;activeProbeBytes=65536;rankProbeBytes=262144;activeIntervalSec=120;meteredActiveIntervalSec=300;rankIntervalSec=1800;rankConcurrency=1;topOnMetered=3;stallSeconds=5;probeTimeoutSec=45;metered='auto';restartDelaySec=3;openSsh=$true;singBoxPath=(Join-Path $PSScriptRoot 'sing-box.exe')}
+    $defaults=@{sshPort=2222;channelSocksPort=2223;channelSshAddress='127.0.0.2';syncPort=22001;probePortBase=26000;socksPortBase=28000;apiPort=29090;bindPhysical=$true;activeProbeBytes=65536;rankProbeBytes=262144;activeIntervalSec=120;meteredActiveIntervalSec=300;rankIntervalSec=1800;rankConcurrency=1;topOnMetered=3;stallSeconds=5;probeTimeoutSec=45;metered='auto';restartDelaySec=3;openSsh=$true;singBoxPath=(Join-Path $PSScriptRoot 'sing-box.exe')}
     $s=@{};foreach($k in $defaults.Keys){$s[$k]=Get-TransportValue $t $k $defaults[$k]}
     foreach($k in @('bindPhysical','openSsh')){if($s[$k] -isnot [bool]){throw 'Нужен логический параметр transport'}}
     foreach($k in @('sshPort','channelSocksPort','syncPort','probePortBase','socksPortBase','apiPort')){if([int]$s[$k] -lt 1 -or [int]$s[$k] -gt 65535){throw 'Неверный порт transport'}}
+    if([string]$s.channelSshAddress -notmatch '\A127\.\d{1,3}\.\d{1,3}\.\d{1,3}\z' -or [string]$s.channelSshAddress -eq '127.0.0.1'){throw 'Неверный адрес входа канала'}
     foreach($k in @('activeProbeBytes','rankProbeBytes','activeIntervalSec','meteredActiveIntervalSec','rankIntervalSec','rankConcurrency','topOnMetered','stallSeconds','probeTimeoutSec','restartDelaySec')){if([double]$s[$k] -le 0){throw 'Параметры transport должны быть положительными'}}
     if([string]$s.metered -notin @('auto','true','false','True','False')){throw 'Неверный metered'}
     if(-not $t.serverRoute -and $config.wizard.serverRoute){$overlay=Get-TransportRouteOverlay $config.wizard.serverRoute $Root;if($overlay){$t|Add-Member -Force serverRoute $overlay}}
@@ -477,13 +478,17 @@ function New-TransportConfig($Settings,$Paths,[string]$Secret,[string]$DefaultTa
         $in+=@{type='mixed';tag='channel-socks';listen='127.0.0.1';listen_port=[int]$o.channelSocksPort}
         $rules+=@{inbound=@('channel-socks');action='route-options';override_address='127.0.0.1';override_port=(Get-TransportServerPort $Settings.Profile)}
         $rules+=@{inbound=@('channel-socks');action='route';outbound='active'}
+        # The SSH entry of the channel: ssh connects here itself (HostName + HostKeyAlias), no ProxyCommand helper.
+        # Its own loopback address keeps the server's port, so the route needs no Port that a -p elsewhere would shadow.
+        $in+=@{type='direct';tag='channel-ssh';listen=$(if($o.channelSshAddress){[string]$o.channelSshAddress}else{'127.0.0.2'});listen_port=(Get-TransportServerPort $Settings.Profile);network='tcp';override_address='127.0.0.1';override_port=(Get-TransportServerPort $Settings.Profile)}
+        $rules+=@{inbound=@('channel-ssh');action='route';outbound='active'}
     }
     foreach($row in $targets){
         $in+=@{type='direct';tag=$row[0];listen='127.0.0.1';listen_port=$row[1];network='tcp';override_address='127.0.0.1';override_port=$row[2]}
         $rules+=@{inbound=@($row[0]);action='route';outbound='active'}
     }
     foreach($c in $Paths.Candidates){$tag='probe-'+$c.tag;$in+=@{type='direct';tag=$tag;listen='127.0.0.1';listen_port=$c.port;network='tcp';override_address='127.0.0.1';override_port=(Get-TransportServerPort $Settings.Profile)};$rules+=@{inbound=@($tag);action='route';outbound=$c.tag}}
-    foreach($port in @(@($in|ForEach-Object {$_.listen_port})+@([int]$o.apiPort)+@($Paths.Outbounds|Where-Object {$_.type -eq 'socks'}|ForEach-Object {$_.server_port}))){
+    foreach($port in @(@($in|Where-Object {$_.listen -eq '127.0.0.1'}|ForEach-Object {$_.listen_port})+@([int]$o.apiPort)+@($Paths.Outbounds|Where-Object {$_.type -eq 'socks'}|ForEach-Object {$_.server_port}))){
         if($port -lt 1 -or $port -gt 65535 -or $ports.ContainsKey([int]$port)){throw 'Пересечение или неверный порт'};$ports[[int]$port]=$true
     }
     $tags=@($Paths.Candidates|ForEach-Object {$_.tag})+@('unavailable');if($DefaultTag -notin $tags){$DefaultTag='unavailable'}
