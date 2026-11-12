@@ -39,6 +39,20 @@ function Invoke-WizardAction([string]$Root,[string]$Action,$Request,[scriptblock
 function Start-WizardWorkingTransport([string]$Root,[string]$Bundle) {
     # The daemon's own per-Home mutex arbitrates with the tray supervisor.
     $stop=Join-Path $Root 'state/transport.stop';if(Test-Path $stop){Remove-Item -LiteralPath $stop -Force}
+    if($env:OS -eq 'Windows_NT'){
+        # The launcher runs every step inside a job object with KILL_ON_JOB_CLOSE (NativeJob.cs): a daemon started as a
+        # child of the step dies the moment the step ends, and the channel with it. WMI creates the daemon outside that
+        # job (as Start-SetupDetached does), hidden. Its diagnostics are logs/transport.log; the pipes are not captured.
+        $line=((@((Get-TransportPowerShell),'-NoProfile','-NonInteractive','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',(Join-Path $Bundle 'transport/Transport.Daemon.ps1'),'-Home',$Root)|ForEach-Object {Quote-Transport $_}) -join ' ')
+        $hidden=New-CimInstance -ClassName Win32_ProcessStartup -Property @{ShowWindow=[uint16]0} -ClientOnly
+        $started=[DateTime]::UtcNow
+        $created=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$line;ProcessStartupInformation=$hidden}
+        if($created.ReturnValue -ne 0){throw ('Не удалось запустить модуль связи (код '+$created.ReturnValue+')')}
+        $process=$null;try{$process=[Diagnostics.Process]::GetProcessById([int]$created.ProcessId)}catch{}
+        # Exited before we could look: a stand-in that reports exit, so the wait reads transport.log at once.
+        if(-not $process){$process=[pscustomobject]@{HasExited=$true};$process|Add-Member ScriptMethod Dispose {}}
+        return [pscustomobject]@{Process=$process;StartedAt=$started;OutputDrain=$null}
+    }
     $si=New-Object Diagnostics.ProcessStartInfo;$si.FileName=Get-TransportPowerShell
     $si.Arguments=((@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $Bundle 'transport/Transport.Daemon.ps1'),'-Home',$Root)|ForEach-Object {Quote-Transport $_}) -join ' ')
     $si.UseShellExecute=$false;$si.CreateNoWindow=$true;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true

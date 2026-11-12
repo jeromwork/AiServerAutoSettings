@@ -22,8 +22,11 @@ namespace RemoteAgents.Launcher
         [System.Runtime.InteropServices.DllImport("kernel32.dll")] static extern uint GetOEMCP();
         public static string ReadPowerShellOutput(string path)
         {
-            byte[] data = File.ReadAllBytes(path);
-            if (data.Length >= 2 && ((data[0] == 255 && data[1] == 254) || (data[0] == 254 && data[1] == 255))) return File.ReadAllText(path);
+            // FileShare.ReadWrite|Delete: a grandchild of the step (killed with its job a moment later) may still hold the inherited
+            // stdout handle with write access; File.ReadAllBytes then fails with a sharing violation and the result looks empty.
+            byte[] data;
+            using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) { data = new byte[stream.Length]; int read = 0, n; while (read < data.Length && (n = stream.Read(data, read, data.Length - read)) > 0) read += n; if (read < data.Length) Array.Resize(ref data, read); }
+            if (data.Length >= 2 && ((data[0] == 255 && data[1] == 254) || (data[0] == 254 && data[1] == 255))) using (var reader = new StreamReader(new MemoryStream(data), true)) return reader.ReadToEnd();
             try { return new UTF8Encoding(false, true).GetString(data).TrimStart('\uFEFF'); }
             catch (DecoderFallbackException) { return Encoding.GetEncoding((int)GetOEMCP()).GetString(data); }
         }
