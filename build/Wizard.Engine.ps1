@@ -2,7 +2,7 @@
 # Long actions own only their mutable resource. Config R/M/W retains its short mutex.
 function Get-WizardResources([string]$Action,$Request) {
     switch($Action){
-        'ConfigSync' {return @('bridge','connection','vpn')}
+        'ConfigSync' {return @('config-sync')}
         'RollbackNetwork' {return @('connection','vpn')}
         'Connection' {return @('connection')}
         {$_ -in @('Bridge','RollbackBridge')} {return @('bridge')}
@@ -21,7 +21,7 @@ function Invoke-WizardResourceLock([string]$Root,[string]$Resource,[scriptblock]
     $mutex=New-Object Threading.Mutex($false,$name);$locked=$false
     try{
         try{$locked=$mutex.WaitOne($TimeoutMs)}catch [Threading.AbandonedMutexException]{$locked=$true}
-        if(-not $locked){throw ('Раздел занят: '+$Resource+'; повторите после завершения')}
+        if(-not $locked){if($Resource -eq 'config-sync'){throw 'Сверка конфига уже выполняется другим процессом'};throw ('Раздел занят: '+$Resource+'; повторите после завершения')}
         & $Work
     }finally{if($locked){$mutex.ReleaseMutex()};$mutex.Dispose()}
 }
@@ -29,7 +29,8 @@ function Invoke-WizardAction([string]$Root,[string]$Action,$Request,[scriptblock
     $watch=[Diagnostics.Stopwatch]::StartNew()
     try{
         $resources=@(Get-WizardResources $Action $Request)
-        Invoke-WizardResourceSet $Root $resources $Body
+        if($Action -eq 'ConfigSync'){Invoke-WizardResourceSet $Root $resources $Body 0}
+        else{Invoke-WizardResourceSet $Root $resources $Body}
     }finally{
         # Same JSONL envelope as other progress messages, including failed stages.
         Write-WizardProgress ('timing '+$Action+' '+$watch.ElapsedMilliseconds)
@@ -126,12 +127,12 @@ print('device-name-ok')
     Update-LauncherConfig $Root {param($c) Set-ConfigDefault $c profile ([pscustomobject]@{});Set-ConfigDefault $c.profile device ([pscustomobject]@{});$c.profile.device|Add-Member -Force name $DeviceName}
 }
 
-function Invoke-WizardResourceSet([string]$Root,[string[]]$Resources,[scriptblock]$Body) {
+function Invoke-WizardResourceSet([string]$Root,[string[]]$Resources,[scriptblock]$Body,[int]$TimeoutMs=120000) {
     if(-not $Resources.Count){& $Body;return}
     Invoke-WizardResourceLock $Root $Resources[0] {
         $tail=@();if($Resources.Count -gt 1){$tail=@($Resources[1..($Resources.Count-1)])}
-        Invoke-WizardResourceSet $Root $tail $Body
-    }
+        Invoke-WizardResourceSet $Root $tail $Body $TimeoutMs
+    } $TimeoutMs
 }
 function Get-WizardRuntimeFiles {
     @('build/Wizard.ps1','build/Wizard.Common.ps1','build/Wizard.Engine.ps1','build/Wizard.Session.ps1','build/Wizard.SessionHost.ps1','build/Wizard.Server.ps1','build/Wizard.Bootstrap.ps1','build/Wizard.Refresh.ps1','build/Wizard.Network.ps1','build/Wizard.Lan.ps1','build/Setup.Common.ps1','transport/Transport.Common.ps1','transport/Route.Proxy.ps1','transport/server-transport-catalog.py','disk/Disk.Common.ps1','disk/Disk.Union.ps1','disk/Disk.Selective.ps1','disk/stignore.txt','disk/stignore-previous.sha256')

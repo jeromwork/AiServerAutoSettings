@@ -99,6 +99,24 @@ function Wait-TransportReady([string]$Root,[int]$Timeout=180){
     do{if(Test-StatusFresh $Root transport){return};Start-Sleep -Seconds 1}while([DateTime]::UtcNow -lt $deadline)
     throw 'Нет проверенного transport'
 }
+# Keep reservations alive until the candidate config is written. Separate blocks
+# let multiple Homes probe concurrently without touching any working listener.
+function New-TransportPortReservation([int]$Count=1,[string]$Address='127.0.0.1',[int]$Port=0) {
+    for($attempt=0;$attempt -lt 12;$attempt++){
+        $sockets=@()
+        try{
+            $base=$Port
+            for($i=0;$i -lt $Count;$i++){
+                $socket=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Parse($Address),$(if($i -eq 0){$base}else{$base+$i}))
+                $socket.Server.ExclusiveAddressUse=$true
+                $sockets+=,$socket;$socket.Start()
+                if($i -eq 0){$base=[int]$socket.LocalEndpoint.Port}
+                if($base+$Count -gt 65535){throw 'Диапазон портов исчерпан'}
+            }
+            return [pscustomobject]@{base=$base;listeners=$sockets}
+        }catch{foreach($socket in $sockets){$socket.Stop()};if($Port -or $attempt -eq 11){throw 'Не удалось выделить свободные порты для пробного транспорта'}}
+    }
+}
 # A candidate transport config is proven on separate ports before the working daemon sees it.
 function Invoke-TransportPreflight([string]$Root,[string]$Bundle,$Config){
     $probe=Join-Path $Root 'state/transport-probe';[void][IO.Directory]::CreateDirectory($probe)
@@ -108,17 +126,26 @@ function Invoke-TransportPreflight([string]$Root,[string]$Bundle,$Config){
     # Readiness comes from the daemon's parallel liveness probes (all paths at once, first answer wins), so this takes seconds.
     # The per-path limit is not shortened: a hop through a DPI filter sometimes answers after 15-20 s. Speed ranking runs later, unawaited.
     $copy.transport|Add-Member -Force rankProbeBytes 65536
-    if($env:REMOTEAGENTS_WIZARD_PROGRESS){$copy.transport|Add-Member -Force probeTimeoutSec 30;$copy.transport|Add-Member -Force stallSeconds 5}
+    $copy.transport|Add-Member -Force probeTimeoutSec 30;$copy.transport|Add-Member -Force stallSeconds 5
     # Reserve a disjoint block for inbounds, ranking probes and local SSH socks. Fail if occupied.
     $listeners=@();$ports=@()
     try{
-        # Probe/socks use consecutive ranges; use explicit, checked ranges away from production defaults.
-        foreach($base in @(34000,36000)){for($i=0;$i -lt 128;$i++){$socket=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,($base+$i));$socket.Start();$listeners+=,$socket}}
-        for($i=0;$i -lt 3;$i++){$socket=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,0);$socket.Start();$listeners+=,$socket;$ports+=([int]$socket.LocalEndpoint.Port)}
+        $t=$copy.transport
+        $probeCount=8+9*@($t.entries|Where-Object {$_}).Count+2*@($t.hops|Where-Object {$_}).Count+@($t.relays|Where-Object {$_}).Count+@($t.cdn|Where-Object {$_}).Count
+        $reserved=New-TransportPortReservation $probeCount;$listeners+=@($reserved.listeners)
+        $copy.transport|Add-Member -Force probePortBase $reserved.base
+        $reserved=New-TransportPortReservation (4+@($t.hops|Where-Object {$_}).Count);$listeners+=@($reserved.listeners)
+        $copy.transport|Add-Member -Force socksPortBase $reserved.base
+        for($i=0;$i -lt 4;$i++){$reserved=New-TransportPortReservation;$listeners+=@($reserved.listeners);$ports+=$reserved.base}
         $copy.transport|Add-Member -Force sshPort $ports[0];$copy.transport|Add-Member -Force syncPort $ports[1];$copy.transport|Add-Member -Force apiPort $ports[2]
-        $copy.transport|Add-Member -Force probePortBase 34000;$copy.transport|Add-Member -Force socksPortBase 36000
-        # The working daemon holds channelSshAddress:<server port>; the preflight one takes another loopback address.
-        if($copy.transport.channelFirst){$copy.transport|Add-Member -Force channelSshAddress ('127.0.'+(Get-Random -Minimum 1 -Maximum 255)+'.'+(Get-Random -Minimum 2 -Maximum 255))}
+        # channel-socks is another inbound even though channel.json only lists ssh/sync.
+        $copy.transport|Add-Member -Force channelSocksPort $ports[3]
+        if($copy.transport.channelFirst){
+            $address='127.0.'+(Get-Random -Minimum 1 -Maximum 255)+'.'+(Get-Random -Minimum 2 -Maximum 255)
+            $profile=Read-TransportJson $copy.transport.profilePath
+            $reserved=New-TransportPortReservation 1 $address (Get-TransportServerPort $profile);$listeners+=@($reserved.listeners)
+            $copy.transport|Add-Member -Force channelSshAddress $address
+        }
         Write-TransportJson (Join-Path $probe 'config.json') $copy
         foreach($name in @('transport-pin.json','transport-memory.json')){
             $source=Join-Path $Root ('state/'+$name);$target=Join-Path $probe ('state/'+$name)
@@ -132,12 +159,13 @@ function Invoke-TransportPreflight([string]$Root,[string]$Bundle,$Config){
     $child=$null
     try{
         $child=Start-TransportProcess (Get-TransportPowerShell) @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $Bundle 'transport/Transport.Daemon.ps1'),'-Home',$probe,'-ParentPid',[string]$PID)
-        if($env:REMOTEAGENTS_WIZARD_PROGRESS){Wait-TransportReady $probe 45}else{Wait-TransportReady $probe}
+        Wait-TransportReady $probe 45
         if(-not (Test-LocalSsh $probe $ports[0])){throw 'SSH на временном входе не прошёл'}
         Write-SetupLog $Root 'preflight.ok'
     }catch{
+        $detail=Protect-TransportDiagnostic ([string]$_.Exception.Message) $copy
         $message=Write-PreflightFailure $Root $probe
-        throw $message
+        throw ('Пробная связь: '+$detail+'. '+$message)
     }finally{
         [IO.File]::WriteAllText($stop,'stop');if($child){[void]$child.Process.WaitForExit(10000)};Stop-TransportProcess $child
     }
@@ -149,7 +177,24 @@ function Write-PreflightFailure([string]$Root,[string]$Probe) {
         if($null -eq $row){continue}
         $reason=if($row.diagnostic){Format-TransportDiagnostic $row.diagnostic}else{'candidate='+$row.tag+' reason='+$row.state+' (проба не завершена)'}
         Write-SetupLog $Root 'preflight.candidate' $reason
-        $parts+=($row.title+': '+$(if($row.diagnostic){$row.diagnostic.reason}else{$row.state}))
+        $code=$(if($row.diagnostic){[string]$row.diagnostic.reason}else{[string]$row.state})
+        $why=switch($code){
+            'process-exited' {'процесс транспорта завершился'}
+            'timeout' {'истекло время ожидания ответа'}
+            'connection-refused' {'сервер отклонил соединение'}
+            'network-unreachable' {'сеть недоступна'}
+            'authentication-failed' {'сервер отклонил вход'}
+            'executable-not-found' {'программа транспорта не найдена'}
+            'ok' {'путь проверен'}
+            default {'проверка не прошла ('+$code+')'}
+        }
+        if($row.diagnostic){
+            $extra=([string]$row.diagnostic.stderr+' '+[string]$row.diagnostic.engineStderr).Trim()
+            if($extra -match '(?i)address already in use|Only one usage|bind.+(?:denied|forbidden)'){$why='локальный порт пробного транспорта занят'}
+            if($extra){$why+=': '+(Protect-TransportText $extra)}
+            if($null -ne $row.diagnostic.exitCode){$why+=' (код '+$row.diagnostic.exitCode+')'}
+        }
+        $parts+=($row.title+': '+$why)
     }
     if(-not $parts.Count){$parts+= $(if($status.error){[string]$status.error}else{'нет статуса транспорта; см. state/transport-probe/logs/transport.log'})}
     $prefix='Нет рабочего пути к серверу: '

@@ -11,12 +11,14 @@ $profile=Join-Path $root 'ssh-profiles/fixture/project-connections/pc-fixture/pr
 Write-DiskUtf8 $known ('old.example.invalid '+$pin+"`r`n")
 Write-TransportJson $profile @{sshExecutable='/usr/bin/ssh';serverAddress='old.example.invalid';login='worker';keyPath=$key;knownHostsPath=$known;configPath=(Join-Path $root 'ssh.conf');arguments=@('-p','22')}
 $channel=Join-Path $root 'channel.json';Write-TransportJson $channel @{inbounds=@();outbounds=@()}
-Write-TransportJson (Join-Path $root 'config.json') @{schema=1;version=1;transport=@{profilePath=$profile;channelPath=$channel;singBoxPath='fixture';entries=@();hops=@();relays=@();cdn=@()};wizard=@{configured=$true};bridge=@{enabled=$false;allowShell=$true};happier=@{label='kept'};disk=@{folders=@('Project')};vpn=@{enabled=$true;checkUrl='https://old.invalid/';dnsServer='192.0.2.1';excludeCidrs=@('192.0.2.0/24')}}
+Write-TransportJson (Join-Path $root 'config.json') @{schema=1;version=1;transport=@{profilePath=$profile;channelPath=$channel;channelFirst=$true;channelSshAddress='127.0.0.7';singBoxPath='fixture';entries=@();hops=@();relays=@();cdn=@()};wizard=@{configured=$true};bridge=@{enabled=$false;allowShell=$true};happier=@{label='kept'};disk=@{folders=@('Project')};vpn=@{enabled=$true;checkUrl='https://old.invalid/';dnsServer='192.0.2.1';excludeCidrs=@('192.0.2.0/24')}}
 $catalog=[pscustomobject]@{schema=1;entries=@();hops=@();relays=@();cdn=@()}
 $data=[pscustomobject]@{schema=1;type='settings';serverAddress='new.example.invalid';serverPort=2223;workerUser='worker';hostKeys=@($pin);routes=@([pscustomobject]@{kind='direct'});bootstrap=[pscustomobject]@{catalog=$catalog;channel=[pscustomobject]@{inbounds=@();outbounds=@()};entries=[pscustomobject]@{};hops=[pscustomobject]@{};vpn=[pscustomobject]@{checkUrl='https://new.invalid/';dnsServer='192.0.2.53'}}}
-$count=0;$script:preflights=0;$script:armed=0;$script:failProof=$false
+$realDeviceKey=${function:Get-WizardDeviceKey}
+$count=0;$script:keyReads=0;$script:preflights=0;$script:armed=0;$script:failProof=$false
 function Assert($OK,$Why){if(-not $OK){throw $Why};$script:count++}
 function Throws($Body,$Why){$failed=$false;try{& $Body|Out-Null}catch{$failed=$true};Assert $failed $Why}
+function Get-WizardDeviceKey($Profile){$script:keyReads++;& $realDeviceKey $Profile}
 function Select-WizardRoute($Profile,$Worker,$Routes){$script:WizardRoute=$Routes[0]}
 function Invoke-WizardLogin($Profile,$User,$Command,$InputText=''){
     Assert ($Profile.keyPath -ceq $key -and $User -eq 'worker' -and $Command -eq 'true') 'only own existing config key is used'
@@ -39,9 +41,8 @@ function New-SyncSnapshot {
     [pscustomobject]@{kind='remoteagents-config-sync';schema=1;generatedUtc='2026-11-12T10:00:00+00:00';revision='fixture';config=$config}
 }
 function Get-WizardConfigSettings($Root,$Command='cat "$HOME/.config/remoteagents/config-sync.json"',$InputText=''){
-    if($Command -eq 'python3 -'){return (ConvertTo-Json $catalog -Depth 30)+"`r`n"}
-    Assert ($Command -eq 'cat "$HOME/.config/remoteagents/config-sync.json"') 'client reads the published snapshot with its own key'
-    return ((ConvertTo-Json (New-SyncSnapshot) -Depth 30).Replace("`n","`r`n"))+"`r`n"
+    Assert ($Command -eq 'python3 - sync') 'snapshot and current catalog share one authenticated request'
+    return ((ConvertTo-Json @{snapshot=(New-SyncSnapshot);catalog=$catalog} -Depth 30).Replace("`n","`r`n"))+"`r`n"
 }
 $converted=ConvertFrom-WizardConfigSync (New-SyncSnapshot)
 Assert ($converted.type -eq 'settings' -and $converted.serverAddress -eq 'new.example.invalid' -and $converted.serverPort -eq 2223 -and $converted.workerUser -eq 'worker' -and $converted.bootstrap.vpn.dnsServer -eq '192.0.2.53' -and @($converted.bootstrap.channel.inbounds).Count -eq 0) 'config-sync.json maps onto the settings snapshot'
@@ -59,11 +60,31 @@ $result=Sync-WizardConfigSettings $root $repo ([pscustomobject]@{})
 Assert ($result.changed -and $script:armed -eq 1) 'authenticated snapshot commits after preflight and watchdog'
 $c=Read-TransportJson (Join-Path $root 'config.json')
 Assert ((Read-TransportJson $profile).serverAddress -eq 'new.example.invalid' -and (Read-TransportJson $profile).keyPath -eq $key) 'stable shared profile updated with same key'
+Assert ('HostName=127.0.0.7' -in (Read-TransportJson $profile).arguments -and 'HostKeyAlias=new.example.invalid' -in (Read-TransportJson $profile).arguments) 'channel-first shared profile keeps the local SSH entry and new pinned alias without a direct handshake'
 Assert ($c.vpn.enabled -and $c.vpn.dnsServer -eq '192.0.2.53' -and $c.vpn.excludeCidrs[0] -eq '192.0.2.0/24') 'VPN choice and exclusions retained'
 Assert ($c.disk.folders[0] -eq 'Project' -and $c.happier.label -eq 'kept' -and $c.bridge.allowShell) 'unrelated sections retained'
 Assert (-not (Test-Path (Join-Path $root 'state/wizard-network.json'))) 'live proof disarms rollback'
+$keyReads=$script:keyReads;$watch=[Diagnostics.Stopwatch]::StartNew()
 $result=Sync-WizardConfigSettings $root $repo ([pscustomobject]@{})
+$unchangedMs=$watch.ElapsedMilliseconds
+Assert ($unchangedMs -lt 20000 -and $script:keyReads -eq $keyReads) 'unchanged exits before keygen or any network proof'
 Assert (-not $result.changed -and $script:preflights -eq 1) 'unchanged authenticated snapshot is idempotent'
+$effective=ConvertFrom-WizardConfigSync (New-SyncSnapshot)
+$reordered=[pscustomobject]@{};foreach($p in @($effective.PSObject.Properties|Sort-Object Name -Descending)){$reordered|Add-Member $p.Name $p.Value}
+$reordered.revision='metadata-only'
+$result=Update-WizardConfigSettings $root $repo ([pscustomobject]@{data=$reordered;trustedSsh=$true})
+Assert (-not $result.changed -and $script:preflights -eq 1 -and $script:keyReads -eq $keyReads) 'revision/property order alone causes no network update'
+# The public catalog can change without a new private snapshot/revision.
+$catalog.relays=@([pscustomobject]@{name='fresh';host='relay.example.invalid';port=443})
+$result=Sync-WizardConfigSettings $root $repo ([pscustomobject]@{})
+Assert ($result.changed -and $script:preflights -eq 2) 'catalog-only changes require a proven update'
+$legacyData=ConvertFrom-WizardConfigSync (New-SyncSnapshot)
+$legacyData.bootstrap|Add-Member -Force catalog $catalog
+Write-TransportJson (Join-Path $root 'state/config-settings-version.json') @{hash=(Get-TransportFingerprint 'config-settings' (ConvertTo-Json $legacyData -Depth 40 -Compress))}
+$keyReads=$script:keyReads
+$result=Sync-WizardConfigSettings $root $repo ([pscustomobject]@{})
+Assert (-not $result.changed -and $script:preflights -eq 2 -and $script:keyReads -eq $keyReads) 'legacy successful receipt upgraded without rechecking network'
+Assert ((Read-TransportJson (Join-Path $root 'state/config-settings-version.json')).schema -eq 2) 'canonical hash receipt migrated'
 $before=[IO.File]::ReadAllText((Join-Path $root 'config.json'));$previous=Read-TransportJson $profile
 $script:failProof=$true;$data.serverAddress='failed.example.invalid'
 Throws {Sync-WizardConfigSettings $root $repo ([pscustomobject]@{})} 'failed working proof causes rollback'
@@ -71,4 +92,17 @@ $c=Read-TransportJson (Join-Path $root 'config.json')
 Assert ((Read-TransportJson $profile).serverAddress -ceq $previous.serverAddress -and $c.disk.folders[0] -eq 'Project') 'rollback restores prior profile and preserves folders'
 Assert ((Get-WizardDeviceKey (Read-TransportJson $profile)) -ceq $pin) 'private config key survives update and rollback'
 Assert (-not (Test-Path (Join-Path $root 'state/config-settings-version.json'))) 'failed snapshot is eligible for retry'
-Write-Output ('OK: '+$count+' config sync/pins/key/rollback/CRLF checks (keygen real; SSH, TUN, scheduler stubbed)')
+# Staging without a broad lock must preserve a concurrent Connection/Vpn edit.
+$liveRoot=$root;$script:failProof=$false
+function Invoke-TransportPreflight($Root,$Bundle,$Candidate){
+    Update-LauncherConfig $liveRoot {param($c) $c.transport|Add-Member -Force concurrentEdit 'kept'}
+}
+$failure='';try{Sync-WizardConfigSettings $root $repo ([pscustomobject]@{})|Out-Null}catch{$failure=$_.Exception.Message}
+Assert ($failure -like '*изменились во время сверки*') 'stale candidate publication rejected after concurrent network edit'
+Assert ((Read-TransportJson (Join-Path $root 'config.json')).transport.concurrentEdit -eq 'kept' -and (Read-TransportJson $profile).serverAddress -ceq $previous.serverAddress) 'concurrent edit and working profile survive stale sync'
+Assert (-not (Test-Path (Join-Path $root 'state/wizard-network.json'))) 'stale sync arms no rollback over concurrent work'
+$probe=Join-Path $root 'state/fixture-failed-probe'
+Write-TransportJson (Join-Path $probe 'status/transport.json') @{ok=$false;candidates=@(@{title='VLESS через relay';state='fail';diagnostic=@{candidate='fixture';reason='process-exited';exitCode=1;engineStderr='listen tcp 127.0.0.1:2223: bind: address already in use'}})}
+$why=Write-PreflightFailure $root $probe
+Assert ($why -like '*локальный порт пробного транспорта занят*' -and $why -like '*код 1*') 'bind/process-exited failure has a concrete Russian cause'
+Write-Output ('OK: unchanged '+$unchangedMs+' ms; '+$count+' config sync/pins/key/rollback/CRLF checks (keygen real; SSH, TUN, scheduler stubbed)')

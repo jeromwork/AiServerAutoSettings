@@ -38,7 +38,7 @@ function Connect-WizardSnapshot([string]$Root,$Request) {
             # ssh goes straight to the daemon's SSH entry (HostName + HostKeyAlias, like the VPN route), not through a ProxyCommand:
             # Windows OpenSSH stalled the .NET --proxy-connect helper mid key exchange («Комп», 12.11.2026), a plain TCP target did not.
             $channelAddress=[string](Get-TransportValue $launcher.transport 'channelSshAddress' '127.0.0.2')
-            if(Test-WizardChannelPort $port $channelAddress){$routes=@([pscustomobject]@{kind='direct';channel=$true;address=$channelAddress})+$routes}
+            if($Request.deferProof -or (Test-WizardChannelPort $port $channelAddress)){$routes=@([pscustomobject]@{kind='direct';channel=$true;address=$channelAddress})+$routes}
         }
         foreach($route in $routes){
             if(-not $route.channel){$routeIndex++}
@@ -74,15 +74,14 @@ function Connect-WizardSnapshot([string]$Root,$Request) {
                 else{Select-WizardRoute $p $p.login $all}
                 $variant=$script:WizardRoute;$r=$variant.request
                 $all=@($all|Where-Object {-not [object]::ReferenceEquals($_,$variant)})
-                Write-WizardProgress ('Подключаюсь: '+$variant.title)
+                Write-WizardProgress ($(if($Request.deferProof){'Подготавливаю маршрут: '}else{'Подключаюсь: '})+$variant.title)
                 # Resuming a lost reply is safe: first check this computer's own key.
-                try{[void](Invoke-WizardLogin $p $p.login 'true');$ok=$true}catch{
+                try{if(-not $Request.deferProof){[void](Invoke-WizardLogin $p $p.login 'true')};$ok=$true}catch{
                     if($_.Exception.Message -like '*Ключ хоста*'){throw}
                     $lastReason='Маршрут «'+$variant.title+'»: '+$_.Exception.Message
                     Write-WizardProgress ('· маршрут «'+$variant.title+'» не прошёл: '+$_.Exception.Message)
                     if($variant.kind -eq 'direct' -and -not @($variant.options).Count){Write-WizardProgress ('· '+(Test-WizardTcpBanner $p.serverAddress $port))}
                 }
-                if(-not $ok -and $Request.deferProof){$ok=$true}
                 if($ok){$chosenRequest=$r;break}
         }
         if(-not $ok){throw $lastReason}
@@ -99,7 +98,7 @@ function Connect-WizardSnapshot([string]$Root,$Request) {
         Write-TransportJson $file $p -Private
         Save-WizardRoute $Root $chosenRequest $p
         Update-LauncherConfig $Root {param($c) Set-ConfigDefault $c transport ([pscustomobject]@{});$c.transport|Add-Member -Force profilePath $file}
-        return @{ok=$true;profile=$file;summary='Вход ключом конфига проверен'}
+        return @{ok=$true;profile=$file;summary=$(if($Request.deferProof){'Маршрут подготовлен; ожидается пробная проверка связи'}else{'Вход ключом конфига проверен'})}
     }finally{$script:WizardRoute=$null}
 }
 function Connect-WizardProfileAccount([string]$Root,[string]$Bundle,$Request) {
