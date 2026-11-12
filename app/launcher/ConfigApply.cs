@@ -692,6 +692,7 @@ namespace RemoteAgents.Launcher
             this.home = home; bundleSource = bundle;
             this.secrets = new Dictionary<string, string>(secrets ?? new Dictionary<string, string>()); this.hints = new Dictionary<string, string>(hints ?? new Dictionary<string, string>());
         }
+        internal void RebindBundle(string current) { bundle = current; }
         internal async Task<string> Bundle() { if (bundle == null) bundle = await bundleSource(); return bundle; }
         internal async Task<List<string>> Plan(CancellationToken token)
         {

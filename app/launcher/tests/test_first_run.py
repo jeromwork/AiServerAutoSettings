@@ -120,9 +120,63 @@ class FirstRunTests(unittest.TestCase):
         self.assertIn('config.sync.unavailable ', sync)
         main = source('ConfigWindow.Main.cs')
         self.assertIn('WindowModel.CanOpen(page.Text, operation)', main)
-        inspect = source('SetupWizard.cs').split('async Task Inspect()', 1)[1].split('async Task Guard(', 1)[0]
+        inspect = source('SetupWizard.cs').split('async Task Inspect()', 1)[1].split('async Task<bool> Guard(', 1)[0]
         self.assertNotIn('await Guard(', inspect)
         self.assertNotIn('.Enabled=false', inspect)
+
+    def test_legacy_sync_is_retired_before_timer_and_again_on_exit(self):
+        tray = source('TrayContext.cs')
+        tick = tray.split('void Tick()', 1)[1].split('async void CheckOperations()', 1)[0]
+        self.assertIn('RetireConfigSyncTask();', tick)
+        sync = tray.split('async void CheckSync()', 1)[1].split('async void CheckServerHealth()', 1)[0]
+        self.assertIn('!syncTaskRetired || syncRunning', sync)
+        retire = tray.split('async void RetireConfigSyncTask()', 1)[1].split('async void CheckSync()', 1)[0]
+        self.assertLess(retire.index('"RetireConfigSync"'), retire.index('syncTaskRetired = true'))
+        self.assertIn('nextSyncTaskRetirement = DateTime.UtcNow.AddSeconds(30)', retire)
+        shutdown = tray.split('void StopManagedComponents()', 1)[1]
+        self.assertIn('Remove-LegacyConfigSyncTask $Root', shutdown)
+        common = (ROOT / 'build/Wizard.Common.ps1').read_text(encoding='utf-8-sig')
+        self.assertNotIn('Install-WizardConfigSync', common)
+        self.assertIn('Remove-LegacyConfigSyncTask $Root', common.split("'Server' {", 1)[1].split("'Lan' {", 1)[0])
+
+    def test_disk_revert_uses_mutation_guard_and_counts_as_applying(self):
+        window = source('ConfigWindow.cs')
+        self.assertIn('ReadFolders(a) : Guard(a), Guard, () => running', window)
+        view = source('DiskFoldersView.cs')
+        revert = view.split('async Task Revert()', 1)[1]
+        self.assertLess(revert.index('await mutate('), revert.index('run("DiskRevert"'))
+        self.assertIn('path }), read, isBusy, log)', view)
+        guard = window.split('async Task Guard(', 1)[1].split('async Task StartFromText', 1)[0]
+        self.assertLess(guard.index('MutationConflict()'), guard.index('SetBusy(true)'))
+        self.assertLess(guard.index('SetBusy(true)'), guard.index('await action()'))
+        self.assertIn('running = value;', window)
+        self.assertIn('return running ||', source('ConfigWindow.Main.cs'))
+        self.assertIn('((ConfigWindow)f).IsApplying', source('TrayContext.cs').split('void RequestExit()', 1)[1])
+
+    def test_pending_account_survives_rejected_or_failed_guard(self):
+        wizard = source('SetupWizard.cs')
+        guard = wizard.split('async Task<bool> Guard(', 1)[1].split('async Task<Dictionary', 1)[0]
+        self.assertIn('lastSuccess = false;', guard)
+        self.assertIn('Append(conflict); return false;', guard)
+        self.assertIn('return lastSuccess;', guard)
+        poll = wizard.split('async Task PollOperations(', 1)[1].split('void ShowInstall()', 1)[0]
+        self.assertIn('if(!pendingAccount)resumeAccount=false;', poll)
+        resume = poll.split('if(!busy && !closingRequested && resumeAccount)', 1)[1].split('if(!busy && !closingRequested && retryConnection)', 1)[0]
+        self.assertEqual(resume.count('resumeAccount=false'), 1)
+        self.assertIn('if(await Guard(', resume)
+        self.assertIn('connected=ApplyResult(3,r) && Json.Bool(r,"ok")', resume)
+        self.assertIn('},3) && connected) resumeAccount=false', resume)
+
+    def test_bundle_switch_rebinds_editor_wizard_and_cached_sessions(self):
+        load = source('TrayContext.cs').split('void LoadComponents()', 1)[1].split('bool Wanted(', 1)[0]
+        self.assertIn('mainWindow.RebindBundle(engine.Folder(engine.Current))', load)
+        rebind = source('ConfigWindow.Main.cs').split('internal void RebindBundle(', 1)[1].split('void BuildMain()', 1)[0]
+        for statement in ['bundle = current;', 'session.RebindBundle(current)', 'followingSession.RebindBundle(current)', 'detailsWindow.RebindBundle(current)']:
+            self.assertIn(statement, rebind)
+        for destructive in ['RefreshConfigText', 'Initialize(', 'Dispose(', 'new SetupWizard', 'new ConfigSession']:
+            self.assertNotIn(destructive, rebind, 'must preserve unsaved editor, folder and wizard values')
+        for name in ['ConfigApply.cs', 'SetupWizard.Main.cs']:
+            self.assertIn('internal void RebindBundle(string current) { bundle = current; }', source(name))
 
     def test_invitations_removed(self):
         for name in ['Program.cs', 'TrayContext.cs', 'SetupWizard.cs', 'EntryPoint.cs', 'UpgradeInstaller.cs', 'Data.cs']:

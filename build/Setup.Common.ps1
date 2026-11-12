@@ -34,6 +34,31 @@ function Get-TaskState([string]$Name){
     $task=Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
     if($task){[pscustomobject]@{exists=$true;enabled=[bool]$task.Settings.Enabled;running=($task.State -eq 'Running')}}else{[pscustomobject]@{exists=$false;enabled=$false;running=$false}}
 }
+function Stop-LegacyConfigSyncProcessTree($Process){
+    $id=[int]$Process.ProcessId
+    $current=Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction Stop
+    if(-not $current -or $current.CreationDate -ne $Process.CreationDate -or $current.CommandLine -cne $Process.CommandLine){return}
+    & "$env:SystemRoot/System32/taskkill.exe" /T /F /PID $id *> $null
+    if($LASTEXITCODE -ne 0 -and (Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction Stop)){throw 'Не удалось остановить прежнюю сверку конфига'}
+}
+# Config refresh is owned by the launcher timer. Stop the legacy task before unregistering it.
+function Remove-LegacyConfigSyncTask([string]$Root){
+    if($env:OS -ne 'Windows_NT'){return}
+    $task='RemoteAgents config sync '+(Get-TransportFingerprint 'sync' $Root.ToLowerInvariant()).Substring(0,16)
+    $exists=(Get-TaskState $task).exists
+    if($exists){Disable-ScheduledTask -TaskName $task -ErrorAction Stop|Out-Null}
+    # Stop the whole old wscript/PowerShell/preflight tree before the scheduler can orphan its children.
+    # Also catch a leftover worker if an earlier exit already removed the task.
+    $prefix=[IO.Path]::GetFullPath($Root).TrimEnd('\','/').Replace('/','\')+'\state\config-sync\'
+    $pattern='(?i)"'+[regex]::Escape($prefix)+'[a-f0-9]{24}\\(?:config-sync-hidden\.vbs|build\\Wizard\.ps1)"(?=\s|$)'
+    foreach($process in @(Get-CimInstance Win32_Process -Filter "Name='wscript.exe' OR Name='powershell.exe'" -ErrorAction Stop)){
+        if(([string]$process.CommandLine).Replace('/','\') -match $pattern){Stop-LegacyConfigSyncProcessTree $process}
+    }
+    if($exists){
+        Stop-ScheduledTask -TaskName $task -ErrorAction Stop
+        Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction Stop
+    }
+}
 function Start-SetupDetached([string]$Exe,[string[]]$Arguments){
     $created=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=((Quote-Transport $Exe)+' '+(($Arguments|ForEach-Object {Quote-Transport $_}) -join ' '))}
     if($created.ReturnValue -ne 0){throw 'Не удалось запустить процесс'}
@@ -44,6 +69,16 @@ function Start-RunCommand([string]$Command){
     if($created.ReturnValue -ne 0){throw 'Не удалось восстановить автозапуск'}
 }
 function Stop-ManagedControl([string]$Root){
+    $config=Join-Path $Root 'config.json'
+    if(-not (Test-Path -LiteralPath $config) -or -not (Read-TransportJson $config).wizard.configured){
+        # Load the existing strict command parser in a child scope: its Stop-ManagedControl
+        # function is first-install-only and must not replace this shutdown helper.
+        $owned=& {
+            . (Join-Path (Split-Path $PSScriptRoot -Parent) 'Start-WindowsControl.ps1') -LibraryOnly
+            Test-ManagedControlCommand ([string](Get-RunValue 'RemoteAgentsControl')) $Root
+        }
+        if($owned){Set-RunValue 'RemoteAgentsControl' $null}
+    }
     $file=Join-Path $Root 'managed-control/control.pid'
     if(Test-Path -LiteralPath $file){
         $id=0;if([int]::TryParse([IO.File]::ReadAllText($file).Trim(),[ref]$id)){

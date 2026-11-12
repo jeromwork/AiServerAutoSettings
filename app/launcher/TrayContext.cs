@@ -26,7 +26,8 @@ namespace RemoteAgents.Launcher
         ConfigWindow mainWindow;
         WindowModel window;
         readonly ConfigSyncSchedule syncSchedule = new ConfigSyncSchedule();
-        bool syncRunning, accountResuming, serverHealthRunning;
+        bool syncRunning, accountResuming, serverHealthRunning, syncTaskRetired, syncTaskRetiring;
+        DateTime nextSyncTaskRetirement = DateTime.MinValue;
         readonly ServerHealthSchedule healthSchedule = new ServerHealthSchedule();
         string syncSummary = "Сверка конфига: ожидается подтверждённая связь";
         readonly Icon green = MakeIcon(Color.ForestGreen), yellow = MakeIcon(Color.Goldenrod), red = MakeIcon(Color.Firebrick);
@@ -126,6 +127,7 @@ namespace RemoteAgents.Launcher
             foreach (var r in runtimes) r.Dispose(); runtimes.Clear();
             foreach (var j in actionJobs) j.Dispose(); actionJobs.Clear();
             definition = BundleDefinition.Load(engine.Folder(engine.Current));
+            if (mainWindow != null && !mainWindow.IsDisposed) mainWindow.RebindBundle(engine.Folder(engine.Current));
             foreach (var c in definition.Components) runtimes.Add(new ComponentRuntime(c, Wanted(c), home, engine.Folder(engine.Current), log));
             var vpn = definition.Components.FirstOrDefault(c => c.Name == "vpn" && c.CommandManaged);
             if (vpn != null && !File.Exists(Path.Combine(home, "status", "vpn.json")) && File.Exists(TransportScript("Vpn.Tun.ps1"))) RunAction(new MenuAction { Exe = vpn.Exe, Args = vpn.Args });
@@ -136,7 +138,7 @@ namespace RemoteAgents.Launcher
         {
             if (closing || ticking || definition == null) return; ticking = true;
             try {
-                TryDeleteOld(); ReloadSettings(); foreach (var r in runtimes) r.Tick();
+                RetireConfigSyncTask(); TryDeleteOld(); ReloadSettings(); foreach (var r in runtimes) r.Tick();
                 var critical = runtimes.Where(r => r.Definition.Critical).ToArray();
                 bool all = Product.IsVpn ? VpnModulesReady() : critical.Length > 0 && critical.All(r => r.Healthy);
                 string result = engine.Observe(all);
@@ -197,11 +199,23 @@ namespace RemoteAgents.Launcher
             } catch (OperationCanceledException) { } catch (Exception) { log.Write("operations.check.failed"); }
             finally { operationChecking = false; }
         }
+        async void RetireConfigSyncTask()
+        {
+            if (Product.IsVpn || closing || syncTaskRetired || syncTaskRetiring || DateTime.UtcNow < nextSyncTaskRetirement) return;
+            syncTaskRetiring = true;
+            string bundle = engine.Folder(engine.Current);
+            try {
+                await Task.Run(() => ServerOperations.Invoke(home, bundle, "RetireConfigSync", new { }, stop.Token));
+                syncTaskRetired = true;
+            } catch (OperationCanceledException) { }
+            catch (Exception) { log.Write("config.sync.task.retire.failed"); }
+            finally { syncTaskRetiring = false; nextSyncTaskRetirement = DateTime.UtcNow.AddSeconds(30); }
+        }
         async void CheckSync()
         {
             if(Product.IsVpn || !Json.Bool(Json.Map(Json.Get(config.Data,"wizard")),"configured") || !Json.Map(Json.Get(config.Data,"profile")).ContainsKey("server"))return;
             bool connected=Json.Bool(StatusView.Read(home,"transport",maxAgeSec:15),"ok");
-            bool occupied = syncRunning || actionBusy || busy || closing || operationChecking || mainWindow != null && mainWindow.IsApplying;
+            bool occupied = !syncTaskRetired || syncRunning || actionBusy || busy || closing || operationChecking || mainWindow != null && mainWindow.IsApplying;
             if (!syncSchedule.Due(connected, DateTime.UtcNow, occupied)) return;
             syncRunning=true; syncSchedule.Started(DateTime.UtcNow);
             syncSummary="Сверка конфига: выполняется в фоне";
@@ -627,7 +641,8 @@ namespace RemoteAgents.Launcher
             // Reuse the existing PID/command-line ownership checks and Disk engine shutdown.
             Files.Atomic(script, "param([string]$Bundle,[string]$Root)\r\n$ErrorActionPreference='Stop'\r\n" +
                 ". (Join-Path $Bundle 'build/Setup.Common.ps1')\r\n" +
-                "$failed=$false;try{Stop-ManagedControl $Root}catch{$failed=$true}\r\n" +
+                "$failed=$false;try{Remove-LegacyConfigSyncTask $Root}catch{$failed=$true}\r\n" +
+                "try{Stop-ManagedControl $Root}catch{$failed=$true}\r\n" +
                 "$disk=Join-Path $env:LOCALAPPDATA 'RemoteDisk';$config=Join-Path $Root 'config.json'\r\n" +
                 "if(Test-Path $config){$c=Read-TransportJson $config;if($c.disk.home){$disk=[string]$c.disk.home}}\r\n" +
                 "try{Stop-ManagedDisk $disk}catch{$failed=$true};if($failed){exit 1}\r\n");

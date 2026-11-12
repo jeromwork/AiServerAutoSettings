@@ -22,7 +22,7 @@ namespace RemoteAgents.Launcher
         readonly ListView external = new ListView { View = View.Details, FullRowSelect = true, HideSelection = false, MultiSelect = false, ShowItemToolTips = true, Height = 104, Dock = DockStyle.Fill };
         readonly DiskFolderTree folders;
         readonly Func<string, object, Task<Dictionary<string, object>>> run;
-        readonly Func<Func<Task>, Task> guard;
+        readonly Func<Func<Task>, Task> mutate;
         readonly Action<string> log;
         internal Func<Task> Apply, Reload;
         internal Func<Task> Skip;
@@ -37,9 +37,9 @@ namespace RemoteAgents.Launcher
             var flow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = true, Margin = new Padding(0) };
             flow.Controls.AddRange(controls); return flow;
         }
-        internal DiskFoldersView(Func<string, object, Task<Dictionary<string, object>>> run, Func<Func<Task>, Task> guard, Func<bool> isBusy, Action<string> log)
+        internal DiskFoldersView(Func<string, object, Task<Dictionary<string, object>>> run, Func<Func<Task>, Task> read, Func<Func<Task>, Task> mutate, Func<bool> isBusy, Action<string> log)
         {
-            this.run = run; this.guard = guard; this.log = log;
+            this.run = run; this.mutate = mutate; this.log = log;
             Dock = DockStyle.Fill; AutoScroll = false; AutoScaleMode = AutoScaleMode.Inherit; Padding = new Padding(8);
             Model = new DiskFoldersModel(new DiskChoice());
             foreach (string d in DiskChoice.Directions) { direction.Items.Add(DiskFoldersModel.DirectionText(d)); externalDirection.Items.Add(DiskFoldersModel.DirectionText(d)); }
@@ -65,7 +65,7 @@ namespace RemoteAgents.Launcher
                 int width = Math.Max(120, content.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - layout.Padding.Horizontal - 12);
                 foreach (var label in new[] { project, changes, keepFiles }) label.MaximumSize = new Size(width, 0);
             };
-            folders = new DiskFolderTree(tree, path => run("DiskTree", new { @base = diskBase, path }), guard, isBusy, log) { Model = Model };
+            folders = new DiskFolderTree(tree, path => run("DiskTree", new { @base = diskBase, path }), read, isBusy, log) { Model = Model };
             folders.SelectionChanged += () => { NeedsExternalInventory = false; RefreshState(); };
             tree.AfterSelect += (s, e) => RefreshDirection();
             all.CheckedChanged += (s, e) => ChangeMode(all, DiskFoldersMode.All);
@@ -199,7 +199,7 @@ namespace RemoteAgents.Launcher
             if (busy || tree.SelectedNode == null) return;
             string path = DiskChoice.Project(Convert.ToString(tree.SelectedNode.Tag));
             if (MessageBox.Show(this, "Заменить изменения в «" + path + "» версией с сервера? Ваши местные изменения будут потеряны.", "Откатить мои изменения", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
-            await guard(async () => {
+            await mutate(async () => {
                 var result = await run("DiskRevert", new { path });
                 log(Json.Text(result, "summary", Json.Bool(result, "ok") ? "Изменения отменены" : "Не удалось отменить изменения"));
                 if (!Json.Bool(result, "ok")) return;

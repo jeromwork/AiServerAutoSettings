@@ -71,4 +71,21 @@ $script:bridgeCommand=$command.Replace($root,($root+'-other'));Stop-ManagedContr
 Assert ($script:removedRun -eq 1 -and $script:bridgeStopped -eq 1) 'foreign bridge and Run entry untouched'
 $script:bridgeCommand=$command;Write-TransportJson (Join-Path $root 'config.json') @{wizard=@{configured=$true}};Stop-ManagedControl $root
 Assert ($script:removedRun -eq 1 -and $script:bridgeStopped -eq 1) 'configured installation never stopped by first-run cleanup'
+# The launcher's shutdown helper stops configured processes too, but removes Run only for unfinished setup.
+Remove-Item -LiteralPath $pidFile
+. (Join-Path $repo 'build/Setup.Common.ps1')
+$script:runRemoved=0
+function Get-RunValue($Name){return $script:bridgeCommand}
+function Set-RunValue($Name,$Value){Assert ($Name -eq 'RemoteAgentsControl' -and $null -eq $Value) 'shutdown only deletes the owned Run value';$script:runRemoved++}
+Write-TransportJson (Join-Path $root 'config.json') @{wizard=@{configured=$false}}
+$script:bridgeCommand=$command
+Stop-ManagedControl $root
+Assert ($script:runRemoved -eq 1) 'launcher shutdown removes unfinished owned bridge autostart even without PID file'
+$script:bridgeCommand=$command.Replace($root,($root+'-other'));Stop-ManagedControl $root
+Assert ($script:runRemoved -eq 1) 'launcher shutdown preserves foreign Home autostart'
+$script:bridgeCommand=$command.Replace('managed-control/app','control/app');Stop-ManagedControl $root
+Assert ($script:runRemoved -eq 1) 'launcher shutdown preserves unmanaged bridge autostart'
+$script:bridgeCommand=$command;Write-TransportJson (Join-Path $root 'config.json') @{wizard=@{configured=$true}}
+Stop-ManagedControl $root
+Assert ($script:runRemoved -eq 1) 'launcher shutdown preserves completed installation autostart'
 Write-Output ('OK: '+$count+' setup/headless checks (fixtures)')

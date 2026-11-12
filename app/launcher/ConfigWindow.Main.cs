@@ -26,6 +26,13 @@ namespace RemoteAgents.Launcher
         readonly PathSelection pathSelection = new PathSelection();
         internal static ConfigWindow Main(string home, string bundle)
         { return new ConfigWindow(home, bundle, null, true, false, true); }
+        internal void RebindBundle(string current)
+        {
+            bundle = current;
+            if (session != null) session.RebindBundle(current);
+            if (followingSession != null && followingSession != session) followingSession.RebindBundle(current);
+            if (detailsWindow != null && !detailsWindow.IsDisposed) detailsWindow.RebindBundle(current);
+        }
         void BuildMain()
         {
             Text = Product.Name;

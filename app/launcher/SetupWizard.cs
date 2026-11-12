@@ -387,16 +387,18 @@ namespace RemoteAgents.Launcher
                 password.Enabled=!applied[0];
             } catch (OperationCanceledException) { } catch (Exception e) { if (!IsDisposed) Append("Проверка состояния: " + e.Message); }
         }
-        async Task Guard(Func<Task> action, int section = -1)
+        async Task<bool> Guard(Func<Task> action, int section = -1)
         {
-            if (IsDisposed || closingRequested) return;
-            if (MutationConflict != null) { string conflict = MutationConflict(); if (conflict.Length > 0) { Append(conflict); return; } }
+            lastSuccess = false;
+            if (IsDisposed || closingRequested || busy) return false;
+            if (MutationConflict != null) { string conflict = MutationConflict(); if (conflict.Length > 0) { Append(conflict); return false; } }
             int page=section<0?steps.Section:section;
-            lastSuccess=false;busy=true;stepCancellation=new CancellationTokenSource();steps.Enabled=false;pages.Enabled=false;foreach(var panel in details)panel.Enabled=false;back.Enabled=next.Enabled=false;close.Enabled=true;progress.Style=ProgressBarStyle.Marquee;
+            busy=true;stepCancellation=new CancellationTokenSource();steps.Enabled=false;pages.Enabled=false;foreach(var panel in details)panel.Enabled=false;back.Enabled=next.Enabled=false;close.Enabled=true;progress.Style=ProgressBarStyle.Marquee;
             try {await action();lastSuccess=true;if(SettingsApplied!=null && !IsDisposed)SettingsApplied();}
             catch(OperationCanceledException) {if(!IsDisposed){if(page!=7)applied[page]=false;results[page]="Шаг отменён; готовность не подтверждена";Append(results[page]);}}
             catch(Exception e) {if(!IsDisposed){if(page==0)password.Enabled=true;if(page!=7)applied[page]=false;results[page]="Ошибка: "+e.Message;Append(results[page]);}}
             finally {busy=false;stepCancellation.Dispose();stepCancellation=null;if(!IsDisposed){foreach(var panel in details)panel.Enabled=true;steps.Enabled=pages.Enabled=close.Enabled=true;back.Enabled=Array.IndexOf(order,steps.Section)>0;next.Enabled=!showingInstall;progress.Style=ProgressBarStyle.Continuous;RefreshSummary();if(closingRequested)Close();}}
+            return lastSuccess;
         }
         async Task<Dictionary<string,object>> Run(string action, object request, CancellationToken? quiet = null)
         {
@@ -447,6 +449,7 @@ namespace RemoteAgents.Launcher
                 var names=tracked.Concat(pendingAccount?new[]{"happier"}:new string[0]).Distinct().ToArray();
                 var result=await Run("Operation",new {operations=names,start},pollCancellation.Token);
                 lastOperations=Json.Map(Json.Get(result,"operations"));pendingAccount=Json.Bool(result,"pendingAccount");
+                if(!pendingAccount)resumeAccount=false;
                 // A restarted («Повторить») install makes its section wait again.
                 foreach(var pair in new[]{new KeyValuePair<string,int>("disk",2),new KeyValuePair<string,int>("happier",3)})if(Json.Str(Json.Map(Json.Get(lastOperations,pair.Key)),"state")=="running" && !applied[pair.Value])waiting[pair.Value]=pair.Key;
                 foreach(var pair in waiting.ToArray()) {
@@ -463,7 +466,11 @@ namespace RemoteAgents.Launcher
             catch(Exception e) {lastLine.Text="Состояние установки на сервере не получено: "+e.Message+". Повторю позже";}
             finally {polling=false;}
             // Dependent parts complete by themselves once the window is free.
-            if(!busy && !closingRequested && resumeAccount){resumeAccount=false;await Guard(async()=>{var r=await Run("ResumeAccount",new {});ApplyResult(3,r);},3);SaveOperations();RefreshInstall();}
+            if(!busy && !closingRequested && resumeAccount){
+                bool connected = false;
+                if(await Guard(async()=>{var r=await Run("ResumeAccount",new {});connected=ApplyResult(3,r) && Json.Bool(r,"ok");},3) && connected) resumeAccount=false;
+                SaveOperations();RefreshInstall();
+            }
             if(!busy && !closingRequested && retryConnection){retryConnection=false;await ExecuteSection(1);}
         }
         void ShowInstall()

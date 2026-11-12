@@ -378,6 +378,7 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
     switch($Action){
         'Bootstrap' {return Start-WizardBootstrap $Root $Bundle $Request}
         'ConfigSync' {return Sync-WizardConfigSettings $Root $Bundle $Request}
+        'RetireConfigSync' {Remove-LegacyConfigSyncTask $Root;return @{ok=$true}}
         'ServerHealth' {return Get-WizardServerHealth $Root}
         'Server' {
             $profile=Connect-WizardServer $Root $Bundle $Request
@@ -399,7 +400,7 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             if(-not $server.userManager){throw 'Нет user systemd. Администратору сервера: sudo loginctl enable-linger <пользователь>; sudo systemctl start user@<uid>.service. Затем повторите шаг'}
             $running=@(foreach($op in @('disk','happier')){if($server.operations -and $server.operations.$op.state -eq 'running'){$(if($op -eq 'disk'){'Диск'}else{'Happier'})}})
             $server|Add-Member -Force summary ('Подключено ✓'+$(if($running.Count){'. На сервере устанавливается: '+($running -join ', ')+' — разделы завершатся сами'}else{''}))
-            if((Read-TransportJson (Join-Path $Root 'config.json')).profile){$server|Add-Member -Force configSync (Install-WizardConfigSync $Root $Bundle)}
+            Remove-LegacyConfigSyncTask $Root
             return $server
         }
         'Lan' {if($Request.host){return Add-WizardLan $Root $Bundle $Request};return Send-WizardLan $Root $Bundle ([string]$Request.file)}

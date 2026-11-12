@@ -80,7 +80,7 @@ namespace RemoteAgents.Launcher
             Text = Product.Name + (settings ? " — настройки" : " — подключение"); FormBorderStyle = FormBorderStyle.Sizable; MaximizeBox = true;
             StartPosition = FormStartPosition.CenterScreen; ClientSize = new Size(520, 300); TopMost = !settings; KeyPreview = true;
             start.FlatAppearance.BorderSize = 0;
-            folders = new DiskFoldersView(RunFolderAction, a => mainWindow ? ReadFolders(a) : Guard(a), () => running, Log);
+            folders = new DiskFoldersView(RunFolderAction, a => mainWindow ? ReadFolders(a) : Guard(a), Guard, () => running, Log);
             folders.Apply = ApplyFolders;
             folders.Reload = LoadFolders;
             folders.Skip = async () => {

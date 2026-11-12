@@ -137,33 +137,6 @@ function Invoke-WizardResourceSet([string]$Root,[string[]]$Resources,[scriptbloc
 function Get-WizardRuntimeFiles {
     @('build/Wizard.ps1','build/Wizard.Common.ps1','build/Wizard.Engine.ps1','build/Wizard.Session.ps1','build/Wizard.SessionHost.ps1','build/Wizard.Server.ps1','build/Wizard.Bootstrap.ps1','build/Wizard.Refresh.ps1','build/Wizard.Network.ps1','build/Wizard.Lan.ps1','build/Setup.Common.ps1','transport/Transport.Common.ps1','transport/Route.Proxy.ps1','transport/server-transport-catalog.py','disk/Disk.Common.ps1','disk/Disk.Union.ps1','disk/Disk.Selective.ps1','disk/stignore.txt','disk/stignore-previous.sha256')
 }
-function Install-WizardConfigSync([string]$Root,[string]$Bundle) {
-    if(-not (Test-WizardWindows)){return @{supported=$false;intervalSec=300}}
-    $files=@(Get-WizardRuntimeFiles)
-    $hashes=@($files|ForEach-Object {(Get-FileHash -LiteralPath (Join-Path $Bundle $_) -Algorithm SHA256).Hash})
-    $version=(Get-TransportFingerprint 'config-sync' ($hashes -join '')).Substring(0,24)
-    $dest=Join-Path $Root ('state/config-sync/'+$version)
-    foreach($file in $files){
-        $target=Join-Path $dest $file
-        if(-not (Test-Path $target)){[void][IO.Directory]::CreateDirectory((Split-Path $target -Parent));Copy-Item -LiteralPath (Join-Path $Bundle $file) -Destination $target}
-    }
-    $task='RemoteAgents config sync '+(Get-TransportFingerprint 'sync' $Root.ToLowerInvariant()).Substring(0,16)
-    $args=@('-NoProfile','-NonInteractive','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',(Join-Path $dest 'build/Wizard.ps1'),'-Home',$Root,'-Action','ConfigSync')
-    # powershell.exe is a console program: started by the scheduler it flashes a window every run, even with -WindowStyle Hidden.
-    # wscript.exe has no console and starts it with window style 0. UTF-16 with BOM keeps non-ASCII profile paths intact.
-    $line=(@((Get-TransportPowerShell))+$args|ForEach-Object {Quote-Transport $_}) -join ' '
-    $hidden=Join-Path $dest 'config-sync-hidden.vbs'
-    [IO.File]::WriteAllText($hidden,('WScript.Quit CreateObject("WScript.Shell").Run("'+$line.Replace('"','""')+'", 0, True)'+"`r`n"),[Text.Encoding]::Unicode)
-    $action=New-ScheduledTaskAction -Execute (([string]$env:SystemRoot).TrimEnd('\')+'\System32\wscript.exe') -Argument ('//B //Nologo '+(Quote-Transport $hidden))
-    $user=Get-WizardInteractiveUser
-    $principal=New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
-    $trigger=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Minutes 5)
-    $settings=New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 4)
-    Register-ScheduledTask -TaskName $task -Action $action -Trigger @($trigger,(New-ScheduledTaskTrigger -AtLogOn -User $user)) -Principal $principal -Settings $settings -Force|Out-Null
-    $registered=Get-TaskState $task
-    if(-not $registered.exists -or -not $registered.enabled){throw 'Не зарегистрировано автообновление конфига каждые 5 минут'}
-    return @{supported=$true;intervalSec=300;task=$task}
-}
 function Get-WizardHostId([string]$Root) {
     Invoke-WizardResourceLock $Root 'device-identity' {
         $file=Join-Path $Root 'state/device-id.json'

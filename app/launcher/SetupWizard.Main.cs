@@ -7,6 +7,7 @@ namespace RemoteAgents.Launcher
         internal Func<string> MutationConflict;
         internal Action SettingsApplied;
         internal bool IsApplying { get { return busy; } }
+        internal void RebindBundle(string current) { bundle = current; }
         internal void OpenSection(int section) { if (!busy) SelectPage(section); }
         internal void PrepareEmbedded()
         {

@@ -43,7 +43,7 @@ namespace RemoteAgents.Launcher
                 case "ServerHealth": return 10 * 1000; // one read-only SSH request, no route probing/retry
                 case "Operation": return 60 * 1000;  // one short status call
                 case "Disk": return 2100 * 1000;     // old disk detach 120 s + install 900 s + apply 900 s
-                case "ConfigSync": return 300 * 1000; // periodic refresh of addresses/host keys/VPN with own key (Windows task limit: 4 min)
+                case "ConfigSync": return 300 * 1000; // periodic refresh of addresses/host keys/VPN with own key (launcher timer)
                 case "Connection": return 900 * 1000; // catalog/helpers/initialize ~400 s + preflight ~75 s + proof 120 s
                 case "Bridge": return 900 * 1000;    // two bridge children 300 s each + live probes
                 case "Vpn": return 600 * 1000;       // TUN child 420 s (may wait for UAC)
