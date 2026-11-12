@@ -251,7 +251,7 @@ def devices(c):
 
 def device(c, selector):
     rows = [r for r in devices(c) if selector in (r['id'], r['name'])]
-    require(len(rows) == 1, 'Компьютер не найден или имя неоднозначно; используйте id из invite devices')
+    require(len({r['id'] for r in rows}) == 1, 'Компьютер не найден или имя неоднозначно; используйте id из invite devices')
     return rows[0]
 
 
@@ -261,8 +261,9 @@ def revoke_device(c, selector):
         with worker_file(c, c['workerAuthorizedKeys']) as fd:
             with os.fdopen(os.dup(fd)) as source:
                 lines = source.read().splitlines()
-            target = row['publicKey'] + ' ra-device:' + row['name']
-            data = ''.join(line + '\n' for line in lines if line != target).encode()
+            # One key can have several invitation labels; revoke the device itself.
+            target = row['publicKey'] + ' ra-device:'
+            data = ''.join(line + '\n' for line in lines if not line.startswith(target)).encode()
             os.lseek(fd, 0, os.SEEK_SET)
             os.write(fd, data)
             os.ftruncate(fd, len(data))

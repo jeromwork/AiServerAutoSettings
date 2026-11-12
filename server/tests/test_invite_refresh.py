@@ -99,6 +99,16 @@ class RefreshTests(unittest.TestCase):
         self.assertIn(b'HOST IDENTIFICATION HAS CHANGED', result.stderr)
         print('PASS auto settings: changed untrusted host rejected by actual OpenSSH before snapshot read')
 
+    def test_revoke_device_with_reused_key(self):
+        # Re-inviting the same computer under a new name must still allow revocation.
+        obj, _, _ = self.b.create('--name', 'Renamed')
+        invite.enroll(self.b.c, obj['id'], self.b.pub)
+        self.assertEqual(self.b.ssh(self.b.own, remote='true').returncode, 0)
+        result = self.b.cli('revoke-device', self.device['id'])
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotEqual(self.b.ssh(self.b.own, remote='true').returncode, 0)
+        self.assertEqual(invite.devices(self.b.c), [])
+
     def test_devices_revoke_and_legacy_metadata(self):
         result = self.b.cli('devices')
         self.assertEqual(result.returncode, 0)
