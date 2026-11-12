@@ -267,7 +267,7 @@ try{
             # Живость — параллельно и раньше rank; rank (по очереди, делит канал) ждёт окончания проб живости.
             $live=@($probes.Values|Where-Object {$_.purpose -eq 'live'}).Count
             if(-not $confirmed -and -not $rankPending -and -not $live -and $pin.mode -eq 'auto' -and $now -ge $nextLive){Start-TransportLiveness;$live=@($probes.Values|Where-Object {$_.purpose -eq 'live'}).Count}
-            if(-not $rankPending -and -not $live -and $now -ge $nextRank){Start-TransportRanking}
+            if($confirmed -and -not $rankPending -and -not $live -and $now -ge $nextRank){Start-TransportRanking}
             if($active -and $active -in @($paths.Candidates|ForEach-Object {$_.tag}) -and $now -ge $nextActive -and -not $probes.ContainsKey($active)){
                 $c=$paths.Candidates|Where-Object {$_.tag -eq $active}|Select-Object -First 1
                 Start-DaemonProbe $c ([long]$settings.Options.activeProbeBytes) 'active'

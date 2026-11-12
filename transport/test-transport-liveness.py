@@ -95,7 +95,18 @@ Server(('127.0.0.1',port),API).serve_forever()
         except OSError:
             return []
 
-    daemon = subprocess.Popen([PWSH, '-NoLogo', '-NoProfile', '-File', str(DAEMON), '-Home', str(root)],
+    # Fault injection: rank is already due while liveness is not due yet.
+    # On a real start the deadlines differ by microseconds; a scheduler tick
+    # between them used to start serial ranking before any liveness probes.
+    source = DAEMON.read_text(encoding='utf-8-sig')
+    original = "$script:nextRank=[DateTime]::UtcNow.AddSeconds(1);"
+    assert original in source
+    source = source.replace(original, "$script:nextRank=[DateTime]::MinValue;")
+    common = str(DAEMON.with_name('Transport.Common.ps1')).replace("'", "''")
+    source = source.replace("(Join-Path $PSScriptRoot 'Transport.Common.ps1')", "'" + common + "'")
+    fixture_daemon = root / 'daemon.ps1'
+    fixture_daemon.write_text(source, encoding='utf-8-sig')
+    daemon = subprocess.Popen([PWSH, '-NoLogo', '-NoProfile', '-File', str(fixture_daemon), '-Home', str(root)],
                               env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         until(lambda: status().get('ok'))
