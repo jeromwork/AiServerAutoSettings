@@ -19,7 +19,10 @@ Assert ($result.supported -and $result.intervalSec -eq 300) 'five minute config 
 Assert ($script:registered.triggers[0].interval.TotalSeconds -eq 300 -and $script:registered.triggers[1].logon) 'recurring trigger and logon recovery'
 Assert ($script:registered.principal.level -eq 'Limited' -and $script:registered.principal.logon -eq 'Interactive') 'same user without elevation'
 Assert ($script:registered.settings.multiple -eq 'IgnoreNew' -and $script:registered.settings.limit.TotalMinutes -eq 4) 'sync does not queue or run indefinitely'
-Assert ($script:registered.action.argument -like '*"-Action" "ConfigSync"*') 'task runs key-only ConfigSync'
+$vbs=@(Get-ChildItem -Path (Join-Path $root 'state/config-sync/*/config-sync-hidden.vbs'))[0]
+Assert ($script:registered.action.execute -like '*wscript.exe' -and $script:registered.action.argument -like ('//B //Nologo "'+$vbs.FullName+'"')) 'the scheduler starts wscript (no console window), not powershell'
+$text=[IO.File]::ReadAllText($vbs.FullName,[Text.Encoding]::Unicode)
+Assert ($text -like 'WScript.Quit CreateObject("WScript.Shell").Run(*, 0, True)*' -and $text -like '*""-Action"" ""ConfigSync""*') 'hidden window, waits, runs key-only ConfigSync'
 $copy=@(Get-ChildItem -Path (Join-Path $root 'state/config-sync/*/build/Wizard.ps1'))[0]
 Assert ($copy -and (Get-FileHash $copy.FullName).Hash -ceq (Get-FileHash (Join-Path $repo 'build/Wizard.ps1')).Hash) 'worker survives source bundle pruning'
 $task=$script:registered.name

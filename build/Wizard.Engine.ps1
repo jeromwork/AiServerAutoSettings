@@ -139,7 +139,12 @@ function Install-WizardConfigSync([string]$Root,[string]$Bundle) {
     }
     $task='RemoteAgents config sync '+(Get-TransportFingerprint 'sync' $Root.ToLowerInvariant()).Substring(0,16)
     $args=@('-NoProfile','-NonInteractive','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',(Join-Path $dest 'build/Wizard.ps1'),'-Home',$Root,'-Action','ConfigSync')
-    $action=New-ScheduledTaskAction -Execute (Get-TransportPowerShell) -Argument (($args|ForEach-Object {Quote-Transport $_}) -join ' ')
+    # powershell.exe is a console program: started by the scheduler it flashes a window every run, even with -WindowStyle Hidden.
+    # wscript.exe has no console and starts it with window style 0. UTF-16 with BOM keeps non-ASCII profile paths intact.
+    $line=(@((Get-TransportPowerShell))+$args|ForEach-Object {Quote-Transport $_}) -join ' '
+    $hidden=Join-Path $dest 'config-sync-hidden.vbs'
+    [IO.File]::WriteAllText($hidden,('WScript.Quit CreateObject("WScript.Shell").Run("'+$line.Replace('"','""')+'", 0, True)'+"`r`n"),[Text.Encoding]::Unicode)
+    $action=New-ScheduledTaskAction -Execute (([string]$env:SystemRoot).TrimEnd('\')+'\System32\wscript.exe') -Argument ('//B //Nologo '+(Quote-Transport $hidden))
     $user=Get-WizardInteractiveUser
     $principal=New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
     $trigger=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Minutes 5)
