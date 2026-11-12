@@ -131,6 +131,21 @@ Invoke-ControlPrepare $c $payload | ConvertTo-Json -Compress
             record=json.loads((directory/'host-one/control.json').read_text());catalog.validate(record,str(home));self.assertTrue(record['controlOnly'])
             self.assertEqual(other_file.read_bytes(),before);self.assertFalse((home/'work/projects/control').exists())
 
+    def test_payload_device_name_from_profile(self):
+        # Every (re)registration reads profile.device.name, so a reconnect never brings back WIN-….
+        with tempfile.TemporaryDirectory() as tmp:
+            launcher=Path(tmp)/'RemoteAgents';launcher.mkdir()
+            def name(config=None, extra=''):
+                if config is not None:(launcher/'config.json').write_text(json.dumps(config,ensure_ascii=False),encoding='utf-8')
+                command=". '"+str(ROOT/'Start-WindowsControl.ps1')+"' -LibraryOnly -LauncherHome '"+str(launcher)+"'"+extra+"; $env:COMPUTERNAME='WIN-TEST'; New-ControlPayload ([pscustomobject]@{hostId='host-one'}) 'label' 'C:/w' ''"
+                payload=subprocess.check_output([str(PWSH),'-NoProfile','-NonInteractive','-Command',command],stdin=subprocess.DEVNULL).decode()
+                data=re.search(r"CONTROL_DATA='([^']+)'",payload).group(1)
+                return json.loads(base64.b64decode(data))['deviceName']
+            self.assertEqual(name({'schema':1,'profile':{'device':{'name':'Ноутбук сына'}}}),'Ноутбук сына')
+            self.assertEqual(name({'schema':1,'profile':{}}),'WIN-TEST')
+            self.assertEqual(name({'schema':1,'profile':{'device':{'name':'bad\u0007name'}}}),'WIN-TEST')
+            self.assertEqual(name(None," -DeviceName 'Явное'"),'Явное')
+
     def test_real_session_binding(self):
         with tempfile.TemporaryDirectory() as tmp:
             home=Path(tmp);home.chmod(0o700);path=home/'session.sock'

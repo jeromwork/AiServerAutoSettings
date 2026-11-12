@@ -13,7 +13,21 @@ fi
 [ -d "$home" ]; [ ! -L "$home/.ssh" ]; [ ! -L "$home/.ssh/authorized_keys" ]
 install -d -m 700 "$home/.ssh"
 touch "$home/.ssh/authorized_keys"; chmod 600 "$home/.ssh/authorized_keys"
-if ! grep -qxF -- "$ra_key" "$home/.ssh/authorized_keys"; then printf '\n%s\n' "$ra_key" >> "$home/.ssh/authorized_keys"; fi
+# Same lock as `remoteagents config export/revoke` (server/remoteagents_config.py): flock on the file itself.
+# Revoke replaces the file by rename while holding the lock, so append only if the locked descriptor is still
+# the current file; otherwise reopen. No concurrent writer loses a line.
+ak="$home/.ssh/authorized_keys"; appended=
+for _ in 1 2 3 4 5; do
+    exec 9>>"$ak"
+    flock -w 30 9
+    if [ "$(stat -L -c %d:%i /dev/fd/9)" = "$(stat -c %d:%i "$ak")" ]; then
+        if ! grep -qxF -- "$ra_key" "$ak"; then printf '\n%s\n' "$ra_key" >&9; fi
+        appended=1
+    fi
+    exec 9>&-
+    [ -n "$appended" ] && break
+done
+[ -n "$appended" ]
 if [ "$(id -u)" = 0 ]; then
     chown "$ra_user:$(id -gn "$ra_user")" "$home/.ssh" "$home/.ssh/authorized_keys"
     loginctl enable-linger "$ra_user"

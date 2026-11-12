@@ -1,5 +1,5 @@
 ﻿[CmdletBinding()]
-param([string]$Profile,[string]$AgentUser,[switch]$LibraryOnly,[switch]$Install,[switch]$Uninstall,[string]$LauncherHome,[switch]$KeepState,[switch]$StopManaged)
+param([string]$Profile,[string]$AgentUser,[switch]$LibraryOnly,[switch]$Install,[switch]$Uninstall,[string]$LauncherHome,[switch]$KeepState,[switch]$StopManaged,[string]$DeviceName)
 $ErrorActionPreference='Stop'
 function Convert-ControlLF([string]$Text) { $Text.Replace("`r`n","`n").Replace("`r","`n") }
 function Quote-ControlNative([string]$Text) { '"'+([regex]::Replace([regex]::Replace($Text,'(\\*)"','$1$1\"'),'(\\+)$','$1$1'))+'"' }
@@ -39,8 +39,22 @@ function Get-ControlAllowShell {
     if(Test-Path -LiteralPath $file){$c=Get-Content -LiteralPath $file -Raw -Encoding UTF8|ConvertFrom-Json;return ($c.bridge.allowShell -eq $true)}
     return $false
 }
+# The human name of this computer (docs/CONFIG.md device.name): -DeviceName, else profile.device.name of the
+# launcher config — read at every registration, so a reconnect never brings back WIN-…; fallback COMPUTERNAME.
+function Get-ControlDeviceName {
+    if($DeviceName){return $DeviceName}
+    $root=$LauncherHome;if(-not $root -and $env:LOCALAPPDATA){$root=Join-Path $env:LOCALAPPDATA 'RemoteAgents'}
+    try{
+        $file=Join-Path $root 'config.json'
+        if($root -and (Test-Path -LiteralPath $file)){
+            $name=[string](Get-Content -LiteralPath $file -Raw -Encoding UTF8|ConvertFrom-Json).profile.device.name
+            if($name -and $name.Length -le 80 -and $name -notmatch '[\x00-\x1f\x7f]'){return $name}
+        }
+    }catch{}
+    return $env:COMPUTERNAME
+}
 function New-ControlPayload($Connection,[string]$Label,[string]$Workspace,[string]$User) {
-    $data=@{projectId='control';hostId=$Connection.hostId;deviceLabel=$Label;deviceName=$env:COMPUTERNAME;windowsReplica=$Workspace;allowShell=(Get-ControlAllowShell)}|ConvertTo-Json -Compress
+    $data=@{projectId='control';hostId=$Connection.hostId;deviceLabel=$Label;deviceName=(Get-ControlDeviceName);windowsReplica=$Workspace;allowShell=(Get-ControlAllowShell)}|ConvertTo-Json -Compress
     $values=@{CONTROL_USER=$User;CONTROL_DATA=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($data))}
     foreach($pair in @(@('CONTROL_BRIDGE','codex-windows-bridge.py'),@('CONTROL_SESSION','codex-bridge-session.py'),@('CONTROL_CATALOG','server_node_catalog.py'))) {
         $values[$pair[0]]=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Convert-ControlLF ([IO.File]::ReadAllText((Join-Path $PSScriptRoot $pair[1]))))))

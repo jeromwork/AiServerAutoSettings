@@ -28,7 +28,7 @@ function Wait-WizardBootstrapTun($Root){return 'on'}
 $channel=Join-Path $root 'secrets/channel.json';Write-TransportJson $channel @{inbounds=@(@{tag='sync';override_port=23456});outbounds=@()} -Private
 Write-TransportJson (Join-Path $root 'secrets/entries/fixture.json') @{server='fixture.example.invalid'} -Private
 $binary=Join-Path $root 'sing-box.exe';Write-DiskUtf8 $binary 'fixture'
-$initial=@{catalog=@{schema=1;entries=@(@{name='fixture';ssh='fixture';kinds=@('hy2')});hops=@();relays=@();cdn=@()}}
+$initial=@{channel=@{secret='vpn-channel'};catalog=@{schema=1;entries=@(@{name='fixture';ssh='fixture';kinds=@('hy2')});hops=@();relays=@();cdn=@()}}
 $script:wanted=$true
 function Reset {
     $script:events.Clear()
@@ -68,4 +68,23 @@ $initial.Remove('catalog');$initial.entries=@{fixture=@{secret='vpn-entry-fixtur
 Reset
 $r=Invoke-WizardStep $root $repo 'Bootstrap' $request
 Assert ($r.ok -and $r.vpn -eq 'on') 'materialized entries work with the minimal contract bootstrap form'
+# config export --vpn off: a public catalog without a channel is not a VPN-first request.
+$initial.Remove('channel');$initial.catalog=@{schema=1;entries=@();hops=@();relays=@();cdn=@()};Reset
+$r=Invoke-WizardStep $root $repo 'Bootstrap' $request
+Assert ($r.ok -and $r.vpn -eq 'off' -and $script:events.Count -eq 0) 'catalog without a channel starts nothing'
+# VPN-first through an SSH hop of the catalog: the key comes from materialized.json, host keys from the catalog.
+$pinKey='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHopHostKeyFixtureHopHostKey0'
+$hopKey=Join-Path $root 'secrets/vpn-hop-fixture';Write-DiskUtf8 $hopKey "KEY`n"
+Write-TransportJson (Join-Path $root 'secrets/materialized.json') @{schema=1;channelPath=$channel;hops=@{vhop=@{name='vpn-hop-fixture';ssh='hopuser@127.0.0.1:2222';keyFile=$hopKey}}} -Private
+$initial.channel=@{secret='vpn-channel'};$initial.catalog=@{schema=1;entries=@(@{name='fixture';ssh='fixture';kinds=@('hy2')});hops=@(@{name='vhop';ssh='vhop';hostKey=@($pinKey)});relays=@();cdn=@()}
+$initial.hops=@{vhop=@{host='127.0.0.1';port=2222;user='hopuser';key=@{secret='vpn-hop-vhop'}}}
+Reset
+$r=Invoke-WizardStep $root $repo 'Bootstrap' $request
+$hop=@((Read-TransportJson (Join-Path $root 'config.json')).transport.hops)[0]
+$conf=[IO.File]::ReadAllText([string]$hop.configPath)
+Assert ($r.ok -and $hop.ssh -eq 'vhop' -and $conf.Contains('Host vhop') -and $conf.Contains('Port 2222') -and $conf.Contains('User hopuser') -and $conf.Contains($hopKey) -and $conf.Contains('StrictHostKeyChecking yes')) 'VPN hop alias mapped to the materialized key'
+Assert ([IO.File]::ReadAllText($hopKey+'.known_hosts').Trim() -ceq ('[127.0.0.1]:2222 '+$pinKey)) 'VPN hop pinned to the catalog host key'
+Remove-Item -LiteralPath (Join-Path $root 'secrets/materialized.json');Reset
+$r=Invoke-WizardStep $root $repo 'Bootstrap' $request
+Assert (-not $r.ok -and $r.vpn -eq 'unavailable') 'VPN hop without its materialized key is an honest failure'
 Write-Host ('PASS: config VPN bootstrap/on/off/foreign/failure/CRLF: '+$script:checks+' assertions (OS and TUN stubbed)')

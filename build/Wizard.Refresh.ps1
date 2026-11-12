@@ -10,7 +10,9 @@ function Get-WizardDeviceKey($Profile) {
     if($parts.Count -lt 2 -or $parts[0] -ne 'ssh-ed25519'){throw 'Нет собственного ключа ed25519 компьютера'}
     return ($parts[0]+' '+$parts[1])
 }
-function Get-WizardConfigSettings([string]$Root,[string]$Command='export PATH="$HOME/.local/bin:$PATH"; remoteagents config sync',[string]$InputText='') {
+# The server publishes ~worker/.config/remoteagents/config-sync.json on every `remoteagents config export` and
+# `remoteagents config sync` (docs/CONFIG-SERVER.md «Автообновление»). The client only reads it with its own key.
+function Get-WizardConfigSettings([string]$Root,[string]$Command='cat "$HOME/.config/remoteagents/config-sync.json"',[string]$InputText='') {
     # Local transport may reach the server when its former direct address is down.
     $p=Read-TransportJson (Find-InstallProfile $Root);$c=Read-TransportJson (Join-Path $Root 'config.json')
     try{
@@ -33,12 +35,49 @@ function Confirm-WizardConfigSettings([string]$Root) {
     }
     return $true
 }
+# config-sync.json (partial config of the paste format, secrets as plain text in a 0600 file of the worker) ->
+# the internal settings snapshot of Update-WizardConfigSettings. Absent fields stay as they are on this computer:
+# no server key, no vpn.enabled, no device/happier/bridge/disk/proxyOut/lan in a snapshot.
+function ConvertFrom-WizardConfigSync($Snapshot) {
+    if($Snapshot.kind -cne 'remoteagents-config-sync' -or $Snapshot.schema -ne 1){throw 'Неизвестный формат снимка настроек сервера'}
+    $c=$Snapshot.config
+    if($c.kind -cne 'remoteagents-config' -or $c.schema -ne 1 -or -not $c.server){throw 'Неизвестный формат снимка настроек сервера'}
+    $secrets=$c.secrets
+    $value={param($Reference)
+        $name=[string]$Reference.secret
+        if(-not $name -or -not $secrets -or -not $secrets.PSObject.Properties[$name]){throw ('В снимке сервера нет секрета '+$name)}
+        [string]$secrets.PSObject.Properties[$name].Value
+    }
+    $routes=@();foreach($route in @($c.server.routes|Where-Object {$null -ne $_})){
+        switch([string]$route.kind){
+            'direct' {$routes+=[pscustomobject]@{kind='direct'}}
+            'proxy' {$routes+=[pscustomobject]@{kind='proxy';proxy=[pscustomobject]@{type=[string]$route.proxy.type;host=[string]$route.proxy.server;port=[int]$route.proxy.port}}}
+            'hop' {
+                $h=$route.hop;$port=$(if($h.port){[int]$h.port}else{22})
+                $hop=[pscustomobject]@{ssh=([string]$h.user+'@'+$h.host+$(if($port -ne 22){':'+$port}else{''}));hostKey=[string]$h.hostKey}
+                if($h.key){$hop|Add-Member privateKey (& $value $h.key)}
+                if($h.password){$hop|Add-Member password (& $value $h.password)}
+                $routes+=[pscustomobject]@{kind='hop';hop=$hop}
+            }
+            default {throw 'Неизвестный маршрут в снимке сервера'}
+        }
+    }
+    if(-not $routes.Count){$routes=@([pscustomobject]@{kind='direct'})}
+    $b=$c.vpn.bootstrap;$entries=[pscustomobject]@{};$hops=[pscustomobject]@{};$channel=$null
+    if($b.channel){$channel=ConvertFrom-Json (Convert-TransportLF (& $value $b.channel))}
+    if($b.entries){foreach($p in $b.entries.PSObject.Properties){Assert-TransportName $p.Name;$entries|Add-Member $p.Name (ConvertFrom-Json (Convert-TransportLF (& $value $p.Value)))}}
+    if($b.hops){foreach($p in $b.hops.PSObject.Properties){Assert-TransportName $p.Name;$hops|Add-Member $p.Name ([pscustomobject]@{host=[string]$p.Value.host;port=$(if($p.Value.port){[int]$p.Value.port}else{22});user=[string]$p.Value.user;privateKey=(& $value $p.Value.key)})}}
+    $catalog=$b.catalog;if(-not $catalog){$catalog=[pscustomobject]@{schema=1;entries=@();hops=@();relays=@();cdn=@()}}
+    $bootstrap=[pscustomobject]@{catalog=$catalog;entries=$entries;hops=$hops}
+    if($channel){$bootstrap|Add-Member channel $channel}
+    if($c.vpn.checkUrl -or $c.vpn.dnsServer){$bootstrap|Add-Member vpn ([pscustomobject]@{checkUrl=[string]$c.vpn.checkUrl;dnsServer=[string]$c.vpn.dnsServer})}
+    [pscustomobject]@{schema=1;type='settings';revision=[string]$Snapshot.revision;serverAddress=[string]$c.server.address;serverPort=$(if($c.server.port){[int]$c.server.port}else{22});workerUser=[string]$c.server.login;hostKeys=@($c.server.hostKeys);routes=$routes;bootstrap=$bootstrap}
+}
 function Sync-WizardConfigSettings([string]$Root,[string]$Bundle,$Request) {
     if(-not (Confirm-WizardConfigSettings $Root)){return @{ok=$true;changed=$false;summary='Ожидается проверка обновлённой связи; независимый откат включён'}}
     $text=Get-WizardConfigSettings $Root
     if($text.Length -gt 1048576){throw 'Слишком большой снимок настроек'}
-    $data=ConvertFrom-Json (Convert-TransportLF $text)
-    if($data.type -ne 'settings'){throw 'Неизвестный формат настроек сервера'}
+    $data=ConvertFrom-WizardConfigSync (ConvertFrom-Json (Convert-TransportLF $text))
     # The public catalog remains authoritative. Admin sync publishes the private
     # caches/routes/channel; a later catalog removal needs no new access key.
     $source=Convert-TransportLF ([IO.File]::ReadAllText((Join-Path $Bundle 'transport/server-transport-catalog.py')))

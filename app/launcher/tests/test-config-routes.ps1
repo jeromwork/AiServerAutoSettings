@@ -54,6 +54,17 @@ for($n=0;$n -lt 2;$n++){
 Update-LauncherConfig $root {param($c) $c|Add-Member -Force profile ([pscustomobject]@{server=[pscustomobject]@{address='server.invalid';port=22;login='worker';hostKeys=@($pin);keyFile=$key;key=[pscustomobject]@{secret='server-key'};routes=$routes}})}
 $file=Connect-WizardProfileServer $root ([pscustomobject]@{askpassExecutable=$helper})
 Assert ((Read-TransportJson $file).keyPath -ceq $key) 'public config host/user/port route form uses the same materialized key'
+# Pasted form: {"secret":…} references; SecretVault.Materialize wrote secrets/route-<i>-auth.json and the manifest.
+$material=@();for($n=0;$n -lt 2;$n++){
+    $h=$routes[$n].hop;$h.PSObject.Properties.Remove('routePasswordFile');$h|Add-Member password ([pscustomobject]@{secret=('hop-'+$n+'-password')})
+    $auth=Join-Path $root ('secrets/route-'+$n+'-auth.json');Write-TransportJson $auth @{host=$h.host;port=$h.port;user=$h.user;password=@('first-secret','second-secret')[$n]} -Private
+    $material+=@{kind='hop';hop=@{name=('route-'+$n);ssh=($h.user+'@'+$h.host+':'+$h.port);passwordFile=$auth}}
+}
+Write-TransportJson (Join-Path $root 'secrets/materialized.json') @{schema=1;serverKeyFile=$key;routes=$material} -Private
+Update-LauncherConfig $root {param($c) $c.profile.server.PSObject.Properties.Remove('keyFile');$c.profile.server|Add-Member -Force routes $routes}
+$file=Connect-WizardProfileServer $root ([pscustomobject]@{askpassExecutable=$helper})
+Assert ((Read-TransportJson $file).keyPath -ceq $key) 'server key and hop passwords come from secrets/materialized.json'
+Update-LauncherConfig $root {param($c) $c.profile.server|Add-Member -Force keyFile $key}
 Update-LauncherConfig $root {param($c) $c.profile.server.keyFile=Join-Path $Root 'missing-key'}
 $failed=$false;try{Connect-WizardProfileServer $root ([pscustomobject]@{})|Out-Null}catch{$failed=$true}
 Assert $failed 'missing issued key must not fall back to enrolling another key'

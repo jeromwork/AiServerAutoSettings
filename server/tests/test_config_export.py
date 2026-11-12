@@ -418,6 +418,26 @@ class ConfigExportTests(unittest.TestCase):
         self.assertEqual(sum('shell' in x for x in lines), 300)
         self.assertEqual(sum('ra-config:' in x for x in lines), 4)
 
+    def test_wizard_helper_append_survives_revoke(self):
+        # build/server-ssh-user.sh (мастер) дописывает под тем же flock и только в текущий файл:
+        # revoke (временный файл + rename под flock) не теряет ни одной его строки.
+        for n in range(12):
+            self.e.export('Отзыв ' + str(n))
+        ids = [json.loads(x)['id'] for x in self.e.cli('list', '--json').stdout.decode().splitlines()]
+        self.assertEqual(len(ids), 12)
+        helper = ROOT / 'build/server-ssh-user.sh'
+        script = ('for i in $(seq 1 150); do ra_user="$1" ra_key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIWizard$i" '
+                  'HOME="$2" bash "$3" || exit 1; done')
+        writer = subprocess.Popen(['bash', '-c', script, 'x', USER, str(self.e.home), str(helper)], stdin=subprocess.DEVNULL)
+        for config_id in ids:
+            r = self.e.cli('revoke', config_id)
+            self.assertEqual(r.returncode, 0, r.stderr.decode())
+        self.assertEqual(writer.wait(timeout=60), 0)
+        lines = self.lines()
+        self.assertEqual(sum('AAAAIWizard' in x for x in lines), 150)
+        self.assertEqual(sum('ra-config:' in x for x in lines), 0)
+        self.assertEqual(self.e.auth.stat().st_mode & 0o777, 0o600)
+
     def test_review_failed_delivery_rolls_back_key(self):
         c = rc.settings(self.e.cfg)
 
