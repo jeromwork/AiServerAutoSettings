@@ -40,6 +40,7 @@ namespace RemoteAgents.Launcher
                 case "Bootstrap": return 300 * 1000; // VPN first: local sing-box start + live probe
                 case "Server": return 420 * 1000;    // key/password login ~100 s + helpers 60 s + start/catalog 120 s + 2 observations 120 s
                 case "Account": case "ResumeAccount": return 420 * 1000; // helpers 60 s + status 60 s + Account.ps1 child 300 s
+                case "ServerHealth": return 10 * 1000; // one read-only SSH request, no route probing/retry
                 case "Operation": return 60 * 1000;  // one short status call
                 case "Disk": return 2100 * 1000;     // old disk detach 120 s + install 900 s + apply 900 s
                 case "ConfigSync": return 300 * 1000; // periodic refresh of addresses/host keys/VPN with own key (Windows task limit: 4 min)

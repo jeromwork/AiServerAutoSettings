@@ -75,3 +75,4 @@ build/Wizard.Session.ps1
 build/Wizard.SessionHost.ps1
 build/Wizard.Bootstrap.ps1
 build/Wizard.Refresh.ps1
+build/Wizard.Health.ps1

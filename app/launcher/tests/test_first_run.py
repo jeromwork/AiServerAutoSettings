@@ -96,9 +96,13 @@ class FirstRunTests(unittest.TestCase):
     def test_main_window_and_minimal_tray_are_wired_to_existing_views(self):
         tray = source('TrayContext.cs')
         menu = tray.split('void RefreshMenu()', 1)[1].split('bool Configured()', 1)[0]
-        self.assertEqual(menu.count('menu.Items.Add('), 2)
-        self.assertIn('Открыть RemoteAgents', menu)
-        self.assertIn('Выход', menu)
+        self.assertIn('foreach (var entry in TrayEntries())', menu)
+        self.assertIn('TrayMenuModel.Build(config.Data, AccountState()', menu)
+        self.assertIn('if (id == "open") ShowMain()', menu)
+        self.assertIn('if (id == "folders") ShowMain(true)', menu)
+        self.assertIn('TrayMenuModel.HappierUrl(config.Data, AccountState())', menu)
+        self.assertIn('UseShellExecute = true', menu)
+        self.assertIn('if (id == "exit") RequestExit()', menu)
         main = source('ConfigWindow.Main.cs')
         for name in ['Папки', 'Конфиг', 'Подробно', 'Сервис']:
             self.assertIn(name, source('ConfigWindow.cs') + main)

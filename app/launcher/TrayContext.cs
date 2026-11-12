@@ -26,7 +26,8 @@ namespace RemoteAgents.Launcher
         ConfigWindow mainWindow;
         WindowModel window;
         readonly ConfigSyncSchedule syncSchedule = new ConfigSyncSchedule();
-        bool syncRunning, accountResuming;
+        bool syncRunning, accountResuming, serverHealthRunning;
+        readonly ServerHealthSchedule healthSchedule = new ServerHealthSchedule();
         string syncSummary = "Сверка конфига: ожидается подтверждённая связь";
         readonly Icon green = MakeIcon(Color.ForestGreen), yellow = MakeIcon(Color.Goldenrod), red = MakeIcon(Color.Firebrick);
         readonly object pipeGate = new object(); NamedPipeServerStream server; Task worker, pipeWorker;
@@ -151,12 +152,12 @@ namespace RemoteAgents.Launcher
                     string text = "RemoteVPN: " + StatusView.Summary(vpnStatus); icon.Text = text.Length > 63 ? text.Substring(0, 62) + "…" : text;
                 } else {
                     icon.Icon = transport.Count == 0 ? yellow : Json.Bool(transport, "ok") ? green : red;
-                    icon.Text = Json.Bool(transport, "ok") ? StatusView.Tooltip(transport) : "RemoteAgents: связь с сервером не подтверждена";
+                    icon.Text = TrayMenuModel.Tooltip(transport, ServerHealthView.Read(home));
                 }
-                if (operationTip.Length > 0) icon.Text = operationTip.Length > 63 ? operationTip.Substring(0, 62) + "…" : operationTip;
+                if (Product.IsVpn && operationTip.Length > 0) icon.Text = TrayMenuModel.Short(operationTip, 63);
                 if (DateTime.UtcNow >= nextOperationCheck) CheckOperations();
                 RefreshMenu(); WriteStatus();
-                CheckSync();
+                CheckSync(); CheckServerHealth();
                 if (serverUpdateRequested && !engine.Pending && MutationConflict().Length == 0 && TrySelfUpdate()) return;
             } catch { log.Write("supervisor.tick.failed"); icon.Icon = red; }
             finally { ticking = false; }
@@ -218,6 +219,23 @@ namespace RemoteAgents.Launcher
                 log.Write("config.sync.unavailable " + reason);
             } finally { syncRunning=false; if (!closing) { ReloadSettings(); RefreshMain(); } }
         }
+        async void CheckServerHealth()
+        {
+            if (Product.IsVpn || closing || engine.Current.Length == 0) return;
+            bool occupied = serverHealthRunning || syncRunning || actionBusy || busy || operationChecking || mainWindow != null && mainWindow.IsApplying;
+            if (!healthSchedule.Due(DateTime.UtcNow, Json.Bool(StatusView.Read(home, "transport", maxAgeSec: 15), "ok"), occupied)) return;
+            serverHealthRunning = true; healthSchedule.Started(DateTime.UtcNow);
+            string bundle = engine.Folder(engine.Current);
+            try {
+                await Task.Run(() => ServerOperations.Invoke(home, bundle, "ServerHealth", new { }, stop.Token));
+                log.Write("server.health.complete");
+            } catch (OperationCanceledException) { }
+            catch (Exception) {
+                // The outer ten-second budget may kill PowerShell before it can save its failure.
+                if (!closing) Json.Write(Path.Combine(home, "state", "server-health.json"), new { schema = 1, ok = false, updatedUtc = DateTime.UtcNow.ToString("o"), summary = "Состояние сервера не получено: проверьте связь" });
+                log.Write("server.health.unavailable");
+            } finally { serverHealthRunning = false; if (!closing) RefreshMenu(); }
+        }
         void WriteStatus()
         {
             Json.Write(Path.Combine(home, "status", Product.StatusName), new { schema = 1, pid = Process.GetCurrentProcess().Id, launcherVersion = Program.Version, bundleVersion = engine.Current,
@@ -227,13 +245,39 @@ namespace RemoteAgents.Launcher
         void RefreshMenu()
         {
             if (icon.ContextMenuStrip == null) {
-                var menu = new ContextMenuStrip();
-                menu.Items.Add("Открыть RemoteAgents", null, (s, e) => ShowMain());
-                menu.Items.Add("Выход", null, (s, e) => RequestExit());
+                var menu = new ContextMenuStrip { ShowItemToolTips = true };
+                if (Product.IsVpn) {
+                    menu.Items.Add("Открыть", null, (s, e) => ShowMain());
+                    menu.Items.Add("Выход", null, (s, e) => RequestExit());
+                } else foreach (var entry in TrayEntries()) {
+                    if (entry.Id == "separator") { menu.Items.Add(new ToolStripSeparator()); continue; }
+                    string id = entry.Id;
+                    var item = new ToolStripMenuItem(entry.Text) { Enabled = entry.Enabled, ToolTipText = entry.Hint };
+                    item.Click += (s, e) => Safe(() => {
+                        if (id == "open") ShowMain();
+                        else if (id == "folders") ShowMain(true);
+                        else if (id == "happier") {
+                            string url = TrayMenuModel.HappierUrl(config.Data, AccountState());
+                            if (url.Length > 0) Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+                        } else if (id == "exit") RequestExit();
+                    });
+                    menu.Items.Add(item);
+                }
                 icon.ContextMenuStrip = menu;
+            }
+            if (!Product.IsVpn) {
+                var entries = TrayEntries();
+                for (int i = 0; i < entries.Length; i++) {
+                    if (entries[i].Id == "separator") continue;
+                    var item = icon.ContextMenuStrip.Items[i]; item.Text = entries[i].Text; item.Enabled = entries[i].Enabled; item.ToolTipText = entries[i].Hint;
+                }
             }
             RefreshMain();
         }
+        Dictionary<string, object> AccountState()
+        { try { return Json.Read(Path.Combine(home, "state", "happier-account.json")); } catch { return Json.Map(null); } }
+        TrayMenuEntry[] TrayEntries()
+        { return TrayMenuModel.Build(config.Data, AccountState(), StatusView.Read(home, "transport", maxAgeSec: 15), ServerHealthView.Read(home)); }
         bool Configured()
         { return Json.Bool(Json.Map(Json.Get(new Configuration(home).Data, "wizard")), "configured"); }
         void RegisterVpnRun()
@@ -287,7 +331,7 @@ namespace RemoteAgents.Launcher
                 foreach(var runtime in runtimes.Where(r=>!r.Definition.CommandManaged)){bool enabled=Wanted(runtime.Definition);if(runtime.Enabled!=enabled)runtime.SetEnabled(enabled);}
             }catch{log.Write("setup.config.refresh.failed");}
         }
-        void ShowMain()
+        void ShowMain(bool folders = false)
         {
             if (closing) return;
             // During first installation the existing paste/step window remains the only window.
@@ -316,7 +360,7 @@ namespace RemoteAgents.Launcher
                     Service("Список путей", () => ScriptCommand("Edit-Transport.ps1", new[] { "-List" }, true))
                 }, tag => ScriptCommand("Set-TransportPath.ps1", tag.Length == 0 ? new[] { "-Auto" } : new[] { "-Tag", tag }, false));
             }
-            window.Show(); RefreshMain(); ActivateWindow(mainWindow);
+            window.Show(); RefreshMain(); if (folders) mainWindow.OpenFolders(); ActivateWindow(mainWindow);
         }
         KeyValuePair<string, Action> Service(string title, Action action)
         { return new KeyValuePair<string, Action>(title, () => Safe(action)); }
@@ -349,6 +393,7 @@ namespace RemoteAgents.Launcher
             var transport = StatusView.Read(home, "transport", maxAgeSec: 15);
             mainWindow.UpdateMain(new[] {
                 StatusView.Line("Связь с сервером", transport, true),
+                ServerHealthView.Summary(ServerHealthView.Read(home)),
                 StatusView.Line("Управление компьютером (мост)", StatusView.Read(home, "control", maxAgeSec: 30)),
                 StatusView.Happier(home),
                 StatusView.Line("Диск", StatusView.Read(home, "disk", maxAgeSec: 30)),
@@ -357,7 +402,7 @@ namespace RemoteAgents.Launcher
             "Версия: " + Program.Version + "; бандл: " + engine.Current + "\r\nПапка: " + home +
             "\r\nПуть: " + StatusView.Title(transport) + "; " + StatusView.Speed(transport) + "; проверен: " + StatusView.CheckedAt(transport) +
             "\r\nСеть: " + StatusView.Network(transport) + "; лимитная: " + StatusView.Metered(transport) +
-            (Json.Str(transport, "configError").Length > 0 ? "\r\nНастройки: " + Json.Str(transport, "configError") : ""), transport);
+            (Json.Str(transport, "configError").Length > 0 ? "\r\nНастройки: " + Json.Str(transport, "configError") : ""), transport, ServerHealthView.Read(home));
         }
         string TransportScript(string name) { return Path.Combine(engine.Folder(engine.Current), "transport", name); }
         void EnableRuntime(ComponentRuntime runtime, bool enabled)

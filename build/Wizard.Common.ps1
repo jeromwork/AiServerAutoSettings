@@ -7,6 +7,7 @@
 . (Join-Path $PSScriptRoot 'Wizard.Session.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Bootstrap.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Refresh.ps1')
+. (Join-Path $PSScriptRoot 'Wizard.Health.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Lan.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Network.ps1')
 # All state is observed again. This model is also exercised with fake SSH on Linux.
@@ -377,6 +378,7 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
     switch($Action){
         'Bootstrap' {return Start-WizardBootstrap $Root $Bundle $Request}
         'ConfigSync' {return Sync-WizardConfigSettings $Root $Bundle $Request}
+        'ServerHealth' {return Get-WizardServerHealth $Root}
         'Server' {
             $profile=Connect-WizardServer $Root $Bundle $Request
             Write-WizardProgress 'Проверяю службы сервера…'

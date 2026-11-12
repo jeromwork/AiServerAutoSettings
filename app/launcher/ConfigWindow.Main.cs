@@ -16,11 +16,14 @@ namespace RemoteAgents.Launcher
         readonly FlowLayoutPanel mainStatus = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(12, 8, 12, 4) };
         readonly Label syncStatus = new Label { AutoSize = true, MaximumSize = new Size(620, 0) };
         readonly Label technicalStatus = new Label { AutoSize = true, Visible = false, MaximumSize = new Size(620, 0) };
+        readonly Label serverHealthDetails = new Label { AutoSize = true, MaximumSize = new Size(620, 0) };
+        readonly Label pathStates = new Label { AutoSize = true, MaximumSize = new Size(620, 0) };
         readonly ComboBox pathChoice = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 430 };
         readonly FlowLayoutPanel serviceActions = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(10) };
         readonly List<Label> statusLines = new List<Label>();
         TabPage detailsTab; Panel detailsHost; SetupWizard detailsWindow;
         string pathsSignature = "";
+        readonly PathSelection pathSelection = new PathSelection();
         internal static ConfigWindow Main(string home, string bundle)
         { return new ConfigWindow(home, bundle, null, true, false, true); }
         void BuildMain()
@@ -33,9 +36,15 @@ namespace RemoteAgents.Launcher
             tabs.TabPages.Add(detailsTab);
             var service = new TabPage("Сервис") { AutoScroll = true }; service.Controls.Add(serviceActions); tabs.TabPages.Add(service);
             serviceActions.Controls.Add(syncStatus);
+            serviceActions.Controls.Add(serverHealthDetails);
+            serviceActions.Controls.Add(pathStates);
             serviceActions.Controls.Add(new Label { Text = "Путь связи с сервером", AutoSize = true });
             serviceActions.Controls.Add(pathChoice);
-            for (int i = 0; i < 5; i++) { var line = new Label { AutoSize = true, MaximumSize = new Size(680, 0) }; statusLines.Add(line); mainStatus.Controls.Add(line); }
+            pathChoice.SelectionChangeCommitted += (s, e) => {
+                var option = pathChoice.SelectedItem as PathOption;
+                if (option != null) pathSelection.Choose(option.Tag);
+            };
+            for (int i = 0; i < 6; i++) { var line = new Label { AutoSize = true, MaximumSize = new Size(680, 0) }; statusLines.Add(line); mainStatus.Controls.Add(line); }
             // Keep progress and the editor journal in the config page, not over the other tabs.
             configPage.Controls.Add(rowsPanel); configPage.Controls.Add(journal);
             journal.Height = 72;
@@ -70,21 +79,23 @@ namespace RemoteAgents.Launcher
             expand.CheckedChanged += (s, e) => technicalStatus.Visible = expand.Checked;
             serviceActions.Controls.Add(expand); serviceActions.Controls.Add(technicalStatus);
         }
-        internal void UpdateMain(string[] lines, string sync, string technical, Dictionary<string, object> transport)
+        internal void UpdateMain(string[] lines, string sync, string technical, Dictionary<string, object> transport, Dictionary<string, object> health)
         {
             if (IsDisposed) return;
             for (int i = 0; i < Math.Min(lines.Length, statusLines.Count); i++) if (statusLines[i].Text != lines[i]) statusLines[i].Text = lines[i];
             string operation = MutationConflict == null ? "" : MutationConflict();
             foreach (TabPage page in tabs.TabPages) page.Enabled = WindowModel.CanOpen(page.Text, operation);
             syncStatus.Text = sync; technicalStatus.Text = technical;
-            string signature = Json.Encode(new { mode = Json.Str(transport, "mode"), active = Json.Str(transport, "active"), pinned = Json.Str(transport, "pinnedTag"), candidates = Json.Get(transport, "candidates") });
+            serverHealthDetails.Text = ServerHealthView.Detail(health);
+            var candidates = StatusView.Candidates(transport);
+            pathStates.Text = "Связь: пути к серверу\r\n" + (candidates.Length == 0 ? "Ожидается проверка путей" : string.Join("\r\n", candidates.Select(c => TrayMenuModel.CandidateLine(c, transport))));
+            string signature = Json.Encode(new { ok = Json.Bool(transport, "ok"), mode = Json.Str(transport, "mode"), active = Json.Str(transport, "active"), pinned = Json.Str(transport, "pinnedTag"), candidates = Json.Get(transport, "candidates") });
             if (signature == pathsSignature || pathChoice.DroppedDown) return;
             pathsSignature = signature;
-            string selected = (pathChoice.SelectedItem as PathOption ?? new PathOption()).Tag;
+            string selected = pathSelection.Update(transport);
             var paths = new List<PathOption> { new PathOption { Title = "Автовыбор", Tag = "" } };
             foreach (var c in StatusView.Candidates(transport).Where(c => Json.Bool(c, "enabled", true)))
-                paths.Add(new PathOption { Tag = Json.Str(c, "tag"), Title = Json.Text(c, "title", Json.Str(c, "tag")) + " — " + Json.Text(c, "state", "нет данных") });
-            if (selected == null) selected = Json.Str(transport, "mode") == "pinned" ? Json.Text(transport, "pinnedTag", Json.Str(transport, "active")) : "";
+                paths.Add(new PathOption { Tag = Json.Str(c, "tag"), Title = TrayMenuModel.CandidateLine(c, transport) });
             if (selected.Length > 0 && !paths.Any(p => p.Tag == selected)) paths.Add(new PathOption { Tag = selected, Title = selected + " — недоступен" });
             pathChoice.Items.Clear(); pathChoice.Items.AddRange(paths.Cast<object>().ToArray());
             pathChoice.SelectedIndex = Math.Max(0, paths.FindIndex(p => p.Tag == selected));
@@ -99,7 +110,7 @@ namespace RemoteAgents.Launcher
             ClientSize = new Size(Math.Min((int)(740 * scale), area.Width - 40), Math.Min((int)(700 * scale), area.Height - 80));
             serviceActions.SizeChanged += (s, e) => {
                 int width = Math.Max(150, serviceActions.ClientSize.Width - 32);
-                syncStatus.MaximumSize = technicalStatus.MaximumSize = new Size(width, 0);
+                syncStatus.MaximumSize = technicalStatus.MaximumSize = serverHealthDetails.MaximumSize = pathStates.MaximumSize = new Size(width, 0);
                 pathChoice.Width = Math.Min((int)(430 * scale), width);
             };
         }
@@ -118,6 +129,7 @@ namespace RemoteAgents.Launcher
             detailsWindow.PrepareEmbedded();
             detailsHost.Controls.Add(detailsWindow); detailsWindow.Show();
         }
+        internal void OpenFolders() { tabs.SelectedIndex = 0; }
         internal void OpenDetails(int section)
         { tabs.SelectedTab = detailsTab; EnsureDetails(); detailsWindow.OpenSection(section); }
         void ReportConflict(string message)

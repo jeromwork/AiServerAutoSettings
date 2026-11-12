@@ -12,32 +12,35 @@ function Get-WizardDeviceKey($Profile) {
 }
 # The server publishes ~worker/.config/remoteagents/config-sync.json on every `remoteagents config export` and
 # `remoteagents config sync` (docs/CONFIG-SERVER.md «Автообновление»). The client only reads it with its own key.
-function Get-WizardConfigSettings([string]$Root,[string]$Command='cat "$HOME/.config/remoteagents/config-sync.json"',[string]$InputText='') {
-    # One bounded attempt. A channel-first installation must never fall back to
-    # direct SSH on a mobile network that cuts SSH after the handshake.
-    $p=Read-TransportJson (Find-InstallProfile $Root);$c=Read-TransportJson (Join-Path $Root 'config.json')
+# Shared bounded read-only request for config sync and server health, using the working channel.
+function Invoke-WizardReadOnlySsh([string]$Root,[string]$Command,[string]$Context='Получение настроек') {
+    # One attempt: channel-first installations must never fall back to direct SSH.
+    $profile=Find-InstallProfile $Root
+    if(-not $profile){throw 'Настройте SSH на шаге «Сервер»'}
+    $p=Read-TransportJson $profile;$c=Read-TransportJson (Join-Path $Root 'config.json')
     $port=[int](Get-TransportValue $c.transport 'sshPort' 2222);$address='127.0.0.1';$path='канал'
     if($c.transport.channelFirst){
         $address=[string](Get-TransportValue $c.transport 'channelSshAddress' '127.0.0.2')
         $port=Get-TransportServerPort $p
     }
-    # Without a channel, use the already pinned server/route directly, once.
     elseif(-not $c.transport.channelPath){$address=[string]$p.serverAddress;$port=Get-TransportServerPort $p;$path='сохранённый SSH-маршрут'}
-    if($InputText){
-        # Put the small, credential-free helper in the command: no stdin upload can
-        # consume a second timeout while SSH is stuck before authentication.
-        if($Command -cne 'python3 - sync'){throw 'Неизвестная команда получения настроек'}
-        $encoded=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Convert-TransportLF $InputText)))
-        $Command='python3 -c ''import base64;exec(base64.b64decode("'+$encoded+'"))'' sync';$InputText=''
-    }
-    $base=@(Get-TransportSshArguments $p $port -UseRoute:($path -ne 'канал')|Where-Object {-not ($InputText -and $_ -ceq '-n')})
+    $base=@(Get-TransportSshArguments $p $port -UseRoute:($path -ne 'канал'))
     try{
-        return Invoke-DiskProcess $p.sshExecutable ($base+@($address,$Command)) (Convert-TransportLF $InputText) -TimeoutSeconds 8
+        return Invoke-DiskProcess $p.sshExecutable ($base+@($address,(Convert-TransportLF $Command))) '' -TimeoutSeconds 8
     }catch{
         $reason=Protect-TransportDiagnostic ([string]$_.Exception.Message) $c
-        if($reason -like '*код выхода 1)*'){$reason='Сервер не выдал снимок или каталог: проверьте наличие config-sync.json, формат и права'}
-        throw ('Получение настроек через '+$path+': '+$reason)
+        if($Context -eq 'Получение настроек' -and $reason -like '*код выхода 1)*'){$reason='Сервер не выдал снимок или каталог: проверьте наличие config-sync.json, формат и права'}
+        throw ($Context+' через '+$path+': '+$reason)
     }
+}
+function Get-WizardConfigSettings([string]$Root,[string]$Command='cat "$HOME/.config/remoteagents/config-sync.json"',[string]$InputText='') {
+    if($InputText){
+        # A command payload avoids a second stdin timeout before authentication.
+        if($Command -cne 'python3 - sync'){throw 'Неизвестная команда получения настроек'}
+        $encoded=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Convert-TransportLF $InputText)))
+        $Command='python3 -c ''import base64;exec(base64.b64decode("'+$encoded+'"))'' sync'
+    }
+    return Invoke-WizardReadOnlySsh $Root $Command
 }
 
 function Confirm-WizardConfigSettings([string]$Root) {
