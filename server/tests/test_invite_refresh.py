@@ -75,6 +75,10 @@ class RefreshTests(unittest.TestCase):
         result = command([Path.home()/'.dotnet/dotnet', ROOT/'app/launcher/tests/bin/Release/net10.0/PortableTests.dll', '--overlay', pe])
         self.assertEqual(result.returncode, 0, result.stderr.decode())
 
+    def test_refresh_replaces_previous_transport_route(self):
+        data, _ = self.package()
+        self.client(data, 'old-route')
+
     def test_sync_and_untrusted_host_rejection(self):
         (self.b.dir/'new-vps').mkdir()
         new_vps = Bench(self.b.dir/'new-vps')

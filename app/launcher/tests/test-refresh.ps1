@@ -9,6 +9,9 @@ $profileData=Read-TransportJson $Profile;$data=Read-TransportJson $Payload
 $channel=Join-Path $root 'channel.json';Write-TransportJson $channel $data.bootstrap.channel
 Write-TransportJson (Join-Path $root 'config.json') @{schema=1;version=1;transport=@{profilePath=$Profile;channelPath=$channel;singBoxPath='fixture';entries=@();hops=@();relays=@(@{name='old';host='127.0.0.2';port=1234});cdn=@()};wizard=@{configured=$true};bridge=@{enabled=$true;allowShell=$true};happier=@{label='kept'};disk=@{folders=@('Project/docs')};vpn=@{enabled=$true;checkUrl='https://old.invalid/';dnsServer='192.0.2.1';excludeCidrs=@('192.0.2.0/24')}}
 Write-TransportJson (Join-Path $root 'state/transport-pin.json') @{mode='pinned';tag='vless-relay-old'}
+if($Mode -eq 'old-route'){
+    Update-LauncherConfig $root {param($c) $c.transport|Add-Member serverRoute ([pscustomobject]@{used='proxy';proxy=[pscustomobject]@{type='http';host='127.0.0.1';port=1};proxyExecutable=(Join-Path $root 'obsolete.exe')})}
+}
 $script:checks=0;$script:preflights=0;$script:watchdog=0;$script:proofFails=$false
 function Assert($OK,$Why){if(-not $OK){throw $Why};$script:checks++}
 function Register-WizardRollback($Root,$Bundle,$Kind,$Session,$Task){$script:watchdog++}
@@ -39,6 +42,7 @@ if($Mode -in @('foreign','expired','untrusted')){
     }else{$result=Update-WizardInviteSettings $root $repo $request}
     Assert ($result.ok -and $result.changed) 'settings applied'
     $c=Read-TransportJson (Join-Path $root 'config.json')
+    if($Mode -eq 'old-route'){Assert (-not $c.transport.serverRoute) 'new direct route removes obsolete transport overlay'}
     Assert ($c.transport.relays[0].name -eq 'new' -and @($c.transport.relays).Count -eq 1) 'new route replaces removed route'
     Assert ($c.disk.folders[0] -eq 'Project/docs' -and $c.happier.label -eq 'kept' -and $c.bridge.enabled) 'Disk Happier bridge preserved'
     Assert ($c.vpn.enabled -and $c.vpn.dnsServer -eq '192.0.2.53' -and $c.vpn.excludeCidrs[0] -eq '192.0.2.0/24') 'VPN updates preserve local choice and exclusions'

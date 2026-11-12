@@ -122,6 +122,10 @@ function Update-WizardInviteSettings([string]$Root,[string]$Bundle,$Request) {
         [void](Connect-WizardInvite $stage $r)
     }
     $candidate=Read-TransportJson (Join-Path $stage 'config.json');$nextProfile=Read-TransportJson $candidate.transport.profilePath
+    # Replace the previous transport overlay with the route proved by this snapshot.
+    $overlay=Get-TransportRouteOverlay $candidate.wizard.serverRoute $Root
+    if($overlay){$candidate.transport|Add-Member -Force serverRoute $overlay}else{$candidate.transport.PSObject.Properties.Remove('serverRoute')}
+    Write-TransportJson (Join-Path $stage 'config.json') $candidate -Private
     # Existing independent rollback/preflight protects the live transport.
     $networkReceipt=Join-Path $Root 'state/wizard-network.json'
     if(Test-Path $networkReceipt){throw 'Есть незавершённая настройка связи; дождитесь проверки или отката'}
