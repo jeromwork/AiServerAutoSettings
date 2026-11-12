@@ -339,6 +339,26 @@ class ConfigExportTests(unittest.TestCase):
         self.assertEqual(self.e.auth.read_text(), before)
         print('PASS: маршруты direct/proxy/hop и VPN первым → разделы и имена секретов соглашения; плохие права → отказ без ключа')
 
+    def test_vpn_channel_export(self):
+        # Без vpnBootstrap «канал первым» выдать нельзя — отказ до выдачи ключа.
+        before = self.e.auth.read_text() if self.e.auth.exists() else None
+        p = self.e.cli('export', '--name', 'Без канала', '--vpn', 'channel')
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('--vpn on/channel', p.stderr.decode())
+        self.assertEqual(self.e.auth.read_text() if self.e.auth.exists() else None, before)
+        self.e.vpn()
+        config, _ = self.e.export('Канал первым', '--vpn', 'channel')
+        vpn = config['vpn']
+        self.assertEqual((vpn['enabled'], vpn['checkUrl'], vpn['dnsServer']), (False, 'https://check.example.invalid/', '192.0.2.53'))
+        self.assertEqual(set(vpn['bootstrap']), {'catalog', 'channel', 'entries', 'hops'})
+        self.assertEqual(vpn['bootstrap']['channel'], {'secret': 'vpn-channel'})
+        self.assertEqual(vpn['bootstrap']['entries'], {'Entry1': {'secret': 'vpn-entry-entry1'}})
+        self.assertEqual(vpn['bootstrap']['hops'], {'vhop': {'host': '127.0.0.1', 'port': 2222, 'user': 'hopuser', 'key': {'secret': 'vpn-hop-vhop'}}})
+        self.assertEqual(vpn['bootstrap']['catalog']['relays'][0]['name'], 'fixture')
+        self.assertEqual(set(config['secrets']), {'server-key', 'vpn-channel', 'vpn-entry-entry1', 'vpn-hop-vhop'})
+        self.assertEqual(json.loads(config['secrets']['vpn-channel'])['outbounds'][0]['uuid'], 'CHANNEL-SECRET-UUID')
+        print('PASS: --vpn channel → vpn.enabled=false, каталог, канал, узлы и переходы с секретами как при --vpn on; без vpnBootstrap — отказ без ключа')
+
     def test_refusals_bad_name_untrusted_settings_symlink(self):
         for name in ('', 'a\nb', 'x' * 81, 'tab\there'):
             with self.subTest(name=name):
