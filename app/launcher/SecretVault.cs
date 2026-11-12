@@ -124,6 +124,137 @@ namespace RemoteAgents.Launcher
         internal static string Get(string home, string name)
         { ConfigBundle.ValidName(name); using (var lease = new Lease(home)) { string value; return Load(home).TryGetValue(name, out value) ? value : null; } }
 
+        static string Resolve(Dictionary<string, string> values, object reference)
+        {
+            string name = Json.Str(Json.Map(reference), "secret"), value;
+            return name.Length > 0 && values.TryGetValue(name, out value) && value.Length > 0 ? value : null;
+        }
+        static string SecretJson(string text)
+        {
+            try {
+                if (text.Length > ConfigBundle.MaxLength || !(Json.Parse(text) is Dictionary<string, object>)) throw new FormatException();
+                return Json.Encode(Json.Parse(text)) + "\n";
+            } catch { throw ConfigBundle.Bad("Секрет канала или узла должен содержать JSON-объект"); }
+        }
+        static string FileId(string name)
+        {
+            // No user-controlled name becomes a Windows filename (CON, trailing dots, etc.).
+            using (var sha = SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(Files.Utf8.GetBytes(name))).Replace("-", "").ToLowerInvariant().Substring(0, 24);
+        }
+        internal static string MaterializedPath(string home) { return Path.Combine(Path.GetFullPath(home), "secrets", "materialized.json"); }
+        public static void Materialize(string home)
+        {
+            using (var lease = new Lease(home)) {
+                var settings = ConfigBundle.ReadSettings(home);
+                var profile = ConfigBundle.CurrentProfile(home, settings); var values = Load(home);
+                foreach (var reference in ConfigBundle.References(profile)) if (Resolve(values, reference) == null) throw ConfigBundle.Bad("Не задан секрет: " + Json.Str(reference, "secret"));
+                var files = new Dictionary<string, string>(Windows ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+                var manifest = ConfigBundle.D("schema", 1);
+                string secretDir = Path.Combine(Path.GetFullPath(home), "secrets");
+                Action<string, string> add = (path, content) => {
+                    SafePath(home, path);
+                    string previous; if (files.TryGetValue(path, out previous) && previous != content) throw ConfigBundle.Bad("Два секрета направлены в один файл");
+                    files[path] = content;
+                };
+                var server = Json.Map(Json.Get(profile, "server"));
+                string key = Resolve(values, Json.Get(server, "key"));
+                if (key != null) {
+                    string path = Path.Combine(secretDir, "server-key");
+                    string sshPath = Json.Str(Json.Map(Json.Get(settings, "transport")), "profilePath");
+                    if (sshPath.Length > 0 && File.Exists(sshPath)) {
+                        SafePath(home, sshPath); var ssh = Json.Read(sshPath);
+                        if (Json.Str(server, "address") == Json.Str(ssh, "serverAddress") && Json.Str(server, "login") == Json.Str(ssh, "login") && Json.Int(server, "port", 22) == ConfigBundle.RuntimePort(ssh)) {
+                            string configured = Json.Str(ssh, "keyPath"); if (configured.Length > 0) path = Path.GetFullPath(configured);
+                        }
+                    }
+                    add(path, Files.LF(key)); manifest["serverKeyFile"] = path;
+                }
+                string password = Resolve(values, Json.Get(server, "rootPassword"));
+                if (password != null) { string path = Path.Combine(secretDir, "server-root-password"); add(path, password); manifest["serverPasswordFile"] = path; }
+                string happier = Resolve(values, Json.Get(Json.Map(Json.Get(profile, "happier")), "key"));
+                // Keep the active account key intact until Wizard.Account has tested the pending key.
+                if (happier != null) { string path = Path.Combine(secretDir, "happier-pending.key"); add(path, happier); manifest["happierKeyFile"] = path; }
+                var proxy = Json.Map(Json.Get(profile, "proxyOut"));
+                if (profile.ContainsKey("proxyOut")) {
+                    string value = Resolve(values, Json.Get(proxy, "password"));
+                    string path = Path.Combine(secretDir, "proxy-out.json");
+                    if (!proxy.ContainsKey("password") || value != null) { add(path, Json.Encode(ConfigBundle.D("username", Json.Str(proxy, "login"), "password", value ?? "")) + "\n"); manifest["proxyOutFile"] = path; }
+                }
+                var routes = new List<object>(); int routeIndex = 0;
+                foreach (var route in Json.Array(Json.Get(server, "routes")).Select(Json.Map)) {
+                    string id = "route-" + routeIndex++; var material = ConfigBundle.D("kind", Json.Str(route,"kind"));
+                    var hop = Json.Map(Json.Get(route, "hop"));
+                    if (hop.Count > 0) {
+                        var row = HopFiles(home, id, hop, values, add);
+                        material["hop"] = row;
+                    }
+                    var px = Json.Map(Json.Get(route, "proxy"));
+                    if (px.Count > 0) {
+                        var row = ConfigBundle.D("type", Json.Str(px,"type"), "host", Json.Str(px,"server"), "port", Json.Int(px,"port",1080));
+                        string value = Resolve(values, Json.Get(px,"password"));
+                        if (value != null || px.ContainsKey("login")) {
+                            string path = Path.Combine(secretDir, id + "-proxy.json");
+                            add(path, Json.Encode(ConfigBundle.D("username",Json.Str(px,"login"),"password",value ?? "")) + "\n"); row["credentialsFile"] = path;
+                        }
+                        material["proxy"] = row;
+                    }
+                    routes.Add(material);
+                }
+                if (routes.Count > 0) manifest["routes"] = routes;
+                var bootstrap = Json.Map(Json.Get(Json.Map(Json.Get(profile, "vpn")), "bootstrap"));
+                string channel = Resolve(values, Json.Get(bootstrap, "channel"));
+                if (channel != null) { string path = Path.Combine(secretDir, "channel.json"); add(path, SecretJson(channel)); manifest["channelPath"] = path; }
+                var entries = new Dictionary<string, object>();
+                foreach (var entry in Json.Map(Json.Get(bootstrap, "entries"))) {
+                    // The existing transport reader uses this exact basename, so reject names
+                    // it cannot safely read on Windows instead of silently renaming entries.
+                    if (!System.Text.RegularExpressions.Regex.IsMatch(entry.Key, "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$")) throw ConfigBundle.Bad("Имя VPN-узла: латинские буквы, цифры, _ и -, до 48 знаков");
+                    if (System.Text.RegularExpressions.Regex.IsMatch(entry.Key, "^(?i:con|prn|aux|nul|com[0-9]|lpt[0-9])$")) throw ConfigBundle.Bad("Зарезервированное имя VPN-узла");
+                    string value = Resolve(values, entry.Value); if (value == null) continue;
+                    string path = Path.Combine(secretDir, "entries", entry.Key + ".json"); add(path, SecretJson(value)); entries[entry.Key] = path;
+                }
+                if (entries.Count > 0) manifest["entries"] = entries;
+                var hops = new Dictionary<string, object>();
+                foreach (var hop in Json.Map(Json.Get(bootstrap, "hops"))) hops[hop.Key] = HopFiles(home, "vpn-hop-" + FileId(hop.Key), Json.Map(hop.Value), values, add);
+                if (hops.Count > 0) manifest["hops"] = hops;
+                var lans = new List<object>();
+                foreach (var lan in Json.Array(Json.Get(profile, "lan")).Select(Json.Map)) {
+                    string name = Json.Str(lan,"name"), id = FileId(name);
+                    var row = ConfigBundle.D("name", name);
+                    string ovpn = Resolve(values, Json.Get(lan,"ovpn"));
+                    if (ovpn != null) { string path = Path.Combine(secretDir, "lan", id + ".ovpn"); add(path, Files.LF(ovpn)); row["file"] = path; }
+                    string auth = Resolve(values, Json.Get(lan,"password"));
+                    if (auth != null) { string path = Path.Combine(secretDir,"lan",id + "-auth.json"); add(path, Json.Encode(ConfigBundle.D("username",Json.Str(lan,"login"),"password",auth)) + "\n"); row["authFile"] = path; }
+                    lans.Add(row);
+                }
+                if (lans.Count > 0) manifest["lan"] = lans;
+                // Validate the entire plan before writing the first derived file. Manifest
+                // is private too, but contains only paths and public settings, never values.
+                foreach (string path in files.Keys) SafePath(home,path);
+                foreach (var file in files) WritePrivate(home, file.Key, file.Value);
+                manifest["files"] = files.Keys.OrderBy(p => p, StringComparer.Ordinal).ToArray();
+                WritePrivate(home, MaterializedPath(home), Json.Encode(manifest) + "\n");
+            }
+        }
+        static Dictionary<string, object> HopFiles(string home, string id, Dictionary<string, object> hop, Dictionary<string, string> values, Action<string, string> add)
+        {
+            string directory = Path.Combine(Path.GetFullPath(home), "secrets");
+            string key = Resolve(values, Json.Get(hop,"key")), password = Resolve(values,Json.Get(hop,"password"));
+            string host = Json.Str(hop,"host"), user = Json.Str(hop,"user"); int port = Json.Int(hop,"port",22);
+            var row = ConfigBundle.D("name", id, "ssh", user + "@" + host + (port == 22 ? "" : ":" + port));
+            if (key != null) { string path = Path.Combine(directory,id); add(path,Files.LF(key)); row["keyFile"] = path; }
+            string hostKey = Json.Str(hop,"hostKey");
+            if (hostKey.Length > 0) {
+                string known = Path.Combine(directory,id + ".known_hosts");
+                add(known, (port == 22 ? host : "[" + host + "]:" + port) + " " + hostKey + "\n"); row["knownHostsPath"] = known;
+            }
+            if (password != null) {
+                string path = Path.Combine(directory,id + "-auth.json");
+                add(path,Json.Encode(ConfigBundle.D("host",host,"port",port,"user",user,"password",password)) + "\n"); row["passwordFile"] = path;
+            }
+            return row;
+        }
+
         // DPAPI is in Windows itself; calling it directly avoids adding a runtime/package
         // dependency to the single net48 EXE. Flags=1 forbids UI; no machine scope flag.
         [StructLayout(LayoutKind.Sequential)] struct Blob { internal int Length; internal IntPtr Data; }

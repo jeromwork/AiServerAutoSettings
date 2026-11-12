@@ -49,8 +49,8 @@ namespace RemoteAgents.Launcher
             if (required.Length > 0) d["required"] = required;
             return d;
         }
-        static Dictionary<string, object> Named(object item)
-        { return D("type", "object", "propertyNames", S(64, 1, NamePattern), "additionalProperties", item, "maxProperties", 256); }
+        static Dictionary<string, object> Named(object item, string pattern = NamePattern)
+        { return D("type", "object", "propertyNames", S(64, 1, pattern), "additionalProperties", item, "maxProperties", 256); }
         static Dictionary<string, object> Ref()
         { return O(D("secret", S(64, 1, NamePattern)), "secret"); }
         static Dictionary<string, object> Host() { return S(253, 1, "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$"); }
@@ -68,7 +68,7 @@ namespace RemoteAgents.Launcher
                 D("if", D("properties", D("kind", D("const", "proxy"))), "then", D("required", new[]{"proxy"})),
                 D("if", D("properties", D("kind", D("const", "hop"))), "then", D("required", new[]{"hop"}))
             };
-            var bootstrap = O(D("channel", Ref(), "entries", Named(Ref()), "hops", Named(Hop())));
+            var bootstrap = O(D("channel", Ref(), "entries", Named(Ref(), "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$"), "hops", Named(Hop(), "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$")));
             var component = O(D("enabled", B()));
             var props = D(
                 "kind", D("const", "remoteagents-config"), "schema", D("const", 1),
@@ -78,7 +78,7 @@ namespace RemoteAgents.Launcher
                 "connection", O(D("enabled", B())),
                 "bridge", O(D("enabled", B(), "allowShell", B())),
                 "happier", O(D("mode", E("same", "new"), "label", S(80, 1), "serverUrl", Url(), "webappUrl", Url(), "key", Ref())),
-                "disk", O(D("base", S(1024, 1, "^[^\\r\\n\\x00]+$"), "folders", A(S(255, 1, "^[^/\\\\<>:\"|?*\\x00-\\x1f]+$")))),
+                "disk", O(D("base", S(1024, 1, "^[^\\r\\n\\x00]+$"), "folders", A(S(128, 1, "^[^/\\\\<>:\"|?*\\x00-\\x1f]+$")))),
                 "vpn", O(D("enabled", B(), "checkUrl", Url(), "dnsServer", S(253, 1), "bootstrap", bootstrap)),
                 "proxyOut", Proxy(),
                 "lan", A(O(D("name", S(64, 1, "^[^/\\\\\\r\\n\\x00]+$"), "kind", E("openvpn"), "ovpn", Ref(),
@@ -189,7 +189,7 @@ namespace RemoteAgents.Launcher
                 if ((kind != "proxy" && row.ContainsKey("proxy")) || (kind != "hop" && row.ContainsKey("hop"))) throw Bad("Поля маршрута не соответствуют kind");
             }
             foreach (string f in Json.Strings(Json.Get(Json.Map(Json.Get(profile, "disk")), "folders"))) {
-                if (f == "." || f == ".." || f.EndsWith(".") || f.EndsWith(" ") || Regex.IsMatch(f, "^(?i:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\\.|$)")) throw Bad("Недопустимое имя папки Disk");
+                if (!Regex.IsMatch(f, "^[\\p{L}\\p{N}_][\\p{L}\\p{N}_. -]{0,127}$") || f.Contains("..") || f.EndsWith(".") || f.EndsWith(" ") || Regex.IsMatch(f, "^(?i:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\\.|$)")) throw Bad("Недопустимое имя папки Disk");
             }
         }
         internal static IEnumerable<Dictionary<string, object>> References(object value)
@@ -327,6 +327,7 @@ namespace RemoteAgents.Launcher
                 var values = new Dictionary<string, string>(oldValues, StringComparer.Ordinal);
                 foreach (var pair in p.Secrets) if (!protectedNames.Contains(pair.Key) && (pair.Value.Length > 0 || !values.ContainsKey(pair.Key))) values[pair.Key] = pair.Value;
                 // Empty/AI placeholders preserve values already present in the vault.
+                var checkedRoot = new Dictionary<string, object>(profile); checkedRoot["secrets"] = values; Parse(Json.Encode(checkedRoot));
                 settings["profile"] = profile;
                 if (!settings.ContainsKey("schema")) settings["schema"] = 1;
                 if (!settings.ContainsKey("version")) settings["version"] = 1;

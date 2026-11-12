@@ -14,6 +14,8 @@
     <Compile Include="ConfigBundleTests.cs" />
     <Compile Include="../ConfigBundle.cs" Link="ConfigBundle.cs" />
     <Compile Include="../SecretVault.cs" Link="SecretVault.cs" />
+    <Compile Include="../SecretPrompt.cs" Link="SecretPrompt.cs" />
+    <Compile Include="../SecretCommand.cs" Link="SecretCommand.cs" />
     <Compile Include="InvitationTests.cs" />
     <Compile Include="OverlayTests.cs" />
     <Compile Include="../InvitationOverlay.cs" Link="InvitationOverlay.cs" />

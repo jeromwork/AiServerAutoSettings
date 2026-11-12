@@ -97,6 +97,75 @@ namespace RemoteAgents.Launcher
                 Reject(() => ConfigBundle.Store(home,locked,null), "locked Store");
                 Check(oldConfig == File.ReadAllText(Path.Combine(home,"config.json")) && oldVault == File.ReadAllText(Path.Combine(home,"secrets","vault.json")), "locked Store writes nothing");
                 SecretVault.Set(home,"empty-secret", ""); Check(!SecretVault.Has(home,"empty-secret"), "empty is missing");
+                var material = Example();
+                material["server"] = ConfigBundle.D("address","other.example.invalid","port",2222,"login","worker","key",ConfigBundle.D("secret","server-key"),"rootPassword",ConfigBundle.D("secret","server-root-password"),"routes",new[]{ ConfigBundle.D("kind","hop","hop",ConfigBundle.D("host","hop.example.invalid","user","jump","port",2207,"hostKey","ssh-ed25519 FAKE","key",ConfigBundle.D("secret","hop-key"),"password",ConfigBundle.D("secret","hop-password"))) });
+                material["happier"] = ConfigBundle.D("key",ConfigBundle.D("secret","happier-key"));
+                material["proxyOut"] = ConfigBundle.D("type","socks","server","proxy.example.invalid","port",1080,"login","test-user","password",ConfigBundle.D("secret","proxy-out-password"));
+                material["vpn"] = ConfigBundle.D("bootstrap",ConfigBundle.D("channel",ConfigBundle.D("secret","vpn-channel"),"entries",ConfigBundle.D("edge",ConfigBundle.D("secret","vpn-entry-edge")),"hops",ConfigBundle.D("jumper",ConfigBundle.D("host","hop.example.invalid","user","jump","key",ConfigBundle.D("secret","hop-key")))));
+                material["lan"] = new[]{ConfigBundle.D("name","Офис","kind","openvpn","ovpn",ConfigBundle.D("secret","lan-Офис-ovpn"),"login","office-user","password",ConfigBundle.D("secret","lan-Офис-password"))};
+                material["secrets"] = ConfigBundle.D("server-key","KEY\r\nLINE\r\n","server-root-password","ROOT-VALUE","happier-key","HAPPIER-VALUE","hop-key","HOP-KEY\r\n","hop-password","HOP-PASSWORD","proxy-out-password","PROXY-PASSWORD","vpn-channel","{\r\n\"inbounds\":[],\"outbounds\":[]\r\n}","vpn-entry-edge","{\"server\":\"entry.example.invalid\",\"secrets\":{\"fake\":\"ENTRY-SECRET\"}}","lan-Офис-ovpn","client\r\nremote vpn.example.invalid\r\n","lan-Офис-password","LAN-PASSWORD");
+                ConfigBundle.Store(home,ConfigBundle.Parse(Json.Encode(material)),new[]{"server","happier","disk"});
+                SecretVault.Materialize(home);
+                var manifest = Json.Read(SecretVault.MaterializedPath(home));
+                Check(File.ReadAllText(Json.Str(manifest,"serverKeyFile")) == "KEY\nLINE\n", "key materialization normalizes CRLF");
+                Check(File.ReadAllText(Path.Combine(home,"secrets","happier-pending.key")) == "HAPPIER-VALUE" && !File.Exists(Path.Combine(home,"secrets","happier-account.key")), "account pending preserves rollback");
+                Check(Json.Str(Json.Read(Path.Combine(home,"secrets","proxy-out.json")),"username") == "test-user" && Json.Str(Json.Read(Path.Combine(home,"secrets","proxy-out.json")),"password") == "PROXY-PASSWORD", "proxy legacy format");
+                Check(File.Exists(Path.Combine(home,"secrets","channel.json")) && File.Exists(Path.Combine(home,"secrets","entries","edge.json")), "VPN paths match transport");
+                var hopFiles = Json.Map(Json.Map(Json.Array(manifest["routes"])[0])["hop"]);
+                Check(File.ReadAllText(Json.Str(hopFiles,"keyFile")) == "HOP-KEY\n" && File.ReadAllText(Json.Str(hopFiles,"knownHostsPath")).StartsWith("[hop.example.invalid]:2207 "), "hop private key and host pin");
+                var lanFiles = Json.Map(Json.Array(manifest["lan"])[0]);
+                Check(File.ReadAllText(Json.Str(lanFiles,"file")).Contains("client\nremote") && Json.Str(Json.Read(Json.Str(lanFiles,"authFile")),"password") == "LAN-PASSWORD", "LAN inline profile and auth");
+                var allMaterialSecrets = Json.Map(material["secrets"]).Values.Cast<string>().Where(x => x.Length > 0).ToArray();
+                string aiMaterial = ConfigBundle.ExportForAi(home), manifestText = File.ReadAllText(SecretVault.MaterializedPath(home));
+                foreach(string secret in allMaterialSecrets) Check(!aiMaterial.Contains(secret) && !manifestText.Contains(secret), "no values in AI/manifest");
+                Check(!aiMaterial.Contains("ENTRY-SECRET"), "no nested VPN credential");
+                if (!SecretVault.Windows) foreach(string file in Json.Strings(manifest["files"])) Check((File.GetUnixFileMode(file) & (UnixFileMode.GroupRead | UnixFileMode.OtherRead)) == 0,"private materialized file");
+                string priorChannel = File.ReadAllText(Path.Combine(home,"secrets","channel.json"));
+                SecretVault.Set(home,"vpn-channel","invalid JSON");
+                Reject(() => SecretVault.Materialize(home), "invalid snapshot preflight");
+                Check(File.ReadAllText(Path.Combine(home,"secrets","channel.json")) == priorChannel, "failed preflight writes nothing");
+                SecretVault.Set(home,"vpn-channel",Json.Str(Json.Map(material["secrets"]),"vpn-channel"));
+                SecretVault.Set(home,"hop-password", ""); Reject(() => SecretVault.Materialize(home), "missing secret cannot reuse stale files");
+                SecretVault.Set(home,"hop-password","HOP-PASSWORD");
+                string runtimePath = Path.Combine(home,"ssh-profiles","current","ssh-transport.json"), keyTarget = Path.Combine(home,"ssh-profiles","current","id_ed25519");
+                Json.Write(runtimePath,ConfigBundle.D("serverAddress","other.example.invalid","login","worker","keyPath",keyTarget,"arguments",new[]{"-p","2222"}));
+                var runtimeSettings = Json.Read(Path.Combine(home,"config.json")); runtimeSettings["transport"] = ConfigBundle.D("profilePath",runtimePath); Json.Write(Path.Combine(home,"config.json"),runtimeSettings);
+                SecretVault.Materialize(home);
+                Check(File.ReadAllText(keyTarget) == "KEY\nLINE\n" && Json.Str(Json.Read(SecretVault.MaterializedPath(home)),"serverKeyFile") == keyTarget,"existing profile keyPath honored");
+                runtimeSettings["transport"] = ConfigBundle.D(); Json.Write(Path.Combine(home,"config.json"),runtimeSettings);
+                int exitCode;
+                string setOutput = Command(() => SecretCommand.Execute(home,new[]{"secret","set","command-secret","--why","Объяснение"},(name,why) => "SET-SECRET-VALUE"),out exitCode);
+                Check(exitCode == 0 && setOutput.Trim() == "сохранено" && SecretVault.Get(home,"command-secret") == "SET-SECRET-VALUE", "set prints status only");
+                string cancelOutput = Command(() => SecretCommand.Execute(home,new[]{"set","command-secret","--why","Объяснение"},(name,why) => null),out exitCode);
+                Check(exitCode == 1 && cancelOutput.Trim() == "отменено" && SecretVault.Get(home,"command-secret") == "SET-SECRET-VALUE", "set canceled unchanged");
+                const string variable = "RA_CONFIG_A_TEST_IMPORT";
+                string priorEnv = Environment.GetEnvironmentVariable(variable);
+                try {
+                    Environment.SetEnvironmentVariable(variable,"ENV-IMPORT-VALUE");
+                    string importOutput = Command(() => SecretCommand.Run(home,new[]{"secret","import","env-secret","--from","env:"+variable}),out exitCode);
+                    Check(exitCode == 0 && importOutput.Trim() == "сохранено" && SecretVault.Get(home,"env-secret") == "ENV-IMPORT-VALUE","env import status only");
+                    Environment.SetEnvironmentVariable(variable,null);
+                    string failure = Command(() => SecretCommand.Run(home,new[]{"import","env-secret","--from","env:"+variable}),out exitCode);
+                    Check(exitCode == 1 && !failure.Contains("ENV-IMPORT-VALUE") && SecretVault.Get(home,"env-secret") == "ENV-IMPORT-VALUE","missing source preserves value");
+                } finally { Environment.SetEnvironmentVariable(variable,priorEnv); }
+                string status = Command(() => SecretCommand.Run(home,new[]{"status"}),out exitCode);
+                Check(exitCode == 0 && status.Contains("server-key: есть") && !status.Contains("SET-SECRET-VALUE") && !status.Contains("ENV-IMPORT-VALUE") && !status.Contains("HOP-PASSWORD"),"status without values");
+                var bwItem = ConfigBundle.D("login",ConfigBundle.D("password","BW-PASSWORD","username","BW-USER"),"fields",new[]{ConfigBundle.D("name","ssh-key","value","BW-KEY")});
+                Check(SecretCommand.BitwardenField(bwItem,"password") == "BW-PASSWORD" && SecretCommand.BitwardenField(bwItem,"ssh-key") == "BW-KEY","Bitwarden standard and custom fields");
+                if (!SecretVault.Windows) {
+                    string bin = Path.Combine(home,"test-bin"); Directory.CreateDirectory(bin); string bw = Path.Combine(bin,"bw");
+                    File.WriteAllText(bw,"#!/bin/sh\n[ \"$1\" = get ] && [ \"$2\" = item ] || exit 2\nprintf '%s' '{\"login\":{\"password\":\"BW-CLI-SECRET\"}}'\n");
+                    File.SetUnixFileMode(bw,UnixFileMode.UserRead|UnixFileMode.UserWrite|UnixFileMode.UserExecute);
+                    string priorPath = Environment.GetEnvironmentVariable("PATH");
+                    try {
+                        Environment.SetEnvironmentVariable("PATH",bin+Path.PathSeparator+priorPath);
+                        string bwOutput = Command(() => SecretCommand.Run(home,new[]{"import","bw-secret","--from","bitwarden:test-item/password"}),out exitCode);
+                        Check(exitCode == 0 && bwOutput.Trim() == "сохранено" && SecretVault.Get(home,"bw-secret") == "BW-CLI-SECRET","Bitwarden CLI capture without leak");
+                        File.WriteAllText(bw,"#!/bin/sh\nprintf '%s' 'SENSITIVE-CLI-ERROR' >&2\nexit 1\n");
+                        string failure = Command(() => SecretCommand.Run(home,new[]{"import","bw-secret","--from","bitwarden:test-item/password"}),out exitCode);
+                        Check(exitCode == 1 && !failure.Contains("SENSITIVE-CLI-ERROR") && SecretVault.Get(home,"bw-secret") == "BW-CLI-SECRET","Bitwarden error never exposed");
+                    } finally { Environment.SetEnvironmentVariable("PATH",priorPath); }
+                }
                 if (!SecretVault.Windows) {
                     string outside = Path.Combine(Path.GetTempPath(),"ra-vault-outside-" + Guid.NewGuid().ToString("N"));
                     string linkedHome = Path.Combine(home,"linked"); Directory.CreateDirectory(linkedHome);
@@ -106,6 +175,12 @@ namespace RemoteAgents.Launcher
                 }
             } finally { Directory.Delete(home,true); }
             Console.WriteLine("PASS: CONFIG: " + count + " assertions");
+        }
+        static string Command(Func<int> action, out int code)
+        {
+            var output = new StringWriter(); var oldOut = Console.Out; var oldError = Console.Error;
+            try { Console.SetOut(output); Console.SetError(output); code = action(); return output.ToString(); }
+            finally { Console.SetOut(oldOut); Console.SetError(oldError); output.Dispose(); }
         }
         static string Canonical(object value)
         {
