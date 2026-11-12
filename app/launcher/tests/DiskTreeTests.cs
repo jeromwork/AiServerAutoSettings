@@ -13,6 +13,7 @@ namespace RemoteAgents.Launcher
         static void Check(bool value, string message) { if (!value) throw new Exception(message); count++; }
         internal static void Run()
         {
+            DiskFoldersModelTests.Run();
             var s = new DiskTreeSelection(new[] {"project"});
             Check(s.Paths.SequenceEqual(new[] {"project"}) && s.Includes("project/unopened/deep"), "unopened folder is recursive without inventory");
             s.Level("project", new[] {"project/src", "project/docs", "project/readme"}, false);
