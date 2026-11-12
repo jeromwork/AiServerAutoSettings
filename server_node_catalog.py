@@ -10,6 +10,12 @@ IDENT = re.compile(r'[a-z0-9][a-z0-9_-]{0,63}\Z')
 LABEL = re.compile(r'win-[a-f0-9]{28}\Z')
 
 
+def device_name(value, fallback):
+    """Human computer name (config device.name -> Bridge deviceName): printable, one line, <=80."""
+    text = ' '.join(''.join(ch for ch in value if ch.isprintable()).split()) if isinstance(value, str) else ''
+    return text[:80].strip() or fallback
+
+
 def safe(path):
     path = Path(path).absolute()
     if any(node.is_symlink() for node in (path, *path.parents)):
@@ -42,7 +48,14 @@ def register(directory, data, home):
     record = {key: data[key] for key in ('projectId', 'hostId', 'deviceLabel', 'socketPath', 'serverWorkspace', 'windowsReplica', 'allowShell')}
     if data.get('controlOnly') is True:
         record['controlOnly'] = True
-    record['deviceName'] = str(data.get('deviceName', data['hostId']))[:80]
+    record['deviceName'] = device_name(data.get('deviceName'), data['hostId'])
+    if data.get('controlOnly') is not True:
+        # The computer name chosen in RemoteAgents settings arrives with the control
+        # (Bridge) registration and wins over project handoffs that only know MachineName.
+        for other in sorted(host_directory.glob('*.json')):
+            previous = validate(json.loads(safe(other).read_text('utf-8')), home)
+            if previous.get('controlOnly') is True and previous['hostId'] == data['hostId']:
+                record['deviceName'] = device_name(previous.get('deviceName'), record['deviceName'])
     record['projectName'] = str(data.get('projectName',data['projectId']))[:120]
     if path.exists():
         previous=validate(json.loads(path.read_text('utf-8')),home)
@@ -57,6 +70,26 @@ def register(directory, data, home):
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+    if data.get('controlOnly') is True and device_name(data.get('deviceName'), ''):
+        rename_host(host_directory, data['hostId'], record['deviceName'], home)
+
+
+def rename_host(host_directory, host_id, name, home):
+    # The name belongs to the computer, not to one project binding: a rename from
+    # settings must show up in windows_devices for every project of this hostId.
+    for other in sorted(host_directory.glob('*.json')):
+        previous = validate(json.loads(safe(other).read_text('utf-8')), home)
+        if previous['hostId'] != host_id or previous.get('deviceName') == name:
+            continue
+        previous['deviceName'] = name
+        temporary = host_directory/(uuid.uuid4().hex+'.tmp')
+        try:
+            with temporary.open('x', encoding='utf-8') as stream:
+                json.dump(previous, stream, ensure_ascii=False)
+            temporary.chmod(0o600)
+            os.replace(temporary, other)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def records(directory, home):

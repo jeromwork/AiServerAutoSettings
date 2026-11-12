@@ -1,0 +1,23 @@
+{
+  "$schema": "./config-export.schema.json",
+  "schema": 1,
+  "version": 1,
+  "serverAddress": "server.example.invalid",
+  "serverPort": 22,
+  "workerUser": "workuser",
+  "hostKeyFiles": ["/etc/ssh/ssh_host_ed25519_key.pub"],
+  "routes": [
+    { "kind": "direct" },
+    { "kind": "proxy", "proxy": { "type": "socks", "server": "127.0.0.1", "port": 10808 } },
+    { "kind": "hop", "hop": { "name": "relay", "host": "relay.example.invalid", "port": 22, "user": "relayuser",
+      "hostKey": "ssh-ed25519 REPLACE_WITH_RELAY_HOST_PUBLIC_KEY", "keyFile": "/root/config-secrets/relay-ed25519" } }
+  ],
+  "catalogFile": "/home/workuser/.config/remoteagents/transport-catalog.json",
+  "vpnBootstrap": {
+    "channelFile": "/root/config-secrets/channel.json",
+    "entryFiles": { "entry1": "/root/config-secrets/entry1.json" },
+    "hops": {},
+    "vpn": { "checkUrl": "https://check.example.invalid/", "dnsServer": "192.0.2.53" }
+  },
+  "happier": { "account": "Основной", "serverUrl": "https://happier.example.invalid", "webappUrl": "https://app.example.invalid" }
+}

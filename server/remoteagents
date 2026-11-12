@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
+# remoteagents config export|list|revoke|sync|devices — docs/CONFIG-SERVER.md.
+# Можно положить symlink в /usr/local/bin: путь к коду берётся по настоящему расположению файла.
 set -euo pipefail
-here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-if [[ "${1:-}" != invite ]]; then echo 'Использование: remoteagents invite ...' >&2; exit 2; fi
+here=$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")
+if [[ "${1:-}" != config ]]; then echo 'Использование: remoteagents config export|list|revoke|sync|devices ...' >&2; exit 2; fi
 shift
-exec python3 -I "$here/invite.py" "$@"
+exec python3 -I "$here/remoteagents_config.py" "$@"
