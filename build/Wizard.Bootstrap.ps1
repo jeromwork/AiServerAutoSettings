@@ -157,6 +157,7 @@ function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request,[int]$Time
     # Channel first: no TUN and no UAC. The user-level transport daemon (sing-box) picks a working candidate itself;
     # its local SOCKS entry (channelSocksPort) carries the step «Сервер» and every later SSH as a 'proxy' route.
     try{
+        $prepare=[Diagnostics.Stopwatch]::StartNew()
         $t=Copy-TransportObject $config.transport
         if(-not $t){$t=[pscustomobject]@{}}
         # The profile of the pasted config (its own key), not one left by an earlier installation.
@@ -191,6 +192,7 @@ function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request,[int]$Time
         }
         Stop-WizardOldTransport $Root
         $daemon=Start-WizardWorkingTransport $Root $Bundle
+        Write-WizardProgress ('· подготовка и запуск модуля связи '+$prepare.ElapsedMilliseconds+' мс')
         $tag=Wait-WizardChannel $Root ([int](Get-TransportValue $t 'channelSocksPort' 2223)) $TimeoutSeconds $daemon
         return @{ok=$true;vpn='channel';channel=$tag;summary=('Канал до сервера поднят: '+$tag)}
     }catch{
@@ -264,6 +266,7 @@ function Wait-WizardChannel([string]$Root,[int]$Port,[int]$TimeoutSeconds=25,$Da
         }
         if($status -and $revision -and $status.configRevision -ceq $revision){
             $mismatchAt=$null;$warned=$false
+            if(-not $listed){Write-WizardProgress ('· статус модуля связи '+$watch.ElapsedMilliseconds+' мс')}
             $candidates=@($status.candidates|Where-Object {$_ -and $_.enabled -ne $false})
             if(-not $listed -and $candidates.Count){
                 Write-WizardProgress ('· кандидаты канала: '+((@($candidates|ForEach-Object {Protect-TransportText ([string]$_.tag)})) -join ', '));$listed=$true
@@ -302,7 +305,7 @@ function Wait-WizardChannel([string]$Root,[int]$Port,[int]$TimeoutSeconds=25,$Da
             }
         }
         if($watch.Elapsed.TotalSeconds -ge $TimeoutSeconds){break}
-        Start-Sleep -Milliseconds 200
+        Start-Sleep -Milliseconds 100
     }}finally{if($Daemon -and $Daemon.Process.HasExited){$Daemon.Process.Dispose()}}
     Write-WizardProgress ('· канал не поднят за '+$TimeoutSeconds+' с')
     throw ('нет рабочего кандидата за '+$TimeoutSeconds+' с'+$(if($last){' ('+$last+')'}else{''}))
