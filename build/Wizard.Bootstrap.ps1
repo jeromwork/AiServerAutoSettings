@@ -159,7 +159,8 @@ function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request,[int]$Time
             $status=Read-TransportJson (Join-Path $Root 'status/transport.json');$server=$config.profile.server
             $profile=Read-TransportJson ([string]$config.transport.profilePath)
             $sameServer=(-not $server -or ($profile.serverAddress -ceq $server.address -and $profile.login -ceq $server.login -and (Get-TransportServerPort $profile) -eq [int](Get-TransportValue $server 'port' 22) -and $profile.keyPath -ceq (Get-WizardMaterializedServerKey $Root $config)))
-            $canReuse=($sameServer -and $status.configRevision -ceq (Get-TransportRevision $Root))
+            # Reuse only a channel the daemon has proved (ok + active): an open SOCKS port over an unproved path hangs SSH.
+            $canReuse=($sameServer -and $status.ok -eq $true -and $status.active -and $status.configRevision -ceq (Get-TransportRevision $Root))
         }catch{$canReuse=$false}
     }
     if($canReuse -and (Test-StatusFresh $Root transport) -and (Test-WizardChannelPort $socksPort)){return @{ok=$true;skipped=$true;vpn='channel';summary='Канал до сервера уже работает'}}

@@ -34,6 +34,21 @@ function Test-WizardTcpBanner([string]$Address,[int]$Port) {
         $target+'соединение '+$ms+' мс, баннер «'+([Text.Encoding]::ASCII.GetString($buf,0,$n).Trim())+'»'
     }catch{$target+$_.Exception.GetBaseException().Message}finally{$c.Close()}
 }
+# The same through a local SOCKS entry (the channel): tells a dead channel from a failing ssh ProxyCommand helper.
+function Test-WizardSocksBanner([int]$SocksPort,[string]$Address,[int]$Port) {
+    $c=New-Object Net.Sockets.TcpClient;$w=[Diagnostics.Stopwatch]::StartNew();$target='SOCKS 127.0.0.1:'+$SocksPort+' → '+$Address+':'+$Port+': '
+    try{
+        if(-not $c.ConnectAsync('127.0.0.1',$SocksPort).Wait(3000)){return $target+'локальный вход канала не отвечает'}
+        $s=$c.GetStream();$s.ReadTimeout=10000;$s.WriteTimeout=3000;$buf=New-Object byte[] 512
+        $s.Write([byte[]](5,1,0),0,3);if($s.Read($buf,0,2) -ne 2 -or $buf[1] -ne 0){return $target+'вход канала не принял SOCKS5'}
+        $h=[Text.Encoding]::ASCII.GetBytes($Address);$req=[byte[]](@(5,1,0,3,$h.Length)+$h+@([byte]($Port -shr 8),[byte]($Port -band 255)));$s.Write($req,0,$req.Length)
+        $n=$s.Read($buf,0,10);if($n -lt 2 -or $buf[1] -ne 0){return $target+'канал отказал в подключении (код SOCKS '+$(if($n -ge 2){$buf[1]}else{'—'})+')'}
+        $ms=$w.ElapsedMilliseconds
+        try{$n=$s.Read($buf,0,$buf.Length)}catch{return $target+'подключение через канал есть ('+$ms+' мс), но SSH-баннер не пришёл за 10 с'}
+        if($n -le 0){return $target+'подключение через канал есть ('+$ms+' мс), но его сразу закрыли'}
+        $target+'через канал '+$ms+' мс, баннер «'+([Text.Encoding]::ASCII.GetString($buf,0,$n).Trim())+'»'
+    }catch{$target+$_.Exception.GetBaseException().Message}finally{$c.Close()}
+}
 function Write-WizardEnvironment([string]$SshExecutable) {
     if(-not $script:WizardProgressFile){return}
     $ssh=try{[Diagnostics.FileVersionInfo]::GetVersionInfo($SshExecutable).ProductVersion}catch{'?'}
@@ -134,6 +149,14 @@ function Select-WizardRoute($Profile,[string]$Worker,$Routes) {
         foreach($q in $probes){if($q.State -eq 'pending'){Write-WizardProgress ('Проверяю: '+$q.Route.title+$(if($chosen){'… не дождался: выбран другой способ'}else{'… ✗ нет ответа за '+$script:WizardProbeTimeout+' с'}))}}
     }finally{foreach($q in $probes){if($q.Process){Stop-TransportProcess ([pscustomobject]@{Process=$q.Process})}}}
     if($chosen){$script:WizardRoute=$chosen.Route;$script:WizardReached=$true;return}
+    # No route: what each ssh said (trace only) and whether the channel itself carries SSH without ssh and its helper.
+    foreach($q in $probes){
+        $err='';try{if($q.Err -and $q.Err.Wait(2000)){$err=[string]$q.Err.Result}}catch{}
+        foreach($line in @((Convert-TransportLF $err) -split "`n"|Where-Object {$_.Trim()}|Select-Object -Last 8)){Write-WizardProgress ('·   '+$q.Route.title+': '+(Protect-WizardTrace $line))}
+        $m=[regex]::Match((@($q.Route.options) -join ' '),'--proxy-connect\s+socks\s+(?:127\.0\.0\.1|localhost)\s+(\d+)')
+        if($m.Success){Write-WizardProgress ('· '+(Test-WizardSocksBanner ([int]$m.Groups[1].Value) $Profile.serverAddress (Get-TransportServerPort $Profile)))}
+    }
+
     if($Profile.strictHostKey -and @($probes|Where-Object {$_.Why -like 'Ключ хоста*'}).Count){throw 'Ключ хоста не совпал с конфигом или known_hosts. Попросите администратора проверить ключ сервера'}
     $script:WizardNoBanner=$true;throw 'Сервер не ответил по SSH ни одним из способов (напрямую, через прокси, через промежуточный сервер). Проверьте прокси и промежуточный сервер или включите любой VPN в режиме TUN (OpenVPN, WireGuard…) и нажмите «Повторить». Режим «смешанный» (только прокси) ssh сам не проводит: для него нужен маршрут «Локальный прокси»'
 }

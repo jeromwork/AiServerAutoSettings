@@ -306,7 +306,11 @@ function Get-TransportCandidates($Settings,[string]$Root) {
     if($v.PSObject.Properties['detour']){$v.PSObject.Properties.Remove('detour')}
     [void]$out.Add($v);[void]$c.Add([pscustomobject]@{tag=$v.tag;port=0})
     }
-    if(-not $t.bootstrap -or ((Test-Path $p.knownHostsPath) -and (Get-Item $p.knownHostsPath).Length -gt 1)){
+    # Channel first = a network that cuts direct SSH after the handshake. Direct SSH candidates there never work, and every
+    # attempt hangs on the server until LoginGraceTime: with tunnel restarts they fill MaxStartups and sshd starts refusing
+    # everyone, the channel's own SSH included. Such a config carries the channel; direct SSH is not tried at all.
+    $directSsh=-not $t.channelFirst
+    if($directSsh -and (-not $t.bootstrap -or ((Test-Path $p.knownHostsPath) -and (Get-Item $p.knownHostsPath).Length -gt 1))){
     try{
     $ssh=@{type='ssh';tag='singbox-ssh-direct';server=$p.serverAddress;server_port=(Get-TransportServerPort $p);user=$p.login;private_key_path=$p.keyPath}
     $saved=@($Settings.Channel.outbounds|Where-Object {$_.type -eq 'ssh' -and $_.server -eq $p.serverAddress}|Select-Object -First 1)
@@ -389,7 +393,7 @@ function Get-TransportCandidates($Settings,[string]$Root) {
     # The saved route may be the daemon's own channel SOCKS (channel first): tunnels then go direct, never through themselves.
     $ownChannel=($route -and $route.used -eq 'proxy' -and [string]$route.proxy.host -in @('127.0.0.1','localhost') -and [int]$route.proxy.port -eq [int]$o.channelSocksPort)
     # OpenSSH из профиля + SOCKS (-D): один туннель несёт и SSH, и Syncthing через selector.
-    if($o.openSsh){
+    if($o.openSsh -and $directSsh){
         $port=[int]$o.socksPortBase
         [void]$out.Add(@{type='socks';tag='openssh-direct';server='127.0.0.1';server_port=$port;version='5'})
         [void]$c.Add([pscustomobject]@{tag='openssh-direct';port=0})
