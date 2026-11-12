@@ -62,4 +62,10 @@ Assert (-not (Read-TransportJson (Join-Path $root 'config.json')).components.vpn
 # Once bootstrap is retired, a stale/missing transport is a failure again.
 $bad=$false;try{Get-VpnTransportState $root ([pscustomobject]@{Transport=@{};Vpn=@{}})|Out-Null}catch{$bad=$true}
 Assert $bad 'regular VPN still requires a live SSH transport check'
+# The contracted bootstrap form needs no extra public catalog field.
+$script:fail=$false;$script:wanted=$true
+$initial.Remove('catalog');$initial.entries=@{fixture=@{secret='vpn-entry-fixture'}}
+Reset
+$r=Invoke-WizardStep $root $repo 'Bootstrap' $request
+Assert ($r.ok -and $r.vpn -eq 'on') 'materialized entries work with the minimal contract bootstrap form'
 Write-Host ('PASS: config VPN bootstrap/on/off/foreign/failure/CRLF: '+$script:checks+' assertions (OS and TUN stubbed)')

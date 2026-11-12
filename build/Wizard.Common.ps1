@@ -434,8 +434,8 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
                 };$overlay|Add-Member $g $different
             }
             if($Request.shared){$overlay=[pscustomobject]@{schema=1;entries=@();hops=@();relays=@();cdn=@()}}
-            Update-LauncherConfig $Root {param($c) Set-ConfigDefault $c wizard ([pscustomobject]@{});$c.wizard|Add-Member -Force localCatalog $overlay;$c.wizard.PSObject.Properties.Remove('pendingProfile')}
-            $statusFile=Join-Path $Root 'state/transport-probe/status/transport.json'
+            Update-LauncherConfig $Root {param($c) Set-ConfigDefault $c wizard ([pscustomobject]@{});$c.wizard|Add-Member -Force localCatalog $overlay;$c.wizard.PSObject.Properties.Remove('pendingProfile');if($c.vpn){$c.vpn.PSObject.Properties.Remove('bootstrapTag')}}
+            $statusFile=Join-Path $Root 'status/transport.json'
             $active='проверенный путь';if(Test-Path $statusFile){$status=Read-TransportJson $statusFile;$row=@($status.candidates|Where-Object {$_.tag -ceq $status.active});if($row.Count){$active=[string]$row[0].title}}
             return @{ok=$true;summary=('Работает через '+$active)}
         }
@@ -516,7 +516,11 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             return @{ok=$true;summary=$(if($Request.enabled){'Мост и разрешение shell проверены'}else{'Запрос выключения выполнен'})}
         }
         'Vpn' {
-            $previous=(Read-TransportJson (Join-Path $Root 'config.json')).vpn
+            $config=Read-TransportJson (Join-Path $Root 'config.json')
+            $previous=$config.vpn
+            if(($Request.enabled -or $config.transport.bootstrap -or $previous.bootstrapTag) -and -not (Test-WizardNetworkProof $Root ([DateTime]::UtcNow.AddSeconds(-15)))){
+                return @{ok=$false;pending='connection';summary='Сначала дождитесь живой связи; начальный VPN сохранён'}
+            }
             $changed=([string]$previous.checkUrl -cne [string]$Request.checkUrl) -or ([string]$previous.dnsServer -cne [string]$Request.dnsServer)
             if($Request.enabled -and $previous.enabled -and $changed){throw 'Сначала выключите VPN и дождитесь очистки наших маршрутов, затем измените DNS/адрес проверки и включите снова. Работающий VPN сохранён'}
             if($Request.enabled){

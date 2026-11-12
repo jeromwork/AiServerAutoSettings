@@ -153,7 +153,7 @@ function New-TransportRouteOptions($Route,$Profile,[string]$ProxyExecutable='',[
             $known=Join-Path (Split-Path $Profile.knownHostsPath -Parent) 'known_hosts-hop'
             if($hop.knownHostsPath){$known=[string]$hop.knownHostsPath}
             $h=Get-TransportHopArguments $hop $known -AcceptNew:$AcceptNew
-            $a=@([string]$Profile.sshExecutable,'-q');if($Profile.configPath){$a+=@('-F',[string]$Profile.configPath)}
+            $a=@([string]$Profile.sshExecutable,'-q','-o','ProxyCommand=none','-o','ProxyJump=none');if($Profile.configPath){$a+=@('-F',[string]$Profile.configPath)}
             $a+=@($h.options)
             $pipe=[string]$hop.passwordPipe
             if($pipe){

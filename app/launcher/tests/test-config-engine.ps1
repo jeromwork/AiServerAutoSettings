@@ -49,6 +49,7 @@ function Run-Group($Actions,$Id){
 $rows=Run-Group @('Connection','Bridge','Account','Disk','Vpn') 'independent'
 $latestStart=($rows|Measure-Object -Property begin -Maximum).Maximum
 $earliestEnd=($rows|Measure-Object -Property end -Minimum).Minimum
+$overlapMs=[int](($earliestEnd-$latestStart)/10000)
 Assert ($latestStart -lt $earliestEnd) 'all five production resource locks must overlap across processes'
 $rows=Run-Group @('Proxy','Lan') 'network'
 Assert ($rows[0].end -le $rows[1].begin -or $rows[1].end -le $rows[0].begin) 'Proxy and Lan must serialize across processes'
@@ -60,4 +61,24 @@ foreach($action in @('Connection','Bridge','Account','Disk','Vpn','Proxy','Lan')
 $script:WizardProgressFile=Join-Path $root 'failed.jsonl'
 try{Invoke-WizardAction $root 'Account' $null {throw 'fixture'}}catch{}
 Assert ((ConvertFrom-Json ([IO.File]::ReadAllText($script:WizardProgressFile))).text -match '^timing Account [0-9]+$') 'failed stage also records elapsed time'
-Write-Output ('OK: '+$count+' resource lock/timing/CRLF checks; five actions overlap, Proxy/Lan serialize (real PowerShell children, work simulated)')
+$script:syncBody=0
+Invoke-WizardAction $root 'ConfigSync' $null {$script:syncBody++}
+Assert ($script:syncBody -eq 1) 'multi-resource ConfigSync invokes its body exactly once'
+Update-LauncherConfig $root {param($c) $c|Add-Member -Force transport ([pscustomobject]@{marker='original'})}
+$script:failProof=$true;$script:starts=0
+function Start-WizardWorkingTransport($Root,$Bundle){$script:starts++}
+function Wait-WizardWorkingProof($Root,$Mark){if($script:failProof){throw 'fixture proof failed'}}
+$failed=$false;try{Set-WizardInitialNetwork $root $repo ([pscustomobject]@{marker='candidate'})}catch{$failed=$true}
+Assert ($failed -and (Read-TransportJson (Join-Path $root 'config.json')).transport.marker -eq 'original') 'failed first working proof restores transport'
+Assert ((Read-TransportJson (Join-Path $root 'config.json')).Account) 'first setup rollback preserves unrelated concurrent edits'
+$script:failProof=$false
+Set-WizardInitialNetwork $root $repo ([pscustomobject]@{marker='candidate'})
+Assert ($script:starts -eq 2 -and (Read-TransportJson (Join-Path $root 'config.json')).transport.marker -eq 'candidate') 'first setup commits only after working proof'
+Update-LauncherConfig $root {param($c) $c.transport|Add-Member -Force bootstrap $true;$c|Add-Member -Force vpn ([pscustomobject]@{enabled=$true;bootstrapTag='fixture'})}
+function Test-WizardNetworkProof($Root,$Mark){$false}
+$script:vpnChildren=0
+function Invoke-InstallChild($Bundle,$Script,$Arguments,$TimeoutSeconds){$script:vpnChildren++}
+$pending=Invoke-WizardStep $root $repo 'Vpn' ([pscustomobject]@{enabled=$false})
+Assert ($pending.pending -eq 'connection' -and -not $pending.ok -and $script:vpnChildren -eq 0) 'parallel Vpn must not tear down bootstrap before Connection proof'
+Assert ((Read-TransportJson (Join-Path $root 'config.json')).vpn.enabled) 'bootstrap VPN intent remains enabled while Connection starts'
+Write-Output ('OK: '+$count+' resource lock/timing/CRLF checks; five-way overlap '+$overlapMs+' ms; Proxy/Lan serialize (real PowerShell children, work simulated)')

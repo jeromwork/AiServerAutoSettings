@@ -283,6 +283,14 @@ function Initialize-WizardTransport([string]$Root,[string]$Bundle,$Transport) {
         Write-TransportJson $file $channel -Private
         $Transport|Add-Member -Force channelPath $file
     }
+    Ensure-WizardTransportBinary $Root $Bundle $Transport
+}
+function Ensure-WizardTransportBinary([string]$Root,[string]$Bundle,$Transport) {
+    if(-not $Transport.singBoxPath -or -not (Test-Path $Transport.singBoxPath)){
+        foreach($candidate in @((Join-Path $Root 'transport-bin/sing-box.exe'),(Join-Path $Bundle 'transport/sing-box.exe'),(Join-Path $Bundle 'transport-bin/sing-box.exe'))){
+            if(Test-Path -LiteralPath $candidate -PathType Leaf){$Transport|Add-Member -Force singBoxPath $candidate;return}
+        }
+    }
     if(-not $Transport.singBoxPath -or -not (Test-Path $Transport.singBoxPath)){
         Write-WizardProgress 'Подготавливаю программу связи (загрузка с проверкой SHA-256)…'
         . (Join-Path $Bundle 'disk/Disk.Binary.ps1')

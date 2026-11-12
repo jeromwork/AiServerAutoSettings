@@ -121,7 +121,7 @@ function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request) {
         if(-not $t.profilePath){
             $s=$config.profile.server
             $data=[pscustomobject]@{schema=1;serverAddress=$s.address;serverPort=$(if($s.port){[int]$s.port}else{22});workerUser=$s.login;hostKeys=@($s.hostKeys)}
-            $key=[string]$s.keyFile;if(-not $key){$key=[string]$s.keyPath};if(-not $key){$key=Join-Path $Root 'secrets/server-key'}
+            $key=Get-WizardMaterializedServerKey $Root $config
             $prepared=Initialize-WizardSettingsProfile $Root ([pscustomobject]@{data=$data;keyPath=$key;allowTrustOnFirstUse=$true})
             $t|Add-Member -Force profilePath $prepared.file
         }
@@ -129,11 +129,14 @@ function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request) {
             Assert-WizardCatalog $initial.catalog
             foreach($g in @('entries','hops','relays','cdn')){$t|Add-Member -Force $g @($initial.catalog.$g|Where-Object {$null -ne $_})}
         }
+        if(-not @($t.entries|Where-Object {$null -ne $_}).Count -and $initial.entries){
+            $entries=@();foreach($property in $initial.entries.PSObject.Properties){Assert-TransportName $property.Name;$entries+=@([pscustomobject]@{name=$property.Name;ssh=$property.Name;enabled=$true})}
+            $t|Add-Member -Force entries $entries
+        }
         $channel=Join-Path $Root 'secrets/channel.json'
         if(-not (Test-Path $channel)){throw 'Материализуйте vpn.bootstrap.channel перед Bootstrap'}
         $t|Add-Member -Force channelPath $channel
-        if(-not $t.singBoxPath){$t|Add-Member -Force singBoxPath (Join-Path $Root 'transport-bin/sing-box.exe')}
-        if(-not (Test-Path $t.singBoxPath)){throw 'Для Bootstrap нужна локальная программа sing-box'}
+        Ensure-WizardTransportBinary $Root $Bundle $t
         $t|Add-Member -Force bootstrap $true;$t|Add-Member -Force openSsh $false
         Update-LauncherConfig $Root {param($c)
             $c|Add-Member -Force transport $t
@@ -192,15 +195,38 @@ function Test-WizardBootstrapInternetPath([string]$Root,$Settings,$Paths,[string
 }
 function Connect-WizardProfileServer([string]$Root,$Request) {
     $config=Read-TransportJson (Join-Path $Root 'config.json');$server=$config.profile.server
-    $key=[string]$server.keyFile;if(-not $key){$key=[string]$server.keyPath};if(-not $key){$key=Join-Path $Root 'secrets/server-key'}
+    $key=Get-WizardMaterializedServerKey $Root $config
     if(-not $server){return $null}
     if(-not (Test-Path -LiteralPath $key -PathType Leaf)){
         if($server.key){throw 'Материализуйте ключ server-key перед Server; новый ключ вместо выданного не создаётся'}
         return $null
     }
     $routes=@($server.routes|Where-Object {$null -ne $_});if(-not $routes.Count){$routes=@([pscustomobject]@{kind='direct'})}
+    $routes=Copy-TransportObject $routes
+    foreach($route in $routes){
+        if($route.kind -eq 'proxy' -and -not $route.proxy.host -and $route.proxy.server){$route.proxy|Add-Member -Force host ([string]$route.proxy.server)}
+        if($route.kind -eq 'hop'){
+            $hop=$route.hop
+            if(-not $hop.ssh -and $hop.host){$hop|Add-Member -Force ssh (([string]$hop.user)+'@'+$hop.host+$(if($hop.port){':'+[int]$hop.port}else{''}))}
+            if($hop.password -and $hop.password -isnot [string]){
+                if(-not $hop.routePasswordFile){throw 'Материализуйте пароль SSH-перехода в routePasswordFile перед Server'}
+                $hop.PSObject.Properties.Remove('password')
+            }
+            if($hop.key -and -not $hop.keyFile){throw 'Материализуйте ключ SSH-перехода в keyFile перед Server'}
+        }
+    }
     $data=[pscustomobject]@{schema=1;serverAddress=[string]$server.address;serverPort=$(if($server.port){[int]$server.port}else{22});workerUser=[string]$server.login;hostKeys=@($server.hostKeys);routes=$routes}
     $request=[pscustomobject]@{data=$data;keyPath=$key;allowTrustOnFirstUse=$true;askpassExecutable=[string]$Request.askpassExecutable}
     # Keep the issued key: adding another key would defeat config revoke.
     return (Connect-WizardSnapshot $Root $request).profile
+}
+
+function Get-WizardMaterializedServerKey([string]$Root,$Config) {
+    $server=$Config.profile.server
+    foreach($value in @($server.keyFile,$server.keyPath)){if($value){return [string]$value}}
+    if($Config.transport.profilePath -and (Test-Path -LiteralPath $Config.transport.profilePath)){
+        $p=Read-TransportJson $Config.transport.profilePath
+        if($p.serverAddress -ceq $server.address -and $p.login -ceq $server.login -and $p.keyPath){return [string]$p.keyPath}
+    }
+    return Join-Path $Root 'secrets/server-key'
 }

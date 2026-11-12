@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 param([string]$Root,[string]$Directory,[string]$ProfileFile,[string]$RouteFile)
     $ErrorActionPreference='Stop'
     . (Join-Path $PSScriptRoot 'Wizard.Common.ps1')
@@ -11,6 +11,8 @@ param([string]$Root,[string]$Directory,[string]$ProfileFile,[string]$RouteFile)
         $si.UseShellExecute=$false;$si.CreateNoWindow=$true;$si.RedirectStandardInput=$true;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true
         $ssh=New-Object Diagnostics.Process;$ssh.StartInfo=$si;$ready=Join-Path $Directory 'ready.json';$active=@{};$last=[DateTime]::UtcNow
         try{
+            # Never replay an orphan request from a terminated controller.
+            foreach($pattern in @('*.request.json','*.reply.json','*.stage')){Get-ChildItem -LiteralPath $Directory -Filter $pattern|Remove-Item -Force}
             [void]$ssh.Start();[void]$ssh.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
             $line=$ssh.StandardOutput.ReadLineAsync()
             $idle=330;if($env:REMOTEAGENTS_CONTROL_IDLE_SECONDS){$idle=[int]$env:REMOTEAGENTS_CONTROL_IDLE_SECONDS}
@@ -40,6 +42,6 @@ param([string]$Root,[string]$Directory,[string]$ProfileFile,[string]$RouteFile)
             if(Test-Path $ready){Remove-Item -LiteralPath $ready -Force}
             if($ssh.Id -and -not $ssh.HasExited){$ssh.StandardInput.Close();if(-not $ssh.WaitForExit(2000)){$ssh.Kill()}}
             $ssh.Dispose()
-            Get-ChildItem -LiteralPath $Directory -Filter '*.json'|Remove-Item -Force
+            foreach($pattern in @('*.request.json','*.reply.json','*.stage')){Get-ChildItem -LiteralPath $Directory -Filter $pattern|Remove-Item -Force}
         }
     } -TimeoutMs 1000

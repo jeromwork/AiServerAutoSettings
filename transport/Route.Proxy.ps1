@@ -38,7 +38,7 @@ public sealed class ConfigHopRelay : IDisposable {
 '@
     Add-Type ($source.Replace('RELAY_CTOR',$ctor))
     $relay=New-Object ConfigHopRelay([string]$c.password)
-    $options=@('-F',[string]$c.configPath,'-T','-o','StrictHostKeyChecking=yes','-o','GlobalKnownHostsFile=none','-o',('UserKnownHostsFile="'+$c.knownHostsPath.Replace('\','/')+'"'),'-o','ForwardAgent=no','-o','ConnectTimeout=8','-o','BatchMode=no','-o','NumberOfPasswordPrompts=1','-o','PreferredAuthentications=password,keyboard-interactive','-o','PubkeyAuthentication=no','-p',[string]$c.port,'-l',[string]$c.user,'-W',($Target+':'+$Port),[string]$c.host)
+    $options=@('-o','ProxyCommand=none','-o','ProxyJump=none','-F',[string]$c.configPath,'-T','-o','StrictHostKeyChecking=yes','-o','GlobalKnownHostsFile=none','-o',('UserKnownHostsFile="'+$c.knownHostsPath.Replace('\','/')+'"'),'-o','ForwardAgent=no','-o','ConnectTimeout=8','-o','BatchMode=no','-o','NumberOfPasswordPrompts=1','-o','PreferredAuthentications=password,keyboard-interactive','-o','PubkeyAuthentication=no','-p',[string]$c.port,'-l',[string]$c.user,'-W',($Target+':'+$Port),[string]$c.host)
     $si=New-Object Diagnostics.ProcessStartInfo;$si.FileName=[string]$c.sshExecutable
     $si.Arguments=(($options|ForEach-Object {'"'+[regex]::Replace([regex]::Replace([string]$_,'(\\*)"','$1$1\"'),'(\\+)$','$1$1')+'"'}) -join ' ')
     $si.UseShellExecute=$false;$si.CreateNoWindow=$true;$si.RedirectStandardInput=$true;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true

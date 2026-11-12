@@ -39,4 +39,33 @@ $p=Read-TransportJson $result.profile
 Assert ($p.routeProxyCommand -like '*Route.Proxy-*') 'selected durable relay survives reconnect'
 $route=(Read-TransportJson (Join-Path $root 'config.json')).wizard.serverRoute
 Assert (-not $route.hop.password -and -not $route.hop.passwordPipe) 'saved route contains no password or stale pipe'
+Assert ((Read-TransportJson $result.profile).keyPath -ceq $key) 'issued key is used without replacement'
+Assert (@(Get-ChildItem (Join-Path $root 'ssh-profiles') -Recurse -Filter id_ed25519).Count -eq 0) 'config login generates no extra authorized key'
+$settings=Read-TransportJson $path
+$routes=Copy-TransportObject $settings.routes
+for($n=0;$n -lt 2;$n++){
+    $h=$routes[$n].hop
+    $h.PSObject.Properties.Remove('ssh');$h.PSObject.Properties.Remove('password')
+    $h|Add-Member host @('hop-one.invalid','hop-two.invalid')[$n]
+    $h|Add-Member user @('first','second')[$n]
+    $h|Add-Member port (2201+$n)
+    $h|Add-Member routePasswordFile (Join-Path $root ('secrets/config-hop-'+($n+1)+'.json'))
+}
+Update-LauncherConfig $root {param($c) $c|Add-Member -Force profile ([pscustomobject]@{server=[pscustomobject]@{address='server.invalid';port=22;login='worker';hostKeys=@($pin);keyFile=$key;key=[pscustomobject]@{secret='server-key'};routes=$routes}})}
+$file=Connect-WizardProfileServer $root ([pscustomobject]@{askpassExecutable=$helper})
+Assert ((Read-TransportJson $file).keyPath -ceq $key) 'public config host/user/port route form uses the same materialized key'
+Update-LauncherConfig $root {param($c) $c.profile.server.keyFile=Join-Path $Root 'missing-key'}
+$failed=$false;try{Connect-WizardProfileServer $root ([pscustomobject]@{})|Out-Null}catch{$failed=$true}
+Assert $failed 'missing issued key must not fall back to enrolling another key'
+if($env:OS -ne 'Windows_NT'){
+    # Resolve the generated inner ssh config with REAL ssh -G. A persisted
+    # target ProxyCommand must not recursively apply to the jump server.
+    $poison=Join-Path $root 'inherited-target.conf';Write-DiskUtf8 $poison "Host *`n ProxyCommand /bin/false`n"
+    $pinned=[pscustomobject]@{sshExecutable='/usr/bin/ssh';configPath=$poison;knownHostsPath=(Join-Path $root 'known_hosts')}
+    $jump=[pscustomobject]@{used='hop';hop=[pscustomobject]@{ssh='jumper@hop.invalid:2201';keyFile=$key;knownHostsPath=(Join-Path $root 'known_hosts-hop')}}
+    $inner=@(New-TransportRouteOptions $jump $pinned $helper)[1].Substring(13).Replace(' -q ',' -G ').Replace('%h','target.invalid').Replace('%p','22')
+    $effective=Invoke-DiskProcess '/bin/bash' @('-c',$inner) '' -TimeoutSeconds 10
+    Assert ($effective -match '(?m)^hostname hop.invalid$') 'inner route is resolved by real OpenSSH'
+    Assert ($effective -notmatch '(?m)^proxycommand .*false') 'inner hop does not inherit the target ProxyCommand'
+}
 Write-Host ('PASS: '+$script:checks+' password-route checks (SSH/probes stubbed; no Windows)')

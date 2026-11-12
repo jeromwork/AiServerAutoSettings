@@ -36,6 +36,13 @@ def psq(x):
 
 with tempfile.TemporaryDirectory(prefix='config-c-loopback-') as tmp:
     d = Path(tmp); home = d/'server-home'; home.mkdir()
+    repo = args.repo
+    if args.baseline:
+        repo = d/'baseline-bundle'; repo.mkdir()
+        for directory in ('build', 'transport', 'disk', 'accounts'):
+            shutil.copytree(args.repo/directory, repo/directory)
+        for file in ('codex-windows-bridge.py', 'codex-bridge-session.py', 'server_node_catalog.py'):
+            shutil.copy2(args.repo/file, repo/file)
     user = pwd.getpwuid(os.getuid()).pw_name
     remote_port = port()
     for key in ('host', 'client'):
@@ -90,11 +97,11 @@ LogLevel VERBOSE
         # Baseline hardcodes the remote SSH service to :22; adapt only this fixture
         # port so both revisions can use the same unprivileged, isolated sshd.
         if args.baseline:
-            wizard_server = args.repo/'build/Wizard.Server.ps1'
+            wizard_server = repo/'build/Wizard.Server.ps1'
             wizard_server.write_text(wizard_server.read_text(encoding='utf-8-sig').replace('test -r /etc/sing-box/config.json', 'test -r "${REMOTE_DISK_CHANNEL_SOURCE:-/etc/sing-box/config.json}"'))
-            setup = args.repo/'build/Setup.Common.ps1'
+            setup = repo/'build/Setup.Common.ps1'
             setup.write_text(setup.read_text(encoding='utf-8-sig').replace('34000','14000').replace('36000','16000'))
-            common = args.repo/'transport/Transport.Common.ps1'
+            common = repo/'transport/Transport.Common.ps1'
             text = common.read_text(encoding='utf-8-sig')
             text = text.replace("@('ssh',[int]$o.sshPort,22)", f"@('ssh',[int]$o.sshPort,{remote_port})")
             text = text.replace('override_port=22};$rules+=', f'override_port={remote_port}'+'};$rules+=')
@@ -118,8 +125,10 @@ if($Baseline){
  try{
   Wait-TransportReady $Root 30
   if(-not (Test-LocalSsh $Root ((Read-TransportSettings $Root).Options.sshPort))){throw 'working proof failed'}
+  $workingMs=$watch.ElapsedMilliseconds
  }finally{[IO.File]::WriteAllText((Join-Path $Root 'stop'),'stop');[void]$child.Process.WaitForExit(5000);Stop-TransportProcess $child}
 }else{
+ $workingMs=$connectionMs
  if(-not (Test-WizardNetworkProof $Root ([DateTime]::UtcNow.AddSeconds(-30)))){throw 'working proof failed'}
  # Exercise helper caching and multi-command multiplexing on the same real SSH session.
  Send-WizardHelpers $Root $Repo
@@ -153,11 +162,21 @@ if($Baseline){
  Set-WizardDiskChannel $Root
  $config=Read-TransportJson (Join-Path $Root 'config.json')
  if(@((Read-TransportJson $config.transport.channelPath).inbounds|Where-Object {$_.tag -eq 'sync'}).Count -ne 1){throw 'late disk inbound missing'}
+ $session=@(Get-ChildItem -Path (Join-Path $Root 'state/wizard-control/*/ready.json'))[0].DirectoryName
+ Write-DiskUtf8 (Join-Path $session 'stop') 'stop'
+ $deadline=[Diagnostics.Stopwatch]::StartNew()
+ while(Test-Path (Join-Path $session 'ready.json')){if($deadline.Elapsed.TotalSeconds -gt 10){throw 'control stop timeout'};Start-Sleep -Milliseconds 30}
+ Remove-Item -LiteralPath (Join-Path $session 'stop') -Force
+ $orphan=[pscustomobject]@{id=('a'*32);timeout=1;command=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('touch "$HOME/orphan-replayed"'));input=''}
+ Write-TransportJson (Join-Path $session (('a'*32)+'.request.json')) $orphan -Private
+ $clean=Invoke-WizardSsh $Root 'if [ -e "$HOME/orphan-replayed" ]; then echo replayed; else echo clean; fi'
+ if($clean.Trim() -cne 'clean'){throw 'an orphan modifying request was replayed after controller restart'}
+
 
 }
-@{serverMs=$serverMs;connectionMs=$watch.ElapsedMilliseconds;ok=$true}|ConvertTo-Json -Compress
+@{serverMs=$serverMs;connectionMs=$watch.ElapsedMilliseconds;workingMs=$workingMs;ok=$true}|ConvertTo-Json -Compress
 """
-        header = f"param([string]$Repo={psq(args.repo)},[string]$Root={psq(root)},[string]$Login={psq(user)},[bool]$Baseline=${str(args.baseline).lower()})\n"
+        header = f"param([string]$Repo={psq(repo)},[string]$Root={psq(root)},[string]$Login={psq(user)},[bool]$Baseline=${str(args.baseline).lower()})\n"
         # Record total immediately after Connection, excluding helper-cache assertions.
         body = body.replace("# Baseline returns", "$connectionMs=$watch.ElapsedMilliseconds\n# Baseline returns")
         body = body.replace('connectionMs=$watch.ElapsedMilliseconds;', 'connectionMs=$connectionMs;')
@@ -169,10 +188,15 @@ if($Baseline){
         if not args.baseline:
             lines = (d/'sshd.log').read_text()
             assert len(list((root/'state/wizard-control').glob('*/ready.json'))) == 1, lines
-            print('PASS: one SSH session shared across processes; remote commands overlap; helpers unchanged; late disk inbound reload/proof')
+            print('PASS: one SSH session shared across processes; remote commands overlap; helpers unchanged; late disk inbound reload/proof; orphan request discarded')
     finally:
         (root/'stop').write_text('stop')
         for session in (root/'state/wizard-control').glob('*') if (root/'state/wizard-control').exists() else []:
             (session/'stop').write_text('stop')
-        time.sleep(1.5)
+        deadline = time.monotonic()+6
+        while time.monotonic()<deadline:
+            if not list((root/'state/wizard-control').glob('*/ready.json')):
+                time.sleep(1)
+                break
+            time.sleep(.1)
         server.terminate(); server.wait(timeout=5); logfile.close()
