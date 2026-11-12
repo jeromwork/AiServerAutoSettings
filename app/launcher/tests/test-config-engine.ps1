@@ -75,12 +75,13 @@ $script:failProof=$false
 Set-WizardInitialNetwork $root $repo ([pscustomobject]@{marker='candidate'})
 Assert ($script:starts -eq 2 -and (Read-TransportJson (Join-Path $root 'config.json')).transport.marker -eq 'candidate') 'first setup commits only after working proof'
 # Channel first: the first «Связь» keeps channelFirst, the channel port and the relays the channel was raised through.
-Update-LauncherConfig $root {param($c) $c|Add-Member -Force transport ([pscustomobject]@{marker='bootstrap';channelFirst=$true;bootstrap=$true;channelSocksPort=2300;relays=@([pscustomobject]@{name='sparfum';host='192.0.2.10';port=8443})})}
+Update-LauncherConfig $root {param($c) $c|Add-Member -Force transport ([pscustomobject]@{marker='bootstrap';channelFirst=$true;bootstrap=$true;channelSocksPort=2300;probeTimeoutSec=12;relays=@([pscustomobject]@{name='sparfum';host='192.0.2.10';port=8443})})}
 Set-WizardInitialNetwork $root $repo ([pscustomobject]@{marker='connection';relays=@()})
 $t=(Read-TransportJson (Join-Path $root 'config.json')).transport
-Assert ($t.marker -eq 'connection' -and $t.channelFirst -eq $true -and $t.channelSocksPort -eq 2300 -and @($t.relays).Count -eq 1 -and $t.relays[0].name -eq 'sparfum' -and -not $t.bootstrap) 'first connection keeps channelFirst, channelSocksPort and relays'
-Set-WizardInitialNetwork $root $repo ([pscustomobject]@{marker='connection';relays=@([pscustomobject]@{name='other';host='192.0.2.11';port=443})})
+Assert ($t.marker -eq 'connection' -and $t.channelFirst -eq $true -and $t.channelSocksPort -eq 2300 -and $t.probeTimeoutSec -eq 12 -and @($t.relays).Count -eq 1 -and $t.relays[0].name -eq 'sparfum' -and -not $t.bootstrap) 'first connection keeps channelFirst, channelSocksPort and relays'
+Set-WizardInitialNetwork $root $repo ([pscustomobject]@{marker='connection';probeTimeoutSec=21;relays=@([pscustomobject]@{name='other';host='192.0.2.11';port=443})})
 Assert (@((Read-TransportJson (Join-Path $root 'config.json')).transport.relays).name -join ',' -eq 'other') 'relays of the new catalog win when present'
+Assert ((Read-TransportJson (Join-Path $root 'config.json')).transport.probeTimeoutSec -eq 21) 'explicit connection timeout wins over bootstrap timeout'
 Update-LauncherConfig $root {param($c) $c.transport|Add-Member -Force bootstrap $true;$c|Add-Member -Force vpn ([pscustomobject]@{enabled=$true;bootstrapTag='fixture'})}
 function Test-WizardNetworkProof($Root,$Mark){$false}
 $script:vpnChildren=0

@@ -1,6 +1,8 @@
 ﻿#requires -Version 5.1
 [CmdletBinding()]
 param([Alias('Home')][string]$TransportHome=(Join-Path $env:LOCALAPPDATA 'RemoteAgents'),[int]$ParentPid=0)
+# Persisted pipe output has a known encoding on Windows PowerShell 5.1 too.
+[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
 . (Join-Path $PSScriptRoot 'Transport.Common.ps1')
 $root=(Get-TransportHome $TransportHome);$engine=$null;$tunnelChildren=@{};$probes=@{};$rows=@();$active=$null;$confirmed=$false;$errorText='Запуск';$network=$null;$memory=$null;$secret=$null
 $parent=$null;$mutex=$null;$locked=$false;$settings=$null;$paths=$null;$rankPending=$false;$rankTags=@();$rankQueue=$null;$exitCode=0
@@ -21,7 +23,7 @@ function Publish-TransportStatus {
     $id=$null;if($network){$id=$network.id}
     $summary='нет связи: '+$(if($errorText){$errorText}else{'нет проверенного пути'})
     if($alive -and $confirmed -and $row){$summary=$row.title;if($null -ne $speed){$summary+=' · '+([Math]::Round([double]$speed,1)).ToString([Globalization.CultureInfo]::InvariantCulture)+' КБ/с'}}
-    Write-TransportJson (Join-Path $root 'status/transport.json') ([ordered]@{configRevision=$revision;summary=$summary;ok=[bool]($alive -and $confirmed);active=$active;kbps=$speed;network=$id;metered=$metered;mode=$pin.mode;pinnedTag=$pin.tag;candidates=@($rows);configError=$reloadError;updatedAt=[DateTime]::UtcNow.ToString('o');error=$errorText})
+    Write-TransportJson (Join-Path $root 'status/transport.json') ([ordered]@{configRevision=$revision;fatal=($exitCode -ne 0);summary=$summary;ok=[bool]($alive -and $confirmed);active=$active;kbps=$speed;network=$id;metered=$metered;mode=$pin.mode;pinnedTag=$pin.tag;candidates=@($rows);configError=$reloadError;updatedAt=[DateTime]::UtcNow.ToString('o');error=$errorText})
     $script:lastStatus=[DateTime]::UtcNow
 }
 function Switch-TransportActive([string]$Tag,[bool]$Verified) {
@@ -112,11 +114,14 @@ try{
     if(-not $locked){throw 'Транспорт уже запущен'}
     Write-TransportLog $root 'start'
     if($ParentPid -gt 0){$parent=[Diagnostics.Process]::GetProcessById($ParentPid);[void]$parent.Handle}
-    $settings=Read-TransportSettings $root;Sync-TransportEntryCache $settings $root;$paths=Get-TransportCandidates $settings $root;$secret=Get-TransportSecret $root;$memory=Read-TransportMemory $root
+    # Keep the input revision even when settings/cache/candidates/network initialization fails.
+    $revision=Get-TransportRevision $root
+    $settings=Read-TransportSettings $root;Sync-TransportEntryCache $settings $root;$revision=Get-TransportRevision $root;$settings=Read-TransportSettings $root
+    $paths=Get-TransportCandidates $settings $root;$secret=Get-TransportSecret $root;$memory=Read-TransportMemory $root
     $diagnosticContext=@(Get-TransportDiagnosticContext $settings $root)
     $network=Get-TransportNetwork;$metered=Get-TransportMetered $settings.Options
     $rows=@(Get-TransportRemembered $memory $network.id $paths.AllCandidates)
-    $pin=Read-TransportPin $root;$active=Get-TransportSelection $pin $rows $paths.Candidates;$revision=Get-TransportRevision $root
+    $pin=Read-TransportPin $root;$active=Get-TransportSelection $pin $rows $paths.Candidates
     Publish-TransportStatus
     while(-not (Test-TransportStop)){
         $now=[DateTime]::UtcNow
@@ -235,6 +240,7 @@ try{
                 if(Receive-TransportProbe $probe){
                     $result=$probe.state;$row=$rows|Where-Object {$_.tag -eq $tag}|Select-Object -First 1
                     # Скорость задаёт рейтинг (равные объёмы); проба активного пути меньше и только подтверждает живость.
+                    $row|Add-Member -Force probeMs ([int](([Diagnostics.Stopwatch]::GetTimestamp()-$probe.sink.Started)*1000/[Diagnostics.Stopwatch]::Frequency))
                     $row.state=$result.state;if($probe.purpose -notin @('active','live') -or $result.state -ne 'ok' -or $null -eq $row.kbps){$row.kbps=$result.kbps};$row.checkedAt=$now.ToString('o')
                     $reason=if($result.diagnostic.reason -eq 'timeout'){'таймаут '+$settings.Options.probeTimeoutSec+' с'}elseif($result.diagnostic.reason -eq 'stalled'){'нет ответа'}else{'путь недоступен'}
                     Write-DaemonWizardProgress ('Вариант связи: '+$row.title+$(if($result.state -eq 'ok'){' ✓'}else{' ✗ ('+$reason+')'}))

@@ -659,6 +659,8 @@ function Get-TransportSelection($Pin,$Rows,$Candidates,[string]$Current='') {
     if(@($Candidates).Count){return [string]$Candidates[0].tag};return 'unavailable'
 }
 function Get-TransportRevision([string]$Root) {
+    # One spelling of Home for daemon and Bootstrap (relative/trailing separators differ at entry).
+    $Root=Get-TransportHome $Root
     # Содержимое, а не mtime: Syncthing/атомарная замена и одинаковая длина не скрывают изменение.
     $config=Read-TransportJson (Join-Path $Root 'config.json');$files=@()
     foreach($field in @('profilePath','channelPath')){if($config.transport.$field){$files+=[string]$config.transport.$field}}
@@ -667,7 +669,7 @@ function Get-TransportRevision([string]$Root) {
     $route=$config.transport.serverRoute;if(-not $route){$route=$config.wizard.serverRoute}
     if($route.used -eq 'hop' -and $config.transport.profilePath){$p=Read-TransportJson $config.transport.profilePath;$kh=Join-Path (Split-Path $p.knownHostsPath -Parent) 'known_hosts-hop';if(Test-Path $kh){$files+=$kh}}
     $sha=[Security.Cryptography.SHA256]::Create()
-    try{$text=(ConvertTo-Json -InputObject $route -Depth 20 -Compress)+(ConvertTo-Json -InputObject $config.transport -Depth 40 -Compress)+"`n"+((@($files|ForEach-Object {$_+"`n"+(Convert-TransportLF ([IO.File]::ReadAllText($_)))})) -join "`n");[Convert]::ToBase64String($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))}finally{$sha.Dispose()}
+    try{$text=(ConvertTo-Json -InputObject $route -Depth 20 -Compress)+(ConvertTo-Json -InputObject $config.transport -Depth 40 -Compress)+"`n"+((@($files|ForEach-Object {$(if($env:OS -eq 'Windows_NT'){[IO.Path]::GetFullPath($_).Replace('\','/').ToLowerInvariant()}else{[IO.Path]::GetFullPath($_)})+"`n"+(Convert-TransportLF ([IO.File]::ReadAllText($_)))})) -join "`n");[Convert]::ToBase64String($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))}finally{$sha.Dispose()}
 }
 function Test-TransportConfigFile([string]$Exe,[string]$File) {
     $check=Start-TransportProcess $Exe @('check','-c',$File)

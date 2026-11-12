@@ -199,7 +199,17 @@ try{
         $restored=Read-TransportSettings $work
         Assert ($restored.Transport.serverRoute.used -eq 'hop' -and $restored.Transport.serverRoute.hop.keyFile -eq $hopKey) 'runtime restores old wizard route as local overlay'
         Assert (-not (Read-TransportJson (Join-Path $work 'config.json')).transport.serverRoute) 'loading old route does not modify persisted settings'
+        $personalConfig.transport|Add-Member probeTimeoutSec 12
+        Write-TransportJson (Join-Path $work 'config.json') $personalConfig
+        Assert ((Read-TransportSettings $work).Options.probeTimeoutSec -eq 12) 'bootstrap probe timeout is valid'
         $revision=Get-TransportRevision $work
+        Assert ((Get-TransportRevision ($work+'/./')) -ceq $revision) 'revision ignores Home spelling and trailing slash'
+        if($env:OS -eq 'Windows_NT'){
+            Assert ((Get-TransportRevision $work.ToUpperInvariant().Replace('\','/')) -ceq $revision) 'Windows revision ignores Home case and separators'
+        }
+        $personalConfig|Add-Member account ([pscustomobject]@{enabled=$true})
+        Write-TransportJson (Join-Path $work 'config.json') $personalConfig
+        Assert ((Get-TransportRevision $work) -ceq $revision) 'unrelated C# section writes do not invalidate transport revision'
         $personalConfig.wizard.serverRoute=[pscustomobject]@{used='direct';hop=$personal.hop}
         Write-TransportJson (Join-Path $work 'config.json') $personalConfig
         Assert ((Get-TransportRevision $work) -ne $revision) 'route changes invalidate transport revision'

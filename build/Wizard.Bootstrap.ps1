@@ -146,7 +146,7 @@ function Set-WizardBootstrapHops([string]$Root,$Transport,$Initial,$Manifest) {
         $hop|Add-Member -Force configPath $conf
     }
 }
-function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request) {
+function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request,[int]$TimeoutSeconds=25) {
     $config=Read-TransportJson (Join-Path $Root 'config.json');$initial=$config.profile.vpn.bootstrap
     # A public catalog alone (config export --vpn off) is not a channel: nothing to start before SSH.
     if(-not $initial -or -not $initial.channel){return @{ok=$true;vpn='off';summary='Канал до сервера не задан'}}
@@ -182,6 +182,7 @@ function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request) {
         Set-WizardBootstrapHops $Root $t $initial $manifest
         Ensure-WizardTransportBinary $Root $Bundle $t
         # bootstrap: SSH is not proved yet (the step «Связь» removes the flag); openSsh stays at its default.
+        if($null -eq $t.probeTimeoutSec){$t|Add-Member -Force probeTimeoutSec 12}
         $t|Add-Member -Force bootstrap $true;$t|Add-Member -Force channelFirst $true;$t.PSObject.Properties.Remove('openSsh')
         Update-LauncherConfig $Root {param($c)
             $c|Add-Member -Force transport $t
@@ -189,8 +190,8 @@ function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request) {
             foreach($field in @('checkUrl','dnsServer')){if($c.profile.vpn.$field){$c.vpn|Add-Member -Force $field $c.profile.vpn.$field}}
         }
         Stop-WizardOldTransport $Root
-        Start-WizardWorkingTransport $Root $Bundle
-        $tag=Wait-WizardChannel $Root ([int](Get-TransportValue $t 'channelSocksPort' 2223))
+        $daemon=Start-WizardWorkingTransport $Root $Bundle
+        $tag=Wait-WizardChannel $Root ([int](Get-TransportValue $t 'channelSocksPort' 2223)) $TimeoutSeconds $daemon
         return @{ok=$true;vpn='channel';channel=$tag;summary=('Канал до сервера поднят: '+$tag)}
     }catch{
         Write-SetupLog $Root 'bootstrap.channel.unavailable'
@@ -221,25 +222,88 @@ function Test-WizardChannelPort([int]$Port) {
     try{return ($client.ConnectAsync('127.0.0.1',$Port).Wait(1000) -and $client.Connected)}catch{return $false}finally{$client.Close()}
 }
 # The daemon's own status (status/transport.json of the current config revision) names the active candidate.
-function Wait-WizardChannel([string]$Root,[int]$Port,[int]$TimeoutSeconds=45) {
-    $watch=[Diagnostics.Stopwatch]::StartNew();$file=Join-Path $Root 'status/transport.json';$listed=$false;$last=''
-    while($true){
-        $status=$null;$revision=$null
-        try{if(Test-Path -LiteralPath $file){$status=Read-TransportJson $file;$revision=Get-TransportRevision $Root}}catch{$status=$null}
-        if($status -and $status.configRevision -ceq $revision){
-            if(-not $listed -and @($status.candidates|Where-Object {$null -ne $_}).Count){
-                Write-WizardProgress ('· кандидаты канала: '+((@($status.candidates|Where-Object {$_ -and $_.enabled -ne $false}|ForEach-Object {[string]$_.tag})) -join ', '));$listed=$true
+function Get-WizardChannelFailure([string]$Root,[DateTime]$StartedAt,$Daemon) {
+    $details=@();$log=Join-Path $Root 'logs/transport.log'
+    if(Test-Path -LiteralPath $log){
+        # These log details are already sanitized. Ignore earlier runs, including rotated history.
+        $recent=@(Get-Content -LiteralPath $log -Encoding UTF8 -Tail 100 | Where-Object {
+            if($_ -match '^(\S+) (fatal|process-failed) (.+)$'){
+                try{(Convert-TransportUtc $Matches[1]) -ge $StartedAt}catch{$false}
             }
-            if($status.error){$last=[string]$status.error}
-            if($status.active -and (Test-StatusFresh $Root transport) -and (Test-WizardChannelPort $Port)){
-                Write-WizardProgress ('· выбран кандидат канала: '+[string]$status.active)
+        })
+        $fatal=@($recent|Where-Object {$_ -match '^\S+ fatal '})
+        if($fatal.Count){$details+=$fatal[-1]}elseif($recent.Count){$details+=$recent[-1]}
+    }
+    if($Daemon -and $Daemon.OutputDrain){try{[void]$Daemon.OutputDrain.Wait(200)}catch{}}
+    $output=Join-Path $Root 'logs/transport-daemon.out'
+    if(Test-Path -LiteralPath $output){
+        $context=@()
+        try{
+            $config=Read-TransportJson (Join-Path $Root 'config.json');$context+=,$config
+            if($config.transport.channelPath){$context+=,(Read-TransportJson $config.transport.channelPath)}
+            $context+=@(Get-TransportDiagnosticContext ([pscustomobject]@{Transport=$config.transport}) $Root)
+        }catch{}
+        $lines=@(Get-Content -LiteralPath $output -Encoding UTF8 -TotalCount 6 | Where-Object {$_.Trim()})
+        if(($lines -join ' ') -match 'Транспорт уже запущен'){return 'Транспорт уже запущен'}
+        foreach($line in $lines){$details+=Protect-TransportDiagnostic $line $context}
+    }
+    if($details.Count){return ($details -join '; ')}
+    return 'модуль связи завершился без статуса; проверьте logs/transport-daemon.out'
+}
+function Wait-WizardChannel([string]$Root,[int]$Port,[int]$TimeoutSeconds=25,$Daemon=$null,[DateTime]$StartedAt=[DateTime]::UtcNow) {
+    if($Daemon){$StartedAt=$Daemon.StartedAt}
+    $watch=[Diagnostics.Stopwatch]::StartNew();$file=Join-Path $Root 'status/transport.json';$listed=$false;$last=''
+    $states=@{};$mismatchAt=$null;$warned=$false;$nextWaiting=5
+    try{while($true){
+        if($Daemon -and $Daemon.Process.HasExited){throw ('модуль связи завершился: '+(Get-WizardChannelFailure $Root $StartedAt $Daemon))}
+        $status=$null;$revision=$null
+        try{if(Test-Path -LiteralPath $file){$status=Read-TransportJson $file;$revision=Get-TransportRevision $Root}}catch{}
+        # Even a failure before revision calculation belongs to this run if its timestamp is later than launch.
+        if($status -and $status.fatal -and (Convert-TransportUtc $status.updatedAt) -ge $StartedAt -and (-not $status.configRevision -or $status.configRevision -ceq $revision)){
+            throw ('ошибка модуля связи: '+(Get-WizardChannelFailure $Root $StartedAt $Daemon)+'; '+(Protect-TransportText ([string]$status.error)))
+        }
+        if($status -and $revision -and $status.configRevision -ceq $revision){
+            $mismatchAt=$null;$warned=$false
+            $candidates=@($status.candidates|Where-Object {$_ -and $_.enabled -ne $false})
+            if(-not $listed -and $candidates.Count){
+                Write-WizardProgress ('· кандидаты канала: '+((@($candidates|ForEach-Object {Protect-TransportText ([string]$_.tag)})) -join ', '));$listed=$true
+            }
+            foreach($candidate in $candidates){
+                # Only machine tags, states and reason codes: candidate titles/stderr can contain addresses.
+                $tag=[string]$candidate.tag;if($tag -notmatch '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,95}$'){$tag='invalid-tag'}
+                $state=[string]$candidate.state;if($state -notin @('unknown','pending','remembered','ok','fail','slow','frozen','disabled')){continue}
+                if($states[$tag] -cne $state){
+                    $text='· '+$tag+': '+$state
+                    if($state -eq 'ok' -and $null -ne $candidate.probeMs){$text+=' '+[int]$candidate.probeMs+' мс'}
+                    if($state -in @('fail','slow','frozen') -and $candidate.diagnostic.reason -match '^[a-z][a-z0-9-]{0,63}$'){$text+=' — '+[string]$candidate.diagnostic.reason}
+                    Write-WizardProgress $text;$states[$tag]=$state
+                }
+            }
+            if($status.error){$last=Protect-TransportText ([string]$status.error)}
+            if($candidates.Count -and -not @($candidates|Where-Object {$_.state -ne 'fail'}).Count){
+                $reasons=@($candidates|ForEach-Object {([string]$_.tag)+': '+$(if($_.diagnostic.reason -match '^[a-z][a-z0-9-]{0,63}$'){$_.diagnostic.reason}else{'fail'})})
+                throw ('все варианты канала не прошли: '+(Protect-TransportText ($reasons -join ', ')))
+            }
+            if($status.ok -and $status.active -and (Test-StatusFresh $Root transport) -and (Test-WizardChannelPort $Port)){
+                Write-WizardProgress ('· выбран кандидат канала: '+(Protect-TransportText ([string]$status.active)))
                 Write-WizardProgress ('· канал поднят за '+$watch.ElapsedMilliseconds+' мс')
                 return [string]$status.active
             }
+        }elseif($status){
+            if($null -eq $mismatchAt){$mismatchAt=$watch.Elapsed.TotalSeconds}
+            if(-not $warned -and $watch.Elapsed.TotalSeconds-$mismatchAt -ge 5){
+                Write-WizardProgress '· модуль связи работает со старыми настройками (ревизия не совпала)';$warned=$true
+                foreach($field in @('error','configError')){if($status.$field){$last=Protect-TransportText ([string]$status.$field);Write-WizardProgress ('· '+$last)}}
+            }
+        }else{
+            $mismatchAt=$null;$warned=$false
+            if($watch.Elapsed.TotalSeconds -ge $nextWaiting){
+                Write-WizardProgress ('· жду статус модуля связи ('+[int]$watch.Elapsed.TotalSeconds+' с)');$nextWaiting=$watch.Elapsed.TotalSeconds+5
+            }
         }
         if($watch.Elapsed.TotalSeconds -ge $TimeoutSeconds){break}
-        Start-Sleep -Seconds 1
-    }
+        Start-Sleep -Milliseconds 200
+    }}finally{if($Daemon -and $Daemon.Process.HasExited){$Daemon.Process.Dispose()}}
     Write-WizardProgress ('· канал не поднят за '+$TimeoutSeconds+' с')
     throw ('нет рабочего кандидата за '+$TimeoutSeconds+' с'+$(if($last){' ('+$last+')'}else{''}))
 }

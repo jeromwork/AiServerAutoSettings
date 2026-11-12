@@ -37,13 +37,38 @@ function Invoke-WizardAction([string]$Root,[string]$Action,$Request,[scriptblock
 }
 
 function Start-WizardWorkingTransport([string]$Root,[string]$Bundle) {
+    # CopyToAsync needs one synchronized sink for both pipes and disposal after BOTH drains.
+    # A .NET helper avoids PowerShell callbacks without a runspace on the IO threads (PS 5.1).
+    if(-not ('RemoteAgents.WizardDaemonOutput' -as [type])){Add-Type -TypeDefinition @'
+using System.IO;
+using System.Threading.Tasks;
+namespace RemoteAgents {
+ public static class WizardDaemonOutput {
+  public static async Task Drain(Stream stdout, Stream stderr, Stream file) {
+   using(var sink = Stream.Synchronized(file)) {
+    await Task.WhenAll(stdout.CopyToAsync(sink), stderr.CopyToAsync(sink)).ConfigureAwait(false);
+   }
+  }
+ }
+}
+'@
+    }
     # The daemon's own per-Home mutex arbitrates with the tray supervisor.
     $stop=Join-Path $Root 'state/transport.stop';if(Test-Path $stop){Remove-Item -LiteralPath $stop -Force}
     $si=New-Object Diagnostics.ProcessStartInfo;$si.FileName=Get-TransportPowerShell
     $si.Arguments=((@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $Bundle 'transport/Transport.Daemon.ps1'),'-Home',$Root)|ForEach-Object {Quote-Transport $_}) -join ' ')
     $si.UseShellExecute=$false;$si.CreateNoWindow=$true;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true
     $child=New-Object Diagnostics.Process;$child.StartInfo=$si
-    try{[void]$child.Start();[void]$child.StandardOutput.BaseStream.CopyToAsync([IO.Stream]::Null);[void]$child.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)}finally{$child.Dispose()}
+    $output=Join-Path $Root 'logs/transport-daemon.out';[void][IO.Directory]::CreateDirectory((Split-Path $output -Parent))
+    # Restrict the raw diagnostic file before the child can write; only sanitized excerpts reach the UI.
+    if(-not [IO.File]::Exists($output)){[IO.File]::WriteAllText($output,'')};Protect-TransportPath $output
+    $sink=New-Object IO.FileStream($output,[IO.FileMode]::Create,[IO.FileAccess]::Write,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    $started=[DateTime]::UtcNow
+    try{
+        [void]$child.Start()
+        $drain=[RemoteAgents.WizardDaemonOutput]::Drain($child.StandardOutput.BaseStream,$child.StandardError.BaseStream,$sink)
+        [pscustomobject]@{Process=$child;StartedAt=$started;OutputDrain=$drain}
+    }catch{$sink.Dispose();$child.Dispose();throw}
 }
 function Wait-WizardWorkingProof([string]$Root,[DateTime]$Mark,[int]$Timeout=120) {
     $watch=[Diagnostics.Stopwatch]::StartNew()
@@ -57,14 +82,14 @@ function Set-WizardInitialNetwork([string]$Root,[string]$Bundle,$Transport) {
     $previous=(Read-TransportJson (Join-Path $Root 'config.json')).transport;$mark=[DateTime]::UtcNow
     # Channel first: the new transport keeps the channel entry and the relays it was raised through.
     if($previous.channelFirst){
-        foreach($field in @('channelFirst','channelSocksPort')){if($null -ne $previous.$field -and $null -eq $Transport.$field){$Transport|Add-Member -Force $field $previous.$field}}
+        foreach($field in @('channelFirst','channelSocksPort','probeTimeoutSec')){if($null -ne $previous.$field -and $null -eq $Transport.$field){$Transport|Add-Member -Force $field $previous.$field}}
         if(-not @($Transport.relays|Where-Object {$null -ne $_}).Count -and @($previous.relays|Where-Object {$null -ne $_}).Count){$Transport|Add-Member -Force relays @($previous.relays|Where-Object {$null -ne $_})}
     }
     try{
         Update-LauncherConfig $Root {param($c) $c|Add-Member -Force transport $Transport}
         # A running daemon (same Home mutex) re-reads the changed config itself: the new process exits at once and
         # the working one restarts only sing-box after a background check, so the channel SOCKS entry is gone briefly.
-        Start-WizardWorkingTransport $Root $Bundle
+        Start-WizardWorkingTransport $Root $Bundle | Out-Null
         Wait-WizardWorkingProof $Root $mark
     }catch{
         Update-LauncherConfig $Root {param($c) $c|Add-Member -Force transport $previous}

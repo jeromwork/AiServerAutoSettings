@@ -1,5 +1,5 @@
 ﻿#requires -Version 5.1
-param([string]$TestHome)
+param([string]$TestHome=$env:LOCALAPPDATA)
 $ErrorActionPreference='Stop'
 $repo=Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent
 . (Join-Path $repo 'build/Wizard.Common.ps1')
@@ -9,6 +9,7 @@ $root=Join-Path $TestHome 'RemoteAgents'
 $script:checks=0
 function Assert($Ok,[string]$Why){if(-not $Ok){throw $Why};$script:checks++}
 function Get-FreePort {$l=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,0);$l.Start();$port=[int]$l.LocalEndpoint.Port;$l.Stop();$port}
+$realStart=${function:Start-WizardWorkingTransport}
 $script:events=New-Object Collections.ArrayList
 $script:daemonOk=$true;$script:listener=$null
 # Channel first never starts TUN, never enables the VPN component and never asks about a foreign VPN.
@@ -85,6 +86,105 @@ Write-TransportJson (Join-Path $root 'status/transport.json') ([ordered]@{config
 $failed=$null;try{Wait-WizardChannel $root (Get-FreePort) 2|Out-Null}catch{$failed=$_.Exception.Message}
 Assert ($failed -like 'нет рабочего кандидата за 2 с*') 'no candidate in time is a failure'
 $script:daemonOk=$true
+# Short bootstrap probes are persisted only when the user has not chosen a value.
+Reset
+$r=Invoke-WizardStep $root $bundle 'Bootstrap' $request
+Assert ((Read-TransportJson (Join-Path $root 'config.json')).transport.probeTimeoutSec -eq 12) 'bootstrap defaults to a 12 second probe'
+Reset
+Update-LauncherConfig $root {param($c) $c.transport|Add-Member probeTimeoutSec 19}
+$r=Invoke-WizardStep $root $bundle 'Bootstrap' $request
+Assert ((Read-TransportJson (Join-Path $root 'config.json')).transport.probeTimeoutSec -eq 19) 'bootstrap preserves the user probe timeout'
+
+function Write-ChannelFixture($Revision,$Rows,$ErrorText='') {
+    Write-TransportJson (Join-Path $root 'status/transport.json') @{configRevision=$Revision;ok=$false;candidates=@($Rows);updatedAt=[DateTime]::UtcNow.ToString('o');error=$ErrorText}
+}
+$rows=@(@{tag='vless-direct';state='fail';enabled=$true;diagnostic=@{reason='timeout'}},@{tag='vless-relay-sparfum';state='fail';enabled=$true;diagnostic=@{reason='connection-refused'}})
+Write-ChannelFixture (Get-TransportRevision $root) $rows
+$watch=[Diagnostics.Stopwatch]::StartNew();$failure=''
+try{Wait-WizardChannel $root (Get-FreePort) 20|Out-Null}catch{$failure=$_.Exception.Message}
+Assert ($watch.Elapsed.TotalSeconds -lt 1 -and $failure -like 'все варианты канала не прошли: *vless-direct: timeout*vless-relay-sparfum: connection-refused*') 'all fail exits immediately with reason codes'
+$allFailMs=$watch.ElapsedMilliseconds
+
+# Real child writes CRLF status updates, while the wait reports state transitions once each.
+$fixture=Join-Path $bundle 'transport/Transport.Daemon.ps1'
+$code=@'
+param([Alias('Home')][string]$TransportHome)
+. (Join-Path 'REPO' 'transport/Transport.Common.ps1')
+$revision=Get-TransportRevision $TransportHome
+foreach($state in @('unknown','fail','ok')){
+    $row=@{tag='vless-relay-sparfum';state=$state;enabled=$true;probeMs=640;diagnostic=@{reason='connection-refused'}}
+    $status=@{configRevision=$revision;ok=($state -eq 'ok');active='vless-relay-sparfum';candidates=@($row,@{tag='vless-direct';state='unknown';enabled=$true});updatedAt=[DateTime]::UtcNow.ToString('o')}
+    [IO.File]::WriteAllText((Join-Path $TransportHome 'status/transport.json'),(($status|ConvertTo-Json -Depth 10).Replace("`r",'').Replace("`n","`r`n")))
+    Start-Sleep -Milliseconds 700
+}
+'@
+[IO.File]::WriteAllText($fixture,$code.Replace('REPO',$repo.Replace("'","''")),(New-Object Text.UTF8Encoding($true)))
+Remove-Item -LiteralPath (Join-Path $root 'status/transport.json')
+[IO.File]::WriteAllText($script:WizardProgressFile,'')
+$child=& $realStart $root $bundle
+try{
+    $tag=Wait-WizardChannel $root $channelPort 8 $child
+    Assert ($tag -eq 'vless-relay-sparfum') 'state fixture reaches a confirmed channel'
+}finally{if(-not $child.Process.HasExited){$child.Process.WaitForExit(3000)|Out-Null};$child.Process.Dispose()}
+$trace=@([IO.File]::ReadAllLines($script:WizardProgressFile)|ForEach-Object {(ConvertFrom-Json $_).text})
+Assert (@($trace|Where-Object {$_ -ceq '· vless-relay-sparfum: unknown'}).Count -eq 1) 'unknown state printed once'
+Assert (@($trace|Where-Object {$_ -ceq '· vless-relay-sparfum: fail — connection-refused'}).Count -eq 1) 'failure transition printed without addresses'
+Assert (@($trace|Where-Object {$_ -ceq '· vless-relay-sparfum: ok 640 мс'}).Count -eq 1) 'ok transition includes measured milliseconds'
+
+# The actual launcher retains the process and both output pipes. Old fatals cannot hide the new failure.
+[IO.File]::WriteAllText($fixture,('﻿param([Alias(''Home'')][string]$TransportHome)' + "`r`n" +
+    '. (Join-Path ''REPO'' ''transport/Transport.Common.ps1'')'.Replace('REPO',$repo.Replace("'","''")) + "`r`n" +
+    'Write-TransportLog $TransportHome ''fatal'' ''Нет файла канала @fixture.ps1:7''' + "`r`n" +
+    '[Console]::Out.WriteLine(''stdout password=short-test'');[Console]::Error.WriteLine(''stderr token=short-test'');exit 9' + "`r`n"))
+[IO.File]::WriteAllText((Join-Path $root 'logs/transport.log'),"2000-01-01T00:00:00Z fatal старая причина @old.ps1:1`r`n")
+function Start-WizardWorkingTransport($Root,$Bundle){& $realStart $Root $Bundle}
+Reset
+$watch=[Diagnostics.Stopwatch]::StartNew();$r=Invoke-WizardStep $root $bundle 'Bootstrap' $request
+$exitMs=$watch.ElapsedMilliseconds
+Assert (-not $r.ok -and $exitMs -lt 3000 -and $r.summary -like '*Нет файла канала @fixture.ps1:7*' -and $r.summary -notlike '*старая причина*') 'an immediately exited daemon fails Bootstrap in less than three seconds with the new fatal reason'
+Assert ($r.summary -notlike '*short-test*' -and $r.summary -like '*<redacted>*') 'raw daemon output is sanitized before the summary'
+$raw=[IO.File]::ReadAllText((Join-Path $root 'logs/transport-daemon.out'))
+Assert ($raw.Contains('stdout password=short-test') -and $raw.Contains('stderr token=short-test')) 'both daemon pipes persist in the private file'
+# A second launch truncates output; duplicate-instance errors are explicit even without a status.
+[IO.File]::WriteAllText($fixture,('param([Alias(''Home'')][string]$TransportHome)' + "`r`n" + '[Console]::Error.WriteLine(''Транспорт уже запущен'');exit 1'),(New-Object Text.UTF8Encoding($true)))
+Reset
+$r=Invoke-WizardStep $root $bundle 'Bootstrap' $request
+Assert (-not $r.ok -and $r.summary -like '*Транспорт уже запущен*') 'duplicate instance exits with its explicit reason'
+Assert (-not [IO.File]::ReadAllText((Join-Path $root 'logs/transport-daemon.out')).Contains('short-test')) 'daemon output overwritten on every launch'
+
+# A recent fatal with an empty revision is accepted; earlier runs are ignored.
+Reset
+$mark=[DateTime]::UtcNow.AddSeconds(-1)
+Write-TransportJson (Join-Path $root 'status/transport.json') @{configRevision='';fatal=$true;error='Нет настроек';updatedAt=[DateTime]::UtcNow.ToString('o')}
+$failure='';try{Wait-WizardChannel $root (Get-FreePort) 2 $null $mark|Out-Null}catch{$failure=$_.Exception.Message}
+Assert ($failure -like 'ошибка модуля связи: *Нет настроек*') 'a fresh fatal without revision cannot disappear'
+Write-TransportJson (Join-Path $root 'status/transport.json') @{configRevision='';fatal=$true;error='старый fatal';updatedAt='2000-01-01T00:00:00Z'}
+$failure='';try{Wait-WizardChannel $root (Get-FreePort) 1 $null $mark|Out-Null}catch{$failure=$_.Exception.Message}
+Assert ($failure -like 'нет рабочего кандидата за 1 с*') 'old fatal without revision ignored'
+
+# The real daemon fails before candidate/network setup, yet publishes the revision it read.
+$fatalHome=Join-Path $TestHome 'fatal-home';[void][IO.Directory]::CreateDirectory($fatalHome)
+Write-TransportJson (Join-Path $fatalHome 'config.json') @{transport=@{profilePath=$profileFile;channelPath=$channel}}
+$child=& $realStart $fatalHome $repo
+try{
+    Assert ($child.Process.WaitForExit(5000)) 'real daemon with incomplete profile exits'
+    $fatalStatus=Read-TransportJson (Join-Path $fatalHome 'status/transport.json')
+    Assert ($fatalStatus.fatal -and $fatalStatus.configRevision -ceq (Get-TransportRevision $fatalHome)) 'real initialization fatal keeps input revision'
+}finally{$child.Process.Dispose()}
+
+# Long initialization and a mismatching revision produce actionable progress at five seconds.
+Reset
+[IO.File]::WriteAllText($script:WizardProgressFile,'')
+try{Wait-WizardChannel $root (Get-FreePort) 6|Out-Null}catch{}
+$trace=[IO.File]::ReadAllText($script:WizardProgressFile)
+Assert ($trace.Contains('жду статус модуля связи (5 с)')) 'no-status wait reports elapsed time'
+Write-TransportJson (Join-Path $root 'status/transport.json') @{configRevision='old';error='прежняя ошибка';configError='не удалось применить конфиг'}
+[IO.File]::WriteAllText($script:WizardProgressFile,'')
+try{Wait-WizardChannel $root (Get-FreePort) 6|Out-Null}catch{}
+$trace=[IO.File]::ReadAllText($script:WizardProgressFile)
+Assert ($trace.Contains('модуль связи работает со старыми настройками (ревизия не совпала)') -and $trace.Contains('прежняя ошибка') -and $trace.Contains('не удалось применить конфиг')) 'stale revision and both errors are reported after five seconds'
+Write-Host ('FAST timings: daemon exit '+$exitMs+' ms; all fail '+$allFailMs+' ms')
+
 # The contracted bootstrap form needs no extra public catalog field.
 $initial.Remove('catalog');$initial.entries=@{fixture=@{secret='vpn-entry-fixture'}}
 function Start-WizardWorkingTransport($Root,$Bundle){[void]$script:events.Add('daemon');Write-TransportJson (Join-Path $Root 'status/transport.json') ([ordered]@{configRevision=(Get-TransportRevision $Root);ok=$true;active='vless-direct';candidates=@(@{tag='vless-direct';enabled=$true});updatedAt=[DateTime]::UtcNow.ToString('o')})}
