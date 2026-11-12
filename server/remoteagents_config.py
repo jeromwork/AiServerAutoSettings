@@ -39,7 +39,6 @@ USER_RE = re.compile(r'[a-z_][a-z0-9_-]{0,31}\Z')
 HOST_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9.:-]{0,252}\Z')
 HOST_KEY_RE = re.compile(r'(ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|ssh-rsa) [A-Za-z0-9+/]+={0,2}\Z')
 ROUTE_NAME_RE = re.compile(r'[a-z0-9][a-z0-9_-]{0,31}\Z')
-KEY_TYPES = ('ssh-ed25519', 'ssh-rsa', 'ecdsa-sha2-', 'sk-ssh-ed25519@openssh.com', 'sk-ecdsa-sha2-')
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -131,7 +130,7 @@ def unprotect(section, master):
         return {k: v for k, v in section.items()}
     require(section.get('protected') == 'master-password', 'Неизвестный вид защиты секретов')
     kdf = section.get('kdf') or {}
-    require(kdf.get('name') == 'pbkdf2-sha256' and isinstance(kdf.get('iterations'), int) and kdf['iterations'] >= 10000, 'Неверные параметры kdf')
+    require(kdf.get('name') == 'pbkdf2-sha256' and type(kdf.get('iterations')) is int and 10000 <= kdf['iterations'] <= 10000000, 'Неверные параметры kdf')
     keys = derive(master, base64.b64decode(kdf['salt'], validate=True), kdf['iterations'])
     require(dec1(section.get('check', ''), keys) == CHECK_TEXT, 'Неверный мастер-пароль')
     return {k: (dec1(v, keys) if v else '') for k, v in section.items() if k not in ('protected', 'kdf', 'check')}
@@ -150,12 +149,39 @@ def trusted(path, what):
                 what + ': файл и каталоги над ним должны принадлежать root или вам и быть закрыты от записи другим')
 
 
-def private_file(path, what):
+def read_trusted(path, what, private=False):
+    """Проверка и чтение одного и того же объекта: путь разрешается, каталоги над ним проверяются
+    (никто чужой не может подменить), файл открывается O_NOFOLLOW|O_NONBLOCK и проверяется через fstat."""
     path = Path(path)
     require(path.is_absolute(), what + ': нужен абсолютный путь')
-    st = path.stat()
-    require(stat.S_ISREG(st.st_mode) and st.st_mode & 0o077 == 0 and st.st_uid in (0, os.geteuid()), what + ': нужен файл с правами 0600')
-    return path.read_text(encoding='utf-8-sig').replace('\r', '')
+    try:
+        real = path.resolve(strict=True)
+    except OSError:
+        raise Error(what + ': нет файла ' + str(path))
+    for node in (real.parent, *real.parent.parents):
+        st = node.stat()
+        sticky_root = st.st_mode & stat.S_ISVTX and st.st_uid == 0
+        require(st.st_uid in (0, os.geteuid()) and (st.st_mode & 0o022 == 0 or sticky_root),
+                what + ': каталоги над файлом должны принадлежать root или вам и быть закрыты от записи другим')
+    try:
+        fd = os.open(real, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        raise Error(what + ': файл недоступен ' + str(path))
+    try:
+        st = os.fstat(fd)
+        require(stat.S_ISREG(st.st_mode) and st.st_uid in (0, os.geteuid()) and st.st_mode & 0o022 == 0,
+                what + ': файл должен принадлежать root или вам и быть закрыт от записи другим')
+        require(not private or st.st_mode & 0o077 == 0, what + ': нужен файл с правами 0600')
+        with os.fdopen(os.dup(fd), 'rb') as stream:
+            raw = stream.read(4 * 1024 * 1024 + 1)
+        require(len(raw) <= 4 * 1024 * 1024, what + ': файл больше 4 МиБ')
+        return raw.decode('utf-8-sig').replace('\r', '')
+    finally:
+        os.close(fd)
+
+
+def private_file(path, what):
+    return read_trusted(path, what, private=True)
 
 
 def worker_home(c):
@@ -174,7 +200,10 @@ def settings(path=None):
     path = Path(path)
     require(path.exists(), 'Нет настроек выдачи ' + str(path) + ' (пример: server/config-export.example.json)')
     trusted(path, 'Настройки выдачи')
-    c = load_json(path)
+    try:
+        c = json.loads(read_trusted(path.absolute(), 'Настройки выдачи'))
+    except ValueError:
+        raise Error('Настройки выдачи: повреждён JSON')
     require(isinstance(c, dict) and c.get('schema') == 1 and c.get('version') == 1, 'Неизвестная схема настроек выдачи')
     allowed = {'schema', 'version', '$schema', 'serverAddress', 'serverPort', 'hostKeys', 'hostKeyFiles', 'workerUser',
                'workerAuthorizedKeys', 'stateDir', 'syncFile', 'nodeCatalog', 'routes', 'catalogFile', 'vpnBootstrap',
@@ -263,7 +292,7 @@ def vpn_section(c, values, vpn_on):
     bootstrap = {}
     if source.exists() or explicit:
         try:
-            bootstrap['catalog'] = catalog_validator()(load_json(source))
+            bootstrap['catalog'] = catalog_validator()(json.loads(read_worker(c, source.absolute()).lstrip('\ufeff').replace('\r', '')))
         except (ValueError, KeyError):
             raise Error('Каталог связи не прошёл проверку схемы: ' + str(source))
     settings_ = c.get('vpnBootstrap')
@@ -321,6 +350,14 @@ def common_sections(c, values, vpn_on):
 
 # ---------- authorized_keys и файлы рабочего пользователя ----------
 
+def safe_dir_stat(st, owner):
+    """Каталог на пути: владелец root, рабочий пользователь или запускающий; без записи группе/другим
+    (кроме sticky-каталогов root вроде /tmp). Иначе sshd (StrictModes) не примет ключ, а чужой мог бы подменить файл."""
+    allowed = {0, os.geteuid()} | ({owner[0]} if owner else set())
+    sticky_root = st.st_mode & stat.S_ISVTX and st.st_uid == 0
+    return st.st_uid in allowed and (st.st_mode & 0o022 == 0 or sticky_root)
+
+
 @contextlib.contextmanager
 def directory(path, owner):
     """Каталог открывается по цепочке O_NOFOLLOW от корня: подмена symlink по пути не сработает."""
@@ -338,6 +375,8 @@ def directory(path, owner):
                 raise Error('Путь ' + str(path) + ' недоступен или содержит symlink')
             os.close(parent)
             parent = child
+            if not safe_dir_stat(os.fstat(parent), owner):
+                raise Error('Каталог ' + str(path) + ' (или выше) принадлежит чужому пользователю или открыт для записи другим')
         yield parent
     finally:
         os.close(parent)
@@ -351,29 +390,81 @@ def owner_of(c):
     return user.pw_uid, user.pw_gid
 
 
+def open_regular(name, parent, path, flags=os.O_RDONLY):
+    """O_NONBLOCK: FIFO вместо файла не подвесит команду; тип проверяется до чтения."""
+    fd = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        os.close(fd)
+        raise Error(str(path) + ': не обычный файл или hardlink')
+    os.set_blocking(fd, True)
+    return fd, st
+
+
+def read_fd(fd):
+    # newline='' и surrogateescape: чужие строки (CRLF, не UTF-8) сохраняются байт в байт.
+    with os.fdopen(os.dup(fd), 'r', encoding='utf-8', errors='surrogateescape', newline='') as stream:
+        stream.seek(0)
+        return stream.read()
+
+
+def write_all(fd, text):
+    data = memoryview(text.encode('utf-8', 'surrogateescape'))
+    while data:
+        data = data[os.write(fd, data):]
+
+
 def read_worker(c, path):
     path = Path(path)
     with directory(path.parent, owner_of(c)) as parent:
         try:
-            fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
+            fd, _ = open_regular(path.name, parent, path)
         except FileNotFoundError:
             return ''
         except OSError:
             raise Error(str(path) + ': не обычный файл (symlink?)')
-        with os.fdopen(fd, 'r', encoding='utf-8', errors='surrogateescape', newline='') as stream:
-            return stream.read()
+        try:
+            return read_fd(fd)
+        finally:
+            os.close(fd)
+
+
+def append_worker(c, path, line):
+    """Дописывание строки через O_APPEND проверенного файла: параллельный `>>` другого процесса не теряется."""
+    path = Path(path)
+    owner = owner_of(c)
+    with directory(path.parent, owner) as parent:
+        try:
+            fd, st = open_regular(path.name, parent, path, os.O_RDWR | os.O_APPEND)
+        except FileNotFoundError:
+            fd = os.open(path.name, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+            st = os.fstat(fd)
+        except OSError:
+            raise Error(str(path) + ': не обычный файл (symlink?)')
+        try:
+            require(st.st_uid in ({owner[0], 0} if owner else {os.geteuid()}), str(path) + ': файл принадлежит чужому пользователю')
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            old = read_fd(fd)
+            write_all(fd, ('' if not old or old.endswith('\n') else '\n') + line + '\n')
+            os.fchmod(fd, 0o600)
+            if owner:
+                os.fchown(fd, *owner)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
 
 def replace_worker(c, path, transform):
     """Атомарная замена файла рабочего пользователя: 0600, владелец — рабочий пользователь,
-    flock, без symlink/hardlink; если файл поменял кто-то ещё (например `>>` мастера), пересчитать."""
+    flock, без symlink/hardlink/FIFO; если файл поменял кто-то ещё, пересчитать.
+    Остаточное окно: `>>` без flock между последней проверкой и rename (микросекунды) — см. отчёт."""
     path = Path(path)
     owner = owner_of(c)
     with directory(path.parent, owner) as parent:
         for _ in range(5):
             old_fd, before, old = None, None, ''
             try:
-                old_fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
+                old_fd, before = open_regular(path.name, parent, path)
             except FileNotFoundError:
                 pass
             except OSError:
@@ -381,12 +472,8 @@ def replace_worker(c, path, transform):
             tmp = '.' + path.name + '.ra-' + secrets.token_hex(6)
             try:
                 if old_fd is not None:
-                    before = os.fstat(old_fd)
-                    require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1, str(path) + ': не обычный файл или hardlink')
                     fcntl.flock(old_fd, fcntl.LOCK_EX)
-                    # Чужие байты (не UTF-8) сохраняются как были.
-                    with os.fdopen(os.dup(old_fd), 'r', encoding='utf-8', errors='surrogateescape', newline='') as stream:
-                        old = stream.read()
+                    old = read_fd(old_fd)
                 new = transform(old)
                 if before is None and not new:
                     return old, new
@@ -394,9 +481,7 @@ def replace_worker(c, path, transform):
                     return old, new
                 fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
                 try:
-                    data = memoryview(new.encode('utf-8', 'surrogateescape'))
-                    while data:
-                        data = data[os.write(fd, data):]
+                    write_all(fd, new)
                     os.fchmod(fd, 0o600)
                     if owner:
                         os.fchown(fd, *owner)
@@ -422,15 +507,37 @@ def replace_worker(c, path, transform):
         raise Error(str(path) + ' всё время меняется другим процессом; повторите позже')
 
 
+def split_lines(text):
+    """Строки по LF с окончаниями; Unicode-разделители внутри строк не считаются переводом строки."""
+    parts = text.split('\n')
+    return [x + '\n' for x in parts[:-1]] + ([parts[-1]] if parts[-1] else [])
+
+
+KEY_TYPE_RE = re.compile(r'(ssh-ed25519|ssh-rsa|ssh-dss|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)\Z')
+
+
 def parse_key_line(line):
-    """→ (тип, base64, комментарий) или None. Опции перед ключом допускаются (их не трогаем)."""
-    tokens = line.strip().split()
-    if not tokens or tokens[0].startswith('#'):
+    """→ (тип, base64, комментарий) или None — по формату sshd(8): [опции] тип base64 [комментарий].
+    Опции разбираются с учётом кавычек и \\-экранирования, метка ищется только в настоящем комментарии."""
+    text = line.strip()
+    if not text or text.startswith('#'):
         return None
-    for i, token in enumerate(tokens[:-1]):
-        if token.startswith(KEY_TYPES) and re.fullmatch(r'[A-Za-z0-9+/]+={0,2}', tokens[i + 1]):
-            return token, tokens[i + 1], ' '.join(tokens[i + 2:])
-    return None
+    head = text.split(None, 1)
+    if not KEY_TYPE_RE.fullmatch(head[0]):
+        quoted, i = False, 0
+        while i < len(text) and (quoted or text[i] not in ' \t'):
+            if text[i] == '\\' and quoted:
+                i += 1
+            elif text[i] == '"':
+                quoted = not quoted
+            i += 1
+        if quoted:
+            return None
+        text = text[i:].strip()
+    parts = text.split(None, 2)
+    if len(parts) < 2 or not KEY_TYPE_RE.fullmatch(parts[0]) or not re.fullmatch(r'[A-Za-z0-9+/]+={0,2}', parts[1]):
+        return None
+    return parts[0], parts[1], (parts[2].strip() if len(parts) > 2 else '')
 
 
 def config_label(comment):
@@ -448,6 +555,8 @@ def fingerprint(blob):
 def locked(c):
     root = Path(c['stateDir'])
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    require(not root.is_symlink(), 'stateDir не должен быть symlink')
+    trusted(root, 'stateDir')  # состояние не под управлением рабочего пользователя, если запускает root
     with (root / 'config.lock').open('a') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
         yield root
@@ -517,13 +626,32 @@ def login_times(c, wanted):
             lines = p.stdout.splitlines()
         except (OSError, subprocess.TimeoutExpired):
             return None
+    latest = {}
     for line in lines:
         match = ACCEPTED.search(line)
         if match and match.group(1) == c['workerUser'] and match.group(2) in wanted:
             tokens = line.split()
             stamp = tokens[0] if tokens and tokens[0][:1].isdigit() else ' '.join(tokens[:3])
-            found[match.group(2)] = stamp
-    return found
+            moment = stamp_time(stamp)
+            previous = latest.get(match.group(2))
+            # Самый поздний вход, а не последний прочитанный (журналы могут идти не по порядку).
+            if previous is None or (moment is not None and (previous[0] is None or moment >= previous[0])):
+                latest[match.group(2)] = (moment, stamp)
+    return {fp: value[1] for fp, value in latest.items()}
+
+
+def stamp_time(stamp):
+    try:
+        moment = dt.datetime.fromisoformat(stamp)
+        return moment if moment.tzinfo else moment.astimezone()
+    except ValueError:
+        pass
+    try:  # syslog «Nov 12 11:00:00» — без года и пояса: местное время, текущий год (или прошлый, если в будущем)
+        current = dt.datetime.now().astimezone()
+        moment = dt.datetime.strptime('%d %s' % (current.year, stamp), '%Y %b %d %H:%M:%S').astimezone()
+        return moment.replace(year=current.year - 1) if moment > current + dt.timedelta(days=1) else moment
+    except ValueError:
+        return None
 
 
 # ---------- команды ----------
@@ -546,6 +674,8 @@ def master_password(args):
 def keypair(c, ident):
     root = Path(c['stateDir'])
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    require(not root.is_symlink(), 'stateDir не должен быть symlink')
+    trusted(root, 'stateDir')
     with tempfile.TemporaryDirectory(dir=root) as tmp:
         key = Path(tmp) / 'key'
         p = subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', LABEL + ident, '-f', str(key)],
@@ -591,16 +721,23 @@ def export(c, args, out=sys.stdout, err=sys.stderr):
         config['disk'] = {'folders': folders}
     config['secrets'] = protect(values, master) if master else values
     text = json.dumps(config, ensure_ascii=False, indent=2) + '\n'
-    target, written = None, False
+    target = folder = None
     if args.output:
-        target = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        output = Path(args.output).absolute()
+        folder = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            target = os.open(output.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder)
+        except BaseException:
+            os.close(folder)
+            raise
+    record = {'id': ident, 'name': name, 'createdUtc': now(), 'createdNs': time.time_ns(),
+              'fingerprint': fingerprint(public.split()[1]), 'publicKey': public}
+    added = False
     try:
         with locked(c):
-            record = {'id': ident, 'name': name, 'createdUtc': now(), 'createdNs': time.time_ns(), 'fingerprint': fingerprint(public.split()[1]), 'publicKey': public}
             save_record(c, record)
-            line = public + ' ' + LABEL + ident + ' ' + name
-            replace_worker(c, c['workerAuthorizedKeys'], lambda old: old + ('' if not old or old.endswith('\n') else '\n') + line + '\n')
-            event(c, 'export.ok', ident)
+            append_worker(c, c['workerAuthorizedKeys'], public + ' ' + LABEL + ident + ' ' + name)
+            added = True
         if target is not None:
             with os.fdopen(os.dup(target), 'wb') as stream:
                 stream.write(text.encode('utf-8'))
@@ -608,13 +745,29 @@ def export(c, args, out=sys.stdout, err=sys.stderr):
         else:
             out.write(text)
             out.flush()
-        written = True
+        with locked(c):
+            event(c, 'export.ok', ident)
+    except BaseException:
+        # Конфиг не дошёл до получателя — его ключ не должен оставаться действующим.
+        try:
+            with locked(c):
+                if added:
+                    remove_label(c, ident)
+                record['failedUtc'] = now()
+                save_record(c, record)
+                event(c, 'export.failed', ident)
+        except Exception:
+            err.write('ВНИМАНИЕ: выдача ' + ident + ' не удалась, а ключ убрать не получилось: «remoteagents config revoke ' + ident + '».\n')
+        if target is not None:
+            with contextlib.suppress(OSError):
+                mine, current = os.fstat(target), os.stat(output.name, dir_fd=folder, follow_symlinks=False)
+                if (mine.st_dev, mine.st_ino) == (current.st_dev, current.st_ino):
+                    os.unlink(output.name, dir_fd=folder)
+        raise
     finally:
         if target is not None:
             os.close(target)
-            if not written:
-                with contextlib.suppress(OSError):
-                    os.unlink(args.output)
+            os.close(folder)
     try:
         publish_sync(c)
     except Exception:
@@ -634,7 +787,7 @@ def list_rows(c):
         saved = records(c)
         text = read_worker(c, c['workerAuthorizedKeys'])
     active = {}
-    for line in text.splitlines():
+    for line in split_lines(text):
         parsed = parse_key_line(line)
         label = parsed and config_label(parsed[2])
         if label:
@@ -642,7 +795,8 @@ def list_rows(c):
     rows = []
     for ident in sorted(set(saved) | set(active), key=lambda i: (saved.get(i, {}).get('createdNs', 0), active.get(i, {}).get('order', 1 << 30), i)):
         record, line = saved.get(ident, {}), active.get(ident)
-        state = 'действует' if line else ('отозван' if record.get('revokedUtc') else 'ключа нет в authorized_keys')
+        state = 'действует' if line else ('отозван' if record.get('revokedUtc') else
+                                          'выдача не удалась' if record.get('failedUtc') else 'ключа нет в authorized_keys')
         rows.append({'id': ident, 'name': record.get('name') or (line or {}).get('name', ''),
                      'createdUtc': record.get('createdUtc'), 'state': state,
                      'fingerprint': (line or record).get('fingerprint', '')})
@@ -666,31 +820,38 @@ def show_list(c, as_json, out=sys.stdout):
             row['id'], row['name'], row['createdUtc'] or 'неизвестно', row['state'], login))
 
 
-def revoke(c, ident, out=sys.stdout, err=sys.stderr):
-    require(isinstance(ident, str) and ID_RE.fullmatch(ident), 'id — 16 шестнадцатеричных символов из «config list»')
-    removed = []
+def remove_label(c, ident):
+    """Убрать из authorized_keys только строки с меткой ra-config:<id>; → (ключи удалённых строк, новый текст)."""
+    result = {}
 
     def drop(old):
-        kept = []
-        for line in old.splitlines(keepends=True):  # остальные строки — байт в байт
+        kept, removed = [], []  # заново на каждую попытку replace_worker
+        for line in split_lines(old):  # остальные строки — байт в байт
             parsed = parse_key_line(line)
             label = parsed and config_label(parsed[2])
             if label and label[0] == ident:
                 removed.append(parsed[0] + ' ' + parsed[1])
             else:
                 kept.append(line)
+        result['removed'] = removed
         return ''.join(kept) if removed else old
 
+    _, new = replace_worker(c, c['workerAuthorizedKeys'], drop)
+    return result.get('removed', []), new
+
+
+def revoke(c, ident, out=sys.stdout, err=sys.stderr):
+    require(isinstance(ident, str) and ID_RE.fullmatch(ident), 'id — 16 шестнадцатеричных символов из «config list»')
     with locked(c):
         saved = records(c).get(ident)
-        _, new = replace_worker(c, c['workerAuthorizedKeys'], drop)
+        removed, new = remove_label(c, ident)
         require(removed or saved, 'Конфиг ' + ident + ' не найден')
         if saved and not saved.get('revokedUtc'):
             saved['revokedUtc'] = now()
             save_record(c, saved)
         event(c, 'revoke.ok' if removed else 'revoke.absent', ident)
     others = []
-    for line in new.splitlines():
+    for line in split_lines(new):
         parsed = parse_key_line(line)
         if parsed and parsed[0] + ' ' + parsed[1] in removed:
             others.append(parsed[2] or 'без метки')
@@ -741,8 +902,13 @@ def devices(c, out=sys.stdout):
     hosts = {}
     for record in module.records(c['nodeCatalog'], worker_home(c)):
         row = hosts.setdefault(record['hostId'], {'hostId': record['hostId'], 'deviceName': '', 'projects': []})
-        row['deviceName'] = row['deviceName'] or module.device_name(record.get('deviceName'), record['hostId'])
+        name = module.device_name(record.get('deviceName'), '')
+        # Имя из записи управления (Bridge) главнее; затем любое содержательное; hostId — последним.
+        if name and (record.get('controlOnly') is True or not row['deviceName']):
+            row['deviceName'] = name
         row['projects'].append(record['projectId'])
+    for row in hosts.values():
+        row['deviceName'] = row['deviceName'] or row['hostId']
     if not hosts:
         out.write('Зарегистрированных компьютеров нет (мост ещё ни разу не подключался).\n')
     for row in hosts.values():

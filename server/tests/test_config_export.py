@@ -55,6 +55,7 @@ class Env:
         self.dir = Path(directory)
         self.home = self.dir / 'worker'
         (self.home / '.ssh').mkdir(parents=True, mode=0o700)
+        self.home.chmod(0o755)  # umask стенда может дать g+w — такой HOME sshd (StrictModes) и выдача отвергают
         self.auth = self.home / '.ssh/authorized_keys'
         self.host_key = self.dir / 'host'
         self.host_pub = keygen(self.host_key)
@@ -378,6 +379,101 @@ class ConfigExportTests(unittest.TestCase):
         ident = data.splitlines()[-1].split()[2].decode()[len('ra-config:'):]
         self.assertEqual(self.e.cli('revoke', ident).returncode, 0)
         self.assertIn(b'\xff\xfe not utf-8', self.e.auth.read_bytes())
+
+    def test_review_unsafe_paths_fifo_and_quoted_options(self):
+        # .ssh с записью для группы: sshd (StrictModes) не примет ключ — выдача честно отказывает.
+        (self.e.home / '.ssh').chmod(0o770)
+        p = self.e.cli('export', '--name', 'Группа')
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('открыт для записи', p.stderr.decode())
+        (self.e.home / '.ssh').chmod(0o700)
+        # FIFO вместо authorized_keys не подвешивает команду.
+        self.e.auth.unlink(missing_ok=True)
+        os.mkfifo(self.e.auth)
+        started = time.monotonic()
+        p = self.e.cli('export', '--name', 'FIFO', timeout=20)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertNotEqual(self.e.cli('list', timeout=20).returncode, 0)
+        self.e.auth.unlink()
+        # Метка внутри кавычек опций — не комментарий; Unicode-разделитель в чужом комментарии не перевод строки.
+        foreign = ('command="echo ssh-ed25519 AAAA ra-config:0123456789abcdef x" '
+                   'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIForeign foreign\u2028tail\n')
+        self.e.auth.write_text(foreign)
+        self.e.export('Свой')
+        own = self.e.auth.read_text().split('\n')[1].split()[2][len('ra-config:'):]
+        self.assertEqual(self.e.cli('revoke', '0123456789abcdef').returncode, 1)  # чужая строка не считается выдачей
+        self.assertEqual(self.e.cli('revoke', own).returncode, 0)
+        self.assertEqual(self.e.auth.read_text(), foreign)
+        print('PASS ревью: .ssh g+w → отказ; FIFO → отказ без зависания; метка в опциях и \\u2028 не путают revoke')
+
+    def test_review_parallel_shell_append_not_lost(self):
+        # Мастер дописывает ключи обычным `>>` без flock; выдача дописывает через O_APPEND и их не теряет.
+        script = 'for i in $(seq 1 300); do printf "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIShell$i shell$i\\n" >> "$1"; done'
+        writer = subprocess.Popen(['bash', '-c', script, 'x', str(self.e.auth)])
+        for n in range(4):
+            self.e.export('Параллельно ' + str(n))
+        writer.wait(timeout=30)
+        lines = self.lines()
+        self.assertEqual(sum('shell' in x for x in lines), 300)
+        self.assertEqual(sum('ra-config:' in x for x in lines), 4)
+
+    def test_review_failed_delivery_rolls_back_key(self):
+        c = rc.settings(self.e.cfg)
+
+        class Broken:
+            def write(self, text):
+                raise BrokenPipeError()
+
+            def flush(self):
+                pass
+        import argparse
+        import io
+        args = argparse.Namespace(name='Обрыв', happier='same', folders='', master_password_stdin=False, vpn='off', output=None)
+        with self.assertRaises(BrokenPipeError):
+            rc.export(c, args, out=Broken(), err=io.StringIO())
+        self.assertNotIn('ra-config:', self.e.auth.read_text() if self.e.auth.exists() else '')
+        rows = [json.loads(x) for x in self.e.cli('list', '--json').stdout.decode().splitlines()]
+        self.assertEqual([r['state'] for r in rows], ['выдача не удалась'])
+        events = (Path(c['stateDir']) / 'config-events.log').read_text()
+        self.assertIn('export.failed', events)
+        self.assertNotIn('export.ok', events)
+
+    def test_review_latest_login_kdf_cap_and_names(self):
+        self.e.export('Вход')
+        fp = json.loads(self.e.cli('list', '--json').stdout)['fingerprint']
+        rotated = self.e.dir / 'auth.log.1'
+        line = '%s host sshd[1]: Accepted publickey for ' + USER + ' from 192.0.2.1 port 5 ssh2: ED25519 ' + fp + '\n'
+        self.e.log.write_text(line % '2026-11-12T10:00:00+00:00')
+        rotated.write_text(line % '2026-11-01T10:00:00+00:00')
+        self.e.c['authLog'] = [str(self.e.log), str(rotated)]  # текущий раньше ротированного
+        self.e.write()
+        self.assertEqual(json.loads(self.e.cli('list', '--json').stdout)['lastLogin'], '2026-11-12T10:00:00+00:00')
+        section = rc.protect({'x': 'y'}, MASTER, iterations=10000)
+        section['kdf']['iterations'] = 2000000000
+        with self.assertRaises(rc.Error):
+            rc.unprotect(section, MASTER)
+        home = Path(self.tmp.name) / 'nodes-home'
+        catalog = home / 'nodes'
+
+        def record(project, host, name, control=False):
+            label = 'win-' + (host + project).encode().hex()[:28].ljust(28, '0')
+            data = dict(projectId=project, hostId=host, deviceLabel=label, socketPath=str(home / '.local/state/codex-remote' / (label + '.sock')),
+                        serverWorkspace=str(home / 'work/projects' / project), windowsReplica='C:\\r\\' + project, allowShell=False)
+            if name is not None:
+                data['deviceName'] = name
+            if control:
+                data['controlOnly'] = True
+            return data
+        nodes.register(catalog, record('control', 'h1', 'Ноутбук', True), home)
+        nodes.register(catalog, record('control', 'h1', None, True), home)  # регистрация без имени не сбрасывает выбранное
+        nodes.register(catalog, record('site', 'h1', None), home)
+        self.assertEqual({r['deviceName'] for r in nodes.records(catalog, home)}, {'Ноутбук'})
+        # Параллельные регистрации одного компьютера под замком дают одно имя на всех записях.
+        with concurrent.futures.ThreadPoolExecutor(6) as pool:
+            list(pool.map(lambda n: nodes.register(catalog, record('p' + str(n), 'h1', 'WIN-X'), home) if n % 2 else
+                          nodes.register(catalog, record('control', 'h1', 'Ноутбук ' + str(n), True), home), range(6)))
+        self.assertEqual(len({r['deviceName'] for r in nodes.records(catalog, home)}), 1)
 
     def test_output_file_private(self):
         out = self.e.dir / 'issued.json'

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Installer-owned public bindings. Presence is always a live authenticated probe."""
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -44,24 +45,15 @@ def register(directory, data, home):
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     host_directory=safe(directory/data['hostId'])
     host_directory.mkdir(mode=0o700,exist_ok=True)
-    path = safe(host_directory/(data['projectId']+'.json'))
-    record = {key: data[key] for key in ('projectId', 'hostId', 'deviceLabel', 'socketPath', 'serverWorkspace', 'windowsReplica', 'allowShell')}
-    if data.get('controlOnly') is True:
-        record['controlOnly'] = True
-    record['deviceName'] = device_name(data.get('deviceName'), data['hostId'])
-    if data.get('controlOnly') is not True:
-        # The computer name chosen in RemoteAgents settings arrives with the control
-        # (Bridge) registration and wins over project handoffs that only know MachineName.
-        for other in sorted(host_directory.glob('*.json')):
-            previous = validate(json.loads(safe(other).read_text('utf-8')), home)
-            if previous.get('controlOnly') is True and previous['hostId'] == data['hostId']:
-                record['deviceName'] = device_name(previous.get('deviceName'), record['deviceName'])
-    record['projectName'] = str(data.get('projectName',data['projectId']))[:120]
-    if path.exists():
-        previous=validate(json.loads(path.read_text('utf-8')),home)
-        if any(previous[key]!=record[key] for key in ('projectId','hostId','deviceLabel','socketPath','serverWorkspace','windowsReplica')):
-            raise ValueError('Existing host/project binding differs; explicit repair required')
-    # Catalog records contain no token; a stale record never means online.
+    # One lock per computer: choosing the name, writing this record and renaming the
+    # other records of the same hostId must not interleave with another registration.
+    lock = safe(host_directory/'.lock')
+    with lock.open('a') as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        _register(host_directory, data, home)
+
+
+def _write(host_directory, path, record):
     temporary = host_directory/(uuid.uuid4().hex+'.tmp')
     try:
         with temporary.open('x', encoding='utf-8') as stream:
@@ -70,26 +62,37 @@ def register(directory, data, home):
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
-    if data.get('controlOnly') is True and device_name(data.get('deviceName'), ''):
-        rename_host(host_directory, data['hostId'], record['deviceName'], home)
 
 
-def rename_host(host_directory, host_id, name, home):
-    # The name belongs to the computer, not to one project binding: a rename from
-    # settings must show up in windows_devices for every project of this hostId.
-    for other in sorted(host_directory.glob('*.json')):
-        previous = validate(json.loads(safe(other).read_text('utf-8')), home)
-        if previous['hostId'] != host_id or previous.get('deviceName') == name:
-            continue
-        previous['deviceName'] = name
-        temporary = host_directory/(uuid.uuid4().hex+'.tmp')
-        try:
-            with temporary.open('x', encoding='utf-8') as stream:
-                json.dump(previous, stream, ensure_ascii=False)
-            temporary.chmod(0o600)
-            os.replace(temporary, other)
-        finally:
-            temporary.unlink(missing_ok=True)
+def _register(host_directory, data, home):
+    path = safe(host_directory/(data['projectId']+'.json'))
+    record = {key: data[key] for key in ('projectId', 'hostId', 'deviceLabel', 'socketPath', 'serverWorkspace', 'windowsReplica', 'allowShell')}
+    if data.get('controlOnly') is True:
+        record['controlOnly'] = True
+    others = [validate(json.loads(safe(other).read_text('utf-8')), home) for other in sorted(host_directory.glob('*.json'))]
+    chosen = [device_name(x.get('deviceName'), '') for x in others if x.get('controlOnly') is True and x['hostId'] == data['hostId']]
+    given = device_name(data.get('deviceName'), '')
+    if data.get('controlOnly') is True:
+        # The name chosen in RemoteAgents settings arrives with the control (Bridge)
+        # registration; an empty name keeps the previously chosen one.
+        record['deviceName'] = given or next((x for x in chosen if x), '') or data['hostId']
+    else:
+        # Project handoffs only know MachineName: the computer's chosen name wins.
+        record['deviceName'] = next((x for x in chosen if x), '') or given or data['hostId']
+    record['projectName'] = str(data.get('projectName',data['projectId']))[:120]
+    if path.exists():
+        previous=validate(json.loads(path.read_text('utf-8')),home)
+        if any(previous[key]!=record[key] for key in ('projectId','hostId','deviceLabel','socketPath','serverWorkspace','windowsReplica')):
+            raise ValueError('Existing host/project binding differs; explicit repair required')
+    # Catalog records contain no token; a stale record never means online.
+    _write(host_directory, path, record)
+    if data.get('controlOnly') is True and given:
+        # The name belongs to the computer, not to one project binding.
+        for other in sorted(host_directory.glob('*.json')):
+            previous = validate(json.loads(safe(other).read_text('utf-8')), home)
+            if previous['hostId'] == data['hostId'] and previous.get('deviceName') != record['deviceName']:
+                previous['deviceName'] = record['deviceName']
+                _write(host_directory, other, previous)
 
 
 def records(directory, home):
