@@ -683,6 +683,8 @@ namespace RemoteAgents.Launcher
         readonly Dictionary<string, string> secrets, hints;
         internal Action<string, SectionState, string> Report = delegate { };
         internal Action<string> Log = delegate { };
+        internal Action<string> AccountCreated = delegate { };
+        readonly HappierAccountCreation accountCreation = new HappierAccountCreation();
         internal Func<string, string, string> AskSecret = (name, why) => null;
         Dictionary<string, object> services = new Dictionary<string, object>();
         internal readonly ConcurrentDictionary<string, SectionOutcome> Outcomes = new ConcurrentDictionary<string, SectionOutcome>();
@@ -835,9 +837,17 @@ namespace RemoteAgents.Launcher
                 SecretVault.Set(home, name, key); secrets[name] = key;
                 ConfigProfile.Update(home, pr => { var hh = new Dictionary<string, object>(Json.Map(Json.Get(pr, "happier"))); hh["mode"] = "same"; hh["key"] = new Dictionary<string, object> { { "secret", name } }; pr["happier"] = hh; });
                 hash = ConfigSections.Hash(ConfigProfile.Load(home), ConfigSections.Account);
-                Log("Happier: создан новый аккаунт. Ключ сохранён в секретах программы и попадёт в «Сохранить конфиг в файл»; для телефона — Happier → Restore with Secret Key.");
+                accountCreation.Remember(Json.Str(request, "label"));
+                Log("Happier: ключ нового аккаунта сохранён в секретах программы.");
             }
-            return SectionOutcome.From(result, "Аккаунт Happier подключён ✓");
+            var outcome = SectionOutcome.From(result, "Аккаунт Happier подключён ✓");
+            NotifyAccountCreated(outcome);
+            return outcome;
+        }
+        void NotifyAccountCreated(SectionOutcome outcome)
+        {
+            string message = accountCreation.Complete(outcome);
+            if (message.Length > 0) AccountCreated(message);
         }
         // Root on the server for Proxy/Lan: the key as root, otherwise the root password from the config,
         // otherwise «command» — an exact command for the administrator (no secrets in it) goes to the journal.
@@ -916,6 +926,7 @@ namespace RemoteAgents.Launcher
                     if (state != "finished") continue;
                     if (w.Key == ConfigSections.Account && Json.Bool(status, "pendingAccount")) {
                         try { var r = await Task.Run(() => WizardRunner.Run(home, bundle, "ResumeAccount", new { }, token)); var o = SectionOutcome.From(r, "Аккаунт Happier подключён ✓"); Outcomes[w.Key] = o;
+                            NotifyAccountCreated(o);
                             if (o.Ok) ConfigProfile.MarkApplied(home, w.Key, ConfigSections.Hash(ConfigProfile.Load(home), w.Key)); Report(w.Key, o.Ok ? SectionState.Done : SectionState.Pending, o.Summary); }
                         catch (OperationCanceledException) { throw; } catch (Exception e) { Outcomes[w.Key] = new SectionOutcome { Summary = e.Message }; Report(w.Key, SectionState.Failed, e.Message); }
                     } else await Execute(new[] { w.Key }, token);

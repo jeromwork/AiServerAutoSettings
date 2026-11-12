@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Diagnostics;
 using System.Linq;
 using System.Windows.Forms;
 
@@ -21,7 +22,15 @@ namespace RemoteAgents.Launcher
         readonly ComboBox pathChoice = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 430 };
         readonly FlowLayoutPanel serviceActions = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(10) };
         readonly List<Label> statusLines = new List<Label>();
-        TabPage detailsTab; Panel detailsHost; SetupWizard detailsWindow;
+        TabPage detailsTab, serviceTab; Panel detailsHost; SetupWizard detailsWindow;
+        readonly FlowLayoutPanel happierAccount = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Visible = false, Padding = new Padding(0, 8, 0, 8) };
+        readonly Label happierCaption = new Label { AutoSize = true, UseMnemonic = false, MaximumSize = new Size(620, 0) };
+        readonly TextBox happierKey = new TextBox { ReadOnly = true, Visible = false, Width = 620 };
+        readonly Button showHappierKey = new Button { Text = "Показать ключ", AutoSize = true };
+        readonly Button copyHappierKey = new Button { Text = "Копировать ключ", AutoSize = true };
+        readonly Button openHappier = new Button { Text = "Открыть Happier", AutoSize = true };
+        readonly Label happierCreated = new Label { AutoSize = true, UseMnemonic = false, Visible = false, MaximumSize = new Size(620, 0), Padding = new Padding(8), BackColor = Color.LightGoldenrodYellow };
+        HappierAccountModel happierModel = new HappierAccountModel();
         string pathsSignature = "";
         readonly PathSelection pathSelection = new PathSelection();
         internal static ConfigWindow Main(string home, string bundle)
@@ -41,7 +50,8 @@ namespace RemoteAgents.Launcher
             detailsTab = new TabPage("Подробно") { AutoScroll = true };
             detailsHost = new Panel { Dock = DockStyle.Fill, AutoScroll = true }; detailsTab.Controls.Add(detailsHost);
             tabs.TabPages.Add(detailsTab);
-            var service = new TabPage("Сервис") { AutoScroll = true }; service.Controls.Add(serviceActions); tabs.TabPages.Add(service);
+            serviceTab = new TabPage("Сервис") { AutoScroll = true }; serviceTab.Controls.Add(serviceActions); tabs.TabPages.Add(serviceTab);
+            BuildHappierAccount();
             serviceActions.Controls.Add(syncStatus);
             serviceActions.Controls.Add(serverHealthDetails);
             serviceActions.Controls.Add(pathStates);
@@ -52,6 +62,7 @@ namespace RemoteAgents.Launcher
                 if (option != null) pathSelection.Choose(option.Tag);
             };
             for (int i = 0; i < 6; i++) { var line = new Label { AutoSize = true, MaximumSize = new Size(680, 0) }; statusLines.Add(line); mainStatus.Controls.Add(line); }
+            mainStatus.Controls.Add(happierCreated);
             // Keep progress and the editor journal in the config page, not over the other tabs.
             configPage.Controls.Add(rowsPanel); configPage.Controls.Add(journal);
             journal.Height = 72;
@@ -65,13 +76,84 @@ namespace RemoteAgents.Launcher
             layout.Controls.Add(mainStatus, 0, 0); layout.Controls.Add(header, 0, 1); layout.Controls.Add(tabs, 0, 2);
             Controls.Add(layout);
             bottom.Dispose(); pastePanel.Dispose(); foldersPanel.Dispose();
-            mainStatus.SizeChanged += (s, e) => { foreach (var line in statusLines) line.MaximumSize = new Size(Math.Max(120, mainStatus.Width - 32), 0); };
+            mainStatus.SizeChanged += (s, e) => { foreach (var line in statusLines) line.MaximumSize = new Size(Math.Max(120, mainStatus.Width - 32), 0); happierCreated.MaximumSize = new Size(Math.Max(120, mainStatus.Width - 32), 0); };
             tabs.SelectedIndexChanged += (s, e) => {
+                if (tabs.SelectedTab != serviceTab) HideHappierKey();
                 if (tabs.SelectedTab == detailsTab) EnsureDetails();
                 else if (detailsWindow != null && !detailsWindow.IsApplying) {
                     detailsWindow.CancelEmbedded(); detailsWindow.Dispose(); detailsWindow = null;
                 }
             };
+        }
+        void BuildHappierAccount()
+        {
+            happierAccount.Controls.Add(happierCaption);
+            var actions = new FlowLayoutPanel { AutoSize = true, WrapContents = true, MaximumSize = new Size(620, 0) };
+            actions.Controls.Add(showHappierKey); actions.Controls.Add(copyHappierKey); actions.Controls.Add(openHappier);
+            happierAccount.Controls.Add(actions); happierAccount.Controls.Add(happierKey);
+            serviceActions.Controls.Add(happierAccount);
+            showHappierKey.Click += (s, e) => {
+                if (happierKey.Visible) { HideHappierKey(); return; }
+                try {
+                    string key = ReadHappierKey();
+                    happierKey.Text = key; happierKey.Visible = true; showHappierKey.Text = "Скрыть ключ";
+                } catch (Exception) { HappierActionFailed("Не удалось прочитать ключ Happier из хранилища."); }
+            };
+            // Click handlers run on the STA UI thread, including Clipboard.SetText.
+            copyHappierKey.Click += (s, e) => {
+                try { Clipboard.SetText(ReadHappierKey()); }
+                catch (Exception) { HappierActionFailed("Не удалось скопировать ключ Happier. Повторите попытку."); }
+            };
+            openHappier.Click += (s, e) => {
+                try {
+                    RefreshHappierAccount();
+                    string url = ConfigRequests.Origin(happierModel.WebUrl);
+                    Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+                } catch (Exception) { HappierActionFailed("Не удалось открыть Happier. Проверьте HTTPS-адрес webappUrl в конфиге."); }
+            };
+            VisibleChanged += (s, e) => { if (!Visible) HideHappierKey(); else RefreshHappierAccount(); };
+            serviceActions.SizeChanged += (s, e) => {
+                int width = Math.Max(120, serviceActions.ClientSize.Width - 32);
+                happierCaption.MaximumSize = actions.MaximumSize = new Size(width, 0);
+                happierKey.Width = Math.Min(620, width);
+            };
+            RefreshHappierAccount();
+        }
+        void HideHappierKey()
+        { happierKey.Clear(); happierKey.Visible = false; showHappierKey.Text = "Показать ключ"; }
+        void RefreshHappierAccount()
+        {
+            HappierAccountModel current;
+            try { current = HappierAccountModel.From(new Configuration(home).Data, name => SecretVault.Has(home, name)); }
+            catch (Exception) { current = new HappierAccountModel(); }
+            if (current.Label != happierModel.Label || current.SecretName != happierModel.SecretName || current.WebUrl != happierModel.WebUrl || !current.HasKey) HideHappierKey();
+            happierModel = current;
+            happierCaption.Text = "Аккаунт Happier: " + current.Label;
+            happierAccount.Visible = current.Visible;
+            showHappierKey.Visible = copyHappierKey.Visible = current.HasKey;
+            openHappier.Enabled = current.WebUrl.Length > 0;
+        }
+        string ReadHappierKey()
+        {
+            RefreshHappierAccount();
+            if (!happierModel.HasKey) throw new InvalidOperationException("Ключ Happier недоступен");
+            string key = SecretVault.Get(home, happierModel.SecretName);
+            if (string.IsNullOrEmpty(key)) throw new InvalidOperationException("Ключ Happier недоступен");
+            return key;
+        }
+        void HappierActionFailed(string message)
+        {
+            HideHappierKey();
+            // Fixed text only: vault/clipboard/process exceptions must never reach journals or the UI.
+            MessageBox.Show(this, message, Product.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        void ShowHappierAccountCreated(string message)
+        {
+            if (mainWindow) {
+                HideHappierKey(); RefreshHappierAccount();
+                happierCreated.Text = message; happierCreated.Visible = true;
+                tabs.SelectedTab = serviceTab;
+            } else MessageBox.Show(this, message + "\r\nКнопки аккаунта находятся в главном окне на вкладке «Сервис».", Product.Name, MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         internal void ServiceActions(IEnumerable<KeyValuePair<string, Action>> actions, Action<string> choosePath)
         {
@@ -89,6 +171,7 @@ namespace RemoteAgents.Launcher
         internal void UpdateMain(string[] lines, string sync, string technical, Dictionary<string, object> transport, Dictionary<string, object> health)
         {
             if (IsDisposed) return;
+            RefreshHappierAccount();
             for (int i = 0; i < Math.Min(lines.Length, statusLines.Count); i++) if (statusLines[i].Text != lines[i]) statusLines[i].Text = lines[i];
             string operation = MutationConflict == null ? "" : MutationConflict();
             foreach (TabPage page in tabs.TabPages) page.Enabled = WindowModel.CanOpen(page.Text, operation);

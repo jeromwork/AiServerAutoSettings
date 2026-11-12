@@ -38,6 +38,7 @@ namespace RemoteAgents.Launcher
         {
             DiskChoiceTests.Run();
             Plan(); Channel(); Engine(); Conflicts(); Ai(); Sources(); Requests(); Profiles();
+            HappierAccountTests.Run();
             Console.WriteLine("OK: " + count + " config engine checks (plan by difference, parallel order, conflicts, AI copy without secrets, sources)");
         }
         static void Plan()

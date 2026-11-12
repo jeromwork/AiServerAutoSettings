@@ -346,6 +346,7 @@ namespace RemoteAgents.Launcher
         {
             session = next;
             session.Log = Log; session.Report = Report;
+            session.AccountCreated = message => Ui(() => ShowHappierAccountCreated(message));
             Log(Product.Name + " " + Program.Version + ", Windows " + Environment.OSVersion.Version + (Environment.Is64BitOperatingSystem ? " x64" : "") + ", " + TimeZoneInfo.Local.Id);
             session.AskSecret = (name, why) => { string value = null; Func<string> ask = () => SecretPrompt.Ask(this, name, why); value = InvokeRequired ? (string)Invoke(ask) : ask(); return value; };
             rowsPanel.Visible = true;
