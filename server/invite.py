@@ -168,6 +168,7 @@ def enroll(c, ident, raw):
             fd = os.open(auth.name, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=parent)
             try:
                 require(os.fstat(fd).st_nlink == 1, 'authorized_keys не должен быть hardlink')
+                os.fchmod(fd, 0o600)
                 with os.fdopen(os.dup(fd), 'r') as source:
                     old = source.read()
                 line = key + ' ra-device:' + data['name']

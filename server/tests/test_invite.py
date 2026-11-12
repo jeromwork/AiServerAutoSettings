@@ -185,6 +185,15 @@ class InviteTests(unittest.TestCase):
         self.assertNotIn(b'PRIVATE', listing)
         print('PASS invite: one use; CRLF ed25519; own-key login; single EXE; release prefix unchanged; secret permissions')
 
+    def test_enroll_repairs_authorized_keys_permissions(self):
+        obj, _, _ = self.b.create()
+        auth = Path(self.b.c['workerAuthorizedKeys'])
+        auth.write_text('# existing key file\n')
+        auth.chmod(0o666)
+        invite.enroll(self.b.c, obj['id'], self.b.pub)
+        self.assertEqual(auth.stat().st_mode & 0o777, 0o600)
+        self.assertTrue(auth.read_text().startswith('# existing key file\n'))
+
     def test_two_concurrent_exactly_one(self):
         _, key, _ = self.b.create()
         with concurrent.futures.ThreadPoolExecutor(2) as pool:
