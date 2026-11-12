@@ -23,6 +23,23 @@ namespace RemoteAgents.Launcher
                 return data;
             } catch { return Json.Map(null); }
         }
+        // UI readiness comes from the same fresh files as the path/tooltip, never a second process summary.
+        internal static string Line(string title, Dictionary<string, object> data, bool transport = false)
+        {
+            if (data.Count == 0) return "⏳ " + title + ": ожидается проверка";
+            if (Json.Bool(data, "ok")) return "✅ " + title + ": " + (transport ? "подключено; " + Title(data) : Summary(data));
+            string state = Json.Str(data, "state");
+            bool waiting = state == "starting" || state == "checking" || state == "pending" || state == "off" || Json.Get(data, "ok") == null;
+            return (waiting ? "⏳ " : "❌ ") + title + ": " + (transport ? Json.Text(data, "error", "связь не подтверждена") : Summary(data));
+        }
+        internal static string Happier(string home)
+        {
+            // Account registration is a saved check, not a heartbeat from Happier.
+            try {
+                var data = Json.Read(Path.Combine(home, "state", "happier-account.json"));
+                return "⏳ Happier: " + (Json.Bool(data, "ok") ? "аккаунт подключён; последняя проверка " + Json.Text(data, "updatedUtc", "неизвестна") : Json.Text(data, "summary", "аккаунт не подтверждён"));
+            } catch { return "⏳ Happier: аккаунт ещё не проверен"; }
+        }
         public static Dictionary<string, object>[] Candidates(Dictionary<string, object> data)
         { return Json.Array(Json.Get(data, "candidates")).Select(Json.Map).ToArray(); }
         public static string Title(Dictionary<string, object> data)

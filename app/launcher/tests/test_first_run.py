@@ -69,24 +69,56 @@ class FirstRunTests(unittest.TestCase):
         self.assertIn('stop.Cancel()', shutdown)
         self.assertIn('foreach (var r in runtimes) r.Dispose()', shutdown)
         self.assertIn('icon.Dispose()', shutdown)
-        self.assertIn('if(firstSetup && definition!=null && FirstInstall.Required(home))', shutdown)
-        self.assertIn('"-StopManaged","-LauncherHome",home', shutdown)
+        self.assertIn('StopManagedComponents()', shutdown)
+        self.assertIn('Stop-ManagedControl $Root', tray)
+        self.assertIn('Stop-ManagedDisk $disk', tray)
 
     def test_secondary_launch_activates_first_wizard(self):
         tray = source('TrayContext.cs')
         handle = tray.split('void Handle(string[] args)', 1)[1].split('void Safe(', 1)[0]
         gate = handle.index('if(firstSetup && !icon.Visible)')
-        self.assertIn('form.Activate();return;', handle[gate:])
-        self.assertLess(gate, handle.index('LoadComponents()'))
+        self.assertIn('ActivateWindow(form)', handle[gate:])
+        self.assertLess(gate, handle.index('case WindowCommand.Restart:'))
         self.assertLess(handle.index('args.Contains("--exit")'), gate)
         self.assertIn('f is SetupWizard || f is ConfigWindow', handle[gate:])
 
-    def test_hand_start_shows_enable_window_not_autostart(self):
+    def test_hand_start_routes_to_main_window_and_transfers_foreground(self):
         program = source('Program.cs')
-        self.assertIn('bool interactive = !args.Any(a => a.StartsWith("--", StringComparison.Ordinal));', program)
-        self.assertIn('if (!StartWindow.Confirm())', program)
+        self.assertIn('bool interactive = WindowModel.ShouldShow(args);', program)
+        self.assertNotIn('StartWindow.Confirm()', program)
+        self.assertIn('WindowModel.ForwardArguments(args)', program)
+        self.assertIn('AllowSetForegroundWindow((uint)pid)', program)
         self.assertIn('(started ? " --started" : "")', program)
-        self.assertIn('if (args.Contains("--started") && Configured()) Running();', source('TrayContext.cs'))
+        tray = source('TrayContext.cs')
+        self.assertIn('case WindowCommand.Show: ShowMain();', tray)
+        self.assertIn('form.BringToFront(); form.Activate(); SetForegroundWindow(form.Handle)', tray)
+
+    def test_main_window_and_minimal_tray_are_wired_to_existing_views(self):
+        tray = source('TrayContext.cs')
+        menu = tray.split('void RefreshMenu()', 1)[1].split('bool Configured()', 1)[0]
+        self.assertEqual(menu.count('menu.Items.Add('), 2)
+        self.assertIn('Открыть RemoteAgents', menu)
+        self.assertIn('Выход', menu)
+        main = source('ConfigWindow.Main.cs')
+        for name in ['Папки', 'Конфиг', 'Подробно', 'Сервис']:
+            self.assertIn(name, source('ConfigWindow.cs') + main)
+        self.assertIn('new SetupWizard(home, bundle, false, false)', main)
+        self.assertIn('new DiskFoldersView(', source('ConfigWindow.cs'))
+        self.assertIn('mainWindow && !allowUnload', source('ConfigWindow.cs'))
+        self.assertIn('MouseDoubleClick', tray)
+
+    def test_background_checks_never_acquire_the_ui_action_lock(self):
+        tray = source('TrayContext.cs')
+        sync = tray.split('async void CheckSync()', 1)[1].split('void WriteStatus()', 1)[0]
+        self.assertNotIn('actionBusy=true', sync)
+        self.assertNotIn('actionBusy = true', sync)
+        self.assertIn('syncSchedule.Due(', sync)
+        self.assertIn('config.sync.unavailable ', sync)
+        main = source('ConfigWindow.Main.cs')
+        self.assertIn('WindowModel.CanOpen(page.Text, operation)', main)
+        inspect = source('SetupWizard.cs').split('async Task Inspect()', 1)[1].split('async Task Guard(', 1)[0]
+        self.assertNotIn('await Guard(', inspect)
+        self.assertNotIn('.Enabled=false', inspect)
 
     def test_invitations_removed(self):
         for name in ['Program.cs', 'TrayContext.cs', 'SetupWizard.cs', 'EntryPoint.cs', 'UpgradeInstaller.cs', 'Data.cs']:
