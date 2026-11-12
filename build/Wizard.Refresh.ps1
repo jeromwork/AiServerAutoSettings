@@ -13,11 +13,14 @@ function Get-WizardDeviceKey($Profile) {
 # The server publishes ~worker/.config/remoteagents/config-sync.json on every `remoteagents config export` and
 # `remoteagents config sync` (docs/CONFIG-SERVER.md «Автообновление»). The client only reads it with its own key.
 # Shared bounded read-only request for config sync and server health, using the working channel.
-function Invoke-WizardReadOnlySsh([string]$Root,[string]$Command,[string]$Context='Получение настроек') {
+function Invoke-WizardReadOnlySsh([string]$Root,[string]$Command,[string]$Context='Получение настроек',$Profile=$null) {
     # One attempt: channel-first installations must never fall back to direct SSH.
-    $profile=Find-InstallProfile $Root
-    if(-not $profile){throw 'Настройте SSH на шаге «Сервер»'}
-    $p=Read-TransportJson $profile;$c=Read-TransportJson (Join-Path $Root 'config.json')
+    if($null -eq $Profile){
+        $file=Find-InstallProfile $Root
+        if(-not $file){throw 'Настройте SSH на шаге «Сервер»'}
+        $Profile=Read-TransportJson $file
+    }
+    $p=$Profile;$c=Read-TransportJson (Join-Path $Root 'config.json')
     $port=[int](Get-TransportValue $c.transport 'sshPort' 2222);$address='127.0.0.1';$path='канал'
     if($c.transport.channelFirst){
         $address=[string](Get-TransportValue $c.transport 'channelSshAddress' '127.0.0.2')

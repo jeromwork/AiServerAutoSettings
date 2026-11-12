@@ -66,6 +66,7 @@ namespace RemoteAgents.Launcher
                 Check(ServerHealthView.Summary(h).StartsWith("⚠") == warning, "warning in menu/window");
                 Check(TrayMenuModel.Tooltip(transport, h).Contains("⚠") == warning, "warning in icon tooltip");
             }
+            Check(ServerHealthView.Warning(Health(0, 50000)) && ServerHealthView.Summary(Health(0, 50000)).StartsWith("⚠"), "normalized full disk warns with healthy memory");
             Check(!ServerHealthView.Warning(empty) && !ServerHealthView.Known(empty), "missing counters do not look healthy or low");
             Check(!ServerHealthView.Known(Health(-1, 1000)) && !ServerHealthView.Known(Health(100001, 1000)), "invalid counters rejected");
             health["ok"] = false;
@@ -78,20 +79,46 @@ namespace RemoteAgents.Launcher
             }
             Check(TrayMenuModel.Short(new string('x', 60) + "😀abcdef", 63).Length <= 63 && !char.IsHighSurrogate(TrayMenuModel.Short(new string('x', 61) + "😀abcdef", 63)[61]), "tooltip cut preserves Unicode");
             var now = DateTime.UtcNow; var schedule = new ServerHealthSchedule();
-            Check(!schedule.Due(now, false, false), "no poll without confirmed route");
-            Check(!schedule.Due(now, true, true), "busy poll deferred");
-            Check(schedule.Due(now, true, false), "first read due immediately"); schedule.Started(now);
-            Check(!schedule.Due(now.AddSeconds(299), true, false), "no poll before five minutes");
-            Check(schedule.Due(now.AddMinutes(5), true, false), "poll every five minutes including errors");
+            Check(!schedule.Due(now, false, false, "server-a"), "no poll without confirmed route");
+            Check(!schedule.Due(now, true, true, "server-a"), "busy poll deferred");
+            Check(schedule.Due(now, true, false, "server-a"), "first read due immediately"); schedule.Started(now);
+            Check(!schedule.Due(now.AddSeconds(299), true, false, "server-a"), "no poll before five minutes");
+            Check(schedule.Due(now.AddMinutes(5), true, false, "server-a"), "poll every five minutes including errors");
+            Check(!schedule.Due(now.AddSeconds(1), true, true, "server-b"), "new server poll waits while occupied");
+            Check(schedule.Due(now.AddSeconds(2), true, false, "server-b"), "new server resets five-minute poll delay"); schedule.Started(now.AddSeconds(2));
+            Check(!schedule.Due(now.AddSeconds(3), true, false, "server-b"), "same server keeps poll delay");
+            Check(!schedule.Due(now.AddSeconds(4), true, false, ""), "missing server identity cannot poll");
             Check(WizardStep.Timeout("ServerHealth") == 10000, "outer wizard budget ten seconds");
             string dir = Path.Combine(Path.GetTempPath(), "health-tests-" + Guid.NewGuid().ToString("N"));
             try {
                 Directory.CreateDirectory(Path.Combine(dir, "state")); string path = Path.Combine(dir, "state/server-health.json");
                 Check(!ServerHealthView.Known(ServerHealthView.Read(dir, now)), "missing health file");
+                string profile = Path.Combine(dir, "profile.json");
+                Files.Atomic(Path.Combine(dir, "config.json"), Json.Encode(new { transport = new { profilePath = profile } }));
+                Files.Atomic(profile, Json.Encode(new { serverAddress = "server-a.invalid", login = "worker", arguments = new[] { "-p", "22255" } }));
+                health["serverId"] = "server-a.invalid\n22255\nworker";
                 health["updatedUtc"] = now.ToString("o"); Files.Atomic(path, Json.Encode(health).Replace("{", "{\r\n"));
                 Check(ServerHealthView.Known(ServerHealthView.Read(dir, now)), "CRLF state file is read");
                 Check(!ServerHealthView.Known(ServerHealthView.Read(dir, now.AddSeconds(361))), "stale health not shown as current");
                 Check(!ServerHealthView.Known(ServerHealthView.Read(dir, now.AddSeconds(-10))), "future stamp rejected");
+                Files.Atomic(path, Json.Encode(health));
+                Check(ServerHealthView.Known(ServerHealthView.Read(dir, now)), "same server metrics accepted");
+                Check(ServerHealthView.Identity(dir) == "server-a.invalid\n22255\nworker", "identity agrees with PowerShell state");
+                foreach (var changed in new[] {
+                    new { serverAddress = "server-b.invalid", login = "worker", arguments = new[] { "-p", "22255" } },
+                    new { serverAddress = "server-a.invalid", login = "worker", arguments = new[] { "-p", "22" } },
+                    new { serverAddress = "server-a.invalid", login = "other", arguments = new[] { "-p", "22255" } } }) {
+                    Files.Atomic(profile, Json.Encode(changed));
+                    Check(!ServerHealthView.Known(ServerHealthView.Read(dir, now)), "address/port/login changes hide previous metrics");
+                    var stale = ServerHealthView.Read(dir, now);
+                    Check(!ServerHealthView.Summary(stale).Contains("ГиБ") && !TrayMenuModel.Tooltip(transport, stale).Contains("ОЗУ"), "menu and tooltip hide previous metrics");
+                }
+                Files.Atomic(profile, Json.Encode(new { serverAddress = "server-b.invalid", login = "worker", arguments = new[] { "-p", "22255" } }));
+                Check(!ServerHealthView.Known(ServerHealthView.Read(dir, now)), "fresh metrics of previous server hidden after profile replacement");
+                health.Remove("serverId"); Files.Atomic(path, Json.Encode(health));
+                Check(!ServerHealthView.Known(ServerHealthView.Read(dir, now)), "legacy state without identity is unknown");
+                File.Delete(profile);
+                Check(!ServerHealthView.Known(ServerHealthView.Read(dir, now)), "missing profile cannot validate metrics");
                 Files.Atomic(path, "BROKEN"); Check(!ServerHealthView.Known(ServerHealthView.Read(dir, now)), "corrupt state safe");
             } finally { Directory.Delete(dir, true); }
             Console.WriteLine("PASS: " + count + " tray menu/server health/path/schedule checks");

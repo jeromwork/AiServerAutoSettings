@@ -237,7 +237,8 @@ namespace RemoteAgents.Launcher
         {
             if (Product.IsVpn || closing || engine.Current.Length == 0) return;
             bool occupied = serverHealthRunning || syncRunning || actionBusy || busy || operationChecking || mainWindow != null && mainWindow.IsApplying;
-            if (!healthSchedule.Due(DateTime.UtcNow, Json.Bool(StatusView.Read(home, "transport", maxAgeSec: 15), "ok"), occupied)) return;
+            string serverId = ServerHealthView.Identity(home);
+            if (!healthSchedule.Due(DateTime.UtcNow, Json.Bool(StatusView.Read(home, "transport", maxAgeSec: 15), "ok"), occupied, serverId)) return;
             serverHealthRunning = true; healthSchedule.Started(DateTime.UtcNow);
             string bundle = engine.Folder(engine.Current);
             try {
@@ -246,7 +247,7 @@ namespace RemoteAgents.Launcher
             } catch (OperationCanceledException) { }
             catch (Exception) {
                 // The outer ten-second budget may kill PowerShell before it can save its failure.
-                if (!closing) Json.Write(Path.Combine(home, "state", "server-health.json"), new { schema = 1, ok = false, updatedUtc = DateTime.UtcNow.ToString("o"), summary = "Состояние сервера не получено: проверьте связь" });
+                if (!closing) Json.Write(Path.Combine(home, "state", "server-health.json"), new { schema = 1, ok = false, serverId = serverId, updatedUtc = DateTime.UtcNow.ToString("o"), summary = "Состояние сервера не получено: проверьте связь" });
                 log.Write("server.health.unavailable");
             } finally { serverHealthRunning = false; if (!closing) RefreshMenu(); }
         }

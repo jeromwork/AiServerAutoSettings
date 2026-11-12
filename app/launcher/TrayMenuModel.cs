@@ -89,10 +89,33 @@ namespace RemoteAgents.Launcher
     }
     internal static class ServerHealthView
     {
+        // Same address/SSH port/login tuple as the saved-route PowerShell probe.
+        internal static string Identity(string home)
+        {
+            try {
+                var config = Json.Read(Path.Combine(home, "config.json"));
+                string path = Json.Text(Json.Map(Json.Get(config, "wizard")), "pendingProfile", Json.Str(Json.Map(Json.Get(config, "transport")), "profilePath"));
+                if (path.Length == 0) {
+                    string profiles = Path.Combine(home, "ssh-profiles");
+                    var files = Directory.GetFiles(profiles, "ssh-transport.json", SearchOption.AllDirectories)
+                        .Where(p => Path.GetFileName(Path.GetDirectoryName(Path.GetDirectoryName(p))) == "project-connections").ToArray();
+                    if (files.Length != 1) return "";
+                    path = files[0];
+                }
+                var profile = Json.Read(path); string address = Json.Str(profile, "serverAddress").Trim().ToLowerInvariant();
+                if (address.Length == 0) return "";
+                var args = Json.Strings(Json.Get(profile, "arguments")); int at = Array.IndexOf(args, "-p"), port = 22;
+                if (at >= 0 && at + 1 < args.Length) port = int.Parse(args[at + 1], CultureInfo.InvariantCulture);
+                return address + "\n" + port.ToString(CultureInfo.InvariantCulture) + "\n" + Json.Str(profile, "login");
+            } catch { return ""; }
+        }
         internal static Dictionary<string, object> Read(string home, DateTime? utcNow = null)
         {
             try {
                 var data = Json.Read(Path.Combine(home, "state", "server-health.json"));
+                string serverId = Identity(home);
+                if (serverId.Length == 0 || Json.Str(data, "serverId") != serverId)
+                    return new Dictionary<string, object> { { "summary", "ожидается проверка сервера" } };
                 DateTime stamp; double age;
                 if (!DateTime.TryParse(Json.Str(data, "updatedUtc"), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out stamp) ||
                     (age = ((utcNow ?? DateTime.UtcNow) - stamp.ToUniversalTime()).TotalSeconds) > 360 || age < -5)
@@ -159,7 +182,12 @@ namespace RemoteAgents.Launcher
     internal sealed class ServerHealthSchedule
     {
         DateTime next = DateTime.MinValue;
-        internal bool Due(DateTime now, bool connected, bool occupied) { return connected && !occupied && now >= next; }
+        string observed;
+        internal bool Due(DateTime now, bool connected, bool occupied, string serverId)
+        {
+            if (observed != serverId) { observed = serverId; next = DateTime.MinValue; }
+            return serverId.Length > 0 && connected && !occupied && now >= next;
+        }
         internal void Started(DateTime now) { next = now.AddMinutes(5); }
     }
 }
