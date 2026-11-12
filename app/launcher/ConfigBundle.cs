@@ -231,6 +231,83 @@ namespace RemoteAgents.Launcher
             return bytes;
         }
 
+        public static ParsedConfig Unlock(ParsedConfig p, string master)
+        {
+            if (p == null) throw Bad("Нет конфига");
+            if (!p.Locked) return p;
+            byte[] keys = null;
+            try {
+                var kdf = Json.Map(Json.Get(p.Protection, "kdf"));
+                keys = Derive(master, Base64(Json.Str(kdf, "salt")), Json.Int(kdf, "iterations", 0));
+                if (Decrypt(Json.Str(p.Protection, "check"), keys) != "remoteagents") throw new CryptographicException();
+                var secrets = new Dictionary<string, object>(StringComparer.Ordinal);
+                // Authenticate every value before returning any plaintext or writing anything.
+                foreach (var pair in p.Secrets) secrets[pair.Key] = pair.Value.Length == 0 ? "" : Decrypt(pair.Value, keys);
+                var root = new Dictionary<string, object>(p.Profile); root["secrets"] = secrets;
+                return Parse(Json.Encode(root));
+            } catch { throw Bad("Неверный мастер-пароль"); }
+            finally { if (keys != null) Array.Clear(keys, 0, keys.Length); }
+        }
+        internal static string Pack(ParsedConfig p, string master)
+        {
+            if (p.Locked) throw Bad("Сначала введите мастер-пароль");
+            var root = new Dictionary<string, object>(p.Profile);
+            var secrets = new Dictionary<string, object>(StringComparer.Ordinal);
+            byte[] keys = null;
+            try {
+                if (master != null) {
+                    if (master.Length == 0) throw Bad("Мастер-пароль не должен быть пустым");
+                    byte[] salt = Random(32);
+                    keys = Derive(master, salt, 200000);
+                    secrets["protected"] = "master-password";
+                    secrets["kdf"] = D("name", "pbkdf2-sha256", "iterations", 200000, "salt", Convert.ToBase64String(salt));
+                    secrets["check"] = Encrypt("remoteagents", keys);
+                }
+                foreach (var pair in p.Secrets) secrets[pair.Key] = keys == null || pair.Value.Length == 0 ? pair.Value : Encrypt(pair.Value, keys);
+                root["secrets"] = secrets;
+                return Json.Encode(root) + "\n";
+            } finally { if (keys != null) Array.Clear(keys, 0, keys.Length); }
+        }
+        static byte[] Random(int count)
+        { var bytes = new byte[count]; using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(bytes); return bytes; }
+        static byte[] Derive(string master, byte[] salt, int iterations)
+        {
+            if (master == null || iterations < 200000 || iterations > 2000000 || salt.Length < 16 || salt.Length > 64) throw new CryptographicException();
+            using (var kdf = new Rfc2898DeriveBytes(master, salt, iterations, HashAlgorithmName.SHA256)) return kdf.GetBytes(64);
+        }
+        static byte[] Part(byte[] bytes, int offset, int count)
+        { var p = new byte[count]; Buffer.BlockCopy(bytes, offset, p, 0, count); return p; }
+        static string Encrypt(string text, byte[] keys)
+        {
+            byte[] plain = new UTF8Encoding(false, true).GetBytes(text);
+            try {
+                using (var aes = Aes.Create()) {
+                    aes.Key = Part(keys, 0, 32); aes.IV = Random(16); aes.Mode = CipherMode.CBC; aes.Padding = PaddingMode.PKCS7;
+                    byte[] cipher; using (var encrypt = aes.CreateEncryptor()) cipher = encrypt.TransformFinalBlock(plain, 0, plain.Length);
+                    var payload = new byte[16 + cipher.Length + 32];
+                    Buffer.BlockCopy(aes.IV, 0, payload, 0, 16); Buffer.BlockCopy(cipher, 0, payload, 16, cipher.Length);
+                    using (var mac = new HMACSHA256(Part(keys, 32, 32))) Buffer.BlockCopy(mac.ComputeHash(payload, 0, payload.Length - 32), 0, payload, payload.Length - 32, 32);
+                    return "enc1:" + Convert.ToBase64String(payload);
+                }
+            } finally { Array.Clear(plain, 0, plain.Length); }
+        }
+        static string Decrypt(string value, byte[] keys)
+        {
+            byte[] payload = CheckEnvelope(value);
+            // Encrypt-then-MAC: never attempt CBC decryption of unauthenticated data.
+            using (var mac = new HMACSHA256(Part(keys, 32, 32))) {
+                byte[] expected = mac.ComputeHash(payload, 0, payload.Length - 32); int difference = 0;
+                for (int i = 0; i < 32; i++) difference |= expected[i] ^ payload[payload.Length - 32 + i];
+                if (difference != 0) throw new CryptographicException();
+            }
+            using (var aes = Aes.Create()) {
+                aes.Key = Part(keys, 0, 32); aes.IV = Part(payload, 0, 16); aes.Mode = CipherMode.CBC; aes.Padding = PaddingMode.PKCS7;
+                byte[] plain; using (var decrypt = aes.CreateDecryptor()) plain = decrypt.TransformFinalBlock(payload, 16, payload.Length - 48);
+                try { return new UTF8Encoding(false, true).GetString(plain); }
+                finally { Array.Clear(plain, 0, plain.Length); }
+            }
+        }
+
         // Framework JSON parsing accepts duplicate properties and some non-JSON syntax.
         // This guard enforces strict syntax before using the existing serializer on both runtimes.
         static class StrictJson

@@ -42,6 +42,23 @@ namespace RemoteAgents.Launcher
             Reject(() => ConfigBundle.Parse(Json.Encode(route)), "hop required");
             string schemaPath = Path.GetFullPath("app/launcher/config.paste.schema.json");
             if (File.Exists(schemaPath)) Check(Canonical(Json.Read(schemaPath)) == Canonical(ConfigBundle.SchemaDocument()), "published schema matches compiled schema");
+            p = ConfigBundle.Parse(Json.Encode(valid));
+            string encrypted = ConfigBundle.Pack(p, "Тестовый мастер-пароль");
+            var locked = ConfigBundle.Parse(encrypted);
+            Check(locked.Locked && !encrypted.Contains("TEST-PRIVATE-KEY"), "encrypted values only");
+            var unlocked = ConfigBundle.Unlock(locked, "Тестовый мастер-пароль");
+            Check(unlocked.Secrets["server-key"] == p.Secrets["server-key"] && !unlocked.Locked, "enc1 roundtrip CRLF");
+            Check(locked.Locked && locked.Secrets["server-key"].StartsWith("enc1:"), "unlock does not mutate input");
+            Reject(() => ConfigBundle.Unlock(locked, "wrong"), "wrong master");
+            foreach (string field in new[]{"server-key", "check"}) {
+                var altered = Json.Map(Json.Parse(encrypted)); var sv = Json.Map(altered["secrets"]);
+                var bytes = Convert.FromBase64String(((string)sv[field]).Substring(5)); bytes[17] ^= 1;
+                sv[field] = "enc1:" + Convert.ToBase64String(bytes);
+                Reject(() => ConfigBundle.Unlock(ConfigBundle.Parse(Json.Encode(altered)), "Тестовый мастер-пароль"), "tamper " + field);
+            }
+            Reject(() => ConfigBundle.Pack(p, ""), "empty master");
+            var badProtected = Json.Map(Json.Parse(encrypted)); Json.Map(badProtected["secrets"])["server-key"] = "plain";
+            Reject(() => ConfigBundle.Parse(Json.Encode(badProtected)), "mixed protected/plain");
             Console.WriteLine("PASS: CONFIG: " + count + " assertions");
         }
         static string Canonical(object value)
