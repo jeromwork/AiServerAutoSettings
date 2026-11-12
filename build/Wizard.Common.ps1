@@ -302,7 +302,9 @@ function Set-WizardBridge([string]$Root,[string]$Bundle,[bool]$Enabled,[bool]$Sh
 function Test-WizardNetworkManaged([string]$Root) {
     $file=Join-Path $Root 'config.json';$c=$null;if(Test-Path $file){$c=Read-TransportJson $file}
     # Channel-first Bootstrap runs the daemon before the first «Связь»: its fresh status is not an installed network yet.
-    if($c -and -not $c.wizard.configured -and $c.transport.channelFirst -and $c.transport.bootstrap){return $false}
+    # The same after an earlier installation (wizard.configured): Bootstrap already replaced its transport with the pasted
+    # config, so «Связь» completes that first setup instead of the preflight/rollback path of a working network.
+    if($c -and $c.transport.channelFirst -and $c.transport.bootstrap){return $false}
     if(Test-StatusFresh $Root transport){return $true}
     # A dead heartbeat must never turn off preflight/rollback for an installed PC.
     if($c){

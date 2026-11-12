@@ -62,6 +62,9 @@ Assert (@($trace|Where-Object {$_ -like '· выбран кандидат кан
 Assert (@($trace|Where-Object {$_ -match '^· канал поднят за [0-9]+ мс$'}).Count -eq 1) 'trace records the time'
 # The first «Связь» of this installation still runs as a first setup (Set-WizardInitialNetwork), not as a managed change.
 Assert (-not (Test-WizardNetworkManaged $root)) 'channel-first bootstrap is not a managed network yet'
+Update-LauncherConfig $root {param($c) Set-ConfigDefault $c wizard ([pscustomobject]@{});$c.wizard|Add-Member -Force configured $true}
+Assert (-not (Test-WizardNetworkManaged $root)) 'after an earlier installation (wizard.configured) the first «Связь» of a pasted channel config is still a first setup'
+Update-LauncherConfig $root {param($c) $c.wizard.PSObject.Properties.Remove('configured')}
 $r=Invoke-WizardStep $root $bundle 'Bootstrap' $request
 Assert ($r.ok -and $r.vpn -eq 'channel' -and $r.skipped) 'repeated Bootstrap reuses the running daemon of this config revision'
 Update-LauncherConfig $root {param($c) $c.transport|Add-Member -Force metered 'true'}
