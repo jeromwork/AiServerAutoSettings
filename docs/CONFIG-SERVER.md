@@ -22,7 +22,7 @@
      `hop {name, host, port, user, hostKey, keyFile|passwordFile}`. Секреты переходов — только файлами 0600;
    - `catalogFile` — общий каталог связи (по умолчанию `~рабочего/.config/remoteagents/transport-catalog.json`,
      тот же, что `transport/server-transport-catalog.py` / `Get-WizardCatalog`), проверяется той же схемой;
-   - `vpnBootstrap` — «VPN первым» (как было в invite): `channelFile` (JSON канала, 0600), `entryFiles`
+   - `vpnBootstrap` — «VPN первым»: `channelFile` (JSON канала, 0600), `entryFiles`
      (имя узла каталога → его `client.json`, 0600, нужны все включённые), `hops` (имя перехода каталога →
      `host, port, user, keyFile`), `vpn {checkUrl, dnsServer}` — свой HTTPS-адрес проверки и DNS;
    - `happier {account, serverUrl, webappUrl}` — необязательно;
@@ -98,8 +98,8 @@ remoteagents config export --name "Ноутбук сына" --master-password-st
 | `vpn-entry-<имя в нижнем регистре>` | JSON-текст `client.json` узла каталога (ключ в `entries` — имя как в каталоге) |
 | `vpn-hop-<имя в нижнем регистре>` | закрытый ключ SSH-перехода каталога для VPN первым |
 
-`rootPassword` не выдаётся: компьютер входит ключом конфига. Ключ Happier не выдаётся (как и в invite: аккаунт
-настраивает действие `Account` по SSH). Бинарник `sing-box.exe` в текстовый конфиг не кладётся (см. `docs/CONFIG-REPORT-B.md`, «Что нужно от других потоков»).
+`rootPassword` не выдаётся: компьютер входит ключом конфига. Ключ Happier не выдаётся (аккаунт
+настраивает действие `Account` по SSH). Бинарник `sing-box.exe` в текстовый конфиг не кладётся: он во встроенном бандле EXE (`build/bundle-binaries.json`, SHA-256).
 `disk.base` не задаётся — компьютер берёт свой (`Get-DiskBase`). `--vpn off` → `vpn.enabled=false`, без канала и узлов.
 
 ### Тестовый вектор enc1 (общий для Python и C#)
@@ -142,9 +142,10 @@ remoteagents config export --name "Ноутбук сына" --master-password-st
 
 ## Название компьютера → реестр → `windows_devices`
 
-`device.name` из конфига → действие `Bridge {…, deviceName}` → `Start-WindowsControl.ps1` кладёт `deviceName` в
-`CONTROL_DATA` → `server-control.sh` → `server_node_catalog.register`. Сейчас `Start-WindowsControl.ps1` отправляет
-`$env:COMPUTERNAME` — это надо заменить (см. ниже). На сервере (`server_node_catalog.py`):
+`device.name` из конфига → действие `Bridge {…, deviceName}` (сразу регистрирует имя на сервере) и
+`Start-WindowsControl.ps1`, который при каждой регистрации моста кладёт в `CONTROL_DATA` `-DeviceName`, иначе
+`profile.device.name` из `config.json` программы, иначе `COMPUTERNAME` → `server-control.sh` →
+`server_node_catalog.register`. Смена названия в настройках программы повторяет `Bridge`. На сервере (`server_node_catalog.py`):
 
 - название очищается: только печатаемые символы (переводы строк, управляющие и невидимые `‮` и т. п. убираются),
   пробелы схлопываются, до 80 символов; пусто → `hostId`;
@@ -153,11 +154,13 @@ remoteagents config export --name "Ноутбук сына" --master-password-st
   этого `hostId`, а передача проекта (`Agent.Handoff.ps1`, знает только `MachineName`) берёт имя из записи управления;
 - `windows_devices` (`codex-windows-bridge.py`) показывает очищенное `deviceName`, для старых записей без поля — `hostId`.
 
-## Автообновление (бывший `invite sync`) — для потока C
+## Автообновление — общий протокол с клиентом
 
+Один формат на обеих сторонах (клиент — `docs/CONFIG-ENGINE.md`, «Автообновление (ConfigSync)»).
 Сервер публикует снимок `~рабочего/.config/remoteagents/config-sync.json` (0600, владелец — рабочий пользователь) при
 каждом `config export` и командой `remoteagents config sync` (после изменения адреса, ключей хоста, маршрутов, каталога,
-снимков VPN). Если ничего не изменилось, файл не переписывается (`generatedUtc` прежний).
+снимков VPN). Если ничего не изменилось, файл не переписывается (`generatedUtc` прежний). `remoteagents config sync` —
+команда администратора (читает настройки выдачи); компьютеры её не вызывают, они только читают файл.
 
 ```json
 { "kind": "remoteagents-config-sync", "schema": 1, "generatedUtc": "2026-11-12T10:00:00+00:00",
@@ -169,27 +172,23 @@ remoteagents config export --name "Ноутбук сына" --master-password-st
 ```
 
 `config` — частичный конфиг того же формата (раздел 1 соглашения), секреты **открытым текстом** (файл доступен только
-рабочему пользователю, читается его же ключом). Правила для клиента:
+рабочему пользователю, читается его же ключом). Клиент (действие `ConfigSync`, задача Windows каждые 5 минут и трей после
+восстановления связи):
 
-- забирать раз в 5 минут, при запуске и при восстановлении связи **только своим ключом через SSH с уже закреплённым
-  ключом хоста**: `cat "$HOME/.config/remoteagents/config-sync.json"` (через местный транспорт, затем сохранённый маршрут,
-  как `Get-WizardInviteSettings`). Без keyscan, accept-new и HTTP. Ответ > 1 МиБ, не тот `kind`/`schema` → отказ;
-  `\r` убирать перед разбором (§6б);
-- `revision` совпал с применённым → ничего не делать;
-- отсутствующие поля не трогать: в снимке нет `server.key` (ключ компьютера остаётся свой), нет `vpn.enabled`
+- читает `cat "$HOME/.config/remoteagents/config-sync.json"` **только своим ключом через SSH с уже закреплённым ключом
+  хоста** (сначала через местный транспорт, затем сохранённым маршрутом). Без keyscan, accept-new и HTTP. Ответ > 1 МиБ,
+  не тот `kind`/`schema`, ссылка на секрет, которого нет в снимке, → отказ; `\r` убирается перед разбором (§6б);
+- тот же снимок уже применён → ничего не делает;
+- отсутствующие поля не трогает: в снимке нет `server.key` (ключ компьютера остаётся свой), нет `vpn.enabled`
   (вкл/выкл VPN — выбор компьютера), нет `device`, `happier`, `bridge`, `disk`, `proxyOut`, `lan`;
 - `server.login` не может смениться — отказ; новые `hostKeys`/адрес принимаются, потому что пришли по уже доверенному
   SSH (смена VPS: сначала добавить новый путь, `config sync`, дождаться компьютеров, потом убрать старый и снова `config sync`);
-- применять через тот же движок с проверкой нового пути до замены и независимым откатом (как `Update-WizardInviteSettings`);
+- применяет через тот же движок с проверкой нового пути до замены и независимым откатом;
 - живой каталог связи по-прежнему авторитетен: `python3 - < transport/server-transport-catalog.py` после входа; каталог
   в снимке — то, что нужно до первого SSH.
 
-Соответствие старому `invite-settings.json` (`type: settings`): `serverAddress/serverPort/workerUser/hostKeys` →
-`config.server.address/port/login/hostKeys`; `routes[].proxy.host` → `server`; `routes[].hop.{ssh,privateKey,password}` →
-`hop.{host,port,user}` + `key/password` → `secrets`; `bootstrap.catalog` → `vpn.bootstrap.catalog`;
-`bootstrap.channel/entries` (объекты) → `secrets["vpn-channel"]`, `secrets["vpn-entry-…"]` (JSON-текст);
-`bootstrap.hops[].privateKey` → `secrets["vpn-hop-…"]`; `bootstrap.vpn.{checkUrl,dnsServer}` → `vpn.{checkUrl,dnsServer}`;
-`vpn: on/off` → не передаётся.
+Проверено сквозным тестом `app/launcher/tests/test_config_e2e.py` (настоящий sshd на loopback): снимок от `config export`
+применяется клиентом; новый ключ хоста после `config sync` закрепляется; повтор ничего не меняет.
 
 ## Что удалено
 
