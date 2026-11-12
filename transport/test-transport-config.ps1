@@ -72,6 +72,7 @@ try{
     $script:hopKnown='';$script:hopResolve=@()
     function Get-TransportHostKeys($Ssh,$HostName,$KnownHosts){if($KnownHosts -like '*known_hosts-hop'){$script:hopKnown=$KnownHosts};'ssh-ed25519 fixture-pinned-hop-key'}
     function Invoke-TransportText($Exe,$Arguments){$script:hopResolve=@($Arguments);$script:fakeHop}
+    [IO.File]::WriteAllText((Join-Path $work 'known_hosts-hop'),'fixture')
     $personalPaths=Get-TransportCandidates $overlay $work
     Assert ((ConvertTo-Json -InputObject $overlay.Transport -Depth 30 -Compress) -ceq $before) 'personal overlay does not mutate public catalog lists'
     Assert ($script:hopKnown -eq (Join-Path $work 'known_hosts-hop')) 'personal hop host key comes from known_hosts-hop'
@@ -99,12 +100,63 @@ try{
     Assert ($pc.Contains('--proxy-connect http 127.0.0.1 1080 %h %p') -and $proxyTunnel.target -eq $p.serverAddress) 'persistent proxy uses local exe and target profile'
     Assert (@($proxyPaths.Candidates|Where-Object {$_.tag -eq 'openssh-proxy'}).Count -eq 1) 'persistent proxy participates in transport selection'
     Remove-Item $helper
-    $failed=$false;try{Get-TransportCandidates $overlay $work|Out-Null}catch{$failed=$_.Exception.Message -like '*RemoteAgents.exe*'}
-    Assert $failed 'persistent proxy without helper fails clearly'
+    $failedPaths=Get-TransportCandidates $overlay $work
+    Assert ('openssh-proxy' -notin @($failedPaths.Candidates.tag) -and ($failedPaths.AllCandidates|Where-Object {$_.tag -eq 'openssh-proxy'}).buildFailed) 'proxy without helper fails per candidate'
     $overlay.Transport.serverRoute=[pscustomobject]@{used='hop';hop=[pscustomobject]@{ssh='hop.example.invalid'}}
-    $failed=$false;try{Get-TransportCandidates $overlay $work|Out-Null}catch{$failed=$_.Exception.Message -like '*ключ для промежуточного сервера*'}
-    Assert $failed 'password-only personal hop cannot silently disappear from persistent transport'
+    $failedPaths=Get-TransportCandidates $overlay $work
+    Assert ('openssh-jump-wizard-server-route' -notin @($failedPaths.Candidates.tag) -and ($failedPaths.AllCandidates|Where-Object {$_.tag -eq 'openssh-jump-wizard-server-route'}).buildFailed) 'password-only hop remains visible as failed candidate'
     Set-Item function:Invoke-TransportText $realText;Set-Item function:Get-TransportHostKeys $realHostKeys
+    # Real host-key lookup: code 1 means no match; missing files are diagnosed before ssh-keygen.
+    $reason=$null;try{Get-TransportHostKeys 'ssh' 'absent.example.invalid' $known|Out-Null}catch{$reason=$_.Exception.Data['transportReason']}
+    Assert ($reason -eq 'host-key-missing') 'ssh-keygen -F exit 1 is a missing pin, not command failure'
+    $reason=$null;try{Get-TransportHostKeys 'ssh' 'example.invalid' (Join-Path $work 'absent-known')|Out-Null}catch{$reason=$_.Exception.Data['transportReason']}
+    Assert ($reason -eq 'host-key-missing') 'missing known_hosts file has explicit reason'
+    $reason=$null;$message='';try{Invoke-TransportText (Join-Path $work 'absent-executable') @()|Out-Null}catch{$reason=$_.Exception.Data['transportDiagnostic'].reason;$message=$_.Exception.Message}
+    Assert ($reason -eq 'executable-not-found' -and $message -eq 'Программа или файл запуска не найдены') 'missing executable differs from nonzero exit'
+    $reason=$null;$exitCode=$null;try{Invoke-TransportText (Get-TransportPowerShell) @('-NoProfile','-NonInteractive','-Command','exit 7')|Out-Null}catch{$reason=$_.Exception.Data['transportDiagnostic'].reason;$exitCode=$_.Exception.Data['transportDiagnostic'].exitCode}
+    Assert ($reason -eq 'command-failed' -and $exitCode -eq 7) 'nonzero exit is retained without raw output'
+    # Old local hop overlay with no host pin must not hide working VLESS/relay or occupy selector/rank slots.
+    $broken=Copy-TransportObject $settings;$broken.Transport|Add-Member serverRoute $personal
+    $broken.Transport.entries=@();$broken.Transport.hops=@()
+    Remove-Item -LiteralPath (Join-Path $work 'known_hosts-hop')
+    $brokenPaths=Get-TransportCandidates $broken $work
+    $badTags=@('vless-sshhop-wizard-server-route','openssh-jump-wizard-server-route')
+    Assert ('vless-direct' -in @($brokenPaths.Candidates.tag) -and 'vless-relay-relay' -in @($brokenPaths.Candidates.tag)) 'missing overlay pin keeps direct VLESS and relay'
+    Assert (@($brokenPaths.Candidates|Where-Object {$_.tag -in $badTags}).Count -eq 0 -and @($brokenPaths.Tunnels|Where-Object {$_.tag -in $badTags}).Count -eq 0) 'failed overlay has no selector path or SSH tunnel'
+    $oldMemory=@{version=1;networks=@{fixture=@{candidates=@([pscustomobject]@{tag=$badTags[0];state='ok';kbps=99999;checkedAt='2026-01-01T00:00:00Z'})}}}
+    $failedRows=@(Get-TransportRemembered $oldMemory 'fixture' $brokenPaths.AllCandidates)
+    Assert (@($failedRows|Where-Object {$_.tag -in $badTags -and $_.state -eq 'fail' -and $_.diagnostic.reason -eq 'hop-host-key-missing' -and $_.diagnostic.stderr -eq 'Нет ключа хоста промежуточного сервера' -and $null -eq $_.kbps}).Count -eq 2) 'both overlay candidates have a safe failure, overriding remembered success'
+    Assert (-not (Get-TransportBest $failedRows -Remembered)) 'failed construction never selected from memory'
+    $rank=@(Get-TransportRankTags $failedRows $brokenPaths.Candidates @{topOnMetered=100} $true)
+    Assert (@($rank|Where-Object {$_ -in $badTags}).Count -eq 0 -and $rank.Count -eq $brokenPaths.Candidates.Count) 'failed candidates do not consume metered ranking slots'
+    for($i=0;$i -lt $brokenPaths.Candidates.Count;$i++){Assert ($brokenPaths.Candidates[$i].port -eq 26000+$i) 'probe ports remain contiguous after a skipped candidate'}
+    $selector=(New-TransportConfig $broken $brokenPaths 'fixture' 'vless-relay-relay').outbounds|Where-Object {$_.tag -eq 'active'}
+    Assert (@($selector.outbounds|Where-Object {$_ -in $badTags}).Count -eq 0) 'generated selector has no failed dependencies'
+    $log=[IO.File]::ReadAllText((Join-Path $work 'logs/transport.log'))
+    Assert ($log.Contains('reason=hop-host-key-missing') -and -not $log.Contains('hop.example.invalid') -and -not $log.Contains($hopKey)) 'candidate failure journal contains no endpoint or private path'
+    # Independent direct SSH pin, catalog hop, relay and entry failures all leave the working channel alive.
+    $broken.Profile.knownHostsPath=Join-Path $work 'no-server-known'
+    $broken.Transport.PSObject.Properties.Remove('serverRoute')
+    $broken.Transport.hops=@([pscustomobject]@{name='bad-hop';ssh='-invalid';knownHostsPath=(Join-Path $work 'missing-hop-known')})
+    $broken.Transport.relays+=@([pscustomobject]@{name='bad-relay';host='secret.invalid';port=0})
+    $broken.Transport.entries=@([pscustomobject]@{name='missing-entry';ssh='missing';kinds=@('hy2')})
+    $candidateProfile=Join-Path $work 'candidate-profile.json';$candidateChannel=Join-Path $work 'candidate-channel.json'
+    Write-TransportJson $candidateProfile $broken.Profile;Write-TransportJson $candidateChannel $broken.Channel
+    $broken.Transport|Add-Member -Force profilePath $candidateProfile;$broken.Transport|Add-Member -Force channelPath $candidateChannel
+    Write-TransportJson (Join-Path $work 'config.json') @{schema=1;transport=$broken.Transport}
+    $loadedBroken=Read-TransportSettings $work
+    $brokenPaths=Get-TransportCandidates $loadedBroken $work
+    Assert ('vless-relay-relay' -in @($brokenPaths.Candidates.tag)) 'runtime validation isolates invalid relay/hop settings too'
+    foreach($tag in @('singbox-ssh-direct','vless-sshhop-bad-hop','openssh-jump-bad-hop','vless-relay-bad-relay','hy2-missing-entry')){
+        Assert ($tag -notin @($brokenPaths.Candidates.tag) -and ($brokenPaths.AllCandidates|Where-Object {$_.tag -eq $tag}).buildFailed) ('isolated build failure '+$tag)
+    }
+    Assert ('vless-relay-relay' -in @($brokenPaths.Candidates.tag)) 'valid relay survives all independent build errors'
+    function Invoke-TransportText($Exe,$Arguments){throw 'secret.invalid token=do-not-print'}
+    try{Sync-TransportEntryCache $broken $work}finally{Set-Item function:Invoke-TransportText $realText}
+    Assert (-not [IO.File]::ReadAllText((Join-Path $work 'logs/transport.log')).Contains('do-not-print')) 'cache fetch failure is isolated and sanitized before candidate construction'
+    $broken.Channel.outbounds=@();$broken.Transport.relays=@();$broken.Transport.hops=@();$broken.Transport.entries=@();$broken.Options.openSsh=$false
+    $fatal=$null;try{Get-TransportCandidates $broken $work|Out-Null}catch{$fatal=$_.Exception.Message}
+    Assert ($fatal -eq 'Нет доступных кандидатов транспорта') 'no remaining candidates is fatal'
     $expected=@('vless-direct','singbox-ssh-direct','vless-relay-relay','vless-sshhop-jump','hy2-edge','hy2obfs-edge','tuic-edge','trojan-edge','reality-edge','shadowtls-edge','ws-direct-edge','ws-cdn-edge','openssh-direct','openssh-jump-jump')
     Assert ($paths.Candidates.Count -eq $expected.Count) 'число кандидатов'
     foreach($tag in $expected){Assert ($tag -in @($paths.Candidates|ForEach-Object {$_.tag})) ('путь '+$tag)}
@@ -135,8 +187,8 @@ try{
     Assert ((Get-TransportBest $rows).tag -eq 'b') 'выбор лучшего живого'
     Assert ((Get-TransportBest $rows @('a')).tag -eq 'a') 'ограничение top набора'
     $rankOptions=@{topOnMetered=1}
-    Assert (@(Get-TransportRankTags $rows $paths.Candidates $rankOptions $true)[0] -eq 'b') 'на лимитной сети лучший из памяти'
-    Assert (@(Get-TransportRankTags $rows $paths.Candidates $rankOptions $null).Count -eq 1) 'неизвестная стоимость экономит трафик'
+    Assert (@(Get-TransportRankTags $rows @($rows|ForEach-Object {[pscustomobject]@{tag=$_.tag}}) $rankOptions $true)[0] -eq 'b') 'на лимитной сети лучший из памяти'
+    Assert (@(Get-TransportRankTags $rows @($rows|ForEach-Object {[pscustomobject]@{tag=$_.tag}}) $rankOptions $null).Count -eq 1) 'неизвестная стоимость экономит трафик'
     Assert (@(Get-TransportRankTags $rows $paths.Candidates $rankOptions $false).Count -eq $paths.Candidates.Count) 'без лимита полный рейтинг'
     $s=New-TransportProbeState 65536 5 45
     [void](Update-TransportProbeState $s 16384 1);[void](Update-TransportProbeState $s 65536 2)
