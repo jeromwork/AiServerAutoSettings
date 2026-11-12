@@ -87,7 +87,7 @@ namespace RemoteAgents.Launcher
             var result = new Dictionary<string, string>(StringComparer.Ordinal);
             if (!File.Exists(path)) return result;
             try {
-                if (new FileInfo(path).Length > 16 * 1024 * 1024) throw new IOException();
+                if (new FileInfo(path).Length > ConfigBundle.MaxLength) throw new IOException();
                 var root = Json.Read(path);
                 string protection = Json.Str(root, "protection");
                 if (Json.Int(root, "schema", 0) != 1 || protection != (Windows ? "dpapi-current-user" : "plaintext-linux")) throw new IOException();
@@ -103,18 +103,21 @@ namespace RemoteAgents.Launcher
         }
         internal static void Save(string home, Dictionary<string, string> values)
         {
+            if (values.Count > 256 || values.Values.Sum(v => (long)(v == null ? 0 : Files.Utf8.GetByteCount(v))) > ConfigBundle.MaxLength) throw ConfigBundle.Bad("Хранилище секретов превышает лимит");
             var data = new Dictionary<string, object>(StringComparer.Ordinal);
             foreach (var pair in values) {
                 ConfigBundle.ValidName(pair.Key);
-                if (pair.Value == null || pair.Value.Length > ConfigBundle.MaxLength) throw ConfigBundle.Bad("Недопустимое значение секрета");
+                if (pair.Value == null || pair.Value.Length > ConfigBundle.MaxLength || Files.Utf8.GetByteCount(pair.Value) > ConfigBundle.MaxLength) throw ConfigBundle.Bad("Недопустимое значение секрета");
                 data[pair.Key] = Windows ? ProtectValue(pair.Value) : pair.Value;
             }
-            WritePrivate(home, VaultPath(home), Json.Encode(ConfigBundle.D("schema", 1, "protection", Windows ? "dpapi-current-user" : "plaintext-linux", "values", data)) + "\n");
+            string encoded = Json.Encode(ConfigBundle.D("schema", 1, "protection", Windows ? "dpapi-current-user" : "plaintext-linux", "values", data)) + "\n";
+            if (Files.Utf8.GetByteCount(encoded) > ConfigBundle.MaxLength) throw ConfigBundle.Bad("Хранилище секретов превышает 4 МиБ");
+            WritePrivate(home, VaultPath(home), encoded);
         }
         public static void Set(string home, string name, string value)
         {
             ConfigBundle.ValidName(name);
-            if (value == null || value.Length > ConfigBundle.MaxLength) throw ConfigBundle.Bad("Недопустимое значение секрета");
+            if (value == null || value.Length > ConfigBundle.MaxLength || Files.Utf8.GetByteCount(value) > ConfigBundle.MaxLength) throw ConfigBundle.Bad("Недопустимое значение секрета");
             using (var lease = new Lease(home)) { var values = Load(home); values[name] = value; Save(home, values); }
         }
         public static bool Has(string home, string name)
@@ -132,8 +135,8 @@ namespace RemoteAgents.Launcher
         static string SecretJson(string text)
         {
             try {
-                if (text.Length > ConfigBundle.MaxLength || !(Json.Parse(text) is Dictionary<string, object>)) throw new FormatException();
-                return Json.Encode(Json.Parse(text)) + "\n";
+                if (text.Length > ConfigBundle.MaxLength || !(ConfigBundle.StrictParse(text) is Dictionary<string, object>)) throw new FormatException();
+                return Json.Encode(ConfigBundle.StrictParse(text)) + "\n";
             } catch { throw ConfigBundle.Bad("Секрет канала или узла должен содержать JSON-объект"); }
         }
         static string FileId(string name)
@@ -153,6 +156,7 @@ namespace RemoteAgents.Launcher
                 string secretDir = Path.Combine(Path.GetFullPath(home), "secrets");
                 Action<string, string> add = (path, content) => {
                     SafePath(home, path);
+                    if (string.Equals(path,VaultPath(home),Windows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal) || string.Equals(path,MaterializedPath(home),Windows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) throw ConfigBundle.Bad("Нельзя перезаписать служебный файл секретом");
                     string previous; if (files.TryGetValue(path, out previous) && previous != content) throw ConfigBundle.Bad("Два секрета направлены в один файл");
                     files[path] = content;
                 };
@@ -164,7 +168,14 @@ namespace RemoteAgents.Launcher
                     if (sshPath.Length > 0 && File.Exists(sshPath)) {
                         SafePath(home, sshPath); var ssh = Json.Read(sshPath);
                         if (Json.Str(server, "address") == Json.Str(ssh, "serverAddress") && Json.Str(server, "login") == Json.Str(ssh, "login") && Json.Int(server, "port", 22) == ConfigBundle.RuntimePort(ssh)) {
-                            string configured = Json.Str(ssh, "keyPath"); if (configured.Length > 0) path = Path.GetFullPath(configured);
+                            string configured = Json.Str(ssh, "keyPath");
+                            if (configured.Length > 0) {
+                                configured = Path.GetFullPath(configured); SafePath(home,configured);
+                                string relative = configured.Substring(Path.GetFullPath(home).TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar).Length).TrimStart(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar).Replace('\\','/');
+                                if (!(relative.StartsWith("secrets/",StringComparison.OrdinalIgnoreCase) || relative.StartsWith("ssh-profiles/",StringComparison.OrdinalIgnoreCase)) || new[]{".json",".ps1",".exe",".dll",".conf",".known_hosts"}.Contains(Path.GetExtension(configured).ToLowerInvariant())) throw ConfigBundle.Bad("Недопустимый путь SSH-ключа");
+                                if (!File.Exists(configured) || Files.LF(File.ReadAllText(configured)) == Files.LF(key)) path = configured;
+                                else if (string.Equals(path,configured,Windows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) path = Path.Combine(secretDir,"server-key-pending");
+                            }
                         }
                     }
                     add(path, Files.LF(key)); manifest["serverKeyFile"] = path;

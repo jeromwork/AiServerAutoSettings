@@ -35,7 +35,7 @@ namespace RemoteAgents.Launcher
         static Dictionary<string, object> S(int max = 4096, int min = 0, string pattern = null)
         {
             var d = D("type", "string", "minLength", min, "maxLength", max);
-            if (pattern != null) d["pattern"] = pattern;
+            if (pattern != null) d["pattern"] = pattern + "(?![\\s\\S])";
             return d;
         }
         static Dictionary<string, object> E(params string[] values) { return D("type", "string", "enum", values); }
@@ -51,16 +51,21 @@ namespace RemoteAgents.Launcher
         }
         static Dictionary<string, object> Named(object item, string pattern = NamePattern)
         { return D("type", "object", "propertyNames", S(64, 1, pattern), "additionalProperties", item, "maxProperties", 256); }
-        static Dictionary<string, object> Ref()
-        { return O(D("secret", S(64, 1, NamePattern)), "secret"); }
+        static Dictionary<string, object> Ref(string standard = null)
+        {
+            var d = O(D("secret", S(64, 1, NamePattern)), "secret");
+            d["description"] = standard == null ? "Именованная ссылка; значение хранится только в secrets/vault" : StandardHint(standard);
+            if (standard != null) d["examples"] = new[]{D("secret", standard)};
+            return d;
+        }
         static Dictionary<string, object> Host() { return S(253, 1, "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$"); }
         static Dictionary<string, object> User() { return S(32, 1, "^[a-z_][a-z0-9_-]{0,31}$"); }
         static Dictionary<string, object> Url()
         { var d = S(2048, 1); d["format"] = "https-url"; return d; }
         static Dictionary<string, object> Proxy()
-        { return O(D("type", E("socks", "http"), "server", Host(), "port", N(1, 65535), "login", S(256), "password", Ref(), "checkUrl", Url()), "type", "server", "port"); }
+        { return O(D("type", E("socks", "http"), "server", Host(), "port", N(1, 65535), "login", S(256), "password", Ref("proxy-out-password"), "checkUrl", Url()), "type", "server", "port"); }
         static Dictionary<string, object> Hop()
-        { return O(D("host", Host(), "port", N(1, 65535), "user", User(), "hostKey", S(4096, 1, "^[^\\r\\n\\x00]+$"), "key", Ref(), "password", Ref()), "host", "user"); }
+        { return O(D("host", Host(), "port", N(1, 65535), "user", User(), "hostKey", S(4096, 1, "^[^\\r\\n\\x00]+$"), "key", Ref("hop-key"), "password", Ref("hop-password")), "host", "user"); }
         internal static Dictionary<string, object> SchemaDocument()
         {
             var route = O(D("kind", E("direct", "proxy", "hop"), "proxy", Proxy(), "hop", Hop()), "kind");
@@ -68,17 +73,17 @@ namespace RemoteAgents.Launcher
                 D("if", D("properties", D("kind", D("const", "proxy"))), "then", D("required", new[]{"proxy"})),
                 D("if", D("properties", D("kind", D("const", "hop"))), "then", D("required", new[]{"hop"}))
             };
-            var bootstrap = O(D("channel", Ref(), "entries", Named(Ref(), "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$"), "hops", Named(Hop(), "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$")));
+            var bootstrap = O(D("channel", Ref("vpn-channel"), "entries", Named(Ref(), "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$"), "hops", Named(Hop(), "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$")));
             var component = O(D("enabled", B()));
             var props = D(
                 "kind", D("const", "remoteagents-config"), "schema", D("const", 1),
                 "device", O(D("name", S(80, 1, "^[^\\r\\n\\x00]+$"))),
                 "server", O(D("address", Host(), "port", N(1, 65535), "login", User(),
-                    "hostKeys", A(S(4096, 1, "^[^\\r\\n\\x00]+$"), 32), "key", Ref(), "rootPassword", Ref(), "routes", A(route, 32))),
+                    "hostKeys", A(S(4096, 1, "^[^\\r\\n\\x00]+$"), 32), "key", Ref("server-key"), "rootPassword", Ref("server-root-password"), "routes", A(route, 32))),
                 "connection", O(D("enabled", B())),
                 "bridge", O(D("enabled", B(), "allowShell", B())),
-                "happier", O(D("mode", E("same", "new"), "label", S(80, 1), "serverUrl", Url(), "webappUrl", Url(), "key", Ref())),
-                "disk", O(D("base", S(1024, 1, "^[^\\r\\n\\x00]+$"), "folders", A(S(128, 1, "^[^/\\\\<>:\"|?*\\x00-\\x1f]+$")))),
+                "happier", O(D("mode", E("same", "new"), "label", S(80, 1), "serverUrl", Url(), "webappUrl", Url(), "key", Ref("happier-key"))),
+                "disk", O(D("base", S(1024, 1, "^[^\\r\\n\\x00]+$"), "folders", A(S(1024, 1, "^[^\\\\<>:\"|?*\\x00-\\x1f]+$")))),
                 "vpn", O(D("enabled", B(), "checkUrl", Url(), "dnsServer", S(253, 1), "bootstrap", bootstrap)),
                 "proxyOut", Proxy(),
                 "lan", A(O(D("name", S(64, 1, "^[^/\\\\\\r\\n\\x00]+$"), "kind", E("openvpn"), "ovpn", Ref(),
@@ -96,11 +101,10 @@ namespace RemoteAgents.Launcher
 
         public static ParsedConfig Parse(string text)
         {
-            if (text == null || text.Length > MaxLength) throw Bad("Конфиг пуст или превышает 4 МиБ");
+            if (text == null || text.Length > MaxLength || Files.Utf8.GetByteCount(text) > MaxLength) throw Bad("Конфиг пуст или превышает 4 МиБ");
             Dictionary<string, object> root;
             try {
-                StrictJson.Check(text);
-                root = Json.Parse(text) as Dictionary<string, object>;
+                root = StrictParse(text) as Dictionary<string, object>;
             } catch { throw Bad("Конфиг должен быть корректным JSON без повторяющихся полей"); }
             Validate(root, SchemaDocument(), "конфиг");
             var p = new ParsedConfig { Profile = new Dictionary<string, object>(root), Secrets = new Dictionary<string, string>(StringComparer.Ordinal), Protection = new Dictionary<string, object>() };
@@ -113,7 +117,6 @@ namespace RemoteAgents.Launcher
                 string value = (string)pair.Value;
                 if (value == Hidden) value = ""; // AI copies are editable public profiles, never literal credentials.
                 if (p.Locked && value.Length > 0) CheckEnvelope(value);
-                if (!p.Locked && value.StartsWith("enc1:", StringComparison.Ordinal)) throw Bad("Для enc1 нужен secrets.protected");
                 p.Secrets[pair.Key] = value;
             }
             if (p.Locked) {
@@ -127,10 +130,16 @@ namespace RemoteAgents.Launcher
             RefreshMissing(p);
             return p;
         }
+        internal static object StrictParse(string text)
+        {
+            if (text == null || text.Length > MaxLength || Files.Utf8.GetByteCount(text) > MaxLength) throw Bad("JSON превышает 4 МиБ");
+            try { StrictJson.Check(text); return Json.Parse(text); }
+            catch { throw Bad("Некорректный JSON без допустимого однозначного разбора"); }
+        }
         internal static InvalidDataException Bad(string message) { return new InvalidDataException(message); }
         internal static void ValidName(string name)
         {
-            if (name == null || !Regex.IsMatch(name, NamePattern) || name.Any(c => c > 127 && !char.IsLetter(c)) || new[]{"protected", "kdf", "check", "hint"}.Contains(name)) throw Bad("Недопустимое имя секрета");
+            if (name == null || name.Length == 0 || Regex.Match(name, NamePattern).Length != name.Length || name.Any(c => c > 127 && !char.IsLetter(c)) || new[]{"protected", "kdf", "check", "hint"}.Contains(name)) throw Bad("Недопустимое имя секрета");
         }
         static void Validate(object value, Dictionary<string, object> schema, string path)
         {
@@ -163,7 +172,7 @@ namespace RemoteAgents.Launcher
             } else if (type == "string") {
                 var s = value as string;
                 if (s == null || s.Length < Json.Int(schema, "minLength", 0) || s.Length > Json.Int(schema, "maxLength", MaxLength)) throw Bad("Неверная строка: " + path);
-                if (schema.ContainsKey("pattern") && !Regex.IsMatch(s, (string)schema["pattern"])) throw Bad("Недопустимые символы: " + path);
+                if (schema.ContainsKey("pattern")) { var match = Regex.Match(s,(string)schema["pattern"]); if (!match.Success || match.Index != 0 || match.Length != s.Length) throw Bad("Недопустимые символы: " + path); }
                 if (Json.Str(schema, "format") == "https-url") {
                     Uri u;
                     if (!Uri.TryCreate(s, UriKind.Absolute, out u) || u.Scheme != "https" || u.UserInfo.Length > 0 || s.Any(char.IsWhiteSpace) || s.IndexOfAny(new[]{'\'', '"', '\\', '`', '$'}) >= 0) throw Bad("Нужен HTTPS URL без пароля: " + path);
@@ -188,8 +197,12 @@ namespace RemoteAgents.Launcher
                 string kind = Json.Str(row, "kind");
                 if ((kind != "proxy" && row.ContainsKey("proxy")) || (kind != "hop" && row.ContainsKey("hop"))) throw Bad("Поля маршрута не соответствуют kind");
             }
-            foreach (string f in Json.Strings(Json.Get(Json.Map(Json.Get(profile, "disk")), "folders"))) {
-                if (!Regex.IsMatch(f, "^[\\p{L}\\p{N}_][\\p{L}\\p{N}_. -]{0,127}$") || f.Contains("..") || f.EndsWith(".") || f.EndsWith(" ") || Regex.IsMatch(f, "^(?i:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\\.|$)")) throw Bad("Недопустимое имя папки Disk");
+            var folders = Json.Strings(Json.Get(Json.Map(Json.Get(profile, "disk")), "folders"));
+            if (folders.Distinct(StringComparer.OrdinalIgnoreCase).Count() != folders.Length) throw Bad("Повторяющиеся папки Disk");
+            foreach (string f in folders) {
+                string[] parts = f.Split('/');
+                if (!Regex.IsMatch(parts[0], "^[\\p{L}\\p{N}_][\\p{L}\\p{N}_. -]{0,127}$") || parts[0].Contains("..")) throw Bad("Недопустимое имя проекта Disk");
+                foreach (string part in parts) if (part.Length == 0 || part.Length > 255 || part == "." || part == ".." || part.EndsWith(".") || part.EndsWith(" ") || Regex.IsMatch(part, "^(?i:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\\.|$)")) throw Bad("Недопустимый путь выбора Disk");
             }
         }
         internal static IEnumerable<Dictionary<string, object>> References(object value)
@@ -203,20 +216,39 @@ namespace RemoteAgents.Launcher
         internal static void RefreshMissing(ParsedConfig p)
         {
             p.Hints = new Dictionary<string, string>(StringComparer.Ordinal);
-            foreach (var r in References(p.Profile)) {
-                string name = Json.Str(r, "secret"), hint = Json.Str(r, "hint");
-                p.Hints[name] = hint.Length > 0 ? hint : StandardHint(name);
-            }
+            ReferenceHints(p.Profile, "", p.Hints);
             p.Missing = p.Hints.Keys.Where(n => !p.Secrets.ContainsKey(n) || p.Secrets[n].Length == 0).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+        }
+        static void ReferenceHints(object value, string path, Dictionary<string,string> hints)
+        {
+            var map = value as Dictionary<string, object>;
+            if (map != null) {
+                if (map.ContainsKey("secret")) {
+                    string name = Json.Str(map,"secret"), custom = Json.Str(map,"hint");
+                    string standard = name;
+                    if (path == "server.rootPassword") standard = "server-root-password";
+                    else if (path == "server.key") standard = "server-key";
+                    else if (path == "happier.key") standard = "happier-key";
+                    else if (path.EndsWith(".hop.password") || path.StartsWith("vpn.bootstrap.hops.") && path.EndsWith(".password")) standard = "hop-password";
+                    else if (path.EndsWith(".hop.key") || path.StartsWith("vpn.bootstrap.hops.") && path.EndsWith(".key")) standard = "hop-key";
+                    else if (path == "proxyOut.password" || path.EndsWith(".proxy.password")) standard = "proxy-out-password";
+                    else if (path == "vpn.bootstrap.channel") standard = "vpn-channel";
+                    if (!hints.ContainsKey(name) || custom.Length > 0) hints[name] = custom.Length > 0 ? custom : StandardHint(standard);
+                } else foreach (var pair in map) ReferenceHints(pair.Value,path.Length == 0 ? pair.Key : path + "." + pair.Key,hints);
+            } else foreach (var item in Json.Array(value)) ReferenceHints(item,path + "[]",hints);
         }
         internal static string StandardHint(string name)
         {
+            if (name.StartsWith("vpn-entry-",StringComparison.Ordinal)) return "JSON client.json VPN-узла целиком, полученный у владельца сервера";
+            if (name.StartsWith("lan-",StringComparison.Ordinal) && name.EndsWith("-ovpn",StringComparison.Ordinal)) return "Профиль OpenVPN этой сети с включёнными сертификатами и ключами";
+            if (name.StartsWith("lan-",StringComparison.Ordinal) && name.EndsWith("-password",StringComparison.Ordinal)) return "Пароль пользователя локальной сети, выданный её администратором";
             switch (name) {
                 case "server-root-password": return "Пароль root сервера — его присылает хостинг при покупке сервера";
                 case "server-key": return "Закрытый SSH-ключ доступа к серверу";
                 case "happier-key": return "Секретный ключ аккаунта Happier из его настроек";
                 case "hop-key": return "Закрытый SSH-ключ промежуточного сервера";
                 case "hop-password": return "Пароль SSH промежуточного сервера";
+                case "route-proxy-password":
                 case "proxy-out-password": return "Пароль серверного прокси, выданный его владельцем";
                 case "vpn-channel": return "JSON канала связи с сервера";
                 default: return "Введите секрет «" + name + "» в этом окне. Он не попадёт в чат или журнал";
@@ -247,7 +279,15 @@ namespace RemoteAgents.Launcher
                 var source = Json.Map(Json.Get(settings, section));
                 var fields = Json.Map(Json.Get(Json.Map(definitions[section]), "properties"));
                 var target = source.Where(x => fields.ContainsKey(x.Key)).ToDictionary(x => x.Key, x => x.Value);
+                if (section == "happier" && target.Count > 0 && File.Exists(Path.Combine(home,"secrets","happier-account.key"))) target["key"] = D("secret","happier-key");
                 if (target.Count > 0) profile[section] = target;
+            }
+            var oldProxy = Json.Map(Json.Get(settings,"proxy"));
+            if (oldProxy.ContainsKey("type") && oldProxy.ContainsKey("server") && oldProxy.ContainsKey("port")) {
+                var proxy = D("type",oldProxy["type"],"server",oldProxy["server"],"port",oldProxy["port"]);
+                if (oldProxy.ContainsKey("ipCheckUrl")) proxy["checkUrl"] = oldProxy["ipCheckUrl"];
+                if (File.Exists(Path.Combine(home,"secrets","proxy-out.json"))) proxy["password"] = D("secret","proxy-out-password");
+                profile["proxyOut"] = proxy;
             }
             var transport = Json.Map(Json.Get(settings, "transport"));
             string path = Json.Str(transport, "profilePath");
@@ -255,7 +295,34 @@ namespace RemoteAgents.Launcher
                 SecretVault.SafePath(home, path); var ssh = Json.Read(path);
                 profile["server"] = D("address", Json.Str(ssh, "serverAddress"), "port", RuntimePort(ssh), "login", Json.Str(ssh, "login"), "key", D("secret", "server-key"));
             }
+            string homePath = Path.GetFullPath(home).TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar);
+            if (string.Equals(Path.GetFileName(homePath), "RemoteAgents", StringComparison.OrdinalIgnoreCase) || string.Equals(Path.GetFileName(homePath), "RemoteVPN", StringComparison.OrdinalIgnoreCase)) {
+                string parent = Path.GetDirectoryName(homePath), diskHome = Path.Combine(parent,"RemoteDisk");
+                string basePath = Path.Combine(diskHome,"base.txt"), selectionPath = Path.Combine(diskHome,"selection.json");
+                var disk = D();
+                if (File.Exists(basePath)) { SecretVault.SafePath(parent,basePath); disk["base"] = Files.ReadLine(basePath); }
+                if (File.Exists(selectionPath)) { SecretVault.SafePath(parent,selectionPath); disk["folders"] = Json.Strings(Json.Get(Json.Read(selectionPath),"paths")); }
+                if (disk.Count > 0) profile["disk"] = disk;
+            }
             return Parse(Json.Encode(profile)).Profile;
+        }
+        internal static void LegacyValues(string home, Dictionary<string, object> settings, Dictionary<string, object> profile, Dictionary<string,string> values)
+        {
+            if (settings.ContainsKey("profile")) return;
+            Action<string,string> read = (name,path) => {
+                if (values.ContainsKey(name) || !File.Exists(path)) return;
+                SecretVault.SafePath(home,path); if (new FileInfo(path).Length > MaxLength) throw Bad("Слишком большой файл секрета");
+                values[name] = File.ReadAllText(path);
+            };
+            string sshPath = Json.Str(Json.Map(Json.Get(settings,"transport")),"profilePath");
+            if (sshPath.Length > 0 && File.Exists(sshPath)) { SecretVault.SafePath(home,sshPath); var ssh = Json.Read(sshPath); string keyPath = Json.Str(ssh,"keyPath"); if (keyPath.Length > 0) read("server-key",keyPath); }
+            if (profile.ContainsKey("happier")) read("happier-key",Path.Combine(home,"secrets","happier-account.key"));
+            string proxyPath = Path.Combine(home,"secrets","proxy-out.json");
+            if (profile.ContainsKey("proxyOut") && File.Exists(proxyPath)) {
+                SecretVault.SafePath(home,proxyPath); var auth = Json.Read(proxyPath);
+                if (!values.ContainsKey("proxy-out-password")) values["proxy-out-password"] = Json.Str(auth,"password");
+                Json.Map(profile["proxyOut"])["login"] = Json.Str(auth,"username");
+            }
         }
         internal static int RuntimePort(Dictionary<string, object> ssh)
         {
@@ -276,7 +343,7 @@ namespace RemoteAgents.Launcher
         static Dictionary<string, string> FindConflicts(string home, ParsedConfig p, Dictionary<string, object> settings, Dictionary<string, string> vault)
         {
             var result = new Dictionary<string, string>(StringComparer.Ordinal);
-            var before = CurrentProfile(home, settings);
+            var before = CurrentProfile(home, settings); LegacyValues(home,settings,before,vault);
             var oldServer = Json.Map(Json.Get(before, "server")); var server = Json.Map(Json.Get(p.Profile, "server"));
             if (new[]{"address", "port", "login"}.Any(k => server.ContainsKey(k) && oldServer.ContainsKey(k) && Json.Encode(server[k]) != Json.Encode(oldServer[k]))) {
                 var merged = Merge(oldServer, server);
@@ -286,7 +353,7 @@ namespace RemoteAgents.Launcher
             bool different = new[]{"mode", "label", "serverUrl", "webappUrl"}.Any(k => account.ContainsKey(k) && oldAccount.ContainsKey(k) && Json.Encode(account[k]) != Json.Encode(oldAccount[k]));
             string oldKey = Json.Str(Json.Map(Json.Get(oldAccount, "key")), "secret"), key = Json.Str(Json.Map(Json.Get(account, "key")), "secret");
             if (key.Length > 0 && oldAccount.Count > 0) {
-                if (oldKey.Length > 0 && oldKey != key) different = true;
+                if (oldKey != key) different = true;
                 string previous, incoming;
                 if (p.Secrets.TryGetValue(key, out incoming) && incoming.Length > 0 && vault.TryGetValue(oldKey.Length > 0 ? oldKey : key, out previous) && previous.Length > 0 && incoming != previous) different = true;
             }
@@ -296,10 +363,10 @@ namespace RemoteAgents.Launcher
                 result["disk"] = "сейчас корень «" + Json.Str(oldDisk,"base") + "» / в конфиге «" + Json.Str(disk,"base") + "»";
             if (disk.ContainsKey("folders")) {
                 var kept = new HashSet<string>(Json.Strings(disk["folders"]), StringComparer.OrdinalIgnoreCase);
-                var removed = Json.Strings(Json.Get(oldDisk, "folders")).Where(f => !kept.Contains(f)).ToArray();
+                var removed = Json.Strings(Json.Get(oldDisk, "folders")).Where(f => !kept.Any(k => string.Equals(f,k,StringComparison.OrdinalIgnoreCase) || f.StartsWith(k+"/",StringComparison.OrdinalIgnoreCase))).ToArray();
                 if (removed.Length > 0) result["disk"] = (result.ContainsKey("disk") ? result["disk"] + "; " : "") + "сейчас выбраны папки «" + string.Join(", ", removed) + "» / в конфиге они убраны";
             }
-            var values = vault.Values.Concat(p.Locked ? new string[0] : p.Secrets.Values).Where(v => v.Length > 0).Distinct().OrderByDescending(v => v.Length).ToArray();
+            var values = vault.Values.Concat(p.Locked ? (IEnumerable<string>)new string[0] : p.Secrets.Values).Where(v => v.Length > 0).Distinct().OrderByDescending(v => v.Length).ToArray();
             foreach (string section in result.Keys.ToArray()) result[section] = Scrub(result[section], values);
             return result;
         }
@@ -317,10 +384,10 @@ namespace RemoteAgents.Launcher
             p = Parse(Pack(p, null));
             using (var lease = new SecretVault.Lease(home)) {
                 var settings = ReadSettings(home); var oldValues = SecretVault.Load(home);
+                var before = CurrentProfile(home, settings); LegacyValues(home,settings,before,oldValues);
                 var conflicts = FindConflicts(home, p, settings, oldValues);
                 var accepted = new HashSet<string>(acceptSections ?? new string[0], StringComparer.OrdinalIgnoreCase);
                 var blocked = new HashSet<string>(conflicts.Keys.Where(k => !accepted.Contains(k)), StringComparer.Ordinal);
-                var before = CurrentProfile(home, settings);
                 var patch = p.Profile.Where(x => !blocked.Contains(x.Key)).ToDictionary(x => x.Key, x => x.Value);
                 var profile = Merge(before, patch);
                 var protectedNames = new HashSet<string>(blocked.SelectMany(k => References(Json.Get(before, k)).Concat(References(Json.Get(p.Profile, k)))).Select(r => Json.Str(r, "secret")), StringComparer.Ordinal);
@@ -339,15 +406,16 @@ namespace RemoteAgents.Launcher
         static ParsedConfig Snapshot(string home)
         {
             var settings = ReadSettings(home); var profile = CurrentProfile(home, settings); var secrets = SecretVault.Load(home);
+            LegacyValues(home,settings,profile,secrets);
             // Legacy installations already have a key on disk; include that exact key in a
             // recovery export instead of asking for the root password again.
             var server = Json.Map(Json.Get(profile, "server"));
             string keyName = Json.Str(Json.Map(Json.Get(server, "key")), "secret");
             string sshPath = Json.Str(Json.Map(Json.Get(settings, "transport")), "profilePath");
-            if (keyName.Length > 0 && (!secrets.ContainsKey(keyName) || secrets[keyName].Length == 0) && sshPath.Length > 0 && File.Exists(sshPath)) {
+            if (keyName.Length > 0 && !secrets.ContainsKey(keyName) && sshPath.Length > 0 && File.Exists(sshPath)) {
                 SecretVault.SafePath(home, sshPath); var ssh = Json.Read(sshPath);
                 string keyPath = Json.Str(ssh, "keyPath");
-                if (Json.Str(server, "address") == Json.Str(ssh, "serverAddress") && keyPath.Length > 0 && File.Exists(keyPath)) { SecretVault.SafePath(home, keyPath); secrets[keyName] = File.ReadAllText(keyPath); }
+                if (Json.Str(server, "address") == Json.Str(ssh, "serverAddress") && Json.Int(server,"port",22) == RuntimePort(ssh) && Json.Str(server,"login") == Json.Str(ssh,"login") && keyPath.Length > 0 && File.Exists(keyPath)) { SecretVault.SafePath(home, keyPath); secrets[keyName] = File.ReadAllText(keyPath); }
             }
             foreach (var r in References(profile)) { string name = Json.Str(r, "secret"); if (!secrets.ContainsKey(name)) secrets[name] = ""; }
             var root = new Dictionary<string, object>(profile); root["secrets"] = secrets;
@@ -409,16 +477,21 @@ namespace RemoteAgents.Launcher
                 }
                 foreach (var pair in p.Secrets) secrets[pair.Key] = keys == null || pair.Value.Length == 0 ? pair.Value : Encrypt(pair.Value, keys);
                 root["secrets"] = secrets;
-                return Json.Encode(root) + "\n";
+                string encoded = Json.Encode(root) + "\n";
+                if (encoded.Length > MaxLength || Files.Utf8.GetByteCount(encoded) > MaxLength) throw Bad("Полный конфиг превышает 4 МиБ");
+                return encoded;
             } finally { if (keys != null) Array.Clear(keys, 0, keys.Length); }
         }
         static byte[] Random(int count)
         { var bytes = new byte[count]; using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(bytes); return bytes; }
+        // The static Pbkdf2 API is absent from the shipped .NET Framework 4.8.
+#pragma warning disable SYSLIB0060
         static byte[] Derive(string master, byte[] salt, int iterations)
         {
             if (master == null || iterations < 200000 || iterations > 2000000 || salt.Length < 16 || salt.Length > 64) throw new CryptographicException();
             using (var kdf = new Rfc2898DeriveBytes(master, salt, iterations, HashAlgorithmName.SHA256)) return kdf.GetBytes(64);
         }
+#pragma warning restore SYSLIB0060
         static byte[] Part(byte[] bytes, int offset, int count)
         { var p = new byte[count]; Buffer.BlockCopy(bytes, offset, p, 0, count); return p; }
         static string Encrypt(string text, byte[] keys)
@@ -459,6 +532,7 @@ namespace RemoteAgents.Launcher
             sealed class Reader
             {
                 readonly string s; int i;
+                static readonly Regex Token = new Regex("\\G(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)");
                 internal Reader(string text) { s = text.TrimStart('\uFEFF'); }
                 void White() { while (i < s.Length && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n')) i++; }
                 void Need(char c) { White(); if (i == s.Length || s[i++] != c) throw new FormatException(); }
@@ -486,18 +560,19 @@ namespace RemoteAgents.Launcher
                         i++; White(); if (i < s.Length && s[i] == '}') { i++; return; }
                         var keys = new HashSet<string>(StringComparer.Ordinal);
                         while (true) {
-                            string key = String(); if (!keys.Add(key)) throw new FormatException();
+                            string key = String(); if (!keys.Add(key) || keys.Count > 512) throw new FormatException();
                             Need(':'); Value(depth + 1); White();
                             if (i < s.Length && s[i] == '}') { i++; return; }
                             Need(',');
                         }
                     } else if (c == '[') {
                         i++; White(); if (i < s.Length && s[i] == ']') { i++; return; }
-                        while (true) { Value(depth + 1); White(); if (i < s.Length && s[i] == ']') { i++; return; } Need(','); }
+                        int count = 0;
+                        while (true) { if (++count > 512) throw new FormatException(); Value(depth + 1); White(); if (i < s.Length && s[i] == ']') { i++; return; } Need(','); }
                     } else if (c == '"') String();
                     else {
-                        var m = Regex.Match(s.Substring(i), "\\A(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)");
-                        if (!m.Success) throw new FormatException(); i += m.Length;
+                        var m = Token.Match(s, i);
+                        if (!m.Success || m.Index != i) throw new FormatException(); i += m.Length;
                     }
                 }
                 internal void Check() { Value(0); White(); if (i != s.Length) throw new FormatException(); }

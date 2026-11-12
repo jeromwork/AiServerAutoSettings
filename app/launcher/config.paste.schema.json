@@ -14,7 +14,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 80,
-          "pattern": "^[^\\r\\n\\x00]+$"
+          "pattern": "^[^\\r\\n\\x00]+$(?![\\s\\S])"
         },
         "hint": {
           "type": "string",
@@ -31,7 +31,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 253,
-          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$"
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$(?![\\s\\S])"
         },
         "port": {
           "type": "integer",
@@ -42,7 +42,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 32,
-          "pattern": "^[a-z_][a-z0-9_-]{0,31}$"
+          "pattern": "^[a-z_][a-z0-9_-]{0,31}$(?![\\s\\S])"
         },
         "hostKeys": {
           "type": "array",
@@ -50,7 +50,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 4096,
-            "pattern": "^[^\\r\\n\\x00]+$"
+            "pattern": "^[^\\r\\n\\x00]+$(?![\\s\\S])"
           },
           "maxItems": 32,
           "uniqueItems": true
@@ -62,7 +62,7 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 64,
-              "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$"
+              "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
             },
             "hint": {
               "type": "string",
@@ -73,6 +73,12 @@
           "additionalProperties": false,
           "required": [
             "secret"
+          ],
+          "description": "Закрытый SSH-ключ доступа к серверу",
+          "examples": [
+            {
+              "secret": "server-key"
+            }
           ]
         },
         "rootPassword": {
@@ -82,7 +88,7 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 64,
-              "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$"
+              "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
             },
             "hint": {
               "type": "string",
@@ -93,6 +99,12 @@
           "additionalProperties": false,
           "required": [
             "secret"
+          ],
+          "description": "Пароль root сервера — его присылает хостинг при покупке сервера",
+          "examples": [
+            {
+              "secret": "server-root-password"
+            }
           ]
         },
         "routes": {
@@ -122,7 +134,7 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 253,
-                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$"
+                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$(?![\\s\\S])"
                   },
                   "port": {
                     "type": "integer",
@@ -141,7 +153,7 @@
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 64,
-                        "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$"
+                        "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
                       },
                       "hint": {
                         "type": "string",
@@ -152,6 +164,12 @@
                     "additionalProperties": false,
                     "required": [
                       "secret"
+                    ],
+                    "description": "Пароль серверного прокси, выданный его владельцем",
+                    "examples": [
+                      {
+                        "secret": "proxy-out-password"
+                      }
                     ]
                   },
                   "checkUrl": {
@@ -180,7 +198,7 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 253,
-                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$"
+                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$(?![\\s\\S])"
                   },
                   "port": {
                     "type": "integer",
@@ -191,13 +209,13 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 32,
-                    "pattern": "^[a-z_][a-z0-9_-]{0,31}$"
+                    "pattern": "^[a-z_][a-z0-9_-]{0,31}$(?![\\s\\S])"
                   },
                   "hostKey": {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 4096,
-                    "pattern": "^[^\\r\\n\\x00]+$"
+                    "pattern": "^[^\\r\\n\\x00]+$(?![\\s\\S])"
                   },
                   "key": {
                     "type": "object",
@@ -206,7 +224,7 @@
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 64,
-                        "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$"
+                        "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
                       },
                       "hint": {
                         "type": "string",
@@ -217,6 +235,12 @@
                     "additionalProperties": false,
                     "required": [
                       "secret"
+                    ],
+                    "description": "Закрытый SSH-ключ промежуточного сервера",
+                    "examples": [
+                      {
+                        "secret": "hop-key"
+                      }
                     ]
                   },
                   "password": {
@@ -226,7 +250,7 @@
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 64,
-                        "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$"
+                        "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
                       },
                       "hint": {
                         "type": "string",
@@ -237,6 +261,12 @@
                     "additionalProperties": false,
                     "required": [
                       "secret"
+                    ],
+                    "description": "Пароль SSH промежуточного сервера",
+                    "examples": [
+                      {
+                        "secret": "hop-password"
+                      }
                     ]
                   },
                   "hint": {
@@ -368,7 +398,7 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 64,
-              "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$"
+              "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
             },
             "hint": {
               "type": "string",
@@ -379,6 +409,12 @@
           "additionalProperties": false,
           "required": [
             "secret"
+          ],
+          "description": "Секретный ключ аккаунта Happier из его настроек",
+          "examples": [
+            {
+              "secret": "happier-key"
+            }
           ]
         },
         "hint": {
@@ -396,15 +432,15 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 1024,
-          "pattern": "^[^\\r\\n\\x00]+$"
+          "pattern": "^[^\\r\\n\\x00]+$(?![\\s\\S])"
         },
         "folders": {
           "type": "array",
           "items": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[^/\\\\<>:\"|?*\\x00-\\x1f]+$"
+            "maxLength": 1024,
+            "pattern": "^[^\\\\<>:\"|?*\\x00-\\x1f]+$(?![\\s\\S])"
           },
           "maxItems": 256,
           "uniqueItems": true
@@ -444,7 +480,7 @@
                   "type": "string",
                   "minLength": 1,
                   "maxLength": 64,
-                  "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$"
+                  "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
                 },
                 "hint": {
                   "type": "string",
@@ -455,6 +491,12 @@
               "additionalProperties": false,
               "required": [
                 "secret"
+              ],
+              "description": "JSON канала связи с сервера",
+              "examples": [
+                {
+                  "secret": "vpn-channel"
+                }
               ]
             },
             "entries": {
@@ -463,7 +505,7 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 64,
-                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$"
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$(?![\\s\\S])"
               },
               "additionalProperties": {
                 "type": "object",
@@ -472,7 +514,7 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 64,
-                    "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$"
+                    "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
                   },
                   "hint": {
                     "type": "string",
@@ -483,7 +525,8 @@
                 "additionalProperties": false,
                 "required": [
                   "secret"
-                ]
+                ],
+                "description": "Именованная ссылка; значение хранится только в secrets/vault"
               },
               "maxProperties": 256
             },
@@ -493,7 +536,7 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 64,
-                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$"
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$(?![\\s\\S])"
               },
               "additionalProperties": {
                 "type": "object",
@@ -502,7 +545,7 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 253,
-                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$"
+                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$(?![\\s\\S])"
                   },
                   "port": {
                     "type": "integer",
@@ -513,13 +556,13 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 32,
-                    "pattern": "^[a-z_][a-z0-9_-]{0,31}$"
+                    "pattern": "^[a-z_][a-z0-9_-]{0,31}$(?![\\s\\S])"
                   },
                   "hostKey": {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 4096,
-                    "pattern": "^[^\\r\\n\\x00]+$"
+                    "pattern": "^[^\\r\\n\\x00]+$(?![\\s\\S])"
                   },
                   "key": {
                     "type": "object",
@@ -528,7 +571,7 @@
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 64,
-                        "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$"
+                        "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
                       },
                       "hint": {
                         "type": "string",
@@ -539,6 +582,12 @@
                     "additionalProperties": false,
                     "required": [
                       "secret"
+                    ],
+                    "description": "Закрытый SSH-ключ промежуточного сервера",
+                    "examples": [
+                      {
+                        "secret": "hop-key"
+                      }
                     ]
                   },
                   "password": {
@@ -548,7 +597,7 @@
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 64,
-                        "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$"
+                        "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
                       },
                       "hint": {
                         "type": "string",
@@ -559,6 +608,12 @@
                     "additionalProperties": false,
                     "required": [
                       "secret"
+                    ],
+                    "description": "Пароль SSH промежуточного сервера",
+                    "examples": [
+                      {
+                        "secret": "hop-password"
+                      }
                     ]
                   },
                   "hint": {
@@ -605,7 +660,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 253,
-          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$"
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$(?![\\s\\S])"
         },
         "port": {
           "type": "integer",
@@ -624,7 +679,7 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 64,
-              "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$"
+              "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
             },
             "hint": {
               "type": "string",
@@ -635,6 +690,12 @@
           "additionalProperties": false,
           "required": [
             "secret"
+          ],
+          "description": "Пароль серверного прокси, выданный его владельцем",
+          "examples": [
+            {
+              "secret": "proxy-out-password"
+            }
           ]
         },
         "checkUrl": {
@@ -665,7 +726,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 64,
-            "pattern": "^[^/\\\\\\r\\n\\x00]+$"
+            "pattern": "^[^/\\\\\\r\\n\\x00]+$(?![\\s\\S])"
           },
           "kind": {
             "type": "string",
@@ -680,7 +741,7 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 64,
-                "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$"
+                "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
               },
               "hint": {
                 "type": "string",
@@ -691,7 +752,8 @@
             "additionalProperties": false,
             "required": [
               "secret"
-            ]
+            ],
+            "description": "Именованная ссылка; значение хранится только в secrets/vault"
           },
           "login": {
             "type": "string",
@@ -705,7 +767,7 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 64,
-                "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$"
+                "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
               },
               "hint": {
                 "type": "string",
@@ -716,13 +778,14 @@
             "additionalProperties": false,
             "required": [
               "secret"
-            ]
+            ],
+            "description": "Именованная ссылка; значение хранится только в secrets/vault"
           },
           "host": {
             "type": "string",
             "minLength": 1,
             "maxLength": 253,
-            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$"
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$(?![\\s\\S])"
           },
           "port": {
             "type": "integer",
@@ -874,7 +937,7 @@
         "type": "string",
         "minLength": 1,
         "maxLength": 64,
-        "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$"
+        "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
       },
       "maxProperties": 259
     },

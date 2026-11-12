@@ -29,7 +29,7 @@ namespace RemoteAgents.Launcher
                     ConfigBundle.ValidName(args[1]); string source = args[3], value;
                     if (source.StartsWith("env:", StringComparison.Ordinal)) {
                         string variable = source.Substring(4);
-                        if (!Regex.IsMatch(variable, "^[A-Za-z_][A-Za-z0-9_]{0,127}$")) return Usage();
+                        if (variable.Any(char.IsControl) || !Regex.IsMatch(variable, "^[A-Za-z_][A-Za-z0-9_]{0,127}$")) return Usage();
                         value = Environment.GetEnvironmentVariable(variable);
                         if (value == null) { Console.Error.WriteLine("Переменная окружения не задана"); return 1; }
                     } else if (source.StartsWith("bitwarden:", StringComparison.Ordinal)) value = FromBitwarden(source.Substring(10));
@@ -53,7 +53,8 @@ namespace RemoteAgents.Launcher
         {
             using (var lease = new SecretVault.Lease(home)) {
                 var values = SecretVault.Load(home);
-                var profile = ConfigBundle.CurrentProfile(home, ConfigBundle.ReadSettings(home));
+                var settings = ConfigBundle.ReadSettings(home);
+                var profile = ConfigBundle.CurrentProfile(home, settings); ConfigBundle.LegacyValues(home,settings,profile,values);
                 var referenced = new HashSet<string>(ConfigBundle.References(profile).Select(r => Json.Str(r,"secret")), StringComparer.Ordinal);
                 foreach (string name in values.Keys.Concat(referenced).Distinct(StringComparer.Ordinal).OrderBy(n => n,StringComparer.Ordinal)) {
                     string value; bool present = values.TryGetValue(name,out value) && value.Length > 0;
@@ -68,7 +69,7 @@ namespace RemoteAgents.Launcher
             if (slash < 1 || slash == source.Length - 1 || source.Length > 512) throw new InvalidDataException();
             string item = source.Substring(0,slash), field = source.Substring(slash+1);
             if (item[0] == '-' || item.Any(char.IsControl) || field.Any(char.IsControl)) throw new InvalidDataException();
-            var start = new ProcessStartInfo("bw",Files.Arguments(new[]{"get","item",item})) {
+            var start = new ProcessStartInfo(SecretVault.Windows ? "bw.exe" : "bw",Files.Arguments(new[]{"get","item",item})) {
                 UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
                 StandardOutputEncoding = Files.Utf8, StandardErrorEncoding = Files.Utf8
             };
