@@ -52,7 +52,8 @@ foreach($hop in $Hops){
     $hk=$g.identityfile -replace '^~',$env:USERPROFILE
     $known=Join-Path $env:USERPROFILE '.ssh/known_hosts';$hostName=$g.hostname
     if([int]$g.port -ne 22){$hostName='['+$hostName+']:'+$g.port}
-    $out+=[pscustomobject]@{type='ssh';tag="hop-$hop";server=$g.hostname;server_port=[int]$g.port;user=$g.user;private_key_path=$hk;host_key=@(Get-TransportHostKeys $prof.sshExecutable $hostName $known)}
+    $sshHop=[pscustomobject]@{type='ssh';tag="hop-$hop";server=$g.hostname;server_port=[int]$g.port;user=$g.user;private_key_path=$hk;host_key=@(Get-TransportHostKeys $prof.sshExecutable $hostName $known)}
+    Set-TransportHostKeyAlgorithms $sshHop;$out+=$sshHop
     $t=Copy-Out $v;$t.tag="vless-sshhop-$hop";$t|Add-Member detour "hop-$hop";$out+=$t;$paths[$t.tag]=@{kind='singbox';port=++$port}
 }
 foreach($entry in $Entries){
@@ -80,7 +81,7 @@ foreach($entry in $Entries){
 }
 $sd=$channel.outbounds|Where-Object {$_.type -eq 'ssh' -and $_.server -eq $server}|Select-Object -First 1
 if(-not $sd){$sd=[pscustomobject]@{type='ssh';tag='';server=$server;server_port=22;user=$prof.login;private_key_path=$key}}
-$sd=Copy-Out $sd;if(-not $sd.host_key){$sd|Add-Member -Force host_key @(Get-TransportHostKeys $prof.sshExecutable $server $prof.knownHostsPath)};$sd.tag='singbox-ssh-direct';$out+=$sd;$paths['singbox-ssh-direct']=@{kind='singbox';port=++$port}
+$sd=Copy-Out $sd;if(-not $sd.host_key){$sd|Add-Member -Force host_key @(Get-TransportHostKeys $prof.sshExecutable $server $prof.knownHostsPath)};Set-TransportHostKeyAlgorithms $sd;$sd.tag='singbox-ssh-direct';$out+=$sd;$paths['singbox-ssh-direct']=@{kind='singbox';port=++$port}
 $paths['openssh-direct']=@{kind='openssh';port=++$port;extra=@(@('-o','ProxyCommand=none')+@(if($wifi){'-b',$wifi}))}
 foreach($hop in $Hops){$proxy=(@($prof.sshExecutable,'-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-W','%h:%p',$hop)|ForEach-Object {Q $_}) -join ' ';$paths["openssh-jump-$hop"]=@{kind='openssh';port=++$port;extra=@();proxy=('ProxyCommand='+$proxy)}}
 if($Only){foreach($k in @($paths.Keys)){if(-not ($Only|Where-Object{$k -like $_})){$paths.Remove($k)}}}

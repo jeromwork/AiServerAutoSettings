@@ -160,7 +160,7 @@ try {
                         if($HealthFile){
                             $record=@{ok=$true;pid=$PID;updatedAt=[DateTime]::UtcNow.ToString('o')}|ConvertTo-Json -Compress
                             $tmp=$HealthFile+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
-                            try{[IO.File]::WriteAllText($tmp,$record,(New-Object Text.UTF8Encoding($false)));if(Test-Path $HealthFile){[IO.File]::Replace($tmp,$HealthFile,$null)}else{[IO.File]::Move($tmp,$HealthFile)}}finally{if(Test-Path $tmp){Remove-Item $tmp -Force}}
+                            try{[IO.File]::WriteAllText($tmp,$record,(New-Object Text.UTF8Encoding($false)));if(Test-Path $HealthFile){[IO.File]::Replace($tmp,$HealthFile,[System.Management.Automation.Language.NullString]::Value)}else{[IO.File]::Move($tmp,$HealthFile)}}finally{if(Test-Path $tmp){Remove-Item $tmp -Force}}
                         }
                     }
                     $heartbeat=$ssh.StandardOutput.ReadLineAsync()

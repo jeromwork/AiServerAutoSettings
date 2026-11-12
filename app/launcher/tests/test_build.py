@@ -36,6 +36,9 @@ class PackagingTests(unittest.TestCase):
             self.assertFalse(any(n.startswith(('app/', 'profiles/')) for n in names))
             definition = json.loads(z.read('components.json').decode('utf-8-sig'))
             self.assertTrue(definition['components'][0]['critical'])
+            self.assertEqual({c['name']: c.get('requiresConfig', []) for c in definition['components']}, {
+                'transport': ['transport.profilePath', 'transport.channelPath'],
+                'disk': ['components.disk.enabled'], 'control': ['components.control.enabled'], 'vpn': []})
             self.assertEqual(definition['binaries'], [])
             for c in definition['components']:
                 args = c['args']

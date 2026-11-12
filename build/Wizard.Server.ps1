@@ -17,55 +17,83 @@ function New-WizardRoutes($Request,$Profile) {
     # Routes in order: direct, local proxy (SOCKS5/HTTP, via this exe's --proxy-connect), SSH hop (pass-through; the target login keeps the target's own key).
     # Saved route data (Save-WizardRoute) reuses the transport hops[] field names: name, ssh, hostKey.
     $routes=@(@{kind='direct';title='напрямую';options=@()})
-    $px=$Request.proxy
-    if($px -and $px.host){
-        $port=0;if(([string]$px.type -notin @('socks','http')) -or -not ([string]$px.host -match '\A[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}\z') -or -not [int]::TryParse([string]$px.port,[ref]$port) -or $port -lt 1 -or $port -gt 65535){throw 'Укажите корректный адрес и порт прокси'}
-        $cmd=(Quote-Disk ([string]$Request.askpassExecutable))+' --proxy-connect '+$px.type+' '+$px.host+' '+$port+' %h %p'
-        $routes+=@{kind='proxy';title=('через локальный прокси '+$px.host+':'+$port);options=@('-o',('ProxyCommand='+$cmd))}
+    if($Request.proxy -and $Request.proxy.host){
+        $opts=@(New-TransportRouteOptions ([pscustomobject]@{used='proxy';proxy=$Request.proxy}) $Profile ([string]$Request.askpassExecutable) -AcceptNew:(-not $Request.strictHostKey))
+        $routes+=@{kind='proxy';title=('через локальный прокси '+$Request.proxy.host+':'+$Request.proxy.port);options=$opts}
     }
     $hop=$Request.hop
     if($hop -and $hop.ssh){
-        $m=[regex]::Match([string]$hop.ssh,'\A(?:([a-z_][a-z0-9_-]{0,31})@)?([a-zA-Z0-9][a-zA-Z0-9.-]{0,252})(?::(\d{1,5}))?\z')
-        if(-not $m.Success){throw 'Укажите промежуточный сервер как логин@адрес[:порт]'}
-        $known=(Join-Path (Split-Path $Profile.knownHostsPath -Parent) 'known_hosts-hop').Replace('\','/')
-        if($Request.strictHostKey){
-            if([string]$hop.hostKey -cnotmatch '\A(ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa) [A-Za-z0-9+/=]+\z'){throw 'Ключ хоста промежуточного сервера отсутствует или повреждён'}
-            $hopPort=if($m.Groups[3].Success){[int]$m.Groups[3].Value}else{22};$hopHost=$m.Groups[2].Value
-            if($hopPort -ne 22){$hopHost='['+$hopHost+']:'+$hopPort}
-            Write-DiskUtf8 $known ($hopHost+' '+$hop.hostKey+"`n")
-        }
-        $keys=@(Get-WizardHopKeys ([string]$hop.keyFile));if(-not $keys.Count -and -not $hop.passwordPipe){$keys=@('')}
-        # Key routes first (BatchMode), then one password route. The password never appears here: the inner ssh asks this exe (askpass)
-        # for it through the one-use in-memory pipe, whose random name is set only for that inner ssh (cmd `set`), so the target's own prompts keep their own pipe.
-        $pipe=[string]$hop.passwordPipe;if($pipe -and ($pipe -notmatch '\ARemoteAgents\.Password\.[0-9a-f]{32}\z' -or ([string]$Request.askpassExecutable).Contains('"'))){throw 'Некорректный канал пароля промежуточного сервера'}
-        $variants=@($keys|ForEach-Object {@{key=$_;password=$false}});if($pipe){$variants+=@{key='';password=$true}}
+            if($Request.strictHostKey){
+                if([string]$hop.hostKey -cnotmatch '\A(ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa) [A-Za-z0-9+/=]+\z'){throw 'Некорректный ключ промежуточного сервера'}
+                $known=if($hop.knownHostsPath){[string]$hop.knownHostsPath}else{Join-Path (Split-Path $Profile.knownHostsPath -Parent) 'known_hosts-hop'}
+                $resolved=Get-TransportHopArguments $hop $known
+                $hostName=($resolved.target -split '@')[-1];$at=[array]::IndexOf(@($resolved.options),'-p')
+                if($at -ge 0 -and $resolved.options[$at+1] -ne '22'){$hostName='['+$hostName+']:'+$resolved.options[$at+1]}
+                [IO.File]::WriteAllText($known,($hostName+' '+$hop.hostKey+"`n"),(New-Object Text.UTF8Encoding($false)))
+            }
+        $keys=@(Get-WizardHopKeys ([string]$hop.keyFile))
+        $variants=@($keys|ForEach-Object {@{key=$_;password=$false}})
+        if($hop.passwordPipe){$variants+=@{key='';password=$true}}
+        if(-not $variants.Count){throw 'Нужен ключ для промежуточного сервера: выберите файл ключа на шаге «Сервер»'}
         foreach($v in $variants){
-            # -q: a hop-side failure stays silent, so only the target's own answer reads as "reached".
-            $t=@((Quote-Disk $Profile.sshExecutable),'-q','-F',(Quote-Disk $Profile.configPath))
-            if($v.key){$t+=@('-i',(Quote-Disk $v.key),'-o','IdentitiesOnly=yes')}
-            if($v.password){$t+=@('-o','BatchMode=no','-o','NumberOfPasswordPrompts=1','-o','PreferredAuthentications=password,keyboard-interactive','-o','KbdInteractiveAuthentication=yes','-o','PubkeyAuthentication=no')}else{$t+=@('-o','BatchMode=yes')}
-            $hopStrict=if($Request.strictHostKey){'StrictHostKeyChecking=yes'}else{'StrictHostKeyChecking=accept-new'}
-            $t+=@('-o','ConnectTimeout=8','-o',$hopStrict,'-o',('UserKnownHostsFile="'+$known+'"'),'-o','GlobalKnownHostsFile=none','-o','ForwardAgent=no')
-            if($m.Groups[1].Success){$t+=@('-l',$m.Groups[1].Value)};if($m.Groups[3].Success){$t+=@('-p',$m.Groups[3].Value)}
-            $t+=@('-W','%h:%p',$m.Groups[2].Value)
-            $line=$t -join ' '
-            if($v.password){$line='set "SSH_ASKPASS='+[string]$Request.askpassExecutable+'"&& set "SSH_ASKPASS_REQUIRE=force"&& set "DISPLAY=remoteagents:0"&& set "REMOTEAGENTS_PASSWORD_PIPE='+$pipe+'"&& '+$line}
-            $routes+=@{kind='hop';title=('через промежуточный сервер '+$hop.ssh+$(if($v.password){' (пароль)'}else{''}));key=$v.key;options=@('-o',('ProxyCommand='+$line))}
+            $h=[pscustomobject]@{ssh=[string]$hop.ssh;keyFile=$v.key}
+            if($hop.hostKey){$h|Add-Member hostKey $hop.hostKey}
+            if($hop.knownHostsPath){$h|Add-Member knownHostsPath $hop.knownHostsPath}
+            if($v.password){$h|Add-Member passwordPipe ([string]$hop.passwordPipe)}
+            $opts=@(New-TransportRouteOptions ([pscustomobject]@{used='hop';hop=$h}) $Profile ([string]$Request.askpassExecutable) -AcceptNew:(-not $Request.strictHostKey))
+            $routes+=@{kind='hop';title=('через промежуточный сервер '+$hop.ssh+$(if($v.password){' (пароль)'}else{''}));key=$v.key;password=$v.password;options=$opts}
         }
     }
     ,$routes
 }
+# Route probes run at once, each in its own ssh process: a blocked route costs one timeout in total, not one per route.
+# The limit stays generous (a hop through a DPI filter sometimes needs 15-20 s); tests lower it.
+$script:WizardProbeTimeout=30;$script:WizardProbeGrace=3
+function Start-WizardProbe($Profile,[string]$Worker,$Route) {
+    # 'true' as the worker, as Invoke-WizardLogin does. A password hop has its own ProxyCommand environment; the relay pipe serves one askpass at a time.
+    $si=New-Object Diagnostics.ProcessStartInfo;$si.FileName=$Profile.sshExecutable
+    $strict=if($Profile.strictHostKey){'StrictHostKeyChecking=yes'}else{'StrictHostKeyChecking=accept-new'}
+    $si.Arguments=((@(Get-WizardLoginArguments $Profile $Worker)+@($Route.options)+@('-o','BatchMode=yes','-o',$strict,$Profile.serverAddress,'true'))|ForEach-Object {Quote-Disk ([string]$_)}) -join ' '
+    $si.UseShellExecute=$false;$si.CreateNoWindow=$true;$si.RedirectStandardInput=$true;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true
+    $p=New-Object Diagnostics.Process;$p.StartInfo=$si
+    try{[void]$p.Start();$p.StandardInput.Close()}catch{$p.Dispose();return [pscustomobject]@{Route=$Route;Process=$null;Err=$null;State='fail';Why='нет связи'}}
+    [void]$p.StandardOutput.ReadToEndAsync()
+    [pscustomobject]@{Route=$Route;Process=$p;Err=$p.StandardError.ReadToEndAsync();State='pending';Why=''}
+}
+function Receive-WizardProbe($Probe) {
+    if($Probe.State -ne 'pending' -or -not $Probe.Process.HasExited){return}
+    [void]$Probe.Process.WaitForExit();$code=$Probe.Process.ExitCode;$err='';try{if($Probe.Err.Wait(2000)){$err=[string]$Probe.Err.Result}}catch{}
+    # As Invoke-DiskProcess: success or a key rejection by the server ("Сервер отклонил вход") means the route reaches SSH.
+    if($code -eq 0 -or ($code -eq 255 -and $err -match 'Permission denied')){$Probe.State='ok';return}
+    $Probe.State='fail'
+    if($err -match 'REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed'){$Probe.Why='Ключ хоста не совпал с приглашением или known_hosts';return}
+    if($code -eq 255 -and $err -match $script:WizardNoBannerPattern){$Probe.Why='сервер не ответил по SSH'}else{$Probe.Why='нет связи'}
+}
 function Select-WizardRoute($Profile,[string]$Worker,$Routes) {
-    # With only the direct route nothing is probed. Otherwise each route gets a short probe (8 s) and the first that reaches SSH wins.
+    # With only the direct route nothing is probed. Otherwise all routes are probed in parallel; one progress line per route, then ✓/✗ as each answers.
+    # Several working routes: list order wins (direct > proxy > hop); a later one is taken once no earlier one is pending, or WizardProbeGrace s after the first success.
     $script:WizardRoute=$Routes[0];$script:WizardNoBanner=$false;$script:WizardReached=$false
     if($Routes.Count -lt 2){return}
-    foreach($r in $Routes){
-        $script:WizardRoute=$r;$why='';$ok=$false
-        Write-WizardProgress ('Проверяю: '+$r.title+'…')
-        try{[void](Invoke-WizardLogin $Profile $Worker 'true' -Timeout 20);$ok=$true}catch{$e=[string]$_.Exception.Message;if($e -like '*Сервер отклонил вход*'){$ok=$true}else{$why=if($e -like '*баннер*'){'сервер не ответил по SSH'}else{'нет связи'}}}
-        if($ok){Write-WizardProgress ('Проверяю: '+$r.title+'… ✓');$script:WizardReached=$true;return}
-        Write-WizardProgress ('Проверяю: '+$r.title+'… ✗ '+$why)
-    }
+    $probes=@();$chosen=$null
+    try{
+        foreach($r in $Routes){Write-WizardProgress ('Проверяю: '+$r.title+'…');$q=Start-WizardProbe $Profile $Worker $r;$probes+=$q;if($q.State -eq 'fail'){Write-WizardProgress ('Проверяю: '+$r.title+'… ✗ '+$q.Why)}}
+        $deadline=[DateTime]::UtcNow.AddSeconds($script:WizardProbeTimeout);$firstOk=$null
+        while($true){
+            foreach($q in $probes){
+                if($q.State -ne 'pending'){continue};Receive-WizardProbe $q
+                if($q.State -eq 'ok'){Write-WizardProgress ('Проверяю: '+$q.Route.title+'… ✓');if(-not $firstOk){$firstOk=[DateTime]::UtcNow}}
+                elseif($q.State -eq 'fail'){Write-WizardProgress ('Проверяю: '+$q.Route.title+'… ✗ '+$q.Why)}
+            }
+            $now=[DateTime]::UtcNow;$expired=$now -ge $deadline;$best=$null;$earlier=$false
+            foreach($q in $probes){if($q.State -eq 'ok'){$best=$q;break};if($q.State -eq 'pending'){$earlier=$true}}
+            if($best -and (-not $earlier -or $expired -or ($now-$firstOk).TotalSeconds -ge $script:WizardProbeGrace)){$chosen=$best;break}
+            if($expired -or -not @($probes|Where-Object {$_.State -eq 'pending'}).Count){break}
+            Start-Sleep -Milliseconds 100
+        }
+        foreach($q in $probes){if($q.State -eq 'pending'){Write-WizardProgress ('Проверяю: '+$q.Route.title+$(if($chosen){'… не дождался: выбран другой способ'}else{'… ✗ нет ответа за '+$script:WizardProbeTimeout+' с'}))}}
+    }finally{foreach($q in $probes){if($q.Process){Stop-TransportProcess ([pscustomobject]@{Process=$q.Process})}}}
+    if($chosen){$script:WizardRoute=$chosen.Route;$script:WizardReached=$true;return}
+    if($Profile.strictHostKey -and @($probes|Where-Object {$_.Why -like 'Ключ хоста*'}).Count){throw 'Ключ хоста не совпал с приглашением или known_hosts. Попросите администратора проверить ключ сервера'}
     $script:WizardNoBanner=$true;throw 'Сервер не ответил по SSH ни одним из способов (напрямую, через прокси, через промежуточный сервер). Проверьте прокси и промежуточный сервер или включите любой VPN в режиме TUN (OpenVPN, WireGuard…) и нажмите «Повторить». Режим «смешанный» (только прокси) ssh сам не проводит: для него нужен маршрут «Локальный прокси»'
 }
 function Save-WizardRoute([string]$Root,$Request,$Profile) {
@@ -74,17 +102,27 @@ function Save-WizardRoute([string]$Root,$Request,$Profile) {
     if($Request.proxy -and $Request.proxy.host){$route.proxy=[pscustomobject]@{type=[string]$Request.proxy.type;host=[string]$Request.proxy.host;port=[int]$Request.proxy.port}}
     if($Request.hop -and $Request.hop.ssh){
         $h=[ordered]@{name=$(if($Request.hop.name){[string]$Request.hop.name}else{'hop'});ssh=[string]$Request.hop.ssh}
-        if($r.kind -eq 'hop' -and $r.key){$h.keyFile=[string]$r.key}elseif($Request.hop.keyFile){$h.keyFile=[string]$Request.hop.keyFile}
+        if($r.kind -eq 'hop' -and $r.key){$h.keyFile=[string]$r.key}elseif(-not $r.password -and $Request.hop.keyFile){$h.keyFile=[string]$Request.hop.keyFile}
         $kh=Join-Path (Split-Path $Profile.knownHostsPath -Parent) 'known_hosts-hop'
-        if(Test-Path -LiteralPath $kh){$line=@([IO.File]::ReadAllLines($kh)|Where-Object {$_ -and -not $_.StartsWith('#')})|Select-Object -First 1;if($line){$f=$line -split '\s+';if($f.Count -ge 3){$h.hostKey=$f[1]+' '+$f[2]}}}
+        if($Request.hop.knownHostsPath){$kh=[string]$Request.hop.knownHostsPath;$h.knownHostsPath=$kh}
+        if($r.kind -eq 'hop' -and (Test-Path -LiteralPath $kh)){
+            $resolved=Get-TransportHopArguments $Request.hop $kh
+            $hostName=($resolved.target -split '@')[-1];$at=[array]::IndexOf(@($resolved.options),'-p')
+            if($at -ge 0 -and $resolved.options[$at+1] -ne '22'){$hostName='['+$hostName+']:'+$resolved.options[$at+1]}
+            $h.hostKey=@(Get-TransportHostKeys $Profile.sshExecutable $hostName $kh)[0]
+        }
         $route.hop=[pscustomobject]$h
     }
     $value=[pscustomobject]$route
     Update-LauncherConfig $Root {param($c) Set-ConfigDefault $c wizard ([pscustomobject]@{});$c.wizard|Add-Member -Force serverRoute $value}
 }
-function Invoke-WizardLogin($Profile,[string]$User,[string]$Command,[string]$InputText='', $Credential=$null,[int]$Timeout=20) {
-    $args=@('-F',$Profile.configPath,'-T','-l',$User,'-i',$Profile.keyPath,'-o','IdentitiesOnly=yes','-o','ConnectTimeout=8','-o','ConnectionAttempts=1','-o',('UserKnownHostsFile="'+$Profile.knownHostsPath.Replace('\','/')+'"'),'-o','GlobalKnownHostsFile=none','-o','ForwardAgent=no','-o','ClearAllForwardings=yes')
-    # The chosen route (direct / local proxy / SSH hop) applies to this step's SSH calls only; it is never written into the saved profile.
+function Get-WizardLoginArguments($Profile,[string]$User) {
+    @('-F',$Profile.configPath,'-T','-l',$User,'-i',$Profile.keyPath,'-o','IdentitiesOnly=yes','-o','ConnectTimeout=8','-o','ConnectionAttempts=1','-o',('UserKnownHostsFile="'+$Profile.knownHostsPath.Replace('\','/')+'"'),'-o','GlobalKnownHostsFile=none','-o','ForwardAgent=no','-o','ClearAllForwardings=yes')
+}
+function Invoke-WizardLogin($Profile,[string]$User,[string]$Command,[string]$InputText='', $Credential=$null,[int]$Timeout=45) {
+    # Via an SSH hop a login is usually 3-5 s but spikes to ~20 s were measured; short limits failed working routes.
+    $args=@(Get-WizardLoginArguments $Profile $User)
+    # Route options precede the destination; the profile itself stays independent of the route.
     if($script:WizardRoute){$args+=@($script:WizardRoute.options)}
     $strict=if($Profile.strictHostKey){'StrictHostKeyChecking=yes'}else{'StrictHostKeyChecking=accept-new'}
     if(-not $Credential){
@@ -129,7 +167,7 @@ function Connect-WizardExistingKey([string]$Root,$Profile,[string]$User,[string]
     foreach($key in @(Get-WizardKeyCandidates $Root $Profile.keyPath $Chosen)){
         Write-WizardProgress ('Пробую ключ '+$key+'…')
         $q=$Profile.PSObject.Copy();$q.keyPath=$key;$e=''
-        try{[void](Invoke-WizardLogin $q $User $Command $Payload -Timeout 15);Write-WizardProgress ('Пробую ключ '+$key+'… ✓ ключ этого компьютера добавлен на сервер');return $true}catch{$e=[string]$_.Exception.Message}
+        try{[void](Invoke-WizardLogin $q $User $Command $Payload -Timeout 45);Write-WizardProgress ('Пробую ключ '+$key+'… ✓ ключ этого компьютера добавлен на сервер');return $true}catch{$e=[string]$_.Exception.Message}
         $why='не подошёл'
         if($e -notmatch 'код выхода 255'){$why=if($e -match 'код выхода'){'вход выполнен, но настройка рабочего пользователя не удалась'}else{'сервер не ответил вовремя'}}
         else{try{$keygen=@(Get-Command ssh-keygen -CommandType Application -ErrorAction Stop)[0].Source;[void](Invoke-DiskProcess $keygen @('-y','-P','','-f',$key) -TimeoutSeconds 10)}catch{$why='защищён паролем (или не в формате OpenSSH), пропускаю'}}
@@ -182,7 +220,7 @@ function Connect-WizardServer([string]$Root,[string]$Bundle,$Request) {
     $p.login=$worker
     $p|Add-Member arguments @('-F',$p.configPath,'-l',$worker,'-i',$p.keyPath,'-o','IdentitiesOnly=yes','-o',('UserKnownHostsFile="'+$p.knownHostsPath.Replace('\','/')+'"'),'-o','GlobalKnownHostsFile=none','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-T',$address)
     Write-TransportJson $file $p -Private
-    # The profile above holds no route: bridge/disk connections (section «Связь») choose their own transport.
+    # The personal route stays in config.json; it also supplies the local transport overlay.
     Save-WizardRoute $Root $Request $p
     $changed=$previous -and ($previous.serverAddress -cne $address -or $previous.login -cne $worker)
     $diskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk'
@@ -207,6 +245,8 @@ function Connect-WizardServer([string]$Root,[string]$Bundle,$Request) {
 function Initialize-WizardTransport([string]$Root,[string]$Bundle,$Transport) {
     $config=Read-TransportJson (Join-Path $Root 'config.json')
     $profile=Find-InstallProfile $Root;$p=Read-TransportJson $profile
+    $overlay=Get-TransportRouteOverlay $config.wizard.serverRoute $Root
+    if($overlay){$Transport|Add-Member -Force serverRoute $overlay}else{$Transport.PSObject.Properties.Remove('serverRoute')}
     if(-not $Transport.profilePath){$Transport|Add-Member -Force profilePath $profile}
     if(-not $Transport.channelPath){
         $file=Join-Path $Root ('state/wizard-channel-'+(Get-TransportFingerprint $p.serverAddress $p.login).Substring(0,16)+'.json')

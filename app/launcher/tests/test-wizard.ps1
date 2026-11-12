@@ -35,6 +35,75 @@ $private=Copy-TransportObject $server;$private.relays[0]|Add-Member configPath '
 Throws {Assert-WizardCatalog $private} 'catalog rejects computer paths'
 $bad=Copy-TransportObject $server;$bad.schema=9
 Throws {Assert-WizardCatalog $bad} 'unknown catalog version rejected'
+# Separate PowerShell processes must restore the personal route, with CRLF at both boundaries.
+$routeRoot=Join-Path $TestHome 'route-process/RemoteAgents';[void][IO.Directory]::CreateDirectory($routeRoot)
+$fakeSsh=Join-Path $routeRoot 'ssh'
+Write-DiskUtf8 $fakeSsh @'
+#!/usr/bin/env python3
+import json,sys
+payload=sys.stdin.read()
+print(json.dumps({'args':sys.argv[1:],'payload':payload})+'\r')
+'@
+& chmod +x $fakeSsh
+$routeProfile=Join-Path $routeRoot 'ssh-transport.json'
+$rp=[pscustomobject]@{sshExecutable=$fakeSsh;keyPath=(Join-Path $routeRoot 'target key');configPath=(Join-Path $routeRoot 'ssh.conf');knownHostsPath=(Join-Path $routeRoot 'known_hosts');serverAddress='target.example.invalid';login='worker';arguments=@('-F',(Join-Path $routeRoot 'ssh.conf'),'-l','worker','-i',(Join-Path $routeRoot 'target key'),'-T','target.example.invalid')}
+Write-TransportJson $routeProfile $rp
+$routeConfig=[pscustomobject]@{transport=[pscustomobject]@{profilePath=$routeProfile};wizard=[pscustomobject]@{serverRoute=$null}}
+$routeChild=Join-Path $routeRoot 'child.ps1'
+Write-DiskUtf8 $routeChild @'
+param($Repo,$Root,$Mode)
+. (Join-Path $Repo 'build/Wizard.Common.ps1')
+try{
+    if($Mode -eq 'memory'){$script:WizardRoute=@{kind='direct';options=@()}}
+    if($Mode -eq 'disk'){
+        $env:LOCALAPPDATA=Split-Path $Root -Parent
+        Read-DiskProfile (Join-Path $Root 'ssh-transport.json')
+        Invoke-DiskSsh 'fixture-command' -Direct -InputText "line1`r`nline2`r`n"
+    }else{Invoke-WizardSsh $Root 'fixture-command' "line1`r`nline2`r`n"}
+}catch{@{error=$_.Exception.Message}|ConvertTo-Json -Compress}
+'@
+function Invoke-RouteChild($Route,[string]$Mode='wizard'){
+    $routeConfig.wizard.serverRoute=$Route
+    $json=ConvertTo-Json -InputObject $routeConfig -Depth 30
+    [IO.File]::WriteAllText((Join-Path $routeRoot 'config.json'),$json.Replace("`r",'').Replace("`n","`r`n"),(New-Object Text.UTF8Encoding($true)))
+    ConvertFrom-Json (Invoke-DiskProcess (Get-TransportPowerShell) @('-NoProfile','-NonInteractive','-File',$routeChild,$repo,$routeRoot,$Mode))
+}
+$hopRoute=[pscustomobject]@{used='hop';proxy=[pscustomobject]@{type='socks';host='unused.example.invalid';port=1090};hop=[pscustomobject]@{ssh='jump@hop.example.invalid:2207';keyFile=(Join-Path $routeRoot 'Пользователь с пробелом/hop key')}}
+foreach($mode in @('wizard','disk')){
+    $r=Invoke-RouteChild $hopRoute $mode
+    $pc=@($r.args|Where-Object {$_ -like 'ProxyCommand=*'})
+    Assert ($pc.Count -eq 1 -and $pc[0].Contains($hopRoute.hop.keyFile) -and $pc[0].Contains('IdentitiesOnly=yes')) ($mode+': fresh process restores explicit hop key')
+    Assert ($pc[0].Contains('-p 2207') -and $pc[0].Contains('-l jump') -and $pc[0].Contains('known_hosts-hop') -and $pc[0].Contains('StrictHostKeyChecking=yes') -and -not $pc[0].Contains('--proxy-connect')) ($mode+': used selects hop, with pinned hosts and separate port')
+    Assert ([array]::IndexOf([string[]]$r.args,$pc[0]) -lt [array]::IndexOf([string[]]$r.args,'target.example.invalid') -and $r.args[-1] -eq 'fixture-command') ($mode+': route options precede destination')
+    Assert ($r.payload -ceq "line1`nline2`n") ($mode+': CRLF stdin normalized')
+}
+$r=Invoke-RouteChild $hopRoute 'memory'
+Assert (@($r.args|Where-Object {$_ -like 'ProxyCommand=*'}).Count -eq 0) 'in-memory route takes priority over saved hop'
+$passwordHop=[pscustomobject]@{used='hop';hop=[pscustomobject]@{ssh='jump@hop.example.invalid'}}
+foreach($mode in @('wizard','disk')){$r=Invoke-RouteChild $passwordHop $mode;Assert ($r.error -like '*ключ для промежуточного сервера*') ($mode+': password-only saved hop fails clearly')}
+$r=Invoke-RouteChild ([pscustomobject]@{used='direct';hop=$hopRoute.hop})
+Assert (@($r.args|Where-Object {$_ -like 'ProxyCommand=*'}).Count -eq 0 -and $r.args[-2] -eq 'target.example.invalid') 'direct route ignores unselected saved hop'
+$r=Invoke-RouteChild $null
+Assert (@($r.args|Where-Object {$_ -like 'ProxyCommand=*'}).Count -eq 0) 'legacy configuration keeps direct connection'
+$proxyRoute=[pscustomobject]@{used='proxy';proxy=[pscustomobject]@{type='socks';host='127.0.0.1';port=1080};hop=$hopRoute.hop}
+$r=Invoke-RouteChild $proxyRoute
+Assert ($r.error -like '*RemoteAgents.exe*--proxy-connect*') 'missing proxy helper cannot silently select direct SSH'
+Write-DiskUtf8 (Join-Path $routeRoot 'RemoteAgents.exe') 'fixture-only'
+foreach($mode in @('wizard','disk')){
+    $r=Invoke-RouteChild $proxyRoute $mode;$pc=@($r.args|Where-Object {$_ -like 'ProxyCommand=*'})
+    Assert ($pc.Count -eq 1 -and $pc[0].Contains('--proxy-connect socks 127.0.0.1 1080 %h %p') -and $pc[0].Contains((Join-Path $routeRoot 'RemoteAgents.exe'))) ($mode+': proxy helper resolved from installation home')
+    Assert ([array]::IndexOf([string[]]$r.args,$pc[0]) -lt [array]::IndexOf([string[]]$r.args,'target.example.invalid')) ($mode+': proxy options precede host')
+}
+$privateHop=[pscustomobject]@{hops=@([pscustomobject]@{name='private';ssh='hop.example.invalid';keyFile='local-key-path';knownHostsPath='local-known-hosts';configPath='local-config'})}
+$public=Get-WizardPublicTransport $privateHop
+Assert (-not $public.hops[0].keyFile -and -not $public.hops[0].knownHostsPath -and -not $public.hops[0].configPath) 'public transport projection excludes all computer paths'
+Throws {Assert-WizardCatalog ([pscustomobject]@{schema=1;hops=$privateHop.hops})} 'public catalog rejects a hop key path'
+# An unused hop must not affect saving a successful direct connection.
+Write-DiskUtf8 (Join-Path $routeRoot 'known_hosts-hop') "unrelated.example.invalid ssh-ed25519 Zml4dHVyZQ==`r`n"
+$script:WizardRoute=@{kind='direct';options=@()}
+Save-WizardRoute $routeRoot ([pscustomobject]@{hop=$hopRoute.hop}) $rp
+Assert ((Read-TransportJson (Join-Path $routeRoot 'config.json')).wizard.serverRoute.used -eq 'direct') 'unused hop known_hosts cannot reject a successful direct route'
+$script:WizardRoute=$null
 # Exercise production catalog/inspection through a fake SSH boundary, not a UI copy of the model.
 $root=Join-Path $TestHome 'home';[void][IO.Directory]::CreateDirectory($root)
 Write-TransportJson (Join-Path $root 'config.json') @{schema=1;version=1;components=@{};transport=@{}}

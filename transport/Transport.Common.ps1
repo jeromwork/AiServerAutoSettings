@@ -107,6 +107,71 @@ function Invoke-TransportText([string]$Exe,[string[]]$Arguments) {
         Convert-TransportLF $task.GetAwaiter().GetResult()
     }finally{Stop-TransportProcess $c}
 }
+# Shared by onboarding, later wizard processes, disk bootstrap and persistent OpenSSH tunnels.
+function Get-TransportHopArguments($Hop,[string]$KnownHosts='',[switch]$AcceptNew) {
+    $a=@('-o','BatchMode=yes','-o','ConnectTimeout=8','-o','ForwardAgent=no')
+    if($Hop.configPath){$a+=@('-F',[string]$Hop.configPath)}
+    if($Hop.keyFile){$a+=@('-i',[string]$Hop.keyFile,'-o','IdentitiesOnly=yes')}
+    $a+=@('-o',('StrictHostKeyChecking='+$(if($AcceptNew){'accept-new'}else{'yes'})))
+    if($KnownHosts){$a+=@('-o',('UserKnownHostsFile="'+$KnownHosts.Replace('\','/')+'"'),'-o','GlobalKnownHostsFile=none')}
+    $address=[string](Get-TransportValue $Hop 'ssh' $Hop.alias)
+    # Wizard endpoints may contain :port; OpenSSH expects it as -p before the destination.
+    $m=[regex]::Match($address,'\A(?:([a-z_][a-z0-9_-]{0,31})@)?([a-zA-Z0-9][a-zA-Z0-9.-]{0,252}):(\d{1,5})\z')
+    if($m.Success){
+        $port=[int]$m.Groups[3].Value;if($port -lt 1 -or $port -gt 65535){throw 'Неверный порт промежуточного сервера'}
+        if($m.Groups[1].Success){$a+=@('-l',$m.Groups[1].Value)}
+        $a+=@('-p',[string]$port);$address=$m.Groups[2].Value
+    }
+    if(-not $address -or $address -match '^[\-]|[\r\n]'){throw 'Неверный SSH-алиас'}
+    # Destination is returned separately so callers can insert -G / -W before it.
+    [pscustomobject]@{options=$a;target=$address}
+}
+function New-TransportRouteOptions($Route,$Profile,[string]$ProxyExecutable='',[switch]$AcceptNew) {
+    if(-not $Route -or $Route.used -eq 'direct'){return}
+    if($Profile.inviteProxyCommand){return @('-o',('ProxyCommand='+[string]$Profile.inviteProxyCommand))}
+    switch([string]$Route.used){
+        'proxy' {
+            $px=$Route.proxy;$port=0
+            if(([string]$px.type -notin @('socks','http')) -or -not ([string]$px.host -match '\A[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}\z') -or -not [int]::TryParse([string]$px.port,[ref]$port) -or $port -lt 1 -or $port -gt 65535){throw 'Укажите корректный адрес и порт прокси'}
+            if(-not $ProxyExecutable -or -not (Test-Path -LiteralPath $ProxyExecutable -PathType Leaf)){throw 'Для локального прокси нужен RemoteAgents.exe с поддержкой --proxy-connect; восстановите программу и повторите'}
+            $cmd=(Quote-Transport $ProxyExecutable)+' --proxy-connect '+$px.type+' '+$px.host+' '+$port+' %h %p'
+            @('-o',('ProxyCommand='+$cmd));return
+        }
+        'hop' {
+            $hop=$Route.hop
+            if(-not $hop.keyFile -and -not $hop.passwordPipe){throw 'Нужен ключ для промежуточного сервера: выберите файл ключа на шаге «Сервер»'}
+            if([string]$hop.ssh -notmatch '\A(?:[a-z_][a-z0-9_-]{0,31}@)?[a-zA-Z0-9][a-zA-Z0-9.-]{0,252}(?::\d{1,5})?\z'){throw 'Укажите промежуточный сервер как логин@адрес[:порт]'}
+            $known=Join-Path (Split-Path $Profile.knownHostsPath -Parent) 'known_hosts-hop'
+            if($hop.knownHostsPath){$known=[string]$hop.knownHostsPath}
+            $h=Get-TransportHopArguments $hop $known -AcceptNew:$AcceptNew
+            $a=@([string]$Profile.sshExecutable,'-q');if($Profile.configPath){$a+=@('-F',[string]$Profile.configPath)}
+            $a+=@($h.options)
+            $pipe=[string]$hop.passwordPipe
+            if($pipe){
+                if($pipe -notmatch '\ARemoteAgents\.Password\.[0-9a-f]{32}\z' -or -not $ProxyExecutable -or $ProxyExecutable.Contains('"')){throw 'Некорректный канал пароля промежуточного сервера'}
+                $a=$a|ForEach-Object {if($_ -eq 'BatchMode=yes'){'BatchMode=no'}else{$_}}
+                $a+=@('-o','NumberOfPasswordPrompts=1','-o','PreferredAuthentications=password,keyboard-interactive','-o','KbdInteractiveAuthentication=yes','-o','PubkeyAuthentication=no')
+            }
+            $line=(@(($a+@('-W','%h:%p',$h.target))|ForEach-Object {if($_ -match '[\s"]'){Quote-Transport $_}else{$_}})) -join ' '
+            if($pipe){$line='set "SSH_ASKPASS='+$ProxyExecutable+'"&& set "SSH_ASKPASS_REQUIRE=force"&& set "DISPLAY=remoteagents:0"&& set "REMOTEAGENTS_PASSWORD_PIPE='+$pipe+'"&& '+$line}
+            @('-o',('ProxyCommand='+$line));return
+        }
+        default {throw 'Неизвестный сохранённый маршрут сервера; выберите маршрут на шаге «Сервер»'}
+    }
+}
+function Get-TransportSavedRoute([string]$Root) {
+    $file=Join-Path $Root 'config.json'
+    if(Test-Path -LiteralPath $file){return (Read-TransportJson $file).wizard.serverRoute}
+}
+function Get-TransportSavedRouteOptions([string]$Root,$Profile) {
+    New-TransportRouteOptions (Get-TransportSavedRoute $Root) $Profile (Join-Path $Root 'RemoteAgents.exe')
+}
+function Get-TransportRouteOverlay($Route,[string]$Root) {
+    if(-not $Route -or $Route.used -eq 'direct'){return $null}
+    $copy=Copy-TransportObject $Route
+    if($copy.used -eq 'proxy'){$copy|Add-Member -Force proxyExecutable (Join-Path $Root 'RemoteAgents.exe')}
+    return $copy
+}
 function Read-TransportSettings([string]$Root) {
     $config=Read-TransportJson (Join-Path $Root 'config.json');$t=$config.transport
     if(-not $t){throw 'Нет секции transport'}
@@ -124,6 +189,7 @@ function Read-TransportSettings([string]$Root) {
     foreach($k in @('sshPort','syncPort','probePortBase','socksPortBase','apiPort')){if([int]$s[$k] -lt 1 -or [int]$s[$k] -gt 65535){throw 'Неверный порт transport'}}
     foreach($k in @('activeProbeBytes','rankProbeBytes','activeIntervalSec','meteredActiveIntervalSec','rankIntervalSec','rankConcurrency','topOnMetered','stallSeconds','probeTimeoutSec','restartDelaySec')){if([double]$s[$k] -le 0){throw 'Параметры transport должны быть положительными'}}
     if([string]$s.metered -notin @('auto','true','false','True','False')){throw 'Неверный metered'}
+    if(-not $t.serverRoute -and $config.wizard.serverRoute){$overlay=Get-TransportRouteOverlay $config.wizard.serverRoute $Root;if($overlay){$t|Add-Member -Force serverRoute $overlay}}
     Assert-TransportLists $t
     [pscustomobject]@{Options=$s;Transport=$t;Profile=$profile;Channel=$channel;Vpn=(Get-TransportValue $config 'vpn' ([pscustomobject]@{enabled=$false}))}
 }
@@ -150,6 +216,21 @@ function Get-TransportHostKeys([string]$Ssh,[string]$HostName,[string]$KnownHost
     }
     if(-not $keys.Count){throw 'Нет закреплённого host key'};$keys
 }
+# sing-box 1.14 passes this list to SSH negotiation before checking host_key.
+# Restrict negotiation to pinned key types; RSA key format stays ssh-rsa with SHA2 signatures.
+function Set-TransportHostKeyAlgorithms($Outbound) {
+    $algorithms=@(foreach($key in @($Outbound.host_key)){
+        $type=([string]$key).Trim() -split '\s+' | Select-Object -First 1
+        switch -Exact ($type){
+            'ssh-rsa' {'rsa-sha2-512';'rsa-sha2-256'}
+            {$_ -in @('ssh-ed25519','ecdsa-sha2-nistp256','ecdsa-sha2-nistp384','ecdsa-sha2-nistp521')} {$type}
+            default {throw 'Неподдерживаемый тип закреплённого SSH host key'}
+        }
+    })
+    $algorithms=@($algorithms|Select-Object -Unique)
+    if(-not $algorithms.Count){throw 'Нет закреплённого host key'}
+    if($Outbound -is [hashtable]){$Outbound.host_key_algorithms=$algorithms}else{$Outbound|Add-Member -Force host_key_algorithms $algorithms}
+}
 function Convert-TransportHop([string]$Text) {
     $g=@{};foreach($line in (Convert-TransportLF $Text) -split "`n"){
         if($line -match '^(hostname|user|identityfile|port) (.+)$' -and -not $g.ContainsKey($Matches[1])){$g[$Matches[1]]=$Matches[2].Trim('"')}
@@ -161,7 +242,22 @@ function Convert-TransportHop([string]$Text) {
 }
 function Assert-TransportName([string]$Name) {if($Name -notmatch '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$'){throw 'Имя пути: только буквы, цифры, _ и -'}}
 function Get-TransportCandidates($Settings,[string]$Root) {
-    $p=$Settings.Profile;$t=$Settings.Transport;$o=$Settings.Options;$out=New-Object Collections.ArrayList;$c=New-Object Collections.ArrayList;$tunnels=New-Object Collections.ArrayList
+    $p=$Settings.Profile;$t=Copy-TransportObject $Settings.Transport;$o=$Settings.Options;$out=New-Object Collections.ArrayList;$c=New-Object Collections.ArrayList;$tunnels=New-Object Collections.ArrayList
+    # Personal route is a local overlay, kept outside the public server catalog.
+    $route=$t.serverRoute
+    if($route -and $route.used -ne 'direct' -and -not $p.inviteProxyCommand){
+        $proxyExe=[string]$route.proxyExecutable;if(-not $proxyExe){$proxyExe=Join-Path $Root 'RemoteAgents.exe'}
+        $routeOptions=@(New-TransportRouteOptions $route $p $proxyExe)
+        if($route.used -eq 'hop'){
+            if(-not $o.openSsh -and -not @($Settings.Channel.outbounds|Where-Object {$_.type -eq 'vless'}).Count){throw 'Для выбранного промежуточного сервера включите OpenSSH в настройках связи'}
+            $hop=Copy-TransportObject $route.hop
+            # A stable local name replaces a public homonym only inside this effective overlay.
+            $hop|Add-Member -Force name 'wizard-server-route';$hop|Add-Member -Force enabled $true
+            $hop|Add-Member -Force configPath ([string]$p.configPath)
+            $hop|Add-Member -Force knownHostsPath (Join-Path (Split-Path $p.knownHostsPath -Parent) 'known_hosts-hop')
+            $t|Add-Member -Force hops (@($t.hops|Where-Object {$_ -and $_.name -ne $hop.name})+@($hop))
+        }
+    }
     $vless=@($Settings.Channel.outbounds|Where-Object {$_.type -eq 'vless'}|Select-Object -First 1)
     $v=$null
     if($vless.Count){
@@ -173,6 +269,7 @@ function Get-TransportCandidates($Settings,[string]$Root) {
     $saved=@($Settings.Channel.outbounds|Where-Object {$_.type -eq 'ssh' -and $_.server -eq $p.serverAddress}|Select-Object -First 1)
     if($saved.Count){$ssh=Copy-TransportObject $saved[0];$ssh.tag='singbox-ssh-direct';if($ssh.PSObject.Properties['detour']){$ssh.PSObject.Properties.Remove('detour')}}
     if(-not $ssh.host_key){$hk=@(Get-TransportHostKeys $p.sshExecutable $p.serverAddress $p.knownHostsPath);if($ssh -is [hashtable]){$ssh.host_key=$hk}else{$ssh|Add-Member -Force host_key $hk}}
+    Set-TransportHostKeyAlgorithms $ssh
     [void]$out.Add($ssh);[void]$c.Add([pscustomobject]@{tag=$ssh.tag;port=0})
     foreach($relay in @($t.relays)){
         if($null -eq $relay -or -not (Test-TransportEnabled $relay)){continue};Assert-TransportName $relay.name
@@ -183,17 +280,22 @@ function Get-TransportCandidates($Settings,[string]$Root) {
     }
     foreach($hop in @($t.hops)){
         if($null -eq $hop -or -not (Test-TransportEnabled $hop)){continue};Assert-TransportName $hop.name
-        if(-not $v){throw 'Для hop нужен VLESS канала сервера'}
+        if(-not $v){continue}
         if(-not (Get-TransportValue $hop 'ssh' $hop.alias) -or (Get-TransportValue $hop 'ssh' $hop.alias) -match '^[\-]|[\r\n]'){throw 'Неверный SSH-алиас'}
-        $ha=@('-n','-G');if($hop.configPath){$ha+=@('-F',[string]$hop.configPath)};$ha+=[string](Get-TransportValue $hop 'ssh' $hop.alias)
-        $hopText=Invoke-TransportText $p.sshExecutable $ha;$h=Convert-TransportHop $hopText;$h.tag='hop-'+$hop.name
-        if($hop.hostKey){$h.host_key=@($hop.hostKey)}else{
+        $resolved=Get-TransportHopArguments $hop ([string]$hop.knownHostsPath)
+        $ha=@('-n','-G')+@($resolved.options)+@($resolved.target)
+        $hopText=Invoke-TransportText $p.sshExecutable $ha;$h=Convert-TransportHop $hopText;if($hop.keyFile){$h.private_key_path=[string]$hop.keyFile};$h.tag='hop-'+$hop.name
+        if($hop.knownHostsPath){
+            $hostName=$h.server;if($h.server_port -ne 22){$hostName='['+$h.server+']:'+$h.server_port}
+            $h.host_key=@(Get-TransportHostKeys $p.sshExecutable $hostName $hop.knownHostsPath)
+        }elseif($hop.hostKey){$h.host_key=@($hop.hostKey)}else{
             $known=Join-Path ([Environment]::GetFolderPath('UserProfile')) '.ssh/known_hosts'
             foreach($line in $hopText -split "`n"){if($line -match '^userknownhostsfile ("[^"]+"|\S+)'){$known=$Matches[1].Trim('"');break}}
             $userHome=[Environment]::GetFolderPath('UserProfile');$known=$known.Replace('%d',$userHome);if($known -match '^~(?=[\\/]|$)'){$known=$userHome+$known.Substring(1)}
             $hostName=$h.server;if($h.server_port -ne 22){$hostName='['+$h.server+']:'+$h.server_port}
             $h.host_key=@(Get-TransportHostKeys $p.sshExecutable $hostName $known)
         }
+        Set-TransportHostKeyAlgorithms $h
         [void]$out.Add($h);$r=Copy-TransportObject $v;$r.tag='vless-sshhop-'+$hop.name;$r|Add-Member detour $h.tag
         [void]$out.Add($r);[void]$c.Add([pscustomobject]@{tag=$r.tag;port=0})
     }
@@ -244,14 +346,22 @@ function Get-TransportCandidates($Settings,[string]$Root) {
             $port=[int]$o.socksPortBase+$tunnels.Count;$tag='openssh-jump-'+$hop.name
             [void]$out.Add(@{type='socks';tag=$tag;server='127.0.0.1';server_port=$port;version='5'})
             [void]$c.Add([pscustomobject]@{tag=$tag;port=0})
-            $proxy=@([string]$p.sshExecutable,'-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=10')
-            if($hop.configPath){$proxy+=@('-F',[string]$hop.configPath)}
-            $proxy+=@('-W','%h:%p',[string](Get-TransportValue $hop 'ssh' $hop.alias))
+            $resolved=Get-TransportHopArguments $hop ([string]$hop.knownHostsPath)
+            $proxy=@([string]$p.sshExecutable)+@($resolved.options)+@('-W','%h:%p',$resolved.target)
             $command=(@($proxy|ForEach-Object {Quote-Transport $_})) -join ' '
             $a=@(Get-TransportSshArguments $p (Get-TransportServerPort $p))|ForEach-Object {if($_ -like 'ProxyCommand=*'){'ProxyCommand='+$command}else{$_}}
             $a+=@('-N','-o','ExitOnForwardFailure=yes','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=2','-D',('127.0.0.1:'+$port))
             [void]$tunnels.Add([pscustomobject]@{tag=$tag;arguments=$a;target=$p.serverAddress;bind=$false})
         }
+    }
+    if($route -and $route.used -eq 'proxy'){
+        if(-not $o.openSsh){throw 'Для выбранного локального прокси включите OpenSSH в настройках связи'}
+        $port=[int]$o.socksPortBase+$tunnels.Count;$tag='openssh-proxy'
+        [void]$out.Add(@{type='socks';tag=$tag;server='127.0.0.1';server_port=$port;version='5'})
+        [void]$c.Add([pscustomobject]@{tag=$tag;port=0})
+        $a=@(Get-TransportSshArguments $p (Get-TransportServerPort $p))|ForEach-Object {if($_ -eq 'ProxyCommand=none'){$routeOptions[1]}else{$_}}
+        $a+=@('-N','-o','ExitOnForwardFailure=yes','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=2','-D',('127.0.0.1:'+$port))
+        [void]$tunnels.Add([pscustomobject]@{tag=$tag;arguments=$a;target=$p.serverAddress;bind=$false})
     }
     $tags=@{};$i=0;$all=New-Object Collections.ArrayList
     foreach($r in $out){if($tags.ContainsKey($r.tag)){throw 'Повтор имени пути'};$tags[$r.tag]=$true}
@@ -463,6 +573,7 @@ function Assert-TransportLists($Transport) {
         if($names.ContainsKey($item.name)){throw 'Имена узлов должны быть уникальны во всех списках'};$names[$item.name]=$true
         if((Get-TransportValue $item 'enabled' $true) -isnot [bool]){throw 'enabled должен быть boolean'}
         if($group -in @('entries','hops')){$ssh=Get-TransportValue $item 'ssh' $item.alias;if(-not $ssh -or $ssh -match '^[\-]|[\r\n]'){throw 'Неверный SSH-алиас'}}
+        if($group -eq 'hops'){foreach($field in @('keyFile','knownHostsPath')){if($item.$field -and ([string]$item.$field -match '[\r\n\x00]')){throw 'Неверный локальный путь промежуточного сервера'}}}
         if($group -eq 'entries'){foreach($kind in @($item.kinds)){if($null -ne $kind -and $kind -notin @('hy2','hy2obfs','tuic','trojan','reality','shadowtls','ws-direct','ws-cdn')){throw 'Неизвестный kind'}}}
         if($group -eq 'relays'){if(-not (Get-TransportValue $item 'host' $item.server) -or [int]$item.port -lt 1 -or [int]$item.port -gt 65535){throw 'Неверный relay'}}
         if($group -eq 'cdn'){
@@ -479,6 +590,7 @@ function Get-TransportCandidateInfo([string]$Tag,$Transport) {
     switch -Regex ($Tag){
         '^vless-direct$' {$kind='vless';break}
         '^singbox-ssh-direct$' {$kind='ssh';$title='SSH напрямую';break}
+        '^openssh-proxy$' {$kind='openssh';$via='локальный прокси';$title='OpenSSH через локальный прокси';break}
         '^openssh-direct$' {$kind='openssh';$title='OpenSSH напрямую';break}
         '^vless-relay-(.+)$' {$kind='vless-relay';$via=$Matches[1];$label='VLESS';$title=$null;break}
         '^vless-sshhop-(.+)$' {$kind='vless-sshhop';$via=$Matches[1];$label='VLESS через SSH';$title=$null;break}
@@ -489,6 +601,7 @@ function Get-TransportCandidateInfo([string]$Tag,$Transport) {
             $labels=@{hy2='Hysteria2';hy2obfs='Hysteria2 + Salamander';tuic='TUIC';trojan='Trojan';reality='Reality';shadowtls='ShadowTLS';'ws-direct'='WebSocket';'ws-cdn'='VLESS-WS через домен'};$label=$labels[$kind];break
         }
     }
+    if($via -eq 'wizard-server-route' -and $Transport.serverRoute.used -eq 'hop'){$via=[string]$Transport.serverRoute.hop.name;if(-not $via){$via=[string]$Transport.serverRoute.hop.ssh}}
     if(-not $title){$title=$label+' через '+$via}
     [pscustomobject]@{kind=$kind;via=$via;title=$title}
 }
@@ -528,8 +641,10 @@ function Get-TransportRevision([string]$Root) {
     foreach($field in @('profilePath','channelPath')){if($config.transport.$field){$files+=[string]$config.transport.$field}}
     $files=@($files|Select-Object -Unique)
     $cache=Join-Path (Get-TransportValue $config.transport 'cacheRoot' $Root) 'secrets/entries';if(Test-Path -LiteralPath $cache){$files+=@(Get-ChildItem -LiteralPath $cache -Filter '*.json'|Sort-Object Name|ForEach-Object {$_.FullName})}
+    $route=$config.transport.serverRoute;if(-not $route){$route=$config.wizard.serverRoute}
+    if($route.used -eq 'hop' -and $config.transport.profilePath){$p=Read-TransportJson $config.transport.profilePath;$kh=Join-Path (Split-Path $p.knownHostsPath -Parent) 'known_hosts-hop';if(Test-Path $kh){$files+=$kh}}
     $sha=[Security.Cryptography.SHA256]::Create()
-    try{$text=(ConvertTo-Json -InputObject $config.transport -Depth 40 -Compress)+"`n"+((@($files|ForEach-Object {$_+"`n"+(Convert-TransportLF ([IO.File]::ReadAllText($_)))})) -join "`n");[Convert]::ToBase64String($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))}finally{$sha.Dispose()}
+    try{$text=(ConvertTo-Json -InputObject $route -Depth 20 -Compress)+(ConvertTo-Json -InputObject $config.transport -Depth 40 -Compress)+"`n"+((@($files|ForEach-Object {$_+"`n"+(Convert-TransportLF ([IO.File]::ReadAllText($_)))})) -join "`n");[Convert]::ToBase64String($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))}finally{$sha.Dispose()}
 }
 function Test-TransportConfigFile([string]$Exe,[string]$File) {
     $check=Start-TransportProcess $Exe @('check','-c',$File)
@@ -615,8 +730,7 @@ function Get-VpnExclusions($Settings,$Paths,$Snapshot,[hashtable]$Resolved=@{},[
         if($Root -and (Test-Path -LiteralPath $cache)){$hosts+=(Read-TransportJson $cache).server}
     }
     foreach($hop in @($Settings.Transport.hops)){
-        if(-not $hop){continue};$args=@('-n','-G');if($hop.configPath){$args+=@('-F',[string]$hop.configPath)}
-        $args+=[string](Get-TransportValue $hop 'ssh' $hop.alias)
+        if(-not $hop){continue};$h=Get-TransportHopArguments $hop ([string]$hop.knownHostsPath);$args=@('-n','-G')+@($h.options)+@($h.target)
         $text=Invoke-TransportText $Settings.Profile.sshExecutable $args
         foreach($line in $text -split "`n"){if($line -match '^hostname (.+)$'){$hosts+=$Matches[1].Trim();break}}
     }

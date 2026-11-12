@@ -219,6 +219,18 @@
             "type": "string",
             "minLength": 1,
             "pattern": "^(?!-)[^\\r\\n]+$"
+          },
+          "keyFile": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\r\\n]+$",
+            "description": "Локальный путь; в публичный каталог не передаётся"
+          },
+          "knownHostsPath": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\r\\n]+$",
+            "description": "Локальный путь; в публичный каталог не передаётся"
           }
         },
         "anyOf": [
@@ -333,6 +345,35 @@
       "maximum": 16,
       "default": 1,
       "description": "Сколько путей проверять одновременно при рейтинге. 1 — точная скорость каждого пути."
+    },
+    "serverRoute": {
+      "description": "Личный overlay маршрута мастера; хранится только в локальном config.json",
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "used": {
+          "enum": [
+            "direct",
+            "hop",
+            "proxy"
+          ]
+        },
+        "hop": {
+          "type": "object"
+        },
+        "proxy": {
+          "type": "object"
+        },
+        "proxyExecutable": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "used"
+      ],
+      "additionalProperties": false
     },
     "inviteBootstrap": {
       "type": "boolean",

@@ -6,13 +6,16 @@ function Connect-WizardInvite([string]$Root,$Request) {
     $invite=$prepared.invite;$p=$prepared.profile;$file=$prepared.file;$dir=Split-Path $file -Parent;$port=[int]$invite.serverPort
     $pass=Join-Path $Root 'secrets/invite-pass';$ok=$false;$lastReason='Нет связи ни одним из маршрутов приглашения';$chosenRequest=$null
     try{
+        $all=@();$routeIndex=0
         foreach($route in @($invite.routes)){
+            $routeIndex++
             $r=[pscustomobject]@{askpassExecutable=[string]$Request.askpassExecutable;strictHostKey=$true}
             if($route.kind -eq 'proxy'){$r|Add-Member proxy $route.proxy}
             elseif($route.kind -eq 'hop'){
                 $hop=$route.hop.PSObject.Copy()
                 if(-not $hop.hostKey){throw 'Нет ключа промежуточного сервера'}
-                if($hop.privateKey){$hopKey=Join-Path $Root 'secrets/invite-hop';Write-DiskUtf8 $hopKey ([string]$hop.privateKey);Protect-TransportPath $hopKey;$hop|Add-Member -Force keyFile $hopKey}
+                $hop|Add-Member -Force knownHostsPath (Join-Path $dir ('known_hosts-hop-'+$routeIndex))
+                if($hop.privateKey){$hopKey=Join-Path $Root ('secrets/invite-hop-'+$routeIndex);Write-DiskUtf8 $hopKey ([string]$hop.privateKey);Protect-TransportPath $hopKey;$hop|Add-Member -Force keyFile $hopKey}
                 if($hop.password){$hop|Add-Member -Force passwordPipe ([string]$Request.hopPasswordPipe)}
                 $r|Add-Member hop $hop
             }elseif($route.kind -ne 'direct'){throw 'Неизвестный маршрут приглашения'}
@@ -23,7 +26,14 @@ function Connect-WizardInvite([string]$Root,$Request) {
                     $settings=Read-TransportSettings $Root;$address=(Get-VpnOptions $settings).probeAddress
                     $variant.options=@('-o',('HostName='+$address),'-o',('HostKeyAlias='+$p.serverAddress))
                 }
-                $script:WizardRoute=$variant
+                $variant.request=$r;$all+=$variant
+            }
+        }
+        while($all.Count){
+                if($Request.refresh -and $Request.deferProof){$script:WizardRoute=$all[0]}
+                else{try{Select-WizardRoute $p $p.login $all}catch{if($lastReason -like 'Приглашение уже*'){break};throw}}
+                $variant=$script:WizardRoute;$r=$variant.request
+                $all=@($all|Where-Object {-not [object]::ReferenceEquals($_,$variant)})
                 Write-WizardProgress ('Подключаюсь: '+$variant.title)
                 # Resuming a lost reply is safe: first check this computer's own key.
                 try{[void](Invoke-WizardLogin $p $p.login 'true');$ok=$true}catch{
@@ -41,20 +51,19 @@ function Connect-WizardInvite([string]$Root,$Request) {
                         [void](Invoke-WizardLogin $p $p.login 'true');$ok=$true
                     }catch{
                         if($_.Exception.Message -like '*Ключ хоста*'){throw}
-                        $lastReason=if($_.Exception.Message -like '*отклонил вход*' -or $_.Exception.Message -like '*код выхода 1)*'){'Приглашение уже использовано, отозвано или регистрация отклонена сервером. Попросите администратора проверить invite list и создать новое'}else{'Нет связи по маршрутам приглашения. Проверьте интернет, локальный прокси или промежуточный сервер и нажмите «Повторить»'}
+                        if($_.Exception.Message -like '*отклонил вход*' -or $_.Exception.Message -like '*код выхода 1)*'){$lastReason='Приглашение уже использовано, отозвано или регистрация отклонена сервером. Попросите администратора проверить invite list и создать новое'}
+                        elseif($lastReason -notlike 'Приглашение уже*'){$lastReason='Нет связи по маршрутам приглашения. Проверьте интернет, локальный прокси или промежуточный сервер и нажмите «Повторить»'}
                         continue
                     }
                 }
                 if($ok){$chosenRequest=$r;break}
-            }
-            if($ok){break}
         }
         if(-not $ok){throw $lastReason}
         if($script:WizardRoute.kind -eq 'hop' -and $chosenRequest.hop.password){
             $m=[regex]::Match([string]$chosenRequest.hop.ssh,'\A(?:([a-z_][a-z0-9_-]{0,31})@)?([a-zA-Z0-9][a-zA-Z0-9.-]{0,252})(?::(\d{1,5}))?\z')
             if(-not $m.Groups[1].Success){throw 'В приглашении нужен явный логин промежуточного сервера'}
             $hopSettings=Join-Path $Root 'secrets/invite-hop.json'
-            Write-TransportJson $hopSettings @{sshExecutable=$p.sshExecutable;configPath=$p.configPath;knownHostsPath=(Join-Path $dir 'known_hosts-hop');host=$m.Groups[2].Value;port=$(if($m.Groups[3].Success){[int]$m.Groups[3].Value}else{22});user=$m.Groups[1].Value;password=[string]$chosenRequest.hop.password} -Private
+            Write-TransportJson $hopSettings @{sshExecutable=$p.sshExecutable;configPath=$p.configPath;knownHostsPath=[string]$chosenRequest.hop.knownHostsPath;host=$m.Groups[2].Value;port=$(if($m.Groups[3].Success){[int]$m.Groups[3].Value}else{22});user=$m.Groups[1].Value;password=[string]$chosenRequest.hop.password} -Private
             $script:WizardRoute.options=@('-o',('ProxyCommand='+(Quote-Disk ([string]$Request.askpassExecutable))+' --invite-hop '+(Quote-Disk $hopSettings)+' %h %p'))
         }
         $proxyOption=@($script:WizardRoute.options|Where-Object {$_ -like 'ProxyCommand=*'})

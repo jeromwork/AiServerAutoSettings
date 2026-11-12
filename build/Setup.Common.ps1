@@ -99,9 +99,10 @@ function Invoke-TransportPreflight([string]$Root,[string]$Bundle,$Config){
     $copy=Copy-TransportObject $Config
     # The check must not skip the only working path on a metered/unknown network.
     $copy.transport|Add-Member -Force metered 'false'
+    # Readiness comes from the daemon's parallel liveness probes (all paths at once, first answer wins), so this takes seconds.
+    # The per-path limit is not shortened: a hop through a DPI filter sometimes answers after 15-20 s. Speed ranking runs later, unawaited.
     $copy.transport|Add-Member -Force rankProbeBytes 65536
-    $copy.transport|Add-Member -Force rankConcurrency 4
-    if($env:REMOTEAGENTS_WIZARD_PROGRESS){$copy.transport|Add-Member -Force probeTimeoutSec 5;$copy.transport|Add-Member -Force stallSeconds 5}
+    if($env:REMOTEAGENTS_WIZARD_PROGRESS){$copy.transport|Add-Member -Force probeTimeoutSec 30;$copy.transport|Add-Member -Force stallSeconds 5}
     # Reserve a disjoint block for inbounds, ranking probes and local SSH socks. Fail if occupied.
     $listeners=@();$ports=@()
     try{

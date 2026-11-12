@@ -62,11 +62,13 @@ namespace RemoteAgents.Launcher
                 Directory.Move(tmp, Folder(m.Version)); return m.Version;
             } finally { if (File.Exists(part)) File.Delete(part); if (Directory.Exists(tmp)) Directory.Delete(tmp, true); }
         }
-        public void Activate(string version)
+        public void Activate(string version, bool accept = false)
         {
             Files.SafeVersion(version); BundleDefinition.Load(Folder(version));
             if (Pending) throw new InvalidOperationException("Уже ожидается проверка здоровья");
             string old = Current;
+            // Accepted activation (unfinished first setup): nothing works yet, so no health deadline or rollback.
+            if (accept && old.Length != 0) { Files.Atomic(Path.Combine(Root, "previous.txt"), old + "\n"); Files.Atomic(Path.Combine(Root, "current.txt"), version + "\n"); Cleanup(); return; }
             if (old.Length == 0) { Files.Atomic(Path.Combine(Root, "current.txt"), version + "\n"); Cleanup(); return; }
             // Write recovery record first; interrupted activation is recognized by Recover().
             Json.Write(PendingPath, new { version, previous = old, startedUtc = now().ToString("o") });

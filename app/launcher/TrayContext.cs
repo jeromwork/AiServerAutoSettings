@@ -28,27 +28,28 @@ namespace RemoteAgents.Launcher
         readonly Icon green = MakeIcon(Color.ForestGreen), yellow = MakeIcon(Color.Goldenrod), red = MakeIcon(Color.Firebrick);
         readonly object pipeGate = new object(); NamedPipeServerStream server; Task worker, pipeWorker;
         readonly ConcurrentQueue<string[]> commands = new ConcurrentQueue<string[]>(); volatile bool readyForCommands;
-        BundleDefinition definition; bool busy, closing, ticking, actionBusy, serverUpdateRequested, installStop;
+        string installSource; readonly bool firstSetup; BundleDefinition definition; bool busy, closing, ticking, actionBusy, serverUpdateRequested, installStop;
         DateTime settingsWritten = DateTime.MinValue;
         // Detached server installs started by the wizard (state/server-operations.json).
         DateTime nextOperationCheck = DateTime.MinValue; bool operationChecking, operationsActive; string operationTip = "";
         DateTime nextInviteSync=DateTime.MinValue;bool inviteConnected;
         string updateSummary = "обновления устанавливаются вручную из нового EXE";
         public bool RestartRequested { get; private set; }
-        public TrayContext(string home, Journal log, string pipeName, SecurityIdentifier sid, string[] args)
+        public TrayContext(string home, Journal log, string pipeName, SecurityIdentifier sid, string[] args, string installSource = null)
         {
-            this.home = home; this.log = log; dispatch.CreateControl(); var unused = dispatch.Handle;
+            this.home = home; this.log = log; this.installSource=installSource; dispatch.CreateControl(); var unused = dispatch.Handle;
             Directory.CreateDirectory(Path.Combine(home, "status"));
             config = new Configuration(home); engine = new UpdateEngine(home, Program.Version);
+            firstSetup = Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome),StringComparison.OrdinalIgnoreCase) && FirstInstall.Required(home);
             // Accept secondary launches while first-install selftest / binary downloads are still running.
             pipeWorker = Task.Run(() => Listen(pipeName, sid));
             try {
-                icon = new NotifyIcon { Visible = true, Icon = yellow, Text = Product.Name + ": запускается…" };
-                engine.Recover(); Bootstrap();
+                icon = new NotifyIcon { Visible = !firstSetup, Icon = yellow, Text = Product.Name + ": запускается…" };
+                icon.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowStatus(); };
+                if (!firstSetup) { engine.Recover(); Bootstrap(); LoadComponents(); }
                 if(!Product.IsVpn && !File.Exists(Path.Combine(home,"state","invite-device.json")) && Directory.Exists(Path.Combine(home,"state")) && Directory.GetFiles(Path.Combine(home,"state"),"invite-used-*.json").Length>0){
                     try{RefreshPackage.RememberDevice(home,Environment.MachineName);}catch{log.Write("invite.identity.migrate.failed");}
                 }
-                icon.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowStatus(); }; LoadComponents();
             } catch {
                 stop.Cancel(); lock (pipeGate) { if (server != null) server.Dispose(); }
                 if (icon != null) { icon.Visible = false; icon.Dispose(); }
@@ -56,19 +57,55 @@ namespace RemoteAgents.Launcher
             }
             readyForCommands = true;
             timer.Tick += (s, e) => Tick(); timer.Start();
-            dispatch.BeginInvoke(new Action(() => { Handle(args); DrainCommands(); Tick();
+            dispatch.BeginInvoke(new Action(() => {
+                if (firstSetup) { RunFirstSetup(); return; }
+                Handle(args); DrainCommands(); Tick();
                 if(Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome),StringComparison.OrdinalIgnoreCase)) CheckSetup();
 
             }));
         }
+        void RunFirstSetup()
+        {
+            actionBusy=true;
+            try {
+                // ShowDialog paints the wizard before its Shown handler starts any bundle work.
+                Func<Task<string>> prepare=async()=> {
+                    worker=Task.Run(()=> {engine.Recover();Bootstrap();});await worker;
+                    if(closing)throw new OperationCanceledException();
+                    ReloadSettings();LoadComponents();return engine.Folder(engine.Current);
+                };
+                if(!Product.IsVpn && Invitation.Pending(home)) {
+                    bool manual=InviteWindow.Display(home,null,prepare);
+                    if(manual)SetupWizard.Display(home,engine.Current.Length>0?engine.Folder(engine.Current):null,true,prepare:prepare);
+                } else SetupWizard.Display(home,null,true,prepare:prepare);
+            } finally {actionBusy=false;}
+            if(closing)return;
+            if(FirstInstall.Required(home)){ExitThread();return;}
+            ReloadSettings();icon.Visible=true;readyForCommands=true;
+            if(Product.IsVpn)Safe(RegisterVpnRun);
+            DrainCommands();Tick();
+        }
         void Bootstrap()
         {
-            if (engine.Current.Length != 0) { BundleDefinition.Load(engine.Folder(engine.Current)); return; }
+            if (installSource==null && engine.Current.Length != 0) { BundleDefinition.Load(engine.Folder(engine.Current)); return; }
             string zip = Path.Combine(engine.Root, "embedded.zip");
             try {
                 string version = UpgradeInstaller.ExtractEmbedded(zip);
+                if(installSource!=null) {
+                    string current=engine.Current;
+                    if(File.Exists(Path.Combine(home,Product.ExeName)) && current.Length>0 && UpgradeInstaller.Compare(Program.Version,version,FileVersionInfo.GetVersionInfo(Path.Combine(home,Product.ExeName)).FileVersion,current)<0)
+                        throw new InvalidDataException("Для отката сначала завершите настройку установленной версии");
+                    // Reopening the same downloaded EXE resumes setup without starting an upgrade health deadline.
+                    string target=Path.Combine(home,Product.ExeName);
+                    if(current==version && File.Exists(target) && Files.Hash(target)==Files.Hash(installSource)) {
+                        BundleDefinition.Load(engine.Folder(current));installSource=null;log.Write("bundle.bootstrap.resume");return;
+                    }
+                    // Unfinished first setup has no healthy components to wait for; a 120 s deadline would roll the new EXE back.
+                    UpgradeInstaller.Apply(home,installSource,zip,Program.Version,false,f=>External.SelfTest(f,home,stop.Token),stop.Token,accept:true);
+                    installSource=null;log.Write("bundle.bootstrap.ok");return;
+                }
                 var manifest = Manifest.Parse(Json.Encode(new { version, file = "embedded.zip", sha256 = Files.Hash(zip), size = new FileInfo(zip).Length, minLauncher = Program.Version }));
-                string ready = engine.Prepare(manifest, p => File.Copy(zip, p, true), f => External.SelfTest(f, home, stop.Token), (d, f) => UpdateEngine.InstallBinaries(d, f, home, stop.Token), stop.Token);
+                string ready = engine.Prepare(manifest, p => File.Copy(zip, p, true), f => External.SelfTest(f, home, stop.Token), (d, f) => UpdateEngine.InstallBinaries(d, f, home, stop.Token), stop.Token, downgrade: true);
                 if (ready == null) throw new InvalidDataException(); engine.Activate(ready);
                 log.Write("bundle.bootstrap.ok");
             } finally { if (File.Exists(zip)) File.Delete(zip); }
@@ -89,10 +126,10 @@ namespace RemoteAgents.Launcher
             if (vpn != null && !File.Exists(Path.Combine(home, "status", "vpn.json")) && File.Exists(TransportScript("Vpn.Tun.ps1"))) RunAction(new MenuAction { Exe = vpn.Exe, Args = vpn.Args });
             RefreshMenu();
         }
-        bool Wanted(Component c) { return config.Enabled(c); }
+        bool Wanted(Component c) { return config.Wanted(c); }
         void Tick()
         {
-            if (closing || ticking) return; ticking = true;
+            if (closing || ticking || definition == null) return; ticking = true;
             try {
                 TryDeleteOld(); ReloadSettings(); foreach (var r in runtimes) r.Tick();
                 var critical = runtimes.Where(r => r.Definition.Critical).ToArray();
@@ -365,9 +402,9 @@ namespace RemoteAgents.Launcher
                 var args = new List<string> { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", Path.Combine(engine.Folder(engine.Current), "Start-WindowsControl.ps1"), enabled ? "-Install" : "-Uninstall", "-LauncherHome", home };
                 // Install uses CIM for the long-lived bridge; let the lifecycle command finish independently.
                 Process.Start(new ProcessStartInfo(Files.Executable("powershell.exe"), Files.Arguments(args)) { UseShellExecute = false, CreateNoWindow = true });
-                config.SetEnabled(runtime.Definition, true); if (!runtime.Enabled) runtime.SetEnabled(true); RefreshMenu(); return;
+                config.SetEnabled(runtime.Definition, true); if (!runtime.Enabled) runtime.SetEnabled(Wanted(runtime.Definition)); RefreshMenu(); return;
             }
-            config.SetEnabled(runtime.Definition, enabled); runtime.SetEnabled(enabled); RefreshMenu();
+            config.SetEnabled(runtime.Definition, enabled); runtime.SetEnabled(Wanted(runtime.Definition)); RefreshMenu();
         }
         async void ScriptCommand(string script, string[] args, bool showOutput)
         {
@@ -529,8 +566,9 @@ namespace RemoteAgents.Launcher
         void Handle(string[] args)
         {
             Safe(() => {
+                if (args.Contains("--exit") || args.Contains("--uninstall")) { installStop = args.Contains("--install-stop");foreach(var form in Application.OpenForms.OfType<SetupWizard>().ToArray())form.Close();ExitThread();return; }
+                if(firstSetup && !icon.Visible){foreach(var form in Application.OpenForms.OfType<SetupWizard>())form.Activate();return;}
                 if (args.Contains("--settings")) { ShowSettings(); return; }
-                if (args.Contains("--exit") || args.Contains("--uninstall")) { installStop = args.Contains("--install-stop"); ExitThread(); return; }
                 if (args.Contains("--restart-components")) { if (busy || actionBusy) throw new InvalidOperationException(); LoadComponents(); }
                 if (args.Contains("--rollback")) { if (busy || actionBusy ) throw new InvalidOperationException(); engine.Rollback(); LoadComponents(); log.Write("update.rollback.manual"); }
                 if (args.Contains("--logs")) Open(Path.Combine(home, "logs"));
@@ -554,6 +592,12 @@ namespace RemoteAgents.Launcher
             if (closing) return; closing = true; timer.Stop(); stop.Cancel();
             lock (pipeGate) { if (server != null) server.Dispose(); }
             foreach (var r in runtimes) r.Dispose(); foreach (var job in actionJobs) job.Dispose();
+            if(firstSetup && definition!=null && FirstInstall.Required(home)) {
+                try {
+                    string bundle=engine.Folder(engine.Current),script=Path.Combine(bundle,"Start-WindowsControl.ps1");
+                    if(File.Exists(script) && External.Run("powershell.exe",new[]{"-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File",script,"-StopManaged","-LauncherHome",home},bundle,null,20000,1024,CancellationToken.None)!=0)log.Write("setup.bridge.stop.failed");
+                } catch {log.Write("setup.bridge.stop.failed");}
+            }
             try { WriteStatus(); } catch { log.Write("status.write.failed"); }
             log.Write("launcher.exit"); icon.Visible = false; icon.Dispose(); timer.Dispose();
             green.Dispose(); yellow.Dispose(); red.Dispose(); dispatch.Dispose(); base.ExitThreadCore();

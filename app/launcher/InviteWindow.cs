@@ -12,17 +12,17 @@ namespace RemoteAgents.Launcher
     // Separate entry: no administrator credentials or server repair actions here.
     internal sealed class InviteWindow : Form
     {
-        readonly string home,bundle; readonly Journal log; readonly CancellationTokenSource stop=new CancellationTokenSource();
+        readonly string home; string bundle; readonly Func<Task<string>> prepare; readonly Journal log; readonly CancellationTokenSource stop=new CancellationTokenSource();
         readonly Label line=new Label {Dock=DockStyle.Top,Height=78,Padding=new Padding(12),Text="Подключаю компьютер по приглашению…"};
         readonly TreeView folders=new TreeView {Dock=DockStyle.Fill,CheckBoxes=true,Visible=false};
         DiskTreeSelection selection;bool changingTree;
         readonly Button retry=new Button {Text="Повторить",Width=120},close=new Button {Text="Закрыть",Width=100};
         bool busy,choose; internal bool Manual;
-        internal static bool Display(string home,string bundle)
-        {using(var form=new InviteWindow(home,bundle)){form.ShowDialog();return form.Manual;}}
-        InviteWindow(string home,string bundle)
+        internal static bool Display(string home,string bundle,Func<Task<string>> prepare=null)
+        {using(var form=new InviteWindow(home,bundle,prepare)){form.ShowDialog();return form.Manual;}}
+        InviteWindow(string home,string bundle,Func<Task<string>> prepare)
         {
-            this.home=home;this.bundle=bundle;log=new Journal(home);
+            this.home=home;this.bundle=bundle;this.prepare=prepare;log=new Journal(home);
             Text="RemoteAgents — приглашение";ClientSize=new Size(560,340);StartPosition=FormStartPosition.CenterScreen;Font=new Font("Segoe UI",10F);
             var bar=new FlowLayoutPanel {Dock=DockStyle.Bottom,Height=42,FlowDirection=FlowDirection.RightToLeft};bar.Controls.Add(close);bar.Controls.Add(retry);
             var manual=new LinkLabel {Dock=DockStyle.Bottom,Height=30,Text="Настроить сервер вручную",Padding=new Padding(12,2,0,0)};
@@ -60,6 +60,7 @@ namespace RemoteAgents.Launcher
         {
             if(busy)return;busy=true;retry.Enabled=false;
             try {
+                if(bundle==null && prepare!=null){line.Text="Подготавливаю программу…";bundle=await prepare();}
                 var state=Json.Read(Invitation.State(home));
                 if(!choose){
                 if(!Json.Bool(state,"registered")){

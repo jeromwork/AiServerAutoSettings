@@ -56,7 +56,7 @@ function Invoke-WizardAskpass($Profile,[string]$User,[string]$Command,[string]$I
     try{
         [void]$p.Start();$out=$p.StandardOutput.ReadToEndAsync();$err=$p.StandardError.ReadToEndAsync()
         $bytes=[Text.Encoding]::UTF8.GetBytes($InputText);$task=$p.StandardInput.BaseStream.WriteAsync($bytes,0,$bytes.Length)
-        if(-not $task.Wait(15000)){throw 'Таймаут отправки SSH'};$p.StandardInput.Close();[Array]::Clear($bytes,0,$bytes.Length)
+        if(-not $task.Wait([Math]::Max(15,$Timeout)*1000)){throw 'Таймаут отправки SSH'};$p.StandardInput.Close();[Array]::Clear($bytes,0,$bytes.Length)
         if(-not $p.WaitForExit($Timeout*1000)){throw 'Сервер не ответил вовремя; откат сработает автоматически'}
         if($p.ExitCode -eq 255){throw 'Вход администратора не выполнен: проверьте логин и пароль'}
         if($p.ExitCode -ne 0){throw (Get-WizardNetError $err.GetAwaiter().GetResult() $p.ExitCode)}

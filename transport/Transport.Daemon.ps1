@@ -6,7 +6,7 @@ $root=(Get-TransportHome $TransportHome);$engine=$null;$tunnelChildren=@{};$prob
 $parent=$null;$mutex=$null;$locked=$false;$settings=$null;$paths=$null;$rankPending=$false;$rankTags=@();$rankQueue=$null;$exitCode=0
 $pin=[pscustomobject]@{mode='auto';tag=$null};$nextControl=[DateTime]::MinValue;$revision='';$reloadJob=$null;$reloadError=$null;$failedRevision=$null;$pendingRevision=$null;$nextReload=[DateTime]::MinValue
 $diagnosticContext=$null
-$lastStatus=[DateTime]::MinValue;$nextActive=[DateTime]::MinValue;$nextRank=[DateTime]::MinValue;$nextNetwork=[DateTime]::MinValue;$retryAt=[DateTime]::MinValue
+$lastStatus=[DateTime]::MinValue;$nextActive=[DateTime]::MinValue;$nextRank=[DateTime]::MinValue;$nextNetwork=[DateTime]::MinValue;$retryAt=[DateTime]::MinValue;$nextLive=[DateTime]::MinValue
 function Test-TransportStop {
     try{if([IO.File]::Exists((Join-Path $root 'stop')) -or [IO.File]::Exists((Join-Path $root 'state/transport.stop'))){return $true}}catch{}
     if($parent){try{return $parent.HasExited}catch{return $true}};return $false
@@ -61,6 +61,13 @@ function Start-DaemonProbe($Candidate,[long]$Bytes,[string]$Purpose) {
         Write-TransportLog $root 'process-failed' $detail
     }
 }
+function Start-TransportLiveness {
+    # Пока нет подтверждённого пути, короткая проба живости (activeProbeBytes) идёт по всем кандидатам сразу:
+    # мёртвые пути стоят один таймаут на всех, первый ответивший становится активным. Замер скорости (rank) — после.
+    foreach($c in $paths.Candidates){if(-not $probes.ContainsKey($c.tag)){Start-DaemonProbe $c ([long]$settings.Options.activeProbeBytes) 'live'}}
+    $interval=$settings.Options.activeIntervalSec;if($metered -ne $false){$interval=$settings.Options.meteredActiveIntervalSec}
+    $script:nextLive=[DateTime]::UtcNow.AddSeconds([double]$interval)
+}
 function Start-TransportRanking {
     $tags=@(Get-TransportRankTags $rows $paths.Candidates $settings.Options $metered)
     # Пути проверяются по очереди (rankConcurrency, по умолчанию 1): параллельные пробы делят один канал
@@ -94,7 +101,7 @@ function Start-TransportEngine([switch]$Validated) {
         if($settings.Options.bindPhysical -and $tunnel.bind){if(-not $network.ip){throw 'Нет физического IPv4 для OpenSSH'};$a+=@('-b',[string]$network.ip)}
         $script:tunnelChildren[$tunnel.tag]=Start-TransportProcess $settings.Profile.sshExecutable ($a+@([string]$tunnel.target))
     }
-    $script:nextRank=[DateTime]::UtcNow.AddSeconds(1);$script:nextActive=[DateTime]::UtcNow.AddSeconds(1);Write-TransportLog $root 'ready'
+    $script:nextRank=[DateTime]::UtcNow.AddSeconds(1);$script:nextActive=[DateTime]::UtcNow.AddSeconds(1);$script:nextLive=$script:nextActive;Write-TransportLog $root 'ready'
 }
 $metered=$null
 try{
@@ -177,7 +184,7 @@ try{
                     if($engine -and -not $settings.Options.bindPhysical){[void](Switch-TransportActive $best.tag $false)}
                     else{$active=$best.tag;$errorText='Путь из памяти ещё не проверен'}
                 }
-                $nextRank=$now;$nextActive=$now;Write-TransportLog $root 'network-change'
+                $nextRank=$now;$nextActive=$now;$nextLive=$now;Write-TransportLog $root 'network-change'
                 # bind_interface и OpenSSH -b задаются на сокете. При смене NIC нужен новый процесс;
                 # обычный failover selector никогда не перезапускает sing-box.
                 if($settings.Options.bindPhysical){
@@ -228,7 +235,7 @@ try{
                 if(Receive-TransportProbe $probe){
                     $result=$probe.state;$row=$rows|Where-Object {$_.tag -eq $tag}|Select-Object -First 1
                     # Скорость задаёт рейтинг (равные объёмы); проба активного пути меньше и только подтверждает живость.
-                    $row.state=$result.state;if($probe.purpose -ne 'active' -or $result.state -ne 'ok' -or $null -eq $row.kbps){$row.kbps=$result.kbps};$row.checkedAt=$now.ToString('o')
+                    $row.state=$result.state;if($probe.purpose -notin @('active','live') -or $result.state -ne 'ok' -or $null -eq $row.kbps){$row.kbps=$result.kbps};$row.checkedAt=$now.ToString('o')
                     $reason=if($result.diagnostic.reason -eq 'timeout'){'таймаут '+$settings.Options.probeTimeoutSec+' с'}elseif($result.diagnostic.reason -eq 'stalled'){'нет ответа'}else{'путь недоступен'}
                     Write-DaemonWizardProgress ('Вариант связи: '+$row.title+$(if($result.state -eq 'ok'){' ✓'}else{' ✗ ('+$reason+')'}))
                     $detail=New-TransportDiagnostic $probe.child $tag $result.diagnostic.reason $diagnosticContext
@@ -257,7 +264,10 @@ try{
                 if($best -and $best.tag -ne $active){[void](Switch-TransportActive $best.tag $true)}
                 Save-TransportMemory $root $memory $network.id $rows
             }
-            if(-not $rankPending -and $now -ge $nextRank){Start-TransportRanking}
+            # Живость — параллельно и раньше rank; rank (по очереди, делит канал) ждёт окончания проб живости.
+            $live=@($probes.Values|Where-Object {$_.purpose -eq 'live'}).Count
+            if(-not $confirmed -and -not $rankPending -and -not $live -and $pin.mode -eq 'auto' -and $now -ge $nextLive){Start-TransportLiveness;$live=@($probes.Values|Where-Object {$_.purpose -eq 'live'}).Count}
+            if(-not $rankPending -and -not $live -and $now -ge $nextRank){Start-TransportRanking}
             if($active -and $active -in @($paths.Candidates|ForEach-Object {$_.tag}) -and $now -ge $nextActive -and -not $probes.ContainsKey($active)){
                 $c=$paths.Candidates|Where-Object {$_.tag -eq $active}|Select-Object -First 1
                 Start-DaemonProbe $c ([long]$settings.Options.activeProbeBytes) 'active'

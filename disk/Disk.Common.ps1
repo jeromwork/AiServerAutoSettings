@@ -1,5 +1,7 @@
 ﻿#requires -Version 5.1
 $ErrorActionPreference='Stop'
+# .NET Framework writes Console.InputEncoding's BOM into every redirected stdin; on a UTF-8 console that corrupts the first line sent to ssh.
+try{if([Console]::InputEncoding.GetPreamble().Length){[Console]::InputEncoding=New-Object Text.UTF8Encoding($false)}}catch{}
 function Write-DiskUtf8($File,[string]$Text) {[IO.File]::WriteAllText($File,$Text.Replace("`r",''),(New-Object Text.UTF8Encoding($false)))}
 function Write-DiskLog($Step,$Failure=$null) {
     try {
@@ -18,7 +20,8 @@ function Invoke-DiskProcess($Exe,$Arguments,[string]$InputText='',[string]$Outpu
     try {[void]$p.Start();$err=$p.StandardError.ReadToEndAsync()
         if($OutputFile){$file=[IO.File]::Create($OutputFile);$out=$p.StandardOutput.BaseStream.CopyToAsync($file)}else{$out=$p.StandardOutput.ReadToEndAsync()}
         $bytes=[Text.Encoding]::UTF8.GetBytes($InputText.Replace("`r",''));$write=$p.StandardInput.BaseStream.WriteAsync($bytes,0,$bytes.Length)
-        if(-not $write.Wait(15000)){throw 'Таймаут ввода'};$p.StandardInput.Close()
+        # ssh reads stdin only after the session is up; via a hop that alone can exceed 15 s.
+        if(-not $write.Wait([Math]::Max(15,$TimeoutSeconds)*1000)){throw 'Таймаут ввода'};$p.StandardInput.Close()
         if(-not $p.WaitForExit($TimeoutSeconds*1000)){$p.Kill();throw 'Таймаут команды'};$out.GetAwaiter().GetResult() | Out-Null
         if($p.ExitCode -ne 0){$reason='Внешняя команда не выполнена';if($p.ExitCode -eq 255 -and [IO.Path]::GetFileNameWithoutExtension($Exe) -ieq 'ssh'){$reason=if($err.Result -match 'REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed'){"Ключ хоста не совпал с приглашением или known_hosts. Подключение остановлено; попросите администратора проверить ключ сервера"}elseif($err.Result -match 'Permission denied'){'Сервер отклонил вход'}elseif($err.Result -match 'banner exchange|kex_exchange_identification|Connection closed|Connection reset|timed out'){'Нет SSH-баннера от сервера'}else{'Нет связи с сервером'};if($err.Result -match 'proxy-connect: ([^\r\n]+)'){$reason+=': '+$Matches[1]}}elseif($err.Result -match 'Чужой .stignore'){$reason='Чужой .stignore на сервере: сохраните и удалите его вручную'}elseif($err.Result -match 'требуется -Merge'){$reason='Обе папки непустые: требуется -Merge'};throw ($reason+' (код выхода '+$p.ExitCode+')')}
         if(-not $OutputFile){$out.Result.Replace("`r",'').TrimStart([char]0xFEFF).Trim()}
@@ -37,7 +40,19 @@ function Invoke-DiskSsh($Command,[switch]$Direct,[string]$InputText='',[string]$
     # The launcher's transport serves the server SSH on its configured local port.
     $launcher=Join-Path $env:LOCALAPPDATA 'RemoteAgents/config.json'
     if(Test-Path -LiteralPath $launcher){try{$port=[int](Get-Content -LiteralPath $launcher -Raw -Encoding UTF8|ConvertFrom-Json).transport.sshPort;if($port -ge 1 -and $port -le 65535){$localPort=$port}}catch{}}
-    if($Direct){$args+=@($c.arguments)}else{$args+=@('-F','NUL','-p',[string]$localPort,'-i',$c.keyPath,'-o',('HostKeyAlias='+$c.serverAddress),'-o',('UserKnownHostsFile="'+$c.knownHostsPath.Replace('\','/')+'"'),'-o','IdentitiesOnly=yes',($c.login+'@127.0.0.1'))}
+    if($Direct){
+        . (Join-Path (Split-Path $PSScriptRoot -Parent) 'transport/Transport.Common.ps1')
+        $root=Split-Path $launcher -Parent
+        # A manually selected profile must never inherit another server's personal route.
+        if(Test-Path -LiteralPath $launcher){
+            $config=Read-TransportJson $launcher
+            $routeProfile=[string]$config.transport.profilePath;if($config.wizard.pendingProfile){$routeProfile=[string]$config.wizard.pendingProfile}
+            if($routeProfile -and $script:ProfilePath -eq [IO.Path]::GetFullPath($routeProfile)){
+                if($script:WizardRoute){$args+=@($script:WizardRoute.options)}else{$args+=@(Get-TransportSavedRouteOptions $root $c)}
+            }
+        }
+        $args+=@($c.arguments)
+    }else{$args+=@('-F','NUL','-p',[string]$localPort,'-i',$c.keyPath,'-o',('HostKeyAlias='+$c.serverAddress),'-o',('UserKnownHostsFile="'+$c.knownHostsPath.Replace('\','/')+'"'),'-o','IdentitiesOnly=yes',($c.login+'@127.0.0.1'))}
     Invoke-DiskProcess $c.sshExecutable ($args+@($Command)) $InputText $OutputFile -TimeoutSeconds $TimeoutSeconds
 }
 function Get-DiskTreeCommand([string]$RelativePath='') {

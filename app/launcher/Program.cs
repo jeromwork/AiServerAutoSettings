@@ -62,7 +62,7 @@ namespace RemoteAgents.Launcher
                 }
                 var sid = WindowsIdentity.GetCurrent().User; string name = InstanceName(home, sid);
                 var security = new MutexSecurity(); security.AddAccessRule(new MutexAccessRule(sid, MutexRights.FullControl, AccessControlType.Allow));
-                bool created, owned = false, restart = false;
+                bool created, owned = false, restart = false;string firstInstallSource=null;
                 using (var mutex = new Mutex(false, "Global\\" + name, out created, security)) {
                     // Serialize downloaded installers independently of the running tray's mutex.
                     using (var installer = new Mutex(false, "Global\\" + name + ".Install", out created, security)) {
@@ -90,7 +90,12 @@ namespace RemoteAgents.Launcher
                             bool command = args.Any(a => new[] { "--exit", "--uninstall", "--logs", "--rollback", "--restart-components", "--check-updates", "--settings" }.Contains(a));
                             // --tray with --home is also the isolated development/smoke entry point.
                             bool install = external && !command && !(args.Contains("--tray") && args.Contains("--home"));
-                            if (install) {
+                            // First setup owns a visible wizard before extraction, selftest or binary downloads.
+                            if (install && home.Equals(DefaultHome,StringComparison.OrdinalIgnoreCase) && FirstInstall.Required(home)) {
+                                if(!owned){Forward(name,new[]{"--setup-check"});return 0;}
+                                firstInstallSource=Exe;
+                            }
+                            else if (install) {
                                 string zip = Path.Combine(home, "embedded-install-" + Guid.NewGuid().ToString("N") + ".zip");
                                 try {
                                     string bundle = UpgradeInstaller.ExtractEmbedded(zip);
@@ -110,14 +115,14 @@ namespace RemoteAgents.Launcher
                                     launch(target, true); log.Write("install.upgrade.ok"); return 0;
                                 } finally { if (File.Exists(zip)) File.Delete(zip); }
                             }
-                            if (args.Contains("--install") || (!external && args.Length == 0 && FirstInstall.Required(home))) { firstRun(); return 0; }
+                            if (firstInstallSource==null && (args.Contains("--install") || (!external && args.Length == 0 && FirstInstall.Required(home)))) { firstRun(); return 0; }
                             if (!owned) { Forward(name, args.Contains("--uninstall") ? new[] { "--exit" } : args.Length == 0 ? new[] { "--setup-check" } : args); log.Write("ipc.forward.ok"); return 0; }
                         } finally { if (installOwned) installer.ReleaseMutex(); }
                     }
                     try {
                         if (args.Contains("--uninstall") || args.Contains("--exit")) return 0;
                         Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
-                        using (var context = new TrayContext(home, log, name, sid, args)) { Application.Run(context); restart = context.RestartRequested; }
+                        using (var context = new TrayContext(home, log, name, sid, args, firstInstallSource)) { Application.Run(context); restart = context.RestartRequested; }
                     } finally { if (owned) { mutex.ReleaseMutex(); owned = false; } }
                 }
                 if (restart) StartLauncher(Path.Combine(home, Product.ExeName), home, true);
