@@ -1,0 +1,63 @@
+{
+  "kind": "remoteagents-config",
+  "schema": 1,
+  "device": {
+    "name": "Мой компьютер"
+  },
+  "server": {
+    "address": "server.example.invalid",
+    "port": 22,
+    "login": "remoteagents",
+    "key": {
+      "secret": "server-key"
+    },
+    "routes": [
+      {
+        "kind": "direct"
+      }
+    ]
+  },
+  "connection": {
+    "enabled": true
+  },
+  "bridge": {
+    "enabled": true,
+    "allowShell": false
+  },
+  "happier": {
+    "mode": "same",
+    "label": "Мой аккаунт",
+    "serverUrl": "https://api.example.invalid",
+    "webappUrl": "https://web.example.invalid",
+    "key": {
+      "secret": "happier-key"
+    }
+  },
+  "disk": {
+    "folders": [
+      "Проект",
+      "Документы"
+    ]
+  },
+  "vpn": {
+    "enabled": false
+  },
+  "components": {
+    "transport": {
+      "enabled": true
+    },
+    "disk": {
+      "enabled": true
+    },
+    "control": {
+      "enabled": true
+    },
+    "vpn": {
+      "enabled": false
+    }
+  },
+  "secrets": {
+    "server-key": "",
+    "happier-key": ""
+  }
+}
