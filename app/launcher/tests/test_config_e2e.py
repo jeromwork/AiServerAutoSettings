@@ -704,7 +704,7 @@ def main_channel(upgrade=False):
                     # The earlier installation's hop is not carried into the channel's daemon; it never died.
                     assert not daemon_fatal(root), daemon_fatal(root)
                     assert (config['transport'].get('serverRoute') or {}).get('used') != 'hop', config['transport'].get('serverRoute')
-                    assert not str(config['transport']['profilePath']).startswith(str(old_profile.parent.parent.parent)), 'profile of the pasted config'
+                    assert not str(config['transport']['profilePath']).startswith(str(old_profile.parent.parent)), 'profile of the pasted config'
 
                 # 4. Live SSH login with the issued key, as saved (ProxyCommand through the channel).
                 t = time.monotonic()
