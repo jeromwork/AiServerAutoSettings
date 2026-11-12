@@ -105,6 +105,22 @@ namespace RemoteAgents.Launcher
 
             var pending = ConfigEngine.Execute(new[] { ConfigSections.Account }, (s, t) => Task.FromResult(SectionOutcome.From(Json.Map(Json.Parse("{\"ok\":false,\"pending\":\"happier\",\"summary\":\"Happier устанавливается\"}")), "x")), (s, st, text) => blocked[s] = st, CancellationToken.None).GetAwaiter().GetResult();
             Check(pending[ConfigSections.Account].Pending && pending[ConfigSections.Account].Operation == "happier" && blocked[ConfigSections.Account] == SectionState.Pending, "detached install is ⏳, not ❌");
+            var refused = SectionOutcome.From(Json.Map(Json.Parse("{\"ok\":false,\"vpn\":\"unavailable\",\"summary\":\"нет\"}")), "x");
+            Check(!refused.Ok && !refused.Pending && refused.Summary == "нет", "result.ok:false without pending is ❌, not ⏳ (docs/CONFIG-ENGINE.md)");
+            Check(SectionOutcome.From(Json.Map(Json.Parse("{\"ok\":false,\"summary\":\"запрос передан\"}")), "x", true).Pending, "an unconfirmed VPN request is ⏳, never ✅");
+            Check(!SectionOutcome.ServerOperation("connection") && SectionOutcome.ServerOperation("disk"), "only server installs are followed by «Operation»");
+            int vpnCalls = 0; long connectionDone = 0, secondVpn = 0; var vpnClock = Stopwatch.StartNew();
+            Func<string, CancellationToken, Task<SectionOutcome>> waiting = async (s, t) => {
+                if (s == ConfigSections.Connection) { await Task.Delay(300); connectionDone = vpnClock.ElapsedMilliseconds; return new SectionOutcome { Ok = true }; }
+                if (s == ConfigSections.Vpn) {
+                    if (Interlocked.Increment(ref vpnCalls) == 1) return SectionOutcome.From(Json.Map(Json.Parse("{\"ok\":false,\"pending\":\"connection\",\"summary\":\"ждёт связь\"}")), "x", true);
+                    secondVpn = vpnClock.ElapsedMilliseconds; return new SectionOutcome { Ok = true };
+                }
+                return new SectionOutcome { Ok = true };
+            };
+            var vpnStates = new ConcurrentDictionary<string, SectionState>();
+            var retried = ConfigEngine.Execute(new[] { ConfigSections.Server, ConfigSections.Connection, ConfigSections.Vpn }, waiting, (s, st, text) => vpnStates[s] = st, CancellationToken.None).GetAwaiter().GetResult();
+            Check(vpnCalls == 2 && retried[ConfigSections.Vpn].Ok && vpnStates[ConfigSections.Vpn] == SectionState.Done && secondVpn >= connectionDone, "Vpn waiting for the connection is repeated once right after Connection succeeds");
 
             var cancel = new CancellationTokenSource(); cancel.CancelAfter(100); bool cancelled = false;
             try { ConfigEngine.Execute(plan, fake, (s, st, text) => { }, cancel.Token).GetAwaiter().GetResult(); } catch (OperationCanceledException) { cancelled = true; }
@@ -160,10 +176,16 @@ namespace RemoteAgents.Launcher
         }
         static void Requests()
         {
-            var p = Profile(); string home = Path.Combine(Path.GetTempPath(), "cfgd-home");
+            var p = Profile(); string home = Path.Combine(Path.GetTempPath(), "cfgd-home-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(home, "secrets"));
+            // Paths come only from SecretVault.Materialize's manifest (docs/CONFIG.md), never a guessed location.
+            string keyFile = Path.Combine(home, "secrets", "server-key"), hopKey = Path.Combine(home, "secrets", "route-1"), ovpn = Path.Combine(home, "secrets", "lan", "x.ovpn");
+            File.WriteAllText(Path.Combine(home, "secrets", "materialized.json"), Json.Encode(new Dictionary<string, object> { { "schema", 1 }, { "serverKeyFile", keyFile },
+                { "routes", new object[] { new Dictionary<string, object> { { "kind", "direct" } }, new Dictionary<string, object> { { "kind", "hop" }, { "hop", new Dictionary<string, object> { { "keyFile", hopKey } } } } } },
+                { "lan", new object[] { new Dictionary<string, object> { { "name", "office" }, { "file", ovpn } } } } }));
             var server = ConfigRequests.Server(home, p);
             Check(Json.Str(server, "address") == "203.0.113.10" && Json.Int(server, "port", 0) == 2222 && Json.Str(server, "login") == "remoteagents", "server address/port/login");
-            Check(Json.Str(server, "keyFile") == Path.Combine(home, "secrets", "config", "server-key") && !Json.Encode(server).Contains("password\":\""), "key is a file, no password in the request");
+            Check(Json.Str(server, "keyFile") == keyFile && !Json.Encode(server).Contains("password\":\""), "key is a file, no password in the request");
             Check(Json.Str(Json.Map(Json.Get(server, "proxy")), "host") == "127.0.0.1" && Json.Str(Json.Map(Json.Get(server, "hop")), "ssh") == "jump@hop.example", "routes -> proxy/hop of the Server action");
             var bridge = ConfigRequests.Bridge(p, new Dictionary<string, object>());
             Check(Json.Str(bridge, "deviceName") == "Ноутбук сына" && Json.Bool(bridge, "enabled") && !Json.Bool(bridge, "shell"), "Bridge carries deviceName");
@@ -176,6 +198,8 @@ namespace RemoteAgents.Launcher
             Throws<IOException>(() => ConfigRequests.Account(new Dictionary<string, object> { { "happier", new Dictionary<string, object>() } }, new Dictionary<string, object>(), new Dictionary<string, object>()), "Happier without addresses refused clearly");
             var lan = ConfigRequests.Lan(home, p, Json.Map(Json.Parse("{\"lan\":{\"connections\":[{\"name\":\"old\"}]}}")));
             Check(lan.Item1.Length == 1 && Json.Str(lan.Item1[0], "name") == "office" && lan.Item2.SequenceEqual(new[] { "old" }), "LAN: add new, remove gone");
+            Check(Json.Str(lan.Item1[0], "file") == ovpn, "LAN .ovpn from the manifest");
+            Directory.Delete(home, true);
             Func<string, bool> none = n => false, keyOnly = n => n == "server-key" || n == "hop-password";
             Check(ConfigRequests.SecretsFor(ConfigSections.Server, p, none).SequenceEqual(new[] { "server-root-password", "hop-password" }), "no key -> ask the root password (and the hop password)");
             Check(ConfigRequests.SecretsFor(ConfigSections.Server, p, keyOnly).Count == 0, "key present -> root password not asked");

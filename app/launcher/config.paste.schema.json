@@ -473,6 +473,50 @@
         "bootstrap": {
           "type": "object",
           "properties": {
+            "catalog": {
+              "type": "object",
+              "properties": {
+                "schema": {
+                  "const": 1
+                },
+                "entries": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "maxProperties": 64
+                  },
+                  "maxItems": 256
+                },
+                "hops": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "maxProperties": 64
+                  },
+                  "maxItems": 256
+                },
+                "relays": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "maxProperties": 64
+                  },
+                  "maxItems": 256
+                },
+                "cdn": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "maxProperties": 64
+                  },
+                  "maxItems": 256
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "schema"
+              ]
+            },
             "channel": {
               "type": "object",
               "properties": {

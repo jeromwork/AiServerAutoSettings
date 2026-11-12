@@ -68,7 +68,7 @@ namespace RemoteAgents.Launcher
         {
             var vpn = Json.Map(Json.Get(p, "vpn"));
             switch (s) {
-                case Bootstrap: return vpn.ContainsKey("bootstrap");
+                case Bootstrap: return Json.Map(Json.Get(vpn, "bootstrap")).ContainsKey("channel"); // a public catalog alone needs no VPN-first
                 case Server: case Connection: return p.ContainsKey("server");
                 case Bridge: return p.ContainsKey("bridge") || Json.Str(Json.Map(Json.Get(p, "device")), "name").Length > 0;
                 case Account: return p.ContainsKey("happier");
@@ -159,12 +159,17 @@ namespace RemoteAgents.Launcher
     internal sealed class SectionOutcome
     {
         internal bool Ok, Pending; internal string Summary = "", Operation = ""; internal Dictionary<string, object> Result = new Dictionary<string, object>(); internal long Ms;
-        internal static SectionOutcome From(Dictionary<string, object> result, string success)
+        // docs/CONFIG-ENGINE.md: readiness is result.ok; «pending» names what it waits for (a detached server install
+        // «disk»/«happier», or «connection»). ok:false without pending is a failure, except an unconfirmed request
+        // (VPN TUN) the caller marks as such: that is ⏳, never ✅.
+        internal static SectionOutcome From(Dictionary<string, object> result, string success, bool unconfirmedIsPending = false)
         {
             string pending = Json.Str(result, "pending"); bool ok = Json.Bool(result, "ok", true);
-            return new SectionOutcome { Ok = ok, Pending = !ok, Operation = pending, Result = result,
-                Summary = Json.Text(result, "summary", success) + (ok || pending.Length > 0 ? "" : " (ещё не подтверждено)") };
+            return new SectionOutcome { Ok = ok, Pending = !ok && (pending.Length > 0 || unconfirmedIsPending), Operation = pending, Result = result,
+                Summary = Json.Text(result, "summary", success) + (ok || pending.Length > 0 ? "" : unconfirmedIsPending ? " (ещё не подтверждено)" : "") };
         }
+        // Detached installs on the server that ServerOperations/«Operation» can follow.
+        internal static bool ServerOperation(string operation) { return operation == "disk" || operation == "happier"; }
     }
 
     internal static class ConfigEngine
@@ -195,7 +200,17 @@ namespace RemoteAgents.Launcher
                 foreach (string s in rest) { outcomes[s] = new SectionOutcome { Summary = "ждёт сервер" }; report(s, SectionState.Blocked, "ждёт доступа к серверу: сначала исправьте «Сервер»"); }
                 return new Dictionary<string, SectionOutcome>(outcomes);
             }
-            var tasks = ConfigSections.Parallel.Where(plan.Contains).Select(s => one(s)).ToList();
+            // Vpn may answer pending:"connection" while Connection is still proving the channel: it is run once
+            // more right after a successful Connection instead of staying ⏳ forever.
+            Task<bool> connection = plan.Contains(ConfigSections.Connection) ? one(ConfigSections.Connection) : Task.FromResult(true);
+            Func<string, Task<bool>> after = async s => {
+                bool r = await one(s); SectionOutcome o;
+                if (!r || !outcomes.TryGetValue(s, out o) || !o.Pending || o.Operation != "connection" || !plan.Contains(ConfigSections.Connection)) return r;
+                if (!await connection) return r;
+                return await one(s);
+            };
+            var tasks = ConfigSections.Parallel.Where(s => s != ConfigSections.Connection && plan.Contains(s)).Select(s => after(s)).ToList();
+            tasks.Add(connection);
             Func<Task<bool>> chain = async () => { foreach (string s in ConfigSections.Chain) await one(s); return true; };
             tasks.Add(chain());
             await Task.WhenAll(tasks);
@@ -320,15 +335,28 @@ namespace RemoteAgents.Launcher
     {
         internal static string SecretName(object field) { return Json.Str(Json.Map(field), "secret"); }
         internal static string SecretHint(object field) { return Json.Str(Json.Map(field), "hint"); }
-        // Agreed location for file-like secrets (SSH keys, .ovpn) — reported to stream A in docs/CONFIG-REPORT-D.md.
-        internal static string SecretFile(string home, string name) { return name.Length == 0 ? "" : Path.Combine(home, "secrets", "config", name); }
+        // File-like secrets (SSH keys, .ovpn) are laid out by SecretVault.Materialize; secrets/materialized.json is the
+        // only map of where they are (docs/CONFIG.md «Хранилище и материализация»). No guessed paths, no stale files.
+        internal static Dictionary<string, object> Materialized(string home)
+        {
+            try { string file = Path.Combine(home, "secrets", "materialized.json"); return File.Exists(file) ? Json.Map(Json.Read(file)) : new Dictionary<string, object>(); }
+            catch (Exception) { return new Dictionary<string, object>(); }
+        }
+        internal static string RouteFile(Dictionary<string, object> manifest, Dictionary<string, object> server, string kind, string field)
+        {
+            var routes = Json.Array(Json.Get(server, "routes")).Select(Json.Map).ToList(); int index = routes.FindIndex(r => Json.Str(r, "kind") == kind);
+            var rows = Json.Array(Json.Get(manifest, "routes")).Select(Json.Map).ToArray();
+            return index < 0 || index >= rows.Length ? "" : Json.Str(Json.Map(Json.Get(rows[index], kind)), field);
+        }
+        internal static string LanFile(Dictionary<string, object> manifest, string name)
+        { return Json.Str(Json.Array(Json.Get(manifest, "lan")).Select(Json.Map).FirstOrDefault(r => Json.Str(r, "name") == name) ?? new Dictionary<string, object>(), "file"); }
         internal static Dictionary<string, object> Route(Dictionary<string, object> server, string kind)
         { return Json.Array(Json.Get(server, "routes")).Select(Json.Map).FirstOrDefault(r => Json.Str(r, "kind") == kind); }
         internal static Dictionary<string, object> Server(string home, Dictionary<string, object> p)
         {
-            var server = Json.Map(Json.Get(p, "server"));
+            var server = Json.Map(Json.Get(p, "server")); var manifest = Materialized(home);
             var request = new Dictionary<string, object> { { "address", Json.Str(server, "address") }, { "login", Json.Text(server, "login", "root") }, { "installMissing", true },
-                { "keyFile", SecretFile(home, SecretName(Json.Get(server, "key"))) }, { "hostKeys", Json.Strings(Json.Get(server, "hostKeys")) } };
+                { "keyFile", Json.Str(manifest, "serverKeyFile") }, { "hostKeys", Json.Strings(Json.Get(server, "hostKeys")) } };
             int port = Json.Int(server, "port", 22); if (port != 22) request["port"] = port;
             var proxy = Json.Map(Json.Get(Route(server, "proxy"), "proxy"));
             if (Json.Str(proxy, "server").Length > 0) request["proxy"] = new Dictionary<string, object> { { "type", Json.Str(proxy, "type") == "http" ? "http" : "socks" }, { "host", Json.Str(proxy, "server") }, { "port", Json.Int(proxy, "port", 0) } };
@@ -336,7 +364,7 @@ namespace RemoteAgents.Launcher
             if (Json.Str(hop, "host").Length > 0) {
                 int hopPort = Json.Int(hop, "port", 22); string user = Json.Str(hop, "user");
                 request["hop"] = new Dictionary<string, object> { { "name", "hop" }, { "ssh", (user.Length > 0 ? user + "@" : "") + Json.Str(hop, "host") + (hopPort != 22 ? ":" + hopPort : "") },
-                    { "keyFile", SecretFile(home, SecretName(Json.Get(hop, "key"))) }, { "hostKey", Json.Str(hop, "hostKey") } };
+                    { "keyFile", RouteFile(manifest, server, "hop", "keyFile") }, { "hostKey", Json.Str(hop, "hostKey") } };
             }
             return request;
         }
@@ -366,7 +394,7 @@ namespace RemoteAgents.Launcher
             return new Dictionary<string, object> { { "label", label }, { "serverUrl", Origin(api) }, { "webappUrl", Origin(web) }, { "expectedAccount", "" } };
         }
         internal static string IpCheckUrl(Dictionary<string, object> p, Dictionary<string, object> config)
-        { return Json.Text(Json.Map(Json.Get(p, "proxyOut")), "ipCheckUrl", Json.Text(Json.Map(Json.Get(config, "proxy")), "ipCheckUrl", Json.Str(Json.Map(Json.Get(p, "vpn")), "checkUrl"))); }
+        { return Json.Text(Json.Map(Json.Get(p, "proxyOut")), "checkUrl", Json.Text(Json.Map(Json.Get(config, "proxy")), "ipCheckUrl", Json.Str(Json.Map(Json.Get(p, "vpn")), "checkUrl"))); }
         internal static Dictionary<string, object> Proxy(Dictionary<string, object> p, Dictionary<string, object> config)
         {
             var x = Json.Map(Json.Get(p, "proxyOut")); int port = Json.Int(x, "port", 0);
@@ -378,9 +406,11 @@ namespace RemoteAgents.Launcher
         {
             var have = Json.Array(Json.Get(Json.Map(Json.Get(config, "lan")), "connections")).Select(r => Json.Str(Json.Map(r), "name")).ToArray();
             var wanted = Json.Array(Json.Get(p, "lan")).Select(Json.Map).ToArray();
+            var manifest = Materialized(home);
             var add = wanted.Where(l => !have.Contains(Json.Str(l, "name"))).Select(l => new Dictionary<string, object> {
-                { "kind", Json.Text(l, "kind", "openvpn") }, { "name", Json.Str(l, "name") }, { "file", SecretFile(home, SecretName(Json.Get(l, "ovpn"))) },
-                { "host", Json.Str(l, "host") }, { "port", Json.Str(l, "port") }, { "ipCheckUrl", IpCheckUrl(p, config) } }).ToArray();
+                { "kind", Json.Text(l, "kind", "openvpn") }, { "name", Json.Str(l, "name") }, { "file", LanFile(manifest, Json.Str(l, "name")) },
+                { "host", Json.Str(l, "host") }, { "port", Json.Int(l, "port", 0) > 0 ? Json.Int(l, "port", 0).ToString(CultureInfo.InvariantCulture) : "" },
+                { "ipCheckUrl", Json.Text(l, "checkUrl", IpCheckUrl(p, config)) } }).ToArray();
             return Tuple.Create(add, have.Where(n => !wanted.Any(l => Json.Str(l, "name") == n)).ToArray());
         }
         internal static string Origin(string text)
@@ -620,7 +650,13 @@ namespace RemoteAgents.Launcher
             return ConfigPlan.Build(desired, ConfigProfile.Applied(home), ConfigPlan.Ready(inspect, new Configuration(home).Data, desired));
         }
         bool Available(string name) { string v; return (secrets.TryGetValue(name, out v) && v.Length > 0 && v != ConfigAi.Hidden) || SecretVault.Has(home, name); }
-        string Value(object field) { string n = ConfigRequests.SecretName(field), v; return n.Length > 0 && secrets.TryGetValue(n, out v) && v != ConfigAi.Hidden ? v : ""; }
+        // Pasted value first, then the vault (settings reopened later: root/hop/proxy/LAN passwords live only there).
+        string Value(object field)
+        {
+            string n = ConfigRequests.SecretName(field), v; if (n.Length == 0) return "";
+            if (secrets.TryGetValue(n, out v) && v.Length > 0 && v != ConfigAi.Hidden) return v;
+            try { return SecretVault.Get(home, n) ?? ""; } catch (InvalidDataException) { return ""; }
+        }
         string Hint(string name, Dictionary<string, object> p)
         {
             string h; if (hints.TryGetValue(name, out h) && h.Length > 0) return h;
@@ -673,13 +709,15 @@ namespace RemoteAgents.Launcher
                 case ConfigSections.Bridge: o = SectionOutcome.From(run("Bridge", ConfigRequests.Bridge(p, config)), "Мост проверен ✓"); break;
                 case ConfigSections.Account: o = Account(p, config, run, ref hash); break;
                 case ConfigSections.Disk: o = SectionOutcome.From(run("Disk", ConfigRequests.Disk(p, DiskBase(), DiskSelection())), "Папки подключены; передача файлов продолжается"); break;
-                case ConfigSections.Vpn: o = SectionOutcome.From(run("Vpn", ConfigRequests.Vpn(p)), "VPN настроен"); break;
+                case ConfigSections.Vpn: o = SectionOutcome.From(run("Vpn", ConfigRequests.Vpn(p)), "VPN настроен", true); break;
                 case ConfigSections.Proxy: o = Proxy(p, config, run); break;
                 case ConfigSections.Lan: o = Lan(p, config, run); break;
                 default: throw new ArgumentException("Неизвестный раздел");
             }
+            // Server may have replaced root's password by its own key in the profile (PromoteServerKey).
+            if (o.Ok && s == ConfigSections.Server) hash = ConfigSections.Hash(ConfigProfile.Load(home), s);
             if (o.Ok) ConfigProfile.MarkApplied(home, s, hash); else if (!o.Pending) ConfigProfile.MarkApplied(home, s, null);
-            if (o.Pending && o.Operation.Length > 0) Track(o.Operation, s == ConfigSections.Account && o.Operation == "happier");
+            if (o.Pending && SectionOutcome.ServerOperation(o.Operation)) Track(o.Operation, s == ConfigSections.Account && o.Operation == "happier");
             return o;
         }
         SectionOutcome Server(Dictionary<string, object> p, Func<string, object, Dictionary<string, object>> run)
@@ -694,8 +732,30 @@ namespace RemoteAgents.Launcher
                 var result = run("Server", request);
                 services = Json.Map(Json.Get(result, "services"));
                 foreach (string op in new[] { "disk", "happier" }) if (Json.Str(Json.Map(Json.Get(Json.Map(Json.Get(result, "operations")), op)), "state") == "running") Track(op, false);
+                PromoteServerKey(server);
                 return SectionOutcome.From(result, "Сервер подключён ✓");
             }
+        }
+        // Clean VPS (docs/CONFIG.md, server.rootPassword): after a proved Server the program logs in with the key it
+        // installed for the worker user. That key goes into the vault and the profile, the root password is cleared,
+        // so «Сохранить конфиг в файл» restores access without the hosting password.
+        void PromoteServerKey(Dictionary<string, object> server)
+        {
+            string root = ConfigRequests.SecretName(Json.Get(server, "rootPassword"));
+            if (root.Length == 0 || ConfigRequests.SecretName(Json.Get(server, "key")).Length > 0) return;
+            try {
+                var ssh = Json.Read(Json.Str(Json.Map(Json.Get(new Configuration(home).Data, "transport")), "profilePath"));
+                string keyPath = Json.Str(ssh, "keyPath"), login = Json.Str(ssh, "login");
+                if (keyPath.Length == 0 || login.Length == 0 || login == "root" || !File.Exists(keyPath) || Json.Str(ssh, "serverAddress") != Json.Str(server, "address")) return;
+                SecretVault.Set(home, "server-key", Files.LF(File.ReadAllText(keyPath)));
+                ConfigProfile.Update(home, pr => {
+                    var sv = new Dictionary<string, object>(Json.Map(Json.Get(pr, "server")));
+                    sv.Remove("rootPassword"); sv["login"] = login; sv["key"] = new Dictionary<string, object> { { "secret", "server-key" } }; pr["server"] = sv;
+                });
+                SecretVault.Set(home, root, "");
+                SecretVault.Materialize(home);
+                Log("Сервер: пароль root больше не нужен — программа входит своим ключом; он сохранится в «Сохранить конфиг в файл».");
+            } catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException) { Log("Сервер: ключ для восстановления не сохранён (" + e.Message + "). Пароль root пока остаётся в секретах."); }
         }
         SectionOutcome Account(Dictionary<string, object> p, Dictionary<string, object> config, Func<string, object, Dictionary<string, object>> run, ref string hash)
         {
@@ -783,7 +843,7 @@ namespace RemoteAgents.Launcher
         internal async Task FollowPending(CancellationToken token)
         {
             while (!token.IsCancellationRequested) {
-                var waiting = Outcomes.Where(o => o.Value.Pending && o.Value.Operation.Length > 0).ToArray();
+                var waiting = Outcomes.Where(o => o.Value.Pending && SectionOutcome.ServerOperation(o.Value.Operation)).ToArray();
                 if (waiting.Length == 0) return;
                 await Task.Delay(12000, token);
                 Dictionary<string, object> status;

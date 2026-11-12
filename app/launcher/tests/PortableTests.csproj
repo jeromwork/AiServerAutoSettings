@@ -10,6 +10,11 @@
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <NoWarn>SYSLIB0014;SYSLIB0057;CA1416</NoWarn>
   </PropertyGroup>
+  <!-- A different entry point must not reuse the other build's output (StartupObject alone does not trigger a rebuild). -->
+  <PropertyGroup Condition="'$(ConfigTests)' == 'true'">
+    <IntermediateOutputPath>obj/$(Configuration)/config-tests/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/config-tests/</OutputPath>
+  </PropertyGroup>
   <ItemGroup>
     <Compile Include="PortableJson.cs" />
     <Compile Include="ConfigBundleTests.cs" />

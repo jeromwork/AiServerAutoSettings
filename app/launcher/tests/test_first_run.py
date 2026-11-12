@@ -83,7 +83,7 @@ class FirstRunTests(unittest.TestCase):
     def test_invitations_removed(self):
         for name in ['Program.cs', 'TrayContext.cs', 'SetupWizard.cs', 'EntryPoint.cs', 'UpgradeInstaller.cs', 'Data.cs']:
             text = source(name)
-            for word in ['Invitation', 'InviteWindow', 'InviteHop', 'RefreshPackage', 'rainvite', 'invite-hop']:
+            for word in ['Invitation', 'InviteWindow', 'InviteHop', 'HopRelay', 'RefreshPackage', 'rainvite', 'invite-hop']:
                 self.assertNotIn(word, text, name + ': ' + word)
 
 

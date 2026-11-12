@@ -198,7 +198,7 @@ namespace RemoteAgents.Launcher
             if(actionBusy || busy || closing || DateTime.UtcNow<nextSync)return;
             actionBusy=true;nextSync=DateTime.UtcNow.AddMinutes(5);
             try{
-                var result=await Task.Run(()=>ServerOperations.Invoke(home,engine.Folder(engine.Current),"Sync",new {askpassExecutable=Program.Exe},stop.Token));
+                var result=await Task.Run(()=>ServerOperations.Invoke(home,engine.Folder(engine.Current),"ConfigSync",new {askpassExecutable=Program.Exe},stop.Token));
                 log.Write(Json.Bool(result,"changed")?"config.sync.updated":"config.sync.current");
             }catch(OperationCanceledException){}catch{log.Write("config.sync.unavailable");}
             finally{actionBusy=false;ReloadSettings();}

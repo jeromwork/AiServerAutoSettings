@@ -32,7 +32,6 @@ namespace RemoteAgents.Launcher
         [STAThread] internal static int Run(string[] args)
         {
             // Before askpass: ssh may carry a password pipe in its environment while running this relay as ProxyCommand.
-            if(args.Length>0 && args[0]=="--hop-relay")return HopRelay.Run(args);
             if(args.Length>0 && args[0]=="--proxy-connect")return ProxyRelay.Run(args);
             string passwordPipe=Environment.GetEnvironmentVariable("REMOTEAGENTS_PASSWORD_PIPE");
             if(!string.IsNullOrEmpty(passwordPipe))return PasswordRelay.Answer(passwordPipe);
@@ -46,6 +45,13 @@ namespace RemoteAgents.Launcher
                 test = Option(args, "--selftest-update");
                 if (test != null) { AttachConsole(0xFFFFFFFF); return UpdateSelfTests.Run(Path.GetFullPath(test)); }
                 string home = Path.GetFullPath(Option(args, "--home") ?? DefaultHome);
+                // Agent commands (docs/CONFIG.md «Ввод без раскрытия агенту»): before single-instance, the tray may run.
+                // Output is only «сохранено»/«отменено»/names, never a value.
+                if (args.Length > 0 && args[0] == "secret") {
+                    AttachConsole(0xFFFFFFFF); Directory.CreateDirectory(home);
+                    var rest = new System.Collections.Generic.List<string>(args); int at = rest.IndexOf("--home"); if (at > 0 && at + 1 < rest.Count) rest.RemoveRange(at, 2);
+                    return SecretCommand.Run(home, rest.ToArray());
+                }
                 Directory.CreateDirectory(home); log = new Journal(home); log.Write("launcher.start");
                 if (args.Contains("--uninstall")) { if (Product.IsVpn) FirstInstall.UninstallVpn(home); else Uninstall.Run(home); log.Write("uninstall.ok"); return 0; }
                 var sid = WindowsIdentity.GetCurrent().User; string name = InstanceName(home, sid);

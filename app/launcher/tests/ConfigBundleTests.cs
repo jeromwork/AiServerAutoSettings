@@ -76,6 +76,23 @@ namespace RemoteAgents.Launcher
             var badProtected = Json.Map(Json.Parse(encrypted)); Json.Map(badProtected["secrets"])["server-key"] = "plain";
             Reject(() => ConfigBundle.Parse(Json.Encode(badProtected)), "mixed protected/plain");
             // Independent PBKDF2/AES/HMAC fixture generated with Python hashlib + cryptography.
+            // Shared vector of docs/CONFIG-SERVER.md «Тестовый вектор enc1» (server/remoteagents_config.py produces it).
+            var vector = ConfigBundle.Parse("{\"kind\":\"remoteagents-config\",\"schema\":1,\"server\":{\"key\":{\"secret\":\"server-key\"}},\"secrets\":{\"protected\":\"master-password\",\"kdf\":{\"name\":\"pbkdf2-sha256\",\"iterations\":200000,\"salt\":\"AAECAwQFBgcICQoLDA0ODw==\"}," +
+                "\"check\":\"enc1:EBESExQVFhcYGRobHB0eH5S/AYvjmvqbyp4eatsIP0ESDucdw0ufuFBNWskJNZdj/a/PyROkWqohaJO+d8dnCA==\"," +
+                "\"server-key\":\"enc1:EBESExQVFhcYGRobHB0eH9EATN4mI2yZF1iffFippgsKu5D1MyvAG2NfKVaGcnHzvCO5vWsIX2yfsu90ejzi8negWZF8qpwxkbFOMwPwBMnei8w8zX8GwmtQ4CNs3ZfL\"}}");
+            Check(ConfigBundle.Unlock(vector, "Мастер-пароль 1").Secrets["server-key"] == "секрет\nвторая строка", "enc1 vector of docs/CONFIG-SERVER.md (Python/OpenSSL/.NET) decrypts");
+            Reject(() => ConfigBundle.Unlock(vector, "Мастер-пароль 2"), "enc1 vector: wrong master password");
+            // Shape printed by `remoteagents config export` (docs/CONFIG-SERVER.md): catalog, hop/vpn-hop/vpn-entry names,
+            // disk without base, happier without key, server without rootPassword, JSON text values.
+            var exported = ConfigBundle.Parse("{\"kind\":\"remoteagents-config\",\"schema\":1,\"device\":{\"name\":\"Ноутбук сына\"}," +
+                "\"server\":{\"address\":\"203.0.113.10\",\"port\":22,\"login\":\"worker\",\"hostKeys\":[\"ssh-ed25519 AAAA\"],\"key\":{\"secret\":\"server-key\"}," +
+                "\"routes\":[{\"kind\":\"direct\"},{\"kind\":\"proxy\",\"proxy\":{\"type\":\"socks\",\"server\":\"127.0.0.1\",\"port\":10808}}," +
+                "{\"kind\":\"hop\",\"hop\":{\"host\":\"relay.example.invalid\",\"port\":22,\"user\":\"relay\",\"hostKey\":\"ssh-ed25519 AAAA\",\"key\":{\"secret\":\"hop-relay-key\"},\"password\":{\"secret\":\"hop-relay-password\"}}}]}," +
+                "\"vpn\":{\"enabled\":true,\"checkUrl\":\"https://check.example.invalid/\",\"dnsServer\":\"192.0.2.53\",\"bootstrap\":{\"catalog\":{\"schema\":1,\"entries\":[{\"name\":\"Entry1\",\"ssh\":\"entry1\"}],\"hops\":[{\"name\":\"vhop\",\"ssh\":\"vhop\",\"hostKey\":[\"ssh-ed25519 AAAA\"]}],\"relays\":[],\"cdn\":[]}," +
+                "\"channel\":{\"secret\":\"vpn-channel\"},\"entries\":{\"Entry1\":{\"secret\":\"vpn-entry-entry1\"}},\"hops\":{\"vhop\":{\"host\":\"127.0.0.1\",\"port\":2222,\"user\":\"hopuser\",\"key\":{\"secret\":\"vpn-hop-vhop\"}}}}}," +
+                "\"happier\":{\"mode\":\"same\",\"label\":\"Основной\"},\"bridge\":{\"enabled\":true,\"allowShell\":false},\"disk\":{\"folders\":[\"Проект\",\"Проект/docs\"]}," +
+                "\"secrets\":{\"server-key\":\"K\",\"hop-relay-key\":\"H\",\"hop-relay-password\":\"P\",\"vpn-channel\":\"{\\\"outbounds\\\":[]}\",\"vpn-entry-entry1\":\"{\\\"server\\\":\\\"e\\\"}\",\"vpn-hop-vhop\":\"V\"}}".Replace("\n", "\r\n"));
+            Check(exported.Missing.Length == 0 && Json.Map(Json.Get(Json.Map(Json.Get(exported.Profile, "vpn")), "bootstrap")).ContainsKey("catalog"), "server export shape (catalog, hop/vpn names, JSON text values) is accepted");
             var interop = ConfigBundle.Parse("{\"kind\":\"remoteagents-config\",\"schema\":1,\"server\":{\"key\":{\"secret\":\"server-key\"}},\"secrets\":{\"protected\":\"master-password\",\"kdf\":{\"name\":\"pbkdf2-sha256\",\"iterations\":200000,\"salt\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\"},\"check\":\"enc1:AAECAwQFBgcICQoLDA0ODxDf5ZSnK4rourEgLtBAHFjzLCoRAhgTD+rS5FqlAEve+Ksk7xocQcpH4kbgYFvw6Q==\",\"server-key\":\"enc1:EBESExQVFhcYGRobHB0eHyJI8g0R/TIwsFE14BZyX2wGtchuCE50mSqa/T3/JSZbfimgnDai2DDKLz2i8pV2UhyFlSKUxze5r42EgfJ+S/8=\"}}");
             Check(ConfigBundle.Unlock(interop,"master-interop").Secrets["server-key"] == "interop-line\r\nsecond", "Python enc1 interoperability");
             string home = Path.Combine(Path.GetTempPath(), "ra-config-a-" + Guid.NewGuid().ToString("N"));
@@ -144,7 +161,9 @@ namespace RemoteAgents.Launcher
                 Reject(() => SecretVault.Materialize(home), "invalid snapshot preflight");
                 Check(File.ReadAllText(Path.Combine(home,"secrets","channel.json")) == priorChannel, "failed preflight writes nothing");
                 SecretVault.Set(home,"vpn-channel",Json.Str(Json.Map(material["secrets"]),"vpn-channel"));
-                SecretVault.Set(home,"hop-password", ""); Reject(() => SecretVault.Materialize(home), "missing secret cannot reuse stale files");
+                SecretVault.Set(home,"hop-password", ""); SecretVault.Materialize(home);
+                var withoutPassword = Json.Read(SecretVault.MaterializedPath(home));
+                Check(Json.Strings(withoutPassword["missing"]).Contains("hop-password") && !Json.Encode(Json.Get(withoutPassword,"routes")).Contains("passwordFile"), "missing secret is listed, its stale file is not referenced");
                 SecretVault.Set(home,"hop-password","HOP-PASSWORD");
                 string runtimePath = Path.Combine(home,"ssh-profiles","current","ssh-transport.json"), keyTarget = Path.Combine(home,"ssh-profiles","current","id_ed25519");
                 Json.Write(runtimePath,ConfigBundle.D("serverAddress","other.example.invalid","login","worker","keyPath",keyTarget,"arguments",new[]{"-p","2222"}));

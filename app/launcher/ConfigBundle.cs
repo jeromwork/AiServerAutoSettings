@@ -73,7 +73,12 @@ namespace RemoteAgents.Launcher
                 D("if", D("properties", D("kind", D("const", "proxy"))), "then", D("required", new[]{"proxy"})),
                 D("if", D("properties", D("kind", D("const", "hop"))), "then", D("required", new[]{"hop"}))
             };
-            var bootstrap = O(D("channel", Ref("vpn-channel"), "entries", Named(Ref(), "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$"), "hops", Named(Hop(), "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$")));
+            // Public transport catalog as printed by `remoteagents config export` (server-transport-catalog.py, schema 1).
+            // Only its shape is checked here; Wizard.ps1 Assert-WizardCatalog validates every row before use.
+            var rows = D("type", "array", "items", D("type", "object", "maxProperties", 64), "maxItems", 256);
+            var catalog = D("type", "object", "properties", D("schema", D("const", 1), "entries", rows, "hops", rows, "relays", rows, "cdn", rows),
+                "additionalProperties", false, "required", new[]{"schema"});
+            var bootstrap = O(D("catalog", catalog, "channel", Ref("vpn-channel"), "entries", Named(Ref(), "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$"), "hops", Named(Hop(), "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$")));
             var component = O(D("enabled", B()));
             var props = D(
                 "kind", D("const", "remoteagents-config"), "schema", D("const", 1),

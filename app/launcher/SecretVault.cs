@@ -150,9 +150,13 @@ namespace RemoteAgents.Launcher
             using (var lease = new Lease(home)) {
                 var settings = ConfigBundle.ReadSettings(home);
                 var profile = ConfigBundle.CurrentProfile(home, settings); var values = Load(home);
-                foreach (var reference in ConfigBundle.References(profile)) if (Resolve(values, reference) == null) throw ConfigBundle.Bad("Не задан секрет: " + Json.Str(reference, "secret"));
+                // An empty reference produces no file and no manifest path, so nothing stale is ever used in its place.
+                // It is listed as «missing»: the section that needs it fails with a clear reason, the others still work
+                // (the server needs its key OR root's password; a new Happier account creates its key itself).
+                var missing = ConfigBundle.References(profile).Where(r => Resolve(values, r) == null).Select(r => Json.Str(r, "secret")).Distinct().OrderBy(n => n, StringComparer.Ordinal).ToArray();
                 var files = new Dictionary<string, string>(Windows ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
                 var manifest = ConfigBundle.D("schema", 1);
+                if (missing.Length > 0) manifest["missing"] = missing;
                 string secretDir = Path.Combine(Path.GetFullPath(home), "secrets");
                 Action<string, string> add = (path, content) => {
                     SafePath(home, path);
