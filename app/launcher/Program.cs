@@ -32,7 +32,7 @@ namespace RemoteAgents.Launcher
         [STAThread] internal static int Run(string[] args)
         {
             // Before askpass: ssh may carry a password pipe in its environment while running this relay as ProxyCommand.
-            if(args.Length>0 && args[0]=="--invite-hop")return InviteHop.Run(args);
+            if(args.Length>0 && args[0]=="--hop-relay")return HopRelay.Run(args);
             if(args.Length>0 && args[0]=="--proxy-connect")return ProxyRelay.Run(args);
             string passwordPipe=Environment.GetEnvironmentVariable("REMOTEAGENTS_PASSWORD_PIPE");
             if(!string.IsNullOrEmpty(passwordPipe))return PasswordRelay.Answer(passwordPipe);
@@ -48,21 +48,11 @@ namespace RemoteAgents.Launcher
                 string home = Path.GetFullPath(Option(args, "--home") ?? DefaultHome);
                 Directory.CreateDirectory(home); log = new Journal(home); log.Write("launcher.start");
                 if (args.Contains("--uninstall")) { if (Product.IsVpn) FirstInstall.UninstallVpn(home); else Uninstall.Run(home); log.Write("uninstall.ok"); return 0; }
-                System.Collections.Generic.Dictionary<string,byte[]> refreshFiles=null;
-                if(!Product.IsVpn && !args.Contains("--tray") && !args.Contains("--exit")){
-                    var overlay=InvitationOverlay.Read(Exe);
-                    if(overlay!=null && new Invitation(Json.Map(Json.Parse(System.Text.Encoding.UTF8.GetString(overlay["invite.rainvite"])))).IsRefresh)refreshFiles=overlay;
-                }
-                if(refreshFiles==null && !Product.IsVpn && !args.Contains("--exit") && !args.Contains("--tray")) {
-                    try{bool embedded=InvitationOverlay.Stage(home,Exe);
-                        string invitation=embedded?null:Invitation.Find(args,Path.GetDirectoryName(Exe));
-                        if(embedded)args=args.Concat(new[]{"--setup-check"}).ToArray();
-                        if(invitation!=null){Invitation.Stage(home,invitation);args=args.Concat(new[]{"--setup-check"}).ToArray();}
-                    }catch(Exception e){MessageBox.Show(e.Message,"RemoteAgents — приглашение");return 1;}
-                }
                 var sid = WindowsIdentity.GetCurrent().User; string name = InstanceName(home, sid);
                 var security = new MutexSecurity(); security.AddAccessRule(new MutexAccessRule(sid, MutexRights.FullControl, AccessControlType.Allow));
                 bool created, owned = false, restart = false;string firstInstallSource=null;
+                // A person started the EXE (not autostart/IPC/service commands): show that it runs.
+                bool interactive = !args.Any(a => a.StartsWith("--", StringComparison.Ordinal));
                 using (var mutex = new Mutex(false, "Global\\" + name, out created, security)) {
                     // Serialize downloaded installers independently of the running tray's mutex.
                     using (var installer = new Mutex(false, "Global\\" + name + ".Install", out created, security)) {
@@ -71,7 +61,7 @@ namespace RemoteAgents.Launcher
                         Action<string, bool> launch = (path, after) => {
                             if (owned) { mutex.ReleaseMutex(); owned = false; }
                             installer.ReleaseMutex(); installOwned = false;
-                            StartLauncher(path, home, after);
+                            StartLauncher(path, home, after, interactive);
                         };
                         Action firstRun = () => {
                             if (owned) { mutex.ReleaseMutex(); owned = false; }
@@ -80,12 +70,6 @@ namespace RemoteAgents.Launcher
                         try {
                             owned = WaitMutex(mutex, 0);
                             string target = Path.Combine(home, Product.ExeName);
-                            if(refreshFiles!=null){
-                                if(!File.Exists(target))throw new IOException("Этот компьютер ещё не подключён. Попросите приглашение для регистрации.");
-                                if(!owned){StopInstalled(name,target,home,mutex,log);owned=true;}
-                                try{RefreshPackage.Apply(home,refreshFiles);}
-                                catch(Exception e){launch(target,false);MessageBox.Show(e.Message,"RemoteAgents — обновление связи");return 1;}
-                            }
                             bool external = !Path.GetFullPath(Exe).Equals(target, StringComparison.OrdinalIgnoreCase);
                             bool command = args.Any(a => new[] { "--exit", "--uninstall", "--logs", "--rollback", "--restart-components", "--check-updates", "--settings" }.Contains(a));
                             // --tray with --home is also the isolated development/smoke entry point.
@@ -103,7 +87,8 @@ namespace RemoteAgents.Launcher
                                     int comparison = File.Exists(target) ? UpgradeInstaller.Compare(Version, bundle, FileVersionInfo.GetVersionInfo(target).FileVersion, engine.Current) : 1;
                                     if (comparison == 0) {
                                         if (args.Contains("--install") || (!args.Contains("--home") && FirstInstall.Required(home))) { firstRun(); return 0; }
-                                        if (!owned) Forward(name, new[] { "--setup-check" }); else launch(target, false);
+                                        if (!owned) Forward(name, Started(new[] { "--setup-check" }, interactive));
+                                        else if (!interactive || FirstInstall.Required(home) || StartWindow.Confirm()) launch(target, false);
                                         return 0;
                                     }
                                     if (comparison < 0 && MessageBox.Show("Запущена более старая версия RemoteAgents. Выполнить откат лаунчера и бандла?", "RemoteAgents — откат", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return 0;
@@ -116,12 +101,17 @@ namespace RemoteAgents.Launcher
                                 } finally { if (File.Exists(zip)) File.Delete(zip); }
                             }
                             if (firstInstallSource==null && (args.Contains("--install") || (!external && args.Length == 0 && FirstInstall.Required(home)))) { firstRun(); return 0; }
-                            if (!owned) { Forward(name, args.Contains("--uninstall") ? new[] { "--exit" } : args.Length == 0 ? new[] { "--setup-check" } : args); log.Write("ipc.forward.ok"); return 0; }
+                            if (!owned) { Forward(name, args.Contains("--uninstall") ? new[] { "--exit" } : args.Length == 0 ? Started(new[] { "--setup-check" }, interactive) : args); log.Write("ipc.forward.ok"); return 0; }
                         } finally { if (installOwned) installer.ReleaseMutex(); }
                     }
                     try {
                         if (args.Contains("--uninstall") || args.Contains("--exit")) return 0;
                         Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
+                        // Configured and started by hand: one small «Включить» window, never at Windows sign-in (--tray).
+                        if (interactive && firstInstallSource == null && !FirstInstall.Required(home)) {
+                            if (!StartWindow.Confirm()) { log.Write("launcher.start.declined"); return 0; }
+                            args = Started(args, true);
+                        }
                         using (var context = new TrayContext(home, log, name, sid, args, firstInstallSource)) { Application.Run(context); restart = context.RestartRequested; }
                     } finally { if (owned) { mutex.ReleaseMutex(); owned = false; } }
                 }
@@ -148,8 +138,10 @@ namespace RemoteAgents.Launcher
             }
             log.Write("install.shutdown.forced"); if (!WaitMutex(mutex, 10000)) throw new IOException("Экземпляр не завершился");
         }
-        public static void StartLauncher(string exe, string home, bool afterUpdate)
-        { Process.Start(new ProcessStartInfo(exe, "--tray --home " + Files.Quote(home) + (afterUpdate ? " --after-update" : "")) { UseShellExecute = false, CreateNoWindow = true }); }
+        public static void StartLauncher(string exe, string home, bool afterUpdate, bool started = false)
+        { Process.Start(new ProcessStartInfo(exe, "--tray --home " + Files.Quote(home) + (afterUpdate ? " --after-update" : "") + (started ? " --started" : "")) { UseShellExecute = false, CreateNoWindow = true }); }
+        // «--started»: the tray shows «RemoteAgents работает, значок в трее» so people see it launched.
+        static string[] Started(string[] args, bool interactive) { return interactive && !args.Contains("--started") ? args.Concat(new[] { "--started" }).ToArray() : args; }
         [DllImport("kernel32.dll")] static extern bool AttachConsole(uint processId);
         internal static System.Collections.Generic.Dictionary<string, object> Forward(string name, string[] args)
         {

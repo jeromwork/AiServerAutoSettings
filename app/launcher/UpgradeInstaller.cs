@@ -68,7 +68,7 @@ namespace RemoteAgents.Launcher
         public static void ReplaceImage(string source, string target)
         {
             string tmp = target + ".install.tmp", retired = target + ".retired";
-            InvitationOverlay.CopyBase(source, tmp);
+            File.Copy(source, tmp, true);
             using (var flush = new FileStream(tmp, FileMode.Open, FileAccess.Write, FileShare.Read)) flush.Flush(true);
             try {
                 // Windows permits renaming an executing image; replacing it directly may be denied.

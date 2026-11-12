@@ -70,16 +70,6 @@ namespace RemoteAgents.Launcher
         // One wizard action without UI (tray): «Operation» is a single short status call, «ResumeAccount»
         // connects a saved key once Happier is installed. Budgets: WizardStep.Timeout.
         internal static Dictionary<string, object> Invoke(string home, string bundle, string action, object request, CancellationToken token)
-        {
-            string requestFile = Path.Combine(home, "state", "wizard-request-" + Guid.NewGuid().ToString("N") + ".json"), output = requestFile + ".out";
-            try {
-                Json.Write(requestFile, request);
-                var args = new[] { "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", Path.Combine(bundle, "build", "Wizard.ps1"), "-Home", home, "-Action", action, "-RequestFile", requestFile };
-                int code = External.Run(Files.Executable("powershell.exe"), args, bundle, output, WizardStep.Timeout(action), 4 * 1024 * 1024, token);
-                var response = Json.Map(Json.Parse(Files.LF(External.ReadPowerShellOutput(output))));
-                if (code != 0 || !Json.Bool(response, "ok")) throw new IOException(Json.Text(response, "reason", "Шаг не подтверждён"));
-                return Json.Map(Json.Get(response, "result"));
-            } finally { if (File.Exists(requestFile)) File.Delete(requestFile); if (File.Exists(output)) File.Delete(output); }
-        }
+        { return WizardRunner.Run(home, bundle, action, request, token); }
     }
 }

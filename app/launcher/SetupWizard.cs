@@ -42,9 +42,9 @@ namespace RemoteAgents.Launcher
         DataGridView nodes; TreeView tree; ListBox accounts; Label inventory, accountHint, summary, diskWarning;
         string originalAddress, originalLogin, lanCommand = "";
         Dictionary<string, object> expectedCatalog; Dictionary<string, object>[] accountRows = new Dictionary<string, object>[0];
-        DiskTreeSelection selection = new DiskTreeSelection(new string[0]);
+        DiskFolderTree folders;
         CancellationTokenSource stepCancellation; bool closingRequested;
-        bool busy, changingTree, treeLoaded, catalogLoaded, initializing;
+        bool busy, catalogLoaded, initializing;
 
         protected override void Dispose(bool disposing)
         {if(disposing){operationTimer.Dispose();pollCancellation.Dispose();foreach(var panel in details)if(panel!=null)panel.Dispose();journal.Dispose();}base.Dispose(disposing);}
@@ -120,7 +120,7 @@ namespace RemoteAgents.Launcher
                 }
             }
             nodes.CellValueChanged+=(a,b)=>Changed(1);nodes.UserAddedRow+=(a,b)=>Changed(1);
-            tree.AfterCheck+=(a,b)=> {if(!changingTree)Changed(2);};
+            folders.SelectionChanged+=()=>Changed(2);
             address.TextChanged+=(a,b)=>InvalidateServer();login.TextChanged+=(a,b)=>InvalidateServer();
             steps.SectionRequested+=i=> {if(WizardStep.CanOpen(i,currentPage,first,WizardStep.Passable(applied,waiting.Keys),order))SelectPage(i);else{steps.Section=currentPage;Append("Сначала завершите или пропустите раздел «"+titles[currentPage]+"»");}};
             back.Click+=(a,b)=>Navigate(-1);
@@ -226,14 +226,6 @@ namespace RemoteAgents.Launcher
             password.Enabled=host.Length==0;originalAddress=host;originalLogin=user;
             installMissing=Check(0,"Установить недостающие службы сервера",242,true);
             inventory=Hint(0,"Root используется только для создания рабочего пользователя remoteagents.",50,90);Technical(0,inventory);
-            if(!Product.IsVpn){
-                var inviteLink=new LinkLabel {Left=16,Top=478,Width=560,Height=26,Text="Открыть приглашение… (можно перетащить или вставить путь Ctrl+V)"};sections[0].Controls.Add(inviteLink);
-                Action<string> openInvite=path=>{try{Invitation.Stage(home,path.Trim('"'));InviteWindow.Display(home,bundle);if(!Invitation.Pending(home)){DialogResult=DialogResult.OK;Close();}}catch(Exception e){Append(e.Message);}};
-                inviteLink.LinkClicked+=(a,b)=>{using(var d=new OpenFileDialog {Filter="Приглашение|*.rainvite",CheckFileExists=true})if(d.ShowDialog(this)==DialogResult.OK)openInvite(d.FileName);};
-                AllowDrop=true;DragEnter+=(a,b)=>{if(b.Data.GetDataPresent(DataFormats.FileDrop))b.Effect=DragDropEffects.Copy;};
-                DragDrop+=(a,b)=>{var paths=b.Data.GetData(DataFormats.FileDrop) as string[];if(!busy && paths!=null && paths.Length==1 && paths[0].EndsWith(".rainvite",StringComparison.OrdinalIgnoreCase))openInvite(paths[0]);};
-                KeyPreview=true;KeyDown+=(a,b)=>{if(!busy && steps.Section==0 && b.Control && b.KeyCode==Keys.V && Clipboard.ContainsText()){string path=Clipboard.GetText().Trim().Trim('"');if(path.EndsWith(".rainvite",StringComparison.OrdinalIgnoreCase) && File.Exists(path)){b.SuppressKeyPress=true;openInvite(path);}}};
-            }
             ServerRoutes(config);
             More(0,392);
         }
@@ -276,7 +268,7 @@ namespace RemoteAgents.Launcher
         {
             if(initializing || busy)return;serverChanged=address.Text.Trim()!=originalAddress || login.Text.Trim()!=originalLogin;
             password.Enabled=true;password.Clear();
-            if(serverChanged){for(int i=1;i<6;i++){applied[i]=false;results[i]="Нужно проверить для нового сервера";}catalogLoaded=treeLoaded=false;accountRows=new Dictionary<string,object>[0];
+            if(serverChanged){for(int i=1;i<6;i++){applied[i]=false;results[i]="Нужно проверить для нового сервера";}catalogLoaded=folders.Loaded=false;accountRows=new Dictionary<string,object>[0];
                 api.Clear();web.Clear();accountKey.Clear();accounts.Items.Clear();lanCommand=proxyCommand="";applied[6]=applied[8]=false;results[6]=results[8]="Нужно проверить для нового сервера";expectedCatalog=null;nodes.Rows.Clear();
                 RefreshDiskWarning();RefreshSummary();}
         }
@@ -294,16 +286,15 @@ namespace RemoteAgents.Launcher
         {
             string value=Files.ReadLine(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"RemoteDisk","base.txt"));if(value.Length==0)value=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),"Disk");
             Question(2,"Какие проекты хранить на этом компьютере?");diskBase=Field(2,"Папка Disk",80,value);diskBase.ReadOnly=true;diskBase.Width=450;
-            Button(2,"Изменить…",100,()=>{using(var d=new FolderBrowserDialog {SelectedPath=diskBase.Text})if(d.ShowDialog(this)==DialogResult.OK){diskBase.Text=d.SelectedPath;treeLoaded=false;}return Task.FromResult(0);},480,115);
+            Button(2,"Изменить…",100,()=>{using(var d=new FolderBrowserDialog {SelectedPath=diskBase.Text})if(d.ShowDialog(this)==DialogResult.OK){diskBase.Text=d.SelectedPath;folders.Loaded=false;}return Task.FromResult(0);},480,115);
             tree=new TreeView {Left=16,Top=135,Width=580,Height=150,CheckBoxes=true};sections[2].Controls.Add(tree);
+            folders=new DiskFolderTree(tree,path=>Run("DiskTree",new { @base=diskBase.Text.Trim(),path }),a=>Guard(a),()=>busy,Append);
             diskWarning=Hint(2,"",135,66);diskWarning.Visible=false;
             var reconnect=Button(2,"Отключить и подключить к новому",208,()=>{if(!reconnectDisk){reconnectDisk=true;diskBase.Text=diskBase.Text+"-"+DateTime.Now.ToString("yyyyMMddHHmmss");}RefreshDiskWarning();return Task.FromResult(0);});reconnect.Tag="reconnect";reconnect.Visible=false;
             var keep=Button(2,"Остановить синхронизацию, файлы оставить",245,()=>Skip("Disk",2),16,300);keep.Tag="keep";keep.Visible=false;
-            tree.AfterCheck+=(a,e)=>{if(changingTree)return;string path=Convert.ToString(e.Node.Tag);try{if(path.Length>0)selection.Set(path,e.Node.Checked);}catch(Exception error){Append(error.Message);}RefreshTreeChecks();};
-            tree.BeforeExpand+=async(a,e)=>{if(e.Node.Nodes.Count!=1 || e.Node.Nodes[0].Tag!=null)return;e.Cancel=true;if(busy)return;var node=e.Node;await Guard(async()=>{await LoadChildren(node);node.Expand();});};
             Button(2,"Загрузить проекты",292,LoadTree,16,175);Button(2,"Пропустить",292,()=>Skip("Disk",2),204,110);More(2,292);sections[2].Controls[sections[2].Controls.Count-1].Left=330;
             var info=Hint(2,"Снятие отметки не удаляет файлы. Синхронизация двусторонняя. .git, секреты и зависимости исключены. При смене сервера нужна новая пустая папка: прежняя папка остаётся на ПК.",10,130);Technical(2,info);
-            diskBase.TextChanged+=(a,b)=>treeLoaded=false;
+            diskBase.TextChanged+=(a,b)=>folders.Loaded=false;
         }
         void RefreshDiskWarning()
         {
@@ -333,7 +324,7 @@ namespace RemoteAgents.Launcher
             newAccount.CheckedChanged+=(a,b)=>{accountKey.Visible=accountKeyCaption.Visible=!newAccount.Checked;Changed(3);};
             More(3,215);Button(3,"Пропустить",215,()=>Skip("Happier",3),150,110);
             openHappier=new Button {Left=275,Top=215,Width=160,Height=29,Text="Открыть Happier",Visible=false};sections[3].Controls.Add(openHappier);
-            openHappier.Click+=(a,b)=>{try{Process.Start(new ProcessStartInfo(Origin(web.Text)){UseShellExecute=true});}catch(Exception e){Append("Ошибка: "+e.Message);}};
+            openHappier.Click+=(a,b)=>{try{Process.Start(new ProcessStartInfo(ConfigRequests.Origin(web.Text)){UseShellExecute=true});}catch(Exception e){Append("Ошибка: "+e.Message);}};
             // A new key is shown once, right after creation; it is never written to the journal.
             newKeyPanel=new Panel {Left=16,Top=250,Width=580,Height=92,Visible=false};sections[3].Controls.Add(newKeyPanel);
             newKeyPanel.Controls.Add(new Label {Left=0,Top=0,Width=575,Height=36,Text="Сохраните ключ: он нужен для других компьютеров и телефона (Happier → Restore with Secret Key). Больше он не будет показан."});
@@ -406,26 +397,10 @@ namespace RemoteAgents.Launcher
         {
             string message=action=="Server"?"Подключаюсь к серверу "+address.Text.Trim()+"…":action=="Catalog"?"Загружаю узлы с сервера…":action=="DiskTree"?"Загружаю проекты Disk…":action=="Connection"?"Проверяю варианты связи…":action=="Bridge"?"Настраиваю и проверяю мост…":action=="Inspect"?"Проверяю текущее состояние в фоне…":action=="Lan"?"Подключаю локальную сеть…":action=="Proxy"?"Настраиваю выход сервера в интернет…":action=="NetStatus"?"Проверяю состояние сетей сервера…":action=="AdminProbe"?"Проверяю права root на сервере…":action=="LanRemove"?"Удаляю локальную сеть…":action=="Account"?"Подключаю Happier…":action=="ResumeAccount"?"Happier установлен: подключаю аккаунт…":action=="Disk"?"Применяю выбор проектов…":action=="Vpn"?"Проверяю настройки VPN…":"Завершаю настройку…";
             if(quiet==null)Append(message);
-            string requestFile=Path.Combine(home,"state","wizard-request-"+Guid.NewGuid().ToString("N")+".json"), output=requestFile+".out", live=requestFile+".progress";
-            try {
-                Json.Write(requestFile,request);
-                var args=new[]{"-NoLogo","-NoProfile","-NonInteractive","-STA","-ExecutionPolicy","Bypass","-File",Path.Combine(bundle,"build","Wizard.ps1"),"-Home",home,"-Action",action,"-RequestFile",requestFile,"-ProgressFile",live};
-                var token=quiet ?? stepCancellation.Token;
-                int code;int readLines=0;
-                using(var poll=new System.Windows.Forms.Timer {Interval=150}) {
-                Action readProgress=()=>{try {if(!File.Exists(live))return;string text;using(var stream=new FileStream(live,FileMode.Open,FileAccess.Read,FileShare.ReadWrite))using(var reader=new StreamReader(stream,Files.Utf8)){text=reader.ReadToEnd();}var lines=Files.LF(text).Split('\n');while(readLines<lines.Length-1){var item=Json.Map(Json.Parse(lines[readLines++]));Append(Json.Str(item,"text"));}}catch(IOException){} };
-                poll.Tick+=(s,e)=>readProgress();poll.Start();
-                try {code=await Task.Run(()=>External.Run(Files.Executable("powershell.exe"),args,bundle,output,WizardStep.Timeout(action),4*1024*1024,token));}
-                catch(OperationCanceledException) {new Journal(home).Write("wizard."+action+".cancelled");throw;}
-                catch(TimeoutException) {new Journal(home).Write("wizard."+action+".timeout");throw;}
-                poll.Stop();readProgress();
-                }
-                Dictionary<string,object> response;
-                try {response=Json.Map(Json.Parse(Files.LF(External.ReadPowerShellOutput(output))));}
-                catch {throw new IOException("Шаг не вернул результат (код "+code+"). Проверьте журнал соответствующего модуля и повторите");}
-                if(code!=0 || !Json.Bool(response,"ok"))throw new IOException(Json.Text(response,"reason","Шаг не подтверждён: проверьте журнал и повторите")+". "+Json.Str(response,"remedy"));
-                return Json.Map(Json.Get(response,"result"));
-            } finally {if(File.Exists(requestFile))File.Delete(requestFile);if(File.Exists(output))File.Delete(output);if(File.Exists(live))File.Delete(live);}
+            var token=quiet ?? stepCancellation.Token;
+            // Same runner as the config engine and the tray (WizardRunner); progress lines arrive on a worker thread.
+            Action<string> progress=line=>{try{if(!IsDisposed)BeginInvoke(new Action(()=>Append(line)));}catch(InvalidOperationException){}};
+            return await Task.Run(()=>WizardRunner.Run(home,bundle,action,request,token,progress));
         }
         // Common result handling: ok — ready ✓; «pending» — waits for a detached server install (⏳),
         // which does not block the next sections and completes by itself.
@@ -510,13 +485,9 @@ namespace RemoteAgents.Launcher
         async Task LoadCatalog()
         {
             var catalog=await Run("Catalog",new {});expectedCatalog=catalog;catalogLoaded=true;nodes.Rows.Clear();
-            var config=new Configuration(home).Data;var wizard=Json.Map(Json.Get(config,"wizard"));
-            var local=Json.Map(Json.Get(wizard,"localCatalog"));
-            if(!wizard.ContainsKey("localCatalog"))local=Json.Map(Json.Get(config,"transport"));
+            var merged=ConfigRequests.MergeCatalog(catalog,new Configuration(home).Data);
             foreach(string group in new[]{"entries","hops","relays","cdn"}) {
-                var rows=Json.Array(Json.Get(catalog,group)).Select(Json.Map).ToList();
-                foreach(var row in Json.Array(Json.Get(local,group)).Select(Json.Map)){var clean=new Dictionary<string,object>(row);clean.Remove("configPath");clean.Remove("keyFile");clean.Remove("knownHostsPath");if(!clean.ContainsKey("ssh") && clean.ContainsKey("alias")){clean["ssh"]=clean["alias"];clean.Remove("alias");}if(!clean.ContainsKey("host") && clean.ContainsKey("server")){clean["host"]=clean["server"];clean.Remove("server");}rows.RemoveAll(r=>Json.Str(r,"name")==Json.Str(row,"name"));rows.Add(clean);}
-                foreach(var row in rows){int index=nodes.Rows.Add(CatalogTitle(group),Json.Str(row,"name"),Json.Text(row,"ssh",Json.Text(row,"host",Json.Str(row,"domain"))),Json.Str(row,"port"),Json.Str(row,"entry"),Json.Bool(row,"enabled",true));nodes.Rows[index].Tag=row;}
+                foreach(var row in Json.Array(Json.Get(merged,group)).Select(Json.Map)){int index=nodes.Rows.Add(CatalogTitle(group),Json.Str(row,"name"),Json.Text(row,"ssh",Json.Text(row,"host",Json.Str(row,"domain"))),Json.Str(row,"port"),Json.Str(row,"entry"),Json.Bool(row,"enabled",true));nodes.Rows[index].Tag=row;}
             }
             Append("Каталог получен с сервера; секреты не загружались в таблицу.");
         }
@@ -539,50 +510,12 @@ namespace RemoteAgents.Launcher
                 }map[group]=list.ToArray();
             }return map;
         }
-        static IEnumerable<TreeNode> All(TreeNodeCollection nodes) {foreach(TreeNode n in nodes){yield return n;foreach(var child in All(n.Nodes))yield return child;}}
-        void MarkPartial(){foreach(var n in All(tree.Nodes))if(n.Tag!=null)n.ForeColor=selection.Partial((string)n.Tag)?Color.DarkOrange:SystemColors.WindowText;}
-        void RefreshTreeChecks()
-        {
-            changingTree=true;
-            try {foreach(var n in All(tree.Nodes))n.Checked=n.Tag!=null && Convert.ToString(n.Tag).Length>0 && selection.Includes((string)n.Tag);MarkPartial();}
-            finally{changingTree=false;}
-        }
-        void AddTreeLevel(Dictionary<string,object> union, TreeNode parent)
-        {
-            string prefix=parent==null?"":(string)parent.Tag;
-            var children=new List<TreeNode>();
-            foreach(var r in Json.Array(Json.Get(union,"rows"))) {
-                var row=Json.Map(r);string path=Json.Str(row,"path"),presence=Json.Str(row,"presence");int slash=path.LastIndexOf('/');
-                string actualParent=slash<0?"":path.Substring(0,slash);
-                if(actualParent!=prefix)throw new InvalidDataException("Сервер вернул другой уровень дерева");
-                string mark=presence=="both"?"в обоих":presence=="local"?"только здесь":"только на сервере";
-                if(Json.Bool(union,"truncated"))mark=presence=="both"?"в обоих":"обнаружено "+(presence=="local"?"здесь":"на сервере")+" (список неполный)";
-                var n=new TreeNode((slash<0?path:path.Substring(slash+1))+" — "+mark){Tag=path};
-                if(slash<0 && Json.Str(row,"kind")=="file"){n.Tag="";n.Text+=" — поместите в папку проекта для синхронизации";}
-                if(Json.Str(row,"kind")=="directory" && Json.Bool(row,"hasChildren"))n.Nodes.Add(new TreeNode("Загрузка при раскрытии…"));
-                children.Add(n);
-            }
-            selection.Level(prefix,children.Where(n=>Convert.ToString(n.Tag).Length>0).Select(n=>(string)n.Tag),Json.Bool(union,"truncated"));
-            var target=parent==null?tree.Nodes:parent.Nodes;
-            target.Clear();target.AddRange(children.ToArray());RefreshTreeChecks();
-            if(Json.Bool(union,"truncated"))Append("Показана часть большой папки. Отметка папки включает скрытые элементы. Для частичного выбора снимите всю папку, затем отметьте нужные видимые элементы.");
-        }
         async Task LoadTree()
         {
             var wizard=Json.Map(Json.Get(new Configuration(home).Data,"wizard"));
             if(Json.Str(wizard,"diskPreviousProfile").Length>0 && !reconnectDisk)throw new IOException("Выберите, что делать с прежним подключением диска");
-            treeLoaded=false;
-            var data=await Run("DiskTree",new { @base=diskBase.Text.Trim(),path="",fresh=reconnectDisk });
-            selection=new DiskTreeSelection(Json.Strings(Json.Get(Json.Map(Json.Get(data,"selection")),"paths")));
-            changingTree=true;try {AddTreeLevel(Json.Map(Json.Get(data,"union")),null);treeLoaded=true;}finally{changingTree=false;}
-            Append("Загружен корень Disk. Дети папки загружаются при раскрытии. Наличие в обоих местах не подтверждает совпадение содержимого.");
-        }
-        async Task LoadChildren(TreeNode parent)
-        {
-            var data=await Run("DiskTree",new { @base=diskBase.Text.Trim(),path=(string)parent.Tag });
-            changingTree=true;try {AddTreeLevel(Json.Map(Json.Get(data,"union")),parent);}finally{changingTree=false;}
-            string rejected=Json.Str(data,"unsupportedName");
-            if(rejected.Length>0)Append("Имя «"+rejected+"» не подходит для сервера (допустимы буквы, цифры, пробел, точка, _ и -). Переименуйте папку, чтобы синхронизировать её; показано только локальное содержимое.");
+            folders.Loaded=false;
+            folders.ShowRoot(await Run("DiskTree",new { @base=diskBase.Text.Trim(),path="",fresh=reconnectDisk }));
         }
         async Task LoadAccounts()
         {
@@ -590,11 +523,6 @@ namespace RemoteAgents.Launcher
             string current="";string file=Path.Combine(home,"state","happier-account.json");if(File.Exists(file))current=Json.Str(Json.Read(file),"account");
             foreach(var row in accountRows)accounts.Items.Add(Json.Str(row,"label")+(Json.Str(row,"account")==current?" — мой сохранённый аккаунт (ключ проверяется при подключении)":" — другой / ещё не подтверждён вашим ключом"));
             Append("Имена аккаунтов получены. Принадлежность подтверждается ключом, имя не даёт доступа.");
-        }
-        string Origin(string text)
-        {
-            Uri uri;if(!Uri.TryCreate(text.Trim(),UriKind.Absolute,out uri) || uri.Scheme!="https" || uri.UserInfo.Length>0 || uri.AbsolutePath!="/" || uri.Query.Length>0 || uri.Fragment.Length>0)throw new IOException("Укажите HTTPS-адрес Happier без пути, пароля и параметров");
-            return uri.GetLeftPart(UriPartial.Authority);
         }
         async Task ExecuteCurrent() {await ExecuteSection(steps.Section);}
         async Task ExecuteSection(int index)
@@ -621,11 +549,11 @@ namespace RemoteAgents.Launcher
                         if(!catalogLoaded)await LoadCatalog();
                         result=await Run("Connection",new {catalog=ReadCatalog(),expected=expectedCatalog,shared=shared.Checked});break;
                     case 2:
-                        if(!treeLoaded)await LoadTree();
-                        var paths=selection.Paths;
+                        if(!folders.Loaded)await LoadTree();
+                        var paths=folders.Selection.Paths;
                         result=await Run("Disk",new {@base=diskBase.Text.Trim(),paths,reconnect=reconnectDisk});break;
                     case 3: {
-                        string apiOrigin=Origin(api.Text),webOrigin=Origin(web.Text);if(string.IsNullOrWhiteSpace(label.Text))throw new IOException("Укажите имя аккаунта, чтобы различать аккаунты");
+                        string apiOrigin=ConfigRequests.Origin(api.Text),webOrigin=ConfigRequests.Origin(web.Text);if(string.IsNullOrWhiteSpace(label.Text))throw new IOException("Укажите имя аккаунта, чтобы различать аккаунты");
                         bool create=newAccount.Checked;string key=create?HappierKey.Create():accountKey.Text.Trim();
                         string expectedAccount=!create && accounts.SelectedIndex>=0?Json.Str(accountRows[accounts.SelectedIndex],"account"):"";
                         // The key waits in secrets/happier-pending.key; Wizard.ps1 applies it now or after the install.

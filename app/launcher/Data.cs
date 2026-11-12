@@ -153,12 +153,21 @@ namespace RemoteAgents.Launcher
                     var map = Json.Map(Json.Get(Data, "components")); var item = Json.Map(Json.Get(map, c.Name)); item["enabled"] = enabled; map[c.Name] = item; Data["components"] = map; Save();
             }
         }
-        public void SetInviteVpnIntent(bool enabled)
+        // Tray VPN toggle keeps the pasted config in step: profile.vpn.enabled (only when the config describes VPN).
+        public void SetVpnIntent(bool enabled)
+        {
+            Edit(latest=> {
+                var profile=Json.Map(Json.Get(latest,"profile"));var vpn=Json.Map(Json.Get(profile,"vpn"));
+                if(profile.ContainsKey("vpn")){vpn["enabled"]=enabled;profile["vpn"]=vpn;latest["profile"]=profile;}
+            });
+        }
+        // Read-modify-write of the latest file under the per-home config mutex (same lock as the PowerShell side).
+        public void Edit(Action<Dictionary<string,object>> change)
         {
             using(var lease=Lock(PathName)) {
-                var latest=File.Exists(PathName)?Json.Read(PathName):Data;
-                var wizard=Json.Map(Json.Get(latest,"wizard"));
-                if(Json.Bool(wizard,"inviteVpn")){wizard["inviteVpnWanted"]=enabled;latest["wizard"]=wizard;Json.Write(PathName,latest);}
+                var latest=File.Exists(PathName)?Json.Read(PathName):new Dictionary<string,object>(Data);
+                change(latest);Json.Write(PathName,latest);
+                Data.Clear();foreach(var pair in latest)Data[pair.Key]=pair.Value;
             }
         }
         public void SetHappier(string serverUrl, string webappUrl)
