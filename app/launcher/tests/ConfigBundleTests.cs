@@ -102,6 +102,20 @@ namespace RemoteAgents.Launcher
             string home = Path.Combine(Path.GetTempPath(), "ra-config-a-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(home);
             try {
+                var embedded = Example();
+                embedded["vpn"] = ConfigBundle.D("bootstrap", ConfigBundle.D("channel", ConfigBundle.D("secret", "vpn-channel")));
+                Json.Map(embedded["secrets"])["vpn-channel"] = "{\"outbounds\":[]}\r\n";
+                var pasted = ConfigBundle.Parse("{\r\n" + Json.Encode(embedded).Substring(1));
+                Check(pasted.Missing.Length == 0, "embedded server-key and vpn-channel are counted, including CRLF values");
+                string messageHome = Path.Combine(home, "message-test"); Directory.CreateDirectory(messageHome);
+                ConfigBundle.Store(messageHome, pasted, null);
+                Check(ConfigBundle.AcceptedSummary(messageHome) == "Конфиг принят.", "accepted embedded secrets are never logged as empty");
+                Json.Map(embedded["secrets"])["server-key"] = ""; Json.Map(embedded["secrets"])["vpn-channel"] = "";
+                var placeholders = ConfigBundle.Parse(Json.Encode(embedded));
+                ConfigBundle.Store(messageHome, placeholders, null);
+                Check(placeholders.Missing.Length == 2 && ConfigBundle.AcceptedSummary(messageHome) == "Конфиг принят.", "existing vault values are not reported as missing after placeholder paste");
+                SecretVault.Set(messageHome, "vpn-channel", "");
+                Check(ConfigBundle.AcceptedSummary(messageHome) == "Конфиг принят; не заданы секреты: vpn-channel (спрошу по одному).", "truly missing secret is named without values");
                 ConfigBundle.Store(home, p, null);
                 Check(!File.ReadAllText(Path.Combine(home, "config.json")).Contains("TEST-PRIVATE-KEY"), "settings never contain values");
                 Check(SecretVault.Has(home, "server-key") && SecretVault.Names(home).Contains("server-key"), "vault has/names");

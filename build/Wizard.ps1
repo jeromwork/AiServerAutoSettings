@@ -21,8 +21,8 @@ try{
     Write-SetupLog $root ('wizard.'+$Action+'.complete')
     @{ok=$true;result=$result}|ConvertTo-Json -Depth 40 -Compress
 }catch{
-    Write-SetupLog $root ('wizard.'+$Action+'.failed')
     $detail=Protect-TransportText ([string]$_.Exception.Message)
+    Write-SetupLog $root ('wizard.'+$Action+'.failed') $detail
     @{ok=$false;reason=$detail;remedy='Проверьте SSH, состояние служб и журнал соответствующего шага; повторите проверку. Секреты в журнал не копируйте.'}|ConvertTo-Json -Compress
     exit 1
 }

@@ -158,7 +158,7 @@ def main():
             vault = (root / 'secrets/vault.json').read_text()
             assert MASTER not in vault and MASTER not in (root / 'config.json').read_text()
 
-            # 3. Apply (D orchestrator + C actions): Server, then Connection/Bridge/Account/Disk/Vpn at the same time.
+            # 3. Apply: independent work overlaps; local-port Account/Disk wait for Connection.
             p = run([DOTNET, harness, '--run', root, REPO, PWSH], env=env, check=False, timeout=400)
             if p.returncode != 0:
                 raise AssertionError('apply failed\n' + p.stdout.decode(errors='replace') + p.stderr.decode(errors='replace')[-6000:])
@@ -166,7 +166,11 @@ def main():
             sections = result['sections']
             assert result['plan'][:2] == ['server', 'connection'] and 'bootstrap' not in result['plan'], result['plan']
             assert all(s['ok'] for s in sections.values()), sections
-            assert result['parallelOverlapMs'] > 0, 'independent sections did not overlap'
+            assert result['parallelOverlapMs'] > 0, 'Connection and independent Bridge did not overlap'
+            for name in ('account', 'disk'):
+                assert sections[name]['startMs'] >= sections['connection']['endMs'], name + ' started before Connection proof'
+            assert max(sections[name]['startMs'] for name in ('account', 'disk')) < min(
+                sections[name]['endMs'] for name in ('account', 'disk')), 'Account/Disk did not overlap after Connection'
             config = json.loads((root / 'config.json').read_text(encoding='utf-8-sig'))
             profile = json.loads(Path(config['transport']['profilePath']).read_text(encoding='utf-8-sig'))
             manifest = json.loads((root / 'secrets/materialized.json').read_text())

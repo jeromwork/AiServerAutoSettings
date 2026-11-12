@@ -173,7 +173,32 @@ function Invoke-InstallChild([string]$Bundle,[string]$Script,[string[]]$Argument
     $sta=@();if($env:OS -eq 'Windows_NT'){$sta=@('-STA')}
     $psi.Arguments=(@('-NoLogo','-NoProfile','-NonInteractive')+$sta+@('-ExecutionPolicy','Bypass','-File',(Join-Path $Bundle $Script))+$Arguments|ForEach-Object {Quote-Transport ([string]$_)}) -join ' '
     $psi.UseShellExecute=$false;$psi.CreateNoWindow=$true;$psi.RedirectStandardOutput=$true;$psi.RedirectStandardError=$true
+    # Reuse the transport's bounded streams; asynchronous drains cannot deadlock on a full pipe.
+    Initialize-TransportDiagnostics
+    $stdout=New-Object RemoteAgents.TransportErrorBuffer;$stderr=New-Object RemoteAgents.TransportErrorBuffer
     $p=[Diagnostics.Process]::Start($psi)
-    $out=$p.StandardOutput.BaseStream.CopyToAsync([IO.Stream]::Null);$err=$p.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
-    try{if(-not $p.WaitForExit($TimeoutSeconds*1000)){$p.Kill();throw ('Таймаут шага ('+$TimeoutSeconds+' с)')};if($p.ExitCode -ne 0){throw 'Шаг установки не выполнен'}}finally{$p.Dispose()}
+    $out=$p.StandardOutput.BaseStream.CopyToAsync($stdout);$err=$p.StandardError.BaseStream.CopyToAsync($stderr)
+    try{
+        $timedOut=-not $p.WaitForExit($TimeoutSeconds*1000)
+        if($timedOut){$p.Kill();[void]$p.WaitForExit(2000)}
+        [void]$out.Wait(2000);[void]$err.Wait(2000)
+        if($timedOut -or $p.ExitCode -ne 0){
+            $lines=@()
+            foreach($buffer in @($stdout,$stderr)){
+                $tail=$buffer.Snapshot().Replace("`r",'')
+                if($tail.Length -gt 2048){$tail=$tail.Substring($tail.Length-2048)}
+                foreach($line in ($tail -split "`n")){
+                    $clean=($line -replace '\x1b\[[0-9;]*[a-zA-Z]','').Trim()
+                    # PowerShell 5.1's location/source/stack decorations are not an error reason.
+                    if($clean -and $clean -notmatch '^(At |строка:|[+~]|CategoryInfo\s*:|FullyQualifiedErrorId\s*:)'){$lines+=Protect-TransportText $clean}
+                }
+            }
+            $detail=$lines -join "`n"
+            if($detail.Length -gt 4096){$detail=$detail.Substring($detail.Length-4096)}
+            if($detail -and (Get-Command Write-WizardProgress -ErrorAction SilentlyContinue)){Write-WizardProgress ('· '+$Script+"`n· "+($detail -replace "`n","`n· "))}
+            $reason=if($timedOut){'Таймаут шага ('+$TimeoutSeconds+' с)'}else{'Шаг установки не выполнен (код '+$p.ExitCode+')'}
+            if($lines.Count){$reason+=': '+$lines[-1]}
+            $failure=New-Object Exception($reason);$failure.Data['ChildOutput']=$detail;throw $failure
+        }
+    }finally{$p.Dispose();$stdout.Dispose();$stderr.Dispose()}
 }

@@ -330,7 +330,7 @@ namespace RemoteAgents.Launcher
                 var kept = parsed.Profile.Keys.Where(ConfigSections.Known).Where(k => !accept.Contains(k)).ToArray();
                 if (kept.Length > 0) Log("Оставлено как есть: " + string.Join(", ", kept));
                 ConfigBundle.Store(home, parsed, accept);
-                Log("Конфиг принят" + (parsed.Missing.Length > 0 ? "; пустые секреты: " + string.Join(", ", parsed.Missing) + " (спрошу по одному)" : "") + ".");
+                Log(ConfigBundle.AcceptedSummary(home));
                 Log(ConfigText.Overview(parsed.Profile));
                 await RunSession(new ConfigSession(home, Bundle, parsed.Secrets, parsed.Hints), null);
             });

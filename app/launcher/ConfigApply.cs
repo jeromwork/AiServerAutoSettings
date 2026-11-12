@@ -24,7 +24,8 @@ namespace RemoteAgents.Launcher
             Disk = "disk", Vpn = "vpn", Proxy = "proxy", Lan = "lan";
         // Rows of the window, in the order a person reads them.
         internal static readonly string[] Rows = { Server, Connection, Bridge, Account, Disk, Vpn, Proxy, Lan };
-        // After «Сервер» these run at the same time; Proxy and Lan share the server network lock: one after another.
+        // After «Сервер»: independent work overlaps; Account/Disk wait for Connection.
+        // Proxy and Lan share the server network lock: one after another.
         internal static readonly string[] Parallel = { Connection, Bridge, Account, Disk, Vpn };
         internal static readonly string[] Chain = { Proxy, Lan };
         internal static readonly string[] Order = { Bootstrap, Server, Connection, Bridge, Account, Disk, Vpn, Proxy, Lan };
@@ -175,7 +176,7 @@ namespace RemoteAgents.Launcher
 
     internal static class ConfigEngine
     {
-        // Bootstrap -> Server -> {Connection, Bridge, Account, Disk, Vpn} at the same time, with Proxy -> Lan as one more
+        // Bootstrap -> Server -> {Connection -> {Account, Disk}, Bridge, Vpn}, with Proxy -> Lan as one more
         // parallel chain. A failed Bootstrap does not stop Server (the direct route may work); a failed Server blocks the rest.
         internal static async Task<Dictionary<string, SectionOutcome>> Execute(IList<string> plan, Func<string, CancellationToken, Task<SectionOutcome>> run,
             Action<string, SectionState, string> report, CancellationToken token)
@@ -205,9 +206,24 @@ namespace RemoteAgents.Launcher
             // more right after a successful Connection instead of staying ⏳ forever.
             Task<bool> connection = plan.Contains(ConfigSections.Connection) ? one(ConfigSections.Connection) : Task.FromResult(true);
             Func<string, Task<bool>> after = async s => {
+                // These children use Invoke-DiskSsh without -Direct (the local transport SSH port).
+                if ((s == ConfigSections.Account || s == ConfigSections.Disk) && plan.Contains(ConfigSections.Connection)) {
+                    report(s, SectionState.Waiting, "ждёт подтверждения связи");
+                    await connection;
+                    if (!outcomes[ConfigSections.Connection].Ok) {
+                        const string reason = "не выполнен: нет связи с сервером; сначала исправьте «Связь»";
+                        outcomes[s] = new SectionOutcome { Summary = reason };
+                        report(s, SectionState.Blocked, reason); return false;
+                    }
+                }
                 bool r = await one(s); SectionOutcome o;
                 if (!r || !outcomes.TryGetValue(s, out o) || !o.Pending || o.Operation != "connection" || !plan.Contains(ConfigSections.Connection)) return r;
-                if (!await connection) return r;
+                await connection;
+                if (!outcomes[ConfigSections.Connection].Ok) {
+                    const string reason = "не выполнен: нет связи с сервером; сначала исправьте «Связь»";
+                    outcomes[s] = new SectionOutcome { Summary = reason };
+                    report(s, SectionState.Blocked, reason); return false;
+                }
                 return await one(s);
             };
             var tasks = ConfigSections.Parallel.Where(s => s != ConfigSections.Connection && plan.Contains(s)).Select(s => after(s)).ToList();

@@ -32,4 +32,14 @@ $script:missing=$false
 $script:fail=$true;$failed=$false;try{Connect-HappierAccount $root}catch{$failed=$true}
 Assert ($failed -and -not ([IO.File]::ReadAllText((Join-Path $root 'state/happier-account.json'))|ConvertFrom-Json).ok) 'SSH failure cannot reuse old success'
 Assert (-not ([IO.File]::ReadAllText((Join-Path $root 'logs/accounts.log'))).Contains($script:testKey) -and -not ([IO.File]::ReadAllText((Join-Path $root 'state/happier-account.json'))).Contains($script:testKey)) 'logs and public state contain no secret'
+$entry=Join-Path $TestHome 'account-entry.ps1'
+$source=[IO.File]::ReadAllText((Join-Path $repo 'accounts/Account.ps1'))
+$common=(Join-Path $repo 'disk/Disk.Common.ps1').Replace("'","''")
+$source=$source.Replace("(Join-Path (Split-Path `$PSScriptRoot -Parent) 'disk/Disk.Common.ps1')",("'"+$common+"'"))
+$source=$source.Replace('if($LibraryOnly){return}', 'function Connect-HappierAccount($Root){throw "first SSH refused"};if($LibraryOnly){return}')
+[IO.File]::WriteAllText($entry,$source,(New-Object Text.UTF8Encoding($true)))
+. (Join-Path $repo 'build/Setup.Common.ps1')
+$entryError='';try{Invoke-InstallChild $TestHome 'account-entry.ps1' @('-Home',$root)}catch{$entryError=$_.Exception.Message}
+Assert ($entryError.Contains('Happier: first SSH refused')) 'real Account entry point and child boundary preserve first SSH cause'
+Assert (([IO.File]::ReadAllText((Join-Path $root 'logs/accounts.log'))).Contains('account.failed Happier: first SSH refused')) 'account log retains useful failure cause'
 Write-Output ('OK: '+$count+' account PowerShell checks (fake SSH; no live accounts)')

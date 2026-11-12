@@ -11,7 +11,7 @@ powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File build/Wi
 
 ## Порядок и запросы
 
-D сначала сохраняет `profile` и вызывает `SecretVault.Materialize(home)`, затем `Bootstrap`, `Server`. После успешного Server допускаются независимые процессы Connection, Bridge, Account, Disk, Vpn. Proxy/Lan сериализуются. Для VPN остаётся зависимость от живой связи: ранний Vpn возвращает `pending:"connection"`; до proof он не выключает начальный VPN, даже если итоговый vpn.enabled=false.
+D сначала сохраняет `profile` и вызывает `SecretVault.Materialize(home)`, затем `Bootstrap`, `Server`. После успешного Server параллельно идут Connection, Bridge, Vpn и цепочка Proxy → Lan. Account и Disk используют локальный SSH-вход транспорта и запускаются только после успешного Connection; затем они выполняются параллельно. Если Connection завершился ошибкой или без подтверждения, эти шаги не запускаются и показывают «не выполнен: нет связи с сервером». Proxy/Lan сериализуются. При провале Connection ожидающий VPN также получает явную причину отсутствия связи. Для VPN остаётся зависимость от живой связи: ранний Vpn возвращает `pending:"connection"`; до proof он не выключает начальный VPN, даже если итоговый vpn.enabled=false.
 
 Как окно (D, `SectionOutcome.From`, `ConfigEngine`) читает ответ: `result.ok:true` — ✅; `ok:false` с `pending:"disk"|"happier"` —
 ⏳, окно и трей следят за установкой действием `Operation` и повторяют только этот раздел; `pending:"connection"` у Vpn —

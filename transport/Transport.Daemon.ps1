@@ -27,13 +27,19 @@ function Publish-TransportStatus {
     Write-TransportJson (Join-Path $root 'status/transport.json') ([ordered]@{configRevision=$revision;fatal=($exitCode -ne 0);summary=$summary;ok=[bool]($alive -and $confirmed);active=$active;kbps=$speed;network=$id;metered=$metered;mode=$pin.mode;pinnedTag=$pin.tag;candidates=@($rows);configError=$reloadError;updatedAt=[DateTime]::UtcNow.ToString('o');error=$errorText})
     $script:lastStatus=[DateTime]::UtcNow
 }
+function Set-DaemonNextActive {
+    $interval=$settings.Options.activeIntervalSec;if($metered -ne $false){$interval=$settings.Options.meteredActiveIntervalSec}
+    $script:nextActive=[DateTime]::UtcNow.AddSeconds([double]$interval)
+}
 function Switch-TransportActive([string]$Tag,[bool]$Verified) {
     if($pin.mode -eq 'pinned' -and $Tag -ne $pin.tag){return $false}
     if(-not $Tag){$script:confirmed=$false;$script:errorText='Нет проверенного пути';return $false}
     try{
         $target=$Tag;if($Tag -notin @($paths.Candidates|ForEach-Object {$_.tag})){$target='unavailable';$Verified=$false}
         Set-TransportSelector $settings.Options $secret $target
-        $script:active=$Tag;$script:confirmed=$Verified;$script:nextActive=[DateTime]::UtcNow
+        $script:active=$Tag;$script:confirmed=$Verified
+        # A successful live/rank probe already proves this path. Schedule the next health check normally.
+        if($Verified){Set-DaemonNextActive}else{$script:nextActive=[DateTime]::UtcNow}
         if($Verified){$script:errorText=$null}elseif($pin.mode -eq 'pinned'){$script:errorText='Закреплённый путь ещё не проверен или недоступен'}else{$script:errorText='Путь из памяти ещё не проверен'}
         Write-TransportLog $root 'switch';return $true
     }catch{$script:confirmed=$false;$script:errorText='Не удалось переключить selector';Write-TransportLog $root 'api-failed' (Get-TransportErrorDetail $_);return $false}
@@ -276,7 +282,7 @@ try{
                     Stop-TransportProbe $probe;$probes.Remove($tag)
                     if($result.state -eq 'ok'){
                         Write-TransportLog $root 'probe-ok' $detail
-                        if($tag -eq $active){$confirmed=$true;$errorText=$null}
+                        if($tag -eq $active){$confirmed=$true;$errorText=$null;Set-DaemonNextActive}
                         elseif(-not $confirmed){[void](Switch-TransportActive $tag $true)}
                     }else{
                         Write-TransportLog $root 'probe-failed' $detail
@@ -303,7 +309,7 @@ try{
             if($active -and $active -in @($paths.Candidates|ForEach-Object {$_.tag}) -and $now -ge $nextActive -and -not $probes.ContainsKey($active)){
                 $c=$paths.Candidates|Where-Object {$_.tag -eq $active}|Select-Object -First 1
                 Start-DaemonProbe $c ([long]$settings.Options.activeProbeBytes) 'active'
-                $interval=$settings.Options.activeIntervalSec;if($metered -ne $false){$interval=$settings.Options.meteredActiveIntervalSec};$nextActive=$now.AddSeconds([double]$interval)
+                Set-DaemonNextActive
             }
         }
         if($pin.mode -eq 'pinned' -and $pin.tag -notin @($paths.Candidates|ForEach-Object {$_.tag})){$confirmed=$false;$errorText='Закреплённый путь не работает: отключён или отсутствует'}

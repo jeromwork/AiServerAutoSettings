@@ -55,7 +55,7 @@ namespace RemoteAgents.Launcher
             return 0;
         }
 
-        // The window's run: plan by difference -> ConfigEngine (Server, then Connection/Bridge/Account/Disk/Vpn at once).
+        // The window's run: Server, then independent work; Account/Disk wait for Connection.
         // Bootstrap, Server, Connection and Vpn are the real actions; Bridge/Account/Disk need Windows/Happier/Syncthing and are stand-ins.
         static int Run()
         {
@@ -94,7 +94,8 @@ namespace RemoteAgents.Launcher
             long engineStart = clock.ElapsedMilliseconds;
             var result = ConfigEngine.Execute(plan, run, (s, st, text) => states[s] = st.ToString(), CancellationToken.None).GetAwaiter().GetResult();
             long[] server, connection; times.TryGetValue(ConfigSections.Server, out server); times.TryGetValue(ConfigSections.Connection, out connection);
-            var parallel = ConfigSections.Parallel.Where(times.ContainsKey).ToArray();
+            // Vpn may be retried after Connection; its last invocation need not overlap.
+            var parallel = new[] { ConfigSections.Connection, ConfigSections.Bridge }.Where(times.ContainsKey).ToArray();
             long overlap = parallel.Length < 2 ? 0 : parallel.Select(s => times[s][1]).Min() - parallel.Select(s => times[s][0]).Max();
             SectionOutcome boot; result.TryGetValue(ConfigSections.Bootstrap, out boot);
             Console.WriteLine(Json.Encode(new Dictionary<string, object> {

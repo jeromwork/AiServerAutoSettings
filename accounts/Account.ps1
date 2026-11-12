@@ -2,6 +2,8 @@
 [CmdletBinding()]
 param([Alias('Home')][string]$LauncherHome,[string]$ExpectedAccount,[switch]$LibraryOnly)
 $ErrorActionPreference='Stop'
+# Redirected diagnostics must preserve Russian on Windows PowerShell 5.1 too.
+[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
 . (Join-Path (Split-Path $PSScriptRoot -Parent) 'disk/Disk.Common.ps1')
 function Connect-HappierAccount([string]$Root) {
     [void][IO.Directory]::CreateDirectory((Join-Path $Root 'logs'))
@@ -37,4 +39,9 @@ function Connect-HappierAccount([string]$Root) {
     Write-DiskUtf8 (Join-Path $Root 'state/happier-account.json') ($result|ConvertTo-Json -Compress)
 }
 if($LibraryOnly){return}
-try{Connect-HappierAccount $LauncherHome}catch{if(Test-Path -LiteralPath (Join-Path $LauncherHome 'logs')){[IO.File]::AppendAllText((Join-Path $LauncherHome 'logs/accounts.log'),([DateTime]::UtcNow.ToString('o')+" account.failed`n"))};throw 'Happier: аккаунт не подключён. Проверьте ключ, SSH и установленный Happier на сервере.'}
+try{Connect-HappierAccount $LauncherHome}catch{
+    # Own messages and Invoke-DiskProcess errors contain no key; do not print InvocationInfo/stdin.
+    $reason='Happier: '+[string]$_.Exception.Message
+    if(Test-Path -LiteralPath (Join-Path $LauncherHome 'logs')){[IO.File]::AppendAllText((Join-Path $LauncherHome 'logs/accounts.log'),([DateTime]::UtcNow.ToString('o')+' account.failed '+$reason+"`n"))}
+    [Console]::Error.WriteLine($reason);exit 1
+}

@@ -197,9 +197,21 @@ $child=Join-Path $TestHome 'child.ps1'
 [IO.File]::WriteAllText($child,'[Console]::WriteLine("child-output-must-stay-private");[Console]::Error.WriteLine("child-stderr-must-stay-private");exit 0')
 $output=@(Invoke-InstallChild $TestHome 'child.ps1' @())
 Assert ($output.Count -eq 0) 'real child stdout/stderr cannot contaminate wizard JSON'
-[IO.File]::WriteAllText($child,'[Console]::Error.WriteLine("private-fixture-marker");exit 7')
-$errorText='';try{Invoke-InstallChild $TestHome 'child.ps1' @()}catch{$errorText=$_.Exception.Message}
-Assert ($errorText -and -not $errorText.Contains('private-fixture-marker')) 'real child error is generic and contains no stderr'
+[IO.File]::WriteAllText($child,'[Console]::WriteLine(("x"*100000));[Console]::WriteLine("stdout-tail");[Console]::Error.WriteLine(("y"*100000));[Console]::Error.Write("server refused`r`nfinal child reason`r`n");exit 7')
+$script:childProgress=''
+function Write-WizardProgress($Text){$script:childProgress+=$Text}
+$errorText='';$tail='';try{Invoke-InstallChild $TestHome 'child.ps1' @()}catch{$errorText=$_.Exception.Message;$tail=$_.Exception.Data['ChildOutput']}
+Assert ($errorText.Contains('код 7') -and $errorText.EndsWith('final child reason')) 'last meaningful child error survives exit failure and CRLF'
+Assert ($tail.Length -le 4096 -and $tail.Contains('stdout-tail') -and $tail.Contains('server refused') -and -not $tail.Contains("`r")) 'bounded tails preserve both streams without CR'
+Assert ($script:childProgress.Contains('final child reason')) 'child reason reaches wizard journal'
+[IO.File]::WriteAllText($child,'[Console]::Error.WriteLine("credential AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");exit 7')
+try{Invoke-InstallChild $TestHome 'child.ps1' @()}catch{Assert (-not $_.Exception.Message.Contains('AAAAAAAAAA') -and -not $_.Exception.Data['ChildOutput'].Contains('AAAAAAAAAA')) 'key-like output is masked in exception and tail'}
+[IO.File]::WriteAllText($child,'[Console]::Write("stdout-only failure`r`n");exit 8')
+try{Invoke-InstallChild $TestHome 'child.ps1' @()}catch{Assert ($_.Exception.Message.EndsWith('stdout-only failure')) 'stdout-only failure retains reason'}
+[IO.File]::WriteAllText($child,'[Console]::Error.Write("Причина ошибки`r`nAt child.ps1:1 char:1`r`n+ throw example`r`n+ CategoryInfo : OperationStopped`r`n+ FullyQualifiedErrorId : example`r`n");exit 1',(New-Object Text.UTF8Encoding($true)))
+try{Invoke-InstallChild $TestHome 'child.ps1' @()}catch{Assert ($_.Exception.Message.EndsWith('Причина ошибки')) 'PS 5.1-style stack decorations do not replace the cause'}
+[IO.File]::WriteAllText($child,'[Console]::Error.WriteLine("waiting for child");Start-Sleep -Seconds 30')
+try{Invoke-InstallChild $TestHome 'child.ps1' @() -TimeoutSeconds 1}catch{Assert ($_.Exception.Message.Contains('Таймаут шага (1 с)')) 'child timeout remains bounded and honest'}
 # Stale health on a managed installation must not bypass network preflight.
 function Test-StatusFresh($Root,$Name){$false}
 $config=Read-TransportJson (Join-Path $root 'config.json');$config|Add-Member -Force wizard ([pscustomobject]@{configured=$true});Write-TransportJson (Join-Path $root 'config.json') $config

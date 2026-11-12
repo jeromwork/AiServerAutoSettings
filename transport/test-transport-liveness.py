@@ -111,7 +111,7 @@ Server(('127.0.0.1',port),API).serve_forever()
     try:
         until(lambda: status().get('ok'))
         ok_at = time.time()
-        # Первая проба каждого порта; после переключения активный путь может сразу получить обычную пробу 'active'.
+        # No immediate duplicate active probe after the successful liveness proof.
         live = list({p['port']: p for p in reversed([p for p in probes() if p['bytes'] == 65536])}.values())
         first = min(p['start'] for p in live)
         assert sorted(p['port'] for p in live) == [26000, 26001, 26002], live
@@ -123,6 +123,8 @@ Server(('127.0.0.1',port),API).serve_forever()
         rank = until(lambda: [p for p in probes() if p['bytes'] == 262144], seconds=TIMEOUT + 20)
         assert min(p['start'] for p in rank) >= first + TIMEOUT - .5, 'ranking waits for the liveness round'
         assert status().get('ok')
+        live_counts = [p['port'] for p in probes() if p['bytes'] == 65536]
+        assert sorted(live_counts) == [26000, 26001, 26002], 'verified active path must wait for activeIntervalSec before another health probe'
         (root / 'stop').touch()
         daemon.wait(timeout=15)
         assert daemon.returncode == 0, daemon.communicate()

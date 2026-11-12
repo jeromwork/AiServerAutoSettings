@@ -408,6 +408,13 @@ namespace RemoteAgents.Launcher
                 catch { SecretVault.Save(home, oldValues); throw; }
             }
         }
+        internal static string AcceptedSummary(string home)
+        {
+            // Store merges pasted values with the vault and keeps rejected conflicts unchanged.
+            // Report that effective state, rather than placeholders in the original paste.
+            var saved = Snapshot(home);
+            return "Конфиг принят" + (saved.Missing.Length > 0 ? "; не заданы секреты: " + string.Join(", ", saved.Missing) + " (спрошу по одному)" : "") + ".";
+        }
         static ParsedConfig Snapshot(string home)
         {
             var settings = ReadSettings(home); var profile = CurrentProfile(home, settings); var secrets = SecretVault.Load(home);
