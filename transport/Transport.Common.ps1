@@ -192,10 +192,10 @@ function Read-TransportSettings([string]$Root) {
     $channelPath=[string]$t.channelPath
     if(-not $channelPath){throw 'Нет transport.channelPath в config.json'}
     $channel=Read-TransportJson $channelPath
-    $defaults=@{sshPort=2222;syncPort=22001;probePortBase=26000;socksPortBase=28000;apiPort=29090;bindPhysical=$true;activeProbeBytes=65536;rankProbeBytes=262144;activeIntervalSec=120;meteredActiveIntervalSec=300;rankIntervalSec=1800;rankConcurrency=1;topOnMetered=3;stallSeconds=5;probeTimeoutSec=45;metered='auto';restartDelaySec=3;openSsh=$true;singBoxPath=(Join-Path $PSScriptRoot 'sing-box.exe')}
+    $defaults=@{sshPort=2222;channelSocksPort=2223;syncPort=22001;probePortBase=26000;socksPortBase=28000;apiPort=29090;bindPhysical=$true;activeProbeBytes=65536;rankProbeBytes=262144;activeIntervalSec=120;meteredActiveIntervalSec=300;rankIntervalSec=1800;rankConcurrency=1;topOnMetered=3;stallSeconds=5;probeTimeoutSec=45;metered='auto';restartDelaySec=3;openSsh=$true;singBoxPath=(Join-Path $PSScriptRoot 'sing-box.exe')}
     $s=@{};foreach($k in $defaults.Keys){$s[$k]=Get-TransportValue $t $k $defaults[$k]}
     foreach($k in @('bindPhysical','openSsh')){if($s[$k] -isnot [bool]){throw 'Нужен логический параметр transport'}}
-    foreach($k in @('sshPort','syncPort','probePortBase','socksPortBase','apiPort')){if([int]$s[$k] -lt 1 -or [int]$s[$k] -gt 65535){throw 'Неверный порт transport'}}
+    foreach($k in @('sshPort','channelSocksPort','syncPort','probePortBase','socksPortBase','apiPort')){if([int]$s[$k] -lt 1 -or [int]$s[$k] -gt 65535){throw 'Неверный порт transport'}}
     foreach($k in @('activeProbeBytes','rankProbeBytes','activeIntervalSec','meteredActiveIntervalSec','rankIntervalSec','rankConcurrency','topOnMetered','stallSeconds','probeTimeoutSec','restartDelaySec')){if([double]$s[$k] -le 0){throw 'Параметры transport должны быть положительными'}}
     if([string]$s.metered -notin @('auto','true','false','True','False')){throw 'Неверный metered'}
     if(-not $t.serverRoute -and $config.wizard.serverRoute){$overlay=Get-TransportRouteOverlay $config.wizard.serverRoute $Root;if($overlay){$t|Add-Member -Force serverRoute $overlay}}
@@ -365,7 +365,9 @@ function Get-TransportCandidates($Settings,[string]$Root) {
             [void]$tunnels.Add([pscustomobject]@{tag=$tag;arguments=$a;target=$p.serverAddress;bind=$false})
         }
     }
-    if($route -and $route.used -eq 'proxy'){
+    # A saved route through the daemon's own channel SOCKS entry must not become a daemon path: that is a loop.
+    $ownChannel=($route -and $route.used -eq 'proxy' -and [string]$route.proxy.host -in @('127.0.0.1','localhost') -and [int]$route.proxy.port -eq [int]$o.channelSocksPort)
+    if($route -and $route.used -eq 'proxy' -and -not $ownChannel){
         if(-not $o.openSsh){throw 'Для выбранного локального прокси включите OpenSSH в настройках связи'}
         $port=[int]$o.socksPortBase+$tunnels.Count;$tag='openssh-proxy'
         [void]$out.Add(@{type='socks';tag=$tag;server='127.0.0.1';server_port=$port;version='5'})
@@ -406,6 +408,13 @@ function New-TransportConfig($Settings,$Paths,[string]$Secret,[string]$DefaultTa
     $in=@();$rules=@();$ports=@{}
     $targets=New-Object Collections.ArrayList;[void]$targets.Add(@('ssh',[int]$o.sshPort,(Get-TransportServerPort $Settings.Profile)))
     if($sync.Count){[void]$targets.Add(@('sync',[int]$o.syncPort,[int]$sync[0].override_port))}
+    # Channel first (config.transport.channelFirst): a loopback SOCKS entry to the server's sshd through the active path,
+    # the same meaning as the 'ssh' entry; the wizard's SSH uses it as a 'proxy' route before any other route.
+    if($Settings.Transport.channelFirst){
+        $in+=@{type='mixed';tag='channel-socks';listen='127.0.0.1';listen_port=[int]$o.channelSocksPort}
+        $rules+=@{inbound=@('channel-socks');action='route-options';override_address='127.0.0.1';override_port=(Get-TransportServerPort $Settings.Profile)}
+        $rules+=@{inbound=@('channel-socks');action='route';outbound='active'}
+    }
     foreach($row in $targets){
         $in+=@{type='direct';tag=$row[0];listen='127.0.0.1';listen_port=$row[1];network='tcp';override_address='127.0.0.1';override_port=$row[2]}
         $rules+=@{inbound=@($row[0]);action='route';outbound='active'}
