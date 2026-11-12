@@ -68,6 +68,7 @@ function Connect-WizardSnapshot([string]$Root,$Request) {
                 # Resuming a lost reply is safe: first check this computer's own key.
                 try{[void](Invoke-WizardLogin $p $p.login 'true');$ok=$true}catch{
                     if($_.Exception.Message -like '*Ключ хоста*'){throw}
+                    $lastReason='Маршрут «'+$variant.title+'»: '+$_.Exception.Message
                 }
                 if(-not $ok -and $Request.deferProof){$ok=$true}
                 if($ok){$chosenRequest=$r;break}
