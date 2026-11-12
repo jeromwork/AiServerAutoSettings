@@ -108,7 +108,8 @@ def dispatch(message, path, catalog=None):
             for record in catalog_api.records(catalog, Path.home()):
                 if values.get('projectId') and record['projectId'] != values['projectId']:
                     continue
-                row = {key:record[key] for key in ('projectId','hostId','deviceName','serverWorkspace','windowsReplica')}
+                row = {key:record[key] for key in ('projectId','hostId','serverWorkspace','windowsReplica')}
+                row['deviceName']=catalog_api.device_name(record.get('deviceName'),record['hostId'])
                 row['projectName']=record.get('projectName',record['projectId'])
                 row.update(available=False, capabilities={}, shell_enabled=False)
                 try:
