@@ -12,13 +12,11 @@ $env:REMOTEAGENTS_WIZARD_PROGRESS=$wizardProgressInput
 $root=Get-TransportHome $wizardRootInput;$bundle=Split-Path $PSScriptRoot -Parent
 if($root -ine (Get-TransportHome (Join-Path $env:LOCALAPPDATA 'RemoteAgents'))){throw 'Настройка компьютера разрешена только в основном Home'}
 try{
-    if($Action -eq 'RollbackNetwork'){Invoke-WizardLock $root {Undo-WizardNetwork $root $Session} -TimeoutMs 30000;return}
-    if($Action -eq 'RollbackBridge'){Invoke-WizardLock $root {Undo-WizardBridge $root $Session} -TimeoutMs 30000;return}
+    if($Action -eq 'RollbackNetwork'){Invoke-WizardAction $root $Action $null {Undo-WizardNetwork $root $Session};return}
+    if($Action -eq 'RollbackBridge'){Invoke-WizardAction $root $Action $null {Undo-WizardBridge $root $Session};return}
     $request=[pscustomobject]@{};if($RequestFile){$request=Read-TransportJson $RequestFile}
     Write-SetupLog $root ('wizard.'+$Action+'.start')
-    # Status polling of detached server installs is read-only: it never waits for a running step.
-    if($Action -eq 'Operation'){$result=Invoke-WizardStep $root $bundle $Action $request}
-    else{$result=Invoke-WizardLock $root {Invoke-WizardStep $root $bundle $Action $request}}
+    $result=Invoke-WizardAction $root $Action $request {Invoke-WizardStep $root $bundle $Action $request}
     Write-SetupLog $root ('wizard.'+$Action+'.complete')
     @{ok=$true;result=$result}|ConvertTo-Json -Depth 40 -Compress
 }catch{

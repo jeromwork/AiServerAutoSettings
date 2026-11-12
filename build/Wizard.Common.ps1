@@ -3,6 +3,7 @@
 . (Join-Path (Split-Path $PSScriptRoot -Parent) 'disk/Disk.Common.ps1')
 . (Join-Path (Split-Path $PSScriptRoot -Parent) 'disk/Disk.Union.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Server.ps1')
+. (Join-Path $PSScriptRoot 'Wizard.Engine.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Invite.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Refresh.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Lan.ps1')
@@ -187,7 +188,7 @@ function Get-WizardPublicTransport($Transport) {
 function Register-WizardRollback([string]$Root,[string]$Bundle,[string]$Kind,[string]$Session,[string]$Task) {
     # Recovery is independent of both the UI and the prunable current bundle.
     $recovery=Join-Path $Root ('state/wizard-recovery/'+$Session)
-    foreach($name in @('build/Wizard.ps1','build/Wizard.Common.ps1','build/Wizard.Server.ps1','build/Wizard.Invite.ps1','build/Wizard.Refresh.ps1','build/Wizard.Network.ps1','build/Wizard.Lan.ps1','build/Setup.Common.ps1','transport/Transport.Common.ps1','disk/Disk.Common.ps1','disk/Disk.Union.ps1','disk/Disk.Selective.ps1','disk/stignore.txt','disk/stignore-previous.sha256')){
+    foreach($name in @('build/Wizard.ps1','build/Wizard.Common.ps1','build/Wizard.Engine.ps1','build/Wizard.Server.ps1','build/Wizard.Invite.ps1','build/Wizard.Refresh.ps1','build/Wizard.Network.ps1','build/Wizard.Lan.ps1','build/Setup.Common.ps1','transport/Transport.Common.ps1','disk/Disk.Common.ps1','disk/Disk.Union.ps1','disk/Disk.Selective.ps1','disk/stignore.txt','disk/stignore-previous.sha256')){
         $dest=Join-Path $recovery $name;[void][IO.Directory]::CreateDirectory((Split-Path $dest -Parent))
         Copy-Item -LiteralPath (Join-Path $Bundle $name) -Destination $dest
     }
@@ -549,12 +550,3 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
     }
 }
 
-function Invoke-WizardLock([string]$Root,[scriptblock]$Body,[int]$TimeoutMs=1000) {
-    $mutex=New-Object Threading.Mutex($false,('Global\RemoteAgentsSettings-'+(Get-TransportFingerprint 'settings' $Root.ToLowerInvariant())))
-    $locked=$false
-    try{
-        try{$locked=$mutex.WaitOne($TimeoutMs)}catch [Threading.AbandonedMutexException]{$locked=$true}
-        if(-not $locked){throw 'Настройки уже применяются; повторите после завершения'}
-        & $Body
-    }finally{if($locked){$mutex.ReleaseMutex()};$mutex.Dispose()}
-}
