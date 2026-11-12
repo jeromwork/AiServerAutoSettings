@@ -16,6 +16,7 @@ namespace RemoteAgents.Launcher
         internal DiskTreeSelection Selection = new DiskTreeSelection(new string[0]);
         internal bool Changing { get; private set; }
         internal bool Loaded;
+        internal DiskFoldersModel Model;
         // path -> DiskTree result for that level ("" = root). The owner runs the action (and its busy guard).
         readonly Func<string, Task<Dictionary<string, object>>> level;
         readonly Func<Func<Task>, Task> guard; readonly Func<bool> busy; readonly Action<string> append;
@@ -25,7 +26,7 @@ namespace RemoteAgents.Launcher
             Tree = tree; this.level = level; this.guard = guard; this.busy = busy; this.append = append; Tree.CheckBoxes = true;
             Tree.AfterCheck += (a, e) => {
                 if (Changing) return; string path = Convert.ToString(e.Node.Tag);
-                try { if (path.Length > 0) Selection.Set(path, e.Node.Checked); } catch (Exception error) { append(error.Message); }
+                try { if (path.Length > 0) { if (Model == null) Selection.Set(path, e.Node.Checked); else Model.Set(path, e.Node.Checked); } } catch (Exception error) { append(error.Message); }
                 RefreshChecks(); if (SelectionChanged != null) SelectionChanged();
             };
             Tree.BeforeExpand += async (a, e) => {
@@ -34,17 +35,27 @@ namespace RemoteAgents.Launcher
             };
         }
         static IEnumerable<TreeNode> All(TreeNodeCollection nodes) { foreach (TreeNode n in nodes) { yield return n; foreach (var child in All(n.Nodes)) yield return child; } }
-        void MarkPartial() { foreach (var n in All(Tree.Nodes)) if (n.Tag != null) n.ForeColor = Selection.Partial((string)n.Tag) ? Color.DarkOrange : SystemColors.WindowText; }
+        void MarkPartial() { foreach (var n in All(Tree.Nodes)) if (n.Tag != null) n.ForeColor = (Model == null ? Selection.Partial((string)n.Tag) : Model.Partial((string)n.Tag)) ? Color.DarkOrange : SystemColors.WindowText; }
         internal void RefreshChecks()
         {
-            Changing = true;
-            try { foreach (var n in All(Tree.Nodes)) n.Checked = n.Tag != null && Convert.ToString(n.Tag).Length > 0 && Selection.Includes((string)n.Tag); MarkPartial(); }
-            finally { Changing = false; }
+            bool wasChanging = Changing; Changing = true;
+            try {
+                foreach (var n in All(Tree.Nodes)) {
+                    string path = Convert.ToString(n.Tag);
+                    n.Checked = path.Length > 0 && (Model == null ? Selection.Includes(path) : Model.Includes(path));
+                    if (Model != null && path.Length > 0 && !path.Contains("/")) {
+                        string d = Model.DirectionOf(path);
+                        n.Text = n.Name + ((n.Checked || Model.Partial(path)) && d != DiskChoice.Both ? d == DiskChoice.Send ? " — только отправлять" : " — только забирать" : "");
+                    }
+                }
+                MarkPartial();
+            } finally { Changing = wasChanging; }
         }
         void AddLevel(Dictionary<string, object> union, TreeNode parent)
         {
             string prefix = parent == null ? "" : (string)parent.Tag;
             var children = new List<TreeNode>();
+            if (Model != null) Model.Level(prefix, union);
             foreach (var r in Json.Array(Json.Get(union, "rows"))) {
                 var row = Json.Map(r); string path = Json.Str(row, "path"), presence = Json.Str(row, "presence"); int slash = path.LastIndexOf('/');
                 string actualParent = slash < 0 ? "" : path.Substring(0, slash);
@@ -53,6 +64,7 @@ namespace RemoteAgents.Launcher
                 if (Json.Bool(union, "truncated")) mark = presence == "both" ? "в обоих" : "обнаружено " + (presence == "local" ? "здесь" : "на сервере") + " (список неполный)";
                 var n = new TreeNode((slash < 0 ? path : path.Substring(slash + 1)) + " — " + mark) { Tag = path };
                 if (slash < 0 && Json.Str(row, "kind") == "file") { n.Tag = ""; n.Text += " — поместите в папку проекта для синхронизации"; }
+                n.Name = n.Text;
                 if (Json.Str(row, "kind") == "directory" && Json.Bool(row, "hasChildren")) n.Nodes.Add(new TreeNode("Загрузка при раскрытии…"));
                 children.Add(n);
             }
@@ -65,9 +77,9 @@ namespace RemoteAgents.Launcher
         internal void ShowRoot(Dictionary<string, object> data, IEnumerable<string> preset = null)
         {
             Loaded = false;
-            Selection = new DiskTreeSelection(preset ?? Json.Strings(Json.Get(Json.Map(Json.Get(data, "selection")), "paths")));
+            if (Model == null) Selection = new DiskTreeSelection(preset ?? Json.Strings(Json.Get(Json.Map(Json.Get(data, "selection")), "paths")));
             Changing = true; try { AddLevel(Json.Map(Json.Get(data, "union")), null); Loaded = true; } finally { Changing = false; }
-            append("Загружен корень Disk. Дети папки загружаются при раскрытии. Наличие в обоих местах не подтверждает совпадение содержимого.");
+            append("Папки загружены. Вложенные папки появятся при раскрытии. Наличие в обоих местах ещё не означает, что передача завершена.");
         }
         async Task LoadChildren(TreeNode parent)
         {

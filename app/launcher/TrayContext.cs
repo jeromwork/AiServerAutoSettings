@@ -238,7 +238,7 @@ namespace RemoteAgents.Launcher
                 if(File.Exists(accountState)) { var last=Json.Read(accountState);menu.Items.Add(Json.Bool(last,"ok")?"Happier: последняя проверка "+Json.Str(last,"updatedUtc"):"Happier: подключение не подтверждено").Enabled=false; }
                 menu.Items.Add("Резервные ключи Happier", null, (s,e) => Safe(() => Open(Path.Combine(home,"secrets"))));
                 menu.Items.Add("Аккаунт Happier…", null, (s,e) => ShowSettings(3)).Enabled = !actionBusy && !busy;
-                menu.Items.Add("Выбрать папки и файлы…", null, (s,e) => ShowConfig(true)).Enabled = !actionBusy && !busy;
+                menu.Items.Add("Папки…", null, (s,e) => ShowConfig(true)).Enabled = !actionBusy && !busy;
             }
             if (!Product.IsVpn) menu.Items.Add("Открыть папку Disk", null, (s, e) => Safe(() => {
                 string saved = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteDisk", "base.txt");
