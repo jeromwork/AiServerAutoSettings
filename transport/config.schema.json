@@ -375,9 +375,9 @@
       ],
       "additionalProperties": false
     },
-    "inviteBootstrap": {
+    "bootstrap": {
       "type": "boolean",
-      "description": "Temporary HTTPS/TUN bootstrap before the invited device has its own authorized SSH key"
+      "description": "VPN-first from profile.vpn.bootstrap: HTTPS/TUN path before the first SSH; removed by the Connection step"
     },
     "cacheRoot": {
       "type": "string",

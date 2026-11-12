@@ -16,7 +16,9 @@ function Get-WizardConfigSettings([string]$Root,[string]$Command='cat "$HOME/.co
     # Local transport may reach the server when its former direct address is down.
     $p=Read-TransportJson (Find-InstallProfile $Root);$c=Read-TransportJson (Join-Path $Root 'config.json')
     try{
-        $args=@('-o','ProxyCommand=none')+@(Get-TransportSshArguments $p ([int](Get-TransportValue $c.transport 'sshPort' 2222)))+@('127.0.0.1',$command)
+        # Get-TransportSshArguments starts with -n (stdin from /dev/null); a command with input needs stdin.
+        $base=@(Get-TransportSshArguments $p ([int](Get-TransportValue $c.transport 'sshPort' 2222))|Where-Object {-not ($InputText -and $_ -ceq '-n')})
+        $args=@('-o','ProxyCommand=none')+$base+@('127.0.0.1',$Command)
         return Invoke-DiskProcess $p.sshExecutable $args (Convert-TransportLF $InputText) -TimeoutSeconds 15
     }catch{}
     # No keyscan, accept-new, HTTP or other unverified fallback.

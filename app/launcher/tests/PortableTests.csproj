@@ -4,7 +4,8 @@
     <LangVersion>7.3</LangVersion>
     <OutputType>Exe</OutputType>
     <StartupObject Condition="'$(ConfigTests)' == 'true'">RemoteAgents.Launcher.ConfigBundleTests</StartupObject>
-    <StartupObject Condition="'$(ConfigTests)' != 'true'">RemoteAgents.Launcher.TestEntry</StartupObject>
+    <StartupObject Condition="'$(ConfigE2E)' == 'true'">RemoteAgents.Launcher.ConfigE2E</StartupObject>
+    <StartupObject Condition="'$(ConfigTests)' != 'true' And '$(ConfigE2E)' != 'true'">RemoteAgents.Launcher.TestEntry</StartupObject>
     <DefineConstants>PORTABLE_TEST</DefineConstants>
     <DefineConstants Condition="'$(ProductName)' == 'RemoteVPN'">PORTABLE_TEST;REMOTE_VPN</DefineConstants>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
@@ -15,9 +16,14 @@
     <IntermediateOutputPath>obj/$(Configuration)/config-tests/</IntermediateOutputPath>
     <OutputPath>bin/$(Configuration)/config-tests/</OutputPath>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(ConfigE2E)' == 'true'">
+    <IntermediateOutputPath>obj/$(Configuration)/config-e2e/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/config-e2e/</OutputPath>
+  </PropertyGroup>
   <ItemGroup>
     <Compile Include="PortableJson.cs" />
     <Compile Include="ConfigBundleTests.cs" />
+    <Compile Include="ConfigE2E.cs" />
     <Compile Include="../ConfigBundle.cs" Link="ConfigBundle.cs" />
     <Compile Include="../SecretVault.cs" Link="SecretVault.cs" />
     <Compile Include="../SecretPrompt.cs" Link="SecretPrompt.cs" />

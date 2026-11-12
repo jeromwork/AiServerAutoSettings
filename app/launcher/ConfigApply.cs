@@ -351,7 +351,7 @@ namespace RemoteAgents.Launcher
         internal static string LanFile(Dictionary<string, object> manifest, string name)
         { return Json.Str(Json.Array(Json.Get(manifest, "lan")).Select(Json.Map).FirstOrDefault(r => Json.Str(r, "name") == name) ?? new Dictionary<string, object>(), "file"); }
         internal static Dictionary<string, object> Route(Dictionary<string, object> server, string kind)
-        { return Json.Array(Json.Get(server, "routes")).Select(Json.Map).FirstOrDefault(r => Json.Str(r, "kind") == kind); }
+        { return Json.Array(Json.Get(server, "routes")).Select(Json.Map).FirstOrDefault(r => Json.Str(r, "kind") == kind) ?? new Dictionary<string, object>(); }
         internal static Dictionary<string, object> Server(string home, Dictionary<string, object> p)
         {
             var server = Json.Map(Json.Get(p, "server")); var manifest = Materialized(home);

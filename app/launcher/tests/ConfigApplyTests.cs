@@ -187,6 +187,10 @@ namespace RemoteAgents.Launcher
             Check(Json.Str(server, "address") == "203.0.113.10" && Json.Int(server, "port", 0) == 2222 && Json.Str(server, "login") == "remoteagents", "server address/port/login");
             Check(Json.Str(server, "keyFile") == keyFile && !Json.Encode(server).Contains("password\":\""), "key is a file, no password in the request");
             Check(Json.Str(Json.Map(Json.Get(server, "proxy")), "host") == "127.0.0.1" && Json.Str(Json.Map(Json.Get(server, "hop")), "ssh") == "jump@hop.example", "routes -> proxy/hop of the Server action");
+            // `remoteagents config export` gives only {"kind":"direct"} by default: no proxy/hop route must not break the request.
+            var direct = new Dictionary<string, object> { { "server", Json.Map(Json.Parse("{\"address\":\"203.0.113.10\",\"login\":\"w\",\"routes\":[{\"kind\":\"direct\"}],\"key\":{\"secret\":\"server-key\"}}")) } };
+            var plain = ConfigRequests.Server(home, direct);
+            Check(!plain.ContainsKey("proxy") && !plain.ContainsKey("hop") && ConfigRequests.SecretsFor(ConfigSections.Server, direct, n => n == "server-key").Count == 0, "direct-only route (server export default) builds the Server request");
             var bridge = ConfigRequests.Bridge(p, new Dictionary<string, object>());
             Check(Json.Str(bridge, "deviceName") == "Ноутбук сына" && Json.Bool(bridge, "enabled") && !Json.Bool(bridge, "shell"), "Bridge carries deviceName");
             var renameOnly = new Dictionary<string, object> { { "device", new Dictionary<string, object> { { "name", "Дом" } } } };

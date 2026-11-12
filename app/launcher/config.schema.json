@@ -126,12 +126,6 @@
         "pendingProfile": {
           "type": "string",
           "description": "Chosen server; active transport is kept until successful network preflight"
-        },
-        "inviteVpn": {
-          "type": "boolean"
-        },
-        "inviteVpnWanted": {
-          "type": "boolean"
         }
       },
       "additionalProperties": false

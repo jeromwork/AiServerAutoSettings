@@ -286,7 +286,7 @@ def catalog_validator():
 
 
 def vpn_section(c, values, vpn_on):
-    """VPN первым (бывший invite bootstrap): публичный каталог + секреты канала/узлов/переходов."""
+    """VPN первым: публичный каталог + секреты канала/узлов/переходов."""
     explicit = c.get('catalogFile')
     source = Path(explicit or worker_home(c) / '.config/remoteagents/transport-catalog.json')
     bootstrap = {}

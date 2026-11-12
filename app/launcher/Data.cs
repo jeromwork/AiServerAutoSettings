@@ -32,7 +32,7 @@ namespace RemoteAgents.Launcher
         public static object Parse(string text) { return new JavaScriptSerializer { MaxJsonLength = 4 * 1024 * 1024 }.DeserializeObject(text.TrimStart('\uFEFF')); }
         public static Dictionary<string, object> Map(object value) { return value as Dictionary<string, object> ?? new Dictionary<string, object>(); }
         public static Dictionary<string, object> Read(string path) { return Map(Parse(File.ReadAllText(path))); }
-        public static object Get(Dictionary<string, object> map, string key) { object value; return map.TryGetValue(key, out value) ? value : null; }
+        public static object Get(Dictionary<string, object> map, string key) { object value; return map != null && map.TryGetValue(key, out value) ? value : null; }
         public static string Str(Dictionary<string, object> map, string key, string fallback = "") { return Convert.ToString(Get(map, key), CultureInfo.InvariantCulture) ?? fallback; }
         public static string Text(Dictionary<string, object> map, string key, string fallback) { var s = Str(map, key); return s.Length == 0 ? fallback : s; }
         public static bool Bool(Dictionary<string, object> map, string key, bool fallback = false) { var v = Get(map, key); return v is bool ? (bool)v : fallback; }
