@@ -254,18 +254,15 @@ function Initialize-WizardTransport([string]$Root,[string]$Bundle,$Transport) {
         $file=Join-Path $Root ('state/wizard-channel-'+(Get-TransportFingerprint $p.serverAddress $p.login).Substring(0,16)+'.json')
         # The server exports its VLESS channel when it has one.
         Send-WizardHelpers $Root $Bundle
-        $hasVless=Invoke-WizardSsh $Root 'test -r /etc/sing-box/config.json && echo yes || echo no'
+        $hasVless=Invoke-WizardSsh $Root 'test -r "${REMOTE_DISK_CHANNEL_SOURCE:-/etc/sing-box/config.json}" && echo yes || echo no'
         if($hasVless.Trim() -eq 'yes'){
             $request=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((@{server=$p.serverAddress}|ConvertTo-Json -Compress)))
             $channel=ConvertFrom-Json (Convert-TransportLF (Invoke-WizardSsh $Root ('bash "$HOME/.local/share/remote-disk/server-disk.sh" channel-config '+$request)))
         }else{
             $ports=ConvertFrom-Json (Convert-TransportLF (Invoke-WizardSsh $Root 'cat "$HOME/.local/share/remote-disk/ports.json" 2>/dev/null || echo "{}"'))
-            if([int]$ports.listen -lt 1 -or [int]$ports.listen -gt 65535){
-                $op=(Get-WizardOperation $Root $Bundle 'status' @('disk')).disk
-                if($op.state -eq 'running'){$script:WizardPendingDisk=$op;throw 'Сервер диска ещё устанавливается'}
-                throw 'Нет порта сервера Disk. Включите установку недостающего на шаге «Сервер» и повторите'
-            }
-            $channel=@{inbounds=@(@{tag='sync';override_port=[int]$ports.listen});outbounds=@()}
+            $inbounds=@()
+            if([int]$ports.listen -ge 1 -and [int]$ports.listen -le 65535){$inbounds+=@{tag='sync';override_port=[int]$ports.listen}}
+            $channel=@{inbounds=$inbounds;outbounds=@()}
         }
         Write-TransportJson $file $channel -Private
         $Transport|Add-Member -Force channelPath $file

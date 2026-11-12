@@ -448,5 +448,13 @@ try{
     Write-TransportJson (Join-Path $work 'status/transport.json') @{ok=$true;updatedAt=[DateTime]::UtcNow.AddMinutes(1).ToString('o');candidates=@()}
     $futureStatus=(& (Join-Path $PSScriptRoot 'Get-TransportStatus.ps1') -Home $work) -join "`n"
     Assert ($futureStatus.Contains('статус устарел') -and -not $futureStatus.Contains('соединение проверено')) 'будущий статус после перевода часов не считается проверенной связью'
+    $sshOnly=Copy-TransportObject $settings
+    $sshOnly.Channel=[pscustomobject]@{inbounds=@();outbounds=@()}
+    $generated=New-TransportConfig $sshOnly $paths 'fixture' 'unavailable'
+    Assert (@($generated.inbounds|Where-Object {$_.tag -eq 'ssh'}).Count -eq 1) 'SSH-only channel retains SSH inbound'
+    Assert (@($generated.inbounds|Where-Object {$_.tag -eq 'sync'}).Count -eq 0) 'SSH-only channel has no fabricated Syncthing port'
+    $sshOnly.Channel.inbounds=@([pscustomobject]@{tag='sync';override_port=23456})
+    $generated=New-TransportConfig $sshOnly $paths 'fixture' 'unavailable'
+    Assert (@($generated.inbounds|Where-Object {$_.tag -eq 'sync' -and $_.override_port -eq 23456}).Count -eq 1) 'disk port can be added later'
     Write-Output ('OK: '+$count+' проверок без сети')
 }finally{Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue}

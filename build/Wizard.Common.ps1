@@ -4,6 +4,7 @@
 . (Join-Path (Split-Path $PSScriptRoot -Parent) 'disk/Disk.Union.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Server.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Engine.ps1')
+. (Join-Path $PSScriptRoot 'Wizard.Session.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Invite.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Refresh.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Lan.ps1')
@@ -24,6 +25,7 @@ function Invoke-WizardSsh([string]$Root,[string]$Command,[string]$InputText='',[
     if(-not $profile){throw 'Настройте SSH на шаге «Сервер»'}
     $p=Read-TransportJson $profile
     $routeOptions=if($script:WizardRoute){@($script:WizardRoute.options)}else{@(Get-TransportSavedRouteOptions $Root $p)}
+    if($env:REMOTEAGENTS_WIZARD_SESSION -eq '1'){return Invoke-WizardControlSession $Root $p $routeOptions $Command $InputText $Timeout}
     Invoke-DiskProcess $p.sshExecutable ($routeOptions+@('-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=5')+@($p.arguments)+@($Command)) (Convert-TransportLF $InputText) -TimeoutSeconds $Timeout
 }
 function Send-WizardHelpers([string]$Root,[string]$Bundle) {
@@ -40,9 +42,34 @@ function Send-WizardHelpers([string]$Root,[string]$Bundle) {
         'codex-bridge-session.py'='.local/share/codex-remote/codex-bridge-session.py'
         'server_node_catalog.py'='.local/share/codex-remote/server_node_catalog.py'
     }
+    # Query content hashes first; unchanged helper bytes never cross SSH again.
+    $manifest=@();$contents=@{}
     foreach($key in $files.Keys){
-        $dest='$HOME/'+$files[$key];$directory='$HOME/'+(Split-Path $files[$key] -Parent).Replace('\','/')
         $bytes=[Text.Encoding]::UTF8.GetBytes((Convert-TransportLF ([IO.File]::ReadAllText((Join-Path $Bundle $key)))))
+        $sha=[Security.Cryptography.SHA256]::Create()
+        try{$hash=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+        $contents[$key]=@{bytes=$bytes;hash=$hash}
+        $manifest+=@{source=$key;path=$files[$key];hash=$hash;keep=($key -in @('codex-windows-bridge.py','codex-bridge-session.py','server_node_catalog.py'))}
+    }
+    $probe=@'
+import json,sys,hashlib,os
+from pathlib import Path
+rows=json.loads(sys.stdin.readline());missing=[]
+for row in rows:
+ p=Path.home()/row['path']
+ if any(x.is_symlink() for x in (p,*p.parents)):raise ValueError('symlink')
+ if not p.is_file() or (not row['keep'] and hashlib.sha256(p.read_bytes()).hexdigest()!=row['hash']):missing.append(row['source'])
+print(json.dumps(missing))
+'@
+    $code=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($probe))
+    $json=ConvertTo-Json -InputObject @($manifest) -Depth 5 -Compress
+    $reply=Invoke-WizardSsh $Root ('python3 -c ''import base64;exec(base64.b64decode("'+$code+'"))''') $json
+    $missing=@(ConvertFrom-Json (Convert-TransportLF $reply))
+    if(-not $missing.Count){return}
+    foreach($key in $files.Keys){
+        if($key -notin $missing){continue}
+        $dest='$HOME/'+$files[$key];$directory='$HOME/'+(Split-Path $files[$key] -Parent).Replace('\','/')
+        $bytes=$contents[$key].bytes
         $bridgeHelper=$key -in @('codex-windows-bridge.py','codex-bridge-session.py','server_node_catalog.py')
         if($bridgeHelper){$upload+='if [ ! -f "'+$dest+'" ]; then '+"`n"}
         $temp=$dest+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
@@ -188,7 +215,7 @@ function Get-WizardPublicTransport($Transport) {
 function Register-WizardRollback([string]$Root,[string]$Bundle,[string]$Kind,[string]$Session,[string]$Task) {
     # Recovery is independent of both the UI and the prunable current bundle.
     $recovery=Join-Path $Root ('state/wizard-recovery/'+$Session)
-    foreach($name in @('build/Wizard.ps1','build/Wizard.Common.ps1','build/Wizard.Engine.ps1','build/Wizard.Server.ps1','build/Wizard.Invite.ps1','build/Wizard.Refresh.ps1','build/Wizard.Network.ps1','build/Wizard.Lan.ps1','build/Setup.Common.ps1','transport/Transport.Common.ps1','disk/Disk.Common.ps1','disk/Disk.Union.ps1','disk/Disk.Selective.ps1','disk/stignore.txt','disk/stignore-previous.sha256')){
+    foreach($name in @('build/Wizard.ps1','build/Wizard.Common.ps1','build/Wizard.Engine.ps1','build/Wizard.Session.ps1','build/Wizard.SessionHost.ps1','build/Wizard.Server.ps1','build/Wizard.Invite.ps1','build/Wizard.Refresh.ps1','build/Wizard.Network.ps1','build/Wizard.Lan.ps1','build/Setup.Common.ps1','transport/Transport.Common.ps1','disk/Disk.Common.ps1','disk/Disk.Union.ps1','disk/Disk.Selective.ps1','disk/stignore.txt','disk/stignore-previous.sha256')){
         $dest=Join-Path $recovery $name;[void][IO.Directory]::CreateDirectory((Split-Path $dest -Parent))
         Copy-Item -LiteralPath (Join-Path $Bundle $name) -Destination $dest
     }
@@ -380,10 +407,11 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
                 $payload=@{expected=$Request.expected;catalog=$local}|ConvertTo-Json -Depth 30 -Compress
                 [void](Invoke-WizardSsh $Root 'python3 "$HOME/.local/share/remoteagents-wizard/server-transport-catalog.py" put' $payload)
             }
-            $script:WizardPendingDisk=$null
             try{
-                if(Test-WizardNetworkManaged $Root){Initialize-WizardTransport $Root $Bundle $t;Set-WizardNetwork $Root $Bundle $t}
-                else{Initialize-WizardTransport $Root $Bundle $t;Invoke-TransportPreflight $Root $Bundle ([pscustomobject]@{transport=$t});Update-LauncherConfig $Root {param($c) $c|Add-Member -Force transport $t}}
+                Initialize-WizardTransport $Root $Bundle $t
+                $t.PSObject.Properties.Remove('bootstrap');$t|Add-Member -Force openSsh $true
+                if(Test-WizardNetworkManaged $Root){Set-WizardNetwork $Root $Bundle $t}
+                else{Set-WizardInitialNetwork $Root $Bundle $t}
             }catch{
                 if($Request.shared){
                     try{
@@ -391,11 +419,8 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
                         [void](Invoke-WizardSsh $Root 'python3 "$HOME/.local/share/remoteagents-wizard/server-transport-catalog.py" put' $restore)
                     }catch{Write-SetupLog $Root 'wizard.catalog.restore.failed'}
                 }
-                # The disk server is still installing (detached): wait without failing the section.
-                if($script:WizardPendingDisk){return @{ok=$false;pending='disk';operation=$script:WizardPendingDisk;summary=(Get-WizardOperationText $script:WizardPendingDisk 'установка сервера диска')+'. «Связь» проверится автоматически'}}
                 throw
             }
-            if($t.inviteBootstrap){Update-LauncherConfig $Root {param($c) $c.transport.PSObject.Properties.Remove('inviteBootstrap');$c.transport|Add-Member -Force openSsh $true;$c.vpn.PSObject.Properties.Remove('bootstrapTag')}}
             $overlay=[pscustomobject]@{schema=1}
             foreach($g in @('entries','hops','relays','cdn')){
                 $different=@();foreach($row in @($local.$g)){
