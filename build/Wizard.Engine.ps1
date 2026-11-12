@@ -43,7 +43,16 @@ function Start-WizardWorkingTransport([string]$Root,[string]$Bundle) {
         # The launcher runs every step inside a job object with KILL_ON_JOB_CLOSE (NativeJob.cs): a daemon started as a
         # child of the step dies the moment the step ends, and the channel with it. WMI creates the daemon outside that
         # job (as Start-SetupDetached does), hidden. Its diagnostics are logs/transport.log; the pipes are not captured.
-        $line=((@((Get-TransportPowerShell),'-NoProfile','-NonInteractive','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',(Join-Path $Bundle 'transport/Transport.Daemon.ps1'),'-Home',$Root)|ForEach-Object {Quote-Transport $_}) -join ' ')
+        # Like the tray's own daemon (components.json -ParentPid), it is bound to the launcher (the step's RemoteAgents*.exe
+        # ancestor) and ends with the program: an orphan daemon outlived a closed window on the owner's PC.
+        $owner=0;$id=$PID
+        for($i=0;$i -lt 4 -and $id -gt 0;$i++){
+            $self=Get-CimInstance Win32_Process -Filter ('ProcessId='+$id) -ErrorAction SilentlyContinue;if(-not $self){break};$id=[int]$self.ParentProcessId
+            $up=Get-CimInstance Win32_Process -Filter ('ProcessId='+$id) -ErrorAction SilentlyContinue;if($up -and $up.Name -like 'RemoteAgents*.exe'){$owner=$id;break}
+        }
+        $parts=@((Get-TransportPowerShell),'-NoProfile','-NonInteractive','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',(Join-Path $Bundle 'transport/Transport.Daemon.ps1'),'-Home',$Root)
+        if($owner){$parts+=@('-ParentPid',[string]$owner)}
+        $line=(($parts|ForEach-Object {Quote-Transport $_}) -join ' ')
         $hidden=New-CimInstance -ClassName Win32_ProcessStartup -Property @{ShowWindow=[uint16]0} -ClientOnly
         $started=[DateTime]::UtcNow
         $created=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$line;ProcessStartupInformation=$hidden}

@@ -83,7 +83,7 @@ namespace RemoteAgents.Launcher
         DiskFolderTree folders; string foldersBase = "";
         TabControl tabs; TextBox configText; Button apply, folderApply;
         readonly CancellationTokenSource cancel = new CancellationTokenSource();
-        Task<string> preparing; ConfigSession session; bool running, closingRequested, filling, replaceOnPaste; string defaultName;
+        Task<string> preparing; ConfigSession session; bool running, closeChecked, closingRequested, filling, replaceOnPaste; string defaultName;
 
         internal static bool First(string home, Func<Task<string>> prepare)
         { using (var form = new ConfigWindow(home, null, prepare, false)) { form.ShowDialog(); return form.Manual; } }
@@ -121,7 +121,11 @@ namespace RemoteAgents.Launcher
             close.Click += (a, b) => Close();
             done.Click += async (a, b) => await Finish();
             FormClosing += (a, b) => {
-                if (!running) return; b.Cancel = true; closingRequested = true; Log("Отменяю текущую операцию…"); cancel.Cancel();
+                if (running) { b.Cancel = true; closingRequested = true; Log("Отменяю текущую операцию…"); cancel.Cancel(); return; }
+                // ✕ after a run is «Готово»: closing must leave the program in the tray, not quit it with a half-finished setup.
+                // One attempt only; if the check fails the window stays with the reason, and the next ✕ closes it.
+                if (settings || session == null || closeChecked || !FirstInstall.Required(home)) return;
+                closeChecked = true; b.Cancel = true; BeginInvoke(new Action(async () => await Finish()));
             };
             KeyDown += (a, b) => { if (b.KeyCode == Keys.Escape && !running) Close(); };
             Shown += (a, b) => Ready();
