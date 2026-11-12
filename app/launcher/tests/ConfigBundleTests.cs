@@ -59,6 +59,52 @@ namespace RemoteAgents.Launcher
             Reject(() => ConfigBundle.Pack(p, ""), "empty master");
             var badProtected = Json.Map(Json.Parse(encrypted)); Json.Map(badProtected["secrets"])["server-key"] = "plain";
             Reject(() => ConfigBundle.Parse(Json.Encode(badProtected)), "mixed protected/plain");
+            string home = Path.Combine(Path.GetTempPath(), "ra-config-a-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(home);
+            try {
+                ConfigBundle.Store(home, p, null);
+                Check(!File.ReadAllText(Path.Combine(home, "config.json")).Contains("TEST-PRIVATE-KEY"), "settings never contain values");
+                Check(SecretVault.Has(home, "server-key") && SecretVault.Names(home).Contains("server-key"), "vault has/names");
+                Check(SecretVault.Get(home, "server-key") == p.Secrets["server-key"], "vault preserves bytes");
+                if (!SecretVault.Windows) {
+                    Check((File.GetUnixFileMode(Path.Combine(home, "secrets", "vault.json")) & (UnixFileMode.GroupRead | UnixFileMode.OtherRead | UnixFileMode.GroupWrite | UnixFileMode.OtherWrite)) == 0, "vault mode 0600");
+                    Check(Json.Str(Json.Read(Path.Combine(home,"secrets","vault.json")), "protection") == "plaintext-linux", "honest plaintext Linux marker");
+                }
+                var full = ConfigBundle.Parse(ConfigBundle.Export(home, null));
+                Check(Canonical(full.Profile) == Canonical(p.Profile) && full.Secrets["server-key"] == p.Secrets["server-key"], "Parse Export without loss");
+                var encryptedFull = ConfigBundle.Parse(ConfigBundle.Export(home, "master"));
+                Check(ConfigBundle.Unlock(encryptedFull,"master").Secrets["server-key"] == p.Secrets["server-key"], "protected Export roundtrip");
+                SecretVault.Set(home, "unused-secret", "UNREFERENCED-SECRET-TOKEN");
+                string ai = ConfigBundle.ExportForAi(home);
+                Check(!ai.Contains("TEST-PRIVATE-KEY") && !ai.Contains("UNREFERENCED-SECRET-TOKEN"), "AI export zero secret values");
+                Check(Json.Str(Json.Map(Json.Map(Json.Parse(ai))["secrets"]),"server-key") == ConfigBundle.Hidden, "AI markers");
+                ConfigBundle.Store(home, ConfigBundle.Parse(ai), null);
+                Check(SecretVault.Get(home,"server-key") == p.Secrets["server-key"], "AI edit preserves existing credentials");
+                var changed = Example(); Json.Map(changed["server"])["address"] = "other.example.invalid";
+                Json.Map(changed["secrets"])["server-key"] = "REPLACEMENT-KEY";
+                changed["bridge"] = ConfigBundle.D("enabled", true);
+                var change = ConfigBundle.Parse(Json.Encode(changed));
+                Check(ConfigBundle.Conflicts(home, change).Single().StartsWith("server: сейчас "), "server conflict description");
+                ConfigBundle.Store(home, change, null);
+                var snapshot = ConfigBundle.Parse(ConfigBundle.Export(home,null));
+                Check(Json.Str(Json.Map(snapshot.Profile["server"]),"address") == "server.example.invalid" && Json.Bool(Json.Map(snapshot.Profile["bridge"]),"enabled"), "conflict blocked, independent section stored");
+                Check(SecretVault.Get(home,"server-key") != "REPLACEMENT-KEY", "blocked section cannot replace credential");
+                ConfigBundle.Store(home, change, new[]{"server"});
+                Check(ConfigBundle.Conflicts(home,change).Length == 0 && SecretVault.Get(home,"server-key") == "REPLACEMENT-KEY", "explicit conflict accepted");
+                var diskChange = ConfigBundle.Parse(Json.Encode(ConfigBundle.D("kind","remoteagents-config","schema",1,"disk",ConfigBundle.D("folders", new[]{"Project"}))));
+                Check(ConfigBundle.Conflicts(home,diskChange).Single().StartsWith("disk:"), "removed disk folders conflict");
+                string oldConfig = File.ReadAllText(Path.Combine(home,"config.json")), oldVault = File.ReadAllText(Path.Combine(home,"secrets","vault.json"));
+                Reject(() => ConfigBundle.Store(home,locked,null), "locked Store");
+                Check(oldConfig == File.ReadAllText(Path.Combine(home,"config.json")) && oldVault == File.ReadAllText(Path.Combine(home,"secrets","vault.json")), "locked Store writes nothing");
+                SecretVault.Set(home,"empty-secret", ""); Check(!SecretVault.Has(home,"empty-secret"), "empty is missing");
+                if (!SecretVault.Windows) {
+                    string outside = Path.Combine(Path.GetTempPath(),"ra-vault-outside-" + Guid.NewGuid().ToString("N"));
+                    string linkedHome = Path.Combine(home,"linked"); Directory.CreateDirectory(linkedHome);
+                    Directory.CreateDirectory(outside);
+                    try { Directory.CreateSymbolicLink(Path.Combine(linkedHome,"secrets"),outside); Reject(() => SecretVault.Set(linkedHome,"server-key","never-written"), "symlink vault"); Check(!File.Exists(Path.Combine(outside,"vault.json")),"outside untouched"); }
+                    finally { Directory.Delete(Path.Combine(linkedHome,"secrets")); Directory.Delete(outside); }
+                }
+            } finally { Directory.Delete(home,true); }
             Console.WriteLine("PASS: CONFIG: " + count + " assertions");
         }
         static string Canonical(object value)

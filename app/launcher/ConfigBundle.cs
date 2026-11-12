@@ -231,6 +231,149 @@ namespace RemoteAgents.Launcher
             return bytes;
         }
 
+        internal static Dictionary<string, object> ReadSettings(string home)
+        {
+            string path = Path.Combine(Path.GetFullPath(home), "config.json"); SecretVault.SafePath(home, path);
+            return File.Exists(path) ? Json.Read(path) : D();
+        }
+        internal static Dictionary<string, object> CurrentProfile(string home, Dictionary<string, object> settings)
+        {
+            if (settings.ContainsKey("profile")) return Parse(Json.Encode(Json.Get(settings, "profile"))).Profile;
+            var profile = D("kind", "remoteagents-config", "schema", 1);
+            // Legacy settings are public; only known fields are copied. Runtime-only knobs
+            // and executable/command fields are never accepted from a paste configuration.
+            var definitions = Json.Map(SchemaDocument()["properties"]);
+            foreach (string section in new[]{"device", "bridge", "happier", "components"}) {
+                var source = Json.Map(Json.Get(settings, section));
+                var fields = Json.Map(Json.Get(Json.Map(definitions[section]), "properties"));
+                var target = source.Where(x => fields.ContainsKey(x.Key)).ToDictionary(x => x.Key, x => x.Value);
+                if (target.Count > 0) profile[section] = target;
+            }
+            var transport = Json.Map(Json.Get(settings, "transport"));
+            string path = Json.Str(transport, "profilePath");
+            if (path.Length > 0 && File.Exists(path)) {
+                SecretVault.SafePath(home, path); var ssh = Json.Read(path);
+                profile["server"] = D("address", Json.Str(ssh, "serverAddress"), "port", RuntimePort(ssh), "login", Json.Str(ssh, "login"), "key", D("secret", "server-key"));
+            }
+            return Parse(Json.Encode(profile)).Profile;
+        }
+        internal static int RuntimePort(Dictionary<string, object> ssh)
+        {
+            int port = Json.Int(ssh, "serverPort", Json.Int(ssh, "port", 22));
+            var args = Json.Strings(Json.Get(ssh, "arguments"));
+            for (int i = 0; i + 1 < args.Length; i++) if (args[i] == "-p") { int n; if (int.TryParse(args[i+1], out n)) port = n; }
+            return port;
+        }
+        static Dictionary<string, object> Merge(Dictionary<string, object> before, Dictionary<string, object> patch)
+        {
+            var result = new Dictionary<string, object>(before, StringComparer.Ordinal);
+            foreach (var pair in patch) {
+                var map = pair.Value as Dictionary<string, object>;
+                result[pair.Key] = map != null && !map.ContainsKey("secret") ? Merge(Json.Map(Json.Get(before, pair.Key)), map) : pair.Value;
+            }
+            return result;
+        }
+        static Dictionary<string, string> FindConflicts(string home, ParsedConfig p, Dictionary<string, object> settings, Dictionary<string, string> vault)
+        {
+            var result = new Dictionary<string, string>(StringComparer.Ordinal);
+            var before = CurrentProfile(home, settings);
+            var oldServer = Json.Map(Json.Get(before, "server")); var server = Json.Map(Json.Get(p.Profile, "server"));
+            if (new[]{"address", "port", "login"}.Any(k => server.ContainsKey(k) && oldServer.ContainsKey(k) && Json.Encode(server[k]) != Json.Encode(oldServer[k]))) {
+                var merged = Merge(oldServer, server);
+                result["server"] = "сейчас " + Endpoint(oldServer) + " / в конфиге " + Endpoint(merged);
+            }
+            var oldAccount = Json.Map(Json.Get(before, "happier")); var account = Json.Map(Json.Get(p.Profile, "happier"));
+            bool different = new[]{"mode", "label", "serverUrl", "webappUrl"}.Any(k => account.ContainsKey(k) && oldAccount.ContainsKey(k) && Json.Encode(account[k]) != Json.Encode(oldAccount[k]));
+            string oldKey = Json.Str(Json.Map(Json.Get(oldAccount, "key")), "secret"), key = Json.Str(Json.Map(Json.Get(account, "key")), "secret");
+            if (key.Length > 0 && oldAccount.Count > 0) {
+                if (oldKey.Length > 0 && oldKey != key) different = true;
+                string previous, incoming;
+                if (p.Secrets.TryGetValue(key, out incoming) && incoming.Length > 0 && vault.TryGetValue(oldKey.Length > 0 ? oldKey : key, out previous) && previous.Length > 0 && incoming != previous) different = true;
+            }
+            if (account.Count > 0 && oldAccount.Count > 0 && different) result["happier"] = "сейчас аккаунт «" + Json.Str(oldAccount, "label") + "» / в конфиге другой аккаунт «" + Json.Str(account, "label") + "»";
+            var oldDisk = Json.Map(Json.Get(before, "disk")); var disk = Json.Map(Json.Get(p.Profile, "disk"));
+            if (disk.ContainsKey("base") && oldDisk.ContainsKey("base") && !string.Equals(Json.Str(disk,"base").TrimEnd('\\','/'), Json.Str(oldDisk,"base").TrimEnd('\\','/'), StringComparison.OrdinalIgnoreCase))
+                result["disk"] = "сейчас корень «" + Json.Str(oldDisk,"base") + "» / в конфиге «" + Json.Str(disk,"base") + "»";
+            if (disk.ContainsKey("folders")) {
+                var kept = new HashSet<string>(Json.Strings(disk["folders"]), StringComparer.OrdinalIgnoreCase);
+                var removed = Json.Strings(Json.Get(oldDisk, "folders")).Where(f => !kept.Contains(f)).ToArray();
+                if (removed.Length > 0) result["disk"] = (result.ContainsKey("disk") ? result["disk"] + "; " : "") + "сейчас выбраны папки «" + string.Join(", ", removed) + "» / в конфиге они убраны";
+            }
+            var values = vault.Values.Concat(p.Locked ? new string[0] : p.Secrets.Values).Where(v => v.Length > 0).Distinct().OrderByDescending(v => v.Length).ToArray();
+            foreach (string section in result.Keys.ToArray()) result[section] = Scrub(result[section], values);
+            return result;
+        }
+        static string Endpoint(Dictionary<string, object> server)
+        { return Json.Str(server, "login") + "@" + Json.Str(server, "address") + ":" + Json.Int(server, "port", 22); }
+        public static string[] Conflicts(string home, ParsedConfig p)
+        {
+            if (p == null) throw Bad("Нет конфига");
+            using (var lease = new SecretVault.Lease(home)) return FindConflicts(home, p, ReadSettings(home), SecretVault.Load(home)).Select(x => x.Key + ": " + x.Value).ToArray();
+        }
+        public static void Store(string home, ParsedConfig p, IEnumerable<string> acceptSections)
+        {
+            if (p == null || p.Locked) throw Bad("Сначала введите мастер-пароль");
+            // Revalidate even if the caller has edited the public fields after Parse.
+            p = Parse(Pack(p, null));
+            using (var lease = new SecretVault.Lease(home)) {
+                var settings = ReadSettings(home); var oldValues = SecretVault.Load(home);
+                var conflicts = FindConflicts(home, p, settings, oldValues);
+                var accepted = new HashSet<string>(acceptSections ?? new string[0], StringComparer.OrdinalIgnoreCase);
+                var blocked = new HashSet<string>(conflicts.Keys.Where(k => !accepted.Contains(k)), StringComparer.Ordinal);
+                var before = CurrentProfile(home, settings);
+                var patch = p.Profile.Where(x => !blocked.Contains(x.Key)).ToDictionary(x => x.Key, x => x.Value);
+                var profile = Merge(before, patch);
+                var protectedNames = new HashSet<string>(blocked.SelectMany(k => References(Json.Get(before, k)).Concat(References(Json.Get(p.Profile, k)))).Select(r => Json.Str(r, "secret")), StringComparer.Ordinal);
+                var values = new Dictionary<string, string>(oldValues, StringComparer.Ordinal);
+                foreach (var pair in p.Secrets) if (!protectedNames.Contains(pair.Key) && (pair.Value.Length > 0 || !values.ContainsKey(pair.Key))) values[pair.Key] = pair.Value;
+                // Empty/AI placeholders preserve values already present in the vault.
+                settings["profile"] = profile;
+                if (!settings.ContainsKey("schema")) settings["schema"] = 1;
+                if (!settings.ContainsKey("version")) settings["version"] = 1;
+                SecretVault.Save(home, values);
+                try { Json.Write(Path.Combine(Path.GetFullPath(home), "config.json"), settings); }
+                catch { SecretVault.Save(home, oldValues); throw; }
+            }
+        }
+        static ParsedConfig Snapshot(string home)
+        {
+            var settings = ReadSettings(home); var profile = CurrentProfile(home, settings); var secrets = SecretVault.Load(home);
+            // Legacy installations already have a key on disk; include that exact key in a
+            // recovery export instead of asking for the root password again.
+            var server = Json.Map(Json.Get(profile, "server"));
+            string keyName = Json.Str(Json.Map(Json.Get(server, "key")), "secret");
+            string sshPath = Json.Str(Json.Map(Json.Get(settings, "transport")), "profilePath");
+            if (keyName.Length > 0 && (!secrets.ContainsKey(keyName) || secrets[keyName].Length == 0) && sshPath.Length > 0 && File.Exists(sshPath)) {
+                SecretVault.SafePath(home, sshPath); var ssh = Json.Read(sshPath);
+                string keyPath = Json.Str(ssh, "keyPath");
+                if (Json.Str(server, "address") == Json.Str(ssh, "serverAddress") && keyPath.Length > 0 && File.Exists(keyPath)) { SecretVault.SafePath(home, keyPath); secrets[keyName] = File.ReadAllText(keyPath); }
+            }
+            foreach (var r in References(profile)) { string name = Json.Str(r, "secret"); if (!secrets.ContainsKey(name)) secrets[name] = ""; }
+            var root = new Dictionary<string, object>(profile); root["secrets"] = secrets;
+            return Parse(Json.Encode(root));
+        }
+        public static string Export(string home, string master)
+        { using (var lease = new SecretVault.Lease(home)) return Pack(Snapshot(home), master); }
+        static string Scrub(string text, IEnumerable<string> values)
+        { foreach (string value in values) text = text.Replace(value, Hidden); return text; }
+        static object PublicValue(object value, string[] secrets)
+        {
+            var map = value as Dictionary<string, object>;
+            if (map != null) return map.ToDictionary(x => x.Key, x => PublicValue(x.Value, secrets));
+            if (value is string) return Scrub((string)value, secrets);
+            if (value is System.Collections.IEnumerable) return Json.Array(value).Select(x => PublicValue(x, secrets)).ToArray();
+            return value;
+        }
+        public static string ExportForAi(string home)
+        {
+            using (var lease = new SecretVault.Lease(home)) {
+                var p = Snapshot(home); var values = p.Secrets.Values.Where(v => v.Length > 0).Distinct().OrderByDescending(v => v.Length).ToArray();
+                var root = (Dictionary<string, object>)PublicValue(p.Profile, values);
+                root["secrets"] = p.Secrets.ToDictionary(x => x.Key, x => x.Value.Length > 0 ? Hidden : "");
+                return Json.Encode(root) + "\n";
+            }
+        }
+
         public static ParsedConfig Unlock(ParsedConfig p, string master)
         {
             if (p == null) throw Bad("Нет конфига");
