@@ -34,7 +34,7 @@ $work=Join-Path $env:TEMP ('rd-transports-'+[guid]::NewGuid().ToString('N').Subs
 [void][IO.Directory]::CreateDirectory($work);Protect-TransportPath $work
 
 function Q([string]$v){Quote-Transport $v}
-$sshBase=@(Get-TransportSshArguments $prof (Get-TransportServerPort $prof))
+$sshBase=@(Get-TransportSshArguments $prof (Get-TransportServerPort $prof) -UseRoute)
 $fwdBase=$sshBase
 $key=$prof.keyPath
 $wifi=$null

@@ -128,7 +128,7 @@ function Get-TransportHopArguments($Hop,[string]$KnownHosts='',[switch]$AcceptNe
 }
 function New-TransportRouteOptions($Route,$Profile,[string]$ProxyExecutable='',[switch]$AcceptNew) {
     if(-not $Route -or $Route.used -eq 'direct'){return}
-    if($Profile.inviteProxyCommand){return @('-o',('ProxyCommand='+[string]$Profile.inviteProxyCommand))}
+    if($Profile.routeProxyCommand){return @('-o',('ProxyCommand='+[string]$Profile.routeProxyCommand))}
     switch([string]$Route.used){
         'proxy' {
             $px=$Route.proxy;$port=0
@@ -139,16 +139,21 @@ function New-TransportRouteOptions($Route,$Profile,[string]$ProxyExecutable='',[
         }
         'hop' {
             $hop=$Route.hop
-            if($hop.invitePasswordFile){
-                if(-not $ProxyExecutable -or -not (Test-Path -LiteralPath $ProxyExecutable -PathType Leaf)){throw 'Для маршрута приглашения нужен RemoteAgents.exe'}
-                return @('-o',('ProxyCommand='+(Quote-Transport $ProxyExecutable)+' --invite-hop '+(Quote-Transport ([string]$hop.invitePasswordFile))+' %h %p'))
+            if($hop.routePasswordFile){
+                if(-not $ProxyExecutable -or -not (Test-Path -LiteralPath $ProxyExecutable -PathType Leaf)){throw 'Для пароля SSH-перехода нужен установленный RemoteAgents.exe'}
+                $source=Join-Path $PSScriptRoot 'Route.Proxy.ps1'
+                $directory=Join-Path (Split-Path $ProxyExecutable -Parent) 'transport-bin';[void][IO.Directory]::CreateDirectory($directory);Protect-TransportPath $directory
+                $helper=Join-Path $directory ('Route.Proxy-'+(Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.Substring(0,16)+'.ps1')
+                if(-not (Test-Path $helper)){Copy-Item -LiteralPath $source -Destination $helper;Protect-TransportPath $helper}
+                $cmd=(Quote-Transport (Get-TransportPowerShell))+' -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '+(Quote-Transport $helper)+' -SettingsFile '+(Quote-Transport ([string]$hop.routePasswordFile))+' -Target %h -Port %p'
+                return @('-o',('ProxyCommand='+$cmd))
             }
             if(-not $hop.keyFile -and -not $hop.passwordPipe){throw 'Нужен ключ для промежуточного сервера: выберите файл ключа на шаге «Сервер»'}
             if([string]$hop.ssh -notmatch '\A(?:[a-z_][a-z0-9_-]{0,31}@)?[a-zA-Z0-9][a-zA-Z0-9.-]{0,252}(?::\d{1,5})?\z'){throw 'Укажите промежуточный сервер как логин@адрес[:порт]'}
             $known=Join-Path (Split-Path $Profile.knownHostsPath -Parent) 'known_hosts-hop'
             if($hop.knownHostsPath){$known=[string]$hop.knownHostsPath}
             $h=Get-TransportHopArguments $hop $known -AcceptNew:$AcceptNew
-            $a=@([string]$Profile.sshExecutable,'-q');if($Profile.configPath){$a+=@('-F',[string]$Profile.configPath)}
+            $a=@([string]$Profile.sshExecutable,'-q','-o','ProxyCommand=none','-o','ProxyJump=none');if($Profile.configPath){$a+=@('-F',[string]$Profile.configPath)}
             $a+=@($h.options)
             $pipe=[string]$hop.passwordPipe
             if($pipe){
@@ -197,10 +202,10 @@ function Read-TransportSettings([string]$Root) {
     Assert-TransportLists $t
     [pscustomobject]@{Options=$s;Transport=$t;Profile=$profile;Channel=$channel;Vpn=(Get-TransportValue $config 'vpn' ([pscustomobject]@{enabled=$false}))}
 }
-function Get-TransportSshArguments($Profile,[int]$Port) {
+function Get-TransportSshArguments($Profile,[int]$Port,[switch]$UseRoute) {
     # Явные параметры профиля исключают ProxyCommand/forwarding/RemoteCommand из пользовательского config.
     $nullConfig='NUL';if($env:OS -ne 'Windows_NT'){$nullConfig='/dev/null'}
-    $bootstrapProxy=if($Profile.inviteProxyCommand){'ProxyCommand='+[string]$Profile.inviteProxyCommand}else{'ProxyCommand=none'}
+    $bootstrapProxy=if($UseRoute -and $Profile.routeProxyCommand){'ProxyCommand='+[string]$Profile.routeProxyCommand}else{'ProxyCommand=none'}
     @('-n','-T','-F',$nullConfig,'-p',[string]$Port,'-i',[string]$Profile.keyPath,'-l',[string]$Profile.login,
       '-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','GlobalKnownHostsFile=none','-o','StrictHostKeyChecking=yes','-o',('UserKnownHostsFile="'+$Profile.knownHostsPath.Replace('\','/')+'"'),
       '-o',('HostKeyAlias='+$Profile.serverAddress),'-o',$bootstrapProxy,'-o','ProxyJump=none','-o','ConnectTimeout=10','-o','ConnectionAttempts=1','-o','LogLevel=ERROR')
@@ -249,7 +254,7 @@ function Get-TransportCandidates($Settings,[string]$Root) {
     $p=$Settings.Profile;$t=Copy-TransportObject $Settings.Transport;$o=$Settings.Options;$out=New-Object Collections.ArrayList;$c=New-Object Collections.ArrayList;$tunnels=New-Object Collections.ArrayList
     # Personal route is a local overlay, kept outside the public server catalog.
     $route=$t.serverRoute
-    if($route -and $route.used -ne 'direct' -and -not $p.inviteProxyCommand){
+    if($route -and $route.used -ne 'direct' -and -not $p.routeProxyCommand){
         $proxyExe=[string]$route.proxyExecutable;if(-not $proxyExe){$proxyExe=Join-Path $Root 'RemoteAgents.exe'}
         $routeOptions=@(New-TransportRouteOptions $route $p $proxyExe)
         if($route.used -eq 'hop'){
@@ -269,12 +274,14 @@ function Get-TransportCandidates($Settings,[string]$Root) {
     if($v.PSObject.Properties['detour']){$v.PSObject.Properties.Remove('detour')}
     [void]$out.Add($v);[void]$c.Add([pscustomobject]@{tag=$v.tag;port=0})
     }
+    if(-not $t.bootstrap -or ((Test-Path $p.knownHostsPath) -and (Get-Item $p.knownHostsPath).Length -gt 1)){
     $ssh=@{type='ssh';tag='singbox-ssh-direct';server=$p.serverAddress;server_port=(Get-TransportServerPort $p);user=$p.login;private_key_path=$p.keyPath}
     $saved=@($Settings.Channel.outbounds|Where-Object {$_.type -eq 'ssh' -and $_.server -eq $p.serverAddress}|Select-Object -First 1)
     if($saved.Count){$ssh=Copy-TransportObject $saved[0];$ssh.tag='singbox-ssh-direct';if($ssh.PSObject.Properties['detour']){$ssh.PSObject.Properties.Remove('detour')}}
     if(-not $ssh.host_key){$hk=@(Get-TransportHostKeys $p.sshExecutable $p.serverAddress $p.knownHostsPath);if($ssh -is [hashtable]){$ssh.host_key=$hk}else{$ssh|Add-Member -Force host_key $hk}}
     Set-TransportHostKeyAlgorithms $ssh
     [void]$out.Add($ssh);[void]$c.Add([pscustomobject]@{tag=$ssh.tag;port=0})
+    }
     foreach($relay in @($t.relays)){
         if($null -eq $relay -or -not (Test-TransportEnabled $relay)){continue};Assert-TransportName $relay.name
         if(-not (Get-TransportValue $relay 'host' $relay.server) -or [int]$relay.port -lt 1 -or [int]$relay.port -gt 65535){throw 'Неполный ретранслятор'}
@@ -341,7 +348,7 @@ function Get-TransportCandidates($Settings,[string]$Root) {
         [void]$out.Add(@{type='socks';tag='openssh-direct';server='127.0.0.1';server_port=$port;version='5'})
         [void]$c.Add([pscustomobject]@{tag='openssh-direct';port=0})
         $serverPort=Get-TransportServerPort $p
-        $a=@(Get-TransportSshArguments $p $serverPort)+@('-N','-o','ExitOnForwardFailure=yes','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=2','-D',('127.0.0.1:'+$port))
+        $a=@(Get-TransportSshArguments $p $serverPort -UseRoute)+@('-N','-o','ExitOnForwardFailure=yes','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=2','-D',('127.0.0.1:'+$port))
         [void]$tunnels.Add([pscustomobject]@{tag='openssh-direct';arguments=$a;target=$p.serverAddress;bind=$true})
     }
     if($o.openSsh){
@@ -395,13 +402,15 @@ function Get-TransportCandidates($Settings,[string]$Root) {
 
 function New-TransportConfig($Settings,$Paths,[string]$Secret,[string]$DefaultTag,[string]$Interface='') {
     $o=$Settings.Options;$sync=@($Settings.Channel.inbounds|Where-Object {$_.tag -eq 'sync'}|Select-Object -First 1)
-    if($sync.Count -ne 1 -or [int]$sync[0].override_port -lt 1){throw 'Нет порта Syncthing существующего канала'}
+    if($sync.Count -and ([int]$sync[0].override_port -lt 1 -or [int]$sync[0].override_port -gt 65535)){throw 'Неверный порт Syncthing канала'}
     $in=@();$rules=@();$ports=@{}
-    foreach($row in @(@('ssh',[int]$o.sshPort,22),@('sync',[int]$o.syncPort,[int]$sync[0].override_port))){
+    $targets=New-Object Collections.ArrayList;[void]$targets.Add(@('ssh',[int]$o.sshPort,(Get-TransportServerPort $Settings.Profile)))
+    if($sync.Count){[void]$targets.Add(@('sync',[int]$o.syncPort,[int]$sync[0].override_port))}
+    foreach($row in $targets){
         $in+=@{type='direct';tag=$row[0];listen='127.0.0.1';listen_port=$row[1];network='tcp';override_address='127.0.0.1';override_port=$row[2]}
         $rules+=@{inbound=@($row[0]);action='route';outbound='active'}
     }
-    foreach($c in $Paths.Candidates){$tag='probe-'+$c.tag;$in+=@{type='direct';tag=$tag;listen='127.0.0.1';listen_port=$c.port;network='tcp';override_address='127.0.0.1';override_port=22};$rules+=@{inbound=@($tag);action='route';outbound=$c.tag}}
+    foreach($c in $Paths.Candidates){$tag='probe-'+$c.tag;$in+=@{type='direct';tag=$tag;listen='127.0.0.1';listen_port=$c.port;network='tcp';override_address='127.0.0.1';override_port=(Get-TransportServerPort $Settings.Profile)};$rules+=@{inbound=@($tag);action='route';outbound=$c.tag}}
     foreach($port in @(@($in|ForEach-Object {$_.listen_port})+@([int]$o.apiPort)+@($Paths.Outbounds|Where-Object {$_.type -eq 'socks'}|ForEach-Object {$_.server_port}))){
         if($port -lt 1 -or $port -gt 65535 -or $ports.ContainsKey([int]$port)){throw 'Пересечение или неверный порт'};$ports[[int]$port]=$true
     }
@@ -812,7 +821,7 @@ function Assert-VpnTunRoute([string]$Address,[int]$InterfaceIndex) {
 }
 function Test-VpnThroughTun($Settings,$Adapter) {
     $v=Get-VpnOptions $Settings
-    if(-not $Settings.Transport.inviteBootstrap){
+    if(-not $Settings.Transport.bootstrap){
     Assert-VpnTunRoute $v.probeAddress $Adapter.ifIndex
     # SSH с закреплённым host key проверяет сервер через TUN (synthetic IP -> server loopback),
     # 64 КиБ дополнительно обнаруживают зависание после первых пакетов.
@@ -960,7 +969,7 @@ function Get-TransportEngineDiagnostic($Engine,[string]$Candidate,$Context) {
 # Bootstrap has no registered SSH key yet. Its tag was checked by HTTPS through
 # a temporary local proxy; Worker still verifies DNS/HTTPS and routes through TUN.
 function Get-VpnTransportState([string]$Root,$Settings) {
-    if($Settings.Transport.inviteBootstrap -and $Settings.Vpn.bootstrapTag){return [pscustomobject]@{active=[string]$Settings.Vpn.bootstrapTag;bootstrap=$true}}
+    if($Settings.Transport.bootstrap -and $Settings.Vpn.bootstrapTag){return [pscustomobject]@{active=[string]$Settings.Vpn.bootstrapTag;bootstrap=$true}}
     $status=Read-TransportJson (Join-Path $Root 'status/transport.json')
     if(-not $status.ok -or ([DateTime]::UtcNow-(Convert-TransportUtc $status.updatedAt)).TotalSeconds -gt 15){throw 'Транспорт ещё не проверен'}
     return $status

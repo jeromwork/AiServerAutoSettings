@@ -51,7 +51,10 @@ def channel(data):
     out=[v];tags=['vless-direct']
     if data.get('hop'):out += [dict(v,tag='vless-hop',detour='hop-ssh'),dict(data['hop'],type='ssh',tag='hop-ssh')];tags.append('vless-hop')
     out.append(dict(type='urltest',tag='server',outbounds=tags,url='https://www.gstatic.com/generate_204',interval='1m',tolerance=300))
-    return dict(log=dict(disabled=True),inbounds=[dict(type='direct',tag=tag,listen='127.0.0.1',listen_port=port,network='tcp',override_address='127.0.0.1',override_port=target) for tag,port,target in [('ssh',2222,22),('sync',22001,json.loads((s/'ports.json').read_text())['listen'])]],outbounds=out,route=dict(final='server',auto_detect_interface=True))
+    targets=[('ssh',2222,int(data.get('sshPort',22)))]
+    ports=json.loads((s/'ports.json').read_text()) if (s/'ports.json').exists() else {}
+    if ports.get('listen'):targets.append(('sync',22001,int(ports['listen'])))
+    return dict(log=dict(disabled=True),inbounds=[dict(type='direct',tag=tag,listen='127.0.0.1',listen_port=port,network='tcp',override_address='127.0.0.1',override_port=target) for tag,port,target in targets],outbounds=out,route=dict(final='server',auto_detect_interface=True))
 def ensure_cron():
     line=b'* * * * * bash "$HOME/.local/share/remote-disk/server-disk.sh" bootstrap >/dev/null 2>&1'
     try:

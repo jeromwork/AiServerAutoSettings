@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
-# Both entry points run under Invoke-WizardLock. Network trust comes ONLY from
-# an already pinned SSH session, or the administrator-delivered refresh EXE.
+# Both entry points run under the connection resource lock. Network trust comes ONLY from
+# an already pinned SSH session, or the configuration access key.
 function Get-WizardDeviceKey($Profile) {
     $keygen=Join-Path (Split-Path $Profile.sshExecutable -Parent) 'ssh-keygen.exe'
     if($env:OS -ne 'Windows_NT'){$keygen='ssh-keygen'}
@@ -10,7 +10,7 @@ function Get-WizardDeviceKey($Profile) {
     if($parts.Count -lt 2 -or $parts[0] -ne 'ssh-ed25519'){throw 'Нет собственного ключа ed25519 компьютера'}
     return ($parts[0]+' '+$parts[1])
 }
-function Get-WizardInviteSettings([string]$Root,[string]$Command='cat "$HOME/.config/remoteagents/invite-settings.json"',[string]$InputText='') {
+function Get-WizardConfigSettings([string]$Root,[string]$Command='export PATH="$HOME/.local/bin:$PATH"; remoteagents config sync',[string]$InputText='') {
     # Local transport may reach the server when its former direct address is down.
     $p=Read-TransportJson (Find-InstallProfile $Root);$c=Read-TransportJson (Join-Path $Root 'config.json')
     try{
@@ -20,7 +20,7 @@ function Get-WizardInviteSettings([string]$Root,[string]$Command='cat "$HOME/.co
     # No keyscan, accept-new, HTTP or other unverified fallback.
     return Invoke-WizardSsh $Root $Command $InputText 20
 }
-function Confirm-WizardInviteSettings([string]$Root) {
+function Confirm-WizardConfigSettings([string]$Root) {
     $pending=Join-Path $Root 'state/wizard-network.json'
     if(Test-Path $pending){
         $transaction=Read-TransportJson $pending
@@ -33,22 +33,23 @@ function Confirm-WizardInviteSettings([string]$Root) {
     }
     return $true
 }
-function Sync-WizardInviteSettings([string]$Root,[string]$Bundle,$Request) {
-    if(-not (Confirm-WizardInviteSettings $Root)){return @{ok=$true;changed=$false;summary='Ожидается проверка обновлённой связи; независимый откат включён'}}
-    $device=Join-Path $Root 'state/invite-device.json'
-    if(-not (Test-Path $device)){return @{ok=$true;changed=$false}}
-    $text=Get-WizardInviteSettings $Root
+function Sync-WizardConfigSettings([string]$Root,[string]$Bundle,$Request) {
+    if(-not (Confirm-WizardConfigSettings $Root)){return @{ok=$true;changed=$false;summary='Ожидается проверка обновлённой связи; независимый откат включён'}}
+    $text=Get-WizardConfigSettings $Root
     if($text.Length -gt 1048576){throw 'Слишком большой снимок настроек'}
     $data=ConvertFrom-Json (Convert-TransportLF $text)
     if($data.type -ne 'settings'){throw 'Неизвестный формат настроек сервера'}
     # The public catalog remains authoritative. Admin sync publishes the private
-    # caches/routes/channel; a later catalog removal needs no new invitation.
+    # caches/routes/channel; a later catalog removal needs no new access key.
     $source=Convert-TransportLF ([IO.File]::ReadAllText((Join-Path $Bundle 'transport/server-transport-catalog.py')))
-    $catalog=ConvertFrom-Json (Convert-TransportLF (Get-WizardInviteSettings $Root 'python3 -' $source))
+    $catalog=ConvertFrom-Json (Convert-TransportLF (Get-WizardConfigSettings $Root 'python3 -' $source))
     Assert-WizardCatalog $catalog
     $data.bootstrap|Add-Member -Force catalog $catalog
     $request=[pscustomobject]@{data=$data;trustedSsh=$true;askpassExecutable=[string]$Request.askpassExecutable}
-    return Update-WizardInviteSettings $Root $Bundle $request
+    $result=Update-WizardConfigSettings $Root $Bundle $request
+    $config=Read-TransportJson (Join-Path $Root 'config.json')
+    if($config.bridge.enabled -and $config.profile.device.name){Register-WizardDeviceName $Root ([string]$config.profile.device.name)}
+    return $result
 }
 function Set-WizardRefreshSnapshot([string]$Stage,$Data) {
     $initial=$Data.bootstrap;Assert-WizardCatalog $initial.catalog
@@ -81,22 +82,16 @@ function Set-WizardRefreshSnapshot([string]$Stage,$Data) {
     }
     Write-TransportJson (Join-Path $Stage 'config.json') $c -Private
 }
-function Update-WizardInviteSettings([string]$Root,[string]$Bundle,$Request) {
+function Update-WizardConfigSettings([string]$Root,[string]$Bundle,$Request) {
     $data=$Request.data;if(-not $data){$data=Read-TransportJson ([string]$Request.path)}
-    if($data.schema -ne 1 -or $data.type -notin @('settings','refresh')){throw 'Неизвестная схема обновления'}
+    if($data.schema -ne 1 -or $data.type -ne 'settings'){throw 'Неизвестная схема обновления'}
     $profileFile=Find-InstallProfile $Root
-    if(-not $profileFile){throw 'Этот компьютер ещё не подключён. Попросите приглашение для регистрации'}
+    if(-not $profileFile){throw 'Этот компьютер ещё не подключён. Примените конфиг с ключом доступа'}
     $profile=Read-TransportJson $profileFile;$own=Get-WizardDeviceKey $profile
-    $receipt=Join-Path $Root ('state/refresh-used-'+[string]$data.id+'.json')
-    if($data.type -eq 'refresh'){
-        if($own -cne [string]$data.deviceKey){throw 'Обновление выдано другому компьютеру. Попросите файл для этого устройства'}
-        if([string]$data.id -cnotmatch '\A[a-f0-9]{32}\z'){throw 'Повреждён идентификатор обновления'}
-        if(Test-Path $receipt){return @{ok=$true;changed=$false;summary='Это обновление уже применено'}}
-        if([DateTimeOffset]::Parse([string]$data.expiresUtc) -le [DateTimeOffset]::UtcNow){throw 'Срок обновления истёк. Попросите администратора выдать новое обновление'}
-    }elseif(-not $Request.trustedSsh){throw 'Настройки разрешены только через уже доверенный SSH-канал'}
+    if($data.type -ne 'settings' -or -not $Request.trustedSsh){throw 'Настройки разрешены только через уже доверенный SSH-канал'}
     if($data.workerUser -cne $profile.login){throw 'Обновление не может сменить рабочего пользователя'}
-    $fingerprint=Get-TransportFingerprint 'invite-settings' (ConvertTo-Json $data -Depth 40 -Compress)
-    $lastFile=Join-Path $Root 'state/invite-settings-version.json'
+    $fingerprint=Get-TransportFingerprint 'config-settings' (ConvertTo-Json $data -Depth 40 -Compress)
+    $lastFile=Join-Path $Root 'state/config-settings-version.json'
     if((Test-Path $lastFile) -and (Read-TransportJson $lastFile).hash -ceq $fingerprint){return @{ok=$true;changed=$false}}
     $stage=Join-Path $Root ('state/connection-generations/'+[guid]::NewGuid().ToString('N'))
     [void][IO.Directory]::CreateDirectory($stage);Protect-TransportPath $stage
@@ -104,22 +99,16 @@ function Update-WizardInviteSettings([string]$Root,[string]$Bundle,$Request) {
     Write-TransportJson (Join-Path $stage 'config.json') $previous -Private
     $copy=Copy-TransportObject $data;$copy|Add-Member -Force id ([guid]::NewGuid().ToString('N'))
     $source=Join-Path $stage 'settings.json';Write-TransportJson $source $copy -Private
-    $r=[pscustomobject]@{path=$source;refresh=$true;keyPath=[string]$profile.keyPath;askpassExecutable=[string]$Request.askpassExecutable;hopPasswordPipe=[string]$Request.hopPasswordPipe}
+    $r=[pscustomobject]@{path=$source;hostId=(Split-Path (Split-Path $profileFile -Parent) -Leaf);keyPath=[string]$profile.keyPath;askpassExecutable=[string]$Request.askpassExecutable;hopPasswordPipe=[string]$Request.hopPasswordPipe}
     # Stage pins/profile without ever generating a replacement device key.
-    $prepared=Initialize-WizardInvite $stage $r
+    $prepared=Initialize-WizardSettingsProfile $stage $r
     Update-LauncherConfig $stage {param($c) $c.transport|Add-Member -Force profilePath $prepared.file}
     Set-WizardRefreshSnapshot $stage $copy
-    if($Request.singBoxFile){
-        $bytes=[IO.File]::ReadAllBytes([string]$Request.singBoxFile)
-        if($bytes.Length -lt 2 -or $bytes[0] -ne 77 -or $bytes[1] -ne 90){throw 'Повреждена программа VPN в обновлении'}
-        $binary=Join-Path $stage 'sing-box.exe';[IO.File]::WriteAllBytes($binary,$bytes);Protect-TransportPath $binary
-        Update-LauncherConfig $stage {param($c) $c.transport|Add-Member -Force singBoxPath $binary}
-    }
     # First try every explicit route. If none connects, the transport preflight
     # must prove a new VPN/relay path with this same key before any live edit.
-    try{[void](Connect-WizardInvite $stage $r)}catch{
+    try{[void](Connect-WizardSnapshot $stage $r)}catch{
         $r|Add-Member deferProof $true
-        [void](Connect-WizardInvite $stage $r)
+        [void](Connect-WizardSnapshot $stage $r)
     }
     $candidate=Read-TransportJson (Join-Path $stage 'config.json');$nextProfile=Read-TransportJson $candidate.transport.profilePath
     # Replace the previous transport overlay with the route proved by this snapshot.
@@ -139,7 +128,7 @@ function Update-WizardInviteSettings([string]$Root,[string]$Bundle,$Request) {
     Invoke-TransportPreflight $stage $Bundle $candidate
     $session=[guid]::NewGuid().ToString('N');$mark=[DateTime]::UtcNow
     $task='RemoteAgents settings rollback '+(Get-TransportFingerprint 'settings' $Root.ToLowerInvariant()).Substring(0,16)
-    Write-TransportJson $networkReceipt @{schema=1;session=$session;task=$task;mark=$mark.ToString('o');previous=$previous.transport;profileFile=$profileFile;profile=$profile;vpn=$previous.vpn;serverRoute=$previous.wizard.serverRoute;refreshReceipt=$(if($data.type -eq 'refresh'){$receipt}else{''});versionFile=$lastFile;pin=$(if($resetPin){$oldPin}else{$null})} -Private -Durable
+    Write-TransportJson $networkReceipt @{schema=1;session=$session;task=$task;mark=$mark.ToString('o');previous=$previous.transport;profileFile=$profileFile;profile=$profile;vpn=$previous.vpn;serverRoute=$previous.wizard.serverRoute;versionFile=$lastFile;pin=$(if($resetPin){$oldPin}else{$null})} -Private -Durable
     try{Register-WizardRollback $Root $Bundle Network $session $task}catch{Remove-Item -LiteralPath $networkReceipt -Force;throw}
     try{
         # Stable profile filename is shared by Disk/control; their next reconnect
@@ -152,17 +141,10 @@ function Update-WizardInviteSettings([string]$Root,[string]$Bundle,$Request) {
             if($candidate.vpn){$c|Add-Member -Force vpn $candidate.vpn}
             if($candidate.wizard.serverRoute){$c.wizard|Add-Member -Force serverRoute $candidate.wizard.serverRoute}
         }
-        if(-not $Request.offlineInstaller){
-            $healthy=$false;$watch=[Diagnostics.Stopwatch]::StartNew()
-            while($watch.Elapsed.TotalSeconds -lt 120){
-                if(Test-WizardNetworkProof $Root $mark){$healthy=$true;break};Start-Sleep -Seconds 1
-            }
-            if(-not $healthy){throw 'Новая связь не подтверждена; прежние настройки восстанавливаются'}
-            Remove-Item -LiteralPath $networkReceipt -Force
-            Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyContinue
-        }
+        Wait-WizardWorkingProof $Root $mark
+        Remove-Item -LiteralPath $networkReceipt -Force
+        Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyContinue
         Write-TransportJson $lastFile @{hash=$fingerprint}
-        if($data.type -eq 'refresh'){Write-TransportJson $receipt @{ok=$true;deviceId=[string]$data.deviceId}}
         return @{ok=$true;changed=$true;summary='Настройки связи обновлены; VPN подхватит новые пути автоматически'}
     }catch{
         Undo-WizardNetwork $Root $session

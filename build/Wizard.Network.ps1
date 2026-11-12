@@ -14,14 +14,15 @@ function Read-WizardRelay([string]$Name) {
     $pipe=New-Object IO.Pipes.NamedPipeClientStream('.',$Name,[IO.Pipes.PipeDirection]::In)
     try{$pipe.Connect(5000);$reader=New-Object IO.StreamReader($pipe,(New-Object Text.UTF8Encoding($false)));$line=$reader.ReadLine();if($null -eq $line){throw 'Пароль не получен'};return $line}finally{$pipe.Dispose()}
 }
-function Get-WizardNetArgs($Profile,[string]$User) {
-    @('-F',$Profile.configPath,'-T','-l',$User,'-i',$Profile.keyPath,'-o','IdentitiesOnly=yes','-o','ConnectTimeout=5','-o','ConnectionAttempts=1','-o',('UserKnownHostsFile="'+$Profile.knownHostsPath.Replace('\','/')+'"'),'-o','GlobalKnownHostsFile=none','-o','StrictHostKeyChecking=yes','-o','ForwardAgent=no','-o','ClearAllForwardings=yes')
+function Get-WizardNetArgs($Profile,[string]$User,[string]$Root='') {
+    $route=@();if($Root){$route=@(Get-TransportSavedRouteOptions $Root $Profile)}
+    $route+@('-F',$Profile.configPath,'-T','-l',$User,'-i',$Profile.keyPath,'-o','IdentitiesOnly=yes','-o','ConnectTimeout=5','-o','ConnectionAttempts=1','-o',('UserKnownHostsFile="'+$Profile.knownHostsPath.Replace('\','/')+'"'),'-o','GlobalKnownHostsFile=none','-o','StrictHostKeyChecking=yes','-o','ForwardAgent=no','-o','ClearAllForwardings=yes')
 }
 function Get-WizardAdminMode([string]$Root,$Request) {
     $p=Read-TransportJson (Find-InstallProfile $Root)
     if(([string]$p.login).Trim() -ceq 'root'){return 'profile'}
     # Same key, root account: only works where the owner has authorized it for root.
-    try{[void](Invoke-DiskProcess $p.sshExecutable ((Get-WizardNetArgs $p 'root')+@('-o','BatchMode=yes',$p.serverAddress,'true')) '' -TimeoutSeconds 20);return 'rootkey'}catch{}
+    try{[void](Invoke-DiskProcess $p.sshExecutable ((Get-WizardNetArgs $p 'root' $Root)+@('-o','BatchMode=yes',$p.serverAddress,'true')) '' -TimeoutSeconds 20);return 'rootkey'}catch{}
     if($Request.passwordPipe){return 'password'}
     return 'command'
 }
@@ -33,21 +34,21 @@ function Invoke-WizardAdmin([string]$Root,$Request,[string]$Mode,[string]$Script
     $body=$script:WizardNetBegin+"`n"+(Convert-TransportLF $Script)
     $p=Read-TransportJson (Find-InstallProfile $Root)
     switch($Mode){
-        'profile' {return Invoke-WizardSsh $Root ('bash -c '+(ConvertTo-WizardShell $reader)) $body $Timeout}
-        'rootkey' {return Invoke-DiskProcess $p.sshExecutable ((Get-WizardNetArgs $p 'root')+@('-o','BatchMode=yes',$p.serverAddress,('bash -c '+(ConvertTo-WizardShell $reader)))) $body -TimeoutSeconds $Timeout}
+        'profile' {return Invoke-DiskProcess $p.sshExecutable ((Get-WizardNetArgs $p ([string]$p.login) $Root)+@('-o','BatchMode=yes',$p.serverAddress,('bash -c '+(ConvertTo-WizardShell $reader)))) $body -TimeoutSeconds $Timeout}
+        'rootkey' {return Invoke-DiskProcess $p.sshExecutable ((Get-WizardNetArgs $p 'root' $Root)+@('-o','BatchMode=yes',$p.serverAddress,('bash -c '+(ConvertTo-WizardShell $reader)))) $body -TimeoutSeconds $Timeout}
         'password' {
             $user=[string]$Request.adminLogin;if(-not $user){$user='root'}
             if($user -notmatch '\A[a-z_][a-z0-9_-]{0,31}\z'){throw 'Некорректный логин администратора'}
             $command='bash -c '+(ConvertTo-WizardShell $reader)
             if($user -cne 'root'){$body=(Read-WizardRelay ([string]$Request.passwordPipe))+"`n"+$body;$command="sudo -S -k -p '' "+$command}
-            return Invoke-WizardAskpass $p $user $command $body $Request $Timeout
+            return Invoke-WizardAskpass $p $user $command $body $Request $Timeout $Root
         }
     }
     throw 'Нет прав root: введите пароль или передайте команду администратору'
 }
-function Invoke-WizardAskpass($Profile,[string]$User,[string]$Command,[string]$InputText,$Request,[int]$Timeout) {
+function Invoke-WizardAskpass($Profile,[string]$User,[string]$Command,[string]$InputText,$Request,[int]$Timeout,[string]$Root='') {
     $si=New-Object Diagnostics.ProcessStartInfo
-    $si.FileName=$Profile.sshExecutable;$si.Arguments=(((Get-WizardNetArgs $Profile $User)+@('-o','BatchMode=no','-o','NumberOfPasswordPrompts=1','-o','PreferredAuthentications=password,keyboard-interactive','-o','PubkeyAuthentication=no',$Profile.serverAddress,$Command))|ForEach-Object {Quote-Disk $_}) -join ' '
+    $si.FileName=$Profile.sshExecutable;$si.Arguments=(((Get-WizardNetArgs $Profile $User $Root)+@('-o','BatchMode=no','-o','NumberOfPasswordPrompts=1','-o','PreferredAuthentications=password,keyboard-interactive','-o','PubkeyAuthentication=no',$Profile.serverAddress,$Command))|ForEach-Object {Quote-Disk $_}) -join ' '
     $si.UseShellExecute=$false;$si.CreateNoWindow=$true;$si.RedirectStandardInput=$true;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true
     $si.EnvironmentVariables['SSH_ASKPASS']=[string]$Request.askpassExecutable
     $si.EnvironmentVariables['SSH_ASKPASS_REQUIRE']='force';$si.EnvironmentVariables['DISPLAY']='remoteagents:0'

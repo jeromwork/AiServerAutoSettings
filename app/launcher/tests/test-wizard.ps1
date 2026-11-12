@@ -152,6 +152,8 @@ $collision=Copy-TransportObject $tree;$collision.entries[0].directory=$true
 Throws {Get-DiskUnion $collision $base 'Project'} 'file-directory conflict remains intact'
 function Initialize-WizardTransport($Root,$Bundle,$Transport){}
 function Invoke-TransportPreflight($Root,$Bundle,$Config){}
+function Start-WizardWorkingTransport($Root,$Bundle){}
+function Wait-WizardWorkingProof($Root,$Mark){}
 # First setup connection persists public settings.
 function Test-StatusFresh($Root,$Name){$false}
 [void](Invoke-WizardStep $root $repo 'Connection' ([pscustomobject]@{catalog=$merged;shared=$false}))

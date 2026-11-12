@@ -1,7 +1,15 @@
 ﻿#requires -Version 5.1
 # setup-vps-ssh.ps1 creates the OpenSSH key and profile; the wizard supplies a one-use in-memory askpass.
 function Write-WizardProgress([string]$Text) {
-    if($script:WizardProgressFile){[IO.File]::AppendAllText($script:WizardProgressFile,((@{text=$Text}|ConvertTo-Json -Compress)+"`n"),(New-Object Text.UTF8Encoding($false)))}
+    if(-not $script:WizardProgressFile){return}
+    $mutex=New-Object Threading.Mutex($false,('Global\RemoteAgentsProgress-'+(Get-TransportFingerprint 'progress' ([IO.Path]::GetFullPath($script:WizardProgressFile).ToLowerInvariant()))))
+    $locked=$false
+    try{
+        try{$locked=$mutex.WaitOne(5000)}catch [Threading.AbandonedMutexException]{$locked=$true}
+        if(-not $locked){throw 'Журнал прогресса занят'}
+        [void][IO.Directory]::CreateDirectory((Split-Path $script:WizardProgressFile -Parent))
+        [IO.File]::AppendAllText($script:WizardProgressFile,((@{text=$Text}|ConvertTo-Json -Compress)+"`n"),(New-Object Text.UTF8Encoding($false)))
+    }finally{if($locked){$mutex.ReleaseMutex()};$mutex.Dispose()}
 }
 # Messages and detection for a server that accepts TCP but never answers SSH (typically a provider filter).
 $script:WizardNoBannerPattern='banner exchange|kex_exchange_identification|Connection closed|Connection reset|timed out'
@@ -23,7 +31,7 @@ function New-WizardRoutes($Request,$Profile) {
     }
     $hop=$Request.hop
     if($hop -and $hop.ssh){
-            if($Request.strictHostKey){
+            if($Request.strictHostKey -or $hop.hostKey){
                 if([string]$hop.hostKey -cnotmatch '\A(ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa) [A-Za-z0-9+/=]+\z'){throw 'Некорректный ключ промежуточного сервера'}
                 $known=if($hop.knownHostsPath){[string]$hop.knownHostsPath}else{Join-Path (Split-Path $Profile.knownHostsPath -Parent) 'known_hosts-hop'}
                 $resolved=Get-TransportHopArguments $hop $known
@@ -33,14 +41,14 @@ function New-WizardRoutes($Request,$Profile) {
             }
         $keys=@(Get-WizardHopKeys ([string]$hop.keyFile))
         $variants=@($keys|ForEach-Object {@{key=$_;password=$false}})
-        if($hop.passwordPipe -or $hop.invitePasswordFile){$variants+=@{key='';password=$true}}
+        if($hop.passwordPipe -or $hop.routePasswordFile){$variants+=@{key='';password=$true}}
         if(-not $variants.Count){throw 'Нужен ключ для промежуточного сервера: выберите файл ключа на шаге «Сервер»'}
         foreach($v in $variants){
             $h=[pscustomobject]@{ssh=[string]$hop.ssh;keyFile=$v.key}
             if($hop.hostKey){$h|Add-Member hostKey $hop.hostKey}
             if($hop.knownHostsPath){$h|Add-Member knownHostsPath $hop.knownHostsPath}
             if($v.password){
-                if($hop.invitePasswordFile){$h|Add-Member invitePasswordFile ([string]$hop.invitePasswordFile)}else{$h|Add-Member passwordPipe ([string]$hop.passwordPipe)}
+                if($hop.routePasswordFile){$h|Add-Member routePasswordFile ([string]$hop.routePasswordFile)}else{$h|Add-Member passwordPipe ([string]$hop.passwordPipe)}
             }
             $opts=@(New-TransportRouteOptions ([pscustomobject]@{used='hop';hop=$h}) $Profile ([string]$Request.askpassExecutable) -AcceptNew:(-not $Request.strictHostKey))
             $routes+=@{kind='hop';title=('через промежуточный сервер '+$hop.ssh+$(if($v.password){' (пароль)'}else{''}));key=$v.key;password=$v.password;options=$opts}
@@ -68,7 +76,7 @@ function Receive-WizardProbe($Probe) {
     # As Invoke-DiskProcess: success or a key rejection by the server ("Сервер отклонил вход") means the route reaches SSH.
     if($code -eq 0 -or ($code -eq 255 -and $err -match 'Permission denied')){$Probe.State='ok';return}
     $Probe.State='fail'
-    if($err -match 'REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed'){$Probe.Why='Ключ хоста не совпал с приглашением или known_hosts';return}
+    if($err -match 'REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed'){$Probe.Why='Ключ хоста не совпал с конфигом или known_hosts';return}
     if($code -eq 255 -and $err -match $script:WizardNoBannerPattern){$Probe.Why='сервер не ответил по SSH'}else{$Probe.Why='нет связи'}
 }
 function Select-WizardRoute($Profile,[string]$Worker,$Routes) {
@@ -95,7 +103,7 @@ function Select-WizardRoute($Profile,[string]$Worker,$Routes) {
         foreach($q in $probes){if($q.State -eq 'pending'){Write-WizardProgress ('Проверяю: '+$q.Route.title+$(if($chosen){'… не дождался: выбран другой способ'}else{'… ✗ нет ответа за '+$script:WizardProbeTimeout+' с'}))}}
     }finally{foreach($q in $probes){if($q.Process){Stop-TransportProcess ([pscustomobject]@{Process=$q.Process})}}}
     if($chosen){$script:WizardRoute=$chosen.Route;$script:WizardReached=$true;return}
-    if($Profile.strictHostKey -and @($probes|Where-Object {$_.Why -like 'Ключ хоста*'}).Count){throw 'Ключ хоста не совпал с приглашением или known_hosts. Попросите администратора проверить ключ сервера'}
+    if($Profile.strictHostKey -and @($probes|Where-Object {$_.Why -like 'Ключ хоста*'}).Count){throw 'Ключ хоста не совпал с конфигом или known_hosts. Попросите администратора проверить ключ сервера'}
     $script:WizardNoBanner=$true;throw 'Сервер не ответил по SSH ни одним из способов (напрямую, через прокси, через промежуточный сервер). Проверьте прокси и промежуточный сервер или включите любой VPN в режиме TUN (OpenVPN, WireGuard…) и нажмите «Повторить». Режим «смешанный» (только прокси) ssh сам не проводит: для него нужен маршрут «Локальный прокси»'
 }
 function Save-WizardRoute([string]$Root,$Request,$Profile) {
@@ -115,6 +123,13 @@ function Save-WizardRoute([string]$Root,$Request,$Profile) {
         }
         $route.hop=[pscustomobject]$h
     }
+    # Both control scripts already read -F configPath. Persist the proved route
+    # there too, so bridge preparation and reverse SSH use the same hop/proxy.
+    $sshConfig="Host *`n    Port "+(Get-TransportServerPort $Profile)+"`n    ConnectTimeout 5`n"
+    foreach($option in @($r.options)){
+        if([string]$option -match '\A(ProxyCommand|HostName|HostKeyAlias)=(.+)\z'){$sshConfig+='    '+$Matches[1]+' '+$Matches[2]+"`n"}
+    }
+    Write-DiskUtf8 $Profile.configPath $sshConfig
     $value=[pscustomobject]$route
     Update-LauncherConfig $Root {param($c) Set-ConfigDefault $c wizard ([pscustomobject]@{});$c.wizard|Add-Member -Force serverRoute $value}
 }
@@ -178,6 +193,7 @@ function Connect-WizardExistingKey([string]$Root,$Profile,[string]$User,[string]
     return $false
 }
 function Connect-WizardServer([string]$Root,[string]$Bundle,$Request) {
+    $imported=Connect-WizardProfileServer $Root $Request;if($imported){return $imported}
     $address=[string]$Request.address;$user=[string]$Request.login;if(-not $user){$user='root'}
     if($address -notmatch '\A[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}\z' -or $user -notmatch '\A[a-z_][a-z0-9_-]{0,31}\z'){throw 'Укажите адрес сервера и корректный логин SSH'}
     $old=Find-InstallProfile $Root;$previous=$null
@@ -186,7 +202,7 @@ function Connect-WizardServer([string]$Root,[string]$Bundle,$Request) {
         try{[void](Invoke-WizardSsh $Root 'true' '' 10);Update-LauncherConfig $Root {param($c) if(-not $c.transport.profilePath -and -not $c.wizard.pendingProfile){Set-ConfigDefault $c transport ([pscustomobject]@{});$c.transport|Add-Member -Force profilePath $old}};return $old}catch{}
     }
     $id=(Get-TransportFingerprint $address $user).Substring(0,20)
-    $dir=Join-Path $Root ('ssh-profiles/'+$id+'/project-connections/control')
+    $dir=Join-Path $Root ('ssh-profiles/'+$id+'/project-connections/'+(Get-WizardHostId $Root))
     [void][IO.Directory]::CreateDirectory($dir);Protect-TransportPath $dir
     $file=Join-Path $dir 'ssh-transport.json'
     $p=[pscustomobject]@{sshExecutable=@(Get-Command ssh -CommandType Application -ErrorAction Stop)[0].Source;serverAddress=$address;login=$user;keyPath=(Join-Path $dir 'id_ed25519');knownHostsPath=(Join-Path $dir 'known_hosts');configPath=(Join-Path $dir 'ssh.conf')}
@@ -254,21 +270,26 @@ function Initialize-WizardTransport([string]$Root,[string]$Bundle,$Transport) {
         $file=Join-Path $Root ('state/wizard-channel-'+(Get-TransportFingerprint $p.serverAddress $p.login).Substring(0,16)+'.json')
         # The server exports its VLESS channel when it has one.
         Send-WizardHelpers $Root $Bundle
-        $hasVless=Invoke-WizardSsh $Root 'test -r /etc/sing-box/config.json && echo yes || echo no'
+        $hasVless=Invoke-WizardSsh $Root 'test -r "${REMOTE_DISK_CHANNEL_SOURCE:-/etc/sing-box/config.json}" && echo yes || echo no'
         if($hasVless.Trim() -eq 'yes'){
             $request=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((@{server=$p.serverAddress}|ConvertTo-Json -Compress)))
             $channel=ConvertFrom-Json (Convert-TransportLF (Invoke-WizardSsh $Root ('bash "$HOME/.local/share/remote-disk/server-disk.sh" channel-config '+$request)))
         }else{
             $ports=ConvertFrom-Json (Convert-TransportLF (Invoke-WizardSsh $Root 'cat "$HOME/.local/share/remote-disk/ports.json" 2>/dev/null || echo "{}"'))
-            if([int]$ports.listen -lt 1 -or [int]$ports.listen -gt 65535){
-                $op=(Get-WizardOperation $Root $Bundle 'status' @('disk')).disk
-                if($op.state -eq 'running'){$script:WizardPendingDisk=$op;throw 'Сервер диска ещё устанавливается'}
-                throw 'Нет порта сервера Disk. Включите установку недостающего на шаге «Сервер» и повторите'
-            }
-            $channel=@{inbounds=@(@{tag='sync';override_port=[int]$ports.listen});outbounds=@()}
+            $inbounds=@()
+            if([int]$ports.listen -ge 1 -and [int]$ports.listen -le 65535){$inbounds+=@{tag='sync';override_port=[int]$ports.listen}}
+            $channel=@{inbounds=$inbounds;outbounds=@()}
         }
         Write-TransportJson $file $channel -Private
         $Transport|Add-Member -Force channelPath $file
+    }
+    Ensure-WizardTransportBinary $Root $Bundle $Transport
+}
+function Ensure-WizardTransportBinary([string]$Root,[string]$Bundle,$Transport) {
+    if(-not $Transport.singBoxPath -or -not (Test-Path $Transport.singBoxPath)){
+        foreach($candidate in @((Join-Path $Root 'transport-bin/sing-box.exe'),(Join-Path $Bundle 'transport/sing-box.exe'),(Join-Path $Bundle 'transport-bin/sing-box.exe'))){
+            if(Test-Path -LiteralPath $candidate -PathType Leaf){$Transport|Add-Member -Force singBoxPath $candidate;return}
+        }
     }
     if(-not $Transport.singBoxPath -or -not (Test-Path $Transport.singBoxPath)){
         Write-WizardProgress 'Подготавливаю программу связи (загрузка с проверкой SHA-256)…'

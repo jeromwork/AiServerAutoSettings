@@ -2,9 +2,15 @@
 # Shared helpers of the setup wizard and uninstall. Small Windows adapters are replaceable in offline tests.
 . (Join-Path (Split-Path $PSScriptRoot -Parent) 'transport/Transport.Common.ps1')
 function Write-SetupLog([string]$Root,[string]$Event,[string]$Detail=''){
+    $mutex=New-Object Threading.Mutex($false,('Global\RemoteAgentsSetupLog-'+(Get-TransportFingerprint 'log' (Get-TransportHome $Root).ToLowerInvariant())))
+    $locked=$false
+    try{
+        try{$locked=$mutex.WaitOne(5000)}catch [Threading.AbandonedMutexException]{$locked=$true}
+        if(-not $locked){throw 'Журнал настройки занят'}
     $dir=Join-Path $Root 'logs';[void][IO.Directory]::CreateDirectory($dir);$file=Join-Path $dir 'setup.log'
     if((Test-Path $file) -and (Get-Item $file).Length -gt 1MB){Move-Item $file ($file+'.1') -Force}
     [IO.File]::AppendAllText($file,([DateTime]::UtcNow.ToString('o')+' '+$Event+$(if($Detail){' '+$Detail}else{''})+"`n"),(New-Object Text.UTF8Encoding($false)))
+    }finally{if($locked){$mutex.ReleaseMutex()};$mutex.Dispose()}
 }
 function Update-LauncherConfig([string]$Root,[scriptblock]$Edit){
     $mutex=New-Object Threading.Mutex($false,('Global\RemoteAgentsConfig-'+(Get-TransportFingerprint 'config' (Get-TransportHome $Root).ToLowerInvariant())))
