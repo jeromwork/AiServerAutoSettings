@@ -8,13 +8,17 @@ using System.Windows.Forms;
 
 namespace RemoteAgents.Launcher
 {
-    // One lazy tree with a separately painted status column. The saved allowlist remains authoritative.
+    // A lazy pane with a separately painted status column. The saved allowlist remains authoritative.
     internal sealed class DiskFolderTree
     {
         internal readonly TreeView Tree;
         internal DiskTreeSelection Selection = new DiskTreeSelection(new string[0]);
         internal bool Changing { get; private set; }
         internal bool Loaded;
+        internal bool ShowExternal = true;
+        internal Func<string, bool> VisiblePath;
+        readonly Dictionary<string, Dictionary<string, object>> levels = new Dictionary<string, Dictionary<string, object>>(StringComparer.Ordinal);
+        internal event Action<string, Dictionary<string, object>> LevelLoaded;
         internal DiskFoldersModel Model;
         readonly Func<string, Task<Dictionary<string, object>>> level;
         readonly Func<Func<Task>, Task> guard; readonly Func<bool> busy; readonly Action<string> append;
@@ -107,7 +111,7 @@ namespace RemoteAgents.Launcher
             try {
                 var selected = select ?? SelectedExternal;
                 if (externalRoot != null) externalRoot.Remove(); externalRoot = null;
-                var entries = Model.ExternalRows.ToArray();
+                var entries = ShowExternal ? Model.ExternalRows.ToArray() : new DiskExternalChoice[0];
                 if (entries.Length > 0) {
                     externalRoot = new TreeNode("С этого компьютера"); Tree.Nodes.Add(externalRoot);
                     foreach (var entry in entries) {
@@ -119,14 +123,15 @@ namespace RemoteAgents.Launcher
                 RefreshChecks();
             } finally { Changing = wasChanging; }
         }
-        void AddLevel(Dictionary<string, object> union, TreeNode parent)
+        void AddLevel(Dictionary<string, object> union, TreeNode parent, bool observe = true)
         {
             string prefix = parent == null ? "" : (string)parent.Tag;
             var children = new List<TreeNode>();
-            if (Model != null) Model.Level(prefix, union);
+            if (observe) { levels[prefix] = union; if (Model != null) Model.Level(prefix, union); }
             foreach (var r in Json.Array(Json.Get(union, "rows"))) {
                 var row = Json.Map(r); string path = Json.Str(row, "path"); int slash = path.LastIndexOf('/');
                 if ((slash < 0 ? "" : path.Substring(0, slash)) != prefix) throw new InvalidDataException("Сервер вернул другой уровень дерева");
+                if (VisiblePath != null && !VisiblePath(path)) continue;
                 var n = new TreeNode(slash < 0 ? path : path.Substring(slash + 1)) { Tag = path };
                 if (slash < 0 && Json.Str(row, "kind") == "file") { n.Tag = ""; n.Text += " — поместите в папку проекта для синхронизации"; }
                 n.Name = n.Text;
@@ -137,20 +142,55 @@ namespace RemoteAgents.Launcher
             Selection.Level(prefix, children.Where(n => n.Tag is string && ((string)n.Tag).Length > 0).Select(n => (string)n.Tag), Json.Bool(union, "truncated"));
             var target = parent == null ? Tree.Nodes : parent.Nodes;
             target.Clear(); target.AddRange(children.ToArray());
-            if (parent == null) RefreshExternal(); else RefreshChecks();
-            if (Json.Bool(union, "truncated")) append("Показана часть большой папки. Отметка папки включает скрытые элементы. Для частичного выбора снимите всю папку, затем отметьте нужные видимые элементы.");
+            if (parent == null) RefreshExternal(); else if (observe) RefreshChecks();
+            if (observe && Json.Bool(union, "truncated")) append("Показана часть большой папки. Отметка папки включает скрытые элементы. Для частичного выбора снимите всю папку, затем отметьте нужные видимые элементы.");
+        }
+        internal void Reset()
+        {
+            Loaded = false; levels.Clear(); rows.Clear(); statuses.Clear(); externalRoot = null;
+            Changing = true; try { Tree.Nodes.Clear(); } finally { Changing = false; }
         }
         internal void ShowRoot(Dictionary<string, object> data, IEnumerable<string> preset = null)
         {
-            Loaded = false; rows.Clear(); statuses.Clear(); externalRoot = null;
+            Loaded = false; levels.Clear(); rows.Clear(); statuses.Clear(); externalRoot = null;
             if (Model == null) Selection = new DiskTreeSelection(preset ?? Json.Strings(Json.Get(Json.Map(Json.Get(data, "selection")), "paths")));
             Changing = true; try { AddLevel(Json.Map(Json.Get(data, "union")), null); Loaded = true; } finally { Changing = false; }
             append("Папки загружены. Вложенные папки появятся при раскрытии. Наличие в обоих местах ещё не означает, что передача завершена.");
+        }
+        internal void RememberLevel(string path, Dictionary<string, object> union)
+        { levels[path] = union; RefreshProjection(); }
+        internal void RefreshProjection()
+        {
+            Dictionary<string, object> root;
+            if (!levels.TryGetValue("", out root)) { RefreshExternal(); return; }
+            string selected = SelectedPath; var entry = SelectedExternal;
+            var expanded = new HashSet<string>(All(Tree.Nodes).Where(n => n.IsExpanded && n.Tag is string).Select(n => (string)n.Tag));
+            bool wasChanging = Changing; Changing = true; Tree.BeginUpdate();
+            try {
+                rows.Clear(); statuses.Clear(); externalRoot = null;
+                AddLevel(root, null, false);
+                Action<TreeNode> fill = null;
+                fill = node => {
+                    string path = node.Tag as string; Dictionary<string, object> data;
+                    // Root files carry an empty tag; only real folders get a cached level, otherwise the root would nest into itself.
+                    if (!string.IsNullOrEmpty(path) && levels.TryGetValue(path, out data)) {
+                        AddLevel(data, node, false);
+                    }
+                    foreach (TreeNode child in node.Nodes) fill(child);
+                    if (path != null && expanded.Contains(path)) node.Expand();
+                    if (!string.IsNullOrEmpty(path) && path == selected || entry != null && node.Tag == entry) Tree.SelectedNode = node;
+                };
+                foreach (TreeNode node in Tree.Nodes) fill(node);
+                RefreshChecks();
+            } finally { Tree.EndUpdate(); Changing = wasChanging; }
         }
         async Task LoadChildren(TreeNode parent)
         {
             var data = await level((string)parent.Tag);
             Changing = true; try { AddLevel(Json.Map(Json.Get(data, "union")), parent); } finally { Changing = false; }
+            // A projection rebuilt during the request detached this node: rebuild so the visible copy gets the loaded level.
+            if (parent.TreeView == null) RefreshProjection();
+            if (LevelLoaded != null) LevelLoaded((string)parent.Tag, Json.Map(Json.Get(data, "union")));
             string rejected = Json.Str(data, "unsupportedName");
             if (rejected.Length > 0) append("Имя «" + rejected + "» не подходит для сервера (допустимы буквы, цифры, пробел, точка, _ и -). Переименуйте папку, чтобы синхронизировать её; показано только локальное содержимое.");
         }

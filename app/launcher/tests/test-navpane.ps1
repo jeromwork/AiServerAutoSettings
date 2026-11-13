@@ -11,9 +11,11 @@ function Assert($ok,$name){if(-not $ok){throw ('FAIL '+$name)};$script:count++;W
 
 Assert ((Get-Command Install-DiskNavPane -ErrorAction SilentlyContinue) -and (Get-Command Remove-DiskNavPane -ErrorAction SilentlyContinue)) 'Disk.Common loads the nav pane module'
 # Off Windows the real adapters touch nothing and installing is refused, not faked.
+if(-not (Test-DiskNavPaneWindows)){
 Assert (-not (Test-DiskNavPane (Join-Path $TestHome 'x')).installed) 'non-Windows reports not installed'
 $refused=$false;try{Install-DiskNavPane (Join-Path $TestHome 'x')}catch{$refused=$true};Assert $refused 'non-Windows install refused'
 Remove-DiskNavPane;Assert $true 'non-Windows remove is a no-op'
+}
 
 $script:reg=@{};$script:notify=0;$script:kinds=@{}
 function Test-DiskNavPaneWindows {$true}
@@ -71,8 +73,29 @@ Remove-DiskNavPane;Assert ($script:reg.Count -eq 2) 'remove is idempotent'
 $other=Join-Path $TestHome 'Third';[void][IO.Directory]::CreateDirectory($other);Set-DiskBase $other
 Assert (@($script:reg.Keys|Where-Object {$_.Contains($guid)}).Count -eq 0) 'root change does not install a removed entry'
 
+Assert (Ensure-DiskNavPane $other) 'auto-install restores an absent entry'
+$beforeNotify=$script:notify
+Assert (Ensure-DiskNavPane $other) 'auto-install accepts a complete entry'
+Assert ($script:notify -eq $beforeNotify) 'auto-install performs no writes or notification when complete'
+$script:reg[$cls+'\ShellFolder|FolderValueFlags']=0
+Assert (Ensure-DiskNavPane $other) 'auto-install repairs a partial entry'
+Assert ((Test-DiskNavPane $other).ok) 'repaired entry is checked'
+Remove-DiskNavPane
 $script:fail=$true
 function Set-DiskNavPaneValue([string]$Key,[string]$Name,$Value,[string]$Kind){if($script:fail -and $Name -eq 'TargetFolderPath'){return};$script:reg[$Key+'|'+$Name]=$Value}
 $partial=$false;try{Install-DiskNavPane $other}catch{$partial=$true};Assert $partial 'incomplete write is reported as failure'
+$script:logged=0
+function Write-DiskLog {param($Message,$Failure) $script:logged++}
+Assert (-not (Ensure-DiskNavPane $other)) 'auto-install failure is non-fatal'
+Assert ($script:logged -eq 1) 'auto-install failure is logged'
+function Get-DiskBase {throw 'base.txt locked'}
+Assert (-not (Ensure-DiskNavPane)) 'unreadable Disk base stays inside the guard'
+Assert ($script:logged -eq 2) 'unreadable Disk base is logged'
 Remove-DiskNavPane
+$wizard=[IO.File]::ReadAllText((Join-Path $repo 'build/Wizard.Common.ps1'))
+$monitor=[IO.File]::ReadAllText((Join-Path $repo 'disk/Disk.Status.ps1'))
+$sync=[IO.File]::ReadAllText((Join-Path $repo 'disk/Sync-RemoteDiskFolders.ps1'))
+Assert ($wizard.Contains('[void](Ensure-DiskNavPane $base)')) 'config and wizard Disk action ensure entry'
+Assert ($monitor.Contains('[void](Ensure-DiskNavPane)')) 'enabled Disk monitor ensures entry at startup and periodically'
+Assert ($sync.Contains('[void](Ensure-DiskNavPane ')) 'folder reconciliation ensures entry even before engine probe'
 Write-Output ('navpane: '+$script:count+' passed')

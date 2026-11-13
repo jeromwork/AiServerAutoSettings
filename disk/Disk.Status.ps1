@@ -115,11 +115,15 @@ $engineOwned=$false
 try {
 try{$engineOwned=$engineMutex.WaitOne(0)}catch [Threading.AbandonedMutexException]{$engineOwned=$true}
 if(-not $engineOwned){throw 'Надзор Syncthing уже работает'}
-$script:DiskEngine=$null
+$script:DiskEngine=$null;$nextNavPaneCheck=[DateTime]::MinValue
 do {
     if(Test-Path (Join-Path $LauncherHome 'state/disk-reconfigure')){
         Write-TransportJson (Join-Path $LauncherHome 'status/disk.json') @{ok=$false;summary='Диск отключён для смены сервера; файлы сохранены';updatedAt=[DateTime]::UtcNow.ToString('o')}
         if($Once){break};Start-Sleep -Seconds 1;continue
+    }
+    if([DateTime]::UtcNow -ge $nextNavPaneCheck){
+        [void](Ensure-DiskNavPane)
+        $nextNavPaneCheck=[DateTime]::UtcNow.AddMinutes(5)
     }
     try{Start-DiskHeadless}catch{Write-DiskMonitorLog 'engine.start.failed'}
     $pauseFile=Join-Path $LauncherHome 'state/disk-pause.json'

@@ -95,3 +95,16 @@ function Test-DiskNavPane([string]$Base) {
     }
     [pscustomobject]@{installed=$installed;target=[string]$target;ok=$ok}
 }
+
+# Cosmetic per-user registration: never interrupt the engine or a config apply.
+function Ensure-DiskNavPane([string]$Base) {
+    try{
+        if(-not $Base){$Base=Get-DiskBase} # resolved inside the guard: an unreadable base.txt must not escape
+        if(-not (Test-DiskNavPaneWindows)){return $false}
+        if(-not (Test-DiskNavPane $Base).ok){Install-DiskNavPane $Base}
+        return $true
+    }catch{
+        try{Write-DiskLog 'Значок Disk в Проводнике' $_}catch{}
+        return $false
+    }
+}

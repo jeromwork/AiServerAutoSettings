@@ -32,7 +32,15 @@ namespace RemoteAgents.Launcher
                 Check(TrayMenuModel.HappierUrl(config, empty) == url, "URL comes from each supplied config");
                 Check(TrayMenuModel.Build(config, empty, transport, health)[2].Enabled, "configured URL enables item");
             }
+            Check(TrayMenuModel.LeftClickAction(empty, empty) == "open", "left click without URL opens window");
+            Check(TrayMenuModel.AcceptLeftClick(0, 501, 500), "NotifyIcon single click has Clicks=0");
+            Check(!TrayMenuModel.AcceptLeftClick(0, 200, 500), "NotifyIcon repeat suppressed within double click interval");
+            Check(TrayMenuModel.AcceptLeftClick(1, 501, 500), "first or later single click accepted");
+            Check(!TrayMenuModel.AcceptLeftClick(1, 200, 500) && !TrayMenuModel.AcceptLeftClick(2, 200, 500), "double click cannot launch second tab");
+            Check(!TrayMenuModel.AcceptLeftClick(1, 500, 500), "double click boundary suppressed");
             var account = Data("{\"webappUrl\":\"https://account.example.invalid/\"}");
+            Check(TrayMenuModel.LeftClickAction(empty, account) == "happier", "left click follows account URL");
+            Check(TrayMenuModel.LeftClickAction(Data("{\"happier\":{\"webappUrl\":\"file:///tmp/app\"}}"), account) == "open", "invalid configured URL falls back to window");
             Check(TrayMenuModel.HappierUrl(empty, account) == "https://account.example.invalid/", "fallback to account state");
             Check(TrayMenuModel.HappierUrl(Data("{\"happier\":{\"webappUrl\":\"https://config.example.invalid/\"}}"), account) == "https://config.example.invalid/", "config takes priority");
             foreach (string url in new[] { "", "not a url", "file:///tmp/app", "javascript:alert(1)", "https://user:pass@example.invalid" })
