@@ -286,7 +286,8 @@ def apply(data):
                 'Изменился фильтр действующего bisync: нужна отдельная проверка и явная повторная инициализация.')
     cfg['filterSha256'] = hashlib.sha256(template.encode()).hexdigest()
     # Stop before changing config/state; no password ever enters argv, environment, or journal.
-    systemctl('stop', UNIT)
+    # On the first install the unit does not exist yet (systemctl exits 5) — nothing to stop.
+    systemctl('stop', UNIT, check=False)
     with lock(BASE / 'sync.lock'):
         obscured = run([rclone, 'obscure', '-'], input=data['password'] + '\n', env=tool_env()).stdout.strip()
         require(bool(obscured) and '\n' not in obscured, 'Не удалось скрыть пароль через rclone obscure.')
