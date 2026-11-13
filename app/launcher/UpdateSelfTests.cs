@@ -34,6 +34,15 @@ namespace RemoteAgents.Launcher
             var resultPath = Path.Combine(target, "selftest-result.json"); passed.Clear();
             try {
                 var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc); string home = Path.Combine(work, "home");
+                string shared = Path.Combine(work, "status", "transport.json");
+                Files.Atomic(shared, "{\"generation\":0,\"payload\":\"" + new string('x', 65536) + "\"}\r\n");
+                var writer = System.Threading.Tasks.Task.Run(() => {
+                    for (int i = 1; i <= 200; i++) Files.Atomic(shared, "{\"generation\":" + i + ",\"payload\":\"" + new string('x', 65536) + "\"}\r\n");
+                });
+                int reads = 0;
+                do { var snapshot = Json.Read(shared); if (Json.Str(snapshot, "payload").Length != 65536) throw new InvalidDataException("partial status"); reads++; } while (!writer.IsCompleted || reads < 200);
+                writer.GetAwaiter().GetResult();
+                Check("status-reader-during-atomic-replacement-crlf", reads >= 200 && Json.Int(Json.Read(shared), "generation", -1) == 200);
                 var e = new UpdateEngine(home, "1.0.0.0", () => now);
                 var one = Archive(work, "1.0.0"); Check("initial-stage", Stage(e, one, work) == "1.0.0"); e.Activate(one.Version);
                 Check("initial-activate", e.Current == "1.0.0" && !e.Pending);

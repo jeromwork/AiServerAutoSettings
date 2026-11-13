@@ -7,7 +7,21 @@ function Get-TransportHome([string]$Path){
     $full
 }
 function Convert-TransportLF([string]$Text) {$Text.Replace("`r",'').TrimStart([char]0xFEFF)}
-function Read-TransportJson([string]$Path) {ConvertFrom-Json (Convert-TransportLF ([IO.File]::ReadAllText($Path)))}
+function Read-TransportJson([string]$Path) {
+    # Держим открытый снимок до конца чтения: атомарная замена оставляет его целым.
+    for($attempt=0;;$attempt++){
+        $stream=$null;$reader=$null
+        try{
+            $stream=New-Object IO.FileStream($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+            $reader=New-Object IO.StreamReader($stream,[Text.Encoding]::UTF8,$true)
+            return (ConvertFrom-Json (Convert-TransportLF $reader.ReadToEnd()))
+        }catch [IO.IOException]{
+            # ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION. Другие ошибки не скрываем.
+            if(($_.Exception.GetBaseException().HResult -band 0xffff) -notin @(32,33) -or $attempt -ge 20){throw}
+            Start-Sleep -Milliseconds 50
+        }finally{if($reader){$reader.Dispose()}elseif($stream){$stream.Dispose()}}
+    }
+}
 function Convert-TransportUtc($Value) {
     if($Value -is [DateTimeOffset]){return $Value.UtcDateTime}
     if($Value -is [DateTime]){return $Value.ToUniversalTime()}
