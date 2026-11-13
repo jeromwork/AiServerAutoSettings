@@ -18,7 +18,7 @@ namespace RemoteAgents.Launcher
             case JsonValueKind.Number: return e.GetDecimal(); default: return null;
         } }
         public static Dictionary<string, object> Map(object value) { return value as Dictionary<string, object> ?? new Dictionary<string, object>(); }
-        public static Dictionary<string, object> Read(string path) { return Map(Parse(File.ReadAllText(path))); }
+        public static Dictionary<string, object> Read(string path) { return Map(Parse(Files.ReadSharedText(path))); }
         public static object Get(Dictionary<string, object> map, string key) { object v; return map != null && map.TryGetValue(key, out v) ? v : null; }
         public static string Str(Dictionary<string, object> map, string key, string fallback = "") { return Convert.ToString(Get(map, key), CultureInfo.InvariantCulture) ?? fallback; }
         public static string Text(Dictionary<string, object> map, string key, string fallback) { var s = Str(map, key); return s.Length == 0 ? fallback : s; }

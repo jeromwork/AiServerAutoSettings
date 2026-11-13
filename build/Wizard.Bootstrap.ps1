@@ -322,6 +322,7 @@ function Wait-WizardChannel([string]$Root,[int]$Port,[int]$TimeoutSeconds=25,$Da
                 }
             }
             if($status.error){$last=Protect-TransportText ([string]$status.error)}
+            if($status.portConflict){throw $status.portConflict.message}
             if($candidates.Count -and -not @($candidates|Where-Object {$_.state -ne 'fail'}).Count){
                 $reasons=@($candidates|ForEach-Object {([string]$_.tag)+': '+$(if($_.diagnostic.reason -match '^[a-z][a-z0-9-]{0,63}$'){$_.diagnostic.reason}else{'fail'})})
                 throw ('все варианты канала не прошли: '+(Protect-TransportText ($reasons -join ', ')))

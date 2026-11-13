@@ -3,6 +3,7 @@
 Запуск: python3 transport/test-transport-daemon.py /path/to/pwsh
 Это проверка оркестрации на Linux, не приёмка настоящей Windows/SSH.
 """
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -38,6 +39,10 @@ with tempfile.TemporaryDirectory(prefix='transport-daemon-test-') as tmp:
     with socket.socket() as s:
         s.bind(('127.0.0.1', 0))
         api_port = s.getsockname()[1]
+    optional = socket.socket()
+    optional.bind(('127.0.0.1', 0))
+    optional.listen()
+    optional_port = optional.getsockname()[1]
     ssh = root / 'ssh.exe'
     sb = root / 'sing-box'
     write_exe(ssh, '''import os, sys, time
@@ -45,6 +50,9 @@ from pathlib import Path
 root=Path(__file__).parent
 # Туннель для теста остановки дочерних: не читает приватных данных.
 if '-N' in sys.argv:
+    # Real occupied optional SOCKS: the daemon must still start sing-box/VLESS.
+    if (root/'optional-busy').exists():
+        os.write(2,b'bind: Address already in use\\r\\n'); sys.exit(1)
     (root/'tunnel.pid').write_text(str(os.getpid()))
     while True: time.sleep(.1)
 with (root/'probes.pid').open('a') as ledger: ledger.write(str(os.getpid())+'\\n')
@@ -64,6 +72,12 @@ root=Path(__file__).parent
 if sys.argv[1]=='check': sys.exit(0)
 n=int((root/'starts').read_text())+1 if (root/'starts').exists() else 1
 (root/'starts').write_text(str(n)); (root/'engine.pid').write_text(str(os.getpid()))
+if (root/'other-failure').exists():
+    os.write(2,b'FATAL invalid test configuration\\r\\n'); sys.exit(1)
+if (root/'bind-failure').exists():
+    port=(root/'bind-failure').read_text().strip() or '2222'
+    os.write(2,('FATAL start inbound/direct[ssh]: listen tcp 127.0.0.1:'+port+': bind: Only one usage of each socket address\\r\\n').encode())
+    sys.exit(1)
 c=json.loads(Path(sys.argv[-1]).read_text())
 api=c['experimental']['clash_api']; port=int(api['external_controller'].split(':')[-1])
 class API(http.server.BaseHTTPRequestHandler):
@@ -89,7 +103,7 @@ Server(('127.0.0.1',port),API).serve_forever()
     transport = dict(profilePath=str(root / 'profile.json'), channelPath=str(root / 'channel.json'),
                      singBoxPath=str(sb), bindPhysical=False, metered='false', openSsh=True,
                      activeIntervalSec=1, rankIntervalSec=1800, stallSeconds=2,
-                     probeTimeoutSec=12, restartDelaySec=1, apiPort=api_port)
+                     probeTimeoutSec=12, restartDelaySec=1, apiPort=api_port, socksPortBase=optional_port)
     (root / 'config.json').write_text(json.dumps(dict(version=1, transport=transport)))
     env = dict(os.environ, LOCALAPPDATA=str(root))
     children = []
@@ -101,6 +115,9 @@ Server(('127.0.0.1',port),API).serve_forever()
             return json.loads((root / 'status/transport.json').read_text())
         except (OSError, ValueError):
             return {}
+
+    def retry_delay(s):
+        return (datetime.fromisoformat(s['retryAt']) - datetime.fromisoformat(s['updatedAt'])).total_seconds()
 
     def start(parent_pid=0):
         p = subprocess.Popen([PWSH, '-NoLogo', '-NoProfile', '-File', str(DAEMON), '-Home', str(root),
@@ -117,10 +134,16 @@ Server(('127.0.0.1',port),API).serve_forever()
             return True
 
     try:
+        (root/'optional-busy').touch()
         daemon = start()
+        until(lambda: status().get('ok') and status().get('active')=='vless-direct')
+        assert int((root/'starts').read_text()) == 1, 'Занятый порт необязательного SSH заблокировал sing-box'
+        optional.close()
+        (root/'optional-busy').unlink()
         until(lambda: status().get('ok'))
         until(lambda: len(status().get('candidates', [])) == 3 and all(c['state']=='ok' for c in status()['candidates']))
         assert status().get('summary') and 'нет связи' not in status()['summary']
+        until(lambda: (root/'tunnel.pid').exists())
         initial=status()['active']
         ports={'vless-direct':26000,'singbox-ssh-direct':26001,'openssh-direct':26002}
         first_engine = int((root / 'engine.pid').read_text())
@@ -135,10 +158,18 @@ Server(('127.0.0.1',port),API).serve_forever()
                             '-Home', str(root), *args], env=env, check=True, capture_output=True)
 
         pinned='singbox-ssh-direct' if initial != 'singbox-ssh-direct' else 'openssh-direct'
-        cli('Set-TransportPath.ps1', '-Tag', pinned)
+        # Observe publication while CLI is alive: its PowerShell teardown can outlast the daemon's response.
+        pin_cli = subprocess.Popen([PWSH, '-NoLogo', '-NoProfile', '-File', str(DAEMON.with_name('Set-TransportPath.ps1')),
+                                    '-Home', str(root), '-Tag', pinned], env=env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        children.append(pin_cli)
+        until(lambda: (root/'state/transport-pin.json').exists())
         started=(root/'state/transport-pin.json').stat().st_mtime
-        until(lambda: status().get('mode')=='pinned' and status().get('active')==pinned, seconds=5)
-        assert time.time()-started <= 5
+        applied=until(lambda: (s if (s:=status()).get('mode')=='pinned' and s.get('active')==pinned else None), seconds=5)
+        elapsed=datetime.fromisoformat(applied['updatedAt']).timestamp()-started
+        assert 0 <= elapsed <= 5, ('Pin publication delay', elapsed)
+        pin_output=pin_cli.communicate(timeout=15)
+        assert pin_cli.returncode == 0, pin_output
         (root/'fail-active').write_text(str(ports[pinned]))
         until(lambda: status().get('active')==pinned and not status().get('ok') and
               'Закреплённый путь не работает' in status().get('error',''))
@@ -173,6 +204,55 @@ Server(('127.0.0.1',port),API).serve_forever()
         os.kill(first_engine, 9)
         until(lambda: int((root / 'engine.pid').read_text()) != first_engine)
         until(lambda: status().get('ok'))
+        # Одинаковый bind: причина видна, интервалы 5/10 с, а не быстрый рестарт без конца.
+        (root/'bind-failure').touch()
+        os.kill(int((root/'engine.pid').read_text()), 9)
+        until(lambda: status().get('portConflict'))
+        assert not status()['ok'] and 'Порт 127.0.0.1:2222 занят' in status()['summary']
+        bind_starts=int((root/'starts').read_text())
+        stamp=(root/'status/transport.json').stat().st_mtime_ns
+        time.sleep(2)
+        assert int((root/'starts').read_text()) == bind_starts
+        assert (root/'status/transport.json').stat().st_mtime_ns == stamp, 'Статус долбится во время паузы bind'
+        until(lambda: int((root/'starts').read_text()) > bind_starts, seconds=12)
+        until(lambda: status().get('portConflict') and 'занят' in status().get('error',''))
+        second_starts=int((root/'starts').read_text())
+        time.sleep(6)
+        assert int((root/'starts').read_text()) == second_starts, 'Пауза bind не увеличилась'
+        # Другая bind-ошибка обнуляет нарастающую паузу.
+        (root/'bind-failure').write_text('2223')
+        changed = until(lambda: (s if ((s:=status()).get('portConflict') or {}).get('port')==2223 else None), seconds=15)
+        assert 0 < retry_delay(changed) <= 5.1, 'Другой bind унаследовал паузу'
+        # Любая ошибка без bind тоже сбрасывает серию.
+        (root/'other-failure').touch()
+        failed = until(lambda: (s if not (s:=status()).get('portConflict') and
+                               any(c.get('diagnostic', {}).get('stderr')=='FATAL invalid test configuration'
+                                   for c in s.get('candidates', [])) else None), seconds=10)
+        assert 0 < retry_delay(failed) <= 1.1
+        (root/'other-failure').unlink()
+        rebound = until(lambda: (s if (s:=status()).get('portConflict') else None), seconds=5)
+        assert 0 < retry_delay(rebound) <= 5.1, 'Ошибка без bind не сбросила серию'
+        # Та же ошибка уже повторилась; смена конфига начинает новую серию.
+        before=int((root/'starts').read_text())
+        until(lambda: int((root/'starts').read_text()) > before, seconds=10)
+        until(lambda: status().get('portConflict'))
+        current=json.loads((root/'config.json').read_text())
+        current['transport']['rankIntervalSec']+=1
+        before=int((root/'starts').read_text())
+        (root/'config.json').write_text(json.dumps(current))
+        until(lambda: int((root/'starts').read_text()) > before, seconds=10)
+        reconfigured = until(lambda: (s if (s:=status()).get('portConflict') and
+                                     s.get('configRevision') != rebound.get('configRevision') else None), seconds=10)
+        assert 0 < retry_delay(reconfigured) <= 5.1, 'Новый конфиг унаследовал серию bind'
+        (root/'bind-failure').unlink()
+        until(lambda: status().get('ok') and not status().get('portConflict'), seconds=10)
+        # Успешный запуск также сбросил серию: следующий bind снова ждёт 5 с.
+        (root/'bind-failure').touch()
+        os.kill(int((root/'engine.pid').read_text()), 9)
+        restarted = until(lambda: (s if (s:=status()).get('portConflict') else None), seconds=10)
+        assert 0 < retry_delay(restarted) <= 5.1, 'Успешный запуск не сбросил серию bind'
+        (root/'bind-failure').unlink()
+        until(lambda: status().get('ok') and not status().get('portConflict'), seconds=10)
         (root / 'stop').touch()
         daemon.wait(timeout=10)
         assert daemon.returncode == 0, daemon.communicate()
@@ -192,7 +272,7 @@ Server(('127.0.0.1',port),API).serve_forever()
         assert stopped(int((root / 'engine.pid').read_text()))
         assert stopped(int((root / 'tunnel.pid').read_text()))
         assert all(stopped(int(pid)) for pid in (root/'probes.pid').read_text().splitlines()), 'SSH probe leaked after timeout/stop'
-        print('OK: failover, pin <=5с, мёртвый pin, auto, hot reload, disabled tag, invalid reload, restart, stop, ParentPid (имитаторы)')
+        print('OK: failover, pin <=5с, мёртвый pin, auto, hot reload, disabled tag, invalid reload, restart, optional SSH occupied/VLESS, bind/backoff/reset/status, stop, ParentPid (имитаторы)')
     except Exception:
         print('STATUS', status(), file=sys.stderr)
         log=root/'logs/transport.log'
@@ -201,6 +281,7 @@ Server(('127.0.0.1',port),API).serve_forever()
             if p.poll() is not None: print('EXIT', p.returncode, p.communicate(), file=sys.stderr)
         raise
     finally:
+        optional.close()
         for p in children:
             if p.poll() is None:
                 (root / 'stop').touch()

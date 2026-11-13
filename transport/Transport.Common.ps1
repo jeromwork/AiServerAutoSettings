@@ -7,7 +7,23 @@ function Get-TransportHome([string]$Path){
     $full
 }
 function Convert-TransportLF([string]$Text) {$Text.Replace("`r",'').TrimStart([char]0xFEFF)}
-function Read-TransportJson([string]$Path) {ConvertFrom-Json (Convert-TransportLF ([IO.File]::ReadAllText($Path)))}
+function Read-TransportJson([string]$Path) {
+    # Держим открытый снимок до конца чтения: атомарная замена оставляет его целым.
+    for($attempt=0;;$attempt++){
+        $stream=$null;$reader=$null
+        try{
+            $stream=New-Object IO.FileStream($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+            $reader=New-Object IO.StreamReader($stream,[Text.Encoding]::UTF8,$true)
+            $text=Convert-TransportLF $reader.ReadToEnd()
+            if(-not [string]::IsNullOrWhiteSpace($text)){return (ConvertFrom-Json $text)}
+            if($attempt -ge 20){throw (New-Object IO.InvalidDataException('Пустой JSON после повторного чтения'))}
+        }catch [IO.IOException]{
+            # ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION; пустой снимок повторяем в том же лимите.
+            if(($_.Exception.GetBaseException().HResult -band 0xffff) -notin @(32,33) -or $attempt -ge 20){throw}
+        }finally{if($reader){$reader.Dispose()}elseif($stream){$stream.Dispose()}}
+        Start-Sleep -Milliseconds 50
+    }
+}
 function Convert-TransportUtc($Value) {
     if($Value -is [DateTimeOffset]){return $Value.UtcDateTime}
     if($Value -is [DateTime]){return $Value.ToUniversalTime()}
@@ -1007,23 +1023,93 @@ function Protect-TransportDiagnostic([string]$Text,$Settings) {
     $Text=$Text -replace '(?i)((?:password|token|secret|passphrase|private_key|uuid)\s*[=:]\s*)[^\s,;]+','$1<redacted>'
     Protect-TransportText $Text
 }
+# Снимок только слушающих TCP-сокетов. Ошибки поиска владельца не подменяют причину bind.
+function Get-TransportPortSnapshot {
+    if($env:OS -eq 'Windows_NT'){
+        $listeners=@(Get-NetTCPConnection -State Listen -ErrorAction Stop|ForEach-Object {
+            [pscustomobject]@{address=[string]$_.LocalAddress;port=[int]$_.LocalPort;pid=[int]$_.OwningProcess}
+        })
+        $processes=@(Get-CimInstance Win32_Process -ErrorAction Stop)
+        $legacyActions=@();try{$task=Get-ScheduledTask -TaskPath '\' -TaskName 'RemoteDiskChannel' -ErrorAction Stop;foreach($a in @($task.Actions)){$legacyActions+=@{exe=[string]$a.Execute;arguments=[string]$a.Arguments}}}catch{}
+    }else{
+        $listeners=@([Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()|ForEach-Object {
+            [pscustomobject]@{address=$_.Address.ToString();port=$_.Port;pid=0}
+        });$processes=@()
+    }
+    [pscustomobject]@{listeners=$listeners;processes=$processes;legacyActions=@($legacyActions)}
+}
+function Get-TransportPortConflict([string]$Address,[int]$Port,$Snapshot=$null) {
+    if(-not $Snapshot){try{$Snapshot=Get-TransportPortSnapshot}catch{$Snapshot=[pscustomobject]@{listeners=@();processes=@()}}}
+    $listener=@($Snapshot.listeners|Where-Object {$_.port -eq $Port -and $_.address -in @($Address,'0.0.0.0','::')}|Select-Object -First 1)
+    $owner=$null;$ownerId=0
+    if($listener.Count){$ownerId=[int]$listener[0].pid;$owner=@($Snapshot.processes|Where-Object {[int]$_.ProcessId -eq $ownerId}|Select-Object -First 1)}
+    $exe='';if($owner){$exe=[string]$owner[0].ExecutablePath}
+    $legacy=$false
+    if($exe -and $env:LOCALAPPDATA){
+        $old=[IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'RemoteDisk/channel/sing-box.exe'))
+        $legacy=([IO.Path]::GetFullPath($exe) -ieq $old)
+    }
+    if(-not $legacy -and $exe -and $owner){
+        # Задача могла указывать другой путь. Одного имени exe недостаточно: сверяем действие и аргументы.
+        $line=([string]$owner[0].CommandLine).Replace('/','\').Trim()
+        foreach($action in @($Snapshot.legacyActions)){
+            if(-not $action -or -not $action.exe -or -not $action.arguments){continue}
+            $arguments=([string]$action.arguments).Replace('/','\').Trim()
+            $sameExe=([IO.Path]::GetFullPath([string]$action.exe) -ieq [IO.Path]::GetFullPath($exe))
+            if($sameExe -and $line.EndsWith($arguments,[StringComparison]::OrdinalIgnoreCase)){$legacy=$true;break}
+        }
+    }
+    $endpoint=$Address+':'+$Port
+    $message='Порт '+$endpoint+' занят'
+    if($exe){$message+=' программой '+$exe+' (PID '+$ownerId+')'}elseif($ownerId){$message+=' процессом PID '+$ownerId+' (путь программы недоступен)'}else{$message+='; определить программу не удалось'}
+    if($legacy){$message+=' — это старая установка RemoteDisk: закройте программу и запустите Remove-OldInstall.cmd из инструмента очистки, затем откройте RemoteAgents снова'}
+    $message+='.'
+    [pscustomobject]@{address=$Address;port=$Port;pid=$ownerId;exe=$exe;legacy=$legacy;message=$message;listening=($listener.Count -gt 0)}
+}
+function Get-TransportBindConflict([string]$Text,$Snapshot=$null) {
+    if($Text -notmatch '(?i)Only one usage of each socket address|address already in use|WSAEADDRINUSE'){return}
+    if($Text -match '(?i)(?:listen (?:tcp|udp)\S*\s+)?(127\.\d+\.\d+\.\d+|0\.0\.0\.0|\[::1\]|\[::\]):(\d+)'){
+        return (Get-TransportPortConflict $Matches[1].Trim('[',']') ([int]$Matches[2]) $Snapshot)
+    }
+    [pscustomobject]@{address='';port=0;pid=0;exe='';legacy=$false;message='Порт модуля связи занят другой программой. Освободите порт или измените порты в настройках связи.'}
+}
+# Счётчик относится к одному endpoint и одной фактической ошибке stderr, не ко всем падениям.
+function Get-TransportBindRetry($Previous,$Detail) {
+    if(-not $Detail -or -not $Detail.portConflict){return $null}
+    $key=$Detail.portConflict.address+':'+$Detail.portConflict.port+' '+(Convert-TransportLF ([string]$Detail.stderr)).Trim()
+    $failures=1
+    if($Previous -and $Previous.key -ceq $key){$failures=[Math]::Min(4,$Previous.failures+1)}
+    [pscustomobject]@{key=$key;failures=$failures}
+}
+function Get-TransportRestartDelay([double]$Base,[int]$BindFailures) {
+    if($BindFailures -le 0){return [Math]::Min(30,$Base)}
+    [Math]::Min(30,[Math]::Max(5,$Base)*[Math]::Pow(2,[Math]::Min(3,$BindFailures-1)))
+}
+
 function New-TransportDiagnostic($Child,[string]$Candidate,[string]$Reason,$Settings=$null) {
     $code=$null;$line=''
     if($Child){
         try{if($Child.Process.HasExited){$code=$Child.Process.ExitCode;[void]$Child.ErrorDrain.Wait(500)}}catch{}
         if($Child.PSObject.Properties['ErrorBuffer']){
             $lines=@((Convert-TransportLF $Child.ErrorBuffer.Snapshot()) -split "`n"|Where-Object {$_.Trim()})
-            if($lines.Count){$line=$lines[0]}
+            if($lines.Count){
+                $line=$lines[0]
+                # sing-box может вывести предупреждение до ошибки запуска: ищем саму bind-строку.
+                foreach($entry in $lines){if($entry -match '(?i)bind:.*(?:Only one usage of each socket address|address already in use|WSAEADDRINUSE)'){$line=$entry;break}}
+            }
         }
     }
     # Error kind remains explicit even when stderr is empty or has been redacted.
-    if($line -match '(?i)timed? out|timeout|deadline'){$Reason='timeout'}
+    $portConflict=Get-TransportBindConflict $line
+    if($portConflict){$Reason='port-in-use'}
+    elseif($line -match '(?i)timed? out|timeout|deadline'){$Reason='timeout'}
     elseif($line -match '(?i)refused'){$Reason='connection-refused'}
     elseif($line -match '(?i)unreachable|no route'){$Reason='network-unreachable'}
     elseif($line -match '(?i)permission denied|authentication failed'){$Reason='authentication-failed'}
-    [pscustomobject]@{candidate=$(if($Candidate -match '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,95}$'){$Candidate}else{'invalid-tag'});reason=$Reason;exitCode=$code;stderr=(Protect-TransportDiagnostic $line $Settings)}
+    [pscustomobject]@{candidate=$(if($Candidate -match '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,95}$'){$Candidate}else{'invalid-tag'});reason=$Reason;portConflict=$portConflict;exitCode=$code;stderr=(Protect-TransportDiagnostic $line $Settings)}
 }
 function Format-TransportDiagnostic($Detail) {
+    if($Detail.portConflict){return $Detail.portConflict.message}
     'candidate='+$Detail.candidate+' reason='+$Detail.reason+' exit='+$(if($null -eq $Detail.exitCode){'running/unknown'}else{[string]$Detail.exitCode})+' stderr='+$Detail.stderr+$(if($Detail.engineStderr){' sing-box='+$Detail.engineStderr}else{''})
 }
 
