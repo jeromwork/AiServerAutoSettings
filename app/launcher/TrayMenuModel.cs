@@ -38,7 +38,6 @@ namespace RemoteAgents.Launcher
                 new TrayMenuEntry("separator", "", false),
                 new TrayMenuEntry("connection", Connection(transport), false),
                 new TrayMenuEntry("server", ServerHealthView.Summary(health), false) { Warning = ServerHealthView.Warning(health) },
-                new TrayMenuEntry("separator", "", false),
                 new TrayMenuEntry("exit", "Выход")
             };
         }

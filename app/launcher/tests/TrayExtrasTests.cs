@@ -20,9 +20,9 @@ namespace RemoteAgents.Launcher
         {
             var empty = Data("{}"); var transport = Data("{\r\n\"ok\":true,\"active\":\"vless-relay-fixture\",\"kbps\":96.8,\"candidates\":[{\"tag\":\"vless-relay-fixture\",\"state\":\"ok\",\"kbps\":96.8},{\"tag\":\"vless-direct\",\"state\":\"fail\"}]\r\n}");
             var health = Health(40000, 50000); var menu = TrayMenuModel.Build(empty, empty, transport, health);
-            Check(string.Join(",", menu.Select(x => x.Id)) == "happier,settings,cloud,separator,connection,server,separator,exit", "exact menu order");
-            Check(menu[0].Text == "Открыть" && menu[1].Text == "Настройки" && menu[2].Text == "Диск" && menu[7].Text == "Выход", "human labels");
-            Check(menu[0].Enabled && menu[1].Enabled && menu[7].Enabled, "window and exit remain accessible");
+            Check(string.Join(",", menu.Select(x => x.Id)) == "happier,settings,cloud,separator,connection,server,exit", "exact menu order");
+            Check(menu[0].Text == "Открыть" && menu[1].Text == "Настройки" && menu[2].Text == "Диск" && menu[6].Text == "Выход", "human labels");
+            Check(menu[0].Enabled && menu[1].Enabled && menu[6].Enabled, "window and exit remain accessible");
             Check(!menu[4].Enabled && !menu[5].Enabled, "information rows disabled");
             Check(menu[4].Text.Contains("VLESS через fixture") && menu[4].Text.Contains("КБ/с"), "friendly active route and speed");
             Check(menu[5].Text.Contains("диск") && menu[5].Text.Contains("память") && menu[5].Text.Contains("нагрузка"), "server metrics in menu");
