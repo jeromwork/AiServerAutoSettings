@@ -28,7 +28,10 @@ function Remove-DiskExplorerFolderMetadata([string]$Path) {
         [IO.File]::SetAttributes($file,[IO.FileAttributes]::Normal)
         [IO.File]::Delete($file);$removed=$true
     }finally{
-        if($removed -and $owned.OriginalReadOnly -ceq '0'){$attributes=$attributes -band (-bnot [IO.FileAttributes]::ReadOnly)}
+        if($removed){
+            if($owned.OriginalReadOnly -ceq '0'){$attributes=$attributes -band (-bnot [IO.FileAttributes]::ReadOnly)}
+            elseif($owned.OriginalReadOnly -ceq '1'){$attributes=$attributes -bor [IO.FileAttributes]::ReadOnly}
+        }
         [IO.File]::SetAttributes($Path,$attributes)
     }
     Update-DiskExplorerItem $Path

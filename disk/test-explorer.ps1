@@ -139,6 +139,10 @@ Assert ($script:registry.Count -eq 1 -and $script:notifications -eq 2) 'repeated
 Remove-DiskExplorerFolderMetadata $project
 Assert ([IO.File]::GetAttributes($project) -band [IO.FileAttributes]::ReadOnly) 'cleanup preserves original ReadOnly'
 [IO.File]::SetAttributes($project,([IO.File]::GetAttributes($project) -band (-bnot [IO.FileAttributes]::ReadOnly)))
+[IO.File]::WriteAllText($ini,$owned.Replace('OriginalReadOnly=0','OriginalReadOnly=1'),$utf8)
+Remove-DiskExplorerFolderMetadata $project
+Assert ([IO.File]::GetAttributes($project) -band [IO.FileAttributes]::ReadOnly) 'cleanup restores recorded ReadOnly even if it was cleared after decoration'
+[IO.File]::SetAttributes($project,([IO.File]::GetAttributes($project) -band (-bnot [IO.FileAttributes]::ReadOnly)))
 # Disable removes presentation while retaining the explicit source link for re-enable.
 $externalLink=Join-Path $base 'Outside'
 [void](New-Item -ItemType $linkKind -Path $externalLink -Target $outside)
