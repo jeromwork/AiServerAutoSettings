@@ -62,8 +62,8 @@ namespace RemoteAgents.Launcher
                 using (var mutex = new Mutex(false, "Global\\" + name, out created, security)) {
                     // Serialize downloaded installers independently of the running tray's mutex.
                     using (var installer = new Mutex(false, "Global\\" + name + ".Install", out created, security)) {
-                        bool installOwned = WaitMutex(installer, 0);
-                        if (!installOwned) throw new InvalidOperationException("Установка уже выполняется");
+                        bool installOwned;
+                        if (!LauncherInstallerGate.TryEnter(installer, args, out installOwned)) throw new InvalidOperationException("Установка уже выполняется");
                         Action<string, bool> launch = (path, after) => {
                             if (owned) { mutex.ReleaseMutex(); owned = false; }
                             installer.ReleaseMutex(); installOwned = false;

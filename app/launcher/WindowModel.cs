@@ -52,6 +52,19 @@ namespace RemoteAgents.Launcher
         { return string.IsNullOrEmpty(operation) ? "" : "Идёт " + operation + ", подождите"; }
     }
 
+    internal static class LauncherInstallerGate
+    {
+        internal static bool TryEnter(Mutex installer, string[] args, out bool owned)
+        {
+            owned = false;
+            // Explorer launches one process per selected item. Commands only forward/start the tray;
+            // contending for the installer lock here drops paths before the pipe batching can see them.
+            if (args.Contains("--disk-shell")) return true;
+            try { owned = installer.WaitOne(0); } catch (AbandonedMutexException) { owned = true; }
+            return owned;
+        }
+    }
+
     // One background job at a time for the whole process, not tied to any window: closing a window keeps it
     // running, only Stop (tray exit) cancels it. A request during a run replaces the queued one and runs right after.
     internal sealed class SerialRunner<T> where T : class

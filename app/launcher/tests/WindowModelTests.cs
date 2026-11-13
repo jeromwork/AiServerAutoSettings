@@ -32,6 +32,20 @@ namespace RemoteAgents.Launcher
             Check(!WindowModel.ShouldShow(new[] { "--identify" }), "identity IPC does not recurse into activation");
             Check(!WindowModel.ShouldShow(new[] { "--disk-shell", "sync", "C:\\Disk\\Project" }), "Explorer command opens its own progress only");
             Check(WindowModel.ForwardArguments(new[] { "--disk-shell", "sync", "C:\\Disk\\Project" }).Length == 3, "pipe preserves shell action without opening settings");
+            using (var installer = new Mutex(false)) {
+                installer.WaitOne();
+                try {
+                    bool ordinary = Task.Run(() => { bool owned; bool ok = LauncherInstallerGate.TryEnter(installer, new string[0], out owned); if (owned) installer.ReleaseMutex(); return ok; }).GetAwaiter().GetResult();
+                    Check(!ordinary, "simultaneous installer still refused");
+                    for (int i = 0; i < 15; i++) {
+                        bool forwardedShell = Task.Run(() => {
+                            bool owned; bool ok = LauncherInstallerGate.TryEnter(installer, new[] { "--disk-shell", "sync", "C:\\Disk\\Папка " + i }, out owned);
+                            if (owned) installer.ReleaseMutex(); return ok && !owned;
+                        }).GetAwaiter().GetResult();
+                        Check(forwardedShell, "multiselect command reaches pipe despite another launch holding installer mutex: " + i);
+                    }
+                } finally { installer.ReleaseMutex(); }
+            }
             var forwarded = WindowModel.ForwardArguments(new string[0]);
             Check(forwarded.Contains("--show") && WindowModel.Route(forwarded) == WindowCommand.Show, "second human instance tells first to show");
             Check(WindowModel.ForwardArguments(new[] { "--home", "test-home" }).Contains("--show"), "second instance with home tells first to show");
