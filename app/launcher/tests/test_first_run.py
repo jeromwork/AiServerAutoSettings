@@ -298,7 +298,7 @@ class FirstRunTests(unittest.TestCase):
         # The left tab can stay open while the right tree owns selection B.
         for start, end in [('string SelectedLocalPath()', 'void OpenExplorer('),
                            ('void StopSelected()', 'sealed class FolderDrag'),
-                           ('void RefreshDirection()', 'protected override void Dispose')]:
+                           ('void RefreshDirection(', 'protected override void Dispose')]:
             body = view.split(start, 1)[1].split(end, 1)[0]
             self.assertIn('if (localSelection', body)
             self.assertNotIn('localBrowser.Active', body)

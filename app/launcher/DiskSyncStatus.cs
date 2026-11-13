@@ -126,6 +126,7 @@ namespace RemoteAgents.Launcher
                 // Never expose config.xml, the API key, or a request URI in the window/journal.
                 var web = e as WebException; var http = web == null ? null : web.Response as HttpWebResponse;
                 string reason = http != null ? "локальный REST вернул HTTP " + (int)http.StatusCode : web != null ? "локальный REST не отвечает (" + web.Status + ")" : e is UriFormatException ? "некорректный адрес GUI Syncthing" : e is UnauthorizedAccessException ? "нет доступа к локальной конфигурации Syncthing" : e is FileNotFoundException || e is DirectoryNotFoundException ? "локальная конфигурация Syncthing ещё не найдена" : e is XmlException ? "ошибка чтения конфигурации Syncthing" : e is IOException ? e.Message : "не удалось прочитать ответ Syncthing";
+                if (http != null) http.Close();
                 return DiskSyncSnapshot.Unavailable(reason);
             }
         }
@@ -143,7 +144,7 @@ namespace RemoteAgents.Launcher
         }
         static object Get(Uri uri, string key, CancellationToken token)
         {
-            var request = (HttpWebRequest)WebRequest.Create(uri); request.Proxy = null; request.Timeout = request.ReadWriteTimeout = 1800;
+            var request = (HttpWebRequest)WebRequest.Create(uri); request.Proxy = null; request.AllowAutoRedirect = false; request.Timeout = request.ReadWriteTimeout = 1800;
             request.Headers["X-API-Key"] = key;
             using (token.Register(request.Abort)) using (var response = request.GetResponse()) using (var reader = new StreamReader(response.GetResponseStream())) {
                 token.ThrowIfCancellationRequested(); return Json.Parse(reader.ReadToEnd().Replace("\r", ""));
