@@ -286,7 +286,8 @@ def apply(data):
                 'Изменился фильтр действующего bisync: нужна отдельная проверка и явная повторная инициализация.')
     cfg['filterSha256'] = hashlib.sha256(template.encode()).hexdigest()
     # Stop before changing config/state; no password ever enters argv, environment, or journal.
-    systemctl('stop', UNIT)
+    # On the first install the unit does not exist yet (systemctl exits 5) — nothing to stop.
+    systemctl('stop', UNIT, check=False)
     with lock(BASE / 'sync.lock'):
         obscured = run([rclone, 'obscure', '-'], input=data['password'] + '\n', env=tool_env()).stdout.strip()
         require(bool(obscured) and '\n' not in obscured, 'Не удалось скрыть пароль через rclone obscure.')
@@ -441,8 +442,11 @@ class Worker:
                 '--resilient', '--recover', '--max-lock', '2m', '--conflict-resolve', 'newer',
                 '--conflict-loser', 'num', '--compare', 'size,modtime', '--max-delete', '100', '--force',
                 '--filters-file', str(BASE / 'filter.txt'), '--ignore-case', '--create-empty-src-dirs',
-                '--use-json-log', '--stats', '1h', '--stats-log-level', 'NOTICE']
+                '--use-json-log', '--stats', '1h', '--stats-log-level', 'NOTICE', '--transfers', '16', '--checkers', '16']
         if not initialized.exists():
+            # WebDAV clouds (Mail) stamp upload time as mtime: a modtime compare on resync re-uploads every file.
+            # The first pass compares sizes only; afterwards bisync tracks each side's own mtimes in its listings.
+            args[args.index('size,modtime')] = 'size'
             args.append('--resync')
         entry = {'startedAt': now(), 'result': 'running', 'reason': reason,
                  'transferred': 0, 'bytes': 0, 'deleted': 0, 'firstError': None}
