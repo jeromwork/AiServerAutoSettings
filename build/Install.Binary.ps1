@@ -1,5 +1,5 @@
 ﻿#requires -Version 5.1
-function Install-DiskBinary($Url,$Hash,$Directory,$Name,[string]$Base=$script:DiskHome) {
+function Install-SetupBinary($Url,$Hash,$Directory,$Name,[string]$Base) {
     $dest=Join-Path $Base $Directory;$marker=Join-Path $dest 'release.txt'
     if((Test-Path -LiteralPath (Join-Path $dest $Name)) -and (Test-Path -LiteralPath $marker) -and [IO.File]::ReadAllText($marker) -eq $Hash){return}
     [void][IO.Directory]::CreateDirectory($dest);$tmp=Join-Path $Base ([IO.Path]::GetRandomFileName());[void][IO.Directory]::CreateDirectory($tmp)

@@ -87,17 +87,6 @@ function Stop-ManagedControl([string]$Root){
         }
     }
 }
-function Stop-ManagedDisk([string]$DiskRoot){
-    . (Join-Path (Split-Path $PSScriptRoot -Parent) 'disk/Disk.Engine.ps1')
-    Stop-DiskEngineProcesses $DiskRoot
-}
-function Remove-ExplorerNavPane([string]$LauncherRoot='') {
-    . (Join-Path (Split-Path $PSScriptRoot -Parent) 'disk/Disk.NavPane.ps1')
-    Remove-DiskNavPane
-    . (Join-Path (Split-Path $PSScriptRoot -Parent) 'disk/Disk.Common.ps1')
-    if($LauncherRoot){$c=Read-TransportJson (Join-Path $LauncherRoot 'config.json');if($c.disk.home){$script:DiskHome=[string]$c.disk.home}}
-    Remove-DiskExplorer
-}
 function Test-StatusFresh([string]$Root,[string]$Name){
     $file=Join-Path $Root ('status/'+$Name+'.json')
     if(-not (Test-Path $file)){return $false}
@@ -255,7 +244,7 @@ function Get-InstallFailureLines([string]$Text) {
         $clean=($line -replace '\x1b\[[0-9;]*[a-zA-Z]','').Trim()
         # Ignore PS 5.1/7 source, location and stack decorations, preserving the actual error line.
         if($clean -and $clean -notmatch '^(At |строка:|[+~|]|\d+\s*\||CategoryInfo\s*:|FullyQualifiedErrorId\s*:|(?:Exception|Write-Error):\s+.*\.ps1:\d+)'){
-            $masked=if(Get-Command Protect-DiskFailureText -ErrorAction SilentlyContinue){Protect-DiskFailureText $clean}else{Protect-TransportText $clean}
+            $masked=Protect-TransportText $clean
             if($masked -notmatch '^(<secret>|<uuid>)+$'){$masked}
         }
     }

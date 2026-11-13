@@ -3,4 +3,5 @@
 param([Parameter(Mandatory=$true)][Alias('Home')][string]$LauncherHome)
 . (Join-Path $PSScriptRoot 'Setup.Common.ps1')
 # The tray and its Run value are removed by the launcher; user files and settings stay in place.
-try{Remove-ExplorerNavPane $LauncherHome;Write-SetupLog $LauncherHome 'uninstall.navpane.removed'}catch{Write-SetupLog $LauncherHome 'uninstall.failed';exit 1}
+# C# Uninstall.Run performs LegacyDiskMigration before this helper.
+Write-SetupLog $LauncherHome 'uninstall.complete'

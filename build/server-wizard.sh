@@ -58,7 +58,7 @@ elif a[0]=='end':
   reason=reason or 'код '+str(code)
  s.update(finished=now(),exitCode=code,reason=reason);save(a[1],s)
 PYCODE
-valid_op() { case "${1:-}" in happier|disk) return 0;; *) echo 'Неизвестная операция' >&2; exit 2;; esac; }
+valid_op() { case "${1:-}" in happier) return 0;; *) echo 'Неизвестная операция' >&2; exit 2;; esac; }
 op_status() { python3 -c "$ops_py" status "$@"; }
 op_start() {
     # Lock is taken here and inherited by the detached runner: a second start sees it held.
@@ -80,17 +80,13 @@ op_start() {
 happier_ready() { test -x "$HOME/.local/bin/happier" && systemctl --user show-environment >/dev/null 2>&1; }
 case "${1:-inspect}" in
 inspect)
-RA_OPS=$(op_status happier disk 2>/dev/null || echo '{}') python3 - <<'PYCODE'
-import json,os,subprocess,urllib.request,xml.etree.ElementTree as E
+RA_OPS=$(op_status happier 2>/dev/null || echo '{}') python3 - <<'PYCODE'
+import json,os,subprocess
 from pathlib import Path
 h=Path.home()
 def active(name):
  try:return subprocess.run(['systemctl','--user','is-active','--quiet',name],timeout=5,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
  except (OSError,subprocess.TimeoutExpired):return False
-disk=False
-try:
- c=E.parse(h/'.local/share/remote-disk/config.xml').getroot();g=c.find('gui');req=urllib.request.Request('http://'+g.findtext('address')+'/rest/system/status',headers={'X-API-Key':g.findtext('apikey')});disk=bool(json.load(urllib.request.urlopen(req,timeout=4)).get('myID'))
-except Exception:pass
 settings={}
 f=h/'.config/remoteagents/services.json'
 if f.exists():
@@ -98,7 +94,7 @@ if f.exists():
  except Exception:pass
 try:ops=json.loads(os.environ.get('RA_OPS') or '{}')
 except Exception:ops={}
-print(json.dumps(dict(schema=1,user=os.environ.get('USER',''),root=os.getuid()==0,disk=disk,happier=(h/'.local/bin/happier').is_file(),userManager=active('default.target'),bridge=all((h/'.local/share/codex-remote'/n).is_file() for n in ['codex-windows-bridge.py','server_node_catalog.py']),catalog=(h/'.config/remoteagents/transport-catalog.json').is_file(),services={k:settings.get(k,'') for k in ['serverUrl','webappUrl']},operations=ops)))
+print(json.dumps(dict(schema=1,user=os.environ.get('USER',''),root=os.getuid()==0,happier=(h/'.local/bin/happier').is_file(),userManager=active('default.target'),bridge=all((h/'.local/share/codex-remote'/n).is_file() for n in ['codex-windows-bridge.py','server_node_catalog.py']),catalog=(h/'.config/remoteagents/transport-catalog.json').is_file(),services={k:settings.get(k,'') for k in ['serverUrl','webappUrl']},operations=ops)))
 PYCODE
 ;;
 status)
@@ -122,7 +118,6 @@ export REMOTEAGENTS_STEP_FILE="$state_dir/$op.step"
 # Step file: "k/n text" — stage k of n, shown with the elapsed time (never an estimate).
 case "$op" in
 happier) command=(bash "$HOME/.local/share/remoteagents-accounts/bootstrap.sh");;
-disk) command=(bash "$HOME/.local/share/remote-disk/server-disk.sh" bootstrap); printf '%s\n' '1/1 Загружаю, проверяю и запускаю Syncthing' > "$REMOTEAGENTS_STEP_FILE";;
 esac
 if timeout 1800 "${command[@]}" 9>&-; then code=0; else code=$?; fi
 python3 -c "$ops_py" end "$op" "$code"
@@ -132,10 +127,9 @@ repair)
 # No sudo prompts or escalation in a hidden process. Missing OS prerequisites remain explicit errors.
 for tool in python3 curl tar flock systemctl setsid; do command -v "$tool" >/dev/null || { echo "Администратору сервера нужно установить: $tool" >&2; exit 42; }; done
 # Long installs only start here; the window follows them with «status».
-if [ "${2:-1}" = 1 ]; then op_start disk; fi
-if [ "${3:-1}" = 1 ]; then op_start happier; fi
-if [ "${4:-1}" = 1 ]; then python3 "$HOME/.local/share/remoteagents-wizard/server-transport-catalog.py" get >/dev/null; fi
-op_status happier disk
+if [ "${2:-1}" = 1 ]; then op_start happier; fi
+if [ "${3:-1}" = 1 ]; then python3 "$HOME/.local/share/remoteagents-wizard/server-transport-catalog.py" get >/dev/null; fi
+op_status happier
 ;;
 *) exit 2;;
 esac

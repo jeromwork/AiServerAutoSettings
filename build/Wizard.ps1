@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 [CmdletBinding()]
-param([Alias('Home')][string]$LauncherHome,[ValidateSet('Bootstrap','ConfigSync','RetireConfigSync','ServerHealth','Server','Lan','LanRemove','NetStatus','AdminProbe','Proxy','Skip','Catalog','Connection','DiskTree','DiskRevert','DiskNavPane','DiskExternal','Disk','AccountList','Account','ResumeAccount','Operation','Bridge','Vpn','Inspect','Activate','RollbackNetwork','RollbackBridge')][string]$Action,[string]$RequestFile,[string]$Session,[string]$ProgressFile)
+param([Alias('Home')][string]$LauncherHome,[ValidateSet('Bootstrap','ConfigSync','RetireConfigSync','ServerHealth','Server','Lan','LanRemove','NetStatus','AdminProbe','Proxy','Cloud','Skip','Catalog','Connection','AccountList','Account','ResumeAccount','Operation','Bridge','Vpn','Inspect','Activate','RollbackNetwork','RollbackBridge')][string]$Action,[string]$RequestFile,[string]$Session,[string]$ProgressFile)
 $ErrorActionPreference='Stop'
 $env:REMOTEAGENTS_WIZARD_SESSION=$(if($Action -in @('Proxy','Lan','LanRemove','AdminProbe')){'0'}else{'1'})
 # Machine-readable JSON must preserve filenames on non-Russian Windows too.
@@ -21,7 +21,7 @@ try{
     Write-SetupLog $root ('wizard.'+$Action+'.complete')
     @{ok=$true;result=$result}|ConvertTo-Json -Depth 40 -Compress
 }catch{
-    $detail=Protect-DiskFailureText ([string]$_.Exception.Message)
+    $detail=Protect-TransportText ([string]$_.Exception.Message)
     Write-SetupLog $root ('wizard.'+$Action+'.failed') $detail
     @{ok=$false;reason=$detail;remedy=(Get-InstallFailureRemedy $detail)}|ConvertTo-Json -Compress
     exit 1

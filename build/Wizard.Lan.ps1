@@ -47,24 +47,3 @@ function Send-WizardLan([string]$Root,[string]$Bundle,[string]$File,[string]$Nam
     Write-TransportJson (Join-Path $Root 'state/lan-upload.json') @{schema=1;name=$name;command=$command;uploaded=$true;profile=(Find-InstallProfile $Root)}
     return @{ok=$true;command=$command;summary='Файл на сервере ✓. Включение выполняет администратор сервера; команда запросит HTTPS-адрес проверки IP'}
 }
-function Suspend-WizardDisk([string]$Root,[string]$Bundle) {
-    $hold=Join-Path $Root 'state/disk-reconfigure';Write-DiskUtf8 $hold 'Old disk disconnected; data preserved'
-    Update-LauncherConfig $Root {param($c) Set-ConfigDefault $c components ([pscustomobject]@{});Set-ConfigDefault $c.components disk ([pscustomobject]@{});$c.components.disk|Add-Member -Force enabled $false}
-    Invoke-InstallChild $Bundle 'disk/Install-RemoteDisk.ps1' @('-Uninstall') -TimeoutSeconds 120
-    Stop-ManagedDisk (Join-Path $env:LOCALAPPDATA 'RemoteDisk')
-}
-function Resolve-WizardDiskServer([string]$Root,[string]$Bundle,$Request) {
-    $c=Read-TransportJson (Join-Path $Root 'config.json')
-    if(-not $c.wizard.diskPreviousProfile){return}
-    if(-not $Request.reconnect){throw 'Диск связан с прежним сервером. Выберите отключение и новую пустую папку либо оставьте прежнее подключение'}
-    $base=[IO.Path]::GetFullPath([string]$Request.base)
-    if((Test-Path -LiteralPath $base) -and @(Get-ChildItem -LiteralPath $base -Force).Count){throw 'Для нового сервера выберите пустую папку. Прежние файлы сохраняются отдельно'}
-    $disk=Join-Path $env:LOCALAPPDATA 'RemoteDisk'
-    # Stop all old owners before archiving state. Never delete or move project data.
-    Suspend-WizardDisk $Root $Bundle
-    $archive=Join-Path $disk ('previous-'+[guid]::NewGuid().ToString('N'));[void][IO.Directory]::CreateDirectory($archive)
-    foreach($item in @('state','selection.json','profile.txt','server.txt','base.txt')){
-        $path=Join-Path $disk $item;if(Test-Path -LiteralPath $path){Move-Item -LiteralPath $path -Destination (Join-Path $archive $item)}
-    }
-    Update-LauncherConfig $Root {param($config) $config.wizard.PSObject.Properties.Remove('diskPreviousProfile');$config.wizard.PSObject.Properties.Remove('diskKeepPrevious')}
-}

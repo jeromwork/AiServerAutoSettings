@@ -1,7 +1,6 @@
 ﻿#requires -Version 5.1
 . (Join-Path $PSScriptRoot 'Setup.Common.ps1')
-. (Join-Path (Split-Path $PSScriptRoot -Parent) 'disk/Disk.Common.ps1')
-. (Join-Path (Split-Path $PSScriptRoot -Parent) 'disk/Disk.Union.ps1')
+. (Join-Path $PSScriptRoot 'Process.Common.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Server.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Engine.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Session.ps1')
@@ -10,12 +9,12 @@
 . (Join-Path $PSScriptRoot 'Wizard.Health.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Lan.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Network.ps1')
+. (Join-Path $PSScriptRoot 'Wizard.Cloud.ps1')
 # All state is observed again. This model is also exercised with fake SSH on Linux.
 function Get-WizardPlan($Server,$Local) {
     @(
-        @{id='server';ready=[bool]$Server.ssh;repair=(-not $Server.disk -or -not $Server.happier -or -not $Server.bridge -or -not $Server.catalog)}
+        @{id='server';ready=[bool]$Server.ssh;repair=(-not $Server.happier -or -not $Server.bridge -or -not $Server.catalog)}
         @{id='connection';ready=[bool]$Local.transport}
-        @{id='disk';ready=([bool]$Local.disk -and [bool]$Server.disk)}
         @{id='happier';ready=[bool]$Local.account}
         @{id='bridge';ready=(-not $Local.bridgeEnabled -or [bool]$Local.bridge)}
         @{id='vpn';ready=(-not $Local.vpnEnabled -or [bool]$Local.vpn)}
@@ -108,11 +107,11 @@ function Get-WizardServer([string]$Root,[string]$Bundle) {
     return $server
 }
 function Add-WizardOperationText($Operations) {
-    foreach($p in @($Operations.PSObject.Properties)){$title=if($p.Name -eq 'disk'){'установка сервера диска'}else{'установка Happier'};$p.Value|Add-Member -Force text (Get-WizardOperationText $p.Value $title)}
+    foreach($p in @($Operations.PSObject.Properties)){$title='установка Happier';$p.Value|Add-Member -Force text (Get-WizardOperationText $p.Value $title)}
 }
 function Get-WizardOperation([string]$Root,[string]$Bundle,[string]$Verb,[string[]]$Operations) {
     # Long server installs run detached (server-wizard.sh start/run); the window only makes short calls.
-    foreach($op in $Operations){if($op -notin @('happier','disk')){throw 'Неизвестная операция сервера'}}
+    foreach($op in $Operations){if($op -notin @('happier')){throw 'Неизвестная операция сервера'}}
     if($Verb -eq 'status'){
         # Read-only and streamed: works before the helpers are uploaded.
         $text=Invoke-WizardSsh $Root ('bash -s -- status '+($Operations -join ' ')) ([IO.File]::ReadAllText((Join-Path $Bundle 'build/server-wizard.sh'))) 30
@@ -379,7 +378,6 @@ function Test-WizardBridge([string]$Root) {
     }catch{return $false}
 }
 function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Request) {
-    $diskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk';$script:DiskHome=$diskHome
     switch($Action){
         'Bootstrap' {return Start-WizardBootstrap $Root $Bundle $Request}
         'ConfigSync' {return Sync-WizardConfigSettings $Root $Bundle $Request}
@@ -392,8 +390,8 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             if($Request.installMissing){
                 Write-WizardProgress 'Устанавливаю недостающие службы сервера…'
                 Send-WizardHelpers $Root $Bundle
-                $flags=@([int](-not $server.disk),[int](-not $server.happier),[int](-not $server.catalog)) -join ' '
-                # Happier/Disk installs only START here, detached on the server (closing the window or
+                $flags=@([int](-not $server.happier),[int](-not $server.catalog)) -join ' '
+                # Happier installs only START here, detached on the server (closing the window or
                 # the PC does not stop them); their sections follow them with short «status» calls.
                 try{[void](Invoke-WizardSsh $Root ('bash "$HOME/.local/share/remoteagents-wizard/server-wizard.sh" repair '+$flags) '' 120)}catch{
                     $observed=Get-WizardServer $Root $Bundle
@@ -403,7 +401,7 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
                 $server=Get-WizardServer $Root $Bundle
             }
             if(-not $server.userManager){throw 'Нет user systemd. Администратору сервера: sudo loginctl enable-linger <пользователь>; sudo systemctl start user@<uid>.service. Затем повторите шаг'}
-            $running=@(foreach($op in @('disk','happier')){if($server.operations -and $server.operations.$op.state -eq 'running'){$(if($op -eq 'disk'){'Диск'}else{'Happier'})}})
+            $running=@(foreach($op in @('happier')){if($server.operations -and $server.operations.$op.state -eq 'running'){'Happier'}})
             $server|Add-Member -Force summary ('Подключено ✓'+$(if($running.Count){'. На сервере устанавливается: '+($running -join ', ')+' — разделы завершатся сами'}else{''}))
             Remove-LegacyConfigSyncTask $Root
             return $server
@@ -413,6 +411,7 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
         'NetStatus' {return Get-WizardNetStatus $Root}
         'AdminProbe' {return @{mode=(Get-WizardAdminMode $Root ([pscustomobject]@{}))}}
         'Proxy' {return Set-WizardProxy $Root $Bundle $Request}
+        'Cloud' {return Invoke-WizardCloud $Root $Request}
         'Catalog' {Write-WizardProgress 'Загружаю узлы с сервера…';return Get-WizardCatalog $Root $Bundle}
         'Connection' {
             $server=Get-WizardCatalog $Root $Bundle;$local=$Request.catalog
@@ -464,83 +463,9 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             return @{ok=$true;summary=('Работает через '+$active)}
         }
         'Skip' {
-            if($Request.step -notin @('Disk','Happier','Lan','Proxy')){throw 'Обязательный шаг нельзя пропустить'}
-            if($Request.step -eq 'Disk' -and (Read-TransportJson (Join-Path $Root 'config.json')).wizard.diskPreviousProfile){Suspend-WizardDisk $Root $Bundle}
-            Update-LauncherConfig $Root {param($c) Set-ConfigDefault $c wizard ([pscustomobject]@{});$c.wizard|Add-Member -Force ('skip'+$Request.step) $true;if($Request.step -eq 'Disk' -and $c.wizard.diskPreviousProfile){$c.wizard|Add-Member -Force diskKeepPrevious $true}}
+            if($Request.step -notin @('Happier','Lan','Proxy')){throw 'Обязательный шаг нельзя пропустить'}
             if($Request.step -eq 'Proxy'){return @{ok=$true;summary='Пропущено: сервер выходит в интернет как сейчас, прокси не менялся'}}
             return @{ok=$true;summary='Пропущено по вашему выбору'}
-        }
-        'DiskTree' {
-            Send-WizardHelpers $Root $Bundle
-            $relative=[string]$Request.path
-            $command=Get-DiskTreeCommand $relative
-            $server=ConvertFrom-Json (Convert-TransportLF (Invoke-WizardSsh $Root $command))
-            $base=[string]$Request.base;if(-not $base){$base=Get-DiskBase}
-            $union=Get-DiskUnion $server $base $relative;$selection=Read-DiskSelection
-            if($Request.fresh){$selection=@{schema=1;paths=@()}}
-            # The install-time freeze placeholder is not a user choice: show the default again.
-            if($null -eq $selection -or $selection.placeholder){$selection=@{schema=1;paths=@($union.rows|Where-Object {$_.path -notmatch '/' -and $_.kind -eq 'directory'}|ForEach-Object {$_.path})}}
-            Add-DiskTreeState $union $base
-            $result=@{union=$union;selection=$selection;base=$base}
-            if($server.unsupportedName){$result.unsupportedName=[string]$server.unsupportedName}
-            return $result
-        }
-        'DiskNavPane' {
-            $base=[string]$Request.base;if(-not $base){$base=Get-DiskBase}
-            if($Request.install){[void](Ensure-DiskNavPane $base)}
-            return Test-DiskNavPane $base
-        }
-        'DiskRevert' {
-            $lock=[IO.File]::Open((Join-Path $diskHome 'folders.lock'),'OpenOrCreate','ReadWrite','None')
-            try{return Invoke-DiskRevert ([string]$Request.path)}finally{$lock.Dispose()}
-        }
-        'DiskExternal' {
-            if($Request.action -cne 'list'){throw 'DiskExternal поддерживает только action=list'}
-            return @{items=@(Get-DiskExternalList)}
-        }
-        'Disk' {
-            Send-WizardHelpers $Root $Bundle
-            $server=Get-WizardServer $Root $Bundle
-            if(-not $server.disk){
-                $op=(Get-WizardOperation $Root $Bundle 'status' @('disk')).disk
-                if($op.state -ne 'running'){$op=(Get-WizardOperation $Root $Bundle 'start' @('disk')).disk}
-                return @{ok=$false;pending='disk';operation=$op;summary=(Get-WizardOperationText $op 'установка сервера диска')}
-            }
-            Resolve-WizardDiskServer $Root $Bundle $Request
-            $base=[IO.Path]::GetFullPath([string]$Request.base)
-            $profile=Find-InstallProfile $Root
-            if(Test-Path (Join-Path $diskHome 'state/config.xml')){
-                Read-DiskState
-                [void](Set-DiskBase $base)
-            }
-            [void][IO.Directory]::CreateDirectory($diskHome);[void][IO.Directory]::CreateDirectory($base)
-            Write-DiskUtf8 (Join-Path $diskHome 'base.txt') $base
-            # Older callers send only paths. Omitted fields preserve device choices; explicit empties clear them.
-            $savedSelection=Read-DiskSelection
-            $payload=@{schema=1;paths=@($Request.paths);directions=$savedSelection.directions;external=@(Read-DiskExternal)}
-            foreach($field in @('directions','external')){
-                $present=if($Request -is [Collections.IDictionary]){$Request.Contains($field)}else{$null -ne $Request.PSObject.Properties[$field]}
-                if($present){$payload[$field]=$Request.$field}
-            }
-            $choice=Join-Path $Root 'state/wizard-selection.json';Write-TransportJson $choice $payload
-            $needsInstall= -not (Test-Path (Join-Path $diskHome 'state/config.xml')) -or -not (Test-Path (Join-Path $diskHome 'tray/syncthingtray.exe'))
-            if(-not $needsInstall){try{Read-DiskState;$probe=Invoke-DiskApi 'system/status';$needsInstall= -not $probe.myID}catch{$needsInstall=$true}}
-            if($needsInstall){
-                # Freeze selection until the explicit Apply below.
-                # The placeholder flag keeps it distinguishable from an explicit empty choice after an interruption.
-                if(-not (Test-Path (Join-Path $diskHome 'selection.json'))){Write-TransportJson (Join-Path $diskHome 'selection.json') @{schema=1;paths=@();placeholder=$true}}
-                Invoke-InstallChild $Bundle 'disk/Install-RemoteDisk.ps1' @('-Profile',$profile,'-HelpersReady') -TimeoutSeconds 900
-            }
-            Set-WizardDiskChannel $Root
-            Read-DiskState;$local=Invoke-DiskApi 'system/status';if(-not $local.myID){throw 'Syncthing не отвечает; повторите установку диска'}
-            # The engine is installed and answers: hand it to the tray's supervisor BEFORE the selection. The engine started by
-            # this step dies with the step's job; if a folder then fails, the supervised engine keeps running and the tree loads.
-            Update-LauncherConfig $Root {param($c) Set-ConfigDefault $c components ([pscustomobject]@{});Set-ConfigDefault $c.components disk ([pscustomobject]@{});$c.components.disk|Add-Member -Force enabled $true}
-            $hold=Join-Path $Root 'state/disk-reconfigure';if(Test-Path $hold){Remove-Item -LiteralPath $hold}
-            Invoke-InstallChild $Bundle 'disk/Select-Disk.ps1' @('-Home',$Root,'-Action','Apply','-SelectionFile',$choice) -TimeoutSeconds 900
-            Update-LauncherConfig $Root {param($c) if($c.wizard){$c.wizard.PSObject.Properties.Remove('skipDisk')}}
-            [void](Ensure-DiskNavPane $base) # cosmetic: never fails the Disk step
-            return @{ok=$true;summary='Выбор применён; передача файлов продолжается. Это ещё не подтверждение завершённой синхронизации'}
         }
         'AccountList' {
             # Public adapter only, no vendor/bootstrap/login needed to list account names.
@@ -595,13 +520,9 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             }
         }
         'Inspect' {
-            $server=[pscustomobject]@{ssh=$false;disk=$false;happier=$false;bridge=$false;catalog=$false}
+            $server=[pscustomobject]@{ssh=$false;happier=$false;bridge=$false;catalog=$false}
             try{$server=Get-WizardServer $Root $Bundle}catch{$server|Add-Member -Force reason (Protect-TransportText ([string]$_.Exception.Message))}
             $config=Read-TransportJson (Join-Path $Root 'config.json')
-            $disk=$false
-            try{Read-DiskState;$engine=Invoke-DiskApi 'system/status';$peer=[IO.File]::ReadAllText((Join-Path $diskHome 'server.txt')).Trim();$connections=Invoke-DiskApi 'system/connections';$disk=[bool]($engine.myID -and $connections.connections.PSObject.Properties[$peer].Value.connected)
-
-            }catch{$disk=$false}
             $account=$false
             $state=Join-Path $Root 'state/happier-account.json'
             if($server.ssh -and (Test-Path $state)){
@@ -614,17 +535,13 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
                     }catch{}
                 }
             }
-            # An interrupted install leaves the freeze placeholder: the disk choice is still open.
-            try{$saved=Read-DiskSelection;if($saved -and $saved.placeholder){$disk=$false}}catch{$disk=$false}
             $bridgeIntent=[bool]$config.bridge.enabled;if(-not $config.bridge){$bridgeIntent=[bool]$config.components.control.enabled -or -not $config.components.PSObject.Properties['control']}
             $transport=Test-WizardNetworkProof $Root ([DateTime]::UtcNow.AddSeconds(-15))
-            $local=[pscustomobject]@{transport=$transport;disk=$disk;account=$account;bridgeEnabled=$bridgeIntent;bridge=($server.ssh -and $bridgeIntent -and (Test-WizardBridge $Root));vpnEnabled=[bool]$config.vpn.enabled;vpn=(Test-StatusFresh $Root vpn)}
+            $local=[pscustomobject]@{transport=$transport;account=$account;bridgeEnabled=$bridgeIntent;bridge=($server.ssh -and $bridgeIntent -and (Test-WizardBridge $Root));vpnEnabled=[bool]$config.vpn.enabled;vpn=(Test-StatusFresh $Root vpn)}
             $plan=@(Get-WizardPlan $server $local)
-            if($config.wizard.pendingProfile){foreach($i in @(1,2,3,4)){$plan[$i].ready=$false}}
-            if($config.wizard.diskPreviousProfile){$plan[2].ready=[bool]$config.wizard.diskKeepPrevious}
-            if($config.wizard.skipDisk -and -not $config.wizard.diskPreviousProfile){$plan[2].ready=$true}
-            if($config.wizard.skipHappier){$plan[3].ready=$true}
-            return @{ok=(@($plan|Where-Object {-not $_.ready}).Count -eq 0);server=$server;steps=$plan;pendingAccount=[bool](Get-WizardPendingAccount $Root);summary='Подключения проверены сейчас. Завершение передачи файлов видно в статусе Диска'}
+            if($config.wizard.pendingProfile){foreach($i in @(1,2,3)){$plan[$i].ready=$false}}
+            if($config.wizard.skipHappier){$plan[2].ready=$true}
+            return @{ok=(@($plan|Where-Object {-not $_.ready}).Count -eq 0);server=$server;steps=$plan;pendingAccount=[bool](Get-WizardPendingAccount $Root);summary='Подключения проверены сейчас'}
         }
         'Activate' {
             $config=Read-TransportJson (Join-Path $Root 'config.json')

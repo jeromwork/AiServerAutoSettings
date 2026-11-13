@@ -4,13 +4,12 @@ param([Alias('Home')][string]$LauncherHome,[string]$ExpectedAccount,[switch]$Lib
 $ErrorActionPreference='Stop'
 # Redirected diagnostics must preserve Russian on Windows PowerShell 5.1 too.
 [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
-. (Join-Path (Split-Path $PSScriptRoot -Parent) 'disk/Disk.Common.ps1')
+. (Join-Path (Split-Path $PSScriptRoot -Parent) 'build/Process.Common.ps1')
 function Connect-HappierAccount([string]$Root) {
     [void][IO.Directory]::CreateDirectory((Join-Path $Root 'logs'))
     [void][IO.Directory]::CreateDirectory((Join-Path $Root 'state'))
     Write-DiskUtf8 (Join-Path $Root 'state/happier-account.json') '{"schema":1,"ok":false,"summary":"Проверка аккаунта"}'
     [IO.File]::AppendAllText((Join-Path $Root 'logs/accounts.log'),([DateTime]::UtcNow.ToString('o')+" account.check`n"))
-    $script:DiskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk'
     Read-DiskProfile
     $keyFile=Join-Path $Root 'secrets/happier-account.key'
     if(-not (Test-Path -LiteralPath $keyFile)){throw 'Выберите или создайте аккаунт в RemoteAgents'}

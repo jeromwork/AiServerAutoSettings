@@ -307,15 +307,12 @@ function Connect-WizardServer([string]$Root,[string]$Bundle,$Request) {
     # The personal route stays in config.json; it also supplies the local transport overlay.
     Save-WizardRoute $Root $Request $p
     $changed=$previous -and ($previous.serverAddress -cne $address -or $previous.login -cne $worker)
-    $diskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk'
-    $diskInstalled=(Test-Path (Join-Path $diskHome 'state/config.xml')) -or (Test-Path (Join-Path $diskHome 'profile.txt'))
     Update-LauncherConfig $Root {param($c)
         if($changed){
             Set-ConfigDefault $c wizard ([pscustomobject]@{})
-            if(-not $c.wizard.diskPreviousProfile -and $diskInstalled){$c.wizard|Add-Member -Force diskPreviousProfile $old}
             $c.wizard|Add-Member -Force configured $false
             $c.wizard.PSObject.Properties.Remove('localCatalog')
-            foreach($flag in @('skipDisk','skipHappier','skipLan','diskKeepPrevious')){$c.wizard.PSObject.Properties.Remove($flag)}
+            foreach($flag in @('skipHappier','skipLan')){$c.wizard.PSObject.Properties.Remove($flag)}
             # Preserve other product settings, but never reuse another server's nodes or keys.
             $c.wizard|Add-Member -Force pendingProfile $file
         }else{Set-ConfigDefault $c transport ([pscustomobject]@{});$c.transport|Add-Member -Force profilePath $file}
@@ -336,15 +333,13 @@ function Initialize-WizardTransport([string]$Root,[string]$Bundle,$Transport) {
         $file=Join-Path $Root ('state/wizard-channel-'+(Get-TransportFingerprint $p.serverAddress $p.login).Substring(0,16)+'.json')
         # The server exports its VLESS channel when it has one.
         Send-WizardHelpers $Root $Bundle
-        $hasVless=Invoke-WizardSsh $Root 'test -r "${REMOTE_DISK_CHANNEL_SOURCE:-/etc/sing-box/config.json}" && echo yes || echo no'
+        $hasVless=Invoke-WizardSsh $Root 'test -r "${REMOTEAGENTS_CHANNEL_SOURCE:-${REMOTE_DISK_CHANNEL_SOURCE:-/etc/sing-box/config.json}}" && echo yes || echo no'
         if($hasVless.Trim() -eq 'yes'){
             $request=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((@{server=$p.serverAddress}|ConvertTo-Json -Compress)))
-            $channel=ConvertFrom-Json (Convert-TransportLF (Invoke-WizardSsh $Root ('bash "$HOME/.local/share/remote-disk/server-disk.sh" channel-config '+$request)))
+            $code=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Convert-TransportLF ([IO.File]::ReadAllText((Join-Path $Bundle 'build/server-channel.py'))))))
+            $channel=ConvertFrom-Json (Convert-TransportLF (Invoke-WizardSsh $Root ('python3 -c ''import base64;exec(base64.b64decode("'+$code+'"))'' '+$request)))
         }else{
-            $ports=ConvertFrom-Json (Convert-TransportLF (Invoke-WizardSsh $Root 'cat "$HOME/.local/share/remote-disk/ports.json" 2>/dev/null || echo "{}"'))
-            $inbounds=@()
-            if([int]$ports.listen -ge 1 -and [int]$ports.listen -le 65535){$inbounds+=@{tag='sync';override_port=[int]$ports.listen}}
-            $channel=@{inbounds=$inbounds;outbounds=@()}
+            $channel=@{inbounds=@();outbounds=@()}
         }
         Write-TransportJson $file $channel -Private
         $Transport|Add-Member -Force channelPath $file
@@ -368,8 +363,8 @@ function Ensure-WizardTransportBinary([string]$Root,[string]$Bundle,$Transport) 
     if(Test-Path -LiteralPath $stable -PathType Leaf){$Transport|Add-Member -Force singBoxPath $stable;return}
     Write-WizardProgress 'Подготавливаю программу связи (загрузка с проверкой SHA-256)…'
     try{
-        . (Join-Path $Bundle 'disk/Disk.Binary.ps1')
-        Install-DiskBinary 'https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-windows-amd64.zip' '99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df' 'transport-bin' 'sing-box.exe' $Root
+        . (Join-Path $Bundle 'build/Install.Binary.ps1')
+        Install-SetupBinary 'https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-windows-amd64.zip' '99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df' 'transport-bin' 'sing-box.exe' $Root
     }catch{throw 'Нет программы связи sing-box: в этой сборке EXE её нет, а загрузка с github.com не прошла. Скачайте полную сборку RemoteAgents.exe (с sing-box внутри) или откройте доступ к github.com и нажмите «Повторить»'}
     $Transport|Add-Member -Force singBoxPath $stable
 }

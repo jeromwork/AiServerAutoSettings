@@ -7,11 +7,10 @@ function Get-WizardResources([string]$Action,$Request) {
         'Connection' {return @('connection')}
         {$_ -in @('Bridge','RollbackBridge')} {return @('bridge')}
         {$_ -in @('Account','ResumeAccount')} {return @('account')}
-        {$_ -in @('Disk','DiskRevert')} {return @('disk')}
         {$_ -in @('Vpn','Bootstrap')} {return @('vpn')}
         {$_ -in @('Proxy','Lan','LanRemove')} {return @('server-network')}
+        'Cloud' {return @('cloud')}
         'Server' {return @('profile')}
-        'Skip' {if($Request.step -eq 'Disk'){return @('disk')}}
         'Operation' {if($Request.start){return @('server-install-'+[string]$Request.start)}}
     }
     return @()
@@ -135,7 +134,7 @@ function Invoke-WizardResourceSet([string]$Root,[string[]]$Resources,[scriptbloc
     } $TimeoutMs
 }
 function Get-WizardRuntimeFiles {
-    @('build/Wizard.ps1','build/Wizard.Common.ps1','build/Wizard.Engine.ps1','build/Wizard.Session.ps1','build/Wizard.SessionHost.ps1','build/Wizard.Server.ps1','build/Wizard.Bootstrap.ps1','build/Wizard.Refresh.ps1','build/Wizard.Health.ps1','build/Wizard.Network.ps1','build/Wizard.Lan.ps1','build/Setup.Common.ps1','transport/Transport.Common.ps1','transport/Route.Proxy.ps1','transport/server-transport-catalog.py','disk/Disk.Common.ps1','disk/Disk.Union.ps1','disk/Disk.Selective.ps1','disk/Disk.Explorer.ps1','disk/Remove-DiskExplorer.ps1','disk/Ensure-DiskExplorerIgnores.ps1','disk/stignore.txt','disk/stignore-previous.sha256')
+    @('build/Wizard.ps1','build/Wizard.Common.ps1','build/Process.Common.ps1','build/Wizard.Cloud.ps1','build/Install.Binary.ps1','build/server-channel.py','build/Wizard.Engine.ps1','build/Wizard.Session.ps1','build/Wizard.SessionHost.ps1','build/Wizard.Server.ps1','build/Wizard.Bootstrap.ps1','build/Wizard.Refresh.ps1','build/Wizard.Health.ps1','build/Wizard.Network.ps1','build/Wizard.Lan.ps1','build/Setup.Common.ps1','transport/Transport.Common.ps1','transport/Route.Proxy.ps1','transport/server-transport-catalog.py')
 }
 function Get-WizardHostId([string]$Root) {
     Invoke-WizardResourceLock $Root 'device-identity' {
@@ -149,30 +148,3 @@ function Get-WizardHostId([string]$Root) {
 
 function Test-WizardWindows {return $env:OS -eq 'Windows_NT'}
 function Get-WizardInteractiveUser {return [Security.Principal.WindowsIdentity]::GetCurrent().Name}
-function Set-WizardDiskChannel([string]$Root) {
-    Invoke-WizardResourceLock $Root 'connection' {
-        $config=Read-TransportJson (Join-Path $Root 'config.json')
-        if(-not $config.transport.channelPath){throw 'Сначала завершите раздел «Связь», затем повторите диск'}
-        $ports=ConvertFrom-Json (Convert-TransportLF (Invoke-WizardSsh $Root 'cat "$HOME/.local/share/remote-disk/ports.json"'))
-        $port=[int]$ports.listen;if($port -lt 1 -or $port -gt 65535){throw 'Сервер диска не сообщил порт Syncthing'}
-        $channel=Read-TransportJson $config.transport.channelPath
-        $existing=@($channel.inbounds|Where-Object {$_.tag -eq 'sync'})
-        if($existing.Count -eq 1 -and [int]$existing[0].override_port -eq $port){return}
-        $channel|Add-Member -Force inbounds (@($channel.inbounds|Where-Object {$_.tag -ne 'sync'})+@([pscustomobject]@{tag='sync';override_port=$port}))
-        $file=Join-Path $Root ('secrets/channel-disk-'+(Get-TransportFingerprint 'channel' (ConvertTo-Json $channel -Depth 40 -Compress)).Substring(0,24)+'.json')
-        Write-TransportJson $file $channel -Private
-        $settings=Read-TransportSettings $Root;$settings.Channel=$channel
-        $generated=New-TransportConfig $settings (Get-TransportCandidates $settings $Root) (Get-TransportSecret $Root) 'unavailable'
-        $check=Join-Path $Root 'state/disk-channel-check.json'
-        Write-TransportJson $check $generated -Private
-        try{Test-TransportConfigFile $settings.Options.singBoxPath $check}finally{if(Test-Path $check){Remove-Item -LiteralPath $check -Force}}
-        $previous=[string]$config.transport.channelPath;$mark=[DateTime]::UtcNow
-        try{
-            Update-LauncherConfig $Root {param($c) $c.transport|Add-Member -Force channelPath $file}
-            Wait-WizardWorkingProof $Root $mark
-        }catch{
-            Update-LauncherConfig $Root {param($c) $c.transport|Add-Member -Force channelPath $previous}
-            throw
-        }
-    }
-}

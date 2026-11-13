@@ -5,4 +5,3 @@
 *.cmd text eol=crlf
 *.md text eol=lf
 *.txt text eol=crlf
-disk/stignore.txt text eol=lf
