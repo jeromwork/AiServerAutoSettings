@@ -122,7 +122,7 @@ do {
         if($Once){break};Start-Sleep -Seconds 1;continue
     }
     if([DateTime]::UtcNow -ge $nextNavPaneCheck){
-        [void](Ensure-DiskNavPane (Get-DiskBase))
+        [void](Ensure-DiskNavPane)
         $nextNavPaneCheck=[DateTime]::UtcNow.AddMinutes(5)
     }
     try{Start-DiskHeadless}catch{Write-DiskMonitorLog 'engine.start.failed'}

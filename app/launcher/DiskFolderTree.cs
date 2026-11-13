@@ -172,12 +172,13 @@ namespace RemoteAgents.Launcher
                 Action<TreeNode> fill = null;
                 fill = node => {
                     string path = node.Tag as string; Dictionary<string, object> data;
-                    if (path != null && levels.TryGetValue(path, out data)) {
+                    // Root files carry an empty tag; only real folders get a cached level, otherwise the root would nest into itself.
+                    if (!string.IsNullOrEmpty(path) && levels.TryGetValue(path, out data)) {
                         AddLevel(data, node, false);
                     }
                     foreach (TreeNode child in node.Nodes) fill(child);
                     if (path != null && expanded.Contains(path)) node.Expand();
-                    if (path != null && path == selected || entry != null && node.Tag == entry) Tree.SelectedNode = node;
+                    if (!string.IsNullOrEmpty(path) && path == selected || entry != null && node.Tag == entry) Tree.SelectedNode = node;
                 };
                 foreach (TreeNode node in Tree.Nodes) fill(node);
                 RefreshChecks();
@@ -187,6 +188,8 @@ namespace RemoteAgents.Launcher
         {
             var data = await level((string)parent.Tag);
             Changing = true; try { AddLevel(Json.Map(Json.Get(data, "union")), parent); } finally { Changing = false; }
+            // A projection rebuilt during the request detached this node: rebuild so the visible copy gets the loaded level.
+            if (parent.TreeView == null) RefreshProjection();
             if (LevelLoaded != null) LevelLoaded((string)parent.Tag, Json.Map(Json.Get(data, "union")));
             string rejected = Json.Str(data, "unsupportedName");
             if (rejected.Length > 0) append("Имя «" + rejected + "» не подходит для сервера (допустимы буквы, цифры, пробел, точка, _ и -). Переименуйте папку, чтобы синхронизировать её; показано только локальное содержимое.");

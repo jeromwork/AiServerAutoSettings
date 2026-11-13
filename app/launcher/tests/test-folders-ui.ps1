@@ -21,7 +21,7 @@ public static class FoldersSmoke {
     static void Pump() { for (int i = 0; i < 15; i++) Application.DoEvents(); }
     public static string Run(string path) {
         var asm = Assembly.LoadFrom(path);
-        var data = (Dictionary<string, object>)new JavaScriptSerializer().DeserializeObject("{\"union\":{\"rows\":[{\"path\":\"Local\",\"presence\":\"local\",\"kind\":\"directory\"},{\"path\":\"Both\",\"presence\":\"both\",\"kind\":\"directory\"},{\"path\":\"Remote\",\"presence\":\"server\",\"kind\":\"directory\",\"hasChildren\":true}],\"truncated\":false}}");
+        var data = (Dictionary<string, object>)new JavaScriptSerializer().DeserializeObject("{\"union\":{\"rows\":[{\"path\":\"Local\",\"presence\":\"local\",\"kind\":\"directory\"},{\"path\":\"Both\",\"presence\":\"both\",\"kind\":\"directory\"},{\"path\":\"Remote\",\"presence\":\"server\",\"kind\":\"directory\",\"hasChildren\":true},{\"path\":\"README.txt\",\"presence\":\"both\",\"kind\":\"file\"}],\"truncated\":false}}");
         Func<string,object,Task<Dictionary<string,object>>> run = (action, request) => Task.FromResult(data);
         Func<Func<Task>,Task> guard = action => action();
         Func<bool> busy = () => false;
@@ -37,6 +37,7 @@ public static class FoldersSmoke {
             var local = Field<TreeView>(view,"computerTree"); var server = Field<TreeView>(view,"tree");
             Check(Node(local,"Local") != null && Node(local,"Both") != null && Node(local,"Remote") == null, "computer pane uses local presence");
             Check(Node(server,"Local") == null && Node(server,"Both") != null && Node(server,"Remote") != null, "server pane uses server presence");
+            Check(local.Nodes.Cast<TreeNode>().Count(n => (n.Tag as string) == "") == 1 && local.Nodes.Cast<TreeNode>().All(n => n.Nodes.Count == 0 || (n.Tag as string) != ""), "root file does not nest the root level");
             server.SelectedNode=Node(server,"Remote"); Field<Button>(view,"take").PerformClick(); Pump();
             Check(Node(local,"Remote") != null && Node(local,"Remote").Checked && Node(server,"Remote").Checked, "take updates both panes");
             Field<Button>(view,"stopSync").PerformClick(); Pump();

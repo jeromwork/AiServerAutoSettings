@@ -88,11 +88,14 @@ $script:logged=0
 function Write-DiskLog {param($Message,$Failure) $script:logged++}
 Assert (-not (Ensure-DiskNavPane $other)) 'auto-install failure is non-fatal'
 Assert ($script:logged -eq 1) 'auto-install failure is logged'
+function Get-DiskBase {throw 'base.txt locked'}
+Assert (-not (Ensure-DiskNavPane)) 'unreadable Disk base stays inside the guard'
+Assert ($script:logged -eq 2) 'unreadable Disk base is logged'
 Remove-DiskNavPane
 $wizard=[IO.File]::ReadAllText((Join-Path $repo 'build/Wizard.Common.ps1'))
 $monitor=[IO.File]::ReadAllText((Join-Path $repo 'disk/Disk.Status.ps1'))
 $sync=[IO.File]::ReadAllText((Join-Path $repo 'disk/Sync-RemoteDiskFolders.ps1'))
 Assert ($wizard.Contains('[void](Ensure-DiskNavPane $base)')) 'config and wizard Disk action ensure entry'
-Assert ($monitor.Contains('[void](Ensure-DiskNavPane (Get-DiskBase))')) 'enabled Disk monitor ensures entry at startup and periodically'
+Assert ($monitor.Contains('[void](Ensure-DiskNavPane)')) 'enabled Disk monitor ensures entry at startup and periodically'
 Assert ($sync.Contains('[void](Ensure-DiskNavPane ')) 'folder reconciliation ensures entry even before engine probe'
 Write-Output ('navpane: '+$script:count+' passed')
