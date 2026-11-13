@@ -5,3 +5,4 @@
 *.cmd text eol=crlf
 *.md text eol=lf
 *.txt text eol=crlf
+cloud/filter.txt text eol=lf

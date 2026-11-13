@@ -134,7 +134,7 @@ function Invoke-WizardResourceSet([string]$Root,[string[]]$Resources,[scriptbloc
     } $TimeoutMs
 }
 function Get-WizardRuntimeFiles {
-    @('build/Wizard.ps1','build/Wizard.Common.ps1','build/Process.Common.ps1','build/Wizard.Cloud.ps1','build/Install.Binary.ps1','build/server-channel.py','build/Wizard.Engine.ps1','build/Wizard.Session.ps1','build/Wizard.SessionHost.ps1','build/Wizard.Server.ps1','build/Wizard.Bootstrap.ps1','build/Wizard.Refresh.ps1','build/Wizard.Health.ps1','build/Wizard.Network.ps1','build/Wizard.Lan.ps1','build/Setup.Common.ps1','transport/Transport.Common.ps1','transport/Route.Proxy.ps1','transport/server-transport-catalog.py')
+    @('cloud/server-cloud.sh','cloud/filter.txt','build/Wizard.ps1','build/Wizard.Common.ps1','build/Process.Common.ps1','build/Wizard.Cloud.ps1','build/Install.Binary.ps1','build/server-channel.py','build/Wizard.Engine.ps1','build/Wizard.Session.ps1','build/Wizard.SessionHost.ps1','build/Wizard.Server.ps1','build/Wizard.Bootstrap.ps1','build/Wizard.Refresh.ps1','build/Wizard.Health.ps1','build/Wizard.Network.ps1','build/Wizard.Lan.ps1','build/Setup.Common.ps1','transport/Transport.Common.ps1','transport/Route.Proxy.ps1','transport/server-transport-catalog.py')
 }
 function Get-WizardHostId([string]$Root) {
     Invoke-WizardResourceLock $Root 'device-identity' {
