@@ -11,9 +11,9 @@ powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File build/Wi
 
 ## Порядок и запросы
 
-D сначала сохраняет `profile` и вызывает `SecretVault.Materialize(home)`, затем `Bootstrap`, `Server`. После успешного Server параллельно идут Connection, Bridge, Vpn и цепочка Proxy → Lan. Account и Disk используют локальный SSH-вход транспорта и запускаются только после успешного Connection; затем они выполняются параллельно. Если Connection завершился ошибкой или без подтверждения, эти шаги не запускаются и показывают «не выполнен: нет связи с сервером». Proxy/Lan сериализуются. При провале Connection ожидающий VPN также получает явную причину отсутствия связи. Для VPN остаётся зависимость от живой связи: ранний Vpn возвращает `pending:"connection"`; до proof он не выключает начальный VPN, даже если итоговый vpn.enabled=false.
+D сначала сохраняет `profile` и вызывает `SecretVault.Materialize(home)`, затем `Bootstrap`, `Server`. После успешного Server параллельно идут Connection, Bridge, Vpn и цепочка Proxy → Lan. Account и Cloud используют локальный SSH-вход транспорта и запускаются только после успешного Connection; затем они выполняются параллельно. Если Connection завершился ошибкой или без подтверждения, эти шаги не запускаются и показывают «не выполнен: нет связи с сервером». Proxy/Lan сериализуются. При провале Connection ожидающий VPN также получает явную причину отсутствия связи. Для VPN остаётся зависимость от живой связи: ранний Vpn возвращает `pending:"connection"`; до proof он не выключает начальный VPN, даже если итоговый vpn.enabled=false.
 
-Как окно (D, `SectionOutcome.From`, `ConfigEngine`) читает ответ: `result.ok:true` — ✅; `ok:false` с `pending:"disk"|"happier"` —
+Как окно (D, `SectionOutcome.From`, `ConfigEngine`) читает ответ: `result.ok:true` — ✅; `ok:false` с `pending:"happier"` —
 ⏳, окно и трей следят за установкой действием `Operation` и повторяют только этот раздел; `pending:"connection"` у Vpn —
 Vpn повторяется один раз сразу после успешного Connection; `ok:false` без `pending` — ❌ с причиной и «Повторить»
 (исключение — неподтверждённый запрос TUN у Vpn: ⏳ «ещё не подтверждено», никогда не ✅). Ошибка оболочки
@@ -23,10 +23,10 @@ Vpn повторяется один раз сразу после успешно�
 |---|---|
 | `Bootstrap` | `{}`; необязательный `parentPid` для существующего TUN/watchdog. Читает `profile.vpn.bootstrap`, **до первого SSH** проверяет чужой VPN, выбирает путь с настоящим HTTPS, запускает существующий Vpn.Tun и ждёт свежего `state=on`. Без bootstrap — пропуск; на уже управляемой установке — `skipped`, действующая сеть сохраняется. Ошибка/конфликт дают `result.ok=false`, без поддельного transport.ok. |
 | `Server` | Прежние `address`, `login`, `keyFile`, `passwordPipe`, `askpassExecutable`, `proxy`, `hop`, `installMissing`. Если имеется `profile.server` с материализованным ключом, входит **именно этим ключом**, не создаёт и не добавляет другой. Отсутствующий материализованный секрет — отказ, без отката к регистрации другого ключа. `profile.server.port`, `hostKeys`, `routes` применяются при этом входе. Старый административный мастер по паролю остаётся отдельным путём. |
-| `Connection` | Прежние `catalog`, `shared`, `expected`. `catalog` — публичная схема 1 (`entries/hops/relays/cdn`). При первом запуске запускает и оставляет **рабочий** daemon и требует свежий revision + настоящий SSH через локальный inbound. Не создаёт preflight-копию. При изменении установленной связи сохраняет прежние preflight/watchdog/rollback. От Syncthing не зависит. |
+| `Connection` | Прежние `catalog`, `shared`, `expected`. `catalog` — публичная схема 1 (`entries/hops/relays/cdn`). При первом запуске запускает и оставляет **рабочий** daemon и требует свежий revision + настоящий SSH через локальный inbound. Не создаёт preflight-копию. При изменении установленной связи сохраняет прежние preflight/watchdog/rollback.  |
 | `Bridge` | Прежние `enabled`, `shell`; новое необязательное `deviceName`: 1–80 символов без управляющих символов. Для работающего моста переименование тоже сразу отправляется серверу: повторная регистрация существующего binding с новым именем, проверка чтением реестра. Shell и пути binding сохраняются. Имя записывается в `profile.device.name`. |
 | `Account` | Прежние поля. Дополнительно `mode:"same"`, необязательный публичный `account` — выбрать и живой проверкой подтвердить существующий серверный аккаунт, без recovery-ключа и без нового daemon. Неоднозначный выбор — отказ. Обычный запрос с ключом по-прежнему использует существующий Invoke-WizardAccount. |
-| `Disk` | `{base, paths: string[], directions: {"Проект":"send"|"receive"}, external: [{path,remote,direction}], reconnect}`. `paths:["."]` — все проекты, включая новые; `paths:[]` — никакие. `both` в directions опускается. Если серверный Syncthing ещё не готов, возвращает `ok:false,pending:"disk",operation,summary`; C запускает/наблюдает отсоединённую установку. D повторяет **Disk**, остальные разделы продолжают работу. После подготовки диска C отдельно добавляет настоящий sync inbound в канал и проверяет reload + SSH; Connection ожидания диска не содержит. |
+| `Cloud` | `{secretPipe}`: одноразовый pipe с JSON конфига облака; `Wizard.Cloud.ps1` передаёт его на stdin `server-cloud.sh apply` по существующему SSH-профилю. Окно требует код 0 + `ok:true`; первая строка stderr — причина ошибки, пароль маскируется. Без cloud раздел не запускается. |
 | `ConfigSync` | `{}`; необязательный `askpassExecutable` для пароля hop, по умолчанию установленный EXE. Снимок `config-sync.json` берётся только по доверенному SSH, собственным ключом; произвольный JSON запроса не применяется как доверенный снимок. Ответ `{ok, changed, summary}`. |
 
 Остальные действия и запросы сохранены. Действий InvitePrepare/Enroll/Verify/Refresh/Sync больше нет; файлы приглашений, одноразовые ключи и offline refresh EXE движок не принимает.
@@ -61,10 +61,9 @@ PS не читает vault и не разыменовывает `{"secret":...}`
 
 | Ресурс | Изменяющие действия |
 |---|---|
-| connection | Connection, RollbackNetwork, ConfigSync; короткое добавление inbound Disk |
+| connection | Connection, RollbackNetwork, ConfigSync |
 | bridge | Bridge, RollbackBridge, ConfigSync |
 | account | Account, ResumeAccount |
-| disk | Disk, изменение/пропуск выбора диска |
 | vpn | Vpn, Bootstrap, ConfigSync, RollbackNetwork |
 | server-network | Proxy, Lan, LanRemove |
 | profile | Server |
@@ -75,7 +74,7 @@ ConfigSync берёт bridge → connection → vpn в одном порядке
 
 **Proxy/Lan подтверждаются новым SSH**, даже при общем worker. Живая проверка Connection тоже использует новое аутентифицированное соединение через рабочий транспорт. Для прямого вызова библиотек в тестах повторное использование включается `REMOTEAGENTS_WIZARD_SESSION=1`; штатный CLI включает его сам.
 
-Helpers проверяются по SHA-256 нормализованного LF-содержимого; передаются только отсутствующие/изменённые. Записи атомарные и с уникальными временными именами. Существующие серверные bridge helpers сохраняются, как в прежнем установщике. Disk из мастера принимает внутренний `-HelpersReady` после этой проверки; отдельный установщик продолжает готовить свои helpers самостоятельно.
+Helpers проверяются по SHA-256 нормализованного LF-содержимого; передаются только отсутствующие/изменённые. Записи атомарные и с уникальными временными именами. Существующие серверные bridge helpers сохраняются, как в прежнем установщике.
 
 ProgressFile остаётся UTF-8 JSONL: `{"text":"..."}`. После каждого действия, включая исключение, появляется **`{"text":"timing Connection 1234"}`**: `timing <Action> <целые миллисекунды>`. Это общее время действия с ожиданием своего ресурса. Параллельные шаги могут писать в один ProgressFile; строки не смешиваются. Setup.log также локальный и не зависит от сети.
 
@@ -96,7 +95,7 @@ ProgressFile остаётся UTF-8 JSONL: `{"text":"..."}`. После кажд
 3. `ConvertFrom-WizardConfigSync` (build/Wizard.Refresh.ps1) переводит его во внутренний снимок настроек
    (`serverAddress/serverPort/workerUser/hostKeys`, маршруты `proxy.host`, `hop.{ssh,hostKey,privateKey,password}`,
    `bootstrap.{catalog,channel,entries,hops{host,port,user,privateKey},vpn}`). Отсутствующие поля не трогаются:
-   ключ компьютера, `vpn.enabled`, device/happier/bridge/disk/proxyOut/lan в снимке не передаются.
+   ключ компьютера, `vpn.enabled`, device/happier/bridge/cloud/proxyOut/lan в снимке не передаются.
 4. Публичный каталог берётся живым (`python3 - < transport/server-transport-catalog.py`) и авторитетен; каталог из снимка
    нужен только до первого SSH. `workerUser` не может смениться. Неизменный снимок (тот же отпечаток) ничего не применяет.
 
@@ -109,18 +108,6 @@ ProgressFile остаётся UTF-8 JSONL: `{"text":"..."}`. После кажд
 **Имя компьютера при переподключении:** `Start-WindowsControl.ps1` при каждой регистрации берёт `-DeviceName`, иначе
 `profile.device.name` из `config.json` программы, иначе `COMPUTERNAME` — переподключение моста не возвращает `WIN-…`.
 
-## Выбор папок на компьютере
+## Облако вместо управления папками
 
-`DiskChoice` — общая модель профиля, окна и трея. `ConfigSections.DiskChosen(profile)` означает наличие `disk.folders`, включая `[]`. Disk входит в план только при таком выборе либо непустом `disk.external`; один `disk.base` не запускает Disk. `DiskChoice.WriteTo` сохраняет отсутствие выбора, `all`, направления и внешние папки; `WithFolders`/`SyncFromSettings` сохраняют направления проектов при обновлении путей.
-
-UI сохраняет выбор в профиль через `ConfigProfile.Update`, затем применяет секцию Disk через ConfigSession/ConfigEngine. Прямые действия мастера:
-
-| Действие | Контракт |
-|---|---|
-| `DiskTree` | Прежний `{base,path,fresh}` → `{union,selection,base}`. У подключённых каталогов верхнего уровня `union.rows[]` дополнены `direction: both|send|receive`, `localChanges: int` (для receive — `receiveOnlyTotalItems` из `/rest/db/status`). Недоступность API не выдаётся за ноль правок. |
-| `DiskRevert` | `{path:"Проект"}` → `{ok,summary}`. Только зарегистрированный проект под текущей базой с типом receiveonly; POST `/rest/db/revert?folder=<id>`. Успех означает принятие запроса, завершения фоновой обработки не обещает. |
-| `DiskExternal` | `{action:"list"}` → `{items:[{path,remote,direction,state}]}`, state — состояние `/rest/db/status` (`idle`, `syncing`, `error` и др.), либо `paused`, `detached`, `unknown`. REST-ошибка возвращается вызывающему; отсутствие регистрации честно обозначается detached. Добавление и снятие — только через профиль и Disk. |
-
-Движок PATCH-ит тип локального проекта (`sendonly`/`receiveonly`/`sendreceive`) без снятия регистрации. Сервер остаётся sendreceive. Новые внешние папки подключаются неинтерактивно через Add-RemoteDiskFolder с Remote/ManagedSelection и Direction. Две непустые папки объединяются (см. `disk/README.md`). Ошибка одной папки не останавливает остальные: в конце выводится список неподключённых папок с причинами, а в `selection.json` сохраняются только применённые. Учёт внешних подключений — `RemoteDisk/external.json`, журнал записывается до Add и позволяет снять частично применённый выбор. `selection.json` сохраняет paths, directions, external; автоматическое подключение новых серверных предложений использует те же направления.
-
-Снятие целого проекта/внешней папки удаляет только локальную регистрацию Syncthing, содержимое остаётся. Снятие вложенных путей меняет управляемый `.stignore`, не удаляя локальные копии. Старые квитанции прерванного выбора восстанавливаются для совместимости. Изменения диска сериализованы `folders.lock`; DiskRevert также берёт ресурс disk мастера.
+`ConfigSections.Cloud` находится рядом с Account и ждёт подтверждённого Connection. Proxy и Lan сохраняют свой порядок и замки. Сведения о файлах не опрашиваются; завершение передачи показывает официальное приложение облака. Настройки и формат описаны в [CONFIG.md](CONFIG.md#облако).

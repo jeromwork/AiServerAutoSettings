@@ -37,7 +37,6 @@
 remoteagents config export --name "Ноутбук сына" --master-password-stdin --output /root/laptop.json
 # необязательно: --vpn on|off|channel (по умолчанию on, если есть vpnBootstrap),
 #                --happier same|same:<подпись или id>|new|new:Имя (по умолчанию same; new без имени = --name),
-#                --folders "Проект,Проект/docs"
 ```
 
 Что происходит:
@@ -90,7 +89,6 @@ remoteagents config export --name "Ноутбук сына" --master-password-st
                           "hops": {"vhop": {"host": "…", "port": 22, "user": "…", "key": {"secret": "vpn-hop-vhop"}}} } },
   "happier": { "mode": "same", "label": "Основной", "serverUrl": "…", "webappUrl": "…" },
   "bridge":  { "enabled": true, "allowShell": false },
-  "disk":    { "folders": ["Проект", "Проект/docs"] },
   "secrets": { "protected": "master-password", "kdf": {"name": "pbkdf2-sha256", "iterations": 200000, "salt": "…"},
                "check": "enc1:…", "server-key": "enc1:…", "vpn-channel": "enc1:…", … }
 }
@@ -106,7 +104,7 @@ remoteagents config export --name "Ноутбук сына" --master-password-st
 
 `rootPassword` не выдаётся: компьютер входит ключом конфига. Ключ Happier не выдаётся (аккаунт
 настраивает действие `Account` по SSH). Бинарник `sing-box.exe` в текстовый конфиг не кладётся: он во встроенном бандле EXE (`build/bundle-binaries.json`, SHA-256).
-`disk.base` не задаётся — компьютер берёт свой (`Get-DiskBase`). `--vpn off` → `vpn.enabled=false`, без канала и узлов.
+`--vpn off` → `vpn.enabled=false`, без канала и узлов.
 `--vpn channel` («канал первым») → `vpn.enabled=false`, но `bootstrap` с каталогом, `channel`, `entries`, `hops` и их секретами
 как при `--vpn on`: компьютер поднимает демон связи без TUN и ходит к серверу через его SOCKS-вход (docs/CONFIG.md).
 
@@ -188,7 +186,7 @@ remoteagents config export --name "Ноутбук сына" --master-password-st
   не тот `kind`/`schema`, ссылка на секрет, которого нет в снимке, → отказ; `\r` убирается перед разбором (§6б);
 - тот же снимок уже применён → ничего не делает;
 - отсутствующие поля не трогает: в снимке нет `server.key` (ключ компьютера остаётся свой), нет `vpn.enabled`
-  (вкл/выкл VPN — выбор компьютера), нет `device`, `happier`, `bridge`, `disk`, `proxyOut`, `lan`;
+  (вкл/выкл VPN — выбор компьютера), нет `device`, `happier`, `bridge`, `cloud`, `proxyOut`, `lan`;
 - `server.login` не может смениться — отказ; новые `hostKeys`/адрес принимаются, потому что пришли по уже доверенному
   SSH (смена VPS: сначала добавить новый путь, `config sync`, дождаться компьютеров, потом убрать старый и снова `config sync`);
 - применяет через тот же движок с проверкой нового пути до замены и независимым откатом;
@@ -205,3 +203,5 @@ remoteagents config export --name "Ноутбук сына" --master-password-st
 Вместе с ними ушли служебный пользователь `ra-enroll`, одноразовый пропуск, sudo-скрипт регистрации и его sudoers,
 нагрузка в конце EXE, публикация одноразовых ссылок. Перенесено: «VPN первым» (`vpnBootstrap`), маршруты и пароли hop
 по маршрутам, автообновление, список компьютеров, безопасная запись authorized_keys (O_NOFOLLOW, hardlink, права, flock).
+
+Переносимый конфиг можно дополнить секцией `cloud` по [CONFIG.md](CONFIG.md#облако). Экспорт сервера больше не выдаёт выбор папок; прежний `disk` принимающее приложение игнорирует.

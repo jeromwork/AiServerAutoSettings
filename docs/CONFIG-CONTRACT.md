@@ -8,7 +8,7 @@
 |---|---|---|---|
 | A. Формат и секреты | `app/config-a` / `~/work/wt-config-a` | Codex | новые `app/launcher/ConfigBundle.cs`, `SecretVault.cs`, `SecretCommand.cs`, `SecretPrompt.cs`; `app/launcher/config.paste.schema.json`, `config.paste.example.json`; `docs/CONFIG.md`; тесты `app/launcher/tests/ConfigBundleTests.cs` (+ строки в `PortableTests.csproj`) |
 | B. Сервер | `app/config-b` / `~/work/wt-config-b` | Opus | `server/**` (кроме `server/lan*`, `server/proxy*` — не трогать), `server_node_catalog.py`, `codex-windows-bridge.py` (только имя компьютера), `server/tests/**` |
-| C. Движок и скорость | `app/config-c` / `~/work/wt-config-c` | Codex | `build/*.ps1`, `transport/**`, `disk/**`, их тесты, `app/launcher/tests/*.ps1`, `app/launcher/tests/run.sh` |
+| C. Движок и скорость | `app/config-c` / `~/work/wt-config-c` | Codex | `build/*.ps1`, `transport/**`, их тесты, `app/launcher/tests/*.ps1`, `app/launcher/tests/run.sh` |
 | D. Окно и оркестратор | `app/config-d` / `~/work/wt-config-d` | Opus | остальные `app/launcher/*.cs` (Program, TrayContext, SetupWizard*, FirstInstall, новые `ConfigWindow.cs`, `ConfigApply.cs`), удаление `Invitation*.cs`, `InviteHop`, их C#-тестов |
 
 ## 1. Формат конфига (человек вставляет / сохраняет)
@@ -30,7 +30,7 @@
   "vpn":     { "enabled": false, "checkUrl": "…", "dnsServer": "…", "bootstrap": { "channel": {"secret": "vpn-channel"}, "entries": {"имя": {"secret": "vpn-entry-имя"}} } },
   "happier": { "mode": "same | new", "label": "Мой аккаунт", "serverUrl": "…", "webappUrl": "…", "key": {"secret": "happier-key"} },
   "bridge":  { "enabled": true, "allowShell": false },
-  "disk":    { "base": "C:\\Users\\user\\Disk", "folders": ["Проекты/Сайт", "Документы"] },
+  "cloud": { "vendor": "mailru", "login": "user@mail.ru", "password": {"secret":"cloud-password"}, "remoteRoot":"Disk", "pollSeconds":20 },
   "proxyOut":{ "type": "socks", "server": "…", "port": 1080, "login": "…", "password": {"secret": "proxy-out-password"} },
   "lan":     [ { "name": "Офис", "kind": "openvpn", "ovpn": {"secret": "lan-Офис-ovpn"}, "password": {"secret": "lan-Офис-password"} } ],
   "secrets": {
@@ -81,11 +81,11 @@ internal static class SecretCommand { int Run(string home, string[] args); } // 
 
 - D запускает существующие действия `build/Wizard.ps1 -Action <X> -RequestFile …` как сейчас (`SetupWizard.Run`), но **параллельно**:
   сначала `Bootstrap` (VPN первым, если в profile есть `vpn.bootstrap`), затем `Server`; после успеха одновременно
-  `Connection`, `Bridge`, `Account`, `Disk`, `Vpn`; `Proxy` и `Lan` — последовательно между собой, после `Server`.
+  `Connection`, `Bridge`, `Account`, `Cloud`, `Vpn`; `Proxy` и `Lan` — последовательно между собой, после `Server`.
 - C обеспечивает, что эти действия можно запускать одновременно (узкие замки вместо общего `Invoke-WizardLock`), пишут прогресс
   в `ProgressFile` и время этапа строкой `timing <этап> <мс>`. Формы запросов прежние; новые поля — в `docs/CONFIG-ENGINE.md` (пишет C):
   `Bootstrap {}` (берёт данные из profile/materialized secrets), `Bridge {…, deviceName}`, `Server {…}` без изменений.
-- «Связь работает» = успешный `Connection` с живой проверкой; не ждёт Syncthing/диск.
+- «Связь работает» = успешный `Connection` с живой проверкой; не ждёт облако.
 - Автообновление адресов/ключей/VPN своим ключом раз в 5 минут (бывший invite sync) — C (клиент) + B (сервер), формат ответа сервера
   описывает B в `docs/CONFIG-SERVER.md`.
 

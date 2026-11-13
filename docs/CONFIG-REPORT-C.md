@@ -1,5 +1,7 @@
 # CONFIG — отчёт потока C
 
+> Исторический отчёт до удаления Диска (13.11.2026). Текущая конфигурация облака: [CONFIG.md](CONFIG.md#облако); актуальные изменения: [CLOUD-APP-REPORT.md](CLOUD-APP-REPORT.md). Упоминания старых папок и тестов ниже описывают прежнюю версию.
+
 Ветка `app/config-c`, worktree `/home/remoteagents/work/wt-config-c`. Push/merge не выполнялись. Живые Windows, мосты, серверные службы и пользовательские authorized_keys не менялись. Все SSH-проверки — отдельный rootless sshd на loopback, ключи и writable HOME во временной папке.
 
 ## Сделано
