@@ -33,7 +33,7 @@ function Remove-DiskExplorerFolderMetadata([string]$Path) {
     }
     Update-DiskExplorerItem $Path
 }
-function Remove-DiskExplorer([string]$Base='') {
+function Remove-DiskExplorer([string]$Base='',[switch]$KeepJunctions) {
     if(-not $script:DiskHome){$script:DiskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk'}
     $owner='RemoteAgents.Disk.v1'
     foreach($action in @('download','sync','keep-server','add','progress')){
@@ -55,7 +55,7 @@ function Remove-DiskExplorer([string]$Base='') {
                     if([IO.Directory]::Exists([string]$external.path)){Remove-DiskExplorerFolderMetadata ([string]$external.path)}
                 }catch{Write-DiskLog ('Удаление оформления внешней папки: '+$external.remote) $_}
             }
-            Remove-DiskOwnedExternalJunction $external $Base
+            if(-not $KeepJunctions){Remove-DiskOwnedExternalJunction $external $Base}
     }
     $icons=Join-Path $env:LOCALAPPDATA 'RemoteAgents/icons'
     if([IO.Directory]::Exists($icons)){

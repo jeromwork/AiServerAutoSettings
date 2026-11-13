@@ -139,5 +139,13 @@ Assert ($script:registry.Count -eq 1 -and $script:notifications -eq 2) 'repeated
 Remove-DiskExplorerFolderMetadata $project
 Assert ([IO.File]::GetAttributes($project) -band [IO.FileAttributes]::ReadOnly) 'cleanup preserves original ReadOnly'
 [IO.File]::SetAttributes($project,([IO.File]::GetAttributes($project) -band (-bnot [IO.FileAttributes]::ReadOnly)))
+# Disable removes presentation while retaining the explicit source link for re-enable.
+$externalLink=Join-Path $base 'Outside'
+[void](New-Item -ItemType $linkKind -Path $externalLink -Target $outside)
+[IO.File]::WriteAllText((Join-Path $outside 'desktop.ini'),$owned.Replace('Placeholder=1','Placeholder=0'),$utf8)
+Remove-DiskExplorer $base -KeepJunctions
+Assert (([IO.File]::GetAttributes($externalLink) -band [IO.FileAttributes]::ReparsePoint) -and -not [IO.File]::Exists((Join-Path $outside 'desktop.ini'))) 'disable removes external presentation and preserves its junction for re-enable'
+Remove-DiskExplorer $base
+Assert (-not (Test-DiskExternalEntry $externalLink) -and [IO.File]::Exists((Join-Path $outside 'deep/private.txt'))) 'uninstall unlinks the owned external junction and preserves source files'
 $env:LOCALAPPDATA=$oldLocal
 Write-Output ('PASS: Explorer Disk PowerShell: '+$count+' checks (CRLF placeholder, native ignore upgrade, junction guards, cleanup)')

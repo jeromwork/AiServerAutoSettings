@@ -91,9 +91,12 @@ function Stop-ManagedDisk([string]$DiskRoot){
     . (Join-Path (Split-Path $PSScriptRoot -Parent) 'disk/Disk.Engine.ps1')
     Stop-DiskEngineProcesses $DiskRoot
 }
-function Remove-ExplorerNavPane {
+function Remove-ExplorerNavPane([string]$LauncherRoot='') {
     . (Join-Path (Split-Path $PSScriptRoot -Parent) 'disk/Disk.NavPane.ps1')
     Remove-DiskNavPane
+    . (Join-Path (Split-Path $PSScriptRoot -Parent) 'disk/Disk.Common.ps1')
+    if($LauncherRoot){$c=Read-TransportJson (Join-Path $LauncherRoot 'config.json');if($c.disk.home){$script:DiskHome=[string]$c.disk.home}}
+    Remove-DiskExplorer
 }
 function Test-StatusFresh([string]$Root,[string]$Name){
     $file=Join-Path $Root ('status/'+$Name+'.json')
