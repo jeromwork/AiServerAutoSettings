@@ -20,7 +20,8 @@ namespace RemoteAgents.Launcher
         readonly Label hint = new Label { Text = "Снятие папки останавливает синхронизацию; файлы на компьютере остаются, их можно удалить вручную.", AutoSize = true },
             project = new Label { Text = "Выберите отмеченную папку", AutoSize = true },
             status = new Label { AutoSize = true, AccessibleName = "Статус выбранной папки" },
-            changes = new Label { AutoSize = true, ForeColor = Color.DarkGoldenrod };
+            changes = new Label { AutoSize = true, ForeColor = Color.DarkGoldenrod },
+            applyState = new Label { AutoSize = true, Visible = false, ForeColor = Color.DarkGoldenrod, Text = WindowModel.FoldersInBackground, AccessibleName = "Состояние синхронизации папок" };
         readonly Button open = Button("Открыть в Проводнике"), revert = Button("Откатить мои изменения"), reload = Button("Обновить список"), add = Button("Выбрать папку на компьютере…");
         readonly Button take = Button("← Забрать на компьютер"), send = Button("Отправить на сервер →"), stopSync = Button("Перестать синхронизировать"), navPane = Button("Показать в Проводнике слева");
         readonly Button apply = Button("Синхронизировать выбранные папки"), skip = Button("Пропустить");
@@ -53,26 +54,28 @@ namespace RemoteAgents.Launcher
             Model = new DiskFoldersModel(new DiskChoice());
             foreach (string d in DiskChoice.Directions) direction.Items.Add(DiskFoldersModel.DirectionText(d));
             all.AccessibleName = all.Text;
-            // Font-relative tree heights and auto-sized rows leave the footer reachable at high DPI.
-            var layout = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, Padding = new Padding(0, 0, 8, 0) };
+            // Compact: buttons and text rows take their natural height, the two trees share only what is left
+            // (Percent rows), so every button stays visible from a small window to a maximized 1080p one, at any DPI.
+            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(0, 0, 8, 0) };
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             AddRow(layout, hint);
-            var panes = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, Margin = new Padding(0) };
+            var panes = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = new Padding(0) };
             panes.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50)); panes.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             panes.RowCount = 3;
-            for (int row = 0; row < 3; row++) panes.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            for (int row = 0; row < 3; row++) panes.RowStyles.Add(row < 2 ? new RowStyle(SizeType.AutoSize) : new RowStyle(SizeType.Percent, 100));
             panes.Controls.Add(new Label { Text = "На этом компьютере", AutoSize = true }, 0, 0);
             panes.Controls.Add(new Label { Text = "На сервере", AutoSize = true }, 1, 0);
             panes.Controls.Add(Flow(localPath, navPane), 0, 1); panes.Controls.Add(all, 1, 1);
             panes.Controls.Add(computerTree, 0, 2); panes.Controls.Add(tree, 1, 2);
-            AddRow(layout, panes); AddRow(layout, Flow(take, send, stopSync));
+            AddRow(layout, panes); layout.RowStyles[layout.RowCount - 1] = new RowStyle(SizeType.Percent, 100); panes.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top | AnchorStyles.Bottom;
+            AddRow(layout, Flow(take, send, stopSync));
             AddRow(layout, Flow(add, open, reload));
             AddRow(layout, status); AddRow(layout, project); AddRow(layout, direction);
             direction.Anchor = AnchorStyles.Left | AnchorStyles.Top;
             warning = Flow(changes, revert); AddRow(layout, warning);
             var content = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
             content.Controls.Add(layout);
-            var footer = Flow(apply, skip);
+            var footer = Flow(apply, skip, applyState);
             var frame = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = new Padding(0) };
             frame.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             frame.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -84,13 +87,12 @@ namespace RemoteAgents.Launcher
                 if (fitting) return; fitting = true;
                 try {
                     int width = Math.Max(Font.Height * 8, content.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - layout.Padding.Horizontal);
-                    foreach (var label in new[] { hint, project, status, changes }) label.MaximumSize = new Size(width, 0);
+                    foreach (var label in new[] { hint, project, status, changes, applyState }) label.MaximumSize = new Size(width, 0);
                     int paneWidth = Math.Max(Font.Height * 4, (width - panes.Margin.Horizontal) / 2 - Font.Height);
                     localPath.MaximumSize = all.MaximumSize = new Size(paneWidth, 0);
                     direction.Width = Math.Min(width, DiskChoice.Directions.Max(d => TextRenderer.MeasureText(DiskFoldersModel.DirectionText(d), direction.Font).Width) + SystemInformation.VerticalScrollBarWidth + Font.Height);
-                    int height = Math.Max(Font.Height * 12, content.ClientSize.Height - (layout.Height - tree.Height));
-                    tree.MinimumSize = computerTree.MinimumSize = new Size(0, Font.Height * 12);
-                    tree.Height = computerTree.Height = height;
+                    // A few rows at least; never a minimum that pushes the buttons out of the window.
+                    tree.MinimumSize = computerTree.MinimumSize = new Size(0, Font.Height * 3);
                 } finally { fitting = false; }
             };
             content.SizeChanged += (s, e) => fit();
@@ -117,7 +119,7 @@ namespace RemoteAgents.Launcher
             var takeItem = new ToolStripMenuItem(take.Text); takeItem.Click += (sender, e) => Transfer(folders, true);
             var sendItem = new ToolStripMenuItem(send.Text); sendItem.Click += (sender, e) => Transfer(computerFolders, false);
             var openItem = new ToolStripMenuItem(open.Text); openItem.Click += (sender, e) => OpenExplorer(SelectedLocalPath());
-            var syncItem = new ToolStripMenuItem(apply.Text); syncItem.Click += async (sender, e) => { if (!busy && Apply != null) await Apply(); };
+            var syncItem = new ToolStripMenuItem(apply.Text); syncItem.Click += async (sender, e) => { if (Apply != null) await Apply(); };
             var chooseItem = new ToolStripMenuItem(add.Text); chooseItem.Click += (sender, e) => AddExternal();
             menu.Items.Add(takeItem); menu.Items.Add(sendItem); menu.Items.Add(remove); menu.Items.Add(syncItem); menu.Items.Add(chooseItem); menu.Items.Add(openItem); menu.Items.Add(new ToolStripSeparator());
             foreach (string value in new[] { DiskChoice.Both, DiskChoice.Receive, DiskChoice.Send }) {
@@ -126,7 +128,7 @@ namespace RemoteAgents.Launcher
             }
             menu.Opening += (sender, e) => {
                 activeFolders = menu.SourceControl == tree ? folders : computerFolders;
-                if (busy || SelectedPath(activeFolders).Length == 0) { e.Cancel = true; return; }
+                if (SelectedPath(activeFolders).Length == 0) { e.Cancel = true; return; }
                 RefreshDirection(); string d = CurrentDirection();
                 foreach (var pair in directionMenu) { pair.Value.Enabled = direction.Enabled; pair.Value.Checked = direction.Enabled && pair.Key == d; }
                 takeItem.Enabled = activeFolders == folders && take.Enabled;
@@ -150,9 +152,10 @@ namespace RemoteAgents.Launcher
                 navPane.Visible = !Json.Bool(result, "ok");
                 log(navPane.Visible ? "Значок Disk не установлен. Подробности в журнале Disk." : "Disk показан слева в Проводнике.");
             }); };
-            apply.Click += async (sender, e) => { if (!busy && Apply != null) await Apply(); };
-            skip.Click += async (sender, e) => { if (!busy && Skip != null) await Skip(); };
-            reload.Click += async (sender, e) => { if (!busy && Reload != null) await Reload(); };
+            // Apply only stores the choice and starts the background run (a second click queues the newer choice).
+            apply.Click += async (sender, e) => { if (Apply != null) await Apply(); };
+            skip.Click += async (sender, e) => { if (Skip != null) await Skip(); };
+            reload.Click += async (sender, e) => { if (Reload != null) await Reload(); };
             revert.Click += async (sender, e) => await Revert();
             RefreshState();
         }
@@ -171,7 +174,6 @@ namespace RemoteAgents.Launcher
         }
         void Transfer(DiskFolderTree source, bool takeToComputer)
         {
-            if (busy) return;
             try {
                 string path = SelectedPath(source);
                 if (takeToComputer) Model.TakeToComputer(path); else Model.SendToServer(path);
@@ -181,7 +183,6 @@ namespace RemoteAgents.Launcher
         }
         void StopSelected()
         {
-            if (busy) return;
             try { Model.StopSynchronizing(SelectedPath(activeFolders)); NeedsExternalInventory = false; }
             catch (Exception error) { log(error.Message); }
             RefreshState();
@@ -196,19 +197,19 @@ namespace RemoteAgents.Launcher
         {
             pane.Tree.AllowDrop = true;
             pane.Tree.ItemDrag += (sender, e) => {
-                if (busy || e.Button != MouseButtons.Left) return;
+                if (e.Button != MouseButtons.Left) return;
                 pane.Tree.SelectedNode = (TreeNode)e.Item; activeFolders = pane;
                 string path = SelectedPath(pane); if (path.Length == 0) return;
                 pane.Tree.DoDragDrop(new FolderDrag { Owner = this, Source = pane, Path = path }, DragDropEffects.Copy);
             };
             DragEventHandler over = (sender, e) => {
                 var data = e.Data.GetData(typeof(FolderDrag)) as FolderDrag;
-                e.Effect = !busy && data != null && data.Owner == this && data.Source != pane ? DragDropEffects.Copy : DragDropEffects.None;
+                e.Effect = data != null && data.Owner == this && data.Source != pane ? DragDropEffects.Copy : DragDropEffects.None;
             };
             pane.Tree.DragEnter += over; pane.Tree.DragOver += over;
             pane.Tree.DragDrop += (sender, e) => {
                 var data = e.Data.GetData(typeof(FolderDrag)) as FolderDrag;
-                if (busy || data == null || data.Owner != this || data.Source == pane) return;
+                if (data == null || data.Owner != this || data.Source == pane) return;
                 try {
                     if (pane == computerFolders) Model.TakeToComputer(data.Path); else Model.SendToServer(data.Path);
                     NeedsExternalInventory = false;
@@ -235,8 +236,10 @@ namespace RemoteAgents.Launcher
             Model = new DiskFoldersModel(choice, appliedChoice, excluded);
             foreach (var pane in new[] { folders, computerFolders }) { pane.Model = Model; pane.Reset(); }
             activeFolders = computerFolders;
-            skip.Visible = allowSkip; computerFolders.RefreshExternal(); RefreshState();
+            skip.Visible = allowSkip; computerFolders.RefreshExternal(); ShowLoading(); RefreshState();
         }
+        internal void ShowLoading() { foreach (var pane in new[] { folders, computerFolders }) pane.ShowMessage("Загружаю список папок…"); }
+        internal void ShowLoadFailed() { foreach (var pane in new[] { folders, computerFolders }) pane.ShowMessage("Список не загружен — нажмите «Обновить список»"); }
         internal void ShowExternalInventory(Dictionary<string, object> data)
         {
             foreach (var item in Json.Array(Json.Get(data, "items"))) {
@@ -248,19 +251,27 @@ namespace RemoteAgents.Launcher
             NeedsExternalInventory = false; computerFolders.RefreshExternal(); RefreshState();
         }
         internal void AcceptProfile() { NeedsExternalInventory = false; }
-        internal void MarkApplied() { Model.MarkApplied(ConfigProfile.DiskExclusions()); computerFolders.RefreshExternal(); RefreshState(); }
+        internal void MarkApplied(DiskChoice applied = null) { Model.MarkApplied(ConfigProfile.DiskExclusions(), applied); computerFolders.RefreshExternal(); RefreshState(); }
         internal void AllowSkip(bool value) { skip.Visible = value; }
         internal void ShowTree(Dictionary<string, object> data) { folders.ShowRoot(data); computerFolders.ShowRoot(data); RefreshState(); }
-        internal void SetBusy(bool value) { busy = value; Enabled = !value; if (!value) RefreshState(); }
+        // value: a Disk run or a folder action is in progress. The view stays enabled — ticks, selection, expansion,
+        // scrolling and «Синхронизировать» react at once; only Revert/«Показать в Проводнике» wait, through mutate.
+        internal void SetBusy(bool value) { if (busy == value) return; busy = value; RefreshState(); }
+        // Footer line under «Синхронизировать»: the background Disk run or its last failure, honestly.
+        internal void ShowDiskState(bool running, string failure)
+        {
+            applyState.Text = running ? WindowModel.FoldersInBackground : failure ?? "";
+            applyState.ForeColor = running ? Color.DarkGoldenrod : Color.Firebrick;
+            applyState.Visible = applyState.Text.Length > 0;
+        }
         void RefreshState()
         {
             updating = true; try { all.Checked = Model.Mode == DiskFoldersMode.All; } finally { updating = false; }
             updating = true;
             try { folders.RefreshProjection(); computerFolders.RefreshProjection(); }
             finally { updating = false; }
-            tree.Enabled = Loaded; computerTree.Enabled = computerFolders.Loaded || Model.ExternalRows.Any();
             // A failed inventory must not turn an unseen server selection into an empty selection.
-            apply.Enabled = !busy && (Loaded || Model.Mode != DiskFoldersMode.Selected || Model.ToChoice().Folders.Count > 0 || Model.External.Count > 0);
+            apply.Enabled = (Loaded || Model.Mode != DiskFoldersMode.Selected || Model.ToChoice().Folders.Count > 0 || Model.External.Count > 0);
             RefreshDirection();
         }
         string CurrentDirection() { return Model.DirectionOf(SelectedPath(activeFolders)); }
@@ -283,10 +294,10 @@ namespace RemoteAgents.Launcher
             direction.Enabled = chosen;
             status.Text = (entry == null ? "" : entry.Path + " → " + entry.Remote + ". ") + activeFolders.SelectedStatus;
             status.Visible = status.Text.Length > 0; activeFolders.Tree.AccessibleDescription = status.Text;
-            take.Enabled = !busy && SelectedPath(folders).Length > 0;
-            send.Enabled = !busy && SelectedPath(computerFolders).Length > 0;
-            stopSync.Enabled = !busy && path.Length > 0 && (Model.Includes(path) || Model.Partial(path));
-            open.Enabled = !busy && Directory.Exists(SelectedLocalPath());
+            take.Enabled = SelectedPath(folders).Length > 0;
+            send.Enabled = SelectedPath(computerFolders).Length > 0;
+            stopSync.Enabled = path.Length > 0 && (Model.Includes(path) || Model.Partial(path));
+            open.Enabled = Directory.Exists(SelectedLocalPath());
             bool localChanges = entry == null && Model.CanRevert(top);
             changes.Text = localChanges ? "В «" + top + "» есть изменения на компьютере: " + Model.Items[top].LocalChanges + ". Они не отправляются на сервер." : "";
             warning.Visible = localChanges; revert.Enabled = !busy;

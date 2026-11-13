@@ -44,18 +44,25 @@ public static class FoldersSmoke {
             Check(Node(local,"Remote") == null && !Node(server,"Remote").Checked, "stop removes pending download");
             local.SelectedNode=Node(local,"Local"); Field<Button>(view,"send").PerformClick(); Pump();
             Check(Node(local,"Local").Checked && Node(server,"Local") == null, "send stages upload without inventing server presence");
+            // A running Disk/folder action never disables the panes: ticks, selection and transfer react at once.
+            Call(view,"SetBusy",true); Pump();
+            Check(view.Enabled && local.Enabled && server.Enabled, "busy keeps panes enabled");
+            server.SelectedNode=Node(server,"Both"); Field<Button>(view,"take").PerformClick(); Pump();
+            Check(Node(server,"Both").Checked, "take works while a Disk run is in progress");
+            Call(view,"SetBusy",false); Pump();
             var apply=Field<Button>(view,"apply"); var skip=Field<Button>(view,"skip");
             foreach (float size in new[] {9f, 14f, 18f}) {
                 form.Font=new Font("Segoe UI",size); Pump();
                 var lb=local.RectangleToScreen(local.ClientRectangle); var rb=server.RectangleToScreen(server.ClientRectangle);
                 Check(lb.Top == rb.Top && lb.Right <= rb.Left && lb.Width > form.Font.Height * 5 && rb.Width > form.Font.Height * 5, "separate pane bounds at font " + size);
-                Check(local.Height >= form.Font.Height * 10 && server.Height >= form.Font.Height * 10, "readable tree height at font " + size);
-                var foot=apply.RectangleToScreen(apply.ClientRectangle);
-                Check(form.RectangleToScreen(form.ClientRectangle).Contains(foot) && skip.Visible, "footer remains reachable at font " + size);
+                Check(local.Height >= form.Font.Height * 3 && server.Height >= form.Font.Height * 3, "readable tree height at font " + size);
+                var foot=apply.RectangleToScreen(apply.ClientRectangle); var screen=form.RectangleToScreen(form.ClientRectangle);
+                Check(screen.Contains(foot) && skip.Visible, "footer remains reachable at font " + size);
+                foreach (var name in new[] { "take", "send", "add", "reload" }) { var b=Field<Button>(view,name); Check(screen.Contains(b.RectangleToScreen(b.ClientRectangle)), name + " visible without scrolling at font " + size); }
                 Console.WriteLine("BOUNDS font="+size+" local="+lb+" server="+rb+" footer="+foot);
             }
             Call(view,"Initialize",choice,"C:\\DifferentDisk",false,null,null); Pump();
-            Check(local.Nodes.Count == 0 && server.Nodes.Count == 0, "profile initialization clears pane caches");
+            Check(local.Nodes.Count == 1 && server.Nodes.Count == 1 && local.Nodes[0].Tag == null && server.Nodes[0].Text.StartsWith("Загружаю"), "profile initialization clears pane caches and shows a loading row");
             Check(messages.All(x => !x.Contains("Exception")), "no UI callback errors");
             form.Close();
         }
