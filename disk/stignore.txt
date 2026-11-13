@@ -51,3 +51,5 @@
 // Laravel: загруженные файлы и кэш в storage проекта не передаём
 (?i)/storage/app
 (?i)/storage/framework
+// Оформление Проводника принадлежит этому компьютеру; вложенные desktop.ini не трогаем
+(?i)/desktop.ini

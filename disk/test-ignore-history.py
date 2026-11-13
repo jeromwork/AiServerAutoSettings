@@ -127,7 +127,9 @@ function Invoke-WizardSsh($Root,$Command,$InputText='',$Timeout=60){
             digest((ROOT/'disk/stignore.txt').read_text()),
         } <= set(versions))
         self.assertEqual(len(versions), len(set(versions)))
-        self.assertTrue((ROOT/'disk/stignore.txt').read_text().endswith('(?i)/storage/app\n(?i)/storage/framework\n'))
+        rules = (ROOT/'disk/stignore.txt').read_text().splitlines()
+        self.assertTrue({'(?i)/storage/app', '(?i)/storage/framework', '(?i)/desktop.ini'} <= set(rules))
+        self.assertNotIn('(?i)desktop.ini', rules)
 
 
 if __name__ == '__main__':
