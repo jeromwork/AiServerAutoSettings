@@ -382,7 +382,7 @@ namespace RemoteAgents.Launcher
                 mainWindow.HiddenToTray = () => {
                     if (window.CloseToTray()) {
                         Safe(() => Files.Atomic(Path.Combine(home, "state", "tray-hint-shown"), "shown\n"));
-                        icon.ShowBalloonTip(8000, Product.Name, Product.IsVpn ? "VPN работает — значок в трее. Окно: пункт «Открыть»." : "Значок в трее: клик открывает Happier, если адрес задан. Окно: пункт «Открыть».", ToolTipIcon.Info);
+                        icon.ShowBalloonTip(8000, Product.Name, Product.IsVpn ? "Программа работает — значок в трее. Окно: пункт «Открыть»." : "Значок в трее: клик открывает Happier, если адрес задан. Окно: пункт «Открыть».", ToolTipIcon.Info);
                     }
                 };
                 mainWindow.ServiceActions(new[] {
