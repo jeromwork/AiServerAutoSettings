@@ -5,6 +5,9 @@
     <StartupObject>RemoteAgents.Launcher.EntryPoint</StartupObject>
     <UseWindowsForms>true</UseWindowsForms>
     <ProductName Condition="'$(ProductName)' == ''">RemoteAgents</ProductName>
+    <AssemblyTitle>$(ProductName)</AssemblyTitle>
+    <Product>$(ProductName)</Product>
+    <Description>$(ProductName)</Description>
     <AssemblyName>$(ProductName)</AssemblyName>
     <DefineConstants Condition="'$(ProductName)' == 'RemoteVPN'">$(DefineConstants);REMOTE_VPN</DefineConstants>
     <RootNamespace>RemoteAgents.Launcher</RootNamespace>
@@ -25,6 +28,7 @@
     <Reference Include="Microsoft.CSharp" />
     <Reference Include="Microsoft.VisualBasic" />
     <Reference Include="System.Xml" />
+    <Reference Include="System.Management" />
     <Reference Include="System.Web.Extensions" />
     <Reference Include="System.IO.Compression" />
     <Reference Include="System.IO.Compression.FileSystem" />
