@@ -4,6 +4,7 @@
 All roots/configs/services are temporary. Never touches ~/Disk or Mail.
 """
 import contextlib
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -212,8 +213,19 @@ class CloudTests(unittest.TestCase):
         wait_for(lambda: not (remote_project / 'many/2.txt').exists() and self.healthy(), seconds=10, description='all-files deletion')
         # Reapply must keep bisync listings and initialized markers, then poll cloud changes.
         initialized = {p: p.read_bytes() for p in (self.base / 'state').glob('*/initialized')}
+        # The obsolete header was documentation only: migrate its stored hash,
+        # preserving actual bisync listings. Changed rules must still be refused.
+        template = SCRIPT.with_name('filter.txt').read_text()
+        legacy = template.replace('# Исключения облачных проектов:',
+                                  '# Исключения Диска (как disk/stignore.txt):', 1)
+        stored = cloud.read_json(self.base / 'config.json')
+        stored['filterSha256'] = hashlib.sha256(legacy.encode()).hexdigest()
+        cloud.write_json(self.base / 'config.json', stored)
+        (self.base / 'filter.txt').write_text(legacy)
         self.cfg['pollSeconds'] = 2
         self.assertTrue(cloud.apply(self.cfg)['ok'])
+        self.assertEqual(cloud.read_json(self.base / 'config.json')['filterSha256'],
+                         hashlib.sha256(template.encode()).hexdigest())
         for path, value in initialized.items():
             self.assertEqual(path.read_bytes(), value)
         wait_for(lambda: self.status().get('state') == 'watching', seconds=20)
@@ -276,6 +288,12 @@ class CloudTests(unittest.TestCase):
                 dest.write_text('0' * 64 + '  rclone-v' + cloud.VERSION + '-linux-amd64.zip\n')
             with patch.object(cloud, 'download', side_effect=bad_download), self.assertRaisesRegex(cloud.Error, 'SHA256SUMS'):
                 cloud.install_rclone()
+        self.base.joinpath('state').mkdir()
+        stored = cloud.validate(self.cfg)
+        stored['filterSha256'] = '0' * 64
+        cloud.write_json(self.base / 'config.json', stored)
+        with self.assertRaisesRegex(cloud.Error, 'Изменился фильтр'):
+            cloud.apply(self.cfg)
 
     def test_preexisting_equal_size_different_modtime(self):
         project = self.local / 'Existing'

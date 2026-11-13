@@ -277,14 +277,20 @@ def apply(data):
     rclone = install_rclone()
     install_inotify()
     template = SOURCE.with_name('filter.txt').read_text(encoding='utf-8-sig').replace('\r\n', '\n')
+    filter_hash = hashlib.sha256(template.encode()).hexdigest()
+    # Migration: renaming the retired template's comment changes no filter rule.
+    # Accept only this exact old header with otherwise byte-identical contents.
+    legacy_template = template.replace('# Исключения облачных проектов:',
+                                       '# Исключения Диска (как disk/stignore.txt):', 1)
+    legacy_filter_hash = hashlib.sha256(legacy_template.encode()).hexdigest()
     previous = read_json(BASE / 'config.json')
     if previous:
         identity = ('vendor', 'accountHash', 'remoteRoot', 'localRoot')
         require(all(previous.get(k) == cfg[k] for k in identity),
                 'Изменились корни синхронизации, аккаунт или провайдер: сначала выполните remove, затем apply.')
-        require(not (BASE / 'state').exists() or previous.get('filterSha256') == hashlib.sha256(template.encode()).hexdigest(),
+        require(not (BASE / 'state').exists() or previous.get('filterSha256') in (filter_hash, legacy_filter_hash),
                 'Изменился фильтр действующего bisync: нужна отдельная проверка и явная повторная инициализация.')
-    cfg['filterSha256'] = hashlib.sha256(template.encode()).hexdigest()
+    cfg['filterSha256'] = filter_hash
     # Stop before changing config/state; no password ever enters argv, environment, or journal.
     # On the first install the unit does not exist yet (systemctl exits 5) — nothing to stop.
     systemctl('stop', UNIT, check=False)
