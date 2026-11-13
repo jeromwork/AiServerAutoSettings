@@ -18,7 +18,10 @@ namespace RemoteAgents.Launcher
         internal static string LeftClickAction(Dictionary<string, object> config, Dictionary<string, object> account)
         { return HappierUrl(config, account).Length > 0 ? "happier" : "open"; }
         internal static bool AcceptLeftClick(int clicks, long elapsedMilliseconds, int doubleClickMilliseconds)
-        { return clicks == 1 && elapsedMilliseconds > doubleClickMilliseconds; }
+        {
+            // NotifyIcon.MouseClick reports Clicks=0; ordinary controls can report 1.
+            return (clicks == 0 || clicks == 1) && elapsedMilliseconds > doubleClickMilliseconds;
+        }
         internal static string HappierUrl(Dictionary<string, object> config, Dictionary<string, object> account)
         {
             string value = Json.Text(Json.Map(Json.Get(config, "happier")), "webappUrl", Json.Str(account, "webappUrl")).Trim();

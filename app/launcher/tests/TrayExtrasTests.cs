@@ -33,6 +33,8 @@ namespace RemoteAgents.Launcher
                 Check(TrayMenuModel.Build(config, empty, transport, health)[2].Enabled, "configured URL enables item");
             }
             Check(TrayMenuModel.LeftClickAction(empty, empty) == "open", "left click without URL opens window");
+            Check(TrayMenuModel.AcceptLeftClick(0, 501, 500), "NotifyIcon single click has Clicks=0");
+            Check(!TrayMenuModel.AcceptLeftClick(0, 200, 500), "NotifyIcon repeat suppressed within double click interval");
             Check(TrayMenuModel.AcceptLeftClick(1, 501, 500), "first or later single click accepted");
             Check(!TrayMenuModel.AcceptLeftClick(1, 200, 500) && !TrayMenuModel.AcceptLeftClick(2, 200, 500), "double click cannot launch second tab");
             Check(!TrayMenuModel.AcceptLeftClick(1, 500, 500), "double click boundary suppressed");
