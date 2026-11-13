@@ -43,6 +43,18 @@ namespace RemoteAgents.Launcher
                 do { var snapshot = Json.Read(shared); if (Json.Str(snapshot, "payload").Length != 65536) throw new InvalidDataException("partial status"); reads++; } while (!writer.IsCompleted || reads < 200);
                 writer.GetAwaiter().GetResult();
                 Check("status-reader-during-atomic-replacement-crlf", reads >= 200 && Json.Int(Json.Read(shared), "generation", -1) == 200);
+                foreach (string blank in new[] { "", " \r\n\t " }) {
+                    Files.Atomic(shared, blank);
+                    var fill = System.Threading.Tasks.Task.Run(() => { Thread.Sleep(250); Files.Atomic(shared, "{\"ok\":true}\r\n"); });
+                    Check("status-empty-retry", Json.Bool(Json.Read(shared), "ok"));
+                    fill.GetAwaiter().GetResult();
+                    Files.Atomic(shared, blank);
+                    var watch = System.Diagnostics.Stopwatch.StartNew();
+                    Reject("status-empty-retry-exhausted", () => Json.Read(shared));
+                    Check("status-empty-retry-bounded", watch.ElapsedMilliseconds >= 900 && watch.ElapsedMilliseconds < 5000);
+                }
+                Files.Atomic(shared, "broken");
+                Reject("status-invalid-json", () => Json.Read(shared));
                 var e = new UpdateEngine(home, "1.0.0.0", () => now);
                 var one = Archive(work, "1.0.0"); Check("initial-stage", Stage(e, one, work) == "1.0.0"); e.Activate(one.Version);
                 Check("initial-activate", e.Current == "1.0.0" && !e.Pending);

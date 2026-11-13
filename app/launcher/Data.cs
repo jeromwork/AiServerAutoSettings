@@ -67,13 +67,16 @@ namespace RemoteAgents.Launcher
         {
             for (int attempt = 0; ; attempt++) {
                 try {
+                    string text;
                     using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-                    using (var reader = new StreamReader(stream, Encoding.UTF8, true)) return reader.ReadToEnd();
+                    using (var reader = new StreamReader(stream, Encoding.UTF8, true)) text = reader.ReadToEnd();
+                    if (!string.IsNullOrWhiteSpace(text)) return text;
+                    if (attempt >= 20) throw new InvalidDataException("Пустой JSON после повторного чтения");
                 } catch (IOException ex) {
                     int code = ex.HResult & 0xffff;
                     if ((code != 32 && code != 33) || attempt >= 20) throw;
-                    System.Threading.Thread.Sleep(50);
                 }
+                System.Threading.Thread.Sleep(50);
             }
         }
         public static string ReadLine(string path) { return File.Exists(path) ? LF(File.ReadAllText(path)).Trim('\uFEFF', ' ', '\n', '\t') : ""; }

@@ -24,6 +24,21 @@ try{
     [IO.File]::WriteAllText($file,'broken');$rejected=$false
     try{Read-TransportJson $file|Out-Null}catch{$rejected=$true}
     if(-not $rejected){throw 'Повреждённый JSON принят'}
+    foreach($blank in @(''," `r`n`t ")){
+        # Runspace выполняет реальную запись после начала чтения, без задержки запуска Start-Job.
+        [IO.File]::WriteAllText($file,$blank)
+        $fill=[PowerShell]::Create()
+        try{
+            [void]$fill.AddScript({param($common,$file) . $common;Start-Sleep -Milliseconds 250;Write-TransportJson $file @{ok=$true}}).AddArgument($common).AddArgument($file)
+            $pending=$fill.BeginInvoke()
+            if(-not (Read-TransportJson $file).ok){throw 'Временный пустой JSON не перечитан'}
+            $fill.EndInvoke($pending)|Out-Null
+            if($fill.HadErrors){throw 'Писатель пустого снимка завершился с ошибкой'}
+        }finally{$fill.Dispose()}
+        [IO.File]::WriteAllText($file,$blank);$rejected=$false;$watch=[Diagnostics.Stopwatch]::StartNew()
+        try{Read-TransportJson $file|Out-Null}catch{$rejected=$true}
+        if(-not $rejected -or $watch.ElapsedMilliseconds -lt 900 -or $watch.ElapsedMilliseconds -gt 5000){throw 'Постоянно пустой JSON должен завершиться ошибкой в пределах лимита'}
+    }
     # На Windows проверяем реальную sharing violation и освобождение блокировки в пределах повтора.
     if($env:OS -eq 'Windows_NT'){
         Write-TransportJson $file @{ok=$true}
@@ -39,5 +54,5 @@ try{
             Receive-Job $lock -Wait -ErrorAction Stop|Out-Null
         }finally{Remove-Job $lock -Force}
     }
-    Write-Host ('PASS: чтение при атомарной записи, CRLF и ошибки JSON; снимков: '+$reads)
+    Write-Host ('PASS: чтение при атомарной записи, CRLF, временно пустые снимки и ошибки JSON; снимков: '+$reads)
 }finally{if($writer){Remove-Job $writer -Force};Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue}

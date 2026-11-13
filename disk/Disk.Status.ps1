@@ -19,11 +19,11 @@ function Set-DiskResumeTask($Until) {
     if(-not $Until){if(Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue){Unregister-ScheduledTask -TaskName $name -Confirm:$false};return}
     # Keep a private added copy: a later bundle cleanup cannot remove the timed resume command.
     $sourceRoot=Split-Path $PSScriptRoot -Parent
-    $hashes=@('disk/Disk.Status.ps1','disk/Disk.Common.ps1','disk/Disk.Engine.ps1','transport/Transport.Common.ps1','transport/Legacy.Conflicts.ps1','tools/legacy-cleanup/Restore-OldInstall.ps1')|ForEach-Object {(Get-FileHash -LiteralPath (Join-Path $sourceRoot $_) -Algorithm SHA256).Hash}
+    $hashes=@('disk/Disk.Status.ps1','disk/Disk.Common.ps1','disk/Disk.Engine.ps1','transport/Transport.Common.ps1')|ForEach-Object {(Get-FileHash -LiteralPath (Join-Path $sourceRoot $_) -Algorithm SHA256).Hash}
     $sha=[Security.Cryptography.SHA256]::Create();try{$hash=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(($hashes -join ''))))).Replace('-','').Substring(0,24)}finally{$sha.Dispose()}
     $app=Join-Path $script:MonitorHome ('disk-commands/'+$hash)
-    foreach($part in @('disk','transport','tools/legacy-cleanup')){[void][IO.Directory]::CreateDirectory((Join-Path $app $part))}
-    foreach($path in @('disk/Disk.Status.ps1','disk/Disk.Common.ps1','disk/Disk.Engine.ps1','transport/Transport.Common.ps1','transport/Legacy.Conflicts.ps1','tools/legacy-cleanup/Restore-OldInstall.ps1')){
+    foreach($part in @('disk','transport')){[void][IO.Directory]::CreateDirectory((Join-Path $app $part))}
+    foreach($path in @('disk/Disk.Status.ps1','disk/Disk.Common.ps1','disk/Disk.Engine.ps1','transport/Transport.Common.ps1')){
         $source=Join-Path $sourceRoot $path;$target=Join-Path $app $path
         if(-not (Test-Path $target) -or (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash){Copy-Item -LiteralPath $source -Destination $target -Force}
     }
@@ -115,8 +115,6 @@ $engineOwned=$false
 try {
 try{$engineOwned=$engineMutex.WaitOne(0)}catch [Threading.AbandonedMutexException]{$engineOwned=$true}
 if(-not $engineOwned){throw 'Надзор Syncthing уже работает'}
-. (Join-Path (Split-Path $PSScriptRoot -Parent) 'transport/Legacy.Conflicts.ps1')
-$legacyCleanup=Invoke-LegacyConflictCleanup -Root $LauncherHome
 $script:DiskEngine=$null;$nextNavPaneCheck=[DateTime]::MinValue
 do {
     if(Test-Path (Join-Path $LauncherHome 'state/disk-reconfigure')){
@@ -132,7 +130,6 @@ do {
     try{if(Test-Path -LiteralPath $pauseFile){$pause=Read-TransportJson $pauseFile;if($pause.until -and (Convert-TransportUtc $pause.until) -le [DateTime]::UtcNow){Set-DiskPause Resume}}}catch{}
     $status=Get-DiskMonitorStatus
     if(-not $script:DiskEngine -or $script:DiskEngine.HasExited){$status.ok=$false;$status.summary='Syncthing не запущен под надзором'}
-    if($legacyCleanup -and -not $legacyCleanup.ok){$status.ok=$false;$status.summary+='; '+$legacyCleanup.summary}
     Write-TransportJson (Join-Path $LauncherHome 'status/disk.json') $status
     $state=[string]$status.summary;if($state -cne $lastDiskState){Write-DiskMonitorLog ('status '+$state);$lastDiskState=$state}
     if($Once){break}

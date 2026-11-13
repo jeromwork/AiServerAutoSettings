@@ -193,7 +193,7 @@ function Invoke-TransportPreflight([string]$Root,[string]$Bundle,$Config){
     $status=Join-Path $probe 'status/transport.json';if(Test-Path $status){Remove-Item -LiteralPath $status -Force}
     $child=$null
     try{
-        $child=Start-TransportProcess (Get-TransportPowerShell) @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $Bundle 'transport/Transport.Daemon.ps1'),'-Home',$probe,'-ParentPid',[string]$PID,'-SkipLegacyCleanup')
+        $child=Start-TransportProcess (Get-TransportPowerShell) @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $Bundle 'transport/Transport.Daemon.ps1'),'-Home',$probe,'-ParentPid',[string]$PID)
         Wait-TransportReady $probe 45
         if(-not (Test-LocalSsh $probe $ports[0])){throw 'SSH на временном входе не прошёл'}
         Write-SetupLog $Root 'preflight.ok'

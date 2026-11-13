@@ -22,21 +22,21 @@ $script:fixtureSnapshot=$snapshot
 function Get-TransportPortSnapshot {$script:fixtureSnapshot}
 $child=[pscustomobject]@{Process=[pscustomobject]@{HasExited=$true;ExitCode=1};ErrorDrain=[Threading.Tasks.Task]::CompletedTask;ErrorBuffer=[pscustomobject]@{}}
 $child.ErrorBuffer|Add-Member ScriptMethod Snapshot {$script:bindLine}
-$script:bindLine=$line
+$script:bindLine="WARN a preceding message`r`n"+$line
 $d=New-TransportDiagnostic $child 'sing-box' 'process-exited'
 Assert ($d.reason -eq 'port-in-use' -and (Format-TransportDiagnostic $d).Contains('PID 42')) 'Диагностика stderr сохраняет понятную причину'
-$config=@{inbounds=@(@{listen='127.0.0.1';listen_port=2222});experimental=@{clash_api=@{external_controller='127.0.0.1:29090'}}}
-$paths=@{Outbounds=@();Tunnels=@()}
-Assert ((Find-TransportPortConflict $config $paths @{}).port -eq 2222) 'Конфликт найден до запуска'
-foreach($kind in @('api','probe','socks')){
-    $snapshot.listeners[0].port=30001
-    $config.inbounds=@();$config.experimental.clash_api.external_controller='127.0.0.1:29090';$paths.Outbounds=@();$paths.Tunnels=@()
-    switch($kind){
-        api {$config.experimental.clash_api.external_controller='127.0.0.1:30001'}
-        probe {$config.inbounds=@(@{listen='127.0.0.1';listen_port=30001})}
-        socks {$paths.Outbounds=@(@{type='socks';tag='ssh';server='127.0.0.1';server_port=30001});$paths.Tunnels=@(@{tag='ssh'})}
-    }
-    Assert ((Find-TransportPortConflict $config $paths @{}).port -eq 30001) ('Проверяется порт '+$kind)
-}
-Assert ($null -eq (Find-TransportPortConflict $config $paths @{ssh='our-child'})) 'Собственный SSH-туннель не мешает перезапуску движка'
-Assert ((Get-TransportRestartDelay 3 1) -eq 5 -and (Get-TransportRestartDelay 3 2) -eq 10 -and (Get-TransportRestartDelay 3 8) -eq 120 -and (Get-TransportRestartDelay 3 0) -eq 3) 'Пауза bind растёт с 5 до 120 секунд'
+Assert ($c.message.Contains('Remove-OldInstall.cmd') -and $c.message.Contains('откройте RemoteAgents снова')) 'Для старой установки дано действие ручной очистки'
+$retry=Get-TransportBindRetry $null $d
+Assert ($retry.failures -eq 1) 'Первая ошибка bind начинает новую серию'
+$retry=Get-TransportBindRetry $retry $d
+Assert ($retry.failures -eq 2) 'Повтор одной ошибки bind увеличивает паузу'
+$other=Copy-TransportObject $d;$other.portConflict.port=2223
+$retry=Get-TransportBindRetry $retry $other
+Assert ($retry.failures -eq 1) 'Другой порт сбрасывает серию bind'
+$other.stderr+=' another bind error'
+$retry=Get-TransportBindRetry $retry $other
+Assert ($retry.failures -eq 1) 'Другая ошибка того же порта сбрасывает серию'
+$retry=Get-TransportBindRetry $retry (New-TransportDiagnostic $null 'sing-box' 'engine-start-failed')
+Assert ($null -eq $retry) 'Ошибка без bind сбрасывает серию'
+Assert ($null -eq (Get-TransportBindRetry $d $null)) 'Успешный исход сбрасывает серию'
+Assert ((Get-TransportRestartDelay 3 1) -eq 5 -and (Get-TransportRestartDelay 3 2) -eq 10 -and (Get-TransportRestartDelay 3 8) -eq 30 -and (Get-TransportRestartDelay 3 0) -eq 3 -and (Get-TransportRestartDelay 90 1) -eq 30 -and (Get-TransportRestartDelay 90 0) -eq 30) 'Пауза bind растёт с 5 до 30 секунд и всегда ограничена 30 с'

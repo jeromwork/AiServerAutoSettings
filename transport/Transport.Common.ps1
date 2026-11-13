@@ -14,12 +14,14 @@ function Read-TransportJson([string]$Path) {
         try{
             $stream=New-Object IO.FileStream($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
             $reader=New-Object IO.StreamReader($stream,[Text.Encoding]::UTF8,$true)
-            return (ConvertFrom-Json (Convert-TransportLF $reader.ReadToEnd()))
+            $text=Convert-TransportLF $reader.ReadToEnd()
+            if(-not [string]::IsNullOrWhiteSpace($text)){return (ConvertFrom-Json $text)}
+            if($attempt -ge 20){throw (New-Object IO.InvalidDataException('Пустой JSON после повторного чтения'))}
         }catch [IO.IOException]{
-            # ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION. Другие ошибки не скрываем.
+            # ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION; пустой снимок повторяем в том же лимите.
             if(($_.Exception.GetBaseException().HResult -band 0xffff) -notin @(32,33) -or $attempt -ge 20){throw}
-            Start-Sleep -Milliseconds 50
         }finally{if($reader){$reader.Dispose()}elseif($stream){$stream.Dispose()}}
+        Start-Sleep -Milliseconds 50
     }
 }
 function Convert-TransportUtc($Value) {
@@ -1060,21 +1062,9 @@ function Get-TransportPortConflict([string]$Address,[int]$Port,$Snapshot=$null) 
     $endpoint=$Address+':'+$Port
     $message='Порт '+$endpoint+' занят'
     if($exe){$message+=' программой '+$exe+' (PID '+$ownerId+')'}elseif($ownerId){$message+=' процессом PID '+$ownerId+' (путь программы недоступен)'}else{$message+='; определить программу не удалось'}
-    if($legacy){$message+=' — это старая установка RemoteDisk (RemoteDiskChannel)'}
-    $message+='. Освободите порт или измените порты в настройках связи.'
+    if($legacy){$message+=' — это старая установка RemoteDisk: закройте программу и запустите Remove-OldInstall.cmd из инструмента очистки, затем откройте RemoteAgents снова'}
+    $message+='.'
     [pscustomobject]@{address=$Address;port=$Port;pid=$ownerId;exe=$exe;legacy=$legacy;message=$message;listening=($listener.Count -gt 0)}
-}
-function Find-TransportPortConflict($Config,$Paths,$TunnelChildren) {
-    $endpoints=@($Config.inbounds|ForEach-Object {[pscustomobject]@{address=[string]$_.listen;port=[int]$_.listen_port}})
-    $api=[string]$Config.experimental.clash_api.external_controller
-    if($api -match '^(.+):(\d+)$'){$endpoints+=@([pscustomobject]@{address=$Matches[1];port=[int]$Matches[2]})}
-    foreach($out in @($Paths.Outbounds|Where-Object {$_.type -eq 'socks'})){
-        if(@($Paths.Tunnels|Where-Object {$_.tag -eq $out.tag}).Count -and -not $TunnelChildren.ContainsKey($out.tag)){
-            $endpoints+=@([pscustomobject]@{address=[string]$out.server;port=[int]$out.server_port})
-        }
-    }
-    try{$snapshot=Get-TransportPortSnapshot}catch{return}
-    foreach($e in $endpoints){$conflict=Get-TransportPortConflict $e.address $e.port $snapshot;if($conflict.listening){return $conflict}}
 }
 function Get-TransportBindConflict([string]$Text,$Snapshot=$null) {
     if($Text -notmatch '(?i)Only one usage of each socket address|address already in use|WSAEADDRINUSE'){return}
@@ -1083,9 +1073,17 @@ function Get-TransportBindConflict([string]$Text,$Snapshot=$null) {
     }
     [pscustomobject]@{address='';port=0;pid=0;exe='';legacy=$false;message='Порт модуля связи занят другой программой. Освободите порт или измените порты в настройках связи.'}
 }
+# Счётчик относится к одному endpoint и одной фактической ошибке stderr, не ко всем падениям.
+function Get-TransportBindRetry($Previous,$Detail) {
+    if(-not $Detail -or -not $Detail.portConflict){return $null}
+    $key=$Detail.portConflict.address+':'+$Detail.portConflict.port+' '+(Convert-TransportLF ([string]$Detail.stderr)).Trim()
+    $failures=1
+    if($Previous -and $Previous.key -ceq $key){$failures=[Math]::Min(4,$Previous.failures+1)}
+    [pscustomobject]@{key=$key;failures=$failures}
+}
 function Get-TransportRestartDelay([double]$Base,[int]$BindFailures) {
-    if($BindFailures -le 0){return $Base}
-    [Math]::Min(120,[Math]::Max(5,$Base)*[Math]::Pow(2,[Math]::Min(6,$BindFailures-1)))
+    if($BindFailures -le 0){return [Math]::Min(30,$Base)}
+    [Math]::Min(30,[Math]::Max(5,$Base)*[Math]::Pow(2,[Math]::Min(3,$BindFailures-1)))
 }
 
 function New-TransportDiagnostic($Child,[string]$Candidate,[string]$Reason,$Settings=$null) {
@@ -1094,7 +1092,11 @@ function New-TransportDiagnostic($Child,[string]$Candidate,[string]$Reason,$Sett
         try{if($Child.Process.HasExited){$code=$Child.Process.ExitCode;[void]$Child.ErrorDrain.Wait(500)}}catch{}
         if($Child.PSObject.Properties['ErrorBuffer']){
             $lines=@((Convert-TransportLF $Child.ErrorBuffer.Snapshot()) -split "`n"|Where-Object {$_.Trim()})
-            if($lines.Count){$line=$lines[0]}
+            if($lines.Count){
+                $line=$lines[0]
+                # sing-box может вывести предупреждение до ошибки запуска: ищем саму bind-строку.
+                foreach($entry in $lines){if($entry -match '(?i)bind:.*(?:Only one usage of each socket address|address already in use|WSAEADDRINUSE)'){$line=$entry;break}}
+            }
         }
     }
     # Error kind remains explicit even when stderr is empty or has been redacted.

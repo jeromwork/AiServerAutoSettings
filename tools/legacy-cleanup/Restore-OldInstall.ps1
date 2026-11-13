@@ -2,25 +2,12 @@
 # ВРЕМЕННЫЙ одноразовый инструмент: возвращает старую установку из последней копии
 # %LOCALAPPDATA%\RemoteAgents-old-backup-* (или -Backup <папка>) по manifest.json.
 # Коды: 0 готово, 1 часть шагов не удалась, 2 отменено, 3 ошибка, 4 копия не найдена.
-param([string]$Backup, [switch]$Yes, [string]$Adapter)
+param([string]$Backup, [switch]$Yes)
 $ErrorActionPreference = 'Stop'
 function Invoke-Native([string]$Exe, [string[]]$A) {
     $ErrorActionPreference = 'Continue'; $o = & (Join-Path $env:SystemRoot ('System32\' + $Exe)) @A 2>&1
     [pscustomobject]@{ code = $LASTEXITCODE; out = (@($o | ForEach-Object { [string]$_ }) -join ' ') }
 }
-function Set-RestoreRun($Value) {
-    $kp = 'Software\Microsoft\Windows\CurrentVersion\Run'; $kind = 'String'
-    if ($Value.key) { $kp = $Value.key }; if ($Value.kind) { $kind = $Value.kind }
-    $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($kp)
-    try { $key.SetValue($Value.name, $Value.value, $kind) } finally { $key.Dispose() }
-}
-function Start-RestoreProcess([string]$Command) {
-    $live = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $_.CommandLine -eq $Command })
-    if ($live.Count) { return }
-    $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $Command } -ErrorAction Stop
-    if ($created.ReturnValue -ne 0) { throw 'Не удалось запустить старую программу' }
-}
-if ($Adapter) { . ([IO.Path]::GetFullPath($Adapter)) }
 try {
     $B = $Backup
     if (-not $B) { $B = @(Get-ChildItem -LiteralPath $env:LOCALAPPDATA -Directory -Filter 'RemoteAgents-old-backup-*' | Where-Object { (Test-Path (Join-Path $_.FullName 'manifest.json')) -and -not (Test-Path (Join-Path $_.FullName 'restored.txt')) } | Sort-Object Name -Descending | Select-Object -First 1 | ForEach-Object { $_.FullName }) }
@@ -45,30 +32,17 @@ try {
     foreach ($k in @($m.regkeys)) { $r = Invoke-Native 'reg.exe' @('import', (Join-Path $B $k.file)); if ($r.code) { $fail++; Write-Host ('ОШИБКА, меню ' + $k.key + ': ' + $r.out) -ForegroundColor Red } }
     $run = 'Software\Microsoft\Windows\CurrentVersion\Run'
     foreach ($r in @($m.runs)) {
-        Set-RestoreRun $r
+        $kp = $run; $kind = 'String'; if ($r.key) { $kp = $r.key }; if ($r.kind) { $kind = $r.kind }
+        $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($kp); try { $key.SetValue($r.name, $r.value, $kind) } finally { $key.Dispose() }
         Write-Host ('Значение возвращено: ' + $r.name)
     }
     foreach ($t in @($m.tasks)) {
         $r = Invoke-Native 'schtasks.exe' @('/Create', '/TN', $t.name, '/XML', (Join-Path $B $t.file), '/F')
         if ($r.code) { $fail++; Write-Host ('ОШИБКА, задача ' + $t.name + ': ' + $r.out) -ForegroundColor Red; continue }
         Write-Host ('Задача возвращена: ' + $t.name)
-        if ($t.name -like 'RemoteDisk*' -and (-not $m.automatic -or ($t.running -and $t.enabled))) {
-            $r = Invoke-Native 'schtasks.exe' @('/Run', '/TN', $t.name)
-            if ($m.automatic -and $r.code) { $fail++; Write-Host ('ОШИБКА, запуск старой задачи: ' + $t.name) -ForegroundColor Red }
-        }
+        if ($t.name -like 'RemoteDisk*') { [void](Invoke-Native 'schtasks.exe' @('/Run', '/TN', $t.name)) }
     }
-    foreach ($r in @($m.runs | Where-Object { -not $_.key -or $_.key -like '*\Run' })) {
-        if (-not $m.automatic) { [void](Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = [string]$r.value }); continue }
-        try { Start-RestoreProcess ([string]$r.value) } catch { $fail++; Write-Host ('ОШИБКА, запуск автозагрузки: ' + $r.name) -ForegroundColor Red }
-    }
-    if ($m.automatic) {
-        foreach ($p in @($m.processes | Where-Object { -not $_.restartWith })) {
-            try {
-                Start-RestoreProcess ([string]$p.commandLine)
-                Write-Host ('Запущена старая программа: ' + $p.exe)
-            } catch { $fail++; Write-Host ('ОШИБКА, запуск старой программы: ' + $p.exe) -ForegroundColor Red }
-        }
-    }
+    foreach ($r in @($m.runs | Where-Object { -not $_.key -or $_.key -like '*\Run' })) { [void](Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = [string]$r.value }) }
     if ($fail) { Write-Host ('Ошибок: ' + $fail + '. Исправьте причину и запустите снова с -Backup "' + $B + '".') -ForegroundColor Red; exit 1 }
     Set-Content -LiteralPath (Join-Path $B 'restored.txt') -Value (Get-Date).ToString('o')
     Write-Host 'Старая установка возвращена.' -ForegroundColor Green; exit 0
