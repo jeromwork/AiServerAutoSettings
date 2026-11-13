@@ -198,6 +198,8 @@ class ConfigExportTests(unittest.TestCase):
         self.assertFalse((Path(rc.settings(self.e.cfg)['stateDir']) / 'config-events.log').exists())
         config, _ = self.e.export('Новый', '--happier', 'new:Сын')  # новый аккаунт создаёт компьютер — проверка не нужна
         self.assertEqual(config['happier'], {'mode': 'new', 'label': 'Сын'})
+        config, _ = self.e.export('Ноут', '--happier', 'new')  # без названия аккаунт подписан именем компьютера
+        self.assertEqual(config['happier'], {'mode': 'new', 'label': 'Ноут'})
         print('PASS --happier same без аккаунта на сервере: отказ до ключа; new: выдаётся')
 
     def test_happier_same_native_and_program_needs_choice(self):

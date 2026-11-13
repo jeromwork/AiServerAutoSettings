@@ -36,7 +36,7 @@
 ```sh
 remoteagents config export --name "Ноутбук сына" --master-password-stdin --output /root/laptop.json
 # необязательно: --vpn on|off|channel (по умолчанию on, если есть vpnBootstrap),
-#                --happier same|same:<подпись или id>|new:Имя (по умолчанию same),
+#                --happier same|same:<подпись или id>|new|new:Имя (по умолчанию same; new без имени = --name),
 #                --folders "Проект,Проект/docs"
 ```
 

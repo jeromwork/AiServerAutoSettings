@@ -787,7 +787,7 @@ def happier_same(c, wanted):
 
 def export(c, args, out=sys.stdout, err=sys.stderr):
     name = clean_name(args.name)
-    require(re.fullmatch(r'same(:.+)?|new:.+', args.happier or ''), '--happier: same, same:<подпись или id> или new:Название')
+    require(re.fullmatch(r'same(:.+)?|new(:.+)?', args.happier or ''), '--happier: same, same:<подпись или id>, new или new:Название')
     folders = folders_list(args.folders)
     same = args.happier.startswith('same')
     account = happier_same(c, args.happier[5:]) if same else None
@@ -809,7 +809,7 @@ def export(c, args, out=sys.stdout, err=sys.stderr):
         if account:
             happier['account'] = account
     else:
-        happier.update(mode='new', label=clean_name(args.happier[4:]))
+        happier.update(mode='new', label=clean_name(args.happier[4:] or name))  # без названия аккаунт подписан именем компьютера
     config['happier'] = happier
     config['bridge'] = {'enabled': True, 'allowShell': False}
     if folders is not None:
@@ -1023,7 +1023,7 @@ def main(argv=None):
     p.add_argument('--master-password-stdin', action='store_true')
     p.add_argument('--generate-master-password', action='store_true', help='придумать читаемый мастер-пароль и показать один раз')
     p.add_argument('--vpn', choices=('on', 'off', 'channel'))
-    p.add_argument('--happier', default='same', help='same | same:<подпись или id аккаунта> | new:Название')
+    p.add_argument('--happier', default='same', help='same | same:<подпись или id аккаунта> | new (подпись = --name) | new:Название')
     p.add_argument('--folders', help='all | none | A,B:send,C:receive; без флага программа спросит владельца')
     p.add_argument('--output')
     p = sub.add_parser('list', help='выданные конфиги и последний вход')
