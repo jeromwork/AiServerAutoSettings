@@ -55,8 +55,8 @@ namespace RemoteAgents.Launcher
             return 0;
         }
 
-        // The window's run: Server, then independent work; Account/Disk wait for Connection.
-        // Bootstrap, Server, Connection and Vpn are the real actions; Bridge/Account/Disk need Windows/Happier and are stand-ins.
+        // The window's run: Server, then independent work; Account/Cloud wait for Connection.
+        // Bootstrap, Server, Connection and Vpn are the real actions; Bridge/Account need Windows/Happier and are stand-ins.
         static int Run()
         {
             var desired = ConfigProfile.Load(home);
@@ -70,7 +70,7 @@ namespace RemoteAgents.Launcher
                         // Same request as the window's RunSection (channel first: the transport daemon, no TUN).
                         case ConfigSections.Bootstrap: o = SectionOutcome.From(Invoke("Bootstrap", new Dictionary<string, object>()), "Канал до сервера поднят"); break;
                         case ConfigSections.Server: {
-                            // Stand: no Happier/Syncthing downloads into the temporary server HOME (their sections are stand-ins).
+                            // Stand: no Happier downloads into the temporary server HOME (their sections are stand-ins).
                             var request = ConfigRequests.Server(home, p); request["installMissing"] = false;
                             // A stand RemoteAgents.exe (channel scenario) carries --proxy-connect, as Program.Exe does in the window.
                             string exe = Path.Combine(home, "RemoteAgents.exe"); if (File.Exists(exe)) request["askpassExecutable"] = exe;

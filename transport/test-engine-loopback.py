@@ -54,9 +54,6 @@ with tempfile.TemporaryDirectory(prefix='config-c-loopback-') as tmp:
     (d/'known_hosts').write_text(known)
     bindir = home/'.local/bin'; bindir.mkdir(parents=True)
     (bindir/'systemctl').write_text('#!/bin/sh\nexit 0\n'); (bindir/'systemctl').chmod(0o700)
-    if not args.without_disk:
-        disk = home/'.local/share/remote-disk'; disk.mkdir(parents=True)
-        (disk/'ports.json').write_text('{"listen":23456}')
     conf = d/'sshd.conf'
     conf.write_text(f'''ListenAddress 127.0.0.1
 Port {remote_port}
@@ -158,10 +155,8 @@ if($Baseline){
   if($rows[0].peer -cne $peer -or $rows[1].peer -cne $peer){throw 'actions did not share one authenticated SSH connection'}
   if(($rows|Measure-Object begin -Maximum).Maximum -ge ($rows|Measure-Object end -Minimum).Minimum){throw 'remote commands were serialized'}
  }finally{foreach($c in $children){if(-not $c.p.HasExited){$c.p.Kill()};$c.p.Dispose()}}
- [void](Invoke-WizardSsh $Root 'mkdir -p "$HOME/.local/share/remote-disk"; cat > "$HOME/.local/share/remote-disk/ports.json"' '{"listen":23456}')
- Set-WizardDiskChannel $Root
  $config=Read-TransportJson (Join-Path $Root 'config.json')
- if(@((Read-TransportJson $config.transport.channelPath).inbounds|Where-Object {$_.tag -eq 'sync'}).Count -ne 1){throw 'late disk inbound missing'}
+ if(@((Read-TransportJson $config.transport.channelPath).inbounds|Where-Object {$_.tag -eq 'sync'}).Count){throw 'unexpected legacy sync inbound'}
  $session=@(Get-ChildItem -Path (Join-Path $Root 'state/wizard-control/*/ready.json'))[0].DirectoryName
  Write-DiskUtf8 (Join-Path $session 'stop') 'stop'
  $deadline=[Diagnostics.Stopwatch]::StartNew()
@@ -188,7 +183,10 @@ if($Baseline){
         if not args.baseline:
             lines = (d/'sshd.log').read_text()
             assert len(list((root/'state/wizard-control').glob('*/ready.json'))) == 1, lines
-            print('PASS: one SSH session shared across processes; remote commands overlap; helpers unchanged; late disk inbound reload/proof; orphan request discarded')
+            for name in ('server-cloud.sh', 'filter.txt'):
+                assert (home / '.local/share/remoteagents-cloud' / name).read_bytes() == (repo / 'cloud' / name).read_bytes().replace(b'\r', b'')
+            assert not (home / '.local/share/remote-disk').exists()
+            print('PASS: one SSH session shared across processes; remote commands overlap; helpers unchanged; cloud helper/filter delivered; no legacy sync inbound; orphan request discarded')
     finally:
         (root/'stop').write_text('stop')
         for session in (root/'state/wizard-control').glob('*') if (root/'state/wizard-control').exists() else []:
