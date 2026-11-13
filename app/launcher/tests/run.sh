@@ -24,6 +24,8 @@ pwsh=${PWSH:-$HOME/.cache/pwsh-test/pwsh}
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-config.ps1" < /dev/null
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-json.ps1" < /dev/null
   timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-ports.ps1" < /dev/null
+  timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$repo/tools/legacy-cleanup/tests/test-conflicts.ps1" < /dev/null
+  timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$repo/tools/legacy-cleanup/tests/smoke-plan.ps1" < /dev/null
   timeout 120 python3 "$repo/transport/test-transport-liveness.py" "$pwsh"
   timeout 180 python3 "$repo/transport/test-transport-daemon.py" "$pwsh"
   timeout 120 python3 "$here/test_first_run.py"

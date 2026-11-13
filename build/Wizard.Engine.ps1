@@ -38,6 +38,9 @@ function Invoke-WizardAction([string]$Root,[string]$Action,$Request,[scriptblock
 }
 
 function Start-WizardWorkingTransport([string]$Root,[string]$Bundle) {
+    # Повторяем передачу старых служб и при применении конфига с уже живым демоном.
+    $legacyCleanup=Invoke-LegacyConflictCleanup -Root $Root
+    if(-not $legacyCleanup.ok){Write-WizardProgress $legacyCleanup.summary}
     # The daemon's own per-Home mutex arbitrates with the tray supervisor.
     $stop=Join-Path $Root 'state/transport.stop';if(Test-Path $stop){Remove-Item -LiteralPath $stop -Force}
     if($env:OS -eq 'Windows_NT'){
@@ -135,7 +138,7 @@ function Invoke-WizardResourceSet([string]$Root,[string[]]$Resources,[scriptbloc
     } $TimeoutMs
 }
 function Get-WizardRuntimeFiles {
-    @('build/Wizard.ps1','build/Wizard.Common.ps1','build/Wizard.Engine.ps1','build/Wizard.Session.ps1','build/Wizard.SessionHost.ps1','build/Wizard.Server.ps1','build/Wizard.Bootstrap.ps1','build/Wizard.Refresh.ps1','build/Wizard.Health.ps1','build/Wizard.Network.ps1','build/Wizard.Lan.ps1','build/Setup.Common.ps1','transport/Transport.Common.ps1','transport/Route.Proxy.ps1','transport/server-transport-catalog.py','disk/Disk.Common.ps1','disk/Disk.Union.ps1','disk/Disk.Selective.ps1','disk/stignore.txt','disk/stignore-previous.sha256')
+    @('build/Wizard.ps1','build/Wizard.Common.ps1','build/Wizard.Engine.ps1','build/Wizard.Session.ps1','build/Wizard.SessionHost.ps1','build/Wizard.Server.ps1','build/Wizard.Bootstrap.ps1','build/Wizard.Refresh.ps1','build/Wizard.Health.ps1','build/Wizard.Network.ps1','build/Wizard.Lan.ps1','build/Setup.Common.ps1','transport/Transport.Common.ps1','transport/Legacy.Conflicts.ps1','tools/legacy-cleanup/Restore-OldInstall.ps1','transport/Route.Proxy.ps1','transport/server-transport-catalog.py','disk/Disk.Common.ps1','disk/Disk.Union.ps1','disk/Disk.Selective.ps1','disk/stignore.txt','disk/stignore-previous.sha256')
 }
 function Get-WizardHostId([string]$Root) {
     Invoke-WizardResourceLock $Root 'device-identity' {

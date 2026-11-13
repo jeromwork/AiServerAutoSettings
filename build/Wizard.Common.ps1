@@ -1,5 +1,6 @@
 ﻿#requires -Version 5.1
 . (Join-Path $PSScriptRoot 'Setup.Common.ps1')
+. (Join-Path (Split-Path $PSScriptRoot -Parent) 'transport/Legacy.Conflicts.ps1')
 . (Join-Path (Split-Path $PSScriptRoot -Parent) 'disk/Disk.Common.ps1')
 . (Join-Path (Split-Path $PSScriptRoot -Parent) 'disk/Disk.Union.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Server.ps1')
@@ -502,6 +503,8 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
                 return @{ok=$false;pending='disk';operation=$op;summary=(Get-WizardOperationText $op 'установка сервера диска')}
             }
             Resolve-WizardDiskServer $Root $Bundle $Request
+            $legacyCleanup=Invoke-LegacyConflictCleanup -Root $Root -DiskEnabled
+            if(-not $legacyCleanup.ok){Write-WizardProgress $legacyCleanup.summary}
             $base=[IO.Path]::GetFullPath([string]$Request.base)
             $profile=Find-InstallProfile $Root
             if(Test-Path (Join-Path $diskHome 'state/config.xml')){

@@ -1,13 +1,13 @@
 ﻿#requires -Version 5.1
 [CmdletBinding()]
-param([Alias('Home')][string]$TransportHome=(Join-Path $env:LOCALAPPDATA 'RemoteAgents'),[int]$ParentPid=0)
+param([Alias('Home')][string]$TransportHome=(Join-Path $env:LOCALAPPDATA 'RemoteAgents'),[int]$ParentPid=0,[switch]$SkipLegacyCleanup)
 # Persisted pipe output has a known encoding on Windows PowerShell 5.1 too.
 [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
 . (Join-Path $PSScriptRoot 'Transport.Common.ps1')
 $root=(Get-TransportHome $TransportHome);$engine=$null;$tunnelChildren=@{};$probes=@{};$rows=@();$active=$null;$confirmed=$false;$errorText='Запуск';$network=$null;$memory=$null;$secret=$null
 $parent=$null;$mutex=$null;$locked=$false;$settings=$null;$paths=$null;$rankPending=$false;$rankTags=@();$rankQueue=$null;$exitCode=0
 $pin=[pscustomobject]@{mode='auto';tag=$null};$nextControl=[DateTime]::MinValue;$revision='';$reloadJob=$null;$reloadError=$null;$failedRevision=$null;$pendingRevision=$null;$nextReload=[DateTime]::MinValue
-$portConflict=$null;$bindFailures=0;$engineStarted=[DateTime]::MinValue
+$legacyCleanup=$null;$portConflict=$null;$bindFailures=0;$engineStarted=[DateTime]::MinValue
 $diagnosticContext=$null;$liveDeferred=@();$tunnelLiveAt=[DateTime]::MinValue;$daemonStarted=[DateTime]::Now
 try{$daemonStarted=(Get-Process -Id $PID).StartTime}catch{}
 $lastStatus=[DateTime]::MinValue;$nextActive=[DateTime]::MinValue;$nextRank=[DateTime]::MinValue;$nextNetwork=[DateTime]::MinValue;$retryAt=[DateTime]::MinValue;$nextLive=[DateTime]::MinValue
@@ -25,7 +25,8 @@ function Publish-TransportStatus {
     $id=$null;if($network){$id=$network.id}
     $summary='нет связи: '+$(if($errorText){$errorText}else{'нет проверенного пути'})
     if($alive -and $confirmed -and $row){$summary=$row.title;if($null -ne $speed){$summary+=' · '+([Math]::Round([double]$speed,1)).ToString([Globalization.CultureInfo]::InvariantCulture)+' КБ/с'}}
-    Write-TransportJson (Join-Path $root 'status/transport.json') ([ordered]@{portConflict=$portConflict;retryAt=$retryAt.ToUniversalTime().ToString('o');configRevision=$revision;fatal=($exitCode -ne 0);summary=$summary;ok=[bool]($alive -and $confirmed);active=$active;kbps=$speed;network=$id;metered=$metered;mode=$pin.mode;pinnedTag=$pin.tag;candidates=@($rows);configError=$reloadError;updatedAt=[DateTime]::UtcNow.ToString('o');error=$errorText})
+    if($legacyCleanup -and -not $legacyCleanup.ok){$summary+='; '+$legacyCleanup.summary}
+    Write-TransportJson (Join-Path $root 'status/transport.json') ([ordered]@{legacyCleanup=$legacyCleanup;portConflict=$portConflict;retryAt=$retryAt.ToUniversalTime().ToString('o');configRevision=$revision;fatal=($exitCode -ne 0);summary=$summary;ok=[bool]($alive -and $confirmed);active=$active;kbps=$speed;network=$id;metered=$metered;mode=$pin.mode;pinnedTag=$pin.tag;candidates=@($rows);configError=$reloadError;updatedAt=[DateTime]::UtcNow.ToString('o');error=$errorText})
     $script:lastStatus=[DateTime]::UtcNow
 }
 function Set-DaemonNextActive {
@@ -150,6 +151,10 @@ try{
     Write-TransportLog $root 'start'
     if($ParentPid -gt 0){$parent=[Diagnostics.Process]::GetProcessById($ParentPid);[void]$parent.Handle}
     # Keep the input revision even when settings/cache/candidates/network initialization fails.
+    if(-not $SkipLegacyCleanup -and $env:OS -eq 'Windows_NT'){
+        . (Join-Path $PSScriptRoot 'Legacy.Conflicts.ps1')
+        $legacyCleanup=Invoke-LegacyConflictCleanup -Root $root
+    }
     $revision=Get-TransportRevision $root
     $settings=Read-TransportSettings $root;Sync-TransportEntryCache $settings $root;$revision=Get-TransportRevision $root;$settings=Read-TransportSettings $root
     $paths=Get-TransportCandidates $settings $root;$secret=Get-TransportSecret $root;$memory=Read-TransportMemory $root
