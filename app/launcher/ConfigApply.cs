@@ -928,7 +928,8 @@ namespace RemoteAgents.Launcher
         internal async Task FollowPending(CancellationToken token)
         {
             while (!token.IsCancellationRequested) {
-                var waiting = Outcomes.Where(o => o.Value.Pending && SectionOutcome.ServerOperation(o.Value.Operation)).ToArray();
+                // Disk follows its own server install in ApplyDisk (BackgroundWork.Disk), outside any window.
+                var waiting = Outcomes.Where(o => o.Key != ConfigSections.Disk && o.Value.Pending && SectionOutcome.ServerOperation(o.Value.Operation)).ToArray();
                 if (waiting.Length == 0) return;
                 await Task.Delay(12000, token);
                 Dictionary<string, object> status;
@@ -947,6 +948,28 @@ namespace RemoteAgents.Launcher
                         catch (OperationCanceledException) { throw; } catch (Exception e) { Outcomes[w.Key] = new SectionOutcome { Summary = e.Message }; Report(w.Key, SectionState.Failed, e.Message); }
                     } else await Execute(new[] { w.Key }, token);
                 }
+            }
+        }
+        // Disk on its own: the run, then a detached Syncthing install on the server is followed with short status
+        // calls and Disk is run again once it has finished. Callers pass a token that outlives the window.
+        internal async Task<SectionOutcome> ApplyDisk(CancellationToken token)
+        {
+            await Execute(new[] { ConfigSections.Disk }, token);
+            while (true) {
+                SectionOutcome o;
+                if (!Outcomes.TryGetValue(ConfigSections.Disk, out o)) return new SectionOutcome { Summary = "результат не получен" };
+                if (!o.Pending || !SectionOutcome.ServerOperation(o.Operation)) return o;
+                await Task.Delay(12000, token);
+                Dictionary<string, object> status;
+                try { status = await Task.Run(() => WizardRunner.Run(home, bundle, "Operation", new { operations = new[] { o.Operation } }, token)); }
+                catch (OperationCanceledException) { throw; } catch (Exception e) { Log("Папки: состояние установки на сервере не получено: " + e.Message + ". Повторю позже"); continue; }
+                var op = Json.Map(Json.Get(Json.Map(Json.Get(status, "operations")), o.Operation)); string state = Json.Str(op, "state");
+                if (state == "running") { Report(ConfigSections.Disk, SectionState.Pending, Json.Text(op, "text", "идёт установка на сервере")); continue; }
+                if (state == "failed") {
+                    var failed = new SectionOutcome { Summary = Json.Text(op, "text", "установка на сервере не удалась") };
+                    Outcomes[ConfigSections.Disk] = failed; Report(ConfigSections.Disk, SectionState.Failed, failed.Summary); return failed;
+                }
+                if (state == "finished") await Execute(new[] { ConfigSections.Disk }, token);
             }
         }
         internal async Task<SectionOutcome> Activate(CancellationToken token)

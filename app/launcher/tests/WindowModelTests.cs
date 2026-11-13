@@ -55,11 +55,18 @@ namespace RemoteAgents.Launcher
             Check(WindowModel.CanFinish(false, terminal), "Done allows visible errors and an unconfirmed Disk");
             terminal[ConfigSections.Disk] = SectionState.Running;
             Check(WindowModel.CanFinish(false, terminal), "Disk does not gate Done");
-            foreach (var state in new[] { SectionState.Waiting, SectionState.Running, SectionState.Pending }) {
+            foreach (var state in new[] { SectionState.Waiting, SectionState.Running }) {
                 terminal[ConfigSections.Account] = state;
                 Check(!WindowModel.CanFinish(false, terminal), "non-Disk work still outstanding: " + state);
             }
+            // VPN «ещё не подтверждено» and a Happier install on the server are Pending: handed to the tray, never a dead end.
+            terminal[ConfigSections.Account] = SectionState.Done; terminal[ConfigSections.Vpn] = SectionState.Pending;
+            Check(WindowModel.CanFinish(false, terminal), "pending VPN does not block Done");
+            terminal[ConfigSections.Account] = SectionState.Pending;
+            Check(WindowModel.CanFinish(false, terminal), "pending server install does not block Done");
             terminal[ConfigSections.Account] = SectionState.Done;
+            Check(WindowModel.FoldersRecommendation.StartsWith("Рекомендуем выбрать папки") && WindowModel.FoldersRecommendation.Contains("позже из трея"), "folders are a recommendation, not a step");
+            BackgroundRunner().GetAwaiter().GetResult();
             Check(!WindowModel.CanFinish(true, terminal), "startup/activation guard still gates Done");
             Check(WindowModel.SkippedFolders == "папки не выбраны — выберите в трее → Папки синхронизации", "skip stays honest and points to tray");
             var now = new DateTime(2026, 11, 12, 10, 0, 0, DateTimeKind.Utc); var schedule = new ConfigSyncSchedule();
@@ -93,6 +100,28 @@ namespace RemoteAgents.Launcher
                 Check(StatusView.Read(dir, "transport", maxAgeSec: 15).Count == 0, "old embedded timestamp cannot look fresh after file rewrite");
             } finally { Directory.Delete(dir, true); }
             Console.WriteLine("PASS: " + count + " window/routing/sync/status checks");
+        }
+        static async Task BackgroundRunner()
+        {
+            // The Disk runner: independent of windows, one run at a time, the newest request queued, Stop cancels.
+            var runner = new SerialRunner<DiskRun>(); int changes = 0; runner.Changed += () => Interlocked.Increment(ref changes);
+            var gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var order = new ConcurrentQueue<string>();
+            Check(runner.Start(async token => { order.Enqueue("first"); await gate.Task; return new DiskRun { Ok = true, Summary = "first" }; }), "idle runner starts at once");
+            Check(runner.Busy, "busy while the run is in progress");
+            Check(!runner.Start(async token => { order.Enqueue("stale"); await Task.Yield(); return new DiskRun { Summary = "stale" }; }), "second request queues");
+            Check(!runner.Start(async token => { order.Enqueue("newest"); await Task.Yield(); return new DiskRun { Ok = true, Summary = "newest" }; }), "newest request replaces the queued one");
+            gate.SetResult(true); await runner.Current;
+            Check(!runner.Busy && runner.Last.Summary == "newest", "queue drains to the newest choice");
+            Check(string.Join(",", order) == "first,newest", "stale queued request is dropped, never run twice in parallel");
+            Check(changes == 2, "Changed on start and when drained");
+            Check(runner.Start(async token => { throw new InvalidOperationException("boom"); }), "a failing run does not wedge the runner");
+            await runner.Current; Check(!runner.Busy && runner.Last.Summary == "newest", "failure leaves the last real result");
+            var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            runner.Start(async token => { try { await Task.Delay(Timeout.Infinite, token); } catch (OperationCanceledException) { cancelled.SetResult(true); throw; } return null; });
+            runner.Stop(); await runner.Current;
+            Check(cancelled.Task.IsCompleted && !runner.Busy, "tray exit cancels the background run");
+            Check(!runner.Start(token => Task.FromResult(new DiskRun())), "nothing starts after Stop");
         }
         static async Task FirstRunFolders()
         {

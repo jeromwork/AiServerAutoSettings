@@ -82,9 +82,10 @@ namespace RemoteAgents.Launcher
         {
             return applied != null && (applied.All && !excludedProjects.Contains(DiskChoice.Project(path)) || appliedSelection.Includes(path) || appliedSelection.Partial(path));
         }
-        internal void MarkApplied(IEnumerable<string> excluded = null)
+        // appliedChoice: what the finished Disk run actually applied; edits made while it ran stay pending.
+        internal void MarkApplied(IEnumerable<string> excluded = null, DiskChoice appliedChoice = null)
         {
-            var choice = ToChoice();
+            var choice = appliedChoice ?? ToChoice();
             if (excluded != null) { excludedProjects.Clear(); excludedProjects.UnionWith(excluded); }
             else {
                 foreach (var entry in removedExternal)

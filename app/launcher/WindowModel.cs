@@ -1,6 +1,8 @@
 using System;
 using System.Linq;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace RemoteAgents.Launcher
 {
@@ -40,11 +42,56 @@ namespace RemoteAgents.Launcher
         internal const string SkippedFolders = "папки не выбраны — выберите в трее → Папки синхронизации";
         internal static List<string> SessionPlan(IEnumerable<string> plan, bool folderStepRequired, bool diskChosen)
         { return plan.Where(s => s != ConfigSections.Disk || !folderStepRequired && diskChosen).ToList(); }
+        // Pending (VPN not yet confirmed, a server install) is handed to the tray and does not hold up «Готово»;
+        // Disk runs in the background (BackgroundWork.Disk) and never gates it.
         internal static bool CanFinish(bool running, IDictionary<string, SectionState> states)
-        { return !running && states.Where(s => s.Key != ConfigSections.Disk).All(s => s.Value == SectionState.Done || s.Value == SectionState.Unchanged || s.Value == SectionState.Failed || s.Value == SectionState.Blocked); }
+        { return !running && states.Where(s => s.Key != ConfigSections.Disk).All(s => s.Value == SectionState.Done || s.Value == SectionState.Unchanged || s.Value == SectionState.Failed || s.Value == SectionState.Blocked || s.Value == SectionState.Pending); }
+        internal const string FoldersRecommendation = "Рекомендуем выбрать папки для синхронизации — это можно сделать и позже из трея (пункт «Папки синхронизации»). Без выбора настройка тоже завершится, просто синхронизация папок не будет включена.";
+        internal const string FoldersInBackground = "Папки подключаются в фоне — окно можно закрыть, программа продолжит сама.";
         internal static string Conflict(string operation)
         { return string.IsNullOrEmpty(operation) ? "" : "Идёт " + operation + ", подождите"; }
     }
+
+    // One background job at a time for the whole process, not tied to any window: closing a window keeps it
+    // running, only Stop (tray exit) cancels it. A request during a run replaces the queued one and runs right after.
+    internal sealed class SerialRunner<T> where T : class
+    {
+        readonly object gate = new object();
+        readonly CancellationTokenSource stop = new CancellationTokenSource();
+        Func<CancellationToken, Task<T>> next; bool busy; T last;
+        // Raised on a worker thread when a run starts or the queue drains.
+        internal event Action Changed = delegate { };
+        internal bool Busy { get { lock (gate) return busy; } }
+        internal T Last { get { lock (gate) return last; } }
+        internal Task Current { get; private set; }
+        internal SerialRunner() { Current = Task.FromResult(true); }
+        // true: started now; false: queued behind the running job.
+        internal bool Start(Func<CancellationToken, Task<T>> work)
+        {
+            lock (gate) {
+                if (stop.IsCancellationRequested) return false;
+                if (busy) { next = work; return false; }
+                busy = true; Current = Task.Run(() => Loop(work));
+            }
+            Changed(); return true;
+        }
+        async Task Loop(Func<CancellationToken, Task<T>> work)
+        {
+            while (true) {
+                T result = null;
+                try { result = await work(stop.Token).ConfigureAwait(false); } catch (Exception) { }
+                lock (gate) {
+                    if (result != null) last = result;
+                    if (next == null || stop.IsCancellationRequested) { next = null; busy = false; break; }
+                    work = next; next = null;
+                }
+            }
+            Changed();
+        }
+        internal void Stop() { lock (gate) { next = null; } stop.Cancel(); }
+    }
+    internal sealed class DiskRun { internal bool Ok; internal string Summary = ""; internal DiskChoice Choice = null; }
+    internal static class BackgroundWork { internal static readonly SerialRunner<DiskRun> Disk = new SerialRunner<DiskRun>(); }
 
     // Wait for two continuous minutes of fresh confirmed connectivity, then five minutes per attempt.
     internal sealed class ConfigSyncSchedule
