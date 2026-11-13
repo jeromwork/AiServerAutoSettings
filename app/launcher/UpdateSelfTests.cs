@@ -102,6 +102,24 @@ namespace RemoteAgents.Launcher
                 var cfg = Configuration.ForUpdate("{\r\n\"args\":[\"-F\",\"C:\\\\cfg\",\"-i\",\"C:\\\\key\",\"-p\",\"2200\",\"-o\",\"UserKnownHostsFile=C:\\\\hosts\",\"user@example.invalid\"],\"viaLocalPort\":2222}");
                 var ssh = SshSource.Load(cfg, home);
                 Check("local-ssh-target", ssh.Args.Last() == "user@127.0.0.1" && ssh.Args.Contains("HostKeyAlias=example.invalid") && ssh.Args.Contains("2222") && !ssh.Args.Contains("2200") && ssh.Args.Contains("UserKnownHostsFile=C:\\hosts"));
+                string portHome = Path.Combine(work, "port-state");
+                Json.Write(Path.Combine(portHome, "config.json"), new { transport = new { sshPort = 2222 } });
+                Json.Write(Path.Combine(portHome, "state", "transport-ports.json"), new { schema = 1, configured = new { sshPort = 2222, serverPort = 22 }, effective = new { sshPort = 2232 }, defaults = new { sshPort = 2222 } });
+                // CRLF приходит с Windows и в JSON состояния.
+                string portsFile = Path.Combine(portHome, "state", "transport-ports.json");
+                File.WriteAllText(portsFile, Files.LF(File.ReadAllText(portsFile)).Replace("\n", "\r\n"), Files.Utf8);
+                Check("update-effective-local-port", SshSource.Load(cfg, portHome).Args.Contains("2232"));
+                Check("update-custom-local-port", TransportPorts.LocalSsh(portHome, 5555) == 5555);
+                Json.Write(Path.Combine(portHome, "config.json"), new { transport = new { sshPort = 3333 } });
+                Check("update-rejects-stale-port-state", TransportPorts.LocalSsh(portHome, 2222) == 2222);
+                Json.Write(Path.Combine(portHome, "config.json"), new { transport = new { } });
+                Check("update-default-equivalent-state", TransportPorts.LocalSsh(portHome, 2222) == 2232);
+                Json.Write(portsFile, new { schema = 1, configured = new { sshPort = 3333, serverPort = 22 }, effective = new { sshPort = 3343 }, defaults = new { sshPort = 2222 } });
+                Check("update-removed-setting-invalidates-state", TransportPorts.LocalSsh(portHome, 3333) == 3333);
+                Json.Write(portsFile, new { schema = 1, configured = new { sshPort = 2222 }, effective = new { sshPort = 2232 } });
+                Check("update-minimal-port-state", TransportPorts.LocalSsh(portHome, 2222) == 2232);
+                File.WriteAllText(portsFile, "broken", Files.Utf8);
+                Check("update-damaged-port-state", TransportPorts.LocalSsh(portHome, 2222) == 2222);
                 string routedHome = Path.Combine(work, "routed-profile"), routedFolder = Path.Combine(routedHome, "ssh-profiles", "test", "project-connections", "test");
                 Directory.CreateDirectory(routedFolder); string routedConfig = Path.Combine(routedHome, "ssh-config");
                 File.WriteAllText(routedConfig, "Host example.invalid\r\n    Port 22\r\n", Files.Utf8);

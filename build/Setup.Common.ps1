@@ -195,7 +195,7 @@ function Invoke-TransportPreflight([string]$Root,[string]$Bundle,$Config){
     try{
         $child=Start-TransportProcess (Get-TransportPowerShell) @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $Bundle 'transport/Transport.Daemon.ps1'),'-Home',$probe,'-ParentPid',[string]$PID)
         Wait-TransportReady $probe 45
-        if(-not (Test-LocalSsh $probe $ports[0])){throw 'SSH на временном входе не прошёл'}
+        if(-not (Test-LocalSsh $probe ([int](Get-TransportEffectivePort $probe 'sshPort')))){throw 'SSH на временном входе не прошёл'}
         Write-SetupLog $Root 'preflight.ok'
     }catch{
         $detail=Protect-TransportDiagnostic ([string]$_.Exception.Message) $copy

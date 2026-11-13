@@ -39,6 +39,9 @@ with tempfile.TemporaryDirectory(prefix='transport-daemon-test-') as tmp:
     with socket.socket() as s:
         s.bind(('127.0.0.1', 0))
         api_port = s.getsockname()[1]
+    occupied_ssh = socket.socket()
+    occupied_ssh.bind(('127.0.0.1', 2222)); occupied_ssh.listen()
+    race_socket = None
     optional = socket.socket()
     optional.bind(('127.0.0.1', 0))
     optional.listen()
@@ -79,6 +82,13 @@ if (root/'bind-failure').exists():
     os.write(2,('FATAL start inbound/direct[ssh]: listen tcp 127.0.0.1:'+port+': bind: Only one usage of each socket address\\r\\n').encode())
     sys.exit(1)
 c=json.loads(Path(sys.argv[-1]).read_text())
+if (root/'race-bind').exists():
+    import time
+    ssh_port=next(i['listen_port'] for i in c['inbounds'] if i['tag']=='ssh')
+    (root/'race-request').write_text(str(ssh_port))
+    while not (root/'race-ready').exists(): time.sleep(.02)
+    os.write(2,('FATAL listen tcp 127.0.0.1:'+str(ssh_port)+': bind: address already in use\\r\\n').encode())
+    sys.exit(1)
 api=c['experimental']['clash_api']; port=int(api['external_controller'].split(':')[-1])
 class API(http.server.BaseHTTPRequestHandler):
     def do_PUT(self):
@@ -136,7 +146,12 @@ Server(('127.0.0.1',port),API).serve_forever()
     try:
         (root/'optional-busy').touch()
         daemon = start()
-        until(lambda: status().get('ok') and status().get('active')=='vless-direct')
+        until(lambda: status().get('ok') and any(c['tag']=='vless-direct' and c['state']=='ok' for c in status().get('candidates',[])))
+        selected=json.loads((root/'state/transport-ports.json').read_text())
+        assert selected['configured']['sshPort']==2222 and selected['effective']['sshPort']==2232
+        assert status()['ports']['sshPort']==2232
+        assert next(i for i in json.loads((root/'state/transport-sing-box.json').read_text())['inbounds'] if i['tag']=='ssh')['listen_port']==2232
+        occupied_ssh.close()
         assert int((root/'starts').read_text()) == 1, 'Занятый порт необязательного SSH заблокировал sing-box'
         optional.close()
         (root/'optional-busy').unlink()
@@ -145,7 +160,7 @@ Server(('127.0.0.1',port),API).serve_forever()
         assert status().get('summary') and 'нет связи' not in status()['summary']
         until(lambda: (root/'tunnel.pid').exists())
         initial=status()['active']
-        ports={'vless-direct':26000,'singbox-ssh-direct':26001,'openssh-direct':26002}
+        ports={i['tag'][6:]:i['listen_port'] for i in json.loads((root/'state/transport-sing-box.json').read_text())['inbounds'] if i['tag'].startswith('probe-')}
         first_engine = int((root / 'engine.pid').read_text())
         # Активный поток замер: переключение на ранее проверенный путь через PUT без рестарта.
         (root / 'fail-active').write_text(str(ports[initial]))
@@ -188,7 +203,7 @@ Server(('127.0.0.1',port),API).serve_forever()
         starts=int((root/'starts').read_text())
         # Невалидный reload не останавливает рабочий движок.
         saved=(root/'config.json').read_text()
-        broken=json.loads(saved); broken['transport']['apiPort']=2222
+        broken=json.loads(saved); broken['transport']['apiPort']=65536
         (root/'config.json').write_text(json.dumps(broken))
         until(lambda: bool(status().get('configError')))
         assert int((root/'starts').read_text())==starts
@@ -253,6 +268,19 @@ Server(('127.0.0.1',port),API).serve_forever()
         assert 0 < retry_delay(restarted) <= 5.1, 'Успешный запуск не сбросил серию bind'
         (root/'bind-failure').unlink()
         until(lambda: status().get('ok') and not status().get('portConflict'), seconds=10)
+        # Гонка bind: порт заняли после выбора, пока запускался движок.
+        (root/'race-bind').touch()
+        os.kill(int((root/'engine.pid').read_text()), 9)
+        until(lambda: (root/'race-request').exists())
+        race_port=int((root/'race-request').read_text())
+        race_socket=socket.socket(); race_socket.bind(('127.0.0.1',race_port)); race_socket.listen()
+        (root/'race-bind').unlink(); (root/'race-ready').touch()
+        changed=until(lambda: (s if (s:=status()).get('portConflict') and s.get('ports',{}).get('sshPort')!=race_port else None), seconds=10)
+        assert 0 < retry_delay(changed) <= 1.1, 'Перевыбор после bind унаследовал растущую паузу'
+        until(lambda: status().get('ok') and not status().get('portConflict'), seconds=10)
+        assert status()['ports']['sshPort']==race_port+10
+        assert json.loads((root/'state/transport-ports.json').read_text())['effective']['sshPort']==race_port+10
+        race_socket.close(); race_socket=None
         (root / 'stop').touch()
         daemon.wait(timeout=10)
         assert daemon.returncode == 0, daemon.communicate()
@@ -272,7 +300,7 @@ Server(('127.0.0.1',port),API).serve_forever()
         assert stopped(int((root / 'engine.pid').read_text()))
         assert stopped(int((root / 'tunnel.pid').read_text()))
         assert all(stopped(int(pid)) for pid in (root/'probes.pid').read_text().splitlines()), 'SSH probe leaked after timeout/stop'
-        print('OK: failover, pin <=5с, мёртвый pin, auto, hot reload, disabled tag, invalid reload, restart, optional SSH occupied/VLESS, bind/backoff/reset/status, stop, ParentPid (имитаторы)')
+        print('OK: failover, pin <=5с, мёртвый pin, auto, hot reload, disabled tag, invalid reload, restart, занятый SSH при старте, optional SSH occupied/VLESS, bind/перевыбор/backoff/reset/status, stop, ParentPid (имитаторы)')
     except Exception:
         print('STATUS', status(), file=sys.stderr)
         log=root/'logs/transport.log'
@@ -281,7 +309,8 @@ Server(('127.0.0.1',port),API).serve_forever()
             if p.poll() is not None: print('EXIT', p.returncode, p.communicate(), file=sys.stderr)
         raise
     finally:
-        optional.close()
+        optional.close(); occupied_ssh.close()
+        if race_socket: race_socket.close()
         for p in children:
             if p.poll() is None:
                 (root / 'stop').touch()

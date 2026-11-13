@@ -104,7 +104,9 @@ Write-Output 'PASS: standalone runtime loads Wizard.Common.ps1'
         # separately so slow startup cannot masquerade as an unbounded probe.
         if mode=='timeout':
             assert time.monotonic()-float((d/'ssh-start').read_text())<9, timings
-        assert timings[mode]<(12000 if mode=='timeout' else 10000),(mode,timings)
+        # Запуск PowerShell под параллельной нагрузкой не входит в сетевой таймаут.
+        # Сам SSH выше всё ещё обязан завершиться менее чем за 9 с.
+        assert timings[mode]<(18000 if mode=='timeout' else 10000),(mode,timings)
         assert state['serverId']=='blocked.example.invalid\n22255\nworker',state
         if mode in ('ok','negative'):
             assert p.returncode==0 and result['ok'] and state['ok'],(p.stderr,result)
@@ -129,6 +131,24 @@ Write-Output 'PASS: standalone runtime loads Wizard.Common.ps1'
         assert len((d/'calls').read_text().splitlines())==before+1
         before+=1
         assert (root/'config.json').read_bytes()==original
+    # Один и тот же файл состояния задаёт эффективные адрес и порт для обеих форм канала.
+    config['transport']['channelFirst']=True
+    (root/'config.json').write_text(json.dumps(config))
+    configured=dict(sshPort=2222,channelSocksPort=2223,syncPort=22001,apiPort=29090,
+                    probePortBase=26000,socksPortBase=28000,channelSshAddress='127.0.0.3',serverPort=22255)
+    effective={**configured,'sshPort':2232,'channelSshAddress':'127.0.0.4'}
+    ports_file=root/'state/transport-ports.json'
+    ports_file.write_bytes(json.dumps(dict(schema=1,configured=configured,effective=effective),indent=2).replace('\n','\r\n').encode())
+    for first, address, port in [(True,'127.0.0.4','22255'),(False,'127.0.0.1','2232')]:
+        config['transport']['channelFirst']=first; config['transport']['channelPath']='fixture-channel'
+        (root/'config.json').write_text(json.dumps(config)); original=(root/'config.json').read_bytes()
+        p=run([PWSH,'-NoProfile','-NonInteractive','-File',wizard,'-Home',root,'-Action','ServerHealth'],
+              {**env,'HEALTH_ADDRESS':address,'HEALTH_PORT':port})
+        assert p.returncode==0,(p.stdout,p.stderr)
+        assert len((d/'calls').read_text().splitlines())==before+1
+        assert (root/'config.json').read_bytes()==original
+        before+=1
+    ports_file.unlink()
     # A response arriving after a profile replacement keeps the polled server's identity.
     config['transport']['channelFirst']=True
     (root/'config.json').write_text(json.dumps(config))
@@ -172,4 +192,4 @@ Write-Output "PASS: $n invalid health cases + CRLF SSH boundary + no mutation lo
     p=run([PWSH,'-NoProfile','-NonInteractive','-File',parser],env)
     assert p.returncode==0,(p.stdout,p.stderr)
     print(p.stdout.strip())
-    print(f'PASS: 8 standalone Wizard ServerHealth fake SSH scenarios (channel-first, legacy channel, saved SSH), negative Avail clamped to zero, in-flight profile replacement, CRLF metrics/state, one call/run, saved route, read-only; milliseconds {timings}')
+    print(f'PASS: 10 standalone Wizard ServerHealth fake SSH scenarios (channel-first, legacy channel, effective ports/address, saved SSH), negative Avail clamped to zero, in-flight profile replacement, CRLF metrics/state, one call/run, saved route, read-only; milliseconds {timings}')
