@@ -29,6 +29,7 @@ namespace RemoteAgents.Launcher
         readonly ToolStripMenuItem remove = new ToolStripMenuItem("Перестать синхронизировать");
         readonly Dictionary<string, ToolStripMenuItem> directionMenu = new Dictionary<string, ToolStripMenuItem>();
         readonly DiskFolderTree folders, computerFolders;
+        readonly LocalFolderBrowser localBrowser;
         DiskFolderTree activeFolders;
         readonly Func<string, object, Task<Dictionary<string, object>>> run;
         readonly Func<Func<Task>, Task> mutate;
@@ -64,7 +65,9 @@ namespace RemoteAgents.Launcher
             panes.Controls.Add(new Label { Text = "На этом компьютере", AutoSize = true }, 0, 0);
             panes.Controls.Add(new Label { Text = "На сервере", AutoSize = true }, 1, 0);
             panes.Controls.Add(Flow(localPath, navPane), 0, 1); panes.Controls.Add(all, 1, 1);
-            panes.Controls.Add(computerTree, 0, 2); panes.Controls.Add(tree, 1, 2);
+            // Left pane: «Папка Disk» (the union tree) and «Весь компьютер» (local drives and folders, see LocalFolderBrowser).
+            localBrowser = new LocalFolderBrowser(computerTree, tree, new LocalFileSystem(), () => Model, () => diskBase, () => busy);
+            panes.Controls.Add(localBrowser.Tabs, 0, 2); panes.Controls.Add(tree, 1, 2);
             AddRow(layout, panes); AddRow(layout, Flow(take, send, stopSync));
             AddRow(layout, Flow(add, open, reload));
             AddRow(layout, status); AddRow(layout, project); AddRow(layout, direction);
@@ -110,7 +113,7 @@ namespace RemoteAgents.Launcher
                 WireDrag(current);
             }
             var takeItem = new ToolStripMenuItem(take.Text); takeItem.Click += (sender, e) => Transfer(folders, true);
-            var sendItem = new ToolStripMenuItem(send.Text); sendItem.Click += (sender, e) => Transfer(computerFolders, false);
+            var sendItem = new ToolStripMenuItem(send.Text); sendItem.Click += (sender, e) => SendFromComputer();
             var openItem = new ToolStripMenuItem(open.Text); openItem.Click += (sender, e) => OpenExplorer(SelectedLocalPath());
             var syncItem = new ToolStripMenuItem(apply.Text); syncItem.Click += async (sender, e) => { if (!busy && Apply != null) await Apply(); };
             var chooseItem = new ToolStripMenuItem(add.Text); chooseItem.Click += (sender, e) => AddExternal();
@@ -121,7 +124,7 @@ namespace RemoteAgents.Launcher
             }
             menu.Opening += (sender, e) => {
                 activeFolders = menu.SourceControl == tree ? folders : computerFolders;
-                if (busy || SelectedPath(activeFolders).Length == 0) { e.Cancel = true; return; }
+                if (busy || SelectedPath(activeFolders).Length == 0 && !(menu.SourceControl == localBrowser.Tree && localBrowser.SelectedPath.Length > 0)) { e.Cancel = true; return; }
                 RefreshDirection(); string d = CurrentDirection();
                 foreach (var pair in directionMenu) { pair.Value.Enabled = direction.Enabled; pair.Value.Checked = direction.Enabled && pair.Key == d; }
                 takeItem.Enabled = activeFolders == folders && take.Enabled;
@@ -130,7 +133,7 @@ namespace RemoteAgents.Launcher
             };
             remove.Click += (sender, e) => StopSelected();
             take.Click += (sender, e) => Transfer(folders, true);
-            send.Click += (sender, e) => Transfer(computerFolders, false);
+            send.Click += (sender, e) => SendFromComputer();
             stopSync.Click += (sender, e) => StopSelected();
             all.CheckedChanged += (sender, e) => {
                 if (updating) return;
@@ -149,11 +152,23 @@ namespace RemoteAgents.Launcher
             skip.Click += async (sender, e) => { if (!busy && Skip != null) await Skip(); };
             reload.Click += async (sender, e) => { if (!busy && Reload != null) await Reload(); };
             revert.Click += async (sender, e) => await Revert();
+            localBrowser.Tree.ContextMenuStrip = menu;
+            localBrowser.AcceptDrops(tree);
+            localBrowser.SendRequested += SendLocal;
+            localBrowser.StopRequested += StopLocal;
+            localBrowser.SelectionChanged += () => {
+                if (!localBrowser.Active) { RefreshDirection(); return; }
+                // An already chosen folder is selected in the Disk tab's list, so direction and stop act on the same entry.
+                activeFolders = computerFolders; var state = localBrowser.SelectedState;
+                if (state != null && state.Kind == LocalFolderKind.External) computerFolders.RefreshExternal(state.Entry); else computerFolders.Tree.SelectedNode = null;
+                RefreshDirection();
+            };
             RefreshState();
         }
         static string SelectedPath(DiskFolderTree pane) { return pane.SelectedExternal == null ? pane.SelectedPath : pane.SelectedExternal.Remote; }
         string SelectedLocalPath()
         {
+            if (localBrowser.Active && localBrowser.SelectedPath.Length > 0) return localBrowser.SelectedPath;
             var entry = activeFolders.SelectedExternal;
             string path = SelectedPath(activeFolders);
             return entry != null ? entry.Path : path.Length == 0 ? "" : Path.Combine(diskBase, path.Replace('/', Path.DirectorySeparatorChar));
@@ -174,9 +189,31 @@ namespace RemoteAgents.Launcher
             } catch (Exception error) { log(error.Message); }
             RefreshState();
         }
+        void SendFromComputer()
+        {
+            if (localBrowser.Active && localBrowser.SelectedPath.Length > 0) SendLocal(localBrowser.SelectedPath); else Transfer(computerFolders, false);
+        }
+        // A folder from anywhere on this computer: inside Disk it becomes a Disk path, elsewhere a named external folder.
+        void SendLocal(string path)
+        {
+            if (busy || string.IsNullOrEmpty(path)) return;
+            try {
+                if (LocalFolders.Send(Model, path, diskBase, localBrowser.SystemRoots)) { NameExternal(path); return; }
+                NeedsExternalInventory = false;
+            } catch (Exception error) { log(error.Message); }
+            computerFolders.RefreshExternal(); RefreshState();
+        }
+        void StopLocal(string path)
+        {
+            if (busy || string.IsNullOrEmpty(path)) return;
+            try { LocalFolders.Stop(Model, path, diskBase); NeedsExternalInventory = false; }
+            catch (Exception error) { log(error.Message); }
+            computerFolders.RefreshExternal(); RefreshState();
+        }
         void StopSelected()
         {
             if (busy) return;
+            if (localBrowser.Active && localBrowser.SelectedPath.Length > 0) { StopLocal(localBrowser.SelectedPath); return; }
             try { Model.StopSynchronizing(SelectedPath(activeFolders)); NeedsExternalInventory = false; }
             catch (Exception error) { log(error.Message); }
             RefreshState();
@@ -226,8 +263,9 @@ namespace RemoteAgents.Launcher
         internal void Initialize(DiskChoice choice, string basePath, bool allowSkip, DiskChoice appliedChoice = null, IEnumerable<string> excluded = null)
         {
             NeedsExternalInventory = !choice.Chosen && choice.External.Count == 0;
-            diskBase = basePath; localPath.Text = diskBase; localPath.Enabled = diskBase.Length > 0; navPane.Visible = false;
+            diskBase = basePath; RefreshLocalPath(); navPane.Visible = false;
             Model = new DiskFoldersModel(choice, appliedChoice, excluded);
+            localBrowser.Reset();
             foreach (var pane in new[] { folders, computerFolders }) { pane.Model = Model; pane.Reset(); }
             activeFolders = computerFolders;
             skip.Visible = allowSkip; computerFolders.RefreshExternal(); RefreshState();
@@ -243,15 +281,21 @@ namespace RemoteAgents.Launcher
             NeedsExternalInventory = false; computerFolders.RefreshExternal(); RefreshState();
         }
         internal void AcceptProfile() { NeedsExternalInventory = false; }
-        internal void MarkApplied() { Model.MarkApplied(ConfigProfile.DiskExclusions()); computerFolders.RefreshExternal(); RefreshState(); }
+        internal void MarkApplied() { Model.MarkApplied(ConfigProfile.DiskExclusions()); RefreshLocalPath(); computerFolders.RefreshExternal(); RefreshState(); }
+        // A fresh computer has no Disk folder yet: say so instead of implying local contents.
+        void RefreshLocalPath()
+        {
+            bool exists = new LocalFileSystem().Exists(diskBase);
+            localPath.Text = LocalFolders.DiskBaseText(diskBase, exists); localPath.Enabled = exists;
+        }
         internal void AllowSkip(bool value) { skip.Visible = value; }
-        internal void ShowTree(Dictionary<string, object> data) { folders.ShowRoot(data); computerFolders.ShowRoot(data); RefreshState(); }
+        internal void ShowTree(Dictionary<string, object> data) { folders.ShowRoot(data); computerFolders.ShowRoot(data); RefreshLocalPath(); RefreshState(); }
         internal void SetBusy(bool value) { busy = value; Enabled = !value; if (!value) RefreshState(); }
         void RefreshState()
         {
             updating = true; try { all.Checked = Model.Mode == DiskFoldersMode.All; } finally { updating = false; }
             updating = true;
-            try { folders.RefreshProjection(); computerFolders.RefreshProjection(); }
+            try { folders.RefreshProjection(); computerFolders.RefreshProjection(); localBrowser.RefreshChecks(); }
             finally { updating = false; }
             tree.Enabled = Loaded; computerTree.Enabled = computerFolders.Loaded || Model.ExternalRows.Any();
             // A failed inventory must not turn an unseen server selection into an empty selection.
@@ -285,28 +329,37 @@ namespace RemoteAgents.Launcher
             bool localChanges = entry == null && Model.CanRevert(top);
             changes.Text = localChanges ? "В «" + top + "» есть изменения на компьютере: " + Model.Items[top].LocalChanges + ". Они не отправляются на сервер." : "";
             warning.Visible = localChanges; revert.Enabled = !busy;
+            if (localBrowser.Active && entry == null) {
+                status.Text = localBrowser.SelectedDescription; status.Visible = status.Text.Length > 0;
+                send.Enabled = !busy && localBrowser.CanSend;
+                stopSync.Enabled = !busy && localBrowser.SelectedState != null && localBrowser.SelectedState.Checked;
+            }
         }
         protected override void Dispose(bool disposing) { if (disposing) menu.Dispose(); base.Dispose(disposing); }
         void AddExternal()
         {
             using (var picker = new FolderBrowserDialog { Description = "Выберите папку для синхронизации с сервером", ShowNewFolderButton = false }) {
-                if (picker.ShowDialog(this) != DialogResult.OK) return;
-                using (var dialog = new Form { Text = "Добавить папку", AutoScaleDimensions = new SizeF(96, 96), AutoScaleMode = AutoScaleMode.Dpi, Font = Font,
-                    AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ClientSize = new Size(540, 240), StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false }) {
-                    var body = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Top, Padding = new Padding(12), ColumnCount = 1 };
-                    body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-                    var name = new TextBox { Text = Path.GetFileName(picker.SelectedPath.TrimEnd('\\', '/')), Dock = DockStyle.Fill };
-                    var mode = DirectionBox(); foreach (string d in DiskChoice.Directions) mode.Items.Add(DiskFoldersModel.DirectionText(d)); mode.SelectedIndex = 0;
-                    var ok = Button("Добавить"); var cancel = Button("Отмена"); cancel.DialogResult = DialogResult.Cancel;
-                    AddRow(body, new Label { Text = picker.SelectedPath, AutoSize = true, MaximumSize = new Size(470, 0) });
-                    AddRow(body, new Label { Text = "Имя папки на сервере:", AutoSize = true }); AddRow(body, name); AddRow(body, mode); AddRow(body, Flow(ok, cancel));
-                    dialog.Controls.Add(body); dialog.AcceptButton = ok; dialog.CancelButton = cancel;
-                    ok.Click += (s, e) => {
-                        try { Model.AddExternal(picker.SelectedPath, name.Text, DiskChoice.Directions[mode.SelectedIndex]); dialog.DialogResult = DialogResult.OK; }
-                        catch (Exception error) { MessageBox.Show(dialog, error.Message, "Папка", MessageBoxButtons.OK, MessageBoxIcon.Information); }
-                    };
-                    if (dialog.ShowDialog(this) == DialogResult.OK) { NeedsExternalInventory = false; computerFolders.RefreshExternal(Model.External.Last()); activeFolders = computerFolders; RefreshState(); }
-                }
+                if (picker.ShowDialog(this) == DialogResult.OK) SendLocal(picker.SelectedPath);
+            }
+        }
+        void NameExternal(string path)
+        {
+            using (var dialog = new Form { Text = "Добавить папку", AutoScaleDimensions = new SizeF(96, 96), AutoScaleMode = AutoScaleMode.Dpi, Font = Font,
+                AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ClientSize = new Size(540, 240), StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false }) {
+                var body = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Top, Padding = new Padding(12), ColumnCount = 1 };
+                body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+                var name = new TextBox { Text = LocalFolders.SuggestedRemote(path), Dock = DockStyle.Fill };
+                var mode = DirectionBox(); foreach (string d in DiskChoice.Directions) mode.Items.Add(DiskFoldersModel.DirectionText(d)); mode.SelectedIndex = 0;
+                var ok = Button("Добавить"); var cancel = Button("Отмена"); cancel.DialogResult = DialogResult.Cancel;
+                AddRow(body, new Label { Text = path, AutoSize = true, MaximumSize = new Size(470, 0) });
+                AddRow(body, new Label { Text = "Имя папки на сервере:", AutoSize = true }); AddRow(body, name); AddRow(body, mode); AddRow(body, Flow(ok, cancel));
+                dialog.Controls.Add(body); dialog.AcceptButton = ok; dialog.CancelButton = cancel;
+                ok.Click += (s, e) => {
+                    try { LocalFolders.Choose(Model, path, name.Text, DiskChoice.Directions[mode.SelectedIndex], diskBase, localBrowser.SystemRoots); dialog.DialogResult = DialogResult.OK; }
+                    catch (Exception error) { MessageBox.Show(dialog, error.Message, "Папка", MessageBoxButtons.OK, MessageBoxIcon.Information); }
+                };
+                if (dialog.ShowDialog(this) == DialogResult.OK) { NeedsExternalInventory = false; computerFolders.RefreshExternal(Model.External.Last()); activeFolders = computerFolders; }
+                RefreshState();
             }
         }
         async Task Revert()

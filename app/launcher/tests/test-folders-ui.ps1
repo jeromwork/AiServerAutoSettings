@@ -35,6 +35,7 @@ public static class FoldersSmoke {
             Call(view,"Initialize", choice, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) + "\\Disk", true, null, null);
             Call(view,"ShowTree",data); Pump();
             var local = Field<TreeView>(view,"computerTree"); var server = Field<TreeView>(view,"tree");
+            var browser = Field<object>(view,"localBrowser"); var tabs = Field<TabControl>(browser,"Tabs"); var computer = Field<TreeView>(browser,"Tree");
             Check(Node(local,"Local") != null && Node(local,"Both") != null && Node(local,"Remote") == null, "computer pane uses local presence");
             Check(Node(server,"Local") == null && Node(server,"Both") != null && Node(server,"Remote") != null, "server pane uses server presence");
             Check(local.Nodes.Cast<TreeNode>().Count(n => (n.Tag as string) == "") == 1 && local.Nodes.Cast<TreeNode>().All(n => n.Nodes.Count == 0 || (n.Tag as string) != ""), "root file does not nest the root level");
@@ -47,14 +48,18 @@ public static class FoldersSmoke {
             var apply=Field<Button>(view,"apply"); var skip=Field<Button>(view,"skip");
             foreach (float size in new[] {9f, 14f, 18f}) {
                 form.Font=new Font("Segoe UI",size); Pump();
-                var lb=local.RectangleToScreen(local.ClientRectangle); var rb=server.RectangleToScreen(server.ClientRectangle);
+                var lb=tabs.RectangleToScreen(tabs.ClientRectangle); var rb=server.RectangleToScreen(server.ClientRectangle);
                 Check(lb.Top == rb.Top && lb.Right <= rb.Left && lb.Width > form.Font.Height * 5 && rb.Width > form.Font.Height * 5, "separate pane bounds at font " + size);
                 Check(local.Height >= form.Font.Height * 10 && server.Height >= form.Font.Height * 10, "readable tree height at font " + size);
                 var foot=apply.RectangleToScreen(apply.ClientRectangle);
                 Check(form.RectangleToScreen(form.ClientRectangle).Contains(foot) && skip.Visible, "footer remains reachable at font " + size);
                 Console.WriteLine("BOUNDS font="+size+" local="+lb+" server="+rb+" footer="+foot);
             }
+            tabs.SelectedIndex = 1; for (int i = 0; i < 100 && !computer.Nodes.Cast<TreeNode>().Any(n => (n.Tag as string) == "C:\\"); i++) { Pump(); System.Threading.Thread.Sleep(50); }
+            Check(computer.Nodes.Cast<TreeNode>().Any(n => (n.Tag as string) == "C:\\"), "whole computer tab lists fixed drives");
+            tabs.SelectedIndex = 0; Pump();
             Call(view,"Initialize",choice,"C:\\DifferentDisk",false,null,null); Pump();
+            Check(Field<LinkLabel>(view,"localPath").Text.Contains("ещё нет"), "missing Disk folder is reported plainly");
             Check(local.Nodes.Count == 0 && server.Nodes.Count == 0, "profile initialization clears pane caches");
             Check(messages.All(x => !x.Contains("Exception")), "no UI callback errors");
             form.Close();

@@ -38,6 +38,8 @@
     <Compile Include="DiskChoiceTests.cs" />
     <Compile Include="DiskFoldersModelTests.cs" />
     <Compile Include="../DiskFoldersModel.cs" Link="DiskFoldersModel.cs" />
+    <Compile Include="LocalFoldersTests.cs" />
+    <Compile Include="../LocalFolders.cs" Link="LocalFolders.cs" />
     <Compile Include="ConfigApplyTests.cs" />
     <Compile Include="../ConfigApply.cs" Link="ConfigApply.cs" />
     <Compile Include="ProxyRelayTests.cs" />
