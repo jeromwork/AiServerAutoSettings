@@ -277,6 +277,23 @@ class CloudTests(unittest.TestCase):
             with patch.object(cloud, 'download', side_effect=bad_download), self.assertRaisesRegex(cloud.Error, 'SHA256SUMS'):
                 cloud.install_rclone()
 
+    def test_preexisting_equal_size_different_modtime(self):
+        project = self.local / 'Existing'
+        remote = self.remote / 'Exchange/Existing'
+        self.put(project / 'file.txt', 'same')
+        self.put(remote / 'file.txt', 'same')
+        os.utime(project / 'file.txt', (1700000000, 1700000000))
+        os.utime(remote / 'file.txt', (1800000000, 1800000000))
+        cloud.apply(self.cfg)
+        wait_for(lambda: self.healthy('Existing'), description='existing files initial pass')
+        # A second unchanged pass and restart must keep valid bisync listings.
+        cloud.apply(self.cfg)
+        wait_for(lambda: self.healthy('Existing') and self.status().get('state') == 'watching',
+                 description='existing files after restart')
+        self.put(project / 'file.txt', 'edit')
+        wait_for(lambda: content(remote / 'file.txt') == 'edit' and self.healthy('Existing'),
+                 seconds=10, description='existing file same-size edit')
+
     def test_crlf_json_stdin_and_cli_status(self):
         # A fake systemctl executable exercises the *real* shell stdin/fd3 contract.
         fakebin = self.home / 'fakebin'

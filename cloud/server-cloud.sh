@@ -444,9 +444,8 @@ class Worker:
                 '--filters-file', str(BASE / 'filter.txt'), '--ignore-case', '--create-empty-src-dirs',
                 '--use-json-log', '--stats', '1h', '--stats-log-level', 'NOTICE', '--transfers', '16', '--checkers', '16']
         if not initialized.exists():
-            # WebDAV clouds (Mail) stamp upload time as mtime: a modtime compare on resync re-uploads every file.
-            # The first pass compares sizes only; afterwards bisync tracks each side's own mtimes in its listings.
-            args[args.index('size,modtime')] = 'size'
+            # Keep the same comparison/listing format on initialization and every later pass.
+            # A size-only resync omits mtimes; switching back then breaks bisync's listing checks.
             args.append('--resync')
         entry = {'startedAt': now(), 'result': 'running', 'reason': reason,
                  'transferred': 0, 'bytes': 0, 'deleted': 0, 'firstError': None}
