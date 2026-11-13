@@ -528,9 +528,12 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             }
             Set-WizardDiskChannel $Root
             Read-DiskState;$local=Invoke-DiskApi 'system/status';if(-not $local.myID){throw 'Syncthing не отвечает; повторите установку диска'}
-            Invoke-InstallChild $Bundle 'disk/Select-Disk.ps1' @('-Home',$Root,'-Action','Apply','-SelectionFile',$choice) -TimeoutSeconds 900
-            Update-LauncherConfig $Root {param($c) if($c.wizard){$c.wizard.PSObject.Properties.Remove('skipDisk')};Set-ConfigDefault $c components ([pscustomobject]@{});Set-ConfigDefault $c.components disk ([pscustomobject]@{});$c.components.disk|Add-Member -Force enabled $true}
+            # The engine is installed and answers: hand it to the tray's supervisor BEFORE the selection. The engine started by
+            # this step dies with the step's job; if a folder then fails, the supervised engine keeps running and the tree loads.
+            Update-LauncherConfig $Root {param($c) Set-ConfigDefault $c components ([pscustomobject]@{});Set-ConfigDefault $c.components disk ([pscustomobject]@{});$c.components.disk|Add-Member -Force enabled $true}
             $hold=Join-Path $Root 'state/disk-reconfigure';if(Test-Path $hold){Remove-Item -LiteralPath $hold}
+            Invoke-InstallChild $Bundle 'disk/Select-Disk.ps1' @('-Home',$Root,'-Action','Apply','-SelectionFile',$choice) -TimeoutSeconds 900
+            Update-LauncherConfig $Root {param($c) if($c.wizard){$c.wizard.PSObject.Properties.Remove('skipDisk')}}
             [void](Ensure-DiskNavPane $base) # cosmetic: never fails the Disk step
             return @{ok=$true;summary='Выбор применён; передача файлов продолжается. Это ещё не подтверждение завершённой синхронизации'}
         }

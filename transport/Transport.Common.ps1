@@ -969,12 +969,29 @@ namespace RemoteAgents {
    lock(gate) {
     for(int i=o;i<o+n;i++) {
      if(!firstDone) { if(firstCount<first.Length) first[firstCount++]=b[i]; if(b[i]==10 || firstCount==first.Length) firstDone=true; }
-     if(recentCount==recent.Length) {Buffer.BlockCopy(recent,4096,recent,0,4096);recentCount=4096;}
+     if(recentCount==recent.Length) {Buffer.BlockCopy(recent,4096,recent,0,4096);recentCount=4096;recentCut=true;}
      recent[recentCount++]=b[i];
     }
    }
   }
-  public string Snapshot() {lock(gate) return Encoding.UTF8.GetString(first,0,firstCount)+"\n"+Encoding.UTF8.GetString(recent,0,recentCount);}
+  bool recentCut;
+  public string Snapshot() {lock(gate) return Decode(first,firstCount,false,firstCount==first.Length && first[first.Length-1]!=10)+"\n"+Decode(recent,recentCount,recentCut,false);}
+  // Windows PowerShell 5.1 writes a redirected child's output in the console OEM code page (cp866 on Russian Windows), other
+  // children write UTF-8. Same rule as External.ReadPowerShellOutput in the launcher: strict UTF-8, otherwise the OEM page.
+  // A buffer edge may split one UTF-8 character; only those edge bytes are tolerated.
+  public static int OemCodePage;
+  [System.Runtime.InteropServices.DllImport("kernel32.dll")] static extern uint GetOEMCP();
+  public static string Decode(byte[] b, int count, bool cutStart, bool cutEnd) {
+   int start=0, end=count;
+   if(cutStart) while(start<end && start<3 && (b[start]&0xC0)==0x80) start++;
+   if(cutEnd) { int i=end-1, back=0; while(i>=start && back<3 && (b[i]&0xC0)==0x80) {i--;back++;} if(i>=start && b[i]>=0xC0) { int need=b[i]>=0xF0?4:b[i]>=0xE0?3:2; if(end-i<need) end=i; } }
+   try { return new UTF8Encoding(false,true).GetString(b,start,end-start); }
+   catch(DecoderFallbackException) {
+    int page=OemCodePage;
+    if(page==0) { try { page=Environment.OSVersion.Platform==PlatformID.Win32NT?(int)GetOEMCP():System.Globalization.CultureInfo.CurrentCulture.TextInfo.OEMCodePage; } catch { page=437; } }
+    try { return Encoding.GetEncoding(page).GetString(b,0,count); } catch { return Encoding.UTF8.GetString(b,0,count); }
+   }
+  }
   public override bool CanRead {get{return false;}} public override bool CanSeek {get{return false;}} public override bool CanWrite {get{return true;}}
   public override long Length {get{return 0;}} public override long Position {get{return 0;}set{throw new NotSupportedException();}}
   public override void Flush() {} public override int Read(byte[] b,int o,int n){throw new NotSupportedException();}

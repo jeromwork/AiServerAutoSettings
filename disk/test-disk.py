@@ -200,14 +200,12 @@ def exercise(root, archive):
         require(refused.returncode != 0 and 'Чужой .stignore' in refused.stderr.decode() and ignore.read_text() == 'foreign-policy', 'foreign policy refusal')
         ignore.unlink()
         probe = side['folder'] / 'merge-probe.txt'; probe.write_text('existing')
-        refused = server(side, 'attach', dict(data, localHasFiles=True), ok=False)
-        require(refused.returncode != 0 and 'требуется -Merge' in refused.stderr.decode(), 'initial nonempty folders require merge')
-        side['id'] = server(side, 'attach', dict(data, localHasFiles=True, merge=True))['id']
-        require(server(side, 'attach', dict(data, localHasFiles=True))['id'] == side['id'], 'repeat nonempty attachment without merge')
+        # Both sides non-empty: always merged, never refused (owner decision).
+        side['id'] = server(side, 'attach', dict(data, localHasFiles=True))['id']
+        require(server(side, 'attach', dict(data, localHasFiles=True))['id'] == side['id'], 'repeat nonempty attachment')
         server(side, 'detach', data)
-        refused = server(side, 'attach', dict(data, localHasFiles=True), ok=False)
-        require(refused.returncode != 0 and 'требуется -Merge' in refused.stderr.decode(), 'detached device still requires merge')
-        server(side, 'attach', dict(data, localHasFiles=True, merge=True)); probe.unlink()
+        server(side, 'attach', dict(data, localHasFiles=True)); probe.unlink()
+        require(probe.parent.is_dir(), 'detached device reattaches by merge')
         require(side['id'] == 'disk-' + hashlib.sha256(b'folder:project').hexdigest()[:24], 'stable folder ID')
         require(ignore.read_bytes() == (HERE / 'stignore.txt').read_bytes(), 'canonical policy')
         require(set(('.stignore', '.stfolder', '*.sync-conflict-*')) <= set((side['folder'] / '.git/info/exclude').read_text().splitlines()), 'Git exclusions')
@@ -281,8 +279,8 @@ def exercise(root, archive):
         run([ps,'-NoProfile','-File',str(HERE/'Sync-RemoteDiskFolders.ps1')],env,limit=12)
     accept()
     require(api(b,'config/defaults/folder')['path']==str(base), 'tray default path follows the saved base')
-    require(not any(f['id']==aid for f in api(b,'config/folders')) and (target/'.git').is_dir(), 'occupied git-only folder stays pending')
-    (target/'.git').rmdir(); accept(); accept()
+    require(any(f['id']==aid for f in api(b,'config/folders')) and (target/'.git').is_dir(), 'existing local folder is merged on accept')
+    accept()
     require(len([f for f in api(b,'config/folders') if f['id']==aid])==1, 'accept idempotent')
     wait(lambda: (target/'hello.txt').exists(), 'automatic folder transfer')
     moved=base/'MovedAutoTest'

@@ -25,8 +25,12 @@ try {
     $sha=[Security.Cryptography.SHA256]::Create();try{$id='disk-'+([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes('folder:'+$Remote))).Replace('-','').ToLowerInvariant()).Substring(0,24)}finally{$sha.Dispose()};if($target.Count){$id=$target[0].id}
     if($match.Count -and $match[0].id -cne $id){throw 'Локальная папка уже связана с другим ID'};if(@($existing|Where-Object {$_.id -ceq $id -and $_.path.TrimEnd('\','/') -ine $Path.TrimEnd('\','/')}).Count){throw 'Эта серверная папка уже подключена в другом месте'}
     $reconnecting=$ManagedSelection -and (Test-DiskProjectReconnect $Path $Remote $id $peer ([string]$local.myID))
-    if(-not $match.Count -and -not $reconnecting -and $has -and $target.Count -and $target[0].hasFiles -and -not $Merge){if(-not $interactive){throw 'Обе папки непустые: требуется -Merge'};if([Windows.Forms.MessageBox]::Show('Обе папки непустые. Объединить содержимое?','RemoteDisk','YesNo','Warning') -ne 'Yes'){return};$Merge=$true}
-    $step='Подключение папки на сервере';[void](Invoke-DiskServer attach @{name=$Remote;deviceId=$local.myID;localHasFiles=$has;merge=[bool]$Merge});Test-DiskIgnores $Path -Write
+    # Owner decision: a folder present on both sides is always merged, without a question and without refusal (-Merge is kept
+    # only for old callers). Both sides keep maxConflicts=-1 and staggered versioning (set below and by server attach), so a merge
+    # deletes nothing. Syncthing 2.1.7 compares block hashes: byte-identical files become one file (only time/attributes are
+    # aligned, nothing is transferred); a .sync-conflict copy appears only when contents really differ (disk/test-wizard-merge.py).
+    if(-not $match.Count -and -not $reconnecting -and $has -and $target.Count -and $target[0].hasFiles){Write-DiskProgress ('Объединяю «'+$Remote+'»: на компьютере и на сервере есть файлы; ничего не удаляется, при расхождении сохраняются обе версии')}
+    $step='Подключение папки на сервере';[void](Invoke-DiskServer attach @{name=$Remote;deviceId=$local.myID;localHasFiles=$has;merge=$true});Test-DiskIgnores $Path -Write
     if($match.Count){$folder=$match[0]}else{$folder=@{id=$id;label=$Remote;path=$Path;type='sendreceive';paused=$true;rescanIntervalS=60;fsWatcherEnabled=$true;devices=@(@{deviceID=$local.myID})}}
     $folder.type=Get-DiskFolderType $Direction
     $folder.maxConflicts=-1;$versioning=@{type='staggered';params=@{maxAge='0';cleanInterval='3600'}};if($folder -is [Collections.IDictionary]){$folder.versioning=$versioning}else{$folder|Add-Member -Force versioning $versioning};if(-not @($folder.devices|Where-Object {$_.deviceID -ceq $peer}).Count){$folder.devices+=@(@{deviceID=$peer})}
