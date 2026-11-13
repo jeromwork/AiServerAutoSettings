@@ -61,9 +61,9 @@ namespace RemoteAgents.Launcher
         }
         internal static bool OwnedProcess(string executable, string command, string home)
         {
-            if (!OwnedExecutable(Files.Quote(executable), home)) return false;
+            if (string.IsNullOrWhiteSpace(command) || !OwnedExecutable(Files.Quote(executable), home)) return false;
             string line = (command ?? "").Replace('/', '\\');
-            if (!Regex.IsMatch(line, @"(?:^|\s)""?syncthing""?(?:\s|$)", RegexOptions.IgnoreCase)) return true;
+            if (!Path.GetFileName(executable).Equals("syncthing.exe", StringComparison.OrdinalIgnoreCase) && !Regex.IsMatch(line, @"(?:^|\s)""?syncthing""?(?:\s|$)", RegexOptions.IgnoreCase)) return true;
             string state = Path.GetFullPath(Path.Combine(home, "state")).Replace('/', '\\');
             return Regex.IsMatch(line, @"(?:^|\s)""?--home(?:""?\s+|=)""?" + Regex.Escape(state) + @"""?(?=\s|$)", RegexOptions.IgnoreCase);
         }

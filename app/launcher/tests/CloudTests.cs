@@ -120,6 +120,10 @@ namespace RemoteAgents.Launcher
             Check(LegacyDiskMigration.OwnedProcess(exe, Files.Quote(exe) + " \"syncthing\" \"serve\" \"--home\" " + Files.Quote(state), home), "quoted embedded command with exact state");
             Check(!LegacyDiskMigration.OwnedProcess(exe, "syncthing serve --home " + Files.Quote(state + "-foreign"), home), "similar state is foreign");
             Check(!LegacyDiskMigration.OwnedProcess(exe, "syncthing serve --home " + Files.Quote(Path.Combine(local, "other")), home), "other embedded state untouched");
+            Check(!LegacyDiskMigration.OwnedProcess(exe, "", home), "unreadable command line is not ownership proof");
+            string standalone = Path.Combine(home, "bin/syncthing.exe");
+            Check(!LegacyDiskMigration.OwnedProcess(standalone, Files.Quote(standalone) + " --home " + Files.Quote(state + "-foreign"), home), "standalone Syncthing foreign state preserved");
+            Check(LegacyDiskMigration.OwnedProcess(standalone, Files.Quote(standalone) + " --home=" + Files.Quote(state), home), "standalone Syncthing exact managed state");
             Check(!LegacyDiskMigration.OwnedExecutable(Files.Quote(Path.Combine(home, "tray/syncthingtray.exe.evil")), home), "executable prefix is not ownership");
         }
         sealed class FakeSystem : ILegacyDiskSystem

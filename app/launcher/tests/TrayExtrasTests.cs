@@ -31,7 +31,7 @@ namespace RemoteAgents.Launcher
                 Check(TrayMenuModel.HappierUrl(config, empty) == url, "URL comes from each supplied config");
                 Check(TrayMenuModel.Build(config, empty, transport, health)[0].Enabled, "configured URL enables item");
             }
-            Check(TrayMenuModel.LeftClickAction(empty, empty) == "happier", "left click without URL opens window");
+            Check(TrayMenuModel.LeftClickAction(empty, empty) == "happier", "left click without URL uses Happier action with an explanation");
             Check(TrayMenuModel.AcceptLeftClick(0, 501, 500), "NotifyIcon single click has Clicks=0");
             Check(!TrayMenuModel.AcceptLeftClick(0, 200, 500), "NotifyIcon repeat suppressed within double click interval");
             Check(TrayMenuModel.AcceptLeftClick(1, 501, 500), "first or later single click accepted");
@@ -39,11 +39,11 @@ namespace RemoteAgents.Launcher
             Check(!TrayMenuModel.AcceptLeftClick(1, 500, 500), "double click boundary suppressed");
             var account = Data("{\"webappUrl\":\"https://account.example.invalid/\"}");
             Check(TrayMenuModel.LeftClickAction(empty, account) == "happier", "left click follows account URL");
-            Check(TrayMenuModel.LeftClickAction(Data("{\"happier\":{\"webappUrl\":\"file:///tmp/app\"}}"), account) == "happier", "invalid configured URL falls back to window");
+            Check(TrayMenuModel.LeftClickAction(Data("{\"happier\":{\"webappUrl\":\"file:///tmp/app\"}}"), account) == "happier", "invalid configured URL uses the same explanatory Happier action");
             Check(TrayMenuModel.HappierUrl(empty, account) == "https://account.example.invalid/", "fallback to account state");
             Check(TrayMenuModel.HappierUrl(Data("{\"happier\":{\"webappUrl\":\"https://config.example.invalid/\"}}"), account) == "https://config.example.invalid/", "config takes priority");
             foreach (string url in new[] { "", "not a url", "file:///tmp/app", "javascript:alert(1)", "https://user:pass@example.invalid" })
-                Check(TrayMenuModel.Build(Data(Json.Encode(new { happier = new { webappUrl = url } })), empty, transport, health)[0].Enabled, "invalid URL cannot launch: " + url);
+                Check(TrayMenuModel.HappierUrl(Data(Json.Encode(new { happier = new { webappUrl = url } })), empty) == "" && TrayMenuModel.Build(Data(Json.Encode(new { happier = new { webappUrl = url } })), empty, transport, health)[0].Hint.Contains("не задан"), "invalid URL gets an explanation: " + url);
             Check(TrayMenuModel.Connection(empty).Contains("ожидается"), "missing transport unknown");
             transport["ok"] = false;
             Check(!TrayMenuModel.Connection(transport).Contains("КБ/с") && TrayMenuModel.Connection(transport).Contains("не подтверждена"), "failed transport does not claim a working path/speed");
