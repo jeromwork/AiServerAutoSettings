@@ -64,6 +64,9 @@ root=Path(__file__).parent
 if sys.argv[1]=='check': sys.exit(0)
 n=int((root/'starts').read_text())+1 if (root/'starts').exists() else 1
 (root/'starts').write_text(str(n)); (root/'engine.pid').write_text(str(os.getpid()))
+if (root/'bind-failure').exists():
+    os.write(2,b'FATAL start inbound/direct[ssh]: listen tcp 127.0.0.1:2222: bind: Only one usage of each socket address\\r\\n')
+    sys.exit(1)
 c=json.loads(Path(sys.argv[-1]).read_text())
 api=c['experimental']['clash_api']; port=int(api['external_controller'].split(':')[-1])
 class API(http.server.BaseHTTPRequestHandler):
@@ -173,6 +176,23 @@ Server(('127.0.0.1',port),API).serve_forever()
         os.kill(first_engine, 9)
         until(lambda: int((root / 'engine.pid').read_text()) != first_engine)
         until(lambda: status().get('ok'))
+        # Одинаковый bind: причина видна, интервалы 5/10 с, а не быстрый рестарт без конца.
+        (root/'bind-failure').touch()
+        os.kill(int((root/'engine.pid').read_text()), 9)
+        until(lambda: status().get('portConflict'))
+        assert not status()['ok'] and 'Порт 127.0.0.1:2222 занят' in status()['summary']
+        bind_starts=int((root/'starts').read_text())
+        stamp=(root/'status/transport.json').stat().st_mtime_ns
+        time.sleep(2)
+        assert int((root/'starts').read_text()) == bind_starts
+        assert (root/'status/transport.json').stat().st_mtime_ns == stamp, 'Статус долбится во время паузы bind'
+        until(lambda: int((root/'starts').read_text()) > bind_starts, seconds=12)
+        until(lambda: status().get('portConflict') and 'занят' in status().get('error',''))
+        second_starts=int((root/'starts').read_text())
+        time.sleep(6)
+        assert int((root/'starts').read_text()) == second_starts, 'Пауза bind не увеличилась'
+        (root/'bind-failure').unlink()
+        until(lambda: status().get('ok') and not status().get('portConflict'), seconds=20)
         (root / 'stop').touch()
         daemon.wait(timeout=10)
         assert daemon.returncode == 0, daemon.communicate()
@@ -192,7 +212,7 @@ Server(('127.0.0.1',port),API).serve_forever()
         assert stopped(int((root / 'engine.pid').read_text()))
         assert stopped(int((root / 'tunnel.pid').read_text()))
         assert all(stopped(int(pid)) for pid in (root/'probes.pid').read_text().splitlines()), 'SSH probe leaked after timeout/stop'
-        print('OK: failover, pin <=5с, мёртвый pin, auto, hot reload, disabled tag, invalid reload, restart, stop, ParentPid (имитаторы)')
+        print('OK: failover, pin <=5с, мёртвый pin, auto, hot reload, disabled tag, invalid reload, restart, bind/backoff/status, stop, ParentPid (имитаторы)')
     except Exception:
         print('STATUS', status(), file=sys.stderr)
         log=root/'logs/transport.log'

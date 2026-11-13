@@ -1021,6 +1021,73 @@ function Protect-TransportDiagnostic([string]$Text,$Settings) {
     $Text=$Text -replace '(?i)((?:password|token|secret|passphrase|private_key|uuid)\s*[=:]\s*)[^\s,;]+','$1<redacted>'
     Protect-TransportText $Text
 }
+# Снимок только слушающих TCP-сокетов. Ошибки поиска владельца не подменяют причину bind.
+function Get-TransportPortSnapshot {
+    if($env:OS -eq 'Windows_NT'){
+        $listeners=@(Get-NetTCPConnection -State Listen -ErrorAction Stop|ForEach-Object {
+            [pscustomobject]@{address=[string]$_.LocalAddress;port=[int]$_.LocalPort;pid=[int]$_.OwningProcess}
+        })
+        $processes=@(Get-CimInstance Win32_Process -ErrorAction Stop)
+        $legacyActions=@();try{$task=Get-ScheduledTask -TaskPath '\' -TaskName 'RemoteDiskChannel' -ErrorAction Stop;foreach($a in @($task.Actions)){$legacyActions+=@{exe=[string]$a.Execute;arguments=[string]$a.Arguments}}}catch{}
+    }else{
+        $listeners=@([Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()|ForEach-Object {
+            [pscustomobject]@{address=$_.Address.ToString();port=$_.Port;pid=0}
+        });$processes=@()
+    }
+    [pscustomobject]@{listeners=$listeners;processes=$processes;legacyActions=@($legacyActions)}
+}
+function Get-TransportPortConflict([string]$Address,[int]$Port,$Snapshot=$null) {
+    if(-not $Snapshot){try{$Snapshot=Get-TransportPortSnapshot}catch{$Snapshot=[pscustomobject]@{listeners=@();processes=@()}}}
+    $listener=@($Snapshot.listeners|Where-Object {$_.port -eq $Port -and $_.address -in @($Address,'0.0.0.0','::')}|Select-Object -First 1)
+    $owner=$null;$ownerId=0
+    if($listener.Count){$ownerId=[int]$listener[0].pid;$owner=@($Snapshot.processes|Where-Object {[int]$_.ProcessId -eq $ownerId}|Select-Object -First 1)}
+    $exe='';if($owner){$exe=[string]$owner[0].ExecutablePath}
+    $legacy=$false
+    if($exe -and $env:LOCALAPPDATA){
+        $old=[IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'RemoteDisk/channel/sing-box.exe'))
+        $legacy=([IO.Path]::GetFullPath($exe) -ieq $old)
+    }
+    if(-not $legacy -and $exe -and $owner){
+        # Задача могла указывать другой путь. Одного имени exe недостаточно: сверяем действие и аргументы.
+        $line=([string]$owner[0].CommandLine).Replace('/','\').Trim()
+        foreach($action in @($Snapshot.legacyActions)){
+            if(-not $action -or -not $action.exe -or -not $action.arguments){continue}
+            $arguments=([string]$action.arguments).Replace('/','\').Trim()
+            $sameExe=([IO.Path]::GetFullPath([string]$action.exe) -ieq [IO.Path]::GetFullPath($exe))
+            if($sameExe -and $line.EndsWith($arguments,[StringComparison]::OrdinalIgnoreCase)){$legacy=$true;break}
+        }
+    }
+    $endpoint=$Address+':'+$Port
+    $message='Порт '+$endpoint+' занят'
+    if($exe){$message+=' программой '+$exe+' (PID '+$ownerId+')'}elseif($ownerId){$message+=' процессом PID '+$ownerId+' (путь программы недоступен)'}else{$message+='; определить программу не удалось'}
+    if($legacy){$message+=' — это старая установка RemoteDisk (RemoteDiskChannel)'}
+    $message+='. Освободите порт или измените порты в настройках связи.'
+    [pscustomobject]@{address=$Address;port=$Port;pid=$ownerId;exe=$exe;legacy=$legacy;message=$message;listening=($listener.Count -gt 0)}
+}
+function Find-TransportPortConflict($Config,$Paths,$TunnelChildren) {
+    $endpoints=@($Config.inbounds|ForEach-Object {[pscustomobject]@{address=[string]$_.listen;port=[int]$_.listen_port}})
+    $api=[string]$Config.experimental.clash_api.external_controller
+    if($api -match '^(.+):(\d+)$'){$endpoints+=@([pscustomobject]@{address=$Matches[1];port=[int]$Matches[2]})}
+    foreach($out in @($Paths.Outbounds|Where-Object {$_.type -eq 'socks'})){
+        if(@($Paths.Tunnels|Where-Object {$_.tag -eq $out.tag}).Count -and -not $TunnelChildren.ContainsKey($out.tag)){
+            $endpoints+=@([pscustomobject]@{address=[string]$out.server;port=[int]$out.server_port})
+        }
+    }
+    try{$snapshot=Get-TransportPortSnapshot}catch{return}
+    foreach($e in $endpoints){$conflict=Get-TransportPortConflict $e.address $e.port $snapshot;if($conflict.listening){return $conflict}}
+}
+function Get-TransportBindConflict([string]$Text,$Snapshot=$null) {
+    if($Text -notmatch '(?i)Only one usage of each socket address|address already in use|WSAEADDRINUSE'){return}
+    if($Text -match '(?i)(?:listen (?:tcp|udp)\S*\s+)?(127\.\d+\.\d+\.\d+|0\.0\.0\.0|\[::1\]|\[::\]):(\d+)'){
+        return (Get-TransportPortConflict $Matches[1].Trim('[',']') ([int]$Matches[2]) $Snapshot)
+    }
+    [pscustomobject]@{address='';port=0;pid=0;exe='';legacy=$false;message='Порт модуля связи занят другой программой. Освободите порт или измените порты в настройках связи.'}
+}
+function Get-TransportRestartDelay([double]$Base,[int]$BindFailures) {
+    if($BindFailures -le 0){return $Base}
+    [Math]::Min(120,[Math]::Max(5,$Base)*[Math]::Pow(2,[Math]::Min(6,$BindFailures-1)))
+}
+
 function New-TransportDiagnostic($Child,[string]$Candidate,[string]$Reason,$Settings=$null) {
     $code=$null;$line=''
     if($Child){
@@ -1031,13 +1098,16 @@ function New-TransportDiagnostic($Child,[string]$Candidate,[string]$Reason,$Sett
         }
     }
     # Error kind remains explicit even when stderr is empty or has been redacted.
-    if($line -match '(?i)timed? out|timeout|deadline'){$Reason='timeout'}
+    $portConflict=Get-TransportBindConflict $line
+    if($portConflict){$Reason='port-in-use'}
+    elseif($line -match '(?i)timed? out|timeout|deadline'){$Reason='timeout'}
     elseif($line -match '(?i)refused'){$Reason='connection-refused'}
     elseif($line -match '(?i)unreachable|no route'){$Reason='network-unreachable'}
     elseif($line -match '(?i)permission denied|authentication failed'){$Reason='authentication-failed'}
-    [pscustomobject]@{candidate=$(if($Candidate -match '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,95}$'){$Candidate}else{'invalid-tag'});reason=$Reason;exitCode=$code;stderr=(Protect-TransportDiagnostic $line $Settings)}
+    [pscustomobject]@{candidate=$(if($Candidate -match '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,95}$'){$Candidate}else{'invalid-tag'});reason=$Reason;portConflict=$portConflict;exitCode=$code;stderr=(Protect-TransportDiagnostic $line $Settings)}
 }
 function Format-TransportDiagnostic($Detail) {
+    if($Detail.portConflict){return $Detail.portConflict.message}
     'candidate='+$Detail.candidate+' reason='+$Detail.reason+' exit='+$(if($null -eq $Detail.exitCode){'running/unknown'}else{[string]$Detail.exitCode})+' stderr='+$Detail.stderr+$(if($Detail.engineStderr){' sing-box='+$Detail.engineStderr}else{''})
 }
 

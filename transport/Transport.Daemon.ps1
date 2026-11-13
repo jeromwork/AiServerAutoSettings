@@ -7,6 +7,7 @@ param([Alias('Home')][string]$TransportHome=(Join-Path $env:LOCALAPPDATA 'Remote
 $root=(Get-TransportHome $TransportHome);$engine=$null;$tunnelChildren=@{};$probes=@{};$rows=@();$active=$null;$confirmed=$false;$errorText='Запуск';$network=$null;$memory=$null;$secret=$null
 $parent=$null;$mutex=$null;$locked=$false;$settings=$null;$paths=$null;$rankPending=$false;$rankTags=@();$rankQueue=$null;$exitCode=0
 $pin=[pscustomobject]@{mode='auto';tag=$null};$nextControl=[DateTime]::MinValue;$revision='';$reloadJob=$null;$reloadError=$null;$failedRevision=$null;$pendingRevision=$null;$nextReload=[DateTime]::MinValue
+$portConflict=$null;$bindFailures=0;$engineStarted=[DateTime]::MinValue
 $diagnosticContext=$null;$liveDeferred=@();$tunnelLiveAt=[DateTime]::MinValue;$daemonStarted=[DateTime]::Now
 try{$daemonStarted=(Get-Process -Id $PID).StartTime}catch{}
 $lastStatus=[DateTime]::MinValue;$nextActive=[DateTime]::MinValue;$nextRank=[DateTime]::MinValue;$nextNetwork=[DateTime]::MinValue;$retryAt=[DateTime]::MinValue;$nextLive=[DateTime]::MinValue
@@ -24,7 +25,7 @@ function Publish-TransportStatus {
     $id=$null;if($network){$id=$network.id}
     $summary='нет связи: '+$(if($errorText){$errorText}else{'нет проверенного пути'})
     if($alive -and $confirmed -and $row){$summary=$row.title;if($null -ne $speed){$summary+=' · '+([Math]::Round([double]$speed,1)).ToString([Globalization.CultureInfo]::InvariantCulture)+' КБ/с'}}
-    Write-TransportJson (Join-Path $root 'status/transport.json') ([ordered]@{configRevision=$revision;fatal=($exitCode -ne 0);summary=$summary;ok=[bool]($alive -and $confirmed);active=$active;kbps=$speed;network=$id;metered=$metered;mode=$pin.mode;pinnedTag=$pin.tag;candidates=@($rows);configError=$reloadError;updatedAt=[DateTime]::UtcNow.ToString('o');error=$errorText})
+    Write-TransportJson (Join-Path $root 'status/transport.json') ([ordered]@{portConflict=$portConflict;retryAt=$retryAt.ToUniversalTime().ToString('o');configRevision=$revision;fatal=($exitCode -ne 0);summary=$summary;ok=[bool]($alive -and $confirmed);active=$active;kbps=$speed;network=$id;metered=$metered;mode=$pin.mode;pinnedTag=$pin.tag;candidates=@($rows);configError=$reloadError;updatedAt=[DateTime]::UtcNow.ToString('o');error=$errorText})
     $script:lastStatus=[DateTime]::UtcNow
 }
 function Set-DaemonNextActive {
@@ -113,10 +114,17 @@ function Start-TransportEngine([switch]$Validated) {
     $interface='';if($network -and $settings.Options.bindPhysical){$interface=[string]$network.interface}
     if($settings.Options.bindPhysical -and -not $interface){throw 'Физический интерфейс недоступен'}
     $cfg=New-TransportConfig $settings $paths $secret $active $interface
+    $conflict=Find-TransportPortConflict $cfg $paths $tunnelChildren
+    if($conflict){
+        $ex=New-Object Exception($conflict.message)
+        $ex.Data['transportDiagnostic']=[pscustomobject]@{candidate='sing-box';reason='port-in-use';portConflict=$conflict;exitCode=$null;stderr=''}
+        throw $ex
+    }
     $file=Join-Path $root 'state/transport-sing-box.json';Write-TransportJson $file $cfg -Private
     # Валидация до запуска; stdout/stderr не публикуются, т.к. могут содержать адреса и секреты.
     if(-not $Validated){Test-TransportConfigFile $settings.Options.singBoxPath $file}
     $script:engine=Start-TransportProcess $settings.Options.singBoxPath @('run','-c',$file)
+    $script:engineStarted=[DateTime]::UtcNow;$script:portConflict=$null
     Save-TransportOwner $root 'transport' $engine $settings.Options.singBoxPath $file
     foreach($tunnel in $paths.Tunnels){
         if($tunnelChildren.ContainsKey($tunnel.tag)){continue}
@@ -235,7 +243,10 @@ try{
             Stop-TransportProbes;$rankPending=$false;$rankQueue=$null;Stop-TransportProcess $engine;$engine=$null;$confirmed=$false;$errorText='sing-box завершился, ожидается перезапуск'
             foreach($child in @($tunnelChildren.Values)){Stop-TransportProcess $child};$tunnelChildren.Clear()
             foreach($row in $rows){if($row.state -eq 'ok'){$row.state='remembered'}}
-            $retryAt=$now.AddSeconds([double]$settings.Options.restartDelaySec);Write-TransportLog $root 'restart'
+            $portConflict=$detail.portConflict
+            if($portConflict){$bindFailures++;$errorText=$portConflict.message}else{$bindFailures=0}
+            $retryAt=$now.AddSeconds((Get-TransportRestartDelay ([double]$settings.Options.restartDelaySec) $bindFailures));Write-TransportLog $root 'restart'
+            Publish-TransportStatus
         }
         if(-not $engine -and $now -ge $retryAt){
             try{Start-TransportEngine;$errorText='Ожидается проверка пути'}
@@ -247,10 +258,14 @@ try{
                 Write-TransportLog $root 'process-failed' $detail
                 Stop-TransportProcess $engine;$engine=$null;foreach($child in @($tunnelChildren.Values)){Stop-TransportProcess $child};$tunnelChildren.Clear()
                 $confirmed=$false;$errorText='Не удалось запустить транспорт; проверьте конфиг и физическую сеть'
-                $retryAt=$now.AddSeconds([double]$settings.Options.restartDelaySec)
+                $portConflict=$detail.portConflict
+                if($portConflict){$bindFailures++;$errorText=$portConflict.message}else{$bindFailures=0}
+                $retryAt=$now.AddSeconds((Get-TransportRestartDelay ([double]$settings.Options.restartDelaySec) $bindFailures))
+                Publish-TransportStatus
             }
         }
         if($engine){
+            if($confirmed -or ($now-$engineStarted).TotalSeconds -ge 60){$bindFailures=0}
             foreach($tunnel in $paths.Tunnels){
                 if($tunnelChildren.ContainsKey($tunnel.tag) -and $tunnelChildren[$tunnel.tag].Process.HasExited){
                     $detail=New-TransportDiagnostic $tunnelChildren[$tunnel.tag] $tunnel.tag 'process-exited' $diagnosticContext
@@ -313,7 +328,9 @@ try{
             }
         }
         if($pin.mode -eq 'pinned' -and $pin.tag -notin @($paths.Candidates|ForEach-Object {$_.tag})){$confirmed=$false;$errorText='Закреплённый путь не работает: отключён или отсутствует'}
-        if(($now-$lastStatus).TotalSeconds -ge 1){Publish-TransportStatus}
+        if($portConflict){$errorText=$portConflict.message}
+        $statusInterval=1;if($portConflict -and $now -lt $retryAt){$statusInterval=5}
+        if(($now-$lastStatus).TotalSeconds -ge $statusInterval){Publish-TransportStatus}
         # While the first path is being proved, probe results are read every 100 ms instead of 300 ms.
         Start-Sleep -Milliseconds $(if(-not $confirmed -and $probes.Count){100}else{300})
     }
