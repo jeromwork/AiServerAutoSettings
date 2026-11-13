@@ -13,6 +13,7 @@ pwsh=${PWSH:-$HOME/.cache/pwsh-test/pwsh}
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-first-install.ps1" -TestHome "$testdir/wizard" < /dev/null
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-selective.ps1" -TestHome "$testdir/selective" < /dev/null
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-choice.ps1" -TestHome "$testdir/disk-choice" < /dev/null
+  timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-explorer.ps1" -TestHome "$testdir/disk-explorer" < /dev/null
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-account.ps1" -TestHome "$testdir/accounts" < /dev/null
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-wizard.ps1" -TestHome "$testdir/setup-wizard" < /dev/null
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-wizard-onboarding.ps1" -TestHome "$testdir/onboarding" < /dev/null

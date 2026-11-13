@@ -128,6 +128,8 @@ namespace RemoteAgents.Launcher
             Check(store.Read(prefix + "sync", "MultiSelectModel") == "Document", "legacy Explorer dispatches selected folders individually");
             int writes = store.Writes; reg.Register(@"C:\App Name\RemoteAgents.exe", @"C:\Disk", rows, @"C:\User Home");
             Check(store.Writes == writes && notifications == 1, "registry reconcile skips unchanged values and broadcasts once");
+            reg.Register(@"C:\App Name\RemoteAgents.exe", @"C:\Disk", rows, @"C:\User Home\");
+            Check(store.Read(prefix + "download\\command", "").Contains(" --home " + Files.Quote(@"C:\User Home\") + " --disk-shell "), "trailing slash home keeps native argument boundary");
             reg.Cleanup(); reg.Cleanup(); Check(store.Values.Count == 0, "HKCU cleanup idempotent");
             store.Write(prefix + "add", "MUIVerb", "foreign"); reg.Register(@"C:\app.exe", @"C:\Disk", rows); reg.Cleanup();
             Check(store.Read(prefix + "add", "MUIVerb") == "foreign", "foreign key ownership is respected");

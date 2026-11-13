@@ -30,6 +30,8 @@ namespace RemoteAgents.Launcher
             Check(WindowModel.Route(new[] { "--exit", "--show" }) == WindowCommand.Exit, "exit takes precedence");
             Check(WindowModel.Route(new[] { "--uninstall" }) == WindowCommand.Exit, "uninstall exits the existing instance");
             Check(!WindowModel.ShouldShow(new[] { "--identify" }), "identity IPC does not recurse into activation");
+            Check(!WindowModel.ShouldShow(new[] { "--disk-shell", "sync", "C:\\Disk\\Project" }), "Explorer command opens its own progress only");
+            Check(WindowModel.ForwardArguments(new[] { "--disk-shell", "sync", "C:\\Disk\\Project" }).Length == 3, "pipe preserves shell action without opening settings");
             var forwarded = WindowModel.ForwardArguments(new string[0]);
             Check(forwarded.Contains("--show") && WindowModel.Route(forwarded) == WindowCommand.Show, "second human instance tells first to show");
             Check(WindowModel.ForwardArguments(new[] { "--home", "test-home" }).Contains("--show"), "second instance with home tells first to show");

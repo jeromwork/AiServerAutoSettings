@@ -14,6 +14,8 @@ namespace RemoteAgents.Launcher
         internal static void Run()
         {
             DiskFoldersModelTests.Run();
+            DiskExplorerMetadataTests.Run();
+            DiskShellTests.Run();
             LocalFoldersTests.Run();
             var s = new DiskTreeSelection(new[] {"project"});
             Check(s.Paths.SequenceEqual(new[] {"project"}) && s.Includes("project/unopened/deep"), "unopened folder is recursive without inventory");
