@@ -272,8 +272,12 @@ function Add-DiskManagedExternal($Item) {
 }
 # Native junctions expose an external choice in Disk; these thin wrappers can be replaced in tests.
 # Syncthing still watches the original path, and inventory never follows the junction.
+function Test-DiskExternalEntry([string]$Path) {
+    # Test-Path can hide a broken junction. An occupied directory entry must still block Add.
+    $null -ne (Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue)
+}
 function Get-DiskExternalJunctionTarget([string]$Link) {
-    if(-not (Test-Path -LiteralPath $Link)){return ''}
+    if(-not (Test-DiskExternalEntry $Link)){return ''}
     $item=Get-Item -LiteralPath $Link -Force
     if(-not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or -not $item.PSIsContainer){return ''}
     $target=@($item.Target)
@@ -293,14 +297,14 @@ function Remove-DiskExternalJunction([string]$Link) {
 function Assert-DiskExternalJunction($Item,[string]$Base,$Saved) {
     Assert-DiskPlainPath $Base
     $link=Join-Path $Base ([string]$Item.remote)
-    if(-not (Test-Path -LiteralPath $link)){return}
+    if(-not (Test-DiskExternalEntry $link)){return}
     $target=Get-DiskExternalJunctionTarget $link
     $owned=@($Saved|Where-Object {$_.junction -and [IO.Path]::GetFullPath([string]$_.junction) -ieq [IO.Path]::GetFullPath($link) -and $_.remote -ceq $Item.remote -and [IO.Path]::GetFullPath([string]$_.path).TrimEnd('\','/') -ieq [IO.Path]::GetFullPath([string]$Item.path).TrimEnd('\','/')})
     if(-not $owned.Count -or -not $target -or $target -ine [IO.Path]::GetFullPath([string]$Item.path).TrimEnd('\','/')){throw ('В Диске уже занято имя «'+$Item.remote+'». Переименуйте папку или выберите другое имя проекта')}
 }
 function Ensure-DiskExternalJunction($Item,[string]$Base) {
     $link=Join-Path $Base ([string]$Item.remote)
-    if(-not (Test-Path -LiteralPath $link)){
+    if(-not (Test-DiskExternalEntry $link)){
         Assert-DiskPlainPath $Base
         [void][IO.Directory]::CreateDirectory($Base)
         New-DiskExternalJunction $link ([string]$Item.path)
@@ -311,7 +315,7 @@ function Remove-DiskOwnedExternalJunction($Item,[string]$Base) {
     if(-not $Item.junction){return}
     $link=Join-Path $Base ([string]$Item.remote)
     if([IO.Path]::GetFullPath([string]$Item.junction) -ine [IO.Path]::GetFullPath($link)){return}
-    if(-not (Test-Path -LiteralPath $link)){return}
+    if(-not (Test-DiskExternalEntry $link)){return}
     if((Get-DiskExternalJunctionTarget $link) -ieq [IO.Path]::GetFullPath([string]$Item.path).TrimEnd('\','/')){Remove-DiskExternalJunction $link}
     else{Write-DiskLog ('Соединение каталога изменено пользователем; сохранено: '+$link)}
 }
@@ -336,6 +340,7 @@ function Sync-DiskExternal($Desired,[string]$Base) {
         foreach($folder in $folders|Where-Object {$_.label -ceq $old.remote -and [IO.Path]::GetFullPath($_.path).TrimEnd('\','/') -ieq [IO.Path]::GetFullPath($old.path).TrimEnd('\','/')}){
             [void](Invoke-DiskApi ('config/folders/'+[Uri]::EscapeDataString([string]$folder.id)) DELETE)
         }
+        if((Get-Command Remove-DiskExplorerFolderMetadata -ErrorAction SilentlyContinue) -and [IO.Directory]::Exists([string]$old.path)){Remove-DiskExplorerFolderMetadata ([string]$old.path)}
         Remove-DiskOwnedExternalJunction $old $Base
         $saved=@($saved|Where-Object {$_ -ne $old});Write-DiskExternal $saved
     }

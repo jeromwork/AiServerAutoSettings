@@ -29,7 +29,7 @@ function Wait-DiskTransport {
 }
 $step='Подготовка'
 try {
-    if($Uninstall){. (Join-Path $PSScriptRoot 'Disk.NavPane.ps1');Remove-DiskNavPane;Write-DiskLog 'Удаление';Write-Output 'Значок Disk в Проводнике удалён. Пользовательские файлы сохранены.';return}
+    if($Uninstall){. (Join-Path $PSScriptRoot 'Disk.NavPane.ps1');Remove-DiskExplorer;Remove-DiskNavPane;Write-DiskLog 'Удаление';Write-Output 'Значок Disk в Проводнике удалён. Пользовательские файлы сохранены.';return}
     $step='SSH-профиль и файлы';Read-DiskProfile $Profile
     Write-DiskUtf8 (Join-Path $script:DiskHome 'profile.txt') $script:ProfilePath
     $upload='set -eu; umask 077; mkdir -p "$HOME/.local/share/remote-disk"' + "`n"

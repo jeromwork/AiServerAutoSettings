@@ -9,7 +9,7 @@ $fixture=Join-Path $TestHome 'bundle/disk';[void][IO.Directory]::CreateDirectory
 Get-ChildItem (Join-Path $repo 'disk') -File|Where-Object {$_.Extension -in @('.ps1','.sh') -or $_.Name -like 'stignore*'}|Copy-Item -Destination $fixture
 $fake=@'
 # Production uses an NTFS junction; the portable fixture substitutes a symlink via the narrow wrapper.
-function New-DiskExternalJunction([string]$Link,[string]$Target) {[void](New-Item -ItemType SymbolicLink -Path $Link -Target $Target)}
+function New-DiskExternalJunction([string]$Link,[string]$Target) {$kind='SymbolicLink';if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT){$kind='Junction'};[void](New-Item -ItemType $kind -Path $Link -Target $Target)}
 function Read-DiskProfile {}
 function Read-DiskState {}
 function Write-DiskLog {}
@@ -105,6 +105,10 @@ try{
     Reject {Sync-DiskExternal @($entry) $base} 'уже занято имя'
     Assert ($global:Attaches.Count -eq $attachBefore -and @(Read-DiskExternal).Count -eq 0) 'occupied junction name rejected before changing engine or receipts'
     [IO.Directory]::Delete((Join-Path $base 'Reports'),$false)
+    $brokenLink=Join-Path $base 'Reports';New-DiskExternalJunction $brokenLink (Join-Path $TestHome 'absent-target')
+    Reject {Sync-DiskExternal @($entry) $base} 'уже занято имя'
+    Assert ($global:Attaches.Count -eq $attachBefore) 'broken junction name is rejected before server mutation'
+    Remove-DiskExternalJunction $brokenLink
     Apply @('Project') @{Project='receive'} @($entry)
     Assert ($global:Folders.reports.path -eq $outside -and $global:Folders.reports.type -ceq 'sendonly') 'external added noninteractively with direction'
     Assert ((Get-DiskExternalJunctionTarget (Join-Path $base 'Reports')) -eq $outside) 'external has a junction in Disk'
