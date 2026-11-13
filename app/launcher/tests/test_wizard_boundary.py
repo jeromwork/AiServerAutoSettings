@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+import zipfile
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -93,8 +94,13 @@ else:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             env = dict(os.environ, LOCALAPPDATA=tmp, HOME=tmp)
-            # Obtain the real cross-system payloads with a fake SSH transport.
-            command = '. ' + quote(ROOT / 'build/Wizard.Common.ps1') + ';function Invoke-WizardSsh($Root,$Command,$InputText){[Console]::Write($InputText)};Send-WizardHelpers x ' + quote(ROOT)
+            # Use the packaged payload: source-tree success must not hide a missing allowlist entry.
+            subprocess.run([str(ROOT / 'build/make-bundle.sh'), '20261113.integration', str(root / 'out')],
+                           check=True, capture_output=True, timeout=30)
+            bundle = root / 'bundle'
+            with zipfile.ZipFile(root / 'out/20261113.integration.zip') as archive:
+                archive.extractall(bundle)
+            command = '. ' + quote(bundle / 'build/Wizard.Common.ps1') + ';function Invoke-WizardSsh($Root,$Command,$InputText){[Console]::Write($InputText)};Send-WizardHelpers x ' + quote(bundle)
             scripts = []
             for i in range(2):
                 result = subprocess.run([str(PWSH), '-NoProfile', '-NonInteractive', '-Command', command],
@@ -126,8 +132,12 @@ else:
                 for child in children:
                     self.assertEqual(child.wait(10), 0, child.stderr.read().decode())
                 for source, dest in [('build/server-wizard.sh', '.local/share/remoteagents-wizard/server-wizard.sh'),
-                                     ('accounts/server-account.mjs', '.local/share/remoteagents-accounts/server-account.mjs')]:
+                                     ('accounts/server-account.mjs', '.local/share/remoteagents-accounts/server-account.mjs'),
+                                     ('cloud/server-cloud.sh', '.local/share/remoteagents-cloud/server-cloud.sh'),
+                                     ('cloud/filter.txt', '.local/share/remoteagents-cloud/filter.txt')]:
                     self.assertEqual((root / dest).read_bytes(), (ROOT / source).read_bytes().replace(b'\r', b''))
+                self.assertFalse((root / '.local/share/remote-disk').exists())
+                self.assertFalse(list(root.rglob('*.tmp')))
             finally:
                 for child in children:
                     if child.poll() is None:

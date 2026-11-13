@@ -31,7 +31,9 @@ class PackagingTests(unittest.TestCase):
             names = z.namelist()
             self.assertIn('Start-WindowsControl.ps1', names)
             self.assertFalse(any(n.startswith('disk/') for n in names))
-            self.assertIn('build/Process.Common.ps1', names)
+            for name in ('build/Process.Common.ps1', 'build/Wizard.Cloud.ps1',
+                         'cloud/server-cloud.sh', 'cloud/filter.txt'):
+                self.assertIn(name, names)
             self.assertIn('selftest.ps1', names)
             self.assertIn('build/Wizard.Health.ps1', names)
             self.assertIn('function Get-WizardServerHealth', z.read('build/Wizard.Health.ps1').decode('utf-8-sig'))

@@ -50,9 +50,6 @@ function Send-WizardHelpers([string]$Root,[string]$Bundle) {
         'accounts/bootstrap.sh'='.local/share/remoteagents-accounts/bootstrap.sh'
         'cloud/server-cloud.sh'='.local/share/remoteagents-cloud/server-cloud.sh'
         'cloud/filter.txt'='.local/share/remoteagents-cloud/filter.txt'
-        'disk/server-disk.sh'='.local/share/remote-disk/server-disk.sh'
-        'disk/stignore.txt'='.local/share/remote-disk/stignore.txt'
-        'disk/stignore-previous.sha256'='.local/share/remote-disk/stignore-previous.sha256'
         'codex-windows-bridge.py'='.local/share/codex-remote/codex-windows-bridge.py'
         'codex-bridge-session.py'='.local/share/codex-remote/codex-bridge-session.py'
         'server_node_catalog.py'='.local/share/codex-remote/server_node_catalog.py'
@@ -64,8 +61,7 @@ function Send-WizardHelpers([string]$Root,[string]$Bundle) {
         $sha=[Security.Cryptography.SHA256]::Create()
         try{$hash=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
         $contents[$key]=@{bytes=$bytes;hash=$hash}
-        $versions=@();if($key -eq 'disk/stignore-previous.sha256'){$versions=@([Text.Encoding]::UTF8.GetString($bytes) -split "`n"|Where-Object {$_})}
-        $manifest+=@{source=$key;path=$files[$key];hash=$hash;versions=$versions;keep=($key -in @('codex-windows-bridge.py','codex-bridge-session.py','server_node_catalog.py'))}
+        $manifest+=@{source=$key;path=$files[$key];hash=$hash;keep=($key -in @('codex-windows-bridge.py','codex-bridge-session.py','server_node_catalog.py'))}
     }
     $probe=@'
 import json,sys,hashlib,os,base64
@@ -74,9 +70,7 @@ rows=json.loads(base64.b64decode("MANIFEST_BASE64"));missing=[]
 for row in rows:
  p=Path.home()/row['path']
  if any(x.is_symlink() for x in (p,*p.parents)):raise ValueError('symlink')
- if row['source']=='disk/stignore-previous.sha256':
-  if not p.is_file() or not set(row['versions']).issubset(p.read_text(encoding='utf-8-sig').splitlines()):missing.append(row['source'])
- elif not p.is_file() or (not row['keep'] and hashlib.sha256(p.read_bytes()).hexdigest()!=row['hash']):missing.append(row['source'])
+ if not p.is_file() or (not row['keep'] and hashlib.sha256(p.read_bytes()).hexdigest()!=row['hash']):missing.append(row['source'])
 print(json.dumps(missing))
 '@
     $json=ConvertTo-Json -InputObject @($manifest) -Depth 5 -Compress
@@ -87,9 +81,7 @@ print(json.dumps(missing))
     $received=ConvertFrom-Json (Convert-TransportLF $reply);$missing=@()
     foreach($item in $received){if($null -ne $item){$missing+=[string]$item}}
     if(-not $missing.Count){return}
-    if(@($missing|Where-Object {$_ -in @('disk/stignore.txt','disk/stignore-previous.sha256')}).Count){$upload+=Get-DiskIgnoreUpload (Join-Path $Bundle 'disk')}
     foreach($key in $files.Keys){
-        if($key -in @('disk/stignore.txt','disk/stignore-previous.sha256')){continue}
         if($key -notin $missing){continue}
         $dest='$HOME/'+$files[$key];$directory='$HOME/'+(Split-Path $files[$key] -Parent).Replace('\','/')
         $bytes=$contents[$key].bytes
@@ -413,7 +405,7 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
         'NetStatus' {return Get-WizardNetStatus $Root}
         'AdminProbe' {return @{mode=(Get-WizardAdminMode $Root ([pscustomobject]@{}))}}
         'Proxy' {return Set-WizardProxy $Root $Bundle $Request}
-        'Cloud' {return Invoke-WizardCloud $Root $Request}
+        'Cloud' {Send-WizardHelpers $Root $Bundle;return Invoke-WizardCloud $Root $Request}
         'Catalog' {Write-WizardProgress 'Загружаю узлы с сервера…';return Get-WizardCatalog $Root $Bundle}
         'Connection' {
             $server=Get-WizardCatalog $Root $Bundle;$local=$Request.catalog

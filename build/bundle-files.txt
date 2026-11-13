@@ -66,3 +66,7 @@ build/Process.Common.ps1
 build/Install.Binary.ps1
 build/Wizard.Cloud.ps1
 build/server-channel.py
+
+# Cloud helper and its filter are deployed by Send-WizardHelpers.
+cloud/server-cloud.sh
+cloud/filter.txt

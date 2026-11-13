@@ -34,9 +34,9 @@ namespace RemoteAgents.Launcher
             int calls = 0;
             Func<string, string, CloudCommandResult> good = (command, input) => {
                 calls++; var data = Map(input);
-                Check(command == CloudApply.Command && !command.Contains("fake-cloud-password"), "fixed command without credential arguments");
+                Check(command == "bash \"$HOME/.local/share/remoteagents-cloud/server-cloud.sh\" apply" && !command.Contains("fake-cloud-password"), "fixed command without credential arguments");
                 Check(input.EndsWith("\n") && !input.Contains("\r") && Json.Str(data, "password") == "fake-cloud-password", "JSON credential only on normalized stdin");
-                Check(Json.Str(data, "login") == "user@mail.ru" && Json.Str(data, "localRoot") == "~/Disk" && Json.Str(data, "remoteRoot") == "Диск" && Json.Int(data, "pollSeconds", 0) == 20 && data.Count == 6, "first vendor and exact server contract");
+                Check(Json.Str(data, "vendor") == "mailru" && Json.Str(data, "login") == "user@mail.ru" && Json.Str(data, "localRoot") == "~/Disk" && Json.Str(data, "remoteRoot") == "Диск" && Json.Int(data, "pollSeconds", 0) == 20 && data.Count == 6, "first vendor and exact server contract");
                 return new CloudCommandResult { ExitCode = 0, Output = "{\r\n\"ok\":true\r\n}\r\n" };
             };
             Check(CloudApply.Apply(parsed.Profile, _ => "fake-cloud-password", good).Ok && calls == 1, "code zero and CRLF ok:true accepted");

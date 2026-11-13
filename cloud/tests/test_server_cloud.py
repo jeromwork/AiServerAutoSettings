@@ -303,6 +303,86 @@ class CloudTests(unittest.TestCase):
         verify = subprocess.run(['systemd-analyze', '--user', 'verify', str(cloud.UNIT_PATH)], text=True, capture_output=True)
         self.assertEqual(verify.returncode, 0, verify.stderr)
 
+    def test_wizard_upload_and_apply_contract(self):
+        """Real PS dispatcher -> SSH stdin -> deployed shell helper; no cloud connection."""
+        repo = SCRIPT.parents[1]
+        pwsh = os.environ.get('PWSH') or str(Path.home() / '.cache/pwsh-test/pwsh')
+        # Only the service manager and SSH network are stand-ins. The cached real
+        # rclone/inotify tools from setUpClass run in our temporary server HOME.
+        fakebin = self.home / 'fakebin'
+        fakebin.mkdir()
+        ctl = fakebin / 'systemctl'
+        ctl.write_text('#!/bin/sh\nexit 0\n')
+        ctl.chmod(0o755)
+        ssh = fakebin / 'ssh'
+        ssh.write_text('''#!/usr/bin/env python3
+import subprocess, sys
+assert 'fake-cloud-password' not in ' '.join(sys.argv)
+data = sys.stdin.buffer.read()
+assert b'\\r' not in data
+result = subprocess.run(['bash', '-c', sys.argv[-1]], input=data)
+sys.exit(result.returncode)
+''')
+        ssh.chmod(0o755)
+        # Exercise a Windows checkout's CRLF through Send-WizardHelpers, too.
+        bundle = self.home / 'bundle'
+        sources = ('build/server-wizard.sh', 'transport/server-transport-catalog.py',
+                   'accounts/server-account.mjs', 'accounts/bootstrap.sh',
+                   'cloud/server-cloud.sh', 'cloud/filter.txt', 'codex-windows-bridge.py',
+                   'codex-bridge-session.py', 'server_node_catalog.py')
+        for name in sources:
+            target = bundle / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((repo / name).read_bytes().replace(b'\r', b'').replace(b'\n', b'\r\n'))
+        script = self.home / 'contract.ps1'
+        script.write_text('''$ErrorActionPreference='Stop'
+. (Join-Path $env:RA_CONTRACT_REPO 'build/Wizard.Common.ps1')
+function Invoke-WizardSsh($Root,$Command,$InputText='') {
+    Invoke-DiskProcess $env:RA_CONTRACT_SSH @($Command) (Convert-TransportLF $InputText)
+}
+Send-WizardHelpers $env:HOME $env:RA_CONTRACT_BUNDLE
+$helper=Join-Path $env:HOME '.local/share/remoteagents-cloud/server-cloud.sh'
+$filter=Join-Path $env:HOME '.local/share/remoteagents-cloud/filter.txt'
+$stamp=[IO.File]::GetLastWriteTimeUtc($helper)
+Send-WizardHelpers $env:HOME $env:RA_CONTRACT_BUNDLE
+if([IO.File]::GetLastWriteTimeUtc($helper) -ne $stamp){throw 'unchanged helper was uploaded again'}
+[IO.File]::WriteAllText($filter,'corrupted filter')
+Send-WizardHelpers $env:HOME $env:RA_CONTRACT_BUNDLE
+if([IO.File]::GetLastWriteTimeUtc($helper) -ne $stamp){throw 'filter repair rewrote the helper'}
+$script:profile=[pscustomobject]@{sshExecutable=$env:RA_CONTRACT_SSH;arguments=@()}
+function Find-InstallProfile($Root){return 'fixture'}
+function Read-TransportJson($Path){return $script:profile}
+function Get-TransportSavedRouteOptions($Root,$Profile){return @()}
+function Read-WizardRelay($Name){return $script:payload}
+# Same six fields as CloudApply (also asserted independently in CloudTests.cs).
+$script:payload=@{vendor='mailru';login='user@mail.ru';password='fake-cloud-password';remoteRoot='Диск';localRoot='~/Disk';pollSeconds=37}|ConvertTo-Json
+$script:payload=$script:payload.Replace("`r`n","`n").Replace("`n","`r`n")+"`r`n"
+$result=Invoke-WizardStep $env:HOME $env:RA_CONTRACT_BUNDLE 'Cloud' ([pscustomobject]@{secretPipe='fixture'})
+if($result.exitCode -ne 0 -or $result.stdout -ne '{"ok":true}'){throw ($result|ConvertTo-Json -Compress)}
+$script:payload=$script:payload.Replace('mailru','unsupported')
+$bad=Invoke-WizardCloud $env:HOME ([pscustomobject]@{secretPipe='fixture'})
+if($bad.exitCode -eq 0 -or $bad.stdout -ne '{"ok":false}'){throw 'invalid provider accepted'}
+if($bad.stderr -ne 'Неизвестный провайдер облака.'){throw 'server error contract lost'}
+$result|ConvertTo-Json -Compress
+''', encoding='utf-8-sig', newline='\r\n')
+        env = dict(os.environ, HOME=str(self.home), LOCALAPPDATA=str(self.home / 'appdata'),
+                   PATH=str(fakebin) + os.pathsep + os.environ['PATH'],
+                   RA_CONTRACT_REPO=str(repo), RA_CONTRACT_SSH=str(ssh), RA_CONTRACT_BUNDLE=str(bundle))
+        result = subprocess.run([pwsh, '-NoProfile', '-NonInteractive', '-File', str(script)],
+                                env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(json.loads(result.stdout)['stdout'], '{"ok":true}')
+        for name in ('server-cloud.sh', 'filter.txt'):
+            self.assertEqual((self.base / name).read_bytes(),
+                             (SCRIPT.parent / name).read_bytes().replace(b'\r', b''))
+        cfg = cloud.read_json(self.base / 'config.json')
+        self.assertEqual((cfg['vendor'], cfg['localRoot'], cfg['remoteRoot'], cfg['pollSeconds']),
+                         ('mailru', str(self.local), 'Диск', 37))
+        self.assertFalse((self.home / '.local/share/remote-disk').exists())
+        self.assertFalse(list((self.home / '.local/share').rglob('*.tmp')))
+        self.assertNotIn('fake-cloud-password', (self.base / 'rclone.conf').read_text())
+        print('CONTRACT: CRLF upload, hash probe/reupload, Wizard.Cloud -> deployed server-cloud.sh apply stdin, ok:true/error OK', flush=True)
+
     def test_log_rotation_and_safe_diagnostics(self):
         cloud.setup_log()
         for _ in range(12):
