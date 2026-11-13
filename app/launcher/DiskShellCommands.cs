@@ -30,7 +30,7 @@ namespace RemoteAgents.Launcher
                 model.Level("", Json.Map(Json.Get(tree, "union")));
             }
             var evictions = new Dictionary<string, DiskEvictionCandidate>(StringComparer.OrdinalIgnoreCase);
-            var refusals = new List<string>(); bool changed = false, transfers = false;
+            var refusals = new List<string>(); bool changed = false;
             foreach (var request in requests) {
                 token.ThrowIfCancellationRequested();
                 if (request.Action == "progress") { showProgress(); continue; }
@@ -42,7 +42,7 @@ namespace RemoteAgents.Launcher
                     string name = Path.GetFileName(path);
                     if (Directory.Exists(Path.Combine(diskBase, name)) || File.Exists(Path.Combine(diskBase, name))) throw new IOException("В Диске уже занято имя «" + name + "»");
                     if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) throw new IOException("Соединение каталога нельзя добавить как исходную папку");
-                    LocalFolders.Choose(model, path, name, DiskChoice.Both, diskBase, SystemFolders()); changed = transfers = true;
+                    LocalFolders.Choose(model, path, name, DiskChoice.Both, diskBase, SystemFolders()); changed = true;
                     continue;
                 }
                 string project;
@@ -50,7 +50,7 @@ namespace RemoteAgents.Launcher
                 else if (state.Kind == LocalFolderKind.InDisk && state.DiskPath.IndexOf('/') < 0) project = state.DiskPath;
                 else throw new IOException("Выберите папку проекта верхнего уровня внутри Диска");
                 if (request.Action == "download" || request.Action == "sync") {
-                    model.TakeToComputer(project); changed = transfers = true;
+                    model.TakeToComputer(project); changed = true;
                 } else if (request.Action == "keep-server") {
                     if (!model.Includes(project) && !model.Partial(project)) {
                         var actual = await Task.Run(() => new DiskSyncReader().Read(diskHome, new Dictionary<string, string> { { project, path } }, token));
@@ -65,7 +65,7 @@ namespace RemoteAgents.Launcher
                     model.StopSynchronizing(project); changed = true;
                 }
             }
-            if (!changed) { if (refusals.Count > 0) notify(string.Join("\n", refusals)); return; }
+            if (!changed) { BackgroundWork.DiskProgress.Finish(requests.Select(r => r.Path), refusals.Count == 0, string.Join("; ", refusals)); return; }
             var choice = model.ToChoice();
             if (originalBinding != DiskApplyWait.Binding(ConfigProfile.Load(home))) throw new IOException("Настройки папок изменились. Повторите команду.");
             string binding = DiskApplyWait.Binding(choice.WriteTo(profile, diskBase));
@@ -78,6 +78,7 @@ namespace RemoteAgents.Launcher
                         p["disk"] = choice.WriteTo(p, diskBase)["disk"];
                     });
                     var session = new ConfigSession(home, bundle) { Log = message => log("disk-shell-apply-progress") };
+                    session.Report = (section, state, message) => BackgroundWork.DiskProgress.Report(requests.Select(r => r.Path), message);
                     session.DiskCurrent = () => binding == DiskApplyWait.Binding(ConfigProfile.Load(home));
                     var outcome = await session.ApplyDisk(ct); run.Ok = outcome.Ok; run.Summary = outcome.Summary;
                     if (outcome.Ok && session.DiskCurrent()) foreach (var pair in evictions) {
@@ -89,13 +90,12 @@ namespace RemoteAgents.Launcher
                     }
                     if (!outcome.Ok) refusals.Add("Выбор папок не применён: " + outcome.Summary + ". Локальные файлы оставлены.");
                 } catch (Exception e) { run.Summary = e.Message; refusals.Add("Действие не завершено: " + e.Message); }
-                finally { finished.TrySetResult(run); }
+                finally { BackgroundWork.DiskProgress.Finish(requests.Select(r => r.Path), run.Ok, run.Summary); finished.TrySetResult(run); }
                 return run;
             });
             if (!started) throw new IOException("Сейчас применяется выбор папок. Повторите команду после завершения.");
-            if (transfers) showProgress();
             await finished.Task;
-            if (refusals.Count > 0) notify(string.Join("\n", refusals));
+            if (refusals.Count > 0) BackgroundWork.DiskProgress.Finish(requests.Select(r => r.Path), false, string.Join("; ", refusals));
         }
         static IEnumerable<string> SystemFolders()
         {

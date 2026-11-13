@@ -18,7 +18,6 @@ namespace RemoteAgents.Launcher
         readonly Label rate = new Label { AutoSize = true, Padding = new Padding(10) };
         readonly ComboBox projects = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 210 };
         readonly Timer timer = new Timer { Interval = 1000 }; readonly DiskTransferRate meter = new DiskTransferRate();
-        DiskSyncSnapshot previous;
         internal DiskProgressWindow(Func<DiskSyncSnapshot> snapshot, Func<Dictionary<string, string>> paths, Action<string> openFolder, Action details)
         {
             this.snapshot = snapshot; this.paths = paths;
@@ -35,24 +34,30 @@ namespace RemoteAgents.Launcher
             timer.Tick += (s, e) => RefreshSnapshot(); Shown += (s, e) => { RefreshSnapshot(); timer.Start(); };
             FormClosed += (s, e) => timer.Dispose();
         }
-        void RefreshSnapshot()
+        internal void RefreshSnapshot()
         {
-            var current = snapshot(); if (current == null || ReferenceEquals(previous, current)) return; previous = current;
-            string selected = projects.SelectedItem as string; var names = paths().Keys.OrderBy(n => n, StringComparer.CurrentCultureIgnoreCase).ToArray();
+            var current = snapshot() ?? new DiskSyncSnapshot();
+            string selected = projects.SelectedItem as string; var displayPaths = new Dictionary<string, string>(paths(), StringComparer.OrdinalIgnoreCase);
+            foreach (var row in BackgroundWork.DiskProgress.Snapshot().Values) {
+                string name = Path.GetFileName(row.Path.TrimEnd('\\', '/'));
+                if (!displayPaths.ContainsKey(name)) displayPaths[name] = row.Path;
+            }
+            var names = displayPaths.Keys.OrderBy(n => n, StringComparer.CurrentCultureIgnoreCase).ToArray();
             projects.Items.Clear(); projects.Items.AddRange(names); if (names.Length > 0) projects.SelectedItem = names.Contains(selected) ? selected : names[0];
             rate.Text = meter.Observe(current);
             rows.SuspendLayout(); foreach (Control old in rows.Controls.Cast<Control>().ToArray()) old.Dispose(); rows.Controls.Clear();
             int shown = 0;
             foreach (string name in names) {
                 DiskSyncFolder folder; current.Folders.TryGetValue(name, out folder);
-                if (DiskSyncStatus.Complete(current, folder)) continue;
+                var operation = BackgroundWork.DiskProgress.Row(displayPaths[name]);
+                if (operation == null && DiskSyncStatus.Complete(current, folder)) continue;
                 decimal total = folder == null ? -1 : DiskSyncStatus.Number(folder.Status, "globalBytes"), have = folder == null ? -1 : DiskSyncStatus.Number(folder.Status, "inSyncBytes");
                 int percent = total > 0 && have >= 0 ? (int)Math.Floor(Math.Max(0, Math.Min(100, have / total * 100))) : 0;
-                var panel = new Panel { Width = Math.Max(400, rows.ClientSize.Width - 30), Height = 75 };
+                var panel = new Panel { Width = Math.Max(400, rows.ClientSize.Width - 30), Height = 95 };
                 panel.Controls.Add(new Label { Text = name, AutoSize = true, Top = 0, Left = 0 });
-                panel.Controls.Add(new ProgressBar { Left = 0, Top = 23, Width = panel.Width - 55, Height = 16, Value = percent });
-                panel.Controls.Add(new Label { Text = total > 0 && have >= 0 ? percent + "%" : "…", AutoSize = true, Top = 22, Left = panel.Width - 48 });
-                panel.Controls.Add(new Label { Text = DiskSyncStatus.Text(current, folder), Left = 0, Top = 44, Width = panel.Width, Height = 30, AutoEllipsis = true });
+                panel.Controls.Add(new ProgressBar { Left = 0, Top = 23, Width = panel.Width - 55, Height = 16, Value = percent, Style = operation != null && operation.Marquee ? ProgressBarStyle.Marquee : ProgressBarStyle.Continuous });
+                panel.Controls.Add(new Label { Text = operation == null && total > 0 && have >= 0 ? percent + "%" : "…", AutoSize = true, Top = 22, Left = panel.Width - 48 });
+                panel.Controls.Add(new Label { Text = operation == null ? DiskSyncStatus.Text(current, folder) : operation.Text, Left = 0, Top = 44, Width = panel.Width, Height = 30, AutoEllipsis = true });
                 rows.Controls.Add(panel); shown++;
             }
             if (shown == 0) rows.Controls.Add(new Label { Text = names.Length == 0 ? "Нет выбранных папок" : "Все выбранные папки синхронизированы", AutoSize = true });

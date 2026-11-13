@@ -30,18 +30,65 @@ namespace RemoteAgents.Launcher
     internal sealed class DiskShellBatchQueue
     {
         readonly List<DiskShellRequest> waiting = new List<DiskShellRequest>();
+        readonly List<DiskShellRequest> active = new List<DiskShellRequest>();
         DateTime deadline, first;
-        internal void Add(DiskShellRequest request, DateTime now)
+        internal void Receive(DiskShellRequest request, DateTime now, Action<bool> present)
+        { bool added = Add(request, now); present(added); }
+        internal bool Add(DiskShellRequest request, DateTime now)
         {
+            if (active.Concat(waiting).Any(r => DiskSyncSnapshot.SamePath(r.Path, request.Path))) return false;
             if (waiting.Count == 0) first = now;
             if (!waiting.Any(r => r.Action == request.Action && DiskSyncSnapshot.SamePath(r.Path, request.Path))) waiting.Add(request);
             deadline = now.AddMilliseconds(550); if (deadline > first.AddSeconds(2)) deadline = first.AddSeconds(2);
+            return true;
         }
+        internal void Complete(IEnumerable<DiskShellRequest> batch) { foreach (var request in batch) active.Remove(request); }
         internal IList<DiskShellRequest> Take(DateTime now)
         {
             if (waiting.Count == 0 || now < deadline) return new DiskShellRequest[0];
-            var result = waiting.ToArray(); waiting.Clear(); return result;
+            var result = waiting.ToArray(); waiting.Clear(); active.AddRange(result); return result;
         }
+    }
+    // Shared operation rows precede REST observations; guarded because wizard reports arrive on workers.
+    internal sealed class DiskCommandProgress
+    {
+        readonly object gate = new object();
+        readonly Dictionary<string, DiskCommandRow> rows = new Dictionary<string, DiskCommandRow>(StringComparer.OrdinalIgnoreCase);
+        static string Key(string path) { return path.Replace('\\', '/').TrimEnd('/'); }
+        internal void Begin(IEnumerable<string> paths)
+        { lock (gate) foreach (string path in paths) rows[Key(path)] = new DiskCommandRow { Path = path, Active = true, Step = "Подключаю к серверу…" }; }
+        internal void Report(IEnumerable<string> paths, string text)
+        {
+            text = text.Replace("\r", "").Split('\n')[0];
+            lock (gate) foreach (string path in paths) {
+                DiskCommandRow row; if (!rows.TryGetValue(Key(path), out row)) continue;
+                string prefix = "Не подключена папка «", marker = "»: "; int end = text.IndexOf(marker, StringComparison.Ordinal);
+                if (text.StartsWith(prefix, StringComparison.Ordinal) && end > prefix.Length) {
+                    string name = text.Substring(prefix.Length, end - prefix.Length);
+                    if (Key(path).Split('/').Last().Equals(name, StringComparison.OrdinalIgnoreCase) && row.Failure.Length == 0) row.Failure = text.Substring(end + marker.Length);
+                } else row.Step = text;
+            }
+        }
+        internal void Finish(IEnumerable<string> paths, bool ok, string reason)
+        {
+            lock (gate) foreach (string path in paths) {
+                DiskCommandRow row; if (!rows.TryGetValue(Key(path), out row)) continue;
+                if (ok) rows.Remove(Key(path));
+                else { row.Active = false; if (row.Failure.Length == 0) row.Failure = reason.Replace("\r", "").Split('\n')[0]; }
+            }
+        }
+        internal Dictionary<string, DiskCommandRow> Snapshot()
+        { lock (gate) return rows.ToDictionary(p => p.Key, p => p.Value.Copy(), StringComparer.OrdinalIgnoreCase); }
+        internal DiskCommandRow Row(string path)
+        { lock (gate) { DiskCommandRow row; return rows.TryGetValue(Key(path), out row) ? row.Copy() : null; } }
+    }
+    internal sealed class DiskCommandRow
+    {
+        internal string Path = "", Step = "", Failure = ""; internal bool Active;
+        internal DateTime? RetryUtc;
+        internal DiskCommandRow Copy() { return (DiskCommandRow)MemberwiseClone(); }
+        internal string Text { get { return Failure.Length > 0 ? "⚠ " + Failure + (RetryUtc.HasValue ? " · Автоповтор в " + RetryUtc.Value.ToLocalTime().ToString("HH:mm:ss") : "") : Step; } }
+        internal bool Marquee { get { return Active && Failure.Length == 0; } }
     }
     internal sealed class DiskTransferRate
     {

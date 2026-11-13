@@ -661,19 +661,24 @@ namespace RemoteAgents.Launcher
             if (firstSetup && !icon.Visible) { ShowMain(); return; }
             DiskShellRequest request;
             if (!DiskShellRequest.TryParse(args, out request)) throw new IOException("Проводник не передал команду");
-            InitializeExplorer(); diskShellQueue.Add(request, DateTime.UtcNow);
+            InitializeExplorer();
+            if (request.Action == "progress") { ShowDiskProgress(); return; }
+            diskShellQueue.Receive(request, DateTime.UtcNow, added => {
+                if (added) BackgroundWork.DiskProgress.Begin(new[] { request.Path });
+                ShowDiskProgress(); // Before collection, validation, inventory or any remote work.
+            });
         }
         async void DrainDiskShell()
         {
             if (closing || shellBusy || diskShell == null) return;
             var batch = diskShellQueue.Take(DateTime.UtcNow); if (batch.Count == 0) return;
             string conflict = MutationConflict();
-            if (conflict.Length > 0) { MessageBox.Show(mainWindow, conflict + ". Повторите команду в Проводнике.", "Диск"); return; }
+            if (conflict.Length > 0) { BackgroundWork.DiskProgress.Finish(batch.Select(r => r.Path), false, conflict); diskShellQueue.Complete(batch); return; }
             shellBusy = true;
             try { await diskShell.Execute(batch, stop.Token); }
             catch (OperationCanceledException) { }
-            catch (Exception error) { log.Write("explorer.command.failed"); if (!closing) MessageBox.Show(mainWindow, error.Message, "Диск", MessageBoxButtons.OK, MessageBoxIcon.Information); }
-            finally { shellBusy = false; if (explorer != null && !closing) await explorer.Refresh(); }
+            catch (Exception error) { log.Write("explorer.command.failed"); BackgroundWork.DiskProgress.Finish(batch.Select(r => r.Path), false, error.Message); }
+            finally { diskShellQueue.Complete(batch); shellBusy = false; if (explorer != null && !closing) await explorer.Refresh(); }
         }
         void ShowDiskProgress()
         {
@@ -681,7 +686,7 @@ namespace RemoteAgents.Launcher
             if (diskProgress == null || diskProgress.IsDisposed)
                 diskProgress = new DiskProgressWindow(() => explorer.Snapshot, () => explorer.Paths, Open,
                     () => Safe(() => DiskDetailsLauncher.Open(DiskExplorerController.SyncHome(new Configuration(home).Data))));
-            ActivateWindow(diskProgress);
+            ActivateWindow(diskProgress); diskProgress.RefreshSnapshot(); diskProgress.Update();
         }
         DiskRun reportedDisk;
         void DiskFinished()
