@@ -90,7 +90,7 @@ namespace RemoteAgents.Launcher
                     }
                     if (!outcome.Ok) refusals.Add("Выбор папок не применён: " + outcome.Summary + ". Локальные файлы оставлены.");
                 } catch (Exception e) { run.Summary = e.Message; refusals.Add("Действие не завершено: " + e.Message); }
-                finally { BackgroundWork.DiskProgress.Finish(requests.Select(r => r.Path), run.Ok, run.Summary); finished.TrySetResult(run); }
+                finally { BackgroundWork.DiskProgress.Finish(requests.Select(r => r.Path), run.Ok && refusals.Count == 0, refusals.Count > 0 ? string.Join("; ", refusals) : run.Summary); finished.TrySetResult(run); }
                 return run;
             });
             if (!started) throw new IOException("Сейчас применяется выбор папок. Повторите команду после завершения.");

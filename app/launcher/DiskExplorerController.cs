@@ -31,6 +31,7 @@ namespace RemoteAgents.Launcher
         volatile bool disposed;
         internal DiskSyncSnapshot Snapshot { get; private set; } = new DiskSyncSnapshot();
         internal Dictionary<string, string> Paths { get; private set; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        internal string ObservedBinding { get; private set; } = "";
         internal event Action Changed = delegate { };
         internal DiskExplorerController(string home, Func<string> bundle, Action<string> log)
         {
@@ -65,9 +66,6 @@ namespace RemoteAgents.Launcher
                 var folders = names.Select(n => new DiskExplorerFolder { Name = n, Selected = model.Includes(n) || model.Partial(n), ServerOnly = serverFolders.ContainsKey(n) }).ToArray();
                 var observedPaths = folders.ToDictionary(f => f.Name, f => externalFolders.Any(e => e.Remote.Equals(f.Name, StringComparison.OrdinalIgnoreCase)) ? externalFolders.First(e => e.Remote.Equals(f.Name, StringComparison.OrdinalIgnoreCase)).Path : Path.Combine(root, f.Name), StringComparer.OrdinalIgnoreCase);
                 string policyBinding = binding + "|" + SyncHome(settings) + "|" + ConfigSections.Hash(profile, ConfigSections.Disk);
-                if ((policyBinding != preparedIgnores || DateTime.UtcNow >= nextIgnoreCheck) && !BackgroundWork.Disk.Busy) {
-                    await PrepareIgnores(SyncHome(settings)); preparedIgnores = policyBinding; nextIgnoreCheck = DateTime.UtcNow.AddSeconds(60);
-                }
                 var snapshot = await Task.Run(() => DiskSyncMonitor.Read(SyncHome(settings), observedPaths, stop.Token), stop.Token);
                 if (disposed || binding != inventoryBinding) return;
                 // A selection edited while REST was in flight is read on the next tick, never applied as an operation.
@@ -79,6 +77,12 @@ namespace RemoteAgents.Launcher
                         knownConfigured[pair.Key] = pair.Value.Path;
                 }
                 var paths = folders.Where(f => f.Selected).ToDictionary(f => f.Name, f => observedPaths[f.Name], StringComparer.OrdinalIgnoreCase);
+                // Publish REST before the optional cosmetic policy preparation (which may wait for a process).
+                ObservedBinding = DiskApplyWait.Binding(profile) + "|" + SyncHome(settings); Snapshot = snapshot; Paths = paths; Changed();
+                if ((policyBinding != preparedIgnores || DateTime.UtcNow >= nextIgnoreCheck) && !BackgroundWork.Disk.Busy && DiskRecoverySchedule.Missing(paths, snapshot).Count == 0) {
+                    await PrepareIgnores(SyncHome(settings)); preparedIgnores = policyBinding; nextIgnoreCheck = DateTime.UtcNow.AddSeconds(60);
+                }
+                if (disposed || DiskApplyWait.Binding(profile) != DiskApplyWait.Binding(ConfigProfile.Load(home))) return;
                 string currentRoot = root;
                 await Task.Run(() => { lock (metadataGate) { if (disposed || stop.IsCancellationRequested) return; var safe = folders.Where(folder => {
                         string path = Path.Combine(currentRoot, folder.Name);
@@ -96,7 +100,7 @@ namespace RemoteAgents.Launcher
                 } }, stop.Token);
                 if (disposed) return;
                 registry.Register(Program.Exe, root, folders, home); cleaned = false;
-                Snapshot = snapshot; Paths = paths; Changed();
+                ObservedBinding = DiskApplyWait.Binding(profile) + "|" + SyncHome(settings); Snapshot = snapshot; Paths = paths; Changed();
                 if (DateTime.UtcNow >= nextInventory && !inventoryReading && !BackgroundWork.Disk.Busy) RefreshInventory(binding, currentRoot);
             } catch (OperationCanceledException) { }
             catch (Exception) { log("explorer.refresh.failed"); }

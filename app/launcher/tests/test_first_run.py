@@ -26,6 +26,21 @@ class FirstRunTests(unittest.TestCase):
         self.assertIn('if (firstSetup) { RunFirstSetup(); return; }', constructor)
         self.assertIn('Visible = !firstSetup', constructor)
 
+    def test_cold_explorer_paints_before_preparation_and_warm_commands_present_before_drain(self):
+        tray = source('TrayContext.cs')
+        constructor = tray.split('public TrayContext(', 1)[1].split('void RunFirstSetup()', 1)[0]
+        self.assertLess(constructor.index('args.Contains("--disk-shell")) Handle(args)'), constructor.index('engine.Recover(); Bootstrap(); LoadComponents();'))
+        queue = tray.split('void QueueDiskShell(', 1)[1].split('async void DrainDiskShell()', 1)[0]
+        self.assertIn('diskShellQueue.Receive', queue)
+        self.assertIn('BackgroundWork.DiskProgress.Begin', queue)
+        self.assertIn('ShowDiskProgress()', queue)
+        show = tray.split('void ShowDiskProgress()', 1)[1].split('void CheckDiskRecovery(', 1)[0]
+        self.assertIn('diskProgress.RefreshSnapshot(); diskProgress.Update()', show)
+        recover = tray.split('void CheckDiskRecovery(', 1)[1].split('DiskRun reportedDisk', 1)[0]
+        for required in ('BackgroundWork.Disk.Busy', 'diskShellQueue.Pending', 'maxAgeSec: 15', 'explorer.ObservedBinding != observedBinding', 'BackgroundWork.Disk.TryStart', 'session.ApplyDisk(token)'):
+            self.assertIn(required, recover)
+        self.assertNotIn('Нажмите «Синхронизировать выбранные папки» ещё раз', source('ConfigWindow.cs'))
+
     def test_downloaded_first_exe_defers_installation_too(self):
         program = source('Program.cs')
         first = program.split('if (install && home.Equals(DefaultHome', 1)[1].split('else if (install)', 1)[0]
@@ -88,6 +103,7 @@ class FirstRunTests(unittest.TestCase):
         self.assertNotIn('StartWindow.Confirm()', program)
         self.assertIn('WindowModel.ForwardArguments(args)', program)
         self.assertIn('AllowSetForegroundWindow((uint)pid)', program)
+        self.assertIn('WindowModel.ShouldShow(args) || args.Contains("--disk-shell")', program)
         self.assertIn('(started ? " --started" : "")', program)
         tray = source('TrayContext.cs')
         self.assertIn('case WindowCommand.Show: ShowMain();', tray)
@@ -314,7 +330,8 @@ class FirstRunTests(unittest.TestCase):
         self.assertIn('var current = new ConfigSession(home, Bundle)', start)
         self.assertIn('current.DiskCurrent = () => binding == DiskApplyWait.Binding(ConfigProfile.Load(home))', start)
         self.assertIn('Binding = binding', start)
-        self.assertIn('=> Ui(() => { if (current.DiskCurrent()) Report(', start)
+        self.assertIn('Ui(() => { if (current.DiskCurrent()) Report(', start)
+        self.assertIn('if (current.DiskCurrent()) BackgroundWork.DiskProgress.Report(paths, message)', start)
         changed = window.split('void OnDiskChanged()', 1)[1].split('void StartQueuedDisk()', 1)[0]
         self.assertLess(changed.index('last.Binding != DiskApplyWait.Binding'), changed.index('folders.MarkApplied'))
         run = source('ConfigApply.cs').split('SectionOutcome RunSection(', 1)[1].split('SectionOutcome Server(', 1)[0]

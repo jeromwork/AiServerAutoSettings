@@ -31,7 +31,8 @@ namespace RemoteAgents.Launcher
         DiskShellCommands diskShell;
         DiskProgressWindow diskProgress;
         readonly DiskShellBatchQueue diskShellQueue = new DiskShellBatchQueue();
-        bool shellBusy;
+        bool shellBusy, diskRetryRequested;
+        readonly DiskRecoverySchedule diskRecovery = new DiskRecoverySchedule();
         readonly ConfigSyncSchedule syncSchedule = new ConfigSyncSchedule();
         bool syncRunning, accountResuming, serverHealthRunning, syncTaskRetired, syncTaskRetiring;
         DateTime nextSyncTaskRetirement = DateTime.MinValue;
@@ -66,6 +67,8 @@ namespace RemoteAgents.Launcher
                         else ShowMain();
                     });
                 };
+                // A cold Explorer launch owns and paints its progress before bundle/component preparation.
+                if (!firstSetup && args.Contains("--disk-shell")) Handle(args);
                 if (!firstSetup) { engine.Recover(); Bootstrap(); LoadComponents(); }
             } catch {
                 stop.Cancel(); lock (pipeGate) { if (server != null) server.Dispose(); }
@@ -79,7 +82,8 @@ namespace RemoteAgents.Launcher
             BackgroundWork.Disk.Changed += () => { try { dispatch.BeginInvoke(new Action(DiskFinished)); } catch (InvalidOperationException) { } };
             dispatch.BeginInvoke(new Action(() => {
                 if (firstSetup) { RunFirstSetup(); return; }
-                Handle(args); DrainCommands(); Tick();
+                if (!args.Contains("--disk-shell")) Handle(args);
+                DrainCommands(); Tick();
                 if(Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome),StringComparison.OrdinalIgnoreCase)) CheckSetup();
 
             }));
@@ -176,7 +180,7 @@ namespace RemoteAgents.Launcher
                 if (Product.IsVpn && operationTip.Length > 0) icon.Text = TrayMenuModel.Short(operationTip, 63);
                 if (DateTime.UtcNow >= nextOperationCheck) CheckOperations();
                 RefreshMenu(); WriteStatus();
-                CheckSync(); CheckServerHealth();
+                CheckSync(); CheckServerHealth(); CheckDiskRecovery();
                 if (serverUpdateRequested && !engine.Pending && MutationConflict().Length == 0 && !BackgroundWork.Disk.Busy && TrySelfUpdate()) return;
             } catch { log.Write("supervisor.tick.failed"); icon.Icon = red; }
             finally { ticking = false; }
@@ -663,6 +667,7 @@ namespace RemoteAgents.Launcher
             if (!DiskShellRequest.TryParse(args, out request)) throw new IOException("Проводник не передал команду");
             InitializeExplorer();
             if (request.Action == "progress") { ShowDiskProgress(); return; }
+            if (BackgroundWork.Disk.Busy && BackgroundWork.DiskProgress.Row(request.Path)?.Active == true) { ShowDiskProgress(); return; }
             diskShellQueue.Receive(request, DateTime.UtcNow, added => {
                 if (added) BackgroundWork.DiskProgress.Begin(new[] { request.Path });
                 ShowDiskProgress(); // Before collection, validation, inventory or any remote work.
@@ -670,13 +675,13 @@ namespace RemoteAgents.Launcher
         }
         async void DrainDiskShell()
         {
-            if (closing || shellBusy || diskShell == null) return;
+            if (closing || shellBusy || BackgroundWork.Disk.Busy || diskShell == null) return;
             var batch = diskShellQueue.Take(DateTime.UtcNow); if (batch.Count == 0) return;
             string conflict = MutationConflict();
             if (conflict.Length > 0) { BackgroundWork.DiskProgress.Finish(batch.Select(r => r.Path), false, conflict); diskShellQueue.Complete(batch); return; }
             shellBusy = true;
             try { await diskShell.Execute(batch, stop.Token); }
-            catch (OperationCanceledException) { }
+            catch (OperationCanceledException) { BackgroundWork.DiskProgress.Finish(batch.Select(r => r.Path), false, "Действие прервано"); }
             catch (Exception error) { log.Write("explorer.command.failed"); BackgroundWork.DiskProgress.Finish(batch.Select(r => r.Path), false, error.Message); }
             finally { diskShellQueue.Complete(batch); shellBusy = false; if (explorer != null && !closing) await explorer.Refresh(); }
         }
@@ -685,8 +690,45 @@ namespace RemoteAgents.Launcher
             if (closing || Product.IsVpn) return; InitializeExplorer();
             if (diskProgress == null || diskProgress.IsDisposed)
                 diskProgress = new DiskProgressWindow(() => explorer.Snapshot, () => explorer.Paths, Open,
+                    () => CheckDiskRecovery(true),
                     () => Safe(() => DiskDetailsLauncher.Open(DiskExplorerController.SyncHome(new Configuration(home).Data))));
-            ActivateWindow(diskProgress); diskProgress.RefreshSnapshot(); diskProgress.Update();
+            ActivateWindow(diskProgress); diskProgress.RefreshSnapshot(); diskProgress.Update(); log.Write("disk-shell-progress.shown");
+        }
+        void CheckDiskRecovery(bool manual = false)
+        {
+            if (manual) diskRetryRequested = true;
+            if (closing || Product.IsVpn || explorer == null || shellBusy || BackgroundWork.Disk.Busy) return;
+            var settings = new Configuration(home).Data;
+            if (!Json.Bool(Json.Map(Json.Get(Json.Map(Json.Get(settings, "components")), "disk")), "enabled")) { diskRecovery.Observe("", false, DateTime.UtcNow); BackgroundWork.DiskProgress.Clear(); return; }
+            var profile = ConfigProfile.Load(home); var choice = DiskChoice.FromProfile(profile);
+            string binding = DiskApplyWait.Binding(profile), observedBinding = binding + "|" + DiskExplorerController.SyncHome(settings);
+            var snapshot = explorer.Snapshot; DateTime now = DateTime.UtcNow;
+            if (explorer.ObservedBinding != observedBinding || snapshot.Failure.Length > 0 || (now - snapshot.ObservedUtc).TotalSeconds > 15) return;
+            var model = new DiskFoldersModel(choice, null, ConfigProfile.DiskExclusions(DiskExplorerController.SyncHome(settings)));
+            var selected = explorer.Paths.Where(p => model.Includes(p.Key) || model.Partial(p.Key)).ToDictionary(p => p.Key, p => p.Value, StringComparer.OrdinalIgnoreCase);
+            var missing = DiskRecoverySchedule.Missing(selected, snapshot);
+            if (diskRecovery.Observe(observedBinding, missing.Count > 0, now)) { BackgroundWork.DiskProgress.Clear(); diskRetryRequested = false; }
+            if (diskRetryRequested) diskRecovery.RetryNow(now);
+            BackgroundWork.DiskProgress.Reconcile(selected, missing, diskRecovery.NextUtc);
+            bool occupied = diskShellQueue.Pending || MutationConflict().Length > 0 || actionBusy || busy || operationChecking;
+            bool connected = Json.Bool(StatusView.Read(home, "transport", maxAgeSec: 15), "ok");
+            if (!diskRecovery.Due(connected, occupied, now)) return;
+            var paths = missing.Values.ToArray();
+            // TryStart is the final atomic Busy check: never displace a queued settings operation.
+            if (!BackgroundWork.Disk.TryStart(async token => {
+                var run = new DiskRun { Binding = binding, Choice = choice };
+                BackgroundWork.DiskProgress.Begin(paths);
+                try {
+                    var session = new ConfigSession(home, () => Task.FromResult(engine.Folder(engine.Current)));
+                    session.DiskCurrent = () => binding == DiskApplyWait.Binding(ConfigProfile.Load(home)) && observedBinding == binding + "|" + DiskExplorerController.SyncHome(new Configuration(home).Data);
+                    session.Report = (section, state, text) => { if (session.DiskCurrent()) BackgroundWork.DiskProgress.Report(paths, text); };
+                    session.Log = text => log.Write("disk-recovery.progress");
+                    var outcome = await session.ApplyDisk(token); run.Ok = outcome.Ok; run.Summary = outcome.Summary;
+                } catch (Exception error) { run.Summary = error.Message; }
+                finally { BackgroundWork.DiskProgress.Finish(paths, run.Ok, run.Summary); }
+                return run;
+            })) return;
+            diskRetryRequested = false; diskRecovery.Started(); log.Write("disk-recovery.start");
         }
         DiskRun reportedDisk;
         void DiskFinished()
@@ -694,10 +736,19 @@ namespace RemoteAgents.Launcher
             var last = BackgroundWork.Disk.Last;
             if (closing || BackgroundWork.Disk.Busy || last == null || last == reportedDisk) return;
             reportedDisk = last;
+            if (last.Binding != DiskApplyWait.Binding(ConfigProfile.Load(home))) return;
+            if (!last.Ok && last.Choice != null) {
+                var profile = ConfigProfile.Load(home); string root = DiskExplorerController.Root(profile);
+                var paths = DiskCommandProgress.SelectedPaths(last.Choice, root);
+                BackgroundWork.DiskProgress.EnsureFailure(paths, last.Summary);
+            }
+            diskRecovery.Finished(DateTime.UtcNow);
+            if (explorer != null) { var ignored = explorer.Refresh(); }
+            CheckDiskRecovery();
             // An open window shows the result itself; the balloon is for a run that outlived its window.
             if (Application.OpenForms.Cast<Form>().Any(f => f is ConfigWindow && f.Visible) || !icon.Visible) return;
             if (last.Ok) icon.ShowBalloonTip(5000, Product.Name, "Папки: " + last.Summary, ToolTipIcon.Info);
-            else icon.ShowBalloonTip(10000, Product.Name, "Папки не подключены: " + last.Summary + ". Повторите команду в Проводнике или применение на вкладке «Папки».", ToolTipIcon.Warning);
+            else icon.ShowBalloonTip(10000, Product.Name, "Папки не подключены: " + last.Summary + ". Выбранные папки программа подключит повторно после восстановления связи.", ToolTipIcon.Warning);
         }
         void RequestExit()
         {

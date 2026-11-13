@@ -17,10 +17,12 @@ namespace RemoteAgents.Launcher
         readonly FlowLayoutPanel rows = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true, Padding = new Padding(12) };
         readonly Label rate = new Label { AutoSize = true, Padding = new Padding(10) };
         readonly ComboBox projects = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 210 };
+        DiskSyncSnapshot previous;
+        readonly Action retry;
         readonly Timer timer = new Timer { Interval = 1000 }; readonly DiskTransferRate meter = new DiskTransferRate();
-        internal DiskProgressWindow(Func<DiskSyncSnapshot> snapshot, Func<Dictionary<string, string>> paths, Action<string> openFolder, Action details)
+        internal DiskProgressWindow(Func<DiskSyncSnapshot> snapshot, Func<Dictionary<string, string>> paths, Action<string> openFolder, Action retry, Action details)
         {
-            this.snapshot = snapshot; this.paths = paths;
+            this.snapshot = snapshot; this.paths = paths; this.retry = retry;
             Text = "Ход синхронизации Диска"; StartPosition = FormStartPosition.CenterScreen;
             Size = new Size(570, 350); MinimumSize = new Size(470, 260); ShowIcon = false;
             var bottom = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, Padding = new Padding(10) };
@@ -44,7 +46,7 @@ namespace RemoteAgents.Launcher
             }
             var names = displayPaths.Keys.OrderBy(n => n, StringComparer.CurrentCultureIgnoreCase).ToArray();
             projects.Items.Clear(); projects.Items.AddRange(names); if (names.Length > 0) projects.SelectedItem = names.Contains(selected) ? selected : names[0];
-            rate.Text = meter.Observe(current);
+            if (!ReferenceEquals(previous, current)) { rate.Text = meter.Observe(current); previous = current; }
             rows.SuspendLayout(); foreach (Control old in rows.Controls.Cast<Control>().ToArray()) old.Dispose(); rows.Controls.Clear();
             int shown = 0;
             foreach (string name in names) {
@@ -53,11 +55,16 @@ namespace RemoteAgents.Launcher
                 if (operation == null && DiskSyncStatus.Complete(current, folder)) continue;
                 decimal total = folder == null ? -1 : DiskSyncStatus.Number(folder.Status, "globalBytes"), have = folder == null ? -1 : DiskSyncStatus.Number(folder.Status, "inSyncBytes");
                 int percent = total > 0 && have >= 0 ? (int)Math.Floor(Math.Max(0, Math.Min(100, have / total * 100))) : 0;
-                var panel = new Panel { Width = Math.Max(400, rows.ClientSize.Width - 30), Height = 95 };
+                var panel = new Panel { Width = Math.Max(400, rows.ClientSize.Width - 30), Height = 105 };
                 panel.Controls.Add(new Label { Text = name, AutoSize = true, Top = 0, Left = 0 });
                 panel.Controls.Add(new ProgressBar { Left = 0, Top = 23, Width = panel.Width - 55, Height = 16, Value = percent, Style = operation != null && operation.Marquee ? ProgressBarStyle.Marquee : ProgressBarStyle.Continuous });
                 panel.Controls.Add(new Label { Text = operation == null && total > 0 && have >= 0 ? percent + "%" : "…", AutoSize = true, Top = 22, Left = panel.Width - 48 });
-                panel.Controls.Add(new Label { Text = operation == null ? DiskSyncStatus.Text(current, folder) : operation.Text, Left = 0, Top = 44, Width = panel.Width, Height = 30, AutoEllipsis = true });
+                panel.Controls.Add(new Label { Text = operation == null ? DiskSyncStatus.Text(current, folder) : operation.Failure.Length > 0 ? "⚠ " + operation.Failure : operation.Step, Left = 0, Top = 44, Width = panel.Width, Height = 30, AutoEllipsis = true });
+                if (operation != null && operation.NextText.Length > 0) panel.Controls.Add(new Label { Text = operation.NextText, Left = 0, Top = 78, Width = panel.Width - 145, AutoEllipsis = true });
+                if (operation != null && operation.CanRetry) {
+                    var again = new Button { Text = "Повторить сейчас", AutoSize = true, Left = panel.Width - 140, Top = 73 };
+                    again.Click += (s, e) => { retry(); RefreshSnapshot(); }; panel.Controls.Add(again);
+                }
                 rows.Controls.Add(panel); shown++;
             }
             if (shown == 0) rows.Controls.Add(new Label { Text = names.Length == 0 ? "Нет выбранных папок" : "Все выбранные папки синхронизированы", AutoSize = true });

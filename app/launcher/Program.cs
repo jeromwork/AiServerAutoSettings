@@ -149,7 +149,7 @@ namespace RemoteAgents.Launcher
         internal static System.Collections.Generic.Dictionary<string, object> Forward(string name, string[] args)
         {
             // Windows grants foreground activation to the newly launched process. Transfer it to the existing instance.
-            if (WindowModel.ShouldShow(args)) {
+            if (WindowModel.ShouldShow(args) || args.Contains("--disk-shell")) {
                 try { var identity = Forward(name, new[] { "--identify" }); int pid = Json.Int(identity, "pid", 0); if (pid > 0) AllowSetForegroundWindow((uint)pid); } catch { }
             }
             using (var pipe = new NamedPipeClientStream(".", name, args.Contains("--identify") ? PipeDirection.InOut : PipeDirection.Out, PipeOptions.Asynchronous)) {

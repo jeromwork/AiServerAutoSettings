@@ -549,7 +549,7 @@ namespace RemoteAgents.Launcher
                 folderStepRequired = false; folderSkipped = false; folders.AllowSkip(false); diskFailure = "";
                 if (foldersInitialized) folders.MarkApplied(last.Choice);
             } else {
-                diskFailure = "Папки не подключены: " + last.Summary + ". Нажмите «Синхронизировать выбранные папки» ещё раз.";
+                diskFailure = "Папки не подключены: " + last.Summary + ". Выбранные папки программа подключит повторно после восстановления связи.";
                 Log(diskFailure);
             }
             SetBusy(running);
@@ -566,13 +566,21 @@ namespace RemoteAgents.Launcher
             bool started = BackgroundWork.Disk.Start(async token => {
                 var profile = ConfigProfile.Load(home); var choice = DiskChoice.FromProfile(profile);
                 string binding = DiskApplyWait.Binding(profile);
+                var paths = DiskCommandProgress.SelectedPaths(choice, DiskExplorerController.Root(profile));
+                BackgroundWork.DiskProgress.Begin(paths);
                 // Separate callbacks: an old Disk result cannot repaint a newer config's rows.
                 var current = new ConfigSession(home, Bundle);
                 current.DiskCurrent = () => binding == DiskApplyWait.Binding(ConfigProfile.Load(home));
                 current.Log = message => { if (current.DiskCurrent()) Log(message); };
-                current.Report = (section, state, message) => Ui(() => { if (current.DiskCurrent()) Report(section, state, message); });
-                var outcome = await current.ApplyDisk(token);
-                return new DiskRun { Ok = outcome.Ok, Summary = outcome.Summary, Choice = choice, Binding = binding };
+                current.Report = (section, state, message) => {
+                    if (current.DiskCurrent()) BackgroundWork.DiskProgress.Report(paths, message);
+                    Ui(() => { if (current.DiskCurrent()) Report(section, state, message); });
+                };
+                var run = new DiskRun { Choice = choice, Binding = binding };
+                try { var outcome = await current.ApplyDisk(token); run.Ok = outcome.Ok; run.Summary = outcome.Summary; }
+                catch (Exception error) { run.Summary = error.Message; }
+                finally { BackgroundWork.DiskProgress.Finish(paths, run.Ok, run.Summary); }
+                return run;
             });
             if (started) Log("Папки: применяю выбор в фоне. Остальное не ждёт, окно можно закрыть.");
             else { rows[ConfigSections.Disk].Set(SectionState.Waiting, "новый выбор применится после текущего"); Log("Папки: новый выбор сохранён и применится сразу после текущей синхронизации."); }

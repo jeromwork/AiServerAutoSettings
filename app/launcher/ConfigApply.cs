@@ -723,7 +723,7 @@ namespace RemoteAgents.Launcher
                 if (state == "finished") { outcome = await execute(); continue; }
                 // Missing/unknown operations cannot prove that this install is still running.
                 var failed = new SectionOutcome { Summary = state == "failed" ? Json.Text(op, "text", "установка на сервере не удалась")
-                    : "состояние установки на сервере не найдено; нажмите «Синхронизировать выбранные папки» ещё раз" };
+                    : "состояние установки на сервере не найдено; выбранные папки будут подключены повторно" };
                 report(SectionState.Failed, failed.Summary); return failed;
             }
         }
