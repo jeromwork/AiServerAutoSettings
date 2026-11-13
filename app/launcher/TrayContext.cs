@@ -23,6 +23,8 @@ namespace RemoteAgents.Launcher
         readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 1000 };
         readonly CancellationTokenSource stop = new CancellationTokenSource();
         readonly List<ComponentRuntime> runtimes = new List<ComponentRuntime>(); readonly List<NativeJob> actionJobs = new List<NativeJob>();
+        readonly Stopwatch trayClickClock = Stopwatch.StartNew();
+        long lastTrayClick = -SystemInformation.DoubleClickTime - 1L;
         ConfigWindow mainWindow;
         WindowModel window;
         readonly ConfigSyncSchedule syncSchedule = new ConfigSyncSchedule();
@@ -50,8 +52,15 @@ namespace RemoteAgents.Launcher
             pipeWorker = Task.Run(() => Listen(pipeName, sid));
             try {
                 icon = new NotifyIcon { Visible = !firstSetup, Icon = yellow, Text = Product.Name + ": запускается…" };
-                icon.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowMain(); };
-                icon.MouseDoubleClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowMain(); };
+                icon.MouseClick += (s, e) => {
+                    long now = trayClickClock.ElapsedMilliseconds;
+                    if (e.Button != MouseButtons.Left || !TrayMenuModel.AcceptLeftClick(e.Clicks, now - lastTrayClick, SystemInformation.DoubleClickTime)) return;
+                    lastTrayClick = now;
+                    Safe(() => {
+                        if (!Product.IsVpn && TrayMenuModel.LeftClickAction(config.Data, AccountState()) == "happier") OpenHappier();
+                        else ShowMain();
+                    });
+                };
                 if (!firstSetup) { engine.Recover(); Bootstrap(); LoadComponents(); }
             } catch {
                 stop.Cancel(); lock (pipeGate) { if (server != null) server.Dispose(); }
@@ -265,6 +274,11 @@ namespace RemoteAgents.Launcher
                 previousVersion = engine.Previous, pending = engine.Pending, running = !closing, updatedUtc = DateTime.UtcNow.ToString("o"), update = updateSummary,
                 ok = !closing && (Product.IsVpn ? VpnModulesReady() : runtimes.Any(r => r.Definition.Critical) && runtimes.Where(r => r.Definition.Critical).All(r => r.Healthy)), components = runtimes.Select(r => r.Snapshot()).ToArray() });
         }
+        void OpenHappier()
+        {
+            string url = TrayMenuModel.HappierUrl(config.Data, AccountState());
+            if (url.Length > 0) Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+        }
         void RefreshMenu()
         {
             if (icon.ContextMenuStrip == null) {
@@ -280,8 +294,7 @@ namespace RemoteAgents.Launcher
                         if (id == "open") ShowMain();
                         else if (id == "folders") ShowMain(true);
                         else if (id == "happier") {
-                            string url = TrayMenuModel.HappierUrl(config.Data, AccountState());
-                            if (url.Length > 0) Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+                            OpenHappier();
                         } else if (id == "exit") RequestExit();
                     });
                     menu.Items.Add(item);
@@ -369,7 +382,7 @@ namespace RemoteAgents.Launcher
                 mainWindow.HiddenToTray = () => {
                     if (window.CloseToTray()) {
                         Safe(() => Files.Atomic(Path.Combine(home, "state", "tray-hint-shown"), "shown\n"));
-                        icon.ShowBalloonTip(8000, Product.Name, "RemoteAgents работает — значок в трее", ToolTipIcon.Info);
+                        icon.ShowBalloonTip(8000, Product.Name, Product.IsVpn ? "VPN работает — значок в трее. Окно: пункт «Открыть»." : "Значок в трее: клик открывает Happier, если адрес задан. Окно: пункт «Открыть».", ToolTipIcon.Info);
                     }
                 };
                 mainWindow.ServiceActions(new[] {

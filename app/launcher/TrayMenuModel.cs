@@ -15,6 +15,10 @@ namespace RemoteAgents.Launcher
     // Pure presentation model: the same facts feed the menu, tooltip and window.
     internal static class TrayMenuModel
     {
+        internal static string LeftClickAction(Dictionary<string, object> config, Dictionary<string, object> account)
+        { return HappierUrl(config, account).Length > 0 ? "happier" : "open"; }
+        internal static bool AcceptLeftClick(int clicks, long elapsedMilliseconds, int doubleClickMilliseconds)
+        { return clicks == 1 && elapsedMilliseconds > doubleClickMilliseconds; }
         internal static string HappierUrl(Dictionary<string, object> config, Dictionary<string, object> account)
         {
             string value = Json.Text(Json.Map(Json.Get(config, "happier")), "webappUrl", Json.Str(account, "webappUrl")).Trim();
