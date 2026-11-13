@@ -12,8 +12,8 @@ namespace RemoteAgents.Launcher
     {
         bool allowUnload, mainLaidOut;
         internal Action HiddenToTray;
-        internal Func<string> MutationConflict;
-        internal bool IsApplying { get { return running || detailsWindow != null && detailsWindow.IsApplying; } }
+        internal Func<string> MutationConflict, FolderMutationConflict;
+        internal bool IsApplying { get { return running || folderActionRunning || diskApplying || detailsWindow != null && detailsWindow.IsApplying; } }
         readonly FlowLayoutPanel mainStatus = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(12, 8, 12, 4) };
         readonly Label syncStatus = new Label { AutoSize = true, MaximumSize = new Size(620, 0) };
         readonly Label technicalStatus = new Label { AutoSize = true, Visible = false, MaximumSize = new Size(620, 0) };

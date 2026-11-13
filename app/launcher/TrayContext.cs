@@ -379,6 +379,7 @@ namespace RemoteAgents.Launcher
             if (mainWindow == null || mainWindow.IsDisposed) {
                 mainWindow = ConfigWindow.Main(home, engine.Folder(engine.Current));
                 mainWindow.MutationConflict = MutationConflict;
+                mainWindow.FolderMutationConflict = () => MutationConflict(mainWindow);
                 mainWindow.HiddenToTray = () => {
                     if (window.CloseToTray()) {
                         Safe(() => Files.Atomic(Path.Combine(home, "state", "tray-hint-shown"), "shown\n"));
@@ -411,9 +412,10 @@ namespace RemoteAgents.Launcher
             string saved = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteDisk", "base.txt");
             string path = Files.ReadLine(saved); if (path.Length == 0) path = ConfigSession.DiskBase(); Open(path);
         }
-        string MutationConflict()
+        string MutationConflict() { return MutationConflict(null); }
+        string MutationConflict(ConfigWindow except)
         {
-            string operation = syncRunning ? "сверка конфига" : busy ? "обновление" : actionBusy ? "настройка компонентов" : accountResuming ? "подключение аккаунта Happier" : mainWindow != null && mainWindow.IsApplying ? "применение настроек" : "";
+            string operation = syncRunning ? "сверка конфига" : busy ? "обновление" : actionBusy ? "настройка компонентов" : accountResuming ? "подключение аккаунта Happier" : mainWindow != null && mainWindow != except && mainWindow.IsApplying ? "применение настроек" : "";
             return WindowModel.Conflict(operation);
         }
         bool AllowMutation()

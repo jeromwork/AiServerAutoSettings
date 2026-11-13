@@ -46,7 +46,7 @@ namespace RemoteAgents.Launcher
         readonly ToolTip tip = new ToolTip(); bool pasting = true;
         readonly Panel header = new Panel { Dock = DockStyle.Top }, pastePanel = new Panel { Dock = DockStyle.Top, Height = 204 },
             rowsPanel = new Panel { Dock = DockStyle.Top, Visible = false, Padding = new Padding(16, 6, 16, 4) },
-            foldersPanel = new Panel { Dock = DockStyle.Fill, Height = 520, Visible = false, Padding = new Padding(16, 4, 16, 4) },
+            foldersPanel = new Panel { Dock = DockStyle.Fill, Visible = false, Padding = new Padding(16, 4, 16, 4) },
             bottom = new Panel { Dock = DockStyle.Bottom, Height = 46, Padding = new Padding(12, 8, 12, 8) };
         readonly TextBox input = new TextBox { Multiline = true, ScrollBars = ScrollBars.Vertical, Left = 16, Top = 4, Width = 488, Height = 84, AcceptsReturn = true, WordWrap = true };
         readonly TextBox deviceName = new TextBox { Width = 250 };
@@ -61,7 +61,8 @@ namespace RemoteAgents.Launcher
         readonly Dictionary<string, SectionRow> rows = new Dictionary<string, SectionRow>();
         DiskFoldersView folders; string foldersBase = ""; bool foldersInitialized, folderStepRequired, folderSkipped;
         TabControl tabs; TextBox configText; Button apply;
-        List<string> deferredSections = new List<string>();
+        readonly TableLayoutPanel windowLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4 };
+        bool folderAccessReady, folderActionRunning, foldersStarted;
         readonly CancellationTokenSource cancel = new CancellationTokenSource();
         Task<string> preparing; Task following; ConfigSession followingSession; ConfigSession session; bool diskApplying, running, closeChecked, closingRequested, filling, replaceOnPaste; string defaultName;
 
@@ -80,16 +81,10 @@ namespace RemoteAgents.Launcher
             Text = Product.Name + (settings ? " — настройки" : " — подключение"); FormBorderStyle = FormBorderStyle.Sizable; MaximizeBox = true;
             StartPosition = FormStartPosition.CenterScreen; ClientSize = new Size(520, 300); TopMost = !settings; KeyPreview = true;
             start.FlatAppearance.BorderSize = 0;
-            folders = new DiskFoldersView(RunFolderAction, a => mainWindow ? ReadFolders(a) : Guard(a), Guard, () => running, Log);
+            folders = new DiskFoldersView(RunFolderAction, ReadFolders, GuardFolders, () => diskApplying || folderActionRunning, Log);
             folders.Apply = ApplyFolders;
             folders.Reload = LoadFolders;
-            folders.Skip = async () => {
-                folderSkipped = true; folderStepRequired = false; foldersPanel.Visible = false;
-                Log("Выбор папок пропущен. Настроить их можно в меню значка → «Папки…».");
-                var continuation = FolderContinuation(false);
-                if (continuation.Count > 0) await Guard(() => RunSession(session, continuation));
-                done.Enabled = !running; Relayout();
-            };
+            folders.Skip = () => { SkipFolders(); return Task.CompletedTask; };
             foldersPanel.Controls.Add(folders);
             bottom.Controls.Add(done); bottom.Controls.Add(new Label { Dock = DockStyle.Right, Width = 8 }); bottom.Controls.Add(close);
             var copyLog = new Button { Text = "Скопировать журнал", Width = 150, Dock = DockStyle.Left };
@@ -97,11 +92,22 @@ namespace RemoteAgents.Launcher
             copyLog.Click += (a, b) => { try { Clipboard.SetText(journal.TextLength > 0 ? journal.Text : "Журнал пуст"); Log("Журнал скопирован."); } catch (Exception e) { Log("Журнал не скопирован: " + e.Message); } };
             bottom.Controls.Add(copyLog);
             if (settings) BuildSettings(); else BuildPaste();
-            // Docking: the last added control is the outermost one.
-            if (settings) Controls.Add(tabs); else Controls.Add(foldersPanel);
-            Controls.Add(journal); Controls.Add(rowsPanel);
-            if (!settings) Controls.Add(pastePanel);
-            Controls.Add(header); Controls.Add(bottom);
+            // Bounded rows reserve space for the folder footer even on a short/high-DPI screen.
+            // Status rows and the folder body scroll inside their own areas; the journal cannot cover them.
+            var progress = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
+            progress.Controls.Add(rowsPanel);
+            if (!settings) progress.Controls.Add(pastePanel);
+            progress.Controls.Add(header);
+            windowLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            for (int i = 0; i < 3; i++) windowLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 0));
+            windowLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            journal.Dock = DockStyle.Fill;
+            bottom.Dock = DockStyle.Fill;
+            windowLayout.Controls.Add(progress, 0, 0);
+            windowLayout.Controls.Add(settings ? (Control)tabs : foldersPanel, 0, 1);
+            windowLayout.Controls.Add(journal, 0, 2);
+            windowLayout.Controls.Add(bottom, 0, 3);
+            Controls.Add(windowLayout);
             foreach (string s in ConfigSections.Rows.Reverse()) {
                 string section = s; var row = new SectionRow(ConfigSections.Title(s), tip) { Visible = false }; rows[s] = row; rowsPanel.Controls.Add(row);
                 row.Retry.LinkClicked += async (a, b) => await RetrySection(section);
@@ -110,7 +116,7 @@ namespace RemoteAgents.Launcher
             done.Click += async (a, b) => await Finish();
             FormClosing += (a, b) => {
                 if (mainWindow && !allowUnload) { b.Cancel = true; Hide(); if (HiddenToTray != null) HiddenToTray(); return; }
-                if (running) { b.Cancel = true; closingRequested = true; Log("Отменяю текущую операцию…"); cancel.Cancel(); return; }
+                if (running || folderActionRunning) { b.Cancel = true; closingRequested = true; Log("Отменяю текущую операцию…"); cancel.Cancel(); return; }
                 // ✕ after a run is «Готово»: closing must leave the program in the tray, not quit it with a half-finished setup.
                 // One attempt only; if the check fails the window stays with the reason, and the next ✕ closes it.
                 if (settings || session == null || closeChecked || !FirstInstall.Required(home)) return;
@@ -247,10 +253,15 @@ namespace RemoteAgents.Launcher
             int visibleRows = rows.Values.Count(r => r.Visible);
             rowsPanel.Height = (int)((visibleRows * 24 + 12) * scale);
             bool showFolders = settings || foldersPanel.Visible;
+            windowLayout.RowStyles[0].Height = showFolders ? (rowsPanel.Visible ? 30 : settings && !foldersOnly ? 12 : 0) : 100;
+            windowLayout.RowStyles[1].Height = showFolders ? 70 : 0;
+            windowLayout.RowStyles[2].Height = journal.Visible ? 15 : 0;
+            bottom.Height = Math.Max(done.PreferredSize.Height, close.PreferredSize.Height) + bottom.Padding.Vertical;
+            windowLayout.PerformLayout();
             int height = header.Height + bottom.Height + (settings ? (int)(540 * scale) : pasting ? pastePanel.Height : 0);
             if (rowsPanel.Visible) height += rowsPanel.Height;
             if (!settings && foldersPanel.Visible) height += (int)(530 * scale);
-            if (journal.Visible) height += journal.Height;
+            if (journal.Visible) height += Font.Height * 6;
             var area = Screen.FromControl(this).WorkingArea;
             int width = (int)((showFolders ? 720 : 520) * scale);
             MinimumSize = new Size((int)(520 * scale), Math.Min((int)(420 * scale), area.Height - 40));
@@ -276,23 +287,27 @@ namespace RemoteAgents.Launcher
                 SectionRow row; if (!rows.TryGetValue(section == ConfigSections.Bootstrap ? ConfigSections.Server : section, out row)) return;
                 if (section == ConfigSections.Bootstrap) { text = "Канал: " + text; if (state == SectionState.Done || state == SectionState.Failed) state = SectionState.Waiting; }
                 row.Set(state, text);
+                if (section == ConfigSections.Connection && state == SectionState.Done) {
+                    folderAccessReady = true;
+                    ShowFoldersEarly();
+                }
                 if (section == ConfigSections.Disk) {
                     diskApplying = state == SectionState.Running || state == SectionState.Pending;
                     if (state == SectionState.Done) { folderStepRequired = false; folders.AllowSkip(false); if (foldersInitialized) folders.MarkApplied(); }
-                    SetBusy(running);
                 }
+                SetBusy(running);
             });
         }
         void SetBusy(bool value)
         {
-            running = value; start.Enabled = !value; askAi.Enabled = !value; steps.Enabled = !value; openFile.Enabled = !value; done.Enabled = !value && !folderStepRequired; input.ReadOnly = value;
-            if (apply != null) apply.Enabled = !value && !diskApplying;
-            folders.SetBusy(value || diskApplying); header.Enabled = !value;
+            running = value; start.Enabled = !value; askAi.Enabled = !value; steps.Enabled = !value; openFile.Enabled = !value; done.Enabled = WindowModel.CanFinish(value, rows.Where(r => r.Value.Visible).ToDictionary(r => r.Key, r => r.Value.State)); input.ReadOnly = value;
+            if (apply != null) apply.Enabled = !value && !diskApplying && !folderActionRunning;
+            folders.SetBusy(diskApplying || folderActionRunning || value && !folderAccessReady); header.Enabled = !value;
             UseWaitCursor = false; Cursor = value ? Cursors.AppStarting : Cursors.Default;
         }
-        async Task Guard(Func<Task> action)
+        async Task Guard(Func<Task> action, bool allowPendingDisk = false)
         {
-            if (running) { ReportConflict(WindowModel.Conflict("действие в окне")); return; }
+            if (running || diskApplying && !allowPendingDisk || folderActionRunning) { ReportConflict(WindowModel.Conflict("действие в окне")); return; }
             string conflict = mainWindow && MutationConflict != null ? MutationConflict() : "";
             if (conflict.Length > 0) { ReportConflict(conflict); return; }
             SetBusy(true);
@@ -303,7 +318,7 @@ namespace RemoteAgents.Launcher
         // Paste -> parse -> master password -> conflicts -> store -> plan -> run.
         async Task StartFromText(string text)
         {
-            if (running || diskApplying) return; Hint("");
+            if (running || diskApplying || folderActionRunning) return; Hint("");
             await Guard(async () => {
                 string source;
                 try {
@@ -336,7 +351,7 @@ namespace RemoteAgents.Launcher
                 var kept = parsed.Profile.Keys.Where(ConfigSections.Known).Where(k => !accept.Contains(k)).ToArray();
                 if (kept.Length > 0) Log("Оставлено как есть: " + string.Join(", ", kept));
                 ConfigBundle.Store(home, parsed, accept);
-                foldersInitialized = false; folderSkipped = false; deferredSections.Clear();
+                foldersInitialized = false; folderSkipped = false; foldersStarted = false; folderAccessReady = false;
                 Log(ConfigBundle.AcceptedSummary(home));
                 Log(ConfigText.Overview(parsed.Profile));
                 await RunSession(new ConfigSession(home, Bundle, parsed.Secrets, parsed.Hints), null);
@@ -357,19 +372,22 @@ namespace RemoteAgents.Launcher
             var profile = ConfigProfile.Load(home);
             bool chosen = DiskChosen(profile);
             if (!settings && forced == null) folderStepRequired = !Product.IsVpn && !chosen && !folderSkipped;
-            if (!chosen) plan.Remove(ConfigSections.Disk);
+            plan = WindowModel.SessionPlan(plan, folderStepRequired, chosen);
+            if (plan.Contains(ConfigSections.Connection) || plan.Contains(ConfigSections.Server)) folderAccessReady = false;
             foreach (var pair in rows) {
-                bool described = pair.Key == ConfigSections.Disk ? chosen : ConfigSections.Present(profile, pair.Key);
+                bool described = pair.Key == ConfigSections.Disk ? chosen || folderStepRequired || folderSkipped : ConfigSections.Present(profile, pair.Key);
                 pair.Value.Visible = described || plan.Contains(pair.Key);
                 if (forced == null || plan.Contains(pair.Key)) pair.Value.Set(plan.Contains(pair.Key) ? SectionState.Waiting : SectionState.Unchanged, plan.Contains(pair.Key) ? "в очереди" : "без изменений");
             }
             Relayout();
             if (plan.Count == 0) Log("Ничего не изменилось: всё уже настроено так, как в конфиге.");
-            if (!settings && forced == null && folderStepRequired) {
-                // Ask immediately after the network, before starting the remaining optional sections.
-                deferredSections = plan.Where(s => s != ConfigSections.Bootstrap && s != ConfigSections.Server && s != ConfigSections.Connection).ToList();
-                plan = plan.Except(deferredSections).ToList();
-                foreach (string s in deferredSections) rows[s].Set(SectionState.Waiting, "после выбора папок");
+            if (folderStepRequired) rows[ConfigSections.Disk].Set(SectionState.Waiting, "выберите папки и нажмите «Синхронизировать выбранные папки»");
+            if (folderSkipped) rows[ConfigSections.Disk].Set(SectionState.Waiting, WindowModel.SkippedFolders);
+            done.Visible = !settings; AcceptButton = null;
+            SetBusy(running);
+            if (!plan.Contains(ConfigSections.Connection) && !plan.Contains(ConfigSections.Server)) {
+                folderAccessReady = true;
+                ShowFoldersEarly();
             }
             session.AskMissing(plan);
             await session.Execute(plan, cancel.Token);
@@ -377,24 +395,57 @@ namespace RemoteAgents.Launcher
             if (plan.Contains(ConfigSections.Disk) && session.Outcomes.TryGetValue(ConfigSections.Disk, out diskOutcome) && diskOutcome.Ok) { folderStepRequired = false; folders.AllowSkip(false); }
             Log("Выполнено за " + (watch.ElapsedMilliseconds / 1000.0).ToString("0.0", CultureInfo.InvariantCulture) + " с.");
             RefreshDiskBusy();
-            if (followingSession != session || following == null || following.IsCompleted) {
-                followingSession = session; var watched = session;
-                following = watched.FollowPending(cancel.Token);
-                var observe = following.ContinueWith(t => {
-                    if (t.IsFaulted) Log("Слежение за установкой на сервере остановлено: " + t.Exception.GetBaseException().Message);
-                    Ui(() => { if (session == watched) RefreshDiskBusy(); });
-                }, TaskScheduler.Default);
-            }
+            FollowSession();
             if (!settings) {
-                if (forced == null) folderStepRequired = !Product.IsVpn && !chosen && !folderSkipped;
-                if (!Product.IsVpn && !folderSkipped) {
-                    foldersPanel.Visible = true; Relayout();
-                    ((Label)header.Controls[0]).Text = "Папки";
-                    await LoadFoldersInner();
-                }
-                done.Visible = true; AcceptButton = null;
                 if (!folderStepRequired) done.Focus();
-            } else { RefreshConfigText(); if (FoldersSelected) await LoadFoldersInner(); }
+            } else { RefreshConfigText(); if (FoldersSelected && !foldersStarted) await LoadFolders(); }
+        }
+        void FollowSession()
+        {
+            if (followingSession == session && following != null && !following.IsCompleted) return;
+            followingSession = session; var watched = session;
+            following = watched.FollowPending(cancel.Token);
+            var observe = following.ContinueWith(t => {
+                if (t.IsFaulted) Log("Слежение за установкой на сервере остановлено: " + t.Exception.GetBaseException().Message);
+                Ui(() => { if (session == watched) RefreshDiskBusy(); });
+            }, TaskScheduler.Default);
+        }
+        // Called from the UI report as soon as Connection is proved. Tree IO never holds up the plan.
+        void ShowFoldersEarly()
+        {
+            if (Product.IsVpn || foldersStarted || IsDisposed || (!settings && folderSkipped)) return;
+            if (settings && !FoldersSelected) return;
+            foldersStarted = true;
+            if (!settings) {
+                foldersPanel.Visible = true;
+                ((Label)header.Controls[0]).Text = "Папки";
+                Relayout();
+            }
+            SetBusy(running);
+            var load = LoadFolders();
+        }
+        void SkipFolders()
+        {
+            if (diskApplying || folderActionRunning) return;
+            folderSkipped = true; folderStepRequired = false; folders.AllowSkip(false);
+            if (!settings) foldersPanel.Visible = false;
+            rows[ConfigSections.Disk].Visible = true;
+            rows[ConfigSections.Disk].Set(SectionState.Waiting, WindowModel.SkippedFolders);
+            Log(WindowModel.SkippedFolders);
+            SetBusy(running); Relayout();
+        }
+        // Only Disk mutations exclude other folder actions. Bridge/Account/Vpn keep running independently.
+        async Task GuardFolders(Func<Task> action)
+        {
+            if (diskApplying || folderActionRunning || running && !folderAccessReady) return;
+            if (detailsWindow != null && detailsWindow.IsApplying) { ReportConflict(WindowModel.Conflict("применение настроек")); return; }
+            string conflict = mainWindow && FolderMutationConflict != null ? FolderMutationConflict() : "";
+            if (conflict.Length > 0) { ReportConflict(conflict); return; }
+            folderActionRunning = true; SetBusy(running);
+            try { await action(); }
+            catch (OperationCanceledException) { }
+            catch (Exception e) { Log("Папки: " + e.Message); }
+            finally { if (!IsDisposed) { folderActionRunning = false; RefreshDiskBusy(); if (closingRequested && !running) Close(); } }
         }
         void RefreshDiskBusy()
         {
@@ -407,6 +458,7 @@ namespace RemoteAgents.Launcher
         { var choice = DiskChoice.FromProfile(profile); return choice.Chosen || choice.External.Count > 0; }
         async Task RetrySection(string section)
         {
+            if (section == ConfigSections.Disk) { await ApplyFolders(); return; }
             if (running) return;
             var plan = new List<string> { section };
             // A repaired server releases the sections that waited for it.
@@ -427,7 +479,7 @@ namespace RemoteAgents.Launcher
         bool loadingFolders;
         async Task LoadFolders()
         {
-            if (loadingFolders) return;
+            if (loadingFolders || diskApplying || folderActionRunning || running && !folderAccessReady) return;
             loadingFolders = true;
             try { await LoadFoldersInner(); }
             catch (OperationCanceledException) { }
@@ -454,25 +506,24 @@ namespace RemoteAgents.Launcher
                 catch (Exception e) { Log("Список папок с компьютера не получен: " + e.Message); }
             }
         }
-        List<string> FolderContinuation(bool includeDisk)
-        {
-            var remaining = new HashSet<string>(deferredSections); deferredSections.Clear();
-            if (includeDisk) remaining.Add(ConfigSections.Disk);
-            // Keep dependency failures in the regular engine when continuing after a failed network attempt.
-            foreach (string s in new[] { ConfigSections.Server, ConfigSections.Connection })
-                if (rows[s].State == SectionState.Failed || rows[s].State == SectionState.Blocked || rows[s].State == SectionState.Pending) remaining.Add(s);
-            return ConfigSections.Order.Where(remaining.Contains).ToList();
-        }
         // One path for every host: DiskChoice -> stored profile -> the regular Disk section.
         async Task ApplyFolders()
         {
             if (diskApplying) return;
-            await Guard(async () => {
+            await GuardFolders(async () => {
                 var choice = folders.Model.ToChoice();
                 ConfigProfile.Update(home, p => p["disk"] = choice.WriteTo(p, foldersBase)["disk"]);
                 folders.AcceptProfile();
+                folderStepRequired = false; folderSkipped = false; folders.AllowSkip(false);
                 Log("Применяю выбор папок…");
-                await RunSession(session ?? new ConfigSession(home, Bundle), FolderContinuation(true));
+                // Do not re-enter RunSession: it owns the non-Disk plan and its rows.
+                if (session == null) {
+                    session = new ConfigSession(home, Bundle);
+                    session.Log = Log; session.Report = Report;
+                }
+                rows[ConfigSections.Disk].Visible = true; rowsPanel.Visible = true; Relayout();
+                await session.Execute(new[] { ConfigSections.Disk }, cancel.Token);
+                FollowSession();
                 SectionOutcome outcome;
                 if (session.Outcomes.TryGetValue(ConfigSections.Disk, out outcome) && outcome.Ok) {
                     folderStepRequired = false; folderSkipped = false;
@@ -483,15 +534,18 @@ namespace RemoteAgents.Launcher
         }
         async Task Finish()
         {
-            if (running) return;
-            if (folderStepRequired) { Log("Выберите папки и нажмите «Синхронизировать» или «Пропустить»."); return; }
+            if (!done.Enabled) return;
+            if (folderStepRequired) SkipFolders();
+            // A live local apply must finish before unloading its job. A detached server install
+            // is already tracked for the tray and does not hold up activation.
+            if (folderActionRunning) { Log("Папки ещё применяются. Дождитесь результата и нажмите «Готово» снова."); return; }
             if (!FirstInstall.Required(home)) { DialogResult = DialogResult.OK; Close(); return; }
             bool ok = false;
             await Guard(async () => {
                 Log("Проверяю итог: связь и мост…");
                 var result = await (session ?? new ConfigSession(home, Bundle)).Activate(cancel.Token);
                 Log(result.Summary); ok = !FirstInstall.Required(home);
-            });
+            }, allowPendingDisk: true);
             if (ok) { DialogResult = DialogResult.OK; Close(); }
             else Log("Настройка ещё не завершена: исправьте разделы с ❌ («Повторить») и нажмите «Готово» снова.");
         }

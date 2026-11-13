@@ -23,7 +23,7 @@ namespace RemoteAgents.Launcher
             changes = new Label { AutoSize = true, ForeColor = Color.DarkGoldenrod };
         readonly Button open = Button("Открыть в Проводнике"), revert = Button("Откатить мои изменения"), reload = Button("Обновить список"), add = Button("Выбрать папку на компьютере…");
         readonly Button take = Button("← Забрать на компьютер"), send = Button("Отправить на сервер →"), stopSync = Button("Перестать синхронизировать"), navPane = Button("Показать в Проводнике слева");
-        readonly Button apply = Button("Синхронизировать"), skip = Button("Пропустить");
+        readonly Button apply = Button("Синхронизировать выбранные папки"), skip = Button("Пропустить");
         readonly FlowLayoutPanel warning;
         readonly ContextMenuStrip menu = new ContextMenuStrip();
         readonly ToolStripMenuItem remove = new ToolStripMenuItem("Перестать синхронизировать");
@@ -72,8 +72,13 @@ namespace RemoteAgents.Launcher
             warning = Flow(changes, revert); AddRow(layout, warning);
             var content = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
             content.Controls.Add(layout);
-            var footer = Flow(apply, skip); footer.Dock = DockStyle.Bottom;
-            Controls.Add(content); Controls.Add(footer);
+            var footer = Flow(apply, skip);
+            var frame = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = new Padding(0) };
+            frame.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            frame.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            frame.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            frame.Controls.Add(content, 0, 0); frame.Controls.Add(footer, 0, 1);
+            Controls.Add(frame);
             bool fitting = false;
             Action fit = () => {
                 if (fitting) return; fitting = true;

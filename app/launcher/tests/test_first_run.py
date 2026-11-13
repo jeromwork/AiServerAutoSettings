@@ -167,7 +167,7 @@ class FirstRunTests(unittest.TestCase):
         self.assertIn('Model.SendToServer(data.Path)', view)
         self.assertIn('Model.StopSynchronizing(SelectedPath(activeFolders))', view)
         self.assertIn('new LinkLabel', view)
-        self.assertIn('Button("Синхронизировать")', view)
+        self.assertIn('Button("Синхронизировать выбранные папки")', view)
         self.assertIn('await Apply()', view)
         self.assertIn('run("DiskNavPane",', view)
         self.assertIn('await folders.RefreshNavPane()', window)
@@ -188,7 +188,7 @@ class FirstRunTests(unittest.TestCase):
 
     def test_disk_revert_uses_mutation_guard_and_counts_as_applying(self):
         window = source('ConfigWindow.cs')
-        self.assertIn('ReadFolders(a) : Guard(a), Guard, () => running', window)
+        self.assertIn('RunFolderAction, ReadFolders, GuardFolders, () => diskApplying || folderActionRunning', window)
         view = source('DiskFoldersView.cs')
         revert = view.split('async Task Revert()', 1)[1]
         self.assertLess(revert.index('await mutate('), revert.index('run("DiskRevert"'))
@@ -197,8 +197,45 @@ class FirstRunTests(unittest.TestCase):
         self.assertLess(guard.index('MutationConflict()'), guard.index('SetBusy(true)'))
         self.assertLess(guard.index('SetBusy(true)'), guard.index('await action()'))
         self.assertIn('running = value;', window)
-        self.assertIn('return running ||', source('ConfigWindow.Main.cs'))
+        self.assertIn('return running || folderActionRunning || diskApplying ||', source('ConfigWindow.Main.cs'))
         self.assertIn('((ConfigWindow)f).IsApplying', source('TrayContext.cs').split('void RequestExit()', 1)[1])
+
+    def test_folder_confirmation_is_independent_of_the_plan_and_tree_reads(self):
+        window = source('ConfigWindow.cs')
+        self.assertNotIn('deferredSections', window)
+        self.assertNotIn('FolderContinuation', window)
+        self.assertNotIn('после выбора папок', window)
+        self.assertIn('WindowModel.SessionPlan(plan, folderStepRequired, chosen)', window)
+        report = window.split('void Report(', 1)[1].split('void SetBusy(', 1)[0]
+        self.assertIn('section == ConfigSections.Connection && state == SectionState.Done', report)
+        self.assertIn('ShowFoldersEarly();', report)
+        early = window.split('void ShowFoldersEarly()', 1)[1].split('void SkipFolders()', 1)[0]
+        self.assertIn('foldersPanel.Visible = true', early)
+        self.assertIn('var load = LoadFolders()', early)
+        self.assertNotIn('await ', early)
+        read = window.split('async Task ReadFolders(', 1)[1].split('bool loadingFolders', 1)[0]
+        self.assertNotIn('Guard(', read)
+        apply = window.split('async Task ApplyFolders()', 1)[1].split('async Task Finish()', 1)[0]
+        self.assertIn('await GuardFolders(', apply)
+        self.assertIn('await session.Execute(new[] { ConfigSections.Disk }', apply)
+        self.assertNotIn('await RunSession(', apply)
+        finish = window.split('async Task Finish()', 1)[1].split('async Task RenameDevice()', 1)[0]
+        self.assertIn('if (folderStepRequired) SkipFolders()', finish)
+        self.assertIn('WindowModel.CanFinish(', window)
+        self.assertIn('FolderMutationConflict = () => MutationConflict(mainWindow)', source('TrayContext.cs'))
+
+    def test_folder_footer_has_reserved_layout_rows_in_both_hosts(self):
+        window = source('ConfigWindow.cs')
+        self.assertNotIn('Dock = DockStyle.Fill, Height = 520', window)
+        self.assertIn('windowLayout.Controls.Add(settings ? (Control)tabs : foldersPanel, 0, 1)', window)
+        self.assertIn('windowLayout.Controls.Add(journal, 0, 2)', window)
+        self.assertIn('AutoScroll = true', window)
+        view = source('DiskFoldersView.cs')
+        self.assertIn('frame.RowStyles.Add(new RowStyle(SizeType.Percent, 100))', view)
+        self.assertIn('frame.RowStyles.Add(new RowStyle(SizeType.AutoSize))', view)
+        self.assertIn('frame.Controls.Add(content, 0, 0); frame.Controls.Add(footer, 0, 1)', view)
+        self.assertIn('Dock = DockStyle.Fill, AutoScroll = true', view)
+        self.assertIn('AutoScaleMode = AutoScaleMode.Inherit', view)
 
     def test_pending_account_survives_rejected_or_failed_guard(self):
         wizard = source('SetupWizard.cs')
