@@ -28,6 +28,10 @@ Assert ((Get-DiskUnion $tree $base).rows[0].presence -ceq 'both') 'local copy wi
 [IO.File]::WriteAllText($ini,"[.ShellClassInfo]`r`nInfoTip=Mine`r`n",$utf8)
 Assert (-not (Test-DiskPlaceholder $project)) 'foreign desktop.ini is never a placeholder'
 Assert ((Get-DiskUnion $tree $base).rows[0].presence -ceq 'both') 'foreign customized folder remains a local copy'
+$storageProject=Join-Path $base 'storage';[void][IO.Directory]::CreateDirectory((Join-Path $storageProject 'app'))
+$storageLevel=Get-DiskUnion ([pscustomobject]@{entries=@()}) $base 'storage'
+Assert (@($storageLevel.rows|Where-Object {$_.path -ceq 'storage/app'}).Count -eq 1) 'root-only patterns are relative to each project, not to Disk root'
+[IO.Directory]::Delete((Join-Path $storageProject 'app'),$false);[IO.Directory]::Delete($storageProject,$false)
 # Real links are the portable surrogate of a Windows junction. Test entry points as well as descendants.
 $outside=Join-Path $TestHome 'Outside';[void][IO.Directory]::CreateDirectory((Join-Path $outside 'deep'));[IO.File]::WriteAllText((Join-Path $outside 'deep/private.txt'),'do not enumerate')
 $link=Join-Path $base 'Link';$linkKind='SymbolicLink';if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT){$linkKind='Junction'};[void](New-Item -ItemType $linkKind -Path $link -Target $outside)

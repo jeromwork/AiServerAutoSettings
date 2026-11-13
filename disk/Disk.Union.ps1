@@ -2,7 +2,7 @@
 # A pure one-level inventory: never follows junctions or modifies user content.
 function Get-DiskUnion($ServerTree,[string]$BasePath,[string]$RelativePath='',[int]$Limit=2000) {
     function Test-UnionProtected([string]$Path) {
-        if(Test-SelectionProtected $Path){return $true}
+        if(Test-SelectionProtected $Path -SkipRootPatterns){return $true}
         $slash=$Path.IndexOf('/')
         if($slash -ge 0){return Test-SelectionProtected $Path.Substring($slash+1)}
         return $false

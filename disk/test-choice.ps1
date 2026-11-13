@@ -10,6 +10,7 @@ Get-ChildItem (Join-Path $repo 'disk') -File|Where-Object {$_.Extension -in @('.
 $fake=@'
 # Production uses an NTFS junction; the portable fixture substitutes a symlink via the narrow wrapper.
 function New-DiskExternalJunction([string]$Link,[string]$Target) {$kind='SymbolicLink';if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT){$kind='Junction'};[void](New-Item -ItemType $kind -Path $Link -Target $Target)}
+function Remove-DiskExternalJunction([string]$Link) {if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT){[IO.Directory]::Delete($Link,$false)}else{[IO.File]::Delete($Link)}}
 function Read-DiskProfile {}
 function Read-DiskState {}
 function Write-DiskLog {}

@@ -13,9 +13,9 @@ function Test-SelectionIncluded([string]$Path,$Paths) {
 }
 # Cache once per process; a tree level must not reopen stignore for every entry.
 $script:SelectionProtectedPatterns=@([IO.File]::ReadAllLines((Join-Path $PSScriptRoot 'stignore.txt'))|Where-Object {$_.StartsWith('(?i)')}|ForEach-Object {$_.Substring(4)})
-function Test-SelectionProtected([string]$Path) {
+function Test-SelectionProtected([string]$Path,[switch]$SkipRootPatterns) {
     foreach($pattern in $script:SelectionProtectedPatterns){
-        if($pattern.StartsWith('/')){
+        if(-not $SkipRootPatterns -and $pattern.StartsWith('/')){
             $rootPattern=$pattern.Substring(1)
             if($Path -like $rootPattern -or $Path -like ($rootPattern+'/*')){return $true}
         }
