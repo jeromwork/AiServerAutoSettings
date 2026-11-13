@@ -167,12 +167,15 @@ class FirstRunTests(unittest.TestCase):
         self.assertIn('Model.SendToServer(data.Path)', view)
         self.assertIn('Model.StopSynchronizing(SelectedPath(activeFolders))', view)
         self.assertIn('new LinkLabel', view)
-        self.assertIn('Button("Синхронизировать")', view)
+        self.assertIn('Button("Синхронизировать выбранные папки")', view)
         self.assertIn('await Apply()', view)
         self.assertIn('run("DiskNavPane",', view)
-        self.assertIn('await folders.RefreshNavPane()', window)
-        self.assertIn('outcome.Ok)', window.split('async Task ApplyFolders()', 1)[1].split('folders.MarkApplied()', 1)[0])
-        self.assertIn('state == SectionState.Done', window.split('void Report(', 1)[1].split('folders.MarkApplied()', 1)[0])
+        self.assertIn('var nav = folders.RefreshNavPane();', window)
+        # MarkApplied uses what the finished background run applied, not the live (possibly edited) model.
+        changed = window.split('void OnDiskChanged()', 1)[1].split('void StartQueuedDisk()', 1)[0]
+        self.assertIn('if (last.Ok)', changed)
+        self.assertIn('folders.MarkApplied(last.Choice)', changed)
+        self.assertNotIn('MarkApplied', window.split('void Report(', 1)[1].split('void SetBusy(', 1)[0])
 
     def test_folder_review_wiring_and_honest_removal_hint(self):
         view = source('DiskFoldersView.cs')
@@ -184,11 +187,11 @@ class FirstRunTests(unittest.TestCase):
         initialize = window.split('folders.Initialize(', 1)[1].split('foldersInitialized = true', 1)[0]
         self.assertIn('ConfigProfile.AppliedDiskChoice(home, profile)', initialize)
         self.assertIn('ConfigProfile.DiskExclusions(', initialize)
-        self.assertIn('Model.MarkApplied(ConfigProfile.DiskExclusions())', view)
+        self.assertIn('Model.MarkApplied(ConfigProfile.DiskExclusions(), applied)', view)
 
     def test_disk_revert_uses_mutation_guard_and_counts_as_applying(self):
         window = source('ConfigWindow.cs')
-        self.assertIn('ReadFolders(a) : Guard(a), Guard, () => running', window)
+        self.assertIn('RunFolderAction, ReadFolders, GuardFolders, () => diskApplying || folderActionRunning', window)
         view = source('DiskFoldersView.cs')
         revert = view.split('async Task Revert()', 1)[1]
         self.assertLess(revert.index('await mutate('), revert.index('run("DiskRevert"'))
@@ -197,8 +200,114 @@ class FirstRunTests(unittest.TestCase):
         self.assertLess(guard.index('MutationConflict()'), guard.index('SetBusy(true)'))
         self.assertLess(guard.index('SetBusy(true)'), guard.index('await action()'))
         self.assertIn('running = value;', window)
-        self.assertIn('return running ||', source('ConfigWindow.Main.cs'))
-        self.assertIn('((ConfigWindow)f).IsApplying', source('TrayContext.cs').split('void RequestExit()', 1)[1])
+        # A background Disk run is not «applying settings» of the window: config Apply and other sections go on.
+        self.assertIn('return running || folderActionRunning || detailsWindow', source('ConfigWindow.Main.cs'))
+        exit_ = source('TrayContext.cs').split('void RequestExit()', 1)[1]
+        self.assertIn('((ConfigWindow)f).IsApplying', exit_)
+        self.assertIn('BackgroundWork.Disk.Busy', exit_.split('MessageBox', 1)[0])
+
+    def test_folder_confirmation_is_independent_of_the_plan_and_tree_reads(self):
+        window = source('ConfigWindow.cs')
+        self.assertNotIn('deferredSections', window)
+        self.assertNotIn('FolderContinuation', window)
+        self.assertNotIn('после выбора папок', window)
+        self.assertIn('WindowModel.SessionPlan(plan, folderStepRequired, chosen)', window)
+        report = window.split('void Report(', 1)[1].split('void SetBusy(', 1)[0]
+        self.assertIn('section == ConfigSections.Connection && state == SectionState.Done', report)
+        self.assertIn('ShowFoldersEarly();', report)
+        early = window.split('void ShowFoldersEarly()', 1)[1].split('void SkipFolders()', 1)[0]
+        self.assertIn('foldersPanel.Visible = true', early)
+        self.assertIn('var load = LoadFolders()', early)
+        self.assertNotIn('await ', early)
+        read = window.split('async Task ReadFolders(', 1)[1].split('bool loadingFolders', 1)[0]
+        self.assertNotIn('Guard(', read)
+        apply = window.split('Task ApplyFolders()', 1)[1].split('async Task Finish()', 1)[0]
+        self.assertNotIn('await ', apply, 'apply only stores the choice and returns at once')
+        self.assertIn('StartDisk();', apply)
+        self.assertNotIn('RunSession(', apply)
+        start = window.split('void StartDisk()', 1)[1].split('static bool DiskChosen(', 1)[0]
+        self.assertIn('BackgroundWork.Disk.Start(', start)
+        self.assertIn('current.ApplyDisk(token)', start)
+        self.assertNotIn('cancel.Token', start, 'the Disk run must outlive the window')
+        retry = window.split('async Task RetrySection(', 1)[1].split('async Task<Dictionary', 1)[0]
+        self.assertIn('if (section == ConfigSections.Disk) { StartDisk(); return; }', retry)
+        self.assertNotIn('ApplyFolders', retry)
+        finish = window.split('async Task Finish()', 1)[1].split('async Task RenameDevice()', 1)[0]
+        self.assertIn('else SkipFolders()', finish)
+        self.assertIn('AnyFolders(folders.Model.ToChoice())', finish)
+        self.assertNotIn('allowPendingDisk', window)
+        self.assertIn('WindowModel.CanFinish(', window)
+        self.assertIn('FolderMutationConflict = () => MutationConflict(mainWindow)', source('TrayContext.cs'))
+
+    def test_folder_footer_has_reserved_layout_rows_in_both_hosts(self):
+        window = source('ConfigWindow.cs')
+        self.assertNotIn('Dock = DockStyle.Fill, Height = 520', window)
+        self.assertIn('windowLayout.Controls.Add(settings ? (Control)tabs : foldersPanel, 0, 1)', window)
+        self.assertIn('windowLayout.Controls.Add(journal, 0, 2)', window)
+        self.assertIn('AutoScroll = true', window)
+        view = source('DiskFoldersView.cs')
+        self.assertIn('frame.RowStyles.Add(new RowStyle(SizeType.Percent, 100))', view)
+        self.assertIn('frame.RowStyles.Add(new RowStyle(SizeType.AutoSize))', view)
+        self.assertIn('frame.Controls.Add(content, 0, 0); frame.Controls.Add(footer, 0, 1)', view)
+        self.assertIn('Dock = DockStyle.Fill, AutoScroll = true', view)
+        self.assertIn('AutoScaleMode = AutoScaleMode.Inherit', view)
+
+    def test_disk_runs_in_background_and_outlives_the_window(self):
+        window = source('ConfigWindow.cs')
+        run = window.split('async Task RunSession(', 1)[1].split('void FollowSession()', 1)[0]
+        self.assertIn('diskQueued = plan.Remove(ConfigSections.Disk);', run)
+        self.assertIn('StartQueuedDisk();', window.split('void Report(', 1)[1].split('void SetBusy(', 1)[0])
+        apply = source('ConfigApply.cs')
+        follow = apply.split('internal async Task FollowPending(', 1)[1].split('internal async Task<SectionOutcome> ApplyDisk(', 1)[0]
+        self.assertIn('o.Key != ConfigSections.Disk', follow)
+        disk = apply.split('internal async Task<SectionOutcome> ApplyDisk(', 1)[1].split('internal async Task<SectionOutcome> Activate(', 1)[0]
+        self.assertIn('"Operation"', disk)
+        self.assertIn('if (state == "finished") await Execute(new[] { ConfigSections.Disk }, token);', disk)
+        tray = source('TrayContext.cs')
+        self.assertIn('BackgroundWork.Disk.Stop();', tray.split('protected override void ExitThreadCore()', 1)[1])
+        self.assertIn('BackgroundWork.Disk.Changed +=', tray)
+        self.assertIn('BackgroundWork.Disk.Changed -= diskChanged', window)
+        # Imported config: the folder model follows the stored profile at once (no stale overwrite).
+        self.assertIn('if (settings) InitializeFolders();', window.split('async Task StartFromText(', 1)[1])
+
+    def test_folder_ui_never_disabled_or_waiting(self):
+        view = source('DiskFoldersView.cs')
+        set_busy = view.split('internal void SetBusy(bool value)', 1)[1].split('\n', 1)[0]
+        self.assertNotIn('Enabled', set_busy)
+        self.assertNotIn('tree.Enabled', view)
+        self.assertNotIn('computerTree.Enabled', view)
+        for guarded in ['if (busy) return;', 'if (!busy && Apply', 'if (!busy && Reload', 'take.Enabled = !busy', 'send.Enabled = !busy']:
+            self.assertNotIn(guarded, view)
+        tree = source('DiskFolderTree.cs')
+        self.assertNotIn('busy()', tree)
+        self.assertIn('Загружаю…', tree)
+        self.assertIn('internal void ShowMessage(string text)', tree)
+        self.assertIn('Tree.SelectedNode = e.Node', tree.split('Tree.AfterCheck +=', 1)[1].split('Tree.BeforeExpand', 1)[0])
+        window = source('ConfigWindow.cs')
+        load = window.split('async Task LoadFolders()', 1)[1].split('void InitializeFolders()', 1)[0]
+        self.assertNotIn('diskApplying', load)
+        inner = window.split('async Task LoadFoldersInner()', 1)[1].split('Task ApplyFolders()', 1)[0]
+        self.assertLess(inner.index('folders.ShowLoading()'), inner.index('await Bundle()'))
+        self.assertLess(inner.index('var nav = folders.RefreshNavPane();'), inner.index('await tree'))
+        self.assertIn('folders.ShowLoadFailed()', inner)
+        self.assertIn('WindowModel.FoldersRecommendation', window)
+
+    def test_wheel_layout_and_window_order(self):
+        window = source('ConfigWindow.cs')
+        self.assertIn('class WheelRouter : IMessageFilter', window)
+        self.assertIn('Application.AddMessageFilter(wheel)', window)
+        self.assertIn('Application.RemoveMessageFilter(wheel)', window)
+        self.assertIn('WindowFromPoint', window)
+        self.assertNotIn('TopMost', window)
+        rows = window.split('void LayoutRows()', 1)[1].split('void Ui(', 1)[0]
+        self.assertIn('new RowStyle(SizeType.Percent, 100)', rows)
+        self.assertIn('SizeType.Absolute, journal.Visible ? JournalHeight : 0', rows)
+        self.assertIn('Resize += (a, b) => LayoutRows();', window)
+        view = source('DiskFoldersView.cs')
+        self.assertNotIn('Font.Height * 12', view)
+        self.assertIn('layout.RowStyles[layout.RowCount - 1] = new RowStyle(SizeType.Percent, 100)', view)
+        main = source('ConfigWindow.Main.cs')
+        self.assertIn('journal.Dock = DockStyle.Bottom;', main.split('void BuildMain()', 1)[1].split('configPage.Controls.Add(journal)', 1)[0])
 
     def test_pending_account_survives_rejected_or_failed_guard(self):
         wizard = source('SetupWizard.cs')

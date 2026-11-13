@@ -69,6 +69,8 @@ namespace RemoteAgents.Launcher
             }
             readyForCommands = true;
             timer.Tick += (s, e) => Tick(); timer.Start();
+            // The folder choice keeps applying after its window closed; the tray reports the result.
+            BackgroundWork.Disk.Changed += () => { try { dispatch.BeginInvoke(new Action(DiskFinished)); } catch (InvalidOperationException) { } };
             dispatch.BeginInvoke(new Action(() => {
                 if (firstSetup) { RunFirstSetup(); return; }
                 Handle(args); DrainCommands(); Tick();
@@ -169,7 +171,7 @@ namespace RemoteAgents.Launcher
                 if (DateTime.UtcNow >= nextOperationCheck) CheckOperations();
                 RefreshMenu(); WriteStatus();
                 CheckSync(); CheckServerHealth();
-                if (serverUpdateRequested && !engine.Pending && MutationConflict().Length == 0 && TrySelfUpdate()) return;
+                if (serverUpdateRequested && !engine.Pending && MutationConflict().Length == 0 && !BackgroundWork.Disk.Busy && TrySelfUpdate()) return;
             } catch { log.Write("supervisor.tick.failed"); icon.Icon = red; }
             finally { ticking = false; }
         }
@@ -232,7 +234,7 @@ namespace RemoteAgents.Launcher
         {
             if(Product.IsVpn || !Json.Bool(Json.Map(Json.Get(config.Data,"wizard")),"configured") || !Json.Map(Json.Get(config.Data,"profile")).ContainsKey("server"))return;
             bool connected=Json.Bool(StatusView.Read(home,"transport",maxAgeSec:15),"ok");
-            bool occupied = !syncTaskRetired || syncRunning || actionBusy || busy || closing || operationChecking || mainWindow != null && mainWindow.IsApplying;
+            bool occupied = !syncTaskRetired || syncRunning || actionBusy || busy || closing || operationChecking || BackgroundWork.Disk.Busy || mainWindow != null && mainWindow.IsApplying;
             if (!syncSchedule.Due(connected, DateTime.UtcNow, occupied)) return;
             syncRunning=true; syncSchedule.Started(DateTime.UtcNow);
             syncSummary="Сверка конфига: выполняется в фоне";
@@ -279,6 +281,7 @@ namespace RemoteAgents.Launcher
             string url = TrayMenuModel.HappierUrl(config.Data, AccountState());
             if (url.Length > 0) Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
         }
+        readonly Image warningImage = SystemIcons.Warning.ToBitmap();
         void RefreshMenu()
         {
             if (icon.ContextMenuStrip == null) {
@@ -289,7 +292,7 @@ namespace RemoteAgents.Launcher
                 } else foreach (var entry in TrayEntries()) {
                     if (entry.Id == "separator") { menu.Items.Add(new ToolStripSeparator()); continue; }
                     string id = entry.Id;
-                    var item = new ToolStripMenuItem(entry.Text) { Enabled = entry.Enabled, ToolTipText = entry.Hint };
+                    var item = new ToolStripMenuItem(entry.Text) { Enabled = entry.Enabled, ToolTipText = entry.Hint, Image = entry.Warning ? warningImage : null };
                     item.Click += (s, e) => Safe(() => {
                         if (id == "open") ShowMain();
                         else if (id == "folders") ShowMain(true);
@@ -305,7 +308,7 @@ namespace RemoteAgents.Launcher
                 var entries = TrayEntries();
                 for (int i = 0; i < entries.Length; i++) {
                     if (entries[i].Id == "separator") continue;
-                    var item = icon.ContextMenuStrip.Items[i]; item.Text = entries[i].Text; item.Enabled = entries[i].Enabled; item.ToolTipText = entries[i].Hint;
+                    var item = icon.ContextMenuStrip.Items[i]; item.Text = entries[i].Text; item.Enabled = entries[i].Enabled; item.ToolTipText = entries[i].Hint; item.Image = entries[i].Warning ? warningImage : null;
                 }
             }
             RefreshMain();
@@ -379,6 +382,7 @@ namespace RemoteAgents.Launcher
             if (mainWindow == null || mainWindow.IsDisposed) {
                 mainWindow = ConfigWindow.Main(home, engine.Folder(engine.Current));
                 mainWindow.MutationConflict = MutationConflict;
+                mainWindow.FolderMutationConflict = () => MutationConflict(mainWindow);
                 mainWindow.HiddenToTray = () => {
                     if (window.CloseToTray()) {
                         Safe(() => Files.Atomic(Path.Combine(home, "state", "tray-hint-shown"), "shown\n"));
@@ -411,14 +415,16 @@ namespace RemoteAgents.Launcher
             string saved = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteDisk", "base.txt");
             string path = Files.ReadLine(saved); if (path.Length == 0) path = ConfigSession.DiskBase(); Open(path);
         }
-        string MutationConflict()
+        string MutationConflict() { return MutationConflict(null); }
+        string MutationConflict(ConfigWindow except)
         {
-            string operation = syncRunning ? "сверка конфига" : busy ? "обновление" : actionBusy ? "настройка компонентов" : accountResuming ? "подключение аккаунта Happier" : mainWindow != null && mainWindow.IsApplying ? "применение настроек" : "";
+            string operation = syncRunning ? "сверка конфига" : busy ? "обновление" : actionBusy ? "настройка компонентов" : accountResuming ? "подключение аккаунта Happier" : mainWindow != null && mainWindow != except && mainWindow.IsApplying ? "применение настроек" : "";
             return WindowModel.Conflict(operation);
         }
+        // Restart/rollback/update stop processes: they also wait for a background folder run (windows do not).
         bool AllowMutation()
         {
-            string conflict = MutationConflict();
+            string conflict = MutationConflict(); if (conflict.Length == 0 && BackgroundWork.Disk.Busy) conflict = WindowModel.Conflict("подключение папок");
             if (conflict.Length == 0) return !closing;
             if (!closing) MessageBox.Show(mainWindow, conflict, Product.Name);
             return false;
@@ -634,9 +640,20 @@ namespace RemoteAgents.Launcher
                 }
             });
         }
+        DiskRun reportedDisk;
+        void DiskFinished()
+        {
+            var last = BackgroundWork.Disk.Last;
+            if (closing || BackgroundWork.Disk.Busy || last == null || last == reportedDisk) return;
+            reportedDisk = last;
+            // An open window shows the result itself; the balloon is for a run that outlived its window.
+            if (Application.OpenForms.Cast<Form>().Any(f => f is ConfigWindow && f.Visible) || !icon.Visible) return;
+            if (last.Ok) icon.ShowBalloonTip(5000, Product.Name, "Папки: " + last.Summary, ToolTipIcon.Info);
+            else icon.ShowBalloonTip(10000, Product.Name, "Папки не подключены: " + last.Summary + ". Откройте «Папки синхронизации» и нажмите «Синхронизировать» ещё раз.", ToolTipIcon.Warning);
+        }
         void RequestExit()
         {
-            bool applying = actionBusy && !firstSetup || Application.OpenForms.Cast<Form>().Any(f => f is ConfigWindow && ((ConfigWindow)f).IsApplying || f is SetupWizard && ((SetupWizard)f).IsApplying);
+            bool applying = actionBusy && !firstSetup || BackgroundWork.Disk.Busy || Application.OpenForms.Cast<Form>().Any(f => f is ConfigWindow && ((ConfigWindow)f).IsApplying || f is SetupWizard && ((SetupWizard)f).IsApplying);
             if (window.Exit(applying) == WindowExit.ConfirmApplying && MessageBox.Show(mainWindow, "Идёт применение настроек. Прервать?", Product.Name, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
             if (mainWindow != null) mainWindow.Unload();
             foreach (var form in Application.OpenForms.Cast<Form>().ToArray()) { var wizard = form as SetupWizard; if (wizard != null) wizard.CancelEmbedded(); form.Dispose(); }
@@ -675,7 +692,7 @@ namespace RemoteAgents.Launcher
         }
         protected override void ExitThreadCore()
         {
-            if (closing) return; closing = true; timer.Stop(); stop.Cancel();
+            if (closing) return; closing = true; timer.Stop(); stop.Cancel(); BackgroundWork.Disk.Stop();
             if (mainWindow != null && !mainWindow.IsDisposed) mainWindow.Unload();
             lock (pipeGate) { if (server != null) server.Dispose(); }
             foreach (var r in runtimes) r.Dispose(); foreach (var job in actionJobs) job.Dispose();

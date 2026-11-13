@@ -21,21 +21,25 @@ namespace RemoteAgents.Launcher
         internal event Action<string, Dictionary<string, object>> LevelLoaded;
         internal DiskFoldersModel Model;
         readonly Func<string, Task<Dictionary<string, object>>> level;
-        readonly Func<Func<Task>, Task> guard; readonly Func<bool> busy; readonly Action<string> append;
+        readonly Func<Func<Task>, Task> guard; readonly Action<string> append;
         readonly Dictionary<TreeNode, DiskFolderInfo> rows = new Dictionary<TreeNode, DiskFolderInfo>();
         readonly Dictionary<TreeNode, string> statuses = new Dictionary<TreeNode, string>();
         TreeNode externalRoot;
         internal event Action SelectionChanged;
+        // busy is kept for callers but no longer gates anything: ticks, selection and expansion never wait for
+        // the server, other sections or a Disk run; only the Disk application itself is serialized elsewhere.
         internal DiskFolderTree(TreeView tree, Func<string, Task<Dictionary<string, object>>> level, Func<Func<Task>, Task> guard, Func<bool> busy, Action<string> append)
         {
-            Tree = tree; this.level = level; this.guard = guard; this.busy = busy; this.append = append;
+            Tree = tree; this.level = level; this.guard = guard; this.append = append;
             Tree.CheckBoxes = true; Tree.DrawMode = TreeViewDrawMode.OwnerDrawText;
             Tree.DrawNode += DrawNode;
             Tree.Resize += (s, e) => Tree.Invalidate();
             Tree.FontChanged += (s, e) => SetRowHeight(); SetRowHeight();
-            Tree.BeforeCheck += (s, e) => { if (!Changing && (busy() || e.Node.Tag == null || e.Node.Tag is string && ((string)e.Node.Tag).Length == 0)) e.Cancel = true; };
+            Tree.BeforeCheck += (s, e) => { if (!Changing && (e.Node.Tag == null || e.Node.Tag is string && ((string)e.Node.Tag).Length == 0)) e.Cancel = true; };
             Tree.AfterCheck += (a, e) => {
                 if (Changing) return;
+                // A tick also selects its row: «Забрать»/«Отправить»/direction act on it at once.
+                if (Tree.SelectedNode != e.Node) Tree.SelectedNode = e.Node;
                 try {
                     var entry = e.Node.Tag as DiskExternalChoice;
                     if (entry != null) Model.SetExternal(entry, e.Node.Checked);
@@ -48,8 +52,13 @@ namespace RemoteAgents.Launcher
             };
             Tree.BeforeExpand += async (a, e) => {
                 if (!(e.Node.Tag is string) || e.Node.Nodes.Count != 1 || e.Node.Nodes[0].Tag != null) return;
-                e.Cancel = true; if (busy()) return;
-                var node = e.Node; await guard(async () => { await LoadChildren(node); node.Expand(); });
+                e.Cancel = true;
+                // The level loads in the background; the marker row says so and a second click does not start another load.
+                var node = e.Node; var marker = node.Nodes[0];
+                if (marker.Name == Loading) return;
+                marker.Name = Loading; marker.Text = "Загружаю…"; marker.ForeColor = SystemColors.GrayText; Tree.Invalidate();
+                try { await guard(async () => { await LoadChildren(node); node.Expand(); }); }
+                finally { if (marker.TreeView != null && marker.Name == Loading) { marker.Name = ""; marker.Text = "Не загрузилось — раскройте ещё раз"; Tree.Invalidate(); } }
             };
         }
         void SetRowHeight() { Tree.ItemHeight = Math.Max(Tree.Font.Height + 8, SystemInformation.MenuCheckSize.Height + 4); }
@@ -144,6 +153,19 @@ namespace RemoteAgents.Launcher
             target.Clear(); target.AddRange(children.ToArray());
             if (parent == null) RefreshExternal(); else if (observe) RefreshChecks();
             if (observe && Json.Bool(union, "truncated")) append("Показана часть большой папки. Отметка папки включает скрытые элементы. Для частичного выбора снимите всю папку, затем отметьте нужные видимые элементы.");
+        }
+        const string Loading = "loading";
+        // A grey row instead of an empty or disabled pane while the server answers (DiskTree may take seconds).
+        // Rows from this computer («С этого компьютера») stay usable below it.
+        internal void ShowMessage(string text)
+        {
+            if (Loaded) return;
+            bool wasChanging = Changing; Changing = true;
+            try {
+                rows.Clear(); statuses.Clear(); externalRoot = null; Tree.Nodes.Clear();
+                Tree.Nodes.Add(new TreeNode(text) { Name = Loading, ForeColor = SystemColors.GrayText });
+                RefreshExternal();
+            } finally { Changing = wasChanging; }
         }
         internal void Reset()
         {

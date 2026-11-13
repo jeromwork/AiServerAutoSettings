@@ -9,7 +9,7 @@ namespace RemoteAgents.Launcher
     internal sealed class TrayMenuEntry
     {
         internal string Id, Text, Hint = "";
-        internal bool Enabled;
+        internal bool Enabled, Warning;
         internal TrayMenuEntry(string id, string text, bool enabled = true) { Id = id; Text = text; Enabled = enabled; }
     }
     // Pure presentation model: the same facts feed the menu, tooltip and window.
@@ -33,7 +33,7 @@ namespace RemoteAgents.Launcher
             string url = HappierUrl(config, account);
             return new[] {
                 new TrayMenuEntry("open", "Открыть"),
-                new TrayMenuEntry("folders", "Папки синхронизации"),
+                Folders(config),
                 new TrayMenuEntry("happier", "Открыть Happier", url.Length > 0) { Hint = url.Length > 0 ? "Открыть веб-приложение Happier" : "Адрес Happier не задан: укажите happier.webappUrl в настройках" },
                 new TrayMenuEntry("separator", "", false),
                 new TrayMenuEntry("connection", Connection(transport), false),
@@ -41,6 +41,20 @@ namespace RemoteAgents.Launcher
                 new TrayMenuEntry("separator", "", false),
                 new TrayMenuEntry("exit", "Выход")
             };
+        }
+        internal const string NoFolders = "⚠ Папки не выбраны — выберите папки для синхронизации";
+        // No folders in the profile: nothing is synchronized. That is allowed, but the menu says so plainly.
+        internal static bool FoldersMissing(Dictionary<string, object> config)
+        {
+            var profile = Json.Map(Json.Get(config, "profile"));
+            if (!profile.ContainsKey("server")) return false;
+            var choice = DiskChoice.FromProfile(profile);
+            return !(choice.All || choice.Folders.Count > 0 || choice.External.Count > 0);
+        }
+        static TrayMenuEntry Folders(Dictionary<string, object> config)
+        {
+            if (!FoldersMissing(config)) return new TrayMenuEntry("folders", "Папки синхронизации");
+            return new TrayMenuEntry("folders", NoFolders) { Warning = true, Hint = "Сейчас ни одна папка не синхронизируется с сервером. Откройте и отметьте нужные папки." };
         }
         internal static string PathTitle(Dictionary<string, object> candidate)
         {

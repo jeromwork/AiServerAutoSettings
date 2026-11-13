@@ -23,6 +23,14 @@ namespace RemoteAgents.Launcher
             Check(string.Join(",", menu.Select(x => x.Id)) == "open,folders,happier,separator,connection,server,separator,exit", "exact menu order");
             Check(menu[0].Text == "Открыть" && menu[1].Text == "Папки синхронизации" && menu[2].Text == "Открыть Happier" && menu[7].Text == "Выход", "human labels");
             Check(menu[0].Enabled && menu[1].Enabled && menu[7].Enabled, "window and exit remain accessible");
+            // No folders chosen: nothing syncs. Allowed, but the same «folders» item turns into a visible warning.
+            var noFolders = Data("{\r\n\"profile\":{\"server\":{\"address\":\"203.0.113.10\"}}\r\n}");
+            var warned = TrayMenuModel.Build(noFolders, empty, transport, health);
+            Check(TrayMenuModel.FoldersMissing(noFolders) && warned[1].Id == "folders" && warned[1].Warning && warned[1].Enabled && warned[1].Text == TrayMenuModel.NoFolders && warned[1].Text.StartsWith("⚠"), "no chosen folders shows a warning item that opens folders");
+            Check(warned.Length == menu.Length, "menu shape stays the same for in-place refresh");
+            Check(!TrayMenuModel.FoldersMissing(Data("{\"profile\":{\"server\":{},\"disk\":{\"folders\":[\"Project\"]}}}")), "a chosen folder clears the warning");
+            Check(!TrayMenuModel.FoldersMissing(Data("{\"profile\":{\"server\":{},\"disk\":{\"folders\":\"all\"}}}")), "all server folders count as chosen");
+            Check(!TrayMenuModel.FoldersMissing(empty) && !menu[1].Warning, "not configured yet: no folder warning");
             Check(!menu[2].Enabled && menu[2].Hint.Contains("happier.webappUrl"), "missing Happier URL disabled with explanation");
             Check(!menu[4].Enabled && !menu[5].Enabled, "information rows disabled");
             Check(menu[4].Text.Contains("VLESS через fixture") && menu[4].Text.Contains("КБ/с"), "friendly active route and speed");
