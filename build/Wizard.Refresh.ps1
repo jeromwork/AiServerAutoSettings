@@ -259,7 +259,7 @@ function Update-WizardConfigSettings([string]$Root,[string]$Bundle,$Request) {
         Write-TransportJson $networkReceipt @{schema=1;session=$session;task=$task;mark=$mark.ToString('o');previous=$previous.transport;profileFile=$profileFile;profile=$profile;vpn=$previous.vpn;serverRoute=$previous.wizard.serverRoute;versionFile=$lastFile;pin=$(if($resetPin){$oldPin}else{$null})} -Private -Durable
         try{Register-WizardRollback $Root $Bundle Network $session $task}catch{Remove-Item -LiteralPath $networkReceipt -Force;throw}
         try{
-            # Stable profile filename is shared by Disk/control; their next reconnect
+            # Stable profile filename is used by control; its next reconnect
             # reads the new pins/options while keeping the exact same private key.
             if($resetPin){Write-TransportJson (Join-Path $Root 'state/transport-pin.json') @{mode='auto';tag=$null} -Private}
             Write-TransportJson $profileFile $nextProfile -Private

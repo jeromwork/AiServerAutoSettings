@@ -564,7 +564,7 @@ function Get-TransportCandidates($Settings,[string]$Root) {
     }
     # The saved route may be the daemon's own channel SOCKS (channel first): tunnels then go direct, never through themselves.
     $ownChannel=($route -and $route.used -eq 'proxy' -and [string]$route.proxy.host -in @('127.0.0.1','localhost') -and [int]$route.proxy.port -in @([int]$o.channelSocksPort,[int](Get-TransportConfiguredPorts $Settings.Transport $p).channelSocksPort))
-    # OpenSSH из профиля + SOCKS (-D): один туннель несёт и SSH, и Syncthing через selector.
+    # OpenSSH из профиля + SOCKS (-D): один туннель несёт SSH и совместимый sync-вход через selector.
     if($o.openSsh -and $directSsh){
         $port=[int]$o.socksPortBase
         [void]$out.Add(@{type='socks';tag='openssh-direct';server='127.0.0.1';server_port=$port;version='5'})
@@ -639,7 +639,7 @@ function Get-TransportCandidates($Settings,[string]$Root) {
 
 function New-TransportConfig($Settings,$Paths,[string]$Secret,[string]$DefaultTag,[string]$Interface='') {
     $o=$Settings.Options;$sync=@($Settings.Channel.inbounds|Where-Object {$_.tag -eq 'sync'}|Select-Object -First 1)
-    if($sync.Count -and ([int]$sync[0].override_port -lt 1 -or [int]$sync[0].override_port -gt 65535)){throw 'Неверный порт Syncthing канала'}
+    if($sync.Count -and ([int]$sync[0].override_port -lt 1 -or [int]$sync[0].override_port -gt 65535)){throw 'Неверный порт sync-входа канала'}
     $in=@();$rules=@();$ports=@{}
     $targets=New-Object Collections.ArrayList;[void]$targets.Add(@('ssh',[int]$o.sshPort,(Get-TransportServerPort $Settings.Profile)))
     if($sync.Count){[void]$targets.Add(@('sync',[int]$o.syncPort,[int]$sync[0].override_port))}
@@ -873,7 +873,7 @@ function Get-TransportSelection($Pin,$Rows,$Candidates,[string]$Current='') {
 function Get-TransportRevision([string]$Root) {
     # One spelling of Home for daemon and Bootstrap (relative/trailing separators differ at entry).
     $Root=Get-TransportHome $Root
-    # Содержимое, а не mtime: Syncthing/атомарная замена и одинаковая длина не скрывают изменение.
+    # Содержимое, а не mtime: атомарная замена и одинаковая длина не скрывают изменение.
     $config=Read-TransportJson (Join-Path $Root 'config.json');$files=@()
     foreach($field in @('profilePath','channelPath')){if($config.transport.$field){$files+=[string]$config.transport.$field}}
     $files=@($files|Select-Object -Unique)

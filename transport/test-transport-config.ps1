@@ -514,7 +514,7 @@ try{
     $sshOnly.Channel=[pscustomobject]@{inbounds=@();outbounds=@()}
     $generated=New-TransportConfig $sshOnly $paths 'fixture' 'unavailable'
     Assert (@($generated.inbounds|Where-Object {$_.tag -eq 'ssh'}).Count -eq 1) 'SSH-only channel retains SSH inbound'
-    Assert (@($generated.inbounds|Where-Object {$_.tag -eq 'sync'}).Count -eq 0) 'SSH-only channel has no fabricated Syncthing port'
+    Assert (@($generated.inbounds|Where-Object {$_.tag -eq 'sync'}).Count -eq 0) 'SSH-only channel has no fabricated sync port'
     $sshOnly.Channel.inbounds=@([pscustomobject]@{tag='sync';override_port=23456})
     $generated=New-TransportConfig $sshOnly $paths 'fixture' 'unavailable'
     Assert (@($generated.inbounds|Where-Object {$_.tag -eq 'sync' -and $_.override_port -eq 23456}).Count -eq 1) 'disk port can be added later'

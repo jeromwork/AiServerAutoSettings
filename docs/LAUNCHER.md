@@ -9,6 +9,14 @@
 Задача G реализована в коде; Linux-проверки перечислены в разделе «Два EXE».
 Приёмка на Windows ещё не выполнена. `--tray --home <тест>` не запускает мастер и не регистрирует Run.
 
+## Актуально для app/cloud-app
+
+Прежний встроенный движок синхронизации, дерево папок и его шаг мастера удалены. «Диск» в трее открывает папку официального облачного клиента; локальный путь задаётся через `cloud.localFolder`. Облако на сервере применяет отдельный шаг конфига Cloud после Server/Connection. `Send-WizardHelpers` доставляет `cloud/server-cloud.sh` и `cloud/filter.txt` в `$HOME/.local/share/remoteagents-cloud/`, включая повторную проверку перед самим Cloud.
+
+Контракт: `bash "$HOME/.local/share/remoteagents-cloud/server-cloud.sh" apply`; JSON stdin содержит `vendor`, `login`, `password`, `remoteRoot`, `localRoot`, `pollSeconds`. Успех требует нулевого кода и boolean `ok:true`. Пароль не входит в argv, запросный файл или журнал.
+
+Актуальные состав бандла и проверка стыковки: [build/README.md](../build/README.md), [CLOUD-APP-REPORT.md](CLOUD-APP-REPORT.md), [CLOUD-SERVER-REPORT.md](CLOUD-SERVER-REPORT.md). Дальнейшие разделы этого документа — история предыдущих задач; описания старого дерева, статусов и интеграции Проводника не относятся к облачной ветке.
+
 ## Выход в интернет и локальные сети (задача Q)
 
 Раздел «Выход в интернет» (после «Связь», необязательный): тип SOCKS5/HTTP, адрес, порт,
