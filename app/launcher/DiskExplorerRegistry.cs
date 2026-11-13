@@ -50,7 +50,7 @@ namespace RemoteAgents.Launcher
                 string label = action == "download" ? "Скачать на компьютер" : action == "sync" ? "Синхронизировать" : action == "keep-server" ? "Оставить только на сервере" : action == "add" ? "Добавить в Диск" : "Ход синхронизации…";
                 Set(key, "RemoteAgentsOwner", DiskExplorerService.Owner); Set(key, "MUIVerb", label); Set(key, "Icon", "\"" + exePath + "\",0");
                 Set(key, "MultiSelectModel", "Document"); Set(key, "AppliesTo", applies);
-                Set(key + @"\command", "", "\"" + exePath + "\"" + (launcherHome == null ? "" : " --home \"" + launcherHome + "\"") + " --disk-shell " + action + " \"%1\"");
+                Set(key + @"\command", "", "\"" + exePath + "\"" + (launcherHome == null ? "" : " --home " + Files.Quote(launcherHome)) + " --disk-shell " + action + " \"%1\"");
             }
             if (dirty) changed();
         }

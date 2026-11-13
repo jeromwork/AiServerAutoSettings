@@ -33,7 +33,7 @@ namespace RemoteAgents.Launcher
         readonly DiskFolderTree folders, computerFolders;
         readonly System.Windows.Forms.Timer syncTimer = new System.Windows.Forms.Timer { Interval = 2500 };
         readonly CancellationTokenSource syncCancel = new CancellationTokenSource();
-        readonly DiskSyncReader syncReader = new DiskSyncReader();
+
         readonly Label syncOverview = new Label { AutoSize = true, AccessibleName = "Состояние Syncthing" };
         bool syncReading, initialized;
         internal event Action SyncChanged;
@@ -193,7 +193,7 @@ namespace RemoteAgents.Launcher
             syncReading = true; var currentModel = Model; int current = generation;
             var paths = Model.SyncPaths(diskBase); string home = SyncHome; var token = syncCancel.Token;
             try {
-                var snapshot = await Task.Run(() => syncReader.Read(home, paths, token), token);
+                var snapshot = await Task.Run(() => DiskSyncMonitor.Read(home, paths, token), token);
                 if (IsDisposed || current != generation || Model != currentModel || home != SyncHome) return;
                 var now = Model.SyncPaths(diskBase);
                 if (paths.Count != now.Count || paths.Any(p => !now.ContainsKey(p.Key) || now[p.Key] != p.Value)) return;

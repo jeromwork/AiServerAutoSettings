@@ -13,9 +13,25 @@ namespace RemoteAgents.Launcher
                 var value = Convert.ToString(key.GetValue("RemoteAgents", ""));
                 if (value.IndexOf(Path.Combine(home, "RemoteAgents.exe"), StringComparison.OrdinalIgnoreCase) >= 0) key.DeleteValue("RemoteAgents", false);
             }
-            try { Program.Forward(Program.InstanceName(home, System.Security.Principal.WindowsIdentity.GetCurrent().User), new[] { "--exit" }); } catch { }
+            string instance = Program.InstanceName(home, System.Security.Principal.WindowsIdentity.GetCurrent().User);
+            try { Program.Forward(instance, new[] { "--exit" }); } catch { }
+            // Wait until the tray stopped its background Explorer projection before removing the same metadata.
+            try { using (var running = Mutex.OpenExisting("Global\\" + instance)) {
+                bool held = false;
+                try { try { held = running.WaitOne(60000); } catch (AbandonedMutexException) { held = true; }
+                    if (!held) throw new IOException("Закройте RemoteAgents перед удалением");
+                } finally { if (held) running.ReleaseMutex(); }
+            } } catch (WaitHandleCannotBeOpenedException) { }
             var engine = new UpdateEngine(home, Program.Version);
-            if (engine.Current.Length == 0) return;
+            if (engine.Current.Length == 0) {
+                var cleanup = DiskExplorerNative.CreateService(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteAgents", "icons"), new Journal(home).Write);
+                var profile = ConfigProfile.Load(home);
+                cleanup.Cleanup(DiskExplorerController.Root(profile));
+                foreach (var external in DiskChoice.FromProfile(profile).External) cleanup.CleanupExternal(external.Path);
+                DiskExplorerNative.CreateRegistry(new Journal(home).Write).Cleanup();
+                DiskExplorerNative.CleanupIcons(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteAgents", "icons"));
+                return;
+            }
             string script = Path.Combine(engine.Folder(engine.Current), "build", "Uninstall.ps1");
             string output = Path.Combine(home, "state", "uninstall-output.tmp"); Directory.CreateDirectory(Path.GetDirectoryName(output));
             try {

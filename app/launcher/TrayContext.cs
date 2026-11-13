@@ -27,6 +27,11 @@ namespace RemoteAgents.Launcher
         long lastTrayClick = -SystemInformation.DoubleClickTime - 1L;
         ConfigWindow mainWindow;
         WindowModel window;
+        DiskExplorerController explorer;
+        DiskShellCommands diskShell;
+        DiskProgressWindow diskProgress;
+        readonly DiskShellBatchQueue diskShellQueue = new DiskShellBatchQueue();
+        bool shellBusy;
         readonly ConfigSyncSchedule syncSchedule = new ConfigSyncSchedule();
         bool syncRunning, accountResuming, serverHealthRunning, syncTaskRetired, syncTaskRetiring;
         DateTime nextSyncTaskRetirement = DateTime.MinValue;
@@ -68,7 +73,8 @@ namespace RemoteAgents.Launcher
                 throw;
             }
             readyForCommands = true;
-            timer.Tick += (s, e) => Tick(); timer.Start();
+            timer.Tick += (s, e) => { Tick(); DrainDiskShell(); }; timer.Start();
+            if (!Product.IsVpn && !firstSetup) InitializeExplorer();
             // The folder choice keeps applying after its window closed; the tray reports the result.
             BackgroundWork.Disk.Changed += () => { try { dispatch.BeginInvoke(new Action(DiskFinished)); } catch (InvalidOperationException) { } };
             dispatch.BeginInvoke(new Action(() => {
@@ -98,7 +104,7 @@ namespace RemoteAgents.Launcher
             } finally {actionBusy=false;}
             if(closing)return;
             if(FirstInstall.Required(home)){ExitThread();return;}
-            ReloadSettings();icon.Visible=true;readyForCommands=true;ShowMain();
+            ReloadSettings();icon.Visible=true;readyForCommands=true;if (!Product.IsVpn) InitializeExplorer();ShowMain();
             if(Product.IsVpn)Safe(RegisterVpnRun);
             DrainCommands();Tick();
         }
@@ -234,7 +240,7 @@ namespace RemoteAgents.Launcher
         {
             if(Product.IsVpn || !Json.Bool(Json.Map(Json.Get(config.Data,"wizard")),"configured") || !Json.Map(Json.Get(config.Data,"profile")).ContainsKey("server"))return;
             bool connected=Json.Bool(StatusView.Read(home,"transport",maxAgeSec:15),"ok");
-            bool occupied = !syncTaskRetired || syncRunning || actionBusy || busy || closing || operationChecking || BackgroundWork.Disk.Busy || mainWindow != null && mainWindow.IsApplying;
+            bool occupied = shellBusy || !syncTaskRetired || syncRunning || actionBusy || busy || closing || operationChecking || BackgroundWork.Disk.Busy || mainWindow != null && mainWindow.IsApplying;
             if (!syncSchedule.Due(connected, DateTime.UtcNow, occupied)) return;
             syncRunning=true; syncSchedule.Started(DateTime.UtcNow);
             syncSummary="Сверка конфига: выполняется в фоне";
@@ -295,7 +301,8 @@ namespace RemoteAgents.Launcher
                     var item = new ToolStripMenuItem(entry.Text) { Enabled = entry.Enabled, ToolTipText = entry.Hint, Image = entry.Warning ? warningImage : null };
                     item.Click += (s, e) => Safe(() => {
                         if (id == "open") ShowMain();
-                        else if (id == "folders") ShowMain(true);
+                        else if (id == "folders") OpenDisk();
+                        else if (id == "progress") ShowDiskProgress();
                         else if (id == "happier") {
                             OpenHappier();
                         } else if (id == "exit") RequestExit();
@@ -412,13 +419,12 @@ namespace RemoteAgents.Launcher
         }
         void OpenDisk()
         {
-            string saved = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteDisk", "base.txt");
-            string path = Files.ReadLine(saved); if (path.Length == 0) path = ConfigSession.DiskBase(); Open(path);
+            Open(DiskExplorerController.Root(ConfigProfile.Load(home)));
         }
         string MutationConflict() { return MutationConflict(null); }
         string MutationConflict(ConfigWindow except)
         {
-            string operation = syncRunning ? "сверка конфига" : busy ? "обновление" : actionBusy ? "настройка компонентов" : accountResuming ? "подключение аккаунта Happier" : mainWindow != null && mainWindow != except && mainWindow.IsApplying ? "применение настроек" : "";
+            string operation = shellBusy ? "команда Проводника" : syncRunning ? "сверка конфига" : busy ? "обновление" : actionBusy ? "настройка компонентов" : accountResuming ? "подключение аккаунта Happier" : mainWindow != null && mainWindow != except && mainWindow.IsApplying ? "применение настроек" : "";
             return WindowModel.Conflict(operation);
         }
         // Restart/rollback/update stop processes: they also wait for a background folder run (windows do not).
@@ -627,6 +633,7 @@ namespace RemoteAgents.Launcher
         void Handle(string[] args)
         {
             Safe(() => {
+                if (args.Contains("--disk-shell")) { QueueDiskShell(args); return; }
                 WindowCommand command = WindowModel.Route(args);
                 if (args.Contains("--exit") || args.Contains("--uninstall")) { RequestExit(); return; }
                 if(firstSetup && !icon.Visible){foreach(var form in Application.OpenForms.Cast<Form>().Where(f=>f is SetupWizard || f is ConfigWindow).ToArray()) { ActivateWindow(form); } return;}
@@ -639,6 +646,42 @@ namespace RemoteAgents.Launcher
                     case WindowCommand.SetupCheck: CheckSetup(); break;
                 }
             });
+        }
+        void InitializeExplorer()
+        {
+            if (explorer != null || Product.IsVpn) return;
+            explorer = new DiskExplorerController(home, () => engine.Folder(engine.Current), log.Write);
+            diskShell = new DiskShellCommands(home, () => Task.FromResult(engine.Folder(engine.Current)), ShowDiskProgress,
+                message => { if (!closing) MessageBox.Show(mainWindow, message, "Диск", MessageBoxButtons.OK, MessageBoxIcon.Information); }, log.Write,
+                path => explorer.MarkPlaceholder(path));
+        }
+        void QueueDiskShell(string[] args)
+        {
+            if (Product.IsVpn) { MessageBox.Show("Диск доступен в RemoteAgents", Product.Name); return; }
+            if (firstSetup && !icon.Visible) { ShowMain(); return; }
+            DiskShellRequest request;
+            if (!DiskShellRequest.TryParse(args, out request)) throw new IOException("Проводник не передал команду");
+            InitializeExplorer(); diskShellQueue.Add(request, DateTime.UtcNow);
+        }
+        async void DrainDiskShell()
+        {
+            if (closing || shellBusy || diskShell == null) return;
+            var batch = diskShellQueue.Take(DateTime.UtcNow); if (batch.Count == 0) return;
+            string conflict = MutationConflict();
+            if (conflict.Length > 0) { MessageBox.Show(mainWindow, conflict + ". Повторите команду в Проводнике.", "Диск"); return; }
+            shellBusy = true;
+            try { await diskShell.Execute(batch, stop.Token); }
+            catch (OperationCanceledException) { }
+            catch (Exception error) { log.Write("explorer.command.failed"); if (!closing) MessageBox.Show(mainWindow, error.Message, "Диск", MessageBoxButtons.OK, MessageBoxIcon.Information); }
+            finally { shellBusy = false; if (explorer != null && !closing) await explorer.Refresh(); }
+        }
+        void ShowDiskProgress()
+        {
+            if (closing || Product.IsVpn) return; InitializeExplorer();
+            if (diskProgress == null || diskProgress.IsDisposed)
+                diskProgress = new DiskProgressWindow(() => explorer.Snapshot, () => explorer.Paths, Open,
+                    () => Safe(() => DiskDetailsLauncher.Open(DiskExplorerController.SyncHome(new Configuration(home).Data))));
+            ActivateWindow(diskProgress);
         }
         DiskRun reportedDisk;
         void DiskFinished()
@@ -693,6 +736,8 @@ namespace RemoteAgents.Launcher
         protected override void ExitThreadCore()
         {
             if (closing) return; closing = true; timer.Stop(); stop.Cancel(); BackgroundWork.Disk.Stop();
+            if (explorer != null) explorer.Dispose();
+            if (diskProgress != null) diskProgress.Dispose();
             if (mainWindow != null && !mainWindow.IsDisposed) mainWindow.Unload();
             lock (pipeGate) { if (server != null) server.Dispose(); }
             foreach (var r in runtimes) r.Dispose(); foreach (var job in actionJobs) job.Dispose();

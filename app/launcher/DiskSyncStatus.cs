@@ -21,6 +21,9 @@ namespace RemoteAgents.Launcher
     {
         internal string Failure = "ожидаю ответ", DisconnectedFor = "";
         internal bool Connected;
+        internal string[] ConfiguredPaths = new string[0];
+        internal decimal InBytesTotal = -1, OutBytesTotal = -1;
+        internal DateTime ObservedUtc = DateTime.UtcNow;
         internal readonly Dictionary<string, DiskSyncFolder> Folders = new Dictionary<string, DiskSyncFolder>(StringComparer.OrdinalIgnoreCase);
         internal static DiskSyncSnapshot Unavailable(string reason) { return new DiskSyncSnapshot { Failure = reason.Replace("\r", "").Split('\n')[0] }; }
 
@@ -29,7 +32,9 @@ namespace RemoteAgents.Launcher
             Dictionary<string, object> connections, Dictionary<string, object> pending,
             IDictionary<string, Dictionary<string, object>> statuses, IDictionary<string, Dictionary<string, object>> errors)
         {
-            var result = new DiskSyncSnapshot { Failure = "", Connected = Json.Bool(Json.Map(Json.Get(Json.Map(Json.Get(connections, "connections")), peer)), "connected") };
+            var result = new DiskSyncSnapshot { ConfiguredPaths = Json.Array(config).Select(Json.Map).Select(f => Json.Str(f, "path")).Where(p => p.Length > 0).ToArray(), Failure = "", Connected = Json.Bool(Json.Map(Json.Get(Json.Map(Json.Get(connections, "connections")), peer)), "connected") };
+            var totals = Json.Map(Json.Get(connections, "total"));
+            result.InBytesTotal = DiskSyncStatus.Number(totals, "inBytesTotal"); result.OutBytesTotal = DiskSyncStatus.Number(totals, "outBytesTotal");
             foreach (var pair in paths) {
                 var matches = Json.Array(config).Select(Json.Map).Where(f => SamePath(Json.Str(f, "path"), pair.Value)).ToArray();
                 var folder = new DiskSyncFolder(); result.Folders[pair.Key] = folder;

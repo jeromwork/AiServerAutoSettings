@@ -34,6 +34,7 @@ namespace RemoteAgents.Launcher
             return new[] {
                 new TrayMenuEntry("open", "Открыть"),
                 Folders(config),
+                new TrayMenuEntry("progress", "Ход синхронизации…"),
                 new TrayMenuEntry("happier", "Открыть Happier", url.Length > 0) { Hint = url.Length > 0 ? "Открыть веб-приложение Happier" : "Адрес Happier не задан: укажите happier.webappUrl в настройках" },
                 new TrayMenuEntry("separator", "", false),
                 new TrayMenuEntry("connection", Connection(transport), false),
@@ -53,8 +54,8 @@ namespace RemoteAgents.Launcher
         }
         static TrayMenuEntry Folders(Dictionary<string, object> config)
         {
-            if (!FoldersMissing(config)) return new TrayMenuEntry("folders", "Папки синхронизации");
-            return new TrayMenuEntry("folders", NoFolders) { Warning = true, Hint = "Сейчас ни одна папка не синхронизируется с сервером. Откройте и отметьте нужные папки." };
+            if (!FoldersMissing(config)) return new TrayMenuEntry("folders", "Папки");
+            return new TrayMenuEntry("folders", NoFolders) { Warning = true, Hint = "Сейчас ни одна папка не синхронизируется с сервером. Откройте программу и выберите папки на вкладке «Папки»." };
         }
         internal static string PathTitle(Dictionary<string, object> candidate)
         {

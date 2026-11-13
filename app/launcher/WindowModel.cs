@@ -27,7 +27,7 @@ namespace RemoteAgents.Launcher
         }
         internal static bool ShouldShow(string[] args)
         {
-            if (args.Any(a => new[] { "--exit", "--uninstall", "--identify", "--install-stop", "--restart-components", "--rollback", "--logs", "--check-updates" }.Contains(a))) return false;
+            if (args.Any(a => new[] { "--exit", "--uninstall", "--identify", "--install-stop", "--restart-components", "--rollback", "--logs", "--check-updates", "--disk-shell" }.Contains(a))) return false;
             if (args.Any(a => new[] { "--show", "--started", "--settings" }.Contains(a))) return true;
             return !args.Contains("--tray") && !args.Contains("--after-update") && !args.Contains("--setup-check");
         }
@@ -65,6 +65,15 @@ namespace RemoteAgents.Launcher
         internal T Last { get { lock (gate) return last; } }
         internal Task Current { get; private set; }
         internal SerialRunner() { Current = Task.FromResult(true); }
+        // Shell commands must not replace a queued settings edit or await a displaced callback.
+        internal bool TryStart(Func<CancellationToken, Task<T>> work)
+        {
+            lock (gate) {
+                if (stop.IsCancellationRequested || busy) return false;
+                busy = true; Current = Task.Run(() => Loop(work));
+            }
+            Changed(); return true;
+        }
         // true: started now; false: queued behind the running job.
         internal bool Start(Func<CancellationToken, Task<T>> work)
         {
