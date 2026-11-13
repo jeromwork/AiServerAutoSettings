@@ -68,6 +68,9 @@ server/proxy_out.py
 build/Wizard.Network.ps1
 disk/Disk.Binary.ps1
 disk/Disk.NavPane.ps1
+disk/Disk.Explorer.ps1
+disk/Ensure-DiskExplorerIgnores.ps1
+disk/Remove-DiskExplorer.ps1
 
 # Config engine: resource locks, shared SSH session, VPN-first and key-only sync.
 build/Wizard.Engine.ps1
