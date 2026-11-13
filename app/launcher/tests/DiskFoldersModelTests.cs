@@ -18,6 +18,35 @@ namespace RemoteAgents.Launcher
         static DiskChoice Roundtrip(DiskFoldersModel model)
         { return DiskChoice.FromProfile(model.ToChoice().WriteTo(new Dictionary<string, object>(), "C:\\Disk")); }
         static bool Refused(Action action) { try { action(); return false; } catch (IOException) { return true; } catch (InvalidDataException) { return true; } }
+        static void TransferChecks()
+        {
+            var m = Model("{\"folders\":[]}");
+            m.Level("", Level(Row("Local").Replace("both", "local") + "," + Row("Remote").Replace("both", "server")));
+            Check(m.OnComputer("Local") && !m.OnServer("Local"), "local-only folder belongs on computer");
+            Check(!m.OnComputer("Remote") && m.OnServer("Remote"), "server-only folder belongs on server");
+            m.TakeToComputer("Remote");
+            Check(m.OnComputer("Remote") && m.Includes("Remote") && Roundtrip(m).Folders.Count == 1, "take creates pending local row and config choice");
+            m.SetDirection("Remote", DiskChoice.Send); m.TakeToComputer("Remote");
+            Check(m.DirectionOf("Remote") == DiskChoice.Both, "take enables receiving when previously send only");
+            m.SendToServer("Local"); m.SetDirection("Local", DiskChoice.Receive); m.SendToServer("Local");
+            Check(m.DirectionOf("Local") == DiskChoice.Both, "send enables sending when previously receive only");
+            m.StopSynchronizing("Remote");
+            Check(!m.Includes("Remote") && !m.OnComputer("Remote") && m.OnServer("Remote"), "stop removes pending download without inventing local presence");
+            m.StopSynchronizing("Local");
+            Check(m.OnComputer("Local") && !m.Includes("Local"), "stop keeps observed local folder visible");
+            m.AddExternal("C:\\Other", "Other", DiskChoice.Receive);
+            m.StopSynchronizing("Other"); m.SendToServer("Other");
+            Check(m.External.Count == 1 && m.DirectionOf("Other") == DiskChoice.Both, "send restores detached external choice and enables upload");
+            m.SetMode(DiskFoldersMode.All); m.StopSynchronizing("Remote");
+            Check(m.Mode == DiskFoldersMode.Selected && m.Includes("Local") && !m.Includes("Remote"), "stop in all mode preserves other loaded roots");
+            Check(Refused(() => m.TakeToComputer("")) && Refused(() => m.SendToServer("")) && Refused(() => m.StopSynchronizing("")), "empty actions refused");
+            var partial = Model("{\"folders\":[{\"path\":\"Remote/Keep\",\"direction\":\"receive\"}]}");
+            partial.TakeToComputer("Remote/New"); partial.StopSynchronizing("Remote/New");
+            Check(Roundtrip(partial).Folders.Single().Path == "Remote/Keep" && partial.DirectionOf("Remote") == DiskChoice.Receive, "unloaded siblings and directions survive transfers");
+            var incomplete = Model("{\"folders\":\"all\"}");
+            incomplete.Level("", Level(Row("Local"), true));
+            Check(Refused(() => incomplete.StopSynchronizing("Local")) && incomplete.Mode == DiskFoldersMode.All, "incomplete all inventory cannot silently discard hidden selections");
+        }
         static void StatusChecks()
         {
             const string both = "✓ На компьютере и на сервере", copies = "Не синхронизируется; копии на компьютере и сервере";
@@ -195,7 +224,7 @@ namespace RemoteAgents.Launcher
         internal static void Run()
         {
             ReviewRegressions(); RestartRegressions();
-            StatusChecks();
+            StatusChecks(); TransferChecks();
             var absent = new Dictionary<string, object>();
             var c = DiskChoice.FromProfile(absent); var m = new DiskFoldersModel(c);
             Check(!c.Chosen && m.Mode == DiskFoldersMode.Selected, "missing choice prompts for folders");

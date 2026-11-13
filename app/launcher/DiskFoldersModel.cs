@@ -139,6 +139,31 @@ namespace RemoteAgents.Launcher
             Mode = mode;
             if (mode == DiskFoldersMode.None) { ClearSelection(); External.Clear(); manualPaths = null; manualDirections = null; }
         }
+        // Pane membership is based on observations and the pending choice, never on filesystem guesses.
+        internal bool OnComputer(string path)
+        {
+            DiskFolderInfo info;
+            return ExternalFor(path) == null && (Includes(path) || Partial(path) || Items.TryGetValue(path, out info) && (info.Presence == "local" || info.Presence == "both"));
+        }
+        internal bool OnServer(string path)
+        {
+            DiskFolderInfo info;
+            return Items.TryGetValue(path, out info) && (info.Presence == "server" || info.Presence == "both");
+        }
+        internal void TakeToComputer(string path) { ChooseTransfer(path, DiskChoice.Send); }
+        internal void SendToServer(string path) { ChooseTransfer(path, DiskChoice.Receive); }
+        void ChooseTransfer(string path, string blockedDirection)
+        {
+            if (string.IsNullOrEmpty(path)) throw new IOException("Выберите папку");
+            Set(path, true);
+            // A deliberate transfer must enable that direction. Keep other existing policies.
+            if (DirectionOf(path) == blockedDirection) SetDirection(path, DiskChoice.Both);
+        }
+        internal void StopSynchronizing(string path)
+        {
+            if (string.IsNullOrEmpty(path)) throw new IOException("Выберите папку");
+            Set(path, false);
+        }
         internal void Set(string path, bool value)
         {
             var entry = ExternalFor(path); if (entry != null) { SetExternal(entry, value); return; }
