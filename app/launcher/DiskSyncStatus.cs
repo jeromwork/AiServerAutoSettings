@@ -67,9 +67,11 @@ namespace RemoteAgents.Launcher
             }
             return "";
         }
+        internal static bool HasLocalChanges(DiskSyncFolder folder)
+        { return folder != null && new[] { "receiveOnlyChangedFiles", "receiveOnlyChangedBytes", "receiveOnlyTotalItems" }.Any(k => Number(folder.Status, k, 0) != 0); }
         internal static bool Complete(DiskSyncSnapshot snapshot, DiskSyncFolder folder)
         {
-            return snapshot.Failure.Length == 0 && snapshot.Connected && folder != null && folder.Id.Length > 0 && folder.Shared && !folder.Pending && !folder.Paused &&
+            return snapshot.Failure.Length == 0 && snapshot.Connected && folder != null && folder.Id.Length > 0 && folder.Shared && !folder.Pending && !folder.Paused && !HasLocalChanges(folder) &&
                 Json.Str(folder.Status, "state") == "idle" && Number(folder.Status, "needFiles") == 0 && Number(folder.Status, "needBytes") == 0 &&
                 Number(folder.Status, "needTotalItems", 0) == 0 && Number(folder.Status, "errors", 0) == 0 && Number(folder.Status, "pullErrors", 0) == 0 && Json.Str(folder.Status, "error").Length == 0 && FirstError(folder).Length == 0;
         }
@@ -81,6 +83,7 @@ namespace RemoteAgents.Launcher
                 if (error.Length > 0) return "⚠ " + error;
                 if (Json.Str(folder.Status, "state") == "error" || Json.Str(folder.Status, "error").Length > 0) return "⚠ " + Line(Json.Text(folder.Status, "error", "Syncthing остановил папку из-за ошибки"));
                 if (Number(folder.Status, "errors", 0) > 0 || Number(folder.Status, "pullErrors", 0) > 0) return "⚠ Syncthing не смог обработать часть файлов";
+                if (HasLocalChanges(folder)) return "⚠ Есть локальные изменения, не отправленные на сервер";
                 if (folder.Paused || Json.Str(folder.Status, "state") == "paused") return "⏸ Синхронизация приостановлена";
             }
             if (!snapshot.Connected) return "⏸ Нет связи с сервером" + (snapshot.DisconnectedFor.Length > 0 ? " · " + snapshot.DisconnectedFor : "");

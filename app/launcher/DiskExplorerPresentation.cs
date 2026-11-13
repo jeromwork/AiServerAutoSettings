@@ -30,7 +30,7 @@ namespace RemoteAgents.Launcher
             snapshot = snapshot ?? DiskSyncSnapshot.Unavailable("ожидаю ответ");
             var result = new DiskExplorerPresentation { Tooltip = DiskSyncStatus.Text(snapshot, folder), Kind = DiskExplorerKind.Pending };
             if (snapshot.Failure.Length > 0) result.Kind = DiskExplorerKind.Unavailable;
-            else if (folder != null && (DiskSyncStatus.FirstError(folder).Length > 0 || Json.Str(folder.Status, "state") == "error" || Json.Str(folder.Status, "error").Length > 0 || DiskSyncStatus.Number(folder.Status, "errors", 0) > 0 || DiskSyncStatus.Number(folder.Status, "pullErrors", 0) > 0)) result.Kind = DiskExplorerKind.Error;
+            else if (folder != null && (DiskSyncStatus.HasLocalChanges(folder) || DiskSyncStatus.FirstError(folder).Length > 0 || Json.Str(folder.Status, "state") == "error" || Json.Str(folder.Status, "error").Length > 0 || DiskSyncStatus.Number(folder.Status, "errors", 0) > 0 || DiskSyncStatus.Number(folder.Status, "pullErrors", 0) > 0)) result.Kind = DiskExplorerKind.Error;
             else if (folder != null && (folder.Paused || Json.Str(folder.Status, "state") == "paused")) result.Kind = DiskExplorerKind.Paused;
             else if (!snapshot.Connected) result.Kind = DiskExplorerKind.Offline;
             else if (DiskSyncStatus.Complete(snapshot, folder)) result.Kind = DiskExplorerKind.Synced;

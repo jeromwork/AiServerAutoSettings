@@ -87,7 +87,6 @@ namespace RemoteAgents.Launcher
         internal static string Refusal(DiskSyncSnapshot snapshot, DiskSyncFolder folder, Dictionary<string, object> completion)
         {
             if (!DiskSyncStatus.Complete(snapshot, folder)) return "Локальная папка ещё не синхронизирована: " + DiskSyncStatus.Text(snapshot, folder);
-            if (DiskSyncStatus.Number(folder.Status, "receiveOnlyChangedFiles", 0) != 0 || DiskSyncStatus.Number(folder.Status, "receiveOnlyChangedBytes", 0) != 0 || DiskSyncStatus.Number(folder.Status, "receiveOnlyTotalItems", 0) != 0) return "Есть локальные изменения, не отправленные на сервер";
             if (DiskSyncStatus.Number(completion, "completion") != 100 || DiskSyncStatus.Number(completion, "needBytes") != 0 || DiskSyncStatus.Number(completion, "needItems") != 0 || DiskSyncStatus.Number(completion, "needDeletes") != 0 || Json.Str(completion, "remoteState") != "valid") return "Сервер не подтвердил полную копию папки (100%)";
             return "";
         }
