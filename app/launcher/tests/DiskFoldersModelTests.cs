@@ -190,9 +190,13 @@ namespace RemoteAgents.Launcher
                 File.WriteAllText(Path.Combine(home, "state", "config.xml"), "<configuration>\r\n<gui><address>127.0.0.1:" + port + "</address><apikey>fixture-api-key</apikey></gui>\r\n</configuration>");
                 File.WriteAllText(Path.Combine(home, "server.txt"), "peer\r\n");
                 var paths = new Dictionary<string, string> { { "Фото", "C:\\Disk\\Фото" } };
-                var reader = new DiskSyncReader(); var s = reader.Read(home, paths, System.Threading.CancellationToken.None);
+                var reader = new DiskSyncReader();
+                var observed = new Dictionary<string, string>(paths) { { "Local", "C:\\Disk\\Local" } };
+                var s = DiskSyncMonitor.Read(home, observed, System.Threading.CancellationToken.None);
                 Check(s.Failure == "" && DiskSyncStatus.Complete(s, s.Folders["Фото"]), "actual HTTP client reads XML GUI/key and CRLF peer/JSON");
                 Check(worker.Wait(5000) && requests.Count == 5 && requests.Contains("/rest/folder/errors?folder=photo%2Fid"), "one HTTP collection includes the escaped folder ID and error endpoint");
+                Check(object.ReferenceEquals(s, DiskSyncMonitor.Read(home, paths, System.Threading.CancellationToken.None)) && requests.Count == 5,
+                    "folder tab reuses the tray superset snapshot without a second HTTP collection");
                 s = reader.Read(home, paths, System.Threading.CancellationToken.None);
                 Check(s.Failure.Contains("REST не отвечает") && !s.Failure.Contains("fixture-api-key") && !s.Connected, "unreachable HTTP replaces old success without exposing key");
                 var cancelled = new System.Threading.CancellationTokenSource(); cancelled.Cancel();
