@@ -95,6 +95,19 @@ namespace RemoteAgents.Launcher
                 rest.Detached = true; candidate.Recycle(recycle);
                 Check(recycle.Calls == 1 && !File.Exists(userFile) && File.ReadAllText(Path.Combine(recyclePath, "data.txt")) == "123", "verified candidate only invokes injected Recycle Bin adapter");
             } finally { Directory.Delete(work, true); }
+            var observed = new DiskSyncSnapshot { Failure = "", Connected = true };
+            observed.Folders["A"] = new DiskSyncFolder { Id = "configured", Path = "C:\\Disk\\A", Shared = true };
+            var remembered = new Dictionary<string, string> { { "A", "C:\\Disk\\A" } };
+            Check(DiskExplorerObservation.EffectiveSelection(false, "A", "C:\\Disk\\A", observed, remembered), "failed deselect keeps actual configured share");
+            observed.Folders["A"].Shared = false;
+            Check(!DiskExplorerObservation.EffectiveSelection(false, "A", "C:\\Disk\\A", observed, remembered), "another peer does not make a Disk share");
+            observed.Folders["A"].Shared = true; observed.Folders["A"].Path = "D:\\Other\\A";
+            Check(!DiskExplorerObservation.EffectiveSelection(false, "A", "C:\\Disk\\A", observed, remembered), "same name at another path does not select folder");
+            observed.Folders.Clear();
+            Check(!DiskExplorerObservation.EffectiveSelection(false, "A", "C:\\Disk\\A", observed, remembered), "successful REST detachment clears actual selection");
+            Check(DiskExplorerObservation.EffectiveSelection(false, "A", "c:/disk/a", DiskSyncSnapshot.Unavailable("offline\r\n"), remembered), "REST outage retains last verified path");
+            Check(!DiskExplorerObservation.EffectiveSelection(false, "A", "D:\\Other\\A", DiskSyncSnapshot.Unavailable("offline"), remembered), "REST outage never transfers proof to another path");
+            Check(DiskExplorerObservation.EffectiveSelection(true, "New", "C:\\Disk\\New", observed, remembered), "desired selection stays pending before attachment");
             Console.WriteLine("DiskShell: " + count + " checks");
         }
         sealed class FakeRecycle : IDiskRecycle

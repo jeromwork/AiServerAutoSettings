@@ -52,7 +52,10 @@ namespace RemoteAgents.Launcher
                 if (request.Action == "download" || request.Action == "sync") {
                     model.TakeToComputer(project); changed = transfers = true;
                 } else if (request.Action == "keep-server") {
-                    if (!model.Includes(project) && !model.Partial(project)) throw new IOException("Эта папка не выбрана для синхронизации");
+                    if (!model.Includes(project) && !model.Partial(project)) {
+                        var actual = await Task.Run(() => new DiskSyncReader().Read(diskHome, new Dictionary<string, string> { { project, path } }, token));
+                        if (!DiskExplorerObservation.EffectiveSelection(false, project, path, actual, null)) throw new IOException("Эта папка не подключена к Syncthing; состояние можно уточнить в «Ход синхронизации…»");
+                    }
                     if (state.Kind == LocalFolderKind.External || (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) {
                         refusals.Add(project + ": внешняя папка сохранена в исходном месте; снять её выбор можно во вкладке «Папки»."); continue;
                     }
