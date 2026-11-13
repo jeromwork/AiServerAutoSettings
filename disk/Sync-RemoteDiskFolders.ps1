@@ -6,6 +6,7 @@ $script:DiskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk'
 $lock=$null
 try {
     $lock=[IO.File]::Open((Join-Path $script:DiskHome 'folders.lock'),'OpenOrCreate','ReadWrite','None')
+    [void](Ensure-DiskNavPane $(if($BasePath){$BasePath}else{Get-DiskBase}))
     Read-DiskState
     Resume-InterruptedSelection
     if(-not $BasePath){$BasePath=Get-DiskBase};$BasePath=[IO.Path]::GetFullPath($BasePath);[void][IO.Directory]::CreateDirectory($BasePath)
