@@ -32,6 +32,7 @@ namespace RemoteAgents.Launcher
         readonly DiskFolderTree folders, computerFolders;
         readonly LocalFolderBrowser localBrowser;
         DiskFolderTree activeFolders;
+        bool localSelection; int generation;
         readonly Func<string, object, Task<Dictionary<string, object>>> run;
         readonly Func<Func<Task>, Task> mutate;
         readonly Action<string> log;
@@ -113,9 +114,9 @@ namespace RemoteAgents.Launcher
             foreach (var pane in new[] { folders, computerFolders }) {
                 var current = pane;
                 current.SelectionChanged += () => { NeedsExternalInventory = false; RefreshState(); };
-                current.Tree.AfterSelect += (sender, e) => { if (!current.Changing) { activeFolders = current; RefreshDirection(); } };
-                current.Tree.Enter += (sender, e) => { activeFolders = current; RefreshDirection(); };
-                current.Tree.NodeMouseClick += (sender, e) => { if (e.Button == MouseButtons.Right) { activeFolders = current; current.Tree.SelectedNode = e.Node; } };
+                current.Tree.AfterSelect += (sender, e) => { if (!current.Changing) { activeFolders = current; localSelection = false; RefreshDirection(); } };
+                current.Tree.Enter += (sender, e) => { activeFolders = current; localSelection = false; RefreshDirection(); };
+                current.Tree.NodeMouseClick += (sender, e) => { if (e.Button == MouseButtons.Right) { activeFolders = current; localSelection = false; current.Tree.SelectedNode = e.Node; RefreshDirection(); } };
                 current.Tree.ContextMenuStrip = menu;
                 WireDrag(current);
             }
@@ -131,6 +132,7 @@ namespace RemoteAgents.Launcher
             }
             menu.Opening += (sender, e) => {
                 activeFolders = menu.SourceControl == tree ? folders : computerFolders;
+                localSelection = menu.SourceControl == localBrowser.Tree;
                 if (SelectedPath(activeFolders).Length == 0 && !(menu.SourceControl == localBrowser.Tree && localBrowser.SelectedPath.Length > 0)) { e.Cancel = true; return; }
                 RefreshDirection(); string d = CurrentDirection();
                 foreach (var pair in directionMenu) { pair.Value.Enabled = direction.Enabled; pair.Value.Checked = direction.Enabled && pair.Key == d; }
@@ -165,18 +167,19 @@ namespace RemoteAgents.Launcher
             localBrowser.SendRequested += SendLocal;
             localBrowser.StopRequested += StopLocal;
             localBrowser.SelectionChanged += () => {
-                if (!localBrowser.Active) { RefreshDirection(); return; }
+                localSelection = localBrowser.Active;
+                if (!localSelection) { activeFolders = computerFolders; RefreshDirection(); return; }
                 // An already chosen folder is selected in the Disk tab's list, so direction and stop act on the same entry.
                 activeFolders = computerFolders; var state = localBrowser.SelectedState;
                 if (state != null && state.Kind == LocalFolderKind.External) computerFolders.RefreshExternal(state.Entry); else computerFolders.Tree.SelectedNode = null;
-                RefreshDirection();
+                localSelection = true; RefreshDirection();
             };
             RefreshState();
         }
         static string SelectedPath(DiskFolderTree pane) { return pane.SelectedExternal == null ? pane.SelectedPath : pane.SelectedExternal.Remote; }
         string SelectedLocalPath()
         {
-            if (localBrowser.Active && localBrowser.SelectedPath.Length > 0) return localBrowser.SelectedPath;
+            if (localSelection && localBrowser.SelectedPath.Length > 0) return localBrowser.SelectedPath;
             var entry = activeFolders.SelectedExternal;
             string path = SelectedPath(activeFolders);
             return entry != null ? entry.Path : path.Length == 0 ? "" : Path.Combine(diskBase, path.Replace('/', Path.DirectorySeparatorChar));
@@ -198,7 +201,7 @@ namespace RemoteAgents.Launcher
         }
         void SendFromComputer()
         {
-            if (localBrowser.Active && localBrowser.SelectedPath.Length > 0) SendLocal(localBrowser.SelectedPath); else Transfer(computerFolders, false);
+            if (localSelection && localBrowser.SelectedPath.Length > 0) SendLocal(localBrowser.SelectedPath); else Transfer(computerFolders, false);
         }
         // A folder from anywhere on this computer: inside Disk it becomes a Disk path, elsewhere a named external folder.
         void SendLocal(string path)
@@ -219,7 +222,7 @@ namespace RemoteAgents.Launcher
         }
         void StopSelected()
         {
-            if (localBrowser.Active && localBrowser.SelectedPath.Length > 0) { StopLocal(localBrowser.SelectedPath); return; }
+            if (localSelection && localBrowser.SelectedPath.Length > 0) { StopLocal(localBrowser.SelectedPath); return; }
             try { Model.StopSynchronizing(SelectedPath(activeFolders)); NeedsExternalInventory = false; }
             catch (Exception error) { log(error.Message); }
             RefreshState();
@@ -235,7 +238,7 @@ namespace RemoteAgents.Launcher
             pane.Tree.AllowDrop = true;
             pane.Tree.ItemDrag += (sender, e) => {
                 if (e.Button != MouseButtons.Left) return;
-                pane.Tree.SelectedNode = (TreeNode)e.Item; activeFolders = pane;
+                pane.Tree.SelectedNode = (TreeNode)e.Item; activeFolders = pane; localSelection = false;
                 string path = SelectedPath(pane); if (path.Length == 0) return;
                 pane.Tree.DoDragDrop(new FolderDrag { Owner = this, Source = pane, Path = path }, DragDropEffects.Copy);
             };
@@ -256,9 +259,10 @@ namespace RemoteAgents.Launcher
         }
         internal async Task RefreshNavPane()
         {
-            try { var data = await run("DiskNavPane", new { @base = diskBase }); if (!IsDisposed) navPane.Visible = !Json.Bool(data, "ok"); }
+            int current = generation;
+            try { var data = await run("DiskNavPane", new { @base = diskBase }); if (!IsDisposed && current == generation) navPane.Visible = !Json.Bool(data, "ok"); }
             catch (OperationCanceledException) { throw; }
-            catch (Exception error) { log("Не удалось проверить значок Disk: " + error.Message); }
+            catch (Exception error) { if (current == generation) log("Не удалось проверить значок Disk: " + error.Message); }
         }
         static void AddRow(TableLayoutPanel panel, Control c)
         {
@@ -268,6 +272,7 @@ namespace RemoteAgents.Launcher
         }
         internal void Initialize(DiskChoice choice, string basePath, bool allowSkip, DiskChoice appliedChoice = null, IEnumerable<string> excluded = null)
         {
+            generation++; localSelection = false;
             NeedsExternalInventory = !choice.Chosen && choice.External.Count == 0;
             diskBase = basePath; RefreshLocalPath(); navPane.Visible = false;
             Model = new DiskFoldersModel(choice, appliedChoice, excluded);
@@ -345,7 +350,7 @@ namespace RemoteAgents.Launcher
             bool localChanges = entry == null && Model.CanRevert(top);
             changes.Text = localChanges ? "В «" + top + "» есть изменения на компьютере: " + Model.Items[top].LocalChanges + ". Они не отправляются на сервер." : "";
             warning.Visible = localChanges; revert.Enabled = !busy;
-            if (localBrowser.Active && entry == null) {
+            if (localSelection) {
                 status.Text = localBrowser.SelectedDescription; status.Visible = status.Text.Length > 0;
                 send.Enabled = localBrowser.CanSend;
                 stopSync.Enabled = localBrowser.SelectedState != null && localBrowser.SelectedState.Checked;

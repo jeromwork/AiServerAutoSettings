@@ -14,7 +14,7 @@ namespace RemoteAgents.Launcher
         internal readonly TreeView Tree;
         internal DiskTreeSelection Selection = new DiskTreeSelection(new string[0]);
         internal bool Changing { get; private set; }
-        internal bool Loaded;
+        internal bool Loaded; int generation;
         internal bool ShowExternal = true;
         internal Func<string, bool> VisiblePath;
         readonly Dictionary<string, Dictionary<string, object>> levels = new Dictionary<string, Dictionary<string, object>>(StringComparer.Ordinal);
@@ -169,12 +169,12 @@ namespace RemoteAgents.Launcher
         }
         internal void Reset()
         {
-            Loaded = false; levels.Clear(); rows.Clear(); statuses.Clear(); externalRoot = null;
+            generation++; Loaded = false; levels.Clear(); rows.Clear(); statuses.Clear(); externalRoot = null;
             Changing = true; try { Tree.Nodes.Clear(); } finally { Changing = false; }
         }
         internal void ShowRoot(Dictionary<string, object> data, IEnumerable<string> preset = null)
         {
-            Loaded = false; levels.Clear(); rows.Clear(); statuses.Clear(); externalRoot = null;
+            generation++; Loaded = false; levels.Clear(); rows.Clear(); statuses.Clear(); externalRoot = null;
             if (Model == null) Selection = new DiskTreeSelection(preset ?? Json.Strings(Json.Get(Json.Map(Json.Get(data, "selection")), "paths")));
             Changing = true; try { AddLevel(Json.Map(Json.Get(data, "union")), null); Loaded = true; } finally { Changing = false; }
             append("Папки загружены. Вложенные папки появятся при раскрытии. Наличие в обоих местах ещё не означает, что передача завершена.");
@@ -208,7 +208,9 @@ namespace RemoteAgents.Launcher
         }
         async Task LoadChildren(TreeNode parent)
         {
+            int current = generation;
             var data = await level((string)parent.Tag);
+            if (current != generation || Tree.IsDisposed) return;
             Changing = true; try { AddLevel(Json.Map(Json.Get(data, "union")), parent); } finally { Changing = false; }
             // A projection rebuilt during the request detached this node: rebuild so the visible copy gets the loaded level.
             if (parent.TreeView == null) RefreshProjection();

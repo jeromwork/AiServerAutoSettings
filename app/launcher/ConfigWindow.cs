@@ -544,6 +544,7 @@ namespace RemoteAgents.Launcher
             var last = BackgroundWork.Disk.Last;
             if (BackgroundWork.Disk.Busy || last == null || last == seenDisk) return;
             seenDisk = last;
+            if (last.Binding != DiskApplyWait.Binding(ConfigProfile.Load(home))) return;
             if (last.Ok) {
                 folderStepRequired = false; folderSkipped = false; folders.AllowSkip(false); diskFailure = "";
                 if (foldersInitialized) folders.MarkApplied(last.Choice);
@@ -560,12 +561,18 @@ namespace RemoteAgents.Launcher
         {
             if (Product.IsVpn) return;
             if (session == null) { session = new ConfigSession(home, Bundle); session.Log = Log; session.Report = Report; }
-            var current = session; diskFailure = "";
+            diskFailure = "";
             rows[ConfigSections.Disk].Visible = true; rowsPanel.Visible = true; Relayout();
             bool started = BackgroundWork.Disk.Start(async token => {
-                var choice = DiskChoice.FromProfile(ConfigProfile.Load(home));
+                var profile = ConfigProfile.Load(home); var choice = DiskChoice.FromProfile(profile);
+                string binding = DiskApplyWait.Binding(profile);
+                // Separate callbacks: an old Disk result cannot repaint a newer config's rows.
+                var current = new ConfigSession(home, Bundle);
+                current.DiskCurrent = () => binding == DiskApplyWait.Binding(ConfigProfile.Load(home));
+                current.Log = message => { if (current.DiskCurrent()) Log(message); };
+                current.Report = (section, state, message) => Ui(() => { if (current.DiskCurrent()) Report(section, state, message); });
                 var outcome = await current.ApplyDisk(token);
-                return new DiskRun { Ok = outcome.Ok, Summary = outcome.Summary, Choice = choice };
+                return new DiskRun { Ok = outcome.Ok, Summary = outcome.Summary, Choice = choice, Binding = binding };
             });
             if (started) Log("Папки: применяю выбор в фоне. Остальное не ждёт, окно можно закрыть.");
             else { rows[ConfigSections.Disk].Set(SectionState.Waiting, "новый выбор применится после текущего"); Log("Папки: новый выбор сохранён и применится сразу после текущей синхронизации."); }
@@ -585,8 +592,13 @@ namespace RemoteAgents.Launcher
         }
         async Task<Dictionary<string, object>> RunFolderAction(string action, object request)
         {
+            int current = foldersGeneration;
             await Bundle();
-            return await Task.Run(() => WizardRunner.Run(home, bundle, action, request, cancel.Token, Log));
+            if (current != foldersGeneration) throw new OperationCanceledException();
+            return await Task.Run(() => {
+                if (current != foldersGeneration) throw new OperationCanceledException();
+                return WizardRunner.Run(home, bundle, action, request, cancel.Token, Log);
+            });
         }
         async Task ReadFolders(Func<Task> action)
         {
@@ -594,43 +606,52 @@ namespace RemoteAgents.Launcher
             catch (OperationCanceledException) { }
             catch (Exception e) { Log("Папки: " + e.Message); }
         }
-        bool loadingFolders;
+        bool loadingFolders; int foldersGeneration;
         // Reads only (DiskTree, DiskNavPane, DiskExternal): never blocked by a Disk run or other sections.
         async Task LoadFolders()
         {
             if (loadingFolders || running && !folderAccessReady) return;
-            loadingFolders = true;
-            try { await LoadFoldersInner(); }
+            // Initialize before taking ownership: resetting the model invalidates all earlier reads.
+            if (!foldersInitialized) InitializeFolders();
+            int current = foldersGeneration; loadingFolders = true;
+            try { await LoadFoldersInner(current); }
             catch (OperationCanceledException) { }
-            catch (Exception e) { Log("Папки не загружены: " + e.Message); }
-            finally { loadingFolders = false; }
+            catch (Exception e) { if (current == foldersGeneration) Log("Папки не загружены: " + e.Message); }
+            finally { if (current == foldersGeneration) loadingFolders = false; }
         }
         void InitializeFolders()
         {
+            bool reload = loadingFolders;
+            foldersGeneration++; loadingFolders = false;
             var profile = ConfigProfile.Load(home); var disk = Json.Map(Json.Get(profile, "disk"));
             foldersBase = Json.Text(disk, "base", ConfigSession.DiskBase());
             folders.Initialize(DiskChoice.FromProfile(profile), foldersBase, !settings && folderStepRequired,
                 ConfigProfile.AppliedDiskChoice(home, profile), ConfigProfile.DiskExclusions());
             foldersInitialized = true;
+            // A pending A read must neither block B nor be required to finish before B starts.
+            if (reload) { var load = LoadFolders(); }
         }
-        async Task LoadFoldersInner()
+        async Task LoadFoldersInner(int current)
         {
-            // The model comes from the profile without IO, so the panes are usable before the server answers.
-            if (!foldersInitialized) InitializeFolders();
             if (!folders.Loaded) folders.ShowLoading();
             await Bundle();
+            if (IsDisposed || current != foldersGeneration) return;
             // The three reads run side by side; a slow DiskTree only keeps its «Загружаю…» row.
             var tree = RunFolderAction("DiskTree", new { @base = foldersBase, path = "" });
             var nav = folders.RefreshNavPane();
             var inventory = folders.NeedsExternalInventory || folders.Model.External.Count > 0 ? RunFolderAction("DiskExternal", new { action = "list" }) : null;
-            try { var data = await tree; if (IsDisposed) return; folders.ShowTree(data); }
+            try { var data = await tree; if (IsDisposed || current != foldersGeneration) return; folders.ShowTree(data); }
             catch (OperationCanceledException) { throw; }
-            catch (Exception e) { if (!IsDisposed) folders.ShowLoadFailed(); Log("Папки не загружены: " + e.Message + ". Нажмите «Обновить список», чтобы попробовать снова."); }
+            catch (Exception e) {
+                if (IsDisposed || current != foldersGeneration) return;
+                folders.ShowLoadFailed(); Log("Папки не загружены: " + e.Message + ". Нажмите «Обновить список», чтобы попробовать снова.");
+            }
             await nav;
+            if (IsDisposed || current != foldersGeneration) return;
             if (inventory != null) {
-                try { var data = await inventory; if (IsDisposed) return; folders.ShowExternalInventory(data); }
+                try { var data = await inventory; if (IsDisposed || current != foldersGeneration) return; folders.ShowExternalInventory(data); }
                 catch (OperationCanceledException) { throw; }
-                catch (Exception e) { Log("Список папок с компьютера не получен: " + e.Message); }
+                catch (Exception e) { if (current == foldersGeneration) Log("Список папок с компьютера не получен: " + e.Message); }
             }
         }
         // One path for every host: DiskChoice -> stored profile -> the regular Disk section.

@@ -90,7 +90,7 @@ namespace RemoteAgents.Launcher
         }
         internal void Stop() { lock (gate) { next = null; } stop.Cancel(); }
     }
-    internal sealed class DiskRun { internal bool Ok; internal string Summary = ""; internal DiskChoice Choice = null; }
+    internal sealed class DiskRun { internal bool Ok; internal string Summary = "", Binding = ""; internal DiskChoice Choice = null; }
     internal static class BackgroundWork { internal static readonly SerialRunner<DiskRun> Disk = new SerialRunner<DiskRun>(); }
 
     // Wait for two continuous minutes of fresh confirmed connectivity, then five minutes per attempt.

@@ -262,7 +262,8 @@ class FirstRunTests(unittest.TestCase):
         self.assertIn('o.Key != ConfigSections.Disk', follow)
         disk = apply.split('internal async Task<SectionOutcome> ApplyDisk(', 1)[1].split('internal async Task<SectionOutcome> Activate(', 1)[0]
         self.assertIn('"Operation"', disk)
-        self.assertIn('if (state == "finished") await Execute(new[] { ConfigSections.Disk }, token);', disk)
+        self.assertIn('DiskApplyWait.Run(DiskCurrent', disk)
+        self.assertIn('if (state == "finished") { outcome = await execute(); continue; }', apply)
         tray = source('TrayContext.cs')
         self.assertIn('BackgroundWork.Disk.Stop();', tray.split('protected override void ExitThreadCore()', 1)[1])
         self.assertIn('BackgroundWork.Disk.Changed +=', tray)
@@ -286,11 +287,58 @@ class FirstRunTests(unittest.TestCase):
         window = source('ConfigWindow.cs')
         load = window.split('async Task LoadFolders()', 1)[1].split('void InitializeFolders()', 1)[0]
         self.assertNotIn('diskApplying', load)
-        inner = window.split('async Task LoadFoldersInner()', 1)[1].split('Task ApplyFolders()', 1)[0]
+        inner = window.split('async Task LoadFoldersInner(int current)', 1)[1].split('Task ApplyFolders()', 1)[0]
         self.assertLess(inner.index('folders.ShowLoading()'), inner.index('await Bundle()'))
         self.assertLess(inner.index('var nav = folders.RefreshNavPane();'), inner.index('await tree'))
         self.assertIn('folders.ShowLoadFailed()', inner)
         self.assertIn('WindowModel.FoldersRecommendation', window)
+
+    def test_active_selection_owns_stop_status_and_local_path(self):
+        view = source('DiskFoldersView.cs')
+        # The left tab can stay open while the right tree owns selection B.
+        for start, end in [('string SelectedLocalPath()', 'void OpenExplorer('),
+                           ('void StopSelected()', 'sealed class FolderDrag'),
+                           ('void RefreshDirection()', 'protected override void Dispose')]:
+            body = view.split(start, 1)[1].split(end, 1)[0]
+            self.assertIn('if (localSelection', body)
+            self.assertNotIn('localBrowser.Active', body)
+        for event in ('current.Tree.AfterSelect +=', 'current.Tree.Enter +=', 'current.Tree.NodeMouseClick +='):
+            self.assertIn('localSelection = false', view.split(event, 1)[1].split('};', 1)[0])
+        local = view.split('localBrowser.SelectionChanged +=', 1)[1].split('static string SelectedPath', 1)[0]
+        self.assertIn('localSelection = localBrowser.Active', local)
+        self.assertIn('localSelection = menu.SourceControl == localBrowser.Tree', view)
+
+    def test_disk_completion_is_bound_to_its_server_and_choice(self):
+        window = source('ConfigWindow.cs')
+        start = window.split('void StartDisk()', 1)[1].split('static bool DiskChosen', 1)[0]
+        self.assertIn('var current = new ConfigSession(home, Bundle)', start)
+        self.assertIn('current.DiskCurrent = () => binding == DiskApplyWait.Binding(ConfigProfile.Load(home))', start)
+        self.assertIn('Binding = binding', start)
+        self.assertIn('=> Ui(() => { if (current.DiskCurrent()) Report(', start)
+        changed = window.split('void OnDiskChanged()', 1)[1].split('void StartQueuedDisk()', 1)[0]
+        self.assertLess(changed.index('last.Binding != DiskApplyWait.Binding'), changed.index('folders.MarkApplied'))
+        run = source('ConfigApply.cs').split('SectionOutcome RunSection(', 1)[1].split('SectionOutcome Server(', 1)[0]
+        self.assertEqual(run.count('s == ConfigSections.Disk && !DiskCurrent()'), 2)
+        self.assertLess(run.rindex('s == ConfigSections.Disk && !DiskCurrent()'), run.index('ConfigProfile.MarkApplied'))
+
+    def test_folder_read_generations_drop_old_tree_inventory_and_lazy_levels(self):
+        window = source('ConfigWindow.cs')
+        init = window.split('void InitializeFolders()', 1)[1].split('async Task LoadFoldersInner', 1)[0]
+        self.assertIn('foldersGeneration++; loadingFolders = false', init)
+        self.assertIn('if (reload) { var load = LoadFolders(); }', init)
+        load = window.split('async Task LoadFolders()', 1)[1].split('void InitializeFolders()', 1)[0]
+        self.assertIn('finally { if (current == foldersGeneration) loadingFolders = false; }', load)
+        inner = window.split('async Task LoadFoldersInner(int current)', 1)[1].split('Task ApplyFolders()', 1)[0]
+        for await_, write in [('await tree', 'folders.ShowTree(data)'), ('await inventory', 'folders.ShowExternalInventory(data)')]:
+            self.assertIn('current != foldersGeneration', inner.split(await_, 1)[1].split(write, 1)[0])
+        self.assertIn('current != foldersGeneration', inner.split('await Bundle();', 1)[1].split('var tree', 1)[0])
+        tree = source('DiskFolderTree.cs')
+        for start in ('internal void Reset()', 'internal void ShowRoot('):
+            self.assertIn('generation++', tree.split(start, 1)[1].split('\n        }', 1)[0])
+        lazy = tree.split('async Task LoadChildren(', 1)[1]
+        self.assertIn('current != generation', lazy.split('await level', 1)[1].split('AddLevel(', 1)[0])
+        nav = source('DiskFoldersView.cs').split('internal async Task RefreshNavPane()', 1)[1].split('static void AddRow', 1)[0]
+        self.assertIn('current == generation', nav.split('await run', 1)[1].split('navPane.Visible', 1)[0])
 
     def test_wheel_layout_and_window_order(self):
         window = source('ConfigWindow.cs')

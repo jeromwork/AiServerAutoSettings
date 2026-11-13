@@ -690,6 +690,45 @@ namespace RemoteAgents.Launcher
         }
     }
 
+    // Wizard actions read mutable settings from home. Never resume a detached install after its
+    // server/choice changed: release the serial queue so the newest request can use that home.
+    internal static class DiskApplyWait
+    {
+        internal static string Binding(Dictionary<string, object> profile)
+        { return ConfigSections.Hash(profile, ConfigSections.Connection) + ":" + ConfigSections.Hash(profile, ConfigSections.Disk); }
+        internal static SectionOutcome Superseded()
+        { return new SectionOutcome { Summary = "настройки папок или сервера изменились; прежнее ожидание завершено" }; }
+        internal static async Task<SectionOutcome> Run(Func<bool> current, Func<Task<SectionOutcome>> execute,
+            Func<string, Task<Dictionary<string, object>>> poll, Func<CancellationToken, Task> wait,
+            Action<SectionState, string> report, Action<string> log, CancellationToken token)
+        {
+            if (!current()) return Superseded();
+            var outcome = await execute();
+            while (true) {
+                if (!current()) return Superseded();
+                if (!outcome.Pending || !SectionOutcome.ServerOperation(outcome.Operation)) return outcome;
+                await wait(token);
+                if (!current()) return Superseded();
+                Dictionary<string, object> status;
+                try { status = await poll(outcome.Operation); }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception e) {
+                    if (!current()) return Superseded();
+                    log("Папки: состояние установки на сервере не получено: " + e.Message + ". Повторю позже"); continue;
+                }
+                if (!current()) return Superseded();
+                var op = Json.Map(Json.Get(Json.Map(Json.Get(status, "operations")), outcome.Operation));
+                string state = Json.Str(op, "state");
+                if (state == "running") { report(SectionState.Pending, Json.Text(op, "text", "идёт установка на сервере")); continue; }
+                if (state == "finished") { outcome = await execute(); continue; }
+                // Missing/unknown operations cannot prove that this install is still running.
+                var failed = new SectionOutcome { Summary = state == "failed" ? Json.Text(op, "text", "установка на сервере не удалась")
+                    : "состояние установки на сервере не найдено; нажмите «Синхронизировать выбранные папки» ещё раз" };
+                report(SectionState.Failed, failed.Summary); return failed;
+            }
+        }
+    }
+
 #if !PORTABLE_TEST
     // One application of the stored profile: Inspect -> plan -> missing secrets (asked once, before anything runs)
     // -> ConfigEngine with the real actions. Callbacks may arrive on worker threads; the window marshals them.
@@ -701,6 +740,7 @@ namespace RemoteAgents.Launcher
         internal Action<string> Log = delegate { };
         internal Action<string> AccountCreated = delegate { };
         readonly HappierAccountCreation accountCreation;
+        internal Func<bool> DiskCurrent = () => true;
         internal Func<string, string, string> AskSecret = (name, why) => null;
         Dictionary<string, object> services = new Dictionary<string, object>();
         internal readonly ConcurrentDictionary<string, SectionOutcome> Outcomes = new ConcurrentDictionary<string, SectionOutcome>();
@@ -772,6 +812,7 @@ namespace RemoteAgents.Launcher
         }
         SectionOutcome RunSection(string s, CancellationToken token)
         {
+            if (s == ConfigSections.Disk && !DiskCurrent()) return DiskApplyWait.Superseded();
             var p = ConfigProfile.Load(home); var config = new Configuration(home).Data; string hash = ConfigSections.Hash(p, s);
             // «·» lines are the detailed trace (each SSH run, probes): journal only, the row keeps the current step.
             Action<string> progress = line => { if (!line.StartsWith("·", StringComparison.Ordinal)) Report(s, SectionState.Running, line); Log(ConfigSections.Title(s) + ": " + line); };
@@ -791,6 +832,7 @@ namespace RemoteAgents.Launcher
                 case ConfigSections.Lan: o = Lan(p, config, run); break;
                 default: throw new ArgumentException("Неизвестный раздел");
             }
+            if (s == ConfigSections.Disk && !DiskCurrent()) return DiskApplyWait.Superseded();
             // Server may have replaced root's password by its own key in the profile (PromoteServerKey).
             if (o.Ok && s == ConfigSections.Server) hash = ConfigSections.Hash(ConfigProfile.Load(home), s);
             if (o.Ok) ConfigProfile.MarkApplied(home, s, hash); else if (!o.Pending) ConfigProfile.MarkApplied(home, s, null);
@@ -954,23 +996,16 @@ namespace RemoteAgents.Launcher
         // calls and Disk is run again once it has finished. Callers pass a token that outlives the window.
         internal async Task<SectionOutcome> ApplyDisk(CancellationToken token)
         {
-            await Execute(new[] { ConfigSections.Disk }, token);
-            while (true) {
-                SectionOutcome o;
-                if (!Outcomes.TryGetValue(ConfigSections.Disk, out o)) return new SectionOutcome { Summary = "результат не получен" };
-                if (!o.Pending || !SectionOutcome.ServerOperation(o.Operation)) return o;
-                await Task.Delay(12000, token);
-                Dictionary<string, object> status;
-                try { status = await Task.Run(() => WizardRunner.Run(home, bundle, "Operation", new { operations = new[] { o.Operation } }, token)); }
-                catch (OperationCanceledException) { throw; } catch (Exception e) { Log("Папки: состояние установки на сервере не получено: " + e.Message + ". Повторю позже"); continue; }
-                var op = Json.Map(Json.Get(Json.Map(Json.Get(status, "operations")), o.Operation)); string state = Json.Str(op, "state");
-                if (state == "running") { Report(ConfigSections.Disk, SectionState.Pending, Json.Text(op, "text", "идёт установка на сервере")); continue; }
-                if (state == "failed") {
-                    var failed = new SectionOutcome { Summary = Json.Text(op, "text", "установка на сервере не удалась") };
-                    Outcomes[ConfigSections.Disk] = failed; Report(ConfigSections.Disk, SectionState.Failed, failed.Summary); return failed;
-                }
-                if (state == "finished") await Execute(new[] { ConfigSections.Disk }, token);
-            }
+            var result = await DiskApplyWait.Run(DiskCurrent, async () => {
+                await Execute(new[] { ConfigSections.Disk }, token);
+                SectionOutcome outcome;
+                return Outcomes.TryGetValue(ConfigSections.Disk, out outcome) ? outcome : new SectionOutcome { Summary = "результат не получен" };
+            }, operation => Task.Run(() => {
+                if (!DiskCurrent()) throw new OperationCanceledException();
+                return WizardRunner.Run(home, bundle, "Operation", new { operations = new[] { operation } }, token);
+            }), ct => Task.Delay(12000, ct), (state, text) => Report(ConfigSections.Disk, state, text), Log, token);
+            if (DiskCurrent()) Outcomes[ConfigSections.Disk] = result;
+            return result;
         }
         internal async Task<SectionOutcome> Activate(CancellationToken token)
         {

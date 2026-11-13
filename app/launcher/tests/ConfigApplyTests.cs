@@ -29,6 +29,57 @@ namespace RemoteAgents.Launcher
             "  \"disk\": { \"base\": \"C:\\\\Users\\\\user\\\\Disk\", \"folders\": [\"Проекты\", \"Документы\"] },\r\n" +
             "  \"proxyOut\": { \"type\": \"socks\", \"server\": \"proxy.example\", \"port\": 1080, \"login\": \"u\", \"password\": { \"secret\": \"proxy-out-password\" } },\r\n" +
             "  \"lan\": [ { \"name\": \"office\", \"kind\": \"openvpn\", \"ovpn\": { \"secret\": \"lan-office-ovpn\" } } ]\r\n}\r\n";
+        static Dictionary<string, object> DiskStatus(string state)
+        { return Json.Map(Json.Parse("{\r\n\"operations\":{\"disk\":{\"state\":\"" + state + "\"}}\r\n}")); }
+        static async Task DiskWait()
+        {
+            var a = Profile(); var b = Clone(a); Json.Map(Json.Get(b, "server"))["address"] = "203.0.113.11";
+            string binding = DiskApplyWait.Binding(a);
+            Check(binding != DiskApplyWait.Binding(b), "same folders on a different server have a different Disk binding");
+            b = Clone(a); Json.Map(Json.Get(b, "disk"))["folders"] = new[] { "B" };
+            Check(binding != DiskApplyWait.Binding(b), "new folder choice invalidates the old Disk wait");
+            b = Clone(a); Json.Map(Json.Get(b, "server")).Remove("rootPassword");
+            Check(binding == DiskApplyWait.Binding(b), "promoted root password does not invalidate the server binding");
+            Func<Task<SectionOutcome>> pending = () => Task.FromResult(new SectionOutcome { Pending = true, Operation = "disk" });
+            Func<CancellationToken, Task> immediate = token => Task.CompletedTask;
+            foreach (string state in new[] { "none", "", "unexpected", "failed" }) {
+                int polls = 0;
+                var outcome = await DiskApplyWait.Run(() => true, pending, operation => {
+                    Check(++polls == 1, "missing status must not poll forever"); return Task.FromResult(DiskStatus(state));
+                }, immediate, (st, text) => { }, text => { }, CancellationToken.None);
+                Check(!outcome.Ok && !outcome.Pending && polls == 1, "missing/failed operation releases Disk instead of an infinite wait: " + state);
+            }
+            int executes = 0, progress = 0, steps = 0;
+            var finished = await DiskApplyWait.Run(() => true, () => Task.FromResult(++executes == 1
+                ? new SectionOutcome { Pending = true, Operation = "disk" } : new SectionOutcome { Ok = true }),
+                operation => Task.FromResult(DiskStatus(++steps == 1 ? "running" : "finished")), immediate,
+                (st, text) => progress++, text => { }, CancellationToken.None);
+            Check(finished.Ok && executes == 2 && progress == 1, "running then finished reapplies Disk once");
+
+            var runner = new SerialRunner<DiskRun>(); string target = "A"; int oldPolls = 0;
+            var waiting = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            runner.Start(async token => {
+                var outcome = await DiskApplyWait.Run(() => target == "A", pending,
+                    operation => { oldPolls++; return Task.FromResult(DiskStatus("none")); },
+                    async ct => { waiting.TrySetResult(true); await release.Task; }, (st, text) => { }, text => { }, token);
+                return new DiskRun { Ok = outcome.Ok, Summary = "A", Binding = "A" };
+            });
+            await waiting.Task;
+            runner.Start(token => Task.FromResult(new DiskRun { Ok = true, Summary = "B", Binding = "B" }));
+            target = "B"; release.SetResult(true); await runner.Current;
+            Check(!runner.Busy && runner.Last.Binding == "B" && oldPolls == 0, "server switch during wait releases SerialRunner to queued B without querying B for A");
+
+            bool current = true; int reports = 0; executes = 0;
+            var stale = await DiskApplyWait.Run(() => current, () => { executes++; return pending(); }, operation => {
+                current = false; return Task.FromResult(DiskStatus("finished"));
+            }, immediate, (st, text) => reports++, text => { }, CancellationToken.None);
+            Check(!stale.Ok && executes == 1 && reports == 0, "server switch during poll ignores stale finished and never reapplies on B");
+            current = true;
+            stale = await DiskApplyWait.Run(() => current, () => { current = false; return Task.FromResult(new SectionOutcome { Ok = true }); },
+                operation => { throw new Exception("unexpected poll"); }, immediate, (st, text) => reports++, text => { }, CancellationToken.None);
+            Check(!stale.Ok, "server switch during execute cannot announce stale success");
+        }
         static Dictionary<string, object> Profile() { var p = Json.Map(Json.Parse(Sample)); p.Remove("kind"); p.Remove("schema"); return p; }
         static Dictionary<string, string> AllApplied(Dictionary<string, object> p) { return ConfigSections.Order.Where(s => ConfigSections.Present(p, s)).ToDictionary(s => s, s => ConfigSections.Hash(p, s)); }
         static Dictionary<string, bool> AllReady() { return ConfigSections.Order.ToDictionary(s => s, s => true); }
@@ -37,7 +88,7 @@ namespace RemoteAgents.Launcher
         internal static void Run()
         {
             DiskChoiceTests.Run();
-            Plan(); Channel(); Engine(); Conflicts(); Ai(); Sources(); Requests(); Profiles();
+            Plan(); Channel(); Engine(); Conflicts(); Ai(); Sources(); Requests(); Profiles(); DiskWait().GetAwaiter().GetResult();
             HappierAccountTests.Run();
             Console.WriteLine("OK: " + count + " config engine checks (plan by difference, parallel order, conflicts, AI copy without secrets, sources)");
         }
