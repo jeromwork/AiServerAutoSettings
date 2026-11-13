@@ -439,16 +439,25 @@ namespace RemoteAgents.Launcher
             var vpn = Json.Map(Json.Get(p, "vpn"));
             return new Dictionary<string, object> { { "enabled", Json.Bool(vpn, "enabled") }, { "checkUrl", Json.Str(vpn, "checkUrl") }, { "dnsServer", Json.Str(vpn, "dnsServer") } };
         }
+        internal static bool KeepsAccount(Dictionary<string, object> h)
+        { return !h.ContainsKey("mode") && !h.ContainsKey("account") && !h.ContainsKey("key"); }
         internal static Dictionary<string, object> Account(Dictionary<string, object> p, Dictionary<string, object> services, Dictionary<string, object> config)
         {
             var h = Json.Map(Json.Get(p, "happier")); var saved = Json.Map(Json.Get(config, "happier"));
+            // Store has already merged any existing mode/key. With no identity left, only save the label:
+            // never fall through to the server-account picker or require service URLs on an empty computer.
+            if (KeepsAccount(h)) return new Dictionary<string, object> { { "mode", "keep" }, { "label", Json.Text(h, "label", Json.Str(saved, "label")) } };
             string api = Json.Text(h, "serverUrl", Json.Text(saved, "serverUrl", Json.Str(services, "serverUrl"))), web = Json.Text(h, "webappUrl", Json.Text(saved, "webappUrl", Json.Str(services, "webappUrl")));
             if (api.Length == 0 || web.Length == 0) throw new IOException("Нет адресов Happier: укажите happier.serverUrl и happier.webappUrl или дождитесь установки Happier на сервере");
             string label = Json.Text(h, "label", ConfigProfile.DeviceName(p)); if (label.Length == 0) label = "Мой аккаунт";
             var request = new Dictionary<string, object> { { "label", label }, { "serverUrl", Origin(api) }, { "webappUrl", Origin(web) }, { "expectedAccount", "" } };
             // «Тот же аккаунт» without a key (what `remoteagents config export` issues): the engine selects and live-checks
             // the server's existing account (docs/CONFIG-ENGINE.md, Account mode:"same"); no recovery key travels.
-            if (Json.Str(h, "mode") != "new" && SecretName(Json.Get(h, "key")).Length == 0) request["mode"] = "same";
+            if (Json.Str(h, "mode") != "new" && SecretName(Json.Get(h, "key")).Length == 0) {
+                request["mode"] = "same";
+                // An explicit label may rename a reused account; otherwise keep the server's label.
+                if (!h.ContainsKey("label")) request.Remove("label");
+            }
             // Several accounts on the server: the exporter pins the public id (accounts/server-account.mjs list).
             if (request.ContainsKey("mode") && Json.Str(h, "account").Length > 0) request["account"] = Json.Str(h, "account");
             return request;

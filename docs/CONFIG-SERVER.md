@@ -36,7 +36,7 @@
 ```sh
 remoteagents config export --name "Ноутбук сына" --master-password-stdin --output /root/laptop.json
 # необязательно: --vpn on|off|channel (по умолчанию on, если есть vpnBootstrap),
-#                --happier same|same:<подпись или id>|new|new:Имя (по умолчанию same; new без имени = --name),
+#                --happier same|same:<подпись или id>|new|new:Имя|keep|keep:Подпись (по умолчанию same; new/keep без подписи = --name),
 #                --folders "Проект,Проект/docs"
 ```
 
@@ -47,6 +47,10 @@ remoteagents config export --name "Ноутбук сына" --master-password-st
    установка `~/.happier` со входом; список — `accounts/server-account.mjs list`). Нет ни одного — отказ.
    Несколько — нужен однозначный выбор (`--happier same:<подпись или id>` или подпись `happier.account` в настройках),
    тогда его id пишется в конфиг как `happier.account`; иначе отказ со списком аккаунтов.
+   `--happier keep` / `keep:Подпись` выдаёт `happier` с одной подписью `label` (по умолчанию `--name`)
+   и адресами `serverUrl`/`webappUrl`, если они заданы в настройках выдачи. Полей `mode`, `account`, `key` нет;
+   аккаунты на сервере не проверяются. На компьютере сохраняются текущий аккаунт и его ключ, меняется подпись.
+   Если аккаунта на компьютере нет, подпись сохраняется с явным сообщением, без ошибки и создания аккаунта.
 2. `ssh-keygen` создаёт новую пару ed25519 (без пароля, во временном каталоге 0700, затем удаляется).
 3. Под `flock` (`<stateDir>/config.lock`) открытая часть дописывается в authorized_keys рабочего пользователя строкой
    `ssh-ed25519 AAAA… ra-config:<id> <название>` — через `O_APPEND` проверенного файла, поэтому параллельный `>>`

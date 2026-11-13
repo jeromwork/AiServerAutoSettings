@@ -110,6 +110,7 @@ function Connect-WizardProfileAccount([string]$Root,[string]$Bundle,$Request) {
         $body=@{action='inspect';account=[string]$row.account}|ConvertTo-Json -Compress
         $status=ConvertFrom-Json (Convert-TransportLF (Invoke-WizardSsh $Root 'export PATH="$HOME/.local/share/remoteagents-accounts/node:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"; node "$HOME/.local/share/remoteagents-accounts/server-account.mjs"' $body))
         if(-not $status.ok){throw 'Happier на сервере не подтвердил работу выбранного аккаунта'}
+        if($Request.label){$row|Add-Member -Force label ([string]$Request.label)}
         # Same workstation: the existing server daemon and its subscriptions are reused.
         # No recovery secret exists on the server and none needs to travel to the PC.
         $row|Add-Member -Force ok $true;$row|Add-Member -Force updatedUtc ([DateTime]::UtcNow.ToString('o'))

@@ -415,7 +415,9 @@ namespace RemoteAgents.Launcher
                 result["server"] = "сейчас " + Endpoint(oldServer) + " / в конфиге " + Endpoint(merged);
             }
             var oldAccount = Json.Map(Json.Get(before, "happier")); var account = Json.Map(Json.Get(p.Profile, "happier"));
-            bool different = new[]{"mode", "account", "label", "serverUrl", "webappUrl"}.Any(k => account.ContainsKey(k) && oldAccount.ContainsKey(k) && Json.Encode(account[k]) != Json.Encode(oldAccount[k]));
+            // A label/URL patch keeps the current identity, including its mode and key after Merge.
+            var identityFields = ConfigRequests.KeepsAccount(account) ? new[]{"serverUrl", "webappUrl"} : new[]{"mode", "account", "label", "serverUrl", "webappUrl"};
+            bool different = identityFields.Any(k => account.ContainsKey(k) && oldAccount.ContainsKey(k) && Json.Encode(account[k]) != Json.Encode(oldAccount[k]));
             string oldKey = Json.Str(Json.Map(Json.Get(oldAccount, "key")), "secret"), key = Json.Str(Json.Map(Json.Get(account, "key")), "secret");
             if (key.Length > 0 && oldAccount.Count > 0) {
                 if (oldKey != key) different = true;

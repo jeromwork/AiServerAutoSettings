@@ -543,7 +543,13 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             $text=Invoke-WizardSsh $Root 'export PATH="$HOME/.local/share/remoteagents-accounts/node:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"; node "$HOME/.local/share/remoteagents-accounts/server-account.mjs"' '{"action":"list"}'
             return ConvertFrom-Json (Convert-TransportLF $text)
         }
-        'Account' {if($Request.mode -eq 'same'){return Connect-WizardProfileAccount $Root $Bundle $Request};return Invoke-WizardAccount $Root $Bundle $Request $true}
+        'Account' {
+            if($Request.mode -eq 'keep'){
+                if($Request.label){Update-LauncherConfig $Root {param($c) Set-ConfigDefault $c happier ([pscustomobject]@{});$c.happier|Add-Member -Force label ([string]$Request.label)}}
+                return @{ok=$true;summary='Аккаунт Happier в конфиге не задан — подпись сохранена'}
+            }
+            if($Request.mode -eq 'same'){return Connect-WizardProfileAccount $Root $Bundle $Request};return Invoke-WizardAccount $Root $Bundle $Request $true
+        }
         'ResumeAccount' {return Invoke-WizardAccount $Root $Bundle $null $false}
         'Operation' {
             $ops=@($Request.operations|Where-Object {$_})
