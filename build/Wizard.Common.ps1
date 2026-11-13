@@ -63,7 +63,8 @@ function Send-WizardHelpers([string]$Root,[string]$Bundle) {
         $sha=[Security.Cryptography.SHA256]::Create()
         try{$hash=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
         $contents[$key]=@{bytes=$bytes;hash=$hash}
-        $manifest+=@{source=$key;path=$files[$key];hash=$hash;keep=($key -in @('codex-windows-bridge.py','codex-bridge-session.py','server_node_catalog.py'))}
+        $versions=@();if($key -eq 'disk/stignore-previous.sha256'){$versions=@([Text.Encoding]::UTF8.GetString($bytes) -split "`n"|Where-Object {$_})}
+        $manifest+=@{source=$key;path=$files[$key];hash=$hash;versions=$versions;keep=($key -in @('codex-windows-bridge.py','codex-bridge-session.py','server_node_catalog.py'))}
     }
     $probe=@'
 import json,sys,hashlib,os,base64
@@ -72,7 +73,9 @@ rows=json.loads(base64.b64decode("MANIFEST_BASE64"));missing=[]
 for row in rows:
  p=Path.home()/row['path']
  if any(x.is_symlink() for x in (p,*p.parents)):raise ValueError('symlink')
- if not p.is_file() or (not row['keep'] and hashlib.sha256(p.read_bytes()).hexdigest()!=row['hash']):missing.append(row['source'])
+ if row['source']=='disk/stignore-previous.sha256':
+  if not p.is_file() or not set(row['versions']).issubset(p.read_text(encoding='utf-8-sig').splitlines()):missing.append(row['source'])
+ elif not p.is_file() or (not row['keep'] and hashlib.sha256(p.read_bytes()).hexdigest()!=row['hash']):missing.append(row['source'])
 print(json.dumps(missing))
 '@
     $json=ConvertTo-Json -InputObject @($manifest) -Depth 5 -Compress
@@ -83,7 +86,9 @@ print(json.dumps(missing))
     $received=ConvertFrom-Json (Convert-TransportLF $reply);$missing=@()
     foreach($item in $received){if($null -ne $item){$missing+=[string]$item}}
     if(-not $missing.Count){return}
+    if(@($missing|Where-Object {$_ -in @('disk/stignore.txt','disk/stignore-previous.sha256')}).Count){$upload+=Get-DiskIgnoreUpload (Join-Path $Bundle 'disk')}
     foreach($key in $files.Keys){
+        if($key -in @('disk/stignore.txt','disk/stignore-previous.sha256')){continue}
         if($key -notin $missing){continue}
         $dest='$HOME/'+$files[$key];$directory='$HOME/'+(Split-Path $files[$key] -Parent).Replace('\','/')
         $bytes=$contents[$key].bytes

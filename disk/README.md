@@ -13,7 +13,7 @@
 
 Серверная папка — `~/Disk/<имя>`, одна на проект. Новые ID: `disk-` и 24 hex SHA-256 от UTF-8 `folder:<имя>`; старые ID сохраняются. Если папка есть и на компьютере, и на сервере, она всегда объединяется — без вопроса и без отказа. Ничего не удаляется: у обеих сторон `maxConflicts=-1` и поэтапное хранение версий. Файлы с одинаковым содержимым остаются одним файлом (Syncthing сравнивает хеши блоков, выравнивает только время и атрибуты, ничего не передаёт); копия `*.sync-conflict-*` появляется только при разном содержимом. Проверено `disk/test-wizard-merge.py` на двух настоящих Syncthing 2.1.7. Повтор безопасен, команда сразу возвращает управление после настройки; передачу показывает готовый трей. Пауза управляется в Syncthing Tray. Без связи файлы остаются доступными для записи. Конфликтные копии сохраняет Syncthing без ограничения числа.
 
-Правила обеих сторон — только `stignore.txt`. Перед перезаписью принимаются точная копия или старый набор с отпечатком из `stignore-previous.sha256`, извлечённым из Git-истории. Чужой `.stignore` нужно самостоятельно сохранить и удалить перед подключением. В Git `info/exclude` сервер добавляет `.stfolder`, `.stignore`, `*.sync-conflict-*`. Секреты и генерируемые каталоги исключаются; обычные исходники внутри `log` и `db` передаются.
+Правила обеих сторон — только `stignore.txt`. Перед перезаписью принимаются точная копия или старый набор с отпечатком из `stignore-previous.sha256`, извлечённым из Git-истории. История содержит все выпущенные шаблоны, включая текущий; новые хэши дописываются, старые не удаляются. Установщик, Select и мастер объединяют историю с серверной под общей блокировкой, Windows хранит объединение в `%LOCALAPPDATA%\RemoteDisk`. Чужой `.stignore` нужно самостоятельно сохранить и удалить перед подключением. В Git `info/exclude` сервер добавляет `.stfolder`, `.stignore`, `*.sync-conflict-*`. Секреты и генерируемые каталоги исключаются; обычные исходники внутри `log` и `db` передаются.
 
 Серверные команды: `list`, `attach`, `detach`, `add-device`, `channel-config`, `bootstrap`, `reconcile`,
 `install-auto`, `tree`, `verify-selection`. Для команд с данными второй аргумент — base64 JSON.
@@ -33,7 +33,15 @@
 ```bash
 cd /home/remoteagents/Disk/AiServerAutoSettings
 install -m 700 disk/server-disk.sh "$HOME/.local/share/remote-disk/server-disk.sh"
-install -m 600 disk/stignore.txt disk/stignore-previous.sha256 "$HOME/.local/share/remote-disk/"
+(
+  flock -x 9
+  history="$HOME/.local/share/remote-disk/stignore-previous.sha256"
+  tmp=$(mktemp "$HOME/.local/share/remote-disk/history.XXXXXX")
+  { if [ -f "$history" ]; then cat "$history"; fi; cat disk/stignore-previous.sha256; } | tr -d '\r' | sed '/^$/d' | sort -u > "$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$history"
+  install -m 600 disk/stignore.txt "$HOME/.local/share/remote-disk/"
+) 9>"$HOME/.local/share/remote-disk/.stignore-history.lock"
 bash "$HOME/.local/share/remote-disk/server-disk.sh" install-auto
 bash "$HOME/.local/share/remote-disk/server-disk.sh" reconcile
 systemctl --user status remote-disk-folders.timer --no-pager

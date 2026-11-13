@@ -48,3 +48,6 @@
 (?i)*.db-shm
 (?i)*.dump
 (?i)*.bak
+// Laravel: загруженные файлы и кэш в storage проекта не передаём
+(?i)/storage/app
+(?i)/storage/framework

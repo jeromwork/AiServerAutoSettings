@@ -17,11 +17,12 @@ try{
     Read-DiskProfile
     # Refresh public server helper through the saved SSH profile (keeps the server copy current).
     $upload='set -eu; umask 077; mkdir -p "$HOME/.local/share/remote-disk"'+"`n"
-    foreach($name in @('server-disk.sh','stignore.txt','stignore-previous.sha256')){
+    foreach($name in @('server-disk.sh')){
         $source=[IO.File]::ReadAllText((Join-Path $PSScriptRoot $name)).Replace("`r",'')
         $remote='$HOME/.local/share/remote-disk/'+$name;$temp=$remote+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
         $upload+='printf %s '+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($source))+' | base64 -d > "'+$temp+'"; mv -f -- "'+$temp+'" "'+$remote+'"'+"`n"
     }
+    $upload+=Get-DiskIgnoreUpload
     [void](Invoke-DiskSsh 'bash -s' -InputText $upload)
     $lock=[IO.File]::Open((Join-Path $script:DiskHome 'folders.lock'),'OpenOrCreate','ReadWrite','None')
     try{
