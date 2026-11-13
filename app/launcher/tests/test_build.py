@@ -30,7 +30,8 @@ class PackagingTests(unittest.TestCase):
         with zipfile.ZipFile(self.zip) as z:
             names = z.namelist()
             self.assertIn('Start-WindowsControl.ps1', names)
-            self.assertIn('disk/Install-RemoteDisk.ps1', names)
+            self.assertFalse(any(n.startswith('disk/') for n in names))
+            self.assertIn('build/Process.Common.ps1', names)
             self.assertIn('selftest.ps1', names)
             self.assertIn('build/Wizard.Health.ps1', names)
             self.assertIn('function Get-WizardServerHealth', z.read('build/Wizard.Health.ps1').decode('utf-8-sig'))
@@ -40,7 +41,7 @@ class PackagingTests(unittest.TestCase):
             self.assertTrue(definition['components'][0]['critical'])
             self.assertEqual({c['name']: c.get('requiresConfig', []) for c in definition['components']}, {
                 'transport': ['transport.profilePath', 'transport.channelPath'],
-                'disk': ['components.disk.enabled'], 'control': ['components.control.enabled'], 'vpn': []})
+                'control': ['components.control.enabled'], 'vpn': []})
             self.assertEqual(definition['binaries'], [])
             for c in definition['components']:
                 args = c['args']
@@ -169,11 +170,11 @@ class PackagingTests(unittest.TestCase):
         with zipfile.ZipFile(self.zip) as agents, zipfile.ZipFile(vpn) as other:
             a = json.loads(agents.read('components.json').decode('utf-8-sig'))
             v = json.loads(other.read('components.json').decode('utf-8-sig'))
-            self.assertEqual([c['name'] for c in a['components']], ['transport','disk','control','vpn'])
+            self.assertEqual([c['name'] for c in a['components']], ['transport','control','vpn'])
             self.assertEqual([c['name'] for c in v['components']], ['vpn'])
             self.assertEqual(a['components'][-1], v['components'][0], 'same command-managed VPN component in the single-file installer')
             self.assertIn('build/Wizard.ps1', other.namelist())
-            self.assertIn('disk/Select-Disk.ps1', other.namelist())
+            self.assertFalse(any(n.startswith('disk/') for n in other.namelist()))
             self.assertIn('build/Setup.Common.ps1', agents.namelist())
             self.assertIn('build/Uninstall.ps1', agents.namelist())
             self.assertIn('setup-vps-ssh.ps1', agents.namelist())
@@ -181,8 +182,6 @@ class PackagingTests(unittest.TestCase):
         for name in ('RemoteAgents.exe','RemoteVPN.exe','Start.cmd'):
             result = subprocess.run(['git','check-ignore','-q','release/'+name],cwd=ROOT)
             self.assertEqual(result.returncode, 1, name)
-        rules = (ROOT/'disk/stignore.txt').read_text()
-        self.assertNotIn('release', rules.lower())
         self.assertEqual(len((ROOT/'build/Start.cmd').read_text().splitlines()),3)
 
     def test_invalid_versions(self):

@@ -33,30 +33,11 @@
       "secret": "happier-key"
     }
   },
-  "disk": {
-    "folders": [
-      "Проект",
-      {
-        "path": "Документы",
-        "direction": "receive"
-      }
-    ],
-    "external": [
-      {
-        "path": "D:\\Отчёты",
-        "remote": "Отчёты",
-        "direction": "send"
-      }
-    ]
-  },
   "vpn": {
     "enabled": false
   },
   "components": {
     "transport": {
-      "enabled": true
-    },
-    "disk": {
       "enabled": true
     },
     "control": {
@@ -68,6 +49,17 @@
   },
   "secrets": {
     "server-key": "",
-    "happier-key": ""
+    "happier-key": "",
+    "cloud-password": ""
+  },
+  "cloud": {
+    "vendor": "mailru",
+    "login": "user@mail.ru",
+    "password": {
+      "secret": "cloud-password",
+      "hint": "Пароль для внешних приложений Mail"
+    },
+    "remoteRoot": "Disk",
+    "pollSeconds": 20
   }
 }

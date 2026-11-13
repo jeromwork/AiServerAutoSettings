@@ -215,24 +215,12 @@ $rr=New-RouteRoot 'denied';$env:RA_TEST_BLOCK='';$env:RA_TEST_GOOD_KEY='';$messa
 try{[void](Connect-WizardServer $rr $repo ([pscustomobject]@{address='route6.example.invalid';login='root';passwordPipe='';askpassExecutable='x'}))}catch{$message=$_.Exception.Message}
 Assert ($message -clike 'Ни один ключ не подошёл*') ('Permission denied keeps the key message: '+$message)
 $env:RA_TEST_BLOCK='';$env:RA_TEST_SSH=$TestHome;$script:WizardProgressFile=Join-Path $TestHome 'live.jsonl'
-# The disk decision is asked only when a disk is installed.
-[void][IO.Directory]::CreateDirectory((Join-Path $TestHome 'RemoteDisk/state'));Write-DiskUtf8 (Join-Path $TestHome 'RemoteDisk/state/config.xml') '<configuration/>'
+# Server change stages a new profile without a Disk decision; the old transport is kept until proof.
 [void](Connect-WizardServer $root $repo $other)
 $c=Read-TransportJson (Join-Path $root 'config.json')
-Assert ($c.wizard.diskPreviousProfile -ceq $file -and $c.wizard.pendingProfile -cne $file -and $c.transport.profilePath -ceq $file -and -not $c.wizard.configured) 'changed server records explicit disk decision and resets setup'
-Assert ((Find-InstallProfile $root) -ceq $c.wizard.pendingProfile) 'wizard uses staged profile while active transport stays unchanged'
-$noDisk=Join-Path $TestHome 'RemoteAgents-nodisk';[void][IO.Directory]::CreateDirectory($noDisk)
-Write-TransportJson (Join-Path $noDisk 'config.json') @{schema=1;version=1;transport=@{};components=@{}}
-$saved=$env:LOCALAPPDATA;$env:LOCALAPPDATA=Join-Path $TestHome 'empty-local'
-[void](Connect-WizardServer $noDisk $repo $request);[void](Connect-WizardServer $noDisk $repo $other)
-$env:LOCALAPPDATA=$saved;$nd=Read-TransportJson (Join-Path $noDisk 'config.json')
-Assert ($nd.wizard.pendingProfile -and -not $nd.wizard.diskPreviousProfile) 'server change without an installed disk asks no disk question'
-# Explicit reconnect refuses non-empty data before stopping any process or touching old files.
-$base=Join-Path $TestHome 'old-data';[void][IO.Directory]::CreateDirectory($base);Write-DiskUtf8 (Join-Path $base 'keep.txt') 'keep-local-files'
-Throws {Resolve-WizardDiskServer $root $repo ([pscustomobject]@{base=$base;reconnect=$true})} 'nonempty disk cannot be silently merged into new server'
-Assert ([IO.File]::ReadAllText((Join-Path $base 'keep.txt')) -ceq 'keep-local-files') 'refused reconnect preserves old local data'
-# Real transport initialization reuses the explicit profile and the server's actual sync port.
-$binary=Join-Path $TestHome 'fixture-sing-box.exe';Write-DiskUtf8 $binary 'fixture-only-not-executable'
+Assert ($c.wizard.pendingProfile -cne $file -and $c.transport.profilePath -ceq $file -and -not $c.wizard.configured) 'server change keeps old active transport until proof'
+Assert (-not $c.wizard.PSObject.Properties['diskPreviousProfile']) 'no retired disk state is written'
+$binary=Join-Path $TestHome 'fixture-sing-box.exe' ;Write-DiskUtf8 $binary 'fixture-only-not-executable'
 $transport=[pscustomobject]@{singBoxPath=$binary}
 function Send-WizardHelpers($Root,$Bundle){}
 function Invoke-WizardSsh($Root,$Command,$InputText='',$Timeout=60){
@@ -242,7 +230,7 @@ function Invoke-WizardSsh($Root,$Command,$InputText='',$Timeout=60){
 }
 Initialize-WizardTransport $root $repo $transport
 $channel=Read-TransportJson $transport.channelPath
-Assert ($transport.profilePath -ceq $c.wizard.pendingProfile -and $channel.inbounds[0].override_port -eq 34567) 'fresh connection uses selected profile and actual server sync port'
+Assert ($transport.profilePath -ceq $c.wizard.pendingProfile -and @($channel.inbounds).Count -eq 0) 'fresh connection uses selected profile and no retired sync inbound'
 Assert (-not $transport.PSObject.Properties['serverRoute']) 'direct initialization adds no personal transport overlay'
 Assert (@($channel.outbounds).Count -eq 0) 'clean server needs no fabricated VLESS endpoint or user value'
 Assert ((Invoke-DiskProcess '/usr/bin/stat' @('-c','%a',$transport.channelPath)) -eq '600') 'channel material uses private permissions'

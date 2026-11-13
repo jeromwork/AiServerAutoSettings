@@ -15,18 +15,17 @@ namespace RemoteAgents.Launcher
             return ConfigBundle.D("kind", "remoteagents-config", "schema", 1,
                 "device", ConfigBundle.D("name", "Ноутбук"),
                 "server", ConfigBundle.D("address", "server.example.invalid", "port", 2222, "login", "worker", "key", ConfigBundle.D("secret", "server-key")),
-                "disk", ConfigBundle.D("folders", new[]{"Project", "Документы"}),
                 "secrets", ConfigBundle.D("server-key", "TEST-PRIVATE-KEY\r\nSECOND-LINE\r\n"));
         }
         internal static void Run()
         {
-            DiskChoiceTests.Run();
+            CloudTests.Run();
             var valid = Example();
             var p = ConfigBundle.Parse(Json.Encode(valid));
             Check(!p.Locked && p.Missing.Length == 0 && !p.Profile.ContainsKey("secrets"), "public profile separate");
             Check(p.Secrets["server-key"].Contains("\r\n"), "values preserved");
             Check(ConfigBundle.Parse("\uFEFF{\r\n\"kind\":\"remoteagents-config\",\r\n\"schema\":1\r\n}").Missing.Length == 0, "CRLF and BOM");
-            foreach (var pair in ConfigBundle.D("schema", 2, "kind", "wrong", "extra", true, "device", ConfigBundle.D("extra", 1), "server", ConfigBundle.D("password", "must-be-reference"), "disk", ConfigBundle.D("folders", new[]{"Project/../escape"}), "vpn", ConfigBundle.D("enabled", "true"))) {
+            foreach (var pair in ConfigBundle.D("schema", 2, "kind", "wrong", "extra", true, "device", ConfigBundle.D("extra", 1), "server", ConfigBundle.D("password", "must-be-reference"), "vpn", ConfigBundle.D("enabled", "true"))) {
                 var bad = new Dictionary<string, object>(valid); bad[pair.Key] = pair.Value;
                 Reject(() => ConfigBundle.Parse(Json.Encode(bad)), "schema " + pair.Key);
             }
@@ -48,15 +47,13 @@ namespace RemoteAgents.Launcher
             p = ConfigBundle.Parse(Json.Encode(missing));
             Check(p.Missing.Contains("lan-Офис-ovpn") && p.Hints["lan-Офис-ovpn"] == "Профиль сети", "Unicode and custom hint");
             foreach (string name in new[]{"", "../bad", "Upper", "trailing\n", "protected", "a/b", new string('a',65)}) { reference["secret"] = name; Reject(() => ConfigBundle.Parse(Json.Encode(missing)), "secret name"); }
-            var nestedSelection = Example(); nestedSelection["disk"] = ConfigBundle.D("folders",new[]{"Project/docs","Проекты/Сайт"});
-            Check(ConfigBundle.Parse(Json.Encode(nestedSelection)).Profile.ContainsKey("disk"), "nested selection retains first-level project roots");
             var namedPassword = ConfigBundle.Parse("{\"kind\":\"remoteagents-config\",\"schema\":1,\"server\":{\"rootPassword\":{\"secret\":\"custom-root\"}}}");
             Check(namedPassword.Hints["custom-root"].Contains("хостинг"),"standard field explanation independent of secret name");
             var route = Example(); route["server"] = ConfigBundle.D("routes", new[]{ConfigBundle.D("kind", "hop")});
             Reject(() => ConfigBundle.Parse(Json.Encode(route)), "hop required");
             string schemaPath = FindSchema();
             Check(Canonical(Json.Read(schemaPath)) == Canonical(ConfigBundle.SchemaDocument()), "published schema matches compiled schema");
-            Check(ConfigBundle.Parse(File.ReadAllText(Path.Combine(Path.GetDirectoryName(schemaPath),"config.paste.example.json"))).Missing.Length == 2,"published example parses with missing secrets");
+            Check(ConfigBundle.Parse(File.ReadAllText(Path.Combine(Path.GetDirectoryName(schemaPath),"config.paste.example.json"))).Missing.Length == 3,"published example parses with missing secrets");
             p = ConfigBundle.Parse(Json.Encode(valid));
             string encrypted = ConfigBundle.Pack(p, "Тестовый мастер-пароль");
             var locked = ConfigBundle.Parse(encrypted);
@@ -146,8 +143,6 @@ namespace RemoteAgents.Launcher
                 Check(SecretVault.Get(home,"server-key") != "REPLACEMENT-KEY", "blocked section cannot replace credential");
                 ConfigBundle.Store(home, change, new[]{"server"});
                 Check(ConfigBundle.Conflicts(home,change).Length == 0 && SecretVault.Get(home,"server-key") == "REPLACEMENT-KEY", "explicit conflict accepted");
-                var diskChange = ConfigBundle.Parse(Json.Encode(ConfigBundle.D("kind","remoteagents-config","schema",1,"disk",ConfigBundle.D("folders", new[]{"Project"}))));
-                Check(ConfigBundle.Conflicts(home,diskChange).Single().StartsWith("disk:"), "removed disk folders conflict");
                 string oldConfig = File.ReadAllText(Path.Combine(home,"config.json")), oldVault = File.ReadAllText(Path.Combine(home,"secrets","vault.json"));
                 Reject(() => ConfigBundle.Store(home,locked,null), "locked Store");
                 Check(oldConfig == File.ReadAllText(Path.Combine(home,"config.json")) && oldVault == File.ReadAllText(Path.Combine(home,"secrets","vault.json")), "locked Store writes nothing");
@@ -159,7 +154,7 @@ namespace RemoteAgents.Launcher
                 material["vpn"] = ConfigBundle.D("bootstrap",ConfigBundle.D("channel",ConfigBundle.D("secret","vpn-channel"),"entries",ConfigBundle.D("edge",ConfigBundle.D("secret","vpn-entry-edge")),"hops",ConfigBundle.D("jumper",ConfigBundle.D("host","hop.example.invalid","user","jump","key",ConfigBundle.D("secret","hop-key")))));
                 material["lan"] = new[]{ConfigBundle.D("name","Офис","kind","openvpn","ovpn",ConfigBundle.D("secret","lan-Офис-ovpn"),"login","office-user","password",ConfigBundle.D("secret","lan-Офис-password"))};
                 material["secrets"] = ConfigBundle.D("server-key","KEY\r\nLINE\r\n","server-root-password","ROOT-VALUE","happier-key","HAPPIER-VALUE","hop-key","HOP-KEY\r\n","hop-password","HOP-PASSWORD","proxy-out-password","PROXY-PASSWORD","vpn-channel","{\r\n\"inbounds\":[],\"outbounds\":[]\r\n}","vpn-entry-edge","{\"server\":\"entry.example.invalid\",\"secrets\":{\"fake\":\"ENTRY-SECRET\"}}","lan-Офис-ovpn","client\r\nremote vpn.example.invalid\r\n","lan-Офис-password","LAN-PASSWORD");
-                ConfigBundle.Store(home,ConfigBundle.Parse(Json.Encode(material)),new[]{"server","happier","disk"});
+                ConfigBundle.Store(home,ConfigBundle.Parse(Json.Encode(material)),new[]{"server","happier"});
                 SecretVault.Materialize(home);
                 var manifest = Json.Read(SecretVault.MaterializedPath(home));
                 Check(File.ReadAllText(Json.Str(manifest,"serverKeyFile")) == "KEY\nLINE\n", "key materialization normalizes CRLF");
@@ -218,10 +213,10 @@ namespace RemoteAgents.Launcher
                 Json.Write(Path.Combine(legacyHome,"config.json"),ConfigBundle.D("transport",ConfigBundle.D("profilePath",legacySsh),"happier",ConfigBundle.D("label","Старый аккаунт")));
                 SecretVault.WritePrivate(legacyHome,Path.Combine(legacyHome,"secrets","happier-account.key"),"LEGACY-HAPPIER-KEY");
                 var legacyChange = ConfigBundle.Parse(Json.Encode(ConfigBundle.D("kind","remoteagents-config","schema",1,"disk",ConfigBundle.D("base","D:\\Disk","folders",new string[0]),"happier",ConfigBundle.D("label","Старый аккаунт","key",ConfigBundle.D("secret","happier-key")),"secrets",ConfigBundle.D("happier-key","CHANGED-ACCOUNT-KEY"))));
-                Check(ConfigBundle.Conflicts(legacyHome,legacyChange).Length == 2,"legacy root/folders and account-key conflicts found");
+                Check(ConfigBundle.Conflicts(legacyHome,legacyChange).Length == 1,"legacy root/folders and account-key conflicts found");
                 ConfigBundle.Store(legacyHome,ConfigBundle.Parse("{\"kind\":\"remoteagents-config\",\"schema\":1,\"bridge\":{\"enabled\":true}}"),null);
                 var legacyRecovered = ConfigBundle.Parse(ConfigBundle.Export(legacyHome,null));
-                Check(legacyRecovered.Secrets["server-key"] == "LEGACY-KEY\r\n" && legacyRecovered.Secrets["happier-key"] == "LEGACY-HAPPIER-KEY" && Json.Strings(Json.Get(Json.Map(legacyRecovered.Profile["disk"]),"folders")).Single() == "Project/docs","first profile preserves existing disk and keys");
+                Check(legacyRecovered.Secrets["server-key"] == "LEGACY-KEY\r\n" && legacyRecovered.Secrets["happier-key"] == "LEGACY-HAPPIER-KEY" && !legacyRecovered.Profile.ContainsKey("disk"),"first profile preserves existing disk and keys");
                 SecretVault.Materialize(legacyHome);
                 SecretVault.Set(legacyHome,"server-key", "");
                 Check(ConfigBundle.Parse(ConfigBundle.Export(legacyHome,null)).Secrets["server-key"] == "", "explicitly cleared key is not resurrected from old materialized file");

@@ -2,8 +2,8 @@
 """Сквозной тест CONFIG на loopback-стенде (без root, временные HOME, настоящие OpenSSH/sshd/sing-box):
 
 `remoteagents config export` (B, мастер-пароль) → текст конфига → ConfigBundle.Parse/Unlock/Store/Materialize (A)
-→ оркестратор ConfigEngine (D) запускает настоящие действия Wizard.ps1 Server, Connection, Vpn (C); Bridge/Account/Disk —
-стендовые (нужны Windows/Happier/Syncthing) → живой SSH-вход ключом из конфига → ConfigSync по снимку сервера (B→C)
+→ оркестратор ConfigEngine (D) запускает настоящие действия Wizard.ps1 Server, Connection, Vpn (C); Bridge/Account —
+стендовые (нужны Windows/Happier) → живой SSH-вход ключом из конфига → ConfigSync по снимку сервера (B→C)
 → `config revoke` → новый вход отвергнут.
 
 Не трогает ~/.ssh, authorized_keys рабочего пользователя, службы, мост и Windows.
@@ -76,7 +76,7 @@ PubkeyAuthentication yes
 AllowUsers {USER}
 AllowTcpForwarding yes
 PermitTTY no
-SetEnv REMOTE_DISK_CHANNEL_SOURCE={server_home}/no-channel HOME={server_home} PATH={bindir}:/usr/bin:/bin
+SetEnv REMOTEAGENTS_CHANNEL_SOURCE={server_home}/no-channel HOME={server_home} PATH={bindir}:/usr/bin:/bin
 LogLevel VERBOSE
 ''')
 
@@ -139,7 +139,7 @@ def main():
             wait_port(port, sshd, d / 'sshd.log')
 
             # 1. Server (B): full config for one more computer, closed by a master password.
-            issued = b('export', '--name', 'Ноутбук сына', '--folders', 'Проект', '--master-password-stdin',
+            issued = b('export', '--name', 'Ноутбук сына', '--master-password-stdin',
                        input=(MASTER + '\r\n').encode()).stdout.decode()
             secrets = json.loads(issued)['secrets']
             assert MASTER not in issued and secrets['protected'] == 'master-password' and secrets['server-key'].startswith('enc1:'), 'enc1 config expected'
@@ -158,7 +158,7 @@ def main():
             vault = (root / 'secrets/vault.json').read_text()
             assert MASTER not in vault and MASTER not in (root / 'config.json').read_text()
 
-            # 3. Apply: independent work overlaps; local-port Account/Disk wait for Connection.
+            # 3. Apply: independent work overlaps; local-port Account wait for Connection.
             p = run([DOTNET, harness, '--run', root, REPO, PWSH], env=env, check=False, timeout=400)
             if p.returncode != 0:
                 raise AssertionError('apply failed\n' + p.stdout.decode(errors='replace') + p.stderr.decode(errors='replace')[-6000:])
@@ -167,10 +167,8 @@ def main():
             assert result['plan'][:2] == ['server', 'connection'] and 'bootstrap' not in result['plan'], result['plan']
             assert all(s['ok'] for s in sections.values()), sections
             assert result['parallelOverlapMs'] > 0, 'Connection and independent Bridge did not overlap'
-            for name in ('account', 'disk'):
+            for name in ('account',):
                 assert sections[name]['startMs'] >= sections['connection']['endMs'], name + ' started before Connection proof'
-            assert max(sections[name]['startMs'] for name in ('account', 'disk')) < min(
-                sections[name]['endMs'] for name in ('account', 'disk')), 'Account/Disk did not overlap after Connection'
             config = json.loads((root / 'config.json').read_text(encoding='utf-8-sig'))
             profile = json.loads(Path(config['transport']['profilePath']).read_text(encoding='utf-8-sig'))
             manifest = json.loads((root / 'secrets/materialized.json').read_text())

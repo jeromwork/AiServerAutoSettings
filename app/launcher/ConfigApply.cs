@@ -21,22 +21,21 @@ namespace RemoteAgents.Launcher
     internal static class ConfigSections
     {
         internal const string Bootstrap = "bootstrap", Server = "server", Connection = "connection", Bridge = "bridge", Account = "account",
-            Disk = "disk", Vpn = "vpn", Proxy = "proxy", Lan = "lan";
+            Cloud = "cloud", Vpn = "vpn", Proxy = "proxy", Lan = "lan";
         // Rows of the window, in the order a person reads them.
-        internal static readonly string[] Rows = { Server, Connection, Bridge, Account, Disk, Vpn, Proxy, Lan };
-        // After «Сервер»: independent work overlaps; Account/Disk wait for Connection.
+        internal static readonly string[] Rows = { Server, Connection, Bridge, Account, Cloud, Vpn, Proxy, Lan };
         // Proxy and Lan share the server network lock: one after another.
-        internal static readonly string[] Parallel = { Connection, Bridge, Account, Disk, Vpn };
+        internal static readonly string[] Parallel = { Connection, Bridge, Account, Cloud, Vpn };
         internal static readonly string[] Chain = { Proxy, Lan };
-        internal static readonly string[] Order = { Bootstrap, Server, Connection, Bridge, Account, Disk, Vpn, Proxy, Lan };
+        internal static readonly string[] Order = { Bootstrap, Server, Connection, Bridge, Account, Cloud, Vpn, Proxy, Lan };
         // Top-level profile keys (config.paste.schema.json). Unknown keys are refused by ConfigBundle.Parse (stream A).
-        internal static readonly string[] ProfileKeys = { "device", "server", "vpn", "happier", "bridge", "disk", "proxyOut", "lan", "components" };
+        internal static readonly string[] ProfileKeys = { "device", "server", "vpn", "happier", "bridge", "cloud", "proxyOut", "lan", "components" };
         internal static bool Known(string key) { return ProfileKeys.Contains(key); }
         internal static string Title(string s)
         {
             switch (s) {
                 case Bootstrap: return "Канал до сервера"; case Server: return "Сервер"; case Connection: return "Связь"; case Bridge: return "Мост";
-                case Account: return "Happier"; case Disk: return "Диск"; case Vpn: return "VPN"; case Proxy: return "Прокси сервера"; case Lan: return "Локальные сети";
+                case Account: return "Happier"; case Cloud: return "Облако"; case Vpn: return "VPN"; case Proxy: return "Прокси сервера"; case Lan: return "Локальные сети";
                 default: return s;
             }
         }
@@ -44,7 +43,7 @@ namespace RemoteAgents.Launcher
         {
             switch (s) {
                 case Bootstrap: return "Bootstrap"; case Server: return "Server"; case Connection: return "Connection"; case Bridge: return "Bridge";
-                case Account: return "Account"; case Disk: return "Disk"; case Vpn: return "Vpn"; case Proxy: return "Proxy"; case Lan: return "Lan";
+                case Account: return "Account"; case Cloud: return "Cloud"; case Vpn: return "Vpn"; case Proxy: return "Proxy"; case Lan: return "Lan";
                 default: throw new ArgumentException("Неизвестный раздел");
             }
         }
@@ -54,7 +53,6 @@ namespace RemoteAgents.Launcher
             string head = (line ?? "").Split(':')[0].Trim().ToLowerInvariant();
             if (head == "server" || head.StartsWith("сервер")) return "server";
             if (head == "happier" || head.StartsWith("аккаунт") || head.Contains("happier")) return "happier";
-            if (head == "disk" || head.StartsWith("диск") || head.StartsWith("папк") || head.StartsWith("корень")) return "disk";
             return head;
         }
         // Profile keys to store: everything described, except conflicting keys the person did not explicitly take
@@ -74,14 +72,13 @@ namespace RemoteAgents.Launcher
                 case Server: case Connection: return p.ContainsKey("server");
                 case Bridge: return p.ContainsKey("bridge") || Json.Str(Json.Map(Json.Get(p, "device")), "name").Length > 0;
                 case Account: return p.ContainsKey("happier");
-                case Disk: return DiskChosen(p) || DiskChoice.FromProfile(p).External.Count > 0;
+                case Cloud: return p.ContainsKey("cloud");
                 case Vpn: return vpn.Keys.Any(k => k != "bootstrap");
                 case Proxy: return p.ContainsKey("proxyOut");
                 case Lan: return p.ContainsKey("lan");
                 default: return false;
             }
         }
-        internal static bool DiskChosen(Dictionary<string, object> profile) { return DiskChoice.FromProfile(profile).Chosen; }
         // The part of the profile a section depends on; its hash decides «changed since last successful apply».
         internal static object Slice(Dictionary<string, object> p, string s)
         {
@@ -92,7 +89,7 @@ namespace RemoteAgents.Launcher
                 case Connection: { var server = new Dictionary<string, object>(Json.Map(Json.Get(p, "server"))); server.Remove("rootPassword"); return server; }
                 case Bridge: return new Dictionary<string, object> { { "bridge", Json.Get(p, "bridge") }, { "name", Json.Str(Json.Map(Json.Get(p, "device")), "name") } };
                 case Account: return Json.Get(p, "happier");
-                case Disk: return Json.Get(p, "disk");
+                case Cloud: return Json.Get(p, "cloud");
                 case Vpn: vpn.Remove("bootstrap"); return vpn;
                 case Proxy: return Json.Get(p, "proxyOut");
                 case Lan: return Json.Get(p, "lan");
@@ -144,7 +141,7 @@ namespace RemoteAgents.Launcher
         internal static Dictionary<string, bool> Ready(Dictionary<string, object> inspect, Dictionary<string, object> config, Dictionary<string, object> desired)
         {
             var ready = new Dictionary<string, bool>();
-            var map = new Dictionary<string, string> { { "server", ConfigSections.Server }, { "connection", ConfigSections.Connection }, { "disk", ConfigSections.Disk },
+            var map = new Dictionary<string, string> { { "server", ConfigSections.Server }, { "connection", ConfigSections.Connection },
                 { "happier", ConfigSections.Account }, { "bridge", ConfigSections.Bridge }, { "vpn", ConfigSections.Vpn } };
             foreach (var step in Json.Array(Json.Get(inspect, "steps")).Select(Json.Map)) {
                 string s; if (map.TryGetValue(Json.Str(step, "id"), out s)) ready[s] = Json.Bool(step, "ready");
@@ -163,7 +160,6 @@ namespace RemoteAgents.Launcher
     {
         internal bool Ok, Pending; internal string Summary = "", Operation = ""; internal Dictionary<string, object> Result = new Dictionary<string, object>(); internal long Ms;
         // docs/CONFIG-ENGINE.md: readiness is result.ok; «pending» names what it waits for (a detached server install
-        // «disk»/«happier», or «connection»). ok:false without pending is a failure, except an unconfirmed request
         // (VPN TUN) the caller marks as such: that is ⏳, never ✅.
         internal static SectionOutcome From(Dictionary<string, object> result, string success, bool unconfirmedIsPending = false)
         {
@@ -172,12 +168,12 @@ namespace RemoteAgents.Launcher
                 Summary = Json.Text(result, "summary", success) + (ok || pending.Length > 0 ? "" : unconfirmedIsPending ? " (ещё не подтверждено)" : "") };
         }
         // Detached installs on the server that ServerOperations/«Operation» can follow.
-        internal static bool ServerOperation(string operation) { return operation == "disk" || operation == "happier"; }
+        internal static bool ServerOperation(string operation) { return operation == "happier"; }
     }
 
     internal static class ConfigEngine
     {
-        // Bootstrap -> Server -> {Connection -> {Account, Disk}, Bridge, Vpn}, with Proxy -> Lan as one more
+        // Bootstrap -> Server -> {Connection -> {Account, Cloud}, Bridge, Vpn}, with Proxy -> Lan as one more
         // parallel chain. A failed Bootstrap does not stop Server (the direct route may work); a failed Server blocks the rest.
         internal static async Task<Dictionary<string, SectionOutcome>> Execute(IList<string> plan, Func<string, CancellationToken, Task<SectionOutcome>> run,
             Action<string, SectionState, string> report, CancellationToken token)
@@ -207,8 +203,7 @@ namespace RemoteAgents.Launcher
             // more right after a successful Connection instead of staying ⏳ forever.
             Task<bool> connection = plan.Contains(ConfigSections.Connection) ? one(ConfigSections.Connection) : Task.FromResult(true);
             Func<string, Task<bool>> after = async s => {
-                // These children use Invoke-DiskSsh without -Direct (the local transport SSH port).
-                if ((s == ConfigSections.Account || s == ConfigSections.Disk) && plan.Contains(ConfigSections.Connection)) {
+                if ((s == ConfigSections.Account || s == ConfigSections.Cloud) && plan.Contains(ConfigSections.Connection)) {
                     report(s, SectionState.Waiting, "ждёт подтверждения связи");
                     await connection;
                     if (!outcomes[ConfigSections.Connection].Ok) {
@@ -300,22 +295,6 @@ namespace RemoteAgents.Launcher
             try { var m = Json.Map(Json.Get(Json.Read(AppliedFile(home)), "sections")); return m.ToDictionary(p => p.Key, p => Convert.ToString(p.Value, CultureInfo.InvariantCulture)); }
             catch (Exception) { return new Dictionary<string, string>(); }
         }
-        internal static DiskChoice AppliedDiskChoice(string home, Dictionary<string, object> profile)
-        {
-            string hash;
-            return Applied(home).TryGetValue(ConfigSections.Disk, out hash) && hash == ConfigSections.Hash(profile, ConfigSections.Disk)
-                ? DiskChoice.FromProfile(profile) : null;
-        }
-        // Read the disk's existing peer-scoped exclusions; All must not claim detached external projects.
-        internal static string[] DiskExclusions(string diskHome = null)
-        {
-            if (diskHome == null) diskHome = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteDisk");
-            try {
-                var saved = Json.Read(Path.Combine(diskHome, "external-exclusions.json"));
-                return Json.Int(saved, "schema", 0) == 1 && Json.Str(saved, "peer").Length > 0 && Json.Str(saved, "peer") == Files.ReadLine(Path.Combine(diskHome, "server.txt"))
-                    ? Json.Strings(Json.Get(saved, "names")) : new string[0];
-            } catch (Exception) { return new string[0]; }
-        }
         static readonly object appliedGate = new object();
         internal static void MarkApplied(string home, string section, string hash)
         {
@@ -330,17 +309,9 @@ namespace RemoteAgents.Launcher
             var p = new Dictionary<string, object>(profile); var device = new Dictionary<string, object>(Json.Map(Json.Get(p, "device")));
             device["name"] = name.Trim(); p["device"] = device; return p;
         }
-        internal static Dictionary<string, object> WithFolders(Dictionary<string, object> profile, IEnumerable<string> folders, string diskBase)
-        {
-            var choice = DiskChoice.FromProfile(profile);
-            var paths = folders.ToArray();
-            var next = new DiskChoice { Chosen = true, All = paths.Contains("."), External = choice.External };
-            if (!next.All) next.Folders = paths.Select(path => new DiskFolderChoice { Path = path, Direction = choice.DirectionOf(path) }).ToList();
-            return next.WriteTo(profile, diskBase);
-        }
         // «Подробно» (the step-by-step sections) edit config.json; bring the same facts back into the profile so the
         // config stays the one description of the program. Sections never described are added only when really set.
-        internal static Dictionary<string, object> SyncFromSettings(Dictionary<string, object> profile, Dictionary<string, object> config, string diskBase, string[] diskFolders, string serverAddress, string serverLogin)
+        internal static Dictionary<string, object> SyncFromSettings(Dictionary<string, object> profile, Dictionary<string, object> config, string serverAddress, string serverLogin)
         {
             var p = new Dictionary<string, object>(profile);
             var bridge = Json.Map(Json.Get(config, "bridge"));
@@ -367,10 +338,6 @@ namespace RemoteAgents.Launcher
             if (lans.Length > 0 || p.ContainsKey("lan")) {
                 var old = Json.Array(Json.Get(p, "lan")).Select(Json.Map).ToArray();
                 p["lan"] = lans.Select(l => (object)(old.FirstOrDefault(o => Json.Str(o, "name") == Json.Str(l, "name")) ?? new Dictionary<string, object> { { "name", Json.Str(l, "name") }, { "kind", "openvpn" } })).ToArray();
-            }
-            if (!string.IsNullOrEmpty(diskBase) && (diskFolders != null || p.ContainsKey("disk"))) {
-                if (diskFolders != null) p = WithFolders(p, diskFolders, diskBase);
-                var d = new Dictionary<string, object>(Json.Map(Json.Get(p, "disk"))); d["base"] = diskBase; p["disk"] = d;
             }
             if (!string.IsNullOrEmpty(serverAddress)) {
                 var s = new Dictionary<string, object>(Json.Map(Json.Get(p, "server"))); s["address"] = serverAddress; if (!string.IsNullOrEmpty(serverLogin)) s["login"] = serverLogin; p["server"] = s;
@@ -424,15 +391,6 @@ namespace RemoteAgents.Launcher
             var request = new Dictionary<string, object> { { "enabled", Json.Bool(bridge, "enabled", true) }, { "shell", Json.Bool(bridge, "allowShell") } };
             string name = ConfigProfile.DeviceName(p); if (name.Length > 0) request["deviceName"] = name;
             return request;
-        }
-        internal static Dictionary<string, object> Disk(Dictionary<string, object> p, string defaultBase, string[] currentSelection)
-        {
-            var disk = Json.Map(Json.Get(p, "disk"));
-            var choice = DiskChoice.FromProfile(p);
-            var directions = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-            foreach (var folder in choice.Folders) if (folder.Direction != DiskChoice.Both) directions[DiskChoice.Project(folder.Path)] = folder.Direction;
-            return new Dictionary<string, object> { { "base", Json.Text(disk, "base", defaultBase) }, { "paths", choice.Chosen ? choice.Paths : currentSelection ?? new string[0] },
-                { "directions", directions }, { "external", choice.External.Select(e => (object)new Dictionary<string, object> { { "path", e.Path }, { "remote", e.Remote }, { "direction", e.Direction } }).ToArray() }, { "reconnect", false } };
         }
         internal static Dictionary<string, object> Vpn(Dictionary<string, object> p)
         {
@@ -494,6 +452,7 @@ namespace RemoteAgents.Launcher
                     if (hopKey.Length == 0 || !available(hopKey)) { if (SecretName(Json.Get(hop, "password")).Length > 0) need(Json.Get(hop, "password")); else need(Json.Get(hop, "key")); }
                     break; }
                 case ConfigSections.Account: if (Json.Str(Json.Map(Json.Get(p, "happier")), "mode") != "new") need(Json.Get(Json.Map(Json.Get(p, "happier")), "key")); break;
+                case ConfigSections.Cloud: need(Json.Get(CloudSettings.First(Json.Get(p, "cloud")), "password")); break;
                 case ConfigSections.Proxy: need(Json.Get(Json.Map(Json.Get(p, "proxyOut")), "password")); break;
                 case ConfigSections.Lan: foreach (var l in Json.Array(Json.Get(p, "lan")).Select(Json.Map)) { need(Json.Get(l, "ovpn")); need(Json.Get(l, "password")); } break;
                 case ConfigSections.Bootstrap: {
@@ -512,6 +471,7 @@ namespace RemoteAgents.Launcher
             else if (name == "server-key") text = "Закрытый SSH-ключ для входа на сервер " + address + " (текст ключа целиком).";
             else if (name.StartsWith("hop-")) text = (name.Contains("password") ? "Пароль" : "Закрытый ключ") + " промежуточного SSH-сервера (способ «через SSH-сервер»).";
             else if (name == "happier-key") text = "Секретный ключ аккаунта Happier (Happier → Settings → Secret Key). Он же нужен для телефона и других компьютеров.";
+            else if (name == "cloud-password") text = ConfigBundle.StandardHint(name);
             else if (name == "proxy-out-password") text = "Пароль прокси, через который сервер выходит в интернет.";
             else if (name == "vpn-channel" || name.StartsWith("vpn-entry-")) text = "Данные VPN для подключения в обход блокировок (их выдаёт администратор сервера).";
             else if (name.StartsWith("lan-")) text = (name.EndsWith("-ovpn") ? "Файл OpenVPN (.ovpn, текстом)" : "Пароль") + " локальной сети «" + name.Substring(4).Split('-')[0] + "».";
@@ -692,43 +652,6 @@ namespace RemoteAgents.Launcher
 
     // Wizard actions read mutable settings from home. Never resume a detached install after its
     // server/choice changed: release the serial queue so the newest request can use that home.
-    internal static class DiskApplyWait
-    {
-        internal static string Binding(Dictionary<string, object> profile)
-        { return ConfigSections.Hash(profile, ConfigSections.Connection) + ":" + ConfigSections.Hash(profile, ConfigSections.Disk); }
-        internal static SectionOutcome Superseded()
-        { return new SectionOutcome { Summary = "настройки папок или сервера изменились; прежнее ожидание завершено" }; }
-        internal static async Task<SectionOutcome> Run(Func<bool> current, Func<Task<SectionOutcome>> execute,
-            Func<string, Task<Dictionary<string, object>>> poll, Func<CancellationToken, Task> wait,
-            Action<SectionState, string> report, Action<string> log, CancellationToken token)
-        {
-            if (!current()) return Superseded();
-            var outcome = await execute();
-            while (true) {
-                if (!current()) return Superseded();
-                if (!outcome.Pending || !SectionOutcome.ServerOperation(outcome.Operation)) return outcome;
-                await wait(token);
-                if (!current()) return Superseded();
-                Dictionary<string, object> status;
-                try { status = await poll(outcome.Operation); }
-                catch (OperationCanceledException) { throw; }
-                catch (Exception e) {
-                    if (!current()) return Superseded();
-                    log("Папки: состояние установки на сервере не получено: " + e.Message + ". Повторю позже"); continue;
-                }
-                if (!current()) return Superseded();
-                var op = Json.Map(Json.Get(Json.Map(Json.Get(status, "operations")), outcome.Operation));
-                string state = Json.Str(op, "state");
-                if (state == "running") { report(SectionState.Pending, Json.Text(op, "text", "идёт установка на сервере")); continue; }
-                if (state == "finished") { outcome = await execute(); continue; }
-                // Missing/unknown operations cannot prove that this install is still running.
-                var failed = new SectionOutcome { Summary = state == "failed" ? Json.Text(op, "text", "установка на сервере не удалась")
-                    : "состояние установки на сервере не найдено; нажмите «Синхронизировать выбранные папки» ещё раз" };
-                report(SectionState.Failed, failed.Summary); return failed;
-            }
-        }
-    }
-
 #if !PORTABLE_TEST
     // One application of the stored profile: Inspect -> plan -> missing secrets (asked once, before anything runs)
     // -> ConfigEngine with the real actions. Callbacks may arrive on worker threads; the window marshals them.
@@ -740,7 +663,6 @@ namespace RemoteAgents.Launcher
         internal Action<string> Log = delegate { };
         internal Action<string> AccountCreated = delegate { };
         readonly HappierAccountCreation accountCreation;
-        internal Func<bool> DiskCurrent = () => true;
         internal Func<string, string, string> AskSecret = (name, why) => null;
         Dictionary<string, object> services = new Dictionary<string, object>();
         internal readonly ConcurrentDictionary<string, SectionOutcome> Outcomes = new ConcurrentDictionary<string, SectionOutcome>();
@@ -812,7 +734,6 @@ namespace RemoteAgents.Launcher
         }
         SectionOutcome RunSection(string s, CancellationToken token)
         {
-            if (s == ConfigSections.Disk && !DiskCurrent()) return DiskApplyWait.Superseded();
             var p = ConfigProfile.Load(home); var config = new Configuration(home).Data; string hash = ConfigSections.Hash(p, s);
             // «·» lines are the detailed trace (each SSH run, probes): journal only, the row keeps the current step.
             Action<string> progress = line => { if (!line.StartsWith("·", StringComparison.Ordinal)) Report(s, SectionState.Running, line); Log(ConfigSections.Title(s) + ": " + line); };
@@ -826,13 +747,12 @@ namespace RemoteAgents.Launcher
                     o = SectionOutcome.From(run("Connection", new { catalog = ConfigRequests.MergeCatalog(catalog, config), expected = catalog, shared = false }), "Связь работает ✓"); break; }
                 case ConfigSections.Bridge: o = SectionOutcome.From(run("Bridge", ConfigRequests.Bridge(p, config)), "Мост проверен ✓"); break;
                 case ConfigSections.Account: o = Account(p, config, run, ref hash); break;
-                case ConfigSections.Disk: o = SectionOutcome.From(run("Disk", ConfigRequests.Disk(p, DiskBase(), DiskSelection())), "Папки подключены; передача файлов продолжается"); break;
+                case ConfigSections.Cloud: o = CloudApply.Apply(p, Value, (command, input) => CloudApply.Execute(home, bundle, input, token)); break;
                 case ConfigSections.Vpn: o = SectionOutcome.From(run("Vpn", ConfigRequests.Vpn(p)), "VPN настроен", true); break;
                 case ConfigSections.Proxy: o = Proxy(p, config, run); break;
                 case ConfigSections.Lan: o = Lan(p, config, run); break;
                 default: throw new ArgumentException("Неизвестный раздел");
             }
-            if (s == ConfigSections.Disk && !DiskCurrent()) return DiskApplyWait.Superseded();
             // Server may have replaced root's password by its own key in the profile (PromoteServerKey).
             if (o.Ok && s == ConfigSections.Server) hash = ConfigSections.Hash(ConfigProfile.Load(home), s);
             if (o.Ok) ConfigProfile.MarkApplied(home, s, hash); else if (!o.Pending) ConfigProfile.MarkApplied(home, s, null);
@@ -850,7 +770,7 @@ namespace RemoteAgents.Launcher
                 var hopRequest = Json.Get(request, "hop") as Dictionary<string, object>; if (hopRequest != null) hopRequest["passwordPipe"] = hopRelay.Name;
                 var result = run("Server", request);
                 services = Json.Map(Json.Get(result, "services"));
-                foreach (string op in new[] { "disk", "happier" }) if (Json.Str(Json.Map(Json.Get(Json.Map(Json.Get(result, "operations")), op)), "state") == "running") Track(op, false);
+                foreach (string op in new[] { "happier" }) if (Json.Str(Json.Map(Json.Get(Json.Map(Json.Get(result, "operations")), op)), "state") == "running") Track(op, false);
                 PromoteServerKey(server);
                 return SectionOutcome.From(result, "Сервер подключён ✓");
             }
@@ -883,7 +803,7 @@ namespace RemoteAgents.Launcher
             var request = ConfigRequests.Account(p, services, config);
             string key = create ? HappierKey.Create() : Value(Json.Get(h, "key"));
             // The key waits in secrets/happier-pending.key; Wizard.ps1 applies it now or after the Happier install.
-            if (key.Length > 0) AccountDiskSetup.SaveKey(home, key, "happier-pending.key");
+            if (key.Length > 0) AccountSecrets.SaveKey(home, key, "happier-pending.key");
             Dictionary<string, object> result;
             try { result = run("Account", request); }
             catch {
@@ -923,7 +843,7 @@ namespace RemoteAgents.Launcher
             var request = ConfigRequests.Proxy(p, config); var x = Json.Map(Json.Get(p, "proxyOut"));
             string login = Json.Str(x, "login"), password = Value(Json.Get(x, "password")), file = Path.Combine(home, "secrets", "proxy-out.json");
             if (login.Length == 0) { if (File.Exists(file)) File.Delete(file); }
-            else if (password.Length > 0) { AccountDiskSetup.ProtectSecrets(home); Files.Atomic(file, Json.Encode(new Dictionary<string, object> { { "username", login }, { "password", password } }) + "\n"); }
+            else if (password.Length > 0) { AccountSecrets.ProtectSecrets(home); Files.Atomic(file, Json.Encode(new Dictionary<string, object> { { "username", login }, { "password", password } }) + "\n"); }
             var access = RootAccess(p, run);
             using (access.Item3) {
                 AddRoot(request, access); var result = run("Proxy", request);
@@ -965,13 +885,11 @@ namespace RemoteAgents.Launcher
                 ServerOperations.Save(home, tracked, Json.Map(Json.Get(state, "operations")), pendingAccount || Json.Bool(state, "pendingAccount"));
             }
         }
-        // Detached server installs (Happier, Syncthing) finish on their own; follow them with short status calls and
         // complete what waited for them. The tray does the same after the window is closed (TrayContext.CheckOperations).
         internal async Task FollowPending(CancellationToken token)
         {
             while (!token.IsCancellationRequested) {
-                // Disk follows its own server install in ApplyDisk (BackgroundWork.Disk), outside any window.
-                var waiting = Outcomes.Where(o => o.Key != ConfigSections.Disk && o.Value.Pending && SectionOutcome.ServerOperation(o.Value.Operation)).ToArray();
+                var waiting = Outcomes.Where(o => o.Value.Pending && SectionOutcome.ServerOperation(o.Value.Operation)).ToArray();
                 if (waiting.Length == 0) return;
                 await Task.Delay(12000, token);
                 Dictionary<string, object> status;
@@ -992,39 +910,11 @@ namespace RemoteAgents.Launcher
                 }
             }
         }
-        // Disk on its own: the run, then a detached Syncthing install on the server is followed with short status
-        // calls and Disk is run again once it has finished. Callers pass a token that outlives the window.
-        internal async Task<SectionOutcome> ApplyDisk(CancellationToken token)
-        {
-            var result = await DiskApplyWait.Run(DiskCurrent, async () => {
-                await Execute(new[] { ConfigSections.Disk }, token);
-                SectionOutcome outcome;
-                return Outcomes.TryGetValue(ConfigSections.Disk, out outcome) ? outcome : new SectionOutcome { Summary = "результат не получен" };
-            }, operation => Task.Run(() => {
-                if (!DiskCurrent()) throw new OperationCanceledException();
-                return WizardRunner.Run(home, bundle, "Operation", new { operations = new[] { operation } }, token);
-            }), ct => Task.Delay(12000, ct), (state, text) => Report(ConfigSections.Disk, state, text), Log, token);
-            if (DiskCurrent()) Outcomes[ConfigSections.Disk] = result;
-            return result;
-        }
         internal async Task<SectionOutcome> Activate(CancellationToken token)
         {
             await Bundle();
             var r = await Task.Run(() => WizardRunner.Run(home, bundle, "Activate", new { }, token, line => Log("Итог: " + line)));
             return SectionOutcome.From(r, "Настройки сохранены");
-        }
-        internal static string DiskBase()
-        {
-            string value = Files.ReadLine(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteDisk", "base.txt"));
-            return value.Length > 0 ? value : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Disk");
-        }
-        // Folders actually chosen on this computer (RemoteDisk selection.json; the install placeholder is not a choice).
-        internal static string[] DiskSelection()
-        {
-            try {
-                var s = Json.Read(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteDisk", "selection.json"));
-                return Json.Bool(s, "placeholder") ? null : Json.Strings(Json.Get(s, "paths"));
-            } catch (Exception) { return null; }
         }
         // After «Подробно» (step-by-step sections) the profile follows what they configured; those sections count as applied.
         internal static void SyncFromSettings(string home)
@@ -1032,7 +922,7 @@ namespace RemoteAgents.Launcher
             var config = new Configuration(home).Data; string address = "", login = "";
             try { var t = Json.Read(Json.Str(Json.Map(Json.Get(config, "transport")), "profilePath")); address = Json.Str(t, "serverAddress"); login = Json.Str(t, "login"); } catch (Exception) { }
             Dictionary<string, object> updated = null;
-            ConfigProfile.Update(home, p => { updated = ConfigProfile.SyncFromSettings(p, config, DiskBase(), DiskSelection(), address, login); p.Clear(); foreach (var pair in updated) p[pair.Key] = pair.Value; });
+            ConfigProfile.Update(home, p => { updated = ConfigProfile.SyncFromSettings(p, config, address, login); p.Clear(); foreach (var pair in updated) p[pair.Key] = pair.Value; });
             foreach (string s in ConfigSections.Order) if (ConfigSections.Present(updated, s)) ConfigProfile.MarkApplied(home, s, ConfigSections.Hash(updated, s));
         }
     }

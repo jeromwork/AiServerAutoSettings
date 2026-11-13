@@ -103,18 +103,8 @@
           "type": "object",
           "description": "Public per-device overlay; credentials remain in secrets"
         },
-        "skipDisk": {
-          "type": "boolean"
-        },
         "skipHappier": {
           "type": "boolean"
-        },
-        "diskKeepPrevious": {
-          "type": "boolean"
-        },
-        "diskPreviousProfile": {
-          "type": "string",
-          "description": "Previous SSH profile retained until an explicit Disk decision"
         },
         "skipLan": {
           "type": "boolean"
@@ -126,6 +116,17 @@
         "pendingProfile": {
           "type": "string",
           "description": "Chosen server; active transport is kept until successful network preflight"
+        }
+      },
+      "additionalProperties": false
+    },
+    "cloud": {
+      "type": "object",
+      "properties": {
+        "localFolder": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Папка официального приложения облака на этом устройстве. По умолчанию для mailru: %USERPROFILE%\\Облако Mail."
         }
       },
       "additionalProperties": false

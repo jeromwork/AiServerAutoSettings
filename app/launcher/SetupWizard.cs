@@ -17,19 +17,19 @@ namespace RemoteAgents.Launcher
         readonly string home; string bundle; readonly bool first; readonly Func<Task<string>> prepare; bool preparing;
         readonly WizardNavigation steps = new WizardNavigation();
         readonly Panel pages = new Panel { Dock = DockStyle.Fill };
-        readonly Panel[] sections = new Panel[9], details = new Panel[9];
-        readonly Label[] states = new Label[9];
+        readonly Panel[] sections = new Panel[8], details = new Panel[8];
+        readonly Label[] states = new Label[8];
         readonly TextBox journal = new TextBox { Dock = DockStyle.Fill, ReadOnly = true, Multiline = true, ScrollBars = ScrollBars.Vertical };
         readonly Label lastLine = new Label { Dock = DockStyle.Fill, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
         readonly Button back = new Button { Text = "Назад", Width = 88 }, next = new Button { Text = "Далее", Width = 88 }, close = new Button { Text = "Закрыть", Width = 88 };
         readonly ProgressBar progress = new ProgressBar { Dock = DockStyle.Bottom, Height = 4 };
-        readonly string[] titles = { "Сервер", "Связь", "Диск", "Happier", "Мост", "VPN", "Локальные сети", "Итог", "Выход в интернет" };
-        readonly string[] results = Enumerable.Repeat("Ещё не проверено", 9).ToArray();
-        readonly int[] order = {0,1,8,4,2,3,6,5,7};
-        bool activationRequested, lastSuccess, reconnectDisk, serverChanged, repairingServer; int currentPage;
-        readonly bool[] applied = new bool[9], dirty = new bool[9];
+        readonly string[] titles = { "Сервер", "Связь", "Happier", "Мост", "VPN", "Локальные сети", "Итог", "Выход в интернет" };
+        readonly string[] results = Enumerable.Repeat("Ещё не проверено", 8).ToArray();
+        readonly int[] order = {0,1,7,3,2,5,4,6};
+        bool activationRequested, lastSuccess, serverChanged, repairingServer; int currentPage;
+        readonly bool[] applied = new bool[8], dirty = new bool[8];
         ComboBox routeProxyType; TextBox routeProxy, routeHop, routeHopPort, routeHopUser, routeHopPassword, routeHopKey; Label routeHint;
-        TextBox address, login, password, keyFile, diskBase, label, accountKey, api, web, vpnCheck, vpnDns;
+        TextBox address, login, password, keyFile, label, accountKey, api, web, vpnCheck, vpnDns;
         CheckBox installMissing, shared, bridge, shell, vpn;
         RadioButton haveAccount, newAccount; Panel newKeyPanel; TextBox newKeyText; Button openHappier; Label accountKeyCaption;
         // Long server installs run detached on the server; sections wait (⏳) without blocking the next ones.
@@ -39,10 +39,9 @@ namespace RemoteAgents.Launcher
         readonly System.Windows.Forms.Timer operationTimer = new System.Windows.Forms.Timer { Interval = 12000 };
         readonly CancellationTokenSource pollCancellation = new CancellationTokenSource();
         bool pendingAccount, polling, showingInstall, resumeAccount, retryConnection;
-        DataGridView nodes; TreeView tree; ListBox accounts; Label inventory, accountHint, summary, diskWarning;
+        DataGridView nodes; ListBox accounts; Label inventory, accountHint, summary;
         string originalAddress, originalLogin, lanCommand = "";
         Dictionary<string, object> expectedCatalog; Dictionary<string, object>[] accountRows = new Dictionary<string, object>[0];
-        DiskFolderTree folders;
         CancellationTokenSource stepCancellation; bool closingRequested;
         bool busy, catalogLoaded, initializing;
 
@@ -72,16 +71,16 @@ namespace RemoteAgents.Launcher
                 await form.Inspect();
                 // At boot the transport may publish its first live status later than this check:
                 // when only «Связь» is open, look once more before showing anything.
-                if(!form.applied[1] && Enumerable.Range(0,6).All(i=>i==1 || form.applied[i])){await Task.Delay(20000);await form.Inspect();}
+                if(!form.applied[1] && Enumerable.Range(0,5).All(i=>i==1 || form.applied[i])){await Task.Delay(20000);await form.Inspect();}
                 // The optional LAN step alone never opens the window.
-                bool required=Enumerable.Range(0,6).All(i=>form.applied[i]);
+                bool required=Enumerable.Range(0,5).All(i=>form.applied[i]);
                 if(required){
                     // Everything is verified: record it without a window.
-                    form.SelectPage(7);await form.ExecuteCurrent();
+                    form.SelectPage(6);await form.ExecuteCurrent();
                     if(form.lastSuccess)return "Настройка завершена. Приложение работает в трее.";
                     // Not confirmed: show the summary with the reason instead of failing silently.
                 }
-                form.SelectPage(required?7:form.order.First(i=>i<6 && !form.applied[i]));
+                form.SelectPage(required?6:form.order.First(i=>i<5 && !form.applied[i]));
                 if(form.ShowDialog()!=DialogResult.OK)return null;
                 return "Настройка завершена. Приложение работает в трее.";
             }}finally{lease.ReleaseMutex();}
@@ -92,7 +91,7 @@ namespace RemoteAgents.Launcher
             this.home = home; this.bundle = bundle; this.first = first; this.prepare = prepare; initializing=true;
             AutoScaleDimensions=new SizeF(96,96); AutoScaleMode=AutoScaleMode.Dpi;
             Text = "RemoteAgents — " + (first ? "настройка" : "Настройки"); ClientSize=new Size(780,460);
-            if(!first)titles[7]="Состояние";
+            if(!first)titles[6]="Состояние";
             FormBorderStyle=FormBorderStyle.FixedDialog; MaximizeBox=false; StartPosition=FormStartPosition.CenterScreen;
             Font=new Font("Segoe UI",9F);
             var bar=new FlowLayoutPanel {Dock=DockStyle.Bottom,Height=42,FlowDirection=FlowDirection.RightToLeft,Padding=new Padding(5)};
@@ -108,20 +107,19 @@ namespace RemoteAgents.Launcher
                 details[i]=new Panel {Width=575,Height=420,AutoScroll=true};
             }
             results[1]=WizardStep.ConnectionResult(config,new Dictionary<string,object>(),false,results[1]);
-            ServerPage(config);ConnectionPage();DiskPage();AccountPage(config);BridgePage(config);VpnPage(config);LanPage();SummaryPage();ProxyPage(config);
+            ServerPage(config);ConnectionPage();AccountPage(config);BridgePage(config);VpnPage(config);LanPage();SummaryPage();ProxyPage(config);
             pages.Controls.Add(installPanel);
             steps.Initialize(titles,order);steps.Available=i=>WizardStep.CanOpen(i,currentPage,first,WizardStep.Passable(applied,waiting.Keys),order);
             steps.ExtraRequested+=ShowInstall;operationTimer.Tick+=async(a,b)=>await PollOperations();
             // Settings: free clicking, the main button applies the open section. First run: walk with «Далее».
             back.Visible=first;
-            foreach(int i in order.Where(x=>x!=7)) {int section=i;
+            foreach(int i in order.Where(x=>x!=6)) {int section=i;
                 foreach(Control c in sections[i].Controls.Cast<Control>().Concat(details[i].Controls.Cast<Control>())) {
                     var t=c as TextBox;if(t!=null)t.TextChanged+=(a,b)=>Changed(section);
                     var check=c as CheckBox;if(check!=null)check.CheckedChanged+=(a,b)=>Changed(section);
                 }
             }
             nodes.CellValueChanged+=(a,b)=>Changed(1);nodes.UserAddedRow+=(a,b)=>Changed(1);
-            folders.SelectionChanged+=()=>Changed(2);
             address.TextChanged+=(a,b)=>InvalidateServer();login.TextChanged+=(a,b)=>InvalidateServer();
             steps.SectionRequested+=i=> {if(WizardStep.CanOpen(i,currentPage,first,WizardStep.Passable(applied,waiting.Keys),order))SelectPage(i);else{steps.Section=currentPage;Append("Сначала завершите или пропустите раздел «"+titles[currentPage]+"»");}};
             back.Click+=(a,b)=>Navigate(-1);
@@ -132,7 +130,7 @@ namespace RemoteAgents.Launcher
                 if(!lastSuccess || closingRequested)return;
                 if(completed==0 && serverChanged){repairingServer=true;serverChanged=false;}
                 if(!first){if(completed==0 && repairingServer){Navigate(1);await ContinueServerRepair();}return;}
-                if(completed==7){DialogResult=DialogResult.OK;Close();return;}
+                if(completed==6){DialogResult=DialogResult.OK;Close();return;}
                 Navigate(1);await ContinueServerRepair();await FinishAutomatically();
             };
             close.Click+=(a,b)=>Close();
@@ -142,7 +140,7 @@ namespace RemoteAgents.Launcher
             Append("Готов к настройке. Пароль используется один раз и не сохраняется.");
             // Reopened window: installs started earlier (even before closing the window or the PC).
             var saved=ServerOperations.Load(home);tracked.AddRange(Json.Strings(Json.Get(saved,"tracked")));lastOperations=Json.Map(Json.Get(saved,"operations"));pendingAccount=Json.Bool(saved,"pendingAccount");
-            if(pendingAccount)waiting[3]="happier";RefreshInstall();if(prepare==null && (tracked.Count>0 || pendingAccount))operationTimer.Start();
+            if(pendingAccount)waiting[2]="happier";RefreshInstall();if(prepare==null && (tracked.Count>0 || pendingAccount))operationTimer.Start();
             if(prepare!=null)PreparationState(true);
         }
         void PreparationState(bool running)
@@ -169,14 +167,14 @@ namespace RemoteAgents.Launcher
             if(index<0 || index>=sections.Length)return;
             showingInstall=false;if(!busy)next.Enabled=true;
             currentPage=index;steps.Section=index;sections[index].BringToFront();back.Enabled=!busy && Array.IndexOf(order,index)>0;
-            next.Text=first?(index==7?"Готово":"Далее"):(index==7?"Проверить":"Применить");RefreshSummary();
+            next.Text=first?(index==6?"Готово":"Далее"):(index==6?"Проверить":"Применить");RefreshSummary();
         }
         void Navigate(int direction)
         {
             // Forward in first run skips ready sections; back always opens the previous one.
             int n=Array.IndexOf(order,steps.Section)+direction;
             while(n>=0 && n<order.Length) {
-                int i=order[n];if(!first || direction<0 || i==7 || !applied[i]){SelectPage(i);return;}n+=direction;
+                int i=order[n];if(!first || direction<0 || i==6 || !applied[i]){SelectPage(i);return;}n+=direction;
             }
         }
         async Task ContinueServerRepair()
@@ -184,14 +182,14 @@ namespace RemoteAgents.Launcher
             // Reapply known settings in priority order; stop whenever an explicit data/file choice is needed.
             while(repairingServer && !closingRequested) {
                 int index=steps.Section;
-                if(index==2 || index==6 || index==7 || (index==5 && vpn.Checked))return;
-                if(index==3 && (api.Text.Length==0 || web.Text.Length==0 || label.Text.Length==0))return;
-                if(index!=1 && index!=4 && index!=3 && index!=5)return;
+                if(index==5 || index==7 || (index==4 && vpn.Checked))return;
+                if(index==2 && (api.Text.Length==0 || web.Text.Length==0 || label.Text.Length==0))return;
+                if(index!=1 && index!=3 && index!=2 && index!=4)return;
                 await ExecuteCurrent();if(!lastSuccess)return;Navigate(1);
             }
         }
         async Task FinishAutomatically()
-        {if(first && steps.Section==7 && lastSuccess && !closingRequested){await ExecuteCurrent();if(lastSuccess){DialogResult=DialogResult.OK;Close();}}}
+        {if(first && steps.Section==6 && lastSuccess && !closingRequested){await ExecuteCurrent();if(lastSuccess){DialogResult=DialogResult.OK;Close();}}}
         Label Hint(int page,string text,int top=12,int height=44)
         {var c=new Label {Left=16,Top=top,Width=585,Height=height,Text=text};sections[page].Controls.Add(c);return c;}
         void Question(int page,string text)
@@ -269,9 +267,9 @@ namespace RemoteAgents.Launcher
         {
             if(initializing || busy)return;serverChanged=address.Text.Trim()!=originalAddress || login.Text.Trim()!=originalLogin;
             password.Enabled=true;password.Clear();
-            if(serverChanged){for(int i=1;i<6;i++){applied[i]=false;results[i]="Нужно проверить для нового сервера";}catalogLoaded=folders.Loaded=false;accountRows=new Dictionary<string,object>[0];
-                api.Clear();web.Clear();accountKey.Clear();accounts.Items.Clear();lanCommand=proxyCommand="";applied[6]=applied[8]=false;results[6]=results[8]="Нужно проверить для нового сервера";expectedCatalog=null;nodes.Rows.Clear();
-                RefreshDiskWarning();RefreshSummary();}
+            if(serverChanged){for(int i=1;i<5;i++){applied[i]=false;results[i]="Нужно проверить для нового сервера";}catalogLoaded=false;accountRows=new Dictionary<string,object>[0];
+                api.Clear();web.Clear();accountKey.Clear();accounts.Items.Clear();lanCommand=proxyCommand="";applied[5]=applied[7]=false;results[5]=results[7]="Нужно проверить для нового сервера";expectedCatalog=null;nodes.Rows.Clear();
+                RefreshSummary();}
         }
         void ConnectionPage()
         {
@@ -283,51 +281,31 @@ namespace RemoteAgents.Launcher
             var reload=new Button {Text="Обновить каталог",Left=12,Top=8,Width=170};reload.Click+=async(a,b)=>{if(!busy)await Guard(LoadCatalog);};details[1].Controls.Add(reload);
             More(1,150);
         }
-        void DiskPage()
-        {
-            string value=Files.ReadLine(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"RemoteDisk","base.txt"));if(value.Length==0)value=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),"Disk");
-            Question(2,"Какие проекты хранить на этом компьютере?");diskBase=Field(2,"Папка Disk",80,value);diskBase.ReadOnly=true;diskBase.Width=450;
-            Button(2,"Изменить…",100,()=>{using(var d=new FolderBrowserDialog {SelectedPath=diskBase.Text})if(d.ShowDialog(this)==DialogResult.OK){diskBase.Text=d.SelectedPath;folders.Loaded=false;}return Task.FromResult(0);},480,115);
-            tree=new TreeView {Left=16,Top=135,Width=580,Height=150,CheckBoxes=true};sections[2].Controls.Add(tree);
-            folders=new DiskFolderTree(tree,path=>Run("DiskTree",new { @base=diskBase.Text.Trim(),path }),a=>Guard(a),()=>busy,Append);
-            diskWarning=Hint(2,"",135,66);diskWarning.Visible=false;
-            var reconnect=Button(2,"Отключить и подключить к новому",208,()=>{if(!reconnectDisk){reconnectDisk=true;diskBase.Text=diskBase.Text+"-"+DateTime.Now.ToString("yyyyMMddHHmmss");}RefreshDiskWarning();return Task.FromResult(0);});reconnect.Tag="reconnect";reconnect.Visible=false;
-            var keep=Button(2,"Остановить синхронизацию, файлы оставить",245,()=>Skip("Disk",2),16,300);keep.Tag="keep";keep.Visible=false;
-            Button(2,"Загрузить проекты",292,LoadTree,16,175);Button(2,"Пропустить",292,()=>Skip("Disk",2),204,110);More(2,292);sections[2].Controls[sections[2].Controls.Count-1].Left=330;
-            var info=Hint(2,"Снятие отметки не удаляет файлы. Синхронизация двусторонняя. .git, секреты и зависимости исключены. При смене сервера нужна новая пустая папка: прежняя папка остаётся на ПК.",10,130);Technical(2,info);
-            diskBase.TextChanged+=(a,b)=>folders.Loaded=false;
-        }
-        void RefreshDiskWarning()
-        {
-            var wizard=Json.Map(Json.Get(new Configuration(home).Data,"wizard"));bool warning=!reconnectDisk && Json.Str(wizard,"diskPreviousProfile").Length>0;
-            diskWarning.Visible=warning;tree.Visible=!warning;diskWarning.Text="Диск был подключён к старому серверу. «Отключить и подключить к новому» — новая пустая папка для нового сервера; старые файлы останутся на ПК. «Остановить синхронизацию, файлы оставить» — диск не синхронизируется, файлы и прежние настройки сохраняются.";
-            foreach(Control c in sections[2].Controls)if(Convert.ToString(c.Tag)=="reconnect" || Convert.ToString(c.Tag)=="keep")c.Visible=warning;
-        }
         async Task Skip(string step,int index)
         {var result=await Run("Skip",new {step});applied[index]=true;dirty[index]=false;results[index]=Json.Str(result,"summary");Append(results[index]);if(first)Navigate(1);}
         void AccountPage(Dictionary<string,object> config)
         {
-            var settings=Json.Map(Json.Get(config,"happier"));Question(3,"Подключить свой аккаунт Happier?");
+            var settings=Json.Map(Json.Get(config,"happier"));Question(2,"Подключить свой аккаунт Happier?");
             haveAccount=new RadioButton {Left=16,Top=82,Width=280,Height=24,Text="У меня уже есть аккаунт",Checked=true};
             newAccount=new RadioButton {Left=300,Top=82,Width=280,Height=24,Text="Создать новый аккаунт"};
-            sections[3].Controls.Add(haveAccount);sections[3].Controls.Add(newAccount);
-            accountKeyCaption=Hint(3,"Секретный ключ аккаунта (пусто — сохранённый на этом компьютере)",112,21);
-            accountKey=new TextBox {Left=16,Top=134,Width=575,UseSystemPasswordChar=true};sections[3].Controls.Add(accountKey);
-            label=Field(3,"Имя аккаунта — чтобы различать аккаунты",160,Json.Str(settings,"label"));
+            sections[2].Controls.Add(haveAccount);sections[2].Controls.Add(newAccount);
+            accountKeyCaption=Hint(2,"Секретный ключ аккаунта (пусто — сохранённый на этом компьютере)",112,21);
+            accountKey=new TextBox {Left=16,Top=134,Width=575,UseSystemPasswordChar=true};sections[2].Controls.Add(accountKey);
+            label=Field(2,"Имя аккаунта — чтобы различать аккаунты",160,Json.Str(settings,"label"));
             accounts=new ListBox {Left=16,Top=12,Width=570,Height=80};
-            api=Field(3,"HTTPS API Happier",105,Json.Str(settings,"serverUrl"));web=Field(3,"HTTPS Web Happier",165,Json.Str(settings,"webappUrl"));
-            accountHint=Hint(3,"Ключ хранится только в secrets этого компьютера и передаётся на сервер через SSH stdin. Для телефона — тот же ключ (Happier → Restore with Secret Key). Если Happier на сервере ещё устанавливается, ключ можно ввести сразу: подключение применится само.",235,70);
+            api=Field(2,"HTTPS API Happier",105,Json.Str(settings,"serverUrl"));web=Field(2,"HTTPS Web Happier",165,Json.Str(settings,"webappUrl"));
+            accountHint=Hint(2,"Ключ хранится только в secrets этого компьютера и передаётся на сервер через SSH stdin. Для телефона — тот же ключ (Happier → Restore with Secret Key). Если Happier на сервере ещё устанавливается, ключ можно ввести сразу: подключение применится само.",235,70);
             // Technical fields and their captions live under «Подробнее…».
-            foreach(Control c in sections[3].Controls.Cast<Control>().Where(c=>c is Label && (c.Top==105 || c.Top==165)).ToArray())Technical(3,c);
-            Technical(3,accounts,api,web,accountHint);
+            foreach(Control c in sections[2].Controls.Cast<Control>().Where(c=>c is Label && (c.Top==105 || c.Top==165)).ToArray())Technical(2,c);
+            Technical(2,accounts,api,web,accountHint);
             accounts.SelectedIndexChanged+=(a,b)=>{if(accounts.SelectedIndex<0)return;var r=accountRows[accounts.SelectedIndex];label.Text=Json.Str(r,"label");if(Json.Str(r,"serverUrl").Length>0)api.Text=Json.Str(r,"serverUrl");if(Json.Str(r,"webappUrl").Length>0)web.Text=Json.Str(r,"webappUrl");};
-            var reload=new Button {Text="Получить аккаунты",Left=16,Top=310,Width=180};reload.Click+=async(a,b)=>{if(!busy)await Guard(LoadAccounts);};details[3].Controls.Add(reload);
-            newAccount.CheckedChanged+=(a,b)=>{accountKey.Visible=accountKeyCaption.Visible=!newAccount.Checked;Changed(3);};
-            More(3,215);Button(3,"Пропустить",215,()=>Skip("Happier",3),150,110);
-            openHappier=new Button {Left=275,Top=215,Width=160,Height=29,Text="Открыть Happier",Visible=false};sections[3].Controls.Add(openHappier);
+            var reload=new Button {Text="Получить аккаунты",Left=16,Top=310,Width=180};reload.Click+=async(a,b)=>{if(!busy)await Guard(LoadAccounts);};details[2].Controls.Add(reload);
+            newAccount.CheckedChanged+=(a,b)=>{accountKey.Visible=accountKeyCaption.Visible=!newAccount.Checked;Changed(2);};
+            More(2,215);Button(2,"Пропустить",215,()=>Skip("Happier",2),150,110);
+            openHappier=new Button {Left=275,Top=215,Width=160,Height=29,Text="Открыть Happier",Visible=false};sections[2].Controls.Add(openHappier);
             openHappier.Click+=(a,b)=>{try{Process.Start(new ProcessStartInfo(ConfigRequests.Origin(web.Text)){UseShellExecute=true});}catch(Exception e){Append("Ошибка: "+e.Message);}};
             // A new key is shown once, right after creation; it is never written to the journal.
-            newKeyPanel=new Panel {Left=16,Top=250,Width=580,Height=92,Visible=false};sections[3].Controls.Add(newKeyPanel);
+            newKeyPanel=new Panel {Left=16,Top=250,Width=580,Height=92,Visible=false};sections[2].Controls.Add(newKeyPanel);
             newKeyPanel.Controls.Add(new Label {Left=0,Top=0,Width=575,Height=36,Text="Сохраните ключ: он нужен для других компьютеров и телефона (Happier → Restore with Secret Key). Больше он не будет показан."});
             newKeyText=new TextBox {Left=0,Top=40,Width=455,ReadOnly=true};newKeyPanel.Controls.Add(newKeyText);
             var copy=new Button {Left=465,Top=38,Width=110,Height=27,Text="Скопировать"};newKeyPanel.Controls.Add(copy);
@@ -335,33 +313,33 @@ namespace RemoteAgents.Launcher
             RefreshAccountButtons();
         }
         void RefreshAccountButtons()
-        {if(openHappier!=null)openHappier.Visible=applied[3] && !waiting.ContainsKey(3) && web.Text.Trim().StartsWith("https://",StringComparison.OrdinalIgnoreCase);}
+        {if(openHappier!=null)openHappier.Visible=applied[2] && !waiting.ContainsKey(2) && web.Text.Trim().StartsWith("https://",StringComparison.OrdinalIgnoreCase);}
         void ShowNewKey(string key)
         {newKeyText.Text=key;newKeyPanel.Visible=true;}
         void BridgePage(Dictionary<string,object> config)
         {
-            var c=Json.Map(Json.Get(config,"bridge"));Question(4,"Разрешить агенту управлять этим ПК?");
+            var c=Json.Map(Json.Get(config,"bridge"));Question(3,"Разрешить агенту управлять этим ПК?");
             bool controlOn=Json.Bool(Json.Map(Json.Get(Json.Map(Json.Get(config,"components")),"control")),"enabled");
-            bridge=Check(4,"Включить мост",95,Json.Bool(c,"enabled",controlOn || !Json.Map(Json.Get(config,"components")).ContainsKey("control")));shell=Check(4,"Разрешить выполнение команд (shell)",135,Json.Bool(c,"allowShell",c.Count==0 && controlOn));
-            var info=Hint(4,"Разрешение shell позволяет выполнять команды от вашего имени. Настройка применяется на компьютере и на сервере. Изменение защищено независимым откатом.",12,100);Technical(4,info);More(4,195);
+            bridge=Check(3,"Включить мост",95,Json.Bool(c,"enabled",controlOn || !Json.Map(Json.Get(config,"components")).ContainsKey("control")));shell=Check(3,"Разрешить выполнение команд (shell)",135,Json.Bool(c,"allowShell",c.Count==0 && controlOn));
+            var info=Hint(3,"Разрешение shell позволяет выполнять команды от вашего имени. Настройка применяется на компьютере и на сервере. Изменение защищено независимым откатом.",12,100);Technical(3,info);More(3,195);
         }
         void VpnPage(Dictionary<string,object> config)
         {
-            var c=Json.Map(Json.Get(config,"vpn"));Question(5,"Использовать VPN на этом компьютере?");vpn=Check(5,"Включить VPN",95,Json.Bool(c,"enabled"));
-            Hint(5,"Можно оставить выключенным. Первый запуск TUN запросит UAC.",140,55);
-            vpnCheck=Field(5,"Ваш HTTPS-адрес проверки VPN",20,Json.Str(c,"checkUrl"));vpnDns=Field(5,"DNS для VPN",85,Json.Str(c,"dnsServer"));
-            foreach(Control control in sections[5].Controls.Cast<Control>().Where(cn=>cn.Top==20 || cn.Top==85).ToArray())Technical(5,control);
-            Technical(5,vpnCheck,vpnDns);More(5,210);
+            var c=Json.Map(Json.Get(config,"vpn"));Question(4,"Использовать VPN на этом компьютере?");vpn=Check(4,"Включить VPN",95,Json.Bool(c,"enabled"));
+            Hint(4,"Можно оставить выключенным. Первый запуск TUN запросит UAC.",140,55);
+            vpnCheck=Field(4,"Ваш HTTPS-адрес проверки VPN",20,Json.Str(c,"checkUrl"));vpnDns=Field(4,"DNS для VPN",85,Json.Str(c,"dnsServer"));
+            foreach(Control control in sections[4].Controls.Cast<Control>().Where(cn=>cn.Top==20 || cn.Top==85).ToArray())Technical(4,control);
+            Technical(4,vpnCheck,vpnDns);More(4,210);
         }
-        void SummaryPage(){Question(7,"Настройка завершена?");summary=Hint(7,"",85,235);}
+        void SummaryPage(){Question(6,"Настройка завершена?");summary=Hint(6,"",85,235);}
         void Changed(int index){if(busy || initializing)return;dirty[index]=true;applied[index]=false;results[index]="Есть неприменённые изменения";RefreshSummary();}
         void RefreshSummary()
         {
-            if(summary!=null)summary.Text=string.Join("\r\n",order.Where(i=>i!=7).Select(i=>titles[i]+": "+(results[i].Length>72?results[i].Substring(0,69)+"…":results[i])));
-            for(int i=0;i<sections.Length;i++){if(states[i]!=null){states[i].Text=results[i];states[i].ForeColor=results[i].StartsWith("Ошибка")?Color.Firebrick:SystemColors.ControlText;}steps.Mark(i,(i!=7 && applied[i])?"✓":waiting.ContainsKey(i)?"⏳":results[i].StartsWith("Ошибка")?"✗":"…");}
+            if(summary!=null)summary.Text=string.Join("\r\n",order.Where(i=>i!=6).Select(i=>titles[i]+": "+(results[i].Length>72?results[i].Substring(0,69)+"…":results[i])));
+            for(int i=0;i<sections.Length;i++){if(states[i]!=null){states[i].Text=results[i];states[i].ForeColor=results[i].StartsWith("Ошибка")?Color.Firebrick:SystemColors.ControlText;}steps.Mark(i,(i!=6 && applied[i])?"✓":waiting.ContainsKey(i)?"⏳":results[i].StartsWith("Ошибка")?"✗":"…");}
             RefreshAccountButtons();
             steps.Invalidate();
-            RefreshDiskWarning();
+
         }
         void Append(string text)
         {
@@ -375,7 +353,7 @@ namespace RemoteAgents.Launcher
                 var result=await Run("Inspect",new {},pollCancellation.Token);
                 if (IsDisposed || closingRequested || busy) return;
                 var observations=Json.Array(Json.Get(result,"steps")).Select(Json.Map).ToArray();
-                for(int i=0;i<Math.Min(6,observations.Length);i++)if(!dirty[i]){applied[i]=Json.Bool(observations[i],"ready");if(i!=1)results[i]=applied[i]?"Проверено сейчас ✓":"Требуется настройка или проверка";}
+                for(int i=0;i<Math.Min(5,observations.Length);i++)if(!dirty[i]){applied[i]=Json.Bool(observations[i],"ready");if(i!=1)results[i]=applied[i]?"Проверено сейчас ✓":"Требуется настройка или проверка";}
                 var server=Json.Map(Json.Get(result,"server"));
                 results[0]=applied[0]?"Подключено ✓":Json.Text(server,"reason","Укажите сервер и проверьте вход");
                 var current=StatusView.Read(home,"transport",maxAgeSec:15);
@@ -402,7 +380,7 @@ namespace RemoteAgents.Launcher
         }
         async Task<Dictionary<string,object>> Run(string action, object request, CancellationToken? quiet = null)
         {
-            string message=action=="Server"?"Подключаюсь к серверу "+address.Text.Trim()+"…":action=="Catalog"?"Загружаю узлы с сервера…":action=="DiskTree"?"Загружаю проекты Disk…":action=="Connection"?"Проверяю варианты связи…":action=="Bridge"?"Настраиваю и проверяю мост…":action=="Inspect"?"Проверяю текущее состояние в фоне…":action=="Lan"?"Подключаю локальную сеть…":action=="Proxy"?"Настраиваю выход сервера в интернет…":action=="NetStatus"?"Проверяю состояние сетей сервера…":action=="AdminProbe"?"Проверяю права root на сервере…":action=="LanRemove"?"Удаляю локальную сеть…":action=="Account"?"Подключаю Happier…":action=="ResumeAccount"?"Happier установлен: подключаю аккаунт…":action=="Disk"?"Применяю выбор проектов…":action=="Vpn"?"Проверяю настройки VPN…":"Завершаю настройку…";
+            string message=action=="Server"?"Подключаюсь к серверу "+address.Text.Trim()+"…":action=="Catalog"?"Загружаю узлы с сервера…":action=="Connection"?"Проверяю варианты связи…":action=="Bridge"?"Настраиваю и проверяю мост…":action=="Inspect"?"Проверяю текущее состояние в фоне…":action=="Lan"?"Подключаю локальную сеть…":action=="Proxy"?"Настраиваю выход сервера в интернет…":action=="NetStatus"?"Проверяю состояние сетей сервера…":action=="AdminProbe"?"Проверяю права root на сервере…":action=="LanRemove"?"Удаляю локальную сеть…":action=="Account"?"Подключаю Happier…":action=="ResumeAccount"?"Happier установлен: подключаю аккаунт…":action=="Vpn"?"Проверяю настройки VPN…":"Завершаю настройку…";
             if(quiet==null)Append(message);
             var token=quiet ?? stepCancellation.Token;
             // Same runner as the config engine and the tray (WizardRunner); progress lines arrive on a worker thread.
@@ -416,7 +394,7 @@ namespace RemoteAgents.Launcher
             bool ok=Json.Bool(result,"ok",true);string pending=Json.Str(result,"pending");
             applied[index]=ok;dirty[index]=false;
             if(pending.Length>0){waiting[index]=pending;TrackOperation(pending);}else waiting.Remove(index);
-            if(index==3){pendingAccount=pending=="happier";if(ok)newKeyPanel.Visible=newKeyText.Text.Length>0;}
+            if(index==2){pendingAccount=pending=="happier";if(ok)newKeyPanel.Visible=newKeyText.Text.Length>0;}
             results[index]=Json.Text(result,"summary",index==0?"Подключено ✓":"Готово: операция подтверждена")+(ok || pending.Length>0?"":" (ожидание, не готово)");Append(titles[index]+": "+results[index]);
             RefreshInstall();
             return ok || pending.Length>0;
@@ -424,12 +402,12 @@ namespace RemoteAgents.Launcher
         // Server step / inspection: installs running on the server are tracked by their sections.
         void TrackServer(Dictionary<string,object> operations)
         {
-            foreach(var pair in new[]{new KeyValuePair<string,int>("disk",2),new KeyValuePair<string,int>("happier",3)}) {
+            foreach(var pair in new[]{new KeyValuePair<string,int>("happier",2)}) {
                 var op=Json.Map(Json.Get(operations,pair.Key));if(Json.Str(op,"state")!="running")continue;
                 lastOperations[pair.Key]=op;TrackOperation(pair.Key);
                 if(!applied[pair.Value]){waiting[pair.Value]=pair.Key;results[pair.Value]=Json.Str(op,"text");}
             }
-            if(pendingAccount){waiting[3]="happier";TrackOperation("happier");}
+            if(pendingAccount){waiting[2]="happier";TrackOperation("happier");}
             RefreshInstall();
         }
         // API for other sections (e.g. LAN): follow a detached server operation in «Установка».
@@ -451,15 +429,15 @@ namespace RemoteAgents.Launcher
                 lastOperations=Json.Map(Json.Get(result,"operations"));pendingAccount=Json.Bool(result,"pendingAccount");
                 if(!pendingAccount)resumeAccount=false;
                 // A restarted («Повторить») install makes its section wait again.
-                foreach(var pair in new[]{new KeyValuePair<string,int>("disk",2),new KeyValuePair<string,int>("happier",3)})if(Json.Str(Json.Map(Json.Get(lastOperations,pair.Key)),"state")=="running" && !applied[pair.Value])waiting[pair.Value]=pair.Key;
+                foreach(var pair in new[]{new KeyValuePair<string,int>("happier",2)})if(Json.Str(Json.Map(Json.Get(lastOperations,pair.Key)),"state")=="running" && !applied[pair.Value])waiting[pair.Value]=pair.Key;
                 foreach(var pair in waiting.ToArray()) {
                     var op=Json.Map(Json.Get(lastOperations,pair.Value));string state=Json.Str(op,"state");
-                    if(state=="running"){results[pair.Key]=Json.Str(op,"text")+(pair.Key==3 && pendingAccount?". Ключ сохранён: подключение применится автоматически":"");continue;}
+                    if(state=="running"){results[pair.Key]=Json.Str(op,"text")+(pair.Key==2 && pendingAccount?". Ключ сохранён: подключение применится автоматически":"");continue;}
                     waiting.Remove(pair.Key);
                     if(state=="failed"){results[pair.Key]=Json.Str(op,"text");applied[pair.Key]=false;continue;}
-                    if(pair.Key==3 && pendingAccount)resumeAccount=true;
+                    if(pair.Key==2 && pendingAccount)resumeAccount=true;
                     else if(pair.Key==1)retryConnection=true;
-                    else if(!applied[pair.Key])results[pair.Key]=pair.Key==3?"Happier установлен на сервере. Подключите аккаунт":"Сервер диска установлен. Выберите проекты";
+                    else if(!applied[pair.Key])results[pair.Key]="Happier установлен на сервере. Подключите аккаунт";
                 }
                 SaveOperations();RefreshSummary();RefreshInstall();
             } catch(OperationCanceledException) {}
@@ -468,7 +446,7 @@ namespace RemoteAgents.Launcher
             // Dependent parts complete by themselves once the window is free.
             if(!busy && !closingRequested && resumeAccount){
                 bool connected = false;
-                if(await Guard(async()=>{var r=await Run("ResumeAccount",new {});connected=ApplyResult(3,r) && Json.Bool(r,"ok");},3) && connected) resumeAccount=false;
+                if(await Guard(async()=>{var r=await Run("ResumeAccount",new {});connected=ApplyResult(2,r) && Json.Bool(r,"ok");},2) && connected) resumeAccount=false;
                 SaveOperations();RefreshInstall();
             }
             if(!busy && !closingRequested && retryConnection){retryConnection=false;await ExecuteSection(1);}
@@ -513,21 +491,14 @@ namespace RemoteAgents.Launcher
                 var list=new List<object>();foreach(DataGridViewRow row in nodes.Rows) {
                     if(row.IsNewRow || Convert.ToString(row.Cells[0].Value)!=CatalogTitle(group))continue;
                     var item=row.Tag is Dictionary<string,object>?new Dictionary<string,object>((Dictionary<string,object>)row.Tag):new Dictionary<string,object>();
-                    item["name"]=Convert.ToString(row.Cells[1].Value).Trim();item["enabled"]=Convert.ToBoolean(row.Cells[5].Value??true);
+                    item["name"]=Convert.ToString(row.Cells[1].Value).Trim();item["enabled"]=Convert.ToBoolean(row.Cells[4].Value??true);
                     string target=Convert.ToString(row.Cells[2].Value).Trim();
                     if(group=="entries" || group=="hops")item["ssh"]=target;
-                    if(group=="relays"){item["host"]=target;item["port"]=int.Parse(Convert.ToString(row.Cells[3].Value));}
-                    if(group=="cdn"){item["domain"]=target;item["entry"]=Convert.ToString(row.Cells[4].Value).Trim();}
+                    if(group=="relays"){item["host"]=target;item["port"]=int.Parse(Convert.ToString(row.Cells[2].Value));}
+                    if(group=="cdn"){item["domain"]=target;item["entry"]=Convert.ToString(row.Cells[3].Value).Trim();}
                     list.Add(item);
                 }map[group]=list.ToArray();
             }return map;
-        }
-        async Task LoadTree()
-        {
-            var wizard=Json.Map(Json.Get(new Configuration(home).Data,"wizard"));
-            if(Json.Str(wizard,"diskPreviousProfile").Length>0 && !reconnectDisk)throw new IOException("Выберите, что делать с прежним подключением диска");
-            folders.Loaded=false;
-            folders.ShowRoot(await Run("DiskTree",new { @base=diskBase.Text.Trim(),path="",fresh=reconnectDisk }));
         }
         async Task LoadAccounts()
         {
@@ -552,7 +523,7 @@ namespace RemoteAgents.Launcher
                             routeHopPassword.Clear();routeHint.Visible=false;
                         }
                         var saved=new Configuration(home).Data;var profile=Json.Read(Json.Text(Json.Map(Json.Get(saved,"wizard")),"pendingProfile",Json.Str(Json.Map(Json.Get(saved,"transport")),"profilePath")));login.Text=Json.Str(profile,"login");originalAddress=address.Text.Trim();originalLogin=login.Text.Trim();password.Enabled=false;
-                        inventory.Text="SSH: проверен\r\n"+string.Join("\r\n",new[]{"disk","happier","bridge","catalog"}.Select(k=>(k=="disk"?"Диск-сервер":k=="happier"?"Happier (программа)":k=="bridge"?"Серверная часть моста":"Каталог узлов")+": "+(Json.Bool(result,k)?"обнаружен / проверен":"отсутствует или не отвечает")));
+                        inventory.Text="SSH: проверен\r\n"+string.Join("\r\n",new[]{"happier","bridge","catalog"}.Select(k=>(k=="happier"?"Happier (программа)":k=="bridge"?"Серверная часть моста":"Каталог узлов")+": "+(Json.Bool(result,k)?"обнаружен / проверен":"отсутствует или не отвечает")));
                         var services=Json.Map(Json.Get(result,"services"));if(api.Text.Length==0)api.Text=Json.Str(services,"serverUrl");if(web.Text.Length==0)web.Text=Json.Str(services,"webappUrl");
                         TrackServer(Json.Map(Json.Get(result,"operations")));
 
@@ -560,18 +531,12 @@ namespace RemoteAgents.Launcher
                     case 1:
                         if(!catalogLoaded)await LoadCatalog();
                         result=await Run("Connection",new {catalog=ReadCatalog(),expected=expectedCatalog,shared=shared.Checked});break;
-                    case 2:
-                        if(!folders.Loaded)await LoadTree();
-                        var paths=folders.Selection.Paths;
-                        var diskRequest=ConfigRequests.Disk(ConfigProfile.Load(home),diskBase.Text.Trim(),paths);
-                        diskRequest["base"]=diskBase.Text.Trim();diskRequest["paths"]=paths;diskRequest["reconnect"]=reconnectDisk;
-                        result=await Run("Disk",diskRequest);break;
-                    case 3: {
+                    case 2: {
                         string apiOrigin=ConfigRequests.Origin(api.Text),webOrigin=ConfigRequests.Origin(web.Text);if(string.IsNullOrWhiteSpace(label.Text))throw new IOException("Укажите имя аккаунта, чтобы различать аккаунты");
                         bool create=newAccount.Checked;string key=create?HappierKey.Create():accountKey.Text.Trim();
                         string expectedAccount=!create && accounts.SelectedIndex>=0?Json.Str(accountRows[accounts.SelectedIndex],"account"):"";
                         // The key waits in secrets/happier-pending.key; Wizard.ps1 applies it now or after the install.
-                        if(key.Length>0){AccountDiskSetup.SaveKey(home,key,"happier-pending.key");accountKey.Clear();}
+                        if(key.Length>0){AccountSecrets.SaveKey(home,key,"happier-pending.key");accountKey.Clear();}
                         try {result=await Run("Account",new {label=label.Text.Trim(),serverUrl=apiOrigin,webappUrl=webOrigin,expectedAccount});}
                         catch {
                             // A never shown new key must not be connected later by the automatic resume.
@@ -580,17 +545,17 @@ namespace RemoteAgents.Launcher
                         }
                         if(create){ShowNewKey(key);haveAccount.Checked=true;}
                         break; }
-                    case 4:result=await Run("Bridge",new {enabled=bridge.Checked,shell=shell.Checked});break;
-                    case 6:result=await ExecuteLan();break;
-                    case 8:result=await ExecuteProxy();break;
-                    case 5:result=await Run("Vpn",new {enabled=vpn.Checked,checkUrl=vpnCheck.Text.Trim(),dnsServer=vpnDns.Text.Trim()});break;
+                    case 3:result=await Run("Bridge",new {enabled=bridge.Checked,shell=shell.Checked});break;
+                    case 5:result=await ExecuteLan();break;
+                    case 7:result=await ExecuteProxy();break;
+                    case 4:result=await Run("Vpn",new {enabled=vpn.Checked,checkUrl=vpnCheck.Text.Trim(),dnsServer=vpnDns.Text.Trim()});break;
                     default:
                         if(dirty.Any(v=>v))throw new IOException("Сначала примените изменённые разделы: итог проверяет сохранённые настройки");
                         var config=new Configuration(home).Data;
                         bool configured=Json.Bool(Json.Map(Json.Get(config,"wizard")),"configured");
                         if(!configured && !activationRequested){result=await Run("Activate",new {});activationRequested=true;}
                         else {result=await Run("Inspect",new {});if(!Json.Bool(result,"ok"))throw new IOException("Есть неготовые шаги. Проверьте связь и разделы с отметкой …");}
-                        results[7]=Json.Text(result,"summary","Настройки сохранены");Append(results[7]);
+                        results[6]=Json.Text(result,"summary","Настройки сохранены");Append(results[6]);
                         return;
                 }
                 operationReady=ApplyResult(index,result);

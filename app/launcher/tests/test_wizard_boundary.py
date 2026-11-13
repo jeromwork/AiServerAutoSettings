@@ -88,22 +88,6 @@ else:
                     self.assertEqual(result.returncode, 0, result.stderr.decode())
                     self.assertEqual(result.stdout, b'')
 
-    def test_server_ignore_replace_failure_keeps_complete_old_policy(self):
-        # Load only the pure helper definitions, never server main/bootstrap.
-        source = (ROOT / 'disk/server-disk.sh').read_text().split("<<'PY'\n", 1)[1].split('def main():', 1)[0]
-        namespace = {}
-        with patch.dict(os.environ, REMOTE_DISK_SCRIPT_DIR=str(ROOT / 'disk')):
-            exec(compile(source, 'server-disk-helpers', 'exec'), namespace)
-        with tempfile.TemporaryDirectory() as tmp:
-            folder = Path(tmp)
-            policy = (folder / '.stignore')
-            previous = (ROOT / 'disk/stignore.txt').read_bytes().replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
-            policy.write_bytes(previous)
-            with patch.object(os, 'replace', side_effect=OSError('injected replace failure')):
-                with self.assertRaises(OSError):
-                    namespace['ignores'](folder, True)
-            self.assertEqual(policy.read_bytes(), previous)
-            self.assertEqual(list((folder / '.stfolder').iterdir()), [])
 
     def test_two_computers_upload_without_sharing_staging_files(self):
         with tempfile.TemporaryDirectory() as tmp:

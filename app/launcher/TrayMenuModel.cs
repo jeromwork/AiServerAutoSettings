@@ -16,7 +16,7 @@ namespace RemoteAgents.Launcher
     internal static class TrayMenuModel
     {
         internal static string LeftClickAction(Dictionary<string, object> config, Dictionary<string, object> account)
-        { return HappierUrl(config, account).Length > 0 ? "happier" : "open"; }
+        { return "happier"; }
         internal static bool AcceptLeftClick(int clicks, long elapsedMilliseconds, int doubleClickMilliseconds)
         {
             // NotifyIcon.MouseClick reports Clicks=0; ordinary controls can report 1.
@@ -32,30 +32,15 @@ namespace RemoteAgents.Launcher
         {
             string url = HappierUrl(config, account);
             return new[] {
-                new TrayMenuEntry("open", "Открыть"),
-                Folders(config),
-                new TrayMenuEntry("progress", "Ход синхронизации…"),
-                new TrayMenuEntry("happier", "Открыть Happier", url.Length > 0) { Hint = url.Length > 0 ? "Открыть веб-приложение Happier" : "Адрес Happier не задан: укажите happier.webappUrl в настройках" },
+                new TrayMenuEntry("happier", "Открыть") { Hint = url.Length > 0 ? "Открыть веб-приложение Happier" : "Адрес Happier не задан: укажите happier.webappUrl в настройках" },
+                new TrayMenuEntry("settings", "Настройки"),
+                new TrayMenuEntry("cloud", "Диск"),
                 new TrayMenuEntry("separator", "", false),
                 new TrayMenuEntry("connection", Connection(transport), false),
-                new TrayMenuEntry("server", ServerHealthView.Summary(health), false),
+                new TrayMenuEntry("server", ServerHealthView.Summary(health), false) { Warning = ServerHealthView.Warning(health) },
                 new TrayMenuEntry("separator", "", false),
                 new TrayMenuEntry("exit", "Выход")
             };
-        }
-        internal const string NoFolders = "⚠ Папки не выбраны — выберите папки для синхронизации";
-        // No folders in the profile: nothing is synchronized. That is allowed, but the menu says so plainly.
-        internal static bool FoldersMissing(Dictionary<string, object> config)
-        {
-            var profile = Json.Map(Json.Get(config, "profile"));
-            if (!profile.ContainsKey("server")) return false;
-            var choice = DiskChoice.FromProfile(profile);
-            return !(choice.All || choice.Folders.Count > 0 || choice.External.Count > 0);
-        }
-        static TrayMenuEntry Folders(Dictionary<string, object> config)
-        {
-            if (!FoldersMissing(config)) return new TrayMenuEntry("folders", "Папки");
-            return new TrayMenuEntry("folders", NoFolders) { Warning = true, Hint = "Сейчас ни одна папка не синхронизируется с сервером. Откройте программу и выберите папки на вкладке «Папки»." };
         }
         internal static string PathTitle(Dictionary<string, object> candidate)
         {

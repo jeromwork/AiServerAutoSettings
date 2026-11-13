@@ -14,6 +14,7 @@ namespace RemoteAgents.Launcher
         public Dictionary<string, object> Profile;
         public Dictionary<string, string> Secrets;
         public bool Locked;
+        public bool LegacyDiskIgnored;
         public string[] Missing;
         public Dictionary<string, string> Hints;
         internal Dictionary<string, object> Protection;
@@ -66,15 +67,12 @@ namespace RemoteAgents.Launcher
         { return O(D("type", E("socks", "http"), "server", Host(), "port", N(1, 65535), "login", S(256), "password", Ref("proxy-out-password"), "checkUrl", Url()), "type", "server", "port"); }
         static Dictionary<string, object> Hop()
         { return O(D("host", Host(), "port", N(1, 65535), "user", User(), "hostKey", S(4096, 1, "^[^\\r\\n\\x00]+$"), "key", Ref("hop-key"), "password", Ref("hop-password")), "host", "user"); }
-        static Dictionary<string, object> DiskPath() { return S(1024, 1, "^[^\\\\<>:\"|?*\\x00-\\x1f]+$"); }
-        static Dictionary<string, object> DiskSchema()
+        static Dictionary<string, object> CloudSchema()
         {
-            var direction = E("both", "send", "receive");
-            // Strict objects: unlike the general section helper, folder entries have no hint field.
-            var folder = D("type", "object", "properties", D("path", DiskPath(), "direction", direction), "additionalProperties", false, "required", new[]{"path"});
-            var external = D("type", "object", "properties", D("path", S(1024, 3, @"^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/:<>""|?*\x00-\x1f]+[\\/][^\\/:<>""|?*\x00-\x1f]+(?:[\\/]|$))[^<>:""|?*\x00-\x1f]*$"), "remote", S(128, 1, @"^[^/\\<>:""|?*\x00-\x1f]+$"), "direction", direction), "additionalProperties", false, "required", new[]{"path", "remote"});
-            return O(D("base", S(1024, 1, "^[^\\r\\n\\x00]+$"),
-                "folders", D("oneOf", new object[]{ E("all"), A(D("oneOf", new object[]{ DiskPath(), folder })) }), "external", A(external)));
+            var item = O(D("vendor", E("mailru"), "login", S(256, 1, "^[^\\r\\n\\x00]+$"), "password", Ref("cloud-password"),
+                "remoteRoot", S(1024, 1, "^[^\\r\\n\\x00]+$"), "pollSeconds", N(1, 86400)), "vendor", "login", "password");
+            var list = A(item, 32); list["minItems"] = 1;
+            return D("oneOf", new object[] { item, list });
         }
         internal static Dictionary<string, object> SchemaDocument()
         {
@@ -98,12 +96,12 @@ namespace RemoteAgents.Launcher
                 "connection", O(D("enabled", B())),
                 "bridge", O(D("enabled", B(), "allowShell", B())),
                 "happier", O(D("mode", E("same", "new"), "account", S(64, 64, "^[a-f0-9]{64}$"), "label", S(80, 1), "serverUrl", Url(), "webappUrl", Url(), "key", Ref("happier-key"))),
-                "disk", DiskSchema(),
+                "cloud", CloudSchema(),
                 "vpn", O(D("enabled", B(), "checkUrl", Url(), "dnsServer", S(253, 1), "bootstrap", bootstrap)),
                 "proxyOut", Proxy(),
                 "lan", A(O(D("name", S(64, 1, "^[^/\\\\\\r\\n\\x00]+$"), "kind", E("openvpn"), "ovpn", Ref(),
                     "login", S(256), "password", Ref(), "host", Host(), "port", N(1, 65535), "checkUrl", Url()), "name", "kind", "ovpn"), 64),
-                "components", O(D("transport", component, "disk", component, "control", component, "vpn", component)),
+                "components", O(D("transport", component, "control", component, "vpn", component)),
                 "secrets", D("type", "object", "properties", D(
                     "protected", E("master-password"),
                     "kdf", O(D("name", E("pbkdf2-sha256"), "iterations", N(200000, 2000000), "salt", S(128, 1)), "name", "iterations", "salt"),
@@ -121,8 +119,10 @@ namespace RemoteAgents.Launcher
             try {
                 root = StrictParse(text) as Dictionary<string, object>;
             } catch { throw Bad("Конфиг должен быть корректным JSON без повторяющихся полей"); }
+            bool legacyDisk = root != null && root.Remove("disk");
+            if (root != null) Json.Map(Json.Get(root, "components")).Remove("disk");
             Validate(root, SchemaDocument(), "конфиг");
-            var p = new ParsedConfig { Profile = new Dictionary<string, object>(root), Secrets = new Dictionary<string, string>(StringComparer.Ordinal), Protection = new Dictionary<string, object>() };
+            var p = new ParsedConfig { LegacyDiskIgnored = legacyDisk, Profile = new Dictionary<string, object>(root), Secrets = new Dictionary<string, string>(StringComparer.Ordinal), Protection = new Dictionary<string, object>() };
             p.Profile.Remove("secrets");
             var secrets = Json.Map(Json.Get(root, "secrets"));
             p.Locked = secrets.ContainsKey("protected");
@@ -189,6 +189,7 @@ namespace RemoteAgents.Launcher
             } else if (type == "array") {
                 if (!(value is System.Collections.IEnumerable) || value is string || value is System.Collections.IDictionary) throw Bad("Нужен список: " + path);
                 var items = Json.Array(value);
+                if (items.Length < Json.Int(schema, "minItems", 0)) throw Bad("Пустой список: " + path);
                 if (items.Length > Json.Int(schema, "maxItems", 256)) throw Bad("Слишком длинный список: " + path);
                 if (Json.Bool(schema, "uniqueItems") && items.Select(Json.Encode).Distinct(StringComparer.Ordinal).Count() != items.Length) throw Bad("Повторяющиеся элементы: " + path);
                 foreach (var item in items) Validate(item, Json.Map(schema["items"]), path);
@@ -220,56 +221,7 @@ namespace RemoteAgents.Launcher
                 string kind = Json.Str(row, "kind");
                 if ((kind != "proxy" && row.ContainsKey("proxy")) || (kind != "hop" && row.ContainsKey("hop"))) throw Bad("Поля маршрута не соответствуют kind");
             }
-            var choice = DiskChoice.FromProfile(profile);
-            var folders = choice.Folders.Select(f => f.Path).ToArray();
-            if (folders.Distinct(StringComparer.OrdinalIgnoreCase).Count() != folders.Length) throw Bad("Повторяющиеся папки Disk");
-            foreach (string f in folders) ValidateDiskPath(f);
-            var directions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var f in choice.Folders) CheckDiskDirection(directions, DiskChoice.Project(f.Path), f.Direction);
-            var disk = Json.Map(Json.Get(profile, "disk"));
-            string diskBase = Json.Str(disk, "base");
-            if (diskBase.Length == 0) diskBase = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Disk");
-            string normalizedBase = diskBase.Replace('/', '\\').TrimEnd('\\');
-            var externalPaths = new List<string>(); var remotes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var e in choice.External) {
-                ValidateDiskPath(e.Remote);
-                if (e.Remote.Contains("/")) throw Bad("disk.external.remote: нужно имя одной серверной папки");
-                CheckDiskDirection(directions, e.Remote, e.Direction);
-                if (!remotes.Add(e.Remote)) throw Bad("Повторяющаяся серверная папка disk.external: " + e.Remote);
-                string path = NormalizeWindowsPath(e.Path);
-                if (WindowsContains(normalizedBase, path) || WindowsContains(path, normalizedBase)) throw Bad("disk.external.path пересекается с корнем Disk: " + e.Path);
-                if (externalPaths.Any(p => WindowsContains(p, path) || WindowsContains(path, p))) throw Bad("Пересекающиеся пути disk.external: " + e.Path);
-                externalPaths.Add(path);
-                // Filesystem checks only apply to paths on this Windows computer. Runtime checks again before attachment.
-                if (Path.DirectorySeparatorChar == '\\') for (string p = path; !string.IsNullOrEmpty(p); p = Path.GetDirectoryName(p))
-                    if ((Directory.Exists(p) || File.Exists(p)) && (File.GetAttributes(p) & FileAttributes.ReparsePoint) != 0) throw Bad("Ссылки в disk.external.path запрещены");
-            }
         }
-        static void ValidateDiskPath(string f)
-        {
-            string[] parts = f.Split('/');
-            if (!Regex.IsMatch(parts[0], "^[\\p{L}\\p{N}_][\\p{L}\\p{N}_. -]{0,127}$") || parts[0].Contains("..")) throw Bad("Недопустимое имя проекта Disk: " + f);
-            foreach (string part in parts) if (part.Length == 0 || part.Length > 255 || part == "." || part == ".." || part.EndsWith(".") || part.EndsWith(" ") || Regex.IsMatch(part, "[\\\\<>:\"|?*\\x00-\\x1f]|^(?i:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\\.|$)")) throw Bad("Недопустимый путь выбора Disk: " + f);
-        }
-        static void CheckDiskDirection(Dictionary<string, string> directions, string project, string direction)
-        {
-            string previous;
-            if (directions.TryGetValue(project, out previous) && previous != direction) throw Bad("Разные направления для проекта «" + project + "»: " + previous + " и " + direction + ". У проекта одно направление на этом компьютере");
-            directions[project] = direction;
-        }
-        internal static string NormalizeWindowsPath(string value)
-        {
-            string p = value.Replace('/', '\\');
-            bool drive = Regex.IsMatch(p, "^[a-zA-Z]:\\\\");
-            bool unc = Regex.IsMatch(p, "^\\\\\\\\[^\\\\]+\\\\[^\\\\]+(?:\\\\|$)");
-            if ((!drive && !unc) || p.StartsWith("\\\\?\\") || p.StartsWith("\\\\.\\") || Regex.IsMatch(p.Substring(drive ? 2 : 0), "[<>:\"|?*\\x00-\\x1f]")) throw Bad("disk.external.path: нужен абсолютный путь Windows");
-            string tail = p.Substring(drive ? 3 : 2).TrimEnd('\\');
-            var parts = drive && tail.Length == 0 ? new string[0] : tail.Split('\\');
-            if (parts.Any(x => x.Length == 0 || x == "." || x == ".." || x.EndsWith(".") || x.EndsWith(" ") || Regex.IsMatch(x, "^(?i:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\\.|$)"))) throw Bad("Недопустимый путь disk.external.path");
-            return drive && p.Length == 3 ? p : p.TrimEnd('\\');
-        }
-        static bool WindowsContains(string parent, string child)
-        { parent = parent.TrimEnd('\\'); child = child.TrimEnd('\\'); return string.Equals(parent, child, StringComparison.OrdinalIgnoreCase) || child.StartsWith(parent + "\\", StringComparison.OrdinalIgnoreCase); }
         internal static IEnumerable<Dictionary<string, object>> References(object value)
         {
             var map = value as Dictionary<string, object>;
@@ -293,6 +245,7 @@ namespace RemoteAgents.Launcher
                     string standard = name;
                     if (path == "server.rootPassword") standard = "server-root-password";
                     else if (path == "server.key") standard = "server-key";
+                    else if (path == "cloud.password" || path == "cloud[].password") standard = "cloud-password";
                     else if (path == "happier.key") standard = "happier-key";
                     else if (path.EndsWith(".hop.password") || path.StartsWith("vpn.bootstrap.hops.") && path.EndsWith(".password")) standard = "hop-password";
                     else if (path.EndsWith(".hop.key") || path.StartsWith("vpn.bootstrap.hops.") && path.EndsWith(".key")) standard = "hop-key";
@@ -310,6 +263,7 @@ namespace RemoteAgents.Launcher
             switch (name) {
                 case "server-root-password": return "Пароль root сервера — его присылает хостинг при покупке сервера";
                 case "server-key": return "Закрытый SSH-ключ доступа к серверу";
+                case "cloud-password": return "Пароль для внешних приложений Mail";
                 case "happier-key": return "Секретный ключ аккаунта Happier из его настроек";
                 case "hop-key": return "Закрытый SSH-ключ промежуточного сервера";
                 case "hop-password": return "Пароль SSH промежуточного сервера";
@@ -359,15 +313,6 @@ namespace RemoteAgents.Launcher
             if (path.Length > 0 && File.Exists(path)) {
                 SecretVault.SafePath(home, path); var ssh = Json.Read(path);
                 profile["server"] = D("address", Json.Str(ssh, "serverAddress"), "port", RuntimePort(ssh), "login", Json.Str(ssh, "login"), "key", D("secret", "server-key"));
-            }
-            string homePath = Path.GetFullPath(home).TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar);
-            if (string.Equals(Path.GetFileName(homePath), "RemoteAgents", StringComparison.OrdinalIgnoreCase) || string.Equals(Path.GetFileName(homePath), "RemoteVPN", StringComparison.OrdinalIgnoreCase)) {
-                string parent = Path.GetDirectoryName(homePath), diskHome = Path.Combine(parent,"RemoteDisk");
-                string basePath = Path.Combine(diskHome,"base.txt"), selectionPath = Path.Combine(diskHome,"selection.json");
-                var disk = D();
-                if (File.Exists(basePath)) { SecretVault.SafePath(parent,basePath); disk["base"] = Files.ReadLine(basePath); }
-                if (File.Exists(selectionPath)) { SecretVault.SafePath(parent,selectionPath); disk["folders"] = Json.Strings(Json.Get(Json.Read(selectionPath),"paths")); }
-                if (disk.Count > 0) profile["disk"] = disk;
             }
             return Parse(Json.Encode(profile)).Profile;
         }
@@ -423,14 +368,6 @@ namespace RemoteAgents.Launcher
                 if (p.Secrets.TryGetValue(key, out incoming) && incoming.Length > 0 && vault.TryGetValue(oldKey.Length > 0 ? oldKey : key, out previous) && previous.Length > 0 && incoming != previous) different = true;
             }
             if (account.Count > 0 && oldAccount.Count > 0 && different) result["happier"] = "сейчас аккаунт «" + Json.Str(oldAccount, "label") + "» / в конфиге другой аккаунт «" + Json.Str(account, "label") + "»";
-            var oldDisk = Json.Map(Json.Get(before, "disk")); var disk = Json.Map(Json.Get(p.Profile, "disk"));
-            if (disk.ContainsKey("base") && oldDisk.ContainsKey("base") && !string.Equals(Json.Str(disk,"base").TrimEnd('\\','/'), Json.Str(oldDisk,"base").TrimEnd('\\','/'), StringComparison.OrdinalIgnoreCase))
-                result["disk"] = "сейчас корень «" + Json.Str(oldDisk,"base") + "» / в конфиге «" + Json.Str(disk,"base") + "»";
-            if (disk.ContainsKey("folders")) {
-                var oldChoice = DiskChoice.FromProfile(before); var next = DiskChoice.FromProfile(p.Profile);
-                var removed = next.All ? new string[0] : oldChoice.All ? new[]{"все проекты (включая новые)"} : oldChoice.Paths.Where(f => !next.Paths.Any(k => string.Equals(f,k,StringComparison.OrdinalIgnoreCase) || f.StartsWith(k+"/",StringComparison.OrdinalIgnoreCase))).ToArray();
-                if (removed.Length > 0) result["disk"] = (result.ContainsKey("disk") ? result["disk"] + "; " : "") + "сейчас выбраны папки «" + string.Join(", ", removed) + "» / в конфиге они убраны; локальные файлы останутся";
-            }
             var values = vault.Values.Concat(p.Locked ? (IEnumerable<string>)new string[0] : p.Secrets.Values).Where(v => v.Length > 0).Distinct().OrderByDescending(v => v.Length).ToArray();
             foreach (string section in result.Keys.ToArray()) result[section] = Scrub(result[section], values);
             return result;
@@ -446,6 +383,7 @@ namespace RemoteAgents.Launcher
         {
             if (p == null || p.Locked) throw Bad("Сначала введите мастер-пароль");
             // Revalidate even if the caller has edited the public fields after Parse.
+            bool legacy = p.LegacyDiskIgnored;
             p = Parse(Pack(p, null));
             using (var lease = new SecretVault.Lease(home)) {
                 var settings = ReadSettings(home); var oldValues = SecretVault.Load(home);
@@ -460,12 +398,14 @@ namespace RemoteAgents.Launcher
                 foreach (var pair in p.Secrets) if (!protectedNames.Contains(pair.Key) && (pair.Value.Length > 0 || !values.ContainsKey(pair.Key))) values[pair.Key] = pair.Value;
                 // Empty/AI placeholders preserve values already present in the vault.
                 var checkedRoot = new Dictionary<string, object>(profile); checkedRoot["secrets"] = values; Parse(Json.Encode(checkedRoot));
+                settings.Remove("disk"); Json.Map(Json.Get(settings, "components")).Remove("disk");
                 settings["profile"] = profile;
                 if (!settings.ContainsKey("schema")) settings["schema"] = 1;
                 if (!settings.ContainsKey("version")) settings["version"] = 1;
                 SecretVault.Save(home, values);
                 try { Json.Write(Path.Combine(Path.GetFullPath(home), "config.json"), settings); }
                 catch { SecretVault.Save(home, oldValues); throw; }
+                if (legacy) new Journal(home).Write("config.disk.ignored");
             }
         }
         internal static string AcceptedSummary(string home)
@@ -528,7 +468,7 @@ namespace RemoteAgents.Launcher
                 // Authenticate every value before returning any plaintext or writing anything.
                 foreach (var pair in p.Secrets) secrets[pair.Key] = pair.Value.Length == 0 ? "" : Decrypt(pair.Value, keys);
                 var root = new Dictionary<string, object>(p.Profile); root["secrets"] = secrets;
-                return Parse(Json.Encode(root));
+                var unlocked = Parse(Json.Encode(root)); unlocked.LegacyDiskIgnored = p.LegacyDiskIgnored; return unlocked;
             } catch { throw Bad("Неверный мастер-пароль"); }
             finally { if (keys != null) Array.Clear(keys, 0, keys.Length); }
         }

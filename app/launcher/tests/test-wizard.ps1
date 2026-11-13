@@ -7,22 +7,19 @@ $repo=Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent
 $count=0
 function Assert($Value,[string]$Name){if(-not $Value){throw ('FAIL: '+$Name)};$script:count++}
 function Throws([scriptblock]$Body,[string]$Name){$failed=$false;try{& $Body}catch{$failed=$true};Assert $failed $Name}
-$empty=[pscustomobject]@{ssh=$false;disk=$false;happier=$false;bridge=$false;catalog=$false}
-$ready=[pscustomobject]@{ssh=$true;disk=$true;happier=$true;bridge=$true;catalog=$true}
-$clean=[pscustomobject]@{transport=$false;disk=$false;account=$false;bridgeEnabled=$false;vpnEnabled=$false}
-$local=[pscustomobject]@{transport=$true;disk=$true;account=$true;bridgeEnabled=$true;bridge=$true;vpnEnabled=$false}
+$empty=[pscustomobject]@{ssh=$false;happier=$false;bridge=$false;catalog=$false}
+$ready=[pscustomobject]@{ssh=$true;happier=$true;bridge=$true;catalog=$true}
+$clean=[pscustomobject]@{transport=$false;account=$false;bridgeEnabled=$false;vpnEnabled=$false}
+$local=[pscustomobject]@{transport=$true;account=$true;bridgeEnabled=$true;bridge=$true;vpnEnabled=$false}
 $p=@(Get-WizardPlan $empty $clean)
-Assert ($p.Count -eq 6 -and -not $p[0].ready -and $p[0].repair -and -not $p[2].ready) 'clean PC, empty server: nothing falsely ready'
-Assert ($p[4].ready -and $p[5].ready) 'bridge and VPN explicitly disabled'
+Assert ($p.Count -eq 5 -and -not $p[0].ready -and $p[0].repair -and -not $p[2].ready) 'clean PC, empty server: nothing falsely ready'
+Assert ($p[3].ready -and $p[4].ready) 'bridge and VPN explicitly disabled'
 $p=@(Get-WizardPlan $ready $clean)
-Assert ($p[0].ready -and -not $p[0].repair -and -not $p[2].ready -and -not $p[3].ready) 'clean PC, configured server: reuse server, configure local components'
+Assert ($p[0].ready -and -not $p[0].repair -and -not $p[2].ready) 'clean PC, configured server: reuse server, configure local components'
 $p=@(Get-WizardPlan $ready $local)
 Assert (@($p|Where-Object {-not $_.ready}).Count -eq 0) 'repeat run observes healthy state'
-$broken=Copy-TransportObject $ready;$broken.disk=$false
-$p=@(Get-WizardPlan $broken $local)
-Assert ($p[0].repair -and -not $p[2].ready -and $p[3].ready) 'partially broken server isolates disk repair'
 $local.bridge=$false;$p=@(Get-WizardPlan $ready $local)
-Assert (-not $p[4].ready -and $p[3].ready) 'dead bridge is never ready from a marker'
+Assert (-not $p[3].ready -and $p[2].ready) 'dead bridge is never ready from a marker'
 # Public catalogs use existing transport schema. Both SSH input and server output include CRLF.
 $server=ConvertFrom-Json ('{"schema":1,"entries":[],"hops":[],"relays":[{"name":"my-node","host":"relay.example.invalid","port":443,"enabled":true}],"cdn":[]}'+"`r`n")
 $overlay=ConvertFrom-Json '{"schema":1,"entries":[],"hops":[],"relays":[{"name":"my-node","host":"relay.example.invalid","port":443,"enabled":false}],"cdn":[]}'
@@ -55,7 +52,7 @@ param($Repo,$Root,$Mode)
 . (Join-Path $Repo 'build/Wizard.Common.ps1')
 try{
     if($Mode -eq 'memory'){$script:WizardRoute=@{kind='direct';options=@()}}
-    if($Mode -eq 'disk'){
+    if($Mode -eq 'account'){
         $env:LOCALAPPDATA=Split-Path $Root -Parent
         Read-DiskProfile (Join-Path $Root 'ssh-transport.json')
         Invoke-DiskSsh 'fixture-command' -Direct -InputText "line1`r`nline2`r`n"
@@ -69,7 +66,7 @@ function Invoke-RouteChild($Route,[string]$Mode='wizard'){
     ConvertFrom-Json (Invoke-DiskProcess (Get-TransportPowerShell) @('-NoProfile','-NonInteractive','-File',$routeChild,$repo,$routeRoot,$Mode))
 }
 $hopRoute=[pscustomobject]@{used='hop';proxy=[pscustomobject]@{type='socks';host='unused.example.invalid';port=1090};hop=[pscustomobject]@{ssh='jump@hop.example.invalid:2207';keyFile=(Join-Path $routeRoot 'Пользователь с пробелом/hop key')}}
-foreach($mode in @('wizard','disk')){
+foreach($mode in @('wizard','account')){
     $r=Invoke-RouteChild $hopRoute $mode
     $pc=@($r.args|Where-Object {$_ -like 'ProxyCommand=*'})
     Assert ($pc.Count -eq 1 -and $pc[0].Contains($hopRoute.hop.keyFile) -and $pc[0].Contains('IdentitiesOnly=yes')) ($mode+': fresh process restores explicit hop key')
@@ -80,7 +77,7 @@ foreach($mode in @('wizard','disk')){
 $r=Invoke-RouteChild $hopRoute 'memory'
 Assert (@($r.args|Where-Object {$_ -like 'ProxyCommand=*'}).Count -eq 0) 'in-memory route takes priority over saved hop'
 $passwordHop=[pscustomobject]@{used='hop';hop=[pscustomobject]@{ssh='jump@hop.example.invalid'}}
-foreach($mode in @('wizard','disk')){$r=Invoke-RouteChild $passwordHop $mode;Assert ($r.error -like '*ключ для промежуточного сервера*') ($mode+': password-only saved hop fails clearly')}
+foreach($mode in @('wizard','account')){$r=Invoke-RouteChild $passwordHop $mode;Assert ($r.error -like '*ключ для промежуточного сервера*') ($mode+': password-only saved hop fails clearly')}
 $r=Invoke-RouteChild ([pscustomobject]@{used='direct';hop=$hopRoute.hop})
 Assert (@($r.args|Where-Object {$_ -like 'ProxyCommand=*'}).Count -eq 0 -and $r.args[-2] -eq 'target.example.invalid') 'direct route ignores unselected saved hop'
 $r=Invoke-RouteChild $null
@@ -89,7 +86,7 @@ $proxyRoute=[pscustomobject]@{used='proxy';proxy=[pscustomobject]@{type='socks';
 $r=Invoke-RouteChild $proxyRoute
 Assert ($r.error -like '*RemoteAgents.exe*--proxy-connect*') 'missing proxy helper cannot silently select direct SSH'
 Write-DiskUtf8 (Join-Path $routeRoot 'RemoteAgents.exe') 'fixture-only'
-foreach($mode in @('wizard','disk')){
+foreach($mode in @('wizard','account')){
     $r=Invoke-RouteChild $proxyRoute $mode;$pc=@($r.args|Where-Object {$_ -like 'ProxyCommand=*'})
     Assert ($pc.Count -eq 1 -and $pc[0].Contains('--proxy-connect socks 127.0.0.1 1080 %h %p') -and $pc[0].Contains((Join-Path $routeRoot 'RemoteAgents.exe'))) ($mode+': proxy helper resolved from installation home')
     Assert ([array]::IndexOf([string[]]$r.args,$pc[0]) -lt [array]::IndexOf([string[]]$r.args,'target.example.invalid')) ($mode+': proxy options precede host')
@@ -113,43 +110,16 @@ function Invoke-WizardSsh($Root,$Command,$InputText='',$Timeout=60){
     Assert (-not $InputText.Contains("`r")) 'cross-system payload is LF'
     if($script:offline){throw 'Нет связи с сервером'}
     if($Command -eq 'python3 -'){return (ConvertTo-Json -InputObject $server -Depth 30)+"`r`n"}
-    if($Command -eq 'bash -s'){return '{"schema":1,"disk":true,"happier":true,"bridge":true,"catalog":true,"userManager":true}'+"`r`n"}
+    if($Command -eq 'bash -s'){return '{"schema":1,"happier":true,"bridge":true,"catalog":true,"userManager":true}'+"`r`n"}
     throw 'Unexpected fake SSH command'
 }
 $c=Get-WizardCatalog $root $repo
 Assert ($c.schema -eq 1 -and $c.relays[0].name -eq 'my-node') 'catalog fetched automatically from server (fake SSH, CRLF)'
 $s=Get-WizardServer $root $repo
-Assert ($s.ssh -and $s.disk) 'server readiness comes from inspection output'
+Assert ($s.ssh -and $s.happier) 'server readiness comes from inspection output'
 $script:offline=$true
 Throws {Get-WizardServer $root $repo} 'saved success cannot hide SSH failure'
 $script:offline=$false
-# File union: identical path means presence, never assumed equal bytes.
-$base=Join-Path $TestHome 'Disk';[void][IO.Directory]::CreateDirectory((Join-Path $base 'Project/empty'))
-[IO.File]::WriteAllText((Join-Path $base 'Project/both.txt'),'local version')
-[IO.File]::WriteAllText((Join-Path $base 'Project/local.txt'),'preserve me')
-[IO.File]::WriteAllText((Join-Path $base 'loose.txt'),'root local file')
-[IO.File]::WriteAllText((Join-Path $base 'Project/.env'),'never enumerate')
-[void][IO.Directory]::CreateDirectory((Join-Path $base 'LocalOnly'))
-$tree=ConvertFrom-Json ('{"folders":[{"name":"Project"},{"name":"ServerOnly"}],"entries":[{"path":"Project/both.txt","directory":false},{"path":"Project/remote.txt","directory":false}]}'+"`r`n")
-$rootTree=ConvertFrom-Json ('{"folders":[{"name":"Project","hasChildren":true},{"name":"ServerOnly","hasChildren":false}],"entries":[]}'+"`r`n")
-$rootUnion=Get-DiskUnion $rootTree $base
-Assert (@($rootUnion.rows|Where-Object {$_.path -match '/'}).Count -eq 0) 'initial inventory is root only'
-Assert (@($rootUnion.rows|Where-Object {$_.path -ceq 'Project' -and $_.hasChildren -and $_.presence -eq 'both'}).Count -eq 1) 'root union has lazy child flag'
-$tree.folders=@()
-$union=Get-DiskUnion $tree $base 'Project'
-Assert (@($union.rows|Where-Object {$_.path -ceq 'Project/both.txt' -and $_.presence -eq 'both'}).Count -eq 1) 'both marker'
-Assert (@($union.rows|Where-Object {$_.path -ceq 'Project/local.txt' -and $_.presence -eq 'local'}).Count -eq 1) 'local-only marker'
-Assert (@($union.rows|Where-Object {$_.path -ceq 'Project/remote.txt' -and $_.presence -eq 'server'}).Count -eq 1) 'server-only marker'
-Assert (@($rootUnion.rows|Where-Object {$_.path -ceq 'LocalOnly' -and $_.presence -eq 'local'}).Count -eq 1) 'local-only project included'
-Assert (@($rootUnion.rows|Where-Object {$_.path -ceq 'ServerOnly' -and $_.presence -eq 'server'}).Count -eq 1) 'server-only project included'
-Assert (@($union.rows|Where-Object {$_.path -ceq 'Project/empty' -and $_.kind -eq 'directory'}).Count -eq 1) 'empty local directory included'
-Assert (@($union.rows|Where-Object {$_.path -like '*.env*'}).Count -eq 0) 'secrets excluded from union'
-Assert (@($rootUnion.rows|Where-Object {$_.path -ceq 'loose.txt' -and $_.presence -eq 'local' -and $_.kind -eq 'file'}).Count -eq 1) 'loose root files are visible and never silently omitted'
-Assert ([IO.File]::ReadAllText((Join-Path $base 'Project/local.txt')) -ceq 'preserve me') 'tree does not modify local files'
-$collision=Copy-TransportObject $tree;$collision.entries[0].path='Project/BOTH.txt'
-Throws {Get-DiskUnion $collision $base 'Project'} 'case collision fails before syncing to Windows'
-$collision=Copy-TransportObject $tree;$collision.entries[0].directory=$true
-Throws {Get-DiskUnion $collision $base 'Project'} 'file-directory conflict remains intact'
 function Initialize-WizardTransport($Root,$Bundle,$Transport){}
 function Invoke-TransportPreflight($Root,$Bundle,$Config){}
 function Start-WizardWorkingTransport($Root,$Bundle){}
@@ -178,10 +148,9 @@ $config=Read-TransportJson (Join-Path $root 'config.json')
 Assert ($config.transport.marker -eq 'original' -and $config.wizard.localCatalog.relays[0].name -eq 'my-node') 'rollback restores network and keeps unrelated settings'
 Assert (-not (Test-Path $receipt)) 'rollback is idempotent and clears receipt'
 Undo-WizardNetwork $root 'fixture'
-function Test-StatusFresh($Root,$Name){$Name -in @('transport','disk')}
+function Test-StatusFresh($Root,$Name){$Name -in @('transport')}
 function Test-LocalSsh($Root,$Port){$true}
 $config=Read-TransportJson (Join-Path $root 'config.json');$config|Add-Member -Force bridge ([pscustomobject]@{enabled=$false;allowShell=$false});Write-TransportJson (Join-Path $root 'config.json') $config
-Write-TransportJson (Join-Path $root 'status/disk.json') @{connected=$true}
 $config.bridge.enabled=$true;Write-TransportJson (Join-Path $root 'config.json') $config
 $mark=[DateTime]::UtcNow.AddSeconds(-2)
 Write-TransportJson (Join-Path $root 'status/transport.json') @{ok=$true;configRevision='previous-configuration'}
@@ -268,51 +237,9 @@ function Invoke-InstallChild($Bundle,$Script,$Arguments){throw ('summary must no
 function Test-WizardNetworkProof($Root,$Mark){$false}
 Throws {Invoke-WizardStep $freshRoot $repo 'Activate' ([pscustomobject]@{})} 'summary without a proven connection is refused'
 Assert ($script:detached.Count -eq 0) 'summary never starts a background process'
-function Get-WizardServer($Root,$Bundle){[pscustomobject]@{ssh=$true;disk=$true;happier=$true;bridge=$true;catalog=$true;userManager=$true}}
+function Get-WizardServer($Root,$Bundle){[pscustomobject]@{ssh=$true;happier=$true;bridge=$true;catalog=$true;userManager=$true}}
 function Test-WizardBridge($Root){$true}
 $inspect=Invoke-WizardStep $freshRoot $repo 'Inspect' ([pscustomobject]@{})
 Assert (-not $inspect.steps[1].ready) 'connection needs a live proof'
 Assert (-not (Read-TransportJson (Join-Path $freshRoot 'config.json')).wizard.configured) 'unproven summary leaves setup unfinished'
-# Exercise the actual Disk dispatcher with offline children and saved receive/external state.
-& {
-    $savedLocal=$env:LOCALAPPDATA;$env:LOCALAPPDATA=Join-Path $TestHome 'disk-dispatch'
-    try{
-        $root=Join-Path $env:LOCALAPPDATA 'RemoteAgents';$disk=Join-Path $env:LOCALAPPDATA 'RemoteDisk'
-        [void][IO.Directory]::CreateDirectory((Join-Path $root 'state'))
-        [void][IO.Directory]::CreateDirectory((Join-Path $disk 'state'))
-        [void][IO.Directory]::CreateDirectory((Join-Path $disk 'tray'))
-        Write-TransportJson (Join-Path $root 'config.json') @{schema=1;components=@{}}
-        Write-DiskUtf8 (Join-Path $disk 'state/config.xml') '<fixture/>'
-        Write-DiskUtf8 (Join-Path $disk 'tray/syncthingtray.exe') 'fixture-only'
-        Write-DiskUtf8 (Join-Path $disk 'selection.json') ('{"schema":1,"paths":["Project"],"directions":{"Project":"receive"}}'+"`r`n")
-        Write-DiskUtf8 (Join-Path $disk 'external.json') ('{"schema":1,"items":[{"path":"D:\\Reports","remote":"Reports","direction":"send"}]}'+"`r`n")
-        function Send-WizardHelpers {}
-        function Get-WizardServer {@{disk=$true}}
-        function Resolve-WizardDiskServer {}
-        function Find-InstallProfile {'fixture-profile'}
-        function Read-DiskState {}
-        function Set-DiskBase {}
-        function Set-WizardDiskChannel {}
-        function Install-DiskNavPane {}
-        function Invoke-DiskApi($Route){if($Route -cne 'system/status'){throw ('unexpected '+$Route)};@{myID='LOCAL'}}
-        function Invoke-InstallChild($Bundle,$Script,$Arguments){
-            Assert ($Script -ceq 'disk/Select-Disk.ps1') 'Disk invokes only the selection child'
-            $script:diskPayload=Read-TransportJson $Arguments[5]
-        }
-        $request=[pscustomobject]@{base=(Join-Path $TestHome 'dispatch-Disk');paths=@('Project')}
-        [void](Invoke-WizardStep $root $repo 'Disk' $request)
-        Assert ($script:diskPayload.directions.Project -ceq 'receive') 'missing directions preserves receive'
-        Assert (@($script:diskPayload.external).Count -eq 1 -and $script:diskPayload.external[0].remote -ceq 'Reports' -and $script:diskPayload.external[0].direction -ceq 'send') 'missing external preserves saved attachment'
-        $request|Add-Member directions @{};$request|Add-Member external @()
-        [void](Invoke-WizardStep $root $repo 'Disk' $request)
-        Assert (@($script:diskPayload.directions.PSObject.Properties).Count -eq 0 -and @($script:diskPayload.external).Count -eq 0) 'explicit empty directions and external clears both'
-        [void](Invoke-WizardStep $root $repo 'Disk' @{base=$request.base;paths=@('Project');directions=@{Project='send'};external=@()})
-        Assert ($script:diskPayload.directions.Project -ceq 'send' -and @($script:diskPayload.external).Count -eq 0) 'dictionary request respects explicit fields'
-        # A failed folder must not leave the engine unsupervised (REST unavailable afterwards).
-        Write-TransportJson (Join-Path $root 'config.json') @{schema=1;components=@{}}
-        function Invoke-InstallChild($Bundle,$Script,$Arguments){throw 'Не все выбранные папки подключены'}
-        $failed=$false;try{[void](Invoke-WizardStep $root $repo 'Disk' $request)}catch{$failed=$true}
-        Assert ($failed -and (Read-TransportJson (Join-Path $root 'config.json')).components.disk.enabled) 'failed selection still leaves the disk engine under the tray supervisor'
-    }finally{$env:LOCALAPPDATA=$savedLocal}
-}
-Write-Output ('OK: '+$count+' wizard/model/catalog/union/rollback checks (fake SSH, no Windows)')
+Write-Output ('OK: '+$count+' wizard/model/catalog/rollback checks (fake SSH, no Windows)')

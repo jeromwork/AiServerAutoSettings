@@ -20,27 +20,18 @@ namespace RemoteAgents.Launcher
         {
             var empty = Data("{}"); var transport = Data("{\r\n\"ok\":true,\"active\":\"vless-relay-fixture\",\"kbps\":96.8,\"candidates\":[{\"tag\":\"vless-relay-fixture\",\"state\":\"ok\",\"kbps\":96.8},{\"tag\":\"vless-direct\",\"state\":\"fail\"}]\r\n}");
             var health = Health(40000, 50000); var menu = TrayMenuModel.Build(empty, empty, transport, health);
-            Check(string.Join(",", menu.Select(x => x.Id)) == "open,folders,progress,happier,separator,connection,server,separator,exit", "exact menu order");
-            Check(menu[0].Text == "Открыть" && menu[1].Text == "Папки" && menu[2].Text == "Ход синхронизации…" && menu[3].Text == "Открыть Happier" && menu[8].Text == "Выход", "human labels");
-            Check(menu[0].Enabled && menu[1].Enabled && menu[8].Enabled, "window and exit remain accessible");
-            // No folders chosen: nothing syncs. Allowed, but the same «folders» item turns into a visible warning.
-            var noFolders = Data("{\r\n\"profile\":{\"server\":{\"address\":\"203.0.113.10\"}}\r\n}");
-            var warned = TrayMenuModel.Build(noFolders, empty, transport, health);
-            Check(TrayMenuModel.FoldersMissing(noFolders) && warned[1].Id == "folders" && warned[1].Warning && warned[1].Enabled && warned[1].Text == TrayMenuModel.NoFolders && warned[1].Text.StartsWith("⚠"), "no chosen folders shows a warning item that opens folders");
-            Check(warned.Length == menu.Length, "menu shape stays the same for in-place refresh");
-            Check(!TrayMenuModel.FoldersMissing(Data("{\"profile\":{\"server\":{},\"disk\":{\"folders\":[\"Project\"]}}}")), "a chosen folder clears the warning");
-            Check(!TrayMenuModel.FoldersMissing(Data("{\"profile\":{\"server\":{},\"disk\":{\"folders\":\"all\"}}}")), "all server folders count as chosen");
-            Check(!TrayMenuModel.FoldersMissing(empty) && !menu[1].Warning, "not configured yet: no folder warning");
-            Check(!menu[3].Enabled && menu[3].Hint.Contains("happier.webappUrl"), "missing Happier URL disabled with explanation");
-            Check(!menu[5].Enabled && !menu[6].Enabled, "information rows disabled");
-            Check(menu[5].Text.Contains("VLESS через fixture") && menu[5].Text.Contains("КБ/с"), "friendly active route and speed");
-            Check(menu[6].Text.Contains("диск") && menu[6].Text.Contains("память") && menu[6].Text.Contains("нагрузка"), "server metrics in menu");
+            Check(string.Join(",", menu.Select(x => x.Id)) == "happier,settings,cloud,separator,connection,server,separator,exit", "exact menu order");
+            Check(menu[0].Text == "Открыть" && menu[1].Text == "Настройки" && menu[2].Text == "Диск" && menu[7].Text == "Выход", "human labels");
+            Check(menu[0].Enabled && menu[1].Enabled && menu[7].Enabled, "window and exit remain accessible");
+            Check(!menu[4].Enabled && !menu[5].Enabled, "information rows disabled");
+            Check(menu[4].Text.Contains("VLESS через fixture") && menu[4].Text.Contains("КБ/с"), "friendly active route and speed");
+            Check(menu[5].Text.Contains("диск") && menu[5].Text.Contains("память") && menu[5].Text.Contains("нагрузка"), "server metrics in menu");
             foreach (string url in new[] { "https://first.example.invalid/path", "https://second.example.invalid:8443/", "http://local.example.invalid/" }) {
                 var config = Data(Json.Encode(new { happier = new { webappUrl = url } }));
                 Check(TrayMenuModel.HappierUrl(config, empty) == url, "URL comes from each supplied config");
-                Check(TrayMenuModel.Build(config, empty, transport, health)[3].Enabled, "configured URL enables item");
+                Check(TrayMenuModel.Build(config, empty, transport, health)[0].Enabled, "configured URL enables item");
             }
-            Check(TrayMenuModel.LeftClickAction(empty, empty) == "open", "left click without URL opens window");
+            Check(TrayMenuModel.LeftClickAction(empty, empty) == "happier", "left click without URL opens window");
             Check(TrayMenuModel.AcceptLeftClick(0, 501, 500), "NotifyIcon single click has Clicks=0");
             Check(!TrayMenuModel.AcceptLeftClick(0, 200, 500), "NotifyIcon repeat suppressed within double click interval");
             Check(TrayMenuModel.AcceptLeftClick(1, 501, 500), "first or later single click accepted");
@@ -48,11 +39,11 @@ namespace RemoteAgents.Launcher
             Check(!TrayMenuModel.AcceptLeftClick(1, 500, 500), "double click boundary suppressed");
             var account = Data("{\"webappUrl\":\"https://account.example.invalid/\"}");
             Check(TrayMenuModel.LeftClickAction(empty, account) == "happier", "left click follows account URL");
-            Check(TrayMenuModel.LeftClickAction(Data("{\"happier\":{\"webappUrl\":\"file:///tmp/app\"}}"), account) == "open", "invalid configured URL falls back to window");
+            Check(TrayMenuModel.LeftClickAction(Data("{\"happier\":{\"webappUrl\":\"file:///tmp/app\"}}"), account) == "happier", "invalid configured URL falls back to window");
             Check(TrayMenuModel.HappierUrl(empty, account) == "https://account.example.invalid/", "fallback to account state");
             Check(TrayMenuModel.HappierUrl(Data("{\"happier\":{\"webappUrl\":\"https://config.example.invalid/\"}}"), account) == "https://config.example.invalid/", "config takes priority");
             foreach (string url in new[] { "", "not a url", "file:///tmp/app", "javascript:alert(1)", "https://user:pass@example.invalid" })
-                Check(!TrayMenuModel.Build(Data(Json.Encode(new { happier = new { webappUrl = url } })), empty, transport, health)[3].Enabled, "invalid URL cannot launch: " + url);
+                Check(TrayMenuModel.Build(Data(Json.Encode(new { happier = new { webappUrl = url } })), empty, transport, health)[0].Enabled, "invalid URL cannot launch: " + url);
             Check(TrayMenuModel.Connection(empty).Contains("ожидается"), "missing transport unknown");
             transport["ok"] = false;
             Check(!TrayMenuModel.Connection(transport).Contains("КБ/с") && TrayMenuModel.Connection(transport).Contains("не подтверждена"), "failed transport does not claim a working path/speed");

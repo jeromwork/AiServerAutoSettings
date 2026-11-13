@@ -27,7 +27,7 @@ namespace RemoteAgents.Launcher
         }
         internal static bool ShouldShow(string[] args)
         {
-            if (args.Any(a => new[] { "--exit", "--uninstall", "--identify", "--install-stop", "--restart-components", "--rollback", "--logs", "--check-updates", "--disk-shell" }.Contains(a))) return false;
+            if (args.Any(a => new[] { "--exit", "--uninstall", "--identify", "--install-stop", "--restart-components", "--rollback", "--logs", "--check-updates" }.Contains(a))) return false;
             if (args.Any(a => new[] { "--show", "--started", "--settings" }.Contains(a))) return true;
             return !args.Contains("--tray") && !args.Contains("--after-update") && !args.Contains("--setup-check");
         }
@@ -38,16 +38,10 @@ namespace RemoteAgents.Launcher
         { Visible = false; bool notify = !HintShown; HintShown = true; return notify; }
         internal WindowExit Exit(bool applying) { return applying ? WindowExit.ConfirmApplying : WindowExit.Unload; }
         internal static bool CanOpen(string page, string operation)
-        { return page == "Папки" || page == "Конфиг" || page == "Подробно" || page == "Сервис" || string.IsNullOrEmpty(operation); }
-        internal const string SkippedFolders = "папки не выбраны — выберите в трее → Папки";
-        internal static List<string> SessionPlan(IEnumerable<string> plan, bool folderStepRequired, bool diskChosen)
-        { return plan.Where(s => s != ConfigSections.Disk || !folderStepRequired && diskChosen).ToList(); }
+        { return page == "Конфиг" || page == "Подробно" || page == "Сервис" || string.IsNullOrEmpty(operation); }
         // Pending (VPN not yet confirmed, a server install) is handed to the tray and does not hold up «Готово»;
-        // Disk runs in the background (BackgroundWork.Disk) and never gates it.
         internal static bool CanFinish(bool running, IDictionary<string, SectionState> states)
-        { return !running && states.Where(s => s.Key != ConfigSections.Disk).All(s => s.Value == SectionState.Done || s.Value == SectionState.Unchanged || s.Value == SectionState.Failed || s.Value == SectionState.Blocked || s.Value == SectionState.Pending); }
-        internal const string FoldersRecommendation = "Рекомендуем выбрать папки для синхронизации — это можно сделать и позже из трея (пункт «Папки»). Без выбора настройка тоже завершится, просто синхронизация папок не будет включена.";
-        internal const string FoldersInBackground = "Папки подключаются в фоне — окно можно закрыть, программа продолжит сама.";
+        { return !running && states.All(s => s.Value == SectionState.Done || s.Value == SectionState.Unchanged || s.Value == SectionState.Failed || s.Value == SectionState.Blocked || s.Value == SectionState.Pending); }
         internal static string Conflict(string operation)
         { return string.IsNullOrEmpty(operation) ? "" : "Идёт " + operation + ", подождите"; }
     }
@@ -57,63 +51,11 @@ namespace RemoteAgents.Launcher
         internal static bool TryEnter(Mutex installer, string[] args, out bool owned)
         {
             owned = false;
-            // Explorer launches one process per selected item. Commands only forward/start the tray;
             // contending for the installer lock here drops paths before the pipe batching can see them.
-            if (args.Contains("--disk-shell")) return true;
             try { owned = installer.WaitOne(0); } catch (AbandonedMutexException) { owned = true; }
             return owned;
         }
     }
-
-    // One background job at a time for the whole process, not tied to any window: closing a window keeps it
-    // running, only Stop (tray exit) cancels it. A request during a run replaces the queued one and runs right after.
-    internal sealed class SerialRunner<T> where T : class
-    {
-        readonly object gate = new object();
-        readonly CancellationTokenSource stop = new CancellationTokenSource();
-        Func<CancellationToken, Task<T>> next; bool busy; T last;
-        // Raised on a worker thread when a run starts or the queue drains.
-        internal event Action Changed = delegate { };
-        internal bool Busy { get { lock (gate) return busy; } }
-        internal T Last { get { lock (gate) return last; } }
-        internal Task Current { get; private set; }
-        internal SerialRunner() { Current = Task.FromResult(true); }
-        // Shell commands must not replace a queued settings edit or await a displaced callback.
-        internal bool TryStart(Func<CancellationToken, Task<T>> work)
-        {
-            lock (gate) {
-                if (stop.IsCancellationRequested || busy) return false;
-                busy = true; Current = Task.Run(() => Loop(work));
-            }
-            Changed(); return true;
-        }
-        // true: started now; false: queued behind the running job.
-        internal bool Start(Func<CancellationToken, Task<T>> work)
-        {
-            lock (gate) {
-                if (stop.IsCancellationRequested) return false;
-                if (busy) { next = work; return false; }
-                busy = true; Current = Task.Run(() => Loop(work));
-            }
-            Changed(); return true;
-        }
-        async Task Loop(Func<CancellationToken, Task<T>> work)
-        {
-            while (true) {
-                T result = null;
-                try { result = await work(stop.Token).ConfigureAwait(false); } catch (Exception) { }
-                lock (gate) {
-                    if (result != null) last = result;
-                    if (next == null || stop.IsCancellationRequested) { next = null; busy = false; break; }
-                    work = next; next = null;
-                }
-            }
-            Changed();
-        }
-        internal void Stop() { lock (gate) { next = null; } stop.Cancel(); }
-    }
-    internal sealed class DiskRun { internal bool Ok; internal string Summary = "", Binding = ""; internal DiskChoice Choice = null; }
-    internal static class BackgroundWork { internal static readonly SerialRunner<DiskRun> Disk = new SerialRunner<DiskRun>(); }
 
     // Wait for two continuous minutes of fresh confirmed connectivity, then five minutes per attempt.
     internal sealed class ConfigSyncSchedule

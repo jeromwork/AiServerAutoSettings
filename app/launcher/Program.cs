@@ -77,7 +77,7 @@ namespace RemoteAgents.Launcher
                             owned = WaitMutex(mutex, 0);
                             string target = Path.Combine(home, Product.ExeName);
                             bool external = !Path.GetFullPath(Exe).Equals(target, StringComparison.OrdinalIgnoreCase);
-                            bool command = args.Any(a => new[] { "--exit", "--uninstall", "--logs", "--rollback", "--restart-components", "--check-updates", "--settings", "--disk-shell" }.Contains(a));
+                            bool command = args.Any(a => new[] { "--exit", "--uninstall", "--logs", "--rollback", "--restart-components", "--check-updates", "--settings" }.Contains(a));
                             // --tray with --home is also the isolated development/smoke entry point.
                             bool install = external && !command && !(args.Contains("--tray") && args.Contains("--home"));
                             // First setup owns a visible wizard before extraction, selftest or binary downloads.
@@ -128,7 +128,7 @@ namespace RemoteAgents.Launcher
             // Compatibility with the original one-way pipe: identify the installed image, never an arbitrary PID.
             if (pid == 0) foreach (var p in Process.GetProcessesByName(Product.Name)) using (p) { try { if (p.Id != Process.GetCurrentProcess().Id && p.MainModule.FileName.Equals(target, StringComparison.OrdinalIgnoreCase)) { pid = p.Id; break; } } catch { } }
             try { Forward(name, new[] { "--exit", "--install-stop" }); } catch { log.Write("install.shutdown.ipc.failed"); }
-            // Allow the owned bridge/Disk shutdown budget before last-resort termination.
+            // Allow the owned bridge shutdown budget before last-resort termination.
             if (WaitMutex(mutex, 60000)) return;
             if (pid == 0) throw new IOException("Не удалось определить экземпляр");
             using (var process = Process.GetProcessById(pid)) {

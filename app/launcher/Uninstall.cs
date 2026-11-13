@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Threading;
 
@@ -23,15 +23,8 @@ namespace RemoteAgents.Launcher
                 } finally { if (held) running.ReleaseMutex(); }
             } } catch (WaitHandleCannotBeOpenedException) { }
             var engine = new UpdateEngine(home, Program.Version);
-            if (engine.Current.Length == 0) {
-                var cleanup = DiskExplorerNative.CreateService(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteAgents", "icons"), new Journal(home).Write);
-                var profile = ConfigProfile.Load(home);
-                cleanup.Cleanup(DiskExplorerController.Root(profile));
-                foreach (var external in DiskChoice.FromProfile(profile).External) cleanup.CleanupExternal(external.Path);
-                DiskExplorerNative.CreateRegistry(new Journal(home).Write).Cleanup();
-                DiskExplorerNative.CleanupIcons(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteAgents", "icons"));
-                return;
-            }
+            LegacyDiskMigration.RunWindows(home, new Journal(home).Write, true);
+            if (engine.Current.Length == 0) return;
             string script = Path.Combine(engine.Folder(engine.Current), "build", "Uninstall.ps1");
             string output = Path.Combine(home, "state", "uninstall-output.tmp"); Directory.CreateDirectory(Path.GetDirectoryName(output));
             try {

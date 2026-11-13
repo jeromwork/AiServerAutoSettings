@@ -26,60 +26,9 @@ namespace RemoteAgents.Launcher
             "  \"vpn\": { \"enabled\": false, \"checkUrl\": \"https://check.example/ip\", \"dnsServer\": \"1.1.1.1\", \"bootstrap\": { \"channel\": { \"secret\": \"vpn-channel\" } } },\r\n" +
             "  \"happier\": { \"mode\": \"same\", \"label\": \"Мой аккаунт\", \"serverUrl\": \"https://api.example\", \"webappUrl\": \"https://app.example\", \"key\": { \"secret\": \"happier-key\" } },\r\n" +
             "  \"bridge\": { \"enabled\": true, \"allowShell\": false },\r\n" +
-            "  \"disk\": { \"base\": \"C:\\\\Users\\\\user\\\\Disk\", \"folders\": [\"Проекты\", \"Документы\"] },\r\n" +
+            "  \"cloud\": { \"vendor\": \"mailru\", \"login\": \"user@mail.ru\", \"password\": { \"secret\": \"cloud-password\" } },\r\n" +
             "  \"proxyOut\": { \"type\": \"socks\", \"server\": \"proxy.example\", \"port\": 1080, \"login\": \"u\", \"password\": { \"secret\": \"proxy-out-password\" } },\r\n" +
             "  \"lan\": [ { \"name\": \"office\", \"kind\": \"openvpn\", \"ovpn\": { \"secret\": \"lan-office-ovpn\" } } ]\r\n}\r\n";
-        static Dictionary<string, object> DiskStatus(string state)
-        { return Json.Map(Json.Parse("{\r\n\"operations\":{\"disk\":{\"state\":\"" + state + "\"}}\r\n}")); }
-        static async Task DiskWait()
-        {
-            var a = Profile(); var b = Clone(a); Json.Map(Json.Get(b, "server"))["address"] = "203.0.113.11";
-            string binding = DiskApplyWait.Binding(a);
-            Check(binding != DiskApplyWait.Binding(b), "same folders on a different server have a different Disk binding");
-            b = Clone(a); Json.Map(Json.Get(b, "disk"))["folders"] = new[] { "B" };
-            Check(binding != DiskApplyWait.Binding(b), "new folder choice invalidates the old Disk wait");
-            b = Clone(a); Json.Map(Json.Get(b, "server")).Remove("rootPassword");
-            Check(binding == DiskApplyWait.Binding(b), "promoted root password does not invalidate the server binding");
-            Func<Task<SectionOutcome>> pending = () => Task.FromResult(new SectionOutcome { Pending = true, Operation = "disk" });
-            Func<CancellationToken, Task> immediate = token => Task.CompletedTask;
-            foreach (string state in new[] { "none", "", "unexpected", "failed" }) {
-                int polls = 0;
-                var outcome = await DiskApplyWait.Run(() => true, pending, operation => {
-                    Check(++polls == 1, "missing status must not poll forever"); return Task.FromResult(DiskStatus(state));
-                }, immediate, (st, text) => { }, text => { }, CancellationToken.None);
-                Check(!outcome.Ok && !outcome.Pending && polls == 1, "missing/failed operation releases Disk instead of an infinite wait: " + state);
-            }
-            int executes = 0, progress = 0, steps = 0;
-            var finished = await DiskApplyWait.Run(() => true, () => Task.FromResult(++executes == 1
-                ? new SectionOutcome { Pending = true, Operation = "disk" } : new SectionOutcome { Ok = true }),
-                operation => Task.FromResult(DiskStatus(++steps == 1 ? "running" : "finished")), immediate,
-                (st, text) => progress++, text => { }, CancellationToken.None);
-            Check(finished.Ok && executes == 2 && progress == 1, "running then finished reapplies Disk once");
-
-            var runner = new SerialRunner<DiskRun>(); string target = "A"; int oldPolls = 0;
-            var waiting = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            runner.Start(async token => {
-                var outcome = await DiskApplyWait.Run(() => target == "A", pending,
-                    operation => { oldPolls++; return Task.FromResult(DiskStatus("none")); },
-                    async ct => { waiting.TrySetResult(true); await release.Task; }, (st, text) => { }, text => { }, token);
-                return new DiskRun { Ok = outcome.Ok, Summary = "A", Binding = "A" };
-            });
-            await waiting.Task;
-            runner.Start(token => Task.FromResult(new DiskRun { Ok = true, Summary = "B", Binding = "B" }));
-            target = "B"; release.SetResult(true); await runner.Current;
-            Check(!runner.Busy && runner.Last.Binding == "B" && oldPolls == 0, "server switch during wait releases SerialRunner to queued B without querying B for A");
-
-            bool current = true; int reports = 0; executes = 0;
-            var stale = await DiskApplyWait.Run(() => current, () => { executes++; return pending(); }, operation => {
-                current = false; return Task.FromResult(DiskStatus("finished"));
-            }, immediate, (st, text) => reports++, text => { }, CancellationToken.None);
-            Check(!stale.Ok && executes == 1 && reports == 0, "server switch during poll ignores stale finished and never reapplies on B");
-            current = true;
-            stale = await DiskApplyWait.Run(() => current, () => { current = false; return Task.FromResult(new SectionOutcome { Ok = true }); },
-                operation => { throw new Exception("unexpected poll"); }, immediate, (st, text) => reports++, text => { }, CancellationToken.None);
-            Check(!stale.Ok, "server switch during execute cannot announce stale success");
-        }
         static Dictionary<string, object> Profile() { var p = Json.Map(Json.Parse(Sample)); p.Remove("kind"); p.Remove("schema"); return p; }
         static Dictionary<string, string> AllApplied(Dictionary<string, object> p) { return ConfigSections.Order.Where(s => ConfigSections.Present(p, s)).ToDictionary(s => s, s => ConfigSections.Hash(p, s)); }
         static Dictionary<string, bool> AllReady() { return ConfigSections.Order.ToDictionary(s => s, s => true); }
@@ -87,8 +36,7 @@ namespace RemoteAgents.Launcher
 
         internal static void Run()
         {
-            DiskChoiceTests.Run();
-            Plan(); Channel(); Engine(); Conflicts(); Ai(); Sources(); Requests(); Profiles(); DiskWait().GetAwaiter().GetResult();
+            Plan(); Channel(); Engine(); Conflicts(); Ai(); Sources(); Requests(); Profiles();
             HappierAccountTests.Run();
             Console.WriteLine("OK: " + count + " config engine checks (plan by difference, parallel order, conflicts, AI copy without secrets, sources)");
         }
@@ -99,21 +47,21 @@ namespace RemoteAgents.Launcher
             Check(first.SequenceEqual(ConfigSections.Order), "first apply runs every described section in engine order: " + string.Join(",", first));
             Check(ConfigPlan.Build(p, AllApplied(p), AllReady()).Count == 0, "same config again (applied + ready) changes nothing");
             Check(ConfigPlan.Build(Clone(p), AllApplied(p), AllReady()).Count == 0, "re-parsed identical text is still identical (canonical hash)");
-            var folders = Clone(p); ((Dictionary<string, object>)folders["disk"])["folders"] = new object[] { "Проекты" };
-            Check(ConfigPlan.Build(folders, AllApplied(p), AllReady()).SequenceEqual(new[] { ConfigSections.Disk }), "changed folders -> only Disk");
+            var folders = Clone(p); ((Dictionary<string, object>)folders["cloud"])["remoteRoot"] = "Other";
+            Check(ConfigPlan.Build(folders, AllApplied(p), AllReady()).SequenceEqual(new[] { ConfigSections.Cloud }), "changed folders -> only Disk");
             var renamed = ConfigProfile.WithDeviceName(p, "Компьютер сына");
             Check(ConfigPlan.Build(renamed, AllApplied(p), AllReady()).SequenceEqual(new[] { ConfigSections.Bridge }), "new device name -> only Bridge (deviceName)");
             var moved = Clone(p); ((Dictionary<string, object>)moved["server"])["address"] = "198.51.100.7";
             var all = ConfigPlan.Build(moved, AllApplied(p), AllReady());
-            Check(all.Contains(ConfigSections.Server) && all.Contains(ConfigSections.Disk) && all.Contains(ConfigSections.Lan) && !all.Contains(ConfigSections.Bootstrap), "another server re-applies every dependent section (bootstrap only if the server is unreachable)");
+            Check(all.Contains(ConfigSections.Server) && all.Contains(ConfigSections.Cloud) && all.Contains(ConfigSections.Lan) && !all.Contains(ConfigSections.Bootstrap), "another server re-applies every dependent section (bootstrap only if the server is unreachable)");
             var notReady = AllReady(); notReady[ConfigSections.Connection] = false;
             Check(ConfigPlan.Build(p, AllApplied(p), notReady).SequenceEqual(new[] { ConfigSections.Connection }), "live observation not ready -> that section only");
             var down = AllReady(); down[ConfigSections.Server] = false;
             var reconnect = ConfigPlan.Build(p, AllApplied(p), down);
             Check(reconnect[0] == ConfigSections.Bootstrap && reconnect[1] == ConfigSections.Server, "unreachable server: VPN first, then server");
-            var partial = Clone(p); partial.Remove("lan"); partial.Remove("proxyOut"); partial.Remove("disk");
+            var partial = Clone(p); partial.Remove("lan"); partial.Remove("proxyOut"); partial.Remove("cloud");
             var some = ConfigPlan.Build(partial, new Dictionary<string, string>(), new Dictionary<string, bool>());
-            Check(!some.Contains(ConfigSections.Lan) && !some.Contains(ConfigSections.Proxy) && !some.Contains(ConfigSections.Disk), "missing section = do not touch");
+            Check(!some.Contains(ConfigSections.Lan) && !some.Contains(ConfigSections.Proxy) && !some.Contains(ConfigSections.Cloud), "missing section = do not touch");
             Check(ConfigSections.Canonical(Json.Parse("{\"b\":1,\"a\":[true,\"x\"]}")) == ConfigSections.Canonical(new Dictionary<string, object> { { "a", new object[] { true, "x" } }, { "b", 1 } }), "canonical JSON ignores key order and number type");
             var hashOnlyRoot = Clone(p); ((Dictionary<string, object>)((Dictionary<string, object>)hashOnlyRoot["server"])["rootPassword"])["hint"] = "другая подсказка";
             Check(ConfigSections.Hash(hashOnlyRoot, ConfigSections.Connection) == ConfigSections.Hash(p, ConfigSections.Connection), "root password hint does not touch the connection");
@@ -157,12 +105,12 @@ namespace RemoteAgents.Launcher
             foreach (string s in ConfigSections.Parallel.Concat(ConfigSections.Chain)) Check(starts[s] >= ends[ConfigSections.Server], s + " waits for Server");
             var group = new[] { ConfigSections.Connection, ConfigSections.Bridge, ConfigSections.Vpn, ConfigSections.Proxy };
             Check(group.Max(s => starts[s]) < group.Min(s => ends[s]), "independent Connection/Bridge/Vpn/Proxy overlap in time");
-            foreach (string s in new[] { ConfigSections.Account, ConfigSections.Disk })
+            foreach (string s in new[] { ConfigSections.Account, ConfigSections.Cloud })
                 Check(starts[s] >= ends[ConfigSections.Connection], s + " cannot start local-port SSH before Connection succeeds");
-            Check(starts[ConfigSections.Account] < ends[ConfigSections.Disk] && starts[ConfigSections.Disk] < ends[ConfigSections.Account], "Account and Disk overlap after Connection");
+            Check(starts[ConfigSections.Account] < ends[ConfigSections.Cloud] && starts[ConfigSections.Cloud] < ends[ConfigSections.Account], "Account and Disk overlap after Connection");
             Check(starts[ConfigSections.Lan] >= ends[ConfigSections.Proxy], "Lan after Proxy (one server network lock)");
             Check(total < 400 * plan.Count - 1000, "total time is far below the serial sum (" + total + " ms)");
-            Check(states.Contains(ConfigSections.Disk + ":" + SectionState.Running) && states.Contains(ConfigSections.Disk + ":" + SectionState.Done), "rows see running and done");
+            Check(states.Contains(ConfigSections.Cloud + ":" + SectionState.Running) && states.Contains(ConfigSections.Cloud + ":" + SectionState.Done), "rows see running and done");
 
             var called = new ConcurrentBag<string>();
             Func<string, CancellationToken, Task<SectionOutcome>> serverFails = (s, t) => {
@@ -174,7 +122,7 @@ namespace RemoteAgents.Launcher
             var blocked = new ConcurrentDictionary<string, SectionState>();
             var failed = ConfigEngine.Execute(plan, serverFails, (s, st, text) => blocked[s] = st, CancellationToken.None).GetAwaiter().GetResult();
             Check(called.Contains(ConfigSections.Server), "failed VPN-first still tries the server");
-            Check(called.Count == 2 && blocked[ConfigSections.Disk] == SectionState.Blocked && !failed[ConfigSections.Disk].Ok, "failed server blocks the rest without running it");
+            Check(called.Count == 2 && blocked[ConfigSections.Cloud] == SectionState.Blocked && !failed[ConfigSections.Cloud].Ok, "failed server blocks the rest without running it");
             Check(failed[ConfigSections.Bootstrap].Summary == "канал недоступен", "error text reaches the row");
 
             var pending = ConfigEngine.Execute(new[] { ConfigSections.Account }, (s, t) => Task.FromResult(SectionOutcome.From(Json.Map(Json.Parse("{\"ok\":false,\"pending\":\"happier\",\"summary\":\"Happier устанавливается\"}")), "x")), (s, st, text) => blocked[s] = st, CancellationToken.None).GetAwaiter().GetResult();
@@ -182,7 +130,7 @@ namespace RemoteAgents.Launcher
             var refused = SectionOutcome.From(Json.Map(Json.Parse("{\"ok\":false,\"vpn\":\"unavailable\",\"summary\":\"нет\"}")), "x");
             Check(!refused.Ok && !refused.Pending && refused.Summary == "нет", "result.ok:false without pending is ❌, not ⏳ (docs/CONFIG-ENGINE.md)");
             Check(SectionOutcome.From(Json.Map(Json.Parse("{\"ok\":false,\"summary\":\"запрос передан\"}")), "x", true).Pending, "an unconfirmed VPN request is ⏳, never ✅");
-            Check(!SectionOutcome.ServerOperation("connection") && SectionOutcome.ServerOperation("disk"), "only server installs are followed by «Operation»");
+            Check(!SectionOutcome.ServerOperation("connection") && SectionOutcome.ServerOperation("happier"), "only server installs are followed by «Operation»");
             int vpnCalls = 0; long connectionDone = 0, secondVpn = 0; var vpnClock = Stopwatch.StartNew();
             Func<string, CancellationToken, Task<SectionOutcome>> waiting = async (s, t) => {
                 if (s == ConfigSections.Connection) { await Task.Delay(300); connectionDone = vpnClock.ElapsedMilliseconds; return new SectionOutcome { Ok = true }; }
@@ -204,9 +152,9 @@ namespace RemoteAgents.Launcher
                     if (s == ConfigSections.Vpn) return new SectionOutcome { Pending = true, Operation = "connection" };
                     return new SectionOutcome { Ok = true };
                 }, (s, st, text) => blocked[s] = st, CancellationToken.None).GetAwaiter().GetResult();
-                foreach (string s in new[] { ConfigSections.Account, ConfigSections.Disk, ConfigSections.Vpn })
+                foreach (string s in new[] { ConfigSections.Account, ConfigSections.Cloud, ConfigSections.Vpn })
                     Check(!noConnection[s].Ok && !noConnection[s].Pending && blocked[s] == SectionState.Blocked && noConnection[s].Summary.Contains("нет связи с сервером"), s + " has an honest connection failure, including unconfirmed Connection");
-                Check(!called.Contains(ConfigSections.Account) && !called.Contains(ConfigSections.Disk) && called.Contains(ConfigSections.Bridge), "failed Connection prevents SSH children and allows independent Bridge");
+                Check(!called.Contains(ConfigSections.Account) && !called.Contains(ConfigSections.Cloud) && called.Contains(ConfigSections.Bridge), "failed Connection prevents SSH children and allows independent Bridge");
             }
 
             var cancel = new CancellationTokenSource(); cancel.CancelAfter(100); bool cancelled = false;
@@ -215,16 +163,16 @@ namespace RemoteAgents.Launcher
         }
         static void Conflicts()
         {
-            var keys = new[] { "device", "server", "happier", "disk", "bridge", "kind" };
-            var conflicts = new[] { "server: сейчас 198.51.100.7 / в конфиге 203.0.113.10", "disk: сейчас C:\\Disk / в конфиге D:\\Disk" };
+            var keys = new[] { "device", "server", "happier", "cloud", "bridge", "kind" };
+            var conflicts = new[] { "server: сейчас 198.51.100.7 / в конфиге 203.0.113.10", "cloud: сейчас C:\\Disk / в конфиге D:\\Disk" };
             var none = ConfigSections.Accept(keys, conflicts, new HashSet<int>());
-            Check(!none.Contains("server") && !none.Contains("disk") && none.Contains("bridge") && none.Contains("happier") && !none.Contains("kind"), "a conflict is not applied without an explicit choice; the rest is");
+            Check(!none.Contains("server") && !none.Contains("cloud") && none.Contains("bridge") && none.Contains("happier") && !none.Contains("kind"), "a conflict is not applied without an explicit choice; the rest is");
             Check(!ConfigSections.Accept(keys, conflicts, null).Contains("server"), "no dialog answer = keep");
             var taken = ConfigSections.Accept(keys, conflicts, new HashSet<int> { 0 });
-            Check(taken.Contains("server") && !taken.Contains("disk"), "«Взять из конфига» applies only that one");
-            var both = new[] { "disk: корень C:\\Disk / D:\\Disk", "disk: убраны папки Архив" };
-            Check(!ConfigSections.Accept(keys, both, new HashSet<int> { 0 }).Contains("disk"), "one «Оставить» keeps the whole section");
-            Check(ConfigSections.ProfileKeyOfConflict("Аккаунт Happier: сейчас A / в конфиге B") == "happier" && ConfigSections.ProfileKeyOfConflict("Папки диска: убраны X") == "disk", "Russian conflict titles map to sections");
+            Check(taken.Contains("server") && !taken.Contains("cloud"), "«Взять из конфига» applies only that one");
+            var both = new[] { "cloud: корень C:\\Disk / D:\\Disk", "cloud: убраны папки Архив" };
+            Check(!ConfigSections.Accept(keys, both, new HashSet<int> { 0 }).Contains("cloud"), "one «Оставить» keeps the whole section");
+            Check(ConfigSections.ProfileKeyOfConflict("Аккаунт Happier: сейчас A / в конфиге B") == "happier" && ConfigSections.ProfileKeyOfConflict("cloud: изменение") == "cloud", "Russian conflict titles map to sections");
         }
         static void Ai()
         {
@@ -282,8 +230,6 @@ namespace RemoteAgents.Launcher
             Check(Json.Str(bridge, "deviceName") == "Ноутбук сына" && Json.Bool(bridge, "enabled") && !Json.Bool(bridge, "shell"), "Bridge carries deviceName");
             var renameOnly = new Dictionary<string, object> { { "device", new Dictionary<string, object> { { "name", "Дом" } } } };
             Check(Json.Bool(ConfigRequests.Bridge(renameOnly, Json.Map(Json.Parse("{\"bridge\":{\"enabled\":true,\"allowShell\":true}}"))), "shell"), "rename keeps current bridge settings");
-            var disk = ConfigRequests.Disk(p, "C:\\Default", new[] { "old" });
-            Check(Json.Strings(Json.Get(disk, "paths")).SequenceEqual(new[] { "Проекты", "Документы" }) && Json.Str(disk, "base") == "C:\\Users\\user\\Disk", "Disk from profile folders");
             var account = ConfigRequests.Account(p, new Dictionary<string, object>(), new Dictionary<string, object>());
             Check(Json.Str(account, "serverUrl") == "https://api.example" && Json.Str(account, "label") == "Мой аккаунт", "Account request");
             var issued = Json.Map(Json.Parse("{\"happier\":{\"mode\":\"same\",\"serverUrl\":\"https://api.example\",\"webappUrl\":\"https://app.example\"}}"));
@@ -309,22 +255,20 @@ namespace RemoteAgents.Launcher
         {
             var p = Profile();
             var config = Json.Map(Json.Parse("{\"bridge\":{\"enabled\":false,\"allowShell\":true},\"vpn\":{\"enabled\":true,\"checkUrl\":\"https://c\"},\"lan\":{\"connections\":[{\"name\":\"home\"}]},\"proxy\":{\"type\":\"http\",\"server\":\"p2\",\"port\":3128}}"));
-            var synced = ConfigProfile.SyncFromSettings(p, config, "D:\\Disk", new[] { "A" }, "198.51.100.9", "remoteagents");
+            var synced = ConfigProfile.SyncFromSettings(p, config, "198.51.100.9", "remoteagents");
             var bridge = Json.Map(Json.Get(synced, "bridge")); var vpn = Json.Map(Json.Get(synced, "vpn"));
             Check(!Json.Bool(bridge, "enabled") && Json.Bool(bridge, "allowShell") && Json.Bool(vpn, "enabled") && Json.Map(Json.Get(vpn, "bootstrap")).Count > 0, "«Подробно» changes come back into the profile (VPN-first kept)");
             Check(Json.Array(Json.Get(synced, "lan")).Length == 1 && Json.Str(Json.Map(Json.Array(Json.Get(synced, "lan"))[0]), "name") == "home", "LAN list follows this computer");
             var proxy = Json.Map(Json.Get(synced, "proxyOut"));
             Check(Json.Str(proxy, "server") == "p2" && Json.Str(proxy, "type") == "http" && Json.Str(Json.Map(Json.Get(proxy, "password")), "secret") == "proxy-out-password", "proxy follows, secret reference kept");
-            Check(Json.Str(Json.Map(Json.Get(synced, "server")), "address") == "198.51.100.9" && Json.Strings(Json.Get(Json.Map(Json.Get(synced, "disk")), "folders")).SequenceEqual(new[] { "A" }), "server and folders follow");
-            var withFolders = ConfigProfile.WithFolders(new Dictionary<string, object>(), new[] { "X" }, "C:\\D");
-            Check(Json.Str(Json.Map(Json.Get(withFolders, "disk")), "base") == "C:\\D", "folders chosen without a disk section get the base");
+            Check(Json.Str(Json.Map(Json.Get(synced, "server")), "address") == "198.51.100.9", "server and folders follow");
             string home = Path.Combine(Path.GetTempPath(), "cfgd-profile-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(home);
             try {
                 ConfigProfile.Update(home, x => { foreach (var pair in p) x[pair.Key] = pair.Value; });
-                ConfigProfile.MarkApplied(home, ConfigSections.Disk, ConfigSections.Hash(ConfigProfile.Load(home), ConfigSections.Disk));
-                Check(ConfigProfile.Applied(home)[ConfigSections.Disk] == ConfigSections.Hash(p, ConfigSections.Disk), "profile and applied hash survive config.json");
+                ConfigProfile.MarkApplied(home, ConfigSections.Cloud, ConfigSections.Hash(ConfigProfile.Load(home), ConfigSections.Cloud));
+                Check(ConfigProfile.Applied(home)[ConfigSections.Cloud] == ConfigSections.Hash(p, ConfigSections.Cloud), "profile and applied hash survive config.json");
                 Check(Json.Int(new Configuration(home).Data, "schema", 0) == 1, "config.json keeps its schema");
-                ConfigProfile.MarkApplied(home, ConfigSections.Disk, null); Check(!ConfigProfile.Applied(home).ContainsKey(ConfigSections.Disk), "failed section forgets its hash");
+                ConfigProfile.MarkApplied(home, ConfigSections.Cloud, null); Check(!ConfigProfile.Applied(home).ContainsKey(ConfigSections.Cloud), "failed section forgets its hash");
             } finally { Directory.Delete(home, true); }
         }
     }

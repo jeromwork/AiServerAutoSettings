@@ -21,37 +21,37 @@ namespace RemoteAgents.Launcher
         void ProxyPage(Dictionary<string,object> config)
         {
             var c=Json.Map(Json.Get(config,"proxy"));
-            Question(8,"Через какой прокси сервер выходит в интернет?");
-            Hint(8,"Интернет сервера идёт только через этот прокси и никогда через локальные сети.",80,22);
-            Hint(8,"Тип",104,21);
+            Question(7,"Через какой прокси сервер выходит в интернет?");
+            Hint(7,"Интернет сервера идёт только через этот прокси и никогда через локальные сети.",80,22);
+            Hint(7,"Тип",104,21);
             proxyType=new ComboBox {Left=16,Top=126,Width=160,DropDownStyle=ComboBoxStyle.DropDownList};proxyType.Items.AddRange(new object[]{"SOCKS5","HTTP"});
-            proxyType.SelectedIndex=Json.Str(c,"type")=="http"?1:0;sections[8].Controls.Add(proxyType);
-            proxyServer=Field(8,"Адрес прокси",152,Json.Str(c,"server"));proxyServer.Width=420;
-            proxyPort=Field(8,"Порт",152,Json.Str(c,"port"));proxyPort.Left=450;proxyPort.Width=141;
-            sections[8].Controls.Cast<Control>().Last(x=>x is Label).Left=450;
+            proxyType.SelectedIndex=Json.Str(c,"type")=="http"?1:0;sections[7].Controls.Add(proxyType);
+            proxyServer=Field(7,"Адрес прокси",152,Json.Str(c,"server"));proxyServer.Width=420;
+            proxyPort=Field(7,"Порт",152,Json.Str(c,"port"));proxyPort.Left=450;proxyPort.Width=141;
+            sections[7].Controls.Cast<Control>().Last(x=>x is Label).Left=450;
             string savedUser="";try{if(File.Exists(ProxySecretFile))savedUser=Json.Str(Json.Read(ProxySecretFile),"username");}catch{}
-            proxyUser=Field(8,"Логин (необязательно)",204,savedUser);proxyUser.Width=280;
-            proxyPassword=Field(8,"Пароль (пусто — сохранённый)",204,"",true);proxyPassword.Left=311;proxyPassword.Width=280;
-            sections[8].Controls.Cast<Control>().Last(x=>x is Label).Left=311;
-            proxyCheckUrl=Field(8,"Ваш HTTPS-адрес проверки IP (отвечает только IP)",256,Json.Text(c,"ipCheckUrl",Json.Str(Json.Map(Json.Get(config,"vpn")),"checkUrl")));
-            proxyType.SelectedIndexChanged+=(a,b)=>Changed(8);
-            Button(8,"Пропустить",310,()=>Skip("Proxy",8),16,120);
-            Button(8,"Скопировать команду",310,()=>CopyCommand(proxyCommand),146,200);
-            Button(8,"Обновить состояние",310,RefreshNetwork,356,180);
+            proxyUser=Field(7,"Логин (необязательно)",204,savedUser);proxyUser.Width=280;
+            proxyPassword=Field(7,"Пароль (пусто — сохранённый)",204,"",true);proxyPassword.Left=311;proxyPassword.Width=280;
+            sections[7].Controls.Cast<Control>().Last(x=>x is Label).Left=311;
+            proxyCheckUrl=Field(7,"Ваш HTTPS-адрес проверки IP (отвечает только IP)",256,Json.Text(c,"ipCheckUrl",Json.Str(Json.Map(Json.Get(config,"vpn")),"checkUrl")));
+            proxyType.SelectedIndexChanged+=(a,b)=>Changed(7);
+            Button(7,"Пропустить",310,()=>Skip("Proxy",7),16,120);
+            Button(7,"Скопировать команду",310,()=>CopyCommand(proxyCommand),146,200);
+            Button(7,"Обновить состояние",310,RefreshNetwork,356,180);
         }
         void LanPage()
         {
-            Question(6,"Какие локальные сети доступны серверу?");
-            Hint(6,"Интернет всегда идёт через прокси, не через эти сети. Можно добавить несколько подключений.",80,22);
+            Question(5,"Какие локальные сети доступны серверу?");
+            Hint(5,"Интернет всегда идёт через прокси, не через эти сети. Можно добавить несколько подключений.",80,22);
             lanList=new ListView {Left=16,Top=106,Width=575,Height=170,View=View.Details,FullRowSelect=true,MultiSelect=false,HideSelection=false};
-            lanList.Columns.Add("Имя",110);lanList.Columns.Add("Тип",90);lanList.Columns.Add("Состояние",350);sections[6].Controls.Add(lanList);
+            lanList.Columns.Add("Имя",110);lanList.Columns.Add("Тип",90);lanList.Columns.Add("Состояние",350);sections[5].Controls.Add(lanList);
             try{foreach(var row in Json.Array(Json.Get(Json.Map(Json.Get(new Configuration(home).Data,"lan")),"connections")).Select(Json.Map))
                 lanList.Items.Add(new ListViewItem(new[]{Json.Str(row,"name"),"OpenVPN","не проверено"}){Name=Json.Str(row,"name")});}catch{}
-            Button(6,"Добавить…",284,AddLan,16,110);
-            Button(6,"Удалить",284,RemoveLan,134,90);
-            Button(6,"Обновить состояние",284,RefreshNetwork,232,160);
-            Button(6,"Скопировать команду",284,()=>CopyCommand(lanCommand),400,191);
-            Button(6,"Пропустить",318,()=>Skip("Lan",6),16,110);
+            Button(5,"Добавить…",284,AddLan,16,110);
+            Button(5,"Удалить",284,RemoveLan,134,90);
+            Button(5,"Обновить состояние",284,RefreshNetwork,232,160);
+            Button(5,"Скопировать команду",284,()=>CopyCommand(lanCommand),400,191);
+            Button(5,"Пропустить",318,()=>Skip("Lan",5),16,110);
         }
         Task CopyCommand(string command)
         {
@@ -62,9 +62,9 @@ namespace RemoteAgents.Launcher
         {
             var config=new Configuration(home).Data;var proxy=Json.Map(Json.Get(config,"proxy"));
             int lans=Json.Array(Json.Get(Json.Map(Json.Get(config,"lan")),"connections")).Length;
-            if(!dirty[6]){applied[6]=lans>0 || Json.Bool(wizard,"skipLan") || Json.Bool(wizard,"configured");results[6]=lans>0?"Добавлено сетей: "+lans+" (состояние — «Обновить состояние»)":"Не настроены (необязательно)";}
-            if(!dirty[8]){applied[8]=Json.Bool(proxy,"confirmed") || Json.Bool(wizard,"skipProxy") || Json.Bool(wizard,"configured");
-                results[8]=Json.Bool(proxy,"confirmed")?"Прокси подтверждён при применении (текущее — «Обновить состояние»)":Json.Bool(wizard,"skipProxy")?"Пропущено: сервер выходит в интернет как сейчас":"Не настроен (необязательно)";}
+            if(!dirty[5]){applied[5]=lans>0 || Json.Bool(wizard,"skipLan") || Json.Bool(wizard,"configured");results[5]=lans>0?"Добавлено сетей: "+lans+" (состояние — «Обновить состояние»)":"Не настроены (необязательно)";}
+            if(!dirty[7]){applied[7]=Json.Bool(proxy,"confirmed") || Json.Bool(wizard,"skipProxy") || Json.Bool(wizard,"configured");
+                results[7]=Json.Bool(proxy,"confirmed")?"Прокси подтверждён при применении (текущее — «Обновить состояние»)":Json.Bool(wizard,"skipProxy")?"Пропущено: сервер выходит в интернет как сейчас":"Не настроен (необязательно)";}
         }
         async Task RefreshNetwork()
         {
@@ -73,8 +73,8 @@ namespace RemoteAgents.Launcher
             lanList.Items.Clear();
             foreach(var row in rows)lanList.Items.Add(new ListViewItem(new[]{Json.Str(row,"name"),"OpenVPN",Json.Str(row,"state")}){Name=Json.Str(row,"name"),ForeColor=Json.Bool(row,"ok")?SystemColors.WindowText:Color.Firebrick});
             var proxy=Json.Map(Json.Get(status,"proxy"));
-            results[8]="Сейчас на сервере: "+Json.Str(proxy,"summary");
-            results[6]=rows.Length==0?"Сетей на сервере нет":"Подключено "+rows.Count(r=>Json.Bool(r,"ok"))+" из "+rows.Length;
+            results[7]="Сейчас на сервере: "+Json.Str(proxy,"summary");
+            results[5]=rows.Length==0?"Сетей на сервере нет":"Подключено "+rows.Count(r=>Json.Bool(r,"ok"))+" из "+rows.Length;
             Append(titles[currentPage]+": "+results[currentPage]);
         }
         // Returns the root mode and, if a password is needed and typed, a relay that serves it a few times.
@@ -129,7 +129,7 @@ namespace RemoteAgents.Launcher
         async Task<Dictionary<string,object>> ExecuteLan()
         {
             if(lanList.Items.Count==0)return new Dictionary<string,object>{{"summary","Локальные сети не добавлены (необязательно)"}};
-            await RefreshNetwork();return new Dictionary<string,object>{{"summary",results[6]}};
+            await RefreshNetwork();return new Dictionary<string,object>{{"summary",results[5]}};
         }
         async Task AddLan()
         {
@@ -159,10 +159,10 @@ namespace RemoteAgents.Launcher
             using(var lanSecret=new PasswordRelay(lanUser.Length>0?Json.Encode(new Dictionary<string,object>{{"username",lanUser},{"password",lanPassword}}):"")) {
                 lanPassword="";
                 var result=await Run("Lan",new {kind="openvpn",name,file,host=hostAddress,port,ipCheckUrl=proxyCheckUrl.Text.Trim(),secretPipe=lanSecret.Name,mode=access.Item1,adminLogin=access.Item2,passwordPipe=access.Item3==null?"":access.Item3.Name,askpassExecutable=Program.Exe});
-                lanCommand=Json.Str(result,"command");results[6]=Json.Str(result,"summary");Append(results[6]);
+                lanCommand=Json.Str(result,"command");results[5]=Json.Str(result,"summary");Append(results[5]);
                 string added=Json.Str(result,"name");if(lanList.Items.ContainsKey(added))lanList.Items.RemoveByKey(added);
                 lanList.Items.Add(new ListViewItem(new[]{added,"OpenVPN",Json.Bool(result,"ok")?"подключена ✓":"ждёт администратора"}){Name=added});
-                applied[6]=Json.Bool(result,"ok");dirty[6]=false;
+                applied[5]=Json.Bool(result,"ok");dirty[5]=false;
             }
         }
         async Task RemoveLan()

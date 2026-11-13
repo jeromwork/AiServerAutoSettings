@@ -34,8 +34,8 @@ Assert ($failed -and -not ([IO.File]::ReadAllText((Join-Path $root 'state/happie
 Assert (-not ([IO.File]::ReadAllText((Join-Path $root 'logs/accounts.log'))).Contains($script:testKey) -and -not ([IO.File]::ReadAllText((Join-Path $root 'state/happier-account.json'))).Contains($script:testKey)) 'logs and public state contain no secret'
 $entry=Join-Path $TestHome 'account-entry.ps1'
 $source=[IO.File]::ReadAllText((Join-Path $repo 'accounts/Account.ps1'))
-$common=(Join-Path $repo 'disk/Disk.Common.ps1').Replace("'","''")
-$source=$source.Replace("(Join-Path (Split-Path `$PSScriptRoot -Parent) 'disk/Disk.Common.ps1')",("'"+$common+"'"))
+$common=(Join-Path $repo 'build/Process.Common.ps1').Replace("'","''")
+$source=$source.Replace("(Join-Path (Split-Path `$PSScriptRoot -Parent) 'build/Process.Common.ps1')",("'"+$common+"'"))
 $source=$source.Replace('if($LibraryOnly){return}', 'function Connect-HappierAccount($Root){throw "first SSH refused"};if($LibraryOnly){return}')
 [IO.File]::WriteAllText($entry,$source,(New-Object Text.UTF8Encoding($true)))
 . (Join-Path $repo 'build/Setup.Common.ps1')

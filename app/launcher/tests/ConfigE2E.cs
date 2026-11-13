@@ -56,7 +56,7 @@ namespace RemoteAgents.Launcher
         }
 
         // The window's run: Server, then independent work; Account/Disk wait for Connection.
-        // Bootstrap, Server, Connection and Vpn are the real actions; Bridge/Account/Disk need Windows/Happier/Syncthing and are stand-ins.
+        // Bootstrap, Server, Connection and Vpn are the real actions; Bridge/Account/Disk need Windows/Happier and are stand-ins.
         static int Run()
         {
             var desired = ConfigProfile.Load(home);
@@ -83,8 +83,7 @@ namespace RemoteAgents.Launcher
                         default:
                             // Request builders of the real sections are still exercised.
                             if (s == ConfigSections.Bridge) ConfigRequests.Bridge(p, config);
-                            if (s == ConfigSections.Disk) ConfigRequests.Disk(p, Path.Combine(home, "Disk"), null);
-                            Thread.Sleep(1500); o = new SectionOutcome { Ok = true, Summary = "стенд (Windows/Happier/Syncthing недоступны на Linux)" }; break;
+                            Thread.Sleep(1500); o = new SectionOutcome { Ok = true, Summary = "стенд (Windows/Happier недоступны на Linux)" }; break;
                     }
                 } catch (Exception e) when (!(e is IOException)) { Console.Error.WriteLine(s + ": " + e); throw; }
                 finally { times[s] = new[] { start, clock.ElapsedMilliseconds }; }

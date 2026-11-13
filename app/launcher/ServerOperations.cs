@@ -19,13 +19,13 @@ namespace RemoteAgents.Launcher
     {
         internal const string Account = "account";
         static readonly Dictionary<string, string> titles = new Dictionary<string, string> {
-            { "happier", "Установка Happier" }, { "disk", "Сервер диска (Syncthing)" }, { Account, "Подключение аккаунта Happier" } };
+            { "happier", "Установка Happier" }, { Account, "Подключение аккаунта Happier" } };
         internal static string Title(string name) { string t; return titles.TryGetValue(name, out t) ? t : name; }
         internal static string StatePath(string home) { return Path.Combine(home, "state", "server-operations.json"); }
         internal static List<ServerOperation> Parse(Dictionary<string, object> operations, IEnumerable<string> tracked, bool pendingAccount)
         {
             var list = new List<ServerOperation>();
-            foreach (string name in tracked.Where(n => n != Account).Distinct()) {
+            foreach (string name in tracked.Where(n => n != Account && titles.ContainsKey(n)).Distinct()) {
                 var m = Json.Map(Json.Get(operations, name));
                 list.Add(new ServerOperation { Name = name, Title = Title(name), State = Json.Text(m, "state", "none"), Step = Json.Str(m, "step"), Reason = Json.Str(m, "reason"),
                     Stage = Json.Int(m, "stage", 0), Stages = Json.Int(m, "stages", 0), ElapsedSec = Json.Int(m, "elapsedSec", 0) });
@@ -59,10 +59,18 @@ namespace RemoteAgents.Launcher
         internal static void Save(string home, IEnumerable<string> tracked, Dictionary<string, object> operations, bool pendingAccount)
         {
             Json.Write(StatePath(home), new Dictionary<string, object> { { "schema", 1 }, { "updatedUtc", DateTime.UtcNow.ToString("o") },
-                { "tracked", tracked.Distinct().ToArray() }, { "operations", operations ?? new Dictionary<string, object>() }, { "pendingAccount", pendingAccount } });
+                { "tracked", tracked.Where(titles.ContainsKey).Distinct().ToArray() }, { "operations", operations ?? new Dictionary<string, object>() }, { "pendingAccount", pendingAccount } });
         }
         internal static Dictionary<string, object> Load(string home)
-        { try { string p = StatePath(home); return File.Exists(p) ? Json.Read(p) : new Dictionary<string, object>(); } catch (Exception) { return new Dictionary<string, object>(); } }
+        {
+            try {
+                string p = StatePath(home); var state = File.Exists(p) ? Json.Read(p) : new Dictionary<string, object>();
+                state["tracked"] = Json.Strings(Json.Get(state, "tracked")).Where(titles.ContainsKey).ToArray();
+                var operations = Json.Map(Json.Get(state, "operations"));
+                state["operations"] = operations.Where(x => titles.ContainsKey(x.Key)).ToDictionary(x => x.Key, x => x.Value);
+                return state;
+            } catch (Exception) { return new Dictionary<string, object>(); }
+        }
         internal static List<ServerOperation> FromState(Dictionary<string, object> state)
         { return Parse(Json.Map(Json.Get(state, "operations")), Json.Strings(Json.Get(state, "tracked")), Json.Bool(state, "pendingAccount")); }
         internal static DateTime Updated(Dictionary<string, object> state)

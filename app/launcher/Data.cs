@@ -265,7 +265,7 @@ namespace RemoteAgents.Launcher
         {
             var raw = Json.Parse(File.ReadAllText(Path.Combine(folder, "components.json"))); var map = Json.Map(raw);
             var result = new BundleDefinition {
-                Components = Json.Array(raw is IDictionary ? Json.Get(map, "components") : raw).Select(Component.Read).ToArray(),
+                Components = Json.Array(raw is IDictionary ? Json.Get(map, "components") : raw).Where(value => !string.Equals(Json.Str(Json.Map(value), "name"), "disk", StringComparison.OrdinalIgnoreCase)).Select(Component.Read).ToArray(),
                 Menu = Json.Array(Json.Get(map, "menu")).Select(MenuAction.Read).ToArray(),
                 Binaries = Json.Array(Json.Get(map, "binaries")).Select(Json.Map).ToArray()
             };

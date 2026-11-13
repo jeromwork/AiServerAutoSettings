@@ -431,105 +431,145 @@
       },
       "additionalProperties": false
     },
-    "disk": {
-      "type": "object",
-      "properties": {
-        "base": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 1024,
-          "pattern": "^[^\\r\\n\\x00]+$(?![\\s\\S])"
-        },
-        "folders": {
-          "oneOf": [
-            {
+    "cloud": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "vendor": {
               "type": "string",
               "enum": [
-                "all"
+                "mailru"
               ]
             },
-            {
-              "type": "array",
-              "items": {
-                "oneOf": [
-                  {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 1024,
-                    "pattern": "^[^\\\\<>:\"|?*\\x00-\\x1f]+$(?![\\s\\S])"
-                  },
-                  {
-                    "type": "object",
-                    "properties": {
-                      "path": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 1024,
-                        "pattern": "^[^\\\\<>:\"|?*\\x00-\\x1f]+$(?![\\s\\S])"
-                      },
-                      "direction": {
-                        "type": "string",
-                        "enum": [
-                          "both",
-                          "send",
-                          "receive"
-                        ]
-                      }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                      "path"
-                    ]
-                  }
-                ]
+            "login": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^[^\\r\\n\\x00]+$(?![\\s\\S])"
+            },
+            "password": {
+              "type": "object",
+              "properties": {
+                "secret": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64,
+                  "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
+                },
+                "hint": {
+                  "type": "string",
+                  "minLength": 0,
+                  "maxLength": 2048
+                }
               },
-              "maxItems": 256,
-              "uniqueItems": true
+              "additionalProperties": false,
+              "required": [
+                "secret"
+              ],
+              "description": "Пароль для внешних приложений Mail",
+              "examples": [
+                {
+                  "secret": "cloud-password"
+                }
+              ]
+            },
+            "remoteRoot": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024,
+              "pattern": "^[^\\r\\n\\x00]+$(?![\\s\\S])"
+            },
+            "pollSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 86400
+            },
+            "hint": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 2048
             }
+          },
+          "additionalProperties": false,
+          "required": [
+            "vendor",
+            "login",
+            "password"
           ]
         },
-        "external": {
+        {
           "type": "array",
           "items": {
             "type": "object",
             "properties": {
-              "path": {
-                "type": "string",
-                "minLength": 3,
-                "maxLength": 1024,
-                "pattern": "^(?:[A-Za-z]:[\\\\/]|[\\\\/]{2}[^\\\\/:<>\"|?*\\x00-\\x1f]+[\\\\/][^\\\\/:<>\"|?*\\x00-\\x1f]+(?:[\\\\/]|$))[^<>:\"|?*\\x00-\\x1f]*$(?![\\s\\S])"
-              },
-              "remote": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128,
-                "pattern": "^[^/\\\\<>:\"|?*\\x00-\\x1f]+$(?![\\s\\S])"
-              },
-              "direction": {
+              "vendor": {
                 "type": "string",
                 "enum": [
-                  "both",
-                  "send",
-                  "receive"
+                  "mailru"
                 ]
+              },
+              "login": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[^\\r\\n\\x00]+$(?![\\s\\S])"
+              },
+              "password": {
+                "type": "object",
+                "properties": {
+                  "secret": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
+                  },
+                  "hint": {
+                    "type": "string",
+                    "minLength": 0,
+                    "maxLength": 2048
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "secret"
+                ],
+                "description": "Пароль для внешних приложений Mail",
+                "examples": [
+                  {
+                    "secret": "cloud-password"
+                  }
+                ]
+              },
+              "remoteRoot": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024,
+                "pattern": "^[^\\r\\n\\x00]+$(?![\\s\\S])"
+              },
+              "pollSeconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 86400
+              },
+              "hint": {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 2048
               }
             },
             "additionalProperties": false,
             "required": [
-              "path",
-              "remote"
+              "vendor",
+              "login",
+              "password"
             ]
           },
-          "maxItems": 256,
-          "uniqueItems": true
-        },
-        "hint": {
-          "type": "string",
-          "minLength": 0,
-          "maxLength": 2048
+          "maxItems": 32,
+          "uniqueItems": true,
+          "minItems": 1
         }
-      },
-      "additionalProperties": false
+      ]
     },
     "vpn": {
       "type": "object",
@@ -940,20 +980,6 @@
       "type": "object",
       "properties": {
         "transport": {
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "hint": {
-              "type": "string",
-              "minLength": 0,
-              "maxLength": 2048
-            }
-          },
-          "additionalProperties": false
-        },
-        "disk": {
           "type": "object",
           "properties": {
             "enabled": {

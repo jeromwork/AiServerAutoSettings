@@ -1,6 +1,6 @@
 """Detached server operations (server-wizard.sh start/status/ensure/run) in a disposable HOME.
 
-Fake bootstrap scripts stand in for the Happier/Syncthing installers; nothing is downloaded."""
+Fake bootstrap scripts stand in for the Happier installers; nothing is downloaded."""
 import json
 import os
 from pathlib import Path
@@ -27,7 +27,7 @@ class ServerOperationTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix='ra-ops-')
         self.home = Path(self.tmp.name)
         h = self.home
-        for rel in ('.local/share/remoteagents-wizard', '.local/share/remoteagents-accounts', '.local/share/remote-disk', '.local/bin'):
+        for rel in ('.local/share/remoteagents-wizard', '.local/share/remoteagents-accounts', '.local/bin'):
             (h / rel).mkdir(parents=True)
         # The window uploads LF; a CRLF checkout is normalized at that boundary.
         source = (ROOT / 'build/server-wizard.sh').read_bytes().replace(b'\r\n', b'\n')
@@ -35,7 +35,6 @@ class ServerOperationTests(unittest.TestCase):
         install = h / 'fake-install.sh'
         install.write_text(FAKE_INSTALL)
         (h / '.local/share/remoteagents-accounts/bootstrap.sh').write_text('exec bash "$HOME/fake-install.sh" happier\n')
-        (h / '.local/share/remote-disk/server-disk.sh').write_text('[ "$1" = bootstrap ] || exit 9\nexec bash "$HOME/fake-install.sh" disk\n')
         (h / '.local/share/remoteagents-wizard/server-transport-catalog.py').write_text('print("{}")\n')
         # The helper puts ~/.local/bin first in PATH. Fake systemd-run --scope records the unit and execs the command (fds inherited).
         (h / '.local/bin/systemctl').write_text('#!/bin/sh\nexit 0\n')
@@ -45,12 +44,12 @@ class ServerOperationTests(unittest.TestCase):
         self.env = dict(os.environ, HOME=str(h), PATH=os.environ['PATH'], XDG_RUNTIME_DIR=str(h))
 
     def tearDown(self):
-        for op in ('happier', 'disk'):
+        for op in ('happier',):
             release = self.home / ('release-' + op)
             if not release.exists():
                 release.write_text('0')
         deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and any(self.state(op)['state'] == 'running' for op in ('happier', 'disk')):
+        while time.monotonic() < deadline and any(self.state(op)['state'] == 'running' for op in ('happier',)):
             time.sleep(0.05)
         self.tmp.cleanup()
 
@@ -108,24 +107,23 @@ class ServerOperationTests(unittest.TestCase):
         self.assertEqual(len(self.runs('happier')), 1, 'ready Happier is not reinstalled')
 
     def test_failure_reason_is_public_and_retry_starts_again(self):
-        self.call('start', 'disk')
-        (self.home / 'release-disk').write_text('7')
-        failed = self.wait('disk', 'failed')
+        self.call('start', 'happier')
+        (self.home / 'release-happier').write_text('7')
+        failed = self.wait('happier', 'failed')
         self.assertEqual(failed['exitCode'], 7)
         self.assertIn('Connection timed out', failed['reason'])
         self.assertNotIn('abc123', json.dumps(failed))
-        (self.home / 'release-disk').unlink()
-        self.assertEqual(self.call('start', 'disk')['disk']['state'], 'running')
-        (self.home / 'release-disk').write_text('0')
-        self.assertEqual(self.wait('disk', 'finished')['exitCode'], 0)
-        self.assertEqual(len(self.runs('disk')), 2)
+        (self.home / 'release-happier').unlink()
+        self.assertEqual(self.call('start', 'happier')['happier']['state'], 'running')
+        (self.home / 'release-happier').write_text('0')
+        self.assertEqual(self.wait('happier', 'finished')['exitCode'], 0)
+        self.assertEqual(len(self.runs('happier')), 2)
 
-    def test_repair_starts_both_and_returns_at_once(self):
+    def test_repair_starts_remaining_installer_and_returns_at_once(self):
         # Without a user manager the plain setsid/nohup session is used.
         (self.home / '.local/bin/systemd-run').unlink()
-        result = self.call('repair', '1', '1', '1')
+        result = self.call('repair', '1', '1')
         self.assertEqual(result['happier']['state'], 'running')
-        self.assertEqual(result['disk']['state'], 'running')
         inspect = self.call('inspect', streamed=True)
         self.assertEqual(inspect['operations']['happier']['state'], 'running')
 

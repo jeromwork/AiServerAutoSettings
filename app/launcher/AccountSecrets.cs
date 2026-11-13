@@ -5,7 +5,7 @@ using System.Security.Principal;
 
 namespace RemoteAgents.Launcher
 {
-    internal static class AccountDiskSetup
+    internal static class AccountSecrets
     {
         internal static void ProtectSecrets(string home)
         {

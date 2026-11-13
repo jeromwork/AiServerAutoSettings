@@ -154,9 +154,9 @@ namespace RemoteAgents.Launcher
                 Check("component-after-connection-starts", fresh.Wanted(transportComponent));
                 fresh.Data["components"]=Json.Parse("{\"transport\":{\"enabled\":false}}");
                 Check("component-disabled-ready-stays-off", !fresh.Wanted(transportComponent));
-                var explicitComponent=Component.Read(Json.Parse("{\"name\":\"disk\",\"exe\":\"unused\",\"enabledByDefault\":true,\"requiresConfig\":[\"components.disk.enabled\"]}"));
+                var explicitComponent=Component.Read(Json.Parse("{\"name\":\"control\",\"exe\":\"unused\",\"enabledByDefault\":true,\"requiresConfig\":[\"components.control.enabled\"]}"));
                 Check("component-default-cannot-skip-setup", !fresh.Wanted(explicitComponent));
-                fresh.Data["components"]=Json.Parse("{\"disk\":{\"enabled\":true}}");
+                fresh.Data["components"]=Json.Parse("{\"control\":{\"enabled\":true}}");
                 Check("component-explicit-step-starts", fresh.Wanted(explicitComponent));
                 Check("legacy-component-without-contract", fresh.Wanted(Component.Read(Json.Parse("{\"name\":\"legacy\",\"exe\":\"unused\",\"enabledByDefault\":true}"))));
                 var freshStatus=Json.Map(Json.Parse("{\"ok\":false,\"error\":\"transport failed\"}"));
@@ -198,7 +198,7 @@ namespace RemoteAgents.Launcher
                 }
                 foreach (string dir in new[] { "state", "secrets", "logs" }) Files.Atomic(Path.Combine(upgradeHome, dir, "keep"), "keep\r\n");
                 Files.Atomic(Path.Combine(upgradeHome, "config.json"), "{\r\n\"custom\":true}\r\n");
-                var userFiles=new Dictionary<string,string>{{"secrets/device-key","own-key"},{"state/happier-account.json","happier-kept"},{"disk/folders.json","Project/docs"},{"control/config.json","bridge-kept"}};
+                var userFiles=new Dictionary<string,string>{{"secrets/device-key","own-key"},{"state/happier-account.json","happier-kept"},{"cloud/local.json","local-setting"},{"control/config.json","bridge-kept"}};
                 foreach(var pair in userFiles)Files.Atomic(Path.Combine(upgradeHome,pair.Key),pair.Value);
                 string configHash = Files.Hash(Path.Combine(upgradeHome, "config.json"));
                 File.WriteAllText(image, "new-image");
@@ -206,7 +206,7 @@ namespace RemoteAgents.Launcher
                 var ue = new UpdateEngine(upgradeHome, "1.1.0");
                 Check("upgrade-over-and-previous", ue.Current == u2.Version && ue.Previous == u1.Version && ue.Pending && File.ReadAllText(installedImage) == "new-image");
                 Check("upgrade-preserves-user-data", Files.Hash(Path.Combine(upgradeHome, "config.json")) == configHash && new[] { "state", "secrets", "logs" }.All(dir => File.ReadAllText(Path.Combine(upgradeHome, dir, "keep")) == "keep\r\n"));
-                Check("upgrade-keeps-device-disk-happier-bridge",userFiles.All(pair=>File.ReadAllText(Path.Combine(upgradeHome,pair.Key))==pair.Value));
+                Check("upgrade-keeps-device-cloud-happier-bridge",userFiles.All(pair=>File.ReadAllText(Path.Combine(upgradeHome,pair.Key))==pair.Value));
                 Check("upgrade-119-second-grace", UpgradeInstaller.ObserveImage(upgradeHome, ue, false, "", DateTime.UtcNow.AddSeconds(118)) == "" && ue.Pending);
                 Check("upgrade-restores-image-and-bundle", UpgradeInstaller.ObserveImage(upgradeHome, ue, false, "", DateTime.UtcNow.AddSeconds(121)) == "rollback" && ue.Current == u1.Version && File.ReadAllText(installedImage) == "old-image");
                 Check("product-upgrade-and-rollback-preserve-neighbor", File.ReadAllText(neighborImage) == "neighbor" && Files.ReadLine(neighborPointer) == "neighbor-current");

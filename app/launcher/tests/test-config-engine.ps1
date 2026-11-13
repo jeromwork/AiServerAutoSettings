@@ -46,14 +46,14 @@ function Run-Group($Actions,$Id){
         return @($Actions|ForEach-Object {Read-TransportJson (Join-Path $root ($_+'.result'))})
     }finally{foreach($c in $children){if(-not $c.process.HasExited){$c.process.Kill()};$c.process.Dispose()}}
 }
-$rows=Run-Group @('ConfigSync','Connection','Bridge','Account','Disk','Vpn') 'independent'
+$rows=Run-Group @('ConfigSync','Connection','Bridge','Account','Cloud','Vpn') 'independent'
 $latestStart=($rows|Measure-Object -Property begin -Maximum).Maximum
 $earliestEnd=($rows|Measure-Object -Property end -Minimum).Minimum
 $overlapMs=[int](($earliestEnd-$latestStart)/10000)
 Assert ($latestStart -lt $earliestEnd) 'ConfigSync and all five production resource locks must overlap across processes'
 $rows=Run-Group @('Proxy','Lan') 'network'
 Assert ($rows[0].end -le $rows[1].begin -or $rows[1].end -le $rows[0].begin) 'Proxy and Lan must serialize across processes'
-foreach($action in @('ConfigSync','Connection','Bridge','Account','Disk','Vpn','Proxy','Lan')){
+foreach($action in @('ConfigSync','Connection','Bridge','Account','Cloud','Vpn','Proxy','Lan')){
     Assert ((Read-TransportJson (Join-Path $root 'config.json')).$action) 'short config lock must preserve every parallel edit'
     $line=ConvertFrom-Json ([IO.File]::ReadAllText((Join-Path $root ($action+'.jsonl'))))
     Assert ($line.text -match ('^timing '+$action+' [0-9]+$')) 'elapsed time in ProgressFile'
