@@ -33,7 +33,7 @@ try {
             if(@($folders|Where-Object {$_.id -ceq $id}).Count){continue}
             Assert-DiskFreePath $target $folders -AllowContent
             # A local folder with the same name is merged like an explicit choice: nothing is deleted, identical files stay single.
-            if((Test-Path -LiteralPath $target) -and @(Get-ChildItem -LiteralPath $target -Force|Where-Object {$_.Name -notin @('.git','.stignore','.stfolder','.stversions')}).Count){Write-DiskProgress ('Объединяю «'+$name+'»: на компьютере и на сервере есть файлы; ничего не удаляется, при расхождении сохраняются обе версии')}
+            if((Test-DiskLocalContent $target)){Write-DiskProgress ('Объединяю «'+$name+'»: на компьютере и на сервере есть файлы; ничего не удаляется, при расхождении сохраняются обе версии')}
             [void][IO.Directory]::CreateDirectory($target)
             # Recheck immediately before writing policy/configuration.
             Assert-DiskFreePath $target $folders -AllowContent

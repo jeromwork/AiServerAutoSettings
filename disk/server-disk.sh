@@ -91,7 +91,9 @@ def reconcile(api,identity):
 
 patterns=[x[4:].lower() for x in (here/'stignore.txt').read_text(encoding='utf-8-sig').splitlines() if x.startswith('(?i)')]
 def selectable(relative):
-    return all(part.lower() not in ('.stignore','.stfolder','.stversions') and not any(fnmatch.fnmatchcase(part.lower(),pat.lower()) for pat in patterns) for part in relative.split('/'))
+    project_relative='/'.join(relative.split('/')[1:]).lower()
+    if any(project_relative==pat[1:] or project_relative.startswith(pat[1:]+'/') for pat in patterns if pat.startswith('/')):return False
+    return all(part.lower() not in ('.stignore','.stfolder','.stversions') and not any(fnmatch.fnmatchcase(part.lower(),pat.lower()) for pat in patterns if not pat.startswith('/')) for part in relative.split('/'))
 def relative_path(root,value):
     if not isinstance(value,str) or not value or value.startswith('/') or any(x in ('','.','..') for x in value.split('/')) or '\\' in value:raise ValueError('Недопустимый путь')
     p=root.joinpath(*value.split('/'));safe(p)

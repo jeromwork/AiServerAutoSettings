@@ -19,7 +19,7 @@ try {
         }
     }
     if($Remote.Length -gt 128 -or $Remote -notmatch '^[\p{L}\p{N}_][\p{L}\p{N}_. -]*$' -or $Remote.Contains('..') -or $Remote -match '[ .]$|^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)'){throw 'Недопустимое имя серверной папки'}
-    $has=@(Get-ChildItem -LiteralPath $Path -Force|Where-Object {$_.Name -notin @('.git','.stignore','.stfolder','.stversions')}).Count -gt 0;$target=@($folders|Where-Object {$_.name -ceq $Remote})
+    $has=Test-DiskLocalContent $Path;$target=@($folders|Where-Object {$_.name -ceq $Remote})
     $step='Проверка подключения';$local=Invoke-DiskApi 'system/status';if(-not $local.myID){throw 'Движок не вернул ID устройства'};$peer=[IO.File]::ReadAllText((Join-Path $script:DiskHome 'server.txt')).Trim();$existing=@(Invoke-DiskApi 'config/folders');$match=@($existing|Where-Object {$_.path.TrimEnd('\','/') -ieq $Path.TrimEnd('\','/')})
     if($match.Count -gt 1){throw 'Несколько ID для одной локальной папки'}
     $sha=[Security.Cryptography.SHA256]::Create();try{$id='disk-'+([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes('folder:'+$Remote))).Replace('-','').ToLowerInvariant()).Substring(0,24)}finally{$sha.Dispose()};if($target.Count){$id=$target[0].id}

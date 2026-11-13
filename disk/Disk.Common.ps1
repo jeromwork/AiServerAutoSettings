@@ -226,7 +226,41 @@ function Get-DiskBase {
     if(Test-Path -LiteralPath $saved){return [IO.File]::ReadAllText($saved).Trim()}
     Join-Path $env:USERPROFILE 'Disk'
 }
+# desktop.ini is only a placeholder marker while no user/engine entries exist.
+# Own helper is needed because Syncthing does not know Explorer-only placeholders.
+function Test-DiskPlaceholder([string]$Path) {
+    if(-not [IO.Directory]::Exists($Path)){return $false}
+    Assert-DiskPlainPath $Path
+    $ini=Join-Path $Path 'desktop.ini'
+    if(-not [IO.File]::Exists($ini) -or ([IO.File]::GetAttributes($ini) -band [IO.FileAttributes]::ReparsePoint)){return $false}
+    $section='';$owner='';$placeholder=''
+    foreach($line in ([IO.File]::ReadAllText($ini).Replace("`r",'') -split "`n")){
+        if($line -match '^\s*\[([^]]+)\]\s*$'){$section=$Matches[1];continue}
+        if($section -ieq 'RemoteAgents'){
+            if($line -match '^\s*Owner\s*=\s*(.*?)\s*$'){$owner=$Matches[1]}
+            if($line -match '^\s*Placeholder\s*=\s*(.*?)\s*$'){$placeholder=$Matches[1]}
+        }
+    }
+    if($owner -cne 'RemoteAgents.Disk.v1' -or $placeholder -cne '1'){return $false}
+    foreach($item in (New-Object IO.DirectoryInfo($Path)).EnumerateFileSystemInfos()){
+        if($item.Name -ine 'desktop.ini'){return $false}
+    }
+    return $true
+}
+function Test-DiskLocalContent([string]$Path) {
+    if(-not [IO.Directory]::Exists($Path) -or (Test-DiskPlaceholder $Path)){return $false}
+    foreach($item in (New-Object IO.DirectoryInfo($Path)).EnumerateFileSystemInfos()){
+        if($item.Name -in @('.git','.stignore','.stfolder','.stversions')){continue}
+        if($item.Name -ieq 'desktop.ini' -and -not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)){
+            $text=[IO.File]::ReadAllText($item.FullName).Replace("`r",'')
+            if($text -match '(?m)^Owner=RemoteAgents\.Disk\.v1$'){continue}
+        }
+        return $true
+    }
+    return $false
+}
 function Copy-DiskTree([string]$From,[string]$To) {
+    Assert-DiskPlainPath $From;Assert-DiskPlainPath $To
     [void][IO.Directory]::CreateDirectory($To);$dir=New-Object IO.DirectoryInfo($From)
     foreach($item in $dir.GetFileSystemInfos()){
         if($item.Attributes -band [IO.FileAttributes]::ReparsePoint){throw ('Ссылки в папке запрещены: '+$item.FullName)}
@@ -237,7 +271,15 @@ function Copy-DiskTree([string]$From,[string]$To) {
     [IO.Directory]::SetLastWriteTimeUtc($To,$dir.LastWriteTimeUtc)
 }
 function Get-DiskTreeList([string]$Path) {
-    @(Get-ChildItem -LiteralPath $Path -Recurse -Force|ForEach-Object {$_.FullName.Substring($Path.Length)+'|'+$(if($_.PSIsContainer){'d'}else{(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash})}|Sort-Object) -join "`n"
+    Assert-DiskPlainPath $Path
+    function Read-DiskTreeList([string]$Directory,[string]$Root) {
+        foreach($item in (New-Object IO.DirectoryInfo($Directory)).EnumerateFileSystemInfos()){
+            if($item.Attributes -band [IO.FileAttributes]::ReparsePoint){throw ('Ссылки в папке запрещены: '+$item.FullName)}
+            $item.FullName.Substring($Root.Length)+'|'+$(if($item -is [IO.DirectoryInfo]){'d'}else{(Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash})
+            if($item -is [IO.DirectoryInfo]){Read-DiskTreeList $item.FullName $Root}
+        }
+    }
+    @(Read-DiskTreeList $Path $Path|Sort-Object) -join "`n"
 }
 function Move-DiskFolder([string]$FolderId,[string]$Destination,[switch]$Copy) {
     $route='config/folders/'+[Uri]::EscapeDataString($FolderId)
@@ -301,6 +343,7 @@ function Set-DiskBase([string]$Path) {
 
 $selective=Join-Path $PSScriptRoot 'Disk.Selective.ps1';if(Test-Path -LiteralPath $selective){. $selective}
 $navPane=Join-Path $PSScriptRoot 'Disk.NavPane.ps1';if(Test-Path -LiteralPath $navPane){. $navPane}
+$explorer=Join-Path $PSScriptRoot 'Disk.Explorer.ps1';if(Test-Path -LiteralPath $explorer){. $explorer}
 
 # Только локальный адрес устройства сервера; остальные настройки устройства сохраняются.
 function Sync-DiskServerAddress([string]$LauncherRoot=(Join-Path $env:LOCALAPPDATA 'RemoteAgents')) {

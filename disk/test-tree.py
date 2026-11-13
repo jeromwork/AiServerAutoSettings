@@ -32,6 +32,8 @@ class LazyTreeTests(unittest.TestCase):
         (cls.project / "O'Brien/a.txt").touch()
         (cls.project / '.env').touch()
         (cls.project / '.STIGNORE').touch()
+        (cls.project / 'DeSkToP.InI').touch()
+        (cls.project / 'src/desktop.ini').touch()
         (cls.project / 'vendor/ignored.txt').touch()
         (cls.project / 'link').symlink_to(cls.project / 'src', target_is_directory=True)
         cls.times = []
@@ -98,6 +100,18 @@ class LazyTreeTests(unittest.TestCase):
                       " 'Project/many' -Limit 3|ConvertTo-Json -Depth 20 -Compress")
         self.assertEqual(len(cap['rows']), 3)
         self.assertTrue(cap['truncated'])
+
+    def test_desktop_ini_is_ignored_only_at_project_root(self):
+        result = self.tree('Project/src')
+        self.assertEqual({x['path'] for x in result['entries']}, {'Project/src/deep', 'Project/src/desktop.ini'})
+        union = self.ps('. ' + quote(ROOT / 'disk/Disk.Common.ps1') + ';. ' + quote(ROOT / 'disk/Disk.Union.ps1') +
+                        ';Get-DiskUnion ([pscustomobject]@{entries=@()}) ' + quote(self.home / 'Disk') +
+                        " 'Project'|ConvertTo-Json -Depth 20 -Compress")
+        self.assertNotIn('Project/DeSkToP.InI', {x['path'] for x in union['rows']})
+        nested = self.ps('. ' + quote(ROOT / 'disk/Disk.Common.ps1') + ';. ' + quote(ROOT / 'disk/Disk.Union.ps1') +
+                         ';Get-DiskUnion ([pscustomobject]@{entries=@()}) ' + quote(self.home / 'Disk') +
+                         " 'Project/src'|ConvertTo-Json -Depth 20 -Compress")
+        self.assertIn('Project/src/desktop.ini', {x['path'] for x in nested['rows']})
 
     def test_dispatcher_updates_old_helper_before_tree_and_quotes_path(self):
         installed = self.home / '.local/share/remote-disk'

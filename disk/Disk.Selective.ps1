@@ -14,6 +14,12 @@ function Test-SelectionIncluded([string]$Path,$Paths) {
 # Cache once per process; a tree level must not reopen stignore for every entry.
 $script:SelectionProtectedPatterns=@([IO.File]::ReadAllLines((Join-Path $PSScriptRoot 'stignore.txt'))|Where-Object {$_.StartsWith('(?i)')}|ForEach-Object {$_.Substring(4)})
 function Test-SelectionProtected([string]$Path) {
+    foreach($pattern in $script:SelectionProtectedPatterns){
+        if($pattern.StartsWith('/')){
+            $rootPattern=$pattern.Substring(1)
+            if($Path -like $rootPattern -or $Path -like ($rootPattern+'/*')){return $true}
+        }
+    }
     foreach($part in $Path.Split('/')){
         if($part -in @('.stignore','.stfolder','.stversions')){return $true}
         foreach($pattern in $script:SelectionProtectedPatterns){if($part -like $pattern){return $true}}
@@ -52,6 +58,7 @@ function Assert-SelectionSynced($Status) {
     }
 }
 function Get-SelectionFiles([string]$Root,[string]$Relative='') {
+    Assert-DiskPlainPath (Join-Path $Root $Relative)
     foreach($entry in @(Get-ChildItem -LiteralPath (Join-Path $Root $Relative) -Force)){
         $rel=$entry.Name;if($Relative){$rel=$Relative+'/'+$entry.Name}
         if(Test-SelectionProtected $rel){continue}
@@ -263,12 +270,58 @@ function Add-DiskManagedExternal($Item) {
     & (Join-Path $PSScriptRoot 'Add-RemoteDiskFolder.ps1') -Path ([string]$Item.path) -Remote ([string]$Item.remote) -ManagedSelection -Direction ([string]$Item.direction)
     if(-not $?){throw ('Не удалось подключить внешнюю папку '+$Item.remote)}
 }
+# Native junctions expose an external choice in Disk; these thin wrappers can be replaced in tests.
+# Syncthing still watches the original path, and inventory never follows the junction.
+function Get-DiskExternalJunctionTarget([string]$Link) {
+    if(-not (Test-Path -LiteralPath $Link)){return ''}
+    $item=Get-Item -LiteralPath $Link -Force
+    if(-not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or -not $item.PSIsContainer){return ''}
+    $target=@($item.Target)
+    if($target.Count -ne 1 -or -not $target[0]){return ''}
+    $value=[string]$target[0]
+    if(-not [IO.Path]::IsPathRooted($value)){$value=Join-Path (Split-Path $Link -Parent) $value}
+    [IO.Path]::GetFullPath($value).TrimEnd('\','/')
+}
+function New-DiskExternalJunction([string]$Link,[string]$Target) {
+    if([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT){throw 'Соединение каталога Disk поддерживается только в Windows'}
+    [void](New-Item -ItemType Junction -Path $Link -Target $Target -ErrorAction Stop)
+}
+function Remove-DiskExternalJunction([string]$Link) {
+    # Never use recursive Remove-Item: only the link itself belongs to Disk.
+    [IO.Directory]::Delete($Link,$false)
+}
+function Assert-DiskExternalJunction($Item,[string]$Base,$Saved) {
+    Assert-DiskPlainPath $Base
+    $link=Join-Path $Base ([string]$Item.remote)
+    if(-not (Test-Path -LiteralPath $link)){return}
+    $target=Get-DiskExternalJunctionTarget $link
+    $owned=@($Saved|Where-Object {$_.junction -and [IO.Path]::GetFullPath([string]$_.junction) -ieq [IO.Path]::GetFullPath($link) -and $_.remote -ceq $Item.remote -and [IO.Path]::GetFullPath([string]$_.path).TrimEnd('\','/') -ieq [IO.Path]::GetFullPath([string]$Item.path).TrimEnd('\','/')})
+    if(-not $owned.Count -or -not $target -or $target -ine [IO.Path]::GetFullPath([string]$Item.path).TrimEnd('\','/')){throw ('В Диске уже занято имя «'+$Item.remote+'». Переименуйте папку или выберите другое имя проекта')}
+}
+function Ensure-DiskExternalJunction($Item,[string]$Base) {
+    $link=Join-Path $Base ([string]$Item.remote)
+    if(-not (Test-Path -LiteralPath $link)){
+        Assert-DiskPlainPath $Base
+        [void][IO.Directory]::CreateDirectory($Base)
+        New-DiskExternalJunction $link ([string]$Item.path)
+    }
+    if((Get-DiskExternalJunctionTarget $link) -ine [IO.Path]::GetFullPath([string]$Item.path).TrimEnd('\','/')){throw ('Не подтверждено соединение каталога: '+$Item.remote)}
+}
+function Remove-DiskOwnedExternalJunction($Item,[string]$Base) {
+    if(-not $Item.junction){return}
+    $link=Join-Path $Base ([string]$Item.remote)
+    if([IO.Path]::GetFullPath([string]$Item.junction) -ine [IO.Path]::GetFullPath($link)){return}
+    if(-not (Test-Path -LiteralPath $link)){return}
+    if((Get-DiskExternalJunctionTarget $link) -ieq [IO.Path]::GetFullPath([string]$Item.path).TrimEnd('\','/')){Remove-DiskExternalJunction $link}
+    else{Write-DiskLog ('Соединение каталога изменено пользователем; сохранено: '+$link)}
+}
 function Sync-DiskExternal($Desired,[string]$Base) {
     $desiredItems=@($Desired|Where-Object {$null -ne $_})
     Assert-DiskExternalChoices $desiredItems $Base
     $saved=@(Read-DiskExternal);$folders=@(Invoke-DiskApi 'config/folders')
     # Preflight identities and intersections before detaching anything.
     foreach($item in $desiredItems){
+        Assert-DiskExternalJunction $item $Base $saved
         foreach($folder in $folders){
             $same=[IO.Path]::GetFullPath([string]$item.path).TrimEnd('\','/') -ieq [IO.Path]::GetFullPath([string]$folder.path).TrimEnd('\','/')
             if($same -and $folder.label -cne [string]$item.remote){throw 'Внешняя папка уже связана с другим проектом'}
@@ -283,11 +336,12 @@ function Sync-DiskExternal($Desired,[string]$Base) {
         foreach($folder in $folders|Where-Object {$_.label -ceq $old.remote -and [IO.Path]::GetFullPath($_.path).TrimEnd('\','/') -ieq [IO.Path]::GetFullPath($old.path).TrimEnd('\','/')}){
             [void](Invoke-DiskApi ('config/folders/'+[Uri]::EscapeDataString([string]$folder.id)) DELETE)
         }
+        Remove-DiskOwnedExternalJunction $old $Base
         $saved=@($saved|Where-Object {$_ -ne $old});Write-DiskExternal $saved
     }
     foreach($item in $desiredItems){
         $direction='both';if($item.direction){$direction=[string]$item.direction}
-        $entry=[pscustomobject]@{path=[IO.Path]::GetFullPath([string]$item.path);remote=[string]$item.remote;direction=$direction}
+        $entry=[pscustomobject]@{path=[IO.Path]::GetFullPath([string]$item.path);remote=[string]$item.remote;direction=$direction;junction=(Join-Path $Base ([string]$item.remote))}
         $match=@(Invoke-DiskApi 'config/folders'|Where-Object {$_.label -ceq $entry.remote -and [IO.Path]::GetFullPath($_.path).TrimEnd('\','/') -ieq $entry.path.TrimEnd('\','/')})
         if(-not $match.Count){
             [void][IO.Directory]::CreateDirectory($entry.path)
@@ -303,6 +357,7 @@ function Sync-DiskExternal($Desired,[string]$Base) {
         $saved=@($saved|Where-Object {$_.remote -cne $entry.remote})+@($entry);Write-DiskExternal $saved
         Initialize-ProjectSelection $entry.path @('.')
         Set-DiskFolderDirection $match[0] $direction
+        Ensure-DiskExternalJunction $entry $Base
     }
 }
 function Get-DiskExternalList {

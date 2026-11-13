@@ -8,6 +8,8 @@ $oldLocal=$env:LOCALAPPDATA;$env:LOCALAPPDATA=Join-Path $TestHome 'local'
 $fixture=Join-Path $TestHome 'bundle/disk';[void][IO.Directory]::CreateDirectory($fixture)
 Get-ChildItem (Join-Path $repo 'disk') -File|Where-Object {$_.Extension -in @('.ps1','.sh') -or $_.Name -like 'stignore*'}|Copy-Item -Destination $fixture
 $fake=@'
+# Production uses an NTFS junction; the portable fixture substitutes a symlink via the narrow wrapper.
+function New-DiskExternalJunction([string]$Link,[string]$Target) {[void](New-Item -ItemType SymbolicLink -Path $Link -Target $Target)}
 function Read-DiskProfile {}
 function Read-DiskState {}
 function Write-DiskLog {}
@@ -98,8 +100,15 @@ try{
     $outside=Join-Path $TestHome 'Reports';[void][IO.Directory]::CreateDirectory($outside);[IO.File]::WriteAllText((Join-Path $outside 'report.txt'),'external local data')
     $global:ServerFolders+=@([pscustomobject]@{name='Reports';id='reports';hasFiles=$false})
     $entry=@{path=$outside;remote='Reports';direction='send'}
+    [void][IO.Directory]::CreateDirectory((Join-Path $base 'Reports'))
+    $attachBefore=$global:Attaches.Count
+    Reject {Sync-DiskExternal @($entry) $base} 'уже занято имя'
+    Assert ($global:Attaches.Count -eq $attachBefore -and @(Read-DiskExternal).Count -eq 0) 'occupied junction name rejected before changing engine or receipts'
+    [IO.Directory]::Delete((Join-Path $base 'Reports'),$false)
     Apply @('Project') @{Project='receive'} @($entry)
     Assert ($global:Folders.reports.path -eq $outside -and $global:Folders.reports.type -ceq 'sendonly') 'external added noninteractively with direction'
+    Assert ((Get-DiskExternalJunctionTarget (Join-Path $base 'Reports')) -eq $outside) 'external has a junction in Disk'
+    Assert (@((Get-DiskUnion ([pscustomobject]@{entries=@()}) $base).rows|Where-Object {$_.path -eq 'Reports'}).Count -eq 0) 'external junction is not a second local project'
     $items=@(Get-DiskExternalList)
     Assert ($items.Count -eq 1 -and $items[0].remote -ceq 'Reports' -and $items[0].direction -ceq 'send' -and $items[0].state -ceq 'idle') 'external list'
     $put=@($global:Calls|Where-Object {$_.method -eq 'PUT'}).Count
@@ -110,13 +119,13 @@ try{
     Write-SelectionState $selectionFile (@{schema=1;paths=@('.')}|ConvertTo-Json -Compress)
     $global:Pending=[pscustomobject]@{reports=[pscustomobject]@{offeredBy=[pscustomobject]@{PEER=[pscustomobject]@{label='Reports'}}}}
     & (Join-Path $fixture 'Sync-RemoteDiskFolders.ps1')
-    Assert (-not $global:Folders.ContainsKey('reports') -and -not (Test-Path (Join-Path $base 'Reports'))) 'all never accepts detached external under Disk'
+    Assert (-not $global:Folders.ContainsKey('reports') -and (Get-DiskExternalJunctionTarget (Join-Path $base 'Reports')) -eq $outside) 'all never accepts detached external under Disk; its existing junction stays'
     Assert ((@(Get-DiskExternalList))[0].state -ceq 'detached') 'external list reports missing registration honestly'
     $global:Folders.reports=$savedFolder;$global:Pending=[pscustomobject]@{};Write-SelectionState $selectionFile $savedSelection
     $entry.direction='receive';Apply @('Project') @{Project='receive'} @($entry)
     Assert ($global:Folders.reports.type -ceq 'receiveonly' -and @($global:Calls|Where-Object {$_.method -eq 'PUT'}).Count -eq $put) 'external direction changes by patch'
     Apply @('Project') @{Project='receive'} @()
-    Assert (-not $global:Folders.ContainsKey('reports') -and @(Read-DiskExternal).Count -eq 0) 'external removed from PC configuration'
+    Assert (-not $global:Folders.ContainsKey('reports') -and @(Read-DiskExternal).Count -eq 0 -and -not (Test-Path (Join-Path $base 'Reports'))) 'external removed from PC configuration and only its junction unlinked'
     Assert ([IO.File]::ReadAllText((Join-Path $outside 'report.txt')) -ceq 'external local data') 'external removal keeps files'
     $global:Pending=[pscustomobject]@{reports=[pscustomobject]@{offeredBy=[pscustomobject]@{PEER=[pscustomobject]@{label='Reports'}}}}
     Apply @('.') @{Project='receive'} @()

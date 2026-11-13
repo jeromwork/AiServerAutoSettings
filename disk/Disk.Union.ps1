@@ -1,11 +1,17 @@
 ﻿#requires -Version 5.1
 # A pure one-level inventory: never follows junctions or modifies user content.
 function Get-DiskUnion($ServerTree,[string]$BasePath,[string]$RelativePath='',[int]$Limit=2000) {
-    if($RelativePath){Assert-SelectionPath $RelativePath;if(Test-SelectionProtected $RelativePath){throw 'Защищённый путь'}}
+    function Test-UnionProtected([string]$Path) {
+        if(Test-SelectionProtected $Path){return $true}
+        $slash=$Path.IndexOf('/')
+        if($slash -ge 0){return Test-SelectionProtected $Path.Substring($slash+1)}
+        return $false
+    }
+    if($RelativePath){Assert-SelectionPath $RelativePath;if(Test-UnionProtected $RelativePath){throw 'Защищённый путь'}}
     $rows=@{};$caseNames=@{};$truncated=[bool]$ServerTree.truncated
     function Add-UnionRow([string]$Path,[string]$Kind,[string]$Side,[bool]$HasChildren) {
         Assert-SelectionPath $Path
-        if(Test-SelectionProtected $Path){return}
+        if(Test-UnionProtected $Path){return}
         $slash=$Path.LastIndexOf('/');$parent='';if($slash -ge 0){$parent=$Path.Substring(0,$slash)}
         if($parent -cne $RelativePath){throw 'Сервер вернул другой уровень дерева; обновите помощник диска'}
         $fold=$Path.ToLowerInvariant()
@@ -26,7 +32,8 @@ function Get-DiskUnion($ServerTree,[string]$BasePath,[string]$RelativePath='',[i
         # Do not collect the directory before applying the cap (PS 5.1).
         foreach($item in (New-Object IO.DirectoryInfo($directory)).EnumerateFileSystemInfos()){
             $rel=$item.Name;if($RelativePath){$rel=$RelativePath+'/'+$item.Name}
-            if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or (Test-SelectionProtected $rel)){continue}
+            if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or (Test-UnionProtected $rel)){continue}
+            if($item -is [IO.DirectoryInfo] -and (Test-DiskPlaceholder $item.FullName)){continue}
             try{Assert-SelectionPath $rel}catch{continue}
             if($count -ge $Limit){$truncated=$true;break};$count++
             $kind='file';$hasChildren=$false
@@ -34,7 +41,7 @@ function Get-DiskUnion($ServerTree,[string]$BasePath,[string]$RelativePath='',[i
                 $kind='directory'
                 foreach($child in $item.EnumerateFileSystemInfos()){
                     $childPath=$rel+'/'+$child.Name
-                    if(($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -or (Test-SelectionProtected $childPath)){continue}
+                    if(($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -or (Test-UnionProtected $childPath)){continue}
                     try{Assert-SelectionPath $childPath}catch{continue}
                     $hasChildren=$true;break
                 }
