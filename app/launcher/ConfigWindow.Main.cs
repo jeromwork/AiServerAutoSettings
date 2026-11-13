@@ -13,7 +13,7 @@ namespace RemoteAgents.Launcher
         bool allowUnload, mainLaidOut;
         internal Action HiddenToTray;
         internal Func<string> MutationConflict, FolderMutationConflict;
-        internal bool IsApplying { get { return running || folderActionRunning || diskApplying || detailsWindow != null && detailsWindow.IsApplying; } }
+        internal bool IsApplying { get { return running || folderActionRunning || detailsWindow != null && detailsWindow.IsApplying; } }
         readonly FlowLayoutPanel mainStatus = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(12, 8, 12, 4) };
         readonly Label syncStatus = new Label { AutoSize = true, MaximumSize = new Size(620, 0) };
         readonly Label technicalStatus = new Label { AutoSize = true, Visible = false, MaximumSize = new Size(620, 0) };
@@ -64,8 +64,10 @@ namespace RemoteAgents.Launcher
             for (int i = 0; i < 6; i++) { var line = new Label { AutoSize = true, MaximumSize = new Size(680, 0) }; statusLines.Add(line); mainStatus.Controls.Add(line); }
             mainStatus.Controls.Add(happierCreated);
             // Keep progress and the editor journal in the config page, not over the other tabs.
+            // The paste window docks the journal Fill in its own layout row; here it sits under the editor.
+            journal.Dock = DockStyle.Bottom; rowsPanel.Dock = DockStyle.Top;
             configPage.Controls.Add(rowsPanel); configPage.Controls.Add(journal);
-            journal.Height = 72;
+            journal.Height = Font.Height * 6;
             Controls.Clear();
             var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -212,7 +214,7 @@ namespace RemoteAgents.Launcher
                 ConfigSession.SyncFromSettings(home);
                 if (configText.Text == displayedConfigText) RefreshConfigText();
                 else Log("Настройки обновлены в «Подробно». Ваши правки в редакторе конфига сохранены.");
-                foldersInitialized = false;
+                InitializeFolders();
             };
             detailsWindow.MutationConflict = () => running ? WindowModel.Conflict("применение настроек") : MutationConflict == null ? "" : MutationConflict();
             detailsWindow.TopLevel = false; detailsWindow.FormBorderStyle = FormBorderStyle.None;
