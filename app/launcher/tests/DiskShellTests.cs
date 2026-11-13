@@ -95,6 +95,23 @@ namespace RemoteAgents.Launcher
                 rest.Detached = true; candidate.Recycle(recycle);
                 Check(recycle.Calls == 1 && !File.Exists(userFile) && File.ReadAllText(Path.Combine(recyclePath, "data.txt")) == "123", "verified candidate only invokes injected Recycle Bin adapter");
             } finally { Directory.Delete(work, true); }
+            string restHome = Path.Combine(Path.GetTempPath(), "disk-rest-error-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(restHome, "state"));
+            try {
+                File.WriteAllText(Path.Combine(restHome, "server.txt"), "SERVER\r\n");
+                File.WriteAllText(Path.Combine(restHome, "state", "config.xml"), "<configuration><gui><address>127.0.0.1:8384</address><apikey>fixture</apikey></gui></configuration>");
+                foreach (bool cancel in new[] { false, true }) using (var cancellation = new CancellationTokenSource()) {
+                    var response = new ErrorResponse();
+                    var rest = new DiskLocalRest(restHome, cancellation.Token, req => {
+                        if (cancel) cancellation.Cancel();
+                        throw new System.Net.WebException("fixture", null, System.Net.WebExceptionStatus.ProtocolError, response);
+                    });
+                    try { rest.File("folder", "data.txt"); throw new Exception("REST failure ignored"); }
+                    catch (IOException) { Check(!cancel, "HTTP error becomes safe refusal"); }
+                    catch (OperationCanceledException) { Check(cancel, "request cancellation remains cancellation"); }
+                    Check(response.Closed, "HTTP error response closed even during cancellation: " + cancel);
+                }
+            } finally { Directory.Delete(restHome, true); }
             var observed = new DiskSyncSnapshot { Failure = "", Connected = true };
             observed.Folders["A"] = new DiskSyncFolder { Id = "configured", Path = "C:\\Disk\\A", Shared = true };
             var remembered = new Dictionary<string, string> { { "A", "C:\\Disk\\A" } };
@@ -109,6 +126,11 @@ namespace RemoteAgents.Launcher
             Check(!DiskExplorerObservation.EffectiveSelection(false, "A", "D:\\Other\\A", DiskSyncSnapshot.Unavailable("offline"), remembered), "REST outage never transfers proof to another path");
             Check(DiskExplorerObservation.EffectiveSelection(true, "New", "C:\\Disk\\New", observed, remembered), "desired selection stays pending before attachment");
             Console.WriteLine("DiskShell: " + count + " checks");
+        }
+        sealed class ErrorResponse : System.Net.WebResponse
+        {
+            internal bool Closed;
+            public override void Close() { Closed = true; }
         }
         sealed class FakeRecycle : IDiskRecycle
         {

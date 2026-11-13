@@ -131,6 +131,7 @@ namespace RemoteAgents.Launcher
     }
     internal sealed class DiskLocalRest : IDiskEvictionRest
     {
+        readonly Func<HttpWebRequest, WebResponse> getResponse;
         readonly Uri endpoint; readonly string key, home; readonly CancellationToken token; internal readonly string Peer;
         public string PeerId { get { return Peer; } }
         public DiskSyncSnapshot Read(Dictionary<string, string> paths, CancellationToken token)
@@ -145,9 +146,9 @@ namespace RemoteAgents.Launcher
             if (!(configured is System.Collections.IEnumerable) || configured is string || configured is System.Collections.IDictionary) return false;
             return !Json.Array(configured).Select(Json.Map).Any(f => DiskSyncSnapshot.SamePath(Json.Str(f, "path"), path));
         }
-        internal DiskLocalRest(string home, CancellationToken token)
+        internal DiskLocalRest(string home, CancellationToken token, Func<HttpWebRequest, WebResponse> getResponse = null)
         {
-            this.token = token; this.home = home;
+            this.token = token; this.home = home; this.getResponse = getResponse ?? (request => request.GetResponse());
             var xml = new XmlDocument { XmlResolver = null }; xml.Load(Path.Combine(home, "state", "config.xml"));
             var gui = xml.SelectSingleNode("/configuration/gui");
             if (gui == null || gui.SelectSingleNode("address") == null || gui.SelectSingleNode("apikey") == null) throw new IOException("Локальный REST не настроен");
@@ -164,8 +165,8 @@ namespace RemoteAgents.Launcher
             token.ThrowIfCancellationRequested(); var request = (HttpWebRequest)WebRequest.Create(new Uri(endpoint, route));
             request.Method = method; request.Proxy = null; request.AllowAutoRedirect = false; request.Timeout = request.ReadWriteTimeout = timeout; request.Headers["X-API-Key"] = key;
             if (method == "POST") request.ContentLength = 0;
-            try { using (token.Register(request.Abort)) using (var response = request.GetResponse()) using (var reader = new StreamReader(response.GetResponseStream())) { token.ThrowIfCancellationRequested(); return reader.ReadToEnd().Replace("\r", ""); } }
-            catch (WebException) { token.ThrowIfCancellationRequested(); throw new IOException("Локальный REST не подтвердил безопасное освобождение папки"); }
+            try { using (token.Register(request.Abort)) using (var response = getResponse(request)) using (var reader = new StreamReader(response.GetResponseStream())) { token.ThrowIfCancellationRequested(); return reader.ReadToEnd().Replace("\r", ""); } }
+            catch (WebException e) { if (e.Response != null) e.Response.Close(); token.ThrowIfCancellationRequested(); throw new IOException("Локальный REST не подтвердил безопасное освобождение папки"); }
         }
     }
 }
