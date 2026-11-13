@@ -625,6 +625,7 @@ namespace RemoteAgents.Launcher
             foldersGeneration++; loadingFolders = false;
             var profile = ConfigProfile.Load(home); var disk = Json.Map(Json.Get(profile, "disk"));
             foldersBase = Json.Text(disk, "base", ConfigSession.DiskBase());
+            folders.SyncHome = Json.Text(Json.Map(Json.Get(new Configuration(home).Data, "disk")), "home", Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteDisk"));
             folders.Initialize(DiskChoice.FromProfile(profile), foldersBase, !settings && folderStepRequired,
                 ConfigProfile.AppliedDiskChoice(home, profile), ConfigProfile.DiskExclusions());
             foldersInitialized = true;

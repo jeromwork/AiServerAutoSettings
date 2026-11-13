@@ -104,14 +104,14 @@ namespace RemoteAgents.Launcher
             var entry = model.ExternalRows.FirstOrDefault(e => Same(e.Path, path));
             if (entry != null) {
                 s.Kind = LocalFolderKind.External; s.Entry = entry; s.Checked = model.IncludesExternal(entry);
-                s.Choosable = !s.Checked; s.Reason = s.Checked ? "Эта папка уже синхронизируется" : "";
+                s.Choosable = !s.Checked; s.Reason = s.Checked ? "Эта папка выбрана для синхронизации" : "";
                 s.Status = model.ExternalStatus(entry) + " → «" + entry.Remote + "»";
                 return s;
             }
             var owner = model.External.FirstOrDefault(e => Within(e.Path, path));
             if (owner != null) {
                 s.Kind = LocalFolderKind.InExternal; s.Entry = owner;
-                s.Status = s.Reason = "Входит в синхронизируемую папку «" + owner.Remote + "»";
+                s.Status = s.Reason = "Входит в выбранную папку «" + owner.Remote + "»";
                 return s;
             }
             if (!string.IsNullOrEmpty(diskBase) && Same(diskBase, path)) {
@@ -122,8 +122,8 @@ namespace RemoteAgents.Launcher
             if (!string.IsNullOrEmpty(diskBase) && Within(diskBase, path)) {
                 s.Kind = LocalFolderKind.InDisk; s.DiskPath = Relative(diskBase, path);
                 s.Checked = model.Includes(s.DiskPath); s.Partial = !s.Checked && model.Partial(s.DiskPath);
-                s.Choosable = !s.Checked; s.Reason = s.Checked ? "Эта папка уже синхронизируется" : "";
-                s.Status = s.Checked ? "Выбрана для синхронизации (папка Disk)" : s.Partial ? "Часть вложенных папок выбрана (папка Disk)" : "В папке Disk; не синхронизируется";
+                s.Choosable = !s.Checked; s.Reason = s.Checked ? "Эта папка выбрана для синхронизации" : "";
+                s.Status = (s.Checked || s.Partial) ? model.Status(s.DiskPath) : "В папке Disk; не синхронизируется";
                 return s;
             }
             string systemRoot = (system ?? new string[0]).FirstOrDefault(r => Within(r, path));
@@ -135,8 +135,8 @@ namespace RemoteAgents.Launcher
             var inner = model.External.FirstOrDefault(e => Within(path, e.Path));
             if (hasDisk || inner != null) {
                 s.Kind = LocalFolderKind.Contains; s.Partial = true;
-                s.Status = hasDisk ? "Внутри папка Disk" : "Внутри синхронизируется «" + inner.Remote + "»";
-                s.Reason = hasDisk ? "Внутри находится папка Disk — выберите папку поменьше" : "Внутри уже синхронизируется «" + inner.Remote + "». Снимите её, чтобы выбрать эту папку целиком.";
+                s.Status = hasDisk ? "Внутри папка Disk" : "Внутри выбрана папка «" + inner.Remote + "»";
+                s.Reason = hasDisk ? "Внутри находится папка Disk — выберите папку поменьше" : "Внутри уже выбрана папка «" + inner.Remote + "». Снимите её, чтобы выбрать эту папку целиком.";
                 return s;
             }
             if (IsDriveRoot(path)) {

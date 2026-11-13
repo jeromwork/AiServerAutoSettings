@@ -42,30 +42,48 @@ namespace RemoteAgents.Launcher
         internal static string DirectionText(string value) { return value == DiskChoice.Send ? "Только отправлять на сервер" : value == DiskChoice.Receive ? "Только забирать с сервера" : "В обе стороны"; }
         internal DiskExternalChoice ExternalFor(string path) { return ExternalRows.FirstOrDefault(e => string.Equals(e.Remote, DiskChoice.Project(path), StringComparison.OrdinalIgnoreCase)); }
         internal string DirectionOf(string path) { var entry = ExternalFor(path); if (entry != null) return entry.Direction; if (Mode == DiskFoldersMode.All) return DiskChoice.Both; string d; return directions.TryGetValue(DiskChoice.Project(path), out d) ? d : DiskChoice.Both; }
-        // Presence means an entry was observed, not that its contents have finished transferring.
-        // A truncated union cannot establish absence on the other side. Direction must never promise a forbidden transfer.
+        internal DiskSyncSnapshot Sync = new DiskSyncSnapshot();
+        // Presence is useful only for a folder that is not selected. Apply is no transfer proof.
         internal static string FolderStatus(bool isChecked, string presence, bool isApplied, string direction, bool truncated, bool wasChecked, string state = "")
         {
-            if (!isChecked && wasChecked) return "Перестанет синхронизироваться; файлы на компьютере останутся";
-            if (!isChecked) {
-                if (presence == "both") return "Не синхронизируется; копии на компьютере и сервере";
-                if (presence == "local" && !truncated) return "🖥 Только на этом компьютере (не синхронизируется)";
-                if (presence == "server" && !truncated) return "☁ Только на сервере";
-            }
-            if (isChecked && isApplied && state == "syncing") return direction == DiskChoice.Send ? "⟳ Отправляется" : "⟳ Скачивается";
-            if (presence == "both") return "✓ На компьютере и на сервере";
-            if (truncated) return presence == "local" ? "Обнаружена на компьютере; список неполный" : presence == "server" ? "Обнаружена на сервере; список неполный" : "Наличие не проверено; список неполный";
-            if (isChecked && presence == "server") return direction == DiskChoice.Send ? "☁ На сервере; получение отключено" : isApplied ? "⟳ Скачивается" : "↓ Будет скачана";
-            if (isChecked && presence == "local") return direction == DiskChoice.Receive ? "🖥 На компьютере; отправка отключена" : isApplied ? "⟳ Отправляется" : "↑ Будет отправлена";
-            return "Наличие не проверено";
+            if (isChecked) return "⏳ Ждёт подключения";
+            string text = wasChecked ? "Перестанет синхронизироваться; файлы на компьютере останутся" : "Не синхронизируется";
+            if (presence == "both") return text + "; копии на компьютере и сервере";
+            if (presence == "local") return text + "; копия на компьютере" + (truncated ? "; список неполный" : "");
+            if (presence == "server") return text + "; копия на сервере" + (truncated ? "; список неполный" : "");
+            return text + "; наличие копий не проверено";
         }
         internal static string DirectionHint(string direction) { return direction == DiskChoice.Receive ? "↓ только забирать" : direction == DiskChoice.Send ? "↑ только отправлять" : ""; }
+        internal IEnumerable<string> SelectedProjects
+        {
+            get { return Items.Keys.Concat(Selection.Paths).Select(DiskChoice.Project).Concat(External.Select(e => e.Remote)).Distinct(StringComparer.OrdinalIgnoreCase).Where(p => Includes(p) || Partial(p)); }
+        }
+        internal Dictionary<string, string> SyncPaths(string diskBase)
+        {
+            return SelectedProjects.ToDictionary(p => p, p => ExternalFor(p) == null ? Path.Combine(diskBase, p) : ExternalFor(p).Path, StringComparer.OrdinalIgnoreCase);
+        }
+        internal string SyncSummary
+        {
+            get {
+                if (Sync.Failure.Length > 0) return DiskSyncStatus.Text(Sync, null);
+                var names = SelectedProjects.ToArray();
+                int complete = names.Count(p => { DiskSyncFolder f; return Sync.Folders.TryGetValue(p, out f) && DiskSyncStatus.Complete(Sync, f); });
+                return "Синхронизировано: " + complete + " из " + names.Length + (Mode == DiskFoldersMode.All && (!rootLoaded || rootIncomplete) ? " известных папок · список неполный" : " папок");
+            }
+        }
+        internal string MainStatusLine(string previous)
+        { return previous.IndexOf("Диск:", StringComparison.Ordinal) >= 0 ? "Диск: " + SyncSummary : previous; }
+        internal string ServerFact(string path)
+        {
+            DiskFolderInfo info;
+            return Items.TryGetValue(path, out info) && (info.Presence == "both" || info.Presence == "server") ? "Есть на сервере" : "Наличие на сервере не проверено";
+        }
         internal string Status(string path)
         {
             var entry = ExternalFor(path); if (entry != null) return ExternalStatus(entry);
-            DiskFolderInfo info; if (!Items.TryGetValue(path, out info)) return "Наличие не проверено";
-            bool current = Includes(path) || Partial(path), confirmed = applied != null && (applied.All && !excludedProjects.Contains(DiskChoice.Project(path)) || appliedSelection.Includes(path)) && applied.DirectionOf(path) == DirectionOf(path);
-            return FolderStatus(current, info.Presence, confirmed, DirectionOf(path), info.Truncated, WasChecked(path));
+            DiskFolderInfo info; Items.TryGetValue(path, out info);
+            if (Includes(path) || Partial(path)) { DiskSyncFolder f; Sync.Folders.TryGetValue(DiskChoice.Project(path), out f); return DiskSyncStatus.Text(Sync, f); }
+            return FolderStatus(false, info == null ? "" : info.Presence, false, DirectionOf(path), info != null && info.Truncated, WasChecked(path));
         }
         internal bool CanRevert(string path)
         {
@@ -111,6 +129,11 @@ namespace RemoteAgents.Launcher
                 Items[path] = new DiskFolderInfo { Path = path, Presence = Json.Str(r, "presence"), Kind = Json.Str(r, "kind"), LocalChanges = Json.Int(r, "localChanges", 0), Truncated = Json.Bool(union, "truncated") };
                 if (Mode != DiskFoldersMode.All && parent.Length == 0 && !directions.ContainsKey(path) && DiskChoice.Directions.Contains(Json.Str(r, "direction"))) directions[path] = Json.Str(r, "direction");
                 if (parent.Length > 0 || Json.Str(r, "kind") != "file") children.Add(path);
+            }
+            if (!Json.Bool(union, "truncated")) {
+                var observed = new HashSet<string>(rows.Select(r => Json.Str(r, "path")), StringComparer.Ordinal);
+                var missing = Items.Keys.Where(p => { int slash = p.LastIndexOf('/'); return (slash < 0 ? "" : p.Substring(0, slash)) == parent && !observed.Contains(p); }).ToArray();
+                foreach (string p in Items.Keys.Where(p => missing.Any(m => p == m || p.StartsWith(m + "/", StringComparison.Ordinal))).ToArray()) Items.Remove(p);
             }
             bool incomplete = Json.Bool(union, "truncated");
             Selection.Level(parent, children, incomplete);
@@ -203,14 +226,8 @@ namespace RemoteAgents.Launcher
         {
             if (!IncludesExternal(entry)) return FolderStatus(false, "", false, entry.Direction, false,
                 applied != null && applied.External.Any(e => string.Equals(e.Remote, entry.Remote, StringComparison.OrdinalIgnoreCase)));
-            string state, observedDirection; externalStates.TryGetValue(entry.Path, out state);
-            if (!externalDirections.TryGetValue(entry.Path, out observedDirection) || observedDirection != entry.Direction) state = "";
-            bool confirmed = applied != null && applied.External.Any(e => e.Path == entry.Path && e.Remote == entry.Remote && e.Direction == entry.Direction);
-            if (state == "syncing") return FolderStatus(true, "", true, entry.Direction, false, false, state);
-            if (state == "paused") return "Синхронизация приостановлена";
-            if (state == "detached") return "Будет подключена к синхронизации";
-            if (!confirmed && string.IsNullOrEmpty(state)) return "Будет подключена к синхронизации";
-            return state == "idle" ? "✓ Подключена к синхронизации" : "Подключена; состояние передачи неизвестно";
+            DiskSyncFolder folder; Sync.Folders.TryGetValue(entry.Remote, out folder);
+            return DiskSyncStatus.Text(Sync, folder);
         }
         internal DiskChoice ToChoice()
         {

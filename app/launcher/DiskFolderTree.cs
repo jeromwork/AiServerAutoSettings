@@ -16,6 +16,7 @@ namespace RemoteAgents.Launcher
         internal bool Changing { get; private set; }
         internal bool Loaded; int generation;
         internal bool ShowExternal = true;
+        internal bool ServerFactsOnly;
         internal Func<string, bool> VisiblePath;
         readonly Dictionary<string, Dictionary<string, object>> levels = new Dictionary<string, Dictionary<string, object>>(StringComparer.Ordinal);
         internal event Action<string, Dictionary<string, object>> LevelLoaded;
@@ -95,7 +96,7 @@ namespace RemoteAgents.Launcher
                     if (entry != null) {
                         n.Checked = Model.IncludesExternal(entry);
                         n.Text = n.Name + (n.Checked && entry.Direction != DiskChoice.Both ? "  " + DiskFoldersModel.DirectionHint(entry.Direction) : "");
-                        statuses[n] = Model.ExternalStatus(entry);
+                        statuses[n] = Model.IncludesExternal(entry) && Model.Sync.Failure.Length > 0 ? "⏳ Состояние не получено" : Model.ExternalStatus(entry);
                         n.ToolTipText = entry.Path + " → " + entry.Remote + "\n" + statuses[n];
                         continue;
                     }
@@ -104,11 +105,12 @@ namespace RemoteAgents.Launcher
                     bool partial = Model == null ? Selection.Partial(path) : Model.Partial(path);
                     n.Checked = Model == null ? Selection.Includes(path) : Model.Includes(path);
                     string d = Model == null ? DiskChoice.Both : Model.DirectionOf(path);
-                    n.Text = n.Name + ((n.Checked || partial) && d != DiskChoice.Both ? "  " + DiskFoldersModel.DirectionHint(d) : "");
-                    statuses[n] = Model == null ? DiskFoldersModel.FolderStatus(n.Checked, info.Presence, false, d, info.Truncated, false) : Model.Status(path);
-                    if (partial) statuses[n] = "Часть вложенных папок отмечена. " + statuses[n];
-                    n.ForeColor = partial ? Color.DarkOrange : SystemColors.WindowText;
-                    n.ToolTipText = path + "\n" + statuses[n] + (d == DiskChoice.Both ? "" : "\n" + DiskFoldersModel.DirectionText(d));
+                    n.Text = n.Name + ((!ServerFactsOnly && (n.Checked || partial)) && d != DiskChoice.Both ? "  " + DiskFoldersModel.DirectionHint(d) : "");
+                    statuses[n] = Model == null ? DiskFoldersModel.FolderStatus(n.Checked, info.Presence, false, d, info.Truncated, false) : ServerFactsOnly ? Model.ServerFact(path) : Model.Status(path);
+                    if (Model != null && !ServerFactsOnly && (n.Checked || partial) && Model.Sync.Failure.Length > 0) statuses[n] = "⏳ Состояние не получено";
+                    if (partial && !ServerFactsOnly) statuses[n] = "Часть вложенных папок отмечена. " + statuses[n];
+                    n.ForeColor = partial && !ServerFactsOnly ? Color.DarkOrange : SystemColors.WindowText;
+                    n.ToolTipText = path + "\n" + statuses[n] + (ServerFactsOnly || d == DiskChoice.Both ? "" : "\n" + DiskFoldersModel.DirectionText(d));
                 }
                 Tree.Invalidate();
             } finally { Changing = wasChanging; }
@@ -147,6 +149,12 @@ namespace RemoteAgents.Launcher
                 rows[n] = new DiskFolderInfo { Path = path, Presence = Json.Str(row, "presence"), Truncated = Json.Bool(union, "truncated") };
                 if (Json.Str(row, "kind") == "directory" && Json.Bool(row, "hasChildren")) n.Nodes.Add(new TreeNode("Загрузка при раскрытии…"));
                 children.Add(n);
+            }
+            // Persisted choices still need a row when neither inventory currently contains their path.
+            if (parent == null && Model != null && !ServerFactsOnly) foreach (string path in Model.SelectedProjects.Where(p => Model.ExternalFor(p) == null)) {
+                if (children.Any(child => child.Tag as string == path)) continue;
+                var n = new TreeNode(path) { Name = path, Tag = path };
+                rows[n] = new DiskFolderInfo { Path = path, Presence = "" }; children.Add(n);
             }
             Selection.Level(prefix, children.Where(n => n.Tag is string && ((string)n.Tag).Length > 0).Select(n => (string)n.Tag), Json.Bool(union, "truncated"));
             var target = parent == null ? Tree.Nodes : parent.Nodes;

@@ -63,6 +63,8 @@ namespace RemoteAgents.Launcher
             };
             for (int i = 0; i < 6; i++) { var line = new Label { AutoSize = true, MaximumSize = new Size(680, 0) }; statusLines.Add(line); mainStatus.Controls.Add(line); }
             mainStatus.Controls.Add(happierCreated);
+            folders.SummaryInHeader = true;
+            folders.SyncChanged += RefreshMainDiskStatus;
             // Keep progress and the editor journal in the config page, not over the other tabs.
             // The paste window docks the journal Fill in its own layout row; here it sits under the editor.
             journal.Dock = DockStyle.Bottom; rowsPanel.Dock = DockStyle.Top;
@@ -175,6 +177,7 @@ namespace RemoteAgents.Launcher
             if (IsDisposed) return;
             RefreshHappierAccount();
             for (int i = 0; i < Math.Min(lines.Length, statusLines.Count); i++) if (statusLines[i].Text != lines[i]) statusLines[i].Text = lines[i];
+            RefreshMainDiskStatus();
             string operation = MutationConflict == null ? "" : MutationConflict();
             foreach (TabPage page in tabs.TabPages) page.Enabled = WindowModel.CanOpen(page.Text, operation);
             syncStatus.Text = sync; technicalStatus.Text = technical;
@@ -191,6 +194,10 @@ namespace RemoteAgents.Launcher
             if (selected.Length > 0 && !paths.Any(p => p.Tag == selected)) paths.Add(new PathOption { Tag = selected, Title = selected + " — недоступен" });
             pathChoice.Items.Clear(); pathChoice.Items.AddRange(paths.Cast<object>().ToArray());
             pathChoice.SelectedIndex = Math.Max(0, paths.FindIndex(p => p.Tag == selected));
+        }
+        void RefreshMainDiskStatus()
+        {
+            foreach (var line in statusLines) line.Text = folders.Model.MainStatusLine(line.Text);
         }
         sealed class PathOption { internal string Tag, Title; public override string ToString() { return Title; } }
         void LayoutMain()

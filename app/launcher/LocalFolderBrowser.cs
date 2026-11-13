@@ -148,7 +148,9 @@ namespace RemoteAgents.Launcher
                 states.Clear();
                 foreach (var n in All(Tree.Nodes)) {
                     string path = n.Tag as string; if (path == null) continue;
-                    var s = LocalFolders.State(m, path, root, system); states[n] = s;
+                    var s = LocalFolders.State(m, path, root, system);
+                    if ((s.Checked || s.Partial) && m.Sync.Failure.Length > 0 && (s.Kind == LocalFolderKind.InDisk || s.Kind == LocalFolderKind.External)) s.Status = "⏳ Состояние не получено";
+                    states[n] = s;
                     n.Checked = s.Checked;
                     n.ForeColor = s.Partial ? Color.DarkOrange : !s.Checked && !s.Choosable ? SystemColors.GrayText : SystemColors.WindowText;
                     n.ToolTipText = path + (s.Status.Length > 0 ? "\n" + s.Status : "") + (!s.Choosable && !s.Checked && s.Reason.Length > 0 && s.Reason != s.Status ? "\n" + s.Reason : "");
