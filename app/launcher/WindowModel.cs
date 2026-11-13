@@ -39,14 +39,14 @@ namespace RemoteAgents.Launcher
         internal WindowExit Exit(bool applying) { return applying ? WindowExit.ConfirmApplying : WindowExit.Unload; }
         internal static bool CanOpen(string page, string operation)
         { return page == "Папки" || page == "Конфиг" || page == "Подробно" || page == "Сервис" || string.IsNullOrEmpty(operation); }
-        internal const string SkippedFolders = "папки не выбраны — выберите в трее → Папки синхронизации";
+        internal const string SkippedFolders = "папки не выбраны — выберите в трее → Папки";
         internal static List<string> SessionPlan(IEnumerable<string> plan, bool folderStepRequired, bool diskChosen)
         { return plan.Where(s => s != ConfigSections.Disk || !folderStepRequired && diskChosen).ToList(); }
         // Pending (VPN not yet confirmed, a server install) is handed to the tray and does not hold up «Готово»;
         // Disk runs in the background (BackgroundWork.Disk) and never gates it.
         internal static bool CanFinish(bool running, IDictionary<string, SectionState> states)
         { return !running && states.Where(s => s.Key != ConfigSections.Disk).All(s => s.Value == SectionState.Done || s.Value == SectionState.Unchanged || s.Value == SectionState.Failed || s.Value == SectionState.Blocked || s.Value == SectionState.Pending); }
-        internal const string FoldersRecommendation = "Рекомендуем выбрать папки для синхронизации — это можно сделать и позже из трея (пункт «Папки синхронизации»). Без выбора настройка тоже завершится, просто синхронизация папок не будет включена.";
+        internal const string FoldersRecommendation = "Рекомендуем выбрать папки для синхронизации — это можно сделать и позже из трея (пункт «Папки»). Без выбора настройка тоже завершится, просто синхронизация папок не будет включена.";
         internal const string FoldersInBackground = "Папки подключаются в фоне — окно можно закрыть, программа продолжит сама.";
         internal static string Conflict(string operation)
         { return string.IsNullOrEmpty(operation) ? "" : "Идёт " + operation + ", подождите"; }

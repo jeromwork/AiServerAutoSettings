@@ -70,7 +70,7 @@ namespace RemoteAgents.Launcher
             Check(WindowModel.FoldersRecommendation.StartsWith("Рекомендуем выбрать папки") && WindowModel.FoldersRecommendation.Contains("позже из трея"), "folders are a recommendation, not a step");
             BackgroundRunner().GetAwaiter().GetResult();
             Check(!WindowModel.CanFinish(true, terminal), "startup/activation guard still gates Done");
-            Check(WindowModel.SkippedFolders == "папки не выбраны — выберите в трее → Папки синхронизации", "skip stays honest and points to tray");
+            Check(WindowModel.SkippedFolders == "папки не выбраны — выберите в трее → Папки", "skip stays honest and points to tray");
             var now = new DateTime(2026, 11, 12, 10, 0, 0, DateTimeKind.Utc); var schedule = new ConfigSyncSchedule();
             Check(!schedule.Due(false, now, false), "no sync while disconnected");
             Check(!schedule.Due(true, now, false), "no sync on first confirmed connection");

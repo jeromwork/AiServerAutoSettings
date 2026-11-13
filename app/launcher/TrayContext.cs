@@ -692,7 +692,7 @@ namespace RemoteAgents.Launcher
             // An open window shows the result itself; the balloon is for a run that outlived its window.
             if (Application.OpenForms.Cast<Form>().Any(f => f is ConfigWindow && f.Visible) || !icon.Visible) return;
             if (last.Ok) icon.ShowBalloonTip(5000, Product.Name, "Папки: " + last.Summary, ToolTipIcon.Info);
-            else icon.ShowBalloonTip(10000, Product.Name, "Папки не подключены: " + last.Summary + ". Откройте «Папки синхронизации» и нажмите «Синхронизировать» ещё раз.", ToolTipIcon.Warning);
+            else icon.ShowBalloonTip(10000, Product.Name, "Папки не подключены: " + last.Summary + ". Повторите команду в Проводнике или применение на вкладке «Папки».", ToolTipIcon.Warning);
         }
         void RequestExit()
         {
