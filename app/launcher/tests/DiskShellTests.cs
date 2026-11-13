@@ -89,7 +89,10 @@ namespace RemoteAgents.Launcher
                 Check(candidate.Reason.Length > 0, "unindexed same-size edit rejected before deselection");
                 File.WriteAllText(userFile, "123"); rest = new FakeRest(userFile);
                 candidate = DiskEvictionCandidate.Prepare(rest, "A", project, CancellationToken.None);
-                candidate.Recycle(recycle);
+                rest.Detached = false;
+                try { candidate.Recycle(recycle); throw new Exception("attached folder recycled"); } catch (IOException) { count++; }
+                Check(recycle.Calls == 0 && File.Exists(userFile), "still-attached engine cannot propagate local deletions");
+                rest.Detached = true; candidate.Recycle(recycle);
                 Check(recycle.Calls == 1 && !File.Exists(userFile) && File.ReadAllText(Path.Combine(recyclePath, "data.txt")) == "123", "verified candidate only invokes injected Recycle Bin adapter");
             } finally { Directory.Delete(work, true); }
             Console.WriteLine("DiskShell: " + count + " checks");
@@ -103,13 +106,14 @@ namespace RemoteAgents.Launcher
         }
         sealed class FakeRest : IDiskEvictionRest
         {
-            readonly Dictionary<string, object> entry; internal decimal Percent = 100; internal bool Proof = true;
+            readonly Dictionary<string, object> entry; internal decimal Percent = 100; internal bool Proof = true, Detached = true;
             internal FakeRest(string path)
             {
                 byte[] bytes = System.IO.File.ReadAllBytes(path);
                 entry = ConfigBundle.D("name", "data.txt", "type", "FILE_INFO_TYPE_FILE", "size", bytes.Length, "numBlocks", 1, "blocksHash", BlockHash(bytes, 131072), "version", new[] { "DEV:1" }, "modified", System.IO.File.GetLastWriteTimeUtc(path).ToString("o"));
             }
             public string PeerId { get { return "SERVER"; } }
+            public bool IsDetached(string path) { return Detached; }
             public DiskSyncSnapshot Read(Dictionary<string, string> paths, CancellationToken token)
             {
                 var snapshot = new DiskSyncSnapshot { Failure = "", Connected = true };

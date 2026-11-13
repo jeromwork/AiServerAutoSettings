@@ -16,6 +16,7 @@ namespace RemoteAgents.Launcher
     internal interface IDiskEvictionRest
     {
         string PeerId { get; }
+        bool IsDetached(string path);
         DiskSyncSnapshot Read(Dictionary<string, string> paths, CancellationToken token);
         void Scan(string folder);
         Dictionary<string, object> Completion(string folder);
@@ -34,7 +35,7 @@ namespace RemoteAgents.Launcher
     internal sealed class DiskEvictionCandidate
     {
         internal string Project = "", Reason = "";
-        string path; Dictionary<string, string> inventory;
+        string path; Dictionary<string, string> inventory; IDiskEvictionRest evidence;
         internal static DiskEvictionCandidate Prepare(string home, string project, string path, CancellationToken token)
         {
             try { return Prepare(new DiskLocalRest(home, token), project, path, token); }
@@ -43,7 +44,7 @@ namespace RemoteAgents.Launcher
         }
         internal static DiskEvictionCandidate Prepare(IDiskEvictionRest rest, string project, string path, CancellationToken token)
         {
-            var result = new DiskEvictionCandidate { Project = project, path = path };
+            var result = new DiskEvictionCandidate { Project = project, path = path, evidence = rest };
             try {
                 var paths = new Dictionary<string, string> { { project, path } };
                 var before = rest.Read(paths, token); DiskSyncFolder folder;
@@ -91,6 +92,7 @@ namespace RemoteAgents.Launcher
         internal void Recycle(IDiskRecycle recycle = null)
         {
             if (Reason.Length > 0) throw new IOException(Reason);
+            if (evidence == null || !evidence.IsDetached(path)) throw new IOException("Syncthing ещё не подтвердил отключение локальной папки; файлы сохранены");
             if (recycle == null) recycle = new DiskNativeRecycle();
             string refusal = Revalidate(); if (refusal.Length > 0) throw new IOException(refusal);
             foreach (string item in Directory.EnumerateFileSystemEntries(path)) {
@@ -131,7 +133,18 @@ namespace RemoteAgents.Launcher
     {
         readonly Uri endpoint; readonly string key, home; readonly CancellationToken token; internal readonly string Peer;
         public string PeerId { get { return Peer; } }
-        public DiskSyncSnapshot Read(Dictionary<string, string> paths, CancellationToken token) { return new DiskSyncReader().Read(home, paths, token); }
+        public DiskSyncSnapshot Read(Dictionary<string, string> paths, CancellationToken token)
+        {
+            if (Files.ReadLine(Path.Combine(home, "server.txt")) != Peer) return DiskSyncSnapshot.Unavailable("Настройка сервера изменилась");
+            return new DiskSyncReader().Read(home, paths, token);
+        }
+        public bool IsDetached(string path)
+        {
+            if (Files.ReadLine(Path.Combine(home, "server.txt")) != Peer) return false;
+            object configured = Json.Parse(Request("GET", "config/folders", 2500));
+            if (!(configured is System.Collections.IEnumerable) || configured is string || configured is System.Collections.IDictionary) return false;
+            return !Json.Array(configured).Select(Json.Map).Any(f => DiskSyncSnapshot.SamePath(Json.Str(f, "path"), path));
+        }
         internal DiskLocalRest(string home, CancellationToken token)
         {
             this.token = token; this.home = home;
