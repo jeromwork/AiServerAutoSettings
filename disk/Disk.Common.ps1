@@ -18,15 +18,24 @@ function Write-DiskProgress([string]$Text) {
     try{[IO.File]::AppendAllText($env:REMOTEAGENTS_WIZARD_PROGRESS,((@{text=$Text}|ConvertTo-Json -Compress)+"`n"),(New-Object Text.UTF8Encoding($false)))}catch{}
 }
 function Quote-Disk([string]$Value) {'"'+[regex]::Replace([regex]::Replace($Value,'(\\*)"','$1$1\"'),'(\\+)$','$1$1')+'"'}
+# Valid project names in our own .stignore refusal are context, even when they look like long tokens.
+function Protect-DiskFailureText([string]$Text) {
+    $names=@();$safe=$Text
+    foreach($m in [regex]::Matches($Text,'(^|: )([\p{L}\p{N}_. -]{1,128})(?=: Чужой \.stignore)')){
+        $name=$m.Groups[2].Value;$placeholder='diskfolder'+$names.Count
+        $safe=$safe.Replace($name+': Чужой .stignore',$placeholder+': Чужой .stignore');$names+=@($name)
+    }
+    if(Get-Command Protect-TransportText -ErrorAction SilentlyContinue){$safe=Protect-TransportText $safe}
+    else{$safe=$safe -replace '[A-Za-z0-9+/_=-]{20,}','<secret>' -replace '://[^/@\s]+@','://<auth>@'}
+    for($i=0;$i -lt $names.Count;$i++){$safe=$safe.Replace(('diskfolder'+$i+': Чужой .stignore'),($names[$i]+': Чужой .stignore'))}
+    $safe
+}
 # A server refusal is a useful cause. Native tools' arbitrary stderr still stays out of the UI.
 function Get-DiskServerFailure([string]$Text) {
     foreach($line in ($Text.Replace("`r",'') -split "`n")){
         $clean=($line -replace '\x1b\[[0-9;]*[a-zA-Z]','').Trim()
         if(-not $clean -or $clean -match '^(Warning: Permanently added|Connection to .* closed\.?$)'){continue}
-        if(Get-Command Protect-TransportText -ErrorAction SilentlyContinue){return Protect-TransportText $clean}
-        # Disk.Common is also used on its own, before the wizard/transport libraries are loaded.
-        $clean=$clean -replace '[A-Za-z0-9+/_=-]{20,}','<secret>' -replace '://[^/@\s]+@','://<auth>@'
-        return $clean
+        return Protect-DiskFailureText $clean
     }
     return ''
 }

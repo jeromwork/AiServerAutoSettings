@@ -252,7 +252,7 @@ function Get-InstallFailureLines([string]$Text) {
         $clean=($line -replace '\x1b\[[0-9;]*[a-zA-Z]','').Trim()
         # Ignore PS 5.1/7 source, location and stack decorations, preserving the actual error line.
         if($clean -and $clean -notmatch '^(At |строка:|[+~|]|\d+\s*\||CategoryInfo\s*:|FullyQualifiedErrorId\s*:|(?:Exception|Write-Error):\s+.*\.ps1:\d+)'){
-            $masked=Protect-TransportText $clean
+            $masked=if(Get-Command Protect-DiskFailureText -ErrorAction SilentlyContinue){Protect-DiskFailureText $clean}else{Protect-TransportText $clean}
             if($masked -notmatch '^(<secret>|<uuid>)+$'){$masked}
         }
     }

@@ -21,7 +21,7 @@ try{
     Write-SetupLog $root ('wizard.'+$Action+'.complete')
     @{ok=$true;result=$result}|ConvertTo-Json -Depth 40 -Compress
 }catch{
-    $detail=Protect-TransportText ([string]$_.Exception.Message)
+    $detail=Protect-DiskFailureText ([string]$_.Exception.Message)
     Write-SetupLog $root ('wizard.'+$Action+'.failed') $detail
     @{ok=$false;reason=$detail;remedy=(Get-InstallFailureRemedy $detail)}|ConvertTo-Json -Compress
     exit 1
