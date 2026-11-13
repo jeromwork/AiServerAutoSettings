@@ -11,6 +11,19 @@
     "ready": {"type": "boolean"},
     "static": {"$ref": "#/$defs/subnets"},
     "subnets": {"$ref": "#/$defs/subnets"},
+    "endpoints": {
+      "description": "Optional client-independent transport allowlist; lan_vpn.endpoints validates canonical globally routable IPv4 (no multicast/reserved).",
+      "type": "array", "maxItems": 16, "uniqueItems": true,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["ip", "proto", "port"],
+        "properties": {
+          "ip": {"type": "string", "format": "ipv4"},
+          "proto": {"enum": ["udp", "tcp"]},
+          "port": {"type": "integer", "minimum": 1, "maximum": 65535}
+        }
+      }
+    },
     "table": {"type": "integer", "minimum": 42000, "maximum": 42063},
     "priority": {"type": "integer", "minimum": 1000, "maximum": 1063},
     "dns": {

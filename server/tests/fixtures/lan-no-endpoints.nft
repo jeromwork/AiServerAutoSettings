@@ -1,0 +1,21 @@
+table inet remoteagents_lan {
+ chain input { type filter hook input priority -10; policy accept;
+  iifname "tun-lan-office" ip saddr { 10.123.0.0/16 } ct state established,related accept
+  iifname "tun-lan-other" ip saddr { 192.168.143.0/24 } ct state established,related accept
+  iifname "tun-lan-*" drop
+ }
+ chain forward { type filter hook forward priority -10; policy accept;
+  iifname "tun-lan-*" drop
+  oifname "tun-lan-*" drop
+ }
+ chain output { type filter hook output priority -10; policy accept;
+  oifname "tun-lan-office" ip daddr { 10.123.0.0/16 } accept
+  oifname "tun-lan-other" ip daddr { 192.168.143.0/24 } accept
+  oifname "tun-lan-*" drop
+ }
+ chain egress { type filter hook postrouting priority 300; policy accept;
+  oifname "tun-lan-office" ip daddr { 10.123.0.0/16 } accept
+  oifname "tun-lan-other" ip daddr { 192.168.143.0/24 } accept
+  oifname "tun-lan-*" drop
+ }
+}

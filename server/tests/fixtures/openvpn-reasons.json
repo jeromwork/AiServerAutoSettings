@@ -1,0 +1,11 @@
+[
+  {"line": "AUTH_FAILED,TEST_ONLY_LAN_USER TEST_ONLY_LAN_PASS", "reason": "шлюз отклонил логин/пароль"},
+  {"line": "TLS key negotiation failed: TEST_ONLY_SECRET_NEVER_PRINT", "reason": "шлюз не отвечает на рукопожатие: трафик до шлюза не проходит или неверный порт/протокол"},
+  {"line": "TLS Error: TEST_ONLY_SECRET_NEVER_PRINT", "reason": "шлюз не отвечает на рукопожатие: трафик до шлюза не проходит или неверный порт/протокол"},
+  {"line": "TLS handshake failed TEST_ONLY_SECRET_NEVER_PRINT", "reason": "шлюз не отвечает на рукопожатие: трафик до шлюза не проходит или неверный порт/протокол"},
+  {"line": "Cannot resolve TEST_ONLY_SECRET_NEVER_PRINT", "reason": "не удалось разрешить адрес шлюза"},
+  {"line": "RESOLVE: TEST_ONLY_SECRET_NEVER_PRINT", "reason": "не удалось разрешить адрес шлюза"},
+  {"line": "Options error: TEST_ONLY_SECRET_NEVER_PRINT", "reason": "OpenVPN отверг параметры профиля"},
+  {"line": "Initialization Sequence Completed TEST_ONLY_SECRET_NEVER_PRINT", "reason": "подключилось, но ЛВС не прислала частных подсетей: задайте --subnet"},
+  {"line": "Failed running command (--route-up): TEST_ONLY_SECRET_NEVER_PRINT", "reason": "подключилось, но ЛВС не прислала частных подсетей: задайте --subnet"}
+]
