@@ -379,27 +379,6 @@ class ConfigExportTests(unittest.TestCase):
         self.assertNotIn('Без утечек', texts['events'])
         print('PASS: ни stderr, ни журнал, ни записи, ни list не содержат секретов (%d проверенных строк)' % len(leaks))
 
-    def test_folder_choice_modes_and_directions(self):
-        for option, expected in [('all', 'all'), ('none', []),
-                                 ('A,B:send,C:receive', ['A', {'path': 'B', 'direction': 'send'}, {'path': 'C', 'direction': 'receive'}]),
-                                 ('Проект/docs:send,Проект/src:send', [{'path': 'Проект/docs', 'direction': 'send'}, {'path': 'Проект/src', 'direction': 'send'}])]:
-            with self.subTest(option=option):
-                config, _ = self.e.export('Папки', '--folders', option)
-                self.assertEqual(config['disk'], {'folders': expected})
-        config, _ = self.e.export('Спросить')
-        self.assertNotIn('disk', config)
-        self.assertEqual(rc.folders_list('A:both'), ['A'])
-        self.assertIsNone(rc.folders_list(None))
-        before = self.e.auth.read_text()
-        for text in ('A:send,A/docs:receive', 'A,a', 'A,,B', 'CON', 'A/../B', 'A:bad', 'A:send:receive',
-                     '/absolute', 'A\\B', 'A/aux.txt', 'bad..name', 'bad.', '1:receive,' , 'A\r\n'):
-            with self.subTest(text=text):
-                result = self.e.cli('export', '--name', 'Ошибка', '--folders', text)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(self.e.auth.read_text(), before, 'invalid choice cannot issue a key')
-        with self.assertRaises(Exception) as error:
-            rc.folders_list('Project:send,project/docs:receive')
-        self.assertIn('Разные направления', str(error.exception))
 
     def test_routes_and_vpn_bootstrap_sections(self):
         self.e.vpn()
@@ -407,7 +386,7 @@ class ConfigExportTests(unittest.TestCase):
                               {'kind': 'hop', 'hop': {'name': 'relay', 'host': 'relay.example.invalid', 'port': 2200, 'user': 'relayuser',
                                                       'hostKey': self.e.host_pub, 'keyFile': str(self.e.route_key), 'passwordFile': str(self.e.route_password)}}]
         self.e.write()
-        config, _ = self.e.export('Маршруты', '--folders', 'Проект,Проект/docs', '--happier', 'new:Сын')
+        config, _ = self.e.export('Маршруты', '--happier', 'new:Сын')
         self.assertEqual(config['server']['routes'][1], {'kind': 'proxy', 'proxy': {'type': 'socks', 'server': '127.0.0.1', 'port': 10808}})
         self.assertEqual(config['server']['routes'][2], {'kind': 'hop', 'hop': {'host': 'relay.example.invalid', 'port': 2200, 'user': 'relayuser',
                          'hostKey': self.e.host_pub, 'key': {'secret': 'hop-relay-key'}, 'password': {'secret': 'hop-relay-password'}}})
@@ -419,7 +398,7 @@ class ConfigExportTests(unittest.TestCase):
         self.assertEqual(vpn['bootstrap']['hops'], {'vhop': {'host': '127.0.0.1', 'port': 2222, 'user': 'hopuser', 'key': {'secret': 'vpn-hop-vhop'}}})
         self.assertEqual(vpn['bootstrap']['catalog']['relays'][0]['name'], 'fixture')
         self.assertEqual(json.loads(config['secrets']['vpn-channel'])['outbounds'][0]['uuid'], 'CHANNEL-SECRET-UUID')
-        self.assertEqual(config['disk'], {'folders': ['Проект', 'Проект/docs']})
+        self.assertNotIn('disk', config)
         self.assertEqual(config['happier'], {'mode': 'new', 'label': 'Сын'})
         for name in config['secrets']:
             self.assertRegex(name, r'^[a-z0-9][a-z0-9._-]{0,63}$')
@@ -576,7 +555,7 @@ class ConfigExportTests(unittest.TestCase):
                 pass
         import argparse
         import io
-        args = argparse.Namespace(name='Обрыв', happier='same', folders='', master_password_stdin=False, vpn='off', output=None)
+        args = argparse.Namespace(name='Обрыв', happier='same', master_password_stdin=False, vpn='off', output=None)
         with self.assertRaises(BrokenPipeError):
             rc.export(c, args, out=Broken(), err=io.StringIO())
         self.assertNotIn('ra-config:', self.e.auth.read_text() if self.e.auth.exists() else '')
