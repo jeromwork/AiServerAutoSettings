@@ -447,6 +447,7 @@ namespace RemoteAgents.Launcher
             try { var tree = await RunFolderAction("DiskTree", new { @base = foldersBase, path = "" }); if (IsDisposed) return; folders.ShowTree(tree); }
             catch (OperationCanceledException) { throw; }
             catch (Exception e) { Log("Папки не загружены: " + e.Message + ". Нажмите «Обновить список», чтобы попробовать снова."); }
+            await folders.RefreshNavPane();
             if (folders.NeedsExternalInventory || folders.Model.External.Count > 0) {
                 try { var inventory = await RunFolderAction("DiskExternal", new { action = "list" }); if (IsDisposed) return; folders.ShowExternalInventory(inventory); }
                 catch (OperationCanceledException) { throw; }
@@ -477,13 +478,13 @@ namespace RemoteAgents.Launcher
                     folderStepRequired = false; folderSkipped = false;
                     // The first-run step becomes a review of the applied choice; there is no longer anything to skip.
                     folders.AllowSkip(false); folders.MarkApplied();
-                } else Log("Выбор сохранён, но ещё не применён. Проверьте журнал и нажмите «Применить» ещё раз.");
+                } else Log("Выбор сохранён, но ещё не применён. Проверьте журнал и нажмите «Синхронизировать» ещё раз.");
             });
         }
         async Task Finish()
         {
             if (running) return;
-            if (folderStepRequired) { Log("Выберите папки и нажмите «Применить» или «Пропустить»."); return; }
+            if (folderStepRequired) { Log("Выберите папки и нажмите «Синхронизировать» или «Пропустить»."); return; }
             if (!FirstInstall.Required(home)) { DialogResult = DialogResult.OK; Close(); return; }
             bool ok = false;
             await Guard(async () => {
