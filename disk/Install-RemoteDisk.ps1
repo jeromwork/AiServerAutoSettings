@@ -37,7 +37,7 @@ try {
     foreach($name in @('server-disk.sh')){$data=[IO.File]::ReadAllText((Join-Path $PSScriptRoot $name)).Replace("`r",'');$upload+='printf %s '+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($data))+' | base64 -d > "$HOME/.local/share/remote-disk/'+$name+'"' + "`n"}
     }
     if(-not $HelpersReady){$upload+=Get-DiskIgnoreUpload}
-    $step='Bootstrap сервера';$remote=(Invoke-DiskSsh 'bash -s' -Direct -InputText ($upload+'bash "$HOME/.local/share/remote-disk/server-disk.sh" bootstrap'))|ConvertFrom-Json
+    $step='Bootstrap сервера';$remote=(Invoke-DiskSsh 'bash -s' -Direct -InputText ($upload+'bash "$HOME/.local/share/remote-disk/server-disk.sh" bootstrap') -RetrySafe)|ConvertFrom-Json
     $step='Установка трея';Install-DiskBinary 'https://github.com/Martchus/syncthingtray/releases/download/v2.1.9/syncthingtray-2.1.9-x86_64-w64-mingw32.exe.zip' 'c20d74998cb84980b07cb00eca4c38d26643eaa69b8bef94f6841ded6c752cc5' tray syncthingtray.exe
     $step='Конфигурация движка';$fresh=-not (Test-Path -LiteralPath (Join-Path $state 'config.xml'))
     if($fresh){[void](Invoke-DiskProcess $tray @('syncthing','generate','--home',$state))};Read-DiskState

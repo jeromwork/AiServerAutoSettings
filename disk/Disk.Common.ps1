@@ -39,7 +39,33 @@ function Get-DiskServerFailure([string]$Text) {
     }
     return ''
 }
-function Invoke-DiskProcess($Exe,$Arguments,[string]$InputText='',[string]$OutputFile='',[int]$TimeoutSeconds=45) {
+# Retry only an explicitly reviewed idempotent operation. Three repeats, four attempts total.
+function Test-DiskSshTransient([int]$ExitCode,[string]$Text) {
+    $text=$Text.Replace("`r",'')
+    if($text -match 'REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed|Permission denied|Сервер отклонил вход|Ключ хоста|Чужой \.stignore'){return $false}
+    return $ExitCode -eq 255 -and $text -match 'banner exchange|kex_exchange_identification|Connection closed|Connection reset|timed out|Connection refused|No route to host|Network is unreachable|Нет SSH-баннера|Нет связи с сервером'
+}
+function Invoke-DiskRetry([scriptblock]$Operation) {
+    $delays=@(2,5,10)
+    for($attempt=0;;$attempt++){
+        try{return & $Operation}catch{
+            $failure=$_;$message=[string]$failure.Exception.Message
+            $transient=$failure.Exception.Data['DiskSshTransient'] -eq $true
+            # A lost control session can have executed the command; callers must opt in to safe replay.
+            if($message -like 'Управляющий SSH-сеанс прерван*'){$transient=$true}
+            if(-not $transient -or $attempt -ge $delays.Count){throw}
+            $seconds=$delays[$attempt]
+            Write-DiskProgress ('Нет связи с сервером, повтор через '+$seconds+' с…') | Out-Null
+            Start-Sleep -Seconds $seconds
+        }
+    }
+}
+function Invoke-DiskProcess($Exe,$Arguments,[string]$InputText='',[string]$OutputFile='',[int]$TimeoutSeconds=45,[switch]$RetrySafe) {
+    $run={Invoke-DiskProcessOnce $Exe $Arguments $InputText $OutputFile -TimeoutSeconds $TimeoutSeconds}
+    if($RetrySafe){return Invoke-DiskRetry $run}
+    return & $run
+}
+function Invoke-DiskProcessOnce($Exe,$Arguments,[string]$InputText='',[string]$OutputFile='',[int]$TimeoutSeconds=45) {
     $si=New-Object Diagnostics.ProcessStartInfo;$si.FileName=$Exe;$si.Arguments=($Arguments|ForEach-Object {Quote-Disk ([string]$_)}) -join ' '
     $si.UseShellExecute=$false;$si.CreateNoWindow=$true;$si.RedirectStandardInput=$true;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true;$si.StandardOutputEncoding=New-Object Text.UTF8Encoding($false);$si.StandardErrorEncoding=New-Object Text.UTF8Encoding($false)
     $p=New-Object Diagnostics.Process;$p.StartInfo=$si;$file=$null;$err=$null
@@ -56,7 +82,7 @@ function Invoke-DiskProcess($Exe,$Arguments,[string]$InputText='',[string]$Outpu
         }
         try{$p.StandardInput.Close()}catch{if(-not $p.HasExited){throw};if(-not $inputFailure){$inputFailure=$_}}
         if(-not $p.WaitForExit($TimeoutSeconds*1000)){$p.Kill();throw 'Таймаут команды'};$out.GetAwaiter().GetResult() | Out-Null
-        if($p.ExitCode -ne 0){$reason='Внешняя команда не выполнена';if($p.ExitCode -eq 255 -and [IO.Path]::GetFileNameWithoutExtension($Exe) -ieq 'ssh'){$reason=if($err.Result -match 'REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed'){"Ключ хоста не совпал с приглашением или known_hosts. Подключение остановлено; попросите администратора проверить ключ сервера"}elseif($err.Result -match 'Permission denied'){'Сервер отклонил вход'}elseif($err.Result -match 'Remote protocol version' -and $err.Result -match 'timed out|Connection reset'){'Сервер ответил, но сеть глушит SSH после рукопожатия — нужен обход (канал через промежуточный сервер)'}elseif($err.Result -match 'banner exchange|kex_exchange_identification|Connection closed|Connection reset|timed out'){'Нет SSH-баннера от сервера'}else{'Нет связи с сервером'};if($err.Result -match 'proxy-connect: ([^\r\n]+)'){$reason+=': '+$Matches[1]}}elseif([IO.Path]::GetFileNameWithoutExtension($Exe) -ieq 'ssh'){$detail=Get-DiskServerFailure $err.Result;if($detail){$reason=$detail}};throw ($reason+' (код выхода '+$p.ExitCode+')')}
+        if($p.ExitCode -ne 0){$reason='Внешняя команда не выполнена';if($p.ExitCode -eq 255 -and [IO.Path]::GetFileNameWithoutExtension($Exe) -ieq 'ssh'){$reason=if($err.Result -match 'REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed'){"Ключ хоста не совпал с приглашением или known_hosts. Подключение остановлено; попросите администратора проверить ключ сервера"}elseif($err.Result -match 'Permission denied'){'Сервер отклонил вход'}elseif($err.Result -match 'Remote protocol version' -and $err.Result -match 'timed out|Connection reset'){'Сервер ответил, но сеть глушит SSH после рукопожатия — нужен обход (канал через промежуточный сервер)'}elseif($err.Result -match 'banner exchange|kex_exchange_identification|Connection closed|Connection reset|timed out'){'Нет SSH-баннера от сервера'}else{'Нет связи с сервером'};if($err.Result -match 'proxy-connect: ([^\r\n]+)'){$reason+=': '+$Matches[1]}}elseif([IO.Path]::GetFileNameWithoutExtension($Exe) -ieq 'ssh'){$detail=Get-DiskServerFailure $err.Result;if($detail){$reason=$detail}};$failure=New-Object IO.IOException ($reason+' (код выхода '+$p.ExitCode+')');$failure.Data['DiskSshTransient']=([IO.Path]::GetFileNameWithoutExtension($Exe) -ieq 'ssh' -and (Test-DiskSshTransient $p.ExitCode $err.Result));throw $failure}
         if($inputFailure){throw $inputFailure}
         if(-not $OutputFile){$out.Result.Replace("`r",'').TrimStart([char]0xFEFF).Trim()}
     }finally{if($file){$file.Dispose()};if($p.Id -and -not $p.HasExited){$p.Kill()}
@@ -72,7 +98,7 @@ function Read-DiskProfile([string]$Profile) {
     foreach($f in @('sshExecutable','arguments','serverAddress','login','keyPath','knownHostsPath','configPath')){if(-not $script:Connection.$f){throw 'Неполный SSH-профиль'}}
     if($script:Connection.login.Trim() -ieq 'root'){throw 'SSH-профиль должен входить как рабочий пользователь, не root'}
 }
-function Invoke-DiskSsh($Command,[switch]$Direct,[string]$InputText='',[string]$OutputFile='',[int]$TimeoutSeconds=45) {
+function Invoke-DiskSsh($Command,[switch]$Direct,[string]$InputText='',[string]$OutputFile='',[int]$TimeoutSeconds=45,[switch]$RetrySafe) {
     $c=$script:Connection;$args=@('-o','BatchMode=yes','-o','ConnectTimeout=8','-o','StrictHostKeyChecking=yes')
     . (Join-Path (Split-Path $PSScriptRoot -Parent) 'transport/Transport.Common.ps1')
     $root=Join-Path $env:LOCALAPPDATA 'RemoteAgents';$launcher=Join-Path $root 'config.json'
@@ -89,7 +115,7 @@ function Invoke-DiskSsh($Command,[switch]$Direct,[string]$InputText='',[string]$
         }
         $args+=@($c.arguments)
     }else{$args+=@('-F','NUL','-p',[string]$localPort,'-i',$c.keyPath,'-o',('HostKeyAlias='+$c.serverAddress),'-o',('UserKnownHostsFile="'+$c.knownHostsPath.Replace('\','/')+'"'),'-o','IdentitiesOnly=yes',($c.login+'@127.0.0.1'))}
-    Invoke-DiskProcess $c.sshExecutable ($args+@($Command)) $InputText $OutputFile -TimeoutSeconds $TimeoutSeconds
+    Invoke-DiskProcess $c.sshExecutable ($args+@($Command)) $InputText $OutputFile -TimeoutSeconds $TimeoutSeconds -RetrySafe:$RetrySafe
 }
 function Get-DiskTreeCommand([string]$RelativePath='') {
     $command='bash "$HOME/.local/share/remote-disk/server-disk.sh" tree'
@@ -109,7 +135,10 @@ function Invoke-DiskServer($Action,$Data=$null,[switch]$Direct,[string]$OutputFi
         $encoded=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($Data|ConvertTo-Json -Depth 20 -Compress)))
         if($Action -eq 'verify-selection'){$cmd+=' --stdin';$inputText=$encoded}else{$cmd+=' '+$encoded}
     }
-    $text=Invoke-DiskSsh $cmd -Direct:$Direct -OutputFile $OutputFile -InputText $inputText
+    # list/tree/verification read state; attach/detach/add-device are upserts of stable identities.
+    # Other server actions get no implicit replay.
+    $safe=$Action -in @('list','tree','channel-config','verify-selection','attach','detach','add-device','bootstrap')
+    $text=Invoke-DiskSsh $cmd -Direct:$Direct -OutputFile $OutputFile -InputText $inputText -RetrySafe:$safe
     if(-not $OutputFile -and $text){$value=$text|ConvertFrom-Json;if($null -ne $value){foreach($item in $value){$item}}}
 }
 function Invoke-DiskApi($Route,$Method='GET',$Body=$null) {

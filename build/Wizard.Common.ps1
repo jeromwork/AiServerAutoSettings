@@ -21,7 +21,7 @@ function Get-WizardPlan($Server,$Local) {
         @{id='vpn';ready=(-not $Local.vpnEnabled -or [bool]$Local.vpn)}
     )
 }
-function Invoke-WizardSsh([string]$Root,[string]$Command,[string]$InputText='',[int]$Timeout=60) {
+function Invoke-WizardSsh([string]$Root,[string]$Command,[string]$InputText='',[int]$Timeout=60,[switch]$RetrySafe) {
     $profile=Find-InstallProfile $Root
     if(-not $profile){throw 'Настройте SSH на шаге «Сервер»'}
     $p=Read-TransportJson $profile
@@ -30,11 +30,13 @@ function Invoke-WizardSsh([string]$Root,[string]$Command,[string]$InputText='',[
         if($env:REMOTEAGENTS_WIZARD_SESSION -eq '1'){return Invoke-WizardControlSession $Root $p $routeOptions $Command $InputText $Timeout}
         Invoke-DiskProcess $p.sshExecutable ($routeOptions+@('-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=5')+@($p.arguments)+@($Command)) (Convert-TransportLF $InputText) -TimeoutSeconds $Timeout
     }
+    if($RetrySafe){return Invoke-DiskRetry $run}
     try{return & $run}catch{
         # Channel first: the daemon briefly restarts sing-box when «Связь» rewrites config.transport, and
         # parallel sections lose their SSH through the channel SOCKS entry. One repeat after 3 s, only for an
         # SSH connection failure (ssh code 255; for the shared control session: session not started/interrupted).
         $message=[string]$_.Exception.Message
+        if($message -match 'Ключ хоста|Сервер отклонил вход|Permission denied|Чужой \.stignore'){throw}
         if($message -notlike '*(код выхода 255)*' -and $message -notlike 'Управляющий SSH-сеанс не запущен*' -and $message -notlike 'Управляющий SSH-сеанс прерван*'){throw}
         $config=Join-Path $Root 'config.json'
         if(-not (Test-Path -LiteralPath $config) -or -not (Read-TransportJson $config).transport.channelFirst){throw}
@@ -42,7 +44,7 @@ function Invoke-WizardSsh([string]$Root,[string]$Command,[string]$InputText='',[
         return & $run
     }
 }
-function Send-WizardHelpers([string]$Root,[string]$Bundle) {
+function Send-WizardHelpers([string]$Root,[string]$Bundle,[switch]$RetrySafe) {
     $upload='set -eu; umask 077;'+"`n"
     $files=@{
         'build/server-wizard.sh'='.local/share/remoteagents-wizard/server-wizard.sh'
@@ -81,7 +83,7 @@ print(json.dumps(missing))
     $json=ConvertTo-Json -InputObject @($manifest) -Depth 5 -Compress
     $probe=$probe.Replace('MANIFEST_BASE64',[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)))
     $code=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($probe))
-    $reply=Invoke-WizardSsh $Root ('python3 -c ''import base64;exec(base64.b64decode("'+$code+'"))''')
+    $reply=Invoke-WizardSsh $Root ('python3 -c ''import base64;exec(base64.b64decode("'+$code+'"))''') -RetrySafe:$RetrySafe
     if([string]::IsNullOrWhiteSpace($reply)){$reply=ConvertTo-Json -InputObject @($files.Keys) -Compress}
     $received=ConvertFrom-Json (Convert-TransportLF $reply);$missing=@()
     foreach($item in $received){if($null -ne $item){$missing+=[string]$item}}
@@ -98,11 +100,11 @@ print(json.dumps(missing))
         $upload+='mkdir -p "'+$directory+'"; test ! -L "'+$dest+'"; printf %s '+[Convert]::ToBase64String($bytes)+' | base64 -d > "'+$temp+'"; mv -f -- "'+$temp+'" "'+$dest+'"'+"`n"
         if($bridgeHelper){$upload+='fi'+"`n"}
     }
-    [void](Invoke-WizardSsh $Root 'bash -s' $upload)
+    [void](Invoke-WizardSsh $Root 'bash -s' $upload -RetrySafe:$RetrySafe)
 }
-function Get-WizardServer([string]$Root,[string]$Bundle) {
+function Get-WizardServer([string]$Root,[string]$Bundle,[switch]$RetrySafe) {
     # Read-only script is streamed, so observing a configured server installs nothing.
-    $text=Invoke-WizardSsh $Root 'bash -s' ([IO.File]::ReadAllText((Join-Path $Bundle 'build/server-wizard.sh')))
+    $text=Invoke-WizardSsh $Root 'bash -s' ([IO.File]::ReadAllText((Join-Path $Bundle 'build/server-wizard.sh'))) -RetrySafe:$RetrySafe
     $server=ConvertFrom-Json (Convert-TransportLF $text);$server|Add-Member -Force ssh $true
     if($server.operations){Add-WizardOperationText $server.operations}
     return $server
@@ -499,8 +501,8 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             return @{items=@(Get-DiskExternalList)}
         }
         'Disk' {
-            Send-WizardHelpers $Root $Bundle
-            $server=Get-WizardServer $Root $Bundle
+            Send-WizardHelpers $Root $Bundle -RetrySafe
+            $server=Get-WizardServer $Root $Bundle -RetrySafe
             if(-not $server.disk){
                 $op=(Get-WizardOperation $Root $Bundle 'status' @('disk')).disk
                 if($op.state -ne 'running'){$op=(Get-WizardOperation $Root $Bundle 'start' @('disk')).disk}
@@ -531,7 +533,7 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
                 if(-not (Test-Path (Join-Path $diskHome 'selection.json'))){Write-TransportJson (Join-Path $diskHome 'selection.json') @{schema=1;paths=@();placeholder=$true}}
                 Invoke-InstallChild $Bundle 'disk/Install-RemoteDisk.ps1' @('-Profile',$profile,'-HelpersReady') -TimeoutSeconds 900
             }
-            Set-WizardDiskChannel $Root
+            Set-WizardDiskChannel $Root -RetrySafe
             Read-DiskState;$local=Invoke-DiskApi 'system/status';if(-not $local.myID){throw 'Syncthing не отвечает; повторите установку диска'}
             # The engine is installed and answers: hand it to the tray's supervisor BEFORE the selection. The engine started by
             # this step dies with the step's job; if a folder then fails, the supervised engine keeps running and the tree loads.

@@ -149,11 +149,11 @@ function Get-WizardHostId([string]$Root) {
 
 function Test-WizardWindows {return $env:OS -eq 'Windows_NT'}
 function Get-WizardInteractiveUser {return [Security.Principal.WindowsIdentity]::GetCurrent().Name}
-function Set-WizardDiskChannel([string]$Root) {
+function Set-WizardDiskChannel([string]$Root,[switch]$RetrySafe) {
     Invoke-WizardResourceLock $Root 'connection' {
         $config=Read-TransportJson (Join-Path $Root 'config.json')
         if(-not $config.transport.channelPath){throw 'Сначала завершите раздел «Связь», затем повторите диск'}
-        $ports=ConvertFrom-Json (Convert-TransportLF (Invoke-WizardSsh $Root 'cat "$HOME/.local/share/remote-disk/ports.json"'))
+        $ports=ConvertFrom-Json (Convert-TransportLF (Invoke-WizardSsh $Root 'cat "$HOME/.local/share/remote-disk/ports.json"' -RetrySafe:$RetrySafe))
         $port=[int]$ports.listen;if($port -lt 1 -or $port -gt 65535){throw 'Сервер диска не сообщил порт Syncthing'}
         $channel=Read-TransportJson $config.transport.channelPath
         $existing=@($channel.inbounds|Where-Object {$_.tag -eq 'sync'})

@@ -23,7 +23,7 @@ try{
         $upload+='printf %s '+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($source))+' | base64 -d > "'+$temp+'"; mv -f -- "'+$temp+'" "'+$remote+'"'+"`n"
     }
     $upload+=Get-DiskIgnoreUpload
-    [void](Invoke-DiskSsh 'bash -s' -InputText $upload)
+    [void](Invoke-DiskSsh 'bash -s' -InputText $upload -RetrySafe)
     $lock=[IO.File]::Open((Join-Path $script:DiskHome 'folders.lock'),'OpenOrCreate','ReadWrite','None')
     try{
         if($Action -eq 'Tree'){
