@@ -49,6 +49,8 @@ function Send-WizardHelpers([string]$Root,[string]$Bundle) {
         'transport/server-transport-catalog.py'='.local/share/remoteagents-wizard/server-transport-catalog.py'
         'accounts/server-account.mjs'='.local/share/remoteagents-accounts/server-account.mjs'
         'accounts/bootstrap.sh'='.local/share/remoteagents-accounts/bootstrap.sh'
+        'cloud/server-cloud.sh'='.local/share/remoteagents-cloud/server-cloud.sh'
+        'cloud/filter.txt'='.local/share/remoteagents-cloud/filter.txt'
         'disk/server-disk.sh'='.local/share/remote-disk/server-disk.sh'
         'disk/stignore.txt'='.local/share/remote-disk/stignore.txt'
         'disk/stignore-previous.sha256'='.local/share/remote-disk/stignore-previous.sha256'
