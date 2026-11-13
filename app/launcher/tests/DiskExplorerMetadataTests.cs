@@ -70,8 +70,50 @@ namespace RemoteAgents.Launcher
             string fresh = Path.GetFullPath("/FreshDisk");
             service.Reconcile(fresh, new[] { new DiskExplorerFolder { Name = "remote", ServerOnly = true } }, null);
             Check(service.IsPlaceholder(Path.Combine(fresh, "remote")), "fresh Disk root created for confirmed inventory");
+            External();
             Registry();
             Console.WriteLine("Explorer metadata: " + checks + " checks passed");
+        }
+        static void External()
+        {
+            var fs = new FakeFiles(); var notify = new FakeNotify(); var logs = new List<string>();
+            var service = new DiskExplorerService(fs, new FakeIcons(), notify, logs.Add);
+            string parent = Path.GetFullPath("/External"), target = Path.Combine(parent, "source"), sibling = Path.Combine(parent, "sibling");
+            fs.CreateDirectory(parent); fs.CreateDirectory(target); fs.CreateDirectory(sibling);
+            fs.Attributes(target, FileAttributes.Directory | FileAttributes.ReadOnly | FileAttributes.Hidden);
+            fs.Write(Path.Combine(target, "project.txt"), "user data");
+            fs.Write(Path.Combine(target, ".stignore"), "desktop.ini\r\n");
+            fs.Write(Path.Combine(sibling, "desktop.ini"), "foreign sibling\r\n");
+            var snapshot = new DiskSyncSnapshot { Connected = true, Failure = "" };
+            var folder = new DiskSyncFolder { Id = "external-id", Path = target, Shared = true };
+            folder.Status["state"] = "idle"; folder.Status["needFiles"] = 0; folder.Status["needBytes"] = 0;
+            snapshot.Folders["remote"] = folder;
+            int enumerations = fs.Enumerations;
+            Check(service.ReconcileExternal(target, "remote", snapshot, true), "configured external source accepts direct customization");
+            string ini = Path.Combine(target, "desktop.ini");
+            Check(fs.Read(ini).Contains("Synced.ico") && fs.Read(ini).Contains("InfoTip=На компьютере и на сервере") && fs.Read(ini).Contains("Placeholder=0"), "external source uses actual shared snapshot");
+            Check(fs.Enumerations == enumerations, "external customization never enumerates target, parent or siblings");
+            int writes = fs.Writes, attributes = fs.AttributeWrites, changes = notify.Changes;
+            Check(service.ReconcileExternal(target, "remote", snapshot, true) && fs.Writes == writes && fs.AttributeWrites == attributes && notify.Changes == changes, "external customization is idempotent");
+            folder.Status["state"] = "syncing"; folder.Status["needFiles"] = 2; folder.Status["globalBytes"] = 100; folder.Status["inSyncBytes"] = 45;
+            service.ReconcileExternal(target, "remote", snapshot, true);
+            Check(fs.Read(ini).Contains("Syncing.ico") && fs.Read(ini).Contains("Синхронизация 45%"), "external source updates transfer progress");
+            folder.Path = Path.Combine(parent, "different"); service.ReconcileExternal(target, "remote", snapshot, true);
+            Check(fs.Read(ini).Contains("Unavailable.ico"), "snapshot for a different external source cannot show completion");
+            service.CleanupExternal(target); service.CleanupExternal(target);
+            Check(fs.DirectoryExists(target) && !fs.FileExists(ini) && fs.Read(Path.Combine(target, "project.txt")) == "user data", "external cleanup only removes owned metadata");
+            Check((fs.Attributes(target) & (FileAttributes.ReadOnly | FileAttributes.Hidden)) == (FileAttributes.ReadOnly | FileAttributes.Hidden), "external cleanup restores original RO and preserves hidden flag");
+            Check(fs.Read(Path.Combine(sibling, "desktop.ini")) == "foreign sibling\r\n" && fs.Enumerations == enumerations, "external cleanup leaves siblings untouched without enumeration");
+            fs.Write(ini, "[.ShellClassInfo]\r\nInfoTip=foreign\r\n"); writes = fs.Writes;
+            Check(!service.ReconcileExternal(target, "remote", snapshot, true) && fs.Writes == writes && logs.Any(x => x.Contains("чужой")), "external foreign metadata is preserved and logged");
+            fs.Attributes(target, fs.Attributes(target) | FileAttributes.ReparsePoint);
+            Check(!service.ReconcileExternal(target, "remote", snapshot, true), "external target cannot itself be a junction");
+            fs.Attributes(target, FileAttributes.Directory); fs.Attributes(parent, FileAttributes.Directory | FileAttributes.ReparsePoint);
+            Check(!service.ReconcileExternal(target, "remote", snapshot, true), "external target under a junction is rejected");
+            fs.Attributes(parent, FileAttributes.Directory);
+            string missing = Path.Combine(parent, "missing");
+            Check(!service.ReconcileExternal(missing, "remote", snapshot, true) && !fs.DirectoryExists(missing), "external customization never creates a missing source");
+            Check(!service.ReconcileExternal(target, "bad\r\nname", snapshot, true), "external name rejects CRLF injection");
         }
         static void Registry()
         {
@@ -98,12 +140,12 @@ namespace RemoteAgents.Launcher
         {
             sealed class Entry { internal FileAttributes Attributes; internal string Content; }
             readonly Dictionary<string, Entry> entries = new Dictionary<string, Entry>(StringComparer.OrdinalIgnoreCase);
-            internal int Writes, AttributeWrites;
+            internal int Writes, AttributeWrites, Enumerations;
             public bool DirectoryExists(string path) { Entry e; return entries.TryGetValue(path, out e) && (e.Attributes & FileAttributes.Directory) != 0; }
             public bool FileExists(string path) { Entry e; return entries.TryGetValue(path, out e) && (e.Attributes & FileAttributes.Directory) == 0; }
             public FileAttributes Attributes(string path) { return entries[path].Attributes; }
             public void Attributes(string path, FileAttributes value) { entries[path].Attributes = value; AttributeWrites++; }
-            public IEnumerable<string> Entries(string path) { return entries.Keys.Where(p => Path.GetDirectoryName(p) == path).ToArray(); }
+            public IEnumerable<string> Entries(string path) { Enumerations++; return entries.Keys.Where(p => Path.GetDirectoryName(p) == path).ToArray(); }
             public string Read(string path) { return entries[path].Content; }
             public void Write(string path, string content) { entries[path] = new Entry { Content = content, Attributes = FileAttributes.Normal }; Writes++; }
             public void CreateDirectory(string path) { if (!DirectoryExists(path)) entries[path] = new Entry { Attributes = FileAttributes.Directory }; }

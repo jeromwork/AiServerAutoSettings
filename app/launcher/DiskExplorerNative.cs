@@ -60,7 +60,13 @@ namespace RemoteAgents.Launcher
                     foreach (int size in sizes) using (var bitmap = new Bitmap(size, size, PixelFormat.Format32bppArgb)) {
                         using (var g = Graphics.FromImage(bitmap)) {
                             g.Clear(Color.Transparent); g.SmoothingMode = SmoothingMode.AntiAlias; g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                            g.DrawIcon(folder, new Rectangle(0, 0, size, size)); DrawBadge(g, kind, size);
+                            if (kind == DiskExplorerKind.ServerOnly) {
+                                using (var source = folder.ToBitmap()) using (var attributes = new ImageAttributes()) {
+                                    var faded = new ColorMatrix { Matrix33 = .45f }; attributes.SetColorMatrix(faded);
+                                    g.DrawImage(source, new Rectangle(0, 0, size, size), 0, 0, source.Width, source.Height, GraphicsUnit.Pixel, attributes);
+                                }
+                            } else g.DrawIcon(folder, new Rectangle(0, 0, size, size));
+                            DrawBadge(g, kind, size);
                         }
                         using (var stream = new MemoryStream()) { bitmap.Save(stream, ImageFormat.Png); frames.Add(stream.ToArray()); }
                     }
@@ -84,26 +90,31 @@ namespace RemoteAgents.Launcher
         }
         static void DrawBadge(Graphics g, DiskExplorerKind kind, int size)
         {
+            if (kind == DiskExplorerKind.Local) return;
             float d = size * .54f, left = size - d, top = size - d;
-            Color color = kind == DiskExplorerKind.Synced ? Color.FromArgb(25, 145, 72) : kind == DiskExplorerKind.Error ? Color.FromArgb(205, 47, 47) :
-                kind == DiskExplorerKind.Pending || kind == DiskExplorerKind.Paused ? Color.FromArgb(205, 145, 17) :
-                kind == DiskExplorerKind.Syncing || kind == DiskExplorerKind.ServerOnly ? Color.FromArgb(35, 118, 208) : Color.FromArgb(105, 112, 120);
+            if (kind == DiskExplorerKind.ServerOnly) {
+                using (var cloud = new SolidBrush(Color.FromArgb(110, 115, 120))) {
+                    g.FillEllipse(cloud, left + d * .05f, top + d * .43f, d * .48f, d * .46f);
+                    g.FillEllipse(cloud, left + d * .27f, top + d * .21f, d * .48f, d * .63f);
+                    g.FillEllipse(cloud, left + d * .56f, top + d * .44f, d * .4f, d * .45f);
+                    g.FillRectangle(cloud, left + d * .25f, top + d * .62f, d * .5f, d * .26f);
+                }
+                return;
+            }
+            Color color = kind == DiskExplorerKind.Synced ? Color.FromArgb(25, 145, 72) :
+                kind == DiskExplorerKind.Syncing ? Color.FromArgb(35, 118, 208) : Color.FromArgb(218, 158, 20);
             using (var brush = new SolidBrush(color)) g.FillEllipse(brush, left, top, d, d);
             using (var pen = new Pen(Color.White, Math.Max(1, size * .052f))) {
                 pen.StartCap = pen.EndCap = LineCap.Round;
                 Func<float, float, PointF> p = (x, y) => new PointF(left + x * d, top + y * d);
                 if (kind == DiskExplorerKind.Synced) g.DrawLines(pen, new[] { p(.22f, .51f), p(.43f, .7f), p(.78f, .3f) });
-                else if (kind == DiskExplorerKind.Paused) { g.DrawLine(pen, p(.37f, .3f), p(.37f, .72f)); g.DrawLine(pen, p(.65f, .3f), p(.65f, .72f)); }
-                else if (kind == DiskExplorerKind.ServerOnly) { g.DrawLine(pen, p(.5f, .22f), p(.5f, .75f)); g.DrawLines(pen, new[] { p(.27f, .52f), p(.5f, .75f), p(.73f, .52f) }); }
                 else if (kind == DiskExplorerKind.Syncing) {
-                    g.DrawArc(pen, left + d * .24f, top + d * .23f, d * .53f, d * .53f, 35, 250);
-                    g.DrawLines(pen, new[] { p(.66f, .23f), p(.79f, .25f), p(.77f, .43f) });
+                    var ring = new RectangleF(left + d * .23f, top + d * .23f, d * .54f, d * .54f);
+                    g.DrawArc(pen, ring, 20, 135); g.DrawArc(pen, ring, 200, 135);
+                    g.DrawLines(pen, new[] { p(.25f, .47f), p(.26f, .62f), p(.42f, .62f) });
+                    g.DrawLines(pen, new[] { p(.75f, .53f), p(.74f, .38f), p(.58f, .38f) });
                 }
-                else if (kind == DiskExplorerKind.Error) { g.DrawLine(pen, p(.5f, .25f), p(.5f, .53f)); g.DrawLine(pen, p(.5f, .72f), p(.5f, .73f)); }
-                else if (kind == DiskExplorerKind.Offline) g.DrawLine(pen, p(.27f, .73f), p(.73f, .27f));
-                else if (kind == DiskExplorerKind.Unavailable) { g.DrawArc(pen, left + d * .33f, top + d * .22f, d * .35f, d * .3f, 170, 270); g.DrawLine(pen, p(.5f, .57f), p(.5f, .58f)); g.DrawLine(pen, p(.5f, .76f), p(.5f, .77f)); }
-                else if (kind == DiskExplorerKind.Pending) { foreach (float x in new[] { .28f, .5f, .72f }) g.DrawLine(pen, p(x, .5f), p(x, .51f)); }
-                else { g.DrawLine(pen, p(.3f, .5f), p(.7f, .5f)); g.DrawLine(pen, p(.5f, .3f), p(.5f, .7f)); }
+                else { g.DrawLine(pen, p(.5f, .25f), p(.5f, .53f)); g.DrawLine(pen, p(.5f, .72f), p(.5f, .73f)); }
             }
         }
     }

@@ -76,6 +76,30 @@ namespace RemoteAgents.Launcher
                 catch (Exception e) { Failure(e); }
             }
         }
+        // External targets are explicitly configured sources. Never enumerate their parent or follow the Disk junction.
+        internal bool ReconcileExternal(string targetPath, string remoteName, DiskSyncSnapshot snapshot, bool selected)
+        {
+            try {
+                if (!ValidName(remoteName)) { log("Проводник: недопустимое имя внешнего проекта"); return false; }
+                targetPath = Path.GetFullPath(targetPath);
+                if (!fs.DirectoryExists(targetPath) || HasReparseAncestor(targetPath)) { log("Проводник: внешний источник недоступен или является ссылкой"); return false; }
+                var metadata = ReadOwned(targetPath);
+                string ini = Path.Combine(targetPath, "desktop.ini");
+                if ((fs.FileExists(ini) || fs.DirectoryExists(ini)) && metadata == null) { log("Проводник: чужой desktop.ini внешнего источника пропущен"); return false; }
+                DiskSyncFolder sync = null;
+                if (snapshot != null) snapshot.Folders.TryGetValue(remoteName, out sync);
+                if (sync != null && sync.Path.Length > 0 && !DiskSyncSnapshot.SamePath(sync.Path, targetPath)) {
+                    snapshot = DiskSyncSnapshot.Unavailable("путь внешней папки Syncthing изменился"); sync = null;
+                }
+                Apply(targetPath, DiskExplorerPresentation.From(snapshot, sync, selected, false), metadata, false, false);
+                return true;
+            } catch (Exception e) { Failure(e); return false; }
+        }
+        internal void CleanupExternal(string targetPath)
+        {
+            try { CleanupFolder(Path.GetFullPath(targetPath), false); }
+            catch (Exception e) { Failure(e); }
+        }
         internal static bool ValidName(string name)
         { return !string.IsNullOrWhiteSpace(name) && name != "." && name != ".." && name.IndexOfAny(new[] { '/', '\\', ':', '"', '\r', '\n', '\0' }) < 0 && name.TrimEnd(' ', '.') == name && name.IndexOfAny(Path.GetInvalidFileNameChars()) < 0; }
         internal bool HasReparseAncestor(string path)
