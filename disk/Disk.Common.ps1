@@ -42,12 +42,10 @@ function Read-DiskProfile([string]$Profile) {
 }
 function Invoke-DiskSsh($Command,[switch]$Direct,[string]$InputText='',[string]$OutputFile='',[int]$TimeoutSeconds=45) {
     $c=$script:Connection;$args=@('-o','BatchMode=yes','-o','ConnectTimeout=8','-o','StrictHostKeyChecking=yes')
-    $localPort=2222
-    # The launcher's transport serves the server SSH on its configured local port.
-    $launcher=Join-Path $env:LOCALAPPDATA 'RemoteAgents/config.json'
-    if(Test-Path -LiteralPath $launcher){try{$port=[int](Get-Content -LiteralPath $launcher -Raw -Encoding UTF8|ConvertFrom-Json).transport.sshPort;if($port -ge 1 -and $port -le 65535){$localPort=$port}}catch{}}
+    . (Join-Path (Split-Path $PSScriptRoot -Parent) 'transport/Transport.Common.ps1')
+    $root=Join-Path $env:LOCALAPPDATA 'RemoteAgents';$launcher=Join-Path $root 'config.json'
+    $localPort=[int](Get-TransportEffectivePort $root 'sshPort')
     if($Direct){
-        . (Join-Path (Split-Path $PSScriptRoot -Parent) 'transport/Transport.Common.ps1')
         $root=Split-Path $launcher -Parent
         # A manually selected profile must never inherit another server's personal route.
         if(Test-Path -LiteralPath $launcher){
@@ -210,3 +208,21 @@ function Set-DiskBase([string]$Path) {
 
 $selective=Join-Path $PSScriptRoot 'Disk.Selective.ps1';if(Test-Path -LiteralPath $selective){. $selective}
 $navPane=Join-Path $PSScriptRoot 'Disk.NavPane.ps1';if(Test-Path -LiteralPath $navPane){. $navPane}
+
+# Только локальный адрес устройства сервера; остальные настройки устройства сохраняются.
+function Sync-DiskServerAddress([string]$LauncherRoot=(Join-Path $env:LOCALAPPDATA 'RemoteAgents')) {
+    $file=Join-Path $script:DiskHome 'server.txt'
+    if(-not (Test-Path -LiteralPath $file)){return $false}
+    try{
+        if(-not (Get-Command Get-TransportEffectivePort -ErrorAction SilentlyContinue)){. (Join-Path (Split-Path $PSScriptRoot -Parent) 'transport/Transport.Common.ps1')}
+        $peer=[IO.File]::ReadAllText($file).Replace("`r",'').TrimStart([char]0xFEFF).Trim()
+        if(-not $peer){return $false}
+        $route='config/devices/'+[Uri]::EscapeDataString($peer)
+        $device=Invoke-DiskApi $route
+        $address='tcp://127.0.0.1:'+[int](Get-TransportEffectivePort $LauncherRoot 'syncPort')
+        if(@($device.addresses).Count -eq 1 -and [string]$device.addresses[0] -ceq $address){return $false}
+        [void](Invoke-DiskApi $route PATCH @{addresses=@($address)})
+        Write-DiskLog ('Адрес сервера Syncthing обновлён: '+$address)
+        return $true
+    }catch{Write-DiskLog 'Не удалось обновить локальный адрес сервера Syncthing; повторим проверку';return $false}
+}

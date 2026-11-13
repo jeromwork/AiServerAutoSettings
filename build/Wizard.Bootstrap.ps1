@@ -37,7 +37,7 @@ function Connect-WizardSnapshot([string]$Root,$Request) {
         if($launcher.transport.channelFirst){
             # ssh goes straight to the daemon's SSH entry (HostName + HostKeyAlias, like the VPN route), not through a ProxyCommand:
             # Windows OpenSSH stalled the .NET --proxy-connect helper mid key exchange («Комп», 12.11.2026), a plain TCP target did not.
-            $channelAddress=[string](Get-TransportValue $launcher.transport 'channelSshAddress' '127.0.0.2')
+            $channelAddress=[string](Get-TransportEffectivePort $Root 'channelSshAddress')
             if($Request.deferProof -or (Test-WizardChannelPort $port $channelAddress)){$routes=@([pscustomobject]@{kind='direct';channel=$true;address=$channelAddress})+$routes}
         }
         foreach($route in $routes){
@@ -153,7 +153,7 @@ function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request,[int]$Time
     if(-not $initial -or -not $initial.channel){return @{ok=$true;vpn='off';summary='Канал до сервера не задан'}}
     # Skipped only when the channel already works. An earlier installation (wizard.configured, an old daemon) does not
     # count: on a network that cuts SSH it is exactly what fails, so the channel replaces it.
-    $socksPort=[int](Get-TransportValue $config.transport 'channelSocksPort' 2223)
+    $socksPort=[int](Get-TransportEffectivePort $Root 'channelSocksPort')
     $canReuse=$false
     if($config.transport.channelFirst -and -not $config.transport.serverRoute -and -not $config.wizard.serverRoute -and ([string]$config.transport.cacheRoot).StartsWith((Join-Path $Root 'state/bootstrap-cache-'),[StringComparison]::OrdinalIgnoreCase)){
         try{
@@ -163,7 +163,7 @@ function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request,[int]$Time
             # Reuse only a channel the daemon has proved (ok + active): an open SOCKS port over an unproved path hangs SSH.
             $canReuse=($sameServer -and $status.ok -eq $true -and $status.active -and $status.configRevision -ceq (Get-TransportRevision $Root))
             # A daemon of an older build has no channel SSH entry: then it is replaced, not reused.
-            $canReuse=($canReuse -and (Test-WizardChannelPort (Get-TransportServerPort $profile) ([string](Get-TransportValue $config.transport 'channelSshAddress' '127.0.0.2'))))
+            $canReuse=($canReuse -and (Test-WizardChannelPort (Get-TransportServerPort $profile) ([string](Get-TransportEffectivePort $Root 'channelSshAddress'))))
         }catch{$canReuse=$false}
     }
     if($canReuse -and (Test-StatusFresh $Root transport) -and (Test-WizardChannelPort $socksPort)){return @{ok=$true;skipped=$true;vpn='channel';summary='Канал до сервера уже работает'}}
@@ -208,7 +208,6 @@ function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request,[int]$Time
         }
         $t|Add-Member -Force cacheRoot $cache
         Set-WizardBootstrapHops $Root $t $initial $manifest
-        $t|Add-Member -Force channelSshAddress (Find-WizardChannelAddress (Get-TransportServerPort (Read-TransportJson ([string]$t.profilePath))) ([string]$t.channelSshAddress))
         Ensure-WizardTransportBinary $Root $Bundle $t
         # bootstrap: SSH is not proved yet (the step «Связь» removes the flag); openSsh stays at its default.
         if($null -eq $t.probeTimeoutSec){$t|Add-Member -Force probeTimeoutSec 12}
@@ -222,7 +221,7 @@ function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request,[int]$Time
         Stop-WizardOldTransport $Root
         $daemon=Start-WizardWorkingTransport $Root $Bundle
         Write-WizardProgress ('· подготовка и запуск модуля связи '+$prepare.ElapsedMilliseconds+' мс')
-        $tag=Wait-WizardChannel $Root ([int](Get-TransportValue $t 'channelSocksPort' 2223)) $TimeoutSeconds $daemon
+        $tag=Wait-WizardChannel $Root ([int](Get-TransportEffectivePort $Root 'channelSocksPort')) $TimeoutSeconds $daemon
         return @{ok=$true;vpn='channel';channel=$tag;summary=('Канал до сервера поднят: '+$tag)}
     }catch{
         Write-SetupLog $Root 'bootstrap.channel.unavailable'
@@ -251,12 +250,7 @@ function Stop-WizardOldTransport([string]$Root) {
 # The channel SSH entry keeps the server's port on its own loopback address. A local sshd on 0.0.0.0:<port> or an earlier
 # daemon may hold that pair, and sing-box would then not start at all: take the first address that binds now.
 function Find-WizardChannelAddress([int]$Port,[string]$Preferred) {
-    $random=@(1..6|ForEach-Object {'127.0.'+(Get-Random -Minimum 1 -Maximum 255)+'.'+(Get-Random -Minimum 2 -Maximum 255)})
-    foreach($address in @(@($Preferred,'127.0.0.2')+$random|Where-Object {$_ -match '\A127\.\d{1,3}\.\d{1,3}\.\d{1,3}\z' -and $_ -ne '127.0.0.1'}|Select-Object -Unique)){
-        $listener=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Parse($address),$Port)
-        try{$listener.Start();return $address}catch{}finally{$listener.Stop()}
-    }
-    throw ('Нет свободного локального адреса для входа канала (порт '+$Port+')')
+    Find-TransportChannelAddress $Port $Preferred
 }
 function Test-WizardChannelPort([int]$Port,[string]$Address='127.0.0.1') {
     $client=New-Object Net.Sockets.TcpClient
@@ -327,7 +321,7 @@ function Wait-WizardChannel([string]$Root,[int]$Port,[int]$TimeoutSeconds=25,$Da
                 $reasons=@($candidates|ForEach-Object {([string]$_.tag)+': '+$(if($_.diagnostic.reason -match '^[a-z][a-z0-9-]{0,63}$'){$_.diagnostic.reason}else{'fail'})})
                 throw ('все варианты канала не прошли: '+(Protect-TransportText ($reasons -join ', ')))
             }
-            if($status.ok -and $status.active -and (Test-StatusFresh $Root transport) -and (Test-WizardChannelPort $Port)){
+            if($status.ok -and $status.active -and (Test-StatusFresh $Root transport) -and (Test-WizardChannelPort ([int](Get-TransportEffectivePort $Root 'channelSocksPort')))){
                 Write-WizardProgress ('· выбран кандидат канала: '+(Protect-TransportText ([string]$status.active)))
                 Write-WizardProgress ('· канал поднят за '+$watch.ElapsedMilliseconds+' мс')
                 return [string]$status.active

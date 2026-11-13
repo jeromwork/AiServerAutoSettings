@@ -23,6 +23,24 @@ try {
     Write-DiskUtf8 $config $xml;Read-DiskState;$before=$script:Engine.configuration.folder.OuterXml;Save-DiskState @{natEnabled=$false;listenAddresses=@('tcp://127.0.0.1:22000')};$saved=[IO.File]::ReadAllText($config);Read-DiskState
     Assert ($script:Engine.PreserveWhitespace -and $script:Engine.configuration.folder.OuterXml -ceq $before -and $saved.Contains('<encryptionPassword></encryptionPassword>') -and -not $saved.Contains('&#xD;') -and $saved.Replace($script:Engine.configuration.options.OuterXml,'<options><natEnabled>true</natEnabled></options>') -ceq $xml) 'XML save preserves empty passwords and unrelated document'
     Assert ($script:Engine.configuration.options.natEnabled -ceq 'false' -and $script:Engine.configuration.options.listenAddress -ceq 'tcp://127.0.0.1:22000') 'XML options updated and appended'
+    . (Join-Path (Split-Path $PSScriptRoot -Parent) 'transport/Transport.Common.ps1')
+    $portRoot=Join-Path $tmp 'ports';[void][IO.Directory]::CreateDirectory($script:DiskHome)
+    $portsConfig=[pscustomobject]@{syncPort=22001};Write-TransportJson (Join-Path $portRoot 'config.json') @{transport=$portsConfig}
+    $configuredPorts=Get-TransportConfiguredPorts $portsConfig $null;$effectivePorts=Copy-TransportObject $configuredPorts;$effectivePorts.syncPort=22011
+    Write-TransportJson (Join-Path $portRoot 'state/transport-ports.json') @{schema=1;configured=$configuredPorts;effective=$effectivePorts} -Private
+    [IO.File]::WriteAllText((Join-Path $script:DiskHome 'server.txt'),"TEST-PEER`r`n")
+    $script:addresses=@('tcp://127.0.0.1:22001');$script:addressWrites=0
+    function Invoke-RestMethod {
+        param($Uri,$Method,$Headers,$TimeoutSec,$UseBasicParsing,$Body,$ContentType)
+        if($Method -eq 'PATCH'){$script:addresses=@((ConvertFrom-Json ([Text.Encoding]::UTF8.GetString($Body))).addresses);$script:addressWrites++}
+        [pscustomobject]@{addresses=$script:addresses;name='Имя устройства'}
+    }
+    $script:Gui='127.0.0.1:8384';$script:ApiKey='test'
+    Assert (Sync-DiskServerAddress $portRoot) 'Адрес Syncthing следует за эффективным портом; server.txt с CRLF'
+    Assert ($script:addresses[0] -ceq 'tcp://127.0.0.1:22011' -and $script:addressWrites -eq 1) 'Изменён только локальный адрес устройства'
+    Assert (-not (Sync-DiskServerAddress $portRoot) -and $script:addressWrites -eq 1) 'Верный адрес повторно не записывается'
+    function Invoke-RestMethod {throw 'Тестовый отказ REST'}
+    Assert (-not (Sync-DiskServerAddress $portRoot)) 'Недоступный REST не останавливает монитор'
     function Invoke-RestMethod {Write-Output -NoEnumerate $script:ApiResponse}
     $script:Gui=$null;$script:ApiKey=$null;$script:ApiResponse=[pscustomobject]@{myID='lazy'};$null=Invoke-DiskApi 'system/status';Assert ($script:Gui -eq '127.0.0.1:8384' -and $script:ApiKey -eq 'test') 'CLI lazily loads engine state'
     $script:Gui='127.0.0.1:8384';$script:ApiResponse=@([pscustomobject]@{id='first';path='first'},[pscustomobject]@{id='second';path='second'});$captured=@(Invoke-DiskApi 'config/folders');Assert ($captured.Count -eq 2 -and $captured[0].id -ceq 'first' -and $captured[1].id -ceq 'second') 'PS5 REST array is emitted as individual folders'

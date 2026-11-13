@@ -21,9 +21,10 @@ function Invoke-WizardReadOnlySsh([string]$Root,[string]$Command,[string]$Contex
         $Profile=Read-TransportJson $file
     }
     $p=$Profile;$c=Read-TransportJson (Join-Path $Root 'config.json')
-    $port=[int](Get-TransportValue $c.transport 'sshPort' 2222);$address='127.0.0.1';$path='канал'
+    $ports=Get-TransportEffectivePorts $Root
+    $port=[int]$ports.sshPort;$address='127.0.0.1';$path='канал'
     if($c.transport.channelFirst){
-        $address=[string](Get-TransportValue $c.transport 'channelSshAddress' '127.0.0.2')
+        $address=[string]$ports.channelSshAddress
         $port=Get-TransportServerPort $p
     }
     elseif(-not $c.transport.channelPath){$address=[string]$p.serverAddress;$port=Get-TransportServerPort $p;$path='сохранённый SSH-маршрут'}

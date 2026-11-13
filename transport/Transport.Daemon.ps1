@@ -25,7 +25,7 @@ function Publish-TransportStatus {
     $id=$null;if($network){$id=$network.id}
     $summary='нет связи: '+$(if($errorText){$errorText}else{'нет проверенного пути'})
     if($alive -and $confirmed -and $row){$summary=$row.title;if($null -ne $speed){$summary+=' · '+([Math]::Round([double]$speed,1)).ToString([Globalization.CultureInfo]::InvariantCulture)+' КБ/с'}}
-    Write-TransportJson (Join-Path $root 'status/transport.json') ([ordered]@{portConflict=$portConflict;retryAt=$retryAt.ToUniversalTime().ToString('o');configRevision=$revision;fatal=($exitCode -ne 0);summary=$summary;ok=[bool]($alive -and $confirmed);active=$active;kbps=$speed;network=$id;metered=$metered;mode=$pin.mode;pinnedTag=$pin.tag;candidates=@($rows);configError=$reloadError;updatedAt=[DateTime]::UtcNow.ToString('o');error=$errorText})
+    Write-TransportJson (Join-Path $root 'status/transport.json') ([ordered]@{ports=$(if($settings){Get-TransportConfiguredPorts ([pscustomobject]$settings.Options) $settings.Profile}else{$null});portConflict=$portConflict;retryAt=$retryAt.ToUniversalTime().ToString('o');configRevision=$revision;fatal=($exitCode -ne 0);summary=$summary;ok=[bool]($alive -and $confirmed);active=$active;kbps=$speed;network=$id;metered=$metered;mode=$pin.mode;pinnedTag=$pin.tag;candidates=@($rows);configError=$reloadError;updatedAt=[DateTime]::UtcNow.ToString('o');error=$errorText})
     $script:lastStatus=[DateTime]::UtcNow
 }
 function Set-DaemonNextActive {
@@ -109,14 +109,36 @@ function Wait-TransportEngineReady([int]$Port,[int]$TimeoutMs) {
     }
     return $false
 }
-function Start-TransportEngine([switch]$Validated) {
+function Reset-DaemonPorts {
+    # Старые туннели тоже держат локальные порты; проверяем после их остановки.
+    Stop-TransportProbes
+    foreach($child in @($tunnelChildren.Values)){Stop-TransportProcess $child};$tunnelChildren.Clear()
+    $before=Get-TransportConfiguredPorts ([pscustomobject]$settings.Options) $settings.Profile
+    $probeCount=0;$socksCount=0
+    foreach($c in $paths.AllCandidates){if($c.port -gt 0){$probeCount=[Math]::Max($probeCount,([int]$c.port-[int]$settings.Options.probePortBase+1))}}
+    foreach($o in $paths.Outbounds){if($o.type -eq 'socks' -and $o.server -eq '127.0.0.1'){$socksCount=[Math]::Max($socksCount,([int]$o.server_port-[int]$settings.Options.socksPortBase+1))}}
+    $inputRevision=Get-TransportRevision $root
+    $script:settings=Resolve-TransportPorts $root $settings $probeCount $socksCount
+    $script:paths=Get-TransportCandidates $settings $root
+    # Смена HostName в сохранённых argv профиля меняет его хэш, но уже применена нами.
+    if($inputRevision -ceq $revision){$script:revision=Get-TransportRevision $root;$script:observedRevision=$revision}
+    return (-not (Test-TransportPortsEqual $before (Get-TransportConfiguredPorts ([pscustomobject]$settings.Options) $settings.Profile)))
+}
+function Get-DaemonRestartDelay($Detail) {
+    if($Detail.portConflict){
+        try{if(Reset-DaemonPorts){$script:bindRetry=$null}}catch{Write-TransportLog $root 'process-failed' (Get-TransportErrorDetail $_)}
+    }
+    Get-TransportRestartDelay ([double]$settings.Options.restartDelaySec) $(if($bindRetry){$bindRetry.failures}else{0})
+}
+function Start-TransportEngine {
+    [void](Reset-DaemonPorts)
     $script:confirmed=$false
     $interface='';if($network -and $settings.Options.bindPhysical){$interface=[string]$network.interface}
     if($settings.Options.bindPhysical -and -not $interface){throw 'Физический интерфейс недоступен'}
     $cfg=New-TransportConfig $settings $paths $secret $active $interface
     $file=Join-Path $root 'state/transport-sing-box.json';Write-TransportJson $file $cfg -Private
     # Валидация до запуска; stdout/stderr не публикуются, т.к. могут содержать адреса и секреты.
-    if(-not $Validated){Test-TransportConfigFile $settings.Options.singBoxPath $file}
+    Test-TransportConfigFile $settings.Options.singBoxPath $file
     $script:engine=Start-TransportProcess $settings.Options.singBoxPath @('run','-c',$file)
     Save-TransportOwner $root 'transport' $engine $settings.Options.singBoxPath $file
     foreach($tunnel in $paths.Tunnels){
@@ -186,6 +208,8 @@ try{
                             param($scripts,$homeRoot,$apiSecret,$nic,$rev)
                             . (Join-Path $scripts 'Transport.Common.ps1')
                             $newSettings=Read-TransportSettings $homeRoot;Sync-TransportEntryCache $newSettings $homeRoot;$stableRevision=Get-TransportRevision $homeRoot;$newSettings=Read-TransportSettings $homeRoot;$newPaths=Get-TransportCandidates $newSettings $homeRoot
+                            $probeCount=@($newPaths.AllCandidates|Where-Object {$_.port -gt 0}).Count;$socksCount=$probeCount
+                            $newSettings=Resolve-TransportPorts $homeRoot $newSettings $probeCount $socksCount -Preview;$newPaths=Get-TransportCandidates $newSettings $homeRoot
                             $newConfig=New-TransportConfig $newSettings $newPaths $apiSecret 'unavailable' $nic
                             $checkFile=Join-Path $homeRoot 'state/transport-pending.json';Write-TransportJson $checkFile $newConfig -Private
                             Test-TransportConfigFile $newSettings.Options.singBoxPath $checkFile
@@ -201,20 +225,12 @@ try{
                 $result=Receive-Job $reloadJob -ErrorAction Stop
                 if(-not $result -or $reloadJob.State -ne 'Completed'){throw 'Reload failed'}
                 Stop-TransportProbes;$rankPending=$false;$rankQueue=$null
-                # Сохраняем неизменившиеся SSH -D; только изменённые/удалённые туннели закрываются.
-                foreach($tag in @($tunnelChildren.Keys)){
-                    $old=$paths.Tunnels|Where-Object {$_.tag -eq $tag}|Select-Object -First 1
-                    $new=$result.Paths.Tunnels|Where-Object {$_.tag -eq $tag}|Select-Object -First 1
-                    if(-not $new -or (ConvertTo-Json $old -Compress -Depth 20) -ne (ConvertTo-Json $new -Compress -Depth 20)){
-                        Stop-TransportProcess $tunnelChildren[$tag];$tunnelChildren.Remove($tag)
-                    }
-                }
                 Stop-TransportProcess $engine;$engine=$null;$settings=$result.Settings;$paths=$result.Paths;$revision=$result.Revision
                 $diagnosticContext=@(Get-TransportDiagnosticContext $settings $root)
                 $rows=@(Get-TransportRemembered $memory $network.id $paths.AllCandidates)
                 $active=Get-TransportSelection $pin $rows $paths.Candidates $active;$confirmed=$false;$retryAt=$now
                 $bindRetry=$null;$portConflict=$null
-                Start-TransportEngine -Validated;$reloadError=$null;$errorText='Конфиг применён; ожидается проверка пути'
+                Start-TransportEngine;$reloadError=$null;$errorText='Конфиг применён; ожидается проверка пути'
                 Write-TransportLog $root 'restart'
             }catch{$reloadError='Новый конфиг не применён; проверьте списки узлов и кэш секретов';$nextReload=[DateTime]::UtcNow.AddSeconds(5)}
             finally{Remove-Job $reloadJob -Force;$reloadJob=$null}
@@ -251,7 +267,7 @@ try{
             $portConflict=$detail.portConflict
             if($portConflict){$errorText=$portConflict.message}
             $bindRetry=Get-TransportBindRetry $bindRetry $detail
-            $retryAt=$now.AddSeconds((Get-TransportRestartDelay ([double]$settings.Options.restartDelaySec) $(if($bindRetry){$bindRetry.failures}else{0})));Write-TransportLog $root 'restart'
+            $retryAt=$now.AddSeconds((Get-DaemonRestartDelay $detail));Write-TransportLog $root 'restart'
             Publish-TransportStatus
         }
         if(-not $engine -and $now -ge $retryAt){
@@ -267,7 +283,7 @@ try{
                 $portConflict=$detail.portConflict
                 if($portConflict){$errorText=$portConflict.message}
                 $bindRetry=Get-TransportBindRetry $bindRetry $detail
-                $retryAt=$now.AddSeconds((Get-TransportRestartDelay ([double]$settings.Options.restartDelaySec) $(if($bindRetry){$bindRetry.failures}else{0})))
+                $retryAt=$now.AddSeconds((Get-DaemonRestartDelay $detail))
                 Publish-TransportStatus
             }
         }

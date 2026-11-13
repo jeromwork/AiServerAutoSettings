@@ -70,6 +70,7 @@ namespace RemoteAgents.Launcher
             if (string.IsNullOrWhiteSpace(target) || target.Contains("\n") || target.Contains("\r")) throw new InvalidDataException("Нет адреса SSH");
             int port = Json.Int(update, "viaLocalPort", 0);
             if (port != 0) {
+                port = TransportPorts.LocalSsh(home, port);
                 if (port < 1 || port > 65535) throw new InvalidDataException("Неверный локальный порт");
                 int at = target.LastIndexOf('@'); string user = at >= 0 ? target.Substring(0, at + 1) : "";
                 string host = Json.Text(update, "hostKeyAlias", Json.Text(profile, "serverAddress", at >= 0 ? target.Substring(at + 1) : target));

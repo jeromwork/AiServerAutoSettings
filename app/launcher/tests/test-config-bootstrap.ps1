@@ -28,8 +28,11 @@ function Start-WizardWorkingTransport($Root,$Bundle){
     Assert ((Read-TransportJson $c.transport.channelPath).inbounds[0].override_port -eq 23456) 'channel snapshot applied before the daemon starts'
     [void]$script:events.Add('daemon')
     if(-not $script:daemonOk){return}
-    if(-not $script:listener){$script:listener=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,$channelPort);$script:listener.Start()}
-    if(-not $script:sshEntry){$script:sshEntry=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Parse([string]$c.transport.channelSshAddress),(Get-TransportServerPort (Read-TransportJson ([string]$c.transport.profilePath))));$script:sshEntry.Start()}
+    foreach($listener in @($script:listener,$script:sshEntry)){if($listener){$listener.Stop()}};$script:listener=$null;$script:sshEntry=$null
+    $settings=[pscustomobject]@{Transport=$c.transport;Options=(Get-TransportPortDefaults);Profile=(Read-TransportJson $c.transport.profilePath);Channel=(Read-TransportJson $c.transport.channelPath)}
+    [void](Resolve-TransportPorts $Root $settings 0 0)
+    if(-not $script:listener){$script:listener=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,([int](Get-TransportEffectivePort $Root 'channelSocksPort')));$script:listener.Start()}
+    if(-not $script:sshEntry){$script:sshEntry=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Parse([string](Get-TransportEffectivePort $Root 'channelSshAddress')),(Get-TransportServerPort (Read-TransportJson ([string]$c.transport.profilePath))));$script:sshEntry.Start()}
     Write-TransportJson (Join-Path $Root 'status/transport.json') ([ordered]@{configRevision=(Get-TransportRevision $Root);summary='fixture';ok=$true;active='vless-relay-sparfum';candidates=@(@{tag='vless-direct';enabled=$true},@{tag='vless-relay-sparfum';enabled=$true});updatedAt=[DateTime]::UtcNow.ToString('o');error=$null})
 }
 $channel=Join-Path $root 'secrets/channel.json';Write-TransportJson $channel @{inbounds=@(@{tag='sync';override_port=23456});outbounds=@()} -Private
@@ -179,7 +182,7 @@ function Start-WizardWorkingTransport($Root,$Bundle){& $realStart $Root $Bundle}
 Reset
 $watch=[Diagnostics.Stopwatch]::StartNew();$r=Invoke-WizardStep $root $bundle 'Bootstrap' $request
 $exitMs=$watch.ElapsedMilliseconds
-Assert (-not $r.ok -and $exitMs -lt 3000 -and $r.summary -like '*Нет файла канала @fixture.ps1:7*' -and $r.summary -notlike '*старая причина*') 'an immediately exited daemon fails Bootstrap in less than three seconds with the new fatal reason'
+Assert (-not $r.ok -and $exitMs -lt 3000 -and $r.summary -like '*Нет файла канала @fixture.ps1:7*' -and $r.summary -notlike '*старая причина*') ('an immediately exited daemon fails Bootstrap in less than three seconds with the new fatal reason: '+$exitMs+' мс; '+$r.summary)
 Assert ($r.summary -notlike '*short-test*' -and $r.summary -like '*<redacted>*') 'raw daemon output is sanitized before the summary'
 $raw=[IO.File]::ReadAllText((Join-Path $root 'logs/transport-daemon.out'))
 Assert ($raw.Contains('stdout password=short-test') -and $raw.Contains('stderr token=short-test')) 'both daemon pipes persist in the private file'
@@ -247,7 +250,7 @@ $r=Invoke-WizardStep $root $bundle 'Bootstrap' $request
 Assert (-not $r.ok -and $r.vpn -eq 'channel-failed') 'channel hop without its materialized key is an honest failure'
 
 # Daemon config: the channel SOCKS entry and its rules come first; without channelFirst nothing changes.
-$options=@{sshPort=2222;channelSocksPort=2223;syncPort=22001;probePortBase=26000;socksPortBase=28000;apiPort=29090;bindPhysical=$false;openSsh=$true}
+$options=@{channelSshAddress=(Get-TransportPortDefaults).channelSshAddress;sshPort=2222;channelSocksPort=2223;syncPort=22001;probePortBase=26000;socksPortBase=28000;apiPort=29090;bindPhysical=$false;openSsh=$true}
 $settings=[pscustomobject]@{Options=$options;Transport=[pscustomobject]@{channelFirst=$true};Profile=[pscustomobject]@{arguments=@('-p','2022')};Channel=[pscustomobject]@{inbounds=@();outbounds=@()}}
 $paths=[pscustomobject]@{Candidates=@();Outbounds=@()}
 $cfg=New-TransportConfig $settings $paths 'fixture-secret' 'unavailable'

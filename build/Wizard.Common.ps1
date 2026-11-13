@@ -320,7 +320,7 @@ function Test-WizardNetworkProof([string]$Root,[DateTime]$Mark) {
     $observed=Read-TransportJson $status
     if($observed.configError -or $observed.configRevision -cne (Get-TransportRevision $Root)){return $false}
     $config=Read-TransportJson (Join-Path $Root 'config.json')
-    return Test-LocalSsh $Root ([int](Get-TransportValue $config.transport 'sshPort' 2222))
+    return Test-LocalSsh $Root ([int](Get-TransportEffectivePort $Root 'sshPort'))
 }
 function Set-WizardNetwork([string]$Root,[string]$Bundle,$Transport) {
     # Separate ports and real SSH check BEFORE touching the working daemon.

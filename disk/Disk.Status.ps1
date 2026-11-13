@@ -115,7 +115,7 @@ $engineOwned=$false
 try {
 try{$engineOwned=$engineMutex.WaitOne(0)}catch [Threading.AbandonedMutexException]{$engineOwned=$true}
 if(-not $engineOwned){throw 'Надзор Syncthing уже работает'}
-$script:DiskEngine=$null;$nextNavPaneCheck=[DateTime]::MinValue
+$script:DiskEngine=$null;$nextNavPaneCheck=[DateTime]::MinValue;$nextPortCheck=[DateTime]::MinValue;$portsStamp=''
 do {
     if(Test-Path (Join-Path $LauncherHome 'state/disk-reconfigure')){
         Write-TransportJson (Join-Path $LauncherHome 'status/disk.json') @{ok=$false;summary='Диск отключён для смены сервера; файлы сохранены';updatedAt=[DateTime]::UtcNow.ToString('o')}
@@ -126,6 +126,12 @@ do {
         $nextNavPaneCheck=[DateTime]::UtcNow.AddMinutes(5)
     }
     try{Start-DiskHeadless}catch{Write-DiskMonitorLog 'engine.start.failed'}
+    $portFile=Join-Path $LauncherHome 'state/transport-ports.json';$stamp=''
+    try{if(Test-Path -LiteralPath $portFile){$stamp=(Get-Item -LiteralPath $portFile).LastWriteTimeUtc.Ticks.ToString()}}catch{}
+    if($stamp -cne $portsStamp -or [DateTime]::UtcNow -ge $nextPortCheck){
+        if(Sync-DiskServerAddress $LauncherHome){Write-DiskMonitorLog 'Локальный адрес сервера Syncthing обновлён'}
+        $portsStamp=$stamp;$nextPortCheck=[DateTime]::UtcNow.AddSeconds(30)
+    }
     $pauseFile=Join-Path $LauncherHome 'state/disk-pause.json'
     try{if(Test-Path -LiteralPath $pauseFile){$pause=Read-TransportJson $pauseFile;if($pause.until -and (Convert-TransportUtc $pause.until) -le [DateTime]::UtcNow){Set-DiskPause Resume}}}catch{}
     $status=Get-DiskMonitorStatus

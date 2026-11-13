@@ -78,13 +78,14 @@ function Get-TransportErrorDetail($ErrorRecord) {
 }
 function Write-TransportLog([string]$Root,[string]$Event,$Detail='') {
     # Structured process diagnostics are sanitized with the loaded credential values before logging.
-    $allowed=@('start','ready','switch','probe-ok','probe-failed','network-change','restart','api-failed','process-failed','memory-invalid','network-unavailable','stop','fatal')
+    $allowed=@('start','ready','switch','probe-ok','probe-failed','network-change','restart','api-failed','process-failed','memory-invalid','network-unavailable','stop','fatal','port-moved','channel-address-moved')
     if($Event -notin $allowed){$Event='process-failed'}
     $dir=Join-Path $Root 'logs';[void][IO.Directory]::CreateDirectory($dir);$path=Join-Path $dir 'transport.log'
     if([IO.File]::Exists($path) -and (Get-Item -LiteralPath $path).Length -ge 1MB){Move-Item -LiteralPath $path -Destination ($path+'.1') -Force}
     $line=[DateTime]::UtcNow.ToString('o')+' '+$Event
     # Plain exception text is rejected; callers supply a sanitized diagnostic or safe script location.
-    if($Detail -is [pscustomobject] -and $Detail.PSObject.Properties['reason']){$line+=' '+(Format-TransportDiagnostic $Detail)}
+    if($Event -in @('port-moved','channel-address-moved') -and $Detail -is [pscustomobject] -and $Detail.PSObject.Properties['message']){$line+=' '+([string]$Detail.message -replace '[\r\n]',' ')}
+    elseif($Detail -is [pscustomobject] -and $Detail.PSObject.Properties['reason']){$line+=' '+(Format-TransportDiagnostic $Detail)}
     elseif($Detail -match '^(.+) @[\w.-]+:\d+$'){$head=$Matches[1];if($head -match '^[A-Za-z0-9_.]+$' -or ($head -match '[А-Яа-яЁё]' -and $head -notmatch '[A-Za-z0-9+/_=-]{12,}')){$line+=' '+$Detail}}
     [IO.File]::AppendAllText($path,($line+"`n"),(New-Object Text.UTF8Encoding($false)))
 }
@@ -191,10 +192,22 @@ function New-TransportRouteOptions($Route,$Profile,[string]$ProxyExecutable='',[
 }
 function Get-TransportSavedRoute([string]$Root) {
     $file=Join-Path $Root 'config.json'
-    if(Test-Path -LiteralPath $file){return (Read-TransportJson $file).wizard.serverRoute}
+    if(Test-Path -LiteralPath $file){
+        $config=Read-TransportJson $file;$route=$config.wizard.serverRoute
+        if($route -and $route.used -eq 'proxy' -and $route.proxy.host -in @('127.0.0.1','localhost')){
+            $ports=Get-TransportEffectivePorts $Root;$configured=Get-TransportConfiguredPorts $config.transport $null
+            if([int]$route.proxy.port -eq [int]$configured.channelSocksPort){$route.proxy.port=[int]$ports.channelSocksPort}
+        }
+        return $route
+    }
 }
 function Get-TransportSavedRouteOptions([string]$Root,$Profile) {
-    New-TransportRouteOptions (Get-TransportSavedRoute $Root) $Profile (Join-Path $Root 'RemoteAgents.exe')
+    $route=Get-TransportSavedRoute $Root
+    if($route -and $route.used -eq 'proxy' -and $route.proxy.host -in @('127.0.0.1','localhost') -and [int]$route.proxy.port -eq [int](Get-TransportEffectivePort $Root 'channelSocksPort')){
+        # Старый ProxyCommand в профиле мог запомнить прежний порт нашего SOCKS.
+        $Profile=Copy-TransportObject $Profile;$Profile.PSObject.Properties.Remove('routeProxyCommand')
+    }
+    New-TransportRouteOptions $route $Profile (Join-Path $Root 'RemoteAgents.exe')
 }
 function Get-TransportRouteOverlay($Route,[string]$Root) {
     if(-not $Route -or $Route.used -eq 'direct'){return $null}
@@ -202,6 +215,146 @@ function Get-TransportRouteOverlay($Route,[string]$Root) {
     if($copy.used -eq 'proxy'){$copy|Add-Member -Force proxyExecutable (Join-Path $Root 'RemoteAgents.exe')}
     return $copy
 }
+# Настроенные значения отделены от состояния: выбор порта не меняет ревизию config.json.
+function Get-TransportPortDefaults {
+    @{sshPort=2222;channelSocksPort=2223;channelSshAddress='127.0.0.2';syncPort=22001;probePortBase=26000;socksPortBase=28000;apiPort=29090}
+}
+function Get-TransportConfiguredPorts($Transport,$Profile) {
+    $ports=[ordered]@{};$defaults=Get-TransportPortDefaults
+    foreach($key in @('sshPort','channelSocksPort','syncPort','apiPort','probePortBase','socksPortBase','channelSshAddress')){$ports[$key]=Get-TransportValue $Transport $key $defaults[$key]}
+    $ports['serverPort']=Get-TransportServerPort $Profile
+    [pscustomobject]$ports
+}
+function Test-TransportPortsEqual($Left,$Right) {
+    if(-not $Left -or -not $Right){return $false}
+    foreach($key in @('sshPort','channelSocksPort','syncPort','apiPort','probePortBase','socksPortBase','channelSshAddress','serverPort')){
+        if([string]$Left.$key -cne [string]$Right.$key){return $false}
+    };return $true
+}
+function Get-TransportEffectivePorts([string]$Root) {
+    $t=$null;$p=$null;$file=Join-Path $Root 'config.json'
+    if(Test-Path -LiteralPath $file){$t=(Read-TransportJson $file).transport;if($t.profilePath -and (Test-Path -LiteralPath $t.profilePath)){$p=Read-TransportJson $t.profilePath}}
+    $configured=Get-TransportConfiguredPorts $t $p
+    try{
+        $state=Read-TransportJson (Join-Path $Root 'state/transport-ports.json')
+        if($state.schema -eq 1 -and (Test-TransportPortsEqual $configured $state.configured)){
+            foreach($key in @('sshPort','channelSocksPort','syncPort','apiPort','probePortBase','socksPortBase','serverPort')){
+                if([int]$state.effective.$key -lt 1 -or [int]$state.effective.$key -gt 65535){return $configured}
+            }
+            $ip=$null
+            if(-not [Net.IPAddress]::TryParse([string]$state.effective.channelSshAddress,[ref]$ip) -or $ip.ToString() -notmatch '^127\.' -or $ip.ToString() -eq '127.0.0.1' -or $state.effective.serverPort -ne $configured.serverPort){return $configured}
+            return $state.effective
+        }
+    }catch{}
+    return $configured
+}
+function Get-TransportEffectivePort([string]$Root,[string]$Key) {
+    $ports=Get-TransportEffectivePorts $Root
+    if(-not $ports.PSObject.Properties[$Key]){throw 'Неизвестный параметр порта транспорта'}
+    $ports.$Key
+}
+function Test-TransportPortFree([string]$Address,[int]$Port,$Snapshot=$null) {
+    if($Port -lt 1 -or $Port -gt 65535){return $false}
+    if($null -eq $Snapshot){$Snapshot=Get-TransportPortSnapshot}
+    if(@($Snapshot.listeners|Where-Object {[int]$_.port -eq $Port -and [string]$_.address -in @($Address,'0.0.0.0','::')}).Count){return $false}
+    $listener=$null
+    try{$listener=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Parse($Address),$Port);$listener.ExclusiveAddressUse=$true;$listener.Start();return $true}catch{return $false}finally{if($listener){$listener.Stop()}}
+}
+function Find-TransportChannelAddress([int]$Port,[string]$Preferred,$Snapshot=$null) {
+    if($null -eq $Snapshot){$Snapshot=Get-TransportPortSnapshot}
+    # Wildcard занимает весь loopback: смена 127.x здесь не поможет.
+    if(@($Snapshot.listeners|Where-Object {[int]$_.port -eq $Port -and $_.address -in @('0.0.0.0','::')}).Count){throw 'Нет свободного локального адреса для входа канала: порт занят на всех адресах'}
+    foreach($address in @(@($Preferred)+@(2..254|ForEach-Object {'127.0.0.'+$_})|Select-Object -Unique)){
+        $ip=$null
+        if([Net.IPAddress]::TryParse($address,[ref]$ip) -and $ip.ToString() -match '^127\.' -and $ip.ToString() -ne '127.0.0.1' -and (Test-TransportPortFree $address $Port $Snapshot)){return $address}
+    }
+    throw 'Нет свободного локального адреса для входа канала'
+}
+function Select-TransportPortBlock([int]$Preferred,[int]$Count,[int]$Step,$Snapshot,$Selected) {
+    if($Count -le 0){return $Preferred}
+    for($attempt=0;$attempt -lt 200;$attempt++){
+        $port=$Preferred+$attempt*$Step;if($port+$Count-1 -gt 65535){break}
+        $free=$true
+        for($i=0;$i -lt $Count;$i++){if($Selected.ContainsKey($port+$i) -or -not (Test-TransportPortFree '127.0.0.1' ($port+$i) $Snapshot)){$free=$false;break}}
+        if($free){for($i=0;$i -lt $Count;$i++){$Selected[$port+$i]=$true};return $port}
+    }
+    # ОС выбирает начало блока. Держим весь блок до конца проверки, затем освобождаем перед запуском.
+    for($attempt=0;$attempt -lt 200;$attempt++){
+        $held=New-Object Collections.ArrayList
+        try{
+            $first=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,0);$first.ExclusiveAddressUse=$true;$first.Start();[void]$held.Add($first);$port=$first.LocalEndpoint.Port
+            if($port+$Count-1 -gt 65535){continue}
+            $free=$true
+            for($i=0;$i -lt $Count;$i++){
+                if($Selected.ContainsKey($port+$i) -or @($Snapshot.listeners|Where-Object {[int]$_.port -eq $port+$i -and $_.address -in @('127.0.0.1','0.0.0.0','::')}).Count){$free=$false;break}
+                if($i -gt 0){$next=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,($port+$i));[void]$held.Add($next);$next.ExclusiveAddressUse=$true;$next.Start()}
+            }
+            if($free){for($i=0;$i -lt $Count;$i++){$Selected[$port+$i]=$true};return $port}
+        }catch{}finally{foreach($listener in $held){$listener.Stop()}}
+    }
+    throw 'Не удалось выбрать свободные локальные порты транспорта'
+}
+function Update-TransportChannelRoute([string]$Root,$Settings,[string]$Old,[string]$New) {
+    if(-not $Old -or $Old -ceq $New){return}
+    $profile=$Settings.Profile;$file=[string]$profile.configPath;$changed=$false
+    if($file -and [IO.File]::Exists($file)){
+        $bytes=[IO.File]::ReadAllBytes($file);$bom=($bytes.Length -ge 3 -and $bytes[0] -eq 239 -and $bytes[1] -eq 187 -and $bytes[2] -eq 191)
+        $text=[Text.Encoding]::UTF8.GetString($bytes).TrimStart([char]0xFEFF)
+        $pattern='(?im)^(\s*HostName[ \t]+)'+[regex]::Escape($Old)+'([ \t]*\r?$)'
+        $next=[regex]::Replace($text,$pattern,('${1}'+$New+'${2}'))
+        if($next -cne $text){
+            $tmp=$file+'.'+[guid]::NewGuid().ToString('N')+'.tmp';$backup=$tmp+'.old'
+            try{[IO.File]::WriteAllText($tmp,$next,(New-Object Text.UTF8Encoding($bom)));Protect-TransportPath $tmp;[IO.File]::Replace($tmp,$file,$backup);$changed=$true}
+            finally{foreach($path in @($tmp,$backup)){if([IO.File]::Exists($path)){[IO.File]::Delete($path)}}}
+        }
+    }
+    $args=@($profile.arguments|ForEach-Object {if([string]$_ -ceq ('HostName='+$Old)){'HostName='+$New}else{$_}})
+    if(($args -join "`n") -cne (@($profile.arguments) -join "`n")){
+        $profile|Add-Member -Force arguments $args
+        if($Settings.Transport.profilePath){Write-TransportJson $Settings.Transport.profilePath $profile -Private};$changed=$true
+    }
+    if($changed){Write-TransportLog $Root 'channel-address-moved' ([pscustomobject]@{message=('Адрес входа канала в SSH-профиле изменён: '+$Old+' — '+$New)})}
+}
+function Resolve-TransportPorts([string]$Root,$Settings,[int]$ProbeCount,[int]$SocksCount,[switch]$Preview) {
+    $configured=Get-TransportConfiguredPorts $Settings.Transport $Settings.Profile;$effective=Copy-TransportObject $configured
+    $previous=$null;try{$previous=Read-TransportJson (Join-Path $Root 'state/transport-ports.json')}catch{}
+    $snapshot=Get-TransportPortSnapshot -ListenersOnly;$selected=@{};$moved=New-Object Collections.ArrayList;$owners=$null
+    $keys=@('sshPort');if($Settings.Transport.channelFirst){$keys+=@('channelSocksPort')}
+    if(@($Settings.Channel.inbounds|Where-Object {$_.tag -eq 'sync'}).Count){$keys+=@('syncPort')};$keys+=@('apiPort','probePortBase','socksPortBase')
+    foreach($key in $keys){
+        $count=1;$step=10
+        if($key -eq 'probePortBase'){$count=$ProbeCount}elseif($key -eq 'socksPortBase'){$count=$SocksCount}
+        if($key -in @('probePortBase','socksPortBase')){$step=[int]([Math]::Max(100,[Math]::Ceiling($count/100.0)*100))}
+        $from=[int]$configured.$key;$to=Select-TransportPortBlock $from $count $step $snapshot $selected;$effective.$key=$to
+        if($from -ne $to){
+            $conflict=$null
+            if($null -eq $owners){try{$owners=Get-TransportPortSnapshot}catch{$owners=$snapshot}}
+            for($i=0;$i -lt $count;$i++){$c=Get-TransportPortConflict '127.0.0.1' ($from+$i) $owners;if($c.listening){$conflict=$c;break}}
+            $owner='';if($conflict.exe){$owner=' ('+$conflict.exe+', PID '+$conflict.pid+')'}elseif($conflict.pid){$owner=' (PID '+$conflict.pid+')'}
+            [void]$moved.Add([pscustomobject]@{key=$key;from=$from;to=$to;pid=$(if($conflict){$conflict.pid}else{0});exe=$(if($conflict){$conflict.exe}else{''})})
+            if(-not $Preview){Write-TransportLog $Root 'port-moved' ([pscustomobject]@{message=('Порт '+$from+' занят другой программой'+$owner+' — использую '+$to)})}
+        }
+    }
+    if($Settings.Transport.channelFirst){
+        $from=[string]$configured.channelSshAddress;$to=Find-TransportChannelAddress $configured.serverPort $from $snapshot;$effective.channelSshAddress=$to
+        if($from -cne $to){
+            if($null -eq $owners){try{$owners=Get-TransportPortSnapshot}catch{$owners=$snapshot}}
+            $c=Get-TransportPortConflict $from $configured.serverPort $owners
+            [void]$moved.Add([pscustomobject]@{key='channelSshAddress';from=$from;to=$to;pid=$c.pid;exe=$c.exe})
+            if(-not $Preview){Write-TransportLog $Root 'port-moved' ([pscustomobject]@{message=($c.message+' — использую '+$to+':'+$configured.serverPort)})}
+        }
+        if(-not $Preview){
+            # Профиль мог хранить предыдущий эффективный адрес либо настроенный адрес.
+            $old=$from;if($previous.effective.channelSshAddress){$old=[string]$previous.effective.channelSshAddress}
+            Update-TransportChannelRoute $Root $Settings $old $to
+            if($old -cne $from){Update-TransportChannelRoute $Root $Settings $from $to}
+        }
+    }
+    if(-not $Preview){Write-TransportJson (Join-Path $Root 'state/transport-ports.json') ([ordered]@{schema=1;defaults=(Get-TransportPortDefaults);configured=$configured;effective=$effective;moved=@($moved.ToArray());updatedAt=[DateTime]::UtcNow.ToString('o')}) -Private}
+    foreach($key in (Get-TransportPortDefaults).Keys){$Settings.Options[$key]=$effective.$key}
+    return $Settings
+}
+
 function Read-TransportSettings([string]$Root) {
     $config=Read-TransportJson (Join-Path $Root 'config.json');$t=$config.transport
     if(-not $t){throw 'Нет секции transport'}
@@ -213,7 +366,8 @@ function Read-TransportSettings([string]$Root) {
     $channelPath=[string]$t.channelPath
     if(-not $channelPath){throw 'Нет transport.channelPath в config.json'}
     $channel=Read-TransportJson $channelPath
-    $defaults=@{sshPort=2222;channelSocksPort=2223;channelSshAddress='127.0.0.2';syncPort=22001;probePortBase=26000;socksPortBase=28000;apiPort=29090;bindPhysical=$true;activeProbeBytes=65536;rankProbeBytes=262144;activeIntervalSec=120;meteredActiveIntervalSec=300;rankIntervalSec=1800;rankConcurrency=1;topOnMetered=3;stallSeconds=5;probeTimeoutSec=45;metered='auto';restartDelaySec=3;openSsh=$true;singBoxPath=(Join-Path $PSScriptRoot 'sing-box.exe')}
+    $defaults=@{bindPhysical=$true;activeProbeBytes=65536;rankProbeBytes=262144;activeIntervalSec=120;meteredActiveIntervalSec=300;rankIntervalSec=1800;rankConcurrency=1;topOnMetered=3;stallSeconds=5;probeTimeoutSec=45;metered='auto';restartDelaySec=3;openSsh=$true;singBoxPath=(Join-Path $PSScriptRoot 'sing-box.exe')}
+    $portDefaults=Get-TransportPortDefaults;foreach($k in $portDefaults.Keys){$defaults[$k]=$portDefaults[$k]}
     $s=@{};foreach($k in $defaults.Keys){$s[$k]=Get-TransportValue $t $k $defaults[$k]}
     foreach($k in @('bindPhysical','openSsh')){if($s[$k] -isnot [bool]){throw 'Нужен логический параметр transport'}}
     foreach($k in @('sshPort','channelSocksPort','syncPort','probePortBase','socksPortBase','apiPort')){if([int]$s[$k] -lt 1 -or [int]$s[$k] -gt 65535){throw 'Неверный порт transport'}}
@@ -222,6 +376,7 @@ function Read-TransportSettings([string]$Root) {
     if([string]$s.metered -notin @('auto','true','false','True','False')){throw 'Неверный metered'}
     if(-not $t.serverRoute -and $config.wizard.serverRoute){$overlay=Get-TransportRouteOverlay $config.wizard.serverRoute $Root;if($overlay){$t|Add-Member -Force serverRoute $overlay}}
     Assert-TransportLists $t -ForBuild
+    $effective=Get-TransportEffectivePorts $Root;foreach($k in (Get-TransportPortDefaults).Keys){$s[$k]=$effective.$k}
     [pscustomobject]@{Options=$s;Transport=$t;Profile=$profile;Channel=$channel;Vpn=(Get-TransportValue $config 'vpn' ([pscustomobject]@{enabled=$false}))}
 }
 function Get-TransportSshArguments($Profile,[int]$Port,[switch]$UseRoute) {
@@ -408,7 +563,7 @@ function Get-TransportCandidates($Settings,[string]$Root) {
     }catch{Add-TransportCandidateFailure $failures ('cdn-'+$cdn.name) $_ $Root}
     }
     # The saved route may be the daemon's own channel SOCKS (channel first): tunnels then go direct, never through themselves.
-    $ownChannel=($route -and $route.used -eq 'proxy' -and [string]$route.proxy.host -in @('127.0.0.1','localhost') -and [int]$route.proxy.port -eq [int]$o.channelSocksPort)
+    $ownChannel=($route -and $route.used -eq 'proxy' -and [string]$route.proxy.host -in @('127.0.0.1','localhost') -and [int]$route.proxy.port -in @([int]$o.channelSocksPort,[int](Get-TransportConfiguredPorts $Settings.Transport $p).channelSocksPort))
     # OpenSSH из профиля + SOCKS (-D): один туннель несёт и SSH, и Syncthing через selector.
     if($o.openSsh -and $directSsh){
         $port=[int]$o.socksPortBase
@@ -496,7 +651,7 @@ function New-TransportConfig($Settings,$Paths,[string]$Secret,[string]$DefaultTa
         $rules+=@{inbound=@('channel-socks');action='route';outbound='active'}
         # The SSH entry of the channel: ssh connects here itself (HostName + HostKeyAlias), no ProxyCommand helper.
         # Its own loopback address keeps the server's port, so the route needs no Port that a -p elsewhere would shadow.
-        $in+=@{type='direct';tag='channel-ssh';listen=$(if($o.channelSshAddress){[string]$o.channelSshAddress}else{'127.0.0.2'});listen_port=(Get-TransportServerPort $Settings.Profile);network='tcp';override_address='127.0.0.1';override_port=(Get-TransportServerPort $Settings.Profile)}
+        $in+=@{type='direct';tag='channel-ssh';listen=[string]$o.channelSshAddress;listen_port=(Get-TransportServerPort $Settings.Profile);network='tcp';override_address='127.0.0.1';override_port=(Get-TransportServerPort $Settings.Profile)}
         $rules+=@{inbound=@('channel-ssh');action='route';outbound='active'}
     }
     foreach($row in $targets){
@@ -1024,11 +1179,13 @@ function Protect-TransportDiagnostic([string]$Text,$Settings) {
     Protect-TransportText $Text
 }
 # Снимок только слушающих TCP-сокетов. Ошибки поиска владельца не подменяют причину bind.
-function Get-TransportPortSnapshot {
+# -ListenersOnly: быстрый снимок для выбора портов; список процессов (CIM) нужен только для имени владельца.
+function Get-TransportPortSnapshot([switch]$ListenersOnly) {
     if($env:OS -eq 'Windows_NT'){
         $listeners=@(Get-NetTCPConnection -State Listen -ErrorAction Stop|ForEach-Object {
             [pscustomobject]@{address=[string]$_.LocalAddress;port=[int]$_.LocalPort;pid=[int]$_.OwningProcess}
         })
+        if($ListenersOnly){return [pscustomobject]@{listeners=$listeners;processes=@();legacyActions=@()}}
         $processes=@(Get-CimInstance Win32_Process -ErrorAction Stop)
         $legacyActions=@();try{$task=Get-ScheduledTask -TaskPath '\' -TaskName 'RemoteDiskChannel' -ErrorAction Stop;foreach($a in @($task.Actions)){$legacyActions+=@{exe=[string]$a.Execute;arguments=[string]$a.Arguments}}}catch{}
     }else{
@@ -1060,8 +1217,8 @@ function Get-TransportPortConflict([string]$Address,[int]$Port,$Snapshot=$null) 
         }
     }
     $endpoint=$Address+':'+$Port
-    $message='Порт '+$endpoint+' занят'
-    if($exe){$message+=' программой '+$exe+' (PID '+$ownerId+')'}elseif($ownerId){$message+=' процессом PID '+$ownerId+' (путь программы недоступен)'}else{$message+='; определить программу не удалось'}
+    $message='Порт '+$endpoint+' занят другой программой'
+    if($exe){$message+=' '+$exe+' (PID '+$ownerId+')'}elseif($ownerId){$message+=' (PID '+$ownerId+', путь программы недоступен)'}else{$message+='; определить программу не удалось'}
     if($legacy){$message+=' — это старая установка RemoteDisk: закройте программу и запустите Remove-OldInstall.cmd из инструмента очистки, затем откройте RemoteAgents снова'}
     $message+='.'
     [pscustomobject]@{address=$Address;port=$Port;pid=$ownerId;exe=$exe;legacy=$legacy;message=$message;listening=($listener.Count -gt 0)}

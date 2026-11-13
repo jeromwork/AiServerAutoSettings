@@ -2,6 +2,7 @@
 [CmdletBinding()]
 param([string]$Profile,[switch]$Uninstall,[switch]$HelpersReady)
 . (Join-Path $PSScriptRoot 'Disk.Common.ps1')
+. (Join-Path (Split-Path $PSScriptRoot -Parent) 'transport/Transport.Common.ps1')
 $script:DiskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk';$tray=Join-Path $script:DiskHome 'tray/syncthingtray.exe';$state=Join-Path $script:DiskHome 'state'
 . (Join-Path $PSScriptRoot 'Disk.Binary.ps1')
 function Get-DiskPort {$socket=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,0);$socket.Start();try{$socket.LocalEndpoint.Port}finally{$socket.Stop()}}
@@ -10,7 +11,8 @@ function Wait-DiskTransport {
     while($watch.ElapsedMilliseconds -lt 30000){
         $client=New-Object Net.Sockets.TcpClient
         try{
-            $connect=$client.ConnectAsync('127.0.0.1',2222)
+            $port=[int](Get-TransportEffectivePort (Join-Path $env:LOCALAPPDATA 'RemoteAgents') 'sshPort')
+            $connect=$client.ConnectAsync('127.0.0.1',$port)
             if($connect.Wait([int][Math]::Max(1,[Math]::Min(1000,30000-$watch.ElapsedMilliseconds)))){
                 $stream=$client.GetStream();$bytes=New-Object byte[] 4;$count=0
                 while($count -lt 4 -and $watch.ElapsedMilliseconds -lt 30000){
@@ -23,7 +25,7 @@ function Wait-DiskTransport {
         }catch{}finally{$client.Dispose()}
         if($watch.ElapsedMilliseconds -lt 30000){Start-Sleep -Milliseconds ([int][Math]::Min(250,30000-$watch.ElapsedMilliseconds))}
     }
-    throw 'Связь не поднялась: нет баннера SSH на 127.0.0.1:2222 за 30 с. Настройки сохранены; повторите установку.'
+    throw ('Связь не поднялась: нет баннера SSH на 127.0.0.1:'+$port+' за 30 с. Настройки сохранены; повторите установку.')
 }
 $step='Подготовка'
 try {
@@ -48,7 +50,7 @@ try {
     . (Join-Path $PSScriptRoot 'Disk.Engine.ps1')
     $script:DiskEngine=$null;Start-DiskHeadless
     $local=$null;for($i=0;$i -lt 40;$i++){try{$local=Invoke-DiskApi 'system/status';if($local.myID){break}}catch{};Start-Sleep -Milliseconds 250};if(-not $local.myID){throw 'Движок не запустился'}
-    $step='Подключение устройств';[void](Invoke-DiskApi ('config/devices/'+$remote.deviceId) PUT @{deviceID=$remote.deviceId;name='RemoteDisk Server';addresses=@('tcp://127.0.0.1:22001');autoAcceptFolders=$false})
+    $step='Подключение устройств';[void](Invoke-DiskApi ('config/devices/'+$remote.deviceId) PUT @{deviceID=$remote.deviceId;name='RemoteDisk Server';addresses=@('tcp://127.0.0.1:'+[int](Get-TransportEffectivePort (Join-Path $env:LOCALAPPDATA 'RemoteAgents') 'syncPort'));autoAcceptFolders=$false})
     [void](Invoke-DiskServer add-device @{deviceId=$local.myID;deviceName=$env:COMPUTERNAME} -Direct);Write-DiskUtf8 (Join-Path $script:DiskHome 'server.txt') $remote.deviceId
     $step='Проверка связи';Wait-DiskTransport
     Write-DiskLog 'Установка';Write-Output ('RemoteDisk установлен. Серверные папки появляются в '+(Get-DiskBase)+'; занятые пути остаются в ожидании.')

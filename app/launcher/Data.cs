@@ -43,6 +43,35 @@ namespace RemoteAgents.Launcher
         public static void Write(string path, object value) { Files.Atomic(path, Encode(value) + "\n"); }
     }
 #endif
+    internal static class TransportPorts
+    {
+        // Значения по умолчанию записывает общий PowerShell-код; здесь нет второй копии портов.
+        public static int LocalSsh(string home, int requested)
+        {
+            try {
+                var state = Json.Read(Path.Combine(home, "state", "transport-ports.json"));
+                var configured = Json.Map(Json.Get(state, "configured"));
+                if (Json.Int(state, "schema", 0) != 1 || Json.Int(configured, "sshPort", 0) != requested) return requested;
+                string configPath = Path.Combine(home, "config.json");
+                var transport = File.Exists(configPath) ? Json.Map(Json.Get(Json.Read(configPath), "transport")) : new Dictionary<string, object>();
+                var defaults = Json.Map(Json.Get(state, "defaults"));
+                foreach (string key in new[] { "sshPort", "channelSocksPort", "syncPort", "apiPort", "probePortBase", "socksPortBase", "channelSshAddress" }) {
+                    if (Json.Get(transport, key) == null && !state.ContainsKey("defaults")) continue;
+                    if ((Json.Get(transport, key) == null ? Json.Str(defaults, key) : Json.Str(transport, key)) != Json.Str(configured, key)) return requested;
+                }
+                int serverPort = 22;
+                string profilePath = Json.Str(transport, "profilePath");
+                if (profilePath.Length != 0) {
+                    var arguments = Json.Strings(Json.Get(Json.Read(profilePath), "arguments"));
+                    int at = Array.IndexOf(arguments, "-p");
+                    if (at >= 0 && at + 1 < arguments.Length && !int.TryParse(arguments[at + 1], out serverPort)) return requested;
+                }
+                if (configured.ContainsKey("serverPort") && serverPort != Json.Int(configured, "serverPort", 0)) return requested;
+                int effective = Json.Int(Json.Map(Json.Get(state, "effective")), "sshPort", 0);
+                return effective > 0 && effective <= 65535 ? effective : requested;
+            } catch { return requested; }
+        }
+    }
     internal static class Files
     {
         public static string Executable(string exe)
