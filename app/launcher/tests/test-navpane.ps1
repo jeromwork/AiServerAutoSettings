@@ -11,9 +11,11 @@ function Assert($ok,$name){if(-not $ok){throw ('FAIL '+$name)};$script:count++;W
 
 Assert ((Get-Command Install-DiskNavPane -ErrorAction SilentlyContinue) -and (Get-Command Remove-DiskNavPane -ErrorAction SilentlyContinue)) 'Disk.Common loads the nav pane module'
 # Off Windows the real adapters touch nothing and installing is refused, not faked.
+if(-not (Test-DiskNavPaneWindows)){
 Assert (-not (Test-DiskNavPane (Join-Path $TestHome 'x')).installed) 'non-Windows reports not installed'
 $refused=$false;try{Install-DiskNavPane (Join-Path $TestHome 'x')}catch{$refused=$true};Assert $refused 'non-Windows install refused'
 Remove-DiskNavPane;Assert $true 'non-Windows remove is a no-op'
+}
 
 $script:reg=@{};$script:notify=0;$script:kinds=@{}
 function Test-DiskNavPaneWindows {$true}
