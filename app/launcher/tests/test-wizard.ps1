@@ -201,7 +201,7 @@ Assert ($output.Count -eq 0) 'real child stdout/stderr cannot contaminate wizard
 $script:childProgress=''
 function Write-WizardProgress($Text){$script:childProgress+=$Text}
 $errorText='';$tail='';try{Invoke-InstallChild $TestHome 'child.ps1' @()}catch{$errorText=$_.Exception.Message;$tail=$_.Exception.Data['ChildOutput']}
-Assert ($errorText.Contains('код 7') -and $errorText.EndsWith('final child reason')) 'last meaningful child error survives exit failure and CRLF'
+Assert ($errorText.Contains('код 7') -and $errorText.EndsWith('server refused')) 'first meaningful stderr cause survives exit failure, CRLF and large output'
 Assert ($tail.Length -le 4096 -and $tail.Contains('stdout-tail') -and $tail.Contains('server refused') -and -not $tail.Contains("`r")) 'bounded tails preserve both streams without CR'
 Assert ($script:childProgress.Contains('final child reason')) 'child reason reaches wizard journal'
 [IO.File]::WriteAllText($child,'[Console]::Error.WriteLine("credential AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");exit 7')
@@ -215,7 +215,7 @@ Initialize-TransportDiagnostics;[RemoteAgents.TransportErrorBuffer]::OemCodePage
 [IO.File]::WriteAllText($child,'$b=[Convert]::FromBase64String("'+[Convert]::ToBase64String([Text.Encoding]::GetEncoding(866).GetBytes("Обе папки непустые: требуется объединение`r`n"))+'");$s=[Console]::OpenStandardError();$s.Write($b,0,$b.Length);$s.Flush();exit 1')
 try{Invoke-InstallChild $TestHome 'child.ps1' @()}catch{Assert ($_.Exception.Message.EndsWith('Обе папки непустые: требуется объединение')) ('cp866 child error is decoded: '+$_.Exception.Message)}
 [IO.File]::WriteAllText($child,'$b=[Text.Encoding]::UTF8.GetBytes("x"+("я"*6000)+"`nUTF-8 причина`n");$s=[Console]::OpenStandardError();$s.Write($b,0,$b.Length);$s.Flush();exit 1',(New-Object Text.UTF8Encoding($true)))
-try{Invoke-InstallChild $TestHome 'child.ps1' @()}catch{Assert ($_.Exception.Message.EndsWith('UTF-8 причина')) 'long UTF-8 child output stays UTF-8'}
+try{Invoke-InstallChild $TestHome 'child.ps1' @()}catch{Assert ($_.Exception.Message.Contains('xяяя') -and $_.Exception.Data['ChildOutput'].Contains('UTF-8 причина') -and -not $_.Exception.Message.Contains([string][char]0xFFFD)) 'first long UTF-8 child line and diagnostic tail stay UTF-8'}
 $bytes=[Text.Encoding]::UTF8.GetBytes('xяяя');$cut=New-Object byte[] 4;[Array]::Copy($bytes,0,$cut,0,4)
 Assert ([RemoteAgents.TransportErrorBuffer]::Decode($cut,4,$false,$true) -ceq 'xя') 'UTF-8 split at the end of the first buffer is not mistaken for OEM'
 Assert ([RemoteAgents.TransportErrorBuffer]::Decode($bytes,7,$false,$false) -ceq 'xяяя') 'whole UTF-8 decodes'

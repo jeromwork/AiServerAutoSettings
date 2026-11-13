@@ -247,6 +247,22 @@ function Find-InstallProfile([string]$Root) {
     if($files.Count -gt 1){throw 'Несколько профилей: задайте transport.profilePath в config.json'}
     return ''
 }
+function Get-InstallFailureLines([string]$Text) {
+    foreach($line in ($Text.Replace("`r",'') -split "`n")){
+        $clean=($line -replace '\x1b\[[0-9;]*[a-zA-Z]','').Trim()
+        # Ignore PS 5.1/7 source, location and stack decorations, preserving the actual error line.
+        if($clean -and $clean -notmatch '^(At |строка:|[+~|]|\d+\s*\||CategoryInfo\s*:|FullyQualifiedErrorId\s*:|(?:Exception|Write-Error):\s+.*\.ps1:\d+)'){
+            $masked=Protect-TransportText $clean
+            if($masked -notmatch '^(<secret>|<uuid>)+$'){$masked}
+        }
+    }
+}
+function Get-InstallFailureRemedy([string]$Reason) {
+    if(-not $Reason -or $Reason -match '^(Шаг установки не выполнен \(код \d+\)|Внешняя команда не выполнена \(код выхода \d+\))$'){
+        return 'Проверьте SSH, состояние служб и журнал соответствующего шага; повторите проверку. Секреты в журнал не копируйте.'
+    }
+    return ''
+}
 function Invoke-InstallChild([string]$Bundle,[string]$Script,[string[]]$Arguments,[int]$TimeoutSeconds=900) {
     $psi=New-Object Diagnostics.ProcessStartInfo
     $psi.FileName=Get-TransportPowerShell
@@ -263,21 +279,14 @@ function Invoke-InstallChild([string]$Bundle,[string]$Script,[string[]]$Argument
         if($timedOut){$p.Kill();[void]$p.WaitForExit(2000)}
         [void]$out.Wait(2000);[void]$err.Wait(2000)
         if($timedOut -or $p.ExitCode -ne 0){
-            $lines=@()
-            foreach($buffer in @($stdout,$stderr)){
-                $tail=$buffer.Snapshot().Replace("`r",'')
-                if($tail.Length -gt 2048){$tail=$tail.Substring($tail.Length-2048)}
-                foreach($line in ($tail -split "`n")){
-                    $clean=($line -replace '\x1b\[[0-9;]*[a-zA-Z]','').Trim()
-                    # PowerShell 5.1's location/source/stack decorations are not an error reason.
-                    if($clean -and $clean -notmatch '^(At |строка:|[+~]|CategoryInfo\s*:|FullyQualifiedErrorId\s*:)'){$lines+=Protect-TransportText $clean}
-                }
-            }
+            # The bounded buffer retains the FIRST line as well as the tail. Cutting the tail again
+            # discarded the cause and could start in the middle of a word ("да не выполнена").
+            $lines=@(Get-InstallFailureLines $stderr.Snapshot())+@(Get-InstallFailureLines $stdout.Snapshot())
             $detail=$lines -join "`n"
-            if($detail.Length -gt 4096){$detail=$detail.Substring($detail.Length-4096)}
+            if($detail.Length -gt 4096){$detail=$detail.Substring(0,4096)}
             if($detail -and (Get-Command Write-WizardProgress -ErrorAction SilentlyContinue)){Write-WizardProgress ('· '+$Script+"`n· "+($detail -replace "`n","`n· "))}
             $reason=if($timedOut){'Таймаут шага ('+$TimeoutSeconds+' с)'}else{'Шаг установки не выполнен (код '+$p.ExitCode+')'}
-            if($lines.Count){$reason+=': '+$lines[-1]}
+            if($lines.Count){$reason+=': '+$lines[0]}
             $failure=New-Object Exception($reason);$failure.Data['ChildOutput']=$detail;throw $failure
         }
     }finally{$p.Dispose();$stdout.Dispose();$stderr.Dispose()}

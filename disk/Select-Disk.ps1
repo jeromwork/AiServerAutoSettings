@@ -91,10 +91,11 @@ try{
         }
     }finally{$lock.Dispose()}
     if($Action -eq 'Apply'){& (Join-Path $PSScriptRoot 'Sync-RemoteDiskFolders.ps1')}
-}catch{Write-DiskLog 'Выбор синхронизации: не завершён' $_;throw ('Выбор не применён полностью; локальные файлы сохранены. Причина: '+$_.Exception.Message)}
+}catch{Write-DiskLog 'Выбор синхронизации: не завершён' $_;$reason='Выбор не применён полностью; локальные файлы сохранены. Причина: '+$_.Exception.Message;[Console]::Error.WriteLine($reason);throw $reason}
 if($script:SelectFailures.Count){
-    # One line: the wizard shows the last line of the child's error output as the step reason.
+    # Emit an unwrapped first stderr line before PowerShell adds source/stack decorations.
     $list=@($script:SelectFailures|ForEach-Object {'«'+$_.name+'» — '+$_.reason}) -join '; '
     Write-DiskLog ('Выбор синхронизации: не подключено '+$script:SelectFailures.Count)
-    throw ('Не все выбранные папки подключены. Ошибки: '+$list+'. Остальные папки подключены; локальные файлы сохранены.')
+    $reason='Не все выбранные папки подключены. Ошибки: '+$list+'. Остальные папки подключены; локальные файлы сохранены.'
+    [Console]::Error.WriteLine($reason);throw $reason
 }

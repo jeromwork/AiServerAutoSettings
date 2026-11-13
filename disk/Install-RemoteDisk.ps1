@@ -55,4 +55,4 @@ try {
     [void](Invoke-DiskServer add-device @{deviceId=$local.myID;deviceName=$env:COMPUTERNAME} -Direct);Write-DiskUtf8 (Join-Path $script:DiskHome 'server.txt') $remote.deviceId
     $step='Проверка связи';Wait-DiskTransport
     Write-DiskLog 'Установка';Write-Output ('RemoteDisk установлен. Серверные папки появляются в '+(Get-DiskBase)+'; занятые пути остаются в ожидании.')
-}catch{Write-DiskLog $step $_;Write-Error ('Установка RemoteDisk не выполнена: '+$_.Exception.Message+' Проверьте SSH-профиль, доступ к серверу и загрузкам.') -ErrorAction Continue;exit 1}
+}catch{Write-DiskLog $step $_;[Console]::Error.WriteLine('Установка RemoteDisk не выполнена: '+$_.Exception.Message);exit 1}

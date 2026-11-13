@@ -23,6 +23,6 @@ try{
 }catch{
     $detail=Protect-TransportText ([string]$_.Exception.Message)
     Write-SetupLog $root ('wizard.'+$Action+'.failed') $detail
-    @{ok=$false;reason=$detail;remedy='Проверьте SSH, состояние служб и журнал соответствующего шага; повторите проверку. Секреты в журнал не копируйте.'}|ConvertTo-Json -Compress
+    @{ok=$false;reason=$detail;remedy=(Get-InstallFailureRemedy $detail)}|ConvertTo-Json -Compress
     exit 1
 }
