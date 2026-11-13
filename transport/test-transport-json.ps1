@@ -1,7 +1,6 @@
 ﻿#requires -Version 5.1
 $ErrorActionPreference='Stop'
 $common=Join-Path $PSScriptRoot 'Transport.Common.ps1'
-if(-not (Test-Path $common)){$common=Join-Path $PSScriptRoot 'Transport.Common.ps1'}
 . $common
 $work=Join-Path ([IO.Path]::GetTempPath()) ('transport-json-'+[guid]::NewGuid().ToString('N'))
 $file=Join-Path $work 'status/transport.json';$writer=$null
