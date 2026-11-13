@@ -31,7 +31,7 @@ namespace RemoteAgents.Launcher
     {
         public static object Parse(string text) { return new JavaScriptSerializer { MaxJsonLength = 4 * 1024 * 1024 }.DeserializeObject(text.TrimStart('\uFEFF')); }
         public static Dictionary<string, object> Map(object value) { return value as Dictionary<string, object> ?? new Dictionary<string, object>(); }
-        public static Dictionary<string, object> Read(string path) { return Map(Parse(File.ReadAllText(path))); }
+        public static Dictionary<string, object> Read(string path) { return Map(Parse(Files.ReadSharedText(path))); }
         public static object Get(Dictionary<string, object> map, string key) { object value; return map != null && map.TryGetValue(key, out value) ? value : null; }
         public static string Str(Dictionary<string, object> map, string key, string fallback = "") { return Convert.ToString(Get(map, key), CultureInfo.InvariantCulture) ?? fallback; }
         public static string Text(Dictionary<string, object> map, string key, string fallback) { var s = Str(map, key); return s.Length == 0 ? fallback : s; }
@@ -62,6 +62,22 @@ namespace RemoteAgents.Launcher
                 }
                 if (File.Exists(path)) File.Replace(temp, path, null); else File.Move(temp, path);
             } finally { if (File.Exists(temp)) File.Delete(temp); }
+        }
+        public static string ReadSharedText(string path)
+        {
+            for (int attempt = 0; ; attempt++) {
+                try {
+                    string text;
+                    using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                    using (var reader = new StreamReader(stream, Encoding.UTF8, true)) text = reader.ReadToEnd();
+                    if (!string.IsNullOrWhiteSpace(text)) return text;
+                    if (attempt >= 20) throw new InvalidDataException("Пустой JSON после повторного чтения");
+                } catch (IOException ex) {
+                    int code = ex.HResult & 0xffff;
+                    if ((code != 32 && code != 33) || attempt >= 20) throw;
+                }
+                System.Threading.Thread.Sleep(50);
+            }
         }
         public static string ReadLine(string path) { return File.Exists(path) ? LF(File.ReadAllText(path)).Trim('\uFEFF', ' ', '\n', '\t') : ""; }
         public static string Hash(string file) { using (var sha = SHA256.Create()) using (var f = File.OpenRead(file)) return BitConverter.ToString(sha.ComputeHash(f)).Replace("-", "").ToLowerInvariant(); }
