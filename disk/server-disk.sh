@@ -166,8 +166,6 @@ def main():
         p=folder_path(data['name'])
         if action=='attach':
             ignores(p)
-            linked=cfg.exists() and any(f.get('path','').rstrip('/')==str(p) and any(d.get('id')==data['deviceId'] for d in f.findall('device')) for f in E.parse(cfg).getroot().findall('folder'))
-            if not linked and has_files(p) and data.get('localHasFiles') and not data.get('merge'):raise ValueError('Обе папки непустые: требуется -Merge')
     s.mkdir(parents=True,exist_ok=True)
     with (s/'bootstrap.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
@@ -239,8 +237,7 @@ def main():
                 if current:current['devices']=[d for d in current['devices'] if d['deviceID']!=data['deviceId']];api('config/folders/'+folder_id,'PUT',current)
             else:
                 if any(f['id']==folder_id and f['path'].rstrip('/')!=str(p) for f in folders):raise ValueError('ID уже занят другой папкой')
-                linked=current and any(d['deviceID']==data['deviceId'] for d in current['devices'])
-                if not linked and has_files(p) and data.get('localHasFiles') and not data.get('merge'):raise ValueError('Обе папки непустые: требуется -Merge')
+                # Both sides non-empty is always merged (owner decision); maxConflicts=-1 + versioning below mean nothing is lost.
                 ignores(p);p.mkdir(parents=True,exist_ok=True);ignores(p,True);exclude_git(p)
                 current=current or dict(id=folder_id,label=data['name'],path=str(p),type='sendreceive',paused=False,devices=[dict(deviceID=identity)],rescanIntervalS=60,fsWatcherEnabled=True)
                 if not any(d['deviceID']==data['deviceId'] for d in current['devices']):current['devices'].append(dict(deviceID=data['deviceId']))

@@ -5,6 +5,13 @@ $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Disk.Common.ps1')
 . (Join-Path $PSScriptRoot 'Disk.Union.ps1')
 $script:DiskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk'
+# One failing folder must not stop the others: every failure is collected and reported at the end.
+$script:SelectFailures=New-Object Collections.ArrayList
+function Add-SelectFailure([string]$Name,$Failure) {
+    Write-DiskLog ('Выбор синхронизации: '+$Name) $Failure
+    [void]$script:SelectFailures.Add([pscustomobject]@{name=$Name;reason=[string]$Failure.Exception.Message})
+    Write-DiskProgress ('Не подключена папка «'+$Name+'»: '+$Failure.Exception.Message)
+}
 try{
     Write-DiskLog ('Выбор синхронизации: '+$Action)
     Read-DiskProfile
@@ -34,20 +41,23 @@ try{
             foreach($row in @($union.rows|Where-Object {$_.kind -eq 'file' -and $_.path -notmatch '/'})){if('.' -cnotin $paths -and (Test-SelectionIncluded $row.path $paths)){throw 'Файлы в корне Disk сначала поместите в папку проекта; исходный файл сохранён'}}
             Read-DiskState
             Resume-InterruptedSelection
-            Sync-DiskExternal @($selection.external) (Get-DiskBase)
+            try{Sync-DiskExternal @($selection.external) (Get-DiskBase)}catch{Add-SelectFailure 'внешние папки' $_}
             $external=@(Read-DiskExternal)
             # Save policy before attaching: unselected local content must never be offered to the server.
             foreach($project in @($union.rows|Where-Object {$_.path -notmatch '/' -and $_.kind -eq 'directory' -and $_.presence -ne 'server'})){
                 if(@($external|Where-Object {$_.remote -ieq $project.path}).Count){continue}
                 $chosen=@(Get-ProjectSelection $project.path $selection)
                 if(-not $chosen.Count){continue}
-                $projectPath=Join-Path (Get-DiskBase) $project.path
-                $known=@(Invoke-DiskApi 'config/folders'|Where-Object {[IO.Path]::GetFullPath($_.path) -ieq [IO.Path]::GetFullPath($projectPath)})
-                if(-not $known.Count){
-                    Initialize-ProjectSelection $projectPath $chosen
-                    & (Join-Path $PSScriptRoot 'Add-RemoteDiskFolder.ps1') -Path $projectPath -Remote $project.path -ManagedSelection -Direction (Get-DiskDirection $selection $project.path)
-                    if(-not $?){throw 'Не удалось подключить локальную папку'}
-                }
+                try{
+                    $projectPath=Join-Path (Get-DiskBase) $project.path
+                    $known=@(Invoke-DiskApi 'config/folders'|Where-Object {[IO.Path]::GetFullPath($_.path) -ieq [IO.Path]::GetFullPath($projectPath)})
+                    if(-not $known.Count){
+                        Initialize-ProjectSelection $projectPath $chosen
+                        # A project present on both sides is merged (Add-RemoteDiskFolder): nothing is deleted, identical files stay single.
+                        & (Join-Path $PSScriptRoot 'Add-RemoteDiskFolder.ps1') -Path $projectPath -Remote $project.path -ManagedSelection -Direction (Get-DiskDirection $selection $project.path)
+                        if(-not $?){throw 'Не удалось подключить локальную папку'}
+                    }
+                }catch{Add-SelectFailure $project.path $_}
             }
             $peer=[IO.File]::ReadAllText((Join-Path $script:DiskHome 'server.txt')).Trim()
             foreach($folder in @(Invoke-DiskApi 'config/folders')){
@@ -55,24 +65,35 @@ try{
                 $expected=[IO.Path]::GetFullPath((Join-Path (Get-DiskBase) $folder.label))
                 if([IO.Path]::GetFullPath($folder.path) -ine $expected){continue} # External and foreign folders have their own ownership.
                 $chosen=@(Get-ProjectSelection $folder.label $selection)
-                if(-not $chosen.Count){
-                    # Persist the exact identity BEFORE unregistering, including after an interrupted apply.
-                    Save-DiskDetachedProject $folder $peer ([string](Invoke-DiskApi 'system/status').myID)
-                    # Syncthing DELETE unregisters the folder on this device; it never deletes its contents.
-                    [void](Invoke-DiskApi ('config/folders/'+[Uri]::EscapeDataString($folder.id)) DELETE)
-                    continue
-                }
-                Set-DiskFolderDirection $folder (Get-DiskDirection $selection $folder.label)
-                if($folder.maxConflicts -ne -1 -or $folder.versioning.type -ne 'staggered' -or [string]$folder.versioning.params.maxAge -ne '0'){[void](Invoke-DiskApi ('config/folders/'+[Uri]::EscapeDataString($folder.id)) PATCH @{maxConflicts=-1;versioning=@{type='staggered';params=@{maxAge='0';cleanInterval='3600'}}})}
-                Set-ProjectSelection $folder $chosen
+                try{
+                    if(-not $chosen.Count){
+                        # Persist the exact identity BEFORE unregistering, including after an interrupted apply.
+                        Save-DiskDetachedProject $folder $peer ([string](Invoke-DiskApi 'system/status').myID)
+                        # Syncthing DELETE unregisters the folder on this device; it never deletes its contents.
+                        [void](Invoke-DiskApi ('config/folders/'+[Uri]::EscapeDataString($folder.id)) DELETE)
+                        continue
+                    }
+                    Set-DiskFolderDirection $folder (Get-DiskDirection $selection $folder.label)
+                    if($folder.maxConflicts -ne -1 -or $folder.versioning.type -ne 'staggered' -or [string]$folder.versioning.params.maxAge -ne '0'){[void](Invoke-DiskApi ('config/folders/'+[Uri]::EscapeDataString($folder.id)) PATCH @{maxConflicts=-1;versioning=@{type='staggered';params=@{maxAge='0';cleanInterval='3600'}}})}
+                    Set-ProjectSelection $folder $chosen
+                }catch{Add-SelectFailure ([string]$folder.label) $_}
             }
-            Write-DiskUtf8 (Join-Path $script:DiskHome 'selection.json') (@{schema=1;paths=$paths;directions=$selection.directions;external=@($selection.external)}|ConvertTo-Json -Depth 20 -Compress)
+            # Only what was applied is saved: a failed project stays unselected, so the tree shows the real state.
+            $failed=@($script:SelectFailures|ForEach-Object {$_.name})
+            $saved=@($paths|Where-Object {$_ -ceq '.' -or $_.Split('/')[0] -cnotin $failed})
+            Write-DiskUtf8 (Join-Path $script:DiskHome 'selection.json') (@{schema=1;paths=$saved;directions=$selection.directions;external=@($selection.external)}|ConvertTo-Json -Depth 20 -Compress)
             # A successfully applied explicit project choice clears its automatic exclusion.
-            $explicit=@($paths|Where-Object {$_ -cne '.'}|ForEach-Object {$_.Split('/')[0]})
+            $explicit=@($saved|Where-Object {$_ -cne '.'}|ForEach-Object {$_.Split('/')[0]})
             $excluded=@(Read-DiskExternalExclusions)
             if(@($excluded|Where-Object {$_ -iin $explicit}).Count){Write-DiskExternalExclusions @($excluded|Where-Object {$_ -notin $explicit})}
-            @{ok=$true}|ConvertTo-Json -Compress
+            @{ok=($script:SelectFailures.Count -eq 0);failed=@($script:SelectFailures)}|ConvertTo-Json -Compress
         }
     }finally{$lock.Dispose()}
     if($Action -eq 'Apply'){& (Join-Path $PSScriptRoot 'Sync-RemoteDiskFolders.ps1')}
 }catch{Write-DiskLog 'Выбор синхронизации: не завершён' $_;throw ('Выбор не применён полностью; локальные файлы сохранены. Причина: '+$_.Exception.Message)}
+if($script:SelectFailures.Count){
+    # One line: the wizard shows the last line of the child's error output as the step reason.
+    $list=@($script:SelectFailures|ForEach-Object {'«'+$_.name+'» — '+$_.reason}) -join '; '
+    Write-DiskLog ('Выбор синхронизации: не подключено '+$script:SelectFailures.Count)
+    throw ('Не все выбранные папки подключены. Ошибки: '+$list+'. Остальные папки подключены; локальные файлы сохранены.')
+}

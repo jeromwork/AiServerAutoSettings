@@ -12,6 +12,11 @@ function Write-DiskLog($Step,$Failure=$null) {
         [IO.File]::AppendAllText($file,$text,$encoding)
     }catch{}
 }
+# A line for the wizard journal while the step is still running (the wizard passes its file to children).
+function Write-DiskProgress([string]$Text) {
+    if(-not $env:REMOTEAGENTS_WIZARD_PROGRESS){Write-Output $Text;return}
+    try{[IO.File]::AppendAllText($env:REMOTEAGENTS_WIZARD_PROGRESS,((@{text=$Text}|ConvertTo-Json -Compress)+"`n"),(New-Object Text.UTF8Encoding($false)))}catch{}
+}
 function Quote-Disk([string]$Value) {'"'+[regex]::Replace([regex]::Replace($Value,'(\\*)"','$1$1\"'),'(\\+)$','$1$1')+'"'}
 function Invoke-DiskProcess($Exe,$Arguments,[string]$InputText='',[string]$OutputFile='',[int]$TimeoutSeconds=45) {
     $si=New-Object Diagnostics.ProcessStartInfo;$si.FileName=$Exe;$si.Arguments=($Arguments|ForEach-Object {Quote-Disk ([string]$_)}) -join ' '
@@ -25,7 +30,7 @@ function Invoke-DiskProcess($Exe,$Arguments,[string]$InputText='',[string]$Outpu
         # ssh reads stdin only after the session is up; via a hop that alone can exceed 15 s.
         if(-not $write.Wait([Math]::Max(15,$TimeoutSeconds)*1000)){throw 'Таймаут ввода'};$p.StandardInput.Close()
         if(-not $p.WaitForExit($TimeoutSeconds*1000)){$p.Kill();throw 'Таймаут команды'};$out.GetAwaiter().GetResult() | Out-Null
-        if($p.ExitCode -ne 0){$reason='Внешняя команда не выполнена';if($p.ExitCode -eq 255 -and [IO.Path]::GetFileNameWithoutExtension($Exe) -ieq 'ssh'){$reason=if($err.Result -match 'REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed'){"Ключ хоста не совпал с приглашением или known_hosts. Подключение остановлено; попросите администратора проверить ключ сервера"}elseif($err.Result -match 'Permission denied'){'Сервер отклонил вход'}elseif($err.Result -match 'Remote protocol version' -and $err.Result -match 'timed out|Connection reset'){'Сервер ответил, но сеть глушит SSH после рукопожатия — нужен обход (канал через промежуточный сервер)'}elseif($err.Result -match 'banner exchange|kex_exchange_identification|Connection closed|Connection reset|timed out'){'Нет SSH-баннера от сервера'}else{'Нет связи с сервером'};if($err.Result -match 'proxy-connect: ([^\r\n]+)'){$reason+=': '+$Matches[1]}}elseif($err.Result -match 'Чужой .stignore'){$reason='Чужой .stignore на сервере: сохраните и удалите его вручную'}elseif($err.Result -match 'требуется -Merge'){$reason='Обе папки непустые: требуется -Merge'};throw ($reason+' (код выхода '+$p.ExitCode+')')}
+        if($p.ExitCode -ne 0){$reason='Внешняя команда не выполнена';if($p.ExitCode -eq 255 -and [IO.Path]::GetFileNameWithoutExtension($Exe) -ieq 'ssh'){$reason=if($err.Result -match 'REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed'){"Ключ хоста не совпал с приглашением или known_hosts. Подключение остановлено; попросите администратора проверить ключ сервера"}elseif($err.Result -match 'Permission denied'){'Сервер отклонил вход'}elseif($err.Result -match 'Remote protocol version' -and $err.Result -match 'timed out|Connection reset'){'Сервер ответил, но сеть глушит SSH после рукопожатия — нужен обход (канал через промежуточный сервер)'}elseif($err.Result -match 'banner exchange|kex_exchange_identification|Connection closed|Connection reset|timed out'){'Нет SSH-баннера от сервера'}else{'Нет связи с сервером'};if($err.Result -match 'proxy-connect: ([^\r\n]+)'){$reason+=': '+$Matches[1]}}elseif($err.Result -match 'Чужой .stignore'){$reason='Чужой .stignore на сервере: сохраните и удалите его вручную'};throw ($reason+' (код выхода '+$p.ExitCode+')')}
         if(-not $OutputFile){$out.Result.Replace("`r",'').TrimStart([char]0xFEFF).Trim()}
     }finally{if($file){$file.Dispose()};if($p.Id -and -not $p.HasExited){$p.Kill()}
         if($trace){try{$code=if($p.HasExited){[string]$p.ExitCode}else{'прервано'};$text=if($err -and $err.Wait(2000)){$err.Result}else{''};Write-WizardTrace $Exe $si.Arguments $code $watch.ElapsedMilliseconds $text}catch{}}
@@ -116,7 +121,8 @@ function Test-DiskIgnores($Path,[switch]$Write) {
     if($managed){$rules=$managed}
     if($Write){if(Test-Path -LiteralPath $file){[IO.File]::SetAttributes($file,([IO.File]::GetAttributes($file) -band (-bnot [IO.FileAttributes]::Hidden)))};try{if(-not [IO.Directory]::Exists((Join-Path $Path '.stfolder'))){[void][IO.Directory]::CreateDirectory((Join-Path $Path '.stfolder'))};Write-SelectionAtomic $file $rules}finally{if(Test-Path -LiteralPath $file){[IO.File]::SetAttributes($file,([IO.File]::GetAttributes($file) -bor [IO.FileAttributes]::Hidden))}}}
 }
-function Assert-DiskFreePath([string]$Path,$Folders) {
+# -AllowContent: an existing local folder with files is merged (owner decision), only links and Syncthing overlaps are refused.
+function Assert-DiskFreePath([string]$Path,$Folders,[switch]$AllowContent) {
     $full=[IO.Path]::GetFullPath($Path).TrimEnd('\','/')
     for($part=$full;$part;$part=[IO.Path]::GetDirectoryName($part)){
         if(Test-Path -LiteralPath $part){if([IO.File]::GetAttributes($part) -band [IO.FileAttributes]::ReparsePoint){throw 'Ссылки в пути запрещены'}}
@@ -126,6 +132,7 @@ function Assert-DiskFreePath([string]$Path,$Folders) {
         if($full -ieq $other -or $full.StartsWith($other+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or $other.StartsWith($full+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw 'папка занята: пересечение с Syncthing'}
     }
     if(Test-Path -LiteralPath $full){
+        if($AllowContent -and (Get-Item -LiteralPath $full).PSIsContainer){return}
         if(-not (Get-Item -LiteralPath $full).PSIsContainer -or @(Get-ChildItem -LiteralPath $full -Force).Count){throw 'папка занята'}
     }
 }

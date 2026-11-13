@@ -16,7 +16,7 @@ function Invoke-DiskServer($Action,$Data) {
     switch($Action){
         'tree' {return @{schema=1;folders=@($global:ServerFolders|ForEach-Object {@{name=$_.name;hasChildren=$true}})}}
         'list' {return $global:ServerFolders}
-        'attach' {if($Data.merge){throw 'unexpected implicit merge'};return @{ok=$true}}
+        'attach' {[void]$global:Attaches.Add($Data);if($Data.name -ceq 'Broken'){throw 'Сервер отказал: проверка'};return @{ok=$true}}
         default {throw ('unexpected server action '+$Action)}
     }
 }
@@ -28,7 +28,7 @@ function Invoke-DiskApi($Route,$Method='GET',$Body=$null) {
             if($Method -eq 'PATCH'){$global:Defaults.path=$Body.path;return}
             return [pscustomobject]@{id='';label='';path=$global:Defaults.path;type='sendreceive';paused=$false;devices=@();maxConflicts=10}
         }
-        'config/devices/PEER' {return [pscustomobject]@{autoAcceptFolders=$false}}
+        'config/devices/*' {return [pscustomobject]@{autoAcceptFolders=$false}}
         'cluster/pending/folders' {return $global:Pending}
         'config/folders' {return $global:Folders.Values}
         'config/folders/*' {
@@ -61,7 +61,9 @@ $base=Join-Path $TestHome 'Disk';$project=Join-Path $base 'Project';[void][IO.Di
 [IO.File]::WriteAllText((Join-Path $script:DiskHome 'base.txt'),$base)
 $global:Folders=@{project=[pscustomobject]@{id='project';label='Project';path=$project;type='sendreceive';paused=$false;devices=@(@{deviceID='PEER'});maxConflicts=-1;versioning=@{type='staggered';params=@{maxAge='0'}}}}
 $global:ServerFolders=@([pscustomobject]@{name='Project';id='project';hasFiles=$true})
-$global:Defaults=@{path=$base};$global:Pending=[pscustomobject]@{};$global:LocalChanges=3;$global:Calls=New-Object Collections.ArrayList
+$global:Defaults=@{path=$base};$global:Pending=[pscustomobject]@{};$global:LocalChanges=3;$global:Calls=New-Object Collections.ArrayList;$global:Attaches=New-Object Collections.ArrayList
+$progress=Join-Path $TestHome 'progress.jsonl';$env:REMOTEAGENTS_WIZARD_PROGRESS=$progress
+function Get-Progress {if(Test-Path -LiteralPath $progress){[IO.File]::ReadAllText($progress)}else{''}}
 $count=0
 function Assert($Value,[string]$Label){if(-not $Value){throw ('FAIL: '+$Label)};$script:count++}
 function Reject([scriptblock]$Run,[string]$Reason){$caught=$false;try{& $Run}catch{$caught=$_.Exception.Message -like ('*'+$Reason+'*')};Assert $caught ('reject '+$Reason)}
@@ -123,23 +125,47 @@ try{
     Assert (-not $global:Folders.ContainsKey('reports')) 'removed external stays excluded on periodic sync'
     $global:Pending=[pscustomobject]@{}
     $entry.direction='both';$global:ServerFolders[1].hasFiles=$true
-    Reject {Apply @('Project') @{} @($entry)} 'Обе папки непустые'
-    Assert (-not $global:Folders.ContainsKey('reports') -and [IO.File]::ReadAllText((Join-Path $outside 'report.txt')) -ceq 'external local data') 'occupied external error preserves files'
+    Apply @('Project') @{} @($entry)
+    Assert ($global:Folders.reports.path -eq $outside -and $global:Attaches[-1].merge -and [IO.File]::ReadAllText((Join-Path $outside 'report.txt')) -ceq 'external local data') 'occupied external is merged without a question and keeps files'
+    Assert ((Get-Progress).Contains('Объединяю «Reports»') -and (Get-Progress).Contains('ничего не удаляется')) 'merge is announced in plain words'
+    $put=@($global:Calls|Where-Object {$_.method -eq 'PUT' -and $_.body.label -ceq 'Reports'})[-1].body
+    Assert (@($global:Calls|Where-Object {$_.method -eq 'PATCH' -and $_.body.Contains('paused')}).Count -and $put.maxConflicts -eq -1 -and $put.versioning.type -ceq 'staggered' -and [string]$put.versioning.params.maxAge -ceq '0') 'local side gets unlimited conflicts and versioning before the first sync'
     Reject {Sync-DiskExternal @(@{path=$project;remote='Project';direction='both'}) $base} 'пересекается с корнем Disk'
     $link=Join-Path $TestHome 'linked';[void](New-Item -ItemType SymbolicLink -Path $link -Target $outside)
     Reject {Sync-DiskExternal @(@{path=$link;remote='Linked';direction='both'}) $base} 'Ссылки в пути'
     Apply @() @{} @()
     Assert (-not $global:Folders.ContainsKey('project') -and (Test-Path (Join-Path $project 'local.txt'))) 'deselected project detached with files on disk'
-    $global:ServerFolders[0].id='different-id'
-    Reject {Apply @('Project') @{Project='receive'} @()} 'Обе папки непустые'
-    $global:ServerFolders[0].id='project'
-    [IO.File]::WriteAllText((Join-Path $script:DiskHome 'server.txt'),'OTHER-PEER')
-    Reject {Apply @('Project') @{Project='receive'} @()} 'Обе папки непустые'
-    [IO.File]::WriteAllText((Join-Path $script:DiskHome 'server.txt'),'PEER')
+    # Changed identity is not a reconnect: the folders are merged (announced), never refused.
+    $global:ServerFolders[0].id='different-id';[IO.File]::WriteAllText($progress,'')
     Apply @('Project') @{Project='receive'} @()
-    Assert ($global:Folders.project.path -eq $project -and $global:Folders.project.type -ceq 'receiveonly') 'same project reattaches without Merge'
+    Assert ($global:Folders.ContainsKey('different-id') -and (Get-Progress).Contains('Объединяю «Project»')) 'changed server ID merges instead of refusing'
+    [void]$global:Folders.Remove('different-id');$global:ServerFolders[0].id='project'
+    [IO.File]::WriteAllText((Join-Path $script:DiskHome 'server.txt'),'OTHER-PEER');[IO.File]::WriteAllText($progress,'')
+    Apply @('Project') @{Project='receive'} @()
+    Assert ($global:Folders.ContainsKey('project') -and (Get-Progress).Contains('Объединяю «Project»')) 'changed peer merges instead of refusing'
+    [void]$global:Folders.Remove('project')
+    [IO.File]::WriteAllText((Join-Path $script:DiskHome 'server.txt'),'PEER');[IO.File]::WriteAllText($progress,'')
+    Apply @('Project') @{Project='receive'} @()
+    Assert ($global:Folders.project.path -eq $project -and $global:Folders.project.type -ceq 'receiveonly' -and -not (Get-Progress).Contains('Объединяю')) 'same project reattaches as a reconnect, not a merge'
     Assert ([IO.File]::ReadAllText((Join-Path $project 'local.txt')) -ceq 'unsent local version') 'reattach preserves existing local data'
+    # One failing folder does not stop the others; the summary names it; only applied folders are saved.
     Apply @() @{} @()
+    $broken=Join-Path $base 'Broken';[void][IO.Directory]::CreateDirectory($broken);[IO.File]::WriteAllText((Join-Path $broken 'mine.txt'),'local broken data')
+    $global:ServerFolders+=@([pscustomobject]@{name='Broken';id='broken';hasFiles=$true});[IO.File]::WriteAllText($progress,'')
+    $message='';try{Apply @('Broken','Project') @{} @()}catch{$message=$_.Exception.Message}
+    Assert ($message.Contains('«Broken» — Сервер отказал: проверка') -and -not $message.Contains('«Project»')) ('summary lists the failed folder with its reason: '+$message)
+    Assert ($global:Folders.ContainsKey('project') -and -not @($global:Folders.Values|Where-Object {$_.label -ceq 'Broken'}).Count) 'other folders are applied after a failure'
+    Assert (@((Read-DiskSelection).paths) -ceq 'Project' -and [IO.File]::ReadAllText((Join-Path $broken 'mine.txt')) -ceq 'local broken data') 'only applied folders are saved; failed folder files kept'
+    Assert ((Get-Progress).Contains('Не подключена папка «Broken»')) 'failure reaches the journal per folder'
+    Remove-Item -LiteralPath $broken -Recurse -Force;$global:ServerFolders=@($global:ServerFolders|Where-Object {$_.name -cne 'Broken'})
+    Apply @() @{} @()
+    # Automatic accept of a new server folder merges into an existing local folder of the same name.
+    $busy=Join-Path $base 'Busy';[void][IO.Directory]::CreateDirectory($busy);[IO.File]::WriteAllText((Join-Path $busy 'keep.txt'),'busy local')
+    $savedSelection=[IO.File]::ReadAllText($selectionFile);Write-SelectionState $selectionFile (@{schema=1;paths=@('.')}|ConvertTo-Json -Compress)
+    $global:Pending=[pscustomobject]@{busy=[pscustomobject]@{offeredBy=[pscustomobject]@{PEER=[pscustomobject]@{label='Busy'}}}}
+    & (Join-Path $fixture 'Sync-RemoteDiskFolders.ps1')
+    Assert ($global:Folders.busy.path -eq $busy -and $global:Folders.busy.maxConflicts -eq -1 -and [IO.File]::ReadAllText((Join-Path $busy 'keep.txt')) -ceq 'busy local') 'occupied local folder is merged on automatic accept'
+    [void]$global:Folders.Remove('busy');Remove-Item -LiteralPath $busy -Recurse -Force;$global:Pending=[pscustomobject]@{};Write-SelectionState $selectionFile $savedSelection
     Assert ((Get-ProjectSelection 'Future' ([pscustomobject]@{paths=@('.')})) -ceq '.') 'all includes future projects'
     Assert (@(Get-ProjectSelection 'Future' ([pscustomobject]@{paths=@()})).Count -eq 0) 'none excludes future projects'
     $global:Pending=[pscustomobject]@{future=[pscustomobject]@{offeredBy=[pscustomobject]@{PEER=[pscustomobject]@{label='Future'}}}}
@@ -159,4 +185,4 @@ try{
 
     Assert (@($global:Calls|Where-Object {$_.route -like '*override*' -or $_.route -like '*reset*'}).Count -eq 0) 'no override/reset APIs'
     Write-Output ('PASS: DiskChoice PowerShell: '+$count+' checks (fake API, actual Select/Add/Sync, direction, revert, external)')
-}finally{$env:LOCALAPPDATA=$oldLocal}
+}finally{$env:LOCALAPPDATA=$oldLocal;Remove-Item Env:REMOTEAGENTS_WIZARD_PROGRESS -ErrorAction SilentlyContinue}

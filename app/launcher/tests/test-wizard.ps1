@@ -210,6 +210,18 @@ try{Invoke-InstallChild $TestHome 'child.ps1' @()}catch{Assert (-not $_.Exceptio
 try{Invoke-InstallChild $TestHome 'child.ps1' @()}catch{Assert ($_.Exception.Message.EndsWith('stdout-only failure')) 'stdout-only failure retains reason'}
 [IO.File]::WriteAllText($child,'[Console]::Error.Write("Причина ошибки`r`nAt child.ps1:1 char:1`r`n+ throw example`r`n+ CategoryInfo : OperationStopped`r`n+ FullyQualifiedErrorId : example`r`n");exit 1',(New-Object Text.UTF8Encoding($true)))
 try{Invoke-InstallChild $TestHome 'child.ps1' @()}catch{Assert ($_.Exception.Message.EndsWith('Причина ошибки')) 'PS 5.1-style stack decorations do not replace the cause'}
+# Windows PowerShell 5.1 children write redirected output in the OEM code page (cp866): the journal must stay readable.
+Initialize-TransportDiagnostics;[RemoteAgents.TransportErrorBuffer]::OemCodePage=866
+[IO.File]::WriteAllText($child,'$b=[Convert]::FromBase64String("'+[Convert]::ToBase64String([Text.Encoding]::GetEncoding(866).GetBytes("Обе папки непустые: требуется объединение`r`n"))+'");$s=[Console]::OpenStandardError();$s.Write($b,0,$b.Length);$s.Flush();exit 1')
+try{Invoke-InstallChild $TestHome 'child.ps1' @()}catch{Assert ($_.Exception.Message.EndsWith('Обе папки непустые: требуется объединение')) ('cp866 child error is decoded: '+$_.Exception.Message)}
+[IO.File]::WriteAllText($child,'$b=[Text.Encoding]::UTF8.GetBytes("x"+("я"*6000)+"`nUTF-8 причина`n");$s=[Console]::OpenStandardError();$s.Write($b,0,$b.Length);$s.Flush();exit 1',(New-Object Text.UTF8Encoding($true)))
+try{Invoke-InstallChild $TestHome 'child.ps1' @()}catch{Assert ($_.Exception.Message.EndsWith('UTF-8 причина')) 'long UTF-8 child output stays UTF-8'}
+$bytes=[Text.Encoding]::UTF8.GetBytes('xяяя');$cut=New-Object byte[] 4;[Array]::Copy($bytes,0,$cut,0,4)
+Assert ([RemoteAgents.TransportErrorBuffer]::Decode($cut,4,$false,$true) -ceq 'xя') 'UTF-8 split at the end of the first buffer is not mistaken for OEM'
+Assert ([RemoteAgents.TransportErrorBuffer]::Decode($bytes,7,$false,$false) -ceq 'xяяя') 'whole UTF-8 decodes'
+$edge=New-Object byte[] 5;[Array]::Copy($bytes,2,$edge,0,5)
+Assert ([RemoteAgents.TransportErrorBuffer]::Decode($edge,5,$true,$false) -ceq 'яя') 'UTF-8 split at the start of the recent buffer is not mistaken for OEM'
+[RemoteAgents.TransportErrorBuffer]::OemCodePage=0
 [IO.File]::WriteAllText($child,'[Console]::Error.WriteLine("waiting for child");Start-Sleep -Seconds 30')
 try{Invoke-InstallChild $TestHome 'child.ps1' @() -TimeoutSeconds 1}catch{Assert ($_.Exception.Message.Contains('Таймаут шага (1 с)')) 'child timeout remains bounded and honest'}
 # Stale health on a managed installation must not bypass network preflight.
@@ -296,6 +308,11 @@ Assert (-not (Read-TransportJson (Join-Path $freshRoot 'config.json')).wizard.co
         Assert (@($script:diskPayload.directions.PSObject.Properties).Count -eq 0 -and @($script:diskPayload.external).Count -eq 0) 'explicit empty directions and external clears both'
         [void](Invoke-WizardStep $root $repo 'Disk' @{base=$request.base;paths=@('Project');directions=@{Project='send'};external=@()})
         Assert ($script:diskPayload.directions.Project -ceq 'send' -and @($script:diskPayload.external).Count -eq 0) 'dictionary request respects explicit fields'
+        # A failed folder must not leave the engine unsupervised (REST unavailable afterwards).
+        Write-TransportJson (Join-Path $root 'config.json') @{schema=1;components=@{}}
+        function Invoke-InstallChild($Bundle,$Script,$Arguments){throw 'Не все выбранные папки подключены'}
+        $failed=$false;try{[void](Invoke-WizardStep $root $repo 'Disk' $request)}catch{$failed=$true}
+        Assert ($failed -and (Read-TransportJson (Join-Path $root 'config.json')).components.disk.enabled) 'failed selection still leaves the disk engine under the tray supervisor'
     }finally{$env:LOCALAPPDATA=$savedLocal}
 }
 Write-Output ('OK: '+$count+' wizard/model/catalog/union/rollback checks (fake SSH, no Windows)')

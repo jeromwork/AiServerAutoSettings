@@ -24,24 +24,39 @@ try:
             stamp=time.time()-60+i*5;os.utime(side['folder']/'same-name.txt',(stamp,stamp))
             (side['folder']/('only-server.txt' if i==0 else 'only-local.txt')).write_text('server' if i==0 else 'local')
             (side['folder']/'identical.txt').write_text('same bytes')
+            # Same content, different time and permissions on each side: must stay one file, no conflict copy.
+            stamp=time.time()-3600*(i+1);os.utime(side['folder']/'identical.txt',(stamp,stamp));(side['folder']/'identical.txt').chmod(0o644 if i==0 else 0o600)
+            nested=side['folder']/'same-dir/inner';nested.mkdir(parents=True)
+            for n in range(3):
+                f=nested/f'file-{n}.bin';f.write_bytes(bytes([n])*200000);stamp=time.time()-7200-i*500-n;os.utime(f,(stamp,stamp))
             (side['folder']/'.env').write_text('private-'+str(i))
         a,b=t.SIDES
         for side,peer in ((a,b),(b,a)):
             t.server(side,'add-device',dict(deviceId=peer['deviceId'],addresses=[f"tcp://127.0.0.1:{peer['listen']}"]))
             t.api(side,'config/devices/'+peer['deviceId'],'PATCH',dict(paused=True))
-            side['id']=t.server(side,'attach',dict(name='project',deviceId=peer['deviceId'],localHasFiles=True,merge=True))['id']
+            # No merge flag: a folder present on both sides is always merged (owner decision).
+            side['id']=t.server(side,'attach',dict(name='project',deviceId=peer['deviceId'],localHasFiles=True))['id']
             t.api(side,'db/scan?folder='+side['id'],'POST')
-        t.wait(lambda:all(t.api(s,'db/status?folder='+s['id'])['localFiles']==3 for s in t.SIDES),'initial populated scans')
+        t.wait(lambda:all(t.api(s,'db/status?folder='+s['id'])['localFiles']==6 for s in t.SIDES),'initial populated scans')
         for side,peer in ((a,b),(b,a)):t.api(side,'config/devices/'+peer['deviceId'],'PATCH',dict(paused=False))
         def merged():
             for side in t.SIDES:
                 files=[side['folder']/'same-name.txt',*side['folder'].glob('same-name.sync-conflict-*')]
                 if {p.read_text() for p in files if p.exists()}!={'initial-server','initial-local'}:return False
                 if not all((side['folder']/n).exists() for n in ('only-server.txt','only-local.txt')):return False
+                if t.api(side,'db/status?folder='+side['id'])['localFiles']!=8:return False
             return t.settled()
         t.wait(merged,'first merge keeps initial conflicting versions')
         check(merged(),'both original versions retained and propagated')
+        t.wait(lambda:len({int((s['folder']/'identical.txt').stat().st_mtime) for s in t.SIDES})==1 and t.settled(),'metadata of identical file aligned')
         check(all((s['folder']/'identical.txt').read_text()=='same bytes' for s in t.SIDES),'identical initial file reused')
+        copies=[str(p.relative_to(s['folder'])) for s in t.SIDES for p in s['folder'].rglob('*sync-conflict*')]
+        check(all(c.startswith('same-name.sync-conflict-') for c in copies) and len(copies)==2,'conflict copy only for really different content: '+repr(copies))
+        check(all((s['folder']/'same-dir/inner'/f'file-{n}.bin').read_bytes()==bytes([n])*200000 for s in t.SIDES for n in range(3)),'identical folders stay one folder')
+        stats=[t.api(s,'db/status?folder='+s['id']) for s in t.SIDES]
+        check(all(x['pullErrors']==0 and x['needFiles']==0 for x in stats),'nothing left to pull')
+        mtimes=[int((s['folder']/'identical.txt').stat().st_mtime) for s in t.SIDES]
+        check(mtimes[0]==mtimes[1],'identical file: only the time is aligned')
         check(all((s['folder']/'only-server.txt').read_text()=='server' and (s['folder']/'only-local.txt').read_text()=='local' for s in t.SIDES),'union transferred both directions')
         check(all((s['folder']/'.env').read_text()=='private-'+str(i) for i,s in enumerate(t.SIDES)),'secrets remain local')
         check(all(t.api(s,'config/folders/'+s['id'])['maxConflicts']==-1 for s in t.SIDES),'conflict copies have no automatic count limit')

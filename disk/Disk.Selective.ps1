@@ -294,7 +294,7 @@ function Sync-DiskExternal($Desired,[string]$Base) {
             Assert-DiskPlainPath $entry.path
             # Journal ownership first: an interruption after Add must leave the folder removable.
             $saved=@($saved|Where-Object {$_.remote -cne $entry.remote})+@($entry);Write-DiskExternal $saved
-            # Add validates occupied-folder conflicts before touching policy or server state; no implicit -Merge.
+            # Add validates identity conflicts before touching policy or server state; occupied folders are merged without deleting.
             [void](Add-DiskManagedExternal $entry)
             $match=@(Invoke-DiskApi 'config/folders'|Where-Object {$_.label -ceq $entry.remote -and [IO.Path]::GetFullPath($_.path).TrimEnd('\','/') -ieq $entry.path.TrimEnd('\','/')})
             if($match.Count -ne 1){throw ('Syncthing не подтвердил внешнюю папку '+$entry.remote)}
