@@ -11,9 +11,10 @@ pwsh=${PWSH:-$HOME/.cache/pwsh-test/pwsh}
 # SSH wait times. Every child is bounded; the outer caller may set a total limit.
 (
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-first-install.ps1" -TestHome "$testdir/wizard" < /dev/null
-  LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-selective.ps1" -TestHome "$testdir/selective" < /dev/null
-  timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-choice.ps1" -TestHome "$testdir/disk-choice" < /dev/null
-  timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-explorer.ps1" -TestHome "$testdir/disk-explorer" < /dev/null
+  timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-accept.ps1" -TestHome "$testdir/disk-accept" < /dev/null
+  timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-cleanup.ps1" -TestHome "$testdir/disk-cleanup" < /dev/null
+  timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-install.ps1" < /dev/null
+  timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-pairing.ps1" -TestHome "$testdir/disk-pairing" < /dev/null
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-account.ps1" -TestHome "$testdir/accounts" < /dev/null
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-wizard.ps1" -TestHome "$testdir/setup-wizard" < /dev/null
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-wizard-onboarding.ps1" -TestHome "$testdir/onboarding" < /dev/null
@@ -31,8 +32,8 @@ pwsh=${PWSH:-$HOME/.cache/pwsh-test/pwsh}
   timeout 120 python3 "$here/test_first_run.py"
   timeout 60 python3 "$here/test_happier_account_ui.py"
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-config-routes.ps1" -TestHome "$testdir/config-routes" < /dev/null
-  timeout 120 python3 "$repo/disk/test-tree.py"
-  timeout 60 python3 "$repo/disk/test-ignore-history.py"
+  timeout 180 python3 "$repo/disk/test-disk.py"
+  timeout 120 python3 "$repo/disk/test-wizard-merge.py"
   timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-disk-errors.ps1"
   timeout 120 python3 "$repo/transport/test-engine-loopback.py" --without-disk
   LOCALAPPDATA="$testdir/local" timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-config-engine.ps1" -TestHome "$testdir/config-engine" < /dev/null

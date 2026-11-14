@@ -42,6 +42,17 @@ class PackagingTests(unittest.TestCase):
                 'transport': ['transport.profilePath', 'transport.channelPath'],
                 'disk': ['components.disk.enabled'], 'control': ['components.control.enabled'], 'vpn': []})
             self.assertEqual(definition['binaries'], [])
+            disk = next(c for c in definition['components'] if c['name'] == 'disk')
+            self.assertEqual(disk['exe'], r'%LOCALAPPDATA%\RemoteDisk\tray\syncthingtray.exe')
+            self.assertEqual(disk['args'], [])
+            self.assertEqual(disk['cwd'], r'%LOCALAPPDATA%\RemoteDisk\tray')
+            self.assertEqual(disk['restart'], 'always')
+            self.assertFalse(disk['critical'])
+            self.assertFalse(disk.get('menu'))
+            self.assertNotIn('healthFile', disk)
+            self.assertEqual({n for n in names if n.startswith('disk/')}, {
+                'disk/Install-RemoteDisk.ps1', 'disk/Disk.Common.ps1', 'disk/Disk.Binary.ps1',
+                'disk/Disk.Engine.ps1', 'disk/Disk.NavPane.ps1', 'disk/server-disk.sh', 'disk/stignore.txt'})
             for c in definition['components']:
                 args = c['args']
                 if '-File' in args:
@@ -99,6 +110,66 @@ class PackagingTests(unittest.TestCase):
         self.assertGreater(len(runtime), 10)
         for name in runtime + [p.relative_to(ROOT).as_posix() for p in (ROOT / 'build').glob('Wizard*.ps1')]:
             self.assertIn(name, names)
+
+    def test_ignore_template_upload_preserves_user_rules_without_history(self):
+        pwsh = os.environ.get('PWSH', str(Path.home() / '.cache/pwsh-test/pwsh'))
+        quote = lambda p: "'" + str(p).replace("'", "''") + "'"
+        template = self.root / 'template'
+        template.mkdir()
+        rules = '// Правила\n.env*\nnode_modules\n'
+        (template / 'stignore.txt').write_bytes(b'\xef\xbb\xbf' + rules.replace('\n', '\r\n').encode())
+        command = '. ' + quote(ROOT / 'disk/Disk.Common.ps1') + ';Get-DiskIgnoreUpload ' + quote(template)
+        result = subprocess.run([pwsh, '-NoProfile', '-NonInteractive', '-Command', command],
+                                capture_output=True, check=True, timeout=30)
+        script = result.stdout.decode('utf-8-sig')
+        home = self.root / 'home'
+        user = home / 'Disk/Project/.stignore'
+        user.parent.mkdir(parents=True)
+        user.write_bytes(b'// user rules\r\nprivate.txt\r\n')
+        env = dict(os.environ, HOME=str(home))
+        for _ in range(2):
+            subprocess.run(['bash', '-seu'], input=script, text=True, env=env,
+                           capture_output=True, check=True, timeout=10)
+        state = home / '.local/share/remote-disk'
+        self.assertEqual([p.name for p in state.iterdir()], ['stignore.txt'])
+        self.assertEqual((state / 'stignore.txt').read_bytes(), rules.encode())
+        self.assertEqual(user.read_bytes(), b'// user rules\r\nprivate.txt\r\n')
+        (state / 'stignore.txt').unlink()
+        (state / 'stignore.txt').symlink_to(user)
+        refused = subprocess.run(['bash', '-seu'], input=script, text=True, env=env,
+                                 capture_output=True, timeout=10)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual(user.read_bytes(), b'// user rules\r\nprivate.txt\r\n')
+
+    def test_inspect_disk_uses_live_connection_without_removed_selection(self):
+        pwsh = os.environ.get('PWSH', str(Path.home() / '.cache/pwsh-test/pwsh'))
+        quote = lambda p: "'" + str(p).replace("'", "''") + "'"
+        local = self.root / 'local'
+        home = local / 'RemoteAgents'
+        home.mkdir(parents=True)
+        (home / 'config.json').write_text('{"components":{},"bridge":{"enabled":false}}')
+        disk = local / 'RemoteDisk'
+        disk.mkdir()
+        (disk / 'server.txt').write_text('PEER')
+        command = '. ' + quote(ROOT / 'build/Wizard.Common.ps1') + r'''
+function Get-WizardServer { [pscustomobject]@{ssh=$true;disk=$true} }
+function Read-DiskState {}
+function Test-WizardNetworkProof { $true }
+function Invoke-DiskApi($Route) {
+    if($Route -eq 'system/status'){return @{myID='LOCAL'}}
+    if($Route -eq 'system/connections'){return [pscustomobject]@{connections=[pscustomobject]@{PEER=[pscustomobject]@{connected=$script:connected}}}}
+    throw 'Unexpected REST request'
+}
+$script:connected=$true
+$live=Invoke-WizardStep HOME BUNDLE 'Inspect' ([pscustomobject]@{})
+$script:connected=$false
+$offline=Invoke-WizardStep HOME BUNDLE 'Inspect' ([pscustomobject]@{})
+@{live=$live.steps[2].ready;offline=$offline.steps[2].ready}|ConvertTo-Json -Compress
+'''.replace('HOME', quote(home)).replace('BUNDLE', quote(ROOT))
+        result = subprocess.run([pwsh, '-NoProfile', '-NonInteractive', '-Command', command],
+                                env=dict(os.environ, LOCALAPPDATA=str(local)), stdin=subprocess.DEVNULL,
+                                capture_output=True, check=True, timeout=30)
+        self.assertEqual(json.loads(result.stdout.decode('utf-8-sig')), {'live': True, 'offline': False})
 
     def test_lf_and_ps51_encoding(self):
         with zipfile.ZipFile(self.zip) as z:
@@ -173,7 +244,7 @@ class PackagingTests(unittest.TestCase):
             self.assertEqual([c['name'] for c in v['components']], ['vpn'])
             self.assertEqual(a['components'][-1], v['components'][0], 'same command-managed VPN component in the single-file installer')
             self.assertIn('build/Wizard.ps1', other.namelist())
-            self.assertIn('disk/Select-Disk.ps1', other.namelist())
+            self.assertIn('disk/Install-RemoteDisk.ps1', other.namelist())
             self.assertIn('build/Setup.Common.ps1', agents.namelist())
             self.assertIn('build/Uninstall.ps1', agents.namelist())
             self.assertIn('setup-vps-ssh.ps1', agents.namelist())
