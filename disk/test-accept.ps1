@@ -69,7 +69,11 @@ function Invoke-DiskApi($Route,$Method='GET',$Body=$null) {
     $explicit=@($data.folders|Where-Object {$_.id -ceq 'Custom'})[0]
     Assert ($default.path -ceq (Join-Path $base 'Default') -and $explicit.path -ceq $custom) 'AcceptFile supports default and explicit absolute paths'
     Assert ($default.label -ceq 'Default' -and $default.type -ceq 'sendreceive' -and 'PEER' -cin @($default.devices|ForEach-Object {$_.deviceID}) -and 'LOCAL' -cin @($default.devices|ForEach-Object {$_.deviceID})) 'accepted folder uses server ID and sendreceive with both devices'
-    Assert ([IO.File]::ReadAllText($ignore) -ceq 'my own rules') 'existing user ignore rules are preserved'
+    Assert ([IO.File]::ReadAllText($ignore) -ceq "my own rules`n#include .stignore-remoteagents`n") 'existing user rules are preserved and include appended after a missing newline'
+    foreach($folder in @($default,$explicit)){
+        Assert ($folder.maxConflicts -eq -1 -and $folder.versioning.type -ceq 'staggered' -and $folder.versioning.params.maxAge -ceq '0' -and $folder.versioning.params.cleanInterval -ceq '3600') 'new folders retain all conflicts and staggered versions forever'
+        Assert ([IO.File]::ReadAllText((Join-Path $folder.path '.stignore-remoteagents')) -ceq [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'stignore.txt')).Replace("`r",'')) 'accepted default and external folders receive the managed ignore template'
+    }
     $keep=@($data.folders|Where-Object {$_.id -ceq 'Keep'})[0]
     Assert ($keep.path -ceq $keepPath -and $keep.type -ceq 'receiveonly' -and $keep.paused -and $keep.maxConflicts -eq 17) 'existing folder path and options are preserved'
     $snapshot=ConvertTo-Json -InputObject $data.folders -Depth 20 -Compress
@@ -140,6 +144,16 @@ function Remove-DiskLegacy {
     [void](New-Item -ItemType $kind -Path $link -Target $custom)
     Assert (Refuses {Accept-DiskFolders @(@{id='Link';path=(Join-Path $link 'child')}) 'PEER' 'LOCAL'}) 'acceptance cannot follow a junction'
     Assert ($script:preflightCalls -eq 0 -and [IO.File]::ReadAllText($userFile) -ceq 'local data') 'invalid batches perform no polling or writes and preserve files'
+    $ignoreFolder=Join-Path $TestHome 'Ignore CRLF';[void][IO.Directory]::CreateDirectory($ignoreFolder)
+    $ignoreFile=Join-Path $ignoreFolder '.stignore';$original="Правила пользователя`r`n*.mine`r`n"
+    [IO.File]::WriteAllText($ignoreFile,$original,(New-Object Text.UTF8Encoding($true)))
+    $originalBytes=[IO.File]::ReadAllBytes($ignoreFile)
+    Set-DiskFolderIgnores $ignoreFolder;$once=[IO.File]::ReadAllBytes($ignoreFile);Set-DiskFolderIgnores $ignoreFolder
+    Assert ([Convert]::ToBase64String($once,0,$originalBytes.Length) -ceq [Convert]::ToBase64String($originalBytes) -and [IO.File]::ReadAllText($ignoreFile) -ceq ($original+"#include .stignore-remoteagents`r`n")) 'CRLF user rules and UTF-8 BOM bytes are preserved'
+    Assert ([Convert]::ToBase64String([IO.File]::ReadAllBytes($ignoreFile)) -ceq [Convert]::ToBase64String($once)) 'ignore include is idempotent'
+    $managed=Join-Path $ignoreFolder '.stignore-remoteagents';[IO.File]::Delete($managed)
+    [void](New-Item -ItemType $kind -Path $managed -Target $custom)
+    Assert (Refuses {Set-DiskFolderIgnores $ignoreFolder}) 'ignore template does not follow links'
     # Device updates preserve unrelated settings and are idempotent.
     function Get-TransportEffectivePort {22123}
     $script:device=[pscustomobject]@{deviceID='PEER';addresses=@('dynamic');autoAcceptFolders=$true;name='User name'};$script:patches=0

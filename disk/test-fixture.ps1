@@ -2,7 +2,7 @@
 function New-DiskInstallFixture([string]$Root) {
     $bundle=Join-Path $Root 'bundle';$disk=Join-Path $bundle 'disk'
     [void][IO.Directory]::CreateDirectory($disk);[void][IO.Directory]::CreateDirectory((Join-Path $bundle 'transport'))
-    foreach($name in @('Install-RemoteDisk.ps1','Disk.Common.ps1','Disk.NavPane.ps1','Disk.Binary.ps1','Disk.Engine.ps1')){Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $disk $name)}
+    foreach($name in @('Install-RemoteDisk.ps1','Disk.Common.ps1','Disk.NavPane.ps1','Disk.Binary.ps1','Disk.Engine.ps1','stignore.txt')){Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $disk $name)}
     Write-DiskUtf8 (Join-Path $bundle 'transport/Transport.Common.ps1') 'function Get-TransportEffectivePort {22123}'
     return $bundle
 }

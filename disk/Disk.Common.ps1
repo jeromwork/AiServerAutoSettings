@@ -276,6 +276,10 @@ function Test-DiskFolderAccepted($Folder,$Existing,[string]$Peer) {
 function Assert-DiskAcceptPath([string]$Path,$Existing) {
     Assert-DiskAcceptBase $Path;Assert-DiskPlainPath $Path
     if([IO.File]::Exists($Path)){throw ('Путь папки занят файлом: '+$Path)}
+    foreach($name in @('.stignore','.stignore-remoteagents')){
+        $file=Join-Path $Path $name;Assert-DiskPlainPath $file
+        if([IO.Directory]::Exists($file)){throw ('Файл правил занят каталогом: '+$file)}
+    }
     $full=[IO.Path]::GetFullPath($Path).TrimEnd('\','/')
     foreach($folder in $Existing){
         $other=[IO.Path]::GetFullPath([string]$folder.path).TrimEnd('\','/')
@@ -290,6 +294,21 @@ function Get-DiskPendingFolderId($Pending,[string]$Name,[string]$Peer) {
         $offer=$Pending.$key.offeredBy.$Peer
         if($null -ne $offer -and ($key -ceq $Name -or $offer.label -ceq $Name)){return [string]$key}
     }
+}
+function Set-DiskFolderIgnores([string]$Path) {
+    Assert-DiskPlainPath $Path
+    $managed=Join-Path $Path '.stignore-remoteagents';$file=Join-Path $Path '.stignore'
+    Assert-DiskPlainPath $managed;Assert-DiskPlainPath $file
+    $rules=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'stignore.txt')).Replace("`r",'')
+    [void][IO.Directory]::CreateDirectory($Path)
+    # Publish the include target first; append to the user's bytes without rewriting them.
+    if(-not [IO.File]::Exists($managed) -or [IO.File]::ReadAllText($managed) -cne $rules){Write-DiskUtf8 $managed $rules}
+    $old='';if([IO.File]::Exists($file)){$old=[IO.File]::ReadAllText($file)}
+    $include='#include .stignore-remoteagents'
+    if(@($old.Replace("`r",'') -split "`n"|Where-Object {$_.Trim() -ceq $include}).Count){return}
+    $newline="`n";if($old.Contains("`r`n")){$newline="`r`n"}
+    $append=$include+$newline;if($old.Length -and -not $old.EndsWith("`n")){$append=$newline+$append}
+    [IO.File]::AppendAllText($file,$append,(New-Object Text.UTF8Encoding($false)))
 }
 function Accept-DiskFolders($Folders,[string]$Peer,[string]$LocalId) {
     $existing=@(Invoke-DiskApi 'config/folders')
@@ -315,7 +334,8 @@ function Accept-DiskFolders($Folders,[string]$Peer,[string]$LocalId) {
             $id=$folder.id;$message='Сервер не предложил папку '+$folder.id+' за 30 с; создаю локальную папку с ID '+$id
             Write-DiskProgress $message;Write-DiskLog $message
         }
-        [void](Invoke-DiskApi 'config/folders' POST @{id=$id;label=$folder.id;path=$folder.path;type='sendreceive';devices=@(@{deviceID=$LocalId},@{deviceID=$Peer})})
+        Set-DiskFolderIgnores $folder.path
+        [void](Invoke-DiskApi 'config/folders' POST @{id=$id;label=$folder.id;path=$folder.path;type='sendreceive';maxConflicts=-1;versioning=@{type='staggered';params=@{maxAge='0';cleanInterval='3600'}};devices=@(@{deviceID=$LocalId},@{deviceID=$Peer})})
     }
 }
 function Set-DiskServerDevice([string]$Peer) {
