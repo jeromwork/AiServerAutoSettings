@@ -407,13 +407,14 @@ namespace RemoteAgents.Launcher
             if (form.WindowState == FormWindowState.Minimized) form.WindowState = FormWindowState.Normal;
             form.BringToFront(); form.Activate(); SetForegroundWindow(form.Handle);
         }
-        // First start of a version without the Explorer integration: its menus and icons are taken away once, in the background.
+        // Remove old Explorer menus/icons in the background, also when a downgrade recreated our owned verbs.
         // A failure only reaches the journal (the flag file is written on success) and never stops the program.
         // Only the installed program does it: an isolated --home (tests, smoke runs) must not touch this computer's Explorer settings.
         void StartLegacyDiskCleanup()
         {
-            if (Product.IsVpn || closing || engine.Current.Length == 0 || LegacyDiskCleanup.Done(home)) return;
+            if (Product.IsVpn || closing || engine.Current.Length == 0) return;
             if (!Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome), StringComparison.OrdinalIgnoreCase)) return;
+            if (!LegacyDiskCleanup.Required(home)) return;
             string bundle = engine.Folder(engine.Current);
             Task.Run(() => LegacyDiskCleanup.Run(home, bundle, (exe, args) => External.Run(exe, args, bundle, null, 120000, 1024 * 1024, stop.Token), log.Write));
         }
@@ -653,6 +654,7 @@ namespace RemoteAgents.Launcher
             var last = BackgroundWork.Disk.Last;
             if (closing || BackgroundWork.Disk.Busy || last == null || last == reportedDisk) return;
             reportedDisk = last;
+            if (!DiskApplyWait.Current(last.Binding, ConfigProfile.Load(home))) return;
             // An open window shows the result itself; the balloon is for a run that outlived its window.
             if (Application.OpenForms.Cast<Form>().Any(f => f is ConfigWindow && f.Visible) || !icon.Visible) return;
             if (last.Ok) icon.ShowBalloonTip(5000, Product.Name, "Диск: " + last.Summary, ToolTipIcon.Info);

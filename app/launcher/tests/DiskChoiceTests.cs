@@ -39,6 +39,12 @@ namespace RemoteAgents.Launcher
             Check(!request.ContainsKey("paths") && !request.ContainsKey("directions") && !request.ContainsKey("external"), "no field of the earlier request survives");
             var accept = Json.Map(Json.Parse(Json.Encode(new Dictionary<string, object> { { "folders", request["folders"] } })));
             Check(Json.Array(Json.Get(accept, "folders")).Length == 2, "the folders list alone is the AcceptFile document");
+            // Switching servers must not offer old local data (including paths outside the old Disk root) to the new peer.
+            string beforeReconnect = Json.Encode(p);
+            var reconnect = ConfigRequests.Disk(p, "C:\\Disk-new", true);
+            Check(Json.Bool(reconnect, "reconnect") && Json.Str(reconnect, "base") == "C:\\Disk-new", "reconnect uses the newly chosen root, not the old profile base");
+            Check(reconnect.Count == 2 && !reconnect.ContainsKey("folders"), "reconnect accepts neither old ids nor absolute folder paths");
+            Check(Json.Encode(p) == beforeReconnect && ConfigRequests.Disk(p, "ignored").ContainsKey("folders"), "building a reconnect request does not mutate the stored folder choice or ordinary apply");
             // No folders: nothing is accepted, the server only offers its folders in Syncthing Tray.
             foreach (var none in new object[] { D("base", "C:\\Disk"), D("folders", new object[0]), D() }) {
                 var noRequest = ConfigRequests.Disk(Parse(none), "C:\\Default");
