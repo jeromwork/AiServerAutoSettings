@@ -1,4 +1,6 @@
 ﻿#requires -Version 5.1
+[CmdletBinding()]
+param([switch]$StartTray,[Alias('Home')][string]$LauncherHome)
 # Shared ownership helpers: same embedded engine and state as the former tray.
 function Get-DiskEngineProcesses([string]$DiskRoot) {
     $exe=[IO.Path]::GetFullPath((Join-Path $DiskRoot 'tray/syncthingtray.exe'))
@@ -43,4 +45,23 @@ function Start-DiskHeadless {
     $si.FileName=$exe;$si.Arguments=(@('syncthing','serve','--home',(Join-Path $script:DiskHome 'state'),'--no-browser','--no-restart')|ForEach-Object {Quote-Disk $_}) -join ' '
     $si.UseShellExecute=$false;$si.CreateNoWindow=$true
     $script:DiskEngine=[Diagnostics.Process]::Start($si)
+}
+
+function Start-DiskTray {
+    $si=New-Object Diagnostics.ProcessStartInfo
+    $si.FileName=Join-Path $script:DiskHome 'tray/syncthingtray.exe';$si.WorkingDirectory=Split-Path $si.FileName -Parent
+    $si.UseShellExecute=$false
+    $process=[Diagnostics.Process]::Start($si)
+    try{$process.WaitForExit();return $process.ExitCode}finally{$process.Dispose()}
+}
+if($StartTray){
+    . (Join-Path $PSScriptRoot 'Disk.Common.ps1')
+    . (Join-Path (Split-Path $PSScriptRoot -Parent) 'transport/Transport.Common.ps1')
+    $script:DiskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk'
+    if(-not $LauncherHome){$LauncherHome=Join-Path $env:LOCALAPPDATA 'RemoteAgents'}
+    try{
+        [void](Sync-DiskServerAddress $LauncherHome)
+        # Keep this supervisor child alive for Tray's entire lifetime (the launcher's job owns both).
+        exit (Start-DiskTray)
+    }catch{Write-DiskLog 'Запуск Syncthing Tray' $_;[Console]::Error.WriteLine('Не удалось запустить Syncthing Tray: '+$_.Exception.Message);exit 1}
 }

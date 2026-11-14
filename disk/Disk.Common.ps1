@@ -351,3 +351,33 @@ function Set-DiskServerDevice([string]$Peer) {
         if($patch.Count){[void](Invoke-DiskApi $route PATCH $patch)}
     }
 }
+
+# Reconcile the transport's effective port once, before starting Tray; no SSH or background polling.
+function Sync-DiskServerAddress([string]$LauncherRoot) {
+    $file=Join-Path $script:DiskHome 'server.txt'
+    if(-not [IO.File]::Exists($file)){return $false}
+    $peer=[IO.File]::ReadAllText($file).TrimStart([char]0xFEFF).Trim()
+    if(-not $peer){return $false}
+    $address='tcp://127.0.0.1:'+[int](Get-TransportEffectivePort $LauncherRoot 'syncPort')
+    $route='config/devices/'+[Uri]::EscapeDataString($peer)
+    $rest=$false
+    try{$device=Invoke-DiskApi $route;$rest=$true}catch{
+        # An active engine owns config.xml even while its REST listener is starting.
+        if(@(Get-DiskEngineProcesses $script:DiskHome).Count){throw 'Syncthing работает, но REST ещё недоступен; адрес сервера будет проверен при повторном запуске'}
+    }
+    if($rest){
+        if(@($device.addresses).Count -eq 1 -and [string]$device.addresses[0] -ceq $address){return $false}
+        [void](Invoke-DiskApi $route PATCH @{addresses=@($address)})
+    }else{
+        Read-DiskState
+        $devices=@($script:Engine.configuration.SelectNodes('device')|Where-Object {$_.GetAttribute('id') -ceq $peer})
+        if($devices.Count -ne 1){throw 'Устройство сервера отсутствует в config.xml Syncthing; повторите установку Disk'}
+        $device=$devices[0];$addresses=@($device.SelectNodes('address'))
+        if($addresses.Count -eq 1 -and $addresses[0].InnerText -ceq $address){return $false}
+        foreach($old in $addresses){[void]$device.RemoveChild($old)}
+        $node=$script:Engine.CreateElement('address');$node.InnerText=$address;[void]$device.AppendChild($node)
+        $script:Engine.Save((Join-Path $script:DiskHome 'state/config.xml'))
+    }
+    Write-DiskLog ('Адрес сервера Syncthing обновлён: '+$address)
+    return $true
+}
