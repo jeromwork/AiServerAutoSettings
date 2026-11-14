@@ -18,9 +18,11 @@ namespace RemoteAgents.Launcher
         }
         static void DiskRest()
         {
-            var folder = Data("{\"id\":\"disk a/б\"}"); var idle = Data("{\"state\":\"idle\",\"globalBytes\":2048}");
+            var folder = Data("{\"id\":\"disk a/б\",\"devices\":[{\"deviceID\":\"PEER\"}]}"); var idle = Data("{\"state\":\"idle\",\"globalBytes\":2048,\"needBytes\":0,\"needTotalItems\":0}");
             var folders = new[] { folder }; var states = new[] { idle };
-            Check(DiskTraySession.Summary(folders, states, true) == "Диск: синхронизирован", "REST idle and connected means synchronized");
+            var complete = new[] { Data("{\"completion\":100,\"needItems\":0,\"needBytes\":0,\"needDeletes\":0,\"remoteState\":\"valid\"}") };
+            Check(!DiskTraySession.Summary(folders, states, true).Contains("синхронизирован"), "missing server completion cannot be green");
+            Check(DiskTraySession.Summary(folders, states, true, complete) == "Диск: синхронизирован", "local idle and confirmed server completion means synchronized");
             Check(DiskTraySession.Summary(folders, states, false).Contains("не подключён"), "idle without server never claims synchronization");
             Check(DiskTraySession.Summary(new Dictionary<string, object>[0], states, true).Contains("нет выбранных"), "empty selection is explicit");
             folder["paused"] = true;
@@ -58,6 +60,7 @@ namespace RemoteAgents.Launcher
                             else if (url.StartsWith("/rest/events?")) { poll++; json = poll == 2 ? "[]" : "[{\"id\":" + (poll * 10) + ",\"type\":\"FolderSummary\"}]"; }
                             else if (url == "/rest/system/connections") json = "{\"connections\":{\"PEER\":{\"connected\":true}},\"total\":{\"inBytesTotal\":" + poll * 1024 + ",\"outBytesTotal\":0}}";
                             else if (url == "/rest/config/folders") json = Json.Encode(new[] { folder });
+                            else if (url.StartsWith("/rest/db/completion?folder=")) json = Json.Encode(complete[0]);
                             else if (url.StartsWith("/rest/db/status?folder=")) { statusCalls++; json = poll == 1 ? "{\"state\":\"syncing\",\"globalBytes\":2048,\"needBytes\":1024}" : Json.Encode(idle); }
                             else throw new Exception("Unexpected local REST request: " + url);
                             byte[] bytes = System.Text.Encoding.UTF8.GetBytes(json); context.Response.ContentType = "application/json";

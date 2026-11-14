@@ -73,6 +73,7 @@ trap cleanup EXIT
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -- "$testdir/core"
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ProductName=RemoteVPN -- "$testdir/core-vpn"
 timeout 120 python3 "$here/test-disk-explorer-engine.py"
+timeout 180 python3 "$here/test-disk-safety-engine.py"
 # Config format, enc1, vault and materialization (stream A entry point; own output directory).
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ConfigTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ConfigTests=true -p:ProductName=RemoteVPN

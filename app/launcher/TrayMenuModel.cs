@@ -107,7 +107,8 @@ namespace RemoteAgents.Launcher
         long since;
         string engineStart;
         double previousUptime;
-        Dictionary<string, object>[] folders, states;
+        Dictionary<string, object>[] folders, states, remoteStates;
+        string folderPeer;
         double previousIn, previousOut;
         readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
         double previousTime = -1;
@@ -143,7 +144,7 @@ namespace RemoteAgents.Launcher
                 token.ThrowIfCancellationRequested();
                 using (var response = (System.Net.HttpWebResponse)request.GetResponse()) {
                     if (response.StatusCode != System.Net.HttpStatusCode.OK) throw new InvalidDataException();
-                    using (var reader = new StreamReader(response.GetResponseStream(), System.Text.Encoding.UTF8)) return Json.Parse(reader.ReadToEnd());
+                    using (var reader = new StreamReader(response.GetResponseStream(), System.Text.Encoding.UTF8)) return Json.Parse(reader.ReadToEnd().Replace("\r", ""));
                 }
             }
         }
@@ -157,29 +158,33 @@ namespace RemoteAgents.Launcher
             // Events long-poll gates state refresh; connections counters supply the speed.
             // First snapshot also establishes a cursor, so changes during that snapshot are replayed.
             var events = Json.Array(Get("events?since=" + since.ToString(CultureInfo.InvariantCulture) + "&timeout=" + (previousTime < 0 ? "0&limit=1" : "2") +
-                "&events=StateChanged,FolderSummary,FolderErrors,ConfigSaved,DeviceConnected,DeviceDisconnected,FolderCompletion", token));
+                "&events=StateChanged,FolderSummary,FolderErrors,ConfigSaved,DeviceConnected,DeviceDisconnected,FolderCompletion,LocalIndexUpdated,RemoteIndexUpdated", token));
             foreach (var item in events) since = Math.Max(since, (long)Number(Json.Map(item), "id"));
             var connections = Json.Map(Get("system/connections", token));
             var total = Json.Map(Json.Get(connections, "total")); double now = clock.Elapsed.TotalSeconds;
             double input = Number(total, "inBytesTotal"), output = Number(total, "outBytesTotal");
             if (previousTime >= 0 && (input < previousIn || output < previousOut)) Reset();
+            string peer = File.ReadAllText(Path.Combine(Root, "server.txt")).Trim('\uFEFF', ' ', '\r', '\n', '\t');
+            if (folderPeer != peer) { folders = states = remoteStates = null; folderPeer = peer; }
             // db/status is expensive: refresh folder state only initially or after an event.
             if (folders == null || events.Length > 0) {
-                folders = Json.Array(Get("config/folders", token)).Select(Json.Map).ToArray();
-                var updated = new List<Dictionary<string, object>>();
+                folders = Json.Array(Get("config/folders", token)).Select(Json.Map)
+                    .Where(f => Json.Array(Json.Get(f, "devices")).Any(d => Json.Str(Json.Map(d), "deviceID") == peer)).ToArray();
+                var updated = new List<Dictionary<string, object>>(); var completions = new List<Dictionary<string, object>>();
                 foreach (var folder in folders) {
                     token.ThrowIfCancellationRequested();
-                    if (!Json.Bool(folder, "paused")) updated.Add(Json.Map(Get("db/status?folder=" + Uri.EscapeDataString(Json.Str(folder, "id")), token)));
+                    bool paused = Json.Bool(folder, "paused"); string id = Uri.EscapeDataString(Json.Str(folder, "id"));
+                    updated.Add(paused ? Json.Map(null) : Json.Map(Get("db/status?folder=" + id, token)));
+                    completions.Add(paused ? Json.Map(null) : Json.Map(Get("db/completion?folder=" + id + "&device=" + Uri.EscapeDataString(peer), token)));
                 }
-                states = updated.ToArray();
+                states = updated.ToArray(); remoteStates = completions.ToArray();
             }
-            string peer = File.ReadAllText(Path.Combine(Root, "server.txt")).Trim('\uFEFF', ' ', '\r', '\n', '\t');
             bool connected = Json.Bool(Json.Map(Json.Get(Json.Map(Json.Get(connections, "connections")), peer)), "connected");
             string speed = Rates(previousIn, previousOut, input, output, previousTime < 0 ? 0 : now - previousTime);
             previousIn = input; previousOut = output; previousTime = now;
-            return Summary(folders, states, connected) + speed;
+            return Summary(folders, states, connected, remoteStates) + speed;
         }
-        void Reset() { since = 0; folders = states = null; previousTime = -1; }
+        void Reset() { since = 0; folders = states = remoteStates = null; previousTime = -1; }
         internal static double Number(Dictionary<string, object> data, string key)
         {
             double value;
@@ -191,17 +196,25 @@ namespace RemoteAgents.Launcher
             return " · ↓" + ((input - oldIn) / seconds / 1024).ToString("0.#", CultureInfo.InvariantCulture) + " ↑" +
                 ((output - oldOut) / seconds / 1024).ToString("0.#", CultureInfo.InvariantCulture) + " КБ/с";
         }
-        internal static string Summary(Dictionary<string, object>[] folders, Dictionary<string, object>[] states, bool connected)
+        internal static string Summary(Dictionary<string, object>[] folders, Dictionary<string, object>[] states, bool connected, Dictionary<string, object>[] remoteStates = null)
         {
             if (states.Any(s => Number(s, "errors") > 0 || Number(s, "pullErrors") > 0 || Json.Str(s, "state") == "error")) return "Диск: ошибка синхронизации";
             if (folders.Length == 0) return "Диск: нет выбранных папок";
             if (folders.Any(f => Json.Bool(f, "paused"))) return "Диск: есть папки на паузе";
             if (!connected) return "Диск: сервер не подключён";
+            if (states.Any(s => Number(s, "receiveOnlyTotalItems") > 0 || Number(s, "receiveOnlyChangedBytes") > 0)) return "Диск: есть локальные изменения";
             if (states.Any(s => Json.Str(s, "state").StartsWith("scan", StringComparison.Ordinal))) return "Диск: проверка файлов";
             double needed = states.Sum(s => Number(s, "needBytes")), total = states.Sum(s => Number(s, "globalBytes"));
             if (needed > 0 || states.Any(s => Number(s, "needTotalItems") > 0 || Json.Str(s, "state").StartsWith("sync", StringComparison.Ordinal)))
                 return "Диск: синхронизация" + (total > 0 ? " " + Math.Min(100, Math.Max(0, (total - needed) * 100 / total)).ToString("0", CultureInfo.InvariantCulture) + "%" : "");
-            return states.Length == folders.Length && states.All(s => Json.Str(s, "state") == "idle") ? "Диск: синхронизирован" : "Диск: состояние уточняется";
+            // Explorer and tray use exactly the same local/remote readiness decision.
+            if (states.Length != folders.Length || remoteStates == null || remoteStates.Length != folders.Length) return "Диск: состояние уточняется";
+            var rows = folders.Select((f, i) => DiskSnapshot.Status(new DiskFolderState { Paused = Json.Bool(f, "paused") }, states[i], remoteStates[i], connected)).ToArray();
+            if (rows.Any(r => r.Kind == DiskExplorerKind.Error)) return "Диск: ошибка синхронизации";
+            if (rows.Any(r => r.Kind == DiskExplorerKind.Paused)) return "Диск: есть папки на паузе";
+            if (rows.All(r => r.Kind == DiskExplorerKind.Synced)) return "Диск: синхронизирован";
+            if (rows.Any(r => r.Kind == DiskExplorerKind.Syncing)) return "Диск: синхронизация " + rows.Min(r => r.Percent).ToString(CultureInfo.InvariantCulture) + "%";
+            return "Диск: состояние уточняется";
         }
     }
     internal static class ServerHealthView
