@@ -552,8 +552,8 @@ namespace RemoteAgents.Launcher
                         result=await Run("Connection",new {catalog=ReadCatalog(),expected=expectedCatalog,shared=shared.Checked});break;
                     case 2:
                         // Folders listed in the config's disk.folders are accepted at once; without them the person accepts in Syncthing Tray.
-                        var diskRequest=ConfigRequests.Disk(ConfigProfile.Load(home),diskBase.Text.Trim());
-                        diskRequest["base"]=diskBase.Text.Trim();diskRequest["reconnect"]=reconnectDisk;
+                        var diskRequest=ConfigRequests.Disk(ConfigProfile.Load(home),diskBase.Text.Trim(),reconnectDisk);
+                        diskRequest["base"]=diskBase.Text.Trim();
                         result=await Run("Disk",diskRequest);break;
                     case 3: {
                         string apiOrigin=ConfigRequests.Origin(api.Text),webOrigin=ConfigRequests.Origin(web.Text);if(string.IsNullOrWhiteSpace(label.Text))throw new IOException("Укажите имя аккаунта, чтобы различать аккаунты");

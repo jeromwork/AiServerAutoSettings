@@ -423,10 +423,12 @@ namespace RemoteAgents.Launcher
         // The Disk step of build/Wizard.ps1 -> disk/Install-RemoteDisk.ps1: install Syncthing and Syncthing Tray, pair with the server
         // and accept «folders» ([{ id, path? }], the format of Install-RemoteDisk.ps1 -AcceptFile). No folders: nothing is accepted
         // and the server's folders wait in Syncthing Tray. «reconnect» is the wizard's «новая пустая папка для нового сервера».
-        internal static Dictionary<string, object> Disk(Dictionary<string, object> p, string defaultBase)
+        // A reconnect accepts nothing automatically: both ids and absolute paths belong to the previous server's choice.
+        internal static Dictionary<string, object> Disk(Dictionary<string, object> p, string defaultBase, bool reconnect = false)
         {
             var disk = Json.Map(Json.Get(p, "disk"));
-            var request = new Dictionary<string, object> { { "base", Json.Text(disk, "base", defaultBase) }, { "reconnect", false } };
+            var request = new Dictionary<string, object> { { "base", reconnect ? defaultBase : Json.Text(disk, "base", defaultBase) }, { "reconnect", reconnect } };
+            if (reconnect) return request;
             var folders = DiskChoice.FromProfile(p).Folders;
             if (folders.Count > 0) request["folders"] = folders.Select(f => (object)(f.Path.Length == 0
                 ? new Dictionary<string, object> { { "id", f.Id } }

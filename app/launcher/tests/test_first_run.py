@@ -14,8 +14,9 @@ class FirstRunTests(unittest.TestCase):
         wizard = source('SetupWizard.cs')
         disk = wizard.split('case 2:', 1)[1].split('case 3:', 1)[0]
         self.assertIn('ConfigRequests.Disk(ConfigProfile.Load(home)', disk)
-        for field in ('base', 'reconnect'):
-            self.assertIn('diskRequest["' + field + '"]', disk)
+        self.assertIn('diskBase.Text.Trim(),reconnectDisk)', disk)
+        self.assertIn('diskRequest["base"]=diskBase.Text.Trim()', disk)
+        self.assertNotIn('diskRequest["reconnect"]', disk, 'reconnect safety belongs to the shared request builder')
         self.assertIn('Run("Disk",diskRequest)', disk)
         # No folder tree any more: the folders to accept come only from the profile's disk.folders (inside the request).
         for gone in ('paths', 'folders.', 'LoadTree', 'directions', 'external'):
