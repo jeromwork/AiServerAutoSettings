@@ -49,6 +49,8 @@
     <Compile Include="../NativeJob.cs" Link="NativeJob.cs" />
     <Compile Include="../WizardStep.cs" Link="WizardStep.cs" />
     <Compile Include="../DiskChoice.cs" Link="DiskChoice.cs" />
+    <Compile Include="LegacyCleanupTests.cs" />
+    <Compile Include="../LegacyCleanup.cs" Link="LegacyCleanup.cs" />
     <Compile Include="../ServerOperations.cs" Link="ServerOperations.cs" />
   </ItemGroup>
 </Project>

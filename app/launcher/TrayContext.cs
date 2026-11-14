@@ -73,7 +73,7 @@ namespace RemoteAgents.Launcher
             BackgroundWork.Disk.Changed += () => { try { dispatch.BeginInvoke(new Action(DiskFinished)); } catch (InvalidOperationException) { } };
             dispatch.BeginInvoke(new Action(() => {
                 if (firstSetup) { RunFirstSetup(); return; }
-                Handle(args); DrainCommands(); Tick();
+                Handle(args); DrainCommands(); Tick(); StartLegacyDiskCleanup();
                 if(Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome),StringComparison.OrdinalIgnoreCase)) CheckSetup();
 
             }));
@@ -406,6 +406,14 @@ namespace RemoteAgents.Launcher
             if (!form.Visible) form.Show();
             if (form.WindowState == FormWindowState.Minimized) form.WindowState = FormWindowState.Normal;
             form.BringToFront(); form.Activate(); SetForegroundWindow(form.Handle);
+        }
+        // First start of a version without the Explorer integration: its menus and icons are taken away once, in the background.
+        // A failure only reaches the journal (the flag file is written on success) and never stops the program.
+        void StartLegacyDiskCleanup()
+        {
+            if (Product.IsVpn || closing || engine.Current.Length == 0 || LegacyDiskCleanup.Done(home)) return;
+            string bundle = engine.Folder(engine.Current);
+            Task.Run(() => LegacyDiskCleanup.Run(home, bundle, (exe, args) => External.Run(exe, args, bundle, null, 120000, 1024 * 1024, stop.Token), log.Write));
         }
         // The Disk root in Explorer: accepted folders live there, their state is shown by Syncthing Tray, not by this program.
         void OpenDisk()
