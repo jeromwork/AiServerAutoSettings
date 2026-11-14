@@ -458,7 +458,8 @@ class ServerTests(unittest.TestCase):
                     before = t.folder(a, 'Existing')
                     data = dict(deviceId=b['deviceId'], deviceName=b['home'].name) if action == 'add-device' else None
                     t.server(a, action, data)
-                    self.assertEqual(t.folder(a, 'Existing'), dict(before, fsWatcherDelayS=2))
+                    # Managed Disk folders always watch changes: the two-second delay is useless without the watcher.
+                    self.assertEqual(t.folder(a, 'Existing'), dict(before, fsWatcherDelayS=2, fsWatcherEnabled=True))
                     self.assertEqual(t.folder(a, 'external'), outside)
                     # Count actual REST folder PUTs through a proxy: a repeat has none.
                     ports_file = a['state'] / 'ports.json'
@@ -470,7 +471,8 @@ class ServerTests(unittest.TestCase):
                         finally:
                             ports_file.write_text(json.dumps(ports))
                         self.assertEqual(proxy.held, 0)
-                    self.assertEqual(t.folder(a, 'Existing'), dict(before, fsWatcherDelayS=2))
+                    # Managed Disk folders always watch changes: the two-second delay is useless without the watcher.
+                    self.assertEqual(t.folder(a, 'Existing'), dict(before, fsWatcherDelayS=2, fsWatcherEnabled=True))
 
     def test_powershell_watcher_migration_acceptance_and_native_defaults_with_real_syncthing(self):
         pwsh = os.environ.get('PWSH') or str(Path.home() / '.cache/pwsh-test/pwsh')
