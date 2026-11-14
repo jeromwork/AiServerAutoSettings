@@ -1,4 +1,5 @@
 // RemoteDisk: не передаём секреты и то, что генерируется
+(?i)/.stignore-remoteagents
 (?i).env*
 (?i).npmrc
 (?i).pypirc

@@ -3,7 +3,7 @@ set -euo pipefail
 umask 077
 export REMOTE_DISK_SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 python3 - "$@" 3<&0 <<'PY'
-import os,sys,json,subprocess,hashlib,tempfile,tarfile,urllib.request,time,socket,base64,re,fcntl,fnmatch,xml.etree.ElementTree as E
+import os,sys,json,subprocess,hashlib,tempfile,tarfile,urllib.request,time,socket,base64,re,fcntl,xml.etree.ElementTree as E
 from pathlib import Path
 s=Path.home()/'.local/share/remote-disk'; cfg=s/'config.xml'; binary=s/'bin/syncthing'; here=Path(os.environ['REMOTE_DISK_SCRIPT_DIR'])
 a=sys.argv[1:] or ['bootstrap']; action=a[0]
@@ -13,19 +13,25 @@ def folder_path(name):
     if not isinstance(name,str) or not re.fullmatch(r'[^\W\d-][\w. -]{0,127}|[0-9][\w. -]{0,127}',name) or '..' in name or name[-1] in ' .' or re.match(r'(?i)^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)',name):raise ValueError('Недопустимое имя папки')
     p=Path.home()/'Disk'/name;safe(p);return p
 
-def fid(name):return 'disk-'+hashlib.sha256(('folder:'+name).encode()).hexdigest()[:24]
-def has_files(p):return p.exists() and any(x.name not in {'.git','.stignore','.stfolder','.stversions'} for x in p.iterdir())
-def ignores(p,write=False):
-    f=p/'.stignore';safe(f);rules=(here/'stignore.txt').read_bytes()
-    if f.exists() and f.read_text(encoding='utf-8-sig').replace('\r','').rstrip('\n')!=rules.decode('utf-8-sig').replace('\r','').rstrip('\n'):
-        normalized=f.read_text(encoding='utf-8-sig').replace('\r','').rstrip('\n')+'\n'
-        if hashlib.sha256(normalized.encode()).hexdigest() not in (here/'stignore-previous.sha256').read_text().splitlines():raise ValueError(p.name+': Чужой .stignore: сохраните и удалите его вручную перед подключением')
-    if write and (not f.exists() or f.read_bytes()!=rules):
-        marker=p/'.stfolder';safe(marker);marker.mkdir(exist_ok=True)
+def ignores(p,write=True):
+    f=p/'.stignore';managed=p/'.stignore-remoteagents';marker=p/'.stfolder'
+    for path in (f,managed,marker):safe(path)
+    rules=(here/'stignore.txt').read_text(encoding='utf-8-sig').replace('\r','').encode('utf-8')
+    old=f.read_bytes() if f.exists() else b''
+    include=b'#include .stignore-remoteagents'
+    merged=old
+    if include not in [line.strip() for line in old.removeprefix(b'\xef\xbb\xbf').splitlines()]:
+        newline=b'\r\n' if b'\r\n' in old else b'\n'
+        merged=old+(newline if old and not old.endswith(b'\n') else b'')+include+newline
+    if not write:return
+    marker.mkdir(exist_ok=True)
+    # Publish the include target first. User rules stay byte-for-byte intact.
+    for target,content in ((managed,rules),(f,merged)):
+        if target.exists() and target.read_bytes()==content:continue
         fd,tmp=tempfile.mkstemp(dir=marker)
         try:
-            with os.fdopen(fd,'wb') as out:out.write(rules);out.flush();os.fsync(out.fileno())
-            os.replace(tmp,f)
+            with os.fdopen(fd,'wb') as out:out.write(content);out.flush();os.fsync(out.fileno())
+            os.replace(tmp,target)
         finally:
             if os.path.exists(tmp):os.unlink(tmp)
 def git(p,*args):
@@ -36,7 +42,7 @@ def exclude_git(p):
     target=Path(value);target=target if target.is_absolute() else p/target;safe(target)
     if not target.resolve().is_relative_to((Path.home()/'Disk').resolve()):return
     target.parent.mkdir(parents=True,exist_ok=True)
-    old=target.read_text() if target.exists() else '';missing=[x for x in ('.stignore','.stfolder','*.sync-conflict-*') if x not in old.splitlines()]
+    old=target.read_text() if target.exists() else '';missing=[x for x in ('.stignore','.stignore-remoteagents','.stfolder','*.sync-conflict-*') if x not in old.splitlines()]
     if missing:target.write_text(old+('\n' if old and not old.endswith('\n') else '')+'\n'.join(missing)+'\n')
 def channel(data):
     source=json.loads(Path(os.environ.get('REMOTE_DISK_CHANNEL_SOURCE','/etc/sing-box/config.json')).read_text())
@@ -66,7 +72,7 @@ def ensure_cron():
 def reconcile(api,identity):
     disk=Path.home()/'Disk';safe(disk)
     folders=api('config/folders');devices=[d['deviceID'] for d in api('config/devices') if d['deviceID']!=identity]
-    if not disk.exists() or not devices:return
+    if not disk.exists():return
     for p in sorted(disk.iterdir()):
         if not p.is_dir() or p.is_symlink():continue
         try:
@@ -74,100 +80,39 @@ def reconcile(api,identity):
             matches=[f for f in folders if f['path'].rstrip('/')==str(p)]
             if len(matches)>1:raise ValueError('Несколько ID для одной папки')
             current=matches[0] if matches else None
-            folder_id=current['id'] if current else fid(p.name)
+            folder_id=current['id'] if current else p.name
             if any(f['id']==folder_id and f['path'].rstrip('/')!=str(p) for f in folders):raise ValueError('ID занят')
-            ignores(p)
             if not current:
                 current=api('config/defaults/folder');current.update(id=folder_id,label=p.name,path=str(p),type='sendreceive',paused=False,devices=[dict(deviceID=identity)],maxConflicts=-1,versioning=dict(type='staggered',params=dict(maxAge='0',cleanInterval='3600')),rescanIntervalS=60,fsWatcherEnabled=True)
             conflict_changed=current.get('maxConflicts')!=-1 or current.get('type')!='sendreceive'
             current['type']='sendreceive'
             current['maxConflicts']=-1
             missing=[d for d in devices if not any(x['deviceID']==d for x in current['devices'])]
-            ignores(p,True);exclude_git(p)
+            ignores(p);exclude_git(p)
             if missing or not matches or conflict_changed:
                 current['devices'] += [dict(deviceID=d) for d in missing]
-                api('config/folders/'+folder_id,'PUT',current)
+                api('config/folders/'+urllib.parse.quote(folder_id,safe=''),'PUT',current)
         except ValueError as e:print('RemoteDisk: '+p.name+': '+str(e),file=sys.stderr)
-
-patterns=[x[4:].lower() for x in (here/'stignore.txt').read_text(encoding='utf-8-sig').splitlines() if x.startswith('(?i)')]
-def selectable(relative):
-    project_relative='/'.join(relative.split('/')[1:]).lower()
-    if any(project_relative==pat[1:] or project_relative.startswith(pat[1:]+'/') for pat in patterns if pat.startswith('/')):return False
-    return all(part.lower() not in ('.stignore','.stfolder','.stversions') and not any(fnmatch.fnmatchcase(part.lower(),pat.lower()) for pat in patterns if not pat.startswith('/')) for part in relative.split('/'))
-def relative_path(root,value):
-    if not isinstance(value,str) or not value or value.startswith('/') or any(x in ('','.','..') for x in value.split('/')) or '\\' in value:raise ValueError('Недопустимый путь')
-    p=root.joinpath(*value.split('/'));safe(p)
-    if not selectable(value):raise ValueError('Защищённый путь')
-    return p
 
 def main():
     for path in (s,cfg,binary,s/'ports.json',s/'bootstrap.lock',s/'syncthing.log',s/'syncthing.pid'):safe(path)
-    if action not in ('list','attach','detach','add-device','channel-config','bootstrap','reconcile','install-auto','tree','verify-selection'):raise ValueError('Неизвестная команда')
+    if action not in ('add-device','channel-config','bootstrap','install-auto'):raise ValueError('Неизвестная команда')
     payload=a[1] if len(a)==2 else None
     if payload=='--stdin':
         with os.fdopen(3,'r') as stream:payload=stream.read(8*1024*1024+1).replace('\r','').strip()
         if len(payload)>8*1024*1024:raise ValueError('Запрос слишком велик')
-    data={} if action=='tree' else (json.loads(base64.b64decode(payload,validate=True)) if payload else {})
+    data=json.loads(base64.b64decode(payload,validate=True)) if payload else {}
     if action=='install-auto':
         units=Path.home()/'.config/systemd/user';safe(units);units.mkdir(parents=True,exist_ok=True)
         script=s/'server-disk.sh'
         if not script.exists():raise ValueError('Сначала скопируйте server-disk.sh в ~/.local/share/remote-disk')
         for unit in ('remote-disk-folders.service','remote-disk-folders.timer'):safe(units/unit)
-        (units/'remote-disk-folders.service').write_text('[Unit]\nDescription=RemoteDisk folder discovery\n[Service]\nType=oneshot\nExecStart=/bin/bash "%h/.local/share/remote-disk/server-disk.sh" reconcile\n')
+        (units/'remote-disk-folders.service').write_text('[Unit]\nDescription=RemoteDisk folder discovery\n[Service]\nType=oneshot\nExecStart=/bin/bash "%h/.local/share/remote-disk/server-disk.sh" bootstrap\n')
         (units/'remote-disk-folders.timer').write_text('[Unit]\nDescription=Discover RemoteDisk folders every 30s\n[Timer]\nOnStartupSec=10\nOnUnitInactiveSec=30\n[Install]\nWantedBy=timers.target\n')
         subprocess.run(['systemctl','--user','daemon-reload'],check=True)
         subprocess.run(['systemctl','--user','enable','--now','remote-disk-folders.timer'],check=True)
         print('{}');return
     if action=='channel-config':print(json.dumps(channel(data)));return
-    if action=='tree':
-        disk=Path.home()/'Disk';safe(disk)
-        relative=(payload or '').replace('\r','').rstrip('\n')
-        directory=relative_path(disk,relative) if relative else disk
-        if relative:
-            # A local-only project whose name the server cannot hold has no server side: list nothing, do not fail the level.
-            try:folder_path(relative.split('/')[0])
-            except ValueError:print(json.dumps(dict(schema=1,parent=relative,folders=[],entries=[],truncated=False,unsupportedName=relative.split('/')[0])));return
-        limit=2000
-        def children(parent,prefix):
-            if not parent.exists():return
-            if not parent.is_dir():raise ValueError('Ожидалась папка')
-            # scandir stays bounded in memory and never descends into project sources.
-            with os.scandir(parent) as stream:
-                for child in stream:
-                    value=(prefix+'/' if prefix else '')+child.name
-                    if child.is_symlink() or not selectable(value):continue
-                    if any(c in child.name for c in '<>:"\\|?*') or re.search(r'[\x00-\x1f]',child.name) or child.name.endswith((' ','.')):continue
-                    if re.match(r'(?i)^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)',child.name):continue
-                    if not prefix and child.is_dir(follow_symlinks=False):
-                        try:folder_path(child.name)
-                        except ValueError:continue
-                    if child.is_dir(follow_symlinks=False) or child.is_file(follow_symlinks=False):yield child,value
-        entries=[];truncated=False
-        for child,value in children(directory,relative):
-            if len(entries)>=limit:truncated=True;break
-            is_dir=child.is_dir(follow_symlinks=False)
-            has_children=False
-            if is_dir:
-                iterator=children(Path(child.path),value)
-                try:has_children=next(iterator,None) is not None
-                finally:iterator.close()
-            entries.append(dict(path=value,directory=is_dir,hasChildren=has_children))
-        entries.sort(key=lambda x:x['path'])
-        print(json.dumps(dict(schema=1,parent=relative,folders=[],entries=entries,truncated=truncated)));return
-    if action=='list':
-        disk=Path.home()/'Disk';safe(disk);root=E.parse(cfg).getroot() if cfg.exists() else E.Element('configuration');rows=[]
-        for p in sorted(disk.iterdir()) if disk.exists() else []:
-            if not p.is_dir() or p.is_symlink():continue
-            try:folder_path(p.name)
-            except ValueError:continue
-            ids=[f.get('id') for f in root.findall('folder') if f.get('path','').rstrip('/')==str(p)]
-            if len(ids)>1:raise ValueError('Несколько ID для одной папки')
-            rows.append(dict(name=p.name,id=ids[0] if ids else fid(p.name),hasFiles=has_files(p)))
-        print(json.dumps(rows));return
-    if action in ('attach','detach'):
-        p=folder_path(data['name'])
-        if action=='attach':
-            ignores(p)
     s.mkdir(parents=True,exist_ok=True)
     with (s/'bootstrap.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
@@ -211,41 +156,17 @@ def main():
                 time.sleep(.1)
         if not identity:raise ValueError('Движок не запустился')
         api('config/options','PATCH',dict(globalAnnounceEnabled=False,localAnnounceEnabled=False,relaysEnabled=False,natEnabled=False,autoUpgradeIntervalH=0,reconnectionIntervalS=10))
-        if action=='verify-selection':
-            p=folder_path(data['name']);folder_id=data['id']
-            folder=api('config/folders/'+urllib.parse.quote(folder_id,safe=''))
-            if folder['path'].rstrip('/')!=str(p):raise ValueError('Папка не совпадает')
-            status=api('db/status?folder='+urllib.parse.quote(folder_id,safe=''))
-            completion=api('db/completion?folder='+urllib.parse.quote(folder_id,safe='')+'&device='+urllib.parse.quote(data['deviceId'],safe=''))
-            if status.get('state')!='idle' or any(status.get(k,-1)!=0 for k in ('needBytes','needTotalItems','pullErrors')) or completion.get('completion')!=100 or any(completion.get(k,-1)!=0 for k in ('needBytes','needItems')):raise ValueError('Сервер ещё не синхронизирован')
-            hashes={};missing=[]
-            for value in data['paths']:
-                f=relative_path(p,value)
-                if not f.exists() and data.get('allowMissing'):
-                    missing.append(value);continue
-                if not f.is_file():raise ValueError('Нет серверной копии')
-                with f.open('rb') as stream:hashes[value]=hashlib.file_digest(stream,'sha256').hexdigest()
-            print(json.dumps(dict(ok=True,hashes=hashes,missing=missing)));return
         if action=='add-device':
-            api('config/devices/'+data['deviceId'],'PUT',dict(deviceID=data['deviceId'],name=data.get('deviceName','RemoteDisk'),addresses=data.get('addresses',['dynamic']),autoAcceptFolders=False))
-        if action in ('reconcile','bootstrap','add-device'):
-            reconcile(api,identity)
+            device_id=data['deviceId']
+            previous=next((d for d in api('config/devices') if d['deviceID']==device_id),None)
+            device=dict(previous) if previous else api('config/defaults/device')
+            device['deviceID']=device_id
+            if not previous:device.update(name='RemoteDisk',addresses=['dynamic'],autoAcceptFolders=False)
+            if 'deviceName' in data:device['name']=data['deviceName']
+            if 'addresses' in data:device['addresses']=data['addresses']
+            if device!=previous:api('config/devices/'+urllib.parse.quote(device_id,safe=''),'PUT',device)
+        reconcile(api,identity)
         if action=='add-device':print('{}');return
-        if action in ('attach','detach'):
-            folders=api('config/folders');matches=[f for f in folders if f['path'].rstrip('/')==str(p)]
-            if len(matches)>1:raise ValueError('Несколько ID для одной папки')
-            current=matches[0] if matches else None;folder_id=current['id'] if current else fid(data['name'])
-            if action=='detach':
-                if current:current['devices']=[d for d in current['devices'] if d['deviceID']!=data['deviceId']];api('config/folders/'+folder_id,'PUT',current)
-            else:
-                if any(f['id']==folder_id and f['path'].rstrip('/')!=str(p) for f in folders):raise ValueError('ID уже занят другой папкой')
-                # Both sides non-empty is always merged (owner decision); maxConflicts=-1 + versioning below mean nothing is lost.
-                ignores(p);p.mkdir(parents=True,exist_ok=True);ignores(p,True);exclude_git(p)
-                current=current or dict(id=folder_id,label=data['name'],path=str(p),type='sendreceive',paused=False,devices=[dict(deviceID=identity)],rescanIntervalS=60,fsWatcherEnabled=True)
-                if not any(d['deviceID']==data['deviceId'] for d in current['devices']):current['devices'].append(dict(deviceID=data['deviceId']))
-                conflict_changed=current.get('maxConflicts')!=-1
-            current['type']='sendreceive';current['maxConflicts']=-1;current['versioning']=dict(type='staggered',params=dict(maxAge='0',cleanInterval='3600'));api('config/folders/'+folder_id,'PUT',current)
-            print(json.dumps(dict(id=folder_id)));return
         if action=='bootstrap':ensure_cron()
         print(json.dumps(dict(deviceId=identity,listen=ports['listen'])))
 try:main()
