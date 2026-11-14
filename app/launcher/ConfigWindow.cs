@@ -450,7 +450,7 @@ namespace RemoteAgents.Launcher
             var last = BackgroundWork.Disk.Last;
             if (BackgroundWork.Disk.Busy || last == null || last == seenDisk) return;
             seenDisk = last;
-            if (last.Binding != DiskApplyWait.Binding(ConfigProfile.Load(home))) return;
+            if (!DiskApplyWait.Current(last.Binding, ConfigProfile.Load(home))) return;
             if (!last.Ok) Log("Диск не подключён: " + last.Summary + ". Нажмите «Повторить» в строке «Диск».");
             SetBusy(running);
         }
@@ -459,7 +459,7 @@ namespace RemoteAgents.Launcher
         // during a run is applied right after it, and the result comes back through OnDiskChanged.
         void StartDisk()
         {
-            if (Product.IsVpn) return;
+            if (Product.IsVpn || !ConfigSections.DiskDescribed(ConfigProfile.Load(home))) return;
             if (session == null) { session = new ConfigSession(home, Bundle); session.Log = Log; session.Report = Report; }
             rows[ConfigSections.Disk].Visible = true; rowsPanel.Visible = true; Relayout();
             bool started = BackgroundWork.Disk.Start(async token => {
@@ -467,7 +467,7 @@ namespace RemoteAgents.Launcher
                 string binding = DiskApplyWait.Binding(profile);
                 // Separate callbacks: an old Disk result cannot repaint a newer config's rows.
                 var current = new ConfigSession(home, Bundle);
-                current.DiskCurrent = () => binding == DiskApplyWait.Binding(ConfigProfile.Load(home));
+                current.DiskCurrent = () => DiskApplyWait.Current(binding, ConfigProfile.Load(home));
                 current.Log = message => { if (current.DiskCurrent()) Log(message); };
                 current.Report = (section, state, message) => Ui(() => { if (current.DiskCurrent()) Report(section, state, message); });
                 var outcome = await current.ApplyDisk(token);

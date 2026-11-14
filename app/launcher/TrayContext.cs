@@ -653,6 +653,7 @@ namespace RemoteAgents.Launcher
             var last = BackgroundWork.Disk.Last;
             if (closing || BackgroundWork.Disk.Busy || last == null || last == reportedDisk) return;
             reportedDisk = last;
+            if (!DiskApplyWait.Current(last.Binding, ConfigProfile.Load(home))) return;
             // An open window shows the result itself; the balloon is for a run that outlived its window.
             if (Application.OpenForms.Cast<Form>().Any(f => f is ConfigWindow && f.Visible) || !icon.Visible) return;
             if (last.Ok) icon.ShowBalloonTip(5000, Product.Name, "Диск: " + last.Summary, ToolTipIcon.Info);

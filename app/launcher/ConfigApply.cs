@@ -696,7 +696,9 @@ namespace RemoteAgents.Launcher
     internal static class DiskApplyWait
     {
         internal static string Binding(Dictionary<string, object> profile)
-        { return ConfigSections.Hash(profile, ConfigSections.Connection) + ":" + ConfigSections.Hash(profile, ConfigSections.Disk); }
+        { return (ConfigSections.DiskDescribed(profile) ? "enabled:" : "disabled:") + ConfigSections.Hash(profile, ConfigSections.Connection) + ":" + ConfigSections.Hash(profile, ConfigSections.Disk); }
+        internal static bool Current(string binding, Dictionary<string, object> profile)
+        { return ConfigSections.DiskDescribed(profile) && binding == Binding(profile); }
         internal static SectionOutcome Superseded()
         { return new SectionOutcome { Summary = "настройки диска или сервера изменились; прежнее ожидание завершено" }; }
         internal static async Task<SectionOutcome> Run(Func<bool> current, Func<Task<SectionOutcome>> execute,
@@ -742,6 +744,8 @@ namespace RemoteAgents.Launcher
         internal Action<string> AccountCreated = delegate { };
         readonly HappierAccountCreation accountCreation;
         internal Func<bool> DiskCurrent = () => true;
+        // Recheck permission even for callers without a binding callback and requests already queued in the background.
+        bool DiskStillCurrent() { return DiskCurrent() && ConfigSections.DiskDescribed(ConfigProfile.Load(home)); }
         internal Func<string, string, string> AskSecret = (name, why) => null;
         Dictionary<string, object> services = new Dictionary<string, object>();
         internal readonly ConcurrentDictionary<string, SectionOutcome> Outcomes = new ConcurrentDictionary<string, SectionOutcome>();
@@ -813,7 +817,7 @@ namespace RemoteAgents.Launcher
         }
         SectionOutcome RunSection(string s, CancellationToken token)
         {
-            if (s == ConfigSections.Disk && !DiskCurrent()) return DiskApplyWait.Superseded();
+            if (s == ConfigSections.Disk && !DiskStillCurrent()) return DiskApplyWait.Superseded();
             var p = ConfigProfile.Load(home); var config = new Configuration(home).Data; string hash = ConfigSections.Hash(p, s);
             // «·» lines are the detailed trace (each SSH run, probes): journal only, the row keeps the current step.
             Action<string> progress = line => { if (!line.StartsWith("·", StringComparison.Ordinal)) Report(s, SectionState.Running, line); Log(ConfigSections.Title(s) + ": " + line); };
@@ -836,7 +840,7 @@ namespace RemoteAgents.Launcher
                 case ConfigSections.Lan: o = Lan(p, config, run); break;
                 default: throw new ArgumentException("Неизвестный раздел");
             }
-            if (s == ConfigSections.Disk && !DiskCurrent()) return DiskApplyWait.Superseded();
+            if (s == ConfigSections.Disk && !DiskStillCurrent()) return DiskApplyWait.Superseded();
             // Server may have replaced root's password by its own key in the profile (PromoteServerKey).
             if (o.Ok && s == ConfigSections.Server) hash = ConfigSections.Hash(ConfigProfile.Load(home), s);
             if (o.Ok) ConfigProfile.MarkApplied(home, s, hash); else if (!o.Pending) ConfigProfile.MarkApplied(home, s, null);
@@ -1000,15 +1004,15 @@ namespace RemoteAgents.Launcher
         // calls and Disk is run again once it has finished. Callers pass a token that outlives the window.
         internal async Task<SectionOutcome> ApplyDisk(CancellationToken token)
         {
-            var result = await DiskApplyWait.Run(DiskCurrent, async () => {
+            var result = await DiskApplyWait.Run(DiskStillCurrent, async () => {
                 await Execute(new[] { ConfigSections.Disk }, token);
                 SectionOutcome outcome;
                 return Outcomes.TryGetValue(ConfigSections.Disk, out outcome) ? outcome : new SectionOutcome { Summary = "результат не получен" };
             }, operation => Task.Run(() => {
-                if (!DiskCurrent()) throw new OperationCanceledException();
+                if (!DiskStillCurrent()) throw new OperationCanceledException();
                 return WizardRunner.Run(home, bundle, "Operation", new { operations = new[] { operation } }, token);
             }), ct => Task.Delay(12000, ct), (state, text) => Report(ConfigSections.Disk, state, text), Log, token);
-            if (DiskCurrent()) Outcomes[ConfigSections.Disk] = result;
+            if (DiskStillCurrent()) Outcomes[ConfigSections.Disk] = result;
             return result;
         }
         internal async Task<SectionOutcome> Activate(CancellationToken token)

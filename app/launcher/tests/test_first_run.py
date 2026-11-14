@@ -158,7 +158,7 @@ class FirstRunTests(unittest.TestCase):
         self.assertIn('o.Key != ConfigSections.Disk', follow)
         disk = apply.split('internal async Task<SectionOutcome> ApplyDisk(', 1)[1].split('internal async Task<SectionOutcome> Activate(', 1)[0]
         self.assertIn('"Operation"', disk)
-        self.assertIn('DiskApplyWait.Run(DiskCurrent', disk)
+        self.assertIn('DiskApplyWait.Run(DiskStillCurrent', disk)
         self.assertIn('if (state == "finished") { outcome = await execute(); continue; }', apply)
         tray = source('TrayContext.cs')
         self.assertIn('BackgroundWork.Disk.Stop();', tray.split('protected override void ExitThreadCore()', 1)[1])
@@ -177,15 +177,20 @@ class FirstRunTests(unittest.TestCase):
         window = source('ConfigWindow.cs')
         start = window.split('void StartDisk()', 1)[1].split('async Task RetrySection(', 1)[0]
         self.assertIn('var current = new ConfigSession(home, Bundle)', start)
-        self.assertIn('current.DiskCurrent = () => binding == DiskApplyWait.Binding(ConfigProfile.Load(home))', start)
+        self.assertIn('current.DiskCurrent = () => DiskApplyWait.Current(binding, ConfigProfile.Load(home))', start)
+        self.assertIn('!ConfigSections.DiskDescribed(ConfigProfile.Load(home))', start)
         self.assertIn('Binding = binding', start)
         self.assertIn('=> Ui(() => { if (current.DiskCurrent()) Report(', start)
         changed = window.split('void OnDiskChanged()', 1)[1].split('void StartQueuedDisk()', 1)[0]
         # A result of an older server/config is ignored: only the current binding reports (and logs) a failure.
-        self.assertLess(changed.index('last.Binding != DiskApplyWait.Binding'), changed.index('Log("Диск не подключён: "'))
+        self.assertLess(changed.index('!DiskApplyWait.Current(last.Binding,'), changed.index('Log("Диск не подключён: "'))
         run = source('ConfigApply.cs').split('SectionOutcome RunSection(', 1)[1].split('SectionOutcome Server(', 1)[0]
-        self.assertEqual(run.count('s == ConfigSections.Disk && !DiskCurrent()'), 2)
-        self.assertLess(run.rindex('s == ConfigSections.Disk && !DiskCurrent()'), run.index('ConfigProfile.MarkApplied'))
+        self.assertEqual(run.count('s == ConfigSections.Disk && !DiskStillCurrent()'), 2)
+        self.assertLess(run.rindex('s == ConfigSections.Disk && !DiskStillCurrent()'), run.index('ConfigProfile.MarkApplied'))
+        apply = source('ConfigApply.cs')
+        self.assertIn('bool DiskStillCurrent() { return DiskCurrent() && ConfigSections.DiskDescribed(ConfigProfile.Load(home)); }', apply)
+        tray = source('TrayContext.cs').split('void DiskFinished()', 1)[1].split('void RequestExit()', 1)[0]
+        self.assertLess(tray.index('!DiskApplyWait.Current(last.Binding,'), tray.index('icon.ShowBalloonTip'))
 
     def test_wheel_layout_and_window_order(self):
         window = source('ConfigWindow.cs')

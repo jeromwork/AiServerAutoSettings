@@ -40,7 +40,34 @@ namespace RemoteAgents.Launcher
             Check(binding != DiskApplyWait.Binding(b), "new folder choice invalidates the old Disk wait");
             b = Clone(a); Json.Map(Json.Get(b, "server")).Remove("rootPassword");
             Check(binding == DiskApplyWait.Binding(b), "promoted root password does not invalidate the server binding");
+            b = Clone(a); b["components"] = ConfigBundle.D("disk", ConfigBundle.D("enabled", false));
+            Check(binding != DiskApplyWait.Binding(b) && !DiskApplyWait.Current(binding, b), "disabling the Disk invalidates a pending binding without changing server or folders");
+            Check(!DiskApplyWait.Current(DiskApplyWait.Binding(b), b), "a request dequeued after opt-out cannot start even with a fresh binding");
+            b["components"] = ConfigBundle.D("disk", ConfigBundle.D("enabled", true));
+            Check(DiskApplyWait.Current(binding, b), "explicit permission has the same binding as the default permission");
+            b.Remove("server"); b.Remove("disk");
+            Check(!DiskApplyWait.Current(DiskApplyWait.Binding(b), b), "removing the Disk and server descriptions also prevents a continuation");
             Func<Task<SectionOutcome>> pending = () => Task.FromResult(new SectionOutcome { Pending = true, Operation = "disk" });
+            foreach (string phase in new[] { "start", "wait", "poll", "poll-error", "execute" }) {
+                b = Clone(a); int calls = 0, polls = 0, notices = 0;
+                Action disable = () => b["components"] = ConfigBundle.D("disk", ConfigBundle.D("enabled", false));
+                if (phase == "start") disable();
+                // A queued job captures its binding on dequeue; permission must still be checked independently.
+                string queuedBinding = DiskApplyWait.Binding(b);
+                var stopped = await DiskApplyWait.Run(() => DiskApplyWait.Current(queuedBinding, b), () => {
+                    calls++;
+                    if (phase == "execute") { disable(); return Task.FromResult(new SectionOutcome { Ok = true }); }
+                    return pending();
+                }, operation => {
+                    polls++; disable();
+                    if (phase == "poll-error") throw new IOException("installation status unavailable");
+                    return Task.FromResult(DiskStatus("finished"));
+                }, token => { if (phase == "wait") disable(); return Task.CompletedTask; },
+                (st, text) => notices++, text => notices++, CancellationToken.None);
+                Check(!stopped.Ok && !stopped.Pending && calls == (phase == "start" ? 0 : 1)
+                    && polls == (phase == "poll" || phase == "poll-error" ? 1 : 0) && notices == 0,
+                    "opt-out during " + phase + " stops the old install without polling, reapplying, or stale reports");
+            }
             Func<CancellationToken, Task> immediate = token => Task.CompletedTask;
             foreach (string state in new[] { "none", "", "unexpected", "failed" }) {
                 int polls = 0;
