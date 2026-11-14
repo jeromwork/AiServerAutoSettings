@@ -31,7 +31,7 @@
     },
     {
       "name": "disk",
-      "title": "Syncthing Tray",
+      "title": "Диск (Syncthing)",
       "exe": "powershell.exe",
       "args": [
         "-NoLogo",
@@ -41,11 +41,11 @@
         "Bypass",
         "-File",
         "{bundle}\\disk\\Disk.Engine.ps1",
-        "-StartTray",
+        "-StartEngine",
         "-Home",
         "{home}"
       ],
-      "cwd": "%LOCALAPPDATA%\\RemoteDisk\\tray",
+      "cwd": "{bundle}",
       "restart": "always",
       "enabledByDefault": false,
       "critical": false,

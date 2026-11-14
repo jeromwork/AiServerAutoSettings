@@ -76,6 +76,7 @@ try {
     }
     $ini=Join-Path $script:DiskHome 'tray/syncthingtray.ini'
     if($fresh -or -not (Test-Path -LiteralPath $ini)){Write-DiskUtf8 $ini (New-DiskIni $tray $state $script:Gui $script:ApiKey)}
+    Set-DiskTrayExternalEngine
     $local=$null;try{$local=Invoke-DiskApi 'system/status'}catch{}
     if(-not $local.myID){Start-DiskHeadless}
     for($i=0;$i -lt 40 -and -not $local.myID;$i++){Start-Sleep -Milliseconds 250;try{$local=Invoke-DiskApi 'system/status'}catch{}}

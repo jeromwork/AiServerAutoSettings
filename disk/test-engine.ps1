@@ -35,7 +35,7 @@ try{
     # A single real OS process; records the child-only environment before exec.
     $shell=@'
 #!/bin/sh
-printf '%s' "$STMONITORED" > "$(dirname "$0")/monitored"
+printf '%s' "$STMONITORED" > "${0%/*}/monitored"
 exec sleep 60
 '@
     Write-DiskUtf8 $tray $shell
@@ -77,7 +77,7 @@ function Set-DiskServerDevice {
 }
 function Ensure-DiskNavPane {$true}
 function Sync-DiskServerAddress {}
-function Start-DiskTray($StartupLease){
+function Start-DiskComponent($StartupLease){
     $file=Join-Path $script:DiskHome 'owned-pid'
     if(Test-Path -LiteralPath $file){
         $id=[int][IO.File]::ReadAllText($file)
@@ -126,20 +126,20 @@ function Stop-DiskHeadless {& $script:OriginalStopDiskHeadless;throw 'Тест: 
     $install=Start-Child (Join-Path $bundle 'disk/Install-RemoteDisk.ps1') @();$children+=$install
     Wait-File (Join-Path $script:DiskHome 'ready')
     $ownedId=[int][IO.File]::ReadAllText((Join-Path $script:DiskHome 'owned-pid'))
-    $component=Start-Child (Join-Path $bundle 'disk/Disk.Engine.ps1') @('-StartTray');$children+=$component
+    $component=Start-Child (Join-Path $bundle 'disk/Disk.Engine.ps1') @('-StartEngine');$children+=$component
     Start-Sleep -Milliseconds 700
     Assert (-not (Test-Path -LiteralPath (Join-Path $script:DiskHome 'tray-started')) -and (Alive $ownedId) -and -not $component.Process.HasExited) 'component waits for the in-progress installer instead of starting a second engine'
     Write-DiskUtf8 (Join-Path $script:DiskHome 'release') '1'
     $null=Finish-Child $install;$null=Finish-Child $component
-    Assert ((Test-Path -LiteralPath (Join-Path $script:DiskHome 'tray-started')) -and -not (Alive $ownedId)) 'Tray startup follows temporary engine exit'
+    Assert ((Test-Path -LiteralPath (Join-Path $script:DiskHome 'tray-started')) -and -not (Alive $ownedId)) 'headless component startup follows temporary engine exit'
     $lease=Enter-DiskEngineLock $script:DiskHome -TimeoutMilliseconds 100
     Exit-DiskEngineLock $lease;$lease=$null
     Assert $true 'installer and component both release the lifecycle mutex'
 
     # Upgrade inventory: previous orphan monitor + worker + GUI, plus a foreign state.
-    $legacy=@();foreach($n in 1..4){$p=[Diagnostics.Process]::Start('sleep','60');$children+=@{Process=$p};$legacy+=@($p)}
-    $rows=@();foreach($n in 0..3){
-        $line=if($n -eq 0){(Quote-Disk $tray)}else{(Quote-Disk $tray)+' syncthing serve --home '+(Quote-Disk $(if($n -eq 3){Join-Path $TestHome 'foreign-state'}else{$state}))}
+    $legacy=@();foreach($n in 1..5){$p=[Diagnostics.Process]::Start('sleep','60');$children+=@{Process=$p};$legacy+=@($p)}
+    $rows=@();foreach($n in 0..4){
+        $line=if($n -eq 0){(Quote-Disk $tray)}elseif($n -eq 4){(Quote-Disk $tray)+' --windowed --single-instance --trigger'}else{(Quote-Disk $tray)+' syncthing serve --home '+(Quote-Disk $(if($n -eq 3){Join-Path $TestHome 'foreign-state'}else{$state}))}
         $rows+=@{ProcessId=$legacy[$n].Id;ExecutablePath=$tray;CommandLine=$line;CreationDate='fixture'}
     }
     Write-DiskUtf8 (Join-Path $script:DiskHome 'inventory.json') (ConvertTo-Json -InputObject @($rows))
@@ -153,11 +153,58 @@ function Get-CimInstance($ClassName,$Filter,$ErrorAction){
 }
 '@
     Remove-Item -LiteralPath (Join-Path $script:DiskHome 'tray-started')
-    $component=Start-Child (Join-Path $bundle 'disk/Disk.Engine.ps1') @('-StartTray');$children+=$component
+    $component=Start-Child (Join-Path $bundle 'disk/Disk.Engine.ps1') @('-StartEngine');$children+=$component
     $null=Finish-Child $component
-    Assert ($legacy[0].HasExited -and $legacy[1].HasExited -and $legacy[2].HasExited -and -not $legacy[3].HasExited) 'upgrade removes old GUI and both orphan processes, preserving another state'
-    Assert (Test-Path -LiteralPath (Join-Path $script:DiskHome 'tray-started')) 'component launches Tray after the old engine is completely gone'
+    Assert ($legacy[0].HasExited -and $legacy[1].HasExited -and $legacy[2].HasExited -and -not $legacy[3].HasExited -and -not $legacy[4].HasExited) 'upgrade removes old GUI and both orphan processes, preserving another state and engine-independent window'
+    Assert (Test-Path -LiteralPath (Join-Path $script:DiskHome 'tray-started')) 'component starts the headless hook after the old engine is completely gone'
     Assert ((Get-FileHash -LiteralPath $config).Hash -ceq $before) 'upgrade preserves config.xml including accepted folders'
+
+    # The production component hook owns a real worker, drops the lock after
+    # readiness, stays alive until worker exit, then lets restart=always act.
+    $managedBundle=New-DiskInstallFixture (Join-Path $TestHome 'managed-component')
+    Add-DiskFixtureCode $managedBundle @'
+function Get-CimInstance {param($ClassName,$Filter,$ErrorAction)}
+function Sync-DiskServerAddress {}
+function Wait-DiskEngineReady {
+    Write-DiskUtf8 (Join-Path $script:DiskHome 'managed-pid') ([string]$script:DiskEngine.Id)
+    return @{myID='LOCAL'}
+}
+'@
+    $managed=Start-Child (Join-Path $managedBundle 'disk/Disk.Engine.ps1') @('-StartEngine');$children+=$managed
+    Wait-File (Join-Path $script:DiskHome 'managed-pid')
+    $managedId=[int][IO.File]::ReadAllText((Join-Path $script:DiskHome 'managed-pid'))
+    $lease=Enter-DiskEngineLock $script:DiskHome -TimeoutMilliseconds 2000
+    Exit-DiskEngineLock $lease;$lease=$null
+    Assert ((Alive $managedId) -and -not $managed.Process.HasExited) 'headless component remains alive with its worker and releases mutex for installers'
+    Stop-Process -Id $managedId -Force
+    $null=Finish-Child $managed 137
+    Assert (-not (Alive $managedId)) 'worker crash finishes the supervised component for restart'
+    Remove-Item -LiteralPath (Join-Path $script:DiskHome 'managed-pid')
+    $managed=Start-Child (Join-Path $managedBundle 'disk/Disk.Engine.ps1') @('-StartTray');$children+=$managed
+    Wait-File (Join-Path $script:DiskHome 'managed-pid')
+    $nextId=[int][IO.File]::ReadAllText((Join-Path $script:DiskHome 'managed-pid'))
+    Assert ($nextId -ne $managedId -and (Alive $nextId)) 'legacy StartTray alias now launches a fresh headless worker'
+
+    $oldIni="[tray]`r`nuserOption=keep`r`n[startup]`r`nsyncthingAutostart=true`r`nuseLibSyncthing=true`r`n"
+    Write-DiskUtf8 $ini $oldIni;Set-DiskTrayExternalEngine
+    $iniHash=(Get-FileHash -LiteralPath $ini).Hash;Set-DiskTrayExternalEngine
+    $safeIni=[IO.File]::ReadAllText($ini)
+    Assert ($safeIni.Contains('userOption=keep') -and $safeIni.Contains('syncthingAutostart=false') -and $safeIni.Contains('useLibSyncthing=false') -and (Get-FileHash -LiteralPath $ini).Hash -ceq $iniHash) 'CRLF legacy ini keeps user settings, disables engine launch and migrates idempotently'
+    # Simulate only the GUI boundary. Actual CLI switches/ini were additionally
+    # checked with release 2.1.9 on Linux; this fixture verifies our launch wiring.
+    Write-DiskUtf8 $tray @'
+#!/bin/sh
+printf '%s\n' "$PWD" "$@" > "${0%/*}/window-arguments"
+exit 37
+'@
+    & chmod +x $tray
+    Assert ((Open-DiskSyncWindow) -eq 37) 'window exit code is separate from the engine component'
+    $windowArgs=[IO.File]::ReadAllText((Join-Path $script:DiskHome 'tray/window-arguments')).Replace("`r",'')
+    $windowIni=[IO.File]::ReadAllText((Join-Path $script:DiskHome 'tray/window/syncthingtray.ini'))
+    Assert ($windowArgs -ceq ((Join-Path $script:DiskHome 'tray/window')+"`n--windowed`n--single-instance`n--trigger`n")) 'window uses isolated working directory and the three checked GUI switches'
+    Assert ($windowIni.Contains('syncthingAutostart=false') -and $windowIni.Contains('useLibSyncthing=false') -and $windowIni.Contains('considerLauncherForReconnect=false') -and -not $windowArgs.Contains('fixture')) 'window config cannot auto-start a second engine; API key stays out of argv'
+    Assert ((Alive $nextId) -and -not $managed.Process.HasExited) 'closing synchronization window leaves the headless worker running'
+    Stop-Process -Id $nextId -Force;$null=Finish-Child $managed 137
 
     if($Syncthing){
         # Optional real Syncthing 2.1.7: same engine as Tray 2.1.9, no mocked REST.
