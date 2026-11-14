@@ -31,7 +31,7 @@ try{
         $script:apiDevice.addresses=$Body.addresses;$script:patches++
     }
     $before=(Get-FileHash -LiteralPath $xml).Hash
-    Assert (Sync-DiskServerAddress $launcher) 'live REST address is updated before Tray'
+    Assert (Sync-DiskServerAddress $launcher) 'live REST address is updated before engine startup'
     Assert (-not (Sync-DiskServerAddress $launcher)) 'matching REST address is unchanged'
     Assert ($script:patches -eq 1 -and $script:apiDevice.addresses[0] -ceq 'tcp://127.0.0.1:22133' -and $script:apiDevice.name -ceq 'Personal' -and $script:apiDevice.autoAcceptFolders -and (Get-FileHash -LiteralPath $xml).Hash -ceq $before) 'REST preserves all other settings and config.xml bytes'
     function Invoke-DiskApi {throw 'Engine stopped'}
@@ -53,20 +53,24 @@ function Sync-DiskServerAddress([string]$LauncherRoot){
     [IO.File]::AppendAllText((Join-Path $script:DiskHome 'startup-order'),('address:'+ $LauncherRoot))
     if(Test-Path -LiteralPath (Join-Path $script:DiskHome 'startup-fail')){throw 'Тест: адрес не обновлён'}
 }
-function Start-DiskTray {
-    [IO.File]::AppendAllText((Join-Path $script:DiskHome 'startup-order'),'|tray')
+function Start-DiskComponent {
+    [IO.File]::AppendAllText((Join-Path $script:DiskHome 'startup-order'),'|engine')
     return 0
 }
 '@
     Add-DiskFixtureCode $bundle $mock
     $repo=Split-Path $PSScriptRoot -Parent
     $component=@(([IO.File]::ReadAllText((Join-Path $repo 'build/components.json'))|ConvertFrom-Json).components|Where-Object {$_.name -ceq 'disk'})[0]
-    Assert ($component.exe -ceq 'powershell.exe') 'disk component invokes the bundled startup script'
+    Assert ($component.exe -ceq 'powershell.exe' -and $component.args -contains '-StartEngine' -and $component.restart -ceq 'always' -and $component.cwd -ceq '{bundle}') 'disk component supervises headless engine and can start before tray directory exists'
     $arguments=@($component.args|ForEach-Object {$_.Replace('{bundle}',$bundle).Replace('{home}',$launcher).Replace('\',[IO.Path]::DirectorySeparatorChar)})
     $null=Invoke-DiskProcess ((Get-Process -Id $PID).Path) $arguments
-    Assert ([IO.File]::ReadAllText((Join-Path $script:DiskHome 'startup-order')) -ceq ('cleanup|address:'+$launcher+'|tray')) 'component removes old owners and checks the effective address before starting Tray'
+    Assert ([IO.File]::ReadAllText((Join-Path $script:DiskHome 'startup-order')) -ceq ('cleanup|address:'+$launcher+'|engine')) 'component removes old owners and checks the effective address before starting the headless engine'
     Write-DiskUtf8 (Join-Path $script:DiskHome 'startup-fail') '1'
     $failed=$false;try{Invoke-DiskProcess ((Get-Process -Id $PID).Path) $arguments}catch{$failed=$true}
-    Assert ($failed -and [IO.File]::ReadAllText((Join-Path $script:DiskHome 'startup-order')) -ceq ('cleanup|address:'+$launcher)) 'address failure does not start Tray and exits nonzero for supervisor retry'
+    Assert ($failed -and [IO.File]::ReadAllText((Join-Path $script:DiskHome 'startup-order')) -ceq ('cleanup|address:'+$launcher)) 'address failure does not start the engine and exits nonzero for supervisor retry'
+    $custom=Join-Path $TestHome 'custom-disk';[void][IO.Directory]::CreateDirectory($custom)
+    Write-TransportJson (Join-Path $launcher 'config.json') @{disk=@{home=$custom}}
+    $null=Invoke-DiskProcess ((Get-Process -Id $PID).Path) $arguments
+    Assert ([IO.File]::ReadAllText((Join-Path $custom 'startup-order')) -ceq ('cleanup|address:'+$launcher+'|engine')) 'component honors configured disk.home for engine and UI state'
     Write-Output ('PASS: '+$count+' startup/address checks (actual effective-port reader and component entry point; local fixtures)')
 }finally{$env:LOCALAPPDATA=$oldLocal}

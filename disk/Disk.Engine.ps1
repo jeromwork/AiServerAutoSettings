@@ -1,9 +1,9 @@
 ﻿#requires -Version 5.1
 [CmdletBinding()]
-param([switch]$StartTray,[Alias('Home')][string]$LauncherHome)
+param([Alias('StartTray')][switch]$StartEngine,[switch]$OpenWindow,[Alias('Home')][string]$LauncherHome)
 # Shared ownership helpers: same embedded engine and state as the former tray.
-# Installation and component startup share one per-state lock. Tray itself stays
-# unlocked after launch so a later installer can borrow its REST endpoint.
+# Installation and component startup share one per-state lock. The component
+# releases it after REST is ready so a later installer can borrow the engine.
 function Enter-DiskEngineLock([string]$DiskRoot,[int]$TimeoutMilliseconds=900000) {
     $key=[IO.Path]::GetFullPath($DiskRoot).Replace('/','\').TrimEnd('\').ToLowerInvariant()
     $sha=[Security.Cryptography.SHA256]::Create()
@@ -26,7 +26,10 @@ function Get-DiskEngineProcesses([string]$DiskRoot) {
     @(Get-CimInstance Win32_Process -ErrorAction Stop|Where-Object {
         if(-not $_.ExecutablePath -or [IO.Path]::GetFullPath($_.ExecutablePath) -ine $exe){return $false}
         $line=([string]$_.CommandLine).Replace('/','\')
-        # GUI owns its adjacent ini. Embedded command mode belongs to us only for this state.
+        # Our windowed UI cannot launch an engine and must not block temporary
+        # installer startup when REST is down. Old tray GUI still gets removed.
+        if($line -match '(?:^|\s)"?--windowed"?(?=\s|$)'){return $false}
+        # Embedded command mode belongs to us only for this state.
         ($line -notmatch '(?:^|\s)"?syncthing"?(?:\s|$)' -or $line -match $statePattern)
     })
 }
@@ -80,27 +83,73 @@ function Stop-DiskHeadless {
     }finally{$owned.Dispose();$script:DiskEngine=$null}
 }
 
-function Start-DiskTray($StartupLease) {
-    $si=New-Object Diagnostics.ProcessStartInfo
-    $si.FileName=Join-Path $script:DiskHome 'tray/syncthingtray.exe';$si.WorkingDirectory=Split-Path $si.FileName -Parent
-    $si.UseShellExecute=$false
-    $process=[Diagnostics.Process]::Start($si)
+# Managed UI never owns the engine. Also neutralize the old adjacent ini on upgrade.
+function Set-DiskTrayExternalEngine {
+    $ini=Join-Path $script:DiskHome 'tray/syncthingtray.ini'
+    if(-not (Test-Path -LiteralPath $ini)){return}
+    $text=[IO.File]::ReadAllText($ini).Replace("`r",'')
+    # No startup group means default autostart=false; preserve unrelated settings.
+    if($text -notmatch '(?m)^\[startup\]$'){return}
+    $section='';$startup=$false;$lines=New-Object 'Collections.Generic.List[string]'
+    $keys=@('syncthingAutostart','useLibSyncthing','considerLauncherForReconnect','showLauncherButton')
+    foreach($line in ($text -split "`n")){
+        if($line -match '^\[(.+)\]$'){
+            $section=$Matches[1]
+            if($section -eq 'startup' -and -not $startup){
+                $startup=$true;$lines.Add($line)
+                foreach($key in $keys){$lines.Add($key+'=false')}
+                continue
+            }
+        }
+        if($section -eq 'startup' -and $line -match '^(syncthingAutostart|useLibSyncthing|considerLauncherForReconnect|showLauncherButton)='){continue}
+        $lines.Add($line)
+    }
+    $updated=$lines -join "`n"
+    if($updated -cne $text){Write-DiskUtf8 $ini $updated}
+}
+function Start-DiskComponent($StartupLease) {
+    Start-DiskHeadless
+    if(-not $script:DiskEngine){throw 'Не удалось получить собственный движок Syncthing'}
+    Read-DiskState
+    [void](Wait-DiskEngineReady)
     Exit-DiskEngineLock $StartupLease
+    # Inherits the launcher's kill-on-close Job. Its exit ends this component,
+    # so the existing supervisor restarts it even after a normal Syncthing exit.
+    $script:DiskEngine.WaitForExit()
+    return $script:DiskEngine.ExitCode
+}
+function Open-DiskSyncWindow {
+    Read-DiskState
+    # Separate settings keep any user auto-start/embedded-engine preferences out
+    # of this window. --windowed creates TrayWidget instead of TrayIcon (v2.1.9).
+    $directory=Join-Path $script:DiskHome 'tray/window'
+    [void][IO.Directory]::CreateDirectory($directory)
+    $ini=Join-Path $directory 'syncthingtray.ini'
+    $exe=Join-Path $script:DiskHome 'tray/syncthingtray.exe'
+    $settings=(New-DiskIni $exe (Join-Path $script:DiskHome 'state') $script:Gui $script:ApiKey).Replace('syncthingAutostart=true','syncthingAutostart=false').Replace('considerLauncherForReconnect=true','considerLauncherForReconnect=false')
+    Write-DiskUtf8 $ini $settings
+    $si=New-Object Diagnostics.ProcessStartInfo
+    $si.FileName=$exe;$si.WorkingDirectory=$directory
+    $si.Arguments=(@('--windowed','--single-instance','--trigger')|ForEach-Object {Quote-Disk $_}) -join ' '
+    $si.UseShellExecute=$false;$si.CreateNoWindow=$true
+    $process=[Diagnostics.Process]::Start($si)
     try{$process.WaitForExit();return $process.ExitCode}finally{$process.Dispose()}
 }
-if($StartTray){
+if($StartEngine -or $OpenWindow){
     . (Join-Path $PSScriptRoot 'Disk.Common.ps1')
     . (Join-Path (Split-Path $PSScriptRoot -Parent) 'transport/Transport.Common.ps1')
-    $script:DiskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk'
     if(-not $LauncherHome){$LauncherHome=Join-Path $env:LOCALAPPDATA 'RemoteAgents'}
+    $script:DiskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk'
     $lease=$null
     try{
+        $config=Join-Path $LauncherHome 'config.json'
+        if(Test-Path -LiteralPath $config){$c=[IO.File]::ReadAllText($config)|ConvertFrom-Json;if($c.disk.home){$script:DiskHome=[Environment]::ExpandEnvironmentVariables([string]$c.disk.home)}}
+        if($OpenWindow){exit (Open-DiskSyncWindow)}
         $lease=Enter-DiskEngineLock $script:DiskHome
-        # An older installer could leave an unowned monitor/worker or GUI behind.
-        # Stop this exact executable/state before Tray autostarts inside our Job.
+        # Stop the old GUI before its monitor/worker, then start one owned worker.
         Stop-DiskEngineProcesses $script:DiskHome
+        Set-DiskTrayExternalEngine
         [void](Sync-DiskServerAddress $LauncherHome)
-        # Keep this supervisor child alive for Tray's entire lifetime (the launcher's job owns both).
-        exit (Start-DiskTray $lease)
-    }catch{Write-DiskLog 'Запуск Syncthing Tray' $_;[Console]::Error.WriteLine('Не удалось запустить Syncthing Tray: '+$_.Exception.Message);exit 1}finally{Exit-DiskEngineLock $lease}
+        exit (Start-DiskComponent $lease)
+    }catch{Write-DiskLog 'Запуск Syncthing' $_;[Console]::Error.WriteLine('Не удалось запустить Syncthing: '+$_.Exception.Message);exit 1}finally{Stop-DiskHeadless;Exit-DiskEngineLock $lease}
 }

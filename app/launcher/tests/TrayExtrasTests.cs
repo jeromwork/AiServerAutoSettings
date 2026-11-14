@@ -16,29 +16,101 @@ namespace RemoteAgents.Launcher
                 memory = new { totalBytes = 100000, availableBytes = memoryFree, usedBytes = 100000 - memoryFree },
                 load = new { one = 1.2, five = 0.8, fifteen = 0.5, cores = 4 }, uptimeSec = 90061 }));
         }
+        static void DiskRest()
+        {
+            var folder = Data("{\"id\":\"disk a/б\"}"); var idle = Data("{\"state\":\"idle\",\"globalBytes\":2048}");
+            var folders = new[] { folder }; var states = new[] { idle };
+            Check(DiskTraySession.Summary(folders, states, true) == "Диск: синхронизирован", "REST idle and connected means synchronized");
+            Check(DiskTraySession.Summary(folders, states, false).Contains("не подключён"), "idle without server never claims synchronization");
+            Check(DiskTraySession.Summary(new Dictionary<string, object>[0], states, true).Contains("нет выбранных"), "empty selection is explicit");
+            folder["paused"] = true;
+            Check(DiskTraySession.Summary(folders, states, true).Contains("паузе"), "paused folder cannot look synchronized"); folder.Remove("paused");
+            foreach (string key in new[] { "errors", "pullErrors" }) {
+                idle[key] = 1;
+                Check(DiskTraySession.Summary(folders, states, true).Contains("ошибка"), "folder error " + key); idle.Remove(key);
+            }
+            Check(DiskTraySession.Summary(folders, new[] { Data("{\"state\":\"scanning\"}") }, true).Contains("проверка"), "scan is not success");
+            Check(DiskTraySession.Summary(folders, new[] { Data("{\"state\":\"syncing\",\"globalBytes\":2048,\"needBytes\":1024}") }, true).Contains("50%"), "sync percentage");
+            Check(DiskTraySession.Summary(folders, new[] { Data("{\"state\":\"idle\",\"needTotalItems\":1}") }, true).Contains("синхронизация"), "zero byte deletions still pending");
+            Check(!DiskTraySession.Summary(folders, new[] { Data("{}") }, true).Contains("синхронизирован"), "missing state is unknown");
+            Check(DiskTraySession.Rates(1024, 2048, 3072, 3072, 2) == " · ↓1 ↑0.5 КБ/с", "speed uses counter deltas and elapsed time");
+            Check(DiskTraySession.Rates(100, 100, 10, 10, 1) == "" && DiskTraySession.Rates(0, 0, 100, 100, 0) == "", "restart and first sample have no invented speed");
+            foreach (string value in new[] { "example.invalid:8384", "0.0.0.0:8384", "user:pass@127.0.0.1:8384", "127.0.0.1:8384/path", "127.0.0.1:8384/?x=1" }) {
+                bool rejected = false; try { DiskTraySession.LocalAddress(value); } catch (InvalidDataException) { rejected = true; }
+                Check(rejected, "nonlocal or unsafe REST rejected");
+            }
+            // Real HTTP transport: UTF-8/CRLF config, credentials in header only, cursor,
+            // status refresh on events, no repeated db/status on an empty long-poll.
+            string dir = Path.Combine(Path.GetTempPath(), "tray-rest-" + Guid.NewGuid().ToString("N"));
+            var socket = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0); socket.Start();
+            int port = ((System.Net.IPEndPoint)socket.LocalEndpoint).Port; socket.Stop();
+            using (var listener = new System.Net.HttpListener()) {
+                listener.Prefixes.Add("http://127.0.0.1:" + port + "/"); listener.Start();
+                var requests = new List<string>(); int poll = 0, statusCalls = 0; bool headerOk = true, redirect = false, restarted = false;
+                var server = System.Threading.Tasks.Task.Run(() => {
+                    try {
+                        while (listener.IsListening) {
+                            var context = listener.GetContext(); string url = context.Request.RawUrl; requests.Add(url);
+                            headerOk &= context.Request.Headers["X-API-Key"] == "fixture" && !url.Contains("fixture");
+                            string json;
+                            if (redirect) { context.Response.StatusCode = 302; context.Response.RedirectLocation = "http://127.0.0.1:" + port + "/redirected"; json = "{}"; }
+                            else if (url == "/rest/system/status") json = Json.Encode(new { myID = "LOCAL", startTime = restarted ? "2026-01-01T00:00:10Z" : "2026-01-01T00:00:00Z", uptime = 1 });
+                            else if (url.StartsWith("/rest/events?")) { poll++; json = poll == 2 ? "[]" : "[{\"id\":" + (poll * 10) + ",\"type\":\"FolderSummary\"}]"; }
+                            else if (url == "/rest/system/connections") json = "{\"connections\":{\"PEER\":{\"connected\":true}},\"total\":{\"inBytesTotal\":" + poll * 1024 + ",\"outBytesTotal\":0}}";
+                            else if (url == "/rest/config/folders") json = Json.Encode(new[] { folder });
+                            else if (url.StartsWith("/rest/db/status?folder=")) { statusCalls++; json = poll == 1 ? "{\"state\":\"syncing\",\"globalBytes\":2048,\"needBytes\":1024}" : Json.Encode(idle); }
+                            else throw new Exception("Unexpected local REST request: " + url);
+                            byte[] bytes = System.Text.Encoding.UTF8.GetBytes(json); context.Response.ContentType = "application/json";
+                            context.Response.OutputStream.Write(bytes, 0, bytes.Length); context.Response.Close();
+                        }
+                    } catch (System.Net.HttpListenerException) { } catch (ObjectDisposedException) { }
+                });
+                try {
+                    Directory.CreateDirectory(Path.Combine(dir, "state"));
+                    Files.Atomic(Path.Combine(dir, "state", "config.xml"), "<configuration>\r\n<gui><address>127.0.0.1:" + port + "</address><apikey>fixture</apikey></gui>\r\n</configuration>");
+                    Files.Atomic(Path.Combine(dir, "server.txt"), "PEER\r\n");
+                    var client = new DiskTraySession(dir);
+                    Check(client.Read(System.Threading.CancellationToken.None).Contains("50%"), "HTTP first snapshot");
+                    string second = client.Read(System.Threading.CancellationToken.None);
+                    Check(second.Contains("50%") && second.Contains("КБ/с") && statusCalls == 1, "empty events preserve state and refresh speed only");
+                    Check(client.Read(System.Threading.CancellationToken.None).Contains("синхронизирован") && statusCalls == 2, "event refreshes folder state");
+                    Check(requests.Count(r => r.Contains("since=10&timeout=2")) == 2, "event cursor advances and waits locally");
+                    Check(requests.Any(r => r.Contains("disk%20a%2F%D0%B1")) && headerOk, "encoded folder ID and private header");
+                    restarted = true;
+                    Check(client.Read(System.Threading.CancellationToken.None).Contains("синхронизирован") && statusCalls == 3 &&
+                        requests.Count(r => r.Contains("since=0&timeout=0")) == 2, "engine restart resets event cursor and refreshes folder state");
+                    redirect = true; bool rejected = false;
+                    try { client.Read(System.Threading.CancellationToken.None); } catch (Exception) { rejected = true; }
+                    Check(rejected && !requests.Any(r => r.Contains("redirected")), "redirect never forwards API key");
+                } finally { listener.Stop(); server.GetAwaiter().GetResult(); Directory.Delete(dir, true); }
+            }
+        }
         internal static void Run()
         {
             var empty = Data("{}"); var transport = Data("{\r\n\"ok\":true,\"active\":\"vless-relay-fixture\",\"kbps\":96.8,\"candidates\":[{\"tag\":\"vless-relay-fixture\",\"state\":\"ok\",\"kbps\":96.8},{\"tag\":\"vless-direct\",\"state\":\"fail\"}]\r\n}");
             var health = Health(40000, 50000); var menu = TrayMenuModel.Build(empty, empty, transport, health);
-            // The tray is four actions plus two information rows: Happier, program window, Disk root, exit.
-            Check(string.Join(",", menu.Select(x => x.Id)) == "open,settings,disk,separator,connection,server,separator,exit", "exact menu order");
-            Check(menu[0].Text == "Открыть" && menu[1].Text == "Настройки" && menu[2].Text == "Диск" && menu[7].Text == "Выход", "human labels");
-            Check(menu[1].Enabled && menu[2].Enabled && menu[7].Enabled, "settings, Disk and exit are always accessible");
-            // No folder status, no sync progress and no folder warning exist in the tray: Syncthing Tray owns them.
+            // Application actions, separate synchronization window, and local REST summary.
+            Check(string.Join(",", menu.Select(x => x.Id)) == "open,settings,disk,synchronization,diskStatus,separator,connection,server,separator,exit", "exact menu order");
+            Check(menu[0].Text == "Открыть" && menu[1].Text == "Настройки" && menu[2].Text == "Диск" && menu[9].Text == "Выход", "human labels");
+            Check(menu[1].Enabled && menu[2].Enabled && menu[9].Enabled, "settings, Disk and exit are always accessible");
+            // Detailed folder actions stay in the synchronization window.
             string labels = string.Join("|", menu.Select(x => x.Text));
             Check(!labels.Contains("Папки") && !labels.Contains("Ход синхронизации") && !labels.Contains("⚠") && !menu.Any(x => x.Id == "folders" || x.Id == "progress"), "no folder state rows in the menu");
             var configured = Data("{\r\n\"profile\":{\"server\":{\"address\":\"203.0.113.10\"},\"disk\":{\"folders\":[]}}\r\n}");
             Check(string.Join(",", TrayMenuModel.Build(configured, empty, transport, health).Select(x => x.Id + ":" + x.Text)) == string.Join(",", menu.Select(x => x.Id + ":" + x.Text)), "folder choice in the profile never changes the menu");
             Check(!menu[0].Enabled && menu[0].Hint.Contains("happier.webappUrl"), "missing Happier URL disables «Открыть» with explanation");
-            Check(menu[2].Hint.Contains("Syncthing Tray"), "Disk entry points to Syncthing Tray for folders");
+            Check(menu[3].Text == "Синхронизация (Syncthing)…" && menu[3].Enabled, "independent synchronization window entry");
+            Check(!menu[4].Enabled && menu[4].Text == "Диск: ожидается проверка", "honest unknown Disk state");
+            Check(TrayMenuModel.Build(empty, empty, transport, health, "Диск: синхронизирован")[4].Text == "Диск: синхронизирован", "REST state reaches the menu");
+            DiskRest();
             // «Диск» opens the root the installed Disk really uses; the configured disk.base counts until the Disk section applied it.
             var configuredBase = Data("{\"disk\":{\"base\":\"D:\\\\Work\\\\Disk\"}}");
             Check(ConfigProfile.DiskRoot(configuredBase, "C:\\Users\\u\\Disk") == "C:\\Users\\u\\Disk", "installed Disk root wins over the config");
             Check(ConfigProfile.DiskRoot(configuredBase, "") == "D:\\Work\\Disk", "configured root before the first install");
             Check(ConfigProfile.DiskRoot(empty, "") == ConfigProfile.DefaultDiskBase() && ConfigProfile.DefaultDiskBase().EndsWith("Disk"), "default root is the user's Disk folder");
-            Check(!menu[4].Enabled && !menu[5].Enabled, "information rows disabled");
-            Check(menu[4].Text.Contains("VLESS через fixture") && menu[4].Text.Contains("КБ/с"), "friendly active route and speed");
-            Check(menu[5].Text.Contains("диск") && menu[5].Text.Contains("память") && menu[5].Text.Contains("нагрузка"), "server metrics in menu");
+            Check(!menu[6].Enabled && !menu[7].Enabled, "information rows disabled");
+            Check(menu[6].Text.Contains("VLESS через fixture") && menu[6].Text.Contains("КБ/с"), "friendly active route and speed");
+            Check(menu[7].Text.Contains("диск") && menu[7].Text.Contains("память") && menu[7].Text.Contains("нагрузка"), "server metrics in menu");
             foreach (string url in new[] { "https://first.example.invalid/path", "https://second.example.invalid:8443/", "http://local.example.invalid/" }) {
                 var config = Data(Json.Encode(new { happier = new { webappUrl = url } }));
                 Check(TrayMenuModel.HappierUrl(config, empty) == url, "URL comes from each supplied config");

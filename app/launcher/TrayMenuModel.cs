@@ -29,14 +29,16 @@ namespace RemoteAgents.Launcher
             Uri uri;
             return Uri.TryCreate(value, UriKind.Absolute, out uri) && (uri.Scheme == "https" || uri.Scheme == "http") && uri.UserInfo.Length == 0 ? uri.AbsoluteUri : "";
         }
-        // The only folder control is Syncthing Tray: the menu opens the Disk root in Explorer and shows no folder state.
-        internal static TrayMenuEntry[] Build(Dictionary<string, object> config, Dictionary<string, object> account, Dictionary<string, object> transport, Dictionary<string, object> health)
+        // One application icon; synchronization UI is an independent window.
+        internal static TrayMenuEntry[] Build(Dictionary<string, object> config, Dictionary<string, object> account, Dictionary<string, object> transport, Dictionary<string, object> health, string diskStatus = "Диск: ожидается проверка")
         {
             string url = HappierUrl(config, account);
             return new[] {
                 new TrayMenuEntry("open", "Открыть", url.Length > 0) { Hint = url.Length > 0 ? "Открыть веб-приложение Happier" : "Адрес Happier не задан: укажите happier.webappUrl в настройках" },
                 new TrayMenuEntry("settings", "Настройки") { Hint = "Окно программы: конфиг, подробные настройки и сервис" },
-                new TrayMenuEntry("disk", "Диск") { Hint = "Папка Disk в Проводнике. Папки сервера принимайте в Syncthing Tray" },
+                new TrayMenuEntry("disk", "Диск") { Hint = "Папка Disk в Проводнике" },
+                new TrayMenuEntry("synchronization", "Синхронизация (Syncthing)…") { Hint = "Окно синхронизации; его закрытие не останавливает Диск" },
+                new TrayMenuEntry("diskStatus", Short(diskStatus, 100), false),
                 new TrayMenuEntry("separator", "", false),
                 new TrayMenuEntry("connection", Connection(transport), false),
                 new TrayMenuEntry("server", ServerHealthView.Summary(health), false),
@@ -94,6 +96,112 @@ namespace RemoteAgents.Launcher
             if (value.Length <= max) return value;
             int length = max - 1; if (length > 0 && char.IsHighSurrogate(value[length - 1])) length--;
             return value.Substring(0, length) + "…";
+        }
+    }
+    // Local REST only. The API key stays in memory and never enters arguments/logs.
+    internal sealed class DiskTraySession
+    {
+        internal readonly string Root, Identity;
+        internal readonly Uri Address;
+        readonly string apiKey;
+        long since;
+        string engineStart;
+        double previousUptime;
+        Dictionary<string, object>[] folders, states;
+        double previousIn, previousOut;
+        readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
+        double previousTime = -1;
+        internal DiskTraySession(string root)
+        {
+            Root = root;
+            var xml = new System.Xml.XmlDocument { XmlResolver = null };
+            using (var reader = System.Xml.XmlReader.Create(Path.Combine(root, "state", "config.xml"), new System.Xml.XmlReaderSettings {
+                DtdProcessing = System.Xml.DtdProcessing.Prohibit, XmlResolver = null })) xml.Load(reader);
+            Address = LocalAddress(xml.SelectSingleNode("/configuration/gui/address").InnerText.Trim());
+            apiKey = xml.SelectSingleNode("/configuration/gui/apikey").InnerText.Trim();
+            if (apiKey.Length == 0) throw new InvalidDataException();
+            Identity = Address.AbsoluteUri + "\n" + apiKey;
+        }
+        internal static string Home(Dictionary<string, object> config)
+        {
+            string value = Json.Str(Json.Map(Json.Get(config, "disk")), "home");
+            return value.Length > 0 ? Environment.ExpandEnvironmentVariables(value) : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteDisk");
+        }
+        internal static Uri LocalAddress(string value)
+        {
+            Uri uri;
+            if (!Uri.TryCreate("http://" + value, UriKind.Absolute, out uri) || uri.Host != "127.0.0.1" || uri.UserInfo.Length != 0 ||
+                uri.Query.Length != 0 || uri.Fragment.Length != 0 || uri.AbsolutePath != "/") throw new InvalidDataException("REST Syncthing должен слушать 127.0.0.1");
+            return uri;
+        }
+        object Get(string route, System.Threading.CancellationToken token)
+        {
+            var request = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(new Uri(Address, "rest/" + route));
+            request.Proxy = null; request.AllowAutoRedirect = false; request.Timeout = 3500; request.ReadWriteTimeout = 3500;
+            request.Headers["X-API-Key"] = apiKey;
+            using (token.Register(request.Abort)) {
+                token.ThrowIfCancellationRequested();
+                using (var response = (System.Net.HttpWebResponse)request.GetResponse()) {
+                    if (response.StatusCode != System.Net.HttpStatusCode.OK) throw new InvalidDataException();
+                    using (var reader = new StreamReader(response.GetResponseStream(), System.Text.Encoding.UTF8)) return Json.Parse(reader.ReadToEnd());
+                }
+            }
+        }
+        internal string Read(System.Threading.CancellationToken token)
+        {
+            var system = Json.Map(Get("system/status", token));
+            string start = Json.Str(system, "startTime"); double uptime = Number(system, "uptime");
+            if (Json.Str(system, "myID").Length == 0 || start.Length == 0) throw new InvalidDataException();
+            if (engineStart != null && (engineStart != start || uptime < previousUptime)) Reset();
+            engineStart = start; previousUptime = uptime;
+            // Events long-poll gates state refresh; connections counters supply the speed.
+            // First snapshot also establishes a cursor, so changes during that snapshot are replayed.
+            var events = Json.Array(Get("events?since=" + since.ToString(CultureInfo.InvariantCulture) + "&timeout=" + (previousTime < 0 ? "0&limit=1" : "2") +
+                "&events=StateChanged,FolderSummary,FolderErrors,ConfigSaved,DeviceConnected,DeviceDisconnected,FolderCompletion", token));
+            foreach (var item in events) since = Math.Max(since, (long)Number(Json.Map(item), "id"));
+            var connections = Json.Map(Get("system/connections", token));
+            var total = Json.Map(Json.Get(connections, "total")); double now = clock.Elapsed.TotalSeconds;
+            double input = Number(total, "inBytesTotal"), output = Number(total, "outBytesTotal");
+            if (previousTime >= 0 && (input < previousIn || output < previousOut)) Reset();
+            // db/status is expensive: refresh folder state only initially or after an event.
+            if (folders == null || events.Length > 0) {
+                folders = Json.Array(Get("config/folders", token)).Select(Json.Map).ToArray();
+                var updated = new List<Dictionary<string, object>>();
+                foreach (var folder in folders) {
+                    token.ThrowIfCancellationRequested();
+                    if (!Json.Bool(folder, "paused")) updated.Add(Json.Map(Get("db/status?folder=" + Uri.EscapeDataString(Json.Str(folder, "id")), token)));
+                }
+                states = updated.ToArray();
+            }
+            string peer = File.ReadAllText(Path.Combine(Root, "server.txt")).Trim('\uFEFF', ' ', '\r', '\n', '\t');
+            bool connected = Json.Bool(Json.Map(Json.Get(Json.Map(Json.Get(connections, "connections")), peer)), "connected");
+            string speed = Rates(previousIn, previousOut, input, output, previousTime < 0 ? 0 : now - previousTime);
+            previousIn = input; previousOut = output; previousTime = now;
+            return Summary(folders, states, connected) + speed;
+        }
+        void Reset() { since = 0; folders = states = null; previousTime = -1; }
+        internal static double Number(Dictionary<string, object> data, string key)
+        {
+            double value;
+            return double.TryParse(Json.Str(data, key), NumberStyles.Float, CultureInfo.InvariantCulture, out value) && !double.IsNaN(value) && !double.IsInfinity(value) ? value : 0;
+        }
+        internal static string Rates(double oldIn, double oldOut, double input, double output, double seconds)
+        {
+            if (seconds <= 0 || input < oldIn || output < oldOut) return "";
+            return " · ↓" + ((input - oldIn) / seconds / 1024).ToString("0.#", CultureInfo.InvariantCulture) + " ↑" +
+                ((output - oldOut) / seconds / 1024).ToString("0.#", CultureInfo.InvariantCulture) + " КБ/с";
+        }
+        internal static string Summary(Dictionary<string, object>[] folders, Dictionary<string, object>[] states, bool connected)
+        {
+            if (states.Any(s => Number(s, "errors") > 0 || Number(s, "pullErrors") > 0 || Json.Str(s, "state") == "error")) return "Диск: ошибка синхронизации";
+            if (folders.Length == 0) return "Диск: нет выбранных папок";
+            if (folders.Any(f => Json.Bool(f, "paused"))) return "Диск: есть папки на паузе";
+            if (!connected) return "Диск: сервер не подключён";
+            if (states.Any(s => Json.Str(s, "state").StartsWith("scan", StringComparison.Ordinal))) return "Диск: проверка файлов";
+            double needed = states.Sum(s => Number(s, "needBytes")), total = states.Sum(s => Number(s, "globalBytes"));
+            if (needed > 0 || states.Any(s => Number(s, "needTotalItems") > 0 || Json.Str(s, "state").StartsWith("sync", StringComparison.Ordinal)))
+                return "Диск: синхронизация" + (total > 0 ? " " + Math.Min(100, Math.Max(0, (total - needed) * 100 / total)).ToString("0", CultureInfo.InvariantCulture) + "%" : "");
+            return states.Length == folders.Length && states.All(s => Json.Str(s, "state") == "idle") ? "Диск: синхронизирован" : "Диск: состояние уточняется";
         }
     }
     internal static class ServerHealthView

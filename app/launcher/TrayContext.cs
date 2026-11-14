@@ -31,6 +31,10 @@ namespace RemoteAgents.Launcher
         bool syncRunning, accountResuming, serverHealthRunning, syncTaskRetired, syncTaskRetiring;
         DateTime nextSyncTaskRetirement = DateTime.MinValue;
         readonly ServerHealthSchedule healthSchedule = new ServerHealthSchedule();
+        bool diskReading;
+        string diskSummary = "Диск: ожидается проверка";
+        DateTime diskUpdated = DateTime.MinValue;
+        DiskTraySession diskSession;
         string syncSummary = "Сверка конфига: ожидается подтверждённая связь";
         readonly Icon green = MakeIcon(Color.ForestGreen), yellow = MakeIcon(Color.Goldenrod), red = MakeIcon(Color.Firebrick);
         readonly object pipeGate = new object(); NamedPipeServerStream server; Task worker, pipeWorker;
@@ -170,7 +174,7 @@ namespace RemoteAgents.Launcher
                 if (Product.IsVpn && operationTip.Length > 0) icon.Text = TrayMenuModel.Short(operationTip, 63);
                 if (DateTime.UtcNow >= nextOperationCheck) CheckOperations();
                 RefreshMenu(); WriteStatus();
-                CheckSync(); CheckServerHealth();
+                CheckSync(); CheckServerHealth(); CheckDisk();
                 if (serverUpdateRequested && !engine.Pending && MutationConflict().Length == 0 && !BackgroundWork.Disk.Busy && TrySelfUpdate()) return;
             } catch { log.Write("supervisor.tick.failed"); icon.Icon = red; }
             finally { ticking = false; }
@@ -296,6 +300,7 @@ namespace RemoteAgents.Launcher
                         if (id == "open") OpenHappier();
                         else if (id == "settings") ShowMain();
                         else if (id == "disk") OpenDisk();
+                        else if (id == "synchronization") OpenSynchronization();
                         else if (id == "exit") RequestExit();
                     });
                     menu.Items.Add(item);
@@ -314,7 +319,7 @@ namespace RemoteAgents.Launcher
         Dictionary<string, object> AccountState()
         { try { return Json.Read(Path.Combine(home, "state", "happier-account.json")); } catch { return Json.Map(null); } }
         TrayMenuEntry[] TrayEntries()
-        { return TrayMenuModel.Build(config.Data, AccountState(), StatusView.Read(home, "transport", maxAgeSec: 15), ServerHealthView.Read(home)); }
+        { return TrayMenuModel.Build(config.Data, AccountState(), StatusView.Read(home, "transport", maxAgeSec: 15), ServerHealthView.Read(home), DiskSummary()); }
         bool Configured()
         { return Json.Bool(Json.Map(Json.Get(new Configuration(home).Data, "wizard")), "configured"); }
         void RegisterVpnRun()
@@ -424,6 +429,35 @@ namespace RemoteAgents.Launcher
             string root = ConfigProfile.DiskRoot(ConfigProfile.Load(home));
             if (Directory.Exists(root)) { Open(root); return; }
             MessageBox.Show(mainWindow, "Папка Диска ещё не создана: " + root + "\r\nДиск устанавливается вместе с настройкой сервера («Настройки» → «Конфиг» → «Применить»). Папки сервера принимайте в Syncthing Tray.", Product.Name);
+        }
+        string DiskSummary()
+        {
+            if (!runtimes.Any(r => r.Definition.Name == "disk" && r.Enabled)) return "Диск: отключён";
+            return (DateTime.UtcNow - diskUpdated).TotalSeconds <= 10 ? diskSummary : "Диск: состояние не получено";
+        }
+        async void CheckDisk()
+        {
+            if (Product.IsVpn || closing || diskReading) return;
+            if (!runtimes.Any(r => r.Definition.Name == "disk" && r.Enabled)) { diskSession = null; diskUpdated = DateTime.MinValue; return; }
+            string root = DiskTraySession.Home(config.Data);
+            diskReading = true;
+            try {
+                var current = diskSession;
+                var result = await Task.Run(() => {
+                    var candidate = new DiskTraySession(root);
+                    var session = current != null && current.Root == root && current.Identity == candidate.Identity ? current : candidate;
+                    return Tuple.Create(session, session.Read(stop.Token));
+                });
+                if (!closing && root == DiskTraySession.Home(config.Data) && runtimes.Any(r => r.Definition.Name == "disk" && r.Enabled)) { diskSession = result.Item1; diskSummary = result.Item2; diskUpdated = DateTime.UtcNow; }
+            } catch (Exception) { diskSession = null; diskSummary = "Диск: локальный Syncthing недоступен"; diskUpdated = DateTime.UtcNow; }
+            finally { diskReading = false; }
+        }
+        void OpenSynchronization()
+        {
+            string script = Path.Combine(engine.Folder(engine.Current), "disk", "Disk.Engine.ps1");
+            if (!File.Exists(script)) throw new FileNotFoundException();
+            // The UI has its own action Job. Closing it cannot affect the disk component's Job.
+            RunAction(new MenuAction { Exe = "powershell.exe", Args = new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-OpenWindow", "-Home", home } });
         }
         string MutationConflict()
         {
