@@ -7,6 +7,8 @@ import os,sys,json,subprocess,hashlib,tempfile,tarfile,urllib.request,time,socke
 from pathlib import Path
 s=Path.home()/'.local/share/remote-disk'; cfg=s/'config.xml'; binary=s/'bin/syncthing'; here=Path(os.environ['REMOTE_DISK_SCRIPT_DIR'])
 a=sys.argv[1:] or ['bootstrap']; action=a[0]
+# systemd-таймер, поставленный прежним install-auto, вызывает reconcile: это та же команда, что bootstrap.
+if action=='reconcile':action='bootstrap'
 def safe(p):
     if any(x.is_symlink() for x in (p,*p.parents)):raise ValueError('Символические ссылки запрещены')
 def folder_path(name):

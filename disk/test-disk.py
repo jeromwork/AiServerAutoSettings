@@ -378,6 +378,18 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(source.read_bytes(), before)
 
 
+class ServerHardeningTests(unittest.TestCase):
+    def test_reconcile_stays_an_alias_of_bootstrap_for_installed_timers(self):
+        with Stand(2) as t:
+            a, b = t.sides
+            t.server(a, 'add-device', dict(deviceId=b['deviceId'], deviceName='Laptop'))
+            (a['home'] / 'Disk/Fresh').mkdir(parents=True)
+            # Word for word the ExecStart of the unit that the earlier install-auto wrote on the real server.
+            result = run(['bash', '-c', 'bash "$HOME/.local/share/remote-disk/server-disk.sh" reconcile'], a['env'])
+            self.assertEqual(json.loads(result.stdout)['deviceId'], a['deviceId'])
+            self.assertEqual({d['deviceID'] for d in t.folder(a, 'Fresh')['devices']}, {a['deviceId'], b['deviceId']})
+
+
 if __name__ == '__main__':
     if len(sys.argv) == 2 and not sys.argv[1].startswith('-'):
         os.environ['SYNCTHING_ARCHIVE'] = sys.argv.pop()
