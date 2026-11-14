@@ -140,8 +140,9 @@ else:p.write_bytes(sys.stdin.buffer.read())
                 crontab.chmod(0o700)
                 systemctl = fake_bin / 'systemctl'
                 systemctl.write_text(f'''#!{sys.executable}
-import json,sys
+import json,os,sys
 from pathlib import Path
+if os.environ.get('FAIL_SYSTEMD')=='1' or (os.environ.get('FAIL_SYSTEMD_ENABLE')=='1' and 'enable' in sys.argv):sys.exit(1)
 with (Path.home()/'systemctl-calls').open('a') as f:f.write(json.dumps(sys.argv[1:])+'\\n')
 ''')
                 systemctl.chmod(0o700)
@@ -566,9 +567,52 @@ Set-DiskWatcherDelay
             self.assertFalse((outside / '.stignore').exists())
             self.assertFalse((disk / 'Valid/nested/.stignore').exists())
 
+    def test_bootstrap_installs_and_updates_two_second_timer_idempotently(self):
+        with Stand(1) as t:
+            side = t.sides[0]
+            units = side['home'] / '.config/systemd/user'
+            timer = units / 'remote-disk-folders.timer'
+            service = units / 'remote-disk-folders.service'
+            self.assertTrue(timer.exists(), 'normal bootstrap must install the timer')
+            timer.write_text('[Timer]\nOnUnitInactiveSec=60\n')
+            cron = side['home'] / 'fake-crontab'
+            foreign = b'# keep user cron\n17 * * * * echo keep\n'
+            cron.write_bytes(foreign + b'* * * * * bash "$HOME/.local/share/remote-disk/server-disk.sh" bootstrap >/dev/null 2>&1\n')
+            t.server(side, 'bootstrap')
+            self.assertIn('OnUnitInactiveSec=2\n', timer.read_text())
+            self.assertIn('StandardOutput=null\n', service.read_text())
+            self.assertIn('SyslogLevel=warning\n', service.read_text())
+            self.assertIn('LogLevelMax=notice\n', service.read_text())
+            self.assertEqual(cron.read_bytes(), foreign)
+            before = [(p.read_bytes(), p.stat().st_mtime_ns) for p in (timer, service)]
+            calls_before = (side['home'] / 'systemctl-calls').read_text().splitlines()
+            t.server(side, 'bootstrap')
+            self.assertEqual([(p.read_bytes(), p.stat().st_mtime_ns) for p in (timer, service)], before)
+            new_calls = (side['home'] / 'systemctl-calls').read_text().splitlines()[len(calls_before):]
+            self.assertFalse(any(set(json.loads(call)) & {'daemon-reload', 'enable', 'restart'} for call in new_calls))
+
+    def test_timer_enable_failure_falls_back_to_cron_and_add_device_repairs_it(self):
+        with Stand(2) as t:
+            side, peer = t.sides
+            stamp = side['state'] / 'auto-units.sha256'
+            stamp.unlink()
+            side['env']['FAIL_SYSTEMD_ENABLE'] = '1'
+            t.server(side, 'bootstrap')
+            self.assertFalse(stamp.exists(), 'failed enable must be retried, not cached as installed')
+            cron = side['home'] / 'fake-crontab'
+            self.assertIn(b'server-disk.sh" bootstrap', cron.read_bytes())
+            side['env'].pop('FAIL_SYSTEMD_ENABLE')
+            t.server(side, 'add-device', dict(deviceId=peer['deviceId']))
+            self.assertTrue(stamp.exists())
+            self.assertNotIn(b'server-disk.sh" bootstrap', cron.read_bytes())
+            calls = [json.loads(line) for line in (side['home'] / 'systemctl-calls').read_text().splitlines()]
+            self.assertGreaterEqual(calls.count(['--user', 'daemon-reload']), 3)
+            self.assertIn(['--user', 'restart', 'remote-disk-folders.timer'], calls)
+
     def test_bootstrap_cron_and_install_auto_share_the_same_entry_point(self):
         with Stand(1) as t:
             side = t.sides[0]
+            side['env']['FAIL_SYSTEMD'] = '1'
             foreign = b'# user cron\n17 * * * * echo keep\n'
             cron = side['home'] / 'fake-crontab'
             cron.write_bytes(foreign)
@@ -578,6 +622,7 @@ Set-DiskWatcherDelay
             self.assertEqual(cron.read_bytes(), foreign + expected)
             side['env']['FAIL_CRONTAB'] = '1'
             self.assertEqual(t.server(side, 'bootstrap')['deviceId'], side['deviceId'])
+            side['env'].pop('FAIL_SYSTEMD')
             t.server(side, 'install-auto')
             units = side['home'] / '.config/systemd/user'
             service = (units / 'remote-disk-folders.service').read_text()
@@ -587,7 +632,8 @@ Set-DiskWatcherDelay
             self.assertIn('OnUnitInactiveSec=2\n', timer)
             self.assertIn('AccuracySec=1\n', timer)  # systemd's default minute of coalescing would hide the short interval.
             calls = [json.loads(line) for line in (side['home'] / 'systemctl-calls').read_text().splitlines()]
-            self.assertEqual(calls, [['--user', 'daemon-reload'], ['--user', 'enable', '--now', 'remote-disk-folders.timer']])
+            self.assertIn(['--user', 'daemon-reload'], calls)
+            self.assertIn(['--user', 'enable', '--now', 'remote-disk-folders.timer'], calls)
             config = E.parse(side['state'] / 'config.xml')
             options = config.find('options')
             self.assertTrue(all(options.findtext(n) == 'false' for n in

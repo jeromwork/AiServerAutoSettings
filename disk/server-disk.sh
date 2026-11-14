@@ -142,14 +142,51 @@ def channel(data):
     ports=json.loads((s/'ports.json').read_text()) if (s/'ports.json').exists() else {}
     if ports.get('listen'):targets.append(('sync',22001,int(ports['listen'])))
     return dict(log=dict(disabled=True),inbounds=[dict(type='direct',tag=tag,listen='127.0.0.1',listen_port=port,network='tcp',override_address='127.0.0.1',override_port=target) for tag,port,target in targets],outbounds=out,route=dict(final='server',auto_detect_interface=True))
-def ensure_cron():
-    line=b'* * * * * bash "$HOME/.local/share/remote-disk/server-disk.sh" bootstrap >/dev/null 2>&1'
+CRON_LINE=b'* * * * * bash "$HOME/.local/share/remote-disk/server-disk.sh" bootstrap >/dev/null 2>&1'
+def ensure_cron(enabled=True):
     try:
         old=subprocess.run(['crontab','-l'],capture_output=True,timeout=5)
-        if old.returncode not in (0,1) or line in old.stdout.splitlines():return
-        content=old.stdout+(b'\n' if old.stdout and not old.stdout.endswith(b'\n') else b'')+line+b'\n'
+        if old.returncode not in (0,1):return
+        lines=old.stdout.splitlines(keepends=True)
+        if enabled:
+            if CRON_LINE in old.stdout.splitlines():return
+            content=old.stdout+(b'\n' if old.stdout and not old.stdout.endswith(b'\n') else b'')+CRON_LINE+b'\n'
+        else:
+            content=b''.join(line for line in lines if line.rstrip(b'\r\n')!=CRON_LINE)
+            if content==old.stdout:return
         subprocess.run(['crontab','-'],input=content,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=5)
     except (OSError,subprocess.SubprocessError):pass
+
+def ensure_auto():
+    # Bootstrap is also the installer/wizard and the old timer's entry point.
+    # Update only changed unit files: running every 2 s must not reload/restart itself.
+    def systemctl(*args):
+        return subprocess.run(['systemctl','--user',*args],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=5).returncode==0
+    try:
+        if not systemctl('show-environment'):raise OSError('user systemd unavailable')
+        units=Path.home()/'.config/systemd/user';safe(units);units.mkdir(parents=True,exist_ok=True)
+        script=s/'server-disk.sh'
+        if not script.is_file():raise ValueError('Сначала скопируйте server-disk.sh в ~/.local/share/remote-disk')
+        contents={
+            'remote-disk-folders.service':'[Unit]\nDescription=RemoteDisk folder discovery\n[Service]\nType=oneshot\n# Runs every 2 s: keep successes out of the journal, errors (stderr) stay visible as warnings.\nStandardOutput=null\nSyslogLevel=warning\nLogLevelMax=notice\nExecStart=/bin/bash "%h/.local/share/remote-disk/server-disk.sh" bootstrap\n',
+            'remote-disk-folders.timer':'[Unit]\nDescription=Discover and accept RemoteDisk folders every 2s\n[Timer]\nOnStartupSec=2\nOnUnitInactiveSec=2\nAccuracySec=1\n[Install]\nWantedBy=timers.target\n'}
+        stamp=s/'auto-units.sha256';safe(stamp)
+        generation=hashlib.sha256(json.dumps(contents,sort_keys=True).encode()).hexdigest().encode()
+        changed=not stamp.exists() or stamp.read_bytes()!=generation
+        existed=(units/'remote-disk-folders.timer').exists()
+        for name,content in contents.items():
+            target=units/name;safe(target);content=content.encode('utf-8')
+            if not target.exists() or target.read_bytes()!=content:
+                write_atomic(target,content,units);changed=True
+        if changed and not systemctl('daemon-reload'):raise OSError('systemd reload failed')
+        if changed or not systemctl('is-enabled','--quiet','remote-disk-folders.timer') or not systemctl('is-active','--quiet','remote-disk-folders.timer'):
+            if not systemctl('enable','--now','remote-disk-folders.timer'):raise OSError('systemd enable failed')
+        if changed and existed and not systemctl('restart','remote-disk-folders.timer'):raise OSError('systemd restart failed')
+        if not stamp.exists() or stamp.read_bytes()!=generation:write_atomic(stamp,generation,s)
+    except (OSError,ValueError,subprocess.SubprocessError):
+        ensure_cron();return
+    # Remove only our own minute job after the fast timer is confirmed available.
+    ensure_cron(False)
 # Сбой одной папки (недопустимое имя, права доступа, ошибка REST, git не ответил) не должен лишать остальные папки обнаружения.
 FOLDER_ERRORS=(ValueError,OSError,subprocess.SubprocessError)
 def describe(e):return str(e) if isinstance(e,ValueError) else type(e).__name__+': '+str(e)
@@ -211,16 +248,7 @@ def main():
         with os.fdopen(3,'r') as stream:payload=stream.read(8*1024*1024+1).replace('\r','').strip()
         if len(payload)>8*1024*1024:raise ValueError('Запрос слишком велик')
     data=json.loads(base64.b64decode(payload,validate=True)) if payload else {}
-    if action=='install-auto':
-        units=Path.home()/'.config/systemd/user';safe(units);units.mkdir(parents=True,exist_ok=True)
-        script=s/'server-disk.sh'
-        if not script.exists():raise ValueError('Сначала скопируйте server-disk.sh в ~/.local/share/remote-disk')
-        for unit in ('remote-disk-folders.service','remote-disk-folders.timer'):safe(units/unit)
-        (units/'remote-disk-folders.service').write_text('[Unit]\nDescription=RemoteDisk folder discovery\n[Service]\nType=oneshot\n# Runs every 2 s: keep successes out of the journal, errors (stderr) stay visible as warnings.\nStandardOutput=null\nSyslogLevel=warning\nLogLevelMax=notice\nExecStart=/bin/bash "%h/.local/share/remote-disk/server-disk.sh" bootstrap\n')
-        (units/'remote-disk-folders.timer').write_text('[Unit]\nDescription=Discover and accept RemoteDisk folders every 2s\n[Timer]\nOnStartupSec=2\nOnUnitInactiveSec=2\nAccuracySec=1\n[Install]\nWantedBy=timers.target\n')
-        subprocess.run(['systemctl','--user','daemon-reload'],check=True)
-        subprocess.run(['systemctl','--user','enable','--now','remote-disk-folders.timer'],check=True)
-        print('{}');return
+    if action=='install-auto':ensure_auto();print('{}');return
     if action=='channel-config':print(json.dumps(channel(data)));return
     s.mkdir(parents=True,exist_ok=True)
     with (s/'bootstrap.lock').open('a') as lock:
@@ -265,6 +293,7 @@ def main():
                 time.sleep(.1)
         if not identity:raise ValueError('Движок не запустился')
         api('config/options','PATCH',dict(globalAnnounceEnabled=False,localAnnounceEnabled=False,relaysEnabled=False,natEnabled=False,autoUpgradeIntervalH=0,reconnectionIntervalS=10))
+        ensure_auto()
         if action=='add-device':
             device_id=data['deviceId']
             previous=next((d for d in api('config/devices') if d['deviceID']==device_id),None)
@@ -279,7 +308,6 @@ def main():
             except FOLDER_ERRORS as e:print('RemoteDisk: устройство зарегистрировано, папки сервера пока не обработаны: '+describe(e),file=sys.stderr)
             print('{}');return
         reconcile(api,identity)
-        if action=='bootstrap':ensure_cron()
         print(json.dumps(dict(deviceId=identity,listen=ports['listen'])))
 try:main()
 except ValueError as e:print(str(e),file=sys.stderr);sys.exit(1)
