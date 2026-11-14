@@ -118,4 +118,4 @@ VPN для HAPP использует Xray с VLESS/REALITY на TCP 8443. Сер
 
 ## Синхронизация папок RemoteDisk
 
-`04-disk.cmd` устанавливает Syncthing Tray и канал sing-box для папок `~/Disk/<имя>` на сервере. Добавляйте папки через контекстное меню Windows или `disk/Add-RemoteDiskFolder.ps1`. [Установка и проверки](disk/README.md).
+`04-disk.cmd` устанавливает Syncthing Tray и канал sing-box для папок `~/Disk/<имя>` на сервере. Сервер предлагает свои папки компьютеру; принимайте нужные и смотрите ход передачи в Syncthing Tray. [Установка и проверки](disk/README.md).
