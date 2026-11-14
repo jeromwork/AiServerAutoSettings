@@ -49,7 +49,7 @@ function Invoke-DiskApi($Route,$Method='GET',$Body=$null) {
             if($data.race -and -not @($data.folders|Where-Object {$_.id -ceq 'Race'}).Count){$data.folders=@($data.folders)+@(@{id='Race';path=(Join-Path $env:USERPROFILE 'Disk/Race');type='receiveonly'})}
             if($data.noOffer){$result=@{Fallback=@{offeredBy=@{OTHER=@{label='wrong device'}}}}}
             elseif($data.polls -eq 1){$result=@{Default=@{offeredBy=@{OTHER=@{label='wrong device'}}}}}
-            else{$result=@{Default=@{offeredBy=@{PEER=@{label='default'}}};Custom=@{offeredBy=@{PEER=@{label='custom'}}};Race=@{offeredBy=@{PEER=@{label='race'}}}}}
+            else{$result=@{'disk-0123456789abcdef01234567'=@{offeredBy=@{PEER=@{label='Default'}}};Custom=@{offeredBy=@{PEER=@{label='custom'}}};Race=@{offeredBy=@{PEER=@{label='race'}}}}}
         }
         default {throw ('Unexpected local REST '+$Method+' '+$Route)}
     }
@@ -65,10 +65,10 @@ function Invoke-DiskApi($Route,$Method='GET',$Body=$null) {
     $null=Invoke-DiskFixture $bundle @('-AcceptFile',$accept)
     $data=[IO.File]::ReadAllText($api)|ConvertFrom-Json
     Assert ($data.writes -eq 2 -and $data.polls -eq 2) 'AcceptFile waits for offers from the server and accepts only missing IDs'
-    $default=@($data.folders|Where-Object {$_.id -ceq 'Default'})[0]
+    $default=@($data.folders|Where-Object {$_.id -ceq 'disk-0123456789abcdef01234567'})[0]
     $explicit=@($data.folders|Where-Object {$_.id -ceq 'Custom'})[0]
     Assert ($default.path -ceq (Join-Path $base 'Default') -and $explicit.path -ceq $custom) 'AcceptFile supports default and explicit absolute paths'
-    Assert ($default.type -ceq 'sendreceive' -and 'PEER' -cin @($default.devices|ForEach-Object {$_.deviceID}) -and 'LOCAL' -cin @($default.devices|ForEach-Object {$_.deviceID})) 'accepted folder uses server ID and sendreceive with both devices'
+    Assert ($default.label -ceq 'Default' -and $default.type -ceq 'sendreceive' -and 'PEER' -cin @($default.devices|ForEach-Object {$_.deviceID}) -and 'LOCAL' -cin @($default.devices|ForEach-Object {$_.deviceID})) 'accepted folder uses server ID and sendreceive with both devices'
     Assert ([IO.File]::ReadAllText($ignore) -ceq 'my own rules') 'existing user ignore rules are preserved'
     $keep=@($data.folders|Where-Object {$_.id -ceq 'Keep'})[0]
     Assert ($keep.path -ceq $keepPath -and $keep.type -ceq 'receiveonly' -and $keep.paused -and $keep.maxConflicts -eq 17) 'existing folder path and options are preserved'
@@ -86,11 +86,32 @@ function Invoke-DiskApi($Route,$Method='GET',$Body=$null) {
     Assert ($data.writes -eq 2 -and @($data.folders|Where-Object {$_.id -ceq 'Race'})[0].type -ceq 'receiveonly') 'acceptance in Tray during wait is preserved'
     $data.noOffer=$true;Write-DiskUtf8 $api ($data|ConvertTo-Json -Depth 30)
     Write-DiskUtf8 $accept '{"folders":[{"id":"Fallback"}]}'
-    $watch=[Diagnostics.Stopwatch]::StartNew();$null=Invoke-DiskFixture $bundle @('-AcceptFile',$accept)
+    $watch=[Diagnostics.Stopwatch]::StartNew();$fallbackOutput=Invoke-DiskFixture $bundle @('-AcceptFile',$accept)
     $data=[IO.File]::ReadAllText($api)|ConvertFrom-Json
     Assert ($watch.Elapsed.TotalSeconds -ge 29 -and $watch.Elapsed.TotalSeconds -lt 40 -and @($data.folders|Where-Object {$_.id -ceq 'Fallback'}).Count -eq 1) 'without a server offer the same ID is created after about 30 seconds'
-    foreach($bad in @('{"folders":{}}','{"folders":[{"id":"../escape"}]}','{"folders":[{"id":"A"},{"id":"a"}]}','{"folders":[{"id":"A","path":"relative"}]}','{"folders":[{"id":"A","path":0}]}','{}')){
+    Assert ($fallbackOutput.Contains('Сервер не предложил папку Fallback') -and [IO.File]::ReadAllText((Join-Path $script:DiskHome 'install.log')).Contains('Сервер не предложил папку Fallback')) 'missing offer is reported in output and journal'
+    # Laptop update: all four accepted folders have opaque server IDs and custom paths/options.
+    $data.noOffer=$false;$data.race=$false;$data.folders=@();$laptop=@()
+    foreach($n in 1..4){
+        $name='Проект '+$n;$id='disk-'+($n.ToString('x24'));$path=Join-Path $TestHome ('Laptop/'+$n)
+        $data.folders+=@(@{id=$id;label=$name;path=$path;devices=@(@{deviceID='PEER'});type='receiveonly';paused=$true;maxConflicts=17})
+        $laptop+=@(@{id=$name})
+    }
+    Write-DiskUtf8 $api ($data|ConvertTo-Json -Depth 30);$snapshot=[IO.File]::ReadAllText($api)
+    Write-DiskUtf8 $accept (@{folders=$laptop}|ConvertTo-Json -Depth 10)
+    $null=Invoke-DiskFixture $bundle @('-AcceptFile',$accept)
+    Assert ([IO.File]::ReadAllText($api) -ceq $snapshot -and (Get-FileHash -LiteralPath $xml).Hash -ceq $before) 'four existing disk-hex folders with server labels exit zero without writes or polling'
+    Assert (Test-DiskFolderAccepted @{id='Other name';path=$data.folders[0].path} $data.folders 'PEER') 'the same path is already accepted regardless of ID'
+    Assert (-not (Test-DiskFolderAccepted @{id='Проект 1';path=(Join-Path $base 'Elsewhere')} $data.folders 'OTHER')) 'label match requires the server device'
+    $pending=[pscustomobject]@{'disk-abcdefabcdefabcdefabcdef'=[pscustomobject]@{offeredBy=[pscustomobject]@{PEER=[pscustomobject]@{label='Русское имя'}}}}
+    Assert ((Get-DiskPendingFolderId $pending 'Русское имя' 'PEER') -ceq 'disk-abcdefabcdefabcdefabcdef') 'pending REST object is searched by server label'
+    Assert (-not (Get-DiskPendingFolderId $pending 'Русское имя' 'OTHER')) 'pending label from another device is ignored'
+    foreach($bad in @('{"folders":{}}','{"folders":[{"id":"../escape"}]}','{"folders":[{"id":"A"},{"id":"a"}]}','{"folders":[{"id":"A","path":"relative"}]}','{"folders":[{"id":"A","path":0}]}','{}','{"folders":[{"id":"A\n"}]}','{"folders":[{"id":"A","path":"\\\\?\\C:\\folder"}]}','{"folders":[{"id":"A","path":"\\\\.\\C:\\folder"}]}')){
         Write-DiskUtf8 $accept $bad;Assert (Refuses {Read-DiskAcceptFile $accept}) 'invalid AcceptFile rejected before accepting folders'
+    }
+    foreach($path in @($base,$env:USERPROFILE,[IO.Path]::GetPathRoot($base))){
+        Write-DiskUtf8 $accept (@{folders=@(@{id='Root';path=$path})}|ConvertTo-Json -Depth 10)
+        Assert (Refuses {Read-DiskAcceptFile $accept}) 'Disk root and its parents are refused'
     }
     $script:preflightCalls=0
     function Invoke-DiskApi($Route,$Method='GET',$Body=$null){

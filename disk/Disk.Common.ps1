@@ -241,45 +241,81 @@ function Read-DiskAcceptFile([string]$File) {
     $ids=@{}
     foreach($folder in $data.folders){
         $id=[string]$folder.id
-        if($folder.id -isnot [string] -or $id.Length -gt 128 -or $id -notmatch '^[\p{L}\p{N}_][\p{L}\p{N}_. -]*$' -or $id.Contains('..') -or $id -match '[ .]$|^(?i:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|$)'){throw ('AcceptFile: недопустимый ID папки: '+$id)}
+        if($folder.id -isnot [string] -or $id.Length -gt 128 -or $id -notmatch '\A[\p{L}\p{N}_][\p{L}\p{N}_. -]*\z' -or $id.Contains('..') -or $id -match '[ .]$|^(?i:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|$)'){throw ('AcceptFile: недопустимый ID папки: '+$id)}
         if($ids.ContainsKey($id)){throw ('AcceptFile: повторный ID папки: '+$id)};$ids[$id]=$true
         if($null -ne $folder.path -and $folder.path -isnot [string]){throw 'AcceptFile: путь папки должен быть строкой'}
         $path=[string]$folder.path
         if($path){
+            $windows=$path.Replace('/','\')
+            if($windows.StartsWith('\\?\') -or $windows.StartsWith('\\.\')){throw 'AcceptFile: пути устройств запрещены'}
+            if($env:OS -eq 'Windows_NT'){
+                $drive=$windows -match '\A[a-zA-Z]:\\';$tail=$windows.Substring($(if($drive){3}else{2})).TrimEnd('\')
+                if($windows.Substring($(if($drive){2}else{0})) -match '[<>:"|?*\x00-\x1f]' -or @($tail -split '\\'|Where-Object {$_ -eq '' -or $_ -in @('.','..') -or $_ -match '[ .]\z|\A(?i:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|\z)'}).Count){
+                    if(-not ($drive -and $windows.Length -eq 3)){throw 'AcceptFile: недопустимый путь папки'}
+                }
+            }
             if(-not [IO.Path]::IsPathRooted($path) -or ($env:OS -eq 'Windows_NT' -and $path -notmatch '^(?:[a-zA-Z]:[\\/]|\\\\[^\\]+\\[^\\]+)')){throw 'AcceptFile: нужен абсолютный путь к папке'}
         }else{$path=Join-Path (Get-DiskBase) $id}
-        [pscustomobject]@{id=$id;path=[IO.Path]::GetFullPath($path)}
+        $path=[IO.Path]::GetFullPath($path);Assert-DiskAcceptBase $path
+        [pscustomobject]@{id=$id;path=$path}
     }
 }
+function Assert-DiskAcceptBase([string]$Path) {
+    $full=[IO.Path]::GetFullPath($Path).TrimEnd('\','/')
+    $base=[IO.Path]::GetFullPath((Get-DiskBase)).TrimEnd('\','/')
+    if($full -ieq $base -or $base.StartsWith($full+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw ('AcceptFile: путь содержит корень Disk: '+$Path)}
+}
+function Test-DiskFolderAccepted($Folder,$Existing,[string]$Peer) {
+    $full=[IO.Path]::GetFullPath([string]$Folder.path).TrimEnd('\','/')
+    foreach($other in $Existing){
+        if($other.id -ceq $Folder.id -or ($other.label -ceq $Folder.id -and $Peer -cin @($other.devices|ForEach-Object {$_.deviceID}))){return $true}
+        if($other.path -and [IO.Path]::GetFullPath([string]$other.path).TrimEnd('\','/') -ieq $full){return $true}
+    }
+    return $false
+}
 function Assert-DiskAcceptPath([string]$Path,$Existing) {
-    Assert-DiskPlainPath $Path
+    Assert-DiskAcceptBase $Path;Assert-DiskPlainPath $Path
     if([IO.File]::Exists($Path)){throw ('Путь папки занят файлом: '+$Path)}
-    $full=$Path.TrimEnd('\','/')
+    $full=[IO.Path]::GetFullPath($Path).TrimEnd('\','/')
     foreach($folder in $Existing){
         $other=[IO.Path]::GetFullPath([string]$folder.path).TrimEnd('\','/')
-        if($full -ieq $other -or $full.StartsWith($other+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or $other.StartsWith($full+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw ('Путь пересекается с папкой Syncthing: '+$Path)}
+        if($full -ieq $other){continue}
+        if($full.StartsWith($other+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or $other.StartsWith($full+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw ('Путь пересекается с папкой Syncthing: '+$Path)}
+    }
+}
+function Get-DiskPendingFolderId($Pending,[string]$Name,[string]$Peer) {
+    # REST returns an object keyed by the real Syncthing ID, not by the folder name.
+    $keys=if($Pending -is [Collections.IDictionary]){@($Pending.Keys)}else{@($Pending.PSObject.Properties|ForEach-Object {$_.Name})}
+    foreach($key in $keys){
+        $offer=$Pending.$key.offeredBy.$Peer
+        if($null -ne $offer -and ($key -ceq $Name -or $offer.label -ceq $Name)){return [string]$key}
     }
 }
 function Accept-DiskFolders($Folders,[string]$Peer,[string]$LocalId) {
     $existing=@(Invoke-DiskApi 'config/folders')
-    $wanted=@($Folders|Where-Object {$_.id -cnotin @($existing|ForEach-Object {$_.id})})
+    $wanted=@($Folders|Where-Object {-not (Test-DiskFolderAccepted $_ $existing $Peer)})
     if(-not $wanted.Count){return}
-    # Validate the entire batch before any write. Existing user .stignore rules are never changed.
+    # Validate the entire batch before any write.
     $paths=@($existing)
     foreach($folder in $wanted){Assert-DiskAcceptPath $folder.path $paths;$paths+=@($folder)}
-    $watch=[Diagnostics.Stopwatch]::StartNew()
-    $waiting=@($wanted)
-    while($waiting.Count -and $watch.Elapsed.TotalSeconds -lt 30){
+    $watch=[Diagnostics.Stopwatch]::StartNew();$offers=@{}
+    while($offers.Count -lt $wanted.Count -and $watch.Elapsed.TotalSeconds -lt 30){
         $pending=Invoke-DiskApi 'cluster/pending/folders'
-        $waiting=@($waiting|Where-Object {-not $pending.($_.id).offeredBy.$Peer})
-        if($waiting.Count -and $watch.Elapsed.TotalSeconds -lt 30){Start-Sleep -Milliseconds 500}
+        foreach($folder in $wanted){$id=Get-DiskPendingFolderId $pending $folder.id $Peer;if($id){$offers[$folder.id]=$id}}
+        if($offers.Count -lt $wanted.Count -and $watch.Elapsed.TotalSeconds -lt 30){Start-Sleep -Milliseconds 500}
     }
     foreach($folder in $wanted){
         # A person may accept an offer in Tray while we wait. Preserve that registration as well.
         $existing=@(Invoke-DiskApi 'config/folders')
-        if($folder.id -cin @($existing|ForEach-Object {$_.id})){continue}
+        if(Test-DiskFolderAccepted $folder $existing $Peer){continue}
+        $id=$offers[$folder.id]
+        if($id -and @($existing|Where-Object {$_.id -ceq $id}).Count){continue}
         Assert-DiskAcceptPath $folder.path $existing
-        [void](Invoke-DiskApi 'config/folders' POST @{id=$folder.id;label=$folder.id;path=$folder.path;type='sendreceive';devices=@(@{deviceID=$LocalId},@{deviceID=$Peer})})
+        if(-not $id){
+            $id=$folder.id;$message='Сервер не предложил папку '+$folder.id+' за 30 с; создаю локальную папку с ID '+$id
+            Write-DiskProgress $message;Write-DiskLog $message
+        }
+        [void](Invoke-DiskApi 'config/folders' POST @{id=$id;label=$folder.id;path=$folder.path;type='sendreceive';devices=@(@{deviceID=$LocalId},@{deviceID=$Peer})})
     }
 }
 function Set-DiskServerDevice([string]$Peer) {
