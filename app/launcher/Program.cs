@@ -77,7 +77,7 @@ namespace RemoteAgents.Launcher
                             owned = WaitMutex(mutex, 0);
                             string target = Path.Combine(home, Product.ExeName);
                             bool external = !Path.GetFullPath(Exe).Equals(target, StringComparison.OrdinalIgnoreCase);
-                            bool command = args.Any(a => new[] { "--exit", "--uninstall", "--logs", "--rollback", "--restart-components", "--check-updates", "--settings", "--disk-shell" }.Contains(a));
+                            bool command = args.Any(a => new[] { "--exit", "--uninstall", "--logs", "--rollback", "--restart-components", "--check-updates", "--settings" }.Contains(a));
                             // --tray with --home is also the isolated development/smoke entry point.
                             bool install = external && !command && !(args.Contains("--tray") && args.Contains("--home"));
                             // First setup owns a visible wizard before extraction, selftest or binary downloads.

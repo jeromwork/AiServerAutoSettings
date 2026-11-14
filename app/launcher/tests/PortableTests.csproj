@@ -37,15 +37,7 @@
     <Compile Include="DiskTreeTests.cs" />
     <Compile Include="DiskChoiceTests.cs" />
     <Compile Include="DiskFoldersModelTests.cs" />
-    <Compile Include="DiskExplorerMetadataTests.cs" />
-    <Compile Include="DiskShellTests.cs" />
-    <Compile Include="../DiskShellModel.cs" />
-    <Compile Include="../DiskEvictionSafety.cs" />
-    <Compile Include="../DiskExplorerPresentation.cs" />
-    <Compile Include="../DiskExplorerMetadata.cs" />
-    <Compile Include="../DiskExplorerRegistry.cs" />
     <Compile Include="../DiskSyncMonitor.cs" />
-    <Compile Include="../DiskExplorerObservation.cs" />
     <Compile Include="../DiskSyncStatus.cs" Link="DiskSyncStatus.cs" />
     <Compile Include="../DiskFoldersModel.cs" Link="DiskFoldersModel.cs" />
     <Compile Include="LocalFoldersTests.cs" />

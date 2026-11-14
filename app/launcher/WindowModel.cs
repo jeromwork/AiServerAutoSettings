@@ -27,7 +27,7 @@ namespace RemoteAgents.Launcher
         }
         internal static bool ShouldShow(string[] args)
         {
-            if (args.Any(a => new[] { "--exit", "--uninstall", "--identify", "--install-stop", "--restart-components", "--rollback", "--logs", "--check-updates", "--disk-shell" }.Contains(a))) return false;
+            if (args.Any(a => new[] { "--exit", "--uninstall", "--identify", "--install-stop", "--restart-components", "--rollback", "--logs", "--check-updates" }.Contains(a))) return false;
             if (args.Any(a => new[] { "--show", "--started", "--settings" }.Contains(a))) return true;
             return !args.Contains("--tray") && !args.Contains("--after-update") && !args.Contains("--setup-check");
         }
@@ -57,9 +57,6 @@ namespace RemoteAgents.Launcher
         internal static bool TryEnter(Mutex installer, string[] args, out bool owned)
         {
             owned = false;
-            // Explorer launches one process per selected item. Commands only forward/start the tray;
-            // contending for the installer lock here drops paths before the pipe batching can see them.
-            if (args.Contains("--disk-shell")) return true;
             try { owned = installer.WaitOne(0); } catch (AbandonedMutexException) { owned = true; }
             return owned;
         }

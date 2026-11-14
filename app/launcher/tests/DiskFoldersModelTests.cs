@@ -85,7 +85,6 @@ namespace RemoteAgents.Launcher
             foreach (string field in new[] { "receiveOnlyChangedFiles", "receiveOnlyChangedBytes", "receiveOnlyTotalItems" }) {
                 s = Snapshot(); f = s.Folders["Фото"]; f.Status[field] = 1;
                 Check(!DiskSyncStatus.Complete(s, f) && DiskSyncStatus.Text(s, f).Contains("локальные изменения"), "receive-only changes cannot show success: " + field);
-                Check(DiskExplorerPresentation.From(s, f, true, false).Kind == DiskExplorerKind.Error, "Explorer warns about receive-only changes: " + field);
                 var changedModel = new DiskFoldersModel(DiskChoice.FromProfile(ConfigBundle.D("disk", ConfigBundle.D("folders", new[] { ConfigBundle.D("path", "Фото", "direction", "receive") }))));
                 changedModel.Sync = s;
                 Check(changedModel.SyncSummary == "Синхронизировано: 0 из 1 папок", "receive-only changes excluded from completed count: " + field);
