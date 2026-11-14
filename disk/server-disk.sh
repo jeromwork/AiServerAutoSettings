@@ -9,6 +9,8 @@ s=Path.home()/'.local/share/remote-disk'; cfg=s/'config.xml'; binary=s/'bin/sync
 a=sys.argv[1:] or ['bootstrap']; action=a[0]
 # systemd-таймер, поставленный прежним install-auto, вызывает reconcile: это та же команда, что bootstrap.
 if action=='reconcile':action='bootstrap'
+# Чтение REST быстрое. PUT папки ждёт перезапуска её движка: на нагруженном сервере это секунды, а папок много.
+API_READ_TIMEOUT,API_WRITE_TIMEOUT=3,30
 # Свой код, потому что Syncthing не знает, что .stignore с нашим прежним шаблоном — не правила пользователя.
 # SHA-256 точных байтов шаблонов, которые мы сами клали в папки: disk/stignore.txt на app/config (395c2cb, b8cfc4e, f79b03f)
 # и список имён Get-DiskIgnores из RemoteDisk.ps1 до 395c2cb. Их правила теперь живут в .stignore-remoteagents.
@@ -168,7 +170,7 @@ def main():
         root=E.parse(cfg).getroot();ports=json.loads((s/'ports.json').read_text());key=root.findtext('gui/apikey');http=urllib.request.build_opener(urllib.request.ProxyHandler({}))
         def api(route,method='GET',body=None):
             req=urllib.request.Request(f"http://127.0.0.1:{ports['gui']}/rest/{route}",headers={'X-API-Key':key,'Content-Type':'application/json'},method=method,data=None if body is None else json.dumps(body).encode())
-            with http.open(req,timeout=3) as r:return json.loads(r.read() or b'{}')
+            with http.open(req,timeout=API_READ_TIMEOUT if method=='GET' else API_WRITE_TIMEOUT) as r:return json.loads(r.read() or b'{}')
         def ready():
             try:return api('system/status')['myID']
             except Exception:return None

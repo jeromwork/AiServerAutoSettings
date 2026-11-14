@@ -3,6 +3,8 @@
 import base64
 import contextlib
 import hashlib
+import http.client
+import http.server
 import io
 import json
 import os
@@ -13,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -245,6 +248,53 @@ def raiser(error):
     def raise_it(*args, **kwargs):
         raise error
     return raise_it
+
+
+class SlowFolderWrites:
+    """Reverse proxy in front of the Syncthing REST that holds back PUT of a folder, like a loaded server does."""
+    def __init__(self, target_port, delay):
+        outer = self
+        self.held = 0
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = 'HTTP/1.0'
+
+            def forward(self):
+                length = int(self.headers.get('Content-Length') or 0)
+                body = self.rfile.read(length) if length else None
+                if self.command == 'PUT' and self.path.startswith('/rest/config/folders/'):
+                    outer.held += 1
+                    time.sleep(delay)
+                upstream = http.client.HTTPConnection('127.0.0.1', target_port, timeout=30)
+                try:
+                    upstream.request(self.command, self.path, body=body, headers={
+                        k: v for k, v in self.headers.items() if k.lower() not in ('host', 'connection')})
+                    response = upstream.getresponse()
+                    data = response.read()
+                finally:
+                    upstream.close()
+                self.send_response(response.status)
+                self.send_header('Content-Type', response.getheader('Content-Type', 'application/json'))
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            do_GET = do_PUT = do_POST = do_PATCH = do_DELETE = forward
+
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_):
+        self.server.shutdown()
+        self.server.server_close()
 
 
 class ServerTests(unittest.TestCase):
@@ -621,6 +671,21 @@ class ServerHardeningTests(unittest.TestCase):
             t.server(side, 'bootstrap')
             self.assertEqual([(p, p.read_bytes(), p.stat().st_mtime_ns, stat.S_IMODE(p.stat().st_mode)) for p in files],
                              before)
+
+    def test_slow_folder_updates_do_not_fail_registration(self):
+        with Stand(2) as t:
+            a, b = t.sides
+            (a['home'] / 'Disk/Slow').mkdir(parents=True)
+            t.server(a, 'bootstrap')
+            # A loaded server needs seconds to apply one folder: longer than the old 3 s limit, far below the new one.
+            with SlowFolderWrites(int(a['gui']), delay=4) as proxy:
+                ports = a['state'] / 'ports.json'
+                ports.write_text(json.dumps(dict(json.loads(ports.read_text()), gui=proxy.port)))
+                started = time.monotonic()
+                t.server(a, 'add-device', dict(deviceId=b['deviceId'], deviceName='Laptop'))
+                self.assertGreaterEqual(time.monotonic() - started, 4)
+                self.assertEqual(proxy.held, 1)
+            self.assertEqual({d['deviceID'] for d in t.folder(a, 'Slow')['devices']}, {a['deviceId'], b['deviceId']})
 
 
 if __name__ == '__main__':
