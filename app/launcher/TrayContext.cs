@@ -409,9 +409,11 @@ namespace RemoteAgents.Launcher
         }
         // First start of a version without the Explorer integration: its menus and icons are taken away once, in the background.
         // A failure only reaches the journal (the flag file is written on success) and never stops the program.
+        // Only the installed program does it: an isolated --home (tests, smoke runs) must not touch this computer's Explorer settings.
         void StartLegacyDiskCleanup()
         {
             if (Product.IsVpn || closing || engine.Current.Length == 0 || LegacyDiskCleanup.Done(home)) return;
+            if (!Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome), StringComparison.OrdinalIgnoreCase)) return;
             string bundle = engine.Folder(engine.Current);
             Task.Run(() => LegacyDiskCleanup.Run(home, bundle, (exe, args) => External.Run(exe, args, bundle, null, 120000, 1024 * 1024, stop.Token), log.Write));
         }
