@@ -1,23 +1,88 @@
 #!/usr/bin/env python3
 """Server contracts against real Syncthing in disposable HOME directories."""
 import base64
+import contextlib
+import hashlib
+import http.client
+import http.server
+import io
 import json
 import os
 from pathlib import Path
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from unittest import mock
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as E
+import zlib
 
 HERE = Path(__file__).resolve().parent
 HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 ARCHIVE_NAME = 'syncthing-linux-amd64-v2.1.7.tar.gz'
+
+# Прежние шаблоны .stignore, которые наш код сам клал в папки (байт в байт). Три из них — disk/stignore.txt на app/config
+# (git show <коммит>:disk/stignore.txt, zlib+base64); четвёртый собирается из списка имён Get-DiskIgnores в
+# disk/RemoteDisk.ps1 до коммита 395c2cb. Их SHA-256 лежат в PREVIOUS_TEMPLATES самого server-disk.sh.
+OLD_TEMPLATES_ZLIB = {
+    '395c2cb': (
+        'eNpV0T1OwzAYBuC9p8gIFU3VokrAwsIJuEDl5Pto3Ti28U9pt7YMDAyImyBBpQpRuIJ9I5LY'
+        'aWHK8/rndeL0+8ktlsLgDdXFVeL2bpu4H7f1K7d1H+7Nv7qvxK+r8FkP+Y1/Ttwu8Rv3fZb4'
+        'p/qZuPdqet/s2fmVf2yWrf1L5+SanqbI590gLkuVB8qlpK05mkhizTSdacGblCsE5IYSpkOB'
+        'xmrIxEBhrDQ5GGE4Gg0ujzmHP7MHd9MCl0dpIxTGOCt0lLxoMRi2uls0YiInLJVKSFSGYtiR'
+        'TqgJ0HoakAvARSQjFsIhqRGChT28WjAuBVgWS+bIQajYpwgwbG9nEcu5bSWskTY6J/m0bbcq'
+        'E4FAlBnXp8VFi/AymaUMGgHVocAQNcFAkc3CxYs5KjKJrRSQBM11/VnhT3FQgkJPQxFviIlJ'
+        'lL5n1OC/cB4TZAf0Hgg7Bj0t22BLGZmRovMLvwzliA=='
+    ),
+    'b8cfc4e': (
+        'eNptks1OGzEUhfd5Ci8pKjOCCql0w4ZlV32ByDO+JM54bOOfIewgrdRKqKr6JlEhQFsCr2C/'
+        'ER7bkxSpq/nOte+5Y/uUJfoErTBwQnXzAbm1WyH37Fb+0q3crVv6n+4R+asg/vQlv/DXyD0g'
+        'v3BPb5H/2n+RuwnL69jz4C/957jtyv8Y7RzTNwXwbjcRl62qE8oLSQfmYDJia6bFTAseVa2A'
+        'ADcUM50MNISSyYKSsdJ4w0AODg/3j7a6Jv+sbni3aOBiS9oIBVnOGp1Jvh9g/2Cg03kkJmrM'
+        'CqmEBGUopI5iQk0CracJakFgnpFhS9KQwgjBUg8PG8atIJZlkw44ESr7KUwYDLczz+bcDiSs'
+        'kTZzjevp4G5VJRISrMy4n5Y3zdPPVJYyEolQnQwMVhNIKKpZunjRgcKT7EoJ4ESd7o+VXooT'
+        'JSjZ06TJN8TEJJM+Y9TAK/EuK1JtYO8cs63Q03YQtpUZK9yMyhJ9xAp3wEI4793S3cSE3cXE'
+        'rf11iKv/Esq/3d+UzJDT7/4bcr9Q/7jhFCHOIZhPMcELt/x/xOPEMneUWMrXhVOFWzgXqhm9'
+        'AFv1MvM='
+    ),
+    'f79b03f': (
+        'eNptk0tu2zAQhvc+BZdt0EhIigB9LLrpsqtewKBFxqZFiSxJOc4ucQq0QPpAL9BewYij1E1s'
+        '9wrkjTp8yI6BLgR9/2ie1DDP0XtaCUPfMl2+QnZtW2T/2tZd2Nbe2rn7YVfIXYK49yY3c9fI'
+        'LpGb2c0z5D75N7IL+LwOMUt34a6C26X73nvyhj3NaD05iFTLShUR5blkHdfUJMSNGWVjLeqg'
+        'CkUJrQ3DXMcEmoLJJMFIX2m8ZUqOT06OXu50QR593fJBVtLzHWkjFE1yXOpE8kUHR8cdnU4D'
+        'cVFgnkklJFWG0RiRDZmJoPUoQiEInSbkuCGxSGaE4DGmBod+JUjDU5IJrYlQKZ/ChNPudKYp'
+        'ed10JBojm8QFLkZd9kYNRESClen7aslpGpsZNIyTQITpmMBgNaQRxWAcD15MqMLDlJURiiNN'
+        'tB8r/qmaKMHIoSZlOiEuhon0B84M3RPPkyKDLRyeYb4TelR1oqlkwgEue3mO3mGFJ5TDcv62'
+        'c7sIG3YXNm7trmFd3Ucw/7EPcTNhT7+6z8jeIP9zYQpYZ1jMTdjgmZ3/f8VDxTxF5FjKfcOp'
+        'whU9Eyr0Y39CxQ1Er+xDaGPpE/4KRW7guQ2me1/KV16CnIPR+97BBZkhaBCujV25K+jWA/h9'
+        'cd/A2PrhXkPz4L3ZG5JQXRohM1azOAFcMV9wAbnbrv9HTr1/z2Odfw=='
+    ),
+}
+LEGACY_IGNORE_NAMES = (
+    '.env*', 'env.example', '.npmrc', '.pypirc', '.netrc', 'auth.json', '*credential*', '*token*', '*secret*',
+    '*private*', 'id_*', '.git', '.tools', 'ssh', '.ssh', '.codex', '.claude', 'node_modules', 'vendor', 'deps',
+    'dependencies', '.gradle', '.next', '.cache', '.stversions', '.stfolder', '.stignore', 'build', 'dist', 'target',
+    'obj', 'bin', '.dart_tool', '.nuxt', '.output', '.turbo', '.cxx', 'coverage', 'logs', 'log', 'cache', 'caches',
+    'db', 'database', 'databases', 'backup', 'backups', '*backup*', '*dump*', 'uploads', 'upload', 'storage',
+    'android-sdk', '.idea', '.vscode', 'local.properties', 'google-services*.json', 'GoogleService-Info.plist',
+    'config.php', '*.pem', '*.key', '*.keystore', '*.jks', '*.p8', '*.p12', '*.pfx', '*.sqlite', '*.sqlite3', '*.db',
+    '*.db3', '*.bak', '*.backup', '*.dump', '*.log', '*.zip', '*.tar', '*.gz', '*.exe', '*.dll', '*.so', '*.bin',
+)
+
+
+def old_templates():
+    """Byte-exact previous templates by label: three from git history and the one before the Syncthing rewrite."""
+    result = {label: zlib.decompress(base64.b64decode(blob)) for label, blob in OLD_TEMPLATES_ZLIB.items()}
+    result['legacy'] = ('\n'.join('(?i)' + name for name in LEGACY_IGNORE_NAMES) + '\n').encode()
+    return result
 
 
 def archive_path():
@@ -149,6 +214,87 @@ with (Path.home()/'systemctl-calls').open('a') as f:f.write(json.dumps(sys.argv[
             if status['state'] != 'idle' or status['needTotalItems'] or status['pullErrors']:
                 return False
         return True
+
+
+@contextlib.contextmanager
+def server_helpers(home):
+    """Only the helper definitions of server-disk.sh (everything before main), with HOME at a disposable directory."""
+    source = (HERE / 'server-disk.sh').read_text().split("<<'PY'\n", 1)[1].split('def main():', 1)[0]
+    namespace = {}
+    with mock.patch.dict(os.environ, HOME=str(home), REMOTE_DISK_SCRIPT_DIR=str(HERE)):
+        exec(compile(source, 'server-disk-helpers', 'exec'), namespace)
+        yield namespace
+
+
+class FakeRest:
+    """Just enough of the Syncthing REST for reconcile(): records which folders were written."""
+    def __init__(self):
+        self.puts = []
+
+    def __call__(self, route, method='GET', body=None):
+        if (method, route) == ('GET', 'config/folders'):
+            return []
+        if (method, route) == ('GET', 'config/devices'):
+            return [dict(deviceID='SERVER'), dict(deviceID='PEER')]
+        if (method, route) == ('GET', 'config/defaults/folder'):
+            return dict(devices=[], versioning={}, maxConflicts=10, type='sendreceive')
+        if method == 'PUT' and route.startswith('config/folders/'):
+            self.puts.append(urllib.parse.unquote(route.rsplit('/', 1)[1]))
+            return {}
+        raise AssertionError((method, route))
+
+
+def raiser(error):
+    def raise_it(*args, **kwargs):
+        raise error
+    return raise_it
+
+
+class SlowFolderWrites:
+    """Reverse proxy in front of the Syncthing REST that holds back PUT of a folder, like a loaded server does."""
+    def __init__(self, target_port, delay):
+        outer = self
+        self.held = 0
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = 'HTTP/1.0'
+
+            def forward(self):
+                length = int(self.headers.get('Content-Length') or 0)
+                body = self.rfile.read(length) if length else None
+                if self.command == 'PUT' and self.path.startswith('/rest/config/folders/'):
+                    outer.held += 1
+                    time.sleep(delay)
+                upstream = http.client.HTTPConnection('127.0.0.1', target_port, timeout=30)
+                try:
+                    upstream.request(self.command, self.path, body=body, headers={
+                        k: v for k, v in self.headers.items() if k.lower() not in ('host', 'connection')})
+                    response = upstream.getresponse()
+                    data = response.read()
+                finally:
+                    upstream.close()
+                self.send_response(response.status)
+                self.send_header('Content-Type', response.getheader('Content-Type', 'application/json'))
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            do_GET = do_PUT = do_POST = do_PATCH = do_DELETE = forward
+
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_):
+        self.server.shutdown()
+        self.server.server_close()
 
 
 class ServerTests(unittest.TestCase):
@@ -376,6 +522,170 @@ class ServerTests(unittest.TestCase):
                 if hop:
                     self.assertEqual(result['outbounds'][1]['detour'], 'hop-ssh')
             self.assertEqual(source.read_bytes(), before)
+
+
+class ServerHardeningTests(unittest.TestCase):
+    def test_reconcile_stays_an_alias_of_bootstrap_for_installed_timers(self):
+        with Stand(2) as t:
+            a, b = t.sides
+            t.server(a, 'add-device', dict(deviceId=b['deviceId'], deviceName='Laptop'))
+            (a['home'] / 'Disk/Fresh').mkdir(parents=True)
+            # Word for word the ExecStart of the unit that the earlier install-auto wrote on the real server.
+            result = run(['bash', '-c', 'bash "$HOME/.local/share/remote-disk/server-disk.sh" reconcile'], a['env'])
+            self.assertEqual(json.loads(result.stdout)['deviceId'], a['deviceId'])
+            self.assertEqual({d['deviceID'] for d in t.folder(a, 'Fresh')['devices']}, {a['deviceId'], b['deviceId']})
+
+    def test_one_broken_folder_neither_stops_discovery_nor_registration(self):
+        with Stand(2) as t:
+            a, b = t.sides
+            disk = a['home'] / 'Disk'
+            (disk / 'A_dir_ignore/.stignore').mkdir(parents=True)  # OSError: .stignore is a directory
+            (disk / 'B_link_ignore').mkdir()
+            (disk / 'B_link_ignore/rules.txt').write_text('shared-rules\n')
+            (disk / 'B_link_ignore/.stignore').symlink_to('rules.txt')  # ValueError: links are refused
+            (disk / 'C_ok').mkdir()
+            for action, data in (('bootstrap', None), ('add-device', dict(deviceId=b['deviceId'], deviceName='Laptop'))):
+                with self.subTest(action=action):
+                    result = t.server(a, action, data, ok=False)
+                    self.assertEqual(result.returncode, 0, result.stderr.decode())
+                    self.assertEqual(json.loads(result.stdout), {} if data else
+                                     dict(deviceId=a['deviceId'], listen=a['listen']))
+                    error = result.stderr.decode()
+                    self.assertIn('RemoteDisk: A_dir_ignore: ', error)
+                    self.assertIn('RemoteDisk: B_link_ignore: ', error)
+                    self.assertNotIn('C_ok', error)
+            self.assertEqual({f['id'] for f in t.api(a, 'config/folders')}, {'C_ok'})
+            self.assertEqual({d['deviceID'] for d in t.folder(a, 'C_ok')['devices']}, {a['deviceId'], b['deviceId']})
+            # The broken folders stay exactly as the user left them.
+            self.assertTrue((disk / 'A_dir_ignore/.stignore').is_dir())
+            self.assertEqual(os.readlink(disk / 'B_link_ignore/.stignore'), 'rules.txt')
+            self.assertFalse((disk / 'B_link_ignore/.stignore-remoteagents').exists())
+
+    def test_every_error_class_stays_inside_its_folder(self):
+        errors = {'ValueError': ValueError('Недопустимое имя'),
+                  'OSError': PermissionError(13, 'Permission denied'),
+                  'REST': urllib.error.URLError('connection refused'),
+                  'SubprocessError': subprocess.TimeoutExpired(['git'], 5)}
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in 'ABC':
+                (Path(tmp) / 'Disk' / name).mkdir(parents=True)
+            for label, error in errors.items():
+                with self.subTest(error=label), server_helpers(tmp) as ns:
+                    def ignores(path, write=True):
+                        if path.name == 'B':
+                            raise error
+                    ns['ignores'] = ignores
+                    ns['exclude_git'] = lambda path: None
+                    rest, stderr = FakeRest(), io.StringIO()
+                    with contextlib.redirect_stderr(stderr):
+                        ns['reconcile'](rest, 'SERVER')
+                    self.assertEqual(rest.puts, ['A', 'C'])
+                    self.assertRegex(stderr.getvalue(), r'^RemoteDisk: B: .+\n$')
+
+    def test_git_trouble_never_blocks_sharing(self):
+        troubles = {'git timeout': ('git', subprocess.TimeoutExpired(['git'], 5)),
+                    'git is missing': ('git', FileNotFoundError(2, 'No such file or directory', 'git')),
+                    'linked exclude file': ('exclude_git', ValueError('Символические ссылки запрещены'))}
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / 'Disk/Repo').mkdir(parents=True)
+            for label, (name, error) in troubles.items():
+                with self.subTest(trouble=label), server_helpers(tmp) as ns:
+                    ns['ignores'] = lambda path, write=True: None
+                    ns[name] = raiser(error)
+                    rest, stderr = FakeRest(), io.StringIO()
+                    with contextlib.redirect_stderr(stderr):
+                        ns['reconcile'](rest, 'SERVER')
+                    # Git exclusions are cosmetics: the folder is still offered, the cause is reported.
+                    self.assertEqual(rest.puts, ['Repo'])
+                    self.assertRegex(stderr.getvalue(), r'^RemoteDisk: Repo: .+\n$')
+
+    def test_registration_survives_a_failing_discovery(self):
+        with Stand(2) as t:
+            a, b = t.sides
+            elsewhere = a['home'] / 'elsewhere'
+            elsewhere.mkdir()
+            (a['home'] / 'Disk').symlink_to(elsewhere, target_is_directory=True)
+            result = t.server(a, 'add-device', dict(deviceId=b['deviceId'], deviceName='Laptop'), ok=False)
+            self.assertEqual((result.returncode, json.loads(result.stdout)), (0, {}), result.stderr.decode())
+            self.assertIn('Символические ссылки запрещены', result.stderr.decode())
+            self.assertIn(b['deviceId'], {d['deviceID'] for d in t.api(a, 'config/devices')})
+            # Without a device to keep, bootstrap still reports the cause as a failure.
+            broken = t.server(a, 'bootstrap', ok=False)
+            self.assertEqual(broken.returncode, 1)
+            self.assertIn('Символические ссылки запрещены', broken.stderr.decode())
+
+    def test_script_knows_exactly_our_four_previous_templates(self):
+        old = old_templates()
+        self.assertEqual(len(old), 4)
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            self.assertEqual(set(ns['PREVIOUS_TEMPLATES']), {hashlib.sha256(b).hexdigest() for b in old.values()})
+
+    def test_user_ignore_keeps_its_mode_and_only_our_old_templates_are_replaced(self):
+        old = old_templates()
+        include = b'#include .stignore-remoteagents\n'
+        template = (HERE / 'stignore.txt').read_bytes()
+        latest = old['f79b03f']
+        with Stand(1) as t:
+            side = t.sides[0]
+            disk = side['home'] / 'Disk'
+
+            def seed(name, content, mode, file='.stignore'):
+                (disk / name).mkdir(parents=True)
+                (disk / name / file).write_bytes(content)
+                os.chmod(disk / name / file, mode)
+
+            def mode(name, file='.stignore'):
+                return stat.S_IMODE((disk / name / file).stat().st_mode)
+
+            seed('UserRules', b'my-rules\n', 0o664)
+            for label, content in old.items():
+                seed('Old-' + label, content, 0o640)
+            # Anything that is not byte-for-byte one of our templates belongs to the user.
+            seed('OldPlusUser', latest + b'my-extra.txt\n', 0o600)
+            seed('OldCRLF', latest.replace(b'\n', b'\r\n'), 0o600)
+            seed('OldBOM', b'\xef\xbb\xbf' + latest, 0o600)
+            seed('Managed', b'stale\n', 0o644, '.stignore-remoteagents')
+            result = t.server(side, 'bootstrap', ok=False)
+            self.assertEqual((result.returncode, result.stderr), (0, b''))
+            self.assertEqual((disk / 'UserRules/.stignore').read_bytes(), b'my-rules\n' + include)
+            self.assertEqual(mode('UserRules'), 0o664)
+            for label in old:
+                with self.subTest(replaced=label):
+                    name = 'Old-' + label
+                    self.assertEqual((disk / name / '.stignore').read_bytes(), include)
+                    self.assertEqual(mode(name), 0o640)
+                    self.assertEqual((disk / name / '.stignore-remoteagents').read_bytes(), template)
+                    rules = t.api(side, 'db/ignores?folder=' + name)
+                    self.assertEqual((rules['ignore'], rules['error']), (['#include .stignore-remoteagents'], None))
+                    self.assertIn('(?i)/.stignore-remoteagents', rules['expanded'])
+            self.assertEqual((disk / 'OldPlusUser/.stignore').read_bytes(), latest + b'my-extra.txt\n' + include)
+            self.assertEqual((disk / 'OldCRLF/.stignore').read_bytes(),
+                             latest.replace(b'\n', b'\r\n') + include.replace(b'\n', b'\r\n'))
+            self.assertEqual((disk / 'OldBOM/.stignore').read_bytes(), b'\xef\xbb\xbf' + latest + include)
+            self.assertEqual({mode(n) for n in ('OldPlusUser', 'OldCRLF', 'OldBOM')}, {0o600})
+            self.assertEqual((disk / 'Managed/.stignore-remoteagents').read_bytes(), template)
+            self.assertEqual(mode('Managed', '.stignore-remoteagents'), 0o644)
+            # A repeated run changes nothing: neither bytes, nor modification times, nor modes.
+            files = sorted(disk.glob('*/.stignore*'))
+            before = [(p, p.read_bytes(), p.stat().st_mtime_ns, stat.S_IMODE(p.stat().st_mode)) for p in files]
+            t.server(side, 'bootstrap')
+            self.assertEqual([(p, p.read_bytes(), p.stat().st_mtime_ns, stat.S_IMODE(p.stat().st_mode)) for p in files],
+                             before)
+
+    def test_slow_folder_updates_do_not_fail_registration(self):
+        with Stand(2) as t:
+            a, b = t.sides
+            (a['home'] / 'Disk/Slow').mkdir(parents=True)
+            t.server(a, 'bootstrap')
+            # A loaded server needs seconds to apply one folder: longer than the old 3 s limit, far below the new one.
+            with SlowFolderWrites(int(a['gui']), delay=4) as proxy:
+                ports = a['state'] / 'ports.json'
+                ports.write_text(json.dumps(dict(json.loads(ports.read_text()), gui=proxy.port)))
+                started = time.monotonic()
+                t.server(a, 'add-device', dict(deviceId=b['deviceId'], deviceName='Laptop'))
+                self.assertGreaterEqual(time.monotonic() - started, 4)
+                self.assertEqual(proxy.held, 1)
+            self.assertEqual({d['deviceID'] for d in t.folder(a, 'Slow')['devices']}, {a['deviceId'], b['deviceId']})
 
 
 if __name__ == '__main__':
