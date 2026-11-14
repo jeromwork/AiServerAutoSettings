@@ -446,17 +446,42 @@
               "type": "string",
               "enum": [
                 "all"
-              ]
+              ],
+              "deprecated": true,
+              "description": "Прежний формат: игнорируется, сервер сам предлагает все свои папки"
             },
             {
               "type": "array",
               "items": {
                 "oneOf": [
                   {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "pattern": "^[^/\\\\<>:\"|?*\\x00-\\x1f]+$(?![\\s\\S])"
+                      },
+                      "path": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 1024,
+                        "pattern": "^(?:[A-Za-z]:[\\\\/]|[\\\\/]{2}[^\\\\/:<>\"|?*\\x00-\\x1f]+[\\\\/][^\\\\/:<>\"|?*\\x00-\\x1f]+(?:[\\\\/]|$))[^<>:\"|?*\\x00-\\x1f]*$(?![\\s\\S])"
+                      }
+                    },
+                    "additionalProperties": false,
+                    "required": [
+                      "id"
+                    ]
+                  },
+                  {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 1024,
-                    "pattern": "^[^\\\\<>:\"|?*\\x00-\\x1f]+$(?![\\s\\S])"
+                    "pattern": "^[^\\\\<>:\"|?*\\x00-\\x1f]+$(?![\\s\\S])",
+                    "deprecated": true,
+                    "description": "Прежний формат: путь заменяется папкой верхнего уровня"
                   },
                   {
                     "type": "object",
@@ -479,7 +504,9 @@
                     "additionalProperties": false,
                     "required": [
                       "path"
-                    ]
+                    ],
+                    "deprecated": true,
+                    "description": "Прежний формат: берётся папка верхнего уровня, направление игнорируется. Пишите {\"id\": \"Проект\"}"
                   }
                 ]
               },
@@ -518,7 +545,9 @@
             "required": [
               "path",
               "remote"
-            ]
+            ],
+            "deprecated": true,
+            "description": "Прежний формат: папки вне Disk больше не подключаются из конфига, добавьте их в Syncthing Tray"
           },
           "maxItems": 256,
           "uniqueItems": true

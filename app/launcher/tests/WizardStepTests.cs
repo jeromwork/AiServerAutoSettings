@@ -7,33 +7,12 @@ using System.Threading;
 
 namespace RemoteAgents.Launcher
 {
-    internal static class DiskTreeTests
+    internal static class WizardStepTests
     {
         static int count;
         static void Check(bool value, string message) { if (!value) throw new Exception(message); count++; }
         internal static void Run()
         {
-            DiskFoldersModelTests.Run();
-            DiskExplorerMetadataTests.Run();
-            DiskShellTests.Run();
-            LocalFoldersTests.Run();
-            var s = new DiskTreeSelection(new[] {"project"});
-            Check(s.Paths.SequenceEqual(new[] {"project"}) && s.Includes("project/unopened/deep"), "unopened folder is recursive without inventory");
-            s.Level("project", new[] {"project/src", "project/docs", "project/readme"}, false);
-            s.Level("project/src", new[] {"project/src/a", "project/src/b"}, false);
-            s.Set("project/src/a", false);
-            Check(s.Paths.SequenceEqual(new[] {"project/docs", "project/readme", "project/src/b"}), "deselect nested file preserves unopened siblings");
-            Check(s.Partial("project") && s.Partial("project/src"), "partial markers use saved selection");
-            s.Set("project", true);Check(s.Paths.SequenceEqual(new[] {"project"}), "reselect collapses descendants");
-            s.Set("project", false);Check(s.Paths.Length==0, "unchecked unopened parent clears descendants");
-            s = new DiskTreeSelection(new[] {"project/notLoaded/deep.txt", "absent/project"});
-            s.Level("project", new[] {"project/notLoaded"}, false);
-            Check(s.Partial("project") && s.Paths.Length==2, "saved deep and absent paths survive initial load");
-            s.Set("project/notLoaded", false);Check(s.Paths.SequenceEqual(new[] {"absent/project"}), "hidden descendant deselected without fetching");
-            s = new DiskTreeSelection(new[] {"project"});s.Level("project", new[] {"project/a"}, true);
-            bool refused=false;try{s.Set("project/a", false);}catch(IOException){refused=true;}
-            Check(refused && s.Paths.SequenceEqual(new[] {"project"}), "truncation cannot silently unselect omitted siblings");
-            s.Set("project",false);Check(s.Paths.Length==0, "truncated parent can be unchecked as a whole");
             int[] order={0,1,4,2,3,6,5,7};var done=new[]{true,false,false,false,true,false,false};
             Check(WizardStep.CanOpen(0,1,true,done,order) && WizardStep.CanOpen(4,1,true,done,order), "first run reopens completed sections");
             Check(WizardStep.CanOpen(1,4,true,done,order) && !WizardStep.CanOpen(2,1,true,done,order) && !WizardStep.CanOpen(7,1,true,done,order), "first run blocks sections after the first unfinished one");
@@ -42,9 +21,9 @@ namespace RemoteAgents.Launcher
             // A section waiting for a detached server install (⏳) does not block the next ones.
             var before=new[]{true,true,true,false,true,false,false};var passable=WizardStep.Passable(before,new[]{3});
             Check(WizardStep.CanOpen(6,3,true,passable,order) && !WizardStep.CanOpen(5,3,true,passable,order) && !WizardStep.CanOpen(6,3,true,before,order), "waiting Happier lets the next sections open");
-            // Budgets cover the slowest child: Account.ps1 300 s, disk install+apply 900+900 s. Server installs are
+            // Budgets cover the slowest child: Account.ps1 300 s, Install-RemoteDisk.ps1 900 s. Server installs are
             // detached: Server/Account calls stay short, status polling is one short SSH call.
-            Check(WizardStep.Timeout("Server")>=(100+60+120+120)*1000 && WizardStep.Timeout("Server")<=600*1000 && WizardStep.Timeout("Account")>=(300+60+60)*1000 && WizardStep.Timeout("Account")<=600*1000 && WizardStep.Timeout("ResumeAccount")==WizardStep.Timeout("Account") && WizardStep.Timeout("Operation")<=60*1000 && WizardStep.Timeout("Disk")>=(120+900+900)*1000, "step budgets cover their slowest child; long server installs are not waited for");
+            Check(WizardStep.Timeout("Server")>=(100+60+120+120)*1000 && WizardStep.Timeout("Server")<=600*1000 && WizardStep.Timeout("Account")>=(300+60+60)*1000 && WizardStep.Timeout("Account")<=600*1000 && WizardStep.Timeout("ResumeAccount")==WizardStep.Timeout("Account") && WizardStep.Timeout("Operation")<=60*1000 && WizardStep.Timeout("Disk")>=(60+900)*1000 && WizardStep.Timeout("Disk")<=1200*1000, "step budgets cover their slowest child; long server installs are not waited for");
             // Reference vector: Python base64.b32encode(bytes(range(1,33))); server-account.mjs normalizeKey accepts it.
             Check(HappierKey.Format(Enumerable.Range(1,32).Select(i=>(byte)i).ToArray())=="AEBAG-BAFAY-DQQCI-KBMGA-2DQPC-AIREE-YUCUL-BOGAZ-DINRY-HI6D4-QA", "Happier key is grouped base32");
             // «Установка» list: stage k/n and elapsed time, waiting account, failure reason; hidden when all done.
@@ -63,7 +42,7 @@ namespace RemoteAgents.Launcher
                 Check(ServerOperations.Parse(allDone,new[]{"happier"},true)[1].State=="running", "finished Happier: account connection runs by itself");
             } finally { if(Directory.Exists(dir))Directory.Delete(dir,true); }
             Check(HappierKey.Create().Replace("-","").Length==52 && HappierKey.Create()!=HappierKey.Create(), "new keys are random 32-byte values");
-            Check(WizardStep.Timeout("Connection")>=600*1000 && WizardStep.Timeout("Bridge")>=(300+300+120)*1000 && WizardStep.Timeout("Vpn")>420*1000 && WizardStep.Timeout("DiskTree")>=120*1000 && WizardStep.Timeout("Catalog")==120000, "step-specific deadlines");
+            Check(WizardStep.Timeout("Connection")>=600*1000 && WizardStep.Timeout("Bridge")>=(300+300+120)*1000 && WizardStep.Timeout("Vpn")>420*1000 && WizardStep.Timeout("Catalog")==120000, "step-specific deadlines");
             // Real portable processes exercise the exact wait used by External.Run. NativeJob's Windows tree kill is a live check.
             for(int mode=0;mode<2;mode++) {
                 var psi=new ProcessStartInfo("/bin/sleep", "10") {UseShellExecute=false};
@@ -77,7 +56,7 @@ namespace RemoteAgents.Launcher
                     Check(interrupted && timer.ElapsedMilliseconds<2000 && process.HasExited,mode==0?"step timeout is bounded":"step cancellation is bounded");
                 }
             }
-            Console.WriteLine("OK: "+count+" lazy selection / step deadline checks (portable; Windows job kill requires Windows)");
+            Console.WriteLine("OK: "+count+" wizard navigation / server install list / step deadline checks (portable; Windows job kill requires Windows)");
         }
     }
 }

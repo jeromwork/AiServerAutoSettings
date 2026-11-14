@@ -27,11 +27,6 @@ namespace RemoteAgents.Launcher
         long lastTrayClick = -SystemInformation.DoubleClickTime - 1L;
         ConfigWindow mainWindow;
         WindowModel window;
-        DiskExplorerController explorer;
-        DiskShellCommands diskShell;
-        DiskProgressWindow diskProgress;
-        readonly DiskShellBatchQueue diskShellQueue = new DiskShellBatchQueue();
-        bool shellBusy;
         readonly ConfigSyncSchedule syncSchedule = new ConfigSyncSchedule();
         bool syncRunning, accountResuming, serverHealthRunning, syncTaskRetired, syncTaskRetiring;
         DateTime nextSyncTaskRetirement = DateTime.MinValue;
@@ -73,13 +68,12 @@ namespace RemoteAgents.Launcher
                 throw;
             }
             readyForCommands = true;
-            timer.Tick += (s, e) => { Tick(); DrainDiskShell(); }; timer.Start();
-            if (!Product.IsVpn && !firstSetup) InitializeExplorer();
+            timer.Tick += (s, e) => Tick(); timer.Start();
             // The folder choice keeps applying after its window closed; the tray reports the result.
             BackgroundWork.Disk.Changed += () => { try { dispatch.BeginInvoke(new Action(DiskFinished)); } catch (InvalidOperationException) { } };
             dispatch.BeginInvoke(new Action(() => {
                 if (firstSetup) { RunFirstSetup(); return; }
-                Handle(args); DrainCommands(); Tick();
+                Handle(args); DrainCommands(); Tick(); StartLegacyDiskCleanup();
                 if(Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome),StringComparison.OrdinalIgnoreCase)) CheckSetup();
 
             }));
@@ -104,7 +98,7 @@ namespace RemoteAgents.Launcher
             } finally {actionBusy=false;}
             if(closing)return;
             if(FirstInstall.Required(home)){ExitThread();return;}
-            ReloadSettings();icon.Visible=true;readyForCommands=true;if (!Product.IsVpn) InitializeExplorer();ShowMain();
+            ReloadSettings();icon.Visible=true;readyForCommands=true;ShowMain();
             if(Product.IsVpn)Safe(RegisterVpnRun);
             DrainCommands();Tick();
         }
@@ -240,7 +234,7 @@ namespace RemoteAgents.Launcher
         {
             if(Product.IsVpn || !Json.Bool(Json.Map(Json.Get(config.Data,"wizard")),"configured") || !Json.Map(Json.Get(config.Data,"profile")).ContainsKey("server"))return;
             bool connected=Json.Bool(StatusView.Read(home,"transport",maxAgeSec:15),"ok");
-            bool occupied = shellBusy || !syncTaskRetired || syncRunning || actionBusy || busy || closing || operationChecking || BackgroundWork.Disk.Busy || mainWindow != null && mainWindow.IsApplying;
+            bool occupied = !syncTaskRetired || syncRunning || actionBusy || busy || closing || operationChecking || BackgroundWork.Disk.Busy || mainWindow != null && mainWindow.IsApplying;
             if (!syncSchedule.Due(connected, DateTime.UtcNow, occupied)) return;
             syncRunning=true; syncSchedule.Started(DateTime.UtcNow);
             syncSummary="Сверка конфига: выполняется в фоне";
@@ -287,7 +281,6 @@ namespace RemoteAgents.Launcher
             string url = TrayMenuModel.HappierUrl(config.Data, AccountState());
             if (url.Length > 0) Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
         }
-        readonly Image warningImage = SystemIcons.Warning.ToBitmap();
         void RefreshMenu()
         {
             if (icon.ContextMenuStrip == null) {
@@ -298,14 +291,12 @@ namespace RemoteAgents.Launcher
                 } else foreach (var entry in TrayEntries()) {
                     if (entry.Id == "separator") { menu.Items.Add(new ToolStripSeparator()); continue; }
                     string id = entry.Id;
-                    var item = new ToolStripMenuItem(entry.Text) { Enabled = entry.Enabled, ToolTipText = entry.Hint, Image = entry.Warning ? warningImage : null };
+                    var item = new ToolStripMenuItem(entry.Text) { Enabled = entry.Enabled, ToolTipText = entry.Hint };
                     item.Click += (s, e) => Safe(() => {
-                        if (id == "open") ShowMain();
-                        else if (id == "folders") OpenDisk();
-                        else if (id == "progress") ShowDiskProgress();
-                        else if (id == "happier") {
-                            OpenHappier();
-                        } else if (id == "exit") RequestExit();
+                        if (id == "open") OpenHappier();
+                        else if (id == "settings") ShowMain();
+                        else if (id == "disk") OpenDisk();
+                        else if (id == "exit") RequestExit();
                     });
                     menu.Items.Add(item);
                 }
@@ -315,7 +306,7 @@ namespace RemoteAgents.Launcher
                 var entries = TrayEntries();
                 for (int i = 0; i < entries.Length; i++) {
                     if (entries[i].Id == "separator") continue;
-                    var item = icon.ContextMenuStrip.Items[i]; item.Text = entries[i].Text; item.Enabled = entries[i].Enabled; item.ToolTipText = entries[i].Hint; item.Image = entries[i].Warning ? warningImage : null;
+                    var item = icon.ContextMenuStrip.Items[i]; item.Text = entries[i].Text; item.Enabled = entries[i].Enabled; item.ToolTipText = entries[i].Hint;
                 }
             }
             RefreshMain();
@@ -377,7 +368,7 @@ namespace RemoteAgents.Launcher
                 foreach(var runtime in runtimes.Where(r=>!r.Definition.CommandManaged)){bool enabled=Wanted(runtime.Definition);if(runtime.Enabled!=enabled)runtime.SetEnabled(enabled);}
             }catch{log.Write("setup.config.refresh.failed");}
         }
-        void ShowMain(bool folders = false)
+        void ShowMain()
         {
             if (closing) return;
             // During first installation the existing paste/step window remains the only window.
@@ -389,11 +380,10 @@ namespace RemoteAgents.Launcher
             if (mainWindow == null || mainWindow.IsDisposed) {
                 mainWindow = ConfigWindow.Main(home, engine.Folder(engine.Current));
                 mainWindow.MutationConflict = MutationConflict;
-                mainWindow.FolderMutationConflict = () => MutationConflict(mainWindow);
                 mainWindow.HiddenToTray = () => {
                     if (window.CloseToTray()) {
                         Safe(() => Files.Atomic(Path.Combine(home, "state", "tray-hint-shown"), "shown\n"));
-                        icon.ShowBalloonTip(8000, Product.Name, Product.IsVpn ? "Программа работает — значок в трее. Окно: пункт «Открыть»." : "Значок в трее: клик открывает Happier, если адрес задан. Окно: пункт «Открыть».", ToolTipIcon.Info);
+                        icon.ShowBalloonTip(8000, Product.Name, Product.IsVpn ? "Программа работает — значок в трее. Окно: пункт «Открыть»." : "Значок в трее: клик открывает Happier, если адрес задан. Окно программы: пункт «Настройки».", ToolTipIcon.Info);
                     }
                 };
                 mainWindow.ServiceActions(new[] {
@@ -407,7 +397,7 @@ namespace RemoteAgents.Launcher
                     Service("Список путей", () => ScriptCommand("Edit-Transport.ps1", new[] { "-List" }, true))
                 }, tag => ScriptCommand("Set-TransportPath.ps1", tag.Length == 0 ? new[] { "-Auto" } : new[] { "-Tag", tag }, false));
             }
-            window.Show(); RefreshMain(); if (folders) mainWindow.OpenFolders(); ActivateWindow(mainWindow);
+            window.Show(); RefreshMain(); ActivateWindow(mainWindow);
         }
         KeyValuePair<string, Action> Service(string title, Action action)
         { return new KeyValuePair<string, Action>(title, () => Safe(action)); }
@@ -417,20 +407,32 @@ namespace RemoteAgents.Launcher
             if (form.WindowState == FormWindowState.Minimized) form.WindowState = FormWindowState.Normal;
             form.BringToFront(); form.Activate(); SetForegroundWindow(form.Handle);
         }
+        // First start of a version without the Explorer integration: its menus and icons are taken away once, in the background.
+        // A failure only reaches the journal (the flag file is written on success) and never stops the program.
+        // Only the installed program does it: an isolated --home (tests, smoke runs) must not touch this computer's Explorer settings.
+        void StartLegacyDiskCleanup()
+        {
+            if (Product.IsVpn || closing || engine.Current.Length == 0 || LegacyDiskCleanup.Done(home)) return;
+            if (!Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome), StringComparison.OrdinalIgnoreCase)) return;
+            string bundle = engine.Folder(engine.Current);
+            Task.Run(() => LegacyDiskCleanup.Run(home, bundle, (exe, args) => External.Run(exe, args, bundle, null, 120000, 1024 * 1024, stop.Token), log.Write));
+        }
+        // The Disk root in Explorer: accepted folders live there, their state is shown by Syncthing Tray, not by this program.
         void OpenDisk()
         {
-            Open(DiskExplorerController.Root(ConfigProfile.Load(home)));
+            string root = ConfigProfile.DiskRoot(ConfigProfile.Load(home));
+            if (Directory.Exists(root)) { Open(root); return; }
+            MessageBox.Show(mainWindow, "Папка Диска ещё не создана: " + root + "\r\nДиск устанавливается вместе с настройкой сервера («Настройки» → «Конфиг» → «Применить»). Папки сервера принимайте в Syncthing Tray.", Product.Name);
         }
-        string MutationConflict() { return MutationConflict(null); }
-        string MutationConflict(ConfigWindow except)
+        string MutationConflict()
         {
-            string operation = shellBusy ? "команда Проводника" : syncRunning ? "сверка конфига" : busy ? "обновление" : actionBusy ? "настройка компонентов" : accountResuming ? "подключение аккаунта Happier" : mainWindow != null && mainWindow != except && mainWindow.IsApplying ? "применение настроек" : "";
+            string operation = syncRunning ? "сверка конфига" : busy ? "обновление" : actionBusy ? "настройка компонентов" : accountResuming ? "подключение аккаунта Happier" : mainWindow != null && mainWindow.IsApplying ? "применение настроек" : "";
             return WindowModel.Conflict(operation);
         }
-        // Restart/rollback/update stop processes: they also wait for a background folder run (windows do not).
+        // Restart/rollback/update stop processes: they also wait for the background Disk install (windows do not).
         bool AllowMutation()
         {
-            string conflict = MutationConflict(); if (conflict.Length == 0 && BackgroundWork.Disk.Busy) conflict = WindowModel.Conflict("подключение папок");
+            string conflict = MutationConflict(); if (conflict.Length == 0 && BackgroundWork.Disk.Busy) conflict = WindowModel.Conflict("установка Диска");
             if (conflict.Length == 0) return !closing;
             if (!closing) MessageBox.Show(mainWindow, conflict, Product.Name);
             return false;
@@ -444,7 +446,6 @@ namespace RemoteAgents.Launcher
                 ServerHealthView.Summary(ServerHealthView.Read(home)),
                 StatusView.Line("Управление компьютером (мост)", StatusView.Read(home, "control", maxAgeSec: 30)),
                 StatusView.Happier(home),
-                StatusView.Line("Диск", StatusView.Read(home, "disk", maxAgeSec: 30)),
                 StatusView.Line("VPN", StatusView.Read(home, "vpn", maxAgeSec: 15))
             }, syncSummary + "\r\n" + updateSummary,
             "Версия: " + Program.Version + "; бандл: " + engine.Current + "\r\nПапка: " + home +
@@ -633,7 +634,6 @@ namespace RemoteAgents.Launcher
         void Handle(string[] args)
         {
             Safe(() => {
-                if (args.Contains("--disk-shell")) { QueueDiskShell(args); return; }
                 WindowCommand command = WindowModel.Route(args);
                 if (args.Contains("--exit") || args.Contains("--uninstall")) { RequestExit(); return; }
                 if(firstSetup && !icon.Visible){foreach(var form in Application.OpenForms.Cast<Form>().Where(f=>f is SetupWizard || f is ConfigWindow).ToArray()) { ActivateWindow(form); } return;}
@@ -647,42 +647,6 @@ namespace RemoteAgents.Launcher
                 }
             });
         }
-        void InitializeExplorer()
-        {
-            if (explorer != null || Product.IsVpn) return;
-            explorer = new DiskExplorerController(home, () => engine.Folder(engine.Current), log.Write);
-            diskShell = new DiskShellCommands(home, () => Task.FromResult(engine.Folder(engine.Current)), ShowDiskProgress,
-                message => { if (!closing) MessageBox.Show(mainWindow, message, "Диск", MessageBoxButtons.OK, MessageBoxIcon.Information); }, log.Write,
-                path => explorer.MarkPlaceholder(path));
-        }
-        void QueueDiskShell(string[] args)
-        {
-            if (Product.IsVpn) { MessageBox.Show("Диск доступен в RemoteAgents", Product.Name); return; }
-            if (firstSetup && !icon.Visible) { ShowMain(); return; }
-            DiskShellRequest request;
-            if (!DiskShellRequest.TryParse(args, out request)) throw new IOException("Проводник не передал команду");
-            InitializeExplorer(); diskShellQueue.Add(request, DateTime.UtcNow);
-        }
-        async void DrainDiskShell()
-        {
-            if (closing || shellBusy || diskShell == null) return;
-            var batch = diskShellQueue.Take(DateTime.UtcNow); if (batch.Count == 0) return;
-            string conflict = MutationConflict();
-            if (conflict.Length > 0) { MessageBox.Show(mainWindow, conflict + ". Повторите команду в Проводнике.", "Диск"); return; }
-            shellBusy = true;
-            try { await diskShell.Execute(batch, stop.Token); }
-            catch (OperationCanceledException) { }
-            catch (Exception error) { log.Write("explorer.command.failed"); if (!closing) MessageBox.Show(mainWindow, error.Message, "Диск", MessageBoxButtons.OK, MessageBoxIcon.Information); }
-            finally { shellBusy = false; if (explorer != null && !closing) await explorer.Refresh(); }
-        }
-        void ShowDiskProgress()
-        {
-            if (closing || Product.IsVpn) return; InitializeExplorer();
-            if (diskProgress == null || diskProgress.IsDisposed)
-                diskProgress = new DiskProgressWindow(() => explorer.Snapshot, () => explorer.Paths, Open,
-                    () => Safe(() => DiskDetailsLauncher.Open(DiskExplorerController.SyncHome(new Configuration(home).Data))));
-            ActivateWindow(diskProgress);
-        }
         DiskRun reportedDisk;
         void DiskFinished()
         {
@@ -691,8 +655,8 @@ namespace RemoteAgents.Launcher
             reportedDisk = last;
             // An open window shows the result itself; the balloon is for a run that outlived its window.
             if (Application.OpenForms.Cast<Form>().Any(f => f is ConfigWindow && f.Visible) || !icon.Visible) return;
-            if (last.Ok) icon.ShowBalloonTip(5000, Product.Name, "Папки: " + last.Summary, ToolTipIcon.Info);
-            else icon.ShowBalloonTip(10000, Product.Name, "Папки не подключены: " + last.Summary + ". Повторите команду в Проводнике или применение на вкладке «Папки».", ToolTipIcon.Warning);
+            if (last.Ok) icon.ShowBalloonTip(5000, Product.Name, "Диск: " + last.Summary, ToolTipIcon.Info);
+            else icon.ShowBalloonTip(10000, Product.Name, "Диск не подключён: " + last.Summary + ". Повторите: «Настройки» → «Конфиг» → «Применить».", ToolTipIcon.Warning);
         }
         void RequestExit()
         {
@@ -736,8 +700,6 @@ namespace RemoteAgents.Launcher
         protected override void ExitThreadCore()
         {
             if (closing) return; closing = true; timer.Stop(); stop.Cancel(); BackgroundWork.Disk.Stop();
-            if (explorer != null) explorer.Dispose();
-            if (diskProgress != null) diskProgress.Dispose();
             if (mainWindow != null && !mainWindow.IsDisposed) mainWindow.Unload();
             lock (pipeGate) { if (server != null) server.Dispose(); }
             foreach (var r in runtimes) r.Dispose(); foreach (var job in actionJobs) job.Dispose();

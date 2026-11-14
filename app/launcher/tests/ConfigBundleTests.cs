@@ -15,7 +15,7 @@ namespace RemoteAgents.Launcher
             return ConfigBundle.D("kind", "remoteagents-config", "schema", 1,
                 "device", ConfigBundle.D("name", "Ноутбук"),
                 "server", ConfigBundle.D("address", "server.example.invalid", "port", 2222, "login", "worker", "key", ConfigBundle.D("secret", "server-key")),
-                "disk", ConfigBundle.D("folders", new[]{"Project", "Документы"}),
+                "disk", ConfigBundle.D("folders", new object[]{ConfigBundle.D("id", "Project"), ConfigBundle.D("id", "Документы", "path", "D:\\Документы")}),
                 "secrets", ConfigBundle.D("server-key", "TEST-PRIVATE-KEY\r\nSECOND-LINE\r\n"));
         }
         internal static void Run()
@@ -49,7 +49,7 @@ namespace RemoteAgents.Launcher
             Check(p.Missing.Contains("lan-Офис-ovpn") && p.Hints["lan-Офис-ovpn"] == "Профиль сети", "Unicode and custom hint");
             foreach (string name in new[]{"", "../bad", "Upper", "trailing\n", "protected", "a/b", new string('a',65)}) { reference["secret"] = name; Reject(() => ConfigBundle.Parse(Json.Encode(missing)), "secret name"); }
             var nestedSelection = Example(); nestedSelection["disk"] = ConfigBundle.D("folders",new[]{"Project/docs","Проекты/Сайт"});
-            Check(ConfigBundle.Parse(Json.Encode(nestedSelection)).Profile.ContainsKey("disk"), "nested selection retains first-level project roots");
+            Check(ConfigBundle.Parse(Json.Encode(nestedSelection)).Profile.ContainsKey("disk"), "earlier nested paths are still accepted (they become first-level folders)");
             var namedPassword = ConfigBundle.Parse("{\"kind\":\"remoteagents-config\",\"schema\":1,\"server\":{\"rootPassword\":{\"secret\":\"custom-root\"}}}");
             Check(namedPassword.Hints["custom-root"].Contains("хостинг"),"standard field explanation independent of secret name");
             var route = Example(); route["server"] = ConfigBundle.D("routes", new[]{ConfigBundle.D("kind", "hop")});
@@ -146,8 +146,8 @@ namespace RemoteAgents.Launcher
                 Check(SecretVault.Get(home,"server-key") != "REPLACEMENT-KEY", "blocked section cannot replace credential");
                 ConfigBundle.Store(home, change, new[]{"server"});
                 Check(ConfigBundle.Conflicts(home,change).Length == 0 && SecretVault.Get(home,"server-key") == "REPLACEMENT-KEY", "explicit conflict accepted");
-                var diskChange = ConfigBundle.Parse(Json.Encode(ConfigBundle.D("kind","remoteagents-config","schema",1,"disk",ConfigBundle.D("folders", new[]{"Project"}))));
-                Check(ConfigBundle.Conflicts(home,diskChange).Single().StartsWith("disk:"), "removed disk folders conflict");
+                var diskChange = ConfigBundle.Parse(Json.Encode(ConfigBundle.D("kind","remoteagents-config","schema",1,"disk",ConfigBundle.D("folders", new object[]{ConfigBundle.D("id", "Project")}))));
+                Check(ConfigBundle.Conflicts(home,diskChange).Length == 0, "leaving a folder out of disk.folders is not a conflict (it only lists what to accept)");
                 string oldConfig = File.ReadAllText(Path.Combine(home,"config.json")), oldVault = File.ReadAllText(Path.Combine(home,"secrets","vault.json"));
                 Reject(() => ConfigBundle.Store(home,locked,null), "locked Store");
                 Check(oldConfig == File.ReadAllText(Path.Combine(home,"config.json")) && oldVault == File.ReadAllText(Path.Combine(home,"secrets","vault.json")), "locked Store writes nothing");
@@ -211,17 +211,17 @@ namespace RemoteAgents.Launcher
                 string legacyParent = Path.Combine(home,"legacy"), legacyHome = Path.Combine(legacyParent,"RemoteAgents"), diskHome = Path.Combine(legacyParent,"RemoteDisk");
                 Directory.CreateDirectory(legacyHome); Directory.CreateDirectory(diskHome);
                 File.WriteAllText(Path.Combine(diskHome,"base.txt"),"C:\\Users\\owner\\Disk\r\n");
-                Json.Write(Path.Combine(diskHome,"selection.json"),ConfigBundle.D("paths",new[]{"Project/docs"}));
+                Json.Write(Path.Combine(diskHome,"selection.json"),ConfigBundle.D("paths",new[]{"Project/docs"})); // earlier install: no longer read
                 string legacyKey = Path.Combine(legacyHome,"ssh-profiles","current","id_ed25519"), legacySsh = Path.Combine(legacyHome,"ssh-profiles","current","ssh-transport.json");
                 SecretVault.WritePrivate(legacyHome,legacyKey,"LEGACY-KEY\r\n");
                 Json.Write(legacySsh,ConfigBundle.D("serverAddress","legacy.example.invalid","login","worker","keyPath",legacyKey));
                 Json.Write(Path.Combine(legacyHome,"config.json"),ConfigBundle.D("transport",ConfigBundle.D("profilePath",legacySsh),"happier",ConfigBundle.D("label","Старый аккаунт")));
                 SecretVault.WritePrivate(legacyHome,Path.Combine(legacyHome,"secrets","happier-account.key"),"LEGACY-HAPPIER-KEY");
                 var legacyChange = ConfigBundle.Parse(Json.Encode(ConfigBundle.D("kind","remoteagents-config","schema",1,"disk",ConfigBundle.D("base","D:\\Disk","folders",new string[0]),"happier",ConfigBundle.D("label","Старый аккаунт","key",ConfigBundle.D("secret","happier-key")),"secrets",ConfigBundle.D("happier-key","CHANGED-ACCOUNT-KEY"))));
-                Check(ConfigBundle.Conflicts(legacyHome,legacyChange).Length == 2,"legacy root/folders and account-key conflicts found");
+                Check(ConfigBundle.Conflicts(legacyHome,legacyChange).Length == 2,"legacy root and account-key conflicts found");
                 ConfigBundle.Store(legacyHome,ConfigBundle.Parse("{\"kind\":\"remoteagents-config\",\"schema\":1,\"bridge\":{\"enabled\":true}}"),null);
                 var legacyRecovered = ConfigBundle.Parse(ConfigBundle.Export(legacyHome,null));
-                Check(legacyRecovered.Secrets["server-key"] == "LEGACY-KEY\r\n" && legacyRecovered.Secrets["happier-key"] == "LEGACY-HAPPIER-KEY" && Json.Strings(Json.Get(Json.Map(legacyRecovered.Profile["disk"]),"folders")).Single() == "Project/docs","first profile preserves existing disk and keys");
+                Check(legacyRecovered.Secrets["server-key"] == "LEGACY-KEY\r\n" && legacyRecovered.Secrets["happier-key"] == "LEGACY-HAPPIER-KEY" && Json.Str(Json.Map(legacyRecovered.Profile["disk"]),"base") == "C:\\Users\\owner\\Disk" && !Json.Map(legacyRecovered.Profile["disk"]).ContainsKey("folders"),"first profile preserves the existing Disk root and keys; accepted folders live in Syncthing, not in the config");
                 SecretVault.Materialize(legacyHome);
                 SecretVault.Set(legacyHome,"server-key", "");
                 Check(ConfigBundle.Parse(ConfigBundle.Export(legacyHome,null)).Secrets["server-key"] == "", "explicitly cleared key is not resurrected from old materialized file");

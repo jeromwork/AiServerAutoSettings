@@ -34,22 +34,8 @@
     <Compile Include="../SecretVault.cs" Link="SecretVault.cs" />
     <Compile Include="../SecretPrompt.cs" Link="SecretPrompt.cs" />
     <Compile Include="../SecretCommand.cs" Link="SecretCommand.cs" />
-    <Compile Include="DiskTreeTests.cs" />
+    <Compile Include="WizardStepTests.cs" />
     <Compile Include="DiskChoiceTests.cs" />
-    <Compile Include="DiskFoldersModelTests.cs" />
-    <Compile Include="DiskExplorerMetadataTests.cs" />
-    <Compile Include="DiskShellTests.cs" />
-    <Compile Include="../DiskShellModel.cs" />
-    <Compile Include="../DiskEvictionSafety.cs" />
-    <Compile Include="../DiskExplorerPresentation.cs" />
-    <Compile Include="../DiskExplorerMetadata.cs" />
-    <Compile Include="../DiskExplorerRegistry.cs" />
-    <Compile Include="../DiskSyncMonitor.cs" />
-    <Compile Include="../DiskExplorerObservation.cs" />
-    <Compile Include="../DiskSyncStatus.cs" Link="DiskSyncStatus.cs" />
-    <Compile Include="../DiskFoldersModel.cs" Link="DiskFoldersModel.cs" />
-    <Compile Include="LocalFoldersTests.cs" />
-    <Compile Include="../LocalFolders.cs" Link="LocalFolders.cs" />
     <Compile Include="ConfigApplyTests.cs" />
     <Compile Include="../ConfigApply.cs" Link="ConfigApply.cs" />
     <Compile Include="ProxyRelayTests.cs" />
@@ -62,8 +48,9 @@
     <Compile Include="../SshUpdate.cs" Link="SshUpdate.cs" />
     <Compile Include="../NativeJob.cs" Link="NativeJob.cs" />
     <Compile Include="../WizardStep.cs" Link="WizardStep.cs" />
-    <Compile Include="../DiskTreeSelection.cs" Link="DiskTreeSelection.cs" />
     <Compile Include="../DiskChoice.cs" Link="DiskChoice.cs" />
+    <Compile Include="LegacyCleanupTests.cs" />
+    <Compile Include="../LegacyCleanup.cs" Link="LegacyCleanup.cs" />
     <Compile Include="../ServerOperations.cs" Link="ServerOperations.cs" />
   </ItemGroup>
 </Project>

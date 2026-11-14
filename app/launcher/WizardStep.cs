@@ -42,7 +42,7 @@ namespace RemoteAgents.Launcher
                 case "Account": case "ResumeAccount": return 420 * 1000; // helpers 60 s + status 60 s + Account.ps1 child 300 s
                 case "ServerHealth": return 10 * 1000; // one read-only SSH request, no route probing/retry
                 case "Operation": return 60 * 1000;  // one short status call
-                case "Disk": return 2100 * 1000;     // old disk detach 120 s + install 900 s + apply 900 s
+                case "Disk": return 1080 * 1000;     // helper upload 60 s + Install-RemoteDisk.ps1 (install, pairing, folders to accept) 900 s + closing steps 120 s
                 case "ConfigSync": return 300 * 1000; // periodic refresh of addresses/host keys/VPN with own key (launcher timer)
                 case "Connection": return 900 * 1000; // catalog/helpers/initialize ~400 s + preflight ~75 s + proof 120 s
                 case "Bridge": return 900 * 1000;    // two bridge children 300 s each + live probes
@@ -50,7 +50,7 @@ namespace RemoteAgents.Launcher
                 case "Skip": return 300 * 1000;      // old disk detach 120 s
                 case "Inspect": return 300 * 1000;   // server, account and bridge probes ~210 s
                 case "Activate": return 180 * 1000;  // live connection and bridge proofs
-                case "DiskTree": case "AccountList": return 180 * 1000; // helper upload 60 s + listing 60 s
+                case "AccountList": return 180 * 1000; // helper upload 60 s + listing 60 s
                 case "Proxy": return 420 * 1000;     // root probe 20 s + apply 180 s + confirm in a new SSH 120 s
                 case "Lan": return 480 * 1000;       // root probe 20 s + add (may install OpenVPN) 300 s + test/confirm 120 s
                 case "LanRemove": return 240 * 1000; // root probe 20 s + remove 180 s

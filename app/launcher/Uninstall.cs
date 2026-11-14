@@ -4,7 +4,7 @@ using System.Threading;
 
 namespace RemoteAgents.Launcher
 {
-    // Removes autostart, stops the tray and the Explorer Disk entry. User files and settings stay.
+    // Removes autostart and stops the tray; the installed bundle's Uninstall.ps1 removes the Disk pin. User files and settings stay.
     internal static class Uninstall
     {
         public static void Run(string home)
@@ -15,7 +15,7 @@ namespace RemoteAgents.Launcher
             }
             string instance = Program.InstanceName(home, System.Security.Principal.WindowsIdentity.GetCurrent().User);
             try { Program.Forward(instance, new[] { "--exit" }); } catch { }
-            // Wait until the tray stopped its background Explorer projection before removing the same metadata.
+            // Wait until the tray has stopped before anything of it is removed.
             try { using (var running = Mutex.OpenExisting("Global\\" + instance)) {
                 bool held = false;
                 try { try { held = running.WaitOne(60000); } catch (AbandonedMutexException) { held = true; }
@@ -23,15 +23,8 @@ namespace RemoteAgents.Launcher
                 } finally { if (held) running.ReleaseMutex(); }
             } } catch (WaitHandleCannotBeOpenedException) { }
             var engine = new UpdateEngine(home, Program.Version);
-            if (engine.Current.Length == 0) {
-                var cleanup = DiskExplorerNative.CreateService(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteAgents", "icons"), new Journal(home).Write);
-                var profile = ConfigProfile.Load(home);
-                cleanup.Cleanup(DiskExplorerController.Root(profile));
-                foreach (var external in DiskChoice.FromProfile(profile).External) cleanup.CleanupExternal(external.Path);
-                DiskExplorerNative.CreateRegistry(new Journal(home).Write).Cleanup();
-                DiskExplorerNative.CleanupIcons(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteAgents", "icons"));
-                return;
-            }
+            // No installed bundle: nothing was ever set up beyond autostart, which is already removed.
+            if (engine.Current.Length == 0) return;
             string script = Path.Combine(engine.Folder(engine.Current), "build", "Uninstall.ps1");
             string output = Path.Combine(home, "state", "uninstall-output.tmp"); Directory.CreateDirectory(Path.GetDirectoryName(output));
             try {

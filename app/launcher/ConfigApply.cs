@@ -74,14 +74,21 @@ namespace RemoteAgents.Launcher
                 case Server: case Connection: return p.ContainsKey("server");
                 case Bridge: return p.ContainsKey("bridge") || Json.Str(Json.Map(Json.Get(p, "device")), "name").Length > 0;
                 case Account: return p.ContainsKey("happier");
-                case Disk: return DiskChosen(p) || DiskChoice.FromProfile(p).External.Count > 0;
+                case Disk: return DiskDescribed(p);
                 case Vpn: return vpn.Keys.Any(k => k != "bootstrap");
                 case Proxy: return p.ContainsKey("proxyOut");
                 case Lan: return p.ContainsKey("lan");
                 default: return false;
             }
         }
-        internal static bool DiskChosen(Dictionary<string, object> profile) { return DiskChoice.FromProfile(profile).Chosen; }
+        // Syncthing is part of every connection to a server; the disk section only adds folders to accept at once, so a
+        // profile with a server describes the Disk too. components.disk.enabled = false opts out.
+        internal static bool DiskDescribed(Dictionary<string, object> p)
+        {
+            var component = Json.Map(Json.Get(Json.Map(Json.Get(p, "components")), "disk"));
+            if (component.ContainsKey("enabled") && !Json.Bool(component, "enabled", true)) return false;
+            return p.ContainsKey("server") || p.ContainsKey("disk");
+        }
         // The part of the profile a section depends on; its hash decides «changed since last successful apply».
         internal static object Slice(Dictionary<string, object> p, string s)
         {
@@ -300,21 +307,17 @@ namespace RemoteAgents.Launcher
             try { var m = Json.Map(Json.Get(Json.Read(AppliedFile(home)), "sections")); return m.ToDictionary(p => p.Key, p => Convert.ToString(p.Value, CultureInfo.InvariantCulture)); }
             catch (Exception) { return new Dictionary<string, string>(); }
         }
-        internal static DiskChoice AppliedDiskChoice(string home, Dictionary<string, object> profile)
+        // Disk root: where accepted folders land by default (<root>\<id>). The root the installed Disk really uses
+        // (RemoteDisk\base.txt) wins over the configured disk.base, which only becomes real after the Disk section ran;
+        // without both it is %USERPROFILE%\Disk. «installed» is a seam for tests.
+        internal static string InstalledDiskBase()
+        { return Files.ReadLine(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteDisk", "base.txt")); }
+        internal static string DefaultDiskBase()
+        { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Disk"); }
+        internal static string DiskRoot(Dictionary<string, object> profile, string installed = null)
         {
-            string hash;
-            return Applied(home).TryGetValue(ConfigSections.Disk, out hash) && hash == ConfigSections.Hash(profile, ConfigSections.Disk)
-                ? DiskChoice.FromProfile(profile) : null;
-        }
-        // Read the disk's existing peer-scoped exclusions; All must not claim detached external projects.
-        internal static string[] DiskExclusions(string diskHome = null)
-        {
-            if (diskHome == null) diskHome = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteDisk");
-            try {
-                var saved = Json.Read(Path.Combine(diskHome, "external-exclusions.json"));
-                return Json.Int(saved, "schema", 0) == 1 && Json.Str(saved, "peer").Length > 0 && Json.Str(saved, "peer") == Files.ReadLine(Path.Combine(diskHome, "server.txt"))
-                    ? Json.Strings(Json.Get(saved, "names")) : new string[0];
-            } catch (Exception) { return new string[0]; }
+            installed = installed ?? InstalledDiskBase();
+            return installed.Length > 0 ? installed : Json.Text(Json.Map(Json.Get(profile, "disk")), "base", DefaultDiskBase());
         }
         static readonly object appliedGate = new object();
         internal static void MarkApplied(string home, string section, string hash)
@@ -330,17 +333,9 @@ namespace RemoteAgents.Launcher
             var p = new Dictionary<string, object>(profile); var device = new Dictionary<string, object>(Json.Map(Json.Get(p, "device")));
             device["name"] = name.Trim(); p["device"] = device; return p;
         }
-        internal static Dictionary<string, object> WithFolders(Dictionary<string, object> profile, IEnumerable<string> folders, string diskBase)
-        {
-            var choice = DiskChoice.FromProfile(profile);
-            var paths = folders.ToArray();
-            var next = new DiskChoice { Chosen = true, All = paths.Contains("."), External = choice.External };
-            if (!next.All) next.Folders = paths.Select(path => new DiskFolderChoice { Path = path, Direction = choice.DirectionOf(path) }).ToList();
-            return next.WriteTo(profile, diskBase);
-        }
         // «Подробно» (the step-by-step sections) edit config.json; bring the same facts back into the profile so the
         // config stays the one description of the program. Sections never described are added only when really set.
-        internal static Dictionary<string, object> SyncFromSettings(Dictionary<string, object> profile, Dictionary<string, object> config, string diskBase, string[] diskFolders, string serverAddress, string serverLogin)
+        internal static Dictionary<string, object> SyncFromSettings(Dictionary<string, object> profile, Dictionary<string, object> config, string diskBase, string serverAddress, string serverLogin)
         {
             var p = new Dictionary<string, object>(profile);
             var bridge = Json.Map(Json.Get(config, "bridge"));
@@ -368,8 +363,8 @@ namespace RemoteAgents.Launcher
                 var old = Json.Array(Json.Get(p, "lan")).Select(Json.Map).ToArray();
                 p["lan"] = lans.Select(l => (object)(old.FirstOrDefault(o => Json.Str(o, "name") == Json.Str(l, "name")) ?? new Dictionary<string, object> { { "name", Json.Str(l, "name") }, { "kind", "openvpn" } })).ToArray();
             }
-            if (!string.IsNullOrEmpty(diskBase) && (diskFolders != null || p.ContainsKey("disk"))) {
-                if (diskFolders != null) p = WithFolders(p, diskFolders, diskBase);
+            // The Disk root chosen in the step-by-step wizard; the folders to accept stay as the config wrote them.
+            if (!string.IsNullOrEmpty(diskBase) && p.ContainsKey("disk")) {
                 var d = new Dictionary<string, object>(Json.Map(Json.Get(p, "disk"))); d["base"] = diskBase; p["disk"] = d;
             }
             if (!string.IsNullOrEmpty(serverAddress)) {
@@ -425,14 +420,18 @@ namespace RemoteAgents.Launcher
             string name = ConfigProfile.DeviceName(p); if (name.Length > 0) request["deviceName"] = name;
             return request;
         }
-        internal static Dictionary<string, object> Disk(Dictionary<string, object> p, string defaultBase, string[] currentSelection)
+        // The Disk step of build/Wizard.ps1 -> disk/Install-RemoteDisk.ps1: install Syncthing and Syncthing Tray, pair with the server
+        // and accept «folders» ([{ id, path? }], the format of Install-RemoteDisk.ps1 -AcceptFile). No folders: nothing is accepted
+        // and the server's folders wait in Syncthing Tray. «reconnect» is the wizard's «новая пустая папка для нового сервера».
+        internal static Dictionary<string, object> Disk(Dictionary<string, object> p, string defaultBase)
         {
             var disk = Json.Map(Json.Get(p, "disk"));
-            var choice = DiskChoice.FromProfile(p);
-            var directions = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-            foreach (var folder in choice.Folders) if (folder.Direction != DiskChoice.Both) directions[DiskChoice.Project(folder.Path)] = folder.Direction;
-            return new Dictionary<string, object> { { "base", Json.Text(disk, "base", defaultBase) }, { "paths", choice.Chosen ? choice.Paths : currentSelection ?? new string[0] },
-                { "directions", directions }, { "external", choice.External.Select(e => (object)new Dictionary<string, object> { { "path", e.Path }, { "remote", e.Remote }, { "direction", e.Direction } }).ToArray() }, { "reconnect", false } };
+            var request = new Dictionary<string, object> { { "base", Json.Text(disk, "base", defaultBase) }, { "reconnect", false } };
+            var folders = DiskChoice.FromProfile(p).Folders;
+            if (folders.Count > 0) request["folders"] = folders.Select(f => (object)(f.Path.Length == 0
+                ? new Dictionary<string, object> { { "id", f.Id } }
+                : new Dictionary<string, object> { { "id", f.Id }, { "path", f.Path } })).ToArray();
+            return request;
         }
         internal static Dictionary<string, object> Vpn(Dictionary<string, object> p)
         {
@@ -691,13 +690,13 @@ namespace RemoteAgents.Launcher
     }
 
     // Wizard actions read mutable settings from home. Never resume a detached install after its
-    // server/choice changed: release the serial queue so the newest request can use that home.
+    // server/disk settings changed: release the serial queue so the newest request can use that home.
     internal static class DiskApplyWait
     {
         internal static string Binding(Dictionary<string, object> profile)
         { return ConfigSections.Hash(profile, ConfigSections.Connection) + ":" + ConfigSections.Hash(profile, ConfigSections.Disk); }
         internal static SectionOutcome Superseded()
-        { return new SectionOutcome { Summary = "настройки папок или сервера изменились; прежнее ожидание завершено" }; }
+        { return new SectionOutcome { Summary = "настройки диска или сервера изменились; прежнее ожидание завершено" }; }
         internal static async Task<SectionOutcome> Run(Func<bool> current, Func<Task<SectionOutcome>> execute,
             Func<string, Task<Dictionary<string, object>>> poll, Func<CancellationToken, Task> wait,
             Action<SectionState, string> report, Action<string> log, CancellationToken token)
@@ -714,7 +713,7 @@ namespace RemoteAgents.Launcher
                 catch (OperationCanceledException) { throw; }
                 catch (Exception e) {
                     if (!current()) return Superseded();
-                    log("Папки: состояние установки на сервере не получено: " + e.Message + ". Повторю позже"); continue;
+                    log("Диск: состояние установки на сервере не получено: " + e.Message + ". Повторю позже"); continue;
                 }
                 if (!current()) return Superseded();
                 var op = Json.Map(Json.Get(Json.Map(Json.Get(status, "operations")), outcome.Operation));
@@ -723,7 +722,7 @@ namespace RemoteAgents.Launcher
                 if (state == "finished") { outcome = await execute(); continue; }
                 // Missing/unknown operations cannot prove that this install is still running.
                 var failed = new SectionOutcome { Summary = state == "failed" ? Json.Text(op, "text", "установка на сервере не удалась")
-                    : "состояние установки на сервере не найдено; нажмите «Синхронизировать выбранные папки» ещё раз" };
+                    : "состояние установки на сервере не найдено; нажмите «Повторить» в строке «Диск»" };
                 report(SectionState.Failed, failed.Summary); return failed;
             }
         }
@@ -826,7 +825,10 @@ namespace RemoteAgents.Launcher
                     o = SectionOutcome.From(run("Connection", new { catalog = ConfigRequests.MergeCatalog(catalog, config), expected = catalog, shared = false }), "Связь работает ✓"); break; }
                 case ConfigSections.Bridge: o = SectionOutcome.From(run("Bridge", ConfigRequests.Bridge(p, config)), "Мост проверен ✓"); break;
                 case ConfigSections.Account: o = Account(p, config, run, ref hash); break;
-                case ConfigSections.Disk: o = SectionOutcome.From(run("Disk", ConfigRequests.Disk(p, DiskBase(), DiskSelection())), "Папки подключены; передача файлов продолжается"); break;
+                case ConfigSections.Disk: {
+                    // Parts of an earlier config format that no longer exist are said here, never refused.
+                    foreach (string warning in DiskChoice.FromProfile(p).Warnings) Log("Диск: " + warning);
+                    o = SectionOutcome.From(run("Disk", ConfigRequests.Disk(p, DiskBase())), "Диск подключён; папки сервера принимайте в Syncthing Tray"); break; }
                 case ConfigSections.Vpn: o = SectionOutcome.From(run("Vpn", ConfigRequests.Vpn(p)), "VPN настроен", true); break;
                 case ConfigSections.Proxy: o = Proxy(p, config, run); break;
                 case ConfigSections.Lan: o = Lan(p, config, run); break;
@@ -1015,16 +1017,8 @@ namespace RemoteAgents.Launcher
         }
         internal static string DiskBase()
         {
-            string value = Files.ReadLine(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteDisk", "base.txt"));
-            return value.Length > 0 ? value : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Disk");
-        }
-        // Folders actually chosen on this computer (RemoteDisk selection.json; the install placeholder is not a choice).
-        internal static string[] DiskSelection()
-        {
-            try {
-                var s = Json.Read(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteDisk", "selection.json"));
-                return Json.Bool(s, "placeholder") ? null : Json.Strings(Json.Get(s, "paths"));
-            } catch (Exception) { return null; }
+            string value = ConfigProfile.InstalledDiskBase();
+            return value.Length > 0 ? value : ConfigProfile.DefaultDiskBase();
         }
         // After «Подробно» (step-by-step sections) the profile follows what they configured; those sections count as applied.
         internal static void SyncFromSettings(string home)
@@ -1032,7 +1026,7 @@ namespace RemoteAgents.Launcher
             var config = new Configuration(home).Data; string address = "", login = "";
             try { var t = Json.Read(Json.Str(Json.Map(Json.Get(config, "transport")), "profilePath")); address = Json.Str(t, "serverAddress"); login = Json.Str(t, "login"); } catch (Exception) { }
             Dictionary<string, object> updated = null;
-            ConfigProfile.Update(home, p => { updated = ConfigProfile.SyncFromSettings(p, config, DiskBase(), DiskSelection(), address, login); p.Clear(); foreach (var pair in updated) p[pair.Key] = pair.Value; });
+            ConfigProfile.Update(home, p => { updated = ConfigProfile.SyncFromSettings(p, config, DiskBase(), address, login); p.Clear(); foreach (var pair in updated) p[pair.Key] = pair.Value; });
             foreach (string s in ConfigSections.Order) if (ConfigSections.Present(updated, s)) ConfigProfile.MarkApplied(home, s, ConfigSections.Hash(updated, s));
         }
     }
