@@ -300,6 +300,18 @@ namespace RemoteAgents.Launcher
             try { var m = Json.Map(Json.Get(Json.Read(AppliedFile(home)), "sections")); return m.ToDictionary(p => p.Key, p => Convert.ToString(p.Value, CultureInfo.InvariantCulture)); }
             catch (Exception) { return new Dictionary<string, string>(); }
         }
+        // Disk root: where accepted folders land by default (<root>\<id>). The root the installed Disk really uses
+        // (RemoteDisk\base.txt) wins over the configured disk.base, which only becomes real after the Disk section ran;
+        // without both it is %USERPROFILE%\Disk. «installed» is a seam for tests.
+        internal static string InstalledDiskBase()
+        { return Files.ReadLine(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteDisk", "base.txt")); }
+        internal static string DefaultDiskBase()
+        { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Disk"); }
+        internal static string DiskRoot(Dictionary<string, object> profile, string installed = null)
+        {
+            installed = installed ?? InstalledDiskBase();
+            return installed.Length > 0 ? installed : Json.Text(Json.Map(Json.Get(profile, "disk")), "base", DefaultDiskBase());
+        }
         internal static DiskChoice AppliedDiskChoice(string home, Dictionary<string, object> profile)
         {
             string hash;
@@ -1015,8 +1027,8 @@ namespace RemoteAgents.Launcher
         }
         internal static string DiskBase()
         {
-            string value = Files.ReadLine(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteDisk", "base.txt"));
-            return value.Length > 0 ? value : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Disk");
+            string value = ConfigProfile.InstalledDiskBase();
+            return value.Length > 0 ? value : ConfigProfile.DefaultDiskBase();
         }
         // Folders actually chosen on this computer (RemoteDisk selection.json; the install placeholder is not a choice).
         internal static string[] DiskSelection()

@@ -287,7 +287,6 @@ namespace RemoteAgents.Launcher
             string url = TrayMenuModel.HappierUrl(config.Data, AccountState());
             if (url.Length > 0) Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
         }
-        readonly Image warningImage = SystemIcons.Warning.ToBitmap();
         void RefreshMenu()
         {
             if (icon.ContextMenuStrip == null) {
@@ -298,14 +297,12 @@ namespace RemoteAgents.Launcher
                 } else foreach (var entry in TrayEntries()) {
                     if (entry.Id == "separator") { menu.Items.Add(new ToolStripSeparator()); continue; }
                     string id = entry.Id;
-                    var item = new ToolStripMenuItem(entry.Text) { Enabled = entry.Enabled, ToolTipText = entry.Hint, Image = entry.Warning ? warningImage : null };
+                    var item = new ToolStripMenuItem(entry.Text) { Enabled = entry.Enabled, ToolTipText = entry.Hint };
                     item.Click += (s, e) => Safe(() => {
-                        if (id == "open") ShowMain();
-                        else if (id == "folders") OpenDisk();
-                        else if (id == "progress") ShowDiskProgress();
-                        else if (id == "happier") {
-                            OpenHappier();
-                        } else if (id == "exit") RequestExit();
+                        if (id == "open") OpenHappier();
+                        else if (id == "settings") ShowMain();
+                        else if (id == "disk") OpenDisk();
+                        else if (id == "exit") RequestExit();
                     });
                     menu.Items.Add(item);
                 }
@@ -315,7 +312,7 @@ namespace RemoteAgents.Launcher
                 var entries = TrayEntries();
                 for (int i = 0; i < entries.Length; i++) {
                     if (entries[i].Id == "separator") continue;
-                    var item = icon.ContextMenuStrip.Items[i]; item.Text = entries[i].Text; item.Enabled = entries[i].Enabled; item.ToolTipText = entries[i].Hint; item.Image = entries[i].Warning ? warningImage : null;
+                    var item = icon.ContextMenuStrip.Items[i]; item.Text = entries[i].Text; item.Enabled = entries[i].Enabled; item.ToolTipText = entries[i].Hint;
                 }
             }
             RefreshMain();
@@ -417,9 +414,12 @@ namespace RemoteAgents.Launcher
             if (form.WindowState == FormWindowState.Minimized) form.WindowState = FormWindowState.Normal;
             form.BringToFront(); form.Activate(); SetForegroundWindow(form.Handle);
         }
+        // The Disk root in Explorer: accepted folders live there, their state is shown by Syncthing Tray, not by this program.
         void OpenDisk()
         {
-            Open(DiskExplorerController.Root(ConfigProfile.Load(home)));
+            string root = ConfigProfile.DiskRoot(ConfigProfile.Load(home));
+            if (Directory.Exists(root)) { Open(root); return; }
+            MessageBox.Show(mainWindow, "Папка Диска ещё не создана: " + root + "\r\nДиск устанавливается вместе с настройкой сервера («Настройки» → «Конфиг» → «Применить»). Папки сервера принимайте в Syncthing Tray.", Product.Name);
         }
         string MutationConflict() { return MutationConflict(null); }
         string MutationConflict(ConfigWindow except)
