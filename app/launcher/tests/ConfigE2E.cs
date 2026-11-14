@@ -83,7 +83,7 @@ namespace RemoteAgents.Launcher
                         default:
                             // Request builders of the real sections are still exercised.
                             if (s == ConfigSections.Bridge) ConfigRequests.Bridge(p, config);
-                            if (s == ConfigSections.Disk) ConfigRequests.Disk(p, Path.Combine(home, "Disk"), null);
+                            if (s == ConfigSections.Disk) ConfigRequests.Disk(p, Path.Combine(home, "Disk"));
                             Thread.Sleep(1500); o = new SectionOutcome { Ok = true, Summary = "стенд (Windows/Happier/Syncthing недоступны на Linux)" }; break;
                     }
                 } catch (Exception e) when (!(e is IOException)) { Console.Error.WriteLine(s + ": " + e); throw; }

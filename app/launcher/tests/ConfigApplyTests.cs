@@ -26,7 +26,7 @@ namespace RemoteAgents.Launcher
             "  \"vpn\": { \"enabled\": false, \"checkUrl\": \"https://check.example/ip\", \"dnsServer\": \"1.1.1.1\", \"bootstrap\": { \"channel\": { \"secret\": \"vpn-channel\" } } },\r\n" +
             "  \"happier\": { \"mode\": \"same\", \"label\": \"Мой аккаунт\", \"serverUrl\": \"https://api.example\", \"webappUrl\": \"https://app.example\", \"key\": { \"secret\": \"happier-key\" } },\r\n" +
             "  \"bridge\": { \"enabled\": true, \"allowShell\": false },\r\n" +
-            "  \"disk\": { \"base\": \"C:\\\\Users\\\\user\\\\Disk\", \"folders\": [\"Проекты\", \"Документы\"] },\r\n" +
+            "  \"disk\": { \"base\": \"C:\\\\Users\\\\user\\\\Disk\", \"folders\": [{ \"id\": \"Проекты\" }, { \"id\": \"Документы\", \"path\": \"D:\\\\Документы\" }] },\r\n" +
             "  \"proxyOut\": { \"type\": \"socks\", \"server\": \"proxy.example\", \"port\": 1080, \"login\": \"u\", \"password\": { \"secret\": \"proxy-out-password\" } },\r\n" +
             "  \"lan\": [ { \"name\": \"office\", \"kind\": \"openvpn\", \"ovpn\": { \"secret\": \"lan-office-ovpn\" } } ]\r\n}\r\n";
         static Dictionary<string, object> DiskStatus(string state)
@@ -99,7 +99,7 @@ namespace RemoteAgents.Launcher
             Check(first.SequenceEqual(ConfigSections.Order), "first apply runs every described section in engine order: " + string.Join(",", first));
             Check(ConfigPlan.Build(p, AllApplied(p), AllReady()).Count == 0, "same config again (applied + ready) changes nothing");
             Check(ConfigPlan.Build(Clone(p), AllApplied(p), AllReady()).Count == 0, "re-parsed identical text is still identical (canonical hash)");
-            var folders = Clone(p); ((Dictionary<string, object>)folders["disk"])["folders"] = new object[] { "Проекты" };
+            var folders = Clone(p); ((Dictionary<string, object>)folders["disk"])["folders"] = new object[] { ConfigBundle.D("id", "Проекты") };
             Check(ConfigPlan.Build(folders, AllApplied(p), AllReady()).SequenceEqual(new[] { ConfigSections.Disk }), "changed folders -> only Disk");
             var renamed = ConfigProfile.WithDeviceName(p, "Компьютер сына");
             Check(ConfigPlan.Build(renamed, AllApplied(p), AllReady()).SequenceEqual(new[] { ConfigSections.Bridge }), "new device name -> only Bridge (deviceName)");
@@ -113,7 +113,11 @@ namespace RemoteAgents.Launcher
             Check(reconnect[0] == ConfigSections.Bootstrap && reconnect[1] == ConfigSections.Server, "unreachable server: VPN first, then server");
             var partial = Clone(p); partial.Remove("lan"); partial.Remove("proxyOut"); partial.Remove("disk");
             var some = ConfigPlan.Build(partial, new Dictionary<string, string>(), new Dictionary<string, bool>());
-            Check(!some.Contains(ConfigSections.Lan) && !some.Contains(ConfigSections.Proxy) && !some.Contains(ConfigSections.Disk), "missing section = do not touch");
+            Check(!some.Contains(ConfigSections.Lan) && !some.Contains(ConfigSections.Proxy), "missing section = do not touch");
+            // The exception is the Disk: it follows the server (Syncthing is installed and paired; folders are accepted in Syncthing Tray).
+            Check(some.Contains(ConfigSections.Disk), "a config without a disk section still installs the Disk for its server");
+            var noServer = Clone(partial); noServer.Remove("server");
+            Check(!ConfigPlan.Build(noServer, new Dictionary<string, string>(), new Dictionary<string, bool>()).Contains(ConfigSections.Disk), "no server and no disk section: the Disk is not touched");
             Check(ConfigSections.Canonical(Json.Parse("{\"b\":1,\"a\":[true,\"x\"]}")) == ConfigSections.Canonical(new Dictionary<string, object> { { "a", new object[] { true, "x" } }, { "b", 1 } }), "canonical JSON ignores key order and number type");
             var hashOnlyRoot = Clone(p); ((Dictionary<string, object>)((Dictionary<string, object>)hashOnlyRoot["server"])["rootPassword"])["hint"] = "другая подсказка";
             Check(ConfigSections.Hash(hashOnlyRoot, ConfigSections.Connection) == ConfigSections.Hash(p, ConfigSections.Connection), "root password hint does not touch the connection");
@@ -282,8 +286,11 @@ namespace RemoteAgents.Launcher
             Check(Json.Str(bridge, "deviceName") == "Ноутбук сына" && Json.Bool(bridge, "enabled") && !Json.Bool(bridge, "shell"), "Bridge carries deviceName");
             var renameOnly = new Dictionary<string, object> { { "device", new Dictionary<string, object> { { "name", "Дом" } } } };
             Check(Json.Bool(ConfigRequests.Bridge(renameOnly, Json.Map(Json.Parse("{\"bridge\":{\"enabled\":true,\"allowShell\":true}}"))), "shell"), "rename keeps current bridge settings");
-            var disk = ConfigRequests.Disk(p, "C:\\Default", new[] { "old" });
-            Check(Json.Strings(Json.Get(disk, "paths")).SequenceEqual(new[] { "Проекты", "Документы" }) && Json.Str(disk, "base") == "C:\\Users\\user\\Disk", "Disk from profile folders");
+            var disk = ConfigRequests.Disk(p, "C:\\Default");
+            var diskRows = Json.Array(Json.Get(disk, "folders")).Select(Json.Map).ToArray();
+            Check(diskRows.Length == 2 && Json.Str(diskRows[0], "id") == "Проекты" && !diskRows[0].ContainsKey("path") && Json.Str(diskRows[1], "id") == "Документы" && Json.Str(diskRows[1], "path") == "D:\\Документы" && Json.Str(disk, "base") == "C:\\Users\\user\\Disk", "Disk request: base and the folders to accept from the profile");
+            var diskWithout = Clone(p); ((Dictionary<string, object>)diskWithout["disk"]).Remove("folders");
+            Check(!ConfigRequests.Disk(diskWithout, "C:\\Default").ContainsKey("folders"), "Disk request without folders accepts nothing");
             var account = ConfigRequests.Account(p, new Dictionary<string, object>(), new Dictionary<string, object>());
             Check(Json.Str(account, "serverUrl") == "https://api.example" && Json.Str(account, "label") == "Мой аккаунт", "Account request");
             var issued = Json.Map(Json.Parse("{\"happier\":{\"mode\":\"same\",\"serverUrl\":\"https://api.example\",\"webappUrl\":\"https://app.example\"}}"));
@@ -309,15 +316,13 @@ namespace RemoteAgents.Launcher
         {
             var p = Profile();
             var config = Json.Map(Json.Parse("{\"bridge\":{\"enabled\":false,\"allowShell\":true},\"vpn\":{\"enabled\":true,\"checkUrl\":\"https://c\"},\"lan\":{\"connections\":[{\"name\":\"home\"}]},\"proxy\":{\"type\":\"http\",\"server\":\"p2\",\"port\":3128}}"));
-            var synced = ConfigProfile.SyncFromSettings(p, config, "D:\\Disk", new[] { "A" }, "198.51.100.9", "remoteagents");
+            var synced = ConfigProfile.SyncFromSettings(p, config, "D:\\Disk", "198.51.100.9", "remoteagents");
             var bridge = Json.Map(Json.Get(synced, "bridge")); var vpn = Json.Map(Json.Get(synced, "vpn"));
             Check(!Json.Bool(bridge, "enabled") && Json.Bool(bridge, "allowShell") && Json.Bool(vpn, "enabled") && Json.Map(Json.Get(vpn, "bootstrap")).Count > 0, "«Подробно» changes come back into the profile (VPN-first kept)");
             Check(Json.Array(Json.Get(synced, "lan")).Length == 1 && Json.Str(Json.Map(Json.Array(Json.Get(synced, "lan"))[0]), "name") == "home", "LAN list follows this computer");
             var proxy = Json.Map(Json.Get(synced, "proxyOut"));
             Check(Json.Str(proxy, "server") == "p2" && Json.Str(proxy, "type") == "http" && Json.Str(Json.Map(Json.Get(proxy, "password")), "secret") == "proxy-out-password", "proxy follows, secret reference kept");
-            Check(Json.Str(Json.Map(Json.Get(synced, "server")), "address") == "198.51.100.9" && Json.Strings(Json.Get(Json.Map(Json.Get(synced, "disk")), "folders")).SequenceEqual(new[] { "A" }), "server and folders follow");
-            var withFolders = ConfigProfile.WithFolders(new Dictionary<string, object>(), new[] { "X" }, "C:\\D");
-            Check(Json.Str(Json.Map(Json.Get(withFolders, "disk")), "base") == "C:\\D", "folders chosen without a disk section get the base");
+            Check(Json.Str(Json.Map(Json.Get(synced, "server")), "address") == "198.51.100.9" && Json.Str(Json.Map(Json.Get(synced, "disk")), "base") == "D:\\Disk" && DiskChoice.FromProfile(synced).Folders.Count == 2, "server and Disk root follow, the folders to accept stay");
             string home = Path.Combine(Path.GetTempPath(), "cfgd-profile-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(home);
             try {
                 ConfigProfile.Update(home, x => { foreach (var pair in p) x[pair.Key] = pair.Value; });

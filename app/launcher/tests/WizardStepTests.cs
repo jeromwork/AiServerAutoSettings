@@ -21,9 +21,9 @@ namespace RemoteAgents.Launcher
             // A section waiting for a detached server install (⏳) does not block the next ones.
             var before=new[]{true,true,true,false,true,false,false};var passable=WizardStep.Passable(before,new[]{3});
             Check(WizardStep.CanOpen(6,3,true,passable,order) && !WizardStep.CanOpen(5,3,true,passable,order) && !WizardStep.CanOpen(6,3,true,before,order), "waiting Happier lets the next sections open");
-            // Budgets cover the slowest child: Account.ps1 300 s, disk install+apply 900+900 s. Server installs are
+            // Budgets cover the slowest child: Account.ps1 300 s, Install-RemoteDisk.ps1 900 s. Server installs are
             // detached: Server/Account calls stay short, status polling is one short SSH call.
-            Check(WizardStep.Timeout("Server")>=(100+60+120+120)*1000 && WizardStep.Timeout("Server")<=600*1000 && WizardStep.Timeout("Account")>=(300+60+60)*1000 && WizardStep.Timeout("Account")<=600*1000 && WizardStep.Timeout("ResumeAccount")==WizardStep.Timeout("Account") && WizardStep.Timeout("Operation")<=60*1000 && WizardStep.Timeout("Disk")>=(120+900+900)*1000, "step budgets cover their slowest child; long server installs are not waited for");
+            Check(WizardStep.Timeout("Server")>=(100+60+120+120)*1000 && WizardStep.Timeout("Server")<=600*1000 && WizardStep.Timeout("Account")>=(300+60+60)*1000 && WizardStep.Timeout("Account")<=600*1000 && WizardStep.Timeout("ResumeAccount")==WizardStep.Timeout("Account") && WizardStep.Timeout("Operation")<=60*1000 && WizardStep.Timeout("Disk")>=(60+900)*1000 && WizardStep.Timeout("Disk")<=1200*1000, "step budgets cover their slowest child; long server installs are not waited for");
             // Reference vector: Python base64.b32encode(bytes(range(1,33))); server-account.mjs normalizeKey accepts it.
             Check(HappierKey.Format(Enumerable.Range(1,32).Select(i=>(byte)i).ToArray())=="AEBAG-BAFAY-DQQCI-KBMGA-2DQPC-AIREE-YUCUL-BOGAZ-DINRY-HI6D4-QA", "Happier key is grouped base32");
             // «Установка» list: stage k/n and elapsed time, waiting account, failure reason; hidden when all done.

@@ -35,17 +35,12 @@
   },
   "disk": {
     "folders": [
-      "Проект",
       {
-        "path": "Документы",
-        "direction": "receive"
-      }
-    ],
-    "external": [
+        "id": "Проект"
+      },
       {
-        "path": "D:\\Отчёты",
-        "remote": "Отчёты",
-        "direction": "send"
+        "id": "Документы",
+        "path": "D:\\Документы"
       }
     ]
   },
