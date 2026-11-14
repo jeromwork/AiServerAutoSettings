@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Server contracts against real Syncthing in disposable HOME directories."""
 import base64
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -11,6 +13,8 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as E
@@ -149,6 +153,40 @@ with (Path.home()/'systemctl-calls').open('a') as f:f.write(json.dumps(sys.argv[
             if status['state'] != 'idle' or status['needTotalItems'] or status['pullErrors']:
                 return False
         return True
+
+
+@contextlib.contextmanager
+def server_helpers(home):
+    """Only the helper definitions of server-disk.sh (everything before main), with HOME at a disposable directory."""
+    source = (HERE / 'server-disk.sh').read_text().split("<<'PY'\n", 1)[1].split('def main():', 1)[0]
+    namespace = {}
+    with mock.patch.dict(os.environ, HOME=str(home), REMOTE_DISK_SCRIPT_DIR=str(HERE)):
+        exec(compile(source, 'server-disk-helpers', 'exec'), namespace)
+        yield namespace
+
+
+class FakeRest:
+    """Just enough of the Syncthing REST for reconcile(): records which folders were written."""
+    def __init__(self):
+        self.puts = []
+
+    def __call__(self, route, method='GET', body=None):
+        if (method, route) == ('GET', 'config/folders'):
+            return []
+        if (method, route) == ('GET', 'config/devices'):
+            return [dict(deviceID='SERVER'), dict(deviceID='PEER')]
+        if (method, route) == ('GET', 'config/defaults/folder'):
+            return dict(devices=[], versioning={}, maxConflicts=10, type='sendreceive')
+        if method == 'PUT' and route.startswith('config/folders/'):
+            self.puts.append(urllib.parse.unquote(route.rsplit('/', 1)[1]))
+            return {}
+        raise AssertionError((method, route))
+
+
+def raiser(error):
+    def raise_it(*args, **kwargs):
+        raise error
+    return raise_it
 
 
 class ServerTests(unittest.TestCase):
@@ -388,6 +426,85 @@ class ServerHardeningTests(unittest.TestCase):
             result = run(['bash', '-c', 'bash "$HOME/.local/share/remote-disk/server-disk.sh" reconcile'], a['env'])
             self.assertEqual(json.loads(result.stdout)['deviceId'], a['deviceId'])
             self.assertEqual({d['deviceID'] for d in t.folder(a, 'Fresh')['devices']}, {a['deviceId'], b['deviceId']})
+
+    def test_one_broken_folder_neither_stops_discovery_nor_registration(self):
+        with Stand(2) as t:
+            a, b = t.sides
+            disk = a['home'] / 'Disk'
+            (disk / 'A_dir_ignore/.stignore').mkdir(parents=True)  # OSError: .stignore is a directory
+            (disk / 'B_link_ignore').mkdir()
+            (disk / 'B_link_ignore/rules.txt').write_text('shared-rules\n')
+            (disk / 'B_link_ignore/.stignore').symlink_to('rules.txt')  # ValueError: links are refused
+            (disk / 'C_ok').mkdir()
+            for action, data in (('bootstrap', None), ('add-device', dict(deviceId=b['deviceId'], deviceName='Laptop'))):
+                with self.subTest(action=action):
+                    result = t.server(a, action, data, ok=False)
+                    self.assertEqual(result.returncode, 0, result.stderr.decode())
+                    self.assertEqual(json.loads(result.stdout), {} if data else
+                                     dict(deviceId=a['deviceId'], listen=a['listen']))
+                    error = result.stderr.decode()
+                    self.assertIn('RemoteDisk: A_dir_ignore: ', error)
+                    self.assertIn('RemoteDisk: B_link_ignore: ', error)
+                    self.assertNotIn('C_ok', error)
+            self.assertEqual({f['id'] for f in t.api(a, 'config/folders')}, {'C_ok'})
+            self.assertEqual({d['deviceID'] for d in t.folder(a, 'C_ok')['devices']}, {a['deviceId'], b['deviceId']})
+            # The broken folders stay exactly as the user left them.
+            self.assertTrue((disk / 'A_dir_ignore/.stignore').is_dir())
+            self.assertEqual(os.readlink(disk / 'B_link_ignore/.stignore'), 'rules.txt')
+            self.assertFalse((disk / 'B_link_ignore/.stignore-remoteagents').exists())
+
+    def test_every_error_class_stays_inside_its_folder(self):
+        errors = {'ValueError': ValueError('Недопустимое имя'),
+                  'OSError': PermissionError(13, 'Permission denied'),
+                  'REST': urllib.error.URLError('connection refused'),
+                  'SubprocessError': subprocess.TimeoutExpired(['git'], 5)}
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in 'ABC':
+                (Path(tmp) / 'Disk' / name).mkdir(parents=True)
+            for label, error in errors.items():
+                with self.subTest(error=label), server_helpers(tmp) as ns:
+                    def ignores(path, write=True):
+                        if path.name == 'B':
+                            raise error
+                    ns['ignores'] = ignores
+                    ns['exclude_git'] = lambda path: None
+                    rest, stderr = FakeRest(), io.StringIO()
+                    with contextlib.redirect_stderr(stderr):
+                        ns['reconcile'](rest, 'SERVER')
+                    self.assertEqual(rest.puts, ['A', 'C'])
+                    self.assertRegex(stderr.getvalue(), r'^RemoteDisk: B: .+\n$')
+
+    def test_git_trouble_never_blocks_sharing(self):
+        troubles = {'git timeout': ('git', subprocess.TimeoutExpired(['git'], 5)),
+                    'git is missing': ('git', FileNotFoundError(2, 'No such file or directory', 'git')),
+                    'linked exclude file': ('exclude_git', ValueError('Символические ссылки запрещены'))}
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / 'Disk/Repo').mkdir(parents=True)
+            for label, (name, error) in troubles.items():
+                with self.subTest(trouble=label), server_helpers(tmp) as ns:
+                    ns['ignores'] = lambda path, write=True: None
+                    ns[name] = raiser(error)
+                    rest, stderr = FakeRest(), io.StringIO()
+                    with contextlib.redirect_stderr(stderr):
+                        ns['reconcile'](rest, 'SERVER')
+                    # Git exclusions are cosmetics: the folder is still offered, the cause is reported.
+                    self.assertEqual(rest.puts, ['Repo'])
+                    self.assertRegex(stderr.getvalue(), r'^RemoteDisk: Repo: .+\n$')
+
+    def test_registration_survives_a_failing_discovery(self):
+        with Stand(2) as t:
+            a, b = t.sides
+            elsewhere = a['home'] / 'elsewhere'
+            elsewhere.mkdir()
+            (a['home'] / 'Disk').symlink_to(elsewhere, target_is_directory=True)
+            result = t.server(a, 'add-device', dict(deviceId=b['deviceId'], deviceName='Laptop'), ok=False)
+            self.assertEqual((result.returncode, json.loads(result.stdout)), (0, {}), result.stderr.decode())
+            self.assertIn('Символические ссылки запрещены', result.stderr.decode())
+            self.assertIn(b['deviceId'], {d['deviceID'] for d in t.api(a, 'config/devices')})
+            # Without a device to keep, bootstrap still reports the cause as a failure.
+            broken = t.server(a, 'bootstrap', ok=False)
+            self.assertEqual(broken.returncode, 1)
+            self.assertIn('Символические ссылки запрещены', broken.stderr.decode())
 
 
 if __name__ == '__main__':

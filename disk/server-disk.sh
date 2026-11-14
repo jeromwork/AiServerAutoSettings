@@ -71,13 +71,17 @@ def ensure_cron():
         content=old.stdout+(b'\n' if old.stdout and not old.stdout.endswith(b'\n') else b'')+line+b'\n'
         subprocess.run(['crontab','-'],input=content,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=5)
     except (OSError,subprocess.SubprocessError):pass
+# Сбой одной папки (недопустимое имя, права доступа, ошибка REST, git не ответил) не должен лишать остальные папки обнаружения.
+FOLDER_ERRORS=(ValueError,OSError,subprocess.SubprocessError)
+def describe(e):return str(e) if isinstance(e,ValueError) else type(e).__name__+': '+str(e)
+def skipped(name,e):print('RemoteDisk: '+name+': '+describe(e),file=sys.stderr)
 def reconcile(api,identity):
     disk=Path.home()/'Disk';safe(disk)
     folders=api('config/folders');devices=[d['deviceID'] for d in api('config/devices') if d['deviceID']!=identity]
     if not disk.exists():return
     for p in sorted(disk.iterdir()):
-        if not p.is_dir() or p.is_symlink():continue
         try:
+            if not p.is_dir() or p.is_symlink():continue
             folder_path(p.name)
             matches=[f for f in folders if f['path'].rstrip('/')==str(p)]
             if len(matches)>1:raise ValueError('Несколько ID для одной папки')
@@ -90,11 +94,14 @@ def reconcile(api,identity):
             current['type']='sendreceive'
             current['maxConflicts']=-1
             missing=[d for d in devices if not any(x['deviceID']==d for x in current['devices'])]
-            ignores(p);exclude_git(p)
+            ignores(p)
+            # Исключения в Git — косметика (чистый git status): нет git или он завис — папку всё равно предлагаем.
+            try:exclude_git(p)
+            except FOLDER_ERRORS as e:skipped(p.name,e)
             if missing or not matches or conflict_changed:
                 current['devices'] += [dict(deviceID=d) for d in missing]
                 api('config/folders/'+urllib.parse.quote(folder_id,safe=''),'PUT',current)
-        except ValueError as e:print('RemoteDisk: '+p.name+': '+str(e),file=sys.stderr)
+        except FOLDER_ERRORS as e:skipped(p.name,e)
 
 def main():
     for path in (s,cfg,binary,s/'ports.json',s/'bootstrap.lock',s/'syncthing.log',s/'syncthing.pid'):safe(path)
@@ -167,8 +174,11 @@ def main():
             if 'deviceName' in data:device['name']=data['deviceName']
             if 'addresses' in data:device['addresses']=data['addresses']
             if device!=previous:api('config/devices/'+urllib.parse.quote(device_id,safe=''),'PUT',device)
+            # Устройство уже зарегистрировано: сбой обнаружения папок не отменяет знакомство, cron повторит расшаривание.
+            try:reconcile(api,identity)
+            except FOLDER_ERRORS as e:print('RemoteDisk: устройство зарегистрировано, папки сервера пока не обработаны: '+describe(e),file=sys.stderr)
+            print('{}');return
         reconcile(api,identity)
-        if action=='add-device':print('{}');return
         if action=='bootstrap':ensure_cron()
         print(json.dumps(dict(deviceId=identity,listen=ports['listen'])))
 try:main()
