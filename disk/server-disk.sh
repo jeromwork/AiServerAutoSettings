@@ -216,7 +216,7 @@ def main():
         script=s/'server-disk.sh'
         if not script.exists():raise ValueError('Сначала скопируйте server-disk.sh в ~/.local/share/remote-disk')
         for unit in ('remote-disk-folders.service','remote-disk-folders.timer'):safe(units/unit)
-        (units/'remote-disk-folders.service').write_text('[Unit]\nDescription=RemoteDisk folder discovery\n[Service]\nType=oneshot\nExecStart=/bin/bash "%h/.local/share/remote-disk/server-disk.sh" bootstrap\n')
+        (units/'remote-disk-folders.service').write_text('[Unit]\nDescription=RemoteDisk folder discovery\n[Service]\nType=oneshot\n# Runs every 2 s: keep successes out of the journal, errors (stderr) stay visible as warnings.\nStandardOutput=null\nSyslogLevel=warning\nLogLevelMax=notice\nExecStart=/bin/bash "%h/.local/share/remote-disk/server-disk.sh" bootstrap\n')
         (units/'remote-disk-folders.timer').write_text('[Unit]\nDescription=Discover and accept RemoteDisk folders every 2s\n[Timer]\nOnStartupSec=2\nOnUnitInactiveSec=2\nAccuracySec=1\n[Install]\nWantedBy=timers.target\n')
         subprocess.run(['systemctl','--user','daemon-reload'],check=True)
         subprocess.run(['systemctl','--user','enable','--now','remote-disk-folders.timer'],check=True)

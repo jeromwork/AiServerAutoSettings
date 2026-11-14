@@ -112,6 +112,8 @@ function Start-DiskComponent($StartupLease) {
     if(-not $script:DiskEngine){throw 'Не удалось получить собственный движок Syncthing'}
     Read-DiskState
     [void](Wait-DiskEngineReady)
+    # Folders accepted by an older build keep the 10-second delay until migrated; an upgrade never runs the installer.
+    try{Set-DiskWatcherDelay}catch{Write-DiskLog 'Задержка обнаружения изменений' $_}
     Exit-DiskEngineLock $StartupLease
     # Inherits the launcher's kill-on-close Job. Its exit ends this component,
     # so the existing supervisor restarts it even after a normal Syncthing exit.
