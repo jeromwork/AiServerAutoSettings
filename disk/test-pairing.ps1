@@ -38,6 +38,13 @@ function Invoke-DiskApi($Route,$Method='GET',$Body=$null) {
         return @{myID='LOCAL'}
     }
     $file=Join-Path $script:DiskHome 'device.json'
+    if($Route -eq 'config/folders' -and $Method -eq 'GET'){return}
+    if($Route -eq 'config/defaults/folder'){
+        $defaults=Join-Path $script:DiskHome 'defaults.json'
+        if($Method -eq 'GET'){if(Test-Path -LiteralPath $defaults){[IO.File]::ReadAllText($defaults)|ConvertFrom-Json}else{@{fsWatcherDelayS=10}};return}
+        if($Method -ne 'PATCH' -or $Body.fsWatcherDelayS -ne 2){throw 'Expected watcher defaults patch'}
+        Write-DiskUtf8 $defaults ($Body|ConvertTo-Json);return
+    }
     if($Route -eq 'config/devices'){if(Test-Path -LiteralPath $file){[IO.File]::ReadAllText($file)|ConvertFrom-Json};return}
     if($Route -eq 'config/devices/PEER' -and $Method -eq 'PUT'){
         Write-DiskUtf8 $file ($Body|ConvertTo-Json -Depth 20);return
@@ -72,6 +79,7 @@ function Wait-DiskTransport {Write-DiskUtf8 (Join-Path $script:DiskHome 'banner-
     Assert ($device.deviceID -ceq 'PEER' -and -not $device.autoAcceptFolders -and $device.addresses[0] -ceq 'tcp://127.0.0.1:22123') 'server device added with autoAcceptFolders=false'
     Assert ([IO.File]::ReadAllText((Join-Path $script:DiskHome 'server.txt')) -ceq 'PEER' -and (Test-Path (Join-Path $script:DiskHome 'banner-checked'))) 'pairing receipt saved after device exchange and transport checked'
     Assert (Test-Path -LiteralPath (Join-Path $script:DiskHome 'legacy-cleanup-v1')) 'ordinary installation performs the one-time legacy migration'
+    Assert (([IO.File]::ReadAllText((Join-Path $script:DiskHome 'defaults.json'))|ConvertFrom-Json).fsWatcherDelayS -eq 2) 'fresh installation sets two-second defaults for manual Tray acceptance'
     $before=(Get-FileHash -LiteralPath $file).Hash
     $null=Invoke-DiskFixture $bundle @('-Profile','fixture-profile','-HelpersReady')
     foreach($name in @('bootstrap-count','pair-count')){Assert ([IO.File]::ReadAllText((Join-Path $script:DiskHome $name)) -ceq '111') 'SSH bootstrap and add-device each succeed on the third attempt and are skipped on repeat install'}

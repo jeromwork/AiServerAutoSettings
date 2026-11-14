@@ -108,8 +108,10 @@ def reconcile(api,identity):
             folder_id=current['id'] if current else p.name
             if any(f['id']==folder_id and f['path'].rstrip('/')!=str(p) for f in folders):raise ValueError('ID занят')
             if not current:
-                current=api('config/defaults/folder');current.update(id=folder_id,label=p.name,path=str(p),type='sendreceive',paused=False,devices=[dict(deviceID=identity)],maxConflicts=-1,versioning=dict(type='staggered',params=dict(maxAge='0',cleanInterval='3600')),rescanIntervalS=60,fsWatcherEnabled=True)
+                current=api('config/defaults/folder');current.update(id=folder_id,label=p.name,path=str(p),type='sendreceive',paused=False,devices=[dict(deviceID=identity)],maxConflicts=-1,versioning=dict(type='staggered',params=dict(maxAge='0',cleanInterval='3600')),rescanIntervalS=60,fsWatcherEnabled=True,fsWatcherDelayS=2)
             conflict_changed=current.get('maxConflicts')!=-1 or current.get('type')!='sendreceive'
+            watcher_changed=current.get('fsWatcherDelayS')!=2
+            current['fsWatcherDelayS']=2
             current['type']='sendreceive'
             current['maxConflicts']=-1
             missing=[d for d in devices if not any(x['deviceID']==d for x in current['devices'])]
@@ -117,7 +119,7 @@ def reconcile(api,identity):
             # Исключения в Git — косметика (чистый git status): нет git или он завис — папку всё равно предлагаем.
             try:exclude_git(p)
             except FOLDER_ERRORS as e:skipped(p.name,e)
-            if missing or not matches or conflict_changed:
+            if missing or not matches or conflict_changed or watcher_changed:
                 current['devices'] += [dict(deviceID=d) for d in missing]
                 api('config/folders/'+urllib.parse.quote(folder_id,safe=''),'PUT',current)
         except FOLDER_ERRORS as e:skipped(p.name,e)

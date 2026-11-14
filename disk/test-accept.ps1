@@ -27,7 +27,7 @@ try{
     $custom=Join-Path $TestHome 'Custom folder';[void][IO.Directory]::CreateDirectory($custom)
     $ignore=Join-Path $custom '.stignore';Write-DiskUtf8 $ignore 'my own rules'
     $api=Join-Path $script:DiskHome 'fixture-api.json'
-    $initial=@{folders=@(@{id='Keep';path=$keepPath;type='receiveonly';paused=$true;maxConflicts=17;devices=@(@{deviceID='OTHER'})});devices=@(@{deviceID='PEER';addresses=@('tcp://127.0.0.1:22123');autoAcceptFolders=$false;name='Personal name'});writes=0;polls=0;noOffer=$false;race=$false}
+    $initial=@{folders=@(@{id='Keep';path=$keepPath;type='receiveonly';paused=$true;maxConflicts=17;devices=@(@{deviceID='OTHER'})});devices=@(@{deviceID='PEER';addresses=@('tcp://127.0.0.1:22123');autoAcceptFolders=$false;name='Personal name'});writes=0;patches=0;defaults=@{fsWatcherDelayS=10;rescanIntervalS=777;fsWatcherEnabled=$false};polls=0;noOffer=$false;race=$false}
     Write-DiskUtf8 $api ($initial|ConvertTo-Json -Depth 20)
     $mock=@'
 function Invoke-DiskSsh {throw 'Повторное знакомство через SSH запрещено тестом'}
@@ -43,6 +43,18 @@ function Invoke-DiskApi($Route,$Method='GET',$Body=$null) {
                 if($Method -ne 'POST'){throw 'Expected collection POST'}
                 $data.folders=@($data.folders)+@($Body);$data.writes++
             }
+        }
+        'config/defaults/folder' {
+            if($Method -eq 'GET'){$result=$data.defaults}else{
+                if($Method -cne 'PATCH' -or $Body.Keys.Count -ne 1 -or $Body.fsWatcherDelayS -ne 2){throw 'Expected only the watcher delay patch'}
+                $data.defaults.fsWatcherDelayS=2;$data.patches++
+            }
+        }
+        {$_ -like 'config/folders/*'} {
+            if($Method -cne 'PATCH' -or $Body.Keys.Count -ne 1 -or $Body.fsWatcherDelayS -ne 2){throw 'Expected only the watcher delay patch'}
+            $id=[Uri]::UnescapeDataString($Route.Substring('config/folders/'.Length))
+            $folder=@($data.folders|Where-Object {$_.id -ceq $id})[0]
+            $folder|Add-Member -Force fsWatcherDelayS 2;$data.patches++
         }
         'cluster/pending/folders' {
             $data.polls++
@@ -71,16 +83,18 @@ function Invoke-DiskApi($Route,$Method='GET',$Body=$null) {
     Assert ($default.label -ceq 'Default' -and $default.type -ceq 'sendreceive' -and 'PEER' -cin @($default.devices|ForEach-Object {$_.deviceID}) -and 'LOCAL' -cin @($default.devices|ForEach-Object {$_.deviceID})) 'accepted folder uses server ID and sendreceive with both devices'
     Assert ([IO.File]::ReadAllText($ignore) -ceq "my own rules`n#include .stignore-remoteagents`n") 'existing user rules are preserved and include appended after a missing newline'
     foreach($folder in @($default,$explicit)){
+        Assert ($folder.fsWatcherDelayS -eq 2) 'new folders detect filesystem changes after two seconds'
         Assert ($folder.maxConflicts -eq -1 -and $folder.versioning.type -ceq 'staggered' -and $folder.versioning.params.maxAge -ceq '0' -and $folder.versioning.params.cleanInterval -ceq '3600') 'new folders retain all conflicts and staggered versions forever'
         Assert ([IO.File]::ReadAllText((Join-Path $folder.path '.stignore-remoteagents')) -ceq [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'stignore.txt')).Replace("`r",'')) 'accepted default and external folders receive the managed ignore template'
     }
     $keep=@($data.folders|Where-Object {$_.id -ceq 'Keep'})[0]
     Assert ($keep.path -ceq $keepPath -and $keep.type -ceq 'receiveonly' -and $keep.paused -and $keep.maxConflicts -eq 17) 'existing folder path and options are preserved'
+    Assert ($keep.fsWatcherDelayS -eq 2 -and $data.patches -eq 2 -and $data.defaults.fsWatcherDelayS -eq 2 -and $data.defaults.rescanIntervalS -eq 777 -and -not $data.defaults.fsWatcherEnabled) 'installation patches only watcher delay in existing folders and defaults'
     $snapshot=ConvertTo-Json -InputObject $data.folders -Depth 20 -Compress
     $null=Invoke-DiskFixture $bundle @('-AcceptFile',$accept)
     $null=Invoke-DiskFixture $bundle @()
     $data=[IO.File]::ReadAllText($api)|ConvertFrom-Json
-    Assert ($data.writes -eq 2 -and $data.polls -eq 2 -and (ConvertTo-Json -InputObject $data.folders -Depth 20 -Compress) -ceq $snapshot) 'repeated installation and missing AcceptFile perform no folder writes or polling'
+    Assert ($data.writes -eq 2 -and $data.patches -eq 2 -and $data.polls -eq 2 -and (ConvertTo-Json -InputObject $data.folders -Depth 20 -Compress) -ceq $snapshot) 'repeated installation and missing AcceptFile perform no folder/default writes or pending polling'
     Assert ((Get-FileHash -LiteralPath $xml).Hash -ceq $before -and [IO.File]::ReadAllText($userFile) -ceq 'local data') 'installation preserves config.xml bytes and user files'
     Assert ([IO.File]::ReadAllText((Join-Path $script:DiskHome 'tray/syncthingtray.exe')) -ceq 'existing engine' -and [IO.File]::ReadAllText((Join-Path $script:DiskHome 'tray/syncthingtray.ini')) -ceq 'existing tray settings') 'installed engine and Tray settings remain intact'
     $data.race=$true;Write-DiskUtf8 $api ($data|ConvertTo-Json -Depth 30)
@@ -101,10 +115,19 @@ function Invoke-DiskApi($Route,$Method='GET',$Body=$null) {
         $data.folders+=@(@{id=$id;label=$name;path=$path;devices=@(@{deviceID='PEER'});type='receiveonly';paused=$true;maxConflicts=17})
         $laptop+=@(@{id=$name})
     }
-    Write-DiskUtf8 $api ($data|ConvertTo-Json -Depth 30);$snapshot=[IO.File]::ReadAllText($api)
+    Write-DiskUtf8 $api ($data|ConvertTo-Json -Depth 30);$patches=$data.patches
+    $expected=ConvertFrom-Json (ConvertTo-Json -InputObject $data.folders -Depth 30)
+    foreach($folder in $expected){$folder|Add-Member -Force fsWatcherDelayS 2}
+    $snapshot=ConvertTo-Json -InputObject @($expected) -Depth 30 -Compress
     Write-DiskUtf8 $accept (@{folders=$laptop}|ConvertTo-Json -Depth 10)
     $null=Invoke-DiskFixture $bundle @('-AcceptFile',$accept)
-    Assert ([IO.File]::ReadAllText($api) -ceq $snapshot -and (Get-FileHash -LiteralPath $xml).Hash -ceq $before) 'four existing disk-hex folders with server labels exit zero without writes or polling'
+    $data=[IO.File]::ReadAllText($api)|ConvertFrom-Json
+    Assert ($data.patches -eq $patches+4 -and (ConvertTo-Json -InputObject $data.folders -Depth 30 -Compress) -ceq $snapshot -and (Get-FileHash -LiteralPath $xml).Hash -ceq $before) 'four existing disk-hex folders retain every setting except the two-second watcher delay'
+    $snapshot=[IO.File]::ReadAllText($api);$null=Invoke-DiskFixture $bundle @()
+    Assert ([IO.File]::ReadAllText($api) -ceq $snapshot) 'install without AcceptFile is idempotent after migrating accepted folders'
+    $data.folders[0].fsWatcherDelayS=10;Write-DiskUtf8 $api ($data|ConvertTo-Json -Depth 30)
+    $null=Invoke-DiskFixture $bundle @();$data=[IO.File]::ReadAllText($api)|ConvertFrom-Json
+    Assert ($data.folders[0].fsWatcherDelayS -eq 2 -and $data.patches -eq $patches+5) 'install without AcceptFile also migrates a previously accepted folder'
     Assert (Test-DiskFolderAccepted @{id='Other name';path=$data.folders[0].path} $data.folders 'PEER') 'the same path is already accepted regardless of ID'
     Assert (-not (Test-DiskFolderAccepted @{id='Проект 1';path=(Join-Path $base 'Elsewhere')} $data.folders 'OTHER')) 'label match requires the server device'
     $pending=[pscustomobject]@{'disk-abcdefabcdefabcdefabcdef'=[pscustomobject]@{offeredBy=[pscustomobject]@{PEER=[pscustomobject]@{label='Русское имя'}}}}

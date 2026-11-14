@@ -337,6 +337,7 @@ class ServerTests(unittest.TestCase):
             for name in ('Existing', 'Проект 1'):
                 folder = t.folder(a, name)
                 self.assertEqual((folder['id'], folder['type']), (name, 'sendreceive'))
+                self.assertEqual(folder['fsWatcherDelayS'], 2)
                 self.assertEqual({d['deviceID'] for d in folder['devices']}, {a['deviceId'], b['deviceId']})
             # Repeat registration preserves the user's device settings and folder pauses.
             t.api(a, 'config/devices/' + b['deviceId'], 'PATCH', dict(paused=True, compression='never'))
@@ -355,6 +356,7 @@ class ServerTests(unittest.TestCase):
                 self.assertEqual({d['deviceID'] for d in t.folder(a, name)['devices']},
                                  {s['deviceId'] for s in t.sides})
                 self.assertEqual(t.folder(a, name)['type'], 'sendreceive')
+                self.assertEqual(t.folder(a, name)['fsWatcherDelayS'], 2)
             self.assertTrue(t.folder(a, 'Existing')['paused'])
             self.assertEqual((a['home'] / 'Disk/Existing/keep.txt').read_text(), 'Existing')
 
@@ -422,6 +424,81 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(all(not (target / n).exists() for n in denied))
             self.assertEqual((source / '.stignore').read_bytes(), before)
             self.assertEqual(t.folder(a, 'Shared')['type'], 'sendreceive')
+
+    def test_watcher_delay_is_migrated_idempotently_by_every_server_entry_point(self):
+        with Stand(2) as t:
+            a, b = t.sides
+            (a['home'] / 'Disk/Existing').mkdir(parents=True)
+            t.register(a, b)
+            # A folder outside Disk belongs to the user, not to server discovery.
+            external = t.api(a, 'config/defaults/folder')
+            external.update(id='external', path=str(a['home'] / 'Elsewhere'),
+                            paused=True, fsWatcherDelayS=17)
+            t.api(a, 'config/folders/external', 'PUT', external)
+            outside = t.folder(a, 'external')
+            for action in ('bootstrap', 'reconcile', 'add-device'):
+                with self.subTest(action=action):
+                    t.api(a, 'config/folders/Existing', 'PATCH', dict(
+                        fsWatcherDelayS=10, paused=True, rescanIntervalS=777,
+                        fsWatcherEnabled=False))
+                    before = t.folder(a, 'Existing')
+                    data = dict(deviceId=b['deviceId'], deviceName=b['home'].name) if action == 'add-device' else None
+                    t.server(a, action, data)
+                    self.assertEqual(t.folder(a, 'Existing'), dict(before, fsWatcherDelayS=2))
+                    self.assertEqual(t.folder(a, 'external'), outside)
+                    # Count actual REST folder PUTs through a proxy: a repeat has none.
+                    ports_file = a['state'] / 'ports.json'
+                    ports = json.loads(ports_file.read_text())
+                    with SlowFolderWrites(a['gui'], 0) as proxy:
+                        ports_file.write_text(json.dumps(dict(ports, gui=proxy.port)))
+                        try:
+                            t.server(a, action, data)
+                        finally:
+                            ports_file.write_text(json.dumps(ports))
+                        self.assertEqual(proxy.held, 0)
+                    self.assertEqual(t.folder(a, 'Existing'), dict(before, fsWatcherDelayS=2))
+
+    def test_powershell_watcher_migration_acceptance_and_native_defaults_with_real_syncthing(self):
+        pwsh = os.environ.get('PWSH') or str(Path.home() / '.cache/pwsh-test/pwsh')
+        with Stand(2) as t:
+            a, b = t.sides
+            (a['home'] / 'Disk/Offered').mkdir(parents=True)
+            t.register(a, b)
+            t.register(b, a)
+            wait(lambda: 'Offered' in t.api(b, 'cluster/pending/folders'), 'folder offered for PowerShell acceptance')
+            folder = t.api(b, 'config/defaults/folder')
+            folder.update(id='user папка', path=str(b['home'] / 'Custom'), paused=True,
+                          type='receiveonly', fsWatcherDelayS=10, maxConflicts=17,
+                          rescanIntervalS=777, fsWatcherEnabled=False)
+            t.api(b, 'config/folders', 'POST', folder)
+            route = 'config/folders/' + urllib.parse.quote(folder['id'], safe='')
+            before = t.api(b, route)
+            defaults = t.api(b, 'config/defaults/folder')
+            script = t.root / 'local-settings.ps1'
+            common = str(HERE / 'Disk.Common.ps1').replace("'", "''")
+            script.write_text(". '" + common + "'\n" + """
+$request=[Console]::In.ReadToEnd()|ConvertFrom-Json
+$script:Gui=$request.gui;$script:ApiKey=$request.key;$script:DiskHome=Split-Path $request.path -Parent
+Accept-DiskFolders @(@{id='Offered';path=$request.path}) $request.peer $request.local
+Set-DiskWatcherDelay
+""")
+            request = dict(gui='127.0.0.1:' + str(b['gui']), key=b['key'],
+                           path=str(b['home'] / 'Accepted'), peer=a['deviceId'], local=b['deviceId'])
+            encoded = (json.dumps(request, ensure_ascii=False) + '\r\n').encode()
+            run([pwsh, '-NoProfile', '-NonInteractive', '-File', script],
+                env={**os.environ, 'USERPROFILE': str(b['home'])}, stdin=encoded)
+            self.assertEqual(t.api(b, route), dict(before, fsWatcherDelayS=2))
+            self.assertEqual(t.folder(b, 'Offered')['fsWatcherDelayS'], 2)
+            self.assertEqual(t.api(b, 'config/defaults/folder'), dict(defaults, fsWatcherDelayS=2))
+            config = t.api(b, 'config')
+            run([pwsh, '-NoProfile', '-NonInteractive', '-File', script],
+                env={**os.environ, 'USERPROFILE': str(b['home'])}, stdin=encoded)
+            self.assertEqual(t.api(b, 'config'), config)
+            # Native/manual acceptance starts with the defaults, without our Accept-DiskFolders.
+            native = t.api(b, 'config/defaults/folder')
+            native.update(id='Native', path=str(b['home'] / 'Native'), paused=True)
+            t.api(b, 'config/folders', 'POST', native)
+            self.assertEqual(t.folder(b, 'Native')['fsWatcherDelayS'], 2)
 
     def test_existing_ids_and_settings_survive_discovery(self):
         with Stand() as t:

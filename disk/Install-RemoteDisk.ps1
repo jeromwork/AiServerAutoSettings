@@ -87,6 +87,7 @@ try {
         $step='Проверка связи';Wait-DiskTransport
     }
     $step='Приём папок';if($folders.Count){Accept-DiskFolders $folders $peer ([string]$local.myID)}
+    $step='Задержка обнаружения изменений';Set-DiskWatcherDelay
     $base=Get-DiskBase;[void][IO.Directory]::CreateDirectory($base);[void](Ensure-DiskNavPane $base)
 }catch{$failure=$_}finally{
     if($engineLease){

@@ -354,7 +354,17 @@ function Accept-DiskFolders($Folders,[string]$Peer,[string]$LocalId) {
             Write-DiskProgress $message;Write-DiskLog $message
         }
         Set-DiskFolderIgnores $folder.path
-        [void](Invoke-DiskApi 'config/folders' POST @{id=$id;label=$folder.id;path=$folder.path;type='sendreceive';maxConflicts=-1;versioning=@{type='staggered';params=@{maxAge='0';cleanInterval='3600'}};devices=@(@{deviceID=$LocalId},@{deviceID=$Peer})})
+        [void](Invoke-DiskApi 'config/folders' POST @{id=$id;label=$folder.id;path=$folder.path;type='sendreceive';fsWatcherDelayS=2;maxConflicts=-1;versioning=@{type='staggered';params=@{maxAge='0';cleanInterval='3600'}};devices=@(@{deviceID=$LocalId},@{deviceID=$Peer})})
+    }
+}
+# REST patches keep paths, versions, ignores and all unrelated user settings intact.
+function Set-DiskWatcherDelay {
+    $defaults=Invoke-DiskApi 'config/defaults/folder'
+    if($defaults.fsWatcherDelayS -ne 2){[void](Invoke-DiskApi 'config/defaults/folder' PATCH @{fsWatcherDelayS=2})}
+    foreach($folder in @(Invoke-DiskApi 'config/folders')){
+        if($folder.fsWatcherDelayS -eq 2){continue}
+        $route='config/folders/'+[Uri]::EscapeDataString([string]$folder.id)
+        [void](Invoke-DiskApi $route PATCH @{fsWatcherDelayS=2})
     }
 }
 function Set-DiskServerDevice([string]$Peer) {

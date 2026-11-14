@@ -58,6 +58,8 @@ exec sleep 60
     $mock=@'
 function Get-CimInstance {param($ClassName,$Filter,$ErrorAction)}
 function Invoke-DiskApi($Route,$Method='GET',$Body=$null){
+    if($Method -ceq 'GET' -and $Route -ceq 'config/defaults/folder'){return @{fsWatcherDelayS=2}}
+    if($Method -ceq 'GET' -and $Route -ceq 'config/folders'){return}
     if($Route -cne 'system/status'){throw ('Unexpected REST: '+$Route)}
     $borrow=Join-Path $script:DiskHome 'borrow'
     if(Test-Path -LiteralPath $borrow){return @{myID='LOCAL'}}
