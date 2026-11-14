@@ -93,9 +93,7 @@ Assert (-not (Ensure-DiskNavPane)) 'unreadable Disk base stays inside the guard'
 Assert ($script:logged -eq 2) 'unreadable Disk base is logged'
 Remove-DiskNavPane
 $wizard=[IO.File]::ReadAllText((Join-Path $repo 'build/Wizard.Common.ps1'))
-$monitor=[IO.File]::ReadAllText((Join-Path $repo 'disk/Disk.Status.ps1'))
-$sync=[IO.File]::ReadAllText((Join-Path $repo 'disk/Sync-RemoteDiskFolders.ps1'))
-Assert ($wizard.Contains('[void](Ensure-DiskNavPane $base)')) 'config and wizard Disk action ensure entry'
-Assert ($monitor.Contains('[void](Ensure-DiskNavPane)')) 'enabled Disk monitor ensures entry at startup and periodically'
-Assert ($sync.Contains('[void](Ensure-DiskNavPane ')) 'folder reconciliation ensures entry even before engine probe'
+Assert ($wizard.Contains('[void](Ensure-DiskNavPane $base)')) 'wizard Disk action ensures entry'
+$install=[IO.File]::ReadAllText((Join-Path $repo 'disk/Install-RemoteDisk.ps1'))
+Assert ($install.Contains('[void](Ensure-DiskNavPane $base)')) 'installation ensures entry without a background monitor'
 Write-Output ('navpane: '+$script:count+' passed')

@@ -1,7 +1,6 @@
 ﻿#requires -Version 5.1
 . (Join-Path $PSScriptRoot 'Setup.Common.ps1')
 . (Join-Path (Split-Path $PSScriptRoot -Parent) 'disk/Disk.Common.ps1')
-. (Join-Path (Split-Path $PSScriptRoot -Parent) 'disk/Disk.Union.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Server.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Engine.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Session.ps1')
@@ -470,33 +469,10 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             if($Request.step -eq 'Proxy'){return @{ok=$true;summary='Пропущено: сервер выходит в интернет как сейчас, прокси не менялся'}}
             return @{ok=$true;summary='Пропущено по вашему выбору'}
         }
-        'DiskTree' {
-            Send-WizardHelpers $Root $Bundle
-            $relative=[string]$Request.path
-            $command=Get-DiskTreeCommand $relative
-            $server=ConvertFrom-Json (Convert-TransportLF (Invoke-WizardSsh $Root $command))
-            $base=[string]$Request.base;if(-not $base){$base=Get-DiskBase}
-            $union=Get-DiskUnion $server $base $relative;$selection=Read-DiskSelection
-            if($Request.fresh){$selection=@{schema=1;paths=@()}}
-            # The install-time freeze placeholder is not a user choice: show the default again.
-            if($null -eq $selection -or $selection.placeholder){$selection=@{schema=1;paths=@($union.rows|Where-Object {$_.path -notmatch '/' -and $_.kind -eq 'directory'}|ForEach-Object {$_.path})}}
-            Add-DiskTreeState $union $base
-            $result=@{union=$union;selection=$selection;base=$base}
-            if($server.unsupportedName){$result.unsupportedName=[string]$server.unsupportedName}
-            return $result
-        }
         'DiskNavPane' {
             $base=[string]$Request.base;if(-not $base){$base=Get-DiskBase}
             if($Request.install){[void](Ensure-DiskNavPane $base)}
             return Test-DiskNavPane $base
-        }
-        'DiskRevert' {
-            $lock=[IO.File]::Open((Join-Path $diskHome 'folders.lock'),'OpenOrCreate','ReadWrite','None')
-            try{return Invoke-DiskRevert ([string]$Request.path)}finally{$lock.Dispose()}
-        }
-        'DiskExternal' {
-            if($Request.action -cne 'list'){throw 'DiskExternal поддерживает только action=list'}
-            return @{items=@(Get-DiskExternalList)}
         }
         'Disk' {
             Send-WizardHelpers $Root $Bundle
@@ -507,40 +483,29 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
                 return @{ok=$false;pending='disk';operation=$op;summary=(Get-WizardOperationText $op 'установка сервера диска')}
             }
             Resolve-WizardDiskServer $Root $Bundle $Request
-            $base=[IO.Path]::GetFullPath([string]$Request.base)
+            [void][IO.Directory]::CreateDirectory($diskHome)
+            $base=Get-DiskBase
+            if($Request.base){$base=Get-DiskNavPaneBase ([string]$Request.base);Set-DiskBase $base}
             $profile=Find-InstallProfile $Root
-            if(Test-Path (Join-Path $diskHome 'state/config.xml')){
-                Read-DiskState
-                [void](Set-DiskBase $base)
+            $arguments=@('-Profile',$profile,'-HelpersReady')
+            $accept=''
+            # Only explicitly supplied folders are accepted. Missing folders leaves offers to Tray.
+            if($null -ne $Request.folders){
+                $folders=@(foreach($folder in $Request.folders){
+                    if($folder -is [string]){@{id=$folder}}else{$folder}
+                })
+                $accept=Join-Path $Root ('state/disk-accept-'+[guid]::NewGuid().ToString('N')+'.json')
+                Write-TransportJson $accept @{folders=$folders}
+                $arguments+=@('-AcceptFile',$accept)
             }
-            [void][IO.Directory]::CreateDirectory($diskHome);[void][IO.Directory]::CreateDirectory($base)
-            Write-DiskUtf8 (Join-Path $diskHome 'base.txt') $base
-            # Older callers send only paths. Omitted fields preserve device choices; explicit empties clear them.
-            $savedSelection=Read-DiskSelection
-            $payload=@{schema=1;paths=@($Request.paths);directions=$savedSelection.directions;external=@(Read-DiskExternal)}
-            foreach($field in @('directions','external')){
-                $present=if($Request -is [Collections.IDictionary]){$Request.Contains($field)}else{$null -ne $Request.PSObject.Properties[$field]}
-                if($present){$payload[$field]=$Request.$field}
-            }
-            $choice=Join-Path $Root 'state/wizard-selection.json';Write-TransportJson $choice $payload
-            $needsInstall= -not (Test-Path (Join-Path $diskHome 'state/config.xml')) -or -not (Test-Path (Join-Path $diskHome 'tray/syncthingtray.exe'))
-            if(-not $needsInstall){try{Read-DiskState;$probe=Invoke-DiskApi 'system/status';$needsInstall= -not $probe.myID}catch{$needsInstall=$true}}
-            if($needsInstall){
-                # Freeze selection until the explicit Apply below.
-                # The placeholder flag keeps it distinguishable from an explicit empty choice after an interruption.
-                if(-not (Test-Path (Join-Path $diskHome 'selection.json'))){Write-TransportJson (Join-Path $diskHome 'selection.json') @{schema=1;paths=@();placeholder=$true}}
-                Invoke-InstallChild $Bundle 'disk/Install-RemoteDisk.ps1' @('-Profile',$profile,'-HelpersReady') -TimeoutSeconds 900
-            }
-            Set-WizardDiskChannel $Root
-            Read-DiskState;$local=Invoke-DiskApi 'system/status';if(-not $local.myID){throw 'Syncthing не отвечает; повторите установку диска'}
-            # The engine is installed and answers: hand it to the tray's supervisor BEFORE the selection. The engine started by
-            # this step dies with the step's job; if a folder then fails, the supervised engine keeps running and the tree loads.
-            Update-LauncherConfig $Root {param($c) Set-ConfigDefault $c components ([pscustomobject]@{});Set-ConfigDefault $c.components disk ([pscustomobject]@{});$c.components.disk|Add-Member -Force enabled $true}
+            try{
+                Set-WizardDiskChannel $Root
+                Invoke-InstallChild $Bundle 'disk/Install-RemoteDisk.ps1' $arguments -TimeoutSeconds 900
+            }finally{if($accept -and (Test-Path -LiteralPath $accept)){Remove-Item -LiteralPath $accept -Force}}
+            Update-LauncherConfig $Root {param($c) Set-ConfigDefault $c components ([pscustomobject]@{});Set-ConfigDefault $c.components disk ([pscustomobject]@{});$c.components.disk|Add-Member -Force enabled $true;if($c.wizard){$c.wizard.PSObject.Properties.Remove('skipDisk')}}
             $hold=Join-Path $Root 'state/disk-reconfigure';if(Test-Path $hold){Remove-Item -LiteralPath $hold}
-            Invoke-InstallChild $Bundle 'disk/Select-Disk.ps1' @('-Home',$Root,'-Action','Apply','-SelectionFile',$choice) -TimeoutSeconds 900
-            Update-LauncherConfig $Root {param($c) if($c.wizard){$c.wizard.PSObject.Properties.Remove('skipDisk')}}
-            [void](Ensure-DiskNavPane $base) # cosmetic: never fails the Disk step
-            return @{ok=$true;summary='Выбор применён; передача файлов продолжается. Это ещё не подтверждение завершённой синхронизации'}
+            [void](Ensure-DiskNavPane $base)
+            return @{ok=$true;summary='Диск установлен. Принимайте папки и проверяйте передачу файлов в Syncthing Tray'}
         }
         'AccountList' {
             # Public adapter only, no vendor/bootstrap/login needed to list account names.
