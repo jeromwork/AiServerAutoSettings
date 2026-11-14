@@ -1,0 +1,104 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Text.RegularExpressions;
+
+namespace RemoteAgents.Launcher
+{
+    internal enum DiskExplorerKind { Local, ServerOnly, Pending, Syncing, Synced, Paused, Error, Offline, Unavailable }
+    internal sealed class DiskFolderState
+    {
+        internal string Id = "", Name = "", Path = "", Detail = "";
+        internal bool ServerOnly, Paused;
+        internal DiskExplorerKind Kind = DiskExplorerKind.Pending;
+        internal int Percent;
+        internal Dictionary<string, object> Config;
+        internal DiskFolderState Copy() { return (DiskFolderState)MemberwiseClone(); }
+        internal string Tooltip
+        {
+            get {
+                switch (Kind) {
+                    case DiskExplorerKind.ServerOnly: return "Только на сервере. Правый клик → Забрать с сервера";
+                    case DiskExplorerKind.Synced: return "Синхронизировано с сервером";
+                    case DiskExplorerKind.Syncing: return "Синхронизируется: " + Percent + "%";
+                    case DiskExplorerKind.Paused: return "Синхронизация приостановлена";
+                    case DiskExplorerKind.Offline: return "Нет соединения с сервером";
+                    case DiskExplorerKind.Error: return "Ошибка синхронизации" + (Detail.Length > 0 ? ": " + Detail : "");
+                    case DiskExplorerKind.Unavailable: return "Локальный Syncthing недоступен";
+                    default: return "Ожидается подтверждение Syncthing";
+                }
+            }
+        }
+    }
+    internal sealed class DiskSnapshot
+    {
+        internal readonly List<DiskFolderState> Folders = new List<DiskFolderState>();
+        internal bool Connected;
+        internal static double Number(Dictionary<string, object> m, string key)
+        { double n; return double.TryParse(Json.Str(m, key), NumberStyles.Float, CultureInfo.InvariantCulture, out n) ? n : 0; }
+        internal static DiskFolderState Status(DiskFolderState row, Dictionary<string, object> local, Dictionary<string, object> remote, bool connected)
+        {
+            row.Detail = Json.Str(local, "error");
+            string state = Json.Str(local, "state");
+            double total = Number(local, "globalBytes"), need = Number(local, "needBytes");
+            double localPercent = total > 0 ? 100 * Math.Max(0, total - need) / total : Number(local, "needTotalItems") > 0 ? 0 : 100;
+            double remotePercent = remote.ContainsKey("completion") ? Number(remote, "completion") : 0;
+            row.Percent = (int)Math.Max(0, Math.Min(100, Math.Floor(Math.Min(localPercent, remotePercent))));
+            if (row.Paused || state == "paused" || Json.Str(remote, "remoteState") == "paused") row.Kind = DiskExplorerKind.Paused;
+            else if (state == "error" || row.Detail.Length > 0 || Number(local, "pullErrors") > 0) row.Kind = DiskExplorerKind.Error;
+            else if (!connected) row.Kind = DiskExplorerKind.Offline;
+            else if (state.Length == 0 || !new[] { "needBytes", "needTotalItems", "globalBytes" }.All(local.ContainsKey) ||
+                !new[] { "completion", "needItems", "needBytes", "needDeletes", "remoteState" }.All(remote.ContainsKey)) row.Kind = DiskExplorerKind.Pending;
+            else if (Json.Str(remote, "remoteState") != "valid" || !new[] { "idle", "syncing", "sync-preparing", "sync-waiting", "scanning", "scan-waiting", "cleaning", "clean-waiting" }.Contains(state)) row.Kind = DiskExplorerKind.Pending;
+            else if (state == "idle" && row.Percent == 100 && Number(local, "needTotalItems") == 0 && Number(local, "needBytes") == 0 &&
+                Number(remote, "needItems") == 0 && Number(remote, "needBytes") == 0 && Number(remote, "needDeletes") == 0 && Json.Str(remote, "remoteState") == "valid") row.Kind = DiskExplorerKind.Synced;
+            else { row.Kind = DiskExplorerKind.Syncing; row.Percent = Math.Min(99, row.Percent); }
+            return row;
+        }
+    }
+    internal sealed class DiskShellRequest
+    {
+        internal string Action, Path;
+        internal static DiskShellRequest Parse(string[] args)
+        {
+            int at = Array.IndexOf(args, "--disk-shell");
+            if (at < 0) return null;
+            if (at + 2 >= args.Length || !new[] { "download", "keep-server", "add" }.Contains(args[at + 1])) throw new ArgumentException("Неизвестная команда Диска");
+            return new DiskShellRequest { Action = args[at + 1], Path = DiskPaths.Full(args[at + 2]) };
+        }
+    }
+    internal static class DiskPaths
+    {
+        internal static bool ValidName(string name)
+        {
+            return !string.IsNullOrWhiteSpace(name) && name != "." && name != ".." && name.TrimEnd(' ', '.') == name &&
+                !name.Any(c => c < 32 || "<>:\"/\\|?*".IndexOf(c) >= 0) &&
+                !Regex.IsMatch(name, @"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])($|\.)", RegexOptions.IgnoreCase);
+        }
+        internal static string Full(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path) || path.IndexOfAny(new[] { '"', '\r', '\n', '\0' }) >= 0 || !System.IO.Path.IsPathRooted(path) ||
+                path.StartsWith(@"\\?\") || path.StartsWith(@"\\.\")) throw new IOException("Нужен обычный абсолютный путь к папке");
+            string full = System.IO.Path.GetFullPath(path);
+            return full == System.IO.Path.GetPathRoot(full) ? full : full.TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar);
+        }
+        internal static bool Same(string a, string b) { return string.Equals(Full(a), Full(b), StringComparison.OrdinalIgnoreCase); }
+        internal static bool Within(string path, string parent)
+        { return Same(path, parent) || Full(path).StartsWith(Full(parent).TrimEnd(System.IO.Path.DirectorySeparatorChar) + System.IO.Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase); }
+        internal static void Plain(string path)
+        {
+            for (string p = System.IO.Path.GetFullPath(path); !string.IsNullOrEmpty(p); p = System.IO.Path.GetDirectoryName(p))
+                if ((Directory.Exists(p) || File.Exists(p)) && (File.GetAttributes(p) & FileAttributes.ReparsePoint) != 0) throw new IOException("Папка или её родитель является ссылкой");
+        }
+        internal static void Available(string path, string root, IEnumerable<DiskFolderState> configured)
+        {
+            Plain(path);
+            if (Same(path, root) || Within(root, path) || Same(path, System.IO.Path.GetPathRoot(path))) throw new IOException("Нельзя подключить корень диска или родителя Disk");
+            if (File.Exists(path)) throw new IOException("Путь занят файлом");
+            foreach (var row in configured.Where(f => !f.ServerOnly))
+                if (Within(path, row.Path) || Within(row.Path, path)) throw new IOException("Путь пересекается с папкой Syncthing");
+        }
+    }
+}

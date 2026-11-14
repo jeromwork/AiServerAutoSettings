@@ -51,6 +51,13 @@
     <Compile Include="../DiskChoice.cs" Link="DiskChoice.cs" />
     <Compile Include="LegacyCleanupTests.cs" />
     <Compile Include="../LegacyCleanup.cs" Link="LegacyCleanup.cs" />
+    <Compile Include="DiskExplorerTests.cs" />
+    <Compile Include="../DiskShellModel.cs" Link="DiskShellModel.cs" />
+    <Compile Include="../DiskShellCommands.cs" Link="DiskShellCommands.cs" />
+    <Compile Include="../DiskSyncthingClient.cs" Link="DiskSyncthingClient.cs" />
+    <Compile Include="../DiskExplorerMetadata.cs" Link="DiskExplorerMetadata.cs" />
+    <Compile Include="../DiskExplorerRegistry.cs" Link="DiskExplorerRegistry.cs" />
+    <Compile Include="../DiskExplorerController.cs" Link="DiskExplorerController.cs" />
     <Compile Include="../ServerOperations.cs" Link="ServerOperations.cs" />
   </ItemGroup>
 </Project>
