@@ -6,9 +6,9 @@ $bundle=Split-Path $PSScriptRoot -Parent
 if(-not (Test-Path (Join-Path $bundle 'transport/Transport.Common.ps1'))){$bundle=Split-Path (Split-Path $bundle -Parent) -Parent}
 . (Join-Path $bundle 'transport/Transport.Common.ps1')
 function Get-ControlMonitorStatus([string]$Root) {
-    $result=@{ok=$false;summary='Управление выключено';processAlive=$false;lastContact=$null;updatedAt=[DateTime]::UtcNow.ToString('o')}
+    $result=@{ok=$false;summary='Управление выключено';processAlive=$false;managed=$false;lastContact=$null;updatedAt=[DateTime]::UtcNow.ToString('o')}
     $base=Join-Path $env:LOCALAPPDATA 'RemoteAgents/control'
-    if(Test-Path -LiteralPath (Join-Path $Root 'managed-control/control.pid')){$base=Join-Path $Root 'managed-control'}
+    if(Test-Path -LiteralPath (Join-Path $Root 'managed-control/control.pid')){$base=Join-Path $Root 'managed-control';$result.managed=$true}
     try {
         $pidFile=Join-Path $base 'control.pid';if(-not (Test-Path -LiteralPath $pidFile)){return $result}
         $id=0;if(-not [int]::TryParse([IO.File]::ReadAllText($pidFile).Trim(),[ref]$id)){return $result}
@@ -31,12 +31,14 @@ function Restart-ManagedControl([string]$Root){
     & (Join-Path $bundle 'Start-WindowsControl.ps1') -Install -LauncherHome $Root *> $null
 }
 function Update-ControlSupervision([string]$Root,$Status,$State,[DateTime]$Now){
-    if($Status.ok){$State.failures=0}else{$State.failures++}
-    if($State.failures -lt 3 -or $Now -lt $State.nextRestart){return}
-    # Only the managed bridge belongs to this launcher. No action on a foreign PID.
-    if(Test-Path (Join-Path $Root 'managed-control/control.pid')){
-        try{Restart-ManagedControl $Root}catch{}
+    # A manually installed bridge may supply status, but never belongs to this supervisor.
+    if($Status.processAlive -and -not $Status.managed){$State.failures=0;return}
+    if($Status.processAlive){
+        if($Status.ok){$State.failures=0}else{$State.failures++}
+        if($State.failures -lt 3 -or $Now -lt $State.nextRestart){return}
     }
+    # A missing/dead/reused managed PID needs a start now, even during the heartbeat grace period.
+    try{Restart-ManagedControl $Root}catch{}
     $State.failures=0;$State.nextRestart=$Now.AddSeconds(120)
 }
 if($LibraryOnly){return}

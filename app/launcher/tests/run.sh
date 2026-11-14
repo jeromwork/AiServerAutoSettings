@@ -52,6 +52,7 @@ pwsh=${PWSH:-$HOME/.cache/pwsh-test/pwsh}
   timeout 120 python3 "$repo/transport/test-server-catalog.py"
   timeout 120 node "$repo/accounts/test-accounts.mjs"
   timeout 120 python3 "$here/test_build.py"
+  timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-control-supervision.ps1" -TestHome "$testdir/control" < /dev/null
   timeout 120 python3 "$here/test_bridge_health.py"
   timeout 120 python3 "$here/test_wizard_boundary.py"
   timeout 120 python3 "$here/test_server_operations.py"
