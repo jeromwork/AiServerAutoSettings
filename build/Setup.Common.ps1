@@ -96,7 +96,7 @@ function Remove-ExplorerNavPane([string]$LauncherRoot='') {
     Remove-DiskNavPane
     . (Join-Path (Split-Path $PSScriptRoot -Parent) 'disk/Disk.Common.ps1')
     if($LauncherRoot){$c=Read-TransportJson (Join-Path $LauncherRoot 'config.json');if($c.disk.home){$script:DiskHome=[string]$c.disk.home}}
-    Remove-DiskExplorer
+    Remove-DiskLegacy
 }
 function Test-StatusFresh([string]$Root,[string]$Name){
     $file=Join-Path $Root ('status/'+$Name+'.json')

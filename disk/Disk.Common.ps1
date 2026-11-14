@@ -18,17 +18,9 @@ function Write-DiskProgress([string]$Text) {
     try{[IO.File]::AppendAllText($env:REMOTEAGENTS_WIZARD_PROGRESS,((@{text=$Text}|ConvertTo-Json -Compress)+"`n"),(New-Object Text.UTF8Encoding($false)))}catch{}
 }
 function Quote-Disk([string]$Value) {'"'+[regex]::Replace([regex]::Replace($Value,'(\\*)"','$1$1\"'),'(\\+)$','$1$1')+'"'}
-# Valid project names in our own .stignore refusal are context, even when they look like long tokens.
 function Protect-DiskFailureText([string]$Text) {
-    $names=@();$safe=$Text
-    foreach($m in [regex]::Matches($Text,'(^|: )([\p{L}\p{N}_. -]{1,128})(?=: Чужой \.stignore)')){
-        $name=$m.Groups[2].Value;$placeholder='diskfolder'+$names.Count
-        $safe=$safe.Replace($name+': Чужой .stignore',$placeholder+': Чужой .stignore');$names+=@($name)
-    }
-    if(Get-Command Protect-TransportText -ErrorAction SilentlyContinue){$safe=Protect-TransportText $safe}
-    else{$safe=$safe -replace '[A-Za-z0-9+/_=-]{20,}','<secret>' -replace '://[^/@\s]+@','://<auth>@'}
-    for($i=0;$i -lt $names.Count;$i++){$safe=$safe.Replace(('diskfolder'+$i+': Чужой .stignore'),($names[$i]+': Чужой .stignore'))}
-    $safe
+    if(Get-Command Protect-TransportText -ErrorAction SilentlyContinue){return Protect-TransportText $Text}
+    $Text -replace '[A-Za-z0-9+/_=-]{20,}','<secret>' -replace '://[^/@\s]+@','://<auth>@'
 }
 # A server refusal is a useful cause. Native tools' arbitrary stderr still stays out of the UI.
 function Get-DiskServerFailure([string]$Text) {
@@ -91,31 +83,18 @@ function Invoke-DiskSsh($Command,[switch]$Direct,[string]$InputText='',[string]$
     }else{$args+=@('-F','NUL','-p',[string]$localPort,'-i',$c.keyPath,'-o',('HostKeyAlias='+$c.serverAddress),'-o',('UserKnownHostsFile="'+$c.knownHostsPath.Replace('\','/')+'"'),'-o','IdentitiesOnly=yes',($c.login+'@127.0.0.1'))}
     Invoke-DiskProcess $c.sshExecutable ($args+@($Command)) $InputText $OutputFile -TimeoutSeconds $TimeoutSeconds
 }
-function Get-DiskTreeCommand([string]$RelativePath='') {
-    $command='bash "$HOME/.local/share/remote-disk/server-disk.sh" tree'
-    if($RelativePath){
-        Assert-SelectionPath $RelativePath
-        # Quote a literal argument for the remote POSIX shell (names may contain apostrophes).
-        $quote=[string][char]39;$escape=$quote+'"'+$quote+'"'+$quote
-        $command+=' '+$quote+$RelativePath.Replace($quote,$escape)+$quote
-    }
-    $command
-}
-function Invoke-DiskServer($Action,$Data=$null,[switch]$Direct,[string]$OutputFile='') {
+function Invoke-DiskServer($Action,$Data=$null,[switch]$Direct) {
     $cmd='bash "$HOME/.local/share/remote-disk/server-disk.sh" '+$Action
-    $inputText=''
-    if($Action -eq 'tree'){$cmd=Get-DiskTreeCommand ([string]$Data.path)}
-    elseif($Data){
-        $encoded=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($Data|ConvertTo-Json -Depth 20 -Compress)))
-        if($Action -eq 'verify-selection'){$cmd+=' --stdin';$inputText=$encoded}else{$cmd+=' '+$encoded}
-    }
-    $text=Invoke-DiskSsh $cmd -Direct:$Direct -OutputFile $OutputFile -InputText $inputText
-    if(-not $OutputFile -and $text){$value=$text|ConvertFrom-Json;if($null -ne $value){foreach($item in $value){$item}}}
+    if($Data){$cmd+=' '+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($Data|ConvertTo-Json -Depth 20 -Compress)))}
+    $text=Invoke-DiskSsh $cmd -Direct:$Direct
+    if($text){$value=$text|ConvertFrom-Json;foreach($item in $value){if($null -ne $item){$item}}}
 }
 function Invoke-DiskApi($Route,$Method='GET',$Body=$null) {
     if(-not $script:DiskHome){$script:DiskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk'}
     if(-not $script:Gui -or -not $script:ApiKey){Read-DiskState}
-    $args=@{Uri=('http://'+$script:Gui+'/rest/'+$Route);Method=$Method;Headers=@{'X-API-Key'=$script:ApiKey};TimeoutSec=5;UseBasicParsing=$true}
+    $endpoint=$null
+    if(-not [Uri]::TryCreate(('http://'+$script:Gui),[UriKind]::Absolute,[ref]$endpoint) -or $endpoint.Host -cne '127.0.0.1' -or $endpoint.UserInfo -or $endpoint.Query -or $endpoint.Fragment -or $endpoint.AbsolutePath -cne '/'){throw 'REST Syncthing должен слушать только 127.0.0.1'}
+    $args=@{Uri=('http://'+$script:Gui+'/rest/'+$Route);Method=$Method;Headers=@{'X-API-Key'=$script:ApiKey};TimeoutSec=5;UseBasicParsing=$true;MaximumRedirection=0}
     if($null -ne $Body){$args.Body=[Text.Encoding]::UTF8.GetBytes(($Body|ConvertTo-Json -Depth 30 -Compress));$args.ContentType='application/json'}
     # PS 5.1 Invoke-RestMethod decodes a charset-less JSON answer as Latin-1; Syncthing text (labels, .stignore comments) is UTF-8.
     try {$response=Invoke-WebRequest @args;$text=[Text.Encoding]::UTF8.GetString($response.RawContentStream.ToArray())}catch{throw ('REST Syncthing недоступен ('+$script:Gui+'); проверьте запущенный RemoteDisk и state/config.xml')}
@@ -135,7 +114,7 @@ function Save-DiskState($Options) {
 function New-DiskIni($Tray,$State,$Gui,$ApiKey) {
     @('[General]','v=2.1.9','[tray]','connections\size=1','connections\1\label=RemoteDisk',('connections\1\syncthingUrl=http://'+$Gui),('connections\1\apiKey='+$ApiKey),'connections\1\autoConnect=true','connections\1\reconnectInterval=30','notifyOnDisconnect=false','notifyOnErrors=true','showSyncthingNotifications=true','[startup]','syncthingAutostart=true','useLibSyncthing=false',('syncthingPath='+$Tray.Replace('\','/')),('syncthingArgs="syncthing serve --home \"'+$State.Replace('\','/')+'\" --no-browser --no-restart"'),'considerLauncherForReconnect=true','showLauncherButton=false','') -join "`n"
 }
-# One upgrade boundary for Install, Select and the wizard. The history is append-only across bundle versions.
+# Server helper upload used only during installation. Existing history is preserved.
 function Get-DiskIgnoreUpload([string]$Directory=$PSScriptRoot) {
     $payload=@{rules=[IO.File]::ReadAllText((Join-Path $Directory 'stignore.txt')).Replace("`r",'');versions=@([IO.File]::ReadAllLines((Join-Path $Directory 'stignore-previous.sha256')))}|ConvertTo-Json -Depth 5 -Compress
     $source=@'
@@ -170,199 +149,162 @@ with lock.open('a') as gate:
     $source=$source.Replace('PAYLOAD_BASE64',[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload)))
     'python3 -c ''import base64;exec(base64.b64decode("'+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($source.Replace("`r",'')))+'"))''' + "`n"
 }
-function Get-DiskKnownIgnoreHashes {
-    if(-not $script:DiskHome){$script:DiskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk'}
-    [void][IO.Directory]::CreateDirectory($script:DiskHome)
-    $file=Join-Path $script:DiskHome 'stignore-previous.sha256'
-    $sha=[Security.Cryptography.SHA256]::Create()
-    try{
-        $id=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes([IO.Path]::GetFullPath($file).ToLowerInvariant())))).Replace('-','')
-        $rules=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'stignore.txt')).Replace("`r",'').TrimEnd("`n")+"`n"
-        $current=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($rules)))).Replace('-','').ToLowerInvariant()
-    }finally{$sha.Dispose()}
-    $mutex=New-Object Threading.Mutex($false,('RemoteDiskIgnoreHistory-'+$id));$held=$false
-    try{
-        try{$held=$mutex.WaitOne(5000)}catch [Threading.AbandonedMutexException]{$held=$true}
-        if(-not $held){throw 'История шаблонов Disk занята; повторите подключение'}
-        $versions=@([IO.File]::ReadAllLines((Join-Path $PSScriptRoot 'stignore-previous.sha256')))+@($current)
-        if(Test-Path -LiteralPath $file){$versions+=@([IO.File]::ReadAllLines($file))}
-        $versions=@($versions|ForEach-Object {$_.Trim()}|Where-Object {$_}|Sort-Object -Unique)
-        foreach($v in $versions){if($v -cnotmatch '\A[0-9a-f]{64}\z'){throw 'Повреждена история шаблонов Disk'}}
-        $temp=$file+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
-        try{Write-DiskUtf8 $temp (($versions -join "`n")+"`n");if([IO.File]::Exists($file)){[IO.File]::Replace($temp,$file,[Management.Automation.Language.NullString]::Value)}else{[IO.File]::Move($temp,$file)}}finally{if([IO.File]::Exists($temp)){[IO.File]::Delete($temp)}}
-        $versions
-    }finally{if($held){$mutex.ReleaseMutex()};$mutex.Dispose()}
-}
-function Test-DiskIgnores($Path,[switch]$Write) {
-    $known=@(Get-DiskKnownIgnoreHashes)
-    $file=Join-Path $Path '.stignore';$rules=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'stignore.txt'))
-    $managed='';if(Get-Command Get-SelectionPolicyFile -ErrorAction SilentlyContinue){$policy=Get-SelectionPolicyFile $Path;if(Test-Path -LiteralPath $policy){$managed=[IO.File]::ReadAllText($policy).Replace("`r",'')}}
-    if(Test-Path -LiteralPath $file){
-        if([IO.File]::GetAttributes($file) -band [IO.FileAttributes]::ReparsePoint){throw 'Ссылка .stignore запрещена'}
-        $old=[IO.File]::ReadAllText($file)
-        if($old.Replace("`r",'').TrimEnd("`n") -cne $rules.Replace("`r",'').TrimEnd("`n") -and $old.Replace("`r",'') -cne $managed -and [Convert]::ToBase64String([IO.File]::ReadAllBytes($file)) -cne [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $PSScriptRoot 'stignore.txt')))){
-            $normalized=($old.TrimEnd("`r","`n").Replace("`r`n","`n")+"`n");$sha=[Security.Cryptography.SHA256]::Create()
-            try{$hash=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($normalized)))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
-            if($hash -cnotin $known){throw ((Split-Path -Leaf $Path)+': Чужой .stignore: сохраните и удалите его вручную перед подключением')}
-        }
-    }
-    if($managed){$rules=$managed}
-    if($Write){if(Test-Path -LiteralPath $file){[IO.File]::SetAttributes($file,([IO.File]::GetAttributes($file) -band (-bnot [IO.FileAttributes]::Hidden)))};try{if(-not [IO.Directory]::Exists((Join-Path $Path '.stfolder'))){[void][IO.Directory]::CreateDirectory((Join-Path $Path '.stfolder'))};Write-SelectionAtomic $file $rules}finally{if(Test-Path -LiteralPath $file){[IO.File]::SetAttributes($file,([IO.File]::GetAttributes($file) -bor [IO.FileAttributes]::Hidden))}}}
-}
-# -AllowContent: an existing local folder with files is merged (owner decision), only links and Syncthing overlaps are refused.
-function Assert-DiskFreePath([string]$Path,$Folders,[switch]$AllowContent) {
-    $full=[IO.Path]::GetFullPath($Path).TrimEnd('\','/')
-    for($part=$full;$part;$part=[IO.Path]::GetDirectoryName($part)){
-        if(Test-Path -LiteralPath $part){if([IO.File]::GetAttributes($part) -band [IO.FileAttributes]::ReparsePoint){throw 'Ссылки в пути запрещены'}}
-    }
-    foreach($folder in $Folders){
-        $other=[IO.Path]::GetFullPath($folder.path).TrimEnd('\','/')
-        if($full -ieq $other -or $full.StartsWith($other+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or $other.StartsWith($full+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw 'папка занята: пересечение с Syncthing'}
-    }
-    if(Test-Path -LiteralPath $full){
-        if($AllowContent -and (Get-Item -LiteralPath $full).PSIsContainer){return}
-        if(-not (Get-Item -LiteralPath $full).PSIsContainer -or @(Get-ChildItem -LiteralPath $full -Force).Count){throw 'папка занята'}
-    }
-}
 # Base folder like Yandex Disk: %USERPROFILE%\Disk unless the owner chose another one.
 function Get-DiskBase {
     $saved=Join-Path $script:DiskHome 'base.txt'
     if(Test-Path -LiteralPath $saved){return [IO.File]::ReadAllText($saved).Trim()}
     Join-Path $env:USERPROFILE 'Disk'
 }
-# desktop.ini is only a placeholder marker while no user/engine entries exist.
-# Own helper is needed because Syncthing does not know Explorer-only placeholders.
-function Test-DiskPlaceholder([string]$Path) {
-    if(-not [IO.Directory]::Exists($Path)){return $false}
-    Assert-DiskPlainPath $Path
-    $ini=Join-Path $Path 'desktop.ini'
-    if(-not [IO.File]::Exists($ini) -or ([IO.File]::GetAttributes($ini) -band [IO.FileAttributes]::ReparsePoint)){return $false}
-    $section='';$owner='';$placeholder=''
-    foreach($line in ([IO.File]::ReadAllText($ini).Replace("`r",'') -split "`n")){
-        if($line -match '^\s*\[([^]]+)\]\s*$'){$section=$Matches[1];continue}
-        if($section -ieq 'RemoteAgents'){
-            if($line -match '^\s*Owner\s*=\s*(.*?)\s*$'){$owner=$Matches[1]}
-            if($line -match '^\s*Placeholder\s*=\s*(.*?)\s*$'){$placeholder=$Matches[1]}
-        }
+
+# Only installation and the legacy metadata migration need filesystem checks.
+function Assert-DiskPlainPath([string]$Path) {
+    for($part=[IO.Path]::GetFullPath($Path);$part;$part=[IO.Path]::GetDirectoryName($part)){
+        if((Test-Path -LiteralPath $part) -and ([IO.File]::GetAttributes($part) -band [IO.FileAttributes]::ReparsePoint)){throw ('Ссылки в пути запрещены: '+$Path)}
     }
-    if($owner -cne 'RemoteAgents.Disk.v1' -or $placeholder -cne '1'){return $false}
-    foreach($item in (New-Object IO.DirectoryInfo($Path)).EnumerateFileSystemInfos()){
-        if($item.Name -ine 'desktop.ini'){return $false}
-    }
-    return $true
 }
-function Test-DiskLocalContent([string]$Path) {
-    if(-not [IO.Directory]::Exists($Path) -or (Test-DiskPlaceholder $Path)){return $false}
-    foreach($item in (New-Object IO.DirectoryInfo($Path)).EnumerateFileSystemInfos()){
-        if($item.Name -in @('.git','.stignore','.stfolder','.stversions')){continue}
-        if($item.Name -ieq 'desktop.ini' -and -not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)){
-            $text=[IO.File]::ReadAllText($item.FullName).Replace("`r",'')
-            if($text -match '(?m)^Owner=RemoteAgents\.Disk\.v1$'){continue}
-        }
-        return $true
-    }
-    return $false
-}
-function Copy-DiskTree([string]$From,[string]$To) {
-    Assert-DiskPlainPath $From;Assert-DiskPlainPath $To
-    [void][IO.Directory]::CreateDirectory($To);$dir=New-Object IO.DirectoryInfo($From)
-    foreach($item in $dir.GetFileSystemInfos()){
-        if($item.Attributes -band [IO.FileAttributes]::ReparsePoint){throw ('Ссылки в папке запрещены: '+$item.FullName)}
-        $target=Join-Path $To $item.Name
-        if($item -is [IO.DirectoryInfo]){Copy-DiskTree $item.FullName $target}else{[IO.File]::Copy($item.FullName,$target);[IO.File]::SetLastWriteTimeUtc($target,$item.LastWriteTimeUtc)}
-        [IO.File]::SetAttributes($target,$item.Attributes)
-    }
-    [IO.Directory]::SetLastWriteTimeUtc($To,$dir.LastWriteTimeUtc)
-}
-function Get-DiskTreeList([string]$Path) {
-    Assert-DiskPlainPath $Path
-    function Read-DiskTreeList([string]$Directory,[string]$Root) {
-        foreach($item in (New-Object IO.DirectoryInfo($Directory)).EnumerateFileSystemInfos()){
-            if($item.Attributes -band [IO.FileAttributes]::ReparsePoint){throw ('Ссылки в папке запрещены: '+$item.FullName)}
-            $item.FullName.Substring($Root.Length)+'|'+$(if($item -is [IO.DirectoryInfo]){'d'}else{(Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash})
-            if($item -is [IO.DirectoryInfo]){Read-DiskTreeList $item.FullName $Root}
-        }
-    }
-    @(Read-DiskTreeList $Path $Path|Sort-Object) -join "`n"
-}
-function Move-DiskFolder([string]$FolderId,[string]$Destination,[switch]$Copy) {
-    $route='config/folders/'+[Uri]::EscapeDataString($FolderId)
-    $folder=Invoke-DiskApi $route;$old=[IO.Path]::GetFullPath($folder.path).TrimEnd('\','/');$Destination=[IO.Path]::GetFullPath($Destination).TrimEnd('\','/')
-    if($old -ieq $Destination){return 'Папка уже на месте'}
-    if($Destination.StartsWith($old+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw 'Нельзя перенести папку внутрь неё самой'}
-    $others=@(Invoke-DiskApi 'config/folders'|Where-Object {$_.id -cne $FolderId})
-    Assert-DiskFreePath $Destination $others
-    if([IO.Path]::GetPathRoot($old) -ine [IO.Path]::GetPathRoot($Destination)){$Copy=$true}
-    $source=Get-Item -LiteralPath $old
-    for($part=$source;$null -ne $part;$part=$part.Parent){if($part.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Ссылки в пути запрещены'}}
-    $paused=[bool]$folder.paused
-    $events=@(Invoke-DiskApi 'events?since=0&limit=1&timeout=1');$since=0;if($events.Count){$since=$events[-1].id}
-    [void](Invoke-DiskApi $route PATCH @{paused=$true})
-    $ready=$false
-    for($i=0;$i -lt 8;$i++){
-        $events=@(Invoke-DiskApi ('events?since='+$since+'&timeout=1'))
-        if(@($events|Where-Object {$_.type -eq 'FolderPaused' -and $_.data.id -ceq $FolderId}).Count){$ready=$true;break}
-        if($paused -and (Invoke-DiskApi 'config/insync').configInSync -and (Invoke-DiskApi ('db/status?folder='+[Uri]::EscapeDataString($FolderId))).state -eq ''){$ready=$true;break}
-    }
-    if(-not $ready){throw 'Не подтверждена пауза: перенос отменён, папка оставлена на паузе'}
-    Assert-DiskFreePath $Destination $others
-    [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($Destination))
-    if(Test-Path -LiteralPath $Destination){[IO.Directory]::Delete($Destination,$false)} # empty only
-    if($Copy){
-        # Another volume: verify content, but retain the recovery source because editors remain live.
-        try{Copy-DiskTree $old $Destination;if((Get-DiskTreeList $old) -cne (Get-DiskTreeList $Destination)){throw 'Копия не совпадает с исходной папкой'}}
-        catch{throw ('Копия не проверена. Исходная папка и неполная копия сохранены: '+$old+'; '+$Destination+'. Проверьте их перед повторным переносом')}
-        # Editors are not suspended by a Syncthing pause. Keep the source as a
-        # recovery copy, including files created/changed during the copy.
-        Write-DiskLog ('Исходная копия после переноса сохранена: '+$old)
-    }else{[IO.Directory]::Move($old,$Destination)}
-    # A selective policy belongs to its path; carry its trusted receipt with a managed move.
-    if(Get-Command Get-SelectionPolicyFile -ErrorAction SilentlyContinue){$policy=Get-SelectionPolicyFile $old;if(Test-Path -LiteralPath $policy){Save-SelectionPolicy $Destination ([IO.File]::ReadAllText($policy))}}
-    # On API failure leave paused; files are safe at Destination. Rerun path PATCH manually.
-    [void](Invoke-DiskApi $route PATCH @{path=$Destination})
-    [void](Invoke-DiskApi $route PATCH @{paused=$paused})
-    $summary='Перенесено: '+$Destination;if($Copy){$summary+='; исходная копия сохранена: '+$old};$summary
-}
-# Changing the base moves every server folder lying directly in the previous base.
 function Set-DiskBase([string]$Path) {
-    $new=[IO.Path]::GetFullPath($Path).TrimEnd('\','/');$saved=Join-Path $script:DiskHome 'base.txt'
-    $old=@((Get-DiskBase))
-    $old=@($old|ForEach-Object {[IO.Path]::GetFullPath($_).TrimEnd('\','/')}|Where-Object {$_ -ine $new})
-    $server=Join-Path $script:DiskHome 'server.txt'
-    if($old.Count -and (Test-Path -LiteralPath $server)){
-        $peer=[IO.File]::ReadAllText($server).Trim();$failed=@()
-        foreach($folder in @(Invoke-DiskApi 'config/folders')){
-            if(-not @($folder.devices|Where-Object {$_.deviceID -ceq $peer}).Count){continue}
-            $path=[IO.Path]::GetFullPath($folder.path).TrimEnd('\','/')
-            if([IO.Path]::GetDirectoryName($path) -notin $old){continue}
-            try{Write-Output (Move-DiskFolder $folder.id (Join-Path $new ([IO.Path]::GetFileName($path))));Write-DiskLog ('Переезд базы: '+$folder.label)}
-            catch{Write-DiskLog ('Переезд базы: '+$folder.label) $_;$failed+=($folder.label+': '+$_.Exception.Message)}
-        }
-        if($failed.Count){throw ('Не перенесены: '+($failed -join '; ')+'. Прежняя база сохранена; устраните причину и повторите')}
+    $new=Get-DiskNavPaneBase $Path;Assert-DiskPlainPath $new
+    [void][IO.Directory]::CreateDirectory($new);Write-DiskUtf8 (Join-Path $script:DiskHome 'base.txt') $new
+    if((Test-DiskNavPane $new).installed){[void](Ensure-DiskNavPane $new)}
+}
+. (Join-Path $PSScriptRoot 'Disk.NavPane.ps1')
+function Get-DiskLegacyMetadata([string]$File) {
+    if(-not [IO.File]::Exists($File) -or ([IO.File]::GetAttributes($File) -band [IO.FileAttributes]::ReparsePoint)){return $null}
+    $values=@{};$section=''
+    foreach($line in ([IO.File]::ReadAllText($File).Replace("`r",'') -split "`n")){
+        if($line -match '^\s*\[([^]]+)\]\s*$'){$section=$Matches[1];continue}
+        if($section -ieq 'RemoteAgents' -and $line -match '^\s*([^=]+?)\s*=\s*(.*?)\s*$'){$values[$Matches[1]]=$Matches[2]}
     }
-    [void][IO.Directory]::CreateDirectory($new);Write-DiskUtf8 $saved $new
-    # An existing Explorer entry follows the new root; a failure leaves the base change intact.
-    if((Get-Command Test-DiskNavPane -ErrorAction SilentlyContinue) -and (Test-DiskNavPane $new).installed){try{Install-DiskNavPane $new}catch{Write-DiskLog 'Значок Disk в Проводнике' $_}}
+    if($values.Owner -cne 'RemoteAgents.Disk.v1' -or $values.OriginalReadOnly -cnotin @('0','1')){return $null}
+    $values
+}
+function Update-DiskLegacyItem([string]$Path) {
+    if(-not (Test-DiskNavPaneWindows)){return}
+    if(-not ('RemoteDisk.LegacyCleanup' -as [type])){
+        Add-Type -Namespace RemoteDisk -Name LegacyCleanup -MemberDefinition '[DllImport("shell32.dll", CharSet=CharSet.Unicode)] public static extern void SHChangeNotify(int eventId, uint flags, string item1, IntPtr item2);'
+    }
+    [RemoteDisk.LegacyCleanup]::SHChangeNotify(0x2000,0x5,$Path,[IntPtr]::Zero) # SHCNE_UPDATEITEM, SHCNF_PATHW
+}
+function Remove-DiskLegacyFolderMetadata([string]$Path) {
+    Assert-DiskPlainPath $Path
+    $file=Join-Path $Path 'desktop.ini';$owned=Get-DiskLegacyMetadata $file
+    if(-not $owned){return}
+    $attributes=[IO.File]::GetAttributes($Path);$removed=$false
+    try{
+        [IO.File]::SetAttributes($Path,($attributes -band (-bnot [IO.FileAttributes]::ReadOnly)))
+        [IO.File]::SetAttributes($file,[IO.FileAttributes]::Normal)
+        [IO.File]::Delete($file);$removed=$true
+    }finally{
+        if($removed){
+            if($owned.OriginalReadOnly -ceq '0'){$attributes=$attributes -band (-bnot [IO.FileAttributes]::ReadOnly)}
+            elseif($owned.OriginalReadOnly -ceq '1'){$attributes=$attributes -bor [IO.FileAttributes]::ReadOnly}
+        }
+        [IO.File]::SetAttributes($Path,$attributes)
+    }
+    Update-DiskLegacyItem $Path
+}
+function Remove-DiskLegacy([string]$Base='') {
+    if(-not $script:DiskHome){$script:DiskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk'}
+    $owner='RemoteAgents.Disk.v1'
+    foreach($action in @('download','sync','keep-server','add','progress')){
+        $key='Software\Classes\Directory\shell\RemoteAgents.Disk.'+$action
+        if((Get-DiskNavPaneValue $key 'RemoteAgentsOwner') -ceq $owner){Remove-DiskNavPaneKey $key}
+    }
+    if(-not $Base){$Base=Get-DiskBase}
+    if([IO.Directory]::Exists($Base)){
+        Assert-DiskPlainPath $Base
+        foreach($item in (New-Object IO.DirectoryInfo($Base)).EnumerateDirectories()){
+            if($item.Attributes -band [IO.FileAttributes]::ReparsePoint){continue}
+            $ini=Get-DiskLegacyMetadata (Join-Path $item.FullName 'desktop.ini')
+            if(-not $ini){continue}
+            # Directory.Delete(false) can remove only an empty product-created placeholder.
+            $placeholder=$ini.Placeholder -ceq '1' -and $ini.CreatedDirectory -ceq '1'
+            Remove-DiskLegacyFolderMetadata $item.FullName
+            if($placeholder -and -not @($item.EnumerateFileSystemInfos()).Count){[IO.Directory]::Delete($item.FullName,$false)}
+        }
+    }
+    # Old explicit external receipts identify metadata targets; never follow their junctions.
+    $receipt=Join-Path $script:DiskHome 'external.json'
+    if([IO.File]::Exists($receipt)){
+        Assert-DiskPlainPath $receipt
+        $saved=[IO.File]::ReadAllText($receipt)|ConvertFrom-Json
+        if($saved.schema -ne 1){throw 'Неизвестный формат старых внешних папок Disk'}
+        foreach($external in $saved.items){
+            if($external.path -and [IO.Path]::IsPathRooted([string]$external.path) -and [IO.Directory]::Exists([string]$external.path)){
+                Remove-DiskLegacyFolderMetadata ([string]$external.path)
+            }
+        }
+    }
+    $icons=Join-Path $env:LOCALAPPDATA 'RemoteAgents/icons'
+    if([IO.Directory]::Exists($icons)){
+        Assert-DiskPlainPath $icons
+        foreach($state in @('Local','ServerOnly','Pending','Syncing','Synced','Paused','Error','Offline','Unavailable')){
+            $file=Join-Path $icons ($owner+'.'+$state+'.ico')
+            if([IO.File]::Exists($file) -and -not ([IO.File]::GetAttributes($file) -band [IO.FileAttributes]::ReparsePoint)){[IO.File]::Delete($file)}
+        }
+    }
+    Update-DiskNavPaneShell
 }
 
-$selective=Join-Path $PSScriptRoot 'Disk.Selective.ps1';if(Test-Path -LiteralPath $selective){. $selective}
-$navPane=Join-Path $PSScriptRoot 'Disk.NavPane.ps1';if(Test-Path -LiteralPath $navPane){. $navPane}
-$explorer=Join-Path $PSScriptRoot 'Disk.Explorer.ps1';if(Test-Path -LiteralPath $explorer){. $explorer}
 
-# Только локальный адрес устройства сервера; остальные настройки устройства сохраняются.
-function Sync-DiskServerAddress([string]$LauncherRoot=(Join-Path $env:LOCALAPPDATA 'RemoteAgents')) {
-    $file=Join-Path $script:DiskHome 'server.txt'
-    if(-not (Test-Path -LiteralPath $file)){return $false}
-    try{
-        if(-not (Get-Command Get-TransportEffectivePort -ErrorAction SilentlyContinue)){. (Join-Path (Split-Path $PSScriptRoot -Parent) 'transport/Transport.Common.ps1')}
-        $peer=[IO.File]::ReadAllText($file).Replace("`r",'').TrimStart([char]0xFEFF).Trim()
-        if(-not $peer){return $false}
-        $route='config/devices/'+[Uri]::EscapeDataString($peer)
-        $device=Invoke-DiskApi $route
-        $address='tcp://127.0.0.1:'+[int](Get-TransportEffectivePort $LauncherRoot 'syncPort')
-        if(@($device.addresses).Count -eq 1 -and [string]$device.addresses[0] -ceq $address){return $false}
-        [void](Invoke-DiskApi $route PATCH @{addresses=@($address)})
-        Write-DiskLog ('Адрес сервера Syncthing обновлён: '+$address)
-        return $true
-    }catch{Write-DiskLog 'Не удалось обновить локальный адрес сервера Syncthing; повторим проверку';return $false}
+function Read-DiskAcceptFile([string]$File) {
+    if(-not $File){return}
+    try{$data=[IO.File]::ReadAllText($File)|ConvertFrom-Json}catch{throw 'AcceptFile: не удалось прочитать JSON со списком папок'}
+    if($null -eq $data -or $null -eq $data.PSObject.Properties['folders'] -or $data.folders -isnot [Array]){throw 'AcceptFile: нужен JSON с массивом folders'}
+    $ids=@{}
+    foreach($folder in $data.folders){
+        $id=[string]$folder.id
+        if($folder.id -isnot [string] -or $id.Length -gt 128 -or $id -notmatch '^[\p{L}\p{N}_][\p{L}\p{N}_. -]*$' -or $id.Contains('..') -or $id -match '[ .]$|^(?i:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|$)'){throw ('AcceptFile: недопустимый ID папки: '+$id)}
+        if($ids.ContainsKey($id)){throw ('AcceptFile: повторный ID папки: '+$id)};$ids[$id]=$true
+        if($null -ne $folder.path -and $folder.path -isnot [string]){throw 'AcceptFile: путь папки должен быть строкой'}
+        $path=[string]$folder.path
+        if($path){
+            if(-not [IO.Path]::IsPathRooted($path) -or ($env:OS -eq 'Windows_NT' -and $path -notmatch '^(?:[a-zA-Z]:[\\/]|\\\\[^\\]+\\[^\\]+)')){throw 'AcceptFile: нужен абсолютный путь к папке'}
+        }else{$path=Join-Path (Get-DiskBase) $id}
+        [pscustomobject]@{id=$id;path=[IO.Path]::GetFullPath($path)}
+    }
+}
+function Assert-DiskAcceptPath([string]$Path,$Existing) {
+    Assert-DiskPlainPath $Path
+    if([IO.File]::Exists($Path)){throw ('Путь папки занят файлом: '+$Path)}
+    $full=$Path.TrimEnd('\','/')
+    foreach($folder in $Existing){
+        $other=[IO.Path]::GetFullPath([string]$folder.path).TrimEnd('\','/')
+        if($full -ieq $other -or $full.StartsWith($other+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or $other.StartsWith($full+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw ('Путь пересекается с папкой Syncthing: '+$Path)}
+    }
+}
+function Accept-DiskFolders($Folders,[string]$Peer,[string]$LocalId) {
+    $existing=@(Invoke-DiskApi 'config/folders')
+    $wanted=@($Folders|Where-Object {$_.id -cnotin @($existing|ForEach-Object {$_.id})})
+    if(-not $wanted.Count){return}
+    # Validate the entire batch before any write. Existing user .stignore rules are never changed.
+    $paths=@($existing)
+    foreach($folder in $wanted){Assert-DiskAcceptPath $folder.path $paths;$paths+=@($folder)}
+    $watch=[Diagnostics.Stopwatch]::StartNew()
+    $waiting=@($wanted)
+    while($waiting.Count -and $watch.Elapsed.TotalSeconds -lt 30){
+        $pending=Invoke-DiskApi 'cluster/pending/folders'
+        $waiting=@($waiting|Where-Object {-not $pending.($_.id).offeredBy.$Peer})
+        if($waiting.Count -and $watch.Elapsed.TotalSeconds -lt 30){Start-Sleep -Milliseconds 500}
+    }
+    foreach($folder in $wanted){
+        # A person may accept an offer in Tray while we wait. Preserve that registration as well.
+        $existing=@(Invoke-DiskApi 'config/folders')
+        if($folder.id -cin @($existing|ForEach-Object {$_.id})){continue}
+        Assert-DiskAcceptPath $folder.path $existing
+        [void](Invoke-DiskApi 'config/folders' POST @{id=$folder.id;label=$folder.id;path=$folder.path;type='sendreceive';devices=@(@{deviceID=$LocalId},@{deviceID=$Peer})})
+    }
+}
+function Set-DiskServerDevice([string]$Peer) {
+    $address='tcp://127.0.0.1:'+[int](Get-TransportEffectivePort (Join-Path $env:LOCALAPPDATA 'RemoteAgents') 'syncPort')
+    $route='config/devices/'+[Uri]::EscapeDataString($Peer)
+    $device=@(Invoke-DiskApi 'config/devices'|Where-Object {$_.deviceID -ceq $Peer})
+    if(-not $device.Count){
+        [void](Invoke-DiskApi $route PUT @{deviceID=$Peer;name='RemoteDisk Server';addresses=@($address);autoAcceptFolders=$false})
+    }else{
+        $patch=@{}
+        if($device[0].autoAcceptFolders){$patch.autoAcceptFolders=$false}
+        if(@($device[0].addresses).Count -ne 1 -or [string]$device[0].addresses[0] -cne $address){$patch.addresses=@($address)}
+        if($patch.Count){[void](Invoke-DiskApi $route PATCH $patch)}
+    }
 }
