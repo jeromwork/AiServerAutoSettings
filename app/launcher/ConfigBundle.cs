@@ -243,7 +243,7 @@ namespace RemoteAgents.Launcher
             var paths = new List<string>();
             foreach (var entry in choice.Entries.Where(e => e.Path.Length > 0)) {
                 string path = NormalizeWindowsPath(entry.Path);
-                // A folder may live anywhere except in or above the Disk root: nested Syncthing folders would take the other folders along.
+                // A folder may live anywhere except at the Disk root itself or above it: a Syncthing folder around the root would take the other folders along.
                 if (WindowsContains(path, normalizedBase)) throw Bad("disk.folders.path содержит корень Disk или совпадает с ним: " + entry.Path);
                 if (paths.Any(p => WindowsContains(p, path) || WindowsContains(path, p))) throw Bad("Пересекающиеся пути disk.folders: " + entry.Path);
                 paths.Add(path);
