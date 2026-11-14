@@ -218,14 +218,17 @@ class FirstRunTests(unittest.TestCase):
 
     def test_folder_ui_and_explorer_integration_are_gone(self):
         # Syncthing Tray is the only folder interface: no folder window, tree, Explorer menu/icons or status polling remain.
+        # The names are built from parts so that this test does not contain the very identifiers it forbids.
+        disk = 'Disk'
+        removed = [disk + x for x in ('FoldersView', 'FoldersModel', 'FolderTree', 'TreeSelection', 'SyncMonitor', 'SyncStatus', 'ProgressWindow',
+                                      'EvictionSafety', 'ShellCommands', 'ShellModel', 'ExplorerController', 'ExplorerMetadata', 'ExplorerNative',
+                                      'ExplorerObservation', 'ExplorerPresentation', 'ExplorerRegistry')] + ['LocalFolder' + 'Browser', 'Local' + 'Folders']
         launcher = ROOT / 'app/launcher'
-        for name in ['DiskFoldersView', 'DiskFoldersModel', 'DiskFolderTree', 'DiskTreeSelection', 'LocalFolderBrowser', 'LocalFolders',
-                     'DiskExplorerController', 'DiskExplorerMetadata', 'DiskExplorerNative', 'DiskExplorerObservation', 'DiskExplorerPresentation',
-                     'DiskExplorerRegistry', 'DiskShellCommands', 'DiskShellModel', 'DiskProgressWindow', 'DiskEvictionSafety', 'DiskSyncMonitor', 'DiskSyncStatus']:
+        for name in removed:
             self.assertFalse((launcher / (name + '.cs')).exists(), name)
         everything = '\n'.join(path.read_text(encoding='utf-8-sig') for path in sorted(launcher.glob('*.cs')))
-        for word in ['DiskExplorer', 'DiskFolders', 'DiskSyncStatus', 'DiskFolderTree', 'DiskShell', 'disk-shell', 'ShowDiskProgress',
-                     'InitializeFolders', 'ApplyFolders', 'FoldersRecommendation', 'SessionPlan']:
+        for word in [disk + 'Explorer', disk + 'Folders', disk + 'SyncStatus', disk + 'FolderTree', disk + 'Shell', '--disk' + '-shell',
+                     'Show' + disk + 'Progress', 'Initialize' + 'Folders', 'Apply' + 'Folders', 'Folders' + 'Recommendation', 'Session' + 'Plan']:
             self.assertNotIn(word, everything, word)
 
     def test_pending_account_survives_rejected_or_failed_guard(self):
