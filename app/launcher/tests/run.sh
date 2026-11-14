@@ -4,7 +4,13 @@ here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo=$(cd "$here/../../.." && pwd)
 dotnet=${DOTNET:-$HOME/.dotnet/dotnet}
 testdir=$(mktemp -d /tmp/remoteagents-launcher-tests.XXXXXX)
-trap 'rm -rf "$testdir"' EXIT
+cleanup() {
+  # CleanupLegacy fixtures deliberately preserve read-only directories. On Linux
+  # remove that fixture permission before deleting our own disposable test root.
+  chmod -R u+rwX -- "$testdir" 2>/dev/null || true
+  rm -rf -- "$testdir"
+}
+trap cleanup EXIT
 pwsh=${PWSH:-$HOME/.cache/pwsh-test/pwsh}
 # These groups touch disjoint temporary HOME/state. Keep .NET builds after the
 # server group (it builds the same projects); independent offline checks overlap
@@ -55,14 +61,14 @@ offline_pid=$!
   bash "$repo/server/tests/run.sh"
 ) > "$testdir/server.log" 2>&1 &
 server_pid=$!
-trap 'kill "$offline_pid" "$server_pid" 2>/dev/null || true; rm -rf "$testdir"' EXIT
+trap 'kill "$offline_pid" "$server_pid" 2>/dev/null || true; cleanup' EXIT
 failed=0
 wait "$offline_pid" || failed=1
 cat "$testdir/offline.log"
 wait "$server_pid" || failed=1
 cat "$testdir/server.log"
 [[ $failed == 0 ]] || exit 1
-trap 'rm -rf "$testdir"' EXIT
+trap cleanup EXIT
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -- "$testdir/core"
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ProductName=RemoteVPN -- "$testdir/core-vpn"
 # Config format, enc1, vault and materialization (stream A entry point; own output directory).
