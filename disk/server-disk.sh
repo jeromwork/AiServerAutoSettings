@@ -22,8 +22,68 @@ PREVIOUS_TEMPLATES=frozenset((
 def safe(p):
     if any(x.is_symlink() for x in (p,*p.parents)):raise ValueError('Символические ссылки запрещены')
 def folder_path(name):
-    if not isinstance(name,str) or not re.fullmatch(r'[^\W\d-][\w. -]{0,127}|[0-9][\w. -]{0,127}',name) or '..' in name or name[-1] in ' .' or re.match(r'(?i)^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)',name):raise ValueError('Недопустимое имя папки')
+    if not isinstance(name,str) or not re.fullmatch(r'\w[\w. ()-]{0,127}',name) or len(name.encode('utf-8'))>240 or '..' in name or name[-1] in ' .' or re.match(r'(?i)^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)',name):raise ValueError('Недопустимое имя папки')
     p=Path.home()/'Disk'/name;safe(p);return p
+
+def incoming_name(label):
+    # Label приходит от другого компьютера: это имя, а не путь. Ограничиваем и байты (Linux), и символы (Windows).
+    name=re.sub(r'[^\w. ()-]','_',label or '').strip(' .')
+    while '..' in name:name=name.replace('..','_')
+    if not name:name='Папка'
+    if not re.match(r'\w',name) or re.match(r'(?i)^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)',name):name='_'+name
+    name=name[:110]
+    while len(name.encode('utf-8'))>220:name=name[:-1]
+    return name.rstrip(' .')
+
+def incoming_marker(p):
+    marker=p/'.stfolder/remote-disk-folder-id';safe(marker);return marker
+
+def new_folder(api,identity,folder_id,p):
+    current=api('config/defaults/folder')
+    current.update(id=folder_id,label=p.name,path=str(p),type='sendreceive',paused=False,devices=[dict(deviceID=identity)],maxConflicts=-1,versioning=dict(type='staggered',params=dict(maxAge='0',cleanInterval='3600')),rescanIntervalS=60,fsWatcherEnabled=True,fsWatcherDelayS=2)
+    return current
+
+def configured_paths(folders):
+    return [str(Path(os.path.abspath(os.path.expanduser(f['path'])))).casefold().rstrip('/') for f in folders]
+
+def accept_pending(api,identity,folders,devices,reserved):
+    disk=Path.home()/'Disk'
+    for folder_id,offer in sorted(api('cluster/pending/folders').items()):
+        try:
+            # Pending может содержать старое предложение уже удалённого устройства. Никогда не включаем autoAcceptFolders.
+            peers=sorted(set(offer.get('offeredBy',{})) & set(devices))
+            if not peers or any(f['id']==folder_id for f in folders):continue
+            p=reserved.get(folder_id)
+            if p is None:
+                name=incoming_name(offer['offeredBy'][peers[0]].get('label') or folder_id)
+                disk.mkdir(exist_ok=True)
+                used={x.name.casefold() for x in disk.iterdir()}
+                paths=configured_paths(folders)
+                n=1
+                while True:
+                    candidate=name if n==1 else name+' ('+str(n)+')'
+                    if candidate.casefold() in used:
+                        n+=1;continue
+                    p=folder_path(candidate);normalized=str(p).casefold()
+                    if any(normalized.startswith(x+'/') for x in paths):raise ValueError('Корень Disk уже входит в другую папку Syncthing')
+                    if not any(x==normalized or x.startswith(normalized+'/') for x in paths):
+                        try:p.mkdir()
+                        except FileExistsError:used.add(candidate.casefold())
+                        else:break
+                    n+=1
+                # Запоминаем ID до PUT: после ошибки REST повтор использует тот же каталог, не создаёт ещё один.
+                (p/'.stfolder').mkdir()
+                write_atomic(incoming_marker(p),folder_id.encode('utf-8'),p/'.stfolder')
+                reserved[folder_id]=p
+            safe(p)
+            normalized=str(p).casefold()
+            if any(x==normalized or x.startswith(normalized+'/') or normalized.startswith(x+'/') for x in configured_paths(folders)):raise ValueError('Путь входящей папки уже занят другой папкой Syncthing')
+            ignores(p)
+            current=new_folder(api,identity,folder_id,p)
+            current['devices'] += [dict(deviceID=d) for d in devices]
+            api('config/folders/'+urllib.parse.quote(folder_id,safe=''),'PUT',current)
+            folders.append(current)
+        except FOLDER_ERRORS as e:skipped(folder_id,e)
 
 def write_atomic(target,content,tmpdir):
     # Атомарная замена; права существующего файла сохраняются (иначе mkstemp сделал бы из 0664 файл 0600).
@@ -97,31 +157,50 @@ def skipped(name,e):print('RemoteDisk: '+name+': '+describe(e),file=sys.stderr)
 def reconcile(api,identity):
     disk=Path.home()/'Disk';safe(disk)
     folders=api('config/folders');devices=[d['deviceID'] for d in api('config/devices') if d['deviceID']!=identity]
-    if not disk.exists():return
-    for p in sorted(disk.iterdir()):
+    reserved={};entries=[]
+    for p in sorted(disk.iterdir()) if disk.exists() else []:
         try:
             if not p.is_dir() or p.is_symlink():continue
             folder_path(p.name)
+            marker=incoming_marker(p)
+            if marker.exists():
+                incoming_id=marker.read_text(encoding='utf-8')
+                if not incoming_id or incoming_id in reserved:raise ValueError('Повторный или пустой ID входящей папки')
+                if any(f['path'].rstrip('/')==str(p) and f['id']!=incoming_id for f in folders):raise ValueError('ID входящей папки не совпадает с конфигурацией')
+                reserved[incoming_id]=p
+            entries.append(p)
+        except FOLDER_ERRORS as e:skipped(p.name,e)
+    # Принимаем прежде регистрации местных папок: даже ID, равный занятому label, не должен незаметно слить их данные.
+    try:accept_pending(api,identity,folders,devices,reserved)
+    except FOLDER_ERRORS as e:skipped('входящие папки',e)
+    incoming_ids={p:i for i,p in reserved.items()}
+    for p in entries:
+        try:
             matches=[f for f in folders if f['path'].rstrip('/')==str(p)]
             if len(matches)>1:raise ValueError('Несколько ID для одной папки')
             current=matches[0] if matches else None
+            if p in incoming_ids:
+                # Не выдаём недопринятую папку за новый серверный проект. Нужен повтор предложения от известного peer.
+                if not current:continue
+                if incoming_ids[p]!=current['id']:raise ValueError('ID входящей папки не совпадает с конфигурацией')
             folder_id=current['id'] if current else p.name
             if any(f['id']==folder_id and f['path'].rstrip('/')!=str(p) for f in folders):raise ValueError('ID занят')
             if not current:
-                current=api('config/defaults/folder');current.update(id=folder_id,label=p.name,path=str(p),type='sendreceive',paused=False,devices=[dict(deviceID=identity)],maxConflicts=-1,versioning=dict(type='staggered',params=dict(maxAge='0',cleanInterval='3600')),rescanIntervalS=60,fsWatcherEnabled=True,fsWatcherDelayS=2)
-            conflict_changed=current.get('maxConflicts')!=-1 or current.get('type')!='sendreceive'
-            watcher_changed=current.get('fsWatcherDelayS')!=2
-            current['fsWatcherDelayS']=2
+                current=new_folder(api,identity,folder_id,p)
+            conflict_changed=current.get('maxConflicts')!=-1 or current.get('type')!='sendreceive' or current.get('fsWatcherDelayS')!=2 or not current.get('fsWatcherEnabled')
             current['type']='sendreceive'
             current['maxConflicts']=-1
+            current['fsWatcherEnabled']=True
+            current['fsWatcherDelayS']=2
             missing=[d for d in devices if not any(x['deviceID']==d for x in current['devices'])]
             ignores(p)
             # Исключения в Git — косметика (чистый git status): нет git или он завис — папку всё равно предлагаем.
             try:exclude_git(p)
             except FOLDER_ERRORS as e:skipped(p.name,e)
-            if missing or not matches or conflict_changed or watcher_changed:
+            if missing or not matches or conflict_changed:
                 current['devices'] += [dict(deviceID=d) for d in missing]
                 api('config/folders/'+urllib.parse.quote(folder_id,safe=''),'PUT',current)
+                if not matches:folders.append(current)
         except FOLDER_ERRORS as e:skipped(p.name,e)
 
 def main():
@@ -138,7 +217,7 @@ def main():
         if not script.exists():raise ValueError('Сначала скопируйте server-disk.sh в ~/.local/share/remote-disk')
         for unit in ('remote-disk-folders.service','remote-disk-folders.timer'):safe(units/unit)
         (units/'remote-disk-folders.service').write_text('[Unit]\nDescription=RemoteDisk folder discovery\n[Service]\nType=oneshot\nExecStart=/bin/bash "%h/.local/share/remote-disk/server-disk.sh" bootstrap\n')
-        (units/'remote-disk-folders.timer').write_text('[Unit]\nDescription=Discover RemoteDisk folders every 30s\n[Timer]\nOnStartupSec=10\nOnUnitInactiveSec=30\n[Install]\nWantedBy=timers.target\n')
+        (units/'remote-disk-folders.timer').write_text('[Unit]\nDescription=Discover and accept RemoteDisk folders every 2s\n[Timer]\nOnStartupSec=2\nOnUnitInactiveSec=2\nAccuracySec=1\n[Install]\nWantedBy=timers.target\n')
         subprocess.run(['systemctl','--user','daemon-reload'],check=True)
         subprocess.run(['systemctl','--user','enable','--now','remote-disk-folders.timer'],check=True)
         print('{}');return
