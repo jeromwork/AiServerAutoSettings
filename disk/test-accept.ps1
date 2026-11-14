@@ -106,6 +106,21 @@ function Invoke-DiskApi($Route,$Method='GET',$Body=$null) {
     $pending=[pscustomobject]@{'disk-abcdefabcdefabcdefabcdef'=[pscustomobject]@{offeredBy=[pscustomobject]@{PEER=[pscustomobject]@{label='Русское имя'}}}}
     Assert ((Get-DiskPendingFolderId $pending 'Русское имя' 'PEER') -ceq 'disk-abcdefabcdefabcdefabcdef') 'pending REST object is searched by server label'
     Assert (-not (Get-DiskPendingFolderId $pending 'Русское имя' 'OTHER')) 'pending label from another device is ignored'
+    $migration=Join-Path $script:DiskHome 'legacy-cleanup-v1';[IO.File]::Delete($migration)
+    $broken=Join-Path $script:DiskHome 'cleanup-broken';Write-DiskUtf8 $broken '1'
+    Add-DiskFixtureCode $bundle @'
+function Remove-DiskLegacy {
+    [IO.File]::AppendAllText((Join-Path $script:DiskHome 'cleanup-attempts'),'1')
+    if(Test-Path -LiteralPath (Join-Path $script:DiskHome 'cleanup-broken')){throw 'Тест: оформление занято'}
+}
+'@
+    $output=Invoke-DiskFixture $bundle @()
+    Assert ($output.Contains('установка продолжается') -and -not (Test-Path -LiteralPath $migration)) 'automatic cleanup failure does not fail installation or save the migration flag'
+    Assert ([IO.File]::ReadAllText((Join-Path $script:DiskHome 'install.log')).Contains('Тест: оформление занято')) 'automatic cleanup failure is logged'
+    Assert (Refuses {Invoke-DiskFixture $bundle @('-CleanupLegacy')}) 'explicit CleanupLegacy propagates cleanup errors'
+    Assert (Refuses {Invoke-DiskFixture $bundle @('-Uninstall')}) 'explicit Uninstall propagates cleanup errors'
+    [IO.File]::Delete($broken);$null=Invoke-DiskFixture $bundle @();$null=Invoke-DiskFixture $bundle @()
+    Assert ((Test-Path -LiteralPath $migration) -and [IO.File]::ReadAllText((Join-Path $script:DiskHome 'cleanup-attempts')) -ceq '1111') 'successful retry saves the flag and later installation skips cleanup'
     foreach($bad in @('{"folders":{}}','{"folders":[{"id":"../escape"}]}','{"folders":[{"id":"A"},{"id":"a"}]}','{"folders":[{"id":"A","path":"relative"}]}','{"folders":[{"id":"A","path":0}]}','{}','{"folders":[{"id":"A\n"}]}','{"folders":[{"id":"A","path":"\\\\?\\C:\\folder"}]}','{"folders":[{"id":"A","path":"\\\\.\\C:\\folder"}]}')){
         Write-DiskUtf8 $accept $bad;Assert (Refuses {Read-DiskAcceptFile $accept}) 'invalid AcceptFile rejected before accepting folders'
     }

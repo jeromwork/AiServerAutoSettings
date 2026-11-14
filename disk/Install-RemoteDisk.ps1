@@ -31,7 +31,12 @@ try {
     [void][IO.Directory]::CreateDirectory($script:DiskHome)
     $migration=Join-Path $script:DiskHome 'legacy-cleanup-v1'
     if($Uninstall -or $CleanupLegacy -or -not (Test-Path -LiteralPath $migration)){
-        $step='Очистка старого оформления Disk';Remove-DiskLegacy;Write-DiskUtf8 $migration '1'
+        $step='Очистка старого оформления Disk'
+        try{Remove-DiskLegacy;Write-DiskUtf8 $migration '1'}catch{
+            if($Uninstall -or $CleanupLegacy){throw}
+            Write-DiskLog $step $_
+            Write-DiskProgress 'Не удалось полностью убрать старое оформление Disk; установка продолжается, очистка повторится при следующем запуске.'
+        }
     }
     if($Uninstall){Remove-DiskNavPane;Write-DiskLog 'Удаление';Write-Output 'Значок Disk в Проводнике удалён. Пользовательские файлы сохранены.';return}
     if($CleanupLegacy){Write-DiskLog 'Очистка старого оформления Disk';Write-Output 'Старое оформление Disk удалено. Закрепление Disk и файлы сохранены.';return}
