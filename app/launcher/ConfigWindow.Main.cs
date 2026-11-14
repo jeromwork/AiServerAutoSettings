@@ -7,13 +7,13 @@ using System.Windows.Forms;
 
 namespace RemoteAgents.Launcher
 {
-    // The existing settings form is the main window: the config editor and DiskFoldersView keep their handlers.
+    // The existing settings form is the main window: the config editor, the step-by-step sections and the service tab.
     internal sealed partial class ConfigWindow
     {
         bool allowUnload, mainLaidOut;
         internal Action HiddenToTray;
-        internal Func<string> MutationConflict, FolderMutationConflict;
-        internal bool IsApplying { get { return running || folderActionRunning || detailsWindow != null && detailsWindow.IsApplying; } }
+        internal Func<string> MutationConflict;
+        internal bool IsApplying { get { return running || detailsWindow != null && detailsWindow.IsApplying; } }
         readonly FlowLayoutPanel mainStatus = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(12, 8, 12, 4) };
         readonly Label syncStatus = new Label { AutoSize = true, MaximumSize = new Size(620, 0) };
         readonly Label technicalStatus = new Label { AutoSize = true, Visible = false, MaximumSize = new Size(620, 0) };
@@ -34,7 +34,7 @@ namespace RemoteAgents.Launcher
         string pathsSignature = "";
         readonly PathSelection pathSelection = new PathSelection();
         internal static ConfigWindow Main(string home, string bundle)
-        { return new ConfigWindow(home, bundle, null, true, false, true); }
+        { return new ConfigWindow(home, bundle, null, true, true); }
         internal void RebindBundle(string current)
         {
             bundle = current;
@@ -45,8 +45,7 @@ namespace RemoteAgents.Launcher
         void BuildMain()
         {
             Text = Product.Name;
-            var configPage = tabs.TabPages[0]; var foldersPage = tabs.TabPages[1];
-            tabs.TabPages.Clear(); tabs.TabPages.Add(foldersPage); tabs.TabPages.Add(configPage);
+            var configPage = tabs.TabPages[0];
             detailsTab = new TabPage("Подробно") { AutoScroll = true };
             detailsHost = new Panel { Dock = DockStyle.Fill, AutoScroll = true }; detailsTab.Controls.Add(detailsHost);
             tabs.TabPages.Add(detailsTab);
@@ -61,10 +60,8 @@ namespace RemoteAgents.Launcher
                 var option = pathChoice.SelectedItem as PathOption;
                 if (option != null) pathSelection.Choose(option.Tag);
             };
-            for (int i = 0; i < 6; i++) { var line = new Label { AutoSize = true, MaximumSize = new Size(680, 0) }; statusLines.Add(line); mainStatus.Controls.Add(line); }
+            for (int i = 0; i < 5; i++) { var line = new Label { AutoSize = true, MaximumSize = new Size(680, 0) }; statusLines.Add(line); mainStatus.Controls.Add(line); }
             mainStatus.Controls.Add(happierCreated);
-            folders.SummaryInHeader = true;
-            folders.SyncChanged += RefreshMainDiskStatus;
             // Keep progress and the editor journal in the config page, not over the other tabs.
             // The paste window docks the journal Fill in its own layout row; here it sits under the editor.
             journal.Dock = DockStyle.Bottom; rowsPanel.Dock = DockStyle.Top;
@@ -79,7 +76,7 @@ namespace RemoteAgents.Launcher
             mainStatus.Dock = DockStyle.Fill; header.Dock = DockStyle.Fill;
             layout.Controls.Add(mainStatus, 0, 0); layout.Controls.Add(header, 0, 1); layout.Controls.Add(tabs, 0, 2);
             Controls.Add(layout);
-            bottom.Dispose(); pastePanel.Dispose(); foldersPanel.Dispose();
+            bottom.Dispose(); pastePanel.Dispose();
             mainStatus.SizeChanged += (s, e) => { foreach (var line in statusLines) line.MaximumSize = new Size(Math.Max(120, mainStatus.Width - 32), 0); happierCreated.MaximumSize = new Size(Math.Max(120, mainStatus.Width - 32), 0); };
             tabs.SelectedIndexChanged += (s, e) => {
                 if (tabs.SelectedTab != serviceTab) HideHappierKey();
@@ -177,7 +174,6 @@ namespace RemoteAgents.Launcher
             if (IsDisposed) return;
             RefreshHappierAccount();
             for (int i = 0; i < Math.Min(lines.Length, statusLines.Count); i++) if (statusLines[i].Text != lines[i]) statusLines[i].Text = lines[i];
-            RefreshMainDiskStatus();
             string operation = MutationConflict == null ? "" : MutationConflict();
             foreach (TabPage page in tabs.TabPages) page.Enabled = WindowModel.CanOpen(page.Text, operation);
             syncStatus.Text = sync; technicalStatus.Text = technical;
@@ -194,10 +190,6 @@ namespace RemoteAgents.Launcher
             if (selected.Length > 0 && !paths.Any(p => p.Tag == selected)) paths.Add(new PathOption { Tag = selected, Title = selected + " — недоступен" });
             pathChoice.Items.Clear(); pathChoice.Items.AddRange(paths.Cast<object>().ToArray());
             pathChoice.SelectedIndex = Math.Max(0, paths.FindIndex(p => p.Tag == selected));
-        }
-        void RefreshMainDiskStatus()
-        {
-            foreach (var line in statusLines) line.Text = folders.Model.MainStatusLine(line.Text);
         }
         sealed class PathOption { internal string Tag, Title; public override string ToString() { return Title; } }
         void LayoutMain()
@@ -221,20 +213,18 @@ namespace RemoteAgents.Launcher
                 ConfigSession.SyncFromSettings(home);
                 if (configText.Text == displayedConfigText) RefreshConfigText();
                 else Log("Настройки обновлены в «Подробно». Ваши правки в редакторе конфига сохранены.");
-                InitializeFolders();
             };
             detailsWindow.MutationConflict = () => running ? WindowModel.Conflict("применение настроек") : MutationConflict == null ? "" : MutationConflict();
             detailsWindow.TopLevel = false; detailsWindow.FormBorderStyle = FormBorderStyle.None;
             detailsWindow.PrepareEmbedded();
             detailsHost.Controls.Add(detailsWindow); detailsWindow.Show();
         }
-        internal void OpenFolders() { tabs.SelectedIndex = 0; }
         internal void OpenDetails(int section)
         { tabs.SelectedTab = detailsTab; EnsureDetails(); detailsWindow.OpenSection(section); }
         void ReportConflict(string message)
         {
             Log(message);
-            // In «Папки» the config journal is on a different tab: report at the action as well.
+            // The config journal is on one tab only: report at the action as well.
             if (mainWindow && !IsDisposed) MessageBox.Show(this, message, Product.Name);
         }
         internal void Unload()

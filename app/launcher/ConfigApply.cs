@@ -437,7 +437,7 @@ namespace RemoteAgents.Launcher
             string name = ConfigProfile.DeviceName(p); if (name.Length > 0) request["deviceName"] = name;
             return request;
         }
-        internal static Dictionary<string, object> Disk(Dictionary<string, object> p, string defaultBase, string[] currentSelection)
+        internal static Dictionary<string, object> Disk(Dictionary<string, object> p, string defaultBase, string[] currentSelection = null)
         {
             var disk = Json.Map(Json.Get(p, "disk"));
             var choice = DiskChoice.FromProfile(p);

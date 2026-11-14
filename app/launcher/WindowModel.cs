@@ -38,16 +38,12 @@ namespace RemoteAgents.Launcher
         { Visible = false; bool notify = !HintShown; HintShown = true; return notify; }
         internal WindowExit Exit(bool applying) { return applying ? WindowExit.ConfirmApplying : WindowExit.Unload; }
         internal static bool CanOpen(string page, string operation)
-        { return page == "Папки" || page == "Конфиг" || page == "Подробно" || page == "Сервис" || string.IsNullOrEmpty(operation); }
-        internal const string SkippedFolders = "папки не выбраны — выберите в трее → Папки";
-        internal static List<string> SessionPlan(IEnumerable<string> plan, bool folderStepRequired, bool diskChosen)
-        { return plan.Where(s => s != ConfigSections.Disk || !folderStepRequired && diskChosen).ToList(); }
+        { return page == "Конфиг" || page == "Подробно" || page == "Сервис" || string.IsNullOrEmpty(operation); }
         // Pending (VPN not yet confirmed, a server install) is handed to the tray and does not hold up «Готово»;
         // Disk runs in the background (BackgroundWork.Disk) and never gates it.
         internal static bool CanFinish(bool running, IDictionary<string, SectionState> states)
         { return !running && states.Where(s => s.Key != ConfigSections.Disk).All(s => s.Value == SectionState.Done || s.Value == SectionState.Unchanged || s.Value == SectionState.Failed || s.Value == SectionState.Blocked || s.Value == SectionState.Pending); }
-        internal const string FoldersRecommendation = "Рекомендуем выбрать папки для синхронизации — это можно сделать и позже из трея (пункт «Папки»). Без выбора настройка тоже завершится, просто синхронизация папок не будет включена.";
-        internal const string FoldersInBackground = "Папки подключаются в фоне — окно можно закрыть, программа продолжит сама.";
+        internal const string DiskInBackground = "Диск устанавливается в фоне — окно можно закрыть, программа продолжит сама. Папки сервера принимайте в Syncthing Tray.";
         internal static string Conflict(string operation)
         { return string.IsNullOrEmpty(operation) ? "" : "Идёт " + operation + ", подождите"; }
     }
@@ -64,6 +60,7 @@ namespace RemoteAgents.Launcher
 
     // One background job at a time for the whole process, not tied to any window: closing a window keeps it
     // running, only Stop (tray exit) cancels it. A request during a run replaces the queued one and runs right after.
+    // The only job is the Disk install (Syncthing and Syncthing Tray, pairing, folders to accept at once).
     internal sealed class SerialRunner<T> where T : class
     {
         readonly object gate = new object();
@@ -75,15 +72,6 @@ namespace RemoteAgents.Launcher
         internal T Last { get { lock (gate) return last; } }
         internal Task Current { get; private set; }
         internal SerialRunner() { Current = Task.FromResult(true); }
-        // Shell commands must not replace a queued settings edit or await a displaced callback.
-        internal bool TryStart(Func<CancellationToken, Task<T>> work)
-        {
-            lock (gate) {
-                if (stop.IsCancellationRequested || busy) return false;
-                busy = true; Current = Task.Run(() => Loop(work));
-            }
-            Changed(); return true;
-        }
         // true: started now; false: queued behind the running job.
         internal bool Start(Func<CancellationToken, Task<T>> work)
         {
@@ -109,7 +97,7 @@ namespace RemoteAgents.Launcher
         }
         internal void Stop() { lock (gate) { next = null; } stop.Cancel(); }
     }
-    internal sealed class DiskRun { internal bool Ok; internal string Summary = "", Binding = ""; internal DiskChoice Choice = null; }
+    internal sealed class DiskRun { internal bool Ok; internal string Summary = "", Binding = ""; }
     internal static class BackgroundWork { internal static readonly SerialRunner<DiskRun> Disk = new SerialRunner<DiskRun>(); }
 
     // Wait for two continuous minutes of fresh confirmed connectivity, then five minutes per attempt.

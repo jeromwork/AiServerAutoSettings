@@ -39,10 +39,9 @@ namespace RemoteAgents.Launcher
         readonly System.Windows.Forms.Timer operationTimer = new System.Windows.Forms.Timer { Interval = 12000 };
         readonly CancellationTokenSource pollCancellation = new CancellationTokenSource();
         bool pendingAccount, polling, showingInstall, resumeAccount, retryConnection;
-        DataGridView nodes; TreeView tree; ListBox accounts; Label inventory, accountHint, summary, diskWarning;
+        DataGridView nodes; ListBox accounts; Label inventory, accountHint, summary, diskWarning, diskInfo;
         string originalAddress, originalLogin, lanCommand = "";
         Dictionary<string, object> expectedCatalog; Dictionary<string, object>[] accountRows = new Dictionary<string, object>[0];
-        DiskFolderTree folders;
         CancellationTokenSource stepCancellation; bool closingRequested;
         bool busy, catalogLoaded, initializing;
 
@@ -121,7 +120,6 @@ namespace RemoteAgents.Launcher
                 }
             }
             nodes.CellValueChanged+=(a,b)=>Changed(1);nodes.UserAddedRow+=(a,b)=>Changed(1);
-            folders.SelectionChanged+=()=>Changed(2);
             address.TextChanged+=(a,b)=>InvalidateServer();login.TextChanged+=(a,b)=>InvalidateServer();
             steps.SectionRequested+=i=> {if(WizardStep.CanOpen(i,currentPage,first,WizardStep.Passable(applied,waiting.Keys),order))SelectPage(i);else{steps.Section=currentPage;Append("Сначала завершите или пропустите раздел «"+titles[currentPage]+"»");}};
             back.Click+=(a,b)=>Navigate(-1);
@@ -269,7 +267,7 @@ namespace RemoteAgents.Launcher
         {
             if(initializing || busy)return;serverChanged=address.Text.Trim()!=originalAddress || login.Text.Trim()!=originalLogin;
             password.Enabled=true;password.Clear();
-            if(serverChanged){for(int i=1;i<6;i++){applied[i]=false;results[i]="Нужно проверить для нового сервера";}catalogLoaded=folders.Loaded=false;accountRows=new Dictionary<string,object>[0];
+            if(serverChanged){for(int i=1;i<6;i++){applied[i]=false;results[i]="Нужно проверить для нового сервера";}catalogLoaded=false;accountRows=new Dictionary<string,object>[0];
                 api.Clear();web.Clear();accountKey.Clear();accounts.Items.Clear();lanCommand=proxyCommand="";applied[6]=applied[8]=false;results[6]=results[8]="Нужно проверить для нового сервера";expectedCatalog=null;nodes.Rows.Clear();
                 RefreshDiskWarning();RefreshSummary();}
         }
@@ -283,24 +281,23 @@ namespace RemoteAgents.Launcher
             var reload=new Button {Text="Обновить каталог",Left=12,Top=8,Width=170};reload.Click+=async(a,b)=>{if(!busy)await Guard(LoadCatalog);};details[1].Controls.Add(reload);
             More(1,150);
         }
+        // Syncthing and Syncthing Tray are installed and paired with the server; the folders are accepted in Syncthing Tray.
         void DiskPage()
         {
             string value=Files.ReadLine(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"RemoteDisk","base.txt"));if(value.Length==0)value=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),"Disk");
-            Question(2,"Какие проекты хранить на этом компьютере?");diskBase=Field(2,"Папка Disk",80,value);diskBase.ReadOnly=true;diskBase.Width=450;
-            Button(2,"Изменить…",100,()=>{using(var d=new FolderBrowserDialog {SelectedPath=diskBase.Text})if(d.ShowDialog(this)==DialogResult.OK){diskBase.Text=d.SelectedPath;folders.Loaded=false;}return Task.FromResult(0);},480,115);
-            tree=new TreeView {Left=16,Top=135,Width=580,Height=150,CheckBoxes=true};sections[2].Controls.Add(tree);
-            folders=new DiskFolderTree(tree,path=>Run("DiskTree",new { @base=diskBase.Text.Trim(),path }),a=>Guard(a),()=>busy,Append);
+            Question(2,"Подключить Диск (Syncthing)?");diskBase=Field(2,"Папка Disk",80,value);diskBase.ReadOnly=true;diskBase.Width=450;
+            Button(2,"Изменить…",100,()=>{using(var d=new FolderBrowserDialog {SelectedPath=diskBase.Text})if(d.ShowDialog(this)==DialogResult.OK)diskBase.Text=d.SelectedPath;return Task.FromResult(0);},480,115);
+            diskInfo=Hint(2,"Программа установит Syncthing и Syncthing Tray и познакомит компьютер с сервером. Папки сервера появятся в Syncthing Tray как «Новая папка от устройства» — примите нужные, и они лягут в папку Disk. Пока ничего не принято, ничего не синхронизируется. Файлы программа не удаляет.",135,110);
             diskWarning=Hint(2,"",135,66);diskWarning.Visible=false;
             var reconnect=Button(2,"Отключить и подключить к новому",208,()=>{if(!reconnectDisk){reconnectDisk=true;diskBase.Text=diskBase.Text+"-"+DateTime.Now.ToString("yyyyMMddHHmmss");}RefreshDiskWarning();return Task.FromResult(0);});reconnect.Tag="reconnect";reconnect.Visible=false;
             var keep=Button(2,"Остановить синхронизацию, файлы оставить",245,()=>Skip("Disk",2),16,300);keep.Tag="keep";keep.Visible=false;
-            Button(2,"Загрузить проекты",292,LoadTree,16,175);Button(2,"Пропустить",292,()=>Skip("Disk",2),204,110);More(2,292);sections[2].Controls[sections[2].Controls.Count-1].Left=330;
-            var info=Hint(2,"Снятие отметки не удаляет файлы. Синхронизация двусторонняя. .git, секреты и зависимости исключены. При смене сервера нужна новая пустая папка: прежняя папка остаётся на ПК.",10,130);Technical(2,info);
-            diskBase.TextChanged+=(a,b)=>folders.Loaded=false;
+            Button(2,"Пропустить",292,()=>Skip("Disk",2),16,110);More(2,292);sections[2].Controls[sections[2].Controls.Count-1].Left=146;
+            var info=Hint(2,"Синхронизация двусторонняя. .git, секреты и зависимости исключены. При смене сервера нужна новая пустая папка: прежняя папка остаётся на ПК.",10,130);Technical(2,info);
         }
         void RefreshDiskWarning()
         {
             var wizard=Json.Map(Json.Get(new Configuration(home).Data,"wizard"));bool warning=!reconnectDisk && Json.Str(wizard,"diskPreviousProfile").Length>0;
-            diskWarning.Visible=warning;tree.Visible=!warning;diskWarning.Text="Диск был подключён к старому серверу. «Отключить и подключить к новому» — новая пустая папка для нового сервера; старые файлы останутся на ПК. «Остановить синхронизацию, файлы оставить» — диск не синхронизируется, файлы и прежние настройки сохраняются.";
+            diskWarning.Visible=warning;diskInfo.Visible=!warning;diskWarning.Text="Диск был подключён к старому серверу. «Отключить и подключить к новому» — новая пустая папка для нового сервера; старые файлы останутся на ПК. «Остановить синхронизацию, файлы оставить» — диск не синхронизируется, файлы и прежние настройки сохраняются.";
             foreach(Control c in sections[2].Controls)if(Convert.ToString(c.Tag)=="reconnect" || Convert.ToString(c.Tag)=="keep")c.Visible=warning;
         }
         async Task Skip(string step,int index)
@@ -402,7 +399,7 @@ namespace RemoteAgents.Launcher
         }
         async Task<Dictionary<string,object>> Run(string action, object request, CancellationToken? quiet = null)
         {
-            string message=action=="Server"?"Подключаюсь к серверу "+address.Text.Trim()+"…":action=="Catalog"?"Загружаю узлы с сервера…":action=="DiskTree"?"Загружаю проекты Disk…":action=="Connection"?"Проверяю варианты связи…":action=="Bridge"?"Настраиваю и проверяю мост…":action=="Inspect"?"Проверяю текущее состояние в фоне…":action=="Lan"?"Подключаю локальную сеть…":action=="Proxy"?"Настраиваю выход сервера в интернет…":action=="NetStatus"?"Проверяю состояние сетей сервера…":action=="AdminProbe"?"Проверяю права root на сервере…":action=="LanRemove"?"Удаляю локальную сеть…":action=="Account"?"Подключаю Happier…":action=="ResumeAccount"?"Happier установлен: подключаю аккаунт…":action=="Disk"?"Применяю выбор проектов…":action=="Vpn"?"Проверяю настройки VPN…":"Завершаю настройку…";
+            string message=action=="Server"?"Подключаюсь к серверу "+address.Text.Trim()+"…":action=="Catalog"?"Загружаю узлы с сервера…":action=="Connection"?"Проверяю варианты связи…":action=="Bridge"?"Настраиваю и проверяю мост…":action=="Inspect"?"Проверяю текущее состояние в фоне…":action=="Lan"?"Подключаю локальную сеть…":action=="Proxy"?"Настраиваю выход сервера в интернет…":action=="NetStatus"?"Проверяю состояние сетей сервера…":action=="AdminProbe"?"Проверяю права root на сервере…":action=="LanRemove"?"Удаляю локальную сеть…":action=="Account"?"Подключаю Happier…":action=="ResumeAccount"?"Happier установлен: подключаю аккаунт…":action=="Disk"?"Устанавливаю Диск (Syncthing)…":action=="Vpn"?"Проверяю настройки VPN…":"Завершаю настройку…";
             if(quiet==null)Append(message);
             var token=quiet ?? stepCancellation.Token;
             // Same runner as the config engine and the tray (WizardRunner); progress lines arrive on a worker thread.
@@ -522,13 +519,6 @@ namespace RemoteAgents.Launcher
                 }map[group]=list.ToArray();
             }return map;
         }
-        async Task LoadTree()
-        {
-            var wizard=Json.Map(Json.Get(new Configuration(home).Data,"wizard"));
-            if(Json.Str(wizard,"diskPreviousProfile").Length>0 && !reconnectDisk)throw new IOException("Выберите, что делать с прежним подключением диска");
-            folders.Loaded=false;
-            folders.ShowRoot(await Run("DiskTree",new { @base=diskBase.Text.Trim(),path="",fresh=reconnectDisk }));
-        }
         async Task LoadAccounts()
         {
             var result=await Run("AccountList",new {});accountRows=Json.Array(Json.Get(result,"accounts")).Select(Json.Map).ToArray();accounts.Items.Clear();
@@ -561,10 +551,9 @@ namespace RemoteAgents.Launcher
                         if(!catalogLoaded)await LoadCatalog();
                         result=await Run("Connection",new {catalog=ReadCatalog(),expected=expectedCatalog,shared=shared.Checked});break;
                     case 2:
-                        if(!folders.Loaded)await LoadTree();
-                        var paths=folders.Selection.Paths;
-                        var diskRequest=ConfigRequests.Disk(ConfigProfile.Load(home),diskBase.Text.Trim(),paths);
-                        diskRequest["base"]=diskBase.Text.Trim();diskRequest["paths"]=paths;diskRequest["reconnect"]=reconnectDisk;
+                        // Folders listed in the config's disk.folders are accepted at once; without them the person accepts in Syncthing Tray.
+                        var diskRequest=ConfigRequests.Disk(ConfigProfile.Load(home),diskBase.Text.Trim());
+                        diskRequest["base"]=diskBase.Text.Trim();diskRequest["reconnect"]=reconnectDisk;
                         result=await Run("Disk",diskRequest);break;
                     case 3: {
                         string apiOrigin=ConfigRequests.Origin(api.Text),webOrigin=ConfigRequests.Origin(web.Text);if(string.IsNullOrWhiteSpace(label.Text))throw new IOException("Укажите имя аккаунта, чтобы различать аккаунты");

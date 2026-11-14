@@ -50,7 +50,7 @@ namespace RemoteAgents.Launcher
                 case "Skip": return 300 * 1000;      // old disk detach 120 s
                 case "Inspect": return 300 * 1000;   // server, account and bridge probes ~210 s
                 case "Activate": return 180 * 1000;  // live connection and bridge proofs
-                case "DiskTree": case "AccountList": return 180 * 1000; // helper upload 60 s + listing 60 s
+                case "AccountList": return 180 * 1000; // helper upload 60 s + listing 60 s
                 case "Proxy": return 420 * 1000;     // root probe 20 s + apply 180 s + confirm in a new SSH 120 s
                 case "Lan": return 480 * 1000;       // root probe 20 s + add (may install OpenVPN) 300 s + test/confirm 120 s
                 case "LanRemove": return 240 * 1000; // root probe 20 s + remove 180 s

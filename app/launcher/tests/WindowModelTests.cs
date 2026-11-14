@@ -53,11 +53,11 @@ namespace RemoteAgents.Launcher
             Check(window.Exit(false) == WindowExit.Unload, "exit unloads without a question");
             Check(window.Exit(true) == WindowExit.ConfirmApplying, "applying settings requires interrupt confirmation");
             foreach (string work in new[] { "", "сверка конфига", "проверка здоровья", "применение настроек" }) {
-                foreach (string page in new[] { "Папки", "Конфиг", "Подробно", "Сервис" })
+                foreach (string page in new[] { "Конфиг", "Подробно", "Сервис" })
                     Check(WindowModel.CanOpen(page, work), "navigation remains open: " + work + "/" + page);
                 Check(WindowModel.Conflict(work) == (work.Length == 0 ? "" : "Идёт " + work + ", подождите"), "conflict identifies only the action");
             }
-            FirstRunFolders().GetAwaiter().GetResult();
+            DiskRunsApart().GetAwaiter().GetResult();
             var terminal = new Dictionary<string, SectionState> {
                 { ConfigSections.Server, SectionState.Done }, { ConfigSections.Connection, SectionState.Unchanged },
                 { ConfigSections.Bridge, SectionState.Failed }, { ConfigSections.Account, SectionState.Blocked },
@@ -75,10 +75,9 @@ namespace RemoteAgents.Launcher
             terminal[ConfigSections.Account] = SectionState.Pending;
             Check(WindowModel.CanFinish(false, terminal), "pending server install does not block Done");
             terminal[ConfigSections.Account] = SectionState.Done;
-            Check(WindowModel.FoldersRecommendation.StartsWith("Рекомендуем выбрать папки") && WindowModel.FoldersRecommendation.Contains("позже из трея"), "folders are a recommendation, not a step");
+            Check(WindowModel.DiskInBackground.Contains("в фоне") && WindowModel.DiskInBackground.Contains("Syncthing Tray"), "the window says the Disk install goes on in the background and where folders are accepted");
             BackgroundRunner().GetAwaiter().GetResult();
             Check(!WindowModel.CanFinish(true, terminal), "startup/activation guard still gates Done");
-            Check(WindowModel.SkippedFolders == "папки не выбраны — выберите в трее → Папки", "skip stays honest and points to tray");
             var now = new DateTime(2026, 11, 12, 10, 0, 0, DateTimeKind.Utc); var schedule = new ConfigSyncSchedule();
             Check(!schedule.Due(false, now, false), "no sync while disconnected");
             Check(!schedule.Due(true, now, false), "no sync on first confirmed connection");
@@ -133,13 +132,11 @@ namespace RemoteAgents.Launcher
             Check(cancelled.Task.IsCompleted && !runner.Busy, "tray exit cancels the background run");
             Check(!runner.Start(token => Task.FromResult(new DiskRun())), "nothing starts after Stop");
         }
-        static async Task FirstRunFolders()
+        static async Task DiskRunsApart()
         {
-            // The UI uses this very plan policy with folderStepRequired=true. Account is deliberately
-            // held open: confirmation/Skip must not be needed to start any non-Disk section.
-            var plan = WindowModel.SessionPlan(ConfigSections.Order, folderStepRequired: true, diskChosen: false);
-            Check(plan.SequenceEqual(ConfigSections.Order.Where(s => s != ConfigSections.Disk)), "only Disk waits for first-run folder confirmation");
-            Check(WindowModel.SessionPlan(ConfigSections.Order, false, true).Contains(ConfigSections.Disk), "an already confirmed choice still auto-applies");
+            // The window takes Disk out of the plan (the Disk install can take minutes and survives closing the window):
+            // every other section starts and finishes without it, and Disk later runs once on the same engine.
+            var plan = ConfigSections.Order.Where(s => s != ConfigSections.Disk).ToList();
             var started = new ConcurrentDictionary<string, int>();
             var account = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var connection = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -153,19 +150,19 @@ namespace RemoteAgents.Launcher
             }, CancellationToken.None);
             try {
                 Check(await Task.WhenAny(connection.Task, Task.Delay(3000)) == connection.Task, "Connection reports ready before long Account finishes");
-                Check(!execution.IsCompleted && started.ContainsKey(ConfigSections.Account), "Happier is still running without ApplyFolders");
+                Check(!execution.IsCompleted && started.ContainsKey(ConfigSections.Account), "Happier is still running while the rest goes on");
                 foreach (string section in new[] { ConfigSections.Bridge, ConfigSections.Vpn, ConfigSections.Proxy, ConfigSections.Lan })
-                    Check(started.ContainsKey(section), section + " executes without ApplyFolders");
-                Check(!started.ContainsKey(ConfigSections.Disk), "Disk has not run before confirmation");
-                // ApplyFolders invokes only Disk on the same engine while the other plan is alive.
+                    Check(started.ContainsKey(section), section + " executes without Disk");
+                Check(!started.ContainsKey(ConfigSections.Disk), "Disk has not run inside the window's plan");
+                // The background run invokes only Disk on the same engine while the other plan is alive.
                 var disk = await ConfigEngine.Execute(new[] { ConfigSections.Disk }, run, (s, state, text) => { }, CancellationToken.None);
-                Check(disk[ConfigSections.Disk].Ok && started[ConfigSections.Disk] == 1, "confirmation executes Disk exactly once");
+                Check(disk[ConfigSections.Disk].Ok && started[ConfigSections.Disk] == 1, "the background run executes Disk exactly once");
                 Check(!execution.IsCompleted && started[ConfigSections.Account] == 1, "Disk does not wait for or restart Happier");
             } finally { account.TrySetResult(true); await execution; }
-            // Skip/Done has no continuation: executing the initial plan alone leaves Disk untouched.
+            // Executing the window's plan alone leaves Disk untouched.
             started.Clear();
             await ConfigEngine.Execute(plan, run, (s, state, text) => { }, CancellationToken.None);
-            Check(!started.ContainsKey(ConfigSections.Disk) && started.ContainsKey(ConfigSections.Bridge) && started.ContainsKey(ConfigSections.Account) && started.ContainsKey(ConfigSections.Vpn), "skip needs no continuation and never applies Disk");
+            Check(!started.ContainsKey(ConfigSections.Disk) && started.ContainsKey(ConfigSections.Bridge) && started.ContainsKey(ConfigSections.Account) && started.ContainsKey(ConfigSections.Vpn), "the plan without Disk never applies Disk");
         }
     }
 }

@@ -368,7 +368,7 @@ namespace RemoteAgents.Launcher
                 foreach(var runtime in runtimes.Where(r=>!r.Definition.CommandManaged)){bool enabled=Wanted(runtime.Definition);if(runtime.Enabled!=enabled)runtime.SetEnabled(enabled);}
             }catch{log.Write("setup.config.refresh.failed");}
         }
-        void ShowMain(bool folders = false)
+        void ShowMain()
         {
             if (closing) return;
             // During first installation the existing paste/step window remains the only window.
@@ -380,7 +380,6 @@ namespace RemoteAgents.Launcher
             if (mainWindow == null || mainWindow.IsDisposed) {
                 mainWindow = ConfigWindow.Main(home, engine.Folder(engine.Current));
                 mainWindow.MutationConflict = MutationConflict;
-                mainWindow.FolderMutationConflict = () => MutationConflict(mainWindow);
                 mainWindow.HiddenToTray = () => {
                     if (window.CloseToTray()) {
                         Safe(() => Files.Atomic(Path.Combine(home, "state", "tray-hint-shown"), "shown\n"));
@@ -398,7 +397,7 @@ namespace RemoteAgents.Launcher
                     Service("Список путей", () => ScriptCommand("Edit-Transport.ps1", new[] { "-List" }, true))
                 }, tag => ScriptCommand("Set-TransportPath.ps1", tag.Length == 0 ? new[] { "-Auto" } : new[] { "-Tag", tag }, false));
             }
-            window.Show(); RefreshMain(); if (folders) mainWindow.OpenFolders(); ActivateWindow(mainWindow);
+            window.Show(); RefreshMain(); ActivateWindow(mainWindow);
         }
         KeyValuePair<string, Action> Service(string title, Action action)
         { return new KeyValuePair<string, Action>(title, () => Safe(action)); }
@@ -415,13 +414,12 @@ namespace RemoteAgents.Launcher
             if (Directory.Exists(root)) { Open(root); return; }
             MessageBox.Show(mainWindow, "Папка Диска ещё не создана: " + root + "\r\nДиск устанавливается вместе с настройкой сервера («Настройки» → «Конфиг» → «Применить»). Папки сервера принимайте в Syncthing Tray.", Product.Name);
         }
-        string MutationConflict() { return MutationConflict(null); }
-        string MutationConflict(ConfigWindow except)
+        string MutationConflict()
         {
-            string operation = syncRunning ? "сверка конфига" : busy ? "обновление" : actionBusy ? "настройка компонентов" : accountResuming ? "подключение аккаунта Happier" : mainWindow != null && mainWindow != except && mainWindow.IsApplying ? "применение настроек" : "";
+            string operation = syncRunning ? "сверка конфига" : busy ? "обновление" : actionBusy ? "настройка компонентов" : accountResuming ? "подключение аккаунта Happier" : mainWindow != null && mainWindow.IsApplying ? "применение настроек" : "";
             return WindowModel.Conflict(operation);
         }
-        // Restart/rollback/update stop processes: they also wait for a background folder run (windows do not).
+        // Restart/rollback/update stop processes: they also wait for the background Disk install (windows do not).
         bool AllowMutation()
         {
             string conflict = MutationConflict(); if (conflict.Length == 0 && BackgroundWork.Disk.Busy) conflict = WindowModel.Conflict("установка Диска");
@@ -438,7 +436,6 @@ namespace RemoteAgents.Launcher
                 ServerHealthView.Summary(ServerHealthView.Read(home)),
                 StatusView.Line("Управление компьютером (мост)", StatusView.Read(home, "control", maxAgeSec: 30)),
                 StatusView.Happier(home),
-                StatusView.Line("Диск", StatusView.Read(home, "disk", maxAgeSec: 30)),
                 StatusView.Line("VPN", StatusView.Read(home, "vpn", maxAgeSec: 15))
             }, syncSummary + "\r\n" + updateSummary,
             "Версия: " + Program.Version + "; бандл: " + engine.Current + "\r\nПапка: " + home +
