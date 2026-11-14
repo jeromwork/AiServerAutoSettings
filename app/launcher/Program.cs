@@ -45,6 +45,8 @@ namespace RemoteAgents.Launcher
                 test = Option(args, "--selftest-update");
                 if (test != null) { AttachConsole(0xFFFFFFFF); return UpdateSelfTests.Run(Path.GetFullPath(test)); }
                 string home = Path.GetFullPath(Option(args, "--home") ?? DefaultHome);
+                var diskShell = DiskShellRequest.Parse(args);
+                if (diskShell != null && Product.IsVpn) throw new ArgumentException("В RemoteVPN нет Диска");
                 // Agent commands (docs/CONFIG.md «Ввод без раскрытия агенту»): before single-instance, the tray may run.
                 // Output is only «сохранено»/«отменено»/names, never a value.
                 if (args.Length > 0 && args[0] == "secret") {
@@ -77,7 +79,7 @@ namespace RemoteAgents.Launcher
                             owned = WaitMutex(mutex, 0);
                             string target = Path.Combine(home, Product.ExeName);
                             bool external = !Path.GetFullPath(Exe).Equals(target, StringComparison.OrdinalIgnoreCase);
-                            bool command = args.Any(a => new[] { "--exit", "--uninstall", "--logs", "--rollback", "--restart-components", "--check-updates", "--settings" }.Contains(a));
+                            bool command = args.Any(a => new[] { "--exit", "--uninstall", "--logs", "--rollback", "--restart-components", "--check-updates", "--settings", "--disk-shell" }.Contains(a));
                             // --tray with --home is also the isolated development/smoke entry point.
                             bool install = external && !command && !(args.Contains("--tray") && args.Contains("--home"));
                             // First setup owns a visible wizard before extraction, selftest or binary downloads.
@@ -153,7 +155,7 @@ namespace RemoteAgents.Launcher
                 try { var identity = Forward(name, new[] { "--identify" }); int pid = Json.Int(identity, "pid", 0); if (pid > 0) AllowSetForegroundWindow((uint)pid); } catch { }
             }
             using (var pipe = new NamedPipeClientStream(".", name, args.Contains("--identify") ? PipeDirection.InOut : PipeDirection.Out, PipeOptions.Asynchronous)) {
-                pipe.Connect(10000);
+                pipe.Connect(args.Contains("--disk-shell") ? 750 : 10000);
                 using (var writer = new StreamWriter(pipe, Files.Utf8, 4096, true)) { writer.WriteLine(Json.Encode(args)); writer.Flush(); }
                 // Older launchers do not acknowledge commands; only identify needs a reply.
                 if (!args.Contains("--identify")) return Json.Map(null);

@@ -27,7 +27,9 @@ class FirstRunTests(unittest.TestCase):
         self.assertIn('LegacyDiskCleanup.Required(home)', start)
         self.assertNotIn('LegacyDiskCleanup.Done(home)', start)
         self.assertLess(start.index('Program.DefaultHome'), start.index('LegacyDiskCleanup.Required(home)'))
-        self.assertLess(start.index('LegacyDiskCleanup.Required(home)'), start.index('Task.Run('))
+        self.assertIn('new DiskExplorerController(', start)
+        controller = source('DiskExplorerController.cs')
+        self.assertLess(controller.index('!cleanup()'), controller.index('initialized.TrySetResult'))
 
     def test_first_run_skips_synchronous_bootstrap(self):
         tray = source('TrayContext.cs')
@@ -229,20 +231,24 @@ class FirstRunTests(unittest.TestCase):
         self.assertIn('BackgroundWork.Disk.Busy', exit_.split('MessageBox', 1)[0])
         self.assertIn('WindowModel.CanFinish(', window)
 
-    def test_folder_ui_and_explorer_integration_are_gone(self):
-        # Syncthing Tray is the only folder interface: no folder window, tree, Explorer menu/icons or status polling remain.
-        # The names are built from parts so that this test does not contain the very identifiers it forbids.
+    def test_old_folder_window_is_gone_and_explorer_is_local(self):
+        # Explorer integration is restored over local REST; the removed folder tree / SSH monitor stay removed.
         disk = 'Disk'
         removed = [disk + x for x in ('FoldersView', 'FoldersModel', 'FolderTree', 'TreeSelection', 'SyncMonitor', 'SyncStatus', 'ProgressWindow',
-                                      'EvictionSafety', 'ShellCommands', 'ShellModel', 'ExplorerController', 'ExplorerMetadata', 'ExplorerNative',
-                                      'ExplorerObservation', 'ExplorerPresentation', 'ExplorerRegistry')] + ['LocalFolder' + 'Browser', 'Local' + 'Folders']
+                                      'EvictionSafety', 'ExplorerObservation', 'ExplorerPresentation')] + ['LocalFolder' + 'Browser', 'Local' + 'Folders']
         launcher = ROOT / 'app/launcher'
         for name in removed:
             self.assertFalse((launcher / (name + '.cs')).exists(), name)
         everything = '\n'.join(path.read_text(encoding='utf-8-sig') for path in sorted(launcher.glob('*.cs')))
-        for word in [disk + 'Explorer', disk + 'Folders', disk + 'SyncStatus', disk + 'FolderTree', disk + 'Shell', '--disk' + '-shell',
+        for word in [disk + 'Folders', disk + 'SyncStatus', disk + 'FolderTree',
                      'Show' + disk + 'Progress', 'Initialize' + 'Folders', 'Apply' + 'Folders', 'Folders' + 'Recommendation', 'Session' + 'Plan']:
             self.assertNotIn(word, everything, word)
+        for name in ['DiskShellCommands.cs', 'DiskSyncthingClient.cs', 'DiskExplorerController.cs']:
+            code = source(name)
+            for forbidden in ['Process.Start', 'External.Run', 'ssh.exe', 'powershell.exe', 'Invoke-DiskServer']:
+                self.assertNotIn(forbidden, code)
+        self.assertIn('DiskShellRequest.Parse(args)', source('Program.cs'))
+        self.assertIn('diskExplorer.Submit(diskShell)', source('TrayContext.cs'))
 
     def test_pending_account_survives_rejected_or_failed_guard(self):
         wizard = source('SetupWizard.cs')

@@ -50,10 +50,11 @@ namespace RemoteAgents.Launcher
                 probes.Clear();
                 Check(!LegacyDiskCleanup.Required(home, readOwner) && probes.SequenceEqual(actions.Select(a => prefix + a)), "a flagged ordinary start only probes the five old menu keys");
                 owners[prefix + "add"] = "another-product";
+                owners[prefix + "download"] = "RemoteAgents.Disk.v2";
                 owners[prefix + "sync"] = "remoteagents.disk.v1";
                 owners[prefix + "other"] = "RemoteAgents.Disk.v1";
                 owners[@"Software\Classes\CLSID\DiskPin"] = "RemoteAgents.Disk.v1";
-                Check(!LegacyDiskCleanup.Required(home, readOwner), "foreign owners, a different owner case, other verbs and the navigation pin do not invalidate success");
+                Check(!LegacyDiskCleanup.Required(home, readOwner), "v2 integration, foreign owners, a different owner case, other verbs and the navigation pin do not invalidate success");
                 owners.Clear();
                 foreach (string action in actions) {
                     owners[prefix + action] = "RemoteAgents.Disk.v1";

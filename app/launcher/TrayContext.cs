@@ -26,6 +26,7 @@ namespace RemoteAgents.Launcher
         readonly Stopwatch trayClickClock = Stopwatch.StartNew();
         long lastTrayClick = -SystemInformation.DoubleClickTime - 1L;
         ConfigWindow mainWindow;
+        DiskExplorerController diskExplorer;
         WindowModel window;
         readonly ConfigSyncSchedule syncSchedule = new ConfigSyncSchedule();
         bool syncRunning, accountResuming, serverHealthRunning, syncTaskRetired, syncTaskRetiring;
@@ -77,7 +78,7 @@ namespace RemoteAgents.Launcher
             BackgroundWork.Disk.Changed += () => { try { dispatch.BeginInvoke(new Action(DiskFinished)); } catch (InvalidOperationException) { } };
             dispatch.BeginInvoke(new Action(() => {
                 if (firstSetup) { RunFirstSetup(); return; }
-                Handle(args); DrainCommands(); Tick(); StartLegacyDiskCleanup();
+                StartLegacyDiskCleanup(); Handle(args); DrainCommands(); Tick();
                 if(Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome),StringComparison.OrdinalIgnoreCase)) CheckSetup();
 
             }));
@@ -104,7 +105,7 @@ namespace RemoteAgents.Launcher
             if(FirstInstall.Required(home)){ExitThread();return;}
             ReloadSettings();icon.Visible=true;readyForCommands=true;ShowMain();
             if(Product.IsVpn)Safe(RegisterVpnRun);
-            DrainCommands();Tick();
+            StartLegacyDiskCleanup();DrainCommands();Tick();
         }
         void Bootstrap()
         {
@@ -412,18 +413,22 @@ namespace RemoteAgents.Launcher
             if (form.WindowState == FormWindowState.Minimized) form.WindowState = FormWindowState.Normal;
             form.BringToFront(); form.Activate(); SetForegroundWindow(form.Handle);
         }
-        // Remove old Explorer menus/icons in the background, also when a downgrade recreated our owned verbs.
-        // A failure only reaches the journal (the flag file is written on success) and never stops the program.
+        // The in-process Explorer monitor first removes v1 menus/icons, including those recreated by a downgrade.
+        // Its v2 registration starts only after cleanup succeeds; failures are journalled and retried in the background.
         // Only the installed program does it: an isolated --home (tests, smoke runs) must not touch this computer's Explorer settings.
         void StartLegacyDiskCleanup()
         {
             if (Product.IsVpn || closing || engine.Current.Length == 0) return;
             if (!Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome), StringComparison.OrdinalIgnoreCase)) return;
-            if (!LegacyDiskCleanup.Required(home)) return;
-            string bundle = engine.Folder(engine.Current);
-            Task.Run(() => LegacyDiskCleanup.Run(home, bundle, (exe, args) => External.Run(exe, args, bundle, null, 120000, 1024 * 1024, stop.Token), log.Write));
+            if (diskExplorer != null) return;
+            diskExplorer = new DiskExplorerController(home, () => ConfigProfile.DiskRoot(ConfigProfile.Load(home)), () => engine.Folder(engine.Current),
+                () => ConfigSections.DiskDescribed(ConfigProfile.Load(home)),
+                () => !LegacyDiskCleanup.Required(home) || LegacyDiskCleanup.Run(home, engine.Folder(engine.Current),
+                    (exe, args) => External.Run(exe, args, engine.Folder(engine.Current), null, 120000, 1024 * 1024, stop.Token), log.Write),
+                (message, ok) => { try { dispatch.BeginInvoke(new Action(() => { if (!closing) icon.ShowBalloonTip(4000, "Диск", message, ok ? ToolTipIcon.Info : ToolTipIcon.Warning); })); } catch (InvalidOperationException) { } },
+                log.Write, DiskExplorerNative.CreateService(Path.Combine(DiskExplorerController.DefaultDiskHome, "explorer-icons"), log.Write), DiskExplorerNative.CreateRegistry(log.Write));
         }
-        // The Disk root in Explorer: accepted folders live there, their state is shown by Syncthing Tray, not by this program.
+        // The Disk root in Explorer: the local REST monitor supplies folder icons and shell commands.
         void OpenDisk()
         {
             string root = ConfigProfile.DiskRoot(ConfigProfile.Load(home));
@@ -671,6 +676,12 @@ namespace RemoteAgents.Launcher
             Safe(() => {
                 WindowCommand command = WindowModel.Route(args);
                 if (args.Contains("--exit") || args.Contains("--uninstall")) { RequestExit(); return; }
+                var diskShell = DiskShellRequest.Parse(args);
+                if (diskShell != null) {
+                    if (diskExplorer != null) diskExplorer.Submit(diskShell);
+                    else icon.ShowBalloonTip(4000, "Диск", "Диск ещё не установлен или отключён", ToolTipIcon.Warning);
+                    return;
+                }
                 if(firstSetup && !icon.Visible){foreach(var form in Application.OpenForms.Cast<Form>().Where(f=>f is SetupWizard || f is ConfigWindow).ToArray()) { ActivateWindow(form); } return;}
                 switch (command) {
                     case WindowCommand.Show: ShowMain(); break;
@@ -736,6 +747,7 @@ namespace RemoteAgents.Launcher
         protected override void ExitThreadCore()
         {
             if (closing) return; closing = true; timer.Stop(); stop.Cancel(); BackgroundWork.Disk.Stop();
+            if (diskExplorer != null) { diskExplorer.Dispose(); diskExplorer.Wait(3500); }
             if (mainWindow != null && !mainWindow.IsDisposed) mainWindow.Unload();
             lock (pipeGate) { if (server != null) server.Dispose(); }
             foreach (var r in runtimes) r.Dispose(); foreach (var job in actionJobs) job.Dispose();

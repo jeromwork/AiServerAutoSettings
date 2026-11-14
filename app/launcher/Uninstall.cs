@@ -22,6 +22,12 @@ namespace RemoteAgents.Launcher
                     if (!held) throw new IOException("Закройте RemoteAgents перед удалением");
                 } finally { if (held) running.ReleaseMutex(); }
             } } catch (WaitHandleCannotBeOpenedException) { }
+            if (Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome), StringComparison.OrdinalIgnoreCase)) {
+                string diskHome = DiskExplorerController.DefaultDiskHome;
+                DiskExplorerController.RemoveIntegration(ConfigProfile.DiskRoot(ConfigProfile.Load(home)), diskHome,
+                    DiskExplorerNative.CreateService(Path.Combine(diskHome, "explorer-icons"), delegate { }), DiskExplorerNative.CreateRegistry(delegate { }));
+                DiskExplorerNative.CleanupIcons(Path.Combine(diskHome, "explorer-icons"));
+            }
             var engine = new UpdateEngine(home, Program.Version);
             // No installed bundle: nothing was ever set up beyond autostart, which is already removed.
             if (engine.Current.Length == 0) return;
