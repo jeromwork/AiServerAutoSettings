@@ -5,11 +5,12 @@ $repo=Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent
 $tmp=Join-Path ([IO.Path]::GetTempPath()) ('disk-errors-'+[guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($tmp)
 $previousLocal=$env:LOCALAPPDATA;$env:LOCALAPPDATA=Join-Path $tmp 'local'
+$previousUser=$env:USERPROFILE;$env:USERPROFILE=$tmp
 $count=0
 function Assert($Value,$Text){if(-not $Value){throw $Text};$script:count++}
 try{
     $script:DiskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk';[void][IO.Directory]::CreateDirectory($script:DiskHome)
-    $reason='AddTest: Чужой .stignore: сохраните и удалите его вручную перед подключением'
+    $reason='На сервере недостаточно места для установки Disk'
     # A real SSH-shaped process emits UTF-8/CRLF. Never contact a live server.
     $ssh=Join-Path $tmp 'ssh'
     if($env:OS -eq 'Windows_NT'){
@@ -25,13 +26,13 @@ try{
         $profile=Join-Path $tmp 'profile.json'
         Write-TransportJson $profile @{sshExecutable=$ssh;arguments=@('fixture');serverAddress='server.invalid';login='worker';keyPath='unused';knownHostsPath='unused';configPath='unused'}
         $failure='';try{Invoke-InstallChild $repo 'disk/Install-RemoteDisk.ps1' @('-Profile',$profile)}catch{$failure=$_.Exception.Message}
-        Assert ($failure.Contains($reason) -and -not $failure.Contains('Проверьте SSH')) ('Actual Install -> child -> window reason retains folder and never suggests SSH for a policy refusal: '+$failure)
+        Assert ($failure.Contains($reason) -and -not $failure.Contains('Проверьте SSH')) ('Actual Install -> child -> window reason retains cause and never suggests SSH for a server failure: '+$failure)
     }
     $child=Join-Path $tmp 'failure.ps1'
     $body=@'
 [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
 [Console]::Out.WriteLine(('progress '*600))
-[Console]::Error.WriteLine('AddTest: Чужой .stignore: сохраните и удалите его вручную перед подключением')
+[Console]::Error.WriteLine('На сервере недостаточно места для установки Disk')
 1..600|ForEach-Object {[Console]::Error.WriteLine(('diagnostic '+$_))}
 [Console]::Error.WriteLine('да не выполнена (код выхода 1)')
 exit 1
@@ -42,9 +43,8 @@ exit 1
     $json=@{ok=$false;reason=(Protect-DiskFailureText $failure);remedy=(Get-InstallFailureRemedy $failure)}|ConvertTo-Json -Compress
     $window=$json|ConvertFrom-Json
     Assert ($window.reason.Contains($reason) -and $window.remedy -eq '') 'Machine-readable window response keeps the cause without a generic SSH remedy'
-    $longName='VeryLongProjectNameWithMoreThanTwentyLetters'
-    $protected=Protect-DiskFailureText ('Шаг установки не выполнен (код 1): '+$longName+': Чужой .stignore: token '+('A'*40))
-    Assert ($protected.Contains($longName+': Чужой .stignore') -and -not $protected.Contains(('A'*40))) 'Long project name survives masking while tokens stay private'
+    $protected=Protect-DiskFailureText ('Ошибка установки: token '+('A'*40))
+    Assert (-not $protected.Contains(('A'*40))) 'error text still masks tokens'
     Assert ((Get-InstallFailureRemedy 'Шаг установки не выполнен (код 1)').Contains('Проверьте SSH')) 'Unknown failure still has actionable generic advice'
     Write-Output ('OK: '+$count+' stderr -> Disk log / Install / wizard / window checks (UTF-8, CRLF, long output; no live SSH)')
-}finally{$env:LOCALAPPDATA=$previousLocal;Remove-Item -LiteralPath $tmp -Recurse -Force}
+}finally{$env:USERPROFILE=$previousUser;$env:LOCALAPPDATA=$previousLocal;Remove-Item -LiteralPath $tmp -Recurse -Force}

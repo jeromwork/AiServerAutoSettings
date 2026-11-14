@@ -23,30 +23,26 @@ try {
     Write-DiskUtf8 $config $xml;Read-DiskState;$before=$script:Engine.configuration.folder.OuterXml;Save-DiskState @{natEnabled=$false;listenAddresses=@('tcp://127.0.0.1:22000')};$saved=[IO.File]::ReadAllText($config);Read-DiskState
     Assert ($script:Engine.PreserveWhitespace -and $script:Engine.configuration.folder.OuterXml -ceq $before -and $saved.Contains('<encryptionPassword></encryptionPassword>') -and -not $saved.Contains('&#xD;') -and $saved.Replace($script:Engine.configuration.options.OuterXml,'<options><natEnabled>true</natEnabled></options>') -ceq $xml) 'XML save preserves empty passwords and unrelated document'
     Assert ($script:Engine.configuration.options.natEnabled -ceq 'false' -and $script:Engine.configuration.options.listenAddress -ceq 'tcp://127.0.0.1:22000') 'XML options updated and appended'
-    . (Join-Path (Split-Path $PSScriptRoot -Parent) 'transport/Transport.Common.ps1')
-    $portRoot=Join-Path $tmp 'ports';[void][IO.Directory]::CreateDirectory($script:DiskHome)
-    $portsConfig=[pscustomobject]@{syncPort=22001};Write-TransportJson (Join-Path $portRoot 'config.json') @{transport=$portsConfig}
-    $configuredPorts=Get-TransportConfiguredPorts $portsConfig $null;$effectivePorts=Copy-TransportObject $configuredPorts;$effectivePorts.syncPort=22011
-    Write-TransportJson (Join-Path $portRoot 'state/transport-ports.json') @{schema=1;configured=$configuredPorts;effective=$effectivePorts} -Private
-    [IO.File]::WriteAllText((Join-Path $script:DiskHome 'server.txt'),"TEST-PEER`r`n")
-    $script:addresses=@('tcp://127.0.0.1:22001');$script:addressWrites=0
-    function Invoke-RestMethod {
-        param($Uri,$Method,$Headers,$TimeoutSec,$UseBasicParsing,$Body,$ContentType)
-        if($Method -eq 'PATCH'){$script:addresses=@((ConvertFrom-Json ([Text.Encoding]::UTF8.GetString($Body))).addresses);$script:addressWrites++}
-        [pscustomobject]@{addresses=$script:addresses;name='Имя устройства'}
+    # Exercise the real UTF-8 REST adapter, including PS 5.1's JSON-array pipeline behavior.
+    function Invoke-WebRequest {
+        param($Uri,$Method,$Headers,$TimeoutSec,$UseBasicParsing,$Body,$ContentType,$MaximumRedirection)
+        Assert ($MaximumRedirection -eq 0) 'REST never follows redirects outside loopback'
+        $script:apiUri=[string]$Uri
+        $stream=New-Object IO.MemoryStream(,[Text.Encoding]::UTF8.GetBytes($script:ApiResponse))
+        [pscustomobject]@{RawContentStream=$stream}
     }
-    $script:Gui='127.0.0.1:8384';$script:ApiKey='test'
-    Assert (Sync-DiskServerAddress $portRoot) 'Адрес Syncthing следует за эффективным портом; server.txt с CRLF'
-    Assert ($script:addresses[0] -ceq 'tcp://127.0.0.1:22011' -and $script:addressWrites -eq 1) 'Изменён только локальный адрес устройства'
-    Assert (-not (Sync-DiskServerAddress $portRoot) -and $script:addressWrites -eq 1) 'Верный адрес повторно не записывается'
-    function Invoke-RestMethod {throw 'Тестовый отказ REST'}
-    Assert (-not (Sync-DiskServerAddress $portRoot)) 'Недоступный REST не останавливает монитор'
-    function Invoke-RestMethod {Write-Output -NoEnumerate $script:ApiResponse}
-    $script:Gui=$null;$script:ApiKey=$null;$script:ApiResponse=[pscustomobject]@{myID='lazy'};$null=Invoke-DiskApi 'system/status';Assert ($script:Gui -eq '127.0.0.1:8384' -and $script:ApiKey -eq 'test') 'CLI lazily loads engine state'
-    $script:Gui='127.0.0.1:8384';$script:ApiResponse=@([pscustomobject]@{id='first';path='first'},[pscustomobject]@{id='second';path='second'});$captured=@(Invoke-DiskApi 'config/folders');Assert ($captured.Count -eq 2 -and $captured[0].id -ceq 'first' -and $captured[1].id -ceq 'second') 'PS5 REST array is emitted as individual folders'
-    foreach($case in @(@{value=@();count=0},@{value=$null;count=0},@{value='';count=0},@{value=$false;count=1},@{value=0;count=1},@{value=[pscustomobject]@{myID='local'};count=1})){$script:ApiResponse=$case.value;$captured=@(Invoke-DiskApi 'system/status');Assert ($captured.Count -eq $case.count -and ($case.count -eq 0 -or [object]::ReferenceEquals($captured[0],$case.value))) 'REST empty array, empty response and scalar object'}
-    function Invoke-DiskSsh {param($Command,[switch]$Direct,$OutputFile) $script:ServerResponse}
-    foreach($case in @(@{value='[{"name":"first","id":"one"},{"name":"second","id":"two"}]';count=2},@{value='[{"name":"only","id":"one"}]';count=1},@{value='[]';count=0},@{value='';count=0},@{value='null';count=0},@{value='{"deviceId":"peer"}';count=1})){$script:ServerResponse=$case.value;$captured=@(Invoke-DiskServer list);Assert ($captured.Count -eq $case.count) 'Server JSON stream for interactive folder selection and empty responses';if($case.count -eq 2){Assert ($captured[1].name -ceq 'second' -and $captured[1].id -ceq 'two') 'Server folder selection uses a scalar ID'}};Remove-Item Function:Invoke-DiskSsh
+    $script:Gui=$null;$script:ApiKey=$null;$script:ApiResponse='{"myID":"lazy"}';$null=Invoke-DiskApi 'system/status'
+    Assert ($script:Gui -eq '127.0.0.1:8384' -and $script:ApiKey -eq 'test') 'REST lazily loads existing engine state'
+    $script:ApiResponse='[{"id":"first","label":"Первый"},{"id":"second"}]'
+    $captured=@(Invoke-DiskApi 'config/folders');Assert ($captured.Count -eq 2 -and $captured[0].label -ceq 'Первый' -and $captured[1].id -ceq 'second') 'REST emits UTF-8 JSON folders individually on PS5/PS7'
+    foreach($case in @(@{json='[]';count=0},@{json='null';count=0},@{json='';count=0},@{json='false';count=1},@{json='0';count=1},@{json='{"myID":"local"}';count=1})){
+        $script:ApiResponse=$case.json;$captured=@(Invoke-DiskApi 'system/status');Assert ($captured.Count -eq $case.count) 'REST handles empty and scalar responses'
+    }
+    foreach($gui in @('192.0.2.1:8384','localhost:8384','127.0.0.1:8384@server.invalid','127.0.0.1:8384/elsewhere')){
+        $script:Gui=$gui;$failed=$false;try{$null=Invoke-DiskApi 'system/status'}catch{$failed=$true};Assert $failed 'REST refuses a non-loopback endpoint'
+    }
+    $script:Gui='127.0.0.1:8384'
+    Remove-Item Function:Invoke-WebRequest
     $exe=(Get-Process -Id $PID).Path;$file=Join-Path $tmp 'native.json';$captured=@(Invoke-DiskProcess $exe @('-NoProfile','-Command',('[Console]::Write("'+$secret+'")')) '' $file)
     Assert ($captured.Count -eq 0 -and [IO.File]::ReadAllText($file) -eq $secret) 'Native output stays in file'
     $failure='';try{Invoke-DiskProcess $exe @('-NoProfile','-Command',('[Console]::Error.Write("'+$secret+'");exit 4'))}catch{$failure=$_|Out-String;$nativeFailure=$_}
@@ -55,20 +51,6 @@ try {
     Assert ($text -match '^\d{4}-\d\d-\d\dT' -and $text.Contains('[Native test]') -and $text.Contains('код выхода 4') -and $text.Contains('Disk.Common.ps1') -and -not $text.Contains($secret)) 'Failure log: time, step, reason, position, no stderr'
     [IO.File]::WriteAllText($log,('x'*(256KB+1)));Write-DiskLog 'Install test';Assert ((Get-Item -LiteralPath $log).Length -lt 256KB -and [IO.File]::ReadAllText($log).Contains('[Install test] Успех')) 'Log rotation and success'
     $oldProfile=$env:USERPROFILE;try{$env:USERPROFILE=Join-Path $tmp 'Test User';Assert ((Get-DiskBase) -eq (Join-Path $tmp 'Test User/Disk')) 'Default base is the profile Disk folder'}finally{$env:USERPROFILE=$oldProfile}
-    $free=Join-Path $tmp 'free';Assert-DiskFreePath $free @();[void][IO.Directory]::CreateDirectory($free);Assert-DiskFreePath $free @()
-    [void][IO.Directory]::CreateDirectory((Join-Path $free '.git'));$blocked=$false;try{Assert-DiskFreePath $free @()}catch{$blocked=$_.Exception.Message -eq 'папка занята'};Assert $blocked 'Git-only folder is occupied'
-    $blocked=$false;try{Assert-DiskFreePath (Join-Path $tmp 'nested') @(@{path=$tmp})}catch{$blocked=$true};Assert $blocked 'Nested Syncthing paths refused'
-    $folder=Join-Path $tmp 'folder';[void][IO.Directory]::CreateDirectory($folder);$ignore=Join-Path $folder '.stignore';[IO.File]::WriteAllText($ignore,'foreign-policy');$refused=$false
-    try{Test-DiskIgnores $folder}catch{$refused=$_.Exception.Message.Contains('Чужой .stignore')};Assert ($refused -and [IO.File]::ReadAllText($ignore) -eq 'foreign-policy') 'Foreign ignores refused'
-    Remove-Item -LiteralPath $ignore -Force;Test-DiskIgnores $folder -Write;Test-DiskIgnores $folder -Write
-    Assert ([IO.File]::ReadAllText($ignore) -ceq [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'stignore.txt'))) 'Canonical ignores'
-    Write-DiskUtf8 (Join-Path $folder 'file.txt') 'existing';Write-DiskUtf8 (Join-Path $script:DiskHome 'server.txt') 'peer'
-    $script:LocalFolder=[pscustomobject]@{id='repeat';path=$folder;type='sendreceive';devices=@(@{deviceID='local'},@{deviceID='peer'});maxConflicts=10};$script:Attachments=0;$script:LocalWrites=0
-    function Read-DiskProfile {param($Profile)};function Read-DiskState {}
-    function Invoke-DiskServer {param($Action,$Data) if($Action -eq 'list'){[pscustomobject]@{name='project';id='repeat';hasFiles=$true}}else{$script:Attachments++;Assert ($Data.localHasFiles -and $Data.merge) 'Attach always consents to merge';@{id='repeat'}}}
-    function Invoke-RestMethod {param($Uri) switch -Wildcard ($Uri){'*/system/status' {[pscustomobject]@{myID='local'}} '*/config/folders' {Write-Output -NoEnumerate @([pscustomobject]@{id='unrelated';path=(Join-Path $tmp 'other')},$script:LocalFolder)} default {$script:LocalWrites++}}}
-    $tokens=$null;$errors=$null;$addAst=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'Add-RemoteDiskFolder.ps1'),[ref]$tokens,[ref]$errors);$body=$addAst.EndBlock.Statements|Where-Object {$_ -is [Management.Automation.Language.TryStatementAst]}
-    $Path=$folder;$Remote='project';$Merge=$false;$Direction='both';$interactive=$false;1..2|ForEach-Object {$null=& ([scriptblock]::Create($body.Extent.Text))};Assert ($script:Attachments -eq 2 -and $script:LocalWrites -eq 2) 'Nonempty local folder reconnects without merge'
     . (Join-Path $PSScriptRoot 'Disk.Binary.ps1')
     function Invoke-WebRequest {param($Uri,$OutFile,[switch]$UseBasicParsing,$TimeoutSec) Copy-Item -LiteralPath $script:Archive -Destination $OutFile;$script:Downloads++}
     function Get-Process {param($Name,$ErrorAction) $script:FakeProcesses}

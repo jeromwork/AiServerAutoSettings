@@ -7,7 +7,7 @@ function Get-WizardResources([string]$Action,$Request) {
         'Connection' {return @('connection')}
         {$_ -in @('Bridge','RollbackBridge')} {return @('bridge')}
         {$_ -in @('Account','ResumeAccount')} {return @('account')}
-        {$_ -in @('Disk','DiskRevert')} {return @('disk')}
+        'Disk' {return @('disk')}
         {$_ -in @('Vpn','Bootstrap')} {return @('vpn')}
         {$_ -in @('Proxy','Lan','LanRemove')} {return @('server-network')}
         'Server' {return @('profile')}
@@ -135,7 +135,7 @@ function Invoke-WizardResourceSet([string]$Root,[string[]]$Resources,[scriptbloc
     } $TimeoutMs
 }
 function Get-WizardRuntimeFiles {
-    @('build/Wizard.ps1','build/Wizard.Common.ps1','build/Wizard.Engine.ps1','build/Wizard.Session.ps1','build/Wizard.SessionHost.ps1','build/Wizard.Server.ps1','build/Wizard.Bootstrap.ps1','build/Wizard.Refresh.ps1','build/Wizard.Health.ps1','build/Wizard.Network.ps1','build/Wizard.Lan.ps1','build/Setup.Common.ps1','transport/Transport.Common.ps1','transport/Route.Proxy.ps1','transport/server-transport-catalog.py','disk/Disk.Common.ps1','disk/Disk.Union.ps1','disk/Disk.Selective.ps1','disk/Disk.Explorer.ps1','disk/Remove-DiskExplorer.ps1','disk/Ensure-DiskExplorerIgnores.ps1','disk/stignore.txt','disk/stignore-previous.sha256')
+    @('build/Wizard.ps1','build/Wizard.Common.ps1','build/Wizard.Engine.ps1','build/Wizard.Session.ps1','build/Wizard.SessionHost.ps1','build/Wizard.Server.ps1','build/Wizard.Bootstrap.ps1','build/Wizard.Refresh.ps1','build/Wizard.Health.ps1','build/Wizard.Network.ps1','build/Wizard.Lan.ps1','build/Setup.Common.ps1','transport/Transport.Common.ps1','transport/Route.Proxy.ps1','transport/server-transport-catalog.py','disk/Disk.Common.ps1','disk/Install-RemoteDisk.ps1','disk/Disk.Binary.ps1','disk/Disk.Engine.ps1','disk/Disk.NavPane.ps1','disk/stignore.txt','disk/stignore-previous.sha256')
 }
 function Get-WizardHostId([string]$Root) {
     Invoke-WizardResourceLock $Root 'device-identity' {

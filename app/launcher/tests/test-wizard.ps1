@@ -123,33 +123,6 @@ Assert ($s.ssh -and $s.disk) 'server readiness comes from inspection output'
 $script:offline=$true
 Throws {Get-WizardServer $root $repo} 'saved success cannot hide SSH failure'
 $script:offline=$false
-# File union: identical path means presence, never assumed equal bytes.
-$base=Join-Path $TestHome 'Disk';[void][IO.Directory]::CreateDirectory((Join-Path $base 'Project/empty'))
-[IO.File]::WriteAllText((Join-Path $base 'Project/both.txt'),'local version')
-[IO.File]::WriteAllText((Join-Path $base 'Project/local.txt'),'preserve me')
-[IO.File]::WriteAllText((Join-Path $base 'loose.txt'),'root local file')
-[IO.File]::WriteAllText((Join-Path $base 'Project/.env'),'never enumerate')
-[void][IO.Directory]::CreateDirectory((Join-Path $base 'LocalOnly'))
-$tree=ConvertFrom-Json ('{"folders":[{"name":"Project"},{"name":"ServerOnly"}],"entries":[{"path":"Project/both.txt","directory":false},{"path":"Project/remote.txt","directory":false}]}'+"`r`n")
-$rootTree=ConvertFrom-Json ('{"folders":[{"name":"Project","hasChildren":true},{"name":"ServerOnly","hasChildren":false}],"entries":[]}'+"`r`n")
-$rootUnion=Get-DiskUnion $rootTree $base
-Assert (@($rootUnion.rows|Where-Object {$_.path -match '/'}).Count -eq 0) 'initial inventory is root only'
-Assert (@($rootUnion.rows|Where-Object {$_.path -ceq 'Project' -and $_.hasChildren -and $_.presence -eq 'both'}).Count -eq 1) 'root union has lazy child flag'
-$tree.folders=@()
-$union=Get-DiskUnion $tree $base 'Project'
-Assert (@($union.rows|Where-Object {$_.path -ceq 'Project/both.txt' -and $_.presence -eq 'both'}).Count -eq 1) 'both marker'
-Assert (@($union.rows|Where-Object {$_.path -ceq 'Project/local.txt' -and $_.presence -eq 'local'}).Count -eq 1) 'local-only marker'
-Assert (@($union.rows|Where-Object {$_.path -ceq 'Project/remote.txt' -and $_.presence -eq 'server'}).Count -eq 1) 'server-only marker'
-Assert (@($rootUnion.rows|Where-Object {$_.path -ceq 'LocalOnly' -and $_.presence -eq 'local'}).Count -eq 1) 'local-only project included'
-Assert (@($rootUnion.rows|Where-Object {$_.path -ceq 'ServerOnly' -and $_.presence -eq 'server'}).Count -eq 1) 'server-only project included'
-Assert (@($union.rows|Where-Object {$_.path -ceq 'Project/empty' -and $_.kind -eq 'directory'}).Count -eq 1) 'empty local directory included'
-Assert (@($union.rows|Where-Object {$_.path -like '*.env*'}).Count -eq 0) 'secrets excluded from union'
-Assert (@($rootUnion.rows|Where-Object {$_.path -ceq 'loose.txt' -and $_.presence -eq 'local' -and $_.kind -eq 'file'}).Count -eq 1) 'loose root files are visible and never silently omitted'
-Assert ([IO.File]::ReadAllText((Join-Path $base 'Project/local.txt')) -ceq 'preserve me') 'tree does not modify local files'
-$collision=Copy-TransportObject $tree;$collision.entries[0].path='Project/BOTH.txt'
-Throws {Get-DiskUnion $collision $base 'Project'} 'case collision fails before syncing to Windows'
-$collision=Copy-TransportObject $tree;$collision.entries[0].directory=$true
-Throws {Get-DiskUnion $collision $base 'Project'} 'file-directory conflict remains intact'
 function Initialize-WizardTransport($Root,$Bundle,$Transport){}
 function Invoke-TransportPreflight($Root,$Bundle,$Config){}
 function Start-WizardWorkingTransport($Root,$Bundle){}
@@ -273,46 +246,43 @@ function Test-WizardBridge($Root){$true}
 $inspect=Invoke-WizardStep $freshRoot $repo 'Inspect' ([pscustomobject]@{})
 Assert (-not $inspect.steps[1].ready) 'connection needs a live proof'
 Assert (-not (Read-TransportJson (Join-Path $freshRoot 'config.json')).wizard.configured) 'unproven summary leaves setup unfinished'
-# Exercise the actual Disk dispatcher with offline children and saved receive/external state.
+# Exercise the real Disk dispatcher using an offline installation child.
 & {
     $savedLocal=$env:LOCALAPPDATA;$env:LOCALAPPDATA=Join-Path $TestHome 'disk-dispatch'
+    $savedUser=$env:USERPROFILE;$env:USERPROFILE=$TestHome
     try{
         $root=Join-Path $env:LOCALAPPDATA 'RemoteAgents';$disk=Join-Path $env:LOCALAPPDATA 'RemoteDisk'
         [void][IO.Directory]::CreateDirectory((Join-Path $root 'state'))
         [void][IO.Directory]::CreateDirectory((Join-Path $disk 'state'))
-        [void][IO.Directory]::CreateDirectory((Join-Path $disk 'tray'))
         Write-TransportJson (Join-Path $root 'config.json') @{schema=1;components=@{}}
         Write-DiskUtf8 (Join-Path $disk 'state/config.xml') '<fixture/>'
-        Write-DiskUtf8 (Join-Path $disk 'tray/syncthingtray.exe') 'fixture-only'
-        Write-DiskUtf8 (Join-Path $disk 'selection.json') ('{"schema":1,"paths":["Project"],"directions":{"Project":"receive"}}'+"`r`n")
-        Write-DiskUtf8 (Join-Path $disk 'external.json') ('{"schema":1,"items":[{"path":"D:\\Reports","remote":"Reports","direction":"send"}]}'+"`r`n")
         function Send-WizardHelpers {}
         function Get-WizardServer {@{disk=$true}}
         function Resolve-WizardDiskServer {}
         function Find-InstallProfile {'fixture-profile'}
-        function Read-DiskState {}
-        function Set-DiskBase {}
         function Set-WizardDiskChannel {}
-        function Install-DiskNavPane {}
-        function Invoke-DiskApi($Route){if($Route -cne 'system/status'){throw ('unexpected '+$Route)};@{myID='LOCAL'}}
+        function Ensure-DiskNavPane {$true}
+        $script:children=0
         function Invoke-InstallChild($Bundle,$Script,$Arguments){
-            Assert ($Script -ceq 'disk/Select-Disk.ps1') 'Disk invokes only the selection child'
-            $script:diskPayload=Read-TransportJson $Arguments[5]
+            $script:children++
+            Assert ($Script -ceq 'disk/Install-RemoteDisk.ps1') 'Disk invokes the installation entry point'
+            $script:diskArguments=$Arguments
+            $script:diskPayload=$null
+            $index=[Array]::IndexOf($Arguments,'-AcceptFile')
+            if($index -ge 0){$script:acceptPath=$Arguments[$index+1];$script:diskPayload=Read-TransportJson $script:acceptPath}
         }
-        $request=[pscustomobject]@{base=(Join-Path $TestHome 'dispatch-Disk');paths=@('Project')}
-        [void](Invoke-WizardStep $root $repo 'Disk' $request)
-        Assert ($script:diskPayload.directions.Project -ceq 'receive') 'missing directions preserves receive'
-        Assert (@($script:diskPayload.external).Count -eq 1 -and $script:diskPayload.external[0].remote -ceq 'Reports' -and $script:diskPayload.external[0].direction -ceq 'send') 'missing external preserves saved attachment'
-        $request|Add-Member directions @{};$request|Add-Member external @()
-        [void](Invoke-WizardStep $root $repo 'Disk' $request)
-        Assert (@($script:diskPayload.directions.PSObject.Properties).Count -eq 0 -and @($script:diskPayload.external).Count -eq 0) 'explicit empty directions and external clears both'
-        [void](Invoke-WizardStep $root $repo 'Disk' @{base=$request.base;paths=@('Project');directions=@{Project='send'};external=@()})
-        Assert ($script:diskPayload.directions.Project -ceq 'send' -and @($script:diskPayload.external).Count -eq 0) 'dictionary request respects explicit fields'
-        # A failed folder must not leave the engine unsupervised (REST unavailable afterwards).
-        Write-TransportJson (Join-Path $root 'config.json') @{schema=1;components=@{}}
-        function Invoke-InstallChild($Bundle,$Script,$Arguments){throw 'Не все выбранные папки подключены'}
-        $failed=$false;try{[void](Invoke-WizardStep $root $repo 'Disk' $request)}catch{$failed=$true}
-        Assert ($failed -and (Read-TransportJson (Join-Path $root 'config.json')).components.disk.enabled) 'failed selection still leaves the disk engine under the tray supervisor'
-    }finally{$env:LOCALAPPDATA=$savedLocal}
+        [void](Invoke-WizardStep $root $repo 'Disk' ([pscustomobject]@{}))
+        Assert ($script:children -eq 1 -and $script:diskArguments -notcontains '-AcceptFile') 'missing folders accepts nothing even on an existing installation'
+        Assert ((Read-TransportJson (Join-Path $root 'config.json')).components.disk.enabled) 'successful install enables Disk'
+        [void](Invoke-WizardStep $root $repo 'Disk' @{folders=@('Project',@{id='Reports';path=(Join-Path $TestHome 'Reports')})})
+        Assert ($script:children -eq 2 -and $script:diskPayload.folders.Count -eq 2 -and $script:diskPayload.folders[0].id -ceq 'Project' -and $script:diskPayload.folders[1].path -ceq (Join-Path $TestHome 'Reports')) 'explicit folders with optional paths cross the AcceptFile boundary'
+        Assert (-not (Test-Path -LiteralPath $script:acceptPath)) 'temporary AcceptFile removed after use'
+        Assert ([IO.File]::ReadAllText((Join-Path $disk 'state/config.xml')) -ceq '<fixture/>') 'wizard leaves Syncthing XML untouched'
+        [void](Invoke-WizardStep $root $repo 'Disk' @{folders=@()})
+        Assert ($script:diskPayload.folders.Count -eq 0) 'explicit empty folders stays empty'
+        function Invoke-InstallChild($Bundle,$Script,$Arguments){$script:failedAccept=$Arguments[4];throw 'Тестовый отказ установки'}
+        $failed=$false;try{[void](Invoke-WizardStep $root $repo 'Disk' @{folders=@('Failed')})}catch{$failed=$true}
+        Assert ($failed -and -not (Test-Path -LiteralPath $script:failedAccept)) 'failed install propagates and removes temporary file'
+    }finally{$env:LOCALAPPDATA=$savedLocal;$env:USERPROFILE=$savedUser}
 }
-Write-Output ('OK: '+$count+' wizard/model/catalog/union/rollback checks (fake SSH, no Windows)')
+Write-Output ('OK: '+$count+' wizard/model/catalog/installation/rollback checks (fake SSH, no Windows)')
