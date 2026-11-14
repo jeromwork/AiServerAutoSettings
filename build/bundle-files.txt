@@ -24,7 +24,6 @@ disk/Install-RemoteDisk.ps1
 disk/Disk.Common.ps1
 disk/server-disk.sh
 disk/stignore.txt
-disk/stignore-previous.sha256
 build/components.json => components.json
 build/bundle-binaries.json
 build/selftest.ps1 => selftest.ps1

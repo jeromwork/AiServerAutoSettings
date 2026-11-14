@@ -114,39 +114,26 @@ function Save-DiskState($Options) {
 function New-DiskIni($Tray,$State,$Gui,$ApiKey) {
     @('[General]','v=2.1.9','[tray]','connections\size=1','connections\1\label=RemoteDisk',('connections\1\syncthingUrl=http://'+$Gui),('connections\1\apiKey='+$ApiKey),'connections\1\autoConnect=true','connections\1\reconnectInterval=30','notifyOnDisconnect=false','notifyOnErrors=true','showSyncthingNotifications=true','[startup]','syncthingAutostart=true','useLibSyncthing=false',('syncthingPath='+$Tray.Replace('\','/')),('syncthingArgs="syncthing serve --home \"'+$State.Replace('\','/')+'\" --no-browser --no-restart"'),'considerLauncherForReconnect=true','showLauncherButton=false','') -join "`n"
 }
-# Server helper upload used only during installation. Existing history is preserved.
+# Upload only our template; each folder keeps its own .stignore rules.
 function Get-DiskIgnoreUpload([string]$Directory=$PSScriptRoot) {
-    $payload=@{rules=[IO.File]::ReadAllText((Join-Path $Directory 'stignore.txt')).Replace("`r",'');versions=@([IO.File]::ReadAllLines((Join-Path $Directory 'stignore-previous.sha256')))}|ConvertTo-Json -Depth 5 -Compress
+    $rules=[IO.File]::ReadAllText((Join-Path $Directory 'stignore.txt')).Replace("`r",'')
     $source=@'
-import os,base64,json,hashlib,tempfile,fcntl
+import os,base64,tempfile
 from pathlib import Path
 p=Path.home()/'.local/share/remote-disk'
 if any(x.is_symlink() for x in (p,*p.parents)):raise ValueError('symlink')
 p.mkdir(parents=True,exist_ok=True)
-def safe(f):
- if f.is_symlink():raise ValueError('symlink')
-def normalized(s):return s.lstrip('\ufeff').replace('\r','').rstrip('\n')+'\n'
-def digest(s):return hashlib.sha256(normalized(s).encode()).hexdigest()
-r=json.loads(base64.b64decode('PAYLOAD_BASE64'));history=p/'stignore-previous.sha256';template=p/'stignore.txt';lock=p/'.stignore-history.lock'
-for f in (history,template,lock):safe(f)
-with lock.open('a') as gate:
- fcntl.flock(gate,fcntl.LOCK_EX)
- versions=set(r['versions'])
- if history.exists():versions.update(history.read_text(encoding='utf-8-sig').splitlines())
- if template.exists():versions.add(digest(template.read_text(encoding='utf-8-sig')))
- versions.add(digest(r['rules']))
- versions={v.strip() for v in versions if v.strip()}
- if any(len(v)!=64 or any(c not in '0123456789abcdef' for c in v) for v in versions):raise ValueError('Invalid stignore history')
- # Publish history first: even an interrupted template update recognizes both versions.
- for f,text in ((history,'\n'.join(sorted(versions))+'\n'),(template,normalized(r['rules']))):
-  fd,tmp=tempfile.mkstemp(dir=p)
-  try:
-   with os.fdopen(fd,'w',encoding='utf-8',newline='\n') as out:out.write(text);out.flush();os.fsync(out.fileno())
-   os.replace(tmp,f)
-  finally:
-   if os.path.exists(tmp):os.unlink(tmp)
+template=p/'stignore.txt'
+if template.is_symlink():raise ValueError('symlink')
+rules=base64.b64decode('RULES_BASE64')
+fd,tmp=tempfile.mkstemp(dir=p)
+try:
+ with os.fdopen(fd,'wb') as out:out.write(rules);out.flush();os.fsync(out.fileno())
+ os.replace(tmp,template)
+finally:
+ if os.path.exists(tmp):os.unlink(tmp)
 '@
-    $source=$source.Replace('PAYLOAD_BASE64',[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload)))
+    $source=$source.Replace('RULES_BASE64',[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($rules)))
     'python3 -c ''import base64;exec(base64.b64decode("'+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($source.Replace("`r",'')))+'"))''' + "`n"
 }
 # Base folder like Yandex Disk: %USERPROFILE%\Disk unless the owner chose another one.

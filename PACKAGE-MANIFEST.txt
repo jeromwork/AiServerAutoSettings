@@ -101,11 +101,9 @@ Start-WindowsControl.ps1
 server-control.sh
 test-windows-control.py
 disk/Install-RemoteDisk.ps1
-disk/Add-RemoteDiskFolder.ps1
 disk/Disk.Common.ps1
 disk/server-disk.sh
 disk/stignore.txt
-disk/stignore-previous.sha256
 disk/README.md
 disk/test-disk.py
 disk/test-install.ps1
@@ -113,5 +111,11 @@ SETUP.cmd
 Setup-All.ps1
 OPENVPN-FIX.cmd
 Fix-OpenVpnAdapter.ps1
-disk/Sync-RemoteDiskFolders.ps1
-disk/Move-RemoteDiskFolder.ps1
+disk/Disk.Engine.ps1
+disk/Disk.Binary.ps1
+disk/Disk.NavPane.ps1
+disk/test-accept.ps1
+disk/test-cleanup.ps1
+disk/test-pairing.ps1
+disk/test-fixture.ps1
+disk/test-wizard-merge.py
