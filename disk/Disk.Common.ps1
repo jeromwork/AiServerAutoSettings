@@ -244,6 +244,20 @@ function Remove-DiskLegacy([string]$Base='') {
 }
 
 
+# Match ConfigBundle.NormalizeWindowsPath even when these lexical rules are tested on Linux.
+function ConvertTo-DiskAcceptWindowsPath([string]$Path) {
+    $path=$Path.Replace('/','\')
+    $drive=$path -match '\A[a-zA-Z]:\\';$unc=$path -match '\A\\\\[^\\]+\\[^\\]+(?:\\|\z)'
+    if((-not $drive -and -not $unc) -or $path.StartsWith('\\?\') -or $path.StartsWith('\\.\')){throw 'AcceptFile: нужен абсолютный путь Windows без префикса устройства'}
+    $offset=0;if($drive){$offset=2}
+    if($path.Substring($offset) -match '[<>:"|?*\x00-\x1f]'){throw 'AcceptFile: недопустимый путь папки'}
+    $offset=2;if($drive){$offset=3}
+    $tail=$path.Substring($offset).TrimEnd('\');$parts=@()
+    if(-not ($drive -and $tail.Length -eq 0)){$parts=@($tail -split '\\')}
+    if(@($parts|Where-Object {$_ -eq '' -or $_ -in @('.','..') -or $_ -match '[ .]\z|\A(?i:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|\z)'}).Count){throw 'AcceptFile: недопустимый путь папки'}
+    if($drive -and $path.Length -eq 3){return $path}
+    return $path.TrimEnd('\')
+}
 function Read-DiskAcceptFile([string]$File) {
     if(-not $File){return}
     try{$data=[IO.File]::ReadAllText($File)|ConvertFrom-Json}catch{throw 'AcceptFile: не удалось прочитать JSON со списком папок'}
@@ -258,13 +272,8 @@ function Read-DiskAcceptFile([string]$File) {
         if($path){
             $windows=$path.Replace('/','\')
             if($windows.StartsWith('\\?\') -or $windows.StartsWith('\\.\')){throw 'AcceptFile: пути устройств запрещены'}
-            if($env:OS -eq 'Windows_NT'){
-                $drive=$windows -match '\A[a-zA-Z]:\\';$tail=$windows.Substring($(if($drive){3}else{2})).TrimEnd('\')
-                if($windows.Substring($(if($drive){2}else{0})) -match '[<>:"|?*\x00-\x1f]' -or @($tail -split '\\'|Where-Object {$_ -eq '' -or $_ -in @('.','..') -or $_ -match '[ .]\z|\A(?i:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|\z)'}).Count){
-                    if(-not ($drive -and $windows.Length -eq 3)){throw 'AcceptFile: недопустимый путь папки'}
-                }
-            }
-            if(-not [IO.Path]::IsPathRooted($path) -or ($env:OS -eq 'Windows_NT' -and $path -notmatch '^(?:[a-zA-Z]:[\\/]|\\\\[^\\]+\\[^\\]+)')){throw 'AcceptFile: нужен абсолютный путь к папке'}
+            if($env:OS -eq 'Windows_NT'){$path=ConvertTo-DiskAcceptWindowsPath $path}
+            if(-not [IO.Path]::IsPathRooted($path)){throw 'AcceptFile: нужен абсолютный путь к папке'}
         }else{$path=Join-Path (Get-DiskBase) $id}
         $path=[IO.Path]::GetFullPath($path);Assert-DiskAcceptBase $path
         [pscustomobject]@{id=$id;path=$path}
