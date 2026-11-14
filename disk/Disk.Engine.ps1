@@ -24,12 +24,21 @@ function Stop-DiskEngineProcesses([string]$DiskRoot) {
     }
     if(@(Get-DiskEngineProcesses $DiskRoot).Count){throw 'Syncthing ещё работает'}
 }
+function Wait-DiskEngineReady([int]$TimeoutSeconds=30) {
+    $watch=[Diagnostics.Stopwatch]::StartNew()
+    do{
+        try{$status=Invoke-DiskApi 'system/status';if($status.myID){return $status}}catch{}
+        $remaining=$TimeoutSeconds*1000-$watch.ElapsedMilliseconds
+        if($remaining -gt 0){Start-Sleep -Milliseconds ([int][Math]::Min(250,$remaining))}
+    }while($watch.Elapsed.TotalSeconds -lt $TimeoutSeconds)
+    throw ('Syncthing уже запущен, но REST не ответил за '+$TimeoutSeconds+' с; повторите запуск позже')
+}
 function Start-DiskHeadless {
     $exe=Join-Path $script:DiskHome 'tray/syncthingtray.exe'
     if(-not (Test-Path $exe)){throw 'Syncthing не установлен'}
     if($script:DiskEngine -and -not $script:DiskEngine.HasExited){return}
-    # Never adopt an unowned engine or create a second process for the same state.
-    if(@(Get-DiskEngineProcesses $script:DiskHome).Count){throw 'С этим состоянием уже работает другой Syncthing; закройте его и повторите'}
+    # Tray may have started its engine before REST is ready. Wait without launching a duplicate.
+    if(@(Get-DiskEngineProcesses $script:DiskHome).Count){[void](Wait-DiskEngineReady);return}
     $si=New-Object Diagnostics.ProcessStartInfo
     $si.FileName=$exe;$si.Arguments=(@('syncthing','serve','--home',(Join-Path $script:DiskHome 'state'),'--no-browser','--no-restart')|ForEach-Object {Quote-Disk $_}) -join ' '
     $si.UseShellExecute=$false;$si.CreateNoWindow=$true

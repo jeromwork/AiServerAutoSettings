@@ -37,7 +37,15 @@ try{
     Assert ($arguments[0] -eq 'syncthing' -and $arguments[1] -eq 'serve' -and '--no-browser' -in $arguments -and '--no-restart' -in $arguments -and '--wait' -notin $arguments) 'embedded Syncthing runs without tray against existing state'
 }finally{if($script:DiskEngine){$script:DiskEngine.Kill();$script:DiskEngine.WaitForExit();$script:DiskEngine.Dispose();$script:DiskEngine=$null}}
 $script:foreign=$true
-try{Start-DiskHeadless;throw 'expected duplicate refusal'}catch{Assert ($_.Exception.Message -like 'С этим состоянием уже работает*') 'unowned engine blocks duplicate state instance'}
+$script:restPolls=0
+function Invoke-DiskApi($Route){$script:restPolls++;if($script:restPolls -lt 3){throw 'REST is starting'};@{myID='LOCAL'}}
+Start-DiskHeadless
+Assert ($script:restPolls -eq 3 -and $null -eq $script:DiskEngine) 'existing Tray engine waits for REST without launching a second process'
+function Invoke-DiskApi {throw 'REST is unavailable'}
+$readyWatch=[Diagnostics.Stopwatch]::StartNew();$failed=$false
+try{Wait-DiskEngineReady -TimeoutSeconds 1}catch{$failed=$_.Exception.Message -like 'Syncthing уже запущен, но REST не ответил*'}
+Assert ($failed -and $readyWatch.Elapsed.TotalSeconds -ge 1 -and $readyWatch.Elapsed.TotalSeconds -lt 3) 'REST wait is bounded and reports the unavailable running engine'
+
 
 # Inspect and stop only GUI + the exact existing state; another state is untouched.
 . (Join-Path $repo 'disk/Disk.Engine.ps1')
