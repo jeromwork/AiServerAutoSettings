@@ -22,6 +22,13 @@ class FirstRunTests(unittest.TestCase):
         for gone in ('paths', 'folders.', 'LoadTree', 'directions', 'external'):
             self.assertNotIn(gone, disk)
 
+    def test_legacy_cleanup_checks_markers_after_confirming_installed_home(self):
+        start = source('TrayContext.cs').split('void StartLegacyDiskCleanup()', 1)[1].split('void OpenDisk()', 1)[0]
+        self.assertIn('LegacyDiskCleanup.Required(home)', start)
+        self.assertNotIn('LegacyDiskCleanup.Done(home)', start)
+        self.assertLess(start.index('Program.DefaultHome'), start.index('LegacyDiskCleanup.Required(home)'))
+        self.assertLess(start.index('LegacyDiskCleanup.Required(home)'), start.index('Task.Run('))
+
     def test_first_run_skips_synchronous_bootstrap(self):
         tray = source('TrayContext.cs')
         constructor = tray.split('public TrayContext(', 1)[1].split('void RunFirstSetup()', 1)[0]
