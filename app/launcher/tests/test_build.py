@@ -43,8 +43,9 @@ class PackagingTests(unittest.TestCase):
                 'disk': ['components.disk.enabled'], 'control': ['components.control.enabled'], 'vpn': []})
             self.assertEqual(definition['binaries'], [])
             disk = next(c for c in definition['components'] if c['name'] == 'disk')
-            self.assertEqual(disk['exe'], r'%LOCALAPPDATA%\RemoteDisk\tray\syncthingtray.exe')
-            self.assertEqual(disk['args'], [])
+            # A PowerShell parent syncs the server address, then waits on Syncthing Tray for its whole lifetime.
+            self.assertEqual(disk['exe'], 'powershell.exe')
+            self.assertEqual(disk['args'][-4:], ['{bundle}\\disk\\Disk.Engine.ps1', '-StartTray', '-Home', '{home}'])
             self.assertEqual(disk['cwd'], r'%LOCALAPPDATA%\RemoteDisk\tray')
             self.assertEqual(disk['restart'], 'always')
             self.assertFalse(disk['critical'])
