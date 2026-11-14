@@ -2,12 +2,14 @@
 """Server contracts against real Syncthing in disposable HOME directories."""
 import base64
 import contextlib
+import hashlib
 import io
 import json
 import os
 from pathlib import Path
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -18,10 +20,66 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as E
+import zlib
 
 HERE = Path(__file__).resolve().parent
 HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 ARCHIVE_NAME = 'syncthing-linux-amd64-v2.1.7.tar.gz'
+
+# Прежние шаблоны .stignore, которые наш код сам клал в папки (байт в байт). Три из них — disk/stignore.txt на app/config
+# (git show <коммит>:disk/stignore.txt, zlib+base64); четвёртый собирается из списка имён Get-DiskIgnores в
+# disk/RemoteDisk.ps1 до коммита 395c2cb. Их SHA-256 лежат в PREVIOUS_TEMPLATES самого server-disk.sh.
+OLD_TEMPLATES_ZLIB = {
+    '395c2cb': (
+        'eNpV0T1OwzAYBuC9p8gIFU3VokrAwsIJuEDl5Pto3Ti28U9pt7YMDAyImyBBpQpRuIJ9I5LY'
+        'aWHK8/rndeL0+8ktlsLgDdXFVeL2bpu4H7f1K7d1H+7Nv7qvxK+r8FkP+Y1/Ttwu8Rv3fZb4'
+        'p/qZuPdqet/s2fmVf2yWrf1L5+SanqbI590gLkuVB8qlpK05mkhizTSdacGblCsE5IYSpkOB'
+        'xmrIxEBhrDQ5GGE4Gg0ujzmHP7MHd9MCl0dpIxTGOCt0lLxoMRi2uls0YiInLJVKSFSGYtiR'
+        'TqgJ0HoakAvARSQjFsIhqRGChT28WjAuBVgWS+bIQajYpwgwbG9nEcu5bSWskTY6J/m0bbcq'
+        'E4FAlBnXp8VFi/AymaUMGgHVocAQNcFAkc3CxYs5KjKJrRSQBM11/VnhT3FQgkJPQxFviIlJ'
+        'lL5n1OC/cB4TZAf0Hgg7Bj0t22BLGZmRovMLvwzliA=='
+    ),
+    'b8cfc4e': (
+        'eNptks1OGzEUhfd5Ci8pKjOCCql0w4ZlV32ByDO+JM54bOOfIewgrdRKqKr6JlEhQFsCr2C/'
+        'ER7bkxSpq/nOte+5Y/uUJfoErTBwQnXzAbm1WyH37Fb+0q3crVv6n+4R+asg/vQlv/DXyD0g'
+        'v3BPb5H/2n+RuwnL69jz4C/957jtyv8Y7RzTNwXwbjcRl62qE8oLSQfmYDJia6bFTAseVa2A'
+        'ADcUM50MNISSyYKSsdJ4w0AODg/3j7a6Jv+sbni3aOBiS9oIBVnOGp1Jvh9g/2Cg03kkJmrM'
+        'CqmEBGUopI5iQk0CracJakFgnpFhS9KQwgjBUg8PG8atIJZlkw44ESr7KUwYDLczz+bcDiSs'
+        'kTZzjevp4G5VJRISrMy4n5Y3zdPPVJYyEolQnQwMVhNIKKpZunjRgcKT7EoJ4ESd7o+VXooT'
+        'JSjZ06TJN8TEJJM+Y9TAK/EuK1JtYO8cs63Q03YQtpUZK9yMyhJ9xAp3wEI4793S3cSE3cXE'
+        'rf11iKv/Esq/3d+UzJDT7/4bcr9Q/7jhFCHOIZhPMcELt/x/xOPEMneUWMrXhVOFWzgXqhm9'
+        'AFv1MvM='
+    ),
+    'f79b03f': (
+        'eNptk0tu2zAQhvc+BZdt0EhIigB9LLrpsqtewKBFxqZFiSxJOc4ucQq0QPpAL9BewYij1E1s'
+        '9wrkjTp8yI6BLgR9/2ie1DDP0XtaCUPfMl2+QnZtW2T/2tZd2Nbe2rn7YVfIXYK49yY3c9fI'
+        'LpGb2c0z5D75N7IL+LwOMUt34a6C26X73nvyhj3NaD05iFTLShUR5blkHdfUJMSNGWVjLeqg'
+        'CkUJrQ3DXMcEmoLJJMFIX2m8ZUqOT06OXu50QR593fJBVtLzHWkjFE1yXOpE8kUHR8cdnU4D'
+        'cVFgnkklJFWG0RiRDZmJoPUoQiEInSbkuCGxSGaE4DGmBod+JUjDU5IJrYlQKZ/ChNPudKYp'
+        'ed10JBojm8QFLkZd9kYNRESClen7aslpGpsZNIyTQITpmMBgNaQRxWAcD15MqMLDlJURiiNN'
+        'tB8r/qmaKMHIoSZlOiEuhon0B84M3RPPkyKDLRyeYb4TelR1oqlkwgEue3mO3mGFJ5TDcv62'
+        'c7sIG3YXNm7trmFd3Ucw/7EPcTNhT7+6z8jeIP9zYQpYZ1jMTdjgmZ3/f8VDxTxF5FjKfcOp'
+        'whU9Eyr0Y39CxQ1Er+xDaGPpE/4KRW7guQ2me1/KV16CnIPR+97BBZkhaBCujV25K+jWA/h9'
+        'cd/A2PrhXkPz4L3ZG5JQXRohM1azOAFcMV9wAbnbrv9HTr1/z2Odfw=='
+    ),
+}
+LEGACY_IGNORE_NAMES = (
+    '.env*', 'env.example', '.npmrc', '.pypirc', '.netrc', 'auth.json', '*credential*', '*token*', '*secret*',
+    '*private*', 'id_*', '.git', '.tools', 'ssh', '.ssh', '.codex', '.claude', 'node_modules', 'vendor', 'deps',
+    'dependencies', '.gradle', '.next', '.cache', '.stversions', '.stfolder', '.stignore', 'build', 'dist', 'target',
+    'obj', 'bin', '.dart_tool', '.nuxt', '.output', '.turbo', '.cxx', 'coverage', 'logs', 'log', 'cache', 'caches',
+    'db', 'database', 'databases', 'backup', 'backups', '*backup*', '*dump*', 'uploads', 'upload', 'storage',
+    'android-sdk', '.idea', '.vscode', 'local.properties', 'google-services*.json', 'GoogleService-Info.plist',
+    'config.php', '*.pem', '*.key', '*.keystore', '*.jks', '*.p8', '*.p12', '*.pfx', '*.sqlite', '*.sqlite3', '*.db',
+    '*.db3', '*.bak', '*.backup', '*.dump', '*.log', '*.zip', '*.tar', '*.gz', '*.exe', '*.dll', '*.so', '*.bin',
+)
+
+
+def old_templates():
+    """Byte-exact previous templates by label: three from git history and the one before the Syncthing rewrite."""
+    result = {label: zlib.decompress(base64.b64decode(blob)) for label, blob in OLD_TEMPLATES_ZLIB.items()}
+    result['legacy'] = ('\n'.join('(?i)' + name for name in LEGACY_IGNORE_NAMES) + '\n').encode()
+    return result
 
 
 def archive_path():
@@ -505,6 +563,64 @@ class ServerHardeningTests(unittest.TestCase):
             broken = t.server(a, 'bootstrap', ok=False)
             self.assertEqual(broken.returncode, 1)
             self.assertIn('Символические ссылки запрещены', broken.stderr.decode())
+
+    def test_script_knows_exactly_our_four_previous_templates(self):
+        old = old_templates()
+        self.assertEqual(len(old), 4)
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            self.assertEqual(set(ns['PREVIOUS_TEMPLATES']), {hashlib.sha256(b).hexdigest() for b in old.values()})
+
+    def test_user_ignore_keeps_its_mode_and_only_our_old_templates_are_replaced(self):
+        old = old_templates()
+        include = b'#include .stignore-remoteagents\n'
+        template = (HERE / 'stignore.txt').read_bytes()
+        latest = old['f79b03f']
+        with Stand(1) as t:
+            side = t.sides[0]
+            disk = side['home'] / 'Disk'
+
+            def seed(name, content, mode, file='.stignore'):
+                (disk / name).mkdir(parents=True)
+                (disk / name / file).write_bytes(content)
+                os.chmod(disk / name / file, mode)
+
+            def mode(name, file='.stignore'):
+                return stat.S_IMODE((disk / name / file).stat().st_mode)
+
+            seed('UserRules', b'my-rules\n', 0o664)
+            for label, content in old.items():
+                seed('Old-' + label, content, 0o640)
+            # Anything that is not byte-for-byte one of our templates belongs to the user.
+            seed('OldPlusUser', latest + b'my-extra.txt\n', 0o600)
+            seed('OldCRLF', latest.replace(b'\n', b'\r\n'), 0o600)
+            seed('OldBOM', b'\xef\xbb\xbf' + latest, 0o600)
+            seed('Managed', b'stale\n', 0o644, '.stignore-remoteagents')
+            result = t.server(side, 'bootstrap', ok=False)
+            self.assertEqual((result.returncode, result.stderr), (0, b''))
+            self.assertEqual((disk / 'UserRules/.stignore').read_bytes(), b'my-rules\n' + include)
+            self.assertEqual(mode('UserRules'), 0o664)
+            for label in old:
+                with self.subTest(replaced=label):
+                    name = 'Old-' + label
+                    self.assertEqual((disk / name / '.stignore').read_bytes(), include)
+                    self.assertEqual(mode(name), 0o640)
+                    self.assertEqual((disk / name / '.stignore-remoteagents').read_bytes(), template)
+                    rules = t.api(side, 'db/ignores?folder=' + name)
+                    self.assertEqual((rules['ignore'], rules['error']), (['#include .stignore-remoteagents'], None))
+                    self.assertIn('(?i)/.stignore-remoteagents', rules['expanded'])
+            self.assertEqual((disk / 'OldPlusUser/.stignore').read_bytes(), latest + b'my-extra.txt\n' + include)
+            self.assertEqual((disk / 'OldCRLF/.stignore').read_bytes(),
+                             latest.replace(b'\n', b'\r\n') + include.replace(b'\n', b'\r\n'))
+            self.assertEqual((disk / 'OldBOM/.stignore').read_bytes(), b'\xef\xbb\xbf' + latest + include)
+            self.assertEqual({mode(n) for n in ('OldPlusUser', 'OldCRLF', 'OldBOM')}, {0o600})
+            self.assertEqual((disk / 'Managed/.stignore-remoteagents').read_bytes(), template)
+            self.assertEqual(mode('Managed', '.stignore-remoteagents'), 0o644)
+            # A repeated run changes nothing: neither bytes, nor modification times, nor modes.
+            files = sorted(disk.glob('*/.stignore*'))
+            before = [(p, p.read_bytes(), p.stat().st_mtime_ns, stat.S_IMODE(p.stat().st_mode)) for p in files]
+            t.server(side, 'bootstrap')
+            self.assertEqual([(p, p.read_bytes(), p.stat().st_mtime_ns, stat.S_IMODE(p.stat().st_mode)) for p in files],
+                             before)
 
 
 if __name__ == '__main__':

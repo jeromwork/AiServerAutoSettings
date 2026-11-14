@@ -3,23 +3,45 @@ set -euo pipefail
 umask 077
 export REMOTE_DISK_SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 python3 - "$@" 3<&0 <<'PY'
-import os,sys,json,subprocess,hashlib,tempfile,tarfile,urllib.request,time,socket,base64,re,fcntl,xml.etree.ElementTree as E
+import os,sys,json,subprocess,hashlib,tempfile,tarfile,urllib.request,time,socket,base64,re,fcntl,stat,xml.etree.ElementTree as E
 from pathlib import Path
 s=Path.home()/'.local/share/remote-disk'; cfg=s/'config.xml'; binary=s/'bin/syncthing'; here=Path(os.environ['REMOTE_DISK_SCRIPT_DIR'])
 a=sys.argv[1:] or ['bootstrap']; action=a[0]
 # systemd-таймер, поставленный прежним install-auto, вызывает reconcile: это та же команда, что bootstrap.
 if action=='reconcile':action='bootstrap'
+# Свой код, потому что Syncthing не знает, что .stignore с нашим прежним шаблоном — не правила пользователя.
+# SHA-256 точных байтов шаблонов, которые мы сами клали в папки: disk/stignore.txt на app/config (395c2cb, b8cfc4e, f79b03f)
+# и список имён Get-DiskIgnores из RemoteDisk.ps1 до 395c2cb. Их правила теперь живут в .stignore-remoteagents.
+PREVIOUS_TEMPLATES=frozenset((
+ '9c1b2c9568492b513199bd44ee9963a1915e5d89c5cf79031cd9e3067ffc3409',
+ '53ec8f57dcd8d6e778ecb1b1fea26ed071f82820ff8d42198bc33d553773bbb5',
+ '9a486952e5510eaf30e6d95dfe3400fb48a71e1d7d68a0cbccfb539562f6b80c',
+ 'c20a596f615c0a62ffd6e5a1e8a9dd8c3a06420b26d312b29b9d8dced0632eb8'))
 def safe(p):
     if any(x.is_symlink() for x in (p,*p.parents)):raise ValueError('Символические ссылки запрещены')
 def folder_path(name):
     if not isinstance(name,str) or not re.fullmatch(r'[^\W\d-][\w. -]{0,127}|[0-9][\w. -]{0,127}',name) or '..' in name or name[-1] in ' .' or re.match(r'(?i)^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)',name):raise ValueError('Недопустимое имя папки')
     p=Path.home()/'Disk'/name;safe(p);return p
 
+def write_atomic(target,content,tmpdir):
+    # Атомарная замена; права существующего файла сохраняются (иначе mkstemp сделал бы из 0664 файл 0600).
+    mode=stat.S_IMODE(target.stat().st_mode) if target.exists() else None
+    fd,tmp=tempfile.mkstemp(dir=tmpdir)
+    try:
+        with os.fdopen(fd,'wb') as out:
+            out.write(content);out.flush()
+            if mode is not None:os.fchmod(out.fileno(),mode)
+            os.fsync(out.fileno())
+        os.replace(tmp,target)
+    finally:
+        if os.path.exists(tmp):os.unlink(tmp)
 def ignores(p,write=True):
     f=p/'.stignore';managed=p/'.stignore-remoteagents';marker=p/'.stfolder'
     for path in (f,managed,marker):safe(path)
     rules=(here/'stignore.txt').read_text(encoding='utf-8-sig').replace('\r','').encode('utf-8')
     old=f.read_bytes() if f.exists() else b''
+    # Побайтово наш прежний шаблон: правила переехали в .stignore-remoteagents, остаётся один include. Всё прочее — пользователя.
+    if hashlib.sha256(old).hexdigest() in PREVIOUS_TEMPLATES:old=b''
     include=b'#include .stignore-remoteagents'
     merged=old
     if include not in [line.strip() for line in old.removeprefix(b'\xef\xbb\xbf').splitlines()]:
@@ -30,12 +52,7 @@ def ignores(p,write=True):
     # Publish the include target first. User rules stay byte-for-byte intact.
     for target,content in ((managed,rules),(f,merged)):
         if target.exists() and target.read_bytes()==content:continue
-        fd,tmp=tempfile.mkstemp(dir=marker)
-        try:
-            with os.fdopen(fd,'wb') as out:out.write(content);out.flush();os.fsync(out.fileno())
-            os.replace(tmp,target)
-        finally:
-            if os.path.exists(tmp):os.unlink(tmp)
+        write_atomic(target,content,marker)
 def git(p,*args):
     r=subprocess.run(['git','-C',str(p),*args],capture_output=True,text=True,timeout=5);return r.stdout.strip() if r.returncode==0 else ''
 def exclude_git(p):
