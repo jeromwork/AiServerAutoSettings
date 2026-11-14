@@ -94,8 +94,10 @@ namespace RemoteAgents.Launcher
             foreach (var item in Json.Array(rest.Request("GET", "config/folders", null, token))) {
                 var config = Json.Map(item); string id = Json.Str(config, "id"), path = Json.Str(config, "path");
                 if (id.Length == 0 || path.Length == 0) continue;
-                // Keep all configured paths in the model, including folders shared with another device: overlap guards need them.
-                var row = new DiskFolderState { Id = id, Name = Json.Text(config, "label", id), Path = DiskPaths.Full(path), Config = config, Paused = Json.Bool(config, "paused") };
+                // A foreign registration may use Syncthing's ~/ syntax or an invalid Windows path.
+                // Skip only unresolvable paths; keep every resolvable foreign path for overlap guards.
+                if (!DiskPaths.TryFull(path, out path)) continue;
+                var row = new DiskFolderState { Id = id, Name = Json.Text(config, "label", id), Path = path, Config = config, Paused = Json.Bool(config, "paused") };
                 bool shared = Json.Array(Json.Get(config, "devices")).Any(d => Json.Str(Json.Map(d), "deviceID") == rest.Peer);
                 if (shared && row.Paused) row.Kind = DiskExplorerKind.Paused;
                 else if (shared) {

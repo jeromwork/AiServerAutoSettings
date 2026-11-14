@@ -42,9 +42,9 @@ namespace RemoteAgents.Launcher
     {
         readonly IDiskRest rest; readonly string root, ignoreRules;
         readonly DiskExplorerService metadata; readonly DiskPlaceholderCatalog catalog;
-        readonly Action<string> recycle;
-        internal DiskShellCommands(IDiskRest rest, string root, DiskExplorerService metadata, DiskPlaceholderCatalog catalog, string ignoreRules, Action<string> recycle)
-        { this.rest = rest; this.root = root; this.metadata = metadata; this.catalog = catalog; this.ignoreRules = ignoreRules; this.recycle = recycle; }
+        readonly Action<string> recycle; readonly int readyTimeout;
+        internal DiskShellCommands(IDiskRest rest, string root, DiskExplorerService metadata, DiskPlaceholderCatalog catalog, string ignoreRules, Action<string> recycle, int readyTimeout = 30000)
+        { this.rest = rest; this.root = root; this.metadata = metadata; this.catalog = catalog; this.ignoreRules = ignoreRules; this.recycle = recycle; this.readyTimeout = readyTimeout; }
         internal DiskSnapshot Read(CancellationToken token)
         { var value = new DiskRestModel(rest).Read(root, token); catalog.Merge(rest.Peer, value); return value; }
         internal string Execute(DiskShellRequest request, CancellationToken token)
@@ -65,12 +65,13 @@ namespace RemoteAgents.Launcher
             if (request.Action != "add") throw new IOException("Неизвестная команда Диска");
             if (!Directory.Exists(request.Path)) throw new IOException("Папка не найдена");
             if (row != null && !row.ServerOnly) {
-                if (row.Kind != DiskExplorerKind.Local) return "Папка уже синхронизируется с сервером";
+                if (row.Kind != DiskExplorerKind.Local && Json.Str(row.Config, "type") == "sendreceive") return "Папка уже синхронизируется с сервером";
                 if (!DiskPaths.ValidName(row.Name) || snapshot.Folders.Any(f => f != row && string.Equals(f.Name, row.Name, StringComparison.OrdinalIgnoreCase))) throw new IOException("Имя папки уже занято или недопустимо на сервере");
-                // Share a pre-existing Syncthing registration without replacing its options or other devices.
-                var devices = Json.Array(Json.Get(row.Config, "devices")).ToList(); devices.Add(new Dictionary<string, object> { { "deviceID", rest.Peer } });
+                // Share a pre-existing Syncthing registration and enable uploads without replacing its other options or devices.
+                var devices = Json.Array(Json.Get(row.Config, "devices")).ToList();
+                if (!devices.Any(d => Json.Str(Json.Map(d), "deviceID") == rest.Peer)) devices.Add(new Dictionary<string, object> { { "deviceID", rest.Peer } });
                 using (var rules = new DiskIgnoreChange(row.Path, ignoreRules)) {
-                    try { rest.Request("PATCH", "config/folders/" + Uri.EscapeDataString(row.Id), new { devices }, token); }
+                    try { rest.Request("PATCH", "config/folders/" + Uri.EscapeDataString(row.Id), new { devices, type = "sendreceive" }, token); }
                     catch { rules.Commit(); throw; } // A lost reply must never remove exclusions from an already-shared source.
                     rules.Commit();
                 }
@@ -110,17 +111,50 @@ namespace RemoteAgents.Launcher
             row.ServerOnly = false; row.Kind = DiskExplorerKind.Syncing; row.Percent = 0;
             metadata.Reconcile(root, snapshot.Folders.Where(f => f.Id != row.Id).Concat(new[] { row }));
         }
+        void ConfirmForRemoval(DiskFolderState row, CancellationToken token)
+        {
+            // POST /db/scan waits for the full scan. An idle snapshot taken before the watcher
+            // runs is not evidence that the user's latest edits reached the server.
+            using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(token)) {
+                deadline.CancelAfter(readyTimeout); var check = deadline.Token;
+                string folder = Uri.EscapeDataString(row.Id);
+                try {
+                    rest.Request("POST", "db/scan?folder=" + folder, null, check, readyTimeout);
+                    while (true) {
+                        check.ThrowIfCancellationRequested();
+                        var before = Json.Map(rest.Request("GET", "db/status?folder=" + folder, null, check));
+                        var remote = Json.Map(rest.Request("GET", "db/completion?folder=" + folder + "&device=" + Uri.EscapeDataString(rest.Peer), null, check));
+                        var connections = Json.Map(Json.Get(Json.Map(rest.Request("GET", "system/connections", null, check)), "connections"));
+                        var after = Json.Map(rest.Request("GET", "db/status?folder=" + folder, null, check));
+                        var status = DiskSnapshot.Status(row.Copy(), after, remote, Json.Bool(Json.Map(Json.Get(connections, rest.Peer)), "connected"));
+                        if (status.Kind == DiskExplorerKind.LocalChanges) throw new IOException(status.Tooltip);
+                        long first, last;
+                        bool stable = long.TryParse(Json.Str(before, "sequence"), out first) && long.TryParse(Json.Str(after, "sequence"), out last) && first == last;
+                        // completion.sequence belongs to the REMOTE index, not our local sequence.
+                        // Its zero needs must be measured between two reads of the same post-scan local index.
+                        if (stable && status.Kind == DiskExplorerKind.Synced && Json.Str(before, "state") == "idle") { check.ThrowIfCancellationRequested(); return; }
+                        if (!stable) rest.Request("POST", "db/scan?folder=" + folder, null, check, readyTimeout);
+                        if (check.WaitHandle.WaitOne(200)) check.ThrowIfCancellationRequested();
+                    }
+                } catch (OperationCanceledException) when (!token.IsCancellationRequested) {
+                    throw new IOException("Сервер не подтвердил свежие изменения вовремя. Папка сохранена на компьютере; дождитесь синхронизации и повторите действие");
+                } catch (IOException e) when (!token.IsCancellationRequested) {
+                    throw new IOException("Не удалось подтвердить свежие изменения на сервере. Папка сохранена на компьютере. " + e.Message, e);
+                }
+            }
+        }
         void Keep(DiskFolderState row, CancellationToken token)
         {
             if (!Directory.Exists(row.Path)) throw new IOException("Локальная папка не найдена");
             DiskPaths.Available(row.Path, root, new DiskFolderState[0]);
+            ConfirmForRemoval(row, token);
             // Write the recovery mapping before detaching: a crash cannot lose an external folder's original location.
             catalog.Remember(rest.Peer, row);
             bool detached = false;
             try {
                 rest.Request("DELETE", "config/folders/" + Uri.EscapeDataString(row.Id), null, token);
                 var configured = Json.Array(rest.Request("GET", "config/folders", null, token)).Select(Json.Map).ToArray();
-                if (configured.Any(f => Json.Str(f, "id") == row.Id || DiskPaths.Within(row.Path, Json.Str(f, "path")) || DiskPaths.Within(Json.Str(f, "path"), row.Path))) throw new IOException("Syncthing ещё использует эту папку");
+                if (configured.Any(f => Json.Str(f, "id") == row.Id || DiskPaths.Overlaps(row.Path, Json.Str(f, "path")))) throw new IOException("Syncthing ещё использует эту папку");
                 detached = true;
                 DiskPaths.Plain(row.Path);
                 recycle(row.Path);
@@ -132,7 +166,7 @@ namespace RemoteAgents.Launcher
                         var current = Json.Array(rest.Request("GET", "config/folders", null, CancellationToken.None)).Select(Json.Map).ToArray();
                         var same = current.FirstOrDefault(f => Json.Str(f, "id") == row.Id);
                         if (same == null) {
-                            if (current.Any(f => DiskPaths.Within(row.Path, Json.Str(f, "path")) || DiskPaths.Within(Json.Str(f, "path"), row.Path))) throw new IOException("Путь уже занят другой регистрацией");
+                            if (current.Any(f => DiskPaths.Overlaps(row.Path, Json.Str(f, "path")))) throw new IOException("Путь уже занят другой регистрацией");
                             rest.Request("POST", "config/folders", row.Config, CancellationToken.None);
                         } else if (!DiskPaths.Same(Json.Str(same, "path"), row.Path)) throw new IOException("Регистрация папки изменена");
                         catalog.Forget(rest.Peer, row.Id);

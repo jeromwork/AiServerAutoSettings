@@ -24,7 +24,12 @@ namespace RemoteAgents.Launcher
         internal static int EngineAction(string[] args)
         {
             var rest = new DiskSyncthingClient(args[1]); var service = Service(new TestFiles());
-            var commands = new DiskShellCommands(rest, args[2], service, new DiskPlaceholderCatalog(args[1]), File.ReadAllText(args[5]), path => Directory.Move(path, args[6]));
+            var commands = new DiskShellCommands(rest, args[2], service, new DiskPlaceholderCatalog(args[1]), File.ReadAllText(args[5]), path => Directory.Move(path, args[6]), args.Length > 7 ? int.Parse(args[7]) : 30000);
+            if (args[3] == "inspect") {
+                var snapshot = commands.Read(None);
+                Console.WriteLine(Json.Encode(new { folders = snapshot.Folders.Select(f => new { f.Id, kind = f.Kind.ToString(), f.Detail }).ToArray(), tray = new DiskTraySession(args[1]).Read(None) }));
+                return 0;
+            }
             service.Reconcile(args[2], commands.Read(None).Folders);
             string result = commands.Execute(new DiskShellRequest { Action = args[3], Path = args[4] }, None);
             Console.WriteLine(result); return 0;
@@ -32,9 +37,23 @@ namespace RemoteAgents.Launcher
         internal static void Run()
         {
             string temp = Path.Combine(Path.GetTempPath(), "disk-explorer-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(temp);
-            try { States(); Metadata(Path.Combine(temp, "metadata")); Registry(); Commands(Path.Combine(temp, "actions")); Console.WriteLine("PASS: Explorer model, metadata, registry and action fixtures"); HttpAndEvents(Path.Combine(temp, "http")).GetAwaiter().GetResult(); }
+            try { RecyclePolicy(); States(); Metadata(Path.Combine(temp, "metadata")); Registry(); Commands(Path.Combine(temp, "actions")); Console.WriteLine("PASS: Explorer model, metadata, registry and action fixtures"); HttpAndEvents(Path.Combine(temp, "http")).GetAwaiter().GetResult(); }
             finally { if (Directory.Exists(temp)) Directory.Delete(temp, true); }
             Console.WriteLine("PASS: " + checks + " local Syncthing / Explorer checks (REST, events, placeholders, HKCU, shell, recycle rollback)");
+        }
+        sealed class ShellItem : DiskRecycle.IShellItem { }
+        static void RecyclePolicy()
+        {
+            Check((DiskRecycle.Flags & 0x84050) == 0x84050 && (DiskRecycle.Flags & 0x400) == 0, "recycle-only flags, nuke warning, Shell error UI enabled");
+            var sink = new DiskRecycle.RecycleSink();
+            Check(sink.PreDeleteItem(0, null) < 0 && !sink.Confirmed, "permanent delete vetoed before Shell operation");
+            sink = new DiskRecycle.RecycleSink();
+            Check(sink.PreDeleteItem(0x80, null) == 0, "recycle operation admitted");
+            sink.PostDeleteItem(0x80, null, 0, null);
+            Check(!sink.Confirmed, "missing recycled item is never accepted as success");
+            sink = new DiskRecycle.RecycleSink(); sink.PostDeleteItem(0x80, null, 0, new ShellItem());
+            Check(sink.Confirmed, "Shell reports new item in recycle bin"); sink.FinishOperations(-1);
+            Check(!sink.Confirmed, "failed operation never reports recycle success");
         }
         static void States()
         {
@@ -140,9 +159,10 @@ namespace RemoteAgents.Launcher
             internal readonly List<Dictionary<string, object>> Folders = new List<Dictionary<string, object>>();
             internal readonly Dictionary<string, object> Pending = new Dictionary<string, object>();
             internal readonly List<string> Calls = new List<string>();
+            internal Action OnScan; internal Action<int> OnStatus; int statusReads;
             internal bool FailPost, Connected = true, FailDelete, AppliedThenTimeout, FailVerify;
             bool verifying;
-            internal Dictionary<string, object> Local = Map("{\"state\":\"idle\",\"globalBytes\":100,\"needBytes\":0,\"needTotalItems\":0}");
+            internal Dictionary<string, object> Local = Map("{\"state\":\"idle\",\"globalBytes\":100,\"needBytes\":0,\"needTotalItems\":0,\"sequence\":1}");
             internal Dictionary<string, object> Remote = Map("{\"completion\":100,\"needBytes\":0,\"needItems\":0,\"needDeletes\":0,\"remoteState\":\"valid\"}");
             internal void Offer(string id, string label, string peer = "SERVER") { Pending[id] = new Dictionary<string, object> { { "offeredBy", new Dictionary<string, object> { { peer, new Dictionary<string, object> { { "label", label } } } } } }; }
             public object Request(string method, string route, object body, CancellationToken token, int timeout = 3000)
@@ -151,7 +171,8 @@ namespace RemoteAgents.Launcher
                 if (route == "system/connections") return new Dictionary<string, object> { { "connections", new Dictionary<string, object> { { Peer, new { connected = Connected } } } } }.ToPortable();
                 if (route == "config/folders" && method == "GET") { if (FailVerify && verifying) { verifying = false; throw new IOException("verification lost"); } verifying = false; return Folders.ToArray(); }
                 if (route.StartsWith("cluster/pending/folders")) return Pending;
-                if (route.StartsWith("db/status")) return Local;
+                if (route.StartsWith("db/scan") && method == "POST") { if (OnScan != null) OnScan(); return null; }
+                 if (route.StartsWith("db/status")) { if (OnStatus != null) OnStatus(++statusReads); return new Dictionary<string, object>(Local); }
                 if (route.StartsWith("db/completion")) return Remote;
                 if (route == "config/defaults/folder") return Map("{\"rescanIntervalS\":3600,\"fsWatcherEnabled\":true}");
                 if (route == "system/status") return Map("{\"myID\":\"LOCAL\"}");
@@ -164,7 +185,7 @@ namespace RemoteAgents.Launcher
                     if (FailDelete) throw new IOException("DELETE rejected");
                     string id = Uri.UnescapeDataString(route.Substring("config/folders/".Length)); Folders.RemoveAll(f => Json.Str(f, "id") == id); return null;
                 }
-                if (route.StartsWith("config/folders/") && method == "PATCH") { var patch = Json.Map(Json.Parse(Json.Encode(body))); Folders.Single()["devices"] = patch["devices"]; return null; }
+                if (route.StartsWith("config/folders/") && method == "PATCH") { var patch = Json.Map(Json.Parse(Json.Encode(body))); foreach (var pair in patch) Folders.Single()[pair.Key] = pair.Value; return null; }
                 throw new Exception("Unexpected REST: " + method + " " + route);
             }
         }
@@ -173,7 +194,7 @@ namespace RemoteAgents.Launcher
             string root = Path.Combine(temp, "Disk"), diskHome = Path.Combine(temp, "state"); Directory.CreateDirectory(root);
             var rest = new FakeRest(); var fs = new TestFiles(); var service = Service(fs); var catalog = new DiskPlaceholderCatalog(diskHome);
             int recycled = 0; bool failRecycle = false;
-            Action<string> recycle = path => { Check(!rest.Folders.Any(), "detach confirmed before recycle"); recycled++; if (failRecycle) throw new IOException("cancelled"); Directory.Move(path, path + ".recycled-" + recycled); };
+            Action<string> recycle = path => { Check(!rest.Folders.Any(), "detach confirmed before recycle"); recycled++; if (failRecycle) throw new IOException(DiskRecycle.Refused); Directory.Move(path, path + ".recycled-" + recycled); };
             var commands = new DiskShellCommands(rest, root, service, catalog, "(?i).git\r\n(?i).env*\r\n(?i)/desktop.ini\r\n", recycle);
             rest.Offer("real-id-123", "Проект"); rest.Offer("alien-id", "Чужой", "OTHER"); rest.Offer("unsafe-id", "../escape");
             var initial = commands.Read(None); Check(initial.Folders.Count == 1 && initial.Folders[0].Id == "real-id-123", "only server offer, label distinct from ID, unsafe names excluded");
@@ -189,7 +210,9 @@ namespace RemoteAgents.Launcher
             rest.Remote["completion"] = 100; rest.FailDelete = true;
             Reject(() => commands.Execute(new DiskShellRequest { Action = "keep-server", Path = project }, None), "delete rejection never recycles"); Check(recycled == 0 && File.Exists(Path.Combine(project, "data.txt")), "data retained on REST failure");
             rest.FailDelete = false; failRecycle = true;
-            Reject(() => commands.Execute(new DiskShellRequest { Action = "keep-server", Path = project }, None), "cancelled recycle reported");
+            string recycleFailure = "";
+            try { commands.Execute(new DiskShellRequest { Action = "keep-server", Path = project }, None); } catch (IOException e) { recycleFailure = e.Message; }
+            Check(recycleFailure == DiskRecycle.Refused, "full/unavailable bin is reported with instructions, no permanent fallback");
             Check(rest.Folders.Count == 1 && File.Exists(Path.Combine(project, "data.txt")), "registration restored after failed recycle");
             failRecycle = false; commands.Execute(new DiskShellRequest { Action = "keep-server", Path = project }, None);
             Check(rest.Folders.Count == 0 && service.IsPlaceholder(project) && File.ReadAllText(Path.Combine(project + ".recycled-2", "data.txt")) == "data", "successful eviction keeps files in recycle fixture and creates cloud");
@@ -214,13 +237,30 @@ namespace RemoteAgents.Launcher
             rest.FailPost = rest.FailVerify = false;
             // Sharing an existing registration keeps its path, other devices, and unrelated options.
             string existing = Path.Combine(temp, "Existing"); Directory.CreateDirectory(existing);
-            rest.Folders.Add(new Dictionary<string, object> { { "id", "already-configured" }, { "label", "Existing" }, { "path", existing }, { "rescanIntervalS", 57 }, { "devices", new[] { new { deviceID = "OTHER" } } } }.ToPortable() as Dictionary<string, object>);
+            rest.Folders.Add(new Dictionary<string, object> { { "id", "already-configured" }, { "label", "Existing" }, { "path", existing }, { "rescanIntervalS", 57 }, { "type", "receiveonly" }, { "devices", new[] { new { deviceID = "OTHER" } } } }.ToPortable() as Dictionary<string, object>);
             commands.Execute(new DiskShellRequest { Action = "add", Path = existing }, None);
             Check(Json.Int(rest.Folders.Single(), "rescanIntervalS", 0) == 57 && Json.Array(Json.Get(rest.Folders.Single(), "devices")).Select(Json.Map).Select(d => Json.Str(d, "deviceID")).OrderBy(d => d).SequenceEqual(new[] { "OTHER", "SERVER" }), "existing registration extended without replacing other devices/options");
+            Check(Json.Str(rest.Folders.Single(), "type") == "sendreceive", "existing receiveonly registration enables upload");
             rest.Folders.Clear();
             string externalKeep = Path.Combine(temp, "ExternalKeep"); Directory.CreateDirectory(externalKeep); File.WriteAllText(Path.Combine(externalKeep, "file.txt"), "outside");
             commands.Execute(new DiskShellRequest { Action = "add", Path = externalKeep }, None);
+            int beforeRecycle = recycled;
+            // A stale green snapshot must not authorize deletion after scan discovers local-only changes.
+            rest.OnScan = () => { rest.Local["receiveOnlyChangedBytes"] = 1; };
+            Reject(() => commands.Execute(new DiskShellRequest { Action = "keep-server", Path = externalKeep }, None), "post-scan receiveonly changes stop removal");
+            Check(rest.Folders.Count == 1 && recycled == beforeRecycle, "failed readiness leaves registration and data intact");
+            rest.OnScan = null; rest.Local.Remove("receiveOnlyChangedBytes");
+            var bounded = new DiskShellCommands(rest, root, service, catalog, "rules", recycle, 30);
+            rest.OnScan = () => { rest.Remote["needItems"] = 1; };
+            string failure = "";
+            try { bounded.Execute(new DiskShellRequest { Action = "keep-server", Path = externalKeep }, None); } catch (IOException e) { failure = e.Message; }
+            Check(failure.Contains("вовремя") && rest.Folders.Count == 1 && recycled == beforeRecycle, "readiness timeout is explicit and does not detach/recycle");
+            rest.OnScan = null; rest.Remote["needItems"] = 0;
+            int scans = 0; rest.OnScan = () => scans++;
+            rest.OnStatus = n => { if (scans == 1) rest.Local["sequence"] = Json.Int(rest.Local, "sequence", 0) + 1; };
             commands.Execute(new DiskShellRequest { Action = "keep-server", Path = externalKeep }, None);
+            Check(scans >= 2, "changing local sequence is scanned again before removal");
+            rest.OnScan = null; rest.OnStatus = null;
             Check(service.IsPlaceholder(externalKeep) && commands.Read(None).Folders.Any(f => f.Name == "ExternalKeep" && f.Path == externalKeep), "external keep-server recreates cloud at the original path");
             var switched = new DiskSnapshot(); catalog.Merge("NEW-SERVER", switched); Check(switched.Folders.Count == 0, "placeholder catalog bound to paired server");
             Reject(() => DiskPaths.Available(root, root, new DiskFolderState[0]), "Disk root cannot be shared");

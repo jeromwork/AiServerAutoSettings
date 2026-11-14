@@ -3,9 +3,6 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-#if !PORTABLE_TEST
-using Microsoft.VisualBasic.FileIO;
-#endif
 
 namespace RemoteAgents.Launcher
 {
@@ -52,17 +49,7 @@ namespace RemoteAgents.Launcher
             string rules = File.ReadAllText(Path.Combine(bundle(), "disk", "stignore.txt"));
             return new DiskShellCommands(rest, currentRoot, metadata, new DiskPlaceholderCatalog(diskHome), rules, Recycle);
         }
-        static void Recycle(string path)
-        {
-#if !PORTABLE_TEST
-            // A network share has no local Recycle Bin. Refuse instead of falling back to permanent deletion.
-            var drive = new DriveInfo(Path.GetPathRoot(path));
-            if (drive.DriveType != DriveType.Fixed) throw new IOException("Для этой папки недоступна локальная Корзина");
-            FileSystem.DeleteDirectory(path, UIOption.OnlyErrorDialogs, RecycleOption.SendToRecycleBin, UICancelOption.ThrowException);
-#else
-            throw new IOException("Корзина проверяется только на Windows");
-#endif
-        }
+        static void Recycle(string path) { DiskRecycle.Move(path); }
         void Monitor()
         {
             try {

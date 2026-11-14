@@ -7,7 +7,7 @@ using System.Text.RegularExpressions;
 
 namespace RemoteAgents.Launcher
 {
-    internal enum DiskExplorerKind { Local, ServerOnly, Pending, Syncing, Synced, Paused, Error, Offline, Unavailable }
+    internal enum DiskExplorerKind { Local, ServerOnly, Pending, Syncing, Synced, Paused, Error, Offline, Unavailable, LocalChanges }
     internal sealed class DiskFolderState
     {
         internal string Id = "", Name = "", Path = "", Detail = "";
@@ -26,6 +26,7 @@ namespace RemoteAgents.Launcher
                     case DiskExplorerKind.Paused: return "Синхронизация приостановлена";
                     case DiskExplorerKind.Offline: return "Нет соединения с сервером";
                     case DiskExplorerKind.Error: return "Ошибка синхронизации" + (Detail.Length > 0 ? ": " + Detail : "");
+                    case DiskExplorerKind.LocalChanges: return "Есть локальные изменения. Загрузите их на сервер перед освобождением места";
                     case DiskExplorerKind.Unavailable: return "Локальный Syncthing недоступен";
                     default: return "Ожидается подтверждение Syncthing";
                 }
@@ -48,6 +49,7 @@ namespace RemoteAgents.Launcher
             row.Percent = (int)Math.Max(0, Math.Min(100, Math.Floor(Math.Min(localPercent, remotePercent))));
             if (row.Paused || state == "paused" || Json.Str(remote, "remoteState") == "paused") row.Kind = DiskExplorerKind.Paused;
             else if (state == "error" || row.Detail.Length > 0 || Number(local, "pullErrors") > 0) row.Kind = DiskExplorerKind.Error;
+            else if (Number(local, "receiveOnlyTotalItems") > 0 || Number(local, "receiveOnlyChangedBytes") > 0) { row.Kind = DiskExplorerKind.LocalChanges; row.Detail = "Есть локальные изменения"; }
             else if (!connected) row.Kind = DiskExplorerKind.Offline;
             else if (state.Length == 0 || !new[] { "needBytes", "needTotalItems", "globalBytes" }.All(local.ContainsKey) ||
                 !new[] { "completion", "needItems", "needBytes", "needDeletes", "remoteState" }.All(remote.ContainsKey)) row.Kind = DiskExplorerKind.Pending;
@@ -81,9 +83,15 @@ namespace RemoteAgents.Launcher
         {
             if (string.IsNullOrWhiteSpace(path) || path.IndexOfAny(new[] { '"', '\r', '\n', '\0' }) >= 0 || !System.IO.Path.IsPathRooted(path) ||
                 path.StartsWith(@"\\?\") || path.StartsWith(@"\\.\")) throw new IOException("Нужен обычный абсолютный путь к папке");
-            string full = System.IO.Path.GetFullPath(path);
+            string full;
+            try { full = System.IO.Path.GetFullPath(path); }
+            catch (Exception e) when (e is ArgumentException || e is NotSupportedException) { throw new IOException("Не удалось разрешить путь папки", e); }
             return full == System.IO.Path.GetPathRoot(full) ? full : full.TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar);
         }
+        internal static bool TryFull(string path, out string full)
+        { try { full = Full(path); return true; } catch (IOException) { full = null; return false; } }
+        internal static bool Overlaps(string path, string configured)
+        { string full; return TryFull(configured, out full) && (Within(path, full) || Within(full, path)); }
         internal static bool Same(string a, string b) { return string.Equals(Full(a), Full(b), StringComparison.OrdinalIgnoreCase); }
         internal static bool Within(string path, string parent)
         { return Same(path, parent) || Full(path).StartsWith(Full(parent).TrimEnd(System.IO.Path.DirectorySeparatorChar) + System.IO.Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase); }
