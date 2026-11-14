@@ -63,5 +63,7 @@ try {
         Install-DiskBinary 'https://test.invalid' $hash $name $name;Install-DiskBinary 'https://test.invalid' $hash $name $name
         Assert ($script:Stopped.Count -eq 1 -and $script:Stopped[0] -eq 1001 -and $script:Waited.Count -eq 1 -and $script:Downloads -eq 1 -and [IO.File]::ReadAllText($target) -eq 'new binary') 'Update stops only the target executable; matching release skipped'
     }
+    Write-Output (Invoke-DiskProcess $exe @('-NoProfile','-NonInteractive','-File',(Join-Path $PSScriptRoot 'test-engine.ps1'),'-TestHome',(Join-Path $tmp 'lifecycle')))
+    Write-Output (Invoke-DiskProcess $exe @('-NoProfile','-NonInteractive','-File',(Join-Path $PSScriptRoot 'test-startup.ps1'),'-TestHome',(Join-Path $tmp 'startup')))
     Assert ($watch.Elapsed.TotalSeconds -lt 30) 'PowerShell time budget';Write-Output ('install: exit 0, {0:N2}s' -f $watch.Elapsed.TotalSeconds)
 }finally{Remove-Item -LiteralPath $tmp -Recurse -Force}

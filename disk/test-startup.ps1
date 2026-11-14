@@ -48,8 +48,9 @@ try{
     # Run the exact component entry point in a child; injected local boundaries record ordering.
     $bundle=New-DiskInstallFixture (Join-Path $TestHome 'component')
     $mock=@'
+function Stop-DiskEngineProcesses {Write-DiskUtf8 (Join-Path $script:DiskHome 'startup-order') 'cleanup|'}
 function Sync-DiskServerAddress([string]$LauncherRoot){
-    Write-DiskUtf8 (Join-Path $script:DiskHome 'startup-order') ('address:'+ $LauncherRoot)
+    [IO.File]::AppendAllText((Join-Path $script:DiskHome 'startup-order'),('address:'+ $LauncherRoot))
     if(Test-Path -LiteralPath (Join-Path $script:DiskHome 'startup-fail')){throw 'Тест: адрес не обновлён'}
 }
 function Start-DiskTray {
@@ -63,9 +64,9 @@ function Start-DiskTray {
     Assert ($component.exe -ceq 'powershell.exe') 'disk component invokes the bundled startup script'
     $arguments=@($component.args|ForEach-Object {$_.Replace('{bundle}',$bundle).Replace('{home}',$launcher).Replace('\',[IO.Path]::DirectorySeparatorChar)})
     $null=Invoke-DiskProcess ((Get-Process -Id $PID).Path) $arguments
-    Assert ([IO.File]::ReadAllText((Join-Path $script:DiskHome 'startup-order')) -ceq ('address:'+$launcher+'|tray')) 'component checks the effective address exactly once before starting Tray'
+    Assert ([IO.File]::ReadAllText((Join-Path $script:DiskHome 'startup-order')) -ceq ('cleanup|address:'+$launcher+'|tray')) 'component removes old owners and checks the effective address before starting Tray'
     Write-DiskUtf8 (Join-Path $script:DiskHome 'startup-fail') '1'
     $failed=$false;try{Invoke-DiskProcess ((Get-Process -Id $PID).Path) $arguments}catch{$failed=$true}
-    Assert ($failed -and [IO.File]::ReadAllText((Join-Path $script:DiskHome 'startup-order')) -ceq ('address:'+$launcher)) 'address failure does not start Tray and exits nonzero for supervisor retry'
+    Assert ($failed -and [IO.File]::ReadAllText((Join-Path $script:DiskHome 'startup-order')) -ceq ('cleanup|address:'+$launcher)) 'address failure does not start Tray and exits nonzero for supervisor retry'
     Write-Output ('PASS: '+$count+' startup/address checks (actual effective-port reader and component entry point; local fixtures)')
 }finally{$env:LOCALAPPDATA=$oldLocal}

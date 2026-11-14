@@ -27,7 +27,7 @@ function Wait-DiskTransport([int]$TimeoutSeconds=30) {
     }
     throw ('Связь не поднялась: нет баннера SSH на 127.0.0.1:'+$port+' за '+$TimeoutSeconds+' с. Настройки сохранены; повторите установку.')
 }
-$step='Подготовка'
+$step='Подготовка';$engineLease=$null;$failure=$null;$script:DiskEngine=$null
 try {
     [void][IO.Directory]::CreateDirectory($script:DiskHome)
     $migration=Join-Path $script:DiskHome 'legacy-cleanup-v1'
@@ -45,6 +45,7 @@ try {
     . (Join-Path (Split-Path $PSScriptRoot -Parent) 'transport/Transport.Common.ps1')
     . (Join-Path $PSScriptRoot 'Disk.Binary.ps1')
     . (Join-Path $PSScriptRoot 'Disk.Engine.ps1')
+    $step='Ожидание Диска';$engineLease=Enter-DiskEngineLock $script:DiskHome
     $serverFile=Join-Path $script:DiskHome 'server.txt'
     $peer='';if(Test-Path -LiteralPath $serverFile){$peer=[IO.File]::ReadAllText($serverFile).TrimStart([char]0xFEFF).Trim()}
     $pair=-not $peer -or -not (Test-Path -LiteralPath (Join-Path $state 'config.xml'))
@@ -76,7 +77,7 @@ try {
     $ini=Join-Path $script:DiskHome 'tray/syncthingtray.ini'
     if($fresh -or -not (Test-Path -LiteralPath $ini)){Write-DiskUtf8 $ini (New-DiskIni $tray $state $script:Gui $script:ApiKey)}
     $local=$null;try{$local=Invoke-DiskApi 'system/status'}catch{}
-    if(-not $local.myID){$script:DiskEngine=$null;Start-DiskHeadless}
+    if(-not $local.myID){Start-DiskHeadless}
     for($i=0;$i -lt 40 -and -not $local.myID;$i++){Start-Sleep -Milliseconds 250;try{$local=Invoke-DiskApi 'system/status'}catch{}}
     if(-not $local.myID){throw 'Движок не запустился'}
     $step='Подключение устройств';Set-DiskServerDevice $peer
@@ -87,5 +88,12 @@ try {
     }
     $step='Приём папок';if($folders.Count){Accept-DiskFolders $folders $peer ([string]$local.myID)}
     $base=Get-DiskBase;[void][IO.Directory]::CreateDirectory($base);[void](Ensure-DiskNavPane $base)
-    Write-DiskLog 'Установка';Write-Output 'RemoteDisk установлен. Принимайте новые папки в Syncthing Tray. Ход передачи смотрите там же.'
-}catch{Write-DiskLog $step $_;[Console]::Error.WriteLine('Установка RemoteDisk не выполнена: '+$_.Exception.Message);exit 1}
+}catch{$failure=$_}finally{
+    if($engineLease){
+        try{Stop-DiskHeadless}catch{
+            if(-not $failure){$step='Остановка временного движка';$failure=$_}else{Write-DiskLog 'Остановка временного движка' $_}
+        }finally{Exit-DiskEngineLock $engineLease}
+    }
+}
+if($failure){Write-DiskLog $step $failure;[Console]::Error.WriteLine('Установка RemoteDisk не выполнена: '+$failure.Exception.Message);exit 1}
+Write-DiskLog 'Установка';Write-Output 'RemoteDisk установлен. Принимайте новые папки в Syncthing Tray. Ход передачи смотрите там же.'
