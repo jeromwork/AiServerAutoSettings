@@ -18,12 +18,14 @@ function Invoke-DiskSsh {
     param($Command,[switch]$Direct,$InputText)
     if(-not $Direct -or $InputText -notlike '*server-disk.sh*bootstrap*'){throw 'Expected one bootstrap via the configured SSH route'}
     [IO.File]::AppendAllText((Join-Path $script:DiskHome 'bootstrap-count'),'1')
+    if([IO.File]::ReadAllText((Join-Path $script:DiskHome 'bootstrap-count')).Length -lt 3){throw 'Тест: разрыв bootstrap'}
     '{"deviceId":"PEER"}'
 }
 function Invoke-DiskServer {
     param($Action,$Data,[switch]$Direct)
     if($Action -cne 'add-device' -or -not $Direct -or $Data.deviceId -cne 'LOCAL'){throw 'Expected one device registration'}
     [IO.File]::AppendAllText((Join-Path $script:DiskHome 'pair-count'),'1')
+    if([IO.File]::ReadAllText((Join-Path $script:DiskHome 'pair-count')).Length -lt 3){throw 'Тест: разрыв add-device'}
 }
 function Invoke-DiskProcess($Exe,$Arguments) {
     if($Arguments[0] -cne 'syncthing' -or $Arguments[1] -cne 'generate'){throw 'Only initial state generation is allowed'}
@@ -72,7 +74,9 @@ function Wait-DiskTransport {Write-DiskUtf8 (Join-Path $script:DiskHome 'banner-
     Assert (Test-Path -LiteralPath (Join-Path $script:DiskHome 'legacy-cleanup-v1')) 'ordinary installation performs the one-time legacy migration'
     $before=(Get-FileHash -LiteralPath $file).Hash
     $null=Invoke-DiskFixture $bundle @('-Profile','fixture-profile','-HelpersReady')
-    foreach($name in @('bootstrap-count','pair-count','binary-count','start-count')){Assert ([IO.File]::ReadAllText((Join-Path $script:DiskHome $name)) -ceq '1') 'repeat install does not repeat pairing, download or engine start'}
+    foreach($name in @('bootstrap-count','pair-count')){Assert ([IO.File]::ReadAllText((Join-Path $script:DiskHome $name)) -ceq '111') 'SSH bootstrap and add-device each succeed on the third attempt and are skipped on repeat install'}
+    foreach($name in @('binary-count','start-count')){Assert ([IO.File]::ReadAllText((Join-Path $script:DiskHome $name)) -ceq '1') 'repeat install does not repeat download or engine start'}
+    $log=[IO.File]::ReadAllText((Join-Path $script:DiskHome 'install.log'));Assert ($log.Contains('Тест: разрыв bootstrap') -and $log.Contains('Тест: разрыв add-device')) 'both SSH retry failures are logged'
     Assert ((Get-FileHash -LiteralPath $file).Hash -ceq $before) 'repeat install preserves generated state byte for byte'
     Write-Output ('PASS: '+$count+' first installation/pairing checks (real installer children, offline engine/SSH fixtures)')
 }finally{$env:LOCALAPPDATA=$oldLocal;$env:USERPROFILE=$oldUser}

@@ -83,6 +83,16 @@ function Invoke-DiskSsh($Command,[switch]$Direct,[string]$InputText='',[string]$
     }else{$args+=@('-F','NUL','-p',[string]$localPort,'-i',$c.keyPath,'-o',('HostKeyAlias='+$c.serverAddress),'-o',('UserKnownHostsFile="'+$c.knownHostsPath.Replace('\','/')+'"'),'-o','IdentitiesOnly=yes',($c.login+'@127.0.0.1'))}
     Invoke-DiskProcess $c.sshExecutable ($args+@($Command)) $InputText $OutputFile -TimeoutSeconds $TimeoutSeconds
 }
+# Only idempotent installation commands may use this bounded retry.
+function Invoke-DiskRetry([scriptblock]$Action,[string]$Step) {
+    for($attempt=1;$attempt -le 3;$attempt++){
+        try{& $Action;return}catch{
+            Write-DiskLog ($Step+': попытка '+$attempt+' из 3') $_
+            if($attempt -eq 3){throw}
+            Start-Sleep -Seconds $attempt
+        }
+    }
+}
 function Invoke-DiskServer($Action,$Data=$null,[switch]$Direct) {
     $cmd='bash "$HOME/.local/share/remote-disk/server-disk.sh" '+$Action
     if($Data){$cmd+=' '+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($Data|ConvertTo-Json -Depth 20 -Compress)))}

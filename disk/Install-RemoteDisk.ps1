@@ -5,26 +5,27 @@ param([string]$Profile,[switch]$HelpersReady,[string]$AcceptFile,[switch]$Uninst
 $script:DiskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk'
 $tray=Join-Path $script:DiskHome 'tray/syncthingtray.exe';$state=Join-Path $script:DiskHome 'state'
 function Get-DiskPort {$socket=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,0);$socket.Start();try{$socket.LocalEndpoint.Port}finally{$socket.Stop()}}
-function Wait-DiskTransport {
+function Wait-DiskTransport([int]$TimeoutSeconds=30) {
+    $budget=$TimeoutSeconds*1000
     $watch=[Diagnostics.Stopwatch]::StartNew()
-    while($watch.ElapsedMilliseconds -lt 30000){
+    while($watch.ElapsedMilliseconds -lt $budget){
         $client=New-Object Net.Sockets.TcpClient
         try{
             $port=[int](Get-TransportEffectivePort (Join-Path $env:LOCALAPPDATA 'RemoteAgents') 'sshPort')
             $connect=$client.ConnectAsync('127.0.0.1',$port)
-            if($connect.Wait([int][Math]::Max(1,[Math]::Min(1000,30000-$watch.ElapsedMilliseconds)))){
-                $stream=$client.GetStream();$bytes=New-Object byte[] 4;$count=0
-                while($count -lt 4 -and $watch.ElapsedMilliseconds -lt 30000){
+            if($connect.Wait([int][Math]::Max(1,[Math]::Min(1000,$budget-$watch.ElapsedMilliseconds)))){
+                $stream=$client.GetStream();$bytes=New-Object byte[] 4;$count=0;$banner=[Diagnostics.Stopwatch]::StartNew()
+                while($count -lt 4 -and $watch.ElapsedMilliseconds -lt $budget -and $banner.ElapsedMilliseconds -lt 5000){
                     $read=$stream.ReadAsync($bytes,$count,4-$count)
-                    if(-not $read.Wait([int][Math]::Max(1,[Math]::Min(1000,30000-$watch.ElapsedMilliseconds)))){break}
+                    if(-not $read.Wait([int][Math]::Max(1,[Math]::Min(5000-$banner.ElapsedMilliseconds,$budget-$watch.ElapsedMilliseconds)))){break}
                     if($read.Result -eq 0){break};$count+=$read.Result
                 }
                 if($count -eq 4 -and [Text.Encoding]::ASCII.GetString($bytes) -ceq 'SSH-'){return}
             }
         }catch{}finally{$client.Dispose()}
-        if($watch.ElapsedMilliseconds -lt 30000){Start-Sleep -Milliseconds ([int][Math]::Min(250,30000-$watch.ElapsedMilliseconds))}
+        if($watch.ElapsedMilliseconds -lt $budget){Start-Sleep -Milliseconds ([int][Math]::Min(250,$budget-$watch.ElapsedMilliseconds))}
     }
-    throw ('Связь не поднялась: нет баннера SSH на 127.0.0.1:'+$port+' за 30 с. Настройки сохранены; повторите установку.')
+    throw ('Связь не поднялась: нет баннера SSH на 127.0.0.1:'+$port+' за '+$TimeoutSeconds+' с. Настройки сохранены; повторите установку.')
 }
 $step='Подготовка'
 try {
@@ -56,7 +57,7 @@ try {
             $upload+='printf %s '+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($data))+' | base64 -d > "$HOME/.local/share/remote-disk/server-disk.sh"'+"`n"
             $upload+=Get-DiskIgnoreUpload
         }
-        $step='Bootstrap сервера';$remote=(Invoke-DiskSsh 'bash -s' -Direct -InputText ($upload+'bash "$HOME/.local/share/remote-disk/server-disk.sh" bootstrap'))|ConvertFrom-Json
+        $step='Bootstrap сервера';$remote=(Invoke-DiskRetry {Invoke-DiskSsh 'bash -s' -Direct -InputText ($upload+'bash "$HOME/.local/share/remote-disk/server-disk.sh" bootstrap')} $step)|ConvertFrom-Json
         $peer=[string]$remote.deviceId;if(-not $peer){throw 'Сервер не вернул ID устройства'}
     }
     # Never replace an installed Syncthing binary or edit an existing config.xml on update.
@@ -80,7 +81,7 @@ try {
     if(-not $local.myID){throw 'Движок не запустился'}
     $step='Подключение устройств';Set-DiskServerDevice $peer
     if($pair){
-        [void](Invoke-DiskServer add-device @{deviceId=$local.myID;deviceName=$env:COMPUTERNAME} -Direct)
+        [void](Invoke-DiskRetry {Invoke-DiskServer add-device @{deviceId=$local.myID;deviceName=$env:COMPUTERNAME} -Direct} 'Регистрация устройства на сервере')
         Write-DiskUtf8 $serverFile $peer
         $step='Проверка связи';Wait-DiskTransport
     }
