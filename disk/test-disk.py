@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -310,6 +311,228 @@ class SlowFolderWrites:
     def __exit__(self, *_):
         self.server.shutdown()
         self.server.server_close()
+
+
+class TunnelProxy:
+    """Туннель между компьютером и сервером (sing-box): серверный Syncthing видит все соединения как 127.0.0.1:<порт>.
+    cut() — смена сети у компьютера: его сокеты закрываются, а серверные остаются открытыми и молчат, потому что туннель
+    об обрыве не узнал. Новые соединения после cut() проходят как обычно."""
+    def __init__(self, upstream_port):
+        self.upstream_port = upstream_port
+        self.accepted = 0
+        self.pairs = []
+        self.held = []  # серверные сокеты после cut(): ссылка нужна, иначе сборщик мусора закроет их
+        self.lock = threading.Lock()
+        self.listener = socket.socket()
+        self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.listener.bind(('127.0.0.1', 0))
+        self.listener.listen(16)
+        self.listener.settimeout(.2)
+        self.port = self.listener.getsockname()[1]
+        self.closed = False
+        self.thread = threading.Thread(target=self.accept_loop, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_):
+        self.closed = True
+        self.thread.join(5)
+        self.listener.close()
+        with self.lock:
+            pairs, self.pairs = self.pairs, []
+        for pair in pairs:
+            pair['cut'] = True
+            self.held.append(pair['client'])
+            self.held.append(pair['upstream'])
+        for sock in self.held:
+            with contextlib.suppress(OSError):
+                sock.close()
+
+    def accept_loop(self):
+        while not self.closed:
+            try:
+                client, _ = self.listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            client.settimeout(None)
+            try:
+                upstream = socket.create_connection(('127.0.0.1', self.upstream_port), timeout=5)
+            except OSError:
+                client.close()
+                continue
+            upstream.settimeout(None)
+            pair = dict(client=client, upstream=upstream, cut=False)
+            with self.lock:
+                self.pairs.append(pair)
+                self.accepted += 1
+            for source, target in (('client', 'upstream'), ('upstream', 'client')):
+                threading.Thread(target=self.pump, args=(pair, source, target), daemon=True).start()
+
+    @staticmethod
+    def pump(pair, source, target):
+        while True:
+            try:
+                data = pair[source].recv(65536)
+            except OSError:
+                data = b''
+            if pair['cut']:
+                return  # серверный сокет остаётся открытым и непрочитанным
+            try:
+                if data:
+                    pair[target].sendall(data)
+                else:
+                    pair[target].shutdown(socket.SHUT_WR)
+                    return
+            except OSError:
+                return
+
+    def cut(self):
+        with self.lock:
+            pairs, self.pairs = self.pairs, []
+        for pair in pairs:
+            pair['cut'] = True
+            self.held.append(pair['upstream'])
+            with contextlib.suppress(OSError):
+                pair['client'].shutdown(socket.SHUT_RDWR)
+            pair['client'].close()
+        return len(pairs)
+
+
+class FailingRoute:
+    """Reverse proxy перед REST Syncthing: GET маршрута с заданным началом отвечает 500, остальное проходит."""
+    def __init__(self, target_port, prefix):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = 'HTTP/1.0'
+
+            def forward(self):
+                length = int(self.headers.get('Content-Length') or 0)
+                body = self.rfile.read(length) if length else None
+                if self.command == 'GET' and self.path.startswith('/rest/' + prefix):
+                    self.send_response(500)
+                    self.send_header('Content-Length', '0')
+                    self.end_headers()
+                    return
+                upstream = http.client.HTTPConnection('127.0.0.1', target_port, timeout=30)
+                try:
+                    upstream.request(self.command, self.path, body=body, headers={
+                        k: v for k, v in self.headers.items() if k.lower() not in ('host', 'connection')})
+                    response = upstream.getresponse()
+                    data = response.read()
+                finally:
+                    upstream.close()
+                self.send_response(response.status)
+                self.send_header('Content-Type', response.getheader('Content-Type', 'application/json'))
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            do_GET = do_PUT = do_POST = do_PATCH = do_DELETE = forward
+
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class FakeConnections:
+    """Из REST Syncthing — только то, что трогает watch_connections: счётчики соединений устройств и их пауза."""
+    def __init__(self):
+        self.devices = {}
+        self.calls = []
+        self.resume_failures = []  # исключения, которые resume бросит по очереди
+        self.pause_closes = True   # False — движок «не закрыл» соединения на паузе
+
+    def add(self, device_id, name, *inbound):
+        """Устройство с соединениями, получившими столько байт; без счётчиков — не подключено."""
+        self.devices[device_id] = dict(name=name, connected=bool(inbound), paused=False, conns=[
+            ['127.0.0.1:%d' % (40000 + i), '2026-11-15T07:00:00+01:00', n] for i, n in enumerate(inbound)])
+
+    def posts(self):
+        return [call for call in self.calls if call[0] == 'POST']
+
+    def __call__(self, route, method='GET', body=None):
+        self.calls.append((method, route))
+        if (method, route) == ('GET', 'system/connections'):
+            connections = {}
+            for device_id, d in self.devices.items():
+                infos = [dict(address=a, startedAt=at, inBytesTotal=n) for a, at, n in d['conns']] if d['connected'] else [
+                    dict(address='', startedAt='0001-01-01T00:00:00Z', inBytesTotal=0)]
+                connections[device_id] = dict(connected=d['connected'], paused=d['paused'], primary=infos[0])
+                if infos[1:]:
+                    connections[device_id]['secondary'] = infos[1:]
+            return dict(connections=connections, total={})
+        verb, _, query = route.partition('?device=')
+        device = self.devices.get(urllib.parse.unquote(query))
+        if method == 'POST' and verb == 'system/pause' and device:
+            device.update(paused=True, connected=device['connected'] and not self.pause_closes)
+            return {}
+        if method == 'POST' and verb == 'system/resume' and device:
+            if self.resume_failures:
+                raise self.resume_failures.pop(0)
+            device['paused'] = False
+            return {}
+        if method == 'GET' and route.startswith('config/devices/'):
+            return dict(deviceID=route.rsplit('/', 1)[1], name=self.devices[route.rsplit('/', 1)[1]]['name'])
+        raise AssertionError((method, route))
+
+
+def script_constant(name):
+    with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+        return ns[name]
+
+
+def device_connections(t, server, peer):
+    """Соединения peer глазами server: пусто, если не подключён; иначе primary и secondary."""
+    info = t.api(server, 'system/connections')['connections'][peer['deviceId']]
+    return [info['primary']] + (info.get('secondary') or []) if info['connected'] else []
+
+
+def settled(connections, count=3):
+    # У только что принятого соединения startedAt какое-то время нулевой: ждём настоящих значений.
+    return len(connections) == count and not any(c['startedAt'].startswith('0001') for c in connections)
+
+
+def inbound_bytes(t, server, peer):
+    return t.api(server, 'system/connections')['connections'][peer['deviceId']]['inBytesTotal']
+
+
+def link_through_tunnel(t, server, computer, proxy, interval=3):
+    """Как вживую: сервер знает компьютер без адреса и сам не звонит, компьютер ходит к серверу через туннель."""
+    t.server(server, 'add-device', dict(deviceId=computer['deviceId'], deviceName='Computer'))
+    t.server(computer, 'add-device', dict(deviceId=server['deviceId'], deviceName='Server'))
+    t.api(computer, 'config/devices/' + server['deviceId'], 'PATCH', dict(addresses=[f'tcp://127.0.0.1:{proxy.port}']))
+    t.api(computer, 'config/options', 'PATCH', dict(reconnectionIntervalS=interval))
+
+
+def bootstrap_tick(t, side):
+    """Один запуск таймера: возвращает stderr (строки лечения и диагностики), код возврата обязан быть 0."""
+    result = t.server(side, 'bootstrap', ok=False)
+    if result.returncode:
+        raise AssertionError(result.stderr.decode())
+    return result.stderr.decode()
+
+
+def age_watch(side, seconds):
+    """Сдвигает начало молчания назад: вместо ожидания STALE_AFTER_S проверяем решение сервера при давнем молчании."""
+    path = side['state'] / 'connection-watch.json'
+    state = json.loads(path.read_text())
+    for entry in state['devices'].values():
+        entry['since'] -= seconds
+    path.write_text(json.dumps(state))
 
 
 class ServerTests(unittest.TestCase):
@@ -1063,6 +1286,286 @@ class ServerHardeningTests(unittest.TestCase):
                 self.assertGreaterEqual(time.monotonic() - started, 4)
                 self.assertEqual(proxy.held, 1)
             self.assertEqual({d['deviceID'] for d in t.folder(a, 'Slow')['devices']}, {a['deviceId'], b['deviceId']})
+
+
+class StaleConnectionTests(unittest.TestCase):
+    """Туннель рвётся молча, серверные соединения зависают и не пускают компьютер обратно: bootstrap делает pause/resume."""
+    DEVICE = 'AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG-HHHHHHH'
+    OTHER = 'ZZZZZZZ-YYYYYYY-XXXXXXX-WWWWWWW-VVVVVVV-UUUUUUU-TTTTTTT-SSSSSSS'
+
+    def check(self, ns, engine, now):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), mock.patch('time.sleep'):
+            ns['watch_connections'](engine, now)
+        return stderr.getvalue()
+
+    def recycled(self, engine, device_id=None):
+        device_id = device_id or self.DEVICE
+        return engine.posts() == [('POST', 'system/pause?device=' + device_id), ('POST', 'system/resume?device=' + device_id)]
+
+    def test_device_is_stale_only_after_every_connection_was_silent_for_the_threshold(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            limit = ns['STALE_AFTER_S']
+            # По протоколу живая сторона шлёт пинг раз в 90 с: порог обязан это перекрывать с запасом.
+            self.assertGreaterEqual(limit, 90 + 20)
+            engine = FakeConnections()
+            engine.add(self.DEVICE, 'Computer', 8, 8, 8)
+            self.assertEqual(self.check(ns, engine, 1000), '')  # первая встреча: молчание отсчитывается отсюда
+            self.assertEqual(self.check(ns, engine, 1000 + limit - 1), '')
+            engine.devices[self.DEVICE]['conns'][1][2] += 8  # пинг по одному из трёх соединений: устройство живо
+            self.assertEqual(self.check(ns, engine, 1000 + limit), '')
+            self.assertEqual(self.check(ns, engine, 1000 + 2 * limit - 1), '')
+            engine.devices[self.DEVICE]['conns'].append(['127.0.0.1:40009', '2026-11-15T07:01:00+01:00', 0])  # новое соединение
+            self.assertEqual(self.check(ns, engine, 1000 + 2 * limit), '')
+            self.assertEqual(self.check(ns, engine, 1000 + 3 * limit - 1), '')
+            self.assertEqual(engine.posts(), [])
+            line = self.check(ns, engine, 1000 + 3 * limit)
+            self.assertTrue(self.recycled(engine))
+            self.assertRegex(line, r'^RemoteDisk: Computer \(AAAAAAA\): соединения молчат %d с, .*pause/resume\n$' % limit)
+
+    def test_only_the_silent_connected_device_is_recycled_with_one_log_line(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            limit = ns['STALE_AFTER_S']
+            engine = FakeConnections()
+            engine.add(self.DEVICE, 'Computer', 8, 8)
+            engine.add(self.OTHER, 'Laptop', 8)
+            engine.add('PAUSED1-X', 'Paused by the owner', 8)
+            engine.devices['PAUSED1-X'].update(connected=False, paused=True)
+            engine.add('OFFLINE-X', 'Offline')
+            log = []
+            for now in (0, limit - 1, limit, limit + 1, 3 * limit, 10 * limit):
+                engine.devices[self.OTHER]['conns'][0][2] += 8  # этот обменивается данными постоянно
+                log.append(self.check(ns, engine, 5000 + now))
+            # Одна строка, и ровно тогда, когда молчание компьютера достигло порога; дальше он уже не зависший.
+            self.assertEqual([bool(line) for line in log], [False, False, True, False, False, False])
+            self.assertRegex(log[2], r'^RemoteDisk: Computer \(AAAAAAA\): соединения молчат %d с, .*pause/resume\n$' % limit)
+            self.assertTrue(self.recycled(engine))
+            # Устройство на паузе у владельца, неподключённое и обменивающееся данными не трогаются.
+            self.assertTrue(engine.devices['PAUSED1-X']['paused'])
+
+    def test_device_name_cannot_split_the_log_line(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            engine = FakeConnections()
+            engine.add(self.DEVICE, 'Computer\r\nRemoteDisk: forged\x1b[2J', 8)
+            self.check(ns, engine, 1000)
+            line = self.check(ns, engine, 1000 + ns['STALE_AFTER_S'])
+            self.assertEqual(line.count('\n'), 1)
+            self.assertNotRegex(line, r'[\r\x1b]')
+            self.assertTrue(line.startswith('RemoteDisk: Computer  RemoteDisk: forged'))
+
+    def test_cooldown_blocks_a_second_recycling_of_the_same_device(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            limit, cooldown = ns['STALE_AFTER_S'], ns['HEAL_COOLDOWN_S']
+            engine = FakeConnections()
+            engine.pause_closes = False  # движок соединений не закрыл: сразу после лечения устройство всё ещё зависшее
+            engine.add(self.DEVICE, 'Computer', 8)
+            watch = ns['watch']
+            self.check(ns, engine, 1000)
+            self.assertNotEqual(self.check(ns, engine, 1000 + limit), '')
+            self.assertEqual(len(engine.posts()), 2)
+            # Лечение запомнено: даже при «давнем» молчании второе не раньше, чем через HEAL_COOLDOWN_S.
+            state = json.loads(watch.read_text())
+            self.assertEqual(state['healed'], {self.DEVICE: 1000 + limit})
+            state['devices'][self.DEVICE]['since'] = 0
+            watch.write_text(json.dumps(state))
+            self.assertEqual(self.check(ns, engine, 1000 + limit + cooldown - 1), '')
+            self.assertEqual(len(engine.posts()), 2)
+            self.assertNotEqual(self.check(ns, engine, 1000 + limit + cooldown), '')
+            self.assertEqual(len(engine.posts()), 4)
+            # После лечения молчание отсчитывается заново: ещё одно только через STALE_AFTER_S.
+            self.assertEqual(self.check(ns, engine, 1000 + limit + cooldown + limit - 1), '')
+            self.assertEqual(len(engine.posts()), 4)
+
+    def test_failed_resume_is_retried_by_the_next_run(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            limit = ns['STALE_AFTER_S']
+            engine = FakeConnections()
+            engine.add(self.DEVICE, 'Computer', 8)
+            self.check(ns, engine, 1000)
+            engine.resume_failures = [urllib.error.URLError('REST недоступен')] * 3  # все три попытки внутри запуска
+            line = self.check(ns, engine, 1000 + limit)
+            self.assertRegex(line, r'^RemoteDisk: Computer \(AAAAAAA\): URLError: .*REST недоступен.*\n$')
+            self.assertTrue(engine.devices[self.DEVICE]['paused'])
+            self.assertEqual(json.loads(ns['watch'].read_text())['resume'], {self.DEVICE: 1000 + limit})
+            # Следующий запуск таймера возвращает устройство из паузы и забывает пометку.
+            self.assertEqual(self.check(ns, engine, 1002 + limit), '')
+            self.assertFalse(engine.devices[self.DEVICE]['paused'])
+            self.assertNotIn('resume', json.loads(ns['watch'].read_text()) if ns['watch'].exists() else {})
+
+    def test_resume_is_attempted_three_times_inside_one_run(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            engine = FakeConnections()
+            engine.add(self.DEVICE, 'Computer', 8)
+            self.check(ns, engine, 1000)
+            engine.resume_failures = [urllib.error.URLError('временно')] * 2
+            line = self.check(ns, engine, 1000 + ns['STALE_AFTER_S'])
+            self.assertFalse(engine.devices[self.DEVICE]['paused'])
+            self.assertRegex(line, r'pause/resume\n$')
+            self.assertEqual(len([c for c in engine.posts() if 'resume' in c[1]]), 3)
+
+    def test_run_that_dies_between_pause_and_resume_does_not_leave_the_device_paused(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            limit = ns['STALE_AFTER_S']
+            engine = FakeConnections()
+            engine.add(self.DEVICE, 'Computer', 8)
+            self.check(ns, engine, 1000)
+            engine.resume_failures = [RuntimeError('процесс убит')]  # не из тех сбоев, что обрабатываются: запуск обрывается
+            with self.assertRaises(RuntimeError):
+                self.check(ns, engine, 1000 + limit)
+            self.assertTrue(engine.devices[self.DEVICE]['paused'])
+            self.assertIn(self.DEVICE, json.loads(ns['watch'].read_text())['resume'])
+            self.assertEqual(self.check(ns, engine, 1002 + limit), '')  # следующий запуск возвращает устройство из паузы
+            self.assertFalse(engine.devices[self.DEVICE]['paused'])
+            self.assertFalse(ns['watch'].exists())  # и забывает пометку
+
+    def test_leftover_mark_never_resumes_a_device_that_is_not_paused(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            engine = FakeConnections()
+            engine.add(self.DEVICE, 'Computer', 8)
+            ns['watch'].parent.mkdir(parents=True)
+            ns['watch'].write_text(json.dumps(dict(devices={}, healed={}, resume={self.DEVICE: 1000})))
+            self.assertEqual(self.check(ns, engine, 1001), '')  # pause не состоялся или resume уже был: трогать нечего
+            self.assertEqual(engine.posts(), [])
+            self.assertEqual(json.loads(ns['watch'].read_text())['resume'], {})
+
+    def test_broken_state_file_starts_the_watch_over(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            limit = ns['STALE_AFTER_S']
+            engine = FakeConnections()
+            engine.add(self.DEVICE, 'Computer', 8)
+            ns['watch'].parent.mkdir(parents=True)
+            for garbage in (b'\xff\x00 not json', b'[]', b'{"devices": [], "healed": 5, "resume": "x"}',
+                            json.dumps(dict(devices={self.DEVICE: dict(sig='x', since='yesterday')})).encode()):
+                with self.subTest(garbage=garbage):
+                    ns['watch'].write_bytes(garbage)
+                    self.assertEqual(self.check(ns, engine, 1000), '')
+                    self.assertEqual(json.loads(ns['watch'].read_text())['devices'][self.DEVICE]['since'], 1000)
+            self.assertEqual(engine.posts(), [])
+            self.assertNotEqual(self.check(ns, engine, 1000 + limit), '')
+
+    def test_clock_going_backwards_restarts_the_silence_instead_of_stalling_it(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            limit = ns['STALE_AFTER_S']
+            engine = FakeConnections()
+            engine.add(self.DEVICE, 'Computer', 8)
+            self.check(ns, engine, 10_000)
+            self.assertEqual(self.check(ns, engine, 500), '')  # часы ушли назад: молчание не может быть «отрицательным»
+            self.assertEqual(self.check(ns, engine, 500 + limit - 1), '')
+            self.assertEqual(engine.posts(), [])
+            self.assertNotEqual(self.check(ns, engine, 500 + limit), '')
+
+    def test_state_is_written_only_when_something_changes_and_removed_when_empty(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            engine = FakeConnections()
+            engine.add(self.DEVICE, 'Computer')  # не подключено
+            self.check(ns, engine, 1000)
+            self.assertFalse(ns['watch'].exists())  # помнить нечего: файла нет
+            engine.add(self.DEVICE, 'Computer', 8)
+            self.check(ns, engine, 1001)
+            written = ns['watch'].stat().st_mtime_ns
+            self.check(ns, engine, 1002)  # ничего нового: файл не переписывается
+            self.assertEqual(ns['watch'].stat().st_mtime_ns, written)
+            engine.devices[self.DEVICE].update(connected=False)
+            self.check(ns, engine, 1003)  # устройство ушло: запись о нём не копится
+            self.assertFalse(ns['watch'].exists())
+
+    def test_failing_connection_check_never_stops_folder_discovery_or_bootstrap(self):
+        with Stand(1) as t:
+            side = t.sides[0]
+            (side['home'] / 'Disk/Local').mkdir(parents=True)
+            ports_file = side['state'] / 'ports.json'
+            ports = json.loads(ports_file.read_text())
+            with FailingRoute(int(side['gui']), 'system/connections') as proxy:
+                ports_file.write_text(json.dumps(dict(ports, gui=proxy.port)))
+                try:
+                    result = t.server(side, 'bootstrap', ok=False)
+                finally:
+                    ports_file.write_text(json.dumps(ports))
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            self.assertEqual(json.loads(result.stdout), dict(deviceId=side['deviceId'], listen=side['listen']))
+            self.assertRegex(result.stderr.decode(), r'^RemoteDisk: соединения устройств: HTTPError: .*500.*\n$')
+            self.assertEqual(t.folder(side, 'Local')['id'], 'Local')
+
+    def test_only_bootstrap_watches_connections(self):
+        with Stand(2) as t:
+            server, computer = t.sides
+            t.register(server, computer)
+            t.register(computer, server)
+            wait(lambda: device_connections(t, server, computer), 'engines connected')
+            t.server(server, 'add-device', dict(deviceId=computer['deviceId']))
+            self.assertFalse((server['state'] / 'connection-watch.json').exists())
+            t.server(server, 'bootstrap')
+            self.assertTrue((server['state'] / 'connection-watch.json').exists())
+
+    def test_computer_reconnects_after_the_server_recycles_its_stale_connections(self):
+        limit = script_constant('STALE_AFTER_S')
+        with Stand(2) as t:
+            server, computer = t.sides
+            with TunnelProxy(server['listen']) as proxy:
+                link_through_tunnel(t, server, computer, proxy)
+                wait(lambda: settled(device_connections(t, server, computer)), 'three connections through the tunnel', 90)
+                zombies = {c['address'] for c in device_connections(t, server, computer)}
+                self.assertEqual(bootstrap_tick(t, server), '')  # наблюдение началось
+                device_config = t.api(server, 'config/devices/' + computer['deviceId'])
+                to_server = lambda: t.api(computer, 'system/connections')['connections'][server['deviceId']]['connected']
+
+                # Смена сети у компьютера: туннель рвётся, серверные соединения остаются «живыми».
+                self.assertGreaterEqual(proxy.cut(), 3)
+                wait(lambda: not to_server(), 'the computer notices the broken tunnel', 20)
+                attempts = proxy.accepted
+                wait(lambda: proxy.accepted >= attempts + 2, 'the computer retries through a new tunnel connection', 40)
+                # Без лечения: сервер всё ещё считает старые соединения живыми и отказывает новым, компьютер не подключён.
+                self.assertEqual({c['address'] for c in device_connections(t, server, computer)}, zombies)
+                self.assertFalse(to_server())
+                # Молчание только началось: устройство не трогаем.
+                self.assertEqual(bootstrap_tick(t, server), '')
+                self.assertEqual({c['address'] for c in device_connections(t, server, computer)}, zombies)
+
+                age_watch(server, limit + 10)  # прошло STALE_AFTER_S тишины
+                started = time.monotonic()
+                logged = [bootstrap_tick(t, server)]
+                while not (to_server() and not zombies & {c['address'] for c in device_connections(t, server, computer)}):
+                    self.assertLess(time.monotonic() - started, 60, 'the computer did not come back within 60 s')
+                    time.sleep(1)
+                    logged.append(bootstrap_tick(t, server))
+                lines = [line for text in logged for line in text.splitlines()]
+                self.assertEqual(len(lines), 1, lines)
+                self.assertRegex(lines[0], r'^RemoteDisk: Computer \(%s\): соединения молчат \d+ с, .*pause/resume$' % computer['deviceId'][:7])
+                # Устройство не осталось на паузе, настройки прежние; дальнейшие запуски тихие (нет зависших, нет цикла).
+                self.assertEqual(t.api(server, 'config/devices/' + computer['deviceId']), device_config)
+                for _ in range(3):
+                    self.assertEqual(bootstrap_tick(t, server), '')
+                    time.sleep(1)
+
+    def test_connections_with_real_traffic_are_never_recycled(self):
+        limit = script_constant('STALE_AFTER_S')
+        with Stand(2) as t:
+            server, computer = t.sides
+            with TunnelProxy(server['listen']) as proxy:
+                link_through_tunnel(t, server, computer, proxy)
+                wait(lambda: settled(device_connections(t, server, computer)), 'three connections through the tunnel', 90)
+                identity = lambda: sorted((c['address'], c['startedAt']) for c in device_connections(t, server, computer))
+                before = identity()
+                self.assertEqual(bootstrap_tick(t, server), '')
+                source = t.offer(computer, server, 'live-upload', 'Live')
+                wait(lambda: 'live-upload' in t.api(server, 'cluster/pending/folders'), 'folder offered to the server')
+                self.assertEqual(bootstrap_tick(t, server), '')  # сервер принимает папку: индексы пойдут в обе стороны
+                wait(lambda: (server['home'] / 'Disk/Live/source.txt').exists(), 'accepted folder reaches the server')
+                for n in range(3):
+                    # Часы говорят «молчит давно», но компьютер шлёт данные: это живое соединение, его не трогают.
+                    age_watch(server, limit + 10)
+                    received = inbound_bytes(t, server, computer)
+                    (source / f'note-{n}.txt').write_text(str(n) * 2000)
+                    wait(lambda: inbound_bytes(t, server, computer) > received, 'the computer sends data to the server', 30)
+                    self.assertEqual(bootstrap_tick(t, server), '')
+                    self.assertEqual(identity(), before)
+                    since = json.loads((server['state'] / 'connection-watch.json').read_text())['devices'][
+                        computer['deviceId']]['since']
+                    self.assertLess(time.time() - since, 30)
+                wait(lambda: (server['home'] / 'Disk/Live/note-2.txt').exists(), 'the data reached the server', 40)
+                self.assertEqual((server['home'] / 'Disk/Live/note-2.txt').read_text(), '2' * 2000)
+                self.assertEqual(identity(), before)
+                self.assertFalse(t.api(server, 'config/devices/' + computer['deviceId'])['paused'])
 
 
 if __name__ == '__main__':
