@@ -15,13 +15,7 @@ namespace RemoteAgents.Launcher
         { return new DiskExplorerService(new DiskExplorerFileSystem(), new DiskExplorerIcons(iconDirectory), new DiskExplorerNotifier(), log); }
         internal static DiskExplorerRegistry CreateRegistry(Action<string> log)
         { return new DiskExplorerRegistry(new DiskExplorerCurrentUserRegistry(), log, DiskExplorerNotifier.AssociationsChanged); }
-        internal static void CleanupIcons(string iconDirectory)
-        {
-            foreach (DiskExplorerKind kind in Enum.GetValues(typeof(DiskExplorerKind))) {
-                string path = Path.Combine(iconDirectory, DiskExplorerService.Owner + "." + kind + ".ico");
-                if (File.Exists(path) && (File.GetAttributes(path) & FileAttributes.ReparsePoint) == 0) File.Delete(path);
-            }
-        }
+        internal static void CleanupIcons(string iconDirectory) { DiskIconFile.Cleanup(iconDirectory); }
     }
     internal sealed class DiskExplorerNotifier : IDiskExplorerNotifier
     {
@@ -46,6 +40,14 @@ namespace RemoteAgents.Launcher
         }
         [DllImport("shell32.dll", CharSet = CharSet.Unicode)] static extern int SHGetStockIconInfo(uint id, uint flags, ref StockIconInfo info);
         [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr handle);
+        // The program's own icon (the green dot of the tray, app.ico built into the program) as a file for our Explorer menu items.
+        public string ApplicationPath()
+        {
+            Directory.CreateDirectory(directory);
+            string path = Path.Combine(directory, DiskExplorerService.ApplicationIconFile);
+            DiskIconFile.ExportApplicationIcon(path);
+            return path;
+        }
         public string PathFor(DiskExplorerKind kind)
         {
             Directory.CreateDirectory(directory);
@@ -56,7 +58,7 @@ namespace RemoteAgents.Launcher
             if (error < 0 || info.Icon == IntPtr.Zero) Marshal.ThrowExceptionForHR(error < 0 ? error : unchecked((int)0x80004005));
             try {
                 using (var folder = (Icon)Icon.FromHandle(info.Icon).Clone()) {
-                    var sizes = new[] { 16, 32, 48, 256 }; var frames = new List<byte[]>();
+                    int[] sizes = DiskIconFile.FolderSizes; var frames = new List<byte[]>();
                     foreach (int size in sizes) using (var bitmap = new Bitmap(size, size, PixelFormat.Format32bppArgb)) {
                         using (var g = Graphics.FromImage(bitmap)) {
                             g.Clear(Color.Transparent); g.SmoothingMode = SmoothingMode.AntiAlias; g.InterpolationMode = InterpolationMode.HighQualityBicubic;
@@ -70,20 +72,7 @@ namespace RemoteAgents.Launcher
                         }
                         using (var stream = new MemoryStream()) { bitmap.Save(stream, ImageFormat.Png); frames.Add(stream.ToArray()); }
                     }
-                    string temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
-                    try {
-                        using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None)) using (var writer = new BinaryWriter(stream)) {
-                            writer.Write((ushort)0); writer.Write((ushort)1); writer.Write((ushort)sizes.Length);
-                            int offset = 6 + 16 * sizes.Length;
-                            for (int i = 0; i < sizes.Length; i++) {
-                                writer.Write((byte)(sizes[i] == 256 ? 0 : sizes[i])); writer.Write((byte)(sizes[i] == 256 ? 0 : sizes[i]));
-                                writer.Write((byte)0); writer.Write((byte)0); writer.Write((ushort)1); writer.Write((ushort)32);
-                                writer.Write(frames[i].Length); writer.Write(offset); offset += frames[i].Length;
-                            }
-                            foreach (byte[] frame in frames) writer.Write(frame);
-                        }
-                        if (!File.Exists(path)) File.Move(temp, path);
-                    } finally { if (File.Exists(temp)) File.Delete(temp); }
+                    DiskIconFile.Write(path, sizes, frames);
                 }
             } finally { DestroyIcon(info.Icon); }
             return path;

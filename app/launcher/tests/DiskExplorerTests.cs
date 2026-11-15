@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -38,7 +39,7 @@ namespace RemoteAgents.Launcher
         internal static void Run()
         {
             string temp = Path.Combine(Path.GetTempPath(), "disk-explorer-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(temp);
-            try { RecyclePolicy(); States(); Metadata(Path.Combine(temp, "metadata")); Registry(); Menu(); Commands(Path.Combine(temp, "actions")); Console.WriteLine("PASS: Explorer model, metadata, registry and action fixtures"); HttpAndEvents(Path.Combine(temp, "http")).GetAwaiter().GetResult(); }
+            try { RecyclePolicy(); States(); Metadata(Path.Combine(temp, "metadata")); Registry(); Menu(); MenuIcon(); IconFile(Path.Combine(temp, "icons")); Commands(Path.Combine(temp, "actions")); Console.WriteLine("PASS: Explorer model, metadata, registry and action fixtures"); HttpAndEvents(Path.Combine(temp, "http")).GetAwaiter().GetResult(); }
             finally { if (Directory.Exists(temp)) Directory.Delete(temp, true); }
             Console.WriteLine("PASS: " + checks + " local Syncthing / Explorer checks (REST, events, placeholders, HKCU, shell, recycle rollback)");
         }
@@ -102,7 +103,8 @@ namespace RemoteAgents.Launcher
             public void DeleteFile(string p) { File.Delete(p); attributes.Remove(p); }
             public void DeleteDirectory(string p) { Directory.Delete(p); attributes.Remove(p); }
         }
-        sealed class Icons : IDiskExplorerIcons { public string PathFor(DiskExplorerKind k) { return "/icons/" + k + ".ico"; } }
+        sealed class Icons : IDiskExplorerIcons { public string PathFor(DiskExplorerKind k) { return "/icons/" + k + ".ico"; } public string ApplicationPath() { return "/icons/App.ico"; } }
+        sealed class BrokenIcons : IDiskExplorerIcons { public string PathFor(DiskExplorerKind k) { return "/icons/" + k + ".ico"; } public string ApplicationPath() { throw new IOException("the icon cannot be drawn"); } }
         sealed class Notify : IDiskExplorerNotifier { internal int Count; public void Changed(string path) { Count++; } }
         static DiskExplorerService Service(TestFiles fs) { return new DiskExplorerService(fs, new Icons(), new Notify(), delegate { }); }
         static void Metadata(string root)
@@ -139,10 +141,10 @@ namespace RemoteAgents.Launcher
         internal sealed class TestRegistry : IDiskExplorerRegistry
         {
             internal readonly Dictionary<string, string> Values = new Dictionary<string, string>(); internal int Writes;
-            public bool Exists(string k) { return Values.Keys.Any(v => v.StartsWith(k + "|", StringComparison.Ordinal)); }
-            public string Read(string k, string n) { string v; return Values.TryGetValue(k + "|" + n, out v) ? v : null; }
-            public void Write(string k, string n, string v) { Values[k + "|" + n] = v; Writes++; }
-            public void DeleteTree(string k) { foreach (string v in Values.Keys.Where(v => v.StartsWith(k + "|", StringComparison.Ordinal) || v.StartsWith(k + "\\", StringComparison.Ordinal)).ToArray()) Values.Remove(v); }
+            public bool Exists(string k) { lock (Values) return Values.Keys.Any(v => v.StartsWith(k + "|", StringComparison.Ordinal)); }
+            public string Read(string k, string n) { lock (Values) { string v; return Values.TryGetValue(k + "|" + n, out v) ? v : null; } }
+            public void Write(string k, string n, string v) { lock (Values) { Values[k + "|" + n] = v; Writes++; } }
+            public void DeleteTree(string k) { lock (Values) foreach (string v in Values.Keys.Where(v => v.StartsWith(k + "|", StringComparison.Ordinal) || v.StartsWith(k + "\\", StringComparison.Ordinal)).ToArray()) Values.Remove(v); }
         }
         static void Registry()
         {
@@ -244,6 +246,65 @@ namespace RemoteAgents.Launcher
             Check(bounded.Length <= DiskExplorerRegistry.MaxAppliesTo && !Applies(bounded, disk + @"\Проект") && Applies(bounded, @"D:\Другая"), "outside folders left out of an oversized condition; the Disk children stay hidden");
             string driveScope = DiskExplorerRegistry.UploadScope(@"C:\", Enumerable.Range(1, 80).Select(i => @"C:\Папка-" + i));
             Check(driveScope.Length <= DiskExplorerRegistry.MaxAppliesTo && !Applies(driveScope, @"C:\Папка-5") && !Applies(driveScope, @"C:\") && Applies(driveScope, @"D:\Папка-5"), "a drive root works as the Disk root");
+        }
+        // All three items carry the program's icon exported as a file; without it they fall back to the program file.
+        static void MenuIcon()
+        {
+            const string exe = @"C:\App Name\RemoteAgents.exe", home = @"C:\User Home", disk = @"C:\Disk", icon = @"C:\Users\User\AppData\Local\RemoteDisk\explorer-icons\RemoteAgents.Disk.v2.App.ico";
+            string p = DiskExplorerRegistry.Prefix; string[] verbs = { "download", "keep-server", "add" };
+            var rows = new[] { new DiskFolderState { Path = disk + @"\Проект", ServerOnly = true, Kind = DiskExplorerKind.ServerOnly }, new DiskFolderState { Path = @"D:\External", Kind = DiskExplorerKind.Synced } };
+            var store = new TestRegistry(); int changes = 0; var registry = new DiskExplorerRegistry(store, delegate { }, () => changes++);
+            registry.Register(exe, disk, rows, home, icon);
+            Check(verbs.All(v => store.Read(p + v, "Icon") == "\"" + icon + "\",0"), "all three items carry the application icon");
+            changes = 0; registry.Register(exe, disk, rows, home, icon);
+            Check(changes == 0, "the same icon does not refresh Explorer again");
+            registry.Register(exe, disk, rows, home, @"C:\Other\icon.ico");
+            Check(changes == 1 && verbs.All(v => store.Read(p + v, "Icon") == "\"C:\\Other\\icon.ico\",0"), "a new icon file updates every item and refreshes Explorer once");
+            var bare = new TestRegistry(); new DiskExplorerRegistry(bare, delegate { }).Register(exe, disk, rows, home);
+            Check(verbs.All(v => bare.Read(p + v, "Icon") == "\"" + exe + "\",0"), "without an exported icon the items use the program file");
+            Reject(() => registry.Register(exe, disk, rows, home, "bad\r\nicon.ico"), "icon path injection rejected");
+        }
+        static string SourceDirectory([CallerFilePath] string file = "") { return Path.GetDirectoryName(file); }
+        // Icon files: the container for the folder badges, and the program's own icon (app.ico, built into the program).
+        static void IconFile(string temp)
+        {
+            Directory.CreateDirectory(temp);
+            int[] sizes = DiskIconFile.FolderSizes;
+            Check(sizes.SequenceEqual(new[] { 16, 32, 48, 256 }), "folder badge icon sizes");
+            var frames = sizes.Select(s => new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A }.Concat(Enumerable.Repeat((byte)s, s)).ToArray()).ToList();
+            string path = Path.Combine(temp, "badge.ico");
+            DiskIconFile.Write(path, sizes, frames); byte[] ico = File.ReadAllBytes(path);
+            Check(ico.Take(6).SequenceEqual(new byte[] { 0, 0, 1, 0, (byte)sizes.Length, 0 }), "ICO header: icon type and frame count");
+            bool layout = true; int offset = 6 + 16 * sizes.Length;
+            for (int i = 0; i < sizes.Length; i++) {
+                int entry = 6 + 16 * i; byte side = (byte)(sizes[i] == 256 ? 0 : sizes[i]);
+                layout &= ico[entry] == side && ico[entry + 1] == side && ico[entry + 4] == 1 && ico[entry + 5] == 0 && ico[entry + 6] == 32 && ico[entry + 7] == 0;
+                layout &= BitConverter.ToInt32(ico, entry + 8) == frames[i].Length && BitConverter.ToInt32(ico, entry + 12) == offset && ico.Skip(offset).Take(frames[i].Length).SequenceEqual(frames[i]);
+                offset += frames[i].Length;
+            }
+            Check(layout && offset == ico.Length, "every frame entry (size, 32 bit, length, offset) matches its PNG data");
+            DiskIconFile.Write(path, sizes, sizes.Select(s => new byte[] { 1 }).ToList());
+            Check(File.ReadAllBytes(path).SequenceEqual(ico) && Directory.GetFileSystemEntries(temp).Length == 1, "an icon in use is not replaced and no temporary file is left");
+            Reject(() => DiskIconFile.Write(Path.Combine(temp, "other.ico"), sizes, frames.Take(2).ToList()), "frames must match sizes");
+            // The program's icon: the file built into the program, byte for byte. Its picture is the tray dot.
+            string app = Path.Combine(temp, DiskExplorerService.ApplicationIconFile);
+            DiskIconFile.ExportApplicationIcon(app); byte[] icon = File.ReadAllBytes(app);
+            Check(icon.SequenceEqual(File.ReadAllBytes(Path.Combine(SourceDirectory(), "..", "app.ico"))), "the exported icon is app.ico of the repository, byte for byte");
+            var entries = Enumerable.Range(0, BitConverter.ToUInt16(icon, 4)).Select(i => new { Side = icon[6 + 16 * i] == 0 ? 256 : icon[6 + 16 * i], Bits = BitConverter.ToUInt16(icon, 12 + 16 * i), Length = BitConverter.ToInt32(icon, 14 + 16 * i), Offset = BitConverter.ToInt32(icon, 18 + 16 * i) }).ToArray();
+            Check(entries.Select(e => e.Side).SequenceEqual(new[] { 16, 20, 24, 32, 48, 256 }) && entries.All(e => e.Bits == 32 && e.Offset + e.Length <= icon.Length), "program icon: 16-48 px for menus and the taskbar at 100-300% scale, 256 px for large views, all 32-bit");
+            int at = entries.Single(e => e.Side == 32).Offset;
+            Check(BitConverter.ToInt32(icon, at) == 40 && BitConverter.ToInt32(icon, at + 4) == 32 && BitConverter.ToInt32(icon, at + 8) == 64 && BitConverter.ToUInt16(icon, at + 14) == 32, "the 32 px frame is a 32-bit bitmap");
+            Func<int, int, byte[]> pixel = (x, y) => icon.Skip(at + 40 + ((31 - y) * 32 + x) * 4).Take(4).ToArray(); // B, G, R, A; rows are stored bottom-up
+            Check(pixel(16, 16).SequenceEqual(new byte[] { 34, 139, 34, 255 }) && pixel(0, 0)[3] == 0 && pixel(4, 16)[3] == 255, "the picture is the tray dot: an opaque ForestGreen disc with transparent corners");
+            Check(icon.Skip(entries.Last().Offset).Take(8).SequenceEqual(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A }), "the 256 px frame is PNG");
+            DiskIconFile.ExportApplicationIcon(app);
+            Check(File.ReadAllBytes(app).SequenceEqual(icon) && Directory.GetFileSystemEntries(temp).Length == 2, "export keeps an existing icon and leaves no temporary file");
+            string icons = Path.Combine(temp, "cleanup"); Directory.CreateDirectory(icons);
+            foreach (DiskExplorerKind kind in Enum.GetValues(typeof(DiskExplorerKind))) File.WriteAllText(Path.Combine(icons, DiskExplorerService.Owner + "." + kind + ".ico"), "own");
+            File.WriteAllText(Path.Combine(icons, DiskExplorerService.ApplicationIconFile), "own"); File.WriteAllText(Path.Combine(icons, "foreign.ico"), "foreign");
+            DiskIconFile.Cleanup(icons);
+            Check(Directory.GetFiles(icons).Select(Path.GetFileName).SequenceEqual(new[] { "foreign.ico" }), "uninstall removes the state icons and the application icon, not a foreign file");
+            Check(DiskExplorerService.ApplicationIconFile == "RemoteAgents.Disk.v2.App.ico" && !Enum.GetNames(typeof(DiskExplorerKind)).Any(k => DiskExplorerService.Owner + "." + k + ".ico" == DiskExplorerService.ApplicationIconFile), "application icon file name cannot collide with a folder state icon");
         }
         internal sealed class FakeRest : IDiskRest
         {
@@ -430,9 +491,21 @@ namespace RemoteAgents.Launcher
                     Check(File.ReadAllText(firstIni).Contains("Unavailable.ico"), "exit does not leave a stale green status");
                     string menu = DiskExplorerRegistry.Prefix, upload = store.Read(menu + "add", "AppliesTo");
                     Check(upload.Contains(Path.Combine(root, "First")) && upload.Contains(Path.Combine(root, "Second")), "upload hidden on the placeholder and on the folder that now syncs");
+                    Check(new[] { "download", "keep-server", "add" }.All(a => store.Read(menu + a, "Icon") == "\"/icons/App.ico\",0"), "controller gives all three items the application icon");
                 }
                 DiskExplorerController.RemoveIntegration(root, api.Home, service, new DiskExplorerRegistry(store, delegate { }));
                 Check(Directory.Exists(Path.Combine(root, "First")) && !File.Exists(Path.Combine(root, "First", "desktop.ini")) && !Directory.Exists(Path.Combine(root, "Second")) && store.Values.Count == 0, "uninstall removes only owned decoration/placeholders and preserves accepted folder");
+                // The icon cannot be produced: the items still work with the program file's icon, and the failure is journalled once.
+                var journal = new ConcurrentQueue<string>(); var fallback = new TestRegistry();
+                using (var controller = new DiskExplorerController(Path.Combine(temp, "app2"), () => root, () => bundle, () => true, () => true, (m, ok) => { }, journal.Enqueue, new DiskExplorerService(fs, new BrokenIcons(), new Notify(), delegate { }), new DiskExplorerRegistry(fallback, delegate { }), api.Home)) {
+                    await Until(() => fallback.Read(DiskExplorerRegistry.Prefix + "add", "Icon") != null);
+                    api.Rest.Offer("id-c", "Third"); api.Event();
+                    await Until(() => Directory.Exists(Path.Combine(root, "Third")));
+                    controller.Dispose(); Check(await Task.Run(() => controller.Wait(3000)), "monitor with a broken icon exits promptly");
+                }
+                string programIcon = "\"" + Path.Combine(Path.GetTempPath(), "RemoteAgents.exe") + "\",0";
+                Check(new[] { "download", "keep-server", "add" }.All(a => fallback.Read(DiskExplorerRegistry.Prefix + a, "Icon") == programIcon), "items keep working with the program icon when the icon cannot be produced");
+                Check(journal.Count(j => j == "disk.explorer.icon.failed") == 1, "icon failure is journalled once, not on every refresh");
                 File.WriteAllText(Path.Combine(api.Home, "server.txt"), "OTHER\r\n");
                 Reject(() => client.Request("DELETE", "config/folders/id-a", null, None), "server switch invalidates stale mutation client");
                 string xml = Path.Combine(api.Home, "state", "config.xml"); File.WriteAllText(xml, "<configuration><gui><address>0.0.0.0:8384</address><apikey>test</apikey></gui></configuration>");

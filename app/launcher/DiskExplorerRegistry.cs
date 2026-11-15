@@ -29,6 +29,7 @@ namespace RemoteAgents.Launcher
     //   folder that syncs with the server -> «Оставить только на сервере»
     //   any other ordinary folder         -> «Загрузить на сервер»   (never on the Disk root)
     // A folder shared with the server but receive-only gets both of the last two: upload turns it into send and receive.
+    // All three items carry the same icon: the program's tray icon, so they stand out from other programs' items.
     internal sealed class DiskExplorerRegistry
     {
         internal const string Prefix = @"Software\Classes\Directory\shell\RemoteAgents.Disk.";
@@ -42,14 +43,16 @@ namespace RemoteAgents.Launcher
         static readonly string[] Actions = { "download", "keep-server", "add" };
         internal DiskExplorerRegistry(IDiskExplorerRegistry store, Action<string> log, Action changed = null)
         { this.store = store; this.log = log ?? delegate { }; this.changed = changed ?? delegate { }; }
-        internal void Register(string exePath, string root, IEnumerable<DiskFolderState> folders, string launcherHome = null)
+        // iconPath is the program's icon exported as a .ico file. Without it the items fall back to the program file's own icon.
+        internal void Register(string exePath, string root, IEnumerable<DiskFolderState> folders, string launcherHome = null, string iconPath = null)
         {
             dirty = false;
-            if (!SafePath(exePath) || !SafePath(root) || (launcherHome != null && !SafePath(launcherHome))) throw new ArgumentException("Недопустимый путь оформления Проводника");
+            if (!SafePath(exePath) || !SafePath(root) || (launcherHome != null && !SafePath(launcherHome)) || (iconPath != null && !SafePath(iconPath))) throw new ArgumentException("Недопустимый путь оформления Проводника");
             var rows = folders.Where(f => SafePath(f.Path)).ToArray();
             string[] placeholders = rows.Where(f => f.ServerOnly && f.Kind == DiskExplorerKind.ServerOnly).Select(f => f.Path).ToArray();
             string[] syncing = rows.Where(f => !f.ServerOnly && f.Kind != DiskExplorerKind.Local).Select(f => f.Path).ToArray();
             string[] uploading = rows.Where(f => f.Uploads).Select(f => f.Path).ToArray();
+            string icon = "\"" + (iconPath ?? exePath) + "\",0";
             foreach (string action in Actions) {
                 string key = Prefix + action;
                 if (store.Exists(key) && store.Read(key, "RemoteAgentsOwner") != DiskExplorerService.Owner) { log("Проводник: чужой пункт меню пропущен"); continue; }
@@ -58,7 +61,7 @@ namespace RemoteAgents.Launcher
                 string applies = matches == null ? UploadScope(root, placeholders.Concat(uploading)) : "(" + string.Join(" OR ", matches.Select(Term)) + ")";
                 if (matches == null && applies.Contains("ItemFolderPathDisplay") && store.Read(key, "AppliesTo") != applies) log("Проводник: папок слишком много для условия меню; «Загрузить на сервер» скрыт на всех папках верхнего уровня Диска");
                 string label = action == "download" ? DiskMenu.Download : action == "keep-server" ? DiskMenu.KeepServer : DiskMenu.Upload;
-                Set(key, "RemoteAgentsOwner", DiskExplorerService.Owner); Set(key, "MUIVerb", label); Set(key, "Icon", "\"" + exePath + "\",0");
+                Set(key, "RemoteAgentsOwner", DiskExplorerService.Owner); Set(key, "MUIVerb", label); Set(key, "Icon", icon);
                 Set(key, "MultiSelectModel", "Single"); Set(key, "AppliesTo", applies);
                 Set(key + @"\command", "", "\"" + exePath + "\"" + (launcherHome == null ? "" : " --home " + Files.Quote(launcherHome)) + " --disk-shell " + action + " \"%1\"");
             }
