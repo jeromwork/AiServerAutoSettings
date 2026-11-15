@@ -1181,8 +1181,10 @@ def main():
     if args.cmd == '_hook':
         try:
             hook(args.name)
-        except Exception:
-            event(args.name, 'hook failed: небезопасный push/маршруты/guard; запрошена остановка клиента')
+        except Exception as e:
+            # Error texts are fixed strings of this script; other exceptions only by type.
+            reason = str(e) if isinstance(e, Error) else type(e).__name__
+            event(args.name, 'hook failed: ' + reason + '; запрошена остановка клиента')
             run(['systemctl', 'stop', '--no-block', service(args.name)], check=False)
             raise
         return
