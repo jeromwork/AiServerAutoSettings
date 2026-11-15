@@ -63,7 +63,25 @@ try {
         Install-DiskBinary 'https://test.invalid' $hash $name $name;Install-DiskBinary 'https://test.invalid' $hash $name $name
         Assert ($script:Stopped.Count -eq 1 -and $script:Stopped[0] -eq 1001 -and $script:Waited.Count -eq 1 -and $script:Downloads -eq 1 -and [IO.File]::ReadAllText($target) -eq 'new binary') 'Update stops only the target executable; matching release skipped'
     }
-    Write-Output (Invoke-DiskProcess $exe @('-NoProfile','-NonInteractive','-File',(Join-Path $PSScriptRoot 'test-engine.ps1'),'-TestHome',(Join-Path $tmp 'lifecycle')))
-    Write-Output (Invoke-DiskProcess $exe @('-NoProfile','-NonInteractive','-File',(Join-Path $PSScriptRoot 'test-startup.ps1'),'-TestHome',(Join-Path $tmp 'startup')))
-    Assert ($watch.Elapsed.TotalSeconds -lt 30) 'PowerShell time budget';Write-Output ('install: exit 0, {0:N2}s' -f $watch.Elapsed.TotalSeconds)
+    # Independent child suites have separate TestHome and process environments.
+    # Run them together: the 30 s aggregate budget should not sum their startups.
+    $checks=@()
+    try{
+        foreach($case in @(@{file='test-engine.ps1';home='lifecycle'},@{file='test-startup.ps1';home='startup'})){
+            $si=New-Object Diagnostics.ProcessStartInfo;$si.FileName=$exe
+            $si.Arguments=(@('-NoProfile','-NonInteractive','-File',(Join-Path $PSScriptRoot $case.file),'-TestHome',(Join-Path $tmp $case.home))|ForEach-Object {Quote-Disk $_}) -join ' '
+            $si.UseShellExecute=$false;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true
+            $si.StandardOutputEncoding=New-Object Text.UTF8Encoding($false);$si.StandardErrorEncoding=New-Object Text.UTF8Encoding($false)
+            $p=[Diagnostics.Process]::Start($si)
+            $checks+=@{process=$p;out=$p.StandardOutput.ReadToEndAsync();err=$p.StandardError.ReadToEndAsync();name=$case.file}
+        }
+        foreach($check in $checks){
+            Assert ($check.process.WaitForExit(45000)) ('Child suite timeout: '+$check.name)
+            Assert ($check.process.ExitCode -eq 0) ('Child suite failed: '+$check.name)
+            Write-Output $check.out.GetAwaiter().GetResult()
+        }
+    }finally{
+        foreach($check in $checks){try{if(-not $check.process.HasExited){$check.process.Kill();$check.process.WaitForExit()}}finally{$check.process.Dispose()}}
+    }
+    Assert ($watch.Elapsed.TotalSeconds -lt 30) ('PowerShell time budget: '+[Math]::Round($watch.Elapsed.TotalSeconds,2)+'s');Write-Output ('install: exit 0, {0:N2}s' -f $watch.Elapsed.TotalSeconds)
 }finally{Remove-Item -LiteralPath $tmp -Recurse -Force}
