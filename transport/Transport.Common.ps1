@@ -905,6 +905,7 @@ function Get-VpnOptions($Settings) {
     if($result.enabled -isnot [bool]){throw 'vpn.enabled должен быть boolean'}
     if($result.interfaceName -notmatch '^RemoteAgents-[a-zA-Z0-9_-]{1,32}$'){throw 'Неверное имя нашего TUN'}
     $uri=$null;if(-not [Uri]::TryCreate($result.checkUrl,[UriKind]::Absolute,[ref]$uri) -or $uri.Scheme -ne 'https'){throw 'vpn.checkUrl должен быть HTTPS'}
+    if($uri.HostNameType -ne [UriHostNameType]::Dns){throw 'vpn.checkUrl должен содержать домен для проверки защищённого DNS'}
     foreach($cidr in @($result.address)+@($result.excludeCidrs)){Assert-VpnCidr $cidr}
     $ip=$null;if(-not [Net.IPAddress]::TryParse($result.dnsServer,[ref]$ip)){throw 'vpn.dnsServer должен быть IP'}
     $ip=$null;if(-not [Net.IPAddress]::TryParse($result.probeAddress,[ref]$ip) -or $ip.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork){throw 'vpn.probeAddress должен быть IPv4'}
@@ -1011,16 +1012,20 @@ function New-VpnTunConfig($Settings,$Paths,[string]$SelectedTag,[string[]]$Exclu
     # system использует TCP/IP Windows без дополнительного userspace TCP gVisor.
     # Выбор уменьшает число реализаций стека; превосходство на реальной сети ещё не проверено.
     # DNS remains direct even while the VPN path is unhealthy. Process and endpoint bypass
-    # precede DNS and the VPN final rule. The HTTPS probe has its own synthetic
+    # precede DNS and the VPN final rule. Website DNS uses certificate-validated
+    # direct DoH; UDP bootstrap is reserved for transport endpoint resolution. The HTTPS probe has its own synthetic
     # TUN-only destination, even when the real check host is a server exclusion. No host routes are added to bypass somebody else's VPN.
     @{log=@{disabled=$true};inbounds=@(@{type='tun';tag='vpn-tun';interface_name=$v.interfaceName;address=@($v.address);stack='system';auto_route=$true;strict_route=$false;route_exclude_address=@($ExcludeCidrs)});
       outbounds=$outs;route=@{auto_detect_interface=$true;default_interface=$Interface;default_domain_resolver='bootstrap';final='vpn-active';rules=@(
         @{process_name=@('powershell.exe','python.exe','pythonw.exe','ssh.exe','sing-box.exe','syncthing.exe','SyncthingTray.exe');action='route';outbound='vpn-direct'},
-        @{inbound=@('vpn-tun');network='tcp';ip_cidr=@($v.probeAddress+'/32');port=@($check.Port);action='route';outbound='vpn-active';override_address=$check.DnsSafeHost;override_port=$check.Port},
+        @{inbound=@('vpn-tun');network='tcp';ip_cidr=@($v.probeAddress+'/32');port=@($check.Port);action='route-options';override_address=$check.DnsSafeHost;override_port=$check.Port},
+        @{inbound=@('vpn-tun');domain=@($check.DnsSafeHost);action='resolve';server='vpn-dns';disable_cache=$true;disable_optimistic_cache=$true;timeout='500ms'},
+        @{inbound=@('vpn-tun');domain=@($check.DnsSafeHost);action='route';outbound='vpn-active'},
         @{ip_cidr=@($ExcludeCidrs);action='route';outbound='vpn-direct'},
         @{protocol='dns';action='hijack-dns'},
         @{port=@(53);action='hijack-dns'})};
-      dns=@{servers=@(@{type='udp';tag='bootstrap';server=$v.dnsServer;bind_interface=$Interface});final='bootstrap'}}
+      dns=@{servers=@(@{type='udp';tag='bootstrap';server=$v.dnsServer;bind_interface=$Interface},
+        @{type='https';tag='vpn-dns';server=$v.dnsServer;path='/dns-query';tls=@{enabled=$true};bind_interface=$Interface});final='vpn-dns'}}
 }
 
 function Write-VpnStatus([string]$Root,[bool]$Ok,[bool]$Enabled,[string]$State,$Conflict,[string]$Summary) {

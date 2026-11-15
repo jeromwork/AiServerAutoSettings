@@ -33,6 +33,7 @@ pwsh=${PWSH:-$HOME/.cache/pwsh-test/pwsh}
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-vpn-legacy.ps1" -TestHome "$testdir/vpn-legacy" < /dev/null
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-vpn-lifecycle.ps1" < /dev/null
   timeout 60 python3 "$repo/transport/test-vpn-lifecycle.py"
+  timeout 60 python3 "$repo/transport/test-vpn-dns.py"
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-json.ps1" < /dev/null
   timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-ports.ps1" < /dev/null
   timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$repo/tools/legacy-cleanup/tests/smoke-plan.ps1" < /dev/null

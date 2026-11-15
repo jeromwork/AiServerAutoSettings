@@ -405,6 +405,8 @@ try{
         }
     }
     $settings|Add-Member Vpn ([pscustomobject]@{enabled=$false;excludeCidrs=@('198.51.100.0/24')})
+    $ipProbe=Copy-TransportObject $settings;$ipProbe.Vpn|Add-Member -Force checkUrl 'https://198.51.100.1/'
+    $bad=$false;try{Get-VpnOptions $ipProbe|Out-Null}catch{$bad=$true};Assert $bad 'IP-only checkUrl cannot silently skip protected DNS health'
     $realText=${function:Invoke-TransportText}
     try{function Invoke-TransportText($Exe,$Arguments){$script:fakeHop}
         $exclusions=Get-VpnExclusions $settings $paths $snap @{'entry.example.com'=@('203.0.113.55')} -Root $work
@@ -419,11 +421,12 @@ try{
             Assert (@($tun.outbounds|Where-Object {$_.type -in @('ssh','socks')}).Count -eq 0 -and $tun.route.final -eq 'vpn-active') 'TUN без SSH и с VPN final'
             foreach($process in @('powershell.exe','python.exe','pythonw.exe','ssh.exe','sing-box.exe','syncthing.exe','SyncthingTray.exe')){Assert ($process -in $tun.route.rules[0].process_name) ('прямой обход для '+$process)}
             Assert ('RemoteAgents.exe' -notin $tun.route.rules[0].process_name -and 'RemoteVPN.exe' -notin $tun.route.rules[0].process_name) 'проба из хозяина не обходит TUN'
-            Assert ($tun.route.rules[0].outbound -eq 'vpn-direct' -and $tun.route.rules[2].outbound -eq 'vpn-direct') 'обход процессов и адресов до DNS/final'
-            Assert ($tun.dns.final -eq 'bootstrap' -and $tun.dns.servers.Count -eq 1 -and $tun.dns.servers[0].bind_interface -eq 'Ethernet' -and -not $tun.dns.servers[0].detour) 'DNS всегда напрямую, без VPN detour'
+            Assert ($tun.route.rules[0].outbound -eq 'vpn-direct' -and $tun.route.rules[4].outbound -eq 'vpn-direct') 'обход процессов и адресов до DNS/final'
+            Assert ($tun.dns.final -eq 'vpn-dns' -and $tun.dns.servers.Count -eq 2 -and $tun.dns.servers[1].type -eq 'https' -and $tun.dns.servers[1].path -eq '/dns-query' -and $tun.dns.servers[1].tls.enabled -and -not $tun.dns.servers[1].tls.insecure -and $tun.dns.servers[1].bind_interface -eq 'Ethernet' -and -not $tun.dns.servers[1].detour) 'DNS сайтов через проверенный HTTPS напрямую; UDP bootstrap не обслуживает сайты'
             Assert (($tun.outbounds|Where-Object {$_.tag -eq 'vpn-direct'}).bind_interface -eq 'Ethernet') 'direct привязан к физическому интерфейсу'
-            Assert ($tun.route.rules[3].action -eq 'hijack-dns' -and $tun.route.rules[4].port[0] -eq 53) 'UDP/TCP DNS перехвачен с прямым resolver'
-            Assert ($tun.route.rules[1].ip_cidr[0] -eq '198.18.0.1/32' -and $tun.route.rules[1].outbound -eq 'vpn-active' -and $tun.route.rules[1].override_address -eq 'example.com' -and $tun.route.rules[1].override_port -eq 443) 'лёгкая HTTPS-проба синтетического IP идёт только через VPN'
+            Assert ($tun.route.rules[5].action -eq 'hijack-dns' -and $tun.route.rules[6].port[0] -eq 53) 'UDP/TCP DNS перехвачен с прямым resolver'
+            Assert ($tun.route.rules[1].ip_cidr[0] -eq '198.18.0.1/32' -and $tun.route.rules[1].action -eq 'route-options' -and $tun.route.rules[3].outbound -eq 'vpn-active' -and $tun.route.rules[1].override_address -eq 'example.com' -and $tun.route.rules[1].override_port -eq 443) 'лёгкая HTTPS-проба синтетического IP идёт только через VPN'
+            Assert ($tun.route.rules[2].action -eq 'resolve' -and $tun.route.rules[2].server -eq 'vpn-dns' -and $tun.route.rules[2].disable_cache -and $tun.route.rules[2].disable_optimistic_cache -and $tun.route.rules[2].timeout -eq '500ms') 'каждая TUN-проба проверяет защищённый DNS без кэша до VPN outbound'
             if($SingBox){$file=Join-Path $work 'tun-check.json';Write-TransportJson $file $tun;Test-TransportConfigFile $SingBox $file}
         }else{
             $bad=$false;try{New-VpnTunConfig $settings $paths $candidate.tag $exclusions 'Ethernet'|Out-Null}catch{$bad=$true};Assert $bad ('SSH запрещён в TUN '+$candidate.tag)

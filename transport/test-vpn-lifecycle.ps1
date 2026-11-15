@@ -19,7 +19,7 @@ function Set-VpnEnabled($Root,$Enabled){
     $global:vpnFixture.enabled=$Enabled;$global:vpnFixture.calls+=@('config')
 }
 function Read-TransportSettings($Root){
-    [pscustomobject]@{Options=[pscustomobject]@{singBoxPath=(Join-Path $Root 'fixture.exe')};Transport=[pscustomobject]@{bootstrap=$true};Vpn=[pscustomobject]@{checkUrl='https://198.51.100.8/'};Profile=@{}}
+    [pscustomobject]@{Options=[pscustomobject]@{singBoxPath=(Join-Path $Root 'fixture.exe')};Transport=[pscustomobject]@{bootstrap=$true};Vpn=[pscustomobject]@{checkUrl='https://check.example/'};Profile=@{}}
 }
 function Get-VpnSnapshot {
     $adapters=@();$routes=@()
