@@ -1,0 +1,39 @@
+{
+  "kind": "remoteagents-config",
+  "schema": 1,
+  "hint": "Публичный пример сервера 109. Секреты добавляет владелец из полного экспорта. Не запускать apply на живом сервере для проверки примера.",
+  "server": {
+    "address": "109.199.110.63",
+    "login": "remoteagents"
+  },
+  "proxyOut": {
+    "type": "socks",
+    "server": "104.253.198.239",
+    "port": 8017,
+    "exitIp": "104.253.198.239",
+    "password": { "secret": "proxy-out-password" },
+    "checkUrl": "https://api.ipify.org"
+  },
+  "lan": [
+    {
+      "name": "clinic",
+      "kind": "openvpn",
+      "ovpn": { "secret": "lan-clinic-ovpn", "hint": "Полный профиль клиники со встроенными сертификатами и ключом" },
+      "auth": { "secret": "lan-clinic-auth", "hint": "JSON с username и password, выданными администратором клиники" },
+      "serverFingerprint": "79:40:FE:B0:66:40:0C:31:4E:25:0F:85:72:81:EB:E5:A9:A7:EE:E8:23:26:A5:69:0F:1E:59:07:6B:E0:5F:C2",
+      "subnets": ["192.168.87.0/24"],
+      "directEndpoint": true,
+      "host": "192.168.87.1",
+      "port": 443,
+      "checkUrl": "https://api.ipify.org"
+    }
+  ],
+  "tailscale": {
+    "enabled": true,
+    "hostname": "remoteagents-server",
+    "authKey": { "secret": "tailscale-auth-key" },
+    "userspace": true
+  },
+  "telegramGateway": { "enabled": true, "port": 8444 },
+  "agent": { "sudo": "full" }
+}

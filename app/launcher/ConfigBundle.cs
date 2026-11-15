@@ -62,8 +62,12 @@ namespace RemoteAgents.Launcher
         static Dictionary<string, object> User() { return S(32, 1, "^[a-z_][a-z0-9_-]{0,31}$"); }
         static Dictionary<string, object> Url()
         { var d = S(2048, 1); d["format"] = "https-url"; return d; }
-        static Dictionary<string, object> Proxy()
-        { return O(D("type", E("socks", "http"), "server", Host(), "port", N(1, 65535), "login", S(256), "password", Ref("proxy-out-password"), "checkUrl", Url()), "type", "server", "port"); }
+        static Dictionary<string, object> Proxy(bool serverExit = false)
+        {
+            var d = O(D("type", E("socks", "http"), "server", Host(), "port", N(1, 65535), "login", S(256), "password", Ref("proxy-out-password"), "checkUrl", Url()), "type", "server", "port");
+            if (serverExit) ((Dictionary<string, object>)d["properties"])["exitIp"] = S(45, 1);
+            return d;
+        }
         static Dictionary<string, object> Hop()
         { return O(D("host", Host(), "port", N(1, 65535), "user", User(), "hostKey", S(4096, 1, "^[^\\r\\n\\x00]+$"), "key", Ref("hop-key"), "password", Ref("hop-password")), "host", "user"); }
         static Dictionary<string, object> DiskPath() { return S(1024, 1, "^[^\\\\<>:\"|?*\\x00-\\x1f]+$"); }
@@ -110,9 +114,14 @@ namespace RemoteAgents.Launcher
                 "happier", O(D("mode", E("same", "new"), "account", S(64, 64, "^[a-f0-9]{64}$"), "label", S(80, 1), "serverUrl", Url(), "webappUrl", Url(), "key", Ref("happier-key"))),
                 "disk", DiskSchema(),
                 "vpn", O(D("enabled", B(), "checkUrl", Url(), "dnsServer", S(253, 1), "bootstrap", bootstrap)),
-                "proxyOut", Proxy(),
+                "proxyOut", Proxy(true),
                 "lan", A(O(D("name", S(64, 1, "^[^/\\\\\\r\\n\\x00]+$"), "kind", E("openvpn"), "ovpn", Ref(),
-                    "login", S(256), "password", Ref(), "host", Host(), "port", N(1, 65535), "checkUrl", Url()), "name", "kind", "ovpn"), 64),
+                    "login", S(256), "password", Ref(), "auth", Ref(), "host", Host(), "port", N(1, 65535), "checkUrl", Url(),
+                    "serverFingerprint", S(95, 64, "^(?:[0-9A-Fa-f]{64}|[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){31})$"),
+                    "subnets", A(S(18, 1), 64), "directEndpoint", B(), "dnsDomain", Host(), "dnsServer", Host()), "name", "kind", "ovpn"), 64),
+                "tailscale", O(D("enabled", B(), "hostname", S(63, 1, "^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$"), "authKey", Ref("tailscale-auth-key"), "userspace", B())),
+                "telegramGateway", O(D("enabled", B(), "port", N(1, 65535))),
+                "agent", O(D("sudo", E("none", "apply", "full"))),
                 "components", O(D("transport", component, "disk", component, "control", component, "vpn", component)),
                 "secrets", D("type", "object", "properties", D(
                     "protected", E("master-password"),
@@ -298,6 +307,10 @@ namespace RemoteAgents.Launcher
                     else if (path.EndsWith(".hop.password") || path.StartsWith("vpn.bootstrap.hops.") && path.EndsWith(".password")) standard = "hop-password";
                     else if (path.EndsWith(".hop.key") || path.StartsWith("vpn.bootstrap.hops.") && path.EndsWith(".key")) standard = "hop-key";
                     else if (path == "proxyOut.password" || path.EndsWith(".proxy.password")) standard = "proxy-out-password";
+                    else if (path == "lan[].auth") standard = "lan-network-auth";
+                    else if (path == "lan[].ovpn") standard = "lan-network-ovpn";
+                    else if (path == "lan[].password") standard = "lan-network-password";
+                    else if (path == "tailscale.authKey") standard = "tailscale-auth-key";
                     else if (path == "vpn.bootstrap.channel") standard = "vpn-channel";
                     if (!hints.ContainsKey(name) || custom.Length > 0) hints[name] = custom.Length > 0 ? custom : StandardHint(standard);
                 } else foreach (var pair in map) ReferenceHints(pair.Value,path.Length == 0 ? pair.Key : path + "." + pair.Key,hints);
@@ -307,6 +320,7 @@ namespace RemoteAgents.Launcher
         {
             if (name.StartsWith("vpn-entry-",StringComparison.Ordinal)) return "JSON client.json VPN-узла целиком, полученный у владельца сервера";
             if (name.StartsWith("lan-",StringComparison.Ordinal) && name.EndsWith("-ovpn",StringComparison.Ordinal)) return "Профиль OpenVPN этой сети с включёнными сертификатами и ключами";
+            if (name.StartsWith("lan-",StringComparison.Ordinal) && name.EndsWith("-auth",StringComparison.Ordinal)) return "JSON с username и password, выданными администратором локальной сети";
             if (name.StartsWith("lan-",StringComparison.Ordinal) && name.EndsWith("-password",StringComparison.Ordinal)) return "Пароль пользователя локальной сети, выданный её администратором";
             switch (name) {
                 case "server-root-password": return "Пароль root сервера — его присылает хостинг при покупке сервера";
@@ -316,6 +330,7 @@ namespace RemoteAgents.Launcher
                 case "hop-password": return "Пароль SSH промежуточного сервера";
                 case "route-proxy-password":
                 case "proxy-out-password": return "Пароль серверного прокси, выданный его владельцем";
+                case "tailscale-auth-key": return "Ключ входа Tailscale из панели администратора; используется только для первого входа узла";
                 case "vpn-channel": return "JSON канала связи с сервера";
                 default: return "Введите секрет «" + name + "» в этом окне. Он не попадёт в чат или журнал";
             }
