@@ -3,11 +3,38 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Linq;
+using System.Text;
 
 namespace RemoteAgents.Launcher
 {
     internal static class VpnStatus
     {
+        internal static string DnsSummary(Dictionary<string, object> status)
+        {
+            var policy = Json.Map(Json.Get(status, "dnsPolicy"));
+            if (!Json.Bool(status, "enabled") || Json.Get(policy, "strictRoute") == null || Json.Bool(policy, "strictRoute")) return "";
+            return "DNS: защита частичная из-за " + string.Join(", ", Json.Array(Json.Get(policy, "networks")).Select(n => Json.Str(Json.Map(n), "name")).Distinct());
+        }
+        internal static string DnsDetail(Dictionary<string, object> status)
+        {
+            var policy = Json.Map(Json.Get(status, "dnsPolicy"));
+            if (!Json.Bool(status, "enabled") || Json.Get(policy, "strictRoute") == null) return "";
+            if (Json.Bool(policy, "strictRoute")) return "DNS: strict_route=true. WFP блокирует DNS вне TUN; перехваченные запросы идут через DoH.";
+            var text = new StringBuilder(DnsSummary(status));
+            text.AppendLine(". strict_route=false: сохранён DNS частичных сетей. Windows может принять ответ другого адаптера в обход DoH.");
+            foreach (var item in Json.Array(Json.Get(policy, "networks"))) {
+                var network = Json.Map(item);
+                text.AppendLine(Json.Str(network, "name") + " (ifIndex " + Json.Str(network, "interfaceIndex") + ")");
+                text.AppendLine("  DNS-серверы: " + string.Join(", ", Json.Strings(Json.Get(network, "servers"))));
+                text.AppendLine("  DNS-суффиксы: " + string.Join(", ", Json.Strings(Json.Get(network, "suffixes"))));
+                foreach (var rule in Json.Array(Json.Get(network, "nrpt"))) {
+                    var nrpt = Json.Map(rule);
+                    text.AppendLine("  Эффективная NRPT (владелец не определён): " + string.Join(", ", Json.Strings(Json.Get(nrpt, "namespaces"))) + " → " + string.Join(", ", Json.Strings(Json.Get(nrpt, "servers"))));
+                }
+            }
+            return text.ToString().TrimEnd();
+        }
         // Terminal results are events, not health heartbeats. Keep the reason
         // until the next explicit action; both tray and card read this same file.
         internal static Dictionary<string, object> Read(string home)

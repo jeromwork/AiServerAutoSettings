@@ -21,19 +21,20 @@ function Set-VpnEnabled($Root,$Enabled){
 function Read-TransportSettings($Root){
     [pscustomobject]@{Options=[pscustomobject]@{singBoxPath=(Join-Path $Root 'fixture.exe')};Transport=[pscustomobject]@{bootstrap=$true};Vpn=[pscustomobject]@{checkUrl='https://check.example/'};Profile=@{}}
 }
-function Get-VpnSnapshot {
+function Get-VpnSnapshot([switch]$IncludeDns) {
     $adapters=@();$routes=@()
     if($global:vpnFixture.mode -eq 'foreign'){
         $adapters=@([pscustomobject]@{ifIndex=7;Name='OpenVPN';Status='Up';HardwareInterface=$false;InterfaceDescription='OpenVPN'})
         $routes=@([pscustomobject]@{InterfaceIndex=7;DestinationPrefix='0.0.0.0/0';NextHop='0.0.0.0'})
     }
+    if($global:vpnFixture.mode -eq 'partial'){$adapters=@([pscustomobject]@{ifIndex=7;Name='OpenVPN';Status='Up';HardwareInterface=$false;InterfaceDescription='OpenVPN'})}
     if($global:vpnFixture.mode -eq 'own'){$adapters=@([pscustomobject]@{Name='RemoteAgents-TUN';ifIndex=4})}
-    [pscustomobject]@{Processes=@();Adapters=$adapters;Routes=$routes}
+    [pscustomobject]@{Processes=@();Adapters=$adapters;Routes=$routes;DnsServers=@();DnsClients=@([pscustomobject]@{InterfaceIndex=7;ConnectionSpecificSuffix='corp.example'});Nrpt=@()}
 }
 function Get-TransportCandidates($Settings,$Root){$global:vpnFixture.calls+=@('candidates');@{}}
 function Get-TransportNetwork {@{interface='fixture-physical'}}
 function Get-VpnExclusions($Settings,$Paths,$Snapshot,$Root) {@('10.0.0.0/8')}
-function New-VpnTunConfig($Settings,$Paths,$SelectedTag,$ExcludeCidrs,$Interface){$global:vpnFixture.calls+=@('generate');@{fixture=$true}}
+function New-VpnTunConfig($Settings,$Paths,$SelectedTag,$ExcludeCidrs,$Interface,$StrictRoute){$global:vpnFixture.calls+=@('generate');@{fixture=$true;strictRoute=$StrictRoute}}
 function Test-TransportConfigFile($Exe,$File){$global:vpnFixture.calls+=@('check')}
 function Register-ScheduledTask {throw 'no task creation permitted'}
 function Start-ScheduledTask {throw 'no task start permitted'}
@@ -68,6 +69,14 @@ function Start-Process {throw 'no process or UAC expected'}
     $plan=Read-TransportJson (Join-Path $root 'state/vpn-plan.json')
     Assert ($plan.session -eq 'fixture' -and $plan.tag -eq 'fixture' -and $plan.checkAddress -eq '198.18.0.1') 'prepared plan pins original proof and synthetic TUN-only HTTPS target'
     Assert (($global:vpnFixture.calls -join ',') -eq 'candidates,generate,check') 'Worker only prepares and validates; no live TUN, process, task or probe'
+    Assert ($plan.dnsPolicy.strictRoute -and (Read-TransportJson (Join-Path $root 'state/vpn-sing-box.json')).strictRoute) 'DNS decision is passed to config and session plan'
+    $global:vpnFixture.mode='partial'
+    & $script -Home $root -Worker -Session fixture
+    $plan=Read-TransportJson (Join-Path $root 'state/vpn-plan.json')
+    Assert (-not $plan.dnsPolicy.strictRoute -and $plan.dnsPolicy.networks[0].name -eq 'OpenVPN' -and -not (Read-TransportJson (Join-Path $root 'state/vpn-sing-box.json')).strictRoute) 'Worker preserves partial DNS in config and matching session plan'
+    $global:vpnFixture.mode='empty'
+    & $script -Home $root -Worker -Session fixture
+    Assert ((Read-TransportJson (Join-Path $root 'state/vpn-plan.json')).dnsPolicy.strictRoute) 'next preparation recalculates protection rather than reusing partial session'
     $proof.updatedAt=[DateTime]::UtcNow.AddSeconds(20).ToString('o');Write-TransportJson $file $proof
     & $script -Home $root -Worker -Session fixture
     Assert ((Read-TransportJson (Join-Path $root 'status/vpn.json')).state -eq 'no-path') 'future transport proof is refused'

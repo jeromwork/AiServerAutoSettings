@@ -20,6 +20,7 @@ namespace RemoteAgents.Launcher
             string script = Path.GetFullPath(Program.Option(args, "--vpn-script"));
             string session = Program.Option(args, "--vpn-session");
             string state = "error", tunName = ""; bool held = false, ran = false;
+            Dictionary<string, object> dnsPolicy = null;
             NativeJob job = null; VpnLease lease = null; Process parent = null, core = null; VpnProbe probe = null;
             using (var gate = new Mutex(false, VpnWatchdog.OwnerMutex)) {
                 try {
@@ -44,6 +45,7 @@ namespace RemoteAgents.Launcher
                     }
                     var plan = Read(home, "state/vpn-plan.json");
                     if (Json.Str(plan, "session") != session || Stopped(home, session, parent)) throw new IOException();
+                    dnsPolicy = Json.Map(Json.Get(plan, "dnsPolicy"));
                     string tag = Json.Str(plan, "tag"), network = Json.Str(plan, "network"), revision = Json.Str(plan, "revision");
                     tunName = Json.Str(plan, "interfaceName");
                     string physical = Json.Str(plan, "physical");
@@ -56,7 +58,7 @@ namespace RemoteAgents.Launcher
                     lease = new VpnLease(job.Dispose);
                     core = job.Start(Json.Str(plan, "exe"), new[] { "run", "-c", config }, Path.GetDirectoryName(script)); ran = true;
                     Files.Atomic(Path.Combine(home, "state/vpn-owner.json"), Json.Encode(new { pid = core.Id, exe = Json.Str(plan, "exe"), config, startedAt = core.StartTime.ToUniversalTime().ToString("o") }));
-                    Write(home, "starting", "Включается…", true);
+                    Write(home, "starting", "Включается…", true, dnsPolicy);
                     var clock = Stopwatch.StartNew(); long next = 0, began = 0; bool transportOk = false; int tunIndex = 0;
                     DateTime previous = DateTime.UtcNow; var policy = new VpnWatchdog();
                     while (true) {
@@ -85,7 +87,7 @@ namespace RemoteAgents.Launcher
                             transportOk &= VpnWatchdog.TransportReady(Read(home, "status/transport.json"), DateTime.UtcNow, tag);
                             if (transportOk && ok) lease.Confirmed();
                             if (policy.Sample(transportOk, ok)) { state = "server-unreachable"; break; }
-                            Write(home, policy.Failures == 0 ? "on" : "checking", policy.Failures == 0 ? "Защита включена" : "Проверяем связь с сервером…", true);
+                            Write(home, policy.Failures == 0 ? "on" : "checking", policy.Failures == 0 ? "Защита включена" : "Проверяем связь с сервером…", true, dnsPolicy);
                         }
                         Thread.Sleep(VpnWatchdog.PollMs);
                     }
@@ -134,9 +136,12 @@ namespace RemoteAgents.Launcher
             var ip = net.GetIPProperties();
             return net.Id + ":" + string.Join(",", ip.UnicastAddresses.Select(a => a.Address.ToString()).OrderBy(s => s)) + ":" + string.Join(",", ip.GatewayAddresses.Select(a => a.Address.ToString()).OrderBy(s => s));
         }
-        static void Write(string home, string state, string summary, bool enabled)
+        static void Write(string home, string state, string summary, bool enabled, Dictionary<string, object> dnsPolicy = null)
         {
-            Files.Atomic(Path.Combine(home, "status/vpn.json"), Json.Encode(new { ok = state == "on", enabled, state, summary, updatedAt = DateTime.UtcNow.ToString("o") }));
+            var status = new Dictionary<string, object> { { "ok", state == "on" }, { "enabled", enabled }, { "state", state }, { "summary", summary }, { "dnsPolicy", dnsPolicy }, { "updatedAt", DateTime.UtcNow.ToString("o") } };
+            string dns = VpnStatus.DnsSummary(status);
+            if (dns.Length > 0) status["summary"] = summary + ". " + dns;
+            Files.Atomic(Path.Combine(home, "status/vpn.json"), Json.Encode(status));
             // Fixed categories only; no target, URL, key or process argument logging.
             string log = Path.Combine(home, "logs/vpn.log"); Directory.CreateDirectory(Path.GetDirectoryName(log));
             if (File.Exists(log) && new FileInfo(log).Length > 1024 * 1024) File.Delete(log);

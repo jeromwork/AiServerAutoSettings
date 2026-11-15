@@ -911,9 +911,45 @@ function Get-VpnOptions($Settings) {
     $ip=$null;if(-not [Net.IPAddress]::TryParse($result.probeAddress,[ref]$ip) -or $ip.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork){throw 'vpn.probeAddress должен быть IPv4'}
     return $result
 }
-function Get-VpnSnapshot {
+function Get-VpnSnapshot([switch]$IncludeDns) {
     # Ошибка инвентаризации не означает отсутствие конфликтов: вызывающий запрещает включение.
-    [pscustomobject]@{Processes=@(Get-CimInstance Win32_Process -ErrorAction Stop);Adapters=@(Get-NetAdapter -IncludeHidden -ErrorAction Stop);Routes=@(Get-NetRoute -ErrorAction Stop)}
+    $snapshot=[pscustomobject]@{Processes=@(Get-CimInstance Win32_Process -ErrorAction Stop);Adapters=@(Get-NetAdapter -IncludeHidden -ErrorAction Stop);Routes=@(Get-NetRoute -ErrorAction Stop)}
+    if($IncludeDns){
+        # Read effective policy, not just local NRPT rules: MagicDNS can use NRPT
+        # without putting its resolver into the adapter's DNS server list.
+        $snapshot|Add-Member DnsServers @(Get-DnsClientServerAddress -ErrorAction Stop)
+        $snapshot|Add-Member DnsClients @(Get-DnsClient -ErrorAction Stop)
+        $snapshot|Add-Member Nrpt @(Get-DnsClientNrptPolicy -Effective -ErrorAction Stop)
+    }
+    $snapshot
+}
+function Find-VpnDnsPolicy($Snapshot,[string]$PhysicalInterface,[string]$OwnInterface) {
+    # Missing/failed inventory must never be interpreted as absence of split DNS.
+    foreach($field in @('DnsServers','DnsClients','Nrpt')){
+        if(-not $Snapshot.PSObject.Properties[$field]){throw 'Не удалось проверить DNS частичных сетей'}
+    }
+    $networks=@()
+    foreach($adapter in @($Snapshot.Adapters)){
+        if($adapter.Status -ne 'Up' -or $adapter.Name -in @($PhysicalInterface,$OwnInterface)){continue}
+        $text=$adapter.Name+' '+$adapter.InterfaceDescription
+        $partial=($adapter.HardwareInterface -eq $false -or $adapter.Virtual -eq $true -or $text -match '(?i)VPN|Tailscale|TUN|Wintun|WireGuard|TAP|Teredo|ISATAP|6to4|IP-HTTPS|virtual')
+        if(-not $partial){continue}
+        # Full tunnels have already been rejected by Find-VpnConflicts. An Up
+        # allowed virtual adapter counts even without a non-connected route.
+        $servers=@($Snapshot.DnsServers|Where-Object {$_.InterfaceIndex -eq $adapter.ifIndex}|ForEach-Object {$_.ServerAddresses}|Where-Object {$_}|Sort-Object -Unique)
+        $suffixes=@($Snapshot.DnsClients|Where-Object {$_.InterfaceIndex -eq $adapter.ifIndex}|ForEach-Object {$_.ConnectionSpecificSuffix; $_.ConnectionSpecificSuffixSearchList}|Where-Object {$_}|Sort-Object -Unique)
+        # Effective NRPT has no interface/owner identity. With an active partial
+        # network, preserve it conservatively rather than guessing ownership from
+        # a ts.net suffix or a single MagicDNS IP. Stale rules alone with no active
+        # partial adapter do not relax protection.
+        $nrpt=@($Snapshot.Nrpt|Where-Object {$_.Namespace -or $_.NameServers -or $_.DirectAccessDnsServers}|ForEach-Object {
+            [pscustomobject]@{namespaces=@($_.Namespace);servers=@(@($_.NameServers)+@($_.DirectAccessDnsServers)|Where-Object {$_})}
+        })
+        if($servers.Count -or $suffixes.Count -or $nrpt.Count){
+            $networks+=@([pscustomobject]@{name=[string]$adapter.Name;interfaceIndex=[int]$adapter.ifIndex;servers=$servers;suffixes=$suffixes;nrpt=$nrpt})
+        }
+    }
+    [pscustomobject]@{strictRoute=($networks.Count -eq 0);networks=@($networks)}
 }
 function Get-VpnOwnedProcessIds([string]$Root,$Snapshot) {
     # Нельзя доверять одному PID из state: он мог быть повторно использован чужим процессом.
@@ -995,7 +1031,7 @@ function Get-VpnExclusions($Settings,$Paths,$Snapshot,[hashtable]$Resolved=@{},[
     foreach($cidr in $cidrs){Assert-VpnCidr $cidr}
     @($cidrs|Sort-Object -Unique)
 }
-function New-VpnTunConfig($Settings,$Paths,[string]$SelectedTag,[string[]]$ExcludeCidrs,[string]$Interface) {
+function New-VpnTunConfig($Settings,$Paths,[string]$SelectedTag,[string[]]$ExcludeCidrs,[string]$Interface,[bool]$StrictRoute=$true) {
     $v=Get-VpnOptions $Settings;$check=[Uri]$v.checkUrl
     if($check.UserInfo){throw 'Адрес проверки не должен содержать пароль'}
     if(-not $Interface){throw 'Для TUN нужен физический интерфейс'}
@@ -1015,7 +1051,7 @@ function New-VpnTunConfig($Settings,$Paths,[string]$SelectedTag,[string[]]$Exclu
     # precede DNS and the VPN final rule. Website DNS uses certificate-validated
     # direct DoH; UDP bootstrap is reserved for transport endpoint resolution. The HTTPS probe has its own synthetic
     # TUN-only destination, even when the real check host is a server exclusion. No host routes are added to bypass somebody else's VPN.
-    @{log=@{disabled=$true};inbounds=@(@{type='tun';tag='vpn-tun';interface_name=$v.interfaceName;address=@($v.address);stack='system';auto_route=$true;strict_route=$false;route_exclude_address=@($ExcludeCidrs)});
+    @{log=@{disabled=$true};inbounds=@(@{type='tun';tag='vpn-tun';interface_name=$v.interfaceName;address=@($v.address);stack='system';auto_route=$true;strict_route=$StrictRoute;route_exclude_address=@($ExcludeCidrs)});
       outbounds=$outs;route=@{auto_detect_interface=$true;default_interface=$Interface;default_domain_resolver='bootstrap';final='vpn-active';rules=@(
         @{process_name=@('powershell.exe','python.exe','pythonw.exe','ssh.exe','sing-box.exe','syncthing.exe','SyncthingTray.exe');action='route';outbound='vpn-direct'},
         @{inbound=@('vpn-tun');network='tcp';ip_cidr=@($v.probeAddress+'/32');port=@($check.Port);action='route-options';override_address=$check.DnsSafeHost;override_port=$check.Port},

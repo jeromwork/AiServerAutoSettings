@@ -183,7 +183,7 @@ Pin хранится отдельно в `state/transport-pin.json`: `{ "mode": 
 }
 ```
 
-DNS и внешний HTTPS для проверки можно заменить своими; DNS IP должен поддерживать UDP и DoH `/dns-query`. Bootstrap DNS внешних endpoints идёт по физическому NIC, пользовательский DNS — DoH через выбранный путь. Из-за `strict_route=false` это не режим защиты от всех DNS-утечек. Адреса TUN и служебной пробы следует выбрать без пересечения с сетями пользователя; `probeAddress` резервируется только для TCP:22 проверки. IPv4/IPv6 пользовательские адреса и маски валидируются до запуска.
+DNS и внешний HTTPS для проверки можно заменить своими; DNS IP должен поддерживать UDP и DoH `/dns-query`. Bootstrap DNS внешних endpoints идёт по физическому NIC, пользовательский DNS — DoH с проверкой сертификата напрямую по физическому NIC. Без split-DNS включается `strict_route=true`; при DNS/суффиксах/NRPT активной частичной сети сохраняется `false` с пометкой о частичной защите (подробности в [VPN.md](VPN.md)). Адреса TUN и служебной пробы следует выбрать без пересечения с сетями пользователя; `probeAddress` резервируется для TCP-пробы `checkUrl`. IPv4/IPv6 пользовательские адреса и маски валидируются до запуска.
 
 ```powershell
 .\transport\Test-VpnConflict.ps1 -Home $root
@@ -196,7 +196,7 @@ DNS и внешний HTTPS для проверки можно заменить 
 
 `Generate` читает инвентарь Windows, разрешает адреса endpoints, создаёт JSON и выполняет только `sing-box check`. Этот режим не создаёт задач, не повышает права и не запускает TUN. Linux-тесты передают фиктивный инвентарь и ответы DNS прямо в функции, поэтому сеть им не нужна.
 
-Выбран `stack=system`: TCP/IP обрабатывает стек Windows, без дополнительного TCP стека gVisor. Это инженерный выбор с меньшим числом слоёв; сравнительная надёжность на реальной Windows пока не измерена. В sing-box 1.14 доступны system/gvisor/mixed. `auto_route=true`, `strict_route=false`; внешние сокеты жёстко привязаны к физическому интерфейсу. [Формат TUN 1.14](https://github.com/SagerNet/sing-box/blob/v1.14.0/docs/configuration/inbound/tun.md).
+Выбран `stack=system`: TCP/IP обрабатывает стек Windows, без дополнительного TCP стека gVisor. Это инженерный выбор с меньшим числом слоёв; сравнительная надёжность на реальной Windows пока не измерена. В sing-box 1.14 доступны system/gvisor/mixed. `auto_route=true`, `strict_route` выбирается при каждом включении по DNS-инвентарю; внешние сокеты жёстко привязаны к физическому интерфейсу. [Формат TUN 1.14](https://github.com/SagerNet/sing-box/blob/v1.14.0/docs/configuration/inbound/tun.md).
 
 Исключаются RFC1918, loopback, 100.64/10, 169.254/16, 224/4, IPv6 local/link-local/multicast; public IP сервера, endpoints кандидатов, relay/CDN, SSH-переходы и закэшированные entries, включая отключённые. Доменные endpoints разрешаются в A/AAAA, результат повторно проверяется раз в 30 секунд; ошибка разрешения запрещает применение нового TUN. Маршруты адаптеров с OpenVPN в Name/InterfaceDescription дают дополнительные подсети и адреса шлюзов; default и split-default не добавляются в исключения, иначе исключили бы весь интернет. Дополняется `vpn.excludeCidrs`. Настройки/службы OpenVPN и Tailscale не изменяются.
 

@@ -12,6 +12,7 @@ namespace RemoteAgents.Launcher
         readonly Label vpnTitle = WrapLabel(), vpnState = WrapLabel(), vpnDetail = WrapLabel(), vpnSwitchText = WrapLabel();
         readonly LinkLabel pathLink = new LinkLabel { AutoSize = true, UseMnemonic = false };
         readonly LinkLabel diagnosticPathLink = new LinkLabel { AutoSize = true, UseMnemonic = false };
+        readonly Label vpnDnsDetails = WrapLabel();
         readonly Label diskTitle = WrapLabel(), diskState = WrapLabel(), diskDetail = WrapLabel();
         readonly Label happierTitle = WrapLabel(), happierState = WrapLabel(), happierDetail = WrapLabel();
         readonly Label helperTitle = WrapLabel(), helperState = WrapLabel(), helperDetail = WrapLabel();
@@ -69,6 +70,8 @@ namespace RemoteAgents.Launcher
             vpnSwitch.Busy = facts.VpnBusy; vpnSwitchText.Text = view.Vpn.SwitchText; vpnSwitch.AccessibleDescription = view.Vpn.SwitchText;
             pathLink.Text = diagnosticPathLink.Text = view.Vpn.PathLink;
             pathLink.Enabled = diagnosticPathLink.Enabled = string.IsNullOrEmpty(facts.Operation);
+            vpnDnsDetails.Text = MainScreenModel.CleanSecrets(VpnStatus.DnsDetail(facts.Vpn ?? Json.Map(null)));
+            vpnDnsDetails.Visible = view.Vpn.Visible && vpnDnsDetails.Text.Length > 0;
             RenderCard(view.Disk, diskCard, diskTitle, diskState, diskDetail);
             RenderCard(view.Happier, happierCard, happierTitle, happierState, happierDetail);
             RenderCard(view.Helper, helperCard, helperTitle, helperState, helperDetail);

@@ -95,6 +95,28 @@ namespace RemoteAgents.Launcher
             facts.Vpn = ConfigBundle.D("enabled", true, "state", "starting");
             view = MainScreenModel.Build(facts);
             Check(!view.Vpn.SwitchEnabled && view.Vpn.SwitchText == "Включается…", "starting from a different action also locks switch");
+            var dnsPolicy = ConfigBundle.D("strictRoute", false, "networks", new object[] {
+                ConfigBundle.D("name", "Office", "interfaceIndex", 7, "servers", new[] { "10.9.0.53", "fd00::53" }, "suffixes", new[] { "corp.example" }, "nrpt", new object[0]),
+                ConfigBundle.D("name", "Tailscale", "interfaceIndex", 8, "servers", new string[0], "suffixes", new string[0], "nrpt", new object[] { ConfigBundle.D("namespaces", new[] { ".tail123.ts.net" }, "servers", new[] { "100.100.100.100" }) })
+            });
+            facts.Vpn = ConfigBundle.D("ok", true, "enabled", true, "state", "on", "dnsPolicy", dnsPolicy);
+            facts.Transport = ConfigBundle.D("ok", true);
+            view = MainScreenModel.Build(facts);
+            Check(view.Vpn.On && view.Vpn.SwitchEnabled && view.Vpn.Tone == Tone.Warning && view.Vpn.Detail.Contains("DNS: защита частичная из-за Office, Tailscale"), "partial DNS is visible without making healthy VPN a failure or locking its switch");
+            string detail = VpnStatus.DnsDetail(facts.Vpn);
+            Check(detail.Contains("strict_route=false") && detail.Contains("fd00::53") && detail.Contains("corp.example") && detail.Contains(".tail123.ts.net") && detail.Contains("100.100.100.100"), "diagnostics explain servers, suffixes, NRPT and residual multihomed risk");
+            Check(MainScreenModel.Report(facts, "").Contains(detail.Replace("\r\n", "\n")), "copied diagnostics include complete DNS decision");
+            using (var self = Process.GetCurrentProcess()) {
+                facts.Vpn["updatedAt"] = DateTime.UtcNow.ToString("o");
+                Files.Atomic(file, Json.Encode(facts.Vpn));
+                Files.Atomic(Path.Combine(home, "state/vpn-host.json"), Json.Encode(new { pid = self.Id, startedTicks = self.StartTime.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture) }));
+                Check(VpnStatus.DnsDetail(VpnStatus.Read(home)) == detail, "shared live status retains the session DNS decision after JSON roundtrip");
+            }
+            facts.Vpn["dnsPolicy"] = ConfigBundle.D("strictRoute", true, "networks", new object[0]);
+            view = MainScreenModel.Build(facts);
+            Check(view.Vpn.Tone == Tone.Ok && !view.Vpn.Detail.Contains("защита частичная") && VpnStatus.DnsDetail(facts.Vpn).Contains("strict_route=true"), "next strict session clears partial warning and explains WFP protection");
+            facts.Vpn["dnsPolicy"] = dnsPolicy; facts.Vpn["enabled"] = false; facts.Vpn["ok"] = false; facts.Vpn["state"] = "off";
+            Check(VpnStatus.DnsSummary(facts.Vpn).Length == 0 && VpnStatus.DnsDetail(facts.Vpn).Length == 0 && !MainScreenModel.Build(facts).Vpn.Detail.Contains("защита частичная"), "disabled session never shows stale DNS protection");
             Console.WriteLine("PASS: " + count + " VPN watchdog, timing and lifecycle checks");
         }
     }

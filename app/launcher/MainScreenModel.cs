@@ -147,6 +147,11 @@ namespace RemoteAgents.Launcher
             if (metric.Length == 0) metric = StatusView.Speed(transport);
             bool hasPath = Json.Str(transport, "active").Length > 0 || Json.Str(transport, "title").Length > 0;
             card.Detail = hasPath ? "через «" + OneLine(TrayMenuModel.ActiveTitle(transport)) + "», " + metric : metric;
+            string dns = VpnStatus.DnsSummary(vpn);
+            if (dns.Length > 0) {
+                card.Detail += " · " + OneLine(dns);
+                if (state == "on" && card.Tone == Tone.Ok) card.Tone = Tone.Warning;
+            }
             string pinned = Json.Str(transport, "pinnedTag");
             if (pinned.Length > 0 && Json.Str(transport, "mode") != "auto") {
                 var path = candidates.FirstOrDefault(c => Json.Str(c, "tag") == pinned)
@@ -249,6 +254,8 @@ namespace RemoteAgents.Launcher
             if (!string.IsNullOrWhiteSpace(technical)) report.AppendLine(technical);
             report.AppendLine(TrayMenuModel.Connection(transport));
             AppendCard(report, view.Vpn.Title, view.Vpn.State, view.Vpn.Detail, view.Vpn.Visible);
+            string dns = VpnStatus.DnsDetail(facts.Vpn ?? Json.Map(null));
+            if (view.Vpn.Visible && dns.Length > 0) report.AppendLine(dns);
             AppendCard(report, view.Disk.Title, view.Disk.State, view.Disk.Detail, view.Disk.Visible);
             AppendCard(report, view.Happier.Title, view.Happier.State, view.Happier.Detail, view.Happier.Visible);
             if (view.Helper.Visible) report.AppendLine(view.Helper.State);

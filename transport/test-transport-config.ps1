@@ -417,7 +417,7 @@ try{
     foreach($candidate in $paths.Candidates){
         if($candidate.tunCapable){
             $tun=New-VpnTunConfig $settings $paths $candidate.tag $exclusions 'Ethernet';$tunConfigs+=@($tun)
-            Assert ($tun.inbounds[0].type -eq 'tun' -and $tun.inbounds[0].auto_route -and -not $tun.inbounds[0].strict_route -and $tun.inbounds[0].stack -eq 'system') 'TUN system/auto_route/strict_route'
+            Assert ($tun.inbounds[0].type -eq 'tun' -and $tun.inbounds[0].auto_route -and $tun.inbounds[0].strict_route -and $tun.inbounds[0].stack -eq 'system') 'TUN system/auto_route/strict_route'
             Assert (@($tun.outbounds|Where-Object {$_.type -in @('ssh','socks')}).Count -eq 0 -and $tun.route.final -eq 'vpn-active') 'TUN без SSH и с VPN final'
             foreach($process in @('powershell.exe','python.exe','pythonw.exe','ssh.exe','sing-box.exe','syncthing.exe','SyncthingTray.exe')){Assert ($process -in $tun.route.rules[0].process_name) ('прямой обход для '+$process)}
             Assert ('RemoteAgents.exe' -notin $tun.route.rules[0].process_name -and 'RemoteVPN.exe' -notin $tun.route.rules[0].process_name) 'проба из хозяина не обходит TUN'
@@ -428,6 +428,9 @@ try{
             Assert ($tun.route.rules[1].ip_cidr[0] -eq '198.18.0.1/32' -and $tun.route.rules[1].action -eq 'route-options' -and $tun.route.rules[3].outbound -eq 'vpn-active' -and $tun.route.rules[1].override_address -eq 'example.com' -and $tun.route.rules[1].override_port -eq 443) 'лёгкая HTTPS-проба синтетического IP идёт только через VPN'
             Assert ($tun.route.rules[2].action -eq 'resolve' -and $tun.route.rules[2].server -eq 'vpn-dns' -and $tun.route.rules[2].disable_cache -and $tun.route.rules[2].disable_optimistic_cache -and $tun.route.rules[2].timeout -eq '500ms') 'каждая TUN-проба проверяет защищённый DNS без кэша до VPN outbound'
             if($SingBox){$file=Join-Path $work 'tun-check.json';Write-TransportJson $file $tun;Test-TransportConfigFile $SingBox $file}
+            $splitDns=New-VpnTunConfig $settings $paths $candidate.tag $exclusions 'Ethernet' -StrictRoute $false
+            Assert (-not $splitDns.inbounds[0].strict_route -and $splitDns.dns.final -eq 'vpn-dns' -and $splitDns.route.final -eq 'vpn-active') 'частичный DNS отключает только strict_route, сохраняет DoH и VPN final'
+            if($SingBox){$file=Join-Path $work 'tun-split-dns-check.json';Write-TransportJson $file $splitDns;Test-TransportConfigFile $SingBox $file}
         }else{
             $bad=$false;try{New-VpnTunConfig $settings $paths $candidate.tag $exclusions 'Ethernet'|Out-Null}catch{$bad=$true};Assert $bad ('SSH запрещён в TUN '+$candidate.tag)
         }

@@ -68,6 +68,7 @@ namespace RemoteAgents.Launcher
             RegisterPage("Редактор конфига", editor);
             serviceActions.Controls.Add(syncStatus); serviceActions.Controls.Add(serverHealthDetails); serviceActions.Controls.Add(pathStates);
             serviceActions.Controls.Add(diagnosticPathLink);
+            serviceActions.Controls.Add(vpnDnsDetails);
             diagnosticPathLink.LinkClicked += (s, e) => pathMenu.Show(diagnosticPathLink, new Point(0, diagnosticPathLink.Height));
             RegisterFlowPage("Диагностика", serviceActions);
             detailsHost = new Panel { Dock = DockStyle.Fill, AutoScroll = true }; RegisterPage("Раздел настроек", detailsHost);

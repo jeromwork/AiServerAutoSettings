@@ -106,7 +106,7 @@ try{
         if(-not $Session -or (Read-TransportJson $sessionFile).session -ne $Session -or (Test-Path $stopFile)){throw 'Включение отменено'}
     }
     $settings=Read-TransportSettings $root;$v=Get-VpnOptions $settings
-    $snapshot=Get-VpnSnapshot;$own=@(Get-VpnOwnedProcessIds $root $snapshot)
+    $snapshot=Get-VpnSnapshot -IncludeDns;$own=@(Get-VpnOwnedProcessIds $root $snapshot)
     $conflict=Find-VpnConflicts $snapshot $own
     if($conflict.conflict){Write-VpnStatus $root $false $false 'conflict' $conflict 'Отключите другой VPN перед включением VPN RemoteAgents';exit 1}
     if(@($snapshot.Adapters|Where-Object {$_.Name -eq $v.interfaceName}).Count){throw 'Остался адаптер прошлой версии. Выполните предложенную очистку'}
@@ -115,7 +115,8 @@ try{
     }
     $paths=Get-TransportCandidates $settings $root;$net=Get-TransportNetwork
     $exclude=Get-VpnExclusions $settings $paths $snapshot -Root $root
-    $cfg=New-VpnTunConfig $settings $paths $status.active $exclude $net.interface
+    $dnsPolicy=Find-VpnDnsPolicy $snapshot $net.interface $v.interfaceName
+    $cfg=New-VpnTunConfig $settings $paths $status.active $exclude $net.interface -StrictRoute $dnsPolicy.strictRoute
     $file=Join-Path $root 'state/vpn-sing-box.json'
     if($action -eq 'Generate'){$file=$OutputConfig;if(-not $file){$file=Join-Path $root 'state/vpn-generated.json'}}
     Write-TransportJson $file $cfg -Private;Test-TransportConfigFile $settings.Options.singBoxPath $file
@@ -123,7 +124,7 @@ try{
     # The probe targets a synthetic IPv4 routed through TUN. sing-box rewrites it
     # to checkUrl's host, preserving the probe's real TLS SNI/HTTP Host. No system
     # DNS lookup or uncontrollable DNS timeout runs on the host watchdog thread.
-    Write-TransportJson (Join-Path $root 'state/vpn-plan.json') @{session=$Session;tag=$status.active;network=$status.network;revision=$status.configRevision;physical=$net.interface;interfaceName=$v.interfaceName;exe=[IO.Path]::GetFullPath($settings.Options.singBoxPath);checkUrl=$v.checkUrl;checkAddress=$v.probeAddress} -Private
+    Write-TransportJson (Join-Path $root 'state/vpn-plan.json') @{session=$Session;tag=$status.active;network=$status.network;revision=$status.configRevision;physical=$net.interface;interfaceName=$v.interfaceName;exe=[IO.Path]::GetFullPath($settings.Options.singBoxPath);checkUrl=$v.checkUrl;checkAddress=$v.probeAddress;dnsPolicy=$dnsPolicy} -Private
 }catch{
     if($action -eq 'Enable'){try{Write-TransportJson $stopFile @{stop=$true}}catch{}}
     # Never publish raw exceptions: they may contain secrets from configs or URIs.
