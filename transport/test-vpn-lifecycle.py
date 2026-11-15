@@ -55,6 +55,19 @@ class Lifecycle(unittest.TestCase):
         self.assertIn('CheckLegacyVpn();', tray)
         self.assertIn('if (legacyVpnChecked || closing', tray)
 
+    def test_machine_wide_exclusion_includes_cleanup(self):
+        host = (ROOT/'app/launcher/VpnHost.cs').read_text()
+        policy = (ROOT/'app/launcher/VpnWatchdog.cs').read_text()
+        script = (ROOT/'transport/Vpn.Tun.ps1').read_text(encoding='utf-8-sig')
+        self.assertIn('new Mutex(false, VpnWatchdog.OwnerMutex)', host)
+        self.assertIn('OwnerMutex = @"Global\\RemoteAgents-VpnHost"', policy)
+        self.assertNotIn('VpnId(home)', host)
+        cleanup = script[script.index("if($action -in @('InspectLegacy','Cleanup'))"):script.index("if($action -eq 'Status')")]
+        self.assertIn("Threading.Mutex($false,'Global\\RemoteAgents-VpnHost')", cleanup)
+        self.assertLess(cleanup.index('$held=$gate.WaitOne(0)'), cleanup.index('Remove-VpnRemnants $root'))
+        self.assertIn('if(-not $held){throw', cleanup)
+        self.assertIn('$gate.ReleaseMutex()', cleanup)
+
     def test_unprivileged_observation_of_elevated_owner(self):
         status = (ROOT/'app/launcher/VpnStatus.cs').read_text()
         owner = status[status.index('static bool OwnerAlive'):]

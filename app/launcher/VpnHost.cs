@@ -21,7 +21,7 @@ namespace RemoteAgents.Launcher
             string session = Program.Option(args, "--vpn-session");
             string state = "error", tunName = ""; bool held = false, ran = false;
             NativeJob job = null; VpnLease lease = null; Process parent = null, core = null; VpnProbe probe = null;
-            using (var gate = new Mutex(false, "Global\\RemoteAgents-VpnHost-" + VpnId(home))) {
+            using (var gate = new Mutex(false, VpnWatchdog.OwnerMutex)) {
                 try {
                     try { held = gate.WaitOne(0); } catch (AbandonedMutexException) { held = true; }
                     if (!held) return 1;
@@ -123,8 +123,6 @@ namespace RemoteAgents.Launcher
                 }
             }
         }
-        static string VpnId(string home)
-        { using (var sha = System.Security.Cryptography.SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(Files.Utf8.GetBytes(home.ToUpperInvariant()))).Replace("-", ""); }
         static Dictionary<string, object> Read(string home, string relative)
         { try { return Json.Read(Path.Combine(home, relative)); } catch { return Json.Map(null); } }
         static bool Stopped(string home, string session, Process parent)

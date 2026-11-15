@@ -11,6 +11,17 @@ namespace RemoteAgents.Launcher
         internal static void Run(string root)
         {
             Check(Product.VpnEnabled, "VPN capability is restored");
+            string gateName = VpnWatchdog.OwnerMutex + "-test-" + Guid.NewGuid().ToString("N");
+            using (var ownerGate = new System.Threading.Mutex(false, gateName)) {
+                ownerGate.WaitOne();
+                try {
+                    Check(!System.Threading.Tasks.Task.Run(() => {
+                        using (var otherHome = new System.Threading.Mutex(false, gateName)) {
+                            bool entered = otherHome.WaitOne(0); if (entered) otherHome.ReleaseMutex(); return entered;
+                        }
+                    }).GetAwaiter().GetResult(), "a second home or product cannot own machine VPN or cleanup concurrently");
+                } finally { ownerGate.ReleaseMutex(); }
+            }
             int closed = 0;
             using (var lease = new VpnLease(() => System.Threading.Interlocked.Increment(ref closed), 100)) {
                 Check(System.Threading.SpinWait.SpinUntil(() => System.Threading.Interlocked.CompareExchange(ref closed, 0, 0) == 1, 1500), "blocked lifecycle closes fake core Job independently");

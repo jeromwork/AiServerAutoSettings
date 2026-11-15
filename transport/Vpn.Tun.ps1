@@ -23,7 +23,14 @@ if($action -in @('InspectLegacy','Cleanup')){
     }
     if($env:OS -ne 'Windows_NT' -or -not (Test-VpnAdministrator)){throw 'Очистка требует администратора Windows'}
     if(Test-VpnHostAlive $root){throw 'Сначала выключите VPN'}
-    Remove-VpnRemnants $root;return
+    # The adapter and default routes are machine resources, independent of Home/product/user.
+    $gate=New-Object Threading.Mutex($false,'Global\RemoteAgents-VpnHost');$held=$false
+    try{
+        try{$held=$gate.WaitOne(0)}catch [Threading.AbandonedMutexException]{$held=$true}
+        if(-not $held){throw 'Сначала выключите VPN в другом экземпляре программы'}
+        Remove-VpnRemnants $root
+    }finally{if($held){$gate.ReleaseMutex()};$gate.Dispose()}
+    return
 }
 if($action -eq 'Status'){
     $file=Join-Path $root 'status/vpn.json'
