@@ -39,4 +39,16 @@ Assert ($bootstrap.Contains('export ra_download_proxy') -and -not $bootstrap.Con
 Assert (-not $bootstrap.Contains("`r")) 'bootstrap script uses LF'
 $files=Get-WizardApplyFiles $repo
 Assert ($files.Contains('base_network.py') -and $files.Contains('lan-config.schema.json') -and $files.Contains('tg-gateway/gateway.py') -and $files.Contains('config.paste.schema.json')) 'complete root payload'
+# Key-based clean-VPS bootstrap runs the same apt work as password bootstrap.
+# Model a healthy 90s bootstrap without sleeping or contacting any server.
+function Get-WizardKeyCandidates {param($Root,$Own,$Chosen) 'fixture-root-key'}
+$script:keyBootstrapTimeout=0
+function Invoke-WizardLogin {param($Profile,$User,$Command,$InputText='', $Credential=$null,[int]$Timeout=45)
+    $script:keyBootstrapTimeout=$Timeout
+    if($Timeout -lt 90){throw 'fixture healthy bootstrap exceeds SSH timeout'}
+    return ''
+}
+$keyProfile=[pscustomobject]@{keyPath='own-key'}
+Assert (Connect-WizardExistingKey $TestHome $keyProfile 'root' 'bootstrap' 'fixture-stdin' '') 'existing root key supports slow clean-VPS dependency bootstrap'
+Assert ($script:keyBootstrapTimeout -eq 600) 'key and password bootstrap share the 600s budget'
 Write-Host ('PASS: server-apply engine '+$count+' checks')

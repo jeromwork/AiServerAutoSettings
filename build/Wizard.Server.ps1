@@ -244,7 +244,7 @@ function Connect-WizardExistingKey([string]$Root,$Profile,[string]$User,[string]
     foreach($key in @(Get-WizardKeyCandidates $Root $Profile.keyPath $Chosen)){
         Write-WizardProgress ('Пробую ключ '+$key+'…')
         $q=$Profile.PSObject.Copy();$q.keyPath=$key;$e=''
-        try{[void](Invoke-WizardLogin $q $User $Command $Payload -Timeout 45);Write-WizardProgress ('Пробую ключ '+$key+'… ✓ ключ этого компьютера добавлен на сервер');return $true}catch{$e=[string]$_.Exception.Message}
+        try{[void](Invoke-WizardLogin $q $User $Command $Payload -Timeout 600);Write-WizardProgress ('Пробую ключ '+$key+'… ✓ ключ этого компьютера добавлен на сервер');return $true}catch{$e=[string]$_.Exception.Message}
         $why='не подошёл'
         if($e -notmatch 'код выхода 255'){$why=if($e -match 'код выхода'){'вход выполнен, но настройка рабочего пользователя не удалась'}else{'сервер не ответил вовремя'}}
         else{try{$keygen=@(Get-Command ssh-keygen -CommandType Application -ErrorAction Stop)[0].Source;[void](Invoke-DiskProcess $keygen @('-y','-P','','-f',$key) -TimeoutSeconds 10)}catch{$why='защищён паролем (или не в формате OpenSSH), пропускаю'}}
