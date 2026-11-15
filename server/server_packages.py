@@ -2,6 +2,8 @@
 """Repair prerequisites before attempting to restore services using those tools."""
 from urllib.parse import quote
 
+DATA_PACKAGES = ('ca-certificates', 'dbus-user-session', 'libpam-systemd', 'python3-cryptography')
+
 BASE = {'python3': 'python3', 'curl': 'curl', 'git': 'git', 'ip': 'iproute2',
         'jq': 'jq', 'nft': 'nftables', 'openssl': 'openssl', 'runuser': 'util-linux',
         'dbus-daemon': 'dbus', 'sudo': 'sudo', '/usr/sbin/sshd': 'openssh-server'}
@@ -31,11 +33,13 @@ def ensure(e, apply):
         wanted['sing-box'] = 'sing-box'
     missing = sorted({package for tool, package in wanted.items()
                       if e.s.run(['which', tool], check=False).returncode})
+    missing += [p for p in DATA_PACKAGES if e.s.run(['dpkg-query', '-W', '-f=${Status}', p], check=False).stdout.strip() != 'install ok installed']
+    missing = sorted(set(missing))
     if not missing:
         return True
     if apply:
         prepare(e)
         e.s.run(['apt-get', 'update'], change=True, timeout=300)
-        e.s.run(['apt-get', 'install', '-y', '--no-install-recommends', *missing], change=True, timeout=300)
+        e.s.run(['apt-get', 'install', '-y', '--no-install-recommends', '-o', 'Dpkg::Options::=--force-confold', *missing], change=True, timeout=300)
     return e.row('packages', 'ready' if apply else 'change',
                  'переустановлены зависимости' if apply else 'будут переустановлены отсутствующие пакеты')

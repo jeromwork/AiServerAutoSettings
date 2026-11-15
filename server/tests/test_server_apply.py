@@ -155,7 +155,7 @@ class Fake:
             self.logged = True
             out = TS_KEY  # A malicious child output must never be forwarded.
         elif args[0] == 'dpkg-query':
-            out, code = ('install ok installed', 0) if self.ts_installed else ('', 1)
+            out, code = ('install ok installed', 0) if args[-1] != 'tailscale' or self.ts_installed else ('', 1)
         elif args[:2] == ['apt-get', 'install'] and 'tailscale' in args:
             self.defaults_at_install = self.path('/etc/default/tailscaled').read_text()
             self.ts_installed = True

@@ -28,6 +28,22 @@ class PackageTests(unittest.TestCase):
             self.assertTrue({'sing-box', 'openvpn', 'curl', 'jq'} <= set(install))
             self.assertFalse(missing)
 
+    def test_packages_without_binaries_are_detected_by_dpkg_status(self):
+        with tempfile.TemporaryDirectory() as root:
+            f = Fake(root); c = config()
+            self.assertTrue(f.complete(c)['ok'])
+            original = f.system.runner
+            def runner(args, **kw):
+                if args[0] == 'dpkg-query' and args[-1] in ('ca-certificates', 'python3-cryptography'):
+                    return subprocess.CompletedProcess(args, 1, '', '')
+                return original(args, **kw)
+            f.system.runner = runner; f.calls.clear()
+            self.assertTrue(app.packages.ensure(f.engine(c), True))
+            install = next(a for a in f.calls if a[:2] == ['apt-get', 'install'])
+            self.assertIn('ca-certificates', install)
+            self.assertIn('python3-cryptography', install)
+            self.assertIn('Dpkg::Options::=--force-confold', install)
+
     def test_proxy_environment_is_private_and_egress_probe_remains_direct(self):
         with tempfile.TemporaryDirectory() as root:
             seen = []
