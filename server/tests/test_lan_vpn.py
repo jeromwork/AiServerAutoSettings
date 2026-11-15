@@ -18,6 +18,7 @@ spec = importlib.util.spec_from_file_location('lan_vpn', ROOT / 'lan_vpn.py')
 lan = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(lan)
 FIXTURE = ROOT / 'tests/fixtures/unsafe.ovpn'
+FINGERPRINT = ':'.join(['AB', '01', 'CD', 'EF'] * 8)
 
 
 def config():
@@ -30,16 +31,52 @@ def config():
 
 
 class ImportTests(unittest.TestCase):
-    def render(self, text=None, extra=()):
+    def render(self, text=None, extra=(), server_fingerprint=None):
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / 'in.ovpn'
             source.write_bytes((FIXTURE.read_text() if text is None else text).replace('\n', '\r\n').encode())
             out = io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-                client, nets, gateways = lan.import_client('office', source, extra)
+                client, nets, gateways = lan.import_client('office', source, extra, server_fingerprint=server_fingerprint)
                 self.assertEqual(gateways, [])
             self.assertEqual(out.getvalue(), '')
             return client, nets
+
+    def test_fingerprint_normalization_and_server_verification(self):
+        for value in (FINGERPRINT, FINGERPRINT.lower(), FINGERPRINT.replace(':', ''),
+                      FINGERPRINT.replace(':', '').lower(), FINGERPRINT.replace('CD', 'cD')):
+            with self.subTest(value=value):
+                client, _ = self.render(server_fingerprint=value)
+                self.assertIn('\npeer-fingerprint ' + FINGERPRINT + '\n', client)
+                self.assertNotIn('remote-cert-tls', client)
+                self.assertIn('<ca>\nTEST ONLY CA PLACEHOLDER\n</ca>', client)
+        client, _ = self.render()
+        self.assertEqual(client.count('remote-cert-tls server\n'), 1)
+        self.assertNotIn('peer-fingerprint', client)
+
+    def test_fingerprint_rejects_malformed_values(self):
+        for value in ('', 'AB' * 31, 'AB' * 33, 'GG' * 32, FINGERPRINT + ':', ':' + FINGERPRINT,
+                      FINGERPRINT.replace(':', '-', 1), FINGERPRINT.replace(':', '', 1),
+                      'A:' * 32, FINGERPRINT + '\n', ' ' + FINGERPRINT, 123, False):
+            with self.subTest(value=value), self.assertRaisesRegex(lan.Error, 'Некорректный --server-fingerprint'):
+                self.render(server_fingerprint=value)
+
+    def test_profile_cannot_weaken_or_supply_server_verification(self):
+        text = FIXTURE.read_text().replace('remote-cert-tls server', 'remote-cert-tls none')
+        for pin in (None, FINGERPRINT):
+            with self.subTest(pin=pin):
+                client, _ = self.render(text, server_fingerprint=pin)
+                self.assertNotIn('remote-cert-tls "none"', client)
+                self.assertEqual('remote-cert-tls server\n' in client, pin is None)
+                self.assertEqual('peer-fingerprint ' + FINGERPRINT + '\n' in client, pin is not None)
+                for directive in ('peer-fingerprint ' + FINGERPRINT,
+                                  '--peer-fingerprint ' + FINGERPRINT,
+                                  '<peer-fingerprint>\n' + FINGERPRINT + '\n</peer-fingerprint>'):
+                    with self.subTest(directive=directive), self.assertRaises(lan.Error):
+                        self.render(text + '\n' + directive, server_fingerprint=pin)
+                without_ca = text.replace('<ca>\nTEST ONLY CA PLACEHOLDER\n</ca>', '')
+                with self.assertRaisesRegex(lan.Error, 'Требуется inline CA'):
+                    self.render(without_ca, server_fingerprint=pin)
 
     def test_crlf_inline_and_routes(self):
         client, nets = self.render(extra=['192.168.143.1/24'])
@@ -393,6 +430,88 @@ def lan_profile(subnet='10.123.0.0/16', gateways=None, enabled=False, slot=0):
     return data
 
 
+class FingerprintConfigTests(unittest.TestCase):
+    def test_cli_persists_pin_and_checks_repeated_add(self):
+        for pin in (None, FINGERPRINT):
+            with self.subTest(pin=pin), tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
+                state, etc = Path(tmp) / 'state', Path(tmp) / 'etc'
+                stack.enter_context(patch.object(lan, 'STATE', state))
+                stack.enter_context(patch.object(lan, 'ETC', etc))
+                stack.enter_context(patch.object(lan.os, 'geteuid', return_value=0))
+                stack.enter_context(patch.object(lan.os, 'chown'))
+                stack.enter_context(patch.object(lan.os, 'fchown'))
+                stack.enter_context(patch.object(lan, 'network_pending', return_value=[]))
+                stack.enter_context(patch.object(lan, 'install_runtime'))
+                enable = stack.enter_context(patch.object(lan, 'enable'))
+                base = ['lan', 'add', 'office', str(FIXTURE), '--ip-check-url', 'https://ip.example.invalid']
+                flags = ['--server-fingerprint', pin.replace(':', '').lower()] if pin else []
+                with patch.object(lan.sys, 'argv', base + flags):
+                    lan.main()
+                data = lan.profile('office')
+                self.assertEqual(data.get('server_fingerprint'), pin)
+                self.assertEqual('server_fingerprint' in data, pin is not None)
+                client = (etc / 'office/client.conf').read_text()
+                self.assertEqual('peer-fingerprint ' + FINGERPRINT + '\n' in client, pin is not None)
+                self.assertEqual('remote-cert-tls server\n' in client, pin is None)
+                enable.assert_called_once_with('office', 'https://ip.example.invalid')
+                with patch.object(lan.sys, 'argv', base + (['--server-fingerprint', pin] if pin else [])):
+                    lan.main()
+                # Dropping or changing the pin requires explicit remove/add.
+                alternate = [] if pin else ['--server-fingerprint', FINGERPRINT]
+                with patch.object(lan.sys, 'argv', base + alternate), self.assertRaisesRegex(lan.Error, 'Имя занято'):
+                    lan.main()
+                self.assertEqual(lan.profile('office'), data)
+                self.assertEqual((etc / 'office/client.conf').read_text(), client)
+                if pin:
+                    # Even an identical generated client must agree with the JSON pin.
+                    data['server_fingerprint'] = ':'.join(['00'] * 32)
+                    lan.update('office', data)
+                    with patch.object(lan.sys, 'argv', base + flags), self.assertRaisesRegex(lan.Error, 'Имя занято'):
+                        lan.main()
+
+    def test_cli_invalid_pin_fails_before_files_or_runtime(self):
+        with patch.object(lan.sys, 'argv', ['lan', 'add', 'office', str(FIXTURE),
+                         '--server-fingerprint', 'TEST_ONLY_INVALID', '--ip-check-url', 'https://ip.example.invalid']), \
+             patch.object(lan, 'install_runtime') as runtime, patch.object(lan, 'import_client') as importer, \
+             patch.object(lan.Path, 'mkdir') as mkdir, self.assertRaisesRegex(lan.Error, 'Некорректный --server-fingerprint'):
+            lan.main()
+        runtime.assert_not_called()
+        importer.assert_not_called()
+        mkdir.assert_not_called()
+
+    def test_config_read_requires_canonical_pin(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(lan, 'ETC', Path(tmp)):
+            data = lan_profile()
+            lan.update('office', data)
+            self.assertNotIn('server_fingerprint', lan.profile('office'))
+            data['server_fingerprint'] = FINGERPRINT
+            lan.update('office', data)
+            self.assertEqual(lan.profile('office')['server_fingerprint'], FINGERPRINT)
+            for value in (None, '', FINGERPRINT.lower(), FINGERPRINT.replace(':', ''),
+                          '00:' * 32, 0, [], {}, FINGERPRINT + '\nverb 9'):
+                with self.subTest(value=value):
+                    data['server_fingerprint'] = value
+                    lan.update('office', data)
+                    with self.assertRaises(lan.Error):
+                        lan.profile('office')
+
+    def test_transaction_snapshot_keeps_pin(self):
+        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
+            state, etc, sb = Path(tmp) / 'state', Path(tmp) / 'etc', Path(tmp) / 'sb.json'
+            state.mkdir()
+            for attr, value in [('STATE', state), ('ETC', etc), ('SB', sb)]:
+                stack.enter_context(patch.object(lan, attr, value))
+            stack.enter_context(patch.object(lan, 'network_pending', return_value=[]))
+            stack.enter_context(patch.object(lan, 'event'))
+            stack.enter_context(patch.object(lan, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')))
+            data = lan_profile()
+            data['server_fingerprint'] = FINGERPRINT
+            lan.update('office', data)
+            lan.save(sb, config())
+            lan.start_transaction('office', 'enable')
+            self.assertEqual(lan.read(state / 'pending/profiles.json')['office']['server_fingerprint'], FINGERPRINT)
+
+
 class DirectEndpointTests(unittest.TestCase):
     def render(self, directives, direct=True, answers=('93.184.216.34',)):
         with tempfile.TemporaryDirectory() as tmp:
@@ -569,6 +688,7 @@ class DirectEndpointTests(unittest.TestCase):
                 sb = state / 'sing-box.json'
                 lan.save(sb, config())
                 data = lan_profile(gateways=[endpoint()] if direct else None)
+                data['server_fingerprint'] = FINGERPRINT
                 calls = []
                 def run(args, **kwargs):
                     calls.append(args)
@@ -578,12 +698,13 @@ class DirectEndpointTests(unittest.TestCase):
                         lan.save(state / 'office.discovery.json', {'subnets': data['static']})
                     return subprocess.CompletedProcess(args, 0, '', '')
                 with contextlib.ExitStack() as stack:
-                    for attr, value in [('STATE', state), ('SB', sb), ('LOG', state / 'lan.log')]:
+                    for attr, value in [('STATE', state), ('SB', sb), ('LOG', state / 'lan.log'), ('ETC', state / 'etc')]:
                         stack.enter_context(patch.object(lan, attr, value))
-                    for attr in ('preflight', 'local_conflicts', 'start_transaction', 'update', 'route_ops', 'apply_dns', 'audit_routes', 'event'):
+                    for attr in ('preflight', 'local_conflicts', 'start_transaction', 'route_ops', 'apply_dns', 'audit_routes', 'event'):
                         stack.enter_context(patch.object(lan, attr))
-                    stack.enter_context(patch.object(lan, 'profile', return_value=data))
-                    stack.enter_context(patch.object(lan, 'active', side_effect=lambda: {'office': data} if data['enabled'] else {}))
+                    lan.update('office', data)
+                    client, _, _ = lan.import_client('office', FIXTURE, server_fingerprint=FINGERPRINT)
+                    lan.atomic(lan.ETC / 'office/client.conf', client)
                     stack.enter_context(patch.object(lan, 'baseline', return_value='hash'))
                     stack.enter_context(patch.object(lan, 'firewall', side_effect=lambda _: calls.append(['firewall'])))
                     stack.enter_context(patch.object(lan, 'guard_batch', return_value='synthetic nft'))
@@ -591,6 +712,10 @@ class DirectEndpointTests(unittest.TestCase):
                     stack.enter_context(patch.object(lan, 'run', side_effect=run))
                     stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
                     lan.enable('office', 'https://ip.example.invalid')
+                    self.assertTrue(lan.profile('office')['ready'])
+                    self.assertEqual(lan.profile('office')['server_fingerprint'], FINGERPRINT)
+                    self.assertEqual((lan.ETC / 'office/client.conf').read_text(), client)
+                    data = lan.profile('office')
                 client_start = calls.index(['systemctl', 'start', lan.service('office')])
                 fw_start = calls.index(['systemctl', 'start', 'remoteagents-lan-firewall.service'])
                 restarts = [i for i, args in enumerate(calls) if args == ['systemctl', 'restart', 'sing-box']]
@@ -617,6 +742,21 @@ class DirectEndpointTests(unittest.TestCase):
 
 
 class OpenvpnDiagnosticTests(unittest.TestCase):
+    def test_certificate_diagnoses_precede_generic_tls_and_hide_log_values(self):
+        role_reason = ('у сертификата шлюза нет отметки «сервер»; если это его собственный CA, '
+                       'задайте --server-fingerprint (отпечаток сверьте отдельно)')
+        # Exact OpenVPN 2.6 ssl_verify.c verify_cert() message (with/without later bracket fix).
+        mismatch = ('TLS Error: --tls-verify/--peer-fingerprint certificate hash verification failed. '
+                    '(got certificate fingerprint: TEST_ONLY_SECRET')
+        for line, expected in [('VERIFY KU ERROR', role_reason),
+                               ('Certificate does not have key usage extension', role_reason),
+                               (mismatch, 'отпечаток сертификата шлюза не совпал'),
+                               (mismatch + ')', 'отпечаток сертификата шлюза не совпал')]:
+            with self.subTest(line=line):
+                reason = lan.openvpn_reason(line + '\nTLS Error: TLS handshake failed\nTEST_ONLY_SECRET', 'office')
+                self.assertEqual(reason, expected)
+                self.assertNotIn('TEST_ONLY', reason)
+
     def test_classification_only_returns_fixed_reasons_without_log_text(self):
         rows = json.loads((ROOT / 'tests/fixtures/openvpn-reasons.json').read_text())
         out, err = io.StringIO(), io.StringIO()
@@ -700,7 +840,10 @@ class EndpointLifecycleTests(unittest.TestCase):
                 for attr, value in [('STATE', state), ('ETC', etc), ('SB', sb)]:
                     stack.enter_context(patch.object(lan, attr, value))
                 for name, p in data.items():
+                    p['server_fingerprint'] = FINGERPRINT
                     lan.update(name, p)
+                    client, _, _ = lan.import_client(name, FIXTURE, server_fingerprint=FINGERPRINT)
+                    lan.atomic(etc / name / 'client.conf', client)
                 own = lan.managed_exclusions(data)
                 cfg = config()
                 cfg['inbounds'][0]['route_exclude_address'] = ['203.0.113.7/32'] + own
@@ -721,6 +864,10 @@ class EndpointLifecycleTests(unittest.TestCase):
                 self.assertEqual(lan.managed_subnets(), ['1.1.1.1/32', '192.168.143.0/24'])
                 self.assertEqual((etc / 'office').exists(), not remove)
                 self.assertTrue(lan.profile('other')['enabled'])
+                self.assertEqual(lan.profile('other')['server_fingerprint'], FINGERPRINT)
+                if not remove:
+                    self.assertEqual(lan.profile('office')['server_fingerprint'], FINGERPRINT)
+                    self.assertIn('peer-fingerprint ' + FINGERPRINT, (etc / 'office/client.conf').read_text())
 
     def test_rollback_and_boot_recovery_remove_owned_endpoint_exclusions(self):
         for boot in (False, True):
@@ -734,7 +881,10 @@ class EndpointLifecycleTests(unittest.TestCase):
                 previous = {'office': lan_profile(gateways=[endpoint()], enabled=True)}
                 current = dict(previous, other=lan_profile('192.168.143.0/24', [endpoint('1.1.1.1', 'tcp', 443)], True, 1))
                 for name, p in current.items():
+                    p['server_fingerprint'] = FINGERPRINT
                     lan.update(name, p)
+                    client, _, _ = lan.import_client(name, FIXTURE, server_fingerprint=FINGERPRINT)
+                    lan.atomic(etc / name / 'client.conf', client)
                 before = config()
                 before['inbounds'][0]['route_exclude_address'] = ['203.0.113.7/32'] + lan.managed_exclusions(previous)
                 lan.save(pending / 'sing-box.json', before)
@@ -758,6 +908,9 @@ class EndpointLifecycleTests(unittest.TestCase):
                 self.assertEqual(lan.read(sb)['inbounds'][0]['route_exclude_address'], ['203.0.113.7/32'])
                 self.assertEqual(lan.managed_subnets(), [])
                 self.assertFalse(any(p['enabled'] for p in lan.profiles().values()))
+                for name, p in lan.profiles().items():
+                    self.assertEqual(p['server_fingerprint'], FINGERPRINT)
+                    self.assertIn('peer-fingerprint ' + FINGERPRINT, (etc / name / 'client.conf').read_text())
                 restarts = [c.args[0] for c in run.call_args_list if c.args[0][:2] == ['systemctl', 'restart']]
                 self.assertEqual(bool(restarts), not boot)
                 self.assertFalse(pending.exists())

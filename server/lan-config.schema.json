@@ -9,6 +9,11 @@
     "version": {"const": 1},
     "enabled": {"type": "boolean"},
     "ready": {"type": "boolean"},
+    "server_fingerprint": {
+      "description": "Optional SHA-256 pin of the gateway certificate, set by --server-fingerprint; replaces remote-cert-tls server.",
+      "type": "string", "minLength": 95, "maxLength": 95,
+      "pattern": "^[0-9A-F]{2}(:[0-9A-F]{2}){31}$"
+    },
     "static": {"$ref": "#/$defs/subnets"},
     "subnets": {"$ref": "#/$defs/subnets"},
     "endpoints": {

@@ -71,6 +71,15 @@ def name_ok(name):
     return name
 
 
+def normalize_server_fingerprint(value):
+    require(isinstance(value, str) and re.fullmatch(
+        r'(?:[0-9A-Fa-f]{64}|[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){31})', value) is not None,
+        'Некорректный --server-fingerprint: нужен SHA-256 сертификата шлюза '
+        '(64 hex-символа, без разделителей или пары hex-цифр через двоеточия).')
+    compact = value.replace(':', '').upper()
+    return ':'.join(compact[i:i + 2] for i in range(0, 64, 2))
+
+
 def networks(values):
     result = []
     for value in values:
@@ -157,8 +166,11 @@ def openvpn_log(name):
     return LOG.parent / ('lan-' + name_ok(name) + '.openvpn.log')
 
 
-def import_client(name, source, extra=(), auth=None, direct_endpoint=False):
+def import_client(name, source, extra=(), auth=None, direct_endpoint=False, server_fingerprint=None):
     name_ok(name)
+    # The pin comes only from the trusted CLI/config, never from profile directives.
+    verification = ('remote-cert-tls server' if server_fingerprint is None else
+                    'peer-fingerprint ' + normalize_server_fingerprint(server_fingerprint))
     text = Path(source).read_text(encoding='utf-8-sig').replace('\r\n', '\n').replace('\r', '\n')
     lines, subnets, block, payload = [], list(extra), None, []
     seen = set()
@@ -206,7 +218,7 @@ def import_client(name, source, extra=(), auth=None, direct_endpoint=False):
         else:
             require(option in OPTIONS, 'Запрещённая/неподдерживаемая директива, строка ' + str(number))
             require(len(args) <= 8, 'Слишком много аргументов.')
-            if option in ('verb', 'mute'):
+            if option in ('verb', 'mute', 'remote-cert-tls'):
                 continue
             if option == 'proto':
                 require(args in (['tcp'], ['tcp-client'], ['udp'], ['udp4'], ['tcp4-client']), 'Неподдерживаемый proto.')
@@ -231,16 +243,15 @@ def import_client(name, source, extra=(), auth=None, direct_endpoint=False):
             del lines[start:lines.index('</auth-user-pass>', start) + 1]
         lines.extend(['<auth-user-pass>', *lan_credentials(*auth), '</auth-user-pass>'])
     require(any(l.startswith('remote ') for l in lines), 'В профиле отсутствует remote.')
-    require('ca' in seen or any(l.startswith('peer-fingerprint ') for l in lines), 'Требуется inline CA.')
+    require('ca' in seen, 'Требуется inline CA.')
     gateways = remote_endpoints(remotes, port, proto) if direct_endpoint else []
     if direct_endpoint:
         # No hostname remains: OpenVPN must use exactly the exempted addresses.
         lines = [l for l in lines if not l.startswith(('remote ', 'remote-random-hostname'))]
         lines.extend('remote {ip} {port} {proto}'.format(**e) for e in gateways)
-    # A profile cannot weaken server certificate role checking.
-    lines = [l for l in lines if not l.startswith('remote-cert-tls ')]
+    # A profile cannot weaken the selected server certificate verification.
     lines.extend(['client', 'dev tun-lan-' + name, 'dev-type tun', 'nobind',
-                  'remote-cert-tls server', 'auth-nocache', 'route-noexec',
+                  verification, 'auth-nocache', 'route-noexec',
                   'pull-filter ignore "redirect-gateway"',
                   'pull-filter ignore "redirect-private"',
                   'pull-filter ignore "dhcp-option"',
@@ -430,6 +441,9 @@ def profile(name):
     require(networks(data['static']) == data['static'] and networks(data['subnets']) == data['subnets'],
             'В config.json нужны канонические RFC1918-подсети.')
     endpoints(data.get('endpoints', []))
+    if 'server_fingerprint' in data:
+        require(normalize_server_fingerprint(data['server_fingerprint']) == data['server_fingerprint'],
+                'В config.json нужен канонический server_fingerprint: AA:BB:… (SHA-256, 32 байта).')
     return data
 
 
@@ -804,6 +818,12 @@ def openvpn_reason(text, name):
     """Return only fixed diagnoses; untrusted log contents never leave here."""
     if 'AUTH_FAILED' in text:
         return 'шлюз отклонил логин/пароль'
+    if 'VERIFY KU ERROR' in text or 'does not have key usage' in text:
+        return ('у сертификата шлюза нет отметки «сервер»; если это его собственный CA, '
+                'задайте --server-fingerprint (отпечаток сверьте отдельно)')
+    # OpenVPN 2.6 src/openvpn/ssl_verify.c (verify_cert), before the generic TLS error.
+    if '--tls-verify/--peer-fingerprint certificate hash verification failed' in text:
+        return 'отпечаток сертификата шлюза не совпал'
     if any(s in text for s in ('TLS key negotiation failed', 'TLS Error', 'TLS handshake failed')):
         return 'шлюз не отвечает на рукопожатие: трафик до шлюза не проходит или неверный порт/протокол'
     if 'Cannot resolve' in text or 'RESOLVE' in text:
@@ -1119,6 +1139,7 @@ def main():
             p.add_argument('--dns-domain')
             p.add_argument('--dns-server')
             p.add_argument('--direct-endpoint', action='store_true', help='Pin public IPv4 gateways and bypass proxy-out only for their transport')
+            p.add_argument('--server-fingerprint', help='SHA-256 сертификата шлюза (64 hex-символа, с двоеточиями или без)')
             auth = p.add_mutually_exclusive_group()
             auth.add_argument('--auth-stdin', action='store_true', help='LAN login/password as JSON on stdin after the marker line')
             auth.add_argument('--ask-auth', action='store_true', help='Ask LAN login/password without echo')
@@ -1134,6 +1155,8 @@ def main():
     for command in ('list', 'status', 'public-status', 'rollback', '_watch', '_firewall', '_recover'):
         sub.add_parser(command)
     args = parser.parse_args()
+    if args.cmd == 'add' and args.server_fingerprint is not None:
+        args.server_fingerprint = normalize_server_fingerprint(args.server_fingerprint)
     if args.cmd == 'public-status':
         public_status()
         return
@@ -1173,7 +1196,8 @@ def main():
             require(not network_pending() and not (STATE / 'pending').exists(),
                     'Сначала confirm или rollback предыдущего изменения сети.')
         if args.cmd == 'add':
-            client, static, gateways = import_client(args.name, args.ovpn, args.subnet, read_auth(args), args.direct_endpoint)
+            client, static, gateways = import_client(args.name, args.ovpn, args.subnet, read_auth(args),
+                                                    args.direct_endpoint, args.server_fingerprint)
             require(bool(args.dns_domain) == bool(args.dns_server), 'Задайте обе опции --dns-domain и --dns-server.')
             dns = None
             if args.dns_domain:
@@ -1183,7 +1207,8 @@ def main():
             old = profiles()
             if args.name in old:
                 require((ETC / args.name / 'client.conf').read_text() == client and old[args.name]['static'] == static and old[args.name].get('dns') == dns and
-                        old[args.name].get('endpoints', []) == gateways,
+                        old[args.name].get('endpoints', []) == gateways and
+                        old[args.name].get('server_fingerprint') == args.server_fingerprint,
                         'Имя занято другим профилем; сначала remove.')
             else:
                 used = {p['table'] for p in old.values()}
@@ -1193,6 +1218,8 @@ def main():
                         'subnets': static, 'dns': dns, 'table': 42000 + slot, 'priority': 1000 + slot}
                 if args.direct_endpoint:
                     data['endpoints'] = gateways
+                if args.server_fingerprint is not None:
+                    data['server_fingerprint'] = args.server_fingerprint
                 atomic(ETC / args.name / 'client.conf', client)
                 update(args.name, data)
             install_runtime()
