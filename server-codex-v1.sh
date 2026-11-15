@@ -62,7 +62,7 @@ if [ -d "$release" ] && [ -n "$(find "$release" \( -type l -o ! -user root -o -p
 fi
 verified=false
 check_package() {
-    python3 - "$1" "$version" "$target" <<'PACKAGE_CHECK'
+    python3 -I - "$1" "$version" "$target" <<'PACKAGE_CHECK'
 import json, os, pathlib, sys
 root = pathlib.Path(sys.argv[1])
 try:

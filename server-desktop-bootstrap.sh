@@ -259,7 +259,7 @@ updated = '\n'.join(result) + '\n'
 if updated != path.read_text(): path.write_text(updated)
 DESKTOP_LAYOUT
 fi
-if [[ -f $install_dir/.remoteagents-managed && $(cat "$install_dir/.remoteagents-managed") == desktop-ssh-v2 ]] && python3 "$install_dir/check.py" >/dev/null 2>&1; then
+if [[ -f $install_dir/.remoteagents-managed && $(cat "$install_dir/.remoteagents-managed") == desktop-ssh-v2 ]] && python3 -I "$install_dir/check.py" >/dev/null 2>&1; then
   configure_clipboard
   echo 'DESKTOP_READY=UNIX:/run/remoteagents-desktop-rdp/rdp.socket'
   exit 0
@@ -525,7 +525,7 @@ chmod 0755 "$HOME/Desktop/RemoteAgents-"*.desktop
 DESKTOP_SHORTCUTS
 write_desktop_checker
 chmod 0644 "$install_dir/session.py" "$install_dir/namespace-guard.py" "$install_dir/socket-mode.py" "$install_dir/xrdp.ini"
-python3 -m py_compile "$install_dir/session.py" "$install_dir/socket-mode.py" "$install_dir/check.py"
+python3 -I -m py_compile "$install_dir/session.py" "$install_dir/socket-mode.py" "$install_dir/check.py"
 systemd-analyze verify /etc/systemd/system/remoteagents-desktop-{x,vnc,rdp}.service
 systemctl daemon-reload
 systemctl try-restart remoteagents-desktop-x.service
@@ -533,7 +533,7 @@ systemctl try-restart remoteagents-desktop-x.service
 systemctl reset-failed remoteagents-desktop-x.service remoteagents-desktop-vnc.service remoteagents-desktop-rdp.service 2>/dev/null || true
 systemctl enable --now remoteagents-desktop-x.service remoteagents-desktop-vnc.service remoteagents-desktop-rdp.service
 for attempt in {1..25}; do
-  if python3 "$install_dir/check.py"; then
+  if python3 -I "$install_dir/check.py"; then
     configure_clipboard
     printf 'desktop-ssh-v2\n' > "$install_dir/.remoteagents-managed"
     echo 'DESKTOP_READY=UNIX:/run/remoteagents-desktop-rdp/rdp.socket'
