@@ -125,6 +125,19 @@ class BaseTests(unittest.TestCase):
                 self.assertFalse(any(a[0] == 'systemd-run' for a in f.calls))
                 self.assertFalse(any(a[0] == 'apt-get' for a in f.calls))
 
+    def test_enabled_base_without_proxy_never_reports_success(self):
+        f, c = self.fresh()
+        c.pop('proxyOut')
+        app.validate(c)  # This is accepted by the public configuration schema.
+        for command in ('plan', 'status', 'apply'):
+            with self.subTest(command=command):
+                result = f.engine(c).run(command)
+                self.assertFalse(result['ok'])
+                self.assertEqual(result['parts'][0]['state'], 'blocked')
+                self.assertIn('proxyOut', result['parts'][0]['summary'])
+                self.assertEqual(result['actions'], [])
+        self.assertFalse(f.path('/var/lib/remoteagents-status/server-config.json').exists())
+
     def test_changed_pending_config_does_not_confirm(self):
         f, c = self.fresh()
         self.assertEqual(f.engine(c).run('apply')['parts'][0]['state'], 'pending')

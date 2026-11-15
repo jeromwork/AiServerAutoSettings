@@ -513,6 +513,8 @@ class Engine:
     def egress(self, apply):
         proxy = self.config.get('proxyOut', {})
         if not proxy:
+            if self.config.get('serverNetwork', {}).get('enabled'):
+                return self.row('internet', 'blocked', 'Для serverNetwork.enabled нужен раздел proxyOut с параметрами выхода; базовая сеть не настроена')
             return self.row('internet', 'ready', 'proxyOut не задан; выход не меняется')
         sb = self.singbox()
         if self.s.path(base.STATE).exists():
