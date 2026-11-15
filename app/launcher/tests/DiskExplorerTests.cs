@@ -7,6 +7,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -110,7 +111,9 @@ namespace RemoteAgents.Launcher
             var row = new DiskFolderState { Id = "opaque-id", Name = "Проект", Path = Path.Combine(root, "Проект"), ServerOnly = true, Kind = DiskExplorerKind.ServerOnly };
             service.Reconcile(root, new[] { row });
             Check(service.IsPlaceholder(row.Path), "pending creates owned empty placeholder");
+            Check(row.Tooltip == "Только на сервере. Правый клик → Скачать на компьютер", "download tooltip names the computer destination");
             string ini = Path.Combine(row.Path, "desktop.ini");
+            Check(fs.Read(ini).Contains("InfoTip=Только на сервере. Правый клик → Скачать на компьютер\r\n"), "Explorer InfoTip matches download verb");
             Check(File.ReadAllBytes(ini).Take(2).SequenceEqual(new byte[] { 255, 254 }) && fs.Read(ini).Contains("\r\nOwner=RemoteAgents.Disk.v2\r\n"), "Unicode desktop.ini with CRLF and new ownership");
             Check((fs.Attributes(row.Path) & FileAttributes.ReadOnly) != 0 && (fs.Attributes(ini) & (FileAttributes.Hidden | FileAttributes.System)) != 0, "Explorer customization attributes");
             int writes = fs.Writes; service.Reconcile(root, new[] { row }); Check(fs.Writes == writes, "unchanged metadata not rewritten");
@@ -138,19 +141,58 @@ namespace RemoteAgents.Launcher
             public void Write(string k, string n, string v) { Values[k + "|" + n] = v; Writes++; }
             public void DeleteTree(string k) { foreach (string v in Values.Keys.Where(v => v.StartsWith(k + "|", StringComparison.Ordinal) || v.StartsWith(k + "\\", StringComparison.Ordinal)).ToArray()) Values.Remove(v); }
         }
+        static bool UploadVisible(string applies, string path)
+        {
+            if (applies == null) return false; // Deleted verb is hidden for every selection.
+            var clauses = Regex.Matches(applies, "NOT System\\.ItemPathDisplay:=\"([^\"]+)\"").Cast<Match>().ToArray();
+            Check(clauses.Length > 0 && string.Join(" AND ", clauses.Select(m => m.Value)) == applies, "upload predicate is a complete conjunction of exclusions");
+            return clauses.All(m => !string.Equals(m.Groups[1].Value, path, StringComparison.OrdinalIgnoreCase));
+        }
         static void Registry()
         {
-            var store = new TestRegistry(); int changes = 0; var registry = new DiskExplorerRegistry(store, delegate { }, () => changes++);
-            var rows = new[] { new DiskFolderState { Path = @"C:\Disk\Проект", ServerOnly = true, Kind = DiskExplorerKind.ServerOnly }, new DiskFolderState { Path = @"D:\External", Kind = DiskExplorerKind.Synced } };
+            var store = new TestRegistry(); int changes = 0; var logs = new List<string>(); var registry = new DiskExplorerRegistry(store, logs.Add, () => changes++);
+            var rows = new[] {
+                new DiskFolderState { Path = @"C:\Disk\Проект", ServerOnly = true, Kind = DiskExplorerKind.ServerOnly },
+                new DiskFolderState { Path = @"D:\External", Kind = DiskExplorerKind.Synced },
+                new DiskFolderState { Path = @"C:\Disk\Connected", Kind = DiskExplorerKind.Paused },
+                new DiskFolderState { Path = @"D:\External cloud", ServerOnly = true, Kind = DiskExplorerKind.ServerOnly },
+                new DiskFolderState { Path = @"D:\Not shared", Kind = DiskExplorerKind.Local }
+            };
             registry.Register(@"C:\App Name\RemoteAgents.exe", @"C:\Disk", rows, @"C:\User Home"); string p = DiskExplorerRegistry.Prefix;
             Check(store.Read(p + @"download\command", "") == "\"C:\\App Name\\RemoteAgents.exe\" --home \"C:\\User Home\" --disk-shell download \"%1\"", "quoted executable / home / clicked path");
+            Check(store.Read(p + "download", "MUIVerb") == "Скачать на компьютер" && store.Read(p + "keep-server", "MUIVerb") == "Оставить только на сервере", "download destination is explicit, keep-server label unchanged");
             Check(store.Read(p + "download", "AppliesTo").Contains(@"C:\Disk\Проект") && store.Read(p + "keep-server", "AppliesTo").Contains(@"D:\External"), "verbs scoped to actual folder paths");
-            Check(store.Read(p + "add", "MUIVerb") == "Загрузить на сервер" && !store.Read(p + "add", "AppliesTo").Contains("~<"), "upload available inside and outside Disk");
-            int writes = store.Writes; registry.Register(@"C:\App Name\RemoteAgents.exe", @"C:\Disk", rows, @"C:\User Home");
-            Check(store.Writes == writes && changes == 1, "registry updates are idempotent");
+            string upload = store.Read(p + "add", "AppliesTo");
+            Check(store.Read(p + "add", "MUIVerb") == "Загрузить на сервер", "upload label unchanged");
+            Check(!UploadVisible(upload, @"C:\Disk") && rows.Take(4).All(f => !UploadVisible(upload, f.Path)), "upload hidden on root, placeholders and connected folders inside and outside Disk");
+            Check(UploadVisible(upload, @"C:\Disk\Ordinary") && UploadVisible(upload, @"D:\Ordinary") && UploadVisible(upload, rows[4].Path), "ordinary folders inside and outside Disk and registrations without this server can be connected");
+            Check(UploadVisible(upload, @"D:\External copy") && !UploadVisible(upload, @"c:\disk\проект"), "exact path exclusions ignore case and preserve same-prefix ordinary folders");
+            registry.Register(@"C:\App Name\RemoteAgents.exe", @"C:\Disk", rows.Reverse(), @"C:\User Home");
+            // Download/keep-server retain their snapshot order, but upload exclusions are deterministic.
+            Check(store.Read(p + "add", "AppliesTo") == upload, "upload exclusion order is stable across snapshot reordering");
+            registry.Register(@"C:\App Name\RemoteAgents.exe", @"C:\Disk", rows, @"C:\User Home"); int writes = store.Writes; int stableChanges = changes;
+            registry.Register(@"C:\App Name\RemoteAgents.exe", @"C:\Disk", rows, @"C:\User Home");
+            Check(store.Writes == writes && changes == stableChanges, "registry updates are idempotent");
+            registry.Register(@"C:\App Name\RemoteAgents.exe", @"C:\Disk", rows.Skip(1), @"C:\User Home");
+            Check(UploadVisible(store.Read(p + "add", "AppliesTo"), rows[0].Path) && !UploadVisible(store.Read(p + "add", "AppliesTo"), rows[1].Path), "new snapshot removes stale exclusions and retains connected paths");
+            // Exercise both sides of the exact predicate budget, starting with an existing owned verb.
+            string rootClause = "NOT System.ItemPathDisplay:=\"C:\\Disk\"";
+            string longPath = @"C:\Disk\";
+            longPath += new string('x', DiskExplorerRegistry.MaxAppliesToLength - rootClause.Length - " AND NOT System.ItemPathDisplay:=\"\"".Length - longPath.Length);
+            var boundary = new[] { new DiskFolderState { Path = longPath, Kind = DiskExplorerKind.Synced } };
+            registry.Register(@"C:\app.exe", @"C:\Disk", boundary);
+            Check(store.Read(p + "add", "AppliesTo").Length == DiskExplorerRegistry.MaxAppliesToLength && !UploadVisible(store.Read(p + "add", "AppliesTo"), longPath), "complete exclusions at the size limit are retained");
+            boundary[0].Path += "x"; registry.Register(@"C:\app.exe", @"C:\Disk", boundary);
+            Check(!store.Exists(p + "add") && store.Exists(p + "keep-server") && logs.Count == 1, "one character over budget removes upload verb and logs fallback without changing keep-server");
+            registry.Register(@"C:\app.exe", @"C:\Disk", rows.Concat(Enumerable.Range(0, 80).Select(i => new DiskFolderState { Path = @"D:\Long path " + i + new string('я', 40), Kind = DiskExplorerKind.Offline })));
+            Check(!store.Exists(p + "add") && !UploadVisible(store.Read(p + "add", "AppliesTo"), rows[3].Path) && store.Exists(p + "download"), "large snapshots hide upload globally, including external placeholders, and retain download");
+            registry.Register(@"C:\app.exe", @"C:\Disk", rows);
+            Check(store.Read(p + "add", "AppliesTo") == upload && !UploadVisible(store.Read(p + "add", "AppliesTo"), rows[0].Path), "shorter snapshot restores the complete safe upload predicate");
+            registry.Register(@"C:\app.exe", @"C:\Disk", rows.Concat(new[] { new DiskFolderState { Path = "bad\r\npath", ServerOnly = true } }));
+            Check(!store.Exists(p + "add"), "unrepresentable protected path cannot silently weaken upload exclusions");
             registry.Cleanup(); Check(store.Values.Count == 0, "owned HKCU keys removed");
-            store.Write(p + "add", "RemoteAgentsOwner", "foreign"); registry.Register(@"C:\app.exe", @"C:\Disk", rows); registry.Cleanup();
-            Check(store.Read(p + "add", "RemoteAgentsOwner") == "foreign", "foreign registry owner preserved");
+            store.Write(p + "add", "RemoteAgentsOwner", "foreign"); registry.Register(@"C:\app.exe", @"C:\Disk", boundary); registry.Cleanup();
+            Check(store.Read(p + "add", "RemoteAgentsOwner") == "foreign", "foreign registry owner preserved even during fallback");
             Reject(() => registry.Register("bad\r\nexe", @"C:\Disk", rows), "command injection rejected");
         }
         internal sealed class FakeRest : IDiskRest

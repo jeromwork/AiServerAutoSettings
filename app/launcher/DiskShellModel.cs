@@ -20,7 +20,7 @@ namespace RemoteAgents.Launcher
         {
             get {
                 switch (Kind) {
-                    case DiskExplorerKind.ServerOnly: return "Только на сервере. Правый клик → Забрать с сервера";
+                    case DiskExplorerKind.ServerOnly: return "Только на сервере. Правый клик → Скачать на компьютер";
                     case DiskExplorerKind.Synced: return "Синхронизировано с сервером";
                     case DiskExplorerKind.Syncing: return "Синхронизируется: " + Percent + "%";
                     case DiskExplorerKind.Paused: return "Синхронизация приостановлена";

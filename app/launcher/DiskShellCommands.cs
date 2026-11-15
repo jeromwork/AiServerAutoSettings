@@ -79,7 +79,7 @@ namespace RemoteAgents.Launcher
             }
             string name = Path.GetFileName(request.Path);
             if (!DiskPaths.ValidName(name)) throw new IOException("Имя папки недопустимо на сервере");
-            if (snapshot.Folders.Any(f => string.Equals(f.Name, name, StringComparison.OrdinalIgnoreCase))) throw new IOException("На Диске уже есть папка с таким именем; используйте «Забрать с сервера»");
+            if (snapshot.Folders.Any(f => string.Equals(f.Name, name, StringComparison.OrdinalIgnoreCase))) throw new IOException("На Диске уже есть папка с таким именем; используйте «Скачать на компьютер»");
             // Server auto-accept uses the label as the top-level directory name. An ID must not collide locally.
             row = new DiskFolderState { Id = name, Name = name, Path = request.Path };
             if (snapshot.Folders.Any(f => string.Equals(f.Id, row.Id, StringComparison.OrdinalIgnoreCase))) throw new IOException("ID папки уже занят в Syncthing");
