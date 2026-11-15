@@ -238,7 +238,7 @@ def telegram_restore(e, apply):
     # Accept valid live key rotations; repair malformed/missing key stores.
     keys = '.local/opt/tg-gateway/state/keys.json'
     try:
-        live_keys = json.loads(current.get(keys, 'null'))
+        live_keys = e.module_files.telegram_keys(current.get(keys, 'null'))
         if live_keys.get('version') == 1 and isinstance(live_keys.get('keys'), dict):
             saved[keys] = current[keys]
     except (ValueError, AttributeError):

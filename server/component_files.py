@@ -40,6 +40,14 @@ def path(name):
     return p
 
 
+def telegram_keys(text):
+    # Reuse the gateway CLI's validator; no second credential-store dialect.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('component_tg_keys', Path(__file__).parent / 'tg-gateway/tg_gateway_keys.py')
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    return module.validate_keys(json.loads(text))
+
+
 def validate(kind, files):
     if not isinstance(files, dict) or len(files) > 256 or any(not allowed(kind, n) or not isinstance(v, str) for n, v in files.items()):
         raise ValueError('invalid component identity')
@@ -51,7 +59,7 @@ def validate(kind, files):
         if any(type(ports.get(n)) is not int or not 1 <= ports[n] <= 65535 for n in ('gui', 'listen')):
             raise ValueError('invalid disk ports')
     if kind == 'telegram':
-        keys = json.loads(files.get(FIXED[kind][2], 'null'))
+        keys = telegram_keys(files.get(FIXED[kind][2], 'null'))
         if not set(FIXED[kind]) <= files.keys() or not isinstance(keys, dict) or keys.get('version') != 1 or not isinstance(keys.get('keys'), dict):
             raise ValueError('incomplete Telegram identity')
         json.loads(files[FIXED[kind][3]])

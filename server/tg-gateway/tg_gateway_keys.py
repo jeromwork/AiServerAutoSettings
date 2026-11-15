@@ -29,6 +29,10 @@ def read_keys(path):
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {"version": 1, "keys": {}}
+    return validate_keys(data)
+
+
+def validate_keys(data):
     if (not isinstance(data, dict) or type(data.get("version")) is not int
             or data["version"] != 1 or not isinstance(data.get("keys"), dict)):
         raise ValueError()

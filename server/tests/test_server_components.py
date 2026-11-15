@@ -59,6 +59,12 @@ class ComponentsTests(unittest.TestCase):
             with self.subTest(kind=kind, files=files), self.assertRaises(ValueError):
                 app.component_files.validate(kind, files)
 
+    def test_semantically_corrupt_telegram_key_store_is_not_adopted(self):
+        for raw in ('{"version":1,"keys":{"client":{"sha256":"broken","created":"2026-11-15"}}}',
+                    '{"version":1,"keys":{"client":{"sha256":"' + 'a' * 64 + '","created":"broken"}}}'):
+            with self.assertRaises(ValueError):
+                app.component_files.telegram_keys(raw)
+
     def test_symlink_private_user_restore_never_escapes_home(self):
         engine = self.f.engine(self.c); engine.install_code()
         outside = self.f.path('/outside'); outside.mkdir()
