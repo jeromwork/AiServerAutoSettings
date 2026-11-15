@@ -19,7 +19,6 @@ pwsh=${PWSH:-$HOME/.cache/pwsh-test/pwsh}
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-first-install.ps1" -TestHome "$testdir/wizard" < /dev/null
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-accept.ps1" -TestHome "$testdir/disk-accept" < /dev/null
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-cleanup.ps1" -TestHome "$testdir/disk-cleanup" < /dev/null
-  timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-install.ps1" < /dev/null
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-pairing.ps1" -TestHome "$testdir/disk-pairing" < /dev/null
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-account.ps1" -TestHome "$testdir/accounts" < /dev/null
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-wizard.ps1" -TestHome "$testdir/setup-wizard" < /dev/null
@@ -79,6 +78,10 @@ wait "$server_pid" || failed=1
 cat "$testdir/server.log"
 [[ $failed == 0 ]] || exit 1
 trap cleanup EXIT
+# This suite launches two child suites and enforces a 30 s aggregate budget.
+# Keep it out of the server/offline overlap: scheduling contention alone can
+# double its elapsed time without any failed lifecycle/startup assertions.
+timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-install.ps1" < /dev/null
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -- "$testdir/core"
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ProductName=RemoteVPN -- "$testdir/core-vpn"
 timeout 120 python3 "$here/test-disk-explorer-engine.py"
