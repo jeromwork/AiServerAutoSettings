@@ -489,9 +489,21 @@ try{
     $tunAst=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'Vpn.Tun.ps1'),[ref]$tunTokens,[ref]$tunErrors)
     Assert ($tunErrors.Count -eq 0) 'Vpn.Tun.ps1 разбирается'
     $tunBody=$tunAst.Find({param($node) $node -is [Management.Automation.Language.TryStatementAst]},$false).Extent.Text
-    function Invoke-TestVpn([string]$Action,[bool]$Admin,$FakeSnapshot,$FakeExclusions,[int[]]$OwnProcessIds=@()){
+    function ConvertTo-TestRouteTable($Routes,$Adapters){
+        $table=@()
+        foreach($route in @($Routes)){
+            $bits=ConvertTo-TestBits $route.DestinationPrefix;$owner=@($Adapters|Where-Object {[int]$_.ifIndex -eq [int]$route.InterfaceIndex})[0].Name
+            $table+=@([pscustomobject]@{Family=$bits.Family;Bits=$bits.Bits;If=[int]$route.InterfaceIndex;Metric=[int]$route.Metric;Owner=[string]$owner})
+        }
+        $table
+    }
+    # Граница ОС для Vpn.Tun.ps1 и функций маршрутов: UAC, планировщик, sing-box, сеть Windows и таблица маршрутов подменены,
+    # остальное (ветки Enable/Worker/Rollback, план маршрутов, хост-маршруты, проверки) настоящее. Action 'Custom' выполняет -Body в тех же условиях.
+    function Invoke-TestVpn([string]$Action,[bool]$Admin,$FakeSnapshot,$FakePlan,[int[]]$OwnProcessIds=@(),[bool]$FailRoutes=$false,$ExtraRoutes=@(),[bool]$FailRemove=$false,[scriptblock]$Body=$null){
         $oldOs=$env:OS;$oldRoot=$env:SystemRoot;$realWriteStatus=${function:Write-VpnStatus}
-        $script:vpnRun=@{uac=0;uacVerb='';uacArgs='';order=@();at=$null;statuses=@();checks=0;reads=0}
+        $script:vpnRun=@{uac=0;uacVerb='';uacArgs='';order=@();at=$null;statuses=@();checks=0;reads=0;created=@();lookups=@();capturedArg=@();failRemove=$FailRemove}
+        $script:fakeRoutes=New-Object Collections.ArrayList
+        foreach($r in @($FakeSnapshot.Routes)+@($ExtraRoutes)){[void]$script:fakeRoutes.Add($r)}
         try{
             $env:OS='Windows_NT';$env:SystemRoot=$work
             $root=$work;$ParentPid=0;$child=$null;$mutex=$null;$locked=$false;$parent=$null;$failure=$false;$Session=''
@@ -503,9 +515,9 @@ try{
             function Get-VpnSnapshot { $FakeSnapshot }
             function Get-VpnOwnedProcessIds { $OwnProcessIds }
             function Get-TransportCandidates { $paths }
-            function Get-TransportNetwork { [pscustomobject]@{interface='Wi-Fi'} }
+            function Get-TransportNetwork { [pscustomobject]@{interface='Wi-Fi';ifIndex=12;gateway='192.168.1.1'} }
             function Get-VpnTransportState { [pscustomobject]@{active='hy2-edge'} }
-            function Get-VpnExclusions { $FakeExclusions }
+            function Get-VpnRoutePlan { $FakePlan }
             function Protect-TransportPath { }
             function Test-TransportConfigFile { }
             function Test-VpnAdministrator { $Admin }
@@ -517,29 +529,55 @@ try{
             function New-ScheduledTaskTrigger {param([switch]$Once,$At) [pscustomobject]@{At=$At}}
             function Register-ScheduledTask {param($TaskName,$Action,$Trigger,$Principal,$Settings,[switch]$Force) $script:vpnRun.order+=@('register:'+$TaskName);if($TaskName -eq $tasks.Rollback){$script:vpnRun.at=$Trigger.At}}
             function Start-ScheduledTask {param($TaskName) $script:vpnRun.order+=@('start:'+$TaskName)}
+            function Stop-ScheduledTask {param($TaskName,$ErrorAction)}
             function Unregister-ScheduledTask {param($TaskName,$Confirm,$ErrorAction) $script:vpnRun.order+=@('unregister:'+$TaskName)}
-            function Start-TransportProcess {param($Exe,$Arguments,[switch]$Probe) [pscustomobject]@{Process=[pscustomobject]@{HasExited=$false;Id=4242}}}
+            function Get-CimInstance {param($ClassName,$ErrorAction) @()}
+            function Start-TransportProcess {param($Exe,$Arguments,[switch]$Probe) $script:vpnRun.order+=@('tun-start');[pscustomobject]@{Process=[pscustomobject]@{HasExited=$false;Id=4242}}}
             function Stop-TransportProcess {param($Child)}
             function Save-TransportOwner {param($Root,$Component,$Child,$Exe,$Config)}
             function Clear-VpnRoutes {param($Root,$Session)}
             function Get-NetAdapter {param([switch]$IncludeHidden,$ErrorAction) [pscustomobject]@{Name='RemoteAgents-TUN';Status='Up';ifIndex=71;InterfaceGuid='tun-guid'}}
-            function Test-VpnThroughTun {param($Settings,$Adapter) $script:vpnRun.checks++}
+            function Test-VpnThroughTun {param($Settings,$Adapter,$Captured) $script:vpnRun.checks++;$script:vpnRun.capturedArg=@($Captured)}
             function Start-Sleep {param($Seconds,$Milliseconds) if($Seconds){Write-TransportJson $stopFile @{stop=$true}}}
+            function Get-NetRoute {param($DestinationPrefix,$InterfaceIndex,$NextHop,$PolicyStore,$ErrorAction)
+                @($script:fakeRoutes|Where-Object {(-not $DestinationPrefix -or $_.DestinationPrefix -eq $DestinationPrefix) -and (-not $InterfaceIndex -or [int]$_.InterfaceIndex -eq [int]$InterfaceIndex) -and (-not $NextHop -or $_.NextHop -eq $NextHop)})
+            }
+            function New-NetRoute {param($DestinationPrefix,$InterfaceIndex,$NextHop,$RouteMetric,$PolicyStore,$ErrorAction)
+                $script:vpnRun.order+=@('route+:'+$DestinationPrefix);if($FailRoutes){throw 'отказано в доступе'}
+                $script:vpnRun.created+=@([pscustomobject]@{prefix=$DestinationPrefix;ifIndex=[int]$InterfaceIndex;nextHop=$NextHop;metric=$RouteMetric;store=$PolicyStore})
+                [void]$script:fakeRoutes.Add([pscustomobject]@{DestinationPrefix=$DestinationPrefix;InterfaceIndex=[int]$InterfaceIndex;NextHop=$NextHop;RouteMetric=$RouteMetric;Metric=([int]$RouteMetric+25)})
+            }
+            function Remove-NetRoute {param($DestinationPrefix,$InterfaceIndex,$NextHop,$PolicyStore,$Confirm,$ErrorAction)
+                $script:vpnRun.order+=@('route-:'+$DestinationPrefix);if($script:vpnRun.failRemove){throw 'отказано в доступе'}
+                $left=@($script:fakeRoutes|Where-Object {-not ($_.DestinationPrefix -eq $DestinationPrefix -and [int]$_.InterfaceIndex -eq [int]$InterfaceIndex -and $_.NextHop -eq $NextHop)})
+                $script:fakeRoutes.Clear();foreach($r in $left){[void]$script:fakeRoutes.Add($r)}
+            }
+            function Find-NetRoute {param($RemoteIPAddress,$ErrorAction)
+                $w=Get-TestBestRoute (ConvertTo-TestRouteTable $script:fakeRoutes $FakeSnapshot.Adapters) $RemoteIPAddress
+                $script:vpnRun.lookups+=@([pscustomobject]@{address=$RemoteIPAddress;interface=$w.If;owner=$w.Owner})
+                [pscustomobject]@{DestinationPrefix='model';InterfaceIndex=$w.If}
+            }
             function Write-VpnStatus {param($Root,$Ok,$Enabled,$State,$Conflict,$Summary) & $realWriteStatus $Root $Ok $Enabled $State $Conflict $Summary;$written=Read-TransportJson (Join-Path $Root 'status/vpn.json');$script:vpnRun.statuses+=@([pscustomobject]@{state=$State;ok=$Ok;summary=$written.summary;warning=$written.warning})}
-            if($Action -eq 'Worker'){$Session='test-session';Write-TransportJson $sessionFile @{session=$Session}}
-            $bodyOutput=. ([scriptblock]::Create($tunBody))
+            if($Action -in @('Worker','Rollback')){$Session='test-session';Write-TransportJson $sessionFile @{session=$Session}}
+            if($Body){return (& $Body)}
+            $bodyOutput=. ([scriptblock]::Create($tunBody)) 2>$null
             [pscustomobject]@{failure=$failure;statuses=@($script:vpnRun.statuses)}
         }finally{$env:OS=$oldOs;$env:SystemRoot=$oldRoot}
     }
     # Реальный снимок компьютера владельца (Test-VpnConflict.ps1 на сборке 00815a7): рядом работает Happ в режиме TUN
     # (happd.exe, Happ.exe, xray.exe; адаптер happ-default-tun «SocksTunnel Tunnel», ifIndex 70; маршруты 0.0.0.0/1 и
     # 128.0.0.0/1 via 0.0.0.0, 0.0.0.0/0 via 10.6.7.2), а также OpenVPN TAP-Windows6 и Tailscale. Wi-Fi, адреса
-    # OpenVPN и метрики типовые: Metric — полная метрика (маршрут + интерфейс) только для модели выбора маршрута.
+    # OpenVPN, служебные маршруты Windows (loopback, multicast, Teredo, 6to4) и метрики типовые: Metric — полная метрика
+    # (маршрут + интерфейс) только для модели выбора маршрута. 203.0.113.99/32 — обход собственного сервера Happ через шлюз.
     $ownerRoutes=@(
-        @{p='0.0.0.0/0';i=12;h='192.168.1.1';m=25},@{p='192.168.1.0/24';i=12;h='0.0.0.0';m=281},
+        @{p='0.0.0.0/0';i=12;h='192.168.1.1';m=25},@{p='192.168.1.0/24';i=12;h='0.0.0.0';m=281},@{p='192.168.1.50/32';i=12;h='0.0.0.0';m=281},
+        @{p='169.254.0.0/16';i=12;h='0.0.0.0';m=281},@{p='224.0.0.0/4';i=12;h='0.0.0.0';m=281},@{p='255.255.255.255/32';i=12;h='0.0.0.0';m=281},
+        @{p='203.0.113.99/32';i=12;h='192.168.1.1';m=26},@{p='127.0.0.0/8';i=1;h='0.0.0.0';m=331},
+        @{p='::/0';i=12;h='fe80::1';m=25},@{p='2001:db8:1::/64';i=12;h='::';m=281},@{p='2001:db8:1::50/128';i=12;h='::';m=281},@{p='fe80::/64';i=12;h='::';m=281},@{p='ff00::/8';i=12;h='::';m=256},
         @{p='0.0.0.0/1';i=70;h='0.0.0.0';m=1},@{p='128.0.0.0/1';i=70;h='0.0.0.0';m=1},@{p='0.0.0.0/0';i=70;h='10.6.7.2';m=2},@{p='10.6.7.0/30';i=70;h='0.0.0.0';m=257},
         @{p='10.8.0.0/24';i=9;h='0.0.0.0';m=281},@{p='198.51.100.0/24';i=9;h='10.8.0.1';m=282},
-        @{p='100.64.0.0/10';i=15;h='0.0.0.0';m=5},@{p='fd7a:115c:a1e0::/48';i=15;h='::';m=5})
+        @{p='100.64.0.0/10';i=15;h='0.0.0.0';m=5},@{p='fd7a:115c:a1e0::/48';i=15;h='::';m=5},
+        @{p='2001::/32';i=18;h='::';m=271},@{p='2002::/16';i=19;h='::';m=281})
     $ownerSnap=[pscustomobject]@{
         Processes=@(
             [pscustomobject]@{Name='happd.exe';ProcessId=5100;ExecutablePath='C:\Program Files\Happ\happd.exe'},
@@ -547,19 +585,29 @@ try{
             [pscustomobject]@{Name='xray.exe';ProcessId=5300;ExecutablePath='C:\Program Files\Happ\xray.exe'},
             [pscustomobject]@{Name='sing-box.exe';ProcessId=5400;ExecutablePath='C:\RemoteAgents\sing-box.exe'});
         Adapters=@(
+            [pscustomobject]@{ifIndex=1;Name='Loopback Pseudo-Interface 1';Status='Up';HardwareInterface=$false;Virtual=$true;InterfaceDescription='Software Loopback Interface 1'},
             [pscustomobject]@{ifIndex=12;Name='Wi-Fi';Status='Up';HardwareInterface=$true;Virtual=$false;InterfaceDescription='Intel(R) Wi-Fi 6 AX201 160MHz'},
             [pscustomobject]@{ifIndex=70;Name='happ-default-tun';Status='Up';HardwareInterface=$false;Virtual=$true;InterfaceDescription='SocksTunnel Tunnel'},
             [pscustomobject]@{ifIndex=9;Name='OpenVPN TAP-Windows6';Status='Up';HardwareInterface=$false;Virtual=$true;InterfaceDescription='TAP-Windows Adapter V9'},
-            [pscustomobject]@{ifIndex=15;Name='Tailscale';Status='Up';HardwareInterface=$false;Virtual=$true;InterfaceDescription='Tailscale Tunnel'});
+            [pscustomobject]@{ifIndex=15;Name='Tailscale';Status='Up';HardwareInterface=$false;Virtual=$true;InterfaceDescription='Tailscale Tunnel'},
+            [pscustomobject]@{ifIndex=18;Name='Teredo Tunneling Pseudo-Interface';Status='Up';HardwareInterface=$false;Virtual=$true;InterfaceDescription='Teredo Tunneling Pseudo-Interface'},
+            [pscustomobject]@{ifIndex=19;Name='6TO4 Adapter';Status='Up';HardwareInterface=$false;Virtual=$true;InterfaceDescription='Microsoft 6to4 Adapter'});
         Routes=@($ownerRoutes|ForEach-Object {[pscustomobject]@{DestinationPrefix=$_.p;InterfaceIndex=$_.i;NextHop=$_.h;Metric=$_.m}})}
+    $ownerNet=[pscustomobject]@{interface='Wi-Fi';ifIndex=12;gateway='192.168.1.1'}
     $inventory=Find-VpnConflicts $ownerSnap @(5400) ''
     Assert ($inventory.conflict -and (Get-VpnCoexistenceWarning $inventory) -eq 'рядом работает: happ-default-tun, OpenVPN TAP-Windows6, Tailscale') 'снимок владельца: Happ, OpenVPN и Tailscale названы в предупреждении'
     Assert ($inventory.processHints -eq 'happd.exe, Happ.exe, xray.exe') 'снимок владельца: наш sing-box не считается чужим процессом'
     Assert ((@($inventory.items|Where-Object {$_.kind -eq 'route' -and $_.name -eq 'happ-default-tun'}|ForEach-Object {$_.detail.Split(' ')[0]}|Sort-Object) -join ',') -eq '0.0.0.0/0,0.0.0.0/1,128.0.0.0/1') 'снимок владельца: три маршрута Happ найдены'
     $realText=${function:Invoke-TransportText}
     try{function Invoke-TransportText($Exe,$Arguments){$script:fakeHop}
-        $ownerExclusions=Get-VpnExclusions $settings $paths $ownerSnap @{'entry.example.com'=@('203.0.113.55')} -Root $work
+        $ownerPlan=Get-VpnRoutePlan $settings $paths $ownerSnap @{'entry.example.com'=@('203.0.113.55')} -Root $work
+        $mixedPlan=Get-VpnRoutePlan $settings $paths $ownerSnap @{'entry.example.com'=@('10.20.30.40','198.51.100.77','2001:db8:77::1','203.0.113.55')} -Root $work
+        $legacyExclusions=@(Get-VpnExclusions $settings $paths $ownerSnap @{'entry.example.com'=@('203.0.113.55')} -Root $work)
     }finally{Set-Item function:Invoke-TransportText $realText}
+    $ownerExclusions=@($ownerPlan.Exclusions)
+    Assert (($legacyExclusions -join ',') -eq ($ownerExclusions -join ',')) 'Get-VpnExclusions остаётся обёрткой над планом маршрутов'
+    Assert ((@($ownerPlan.Endpoints|Sort-Object) -join ',') -eq (@('203.0.113.10','203.0.113.20','203.0.113.30','203.0.113.40','203.0.113.55')|Sort-Object) -join ',') 'план: публичные узлы канала (сервер, entry, relay, hop, домен) идут в обход через физический шлюз'
+    Assert ((@($mixedPlan.Endpoints|Sort-Object) -join ',') -eq (@('2001:db8:77::1','203.0.113.10','203.0.113.20','203.0.113.30','203.0.113.40','203.0.113.55')|Sort-Object) -join ',' -and '10.20.30.40/32' -in $mixedPlan.Exclusions -and '198.51.100.77/32' -in $mixedPlan.Exclusions) 'план: частный адрес и адрес внутри сети OpenVPN остаются исключёнными из TUN, но без хост-маршрута через интернет-шлюз'
     foreach($cidr in @('10.0.0.0/8','172.16.0.0/12','192.168.0.0/16','100.64.0.0/10','10.8.0.0/24','198.51.100.0/24','10.8.0.1/32','203.0.113.10/32','203.0.113.20/32','203.0.113.30/32','203.0.113.40/32','203.0.113.55/32')){Assert ($cidr -in $ownerExclusions) ('снимок владельца: исключение '+$cidr)}
     Assert (@($ownerExclusions|Where-Object {$_ -in @('0.0.0.0/0','0.0.0.0/1','128.0.0.0/1','10.6.7.0/30','10.6.7.2/32')}).Count -eq 0) 'снимок владельца: маршруты Happ не исключаются из TUN'
     # Физический адаптер выбирается мимо Happ даже при самом низком метрике его default.
@@ -575,7 +623,7 @@ try{
             function Get-NetIPAddress {param($InterfaceIndex,$AddressFamily,$ErrorAction) [pscustomobject]@{IPAddress='192.168.1.50';AddressState='Preferred'}}
             Get-TransportNetwork
         }
-        Assert ($ownerNetwork[$variant].available -and $ownerNetwork[$variant].interface -eq 'Wi-Fi') ('снимок владельца: сокеты привязываются к Wi-Fi, а не к happ-default-tun ('+$variant+')')
+        Assert ($ownerNetwork[$variant].available -and $ownerNetwork[$variant].interface -eq 'Wi-Fi' -and $ownerNetwork[$variant].ifIndex -eq 12 -and $ownerNetwork[$variant].gateway -eq '192.168.1.1') ('снимок владельца: сокеты и хост-маршруты привязываются к Wi-Fi и его шлюзу, а не к happ-default-tun ('+$variant+')')
     }
     # Все собственные сокеты TUN привязаны к физическому адаптеру: сервер и hop идут мимо TUN и мимо Happ.
     foreach($candidate in @($paths.Candidates|Where-Object {$_.tunCapable})){
@@ -590,8 +638,7 @@ try{
     $ownerRealized4=@(Get-TestTunRoutes $ownerTun.inbounds[0].route_address $ownerTun.inbounds[0].route_exclude_address 'InterNetwork')
     $ownerRealized6=@(Get-TestTunRoutes $ownerTun.inbounds[0].route_address $ownerTun.inbounds[0].route_exclude_address 'InterNetworkV6')
     Assert ((Get-TestShortest $ownerRealized4) -ge 3 -and (Get-TestShortest $ownerRealized6) -ge 2) 'снимок владельца: наши префиксы длиннее /1 Happ (IPv4 от /3, IPv6 от /2)'
-    $ownerTable=@()
-    foreach($route in $ownerSnap.Routes){$bits=ConvertTo-TestBits $route.DestinationPrefix;$owner=@($ownerSnap.Adapters|Where-Object {$_.ifIndex -eq $route.InterfaceIndex})[0].Name;$ownerTable+=@([pscustomobject]@{Family=$bits.Family;Bits=$bits.Bits;If=[int]$route.InterfaceIndex;Metric=[int]$route.Metric;Owner=[string]$owner})}
+    $ownerTable=@(ConvertTo-TestRouteTable $ownerSnap.Routes $ownerSnap.Adapters)
     $ownerOwn=@()
     foreach($bits in $ownerRealized4){$ownerOwn+=@([pscustomobject]@{Family='InterNetwork';Bits=$bits;If=71;Metric=0;Owner='RemoteAgents-TUN'})}
     foreach($bits in $ownerRealized6){$ownerOwn+=@([pscustomobject]@{Family='InterNetworkV6';Bits=$bits;If=71;Metric=0;Owner='RemoteAgents-TUN'})}
@@ -622,24 +669,201 @@ try{
     # Enable доходит до UAC, элевированный Enable ставит автооткат до запуска worker, worker доходит до on: предупреждение в статусе.
     $ownerWarning='рядом работает: happ-default-tun, OpenVPN TAP-Windows6, Tailscale'
     $ownerTasks=Get-VpnTaskNames $work
-    $run=Invoke-TestVpn 'Enable' $false $ownerSnap $ownerExclusions @(5400)
+    $stateFile=Join-Path $work 'state/vpn-bypass-routes.json'
+    $run=Invoke-TestVpn 'Enable' $false $ownerSnap $ownerPlan @(5400)
     $uacStatus=Read-TransportJson (Join-Path $work 'status/vpn.json')
     Assert ($script:vpnRun.uac -eq 1 -and $script:vpnRun.uacVerb -eq 'RunAs' -and $script:vpnRun.uacArgs.Contains('-Broker') -and -not $run.failure) 'снимок владельца: Happ рядом не блокирует Enable, UAC остаётся явным'
     Assert ($uacStatus.state -eq 'awaiting-uac' -and $uacStatus.warning -eq $ownerWarning -and $uacStatus.summary.Contains($ownerWarning) -and $uacStatus.conflict.conflict) 'снимок владельца: предупреждение рядом с состоянием UAC'
-    $run=Invoke-TestVpn 'Enable' $true $ownerSnap $ownerExclusions @(5400)
+    $run=Invoke-TestVpn 'Enable' $true $ownerSnap $ownerPlan @(5400)
     $startStatus=Read-TransportJson (Join-Path $work 'status/vpn.json')
     Assert (-not $run.failure -and ($script:vpnRun.order -join ',') -eq ('register:'+$ownerTasks.Rollback+',register:'+$ownerTasks.Worker+',start:'+$ownerTasks.Worker)) 'снимок владельца: автооткат зарегистрирован до запуска worker'
     Assert (($script:vpnRun.at-(Get-Date)).TotalSeconds -gt 290 -and ($script:vpnRun.at-(Get-Date)).TotalSeconds -le 300) 'снимок владельца: автооткат через пять минут'
     Assert ($startStatus.state -eq 'starting' -and $startStatus.enabled -and $startStatus.warning -eq $ownerWarning -and (Get-VpnOptions (Read-TransportSettings $work)).enabled) 'снимок владельца: запуск идёт с предупреждением и сохранённым намерением'
     Set-VpnEnabled $work $false
-    $run=Invoke-TestVpn 'Worker' $true $ownerSnap $ownerExclusions @(5400)
-    $onStates=@($run.statuses|Where-Object {$_.state -eq 'on'})
+    # Worker рядом с Happ: остаток убитого прежнего worker чистится, хост-маршруты к узлам канала ставятся до запуска TUN,
+    # проверка победителя идёт до снятия автоотката, при остановке остаются только чужие маршруты.
+    $staleRoute=[pscustomobject]@{DestinationPrefix='203.0.113.77/32';InterfaceIndex=12;NextHop='192.168.1.1';RouteMetric=1;Metric=26}
+    Write-TransportJson $stateFile @{session='dead-session';routes=@([pscustomobject]@{prefix='203.0.113.77/32';ifIndex=12;nextHop='192.168.1.1'})}
+    $run=Invoke-TestVpn 'Worker' $true $ownerSnap $ownerPlan @(5400) -ExtraRoutes @($staleRoute)
+    $order=@($script:vpnRun.order);$onStates=@($run.statuses|Where-Object {$_.state -eq 'on'})
     Assert (-not $run.failure -and $onStates.Count -ge 1 -and $onStates[0].ok -and $onStates[0].summary.Contains($ownerWarning) -and $script:vpnRun.checks -ge 1) 'снимок владельца: worker проходит проверку TUN и достигает on рядом с Happ'
-    Assert ($script:vpnRun.order[0] -eq ('register:'+$ownerTasks.Rollback) -and $script:vpnRun.order[1] -eq ('unregister:'+$ownerTasks.Rollback)) 'снимок владельца: автооткат снимается только после проверки TUN'
+    $taskOrder=@($order|Where-Object {$_ -like 'register:*' -or $_ -like 'unregister:*'})
+    Assert ($taskOrder[0] -eq ('register:'+$ownerTasks.Rollback) -and $taskOrder[1] -eq ('unregister:'+$ownerTasks.Rollback)) 'снимок владельца: автооткат снимается только после проверки TUN'
+    $endpointRoutes=@($script:vpnRun.created)
+    Assert ($endpointRoutes.Count -eq 5 -and @($endpointRoutes|Where-Object {$_.nextHop -eq '192.168.1.1' -and $_.ifIndex -eq 12 -and $_.metric -eq 1 -and $_.store -eq 'ActiveStore' -and $_.prefix -match '^203\.0\.113\.(10|20|30|40|55)/32$'}).Count -eq 5) 'снимок владельца: хост-маршруты /32 к серверу и hop через шлюз Wi-Fi, ActiveStore'
+    Assert ($order.IndexOf('route-:203.0.113.77/32') -ge 0 -and $order.IndexOf('route-:203.0.113.77/32') -lt $order.IndexOf('route+:203.0.113.10/32') -and $order.IndexOf('route+:203.0.113.10/32') -lt $order.IndexOf('tun-start')) 'снимок владельца: остаток прежнего worker убран, хост-маршруты стоят до запуска TUN'
+    Assert (@($script:vpnRun.lookups|Where-Object {$_.interface -eq 12}).Count -ge 5 -and @($script:vpnRun.lookups|Where-Object {$_.interface -ne 12}).Count -eq 0) 'снимок владельца: маршрут до каждого узла канала проверен и идёт через Wi-Fi, а не через Happ'
+    Assert ((@($script:fakeRoutes|Where-Object {$_.NextHop -eq '192.168.1.1' -and $_.DestinationPrefix -match '^203\.0\.113\.(10|20|30|40|55|77)/32$'}).Count -eq 0) -and -not (Test-Path -LiteralPath $stateFile) -and @($script:fakeRoutes|Where-Object {$_.DestinationPrefix -eq '203.0.113.99/32'}).Count -eq 1) 'снимок владельца: при остановке хост-маршруты убраны, чужой обход Happ не тронут'
+    $finalStatus=Read-TransportJson (Join-Path $work 'status/vpn.json')
+    Assert (@($finalStatus.conflict.captured).Count -eq 0 -and @($finalStatus.conflict.ignored|Where-Object {$_.prefix -eq '203.0.113.99/32' -and $_.reason -eq 'neighbor-host-bypass'}).Count -eq 1 -and @($finalStatus.conflict.ignored|Where-Object {$_.prefix -eq '2001:db8:1::/64' -and $_.reason -eq 'lan'}).Count -eq 1) 'снимок владельца: служебные маршруты Windows не тревожат, обход сервера Happ и LAN объяснены'
     $workerConfig=Read-TransportJson (Join-Path $work 'state/vpn-sing-box.json')
     Assert (($workerConfig.inbounds[0].route_address -join ',') -eq ($ownerTun.inbounds[0].route_address -join ',') -and '198.51.100.0/24' -in $workerConfig.inbounds[0].route_exclude_address -and '203.0.113.40/32' -in $workerConfig.inbounds[0].route_exclude_address) 'снимок владельца: worker строит TUN из тех же исключений'
     Assert (([IO.File]::ReadAllText((Join-Path $work 'logs/vpn.log'))).Contains('on '+$ownerWarning)) 'снимок владельца: предупреждение записано в локальный журнал'
     Set-VpnEnabled $work $false
+    # Без привязки сокета (пересылка на Wi-Fi, ICS) /1 Happ забрал бы сервер: хост-маршрут возвращает его на физический шлюз,
+    # а проверка победителя ловит случай, когда обход не создан или его перебивает чужой /32.
+    $plainSnap=[pscustomobject]@{Processes=@();Adapters=@($ownerSnap.Adapters|Where-Object {$_.ifIndex -in @(1,12)});Routes=@($ownerSnap.Routes|Where-Object {$_.InterfaceIndex -in @(1,12)})}
+    $foreignHost=[pscustomobject]@{DestinationPrefix='203.0.113.10/32';InterfaceIndex=70;NextHop='0.0.0.0';RouteMetric=1;Metric=1}
+    $verdicts=@{}
+    foreach($case in @(@('happ-no-bypass',$ownerSnap,$true,@()),@('happ-with-bypass',$ownerSnap,$false,@()),@('plain-no-bypass',$plainSnap,$true,@()),@('foreign-host-route',$ownerSnap,$false,@($foreignHost)))){
+        $verdicts[$case[0]]=Invoke-TestVpn 'Custom' $true $case[1] $ownerPlan -FailRoutes $case[2] -ExtraRoutes $case[3] -Body {
+            $sync=Sync-VpnBypassRoutes $work 'verdict' $ownerNet @($ownerPlan.Endpoints)
+            $threw=$false;try{Assert-VpnEndpointRoutes $ownerNet $sync.check}catch{$threw=$true}
+            Clear-VpnBypassRoutes $work 'verdict'
+            [pscustomobject]@{failed=$sync.failed;added=$sync.added;threw=$threw}
+        }
+    }
+    Assert ($verdicts['happ-no-bypass'].failed -eq 5 -and $verdicts['happ-no-bypass'].threw) 'сервер и hop без хост-маршрута уходят в Happ: проверка узлов канала это ловит'
+    Assert ($verdicts['happ-with-bypass'].added -eq 5 -and -not $verdicts['happ-with-bypass'].threw) 'с хост-маршрутами сервер и hop идут через физический шлюз даже при /1 Happ'
+    Assert ($verdicts['plain-no-bypass'].failed -eq 5 -and -not $verdicts['plain-no-bypass'].threw) 'без соседнего VPN сбой создания хост-маршрута не мешает: default физического адаптера и так верный'
+    Assert ($verdicts['foreign-host-route'].threw) 'чужой /32 до сервера с меньшей метрикой перебивает наш обход: проверка узлов канала это ловит'
+    # Worker: обход не создан, Happ перехватывает сервер — TUN не подтверждается, проверка TUN не доходит, остатков нет.
+    $run=Invoke-TestVpn 'Worker' $true $ownerSnap $ownerPlan @(5400) -FailRoutes $true
+    $lastStatus=Read-TransportJson (Join-Path $work 'status/vpn.json')
+    Assert ($run.failure -and @($run.statuses|Where-Object {$_.state -eq 'on'}).Count -eq 0 -and $lastStatus.state -eq 'error' -and $lastStatus.warning -eq $ownerWarning -and $script:vpnRun.checks -eq 0 -and -not (Test-Path -LiteralPath $stateFile)) 'снимок владельца: сервер перехвачен Happ, обход не создан: worker не объявляет on и откатывается'
+    Set-VpnEnabled $work $false
+    $run=Invoke-TestVpn 'Worker' $true $plainSnap $ownerPlan @(5400) -FailRoutes $true
+    Assert (-not $run.failure -and @($run.statuses|Where-Object {$_.state -eq 'on'}).Count -ge 1) 'без соседнего VPN worker доходит до on и при сбое создания хост-маршрутов'
+    Set-VpnEnabled $work $false
+    # Независимый автооткат удаляет и хост-маршруты; чужой сеанс и сбой удаления его не ломают.
+    $rbRoute=[pscustomobject]@{DestinationPrefix='203.0.113.10/32';InterfaceIndex=12;NextHop='192.168.1.1';RouteMetric=1;Metric=26}
+    $rbState=@{session='test-session';routes=@([pscustomobject]@{prefix='203.0.113.10/32';ifIndex=12;nextHop='192.168.1.1'})}
+    Write-TransportJson $stateFile $rbState
+    $run=Invoke-TestVpn 'Rollback' $true $ownerSnap $ownerPlan @(5400) -ExtraRoutes @($rbRoute)
+    Assert (-not $run.failure -and $run.statuses[-1].state -eq 'rolled-back' -and $script:vpnRun.order -contains 'route-:203.0.113.10/32' -and -not (Test-Path -LiteralPath $stateFile) -and @($script:fakeRoutes|Where-Object {$_.DestinationPrefix -eq '203.0.113.10/32' -and $_.NextHop -eq '192.168.1.1'}).Count -eq 0) 'автооткат удаляет хост-маршруты к узлам канала'
+    Write-TransportJson $stateFile @{session='other-session';routes=$rbState.routes}
+    $run=Invoke-TestVpn 'Rollback' $true $ownerSnap $ownerPlan @(5400) -ExtraRoutes @($rbRoute)
+    Assert ($run.statuses[-1].state -eq 'rolled-back' -and (Test-Path -LiteralPath $stateFile) -and @($script:fakeRoutes|Where-Object {$_.DestinationPrefix -eq '203.0.113.10/32' -and $_.NextHop -eq '192.168.1.1'}).Count -eq 1) 'автооткат не трогает хост-маршруты чужого сеанса'
+    Remove-Item -LiteralPath $stateFile -Force
+    Write-TransportJson $stateFile $rbState
+    $run=Invoke-TestVpn 'Rollback' $true $ownerSnap $ownerPlan @(5400) -ExtraRoutes @($rbRoute) -FailRemove $true
+    Assert ($run.failure -and (Test-Path -LiteralPath $stateFile) -and @($script:vpnRun.order|Where-Object {$_ -like 'unregister:*'}).Count -eq 0 -and $run.statuses[-1].state -eq 'error') 'сбой удаления хост-маршрута: запись и независимый автооткат сохранены'
+    Remove-Item -LiteralPath $stateFile -Force
+    # Sync/Clear: что создаётся, что записывается, что удаляется.
+    $sync=Invoke-TestVpn 'Custom' $true $ownerSnap $ownerPlan -Body {
+        $endpoints=@($ownerPlan.Endpoints)
+        $first=Sync-VpnBypassRoutes $work 'sync-a' $ownerNet $endpoints
+        $again=Sync-VpnBypassRoutes $work 'sync-a' $ownerNet $endpoints
+        $fewer=Sync-VpnBypassRoutes $work 'sync-a' $ownerNet @($endpoints|Where-Object {$_ -ne '203.0.113.55'})
+        $recorded=@((Read-TransportJson $stateFile).routes|ForEach-Object {$_.prefix}|Sort-Object)
+        $other=Sync-VpnBypassRoutes $work 'sync-b' $ownerNet @('203.0.113.20')
+        $afterOther=@((Read-TransportJson $stateFile).routes|ForEach-Object {$_.prefix})
+        Clear-VpnBypassRoutes $work 'sync-b'
+        [pscustomobject]@{first=$first;again=$again;fewer=$fewer;recorded=$recorded;other=$other;afterOther=$afterOther;left=@($script:fakeRoutes|ForEach-Object {$_.DestinationPrefix});stateGone=-not (Test-Path -LiteralPath $stateFile)}
+    }
+    Assert ($sync.first.added -eq 5 -and $sync.first.failed -eq 0 -and @($sync.first.check).Count -eq 5) 'Sync: пять публичных узлов — пять хост-маршрутов'
+    Assert ($sync.again.added -eq 0 -and $sync.again.removed -eq 0 -and $sync.again.failed -eq 0 -and $sync.again.preexisting -eq 0) 'Sync: повтор ничего не меняет и не считает свои маршруты чужими'
+    Assert ($sync.fewer.removed -eq 1 -and ($sync.recorded -join ',') -eq '203.0.113.10/32,203.0.113.20/32,203.0.113.30/32,203.0.113.40/32') 'Sync: ушедший из списка узел теряет только свой маршрут и запись'
+    Assert ($sync.other.added -eq 1 -and ($sync.afterOther -join ',') -eq '203.0.113.20/32' -and ($sync.left -join ',') -notmatch '203\.0\.113\.(10|30|40|55)/32' -and $sync.stateGone) 'Sync: запись другого сеанса сначала чистится; Clear убирает последний маршрут и запись'
+    $existing=[pscustomobject]@{DestinationPrefix='203.0.113.10/32';InterfaceIndex=12;NextHop='192.168.1.1';RouteMetric=5;Metric=30}
+    $clear=Invoke-TestVpn 'Custom' $true $ownerSnap $ownerPlan -ExtraRoutes @($existing) -Body {
+        $r=Sync-VpnBypassRoutes $work 'clear-a' $ownerNet @('203.0.113.10','203.0.113.20')
+        $recordedBefore=@((Read-TransportJson $stateFile).routes|ForEach-Object {$_.prefix})
+        Clear-VpnBypassRoutes $work 'not-our-session'
+        $afterWrong=@($script:fakeRoutes|Where-Object {$_.DestinationPrefix -in @('203.0.113.10/32','203.0.113.20/32')}).Count
+        Clear-VpnBypassRoutes $work 'clear-a'
+        [pscustomobject]@{result=$r;recorded=$recordedBefore;afterWrong=$afterWrong;left=@($script:fakeRoutes|Where-Object {$_.DestinationPrefix -in @('203.0.113.10/32','203.0.113.20/32')}|ForEach-Object {$_.DestinationPrefix})}
+    }
+    Assert ($clear.result.added -eq 1 -and $clear.result.preexisting -eq 1 -and ($clear.recorded -join ',') -eq '203.0.113.20/32') 'Sync: чужой такой же маршрут не записывается как наш'
+    Assert ($clear.afterWrong -eq 2 -and ($clear.left -join ',') -eq '203.0.113.10/32') 'Clear: чужой сеанс не трогает, свой сеанс удаляет только записанное'
+    $v6=Invoke-TestVpn 'Custom' $true $ownerSnap $ownerPlan -Body {
+        $withGateway=Sync-VpnBypassRoutes $work 'v6-a' $ownerNet @('2001:db8:77::1','203.0.113.10')
+        $created=@($script:vpnRun.created|ForEach-Object {$_.prefix+'>'+$_.nextHop})
+        Clear-VpnBypassRoutes $work 'v6-a'
+        $noGateway=Sync-VpnBypassRoutes $work 'v6-b' ([pscustomobject]@{interface='Ethernet 2';ifIndex=13;gateway='192.168.2.1'}) @('2001:db8:88::1','203.0.113.11')
+        Clear-VpnBypassRoutes $work 'v6-b'
+        [pscustomobject]@{withGateway=$withGateway;created=$created;noGateway=$noGateway}
+    }
+    Assert ($v6.withGateway.added -eq 2 -and ($v6.created | Sort-Object) -contains '2001:db8:77::1/128>fe80::1' -and $v6.created -contains '203.0.113.10/32>192.168.1.1') 'Sync: IPv6-узел получает /128 через IPv6-шлюз физического адаптера'
+    Assert ($v6.noGateway.added -eq 1 -and @($v6.noGateway.skipped).Count -eq 1 -and $v6.noGateway.skipped[0] -eq '2001:db8:88::1' -and @($v6.noGateway.check).Count -eq 1) 'Sync: без IPv6-шлюза IPv6-узел пропущен и не проверяется'
+    # Хост-маршрут повторяет маршрут самого физического адаптера: статический роутер для подсети сохраняется, адрес в подсети адаптера обхода не требует.
+    $staticRoutes=@([pscustomobject]@{DestinationPrefix='203.0.113.0/27';InterfaceIndex=12;NextHop='192.168.1.254';RouteMetric=5;Metric=30},[pscustomobject]@{DestinationPrefix='203.0.113.32/28';InterfaceIndex=12;NextHop='0.0.0.0';RouteMetric=5;Metric=30})
+    $static=Invoke-TestVpn 'Custom' $true $ownerSnap $ownerPlan -ExtraRoutes $staticRoutes -Body {
+        $r=Sync-VpnBypassRoutes $work 'static-a' $ownerNet @($ownerPlan.Endpoints)
+        $created=@($script:vpnRun.created|ForEach-Object {$_.prefix+'>'+$_.nextHop}|Sort-Object)
+        $assertOk=$true;try{Assert-VpnEndpointRoutes $ownerNet $r.check}catch{$assertOk=$false}
+        Clear-VpnBypassRoutes $work 'static-a'
+        [pscustomobject]@{result=$r;created=$created;assertOk=$assertOk}
+    }
+    Assert ($static.result.added -eq 4 -and @($static.result.check).Count -eq 5 -and (($static.created -join ',') -eq (@('203.0.113.10/32>192.168.1.254','203.0.113.20/32>192.168.1.254','203.0.113.30/32>192.168.1.254','203.0.113.55/32>192.168.1.1')|Sort-Object) -join ',') -and $static.assertOk) 'Sync: статический роутер подсети сохранён, адрес в подсети адаптера без обхода, остальные через default'
+    # Смена шлюза: прежний хост-маршрут не принимается за маршрут адаптера и заменяется новым.
+    $gateway=Invoke-TestVpn 'Custom' $true $ownerSnap $ownerPlan -Body {
+        $old=Sync-VpnBypassRoutes $work 'gw-a' $ownerNet @('203.0.113.10')
+        $left=@($script:fakeRoutes|Where-Object {-not ($_.DestinationPrefix -eq '0.0.0.0/0' -and $_.InterfaceIndex -eq 12)});$script:fakeRoutes.Clear();foreach($r in $left){[void]$script:fakeRoutes.Add($r)}
+        [void]$script:fakeRoutes.Add([pscustomobject]@{DestinationPrefix='0.0.0.0/0';InterfaceIndex=12;NextHop='192.168.1.2';RouteMetric=0;Metric=25})
+        $new=Sync-VpnBypassRoutes $work 'gw-a' ([pscustomobject]@{interface='Wi-Fi';ifIndex=12;gateway='192.168.1.2'}) @('203.0.113.10')
+        $now=@($script:fakeRoutes|Where-Object {$_.DestinationPrefix -eq '203.0.113.10/32'}|ForEach-Object {$_.NextHop})
+        Clear-VpnBypassRoutes $work 'gw-a'
+        [pscustomobject]@{old=$old;new=$new;now=$now}
+    }
+    Assert ($gateway.old.added -eq 1 -and $gateway.new.removed -eq 1 -and $gateway.new.added -eq 1 -and ($gateway.now -join ',') -eq '192.168.1.2') 'Sync: после смены шлюза хост-маршрут заменяется на новый шлюз'
+    $failRemove=Invoke-TestVpn 'Custom' $true $ownerSnap $ownerPlan -FailRemove $true -Body {
+        $first=Sync-VpnBypassRoutes $work 'fail-a' $ownerNet @('203.0.113.10')
+        $shrink=Sync-VpnBypassRoutes $work 'fail-a' $ownerNet @()
+        $kept=@((Read-TransportJson $stateFile).routes).Count
+        $thrown=$false;try{Clear-VpnBypassRoutes $work 'fail-a'}catch{$thrown=$true}
+        $result=[pscustomobject]@{first=$first;shrink=$shrink;kept=$kept;thrown=$thrown;fileKept=(Test-Path -LiteralPath $stateFile)}
+        Remove-Item -LiteralPath $stateFile -Force -ErrorAction SilentlyContinue
+        $result
+    }
+    Assert ($failRemove.first.added -eq 1 -and $failRemove.shrink.failed -eq 1 -and $failRemove.kept -eq 1 -and $failRemove.thrown -and $failRemove.fileKept) 'сбой удаления: маршрут остаётся в записи, Clear сообщает об ошибке и сохраняет запись'
+    # P1: чужой 8.0.0.0/8 длиннее нашего 8.0.0.0/7, а проверка одного адреса на половину интернета его не видит.
+    $slipRoute=[pscustomobject]@{DestinationPrefix='8.0.0.0/8';InterfaceIndex=70;NextHop='0.0.0.0';Metric=1}
+    $slipSnap=[pscustomobject]@{Processes=$ownerSnap.Processes;Adapters=$ownerSnap.Adapters;Routes=@($ownerSnap.Routes)+@($slipRoute)}
+    $slipTable=@(ConvertTo-TestRouteTable $slipSnap.Routes $slipSnap.Adapters)+$ownerOwn
+    Assert ((Get-TestBestRoute $slipTable '8.8.8.8').If -eq 70 -and (Get-TestBestRoute $slipTable '93.184.216.34').If -eq 71 -and (Get-TestBestRoute $slipTable '8.4.4.4').If -eq 70 -and (Get-TestBestRoute $slipTable '9.9.9.9').If -eq 71) 'снимок с 8.0.0.0/8: 8.x забирает Happ, остальной интернет наш'
+    $script:simTable=$slipTable
+    $oldCheck=& {
+        function Get-NetRoute {param($InterfaceIndex,$ErrorAction) foreach($r in @($ownerOwn)){[pscustomobject]@{InterfaceIndex=71;DestinationPrefix=(ConvertFrom-TestBits $r.Bits $r.Family)}}}
+        function Find-NetRoute {param($RemoteIPAddress,$ErrorAction) $w=Get-TestBestRoute $script:simTable $RemoteIPAddress;[pscustomobject]@{DestinationPrefix='model';InterfaceIndex=$w.If}}
+        $threw=$false;try{Assert-VpnInternetRoutes $settings ([pscustomobject]@{ifIndex=71})}catch{$threw=$true};$threw
+    }
+    Assert (-not $oldCheck) 'проверка одного адреса на половину интернета пропускает 8.0.0.0/8 (поэтому нужен анализ перекрытий)'
+    $found=Find-VpnCapturedRoutes $slipSnap $ownerExclusions ''
+    Assert (@($found.captured).Count -eq 1 -and $found.captured[0].prefix -eq '8.0.0.0/8' -and $found.captured[0].interface -eq 'happ-default-tun' -and $found.captured[0].reason -eq 'captured' -and -not $found.truncated) 'перекрытия: 8.0.0.0/8 соседнего VPN найден'
+    Assert ((Get-VpnCoexistenceWarning (Add-VpnCaptured ([pscustomobject]@{conflict=$false;items=@()}) $slipSnap $ownerExclusions '')) -eq 'мимо TUN идут: 8.0.0.0/8 (happ-default-tun)') 'перекрытия: предупреждение называет диапазон и интерфейс'
+    $probeBlocked=$false;try{Assert-VpnProbeNotCaptured '8.8.8.8' $found.captured}catch{$probeBlocked=$true}
+    Assert ($probeBlocked) 'адрес проверки внутри захваченного диапазона не принимается'
+    Assert-VpnProbeNotCaptured '93.184.216.34' $found.captured;Assert-VpnProbeNotCaptured '198.18.0.1' $found.captured;Assert-VpnProbeNotCaptured '2606:4700:4700::1111' $found.captured
+    $routeCheck=& {
+        function Find-NetRoute {param($RemoteIPAddress,$ErrorAction) $w=Get-TestBestRoute $script:simTable $RemoteIPAddress;[pscustomobject]@{DestinationPrefix='model';InterfaceIndex=$w.If}}
+        $captures=$false;try{Assert-VpnTunRoute '8.8.8.8' 71}catch{$captures=$true};$ours=$true;try{Assert-VpnTunRoute '93.184.216.34' 71}catch{$ours=$false};@($captures,$ours)
+    }
+    Assert ($routeCheck[0] -and $routeCheck[1]) 'цель проверки в 8.0.0.0/8 не проходит Assert-VpnTunRoute, цель вне диапазона проходит'
+    # Test-VpnThroughTun целиком (bootstrap: без SSH; адрес-литерал вместо DNS): цель HTTPS в захваченном диапазоне отвергается до запроса.
+    $probeSettings=Copy-TransportObject $settings;$probeSettings.Transport|Add-Member -Force bootstrap $true;$probeSettings.Vpn|Add-Member -Force checkUrl 'https://8.8.8.8/'
+    $probeVerdicts=& {
+        function Get-NetRoute {param($InterfaceIndex,$ErrorAction) foreach($r in @($ownerOwn)){[pscustomobject]@{InterfaceIndex=71;DestinationPrefix=(ConvertFrom-TestBits $r.Bits $r.Family)}}}
+        function Find-NetRoute {param($RemoteIPAddress,$ErrorAction) $w=Get-TestBestRoute $script:simTable $RemoteIPAddress;[pscustomobject]@{DestinationPrefix='model';InterfaceIndex=$w.If}}
+        $messages=@{}
+        foreach($mode in @('captured-list','os-route-only')){
+            $given=@();if($mode -eq 'captured-list'){$given=@($found.captured)}
+            try{Test-VpnThroughTun $probeSettings ([pscustomobject]@{ifIndex=71}) $given;$messages[$mode]='no error'}catch{$messages[$mode]=$_.Exception.Message}
+        }
+        $messages
+    }
+    Assert ($probeVerdicts['captured-list'] -like '*забрал соседний VPN*' -and $probeVerdicts['os-route-only'] -like '*обходит TUN*') 'Test-VpnThroughTun: цель HTTPS в 8.0.0.0/8 отвергается и по списку захваченных диапазонов, и по фактическому маршруту ОС'
+    $run=Invoke-TestVpn 'Worker' $true $slipSnap $ownerPlan @(5400)
+    $slipOn=@($run.statuses|Where-Object {$_.state -eq 'on'});$slipStatus=Read-TransportJson (Join-Path $work 'status/vpn.json')
+    Assert (-not $run.failure -and $slipOn.Count -ge 1 -and $slipOn[0].warning -eq ($ownerWarning+'; мимо TUN идут: 8.0.0.0/8 (happ-default-tun)') -and $slipOn[0].summary.EndsWith($slipOn[0].warning)) 'worker: on с предупреждением о захваченном 8.0.0.0/8, а не молчаливое «трафик идёт через выбранный путь»'
+    Assert (@($script:vpnRun.capturedArg).Count -eq 1 -and $script:vpnRun.capturedArg[0].prefix -eq '8.0.0.0/8' -and @($slipStatus.conflict.captured).Count -eq 1 -and $slipStatus.conflict.captured[0].prefix -eq '8.0.0.0/8') 'worker: захваченные диапазоны переданы проверке TUN и записаны в status/vpn.json'
+    Set-VpnEnabled $work $false
+    # Точность анализа: что считается захватом, а что нет.
+    $precision=@(
+        @{p='8.0.0.0/8';want=$true},@{p='32.0.0.0/4';want=$true},@{p='2a00::/12';want=$true},
+        @{p='64.0.0.0/3';want=$false},@{p='0.0.0.0/3';want=$false},@{p='64.0.0.0/2';want=$false},@{p='0.0.0.0/2';want=$false},
+        @{p='10.99.0.0/16';want=$false},@{p='100.100.0.0/16';want=$false},@{p='198.51.100.0/25';want=$false},@{p='203.0.113.40/32';want=$false},
+        @{p='224.0.0.0/24';want=$false},@{p='169.254.9.0/24';want=$false},@{p='fe80::/32';want=$false},@{p='fd00:1::/32';want=$false})
+    $precisionSnap=[pscustomobject]@{Processes=@();Adapters=$ownerSnap.Adapters;Routes=@($precision|ForEach-Object {[pscustomobject]@{DestinationPrefix=$_.p;InterfaceIndex=70;NextHop='0.0.0.0';Metric=1}})}
+    $precisionFound=Find-VpnCapturedRoutes $precisionSnap $ownerExclusions ''
+    foreach($case in $precision){Assert ((@($precisionFound.captured|Where-Object {$_.prefix -eq $case.p}).Count -eq 1) -eq $case.want) ('перекрытия: '+$case.p+' '+$(if($case.want){'забирает адреса у TUN'}else{'не забирает адреса у TUN'}))}
+    $ownFound=Find-VpnCapturedRoutes ([pscustomobject]@{Processes=@();Adapters=@($ownerSnap.Adapters)+@([pscustomobject]@{ifIndex=71;Name='RemoteAgents-TUN';Status='Up';HardwareInterface=$false;Virtual=$true;InterfaceDescription='Wintun'});Routes=@([pscustomobject]@{DestinationPrefix='8.0.0.0/8';InterfaceIndex=71;NextHop='0.0.0.0';Metric=0})}) $ownerExclusions 'RemoteAgents-TUN'
+    Assert (@($ownFound.captured).Count -eq 0) 'перекрытия: маршруты нашего интерфейса не считаются чужими'
+    $manyRoutes=@(1..30|ForEach-Object {[pscustomobject]@{DestinationPrefix=('8.'+$_+'.0.0/16');InterfaceIndex=70;NextHop='0.0.0.0';Metric=1}})
+    $limited=Find-VpnCapturedRoutes ([pscustomobject]@{Processes=@();Adapters=$ownerSnap.Adapters;Routes=$manyRoutes}) $ownerExclusions '' -Limit 10
+    Assert ($limited.truncated -and @($limited.captured).Count -eq 10) 'перекрытия: слишком большая таблица обрезается с пометкой, а не тормозит worker'
+    $listed=[pscustomobject]@{conflict=$false;items=@();captured=@(1..4|ForEach-Object {[pscustomobject]@{prefix=('9.'+$_+'.0.0/'+(8+$_));interface=('if'+$_)}})}
+    Assert ((Get-VpnCoexistenceWarning $listed) -eq 'мимо TUN идут: 9.1.0.0/9 (if1), 9.2.0.0/10 (if2), 9.3.0.0/11 (if3) и ещё 1') 'предупреждение показывает три самых широких диапазона и число остальных'
     # Worker пишет статус раз в секунду: предупреждение повторяется в журнале только при смене состояния.
     $repeatRoot=Join-Path $work 'repeat-status';$script:VpnLoggedState=$null;$script:VpnLoggedWarning=$null
     Write-VpnStatus $repeatRoot $true $true 'on' $inventory 'ok';Write-VpnStatus $repeatRoot $true $true 'on' $inventory 'ok';Write-VpnStatus $repeatRoot $false $false 'error' $inventory 'x'

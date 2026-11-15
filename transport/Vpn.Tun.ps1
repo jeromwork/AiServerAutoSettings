@@ -33,7 +33,11 @@ try{
         $ownerFile=Join-Path $root 'state/vpn-owner.json'
         if(Test-Path -LiteralPath $ownerFile){$owner=Read-TransportJson $ownerFile;if([int]$owner.pid -in $own){Stop-Process -Id ([int]$owner.pid) -Force -ErrorAction SilentlyContinue}}
         Stop-ScheduledTask -TaskName $tasks.Worker -ErrorAction SilentlyContinue
-        Clear-VpnRoutes $root $Session
+        # Маршруты TUN и хост-маршруты к узлам канала чистятся независимо: сбой первых не оставляет вторые.
+        $cleanup=$null
+        try{Clear-VpnRoutes $root $Session}catch{$cleanup=$_}
+        try{Clear-VpnBypassRoutes $root $Session}catch{if(-not $cleanup){$cleanup=$_}}
+        if($cleanup){throw $cleanup}
         foreach($taskName in @($tasks.Worker,$tasks.Rollback)){Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue}
         Write-VpnStatus $root $false $false 'rolled-back' $conflict 'TUN выключен независимым автооткатом';return
     }
@@ -58,7 +62,8 @@ try{
         # Соседний VPN не блокирует запуск; инвентаризация попадёт в статус и журнал.
         if(@($snapshot.Adapters|Where-Object {$_.Name -eq $v.interfaceName}).Count){throw 'Имя TUN уже занято; существующий интерфейс не трогаем'}
         $paths=Get-TransportCandidates $settings $root;$net=Get-TransportNetwork;$status=Get-VpnTransportState $root $settings
-        $exclude=Get-VpnExclusions $settings $paths $snapshot -Root $root
+        $plan=Get-VpnRoutePlan $settings $paths $snapshot -Root $root;$exclude=$plan.Exclusions
+        $conflict=Add-VpnCaptured $conflict $snapshot $exclude ''
         $cfg=New-VpnTunConfig $settings $paths $status.active $exclude $net.interface
         $preflight=Join-Path $root 'state/vpn-preflight.json';Write-TransportJson $preflight $cfg -Private;Test-TransportConfigFile $settings.Options.singBoxPath $preflight
         if(-not (Test-VpnAdministrator)){
@@ -91,6 +96,7 @@ try{
     if(-not $Session -or (Read-TransportJson $sessionFile).session -ne $Session){return}
     $mutex=New-Object Threading.Mutex($false,$tasks.Worker);try{$locked=$mutex.WaitOne(0)}catch [Threading.AbandonedMutexException]{$locked=$true};if(-not $locked){throw 'TUN уже запущен'}
     if($ParentPid -gt 0){$parent=[Diagnostics.Process]::GetProcessById($ParentPid);[void]$parent.Handle}
+    Clear-VpnBypassRoutes $root '' -Stale
     $lastRevision='';$lastTag='';$nextCheck=[DateTime]::MinValue;$validated=$false
     while($true){
         $settings=Read-TransportSettings $root;$v=Get-VpnOptions $settings
@@ -100,9 +106,12 @@ try{
         if(-not $child -or $lastTag -ne $status.active -or $lastRevision -ne $revision -or [DateTime]::UtcNow -ge $nextCheck){
             $snapshot=Get-VpnSnapshot;$own=@(Get-VpnOwnedProcessIds $root $snapshot);$ownInterface='';if($child){$ownInterface=$v.interfaceName}
             $conflict=Find-VpnConflicts $snapshot $own $ownInterface
-            $paths=Get-TransportCandidates $settings $root;$net=Get-TransportNetwork;$exclude=Get-VpnExclusions $settings $paths $snapshot -Root $root
+            $paths=Get-TransportCandidates $settings $root;$net=Get-TransportNetwork;$plan=Get-VpnRoutePlan $settings $paths $snapshot -Root $root;$exclude=$plan.Exclusions
+            $conflict=Add-VpnCaptured $conflict $snapshot $exclude $ownInterface
             $cfg=New-VpnTunConfig $settings $paths $status.active $exclude $net.interface
             $newJson=ConvertTo-Json -InputObject $cfg -Depth 40 -Compress
+            # Хост-маршруты к узлам канала через физический шлюз ставятся до запуска и пересборки TUN.
+            $bypass=Sync-VpnBypassRoutes $root $Session $net $plan.Endpoints $snapshot.Routes
             if(-not $child -or $newJson -ne $lastJson){
                 $pending=Join-Path $root 'state/vpn-pending.json';Write-TransportJson $pending $cfg -Private;Test-TransportConfigFile $settings.Options.singBoxPath $pending
                 Register-VpnRollbackTask $root $Session $PSCommandPath;$validated=$false
@@ -118,11 +127,12 @@ try{
                 }
                 if(-not $adapter){throw 'Не появился интерфейс TUN'}
                 Write-TransportJson (Join-Path $root 'state/vpn-interface.json') @{session=$Session;guid=[string]$adapter.InterfaceGuid;name=$adapter.Name} -Private
-                Test-VpnThroughTun $settings $adapter
-                # Только успешная проверка сервера, DNS, внешнего HTTPS и TUN routes снимает watchdog.
+                Assert-VpnEndpointRoutes $net $bypass.check
+                Test-VpnThroughTun $settings $adapter $conflict.captured
+                # Только успешная проверка узлов канала, сервера, DNS, внешнего HTTPS и TUN routes снимает watchdog.
                 if(-not $validated){Unregister-ScheduledTask -TaskName $tasks.Rollback -Confirm:$false;$validated=$true}
                 $lastJson=$newJson
-            }else{Test-VpnThroughTun $settings $adapter}
+            }else{Assert-VpnEndpointRoutes $net $bypass.check;Test-VpnThroughTun $settings $adapter $conflict.captured}
             $lastTag=$status.active;$lastRevision=$revision;$nextCheck=[DateTime]::UtcNow.AddSeconds(30)
         }
         if($child.Process.HasExited){throw 'TUN неожиданно завершился'}
@@ -136,9 +146,14 @@ try{
 }finally{
     if($action -eq 'Worker' -and $locked){
         Stop-TransportProcess $child
-        try{Clear-VpnRoutes $root $Session;Set-VpnEnabled $root $false
+        try{
+            $cleanup=$null
+            try{Clear-VpnRoutes $root $Session}catch{$cleanup=$_}
+            try{Clear-VpnBypassRoutes $root $Session}catch{if(-not $cleanup){$cleanup=$_}}
+            if($cleanup){throw $cleanup}
+            Set-VpnEnabled $root $false
             foreach($name in @($tasks.Worker,$tasks.Rollback)){Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue}
-            if(-not $failure){Write-VpnStatus $root $false $false 'off' $conflict 'Системный VPN выключен; маршруты нашего интерфейса удалены'}
+            if(-not $failure){Write-VpnStatus $root $false $false 'off' $conflict 'Системный VPN выключен; маршруты нашего интерфейса и обходы к узлам канала удалены'}
         }catch{$failure=$true;Write-VpnStatus $root $false $false 'rollback-error' $conflict 'Не удалось подтвердить очистку наших маршрутов; независимый автооткат сохранён'}
     }
     if($locked){$mutex.ReleaseMutex()};if($mutex){$mutex.Dispose()};if($parent){$parent.Dispose()}

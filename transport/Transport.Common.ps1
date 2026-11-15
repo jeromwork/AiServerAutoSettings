@@ -758,8 +758,8 @@ function Get-TransportNetwork {
         $neighbor=Get-NetNeighbor -InterfaceIndex $route.InterfaceIndex -IPAddress $route.NextHop -ErrorAction Stop|Where-Object {$_.State -notin @('Unreachable','Incomplete') -and $_.LinkLayerAddress -notmatch '^(00[:-]){5}00$'}|Select-Object -First 1
         $ip=Get-NetIPAddress -InterfaceIndex $route.InterfaceIndex -AddressFamily IPv4 -ErrorAction Stop|Where-Object {$_.AddressState -eq 'Preferred'}|Select-Object -First 1
         $id=Get-TransportFingerprint $neighbor.LinkLayerAddress $profile.Name
-        [pscustomobject]@{id=$id;name=$profile.Name;interface=$adapter.Name;ip=$ip.IPAddress;available=[bool]($id -and $ip.IPAddress)}
-    }catch{[pscustomobject]@{id=$null;name=$null;interface=$null;ip=$null;available=$false}}
+        [pscustomobject]@{id=$id;name=$profile.Name;interface=$adapter.Name;ifIndex=[int]$route.InterfaceIndex;gateway=[string]$route.NextHop;ip=$ip.IPAddress;available=[bool]($id -and $ip.IPAddress)}
+    }catch{[pscustomobject]@{id=$null;name=$null;interface=$null;ifIndex=0;gateway='';ip=$null;available=$false}}
 }
 function Get-TransportMetered($Options) {
     $configured=([string]$Options.metered).ToLowerInvariant();if($configured -ne 'auto'){return ($configured -eq 'true')}
@@ -956,9 +956,25 @@ function Assert-VpnCidr([string]$Cidr) {
     $max=128;if($ip.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork){$max=32}
     if($bits -lt 0 -or $bits -gt $max){throw 'Неверная маска VPN'}
 }
-function Get-VpnExclusions($Settings,$Paths,$Snapshot,[hashtable]$Resolved=@{},[string]$Root='') {
+function Get-VpnLocalRanges {
+    # Всегда вне нашего TUN: LAN, CGNAT/Tailscale, link-local, multicast, loopback.
+    @('10.0.0.0/8','172.16.0.0/12','192.168.0.0/16','100.64.0.0/10','169.254.0.0/16','224.0.0.0/4','127.0.0.0/8','::1/128','fc00::/7','fe80::/10','ff00::/8')
+}
+function Test-VpnCidrContains([string]$Cidr,[string]$Address) {
+    $parts=$Cidr.Split('/');$net=[Net.IPAddress]::Parse($parts[0]);$ip=[Net.IPAddress]::Parse($Address)
+    if($net.AddressFamily -ne $ip.AddressFamily){return $false}
+    $a=$net.GetAddressBytes();$b=$ip.GetAddressBytes();$bits=[int]$parts[1]
+    for($i=0;$bits -gt 0;$i++){
+        $take=[Math]::Min(8,$bits);$mask=(255 -shl (8-$take)) -band 255
+        if(([int]$a[$i] -band $mask) -ne ([int]$b[$i] -band $mask)){return $false}
+        $bits-=$take
+    }
+    return $true
+}
+function Get-VpnRoutePlan($Settings,$Paths,$Snapshot,[hashtable]$Resolved=@{},[string]$Root='') {
     $v=Get-VpnOptions $Settings
-    $cidrs=@('10.0.0.0/8','172.16.0.0/12','192.168.0.0/16','100.64.0.0/10','169.254.0.0/16','224.0.0.0/4','127.0.0.0/8','::1/128','fc00::/7','fe80::/10','ff00::/8')+@($v.excludeCidrs)
+    $local=@(Get-VpnLocalRanges)
+    $cidrs=@($local)+@($v.excludeCidrs)
     # Все транспортные endpoints, включая detour и выключенные узлы с имеющимся кэшем.
     $hosts=@($Settings.Profile.serverAddress)+@($Paths.Outbounds|Where-Object {$_.server -and $_.server -notin @('127.0.0.1','::1')}|ForEach-Object {$_.server})
     foreach($relay in @($Settings.Transport.relays)){if($relay){$hosts+=Get-TransportValue $relay 'host' $relay.server}}
@@ -973,22 +989,81 @@ function Get-VpnExclusions($Settings,$Paths,$Snapshot,[hashtable]$Resolved=@{},[
         $text=Invoke-TransportText $Settings.Profile.sshExecutable $args
         foreach($line in $text -split "`n"){if($line -match '^hostname (.+)$'){$hosts+=$Matches[1].Trim();break}}
     }
+    $endpoints=@()
     foreach($hostName in @($hosts|Where-Object {$_}|Select-Object -Unique)){
         $ip=$null;$addresses=@()
         if([Net.IPAddress]::TryParse([string]$hostName,[ref]$ip)){$addresses=@($ip.ToString())}
         elseif($Resolved.ContainsKey([string]$hostName)){$addresses=@($Resolved[[string]$hostName])}
         else{$addresses=@([Net.Dns]::GetHostAddresses([string]$hostName)|ForEach-Object {$_.ToString()})}
         if(-not $addresses.Count){throw 'Не удалось исключить внешний узел VPN'}
-        foreach($address in $addresses){$cidrs+=ConvertTo-VpnHostCidr $address}
+        foreach($address in $addresses){$cidrs+=ConvertTo-VpnHostCidr $address;$endpoints+=@([string]$address)}
     }
+    $openVpnCidrs=@()
     $openVpn=@($Snapshot.Adapters|Where-Object {($_.Name+' '+$_.InterfaceDescription) -match '(?i)OpenVPN'})
     foreach($route in @($Snapshot.Routes|Where-Object {$_.InterfaceIndex -in @($openVpn|ForEach-Object {$_.ifIndex})})){
         # Default/split-default нельзя исключать целиком: это отключило бы наш VPN.
-        if($route.DestinationPrefix -notin @('0.0.0.0/0','0.0.0.0/1','128.0.0.0/1','::/0','::/1','8000::/1')){$cidrs+=$route.DestinationPrefix}
-        if($route.NextHop -and $route.NextHop -notin @('0.0.0.0','::')){$cidrs+=ConvertTo-VpnHostCidr $route.NextHop}
+        if($route.DestinationPrefix -notin @('0.0.0.0/0','0.0.0.0/1','128.0.0.0/1','::/0','::/1','8000::/1')){$cidrs+=$route.DestinationPrefix;$openVpnCidrs+=@([string]$route.DestinationPrefix)}
+        if($route.NextHop -and $route.NextHop -notin @('0.0.0.0','::')){$cidrs+=ConvertTo-VpnHostCidr $route.NextHop;$openVpnCidrs+=@(ConvertTo-VpnHostCidr $route.NextHop)}
     }
     foreach($cidr in $cidrs){Assert-VpnCidr $cidr}
-    @($cidrs|Sort-Object -Unique)
+    # Явный обход через физический шлюз нужен только публичным адресам узлов: частные сети и сети OpenVPN
+    # (в том числе Tailscale 100.64/10) идут туда, куда им положено, и хост-маршрут через интернет-шлюз их сломал бы.
+    $inside=@($local)+@($openVpnCidrs)
+    $bypass=@($endpoints|Select-Object -Unique|Where-Object {$address=$_;-not @($inside|Where-Object {Test-VpnCidrContains $_ $address}).Count})
+    [pscustomobject]@{Exclusions=@($cidrs|Sort-Object -Unique);Endpoints=@($bypass|Sort-Object -Unique)}
+}
+function Get-VpnExclusions($Settings,$Paths,$Snapshot,[hashtable]$Resolved=@{},[string]$Root='') {
+    (Get-VpnRoutePlan $Settings $Paths $Snapshot $Resolved $Root).Exclusions
+}
+function ConvertTo-VpnPrefixBits([string]$Cidr) {
+    $parts=$Cidr.Split('/');$ip=[Net.IPAddress]::Parse($parts[0]);$length=[int]$parts[1]
+    $full=-join @($ip.GetAddressBytes()|ForEach-Object {[Convert]::ToString([int]$_,2).PadLeft(8,'0')})
+    $family=4;if($ip.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetworkV6){$family=6}
+    [pscustomobject]@{Family=$family;Length=$length;Full=$full;Bits=$full.Substring(0,$length)}
+}
+function Find-VpnCapturedRoutes($Snapshot,[string[]]$Exclusions,[string]$OwnInterface='',[int]$Limit=2000) {
+    # Чужой маршрут длиннее нашего охватывающего префикса забирает адреса у TUN (например, 8.0.0.0/8 у нашего 8.0.0.0/7),
+    # а проверка одного адреса на половину интернета его не видит. Берём все чужие маршруты длиннее /1; пропускаем свои
+    # исключения (LAN, link-local, OpenVPN, Tailscale, узлы канала), наш интерфейс, Teredo и т. п.
+    # Длина нашего охватывающего префикса для адреса a = 1 + наибольшая общая часть a с исключениями: sing-tun вычитает
+    # исключения и склеивает остаток в максимальные выровненные блоки. Равная длина (ничья по метрике) не считается.
+    $ownIndexes=@($Snapshot.Adapters|Where-Object {$OwnInterface -and $_.Name -eq $OwnInterface}|ForEach-Object {[int]$_.ifIndex})
+    $excluded=@{4=@();6=@()}
+    foreach($cidr in @($Exclusions)){$p=ConvertTo-VpnPrefixBits $cidr;$excluded[$p.Family]+=@($p)}
+    $captured=New-Object Collections.ArrayList;$ignored=New-Object Collections.ArrayList;$examined=0;$truncated=$false
+    foreach($route in @($Snapshot.Routes)){
+        $prefix=[string]$route.DestinationPrefix;$index=[int]$route.InterfaceIndex
+        if(-not $prefix -or $index -in $ownIndexes){continue}
+        try{$p=ConvertTo-VpnPrefixBits $prefix}catch{continue}
+        if($p.Length -lt 2 -or $prefix -eq '255.255.255.255/32'){continue}
+        $adapter=@($Snapshot.Adapters|Where-Object {[int]$_.ifIndex -eq $index})|Select-Object -First 1
+        $name=[string]$route.InterfaceAlias;if($adapter){$name=[string]$adapter.Name}
+        if(($name+' '+$adapter.InterfaceDescription) -match '(?i)Teredo|ISATAP|6to4|IP-HTTPS'){continue}
+        $examined++;if($examined -gt $Limit){$truncated=$true;break}
+        $inside=$false;$common=-1
+        foreach($e in @($excluded[$p.Family])){
+            if($p.Bits.StartsWith($e.Bits,[StringComparison]::Ordinal)){$inside=$true;break}
+            $left=$p.Full;$right=$e.Full;$k=0;$span=[Math]::Min($left.Length,$right.Length)
+            while($k -lt $span -and $left[$k] -eq $right[$k]){$k++}
+            if($k -gt $common){$common=$k}
+        }
+        if($inside -or $p.Length -le ($common+1)){continue}
+        $hop=[string]$route.NextHop;$onLink=(-not $hop -or $hop -eq '0.0.0.0' -or $hop -eq '::')
+        $physical=[bool]($adapter -and $adapter.HardwareInterface -eq $true)
+        $hostRoute=(($p.Family -eq 4 -and $p.Length -eq 32) -or ($p.Family -eq 6 -and $p.Length -eq 128))
+        $item=[pscustomobject]@{prefix=$prefix;interface=$name;nextHop=$hop;reason='captured'}
+        # Подсеть физического адаптера — это LAN, а хост-маршрут через его шлюз — обход сервера соседнего VPN: объясняем, не тревожим.
+        if($physical -and $onLink){$item.reason='lan';[void]$ignored.Add($item)}
+        elseif($physical -and $hostRoute){$item.reason='neighbor-host-bypass';[void]$ignored.Add($item)}
+        else{[void]$captured.Add($item)}
+    }
+    [pscustomobject]@{captured=@($captured.ToArray());ignored=@($ignored.ToArray());examined=$examined;truncated=$truncated}
+}
+function Add-VpnCaptured($Inventory,$Snapshot,[string[]]$Exclusions,[string]$OwnInterface='') {
+    $found=Find-VpnCapturedRoutes $Snapshot $Exclusions $OwnInterface
+    $Inventory|Add-Member -Force -NotePropertyName captured -NotePropertyValue @($found.captured|Select-Object -First 50)
+    $Inventory|Add-Member -Force -NotePropertyName ignored -NotePropertyValue @($found.ignored|Select-Object -First 50)
+    return $Inventory
 }
 function New-VpnTunConfig($Settings,$Paths,[string]$SelectedTag,[string[]]$ExcludeCidrs,[string]$Interface) {
     $v=Get-VpnOptions $Settings
@@ -1019,10 +1094,20 @@ function New-VpnTunConfig($Settings,$Paths,[string]$SelectedTag,[string[]]$Exclu
       dns=@{servers=@(@{type='udp';tag='bootstrap';server=$v.dnsServer;bind_interface=$Interface},@{type='https';tag='vpn-dns';server=$v.dnsServer;detour='vpn-active'});final='vpn-dns'}}
 }
 function Get-VpnCoexistenceWarning($Inventory) {
-    if(-not $Inventory -or -not $Inventory.conflict){return ''}
-    $names=@($Inventory.items|ForEach-Object {([string]$_.name -replace '[\r\n\t]',' ').Trim()}|Where-Object {$_}|Sort-Object -Unique)
-    if(-not $names.Count){return 'рядом работает: другой VPN'}
-    return 'рядом работает: '+($names -join ', ')
+    if(-not $Inventory){return ''}
+    $parts=@()
+    if($Inventory.conflict){
+        $names=@($Inventory.items|ForEach-Object {([string]$_.name -replace '[\r\n\t]',' ').Trim()}|Where-Object {$_}|Sort-Object -Unique)
+        if($names.Count){$parts+=@('рядом работает: '+($names -join ', '))}else{$parts+=@('рядом работает: другой VPN')}
+    }
+    # Чужие маршруты длиннее наших забирают часть адресов у TUN: показываем самые широкие, полный список лежит в status/vpn.json.
+    $captured=@($Inventory.captured|Where-Object {$_}|Sort-Object {[int]([string]$_.prefix).Split('/')[1]})
+    if($captured.Count){
+        $shown=@($captured|Select-Object -First 3|ForEach-Object {[string]$_.prefix+' ('+(([string]$_.interface -replace '[\r\n\t]',' ').Trim())+')'})
+        $more='';if($captured.Count -gt 3){$more=' и ещё '+($captured.Count-3)}
+        $parts+=@('мимо TUN идут: '+($shown -join ', ')+$more)
+    }
+    return ($parts -join '; ')
 }
 function Write-VpnStatus([string]$Root,[bool]$Ok,[bool]$Enabled,[string]$State,$Conflict,[string]$Summary) {
     $warning=Get-VpnCoexistenceWarning $Conflict
@@ -1085,10 +1170,11 @@ function Assert-VpnInternetRoutes($Settings,$Adapter) {
         }
     }
 }
-function Test-VpnThroughTun($Settings,$Adapter) {
+function Test-VpnThroughTun($Settings,$Adapter,$Captured=@()) {
     $v=Get-VpnOptions $Settings
     Assert-VpnInternetRoutes $Settings $Adapter
     if(-not $Settings.Transport.bootstrap){
+    Assert-VpnProbeNotCaptured $v.probeAddress $Captured
     Assert-VpnTunRoute $v.probeAddress $Adapter.ifIndex
     # SSH с закреплённым host key проверяет сервер через TUN (synthetic IP -> server loopback),
     # 64 КиБ дополнительно обнаруживают зависание после первых пакетов.
@@ -1106,7 +1192,7 @@ function Test-VpnThroughTun($Settings,$Adapter) {
     $uri=[Uri]$v.checkUrl
     $addresses=@([Net.Dns]::GetHostAddresses($uri.DnsSafeHost));if(-not $addresses.Count){throw 'DNS через VPN не отвечает'}
     # WebRequest может выбрать любой из A/AAAA: все результаты должны маршрутизироваться через наш TUN.
-    foreach($ip in $addresses){Assert-VpnTunRoute $ip.ToString() $Adapter.ifIndex}
+    foreach($ip in $addresses){Assert-VpnProbeNotCaptured $ip.ToString() $Captured;Assert-VpnTunRoute $ip.ToString() $Adapter.ifIndex}
     $req=[Net.HttpWebRequest]::Create($uri);$req.Proxy=$null;$req.Timeout=20000;$req.ReadWriteTimeout=20000;$req.AllowAutoRedirect=$false;$req.KeepAlive=$false
     $response=$req.GetResponse()
     try{if([int]$response.StatusCode -lt 200 -or [int]$response.StatusCode -ge 300){throw 'Внешний HTTPS не прошёл проверку'}}finally{$response.Dispose()}
@@ -1120,6 +1206,104 @@ function Clear-VpnRoutes([string]$Root,[string]$Session) {
         if(@(Get-NetRoute -InterfaceIndex $adapter.ifIndex -ErrorAction SilentlyContinue).Count){throw 'Маршруты TUN остались после остановки'}
     }
     Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+}
+
+function Get-VpnPhysicalNextHop([string]$Address,[int]$InterfaceIndex,$Routes,[string]$Fallback) {
+    # Куда ОС отправила бы адрес через физический адаптер: его самый длинный маршрут, затем метрика. Хост-маршрут повторяет
+    # статические маршруты сети (например, роутер для подсети), а не слепо берёт default. Хост-маршруты /32 и /128 пропускаем:
+    # это обходы соседних VPN и наши прежние. 'on-link' — адрес в подсети адаптера, обход не нужен.
+    $best=$null;$bestLength=-1;$bestMetric=0
+    foreach($route in @($Routes)){
+        if([int]$route.InterfaceIndex -ne $InterfaceIndex){continue}
+        $prefix=[string]$route.DestinationPrefix;if(-not $prefix.Contains('/')){continue}
+        $length=[int]$prefix.Split('/')[1];if($length -ge 32 -and -not $prefix.Contains(':')){continue};if($length -ge 128){continue}
+        $metric=0;if($null -ne $route.RouteMetric){$metric=[int]$route.RouteMetric}
+        if($length -lt $bestLength -or ($length -eq $bestLength -and $metric -ge $bestMetric)){continue}
+        if(Test-VpnCidrContains $prefix $Address){$best=$route;$bestLength=$length;$bestMetric=$metric}
+    }
+    if(-not $best){return $Fallback}
+    $hop=[string]$best.NextHop
+    if(-not $hop -or $hop -eq '0.0.0.0' -or $hop -eq '::'){return 'on-link'}
+    return $hop
+}
+function Test-VpnSameRoute($A,$B) {
+    ([string]$A.prefix -eq [string]$B.prefix) -and ([int]$A.ifIndex -eq [int]$B.ifIndex) -and ([string]$A.nextHop -eq [string]$B.nextHop)
+}
+function Remove-VpnBypassRoute($Route,$Present) {
+    $found=@($Present|Where-Object {([string]$_.DestinationPrefix -eq [string]$Route.prefix) -and ([int]$_.InterfaceIndex -eq [int]$Route.ifIndex) -and ([string]$_.NextHop -eq [string]$Route.nextHop)})
+    if(-not $found.Count){return}
+    Remove-NetRoute -DestinationPrefix ([string]$Route.prefix) -InterfaceIndex ([int]$Route.ifIndex) -NextHop ([string]$Route.nextHop) -PolicyStore ActiveStore -Confirm:$false -ErrorAction Stop
+}
+function Sync-VpnBypassRoutes([string]$Root,[string]$Session,$Network,[string[]]$Addresses,$PresentRoutes=$null) {
+    # Явные хост-маршруты /32 и /128 к узлам канала через физический шлюз. Windows игнорирует привязку сокета к интерфейсу,
+    # если на нём включена пересылка (ICS, точка доступа), и тогда /1 чужого TUN забрал бы соединение с сервером или hop.
+    # Маршруты лежат в ActiveStore (исчезают при перезагрузке). В state записываются только созданные нами: чужой
+    # такой же маршрут не наш и не удаляется. Ошибка создания не фатальна: итог проверяет Assert-VpnEndpointRoutes.
+    $file=Join-Path $Root 'state/vpn-bypass-routes.json'
+    $ifIndex=0;$gateway4=''
+    if($Network){$ifIndex=[int]$Network.ifIndex;$gateway4=[string]$Network.gateway}
+    $recorded=@()
+    if(Test-Path -LiteralPath $file){
+        $state=Read-TransportJson $file
+        if([string]$state.session -eq $Session){$recorded=@($state.routes|Where-Object {$_})}
+        else{Clear-VpnBypassRoutes $Root '' -Stale}
+    }
+    # Список маршрутов worker уже прочитал в этом цикле (снимок); отдельный запрос — только для вызова без снимка.
+    if($null -ne $PresentRoutes){$present=@($PresentRoutes)}else{$present=@(Get-NetRoute -PolicyStore ActiveStore -ErrorAction Stop)}
+    $desired=@();$check=@();$skipped=@()
+    foreach($address in @($Addresses|Where-Object {$_})){
+        $ip=[Net.IPAddress]::Parse([string]$address);$suffix='/32';$fallback=$gateway4
+        if($ip.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetworkV6){$suffix='/128';$fallback=''}
+        $hop='';if($ifIndex){$hop=Get-VpnPhysicalNextHop $ip.ToString() $ifIndex $present $fallback}
+        if(-not $hop){$skipped+=@([string]$address);continue}
+        $check+=@($ip.ToString())
+        if($hop -ne 'on-link'){$desired+=@([pscustomobject]@{prefix=($ip.ToString()+$suffix);ifIndex=$ifIndex;nextHop=$hop})}
+    }
+    $result=[pscustomobject]@{added=0;removed=0;failed=0;preexisting=0;skipped=@($skipped);check=@($check)}
+    $kept=@()
+    foreach($old in $recorded){
+        if(@($desired|Where-Object {Test-VpnSameRoute $_ $old}).Count){$kept+=@($old);continue}
+        try{Remove-VpnBypassRoute $old $present;$result.removed++}catch{$result.failed++;$kept+=@($old)}
+    }
+    foreach($want in $desired){
+        $ours=[bool](@($kept|Where-Object {Test-VpnSameRoute $_ $want}).Count)
+        $exists=[bool](@($present|Where-Object {([string]$_.DestinationPrefix -eq $want.prefix) -and ([int]$_.InterfaceIndex -eq $want.ifIndex) -and ([string]$_.NextHop -eq $want.nextHop)}).Count)
+        if($exists){if(-not $ours){$result.preexisting++};continue}
+        try{
+            New-NetRoute -DestinationPrefix $want.prefix -InterfaceIndex $want.ifIndex -NextHop $want.nextHop -RouteMetric 1 -PolicyStore ActiveStore -ErrorAction Stop|Out-Null
+            if(-not $ours){$kept+=@($want)};$result.added++
+            Write-TransportJson $file @{session=$Session;routes=@($kept)} -Private
+        }catch{$result.failed++}
+    }
+    if($result.removed){Write-TransportJson $file @{session=$Session;routes=@($kept)} -Private}
+    return $result
+}
+function Clear-VpnBypassRoutes([string]$Root,[string]$Session,[switch]$Stale) {
+    # Удаляет только записанные нами хост-маршруты. -Stale: остатки убитого worker любого сеанса (при старте нового).
+    $file=Join-Path $Root 'state/vpn-bypass-routes.json';if(-not (Test-Path -LiteralPath $file)){return}
+    $state=Read-TransportJson $file
+    if(-not $Stale -and [string]$state.session -ne $Session){return}
+    $routes=@($state.routes|Where-Object {$_})
+    $present=@(Get-NetRoute -PolicyStore ActiveStore -ErrorAction Stop)
+    foreach($route in $routes){Remove-VpnBypassRoute $route $present}
+    $left=@(Get-NetRoute -PolicyStore ActiveStore -ErrorAction Stop)
+    foreach($route in $routes){
+        if(@($left|Where-Object {([string]$_.DestinationPrefix -eq [string]$route.prefix) -and ([int]$_.InterfaceIndex -eq [int]$route.ifIndex) -and ([string]$_.NextHop -eq [string]$route.nextHop)}).Count){throw 'Хост-маршрут к узлу канала остался после остановки'}
+    }
+    Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+}
+function Assert-VpnEndpointRoutes($Network,[string[]]$Addresses) {
+    # Фактический победитель маршрута до каждого узла канала (без привязки сокета, как у любого процесса) — физический адаптер,
+    # а не наш TUN и не чужой: иначе канал пошёл бы внутри соседнего VPN.
+    foreach($address in @($Addresses|Where-Object {$_})){
+        $routes=@(Find-NetRoute -RemoteIPAddress $address -ErrorAction Stop|Where-Object {$_.DestinationPrefix})
+        if(-not $routes.Count -or @($routes|Where-Object {[int]$_.InterfaceIndex -ne [int]$Network.ifIndex}).Count){throw 'Маршрут до узла канала идёт не через физический адаптер'}
+    }
+}
+function Assert-VpnProbeNotCaptured([string]$Address,$Captured) {
+    foreach($item in @($Captured|Where-Object {$_})){
+        if(Test-VpnCidrContains ([string]$item.prefix) $Address){throw 'Адрес проверки попадает в диапазон, который забрал соседний VPN'}
+    }
 }
 
 function Register-VpnRollbackTask([string]$Root,[string]$Session,[string]$ScriptPath,[string]$UserId='') {
