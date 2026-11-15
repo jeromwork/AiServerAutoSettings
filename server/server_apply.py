@@ -313,6 +313,8 @@ def ipv6_nft():
 def nft_normal(text):
     # Kernel pretty-printing uses padded hexadecimal marks and named priorities.
     text = re.sub(r'0x[0-9a-fA-F]+', lambda m: hex(int(m[0], 16)), text)
+    text = re.sub(r'((?:ct|meta) mark(?: set)?)\s+(0x[0-9a-fA-F]+|[0-9]+)',
+                  lambda m: m[1] + ' ' + hex(int(m[2], 16 if m[2].startswith('0x') else 10)), text)
     text = text.replace('priority mangle', 'priority -150')
     text = re.sub(r'priority filter\s*-\s*5', 'priority -5', text)
     text = text.replace('meta l4proto ipv6-icmp ', '')

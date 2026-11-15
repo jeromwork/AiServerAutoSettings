@@ -43,6 +43,8 @@ table inet regression {
  }
 }
 ''')
+                rendered = run('nft', 'list', 'table', 'inet', 'remoteagents_inbound').stdout
+                assert app.nft_normal(rendered) == app.nft_normal(app.inbound_nft('wan0')), 'installed guard falsely differs (decimal/hex zero mark)'
                 server.sendall(b'after')
                 assert client.recv(5) == b'after', 'existing reply lost'
                 # A separate outbound connection must retain mark zero.
