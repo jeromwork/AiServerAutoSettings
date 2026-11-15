@@ -22,13 +22,18 @@ PREFIX = 'ra-apply-' + uuid.uuid4().hex[:10]
 containers = []
 
 
+def redact(text):
+    for secret in ('ROOT_FIXTURE_SENTINEL', 'PROXY_SENTINEL', 'LAN_SENTINEL', 'TS_SENTINEL',
+                   'CLAUDE_FIXTURE_SENTINEL', 'CODEX_FIXTURE_SENTINEL', 'HAPPY_FIXTURE_SENTINEL'):
+        text = text.replace(secret, '<redacted>')
+    return text
+
+
 def call(args, input=None, check=True, timeout=600, env=None):
     r = subprocess.run([str(a) for a in args], input=input, text=True, capture_output=True, timeout=timeout, env=env)
     if check and r.returncode:
         # Do not dump stdin, credentials, private key or subprocess traces.
-        detail = r.stderr[-2500:]
-        for secret in ('ROOT_FIXTURE_SENTINEL', 'PROXY_SENTINEL', 'LAN_SENTINEL', 'TS_SENTINEL', 'CLAUDE_FIXTURE_SENTINEL', 'CODEX_FIXTURE_SENTINEL', 'HAPPY_FIXTURE_SENTINEL'):
-            detail = detail.replace(secret, '<redacted>')
+        detail = redact(r.stderr[-2500:])
         raise AssertionError('Stand command failed: ' + str(args[0]) + ' (code ' + str(r.returncode) + '): ' + detail)
     return r
 
@@ -191,6 +196,10 @@ verb 3
     docker('exec', '-d', gateway, 'python3', '/fixture/fixture.py')
     call(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', temp / 'key'])
     target, home, address = new_vps('vps', temp, gateway)
+    # A real, disposable server-side bridge SSH identity must survive repair
+    # and migration too. No Windows bridge or external computer is contacted.
+    inside(target, 'runuser', '-u', 'remoteagents', '--', 'ssh-keygen', '-q', '-t', 'ed25519',
+           '-N', '', '-f', '/home/remoteagents/.ssh/id_ed25519')
     gateway_ip = inside(gateway, 'hostname', '-I').stdout.split()[0]
     profile = 'client\nremote 11.123.45.68 1194 tcp-client\nnobind\nauth-user-pass\n<ca>\n' + (temp / 'gateway.crt').read_text() + '</ca>\n'
     config = dict(kind='remoteagents-config', schema=1, server=dict(address=address, login='remoteagents'),
@@ -238,6 +247,8 @@ verb 3
     expected_id = device_id(target)
     expected_cert = inside(target, 'sha256sum', '/home/remoteagents/.local/opt/tg-gateway/tls/cert.pem').stdout.split()[0]
     expected_keys = inside(target, 'sha256sum', '/home/remoteagents/.local/opt/tg-gateway/state/keys.json').stdout.split()[0]
+    identity_paths = ('.ssh/id_ed25519', '.ssh/id_ed25519.pub', '.happier/settings.json', '.happier/access.key')
+    expected_identities = {p: inside(target, 'sha256sum', '/home/remoteagents/' + p).stdout.split()[0] for p in identity_paths}
     second = engine(home, config, values)
     assert second['ok'] and second['actions'] == [], second
     assert inside(target, 'cat', '/etc/remoteagents/lan/clinic/subnets').stdout.strip() == '10.123.0.0/24'
@@ -262,7 +273,15 @@ verb 3
             except Exception:
                 pass
             time.sleep(2)
-        raise AssertionError(label + ' did not recover: ' + json.dumps(last))
+        # Only synthetic fixture credentials exist here. Preserve timer failures
+        # before finally removes the containers; production status stays redacted.
+        diagnostics = inside(target, 'journalctl', '-u', 'remoteagents-reconcile.service',
+                             '--no-pager', '-n', '200', check=False).stdout
+        for secret in values.values():
+            if secret:
+                diagnostics = diagnostics.replace(secret, '<redacted>')
+        diagnostics = '\n'.join(line for line in diagnostics.splitlines() if 'pam_unix' not in line)
+        raise AssertionError(label + ' did not recover: ' + json.dumps(last) + '\nReconcile journal:\n' + redact(diagnostics))
     wait_ready('real container restart')
     inside(target, 'ip', '-4', 'rule', 'del', 'pref', '8990')
     inside(target, 'ip', '-4', 'rule', 'del', 'pref', '9001')
@@ -283,6 +302,7 @@ verb 3
     for path in ('.local/share/remote-disk/config.xml', '.local/share/remote-disk/key.pem', '.local/share/remote-disk/cert.pem',
                  '.local/opt/tg-gateway/tls/key.pem', '.local/opt/tg-gateway/state/settings.json',
                  '.local/opt/tg-gateway/state/keys.json', '.happier/access.key',
+                 '.happier/settings.json', '.ssh/id_ed25519', '.ssh/id_ed25519.pub',
                  '.local/share/codex-remote/codex-windows-bridge.py', '.codex/config.toml', '.claude.json',
                  '.config/remoteagents/claude.env'):
         put(target, '/home/remoteagents/' + path, '{corrupted')
@@ -296,6 +316,7 @@ verb 3
     assert device_id(target) == expected_id
     assert inside(target, 'sha256sum', '/home/remoteagents/.local/opt/tg-gateway/tls/cert.pem').stdout.split()[0] == expected_cert
     assert inside(target, 'sha256sum', '/home/remoteagents/.local/opt/tg-gateway/state/keys.json').stdout.split()[0] == expected_keys
+    assert {p: inside(target, 'sha256sum', '/home/remoteagents/' + p).stdout.split()[0] for p in identity_paths} == expected_identities
     # Actual package removal and standalone Syncthing binary deletion.
     inside(target, 'apt-get', 'remove', '-y', 'openvpn', 'sing-box', timeout=180)
     inside(target, 'rm', '-f', '/home/remoteagents/.local/share/remote-disk/bin/syncthing')
@@ -361,6 +382,7 @@ verb 3
     assert inside(clone, 'sha256sum', '/home/remoteagents/.local/opt/tg-gateway/tls/cert.pem').stdout.split()[0] == expected_cert
     assert inside(clone, 'sha256sum', '/home/remoteagents/.local/opt/tg-gateway/state/keys.json').stdout.split()[0] == expected_keys
     assert inside(clone, 'sha256sum', '/home/remoteagents/.codex/auth.json').stdout.split()[0] == expected_codex_hash
+    assert {p: inside(clone, 'sha256sum', '/home/remoteagents/' + p).stdout.split()[0] for p in identity_paths} == expected_identities
     health_script = """import json,ssl,sys,urllib.request
 try:
  d=json.load(sys.stdin)
@@ -373,7 +395,7 @@ except Exception:
 """
     inside(clone, 'python3', '-c', health_script,
            input=json.dumps(dict(key=telegram_client['base_url'].rsplit('/', 1)[1], ca=telegram_client['ca_pem'])))
-    print('PASS: full root export -> second clean VPS -> same Syncthing device ID, Telegram TLS/client keys and agent auth', flush=True)
+    print('PASS: full root export -> second clean VPS -> same Syncthing device ID, Telegram TLS/client keys, bridge SSH keypair, Happier identity and agent auth', flush=True)
     # Confirm a real inbound replacement and removal first.
     inbounds = json.loads(clone_values['server-inbounds'])
     inbounds[-1]['listen_port'] = 37092
