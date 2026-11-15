@@ -50,6 +50,7 @@ function Invoke-WizardAskpass($Profile,[string]$User,[string]$Command,[string]$I
     $si=New-Object Diagnostics.ProcessStartInfo
     $si.FileName=$Profile.sshExecutable;$si.Arguments=(((Get-WizardNetArgs $Profile $User $Root)+@('-o','BatchMode=no','-o','NumberOfPasswordPrompts=1','-o','PreferredAuthentications=password,keyboard-interactive','-o','PubkeyAuthentication=no',$Profile.serverAddress,$Command))|ForEach-Object {Quote-Disk $_}) -join ' '
     $si.UseShellExecute=$false;$si.CreateNoWindow=$true;$si.RedirectStandardInput=$true;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true
+    $si.StandardOutputEncoding=New-Object Text.UTF8Encoding($false);$si.StandardErrorEncoding=New-Object Text.UTF8Encoding($false)
     $si.EnvironmentVariables['SSH_ASKPASS']=[string]$Request.askpassExecutable
     $si.EnvironmentVariables['SSH_ASKPASS_REQUIRE']='force';$si.EnvironmentVariables['DISPLAY']='remoteagents:0'
     $si.EnvironmentVariables['REMOTEAGENTS_PASSWORD_PIPE']=[string]$Request.passwordPipe

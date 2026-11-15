@@ -111,6 +111,7 @@ function Start-WizardProbe($Profile,[string]$Worker,$Route) {
     $strict=if($Profile.strictHostKey){'StrictHostKeyChecking=yes'}else{'StrictHostKeyChecking=accept-new'}
     $si.Arguments=((@(Get-WizardLoginArguments $Profile $Worker)+@($Route.options)+@('-o','BatchMode=yes','-o',$strict,$Profile.serverAddress,'true'))|ForEach-Object {Quote-Disk ([string]$_)}) -join ' '
     $si.UseShellExecute=$false;$si.CreateNoWindow=$true;$si.RedirectStandardInput=$true;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true
+    $si.StandardOutputEncoding=New-Object Text.UTF8Encoding($false);$si.StandardErrorEncoding=New-Object Text.UTF8Encoding($false)
     $p=New-Object Diagnostics.Process;$p.StartInfo=$si
     try{[void]$p.Start();$p.StandardInput.Close()}catch{$p.Dispose();return [pscustomobject]@{Route=$Route;Process=$null;Err=$null;State='fail';Why='нет связи'}}
     [void]$p.StandardOutput.ReadToEndAsync()
@@ -207,6 +208,7 @@ function Invoke-WizardLogin($Profile,[string]$User,[string]$Command,[string]$Inp
     $si=New-Object Diagnostics.ProcessStartInfo
     $si.FileName=$Profile.sshExecutable;$si.Arguments=(($args+@('-o','BatchMode=no','-o','StrictHostKeyChecking=accept-new','-o','NumberOfPasswordPrompts=1','-o','PreferredAuthentications=password,keyboard-interactive','-o','KbdInteractiveAuthentication=yes','-o','PubkeyAuthentication=no',$Profile.serverAddress,$Command))|ForEach-Object {Quote-Disk $_}) -join ' '
     $si.UseShellExecute=$false;$si.CreateNoWindow=$true;$si.RedirectStandardInput=$true;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true
+    $si.StandardOutputEncoding=New-Object Text.UTF8Encoding($false);$si.StandardErrorEncoding=New-Object Text.UTF8Encoding($false)
     $si.EnvironmentVariables['SSH_ASKPASS']=[string]$Credential.askpassExecutable
     $si.EnvironmentVariables['SSH_ASKPASS_REQUIRE']='force';$si.EnvironmentVariables['DISPLAY']='remoteagents:0'
     $si.EnvironmentVariables['REMOTEAGENTS_PASSWORD_PIPE']=[string]$Credential.passwordPipe
@@ -215,12 +217,12 @@ function Invoke-WizardLogin($Profile,[string]$User,[string]$Command,[string]$Inp
         [void]$p.Start();$out=$p.StandardOutput.ReadToEndAsync();$err=$p.StandardError.ReadToEndAsync()
         $bytes=[Text.Encoding]::UTF8.GetBytes((Convert-TransportLF $InputText));$task=$p.StandardInput.BaseStream.WriteAsync($bytes,0,$bytes.Length)
         if(-not $task.Wait(5000)){throw 'Таймаут отправки SSH'};$p.StandardInput.Close()
-        if(-not $p.WaitForExit(30000)){throw 'SSH не отвечает (таймаут 30 с)'}
+        if(-not $p.WaitForExit($Timeout*1000)){throw ('SSH не отвечает (таймаут '+$Timeout+' с)')}
         # OpenSSH reports authentication/connection failures as 255; other codes come from the remote helper.
         if($p.ExitCode -eq 255 -and ($err.GetAwaiter().GetResult() -match $script:WizardNoBannerPattern) -and ($err.GetAwaiter().GetResult() -notmatch 'Permission denied')){$script:WizardNoBanner=$true;throw $script:WizardNoBannerText}
         if($p.ExitCode -eq 255){throw 'Вход по паролю не выполнен. Проверьте пароль; если вход по паролю для этого логина запрещён, администратор должен разрешить ключ рабочего пользователя. Изменённый ключ сервера требует проверки known_hosts'}
         if($p.ExitCode -ne 0){
-            $detail=(Protect-TransportText ((Convert-TransportLF $err.GetAwaiter().GetResult()).Trim())) -split "`n"|Where-Object {$_}|Select-Object -Last 3
+            $detail=((Convert-TransportLF $err.GetAwaiter().GetResult()).Trim()) -split "`n"|Where-Object {$_}|Select-Object -Last 6|ForEach-Object {Protect-WizardTrace $_}
             throw ('Вход выполнен, но настройка рабочего пользователя на сервере не удалась (код '+$p.ExitCode+'): '+$(if($detail){($detail -join '; ')}else{'нет вывода'})+'. Нужны права root/sudo, useradd и systemd на сервере')
         }
         return Convert-TransportLF $out.GetAwaiter().GetResult()
@@ -291,13 +293,13 @@ function Connect-WizardServer([string]$Root,[string]$Bundle,$Request) {
         $payload=$worker+"`n"+$key+"`n"+$script
         # read public parameters first, then execute the same idempotent server helper.
         $command='IFS= read -r ra_user; IFS= read -r ra_key; export ra_user ra_key; bash -s'
-        $done=$false;try{[void](Invoke-WizardLogin $p $user $command $payload);$done=$true}catch{}
+        $done=$false;try{[void](Invoke-WizardLogin $p $user $command $payload -Timeout 600);$done=$true}catch{}
         # Any private key that already opens this login installs this computer's own key once; then only it is used.
         if(-not $done){$done=Connect-WizardExistingKey $Root $p $user $command $payload ([string]$Request.keyFile)}
         if(-not $done){
             if(-not $Request.passwordPipe){if($script:WizardNoBanner -and -not $script:WizardReached){throw $script:WizardNoBannerText};throw 'Ни один ключ не подошёл. Выберите файл ключа, которым вы входите на сервер, или введите пароль (если вход по паролю на сервере разрешён)'}
             Write-WizardProgress ('Вхожу как '+$user+' по паролю и настраиваю ключ рабочего пользователя…')
-            [void](Invoke-WizardLogin $p $user $command $payload $Request)
+            [void](Invoke-WizardLogin $p $user $command $payload $Request -Timeout 600)
         }
         [void](Invoke-WizardLogin $p $worker 'true')
     }

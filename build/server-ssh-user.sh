@@ -4,7 +4,39 @@ set -eu
 case "$ra_user" in ''|*[!a-z0-9_-]*) exit 20;; esac
 case "$ra_key" in 'ssh-ed25519 '*) ;; *) exit 21;; esac
 if [ "$(id -u)" = 0 ]; then
-    if ! id "$ra_user" >/dev/null 2>&1; then useradd -m -s /bin/bash "$ra_user"; fi
+    # This helper runs before Python staging and before the worker's bootstrap.
+    # Only administrative SSH is required on a clean Debian/Ubuntu systemd VPS.
+    missing=
+    for tool in python3 curl tar xz git flock cron sudo ip jq nft dbus-daemon; do
+        command -v "$tool" >/dev/null 2>&1 || missing=1
+    done
+    for package in dbus-user-session libpam-systemd; do
+        [ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null)" = 'install ok installed' ] || missing=1
+    done
+    if [ -n "$missing" ]; then
+        command -v apt-get >/dev/null || { echo 'Bootstrap requires Debian/Ubuntu apt-get' >&2; exit 22; }
+        export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l
+        apt-get update >&2
+        apt-get install -y --no-install-recommends python3 curl ca-certificates tar xz-utils git util-linux cron sudo iproute2 jq nftables openssl dbus dbus-user-session libpam-systemd >&2
+    fi
+    if ! id "$ra_user" >/dev/null 2>&1; then
+        useradd -m -s /bin/bash "$ra_user"
+        # Legacy agent installers accept only the canonical account. Never adopt
+        # an unrelated existing user merely because its name matches.
+        if [ "$ra_user" = remoteagents ] && [ "$(getent passwd "$ra_user" | cut -d: -f6)" = /home/remoteagents ]; then
+            for managed_path in /var/lib/remote-agents /var/lib/remote-agents/managed-user-v1; do
+                [ ! -L "$managed_path" ]
+                if [ -e "$managed_path" ]; then
+                    [ "$(stat -c %u "$managed_path")" = 0 ]
+                    [ -z "$(find "$managed_path" -maxdepth 0 -perm /022 -print -quit)" ]
+                fi
+            done
+            install -d -o root -g root -m 755 /var/lib/remote-agents
+            [ ! -L /var/lib/remote-agents/managed-user-v1 ]
+            printf '%s\n' 'remoteagents:/home/remoteagents:v1' > /var/lib/remote-agents/managed-user-v1
+            chmod 644 /var/lib/remote-agents/managed-user-v1
+        fi
+    fi
     uid=$(id -u "$ra_user"); [ "$uid" != 0 ]
     home=$(getent passwd "$ra_user" | cut -d: -f6)
 else
