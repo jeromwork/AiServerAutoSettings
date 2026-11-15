@@ -33,6 +33,9 @@ namespace RemoteAgents.Launcher
         DateTime nextSyncTaskRetirement = DateTime.MinValue;
         readonly ServerHealthSchedule healthSchedule = new ServerHealthSchedule();
         bool diskReading;
+        int diskFolders = -1;
+        bool vpnActionBusy, vpnActionWanted;
+        string vpnError = "";
         string diskSummary = "Диск: ожидается проверка";
         DateTime diskUpdated = DateTime.MinValue;
         DiskTraySession diskSession;
@@ -203,10 +206,10 @@ namespace RemoteAgents.Launcher
                                 if (message.Length > 0) {
                                     ShowMain();
                                     if (mainWindow != null && !mainWindow.IsDisposed) mainWindow.ShowHappierAccountCreated(message);
-                                    else MessageBox.Show(message + "\r\nКнопки аккаунта находятся в главном окне на вкладке «Сервис».", Product.Name, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                                    else MessageBox.Show(message + "\r\nКнопки аккаунта находятся в главном окне на карточке «Happier».", Product.Name, MessageBoxButtons.OK, MessageBoxIcon.Information);
                                 } else icon.ShowBalloonTip(5000, Product.Name, "Happier: " + Json.Text(account, "summary", "аккаунт подключён"), ToolTipIcon.Info);
                             }
-                        } catch (OperationCanceledException) { throw; } catch (Exception) { log.Write("operations.account.failed"); pending = false; icon.ShowBalloonTip(10000, Product.Name, "Happier: аккаунт не подключён. Откройте «Подробно» → Happier.", ToolTipIcon.Warning); }
+                        } catch (OperationCanceledException) { throw; } catch (Exception) { log.Write("operations.account.failed"); pending = false; icon.ShowBalloonTip(10000, Product.Name, "Happier: аккаунт не подключён. Откройте «Настройки» → Happier.", ToolTipIcon.Warning); }
                         finally { accountResuming = false; }
                     }
                     ServerOperations.Save(home, tracked, operations, pending);
@@ -386,6 +389,16 @@ namespace RemoteAgents.Launcher
             if (mainWindow == null || mainWindow.IsDisposed) {
                 mainWindow = ConfigWindow.Main(home, engine.Folder(engine.Current));
                 mainWindow.MutationConflict = MutationConflict;
+                mainWindow.VpnRequested = enabled => {
+                    var vpn = runtimes.FirstOrDefault(r => r.Definition.Name == "vpn");
+                    if (vpn == null) return;
+                    if (enabled) CheckVpn(vpn, true); else DisableVpn(vpn, true);
+                };
+                mainWindow.MainAction = action => Safe(() => {
+                    if (action == "retry") { if (AllowMutation()) LoadComponents(); }
+                    else if (action == "open-sync") OpenSynchronization();
+                    else if (action == "open-disk") OpenDisk();
+                });
                 mainWindow.HiddenToTray = () => {
                     if (window.CloseToTray()) {
                         Safe(() => Files.Atomic(Path.Combine(home, "state", "tray-hint-shown"), "shown\n"));
@@ -433,7 +446,7 @@ namespace RemoteAgents.Launcher
         {
             string root = ConfigProfile.DiskRoot(ConfigProfile.Load(home));
             if (Directory.Exists(root)) { Open(root); return; }
-            MessageBox.Show(mainWindow, "Папка Диска ещё не создана: " + root + "\r\nДиск устанавливается вместе с настройкой сервера («Настройки» → «Конфиг» → «Применить»). Папки сервера принимайте в Syncthing Tray.", Product.Name);
+            MessageBox.Show(mainWindow, "Папка Диска ещё не создана: " + root + "\r\nДиск устанавливается вместе с настройкой сервера («Настройки» → «Дополнительно» → «Редактор конфига» → «Применить»). Папки сервера принимайте в Syncthing Tray.", Product.Name);
         }
         string DiskSummary()
         {
@@ -443,7 +456,7 @@ namespace RemoteAgents.Launcher
         async void CheckDisk()
         {
             if (Product.IsVpn || closing || diskReading) return;
-            if (!runtimes.Any(r => r.Definition.Name == "disk" && r.Enabled)) { diskSession = null; diskUpdated = DateTime.MinValue; return; }
+            if (!runtimes.Any(r => r.Definition.Name == "disk" && r.Enabled)) { diskSession = null; diskFolders = -1; diskUpdated = DateTime.MinValue; return; }
             string root = DiskTraySession.Home(config.Data);
             diskReading = true;
             try {
@@ -451,10 +464,11 @@ namespace RemoteAgents.Launcher
                 var result = await Task.Run(() => {
                     var candidate = new DiskTraySession(root);
                     var session = current != null && current.Root == root && current.Identity == candidate.Identity ? current : candidate;
-                    return Tuple.Create(session, session.Read(stop.Token));
+                    string summary = session.Read(stop.Token);
+                    return Tuple.Create(session, summary, session.FolderCount);
                 });
-                if (!closing && root == DiskTraySession.Home(config.Data) && runtimes.Any(r => r.Definition.Name == "disk" && r.Enabled)) { diskSession = result.Item1; diskSummary = result.Item2; diskUpdated = DateTime.UtcNow; }
-            } catch (Exception) { diskSession = null; diskSummary = "Диск: локальный Syncthing недоступен"; diskUpdated = DateTime.UtcNow; }
+                if (!closing && root == DiskTraySession.Home(config.Data) && runtimes.Any(r => r.Definition.Name == "disk" && r.Enabled)) { diskSession = result.Item1; diskSummary = result.Item2; diskFolders = result.Item3; diskUpdated = DateTime.UtcNow; }
+            } catch (Exception) { diskSession = null; diskFolders = -1; diskSummary = "Диск: локальный Syncthing недоступен"; diskUpdated = DateTime.UtcNow; }
             finally { diskReading = false; }
         }
         void OpenSynchronization()
@@ -481,18 +495,30 @@ namespace RemoteAgents.Launcher
         {
             if (mainWindow == null || mainWindow.IsDisposed) return;
             var transport = StatusView.Read(home, "transport", maxAgeSec: 15);
-            mainWindow.UpdateMain(new[] {
-                StatusView.Line("Связь с сервером", transport, true),
-                ServerHealthView.Summary(ServerHealthView.Read(home)),
-                StatusView.Line("Управление компьютером (мост)", StatusView.Read(home, "control", maxAgeSec: 30)),
-                StatusView.Happier(home),
-                StatusView.Line("VPN", StatusView.Read(home, "vpn", maxAgeSec: 15))
-            }, syncSummary + "\r\n" + updateSummary,
-            "Версия: " + Program.Version + "; бандл: " + engine.Current + "\r\nПапка: " + home +
-            "\r\nПуть: " + StatusView.Title(transport) + "; " + StatusView.Speed(transport) + "; проверен: " + StatusView.CheckedAt(transport) +
-            "\r\nСеть: " + StatusView.Network(transport) + "; лимитная: " + StatusView.Metered(transport) +
-            (Json.Str(transport, "configError").Length > 0 ? "\r\nНастройки: " + Json.Str(transport, "configError") : ""), transport, ServerHealthView.Read(home));
+            var health = ServerHealthView.Read(home);
+            HappierAccountModel account;
+            try { account = HappierAccountModel.From(config.Data, name => SecretVault.Has(home, name)); }
+            catch (Exception) { account = new HappierAccountModel(); }
+            var facts = new MainScreenFacts {
+                IsVpnProduct = Product.IsVpn, Transport = transport,
+                Vpn = StatusView.Read(home, "vpn", maxAgeSec: 15),
+                Control = StatusView.Read(home, "control", maxAgeSec: 30), Health = health,
+                VpnInstalled = definition != null && definition.Components.Any(c => c.Name == "vpn"),
+                VpnWanted = vpnActionBusy ? vpnActionWanted : Json.Bool(Json.Map(Json.Get(Json.Map(Json.Get(config.Data, "profile")), "vpn")), "enabled"),
+                VpnBusy = vpnActionBusy, VpnError = vpnError, Operation = MutationConflict(),
+                DiskEnabled = runtimes.Any(r => r.Definition.Name == "disk" && r.Enabled), DiskSummary = DiskSummary(),
+                DiskFolders = (DateTime.UtcNow - diskUpdated).TotalSeconds <= 10 ? diskFolders : -1, DiskServerOnly = -1,
+                HappierVisible = account.Visible, HappierHasKey = account.HasKey, HappierLabel = account.Label,
+                HappierConfirmed = Json.Bool(AccountState(), "ok"), HappierUrl = account.WebUrl
+            };
+            mainWindow.UpdateActivity(syncSummary + "\r\n" + updateSummary);
+            mainWindow.UpdateMain(facts,
+                "Версия: " + Program.Version + "; бандл: " + engine.Current + "\r\nПапка: " + home +
+                "\r\nПуть: " + StatusView.Title(transport) + "; " + StatusView.Speed(transport) + "; проверен: " + StatusView.CheckedAt(transport) +
+                "\r\nСеть: " + StatusView.Network(transport) + "; лимитная: " + StatusView.Metered(transport) +
+                (Json.Str(transport, "configError").Length > 0 ? "\r\nНастройки: " + Json.Str(transport, "configError") : ""), transport, health);
         }
+
         string TransportScript(string name) { return Path.Combine(engine.Folder(engine.Current), "transport", name); }
         void EnableRuntime(ComponentRuntime runtime, bool enabled)
         {
@@ -532,12 +558,13 @@ namespace RemoteAgents.Launcher
                 return Files.LF(External.ReadPowerShellOutput(output));
             } finally { if (File.Exists(output)) File.Delete(output); }
         }
-        async void CheckVpn(ComponentRuntime vpn)
+        async void CheckVpn(ComponentRuntime vpn, bool fromCard = false)
         {
-            if (!AllowMutation()) return; actionBusy = true;
+            if (!AllowMutation()) return; actionBusy = vpnActionBusy = true; vpnActionWanted = true; vpnError = ""; RefreshMain();
+            bool enabling = false;
             try {
                 if (Product.IsVpn && !Json.Bool(StatusView.Read(home, "transport", maxAgeSec: 15), "ok")) {
-                    MessageBox.Show("Для VPN нужна проверенная связь с сервером. Установите и запустите RemoteAgents.exe; дождитесь подключения.", "RemoteVPN"); return;
+                    VpnFailure("Для VPN нужна проверенная связь с сервером. Дождитесь подключения RemoteAgents.", fromCard); return;
                 }
                 while (!closing) {
                     var result = Json.Map(Json.Parse(await Task.Run(() => CaptureScript("Test-VpnConflict.ps1", new string[0]))));
@@ -545,6 +572,7 @@ namespace RemoteAgents.Launcher
                     var items = Json.Get(result, "items");
                     if (!(Json.Get(result, "conflict") is bool) || !(items is System.Collections.IEnumerable) || items is string || items is System.Collections.IDictionary) throw new InvalidDataException();
                     if (!Json.Bool(result, "conflict")) {
+                        enabling = true;
                         if (vpn.Definition.CommandManaged) {
                             config.SetVpnIntent(true);config.SetEnabled(vpn.Definition, true);
                             await Task.Run(() => CaptureScript("Vpn.Tun.ps1", new[] { "-Enable", "-ParentPid", Process.GetCurrentProcess().Id.ToString() }));
@@ -552,21 +580,26 @@ namespace RemoteAgents.Launcher
                         return;
                     }
                     string found = string.Join("; ", Json.Array(Json.Get(result, "items")).Select(x => { var item = Json.Map(x); return string.Join(" — ", new[] { Json.Str(item, "kind"), Json.Str(item, "name"), Json.Str(item, "path"), Json.Str(item, "detail") }.Where(v => v.Length > 0)); }));
-                    if (!VpnConflictDialog(found)) return;
+                    if (!VpnConflictDialog(found)) { vpnError = "VPN не включён: сначала отключите другой VPN и повторите попытку."; return; }
                 }
             } catch (OperationCanceledException) { }
             catch { if (vpn.Definition.CommandManaged) try { config.SetEnabled(vpn.Definition, false); } catch { log.Write("vpn.config.failed"); }
-                if (!closing) { log.Write("vpn.conflict.check.failed"); MessageBox.Show("Проверить наличие другого VPN не удалось. VPN RemoteAgents не включён.", "RemoteAgents"); } }
-            finally { actionBusy = false; if (!closing) RefreshMenu(); }
+                if (!closing) { log.Write("vpn.conflict.check.failed"); VpnFailure(enabling ? "Не удалось включить VPN. Проверьте связь с сервером и разрешение Windows на запуск VPN." : "Проверить наличие другого VPN не удалось. VPN RemoteAgents не включён.", fromCard); } }
+            finally { actionBusy = vpnActionBusy = false; if (!closing) RefreshMenu(); }
         }
-        async void DisableVpn(ComponentRuntime vpn)
+        void VpnFailure(string message, bool fromCard)
+        { vpnError = message; if (!fromCard && !closing) MessageBox.Show(message, Product.Name); }
+        async void DisableVpn(ComponentRuntime vpn, bool fromCard = false)
         {
-            if (!vpn.Definition.CommandManaged) { Safe(() => EnableRuntime(vpn, false)); return; }
-            if (!AllowMutation()) return; actionBusy = true;
-            try { config.SetVpnIntent(false);config.SetEnabled(vpn.Definition, false); await Task.Run(() => CaptureScript("Vpn.Tun.ps1", new[] { "-Disable" })); }
+            if (!AllowMutation()) return; actionBusy = vpnActionBusy = true; vpnActionWanted = false; vpnError = ""; RefreshMain();
+            try {
+                if (!vpn.Definition.CommandManaged) { EnableRuntime(vpn, false); return; }
+                config.SetVpnIntent(false); config.SetEnabled(vpn.Definition, false);
+                await Task.Run(() => CaptureScript("Vpn.Tun.ps1", new[] { "-Disable" }));
+            }
             catch (OperationCanceledException) { }
-            catch { if (!closing) MessageBox.Show("Запрос выключения VPN не выполнен. Проверьте статус и журналы; выключение ещё не подтверждено.", "RemoteAgents"); }
-            finally { actionBusy = false; if (!closing) RefreshMenu(); }
+            catch { if (!closing) VpnFailure("Запрос выключения VPN не выполнен. Проверьте статус и журналы; выключение ещё не подтверждено.", fromCard); }
+            finally { actionBusy = vpnActionBusy = false; if (!closing) RefreshMenu(); }
         }
         internal static bool VpnConflictDialog(string found)
         {
@@ -703,7 +736,7 @@ namespace RemoteAgents.Launcher
             // An open window shows the result itself; the balloon is for a run that outlived its window.
             if (Application.OpenForms.Cast<Form>().Any(f => f is ConfigWindow && f.Visible) || !icon.Visible) return;
             if (last.Ok) icon.ShowBalloonTip(5000, Product.Name, "Диск: " + last.Summary, ToolTipIcon.Info);
-            else icon.ShowBalloonTip(10000, Product.Name, "Диск не подключён: " + last.Summary + ". Повторите: «Настройки» → «Конфиг» → «Применить».", ToolTipIcon.Warning);
+            else icon.ShowBalloonTip(10000, Product.Name, "Диск не подключён: " + last.Summary + ". Повторите: «Настройки» → «Дополнительно» → «Редактор конфига» → «Применить».", ToolTipIcon.Warning);
         }
         void RequestExit()
         {
