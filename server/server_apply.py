@@ -560,6 +560,9 @@ class Engine:
             return self.row('internet', 'pending', 'Базовая сеть включена; ждёт нового SSH и проверки входящих; автооткат 5 минут')
         if not sb.get('tun'):
             return self.row('internet', 'blocked', 'sing-box не установлен или нет системного перехвата трафика — нужен базовый сетевой конфиг с правилами сохранения SSH; см. SERVER-APPLY.md')
+        # Reject foreign ownership and invalid/missing inbound secrets before
+        # any guard/proxy mutation, even when proxy and inbounds change together.
+        base.inbound_change(self)
         # Install reply protection before a restart can recreate split TUN routes.
         if apply:
             self.guard_apply()
@@ -1055,10 +1058,12 @@ class Engine:
                 if not ready:
                     next(r for r in self.rows if r['part'] == 'internet').update(state='blocked', summary=reason)
             if apply and not ready:
-                self.row(name, 'blocked', 'не устанавливается: выход в интернет не подтверждён')
+                self.row(name, 'blocked', 'не устанавливается: сетевая транзакция ждёт нового SSH' if any(r['state'] == 'pending' for r in self.rows) else 'не устанавливается: выход в интернет не подтверждён')
             else:
                 result = self.part(name, fn)
-                if apply and name == 'inbound' and not result:
+                if apply and not result and (name == 'inbound' or any(r['part'] == name and r['state'] == 'pending' for r in self.rows)):
+                    # Do not spend the rollback window downloading CLIs. Return
+                    # pending now; a NEW external SSH must confirm the network.
                     ready = False
         if apply and all(r['state'] in ('ready', 'waiting') or r['state'] == 'blocked' and r['part'] in ('desktop', 'projectViews', 'agents:codex') for r in self.rows):
             public = {k: v for k, v in self.config.items() if k in ('deployment', 'serverNetwork', 'proxyOut', 'lan', 'tailscale', 'telegramGateway', 'agent', *components.KEYS)}

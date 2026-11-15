@@ -31,6 +31,8 @@ class Fresh(Fake):
         if args[0] == 'ip' and 'rule' in args and 'del' in args:
             self.reply_rules[args[1]] = []
         result = super().run(args, **kw)
+        if args[0] == 'bash' and str(args[1]).endswith('proxy-out.sh') and args[2] == 'apply':
+            self.write('/etc/sing-box/config.json', json.dumps(self.sb))
         if args[0] == 'ip' and 'rule' in args and 'show' in args:
             result.stdout = result.stdout.replace('tun0', 'ra-tun')
         return result
@@ -75,6 +77,22 @@ class BaseTests(unittest.TestCase):
         self.assertTrue(f.engine(c, ssh_checked=True).run('apply')['ok'])
         self.assertEqual(len(f.read('/etc/sing-box/config.json')['inbounds']), 2)
 
+    def test_proxy_and_inbound_edits_each_require_their_own_new_ssh(self):
+        f, c = self.fresh()
+        self.assertTrue(f.complete(c)['ok'])
+        c['proxyOut']['port'] = 2080
+        c['serverNetwork']['inbounds'] = {'secret': 'inputs'}
+        values = dict(VALUES, inputs=json.dumps([dict(type='mixed', tag='extra', listen='0.0.0.0', listen_port=37092)]))
+        first = f.engine(c, values).run('apply')
+        self.assertEqual(first['parts'][0]['state'], 'pending')
+        self.assertTrue(f.path('/var/lib/remoteagents/proxy-out/pending').exists())
+        self.assertFalse(f.path(app.base.STATE).exists())
+        second = f.engine(c, values, ssh_checked=True).run('apply')
+        self.assertEqual(second['parts'][0]['state'], 'pending', second)
+        self.assertTrue(f.path(app.base.STATE).exists())
+        self.assertFalse(f.path('/var/lib/remoteagents/proxy-out/pending').exists())
+        self.assertTrue(f.engine(c, values, ssh_checked=True).run('apply')['ok'])
+
     def test_foreign_tun_inbounds_are_never_adopted(self):
         f = self.fake
         c = config(); c['serverNetwork'] = dict(enabled=True, inbounds={'secret': 'inputs'})
@@ -83,6 +101,7 @@ class BaseTests(unittest.TestCase):
         self.assertFalse(result['ok'])
         self.assertIn('Чужой sing-box', result['parts'][0]['summary'])
         self.assertFalse(any(a[0] == 'systemd-run' for a in f.calls))
+        self.assertFalse(any(a[0] == 'nft' and '-f' in a for a in f.calls))
 
     def test_initial_activation_needs_later_session_even_with_flag(self):
         f, c = self.fresh()
@@ -194,7 +213,7 @@ class BaseTests(unittest.TestCase):
         old = 'LoginGraceTime 100\n'
         f.write('/etc/ssh/sshd_config.d/10-remoteagents-startups.conf', old)
         f.fail = '-t'
-        result = f.engine().run('apply')
+        result = f.complete()
         self.assertEqual(next(r for r in result['parts'] if r['part'] == 'sshd')['state'], 'error')
         self.assertEqual(f.path('/etc/ssh/sshd_config.d/10-remoteagents-startups.conf').read_text(), old)
         self.assertFalse(any(a[:2] == ['systemctl', 'reload'] for a in f.calls))

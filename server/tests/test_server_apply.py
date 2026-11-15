@@ -267,6 +267,13 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(before, after)
         self.assertFalse(any(c[0] in ('apt-get', 'loginctl') or c[:2] in (['systemctl', 'restart'], ['systemctl', 'enable']) for c in f.calls))
 
+    def test_no_user_installers_while_lan_waits_for_new_ssh(self):
+        f = Fake(self.tmp.name)
+        result = f.engine(config()).run('apply')
+        self.assertTrue(any(r['state'] == 'pending' and r['part'] == 'lan:office' for r in result['parts']), result)
+        self.assertFalse(any(a[0] == 'runuser' for a in f.calls))
+        self.assertFalse(f.path('/etc/remoteagents/server-apply/recovery.json').exists())
+
     def test_disappeared_rules_restart_then_recheck_before_other_parts(self):
         f = self.fake
         f.rules = False
@@ -471,7 +478,7 @@ class ApplyTests(unittest.TestCase):
     def test_part_failure_does_not_block_sudo(self):
         f = self.fake
         f.fail = 'loginctl'
-        result = f.engine(ssh_checked=True).run('apply')
+        result = f.complete()
         self.assertEqual(next(r for r in result['parts'] if r['part'] == 'telegramGateway')['state'], 'error')
         self.assertTrue(f.path('/etc/sudoers.d/91-remoteagents-apply').exists())
         for secret in (AUTH_PASS, TS_KEY):
@@ -523,7 +530,7 @@ class ApplyTests(unittest.TestCase):
 
     def test_userspace_before_package_and_no_advertised_subnets(self):
         f = self.fake
-        f.engine(ssh_checked=True).run('apply')
+        self.assertTrue(f.complete()['ok'])
         self.assertIn('FLAGS="--tun=userspace-networking"', f.path('/etc/default/tailscaled').read_text())
         self.assertIn('FLAGS="--tun=userspace-networking"', f.defaults_at_install)
         f.write('/etc/default/tailscaled', 'FLAGS="--tun=userspace-networking --tun=tailscale0"\n')
@@ -579,7 +586,7 @@ class ApplyTests(unittest.TestCase):
         if not binary:
             self.skipTest('visudo не установлен; проверка синтаксиса пропущена')
         f = self.fake
-        f.engine(ssh_checked=True).run('apply')
+        self.assertTrue(f.complete()['ok'])
         result = subprocess.run([binary, '-cf', str(f.path('/etc/sudoers.d/91-remoteagents-apply'))], capture_output=True)
         self.assertEqual(result.returncode, 0)
 
