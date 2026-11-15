@@ -292,6 +292,10 @@ def inbound_nft(iface):
             ' chain pre { type filter hook prerouting priority mangle; policy accept;\n'
             '  iifname "' + iface + '" ct state new ct mark set 0x5241\n }\n'
             ' chain out { type route hook output priority mangle; policy accept;\n'
+            # Connections opened before the guard have no prerouting mark.
+            # Their first reply after TUN activation must survive too. Locally
+            # originated traffic has original direction and remains intercepted.
+            '  ct direction reply ct mark set 0x5241\n'
             '  ct mark 0x5241 meta mark set 0x5241\n }\n}\n')
 
 
