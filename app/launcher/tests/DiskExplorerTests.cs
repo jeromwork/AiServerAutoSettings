@@ -7,6 +7,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -37,7 +38,7 @@ namespace RemoteAgents.Launcher
         internal static void Run()
         {
             string temp = Path.Combine(Path.GetTempPath(), "disk-explorer-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(temp);
-            try { RecyclePolicy(); States(); Metadata(Path.Combine(temp, "metadata")); Registry(); Commands(Path.Combine(temp, "actions")); Console.WriteLine("PASS: Explorer model, metadata, registry and action fixtures"); HttpAndEvents(Path.Combine(temp, "http")).GetAwaiter().GetResult(); }
+            try { RecyclePolicy(); States(); Metadata(Path.Combine(temp, "metadata")); Registry(); Menu(); Commands(Path.Combine(temp, "actions")); Console.WriteLine("PASS: Explorer model, metadata, registry and action fixtures"); HttpAndEvents(Path.Combine(temp, "http")).GetAwaiter().GetResult(); }
             finally { if (Directory.Exists(temp)) Directory.Delete(temp, true); }
             Console.WriteLine("PASS: " + checks + " local Syncthing / Explorer checks (REST, events, placeholders, HKCU, shell, recycle rollback)");
         }
@@ -114,6 +115,10 @@ namespace RemoteAgents.Launcher
             Check(File.ReadAllBytes(ini).Take(2).SequenceEqual(new byte[] { 255, 254 }) && fs.Read(ini).Contains("\r\nOwner=RemoteAgents.Disk.v2\r\n"), "Unicode desktop.ini with CRLF and new ownership");
             Check((fs.Attributes(row.Path) & FileAttributes.ReadOnly) != 0 && (fs.Attributes(ini) & (FileAttributes.Hidden | FileAttributes.System)) != 0, "Explorer customization attributes");
             int writes = fs.Writes; service.Reconcile(root, new[] { row }); Check(fs.Writes == writes, "unchanged metadata not rewritten");
+            string hint = fs.Read(ini);
+            Check(hint.Contains("\r\nInfoTip=Только на сервере. Правый клик → Скачать на компьютер\r\n"), "placeholder hint names the menu item to click");
+            fs.Write(ini, hint.Replace("Скачать на компьютер", "Забрать с сервера")); writes = fs.Writes; service.Reconcile(root, new[] { row });
+            Check(fs.Read(ini).Replace("\r", "") == hint.Replace("\r", "") && fs.Writes == writes + 1, "hint left by the previous version is refreshed");
             File.WriteAllText(Path.Combine(row.Path, "user.txt"), "keep"); service.Reconcile(root, new[] { row });
             Check(!service.IsPlaceholder(row.Path) && fs.Read(ini).Contains("Error.ico"), "local data invalidates transparent cloud");
             service.CleanupFolder(row.Path, true);
@@ -128,6 +133,7 @@ namespace RemoteAgents.Launcher
             service.Reconcile(root, new[] { new DiskFolderState { Path = readOnly, Kind = DiskExplorerKind.Synced } }); service.CleanupFolder(readOnly);
             Check((fs.Attributes(readOnly) & (FileAttributes.ReadOnly | FileAttributes.Hidden)) == (FileAttributes.ReadOnly | FileAttributes.Hidden), "original unrelated attributes restored");
             string empty = Path.Combine(root, "empty"); Check(service.MarkPlaceholder(empty), "eviction placeholder created");
+            Check(fs.Read(Path.Combine(empty, "desktop.ini")).Contains("→ Скачать на компьютер"), "eviction placeholder carries the same hint");
             service.CleanupFolder(empty, true); Check(!Directory.Exists(empty), "only owned empty placeholder can be removed");
         }
         internal sealed class TestRegistry : IDiskExplorerRegistry
@@ -152,6 +158,92 @@ namespace RemoteAgents.Launcher
             store.Write(p + "add", "RemoteAgentsOwner", "foreign"); registry.Register(@"C:\app.exe", @"C:\Disk", rows); registry.Cleanup();
             Check(store.Read(p + "add", "RemoteAgentsOwner") == "foreign", "foreign registry owner preserved");
             Reject(() => registry.Register("bad\r\nexe", @"C:\Disk", rows), "command injection rejected");
+        }
+        static void Require(bool ok, string message) { if (!ok) throw new Exception("Disk Explorer: " + message); }
+        static string ParentOf(string path)
+        { string parent = path.Substring(0, path.LastIndexOfAny(new[] { '\\', '/' })); return parent.Length == 2 && parent[1] == ':' ? parent + "\\" : parent; }
+        // Evaluates the AQS the menu items use and nothing else. A folder list «(T OR T ...)» is true when a term equals the folder path.
+        // The upload condition «NOT T AND NOT T ...» is true when no term does. A term compares either the path of
+        // the folder (ItemPathDisplay) or the path of its parent (ItemFolderPathDisplay). Anything of another shape fails the test.
+        static bool Applies(string aqs, string path)
+        {
+            string shape = Regex.Replace(aqs, "System\\.\\w+:=\"[^\"]*\"", "T");
+            bool upload = Regex.IsMatch(shape, @"^NOT T( AND NOT T)*$");
+            Require(upload || Regex.IsMatch(shape, @"^\(T( OR T)*\)$"), "menu condition has an unexpected shape: " + shape);
+            bool any = false;
+            foreach (Match term in Regex.Matches(aqs, "System\\.(\\w+):=\"([^\"]*)\"")) {
+                string property = term.Groups[1].Value;
+                Require(property == "ItemPathDisplay" || property == "ItemFolderPathDisplay", "unexpected AQS property " + property);
+                any |= string.Equals(term.Groups[2].Value, property == "ItemPathDisplay" ? path : ParentOf(path), StringComparison.OrdinalIgnoreCase);
+            }
+            return upload ? !any : any;
+        }
+        // The three Explorer items: their names and which of them a folder is offered.
+        static void Menu()
+        {
+            const string exe = @"C:\App Name\RemoteAgents.exe", home = @"C:\User Home";
+            string p = DiskExplorerRegistry.Prefix; string[] verbs = { "download", "keep-server", "add" };
+            Check(DiskMenu.Download == "Скачать на компьютер" && DiskMenu.KeepServer == "Оставить только на сервере" && DiskMenu.Upload == "Загрузить на сервер", "menu item names");
+            Check(new DiskFolderState { Kind = DiskExplorerKind.ServerOnly }.Tooltip == "Только на сервере. Правый клик → Скачать на компьютер", "placeholder hint names the item to click");
+            var store = new TestRegistry(); var registry = new DiskExplorerRegistry(store, delegate { });
+            string disk = @"C:\Disk", placeholder = disk + @"\Проект", inDisk = disk + @"\Сайт", outside = @"D:\External", plain = @"E:\Plain", receiveOnly = @"F:\Receive", restored = @"G:\Restored";
+            var rows = new[] {
+                new DiskFolderState { Path = placeholder, ServerOnly = true, Kind = DiskExplorerKind.ServerOnly },
+                new DiskFolderState { Path = inDisk, Kind = DiskExplorerKind.Synced, Config = Map("{\"type\":\"sendreceive\"}") },
+                new DiskFolderState { Path = outside, Kind = DiskExplorerKind.Syncing, Config = Map("{\"type\":\"sendreceive\"}") },
+                new DiskFolderState { Path = plain, Kind = DiskExplorerKind.Local, Config = Map("{\"type\":\"sendreceive\"}") },
+                new DiskFolderState { Path = receiveOnly, Kind = DiskExplorerKind.LocalChanges, Config = Map("{\"type\":\"receiveonly\"}") },
+                new DiskFolderState { Path = restored, Kind = DiskExplorerKind.Unavailable } };
+            registry.Register(exe, disk, rows, home);
+            Check(store.Read(p + "download", "MUIVerb") == "Скачать на компьютер" && store.Read(p + "keep-server", "MUIVerb") == "Оставить только на сервере" && store.Read(p + "add", "MUIVerb") == "Загрузить на сервер", "menu labels");
+            Check(!store.Values.Values.Any(v => v.Contains("Забрать")), "the old item name is gone from the registry");
+            Func<string, string[]> offered = path => verbs.Where(v => store.Exists(p + v) && Applies(store.Read(p + v, "AppliesTo"), path)).ToArray();
+            Check(offered(disk).Length == 0, "no item on the Disk root");
+            Check(offered(placeholder).SequenceEqual(new[] { "download" }), "placeholder: only «Скачать на компьютер»");
+            Check(offered(inDisk).SequenceEqual(new[] { "keep-server" }) && offered(outside).SequenceEqual(new[] { "keep-server" }), "syncing folder in Disk or outside it: only «Оставить только на сервере»");
+            Check(offered(plain).SequenceEqual(new[] { "add" }), "a folder Syncthing knows but has not shared with the server can still be uploaded");
+            Check(offered(receiveOnly).SequenceEqual(new[] { "keep-server", "add" }), "a shared receive-only folder keeps the upload item: it turns the folder into send and receive");
+            Check(offered(restored).SequenceEqual(new[] { "keep-server" }), "state restored without a Syncthing config counts as uploading");
+            Check(offered(disk + @"\Новая").SequenceEqual(new[] { "add" }) && offered(@"D:\Проекты\X").SequenceEqual(new[] { "add" }), "ordinary folder in Disk or anywhere else: only «Загрузить на сервер»");
+            // The condition is stable: the order of folders and the move placeholder -> syncing do not change it (no needless Explorer refresh).
+            string scope = store.Read(p + "add", "AppliesTo");
+            registry.Register(exe, disk, rows.Reverse().ToArray(), home);
+            Check(store.Read(p + "add", "AppliesTo") == scope, "upload condition does not depend on the order of folders");
+            var accepted = rows.Select(r => r.Copy()).ToArray(); accepted[0].ServerOnly = false; accepted[0].Kind = DiskExplorerKind.Syncing;
+            registry.Register(exe, disk, accepted, home);
+            Check(store.Read(p + "add", "AppliesTo") == scope && !store.Exists(p + "download") && Applies(store.Read(p + "keep-server", "AppliesTo"), placeholder), "a downloaded placeholder keeps the upload condition and moves to «Оставить только на сервере»");
+            var empty = new TestRegistry(); new DiskExplorerRegistry(empty, delegate { }).Register(exe, disk, new DiskFolderState[0], home);
+            Check(!empty.Exists(p + "download") && !empty.Exists(p + "keep-server") && empty.Read(p + "add", "AppliesTo") == "NOT System.ItemPathDisplay:=\"" + disk + "\"", "no folders: only the Disk root is excluded from upload");
+            Check(DiskExplorerRegistry.UploadScope(@"C:\Disk\", new[] { placeholder }) == DiskExplorerRegistry.UploadScope(disk, new[] { placeholder }), "closing backslash of the root does not matter");
+            // Too many folders for one registry value: the list is cut by the safe variant, exactly once, and always within the limit.
+            bool safe = false;
+            for (int n = 1; n <= 100; n++) {
+                string text = DiskExplorerRegistry.UploadScope(disk, Enumerable.Range(1, n).Select(i => disk + @"\Проект-" + i));
+                bool listed = !text.Contains("ItemFolderPathDisplay");
+                Require(text.Length <= DiskExplorerRegistry.MaxAppliesTo, "upload condition longer than the limit for " + n + " folders");
+                Require(!(safe && listed), "the safe variant must not switch back to the full list");
+                Require(n > 5 || listed, "a short list of folders is spelled out in full");
+                safe |= !listed;
+            }
+            Check(safe, "a long list of folders switches to the safe variant");
+            var many = Enumerable.Range(1, 60).Select(i => new DiskFolderState { Path = disk + @"\Проект-" + i, ServerOnly = true, Kind = DiskExplorerKind.ServerOnly }).ToList();
+            many.Add(new DiskFolderState { Path = outside, Kind = DiskExplorerKind.Synced });
+            var big = new TestRegistry(); new DiskExplorerRegistry(big, delegate { }).Register(exe, disk, many, home);
+            string compact = big.Read(p + "add", "AppliesTo");
+            Check(compact.Length <= DiskExplorerRegistry.MaxAppliesTo && compact.Contains("System.ItemFolderPathDisplay:=\"" + disk + "\"") && !compact.Contains("Проект-33"), "safe variant: every direct child of Disk is hidden as a whole");
+            Check(!Applies(compact, disk) && !Applies(compact, disk + @"\Проект-33") && !Applies(compact, outside), "safe variant: root, placeholders and the listed outside folder have no upload item");
+            Check(Applies(compact, @"D:\Other") && Applies(compact, @"D:\Проекты\X"), "safe variant: folders outside Disk are still offered the upload item");
+            Check(!Applies(compact, disk + @"\Новая"), "safe variant: the price is that a brand-new folder placed directly in Disk is not offered the upload item");
+            var notes = new List<string>(); var noisy = new DiskExplorerRegistry(new TestRegistry(), notes.Add);
+            noisy.Register(exe, disk, many, home); noisy.Register(exe, disk, many, home);
+            Check(notes.Count == 1 && notes[0].Contains("слишком много"), "the switch to the safe variant is journalled once, not on every refresh");
+            // Even the outside list does not fit: it is left out; the command itself answers that such a folder already syncs.
+            var far = Enumerable.Range(1, 100).Select(i => new DiskFolderState { Path = @"D:\Много\Папка-" + i, Kind = DiskExplorerKind.Synced }).ToList();
+            var farStore = new TestRegistry(); new DiskExplorerRegistry(farStore, delegate { }).Register(exe, disk, far, home);
+            string bounded = farStore.Read(p + "add", "AppliesTo");
+            Check(bounded.Length <= DiskExplorerRegistry.MaxAppliesTo && !Applies(bounded, disk + @"\Проект") && Applies(bounded, @"D:\Другая"), "outside folders left out of an oversized condition; the Disk children stay hidden");
+            string driveScope = DiskExplorerRegistry.UploadScope(@"C:\", Enumerable.Range(1, 80).Select(i => @"C:\Папка-" + i));
+            Check(driveScope.Length <= DiskExplorerRegistry.MaxAppliesTo && !Applies(driveScope, @"C:\Папка-5") && !Applies(driveScope, @"C:\") && Applies(driveScope, @"D:\Папка-5"), "a drive root works as the Disk root");
         }
         internal sealed class FakeRest : IDiskRest
         {
@@ -199,7 +291,8 @@ namespace RemoteAgents.Launcher
             rest.Offer("real-id-123", "Проект"); rest.Offer("alien-id", "Чужой", "OTHER"); rest.Offer("unsafe-id", "../escape");
             var initial = commands.Read(None); Check(initial.Folders.Count == 1 && initial.Folders[0].Id == "real-id-123", "only server offer, label distinct from ID, unsafe names excluded");
             service.Reconcile(root, initial.Folders); string project = Path.Combine(root, "Проект");
-            commands.Execute(new DiskShellRequest { Action = "download", Path = project }, None);
+            string started = commands.Execute(new DiskShellRequest { Action = "download", Path = project }, None);
+            Check(started == "Папка скачивается на компьютер. Синхронизация запущена", "download result names what happens");
             var config = rest.Folders.Single();
             Check(Json.Str(config, "id") == "real-id-123" && Json.Str(config, "label") == "Проект" && DiskPaths.Same(Json.Str(config, "path"), project), "accept uses pending ID and label path");
             Check(Json.Str(config, "type") == "sendreceive" && Json.Int(config, "fsWatcherDelayS", 0) == 2 && Json.Int(config, "maxConflicts", 0) == -1 && Json.Str(Json.Map(Json.Get(config, "versioning")), "type") == "staggered", "required folder options");
@@ -217,6 +310,9 @@ namespace RemoteAgents.Launcher
             failRecycle = false; commands.Execute(new DiskShellRequest { Action = "keep-server", Path = project }, None);
             Check(rest.Folders.Count == 0 && service.IsPlaceholder(project) && File.ReadAllText(Path.Combine(project + ".recycled-2", "data.txt")) == "data", "successful eviction keeps files in recycle fixture and creates cloud");
             Check(commands.Read(None).Folders.Any(f => f.Id == "real-id-123" && f.ServerOnly), "evicted folder survives pending-offer delay");
+            string namesake = Path.Combine(temp, "Elsewhere", "Проект"); Directory.CreateDirectory(namesake); string clash = "";
+            try { commands.Execute(new DiskShellRequest { Action = "add", Path = namesake }, None); } catch (IOException e) { clash = e.Message; }
+            Check(clash == "На Диске уже есть папка с таким именем; используйте «Скачать на компьютер»", "upload of a namesake points to the renamed download item");
             // External upload stays in place; CRLF user ignore bytes are retained.
             string external = Path.Combine(temp, "External"); Directory.CreateDirectory(external); File.WriteAllText(Path.Combine(external, "data.txt"), "external");
             File.WriteAllText(Path.Combine(external, ".stignore"), "custom\r\n", Files.Utf8);
@@ -332,6 +428,8 @@ namespace RemoteAgents.Launcher
                     Check(File.ReadAllText(firstIni).Contains("Synced.ico"), "command completes without waiting for long-poll");
                     controller.Dispose(); Check(await Task.Run(() => controller.Wait(3000)), "monitor exits promptly while long-poll is blocked");
                     Check(File.ReadAllText(firstIni).Contains("Unavailable.ico"), "exit does not leave a stale green status");
+                    string menu = DiskExplorerRegistry.Prefix, upload = store.Read(menu + "add", "AppliesTo");
+                    Check(upload.Contains(Path.Combine(root, "First")) && upload.Contains(Path.Combine(root, "Second")), "upload hidden on the placeholder and on the folder that now syncs");
                 }
                 DiskExplorerController.RemoveIntegration(root, api.Home, service, new DiskExplorerRegistry(store, delegate { }));
                 Check(Directory.Exists(Path.Combine(root, "First")) && !File.Exists(Path.Combine(root, "First", "desktop.ini")) && !Directory.Exists(Path.Combine(root, "Second")) && store.Values.Count == 0, "uninstall removes only owned decoration/placeholders and preserves accepted folder");

@@ -91,7 +91,7 @@ namespace RemoteAgents.Launcher
             var metadata = ReadOwned(path);
             string ini = Path.Combine(path, "desktop.ini");
             if (((fs.FileExists(ini) || fs.DirectoryExists(ini)) && metadata == null) || UserEntries(path).Any()) return false;
-            Apply(path, DiskExplorerKind.ServerOnly, "Только на сервере. Правый клик → Забрать с сервера", metadata, true, created);
+            Apply(path, DiskExplorerKind.ServerOnly, DiskMenu.ServerOnlyHint, metadata, true, created);
             return true;
         }
         internal bool IsPlaceholder(string path)
