@@ -23,6 +23,10 @@
   <ItemGroup>
     <Compile Include="PortableJson.cs" />
     <Compile Include="WindowModelTests.cs" />
+    <Compile Include="MainScreenModelTests.cs" />
+    <Compile Include="MainWindowSizingTests.cs" />
+    <Compile Include="../MainWindowSizing.cs" Link="MainWindowSizing.cs" />
+    <Compile Include="../MainScreenModel.cs" Link="MainScreenModel.cs" />
     <Compile Include="TrayExtrasTests.cs" />
     <Compile Include="../TrayMenuModel.cs" Link="TrayMenuModel.cs" />
     <Compile Include="../WindowModel.cs" Link="WindowModel.cs" />

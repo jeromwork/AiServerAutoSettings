@@ -38,7 +38,7 @@ namespace RemoteAgents.Launcher
         { Visible = false; bool notify = !HintShown; HintShown = true; return notify; }
         internal WindowExit Exit(bool applying) { return applying ? WindowExit.ConfirmApplying : WindowExit.Unload; }
         internal static bool CanOpen(string page, string operation)
-        { return page == "Конфиг" || page == "Подробно" || page == "Сервис" || string.IsNullOrEmpty(operation); }
+        { return page == "Главная" || page == "Настройки" || page == "Редактор конфига" || page == "Раздел настроек" || page == "Диагностика" || string.IsNullOrEmpty(operation); }
         // Pending (VPN not yet confirmed, a server install) is handed to the tray and does not hold up «Готово»;
         // Disk runs in the background (BackgroundWork.Disk) and never gates it.
         internal static bool CanFinish(bool running, IDictionary<string, SectionState> states)

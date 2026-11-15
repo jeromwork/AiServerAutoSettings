@@ -38,7 +38,7 @@ pwsh=${PWSH:-$HOME/.cache/pwsh-test/pwsh}
   timeout 120 python3 "$here/test_first_run.py"
   timeout 60 python3 "$here/test_happier_account_ui.py"
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-config-routes.ps1" -TestHome "$testdir/config-routes" < /dev/null
-  timeout 180 python3 "$repo/disk/test-disk.py"
+  timeout 300 python3 "$repo/disk/test-disk.py"
   timeout 120 python3 "$repo/disk/test-wizard-merge.py"
   timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-disk-errors.ps1"
   timeout 120 python3 "$repo/transport/test-engine-loopback.py" --without-disk

@@ -108,6 +108,7 @@ namespace RemoteAgents.Launcher
         string engineStart;
         double previousUptime;
         Dictionary<string, object>[] folders, states, remoteStates;
+        internal int FolderCount { get { return folders == null ? -1 : folders.Length; } }
         string folderPeer;
         double previousIn, previousOut;
         readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();

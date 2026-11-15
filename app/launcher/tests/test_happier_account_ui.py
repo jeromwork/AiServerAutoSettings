@@ -11,10 +11,10 @@ class HappierAccountUiTests(unittest.TestCase):
         self.assertIn('TextBox happierKey = new TextBox { ReadOnly = true, Visible = false', ui)
         self.assertIn('happierKey.Clear(); happierKey.Visible = false;', ui)
         self.assertIn('if (!Visible) HideHappierKey()', ui)
-        self.assertIn('if (tabs.SelectedTab != serviceTab) HideHappierKey()', ui)
+        self.assertIn('if (name != "Главная") HideHappierKey()', (LAUNCHER / 'MainWindow.Settings.cs').read_text())
         self.assertIn('showHappierKey.Visible = copyHappierKey.Visible = current.HasKey;', ui)
         self.assertIn('openHappier.Enabled = current.WebUrl.Length > 0;', ui)
-        self.assertIn('happierCaption.Text = "Аккаунт Happier: " + current.Label;', ui)
+        self.assertIn('RenderCard(view.Happier, happierCard, happierTitle, happierState, happierDetail)', (LAUNCHER / 'MainWindow.Cards.cs').read_text())
 
     def test_clipboard_and_show_run_on_ui_thread_without_logging_secrets(self):
         ui = (LAUNCHER / 'ConfigWindow.Main.cs').read_text()
@@ -37,7 +37,7 @@ class HappierAccountUiTests(unittest.TestCase):
         session = (LAUNCHER / 'ConfigApply.cs').read_text()
         self.assertIn('session.AccountCreated = message => Ui(() => ShowHappierAccountCreated(message));', window)
         self.assertIn('happierCreated.Text = message; happierCreated.Visible = true;', ui)
-        self.assertIn('tabs.SelectedTab = serviceTab;', ui)
+        self.assertIn('ShowPage("Главная");', ui.split('internal void ShowHappierAccountCreated', 1)[1].split('internal void ServiceActions', 1)[0])
         account = session.split('SectionOutcome Account(', 1)[1].split('// Root on the server', 1)[0]
         self.assertLess(account.index('SecretVault.Set(home, name, key)'), account.index('accountCreation.Remember(Json.Str(request, "label"))'))
         self.assertIn('NotifyAccountCreated(outcome);', account)
