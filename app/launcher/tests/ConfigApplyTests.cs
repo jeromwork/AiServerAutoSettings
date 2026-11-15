@@ -186,7 +186,7 @@ namespace RemoteAgents.Launcher
             Check(result.Count == plan.Count && result.Values.All(o => o.Ok && o.Ms >= 350), "every section ran once with timing");
             Check(ends[ConfigSections.Bootstrap] <= starts[ConfigSections.Server], "VPN first before Server");
             foreach (string s in ConfigSections.Parallel.Concat(ConfigSections.Chain)) Check(starts[s] >= ends[ConfigSections.Server], s + " waits for Server");
-            var group = new[] { ConfigSections.Connection, ConfigSections.Bridge, ConfigSections.Proxy };
+            var group = new[] { ConfigSections.Connection, ConfigSections.Bridge, ConfigSections.Vpn, ConfigSections.Proxy };
             Check(group.Max(s => starts[s]) < group.Min(s => ends[s]), "independent Connection/Bridge/Vpn/Proxy overlap in time");
             foreach (string s in new[] { ConfigSections.Account, ConfigSections.Disk })
                 Check(starts[s] >= ends[ConfigSections.Connection], s + " cannot start local-port SSH before Connection succeeds");
@@ -225,7 +225,7 @@ namespace RemoteAgents.Launcher
             };
             var vpnStates = new ConcurrentDictionary<string, SectionState>();
             var retried = ConfigEngine.Execute(new[] { ConfigSections.Server, ConfigSections.Connection, ConfigSections.Vpn }, waiting, (s, st, text) => vpnStates[s] = st, CancellationToken.None).GetAwaiter().GetResult();
-            Check(vpnCalls == 0 && !retried.ContainsKey(ConfigSections.Vpn) && !vpnStates.ContainsKey(ConfigSections.Vpn), "disabled VPN never runs or reports an error, even in an explicit old plan");
+            Check(vpnCalls == 2 && retried[ConfigSections.Vpn].Ok && vpnStates[ConfigSections.Vpn] == SectionState.Done && secondVpn >= connectionDone, "Vpn waiting for the connection is repeated once right after Connection succeeds");
 
             foreach (bool connectionPending in new[] { false, true }) {
                 called = new ConcurrentBag<string>();
@@ -235,7 +235,7 @@ namespace RemoteAgents.Launcher
                     if (s == ConfigSections.Vpn) return new SectionOutcome { Pending = true, Operation = "connection" };
                     return new SectionOutcome { Ok = true };
                 }, (s, st, text) => blocked[s] = st, CancellationToken.None).GetAwaiter().GetResult();
-                foreach (string s in new[] { ConfigSections.Account, ConfigSections.Disk })
+                foreach (string s in new[] { ConfigSections.Account, ConfigSections.Disk, ConfigSections.Vpn })
                     Check(!noConnection[s].Ok && !noConnection[s].Pending && blocked[s] == SectionState.Blocked && noConnection[s].Summary.Contains("нет связи с сервером"), s + " has an honest connection failure, including unconfirmed Connection");
                 Check(!called.Contains(ConfigSections.Account) && !called.Contains(ConfigSections.Disk) && called.Contains(ConfigSections.Bridge), "failed Connection prevents SSH children and allows independent Bridge");
             }

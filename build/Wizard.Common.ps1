@@ -542,10 +542,9 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             }
             try{
                 if($Request.enabled){
-                    $conflict=ConvertFrom-Json (& (Join-Path $Bundle 'transport/Test-VpnConflict.ps1') -Home $Root|Out-String)
-                    if($conflict.conflict){throw 'Работает другой VPN. Отключите его сами и повторите проверку; RemoteAgents не менял чужой VPN'}
-                    Invoke-InstallChild $Bundle 'transport/Vpn.Tun.ps1' @('-Home',$Root,'-Enable') -TimeoutSeconds 420
-                    return @{ok=$false;summary='Запрос VPN передан. Дождитесь живого статуса TUN; включение ещё не подтверждено'}
+                    # Applying a profile never turns on a full tunnel or requests UAC.
+                    # Only the explicit card/tray action supplies the pinned launcher identity.
+                    return @{ok=$true;enabled=$false;summary='VPN настроен. Включите его переключателем в главном окне или меню трея'}
                 }
                 if($previous.enabled){Invoke-InstallChild $Bundle 'transport/Vpn.Tun.ps1' @('-Home',$Root,'-Disable') -TimeoutSeconds 420}
                 return @{ok=$true;summary='VPN выключен в настройках; состояние маршрутов — в живом статусе VPN'}

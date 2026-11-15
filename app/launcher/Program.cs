@@ -37,6 +37,7 @@ namespace RemoteAgents.Launcher
             if(!string.IsNullOrEmpty(passwordPipe))return PasswordRelay.Answer(passwordPipe);
             Journal log = null;
             try {
+                if (args.Contains("--vpn-host")) return VpnHost.Run(args);
                 // Test modes never create or lock the real user's home.
                 string elevated = Option(args, "--elevated-component");
                 if (elevated != null) return ElevatedTask.RunComponent(Path.GetFullPath(Option(args, "--home") ?? DefaultHome), elevated);

@@ -9,21 +9,8 @@ $root=Join-Path $TestHome 'RemoteAgents'
 [void][IO.Directory]::CreateDirectory($root)
 $script:checks=0
 function Assert($ok,$why){if(-not $ok){throw $why};$script:checks++}
-Assert (-not (Test-ProductVpnEnabled)) 'VPN capability is false'
+Assert (Test-ProductVpnEnabled) 'VPN capability restored'
 Write-TransportJson (Join-Path $root 'config.json') @{vpn=@{enabled=$true;interfaceName='RemoteAgents-Custom'};components=@{vpn=@{enabled=$true}};transport=@{keep='unchanged'};profile=@{vpn=@{enabled=$true}}}
-Assert (-not (Get-VpnOptions ([pscustomobject]@{Vpn=[pscustomobject]@{enabled=$true}})).enabled) 'saved vpn.enabled is ignored'
-function Invoke-InstallChild {throw 'Must not launch Enable'}
-function Start-Process {throw 'Must not request UAC during Enable'}
-function Register-ScheduledTask {throw 'Must not register TUN tasks'}
-$r=Invoke-WizardStep $root $repo Vpn ([pscustomobject]@{enabled=$true})
-Assert ($r.ok -and -not $r.enabled -and $r.summary -match 'отключено') 'wizard VPN is disabled, not an error'
-$p=@(Get-WizardPlan ([pscustomobject]@{}) ([pscustomobject]@{vpnEnabled=$true;vpn=$false}))
-Assert ($p[5].ready -and $p[5].summary -match 'Отключено') 'inspection never reports disabled VPN as an error'
-foreach($mode in @('Enable','Broker','Worker')){
-    $arguments=@{TransportHome=$root};$arguments[$mode]=$true
-    $r=& (Join-Path $repo 'transport/Vpn.Tun.ps1') @arguments
-    Assert ($r -match 'отключено') ($mode+' blocked before settings, UAC or registration')
-}
 $empty=[pscustomobject]@{Adapters=@();Processes=@();Tasks=@()}
 Assert (-not (Find-VpnRemnants $root $empty).found) 'empty snapshot: no cleanup prompt'
 foreach($name in @('RemoteAgents-TUN','RemoteAgents-Custom')){
@@ -49,6 +36,7 @@ Assert ((Find-VpnRemnants $root ([pscustomobject]@{Adapters=@();Processes=@();Ta
 $script:snapshot=[pscustomobject]@{Adapters=@([pscustomobject]@{Name='RemoteAgents-Custom';ifIndex=42},[pscustomobject]@{Name='Happ';ifIndex=10});Processes=@($ours)+$foreign;Tasks=$tasks+@([pscustomobject]@{TaskName='Happ';TaskPath='\'})}
 $script:removedRoutes=@();$script:stopped=@();$script:deleted=@();$script:routePresent=$true
 function Get-VpnLegacySnapshot {$script:snapshot}
+function Remove-VpnLegacyAdapter($Adapter){Assert ($Adapter.Name -eq 'RemoteAgents-Custom') 'remove only our PnP device';$script:snapshot.Adapters=@($script:snapshot.Adapters|Where-Object {$_.Name -ne $Adapter.Name})}
 function Stop-ScheduledTask {param($TaskName,$TaskPath,$ErrorAction) Assert ($TaskName -like 'RemoteAgents-TUN-*') 'stop only our task'}
 function Get-CimInstance {param($ClassName,$Filter,$ErrorAction) $script:snapshot.Processes | Where-Object {('ProcessId='+$_.ProcessId) -eq $Filter}}
 function Stop-Process {param($Id,[switch]$Force,$ErrorAction) $script:stopped+=@($Id);$script:snapshot.Processes=@($script:snapshot.Processes|Where-Object {$_.ProcessId -ne $Id})}
@@ -72,7 +60,8 @@ Assert ($script:stopped.Count -eq 1 -and $script:deleted.Count -eq 2) 'repeat cl
 Write-TransportJson (Join-Path $root 'state/vpn-owner.json') @{pid=123}
 Write-VpnStatus $root $true $true 'on' @{} 'old status'
 $script:routePresent=$true
+$script:snapshot.Adapters+=@([pscustomobject]@{Name='RemoteAgents-Custom';ifIndex=42})
 function Remove-NetRoute {param([Parameter(ValueFromPipeline=$true)]$InputObject,[switch]$Confirm) process{throw 'fixture: route removal failed'}}
 $failed=$false;try{Remove-VpnRemnants $root}catch{$failed=$true}
 Assert ($failed -and (Test-Path (Join-Path $root 'state/vpn-owner.json')) -and (Read-TransportJson (Join-Path $root 'status/vpn.json')).state -eq 'on') 'failed cleanup preserves receipts and does not publish off'
-Write-Output ('PASS: '+$script:checks+' disabled VPN and legacy cleanup checks')
+Write-Output ('PASS: '+$script:checks+' VPN capability and legacy cleanup checks')

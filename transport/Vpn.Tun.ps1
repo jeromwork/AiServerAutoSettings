@@ -6,157 +6,111 @@ param([Alias('Home')][string]$TransportHome=(Join-Path $env:LOCALAPPDATA 'Remote
     [Parameter(Mandatory=$true,ParameterSetName='Generate')][switch]$Generate,
     [Parameter(Mandatory=$true,ParameterSetName='Worker')][switch]$Worker,
     [Parameter(Mandatory=$true,ParameterSetName='Rollback')][switch]$Rollback,
-    [Parameter(Mandatory=$true,ParameterSetName='Broker')][switch]$Broker,
     [Parameter(Mandatory=$true,ParameterSetName='InspectLegacy')][switch]$InspectLegacy,
     [Parameter(Mandatory=$true,ParameterSetName='Cleanup')][switch]$Cleanup,
-    [string]$Session='', [string]$OutputConfig='', [int]$ParentPid=0)
+    [string]$Session='', [string]$OutputConfig='', [int]$ParentPid=0, [string]$HostExe='')
 . (Join-Path $PSScriptRoot 'Transport.Common.ps1')
-$root=(Get-TransportHome $TransportHome);$action=$PSCmdlet.ParameterSetName
+$root=Get-TransportHome $TransportHome;$action=$PSCmdlet.ParameterSetName
+$conflict=[pscustomobject]@{conflict=$false;items=@()}
+$stopFile=Join-Path $root 'state/vpn.stop';$sessionFile=Join-Path $root 'state/vpn-session.json'
 if($action -in @('InspectLegacy','Cleanup')){
     . (Join-Path $PSScriptRoot 'Vpn.Legacy.ps1')
     if($action -eq 'InspectLegacy'){
+        # A live current host is not a remnant. Check pinned identity, not a bare PID.
+        if(Test-VpnHostAlive $root){ConvertTo-Json -Compress @{found=$false};return}
         $found=Find-VpnRemnants $root (Get-VpnLegacySnapshot)
         ConvertTo-Json -Compress @{found=$found.found};return
     }
     if($env:OS -ne 'Windows_NT' -or -not (Test-VpnAdministrator)){throw 'Очистка требует администратора Windows'}
-    Remove-VpnRemnants $root
+    if(Test-VpnHostAlive $root){throw 'Сначала выключите VPN'}
+    Remove-VpnRemnants $root;return
+}
+if($action -eq 'Status'){
+    $file=Join-Path $root 'status/vpn.json'
+    if(-not (Test-Path -LiteralPath $file)){Write-VpnStatus $root $false $false 'off' $conflict 'VPN выключен'}
+    ConvertTo-Json -InputObject (Read-TransportJson $file) -Depth 10;return
+}
+if($action -eq 'Disable'){
+    # The host sees this before a potentially busy configuration mutex.
+    Write-TransportJson $stopFile @{stop=$true}
+    $deadline=[DateTime]::UtcNow.AddSeconds(4)
+    while((Test-VpnHostAlive $root) -and [DateTime]::UtcNow -lt $deadline){Start-Sleep -Milliseconds 50}
+    if(Test-VpnHostAlive $root){throw 'Выключение VPN ещё не подтверждено'}
+    Set-VpnEnabled $root $false
+    Write-VpnStatus $root $false $false 'off' $conflict 'VPN выключен';return
+}
+if($action -eq 'Rollback'){
+    if($env:OS -ne 'Windows_NT' -or -not (Test-VpnAdministrator)){throw 'Очистка требует администратора Windows'}
+    if(-not $Session -or (Read-TransportJson $sessionFile).session -ne $Session){return}
+    $receipt=Join-Path $root 'state/vpn-interface.json'
+    if(Test-Path $receipt){
+        $owned=Read-TransportJson $receipt
+        if($owned.session -ne $Session){return}
+        $adapter=Get-NetAdapter -IncludeHidden -ErrorAction Stop|Where-Object {[string]$_.InterfaceGuid -eq [string]$owned.guid -and $_.Name -eq $owned.name}|Select-Object -First 1
+        Clear-VpnRoutes $root $Session
+        if($adapter){
+            . (Join-Path $PSScriptRoot 'Vpn.Legacy.ps1')
+            Remove-VpnLegacyAdapter $adapter
+        }
+    }
     return
 }
-if($action -in @('Enable','Broker','Worker') -and -not (Test-ProductVpnEnabled)){
-    Write-Output 'VPN отключено в этой версии';return
-}
-$tasks=Get-VpnTaskNames $root
-$sessionFile=Join-Path $root 'state/vpn-session.json';$stopFile=Join-Path $root 'state/vpn.stop';$configFile=Join-Path $root 'state/vpn-sing-box.json'
-$child=$null;$mutex=$null;$locked=$false;$parent=$null;$failure=$false;$conflict=[pscustomobject]@{conflict=$false;items=@()}
 try{
-    if($action -eq 'Status'){
-        $file=Join-Path $root 'status/vpn.json'
-        if(-not (Test-Path -LiteralPath $file)){Write-VpnStatus $root $false $false 'off' $conflict 'Системный VPN выключен'}
-        ConvertTo-Json -InputObject (Read-TransportJson $file) -Depth 10
-        return
+    if($action -eq 'Enable'){
+        if($env:OS -ne 'Windows_NT'){throw 'VPN поддержан только на Windows'}
+        if($ParentPid -le 0 -or -not $HostExe){throw 'Включите VPN кнопкой в окне или меню программы'}
+        if(Test-VpnHostAlive $root){return}
+        $parent=[Diagnostics.Process]::GetProcessById($ParentPid)
+        try{$parentStart=$parent.StartTime.ToUniversalTime().Ticks}finally{$parent.Dispose()}
+        $settings=Read-TransportSettings $root
+        try{$null=Get-VpnTransportState $root $settings}catch{
+            Write-VpnStatus $root $false $false 'no-path' $conflict 'VPN не включён: нет живого пути к серверу';return
+        }
+        $snapshot=Get-VpnSnapshot;$conflict=Find-VpnConflicts $snapshot @(Get-VpnOwnedProcessIds $root $snapshot)
+        if($conflict.conflict){Write-VpnStatus $root $false $false 'conflict' $conflict 'Отключите другой VPN перед включением VPN RemoteAgents';return}
+        $Session=[guid]::NewGuid().ToString('N')
+        Write-TransportJson $sessionFile @{session=$Session} -Private
+        Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue
+        Write-VpnStatus $root $false $true 'awaiting-uac' $conflict 'Ожидается разрешение Windows на включение'
+        $args=@('--vpn-host','--home',$root,'--vpn-script',$PSCommandPath,'--vpn-session',$Session,'--vpn-parent',[string]$ParentPid,'--vpn-parent-start',[string]$parentStart)
+        $hostProcess=Start-Process -FilePath $HostExe -ArgumentList (($args|ForEach-Object {Quote-Transport $_}) -join ' ') -Verb RunAs -WindowStyle Hidden -PassThru
+        try{
+            $deadline=[DateTime]::UtcNow.AddSeconds(35)
+            while([DateTime]::UtcNow -lt $deadline){
+                $status=Read-TransportJson (Join-Path $root 'status/vpn.json')
+                if($status.state -eq 'on'){Set-VpnEnabled $root $true;return}
+                if($hostProcess.HasExited){return}
+                Start-Sleep -Milliseconds 100
+            }
+            Write-TransportJson $stopFile @{stop=$true};throw 'Включение не подтверждено'
+        }finally{$hostProcess.Dispose()}
     }
-    if($action -eq 'Disable'){
-        Set-VpnEnabled $root $false;Write-TransportJson $stopFile @{stop=$true}
-        Write-VpnStatus $root $false $false 'stopping' $conflict 'Запрошено выключение TUN; ожидается подтверждение компонента'
-        return
-    }
-    if($action -eq 'Rollback'){
-        if($env:OS -ne 'Windows_NT' -or -not (Test-VpnAdministrator)){throw 'Откат требует администратора Windows'}
-        if(-not $Session -or (Read-TransportJson $sessionFile).session -ne $Session){return}
-        # Автооткат не зависит от читаемости config.json.
-        try{Set-VpnEnabled $root $false}catch{};Write-TransportJson $stopFile @{stop=$true}
-        $snapshot=[pscustomobject]@{Processes=@(Get-CimInstance Win32_Process -ErrorAction Stop)};$own=@(Get-VpnOwnedProcessIds $root $snapshot)
-        $ownerFile=Join-Path $root 'state/vpn-owner.json'
-        if(Test-Path -LiteralPath $ownerFile){$owner=Read-TransportJson $ownerFile;if([int]$owner.pid -in $own){Stop-Process -Id ([int]$owner.pid) -Force -ErrorAction SilentlyContinue}}
-        Stop-ScheduledTask -TaskName $tasks.Worker -ErrorAction SilentlyContinue
-        Clear-VpnRoutes $root $Session
-        foreach($taskName in @($tasks.Worker,$tasks.Rollback)){Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue}
-        Write-VpnStatus $root $false $false 'rolled-back' $conflict 'TUN выключен независимым автооткатом';return
+    # Worker prepares a plan only: the native elevated host alone starts the core.
+    if($action -eq 'Worker'){
+        if(-not (Test-VpnAdministrator)){throw 'Нужны права администратора'}
+        if(-not $Session -or (Read-TransportJson $sessionFile).session -ne $Session -or (Test-Path $stopFile)){throw 'Включение отменено'}
     }
     $settings=Read-TransportSettings $root;$v=Get-VpnOptions $settings
-    if($action -eq 'Generate'){
-        # Только чтение системы и генерация, без запуска TUN/задач/UAC.
-        $snapshot=Get-VpnSnapshot;$paths=Get-TransportCandidates $settings $root;$net=Get-TransportNetwork
-        $status=Get-VpnTransportState $root $settings
-        $exclude=Get-VpnExclusions $settings $paths $snapshot -Root $root
-        $cfg=New-VpnTunConfig $settings $paths $status.active $exclude $net.interface
-        if(-not $OutputConfig){$OutputConfig=Join-Path $root 'state/vpn-generated.json'}
-        Write-TransportJson $OutputConfig $cfg -Private;Test-TransportConfigFile $settings.Options.singBoxPath $OutputConfig
-        Write-Output 'TUN-конфиг создан и проверен; TUN не запускался';return
+    $snapshot=Get-VpnSnapshot;$own=@(Get-VpnOwnedProcessIds $root $snapshot)
+    $conflict=Find-VpnConflicts $snapshot $own
+    if($conflict.conflict){Write-VpnStatus $root $false $false 'conflict' $conflict 'Отключите другой VPN перед включением VPN RemoteAgents';exit 1}
+    if(@($snapshot.Adapters|Where-Object {$_.Name -eq $v.interfaceName}).Count){throw 'Остался адаптер прошлой версии. Выполните предложенную очистку'}
+    try{$status=Get-VpnTransportState $root $settings}catch{
+        Write-VpnStatus $root $false $false 'no-path' $conflict 'VPN не включён: нет живого пути к серверу';exit 1
     }
-    if($env:OS -ne 'Windows_NT'){throw 'Запуск TUN поддержан только на Windows'}
-    if($action -in @('Enable','Broker')){
-        $snapshot=Get-VpnSnapshot;$own=@(Get-VpnOwnedProcessIds $root $snapshot)
-        # Повторное включение не заменяет задачи работающего сеанса.
-        $ownerFile=Join-Path $root 'state/vpn-owner.json'
-        if(Test-Path -LiteralPath $ownerFile){$owner=Read-TransportJson $ownerFile;if([int]$owner.pid -in $own){Write-Output 'Наш TUN уже работает';return}}
-        $conflict=Find-VpnConflicts $snapshot $own
-        if($conflict.conflict){Write-VpnStatus $root $false $false 'conflict' $conflict 'Найден другой VPN; отключите его самостоятельно или оставьте наш VPN выключенным';return}
-        if(@($snapshot.Adapters|Where-Object {$_.Name -eq $v.interfaceName}).Count){throw 'Имя TUN уже занято; существующий интерфейс не трогаем'}
-        $paths=Get-TransportCandidates $settings $root;$net=Get-TransportNetwork;$status=Get-VpnTransportState $root $settings
-        $exclude=Get-VpnExclusions $settings $paths $snapshot -Root $root
-        $cfg=New-VpnTunConfig $settings $paths $status.active $exclude $net.interface
-        $preflight=Join-Path $root 'state/vpn-preflight.json';Write-TransportJson $preflight $cfg -Private;Test-TransportConfigFile $settings.Options.singBoxPath $preflight
-        if(-not (Test-VpnAdministrator)){
-            Write-VpnStatus $root $false $false 'awaiting-uac' $conflict 'Ожидается подтверждение UAC для одноразовой задачи TUN'
-            $exe=Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
-            $args=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath,'-Home',$root,'-Broker','-ParentPid',[string]$ParentPid)
-            # UAC подтверждает человек. Нет сохранённых паролей или обхода elevation.
-            $elevated=Start-Process -FilePath $exe -ArgumentList (($args|ForEach-Object {Quote-Transport $_}) -join ' ') -Verb RunAs -PassThru -Wait
-            if($elevated.ExitCode -ne 0){throw 'Повышенный компонент не запущен'};return
-        }
-        $mutex=New-Object Threading.Mutex($false,($tasks.Worker+'-Enable'));try{$locked=$mutex.WaitOne(0)}catch [Threading.AbandonedMutexException]{$locked=$true};if(-not $locked){throw 'Включение уже выполняется'}
-        $Session=[guid]::NewGuid().ToString('N');Write-TransportJson $sessionFile @{session=$Session} -Private
-        Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue
-        $exe=Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
-        $base=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath,'-Home',$root,'-Session',$Session)
-        $rollbackAction=New-ScheduledTaskAction -Execute $exe -Argument ((@($base+@('-Rollback'))|ForEach-Object {Quote-Transport $_}) -join ' ')
-        $workerAction=New-ScheduledTaskAction -Execute $exe -Argument ((@($base+@('-Worker','-ParentPid',[string]$ParentPid))|ForEach-Object {Quote-Transport $_}) -join ' ')
-        $principal=New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Highest
-        $taskSettings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)
-        # Независимый watchdog установлен ДО первого run. Не требует живого лаунчера/worker.
-        Register-ScheduledTask -TaskName $tasks.Rollback -Action $rollbackAction -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5)) -Principal $principal -Settings $taskSettings -Force|Out-Null
-        try{
-            Register-ScheduledTask -TaskName $tasks.Worker -Action $workerAction -Principal $principal -Settings $taskSettings -Force|Out-Null
-            Set-VpnEnabled $root $true;Start-ScheduledTask -TaskName $tasks.Worker
-            Write-VpnStatus $root $false $true 'starting' $conflict 'TUN запускается; автооткат через пять минут'
-        }catch{Set-VpnEnabled $root $false;throw}
-        return
-    }
-    if(-not (Test-VpnAdministrator)){throw 'Нужны подтверждённые права администратора'}
-    if(-not $Session -or (Read-TransportJson $sessionFile).session -ne $Session){return}
-    $mutex=New-Object Threading.Mutex($false,$tasks.Worker);try{$locked=$mutex.WaitOne(0)}catch [Threading.AbandonedMutexException]{$locked=$true};if(-not $locked){throw 'TUN уже запущен'}
-    if($ParentPid -gt 0){$parent=[Diagnostics.Process]::GetProcessById($ParentPid);[void]$parent.Handle}
-    $lastRevision='';$lastTag='';$nextCheck=[DateTime]::MinValue;$validated=$false
-    while($true){
-        $settings=Read-TransportSettings $root;$v=Get-VpnOptions $settings
-        if(-not $v.enabled -or (Test-Path -LiteralPath $stopFile) -or (Test-Path -LiteralPath (Join-Path $root 'stop')) -or ($parent -and $parent.HasExited)){break}
-        $status=Get-VpnTransportState $root $settings
-        $revision=(Get-TransportRevision $root)+(ConvertTo-Json -InputObject $v -Depth 20 -Compress)
-        if(-not $child -or $lastTag -ne $status.active -or $lastRevision -ne $revision -or [DateTime]::UtcNow -ge $nextCheck){
-            $snapshot=Get-VpnSnapshot;$own=@(Get-VpnOwnedProcessIds $root $snapshot);$ownInterface='';if($child){$ownInterface=$v.interfaceName}
-            $conflict=Find-VpnConflicts $snapshot $own $ownInterface;if($conflict.conflict){throw 'Обнаружен конфликт VPN'}
-            $paths=Get-TransportCandidates $settings $root;$net=Get-TransportNetwork;$exclude=Get-VpnExclusions $settings $paths $snapshot -Root $root
-            $cfg=New-VpnTunConfig $settings $paths $status.active $exclude $net.interface
-            $newJson=ConvertTo-Json -InputObject $cfg -Depth 40 -Compress
-            if(-not $child -or $newJson -ne $lastJson){
-                $pending=Join-Path $root 'state/vpn-pending.json';Write-TransportJson $pending $cfg -Private;Test-TransportConfigFile $settings.Options.singBoxPath $pending
-                Register-VpnRollbackTask $root $Session $PSCommandPath;$validated=$false
-                Stop-TransportProcess $child;$child=$null;Clear-VpnRoutes $root $Session
-                Write-TransportJson $configFile $cfg -Private
-                $child=Start-TransportProcess $settings.Options.singBoxPath @('run','-c',$configFile)
-                Save-TransportOwner $root 'vpn' $child $settings.Options.singBoxPath $configFile
-                $adapter=$null
-                for($i=0;$i -lt 40;$i++){
-                    if($child.Process.HasExited){throw 'TUN завершился при запуске'}
-                    $adapter=Get-NetAdapter -IncludeHidden|Where-Object {$_.Name -eq $v.interfaceName -and $_.Status -eq 'Up'}|Select-Object -First 1
-                    if($adapter){break};Start-Sleep -Milliseconds 250
-                }
-                if(-not $adapter){throw 'Не появился интерфейс TUN'}
-                Write-TransportJson (Join-Path $root 'state/vpn-interface.json') @{session=$Session;guid=[string]$adapter.InterfaceGuid;name=$adapter.Name} -Private
-                Test-VpnThroughTun $settings $adapter
-                # Только успешная проверка сервера, DNS, внешнего HTTPS и TUN routes снимает watchdog.
-                if(-not $validated){Unregister-ScheduledTask -TaskName $tasks.Rollback -Confirm:$false;$validated=$true}
-                $lastJson=$newJson
-            }else{Test-VpnThroughTun $settings $adapter}
-            $lastTag=$status.active;$lastRevision=$revision;$nextCheck=[DateTime]::UtcNow.AddSeconds(30)
-        }
-        if($child.Process.HasExited){throw 'TUN неожиданно завершился'}
-        Write-VpnStatus $root $true $true 'on' $conflict $(if($settings.Transport.bootstrap){'Начальный VPN: TUN, DNS и HTTPS проверены; SSH ещё не проверен'}else{'Системный VPN проверен; трафик идёт через выбранный путь'})
-        Start-Sleep -Seconds 1
-    }
+    $paths=Get-TransportCandidates $settings $root;$net=Get-TransportNetwork
+    $exclude=Get-VpnExclusions $settings $paths $snapshot -Root $root
+    $cfg=New-VpnTunConfig $settings $paths $status.active $exclude $net.interface
+    $file=Join-Path $root 'state/vpn-sing-box.json'
+    if($action -eq 'Generate'){$file=$OutputConfig;if(-not $file){$file=Join-Path $root 'state/vpn-generated.json'}}
+    Write-TransportJson $file $cfg -Private;Test-TransportConfigFile $settings.Options.singBoxPath $file
+    if($action -eq 'Generate'){Write-Output 'VPN-конфиг создан и проверен; VPN не запускался';return}
+    # The probe targets a synthetic IPv4 routed through TUN. sing-box rewrites it
+    # to checkUrl's host, preserving the probe's real TLS SNI/HTTP Host. No system
+    # DNS lookup or uncontrollable DNS timeout runs on the host watchdog thread.
+    Write-TransportJson (Join-Path $root 'state/vpn-plan.json') @{session=$Session;tag=$status.active;network=$status.network;revision=$status.configRevision;physical=$net.interface;interfaceName=$v.interfaceName;exe=[IO.Path]::GetFullPath($settings.Options.singBoxPath);checkUrl=$v.checkUrl;checkAddress=$v.probeAddress} -Private
 }catch{
-    $failure=$true
-    if($action -ne 'Generate'){try{Set-VpnEnabled $root $false}catch{};Write-VpnStatus $root $false $false 'error' $conflict 'TUN не включён или выключается после ошибки; проверьте конфиг, журнал и права'}
-    Write-Error 'Компонент VPN не выполнил операцию. Секреты и параметры процессов скрыты.' -ErrorAction Continue
-}finally{
-    if($action -eq 'Worker' -and $locked){
-        Stop-TransportProcess $child
-        try{Clear-VpnRoutes $root $Session;Set-VpnEnabled $root $false
-            foreach($name in @($tasks.Worker,$tasks.Rollback)){Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue}
-            if(-not $failure){Write-VpnStatus $root $false $false 'off' $conflict 'Системный VPN выключен; маршруты нашего интерфейса удалены'}
-        }catch{$failure=$true;Write-VpnStatus $root $false $false 'rollback-error' $conflict 'Не удалось подтвердить очистку наших маршрутов; независимый автооткат сохранён'}
-    }
-    if($locked){$mutex.ReleaseMutex()};if($mutex){$mutex.Dispose()};if($parent){$parent.Dispose()}
+    # Never publish raw exceptions: they may contain secrets from configs or URIs.
+    Write-VpnStatus $root $false $false 'error' $conflict 'VPN не включён: проверьте настройки и разрешение Windows'
+    exit 1
 }
-if($failure){exit 1}

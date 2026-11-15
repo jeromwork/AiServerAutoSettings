@@ -35,6 +35,14 @@ function Find-VpnRemnants([string]$Root,$Snapshot) {
     $tasks=@($Snapshot.Tasks | Where-Object {$_.TaskName -like 'RemoteAgents-TUN-*'})
     @{found=($adapters.Count -gt 0 -or $processes.Count -gt 0 -or $tasks.Count -gt 0);adapters=$adapters;processes=$processes;tasks=$tasks}
 }
+function Remove-VpnLegacyAdapter($Adapter) {
+    # Exact name/GUID is checked by the caller. PnP removal also removes a stale
+    # Wintun device; removing routes alone leaves the next Enable blocked.
+    if(-not $Adapter.PnPDeviceID){throw 'Не удалось определить устройство нашего адаптера'}
+    $exe=Join-Path $env:SystemRoot 'System32/pnputil.exe'
+    $p=Start-Process -FilePath $exe -ArgumentList ('/remove-device '+(Quote-Transport ([string]$Adapter.PnPDeviceID))) -PassThru -WindowStyle Hidden
+    try{if(-not $p.WaitForExit(2000) -or $p.ExitCode -ne 0){throw 'Не удалось удалить наш старый адаптер'}}finally{if(-not $p.HasExited){$p.Kill()};$p.Dispose()}
+}
 function Remove-VpnRemnants([string]$Root) {
     # Caller elevates once. Stop workers before sing-box so a previous version cannot restart it.
     $found=Find-VpnRemnants $Root (Get-VpnLegacySnapshot)
@@ -53,10 +61,11 @@ function Remove-VpnRemnants([string]$Root) {
     foreach($adapter in @((Find-VpnRemnants $Root (Get-VpnLegacySnapshot)).adapters)){
         Get-NetRoute -InterfaceIndex $adapter.ifIndex -ErrorAction Stop | Remove-NetRoute -Confirm:$false -ErrorAction Stop
         if(@(Get-NetRoute -InterfaceIndex $adapter.ifIndex -ErrorAction Stop).Count){throw 'Не удалось убрать маршруты нашего VPN'}
+        Remove-VpnLegacyAdapter $adapter
     }
     foreach($task in $found.tasks){Unregister-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -Confirm:$false -ErrorAction Stop}
     $remaining=Find-VpnRemnants $Root (Get-VpnLegacySnapshot)
-    if($remaining.processes.Count -or $remaining.tasks.Count){throw 'Очистка VPN ещё не подтверждена'}
+    if($remaining.processes.Count -or $remaining.tasks.Count -or $remaining.adapters.Count){throw 'Очистка VPN ещё не подтверждена'}
     if(Test-Path -LiteralPath (Join-Path $Root 'config.json')){Set-VpnEnabled $Root $false}
     foreach($name in @('vpn-session.json','vpn-owner.json','vpn-interface.json','vpn-sing-box.json','vpn-preflight.json','vpn-pending.json','vpn-generated.json')){
         Remove-Item -LiteralPath (Join-Path $Root ('state/'+$name)) -Force -ErrorAction SilentlyContinue

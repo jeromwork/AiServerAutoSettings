@@ -27,6 +27,11 @@
     <Compile Include="MainScreenModelTests.cs" />
     <Compile Include="MainWindowSizingTests.cs" />
     <Compile Include="../MainWindowSizing.cs" Link="MainWindowSizing.cs" />
+    <Compile Include="../VpnWatchdog.cs" />
+    <Compile Include="../VpnStatus.cs" />
+    <Compile Include="../VpnProbe.cs" />
+    <Compile Include="../VpnLease.cs" />
+    <Compile Include="VpnTests.cs" />
     <Compile Include="../MainScreenModel.cs" Link="MainScreenModel.cs" />
     <Compile Include="TrayExtrasTests.cs" />
     <Compile Include="../TrayMenuModel.cs" Link="TrayMenuModel.cs" />

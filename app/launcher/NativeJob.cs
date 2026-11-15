@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 
 namespace RemoteAgents.Launcher
 {
@@ -56,7 +57,7 @@ namespace RemoteAgents.Launcher
             } catch { TerminateProcess(info.process, 1); if (process != null) process.Dispose(); throw; }
             finally { CloseHandle(info.thread); CloseHandle(info.process); }
         }
-        public void Dispose() { if (handle != IntPtr.Zero) { CloseHandle(handle); handle = IntPtr.Zero; } }
+        public void Dispose() { var closing = Interlocked.Exchange(ref handle, IntPtr.Zero); if (closing != IntPtr.Zero) CloseHandle(closing); }
         [StructLayout(LayoutKind.Sequential)] struct SecurityAttributes { public int length; public IntPtr descriptor; [MarshalAs(UnmanagedType.Bool)] public bool inherit; }
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateFile(string path, uint access, uint share, ref SecurityAttributes security, uint disposition, uint flags, IntPtr template);
         [StructLayout(LayoutKind.Sequential)] struct BasicLimits { public long ProcessTime, JobTime; public uint LimitFlags; public UIntPtr MinimumWorkingSet, MaximumWorkingSet; public uint ActiveProcessLimit; public UIntPtr Affinity; public uint PriorityClass, SchedulingClass; }
