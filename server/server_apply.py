@@ -1111,8 +1111,8 @@ class Missing(Error):
 
 def egress_watch(engine):
     # Protect replies before any restart can recreate the old split routes.
-    if engine.s.path(base.STATE).exists():
-        return False  # Recovery timer owns this first activation until external confirmation.
+    if any(engine.s.path(p).exists() for p in module('server_recovery').PENDING):
+        return False  # The transaction's external confirmation/rollback owns it.
     before = len(engine.s.actions)
     inbound_ok = False
     try:

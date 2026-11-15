@@ -158,19 +158,21 @@ def restore_lans(app, engine, saved):
         unit = 'remoteagents-lan@' + name + '.service'
         if not changed and s.active(unit) and current.get('ready'):
             continue
-        # OpenVPN's stop/start hooks take network.lock themselves. Never wait on
-        # systemd while holding that lock, otherwise ExecStopPost deadlocks.
-        s.run(['systemctl', 'stop', unit], change=True)
+        # Reserve the entire stop/write/start operation against standalone
+        # lan-vpn/proxy-out, including a transaction started after reconcile's
+        # initial check. The generated _prestart/_hook/_down handlers deliberately
+        # bypass network.lock (enable() also waits for them while holding it).
         with s.network_lock():
             app.require(not any(s.path(p).exists() for p in PENDING), 'Есть незавершённая сетевая транзакция.')
+            s.run(['systemctl', 'stop', unit], change=True)
             for filename, text in files.items():
                 app.require(filename in ('config.json', 'client.conf'), 'Неверный снимок ЛВС.')
                 s.write(directory + filename, text)
-        s.run(['systemctl', 'enable', '--now', unit], change=True)
-        deadline = time.monotonic() + 25
-        while not s.read(directory + 'config.json', {}).get('ready'):
-            app.require(time.monotonic() < deadline, 'Подтверждённая ЛВС не восстановилась.')
-            time.sleep(.5)
+            s.run(['systemctl', 'enable', '--now', unit], change=True)
+            deadline = time.monotonic() + 25
+            while not s.read(directory + 'config.json', {}).get('ready'):
+                app.require(time.monotonic() < deadline, 'Подтверждённая ЛВС не восстановилась.')
+                time.sleep(.5)
         engine.lan_test(item)
 
 

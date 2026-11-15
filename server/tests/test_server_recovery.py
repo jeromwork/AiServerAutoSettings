@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Recovery boundary tests; fake services, real files/permissions. Docker covers kernel."""
 import json
+import contextlib
 import os
 import tempfile
 import unittest
@@ -135,6 +136,33 @@ class RecoveryTests(unittest.TestCase):
                 pending = self.f.path(path); pending.mkdir(parents=True)
                 self.f.system.actions.clear()
                 self.assertFalse(recovery.reconcile(app, self.f.system))
+                self.assertEqual(self.f.system.actions, [])
+                pending.rmdir()
+
+    def test_lan_restore_rechecks_pending_before_stopping_service(self):
+        self.c['lan'] = config()['lan']
+        self.install()
+        self.f.write('/etc/remoteagents/lan/office/client.conf', '# broken')
+        original = self.f.system.network_lock
+        @contextlib.contextmanager
+        def race():
+            with original():
+                yield
+            # A standalone proxy-out/lan-vpn can enter after the first check.
+            self.f.path('/var/lib/remoteagents/proxy-out/pending').mkdir(parents=True, exist_ok=True)
+        with patch.object(self.f.system, 'network_lock', race):
+            with self.assertRaises(app.Error):
+                recovery.reconcile(app, self.f.system)
+        self.assertIn('remoteagents-lan@office.service', self.f.active)
+
+    def test_egress_watch_never_mutates_any_pending_network_transaction(self):
+        self.install()
+        for path in recovery.PENDING:
+            with self.subTest(path=path):
+                pending = self.f.path(path); pending.mkdir(parents=True)
+                self.f.rules = False
+                engine = self.f.engine(self.c)
+                self.assertFalse(app.egress_watch(engine))
                 self.assertEqual(self.f.system.actions, [])
                 pending.rmdir()
 
