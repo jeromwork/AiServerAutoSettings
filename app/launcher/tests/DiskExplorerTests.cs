@@ -39,7 +39,7 @@ namespace RemoteAgents.Launcher
         internal static void Run()
         {
             string temp = Path.Combine(Path.GetTempPath(), "disk-explorer-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(temp);
-            try { RecyclePolicy(); States(); Metadata(Path.Combine(temp, "metadata")); Registry(); Menu(); MenuIcon(); IconFile(Path.Combine(temp, "icons")); Commands(Path.Combine(temp, "actions")); Console.WriteLine("PASS: Explorer model, metadata, registry and action fixtures"); HttpAndEvents(Path.Combine(temp, "http")).GetAwaiter().GetResult(); }
+            try { RecyclePolicy(); States(); Metadata(Path.Combine(temp, "metadata")); Registry(); Menu(); MenuIcon(); IconFile(Path.Combine(temp, "icons")); StateIcons(Path.Combine(temp, "state-icons")); Commands(Path.Combine(temp, "actions")); Console.WriteLine("PASS: Explorer model, metadata, registry and action fixtures"); HttpAndEvents(Path.Combine(temp, "http")).GetAwaiter().GetResult(); }
             finally { if (Directory.Exists(temp)) Directory.Delete(temp, true); }
             Console.WriteLine("PASS: " + checks + " local Syncthing / Explorer checks (REST, events, placeholders, HKCU, shell, recycle rollback)");
         }
@@ -265,46 +265,65 @@ namespace RemoteAgents.Launcher
             Reject(() => registry.Register(exe, disk, rows, home, "bad\r\nicon.ico"), "icon path injection rejected");
         }
         static string SourceDirectory([CallerFilePath] string file = "") { return Path.GetDirectoryName(file); }
-        // Icon files: the container for the folder badges, and the program's own icon (app.ico, built into the program).
+        static readonly byte[] PngSignature = { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+        sealed class IconFrame { internal int Side, Bits, Length, Offset; }
+        static IconFrame[] Frames(byte[] ico)
+        {
+            return Enumerable.Range(0, BitConverter.ToUInt16(ico, 4)).Select(i => new IconFrame {
+                Side = ico[6 + 16 * i] == 0 ? 256 : ico[6 + 16 * i], Bits = BitConverter.ToUInt16(ico, 12 + 16 * i), Length = BitConverter.ToInt32(ico, 14 + 16 * i), Offset = BitConverter.ToInt32(ico, 18 + 16 * i) }).ToArray();
+        }
+        // The program's own icon: app.ico, built into the program and written as it is. Its picture is the tray dot.
         static void IconFile(string temp)
         {
             Directory.CreateDirectory(temp);
-            int[] sizes = DiskIconFile.FolderSizes;
-            Check(sizes.SequenceEqual(new[] { 16, 32, 48, 256 }), "folder badge icon sizes");
-            var frames = sizes.Select(s => new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A }.Concat(Enumerable.Repeat((byte)s, s)).ToArray()).ToList();
-            string path = Path.Combine(temp, "badge.ico");
-            DiskIconFile.Write(path, sizes, frames); byte[] ico = File.ReadAllBytes(path);
-            Check(ico.Take(6).SequenceEqual(new byte[] { 0, 0, 1, 0, (byte)sizes.Length, 0 }), "ICO header: icon type and frame count");
-            bool layout = true; int offset = 6 + 16 * sizes.Length;
-            for (int i = 0; i < sizes.Length; i++) {
-                int entry = 6 + 16 * i; byte side = (byte)(sizes[i] == 256 ? 0 : sizes[i]);
-                layout &= ico[entry] == side && ico[entry + 1] == side && ico[entry + 4] == 1 && ico[entry + 5] == 0 && ico[entry + 6] == 32 && ico[entry + 7] == 0;
-                layout &= BitConverter.ToInt32(ico, entry + 8) == frames[i].Length && BitConverter.ToInt32(ico, entry + 12) == offset && ico.Skip(offset).Take(frames[i].Length).SequenceEqual(frames[i]);
-                offset += frames[i].Length;
-            }
-            Check(layout && offset == ico.Length, "every frame entry (size, 32 bit, length, offset) matches its PNG data");
-            DiskIconFile.Write(path, sizes, sizes.Select(s => new byte[] { 1 }).ToList());
-            Check(File.ReadAllBytes(path).SequenceEqual(ico) && Directory.GetFileSystemEntries(temp).Length == 1, "an icon in use is not replaced and no temporary file is left");
-            Reject(() => DiskIconFile.Write(Path.Combine(temp, "other.ico"), sizes, frames.Take(2).ToList()), "frames must match sizes");
-            // The program's icon: the file built into the program, byte for byte. Its picture is the tray dot.
             string app = Path.Combine(temp, DiskExplorerService.ApplicationIconFile);
             DiskIconFile.ExportApplicationIcon(app); byte[] icon = File.ReadAllBytes(app);
             Check(icon.SequenceEqual(File.ReadAllBytes(Path.Combine(SourceDirectory(), "..", "app.ico"))), "the exported icon is app.ico of the repository, byte for byte");
-            var entries = Enumerable.Range(0, BitConverter.ToUInt16(icon, 4)).Select(i => new { Side = icon[6 + 16 * i] == 0 ? 256 : icon[6 + 16 * i], Bits = BitConverter.ToUInt16(icon, 12 + 16 * i), Length = BitConverter.ToInt32(icon, 14 + 16 * i), Offset = BitConverter.ToInt32(icon, 18 + 16 * i) }).ToArray();
+            var entries = Frames(icon);
             Check(entries.Select(e => e.Side).SequenceEqual(new[] { 16, 20, 24, 32, 48, 256 }) && entries.All(e => e.Bits == 32 && e.Offset + e.Length <= icon.Length), "program icon: 16-48 px for menus and the taskbar at 100-300% scale, 256 px for large views, all 32-bit");
             int at = entries.Single(e => e.Side == 32).Offset;
             Check(BitConverter.ToInt32(icon, at) == 40 && BitConverter.ToInt32(icon, at + 4) == 32 && BitConverter.ToInt32(icon, at + 8) == 64 && BitConverter.ToUInt16(icon, at + 14) == 32, "the 32 px frame is a 32-bit bitmap");
             Func<int, int, byte[]> pixel = (x, y) => icon.Skip(at + 40 + ((31 - y) * 32 + x) * 4).Take(4).ToArray(); // B, G, R, A; rows are stored bottom-up
             Check(pixel(16, 16).SequenceEqual(new byte[] { 34, 139, 34, 255 }) && pixel(0, 0)[3] == 0 && pixel(4, 16)[3] == 255, "the picture is the tray dot: an opaque ForestGreen disc with transparent corners");
-            Check(icon.Skip(entries.Last().Offset).Take(8).SequenceEqual(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A }), "the 256 px frame is PNG");
+            Check(icon.Skip(entries.Last().Offset).Take(8).SequenceEqual(PngSignature), "the 256 px frame is PNG");
             DiskIconFile.ExportApplicationIcon(app);
-            Check(File.ReadAllBytes(app).SequenceEqual(icon) && Directory.GetFileSystemEntries(temp).Length == 2, "export keeps an existing icon and leaves no temporary file");
-            string icons = Path.Combine(temp, "cleanup"); Directory.CreateDirectory(icons);
-            foreach (DiskExplorerKind kind in Enum.GetValues(typeof(DiskExplorerKind))) File.WriteAllText(Path.Combine(icons, DiskExplorerService.Owner + "." + kind + ".ico"), "own");
-            File.WriteAllText(Path.Combine(icons, DiskExplorerService.ApplicationIconFile), "own"); File.WriteAllText(Path.Combine(icons, "foreign.ico"), "foreign");
-            DiskIconFile.Cleanup(icons);
-            Check(Directory.GetFiles(icons).Select(Path.GetFileName).SequenceEqual(new[] { "foreign.ico" }), "uninstall removes the state icons and the application icon, not a foreign file");
-            Check(DiskExplorerService.ApplicationIconFile == "RemoteAgents.Disk.v2.App.ico" && !Enum.GetNames(typeof(DiskExplorerKind)).Any(k => DiskExplorerService.Owner + "." + k + ".ico" == DiskExplorerService.ApplicationIconFile), "application icon file name cannot collide with a folder state icon");
+            Check(File.ReadAllBytes(app).SequenceEqual(icon) && Directory.GetFileSystemEntries(temp).Length == 1, "export keeps an existing icon and leaves no temporary file");
+            Reject(() => DiskIconFile.ExportApplicationIcon(Path.Combine(temp, "no-such-resource", "x.ico")) , "an unwritable target is reported, not ignored");
+        }
+        // The state icons: the files of app/launcher/icons, built into the program and written under names that carry the icon revision.
+        static void StateIcons(string temp)
+        {
+            string dir = Path.Combine(temp, "explorer-icons"), source = Path.Combine(SourceDirectory(), "..", "icons");
+            var provider = new DiskExplorerIcons(dir);
+            var kinds = Enum.GetValues(typeof(DiskExplorerKind)).Cast<DiskExplorerKind>().ToArray();
+            Check(kinds.All(k => File.Exists(Path.Combine(source, k + ".ico"))) && Directory.GetFiles(source, "*.ico").Length == kinds.Length, "every folder state has an icon file, and no icon exists for an unknown state");
+            Check(kinds.All(k => File.ReadAllBytes(provider.PathFor(k)).SequenceEqual(File.ReadAllBytes(Path.Combine(source, k + ".ico")))), "the program writes the icon files of app/launcher/icons as they are");
+            Check(DiskExplorerService.IconRevision >= 2 && kinds.All(k => Path.GetFileName(provider.PathFor(k)) == "RemoteAgents.Disk.v2.r" + DiskExplorerService.IconRevision + "." + k + ".ico"), "state icon files carry the icon revision in their name");
+            Check(kinds.All(k => Path.GetFileName(provider.PathFor(k)) != DiskExplorerService.Owner + "." + k + ".ico"), "the names differ from those of the first icons, so Explorer cannot show a cached old picture");
+            Check(Directory.GetFiles(dir).Length == kinds.Length && !Directory.GetFiles(dir).Any(f => f.EndsWith(".tmp")), "one file per state and no temporary file; a repeated request writes nothing new");
+            var written = kinds.Select(k => File.ReadAllBytes(provider.PathFor(k))).ToArray();
+            Check(written.All(b => { var f = Frames(b); return f.Select(e => e.Side).SequenceEqual(new[] { 16, 20, 24, 32, 48, 256 }) && f.All(e => e.Bits == 32 && e.Offset + e.Length <= b.Length && b.Skip(e.Offset).Take(8).SequenceEqual(PngSignature)); }), "every state icon has 16-48 px frames for lists and tiles and a 256 px frame for large icons, all 32-bit PNG");
+            Check(File.ReadAllBytes(provider.PathFor(DiskExplorerKind.Offline)).SequenceEqual(File.ReadAllBytes(provider.PathFor(DiskExplorerKind.Unavailable))) && !File.ReadAllBytes(provider.PathFor(DiskExplorerKind.Synced)).SequenceEqual(File.ReadAllBytes(provider.PathFor(DiskExplorerKind.Error))), "offline and unavailable share a picture; the other states differ");
+            // Update from the first icons: a folder decorated before points to the old file; the next reconcile points it to the new one.
+            string home = Path.Combine(temp, "update"), root = Path.Combine(home, "Disk"), icons = Path.Combine(home, "explorer-icons"), project = Path.Combine(root, "Проект");
+            Directory.CreateDirectory(icons); Directory.CreateDirectory(project);
+            string old = Path.Combine(icons, "RemoteAgents.Disk.v2.ServerOnly.ico"); File.WriteAllText(old, "the first picture");
+            var fs = new TestFiles();
+            fs.Write(Path.Combine(project, "desktop.ini"), "[.ShellClassInfo]\r\nIconResource=" + old + ",0\r\nInfoTip=Только на сервере. Правый клик → Забрать с сервера\r\n[RemoteAgents]\r\nOwner=RemoteAgents.Disk.v2\r\nOriginalReadOnly=0\r\nPlaceholder=1\r\nCreatedDirectory=1\r\n");
+            var service = new DiskExplorerService(fs, new DiskExplorerIcons(icons), new Notify(), delegate { });
+            service.Reconcile(root, new[] { new DiskFolderState { Id = "id", Name = "Проект", Path = project, ServerOnly = true, Kind = DiskExplorerKind.ServerOnly } });
+            string ini = fs.Read(Path.Combine(project, "desktop.ini")), current = Path.Combine(icons, "RemoteAgents.Disk.v2.r" + DiskExplorerService.IconRevision + ".ServerOnly.ico");
+            Check(ini.Contains("IconResource=" + current + ",0") && !ini.Contains(old) && File.Exists(current), "a folder decorated with the first icons points to the new file after the next reconcile");
+            Check(ini.Contains("Скачать на компьютер") && !ini.Contains("Забрать с сервера") && File.ReadAllText(old) == "the first picture", "the hint is refreshed in the same pass; the old icon file is left alone until uninstall");
+            // Uninstall removes our icons of every revision and the program's icon, and nothing else.
+            string stale = Path.Combine(temp, "cleanup"); Directory.CreateDirectory(stale);
+            foreach (var kind in kinds) foreach (string name in new[] { DiskExplorerService.Owner + "." + kind + ".ico", DiskExplorerService.Owner + ".r2." + kind + ".ico", DiskExplorerService.Owner + ".r9." + kind + ".ico" }) File.WriteAllText(Path.Combine(stale, name), "own");
+            File.WriteAllText(Path.Combine(stale, DiskExplorerService.ApplicationIconFile), "own");
+            var foreign = new[] { "foreign.ico", "RemoteAgents.Disk.v1.Synced.ico", "RemoteAgents.Disk.v2.Unknown.ico", "RemoteAgents.Disk.v2.r2.Synced.ico.bak" };
+            foreach (string name in foreign) File.WriteAllText(Path.Combine(stale, name), "foreign");
+            DiskIconFile.Cleanup(stale); DiskIconFile.Cleanup(Path.Combine(temp, "missing"));
+            Check(Directory.GetFiles(stale).Select(Path.GetFileName).OrderBy(n => n, StringComparer.Ordinal).SequenceEqual(foreign.OrderBy(n => n, StringComparer.Ordinal)), "uninstall removes our icons of every revision and the application icon, nothing else");
+            Check(DiskExplorerService.ApplicationIconFile == "RemoteAgents.Disk.v2.App.ico" && !Enum.GetNames(typeof(DiskExplorerKind)).Contains("App"), "the application icon file name cannot collide with a state icon");
         }
         internal sealed class FakeRest : IDiskRest
         {

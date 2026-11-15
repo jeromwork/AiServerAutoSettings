@@ -15,6 +15,8 @@
 `./build/make-bundle.sh <версия> <каталог> [--launcher <exe>]` собирает только архив.
 `python3 build/make-app-icon.py` рисует `app/launcher/app.ico` — значок программы (зелёный круг трея). Он встраивается в оба EXE (`ApplicationIcon`)
 и выгружается для пунктов меню Проводника; результат в Git, `app/launcher/tests/test_app_icon.py` проверяет файл и значок собранного EXE.
+`python3 build/make-state-icons.py` рисует значки состояний папок Диска в `app/launcher/icons/` (папка с бейджем: галочка, стрелки, облако, крест...);
+они встраиваются в оба EXE и выгружаются в `%LOCALAPPDATA%\RemoteDisk\explorer-icons`, проверка — `test_state_icons.py`. Общая кисть — `build/icon_art.py`.
 `./build/publish.sh <zip> [<dist>] [--min-launcher 1.0.0] [--launcher <exe>]` публикует готовый архив;
 `--launcher` дополнительно публикует отдельный EXE для скачивания установщиком. Для самообновления EXE должен находиться **в ZIP**.
 `REMOTEAGENTS_BUNDLE_VERSION` задаёт фиксированный номер бандла вместо UTC-даты с git hash.

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace RemoteAgents.Launcher
 {
@@ -25,58 +26,63 @@ namespace RemoteAgents.Launcher
         // The program's own icon (the one in the tray) as a file: our Explorer menu items use it.
         string ApplicationPath();
     }
-    // Windows icon files (.ico). The folder badges are drawn at run time (DiskExplorerIcons) and wrapped here; the program's own
-    // icon is the finished file app.ico (drawn by build/make-app-icon.py) that is built into the program.
+    // The icon files of the Disk. All of them are finished .ico files built into the program (the state icons from app/launcher/icons,
+    // the program's icon from app/launcher/app.ico; build/make-state-icons.py and make-app-icon.py draw them) and written to a
+    // directory of the user as they are. Nothing is drawn at run time.
     internal static class DiskIconFile
     {
-        // Folder badges: small list view, normal, large and the 256 px preview.
-        internal static readonly int[] FolderSizes = { 16, 32, 48, 256 };
         // app.ico is built into the program twice: as the program's icon (what Explorer shows for the EXE) and as this resource.
         internal const string ApplicationIconResource = "RemoteAgents.App.ico";
-        // Uninstall: our icon files only (one per folder state and the application icon); anything else in the directory stays.
+        internal static string StateIconResource(DiskExplorerKind kind) { return "RemoteAgents.Icons." + kind + ".ico"; }
+        // Explorer remembers an icon by the name of its file, so a new picture needs a new name: the icon revision is part of it
+        // (DiskExplorerService.IconRevision). Revision 1, the folder icon with a badge drawn over it, has no marker in the name.
+        internal static string StateIconFile(DiskExplorerKind kind) { return DiskExplorerService.Owner + ".r" + DiskExplorerService.IconRevision + "." + kind + ".ico"; }
+        // Uninstall: our icon files of every revision (and the application icon); anything else in the directory stays.
         internal static void Cleanup(string directory)
         {
-            var names = Enum.GetValues(typeof(DiskExplorerKind)).Cast<DiskExplorerKind>().Select(kind => DiskExplorerService.Owner + "." + kind + ".ico").Concat(new[] { DiskExplorerService.ApplicationIconFile });
-            foreach (string name in names) {
-                string path = Path.Combine(directory, name);
-                if (File.Exists(path) && (File.GetAttributes(path) & FileAttributes.ReparsePoint) == 0) File.Delete(path);
-            }
+            if (!Directory.Exists(directory)) return;
+            var ours = new Regex("^" + Regex.Escape(DiskExplorerService.Owner) + @"\.((r\d+\.)?(" + string.Join("|", Enum.GetNames(typeof(DiskExplorerKind))) + @")|App)\.ico$");
+            foreach (string path in Directory.GetFiles(directory))
+                if (ours.IsMatch(Path.GetFileName(path)) && (File.GetAttributes(path) & FileAttributes.ReparsePoint) == 0) File.Delete(path);
         }
-        // The icon container around ready-made PNG frames.
-        internal static void Write(string path, int[] sizes, IList<byte[]> frames)
-        {
-            if (sizes.Length == 0 || sizes.Length != frames.Count) throw new ArgumentException("Размеры и кадры значка не совпадают");
-            using (var bytes = new MemoryStream()) {
-                using (var writer = new BinaryWriter(bytes)) {
-                    writer.Write((ushort)0); writer.Write((ushort)1); writer.Write((ushort)sizes.Length);
-                    int offset = 6 + 16 * sizes.Length;
-                    for (int i = 0; i < sizes.Length; i++) {
-                        writer.Write((byte)(sizes[i] == 256 ? 0 : sizes[i])); writer.Write((byte)(sizes[i] == 256 ? 0 : sizes[i]));
-                        writer.Write((byte)0); writer.Write((byte)0); writer.Write((ushort)1); writer.Write((ushort)32);
-                        writer.Write(frames[i].Length); writer.Write(offset); offset += frames[i].Length;
-                    }
-                    foreach (byte[] frame in frames) writer.Write(frame);
-                }
-                Save(path, bytes.ToArray());
-            }
-        }
-        // The program's icon for the menu items: the file built into the program, byte for byte. An existing file is kept.
-        internal static void ExportApplicationIcon(string path)
+        internal static void ExportStateIcon(DiskExplorerKind kind, string path) { Export(StateIconResource(kind), path); }
+        internal static void ExportApplicationIcon(string path) { Export(ApplicationIconResource, path); }
+        // The built-in file, byte for byte. An existing file is kept: Explorer may be reading it, and its name says which picture it is.
+        static void Export(string resource, string path)
         {
             if (File.Exists(path)) return;
-            using (var source = typeof(DiskIconFile).Assembly.GetManifestResourceStream(ApplicationIconResource)) {
-                if (source == null) throw new IOException("В программе нет файла значка");
-                using (var copy = new MemoryStream()) { source.CopyTo(copy); Save(path, copy.ToArray()); }
+            using (var source = typeof(DiskIconFile).Assembly.GetManifestResourceStream(resource)) {
+                if (source == null) throw new IOException("В программе нет файла значка " + resource);
+                using (var copy = new MemoryStream()) {
+                    source.CopyTo(copy);
+                    string temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                    try {
+                        using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None)) stream.Write(copy.GetBuffer(), 0, (int)copy.Length);
+                        if (!File.Exists(path)) File.Move(temp, path);
+                    } finally { if (File.Exists(temp)) File.Delete(temp); }
+                }
             }
         }
-        // Written through a temporary file; an icon that already exists is never replaced (Explorer may be reading it).
-        static void Save(string path, byte[] data)
+    }
+    // The icons of the Disk in a directory of the user (%LOCALAPPDATA%\RemoteDisk\explorer-icons): the state icons, whose paths go to
+    // desktop.ini of the folders, and the program's icon for the menu items.
+    internal sealed class DiskExplorerIcons : IDiskExplorerIcons
+    {
+        readonly string directory;
+        internal DiskExplorerIcons(string directory) { this.directory = Path.GetFullPath(directory); }
+        public string PathFor(DiskExplorerKind kind)
         {
-            string temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
-            try {
-                using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None)) stream.Write(data, 0, data.Length);
-                if (!File.Exists(path)) File.Move(temp, path);
-            } finally { if (File.Exists(temp)) File.Delete(temp); }
+            Directory.CreateDirectory(directory);
+            string path = Path.Combine(directory, DiskIconFile.StateIconFile(kind));
+            DiskIconFile.ExportStateIcon(kind, path);
+            return path;
+        }
+        public string ApplicationPath()
+        {
+            Directory.CreateDirectory(directory);
+            string path = Path.Combine(directory, DiskExplorerService.ApplicationIconFile);
+            DiskIconFile.ExportApplicationIcon(path);
+            return path;
         }
     }
     internal interface IDiskExplorerNotifier { void Changed(string path); }
@@ -97,6 +103,8 @@ namespace RemoteAgents.Launcher
     {
         internal const string Owner = "RemoteAgents.Disk.v2";
         internal const string ApplicationIconFile = Owner + ".App.ico";
+        // The look of the state icons. Raise it when app/launcher/icons change: the new files get new names (see DiskIconFile).
+        internal const int IconRevision = 2;
         readonly IDiskExplorerFileSystem fs;
         readonly IDiskExplorerIcons icons;
         readonly IDiskExplorerNotifier notifier;

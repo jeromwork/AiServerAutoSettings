@@ -7,10 +7,10 @@ by every Windows version), 256 px as PNG (Windows Vista and later).
 
     python3 build/make-app-icon.py [output.ico]
 """
-import struct
 import sys
-import zlib
 from pathlib import Path
+
+from icon_art import bmp_frame, ico, png_frame
 
 GREEN = (34, 139, 34)          # System.Drawing.Color.ForestGreen, the colour of the "all works" tray dot
 SIZES = (16, 20, 24, 32, 48, 256)
@@ -38,41 +38,18 @@ def alpha_rows(size):
     return rows
 
 
-def bmp_frame(size, alpha):
-    """DIB for an icon: BITMAPINFOHEADER (height doubled), bottom-up BGRA pixels, then the 1-bit AND mask."""
-    r, g, b = GREEN
-    header = struct.pack('<IiiHHIIiiII', 40, size, size * 2, 1, 32, 0, size * size * 4, 0, 0, 0, 0)
-    pixels = b''.join(bytes((b, g, r, a)) for row in reversed(alpha) for a in row)
-    mask = bytes(((size + 31) // 32) * 4 * size)       # alpha carries the shape; the AND mask stays clear
-    return header + pixels + mask
-
-
-def png_frame(size, alpha):
-    def chunk(kind, data):
-        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
-    r, g, b = GREEN
-    raw = b''.join(b'\x00' + b''.join(bytes((r, g, b, a)) for a in row) for row in alpha)
-    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', size, size, 8, 6, 0, 0, 0))
-            + chunk(b'IDAT', zlib.compress(raw, 9)) + chunk(b'IEND', b''))
-
-
 def frames():
     """[(size, alpha rows, frame bytes)] in ascending size."""
     result = []
     for size in SIZES:
         alpha = alpha_rows(size)
-        result.append((size, alpha, (png_frame if size >= PNG_FROM else bmp_frame)(size, alpha)))
+        rows = [[GREEN + (a,) for a in row] for row in alpha]
+        result.append((size, alpha, (png_frame if size >= PNG_FROM else bmp_frame)(size, rows)))
     return result
 
 
 def build():
-    items = frames()
-    out = struct.pack('<HHH', 0, 1, len(items))
-    offset = 6 + 16 * len(items)
-    for size, _, data in items:
-        out += struct.pack('<BBBBHHII', size % 256, size % 256, 0, 0, 1, 32, len(data), offset)
-        offset += len(data)
-    return out + b''.join(data for _, _, data in items)
+    return ico([(size, data) for size, _, data in frames()])
 
 
 if __name__ == '__main__':

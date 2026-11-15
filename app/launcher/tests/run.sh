@@ -53,6 +53,7 @@ pwsh=${PWSH:-$HOME/.cache/pwsh-test/pwsh}
   timeout 120 node "$repo/accounts/test-accounts.mjs"
   timeout 120 python3 "$here/test_build.py"
   timeout 60 python3 "$here/test_app_icon.py"
+  timeout 120 python3 "$here/test_state_icons.py"
   timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-control-supervision.ps1" -TestHome "$testdir/control" < /dev/null
   timeout 120 python3 "$here/test_bridge_health.py"
   timeout 120 python3 "$here/test_wizard_boundary.py"
@@ -97,3 +98,5 @@ print('PASS: net48 build/publish; PE EXE exists; no DLL dependencies')
 PY
 # The published EXE must carry app.ico as its application icon (it had none: Explorer showed the stock window icon).
 timeout 60 python3 "$here/test_app_icon.py" "$testdir/publish/RemoteAgents.exe"
+# ... and carry the folder state icons as resources, byte for byte.
+timeout 60 python3 "$here/test_state_icons.py" "$testdir/publish/RemoteAgents.exe"
