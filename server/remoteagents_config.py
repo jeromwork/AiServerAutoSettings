@@ -813,7 +813,50 @@ def server_sections(c):
     return data
 
 
+def server_secret_values(data, deployment):
+    """Only explicitly requested deployment refs, never unrelated root secrets."""
+    require(isinstance(data, dict) and data.get('schema') == 1 and isinstance(data.get('config'), dict)
+            and isinstance(data.get('secrets'), dict), 'Нет проверенного восстановительного снимка.')
+    require(deployment and all(data['config'].get(k) == v for k, v in deployment.items()),
+            'Публичный и восстановительный снимки отличаются; сначала успешно примените конфиг.')
+    names = set()
+    def refs(node):
+        if isinstance(node, dict):
+            if 'secret' in node:
+                names.add(node['secret'])
+            else:
+                for child in node.values():
+                    refs(child)
+        elif isinstance(node, list):
+            for child in node:
+                refs(child)
+    refs(deployment)
+    require(all(isinstance(data['secrets'].get(k), str) and data['secrets'][k] and
+                data['secrets'][k] != '<есть, скрыт>' for k in names),
+            'В серверном снимке отсутствует секрет; экспорт не выдан.')
+    return {k: data['secrets'][k] for k in names}
+
+
+def read_server_secrets(deployment):
+    require(os.geteuid() == 0, '--include-server-secrets требует root и вывод в файл --output.')
+    path = Path('/etc/remoteagents/server-apply/recovery.json')
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as stream:
+            st = os.fstat(stream.fileno())
+            require(stat.S_ISREG(st.st_mode) and st.st_uid == 0 and st.st_gid == 0 and
+                    st.st_mode & 0o777 == 0o600, 'Снимок должен принадлежать root:root с правами 0600.')
+            raw = stream.read(32 * 1024 * 1024 + 1)
+        require(len(raw) <= 32 * 1024 * 1024, 'Слишком большой серверный снимок.')
+        data = json.loads(raw)
+    except (OSError, ValueError):
+        raise Error('Нет доступного root-only восстановительного снимка.') from None
+    return server_secret_values(data, deployment)
+
+
 def export(c, args, out=sys.stdout, err=sys.stderr):
+    if getattr(args, 'include_server_secrets', False):
+        require(os.geteuid() == 0 and args.output, '--include-server-secrets требует root и вывод в файл --output.')
     name = clean_name(args.name)
     require(re.fullmatch(r'same(:.+)?|new(:.+)?', args.happier or ''), '--happier: same, same:<подпись или id>, new или new:Название')
     folders = folders_list(args.folders)
@@ -823,8 +866,14 @@ def export(c, args, out=sys.stdout, err=sys.stderr):
     values = {}
     server, vpn = common_sections(c, values, args.vpn)
     deployment = server_sections(c)
+    if getattr(args, 'include_server_secrets', False):
+        require(args.output, '--include-server-secrets требует --output, чтобы не печатать секреты в терминал.')
+        recovered = read_server_secrets(deployment)
+        require(not any(k in values and values[k] != v for k, v in recovered.items()), 'Имена секретов подключения и сервера конфликтуют.')
+        values.update(recovered)
     ident = secrets.token_hex(8)
     private, public = keypair(c, ident)
+    require('server-key' not in values, 'Имя server-key зарезервировано для нового SSH-ключа; переименуйте серверный секрет.')
     values = {'server-key': private, **values}
     server['key'] = {'secret': 'server-key'}
     config = {'kind': CONFIG_KIND, 'schema': 1, 'device': {'name': name}, 'server': server}
@@ -858,6 +907,7 @@ def export(c, args, out=sys.stdout, err=sys.stderr):
     refs(deployment)
     config['secrets'] = protect(values, master) if master else values
     text = json.dumps(config, ensure_ascii=False, indent=2) + '\n'
+    require(len(text.encode('utf-8')) <= 4 * 1024 * 1024, 'Экспорт больше 4 МиБ; конфиг не выдан.')
     target = folder = None
     if args.output:
         output = Path(args.output).absolute()
@@ -1068,6 +1118,7 @@ def main(argv=None):
     p.add_argument('--happier', default='same', help='same | same:<подпись или id аккаунта> | new (подпись = --name) | new:Название')
     p.add_argument('--folders', help='all | none | A,B:send,C:receive; без флага программа спросит владельца')
     p.add_argument('--output')
+    p.add_argument('--include-server-secrets', action='store_true', help='root-only: включить серверные секреты подтверждённого снимка; требуется --output')
     p = sub.add_parser('list', help='выданные конфиги и последний вход')
     p.add_argument('--json', action='store_true')
     sub.add_parser('revoke', help='отозвать ключ выданного конфига').add_argument('id')
