@@ -98,6 +98,23 @@ class ComponentsTests(unittest.TestCase):
         self.assertNotIn('0123456789abcdef', self.f.path('/home/worker/.ssh/authorized_keys').read_text())
         self.assertEqual(json.loads(self.f.path('/home/worker/.ssh/remoteagents-revoked.json').read_text()), ['0123456789abcdef'])
 
+    def test_reconcile_preserves_valid_native_agent_settings_edits(self):
+        self.c['serverComponents'] = {'bridge': {'enabled': True}}
+        self.f.write('/home/worker/.claude.json', '{"mcpServers":{}}')
+        self.f.write('/home/worker/.codex/config.toml', 'model = "before"\n')
+        self.assertTrue(self.f.complete(self.c)['ok'])
+        edits = {'.claude.json': '{"mcpServers":{},"theme":"dark"}',
+                 '.codex/config.toml': 'model = "after"\n[mcp_servers.other]\ncommand = "other-mcp"\n'}
+        for name, value in edits.items():
+            self.f.write('/home/worker/' + name, value)
+        self.assertTrue(app.module('server_recovery').reconcile(app, self.f.system))
+        for name, value in edits.items():
+            self.assertEqual(self.f.path('/home/worker/' + name).read_text(), value)
+        # The refreshed recovery snapshot can still repair invalid JSON later.
+        self.f.write('/home/worker/.claude.json', '{broken')
+        self.assertTrue(app.module('server_recovery').reconcile(app, self.f.system))
+        self.assertEqual(self.f.path('/home/worker/.claude.json').read_text(), edits['.claude.json'])
+
     def test_happier_restores_identity_unit_and_deleted_auth_dropin(self):
         self.c['serverComponents'] = {'happier': {'enabled': True, 'version': '0.2.17', 'identity': {'secret': 'happy'}}}
         files = {'.happier/settings.json': '{"machineId":"SYNTHETIC"}', '.happier/access.key': '{"token":"HAPPY_SENTINEL"}'}

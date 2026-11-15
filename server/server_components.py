@@ -189,9 +189,35 @@ def bridge_state(e, apply):
         saved = identity(e, 'bridge')
         if saved:
             e.install_code()
-            if io(e, 'bridge') != saved:
+            current = io(e, 'bridge')
+            preserve_bridge_settings(e, saved, current)
+            if current != saved:
                 io(e, 'bridge', 'identity', saved)
     return True
+
+
+def preserve_bridge_settings(e, saved, current):
+    """A recovery identity must not freeze the agents' mutable native settings.
+
+    Only refresh an already managed identity. An explicit different identity on
+    import still wins. Invalid/missing files continue to use the checked backup.
+    """
+    ref = section(e, 'bridge').get('identity', {}).get('secret')
+    if not ref or e.managed_secrets.get(ref) != e.secrets.get(ref):
+        return
+    name = '.claude.json'
+    try:
+        if isinstance(json.loads(current.get(name, 'null')), dict):
+            saved[name] = current[name]
+    except ValueError:
+        pass
+    name = '.codex/config.toml'
+    if name in current:
+        # Use the installed CLI's parser, including on Python 3.10 without
+        # tomllib. mcp list does not launch the registered MCP commands.
+        checked = e.s.run(e.user_cmd('codex', 'mcp', 'list'), check=False)
+        if checked.returncode == 0:
+            saved[name] = current[name]
 
 
 def bridge(e, apply):
@@ -199,11 +225,14 @@ def bridge(e, apply):
     if not item.get('enabled'):
         return e.row('bridge', 'ready', 'мост не выбран')
     saved = identity(e, 'bridge')
+    current = io(e, 'bridge') if saved and e.code_current() else {}
+    if saved:
+        preserve_bridge_settings(e, saved, current)
     _, _, home = e.worker()
     wanted = {'.local/share/codex-remote/' + n: p.read_text() for n, p in assets(e.s.source) if n in ('codex-windows-bridge.py', 'codex-bridge-session.py', 'server_node_catalog.py', 'server-agent-handoff.py')}
     ok = all(e.s.path(home / n).is_file() and e.s.path(home / n).read_text() == t for n, t in wanted.items())
     if saved:
-        ok = ok and e.code_current() and io(e, 'bridge') == saved
+        ok = ok and e.code_current() and current == saved
     if apply:
         e.install_code()
         if not ok:
