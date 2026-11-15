@@ -129,6 +129,15 @@ class ComponentsTests(unittest.TestCase):
         self.assertTrue(self.f.path('/etc/remoteagents/server-apply/recovery.json').is_file(), result)
         self.assertIn('нужен вход', next(r['summary'] for r in result['parts'] if r['part'] == 'agents:claude'))
 
+    def test_unavailable_manual_extra_does_not_disable_core_recovery(self):
+        self.c['projectViews'] = {'enabled': True}
+        self.c['serverComponents'] = {'bridge': {'enabled': True}}
+        self.assertFalse(self.f.complete(self.c)['ok'])
+        file = self.f.path('/home/worker/.local/share/codex-remote/codex-windows-bridge.py')
+        file.write_text('broken')
+        self.assertFalse(app.module('server_recovery').reconcile(app, self.f.system))
+        self.assertNotEqual(file.read_text(), 'broken')
+
     def test_no_codex_adoption_by_username(self):
         self.c['agents'] = {'codex': {'enabled': True}}
         result = self.f.engine(self.c)

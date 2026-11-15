@@ -1039,6 +1039,7 @@ class Engine:
             parts.append(('tailscale', lambda: self.tailscale(self.config['tailscale'], apply)))
         if 'telegramGateway' in self.config:
             parts.append(('telegramGateway', lambda: self.telegram(self.config['telegramGateway'], apply)))
+        parts.append(('bridgeState', lambda: components.bridge_state(self, apply)))
         for kind in ('codex', 'claude'):
             if kind in self.config.get('agents', {}):
                 parts.append(('agents:' + kind, lambda kind=kind: components.agents(self, kind, apply)))
@@ -1059,7 +1060,7 @@ class Engine:
                 result = self.part(name, fn)
                 if apply and name == 'inbound' and not result:
                     ready = False
-        if apply and all(r['state'] in ('ready', 'waiting') for r in self.rows):
+        if apply and all(r['state'] in ('ready', 'waiting') or r['state'] == 'blocked' and r['part'] in ('desktop', 'projectViews', 'agents:codex') for r in self.rows):
             public = {k: v for k, v in self.config.items() if k in ('deployment', 'serverNetwork', 'proxyOut', 'lan', 'tailscale', 'telegramGateway', 'agent', *components.KEYS)}
             if self.part('recovery', lambda: self.recovery(True)):
                 self.s.write('/var/lib/remoteagents-status/server-config.json', json.dumps(public, ensure_ascii=False, sort_keys=True) + '\n', 0o644)

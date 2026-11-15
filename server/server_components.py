@@ -172,6 +172,20 @@ def disk(e, apply):
     return e.row('disk', 'ready', 'Syncthing, идентичность и таймер восстановлены')
 
 
+def bridge_state(e, apply):
+    """Restore CLI-owned MCP config before a broken config can break --version.
+
+    Registration remains after CLI installation in bridge().
+    """
+    if apply and section(e, 'bridge').get('enabled'):
+        saved = identity(e, 'bridge')
+        if saved:
+            e.install_code()
+            if io(e, 'bridge') != saved:
+                io(e, 'bridge', 'identity', saved)
+    return True
+
+
 def bridge(e, apply):
     item = section(e, 'bridge')
     if not item.get('enabled'):
@@ -314,7 +328,7 @@ def agents(e, kind, apply):
             # wrapper reads the same root-supplied data without eval/source.
             escaped = token.replace('\\', '\\\\').replace('"', '\\"')
             envfile = 'CLAUDE_CODE_OAUTH_TOKEN="' + escaped + '"\n'
-            wrapper = '#!/usr/bin/python3\n# RemoteAgents managed Claude token wrapper\nimport json,os\nfrom pathlib import Path\np=Path.home()/".config/remoteagents/claude.env"\nif p.is_file(): os.environ["CLAUDE_CODE_OAUTH_TOKEN"]=json.loads(p.read_text().split("=",1)[1])\nos.execv(str(Path.home()/".local/bin/claude.vendor"),["claude",*__import__("sys").argv[1:]])\n'
+            wrapper = '#!/usr/bin/python3\n# RemoteAgents managed Claude token wrapper\nimport json,os,sys\nfrom pathlib import Path\np=Path.home()/".config/remoteagents/claude.env"\nif p.is_file() and "--version" not in sys.argv: os.environ["CLAUDE_CODE_OAUTH_TOKEN"]=json.loads(p.read_text().split("=",1)[1])\nos.execv(str(Path.home()/".local/bin/claude.vendor"),["claude",*__import__("sys").argv[1:]])\n'
             # Keep the vendor entry beside the wrapper; no secret is embedded in
             # executable code. Native CLI and Happier now read the same token.
             prep = 'import os; from pathlib import Path; p=Path.home()/".local/bin/claude"; marker=b"# RemoteAgents managed Claude token wrapper"; data=p.read_bytes() if p.exists() else b""; os.replace(p,p.with_name("claude.vendor")) if data and marker not in data else None'
