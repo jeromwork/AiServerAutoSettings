@@ -33,7 +33,9 @@ namespace RemoteAgents.Launcher
             try {
                 var owner = Json.Read(Path.Combine(home, "state/vpn-host.json"));
                 using (var process = Process.GetProcessById(Json.Int(owner, "pid", 0)))
-                    return !process.HasExited && process.StartTime.ToUniversalTime().Ticks.ToString(CultureInfo.InvariantCulture) == Json.Str(owner, "startedTicks");
+                    // net48 HasExited opens PROCESS_QUERY_INFORMATION, denied across UAC.
+                    // WaitForExit(0) needs SYNCHRONIZE; StartTime uses QUERY_LIMITED_INFORMATION.
+                    return !process.WaitForExit(0) && process.StartTime.ToUniversalTime().Ticks.ToString(CultureInfo.InvariantCulture) == Json.Str(owner, "startedTicks");
             } catch { return false; }
         }
     }

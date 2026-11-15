@@ -55,6 +55,17 @@ class Lifecycle(unittest.TestCase):
         self.assertIn('CheckLegacyVpn();', tray)
         self.assertIn('if (legacyVpnChecked || closing', tray)
 
+    def test_unprivileged_observation_of_elevated_owner(self):
+        status = (ROOT/'app/launcher/VpnStatus.cs').read_text()
+        owner = status[status.index('static bool OwnerAlive'):]
+        self.assertIn('!process.WaitForExit(0)', owner)
+        self.assertNotIn('!process.HasExited', owner)
+        common = (ROOT/'transport/Transport.Common.ps1').read_text(encoding='utf-8-sig')
+        observer = common[common.index('function Test-VpnHostAlive'):]
+        self.assertIn('-not $p.WaitForExit(0)', observer)
+        self.assertNotIn('$p.HasExited', observer)
+        self.assertIn('StartTime.ToUniversalTime().Ticks', observer)
+
     def test_bounded_probe_cannot_be_direct_success(self):
         probe = (ROOT/'app/launcher/VpnProbe.cs').read_text()
         self.assertIn('GetBestInterface(', probe)

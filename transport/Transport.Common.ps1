@@ -1309,6 +1309,7 @@ function Test-VpnHostAlive([string]$Root) {
     try{
         $owner=Read-TransportJson (Join-Path $Root 'state/vpn-host.json')
         $p=[Diagnostics.Process]::GetProcessById([int]$owner.pid)
-        try{return (-not $p.HasExited -and $p.StartTime.ToUniversalTime().Ticks -eq [long]$owner.startedTicks)}finally{$p.Dispose()}
+        # net48 HasExited requests elevated query rights; these two APIs need only limited query/synchronize.
+        try{return (-not $p.WaitForExit(0) -and $p.StartTime.ToUniversalTime().Ticks -eq [long]$owner.startedTicks)}finally{$p.Dispose()}
     }catch{return $false}
 }
