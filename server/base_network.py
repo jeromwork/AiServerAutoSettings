@@ -97,45 +97,55 @@ def apply(engine):
     data = candidate(engine)  # Resolve secrets/conflicts before installing anything.
     was_active = s.active('sing-box')
     was_enabled = s.run(['systemctl', 'is-enabled', '--quiet', 'sing-box'], check=False).returncode == 0
-    install_packages(engine)
-    proxy = engine_module('proxy_out')
-    p = engine.config['proxyOut']
-    auth = (p.get('login', ''), engine.secret(p['password'], 'proxy-out-password') if p.get('password') else '')
-    probe = s.run(['curl', '--disable', '--fail', '--silent', '--max-time', '15', '-K', '-', p['checkUrl']],
-                  input=proxy.curl_config(proxy.proxy_url(p['type'], p['server'], p['port']), auth))
-    _require(probe.stdout.strip() == p['exitIp'], 'Прокси до включения TUN не дал ожидаемый exitIp.')
-    version = s.run(['sing-box', 'version']).stdout
-    match = re.search(r'version (\d+)\.(\d+)', version)
-    if match and tuple(map(int, match.groups())) >= (1, 14):
-        data['inbounds'][0]['dns_mode'] = 'disabled'
-    # A package may ship a sample config. It did not exist before this apply,
-    # so rollback removes it too; a clean retry must not mistake it for owner config.
-    engine.install_code()
-    recovery = ('[Unit]\nDescription=Recover unconfirmed server network\nDefaultDependencies=no\n'
-                'After=local-fs.target\nBefore=sing-box.service remoteagents-network-guard.service\n'
-                '[Service]\nType=oneshot\nExecStart=/usr/bin/python3 -I ' + BIN + ' recover\n'
-                '[Install]\nWantedBy=multi-user.target\n')
-    s.write('/etc/systemd/system/remoteagents-base-network-recover.service', recovery, 0o644)
-    s.run(['systemctl', 'daemon-reload'], change=True)
-    s.run(['systemctl', 'enable', 'remoteagents-base-network-recover.service'], change=True)
-    with s.private_file(json.dumps(data)) as file:
-        s.run(['sing-box', 'check', '-c', file])
-    state = {'config': None, 'active': was_active, 'enabled': was_enabled,
-             'inboundsHash': hashlib.sha256(engine.secret(engine.config['serverNetwork']['inbounds'], 'server-inbounds').encode()).hexdigest() if engine.config['serverNetwork'].get('inbounds') else None,
-             'candidateHash': hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(),
-             'tables': {}, 'rules': {}, 'desired': engine.config.get('serverNetwork'),
-             'proxy': {k: v for k, v in engine.config['proxyOut'].items() if k not in ('password', 'login', 'hint')}}
-    for table in ('remoteagents_inbound', 'remoteagents_ipv6'):
-        r = s.run(['nft', 'list', 'table', 'inet', table], check=False)
-        state['tables'][table] = r.stdout if r.returncode == 0 else None
-    for family in ('-4', '-6'):
-        state['rules'][family] = engine.reply_rule(family)
-    s.write(STATE + '/state.json', json.dumps(state))
     try:
-        s.run(['systemd-run', '--quiet', '--unit=' + TIMER, '--on-active=5m',
-               '--timer-property=AccuracySec=1s', '/usr/bin/python3', '-I', BIN, 'rollback'], change=True)
+        install_packages(engine)
+        proxy = engine_module('proxy_out')
+        p = engine.config['proxyOut']
+        auth = (p.get('login', ''), engine.secret(p['password'], 'proxy-out-password') if p.get('password') else '')
+        probe = s.run(['curl', '--disable', '--fail', '--silent', '--max-time', '15', '-K', '-', p['checkUrl']],
+                      input=proxy.curl_config(proxy.proxy_url(p['type'], p['server'], p['port']), auth))
+        _require(probe.stdout.strip() == p['exitIp'], 'Прокси до включения TUN не дал ожидаемый exitIp.')
+        version = s.run(['sing-box', 'version']).stdout
+        match = re.search(r'version (\d+)\.(\d+)', version)
+        if match and tuple(map(int, match.groups())) >= (1, 14):
+            data['inbounds'][0]['dns_mode'] = 'disabled'
+        # A package may ship a sample config. It did not exist before this apply,
+        # so rollback removes it too; a clean retry must not mistake it for owner config.
+        engine.install_code()
+        recovery = ('[Unit]\nDescription=Recover unconfirmed server network\nDefaultDependencies=no\n'
+                    'After=local-fs.target\nBefore=sing-box.service remoteagents-network-guard.service\n'
+                    '[Service]\nType=oneshot\nExecStart=/usr/bin/python3 -I ' + BIN + ' recover\n'
+                    '[Install]\nWantedBy=multi-user.target\n')
+        s.write('/etc/systemd/system/remoteagents-base-network-recover.service', recovery, 0o644)
+        s.run(['systemctl', 'daemon-reload'], change=True)
+        s.run(['systemctl', 'enable', 'remoteagents-base-network-recover.service'], change=True)
+        with s.private_file(json.dumps(data)) as file:
+            s.run(['sing-box', 'check', '-c', file])
+        state = {'config': None, 'active': was_active, 'enabled': was_enabled,
+                 'inboundsHash': hashlib.sha256(engine.secret(engine.config['serverNetwork']['inbounds'], 'server-inbounds').encode()).hexdigest() if engine.config['serverNetwork'].get('inbounds') else None,
+                 'candidateHash': hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(),
+                 'tables': {}, 'rules': {}, 'desired': engine.config.get('serverNetwork'),
+                 'proxy': {k: v for k, v in engine.config['proxyOut'].items() if k not in ('password', 'login', 'hint')}}
+        for table in ('remoteagents_inbound', 'remoteagents_ipv6'):
+            r = s.run(['nft', 'list', 'table', 'inet', table], check=False)
+            state['tables'][table] = r.stdout if r.returncode == 0 else None
+        for family in ('-4', '-6'):
+            state['rules'][family] = engine.reply_rule(family)
+        s.write(STATE + '/state.json', json.dumps(state))
+        try:
+            s.run(['systemd-run', '--quiet', '--unit=' + TIMER, '--on-active=5m',
+                   '--timer-property=AccuracySec=1s', '/usr/bin/python3', '-I', BIN, 'rollback'], change=True)
+        except Exception:
+            shutil.rmtree(s.path(STATE))
+            raise
     except Exception:
-        shutil.rmtree(s.path(STATE))
+        # The package may already have installed/enabled its sample config.
+        # A failed proxy/check/preparation must remain retryable and must not
+        # leave that sample running. No network guard/TUN mutation has begun.
+        if not was_active:
+            s.run(['systemctl', 'stop', 'sing-box'], check=False, change=True)
+        s.path('/etc/sing-box/config.json').unlink(missing_ok=True)
+        s.run(['systemctl', 'enable' if was_enabled else 'disable', 'sing-box'], check=False, change=True)
         raise
     try:
         engine.network_guard()  # ct mark + rule 8990 precede the first TUN packet.

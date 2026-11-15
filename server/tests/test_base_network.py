@@ -89,6 +89,20 @@ class BaseTests(unittest.TestCase):
         # Retry can produce a fresh plan instead of blocking on the package sample.
         self.assertEqual(f.engine(c).run('plan')['parts'][0]['state'], 'change')
 
+    def test_preflight_failure_removes_package_sample_and_restores_service_state(self):
+        f, c = self.fresh()
+        def packages(engine):
+            f.write('/etc/sing-box/config.json', '{"outbounds": []}')
+            f.active.add('sing-box')
+        f.exit = '9.9.9.9'  # Proxy is reachable, but is the wrong exit.
+        with patch.object(app.base, 'install_packages', side_effect=packages):
+            result = f.engine(c).run('apply')
+        self.assertFalse(result['ok'])
+        self.assertFalse(f.path('/etc/sing-box/config.json').exists())
+        self.assertNotIn('sing-box', f.active)
+        self.assertFalse(f.path(app.base.STATE).exists())
+        self.assertEqual(f.engine(c).run('plan')['parts'][0]['state'], 'change')
+
     def test_failed_restart_rolls_back_without_lan_or_agent(self):
         f, c = self.fresh()
         f.fail = 'restart'
