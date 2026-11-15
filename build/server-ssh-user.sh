@@ -10,14 +10,14 @@ if [ "$(id -u)" = 0 ]; then
     for tool in python3 curl tar xz git flock cron sudo ip jq nft dbus-daemon; do
         command -v "$tool" >/dev/null 2>&1 || missing=1
     done
-    for package in dbus-user-session libpam-systemd; do
+    for package in dbus-user-session libpam-systemd python3-cryptography; do
         [ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null)" = 'install ok installed' ] || missing=1
     done
     if [ -n "$missing" ]; then
         command -v apt-get >/dev/null || { echo 'Bootstrap requires Debian/Ubuntu apt-get' >&2; exit 22; }
         export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l
         apt-get update >&2
-        apt-get install -y --no-install-recommends python3 curl ca-certificates tar xz-utils git util-linux cron sudo iproute2 jq nftables openssl dbus dbus-user-session libpam-systemd >&2
+        apt-get install -y --no-install-recommends python3 curl ca-certificates tar xz-utils git util-linux cron sudo iproute2 jq nftables openssl dbus dbus-user-session libpam-systemd python3-cryptography >&2
     fi
     if ! id "$ra_user" >/dev/null 2>&1; then
         useradd -m -s /bin/bash "$ra_user"
