@@ -105,6 +105,29 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(recovery.reconcile(app, self.f.system))
         self.assertTrue(self.f.engine(self.c).run('status')['ok'])
 
+    def test_confirmed_proxy_survives_later_component_failure(self):
+        self.install()
+        self.c['proxyOut']['port'] = 2080
+        self.assertFalse(self.f.engine(self.c).run('apply')['ok'])
+        with patch.object(app.components, 'extras', side_effect=app.Error('later failure')):
+            self.assertFalse(self.f.engine(self.c, ssh_checked=True).run('apply')['ok'])
+        self.assertFalse(self.f.path('/var/lib/remoteagents/proxy-out/pending').exists())
+        self.assertTrue(recovery.reconcile(app, self.f.system))
+        self.assertEqual(self.f.read('/etc/sing-box/config.json')['outbounds'][0]['server_port'], 2080)
+
+    def test_confirmed_lan_survives_later_component_failure(self):
+        self.c['lan'] = config()['lan']
+        self.install()
+        self.c['lan'][0]['subnets'].append('192.168.88.0/24')
+        self.assertFalse(self.f.engine(self.c).run('apply')['ok'])
+        with patch.object(app.components, 'extras', side_effect=app.Error('later failure')):
+            self.assertFalse(self.f.engine(self.c, ssh_checked=True).run('apply')['ok'])
+        self.assertFalse(self.f.path('/var/lib/remoteagents/lan/pending').exists())
+        self.assertTrue(recovery.reconcile(app, self.f.system))
+        saved = self.f.read(recovery.ENVELOPE)
+        self.assertEqual(saved['config']['lan'], self.c['lan'])
+        self.assertIn('192.168.88.0/24', self.f.read('/etc/remoteagents/lan/office/config.json')['static'])
+
     def test_pending_transactions_are_never_self_confirmed_or_overwritten(self):
         self.install()
         for path in recovery.PENDING:

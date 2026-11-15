@@ -576,6 +576,8 @@ class Engine:
                 require(ok, reason)
                 self.check_ssh(None)
                 self.s.run(['bash', self.s.source / 'proxy-out.sh', 'confirm', '--ssh-checked'], change=True)
+                with self.s.network_lock():
+                    module('server_recovery').pin_network(self)
             else:
                 return self.row('internet', 'pending', 'ждёт нового SSH и --confirm-ssh-checked; автооткат остаётся')
         same = bool(proxy) and self.proxy_matches(proxy)
@@ -732,6 +734,8 @@ class Engine:
                     self.checked_lans[name] = {
                         'config.json': json.dumps(read_state('/etc/remoteagents/lan/' + name + '/config.json', {})),
                         'client.conf': self.s.path('/etc/remoteagents/lan/' + name + '/client.conf').read_text()}
+                    with self.s.network_lock():
+                        module('server_recovery').pin_network(self, lan_name=name)
                     return self.row(part, 'ready', 'ЛВС проверена; новый SSH подтверждён')
                 return self.row(part, 'pending', 'ждёт нового SSH и --confirm-ssh-checked; таймер отката остаётся')
         if self.public_only:

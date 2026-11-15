@@ -59,8 +59,8 @@ def envelope(engine):
     return result
 
 
-def pin_network(engine):
-    """Called under network.lock before clearing pending on an inbound commit.
+def pin_network(engine, lan_name=None):
+    """Checkpoint each externally confirmed step before later components run.
 
     Keep the already-confirmed network if later user-component installation fails
     or the caller exits before the final envelope save. Do not accept unconfirmed
@@ -72,12 +72,20 @@ def pin_network(engine):
     if path.is_symlink() or path.stat().st_mode & 0o777 != 0o600:
         raise ValueError('unsafe recovery envelope')
     data = engine.s.read(ENVELOPE)
-    data['singbox'] = engine.s.path('/etc/sing-box/config.json').read_text()
-    for key in ('serverNetwork', 'proxyOut'):
-        if key in engine.config:
-            data['config'][key] = engine.config[key]
-            for name in refs(engine.config[key]):
-                data['secrets'][name] = engine.secret({'secret': name}, name)
+    if lan_name is None:
+        # A proxy edit on a manual TUN must not acquire ownership of sing-box.
+        if engine.receipts.get('base-network', {}).get('managed'):
+            data['singbox'] = engine.s.path('/etc/sing-box/config.json').read_text()
+        sections = {key: engine.config[key] for key in ('serverNetwork', 'proxyOut') if key in engine.config}
+        data['config'].update(sections)
+    else:
+        item = next(i for i in engine.config['lan'] if i['name'] == lan_name)
+        lans = data['config'].setdefault('lan', [])
+        lans[:] = [i for i in lans if i['name'] != lan_name] + [item]
+        data.setdefault('lan', {})[lan_name] = dict(engine.checked_lans[lan_name])
+        sections = item
+    for name in refs(sections):
+        data['secrets'][name] = engine.secret({'secret': name}, name)
     engine.s.write(ENVELOPE, json.dumps(data, sort_keys=True, ensure_ascii=False) + '\n')
 
 
