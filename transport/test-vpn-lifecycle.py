@@ -14,15 +14,27 @@ class Lifecycle(unittest.TestCase):
         self.assertIn('parent.HasExited', host)
         self.assertIn('job.Start(Json.Str(plan, "exe")', host)
         self.assertIn('0x2000', native)  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        create, assign, resume = (native.index(s) for s in ('if (!CreateProcess(', 'if (!AssignProcessToJobObject(', 'if (ResumeThread('))
-        self.assertLess(create, assign)
-        self.assertLess(assign, resume)
-        self.assertIn('0x08000004', native)  # CREATE_SUSPENDED | CREATE_NO_WINDOW
+        assign, create, resume = (native.index(s) for s in ('new IntPtr(0x0002000D)', 'if (!CreateProcess(', 'if (ResumeThread('))
+        self.assertLess(assign, create)  # PROC_THREAD_ATTRIBUTE_JOB_LIST is atomic with creation
+        self.assertLess(create, resume)
+        self.assertNotIn('AssignProcessToJobObject(', native)
+        self.assertIn('0x08080004', native)  # CREATE_SUSPENDED | CREATE_NO_WINDOW
         self.assertIn('TerminateProcess(info.process, 1)', native)
         final = host[host.index('                finally {'):]
         self.assertLess(final.index('job.Dispose()'), final.index('Write(home, state,'))
         self.assertLess(final.index('job.Dispose()'), final.index('new NativeJob()'))
         self.assertIn('process.WaitForExit(2500)', final)
+
+    def test_job_handle_and_inheritance_lifetime(self):
+        native = (ROOT/'app/launcher/NativeJob.cs').read_text()
+        self.assertIn('readonly SafeFileHandle handle', native)
+        self.assertIn('handle.DangerousAddRef(ref pinned)', native)
+        self.assertIn('handle.DangerousRelease()', native)
+        self.assertIn('TerminateJobObject(handle, 1)', native)
+        self.assertIn('new IntPtr(0x00020002)', native)  # inherited stdio whitelist only
+        self.assertIn('new IntPtr(3 * IntPtr.Size)', native)
+        self.assertIn('ref StartupInfoEx startup', native)
+        self.assertIn('startup.cb = Marshal.SizeOf(typeof(StartupInfoEx))', native)
 
     def test_no_tasks_no_automatic_enable(self):
         script = (ROOT/'transport/Vpn.Tun.ps1').read_text(encoding='utf-8-sig')

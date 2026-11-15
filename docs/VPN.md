@@ -126,3 +126,13 @@ API без TUN. Любые запуски sing-box на сервере выпо�
 Не подтверждено Linux-моками: UAC, Windows PowerShell 5.1, реальное закрытие Job,
 исчезновение Wintun/маршрутов, физическая смена сети, сон и фактические ≤5 с.
 Пошаговый план и итог конкретного прогона — в `~/work/logs/vpn-failopen-report.md`.
+
+## Уточнения ревью
+
+На Windows 10+ NativeJob назначает Job атомарно через
+`PROC_THREAD_ATTRIBUTE_JOB_LIST` в `CreateProcess` с `STARTUPINFOEX`, затем
+возобновляет приостановленный поток. Отдельный Assign после создания оставлял бы
+окно для suspended orphan при убийстве хозяина. Наследование stdio ограничено
+`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`; Job не наследуется. SafeHandle удерживает
+валидность Job при конкурентном запуске/выключении, а TerminateJobObject завершает
+уже назначенное ядро без ожидания освобождения временной ссылки CreateProcess.
