@@ -948,3 +948,68 @@ class EndpointLifecycleTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ReconnectAndReplaceTests(unittest.TestCase):
+    def test_reconnect_keeps_historical_confirmation_and_new_pending_does_not(self):
+        for pending in (False, True):
+            with self.subTest(pending=pending), tempfile.TemporaryDirectory() as tmp:
+                state = Path(tmp)
+                data = {'enabled': True, 'ready': True, 'static': ['10.123.0.0/16'],
+                        'subnets': ['10.123.0.0/16'], 'confirmed_at': '2026-11-15T00:00:00+00:00'}
+                if pending:
+                    (state / 'pending').mkdir()
+                with patch.object(lan, 'STATE', state), patch.object(lan, 'profile', return_value=data), \
+                     patch.object(lan, 'prestart'), patch.object(lan, 'route_ops'), patch.object(lan, 'apply_dns'), \
+                     patch.object(lan, 'pushed_routes', return_value=[]), patch.object(lan, 'event') as event, \
+                     patch.dict(os.environ, {'dev': 'tun-lan-office'}):
+                    lan.hook('office')
+                message = event.call_args.args[1]
+                if pending:
+                    self.assertIn('ожидается test', message)
+                else:
+                    self.assertNotIn('ожидается test', message)
+                    self.assertIn('подтверждён ранее', message)
+                    self.assertTrue(event.call_args.args[2])
+
+    def test_transaction_snapshots_private_profile_and_rollback_restores_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state, etc = root / 'state', root / 'etc'
+            state.mkdir(); (etc / 'office').mkdir(parents=True)
+            client = etc / 'office/client.conf'
+            client.write_text('OLD_PRIVATE_CLIENT_SENTINEL')
+            sb = root / 'sing-box.json'; sb.write_text(json.dumps(config()))
+            old = {'enabled': True, 'ready': True, 'subnets': ['10.123.0.0/16']}
+            def run(args, **kw):
+                return subprocess.CompletedProcess(args, 1 if args[0] == 'nft' and 'list' in args else 0, '', '')
+            with patch.object(lan, 'STATE', state), patch.object(lan, 'ETC', etc), patch.object(lan, 'SB', sb), \
+                 patch.object(lan, 'network_pending', return_value=[]), patch.object(lan, 'profiles', return_value={'office': old}), \
+                 patch.object(lan, 'managed_subnets', return_value=[]), patch.object(lan, 'event'), \
+                 patch.object(lan, 'run', side_effect=run), patch.object(lan, 'stop_clients'), \
+                 patch.object(lan, 'route_ops'), patch.object(lan, 'update'), patch.object(lan.os, 'chown'), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                lan.start_transaction('office', 'replace')
+                backup = state / 'pending/clients/office'
+                self.assertEqual(backup.read_text(), 'OLD_PRIVATE_CLIENT_SENTINEL')
+                self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
+                client.write_text('NEW_PRIVATE_CLIENT_SENTINEL')
+                lan.rollback()
+                self.assertEqual(client.read_text(), 'OLD_PRIVATE_CLIENT_SENTINEL')
+
+    def test_replace_arms_rollback_before_stopping_old_client(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            etc = Path(tmp); (etc / 'office').mkdir()
+            (etc / 'office/client.conf').write_text('old profile')
+            old = {'enabled': True, 'ready': True, 'static': ['10.123.0.0/16'], 'table': 42000, 'priority': 1000}
+            calls = []
+            with patch.object(lan, 'ETC', etc), patch.object(lan, 'profiles', return_value={'office': old}), \
+                 patch.object(lan, 'preflight'), patch.object(lan, 'local_conflicts'), patch.object(lan, 'baseline'), \
+                 patch.object(lan, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')), \
+                 patch.object(lan, 'start_transaction', side_effect=lambda *a: calls.append('timer')), \
+                 patch.object(lan, 'stop_client', side_effect=lambda *a: calls.append('stop')), \
+                 patch.object(lan, 'route_ops'), patch.object(lan, 'update'), patch.object(lan, 'enable') as enable:
+                lan.add_profile('office', 'new profile', old['static'], [], None, FINGERPRINT, False,
+                                'https://ip.example.invalid/', replace=True)
+            self.assertEqual(calls, ['timer', 'stop'])
+            self.assertTrue(enable.call_args.kwargs['transaction_started'])
