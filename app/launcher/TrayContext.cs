@@ -136,7 +136,7 @@ namespace RemoteAgents.Launcher
         bool VpnModulesReady()
         {
             // Disabled VPN is a valid installation; updates must never trigger UAC or require TUN.
-            return runtimes.Any(r => r.Definition.Critical) ? runtimes.Where(r => r.Definition.Critical).All(r => r.Healthy) : File.Exists(TransportScript("Vpn.Tun.ps1")) && File.Exists(TransportScript("Test-VpnConflict.ps1"));
+            return runtimes.Any(r => r.Definition.Critical) ? runtimes.Where(r => r.Definition.Critical).All(r => r.Healthy) : File.Exists(TransportScript("Vpn.Tun.ps1"));
         }
         void LoadComponents()
         {
@@ -539,24 +539,14 @@ namespace RemoteAgents.Launcher
                 if (Product.IsVpn && !Json.Bool(StatusView.Read(home, "transport", maxAgeSec: 15), "ok")) {
                     MessageBox.Show("Для VPN нужна проверенная связь с сервером. Установите и запустите RemoteAgents.exe; дождитесь подключения.", "RemoteVPN"); return;
                 }
-                while (!closing) {
-                    var result = Json.Map(Json.Parse(await Task.Run(() => CaptureScript("Test-VpnConflict.ps1", new string[0]))));
-                    if (closing) return;
-                    var items = Json.Get(result, "items");
-                    if (!(Json.Get(result, "conflict") is bool) || !(items is System.Collections.IEnumerable) || items is string || items is System.Collections.IDictionary) throw new InvalidDataException();
-                    if (!Json.Bool(result, "conflict")) {
-                        if (vpn.Definition.CommandManaged) {
-                            config.SetVpnIntent(true);config.SetEnabled(vpn.Definition, true);
-                            await Task.Run(() => CaptureScript("Vpn.Tun.ps1", new[] { "-Enable", "-ParentPid", Process.GetCurrentProcess().Id.ToString() }));
-                        } else EnableRuntime(vpn, true);
-                        return;
-                    }
-                    string found = string.Join("; ", Json.Array(Json.Get(result, "items")).Select(x => { var item = Json.Map(x); return string.Join(" — ", new[] { Json.Str(item, "kind"), Json.Str(item, "name"), Json.Str(item, "path"), Json.Str(item, "detail") }.Where(v => v.Length > 0)); }));
-                    if (!VpnConflictDialog(found)) return;
-                }
+                // Vpn.Tun inventories neighbouring VPNs and reports a warning without refusing enable.
+                if (vpn.Definition.CommandManaged) {
+                    config.SetVpnIntent(true); config.SetEnabled(vpn.Definition, true);
+                    await Task.Run(() => CaptureScript("Vpn.Tun.ps1", new[] { "-Enable", "-ParentPid", Process.GetCurrentProcess().Id.ToString() }));
+                } else EnableRuntime(vpn, true);
             } catch (OperationCanceledException) { }
             catch { if (vpn.Definition.CommandManaged) try { config.SetEnabled(vpn.Definition, false); } catch { log.Write("vpn.config.failed"); }
-                if (!closing) { log.Write("vpn.conflict.check.failed"); MessageBox.Show("Проверить наличие другого VPN не удалось. VPN RemoteAgents не включён.", "RemoteAgents"); } }
+                if (!closing) { log.Write("vpn.enable.failed"); MessageBox.Show("Запрос включения VPN не выполнен. Проверьте статус и журналы; включение ещё не подтверждено.", "RemoteAgents"); } }
             finally { actionBusy = false; if (!closing) RefreshMenu(); }
         }
         async void DisableVpn(ComponentRuntime vpn)
@@ -567,17 +557,6 @@ namespace RemoteAgents.Launcher
             catch (OperationCanceledException) { }
             catch { if (!closing) MessageBox.Show("Запрос выключения VPN не выполнен. Проверьте статус и журналы; выключение ещё не подтверждено.", "RemoteAgents"); }
             finally { actionBusy = false; if (!closing) RefreshMenu(); }
-        }
-        internal static bool VpnConflictDialog(string found)
-        {
-            using (var form = new Form { Text = "RemoteAgents — другой VPN", Width = 640, Height = 290, StartPosition = FormStartPosition.CenterScreen, MinimizeBox = false, MaximizeBox = false }) {
-                var text = new TextBox { Multiline = true, ReadOnly = true, Dock = DockStyle.Fill, ScrollBars = ScrollBars.Vertical, Text = "У вас уже работает VPN: " + (found.Length == 0 ? "нет данных о названии" : found) + ". Чтобы включить VPN RemoteAgents, отключите его сами. Если хотите остаться на нём — нажмите «Оставить как есть»." };
-                var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 48, FlowDirection = FlowDirection.RightToLeft };
-                var leave = new Button { Text = "Оставить как есть", AutoSize = true, DialogResult = DialogResult.Cancel };
-                var retry = new Button { Text = "Проверить снова", AutoSize = true, DialogResult = DialogResult.Retry };
-                buttons.Controls.Add(leave); buttons.Controls.Add(retry); form.Controls.Add(text); form.Controls.Add(buttons); form.CancelButton = leave; form.AcceptButton = leave;
-                return form.ShowDialog() == DialogResult.Retry;
-            }
         }
         static void ShowText(string title, string text)
         {

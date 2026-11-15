@@ -541,8 +541,7 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             }
             try{
                 if($Request.enabled){
-                    $conflict=ConvertFrom-Json (& (Join-Path $Bundle 'transport/Test-VpnConflict.ps1') -Home $Root|Out-String)
-                    if($conflict.conflict){throw 'Работает другой VPN. Отключите его сами и повторите проверку; RemoteAgents не менял чужой VPN'}
+                    # TUN inventories neighbouring VPNs itself; they only produce a status/log warning.
                     Invoke-InstallChild $Bundle 'transport/Vpn.Tun.ps1' @('-Home',$Root,'-Enable') -TimeoutSeconds 420
                     return @{ok=$false;summary='Запрос VPN передан. Дождитесь живого статуса TUN; включение ещё не подтверждено'}
                 }

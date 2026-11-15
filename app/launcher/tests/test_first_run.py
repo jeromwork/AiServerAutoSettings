@@ -250,6 +250,23 @@ class FirstRunTests(unittest.TestCase):
         self.assertIn('DiskShellRequest.Parse(args)', source('Program.cs'))
         self.assertIn('diskExplorer.Submit(diskShell)', source('TrayContext.cs'))
 
+    def test_vpn_enable_has_no_foreign_vpn_refusal_dialog(self):
+        tray = source('TrayContext.cs')
+        enable = tray.split('async void CheckVpn(', 1)[1].split('async void DisableVpn(', 1)[0]
+        self.assertIn('CaptureScript("Vpn.Tun.ps1", new[] { "-Enable"', enable)
+        self.assertNotIn('Test-VpnConflict.ps1', enable)
+        self.assertNotIn('VpnConflictDialog', tray)
+        self.assertNotIn('Оставить как есть', enable)
+        # The conflict probe is inventory only: neither module readiness nor the wizard step may require or call it.
+        ready = tray.split('bool VpnModulesReady()', 1)[1].split('void LoadComponents()', 1)[0]
+        self.assertIn('TransportScript("Vpn.Tun.ps1")', ready)
+        self.assertNotIn('Test-VpnConflict', ready)
+        wizard_common = (ROOT / 'build' / 'Wizard.Common.ps1').read_text(encoding='utf-8-sig')
+        vpn_step = wizard_common.split("'Vpn' {", 1)[1].split("'Inspect' {", 1)[0]
+        self.assertIn("'transport/Vpn.Tun.ps1' @('-Home',$Root,'-Enable')", vpn_step)
+        self.assertNotIn('Test-VpnConflict', vpn_step)
+        self.assertNotIn('conflict.conflict', vpn_step)
+
     def test_pending_account_survives_rejected_or_failed_guard(self):
         wizard = source('SetupWizard.cs')
         guard = wizard.split('async Task<bool> Guard(', 1)[1].split('async Task<Dictionary', 1)[0]

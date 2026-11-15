@@ -90,6 +90,10 @@ namespace RemoteAgents.Launcher
         }
         internal static void Run()
         {
+            var vpnWarning = Data("{\r\n\"ok\":true,\"enabled\":true,\"state\":\"on\",\"conflict\":{\"conflict\":true},\"warning\":\"рядом работает: happ-default-tun, OpenVPN TAP-Windows6, Tailscale\",\"summary\":\"Системный VPN проверен; рядом работает: happ-default-tun, OpenVPN TAP-Windows6, Tailscale\"\r\n}");
+            Check(StatusView.Line("VPN", vpnWarning).StartsWith("✅ VPN:") && StatusView.Line("VPN", vpnWarning).Contains("рядом работает: happ-default-tun, OpenVPN TAP-Windows6, Tailscale"), "coexisting full-tunnel warning does not turn verified VPN into failure");
+            vpnWarning["ok"] = false; vpnWarning["state"] = "starting";
+            Check(StatusView.Line("VPN", vpnWarning).StartsWith("⏳ VPN:") && StatusView.Summary(vpnWarning).Contains("рядом работает:"), "coexistence warning survives pending start");
             var empty = Data("{}"); var transport = Data("{\r\n\"ok\":true,\"active\":\"vless-relay-fixture\",\"kbps\":96.8,\"candidates\":[{\"tag\":\"vless-relay-fixture\",\"state\":\"ok\",\"kbps\":96.8},{\"tag\":\"vless-direct\",\"state\":\"fail\"}]\r\n}");
             var health = Health(40000, 50000); var menu = TrayMenuModel.Build(empty, empty, transport, health);
             // Application actions, separate synchronization window, and local REST summary.

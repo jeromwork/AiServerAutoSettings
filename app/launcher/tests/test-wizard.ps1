@@ -285,4 +285,21 @@ Assert (-not (Read-TransportJson (Join-Path $freshRoot 'config.json')).wizard.co
         Assert ($failed -and -not (Test-Path -LiteralPath $script:failedAccept)) 'failed install propagates and removes temporary file'
     }finally{$env:LOCALAPPDATA=$savedLocal;$env:USERPROFILE=$savedUser}
 }
+# Enable through the wizard continues even with a foreign full-tunnel in the bundle.
+& {
+    $root=Join-Path $TestHome 'vpn-coexist';$bundle=Join-Path $root 'bundle'
+    [void][IO.Directory]::CreateDirectory((Join-Path $bundle 'transport'))
+    Write-TransportJson (Join-Path $root 'config.json') @{schema=1;vpn=@{enabled=$false};transport=@{}}
+    $script:foreignProbe=Join-Path $root 'foreign-probe-called'
+    Write-DiskUtf8 (Join-Path $bundle 'transport/Test-VpnConflict.ps1') ("param([string]`$Home)`r`n[IO.File]::WriteAllText('"+$script:foreignProbe+"','called')`r`n'{""conflict"":true,""items"":[{""kind"":""route"",""name"":""Happ"",""detail"":""0.0.0.0/0""}]}'")
+    function Test-WizardNetworkProof {$true}
+    $script:vpnEnableCalls=0
+    function Invoke-InstallChild($Bundle,$Script,$Arguments,$TimeoutSeconds){
+        Assert ($Script -eq 'transport/Vpn.Tun.ps1' -and '-Enable' -in $Arguments) 'wizard sends enable to TUN worker'
+        $script:vpnEnableCalls++
+    }
+    $r=Invoke-WizardStep $root $bundle 'Vpn' @{enabled=$true;checkUrl='https://example.invalid/';dnsServer='192.0.2.53'}
+    Assert ($script:vpnEnableCalls -eq 1 -and -not $r.ok -and $r.summary.Contains('ещё не подтверждено')) 'foreign VPN does not block the wizard; live verification is still pending'
+    Assert (-not (Test-Path $script:foreignProbe)) 'wizard leaves inventory and coexistence warning to TUN instead of a second refusal gate'
+}
 Write-Output ('OK: '+$count+' wizard/model/catalog/installation/rollback checks (fake SSH, no Windows)')
