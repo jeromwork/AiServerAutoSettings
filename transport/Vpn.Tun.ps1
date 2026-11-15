@@ -84,7 +84,7 @@ try{
         $snapshot=Get-VpnSnapshot;$conflict=Find-VpnConflicts $snapshot @(Get-VpnOwnedProcessIds $root $snapshot)
         if($conflict.conflict){Write-VpnStatus $root $false $false 'conflict' $conflict 'Отключите другой VPN перед включением VPN RemoteAgents';return}
         $Session=[guid]::NewGuid().ToString('N')
-        Write-TransportJson $sessionFile @{session=$Session} -Private
+        Write-TransportJson $sessionFile @{session=$Session;pid=$ParentPid;startedTicks=[string]$parentStart} -Private
         Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue
         Write-VpnStatus $root $false $true 'awaiting-uac' $conflict 'Ожидается разрешение Windows на включение'
         $args=@('--vpn-host','--home',$root,'--vpn-script',$PSCommandPath,'--vpn-session',$Session,'--vpn-parent',[string]$ParentPid,'--vpn-parent-start',[string]$parentStart)

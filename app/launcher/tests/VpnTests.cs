@@ -77,8 +77,18 @@ namespace RemoteAgents.Launcher
             }
             Files.Atomic(file, Json.Encode(new { enabled = true, state = "on", updatedAt = now.AddSeconds(-4).ToString("o") }));
             Check(Json.Str(VpnStatus.Read(home), "state") == "watchdog-stalled" && File.Exists(Path.Combine(home, "state/vpn.stop")), "stale heartbeat never displays active protection");
-            Files.Atomic(file, Json.Encode(new { enabled = true, state = "awaiting-uac" })); File.Delete(Path.Combine(home, "state/vpn-host.json"));
-            Check(Json.Str(VpnStatus.Read(home), "state") == "awaiting-uac", "UAC wait is not mistaken for host death");
+            File.Delete(Path.Combine(home, "state/vpn.stop"));
+            using (var self = Process.GetCurrentProcess()) {
+                var pending = new { enabled = true, state = "awaiting-uac", updatedAt = now.AddMinutes(-10).ToString("o") };
+                Files.Atomic(file, Json.Encode(pending)); File.Delete(Path.Combine(home, "state/vpn-host.json"));
+                Files.Atomic(Path.Combine(home, "state/vpn-session.json"), Json.Encode(new { pid = self.Id, startedTicks = self.StartTime.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture) }));
+                Check(Json.Str(VpnStatus.Read(home), "state") == "awaiting-uac", "slow valid UAC wait is not mistaken for host death");
+                Files.Atomic(Path.Combine(home, "state/vpn-session.json"), Json.Encode(new { pid = self.Id, startedTicks = "0" }));
+                var cancelled = VpnStatus.Read(home);
+                var pendingFacts = new MainScreenFacts { VpnInstalled = true, Vpn = cancelled };
+                Check(Json.Str(cancelled, "state") == "off" && !Json.Bool(cancelled, "enabled") && MainScreenModel.Build(pendingFacts).Vpn.SwitchEnabled, "dead or reused pending launcher unlocks the next launch");
+                Check(File.Exists(Path.Combine(home, "state/vpn.stop")), "late UAC acceptance remains cancelled after pending launcher death");
+            }
             var facts = new MainScreenFacts { VpnInstalled = true, VpnWanted = true, Vpn = ConfigBundle.D("enabled", false, "state", "server-unreachable") };
             var view = MainScreenModel.Build(facts);
             Check(!view.Vpn.On && view.Vpn.State == "VPN выключен: сервер не отвечает" && view.Banner.Text == view.Vpn.State, "stale saved intent cannot hide auto-stop in card and banner");
