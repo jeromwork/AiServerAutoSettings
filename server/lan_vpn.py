@@ -16,6 +16,7 @@ import re
 import shlex
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -41,7 +42,7 @@ BLOCKS = {'ca', 'cert', 'key', 'tls-auth', 'tls-crypt', 'tls-crypt-v2', 'auth-us
 # No arbitrary file paths, executable hooks, plugin, management, setenv, config,
 # connection, daemon, log, writepid, user/group, route-delay or route-method.
 OPTIONS = {
-    'client', 'tls-client', 'nobind', 'remote', 'proto', 'resolv-retry',
+    'client', 'tls-client', 'nobind', 'remote', 'proto', 'port', 'float', 'passtos', 'resolv-retry',
     'connect-retry', 'connect-retry-max', 'connect-timeout', 'server-poll-timeout',
     'remote-random', 'remote-random-hostname', 'remote-cert-tls', 'verify-x509-name',
     'auth', 'cipher', 'data-ciphers', 'data-ciphers-fallback', 'tls-version-min',
@@ -68,6 +69,15 @@ def require(condition, message):
 def name_ok(name):
     require(bool(NAME.fullmatch(name)), 'Имя: 1–7 строчных латинских букв/цифр, первая — буква.')
     return name
+
+
+def normalize_server_fingerprint(value):
+    require(isinstance(value, str) and re.fullmatch(
+        r'(?:[0-9A-Fa-f]{64}|[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){31})', value) is not None,
+        'Некорректный --server-fingerprint: нужен SHA-256 сертификата шлюза '
+        '(64 hex-символа, без разделителей или пары hex-цифр через двоеточия).')
+    compact = value.replace(':', '').upper()
+    return ':'.join(compact[i:i + 2] for i in range(0, 64, 2))
 
 
 def networks(values):
@@ -103,12 +113,69 @@ def lan_credentials(username, password):
     return username, password
 
 
-def import_client(name, source, extra=(), auth=None):
+def endpoints(values):
+    """Shared transport allowlist, independent of the VPN client implementation."""
+    require(isinstance(values, list) and len(values) <= 16, 'endpoints: нужен список не более 16 шлюзов.')
+    seen = set()
+    for item in values:
+        require(isinstance(item, dict) and set(item) == {'ip', 'proto', 'port'}, 'endpoints: неверные поля шлюза.')
+        try:
+            ip = ipaddress.IPv4Address(item['ip'])
+        except (ValueError, TypeError):
+            raise Error('endpoints: нужен канонический публичный IPv4 шлюза.') from None
+        require(isinstance(item['ip'], str) and str(ip) == item['ip'] and ip.is_global and
+                not (ip.is_multicast or ip.is_reserved or ip.is_loopback or ip.is_link_local),
+                'endpoints: нужен канонический публичный IPv4 шлюза.')
+        require(item['proto'] in ('udp', 'tcp') and type(item['port']) is int and 1 <= item['port'] <= 65535,
+                'endpoints: нужны proto udp/tcp и порт 1–65535.')
+        key = (item['ip'], item['proto'], item['port'])
+        require(key not in seen, 'endpoints: повторный шлюз.')
+        seen.add(key)
+    return values
+
+
+def remote_endpoints(remotes, port, proto):
+    result = []
+    protocols = {'tcp-client': 'tcp', 'tcp4-client': 'tcp', 'tcp': 'tcp', 'udp4': 'udp', 'udp': 'udp'}
+    for args in remotes:
+        transport = args[2] if len(args) > 2 else proto
+        require(transport in protocols, 'Неподдерживаемый протокол remote.')
+        raw_port = args[1] if len(args) > 1 else port
+        require(re.fullmatch(r'[0-9]{1,5}', raw_port) is not None, 'Некорректный порт шлюза.')
+        host = args[0]
+        try:
+            addresses = [str(ipaddress.ip_address(host))]
+        except ValueError:
+            # Invalid numeric literals must not become resolver-specific aliases.
+            require(not re.fullmatch(r'[0-9.]+', host), 'Некорректный IPv4 шлюза.')
+            try:
+                addresses = sorted({r[4][0] for r in socket.getaddrinfo(host, None, socket.AF_INET)})
+            except (OSError, UnicodeError):
+                raise Error('Не удалось разрешить адрес шлюза.') from None
+        require(addresses, 'Не удалось разрешить адрес шлюза.')
+        for address in addresses:
+            item = {'ip': address, 'proto': protocols[transport], 'port': int(raw_port)}
+            endpoints([item])
+            if item not in result:
+                result.append(item)
+        endpoints(result)
+    return result
+
+
+def openvpn_log(name):
+    return LOG.parent / ('lan-' + name_ok(name) + '.openvpn.log')
+
+
+def import_client(name, source, extra=(), auth=None, direct_endpoint=False, server_fingerprint=None):
     name_ok(name)
+    # The pin comes only from the trusted CLI/config, never from profile directives.
+    verification = ('remote-cert-tls server' if server_fingerprint is None else
+                    'peer-fingerprint ' + normalize_server_fingerprint(server_fingerprint))
     text = Path(source).read_text(encoding='utf-8-sig').replace('\r\n', '\n').replace('\r', '\n')
     lines, subnets, block, payload = [], list(extra), None, []
     seen = set()
     prompt = False
+    remotes, port, proto = [], '1194', 'udp'
     for number, line in enumerate(text.splitlines(), 1):
         stripped = line.strip()
         if block:
@@ -151,13 +218,20 @@ def import_client(name, source, extra=(), auth=None):
         else:
             require(option in OPTIONS, 'Запрещённая/неподдерживаемая директива, строка ' + str(number))
             require(len(args) <= 8, 'Слишком много аргументов.')
-            if option in ('verb', 'mute'):
+            if option in ('verb', 'mute', 'remote-cert-tls'):
                 continue
             if option == 'proto':
                 require(args in (['tcp'], ['tcp-client'], ['udp'], ['udp4'], ['tcp4-client']), 'Неподдерживаемый proto.')
             if option == 'remote':
                 require(1 <= len(args) <= 3 and re.fullmatch(r'[A-Za-z0-9_.:-]+', args[0]) is not None,
                         'Некорректный remote.')
+                remotes.append(args)
+            if option in ('port', 'proto'):
+                require(len(args) == 1, 'Некорректные port/proto.')
+                if option == 'port':
+                    port = args[0]
+                else:
+                    proto = args[0]
             # Double quotes, no shell interpretation: OpenVPN has its own parser.
             lines.append(option + ''.join(' "' + a.replace('\\', '\\\\').replace('"', '\\"') + '"' for a in args))
     require(block is None, 'Незакрытый inline-блок.')
@@ -169,11 +243,15 @@ def import_client(name, source, extra=(), auth=None):
             del lines[start:lines.index('</auth-user-pass>', start) + 1]
         lines.extend(['<auth-user-pass>', *lan_credentials(*auth), '</auth-user-pass>'])
     require(any(l.startswith('remote ') for l in lines), 'В профиле отсутствует remote.')
-    require('ca' in seen or any(l.startswith('peer-fingerprint ') for l in lines), 'Требуется inline CA.')
-    # A profile cannot weaken server certificate role checking.
-    lines = [l for l in lines if not l.startswith('remote-cert-tls ')]
+    require('ca' in seen, 'Требуется inline CA.')
+    gateways = remote_endpoints(remotes, port, proto) if direct_endpoint else []
+    if direct_endpoint:
+        # No hostname remains: OpenVPN must use exactly the exempted addresses.
+        lines = [l for l in lines if not l.startswith(('remote ', 'remote-random-hostname'))]
+        lines.extend('remote {ip} {port} {proto}'.format(**e) for e in gateways)
+    # A profile cannot weaken the selected server certificate verification.
     lines.extend(['client', 'dev tun-lan-' + name, 'dev-type tun', 'nobind',
-                  'remote-cert-tls server', 'auth-nocache', 'route-noexec',
+                  verification, 'auth-nocache', 'route-noexec',
                   'pull-filter ignore "redirect-gateway"',
                   'pull-filter ignore "redirect-private"',
                   'pull-filter ignore "dhcp-option"',
@@ -184,8 +262,8 @@ def import_client(name, source, extra=(), auth=None):
                   'pull-filter ignore "dns"',
                   'script-security 2',
                   'route-up "/usr/local/lib/remoteagents/lan/lan-vpn.sh _hook ' + name + '"',
-                  'verb 0', 'mute 1'])
-    return '\n'.join(lines) + '\n', networks(subnets)
+                  'verb 3', 'log ' + str(openvpn_log(name))])
+    return '\n'.join(lines) + '\n', networks(subnets), gateways
 
 
 def pushed_routes(env):
@@ -193,11 +271,21 @@ def pushed_routes(env):
     for key in sorted(env):
         if re.fullmatch(r'route_network_[0-9]+', key):
             index = key.rsplit('_', 1)[1]
-            values.extend(parse_route([env[key], env.get('route_netmask_' + index, '255.255.255.255')]))
+            try:
+                network = ipaddress.IPv4Network(env[key] + '/' + env.get('route_netmask_' + index, '255.255.255.255'),
+                                                strict=False)
+            except ValueError:
+                raise Error('route требует числовые IPv4 network/netmask.') from None
+            # A gateway may push public routes (e.g. its own Internet bypass). They are never
+            # executed (route-noexec), so drop them: only RFC1918 LAN subnets reach the server.
+            if any(network.subnet_of(p) for p in PRIVATE):
+                values.append(str(network))
     return networks(values)
 
 
 def nft_rules(profiles):
+    gateways = sorted({(e['ip'], e['proto'], e['port']) for p in profiles.values()
+                       for e in endpoints(p.get('endpoints', []))})
     lines = ['table inet ' + TABLE + ' {',
              ' chain input { type filter hook input priority -10; policy accept;']
     for name, data in sorted(profiles.items()):
@@ -211,6 +299,10 @@ def nft_rules(profiles):
     # postrouting also covers policy reroutes after output and forwarded traffic.
     for chain, hook, priority in [('output', 'output', '-10'), ('egress', 'postrouting', '300')]:
         lines.append(' chain ' + chain + ' { type filter hook ' + hook + ' priority ' + priority + '; policy accept;')
+        for ip, proto, port in gateways:
+            lines.append('  ip daddr ' + ip + ' meta skuid 0 ' + proto + ' dport ' + str(port) + ' accept')
+        if gateways:
+            lines.append('  ip daddr { ' + ', '.join(sorted({e[0] for e in gateways})) + ' } drop')
         for name, data in sorted(profiles.items()):
             nets = networks(data['subnets'])
             if nets:
@@ -356,6 +448,10 @@ def profile(name):
     require(isinstance(data.get('static'), list) and isinstance(data.get('subnets'), list), 'Неверный список подсетей.')
     require(networks(data['static']) == data['static'] and networks(data['subnets']) == data['subnets'],
             'В config.json нужны канонические RFC1918-подсети.')
+    endpoints(data.get('endpoints', []))
+    if 'server_fingerprint' in data:
+        require(normalize_server_fingerprint(data['server_fingerprint']) == data['server_fingerprint'],
+                'В config.json нужен канонический server_fingerprint: AA:BB:… (SHA-256, 32 байта).')
     return data
 
 
@@ -426,8 +522,13 @@ def managed_subnets():
     return read(p) if p.exists() else []
 
 
+def managed_exclusions(data):
+    return sorted({s for p in data.values() for s in p['subnets']} |
+                  {e['ip'] + '/32' for p in data.values() for e in endpoints(p.get('endpoints', []))})
+
+
 def sync_singbox():
-    new = sorted({s for p in active().values() for s in p['subnets']})
+    new = managed_exclusions(active())
     # Do not take ownership of pre-existing exclusions: remove only our additions.
     old = managed_subnets()
     current = [s for i in read(SB)['inbounds'] if i.get('type') == 'tun'
@@ -557,12 +658,16 @@ def rollback(boot=False):
         current[name].update(enabled=False, ready=False)
         update(name, current[name])
     backup = pending / 'sing-box.json'
-    run(['sing-box', 'check', '-c', backup])
-    print(exclusion_diff(read(SB), read(backup)), end='', flush=True)
-    atomic(SB, backup.read_text(), meta['mode'])
+    # All clients were stopped, including previously enabled LANs. Restore the
+    # snapshot's foreign exclusions, but retire every exclusion we owned there.
+    restored = patch_singbox(read(backup), read(pending / 'managed.json'), [])
+    candidate = pending / 'sing-box.restored.json'
+    save(candidate, restored)
+    run(['sing-box', 'check', '-c', candidate])
+    print(exclusion_diff(read(SB), restored), end='', flush=True)
+    atomic(SB, candidate.read_text(), meta['mode'])
     os.chown(SB, meta['uid'], meta['gid'])
-    # Old exclusions may remain but no LAN interface is up; there is no Internet LAN path.
-    save(STATE / 'managed-subnets.json', read(pending / 'managed.json'))
+    save(STATE / 'managed-subnets.json', [])
     if not boot:
         run(['systemctl', 'restart', 'sing-box'])
     event(meta['name'], 'rollback: все клиенты ЛВС остановлены; sing-box/nft восстановлены')
@@ -717,6 +822,43 @@ def apply_dns(name, data):
     run(['resolvectl', 'dns', interface, data['dns']['server']])
 
 
+def openvpn_reason(text, name):
+    """Return only fixed diagnoses; untrusted log contents never leave here."""
+    if 'AUTH_FAILED' in text:
+        return 'шлюз отклонил логин/пароль'
+    if 'VERIFY KU ERROR' in text or 'does not have key usage' in text:
+        return ('у сертификата шлюза нет отметки «сервер»; если это его собственный CA, '
+                'задайте --server-fingerprint (отпечаток сверьте отдельно)')
+    # OpenVPN 2.6 src/openvpn/ssl_verify.c (verify_cert), before the generic TLS error.
+    if '--tls-verify/--peer-fingerprint certificate hash verification failed' in text:
+        return 'отпечаток сертификата шлюза не совпал'
+    if any(s in text for s in ('TLS key negotiation failed', 'TLS Error', 'TLS handshake failed')):
+        return 'шлюз не отвечает на рукопожатие: трафик до шлюза не проходит или неверный порт/протокол'
+    if 'Cannot resolve' in text or 'RESOLVE' in text:
+        return 'не удалось разрешить адрес шлюза'
+    if 'Options error' in text:
+        return 'OpenVPN отверг параметры профиля'
+    if 'Initialization Sequence Completed' in text or 'Failed running command (--route-up)' in text:
+        return 'подключилось, но ЛВС не прислала частных подсетей: задайте --subnet'
+    return 'причина не распознана; подробности в ' + str(openvpn_log(name)) + ' (только root)'
+
+
+def openvpn_failure(name):
+    text = ''
+    # Read only a bounded tail of a root-private regular file, never a symlink.
+    if os.geteuid() == 0:
+        try:
+            fd = os.open(openvpn_log(name), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, 'rb') as log:
+                st = os.fstat(log.fileno())
+                if stat.S_ISREG(st.st_mode) and st.st_uid == 0 and not st.st_mode & 0o077:
+                    log.seek(max(0, st.st_size - 65536))
+                    text = log.read(65536).decode('utf-8', errors='replace')
+        except OSError:
+            pass
+    return openvpn_reason(text, name)
+
+
 def enable(name, url):
     data = profile(name)
     if data.get('enabled'):
@@ -738,13 +880,22 @@ def enable(name, url):
         firewall(active())
         # Required service start is now safe, before the TUN is created.
         run(['systemctl', 'start', 'remoteagents-lan-firewall.service'])
+        if data.get('endpoints'):
+            sync_singbox()
         discovery = STATE / (name + '.discovery.json')
         discovery.unlink(missing_ok=True)
-        run(['systemctl', 'start', service(name)])
+        openvpn_log(name).unlink(missing_ok=True)
+        if run(['systemctl', 'start', service(name)], check=False).returncode:
+            raise Error(openvpn_failure(name))
         deadline = time.monotonic() + 20
         while not discovery.exists() and time.monotonic() < deadline:
+            if run(['systemctl', 'is-active', '--quiet', service(name)], check=False).returncode:
+                raise Error(openvpn_failure(name))
             time.sleep(0.2)
-        require(discovery.exists(), 'Нет push/route за 20 с; подключение не подтверждено.')
+        if not discovery.exists():
+            raise Error(openvpn_failure(name))
+        if run(['systemctl', 'is-active', '--quiet', service(name)], check=False).returncode:
+            raise Error(openvpn_failure(name))
         data['subnets'] = networks(read(discovery)['subnets'])
         for other, p in active().items():
             if other != name:
@@ -757,7 +908,7 @@ def enable(name, url):
         update(name, data)
         # All mutations are prechecked; the rollback timer is already armed.
         run(['nft', '-c', '-f', '-'], input=guard_batch(active()))
-        new = sorted({s for p in active().values() for s in p['subnets']})
+        new = managed_exclusions(active())
         checked_singbox(managed_subnets(), new)
         firewall(active())
         sync_singbox()
@@ -836,7 +987,7 @@ def disable(name, remove=False):
         data = profile(name)
     # Stop first; removal of guards/exclusions cannot expose a live interface.
     remaining = {n: p for n, p in active().items() if n != name}
-    checked_singbox(managed_subnets(), sorted({s for p in remaining.values() for s in p['subnets']}))
+    checked_singbox(managed_subnets(), managed_exclusions(remaining))
     run(['nft', '-c', '-f', '-'], input=guard_batch(remaining))
     start_transaction(name, 'disable')
     try:
@@ -959,6 +1110,7 @@ def watch():
             update(name, p)
             event(name, 'unsafe: watchdog остановил все ЛВС; проверьте nft/маршруты/клиент')
         firewall({})
+        sync_singbox()
         return
     for name in data:
         # Connectivity wasn't tested by the watchdog; never claim it was.
@@ -994,6 +1146,8 @@ def main():
             p.add_argument('--subnet', action='append', default=[])
             p.add_argument('--dns-domain')
             p.add_argument('--dns-server')
+            p.add_argument('--direct-endpoint', action='store_true', help='Pin public IPv4 gateways and bypass proxy-out only for their transport')
+            p.add_argument('--server-fingerprint', help='SHA-256 сертификата шлюза (64 hex-символа, с двоеточиями или без)')
             auth = p.add_mutually_exclusive_group()
             auth.add_argument('--auth-stdin', action='store_true', help='LAN login/password as JSON on stdin after the marker line')
             auth.add_argument('--ask-auth', action='store_true', help='Ask LAN login/password without echo')
@@ -1009,6 +1163,8 @@ def main():
     for command in ('list', 'status', 'public-status', 'rollback', '_watch', '_firewall', '_recover'):
         sub.add_parser(command)
     args = parser.parse_args()
+    if args.cmd == 'add' and args.server_fingerprint is not None:
+        args.server_fingerprint = normalize_server_fingerprint(args.server_fingerprint)
     if args.cmd == 'public-status':
         public_status()
         return
@@ -1025,8 +1181,10 @@ def main():
     if args.cmd == '_hook':
         try:
             hook(args.name)
-        except Exception:
-            event(args.name, 'hook failed: небезопасный push/маршруты/guard; запрошена остановка клиента')
+        except Exception as e:
+            # Error texts are fixed strings of this script; other exceptions only by type.
+            reason = str(e) if isinstance(e, Error) else type(e).__name__
+            event(args.name, 'hook failed: ' + reason + '; запрошена остановка клиента')
             run(['systemctl', 'stop', '--no-block', service(args.name)], check=False)
             raise
         return
@@ -1048,7 +1206,8 @@ def main():
             require(not network_pending() and not (STATE / 'pending').exists(),
                     'Сначала confirm или rollback предыдущего изменения сети.')
         if args.cmd == 'add':
-            client, static = import_client(args.name, args.ovpn, args.subnet, read_auth(args))
+            client, static, gateways = import_client(args.name, args.ovpn, args.subnet, read_auth(args),
+                                                    args.direct_endpoint, args.server_fingerprint)
             require(bool(args.dns_domain) == bool(args.dns_server), 'Задайте обе опции --dns-domain и --dns-server.')
             dns = None
             if args.dns_domain:
@@ -1057,7 +1216,9 @@ def main():
                 dns = {'domain': args.dns_domain.lower(), 'server': str(ipaddress.IPv4Address(args.dns_server))}
             old = profiles()
             if args.name in old:
-                require((ETC / args.name / 'client.conf').read_text() == client and old[args.name]['static'] == static and old[args.name].get('dns') == dns,
+                require((ETC / args.name / 'client.conf').read_text() == client and old[args.name]['static'] == static and old[args.name].get('dns') == dns and
+                        old[args.name].get('endpoints', []) == gateways and
+                        old[args.name].get('server_fingerprint') == args.server_fingerprint,
                         'Имя занято другим профилем; сначала remove.')
             else:
                 used = {p['table'] for p in old.values()}
@@ -1065,6 +1226,10 @@ def main():
                 require(slot is not None, 'Достигнут лимит 64 ЛВС.')
                 data = {'$schema': '../config.schema.json', 'version': 1, 'enabled': False, 'ready': False, 'static': static,
                         'subnets': static, 'dns': dns, 'table': 42000 + slot, 'priority': 1000 + slot}
+                if args.direct_endpoint:
+                    data['endpoints'] = gateways
+                if args.server_fingerprint is not None:
+                    data['server_fingerprint'] = args.server_fingerprint
                 atomic(ETC / args.name / 'client.conf', client)
                 update(args.name, data)
             install_runtime()
