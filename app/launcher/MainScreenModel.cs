@@ -22,6 +22,7 @@ namespace RemoteAgents.Launcher
         internal bool VpnInstalled;          // a "vpn" component exists in the definition
         internal bool VpnWanted;             // profile.vpn.enabled / the user's intent
         internal bool VpnBusy;               // enable/disable is in progress (actionBusy around CheckVpn/DisableVpn)
+        internal bool VpnDisableFailed;       // the last failed request was to disable, never offer to enable it
         internal string VpnError = "";       // last enable/disable failure in plain words, "" when none
         internal bool DiskEnabled;           // the "disk" component is enabled
         internal string DiskSummary = "";    // TrayContext disk summary, e.g. "Диск: синхронизирован" (DiskTraySession.Summary texts)
@@ -100,7 +101,9 @@ namespace RemoteAgents.Launcher
 
             string vpnError = VpnProblem(facts, vpn);
             if (vpnError.Length > 0)
-                view.Banner = Banner(Tone.Error, "Не удалось включить VPN. " + vpnError, "Включить снова", "vpn-on");
+                view.Banner = DisableFailed(facts, vpn)
+                    ? Banner(Tone.Error, vpnError, "Подробнее", "details")
+                    : Banner(Tone.Error, "Не удалось включить VPN. " + vpnError, "Включить снова", "vpn-on");
             else if (transport.Count == 0)
                 view.Banner = Banner(Tone.Warning, "Проверяем связь с сервером…", "", "");
             else if (!Json.Bool(transport, "ok"))
@@ -127,7 +130,7 @@ namespace RemoteAgents.Launcher
             card.SwitchText = facts.VpnBusy ? (facts.VpnWanted ? "Включается…" : "Выключается…") : card.On ? "Вкл" : "Выкл";
             card.Tone = Tone.Warning;
             if (facts.VpnBusy) card.State = card.SwitchText;
-            else if (VpnProblem(facts, vpn).Length > 0) { card.State = "VPN не включён"; card.Tone = Tone.Error; }
+            else if (VpnProblem(facts, vpn).Length > 0) { card.State = DisableFailed(facts, vpn) ? "Выключение VPN не подтверждено" : "VPN не включён"; card.Tone = Tone.Error; }
             else if (state == "stopping") card.State = "Выключается…";
             else if (state == "starting" || state == "awaiting-uac")
                 card.State = state == "awaiting-uac" ? "Ожидается разрешение на включение" : "Включается…";
@@ -208,6 +211,9 @@ namespace RemoteAgents.Launcher
             if (reason.Length > 0) return PlainReason(reason, "не удалось подключиться, проверьте настройки помощника");
             return Json.Bool(control, "processAlive") ? "сервер ещё не подтвердил подключение" : "помощник не запущен";
         }
+
+        static bool DisableFailed(MainScreenFacts facts, Dictionary<string, object> vpn)
+        { return facts.VpnDisableFailed || Json.Str(vpn, "state") == "rollback-error"; }
 
         static string VpnProblem(MainScreenFacts facts, Dictionary<string, object> vpn)
         {

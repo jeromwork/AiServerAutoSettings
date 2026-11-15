@@ -148,16 +148,22 @@ namespace RemoteAgents.Launcher
             // Do not replace a menu underneath a pointer; its commands retain the same PathSelection policy.
             if (pathMenu.Visible) return;
             string selected = pathSelection.Update(transport);
-            foreach (ToolStripItem item in pathMenu.Items.Cast<ToolStripItem>().ToArray()) item.Dispose();
-            pathMenu.Items.Clear();
-            AddPath("Автовыбор", "", selected);
-            foreach (var candidate in candidates.Where(c => Json.Bool(c, "enabled", true)))
-                AddPath(TrayMenuModel.CandidateLine(candidate, transport), Json.Str(candidate, "tag"), selected);
-            if (selected.Length > 0 && !candidates.Any(c => Json.Bool(c, "enabled", true) && Json.Str(c, "tag") == selected)) AddPath(selected + " — недоступен", selected, selected);
+            var paths = candidates.Where(c => Json.Bool(c, "enabled", true))
+                .Select(c => new { Tag = Json.Str(c, "tag"), Title = TrayMenuModel.CandidateLine(c, transport) }).ToList();
+            paths.Insert(0, new { Tag = "", Title = "Автовыбор" });
+            if (selected.Length > 0 && !paths.Any(p => p.Tag == selected)) paths.Add(new { Tag = selected, Title = selected + " — недоступен" });
+            if (!pathMenu.Items.Cast<ToolStripItem>().Select(item => (string)item.Tag).SequenceEqual(paths.Select(p => p.Tag))) {
+                foreach (ToolStripItem item in pathMenu.Items.Cast<ToolStripItem>().ToArray()) item.Dispose();
+                pathMenu.Items.Clear();
+                foreach (var path in paths) AddPath(path.Title, path.Tag, selected);
+            } else for (int i = 0; i < paths.Count; i++) {
+                var item = (ToolStripMenuItem)pathMenu.Items[i];
+                item.Text = paths[i].Title; item.Checked = paths[i].Tag == selected;
+            }
         }
         void AddPath(string title, string tag, string selected)
         {
-            var item = new ToolStripMenuItem(title) { Checked = tag == selected };
+            var item = new ToolStripMenuItem(title) { Tag = tag, Checked = tag == selected };
             item.Click += (s, e) => { pathSelection.Choose(tag); if (choosePath != null) choosePath(tag); };
             pathMenu.Items.Add(item);
         }
@@ -168,6 +174,8 @@ namespace RemoteAgents.Launcher
             float scale = DeviceDpi / 96F; var area = Screen.FromControl(this).WorkingArea;
             MinimumSize = new Size(Math.Min((int)(360 * scale), area.Width - 24), Math.Min((int)(440 * scale), area.Height - 24));
             ClientSize = new Size(Math.Min((int)(420 * scale), area.Width - 40), Math.Min((int)(600 * scale), area.Height - 80));
+            Bounds = MainWindowSizing.Constrain(Bounds, area);
+            SizeForPage(currentPage);
         }
         void EnsureDetails()
         {

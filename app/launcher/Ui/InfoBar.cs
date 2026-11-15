@@ -40,6 +40,8 @@ namespace RemoteAgents.Launcher
 
         internal void ShowMessage(Tone tone, string text, string actionText)
         {
+            if (BackColor == Theme.Fill(tone) && glyph.Text == Theme.Glyph(tone)
+                && message.Text == (text ?? "") && action.Text == (actionText ?? "")) { Visible = true; return; }
             SuspendLayout();
             BackColor = Theme.Fill(tone);
             glyph.ForeColor = Theme.Ink(tone);

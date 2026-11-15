@@ -505,7 +505,7 @@ namespace RemoteAgents.Launcher
                 Control = StatusView.Read(home, "control", maxAgeSec: 30), Health = health,
                 VpnInstalled = definition != null && definition.Components.Any(c => c.Name == "vpn"),
                 VpnWanted = vpnActionBusy ? vpnActionWanted : Json.Bool(Json.Map(Json.Get(Json.Map(Json.Get(config.Data, "profile")), "vpn")), "enabled"),
-                VpnBusy = vpnActionBusy, VpnError = vpnError, Operation = MutationConflict(),
+                VpnBusy = vpnActionBusy, VpnError = vpnError, VpnDisableFailed = vpnError.Length > 0 && !vpnActionWanted, Operation = MutationConflict(),
                 DiskEnabled = runtimes.Any(r => r.Definition.Name == "disk" && r.Enabled), DiskSummary = DiskSummary(),
                 DiskFolders = (DateTime.UtcNow - diskUpdated).TotalSeconds <= 10 ? diskFolders : -1, DiskServerOnly = -1,
                 HappierVisible = account.Visible, HappierHasKey = account.HasKey, HappierLabel = account.Label,

@@ -11,6 +11,8 @@ namespace RemoteAgents.Launcher
     {
         readonly Dictionary<string, Control> pages = new Dictionary<string, Control>();
         readonly Panel pageHost = new Panel { Dock = DockStyle.Fill };
+        readonly MainWindowSizing mainSizing = new MainWindowSizing();
+        Control pageHeader; Size resizeStart;
         readonly FlowLayoutPanel settingsBody = Stack(), aboutBody = Stack();
         readonly Label pageTitle = WrapLabel();
         readonly Button pageBack = new Button { Text = "← Назад", AutoSize = true }, settingsButton = new Button { Text = "⚙", AutoSize = true, AccessibleName = "Настройки" };
@@ -27,7 +29,12 @@ namespace RemoteAgents.Launcher
             top.Controls.Add(pageBack, 0, 0); top.Controls.Add(pageTitle, 1, 0); top.Controls.Add(settingsButton, 2, 0);
             pageBack.Click += (s, e) => ShowPage(currentPage == "Настройки" ? "Главная" : "Настройки");
             settingsButton.Click += (s, e) => ShowPage("Настройки");
+            pageHeader = top;
             Controls.Add(pageHost); Controls.Add(top);
+            ResizeBegin += (s, e) => resizeStart = Size;
+            ResizeEnd += (s, e) => { if (Size != resizeStart) mainSizing.UserResized(); };
+            Resize += (s, e) => { if (WindowState == FormWindowState.Maximized) mainSizing.UserResized(); };
+            DpiChanged += (s, e) => BeginInvoke(new Action(() => { if (!IsDisposed) SizeForPage(currentPage); }));
             RegisterFlowPage("Главная", homeBody); RegisterFlowPage("Настройки", settingsBody);
             AddSetting("Сеть и пути", "Сервер, связь, VPN и выход в интернет", 1);
             AddSetting("Локальные сети", "Подключения к локальным сетям", 6);
@@ -111,13 +118,31 @@ namespace RemoteAgents.Launcher
             if (!WindowModel.CanOpen(name, operation)) { ReportConflict(operation); return; }
             if (name != "Главная") HideHappierKey();
             currentPage = name;
+            SuspendLayout();
             foreach (var page in pages) page.Value.Visible = page.Key == name;
             pages[name].BringToFront(); FitPage(pages[name]);
             pageTitle.Text = name == "Главная" ? Product.Name : name;
             pageBack.Visible = name != "Главная"; settingsButton.Visible = name == "Главная";
+            ResumeLayout(true);
+            SizeForPage(name);
             if (name != "Раздел настроек" && detailsWindow != null && !detailsWindow.IsApplying) {
                 detailsWindow.CancelEmbedded(); detailsWindow.Dispose(); detailsWindow = null;
             }
+        }
+        void SizeForPage(string name)
+        {
+            if (!mainLaidOut || WindowState != FormWindowState.Normal) return;
+            var area = Screen.FromControl(this).WorkingArea;
+            MinimumSize = new Size(Math.Min(Theme.Px(this, 360), area.Width), Math.Min(Theme.Px(this, 440), area.Height));
+            Size content = Size.Empty;
+            if (name == "Раздел настроек")
+                content = new Size(Theme.Px(this, 780) + SystemInformation.VerticalScrollBarWidth,
+                    Theme.Px(this, 460) + pageHeader.Height);
+            else if (name == "Редактор конфига")
+                content = new Size(rowsPanel.MinimumSize.Width + pages[name].Padding.Horizontal + SystemInformation.VerticalScrollBarWidth,
+                    Theme.Px(this, 460) + pageHeader.Height);
+            var required = content.IsEmpty ? Size.Empty : SizeFromClientSize(content);
+            Bounds = mainSizing.ForPage(Bounds, required, name == "Главная" || name == "Настройки", DeviceDpi, area);
         }
         void OpenDiagnostics()
         { advanced.Expanded = true; ShowPage("Диагностика"); }

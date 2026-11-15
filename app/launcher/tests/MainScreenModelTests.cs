@@ -58,7 +58,11 @@ namespace RemoteAgents.Launcher
             Check(banner.ActionId == "vpn-on" && banner.ActionText == "Включить снова" && banner.Text.Contains(facts.VpnError), "VPN error has highest priority and includes plain reason");
             facts.Transport.Clear();
             Check(MainScreenModel.Build(facts).Banner.ActionId == "vpn-on", "VPN failure precedes pending connection too");
-            facts.VpnError = "";
+            facts.VpnDisableFailed = true; facts.VpnError = "Выключение ещё не подтверждено.";
+            var failedDisable = MainScreenModel.Build(facts);
+            Check(failedDisable.Banner.ActionId == "details" && !failedDisable.Banner.Text.Contains("включить"), "failed disable never offers to enable VPN");
+            Check(failedDisable.Vpn.State == "Выключение VPN не подтверждено", "failed disable keeps its own card state");
+            facts.VpnDisableFailed = false; facts.VpnError = "";
             banner = MainScreenModel.Build(facts).Banner;
             Check(banner.Tone == Tone.Warning && banner.Text == "Проверяем связь с сервером…" && banner.ActionId == "" && banner.ActionText == "", "empty or stale transport is a soft banner without a button");
             facts.Transport = Data("{\"ok\":true}");
@@ -77,10 +81,13 @@ namespace RemoteAgents.Launcher
             facts = Healthy(); facts.VpnInstalled = false; facts.Transport = Data("{\"ok\":false}");
             var view = MainScreenModel.Build(facts);
             Check(!view.Vpn.Visible && view.Banner.ActionId == "retry" && view.Overall == Tone.Error, "no installed VPN does not hide server loss");
-            foreach (string state in new[] { "conflict", "error", "rollback-error", "rolled-back" }) {
+            foreach (string state in new[] { "conflict", "error", "rolled-back" }) {
                 facts = Healthy(); facts.Vpn = Data("{\"ok\":false,\"state\":\"" + state + "\"}");
                 Check(MainScreenModel.Build(facts).Banner.ActionId == "vpn-on", "saved VPN failure produces an actionable banner: " + state);
             }
+            facts = Healthy(); facts.Vpn = Data("{\"ok\":false,\"state\":\"rollback-error\"}");
+            var rollback = MainScreenModel.Build(facts);
+            Check(rollback.Banner.ActionId == "details" && rollback.Vpn.State == "Выключение VPN не подтверждено", "failed rollback never offers to enable VPN");
         }
         static void VpnCard()
         {
