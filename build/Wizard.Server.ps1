@@ -252,6 +252,15 @@ function Connect-WizardExistingKey([string]$Root,$Profile,[string]$User,[string]
     }
     return $false
 }
+function Get-WizardBootstrapScript([string]$Bundle,[string]$DownloadProxy='') {
+    $script=Convert-TransportLF ([IO.File]::ReadAllText((Join-Path $Bundle 'build/server-ssh-user.sh')))
+    if($DownloadProxy){
+        # Encoded only inside private SSH stdin; no secret in argv/RequestFile.
+        $encoded=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($DownloadProxy))
+        $script='ra_download_proxy=$(printf %s '+$encoded+' | base64 -d); export ra_download_proxy'+"`n"+$script
+    }
+    return $script
+}
 function Connect-WizardServer([string]$Root,[string]$Bundle,$Request) {
     $imported=Connect-WizardProfileServer $Root $Request;if($imported){return $imported}
     $address=[string]$Request.address;$user=[string]$Request.login;if(-not $user){$user='root'}
@@ -289,7 +298,12 @@ function Connect-WizardServer([string]$Root,[string]$Bundle,$Request) {
     if(-not $ready){
         $key=(Convert-TransportLF ([IO.File]::ReadAllText($p.keyPath+'.pub'))).Trim()
         if($key -notmatch '\Assh-ed25519 [A-Za-z0-9+/=]+(?: [^\r\n]*)?\z'){throw 'Некорректный открытый ключ'}
-        $script=Convert-TransportLF ([IO.File]::ReadAllText((Join-Path $Bundle 'build/server-ssh-user.sh')))
+        $downloadProxy=''
+        if($Request.bootstrapProxyPipe){
+            $downloadProxy=Read-WizardRelay ([string]$Request.bootstrapProxyPipe)
+            if(-not $downloadProxy){Write-WizardProgress 'Предупреждение: proxyOut для начальных загрузок не задан; apt будет использовать прямой выход'}
+        }
+        $script=Get-WizardBootstrapScript $Bundle $downloadProxy
         $payload=$worker+"`n"+$key+"`n"+$script
         # read public parameters first, then execute the same idempotent server helper.
         $command='IFS= read -r ra_user; IFS= read -r ra_key; export ra_user ra_key; bash -s'

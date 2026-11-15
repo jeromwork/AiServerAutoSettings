@@ -34,6 +34,9 @@ $script:calls=@();$script:scenario='broken';$request.statusOnly=$false;$failed=$
 try{Invoke-WizardServerApplyPayload $TestHome $repo $request 'profile' $payload|Out-Null}catch{$failed=$true}
 Assert ($failed -and $script:calls.Count -eq 2 -and -not $script:calls[1].confirm) 'failed new connection leaves rollback armed'
 # Staging carries the schema and dependencies needed after the temporary checkout disappears.
+$bootstrap=Get-WizardBootstrapScript $repo 'http://fixture:PROXY_TEST_SENTINEL@proxy.invalid:3128'
+Assert ($bootstrap.Contains('export ra_download_proxy') -and -not $bootstrap.Contains('PROXY_TEST_SENTINEL')) 'bootstrap proxy travels only encoded in SSH stdin'
+Assert (-not $bootstrap.Contains("`r")) 'bootstrap script uses LF'
 $files=Get-WizardApplyFiles $repo
 Assert ($files.Contains('base_network.py') -and $files.Contains('lan-config.schema.json') -and $files.Contains('tg-gateway/gateway.py') -and $files.Contains('config.paste.schema.json')) 'complete root payload'
 Write-Host ('PASS: server-apply engine '+$count+' checks')

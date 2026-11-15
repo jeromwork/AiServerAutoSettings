@@ -889,7 +889,9 @@ namespace RemoteAgents.Launcher
             var hop = Json.Map(Json.Get(ConfigRequests.Route(server, "hop"), "hop"));
             // Root and hop passwords: one-use in-memory pipes only (never the request file or the journal).
             using (var relay = new PasswordRelay(Value(Json.Get(server, "rootPassword"))))
-            using (var hopRelay = new PasswordRelay(Value(Json.Get(hop, "password")), 16)) {
+            using (var hopRelay = new PasswordRelay(Value(Json.Get(hop, "password")), 16))
+            using (var downloads = new PasswordRelay(BootstrapProxy(p), 16)) {
+                request["bootstrapProxyPipe"] = downloads.Name;
                 request["passwordPipe"] = relay.Name; request["askpassExecutable"] = Program.Exe;
                 var hopRequest = Json.Get(request, "hop") as Dictionary<string, object>; if (hopRequest != null) hopRequest["passwordPipe"] = hopRelay.Name;
                 request["installMissing"] = false; // Establish the worker key before changing the server network.
@@ -910,6 +912,16 @@ namespace RemoteAgents.Launcher
                 PromoteServerKey(server);
                 return deploymentOutcome;
             }
+        }
+        string BootstrapProxy(Dictionary<string, object> p)
+        {
+            var proxy = Json.Map(Json.Get(p, "proxyOut"));
+            string type = Json.Str(proxy, "type"), host = Json.Str(proxy, "server");
+            if (type != "http" && type != "socks") return "";
+            string login = Json.Str(proxy, "login"), password = Value(Json.Get(proxy, "password"));
+            string auth = login.Length > 0 || password.Length > 0 ? Uri.EscapeDataString(login) + ":" + Uri.EscapeDataString(password) + "@" : "";
+            if (host.Contains(":")) host = "[" + host + "]";
+            return (type == "http" ? "http://" : "socks5h://") + auth + host + ":" + Json.Int(proxy, "port", 0);
         }
         // Clean VPS (docs/CONFIG.md, server.rootPassword): after a proved Server the program logs in with the key it
         // installed for the worker user. That key goes into the vault and the profile, the root password is cleared,

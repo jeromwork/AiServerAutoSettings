@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -eu
 # Only public key and validated login arrive in stdin/environment. No password reaches this script.
+# Provided via private SSH stdin by the config engine, never a command argument.
+if [ -n "${ra_download_proxy:-}" ]; then
+    export http_proxy="$ra_download_proxy" https_proxy="$ra_download_proxy" all_proxy="$ra_download_proxy"
+    unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY no_proxy
+fi
 case "$ra_user" in ''|*[!a-z0-9_-]*) exit 20;; esac
 case "$ra_key" in 'ssh-ed25519 '*) ;; *) exit 21;; esac
 if [ "$(id -u)" = 0 ]; then
