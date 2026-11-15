@@ -697,7 +697,17 @@ class Engine:
 
     def lan_part(self, item, apply):
         name, part = item['name'], 'lan:' + item['name']
-        public = self.s.read('/var/lib/remoteagents-status/lan.json', [])
+        def read_state(path, default):
+            try:
+                value = self.s.read(path, default)
+            except (ValueError, UnicodeError):
+                raise Error('ЛВС: ' + path + ' повреждён (неверный JSON/UTF-8); требуется восстановление подтверждённой копии.') from None
+            except OSError:
+                raise Error('ЛВС: не удалось прочитать ' + path + '; проверьте наличие и права файла.') from None
+            require(isinstance(value, type(default)), 'ЛВС: ' + path + ' имеет неверную структуру JSON; требуется восстановление подтверждённой копии.')
+            return value
+        public = read_state('/var/lib/remoteagents-status/lan.json', [])
+        require(all(isinstance(p, dict) for p in public), 'ЛВС: публичный статус имеет неверную структуру JSON.')
         current = next((p for p in public if p.get('name') == name), {})
         active = self.s.active('remoteagents-lan@' + name + '.service')
         receipt = self.receipts.get(part, {})
@@ -708,7 +718,7 @@ class Engine:
         digest = hashlib.sha256(profile.replace('\r\n', '\n').encode()).hexdigest() if profile else None
         pending = self.s.path('/var/lib/remoteagents/lan/pending/meta.json')
         if pending.exists():
-            meta = json.loads(pending.read_text())
+            meta = read_state('/var/lib/remoteagents/lan/pending/meta.json', {})
             if meta.get('name') == name:
                 require('pendingCreated' in receipt and receipt.get('pendingCreated') == meta.get('created'), 'Это изменение ЛВС запущено другой командой; завершите его через lan-vpn.sh.')
                 require(receipt.get('settings') == settings, 'Сначала завершите предыдущее изменение ЛВС; параметры изменились.')
@@ -746,11 +756,15 @@ class Engine:
         client, static, gateways = lan.import_client(name, None, item.get('subnets', []),
                 (auth['username'], auth['password']) if auth else None,
                 item.get('directEndpoint', False), settings.get('serverFingerprint'), text=profile)
-        existing = self.s.read('/etc/remoteagents/lan/' + name + '/config.json', {})
+        existing = read_state('/etc/remoteagents/lan/' + name + '/config.json', {})
         actual_client = self.s.path('/etc/remoteagents/lan/' + name + '/client.conf')
         dns = {'domain': item['dnsDomain'].lower(), 'server': item['dnsServer']} if item.get('dnsDomain') else None
-        matched = existing and actual_client.exists() and actual_client.read_text() == client and existing.get('static') == static and existing.get('dns') == dns and existing.get('endpoints', []) == gateways and existing.get('server_fingerprint') == settings.get('serverFingerprint')
-        tested = self.s.read('/var/lib/remoteagents/lan/' + name + '.test.json', {})
+        try:
+            actual_profile = actual_client.read_text() if actual_client.exists() else None
+        except (OSError, UnicodeError):
+            raise Error('ЛВС: client.conf недоступен или повреждён (неверный UTF-8); требуется восстановление подтверждённой копии.') from None
+        matched = existing and actual_profile == client and existing.get('static') == static and existing.get('dns') == dns and existing.get('endpoints', []) == gateways and existing.get('server_fingerprint') == settings.get('serverFingerprint')
+        tested = read_state('/var/lib/remoteagents/lan/' + name + '.test.json', {})
         confirmed = existing.get('confirmed_at') or tested.get('baseline') and tested.get('baseline') == existing.get('baseline')
         if matched and existing.get('enabled') and existing.get('ready') and active and (confirmed or current.get('ok')):
             return self.row(part, 'ready', 'уже так; профиль и параметры совпадают; служба работает')

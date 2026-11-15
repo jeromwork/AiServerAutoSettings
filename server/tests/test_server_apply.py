@@ -269,6 +269,24 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(before, after)
         self.assertFalse(any(c[0] in ('apt-get', 'loginctl') or c[:2] in (['systemctl', 'restart'], ['systemctl', 'enable']) for c in f.calls))
 
+    def test_lan_status_explains_corrupt_state_without_contents_or_mutations(self):
+        f = self.fake
+        self.assertTrue(f.complete()['ok'])
+        path = '/etc/remoteagents/lan/office/config.json'
+        for value, reason in (('{PRIVATE_SENTINEL', 'неверный JSON/UTF-8'),
+                              ('["PRIVATE_SENTINEL"]', 'неверную структуру JSON')):
+            with self.subTest(value=value):
+                f.write(path, value)
+                before = {str(p): p.read_bytes() for p in f.root.rglob('*') if p.is_file()}
+                result = f.engine().run('status')
+                row = next(r for r in result['parts'] if r['part'] == 'lan:office')
+                self.assertEqual(row['state'], 'error')
+                self.assertIn(path, row['summary'])
+                self.assertIn(reason, row['summary'])
+                self.assertNotIn('PRIVATE_SENTINEL', json.dumps(result))
+                self.assertEqual(result['actions'], [])
+                self.assertEqual(before, {str(p): p.read_bytes() for p in f.root.rglob('*') if p.is_file()})
+
     def test_no_user_installers_while_lan_waits_for_new_ssh(self):
         f = Fake(self.tmp.name)
         result = f.engine(config()).run('apply')
