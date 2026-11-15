@@ -242,6 +242,7 @@ def confirm(engine):
                  'Секрет входящих изменился до подтверждения; таймер сохранён.')
     engine.check_ssh(None)
     engine.save_receipt('base-network', {'managed': True})
+    engine_module('server_recovery').pin_network(engine)
     shutil.rmtree(engine.s.path(STATE))
     engine.s.run(['systemctl', 'stop', TIMER + '.timer'], check=False)
 

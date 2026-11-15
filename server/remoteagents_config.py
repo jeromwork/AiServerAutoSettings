@@ -831,7 +831,9 @@ def server_secret_values(data, deployment):
             for child in node:
                 refs(child)
     refs(deployment)
-    require(all(isinstance(data['secrets'].get(k), str) and data['secrets'][k] and
+    optional = {r['secret'] for agent in deployment.get('agents', {}).values() for k, r in agent.items()
+                if k in ('auth', 'token') and isinstance(r, dict) and 'secret' in r}
+    require(all(isinstance(data['secrets'].get(k), str) and (data['secrets'][k] or k in optional) and
                 data['secrets'][k] != '<есть, скрыт>' for k in names),
             'В серверном снимке отсутствует секрет; экспорт не выдан.')
     return {k: data['secrets'][k] for k in names}
@@ -852,6 +854,19 @@ def read_server_secrets(deployment):
     except (OSError, ValueError):
         raise Error('Нет доступного root-only восстановительного снимка.') from None
     return server_secret_values(data, deployment)
+
+
+def bridge_invitation(deployment, values, line):
+    """The new config's own SSH key must also open a clone made from that config."""
+    ref = deployment.get('serverComponents', {}).get('bridge', {}).get('identity', {}).get('secret')
+    if not ref or not values.get(ref):
+        return
+    files = json.loads(values[ref])
+    require(isinstance(files, dict), 'Неверная идентичность моста; значения скрыты.')
+    old = files.get('.ssh/authorized_keys', '')
+    require(isinstance(old, str), 'Неверная идентичность моста; значения скрыты.')
+    files['.ssh/authorized_keys'] = old + ('\n' if old and not old.endswith('\n') else '') + line + '\n'
+    values[ref] = json.dumps(files, sort_keys=True)
 
 
 def export(c, args, out=sys.stdout, err=sys.stderr):
@@ -876,6 +891,8 @@ def export(c, args, out=sys.stdout, err=sys.stderr):
     require('server-key' not in values, 'Имя server-key зарезервировано для нового SSH-ключа; переименуйте серверный секрет.')
     values = {'server-key': private, **values}
     server['key'] = {'secret': 'server-key'}
+    if getattr(args, 'include_server_secrets', False):
+        bridge_invitation(deployment, values, public + ' ' + LABEL + ident + ' ' + name)
     config = {'kind': CONFIG_KIND, 'schema': 1, 'device': {'name': name}, 'server': server}
     if vpn:
         config['vpn'] = vpn
@@ -1034,6 +1051,18 @@ def revoke(c, ident, out=sys.stdout, err=sys.stderr):
     require(isinstance(ident, str) and ID_RE.fullmatch(ident), 'id — 16 шестнадцатеричных символов из «config list»')
     with locked(c):
         saved = records(c).get(ident)
+        # A persistent explicit revocation must survive disaster restore of the
+        # bridge's authorized_keys. Write the tombstone BEFORE deleting the key.
+        text = read_worker(c, c['workerAuthorizedKeys'])
+        known = saved or any((config_label(parsed[2]) or ('',))[0] == ident
+                             for line in split_lines(text) if (parsed := parse_key_line(line)))
+        require(known, 'Конфиг ' + ident + ' не найден')
+        tombstone = Path(c['workerAuthorizedKeys']).with_name('remoteagents-revoked.json')
+        def remember(old):
+            ids = json.loads(old or '[]')
+            require(isinstance(ids, list) and all(isinstance(i, str) and ID_RE.fullmatch(i) for i in ids), 'Повреждён список отозванных конфигов')
+            return json.dumps(sorted(set(ids) | {ident})) + '\n'
+        replace_worker(c, tombstone, remember)
         removed, new = remove_label(c, ident)
         require(removed or saved, 'Конфиг ' + ident + ' не найден')
         if saved and not saved.get('revokedUtc'):

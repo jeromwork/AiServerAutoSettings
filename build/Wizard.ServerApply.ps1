@@ -9,13 +9,18 @@ function Get-WizardApplyMode([string]$Root,$Request) {
     return Get-WizardAdminMode $Root $Request
 }
 function Get-WizardApplyFiles([string]$Bundle) {
-    $names=@('server_apply.py','server-apply.sh','base_network.py','server_recovery.py','server_packages.py','lan_vpn.py','lan-vpn.sh','lan-config.schema.json','proxy_out.py','proxy-out.sh','remoteagents_config.py')
+    $names=@('server_apply.py','server-apply.sh','base_network.py','server_recovery.py','server_components.py','server_packages.py','component_files.py','lan_vpn.py','lan-vpn.sh','lan-config.schema.json','proxy_out.py','proxy-out.sh','remoteagents_config.py')
     $body=Get-WizardNetFiles $Bundle $names
     $body+='mkdir -p "$d/tg-gateway"'+"`n"
     foreach($name in @('config.paste.schema.json','tg-gateway/gateway.py','tg-gateway/tg_gateway_keys.py','tg-gateway/tg_gateway_setup.py','tg-gateway/install.sh','tg-gateway/README.md')){
         $path=if($name -eq 'config.paste.schema.json'){$(if(Test-Path (Join-Path $Bundle 'server/config.paste.schema.json')){Join-Path $Bundle 'server/config.paste.schema.json'}else{Join-Path $Bundle 'app/launcher/config.paste.schema.json'})}else{Join-Path $Bundle ('server/'+$name)}
         $bytes=[Text.Encoding]::UTF8.GetBytes((Convert-TransportLF ([IO.File]::ReadAllText($path))))
         $body+='printf %s '+[Convert]::ToBase64String($bytes)+' | base64 -d > "$d/'+$name+'"'+"`n"
+    }
+    $body+='mkdir -p "$d/assets/disk"'+"`n"
+    foreach($name in @('disk/server-disk.sh','disk/stignore.txt','codex-windows-bridge.py','codex-bridge-session.py','server_node_catalog.py','server-codex-v1.sh','server-claude-code.sh','server-agent-handoff.py','server-desktop-bootstrap.sh','close-idle-chats.py')){
+        $bytes=[Text.Encoding]::UTF8.GetBytes((Convert-TransportLF ([IO.File]::ReadAllText((Join-Path $Bundle $name)))))
+        $body+='printf %s '+[Convert]::ToBase64String($bytes)+' | base64 -d > "$d/assets/'+$name+'"'+"`n"
     }
     return $body
 }

@@ -38,7 +38,8 @@ def refs(value):
 def portable(engine):
     config = {k: v for k, v in engine.config.items() if k not in ('secrets', 'server')}
     config['server'] = {k: v for k, v in engine.config.get('server', {}).items() if k in ('login', 'address', 'port')}
-    values = {k: engine.secret({'secret': k}, k) for k in refs(config)}
+    optional = set(refs(config.get('agents', {})))
+    values = {k: engine.secrets.get(k, '') if k in optional else engine.secret({'secret': k}, k) for k in refs(config)}
     return dict(schema=1, config=config, secrets=values)
 
 
@@ -59,6 +60,28 @@ def envelope(engine):
         if len(files) == 2:
             result['lan'][name] = files
     return result
+
+
+def pin_network(engine):
+    """Called under network.lock before clearing pending on an inbound commit.
+
+    Keep the already-confirmed network if later user-component installation fails
+    or the caller exits before the final envelope save. Do not accept unconfirmed
+    user-component edits in this narrow commit.
+    """
+    path = engine.s.path(ENVELOPE)
+    if not path.exists():
+        return
+    if path.is_symlink() or path.stat().st_mode & 0o777 != 0o600:
+        raise ValueError('unsafe recovery envelope')
+    data = engine.s.read(ENVELOPE)
+    data['singbox'] = engine.s.path('/etc/sing-box/config.json').read_text()
+    for key in ('serverNetwork', 'proxyOut'):
+        if key in engine.config:
+            data['config'][key] = engine.config[key]
+            for name in refs(engine.config[key]):
+                data['secrets'][name] = engine.secret({'secret': name}, name)
+    engine.s.write(ENVELOPE, json.dumps(data, sort_keys=True, ensure_ascii=False) + '\n')
 
 
 def engine_module_name(engine, item):
@@ -157,11 +180,13 @@ def reconcile(app, system=None):
     app.require(data.get('schema') == 1, 'Неизвестный формат восстановления.')
     app.validate(data['config'])
     engine = app.Engine(data['config'], data['secrets'], s)
+    # Dependencies must exist before jq/nft/sing-box/OpenVPN can inspect or heal.
     # Every manager's rollback and external confirmation keep precedence. The
     # watchdog must never replace an in-flight change or acknowledge its own SSH.
     with s.network_lock():
         if any(s.path(p).exists() for p in PENDING):
             return False
+        app.packages.ensure(engine, True)
         if engine.config.get('proxyOut'):
             engine.network_guard()
         if data.get('singbox'):

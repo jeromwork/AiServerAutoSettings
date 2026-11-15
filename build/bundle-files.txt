@@ -85,4 +85,12 @@ build/ServerApply.ps1
 
 server/server_recovery.py
 
+# Declarative user components and their trusted installers.
+server/server_components.py
+server/component_files.py
+server-codex-v1.sh
+server-claude-code.sh
+server-desktop-bootstrap.sh
+close-idle-chats.py
 server/server_packages.py
+server-agent-handoff.py

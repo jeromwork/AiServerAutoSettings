@@ -202,6 +202,10 @@ def ensure_certificate(base, host):
     if exists:
         if not cert.is_file() or not key.is_file():
             raise ValueError('Нужны оба файла tls/cert.pem и tls/key.pem; существующие файлы не изменены.')
+        if os.environ.get('TG_GW_PRESERVE_IDENTITY') == '1':
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(cert, key)
+            return
         if certificate_matches(cert, key, host):
             key.chmod(0o600)
             return
@@ -238,9 +242,23 @@ def health(base, port):
         return response.status == 200 and response.read(16) == b'ok'
 
 
+def unit_contents(base, port):
+    state = base / 'state'
+    contents = '[Unit]\nDescription=Telegram Bot API HTTPS gateway\n\n[Service]\nType=simple\n'
+    contents += 'ExecStart=/usr/bin/python3 -I -u ' + unit_quote(base / 'gateway.py') + '\n'
+    for name, value in {'TG_GW_PORT': port, 'TG_GW_CERT': base / 'tls/cert.pem',
+                        'TG_GW_KEY': base / 'tls/key.pem', 'TG_GW_KEYS': state / 'keys.json'}.items():
+        contents += 'Environment=' + unit_quote(f'{name}={value}') + '\n'
+    contents += ('UnsetEnvironment=HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy\n'
+                 'Restart=always\nRestartSec=2\nNoNewPrivileges=yes\nUMask=0077\n\n[Install]\nWantedBy=default.target\n')
+    return contents
+
+
 def ready(base):
     saved = settings(base)
-    return bool(saved and service_value('ActiveState') == 'active' and
+    unit = Path.home() / '.config/systemd/user' / UNIT
+    files_ok = all((base / n).is_file() and (base / n).read_bytes() == (SOURCE / n).read_bytes() for n in FILES)
+    return bool(saved and files_ok and unit.is_file() and unit.read_text() == unit_contents(base, valid_port(saved['port'])) and service_value('ActiveState') == 'active' and
                 service_value('UnitFileState') == 'enabled' and health(base, valid_port(saved['port'])))
 
 
@@ -269,13 +287,7 @@ def install(base):
         binary.symlink_to(base / 'tg_gateway_keys.py')
         unit = Path.home() / '.config/systemd/user' / UNIT
         unit.parent.mkdir(parents=True, exist_ok=True)
-        contents = '[Unit]\nDescription=Telegram Bot API HTTPS gateway\n\n[Service]\nType=simple\n'
-        contents += 'ExecStart=/usr/bin/python3 -I -u ' + unit_quote(base / 'gateway.py') + '\n'
-        for name, value in {'TG_GW_PORT': port, 'TG_GW_CERT': base / 'tls/cert.pem',
-                            'TG_GW_KEY': base / 'tls/key.pem', 'TG_GW_KEYS': state / 'keys.json'}.items():
-            contents += 'Environment=' + unit_quote(f'{name}={value}') + '\n'
-        contents += ('UnsetEnvironment=HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy\n'
-                     'Restart=always\nRestartSec=2\nNoNewPrivileges=yes\nUMask=0077\n\n[Install]\nWantedBy=default.target\n')
+        contents = unit_contents(base, port)
         atomic_write(unit, contents.encode())
         try:
             run('loginctl', 'enable-linger', '--no-ask-password', str(os.getuid()))

@@ -50,7 +50,7 @@ class Fake:
     def __init__(self, root):
         self.root = Path(root)
         self.calls = []
-        self.active = {'sing-box'}
+        self.active = {'sing-box', 'ssh.service'}
         self.rules = True
         self.v6 = False
         self.reply_rules = {'-4': [], '-6': []}
@@ -160,6 +160,10 @@ class Fake:
             self.defaults_at_install = self.path('/etc/default/tailscaled').read_text()
             self.ts_installed = True
         elif args[0] == 'runuser':
+            if any(str(a).endswith('component_files.py') for a in args):
+                import subprocess as sp
+                env = dict(os.environ, HOME=str(self.path('/home/worker')))
+                return sp.run(['python3', '-I', str(SOURCE / 'component_files.py')], input=kw['input'], text=True, capture_output=True, env=env)
             if any(str(a).endswith('install.sh') for a in args):
                 if '--check' in args:
                     code = 0 if self.tg else 1
@@ -167,6 +171,9 @@ class Fake:
                     self.tg = True
                     self.write('/home/worker/.local/opt/tg-gateway/state/settings.json', json.dumps({'port': 8444}))
                     self.write('/home/worker/.local/opt/tg-gateway/install.sh', '#!/bin/bash\n')
+                    self.write('/home/worker/.local/opt/tg-gateway/tls/cert.pem', 'FIXTURE CERT')
+                    self.write('/home/worker/.local/opt/tg-gateway/tls/key.pem', 'FIXTURE KEY')
+                    self.write('/home/worker/.local/opt/tg-gateway/state/keys.json', '{"version":1,"keys":{}}')
                     out = AUTH_PASS
         elif args[0] == 'bash' and str(args[1]).endswith('lan-vpn.sh'):
             command, name = args[2:4]

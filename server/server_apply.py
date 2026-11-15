@@ -47,6 +47,9 @@ def module(name):
 lan = module('lan_vpn')
 config_crypto = module('remoteagents_config')
 base = module('base_network')
+packages = module('server_packages')
+components = module('server_components')
+component_files = module('component_files')
 
 
 def strict_json(text, limit=4 * 1024 * 1024):
@@ -346,11 +349,13 @@ class Engine:
         self.config = json.loads(json.dumps(config))
         if 'proxyOut' in self.config:
             self.config['proxyOut'].setdefault('ipv6', 'block')
-        self.secrets = secrets or {}
+        self.secrets = dict(secrets or {})
         self.s = system or System()
         self.ssh_checked, self.public_only = ssh_checked, public_only
         self.rows = []
         self.receipts = self.s.read('/var/lib/remoteagents/server-apply/receipts.json', {})
+        self.module_files = component_files
+        components.hydrate(self)
 
     def row(self, part, state, message, **fields):
         result = dict(part=part, state=state, summary=message, **fields)
@@ -555,12 +560,6 @@ class Engine:
             return self.row('internet', 'pending', 'Базовая сеть включена; ждёт нового SSH и проверки входящих; автооткат 5 минут')
         if not sb.get('tun'):
             return self.row('internet', 'blocked', 'sing-box не установлен или нет системного перехвата трафика — нужен базовый сетевой конфиг с правилами сохранения SSH; см. SERVER-APPLY.md')
-        if base.inbound_change(self):
-            if not apply:
-                return self.row('internet', 'change', 'Входы изменятся транзакционно; нужен новый SSH, автооткат 5 минут')
-            with self.s.network_lock():
-                base.apply(self, update=True)
-            return self.row('internet', 'pending', 'Входы изменены; ждёт нового SSH; автооткат 5 минут')
         # Install reply protection before a restart can recreate split TUN routes.
         if apply:
             self.guard_apply()
@@ -600,12 +599,18 @@ class Engine:
                 return self.row('internet', 'pending', 'ждёт нового SSH и повторного apply --confirm-ssh-checked; откат через 5 минут')
         if not ok:
             return self.row('internet', 'blocked', reason + '; остальные части не устанавливаются')
+        if base.inbound_change(self):
+            if not apply:
+                return self.row('internet', 'change', 'Входы изменятся транзакционно; нужен новый SSH, автооткат 5 минут')
+            with self.s.network_lock():
+                base.apply(self, update=True)
+            return self.row('internet', 'pending', 'Входы изменены; ждёт нового SSH; автооткат 5 минут')
         return self.row('internet', 'ready', 'уже так; ' + reason)
 
     def code_files(self):
         target = '/usr/local/lib/remoteagents/server/'
         files = {}
-        for name in ('server_apply.py', 'server-apply.sh', 'lan_vpn.py', 'lan-vpn.sh', 'proxy_out.py', 'proxy-out.sh', 'remoteagents_config.py', 'base_network.py', 'server_recovery.py', 'server_packages.py', 'lan-config.schema.json'):
+        for name in ('server_apply.py', 'server-apply.sh', 'lan_vpn.py', 'lan-vpn.sh', 'proxy_out.py', 'proxy-out.sh', 'remoteagents_config.py', 'base_network.py', 'server_recovery.py', 'server_components.py', 'server_packages.py', 'component_files.py', 'lan-config.schema.json'):
             files[target + name] = ((self.s.source / name).read_bytes(), 0o755 if name.endswith('.sh') else 0o644)
         schema = self.s.source / 'config.paste.schema.json'
         if not schema.exists():
@@ -613,6 +618,8 @@ class Engine:
         files[target + 'config.paste.schema.json'] = (schema.read_bytes(), 0o644)
         for name in ('gateway.py', 'tg_gateway_keys.py', 'tg_gateway_setup.py', 'install.sh', 'README.md'):
             files[target + 'tg-gateway/' + name] = ((self.s.source / 'tg-gateway' / name).read_bytes(), 0o755 if name.endswith('.sh') else 0o644)
+        for name, path in components.assets(self.s.source):
+            files[target + 'assets/' + name] = (path.read_bytes(), 0o644)
         return files
 
     def code_current(self):
@@ -627,7 +634,7 @@ class Engine:
     def install_code(self):
         target = '/usr/local/lib/remoteagents/server'
         changed = False
-        for absolute in ('/usr/local/lib/remoteagents', target, target + '/tg-gateway'):
+        for absolute in ('/usr/local/lib/remoteagents', target, target + '/tg-gateway', target + '/assets', target + '/assets/disk'):
             parent = self.s.path(absolute)
             require(not parent.is_symlink(), 'Каталог установленного кода не должен быть ссылкой.')
             parent.mkdir(parents=True, exist_ok=True, mode=0o755)
@@ -639,7 +646,7 @@ class Engine:
         for path, (data, mode) in self.code_files().items():
             changed = self.s.write(path, data, mode) or changed
         # Parents are part of the privilege boundary, including on old installs.
-        for parent in (self.s.path('/usr/local/lib/remoteagents'), self.s.path(target), self.s.path(target + '/tg-gateway')):
+        for parent in (self.s.path('/usr/local/lib/remoteagents'), self.s.path(target), self.s.path(target + '/tg-gateway'), self.s.path(target + '/assets'), self.s.path(target + '/assets/disk')):
             if parent.is_symlink():
                 raise Error('Каталог установленного кода не должен быть ссылкой.')
             if parent.stat().st_mode & 0o777 != 0o755 or (self.s.root == Path('/') and (parent.stat().st_uid != 0 or parent.stat().st_gid != 0)):
@@ -903,16 +910,22 @@ class Engine:
         if 'enabled' not in item:
             return self.row('telegramGateway', 'ready', 'включение не задано; без изменений')
         user, uid, home = self.worker()
-        settings = self.s.read(str(home / '.local/opt/tg-gateway/state/settings.json'), {})
+        restored = components.telegram_restore(self, apply)
+        try:
+            settings = self.s.read(str(home / '.local/opt/tg-gateway/state/settings.json'), {})
+        except ValueError:
+            settings = {}
         installed = self.s.path(str(home / '.local/opt/tg-gateway/install.sh'))
-        ready = settings and installed.exists() and self.s.run(self.user_cmd('bash', str(home / '.local/opt/tg-gateway/install.sh'), '--check'), check=False).returncode == 0
+        ready = settings and installed.exists() and self.s.run(self.user_cmd('bash', str(self.s.path('/usr/local/lib/remoteagents/server/tg-gateway/install.sh')), '--check'), check=False).returncode == 0
         if not item['enabled']:
             live = self.s.run(self.user_cmd('systemctl', '--user', 'is-active', '--quiet', 'tg-gateway.service'), check=False).returncode == 0
             enabled = self.s.run(self.user_cmd('systemctl', '--user', 'is-enabled', '--quiet', 'tg-gateway.service'), check=False).returncode == 0
             if apply and (live or enabled):
                 self.s.run(self.user_cmd('systemctl', '--user', 'disable', '--now', 'tg-gateway.service'), change=True)
             return self.row('telegramGateway', 'change' if (live or enabled) and not apply else 'ready', 'будет выключен' if (live or enabled) and not apply else 'выключен')
-        if ready and settings.get('port') == item.get('port', settings.get('port')):
+        if ready and not restored and settings.get('port') == item.get('port', settings.get('port')):
+            if apply:
+                components.telegram_capture(self)
             return self.row('telegramGateway', 'ready', 'уже так; служба и защищённая проверка /health работают')
         if not apply:
             return self.row('telegramGateway', 'change', 'будет установлен шлюз Telegram от имени рабочего пользователя; секреты создаются установщиком')
@@ -922,12 +935,15 @@ class Engine:
         # readable installed copy, not the caller's temporary checkout.
         self.install_code()
         env = ['TG_GW_PORT=' + str(item['port'])] if item.get('port') else []
+        if item.get('identity'):
+            env.append('TG_GW_PRESERVE_IDENTITY=1')
         if self.config.get('server', {}).get('address'):
             env.append('TG_GW_PUBLIC_HOST=' + self.config['server']['address'])
         cmd = self.user_cmd('env', *env, 'bash', self.s.path('/usr/local/lib/remoteagents/server/tg-gateway/install.sh'))
         self.s.run(cmd, change=True, timeout=90)
         require(self.s.run(self.user_cmd('bash', self.s.path('/usr/local/lib/remoteagents/server/tg-gateway/install.sh'), '--check'), check=False).returncode == 0,
                 'Шлюз Telegram не прошёл проверку /health.')
+        components.telegram_capture(self)
         self.row('telegramGateway', 'ready', 'шлюз Telegram установлен и проверен')
 
     def sudo(self, apply):
@@ -963,22 +979,26 @@ class Engine:
     def sshd(self, apply):
         path = '/etc/ssh/sshd_config.d/10-remoteagents-startups.conf'
         wanted = 'LoginGraceTime 30\nMaxStartups 30:30:150\n'
+        keepalive = self.config.get('ssh', {})
+        if keepalive:
+            wanted += 'ClientAliveInterval ' + str(keepalive.get('keepaliveIntervalSec', 30)) + '\nClientAliveCountMax ' + str(keepalive.get('keepaliveCountMax', 3)) + '\n'
         file = self.s.path(path)
         old = file.read_bytes() if file.exists() else None
         mode = file.stat().st_mode & 0o777 if file.exists() else 0o644
         def effective():
             r = self.s.run(['/usr/sbin/sshd', '-T'], check=False)
             fields = dict(line.split(None, 1) for line in r.stdout.splitlines() if ' ' in line)
-            return r.returncode == 0 and fields.get('logingracetime') == '30' and fields.get('maxstartups') == '30:30:150'
-        same = old == wanted.encode() and effective()
+            return r.returncode == 0 and fields.get('logingracetime') == '30' and fields.get('maxstartups') == '30:30:150' and (not keepalive or fields.get('clientaliveinterval') == str(keepalive.get('keepaliveIntervalSec', 30)) and fields.get('clientalivecountmax') == str(keepalive.get('keepaliveCountMax', 3)))
+        ssh_live = self.s.active('ssh.service') or self.s.active('sshd.service')
+        same = old == wanted.encode() and effective() and ssh_live
         if same or not apply:
             return self.row('sshd', 'ready' if same else 'change', 'уже так; SSH: LoginGraceTime 30, MaxStartups 30:30:150' if same else 'будут настроены лимиты подключений SSH с проверкой и reload')
         try:
             self.s.write(path, wanted, 0o644)
             self.s.run(['/usr/sbin/sshd', '-t'])
             require(effective(), 'sshd не читает drop-in до Match или параметры перекрыты; прежний файл восстановлен.')
-            unit = 'ssh.service' if self.s.active('ssh.service') else 'sshd.service'
-            self.s.run(['systemctl', 'reload', unit], change=True)
+            unit = 'sshd.service' if self.s.active('sshd.service') else 'ssh.service'
+            self.s.run(['systemctl', 'reload' if ssh_live else 'enable', *([] if ssh_live else ['--now']), unit], change=True)
         except Exception:
             if old is None:
                 file.unlink(missing_ok=True)
@@ -994,14 +1014,22 @@ class Engine:
         except Missing as exc:
             return self.row(name, 'waiting', 'ждёт секрет «' + exc.name + '»', missing=[exc.name])
         except Exception as exc:
-            return self.row(name, 'error', str(exc) if isinstance(exc, (Error, base.Error, lan.Error)) else 'Проверка/команда не выполнена; детали скрыты.')
+            return self.row(name, 'error', str(exc) if isinstance(exc, (Error, base.Error, lan.Error, components.Error)) else 'Проверка/команда не выполнена; детали скрыты.')
 
     def run(self, command):
         apply = command == 'apply'
         if self.config.get('deployment', {}).get('method', 'host') != 'host':
             self.row('deployment', 'blocked', 'Развёртывание docker ещё не поддерживается')
             return dict(schema=1, command=command, parts=self.rows, actions=[], ok=False)
+        if self.receipts.get('base-network', {}).get('managed') or self.s.path('/etc/remoteagents/server-apply/recovery.json').exists():
+            self.part('packages', lambda: packages.ensure(self, apply))
         ready = self.part('internet', lambda: self.egress(apply))
+        if ready:
+            # After TUN is verified, user installers use system routing. Python
+            # urllib does not support a socks5h proxy environment.
+            self.s.download_proxy = None
+        if self.config.get('serverNetwork', {}).get('enabled'):
+            self.row('bootstrapDownloads', 'ready', 'apt/curl идут через proxyOut до TUN; pip по SOCKS требует PySocks (начальных pip-загрузок нет)' if self.config.get('proxyOut', {}).get('type') == 'socks' else 'начальные загрузки будут использовать HTTP proxyOut до TUN')
         parts = [('inbound', lambda: self.inbound(apply)), ('ipv6', lambda: self.ipv6(apply)),
                  ('egressWatch', lambda: self.watch(apply))]
         if not self.config.get('proxyOut'):
@@ -1011,21 +1039,28 @@ class Engine:
             parts.append(('tailscale', lambda: self.tailscale(self.config['tailscale'], apply)))
         if 'telegramGateway' in self.config:
             parts.append(('telegramGateway', lambda: self.telegram(self.config['telegramGateway'], apply)))
+        for kind in ('codex', 'claude'):
+            if kind in self.config.get('agents', {}):
+                parts.append(('agents:' + kind, lambda kind=kind: components.agents(self, kind, apply)))
+        for kind in ('disk', 'bridge', 'happier'):
+            if kind in self.config.get('serverComponents', {}):
+                parts.append((kind, lambda kind=kind: getattr(components, kind)(self, apply)))
+        parts.append(('extras', lambda: components.extras(self, apply)))
         parts.append(('agent', lambda: self.sudo(apply)))
         parts.append(('sshd', lambda: self.sshd(apply)))
         for name, fn in parts:
             if apply and ready and self.config.get('proxyOut'):
                 ready, reason = self.egress_check()
                 if not ready:
-                    self.rows[0].update(state='blocked', summary=reason)
+                    next(r for r in self.rows if r['part'] == 'internet').update(state='blocked', summary=reason)
             if apply and not ready:
                 self.row(name, 'blocked', 'не устанавливается: выход в интернет не подтверждён')
             else:
                 result = self.part(name, fn)
                 if apply and name == 'inbound' and not result:
                     ready = False
-        if apply and all(r['state'] == 'ready' for r in self.rows):
-            public = {k: v for k, v in self.config.items() if k in ('deployment', 'serverNetwork', 'proxyOut', 'lan', 'tailscale', 'telegramGateway', 'agent')}
+        if apply and all(r['state'] in ('ready', 'waiting') for r in self.rows):
+            public = {k: v for k, v in self.config.items() if k in ('deployment', 'serverNetwork', 'proxyOut', 'lan', 'tailscale', 'telegramGateway', 'agent', *components.KEYS)}
             if self.part('recovery', lambda: self.recovery(True)):
                 self.s.write('/var/lib/remoteagents-status/server-config.json', json.dumps(public, ensure_ascii=False, sort_keys=True) + '\n', 0o644)
                 os.chmod(self.s.path('/var/lib/remoteagents-status'), 0o755)
