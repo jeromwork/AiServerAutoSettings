@@ -92,6 +92,7 @@ def _require(ok, message):
 
 def install_packages(engine):
     s = engine.s
+    engine_module('server_packages').prepare(engine)
     s.run(['apt-get', 'update'], change=True, timeout=300)
     s.run(['apt-get', 'install', '-y', '--no-install-recommends', 'ca-certificates', 'curl', 'jq',
            'iproute2', 'nftables', 'openssl', 'sudo'], change=True, timeout=300)

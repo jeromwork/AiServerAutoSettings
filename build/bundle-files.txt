@@ -84,3 +84,5 @@ app/launcher/config.paste.schema.json => server/config.paste.schema.json
 build/ServerApply.ps1
 
 server/server_recovery.py
+
+server/server_packages.py

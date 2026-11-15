@@ -189,6 +189,7 @@ class System:
     def __init__(self, root='/', runner=None, source=SOURCE):
         self.root, self.runner, self.source = Path(root), runner or subprocess.run, Path(source)
         self.actions = []
+        self.download_proxy = None
 
     def path(self, absolute):
         return self.root / str(absolute).lstrip('/')
@@ -203,6 +204,11 @@ class System:
             self.actions.append(args[0] + ' ' + (args[1] if len(args) > 1 else ''))
         try:
             environment = {k: v for k, v in os.environ.items() if k.lower() not in ('http_proxy', 'https_proxy', 'all_proxy', 'no_proxy')}
+            if self.download_proxy and (args[0] in ('apt-get', 'pip', 'pip3', 'python3', 'bash', 'runuser') or args[0] == 'curl' and any(x in args for x in ('-o', '--output'))):
+                environment.update(http_proxy=self.download_proxy, https_proxy=self.download_proxy, all_proxy=self.download_proxy)
+                if args[0] == 'curl' and '--noproxy' in args:
+                    i = args.index('--noproxy')
+                    del args[i:i + 2]
             if args[0] == 'apt-get':
                 environment['DEBIAN_FRONTEND'] = 'noninteractive'
                 environment['NEEDRESTART_MODE'] = 'l'
@@ -599,7 +605,7 @@ class Engine:
     def code_files(self):
         target = '/usr/local/lib/remoteagents/server/'
         files = {}
-        for name in ('server_apply.py', 'server-apply.sh', 'lan_vpn.py', 'lan-vpn.sh', 'proxy_out.py', 'proxy-out.sh', 'remoteagents_config.py', 'base_network.py', 'server_recovery.py', 'lan-config.schema.json'):
+        for name in ('server_apply.py', 'server-apply.sh', 'lan_vpn.py', 'lan-vpn.sh', 'proxy_out.py', 'proxy-out.sh', 'remoteagents_config.py', 'base_network.py', 'server_recovery.py', 'server_packages.py', 'lan-config.schema.json'):
             files[target + name] = ((self.s.source / name).read_bytes(), 0o755 if name.endswith('.sh') else 0o644)
         schema = self.s.source / 'config.paste.schema.json'
         if not schema.exists():
