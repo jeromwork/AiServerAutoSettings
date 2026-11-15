@@ -40,6 +40,12 @@ class RecoveryTests(unittest.TestCase):
         self.assertIn('singbox', data)
         self.assertEqual(self.f.engine(self.c, values).run('apply')['actions'], [])
         self.assertEqual(self.f.engine(self.c, values).run('status')['actions'], [])
+        log = self.f.path('/var/log/remoteagents/server-apply.log')
+        log.write_text('x' * (1024 * 1024 + 1)); log.chmod(0o644)
+        self.f.system.audit([])
+        self.assertLess(log.stat().st_size, 1024)
+        self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(log.with_name(log.name + '.1').stat().st_mode & 0o777, 0o600)
 
     def test_rotated_secret_updates_backup_even_when_service_needs_no_change(self):
         self.c['tailscale'] = dict(enabled=False, authKey={'secret': 'tailscale-auth-key'})

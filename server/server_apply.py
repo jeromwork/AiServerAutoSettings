@@ -262,6 +262,14 @@ class System:
             if parent == self.root:
                 break
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # The periodic reconciler calls this every 30 s. Keep one bounded
+        # archive instead of growing the operational journal indefinitely.
+        if path.exists() and path.stat().st_size > 1024 * 1024:
+            archive = path.with_name(path.name + '.1')
+            os.replace(path, archive)
+            os.chmod(archive, 0o600)
+            if os.geteuid() == 0:
+                os.chown(archive, 0, 0)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, 'a') as out:
             os.fchmod(out.fileno(), 0o600)
