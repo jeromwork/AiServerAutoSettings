@@ -25,7 +25,7 @@ namespace RemoteAgents.Launcher
         readonly ProgressBar progress = new ProgressBar { Dock = DockStyle.Bottom, Height = 4 };
         readonly string[] titles = { "Сервер", "Связь", "Диск", "Happier", "Мост", "VPN", "Локальные сети", "Итог", "Выход в интернет" };
         readonly string[] results = Enumerable.Repeat("Ещё не проверено", 9).ToArray();
-        readonly int[] order = {0,1,8,4,2,3,6,5,7};
+        readonly int[] order = WindowModel.SetupSections;
         bool activationRequested, lastSuccess, reconnectDisk, serverChanged, repairingServer; int currentPage;
         readonly bool[] applied = new bool[9], dirty = new bool[9];
         ComboBox routeProxyType; TextBox routeProxy, routeHop, routeHopPort, routeHopUser, routeHopPassword, routeHopKey; Label routeHint;
@@ -107,7 +107,7 @@ namespace RemoteAgents.Launcher
                 details[i]=new Panel {Width=575,Height=420,AutoScroll=true};
             }
             results[1]=WizardStep.ConnectionResult(config,new Dictionary<string,object>(),false,results[1]);
-            ServerPage(config);ConnectionPage();DiskPage();AccountPage(config);BridgePage(config);VpnPage(config);LanPage();SummaryPage();ProxyPage(config);
+            ServerPage(config);ConnectionPage();DiskPage();AccountPage(config);BridgePage(config);if(Product.VpnEnabled)VpnPage(config);else {applied[5]=true;results[5]="Отключено в этой версии";}LanPage();SummaryPage();ProxyPage(config);
             pages.Controls.Add(installPanel);
             steps.Initialize(titles,order);steps.Available=i=>WizardStep.CanOpen(i,currentPage,first,WizardStep.Passable(applied,waiting.Keys),order);
             steps.ExtraRequested+=ShowInstall;operationTimer.Tick+=async(a,b)=>await PollOperations();
@@ -164,7 +164,7 @@ namespace RemoteAgents.Launcher
         }
         void SelectPage(int index)
         {
-            if(index<0 || index>=sections.Length)return;
+            if(index<0 || index>=sections.Length || !order.Contains(index))return;
             showingInstall=false;if(!busy)next.Enabled=true;
             currentPage=index;steps.Section=index;sections[index].BringToFront();back.Enabled=!busy && Array.IndexOf(order,index)>0;
             next.Text=first?(index==7?"Готово":"Далее"):(index==7?"Проверить":"Применить");RefreshSummary();
@@ -373,6 +373,7 @@ namespace RemoteAgents.Launcher
                 if (IsDisposed || closingRequested || busy) return;
                 var observations=Json.Array(Json.Get(result,"steps")).Select(Json.Map).ToArray();
                 for(int i=0;i<Math.Min(6,observations.Length);i++)if(!dirty[i]){applied[i]=Json.Bool(observations[i],"ready");if(i!=1)results[i]=applied[i]?"Проверено сейчас ✓":"Требуется настройка или проверка";}
+                if(!Product.VpnEnabled){applied[5]=true;results[5]="Отключено в этой версии";}
                 var server=Json.Map(Json.Get(result,"server"));
                 results[0]=applied[0]?"Подключено ✓":Json.Text(server,"reason","Укажите сервер и проверьте вход");
                 var current=StatusView.Read(home,"transport",maxAgeSec:15);
@@ -386,6 +387,7 @@ namespace RemoteAgents.Launcher
         }
         async Task<bool> Guard(Func<Task> action, int section = -1)
         {
+            if(section == 5 && !Product.VpnEnabled)return true;
             lastSuccess = false;
             if (IsDisposed || closingRequested || busy) return false;
             if (MutationConflict != null) { string conflict = MutationConflict(); if (conflict.Length > 0) { Append(conflict); return false; } }

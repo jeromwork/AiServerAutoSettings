@@ -1,5 +1,8 @@
 ﻿#requires -Version 5.1
 $ErrorActionPreference='Stop'
+function Test-ProductVpnEnabled {
+    [bool](Read-TransportJson (Join-Path $PSScriptRoot 'product-features.json')).vpnEnabled
+}
 # Построение цепочек взято из Test-Transports.ps1; разбор профиля/ssh -G — из Disk.Common.ps1.
 function Get-TransportHome([string]$Path){
     $full=[IO.Path]::GetFullPath($Path);$base=[IO.Path]::GetPathRoot($full)
@@ -898,6 +901,7 @@ function Get-VpnOptions($Settings) {
     $v=Get-TransportValue $Settings 'Vpn' $null
     $defaults=@{enabled=$false;excludeCidrs=@();interfaceName='RemoteAgents-TUN';address=@('172.31.255.1/30','fdfe:7261::1/126');probeAddress='198.18.0.1';checkUrl='https://example.com/';dnsServer='1.1.1.1'}
     $result=@{};foreach($key in $defaults.Keys){$result[$key]=Get-TransportValue $v $key $defaults[$key]}
+    if(-not (Test-ProductVpnEnabled)){$result.enabled=$false}
     if($result.enabled -isnot [bool]){throw 'vpn.enabled должен быть boolean'}
     if($result.interfaceName -notmatch '^RemoteAgents-[a-zA-Z0-9_-]{1,32}$'){throw 'Неверное имя нашего TUN'}
     $uri=$null;if(-not [Uri]::TryCreate($result.checkUrl,[UriKind]::Absolute,[ref]$uri) -or $uri.Scheme -ne 'https'){throw 'vpn.checkUrl должен быть HTTPS'}
@@ -1018,6 +1022,7 @@ function Write-VpnStatus([string]$Root,[bool]$Ok,[bool]$Enabled,[string]$State,$
     [IO.File]::AppendAllText($file,([DateTime]::UtcNow.ToString('o')+' '+$State+"`n"),(New-Object Text.UTF8Encoding($false)))
 }
 function Set-VpnEnabled([string]$Root,[bool]$Enabled) {
+    $Enabled=$Enabled -and (Test-ProductVpnEnabled)
     $mutex=New-Object Threading.Mutex($false,('Global\RemoteAgentsConfig-'+(Get-TransportFingerprint 'config' (Get-TransportHome $Root).ToLowerInvariant())));$locked=$false
     try{
         try{$locked=$mutex.WaitOne(5000)}catch [Threading.AbandonedMutexException]{$locked=$true};if(-not $locked){throw 'Конфиг занят'}
@@ -1082,6 +1087,7 @@ function Clear-VpnRoutes([string]$Root,[string]$Session) {
 }
 
 function Register-VpnRollbackTask([string]$Root,[string]$Session,[string]$ScriptPath,[string]$UserId='') {
+    if(-not (Test-ProductVpnEnabled)){return}
     if(-not $UserId){$UserId=[Security.Principal.WindowsIdentity]::GetCurrent().Name}
     $tasks=Get-VpnTaskNames $Root;$exe=Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
     $args=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$ScriptPath,'-Home',$Root,'-Session',$Session,'-Rollback')

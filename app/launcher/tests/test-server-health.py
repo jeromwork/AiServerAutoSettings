@@ -74,7 +74,8 @@ sys.stdout.buffer.write(output)
 foreach($name in @('Invoke-WizardStep','Get-WizardServerHealth','Get-WizardRuntimeFiles')){{
     if(-not (Get-Command $name -ErrorAction SilentlyContinue)){{throw ('runtime did not load '+$name)}}
 }}
-Write-Output 'PASS: standalone runtime loads Wizard.Common.ps1'
+if(Test-ProductVpnEnabled){{throw 'standalone runtime must keep system VPN disabled'}}
+Write-Output 'PASS: standalone runtime loads Wizard.Common.ps1 and the disabled VPN capability'
 """)
     p=run([PWSH,'-NoProfile','-NonInteractive','-File',probe],env)
     assert p.returncode==0,(p.stdout,p.stderr)

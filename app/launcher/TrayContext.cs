@@ -81,7 +81,7 @@ namespace RemoteAgents.Launcher
             BackgroundWork.Disk.Changed += () => { try { dispatch.BeginInvoke(new Action(DiskFinished)); } catch (InvalidOperationException) { } };
             dispatch.BeginInvoke(new Action(() => {
                 if (firstSetup) { RunFirstSetup(); return; }
-                StartLegacyDiskCleanup(); Handle(args); DrainCommands(); Tick();
+                CheckLegacyVpn(); StartLegacyDiskCleanup(); Handle(args); DrainCommands(); Tick();
                 if(Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome),StringComparison.OrdinalIgnoreCase)) CheckSetup();
 
             }));
@@ -94,7 +94,7 @@ namespace RemoteAgents.Launcher
                 Func<Task<string>> prepare=async()=> {
                     worker=Task.Run(()=> {engine.Recover();Bootstrap();});await worker;
                     if(closing)throw new OperationCanceledException();
-                    ReloadSettings();LoadComponents();return engine.Folder(engine.Current);
+                    ReloadSettings();LoadComponents();CheckLegacyVpn();return engine.Folder(engine.Current);
                 };
                 // One preparation for both windows: «Пройти по шагам» reuses the bundle the config window prepared.
                 Task<string> prepared=null;
@@ -108,7 +108,7 @@ namespace RemoteAgents.Launcher
             if(FirstInstall.Required(home)){ExitThread();return;}
             ReloadSettings();icon.Visible=true;readyForCommands=true;ShowMain();
             if(Product.IsVpn)Safe(RegisterVpnRun);
-            StartLegacyDiskCleanup();DrainCommands();Tick();
+            CheckLegacyVpn();StartLegacyDiskCleanup();DrainCommands();Tick();
         }
         void Bootstrap()
         {
@@ -147,9 +147,9 @@ namespace RemoteAgents.Launcher
             foreach (var j in actionJobs) j.Dispose(); actionJobs.Clear();
             definition = BundleDefinition.Load(engine.Folder(engine.Current));
             if (mainWindow != null && !mainWindow.IsDisposed) mainWindow.RebindBundle(engine.Folder(engine.Current));
-            foreach (var c in definition.Components) runtimes.Add(new ComponentRuntime(c, Wanted(c), home, engine.Folder(engine.Current), log));
+            foreach (var c in definition.Components.Where(c => Product.VpnEnabled || c.Name != "vpn")) runtimes.Add(new ComponentRuntime(c, Wanted(c), home, engine.Folder(engine.Current), log));
             var vpn = definition.Components.FirstOrDefault(c => c.Name == "vpn" && c.CommandManaged);
-            if (vpn != null && !File.Exists(Path.Combine(home, "status", "vpn.json")) && File.Exists(TransportScript("Vpn.Tun.ps1"))) RunAction(new MenuAction { Exe = vpn.Exe, Args = vpn.Args });
+            if (Product.VpnEnabled && vpn != null && !File.Exists(Path.Combine(home, "status", "vpn.json")) && File.Exists(TransportScript("Vpn.Tun.ps1"))) RunAction(new MenuAction { Exe = vpn.Exe, Args = vpn.Args });
             RefreshMenu();
         }
         bool Wanted(Component c) { return config.Wanted(c); }
@@ -363,7 +363,7 @@ namespace RemoteAgents.Launcher
                     if(Json.Bool(StatusView.Read(home,"transport",maxAgeSec:15),"ok")){
                         var vpn=runtimes.FirstOrDefault(r=>r.Definition.Name=="vpn");
                         var wantedVpn=Json.Map(Json.Get(Json.Map(Json.Get(config.Data,"profile")),"vpn"));
-                        if(vpn!=null && Json.Bool(wantedVpn,"enabled") && !vpn.Healthy)CheckVpn(vpn);
+                        if(Product.VpnEnabled && vpn!=null && Json.Bool(wantedVpn,"enabled") && !vpn.Healthy)CheckVpn(vpn);
                         return;
                     }
                 }
@@ -557,6 +557,39 @@ namespace RemoteAgents.Launcher
                 if (External.Run("powershell.exe", argv, engine.Folder(engine.Current), output, 120000, 4 * 1024 * 1024, stop.Token) != 0) throw new IOException();
                 return Files.LF(External.ReadPowerShellOutput(output));
             } finally { if (File.Exists(output)) File.Delete(output); }
+        }
+        bool legacyVpnChecked;
+        async void CheckLegacyVpn()
+        {
+            if (legacyVpnChecked || closing || engine.Current.Length == 0) return;
+            legacyVpnChecked = true; bool cleaning = false;
+            try {
+                var result = Json.Map(Json.Parse(await Task.Run(() => CaptureScript("Vpn.Tun.ps1", new[] { "-InspectLegacy" }))));
+                if (closing || !Json.Bool(result, "found")) return;
+                using (var prompt = new Form { Text = "RemoteAgents", Width = 570, Height = 190, StartPosition = FormStartPosition.CenterScreen,
+                    FormBorderStyle = FormBorderStyle.FixedDialog, MinimizeBox = false, MaximizeBox = false }) {
+                    prompt.Controls.Add(new Label { Text = "Остался VPN от прошлой версии RemoteAgents, он может мешать сети. Убрать? (потребуется подтверждение администратора)", Dock = DockStyle.Fill, Padding = new Padding(16) });
+                    var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 44, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(6) };
+                    var later = new Button { Text = "Не сейчас", DialogResult = DialogResult.Cancel, AutoSize = true };
+                    var remove = new Button { Text = "Убрать", DialogResult = DialogResult.OK, AutoSize = true };
+                    buttons.Controls.Add(later); buttons.Controls.Add(remove); prompt.Controls.Add(buttons); prompt.CancelButton = later;
+                    if (prompt.ShowDialog(mainWindow) != DialogResult.OK || closing) return;
+                }
+                cleaning = true;
+                string exe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"WindowsPowerShell\v1.0\powershell.exe");
+                string arguments = Files.Arguments(new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", TransportScript("Vpn.Tun.ps1"), "-Home", home, "-Cleanup" });
+                await Task.Run(() => {
+                    using (var process = Process.Start(new ProcessStartInfo(exe, arguments) { UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden })) {
+                        process.WaitForExit(); if (process.ExitCode != 0) throw new IOException();
+                    }
+                });
+                ReloadSettings();
+            } catch (System.ComponentModel.Win32Exception e) when (e.NativeErrorCode == 1223) { log.Write("vpn.cleanup.cancelled"); }
+            catch (OperationCanceledException) { }
+            catch {
+                log.Write("vpn.cleanup.failed");
+                if (cleaning && !closing) MessageBox.Show("Не удалось убрать остатки VPN. Очистка не подтверждена. Журнал: logs\\launcher.log", "RemoteAgents");
+            }
         }
         async void CheckVpn(ComponentRuntime vpn, bool fromCard = false)
         {

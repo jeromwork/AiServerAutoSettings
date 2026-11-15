@@ -16,6 +16,7 @@ namespace RemoteAgents.Launcher
         public string Expand(string text) { return Environment.ExpandEnvironmentVariables(text.Replace("{bundle}", bundle).Replace("{home}", home).Replace("{pid}", Process.GetCurrentProcess().Id.ToString())); }
         public void Tick()
         {
+            if (!Product.VpnEnabled && Definition.Name == "vpn") { Enabled = Alive = Healthy = false; Summary = "Отключено в этой версии"; return; }
             DateTime now = DateTime.UtcNow;
             if (Definition.CommandManaged) {
                 var status = StatusView.Read(home, Definition.Name, maxAgeSec: 15);

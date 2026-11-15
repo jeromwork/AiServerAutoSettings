@@ -87,6 +87,7 @@ function Test-WizardNetworkProof($Root,$Mark){$false}
 $script:vpnChildren=0
 function Invoke-InstallChild($Bundle,$Script,$Arguments,$TimeoutSeconds){$script:vpnChildren++}
 $pending=Invoke-WizardStep $root $repo 'Vpn' ([pscustomobject]@{enabled=$false})
-Assert ($pending.pending -eq 'connection' -and -not $pending.ok -and $script:vpnChildren -eq 0) 'parallel Vpn must not tear down bootstrap before Connection proof'
-Assert ((Read-TransportJson (Join-Path $root 'config.json')).vpn.enabled) 'bootstrap VPN intent remains enabled while Connection starts'
+Assert ($pending.ok -and -not $pending.enabled -and $pending.summary -match 'отключено' -and $script:vpnChildren -eq 0) 'disabled Vpn never launches a child or waits for Connection'
+Assert ((Read-TransportJson (Join-Path $root 'config.json')).vpn.enabled) 'saved intent stays untouched until explicit cleanup'
+Assert ((Read-TransportJson (Join-Path $root 'config.json')).transport.bootstrap) 'disabled Vpn leaves the bootstrap transport channel untouched'
 Write-Output ('OK: '+$count+' resource lock/timing/CRLF checks; six-way overlap '+$overlapMs+' ms; Proxy/Lan serialize (real PowerShell children, work simulated)')

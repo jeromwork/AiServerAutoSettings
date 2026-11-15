@@ -21,6 +21,7 @@
     <OutputPath>bin/$(Configuration)/config-e2e/</OutputPath>
   </PropertyGroup>
   <ItemGroup>
+    <EmbeddedResource Include="../../../transport/product-features.json" LogicalName="RemoteAgents.ProductFeatures.json" />
     <Compile Include="PortableJson.cs" />
     <Compile Include="WindowModelTests.cs" />
     <Compile Include="MainScreenModelTests.cs" />
