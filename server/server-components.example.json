@@ -1,0 +1,59 @@
+{
+  "kind": "remoteagents-config",
+  "schema": 1,
+  "server": {
+    "address": "server.example.invalid",
+    "login": "root",
+    "rootPassword": {
+      "secret": "server-root-password"
+    }
+  },
+  "serverComponents": {
+    "disk": {
+      "enabled": true,
+      "discoveryIntervalSec": 2
+    },
+    "bridge": {
+      "enabled": true
+    },
+    "happier": {
+      "enabled": true,
+      "channel": "stable",
+      "version": "0.2.17"
+    }
+  },
+  "agents": {
+    "codex": {
+      "enabled": true,
+      "version": "0.166.0"
+    },
+    "claude": {
+      "enabled": true,
+      "channel": "stable"
+    }
+  },
+  "telegramGateway": {
+    "enabled": true,
+    "port": 8444
+  },
+  "desktop": {
+    "enabled": false,
+    "backend": "desktop"
+  },
+  "projectViews": {
+    "enabled": false
+  },
+  "sessions": {
+    "cleanupEnabled": true,
+    "idleHours": 2,
+    "intervalMinutes": 15
+  },
+  "ssh": {
+    "keepaliveIntervalSec": 30,
+    "keepaliveCountMax": 3
+  },
+  "bridge": {
+    "enabled": true,
+    "allowShell": false
+  }
+}
