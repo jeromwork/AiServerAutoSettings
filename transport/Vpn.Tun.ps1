@@ -118,6 +118,7 @@ try{
     # DNS lookup or uncontrollable DNS timeout runs on the host watchdog thread.
     Write-TransportJson (Join-Path $root 'state/vpn-plan.json') @{session=$Session;tag=$status.active;network=$status.network;revision=$status.configRevision;physical=$net.interface;interfaceName=$v.interfaceName;exe=[IO.Path]::GetFullPath($settings.Options.singBoxPath);checkUrl=$v.checkUrl;checkAddress=$v.probeAddress} -Private
 }catch{
+    if($action -eq 'Enable'){try{Write-TransportJson $stopFile @{stop=$true}}catch{}}
     # Never publish raw exceptions: they may contain secrets from configs or URIs.
     Write-VpnStatus $root $false $false 'error' $conflict 'VPN не включён: проверьте настройки и разрешение Windows'
     exit 1

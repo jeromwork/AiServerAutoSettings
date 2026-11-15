@@ -37,6 +37,8 @@ class Lifecycle(unittest.TestCase):
         self.assertLess(shutdown.index('state/vpn.stop'), shutdown.index('stop.Cancel()'))
         self.assertIn('else if (id == "vpn") ToggleVpn();', tray)
         self.assertIn('if (enabled) CheckVpn(vpn, true); else DisableVpn(vpn, true);', tray)
+        self.assertIn('catch { if (enabling) SignalVpnStop();', tray)
+        self.assertIn('catch (OperationCanceledException) { if (enabling) SignalVpnStop(); }', tray)
         self.assertIn('CheckLegacyVpn();', tray)
         self.assertIn('if (legacyVpnChecked || closing', tray)
 

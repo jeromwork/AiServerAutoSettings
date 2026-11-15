@@ -626,18 +626,20 @@ namespace RemoteAgents.Launcher
                         if (vpn.Definition.CommandManaged) {
                             await Task.Run(() => CaptureScript("Vpn.Tun.ps1", new[] { "-Enable", "-ParentPid", Process.GetCurrentProcess().Id.ToString(), "-HostExe", Program.Exe }));
                             var status = VpnStatus.Read(home);
-                            if (Json.Str(status, "state") != "on") { VpnFailure(Json.Text(status, "summary", "VPN не включён: соединение не подтверждено"), fromCard); return; }
+                            if (Json.Str(status, "state") != "on") { SignalVpnStop(); VpnFailure(Json.Text(status, "summary", "VPN не включён: соединение не подтверждено"), fromCard); return; }
                             config.SetVpnIntent(true); config.SetEnabled(vpn.Definition, true);
                         }
                         return;
                     }
                     VpnFailure("Отключите другой VPN перед включением VPN RemoteAgents", fromCard); return;
                 }
-            } catch (OperationCanceledException) { }
-            catch { if (vpn.Definition.CommandManaged) try { config.SetEnabled(vpn.Definition, false); } catch { log.Write("vpn.config.failed"); }
+            } catch (OperationCanceledException) { if (enabling) SignalVpnStop(); }
+            catch { if (enabling) SignalVpnStop(); if (vpn.Definition.CommandManaged) try { config.SetEnabled(vpn.Definition, false); } catch { log.Write("vpn.config.failed"); }
                 if (!closing) { log.Write("vpn.conflict.check.failed"); VpnFailure(enabling ? "Не удалось включить VPN. Проверьте связь с сервером и разрешение Windows на запуск VPN." : "Проверить наличие другого VPN не удалось. VPN RemoteAgents не включён.", fromCard); } }
             finally { actionBusy = vpnActionBusy = false; if (!closing) RefreshMenu(); }
         }
+        void SignalVpnStop()
+        { try { Files.Atomic(Path.Combine(home, "state/vpn.stop"), "stop\n"); } catch { log.Write("vpn.stop.failed"); } }
         void VpnFailure(string message, bool fromCard)
         { vpnError = message; if (!fromCard && !closing) MessageBox.Show(message, Product.Name); }
         async void DisableVpn(ComponentRuntime vpn, bool fromCard = false)
