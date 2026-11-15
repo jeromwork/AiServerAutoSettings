@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace RemoteAgents.Launcher
 {
@@ -19,7 +20,71 @@ namespace RemoteAgents.Launcher
         void DeleteFile(string path);
         void DeleteDirectory(string path);
     }
-    internal interface IDiskExplorerIcons { string PathFor(DiskExplorerKind kind); }
+    internal interface IDiskExplorerIcons
+    {
+        string PathFor(DiskExplorerKind kind);
+        // The program's own icon (the one in the tray) as a file: our Explorer menu items use it.
+        string ApplicationPath();
+    }
+    // The icon files of the Disk. All of them are finished .ico files built into the program (the state icons from app/launcher/icons,
+    // the program's icon from app/launcher/app.ico; build/make-state-icons.py and make-app-icon.py draw them) and written to a
+    // directory of the user as they are. Nothing is drawn at run time.
+    internal static class DiskIconFile
+    {
+        // app.ico is built into the program twice: as the program's icon (what Explorer shows for the EXE) and as this resource.
+        internal const string ApplicationIconResource = "RemoteAgents.App.ico";
+        internal static string StateIconResource(DiskExplorerKind kind) { return "RemoteAgents.Icons." + kind + ".ico"; }
+        // Explorer remembers an icon by the name of its file, so a new picture needs a new name: the icon revision is part of it
+        // (DiskExplorerService.IconRevision). Revision 1, the folder icon with a badge drawn over it, has no marker in the name.
+        internal static string StateIconFile(DiskExplorerKind kind) { return DiskExplorerService.Owner + ".r" + DiskExplorerService.IconRevision + "." + kind + ".ico"; }
+        // Uninstall: our icon files of every revision (and the application icon); anything else in the directory stays.
+        internal static void Cleanup(string directory)
+        {
+            if (!Directory.Exists(directory)) return;
+            var ours = new Regex("^" + Regex.Escape(DiskExplorerService.Owner) + @"\.((r\d+\.)?(" + string.Join("|", Enum.GetNames(typeof(DiskExplorerKind))) + @")|App)\.ico$");
+            foreach (string path in Directory.GetFiles(directory))
+                if (ours.IsMatch(Path.GetFileName(path)) && (File.GetAttributes(path) & FileAttributes.ReparsePoint) == 0) File.Delete(path);
+        }
+        internal static void ExportStateIcon(DiskExplorerKind kind, string path) { Export(StateIconResource(kind), path); }
+        internal static void ExportApplicationIcon(string path) { Export(ApplicationIconResource, path); }
+        // The built-in file, byte for byte. An existing file is kept: Explorer may be reading it, and its name says which picture it is.
+        static void Export(string resource, string path)
+        {
+            if (File.Exists(path)) return;
+            using (var source = typeof(DiskIconFile).Assembly.GetManifestResourceStream(resource)) {
+                if (source == null) throw new IOException("В программе нет файла значка " + resource);
+                using (var copy = new MemoryStream()) {
+                    source.CopyTo(copy);
+                    string temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                    try {
+                        using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None)) stream.Write(copy.GetBuffer(), 0, (int)copy.Length);
+                        if (!File.Exists(path)) File.Move(temp, path);
+                    } finally { if (File.Exists(temp)) File.Delete(temp); }
+                }
+            }
+        }
+    }
+    // The icons of the Disk in a directory of the user (%LOCALAPPDATA%\RemoteDisk\explorer-icons): the state icons, whose paths go to
+    // desktop.ini of the folders, and the program's icon for the menu items.
+    internal sealed class DiskExplorerIcons : IDiskExplorerIcons
+    {
+        readonly string directory;
+        internal DiskExplorerIcons(string directory) { this.directory = Path.GetFullPath(directory); }
+        public string PathFor(DiskExplorerKind kind)
+        {
+            Directory.CreateDirectory(directory);
+            string path = Path.Combine(directory, DiskIconFile.StateIconFile(kind));
+            DiskIconFile.ExportStateIcon(kind, path);
+            return path;
+        }
+        public string ApplicationPath()
+        {
+            Directory.CreateDirectory(directory);
+            string path = Path.Combine(directory, DiskExplorerService.ApplicationIconFile);
+            DiskIconFile.ExportApplicationIcon(path);
+            return path;
+        }
+    }
     internal interface IDiskExplorerNotifier { void Changed(string path); }
     internal sealed class DiskExplorerFileSystem : IDiskExplorerFileSystem
     {
@@ -37,12 +102,16 @@ namespace RemoteAgents.Launcher
     internal sealed class DiskExplorerService
     {
         internal const string Owner = "RemoteAgents.Disk.v2";
+        internal const string ApplicationIconFile = Owner + ".App.ico";
+        // The look of the state icons. Raise it when app/launcher/icons change: the new files get new names (see DiskIconFile).
+        internal const int IconRevision = 2;
         readonly IDiskExplorerFileSystem fs;
         readonly IDiskExplorerIcons icons;
         readonly IDiskExplorerNotifier notifier;
         readonly Action<string> log;
         internal DiskExplorerService(IDiskExplorerFileSystem fs, IDiskExplorerIcons icons, IDiskExplorerNotifier notifier, Action<string> log)
         { this.fs = fs; this.icons = icons; this.notifier = notifier; this.log = log ?? delegate { }; }
+        internal string ApplicationIcon() { return icons.ApplicationPath(); }
         // Only our own empty placeholders and desktop.ini are managed. User metadata always wins.
         internal void Reconcile(string root, IEnumerable<DiskFolderState> folders)
         {
@@ -91,7 +160,7 @@ namespace RemoteAgents.Launcher
             var metadata = ReadOwned(path);
             string ini = Path.Combine(path, "desktop.ini");
             if (((fs.FileExists(ini) || fs.DirectoryExists(ini)) && metadata == null) || UserEntries(path).Any()) return false;
-            Apply(path, DiskExplorerKind.ServerOnly, "Только на сервере. Правый клик → Забрать с сервера", metadata, true, created);
+            Apply(path, DiskExplorerKind.ServerOnly, DiskMenu.ServerOnlyHint, metadata, true, created);
             return true;
         }
         internal bool IsPlaceholder(string path)

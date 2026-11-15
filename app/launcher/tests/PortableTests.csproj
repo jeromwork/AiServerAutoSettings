@@ -60,5 +60,7 @@
     <Compile Include="../DiskExplorerRegistry.cs" Link="DiskExplorerRegistry.cs" />
     <Compile Include="../DiskExplorerController.cs" Link="DiskExplorerController.cs" />
     <Compile Include="../ServerOperations.cs" Link="ServerOperations.cs" />
+    <EmbeddedResource Include="../app.ico" LogicalName="RemoteAgents.App.ico" />
+    <EmbeddedResource Include="../icons/*.ico" LogicalName="RemoteAgents.Icons.%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>

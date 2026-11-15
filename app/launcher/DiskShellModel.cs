@@ -7,6 +7,13 @@ using System.Text.RegularExpressions;
 
 namespace RemoteAgents.Launcher
 {
+    // Names of the Explorer menu items. The hint on a placeholder and the messages refer to an item by this name,
+    // so the name lives in one place: the text a person reads in the menu is the text the hint tells them to click.
+    internal static class DiskMenu
+    {
+        internal const string Download = "Скачать на компьютер", KeepServer = "Оставить только на сервере", Upload = "Загрузить на сервер";
+        internal const string ServerOnlyHint = "Только на сервере. Правый клик → " + Download;
+    }
     internal enum DiskExplorerKind { Local, ServerOnly, Pending, Syncing, Synced, Paused, Error, Offline, Unavailable, LocalChanges }
     internal sealed class DiskFolderState
     {
@@ -16,11 +23,15 @@ namespace RemoteAgents.Launcher
         internal int Percent;
         internal Dictionary<string, object> Config;
         internal DiskFolderState Copy() { return (DiskFolderState)MemberwiseClone(); }
+        // Shared with the server and set to send and receive: the upload command has nothing left to do for it, so the menu does not
+        // offer it. A folder that is shared but receive-only is different: «Загрузить на сервер» turns it into send and receive.
+        // Without a Syncthing config (state restored from the manifest while Syncthing is unreachable) the folder counts as uploading.
+        internal bool Uploads { get { return !ServerOnly && Kind != DiskExplorerKind.Local && (Config == null || Json.Str(Config, "type") == "sendreceive"); } }
         internal string Tooltip
         {
             get {
                 switch (Kind) {
-                    case DiskExplorerKind.ServerOnly: return "Только на сервере. Правый клик → Забрать с сервера";
+                    case DiskExplorerKind.ServerOnly: return DiskMenu.ServerOnlyHint;
                     case DiskExplorerKind.Synced: return "Синхронизировано с сервером";
                     case DiskExplorerKind.Syncing: return "Синхронизируется: " + Percent + "%";
                     case DiskExplorerKind.Paused: return "Синхронизация приостановлена";

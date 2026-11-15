@@ -60,12 +60,12 @@ namespace RemoteAgents.Launcher
             }
             if (request.Action == "download") {
                 if (row == null || !row.ServerOnly || row.Kind != DiskExplorerKind.ServerOnly || !metadata.IsPlaceholder(request.Path)) throw new IOException("Нужна пустая заглушка предложенной сервером папки");
-                Accept(row, snapshot, token); return "Папка принята. Синхронизация запущена";
+                Accept(row, snapshot, token); return "Папка скачивается на компьютер. Синхронизация запущена";
             }
             if (request.Action != "add") throw new IOException("Неизвестная команда Диска");
             if (!Directory.Exists(request.Path)) throw new IOException("Папка не найдена");
             if (row != null && !row.ServerOnly) {
-                if (row.Kind != DiskExplorerKind.Local && Json.Str(row.Config, "type") == "sendreceive") return "Папка уже синхронизируется с сервером";
+                if (row.Uploads) return "Папка уже синхронизируется с сервером";
                 if (!DiskPaths.ValidName(row.Name) || snapshot.Folders.Any(f => f != row && string.Equals(f.Name, row.Name, StringComparison.OrdinalIgnoreCase))) throw new IOException("Имя папки уже занято или недопустимо на сервере");
                 // Share a pre-existing Syncthing registration and enable uploads without replacing its other options or devices.
                 var devices = Json.Array(Json.Get(row.Config, "devices")).ToList();
@@ -79,7 +79,7 @@ namespace RemoteAgents.Launcher
             }
             string name = Path.GetFileName(request.Path);
             if (!DiskPaths.ValidName(name)) throw new IOException("Имя папки недопустимо на сервере");
-            if (snapshot.Folders.Any(f => string.Equals(f.Name, name, StringComparison.OrdinalIgnoreCase))) throw new IOException("На Диске уже есть папка с таким именем; используйте «Забрать с сервера»");
+            if (snapshot.Folders.Any(f => string.Equals(f.Name, name, StringComparison.OrdinalIgnoreCase))) throw new IOException("На Диске уже есть папка с таким именем; используйте «" + DiskMenu.Download + "»");
             // Server auto-accept uses the label as the top-level directory name. An ID must not collide locally.
             row = new DiskFolderState { Id = name, Name = name, Path = request.Path };
             if (snapshot.Folders.Any(f => string.Equals(f.Id, row.Id, StringComparison.OrdinalIgnoreCase))) throw new IOException("ID папки уже занят в Syncthing");

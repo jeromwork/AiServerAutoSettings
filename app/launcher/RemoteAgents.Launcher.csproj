@@ -3,6 +3,7 @@
     <TargetFramework>net48</TargetFramework>
     <OutputType>WinExe</OutputType>
     <StartupObject>RemoteAgents.Launcher.EntryPoint</StartupObject>
+    <ApplicationIcon>app.ico</ApplicationIcon>
     <UseWindowsForms>true</UseWindowsForms>
     <ProductName Condition="'$(ProductName)' == ''">RemoteAgents</ProductName>
     <AssemblyName>$(ProductName)</AssemblyName>
@@ -29,6 +30,10 @@
     <Reference Include="System.IO.Compression" />
     <Reference Include="System.IO.Compression.FileSystem" />
     <EmbeddedResource Include="config-ai-prompt.md" LogicalName="RemoteAgents.ConfigAiPrompt.md" />
+    <!-- The same file is the program's own icon (ApplicationIcon) and, as a resource, the icon of the Explorer menu items. -->
+    <EmbeddedResource Include="app.ico" LogicalName="RemoteAgents.App.ico" />
+    <!-- The icons of the folder states (build/make-state-icons.py): RemoteAgents.Icons.<Kind>.ico, written as they are to the icon directory of the Disk. -->
+    <EmbeddedResource Include="icons/*.ico" LogicalName="RemoteAgents.Icons.%(Filename)%(Extension)" />
     <EmbeddedResource Include="$(BundlePath)" LogicalName="RemoteAgents.InitialBundle.zip" Condition="Exists('$(BundlePath)')" />
     <Compile Remove="tests/**/*.cs" />
   </ItemGroup>

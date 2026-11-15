@@ -15,7 +15,7 @@ namespace RemoteAgents.Launcher
         readonly SemaphoreSlim gate = new SemaphoreSlim(1, 1);
         readonly DiskExplorerService metadata; readonly DiskExplorerRegistry registry;
         readonly Task worker; readonly TaskCompletionSource<bool> initialized = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        DiskSnapshot last = new DiskSnapshot(); string lastRoot;
+        DiskSnapshot last = new DiskSnapshot(); string lastRoot; bool iconFailed;
         internal DiskExplorerController(string home, Func<string> root, Func<string> bundle, Func<bool> enabled, Func<bool> cleanup, Action<string, bool> notify, Action<string> log,
             DiskExplorerService metadata, DiskExplorerRegistry registry, string diskHome = null)
         {
@@ -115,10 +115,16 @@ namespace RemoteAgents.Launcher
                 if (!paths.Any(p => DiskPaths.Same(p, old))) metadata.CleanupFolder(old, true);
             metadata.Reconcile(currentRoot, snapshot.Folders);
             // Download is offered only on our empty placeholders, never on an unrelated directory of the same name.
-            registry.Register(ProgramPath, currentRoot, snapshot.Folders.Where(f => !f.ServerOnly || metadata.IsPlaceholder(f.Path)), home);
+            registry.Register(ProgramPath, currentRoot, snapshot.Folders.Where(f => !f.ServerOnly || metadata.IsPlaceholder(f.Path)), home, MenuIcon());
             string content = Json.Encode(paths);
             if (!File.Exists(manifest) || File.ReadAllText(manifest) != content) Files.Atomic(manifest, content);
             last = snapshot; lastRoot = currentRoot;
+        }
+        // The program's icon for our menu items. If it cannot be produced the items still work, with the program file's own icon.
+        string MenuIcon()
+        {
+            try { string path = metadata.ApplicationIcon(); iconFailed = false; return path; }
+            catch (Exception) { if (!iconFailed) log("disk.explorer.icon.failed"); iconFailed = true; return null; }
         }
         string ProgramPath
         {
@@ -139,7 +145,7 @@ namespace RemoteAgents.Launcher
                     bool placeholder = metadata.IsPlaceholder(path);
                     last.Folders.Add(new DiskFolderState { Path = path, ServerOnly = placeholder, Kind = placeholder ? DiskExplorerKind.ServerOnly : DiskExplorerKind.Unavailable });
                 }
-                registry.Register(ProgramPath, lastRoot, last.Folders, home);
+                registry.Register(ProgramPath, lastRoot, last.Folders, home, MenuIcon());
             }
             var rows = last.Folders.Select(f => { var copy = f.Copy(); if (!copy.ServerOnly && copy.Kind != DiskExplorerKind.Local) copy.Kind = DiskExplorerKind.Unavailable; return copy; }).ToArray();
             metadata.Reconcile(lastRoot, rows);
