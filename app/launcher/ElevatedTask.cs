@@ -22,6 +22,7 @@ namespace RemoteAgents.Launcher
         public bool Registered { get { return task != null; } }
         public void Register()
         {
+            if (name == "vpn" && !Product.VpnEnabled) return;
             string target = Path.Combine(home, "RemoteAgents.exe");
             if (!File.Exists(target)) throw new IOException("Сначала установите лаунчер");
             string xml = Path.Combine(directory, name + ".task.xml");
@@ -59,6 +60,7 @@ namespace RemoteAgents.Launcher
         }
         public static int RunComponent(string home, string name)
         {
+            if (name == "vpn" && !Product.VpnEnabled) return 0;
             string directory = Path.Combine(home, "state", "elevated");
             var engine = new UpdateEngine(home, Program.Version); string bundle = engine.Folder(engine.Current);
             var c = BundleDefinition.Load(bundle).Components.Single(x => x.Name == name && x.Elevated);

@@ -86,6 +86,7 @@ namespace RemoteAgents.Launcher
             var deployDiagnostic = WrapLabel(); deployDiagnostic.Text = DeploymentText(); serviceActions.Controls.Add(deployDiagnostic);
             AddButton(serviceActions, "Состояние развёртывания сервера", () => { deployDiagnostic.Text = DeploymentText(); ShowPage("Сервер"); });
             serviceActions.Controls.Add(diagnosticPathLink);
+            serviceActions.Controls.Add(vpnDnsDetails);
             diagnosticPathLink.LinkClicked += (s, e) => pathMenu.Show(diagnosticPathLink, new Point(0, diagnosticPathLink.Height));
             RegisterFlowPage("Диагностика", serviceActions);
             detailsHost = new Panel { Dock = DockStyle.Fill, AutoScroll = true }; RegisterPage("Раздел настроек", detailsHost);

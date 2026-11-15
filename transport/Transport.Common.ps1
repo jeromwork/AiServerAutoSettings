@@ -1,5 +1,8 @@
 ﻿#requires -Version 5.1
 $ErrorActionPreference='Stop'
+function Test-ProductVpnEnabled {
+    [bool](Read-TransportJson (Join-Path $PSScriptRoot 'product-features.json')).vpnEnabled
+}
 # Построение цепочек взято из Test-Transports.ps1; разбор профиля/ssh -G — из Disk.Common.ps1.
 function Get-TransportHome([string]$Path){
     $full=[IO.Path]::GetFullPath($Path);$base=[IO.Path]::GetPathRoot($full)
@@ -898,17 +901,55 @@ function Get-VpnOptions($Settings) {
     $v=Get-TransportValue $Settings 'Vpn' $null
     $defaults=@{enabled=$false;excludeCidrs=@();interfaceName='RemoteAgents-TUN';address=@('172.31.255.1/30','fdfe:7261::1/126');probeAddress='198.18.0.1';checkUrl='https://example.com/';dnsServer='1.1.1.1'}
     $result=@{};foreach($key in $defaults.Keys){$result[$key]=Get-TransportValue $v $key $defaults[$key]}
+    if(-not (Test-ProductVpnEnabled)){$result.enabled=$false}
     if($result.enabled -isnot [bool]){throw 'vpn.enabled должен быть boolean'}
     if($result.interfaceName -notmatch '^RemoteAgents-[a-zA-Z0-9_-]{1,32}$'){throw 'Неверное имя нашего TUN'}
     $uri=$null;if(-not [Uri]::TryCreate($result.checkUrl,[UriKind]::Absolute,[ref]$uri) -or $uri.Scheme -ne 'https'){throw 'vpn.checkUrl должен быть HTTPS'}
+    if($uri.HostNameType -ne [UriHostNameType]::Dns){throw 'vpn.checkUrl должен содержать домен для проверки защищённого DNS'}
     foreach($cidr in @($result.address)+@($result.excludeCidrs)){Assert-VpnCidr $cidr}
     $ip=$null;if(-not [Net.IPAddress]::TryParse($result.dnsServer,[ref]$ip)){throw 'vpn.dnsServer должен быть IP'}
     $ip=$null;if(-not [Net.IPAddress]::TryParse($result.probeAddress,[ref]$ip) -or $ip.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork){throw 'vpn.probeAddress должен быть IPv4'}
     return $result
 }
-function Get-VpnSnapshot {
+function Get-VpnSnapshot([switch]$IncludeDns) {
     # Ошибка инвентаризации не означает отсутствие конфликтов: вызывающий запрещает включение.
-    [pscustomobject]@{Processes=@(Get-CimInstance Win32_Process -ErrorAction Stop);Adapters=@(Get-NetAdapter -IncludeHidden -ErrorAction Stop);Routes=@(Get-NetRoute -ErrorAction Stop)}
+    $snapshot=[pscustomobject]@{Processes=@(Get-CimInstance Win32_Process -ErrorAction Stop);Adapters=@(Get-NetAdapter -IncludeHidden -ErrorAction Stop);Routes=@(Get-NetRoute -ErrorAction Stop)}
+    if($IncludeDns){
+        # Read effective policy, not just local NRPT rules: MagicDNS can use NRPT
+        # without putting its resolver into the adapter's DNS server list.
+        $snapshot|Add-Member DnsServers @(Get-DnsClientServerAddress -ErrorAction Stop)
+        $snapshot|Add-Member DnsClients @(Get-DnsClient -ErrorAction Stop)
+        $snapshot|Add-Member Nrpt @(Get-DnsClientNrptPolicy -Effective -ErrorAction Stop)
+    }
+    $snapshot
+}
+function Find-VpnDnsPolicy($Snapshot,[string]$PhysicalInterface,[string]$OwnInterface) {
+    # Missing/failed inventory must never be interpreted as absence of split DNS.
+    foreach($field in @('DnsServers','DnsClients','Nrpt')){
+        if(-not $Snapshot.PSObject.Properties[$field]){throw 'Не удалось проверить DNS частичных сетей'}
+    }
+    $networks=@()
+    foreach($adapter in @($Snapshot.Adapters)){
+        if($adapter.Status -ne 'Up' -or $adapter.Name -in @($PhysicalInterface,$OwnInterface)){continue}
+        $text=$adapter.Name+' '+$adapter.InterfaceDescription
+        $partial=($adapter.HardwareInterface -eq $false -or $adapter.Virtual -eq $true -or $text -match '(?i)VPN|Tailscale|TUN|Wintun|WireGuard|TAP|Teredo|ISATAP|6to4|IP-HTTPS|virtual')
+        if(-not $partial){continue}
+        # Full tunnels have already been rejected by Find-VpnConflicts. An Up
+        # allowed virtual adapter counts even without a non-connected route.
+        $servers=@($Snapshot.DnsServers|Where-Object {$_.InterfaceIndex -eq $adapter.ifIndex}|ForEach-Object {$_.ServerAddresses}|Where-Object {$_}|Sort-Object -Unique)
+        $suffixes=@($Snapshot.DnsClients|Where-Object {$_.InterfaceIndex -eq $adapter.ifIndex}|ForEach-Object {$_.ConnectionSpecificSuffix; $_.ConnectionSpecificSuffixSearchList}|Where-Object {$_}|Sort-Object -Unique)
+        # Effective NRPT has no interface/owner identity. With an active partial
+        # network, preserve it conservatively rather than guessing ownership from
+        # a ts.net suffix or a single MagicDNS IP. Stale rules alone with no active
+        # partial adapter do not relax protection.
+        $nrpt=@($Snapshot.Nrpt|Where-Object {$_.Namespace -or $_.NameServers -or $_.DirectAccessDnsServers}|ForEach-Object {
+            [pscustomobject]@{namespaces=@($_.Namespace);servers=@(@($_.NameServers)+@($_.DirectAccessDnsServers)|Where-Object {$_})}
+        })
+        if($servers.Count -or $suffixes.Count -or $nrpt.Count){
+            $networks+=@([pscustomobject]@{name=[string]$adapter.Name;interfaceIndex=[int]$adapter.ifIndex;servers=$servers;suffixes=$suffixes;nrpt=$nrpt})
+        }
+    }
+    [pscustomobject]@{strictRoute=($networks.Count -eq 0);networks=@($networks)}
 }
 function Get-VpnOwnedProcessIds([string]$Root,$Snapshot) {
     # Нельзя доверять одному PID из state: он мог быть повторно использован чужим процессом.
@@ -930,10 +971,10 @@ function Find-VpnConflicts($Snapshot,[int[]]$OwnProcessIds=@(),[string]$OwnInter
         }
     }
     foreach($route in @($Snapshot.Routes)){
-        if($route.DestinationPrefix -notin @('0.0.0.0/1','128.0.0.0/1','0.0.0.0/0','::/0')){continue}
+        if($route.DestinationPrefix -notin @('0.0.0.0/1','128.0.0.0/1','0.0.0.0/0','::/0','::/1','8000::/1')){continue}
         $adapter=$Snapshot.Adapters|Where-Object {$_.ifIndex -eq $route.InterfaceIndex}|Select-Object -First 1
         # Teredo/ISATAP/6to4/IP-HTTPS are Windows' own IPv6 transition tunnels (Teredo keeps ::/0 up by default), not VPNs.
-        if($adapter -and ($adapter.Name -eq $OwnInterface -or ($adapter.Name+' '+$adapter.InterfaceDescription) -match '(?i)OpenVPN|Tailscale|Teredo|ISATAP|6to4|IP-HTTPS')){continue}
+        if($adapter -and ($adapter.Name -eq $OwnInterface -or ($adapter.Name+' '+$adapter.InterfaceDescription) -match '(?i)Teredo|ISATAP|6to4|IP-HTTPS')){continue}
         if(-not $adapter -and [string]$route.InterfaceAlias -match '(?i)Teredo|ISATAP|6to4|IP-HTTPS'){continue}
         if($route.DestinationPrefix -in @('0.0.0.0/0','::/0')){
             if(-not $adapter -or $adapter.Status -ne 'Up'){continue}
@@ -990,8 +1031,9 @@ function Get-VpnExclusions($Settings,$Paths,$Snapshot,[hashtable]$Resolved=@{},[
     foreach($cidr in $cidrs){Assert-VpnCidr $cidr}
     @($cidrs|Sort-Object -Unique)
 }
-function New-VpnTunConfig($Settings,$Paths,[string]$SelectedTag,[string[]]$ExcludeCidrs,[string]$Interface) {
-    $v=Get-VpnOptions $Settings
+function New-VpnTunConfig($Settings,$Paths,[string]$SelectedTag,[string[]]$ExcludeCidrs,[string]$Interface,[bool]$StrictRoute=$true) {
+    $v=Get-VpnOptions $Settings;$check=[Uri]$v.checkUrl
+    if($check.UserInfo){throw 'Адрес проверки не должен содержать пароль'}
     if(-not $Interface){throw 'Для TUN нужен физический интерфейс'}
     $candidate=$Paths.Candidates|Where-Object {$_.tag -eq $SelectedTag -and $_.enabled -ne $false}|Select-Object -First 1
     if(-not $candidate -or -not (Test-TransportInternetPath $SelectedTag $Paths.Outbounds)){throw 'Выбранный путь не поддерживает интернет TCP/UDP; TUN выключен'}
@@ -1001,15 +1043,27 @@ function New-VpnTunConfig($Settings,$Paths,[string]$SelectedTag,[string[]]$Exclu
         if(-not $copy.detour){$copy|Add-Member -Force bind_interface $Interface;$copy|Add-Member -Force domain_resolver 'bootstrap'}
         $outs+=$copy
     }
+    $outs+=@{type='direct';tag='vpn-direct';bind_interface=$Interface;domain_resolver='bootstrap'}
     $outs+=@{type='selector';tag='vpn-active';outbounds=@($SelectedTag);default=$SelectedTag;interrupt_exist_connections=$false}
     # system использует TCP/IP Windows без дополнительного userspace TCP gVisor.
     # Выбор уменьшает число реализаций стека; превосходство на реальной сети ещё не проверено.
-    @{log=@{disabled=$true};inbounds=@(@{type='tun';tag='vpn-tun';interface_name=$v.interfaceName;address=@($v.address);stack='system';auto_route=$true;strict_route=$false;route_exclude_address=@($ExcludeCidrs)});
+    # DNS remains direct even while the VPN path is unhealthy. Process and endpoint bypass
+    # precede DNS and the VPN final rule. Website DNS uses certificate-validated
+    # direct DoH; UDP bootstrap is reserved for transport endpoint resolution. The HTTPS probe has its own synthetic
+    # TUN-only destination, even when the real check host is a server exclusion. No host routes are added to bypass somebody else's VPN.
+    @{log=@{disabled=$true};inbounds=@(@{type='tun';tag='vpn-tun';interface_name=$v.interfaceName;address=@($v.address);stack='system';auto_route=$true;strict_route=$StrictRoute;route_exclude_address=@($ExcludeCidrs)});
       outbounds=$outs;route=@{auto_detect_interface=$true;default_interface=$Interface;default_domain_resolver='bootstrap';final='vpn-active';rules=@(
-        @{inbound=@('vpn-tun');network='tcp';port=@(22,(Get-TransportServerPort $Settings.Profile))|Select-Object -Unique;ip_cidr=@($v.probeAddress+'/32');action='route';outbound='vpn-active';override_address=$Settings.Profile.serverAddress;override_port=(Get-TransportServerPort $Settings.Profile)},
-        @{protocol='dns';action='hijack-dns'})};
-      dns=@{servers=@(@{type='udp';tag='bootstrap';server=$v.dnsServer;bind_interface=$Interface},@{type='https';tag='vpn-dns';server=$v.dnsServer;detour='vpn-active'});final='vpn-dns'}}
+        @{process_name=@('powershell.exe','python.exe','pythonw.exe','ssh.exe','sing-box.exe','syncthing.exe','SyncthingTray.exe');action='route';outbound='vpn-direct'},
+        @{inbound=@('vpn-tun');network='tcp';ip_cidr=@($v.probeAddress+'/32');port=@($check.Port);action='route-options';override_address=$check.DnsSafeHost;override_port=$check.Port},
+        @{inbound=@('vpn-tun');domain=@($check.DnsSafeHost);action='resolve';server='vpn-dns';disable_cache=$true;disable_optimistic_cache=$true;timeout='500ms'},
+        @{inbound=@('vpn-tun');domain=@($check.DnsSafeHost);action='route';outbound='vpn-active'},
+        @{ip_cidr=@($ExcludeCidrs);action='route';outbound='vpn-direct'},
+        @{protocol='dns';action='hijack-dns'},
+        @{port=@(53);action='hijack-dns'})};
+      dns=@{servers=@(@{type='udp';tag='bootstrap';server=$v.dnsServer;bind_interface=$Interface},
+        @{type='https';tag='vpn-dns';server=$v.dnsServer;path='/dns-query';tls=@{enabled=$true};bind_interface=$Interface});final='vpn-dns'}}
 }
+
 function Write-VpnStatus([string]$Root,[bool]$Ok,[bool]$Enabled,[string]$State,$Conflict,[string]$Summary) {
     Write-TransportJson (Join-Path $Root 'status/vpn.json') @{ok=$Ok;enabled=$Enabled;state=$State;conflict=$Conflict;summary=$Summary;updatedAt=[DateTime]::UtcNow.ToString('o')}
     # Журнал всегда локальный; только категория, без текста исключений и параметров процессов.
@@ -1018,6 +1072,7 @@ function Write-VpnStatus([string]$Root,[bool]$Ok,[bool]$Enabled,[string]$State,$
     [IO.File]::AppendAllText($file,([DateTime]::UtcNow.ToString('o')+' '+$State+"`n"),(New-Object Text.UTF8Encoding($false)))
 }
 function Set-VpnEnabled([string]$Root,[bool]$Enabled) {
+    $Enabled=$Enabled -and (Test-ProductVpnEnabled)
     $mutex=New-Object Threading.Mutex($false,('Global\RemoteAgentsConfig-'+(Get-TransportFingerprint 'config' (Get-TransportHome $Root).ToLowerInvariant())));$locked=$false
     try{
         try{$locked=$mutex.WaitOne(5000)}catch [Threading.AbandonedMutexException]{$locked=$true};if(-not $locked){throw 'Конфиг занят'}
@@ -1045,31 +1100,8 @@ function Assert-VpnTunRoute([string]$Address,[int]$InterfaceIndex) {
     $routes=@(Find-NetRoute -RemoteIPAddress $Address -ErrorAction Stop|Where-Object {$_.DestinationPrefix})
     if(-not $routes.Count -or @($routes|Where-Object {$_.InterfaceIndex -ne $InterfaceIndex}).Count){throw 'Пробный запрос обходит TUN'}
 }
-function Test-VpnThroughTun($Settings,$Adapter) {
-    $v=Get-VpnOptions $Settings
-    if(-not $Settings.Transport.bootstrap){
-    Assert-VpnTunRoute $v.probeAddress $Adapter.ifIndex
-    # SSH с закреплённым host key проверяет сервер через TUN (synthetic IP -> server loopback),
-    # 64 КиБ дополнительно обнаруживают зависание после первых пакетов.
-    $candidate=[pscustomobject]@{tag='tun-check';port=22}
-    $a=@(Get-TransportSshArguments $Settings.Profile 22)+@($v.probeAddress,'head -c 65536 /dev/urandom')
-    $child=Start-TransportProcess $Settings.Profile.sshExecutable $a -Probe
-    Initialize-TransportCounter;$sink=New-Object RemoteAgents.TransportCounter
-    try{
-        $copy=$child.Process.StandardOutput.BaseStream.CopyToAsync($sink)
-        $probe=[pscustomobject]@{child=$child;sink=$sink;copy=$copy;state=(New-TransportProbeState 65536 5 40)}
-        while(-not (Receive-TransportProbe $probe)){Start-Sleep -Milliseconds 100}
-        if($probe.state.state -ne 'ok'){throw 'Сервер через TUN не прошёл проверку'}
-    }finally{Stop-TransportProcess $child;try{if($copy){[void]$copy.Wait(1000)}}catch{};$sink.Dispose()}
-    }
-    $uri=[Uri]$v.checkUrl
-    $addresses=@([Net.Dns]::GetHostAddresses($uri.DnsSafeHost));if(-not $addresses.Count){throw 'DNS через VPN не отвечает'}
-    # WebRequest может выбрать любой из A/AAAA: все результаты должны маршрутизироваться через наш TUN.
-    foreach($ip in $addresses){Assert-VpnTunRoute $ip.ToString() $Adapter.ifIndex}
-    $req=[Net.HttpWebRequest]::Create($uri);$req.Proxy=$null;$req.Timeout=20000;$req.ReadWriteTimeout=20000;$req.AllowAutoRedirect=$false;$req.KeepAlive=$false
-    $response=$req.GetResponse()
-    try{if([int]$response.StatusCode -lt 200 -or [int]$response.StatusCode -ge 300){throw 'Внешний HTTPS не прошёл проверку'}}finally{$response.Dispose()}
-}
+# The bounded HTTPS probe and route assertion run in VpnProbe.cs in the elevated host.
+# No SSH, DNS or HTTPS waits on the PowerShell lifecycle thread.
 function Clear-VpnRoutes([string]$Root,[string]$Session) {
     $file=Join-Path $Root 'state/vpn-interface.json';if(-not (Test-Path -LiteralPath $file)){return}
     $owned=Read-TransportJson $file;if($owned.session -ne $Session){return}
@@ -1081,15 +1113,7 @@ function Clear-VpnRoutes([string]$Root,[string]$Session) {
     Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
 }
 
-function Register-VpnRollbackTask([string]$Root,[string]$Session,[string]$ScriptPath,[string]$UserId='') {
-    if(-not $UserId){$UserId=[Security.Principal.WindowsIdentity]::GetCurrent().Name}
-    $tasks=Get-VpnTaskNames $Root;$exe=Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
-    $args=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$ScriptPath,'-Home',$Root,'-Session',$Session,'-Rollback')
-    $action=New-ScheduledTaskAction -Execute $exe -Argument (($args|ForEach-Object {Quote-Transport $_}) -join ' ')
-    $principal=New-ScheduledTaskPrincipal -UserId $UserId -LogonType Interactive -RunLevel Highest
-    $settings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)
-    Register-ScheduledTask -TaskName $tasks.Rollback -Action $action -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5)) -Principal $principal -Settings $settings -Force|Out-Null
-}
+# No scheduled worker/rollback tasks. VpnHost owns a kill-on-close NativeJob.
 
 function Sync-TransportEntryCache($Settings,[string]$Root) {
     # Новые entries загружаются в background reload, не блокируя pin/API.
@@ -1308,15 +1332,25 @@ function Get-TransportEngineDiagnostic($Engine,[string]$Candidate,$Context) {
     $detail
 }
 
-# Bootstrap has no registered SSH key yet. Its tag was checked by HTTPS through
-# a temporary local proxy; Worker still verifies DNS/HTTPS and routes through TUN.
+# Only the already running transport's current proof can authorize a VPN session.
 function Get-VpnTransportState([string]$Root,$Settings) {
-    if($Settings.Transport.bootstrap -and $Settings.Vpn.bootstrapTag){return [pscustomobject]@{active=[string]$Settings.Vpn.bootstrapTag;bootstrap=$true}}
     $status=Read-TransportJson (Join-Path $Root 'status/transport.json')
-    if(-not $status.ok -or ([DateTime]::UtcNow-(Convert-TransportUtc $status.updatedAt)).TotalSeconds -gt 15){throw 'Транспорт ещё не проверен'}
+    $age=([DateTime]::UtcNow-(Convert-TransportUtc $status.updatedAt)).TotalSeconds
+    if(-not $status.ok -or $age -lt 0 -or $age -gt 3 -or -not $status.active){throw 'Нет живого пути к серверу. Дождитесь подключения'}
+    $row=@($status.candidates|Where-Object {$_.tag -eq $status.active -and $_.state -eq 'ok' -and $_.enabled -ne $false})
+    if(-not $row.Count){throw 'Активный путь к серверу ещё не проверен'}
     return $status
 }
 
 function Get-TransportCacheRoot($Settings,[string]$Root) {
     Get-TransportValue $Settings.Transport 'cacheRoot' $Root
+}
+
+function Test-VpnHostAlive([string]$Root) {
+    try{
+        $owner=Read-TransportJson (Join-Path $Root 'state/vpn-host.json')
+        $p=[Diagnostics.Process]::GetProcessById([int]$owner.pid)
+        # net48 HasExited requests elevated query rights; these two APIs need only limited query/synchronize.
+        try{return (-not $p.WaitForExit(0) -and $p.StartTime.ToUniversalTime().Ticks -eq [long]$owner.startedTicks)}finally{$p.Dispose()}
+    }catch{return $false}
 }

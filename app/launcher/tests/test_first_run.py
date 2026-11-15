@@ -155,7 +155,7 @@ class FirstRunTests(unittest.TestCase):
         tray = source('TrayContext.cs')
         facts = tray.split('void RefreshMain()', 1)[1].split('string TransportScript(', 1)[0]
         for call in ['StatusView.Read(home, "transport", maxAgeSec: 15)',
-                     'StatusView.Read(home, "vpn", maxAgeSec: 15)',
+                     'VpnStatus.Read(home)',
                      'StatusView.Read(home, "control", maxAgeSec: 30)', 'ServerHealthView.Read(home)']:
             self.assertIn(call, facts)
         for member in ['VpnInstalled', 'VpnWanted', 'VpnBusy', 'VpnError', 'Operation', 'DiskEnabled',

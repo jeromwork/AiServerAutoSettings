@@ -12,6 +12,8 @@ namespace RemoteAgents.Launcher
     // Pure policy, shared by startup, IPC and the window; no WinForms or process state.
     internal sealed class WindowModel
     {
+        internal static readonly int[] SetupSections = new[] { 0, 1, 8, 4, 2, 3, 6, 5, 7 }.Where(i => Product.VpnEnabled || i != 5).ToArray();
+        internal static readonly string[] StatusNames = new[] { "transport", "server", "control", "happier", "vpn" }.Where(s => Product.VpnEnabled || s != "vpn").ToArray();
         internal bool Visible { get; private set; }
         internal bool HintShown { get; private set; }
         internal WindowModel(bool hintShown = false) { HintShown = hintShown; }

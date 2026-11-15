@@ -23,12 +23,12 @@ namespace RemoteAgents.Launcher
         internal const string Bootstrap = "bootstrap", Server = "server", Connection = "connection", Bridge = "bridge", Account = "account",
             Disk = "disk", Vpn = "vpn", Proxy = "proxy", Lan = "lan";
         // Rows of the window, in the order a person reads them.
-        internal static readonly string[] Rows = { Server, Connection, Bridge, Account, Disk, Vpn, Proxy, Lan };
+        internal static readonly string[] Rows = new[] { Server, Connection, Bridge, Account, Disk, Vpn, Proxy, Lan }.Where(s => Product.VpnEnabled || s != Vpn).ToArray();
         // After «Сервер»: independent work overlaps; Account/Disk wait for Connection.
         // Proxy and Lan share the server network lock: one after another.
-        internal static readonly string[] Parallel = { Connection, Bridge, Account, Disk, Vpn };
+        internal static readonly string[] Parallel = new[] { Connection, Bridge, Account, Disk, Vpn }.Where(s => Product.VpnEnabled || s != Vpn).ToArray();
         internal static readonly string[] Chain = { Proxy, Lan };
-        internal static readonly string[] Order = { Bootstrap, Server, Connection, Bridge, Account, Disk, Vpn, Proxy, Lan };
+        internal static readonly string[] Order = new[] { Bootstrap, Server, Connection, Bridge, Account, Disk, Vpn, Proxy, Lan }.Where(s => Product.VpnEnabled || s != Vpn).ToArray();
         // Top-level profile keys (config.paste.schema.json). Unknown keys are refused by ConfigBundle.Parse (stream A).
         internal static readonly string[] ProfileKeys = { "device", "server", "vpn", "happier", "bridge", "disk", "proxyOut", "lan", "serverNetwork", "tailscale", "telegramGateway", "agent", "components" };
         internal static bool Known(string key) { return ProfileKeys.Contains(key); }
@@ -75,7 +75,7 @@ namespace RemoteAgents.Launcher
                 case Bridge: return p.ContainsKey("bridge") || Json.Str(Json.Map(Json.Get(p, "device")), "name").Length > 0;
                 case Account: return p.ContainsKey("happier");
                 case Disk: return DiskDescribed(p);
-                case Vpn: return vpn.Keys.Any(k => k != "bootstrap");
+                case Vpn: return Product.VpnEnabled && vpn.Keys.Any(k => k != "bootstrap");
                 case Proxy: return p.ContainsKey("proxyOut");
                 case Lan: return p.ContainsKey("lan");
                 default: return false;
@@ -207,6 +207,7 @@ namespace RemoteAgents.Launcher
         internal static async Task<Dictionary<string, SectionOutcome>> Execute(IList<string> plan, Func<string, CancellationToken, Task<SectionOutcome>> run,
             Action<string, SectionState, string> report, CancellationToken token)
         {
+            plan = plan.Where(s => Product.VpnEnabled || s != ConfigSections.Vpn).ToList();
             var outcomes = new ConcurrentDictionary<string, SectionOutcome>();
             foreach (string s in plan) report(s, SectionState.Waiting, "в очереди");
             Func<string, Task<bool>> one = async s => {
@@ -267,6 +268,8 @@ namespace RemoteAgents.Launcher
     {
         internal static Dictionary<string, object> Run(string home, string bundle, string action, object request, CancellationToken token, Action<string> progress = null)
         {
+            if (action == "Vpn" && !Product.VpnEnabled)
+                return new Dictionary<string, object> { { "ok", true }, { "enabled", false }, { "summary", "VPN отключено в этой версии" } };
             string requestFile = Path.Combine(home, "state", "wizard-request-" + Guid.NewGuid().ToString("N") + ".json"), output = requestFile + ".out", live = requestFile + ".progress";
             var gate = new object(); int readLines = 0;
             Action read = () => {

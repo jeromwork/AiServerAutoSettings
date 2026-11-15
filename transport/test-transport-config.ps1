@@ -378,8 +378,8 @@ try{
             [pscustomobject]@{DestinationPrefix='0.0.0.0/1';InterfaceIndex=1;NextHop='198.51.100.9'},
             [pscustomobject]@{DestinationPrefix='128.0.0.0/1';InterfaceIndex=3;NextHop='0.0.0.0'})}
     $conf=Find-VpnConflicts $snap @(11) 'RemoteAgents-TUN'
-    Assert ($conf.conflict -and $conf.items.Count -eq 2) 'конфликты: только адаптер и маршрут'
-    Assert (@($conf.items|Where-Object {$_.name -in @('OpenVPN','Tailscale','RemoteAgents-TUN')}).Count -eq 0) 'OpenVPN/Tailscale/наш адаптер не конфликтуют'
+    Assert ($conf.conflict -and $conf.items.Count -eq 3) 'конфликты: только адаптер и маршрут'
+    Assert (@($conf.items|Where-Object {$_.name -in @('Tailscale','RemoteAgents-TUN')}).Count -eq 0 -and @($conf.items|Where-Object {$_.name -eq 'OpenVPN'}).Count -eq 1) 'OpenVPN с полным маршрутом конфликтует, частичный Tailscale и наш адаптер — нет'
     Assert (@($conf.items|Where-Object {$_.kind -eq 'process'}).Count -eq 0) 'процессы служат лишь подсказкой имени'
     $empty=[pscustomobject]@{Processes=@();Adapters=@();Routes=@()}
     Assert (-not (Find-VpnConflicts $empty).conflict) 'нет конфликтов на пустом снимке'
@@ -396,7 +396,17 @@ try{
     $teredo=[pscustomobject]@{Processes=@();Adapters=@([pscustomobject]@{ifIndex=18;Name='Teredo Tunneling Pseudo-Interface';Status='Up';HardwareInterface=$false;Virtual=$true;InterfaceDescription='Teredo Tunneling Pseudo-Interface'});Routes=@([pscustomobject]@{DestinationPrefix='::/0';InterfaceIndex=18;NextHop='::';InterfaceAlias='Teredo Tunneling Pseudo-Interface'})}
     Assert (-not (Find-VpnConflicts $teredo).conflict) 'встроенный Teredo с ::/0 — не чужой VPN'
     $teredo.Adapters=@();Assert (-not (Find-VpnConflicts $teredo).conflict) 'скрытый Teredo без адаптера в снимке — не чужой VPN'
+    foreach($name in @('OpenVPN','Tailscale')){
+        $vpnSnapshot=[pscustomobject]@{Processes=@();Adapters=@([pscustomobject]@{ifIndex=12;Name=$name;Status='Up';HardwareInterface=$false;InterfaceDescription=($name+' Tunnel')});Routes=@([pscustomobject]@{InterfaceIndex=12;DestinationPrefix='10.15.0.0/16';NextHop='0.0.0.0'})}
+        Assert (-not (Find-VpnConflicts $vpnSnapshot).conflict) ($name+' с частичными маршрутами не конфликт')
+        foreach($prefixes in @(@('0.0.0.0/0'),@('0.0.0.0/1','128.0.0.0/1'),@('::/1','8000::/1'))){
+            $vpnSnapshot.Routes=@($prefixes|ForEach-Object {[pscustomobject]@{InterfaceIndex=12;DestinationPrefix=$_;NextHop='0.0.0.0'}})
+            Assert ((Find-VpnConflicts $vpnSnapshot).conflict) ($name+' full-tunnel отвергнут: '+($prefixes -join ','))
+        }
+    }
     $settings|Add-Member Vpn ([pscustomobject]@{enabled=$false;excludeCidrs=@('198.51.100.0/24')})
+    $ipProbe=Copy-TransportObject $settings;$ipProbe.Vpn|Add-Member -Force checkUrl 'https://198.51.100.1/'
+    $bad=$false;try{Get-VpnOptions $ipProbe|Out-Null}catch{$bad=$true};Assert $bad 'IP-only checkUrl cannot silently skip protected DNS health'
     $realText=${function:Invoke-TransportText}
     try{function Invoke-TransportText($Exe,$Arguments){$script:fakeHop}
         $exclusions=Get-VpnExclusions $settings $paths $snap @{'entry.example.com'=@('203.0.113.55')} -Root $work
@@ -407,10 +417,20 @@ try{
     foreach($candidate in $paths.Candidates){
         if($candidate.tunCapable){
             $tun=New-VpnTunConfig $settings $paths $candidate.tag $exclusions 'Ethernet';$tunConfigs+=@($tun)
-            Assert ($tun.inbounds[0].type -eq 'tun' -and $tun.inbounds[0].auto_route -and -not $tun.inbounds[0].strict_route -and $tun.inbounds[0].stack -eq 'system') 'TUN system/auto_route/strict_route'
-            Assert (@($tun.outbounds|Where-Object {$_.type -in @('ssh','socks')}).Count -eq 0 -and $tun.route.final -eq 'vpn-active') 'TUN без SSH и direct fallback'
-            Assert (($tun.route.rules[0].override_address -eq $settings.Profile.serverAddress) -and $tun.route.rules[0].override_port -eq (Get-TransportServerPort $settings.Profile)) 'служебная проба идёт до SSH сервера через TUN'
+            Assert ($tun.inbounds[0].type -eq 'tun' -and $tun.inbounds[0].auto_route -and $tun.inbounds[0].strict_route -and $tun.inbounds[0].stack -eq 'system') 'TUN system/auto_route/strict_route'
+            Assert (@($tun.outbounds|Where-Object {$_.type -in @('ssh','socks')}).Count -eq 0 -and $tun.route.final -eq 'vpn-active') 'TUN без SSH и с VPN final'
+            foreach($process in @('powershell.exe','python.exe','pythonw.exe','ssh.exe','sing-box.exe','syncthing.exe','SyncthingTray.exe')){Assert ($process -in $tun.route.rules[0].process_name) ('прямой обход для '+$process)}
+            Assert ('RemoteAgents.exe' -notin $tun.route.rules[0].process_name -and 'RemoteVPN.exe' -notin $tun.route.rules[0].process_name) 'проба из хозяина не обходит TUN'
+            Assert ($tun.route.rules[0].outbound -eq 'vpn-direct' -and $tun.route.rules[4].outbound -eq 'vpn-direct') 'обход процессов и адресов до DNS/final'
+            Assert ($tun.dns.final -eq 'vpn-dns' -and $tun.dns.servers.Count -eq 2 -and $tun.dns.servers[1].type -eq 'https' -and $tun.dns.servers[1].path -eq '/dns-query' -and $tun.dns.servers[1].tls.enabled -and -not $tun.dns.servers[1].tls.insecure -and $tun.dns.servers[1].bind_interface -eq 'Ethernet' -and -not $tun.dns.servers[1].detour) 'DNS сайтов через проверенный HTTPS напрямую; UDP bootstrap не обслуживает сайты'
+            Assert (($tun.outbounds|Where-Object {$_.tag -eq 'vpn-direct'}).bind_interface -eq 'Ethernet') 'direct привязан к физическому интерфейсу'
+            Assert ($tun.route.rules[5].action -eq 'hijack-dns' -and $tun.route.rules[6].port[0] -eq 53) 'UDP/TCP DNS перехвачен с прямым resolver'
+            Assert ($tun.route.rules[1].ip_cidr[0] -eq '198.18.0.1/32' -and $tun.route.rules[1].action -eq 'route-options' -and $tun.route.rules[3].outbound -eq 'vpn-active' -and $tun.route.rules[1].override_address -eq 'example.com' -and $tun.route.rules[1].override_port -eq 443) 'лёгкая HTTPS-проба синтетического IP идёт только через VPN'
+            Assert ($tun.route.rules[2].action -eq 'resolve' -and $tun.route.rules[2].server -eq 'vpn-dns' -and $tun.route.rules[2].disable_cache -and $tun.route.rules[2].disable_optimistic_cache -and $tun.route.rules[2].timeout -eq '500ms') 'каждая TUN-проба проверяет защищённый DNS без кэша до VPN outbound'
             if($SingBox){$file=Join-Path $work 'tun-check.json';Write-TransportJson $file $tun;Test-TransportConfigFile $SingBox $file}
+            $splitDns=New-VpnTunConfig $settings $paths $candidate.tag $exclusions 'Ethernet' -StrictRoute $false
+            Assert (-not $splitDns.inbounds[0].strict_route -and $splitDns.dns.final -eq 'vpn-dns' -and $splitDns.route.final -eq 'vpn-active') 'частичный DNS отключает только strict_route, сохраняет DoH и VPN final'
+            if($SingBox){$file=Join-Path $work 'tun-split-dns-check.json';Write-TransportJson $file $splitDns;Test-TransportConfigFile $SingBox $file}
         }else{
             $bad=$false;try{New-VpnTunConfig $settings $paths $candidate.tag $exclusions 'Ethernet'|Out-Null}catch{$bad=$true};Assert $bad ('SSH запрещён в TUN '+$candidate.tag)
         }
@@ -419,24 +439,10 @@ try{
     # Find-NetRoute возвращает IPAddress И Route: тестируем оба объекта и чужой интерфейс.
     function Find-NetRoute {param($RemoteIPAddress,$ErrorAction) @([pscustomobject]@{IPAddress='172.31.255.1';InterfaceIndex=4},[pscustomobject]@{DestinationPrefix='0.0.0.0/1';InterfaceIndex=4})}
     try{Assert-VpnTunRoute '198.18.0.1' 4;$bad=$false;try{Assert-VpnTunRoute '198.18.0.1' 3}catch{$bad=$true};Assert $bad 'маршрут вне TUN отвергается'}finally{Remove-Item function:Find-NetRoute}
-    # Проверяем watchdog на mock ScheduledTasks: никакие настоящие задачи не создаются.
-    $oldSystemRoot=$env:SystemRoot;$env:SystemRoot=$work;$taskCalls=@{}
-    function New-ScheduledTaskAction {param($Execute,$Argument) $script:taskCalls.action=[pscustomobject]@{Execute=$Execute;Argument=$Argument};$script:taskCalls.action}
-    function New-ScheduledTaskPrincipal {param($UserId,$LogonType,$RunLevel) $script:taskCalls.principal=$RunLevel;@{}}
-    function New-ScheduledTaskSettingsSet {param([switch]$AllowStartIfOnBatteries,[switch]$DontStopIfGoingOnBatteries,[switch]$StartWhenAvailable,$ExecutionTimeLimit) @{}}
-    function New-ScheduledTaskTrigger {param([switch]$Once,$At) $script:taskCalls.at=$At;@{}}
-    function Register-ScheduledTask {param($TaskName,$Action,$Trigger,$Principal,$Settings,[switch]$Force) $script:taskCalls.name=$TaskName}
-    # WindowsIdentity недоступен на Linux: отдельный helper principal тестируется через mock ниже.
-    # Сама сборка action/trigger вынесена в переносимую функцию; UserId передаётся явно.
-    try{
-        Register-VpnRollbackTask $work 'test-session' (Join-Path $PSScriptRoot 'Vpn.Tun.ps1') -UserId 'test-user'
-        Assert ($taskCalls.name -eq (Get-VpnTaskNames $work).Rollback -and $taskCalls.principal -eq 'Highest') 'отдельная задача отката с highest'
-        Assert (($taskCalls.at-(Get-Date)).TotalSeconds -gt 295 -and ($taskCalls.at-(Get-Date)).TotalSeconds -le 300) 'watchdog через пять минут'
-        Assert ($taskCalls.action.Argument -match '-Rollback' -and $taskCalls.action.Argument -match 'test-session') 'watchdog привязан к своему сеансу'
-    }finally{
-        $env:SystemRoot=$oldSystemRoot
-        foreach($name in @('New-ScheduledTaskAction','New-ScheduledTaskPrincipal','New-ScheduledTaskSettingsSet','New-ScheduledTaskTrigger','Register-ScheduledTask')){Remove-Item ('function:'+$name)}
-    }
+    # Lifecycle now belongs to the elevated NativeJob: task registration is absent.
+    Assert (-not (Test-Path function:Register-VpnRollbackTask)) 'нет 5-минутной задачи отката'
+    $vpnSource=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'Vpn.Tun.ps1'))
+    Assert ($vpnSource -notmatch 'Register-ScheduledTask|Start-ScheduledTask|AddMinutes\(5\)') 'новые VPN не создают задачи'
     $ownerTime=[DateTime]::UtcNow
     Write-TransportJson (Join-Path $work 'state/transport-owner.json') @{pid=111;exe=(Join-Path $work 'sing-box.exe');config=(Join-Path $work 'state/transport-sing-box.json');startedAt=$ownerTime.ToString('o')}
     $ownership=[pscustomobject]@{Processes=@(

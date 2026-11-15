@@ -103,7 +103,7 @@ namespace RemoteAgents.Launcher
             if (vpnError.Length > 0)
                 view.Banner = DisableFailed(facts, vpn)
                     ? Banner(Tone.Error, vpnError, "Подробнее", "details")
-                    : Banner(Tone.Error, "Не удалось включить VPN. " + vpnError, "Включить снова", "vpn-on");
+                    : Banner(Tone.Error, vpnError.StartsWith("VPN выключен", StringComparison.Ordinal) ? vpnError : "Не удалось включить VPN. " + vpnError, "Включить снова", "vpn-on");
             else if (transport.Count == 0)
                 view.Banner = Banner(Tone.Warning, "Проверяем связь с сервером…", "", "");
             else if (!Json.Bool(transport, "ok"))
@@ -124,17 +124,17 @@ namespace RemoteAgents.Launcher
         {
             string state = Json.Str(vpn, "state");
             card.Visible = facts.IsVpnProduct || facts.VpnInstalled;
-            card.On = facts.VpnBusy ? facts.VpnWanted : facts.VpnWanted || state == "on"
-                || Json.Bool(vpn, "enabled") && state != "stopping";
-            card.SwitchEnabled = !facts.VpnBusy && string.IsNullOrEmpty(facts.Operation);
-            card.SwitchText = facts.VpnBusy ? (facts.VpnWanted ? "Включается…" : "Выключается…") : card.On ? "Вкл" : "Выкл";
+            card.On = facts.VpnBusy ? facts.VpnWanted : state == "on" || Json.Bool(vpn, "enabled") && state != "stopping";
+            bool starting = state == "starting" || state == "awaiting-uac";
+            card.SwitchEnabled = !facts.VpnBusy && !starting && string.IsNullOrEmpty(facts.Operation);
+            card.SwitchText = starting ? "Включается…" : facts.VpnBusy ? (facts.VpnWanted ? "Включается…" : "Выключается…") : card.On ? "Вкл" : "Выкл";
             card.Tone = Tone.Warning;
             if (facts.VpnBusy) card.State = card.SwitchText;
-            else if (VpnProblem(facts, vpn).Length > 0) { card.State = DisableFailed(facts, vpn) ? "Выключение VPN не подтверждено" : "VPN не включён"; card.Tone = Tone.Error; }
+            else if (VpnProblem(facts, vpn).Length > 0) { card.State = DisableFailed(facts, vpn) ? "Выключение VPN не подтверждено" : VpnWatchdog.FailureSummary(state).Length > 0 ? VpnWatchdog.FailureSummary(state) : "VPN не включён"; card.Tone = Tone.Error; }
             else if (state == "stopping") card.State = "Выключается…";
             else if (state == "starting" || state == "awaiting-uac")
                 card.State = state == "awaiting-uac" ? "Ожидается разрешение на включение" : "Включается…";
-            else if (!facts.VpnWanted && state == "off") { card.State = "VPN выключен"; card.Tone = Tone.Off; }
+            else if (state == "off") { card.State = "VPN выключен"; card.Tone = Tone.Off; }
             else if (vpn.Count == 0 || transport.Count == 0) card.State = "Ожидается проверка";
             else if (!Json.Bool(transport, "ok")) { card.State = "Нет связи с сервером"; card.Tone = Tone.Error; }
             else if (Json.Bool(vpn, "ok") && state == "on") { card.State = "Защита включена"; card.Tone = Tone.Ok; }
@@ -147,6 +147,11 @@ namespace RemoteAgents.Launcher
             if (metric.Length == 0) metric = StatusView.Speed(transport);
             bool hasPath = Json.Str(transport, "active").Length > 0 || Json.Str(transport, "title").Length > 0;
             card.Detail = hasPath ? "через «" + OneLine(TrayMenuModel.ActiveTitle(transport)) + "», " + metric : metric;
+            string dns = VpnStatus.DnsSummary(vpn);
+            if (dns.Length > 0) {
+                card.Detail += " · " + OneLine(dns);
+                if (state == "on" && card.Tone == Tone.Ok) card.Tone = Tone.Warning;
+            }
             string pinned = Json.Str(transport, "pinnedTag");
             if (pinned.Length > 0 && Json.Str(transport, "mode") != "auto") {
                 var path = candidates.FirstOrDefault(c => Json.Str(c, "tag") == pinned)
@@ -219,6 +224,8 @@ namespace RemoteAgents.Launcher
         {
             if (!string.IsNullOrWhiteSpace(facts.VpnError))
                 return PlainReason(facts.VpnError, "Проверьте настройки и разрешение на включение.");
+            string reason = VpnWatchdog.FailureSummary(Json.Str(vpn, "state"));
+            if (reason.Length > 0) return reason;
             switch (Json.Str(vpn, "state")) {
                 case "conflict": return "Работает другой VPN. Отключите его перед включением этого VPN.";
                 case "error": return "Проверьте настройки и разрешение на включение.";
@@ -247,6 +254,8 @@ namespace RemoteAgents.Launcher
             if (!string.IsNullOrWhiteSpace(technical)) report.AppendLine(technical);
             report.AppendLine(TrayMenuModel.Connection(transport));
             AppendCard(report, view.Vpn.Title, view.Vpn.State, view.Vpn.Detail, view.Vpn.Visible);
+            string dns = VpnStatus.DnsDetail(facts.Vpn ?? Json.Map(null));
+            if (view.Vpn.Visible && dns.Length > 0) report.AppendLine(dns);
             AppendCard(report, view.Disk.Title, view.Disk.State, view.Disk.Detail, view.Disk.Visible);
             AppendCard(report, view.Happier.Title, view.Happier.State, view.Happier.Detail, view.Happier.Visible);
             if (view.Helper.Visible) report.AppendLine(view.Helper.State);

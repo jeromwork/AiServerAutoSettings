@@ -32,6 +32,8 @@ class PackagingTests(unittest.TestCase):
             self.assertIn('Start-WindowsControl.ps1', names)
             self.assertIn('disk/Install-RemoteDisk.ps1', names)
             self.assertIn('selftest.ps1', names)
+            self.assertIn('transport/Vpn.Legacy.ps1', names)
+            self.assertEqual(json.loads(z.read('transport/product-features.json')), {'vpnEnabled': True})
             self.assertIn('build/Wizard.Health.ps1', names)
             self.assertIn('function Get-WizardServerHealth', z.read('build/Wizard.Health.ps1').decode('utf-8-sig'))
             self.assertFalse(any(n.endswith(('.exe', '.dll', '.key', '.pem')) for n in names))
