@@ -449,6 +449,31 @@ function Add-TransportCandidateFailure($Failures,[string]$Tag,$ErrorRecord,[stri
     [void]$Failures.Add([pscustomobject]@{tag=$detail.candidate;diagnostic=$detail})
     Write-TransportLog $Root 'process-failed' $detail
 }
+# Discover only a unique configured peer; SSH still verifies the ORIGINAL server's
+# pinned host key. Names and Tailscale Online are not authentication/readiness.
+function Get-TransportTailscaleAddress([string]$Root,$Profile) {
+    try{
+        $config=Read-TransportJson (Join-Path $Root 'config.json')
+        $desired=$config.profile
+        if(-not $desired.tailscale.enabled -or -not $desired.tailscale.hostname -or $desired.server.address -cne $Profile.serverAddress){return $null}
+        $cli=@(Get-Command tailscale -CommandType Application -ErrorAction Stop)[0].Source
+        $status=ConvertFrom-Json (Invoke-DiskProcess $cli @('status','--json') -TimeoutSeconds 3)
+        if($status.BackendState -ne 'Running' -or -not $status.TUN){return $null}
+        $name=([string]$desired.tailscale.hostname).TrimEnd('.')
+        $peers=@($status.Peer.PSObject.Properties|ForEach-Object {$_.Value}|Where-Object {
+            -not $_.Expired -and ($_.HostName -ieq $name -or ([string]$_.DNSName).TrimEnd('.') -ieq $name)
+        })
+        if($peers.Count -ne 1){return $null}
+        foreach($address in @($peers[0].TailscaleIPs)){
+            $ip=$null
+            if([Net.IPAddress]::TryParse([string]$address,[ref]$ip) -and $ip.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork){
+                $bytes=$ip.GetAddressBytes()
+                if($bytes[0] -eq 100 -and $bytes[1] -ge 64 -and $bytes[1] -le 127){return [string]$ip}
+            }
+        }
+    }catch{} # Missing/stopped/old CLI leaves existing paths usable.
+    return $null
+}
 function Get-TransportCandidates($Settings,[string]$Root) {
     $p=$Settings.Profile;$t=Copy-TransportObject $Settings.Transport;$o=$Settings.Options;$out=New-Object Collections.ArrayList;$c=New-Object Collections.ArrayList;$tunnels=New-Object Collections.ArrayList;$failures=New-Object Collections.ArrayList
     # Personal route is a local overlay, kept outside the public server catalog.
@@ -495,6 +520,14 @@ function Get-TransportCandidates($Settings,[string]$Root) {
     [void]$out.Add($ssh);[void]$c.Add([pscustomobject]@{tag=$ssh.tag;port=0})
     }catch{Add-TransportCandidateFailure $failures 'singbox-ssh-direct' $_ $Root}
     }
+    $tailscale=Get-TransportTailscaleAddress $Root $p
+    if($tailscale){try{
+        $keys=@(Get-TransportHostKeys $p.sshExecutable $p.serverAddress $p.knownHostsPath)
+        if(-not $keys.Count){throw 'Нет закреплённого ключа хоста'}
+        $ts=@{type='ssh';tag='tailscale';server=$tailscale;server_port=(Get-TransportServerPort $p);user=$p.login;private_key_path=$p.keyPath;host_key=$keys}
+        Set-TransportHostKeyAlgorithms $ts
+        [void]$out.Add($ts);[void]$c.Add([pscustomobject]@{tag='tailscale';port=0})
+    }catch{Add-TransportCandidateFailure $failures 'tailscale' $_ $Root}}
     foreach($relay in @($t.relays)){
         if($null -eq $relay -or -not (Test-TransportEnabled $relay)){continue};try{Assert-TransportName $relay.name;Assert-TransportCandidateSettings $relay 'relays' $t
         if(-not (Get-TransportValue $relay 'host' $relay.server) -or [int]$relay.port -lt 1 -or [int]$relay.port -gt 65535){throw 'Неполный ретранслятор'}
@@ -827,6 +860,7 @@ function Get-TransportCandidateInfo([string]$Tag,$Transport) {
     $kind=$Tag;$via='сервер';$label='VLESS';$title='VLESS напрямую'
     switch -Regex ($Tag){
         '^vless-direct$' {$kind='vless';break}
+        '^tailscale$' {$kind='ssh';$via='Tailscale';$title='Tailscale';break}
         '^singbox-ssh-direct$' {$kind='ssh';$title='SSH напрямую';break}
         '^openssh-proxy$' {$kind='openssh';$via='локальный прокси';$title='OpenSSH через локальный прокси';break}
         '^openssh-direct$' {$kind='openssh';$title='OpenSSH напрямую';break}
