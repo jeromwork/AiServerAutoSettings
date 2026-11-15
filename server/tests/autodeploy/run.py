@@ -22,11 +22,14 @@ PREFIX = 'ra-apply-' + uuid.uuid4().hex[:10]
 containers = []
 
 
-def call(args, input=None, check=True, timeout=600):
-    r = subprocess.run([str(a) for a in args], input=input, text=True, capture_output=True, timeout=timeout)
+def call(args, input=None, check=True, timeout=600, env=None):
+    r = subprocess.run([str(a) for a in args], input=input, text=True, capture_output=True, timeout=timeout, env=env)
     if check and r.returncode:
         # Do not dump stdin, credentials, private key or subprocess traces.
-        raise AssertionError('Stand command failed: ' + str(args[0]) + ' (code ' + str(r.returncode) + ')')
+        detail = r.stderr[-2500:]
+        for secret in ('ROOT_FIXTURE_SENTINEL', 'PROXY_SENTINEL', 'LAN_SENTINEL', 'TS_SENTINEL'):
+            detail = detail.replace(secret, '<redacted>')
+        raise AssertionError('Stand command failed: ' + str(args[0]) + ' (code ' + str(r.returncode) + '): ' + detail)
     return r
 
 
@@ -53,10 +56,25 @@ def new_vps(label, temp, gateway):
             break
         time.sleep(.2)
     inside(name, 'systemctl', 'start', 'ssh')
-    inside(name, 'useradd', '-m', '-s', '/bin/bash', 'worker')
+    inside(name, 'chpasswd', input='root:ROOT_FIXTURE_SENTINEL\n')
+    put(name, '/etc/ssh/sshd_config.d/01-fixture.conf', 'PermitRootLogin yes\nPasswordAuthentication yes\n', '644')
+    inside(name, 'systemctl', 'restart', 'ssh')
     inside(name, 'mkdir', '-p', '/root/.ssh')
     put(name, '/root/.ssh/authorized_keys', (temp / 'key.pub').read_text())
     inside(name, 'chmod', '700', '/root/.ssh')
+    home = temp / label
+    home.mkdir()
+    address = inside(name, 'hostname', '-I').stdout.split()[0]
+    known = home / 'known_hosts'
+    known.write_text(address + ' ' + inside(name, 'cat', '/etc/ssh/ssh_host_ed25519_key.pub').stdout)
+    sshconf = home / 'ssh.conf'; sshconf.write_text('Host *\n  BatchMode yes\n  StrictHostKeyChecking yes\n')
+    askpass = home / 'askpass'
+    askpass.write_text('#!/bin/sh\nprintf %s ROOT_FIXTURE_SENTINEL\n'); askpass.chmod(0o700)
+    boot = call([PWSH, '-NoProfile', '-NonInteractive', '-File', HERE / 'bootstrap.ps1',
+                 '-Address', address, '-Key', temp / 'key', '-Known', known, '-Config', sshconf,
+                 '-Askpass', askpass, '-Bundle', REPO], timeout=900)
+    assert boot.stdout.strip() == 'bootstrap-ready'
+    print('PASS: actual production root-password login, OS dependencies and worker-key bootstrap', flush=True)
     docker('cp', temp / 'origin.crt', name + ':/usr/local/share/ca-certificates/ra-fixture.crt')
     inside(name, 'update-ca-certificates')
     gateway_ip = inside(gateway, 'hostname', '-I').stdout.split()[0]
@@ -65,6 +83,9 @@ def new_vps(label, temp, gateway):
     inside(name, 'ip', 'route', 'add', 'table', '500', '11.123.45.67/32', 'via', gateway_ip, 'dev', 'eth0')
     inside(name, 'ip', 'rule', 'add', 'pref', '32000', 'to', '11.123.45.67/32', 'lookup', '500')
     inside(name, 'ip', 'route', 'add', '11.123.45.68/32', 'via', gateway_ip, 'dev', 'eth0')
+    put(name, '/etc/systemd/system/fixture-topology.service', '[Unit]\nAfter=network.target\nBefore=remoteagents-reconcile.service\n[Service]\nType=oneshot\nExecStart=/usr/sbin/ip route replace 11.123.45.68/32 via ' + gateway_ip + ' dev eth0\n[Install]\nWantedBy=multi-user.target\n', '644')
+    inside(name, 'systemctl', 'daemon-reload')
+    inside(name, 'systemctl', 'enable', 'fixture-topology.service')
     # Tailscale is the only mocked service/package; its CLI checks the auth-key
     # file and userspace flags, and refuses route/DNS acceptance.
     docker('cp', HERE / 'tailscale_mock.py', name + ':/usr/local/bin/tailscale')
@@ -75,25 +96,35 @@ def new_vps(label, temp, gateway):
     inside(name, 'dpkg', '-i', '/run/tailscale.deb')
     put(name, '/etc/systemd/system/tailscaled.service', '[Service]\nExecStart=/bin/sleep infinity\n[Install]\nWantedBy=multi-user.target\n', '644')
     inside(name, 'systemctl', 'daemon-reload')
-    home = temp / label
-    home.mkdir()
-    address = inside(name, 'hostname', '-I').stdout.split()[0]
-    known = home / 'known_hosts'
-    known.write_text(address + ' ' + inside(name, 'cat', '/etc/ssh/ssh_host_ed25519_key.pub').stdout)
-    sshconf = home / 'ssh.conf'; sshconf.write_text('Host *\n  BatchMode yes\n  StrictHostKeyChecking yes\n')
     profile = home / 'profile.json'
-    profile.write_text(json.dumps(dict(sshExecutable='/usr/bin/ssh', serverAddress=address, login='root',
+    profile.write_text(json.dumps(dict(sshExecutable='/usr/bin/ssh', serverAddress=address, login='worker',
                                       keyPath=str(temp / 'key'), knownHostsPath=str(known), configPath=str(sshconf),
-                                      arguments=['root@' + address])))
+                                      arguments=['-F', str(sshconf), '-l', 'worker', '-i', str(temp / 'key'), '-o', 'IdentitiesOnly=yes',
+                                                 '-o', 'UserKnownHostsFile=' + str(known), '-o', 'GlobalKnownHostsFile=none',
+                                                 '-o', 'StrictHostKeyChecking=yes', '-o', 'BatchMode=yes', '-T', address])))
     (home / 'config.json').write_text(json.dumps(dict(schema=1, version=1, transport=dict(profilePath=str(profile)), components={})))
     # Deny direct oracle access: a successful IP probe must use CONNECT.
     inside(gateway, 'nft', 'add', 'rule', 'inet', 'fixture', 'input', 'ip', 'saddr', address, 'tcp', 'dport', '8443', 'reject')
     return name, home, address
 
 
+def verify_managed_user(name):
+    public = inside(name, 'cat', '/root/.ssh/authorized_keys').stdout.strip().splitlines()[0]
+    command = 'IFS= read -r ra_user; IFS= read -r ra_key; export ra_user ra_key; exec bash /src/build/server-ssh-user.sh'
+    payload = 'remoteagents\n' + public + '\n'
+    inside(name, 'bash', '-c', command, input=payload)
+    marker = '/var/lib/remote-agents/managed-user-v1'
+    assert inside(name, 'cat', marker).stdout.strip() == 'remoteagents:/home/remoteagents:v1'
+    assert inside(name, 'stat', '-c', '%u:%g:%a', marker).stdout.strip() == '0:0:644'
+    before = inside(name, 'cat', '/home/remoteagents/.ssh/authorized_keys').stdout
+    inside(name, 'bash', '-c', command, input=payload)
+    assert inside(name, 'cat', '/home/remoteagents/.ssh/authorized_keys').stdout == before
+    print('PASS: production canonical managed-user marker and repeated key bootstrap', flush=True)
+
+
 def engine(home, config, values, status=False):
     payload = json.dumps(config) + '\r\n---remoteagents-stdin---\r\n' + json.dumps(values) + '\r\n'
-    args = [PWSH, '-NoProfile', '-NonInteractive', '-File', REPO / 'build/ServerApply.ps1', '-HomePath', home]
+    args = [PWSH, '-NoProfile', '-NonInteractive', '-File', REPO / 'build/ServerApply.ps1', '-HomePath', home, '-PasswordPipe', 'synthetic-fixture', '-AskpassExecutable', home / 'askpass']
     if status:
         args.append('-StatusOnly')
     result = call(args, input=payload, check=False, timeout=900)
@@ -103,11 +134,12 @@ def engine(home, config, values, status=False):
 
 
 def main(temp):
-    docker('build', '-t', PREFIX, HERE)
+    docker('build', '--target', 'vps', '-t', PREFIX, HERE)
+    docker('build', '--target', 'fixture', '-t', PREFIX + '-fixture', HERE)
     docker('network', 'create', PREFIX)
     gateway = PREFIX + '-gateway'
     docker('run', '-d', '--name', gateway, '--network', PREFIX, '--cap-add', 'NET_ADMIN', '--device', '/dev/net/tun',
-           '--mount', 'type=bind,src=' + str(HERE) + ',dst=/fixture,readonly', PREFIX, '/bin/sleep', 'infinity')
+           '--mount', 'type=bind,src=' + str(HERE) + ',dst=/fixture,readonly', PREFIX + '-fixture', '/bin/sleep', 'infinity')
     containers.append(gateway)
     for ip in ('11.123.45.67', '11.123.45.68'):
         inside(gateway, 'ip', 'addr', 'add', ip + '/32', 'dev', 'eth0')
@@ -172,16 +204,74 @@ verb 3
     status = engine(home, config, values, status=True)
     assert status['command'] == 'status' and status['actions'] == [] and status['ok'], status
     print('PASS: second apply actions=[]; public push/default dropped; IPv6 LAN off; status read-only', flush=True)
+    # No EXE/manual apply after reboot or breakage: only installed boot units/timer.
+    docker('restart', target)
+    def wait_ready(label):
+        deadline = time.monotonic() + 120
+        last = {}
+        while time.monotonic() < deadline:
+            try:
+                last = engine(home, config, values, status=True)
+                if last.get('ok'):
+                    print('PASS: ' + label + ' ready in ' + str(round(120 - (deadline-time.monotonic()), 1)) + 's', flush=True)
+                    return
+            except Exception:
+                pass
+            time.sleep(2)
+        raise AssertionError(label + ' did not recover: ' + json.dumps(last))
+    wait_ready('real container restart')
+    inside(target, 'ip', '-4', 'rule', 'del', 'pref', '8990')
+    inside(target, 'ip', '-4', 'rule', 'del', 'pref', '9001')
+    inside(target, 'systemctl', 'stop', 'sing-box')
+    wait_ready('deleted ip rules and stopped sing-box, timer only')
+    put(target, '/etc/sing-box/config.json', '{corrupted')
+    inside(target, 'systemctl', 'stop', 'sing-box')
+    wait_ready('corrupted sing-box config, timer only')
+    inside(target, 'systemctl', 'stop', 'remoteagents-lan@clinic.service')
+    put(target, '/etc/remoteagents/lan/clinic/client.conf', '# corrupted')
+    put(target, '/etc/remoteagents/lan/clinic/config.json', '{corrupted')
+    wait_ready('corrupted OpenVPN profile/settings and stopped LAN, timer only')
+    assert engine(home, config, values)['actions'] == []
     put(target, '/run/export.json', json.dumps(dict(schema=1, version=1, serverAddress=address, serverPort=22, workerUser='worker',
-         hostKeys=[' '.join(inside(target, 'cat', '/etc/ssh/ssh_host_ed25519_key.pub').stdout.split()[:2])], stateDir='/run/export-state')))
+         hostKeys=[' '.join(inside(target, 'cat', '/etc/ssh/ssh_host_ed25519_key.pub').stdout.split()[:2])], stateDir='/run/export-state')), '644')
     exported = json.loads(inside(target, 'python3', '-I', '/src/server/remoteagents_config.py', '--config', '/run/export.json',
                                  'export', '--name', 'Clone', '--happier', 'new:Fixture').stdout)
     for key in ('serverNetwork', 'proxyOut', 'lan', 'tailscale', 'telegramGateway'):
         assert exported[key] == config[key]
     assert exported['secrets']['clinic-ovpn'] == ''
     print('PASS: config export includes all server sections and separate named secret slots', flush=True)
+    full = inside(target, 'python3', '-I', '/src/server/remoteagents_config.py', '--config', '/run/export.json',
+                  'export', '--name', 'Restore', '--happier', 'new:Fixture', '--include-server-secrets',
+                  '--master-password-stdin', '--output', '/run/full-config.json', input='MASTER_FIXTURE\n')
+    assert 'SENTINEL' not in full.stdout + full.stderr
+    assert inside(target, 'stat', '-c', '%a', '/run/full-config.json').stdout.strip() == '600'
+    denied = inside(target, 'runuser', '-u', 'worker', '--', 'python3', '-I', '/src/server/remoteagents_config.py',
+                    '--config', '/run/export.json', 'export', '--name', 'Denied', '--happier', 'new:Fixture',
+                    '--include-server-secrets', '--output', '/tmp/denied-export.json', check=False)
+    assert denied.returncode != 0 and 'root' in denied.stderr
+    assert 'SENTINEL' not in denied.stdout + denied.stderr
+    inside(target, 'chmod', '644', '/etc/remoteagents/server-apply/recovery.json')
+    unsafe = inside(target, 'python3', '-I', '/src/server/remoteagents_config.py', '--config', '/run/export.json',
+                    'export', '--name', 'Unsafe', '--happier', 'new:Fixture', '--include-server-secrets',
+                    '--output', '/run/unsafe-export.json', check=False)
+    assert unsafe.returncode != 0 and 'SENTINEL' not in unsafe.stdout + unsafe.stderr
+    inside(target, 'chmod', '600', '/etc/remoteagents/server-apply/recovery.json')
+    assert inside(target, 'test', '-e', '/run/unsafe-export.json', check=False).returncode != 0
+    encrypted = temp / 'full-config.json'
+    encrypted.write_text(inside(target, 'cat', '/run/full-config.json').stdout); encrypted.chmod(0o600)
+    dotnet = Path.home() / '.dotnet/dotnet'
+    env = dict(os.environ, DOTNET_PROCESSOR_COUNT='2', RA_E2E_MASTER='MASTER_FIXTURE')
+    call([dotnet, 'build', REPO / 'app/launcher/tests/PortableTests.csproj', '-c', 'Release',
+          '-p:ConfigE2E=true', '--nologo'], env=env, timeout=120)
+    pasted = json.loads(call([dotnet, REPO / 'app/launcher/tests/bin/Release/config-e2e/net10.0/PortableTests.dll',
+                             '--apply', temp / 'pasted', encrypted], env=env, timeout=120).stdout)
+    assert pasted['missing'] == [] and pasted['keyMaterialized'] and pasted['wrongMasterRefused'] and pasted['fullExportRoundtrip'] and pasted['aiHasNoKey']
+    call(['ssh', '-F', home / 'ssh.conf', '-o', 'UserKnownHostsFile=' + str(home / 'known_hosts'),
+          '-o', 'IdentitiesOnly=yes', '-i', pasted['serverKeyFile'], 'worker@' + address, 'true'])
+    print('PASS: root full export + master password -> actual C# Parse/Unlock/vault/materialize/export -> real SSH with exported key', flush=True)
+    verify_managed_user(target)
     # Verify the installed timer on a second clean VPS, with a deliberately
-    # revoked root key after the initial SSH has authenticated. TCP ports still
+    # locked root password/removed worker key after initial SSH authenticated. Ports still
     # answer, but confirmation in a NEW SSH session must fail.
     broken, broken_home, broken_address = new_vps('broken', temp, gateway)
     bad = json.loads(json.dumps(config)); bad['server']['address'] = broken_address
@@ -190,7 +280,8 @@ verb 3
         try:
             for _ in range(1800):
                 if inside(broken, 'test', '-f', '/var/lib/remoteagents/base-network/pending/state.json', check=False).returncode == 0:
-                    put(broken, '/root/.ssh/authorized_keys', '')
+                    inside(broken, 'passwd', '-l', 'root')
+                    put(broken, '/home/worker/.ssh/authorized_keys', '')
                     return
                 time.sleep(.2)
             errors.append('pending not reached')
@@ -224,4 +315,4 @@ if __name__ == '__main__':
             for container in reversed(containers):
                 docker('rm', '-f', container, check=False)
             docker('network', 'rm', PREFIX, check=False)
-            docker('image', 'rm', PREFIX, check=False)
+            docker('image', 'rm', PREFIX, PREFIX + '-fixture', check=False)

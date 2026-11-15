@@ -2,6 +2,7 @@
 """Isolated stand: authenticated CONNECT proxy + TLS IP oracle. No host install."""
 import base64
 import http.server
+import ipaddress
 import select
 import socket
 import socketserver
@@ -27,12 +28,22 @@ class Connect(socketserver.StreamRequestHandler):
         if headers.get('proxy-authorization') != 'Basic ' + base64.b64encode(b'fixture:PROXY_SENTINEL').decode():
             self.wfile.write(b'HTTP/1.1 407 Proxy Authentication Required\r\n\r\n'); return
         target = first.split()[1]
-        if target != '11.123.45.67:8443':
-            self.wfile.write(b'HTTP/1.1 403 Forbidden\r\n\r\n'); return
-        with socket.create_connection(('127.0.0.1', 8443)) as peer:
+        oracle = target == '11.123.45.67:8443'
+        endpoint = ('127.0.0.1', 8443)
+        if not oracle:
+            # A clean VPS downloads OpenVPN through proxyOut AFTER TUN starts.
+            # Permit public package HTTP/TLS, never an internal fixture service.
+            host, _, port = target.rpartition(':')
+            if port not in ('80', '443'):
+                self.wfile.write(b'HTTP/1.1 403 Forbidden\r\n\r\n'); return
+            addresses = socket.getaddrinfo(host, int(port), socket.AF_INET, socket.SOCK_STREAM)
+            endpoint = next((entry[4] for entry in addresses if ipaddress.ip_address(entry[4][0]).is_global), None)
+            if not endpoint:
+                self.wfile.write(b'HTTP/1.1 403 Forbidden\r\n\r\n'); return
+        with socket.create_connection(endpoint, timeout=15) as peer:
             self.wfile.write(b'HTTP/1.1 200 Connection established\r\n\r\n'); self.wfile.flush()
             with Path('/run/proxy-connections').open('a') as log:
-                log.write('CONNECT ip-oracle\n')
+                log.write('CONNECT ip-oracle\n' if oracle else 'CONNECT package HTTP/TLS\n')
             for _ in range(10000):
                 ready, _, _ = select.select([self.connection, peer], [], [], 30)
                 if not ready:

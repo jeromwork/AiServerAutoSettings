@@ -26,3 +26,8 @@ echo "server/tests: ${#cases[@]} тестов, все прошли"
 # Server-only Telegram gateway import; loopback and disposable HOME, no live services.
 timeout 60 python3 "$repo/server/tg-gateway/test_gateway.py" < /dev/null
 timeout 120 python3 "$repo/server/tg-gateway/test_install.py" < /dev/null
+
+# Slow, online Docker/systemd acceptance; opt in explicitly. Never uses host networking.
+if [[ ${SERVER_AUTODEPLOY_E2E:-0} == 1 ]]; then
+  python3 "$repo/server/tests/autodeploy/run.py"
+fi
