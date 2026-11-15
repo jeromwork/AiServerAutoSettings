@@ -240,8 +240,97 @@ def reconcile(api,identity):
                 if not matches:folders.append(current)
         except FOLDER_ERRORS as e:skipped(p.name,e)
 
+# Зависшие соединения устройства. Свой код, потому что у Syncthing нет настройки, которая сократила бы 300 с молчания
+# (ReceiveTimeout — константа протокола), а отказ новым соединениям на это время ломает подключение компьютера.
+# Когда у компьютера меняется сеть, туннель (sing-box/relay) рвётся молча: для сервера все
+# соединения — это 127.0.0.1:<порт> → его слушающий порт, и локальные сокеты остаются «живыми». Пока Syncthing не признает их
+# мёртвыми (нет данных 300 с, проверка раз в 150 с, то есть 5-7,5 минут), он отказывает новым соединениям того же устройства
+# («уже есть нужное число»): клиент видит EOF при обмене Hello, а сервер пишет об отказе только на уровне DEBUG, причём такой
+# отказ бывает и у здорового устройства (клиент периодически пробует лишнее соединение — замерено на стенде): по журналу
+# зависание не отличить.
+# Надёжный признак — молчание: по протоколу BEP живой peer шлёт по каждому соединению хотя бы пинг раз в 90 с (на 2.1.7 замерено
+# 45-90,6 с), поэтому устройство, у которого ни одно соединение не получило ни байта дольше STALE_AFTER_S, зависло. Это один
+# GET /rest/system/connections за запуск; что видели в прошлый раз — в connection-watch.json. Лечение: pause и сразу resume
+# именно этого устройства (старые соединения закрываются, клиент подключается заново), не чаще раза в HEAL_COOLDOWN_S.
+STALE_AFTER_S,HEAL_COOLDOWN_S=120,60
+watch=s/'connection-watch.json'
+def number(value):return isinstance(value,(int,float)) and not isinstance(value,bool)
+def load_watch():
+    # Битый или чужой файл — не повод ломать bootstrap: наблюдение просто начинается заново.
+    try:data=json.loads(watch.read_text(encoding='utf-8'))
+    except (OSError,ValueError):data={}
+    return {k:data[k] if isinstance(data,dict) and isinstance(data.get(k),dict) else {} for k in ('devices','healed','resume')}
+def save_watch(state):
+    if not any(state.values()):
+        watch.unlink(missing_ok=True);return
+    data=json.dumps(state,sort_keys=True,separators=(',',':')).encode()
+    if watch.exists() and watch.read_bytes()==data:return
+    # Без fsync: состояние при сбое питания можно потерять, наблюдение тогда начнётся заново. Запись при трафике — раз в 2 с.
+    watch.parent.mkdir(parents=True,exist_ok=True)
+    fd,tmp=tempfile.mkstemp(dir=watch.parent)
+    try:
+        with os.fdopen(fd,'wb') as out:out.write(data)
+        os.replace(tmp,watch)
+    finally:
+        if os.path.exists(tmp):os.unlink(tmp)
+def device_call(api,verb,device_id):api('system/'+verb+'?device='+urllib.parse.quote(device_id,safe=''),'POST')
+def recycle_device(api,device_id):
+    # pause закрывает все соединения устройства (асинхронно, обычно за 0,1 с), resume пускает клиента обратно.
+    # Возобновляем при любом исходе ожидания и повторяем при сбое: устройство не должно остаться на паузе по нашей вине.
+    device_call(api,'pause',device_id)
+    try:
+        for _ in range(15):
+            if not api('system/connections')['connections'].get(device_id,{}).get('connected'):break
+            time.sleep(.2)
+    finally:
+        for attempt in range(3):
+            try:device_call(api,'resume',device_id);break
+            except FOLDER_ERRORS:
+                if attempt==2:raise
+                time.sleep(.5)
+def device_label(api,device_id):
+    try:name=api('config/devices/'+urllib.parse.quote(device_id,safe='')).get('name')
+    except FOLDER_ERRORS:name=None
+    # Имя задаёт другая сторона: управляющие символы не должны превратить одну строку журнала в несколько.
+    name=re.sub(r'[\x00-\x1f\x7f]',' ',name).strip() if isinstance(name,str) else ''
+    return (name+' ' if name else '')+'('+device_id[:7]+')'
+def watch_connections(api,now=None):
+    now=time.time() if now is None else now
+    old=load_watch();stats=api('system/connections')['connections']
+    resume=dict(old['resume']);devices={};healed={};stale=[]
+    # Остаток прерванного лечения (сбой между pause и resume): поставленное нами на паузу устройство возобновляем.
+    for device_id in list(resume):
+        try:
+            if stats.get(device_id,{}).get('paused'):device_call(api,'resume',device_id)
+            del resume[device_id]
+        except FOLDER_ERRORS as e:skipped(device_id[:7],e)
+    # Время лечения хранится только пока действует пауза между лечениями; часы, ушедшие назад, её не продлевают.
+    for device_id,at in old['healed'].items():
+        if number(at) and 0<=now-at<HEAL_COOLDOWN_S:healed[device_id]=at
+    for device_id,c in sorted(stats.items()):
+        if not c.get('connected') or c.get('paused'):continue
+        parts=[c['primary']]+(c.get('secondary') or []) if 'primary' in c else [c]
+        # Любое изменение (байты входящего, появилось или закрылось соединение) — признак жизни: молчание отсчитывается заново.
+        sig=';'.join('%s|%s|%s'%(p.get('address'),p.get('startedAt'),p.get('inBytesTotal')) for p in parts)
+        before=old['devices'].get(device_id)
+        since=before.get('since') if isinstance(before,dict) and before.get('sig')==sig else None
+        if not number(since) or since>now:since=now
+        devices[device_id]=dict(sig=sig,since=since)
+        if now-since>=STALE_AFTER_S and device_id not in healed:stale.append((device_id,now-since))
+    for device_id,silent in stale:
+        label=device_id[:7]
+        try:
+            # Пометка до паузы: если запуск оборвётся посреди лечения, следующий вернёт устройство из паузы.
+            resume[device_id]=now;save_watch(dict(devices=devices,healed=healed,resume=resume))
+            label=device_label(api,device_id)
+            recycle_device(api,device_id)
+            del resume[device_id];healed[device_id]=now;devices[device_id]['since']=now
+            print('RemoteDisk: '+label+': соединения молчат '+str(int(silent))+' с, устройство перезапущено через pause/resume',file=sys.stderr)
+        except FOLDER_ERRORS as e:skipped(label,e)
+    save_watch(dict(devices=devices,healed=healed,resume=resume))
+
 def main():
-    for path in (s,cfg,binary,s/'ports.json',s/'bootstrap.lock',s/'syncthing.log',s/'syncthing.pid'):safe(path)
+    for path in (s,cfg,binary,s/'ports.json',s/'bootstrap.lock',s/'syncthing.log',s/'syncthing.pid',watch):safe(path)
     if action not in ('add-device','channel-config','bootstrap','install-auto'):raise ValueError('Неизвестная команда')
     payload=a[1] if len(a)==2 else None
     if payload=='--stdin':
@@ -307,6 +396,9 @@ def main():
             try:reconcile(api,identity)
             except FOLDER_ERRORS as e:print('RemoteDisk: устройство зарегистрировано, папки сервера пока не обработаны: '+describe(e),file=sys.stderr)
             print('{}');return
+        # До reconcile: долгая запись папок не должна откладывать лечение, а сбой проверки не должен останавливать папки.
+        try:watch_connections(api)
+        except Exception as e:skipped('соединения устройств',e)
         reconcile(api,identity)
         print(json.dumps(dict(deviceId=identity,listen=ports['listen'])))
 try:main()
