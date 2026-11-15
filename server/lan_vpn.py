@@ -271,7 +271,15 @@ def pushed_routes(env):
     for key in sorted(env):
         if re.fullmatch(r'route_network_[0-9]+', key):
             index = key.rsplit('_', 1)[1]
-            values.extend(parse_route([env[key], env.get('route_netmask_' + index, '255.255.255.255')]))
+            try:
+                network = ipaddress.IPv4Network(env[key] + '/' + env.get('route_netmask_' + index, '255.255.255.255'),
+                                                strict=False)
+            except ValueError:
+                raise Error('route требует числовые IPv4 network/netmask.') from None
+            # A gateway may push public routes (e.g. its own Internet bypass). They are never
+            # executed (route-noexec), so drop them: only RFC1918 LAN subnets reach the server.
+            if any(network.subnet_of(p) for p in PRIVATE):
+                values.append(str(network))
     return networks(values)
 
 

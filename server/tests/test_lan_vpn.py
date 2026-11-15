@@ -119,13 +119,21 @@ class ImportTests(unittest.TestCase):
             with self.subTest(subnet=subnet), self.assertRaises(lan.Error):
                 lan.networks([subnet])
 
-    def test_push_ignores_split_default_and_rejects_public(self):
+    def test_push_ignores_split_default_and_public(self):
         env = {'route_network_1': '0.0.0.0', 'route_netmask_1': '128.0.0.0',
                'route_network_2': '128.0.0.0', 'route_netmask_2': '128.0.0.0',
                'route_network_3': '10.124.0.0', 'route_netmask_3': '255.255.0.0',
                'route_ipv6_network_1': '::/0'}
         self.assertEqual(lan.pushed_routes(env), ['10.124.0.0/16'])
-        env.update(route_network_4='203.0.113.0', route_netmask_4='255.255.255.0')
+        # Public, CGNAT and private-straddling pushes are dropped, never routed into the LAN.
+        env.update(route_network_4='203.0.113.0', route_netmask_4='255.255.255.0',
+                   route_network_5='100.64.0.0', route_netmask_5='255.192.0.0',
+                   route_network_6='192.168.0.0', route_netmask_6='255.254.0.0',
+                   route_network_7='192.168.88.0', route_netmask_7='255.255.255.0',
+                   route_network_8='104.18.32.47')
+        self.assertEqual(lan.pushed_routes(env), ['10.124.0.0/16', '192.168.88.0/24'])
+        self.assertEqual(lan.pushed_routes({'route_network_1': '8.8.8.0', 'route_netmask_1': '255.255.255.0'}), [])
+        env.update(route_network_9='not-an-ip')
         with self.assertRaises(lan.Error):
             lan.pushed_routes(env)
 
