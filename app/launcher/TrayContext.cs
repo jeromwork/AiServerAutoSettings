@@ -147,10 +147,10 @@ namespace RemoteAgents.Launcher
             foreach (var j in actionJobs) j.Dispose(); actionJobs.Clear();
             definition = BundleDefinition.Load(engine.Folder(engine.Current));
             if (mainWindow != null && !mainWindow.IsDisposed) mainWindow.RebindBundle(engine.Folder(engine.Current));
-            foreach (var c in definition.Components.Where(c => Product.VpnEnabled || c.Name != "vpn")) runtimes.Add(new ComponentRuntime(c, c.Name == "vpn" ? false : Wanted(c), home, engine.Folder(engine.Current), log));
+            foreach (var c in definition.Components.Where(c => Product.VpnEnabled || c.Name != "vpn")) runtimes.Add(new ComponentRuntime(c, Wanted(c), home, engine.Folder(engine.Current), log));
             RefreshMenu();
         }
-        bool Wanted(Component c) { return config.Wanted(c); }
+        bool Wanted(Component c) { return c.Name != "vpn" && config.Wanted(c); }
         void Tick()
         {
             if (closing || ticking || definition == null) return; ticking = true;

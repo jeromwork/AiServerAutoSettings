@@ -32,6 +32,7 @@ class Lifecycle(unittest.TestCase):
             for banned in ('Register-ScheduledTask', 'Start-ScheduledTask', 'New-NetRoute', 'AddMinutes(5)'):
                 self.assertNotIn(banned, source)
         self.assertIn("$ParentPid -le 0 -or -not $HostExe", script)
+        self.assertIn('return c.Name != "vpn" && config.Wanted(c);', tray)
         self.assertNotIn('CheckVpn(vpn);', tray[tray.index('async void WatchHealth'):tray.index('void ShowMain')])
         shutdown = tray[tray.index('protected override void ExitThreadCore'):]
         self.assertLess(shutdown.index('state/vpn.stop'), shutdown.index('stop.Cancel()'))
