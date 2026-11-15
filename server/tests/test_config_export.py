@@ -152,6 +152,8 @@ class ConfigExportTests(unittest.TestCase):
         path.write_text(json.dumps(desired)); path.chmod(0o644)
         self.e.c['serverConfig'] = str(path); self.e.write()
         exported, result = self.e.export()
+        self.assertEqual(exported['proxyOut']['ipv6'], 'block')
+        desired['proxyOut']['ipv6'] = 'block'
         for k, v in desired.items():
             self.assertEqual(exported[k], v)
         self.assertEqual(exported['secrets']['lan-office-ovpn'], '')

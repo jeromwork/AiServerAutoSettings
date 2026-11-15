@@ -797,7 +797,7 @@ def server_sections(c):
         return {}
     require(path.is_absolute(), 'serverConfig: нужен абсолютный путь.')
     data = json.loads(read_trusted(path, 'Серверный снимок'))
-    keys = {'serverNetwork', 'proxyOut', 'lan', 'tailscale', 'telegramGateway', 'agent'}
+    keys = {'deployment', 'serverNetwork', 'proxyOut', 'lan', 'tailscale', 'telegramGateway', 'agent'}
     require(isinstance(data, dict) and not set(data) - keys, 'Неверный серверный снимок; значения скрыты.')
     # The exact same published schema rejects inline credentials/unknown fields.
     import importlib.util
@@ -808,6 +808,8 @@ def server_sections(c):
         reconciler.validate({'kind': CONFIG_KIND, 'schema': 1, **data})
     except Exception:
         raise Error('Серверный снимок не соответствует схеме; значения скрыты.') from None
+    if 'proxyOut' in data:
+        data['proxyOut'].setdefault('ipv6', 'block')
     return data
 
 

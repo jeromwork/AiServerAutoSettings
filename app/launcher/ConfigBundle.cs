@@ -110,6 +110,7 @@ namespace RemoteAgents.Launcher
             var component = O(D("enabled", B()));
             var props = D(
                 "kind", D("const", "remoteagents-config"), "schema", D("const", 1),
+                "deployment", O(D("method", E("host", "docker"), "dockerfile", S(2048, 1), "image", S(2048, 1))),
                 "device", O(D("name", S(80, 1, "^[^\\r\\n\\x00]+$"))),
                 "server", O(D("address", Host(), "port", N(1, 65535), "login", User(),
                     "hostKeys", A(S(4096, 1, "^[^\\r\\n\\x00]+$"), 32), "key", Ref("server-key"), "rootPassword", Ref("server-root-password"), "routes", A(route, 32))),
@@ -147,6 +148,8 @@ namespace RemoteAgents.Launcher
                 root = StrictParse(text) as Dictionary<string, object>;
             } catch { throw Bad("Конфиг должен быть корректным JSON без повторяющихся полей"); }
             Validate(root, SchemaDocument(), "конфиг");
+            var exit = Json.Map(Json.Get(root, "proxyOut"));
+            if (root.ContainsKey("proxyOut") && !exit.ContainsKey("ipv6")) exit["ipv6"] = "block";
             var p = new ParsedConfig { Profile = new Dictionary<string, object>(root), Secrets = new Dictionary<string, string>(StringComparer.Ordinal), Protection = new Dictionary<string, object>() };
             p.Profile.Remove("secrets");
             var secrets = Json.Map(Json.Get(root, "secrets"));
@@ -245,6 +248,8 @@ namespace RemoteAgents.Launcher
                 string kind = Json.Str(row, "kind");
                 if ((kind != "proxy" && row.ContainsKey("proxy")) || (kind != "hop" && row.ContainsKey("hop"))) throw Bad("Поля маршрута не соответствуют kind");
             }
+            var tail = Json.Map(Json.Get(profile, "tailscale"));
+            if (tail.ContainsKey("userspace") && !Json.Bool(tail, "userspace")) throw Bad("Tailscale сервера поддерживает только userspace без маршрутов");
             // disk.folders: names of server folders (top level in ~/Disk), each with an optional absolute path on this computer.
             // Earlier formats (nested paths, directions, «external») are read and ignored by DiskChoice, never refused here.
             var choice = DiskChoice.FromProfile(profile);

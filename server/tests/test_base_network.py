@@ -113,7 +113,7 @@ class BaseTests(unittest.TestCase):
         self.assertFalse(f.path('/etc/sudoers.d').exists())
 
     def test_missing_ipv6_or_secret_or_existing_config_never_activates(self):
-        for variant in ('ipv6', 'secret', 'existing'):
+        for variant in ('secret', 'existing'):
             with self.subTest(variant=variant):
                 f, c = self.fresh()
                 values = dict(VALUES)

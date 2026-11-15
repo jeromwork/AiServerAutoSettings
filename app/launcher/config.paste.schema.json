@@ -1314,6 +1314,34 @@
       "type": "string",
       "minLength": 0,
       "maxLength": 2048
+    },
+    "deployment": {
+      "type": "object",
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "host",
+            "docker"
+          ]
+        },
+        "dockerfile": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "image": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "hint": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2048
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false,

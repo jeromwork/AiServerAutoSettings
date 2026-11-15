@@ -276,19 +276,18 @@ class ApplyTests(unittest.TestCase):
         f.exit = '1.1.1.1'
         result = f.engine(ssh_checked=True).run('apply')
         self.assertFalse(result['ok'])
-        self.assertEqual(result['actions'], ['nft -f', 'ip -4', 'systemctl restart'])
+        self.assertEqual(result['actions'], ['nft -f', 'ip -4', 'nft -f', 'systemctl restart'])
         self.assertTrue(all(r['state'] == 'blocked' for r in result['parts']))
         self.assertFalse(f.path('/etc/sudoers.d').exists())
 
-    def test_ipv6_unspecified_warns_without_blocking_other_parts(self):
+    def test_ipv6_unspecified_defaults_to_block(self):
         f = self.fake
         f.v6 = True
         result = f.complete()
         self.assertTrue(result['ok'], result)
         row = next(r for r in result['parts'] if r['part'] == 'ipv6')
-        self.assertTrue(row['warning'])
-        self.assertIn('мимо sing-box', row['summary'])
-        self.assertNotIn('remoteagents_ipv6', f.nft)
+        self.assertEqual(row['state'], 'ready')
+        self.assertIn('remoteagents_ipv6', f.nft)
         self.assertNotIn(['systemctl', 'restart', 'sing-box'], f.calls)
 
     def test_ipv6_block_allow_and_unset_preserves_existing_policy(self):
@@ -328,6 +327,7 @@ class ApplyTests(unittest.TestCase):
     def test_manual_patch_is_adopted_and_watch_repairs_only_own_guard(self):
         f = self.fake
         manual = app.inbound_nft(f.iface).replace('0x5241', '0x00005241')
+        f.nft['remoteagents_ipv6'] = app.ipv6_nft()
         f.nft['remoteagents_inbound'] = manual
         f.reply_rules['-4'] = [{'priority': 8990, 'table': 254, 'src': 'all', 'fwmark': '0x5241'}]
         self.assertTrue(f.complete()['ok'])
@@ -388,13 +388,13 @@ class ApplyTests(unittest.TestCase):
         f.system.runner = missing_one_rule
         result = f.engine(ssh_checked=True).run('apply')
         self.assertFalse(result['ok'])
-        self.assertEqual(result['actions'], ['nft -f', 'ip -4', 'systemctl restart'])
+        self.assertEqual(result['actions'], ['nft -f', 'ip -4', 'nft -f', 'systemctl restart'])
 
     def test_failed_repair_stays_blocked(self):
         f = self.fake
         f.rules, f.repair = False, False
         result = f.engine(ssh_checked=True).run('apply')
-        self.assertEqual(result['actions'], ['nft -f', 'ip -4', 'systemctl restart'])
+        self.assertEqual(result['actions'], ['nft -f', 'ip -4', 'nft -f', 'systemctl restart'])
         self.assertFalse(result['ok'])
 
     def test_proxy_change_uses_existing_manager_and_waits_for_new_ssh(self):

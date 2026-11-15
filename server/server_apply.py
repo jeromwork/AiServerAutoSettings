@@ -132,6 +132,9 @@ def validate(config):
     check(config, schema)
     proxy = config.get('proxyOut')
     if proxy:
+        proxy.setdefault('ipv6', 'block')
+    require(config.get('tailscale', {}).get('userspace', True), 'Tailscale сервера поддерживает только userspace без интерфейса и маршрутов.')
+    if proxy:
         if 'exitIp' in proxy:
             ipaddress.ip_address(proxy['exitIp'])
     network = config.get('serverNetwork', {})
@@ -326,7 +329,10 @@ def nft_normal(text):
 
 class Engine:
     def __init__(self, config, secrets=None, system=None, ssh_checked=False, public_only=False):
-        self.config, self.secrets = config, secrets or {}
+        self.config = json.loads(json.dumps(config))
+        if 'proxyOut' in self.config:
+            self.config['proxyOut'].setdefault('ipv6', 'block')
+        self.secrets = secrets or {}
         self.s = system or System()
         self.ssh_checked, self.public_only = ssh_checked, public_only
         self.rows = []
@@ -969,6 +975,9 @@ class Engine:
 
     def run(self, command):
         apply = command == 'apply'
+        if self.config.get('deployment', {}).get('method', 'host') != 'host':
+            self.row('deployment', 'blocked', 'Развёртывание docker ещё не поддерживается')
+            return dict(schema=1, command=command, parts=self.rows, actions=[], ok=False)
         ready = self.part('internet', lambda: self.egress(apply))
         parts = [('inbound', lambda: self.inbound(apply)), ('ipv6', lambda: self.ipv6(apply)),
                  ('egressWatch', lambda: self.watch(apply))]
@@ -993,7 +1002,7 @@ class Engine:
                 if apply and name == 'inbound' and not result:
                     ready = False
         if apply and all(r['state'] == 'ready' for r in self.rows):
-            public = {k: v for k, v in self.config.items() if k in ('serverNetwork', 'proxyOut', 'lan', 'tailscale', 'telegramGateway', 'agent')}
+            public = {k: v for k, v in self.config.items() if k in ('deployment', 'serverNetwork', 'proxyOut', 'lan', 'tailscale', 'telegramGateway', 'agent')}
             self.s.write('/var/lib/remoteagents-status/server-config.json', json.dumps(public, ensure_ascii=False, sort_keys=True) + '\n', 0o644)
             os.chmod(self.s.path('/var/lib/remoteagents-status'), 0o755)
         if apply:

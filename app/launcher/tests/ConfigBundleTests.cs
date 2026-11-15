@@ -60,6 +60,14 @@ namespace RemoteAgents.Launcher
                 Json.Map(ipv6Config["proxyOut"])["ipv6"] = "invalid";
                 Reject(() => ConfigBundle.Parse(Json.Encode(ipv6Config)), "unknown IPv6 policy");
             }
+            var defaults = ConfigBundle.Parse("{\"kind\":\"remoteagents-config\",\"schema\":1,\"proxyOut\":{\"type\":\"http\",\"server\":\"proxy.example\",\"port\":8080}}");
+            Check(Json.Str(Json.Map(defaults.Profile["proxyOut"]), "ipv6") == "block", "new configs block IPv6 by default");
+            foreach (string method in new[]{"host", "docker"}) {
+                var deploy = ConfigBundle.D("kind", "remoteagents-config", "schema", 1, "deployment", ConfigBundle.D("method", method, "dockerfile", "server/docker/Dockerfile"));
+                var parsedDeploy = ConfigBundle.Parse(Json.Encode(deploy));
+                Check(ServerDeployment.Profile(parsedDeploy.Profile).ContainsKey("deployment"), "deployment method survives server projection: " + method);
+            }
+            Reject(() => ConfigBundle.Parse("{\"kind\":\"remoteagents-config\",\"schema\":1,\"tailscale\":{\"userspace\":false}}"), "server kernel Tailscale forbidden");
             string schemaPath = FindSchema();
             Check(Canonical(Json.Read(schemaPath)) == Canonical(ConfigBundle.SchemaDocument()), "published schema matches compiled schema");
             Check(ConfigBundle.Parse(File.ReadAllText(Path.Combine(Path.GetDirectoryName(schemaPath),"config.paste.example.json"))).Missing.Length == 2,"published example parses with missing secrets");
