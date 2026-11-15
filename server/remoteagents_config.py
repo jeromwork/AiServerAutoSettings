@@ -797,7 +797,7 @@ def server_sections(c):
         return {}
     require(path.is_absolute(), 'serverConfig: нужен абсолютный путь.')
     data = json.loads(read_trusted(path, 'Серверный снимок'))
-    keys = {'deployment', 'serverNetwork', 'proxyOut', 'lan', 'tailscale', 'telegramGateway', 'agent'}
+    keys = {'deployment', 'serverNetwork', 'proxyOut', 'lan', 'tailscale', 'telegramGateway', 'agent', 'serverComponents', 'agents', 'desktop', 'projectViews', 'sessions', 'ssh'}
     require(isinstance(data, dict) and not set(data) - keys, 'Неверный серверный снимок; значения скрыты.')
     # The exact same published schema rejects inline credentials/unknown fields.
     import importlib.util

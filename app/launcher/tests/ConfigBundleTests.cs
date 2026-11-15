@@ -68,6 +68,11 @@ namespace RemoteAgents.Launcher
                 Check(ServerDeployment.Profile(parsedDeploy.Profile).ContainsKey("deployment"), "deployment method survives server projection: " + method);
             }
             Reject(() => ConfigBundle.Parse("{\"kind\":\"remoteagents-config\",\"schema\":1,\"tailscale\":{\"userspace\":false}}"), "server kernel Tailscale forbidden");
+            var managed = ConfigBundle.Parse("{\"kind\":\"remoteagents-config\",\"schema\":1,\"serverComponents\":{\"disk\":{\"enabled\":true,\"identity\":{\"secret\":\"disk-id\"},\"discoveryIntervalSec\":5},\"bridge\":{\"enabled\":true},\"happier\":{\"enabled\":true,\"channel\":\"stable\"}},\"agents\":{\"codex\":{\"enabled\":true,\"version\":\"0.166.0\"},\"claude\":{\"enabled\":true,\"token\":{\"secret\":\"claude-token\"}}},\"desktop\":{\"enabled\":false},\"projectViews\":{\"enabled\":false},\"sessions\":{\"cleanupEnabled\":true,\"idleHours\":2,\"intervalMinutes\":15},\"ssh\":{\"keepaliveIntervalSec\":30,\"keepaliveCountMax\":3}}");
+            Check(managed.Missing.Contains("disk-id") && managed.Missing.Contains("claude-token"), "portable managed identities and provider credentials remain secret refs");
+            Check(ServerDeployment.Profile(managed.Profile).ContainsKey("agents") && ServerDeployment.Profile(managed.Profile).ContainsKey("serverComponents"), "EXE forwards user components and agents to root reconciler");
+            var loginOnly = ConfigBundle.Parse("{\"kind\":\"remoteagents-config\",\"schema\":1,\"agents\":{\"claude\":{\"enabled\":true,\"auth\":{\"secret\":\"missing-login\"}}}}");
+            Check(ConfigRequests.SecretsFor(ConfigSections.Server, loginOnly.Profile, n => false).Count == 0, "missing agent auth allows CLI install and server waiting state");
             string schemaPath = FindSchema();
             Check(Canonical(Json.Read(schemaPath)) == Canonical(ConfigBundle.SchemaDocument()), "published schema matches compiled schema");
             Check(ConfigBundle.Parse(File.ReadAllText(Path.Combine(Path.GetDirectoryName(schemaPath),"config.paste.example.json"))).Missing.Length == 2,"published example parses with missing secrets");

@@ -127,7 +127,18 @@ namespace RemoteAgents.Launcher
                     "serverFingerprint", S(95, 64, "^(?:[0-9A-Fa-f]{64}|[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){31})$"),
                     "subnets", A(S(18, 1), 64), "directEndpoint", B(), "dnsDomain", Host(), "dnsServer", Host()), "name", "kind", "ovpn"), 64),
                 "tailscale", O(D("enabled", B(), "hostname", S(63, 1, "^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$"), "authKey", Ref("tailscale-auth-key"), "userspace", B())),
-                "telegramGateway", O(D("enabled", B(), "port", N(1, 65535))),
+                "telegramGateway", O(D("enabled", B(), "port", N(1, 65535), "identity", Ref())),
+                "serverComponents", O(D(
+                    "disk", O(D("enabled", B(), "identity", Ref(), "discoveryIntervalSec", N(2, 60))),
+                    "bridge", O(D("enabled", B(), "identity", Ref())),
+                    "happier", O(D("enabled", B(), "identity", Ref(), "channel", E("stable"), "version", S(64, 1))))),
+                "agents", O(D(
+                    "codex", O(D("enabled", B(), "version", E("0.166.0"), "auth", Ref())),
+                    "claude", O(D("enabled", B(), "version", S(64, 1), "channel", E("stable"), "auth", Ref(), "token", Ref())))),
+                "desktop", O(D("enabled", B(), "backend", E("desktop", "native"))),
+                "projectViews", O(D("enabled", B())),
+                "sessions", O(D("cleanupEnabled", B(), "idleHours", N(0, 720), "intervalMinutes", N(1, 1440))),
+                "ssh", O(D("keepaliveIntervalSec", N(1, 3600), "keepaliveCountMax", N(1, 20))),
                 "agent", O(D("sudo", E("none", "apply", "full"))),
                 "components", O(D("transport", component, "disk", component, "control", component, "vpn", component)),
                 "secrets", D("type", "object", "properties", D(

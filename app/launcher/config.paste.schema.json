@@ -7,6 +7,34 @@
     "schema": {
       "const": 1
     },
+    "deployment": {
+      "type": "object",
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "host",
+            "docker"
+          ]
+        },
+        "dockerfile": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "image": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "hint": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2048
+        }
+      },
+      "additionalProperties": false
+    },
     "device": {
       "type": "object",
       "properties": {
@@ -1156,6 +1184,358 @@
           "minimum": 1,
           "maximum": 65535
         },
+        "identity": {
+          "type": "object",
+          "properties": {
+            "secret": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
+            },
+            "hint": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 2048
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "secret"
+          ],
+          "description": "Именованная ссылка; значение хранится только в secrets/vault"
+        },
+        "hint": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2048
+        }
+      },
+      "additionalProperties": false
+    },
+    "serverComponents": {
+      "type": "object",
+      "properties": {
+        "disk": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "identity": {
+              "type": "object",
+              "properties": {
+                "secret": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64,
+                  "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
+                },
+                "hint": {
+                  "type": "string",
+                  "minLength": 0,
+                  "maxLength": 2048
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "secret"
+              ],
+              "description": "Именованная ссылка; значение хранится только в secrets/vault"
+            },
+            "discoveryIntervalSec": {
+              "type": "integer",
+              "minimum": 2,
+              "maximum": 60
+            },
+            "hint": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 2048
+            }
+          },
+          "additionalProperties": false
+        },
+        "bridge": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "identity": {
+              "type": "object",
+              "properties": {
+                "secret": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64,
+                  "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
+                },
+                "hint": {
+                  "type": "string",
+                  "minLength": 0,
+                  "maxLength": 2048
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "secret"
+              ],
+              "description": "Именованная ссылка; значение хранится только в secrets/vault"
+            },
+            "hint": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 2048
+            }
+          },
+          "additionalProperties": false
+        },
+        "happier": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "identity": {
+              "type": "object",
+              "properties": {
+                "secret": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64,
+                  "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
+                },
+                "hint": {
+                  "type": "string",
+                  "minLength": 0,
+                  "maxLength": 2048
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "secret"
+              ],
+              "description": "Именованная ссылка; значение хранится только в secrets/vault"
+            },
+            "channel": {
+              "type": "string",
+              "enum": [
+                "stable"
+              ]
+            },
+            "version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "hint": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 2048
+            }
+          },
+          "additionalProperties": false
+        },
+        "hint": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2048
+        }
+      },
+      "additionalProperties": false
+    },
+    "agents": {
+      "type": "object",
+      "properties": {
+        "codex": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "version": {
+              "type": "string",
+              "enum": [
+                "0.166.0"
+              ]
+            },
+            "auth": {
+              "type": "object",
+              "properties": {
+                "secret": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64,
+                  "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
+                },
+                "hint": {
+                  "type": "string",
+                  "minLength": 0,
+                  "maxLength": 2048
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "secret"
+              ],
+              "description": "Именованная ссылка; значение хранится только в secrets/vault"
+            },
+            "hint": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 2048
+            }
+          },
+          "additionalProperties": false
+        },
+        "claude": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "channel": {
+              "type": "string",
+              "enum": [
+                "stable"
+              ]
+            },
+            "auth": {
+              "type": "object",
+              "properties": {
+                "secret": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64,
+                  "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
+                },
+                "hint": {
+                  "type": "string",
+                  "minLength": 0,
+                  "maxLength": 2048
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "secret"
+              ],
+              "description": "Именованная ссылка; значение хранится только в secrets/vault"
+            },
+            "token": {
+              "type": "object",
+              "properties": {
+                "secret": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64,
+                  "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
+                },
+                "hint": {
+                  "type": "string",
+                  "minLength": 0,
+                  "maxLength": 2048
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "secret"
+              ],
+              "description": "Именованная ссылка; значение хранится только в secrets/vault"
+            },
+            "hint": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 2048
+            }
+          },
+          "additionalProperties": false
+        },
+        "hint": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2048
+        }
+      },
+      "additionalProperties": false
+    },
+    "desktop": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "backend": {
+          "type": "string",
+          "enum": [
+            "desktop",
+            "native"
+          ]
+        },
+        "hint": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2048
+        }
+      },
+      "additionalProperties": false
+    },
+    "projectViews": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "hint": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2048
+        }
+      },
+      "additionalProperties": false
+    },
+    "sessions": {
+      "type": "object",
+      "properties": {
+        "cleanupEnabled": {
+          "type": "boolean"
+        },
+        "idleHours": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 720
+        },
+        "intervalMinutes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1440
+        },
+        "hint": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2048
+        }
+      },
+      "additionalProperties": false
+    },
+    "ssh": {
+      "type": "object",
+      "properties": {
+        "keepaliveIntervalSec": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600
+        },
+        "keepaliveCountMax": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
         "hint": {
           "type": "string",
           "minLength": 0,
@@ -1314,34 +1694,6 @@
       "type": "string",
       "minLength": 0,
       "maxLength": 2048
-    },
-    "deployment": {
-      "type": "object",
-      "properties": {
-        "method": {
-          "type": "string",
-          "enum": [
-            "host",
-            "docker"
-          ]
-        },
-        "dockerfile": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 2048
-        },
-        "image": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 2048
-        },
-        "hint": {
-          "type": "string",
-          "minLength": 0,
-          "maxLength": 2048
-        }
-      },
-      "additionalProperties": false
     }
   },
   "additionalProperties": false,

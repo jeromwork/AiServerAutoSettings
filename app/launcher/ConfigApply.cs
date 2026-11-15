@@ -30,7 +30,7 @@ namespace RemoteAgents.Launcher
         internal static readonly string[] Chain = { Proxy, Lan };
         internal static readonly string[] Order = new[] { Bootstrap, Server, Connection, Bridge, Account, Disk, Vpn, Proxy, Lan }.Where(s => Product.VpnEnabled || s != Vpn).ToArray();
         // Top-level profile keys (config.paste.schema.json). Unknown keys are refused by ConfigBundle.Parse (stream A).
-        internal static readonly string[] ProfileKeys = { "device", "server", "vpn", "happier", "bridge", "disk", "proxyOut", "lan", "deployment", "serverNetwork", "tailscale", "telegramGateway", "agent", "components" };
+        internal static readonly string[] ProfileKeys = { "device", "server", "vpn", "happier", "bridge", "disk", "proxyOut", "lan", "deployment", "serverNetwork", "tailscale", "telegramGateway", "agent", "serverComponents", "agents", "desktop", "projectViews", "sessions", "ssh", "components" };
         internal static bool Known(string key) { return ProfileKeys.Contains(key); }
         internal static string Title(string s)
         {
@@ -129,7 +129,7 @@ namespace RemoteAgents.Launcher
 
     internal static class ServerDeployment
     {
-        internal static readonly string[] Keys = { "deployment", "serverNetwork", "proxyOut", "lan", "tailscale", "telegramGateway", "agent" };
+        internal static readonly string[] Keys = { "deployment", "serverNetwork", "proxyOut", "lan", "tailscale", "telegramGateway", "agent", "serverComponents", "agents", "desktop", "projectViews", "sessions", "ssh" };
         internal static Dictionary<string, object> Profile(Dictionary<string, object> p, bool server = false)
         {
             var result = Keys.Where(p.ContainsKey).ToDictionary(k => k, k => p[k]);
@@ -514,7 +514,8 @@ namespace RemoteAgents.Launcher
                     var hop = Json.Map(Json.Get(Route(server, "hop"), "hop"));
                     string hopKey = SecretName(Json.Get(hop, "key"));
                     if (hopKey.Length == 0 || !available(hopKey)) { if (SecretName(Json.Get(hop, "password")).Length > 0) need(Json.Get(hop, "password")); else need(Json.Get(hop, "key")); }
-                    foreach (var reference in ConfigBundle.References(ServerDeployment.Profile(p))) need(reference);
+                    var requiredDeployment = ServerDeployment.Profile(p); requiredDeployment.Remove("agents");
+                    foreach (var reference in ConfigBundle.References(requiredDeployment)) need(reference);
                     break; }
                 case ConfigSections.Account: if (Json.Str(Json.Map(Json.Get(p, "happier")), "mode") != "new") need(Json.Get(Json.Map(Json.Get(p, "happier")), "key")); break;
                 case ConfigSections.Proxy: need(Json.Get(Json.Map(Json.Get(p, "proxyOut")), "password")); break;
