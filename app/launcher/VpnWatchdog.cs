@@ -9,7 +9,7 @@ namespace RemoteAgents.Launcher
     // wall clock is used only to reject stale/future transport evidence and resume gaps.
     internal sealed class VpnWatchdog
     {
-        internal const int IntervalMs = 2000, ProbeTimeoutMs = 900, PollMs = 50;
+        internal const int IntervalMs = 2000, ProbeTimeoutMs = 800, PollMs = 50;
         internal int Failures { get; private set; }
         internal bool Sample(bool transportOk, bool probeOk)
         { Failures = transportOk && probeOk ? 0 : Failures + 1; return Failures >= 2; }
