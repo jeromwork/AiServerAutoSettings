@@ -1327,7 +1327,8 @@
             "version": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 64
+              "maxLength": 64,
+              "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$(?![\\s\\S])"
             },
             "hint": {
               "type": "string",
@@ -1398,7 +1399,8 @@
             "version": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 64
+              "maxLength": 64,
+              "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$(?![\\s\\S])"
             },
             "channel": {
               "type": "string",

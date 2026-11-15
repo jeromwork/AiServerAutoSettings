@@ -47,6 +47,14 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(log.stat().st_mode & 0o777, 0o600)
         self.assertEqual(log.with_name(log.name + '.1').stat().st_mode & 0o777, 0o600)
 
+    def test_missing_backup_is_a_plan_change_even_when_services_match(self):
+        self.install()
+        self.f.path(recovery.ENVELOPE).unlink()
+        result = self.f.engine(self.c).run('plan')
+        self.assertEqual(result['actions'], [])
+        self.assertEqual(next(r['state'] for r in result['parts'] if r['part'] == 'recovery'), 'change')
+        self.assertFalse(result['ok'])
+
     def test_rotated_secret_updates_backup_even_when_service_needs_no_change(self):
         self.c['tailscale'] = dict(enabled=False, authKey={'secret': 'tailscale-auth-key'})
         self.install()

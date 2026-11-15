@@ -144,6 +144,29 @@ class ComponentsTests(unittest.TestCase):
         self.assertFalse(app.module('server_recovery').reconcile(app, self.f.system))
         self.assertNotEqual(file.read_text(), 'broken')
 
+    def test_existing_cli_login_is_captured_once_and_repaired_without_proxy_setup(self):
+        self.c.pop('proxyOut')
+        self.c['agents'] = {'claude': {'enabled': True}}
+        auth = '{"claudeAiOauth":{"accessToken":"SYNTHETIC_AUTH"}}'
+        file = self.f.path('/home/worker/.claude/.credentials.json')
+        self.f.write('/home/worker/.claude/.credentials.json', auth)
+        result = self.f.complete(self.c)
+        self.assertTrue(result['ok'], result)
+        self.assertTrue(self.f.engine(self.c).run('status')['ok'])
+        self.assertEqual(self.f.engine(self.c).run('apply')['actions'], [])
+        file.unlink()
+        self.assertTrue(app.module('server_recovery').reconcile(app, self.f.system))
+        self.assertEqual(file.read_text(), auth)
+
+    def test_version_cannot_be_an_installer_option(self):
+        for version in ('--uninstall', '--version', '0.2.17 --uninstall'):
+            self.c['serverComponents'] = {'happier': {'enabled': True, 'version': version}}
+            with self.assertRaises(app.Error):
+                app.validate(self.c)
+            with self.assertRaises(comp.Error):
+                comp.install_vendor(self.f.engine(self.c), 'happier', version)
+        self.assertEqual(self.f.calls, [])
+
     def test_no_codex_adoption_by_username(self):
         self.c['agents'] = {'codex': {'enabled': True}}
         result = self.f.engine(self.c)

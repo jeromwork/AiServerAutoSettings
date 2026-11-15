@@ -1070,7 +1070,7 @@ class Engine:
             if self.part('recovery', lambda: self.recovery(True)):
                 self.s.write('/var/lib/remoteagents-status/server-config.json', json.dumps(public, ensure_ascii=False, sort_keys=True) + '\n', 0o644)
                 os.chmod(self.s.path('/var/lib/remoteagents-status'), 0o755)
-        elif not apply and self.s.path('/etc/remoteagents/server-apply/recovery.json').exists():
+        elif not apply:
             self.part('recovery', lambda: self.recovery(False))
         if apply:
             self.part('log', lambda: self.s.audit(self.rows))

@@ -45,6 +45,12 @@ def hydrate(e):
                 item['identity'] = old['identity']
                 key = old['identity']['secret']
                 e.secrets.setdefault(key, saved['secrets'][key])
+        for name, item in e.config.get('agents', {}).items():
+            old = saved['config'].get('agents', {}).get(name, {})
+            if item.get('enabled') and not item.get('auth') and old.get('auth'):
+                item['auth'] = old['auth']
+                key = old['auth']['secret']
+                e.secrets.setdefault(key, saved['secrets'][key])
     except (ValueError, KeyError, TypeError):
         return
 
@@ -195,7 +201,7 @@ def bridge(e, apply):
     wanted = {'.local/share/codex-remote/' + n: p.read_text() for n, p in assets(e.s.source) if n in ('codex-windows-bridge.py', 'codex-bridge-session.py', 'server_node_catalog.py', 'server-agent-handoff.py')}
     ok = all(e.s.path(home / n).is_file() and e.s.path(home / n).read_text() == t for n, t in wanted.items())
     if saved:
-        ok = ok and io(e, 'bridge') == saved
+        ok = ok and e.code_current() and io(e, 'bridge') == saved
     if apply:
         e.install_code()
         if not ok:
@@ -264,6 +270,8 @@ def telegram_capture(e):
 
 
 def install_vendor(e, kind, expected=''):
+    if expected and not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?', expected):
+        raise Error('version: нужна точная версия CLI, например 0.2.17, без параметров установщика')
     _, _, home = e.worker()
     binary = home / ('.local/bin/claude' if kind == 'claude' else '.local/bin/happier')
     result = e.s.run(e.user_cmd(str(binary), '--version'), check=False)
@@ -313,6 +321,7 @@ def agents(e, kind, apply):
                 e.s.run(['bash', e.s.path('/usr/local/lib/remoteagents/server/assets/server-codex-v1.sh')], change=True, timeout=900)
         elif not installed:
             install_vendor(e, kind, expected)
+        e.install_code()  # also needed for an already-installed CLI without proxyOut
         if auth:
             # An auth secret is the vendor's complete JSON, not a made-up token.
             if not isinstance(json.loads(auth), dict):

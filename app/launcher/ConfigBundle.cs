@@ -131,10 +131,10 @@ namespace RemoteAgents.Launcher
                 "serverComponents", O(D(
                     "disk", O(D("enabled", B(), "identity", Ref(), "discoveryIntervalSec", N(2, 60))),
                     "bridge", O(D("enabled", B(), "identity", Ref())),
-                    "happier", O(D("enabled", B(), "identity", Ref(), "channel", E("stable"), "version", S(64, 1))))),
+                    "happier", O(D("enabled", B(), "identity", Ref(), "channel", E("stable"), "version", S(64, 1, @"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$"))))),
                 "agents", O(D(
                     "codex", O(D("enabled", B(), "version", E("0.166.0"), "auth", Ref())),
-                    "claude", O(D("enabled", B(), "version", S(64, 1), "channel", E("stable"), "auth", Ref(), "token", Ref())))),
+                    "claude", O(D("enabled", B(), "version", S(64, 1, @"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$"), "channel", E("stable"), "auth", Ref(), "token", Ref())))),
                 "desktop", O(D("enabled", B(), "backend", E("desktop", "native"))),
                 "projectViews", O(D("enabled", B())),
                 "sessions", O(D("cleanupEnabled", B(), "idleHours", N(0, 720), "intervalMinutes", N(1, 1440))),

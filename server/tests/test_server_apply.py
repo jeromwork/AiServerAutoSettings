@@ -162,6 +162,8 @@ class Fake:
         elif args[0] == 'runuser':
             if any(str(a).endswith('component_files.py') for a in args):
                 import subprocess as sp
+                if not Path(args[-1]).is_file():
+                    return sp.CompletedProcess(args, 127, '', '')
                 env = dict(os.environ, HOME=str(self.path('/home/worker')))
                 return sp.run(['python3', '-I', str(SOURCE / 'component_files.py')], input=kw['input'], text=True, capture_output=True, env=env)
             if any(str(a).endswith('install.sh') for a in args):
