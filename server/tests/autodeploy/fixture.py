@@ -8,6 +8,7 @@ import socket
 import socketserver
 import ssl
 import threading
+from urllib.parse import urlsplit
 from pathlib import Path
 
 class Origin(http.server.BaseHTTPRequestHandler):
@@ -27,7 +28,16 @@ class Connect(socketserver.StreamRequestHandler):
             k, _, v = line.partition(':'); headers[k.lower()] = v.strip()
         if headers.get('proxy-authorization') != 'Basic ' + base64.b64encode(b'fixture:PROXY_SENTINEL').decode():
             self.wfile.write(b'HTTP/1.1 407 Proxy Authentication Required\r\n\r\n'); return
-        target = first.split()[1]
+        method, target, protocol = first.split()
+        request_target = None
+        if method != 'CONNECT':
+            parsed = urlsplit(target)
+            if parsed.scheme != 'http' or not parsed.hostname:
+                return
+            target = parsed.hostname + ':' + str(parsed.port or 80)
+            request_target = parsed.path or '/'
+            if parsed.query:
+                request_target += '?' + parsed.query
         oracle = target == '11.123.45.67:8443'
         endpoint = ('127.0.0.1', 8443)
         if not oracle:
@@ -41,10 +51,15 @@ class Connect(socketserver.StreamRequestHandler):
             if not endpoint:
                 self.wfile.write(b'HTTP/1.1 403 Forbidden\r\n\r\n'); return
         with socket.create_connection(endpoint, timeout=15) as peer:
-            self.wfile.write(b'HTTP/1.1 200 Connection established\r\n\r\n'); self.wfile.flush()
+            if method == 'CONNECT':
+                self.wfile.write(b'HTTP/1.1 200 Connection established\r\n\r\n'); self.wfile.flush()
+            else:
+                forward = method + ' ' + request_target + ' ' + protocol + '\r\n'
+                forward += ''.join(k + ': ' + v + '\r\n' for k, v in headers.items() if k not in ('proxy-authorization', 'proxy-connection', 'connection'))
+                peer.sendall((forward + 'Connection: close\r\n\r\n').encode())
             with Path('/run/proxy-connections').open('a') as log:
-                log.write('CONNECT ip-oracle\n' if oracle else 'CONNECT package HTTP/TLS\n')
-            for _ in range(10000):
+                log.write('CONNECT ip-oracle\n' if oracle else ('CONNECT package HTTP/TLS\n' if method == 'CONNECT' else 'HTTP bootstrap/package\n'))
+            while True:
                 ready, _, _ = select.select([self.connection, peer], [], [], 30)
                 if not ready:
                     return

@@ -27,7 +27,7 @@ def call(args, input=None, check=True, timeout=600, env=None):
     if check and r.returncode:
         # Do not dump stdin, credentials, private key or subprocess traces.
         detail = r.stderr[-2500:]
-        for secret in ('ROOT_FIXTURE_SENTINEL', 'PROXY_SENTINEL', 'LAN_SENTINEL', 'TS_SENTINEL'):
+        for secret in ('ROOT_FIXTURE_SENTINEL', 'PROXY_SENTINEL', 'LAN_SENTINEL', 'TS_SENTINEL', 'CLAUDE_FIXTURE_SENTINEL', 'CODEX_FIXTURE_SENTINEL', 'HAPPY_FIXTURE_SENTINEL'):
             detail = detail.replace(secret, '<redacted>')
         raise AssertionError('Stand command failed: ' + str(args[0]) + ' (code ' + str(r.returncode) + '): ' + detail)
     return r
@@ -72,8 +72,9 @@ def new_vps(label, temp, gateway):
     askpass.write_text('#!/bin/sh\nprintf %s ROOT_FIXTURE_SENTINEL\n'); askpass.chmod(0o700)
     boot = call([PWSH, '-NoProfile', '-NonInteractive', '-File', HERE / 'bootstrap.ps1',
                  '-Address', address, '-Key', temp / 'key', '-Known', known, '-Config', sshconf,
-                 '-Askpass', askpass, '-Bundle', REPO], timeout=900)
+                 '-Askpass', askpass, '-Bundle', REPO], input='http://fixture:PROXY_SENTINEL@' + inside(gateway, 'hostname', '-I').stdout.split()[0] + ':3128', timeout=900)
     assert boot.stdout.strip() == 'bootstrap-ready'
+    assert 'HTTP bootstrap/package' in inside(gateway, 'cat', '/run/proxy-connections').stdout
     print('PASS: actual production root-password login, OS dependencies and worker-key bootstrap', flush=True)
     docker('cp', temp / 'origin.crt', name + ':/usr/local/share/ca-certificates/ra-fixture.crt')
     inside(name, 'update-ca-certificates')
@@ -97,9 +98,9 @@ def new_vps(label, temp, gateway):
     put(name, '/etc/systemd/system/tailscaled.service', '[Service]\nExecStart=/bin/sleep infinity\n[Install]\nWantedBy=multi-user.target\n', '644')
     inside(name, 'systemctl', 'daemon-reload')
     profile = home / 'profile.json'
-    profile.write_text(json.dumps(dict(sshExecutable='/usr/bin/ssh', serverAddress=address, login='worker',
+    profile.write_text(json.dumps(dict(sshExecutable='/usr/bin/ssh', serverAddress=address, login='remoteagents',
                                       keyPath=str(temp / 'key'), knownHostsPath=str(known), configPath=str(sshconf),
-                                      arguments=['-F', str(sshconf), '-l', 'worker', '-i', str(temp / 'key'), '-o', 'IdentitiesOnly=yes',
+                                      arguments=['-F', str(sshconf), '-l', 'remoteagents', '-i', str(temp / 'key'), '-o', 'IdentitiesOnly=yes',
                                                  '-o', 'UserKnownHostsFile=' + str(known), '-o', 'GlobalKnownHostsFile=none',
                                                  '-o', 'StrictHostKeyChecking=yes', '-o', 'BatchMode=yes', '-T', address])))
     (home / 'config.json').write_text(json.dumps(dict(schema=1, version=1, transport=dict(profilePath=str(profile)), components={})))
@@ -129,8 +130,21 @@ def engine(home, config, values, status=False):
         args.append('-StatusOnly')
     result = call(args, input=payload, check=False, timeout=900)
     report = json.loads(result.stdout)
-    assert all(s not in result.stdout + result.stderr for s in ('PROXY_SENTINEL', 'LAN_SENTINEL', 'TS_SENTINEL', 'BEGIN PRIVATE KEY'))
+    assert all(s not in result.stdout + result.stderr for s in ('PROXY_SENTINEL', 'LAN_SENTINEL', 'TS_SENTINEL', 'CLAUDE_FIXTURE_SENTINEL', 'CODEX_FIXTURE_SENTINEL', 'HAPPY_FIXTURE_SENTINEL', 'BEGIN PRIVATE KEY'))
     return report
+
+
+def happier_fixture(name):
+    inside(name, 'runuser', '-u', 'remoteagents', '--', 'mkdir', '-p', '/home/remoteagents/.local/bin')
+    inside(name, 'runuser', '-u', 'remoteagents', '--', 'rm', '-f', '/home/remoteagents/.local/bin/happier')
+    inside(name, 'runuser', '-u', 'remoteagents', '--', 'python3', '-c',
+           'from pathlib import Path; import sys; p=Path.home()/".local/bin/happier"; p.write_text(sys.stdin.read()); p.chmod(0o700)',
+           input=(HERE / 'happier_daemon_fixture.py').read_text())
+
+
+def device_id(name):
+    return json.loads(inside(name, 'runuser', '-u', 'remoteagents', '--', 'bash',
+                      '/home/remoteagents/.local/share/remote-disk/server-disk.sh', 'bootstrap').stdout)['deviceId']
 
 
 def main(temp):
@@ -179,21 +193,51 @@ verb 3
     target, home, address = new_vps('vps', temp, gateway)
     gateway_ip = inside(gateway, 'hostname', '-I').stdout.split()[0]
     profile = 'client\nremote 11.123.45.68 1194 tcp-client\nnobind\nauth-user-pass\n<ca>\n' + (temp / 'gateway.crt').read_text() + '</ca>\n'
-    config = dict(kind='remoteagents-config', schema=1, server=dict(address=address, login='worker'),
+    config = dict(kind='remoteagents-config', schema=1, server=dict(address=address, login='remoteagents'),
                   serverNetwork=dict(enabled=True, tunAddress='172.30.250.1/30', inboundPorts=[22, 443, 37091], inbounds={'secret': 'server-inbounds'}),
                   proxyOut=dict(type='http', server=gateway_ip, port=3128, login='fixture', password={'secret': 'proxy-pass'},
                                 exitIp='8.8.8.8', checkUrl='https://11.123.45.67:8443', ipv6='block'),
                   lan=[dict(name='clinic', kind='openvpn', ovpn={'secret': 'clinic-ovpn'}, auth={'secret': 'clinic-auth'},
                             serverFingerprint=pin, subnets=['10.123.0.0/24'], directEndpoint=True, testHost='10.123.0.1', testPort=1194)],
                   tailscale=dict(enabled=True, userspace=True, authKey={'secret': 'ts-auth'}, hostname='fixture'),
-                  telegramGateway=dict(enabled=True, port=8444), agent=dict(sudo='full'))
+                  telegramGateway=dict(enabled=True, port=8444), agent=dict(sudo='full'),
+                  serverComponents=dict(disk=dict(enabled=True, discoveryIntervalSec=2), bridge=dict(enabled=True)),
+                  ssh=dict(keepaliveIntervalSec=30, keepaliveCountMax=3),
+                  sessions=dict(cleanupEnabled=True, idleHours=2, intervalMinutes=15),
+                  agents=dict(codex=dict(enabled=True, version='0.166.0', auth={'secret': 'codex-auth'}),
+                              claude=dict(enabled=True, channel='stable', token={'secret': 'claude-token'})))
     values = {'proxy-pass': 'PROXY_SENTINEL', 'clinic-ovpn': profile, 'clinic-auth': json.dumps(dict(username='fixture', password='LAN_SENTINEL')),
               'ts-auth': 'TS_SENTINEL', 'server-inbounds': json.dumps([dict(type='mixed', tag='probe443', listen='0.0.0.0', listen_port=443),
                                                                    dict(type='mixed', tag='channel-probe', listen='0.0.0.0', listen_port=37091)])}
+    values.update({'codex-auth': json.dumps({'OPENAI_API_KEY': 'CODEX_FIXTURE_SENTINEL'}), 'claude-token': 'CLAUDE_FIXTURE_SENTINEL'})
     print('Applying one CRLF config through the production PowerShell engine...', flush=True)
     first = engine(home, config, values)
+    if not first['ok']:
+        # Installer output is public in this synthetic stand. Never print auth
+        # files, request stdin or real host credentials; redact fixture tokens.
+        for kind, script in (('codex', '/src/server-codex-v1.sh'), ('claude', '/src/server-claude-code.sh')):
+            if any(r['part'] == 'agents:' + kind and r['state'] == 'error' for r in first['parts']):
+                diagnostic = inside(target, 'bash', script, check=False, timeout=900)
+                detail = (diagnostic.stdout + diagnostic.stderr)[-2500:]
+                for secret in values.values():
+                    detail = detail.replace(secret, '<redacted>')
+                print('INSTALLER DIAGNOSTIC ' + kind + ' rc=' + str(diagnostic.returncode) + ': ' + detail, flush=True)
     assert first['ok'], first
     print('PASS: clean VPS, real TUN/OpenVPN/new SSH/Telegram, mock Tailscale; actions=' + str(len(first['actions'])), flush=True)
+    config['serverComponents']['happier'] = dict(enabled=True, version='0.2.17', channel='stable')
+    waiting = engine(home, config, values)
+    assert not waiting['ok'] and any(r['part'] == 'happier' and r['state'] == 'waiting' and 'нужен вход' in r['summary'] for r in waiting['parts']), waiting
+    print('PASS: actual Codex/Claude/Happier CLI installation; Happier without credentials waits for login', flush=True)
+    happier_fixture(target)
+    values['happier-identity'] = json.dumps({'.happier/settings.json': '{"machineId":"fixture"}', '.happier/access.key': '{"token":"HAPPY_FIXTURE_SENTINEL"}'})
+    config['serverComponents']['happier']['identity'] = {'secret': 'happier-identity'}
+    assert engine(home, config, values)['ok']
+    # Generate a real client credential and let the reconciler capture it.
+    telegram_client = json.loads(inside(target, 'runuser', '-u', 'remoteagents', '--', '/home/remoteagents/.local/bin/tg-gateway-keys', 'add', 'fixture', '--json').stdout)
+    assert engine(home, config, values)['ok']
+    expected_id = device_id(target)
+    expected_cert = inside(target, 'sha256sum', '/home/remoteagents/.local/opt/tg-gateway/tls/cert.pem').stdout.split()[0]
+    expected_keys = inside(target, 'sha256sum', '/home/remoteagents/.local/opt/tg-gateway/state/keys.json').stdout.split()[0]
     second = engine(home, config, values)
     assert second['ok'] and second['actions'] == [], second
     assert inside(target, 'cat', '/etc/remoteagents/lan/clinic/subnets').stdout.strip() == '10.123.0.0/24'
@@ -231,13 +275,38 @@ verb 3
     put(target, '/etc/remoteagents/lan/clinic/client.conf', '# corrupted')
     put(target, '/etc/remoteagents/lan/clinic/config.json', '{corrupted')
     wait_ready('corrupted OpenVPN profile/settings and stopped LAN, timer only')
+    # All user services are repaired ONLY by the production reconcile timer.
+    uid = inside(target, 'id', '-u', 'remoteagents').stdout.strip()
+    user_systemctl = ['runuser', '-u', 'remoteagents', '--', 'env', 'XDG_RUNTIME_DIR=/run/user/' + uid,
+                      'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/' + uid + '/bus', 'systemctl', '--user']
+    inside(target, *user_systemctl, 'stop', 'remote-disk-folders.timer', 'remoteagents-syncthing.service', 'tg-gateway.service', 'remoteagents-happier.service')
+    for path in ('.local/share/remote-disk/config.xml', '.local/share/remote-disk/key.pem', '.local/share/remote-disk/cert.pem',
+                 '.local/opt/tg-gateway/tls/key.pem', '.local/opt/tg-gateway/state/settings.json',
+                 '.local/opt/tg-gateway/state/keys.json', '.happier/access.key',
+                 '.local/share/codex-remote/codex-windows-bridge.py', '.codex/config.toml', '.claude.json',
+                 '.config/remoteagents/claude.env'):
+        put(target, '/home/remoteagents/' + path, '{corrupted')
+        inside(target, 'chown', 'remoteagents:remoteagents', '/home/remoteagents/' + path)
+    put(target, '/home/remoteagents/.local/opt/tg-gateway/state/keys.json', json.dumps({'version': 1, 'keys': {'fixture': {'sha256': 'broken', 'created': '2026-11-15'}}}))
+    inside(target, 'rm', '-f', '/home/remoteagents/.config/systemd/user/remoteagents-happier.service',
+           '/home/remoteagents/.config/systemd/user/tg-gateway.service',
+           '/home/remoteagents/.config/systemd/user/remote-disk-folders.timer.d/interval.conf',
+           '/home/remoteagents/.config/remoteagents/claude.env')
+    wait_ready('corrupted user configs/TLS, stopped Disk/Telegram/Happier, deleted units/drop-in/token, timer only')
+    assert device_id(target) == expected_id
+    assert inside(target, 'sha256sum', '/home/remoteagents/.local/opt/tg-gateway/tls/cert.pem').stdout.split()[0] == expected_cert
+    assert inside(target, 'sha256sum', '/home/remoteagents/.local/opt/tg-gateway/state/keys.json').stdout.split()[0] == expected_keys
+    # Actual package removal and standalone Syncthing binary deletion.
+    inside(target, 'apt-get', 'remove', '-y', 'openvpn', 'sing-box', timeout=180)
+    inside(target, 'rm', '-f', '/home/remoteagents/.local/share/remote-disk/bin/syncthing')
+    wait_ready('removed sing-box/OpenVPN packages and Syncthing binary, timer only')
     assert engine(home, config, values)['actions'] == []
-    put(target, '/run/export.json', json.dumps(dict(schema=1, version=1, serverAddress=address, serverPort=22, workerUser='worker',
+    put(target, '/run/export.json', json.dumps(dict(schema=1, version=1, serverAddress=address, serverPort=22, workerUser='remoteagents',
          hostKeys=[' '.join(inside(target, 'cat', '/etc/ssh/ssh_host_ed25519_key.pub').stdout.split()[:2])], stateDir='/run/export-state')), '644')
     exported = json.loads(inside(target, 'python3', '-I', '/src/server/remoteagents_config.py', '--config', '/run/export.json',
                                  'export', '--name', 'Clone', '--happier', 'new:Fixture').stdout)
     for key in ('serverNetwork', 'proxyOut', 'lan', 'tailscale', 'telegramGateway'):
-        assert exported[key] == config[key]
+        assert {k: v for k, v in exported[key].items() if k != 'identity'} == config[key] if isinstance(config[key], dict) else exported[key] == config[key]
     assert exported['secrets']['clinic-ovpn'] == ''
     print('PASS: config export includes all server sections and separate named secret slots', flush=True)
     full = inside(target, 'python3', '-I', '/src/server/remoteagents_config.py', '--config', '/run/export.json',
@@ -245,7 +314,7 @@ verb 3
                   '--master-password-stdin', '--output', '/run/full-config.json', input='MASTER_FIXTURE\n')
     assert 'SENTINEL' not in full.stdout + full.stderr
     assert inside(target, 'stat', '-c', '%a', '/run/full-config.json').stdout.strip() == '600'
-    denied = inside(target, 'runuser', '-u', 'worker', '--', 'python3', '-I', '/src/server/remoteagents_config.py',
+    denied = inside(target, 'runuser', '-u', 'remoteagents', '--', 'python3', '-I', '/src/server/remoteagents_config.py',
                     '--config', '/run/export.json', 'export', '--name', 'Denied', '--happier', 'new:Fixture',
                     '--include-server-secrets', '--output', '/tmp/denied-export.json', check=False)
     assert denied.returncode != 0 and 'root' in denied.stderr
@@ -267,44 +336,83 @@ verb 3
                              '--apply', temp / 'pasted', encrypted], env=env, timeout=120).stdout)
     assert pasted['missing'] == [] and pasted['keyMaterialized'] and pasted['wrongMasterRefused'] and pasted['fullExportRoundtrip'] and pasted['aiHasNoKey']
     call(['ssh', '-F', home / 'ssh.conf', '-o', 'UserKnownHostsFile=' + str(home / 'known_hosts'),
-          '-o', 'IdentitiesOnly=yes', '-i', pasted['serverKeyFile'], 'worker@' + address, 'true'])
+          '-o', 'IdentitiesOnly=yes', '-i', pasted['serverKeyFile'], 'remoteagents@' + address, 'true'])
     print('PASS: root full export + master password -> actual C# Parse/Unlock/vault/materialize/export -> real SSH with exported key', flush=True)
     verify_managed_user(target)
-    # Verify the installed timer on a second clean VPS, with a deliberately
-    # locked root password/removed worker key after initial SSH authenticated. Ports still
-    # answer, but confirmation in a NEW SSH session must fail.
-    broken, broken_home, broken_address = new_vps('broken', temp, gateway)
-    bad = json.loads(json.dumps(config)); bad['server']['address'] = broken_address
+    inside(target, 'python3', '-I', '/src/server/remoteagents_config.py', '--config', '/run/export.json',
+           'export', '--name', 'Clone', '--happier', 'new:Fixture', '--include-server-secrets', '--output', '/run/clone-config.json')
+    clone_config = json.loads(inside(target, 'cat', '/run/clone-config.json').stdout)
+    clone_values = clone_config.pop('secrets')
+    expected_codex_hash = inside(target, 'sha256sum', '/home/remoteagents/.codex/auth.json').stdout.split()[0]
+    # A replacement with the SAME identities must not compete with the source
+    # for one VPN login / Syncthing device / Happier machine identity.
+    docker('stop', target)
+    clone, clone_home, clone_address = new_vps('clone', temp, gateway)
+    happier_fixture(clone)  # Only the offline Happier API/daemon boundary is mocked.
+    clone_config['server']['address'] = clone_address
+    clone_config['server']['hostKeys'] = [' '.join(inside(clone, 'cat', '/etc/ssh/ssh_host_ed25519_key.pub').stdout.split()[:2])]
+    restored = engine(clone_home, clone_config, clone_values)
+    assert restored['ok'], restored
+    clone_key = temp / 'clone-export-key'
+    clone_key.write_text(clone_values['server-key']); clone_key.chmod(0o600)
+    call(['ssh', '-F', clone_home / 'ssh.conf', '-o', 'UserKnownHostsFile=' + str(clone_home / 'known_hosts'),
+          '-o', 'IdentitiesOnly=yes', '-i', clone_key, 'remoteagents@' + clone_address, 'true'])
+    assert device_id(clone) == expected_id
+    assert inside(clone, 'sha256sum', '/home/remoteagents/.local/opt/tg-gateway/tls/cert.pem').stdout.split()[0] == expected_cert
+    assert inside(clone, 'sha256sum', '/home/remoteagents/.local/opt/tg-gateway/state/keys.json').stdout.split()[0] == expected_keys
+    assert inside(clone, 'sha256sum', '/home/remoteagents/.codex/auth.json').stdout.split()[0] == expected_codex_hash
+    health_script = """import json,ssl,sys,urllib.request
+try:
+ d=json.load(sys.stdin)
+ ctx=ssl.create_default_context(cadata=d['ca'])
+ opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),urllib.request.HTTPSHandler(context=ctx))
+ with opener.open('https://127.0.0.1:8444/'+d['key']+'/health',timeout=5) as response:
+  assert response.read()==b'ok'
+except Exception:
+ raise SystemExit('Original Telegram client rejected') from None
+"""
+    inside(clone, 'python3', '-c', health_script,
+           input=json.dumps(dict(key=telegram_client['base_url'].rsplit('/', 1)[1], ca=telegram_client['ca_pem'])))
+    print('PASS: full root export -> second clean VPS -> same Syncthing device ID, Telegram TLS/client keys and agent auth', flush=True)
+    # Confirm a real inbound replacement and removal first.
+    inbounds = json.loads(clone_values['server-inbounds'])
+    inbounds[-1]['listen_port'] = 37092
+    clone_values['server-inbounds'] = json.dumps(inbounds)
+    clone_config['serverNetwork']['inboundPorts'] = [22, 443, 37092]
+    assert engine(clone_home, clone_config, clone_values)['ok']
+    inbounds.pop()
+    clone_values['server-inbounds'] = json.dumps(inbounds)
+    clone_config['serverNetwork']['inboundPorts'] = [22, 443]
+    assert engine(clone_home, clone_config, clone_values)['ok']
+    old = inside(clone, 'sha256sum', '/etc/sing-box/config.json').stdout.split()[0]
+    inbounds.append(dict(type='mixed', tag='replacement', listen='0.0.0.0', listen_port=37093))
+    clone_values['server-inbounds'] = json.dumps(inbounds)
+    clone_config['serverNetwork']['inboundPorts'] = [22, 443, 37093]
     errors = []
     def revoke_new_ssh():
         try:
             for _ in range(1800):
-                if inside(broken, 'test', '-f', '/var/lib/remoteagents/base-network/pending/state.json', check=False).returncode == 0:
-                    inside(broken, 'passwd', '-l', 'root')
-                    put(broken, '/home/worker/.ssh/authorized_keys', '')
+                if inside(clone, 'test', '-f', '/var/lib/remoteagents/base-network/pending/state.json', check=False).returncode == 0:
+                    inside(clone, 'passwd', '-l', 'root')
+                    put(clone, '/home/remoteagents/.ssh/authorized_keys', '')
                     return
                 time.sleep(.2)
             errors.append('pending not reached')
         except Exception:
             errors.append('watcher failed')
     watcher = threading.Thread(target=revoke_new_ssh, daemon=True); watcher.start()
-    print('Breaking NEW SSH; waiting for the real five-minute rollback timer...', flush=True)
-    failed = engine(broken_home, bad, values)
+    print('Breaking NEW SSH after managed inbound update; waiting for real five-minute rollback...', flush=True)
+    failed = engine(clone_home, clone_config, clone_values)
     watcher.join(timeout=5)
     assert not failed['ok'] and not errors, failed
-    assert inside(broken, 'test', '-f', '/var/lib/remoteagents/base-network/pending/state.json', check=False).returncode == 0
-    assert inside(broken, 'systemctl', 'is-active', '--quiet', 'remoteagents-base-network-rollback.timer', check=False).returncode == 0
+    assert inside(clone, 'systemctl', 'is-active', '--quiet', 'remoteagents-base-network-rollback.timer', check=False).returncode == 0
     deadline = time.monotonic() + 325
-    while inside(broken, 'test', '-f', '/var/lib/remoteagents/base-network/pending/state.json', check=False).returncode == 0 and time.monotonic() < deadline:
+    while inside(clone, 'test', '-f', '/var/lib/remoteagents/base-network/pending/state.json', check=False).returncode == 0 and time.monotonic() < deadline:
         time.sleep(1)
-    assert inside(broken, 'test', '-f', '/var/lib/remoteagents/base-network/pending/state.json', check=False).returncode != 0
-    assert inside(broken, 'systemctl', 'is-active', '--quiet', 'sing-box', check=False).returncode != 0
-    assert inside(broken, 'test', '-f', '/etc/sing-box/config.json', check=False).returncode != 0
-    assert inside(broken, 'nft', 'list', 'table', 'inet', 'remoteagents_inbound', check=False).returncode != 0
-    rules = json.loads(inside(broken, 'ip', '-j', '-4', 'rule', 'show').stdout)
-    assert not any(8990 <= r.get('priority', -1) <= 9010 for r in rules)
-    put(broken, '/root/.ssh/authorized_keys', (temp / 'key.pub').read_text())
-    print('PASS: failed NEW SSH kept timer; actual five-minute rollback removed TUN/config/own guards/rules', flush=True)
+    assert inside(clone, 'test', '-f', '/var/lib/remoteagents/base-network/pending/state.json', check=False).returncode != 0
+    assert inside(clone, 'sha256sum', '/etc/sing-box/config.json').stdout.split()[0] == old
+    assert inside(clone, 'systemctl', 'is-active', '--quiet', 'sing-box', check=False).returncode == 0
+    print('PASS: failed NEW SSH preserved timer; real rollback restored previous managed inbound set', flush=True)
 
 
 if __name__ == '__main__':
