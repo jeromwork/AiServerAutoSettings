@@ -54,6 +54,12 @@ namespace RemoteAgents.Launcher
             Check(namedPassword.Hints["custom-root"].Contains("хостинг"),"standard field explanation independent of secret name");
             var route = Example(); route["server"] = ConfigBundle.D("routes", new[]{ConfigBundle.D("kind", "hop")});
             Reject(() => ConfigBundle.Parse(Json.Encode(route)), "hop required");
+            foreach (string ipv6 in new[]{"block", "allow"}) {
+                var ipv6Config = ConfigBundle.D("kind", "remoteagents-config", "schema", 1, "proxyOut", ConfigBundle.D("type", "socks", "server", "8.8.8.8", "port", 1080, "ipv6", ipv6));
+                Check(ConfigBundle.Parse(Json.Encode(ipv6Config)).Profile.ContainsKey("proxyOut"), "explicit IPv6 policy " + ipv6);
+                Json.Map(ipv6Config["proxyOut"])["ipv6"] = "invalid";
+                Reject(() => ConfigBundle.Parse(Json.Encode(ipv6Config)), "unknown IPv6 policy");
+            }
             string schemaPath = FindSchema();
             Check(Canonical(Json.Read(schemaPath)) == Canonical(ConfigBundle.SchemaDocument()), "published schema matches compiled schema");
             Check(ConfigBundle.Parse(File.ReadAllText(Path.Combine(Path.GetDirectoryName(schemaPath),"config.paste.example.json"))).Missing.Length == 2,"published example parses with missing secrets");

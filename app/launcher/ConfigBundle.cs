@@ -65,7 +65,11 @@ namespace RemoteAgents.Launcher
         static Dictionary<string, object> Proxy(bool serverExit = false)
         {
             var d = O(D("type", E("socks", "http"), "server", Host(), "port", N(1, 65535), "login", S(256), "password", Ref("proxy-out-password"), "checkUrl", Url()), "type", "server", "port");
-            if (serverExit) ((Dictionary<string, object>)d["properties"])["exitIp"] = S(45, 1);
+            if (serverExit)
+            {
+                ((Dictionary<string, object>)d["properties"])["exitIp"] = S(45, 1);
+                ((Dictionary<string, object>)d["properties"])["ipv6"] = E("block", "allow");
+            }
             return d;
         }
         static Dictionary<string, object> Hop()

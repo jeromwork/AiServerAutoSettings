@@ -53,6 +53,10 @@ class Fake:
         self.active = {'sing-box'}
         self.rules = True
         self.v6 = False
+        self.reply_rules = {'-4': [], '-6': []}
+        self.nft = {}
+        self.tun_default = True
+        self.iface = 'enp1s0'
         self.repair = True
         self.exit = '8.8.8.8'
         self.logged = False
@@ -102,17 +106,33 @@ class Fake:
                     self.rules = True
             elif args[1] in ('disable', 'stop'):
                 self.active.discard(args[-1])
+        elif args[0] == 'nft':
+            if 'list' in args:
+                out = self.nft.get(args[-1], '')
+                code = 0 if out else 1
+            elif '-c' not in args:
+                batch = kw['input']
+                for name in ('remoteagents_inbound', 'remoteagents_ipv6'):
+                    if 'delete table inet ' + name in batch:
+                        self.nft.pop(name, None)
+                    prefix = 'table inet ' + name + ' {'
+                    if prefix in batch:
+                        self.nft[name] = batch[batch.index(prefix):]
         elif args[0] == 'ip':
-            if 'rule' in args:
+            if 'rule' in args and 'add' in args:
+                self.reply_rules[args[1]].append({'priority': 8990, 'table': 'main', 'fwmark': '0x5241'})
+            elif 'rule' in args:
                 rules = [{'priority': 9000, 'table': 2022}, {'priority': 9001, 'table': 2022, 'suppress_prefixlen': 0},
                          {'priority': 9002, 'table': 'main', 'dport': 53}, {'priority': 9002, 'goto': 9010, 'iif': 'tun0'},
                          {'priority': 9003, 'table': 2022, 'not': None, 'iif': 'lo'},
                          {'priority': 9003, 'table': 2022, 'src': '0.0.0.0'}, {'priority': 9010, 'nop': None}]
-                out = json.dumps(rules if self.rules else [])
+                out = json.dumps((rules if self.rules and '-4' in args else []) + self.reply_rules['-6' if '-6' in args else '-4'])
+            elif args[-1] == '2022':
+                out = json.dumps([{'dst': 'default', 'dev': 'tun0'}] if self.tun_default else [{'dst': '0.0.0.0/1', 'dev': 'tun0'}])
             elif '-6' in args:
                 out = json.dumps([{'dst': 'default', 'dev': 'eth0'}] if self.v6 else [])
             else:
-                out = json.dumps([{'dev': 'eth0', 'table': 254}])
+                out = json.dumps([{'dev': self.iface, 'table': 254}])
         elif args[0] == 'ss':
             out = '0 0 1.1.1.1:22 9.9.9.9:12345\n'
         elif args[0] == 'curl':
@@ -246,6 +266,7 @@ class ApplyTests(unittest.TestCase):
         restart = f.calls.index(['systemctl', 'restart', 'sing-box'])
         lan = next(i for i, c in enumerate(f.calls) if c[0] == 'bash' and 'add' in c)
         self.assertLess(restart, lan)
+        self.assertLess(next(i for i, c in enumerate(f.calls) if c[:4] == ['ip', '-4', 'rule', 'add']), restart)
         self.assertTrue(any(c[0] == 'curl' for c in f.calls[restart+1:lan]))
 
     def test_wrong_exit_blocks_every_other_part(self):
@@ -253,36 +274,125 @@ class ApplyTests(unittest.TestCase):
         f.exit = '1.1.1.1'
         result = f.engine(ssh_checked=True).run('apply')
         self.assertFalse(result['ok'])
-        self.assertEqual(result['actions'], ['systemctl restart'])
+        self.assertEqual(result['actions'], ['nft -f', 'ip -4', 'systemctl restart'])
         self.assertTrue(all(r['state'] == 'blocked' for r in result['parts']))
         self.assertFalse(f.path('/etc/sudoers.d').exists())
 
-    def test_ipv6_bypass_blocks_remaining_parts(self):
+    def test_ipv6_unspecified_warns_without_blocking_other_parts(self):
         f = self.fake
         f.v6 = True
-        result = f.engine(ssh_checked=True).run('apply')
+        result = f.complete()
+        self.assertTrue(result['ok'], result)
+        row = next(r for r in result['parts'] if r['part'] == 'ipv6')
+        self.assertTrue(row['warning'])
+        self.assertIn('мимо sing-box', row['summary'])
+        self.assertNotIn('remoteagents_ipv6', f.nft)
+        self.assertNotIn(['systemctl', 'restart', 'sing-box'], f.calls)
+
+    def test_ipv6_block_allow_and_unset_preserves_existing_policy(self):
+        f = self.fake
+        cfg = config(); cfg['proxyOut']['ipv6'] = 'block'
+        self.assertTrue(f.complete(cfg)['ok'])
+        rules = f.nft['remoteagents_ipv6']
+        self.assertIn('ct direction reply ct state established,related accept', rules)
+        self.assertNotIn('echo-request', rules)
+        for value in ('packet-too-big', 'nd-neighbor-solicit', 'nd-neighbor-advert', 'meta nfproto ipv6 drop'):
+            self.assertIn(value, rules)
+        self.assertEqual(f.engine(cfg, ssh_checked=True).run('apply')['actions'], [])
+        self.assertTrue(f.engine(ssh_checked=True).run('apply')['ok'])
+        self.assertIn('remoteagents_ipv6', f.nft)
+        cfg['proxyOut']['ipv6'] = 'allow'
+        self.assertTrue(f.engine(cfg, ssh_checked=True).run('apply')['ok'])
+        self.assertNotIn('remoteagents_ipv6', f.nft)
+        self.assertEqual(f.engine(cfg, ssh_checked=True).run('apply')['actions'], [])
+        cfg['proxyOut']['ipv6'] = 'invalid'
+        with self.assertRaises(app.Error):
+            app.validate(cfg)
+
+    def test_split_table_plan_status_watch_report_without_singbox_restart(self):
+        f = self.fake
+        self.assertTrue(f.complete()['ok'])
+        f.tun_default = False
+        for cmd in ('plan', 'status'):
+            result = f.engine().run(cmd)
+            self.assertIn(app.INBOUND_WARNING, json.dumps(result, ensure_ascii=False))
+            self.assertEqual(result['actions'], [])
+        self.assertTrue(app.egress_watch(f.engine()))
+        state = f.read('/var/lib/remoteagents-status/egress.json')
+        self.assertIn('без default', state['summary'])
+        self.assertTrue(any(app.INBOUND_WARNING in ' '.join(c) for c in f.calls if c[0] == 'logger'))
+        self.assertNotIn(['systemctl', 'restart', 'sing-box'], f.calls)
+
+    def test_manual_patch_is_adopted_and_watch_repairs_only_own_guard(self):
+        f = self.fake
+        manual = app.inbound_nft(f.iface).replace('0x5241', '0x00005241')
+        f.nft['remoteagents_inbound'] = manual
+        f.reply_rules['-4'] = [{'priority': 8990, 'table': 254, 'src': 'all', 'fwmark': '0x5241'}]
+        self.assertTrue(f.complete()['ok'])
+        self.assertEqual(f.nft['remoteagents_inbound'], manual)
+        self.assertFalse(any(c[0] == 'nft' and '-f' in c for c in f.calls))
+        self.assertEqual(len(f.reply_rules['-4']), 1)
+        self.assertEqual(f.engine(ssh_checked=True).run('apply')['actions'], [])
+        f.nft.clear(); f.reply_rules['-4'].clear(); f.tun_default = False
+        result = f.engine().run('plan')
+        self.assertIn(app.INBOUND_WARNING, json.dumps(result, ensure_ascii=False))
+        f.calls.clear()
+        self.assertTrue(app.egress_watch(f.engine()))
+        self.assertIn(f.iface, f.nft['remoteagents_inbound'])
+        self.assertNotIn(['systemctl', 'restart', 'sing-box'], f.calls)
+        self.assertEqual(len(f.reply_rules['-4']), 1)
+        unit = f.path('/etc/systemd/system/remoteagents-network-guard.service').read_text()
+        self.assertIn('Before=sing-box.service', unit)
+        self.assertIn('_network-guard --config', unit)
+
+    def test_ipv6_kernel_pretty_print_does_not_trigger_another_apply(self):
+        f = self.fake
+        cfg = config(); cfg['proxyOut']['ipv6'] = 'block'
+        self.assertTrue(f.complete(cfg)['ok'])
+        rendered = f.nft['remoteagents_ipv6'].replace('ct state established,related', 'ct state { related, established }')
+        original = 'destination-unreachable, packet-too-big, time-exceeded, parameter-problem, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert'
+        rendered = rendered.replace(original, ', '.join(reversed(original.split(', '))))
+        f.nft['remoteagents_ipv6'] = rendered
+        self.assertEqual(f.engine(cfg, ssh_checked=True).run('apply')['actions'], [])
+
+    def test_watch_restores_ipv6_block_and_tracks_changed_default_interface(self):
+        f = self.fake
+        cfg = config(); cfg['proxyOut']['ipv6'] = 'block'
+        self.assertTrue(f.complete(cfg)['ok'])
+        del f.nft['remoteagents_ipv6']
+        f.iface = 'ens9'
+        f.calls.clear()
+        self.assertTrue(app.egress_watch(f.engine(cfg)))
+        self.assertIn('ens9', f.nft['remoteagents_inbound'])
+        self.assertIn('remoteagents_ipv6', f.nft)
+        self.assertNotIn(['systemctl', 'restart', 'sing-box'], f.calls)
+
+    def test_conflicting_reply_priority_stops_apply_without_deleting_foreign_rule(self):
+        f = self.fake
+        f.reply_rules['-4'] = [{'priority': 8990, 'fwmark': '0x1234', 'table': 'main'}]
+        result = f.engine().run('apply')
         self.assertFalse(result['ok'])
-        self.assertIn('IPv6', result['parts'][0]['summary'])
-        self.assertEqual(result['actions'], ['systemctl restart'])
+        self.assertIn('8990', result['parts'][0]['summary'])
+        self.assertFalse(any(c[0] in ('bash', 'apt-get') or 'del' in c for c in f.calls))
 
     def test_partial_rule_loss_is_detected_even_if_all_priorities_exist(self):
         f = self.fake
         runner = f.system.runner
         def missing_one_rule(args, **kw):
             result = runner(args, **kw)
-            if args[0] == 'ip' and 'rule' in args:
+            if args[0] == 'ip' and 'rule' in args and 'show' in args:
                 result.stdout = json.dumps([r for r in json.loads(result.stdout) if not r.get('goto')])
             return result
         f.system.runner = missing_one_rule
         result = f.engine(ssh_checked=True).run('apply')
         self.assertFalse(result['ok'])
-        self.assertEqual(result['actions'], ['systemctl restart'])
+        self.assertEqual(result['actions'], ['nft -f', 'ip -4', 'systemctl restart'])
 
     def test_failed_repair_stays_blocked(self):
         f = self.fake
         f.rules, f.repair = False, False
         result = f.engine(ssh_checked=True).run('apply')
-        self.assertEqual(result['actions'], ['systemctl restart'])
+        self.assertEqual(result['actions'], ['nft -f', 'ip -4', 'systemctl restart'])
         self.assertFalse(result['ok'])
 
     def test_proxy_change_uses_existing_manager_and_waits_for_new_ssh(self):

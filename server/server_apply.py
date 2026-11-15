@@ -232,6 +232,14 @@ class System:
     def active(self, unit):
         return self.run(['systemctl', 'is-active', '--quiet', unit], check=False).returncode == 0
 
+    @contextlib.contextmanager
+    def network_lock(self):
+        directory = self.path('/var/lib/remoteagents')
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with (directory / 'network.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
+
     def audit(self, rows):
         # Operational logging does not count as a configuration action. Readers
         # never call this; only our fixed summaries/public identifiers are logged.
@@ -263,6 +271,39 @@ class System:
             yield Path(path)
         finally:
             Path(path).unlink(missing_ok=True)
+
+
+INBOUND_WARNING = 'ответы на входящие подключения (SSH, VPN) уйдут в sing-box — мосты компьютеров отвалятся'
+
+
+def inbound_nft(iface):
+    require(re.fullmatch(r'[a-zA-Z0-9_.:-]{1,15}', iface) is not None, 'Не удалось определить внешний интерфейс.')
+    return ('table inet remoteagents_inbound {\n'
+            ' chain pre { type filter hook prerouting priority mangle; policy accept;\n'
+            '  iifname "' + iface + '" ct state new ct mark set 0x5241\n }\n'
+            ' chain out { type route hook output priority mangle; policy accept;\n'
+            '  ct mark 0x5241 meta mark set 0x5241\n }\n}\n')
+
+
+def ipv6_nft():
+    # Reply direction preserves inbound sessions, including ones predating the
+    # guard. Established *outbound* sessions must not get an exemption.
+    return ('table inet remoteagents_ipv6 {\n'
+            ' chain out { type filter hook output priority -5; policy accept;\n'
+            '  meta nfproto ipv6 oifname "lo" accept\n'
+            '  meta nfproto ipv6 ct direction reply ct state established,related accept\n'
+            '  meta l4proto ipv6-icmp icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept\n'
+            '  meta nfproto ipv6 drop\n }\n}\n')
+
+
+def nft_normal(text):
+    # Kernel pretty-printing uses padded hexadecimal marks and named priorities.
+    text = re.sub(r'0x[0-9a-fA-F]+', lambda m: hex(int(m[0], 16)), text)
+    text = text.replace('priority mangle', 'priority -150')
+    text = re.sub(r'(icmpv6 type|ct state)\s*\{([^{}]+)\}',
+                  lambda m: m[1] + ' ' + ','.join(sorted(v.strip() for v in m[2].split(','))), text)
+    text = re.sub(r'ct state\s+([a-z,]+)', lambda m: 'ct state ' + ','.join(sorted(m[1].split(','))), text)
+    return re.sub(r'\s+', '', text)
 
 
 class Engine:
@@ -335,20 +376,104 @@ class Engine:
             lambda r: r['priority'] == 9010 and 'nop' in r)
         if table is None or not all(any(test(r) for r in own) for test in predicates):
             return False, 'пропали правила выхода сервера (9000–9010)'
-        # A public IPv6 default must not silently bypass an IPv4-only capture.
-        v6 = json.loads(self.s.run(['ip', '-j', '-6', 'route', 'show', 'table', 'main', 'default']).stdout)
-        if v6:
-            addresses = sb['tun'][0].get('address') or []
-            addresses = addresses if isinstance(addresses, list) else [addresses]
-            if not any(':' in a for a in addresses):
-                return False, 'есть прямой маршрут IPv6 вне перехвата sing-box (перехватывается только IPv4)'
-            v6rules = json.loads(self.s.run(['ip', '-j', '-6', 'rule', 'show']).stdout)
-            if not any(9000 <= r.get('priority', -1) <= 9010 and r.get('table') for r in v6rules):
-                return False, 'пропали правила выхода IPv6'
         got = self.s.run(['curl', '--disable', '--noproxy', '*', '--fail', '--silent', '--max-time', '15', proxy['checkUrl']], check=False)
         if got.returncode or got.stdout.strip() != expected:
             return False, 'внешний адрес сервера не совпадает с ожидаемым выходом'
         return True, 'выход сервера проверен'
+
+    def default_iface(self):
+        routes = json.loads(self.s.run(['ip', '-j', '-4', 'route', 'show', 'table', 'main', 'default']).stdout)
+        routes = sorted(routes, key=lambda r: r.get('metric', 0))
+        require(routes and routes[0].get('dev'), 'Нет внешнего интерфейса в маршруте по умолчанию.')
+        return routes[0]['dev']
+
+    def nft_current(self, table, wanted):
+        result = self.s.run(['nft', 'list', 'table', 'inet', table], check=False)
+        return result.returncode == 0 and nft_normal(result.stdout) == nft_normal(wanted)
+
+    def nft_reconcile(self, table, wanted):
+        if self.nft_current(table, wanted):
+            return
+        exists = self.s.run(['nft', 'list', 'table', 'inet', table], check=False).returncode == 0
+        batch = ('delete table inet ' + table + '\n' if exists else '') + wanted
+        self.s.run(['nft', '-c', '-f', '-'], input=batch)
+        self.s.run(['nft', '-f', '-'], input=batch, change=True)
+
+    def reply_rule(self, family, apply=False):
+        rules = json.loads(self.s.run(['ip', '-j', family, 'rule', 'show']).stdout)
+        def number(v):
+            return int(str(v), 0) if isinstance(v, str) else v
+        matching = [r for r in rules if r.get('priority') == 8990 and
+                    number(r.get('fwmark', 0)) == 0x5241 and
+                    number(r.get('fwmask', 0xffffffff)) == 0xffffffff and
+                    str(r.get('table')) in ('main', '254') and
+                    not set(r).difference({'priority', 'src', 'table', 'fwmark', 'fwmask', 'protocol'}) and
+                    r.get('src', 'all') == 'all']
+        if matching:
+            return True
+        if apply:
+            require(not any(r.get('priority') == 8990 for r in rules), 'Приоритет 8990 занят другим правилом; нужно решение владельца.')
+            self.s.run(['ip', family, 'rule', 'add', 'pref', '8990', 'fwmark', '0x5241', 'lookup', 'main'], change=True)
+            return self.reply_rule(family)
+        return False
+
+    def split_tun_table(self):
+        rules = json.loads(self.s.run(['ip', '-j', '-4', 'rule', 'show']).stdout)
+        table = next((str(r['table']) for r in rules if r.get('priority') == 9000 and r.get('table')), '2022')
+        result = self.s.run(['ip', '-j', '-4', 'route', 'show', 'table', table], check=False)
+        routes = json.loads(result.stdout or '[]')
+        return not any(r.get('dst') in ('default', '0.0.0.0/0') and
+                       r.get('type', 'unicast') == 'unicast' for r in routes)
+
+    def reply_families(self):
+        addresses = []
+        for tun in self.singbox().get('tun', []):
+            value = tun.get('address') or []
+            addresses.extend(value if isinstance(value, list) else [value])
+        return ('-4', '-6') if any(':' in a for a in addresses) else ('-4',)
+
+    def inbound_check(self):
+        protected = self.nft_current('remoteagents_inbound', inbound_nft(self.default_iface()))
+        protected = all([self.reply_rule(f) for f in self.reply_families()] + [protected])
+        split = self.split_tun_table()
+        if not protected or split:
+            detail = ('нет защиты ответов' if not protected else 'защита ответов установлена')
+            if split:
+                detail += '; таблица sing-box (обычно 2022) без default'
+            return protected, 'ВНИМАНИЕ: ' + INBOUND_WARNING + ' при отсутствии защиты; ' + detail
+        return True, 'ответы на входящие подключения защищены'
+
+    def network_guard(self):
+        self.nft_reconcile('remoteagents_inbound', inbound_nft(self.default_iface()))
+        for family in self.reply_families():
+            self.reply_rule(family, apply=True)
+        policy = self.config.get('proxyOut', {}).get('ipv6')
+        if policy == 'block':
+            self.nft_reconcile('remoteagents_ipv6', ipv6_nft())
+        elif policy == 'allow':
+            if self.s.run(['nft', 'list', 'table', 'inet', 'remoteagents_ipv6'], check=False).returncode == 0:
+                self.s.run(['nft', '-f', '-'], input='delete table inet remoteagents_ipv6\n', change=True)
+
+    def guard_apply(self):
+        with self.s.network_lock():
+            self.network_guard()
+
+    def inbound(self, apply):
+        if apply:
+            self.guard_apply()
+        ok, reason = self.inbound_check()
+        return self.row('inbound', 'ready' if ok else 'change', ('уже так; ' if ok else 'будет установлена постоянная защита; ') + reason)
+
+    def ipv6(self, apply):
+        policy = self.config.get('proxyOut', {}).get('ipv6')
+        if policy is None:
+            blocked = self.s.run(['nft', 'list', 'table', 'inet', 'remoteagents_ipv6'], check=False).returncode == 0
+            return self.row('ipv6', 'ready', 'ВНИМАНИЕ: proxyOut.ipv6 не задан; IPv6 может идти мимо sing-box; выберите block или allow' +
+                            ('; прежний запрет сохранён' if blocked else '; автоматического запрета нет'), warning=True)
+        same = (self.nft_current('remoteagents_ipv6', ipv6_nft()) if policy == 'block' else
+                self.s.run(['nft', 'list', 'table', 'inet', 'remoteagents_ipv6'], check=False).returncode != 0)
+        return self.row('ipv6', 'ready' if same else 'change', ('уже так; ' if same else 'будет настроено; ') +
+                        ('исходящий IPv6 запрещён, ответы и ICMPv6 соседей/PMTU разрешены' if policy == 'block' else 'прямой IPv6 разрешён владельцем'))
 
     def proxy_matches(self, proxy):
         current = self.singbox().get('proxy', [])
@@ -374,6 +499,9 @@ class Engine:
         sb = self.singbox()
         if not sb.get('tun'):
             return self.row('internet', 'blocked', 'sing-box не установлен или нет системного перехвата трафика — нужен базовый сетевой конфиг с правилами сохранения SSH; см. SERVER-APPLY.md')
+        # Install reply protection before a restart can recreate split TUN routes.
+        if apply:
+            self.guard_apply()
         pending = self.s.path('/var/lib/remoteagents/proxy-out/pending')
         if pending.exists():
             require(self.proxy_matches(proxy), 'Мастер-конфиг отличается от ожидающего proxy-out; сначала завершите прежнее изменение.')
@@ -462,6 +590,7 @@ class Engine:
     def watch_units(self):
         public = {'kind': 'remoteagents-config', 'schema': 1, 'proxyOut': {k: v for k, v in self.config['proxyOut'].items() if k not in ('login', 'password', 'hint')}}
         return {
+            '/etc/systemd/system/remoteagents-network-guard.service': ('[Unit]\nDescription=Preserve inbound replies and IPv6 policy\nWants=network-online.target\nAfter=network-online.target nftables.service\nBefore=sing-box.service\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/local/lib/remoteagents/server/server-apply.sh _network-guard --config /etc/remoteagents/server-apply/watch.json\n[Install]\nWantedBy=multi-user.target\n', 0o644),
             '/etc/remoteagents/server-apply/watch.json': (json.dumps(public, sort_keys=True) + '\n', 0o600),
             '/etc/systemd/system/remoteagents-egress-watch.service': ('[Unit]\nDescription=Check server internet exit and repair sing-box\nAfter=sing-box.service network-online.target\n[Service]\nType=oneshot\nExecStart=/usr/local/lib/remoteagents/server/server-apply.sh _egress-watch --config /etc/remoteagents/server-apply/watch.json\n', 0o644),
             '/etc/systemd/system/remoteagents-egress-watch.timer': ('[Unit]\nDescription=Check server internet exit every minute\n[Timer]\nOnBootSec=1min\nOnUnitActiveSec=1min\nAccuracySec=1s\n[Install]\nWantedBy=timers.target\n', 0o644)}
@@ -471,6 +600,8 @@ class Engine:
             return self.row('egressWatch', 'blocked', 'для сторожа нужен proxyOut')
         units = self.watch_units()
         same = self.code_current() and all(self.s.path(p).exists() and self.s.path(p).read_text() == v[0] for p, v in units.items())
+        guard_enabled = self.s.run(['systemctl', 'is-enabled', '--quiet', 'remoteagents-network-guard.service'], check=False).returncode == 0
+        same = same and guard_enabled
         live = self.s.active('remoteagents-egress-watch.timer') and self.s.run(['systemctl', 'is-enabled', '--quiet', 'remoteagents-egress-watch.timer'], check=False).returncode == 0
         if apply:
             changed = self.install_code()
@@ -478,6 +609,8 @@ class Engine:
                 changed = self.s.write(p, text, mode) or changed
             if changed:
                 self.s.run(['systemctl', 'daemon-reload'], change=True)
+            if not guard_enabled:
+                self.s.run(['systemctl', 'enable', 'remoteagents-network-guard.service'], change=True)
             if not live:
                 self.s.run(['systemctl', 'enable', '--now', 'remoteagents-egress-watch.timer'], change=True)
             same = True
@@ -770,7 +903,8 @@ class Engine:
     def run(self, command):
         apply = command == 'apply'
         ready = self.part('internet', lambda: self.egress(apply))
-        parts = [('egressWatch', lambda: self.watch(apply))]
+        parts = [('inbound', lambda: self.inbound(apply)), ('ipv6', lambda: self.ipv6(apply)),
+                 ('egressWatch', lambda: self.watch(apply))]
         parts += [('lan:' + item['name'], lambda item=item: self.lan_part(item, apply)) for item in self.config.get('lan', [])]
         if 'tailscale' in self.config:
             parts.append(('tailscale', lambda: self.tailscale(self.config['tailscale'], apply)))
@@ -785,7 +919,9 @@ class Engine:
             if apply and not ready:
                 self.row(name, 'blocked', 'не устанавливается: выход в интернет не подтверждён')
             else:
-                self.part(name, fn)
+                result = self.part(name, fn)
+                if apply and name == 'inbound' and not result:
+                    ready = False
         if apply:
             self.part('log', lambda: self.s.audit(self.rows))
         return {'schema': 1, 'command': command, 'parts': self.rows, 'actions': list(self.s.actions),
@@ -798,16 +934,30 @@ class Missing(Error):
 
 
 def egress_watch(engine):
+    # Protect replies before any restart can recreate the old split routes.
+    before = len(engine.s.actions)
+    inbound_ok = False
+    try:
+        engine.network_guard()
+        inbound_ok, inbound_reason = engine.inbound_check()
+    except Exception:
+        inbound_reason = 'ВНИМАНИЕ: ' + INBOUND_WARNING + '; защита не восстановлена'
+    if 'ВНИМАНИЕ' in inbound_reason:
+        engine.s.run(['logger', '-p', 'daemon.crit', '-t', 'remoteagents-egress-watch', inbound_reason], check=False)
+    repaired = len(engine.s.actions) > before
     ok, reason = engine.egress_check()
-    repaired = False
-    if not ok:
+    if not ok and inbound_ok:
         engine.s.run(['logger', '-t', 'remoteagents-egress-watch', 'Выход сервера нарушен; перезапуск sing-box'], check=False)
         with contextlib.suppress(Exception):
             engine.s.run(['systemctl', 'restart', 'sing-box'], check=False, change=True)
         ok, reason = engine.egress_check()
-        repaired = ok
+        repaired = repaired or ok
         if not ok:
             engine.s.run(['logger', '-p', 'daemon.crit', '-t', 'remoteagents-egress-watch', 'ВНИМАНИЕ: выход сервера не восстановлен; проверьте sing-box'], check=False)
+    # A split table is diagnostic: restarting would recreate it from exclusions.
+    # Leave their migration to LAN; repair only our guard here.
+    ok = ok and inbound_ok
+    reason += '; ' + inbound_reason
     path = '/var/lib/remoteagents-status/egress.json'
     value = {'ok': ok, 'repaired': repaired, 'summary': reason, 'checkedAt': int(time.time())}
     engine.s.write(path, json.dumps(value, ensure_ascii=False) + '\n', 0o644)
@@ -845,12 +995,12 @@ def main(argv=None):
     os.umask(0o077)
     parser = argparse.ArgumentParser(description='Настроить сервер из мастер-конфига под root.')
     sub = parser.add_subparsers(dest='command', required=True)
-    for command in ('plan', 'apply', 'status', '_egress-watch'):
+    for command in ('plan', 'apply', 'status', '_egress-watch', '_network-guard'):
         p = sub.add_parser(command)
         p.add_argument('--config', default='-', help='Файл мастер-конфига или - (stdin)')
         p.add_argument('--json', action='store_true')
         p.add_argument('--secrets-stdin', action='store_true', help='Секреты после строки-маркера stdin')
-        if command != '_egress-watch':
+        if command not in ('_egress-watch', '_network-guard'):
             p.add_argument('--confirm-ssh-checked', action='store_true', help='Внешний вызывающий уже проверил новое SSH-соединение')
             p.add_argument('--public-only', action='store_true', help='Только публичная сводка ЛВС, без чтения частных профилей')
     p = sub.add_parser('tailscale-migrate')
@@ -871,11 +1021,11 @@ def main(argv=None):
         require(config.get('server', {}).get('login') == os.environ.get('SUDO_USER') and
                 config.get('agent', {}).get('sudo', 'apply') == 'apply', 'Ограниченное sudo не может менять пользователя или расширять права.')
     engine = Engine(config, secrets, ssh_checked=getattr(args, 'confirm_ssh_checked', False), public_only=getattr(args, 'public_only', False))
-    if args.command == '_egress-watch':
-        directory = engine.s.path('/var/lib/remoteagents')
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        with (directory / 'network.lock').open('a') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+    if args.command in ('_egress-watch', '_network-guard'):
+        with engine.s.network_lock():
+            if args.command == '_network-guard':
+                engine.network_guard()
+                return 0
             return 0 if egress_watch(engine) else 1
     # Readers create no files, including locks. Apply serializes its own runs;
     # network managers retain the separate shared network transaction lock.
@@ -891,7 +1041,7 @@ def main(argv=None):
         print(json.dumps(result, ensure_ascii=False))
     else:
         for row in result['parts']:
-            labels = {'internet': 'Выход в интернет', 'egressWatch': 'Сторож выхода', 'tailscale': 'Tailscale', 'telegramGateway': 'Шлюз Telegram', 'agent': 'Права агента', 'log': 'Журнал'}
+            labels = {'inbound': 'Ответы на входящие', 'ipv6': 'IPv6', 'internet': 'Выход в интернет', 'egressWatch': 'Сторож выхода', 'tailscale': 'Tailscale', 'telegramGateway': 'Шлюз Telegram', 'agent': 'Права агента', 'log': 'Журнал'}
             label = 'ЛВС «' + row['part'][4:] + '»' if row['part'].startswith('lan:') else labels.get(row['part'], row['part'])
             print(label + ': ' + row['summary'])
         if args.command == 'apply':

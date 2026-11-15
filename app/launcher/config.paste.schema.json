@@ -864,6 +864,13 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 45
+        },
+        "ipv6": {
+          "type": "string",
+          "enum": [
+            "block",
+            "allow"
+          ]
         }
       },
       "additionalProperties": false,
