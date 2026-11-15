@@ -52,6 +52,21 @@ table inet regression {
                     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as outbound:
                         outbound.sendto(b'original', receiver.getsockname())
                         assert receiver.recv(8) == b'original'
+                # Preserve a foreign conntrack mark used by earlier routing
+                # rules: filling an unmarked legacy connection must not replace it.
+                run('nft', '-f', '-', input='''delete table inet regression
+table inet foreign_policy {
+ chain tagging { type route hook output priority -160; policy accept;
+ ct direction reply ct mark set 0x1234 meta mark set 0x1234
+ }
+ chain checking { type filter hook output priority 0; policy accept;
+ ct direction reply ct mark != 0x1234 drop
+ ct direction reply meta mark != 0x1234 drop
+ }
+}
+''')
+                server.sendall(b'foreign')
+                assert client.recv(7) == b'foreign', 'foreign routing mark replaced'
 
 
 class ConntrackTests(unittest.TestCase):

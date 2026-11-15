@@ -295,7 +295,7 @@ def inbound_nft(iface):
             # Connections opened before the guard have no prerouting mark.
             # Their first reply after TUN activation must survive too. Locally
             # originated traffic has original direction and remains intercepted.
-            '  ct direction reply ct mark set 0x5241\n'
+            '  ct direction reply ct mark 0 ct mark set 0x5241\n'
             '  ct mark 0x5241 meta mark set 0x5241\n }\n}\n')
 
 
