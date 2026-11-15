@@ -35,14 +35,15 @@ namespace RemoteAgents.Launcher
         internal static void Run()
         {
             fixture = File.ReadAllText(Find("app/launcher/tests/fixtures/vpn-tun-config.json"));
-            Requests(); Configs(); Acls(); Setup(); Core(); Console.WriteLine("PASS: " + count + " VPN service checks");
+            Requests(); Configs(); Acls(); Setup(); Orphans(); Diagnostics(); Core(); Console.WriteLine("PASS: " + count + " VPN service checks");
         }
         static void Requests()
         {
-            foreach (string command in new[] { "status", "stop", "confirm", "start" }) {
+            foreach (string command in new[] { "status", "stop", "confirm", "start", "cleanup" }) {
                 var r = D("protocol", 1, "command", command); if (command == "confirm") r["session"] = new string('a', 32); if (command == "start") { r["config"] = Config(); r["watchPid"] = 42L; }
                 Check(VpnServicePolicy.ParseRequest(r).Command == command, command);
             }
+            Reject(() => VpnServicePolicy.ParseRequest(D("protocol", 1, "command", "cleanup", "session", new string('a', 32))), "cleanup extra field");
             foreach (string c in new[] { "exec", "run" }) Reject(() => VpnServicePolicy.ParseRequest(D("protocol", 1, "command", c)), c, "bad-command");
             foreach (string k in new[] { "path", "exe", "args", "script", "config" }) Reject(() => VpnServicePolicy.ParseRequest(D("protocol", 1, "command", "status", k, "secret")), k);
             foreach (object p in new object[] { 2, "1", null, 1.5m, double.NaN }) Reject(() => VpnServicePolicy.ParseRequest(D("protocol", p, "command", "status")), "protocol");
@@ -65,6 +66,7 @@ namespace RemoteAgents.Launcher
             Check(Out(plan.Config).Keys.OrderBy(x => x).SequenceEqual(new[] { "bind_interface", "domain_resolver", "flow", "server", "server_port", "tag", "tls", "type", "uuid" }), "exact outbound keys");
             Check(!ReferenceEquals(Out(input)["tls"], Out(plan.Config)["tls"]), "nested objects rebuilt");
             Check(!Json.Encode(plan.Config).Contains("experimental"), "no experimental");
+            Check(Json.Encode(plan.Config["log"]) == Json.Encode(D("level", "warn", "timestamp", true)), "service warning log without output");
             var collapsed = Config(); Tun(collapsed)["address"] = "fdfe:7261:0:0::1/126"; Tun(collapsed)["route_exclude_address"] = "10.0.0.0/8"; Rule(collapsed)["ip_cidr"] = "198.18.0.1/32"; Selector(collapsed)["outbounds"] = "reality-edge"; M(Out(collapsed)["tls"])["alpn"] = "h2";
             var rebuilt = VpnServicePolicy.BuildConfig(collapsed).Config; Check(A(Tun(rebuilt)["address"]).Length == 1 && (string)A(Tun(rebuilt)["address"])[0] == "fdfe:7261::1/126", "collapsed/canonical arrays");
             string all = Environment.GetEnvironmentVariable("REMOTEAGENTS_TUN_FIXTURES");
@@ -143,53 +145,112 @@ namespace RemoteAgents.Launcher
                 Reject(() => VpnServiceSetupPlan.ReadLimited(Path.Combine(temp, "large"), long.MaxValue), "absolute read cap");
             } finally { Directory.Delete(temp, true); }
         }
+        static void Orphans()
+        {
+            const string dir = @"C:\Program Files\RemoteAgents\vpn", exe = @"C:\Users\owner\RemoteAgents\transport\sing-box.exe", config = @"C:\Users\owner\RemoteAgents\state\vpn-sing-box.json";
+            string line = "\"" + exe + "\" run -c \"" + config + "\"";
+            Check(VpnServicePolicy.IsLegacyOrphan(exe, line, Sid, Sid, dir), "exact legacy config and owner");
+            Check(!VpnServicePolicy.IsLegacyOrphan(exe, line.Replace("vpn-sing-box.json", "config.json"), Sid, Sid, dir), "other config untouched");
+            Check(!VpnServicePolicy.IsLegacyOrphan(exe, line, Sid, "S-1-5-21-1-2-3-1002", dir), "other owner untouched");
+            foreach (string image in new[] { @"C:\Happ\happ.exe", @"C:\Happ\xray.exe", @"C:\Happ\sing-box.exe" })
+                Check(!VpnServicePolicy.IsLegacyOrphan(image, "\"" + image + "\" run -c \"C:\\Happ\\config.json\"", Sid, Sid, dir), "Happ/xray untouched " + image);
+            foreach (string bad in new[] { line + " --flag", line + " & calc", line.Replace("vpn-sing-box.json", "vpn-sing-box.json\" \"injected"), line.Replace("state", "..\\state"), line + "\ncalc" })
+                Check(!VpnServicePolicy.IsLegacyOrphan(exe, bad, Sid, Sid, dir), "legacy injection rejected");
+            Check(VpnServicePolicy.IsInstalledImage(dir + @"\sing-box.exe", dir) && !VpnServicePolicy.IsInstalledImage(@"C:\Happ\sing-box.exe", dir), "installed image exact path");
+        }
+        static void Diagnostics()
+        {
+            var config = D("password", "password-fixture", "uuid", "uuid-fixture", "tls", D("public_key", "public-fixture", "short_id", "short-fixture"), "obfs", D("password", "obfs-fixture"), "transport", D("path", "/ws-fixture"));
+            var diagnostic = new VpnServiceDiagnostic(config);
+            string text = "password-fixture uuid-fixture public-fixture short-fixture obfs-fixture /ws-fixture";
+            Check(diagnostic.Redact(text) == "*** *** *** *** *** ***", "all required secret fields");
+            Check(diagnostic.Redact("pass\x1b[31mword-fixture") == "***", "ANSI cannot expose a secret");
+            var longText = string.Join("\r\n", Enumerable.Range(0, 60).Select(x => x + " " + text));
+            string detail = diagnostic.Detail("exit=17; " + longText);
+            Check(detail.StartsWith("exit=17; ") && detail.Length <= 2000 && detail.Split('\n').Length <= 40 && !detail.Contains("password-fixture"), "redact before bounded CRLF tail");
+            var escaped = new VpnServiceDiagnostic(D("password", "quote\"and\\slash"));
+            Check(!escaped.Redact(Json.Encode(D("error", "quote\"and\\slash"))).Contains("quote"), "JSON escaped secret");
+            string streamed = new string('x', 65530) + text + new string('y', 1048576) + "\r\n" + text;
+            foreach (int size in new[] { 1, 63, 4096, 65536 }) {
+                string pending = "", source = size == 1 ? text + text + "\r\n" : streamed; var result = new StringBuilder();
+                for (int i = 0; i < source.Length; i += size) { pending += source.Substring(i, Math.Min(size, source.Length - i)); result.Append(diagnostic.TakeOutput(ref pending, false)); if (pending.Length > 64) throw new Exception("Unbounded VPN log overlap"); }
+                result.Append(diagnostic.TakeOutput(ref pending, true));
+                Check(result.ToString() == diagnostic.Redact(source), "streaming copy preserves/redacts long lines and split secrets " + size);
+            }
+
+        }
         sealed class Watch : IVpnProcessWatch { public bool IsAlive = true, Disposed; public bool Alive { get { return IsAlive; } } public void Dispose() { Disposed = true; } }
         sealed class Host : IVpnServiceHost
         {
             public DateTime Now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc); public DateTime UtcNow { get { return Now; } }
-            public string Hash = Pinned, Checked, Started; public bool Alive, Clean = true, Busy, RejectConfig, Owns = true; public int Stops, Starts, Checks; public Dictionary<int, Watch> Watches = new Dictionary<int, Watch>();
+            public string Hash = Pinned, Checked, Started; public bool Alive, Clean = true, Busy, RejectConfig, Owns = true; public int Stops, Starts, Checks, Cleanups; public Dictionary<int, Watch> Watches = new Dictionary<int, Watch>();
             public string NewSession() { return Guid.NewGuid().ToString("N"); }
             public IVpnProcessWatch Watch(int pid) { if (pid <= 0 || pid == 404) return null; var w = new Watch(); Watches[pid] = w; return w; }
             public bool ProcessOwnedBy(int pid, string sid) { return Owns; } public bool InterfaceExists(string name) { return Busy; } public string InstalledSingBoxSha256() { return Hash; }
-            public void CheckConfig(string json) { Checks++; Checked = json; if (RejectConfig) throw new Exception("secret"); }
+            public void CheckConfig(string json) { Checks++; Checked = json; if (RejectConfig) throw new Exception("invalid password=fixture-password uuid=" + Out(M(Json.Parse(json)))["uuid"]); }
             public void StartTun(string json) { Started = json; Starts++; Alive = true; } public bool TunAlive { get { return Alive; } }
-            public bool StopTun(string name) { Stops++; Alive = false; return Clean; } public void Log(string evt) { }
+            public bool StopTun(string name) { Stops++; Alive = false; return Clean; } public List<string> Logs = new List<string>(); public void Log(string evt) { Logs.Add(evt); }
+            public string TunDiagnostic { get { return "exit=23; " + string.Join("\r\n", Enumerable.Range(0, 45).Select(x => "line " + x)) + "\r\npassword fixture-password uuid " + Out(Config())["uuid"]; } }
+            public string CleanupDetail { get { return "routes remain on RemoteAgents-TUN"; } }
+            public void FlushDiagnostics() { }
+            public List<string> Processes = new List<string> { @"C:\Program Files\RemoteAgents\vpn\sing-box.exe", @"C:\Legacy\sing-box.exe", @"C:\Happ\sing-box.exe", @"C:\Happ\xray.exe" };
+            public List<string> Interfaces = new List<string> { "RemoteAgents-old", "happ-default-tun", "OpenVPN TAP", "Tailscale", "vEthernet (Default Switch)" };
+            public VpnCleanupResult CleanupOrphans(string ownerSid) {
+                Cleanups++; var names = Interfaces.Where(VpnServicePolicy.IsOurInterface).ToArray(); Interfaces.RemoveAll(VpnServicePolicy.IsOurInterface);
+                int killed = Processes.RemoveAll(image => VpnServicePolicy.IsInstalledImage(image, @"C:\Program Files\RemoteAgents\vpn") || VpnServicePolicy.IsLegacyOrphan(image, "\"" + image + "\" run -c \"C:\\Legacy\\state\\vpn-sing-box.json\"", ownerSid, image.Contains("Legacy") ? Sid : "S-1-5-21-9-8-7-1002", @"C:\Program Files\RemoteAgents\vpn"));
+                return new VpnCleanupResult { Processes = killed, Interfaces = names };
+            }
         }
         static VpnServiceCore NewCore(Host host) { return new VpnServiceCore(host, new VpnOwnerInfo { OwnerSid = Sid }, Pinned); }
         static Dictionary<string, object> Send(VpnServiceCore c, string command, string session = null, int pid = 42, string sid = Sid, bool admin = false)
         {
-            var r = D("protocol", 1, "command", command); if (command == "start") { r["watchPid"] = pid; r["config"] = Config(); } if (session != null) r["session"] = session;
+            var r = D("protocol", 1, "command", command); if (command == "start") { r["watchPid"] = pid; var config = Config(); Out(config)["type"] = "tuic"; Out(config).Remove("flow"); Out(config)["congestion_control"] = "bbr"; Out(config)["password"] = "fixture-password"; r["config"] = config; } if (session != null) r["session"] = session;
             return M(Json.Parse(c.Handle(Json.Encode(r), 41, sid, admin)));
         }
         static void Core()
         {
             var h = new Host(); var c = NewCore(h); Check((string)Send(c, "status")["state"] == "off", "initial off");
-            var s = Send(c, "start"); string session = (string)s["session"]; Check((string)s["state"] == "starting" && session.Length == 32 && Json.Int(s, "deadlineSec", 0) == 300, "start deadline");
+            c.Cleanup("service-start"); Check(h.Cleanups == 1 && h.Interfaces.SequenceEqual(new[] { "happ-default-tun", "OpenVPN TAP", "Tailscale", "vEthernet (Default Switch)" }), "startup cleans only our interfaces/orphans");
+            Check(h.Processes.SequenceEqual(new[] { @"C:\Happ\sing-box.exe", @"C:\Happ\xray.exe" }), "cleanup kills only installed and legacy orphans");
+            Check(h.Logs.Any(x => x.Contains("processes=2") && x.Contains("RemoteAgents-old")), "cleanup logs counts/names");
+            Send(c, "cleanup"); Check(h.Cleanups == 2, "cleanup command dispatched");
+            h.Processes.Add(@"C:\Legacy\sing-box.exe");
+            var s = Send(c, "start"); string session = (string)s["session"]; Check((string)s["state"] == "starting" && session.Length == 32 && Json.Int(s, "deadlineSec", 0) == 90, "start deadline");
+            Check((string)Send(c, "cleanup")["reason"] == "busy" && h.Cleanups == 2 && h.Stops == 0 && h.Processes.Count == 3, "active starting cleanup busy no kills");
             Check(h.Starts == 1 && h.Checks == 1 && h.Started == h.Checked && (string)Out(M(Json.Parse(h.Started)))["bind_interface"] == "Ethernet", "checked rebuilt config");
-            h.Now = h.Now.AddSeconds(299); c.Tick(); Check((string)Send(c, "status")["state"] == "starting", "299 alive");
-            h.Now = h.Now.AddSeconds(2); c.Tick(); s = Send(c, "status"); Check((string)s["state"] == "rolled-back" && (string)s["reason"] == "not-confirmed" && h.Stops == 1, "301 rollback");
+            h.Now = h.Now.AddSeconds(89); c.Tick(); Check((string)Send(c, "status")["state"] == "starting", "89 alive");
+            h.Now = h.Now.AddSeconds(2); c.Tick(); s = Send(c, "status"); Check((string)s["state"] == "rolled-back" && (string)s["reason"] == "not-confirmed" && h.Stops == 1, "91 rollback");
             session = (string)Send(c, "start")["session"]; Check((string)Send(c, "confirm", new string('a', 32))["error"] == "session", "wrong confirm");
-            Check((string)Send(c, "confirm", session)["state"] == "on", "confirm on"); h.Now = h.Now.AddSeconds(1000); c.Tick(); Check((string)Send(c, "status")["state"] == "on" && Json.Int(Send(c, "status"), "deadlineSec", -1) == 0, "confirmed deadline cleared");
+            Check((string)Send(c, "confirm", session)["state"] == "on", "confirm on");
+            Check((string)Send(c, "cleanup")["reason"] == "busy" && h.Cleanups == 2, "on cleanup busy");
+            h.Now = h.Now.AddSeconds(89); c.Tick(); Check((string)Send(c, "status")["state"] == "on", "lease 89 alive");
+            Send(c, "confirm", session); h.Now = h.Now.AddSeconds(89); c.Tick(); Check((string)Send(c, "status")["state"] == "on", "confirm extends lease");
+            h.Now = h.Now.AddSeconds(2); c.Tick(); s = Send(c, "status"); Check((string)s["reason"] == "lease-expired" && (string)s["state"] == "rolled-back", "lease 91 expires");
+            session = (string)Send(c, "start")["session"]; h.Now = h.Now.AddSeconds(91); s = Send(c, "confirm", session); Check((string)s["reason"] == "not-confirmed", "late confirm cannot revive");
             foreach (int pid in new[] { 42, 41 }) { var started = Send(c, "start"); Send(c, "confirm", (string)started["session"]); h.Watches[pid].IsAlive = false; c.Tick(); s = Send(c, "status"); Check((string)s["state"] == "off" && (string)s["reason"] == "owner-exited" && h.Watches.Values.All(w => w.Disposed), "owner death " + pid); }
             Send(c, "start"); h.Alive = false; c.Tick(); s = Send(c, "status"); Check((string)s["state"] == "error" && (string)s["reason"] == "singbox-exited", "binary exits");
-            Send(c, "start"); h.Clean = false; Check((string)Send(c, "stop")["state"] == "cleanup-error", "cleanup error"); h.Clean = true;
+            Check(((string)s["detail"]).Contains("exit=23") && ((string)s["detail"]).Contains("***") && !((string)s["detail"]).Contains("fixture-password") && !((string)s["detail"]).Contains((string)Out(Config())["uuid"]), "exit code and redacted tail");
+            Check(((string)s["detail"]).Length <= 2000 && ((string)s["detail"]).Split('\n').Length <= 40 && !((string)s["detail"]).Contains("line 0\n"), "bounded diagnostic tail");
+            Check(h.Logs.All(x => !x.Contains("fixture-password") && !x.Contains((string)Out(Config())["uuid"])), "service log sanitized");
+            Send(c, "start"); h.Clean = false; Check((string)Send(c, "stop")["state"] == "cleanup-error", "cleanup error"); Check(((string)Send(c, "status")["detail"]).Contains("RemoteAgents-TUN") && (string)Send(c, "status")["reason"] == "cleanup-error", "cleanup detail names routes/interface"); h.Clean = true;
             h.Owns = false; Check((string)Send(c, "start")["error"] == "watch-pid", "foreign pid"); h.Owns = true;
             Check((string)Send(c, "start", pid: 404)["error"] == "watch-pid", "missing pid");
             Check((string)Send(c, "status", sid: "S-1-5-21-9-8-7-1002")["error"] == "forbidden", "forbidden"); Check(Json.Bool(Send(c, "status", sid: "S-1-5-18", admin: true), "ok"), "admin allowed");
             h.Hash = new string('0', 64); Check((string)Send(c, "start")["error"] == "binary-mismatch", "binary mismatch"); h.Hash = Pinned;
             h.Busy = true; Check((string)Send(c, "start")["error"] == "interface-busy", "busy interface"); h.Busy = false;
-            h.RejectConfig = true; int before = h.Starts; Check((string)Send(c, "start")["error"] == "config-rejected" && h.Starts == before, "check rejected"); h.RejectConfig = false;
+            h.RejectConfig = true; int before = h.Starts; Check((string)Send(c, "start")["error"] == "config-rejected" && h.Starts == before, "check rejected"); s = Send(c, "start"); Check(((string)s["detail"]).Contains("invalid password=***") && !((string)s["detail"]).Contains("fixture-password") && !((string)s["detail"]).Contains((string)Out(Config())["uuid"]), "config-rejected includes redacted check output"); h.RejectConfig = false;
             session = (string)Send(c, "start")["session"]; var oldWatches = h.Watches.Values.ToArray(); before = h.Stops; h.Now = h.Now.AddSeconds(20); s = Send(c, "start");
-            Check(h.Stops == before + 1 && (string)s["session"] != session && Json.Int(s, "deadlineSec", 0) == 300 && oldWatches.All(w => w.Disposed), "restart stops/replaces watches/session/deadline");
+            Check(h.Stops == before + 1 && (string)s["session"] != session && Json.Int(s, "deadlineSec", 0) == 90 && oldWatches.All(w => w.Disposed), "restart stops/replaces watches/session/deadline");
             Check((string)Send(c, "stop", session)["error"] == "session" && h.Alive, "wrong stop");
             Check((string)Send(c, "stop")["state"] == "off" && (string)Send(c, "status")["session"] == "", "stop clears");
             foreach (string junk in new[] { "", "[]", "{", new string('x', 1048577), "\r\n{\"protocol\":1,\"command\":\"status\"}\r\n", null }) { string answer = c.Handle(junk, 41, Sid, false); Check(!answer.Contains("\n") && M(Json.Parse(answer)).ContainsKey("ok"), "never throws/one line"); }
             Check((string)M(Json.Parse(c.Handle(new string('x', 1048577), 41, Sid, false)))["error"] == "too-large", "oversize code");
             Check((string)M(Json.Parse(c.Handle(new string('中', 400000), 41, Sid, false)))["error"] == "too-large", "UTF8 byte cap");
             Check((string)M(Json.Parse(c.Handle("{", 41, Sid, false)))["error"] == "bad-json", "bad-json code");
-            Send(c, "start"); h.Clean = false; h.Now = h.Now.AddSeconds(301); c.Tick(); Check((string)Send(c, "status")["state"] == "cleanup-error", "rollback cleanup fails"); h.Clean = true;
+            Send(c, "start"); h.Clean = false; h.Now = h.Now.AddSeconds(91); c.Tick(); Check((string)Send(c, "status")["state"] == "cleanup-error", "rollback cleanup fails"); h.Clean = true;
             Send(c, "start"); c.Shutdown(); Check(!h.Alive && h.Watches.Values.All(w => w.Disposed), "shutdown cleans");
             Check((string)Send(c, "start")["error"] == "not-running" && !h.Alive, "shutdown forbids racing restart");
+            Check(h.Logs.All(x => !x.Contains("fixture-password") && !x.Contains((string)Out(Config())["uuid"])), "all errors/check logs redact secrets");
         }
     }
 }

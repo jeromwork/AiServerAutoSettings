@@ -51,7 +51,7 @@ try{
         Write-Output 'TUN-конфиг создан и проверен; TUN не запускался';return
     }
     if($env:OS -ne 'Windows_NT'){throw 'Запуск TUN поддержан только на Windows'}
-    if($action -eq 'ServiceWorker'){Invoke-VpnServiceWorker $root $ParentPid;return}
+    if($action -eq 'ServiceWorker'){if(-not (Invoke-VpnServiceWorker $root $ParentPid)){exit 1};return}
     if($action -in @('Enable','Broker')){
         $snapshot=Get-VpnSnapshot;$own=@(Get-VpnOwnedProcessIds $root $snapshot)
         # Повторное включение не заменяет задачи работающего сеанса.
@@ -64,7 +64,7 @@ try{
         $exclude=Get-VpnExclusions $settings $paths $snapshot -Root $root
         $cfg=New-VpnTunConfig $settings $paths $status.active $exclude $net.interface
         $preflight=Join-Path $root 'state/vpn-preflight.json';Write-TransportJson $preflight $cfg -Private;Test-TransportConfigFile $settings.Options.singBoxPath $preflight
-        if($action -eq 'Enable' -and (Test-VpnServiceMode)){Start-VpnServiceSession $root $ParentPid $PSCommandPath $conflict;return}
+        if($action -eq 'Enable' -and (Test-VpnServiceMode)){if(-not (Start-VpnServiceSession $root $ParentPid $PSCommandPath $conflict)){exit 1};return}
         if(-not (Test-VpnAdministrator)){
             Write-VpnStatus $root $false $false 'awaiting-uac' $conflict 'Ожидается подтверждение UAC для одноразовой задачи TUN'
             $exe=Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'

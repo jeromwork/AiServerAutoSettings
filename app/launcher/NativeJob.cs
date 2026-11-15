@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -18,19 +19,19 @@ namespace RemoteAgents.Launcher
         static readonly object inheritGate = new object();
         public Process Start(string exe, string[] args, string cwd)
         { return StartCore(exe, args, cwd, new StartupInfo { cb = Marshal.SizeOf(typeof(StartupInfo)) }, false); }
-        public Process StartRedirected(string exe, string[] args, string cwd, string output)
+        public Process StartRedirected(string exe, string[] args, string cwd, string output, bool mergeError = false)
         {
             // Inheritable handles exist only while this lock is held; parallel commands cannot
-            // keep each other's output files open. Stdin is immediate EOF, stderr is discarded.
+            // keep each other's output files open. Stdin is immediate EOF; services may capture stderr with stdout.
             lock (inheritGate) {
                 IntPtr input = IntPtr.Zero, stdout = IntPtr.Zero, stderr = IntPtr.Zero;
                 try {
                     input = OpenInherited("NUL", 0x80000000, 3);
                     stdout = OpenInherited(output ?? "NUL", 0x40000000, output == null ? 3u : 2u);
-                    stderr = OpenInherited("NUL", 0x40000000, 3);
+                    stderr = mergeError ? stdout : OpenInherited("NUL", 0x40000000, 3);
                     return StartCore(exe, args, cwd, new StartupInfo { cb = Marshal.SizeOf(typeof(StartupInfo)), flags = 0x100, stdInput = input, stdOutput = stdout, stdError = stderr }, true);
                 } finally {
-                    foreach (var h in new[] { input, stdout, stderr }) if (h != IntPtr.Zero && h != new IntPtr(-1)) CloseHandle(h);
+                    foreach (var h in new[] { input, stdout, stderr }.Distinct()) if (h != IntPtr.Zero && h != new IntPtr(-1)) CloseHandle(h);
                 }
             }
         }

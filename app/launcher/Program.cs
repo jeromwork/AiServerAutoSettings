@@ -116,6 +116,7 @@ namespace RemoteAgents.Launcher
                     try {
                         if (args.Contains("--uninstall") || args.Contains("--exit")) return 0;
                         Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
+                        VpnServiceClient.TryCleanup(home);
                         using (var context = new TrayContext(home, log, name, sid, args, firstInstallSource)) { Application.Run(context); restart = context.RestartRequested; }
                     } finally { if (owned) { mutex.ReleaseMutex(); owned = false; } }
                 }

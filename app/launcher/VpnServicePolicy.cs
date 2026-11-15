@@ -15,7 +15,7 @@ namespace RemoteAgents.Launcher
     internal static class VpnServiceNames
     {
         public const string ServiceName = "RemoteAgentsTun", PipeName = "RemoteAgentsTun", ExeName = "RemoteAgentsTun.exe", SingBoxName = "sing-box.exe";
-        public const int Protocol = 1, RollbackSeconds = 300;
+        public const int Protocol = 1, VerifySeconds = 90, LeaseSeconds = 90;
         public static string InstallDirectory(string programFiles) { return Path.Combine(programFiles, "RemoteAgents", "vpn"); }
         public static string RunDirectory(string installDir) { return Path.Combine(installDir, "run"); }
         public static string OwnerFile(string installDir) { return Path.Combine(installDir, "owner.json"); }
@@ -84,12 +84,25 @@ namespace RemoteAgents.Launcher
             try { if (!root.Contains("protocol") || Number(root["protocol"], "protocol", 0, int.MaxValue) != 1) throw new VpnPolicyException("bad-protocol"); }
             catch (VpnPolicyException) { throw new VpnPolicyException("bad-protocol"); }
             string command = root["command"] as string;
-            if (!new[] { "status", "start", "confirm", "stop" }.Contains(command)) throw new VpnPolicyException("bad-command");
+            if (!new[] { "status", "start", "confirm", "stop", "cleanup" }.Contains(command)) throw new VpnPolicyException("bad-command");
             var m = Map(root, "", command == "start" ? new[] { "protocol", "command", "watchPid", "config" } : command == "confirm" || command == "stop" ? new[] { "protocol", "command", "session" } : new[] { "protocol", "command" });
             var r = new VpnRequest { Command = command };
             if (command == "start") { r.WatchPid = Number(Need(m, "watchPid", "watchPid"), "watchPid", 0, int.MaxValue); r.Config = Need(m, "config", "config"); if (!(r.Config is IDictionary)) throw Bad("config"); }
             if (command == "confirm" || m.ContainsKey("session")) r.Session = Match(Need(m, "session", "session"), "session", @"\A[0-9a-f]{32}\z");
             return r;
+        }
+        public static bool IsOurInterface(string name) { return Regex.IsMatch(name ?? "", @"\ARemoteAgents-[A-Za-z0-9_-]{1,32}\z"); }
+        public static bool IsInstalledImage(string exePath, string installDir)
+        { return string.Equals(exePath, installDir.TrimEnd('\\') + "\\sing-box.exe", StringComparison.OrdinalIgnoreCase); }
+        public static bool IsLegacyOrphan(string exePath, string commandLine, string ownerSid, string processSid, string installDir)
+        {
+            if (string.IsNullOrEmpty(ownerSid) || ownerSid != processSid || string.IsNullOrEmpty(exePath) || !exePath.EndsWith("\\sing-box.exe", StringComparison.OrdinalIgnoreCase)) return false;
+            // Strict argv subset: no escaped quotes, switches, suffixes or shell syntax.
+            var match = Regex.Match(commandLine ?? "", @"\A\s*(?:""(?<exe>[^""\r\n]+)""|(?<exe>[^\s""]+))\s+run\s+-c\s+(?:""(?<config>[^""\r\n]+)""|(?<config>[^\s""]+))\s*\z", RegexOptions.CultureInvariant);
+            if (!match.Success || !string.Equals(match.Groups["exe"].Value, exePath, StringComparison.OrdinalIgnoreCase)) return false;
+            string config = match.Groups["config"].Value;
+            return Regex.IsMatch(config, @"\A[A-Za-z]:\\[^""<>|?*\r\n]+\\state\\vpn-sing-box\.json\z", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)
+                && !config.Split('\\').Any(x => x == "." || x == "..");
         }
         static Dictionary<string, object> Tls(object value, string p)
         {
@@ -198,7 +211,7 @@ namespace RemoteAgents.Launcher
             if (seen.Count != byTag.Count) throw Bad("outbounds.unreachable");
             rebuilt.Add(Obj("type", "selector", "tag", "vpn-active", "outbounds", new[] { selected }, "default", selected, "interrupt_exist_connections", false));
             return new VpnTunPlan { InterfaceName = name, DefaultInterface = iface, Selected = selected, Config = Obj(
-                "log", Obj("disabled", true), "inbounds", new[] { Obj("type", "tun", "tag", "vpn-tun", "interface_name", name, "address", addresses, "stack", "system", "auto_route", true, "strict_route", false, "route_exclude_address", excludes) },
+                "log", Obj("level", "warn", "timestamp", true), "inbounds", new[] { Obj("type", "tun", "tag", "vpn-tun", "interface_name", name, "address", addresses, "stack", "system", "auto_route", true, "strict_route", false, "route_exclude_address", excludes) },
                 "outbounds", rebuilt.ToArray(), "route", Obj("auto_detect_interface", true, "default_interface", iface, "default_domain_resolver", "bootstrap", "final", "vpn-active", "rules", new[] {
                     Obj("inbound", new[] { "vpn-tun" }, "network", "tcp", "port", ports, "ip_cidr", new[] { cidr }, "action", "route", "outbound", "vpn-active", "override_address", server, "override_port", port), Obj("protocol", "dns", "action", "hijack-dns") }),
                 "dns", Obj("servers", new[] { Obj("type", "udp", "tag", "bootstrap", "server", dnsip, "bind_interface", iface), Obj("type", "https", "tag", "vpn-dns", "server", dnsip, "detour", "vpn-active") }, "final", "vpn-dns")) };
@@ -263,25 +276,102 @@ namespace RemoteAgents.Launcher
             return new VpnOwnerInfo { Protocol = 1, OwnerSid = sid, SingBoxSha256 = HashValue(Json.Str(m, "singBoxSha256")), ExeSha256 = HashValue(Json.Str(m, "exeSha256")) };
         }
     }
+    // Redact before truncation, so a tail cannot reveal a cut secret.
+    internal sealed class VpnServiceDiagnostic
+    {
+        readonly HashSet<string> secrets = new HashSet<string>(StringComparer.Ordinal);
+        readonly Regex secretPattern; readonly int overlap;
+        public VpnServiceDiagnostic(object config)
+        {
+            Collect(config, ""); overlap = Math.Max(64, secrets.Count == 0 ? 0 : secrets.Max(x => x.Length));
+            if (secrets.Count > 0) secretPattern = new Regex(string.Join("|", secrets.OrderByDescending(x => x.Length).Select(Regex.Escape)), RegexOptions.CultureInvariant);
+        }
+        void Collect(object value, string parent)
+        {
+            var map = value as IDictionary;
+            if (map != null) foreach (DictionaryEntry pair in map) {
+                string key = pair.Key as string; var text = pair.Value as string;
+                if (text != null && text.Length > 0 && (new[] { "password", "uuid", "public_key", "short_id" }.Contains(key) || (parent == "transport" && key == "path"))) {
+                    secrets.Add(text); string encoded = Json.Encode(text); if (encoded.Length >= 2) secrets.Add(encoded.Substring(1, encoded.Length - 2));
+                }
+                Collect(pair.Value, key);
+            }
+            else if (value is IEnumerable && !(value is string)) foreach (var item in (IEnumerable)value) Collect(item, parent);
+        }
+        public string Redact(string text)
+        {
+            text = Regex.Replace(text ?? "", @"\x1b\[[0-9;]*m", "").Replace("\0", "");
+            foreach (string secret in secrets.OrderByDescending(x => x.Length)) text = text.Replace(secret, "***");
+            return text;
+        }
+        public string TakeOutput(ref string pending, bool final)
+        {
+            pending = Regex.Replace(pending, @"\x1b\[[0-9;]*m", "").Replace("\0", "");
+            // Complete lines are safe: validated secrets cannot contain line breaks.
+            int boundary = final ? pending.Length : Math.Max(pending.LastIndexOf('\n') + 1, pending.Length - overlap);
+            if (boundary <= 0) return "";
+            var output = new StringBuilder(); int at = 0;
+            while (at < boundary) {
+                var match = secretPattern == null ? null : secretPattern.Match(pending, at);
+                if (match == null || !match.Success || match.Index >= boundary) { output.Append(pending, at, boundary - at); at = boundary; break; }
+                output.Append(pending, at, match.Index - at); output.Append("***"); at = match.Index + match.Length;
+            }
+            pending = pending.Substring(at); return output.ToString();
+        }
+        public string Detail(string text)
+        {
+            string safe = Redact(text).Replace("\r", "");
+            var code = Regex.Match(safe, @"\A(?:sing-box check: )?(?:exit=[0-9-]+; |timeout 15s; )");
+            string prefix = code.Value; safe = safe.Substring(prefix.Length);
+            var lines = safe.Split('\n'); string tail = string.Join("\n", lines.Skip(Math.Max(0, lines.Length - 40)));
+            int limit = 2000 - prefix.Length;
+            return prefix + (tail.Length <= limit ? tail : tail.Substring(tail.Length - limit));
+        }
+    }
+    internal sealed class VpnCleanupResult { public int Processes; public string[] Interfaces = new string[0]; public string Detail = ""; public bool Clean = true; }
     internal interface IVpnProcessWatch : IDisposable { bool Alive { get; } }
     internal interface IVpnServiceHost
     {
         DateTime UtcNow { get; } string NewSession(); IVpnProcessWatch Watch(int pid); bool ProcessOwnedBy(int pid, string sid); bool InterfaceExists(string name); string InstalledSingBoxSha256();
         void CheckConfig(string configJson); void StartTun(string configJson); bool TunAlive { get; } bool StopTun(string interfaceName); void Log(string evt);
+        string TunDiagnostic { get; } string CleanupDetail { get; } void FlushDiagnostics(); VpnCleanupResult CleanupOrphans(string ownerSid);
     }
     internal sealed class VpnServiceCore
     {
         readonly object gate = new object(); readonly IVpnServiceHost host; readonly VpnOwnerInfo owner; readonly string pinned;
-        readonly List<IVpnProcessWatch> watches = new List<IVpnProcessWatch>(); string state = "off", session = "", iface = "", reason = ""; DateTime? deadline; bool shutdown;
+        readonly List<IVpnProcessWatch> watches = new List<IVpnProcessWatch>(); string state = "off", session = "", iface = "", reason = "", detail = ""; DateTime? deadline; bool shutdown;
+        VpnServiceDiagnostic diagnostic = new VpnServiceDiagnostic(null);
         public VpnServiceCore(IVpnServiceHost host, VpnOwnerInfo owner, string pinnedSingBoxSha256) { this.host = host; this.owner = owner; pinned = VpnServiceSetupPlan.HashValue(pinnedSingBoxSha256); }
-        string Error(string code) { return Json.Encode(VpnServicePolicy.Obj("ok", false, "protocol", 1, "error", code)); }
-        string Status() { return Json.Encode(VpnServicePolicy.Obj("ok", true, "protocol", 1, "state", state, "session", session, "interface", iface, "deadlineSec", deadline.HasValue ? Math.Max(0, (int)Math.Ceiling((deadline.Value - host.UtcNow).TotalSeconds)) : 0, "reason", reason, "singBoxSha256", pinned)); }
-        void Release() { foreach (var watch in watches) try { watch.Dispose(); } catch { } watches.Clear(); deadline = null; }
-        bool Stop(string next, string why, bool clearSession = false)
+        void Log(string text) { try { host.Log(diagnostic.Redact(text)); } catch { } }
+        string Error(string code, string text = null)
         {
-            bool clean = false; try { clean = host.StopTun(iface); } catch { }
-            state = clean ? next : "cleanup-error"; reason = why; Release(); if (clearSession) session = "";
-            try { host.Log(state + (why.Length > 0 ? "." + why : "")); } catch { } return clean;
+            string safe = diagnostic.Detail(text ?? code);
+            if (state != "starting" && state != "on" && new[] { "binary-mismatch", "config-rejected", "interface-busy", "start-failed", "internal-error" }.Contains(code)) { state = "error"; reason = code; detail = safe; }
+            Log("error reason=" + code + " detail=" + safe);
+            return Json.Encode(VpnServicePolicy.Obj("ok", false, "protocol", 1, "error", code, "reason", code, "detail", safe));
+        }
+        string Status() { return Json.Encode(VpnServicePolicy.Obj("ok", true, "protocol", 1, "state", state, "session", session, "interface", iface, "deadlineSec", deadline.HasValue ? Math.Max(0, (int)Math.Ceiling((deadline.Value - host.UtcNow).TotalSeconds)) : 0, "reason", reason, "detail", detail, "singBoxSha256", pinned)); }
+        void Release() { foreach (var watch in watches) try { watch.Dispose(); } catch { } watches.Clear(); deadline = null; }
+        bool Stop(string next, string why, bool clearSession = false, string text = "")
+        {
+            bool clean = false; string failure = ""; try { clean = host.StopTun(iface); } catch (Exception ex) { failure = ex.Message; }
+            state = clean ? next : "cleanup-error"; reason = clean ? why : "cleanup-error";
+            detail = diagnostic.Detail(clean ? text : "Interface/routes remaining: " + iface + "; " + host.CleanupDetail + "; " + failure + "; trigger=" + why + "; " + text);
+            Release(); if (clearSession) session = "";
+            Log(state + " reason=" + reason + " detail=" + detail); return clean;
+        }
+        public string Cleanup(string trigger)
+        {
+            lock (gate) {
+                if (state == "starting" || state == "on") return Error("busy", "Cleanup skipped: active session");
+                try {
+                    var result = host.CleanupOrphans(owner.OwnerSid);
+                    Log("cleanup trigger=" + trigger + " processes=" + result.Processes + " interfaces=" + string.Join(",", result.Interfaces));
+                    state = result.Clean ? "off" : "cleanup-error"; reason = result.Clean ? "" : "cleanup-error"; detail = diagnostic.Detail(result.Detail);
+                    if (!result.Clean) Log(state + " reason=" + reason + " detail=" + detail);
+                    return Status();
+                } catch (Exception ex) { state = "cleanup-error"; reason = "cleanup-error"; detail = diagnostic.Detail(ex.GetType().Name + ": " + ex.Message); Log(reason + " " + detail); return Status(); }
+            }
         }
         public string Handle(string requestLine, int clientPid, string clientSid, bool clientIsAdmin)
         {
@@ -293,38 +383,45 @@ namespace RemoteAgents.Launcher
                     object parsed; try { parsed = Json.Parse(requestLine); } catch { return Error("bad-json"); }
                     var r = VpnServicePolicy.ParseRequest(parsed);
                     if (r.Command == "status") return Status();
+                    if (r.Command == "cleanup") return Cleanup("pipe");
                     if (r.Command == "confirm") {
                         if (r.Session != session || session.Length == 0) return Error("session");
                         if (state != "starting" && state != "on") return Error("not-running");
-                        state = "on"; deadline = null; return Status();
+                        if (deadline.HasValue && host.UtcNow >= deadline.Value) { Stop("rolled-back", state == "starting" ? "not-confirmed" : "lease-expired"); return Status(); }
+                        state = "on"; deadline = host.UtcNow.AddSeconds(VpnServiceNames.LeaseSeconds); return Status();
                     }
                     if (r.Command == "stop") { if (r.Session != null && r.Session != session) return Error("session"); Stop("off", "", true); return Status(); }
                     if (shutdown) return Error("not-running");
-                    if (host.InstalledSingBoxSha256() != pinned) return Error("binary-mismatch");
+                    if (host.InstalledSingBoxSha256() != pinned) return Error("binary-mismatch", "Installed sing-box SHA-256 differs from embedded manifest");
                     var plan = VpnServicePolicy.BuildConfig(r.Config);
                     var pending = new List<IVpnProcessWatch>();
                     try {
                         var client = host.Watch(clientPid); if (client == null) return Error("watch-pid"); pending.Add(client);
                         if (r.WatchPid > 0) { var watch = host.Watch(r.WatchPid); if (watch == null) return Error("watch-pid"); pending.Add(watch); if (!host.ProcessOwnedBy(r.WatchPid, clientSid) || !watch.Alive) return Error("watch-pid"); }
                         if (!client.Alive) return Error("watch-pid");
-                        if ((state == "starting" || state == "on" || state == "cleanup-error") && !Stop("off", "", true)) return Error("cleanup-error");
-                        if (host.InterfaceExists(plan.InterfaceName)) return Error("interface-busy");
+                        if ((state == "starting" || state == "on" || state == "cleanup-error") && !Stop("off", "", true)) return Error("cleanup-error", detail);
+                        diagnostic = new VpnServiceDiagnostic(plan.Config);
+                        if (host.InterfaceExists(plan.InterfaceName)) return Error("interface-busy", "Interface already exists: " + plan.InterfaceName);
                         string json = Json.Encode(plan.Config);
-                        try { host.CheckConfig(json); } catch { return Error("config-rejected"); }
+                        try { host.CheckConfig(json); } catch (Exception ex) { return Error("config-rejected", "sing-box check: " + ex.Message); }
                         iface = plan.InterfaceName;
                         try { host.StartTun(json); session = host.NewSession(); if (!Regex.IsMatch(session ?? "", @"\A[0-9a-f]{32}\z")) throw new VpnPolicyException("session"); }
-                        catch { Stop("error", "start-failed", true); return Error("start-failed"); }
-                        watches.AddRange(pending); pending.Clear(); state = "starting"; reason = ""; deadline = host.UtcNow.AddSeconds(VpnServiceNames.RollbackSeconds); return Status();
+                        catch (Exception ex) { Stop("error", "start-failed", true, ex.GetType().Name + ": " + ex.Message); return Error(reason, detail); }
+                        watches.AddRange(pending); pending.Clear(); state = "starting"; reason = detail = ""; deadline = host.UtcNow.AddSeconds(VpnServiceNames.VerifySeconds); return Status();
                     } finally { foreach (var w in pending) w.Dispose(); }
-                } catch (VpnPolicyException ex) { return Error(ex.Code); } catch { return Error("internal-error"); }
+                } catch (VpnPolicyException ex) { return Error(ex.Code); } catch (Exception ex) { return Error("internal-error", ex.GetType().Name + ": " + ex.Message); }
             }
         }
         public void Tick()
         {
             lock (gate) {
-                if (state != "starting" && state != "on") return;
-                try { if (!host.TunAlive) Stop("error", "singbox-exited"); else if (watches.Any(w => !w.Alive)) Stop("off", "owner-exited"); else if (deadline.HasValue && host.UtcNow >= deadline.Value) Stop("rolled-back", "not-confirmed"); }
-                catch { Stop("error", "host-error"); }
+                try {
+                    host.FlushDiagnostics();
+                    if (state != "starting" && state != "on") return;
+                    if (watches.Any(w => !w.Alive)) Stop("off", "owner-exited", text: "Client/watch process handle signalled");
+                    else if (!host.TunAlive) Stop("error", "singbox-exited", text: host.TunDiagnostic);
+                    else if (deadline.HasValue && host.UtcNow >= deadline.Value) Stop("rolled-back", state == "starting" ? "not-confirmed" : "lease-expired", text: "No successful confirm within 90 seconds");
+                } catch (Exception ex) { Stop("error", "host-error", text: ex.GetType().Name + ": " + ex.Message); }
             }
         }
         public void Shutdown() { lock (gate) { shutdown = true; Stop("off", "shutdown", true); } }
