@@ -55,7 +55,7 @@ try{
         $ownerFile=Join-Path $root 'state/vpn-owner.json'
         if(Test-Path -LiteralPath $ownerFile){$owner=Read-TransportJson $ownerFile;if([int]$owner.pid -in $own){Write-Output 'Наш TUN уже работает';return}}
         $conflict=Find-VpnConflicts $snapshot $own
-        if($conflict.conflict){Write-VpnStatus $root $false $false 'conflict' $conflict 'Найден другой VPN; отключите его самостоятельно или оставьте наш VPN выключенным';return}
+        # Соседний VPN не блокирует запуск; инвентаризация попадёт в статус и журнал.
         if(@($snapshot.Adapters|Where-Object {$_.Name -eq $v.interfaceName}).Count){throw 'Имя TUN уже занято; существующий интерфейс не трогаем'}
         $paths=Get-TransportCandidates $settings $root;$net=Get-TransportNetwork;$status=Get-VpnTransportState $root $settings
         $exclude=Get-VpnExclusions $settings $paths $snapshot -Root $root
@@ -76,7 +76,7 @@ try{
         $base=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath,'-Home',$root,'-Session',$Session)
         $rollbackAction=New-ScheduledTaskAction -Execute $exe -Argument ((@($base+@('-Rollback'))|ForEach-Object {Quote-Transport $_}) -join ' ')
         $workerAction=New-ScheduledTaskAction -Execute $exe -Argument ((@($base+@('-Worker','-ParentPid',[string]$ParentPid))|ForEach-Object {Quote-Transport $_}) -join ' ')
-        $principal=New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Highest
+        $principal=New-ScheduledTaskPrincipal -UserId (Get-VpnUserName) -LogonType Interactive -RunLevel Highest
         $taskSettings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)
         # Независимый watchdog установлен ДО первого run. Не требует живого лаунчера/worker.
         Register-ScheduledTask -TaskName $tasks.Rollback -Action $rollbackAction -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5)) -Principal $principal -Settings $taskSettings -Force|Out-Null
@@ -99,7 +99,7 @@ try{
         $revision=(Get-TransportRevision $root)+(ConvertTo-Json -InputObject $v -Depth 20 -Compress)
         if(-not $child -or $lastTag -ne $status.active -or $lastRevision -ne $revision -or [DateTime]::UtcNow -ge $nextCheck){
             $snapshot=Get-VpnSnapshot;$own=@(Get-VpnOwnedProcessIds $root $snapshot);$ownInterface='';if($child){$ownInterface=$v.interfaceName}
-            $conflict=Find-VpnConflicts $snapshot $own $ownInterface;if($conflict.conflict){throw 'Обнаружен конфликт VPN'}
+            $conflict=Find-VpnConflicts $snapshot $own $ownInterface
             $paths=Get-TransportCandidates $settings $root;$net=Get-TransportNetwork;$exclude=Get-VpnExclusions $settings $paths $snapshot -Root $root
             $cfg=New-VpnTunConfig $settings $paths $status.active $exclude $net.interface
             $newJson=ConvertTo-Json -InputObject $cfg -Depth 40 -Compress

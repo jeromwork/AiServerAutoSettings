@@ -907,7 +907,7 @@ function Get-VpnOptions($Settings) {
     return $result
 }
 function Get-VpnSnapshot {
-    # Ошибка инвентаризации не означает отсутствие конфликтов: вызывающий запрещает включение.
+    # Снимок нужен для исключений маршрутизации; найденные VPN — только предупреждение.
     [pscustomobject]@{Processes=@(Get-CimInstance Win32_Process -ErrorAction Stop);Adapters=@(Get-NetAdapter -IncludeHidden -ErrorAction Stop);Routes=@(Get-NetRoute -ErrorAction Stop)}
 }
 function Get-VpnOwnedProcessIds([string]$Root,$Snapshot) {
@@ -925,15 +925,15 @@ function Find-VpnConflicts($Snapshot,[int[]]$OwnProcessIds=@(),[string]$OwnInter
     $hints=@($Snapshot.Processes|Where-Object {([string]$_.Name) -match '^(?i:Happ|v2ray|xray|sing-box|clash|nekoray|hiddify|wireguard|amnezia)' -and [int]$_.ProcessId -notin $OwnProcessIds}|ForEach-Object {[string]$_.Name}) -join ', '
     foreach($adapter in @($Snapshot.Adapters)){
         $text=$adapter.Name+' '+$adapter.InterfaceDescription
-        if($adapter.Status -eq 'Up' -and $adapter.Name -ne $OwnInterface -and $text -match '(?i)TUN|Wintun|WireGuard|TAP' -and $text -notmatch '(?i)OpenVPN|Tailscale|Teredo|ISATAP|6to4|IP-HTTPS'){
+        if($adapter.Status -eq 'Up' -and $adapter.Name -ne $OwnInterface -and $text -match '(?i)TUN|Wintun|WireGuard|TAP|OpenVPN|Tailscale' -and $text -notmatch '(?i)Teredo|ISATAP|6to4|IP-HTTPS'){
             [void]$items.Add([pscustomobject]@{kind='adapter';name=$adapter.Name;path='';detail=$adapter.InterfaceDescription})
         }
     }
     foreach($route in @($Snapshot.Routes)){
-        if($route.DestinationPrefix -notin @('0.0.0.0/1','128.0.0.0/1','0.0.0.0/0','::/0')){continue}
+        if($route.DestinationPrefix -notin @('0.0.0.0/1','128.0.0.0/1','0.0.0.0/0','::/0','::/1','8000::/1')){continue}
         $adapter=$Snapshot.Adapters|Where-Object {$_.ifIndex -eq $route.InterfaceIndex}|Select-Object -First 1
         # Teredo/ISATAP/6to4/IP-HTTPS are Windows' own IPv6 transition tunnels (Teredo keeps ::/0 up by default), not VPNs.
-        if($adapter -and ($adapter.Name -eq $OwnInterface -or ($adapter.Name+' '+$adapter.InterfaceDescription) -match '(?i)OpenVPN|Tailscale|Teredo|ISATAP|6to4|IP-HTTPS')){continue}
+        if($adapter -and ($adapter.Name -eq $OwnInterface -or ($adapter.Name+' '+$adapter.InterfaceDescription) -match '(?i)Teredo|ISATAP|6to4|IP-HTTPS')){continue}
         if(-not $adapter -and [string]$route.InterfaceAlias -match '(?i)Teredo|ISATAP|6to4|IP-HTTPS'){continue}
         if($route.DestinationPrefix -in @('0.0.0.0/0','::/0')){
             if(-not $adapter -or $adapter.Status -ne 'Up'){continue}
@@ -1004,18 +1004,37 @@ function New-VpnTunConfig($Settings,$Paths,[string]$SelectedTag,[string[]]$Exclu
     $outs+=@{type='selector';tag='vpn-active';outbounds=@($SelectedTag);default=$SelectedTag;interrupt_exist_connections=$false}
     # system использует TCP/IP Windows без дополнительного userspace TCP gVisor.
     # Выбор уменьшает число реализаций стека; превосходство на реальной сети ещё не проверено.
-    @{log=@{disabled=$true};inbounds=@(@{type='tun';tag='vpn-tun';interface_name=$v.interfaceName;address=@($v.address);stack='system';auto_route=$true;strict_route=$false;route_exclude_address=@($ExcludeCidrs)});
+    # Соседний full-tunnel VPN (Happ: 0.0.0.0/1 + 128.0.0.0/1 + 0.0.0.0/0) нельзя победить метрикой: sing-tun
+    # (sing-box 1.14.4) и так задаёт интерфейсу и маршрутам метрику 0, ниже её нет. Поэтому выигрыш строится на
+    # длине префикса, которую Windows сравнивает раньше метрики. Охват интернета задан четвертями /2 (а не /1),
+    # а sing-tun вычитает route_exclude_address и склеивает остаток в минимальные префиксы. Каждая IPv4-четверть
+    # содержит постоянное исключение (10/8; 100.64/10 и 127/8; 169.254/16 и 172.16/12; 192.168/16 и 224/4),
+    # поэтому наш самый короткий IPv4-маршрут — /3, IPv6 — /2 (::/2 и c000::/2 разбиты ::1, fc00::/7, fe80::/10, ff00::/8):
+    # он строго длиннее чужого /1 и /0. LAN, OpenVPN, Tailscale, сервер и hop остаются вне наших маршрутов.
+    # strict_route=false сохраняет DNS соседних сетей на их интерфейсах.
+    @{log=@{disabled=$true};inbounds=@(@{type='tun';tag='vpn-tun';interface_name=$v.interfaceName;address=@($v.address);stack='system';auto_route=$true;strict_route=$false;route_address=@('0.0.0.0/2','64.0.0.0/2','128.0.0.0/2','192.0.0.0/2','::/2','4000::/2','8000::/2','c000::/2');route_exclude_address=@($ExcludeCidrs)});
       outbounds=$outs;route=@{auto_detect_interface=$true;default_interface=$Interface;default_domain_resolver='bootstrap';final='vpn-active';rules=@(
         @{inbound=@('vpn-tun');network='tcp';port=@(22,(Get-TransportServerPort $Settings.Profile))|Select-Object -Unique;ip_cidr=@($v.probeAddress+'/32');action='route';outbound='vpn-active';override_address=$Settings.Profile.serverAddress;override_port=(Get-TransportServerPort $Settings.Profile)},
         @{protocol='dns';action='hijack-dns'})};
       dns=@{servers=@(@{type='udp';tag='bootstrap';server=$v.dnsServer;bind_interface=$Interface},@{type='https';tag='vpn-dns';server=$v.dnsServer;detour='vpn-active'});final='vpn-dns'}}
 }
+function Get-VpnCoexistenceWarning($Inventory) {
+    if(-not $Inventory -or -not $Inventory.conflict){return ''}
+    $names=@($Inventory.items|ForEach-Object {([string]$_.name -replace '[\r\n\t]',' ').Trim()}|Where-Object {$_}|Sort-Object -Unique)
+    if(-not $names.Count){return 'рядом работает: другой VPN'}
+    return 'рядом работает: '+($names -join ', ')
+}
 function Write-VpnStatus([string]$Root,[bool]$Ok,[bool]$Enabled,[string]$State,$Conflict,[string]$Summary) {
-    Write-TransportJson (Join-Path $Root 'status/vpn.json') @{ok=$Ok;enabled=$Enabled;state=$State;conflict=$Conflict;summary=$Summary;updatedAt=[DateTime]::UtcNow.ToString('o')}
-    # Журнал всегда локальный; только категория, без текста исключений и параметров процессов.
+    $warning=Get-VpnCoexistenceWarning $Conflict
+    if($warning){$Summary+='; '+$warning}
+    Write-TransportJson (Join-Path $Root 'status/vpn.json') @{ok=$Ok;enabled=$Enabled;state=$State;conflict=$Conflict;warning=$warning;summary=$Summary;updatedAt=[DateTime]::UtcNow.ToString('o')}
+    # Журнал всегда локальный; имена интерфейсов допустимы, параметры процессов и секреты не пишем.
+    # worker пишет статус каждую секунду: то же предупреждение повторяется в журнале только при смене состояния или текста.
+    $logWarning=$warning;if($script:VpnLoggedState -eq $State -and $script:VpnLoggedWarning -eq $warning){$logWarning=''}
+    $script:VpnLoggedState=$State;$script:VpnLoggedWarning=$warning
     $dir=Join-Path $Root 'logs';[void][IO.Directory]::CreateDirectory($dir);$file=Join-Path $dir 'vpn.log'
     if((Test-Path -LiteralPath $file) -and (Get-Item -LiteralPath $file).Length -ge 1MB){Move-Item -LiteralPath $file -Destination ($file+'.1') -Force}
-    [IO.File]::AppendAllText($file,([DateTime]::UtcNow.ToString('o')+' '+$State+"`n"),(New-Object Text.UTF8Encoding($false)))
+    [IO.File]::AppendAllText($file,([DateTime]::UtcNow.ToString('o')+' '+$State+$(if($logWarning){' '+$logWarning}else{''})+"`n"),(New-Object Text.UTF8Encoding($false)))
 }
 function Set-VpnEnabled([string]$Root,[bool]$Enabled) {
     $mutex=New-Object Threading.Mutex($false,('Global\RemoteAgentsConfig-'+(Get-TransportFingerprint 'config' (Get-TransportHome $Root).ToLowerInvariant())));$locked=$false
@@ -1028,6 +1047,10 @@ function Set-VpnEnabled([string]$Root,[bool]$Enabled) {
         $config.components.vpn|Add-Member -Force enabled $Enabled
         Write-TransportJson $file $config
     }finally{if($locked){$mutex.ReleaseMutex()};$mutex.Dispose()}
+}
+function Get-VpnUserName {
+    # Учётная запись для задач планировщика вынесена отдельно: тесты без Windows подменяют эту функцию.
+    [Security.Principal.WindowsIdentity]::GetCurrent().Name
 }
 function Test-VpnAdministrator {
     if($env:OS -ne 'Windows_NT'){return $false}
@@ -1045,8 +1068,26 @@ function Assert-VpnTunRoute([string]$Address,[int]$InterfaceIndex) {
     $routes=@(Find-NetRoute -RemoteIPAddress $Address -ErrorAction Stop|Where-Object {$_.DestinationPrefix})
     if(-not $routes.Count -or @($routes|Where-Object {$_.InterfaceIndex -ne $InterfaceIndex}).Count){throw 'Пробный запрос обходит TUN'}
 }
+function Assert-VpnInternetRoutes($Settings,$Adapter) {
+    # Read only: verify the least specific own route in each configured half against
+    # Windows' actual winner, including another VPN with equal split-default routes.
+    $v=Get-VpnOptions $Settings;$routes=@(Get-NetRoute -InterfaceIndex $Adapter.ifIndex -ErrorAction Stop)
+    $families=@($v.address|ForEach-Object {([Net.IPAddress]::Parse($_.Split('/')[0])).AddressFamily}|Select-Object -Unique)
+    foreach($family in $families){
+        foreach($half in @(0,1)){
+            $candidates=@(foreach($route in $routes){
+                $parts=$route.DestinationPrefix.Split('/');$ip=[Net.IPAddress]::Parse($parts[0]);$bits=[int]$parts[1]
+                if($ip.AddressFamily -eq $family -and $bits -gt 0 -and [int]($ip.GetAddressBytes()[0] -ge 128) -eq $half){$route}
+            })
+            $selected=$candidates|Sort-Object {[int]$_.DestinationPrefix.Split('/')[1]}|Select-Object -First 1
+            if(-not $selected){throw 'Нет маршрута TUN для половины интернета'}
+            Assert-VpnTunRoute $selected.DestinationPrefix.Split('/')[0] $Adapter.ifIndex
+        }
+    }
+}
 function Test-VpnThroughTun($Settings,$Adapter) {
     $v=Get-VpnOptions $Settings
+    Assert-VpnInternetRoutes $Settings $Adapter
     if(-not $Settings.Transport.bootstrap){
     Assert-VpnTunRoute $v.probeAddress $Adapter.ifIndex
     # SSH с закреплённым host key проверяет сервер через TUN (synthetic IP -> server loopback),
@@ -1082,7 +1123,7 @@ function Clear-VpnRoutes([string]$Root,[string]$Session) {
 }
 
 function Register-VpnRollbackTask([string]$Root,[string]$Session,[string]$ScriptPath,[string]$UserId='') {
-    if(-not $UserId){$UserId=[Security.Principal.WindowsIdentity]::GetCurrent().Name}
+    if(-not $UserId){$UserId=Get-VpnUserName}
     $tasks=Get-VpnTaskNames $Root;$exe=Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
     $args=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$ScriptPath,'-Home',$Root,'-Session',$Session,'-Rollback')
     $action=New-ScheduledTaskAction -Execute $exe -Argument (($args|ForEach-Object {Quote-Transport $_}) -join ' ')

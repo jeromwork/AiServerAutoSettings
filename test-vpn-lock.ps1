@@ -23,7 +23,13 @@ function Get-NetIPAddress {
 }
 function Get-NetRoute { [pscustomobject]@{DestinationPrefix='0.0.0.0/0'} }
 function Get-VpnPublicAddress { $script:publicIp }
-function Get-CimInstance { [pscustomobject]@{State='Running';PathName=$programPath} }
+# Keep the service's Windows spelling while files stay in this platform's temp directory.
+function Get-CimInstance { [pscustomobject]@{State='Running';PathName=$programPath.Replace('/','\')} }
+function Test-Path {
+    [CmdletBinding()]param([string]$LiteralPath)
+    if($LiteralPath -eq $programPath.Replace('/','\')){return [IO.File]::Exists($programPath)}
+    Microsoft.PowerShell.Management\Test-Path -LiteralPath $LiteralPath
+}
 function Get-AuthenticodeSignature { [pscustomobject]@{Status='Valid'} }
 function Get-NetFirewallProfile {
     1..3 | ForEach-Object { [pscustomobject]@{Enabled='True';DefaultOutboundAction=$(if ($script:blocked) {'Block'} else {'Allow'});DisabledInterfaceAliases=@()} }
@@ -85,7 +91,18 @@ try {
     Assert-True ($script:blocked -and $script:imports -eq 1 -and (Get-LockState).Phase -eq 'NeedsAttention') 'Failure silently restored ordinary internet'
     Disable-VpnLock
     Assert-True (-not $script:blocked -and $script:imports -eq 2) 'Recovery after partial activation failed'
-    Write-Host 'PASS: parse, missing tunnel, wrong IP, endpoint scope, repeated ON, invalid backup, restore, partial-failure recovery.'
+    # The independent firewall lock keeps its safety contract; the TUN inventory must
+    # never become a second lock that refuses to coexist with another VPN.
+    $tunSource=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'transport/Vpn.Tun.ps1'))
+    $tunTokens=$null;$tunErrors=$null
+    $tunAst=[Management.Automation.Language.Parser]::ParseInput($tunSource,[ref]$tunTokens,[ref]$tunErrors)
+    Assert-True ($tunErrors.Count -eq 0) 'TUN parse failed'
+    $inventoryGates=@($tunAst.FindAll({param($node)
+        $node -is [Management.Automation.Language.IfStatementAst] -and $node.Clauses[0].Item1.Extent.Text.Contains('$conflict.conflict')
+    },$true))
+    Assert-True ($inventoryGates.Count -eq 0) 'Foreign VPN inventory still gates enable or worker'
+    Assert-True ($tunSource.Contains('AddMinutes(5)') -and $tunSource.Contains('-Verb RunAs') -and $tunSource.Contains('Test-VpnThroughTun $settings $adapter')) 'UAC, HTTPS verification or five-minute rollback removed'
+    Write-Host 'PASS: parse, missing tunnel, wrong IP, endpoint scope, repeated ON, invalid backup, restore, partial-failure recovery, TUN coexistence without inventory gates.'
 } finally {
     foreach ($name in @('state.json','state.pending.json','before.wfw','happd.exe')) {
         $path=Join-Path $fixture $name

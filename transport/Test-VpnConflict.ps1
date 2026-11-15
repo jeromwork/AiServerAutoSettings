@@ -8,7 +8,7 @@ try{
     $nic='';if($own.Count -gt 0 -and (Test-Path -LiteralPath (Join-Path $TransportHome 'state/vpn-owner.json'))){$owner=Read-TransportJson (Join-Path $TransportHome 'state/vpn-owner.json');if([int]$owner.pid -in $own){$settings=Read-TransportSettings $TransportHome;$nic=(Get-VpnOptions $settings).interfaceName}}
     Find-VpnConflicts $snapshot $own $nic|ConvertTo-Json -Depth 10
 }catch{
-    # Fail closed: инвентаризация недоступна — это не разрешение запускать TUN.
+    # Инвентаризация только справочная (TUN включается всегда): сбой чтения сообщаем как неизвестное состояние, а не как запрет.
     [pscustomobject]@{conflict=$true;items=@([pscustomobject]@{kind='adapter';name='inventory';path='';detail='Не удалось проверить процессы, адаптеры или маршруты'})}|ConvertTo-Json -Depth 10
     exit 1
 }
