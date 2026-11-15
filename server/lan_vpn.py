@@ -539,6 +539,17 @@ def sync_singbox():
     save(STATE / 'managed-subnets.json', owned)
 
 
+def rule_dst(rule):
+    """`ip -j rule` reports the prefix length separately: {"dst": "192.168.88.0", "dstlen": 24}."""
+    if not rule.get('dst') or rule['dst'] == 'all':
+        return None
+    try:
+        return str(ipaddress.ip_network(rule['dst'] + ('/' + str(rule['dstlen']) if 'dstlen' in rule else ''),
+                                        strict=False))
+    except ValueError:
+        return None
+
+
 def route_ops(name, data, remove=False):
     # Dedicated table + rules ahead of sing-box (normally preference 9000).
     table, pref = str(data['table']), str(data['priority'])
@@ -559,7 +570,7 @@ def route_ops(name, data, remove=False):
     for subnet in data['subnets']:
         run(['ip', '-4', 'route', 'replace', subnet, 'dev', 'tun-lan-' + name, 'table', table])
         if not any(r.get('priority') == data['priority'] and str(r.get('table')) == table and
-                   r.get('dst') and str(ipaddress.ip_network(r['dst'], strict=False)) == subnet for r in rules):
+                   rule_dst(r) == subnet for r in rules):
             run(['ip', '-4', 'rule', 'add', 'pref', pref, 'to', subnet, 'lookup', table])
 
 

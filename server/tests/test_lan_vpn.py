@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -311,6 +312,27 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(calls[0], ['firewall', {}])
         self.assertEqual(calls[-1], ['firewall', {}])
         self.assertTrue(all(not p['enabled'] for p in data.values()))
+
+
+class ReconnectRouteTests(unittest.TestCase):
+    def test_rule_dst_reads_separate_prefix_length(self):
+        self.assertEqual(lan.rule_dst({'dst': '192.168.88.0', 'dstlen': 24}), '192.168.88.0/24')
+        self.assertEqual(lan.rule_dst({'dst': '10.0.0.1'}), '10.0.0.1/32')
+        self.assertIsNone(lan.rule_dst({'src': 'all'}))
+
+    def test_reconnect_does_not_add_existing_rules(self):
+        data = {'table': 42000, 'priority': 1000, 'subnets': ['192.168.87.0/24', '192.168.88.0/21']}
+        existing = [{'priority': 1000, 'src': 'all', 'dst': '192.168.87.0', 'dstlen': 24, 'table': '42000'},
+                    {'priority': 1000, 'src': 'all', 'dst': '192.168.88.0', 'dstlen': 21, 'table': '42000'}]
+        calls = []
+
+        def fake_run(args, check=True, **kwargs):
+            calls.append([str(a) for a in args])
+            return SimpleNamespace(returncode=0, stdout=json.dumps(existing) if 'show' in args else '')
+        with patch.object(lan, 'run', fake_run):
+            lan.route_ops('clinic', data)
+        self.assertFalse([c for c in calls if c[:4] == ['ip', '-4', 'rule', 'add']])
+        self.assertEqual(sum(c[:4] == ['ip', '-4', 'route', 'replace'] for c in calls), 3)
 
 
 class InternetNeverViaLanTests(unittest.TestCase):
