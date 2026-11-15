@@ -8,6 +8,7 @@ function Assert($ok,$why){if(-not $ok){throw $why};$script:count++}
 $global:vpnFixture=@{calls=@();mode='empty';enabled=$true}
 $originalOs=$env:OS;$env:OS='Windows_NT'
 try{
+    Copy-Item (Join-Path $PSScriptRoot 'Vpn.Legacy.ps1') (Join-Path $work 'Vpn.Legacy.ps1')
     Copy-Item (Join-Path $PSScriptRoot 'Vpn.Tun.ps1') (Join-Path $work 'Vpn.Tun.ps1')
     $common=". '"+(Join-Path $PSScriptRoot 'Transport.Common.ps1').Replace("'","''")+"'`n"+@'
 function Test-VpnAdministrator {$true}
@@ -26,6 +27,7 @@ function Get-VpnSnapshot {
         $adapters=@([pscustomobject]@{ifIndex=7;Name='OpenVPN';Status='Up';HardwareInterface=$false;InterfaceDescription='OpenVPN'})
         $routes=@([pscustomobject]@{InterfaceIndex=7;DestinationPrefix='0.0.0.0/0';NextHop='0.0.0.0'})
     }
+    if($global:vpnFixture.mode -eq 'own'){$adapters=@([pscustomobject]@{Name='RemoteAgents-TUN';ifIndex=4})}
     [pscustomobject]@{Processes=@();Adapters=$adapters;Routes=$routes}
 }
 function Get-TransportCandidates($Settings,$Root){$global:vpnFixture.calls+=@('candidates');@{}}
@@ -42,6 +44,14 @@ function Start-Process {throw 'no process or UAC expected'}
     $root=Join-Path $work 'home';$script=Join-Path $work 'Vpn.Tun.ps1'
     & $script -Home $root -Disable
     Assert (-not $global:vpnFixture.enabled -and (Read-TransportJson (Join-Path $root 'status/vpn.json')).state -eq 'off') 'Disable signals host before config, returns off with no tasks or process launch'
+    Write-VpnStatus $root $false $false 'rollback-error' @{} 'fixture cleanup failure'
+    $failed=$false;try{& $script -Home $root -Disable}catch{$failed=$true}
+    Assert ($failed -and (Read-TransportJson (Join-Path $root 'status/vpn.json')).state -eq 'rollback-error') 'Disable preserves host cleanup failure instead of claiming off'
+    Write-VpnStatus $root $false $false 'off' @{} 'fixture'
+    $global:vpnFixture.mode='own';$failed=$false
+    try{& $script -Home $root -Disable}catch{$failed=$true}
+    Assert ($failed -and (Read-TransportJson (Join-Path $root 'status/vpn.json')).state -eq 'rollback-error') 'Disable cannot claim off while our adapter remains'
+    $global:vpnFixture.mode='empty'
     Remove-Item (Join-Path $root 'state/vpn.stop')
     Write-TransportJson (Join-Path $root 'state/vpn-session.json') @{session='fixture'}
     $global:vpnFixture.mode='foreign';$global:vpnFixture.calls=@()

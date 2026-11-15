@@ -36,6 +36,14 @@ if($action -eq 'Disable'){
     $deadline=[DateTime]::UtcNow.AddSeconds(4)
     while((Test-VpnHostAlive $root) -and [DateTime]::UtcNow -lt $deadline){Start-Sleep -Milliseconds 50}
     if(Test-VpnHostAlive $root){throw 'Выключение VPN ещё не подтверждено'}
+    $terminal=Join-Path $root 'status/vpn.json'
+    if((Test-Path $terminal) -and (Read-TransportJson $terminal).state -eq 'rollback-error'){throw 'Уборка VPN ещё не подтверждена'}
+    . (Join-Path $PSScriptRoot 'Vpn.Legacy.ps1')
+    $names=@(Get-VpnLegacyInterfaces $root)
+    if(@((Get-VpnSnapshot).Adapters|Where-Object {$_.Name -in $names}).Count){
+        Write-VpnStatus $root $false $false 'rollback-error' $conflict 'Не удалось подтвердить выключение VPN. Откройте диагностику'
+        throw 'Остался адаптер нашего VPN; требуется подтверждённая очистка'
+    }
     Set-VpnEnabled $root $false
     Write-VpnStatus $root $false $false 'off' $conflict 'VPN выключен';return
 }
