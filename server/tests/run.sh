@@ -23,3 +23,6 @@ for case in "${cases[@]}"; do
   timeout 60 python3 -m unittest -v "$case" < /dev/null
 done
 echo "server/tests: ${#cases[@]} тестов, все прошли"
+# Server-only Telegram gateway import; loopback and disposable HOME, no live services.
+timeout 60 python3 "$repo/server/tg-gateway/test_gateway.py" < /dev/null
+timeout 120 python3 "$repo/server/tg-gateway/test_install.py" < /dev/null
