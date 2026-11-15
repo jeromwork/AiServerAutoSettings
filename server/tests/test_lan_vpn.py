@@ -681,37 +681,70 @@ class DirectEndpointTests(unittest.TestCase):
                                          'other': {'subnets': ['192.168.143.0/24']}}),
                          (ROOT / 'tests/fixtures/lan-no-endpoints.nft').read_text())
 
-    def test_sync_owns_only_new_exclusions_and_retires_one_lan(self):
-        for foreign_gateway in (False, True):
-            with self.subTest(foreign_gateway=foreign_gateway), tempfile.TemporaryDirectory() as tmp:
+    def test_sync_migrates_old_public_and_private_exclusions_once(self):
+        for receipt in (False, True):
+            with self.subTest(receipt=receipt), tempfile.TemporaryDirectory() as tmp:
                 state = Path(tmp)
                 sb = state / 'config.json'
                 original = config()
-                foreign = ['203.0.113.7/32'] + (['93.184.216.34/32'] if foreign_gateway else [])
-                original['inbounds'][0]['route_exclude_address'] = foreign[:]
-                lan.save(sb, original)
                 data = {'office': lan_profile(gateways=[endpoint()], enabled=True),
                         'other': lan_profile('192.168.143.0/24', [endpoint('1.1.1.1', 'tcp', 443)], True, 1)}
+                original['inbounds'][0]['route_exclude_address'] = ['203.0.113.7/32'] + lan.legacy_exclusions(data)
+                lan.save(sb, original)
+                if receipt:
+                    lan.save(state / 'managed-subnets.json', lan.legacy_exclusions(data))
                 with patch.object(lan, 'STATE', state), patch.object(lan, 'SB', sb), \
-                     patch.object(lan, 'active', side_effect=lambda: {n: p for n, p in data.items() if p['enabled']}), \
-                     patch.object(lan.os, 'chown'), patch.object(lan, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')), \
+                     patch.object(lan, 'profiles', return_value=data), patch.object(lan.os, 'chown'), \
+                     patch.object(lan, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')) as run, \
                      contextlib.redirect_stdout(io.StringIO()):
                     lan.sync_singbox()
-                    own = lan.managed_subnets()
-                    self.assertNotIn('203.0.113.7/32', own)
-                    self.assertEqual('93.184.216.34/32' in own, not foreign_gateway)
-                    self.assertEqual(set(lan.read(sb)['inbounds'][0]['route_exclude_address']),
-                                     set(foreign + lan.managed_exclusions(data)))
-                    data['office']['enabled'] = False
-                    lan.sync_singbox()
-                    self.assertEqual(set(lan.read(sb)['inbounds'][0]['route_exclude_address']),
-                                     set(foreign + ['1.1.1.1/32', '192.168.143.0/24']))
-                    data['other']['enabled'] = False
-                    lan.sync_singbox()
-                    self.assertEqual(lan.read(sb), original)
+                    self.assertEqual(lan.read(sb)['inbounds'][0]['route_exclude_address'], ['203.0.113.7/32'])
                     self.assertEqual(lan.managed_subnets(), [])
+                    self.assertEqual(lan.managed_exclusions(data), [])
+                    self.assertEqual(sum(c.args[0] == ['systemctl', 'restart', 'sing-box'] for c in run.call_args_list), 1)
+                    run.reset_mock()
+                    lan.sync_singbox()
+                    self.assertFalse(any(c.args[0] == ['systemctl', 'restart', 'sing-box'] for c in run.call_args_list))
 
-    def test_enable_applies_endpoint_exclusion_before_client_start(self):
+    def test_prestart_and_already_enabled_migrate_before_openvpn_transport(self):
+        data = lan_profile(gateways=[endpoint()], enabled=True)
+        with tempfile.TemporaryDirectory() as tmp, patch.object(lan, 'STATE', Path(tmp)), \
+             patch.object(lan, 'profile', return_value=data), patch.object(lan, 'nft_identity', return_value={}), \
+             patch.object(lan, 'endpoint_ops') as rules, patch.object(lan, 'sync_singbox') as migrate, \
+             patch.object(lan, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')), \
+             contextlib.redirect_stdout(io.StringIO()):
+            lan.save(Path(tmp) / 'firewall.json', {})
+            lan.prestart('office')
+            rules.assert_called_once_with(data)
+            migrate.assert_called_once_with()
+            rules.reset_mock(); migrate.reset_mock()
+            lan.enable('office', 'https://ip.example.invalid')
+            rules.assert_called_once_with(data)
+            migrate.assert_called_once_with()
+
+    def test_endpoint_rule_is_scoped_idempotent_and_removed(self):
+        data = lan_profile(gateways=[endpoint()])
+        rules, calls = [], []
+        def run(args, **kw):
+            calls.append(args)
+            code = 0
+            if 'add' in args:
+                rules.append({'priority': 2000, 'src': 'all', 'dst': '93.184.216.34', 'dstlen': 32,
+                              'uid_start': 0, 'uid_end': 0, 'ipproto': 'udp', 'dport': 1313, 'table': 'main'})
+            if 'del' in args:
+                code = 0 if rules else 2
+                rules.clear()
+            return subprocess.CompletedProcess(args, code, json.dumps(rules), '')
+        with patch.object(lan, 'run', side_effect=run):
+            lan.endpoint_ops(data)
+            lan.endpoint_ops(data)
+            adds = [c for c in calls if 'add' in c]
+            self.assertEqual(adds, [['ip', '-4', 'rule', 'add', 'pref', '2000', 'to', '93.184.216.34/32',
+                                     'uidrange', '0-0', 'ipproto', 'udp', 'dport', '1313', 'lookup', 'main']])
+            lan.endpoint_ops(data, remove=True)
+            self.assertEqual(rules, [])
+
+    def test_enable_routes_endpoint_before_client_without_tun_exclusions(self):
         for direct in (False, True):
             with self.subTest(direct=direct), tempfile.TemporaryDirectory() as tmp:
                 state = Path(tmp)
@@ -724,9 +757,10 @@ class DirectEndpointTests(unittest.TestCase):
                     calls.append(args)
                     if args == ['systemctl', 'start', lan.service('office')]:
                         exclusions = lan.read(sb)['inbounds'][0].get('route_exclude_address', [])
-                        self.assertEqual('93.184.216.34/32' in exclusions, direct)
+                        self.assertEqual(exclusions, [])
+                        self.assertEqual(any('uidrange' in c for c in calls), direct)
                         lan.save(state / 'office.discovery.json', {'subnets': data['static']})
-                    return subprocess.CompletedProcess(args, 0, '', '')
+                    return subprocess.CompletedProcess(args, 0, '[]' if 'show' in args else '', '')
                 with contextlib.ExitStack() as stack:
                     for attr, value in [('STATE', state), ('SB', sb), ('LOG', state / 'lan.log'), ('ETC', state / 'etc')]:
                         stack.enter_context(patch.object(lan, attr, value))
@@ -751,7 +785,7 @@ class DirectEndpointTests(unittest.TestCase):
                 restarts = [i for i, args in enumerate(calls) if args == ['systemctl', 'restart', 'sing-box']]
                 self.assertLess(calls.index(['firewall']), fw_start)
                 self.assertLess(fw_start, client_start)
-                self.assertEqual(any(fw_start < i < client_start for i in restarts), direct)
+                self.assertEqual(restarts, [])
                 self.assertTrue(data['ready'])
 
     def test_cli_flag_only_add_and_persists_general_endpoints(self):
@@ -833,7 +867,7 @@ class OpenvpnDiagnosticTests(unittest.TestCase):
                 data = lan_profile(gateways=[endpoint()])
                 stack.enter_context(patch.object(lan, 'STATE', state))
                 stack.enter_context(patch.object(lan, 'LOG', state / 'lan.log'))
-                for attr in ('preflight', 'local_conflicts', 'start_transaction', 'update', 'firewall', 'sync_singbox'):
+                for attr in ('preflight', 'local_conflicts', 'start_transaction', 'update', 'firewall', 'sync_singbox', 'endpoint_ops'):
                     stack.enter_context(patch.object(lan, attr))
                 stack.enter_context(patch.object(lan, 'profile', return_value=data))
                 stack.enter_context(patch.object(lan, 'active', side_effect=lambda: {'office': data} if data['enabled'] else {}))
@@ -874,7 +908,7 @@ class EndpointLifecycleTests(unittest.TestCase):
                     lan.update(name, p)
                     client, _, _ = lan.import_client(name, FIXTURE, server_fingerprint=FINGERPRINT)
                     lan.atomic(etc / name / 'client.conf', client)
-                own = lan.managed_exclusions(data)
+                own = lan.legacy_exclusions(data)
                 cfg = config()
                 cfg['inbounds'][0]['route_exclude_address'] = ['203.0.113.7/32'] + own
                 lan.save(sb, cfg)
@@ -890,8 +924,8 @@ class EndpointLifecycleTests(unittest.TestCase):
                 stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
                 lan.disable('office', remove=remove)
                 self.assertEqual(set(lan.read(sb)['inbounds'][0]['route_exclude_address']),
-                                 {'203.0.113.7/32', '1.1.1.1/32', '192.168.143.0/24'})
-                self.assertEqual(lan.managed_subnets(), ['1.1.1.1/32', '192.168.143.0/24'])
+                                 {'203.0.113.7/32'})
+                self.assertEqual(lan.managed_subnets(), [])
                 self.assertEqual((etc / 'office').exists(), not remove)
                 self.assertTrue(lan.profile('other')['enabled'])
                 self.assertEqual(lan.profile('other')['server_fingerprint'], FINGERPRINT)
@@ -916,11 +950,11 @@ class EndpointLifecycleTests(unittest.TestCase):
                     client, _, _ = lan.import_client(name, FIXTURE, server_fingerprint=FINGERPRINT)
                     lan.atomic(etc / name / 'client.conf', client)
                 before = config()
-                before['inbounds'][0]['route_exclude_address'] = ['203.0.113.7/32'] + lan.managed_exclusions(previous)
+                before['inbounds'][0]['route_exclude_address'] = ['203.0.113.7/32'] + lan.legacy_exclusions(previous)
                 lan.save(pending / 'sing-box.json', before)
-                lan.save(sb, lan.patch_singbox(before, [], lan.managed_exclusions(current)))
+                lan.save(sb, lan.patch_singbox(before, [], lan.legacy_exclusions(current)))
                 lan.save(pending / 'profiles.json', previous)
-                lan.save(pending / 'managed.json', lan.managed_exclusions(previous))
+                lan.save(pending / 'managed.json', lan.legacy_exclusions(previous))
                 lan.save(pending / 'meta.json', {'name': 'other', 'uid': os.getuid(), 'gid': os.getgid(), 'mode': 0o600})
                 lan.save(pending / 'nft.json', {'present': False, 'text': ''})
                 for attr in ('stop_clients', 'route_ops', 'event', 'cancel_timer'):

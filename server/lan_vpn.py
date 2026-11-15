@@ -522,21 +522,46 @@ def managed_subnets():
     return read(p) if p.exists() else []
 
 
-def managed_exclusions(data):
+def legacy_exclusions(data):
+    # Values written by the old manager. Exact profile matches are retired even
+    # if an old ownership receipt was lost; unrelated exclusions remain intact.
     return sorted({s for p in data.values() for s in p['subnets']} |
                   {e['ip'] + '/32' for p in data.values() for e in endpoints(p.get('endpoints', []))})
 
 
+def managed_exclusions(data):
+    # Destination rules at 1000..1063 already bypass sing-box for LAN subnets.
+    # Any TUN exclusion can split its default into prefixes that evade suppress=0.
+    return []
+
+
 def sync_singbox():
-    new = managed_exclusions(active())
-    # Do not take ownership of pre-existing exclusions: remove only our additions.
-    old = managed_subnets()
-    current = [s for i in read(SB)['inbounds'] if i.get('type') == 'tun'
-               for s in i.get('route_exclude_address', [])]
-    owned = [s for s in new if s in old or s not in current]
-    candidate = checked_singbox(old, new)
+    old = sorted(set(managed_subnets()) | set(legacy_exclusions(profiles())))
+    candidate = checked_singbox(old, [])
     apply_singbox(candidate)
-    save(STATE / 'managed-subnets.json', owned)
+    if managed_subnets():
+        save(STATE / 'managed-subnets.json', [])
+
+
+def endpoint_ops(data, remove=False):
+    # Root OpenVPN transport only; nft output/postrouting independently enforce
+    # the same allowlist. Separate slots avoid sharing ownership between LANs.
+    pref = str(data['priority'] + 1000)
+    gateways = endpoints(data.get('endpoints', []))
+    if not gateways:
+        return
+    rules = json.loads(run(['ip', '-j', '-4', 'rule', 'show']).stdout)
+    for e in gateways:
+        selector = ['pref', pref, 'to', e['ip'] + '/32', 'uidrange', '0-0',
+                    'ipproto', e['proto'], 'dport', str(e['port']), 'lookup', 'main']
+        if remove:
+            while run(['ip', '-4', 'rule', 'del', *selector], check=False).returncode == 0:
+                pass
+        elif not any(r.get('priority') == int(pref) and str(r.get('table')) in ('main', '254') and
+                     rule_dst(r) == e['ip'] + '/32' and r.get('uid_start') == 0 and r.get('uid_end') == 0 and
+                     r.get('ipproto') in (e['proto'], {'tcp': 6, 'udp': 17}[e['proto']]) and
+                     r.get('dport') == e['port'] for r in rules):
+            run(['ip', '-4', 'rule', 'add', *selector])
 
 
 def rule_dst(rule):
@@ -553,6 +578,7 @@ def rule_dst(rule):
 def route_ops(name, data, remove=False):
     # Dedicated table + rules ahead of sing-box (normally preference 9000).
     table, pref = str(data['table']), str(data['priority'])
+    endpoint_ops(data, remove)
     if remove:
         for subnet in data['subnets']:
             while run(['ip', '-4', 'rule', 'del', 'pref', pref, 'to', subnet, 'lookup', table], check=False).returncode == 0:
@@ -682,7 +708,8 @@ def rollback(boot=False):
     backup = pending / 'sing-box.json'
     # All clients were stopped, including previously enabled LANs. Restore the
     # snapshot's foreign exclusions, but retire every exclusion we owned there.
-    restored = patch_singbox(read(backup), read(pending / 'managed.json'), [])
+    restored = patch_singbox(read(backup), sorted(set(read(pending / 'managed.json')) |
+                              set(legacy_exclusions(previous)) | set(legacy_exclusions(current))), [])
     candidate = pending / 'sing-box.restored.json'
     save(candidate, restored)
     run(['sing-box', 'check', '-c', candidate])
@@ -815,6 +842,8 @@ def prestart(name):
             'Есть другая незавершённая транзакция.')
     require((STATE / 'firewall.json').exists() and nft_identity() == read(STATE / 'firewall.json'),
             'Kernel guard отсутствует/изменён.')
+    endpoint_ops(data)
+    sync_singbox()
 
 
 def stop_client(name, boot=False):
@@ -902,6 +931,8 @@ def enable(name, url, transaction_started=False):
     if data.get('enabled'):
         require(run(['systemctl', 'is-active', '--quiet', service(name)], check=False).returncode == 0,
                 'Флаг enabled без активного клиента: сначала disable.')
+        endpoint_ops(data)
+        sync_singbox()
         print('ЛВС уже включена; проверяйте test/status.')
         return
     for other, p in active().items():
@@ -920,8 +951,8 @@ def enable(name, url, transaction_started=False):
         firewall(active())
         # Required service start is now safe, before the TUN is created.
         run(['systemctl', 'start', 'remoteagents-lan-firewall.service'])
-        if data.get('endpoints'):
-            sync_singbox()
+        sync_singbox()
+        endpoint_ops(data)
         discovery = STATE / (name + '.discovery.json')
         discovery.unlink(missing_ok=True)
         openvpn_log(name).unlink(missing_ok=True)
