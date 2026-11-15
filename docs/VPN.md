@@ -111,7 +111,8 @@ VPN не останавливаются. Рабочий текущий хозя�
   от работоспособности VPN-outbound.
 - DNS-перехват направлен к `vpn-dns`: HTTPS `/dns-query` на `vpn.dnsServer`,
   с проверкой сертификата для его IP и привязкой к физическому интерфейсу.
-  Подмена обычного UDP DNS провайдером не определяет адреса сайтов. UDP `bootstrap`
+  Подмена обычного UDP DNS провайдером не определяет ответы перехваченных
+  запросов. Это не устраняет Windows multihomed DNS вне TUN (см. ниже). UDP `bootstrap`
   остаётся только для разрешения транспортных endpoints. `dnsServer` должен
   поддерживать UDP и HTTPS с сертификатом на IP (как уже требует схема);
   недоступность DoH также выключает VPN. DNS Windows вне TUN (например LAN DNS)
@@ -157,3 +158,24 @@ API без TUN. Любые запуски sing-box на сервере выпо�
 с TTL 3600 не кэшируют сторожевую пробу, адресные исключения не обходят VPN
 outbound, отказ DoH прерывает проверку при живом HTTPS-сайте. Для Linux стенда
 заменяется только вход TUN на mixed; маршруты и Wintun Windows он не проверяет.
+
+## Нерешённое ограничение DNS Windows (P1)
+
+При `strict_route=false` Windows Smart Multi-Homed Name Resolution может принять
+ответ физического DNS в обход перехваченного DoH. Поэтому защита от DNS-подмены
+пока не доказана для всех системных запросов. Штатный `strict_route=true` в
+закреплённом sing-tun создаёт WFP block port 53 на всех интерфейсах, кроме своего
+TUN и процесса sing-box; route_exclude_address этот block не исключает. Это
+блокирует также split-DNS частичного OpenVPN/Tailscale. Включать его автоматически
+при заданном требовании совместимости нельзя.
+
+Для полного исправления нужен поддержанный ядром выборочный DNS/WFP bypass для
+доверенных частичных VPN либо отдельно согласованное ограничение split-DNS.
+Динамическая WFP-сессия сама удаляется при смерти ядра; проблема здесь в области
+блокировки, а не необходимости постоянного firewall-правила. До решения этого
+вопроса ветка не подтверждает требование надёжного открытия заблокированных сайтов
+при любой конфигурации DNS Windows.
+
+Источники: [Windows multihomed DNS](https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-admx-dnsclient#dns-smartmultihomednameresolution),
+[strict_route](https://sing-box.sagernet.org/configuration/inbound/tun/#strict_route),
+[WFP pinned sing-tun](https://raw.githubusercontent.com/SagerNet/sing-tun/040db71fcd33/tun_windows.go).
