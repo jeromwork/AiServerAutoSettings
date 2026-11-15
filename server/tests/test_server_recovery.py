@@ -92,6 +92,19 @@ class RecoveryTests(unittest.TestCase):
         self.assertFalse(self.f.path('/var/lib/remoteagents/lan/pending').exists())
         self.assertIn('remoteagents-lan@office.service', self.f.active)
 
+    def test_late_component_work_cannot_poison_checked_lan_snapshot(self):
+        self.c['lan'] = config()['lan']
+        data = self.install()
+        def corrupt_after_lan_check(engine, apply):
+            self.f.write('/etc/remoteagents/lan/office/config.json', '{PRIVATE_SENTINEL')
+            self.f.write('/etc/remoteagents/lan/office/client.conf', '# PRIVATE_SENTINEL')
+            return True
+        with patch.object(app.components, 'extras', side_effect=corrupt_after_lan_check):
+            self.f.engine(self.c).run('apply')
+        self.assertEqual(self.f.read(recovery.ENVELOPE)['lan'], data['lan'])
+        self.assertTrue(recovery.reconcile(app, self.f.system))
+        self.assertTrue(self.f.engine(self.c).run('status')['ok'])
+
     def test_pending_transactions_are_never_self_confirmed_or_overwritten(self):
         self.install()
         for path in recovery.PENDING:

@@ -356,6 +356,7 @@ class Engine:
         self.receipts = self.s.read('/var/lib/remoteagents/server-apply/receipts.json', {})
         self.module_files = component_files
         self.managed_secrets = {}
+        self.checked_lans = {}
         components.hydrate(self)
 
     def row(self, part, state, message, **fields):
@@ -728,6 +729,9 @@ class Engine:
                     self.lan_test(item)
                     self.s.run(['bash', self.s.source / 'lan-vpn.sh', 'confirm', name, '--ssh-checked'], change=True)
                     self.save_receipt(part, {'settings': settings, 'profileHash': digest or receipt.get('profileHash')})
+                    self.checked_lans[name] = {
+                        'config.json': json.dumps(read_state('/etc/remoteagents/lan/' + name + '/config.json', {})),
+                        'client.conf': self.s.path('/etc/remoteagents/lan/' + name + '/client.conf').read_text()}
                     return self.row(part, 'ready', 'ЛВС проверена; новый SSH подтверждён')
                 return self.row(part, 'pending', 'ждёт нового SSH и --confirm-ssh-checked; таймер отката остаётся')
         if self.public_only:
@@ -767,6 +771,9 @@ class Engine:
         tested = read_state('/var/lib/remoteagents/lan/' + name + '.test.json', {})
         confirmed = existing.get('confirmed_at') or tested.get('baseline') and tested.get('baseline') == existing.get('baseline')
         if matched and existing.get('enabled') and existing.get('ready') and active and (confirmed or current.get('ok')):
+            # Later CLI/service work can be slow. Save the files checked HERE,
+            # never reread a possibly damaged LAN at the end of the whole apply.
+            self.checked_lans[name] = {'config.json': json.dumps(existing), 'client.conf': actual_profile}
             return self.row(part, 'ready', 'уже так; профиль и параметры совпадают; служба работает')
         if not apply:
             return self.row(part, 'change', 'будут установлены профиль ЛВС и параметры; затем проверка хоста и нового SSH')

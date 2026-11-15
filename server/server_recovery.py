@@ -52,13 +52,10 @@ def envelope(engine):
     result['lan'] = {}
     for item in engine.config.get('lan', []):
         name = engine_module_name(engine, item)
-        files = {}
-        for filename in ('config.json', 'client.conf'):
-            path = engine.s.path('/etc/remoteagents/lan/' + name + '/' + filename)
-            if path.is_file():
-                files[filename] = path.read_text()
-        if len(files) == 2:
-            result['lan'][name] = files
+        files = engine.checked_lans.get(name)
+        if not files:
+            raise ValueError('LAN snapshot was not checked in this apply')
+        result['lan'][name] = dict(files)
     return result
 
 
