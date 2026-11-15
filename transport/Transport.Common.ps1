@@ -925,14 +925,16 @@ function Find-VpnConflicts($Snapshot,[int[]]$OwnProcessIds=@(),[string]$OwnInter
     $hints=@($Snapshot.Processes|Where-Object {([string]$_.Name) -match '^(?i:Happ|v2ray|xray|sing-box|clash|nekoray|hiddify|wireguard|amnezia)' -and [int]$_.ProcessId -notin $OwnProcessIds}|ForEach-Object {[string]$_.Name}) -join ', '
     foreach($adapter in @($Snapshot.Adapters)){
         $text=$adapter.Name+' '+$adapter.InterfaceDescription
-        if($adapter.Status -eq 'Up' -and $adapter.Name -ne $OwnInterface -and $text -match '(?i)TUN|Wintun|WireGuard|TAP' -and $text -notmatch '(?i)OpenVPN|Tailscale'){
+        if($adapter.Status -eq 'Up' -and $adapter.Name -ne $OwnInterface -and $text -match '(?i)TUN|Wintun|WireGuard|TAP' -and $text -notmatch '(?i)OpenVPN|Tailscale|Teredo|ISATAP|6to4|IP-HTTPS'){
             [void]$items.Add([pscustomobject]@{kind='adapter';name=$adapter.Name;path='';detail=$adapter.InterfaceDescription})
         }
     }
     foreach($route in @($Snapshot.Routes)){
         if($route.DestinationPrefix -notin @('0.0.0.0/1','128.0.0.0/1','0.0.0.0/0','::/0')){continue}
         $adapter=$Snapshot.Adapters|Where-Object {$_.ifIndex -eq $route.InterfaceIndex}|Select-Object -First 1
-        if($adapter -and ($adapter.Name -eq $OwnInterface -or ($adapter.Name+' '+$adapter.InterfaceDescription) -match '(?i)OpenVPN|Tailscale')){continue}
+        # Teredo/ISATAP/6to4/IP-HTTPS are Windows' own IPv6 transition tunnels (Teredo keeps ::/0 up by default), not VPNs.
+        if($adapter -and ($adapter.Name -eq $OwnInterface -or ($adapter.Name+' '+$adapter.InterfaceDescription) -match '(?i)OpenVPN|Tailscale|Teredo|ISATAP|6to4|IP-HTTPS')){continue}
+        if(-not $adapter -and [string]$route.InterfaceAlias -match '(?i)Teredo|ISATAP|6to4|IP-HTTPS'){continue}
         if($route.DestinationPrefix -in @('0.0.0.0/0','::/0')){
             if(-not $adapter -or $adapter.Status -ne 'Up'){continue}
             $text=$adapter.Name+' '+$adapter.InterfaceDescription

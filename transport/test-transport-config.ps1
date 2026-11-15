@@ -393,6 +393,9 @@ try{
     }
     $physical=[pscustomobject]@{Processes=$idle.Processes;Adapters=@([pscustomobject]@{ifIndex=5;Name='Ethernet';Status='Up';HardwareInterface=$true;Virtual=$false;InterfaceDescription='Ethernet'});Routes=@([pscustomobject]@{DestinationPrefix='0.0.0.0/0';InterfaceIndex=5;NextHop='192.0.2.1'})}
     Assert (-not (Find-VpnConflicts $physical).conflict) 'физический default с VPN-службой не конфликт'
+    $teredo=[pscustomobject]@{Processes=@();Adapters=@([pscustomobject]@{ifIndex=18;Name='Teredo Tunneling Pseudo-Interface';Status='Up';HardwareInterface=$false;Virtual=$true;InterfaceDescription='Teredo Tunneling Pseudo-Interface'});Routes=@([pscustomobject]@{DestinationPrefix='::/0';InterfaceIndex=18;NextHop='::';InterfaceAlias='Teredo Tunneling Pseudo-Interface'})}
+    Assert (-not (Find-VpnConflicts $teredo).conflict) 'встроенный Teredo с ::/0 — не чужой VPN'
+    $teredo.Adapters=@();Assert (-not (Find-VpnConflicts $teredo).conflict) 'скрытый Teredo без адаптера в снимке — не чужой VPN'
     $settings|Add-Member Vpn ([pscustomobject]@{enabled=$false;excludeCidrs=@('198.51.100.0/24')})
     $realText=${function:Invoke-TransportText}
     try{function Invoke-TransportText($Exe,$Arguments){$script:fakeHop}
