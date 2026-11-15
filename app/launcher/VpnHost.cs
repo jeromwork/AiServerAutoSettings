@@ -83,6 +83,7 @@ namespace RemoteAgents.Launcher
                         if (probe != null && (probe.Result.IsCompleted || clock.ElapsedMilliseconds - began >= VpnWatchdog.ProbeTimeoutMs)) {
                             bool ok = probe.Result.IsCompleted && probe.Result.GetAwaiter().GetResult(); probe.Dispose(); probe = null;
                             transportOk &= VpnWatchdog.TransportReady(Read(home, "status/transport.json"), DateTime.UtcNow, tag);
+                            if (transportOk && ok) lease.Confirmed();
                             if (policy.Sample(transportOk, ok)) { state = "server-unreachable"; break; }
                             Write(home, policy.Failures == 0 ? "on" : "checking", policy.Failures == 0 ? "Защита включена" : "Проверяем связь с сервером…", true);
                         }

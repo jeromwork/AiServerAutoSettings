@@ -22,6 +22,18 @@ namespace RemoteAgents.Launcher
                 Check(!lease.Expired && closed == 0, "a progressing lifecycle retains its Job");
             }
             Check(VpnLease.DeadlineMs < 5000, "blocked host fail-open deadline");
+            closed = 0;
+            using (var lease = new VpnLease(() => System.Threading.Interlocked.Increment(ref closed), 1000, 150)) {
+                var slowChecks = Stopwatch.StartNew();
+                while (closed == 0 && slowChecks.ElapsedMilliseconds < 1500) { lease.Pulse(); System.Threading.Thread.Sleep(20); }
+                Check(lease.Expired && closed == 1, "progressing slow checks cannot renew the last successful health proof");
+            }
+            closed = 0;
+            using (var lease = new VpnLease(() => System.Threading.Interlocked.Increment(ref closed), 1000, 200)) {
+                for (int i = 0; i < 6; i++) { lease.Pulse(); lease.Confirmed(); System.Threading.Thread.Sleep(50); }
+                Check(!lease.Expired && closed == 0, "only confirmed health renews the health deadline");
+            }
+            Check(VpnLease.HealthDeadlineMs + VpnWatchdog.PollMs < 5000, "absolute health cutoff has shutdown headroom within five seconds");
             var policy = new VpnWatchdog();
             Check(!policy.Sample(false, true) && policy.Failures == 1, "transport failure counts even if HTTPS works");
             Check(policy.Sample(true, false), "second consecutive failure disables, including mixed causes");
