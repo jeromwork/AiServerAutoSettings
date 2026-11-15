@@ -22,7 +22,14 @@ args = parser.parse_args()
 PWSH = Path.home()/'.cache/pwsh-test/pwsh'
 
 def run(cmd, **kw):
-    p = subprocess.run([str(x) for x in cmd], capture_output=True, timeout=kw.pop('timeout', 45), **kw)
+    try:
+        p = subprocess.run([str(x) for x in cmd], capture_output=True, timeout=kw.pop('timeout', 45), **kw)
+    except subprocess.TimeoutExpired as exc:
+        # This stand has only disposable keys/data. Preserve phase markers before
+        # TemporaryDirectory removes the fixture; never relax the timeout.
+        print('Loopback fixture timeout; stdout: ' + (exc.stdout or b'').decode(errors='replace')[-2000:], flush=True)
+        print('Loopback fixture phases: ' + (exc.stderr or b'').decode(errors='replace')[-4000:], flush=True)
+        raise
     assert p.returncode == 0, p.stdout.decode(errors='replace') + p.stderr.decode(errors='replace')
     return p.stdout.decode()
 
@@ -176,6 +183,12 @@ if($Baseline){
 }
 @{serverMs=$serverMs;connectionMs=$watch.ElapsedMilliseconds;workingMs=$workingMs;ok=$true}|ConvertTo-Json -Compress
 """
+        for label, needle in [('warm SSH', 'if(-not $Baseline){[void](Invoke-WizardSsh'),
+                              ('Server', '$server=Invoke-WizardStep'), ('Connection', '$result=Invoke-WizardStep'),
+                              ('helpers', ' Send-WizardHelpers $Root $Repo'), ('children', ' $children=@()'),
+                              ('late disk', ' Set-WizardDiskChannel $Root'), ('control stop', ' $session=@(Get-ChildItem'),
+                              ('orphan', ' $clean=Invoke-WizardSsh')]:
+            body = body.replace(needle, "[Console]::Error.WriteLine('loopback: " + label + "');\n" + needle)
         header = f"param([string]$Repo={psq(repo)},[string]$Root={psq(root)},[string]$Login={psq(user)},[bool]$Baseline=${str(args.baseline).lower()})\n"
         # Record total immediately after Connection, excluding helper-cache assertions.
         body = body.replace("# Baseline returns", "$connectionMs=$watch.ElapsedMilliseconds\n# Baseline returns")
