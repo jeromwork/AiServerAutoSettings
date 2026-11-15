@@ -19,7 +19,10 @@ PENDING = ('/var/lib/remoteagents/base-network/pending', '/var/lib/remoteagents/
 
 def units():
     return {
-        '/etc/systemd/system/' + UNIT + '.service': '[Unit]\nDescription=Reconcile confirmed RemoteAgents server\nWants=network-online.target\nAfter=network-online.target remoteagents-base-network-recover.service remoteagents-lan-recover.service\n[Service]\nType=oneshot\nUMask=0077\nTimeoutStartSec=90\nExecStart=/usr/local/lib/remoteagents/server/server-apply.sh _reconcile\n',
+        # Package acquisition has two 300s commands; a vendor installer can take
+        # 900s. Do not SIGTERM dpkg/downloads every 90s and retry them forever.
+        # Individual subprocess timeouts still bound a stuck installer.
+        '/etc/systemd/system/' + UNIT + '.service': '[Unit]\nDescription=Reconcile confirmed RemoteAgents server\nWants=network-online.target\nAfter=network-online.target remoteagents-base-network-recover.service remoteagents-lan-recover.service\n[Service]\nType=oneshot\nUMask=0077\nTimeoutStartSec=1h\nExecStart=/usr/local/lib/remoteagents/server/server-apply.sh _reconcile\n',
         '/etc/systemd/system/' + UNIT + '.timer': '[Unit]\nDescription=Restore confirmed server every 30 seconds\n[Timer]\nOnBootSec=15s\nOnUnitInactiveSec=30s\nAccuracySec=1s\n[Install]\nWantedBy=timers.target\n'}
 
 

@@ -261,14 +261,14 @@ verb 3
     print('PASS: second apply actions=[]; public push/default dropped; IPv6 LAN off; status read-only', flush=True)
     # No EXE/manual apply after reboot or breakage: only installed boot units/timer.
     docker('restart', target)
-    def wait_ready(label):
-        deadline = time.monotonic() + 120
+    def wait_ready(label, budget=120):
+        deadline = time.monotonic() + budget
         last = {}
         while time.monotonic() < deadline:
             try:
                 last = engine(home, config, values, status=True)
                 if last.get('ok'):
-                    print('PASS: ' + label + ' ready in ' + str(round(120 - (deadline-time.monotonic()), 1)) + 's', flush=True)
+                    print('PASS: ' + label + ' ready in ' + str(round(budget - (deadline-time.monotonic()), 1)) + 's', flush=True)
                     return
             except Exception:
                 pass
@@ -321,6 +321,14 @@ verb 3
     inside(target, 'apt-get', 'remove', '-y', 'openvpn', 'sing-box', timeout=180)
     inside(target, 'rm', '-f', '/home/remoteagents/.local/share/remote-disk/bin/syncthing')
     wait_ready('removed sing-box/OpenVPN packages and Syncthing binary, timer only')
+    # A healthy apt command may exceed the old 90s systemd service timeout.
+    # The marker is deliberately written AFTER sleep: repeated SIGTERM must not
+    # accidentally make the next retry pass. Real apt still reinstalls real jq.
+    put(target, '/usr/local/bin/apt-get', '#!/bin/sh\nif [ "$1" = update ] && [ ! -f /run/slow-apt-finished ]; then\n sleep 95\n touch /run/slow-apt-finished\nfi\nexec /usr/bin/apt-get "$@"\n', '755')
+    inside(target, 'apt-get', 'remove', '-y', 'jq', timeout=180)
+    wait_ready('package repair exceeding 90s, timer only', budget=180)
+    assert inside(target, 'test', '-f', '/run/slow-apt-finished', check=False).returncode == 0
+    inside(target, 'rm', '-f', '/usr/local/bin/apt-get')
     assert engine(home, config, values)['actions'] == []
     put(target, '/run/export.json', json.dumps(dict(schema=1, version=1, serverAddress=address, serverPort=22, workerUser='remoteagents',
          hostKeys=[' '.join(inside(target, 'cat', '/etc/ssh/ssh_host_ed25519_key.pub').stdout.split()[:2])], stateDir='/run/export-state')), '644')
