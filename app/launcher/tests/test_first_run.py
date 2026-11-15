@@ -121,13 +121,53 @@ class FirstRunTests(unittest.TestCase):
         self.assertIn('UseShellExecute = true', tray.split('void OpenHappier()', 1)[1].split('void RefreshMenu()', 1)[0])
         self.assertIn('else if (id == "exit") RequestExit()', menu)
         main = source('ConfigWindow.Main.cs')
-        for name in ['Конфиг', 'Подробно', 'Сервис']:
-            self.assertIn(name, source('ConfigWindow.cs') + main)
+        pages = source('MainWindow.Settings.cs')
+        for name in ['Главная', 'Настройки', 'Редактор конфига', 'Диагностика', 'Раздел настроек']:
+            self.assertIn(name, pages)
+        self.assertNotIn('TabControl', source('ConfigWindow.cs') + main + pages)
         self.assertNotIn('"Папки"', source('ConfigWindow.cs') + main + source('WindowModel.cs'))
         self.assertIn('new SetupWizard(home, bundle, false, false)', main)
         self.assertIn('mainWindow && !allowUnload', source('ConfigWindow.cs'))
         self.assertNotIn('icon.MouseDoubleClick +=', tray)
         self.assertIn('TrayMenuModel.AcceptLeftClick(e.Clicks', tray)
+
+    def test_main_cards_use_model_and_keep_existing_action_boundaries(self):
+        main = source('ConfigWindow.Main.cs')
+        cards = source('MainWindow.Cards.cs')
+        tray = source('TrayContext.cs')
+        update = main.split('internal void UpdateMain(', 1)[1].split('void AddPath(', 1)[0]
+        self.assertIn('MainScreenModel.Build(facts)', update)
+        self.assertIn('RenderCards(view, facts)', update)
+        self.assertIn('Clipboard.SetText(MainScreenModel.Report(screenFacts, screenTechnical))', main)
+        self.assertNotIn('NotImplementedException', main + cards)
+        self.assertNotIn('StatusView.Line(', cards)
+        self.assertIn('VpnRequested(!vpnSwitch.Checked)', cards)
+        self.assertIn('if (enabled) CheckVpn(vpn, true); else DisableVpn(vpn, true);', tray)
+        self.assertIn('pathSelection.Choose(tag); if (choosePath != null) choosePath(tag)', main)
+        self.assertIn('ScriptCommand("Set-TransportPath.ps1"', tray)
+        for action in ['open-sync', 'open-disk', 'retry']:
+            self.assertIn('action == "' + action + '"', tray)
+        self.assertIn('if (action == "vpn-on")', cards)
+        self.assertIn('mainBanner.DetailsClicked += (s, e) => OpenDiagnostics()', cards)
+        self.assertIn('if (action == "details") { OpenDiagnostics(); return; }', cards)
+
+    def test_main_facts_are_fresh_and_vpn_failures_stay_in_banner_for_card(self):
+        tray = source('TrayContext.cs')
+        facts = tray.split('void RefreshMain()', 1)[1].split('string TransportScript(', 1)[0]
+        for call in ['StatusView.Read(home, "transport", maxAgeSec: 15)',
+                     'StatusView.Read(home, "vpn", maxAgeSec: 15)',
+                     'StatusView.Read(home, "control", maxAgeSec: 30)', 'ServerHealthView.Read(home)']:
+            self.assertIn(call, facts)
+        for member in ['VpnInstalled', 'VpnWanted', 'VpnBusy', 'VpnError', 'Operation', 'DiskEnabled',
+                       'DiskSummary', 'DiskFolders', 'DiskServerOnly', 'HappierConfirmed', 'HappierUrl']:
+            self.assertIn(member + ' =', facts)
+        self.assertIn('session.FolderCount', tray)
+        failure = tray.split('void VpnFailure(', 1)[1].split('async void DisableVpn(', 1)[0]
+        self.assertIn('vpnError = message;', failure)
+        self.assertIn('if (!fromCard && !closing) MessageBox.Show', failure)
+        vpn = tray.split('async void CheckVpn(', 1)[1].split('internal static bool VpnConflictDialog', 1)[0]
+        self.assertEqual(vpn.count('finally { actionBusy = vpnActionBusy = false;'), 2)
+        self.assertNotIn('.Message', vpn)
 
     def test_background_checks_never_acquire_the_ui_action_lock(self):
         tray = source('TrayContext.cs')
@@ -137,7 +177,7 @@ class FirstRunTests(unittest.TestCase):
         self.assertIn('syncSchedule.Due(', sync)
         self.assertIn('config.sync.unavailable ', sync)
         main = source('ConfigWindow.Main.cs')
-        self.assertIn('WindowModel.CanOpen(page.Text, operation)', main)
+        self.assertIn('WindowModel.CanOpen(name, operation)', source('MainWindow.Settings.cs'))
         inspect = source('SetupWizard.cs').split('async Task Inspect()', 1)[1].split('async Task<bool> Guard(', 1)[0]
         self.assertNotIn('await Guard(', inspect)
         self.assertNotIn('.Enabled=false', inspect)
@@ -217,7 +257,11 @@ class FirstRunTests(unittest.TestCase):
         self.assertIn('AutoScroll = true', window)
         self.assertIn('Resize += (a, b) => LayoutRows();', window)
         main = source('ConfigWindow.Main.cs')
-        self.assertIn('journal.Dock = DockStyle.Bottom;', main.split('void BuildMain()', 1)[1].split('configPage.Controls.Add(journal)', 1)[0])
+        editor = source('MainWindow.Settings.cs').split('var editor = new TableLayoutPanel', 1)[1].split('RegisterPage("Редактор конфига", editor)', 1)[0]
+        self.assertIn('editor.Controls.Add(configPage, 0, 1)', editor)
+        self.assertIn('journal.Dock = DockStyle.Fill; editor.Controls.Add(journal, 0, 2)', editor)
+        self.assertIn('RowStyle(SizeType.Absolute, Font.Height * 6)', editor)
+        self.assertIn('rowsHost.Controls.Add(rowsPanel)', editor)
 
     def test_window_mutation_guard_and_exit_confirmation(self):
         window = source('ConfigWindow.cs')
@@ -240,7 +284,8 @@ class FirstRunTests(unittest.TestCase):
         for name in removed:
             self.assertFalse((launcher / (name + '.cs')).exists(), name)
         everything = '\n'.join(path.read_text(encoding='utf-8-sig') for path in sorted(launcher.glob('*.cs')))
-        for word in [disk + 'Folders', disk + 'SyncStatus', disk + 'FolderTree',
+        # DiskFolders is now read-only MainScreenFacts metadata, not a restored folder browser.
+        for word in ['class ' + disk + 'Folders', disk + 'SyncStatus', disk + 'FolderTree',
                      'Show' + disk + 'Progress', 'Initialize' + 'Folders', 'Apply' + 'Folders', 'Folders' + 'Recommendation', 'Session' + 'Plan']:
             self.assertNotIn(word, everything, word)
         for name in ['DiskShellCommands.cs', 'DiskSyncthingClient.cs', 'DiskExplorerController.cs']:

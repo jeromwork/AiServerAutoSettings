@@ -70,7 +70,7 @@ namespace RemoteAgents.Launcher
         }
     }
 
-    // «Вставить конфиг» (first run) and the program window (tabs «Конфиг» / «Подробно» / «Сервис»). Both apply through ConfigSession.
+    // First-run paste and the main window share the same ConfigSession editor.
     internal sealed partial class ConfigWindow : Form
     {
         readonly string home; readonly Func<Task<string>> prepare; string bundle; readonly bool settings, mainWindow;
@@ -90,7 +90,7 @@ namespace RemoteAgents.Launcher
         readonly Button askAi = new Button { Left = 16, Top = 172, Width = 186, Height = 26, Text = "Собрать конфиг с ИИ" };
         readonly Button done = new Button { Text = "Готово", Width = 110, Dock = DockStyle.Right, Visible = false }, close = new Button { Text = "Закрыть", Width = 100, Dock = DockStyle.Right };
         readonly Dictionary<string, SectionRow> rows = new Dictionary<string, SectionRow>();
-        TabControl tabs; TextBox configText; Button apply;
+        Panel configPage; TextBox configText; Button apply;
         readonly TableLayoutPanel windowLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
         readonly CancellationTokenSource cancel = new CancellationTokenSource();
         Task<string> preparing; Task following; ConfigSession followingSession; ConfigSession session; bool diskApplying, running, closeChecked, closingRequested, filling, replaceOnPaste; string defaultName;
@@ -149,7 +149,7 @@ namespace RemoteAgents.Launcher
             };
             KeyDown += (a, b) => { if (b.KeyCode == Keys.Escape && !running) Close(); };
             // Brought to the front once; never always-on-top, so other windows can cover it.
-            Shown += (a, b) => { Activate(); Ready(); };
+            Shown += (a, b) => { if (mainWindow) WindowChrome.Apply(this); Activate(); Ready(); };
             Resize += (a, b) => LayoutRows();
             if (mainWindow) BuildMain();
             Relayout();
@@ -159,6 +159,8 @@ namespace RemoteAgents.Launcher
         {
             if (disposing && !resourcesDisposed) {
                 resourcesDisposed = true; cancel.Cancel(); cancel.Dispose(); tip.Dispose();
+                pathMenu.Dispose();
+                if (detailsWindow != null) detailsWindow.CancelEmbedded();
                 // The background Disk run is not this window's: it goes on, only the subscription ends.
                 BackgroundWork.Disk.Changed -= diskChanged;
                 if (wheel != null) { Application.RemoveMessageFilter(wheel); wheel = null; }
@@ -201,25 +203,19 @@ namespace RemoteAgents.Launcher
         }
         void BuildSettings()
         {
-            header.Height = 44;
             var profile = ConfigProfile.Load(home);
-            header.Controls.Add(new Label { Left = 16, Top = 13, Width = 150, Height = 22, Text = "Название компьютера:", TextAlign = ContentAlignment.MiddleLeft });
-            deviceName.Left = 170; deviceName.Top = 12; deviceName.Text = ConfigProfile.DeviceName(profile); header.Controls.Add(deviceName);
-            var saveName = new Button { Left = 428, Top = 10, Width = 76, Height = 26, Text = "Сменить" }; header.Controls.Add(saveName);
+            deviceName.Text = ConfigProfile.DeviceName(profile);
             tip.SetToolTip(deviceName, "Так этот компьютер называется у агентов и в списке компьютеров. Смена сразу уходит на сервер.");
-            saveName.Click += async (a, b) => await RenameDevice();
-            tabs = new TabControl { Dock = DockStyle.Fill, Height = 590 };
-            var configTab = new TabPage("Конфиг") { Padding = new Padding(6) };
+            configPage = new Panel { Dock = DockStyle.Fill, Padding = new Padding(6) };
             configText = new TextBox { Dock = DockStyle.Fill, Multiline = true, ScrollBars = ScrollBars.Both, WordWrap = false, AcceptsReturn = true, AcceptsTab = false, Font = new Font("Consolas", 9F) };
             tip.SetToolTip(configText, "Текущий конфиг без секретов. Можно поправить или вставить другой и нажать «Применить» — применятся только изменившиеся разделы.");
-            var bar = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 36, FlowDirection = FlowDirection.LeftToRight, Padding = new Padding(0, 4, 0, 0) };
+            var bar = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, WrapContents = true, FlowDirection = FlowDirection.LeftToRight, Padding = new Padding(0, 4, 0, 0) };
             var copy = new Button { Text = "Скопировать", AutoSize = true }; apply = new Button { Text = "Применить", AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) };
-            var save = new Button { Text = "Сохранить конфиг в файл…", AutoSize = true }; var details = new Button { Text = "Подробно…", AutoSize = true };
+            var save = new Button { Text = "Сохранить конфиг в файл…", AutoSize = true }; var details = new Button { Text = "Разделы настроек…", AutoSize = true };
             tip.SetToolTip(copy, "В буфер — без секретов: можно показать ИИ-агенту или в чат.");
             tip.SetToolTip(details, "Прежние разделы настройки по шагам; они меняют тот же конфиг.");
             bar.Controls.Add(copy); bar.Controls.Add(apply); bar.Controls.Add(save); bar.Controls.Add(details);
-            configTab.Controls.Add(configText); configTab.Controls.Add(bar);
-            tabs.TabPages.Add(configTab);
+            configPage.Controls.Add(configText); configPage.Controls.Add(bar);
             copy.Click += (a, b) => { try { Clipboard.SetText(configText.Text); Log("Конфиг скопирован без секретов."); } catch (Exception e) { Log("Ошибка: " + e.Message); } };
             apply.Click += async (a, b) => await StartFromText(configText.Text);
             save.Click += (a, b) => SaveToFile();

@@ -53,10 +53,12 @@ namespace RemoteAgents.Launcher
             Check(window.Exit(false) == WindowExit.Unload, "exit unloads without a question");
             Check(window.Exit(true) == WindowExit.ConfirmApplying, "applying settings requires interrupt confirmation");
             foreach (string work in new[] { "", "сверка конфига", "проверка здоровья", "применение настроек" }) {
-                foreach (string page in new[] { "Конфиг", "Подробно", "Сервис" })
+                foreach (string page in new[] { "Главная", "Настройки", "Редактор конфига", "Раздел настроек", "Диагностика" })
                     Check(WindowModel.CanOpen(page, work), "navigation remains open: " + work + "/" + page);
                 Check(WindowModel.Conflict(work) == (work.Length == 0 ? "" : "Идёт " + work + ", подождите"), "conflict identifies only the action");
             }
+            Check(!WindowModel.CanOpen("Неизвестная страница", "применение настроек"), "unknown navigation cannot bypass an operation");
+            Check(WindowModel.CanOpen("Неизвестная страница", ""), "idle navigation remains unrestricted");
             DiskRunsApart().GetAwaiter().GetResult();
             var terminal = new Dictionary<string, SectionState> {
                 { ConfigSections.Server, SectionState.Done }, { ConfigSections.Connection, SectionState.Unchanged },
