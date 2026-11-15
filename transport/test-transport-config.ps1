@@ -407,6 +407,7 @@ try{
     foreach($candidate in $paths.Candidates){
         if($candidate.tunCapable){
             $tun=New-VpnTunConfig $settings $paths $candidate.tag $exclusions 'Ethernet';$tunConfigs+=@($tun)
+            if($env:REMOTEAGENTS_TUN_FIXTURES){[void][IO.Directory]::CreateDirectory($env:REMOTEAGENTS_TUN_FIXTURES);Write-TransportJson (Join-Path $env:REMOTEAGENTS_TUN_FIXTURES ($candidate.tag+'.json')) $tun}
             Assert ($tun.inbounds[0].type -eq 'tun' -and $tun.inbounds[0].auto_route -and -not $tun.inbounds[0].strict_route -and $tun.inbounds[0].stack -eq 'system') 'TUN system/auto_route/strict_route'
             Assert (@($tun.outbounds|Where-Object {$_.type -in @('ssh','socks')}).Count -eq 0 -and $tun.route.final -eq 'vpn-active') 'TUN без SSH и direct fallback'
             Assert (($tun.route.rules[0].override_address -eq $settings.Profile.serverAddress) -and $tun.route.rules[0].override_port -eq (Get-TransportServerPort $settings.Profile)) 'служебная проба идёт до SSH сервера через TUN'

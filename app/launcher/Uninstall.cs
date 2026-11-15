@@ -9,6 +9,7 @@ namespace RemoteAgents.Launcher
     {
         public static void Run(string home)
         {
+            try { VpnServiceProgram.RequestUninstall(); } catch { }
             using (var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Run")) {
                 var value = Convert.ToString(key.GetValue("RemoteAgents", ""));
                 if (value.IndexOf(Path.Combine(home, "RemoteAgents.exe"), StringComparison.OrdinalIgnoreCase) >= 0) key.DeleteValue("RemoteAgents", false);

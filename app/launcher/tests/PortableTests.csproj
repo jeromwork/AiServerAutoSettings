@@ -22,6 +22,8 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="PortableJson.cs" />
+    <Compile Include="VpnServiceTests.cs" />
+    <Compile Include="../VpnServicePolicy.cs" Link="VpnServicePolicy.cs" />
     <Compile Include="WindowModelTests.cs" />
     <Compile Include="TrayExtrasTests.cs" />
     <Compile Include="../TrayMenuModel.cs" Link="TrayMenuModel.cs" />

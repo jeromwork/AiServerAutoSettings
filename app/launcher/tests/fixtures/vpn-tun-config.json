@@ -1,0 +1,117 @@
+{
+  "log": {
+    "disabled": true
+  },
+  "inbounds": [
+    {
+      "stack": "system",
+      "interface_name": "RemoteAgents-TUN",
+      "route_exclude_address": [
+        "::1/128",
+        "10.0.0.0/8",
+        "100.64.0.0/10",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "172.16.0.0/12",
+        "192.0.2.0/24",
+        "192.168.0.0/16",
+        "198.51.100.0/24",
+        "198.51.100.9/32",
+        "203.0.113.10/32",
+        "203.0.113.20/32",
+        "203.0.113.30/32",
+        "203.0.113.40/32",
+        "203.0.113.55/32",
+        "224.0.0.0/4",
+        "fc00::/7",
+        "fe80::/10",
+        "ff00::/8"
+      ],
+      "strict_route": false,
+      "type": "tun",
+      "address": [
+        "172.31.255.1/30",
+        "fdfe:7261::1/126"
+      ],
+      "tag": "vpn-tun",
+      "auto_route": true
+    }
+  ],
+  "outbounds": [
+    {
+      "server": "203.0.113.20",
+      "flow": "xtls-rprx-vision",
+      "server_port": 8447,
+      "tag": "reality-edge",
+      "uuid": "00000000-0000-4000-8000-000000000003",
+      "tls": {
+        "enabled": true,
+        "server_name": "example.com",
+        "utls": {
+          "fingerprint": "chrome",
+          "enabled": true
+        },
+        "reality": {
+          "enabled": true,
+          "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "short_id": "abcd"
+        }
+      },
+      "type": "vless",
+      "bind_interface": "Ethernet",
+      "domain_resolver": "bootstrap"
+    },
+    {
+      "default": "reality-edge",
+      "outbounds": [
+        "reality-edge"
+      ],
+      "interrupt_exist_connections": false,
+      "tag": "vpn-active",
+      "type": "selector"
+    }
+  ],
+  "route": {
+    "default_domain_resolver": "bootstrap",
+    "default_interface": "Ethernet",
+    "rules": [
+      {
+        "port": 22,
+        "inbound": [
+          "vpn-tun"
+        ],
+        "action": "route",
+        "override_address": "203.0.113.10",
+        "override_port": 22,
+        "outbound": "vpn-active",
+        "network": "tcp",
+        "ip_cidr": [
+          "198.18.0.1/32"
+        ]
+      },
+      {
+        "action": "hijack-dns",
+        "protocol": "dns"
+      }
+    ],
+    "auto_detect_interface": true,
+    "final": "vpn-active"
+  },
+  "dns": {
+    "final": "vpn-dns",
+    "servers": [
+      {
+        "server": "1.1.1.1",
+        "bind_interface": "Ethernet",
+        "tag": "bootstrap",
+        "type": "udp"
+      },
+      {
+        "server": "1.1.1.1",
+        "detour": "vpn-active",
+        "tag": "vpn-dns",
+        "type": "https"
+      }
+    ]
+  }
+}

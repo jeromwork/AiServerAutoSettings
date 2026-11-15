@@ -4,11 +4,13 @@ param([Alias('Home')][string]$TransportHome=(Join-Path $env:LOCALAPPDATA 'Remote
     [Parameter(Mandatory=$true,ParameterSetName='Enable')][switch]$Enable,
     [Parameter(Mandatory=$true,ParameterSetName='Disable')][switch]$Disable,
     [Parameter(Mandatory=$true,ParameterSetName='Generate')][switch]$Generate,
+    [Parameter(Mandatory=$true,ParameterSetName='ServiceWorker')][switch]$ServiceWorker,
     [Parameter(Mandatory=$true,ParameterSetName='Worker')][switch]$Worker,
     [Parameter(Mandatory=$true,ParameterSetName='Rollback')][switch]$Rollback,
     [Parameter(Mandatory=$true,ParameterSetName='Broker')][switch]$Broker,
     [string]$Session='', [string]$OutputConfig='', [int]$ParentPid=0)
 . (Join-Path $PSScriptRoot 'Transport.Common.ps1')
+. (Join-Path $PSScriptRoot 'Vpn.Service.ps1')
 $root=(Get-TransportHome $TransportHome);$action=$PSCmdlet.ParameterSetName;$tasks=Get-VpnTaskNames $root
 $sessionFile=Join-Path $root 'state/vpn-session.json';$stopFile=Join-Path $root 'state/vpn.stop';$configFile=Join-Path $root 'state/vpn-sing-box.json'
 $child=$null;$mutex=$null;$locked=$false;$parent=$null;$failure=$false;$conflict=[pscustomobject]@{conflict=$false;items=@()}
@@ -49,6 +51,7 @@ try{
         Write-Output 'TUN-конфиг создан и проверен; TUN не запускался';return
     }
     if($env:OS -ne 'Windows_NT'){throw 'Запуск TUN поддержан только на Windows'}
+    if($action -eq 'ServiceWorker'){Invoke-VpnServiceWorker $root $ParentPid;return}
     if($action -in @('Enable','Broker')){
         $snapshot=Get-VpnSnapshot;$own=@(Get-VpnOwnedProcessIds $root $snapshot)
         # Повторное включение не заменяет задачи работающего сеанса.
@@ -61,6 +64,7 @@ try{
         $exclude=Get-VpnExclusions $settings $paths $snapshot -Root $root
         $cfg=New-VpnTunConfig $settings $paths $status.active $exclude $net.interface
         $preflight=Join-Path $root 'state/vpn-preflight.json';Write-TransportJson $preflight $cfg -Private;Test-TransportConfigFile $settings.Options.singBoxPath $preflight
+        if($action -eq 'Enable' -and (Test-VpnServiceMode)){Start-VpnServiceSession $root $ParentPid $PSCommandPath $conflict;return}
         if(-not (Test-VpnAdministrator)){
             Write-VpnStatus $root $false $false 'awaiting-uac' $conflict 'Ожидается подтверждение UAC для одноразовой задачи TUN'
             $exe=Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'

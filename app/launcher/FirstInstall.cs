@@ -31,6 +31,7 @@ namespace RemoteAgents.Launcher
 
         public static void UninstallVpn(string home)
         {
+            try { VpnServiceProgram.RequestUninstall(); } catch { }
             try { Program.Forward(Program.InstanceName(home, System.Security.Principal.WindowsIdentity.GetCurrent().User), new[] { "--exit" }); } catch { }
             using (var key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run")) {
                 string command = Convert.ToString(key.GetValue("RemoteVPN", ""));
