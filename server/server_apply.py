@@ -820,7 +820,7 @@ class Engine:
         wanted = '--tun=userspace-networking' if item.get('userspace', True) else ''
         match = re.search(r'(?m)^\s*FLAGS=(.*)$', text)
         flags = match[1].strip().strip('\"').strip("'") if match else ''
-        mode_ok = bool(re.search(r'(?:^|\s)--tun=userspace-networking(?:\s|$)', flags)) == bool(wanted)
+        mode_ok = re.findall(r'(?:^|\s)--tun=(\S+)', flags) == (['userspace-networking'] if wanted else [])
         status = self.s.run(['tailscale', 'status', '--json'], check=False)
         data = json.loads(status.stdout) if status.returncode == 0 and status.stdout else {}
         logged = data.get('BackendState') == 'Running'
