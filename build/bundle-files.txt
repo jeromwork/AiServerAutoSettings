@@ -82,3 +82,5 @@ server/tg-gateway/install.sh
 server/tg-gateway/README.md
 app/launcher/config.paste.schema.json => server/config.paste.schema.json
 build/ServerApply.ps1
+
+server/server_recovery.py

@@ -197,7 +197,9 @@ def confirm(engine):
              state['proxy'] == {k: v for k, v in engine.config['proxyOut'].items() if k not in ('password', 'login', 'hint')},
              'Параметры ожидающего развёртывания изменились; дождитесь отката.')
     ok, reason = engine.egress_check()
-    _require(ok and engine.inbound_check()[0], reason)
+    _require(ok, reason)
+    protected, reason = engine.inbound_check()
+    _require(protected, reason)
     _require(engine.proxy_matches(engine.config['proxyOut']), 'Прокси изменился до подтверждения.')
     _require(hashlib.sha256(json.dumps(engine.s.read('/etc/sing-box/config.json'), sort_keys=True).encode()).hexdigest() == state['candidateHash'],
              'Конфиг sing-box изменился до подтверждения; таймер сохранён.')
@@ -205,6 +207,7 @@ def confirm(engine):
         _require(hashlib.sha256(engine.secret(engine.config['serverNetwork']['inbounds'], 'server-inbounds').encode()).hexdigest() == state['inboundsHash'],
                  'Секрет входящих изменился до подтверждения; таймер сохранён.')
     engine.check_ssh(None)
+    engine.save_receipt('base-network', {'managed': True})
     shutil.rmtree(engine.s.path(STATE))
     engine.s.run(['systemctl', 'stop', TIMER + '.timer'], check=False)
 

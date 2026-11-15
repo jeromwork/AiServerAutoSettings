@@ -49,14 +49,14 @@ config_crypto = module('remoteagents_config')
 base = module('base_network')
 
 
-def strict_json(text):
+def strict_json(text, limit=4 * 1024 * 1024):
     def pairs(items):
         result = {}
         for key, value in items:
             require(key not in result, 'JSON содержит повторные поля.')
             result[key] = value
         return result
-    require(len(text.encode('utf-8')) <= 4 * 1024 * 1024, 'Конфиг превышает 4 МиБ.')
+    require(len(text.encode('utf-8')) <= limit, 'JSON превышает допустимый размер.')
     try:
         return json.loads(text.lstrip('\ufeff').replace('\r\n', '\n'), object_pairs_hook=pairs,
                           parse_constant=lambda _: (_ for _ in ()).throw(Error('Некорректный JSON.')))
@@ -585,7 +585,7 @@ class Engine:
     def code_files(self):
         target = '/usr/local/lib/remoteagents/server/'
         files = {}
-        for name in ('server_apply.py', 'server-apply.sh', 'lan_vpn.py', 'lan-vpn.sh', 'proxy_out.py', 'proxy-out.sh', 'remoteagents_config.py', 'base_network.py', 'lan-config.schema.json'):
+        for name in ('server_apply.py', 'server-apply.sh', 'lan_vpn.py', 'lan-vpn.sh', 'proxy_out.py', 'proxy-out.sh', 'remoteagents_config.py', 'base_network.py', 'server_recovery.py', 'lan-config.schema.json'):
             files[target + name] = ((self.s.source / name).read_bytes(), 0o755 if name.endswith('.sh') else 0o644)
         schema = self.s.source / 'config.paste.schema.json'
         if not schema.exists():
@@ -628,6 +628,9 @@ class Engine:
                     os.chown(parent, 0, 0)
                 changed = True
         return changed
+
+    def recovery(self, apply):
+        return module('server_recovery').install(self, apply)
 
     def watch_units(self):
         public = {'kind': 'remoteagents-config', 'schema': 1, 'proxyOut': {k: v for k, v in self.config['proxyOut'].items() if k not in ('login', 'password', 'hint')}}
@@ -1003,8 +1006,11 @@ class Engine:
                     ready = False
         if apply and all(r['state'] == 'ready' for r in self.rows):
             public = {k: v for k, v in self.config.items() if k in ('deployment', 'serverNetwork', 'proxyOut', 'lan', 'tailscale', 'telegramGateway', 'agent')}
-            self.s.write('/var/lib/remoteagents-status/server-config.json', json.dumps(public, ensure_ascii=False, sort_keys=True) + '\n', 0o644)
-            os.chmod(self.s.path('/var/lib/remoteagents-status'), 0o755)
+            if self.part('recovery', lambda: self.recovery(True)):
+                self.s.write('/var/lib/remoteagents-status/server-config.json', json.dumps(public, ensure_ascii=False, sort_keys=True) + '\n', 0o644)
+                os.chmod(self.s.path('/var/lib/remoteagents-status'), 0o755)
+        elif not apply and self.s.path('/etc/remoteagents/server-apply/recovery.json').exists():
+            self.part('recovery', lambda: self.recovery(False))
         if apply:
             self.part('log', lambda: self.s.audit(self.rows))
         return {'schema': 1, 'command': command, 'parts': self.rows, 'actions': list(self.s.actions),
@@ -1080,12 +1086,12 @@ def main(argv=None):
     os.umask(0o077)
     parser = argparse.ArgumentParser(description='Настроить сервер из мастер-конфига под root.')
     sub = parser.add_subparsers(dest='command', required=True)
-    for command in ('plan', 'apply', 'status', '_egress-watch', '_network-guard'):
+    for command in ('plan', 'apply', 'status', '_egress-watch', '_network-guard', '_reconcile'):
         p = sub.add_parser(command)
         p.add_argument('--config', default='-', help='Файл мастер-конфига или - (stdin)')
         p.add_argument('--json', action='store_true')
         p.add_argument('--secrets-stdin', action='store_true', help='Секреты после строки-маркера stdin')
-        if command not in ('_egress-watch', '_network-guard'):
+        if command not in ('_egress-watch', '_network-guard', '_reconcile'):
             p.add_argument('--confirm-ssh-checked', action='store_true', help='Внешний вызывающий уже проверил новое SSH-соединение')
             p.add_argument('--public-only', action='store_true', help='Только публичная сводка ЛВС, без чтения частных профилей')
     p = sub.add_parser('tailscale-migrate')
@@ -1101,12 +1107,19 @@ def main(argv=None):
     restricted = delegated()
     if restricted:
         require(args.command in ('plan', 'status', 'apply'), 'Ограниченное sudo разрешает только plan/status/apply.')
+    if args.command == '_reconcile':
+        system = System()
+        lockdir = system.path('/run/remoteagents-server-apply')
+        lockdir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with (lockdir / 'apply.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            return 0 if module('server_recovery').reconcile(sys.modules[__name__], system) else 1
     config, secrets = read_input(args.config, sys.stdin, args.secrets_stdin)
     if restricted:
         require(config.get('server', {}).get('login') == os.environ.get('SUDO_USER') and
                 config.get('agent', {}).get('sudo', 'apply') == 'apply', 'Ограниченное sudo не может менять пользователя или расширять права.')
     engine = Engine(config, secrets, ssh_checked=getattr(args, 'confirm_ssh_checked', False), public_only=getattr(args, 'public_only', False))
-    if args.command in ('_egress-watch', '_network-guard'):
+    if args.command in ('_egress-watch', '_network-guard', '_reconcile'):
         with engine.s.network_lock():
             if args.command == '_network-guard':
                 engine.network_guard()

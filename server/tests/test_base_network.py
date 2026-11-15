@@ -22,7 +22,10 @@ class Fresh(Fake):
             file = self.path('/etc/sing-box/config.json')
             if not file.exists():
                 return subprocess.CompletedProcess(args, 1, '', '')
-            self.sb = json.loads(file.read_text())
+            try:
+                self.sb = json.loads(file.read_text())
+            except ValueError:
+                return subprocess.CompletedProcess(args, 1, '', '')
         if args[:2] == ['systemctl', 'restart'] and args[-1] == 'sing-box':
             self.sb = self.read('/etc/sing-box/config.json')
         if args[0] == 'ip' and 'rule' in args and 'del' in args:
