@@ -39,8 +39,18 @@ function Get-VpnLegacySnapshot {$script:snapshot}
 function Remove-VpnLegacyAdapter($Adapter){Assert ($Adapter.Name -eq 'RemoteAgents-Custom') 'remove only our PnP device';$script:snapshot.Adapters=@($script:snapshot.Adapters|Where-Object {$_.Name -ne $Adapter.Name})}
 function Stop-ScheduledTask {param($TaskName,$TaskPath,$ErrorAction) Assert ($TaskName -like 'RemoteAgents-TUN-*') 'stop only our task'}
 function Get-CimInstance {param($ClassName,$Filter,$ErrorAction) $script:snapshot.Processes | Where-Object {('ProcessId='+$_.ProcessId) -eq $Filter}}
-function Stop-Process {param($Id,[switch]$Force,$ErrorAction) $script:stopped+=@($Id);$script:snapshot.Processes=@($script:snapshot.Processes|Where-Object {$_.ProcessId -ne $Id})}
-function Wait-Process {param($Id,$Timeout,$ErrorAction)}
+function Stop-Process {throw 'must terminate a pinned process handle, never a bare PID'}
+function Open-VpnLegacyProcess([int]$Id){
+    $target=[pscustomobject]@{Id=$Id;Pinned=$true;Disposed=$false}
+    $target|Add-Member ScriptMethod Kill {
+        Assert $this.Pinned 'termination uses pinned process object'
+        $script:stopped+=@($this.Id);$script:snapshot.Processes=@($script:snapshot.Processes|Where-Object {$_.ProcessId -ne $this.Id})
+    }
+    $target|Add-Member ScriptMethod WaitForExit {param($Timeout) $true}
+    $target|Add-Member ScriptMethod Dispose {$this.Disposed=$true}
+    $script:lastTarget=$target
+    return $target
+}
 function Get-NetRoute {param($InterfaceIndex,$ErrorAction) Assert ($InterfaceIndex -eq 42) 'query only our routes';if($script:routePresent){[pscustomobject]@{InterfaceIndex=$InterfaceIndex}}}
 function Remove-NetRoute {param([Parameter(ValueFromPipeline=$true)]$InputObject,[switch]$Confirm) process{$script:removedRoutes+=@($InputObject.InterfaceIndex);$script:routePresent=$false}}
 function Unregister-ScheduledTask {param($TaskName,$TaskPath,[switch]$Confirm,$ErrorAction) $script:deleted+=@($TaskName);$script:snapshot.Tasks=@($script:snapshot.Tasks|Where-Object {$_.TaskName -ne $TaskName})}
@@ -56,6 +66,10 @@ Assert ($c.transport.keep -eq 'unchanged' -and $c.profile.vpn.enabled) 'transpor
 Assert (-not (Test-Path (Join-Path $root 'state/vpn-owner.json')) -and -not (Test-Path (Join-Path $root 'state/vpn-session.json'))) 'old owner and session receipts cleared'
 Remove-VpnRemnants $root
 Assert ($script:stopped.Count -eq 1 -and $script:deleted.Count -eq 2) 'repeat cleanup does not touch foreign resources'
+# Ownership changed before handle acquisition: the foreign PID must survive.
+$script:snapshot.Processes=@([pscustomobject]@{ProcessId=123;ExecutablePath=(Join-Path $TestHome 'Happ/sing-box.exe');CommandLine=$ours.CommandLine})
+Stop-VpnLegacyProcess $root $ours
+Assert ($script:stopped.Count -eq 1 -and $script:lastTarget.Disposed) 'PID reused by a foreign process before pin is not killed; handle is released'
 # Failure must not claim off or discard ownership receipts needed for a later retry.
 Write-TransportJson (Join-Path $root 'state/vpn-owner.json') @{pid=123}
 Write-VpnStatus $root $true $true 'on' @{} 'old status'

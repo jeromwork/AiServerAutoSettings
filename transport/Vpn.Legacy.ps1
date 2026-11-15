@@ -43,19 +43,28 @@ function Remove-VpnLegacyAdapter($Adapter) {
     $p=Start-Process -FilePath $exe -ArgumentList ('/remove-device '+(Quote-Transport ([string]$Adapter.PnPDeviceID))) -PassThru -WindowStyle Hidden
     try{if(-not $p.WaitForExit(2000) -or $p.ExitCode -ne 0){throw 'Не удалось удалить наш старый адаптер'}}finally{if(-not $p.HasExited){$p.Kill()};$p.Dispose()}
 }
+function Open-VpnLegacyProcess([int]$Id) {
+    $process=[Diagnostics.Process]::GetProcessById($Id)
+    try{$null=$process.Handle;return $process}catch{$process.Dispose();throw}
+}
+function Stop-VpnLegacyProcess([string]$Root,$Process) {
+    # Pin before the final inventory. Stop-Process -Id could kill a reused PID
+    # between the CIM read and termination; a held process handle cannot be reused.
+    $target=Open-VpnLegacyProcess ([int]$Process.ProcessId)
+    try{
+        $current=Get-CimInstance Win32_Process -Filter ('ProcessId='+[int]$Process.ProcessId) -ErrorAction Stop
+        if($current -and (Test-VpnLegacyProcess $Root $current)){
+            $target.Kill()
+            if(-not $target.WaitForExit(2000)){throw 'Не удалось остановить старый процесс VPN'}
+        }
+    }finally{$target.Dispose()}
+}
 function Remove-VpnRemnants([string]$Root) {
     # Caller elevates once. Stop workers before sing-box so a previous version cannot restart it.
     $found=Find-VpnRemnants $Root (Get-VpnLegacySnapshot)
     Write-TransportJson (Join-Path $Root 'state/vpn.stop') @{stop=$true}
     foreach($task in $found.tasks){Stop-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop}
-    foreach($proc in $found.processes){
-        # Re-read ownership immediately before stopping: no trust in a stale owner PID or process name.
-        $current=Get-CimInstance Win32_Process -Filter ('ProcessId='+[int]$proc.ProcessId) -ErrorAction Stop
-        if($current -and (Test-VpnLegacyProcess $Root $current)){
-            Stop-Process -Id ([int]$current.ProcessId) -Force -ErrorAction Stop
-            Wait-Process -Id ([int]$current.ProcessId) -Timeout 10 -ErrorAction SilentlyContinue
-        }
-    }
+    foreach($proc in $found.processes){Stop-VpnLegacyProcess $Root $proc}
     # Equivalent to Clear-VpnRoutes, including installs whose session receipt was lost.
     # Every route is scoped to an exact adapter name in our reserved namespace, never the default route globally.
     foreach($adapter in @((Find-VpnRemnants $Root (Get-VpnLegacySnapshot)).adapters)){
