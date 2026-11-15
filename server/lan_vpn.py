@@ -166,12 +166,12 @@ def openvpn_log(name):
     return LOG.parent / ('lan-' + name_ok(name) + '.openvpn.log')
 
 
-def import_client(name, source, extra=(), auth=None, direct_endpoint=False, server_fingerprint=None):
+def import_client(name, source, extra=(), auth=None, direct_endpoint=False, server_fingerprint=None, *, text=None):
     name_ok(name)
     # The pin comes only from the trusted CLI/config, never from profile directives.
     verification = ('remote-cert-tls server' if server_fingerprint is None else
                     'peer-fingerprint ' + normalize_server_fingerprint(server_fingerprint))
-    text = Path(source).read_text(encoding='utf-8-sig').replace('\r\n', '\n').replace('\r', '\n')
+    text = (Path(source).read_text(encoding='utf-8-sig') if text is None else text).lstrip('\ufeff').replace('\r\n', '\n').replace('\r', '\n')
     lines, subnets, block, payload = [], list(extra), None, []
     seen = set()
     prompt = False
@@ -522,21 +522,46 @@ def managed_subnets():
     return read(p) if p.exists() else []
 
 
-def managed_exclusions(data):
+def legacy_exclusions(data):
+    # Values written by the old manager. Exact profile matches are retired even
+    # if an old ownership receipt was lost; unrelated exclusions remain intact.
     return sorted({s for p in data.values() for s in p['subnets']} |
                   {e['ip'] + '/32' for p in data.values() for e in endpoints(p.get('endpoints', []))})
 
 
+def managed_exclusions(data):
+    # Destination rules at 1000..1063 already bypass sing-box for LAN subnets.
+    # Any TUN exclusion can split its default into prefixes that evade suppress=0.
+    return []
+
+
 def sync_singbox():
-    new = managed_exclusions(active())
-    # Do not take ownership of pre-existing exclusions: remove only our additions.
-    old = managed_subnets()
-    current = [s for i in read(SB)['inbounds'] if i.get('type') == 'tun'
-               for s in i.get('route_exclude_address', [])]
-    owned = [s for s in new if s in old or s not in current]
-    candidate = checked_singbox(old, new)
+    old = sorted(set(managed_subnets()) | set(legacy_exclusions(profiles())))
+    candidate = checked_singbox(old, [])
     apply_singbox(candidate)
-    save(STATE / 'managed-subnets.json', owned)
+    if managed_subnets():
+        save(STATE / 'managed-subnets.json', [])
+
+
+def endpoint_ops(data, remove=False):
+    # Root OpenVPN transport only; nft output/postrouting independently enforce
+    # the same allowlist. Separate slots avoid sharing ownership between LANs.
+    pref = str(data['priority'] + 1000)
+    gateways = endpoints(data.get('endpoints', []))
+    if not gateways:
+        return
+    rules = json.loads(run(['ip', '-j', '-4', 'rule', 'show']).stdout)
+    for e in gateways:
+        selector = ['pref', pref, 'to', e['ip'] + '/32', 'uidrange', '0-0',
+                    'ipproto', e['proto'], 'dport', str(e['port']), 'lookup', 'main']
+        if remove:
+            while run(['ip', '-4', 'rule', 'del', *selector], check=False).returncode == 0:
+                pass
+        elif not any(r.get('priority') == int(pref) and str(r.get('table')) in ('main', '254') and
+                     rule_dst(r) == e['ip'] + '/32' and r.get('uid_start') == 0 and r.get('uid_end') == 0 and
+                     r.get('ipproto') in (e['proto'], {'tcp': 6, 'udp': 17}[e['proto']]) and
+                     r.get('dport') == e['port'] for r in rules):
+            run(['ip', '-4', 'rule', 'add', *selector])
 
 
 def rule_dst(rule):
@@ -553,6 +578,7 @@ def rule_dst(rule):
 def route_ops(name, data, remove=False):
     # Dedicated table + rules ahead of sing-box (normally preference 9000).
     table, pref = str(data['table']), str(data['priority'])
+    endpoint_ops(data, remove)
     if remove:
         for subnet in data['subnets']:
             while run(['ip', '-4', 'rule', 'del', 'pref', pref, 'to', subnet, 'lookup', table], check=False).returncode == 0:
@@ -574,7 +600,7 @@ def route_ops(name, data, remove=False):
             run(['ip', '-4', 'rule', 'add', 'pref', pref, 'to', subnet, 'lookup', table])
 
 
-def preflight(data):
+def preflight(data, replacing=False):
     require(shutil.which('sing-box') is not None, 'Нужен установленный sing-box.')
     require(run(['systemctl', 'is-active', '--quiet', 'sing-box'], check=False).returncode == 0, 'sing-box не активен.')
     patch_singbox(read(SB), [], [])
@@ -585,7 +611,7 @@ def preflight(data):
         if 0 < priority <= data['priority']:
             require((priority, str(r.get('table'))) in own, 'Конфликт приоритета policy routing.')
     routes = run(['ip', '-j', '-4', 'route', 'show', 'table', str(data['table'])], check=False)
-    require(routes.returncode != 0 or not json.loads(routes.stdout or '[]'), 'Таблица маршрутов уже занята.')
+    require(replacing or routes.returncode != 0 or not json.loads(routes.stdout or '[]'), 'Таблица маршрутов уже занята.')
     run(['sing-box', 'check', '-c', SB])
     run(['nft', '-c', '-f', '-'], input=guard_batch(active()))
 
@@ -619,6 +645,14 @@ def start_transaction(name, kind):
         shutil.copy2(SB, staging / 'sing-box.json')
         os.chmod(staging / 'sing-box.json', 0o600)
         save(staging / 'profiles.json', profiles())
+        # A replacement must roll back the private client file as well as metadata.
+        clients = staging / 'clients'
+        clients.mkdir(mode=0o700)
+        for old_name in profiles():
+            source = ETC / old_name / 'client.conf'
+            if source.exists():
+                shutil.copy2(source, clients / old_name)
+                os.chmod(clients / old_name, 0o600)
         save(staging / 'managed.json', managed_subnets())
         previous_nft = run(['nft', 'list', 'table', 'inet', TABLE], check=False)
         save(staging / 'nft.json', {'present': previous_nft.returncode == 0, 'text': previous_nft.stdout})
@@ -663,6 +697,9 @@ def rollback(boot=False):
     else:
         (STATE / 'firewall.json').unlink(missing_ok=True)
     for name, data in previous.items():
+        client = pending / 'clients' / name
+        if client.exists():
+            atomic(ETC / name / 'client.conf', client.read_text())
         data.update(enabled=False, ready=False)
         update(name, data)
     for name in set(current) - set(previous):
@@ -671,7 +708,8 @@ def rollback(boot=False):
     backup = pending / 'sing-box.json'
     # All clients were stopped, including previously enabled LANs. Restore the
     # snapshot's foreign exclusions, but retire every exclusion we owned there.
-    restored = patch_singbox(read(backup), read(pending / 'managed.json'), [])
+    restored = patch_singbox(read(backup), sorted(set(read(pending / 'managed.json')) |
+                              set(legacy_exclusions(previous)) | set(legacy_exclusions(current))), [])
     candidate = pending / 'sing-box.restored.json'
     save(candidate, restored)
     run(['sing-box', 'check', '-c', candidate])
@@ -763,6 +801,18 @@ WantedBy=timers.target
     run(['systemctl', 'start', 'remoteagents-lan-watch.timer'])
 
 
+def confirmed_at(name, data):
+    if (STATE / 'pending').exists() or not data.get('enabled') or not data.get('ready'):
+        return None
+    if data.get('confirmed_at'):
+        return data['confirmed_at']
+    # Compatibility with profiles confirmed before confirmed_at was introduced.
+    tested = STATE / (name + '.test.json')
+    if tested.exists() and read(tested).get('baseline') == data.get('baseline'):
+        return datetime.fromtimestamp(read(tested)['at'], timezone.utc).isoformat()
+    return None
+
+
 def hook(name):
     # Only trusted generated config calls this; do not acquire the manager lock:
     # enable is waiting for discovery while holding it.
@@ -778,7 +828,11 @@ def hook(name):
     require(found == data['subnets'], 'Push-маршруты изменились; требуется повторный enable.')
     route_ops(name, data)
     apply_dns(name, data)
-    event(name, 'connected: ожидается test; kernel guard установлен')
+    confirmed = confirmed_at(name, data)
+    if confirmed and not (STATE / 'pending').exists():
+        event(name, 'connected: профиль подтверждён ранее; kernel guard установлен; последняя проверка ' + confirmed, True)
+    else:
+        event(name, 'connected: ожидается test; kernel guard установлен')
 
 
 def prestart(name):
@@ -788,6 +842,8 @@ def prestart(name):
             'Есть другая незавершённая транзакция.')
     require((STATE / 'firewall.json').exists() and nft_identity() == read(STATE / 'firewall.json'),
             'Kernel guard отсутствует/изменён.')
+    endpoint_ops(data)
+    sync_singbox()
 
 
 def stop_client(name, boot=False):
@@ -870,11 +926,13 @@ def openvpn_failure(name):
     return openvpn_reason(text, name)
 
 
-def enable(name, url):
+def enable(name, url, transaction_started=False):
     data = profile(name)
     if data.get('enabled'):
         require(run(['systemctl', 'is-active', '--quiet', service(name)], check=False).returncode == 0,
                 'Флаг enabled без активного клиента: сначала disable.')
+        endpoint_ops(data)
+        sync_singbox()
         print('ЛВС уже включена; проверяйте test/status.')
         return
     for other, p in active().items():
@@ -884,15 +942,17 @@ def enable(name, url):
     preflight(data)
     local_conflicts(data['static'])
     before_ip = baseline(url)
-    start_transaction(name, 'enable')
+    if not transaction_started:
+        start_transaction(name, 'enable')
     try:
         data.update(enabled=True, ready=False, ip_url=url, baseline=before_ip)
+        data.pop('confirmed_at', None)
         update(name, data)
         firewall(active())
         # Required service start is now safe, before the TUN is created.
         run(['systemctl', 'start', 'remoteagents-lan-firewall.service'])
-        if data.get('endpoints'):
-            sync_singbox()
+        sync_singbox()
+        endpoint_ops(data)
         discovery = STATE / (name + '.discovery.json')
         discovery.unlink(missing_ok=True)
         openvpn_log(name).unlink(missing_ok=True)
@@ -1073,11 +1133,59 @@ def confirm(name, ssh_checked):
     require(nft_identity() == read(STATE / 'firewall.json'), 'Kernel guard изменён.')
     require(baseline(data['ip_url']) == data['baseline'], 'Внешний IP изменился.')
     run(['systemctl', 'enable', service(name)])
+    data['confirmed_at'] = now()
+    update(name, data)
     # Delete pending BEFORE stopping the timer; a racing rollback sees no pending.
     shutil.rmtree(pending)
     cancel_timer()
     event(name, 'confirmed: test пройден; новый SSH проверен владельцем', True)
     print('Подтверждено. Автозапуск клиента включён, таймер отката снят.')
+
+
+def add_profile(name, client, static, gateways, dns, fingerprint, direct, url, replace=False):
+    old = profiles()
+    previous = old.get(name)
+    same = previous and (ETC / name / 'client.conf').read_text() == client and previous['static'] == static and previous.get('dns') == dns and previous.get('endpoints', []) == gateways and previous.get('server_fingerprint') == fingerprint
+    reconnect = previous and previous.get('enabled') and run(['systemctl', 'is-active', '--quiet', service(name)], check=False).returncode != 0
+    if previous and (not same or reconnect):
+        require(replace, 'Имя занято другим профилем; для замены нужен --replace.')
+        # Validate the candidate before arming the transaction or stopping a client.
+        candidate = dict(previous, static=static, subnets=static, dns=dns, enabled=False, ready=False)
+        candidate.pop('confirmed_at', None)
+        candidate.pop('endpoints', None)
+        candidate.pop('server_fingerprint', None)
+        if direct:
+            candidate['endpoints'] = gateways
+        if fingerprint:
+            candidate['server_fingerprint'] = fingerprint
+        preflight(candidate, replacing=True)
+        local_conflicts(static)
+        baseline(url)
+        start_transaction(name, 'replace')
+        try:
+            stop_client(name)
+            route_ops(name, previous, remove=True)
+            atomic(ETC / name / 'client.conf', client)
+            update(name, candidate)
+            enable(name, url, transaction_started=True)
+        except Exception:
+            if (STATE / 'pending').exists():
+                rollback()
+            raise
+        return
+    if not previous:
+        used = {p['table'] for p in old.values()}
+        slot = next((i for i in range(64) if 42000 + i not in used), None)
+        require(slot is not None, 'Достигнут лимит 64 ЛВС.')
+        data = {'$schema': '../config.schema.json', 'version': 1, 'enabled': False, 'ready': False,
+                'static': static, 'subnets': static, 'dns': dns, 'table': 42000 + slot, 'priority': 1000 + slot}
+        if direct:
+            data['endpoints'] = gateways
+        if fingerprint is not None:
+            data['server_fingerprint'] = fingerprint
+        atomic(ETC / name / 'client.conf', client)
+        update(name, data)
+    enable(name, url)
 
 
 def audit_all_tunnels():
@@ -1123,9 +1231,13 @@ def watch():
         firewall({})
         sync_singbox()
         return
-    for name in data:
-        # Connectivity wasn't tested by the watchdog; never claim it was.
-        event(name, 'guard checked: nft/маршруты/процесс проверены; доступность хоста не проверялась', False)
+    for name, p in data.items():
+        # Keep the historical confirmation; this run does not retest the host.
+        confirmed = confirmed_at(name, p)
+        message = 'guard checked: nft/маршруты/процесс проверены; доступность хоста не проверялась'
+        if confirmed:
+            message += '; профиль подтверждён ранее; последняя проверка ' + confirmed
+        event(name, message, bool(confirmed))
 
 
 def read_auth(args):
@@ -1155,6 +1267,7 @@ def main():
         if command == 'add':
             p.add_argument('ovpn')
             p.add_argument('--subnet', action='append', default=[])
+            p.add_argument('--replace', action='store_true', help='Replace changed profile under the existing rollback timer')
             p.add_argument('--dns-domain')
             p.add_argument('--dns-server')
             p.add_argument('--direct-endpoint', action='store_true', help='Pin public IPv4 gateways and bypass proxy-out only for their transport')
@@ -1225,26 +1338,9 @@ def main():
                 require(bool(re.fullmatch(r'(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?', args.dns_domain)) and '.' in args.dns_domain and '..' not in args.dns_domain, 'Некорректный DNS-домен.')
                 networks([args.dns_server + '/32'])
                 dns = {'domain': args.dns_domain.lower(), 'server': str(ipaddress.IPv4Address(args.dns_server))}
-            old = profiles()
-            if args.name in old:
-                require((ETC / args.name / 'client.conf').read_text() == client and old[args.name]['static'] == static and old[args.name].get('dns') == dns and
-                        old[args.name].get('endpoints', []) == gateways and
-                        old[args.name].get('server_fingerprint') == args.server_fingerprint,
-                        'Имя занято другим профилем; сначала remove.')
-            else:
-                used = {p['table'] for p in old.values()}
-                slot = next((i for i in range(64) if 42000 + i not in used), None)
-                require(slot is not None, 'Достигнут лимит 64 ЛВС.')
-                data = {'$schema': '../config.schema.json', 'version': 1, 'enabled': False, 'ready': False, 'static': static,
-                        'subnets': static, 'dns': dns, 'table': 42000 + slot, 'priority': 1000 + slot}
-                if args.direct_endpoint:
-                    data['endpoints'] = gateways
-                if args.server_fingerprint is not None:
-                    data['server_fingerprint'] = args.server_fingerprint
-                atomic(ETC / args.name / 'client.conf', client)
-                update(args.name, data)
             install_runtime()
-            enable(args.name, args.ip_check_url)
+            add_profile(args.name, client, static, gateways, dns, args.server_fingerprint,
+                        args.direct_endpoint, args.ip_check_url, args.replace)
         elif args.cmd == 'enable':
             install_runtime()
             enable(args.name, args.ip_check_url)

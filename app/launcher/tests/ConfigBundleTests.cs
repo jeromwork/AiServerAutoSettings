@@ -54,9 +54,20 @@ namespace RemoteAgents.Launcher
             Check(namedPassword.Hints["custom-root"].Contains("хостинг"),"standard field explanation independent of secret name");
             var route = Example(); route["server"] = ConfigBundle.D("routes", new[]{ConfigBundle.D("kind", "hop")});
             Reject(() => ConfigBundle.Parse(Json.Encode(route)), "hop required");
+            foreach (string ipv6 in new[]{"block", "allow"}) {
+                var ipv6Config = ConfigBundle.D("kind", "remoteagents-config", "schema", 1, "proxyOut", ConfigBundle.D("type", "socks", "server", "8.8.8.8", "port", 1080, "ipv6", ipv6));
+                Check(ConfigBundle.Parse(Json.Encode(ipv6Config)).Profile.ContainsKey("proxyOut"), "explicit IPv6 policy " + ipv6);
+                Json.Map(ipv6Config["proxyOut"])["ipv6"] = "invalid";
+                Reject(() => ConfigBundle.Parse(Json.Encode(ipv6Config)), "unknown IPv6 policy");
+            }
             string schemaPath = FindSchema();
             Check(Canonical(Json.Read(schemaPath)) == Canonical(ConfigBundle.SchemaDocument()), "published schema matches compiled schema");
             Check(ConfigBundle.Parse(File.ReadAllText(Path.Combine(Path.GetDirectoryName(schemaPath),"config.paste.example.json"))).Missing.Length == 2,"published example parses with missing secrets");
+            var serverExample = ConfigBundle.Parse(File.ReadAllText(Path.Combine(Path.GetDirectoryName(schemaPath), "..", "..", "server", "server-apply.example.json")));
+            Check(serverExample.Missing.Contains("tailscale-auth-key") && serverExample.Missing.Contains("lan-clinic-auth"), "server apply example accepts all declarative sections");
+            var serverFields = ConfigBundle.Parse("{\"kind\":\"remoteagents-config\",\"schema\":1,\"tailscale\":{\"enabled\":true,\"authKey\":{\"secret\":\"custom-tail-key\"}},\"agent\":{\"sudo\":\"apply\"}}");
+            Check(serverFields.Hints["custom-tail-key"].Contains("Tailscale"), "Tailscale explanation independent of secret name");
+            Reject(() => ConfigBundle.Parse("{\"kind\":\"remoteagents-config\",\"schema\":1,\"tailscale\":{\"advertiseRoutes\":[\"10.0.0.0/8\"]}}"), "no Tailscale subnet advertisement in master config");
             p = ConfigBundle.Parse(Json.Encode(valid));
             string encrypted = ConfigBundle.Pack(p, "Тестовый мастер-пароль");
             var locked = ConfigBundle.Parse(encrypted);

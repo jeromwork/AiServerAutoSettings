@@ -859,6 +859,18 @@
           "type": "string",
           "minLength": 0,
           "maxLength": 2048
+        },
+        "exitIp": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 45
+        },
+        "ipv6": {
+          "type": "string",
+          "enum": [
+            "block",
+            "allow"
+          ]
         }
       },
       "additionalProperties": false,
@@ -932,6 +944,27 @@
             ],
             "description": "Именованная ссылка; значение хранится только в secrets/vault"
           },
+          "auth": {
+            "type": "object",
+            "properties": {
+              "secret": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
+              },
+              "hint": {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 2048
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "secret"
+            ],
+            "description": "Именованная ссылка; значение хранится только в secrets/vault"
+          },
           "host": {
             "type": "string",
             "minLength": 1,
@@ -949,6 +982,37 @@
             "maxLength": 2048,
             "format": "https-url"
           },
+          "serverFingerprint": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 95,
+            "pattern": "^(?:[0-9A-Fa-f]{64}|[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){31})$(?![\\s\\S])"
+          },
+          "subnets": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 18
+            },
+            "maxItems": 64,
+            "uniqueItems": true
+          },
+          "directEndpoint": {
+            "type": "boolean"
+          },
+          "dnsDomain": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 253,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$(?![\\s\\S])"
+          },
+          "dnsServer": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 253,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$(?![\\s\\S])"
+          },
           "hint": {
             "type": "string",
             "minLength": 0,
@@ -964,6 +1028,93 @@
       },
       "maxItems": 64,
       "uniqueItems": true
+    },
+    "tailscale": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "hostname": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$(?![\\s\\S])"
+        },
+        "authKey": {
+          "type": "object",
+          "properties": {
+            "secret": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
+            },
+            "hint": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 2048
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "secret"
+          ],
+          "description": "Ключ входа Tailscale из панели администратора; используется только для первого входа узла",
+          "examples": [
+            {
+              "secret": "tailscale-auth-key"
+            }
+          ]
+        },
+        "userspace": {
+          "type": "boolean"
+        },
+        "hint": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2048
+        }
+      },
+      "additionalProperties": false
+    },
+    "telegramGateway": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "hint": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2048
+        }
+      },
+      "additionalProperties": false
+    },
+    "agent": {
+      "type": "object",
+      "properties": {
+        "sudo": {
+          "type": "string",
+          "enum": [
+            "none",
+            "apply",
+            "full"
+          ]
+        },
+        "hint": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2048
+        }
+      },
+      "additionalProperties": false
     },
     "components": {
       "type": "object",
