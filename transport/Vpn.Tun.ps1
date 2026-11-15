@@ -7,9 +7,25 @@ param([Alias('Home')][string]$TransportHome=(Join-Path $env:LOCALAPPDATA 'Remote
     [Parameter(Mandatory=$true,ParameterSetName='Worker')][switch]$Worker,
     [Parameter(Mandatory=$true,ParameterSetName='Rollback')][switch]$Rollback,
     [Parameter(Mandatory=$true,ParameterSetName='Broker')][switch]$Broker,
+    [Parameter(Mandatory=$true,ParameterSetName='InspectLegacy')][switch]$InspectLegacy,
+    [Parameter(Mandatory=$true,ParameterSetName='Cleanup')][switch]$Cleanup,
     [string]$Session='', [string]$OutputConfig='', [int]$ParentPid=0)
 . (Join-Path $PSScriptRoot 'Transport.Common.ps1')
-$root=(Get-TransportHome $TransportHome);$action=$PSCmdlet.ParameterSetName;$tasks=Get-VpnTaskNames $root
+$root=(Get-TransportHome $TransportHome);$action=$PSCmdlet.ParameterSetName
+if($action -in @('InspectLegacy','Cleanup')){
+    . (Join-Path $PSScriptRoot 'Vpn.Legacy.ps1')
+    if($action -eq 'InspectLegacy'){
+        $found=Find-VpnRemnants $root (Get-VpnLegacySnapshot)
+        ConvertTo-Json -Compress @{found=$found.found};return
+    }
+    if($env:OS -ne 'Windows_NT' -or -not (Test-VpnAdministrator)){throw 'Очистка требует администратора Windows'}
+    Remove-VpnRemnants $root
+    return
+}
+if($action -in @('Enable','Broker','Worker') -and -not (Test-ProductVpnEnabled)){
+    Write-Output 'VPN отключено в этой версии';return
+}
+$tasks=Get-VpnTaskNames $root
 $sessionFile=Join-Path $root 'state/vpn-session.json';$stopFile=Join-Path $root 'state/vpn.stop';$configFile=Join-Path $root 'state/vpn-sing-box.json'
 $child=$null;$mutex=$null;$locked=$false;$parent=$null;$failure=$false;$conflict=[pscustomobject]@{conflict=$false;items=@()}
 try{

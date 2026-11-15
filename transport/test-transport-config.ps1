@@ -428,12 +428,17 @@ try{
     function Register-ScheduledTask {param($TaskName,$Action,$Trigger,$Principal,$Settings,[switch]$Force) $script:taskCalls.name=$TaskName}
     # WindowsIdentity недоступен на Linux: отдельный helper principal тестируется через mock ниже.
     # Сама сборка action/trigger вынесена в переносимую функцию; UserId передаётся явно.
+    $realVpnFeature=${function:Test-ProductVpnEnabled}
     try{
+        Register-VpnRollbackTask $work 'disabled-session' (Join-Path $PSScriptRoot 'Vpn.Tun.ps1') -UserId 'test-user'
+        Assert ($taskCalls.Count -eq 0) 'флаг VPN false не регистрирует задачи'
+        function Test-ProductVpnEnabled {$true}
         Register-VpnRollbackTask $work 'test-session' (Join-Path $PSScriptRoot 'Vpn.Tun.ps1') -UserId 'test-user'
         Assert ($taskCalls.name -eq (Get-VpnTaskNames $work).Rollback -and $taskCalls.principal -eq 'Highest') 'отдельная задача отката с highest'
         Assert (($taskCalls.at-(Get-Date)).TotalSeconds -gt 295 -and ($taskCalls.at-(Get-Date)).TotalSeconds -le 300) 'watchdog через пять минут'
         Assert ($taskCalls.action.Argument -match '-Rollback' -and $taskCalls.action.Argument -match 'test-session') 'watchdog привязан к своему сеансу'
     }finally{
+        Set-Item function:Test-ProductVpnEnabled $realVpnFeature
         $env:SystemRoot=$oldSystemRoot
         foreach($name in @('New-ScheduledTaskAction','New-ScheduledTaskPrincipal','New-ScheduledTaskSettingsSet','New-ScheduledTaskTrigger','Register-ScheduledTask')){Remove-Item ('function:'+$name)}
     }

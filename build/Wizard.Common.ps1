@@ -17,7 +17,7 @@ function Get-WizardPlan($Server,$Local) {
         @{id='disk';ready=([bool]$Local.disk -and [bool]$Server.disk)}
         @{id='happier';ready=[bool]$Local.account}
         @{id='bridge';ready=(-not $Local.bridgeEnabled -or [bool]$Local.bridge)}
-        @{id='vpn';ready=(-not $Local.vpnEnabled -or [bool]$Local.vpn)}
+        @{id='vpn';ready=(-not (Test-ProductVpnEnabled) -or -not $Local.vpnEnabled -or [bool]$Local.vpn);summary=$(if(-not (Test-ProductVpnEnabled)){'Отключено в этой версии'}else{''})}
     )
 }
 function Invoke-WizardSsh([string]$Root,[string]$Command,[string]$InputText='',[int]$Timeout=60) {
@@ -523,6 +523,7 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
             return @{ok=$true;summary=$(if($Request.enabled){'Мост и разрешение shell проверены'}else{'Запрос выключения выполнен'})}
         }
         'Vpn' {
+            if(-not (Test-ProductVpnEnabled)){return @{ok=$true;enabled=$false;summary='VPN отключено в этой версии'}}
             $config=Read-TransportJson (Join-Path $Root 'config.json')
             $previous=$config.vpn
             if(($Request.enabled -or $config.transport.bootstrap -or $previous.bootstrapTag) -and -not (Test-WizardNetworkProof $Root ([DateTime]::UtcNow.AddSeconds(-15)))){

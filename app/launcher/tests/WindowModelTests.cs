@@ -15,6 +15,13 @@ namespace RemoteAgents.Launcher
         { if (!condition) throw new Exception("Window: " + name); count++; }
         internal static void Run()
         {
+            Check(!Product.VpnEnabled, "system VPN is disabled in this release");
+            Check(!WindowModel.SetupSections.Contains(5) && !WindowModel.StatusNames.Contains("vpn") && !ConfigSections.Rows.Contains(ConfigSections.Vpn), "VPN is absent from wizard, details, main status and config rows");
+            var vpnConfig = Configuration.ForUpdate("{}");
+            vpnConfig.Data["components"] = ConfigBundle.D("vpn", ConfigBundle.D("enabled", true));
+            Check(!vpnConfig.Wanted(new Component { Name = "vpn", Default = true, RequiredConfig = new string[0] }), "saved enabled intent cannot start the VPN runtime");
+            Check(!TrayMenuModel.Build(ConfigBundle.D("vpn", ConfigBundle.D("enabled", true)), Json.Map(null), Json.Map(null), Json.Map(null)).Any(e => e.Id.ToLowerInvariant().Contains("vpn") || e.Text.Contains("VPN")), "tray has no VPN even when configured enabled");
+            Check(Json.Bool(WizardRunner.Run("nonexistent", "nonexistent", "Vpn", new { enabled = true }, CancellationToken.None), "ok"), "Enable via wizard returns disabled without launching a process or writing files");
             Check(WindowModel.Route(new string[0]) == WindowCommand.Show, "human launch opens the main window");
             Check(WindowModel.Route(new[] { "--home", "test-home" }) == WindowCommand.Show, "home option preserves human launch");
             Check(WindowModel.Route(new[] { "--tray", "--home", "test-home" }) == WindowCommand.None, "Windows sign-in stays in tray");
@@ -151,7 +158,7 @@ namespace RemoteAgents.Launcher
             try {
                 Check(await Task.WhenAny(connection.Task, Task.Delay(3000)) == connection.Task, "Connection reports ready before long Account finishes");
                 Check(!execution.IsCompleted && started.ContainsKey(ConfigSections.Account), "Happier is still running while the rest goes on");
-                foreach (string section in new[] { ConfigSections.Bridge, ConfigSections.Vpn, ConfigSections.Proxy, ConfigSections.Lan })
+                foreach (string section in new[] { ConfigSections.Bridge, ConfigSections.Proxy, ConfigSections.Lan })
                     Check(started.ContainsKey(section), section + " executes without Disk");
                 Check(!started.ContainsKey(ConfigSections.Disk), "Disk has not run inside the window's plan");
                 // The background run invokes only Disk on the same engine while the other plan is alive.
@@ -162,7 +169,7 @@ namespace RemoteAgents.Launcher
             // Executing the window's plan alone leaves Disk untouched.
             started.Clear();
             await ConfigEngine.Execute(plan, run, (s, state, text) => { }, CancellationToken.None);
-            Check(!started.ContainsKey(ConfigSections.Disk) && started.ContainsKey(ConfigSections.Bridge) && started.ContainsKey(ConfigSections.Account) && started.ContainsKey(ConfigSections.Vpn), "the plan without Disk never applies Disk");
+            Check(!started.ContainsKey(ConfigSections.Disk) && started.ContainsKey(ConfigSections.Bridge) && started.ContainsKey(ConfigSections.Account) && !started.ContainsKey(ConfigSections.Vpn), "the plan without Disk never applies Disk or disabled VPN");
         }
     }
 }

@@ -60,7 +60,7 @@ namespace RemoteAgents.Launcher
                 var option = pathChoice.SelectedItem as PathOption;
                 if (option != null) pathSelection.Choose(option.Tag);
             };
-            for (int i = 0; i < 5; i++) { var line = new Label { AutoSize = true, MaximumSize = new Size(680, 0) }; statusLines.Add(line); mainStatus.Controls.Add(line); }
+            for (int i = 0; i < WindowModel.StatusNames.Length; i++) { var line = new Label { AutoSize = true, MaximumSize = new Size(680, 0) }; statusLines.Add(line); mainStatus.Controls.Add(line); }
             mainStatus.Controls.Add(happierCreated);
             // Keep progress and the editor journal in the config page, not over the other tabs.
             // The paste window docks the journal Fill in its own layout row; here it sits under the editor.

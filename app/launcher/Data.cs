@@ -20,6 +20,13 @@ namespace RemoteAgents.Launcher
 #else
         public static bool IsVpn { get { return false; } }
 #endif
+        // Build-time capability, shared with PowerShell; user config cannot override it.
+        public static readonly bool VpnEnabled = ReadVpnFeature();
+        static bool ReadVpnFeature()
+        {
+            using (var stream = typeof(Product).Assembly.GetManifestResourceStream("RemoteAgents.ProductFeatures.json"))
+            using (var reader = new StreamReader(stream)) return Json.Bool(Json.Map(Json.Parse(reader.ReadToEnd())), "vpnEnabled");
+        }
         public static string Name { get { return IsVpn ? "RemoteVPN" : "RemoteAgents"; } }
         public static string ExeName { get { return Name + ".exe"; } }
         public static string BundleDirectory { get { return IsVpn ? "vpn-bundle" : "bundle"; } }
@@ -181,7 +188,7 @@ namespace RemoteAgents.Launcher
         public bool Enabled(Component c) { var map = Json.Map(Json.Get(Data, "components")); return Json.Bool(Json.Map(Json.Get(map, c.Name)), "enabled", c.Default); }
         // Required fields are the component's setup contract, independent of enabled intent.
         public bool Wanted(Component c)
-        { return Enabled(c) && Ready(Data,c.RequiredConfig); }
+        { return (Product.VpnEnabled || c.Name != "vpn") && Enabled(c) && Ready(Data,c.RequiredConfig); }
         internal static bool Ready(Dictionary<string,object> data, string[] fields)
         {
             return fields.All(path=> {
