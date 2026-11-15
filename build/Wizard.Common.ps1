@@ -9,6 +9,7 @@
 . (Join-Path $PSScriptRoot 'Wizard.Health.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Lan.ps1')
 . (Join-Path $PSScriptRoot 'Wizard.Network.ps1')
+. (Join-Path $PSScriptRoot 'Wizard.ServerApply.ps1')
 # All state is observed again. This model is also exercised with fake SSH on Linux.
 function Get-WizardPlan($Server,$Local) {
     @(
@@ -404,6 +405,7 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
         'Lan' {if($Request.host){return Add-WizardLan $Root $Bundle $Request};return Send-WizardLan $Root $Bundle ([string]$Request.file)}
         'LanRemove' {return Remove-WizardLan $Root $Bundle $Request}
         'NetStatus' {return Get-WizardNetStatus $Root}
+        'ServerApply' {return Invoke-WizardServerApply $Root $Bundle $Request}
         'AdminProbe' {return @{mode=(Get-WizardAdminMode $Root ([pscustomobject]@{}))}}
         'Proxy' {return Set-WizardProxy $Root $Bundle $Request}
         'Catalog' {Write-WizardProgress 'Загружаю узлы с сервера…';return Get-WizardCatalog $Root $Bundle}

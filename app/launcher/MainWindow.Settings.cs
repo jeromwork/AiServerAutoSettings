@@ -36,8 +36,24 @@ namespace RemoteAgents.Launcher
             Resize += (s, e) => { if (WindowState == FormWindowState.Maximized) mainSizing.UserResized(); };
             DpiChanged += (s, e) => BeginInvoke(new Action(() => { if (!IsDisposed) SizeForPage(currentPage); }));
             RegisterFlowPage("Главная", homeBody); RegisterFlowPage("Настройки", settingsBody);
+            var serverBody = Stack();
+            var serverState = WrapLabel(); serverBody.Controls.Add(serverState);
+            Action refreshServer = () => serverState.Text = DeploymentText();
+            AddButton(serverBody, "Сверить состояние", async () => {
+                await Guard(async () => { var check = new ConfigSession(home, Bundle); check.Log = Log; await check.Plan(cancel.Token); });
+                refreshServer();
+            });
+            AddButton(serverBody, "Применить конфиг сервера", async () => { await RetrySection(ConfigSections.Server); refreshServer(); });
+            RegisterFlowPage("Сервер", serverBody); refreshServer();
+            FlowLayoutPanel serverLink; MakeCard(settingsBody, new Label { Text = "Сервер", AutoSize = true }, out serverLink);
+            AddButton(serverLink, "Открыть", () => { refreshServer(); ShowPage("Сервер"); });
             AddSetting("Сеть и пути", "Сервер, связь, VPN и выход в интернет", 1);
-            AddSetting("Локальные сети", "Подключения к локальным сетям", 6);
+            var lanBody = Stack(); var lanState = WrapLabel(); lanBody.Controls.Add(lanState);
+            AddButton(lanBody, "Применить конфиг сервера", async () => { await RetrySection(ConfigSections.Server); lanState.Text = DeploymentText(); });
+            AddButton(lanBody, "Профили локальных сетей", () => OpenDetails(6));
+            RegisterFlowPage("Локальные сети", lanBody);
+            FlowLayoutPanel lanLink; MakeCard(settingsBody, new Label { Text = "Локальные сети", AutoSize = true }, out lanLink);
+            AddButton(lanLink, "Открыть", () => { lanState.Text = DeploymentText(); ShowPage("Локальные сети"); });
             if (!Product.IsVpn) {
                 AddSetting("Диск", "Папки и синхронизация", 2);
                 AddSetting("Happier", "Аккаунт и адрес приложения", 3);
@@ -67,6 +83,8 @@ namespace RemoteAgents.Launcher
             editor.Controls.Add(configPage, 0, 1); journal.Dock = DockStyle.Fill; editor.Controls.Add(journal, 0, 2);
             RegisterPage("Редактор конфига", editor);
             serviceActions.Controls.Add(syncStatus); serviceActions.Controls.Add(serverHealthDetails); serviceActions.Controls.Add(pathStates);
+            var deployDiagnostic = WrapLabel(); deployDiagnostic.Text = DeploymentText(); serviceActions.Controls.Add(deployDiagnostic);
+            AddButton(serviceActions, "Состояние развёртывания сервера", () => { deployDiagnostic.Text = DeploymentText(); ShowPage("Сервер"); });
             serviceActions.Controls.Add(diagnosticPathLink);
             diagnosticPathLink.LinkClicked += (s, e) => pathMenu.Show(diagnosticPathLink, new Point(0, diagnosticPathLink.Height));
             RegisterFlowPage("Диагностика", serviceActions);
@@ -143,6 +161,13 @@ namespace RemoteAgents.Launcher
                     Theme.Px(this, 460) + pageHeader.Height);
             var required = content.IsEmpty ? Size.Empty : SizeFromClientSize(content);
             Bounds = mainSizing.ForPage(Bounds, required, name == "Главная" || name == "Настройки", DeviceDpi, area);
+        }
+        string DeploymentText()
+        {
+            try {
+                var result = Json.Read(Path.Combine(home, "state", "server-apply.json"));
+                return string.Join("\r\n", Json.Array(Json.Get(result, "parts")).Select(Json.Map).Select(r => Json.Str(r, "part") + ": " + Json.Str(r, "state") + " — " + Json.Str(r, "summary")));
+            } catch (Exception) { return "Состояние развёртывания ещё не получено. Нажмите «Сверить состояние»."; }
         }
         void OpenDiagnostics()
         { advanced.Expanded = true; ShowPage("Диагностика"); }

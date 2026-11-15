@@ -30,7 +30,7 @@ namespace RemoteAgents.Launcher
         internal static readonly string[] Chain = { Proxy, Lan };
         internal static readonly string[] Order = { Bootstrap, Server, Connection, Bridge, Account, Disk, Vpn, Proxy, Lan };
         // Top-level profile keys (config.paste.schema.json). Unknown keys are refused by ConfigBundle.Parse (stream A).
-        internal static readonly string[] ProfileKeys = { "device", "server", "vpn", "happier", "bridge", "disk", "proxyOut", "lan", "components" };
+        internal static readonly string[] ProfileKeys = { "device", "server", "vpn", "happier", "bridge", "disk", "proxyOut", "lan", "serverNetwork", "tailscale", "telegramGateway", "agent", "components" };
         internal static bool Known(string key) { return ProfileKeys.Contains(key); }
         internal static string Title(string s)
         {
@@ -95,7 +95,7 @@ namespace RemoteAgents.Launcher
             var vpn = new Dictionary<string, object>(Json.Map(Json.Get(p, "vpn")));
             switch (s) {
                 case Bootstrap: return Json.Get(vpn, "bootstrap");
-                case Server: return Json.Get(p, "server");
+                case Server: return ServerDeployment.Profile(p, true);
                 case Connection: { var server = new Dictionary<string, object>(Json.Map(Json.Get(p, "server"))); server.Remove("rootPassword"); return server; }
                 case Bridge: return new Dictionary<string, object> { { "bridge", Json.Get(p, "bridge") }, { "name", Json.Str(Json.Map(Json.Get(p, "device")), "name") } };
                 case Account: return Json.Get(p, "happier");
@@ -124,6 +124,24 @@ namespace RemoteAgents.Launcher
             }
             if (value is IEnumerable) return "[" + string.Join(",", ((IEnumerable)value).Cast<object>().Select(Canonical)) + "]";
             return Convert.ToString(value, CultureInfo.InvariantCulture);
+        }
+    }
+
+    internal static class ServerDeployment
+    {
+        internal static readonly string[] Keys = { "serverNetwork", "proxyOut", "lan", "tailscale", "telegramGateway", "agent" };
+        internal static Dictionary<string, object> Profile(Dictionary<string, object> p, bool server = false)
+        {
+            var result = Keys.Where(p.ContainsKey).ToDictionary(k => k, k => p[k]);
+            if (server && p.ContainsKey("server")) result["server"] = p["server"];
+            return result;
+        }
+        internal static void Observe(Dictionary<string, object> result, Dictionary<string, object> desired, IDictionary<string, bool> ready)
+        {
+            var parts = Json.Array(Json.Get(result, "parts")).Select(Json.Map).ToArray();
+            Func<string, bool> ok = part => parts.Any(r => Json.Str(r, "part") == part && Json.Str(r, "state") == "ready");
+            if (desired.ContainsKey("proxyOut")) ready[ConfigSections.Proxy] = new[] { "internet", "inbound", "ipv6", "egressWatch" }.All(ok);
+            if (desired.ContainsKey("lan")) ready[ConfigSections.Lan] = Json.Array(Json.Get(desired, "lan")).Select(Json.Map).All(l => ok("lan:" + Json.Str(l, "name")));
         }
     }
 
@@ -493,10 +511,11 @@ namespace RemoteAgents.Launcher
                     var hop = Json.Map(Json.Get(Route(server, "hop"), "hop"));
                     string hopKey = SecretName(Json.Get(hop, "key"));
                     if (hopKey.Length == 0 || !available(hopKey)) { if (SecretName(Json.Get(hop, "password")).Length > 0) need(Json.Get(hop, "password")); else need(Json.Get(hop, "key")); }
+                    foreach (var reference in ConfigBundle.References(ServerDeployment.Profile(p))) need(reference);
                     break; }
                 case ConfigSections.Account: if (Json.Str(Json.Map(Json.Get(p, "happier")), "mode") != "new") need(Json.Get(Json.Map(Json.Get(p, "happier")), "key")); break;
                 case ConfigSections.Proxy: need(Json.Get(Json.Map(Json.Get(p, "proxyOut")), "password")); break;
-                case ConfigSections.Lan: foreach (var l in Json.Array(Json.Get(p, "lan")).Select(Json.Map)) { need(Json.Get(l, "ovpn")); need(Json.Get(l, "password")); } break;
+                case ConfigSections.Lan: foreach (var l in Json.Array(Json.Get(p, "lan")).Select(Json.Map)) { need(Json.Get(l, "ovpn")); need(Json.Get(l, "password")); need(Json.Get(l, "auth")); } break;
                 case ConfigSections.Bootstrap: {
                     var b = Json.Map(Json.Get(Json.Map(Json.Get(p, "vpn")), "bootstrap")); need(Json.Get(b, "channel"));
                     foreach (var e in Json.Map(Json.Get(b, "entries")).Values) need(e);
@@ -743,6 +762,7 @@ namespace RemoteAgents.Launcher
         internal Action<string> Log = delegate { };
         internal Action<string> AccountCreated = delegate { };
         readonly HappierAccountCreation accountCreation;
+        SectionOutcome deploymentOutcome;
         internal Func<bool> DiskCurrent = () => true;
         // Recheck permission even for callers without a binding callback and requests already queued in the background.
         bool DiskStillCurrent() { return DiskCurrent() && ConfigSections.DiskDescribed(ConfigProfile.Load(home)); }
@@ -768,7 +788,16 @@ namespace RemoteAgents.Launcher
                 catch (Exception e) { Log("Текущее состояние не получено (" + e.Message + "). Применяю все разделы конфига."); }
             }
             services = Json.Map(Json.Get(Json.Map(Json.Get(inspect, "server")), "services"));
-            return ConfigPlan.Build(desired, ConfigProfile.Applied(home), ConfigPlan.Ready(inspect, new Configuration(home).Data, desired));
+            var ready = ConfigPlan.Ready(inspect, new Configuration(home).Data, desired);
+            if (FirstInstall.HasProfile(home) && desired.ContainsKey("server")) {
+                try {
+                    var status = await Task.Run(() => Deployment(desired, (a, r) => WizardRunner.Run(home, bundle, a, r, token), true));
+                    ServerDeployment.Observe(status.Result, desired, ready);
+                    ready[ConfigSections.Server] = ready.ContainsKey(ConfigSections.Server) && ready[ConfigSections.Server] && status.Ok;
+                } catch (OperationCanceledException) { throw; }
+                catch (Exception) { ready[ConfigSections.Server] = false; Log("Сервер: статус развёртывания не получен."); }
+            }
+            return ConfigPlan.Build(desired, ConfigProfile.Applied(home), ready);
         }
         bool Available(string name) { string v; return (secrets.TryGetValue(name, out v) && v.Length > 0 && v != ConfigAi.Hidden) || SecretVault.Has(home, name); }
         // Pasted value first, then the vault (settings reopened later: root/hop/proxy/LAN passwords live only there).
@@ -806,6 +835,7 @@ namespace RemoteAgents.Launcher
         internal async Task<Dictionary<string, SectionOutcome>> Execute(IList<string> plan, CancellationToken token)
         {
             await Bundle();
+            deploymentOutcome = null;
             var result = await ConfigEngine.Execute(plan, (s, t) => Task.Run(() => RunSection(s, t), t), (s, state, text) => Report(s, state, text), token);
             foreach (var pair in result) {
                 Outcomes[pair.Key] = pair.Value;
@@ -836,8 +866,8 @@ namespace RemoteAgents.Launcher
                     foreach (string warning in DiskChoice.FromProfile(p).Warnings) Log("Диск: " + warning);
                     o = SectionOutcome.From(run("Disk", ConfigRequests.Disk(p, DiskBase())), "Диск подключён; папки сервера принимайте в Syncthing Tray"); break; }
                 case ConfigSections.Vpn: o = SectionOutcome.From(run("Vpn", ConfigRequests.Vpn(p)), "VPN настроен", true); break;
-                case ConfigSections.Proxy: o = Proxy(p, config, run); break;
-                case ConfigSections.Lan: o = Lan(p, config, run); break;
+                case ConfigSections.Proxy: o = deploymentOutcome ?? (deploymentOutcome = Deployment(p, run)); break;
+                case ConfigSections.Lan: o = deploymentOutcome ?? (deploymentOutcome = Deployment(p, run)); break;
                 default: throw new ArgumentException("Неизвестный раздел");
             }
             if (s == ConfigSections.Disk && !DiskStillCurrent()) return DiskApplyWait.Superseded();
@@ -856,11 +886,23 @@ namespace RemoteAgents.Launcher
             using (var hopRelay = new PasswordRelay(Value(Json.Get(hop, "password")), 16)) {
                 request["passwordPipe"] = relay.Name; request["askpassExecutable"] = Program.Exe;
                 var hopRequest = Json.Get(request, "hop") as Dictionary<string, object>; if (hopRequest != null) hopRequest["passwordPipe"] = hopRelay.Name;
+                request["installMissing"] = false; // Establish the worker key before changing the server network.
                 var result = run("Server", request);
                 services = Json.Map(Json.Get(result, "services"));
                 foreach (string op in new[] { "disk", "happier" }) if (Json.Str(Json.Map(Json.Get(Json.Map(Json.Get(result, "operations")), op)), "state") == "running") Track(op, false);
+                var connected = SectionOutcome.From(result, "Сервер подключён ✓");
+                if (!connected.Ok) return connected;
+                deploymentOutcome = Deployment(p, run);
+                if (!deploymentOutcome.Ok) return deploymentOutcome;
+                // Downloads/installations of the other server components now use the verified proxy-out.
+                request["installMissing"] = true;
+                result = run("Server", request);
+                services = Json.Map(Json.Get(result, "services"));
+                foreach (string op in new[] { "disk", "happier" }) if (Json.Str(Json.Map(Json.Get(Json.Map(Json.Get(result, "operations")), op)), "state") == "running") Track(op, false);
+                var installed = SectionOutcome.From(result, "Сервер настроен и проверен ✓");
+                if (!installed.Ok) return installed;
                 PromoteServerKey(server);
-                return SectionOutcome.From(result, "Сервер подключён ✓");
+                return deploymentOutcome;
             }
         }
         // Clean VPS (docs/CONFIG.md, server.rootPassword): after a proved Server the program logs in with the key it
@@ -915,13 +957,44 @@ namespace RemoteAgents.Launcher
             string message = accountCreation.Complete(outcome);
             if (message.Length > 0) AccountCreated(message);
         }
+        SectionOutcome Deployment(Dictionary<string, object> p, Func<string, object, Dictionary<string, object>> run, bool statusOnly = false)
+        {
+            var profile = ServerDeployment.Profile(p, true);
+            profile["kind"] = "remoteagents-config"; profile["schema"] = 1;
+            // Connect-WizardServer may have provisioned a worker from a root login.
+            var server = new Dictionary<string, object>(Json.Map(Json.Get(profile, "server")));
+            try {
+                var ssh = Json.Read(Json.Str(Json.Map(Json.Get(new Configuration(home).Data, "transport")), "profilePath"));
+                if (Json.Str(ssh, "serverAddress") == Json.Str(server, "address")) server["login"] = Json.Str(ssh, "login");
+            } catch (Exception) { }
+            profile["server"] = server;
+            var values = new Dictionary<string, string>();
+            foreach (var r in ConfigBundle.References(ServerDeployment.Profile(p))) {
+                string value = Value(r); if (value.Length > 0) values[Json.Str(r, "secret")] = value;
+            }
+            var access = RootAccess(p, run);
+            using (access.Item3)
+            using (var relay = new PasswordRelay(Json.Encode(values))) {
+                var request = new Dictionary<string, object> { { "config", profile }, { "secretPipe", relay.Name }, { "statusOnly", statusOnly } };
+                AddRoot(request, access);
+                var result = run("ServerApply", request);
+                foreach (var row in Json.Array(Json.Get(result, "parts")).Select(Json.Map)) {
+                    string line = Json.Str(row, "part") + ": " + Json.Str(row, "state") + " — " + Json.Str(row, "summary");
+                    Log("Сервер: " + line);
+                    Report(Json.Str(row, "part").StartsWith("lan:", StringComparison.Ordinal) ? ConfigSections.Lan : ConfigSections.Server,
+                        Json.Str(row, "state") == "ready" ? SectionState.Unchanged : SectionState.Waiting, line);
+                }
+                return SectionOutcome.From(result, "Сервер настроен и проверен ✓");
+            }
+        }
+
         // Root on the server for Proxy/Lan: the key as root, otherwise the root password from the config,
         // otherwise «command» — an exact command for the administrator (no secrets in it) goes to the journal.
         Tuple<string, string, PasswordRelay> RootAccess(Dictionary<string, object> p, Func<string, object, Dictionary<string, object>> run)
         {
             string mode = Json.Str(run("AdminProbe", new { }), "mode");
             string root = Value(Json.Get(Json.Map(Json.Get(p, "server")), "rootPassword"));
-            if (mode == "command" && root.Length > 0) return Tuple.Create("password", "root", new PasswordRelay(root, 8));
+            if (mode == "command" && root.Length > 0) return Tuple.Create("password", "root", new PasswordRelay(root, 160));
             return Tuple.Create(mode, "", (PasswordRelay)null);
         }
         void AddRoot(Dictionary<string, object> request, Tuple<string, string, PasswordRelay> access)

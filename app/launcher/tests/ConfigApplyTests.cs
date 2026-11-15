@@ -126,6 +126,11 @@ namespace RemoteAgents.Launcher
             Check(first.SequenceEqual(ConfigSections.Order), "first apply runs every described section in engine order: " + string.Join(",", first));
             Check(ConfigPlan.Build(p, AllApplied(p), AllReady()).Count == 0, "same config again (applied + ready) changes nothing");
             Check(ConfigPlan.Build(Clone(p), AllApplied(p), AllReady()).Count == 0, "re-parsed identical text is still identical (canonical hash)");
+            var observed = AllReady(); observed[ConfigSections.Proxy] = false; observed[ConfigSections.Lan] = false;
+            ServerDeployment.Observe(ConfigBundle.D("parts", new[] { "internet", "inbound", "ipv6", "egressWatch", "lan:office" }.Select(part => ConfigBundle.D("part", part, "state", "ready")).ToArray()), p, observed);
+            Check(ConfigPlan.Build(p, AllApplied(p), observed).Count == 0, "unified status readiness avoids legacy proxy/LAN reapply at startup");
+            ServerDeployment.Observe(ConfigBundle.D("parts", new[] { ConfigBundle.D("part", "internet", "state", "blocked") }), p, observed);
+            Check(!observed[ConfigSections.Proxy] && !observed[ConfigSections.Lan], "missing or blocked server parts are never inferred ready from legacy flags");
             var folders = Clone(p); ((Dictionary<string, object>)folders["disk"])["folders"] = new object[] { ConfigBundle.D("id", "Проекты") };
             Check(ConfigPlan.Build(folders, AllApplied(p), AllReady()).SequenceEqual(new[] { ConfigSections.Disk }), "changed folders -> only Disk");
             var renamed = ConfigProfile.WithDeviceName(p, "Компьютер сына");
@@ -331,8 +336,8 @@ namespace RemoteAgents.Launcher
             Check(Json.Str(lan.Item1[0], "file") == ovpn, "LAN .ovpn from the manifest");
             Directory.Delete(home, true);
             Func<string, bool> none = n => false, keyOnly = n => n == "server-key" || n == "hop-password";
-            Check(ConfigRequests.SecretsFor(ConfigSections.Server, p, none).SequenceEqual(new[] { "server-root-password", "hop-password" }), "no key -> ask the root password (and the hop password)");
-            Check(ConfigRequests.SecretsFor(ConfigSections.Server, p, keyOnly).Count == 0, "key present -> root password not asked");
+            Check(ConfigRequests.SecretsFor(ConfigSections.Server, p, none).SequenceEqual(new[] { "server-root-password", "hop-password", "proxy-out-password", "lan-office-ovpn" }), "server deployment asks SSH and server section secrets once");
+            Check(ConfigRequests.SecretsFor(ConfigSections.Server, p, keyOnly).SequenceEqual(new[] { "proxy-out-password", "lan-office-ovpn" }), "key present -> root password not asked");
             Check(ConfigRequests.Why("server-root-password", p, "из письма хостинга").Contains("хостинг") && ConfigRequests.Why("server-root-password", p, "из письма хостинга").Contains("Подсказка: из письма хостинга"), "explanation + hint");
             Check(ConfigRequests.SecretsFor(ConfigSections.Account, new Dictionary<string, object> { { "happier", new Dictionary<string, object> { { "mode", "new" }, { "key", new Dictionary<string, object> { { "secret", "happier-key" } } } } } }, none).Count == 0, "new Happier account needs no key");
             var catalog = ConfigRequests.MergeCatalog(Json.Map(Json.Parse("{\"entries\":[{\"name\":\"a\",\"ssh\":\"x\"}]}")), Json.Map(Json.Parse("{\"wizard\":{\"localCatalog\":{\"entries\":[{\"name\":\"a\",\"alias\":\"y\",\"keyFile\":\"C:\\\\k\"}]}}}")));

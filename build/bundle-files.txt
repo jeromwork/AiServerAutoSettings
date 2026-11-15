@@ -68,3 +68,17 @@ build/Wizard.SessionHost.ps1
 build/Wizard.Bootstrap.ps1
 build/Wizard.Refresh.ps1
 build/Wizard.Health.ps1
+
+# Server reconciler and portable schema; no deployment secrets.
+build/Wizard.ServerApply.ps1
+server/server-apply.sh
+server/server_apply.py
+server/base_network.py
+server/remoteagents_config.py
+server/tg-gateway/gateway.py
+server/tg-gateway/tg_gateway_keys.py
+server/tg-gateway/tg_gateway_setup.py
+server/tg-gateway/install.sh
+server/tg-gateway/README.md
+app/launcher/config.paste.schema.json => server/config.paste.schema.json
+build/ServerApply.ps1

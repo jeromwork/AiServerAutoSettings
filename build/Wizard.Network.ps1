@@ -16,7 +16,7 @@ function Read-WizardRelay([string]$Name) {
 }
 function Get-WizardNetArgs($Profile,[string]$User,[string]$Root='') {
     $route=@();if($Root){$route=@(Get-TransportSavedRouteOptions $Root $Profile)}
-    $route+@('-F',$Profile.configPath,'-T','-l',$User,'-i',$Profile.keyPath,'-o','IdentitiesOnly=yes','-o','ConnectTimeout=5','-o','ConnectionAttempts=1','-o',('UserKnownHostsFile="'+$Profile.knownHostsPath.Replace('\','/')+'"'),'-o','GlobalKnownHostsFile=none','-o','StrictHostKeyChecking=yes','-o','ForwardAgent=no','-o','ClearAllForwardings=yes')
+    $route+@('-o','ControlMaster=no','-o','ControlPath=none','-o','ControlPersist=no','-F',$Profile.configPath,'-T','-l',$User,'-i',$Profile.keyPath,'-o','IdentitiesOnly=yes','-o','ConnectTimeout=5','-o','ConnectionAttempts=1','-o',('UserKnownHostsFile="'+$Profile.knownHostsPath.Replace('\','/')+'"'),'-o','GlobalKnownHostsFile=none','-o','StrictHostKeyChecking=yes','-o','ForwardAgent=no','-o','ClearAllForwardings=yes')
 }
 function Get-WizardAdminMode([string]$Root,$Request) {
     $p=Read-TransportJson (Find-InstallProfile $Root)
