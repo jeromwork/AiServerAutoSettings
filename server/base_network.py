@@ -39,9 +39,7 @@ def candidate(engine):
     proxy = engine_module('proxy_out')
     new = proxy.outbound(*proxy.endpoint(p['type'], p['server'], p['port']),
                          *proxy.credentials(p.get('login'), password))
-    extra = json.loads(engine.secret(n['inbounds'], 'server-inbounds')) if n.get('inbounds') else []
-    require(isinstance(extra, list) and all(isinstance(i, dict) and i.get('type') != 'tun' for i in extra),
-            'serverNetwork.inbounds: секрет должен быть JSON-массивом входов sing-box без TUN.')
+    extra = inbounds(engine)
     return {'log': {'level': 'warn'},
             'inbounds': [{'type': 'tun', 'tag': 'system-tun', 'interface_name': n.get('tunName', 'ra-tun'),
                           'address': [str(address)], 'auto_route': True, 'auto_redirect': False,
@@ -50,6 +48,30 @@ def candidate(engine):
             'outbounds': [new, {'type': 'direct', 'tag': 'direct-out'}],
             'route': {'auto_detect_interface': True, 'final': 'proxy-out',
                       'rules': [{'ip_is_private': True, 'outbound': 'direct-out'}]}}
+
+
+def inbounds(engine):
+    n = engine.config.get('serverNetwork', {})
+    extra = json.loads(engine.secret(n['inbounds'], 'server-inbounds')) if n.get('inbounds') else []
+    _require(isinstance(extra, list) and all(isinstance(i, dict) and i.get('type') != 'tun' and
+             i.get('tag') not in ('system-tun', 'local-proxy') for i in extra),
+             'serverNetwork.inbounds: нужен JSON-массив входов без TUN и зарезервированных тегов.')
+    return extra
+
+
+def inbound_change(engine):
+    n = engine.config.get('serverNetwork', {})
+    if not n.get('enabled'):
+        return False
+    # Public status cannot compare secrets, nor claim to have verified them.
+    if engine.public_only:
+        return False
+    desired = inbounds(engine)
+    if not engine.receipts.get('base-network', {}).get('managed'):
+        _require(not n.get('inbounds'), 'Чужой sing-box не управляется: изменение входов запрещено без managed receipt.')
+        return False
+    current = engine.s.read('/etc/sing-box/config.json', {})
+    return [i for i in current.get('inbounds', []) if i.get('tag') not in ('system-tun', 'local-proxy')] != desired
 
 
 def engine_module(name):
@@ -87,18 +109,26 @@ def install_packages(engine):
     s.run(['apt-get', 'install', '-y', 'sing-box'], change=True, timeout=300)
 
 
-def apply(engine):
+def apply(engine, update=False):
     s = engine.s
-    _require(not s.path('/etc/sing-box/config.json').exists(),
+    _require(update or not s.path('/etc/sing-box/config.json').exists(),
              'Существующий sing-box без TUN: автоматическая замена запрещена; сохраните и проверьте его отдельно.')
     _require(not any(s.path(p).exists() for p in (
         STATE, '/var/lib/remoteagents/lan/pending', '/var/lib/remoteagents/proxy-out/pending',
         '/var/lib/remoteagents/port-leak/pending')), 'Сначала завершите прежнее изменение сети.')
-    data = candidate(engine)  # Resolve secrets/conflicts before installing anything.
+    old_file = s.path('/etc/sing-box/config.json')
+    old = {'text': old_file.read_text(), 'mode': old_file.stat().st_mode & 0o777} if update else None
+    if update:
+        _require(engine.receipts.get('base-network', {}).get('managed'), 'Чужой sing-box не присваивается.')
+        data = json.loads(old['text'])
+        data['inbounds'] = [i for i in data['inbounds'] if i.get('tag') in ('system-tun', 'local-proxy')] + inbounds(engine)
+    else:
+        data = candidate(engine)  # Resolve secrets/conflicts before installing anything.
     was_active = s.active('sing-box')
     was_enabled = s.run(['systemctl', 'is-enabled', '--quiet', 'sing-box'], check=False).returncode == 0
     try:
-        install_packages(engine)
+        if not update:
+            install_packages(engine)
         proxy = engine_module('proxy_out')
         p = engine.config['proxyOut']
         auth = (p.get('login', ''), engine.secret(p['password'], 'proxy-out-password') if p.get('password') else '')
@@ -121,7 +151,7 @@ def apply(engine):
         s.run(['systemctl', 'enable', 'remoteagents-base-network-recover.service'], change=True)
         with s.private_file(json.dumps(data)) as file:
             s.run(['sing-box', 'check', '-c', file])
-        state = {'config': None, 'active': was_active, 'enabled': was_enabled,
+        state = {'config': old, 'active': was_active, 'enabled': was_enabled,
                  'inboundsHash': hashlib.sha256(engine.secret(engine.config['serverNetwork']['inbounds'], 'server-inbounds').encode()).hexdigest() if engine.config['serverNetwork'].get('inbounds') else None,
                  'candidateHash': hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(),
                  'tables': {}, 'rules': {}, 'desired': engine.config.get('serverNetwork'),
@@ -144,7 +174,10 @@ def apply(engine):
         # leave that sample running. No network guard/TUN mutation has begun.
         if not was_active:
             s.run(['systemctl', 'stop', 'sing-box'], check=False, change=True)
-        s.path('/etc/sing-box/config.json').unlink(missing_ok=True)
+        if old:
+            s.write('/etc/sing-box/config.json', old['text'], old['mode'])
+        else:
+            s.path('/etc/sing-box/config.json').unlink(missing_ok=True)
         s.run(['systemctl', 'enable' if was_enabled else 'disable', 'sing-box'], check=False, change=True)
         raise
     try:

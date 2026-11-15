@@ -51,6 +51,39 @@ class BaseTests(unittest.TestCase):
         c.pop('tailscale'); c.pop('telegramGateway')
         return f, c
 
+    def test_managed_inbounds_add_change_remove_and_failed_ssh_rollback(self):
+        f, c = self.fresh()
+        self.assertTrue(f.complete(c)['ok'])
+        original = f.path('/etc/sing-box/config.json').read_text()
+        c['serverNetwork']['inbounds'] = {'secret': 'inputs'}
+        for port in (37091, 37092):
+            values = dict(VALUES, inputs=json.dumps([dict(type='mixed', tag='test', listen='::', listen_port=port)]))
+            first = f.engine(c, values).run('apply')
+            self.assertEqual(first['parts'][0]['state'], 'pending', first)
+            self.assertTrue(f.path(app.base.STATE).exists())
+            with patch.object(app.Engine, 'check_ssh', side_effect=app.Error('SSH refused')):
+                self.assertFalse(f.engine(c, values, ssh_checked=True).run('apply')['ok'])
+            self.assertTrue(f.path(app.base.STATE).exists())
+            app.base.rollback(f.system)
+            self.assertEqual(f.path('/etc/sing-box/config.json').read_text(), original)
+            self.assertEqual(f.engine(c, values).run('apply')['parts'][0]['state'], 'pending')
+            self.assertTrue(f.engine(c, values, ssh_checked=True).run('apply')['ok'])
+            original = f.path('/etc/sing-box/config.json').read_text()
+            self.assertEqual(f.engine(c, values).run('apply')['actions'], [])
+        c['serverNetwork'].pop('inbounds')
+        self.assertEqual(f.engine(c).run('apply')['parts'][0]['state'], 'pending')
+        self.assertTrue(f.engine(c, ssh_checked=True).run('apply')['ok'])
+        self.assertEqual(len(f.read('/etc/sing-box/config.json')['inbounds']), 2)
+
+    def test_foreign_tun_inbounds_are_never_adopted(self):
+        f = self.fake
+        c = config(); c['serverNetwork'] = dict(enabled=True, inbounds={'secret': 'inputs'})
+        values = dict(VALUES, inputs='[]')
+        result = f.engine(c, values).run('apply')
+        self.assertFalse(result['ok'])
+        self.assertIn('Чужой sing-box', result['parts'][0]['summary'])
+        self.assertFalse(any(a[0] == 'systemd-run' for a in f.calls))
+
     def test_initial_activation_needs_later_session_even_with_flag(self):
         f, c = self.fresh()
         first = f.engine(c, ssh_checked=True).run('apply')

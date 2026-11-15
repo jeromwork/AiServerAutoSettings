@@ -549,6 +549,12 @@ class Engine:
             return self.row('internet', 'pending', 'Базовая сеть включена; ждёт нового SSH и проверки входящих; автооткат 5 минут')
         if not sb.get('tun'):
             return self.row('internet', 'blocked', 'sing-box не установлен или нет системного перехвата трафика — нужен базовый сетевой конфиг с правилами сохранения SSH; см. SERVER-APPLY.md')
+        if base.inbound_change(self):
+            if not apply:
+                return self.row('internet', 'change', 'Входы изменятся транзакционно; нужен новый SSH, автооткат 5 минут')
+            with self.s.network_lock():
+                base.apply(self, update=True)
+            return self.row('internet', 'pending', 'Входы изменены; ждёт нового SSH; автооткат 5 минут')
         # Install reply protection before a restart can recreate split TUN routes.
         if apply:
             self.guard_apply()
