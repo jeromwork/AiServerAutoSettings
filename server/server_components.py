@@ -5,6 +5,7 @@ Credentials cross runuser only over stdin; root never writes into user-controlle
 paths. Identity snapshots contain an allowlisted set of files, never project data.
 """
 import json
+import hashlib
 from pathlib import Path
 import re
 
@@ -38,6 +39,7 @@ def hydrate(e):
         saved = e.s.read('/etc/remoteagents/server-apply/recovery.json')
         if saved['config'].get('server', {}).get('login') != e.config.get('server', {}).get('login'):
             return
+        e.managed_secrets = saved['secrets']
         for name in ('disk', 'bridge', 'happier', 'telegram'):
             item = section(e, name)
             old = saved['config'].get('telegramGateway', {}) if name == 'telegram' else saved['config'].get('serverComponents', {}).get(name, {})
@@ -296,6 +298,28 @@ bash "$stage/install.sh" "$@"
     return True
 
 
+def auth_state(e, kind, item, supplied):
+    """Checkpoint native OAuth refreshes; a new configured seed still wins."""
+    ref = item['auth']['secret']
+    digest = lambda value: hashlib.sha256(value.encode()).hexdigest()
+    old = e.receipts.get('agent-auth-' + kind, {})
+    cached = e.managed_secrets.get(ref, '')
+    managed = old.get('ref') == ref and (digest(supplied) == old.get('configuredHash') or cached and supplied == cached)
+    current = io(e, kind) if e.code_current() else {}
+    name = e.module_files.FIXED[kind][0]
+    wanted = (cached or supplied) if managed else supplied
+    if managed and current.get(name):
+        try:
+            parsed = json.loads(current[name])
+            if isinstance(parsed, dict) and parsed:
+                wanted = current[name]
+        except ValueError:
+            pass
+    stamp = old if managed else {'ref': ref, 'configuredHash': digest(supplied)}
+    e.secrets[ref] = wanted
+    return wanted, current, stamp
+
+
 def agents(e, kind, apply):
     item = e.config['agents'][kind]
     if not item.get('enabled'):
@@ -327,9 +351,10 @@ def agents(e, kind, apply):
             if not isinstance(json.loads(auth), dict):
                 raise ValueError('Invalid agent auth JSON')
             name = e.module_files.FIXED[kind][0]
-            current = io(e, kind)
+            auth, current, stamp = auth_state(e, kind, item, auth)
             if current.get(name) != auth:
                 io(e, kind, 'identity', {name: auth})
+            e.save_receipt('agent-auth-' + kind, stamp)
         if kind == 'claude' and token:
             if not re.fullmatch(r'[A-Za-z0-9._~+/-]+={0,2}', token):
                 raise ValueError('Invalid Claude token')
@@ -351,7 +376,7 @@ def agents(e, kind, apply):
     if not apply and (auth or token):
         good = True
         if auth:
-            current = io(e, kind) if e.code_current() else {}
+            auth, current, _ = auth_state(e, kind, item, auth)
             good = current.get(e.module_files.FIXED[kind][0]) == auth
         if token:
             envfile = e.s.path(home / '.config/remoteagents/claude.env')
@@ -372,6 +397,7 @@ def agents(e, kind, apply):
             if current.get(e.module_files.FIXED[kind][0]):
                 ref = item.setdefault('auth', {'secret': 'agent-' + kind + '-auth'})
                 e.secrets[ref['secret']] = current[e.module_files.FIXED[kind][0]]
+                e.save_receipt('agent-auth-' + kind, {'ref': ref['secret'], 'configuredHash': hashlib.sha256(e.secrets[ref['secret']].encode()).hexdigest()})
     return e.row('agents:' + kind, 'ready', 'CLI установлен; авторизация доступна')
 
 

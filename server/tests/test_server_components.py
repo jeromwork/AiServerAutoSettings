@@ -158,6 +158,26 @@ class ComponentsTests(unittest.TestCase):
         self.assertTrue(app.module('server_recovery').reconcile(app, self.f.system))
         self.assertEqual(file.read_text(), auth)
 
+    def test_native_oauth_refresh_is_saved_and_stale_seed_does_not_overwrite_it(self):
+        self.c.pop('proxyOut')
+        self.c['agents'] = {'claude': {'enabled': True, 'auth': {'secret': 'oauth'}}}
+        seed = '{"claudeAiOauth":{"accessToken":"SEED"}}'
+        refreshed = '{"claudeAiOauth":{"accessToken":"REFRESHED"}}'
+        rotated = '{"claudeAiOauth":{"accessToken":"NEW_CONFIGURED_LOGIN"}}'
+        self.assertTrue(self.f.complete(self.c, {'oauth': seed})['ok'])
+        file = self.f.path('/home/worker/.claude/.credentials.json')
+        file.write_text(refreshed)
+        self.assertTrue(app.module('server_recovery').reconcile(app, self.f.system))
+        self.assertEqual(file.read_text(), refreshed)
+        self.assertEqual(self.f.read('/etc/remoteagents/server-apply/recovery.json')['secrets']['oauth'], refreshed)
+        self.assertTrue(self.f.engine(self.c, {'oauth': seed}).run('status')['ok'])
+        self.assertEqual(self.f.engine(self.c, {'oauth': seed}).run('apply')['actions'], [])
+        file.write_text('{broken')
+        self.assertTrue(app.module('server_recovery').reconcile(app, self.f.system))
+        self.assertEqual(file.read_text(), refreshed)
+        self.assertTrue(self.f.engine(self.c, {'oauth': rotated}).run('apply')['ok'])
+        self.assertEqual(file.read_text(), rotated)
+
     def test_version_cannot_be_an_installer_option(self):
         for version in ('--uninstall', '--version', '0.2.17 --uninstall'):
             self.c['serverComponents'] = {'happier': {'enabled': True, 'version': version}}

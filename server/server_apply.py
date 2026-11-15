@@ -355,6 +355,7 @@ class Engine:
         self.rows = []
         self.receipts = self.s.read('/var/lib/remoteagents/server-apply/receipts.json', {})
         self.module_files = component_files
+        self.managed_secrets = {}
         components.hydrate(self)
 
     def row(self, part, state, message, **fields):
