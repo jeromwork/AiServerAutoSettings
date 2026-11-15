@@ -996,8 +996,9 @@ class ReconnectAndReplaceTests(unittest.TestCase):
                 with patch.object(lan, 'STATE', state), patch.object(lan, 'profile', return_value=data), \
                      patch.object(lan, 'prestart'), patch.object(lan, 'route_ops'), patch.object(lan, 'apply_dns'), \
                      patch.object(lan, 'pushed_routes', return_value=[]), patch.object(lan, 'event') as event, \
-                     patch.dict(os.environ, {'dev': 'tun-lan-office'}):
+                     patch.dict(os.environ, {'dev': 'tun-lan-office'}), patch.object(lan, 'run') as commands:
                     lan.hook('office')
+                    commands.assert_called_once_with(['sysctl', '-qw', 'net.ipv6.conf.tun-lan-office.disable_ipv6=1'])
                 message = event.call_args.args[1]
                 if pending:
                     self.assertIn('ожидается test', message)

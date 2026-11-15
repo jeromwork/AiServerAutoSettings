@@ -46,6 +46,7 @@ def module(name):
 
 lan = module('lan_vpn')
 config_crypto = module('remoteagents_config')
+base = module('base_network')
 
 
 def strict_json(text):
@@ -133,6 +134,9 @@ def validate(config):
     if proxy:
         if 'exitIp' in proxy:
             ipaddress.ip_address(proxy['exitIp'])
+    network = config.get('serverNetwork', {})
+    if network.get('tunAddress'):
+        ipaddress.IPv4Interface(network['tunAddress'])
     names = set()
     for item in config.get('lan', []):
         lan.name_ok(item['name'])
@@ -142,8 +146,11 @@ def validate(config):
         if item.get('serverFingerprint'):
             lan.normalize_server_fingerprint(item['serverFingerprint'])
         require(bool(item.get('dnsDomain')) == bool(item.get('dnsServer')), 'Для ЛВС нужны оба поля dnsDomain/dnsServer.')
-        if item.get('host'):
-            ipaddress.IPv4Address(item['host'])
+        for key in ('host', 'testHost'):
+            if item.get(key):
+                ipaddress.IPv4Address(item[key])
+        require(not (item.get('host') and item.get('testHost') and item['host'] != item['testHost']), 'host и testHost ЛВС отличаются.')
+        require(not (item.get('port') and item.get('testPort') and item['port'] != item['testPort']), 'port и testPort ЛВС отличаются.')
 
 
 def read_input(path, stream, secret_stdin=False):
@@ -193,6 +200,9 @@ class System:
             self.actions.append(args[0] + ' ' + (args[1] if len(args) > 1 else ''))
         try:
             environment = {k: v for k, v in os.environ.items() if k.lower() not in ('http_proxy', 'https_proxy', 'all_proxy', 'no_proxy')}
+            if args[0] == 'apt-get':
+                environment['DEBIAN_FRONTEND'] = 'noninteractive'
+                environment['NEEDRESTART_MODE'] = 'l'
             result = self.runner(args, input=input, text=True, capture_output=True, timeout=timeout, env=environment)
         except FileNotFoundError:
             if not check:
@@ -300,6 +310,8 @@ def nft_normal(text):
     # Kernel pretty-printing uses padded hexadecimal marks and named priorities.
     text = re.sub(r'0x[0-9a-fA-F]+', lambda m: hex(int(m[0], 16)), text)
     text = text.replace('priority mangle', 'priority -150')
+    text = re.sub(r'priority filter\s*-\s*5', 'priority -5', text)
+    text = text.replace('meta l4proto ipv6-icmp ', '')
     text = re.sub(r'(icmpv6 type|ct state)\s*\{([^{}]+)\}',
                   lambda m: m[1] + ' ' + ','.join(sorted(v.strip() for v in m[2].split(','))), text)
     text = re.sub(r'ct state\s+([a-z,]+)', lambda m: 'ct state ' + ','.join(sorted(m[1].split(','))), text)
@@ -496,7 +508,23 @@ class Engine:
 
     def egress(self, apply):
         proxy = self.config.get('proxyOut', {})
+        if not proxy:
+            return self.row('internet', 'ready', 'proxyOut не задан; выход не меняется')
         sb = self.singbox()
+        if self.s.path(base.STATE).exists():
+            if apply and self.ssh_checked:
+                with self.s.network_lock():
+                    base.confirm(self)
+            else:
+                return self.row('internet', 'pending', 'Базовая сеть включена; ждёт нового SSH и проверки входящих; автооткат 5 минут')
+        if not sb.get('tun') and self.config.get('serverNetwork', {}).get('enabled'):
+            require(not self.s.path('/etc/sing-box/config.json').exists(), 'Существующий sing-box без TUN не заменяется автоматически; проверьте его и наличие jq.')
+            base.candidate(self)
+            if not apply:
+                return self.row('internet', 'change', 'Будут установлены sing-box, TUN, защита ответов и IPv6; автооткат до проверки нового SSH')
+            with self.s.network_lock():
+                base.apply(self)
+            return self.row('internet', 'pending', 'Базовая сеть включена; ждёт нового SSH и проверки входящих; автооткат 5 минут')
         if not sb.get('tun'):
             return self.row('internet', 'blocked', 'sing-box не установлен или нет системного перехвата трафика — нужен базовый сетевой конфиг с правилами сохранения SSH; см. SERVER-APPLY.md')
         # Install reply protection before a restart can recreate split TUN routes.
@@ -543,7 +571,7 @@ class Engine:
     def code_files(self):
         target = '/usr/local/lib/remoteagents/server/'
         files = {}
-        for name in ('server_apply.py', 'server-apply.sh', 'lan_vpn.py', 'lan-vpn.sh', 'proxy_out.py', 'proxy-out.sh', 'remoteagents_config.py'):
+        for name in ('server_apply.py', 'server-apply.sh', 'lan_vpn.py', 'lan-vpn.sh', 'proxy_out.py', 'proxy-out.sh', 'remoteagents_config.py', 'base_network.py', 'lan-config.schema.json'):
             files[target + name] = ((self.s.source / name).read_bytes(), 0o755 if name.endswith('.sh') else 0o644)
         schema = self.s.source / 'config.paste.schema.json'
         if not schema.exists():
@@ -680,7 +708,7 @@ class Engine:
             return self.row(part, 'ready', 'уже так; профиль и параметры совпадают; служба работает')
         if not apply:
             return self.row(part, 'change', 'будут установлены профиль ЛВС и параметры; затем проверка хоста и нового SSH')
-        require(item.get('host'), 'Для проверки ЛВС укажите host (IPv4) и при необходимости port.')
+        require(item.get('testHost', item.get('host')), 'Для проверки ЛВС укажите testHost (IPv4) и при необходимости testPort.')
         with self.s.private_file(profile) as file:
             args = ['bash', self.s.source / 'lan-vpn.sh', 'add', name, file, '--ip-check-url', item.get('checkUrl', self.config['proxyOut']['checkUrl'])]
             if existing:
@@ -716,10 +744,11 @@ class Engine:
         return None
 
     def lan_test(self, item):
-        require(item.get('host'), 'Для проверки ЛВС укажите host.')
-        args = ['bash', self.s.source / 'lan-vpn.sh', 'test', item['name'], item['host']]
-        if item.get('port'):
-            args.append(item['port'])
+        host, port = item.get('testHost', item.get('host')), item.get('testPort', item.get('port'))
+        require(host, 'Для проверки ЛВС укажите testHost.')
+        args = ['bash', self.s.source / 'lan-vpn.sh', 'test', item['name'], host]
+        if port:
+            args.append(port)
         self.s.run(args, change=True)
 
     def check_ssh(self, name):
@@ -831,7 +860,7 @@ class Engine:
                 self.s.run(['curl', '--disable', '--noproxy', '*', '--fail', '--silent', '--max-time', '30', '--output', file, base + suffix])
                 self.s.write(path, file.read_bytes(), 0o644)
         self.s.run(['apt-get', 'update'], change=True, timeout=300)
-        self.s.run(['apt-get', 'install', '-y', 'tailscale'], change=True, timeout=300)
+        self.s.run(['apt-get', 'install', '-y', '-o', 'Dpkg::Options::=--force-confold', 'tailscale'], change=True, timeout=300)
 
     def telegram(self, item, apply):
         if 'enabled' not in item:
@@ -856,6 +885,8 @@ class Engine:
         # readable installed copy, not the caller's temporary checkout.
         self.install_code()
         env = ['TG_GW_PORT=' + str(item['port'])] if item.get('port') else []
+        if self.config.get('server', {}).get('address'):
+            env.append('TG_GW_PUBLIC_HOST=' + self.config['server']['address'])
         cmd = self.user_cmd('env', *env, 'bash', self.s.path('/usr/local/lib/remoteagents/server/tg-gateway/install.sh'))
         self.s.run(cmd, change=True, timeout=90)
         require(self.s.run(self.user_cmd('bash', self.s.path('/usr/local/lib/remoteagents/server/tg-gateway/install.sh'), '--check'), check=False).returncode == 0,
@@ -892,27 +923,58 @@ class Engine:
                         self.s.actions.append('удалён ' + old)
         self.row('agent', 'ready', 'права агента: ' + mode)
 
+    def sshd(self, apply):
+        path = '/etc/ssh/sshd_config.d/10-remoteagents-startups.conf'
+        wanted = 'LoginGraceTime 30\nMaxStartups 30:30:150\n'
+        file = self.s.path(path)
+        old = file.read_bytes() if file.exists() else None
+        mode = file.stat().st_mode & 0o777 if file.exists() else 0o644
+        def effective():
+            r = self.s.run(['/usr/sbin/sshd', '-T'], check=False)
+            fields = dict(line.split(None, 1) for line in r.stdout.splitlines() if ' ' in line)
+            return r.returncode == 0 and fields.get('logingracetime') == '30' and fields.get('maxstartups') == '30:30:150'
+        same = old == wanted.encode() and effective()
+        if same or not apply:
+            return self.row('sshd', 'ready' if same else 'change', 'уже так; SSH: LoginGraceTime 30, MaxStartups 30:30:150' if same else 'будут настроены лимиты подключений SSH с проверкой и reload')
+        try:
+            self.s.write(path, wanted, 0o644)
+            self.s.run(['/usr/sbin/sshd', '-t'])
+            require(effective(), 'sshd не читает drop-in до Match или параметры перекрыты; прежний файл восстановлен.')
+            unit = 'ssh.service' if self.s.active('ssh.service') else 'sshd.service'
+            self.s.run(['systemctl', 'reload', unit], change=True)
+        except Exception:
+            if old is None:
+                file.unlink(missing_ok=True)
+            else:
+                self.s.write(path, old, mode)
+            self.s.run(['/usr/sbin/sshd', '-t'], check=False)
+            raise
+        return self.row('sshd', 'ready', 'SSH: LoginGraceTime 30, MaxStartups 30:30:150; конфиг проверен и перечитан')
+
     def part(self, name, fn):
         try:
             return fn()
         except Missing as exc:
             return self.row(name, 'waiting', 'ждёт секрет «' + exc.name + '»', missing=[exc.name])
         except Exception as exc:
-            return self.row(name, 'error', str(exc) if isinstance(exc, Error) else 'Проверка/команда не выполнена; детали скрыты.')
+            return self.row(name, 'error', str(exc) if isinstance(exc, (Error, base.Error, lan.Error)) else 'Проверка/команда не выполнена; детали скрыты.')
 
     def run(self, command):
         apply = command == 'apply'
         ready = self.part('internet', lambda: self.egress(apply))
         parts = [('inbound', lambda: self.inbound(apply)), ('ipv6', lambda: self.ipv6(apply)),
                  ('egressWatch', lambda: self.watch(apply))]
+        if not self.config.get('proxyOut'):
+            parts = []
         parts += [('lan:' + item['name'], lambda item=item: self.lan_part(item, apply)) for item in self.config.get('lan', [])]
         if 'tailscale' in self.config:
             parts.append(('tailscale', lambda: self.tailscale(self.config['tailscale'], apply)))
         if 'telegramGateway' in self.config:
             parts.append(('telegramGateway', lambda: self.telegram(self.config['telegramGateway'], apply)))
         parts.append(('agent', lambda: self.sudo(apply)))
+        parts.append(('sshd', lambda: self.sshd(apply)))
         for name, fn in parts:
-            if apply and ready:
+            if apply and ready and self.config.get('proxyOut'):
                 ready, reason = self.egress_check()
                 if not ready:
                     self.rows[0].update(state='blocked', summary=reason)
@@ -922,6 +984,10 @@ class Engine:
                 result = self.part(name, fn)
                 if apply and name == 'inbound' and not result:
                     ready = False
+        if apply and all(r['state'] == 'ready' for r in self.rows):
+            public = {k: v for k, v in self.config.items() if k in ('serverNetwork', 'proxyOut', 'lan', 'tailscale', 'telegramGateway', 'agent')}
+            self.s.write('/var/lib/remoteagents-status/server-config.json', json.dumps(public, ensure_ascii=False, sort_keys=True) + '\n', 0o644)
+            os.chmod(self.s.path('/var/lib/remoteagents-status'), 0o755)
         if apply:
             self.part('log', lambda: self.s.audit(self.rows))
         return {'schema': 1, 'command': command, 'parts': self.rows, 'actions': list(self.s.actions),
@@ -935,6 +1001,8 @@ class Missing(Error):
 
 def egress_watch(engine):
     # Protect replies before any restart can recreate the old split routes.
+    if engine.s.path(base.STATE).exists():
+        return False  # Recovery timer owns this first activation until external confirmation.
     before = len(engine.s.actions)
     inbound_ok = False
     try:
@@ -1041,7 +1109,7 @@ def main(argv=None):
         print(json.dumps(result, ensure_ascii=False))
     else:
         for row in result['parts']:
-            labels = {'inbound': 'Ответы на входящие', 'ipv6': 'IPv6', 'internet': 'Выход в интернет', 'egressWatch': 'Сторож выхода', 'tailscale': 'Tailscale', 'telegramGateway': 'Шлюз Telegram', 'agent': 'Права агента', 'log': 'Журнал'}
+            labels = {'inbound': 'Ответы на входящие', 'ipv6': 'IPv6', 'internet': 'Выход в интернет', 'egressWatch': 'Сторож выхода', 'tailscale': 'Tailscale', 'telegramGateway': 'Шлюз Telegram', 'agent': 'Права агента', 'log': 'Журнал', 'sshd': 'Настройка SSH'}
             label = 'ЛВС «' + row['part'][4:] + '»' if row['part'].startswith('lan:') else labels.get(row['part'], row['part'])
             print(label + ': ' + row['summary'])
         if args.command == 'apply':

@@ -207,7 +207,7 @@ def settings(path=None):
     require(isinstance(c, dict) and c.get('schema') == 1 and c.get('version') == 1, 'Неизвестная схема настроек выдачи')
     allowed = {'schema', 'version', '$schema', 'serverAddress', 'serverPort', 'hostKeys', 'hostKeyFiles', 'workerUser',
                'workerAuthorizedKeys', 'stateDir', 'syncFile', 'nodeCatalog', 'routes', 'catalogFile', 'vpnBootstrap',
-               'happier', 'authLog'}
+               'happier', 'authLog', 'serverConfig'}
     unknown = set(c) - allowed
     require(not unknown, 'Неизвестные поля в настройках выдачи: ' + ', '.join(sorted(unknown)))
     require(isinstance(c.get('workerUser'), str) and USER_RE.fullmatch(c['workerUser']) and c['workerUser'] != 'root', 'workerUser: рабочий пользователь (не root)')
@@ -785,6 +785,32 @@ def happier_same(c, wanted):
     return None
 
 
+def server_sections(c):
+    """Public desired state, saved only after a fully verified server apply.
+
+    Never scrape private profiles into an invitation or copy secret values.
+    The owner transfers the separately named secrets when cloning a VPS.
+    """
+    path = Path(c.get('serverConfig', '/var/lib/remoteagents-status/server-config.json'))
+    if not path.exists():
+        require('serverConfig' not in c, 'Нет серверного снимка serverConfig; экспорт не выдан.')
+        return {}
+    require(path.is_absolute(), 'serverConfig: нужен абсолютный путь.')
+    data = json.loads(read_trusted(path, 'Серверный снимок'))
+    keys = {'serverNetwork', 'proxyOut', 'lan', 'tailscale', 'telegramGateway', 'agent'}
+    require(isinstance(data, dict) and not set(data) - keys, 'Неверный серверный снимок; значения скрыты.')
+    # The exact same published schema rejects inline credentials/unknown fields.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('server_apply_export', Path(__file__).with_name('server_apply.py'))
+    reconciler = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(reconciler)
+    try:
+        reconciler.validate({'kind': CONFIG_KIND, 'schema': 1, **data})
+    except Exception:
+        raise Error('Серверный снимок не соответствует схеме; значения скрыты.') from None
+    return data
+
+
 def export(c, args, out=sys.stdout, err=sys.stderr):
     name = clean_name(args.name)
     require(re.fullmatch(r'same(:.+)?|new(:.+)?', args.happier or ''), '--happier: same, same:<подпись или id>, new или new:Название')
@@ -794,6 +820,7 @@ def export(c, args, out=sys.stdout, err=sys.stderr):
     master = master_password(args)
     values = {}
     server, vpn = common_sections(c, values, args.vpn)
+    deployment = server_sections(c)
     ident = secrets.token_hex(8)
     private, public = keypair(c, ident)
     values = {'server-key': private, **values}
@@ -814,6 +841,19 @@ def export(c, args, out=sys.stdout, err=sys.stderr):
     config['bridge'] = {'enabled': True, 'allowShell': False}
     if folders is not None:
         config['disk'] = {'folders': folders}
+    config.update(deployment)
+    # Empty named slots make missing deployment secrets explicit in the receiving program.
+    def refs(node):
+        if isinstance(node, dict):
+            if 'secret' in node:
+                values.setdefault(node['secret'], '')
+            else:
+                for child in node.values():
+                    refs(child)
+        elif isinstance(node, list):
+            for child in node:
+                refs(child)
+    refs(deployment)
     config['secrets'] = protect(values, master) if master else values
     text = json.dumps(config, ensure_ascii=False, indent=2) + '\n'
     target = folder = None

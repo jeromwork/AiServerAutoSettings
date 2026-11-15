@@ -32,7 +32,7 @@ TABLE = 'remoteagents_lan'
 # World-readable, secret-free status for the settings window (no sudo needed to read).
 PUBLIC = Path('/var/lib/remoteagents-status')
 # Every owner-confirmed network transaction; only one may wait for confirm at a time.
-PENDING = (Path('/var/lib/remoteagents/lan/pending'), Path('/var/lib/remoteagents/port-leak/pending'),
+PENDING = (Path('/var/lib/remoteagents/base-network/pending'), Path('/var/lib/remoteagents/lan/pending'), Path('/var/lib/remoteagents/port-leak/pending'),
            Path('/var/lib/remoteagents/proxy-out/pending'))
 MARKER = '---remoteagents-stdin---'
 PRIVATE = tuple(ipaddress.ip_network(s) for s in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
@@ -819,6 +819,9 @@ def hook(name):
     name_ok(name)
     require(os.environ.get('dev') == 'tun-lan-' + name, 'Неожиданный интерфейс OpenVPN.')
     prestart(name)
+    # IPv4-only LANs: Linux otherwise adds an IPv6 multicast/link-local route
+    # when OpenVPN creates the TUN, even without any pushed IPv6 options.
+    run(['sysctl', '-qw', 'net.ipv6.conf.tun-lan-' + name + '.disable_ipv6=1'])
     data = profile(name)
     found = networks(data['static'] + pushed_routes(os.environ))
     require(found, 'ЛВС не прислала частных подсетей; задайте --subnet.')

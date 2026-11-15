@@ -24,6 +24,7 @@
     "stateDir": { "$ref": "#/$defs/path", "description": "Записи выдач и журнал без секретов; по умолчанию /var/lib/remoteagents/config-export (root) или ~/.local/state/remoteagents/config-export" },
     "syncFile": { "$ref": "#/$defs/path", "description": "Снимок автообновления; по умолчанию ~рабочего/.config/remoteagents/config-sync.json" },
     "nodeCatalog": { "$ref": "#/$defs/path", "description": "Реестр моста; по умолчанию ~рабочего/.local/share/remote-agents-nodes" },
+    "serverConfig": { "$ref": "#/$defs/path", "description": "Публичный снимок серверных разделов после server-apply; секреты остаются именованными ссылками" },
     "authLog": { "type": "array", "items": { "$ref": "#/$defs/path" }, "description": "Журналы sshd для «последнего входа»; по умолчанию journalctl (нужен root или группа adm/systemd-journal)" },
     "catalogFile": { "$ref": "#/$defs/path", "description": "Общий каталог связи; по умолчанию ~рабочего/.config/remoteagents/transport-catalog.json" },
     "routes": {

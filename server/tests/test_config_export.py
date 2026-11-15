@@ -143,6 +143,28 @@ class ConfigExportTests(unittest.TestCase):
     def lines(self):
         return self.e.auth.read_text().splitlines()
 
+    def test_export_includes_verified_server_sections_and_named_missing_secrets(self):
+        from test_server_apply import config as full_config
+        desired = full_config()
+        desired.pop('server'); desired.pop('kind'); desired.pop('schema')
+        desired['serverNetwork'] = {'enabled': True, 'inboundPorts': [22, 443]}
+        path = self.e.dir / 'server-desired.json'
+        path.write_text(json.dumps(desired)); path.chmod(0o644)
+        self.e.c['serverConfig'] = str(path); self.e.write()
+        exported, result = self.e.export()
+        for k, v in desired.items():
+            self.assertEqual(exported[k], v)
+        self.assertEqual(exported['secrets']['lan-office-ovpn'], '')
+        self.assertEqual(exported['secrets']['proxy-out-password'], '')
+        self.assertNotIn('LAN_PASSWORD_SENTINEL', result.stdout.decode())
+        desired['proxyOut']['password'] = 'INLINE_SECRET_SENTINEL'
+        path.write_text(json.dumps(desired))
+        before = self.lines()
+        rejected = self.e.cli('export', '--name', 'test')
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertNotIn(b'INLINE_SECRET_SENTINEL', rejected.stderr)
+        self.assertEqual(self.lines(), before)
+
     def test_export_labelled_key_permissions_and_format(self):
         self.e.auth.write_text('ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExisting existing@host')  # без перевода строки
         self.e.auth.chmod(0o644)

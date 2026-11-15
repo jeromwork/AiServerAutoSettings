@@ -82,6 +82,7 @@ BOM и переводы строк CRLF допустимы. Комментари
 | `proxyOut.type`, `.server`, `.port` | Тип (`socks`/`http`), адрес, порт серверного выхода в интернет; обязательны, если раздел задан. |
 | `proxyOut.login`, `.password` | Публичный логин и ссылка на пароль серверного прокси. |
 | `proxyOut.exitIp` | Ожидаемый внешний IP сервера. Необязателен, по умолчанию `proxyOut.server`; для DNS-имени сервера прокси задайте IP явно. |
+| `serverNetwork` | Первоначальное создание системного sing-box: `enabled`, свободный `tunAddress`, `tunName`, `inboundPorts`, ссылка `inbounds` на JSON-массив серверных входов. [Порядок и откат](SERVER-APPLY.md). |
 | `proxyOut.ipv6` | `"block"` запрещает исходящий IPv6, сохраняя входящие ответы, loopback и ICMPv6 для соседей/PMTU; `"allow"` явно разрешает прямой IPv6. Если поле не задано, `plan/status` предупреждают и остальные части устанавливаются; прежний запрет не снимается. |
 | `proxyOut.checkUrl` | Собственный HTTPS URL проверки выхода; подтверждение/откат остаются в сетевом движке. |
 | `lan` | До 64 определений локальных сетей. |
@@ -308,3 +309,17 @@ timeout 60 ~/.dotnet/dotnet run --project app/launcher/tests/PortableTests.cspro
 Это отдельная точка входа в существующем PortableTests-проекте; общий `tests/run.sh` выполняет координатор.
 Тесты используют только временные каталоги и искусственные секреты, не читают реальные доступы и не запускают SSH.
 WinForms, DPAPI и PowerShell 5.1 требуют отдельной проверки на Windows-стенде.
+
+## Автоматическое серверное развёртывание
+
+`serverNetwork.enabled: true` разрешает первое создание sing-box на чистом VPS.
+`proxyOut` задаёт `type: socks|http`, адрес/порт и ссылку на пароль, `exitIp`, HTTPS `checkUrl`,
+явное `ipv6: block|allow`. `serverNetwork.inbounds` — ссылка на секретный JSON-массив
+дополнительных входов sing-box; `inboundPorts` — доступные компьютеру TCP-порты для проверки.
+`lan[].testHost/testPort` — предпочтительные имена проверки; `host/port` читаются как алиасы.
+`lan[].auth` ссылается на JSON-строку username/password, профиль `ovpn` — отдельный секрет.
+EXE передаёт все серверные секреты через in-memory pipe → stdin SSH; enc1 открывается
+приложением прежним механизмом. Секреты не попадают в RequestFile, argv или журнал.
+
+[SERVER-APPLY.md](SERVER-APPLY.md) описывает plan/status/apply, новое SSH, автоподтверждение,
+ограничения существующего sing-box, sshd и экспорт публичного серверного снимка.

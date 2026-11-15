@@ -91,8 +91,8 @@ class Fake:
         if self.fail and self.fail in args:
             return subprocess.CompletedProcess(args, 1, AUTH_PASS, TS_KEY)
         if args[0] == 'jq':
-            out = json.dumps({'final': self.sb['route']['final'], 'tun': self.sb['inbounds'],
-                              'proxy': [{k: v for k, v in o.items() if k in ('type', 'server', 'server_port')} for o in self.sb['outbounds']]})
+            out = json.dumps({'final': self.sb.get('route', {}).get('final'), 'tun': self.sb.get('inbounds', []),
+                              'proxy': [{k: v for k, v in o.items() if k in ('type', 'server', 'server_port')} for o in self.sb['outbounds'] if o.get('tag') == 'proxy-out']})
         elif args[0] == 'python3' and '-c' in args:
             data = json.loads(kw['input'])
             o = self.sb['outbounds'][0]
@@ -133,6 +133,8 @@ class Fake:
                 out = json.dumps([{'dst': 'default', 'dev': 'eth0'}] if self.v6 else [])
             else:
                 out = json.dumps([{'dev': self.iface, 'table': 254}])
+        elif args[0] == '/usr/sbin/sshd' and '-T' in args:
+            out = 'logingracetime 30\nmaxstartups 30:30:150\n' if self.path('/etc/ssh/sshd_config.d/10-remoteagents-startups.conf').exists() else 'logingracetime 120\nmaxstartups 10:30:100\n'
         elif args[0] == 'ss':
             out = '0 0 1.1.1.1:22 9.9.9.9:12345\n'
         elif args[0] == 'curl':
@@ -154,7 +156,7 @@ class Fake:
             out = TS_KEY  # A malicious child output must never be forwarded.
         elif args[0] == 'dpkg-query':
             out, code = ('install ok installed', 0) if self.ts_installed else ('', 1)
-        elif args[:2] == ['apt-get', 'install']:
+        elif args[:2] == ['apt-get', 'install'] and 'tailscale' in args:
             self.defaults_at_install = self.path('/etc/default/tailscaled').read_text()
             self.ts_installed = True
         elif args[0] == 'runuser':
