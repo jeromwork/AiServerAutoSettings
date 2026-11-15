@@ -448,6 +448,18 @@ class FailingRoute:
         self.server.server_close()
 
 
+class FakeClock:
+    """Часы, которые двигает только sleep: ожидания в тестах не тратят реального времени и считаются точно."""
+    def __init__(self, now=0.0):
+        self.now = now
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
 class FakeConnections:
     """Из REST Syncthing — только то, что трогает watch_connections: счётчики соединений устройств и их пауза."""
     def __init__(self):
@@ -455,6 +467,8 @@ class FakeConnections:
         self.calls = []
         self.resume_failures = []  # исключения, которые resume бросит по очереди
         self.pause_closes = True   # False — движок «не закрыл» соединения на паузе
+        self.reads = 0             # сколько раз прочитаны соединения; on_read(номер) срабатывает перед ответом
+        self.on_read = None
 
     def add(self, device_id, name, *inbound):
         """Устройство с соединениями, получившими столько байт; без счётчиков — не подключено."""
@@ -467,6 +481,9 @@ class FakeConnections:
     def __call__(self, route, method='GET', body=None):
         self.calls.append((method, route))
         if (method, route) == ('GET', 'system/connections'):
+            self.reads += 1
+            if self.on_read:
+                self.on_read(self.reads)
             connections = {}
             for device_id, d in self.devices.items():
                 infos = [dict(address=a, startedAt=at, inBytesTotal=n) for a, at, n in d['conns']] if d['connected'] else [
@@ -1293,9 +1310,12 @@ class StaleConnectionTests(unittest.TestCase):
     DEVICE = 'AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG-HHHHHHH'
     OTHER = 'ZZZZZZZ-YYYYYYY-XXXXXXX-WWWWWWW-VVVVVVV-UUUUUUU-TTTTTTT-SSSSSSS'
 
-    def check(self, ns, engine, now):
+    def check(self, ns, engine, now=None, clock=None):
+        """Один запуск проверки; now — «время» наблюдения (без него берутся монотонные часы clock)."""
+        clock = clock or FakeClock()
         stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr), mock.patch('time.sleep'):
+        with contextlib.redirect_stderr(stderr), mock.patch('time.sleep', clock.sleep), \
+                mock.patch('time.monotonic', clock.monotonic):
             ns['watch_connections'](engine, now)
         return stderr.getvalue()
 
@@ -1443,16 +1463,69 @@ class StaleConnectionTests(unittest.TestCase):
             self.assertEqual(engine.posts(), [])
             self.assertNotEqual(self.check(ns, engine, 1000 + limit), '')
 
-    def test_clock_going_backwards_restarts_the_silence_instead_of_stalling_it(self):
+    def test_restarted_time_counter_restarts_the_silence_instead_of_stalling_it(self):
         with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
             limit = ns['STALE_AFTER_S']
             engine = FakeConnections()
             engine.add(self.DEVICE, 'Computer', 8)
             self.check(ns, engine, 10_000)
-            self.assertEqual(self.check(ns, engine, 500), '')  # часы ушли назад: молчание не может быть «отрицательным»
+            # Сервер перезагрузили: монотонный счётчик начался заново, отметка «из будущего» не может давать молчание.
+            self.assertEqual(self.check(ns, engine, 500), '')
             self.assertEqual(self.check(ns, engine, 500 + limit - 1), '')
             self.assertEqual(engine.posts(), [])
             self.assertNotEqual(self.check(ns, engine, 500 + limit), '')
+
+    def test_system_clock_jumps_do_not_make_a_live_device_silent(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            limit = ns['STALE_AFTER_S']
+            engine = FakeConnections()
+            engine.add(self.DEVICE, 'Computer', 8)
+            clock = FakeClock(5000)
+            self.assertEqual(self.check(ns, engine, clock=clock), '')
+            clock.now += 2
+            with mock.patch('time.time', return_value=time.time() + 10 * limit):  # NTP или ручной перевод часов вперёд
+                self.assertEqual(self.check(ns, engine, clock=clock), '')
+            self.assertEqual(engine.posts(), [])
+            clock.now += limit  # а настоящее молчание по-прежнему замечается
+            self.assertNotEqual(self.check(ns, engine, clock=clock), '')
+            self.assertEqual(len(engine.posts()), 2)
+
+    def test_device_that_came_alive_or_was_paused_by_the_owner_before_the_action_is_left_alone(self):
+        for what in ('came alive', 'paused by the owner'):
+            with self.subTest(what), tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+                limit = ns['STALE_AFTER_S']
+                engine = FakeConnections()
+                engine.add(self.DEVICE, 'Computer', 8)
+                self.check(ns, engine, 1000)
+
+                def interfere(read):
+                    if read == 2:  # свежая сверка перед паузой; чтение 1 — снимок, по которому принято решение
+                        if what == 'came alive':
+                            engine.devices[self.DEVICE]['conns'][0][2] += 8
+                        else:
+                            engine.devices[self.DEVICE].update(paused=True, connected=False)
+
+                engine.reads, engine.on_read = 0, interfere
+                self.assertEqual(self.check(ns, engine, 1000 + limit), '')
+                self.assertEqual(engine.posts(), [])
+                self.assertEqual(engine.devices[self.DEVICE]['paused'], what == 'paused by the owner')
+                engine.on_read = None
+                # Ожившее устройство получает свежий отсчёт молчания, а не лечение на следующем же запуске.
+                self.assertEqual(self.check(ns, engine, 1000 + limit + 2), '')
+                self.assertEqual(engine.posts(), [])
+
+    def test_waiting_for_the_disconnect_is_bounded_by_time_not_by_requests(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            engine = FakeConnections()
+            engine.pause_closes = False  # соединения не закрываются, а REST медленный: каждое чтение почти 3 с
+            engine.add(self.DEVICE, 'Computer', 8)
+            clock = FakeClock()
+            self.check(ns, engine, 1000, clock)
+            engine.reads, engine.on_read = 0, lambda read: setattr(clock, 'now', clock.now + 2.9)
+            self.assertNotEqual(self.check(ns, engine, 1000 + ns['STALE_AFTER_S'], clock), '')
+            self.assertEqual(len(engine.posts()), 2)  # pause и resume выполнены
+            # Снимок, сверка и два чтения за три секунды ожидания: бюджет времени, а не пятнадцать запросов.
+            self.assertLessEqual(engine.reads, 4)
 
     def test_state_is_written_only_when_something_changes_and_removed_when_empty(self):
         with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
@@ -1528,6 +1601,7 @@ class StaleConnectionTests(unittest.TestCase):
                     self.assertLess(time.monotonic() - started, 60, 'the computer did not come back within 60 s')
                     time.sleep(1)
                     logged.append(bootstrap_tick(t, server))
+                self.assertLess(time.monotonic() - started, 60, 'the computer did not come back within 60 s')
                 lines = [line for text in logged for line in text.splitlines()]
                 self.assertEqual(len(lines), 1, lines)
                 self.assertRegex(lines[0], r'^RemoteDisk: Computer \(%s\): соединения молчат \d+ с, .*pause/resume$' % computer['deviceId'][:7])
@@ -1561,7 +1635,7 @@ class StaleConnectionTests(unittest.TestCase):
                     self.assertEqual(identity(), before)
                     since = json.loads((server['state'] / 'connection-watch.json').read_text())['devices'][
                         computer['deviceId']]['since']
-                    self.assertLess(time.time() - since, 30)
+                    self.assertLess(time.monotonic() - since, 30)  # часы состояния — монотонные, общие для процессов
                 wait(lambda: (server['home'] / 'Disk/Live/note-2.txt').exists(), 'the data reached the server', 40)
                 self.assertEqual((server['home'] / 'Disk/Live/note-2.txt').read_text(), '2' * 2000)
                 self.assertEqual(identity(), before)

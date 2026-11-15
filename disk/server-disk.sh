@@ -273,15 +273,18 @@ def save_watch(state):
         os.replace(tmp,watch)
     finally:
         if os.path.exists(tmp):os.unlink(tmp)
+def signature(c):
+    # Любое изменение (байты входящего, появилось или закрылось соединение) — признак жизни: молчание отсчитывается заново.
+    parts=[c['primary']]+(c.get('secondary') or []) if 'primary' in c else [c]
+    return ';'.join('%s|%s|%s'%(p.get('address'),p.get('startedAt'),p.get('inBytesTotal')) for p in parts)
 def device_call(api,verb,device_id):api('system/'+verb+'?device='+urllib.parse.quote(device_id,safe=''),'POST')
 def recycle_device(api,device_id):
     # pause закрывает все соединения устройства (асинхронно, обычно за 0,1 с), resume пускает клиента обратно.
     # Возобновляем при любом исходе ожидания и повторяем при сбое: устройство не должно остаться на паузе по нашей вине.
     device_call(api,'pause',device_id)
     try:
-        for _ in range(15):
-            if not api('system/connections')['connections'].get(device_id,{}).get('connected'):break
-            time.sleep(.2)
+        deadline=time.monotonic()+3
+        while api('system/connections')['connections'].get(device_id,{}).get('connected') and time.monotonic()<deadline:time.sleep(.2)
     finally:
         for attempt in range(3):
             try:device_call(api,'resume',device_id);break
@@ -295,7 +298,9 @@ def device_label(api,device_id):
     name=re.sub(r'[\x00-\x1f\x7f]',' ',name).strip() if isinstance(name,str) else ''
     return (name+' ' if name else '')+'('+device_id[:7]+')'
 def watch_connections(api,now=None):
-    now=time.time() if now is None else now
+    # Монотонные часы: перевод системного времени не выдаст живое устройство за молчащее. После перезагрузки сервера счётчик
+    # начинается заново, и отметка «из будущего» просто сбрасывается (сигнатура соединений после перезапуска движка другая).
+    now=time.monotonic() if now is None else now
     old=load_watch();stats=api('system/connections')['connections']
     resume=dict(old['resume']);devices={};healed={};stale=[]
     # Остаток прерванного лечения (сбой между pause и resume): поставленное нами на паузу устройство возобновляем.
@@ -304,14 +309,12 @@ def watch_connections(api,now=None):
             if stats.get(device_id,{}).get('paused'):device_call(api,'resume',device_id)
             del resume[device_id]
         except FOLDER_ERRORS as e:skipped(device_id[:7],e)
-    # Время лечения хранится только пока действует пауза между лечениями; часы, ушедшие назад, её не продлевают.
+    # Время лечения хранится только пока действует пауза между лечениями; счётчик, начавшийся заново после перезагрузки, её не продлевает.
     for device_id,at in old['healed'].items():
         if number(at) and 0<=now-at<HEAL_COOLDOWN_S:healed[device_id]=at
     for device_id,c in sorted(stats.items()):
         if not c.get('connected') or c.get('paused'):continue
-        parts=[c['primary']]+(c.get('secondary') or []) if 'primary' in c else [c]
-        # Любое изменение (байты входящего, появилось или закрылось соединение) — признак жизни: молчание отсчитывается заново.
-        sig=';'.join('%s|%s|%s'%(p.get('address'),p.get('startedAt'),p.get('inBytesTotal')) for p in parts)
+        sig=signature(c)
         before=old['devices'].get(device_id)
         since=before.get('since') if isinstance(before,dict) and before.get('sig')==sig else None
         if not number(since) or since>now:since=now
@@ -320,6 +323,10 @@ def watch_connections(api,now=None):
     for device_id,silent in stale:
         label=device_id[:7]
         try:
+            # Решение принято по снимку, а лечение других устройств и ответы REST занимают время: перед паузой сверяемся со
+            # свежими данными. Устройство, которое успело ожить, отключиться или быть поставленным владельцем на паузу, не трогаем.
+            fresh=api('system/connections')['connections'].get(device_id,{})
+            if not fresh.get('connected') or fresh.get('paused') or signature(fresh)!=devices[device_id]['sig']:continue
             # Пометка до паузы: если запуск оборвётся посреди лечения, следующий вернёт устройство из паузы.
             resume[device_id]=now;save_watch(dict(devices=devices,healed=healed,resume=resume))
             label=device_label(api,device_id)
