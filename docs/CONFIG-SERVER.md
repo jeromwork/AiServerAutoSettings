@@ -205,3 +205,23 @@ remoteagents config export --name "Ноутбук сына" --master-password-st
 Вместе с ними ушли служебный пользователь `ra-enroll`, одноразовый пропуск, sudo-скрипт регистрации и его sudoers,
 нагрузка в конце EXE, публикация одноразовых ссылок. Перенесено: «VPN первым» (`vpnBootstrap`), маршруты и пароли hop
 по маршрутам, автообновление, список компьютеров, безопасная запись authorized_keys (O_NOFOLLOW, hardlink, права, flock).
+
+### Экспорт локальной веб-страницы Happier
+
+Из публичного серверного снимка переносится весь `serverComponents.happierWeb`.
+Экспорт дополнительно строит клиентский `happier.localWeb`: `enabled` из серверного
+компонента, `serverPort` из его `port` (default 47831), локальный `port` из настроек
+выдачи `happier.localWeb.port`, иначе равный серверному `port` (default 47831). Локальный origin остаётся постоянным
+при другом серверном порте. При `enabled:false` клиент тоже получает false.
+Если компонента в снимке нет, localWeb не добавляется. Облачные `serverUrl`,
+`webappUrl` и выбор аккаунта сохраняются. Секретов или кэша лимитов в этом разделе нет.
+См. [HAPPIER-WEB.md](HAPPIER-WEB.md).
+
+Для полной установки в серверном снимке должны быть одновременно включены
+`serverComponents.happier` и `serverComponents.happierWeb`; оба переносятся экспортом.
+В примере настроек выдачи `serverConfig` указывает на снимок после применения
+`server/server-components.example.json`. Полный перенос авторизации daemon выполняется
+обычным `--include-server-secrets --output …`, вместе с identity Happier; обычный экспорт
+оставляет секретные слоты пустыми. Необязательный `happierWeb.serverUrl` выбирает свой
+сервер API; без него веб-служба читает активный native-профиль Happier, затем использует
+облачный адрес по умолчанию. Windows-канал строится клиентом из `happier.localWeb`.
