@@ -105,6 +105,7 @@ namespace RemoteAgents.Launcher
         double previousUptime;
         Dictionary<string, object>[] folders, states, remoteStates;
         ICollection<string> confirmed;
+        internal bool ServerConnected { get; private set; }
         internal int FolderCount { get { return folders == null ? -1 : folders.Length; } }
         string folderPeer;
         double previousIn, previousOut;
@@ -181,6 +182,7 @@ namespace RemoteAgents.Launcher
                     folders.Where((f, i) => DiskSnapshot.ConfirmedByServer(remoteStates[i])).Select(f => Json.Str(f, "id")));
             }
             bool connected = Json.Bool(Json.Map(Json.Get(Json.Map(Json.Get(connections, "connections")), peer)), "connected");
+            ServerConnected = connected;
             string speed = Rates(previousIn, previousOut, input, output, previousTime < 0 ? 0 : now - previousTime);
             previousIn = input; previousOut = output; previousTime = now;
             return Summary(folders, states, connected, remoteStates, confirmed) + speed;

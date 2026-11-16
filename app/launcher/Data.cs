@@ -177,7 +177,7 @@ namespace RemoteAgents.Launcher
             if (!Data.ContainsKey("schema")) { Data["schema"] = 1; changed = true; }
             if (!Data.ContainsKey("version")) { Data["version"] = 1; changed = true; }
             if (!Data.ContainsKey("components")) { Data["components"] = new Dictionary<string, object>(); changed = true; }
-            if (!Data.ContainsKey("update")) { Data["update"] = new Dictionary<string, object> { { "enabled", false }, { "remoteDir", "~/.local/share/remote-agents/dist" } }; changed = true; }
+            if (UpdatePolicy.Defaults(Data)) changed = true;
             if (Json.Int(Data, "schema", 0) != 1) throw new InvalidDataException("Неизвестная схема настроек");
             if (changed) Save();
             }

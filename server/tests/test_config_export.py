@@ -96,9 +96,9 @@ class Env:
         self.log = self.dir / 'auth.log'
         self.cfg = self.dir / 'config-export.json'
         # Never fall back to /var/lib/... on the machine running the suite.
-        # A valid empty desired-state snapshot belongs to this disposable stand.
+        # Match the default deployment: localWeb is exported from happierWeb (docs/HAPPIER-WEB.md).
         snapshot = self.dir / 'server-desired.json'
-        snapshot.write_text('{}')
+        snapshot.write_text(json.dumps({'serverComponents': {'happier': {'enabled': True}, 'happierWeb': {'enabled': True}}}))
         snapshot.chmod(0o644)
         self.c = dict(schema=1, version=1, serverAddress='127.0.0.1', serverPort=22, workerUser=USER,
                       hostKeys=[self.host_pub], workerAuthorizedKeys=str(self.auth), stateDir=str(self.dir / 'state'),
@@ -174,6 +174,16 @@ class ConfigExportTests(unittest.TestCase):
         self.assertNotEqual(rejected.returncode, 0)
         self.assertNotIn(b'INLINE_SECRET_SENTINEL', rejected.stderr)
         self.assertEqual(self.lines(), before)
+
+    def test_program_updates_default_on_and_explicit_override(self):
+        config, _ = self.e.export()
+        self.assertEqual(config['update'], dict(enabled=True, auto=True, intervalHours=6, remoteDir='~/.local/share/remote-agents/dist'))
+        self.e.c['update'] = dict(enabled=False, auto=False, intervalHours=12)
+        self.e.write()
+        config, _ = self.e.export('Без обновлений')
+        self.assertEqual(config['update']['enabled'], False)
+        self.assertEqual(config['update']['auto'], False)
+        self.assertEqual(config['update']['intervalHours'], 12)
 
     def test_export_happier_web_uses_server_port_and_stable_client_origin(self):
         desired = {'serverComponents': {'happier': {'enabled': True}, 'happierWeb': {'enabled': True, 'port': 47833, 'keepChats': 9}}}

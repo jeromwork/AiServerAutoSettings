@@ -30,7 +30,7 @@ namespace RemoteAgents.Launcher
         internal static readonly string[] Chain = { Proxy, Lan };
         internal static readonly string[] Order = new[] { Bootstrap, Server, Connection, Bridge, Account, Disk, Vpn, Proxy, Lan }.Where(s => Product.VpnEnabled || s != Vpn).ToArray();
         // Top-level profile keys (config.paste.schema.json). Unknown keys are refused by ConfigBundle.Parse (stream A).
-        internal static readonly string[] ProfileKeys = { "device", "server", "vpn", "happier", "bridge", "disk", "proxyOut", "lan", "deployment", "serverNetwork", "tailscale", "telegramGateway", "agent", "serverComponents", "agents", "desktop", "projectViews", "sessions", "ssh", "components" };
+        internal static readonly string[] ProfileKeys = { "device", "update", "server", "vpn", "happier", "bridge", "disk", "proxyOut", "lan", "deployment", "serverNetwork", "tailscale", "telegramGateway", "agent", "serverComponents", "agents", "desktop", "projectViews", "sessions", "ssh", "components" };
         internal static bool Known(string key) { return ProfileKeys.Contains(key); }
         internal static string Title(string s)
         {
@@ -359,6 +359,10 @@ namespace RemoteAgents.Launcher
         internal static Dictionary<string, object> SyncFromSettings(Dictionary<string, object> profile, Dictionary<string, object> config, string diskBase, string serverAddress, string serverLogin)
         {
             var p = new Dictionary<string, object>(profile);
+            if (config.ContainsKey("update")) {
+                var values = Json.Map(Json.Get(config, "update"));
+                p["update"] = values.Where(x => new[] { "enabled", "auto", "intervalHours", "remoteDir" }.Contains(x.Key)).ToDictionary(x => x.Key, x => x.Value);
+            }
             var bridge = Json.Map(Json.Get(config, "bridge"));
             if (config.ContainsKey("bridge")) { var b = new Dictionary<string, object>(Json.Map(Json.Get(p, "bridge"))); b["enabled"] = Json.Bool(bridge, "enabled", true); b["allowShell"] = Json.Bool(bridge, "allowShell", true); p["bridge"] = b; }
             var vpn = Json.Map(Json.Get(config, "vpn"));

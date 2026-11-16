@@ -16,7 +16,7 @@ using System.Windows.Forms;
 
 namespace RemoteAgents.Launcher
 {
-    internal sealed class TrayContext : ApplicationContext
+    internal sealed partial class TrayContext : ApplicationContext
     {
         readonly string home; readonly Journal log; readonly Configuration config; readonly UpdateEngine engine;
         readonly NotifyIcon icon; readonly Control dispatch = new Control();
@@ -43,11 +43,11 @@ namespace RemoteAgents.Launcher
         readonly Icon green = MakeIcon(Color.ForestGreen), yellow = MakeIcon(Color.Goldenrod), red = MakeIcon(Color.Firebrick);
         readonly object pipeGate = new object(); NamedPipeServerStream server; Task worker, pipeWorker;
         readonly ConcurrentQueue<string[]> commands = new ConcurrentQueue<string[]>(); volatile bool readyForCommands;
-        string installSource; readonly bool firstSetup; BundleDefinition definition; bool busy, closing, ticking, actionBusy, serverUpdateRequested;
+        string installSource; readonly bool firstSetup; BundleDefinition definition; bool busy, closing, ticking, actionBusy;
         DateTime settingsWritten = DateTime.MinValue;
         // Detached server installs started by the wizard (state/server-operations.json).
         DateTime nextOperationCheck = DateTime.MinValue; bool operationChecking, operationsActive; string operationTip = "";
-        string updateSummary = "обновления устанавливаются вручную из нового EXE";
+        string updateSummary = "Обновления: ожидается проверка";
         public bool RestartRequested { get; private set; }
         public TrayContext(string home, Journal log, string pipeName, SecurityIdentifier sid, string[] args, string installSource = null)
         {
@@ -69,7 +69,7 @@ namespace RemoteAgents.Launcher
                         else ShowMain();
                     });
                 };
-                if (!firstSetup) { engine.Recover(); Bootstrap(); LoadComponents(); }
+                if (!firstSetup) { engine.Recover(); Bootstrap(); LoadComponents(); updateSummary = Json.Text(UpdateState(), "summary", updateSummary); AttachUpdateRestart(); }
             } catch {
                 stop.Cancel(); lock (pipeGate) { if (server != null) server.Dispose(); }
                 if (icon != null) { icon.Visible = false; icon.Dispose(); }
@@ -81,7 +81,7 @@ namespace RemoteAgents.Launcher
             BackgroundWork.Disk.Changed += () => { try { dispatch.BeginInvoke(new Action(DiskFinished)); } catch (InvalidOperationException) { } };
             dispatch.BeginInvoke(new Action(() => {
                 if (firstSetup) { RunFirstSetup(); return; }
-                CheckLegacyVpn(); StartLegacyDiskCleanup(); Handle(args); DrainCommands(); Tick();
+                DeliverUpdateNotice(); CheckLegacyVpn(); StartLegacyDiskCleanup(); Handle(args); DrainCommands(); Tick();
                 if(Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome),StringComparison.OrdinalIgnoreCase)) CheckSetup();
 
             }));
@@ -157,12 +157,13 @@ namespace RemoteAgents.Launcher
             try {
                 RetireConfigSyncTask(); TryDeleteOld(); ReloadSettings(); foreach (var r in runtimes) r.Tick();
                 var critical = runtimes.Where(r => r.Definition.Critical).ToArray();
-                bool all = Product.IsVpn ? VpnModulesReady() : critical.Length > 0 && critical.All(r => r.Healthy);
+                bool all = Product.IsVpn ? VpnModulesReady() : critical.Length > 0 && critical.Where(r => r.Enabled).All(r => r.Healthy);
+                all = all && UpdateHealthReady();
                 string result = engine.Observe(all);
                 string image = UpgradeInstaller.ObserveImage(home, engine, all, result);
-                if (image == "rollback") { log.Write("launcher.rollback"); RestartRequested = true; ExitThread(); return; }
+                if (image == "rollback") { try { PrepareUpdateRestart(); } catch { keepVpnOnRestart = false; log.Write("update.resume.failed"); } UpdateOutcome(Json.Text(UpdateState(), "target", engine.Previous), "здоровье не подтверждено; выполнен откат"); log.Write("launcher.rollback"); RestartRequested = true; ExitThread(); return; }
                 if (result == "rollback") { log.Write("update.rollback"); updateSummary = "обновление откачено: здоровье не подтверждено"; LoadComponents(); foreach (var r in runtimes) r.Tick(); all = false; }
-                if (result == "accepted") { log.Write("update.accepted"); updateSummary = "обновление проверено"; }
+                if (result == "accepted" || image == "accepted") { log.Write("update.accepted"); UpdateOutcome(engine.Current, ""); }
                 int count = critical.Count(r => r.Healthy); icon.Icon = all ? green : count > 0 ? yellow : red;
                 var transport = StatusView.Read(home, "transport", maxAgeSec: 15);
                 if (Product.IsVpn) {
@@ -179,7 +180,7 @@ namespace RemoteAgents.Launcher
                 if (DateTime.UtcNow >= nextOperationCheck) CheckOperations();
                 RefreshMenu(); WriteStatus();
                 CheckSync(); CheckServerHealth(); CheckDisk();
-                if (serverUpdateRequested && !engine.Pending && MutationConflict().Length == 0 && !BackgroundWork.Disk.Busy && TrySelfUpdate()) return;
+                PollUpdates();
             } catch { log.Write("supervisor.tick.failed"); icon.Icon = red; }
             finally { ticking = false; }
         }
@@ -304,13 +305,16 @@ namespace RemoteAgents.Launcher
                 if (Product.IsVpn) {
                     menu.Items.Add("Открыть", null, (s, e) => ShowMain());
                     menu.Items.Add("VPN", null, (s, e) => ToggleVpn());
+                    menu.Items.Add(updateSummary).Enabled = false;
+                    menu.Items.Add("Проверить обновления сейчас", null, (s, e) => CheckUpdates());
                     menu.Items.Add("Выход", null, (s, e) => RequestExit());
                 } else foreach (var entry in TrayEntries()) {
                     if (entry.Id == "separator") { menu.Items.Add(new ToolStripSeparator()); continue; }
                     string id = entry.Id;
                     var item = new ToolStripMenuItem(entry.Text) { Enabled = entry.Enabled, ToolTipText = entry.Hint };
                     item.Click += (s, e) => Safe(() => {
-                        if (id == "open") OpenHappier();
+                        if (id == "update-check") CheckUpdates();
+                        else if (id == "open") OpenHappier();
                         else if (id == "settings") ShowMain();
                         else if (id == "disk") OpenDisk();
                         else if (id == "synchronization") OpenSynchronization();
@@ -329,6 +333,7 @@ namespace RemoteAgents.Launcher
                 }
             }
             if (Product.IsVpn) {
+                icon.ContextMenuStrip.Items[2].Text = updateSummary;
                 var vpn = VpnMenu(); var item = icon.ContextMenuStrip.Items[1]; item.Text = vpn.Text; item.Enabled = vpn.Enabled; item.ToolTipText = vpn.Hint;
             }
             RefreshMain();
@@ -348,6 +353,8 @@ namespace RemoteAgents.Launcher
         TrayMenuEntry[] TrayEntries()
         {
             var entries = TrayMenuModel.Build(config.Data, AccountState(), StatusView.Read(home, "transport", maxAgeSec: 15), ServerHealthView.Read(home), DiskSummary()).ToList();
+            entries.Insert(entries.Count - 1, new TrayMenuEntry("update-status", updateSummary, false));
+            entries.Insert(entries.Count - 1, new TrayMenuEntry("update-check", "Проверить обновления сейчас", !updateChecking && !engine.Pending));
             entries.Insert(entries.Count - 1, VpnMenu()); return entries.ToArray();
         }
         bool Configured()
@@ -678,33 +685,6 @@ namespace RemoteAgents.Launcher
             var form = new Form { Text = "RemoteAgents — " + title, Width = 760, Height = 480, StartPosition = FormStartPosition.CenterScreen };
             form.Controls.Add(new TextBox { Text = text.Length == 0 ? "нет данных" : text, ReadOnly = true, Multiline = true, ScrollBars = ScrollBars.Both, WordWrap = false, Dock = DockStyle.Fill }); form.Show();
         }
-        void CheckUpdates()
-        {
-            if (!AllowMutation()) return;
-            if (engine.Pending || !Json.Bool(config.Update, "enabled")) { MessageBox.Show(mainWindow, engine.Pending ? "Идёт проверка обновления, подождите" : "Обновления на сервере не включены в конфиге", Product.Name); return; }
-            busy = true; updateSummary = "проверка обновлений";
-            RefreshMenu();
-            // Freeze the config snapshot before moving work off the UI thread.
-            var snapshot = Json.Encode(config.Update);
-            worker = Task.Run(() => {
-                string ready = null; string message = "обновлений нет";
-                try {
-                    var source = SshSource.Load(Configuration.ForUpdate(snapshot), home); var m = source.Manifest(home, stop.Token);
-                    if (Files.Compare(m.Minimum, Program.Version) > 0) message = "нужна более новая версия лаунчера";
-                    else if (engine.IsBad(m.Version)) message = "версия ранее отклонена";
-                    else ready = engine.Prepare(m, p => source.Fetch(m.FileName, p, m.Size, stop.Token), f => External.SelfTest(f, home, stop.Token),
-                        (d, f) => UpdateEngine.InstallBinaries(d, f, home, stop.Token), stop.Token);
-                    log.Write(ready == null ? "update.check.complete" : "update.prepared");
-                } catch (OperationCanceledException) { return; }
-                catch { message = "обновление не проверено: нет профиля, связи или проверка не прошла"; log.Write("update.check.failed"); }
-                if (stop.IsCancellationRequested) return;
-                try { dispatch.BeginInvoke(new Action(() => {
-                    if (closing) return; busy = false; updateSummary = message;
-                    if (ready != null) Safe(() => { serverUpdateRequested = true; engine.Activate(ready); LoadComponents(); updateSummary = "ожидание здоровья компонентов (120 с)"; });
-                    RefreshMenu();
-                })); } catch (InvalidOperationException) { }
-            });
-        }
         void RunAction(MenuAction action)
         {
             Safe(() => {
@@ -716,23 +696,20 @@ namespace RemoteAgents.Launcher
                 } catch { job.Dispose(); throw; }
             });
         }
-        bool TrySelfUpdate()
+        bool TrySelfUpdate(string version)
         {
-            string path = Path.Combine(engine.Folder(engine.Current), ".launcher-manifest.json");
+            string path = Path.Combine(engine.Folder(version), ".launcher-manifest.json");
             if (!File.Exists(path)) return false;
-            var m = Manifest.Parse(File.ReadAllText(path)); if (m.LauncherVersion.Length == 0 || Files.Compare(m.LauncherVersion, Program.Version) <= 0) return false;
-            string source = Path.Combine(engine.Folder(engine.Current), Product.ExeName);
-            if (!File.Exists(source) || !Files.Hash(source).Equals(m.LauncherHash, StringComparison.OrdinalIgnoreCase) ||
-                Files.Compare(FileVersionInfo.GetVersionInfo(source).FileVersion, m.LauncherVersion) != 0) { log.Write("launcher.update.invalid"); return false; }
-            string target = Program.Exe, old = Path.Combine(Path.GetDirectoryName(target), Product.Name + ".old.exe"), temp = target + ".new";
-            if (File.Exists(old)) return false; // previous image is still exiting
+            var manifest = Manifest.Parse(File.ReadAllText(path));
+            // FileVersion can stay equal between daily bundles. Verify and replace by hash for EVERY new bundle.
+            UpgradeInstaller.ActivatePrepared(home, engine, manifest);
             try {
-                File.Copy(source, temp, true);
-                using (var flush = new FileStream(temp, FileMode.Open, FileAccess.Write, FileShare.Read)) flush.Flush(true);
-                File.Move(target, old);
-                try { File.Move(temp, target); } catch { File.Move(old, target); throw; }
-                log.Write("launcher.update.ready"); RestartRequested = true; ExitThread(); return true;
-            } catch { log.Write("launcher.update.failed"); return false; }
+                PrepareUpdateRestart();
+                Process.Start(new ProcessStartInfo(Path.Combine(home, Product.Name + ".previous.exe"), "--watch-update " + Files.Quote(home) + " --watch-parent " + Process.GetCurrentProcess().Id.ToString()) { UseShellExecute = false, CreateNoWindow = true });
+            } catch {
+                engine.Rollback(); UpgradeInstaller.ObserveImage(home, engine, false, "rollback"); keepVpnOnRestart = false; throw;
+            }
+            log.Write("launcher.update.ready"); RestartRequested = true; ExitThread(); return true;
         }
         void TryDeleteOld()
         {
@@ -772,6 +749,7 @@ namespace RemoteAgents.Launcher
                 if (args.Contains("--exit") || args.Contains("--uninstall")) { RequestExit(); return; }
                 var diskShell = DiskShellRequest.Parse(args);
                 if (diskShell != null) {
+                    if (busy) { icon.ShowBalloonTip(4000, "Диск", "Идёт обновление программы; повторите действие после перезапуска", ToolTipIcon.Info); return; }
                     if (diskExplorer != null) diskExplorer.Submit(diskShell);
                     else icon.ShowBalloonTip(4000, "Диск", "Диск ещё не установлен или отключён", ToolTipIcon.Warning);
                     return;
@@ -841,13 +819,14 @@ namespace RemoteAgents.Launcher
         protected override void ExitThreadCore()
         {
             if (closing) return;
-            try { Files.Atomic(Path.Combine(home, "state/vpn.stop"), "stop\n"); } catch { log.Write("vpn.stop.failed"); }
+            bool preserveVpn = RestartRequested && keepVpnOnRestart;
+            if (!preserveVpn) try { Files.Atomic(Path.Combine(home, "state/vpn.stop"), "stop\n"); } catch { log.Write("vpn.stop.failed"); }
             closing = true; timer.Stop(); stop.Cancel(); BackgroundWork.Disk.Stop();
             if (diskExplorer != null) { diskExplorer.Dispose(); diskExplorer.Wait(3500); }
             if (mainWindow != null && !mainWindow.IsDisposed) mainWindow.Unload();
             lock (pipeGate) { if (server != null) server.Dispose(); }
-            foreach (var r in runtimes) r.Dispose(); foreach (var job in actionJobs) job.Dispose();
             try { StopManagedComponents(); } catch { log.Write("components.stop.failed"); }
+            foreach (var r in runtimes) r.Dispose(preserveVpn); foreach (var job in actionJobs) job.Dispose();
             try { WriteStatus(); } catch { log.Write("status.write.failed"); }
             log.Write("launcher.exit"); icon.Visible = false; icon.Dispose(); timer.Dispose();
             green.Dispose(); yellow.Dispose(); red.Dispose(); dispatch.Dispose(); base.ExitThreadCore();

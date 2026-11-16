@@ -53,8 +53,17 @@
         },
         "enabled": {
           "type": "boolean",
-          "default": false,
-          "description": "Разрешить только ручную проверку обновлений на сервере"
+          "default": true
+        },
+        "auto": {
+          "type": "boolean",
+          "default": true
+        },
+        "intervalHours": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 168,
+          "default": 6
         }
       },
       "additionalProperties": true

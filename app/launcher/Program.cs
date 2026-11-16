@@ -31,6 +31,10 @@ namespace RemoteAgents.Launcher
         }
         [STAThread] internal static int Run(string[] args)
         {
+            string watchUpdate = Option(args, "--watch-update");
+            if (watchUpdate != null) return UpdateWatchdog.Run(Path.GetFullPath(watchUpdate), Option(args, "--watch-parent"));
+            string checkConfig = Option(args, "--check-update-config");
+            if (checkConfig != null) { try { UpdatePolicy.Compatible(checkConfig); return 0; } catch { return 20; } }
             // Before askpass: ssh may carry a password pipe in its environment while running this relay as ProxyCommand.
             if(args.Length>0 && args[0]=="--proxy-connect")return ProxyRelay.Run(args);
             string passwordPipe=Environment.GetEnvironmentVariable("REMOTEAGENTS_PASSWORD_PIPE");
@@ -120,6 +124,7 @@ namespace RemoteAgents.Launcher
                     }
                     try {
                         if (args.Contains("--uninstall") || args.Contains("--exit")) return 0;
+                        UpgradeInstaller.NoteImageProcess(home);
                         Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
                         using (var context = new TrayContext(home, log, name, sid, args, firstInstallSource)) { Application.Run(context); restart = context.RestartRequested; }
                     } finally { if (owned) { mutex.ReleaseMutex(); owned = false; } }

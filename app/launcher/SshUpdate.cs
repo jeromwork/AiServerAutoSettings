@@ -30,6 +30,17 @@ namespace RemoteAgents.Launcher
             try { return new UTF8Encoding(false, true).GetString(data).TrimStart('\uFEFF'); }
             catch (DecoderFallbackException) { return Encoding.GetEncoding((int)GetOEMCP()).GetString(data); }
         }
+        public static bool UpdateSelfTest(string folder, string home, CancellationToken token)
+        {
+            string exe = Path.Combine(folder, Product.ExeName);
+            if (!File.Exists(exe)) throw new InvalidDataException("Нет нового EXE для проверки конфига");
+            int result;
+            try { result = Run(exe, new[] { "--check-update-config", Path.Combine(home, "config.json") }, folder, null, 30000, 1024, token); }
+            catch (System.ComponentModel.Win32Exception) { throw new InvalidDataException("Новый EXE не запускается"); }
+            if (result == 20) throw new ConfigCompatibilityException();
+            if (result != 0) throw new InvalidDataException("Самопроверка EXE не прошла");
+            return SelfTest(folder, home, token);
+        }
         public static bool SelfTest(string folder, string home, CancellationToken token)
         {
             return Run("powershell.exe", new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", Path.Combine(folder, "selftest.ps1"), "-Home", home }, folder, null, 120000, 4 * 1024 * 1024, token) == 0;
@@ -46,7 +57,13 @@ namespace RemoteAgents.Launcher
                 var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
                 var roots = new[] { Path.Combine(home, "ssh-profiles"), Path.Combine(local, "RemoteAgents", "ssh-profiles") }.Distinct();
                 string found = null;
+                try {
+                    var settings = Json.Read(Path.Combine(home, "config.json"));
+                    string active = Json.Str(Json.Map(Json.Get(settings, "transport")), "profilePath");
+                    if (File.Exists(active)) found = active;
+                } catch { }
                 foreach (string root in roots) {
+                    if (found != null) break;
                     if (!Directory.Exists(root)) continue;
                     found = Directory.GetDirectories(root).OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
                         .SelectMany(p => Directory.Exists(Path.Combine(p, "project-connections")) ? Directory.GetDirectories(Path.Combine(p, "project-connections")).OrderBy(q => q, StringComparer.OrdinalIgnoreCase) : Enumerable.Empty<string>())
@@ -86,7 +103,7 @@ namespace RemoteAgents.Launcher
                 target = user + "127.0.0.1";
             }
             var all = new List<string> { "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "StrictHostKeyChecking=yes", "-T" }; all.AddRange(options); all.Add(target);
-            return new SshSource { Exe = Json.Text(update, "sshExe", Json.Text(profile, "sshExecutable", "ssh.exe")), Args = all.ToArray(), RemoteDir = Json.Text(update, "remoteDir", "~/.local/share/remote-agents/dist") };
+            return new SshSource { Exe = Json.Text(update, "sshExe", Json.Text(profile, "sshExecutable", "ssh.exe")), Args = all.ToArray(), RemoteDir = Json.Text(update, "remoteDir", "~/.local/share/remote-agents/dist").TrimEnd('/') + (Product.IsVpn ? "/vpn" : "") };
         }
         internal static string RemotePath(string dir, string file)
         {
@@ -103,7 +120,8 @@ namespace RemoteAgents.Launcher
         }
         public Manifest Manifest(string home, CancellationToken token)
         {
-            string file = Path.Combine(home, "bundle", "manifest." + Guid.NewGuid().ToString("N") + ".tmp");
+            Directory.CreateDirectory(Path.Combine(home, Product.BundleDirectory));
+            string file = Path.Combine(home, Product.BundleDirectory, "manifest." + Guid.NewGuid().ToString("N") + ".tmp");
             try { Fetch("manifest.json", file, 1024 * 1024, token); return global::RemoteAgents.Launcher.Manifest.Parse(Files.LF(File.ReadAllText(file))); }
             finally { if (File.Exists(file)) File.Delete(file); }
         }

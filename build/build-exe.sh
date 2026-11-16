@@ -18,8 +18,9 @@ for product in RemoteAgents RemoteVPN; do
   cp "$out/$product/publish/$product.exe" "$out/$product.exe"
   cp "$out/$product.exe" "$repo/release/$product.exe"
 done
-# Preserve the existing optional SSH update distribution for the server product.
+# Both products use the same build version and independent OTA roots.
 python3 "$here/bundle.py" attach "$out/RemoteAgents/$version.zip" "$out/RemoteAgents.exe" "$out/$version.zip"
 cp "$out/$version.zip" "$out/bundle.zip"
+python3 "$here/bundle.py" attach "$out/RemoteVPN/$version.zip" "$out/RemoteVPN.exe" "$out/vpn-bundle.zip"
 cp "$here/Start.cmd" "$repo/release/Start.cmd"
 sha256sum "$repo/release/RemoteAgents.exe" "$repo/release/RemoteVPN.exe"

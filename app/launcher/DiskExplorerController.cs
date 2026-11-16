@@ -16,6 +16,8 @@ namespace RemoteAgents.Launcher
         readonly DiskMissingFolders missing;
         readonly DiskExplorerService metadata; readonly DiskExplorerRegistry registry;
         readonly Task worker; readonly TaskCompletionSource<bool> initialized = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        int pendingCommands;
+        internal bool Busy { get { return Volatile.Read(ref pendingCommands) != 0; } }
         DiskSnapshot last = new DiskSnapshot(); string lastRoot; bool iconFailed;
         internal DiskExplorerController(string home, Func<string> root, Func<string> bundle, Func<bool> enabled, Func<bool> cleanup, Action<string, bool> notify, Action<string> log,
             DiskExplorerService metadata, DiskExplorerRegistry registry, string diskHome = null)
@@ -28,6 +30,7 @@ namespace RemoteAgents.Launcher
         internal static string DefaultDiskHome { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteDisk"); } }
         internal void Submit(DiskShellRequest request)
         {
+            Interlocked.Increment(ref pendingCommands);
             notify("Диск: действие принято", true);
             Task.Run(async () => {
                 try {
@@ -44,6 +47,7 @@ namespace RemoteAgents.Launcher
                 } catch (OperationCanceledException) { }
                 catch (IOException e) { log("disk.shell." + request.Action + ".failed"); notify(e.Message, false); }
                 catch (Exception) { log("disk.shell." + request.Action + ".failed"); notify("Действие Диска не выполнено. Проверьте журнал программы", false); }
+                finally { Interlocked.Decrement(ref pendingCommands); }
             });
         }
         DiskShellCommands Commands(IDiskRest rest, string currentRoot)

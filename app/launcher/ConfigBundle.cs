@@ -117,6 +117,7 @@ namespace RemoteAgents.Launcher
                 "server", O(D("address", Host(), "port", N(1, 65535), "login", User(),
                     "hostKeys", A(S(4096, 1, "^[^\\r\\n\\x00]+$"), 32), "key", Ref("server-key"), "rootPassword", Ref("server-root-password"), "routes", A(route, 32))),
                 "connection", O(D("enabled", B())),
+                "update", O(D("enabled", B(), "auto", B(), "intervalHours", N(1, 168), "remoteDir", S(2048, 1))),
                 "bridge", O(D("enabled", B(), "allowShell", B())),
                 "happier", O(D("mode", E("same", "new"), "account", S(64, 64, "^[a-f0-9]{64}$"), "label", S(80, 1), "serverUrl", Url(), "webappUrl", Url(), "key", Ref("happier-key"),
                     "localWeb", O(D("enabled", B(), "port", N(1024, 65535), "serverPort", N(1024, 65535)), "enabled", "port", "serverPort"))),
@@ -391,7 +392,7 @@ namespace RemoteAgents.Launcher
             // Legacy settings are public; only known fields are copied. Runtime-only knobs
             // and executable/command fields are never accepted from a paste configuration.
             var definitions = Json.Map(SchemaDocument()["properties"]);
-            foreach (string section in new[]{"device", "bridge", "happier", "components"}) {
+            foreach (string section in new[]{"device", "update", "bridge", "happier", "components"}) {
                 var source = Json.Map(Json.Get(settings, section));
                 var fields = Json.Map(Json.Get(Json.Map(definitions[section]), "properties"));
                 var target = source.Where(x => fields.ContainsKey(x.Key)).ToDictionary(x => x.Key, x => x.Value);
@@ -508,6 +509,8 @@ namespace RemoteAgents.Launcher
                 // Empty/AI placeholders preserve values already present in the vault.
                 var checkedRoot = new Dictionary<string, object>(profile); checkedRoot["secrets"] = values; Parse(Json.Encode(checkedRoot));
                 settings["profile"] = profile;
+                if (patch.ContainsKey("update")) settings["update"] = Merge(Json.Map(Json.Get(settings, "update")), Json.Map(patch["update"]));
+                UpdatePolicy.Defaults(settings);
                 if (!settings.ContainsKey("schema")) settings["schema"] = 1;
                 if (!settings.ContainsKey("version")) settings["version"] = 1;
                 SecretVault.Save(home, values);

@@ -16,6 +16,9 @@ namespace RemoteAgents.Launcher
         readonly FlowLayoutPanel settingsBody = Stack(), aboutBody = Stack();
         readonly Label pageTitle = WrapLabel();
         readonly Button pageBack = new Button { Text = "← Назад", AutoSize = true }, settingsButton = new Button { Text = "⚙", AutoSize = true, AccessibleName = "Настройки" };
+        // Owner 16.11.2026: a visible «check updates» icon on the main screen, next to settings.
+        readonly Button updateButton = new Button { Text = "⟳", AutoSize = true, AccessibleName = "Проверить обновления", Visible = false };
+        Action updateCheck;
         Expander advanced;
         Label aboutInfo;
 
@@ -26,7 +29,10 @@ namespace RemoteAgents.Launcher
             var top = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 3, Padding = new Padding(12, 8, 12, 8) };
             top.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); top.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             pageTitle.Font = Theme.Big; pageTitle.Anchor = AnchorStyles.Left; pageBack.Visible = false;
-            top.Controls.Add(pageBack, 0, 0); top.Controls.Add(pageTitle, 1, 0); top.Controls.Add(settingsButton, 2, 0);
+            top.Controls.Add(pageBack, 0, 0); top.Controls.Add(pageTitle, 1, 0); var corner = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
+            corner.Controls.Add(updateButton); corner.Controls.Add(settingsButton); top.Controls.Add(corner, 2, 0);
+            new ToolTip().SetToolTip(updateButton, "Проверить обновления"); new ToolTip().SetToolTip(settingsButton, "Настройки");
+            updateButton.Click += (s, e) => updateCheck?.Invoke();
             pageBack.Click += (s, e) => ShowPage(currentPage == "Настройки" ? "Главная" : "Настройки");
             settingsButton.Click += (s, e) => ShowPage("Настройки");
             pageHeader = top;
@@ -141,7 +147,7 @@ namespace RemoteAgents.Launcher
             foreach (var page in pages) page.Value.Visible = page.Key == name;
             pages[name].BringToFront(); FitPage(pages[name]);
             pageTitle.Text = name == "Главная" ? Product.Name : name;
-            pageBack.Visible = name != "Главная"; settingsButton.Visible = name == "Главная";
+            pageBack.Visible = name != "Главная"; settingsButton.Visible = name == "Главная"; updateButton.Visible = name == "Главная" && updateCheck != null;
             ResumeLayout(true);
             SizeForPage(name);
             if (name != "Раздел настроек" && detailsWindow != null && !detailsWindow.IsApplying) {
