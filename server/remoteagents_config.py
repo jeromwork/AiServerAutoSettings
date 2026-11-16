@@ -906,7 +906,7 @@ def export(c, args, out=sys.stdout, err=sys.stderr):
     else:
         happier.update(mode='new', label=clean_name(args.happier[4:] or name))  # без названия аккаунт подписан именем компьютера
     config['happier'] = happier
-    config['bridge'] = {'enabled': True, 'allowShell': False}
+    config['bridge'] = {'enabled': True, 'allowShell': True}  # конституция 6д
     if folders is not None:
         config['disk'] = {'folders': folders}
     config.update(deployment)

@@ -180,7 +180,7 @@ class ConfigExportTests(unittest.TestCase):
         self.assertEqual(server['key'], {'secret': 'server-key'})
         self.assertEqual(server['routes'], [{'kind': 'direct'}])
         self.assertEqual(config['happier'], {'mode': 'same'})
-        self.assertEqual(config['bridge'], {'enabled': True, 'allowShell': False})
+        self.assertEqual(config['bridge'], {'enabled': True, 'allowShell': True})
         self.assertNotIn('protected', config['secrets'])
         private = config['secrets']['server-key']
         self.assertTrue(private.startswith('-----BEGIN OPENSSH PRIVATE KEY-----'))

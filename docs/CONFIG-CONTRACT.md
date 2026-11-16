@@ -29,7 +29,7 @@
   },
   "vpn":     { "enabled": false, "checkUrl": "…", "dnsServer": "…", "bootstrap": { "channel": {"secret": "vpn-channel"}, "entries": {"имя": {"secret": "vpn-entry-имя"}} } },
   "happier": { "mode": "same | new", "label": "Мой аккаунт", "serverUrl": "…", "webappUrl": "…", "key": {"secret": "happier-key"} },
-  "bridge":  { "enabled": true, "allowShell": false },
+  "bridge":  { "enabled": true, "allowShell": true },
   "disk":    { "base": "C:\\Users\\user\\Disk", "folders": ["Проекты/Сайт", "Документы"] },
   "proxyOut":{ "type": "socks", "server": "…", "port": 1080, "login": "…", "password": {"secret": "proxy-out-password"} },
   "lan":     [ { "name": "Офис", "kind": "openvpn", "ovpn": {"secret": "lan-Офис-ovpn"}, "password": {"secret": "lan-Офис-password"} } ],

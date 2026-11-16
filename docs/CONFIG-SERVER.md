@@ -89,7 +89,7 @@ remoteagents config export --name "Ноутбук сына" --master-password-st
                           "entries": {"Entry1": {"secret": "vpn-entry-entry1"}},
                           "hops": {"vhop": {"host": "…", "port": 22, "user": "…", "key": {"secret": "vpn-hop-vhop"}}} } },
   "happier": { "mode": "same", "label": "Основной", "serverUrl": "…", "webappUrl": "…" },
-  "bridge":  { "enabled": true, "allowShell": false },
+  "bridge":  { "enabled": true, "allowShell": true },
   "disk":    { "folders": ["Проект", "Проект/docs"] },
   "secrets": { "protected": "master-password", "kdf": {"name": "pbkdf2-sha256", "iterations": 200000, "salt": "…"},
                "check": "enc1:…", "server-key": "enc1:…", "vpn-channel": "enc1:…", … }
