@@ -11,10 +11,11 @@ namespace RemoteAgents.Launcher
     // so the name lives in one place: the text a person reads in the menu is the text the hint tells them to click.
     internal static class DiskMenu
     {
-        internal const string Download = "Скачать на компьютер", KeepServer = "Оставить только на сервере", Upload = "Загрузить на сервер";
+        internal const string Download = "Скачать на компьютер", KeepServer = "Оставить только на сервере", Upload = "Загрузить на сервер", Sync = "Синхронизировать с сервером";
+        internal const string LocalCopyHint = "Локальная копия, не синхронизируется. Правый клик → " + Sync;
         internal const string ServerOnlyHint = "Только на сервере. Правый клик → " + Download;
     }
-    internal enum DiskExplorerKind { Local, ServerOnly, Pending, Syncing, Synced, Paused, Error, Offline, Unavailable, LocalChanges, ServerRemoved }
+    internal enum DiskExplorerKind { Local, ServerOnly, Pending, Syncing, Synced, Paused, Error, Offline, Unavailable, LocalChanges, ServerRemoved, LocalCopy }
     internal sealed class DiskFolderState
     {
         internal string Id = "", Name = "", Path = "", Detail = "";
@@ -31,6 +32,7 @@ namespace RemoteAgents.Launcher
         {
             get {
                 switch (Kind) {
+                    case DiskExplorerKind.LocalCopy: return DiskMenu.LocalCopyHint;
                     case DiskExplorerKind.ServerOnly: return DiskMenu.ServerOnlyHint;
                     case DiskExplorerKind.Synced: return "Синхронизировано с сервером";
                     case DiskExplorerKind.Syncing: return "Синхронизируется: " + Percent + "%";
@@ -121,7 +123,7 @@ namespace RemoteAgents.Launcher
         {
             int at = Array.IndexOf(args, "--disk-shell");
             if (at < 0) return null;
-            if (at + 2 >= args.Length || !new[] { "download", "keep-server", "add" }.Contains(args[at + 1])) throw new ArgumentException("Неизвестная команда Диска");
+            if (at + 2 >= args.Length || !new[] { "download", "sync", "keep-server", "add" }.Contains(args[at + 1])) throw new ArgumentException("Неизвестная команда Диска");
             return new DiskShellRequest { Action = args[at + 1], Path = DiskPaths.Full(args[at + 2]) };
         }
     }

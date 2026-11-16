@@ -45,7 +45,7 @@ namespace RemoteAgents.Launcher
         internal static void Run()
         {
             string temp = Path.Combine(Path.GetTempPath(), "disk-explorer-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(temp);
-            try { RecyclePolicy(); States(); MissingFolders(Path.Combine(temp, "missing")); FolderErrorsAndRemoval(Path.Combine(temp, "removal")); Metadata(Path.Combine(temp, "metadata")); Registry(); Menu(); MenuIcon(); IconFile(Path.Combine(temp, "icons")); StateIcons(Path.Combine(temp, "state-icons")); Commands(Path.Combine(temp, "actions")); Console.WriteLine("PASS: Explorer model, metadata, registry and action fixtures"); HttpAndEvents(Path.Combine(temp, "http")).GetAwaiter().GetResult(); }
+            try { RecyclePolicy(); States(); MissingFolders(Path.Combine(temp, "missing")); FolderErrorsAndRemoval(Path.Combine(temp, "removal")); Metadata(Path.Combine(temp, "metadata")); LocalCopies(Path.Combine(temp, "local-copies")); Registry(); Menu(); MenuIcon(); IconFile(Path.Combine(temp, "icons")); StateIcons(Path.Combine(temp, "state-icons")); Commands(Path.Combine(temp, "actions")); Console.WriteLine("PASS: Explorer model, metadata, registry and action fixtures"); HttpAndEvents(Path.Combine(temp, "http")).GetAwaiter().GetResult(); }
             finally { if (Directory.Exists(temp)) Directory.Delete(temp, true); }
             Console.WriteLine("PASS: " + checks + " local Syncthing / Explorer checks (REST, events, placeholders, HKCU, shell, recycle rollback)");
         }
@@ -215,7 +215,7 @@ namespace RemoteAgents.Launcher
             fs.Write(ini, hint.Replace("Скачать на компьютер", "Забрать с сервера")); writes = fs.Writes; service.Reconcile(root, new[] { row });
             Check(fs.Read(ini).Replace("\r", "") == hint.Replace("\r", "") && fs.Writes == writes + 1, "hint left by the previous version is refreshed");
             File.WriteAllText(Path.Combine(row.Path, "user.txt"), "keep"); service.Reconcile(root, new[] { row });
-            Check(!service.IsPlaceholder(row.Path) && fs.Read(ini).Contains("Error.ico"), "local data invalidates transparent cloud");
+            Check(!service.IsPlaceholder(row.Path) && fs.Read(ini).Contains("LocalCopy.ico") && fs.Read(ini).Contains("Локальная копия, не синхронизируется"), "local data becomes a neutral local copy without an error badge");
             service.CleanupFolder(row.Path, true);
             Check(File.ReadAllText(Path.Combine(row.Path, "user.txt")) == "keep" && !File.Exists(ini) && (fs.Attributes(row.Path) & FileAttributes.ReadOnly) == 0, "cleanup preserves data and restores read-only");
             string foreign = Path.Combine(root, "foreign"); Directory.CreateDirectory(foreign); File.WriteAllText(Path.Combine(foreign, "desktop.ini"), "foreign\r\n");
@@ -230,6 +230,33 @@ namespace RemoteAgents.Launcher
             string empty = Path.Combine(root, "empty"); Check(service.MarkPlaceholder(empty), "eviction placeholder created");
             Check(fs.Read(Path.Combine(empty, "desktop.ini")).Contains("→ Скачать на компьютер"), "eviction placeholder carries the same hint");
             service.CleanupFolder(empty, true); Check(!Directory.Exists(empty), "only owned empty placeholder can be removed");
+        }
+        static void LocalCopies(string temp)
+        {
+            string root = Path.Combine(temp, "Disk"), home = Path.Combine(temp, "state"), path = Path.Combine(root, "BackendLaravel");
+            Directory.CreateDirectory(Path.Combine(path, ".stfolder")); File.WriteAllText(Path.Combine(path, "local.txt"), "local copy");
+            var rest = new FakeRest(); rest.Offer("server-id", "BackendLaravel");
+            var service = Service(new TestFiles()); var commands = new DiskShellCommands(rest, root, service, new DiskPlaceholderCatalog(home), "(?i).git\r\n/desktop.ini\r\n", p => { throw new Exception("never recycle a local copy"); });
+            var snapshot = commands.Read(None); var row = snapshot.Folders.Single();
+            Check(row.Kind == DiskExplorerKind.LocalCopy && row.Tooltip == DiskMenu.LocalCopyHint && row.ServerOnly, "old installation files without a registration have a separate neutral state");
+            service.Reconcile(root, snapshot.Folders);
+            Check(File.ReadAllText(Path.Combine(path, "desktop.ini")).Contains("LocalCopy.ico") && !service.IsPlaceholder(path), "local copy has a plain folder icon and cannot become an empty cloud");
+            var store = new TestRegistry(); var registry = new DiskExplorerRegistry(store, delegate { });
+            registry.Register("/app.exe", root, snapshot.Folders);
+            string prefix = DiskExplorerRegistry.Prefix;
+            Check(store.Read(prefix + "sync", "MUIVerb") == "Синхронизировать с сервером" && store.Read(prefix + "sync", "Icon") == "\"/app.exe\",0", "explicit merge menu item uses the program icon");
+            Check(store.Read(prefix + @"sync\command", "").Contains("--disk-shell sync") && Applies(store.Read(prefix + "sync", "AppliesTo"), path) && !Applies(store.Read(prefix + "add", "AppliesTo"), path) && !store.Exists(prefix + "download") && !store.Exists(prefix + "keep-server"), "local copy offers merge only, no misleading download/upload/eviction item");
+            Check(!rest.Calls.Any(c => c.StartsWith("POST") || c.StartsWith("DELETE")), "read/reconcile never automatically accepts a populated copy");
+            Reject(() => commands.Execute(new DiskShellRequest { Action = "download", Path = path }, None), "download still requires an empty owned placeholder");
+            string message = commands.Execute(DiskShellRequest.Parse(new[] { "--disk-shell", "sync", path }), None);
+            var config = rest.Folders.Single();
+            Check(message.Contains("Слияние") && Json.Str(config, "id") == "server-id" && DiskPaths.Same(Json.Str(config, "path"), path), "explicit merge keeps offered ID and existing path");
+            Check(Json.Str(config, "type") == "sendreceive" && Json.Int(config, "maxConflicts", 0) == -1 && Json.Str(Json.Map(Json.Get(config, "versioning")), "type") == "staggered", "merge uses existing bidirectional acceptance with unlimited conflicts and versioning");
+            Check(File.ReadAllText(Path.Combine(path, "local.txt")) == "local copy" && Directory.Exists(Path.Combine(path, ".stfolder")), "acceptance leaves original files and old Syncthing marker intact");
+            registry.Register("/app.exe", root, commands.Read(None).Folders);
+            Check(!store.Exists(prefix + "sync") && store.Exists(prefix + "keep-server"), "registered copy moves from merge menu to synchronized-folder menu");
+            Reject(() => commands.Execute(new DiskShellRequest { Action = "sync", Path = path }, None), "stale merge command cannot replace a registration");
+            registry.Cleanup(); Check(store.Values.Count == 0, "cleanup removes the merge menu along with other owned verbs");
         }
         internal sealed class TestRegistry : IDiskExplorerRegistry
         {

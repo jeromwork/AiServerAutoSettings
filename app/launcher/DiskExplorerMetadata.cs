@@ -116,6 +116,7 @@ namespace RemoteAgents.Launcher
         internal void Reconcile(string root, IEnumerable<DiskFolderState> folders)
         {
             var rows = folders.ToArray();
+            ClassifyLocalCopies(rows);
             if (!fs.DirectoryExists(root) && !fs.FileExists(root) && !HasReparseAncestor(root) && rows.Any(f => f.ServerOnly)) fs.CreateDirectory(root);
             if (!fs.DirectoryExists(root) || HasReparseAncestor(root)) return;
             foreach (var row in rows.Where(f => f.Kind != DiskExplorerKind.Local)) {
@@ -130,11 +131,8 @@ namespace RemoteAgents.Launcher
                     string ini = Path.Combine(row.Path, "desktop.ini");
                     if ((fs.FileExists(ini) || fs.DirectoryExists(ini)) && metadata == null) continue;
                     bool placeholder = row.ServerOnly && !UserEntries(row.Path).Any() && (created || Flag(metadata, "Placeholder"));
-                    // A pending offer does not give us ownership of a pre-existing local directory.
-                    if (row.ServerOnly && !placeholder) {
-                        if (metadata != null) Apply(row.Path, DiskExplorerKind.Error, "В папке есть локальные файлы; папка не синхронизируется", metadata, false, false);
-                        continue;
-                    }
+                    // A local copy awaits an explicit merge; its files are never an error or an empty placeholder.
+                    if (row.ServerOnly && !placeholder && row.Kind != DiskExplorerKind.LocalCopy) continue;
                     Apply(row.Path, row.Kind, row.Tooltip, metadata, placeholder, created);
                 } catch (Exception e) { Failure(e); }
             }
@@ -143,6 +141,15 @@ namespace RemoteAgents.Launcher
                 if (wanted.Contains(path)) continue;
                 try { if (fs.DirectoryExists(path) && !HasReparseAncestor(path)) CleanupFolder(path, true); }
                 catch (Exception e) { Failure(e); }
+            }
+        }
+        internal void ClassifyLocalCopies(IEnumerable<DiskFolderState> rows)
+        {
+            foreach (var row in rows.Where(f => f.ServerOnly && (f.Kind == DiskExplorerKind.ServerOnly || f.Kind == DiskExplorerKind.LocalCopy))) {
+                try {
+                    if (fs.DirectoryExists(row.Path) && !HasReparseAncestor(row.Path))
+                        row.Kind = IsPlaceholder(row.Path) ? DiskExplorerKind.ServerOnly : DiskExplorerKind.LocalCopy;
+                } catch (Exception e) { Failure(e); }
             }
         }
         internal bool HasReparseAncestor(string path)

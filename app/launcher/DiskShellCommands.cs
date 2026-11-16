@@ -46,7 +46,7 @@ namespace RemoteAgents.Launcher
         internal DiskShellCommands(IDiskRest rest, string root, DiskExplorerService metadata, DiskPlaceholderCatalog catalog, string ignoreRules, Action<string> recycle, int readyTimeout = 30000, string diskHome = null)
         { this.rest = rest; this.root = root; this.metadata = metadata; this.catalog = catalog; this.ignoreRules = ignoreRules; this.recycle = recycle; this.readyTimeout = readyTimeout; this.diskHome = diskHome; }
         internal DiskSnapshot Read(CancellationToken token)
-        { var value = new DiskRestModel(rest, diskHome).Read(root, token); catalog.Merge(rest.Peer, value); return value; }
+        { var value = new DiskRestModel(rest, diskHome).Read(root, token); catalog.Merge(rest.Peer, value); metadata.ClassifyLocalCopies(value.Folders); return value; }
         internal string Execute(DiskShellRequest request, CancellationToken token)
         {
             DiskPaths.Plain(request.Path);
@@ -57,6 +57,12 @@ namespace RemoteAgents.Launcher
             if (request.Action == "keep-server") {
                 if (row == null || row.ServerOnly || row.Config == null || row.Kind != DiskExplorerKind.Synced || !DiskPaths.ValidName(row.Name)) throw new IOException("Сначала дождитесь подтверждённой синхронизации с сервером и проверьте имя папки");
                 Keep(row, token); return "Локальные файлы в Корзине. Папка оставлена только на сервере";
+            }
+            if (request.Action == "sync") {
+                if (row == null || !row.ServerOnly || row.Kind != DiskExplorerKind.LocalCopy || !Directory.Exists(request.Path)) throw new IOException("Нужна локальная копия предложенной сервером папки");
+                // The same send/receive acceptance used by download and the wizard: Syncthing
+                // merges the existing files, with unlimited conflict copies and versioning.
+                Accept(row, snapshot, token); return "Локальная копия подключена к серверу. Слияние и синхронизация запущены";
             }
             if (request.Action == "download") {
                 if (row == null || !row.ServerOnly || row.Kind != DiskExplorerKind.ServerOnly || !metadata.IsPlaceholder(request.Path)) throw new IOException("Нужна пустая заглушка предложенной сервером папки");

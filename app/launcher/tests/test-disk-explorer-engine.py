@@ -160,6 +160,7 @@ with stand_module.Stand() as stand, tempfile.TemporaryDirectory(prefix='explorer
         wait(lambda: not any(f['id'] == 'Vanished' for f in stand.api(local, 'config/folders')), 'PC detaches missing folder after thirty seconds', 38)
         elapsed = time.monotonic() - started
         assert elapsed >= 30, elapsed
+        print(f'PC missing folder detached in {elapsed:.1f}s', flush=True)
         stdout, stderr = process.communicate(timeout=10)
         assert process.returncode == 0, (stdout, stderr)
         assert stdout.count('disk.folder.missing.detached: Vanished') == 1, stdout
@@ -185,3 +186,43 @@ with stand_module.Stand() as stand, tempfile.TemporaryDirectory(prefix='explorer
     assert next(f for f in inspect()['folders'] if f['Id'] == 'Vanished')['kind'] == 'ServerOnly'
     assert not paths['Vanished'].exists() and server_copy.is_file()
     print('PASS: PC missing >=30s detached; server accept_pending copy/files intact; pending offer, no resurrection; brief disappearance, unavailable parent, empty Disk protected', flush=True)
+
+    # Reinstallation: the new client identity has no registration, but old local files
+    # and .stfolder remain. Only the explicit shell command starts the native first merge.
+    backend_server = server['home'] / 'Disk/BackendLaravel'
+    backend_local = disk / 'BackendLaravel'
+    backend_server.mkdir()
+    (backend_local / '.stfolder').mkdir(parents=True)
+    (backend_local / '.stfolder/old-installation-marker').write_text('old fixture identity')
+    for path, content, age in ((backend_server, 'server original', 90), (backend_local, 'local original', 60)):
+        conflict = path / 'same-name.txt'
+        conflict.write_text(content)
+        stamp = time.time() - age
+        os.utime(conflict, (stamp, stamp))
+        (path / ('only-server.txt' if path == backend_server else 'only-local.txt')).write_text(content)
+    stand.api(server, 'config/folders', 'POST', {
+        'id': 'backend-stable-id', 'label': 'BackendLaravel', 'path': str(backend_server),
+        'type': 'sendreceive', 'maxConflicts': -1, 'devices': [{'deviceID': local['deviceId']}],
+    })
+    wait(lambda: 'backend-stable-id' in stand.api(local, 'cluster/pending/folders'), 'BackendLaravel offer for new PC identity')
+    before = inspect()
+    assert next(f for f in before['folders'] if f['Id'] == 'backend-stable-id')['kind'] == 'LocalCopy', before
+    assert not any(f['id'] == 'backend-stable-id' for f in stand.api(local, 'config/folders'))
+    assert (backend_local / 'same-name.txt').read_text() == 'local original'
+    action('sync', backend_local)
+
+    def merged():
+        for path in (backend_server, backend_local):
+            versions = [path / 'same-name.txt', *path.glob('same-name.sync-conflict-*')]
+            if {p.read_text() for p in versions if p.is_file()} != {'server original', 'local original'}:
+                return False
+            if not all((path / name).is_file() for name in ('only-server.txt', 'only-local.txt')):
+                return False
+        return True
+
+    wait(merged, 'explicit C# merge preserves both initial conflicting versions', 35)
+    assert (backend_local / '.stfolder/old-installation-marker').read_text() == 'old fixture identity'
+    config = next(f for f in stand.api(local, 'config/folders') if f['id'] == 'backend-stable-id')
+    assert config['path'] == str(backend_local) and config['maxConflicts'] == -1 and config['versioning']['type'] == 'staggered'
+    wait(lambda: next(f for f in inspect()['folders'] if f['Id'] == 'backend-stable-id')['kind'] == 'Synced', 'merged copy confirms synchronization')
+    print('PASS: local copy after reinstall stays unregistered and neutral; explicit sync merges existing path, preserves .stfolder and both conflicting versions on both engines', flush=True)

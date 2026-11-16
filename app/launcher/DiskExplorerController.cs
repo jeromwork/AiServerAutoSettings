@@ -121,8 +121,8 @@ namespace RemoteAgents.Launcher
             if (File.Exists(manifest)) foreach (string old in Json.Strings(Json.Parse(File.ReadAllText(manifest))))
                 if (!paths.Any(p => DiskPaths.Same(p, old))) metadata.CleanupFolder(old, true);
             metadata.Reconcile(currentRoot, snapshot.Folders);
-            // Download is offered only on our empty placeholders, never on an unrelated directory of the same name.
-            registry.Register(ProgramPath, currentRoot, snapshot.Folders.Where(f => !f.ServerOnly || metadata.IsPlaceholder(f.Path)), home, MenuIcon());
+            // Empty placeholders offer download; existing local copies offer an explicit merge.
+            registry.Register(ProgramPath, currentRoot, snapshot.Folders.Where(f => !f.ServerOnly || f.Kind == DiskExplorerKind.LocalCopy || metadata.IsPlaceholder(f.Path)), home, MenuIcon());
             string content = Json.Encode(paths);
             if (!File.Exists(manifest) || File.ReadAllText(manifest) != content) Files.Atomic(manifest, content);
             last = snapshot; lastRoot = currentRoot;
