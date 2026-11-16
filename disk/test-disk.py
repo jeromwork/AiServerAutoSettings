@@ -1306,6 +1306,14 @@ class ServerHardeningTests(unittest.TestCase):
 
 
 class MissingFolderTests(unittest.TestCase):
+    def offer_again(self, t, computer, server, folder_id):
+        # DELETE updates the server's ClusterConfig, but the client's unchanged offer is
+        # processed again only on a fresh ClusterConfig (e.g. after reconnecting).
+        route = '?device=' + server['deviceId']
+        t.api(computer, 'system/pause' + route, 'POST')
+        t.api(computer, 'system/resume' + route, 'POST')
+        wait(lambda: folder_id in t.api(server, 'cluster/pending/folders'), 'retained client copy offered again', 30)
+
     def forget(self, t, server, ns, now, api=None):
         folders = t.api(server, 'config/folders')
         stderr = io.StringIO()
@@ -1354,7 +1362,7 @@ class MissingFolderTests(unittest.TestCase):
             self.assertIn(server['deviceId'], {d['deviceID'] for d in t.folder(computer, 'Ephemeral')['devices']})
             self.assertTrue(t.api(computer, 'system/connections')['connections'][server['deviceId']]['connected'])
             # The client continues to offer its local registration. Reconcile must not accept it back.
-            wait(lambda: 'Ephemeral' in t.api(server, 'cluster/pending/folders'), 'client offers the retained local copy')
+            self.offer_again(t, computer, server, 'Ephemeral')
             for _ in range(2):
                 self.assertEqual(bootstrap_tick(t, server), '')
                 self.assertFalse(project.exists())
@@ -1450,7 +1458,7 @@ class MissingFolderTests(unittest.TestCase):
             with server_helpers(server['home']) as ns:
                 self.forget(t, server, ns, 1000)
                 self.assertIn('регистрация снята', self.forget(t, server, ns, 1030))
-            wait(lambda: 'incoming-id' in t.api(server, 'cluster/pending/folders'), 'old upload offered again')
+            self.offer_again(t, computer, server, 'incoming-id')
             t.server(server, 'bootstrap')
             self.assertFalse(project.exists())
             self.assertEqual((source / 'source.txt').read_text(), 'incoming-id')
