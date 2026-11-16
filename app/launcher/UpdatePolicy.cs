@@ -16,6 +16,9 @@ namespace RemoteAgents.Launcher
         internal static bool Defaults(Dictionary<string, object> settings)
         {
             var update = Json.Map(Json.Get(settings, "update")); bool changed = !settings.ContainsKey("update");
+            // Builds before auto-update wrote {"enabled": false} by themselves; that was never a decision.
+            // An explicit opt-out always carries "auto" (owner decision 16.11.2026: updates are on by default).
+            if (!update.ContainsKey("auto") && update.ContainsKey("enabled")) { update["enabled"] = true; changed = true; }
             foreach (var pair in new Dictionary<string, object> { { "enabled", true }, { "auto", true }, { "intervalHours", 6 }, { "remoteDir", "~/.local/share/remote-agents/dist" } })
                 if (!update.ContainsKey(pair.Key)) { update[pair.Key] = pair.Value; changed = true; }
             settings["update"] = update; return changed;

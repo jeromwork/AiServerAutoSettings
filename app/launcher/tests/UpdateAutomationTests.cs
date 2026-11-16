@@ -34,6 +34,10 @@ namespace RemoteAgents.Launcher
             Check(!UpdatePolicy.Defaults(settings), "migration idempotent");
             update["enabled"] = false; update["auto"] = false; UpdatePolicy.Defaults(settings);
             Check(!Json.Bool(update, "enabled") && !Json.Bool(update, "auto"), "explicit choices preserved");
+            var legacy = Json.Map(null); legacy["update"] = new Dictionary<string, object> { { "enabled", false }, { "remoteDir", "~/custom/dist" } };
+            Check(UpdatePolicy.Defaults(legacy), "old self-written default migrated");
+            var migrated = Json.Map(legacy["update"]);
+            Check(Json.Bool(migrated, "enabled") && Json.Bool(migrated, "auto") && Json.Str(migrated, "remoteDir") == "~/custom/dist", "old disabled default becomes auto-update, remoteDir kept");
             var schedule = new UpdateSchedule(); var now = DateTime.UtcNow;
             update["enabled"] = true; Check(schedule.Due(now, update, false), "startup check"); schedule.Started(now, update);
             Check(!schedule.Due(now.AddHours(5.99), update, false) && schedule.Due(now.AddHours(6), update, false), "six hour retry after every result");
