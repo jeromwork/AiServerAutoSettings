@@ -43,7 +43,7 @@ class FirstRunTests(unittest.TestCase):
         tray = source('TrayContext.cs')
         constructor = tray.split('public TrayContext(', 1)[1].split('void RunFirstSetup()', 1)[0]
         self.assertIn('&& FirstInstall.Required(home)', constructor)
-        self.assertIn('if (!firstSetup) { engine.Recover(); Bootstrap(); LoadComponents(); }', constructor)
+        self.assertIn('if (!firstSetup) { engine.Recover(); Bootstrap(); LoadComponents();', constructor)
         self.assertIn('if (firstSetup) { RunFirstSetup(); return; }', constructor)
         self.assertIn('Visible = !firstSetup', constructor)
 
@@ -88,7 +88,8 @@ class FirstRunTests(unittest.TestCase):
         self.assertLess(first.index('if(FirstInstall.Required(home)){ExitThread();return;}'), first.index('icon.Visible=true'))
         shutdown = tray.split('protected override void ExitThreadCore()', 1)[1]
         self.assertIn('stop.Cancel()', shutdown)
-        self.assertIn('foreach (var r in runtimes) r.Dispose()', shutdown)
+        self.assertIn('bool preserveVpn = RestartRequested && keepVpnOnRestart', shutdown)
+        self.assertIn('foreach (var r in runtimes) r.Dispose(preserveVpn)', shutdown)
         self.assertIn('icon.Dispose()', shutdown)
         self.assertIn('StopManagedComponents()', shutdown)
         self.assertIn('Stop-ManagedControl $Root', tray)

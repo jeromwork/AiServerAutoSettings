@@ -140,7 +140,7 @@ namespace RemoteAgents.Launcher
                 Check("toggle-preserves-concurrent-config", Json.Str(Json.Read(realConfig.PathName), "newNode") == "kept");
                 string unchangedHash = Files.Hash(realConfig.PathName); new Configuration(Path.Combine(work, "configuration"));
                 Check("config-read-does-not-rewrite", Files.Hash(realConfig.PathName) == unchangedHash);
-                Check("manual-ssh-default-off", !Json.Bool(reloaded.Update, "enabled"));
+                Check("auto-ssh-default-on", Json.Bool(reloaded.Update, "enabled") && Json.Bool(reloaded.Update, "auto") && Json.Int(reloaded.Update, "intervalHours", 0) == 6);
                 var vpnComponent = Component.Read(Json.Parse("{\"name\":\"vpn\",\"exe\":\"powershell.exe\",\"commandManaged\":true,\"stopFile\":\"state/vpn.stop\"}"));
                 Check("command-managed-defaults", vpnComponent.CommandManaged && !vpnComponent.Default && !vpnComponent.Critical && !vpnComponent.Elevated && vpnComponent.StopFile == "state/vpn.stop");
                 var transportComponent=Component.Read(Json.Parse("{\"name\":\"transport\",\"exe\":\"unused\",\"enabledByDefault\":true,\"requiresConfig\":[\"transport.profilePath\",\"transport.channelPath\"]}"));

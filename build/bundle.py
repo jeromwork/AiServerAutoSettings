@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 import tempfile
 import zipfile
 
@@ -143,7 +144,7 @@ def make(version, outdir, launcher=None, product="RemoteAgents", binaries=False)
             contents[name] = data
     contents['bundle-version.txt'] = (version + '\n').encode()
     if launcher:
-        contents['RemoteAgents.exe'] = Path(launcher).read_bytes()
+        contents[product + '.exe'] = Path(launcher).read_bytes()
     contents['bundle-files.txt'] = ('\n'.join(sorted(contents)) + '\n').encode()
     fd, temp = tempfile.mkstemp(prefix='.bundle-', dir=outdir)
     os.close(fd)
@@ -174,9 +175,11 @@ def attach_launcher(archive, launcher, output):
             # SSH/OTA updates never carry the embedded third-party binaries: the first run copied them
             # out of the initial bundle (transport-bin), an update must stay small.
             pinned_targets = {row['target'] for row in pinned()}
-            names = (set(source.namelist()) - pinned_targets) | {'RemoteAgents.exe'}
+            product = 'RemoteVPN' if 'product.txt' in source.namelist() and source.read('product.txt').strip() == b'RemoteVPN' else 'RemoteAgents'
+            exe_name = product + '.exe'
+            names = (set(source.namelist()) - pinned_targets) | {exe_name}
             for name in sorted(names):
-                if name == 'RemoteAgents.exe':
+                if name == exe_name:
                     data = Path(launcher).read_bytes()
                 elif name == 'bundle-files.txt':
                     data = ('\n'.join(sorted(names - {'bundle-files.txt'})) + '\n').encode()
@@ -212,15 +215,20 @@ def publish(archive, dest, minimum='1.0.0', launcher=None):
     safe_version(minimum)
     archive = Path(archive).resolve()
     dest = Path(dest).expanduser().resolve()
+    if Path(tempfile.gettempdir()).resolve() not in dest.parents:
+        subprocess.run([str(ROOT / 'build/require-main.sh')], check=True)
     dest.mkdir(parents=True, exist_ok=True, mode=0o755)
     os.chmod(dest, 0o755)
     with zipfile.ZipFile(archive) as z:
         version = safe_version(z.read('bundle-version.txt').decode('utf-8-sig').strip())
         json.loads(z.read('components.json').decode('utf-8-sig'))
-        embedded_exe = z.read('RemoteAgents.exe') if 'RemoteAgents.exe' in z.namelist() else None
-    manifest = dict(version=version, file=version+'.zip', sha256=digest(archive), size=archive.stat().st_size, minLauncher=minimum)
+        product = 'RemoteVPN' if 'product.txt' in z.namelist() and z.read('product.txt').strip() == b'RemoteVPN' else 'RemoteAgents'
+        embedded_exe = z.read(product + '.exe') if product + '.exe' in z.namelist() else None
+    manifest = dict(version=version, file=version+'.zip', sha256=digest(archive), size=archive.stat().st_size, minLauncher=minimum, configSchema=1, product=product)
     if embedded_exe:
         manifest['launcher'] = dict(version=file_version(embedded_exe), sha256=hashlib.sha256(embedded_exe).hexdigest())
+    if launcher and embedded_exe != Path(launcher).read_bytes():
+        raise ValueError('EXE отличается от EXE в архиве')
     data = archive.read_bytes()
     target = dest / manifest['file']
     # A version URL is immutable: concurrent clients must never get different content for it.
@@ -229,7 +237,9 @@ def publish(archive, dest, minimum='1.0.0', launcher=None):
     put_atomic(target, data)
     if launcher:
         exe = Path(launcher).read_bytes()
-        put_atomic(dest / 'RemoteAgents.exe', exe)
+        if embedded_exe != exe:
+            raise ValueError('EXE отличается от EXE в архиве')
+        put_atomic(dest / (product + '.exe'), exe)
     # Readers see the new manifest only after every payload is in place.
     put_atomic(dest / 'manifest.json', (json.dumps(manifest, ensure_ascii=False, indent=2)+'\n').encode())
     print(json.dumps(manifest, ensure_ascii=False, indent=2))

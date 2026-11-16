@@ -536,8 +536,11 @@ namespace RemoteAgents.Launcher
                 }
                 string root = Path.Combine(temp, "Disk"), bundle = Path.Combine(temp, "bundle"); Directory.CreateDirectory(Path.Combine(bundle, "disk")); File.WriteAllText(Path.Combine(bundle, "disk", "stignore.txt"), ".git\n.env*\n/desktop.ini\n");
                 api.Rest.Offer("id-a", "First"); var fs = new TestFiles(); var service = Service(fs); var store = new TestRegistry();
-                var notices = new ConcurrentQueue<string>();
-                using (var controller = new DiskExplorerController(Path.Combine(temp, "app"), () => root, () => bundle, () => true, () => true, (m, ok) => notices.Enqueue(m), delegate { }, service, new DiskExplorerRegistry(store, delegate { }), api.Home)) {
+                var notices = new ConcurrentQueue<string>(); bool acceptedBusy = false; DiskExplorerController observedController = null;
+                using (var controller = new DiskExplorerController(Path.Combine(temp, "app"), () => root, () => bundle, () => true, () => true,
+                    (m, ok) => { notices.Enqueue(m); if (notices.Count == 1 && observedController != null) acceptedBusy = observedController.Busy; },
+                    delegate { }, service, new DiskExplorerRegistry(store, delegate { }), api.Home)) {
+                    observedController = controller;
                     await Until(() => Directory.Exists(Path.Combine(root, "First")));
                     await Until(() => api.LongPolls >= 2);
                     int calls = api.Requests; await Task.Delay(200); Check(api.Requests == calls, "quiet long-poll does not poll statuses");
@@ -546,7 +549,8 @@ namespace RemoteAgents.Launcher
                     Check(service.IsPlaceholder(Path.Combine(root, "Second")), "pending event creates new placeholder without timer polling");
                     var watch = Stopwatch.StartNew(); controller.Submit(new DiskShellRequest { Action = "download", Path = Path.Combine(root, "First") });
                     Check(watch.ElapsedMilliseconds < 1000 && notices.Count > 0, "click acknowledged within one second while events wait on separate connection");
-                    await Until(() => notices.Count >= 2);
+                    Check(acceptedBusy, "submitted Disk command blocks an update before its worker runs");
+                    await Until(() => notices.Count >= 2 && !controller.Busy);
                     string firstIni = Path.Combine(root, "First", "desktop.ini");
                     Check(File.ReadAllText(firstIni).Contains("Synced.ico"), "command completes without waiting for long-poll");
                     controller.Dispose(); Check(await Task.Run(() => controller.Wait(3000)), "monitor exits promptly while long-poll is blocked");

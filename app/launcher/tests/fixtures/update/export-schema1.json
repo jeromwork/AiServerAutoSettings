@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "version": 1,
+  "profile": {
+    "kind": "remoteagents-config", "schema": 1,
+    "device": {"name": "Тестовый компьютер"},
+    "server": {"address": "server.example.invalid", "login": "worker", "key": {"secret": "server-key"}},
+    "bridge": {"enabled": true, "allowShell": true}
+  },
+  "update": {"enabled": false}
+}

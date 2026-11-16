@@ -93,11 +93,14 @@ class Env:
         self.route_password = self.private('route-password', 'HOP-PASSWORD\n')
         self.log = self.dir / 'auth.log'
         self.cfg = self.dir / 'config-export.json'
+        # Never fall back to this host's live /var/lib/remoteagents-status/server-config.json.
+        snapshot = self.dir / 'server-config.json'
+        snapshot.write_text('{}\n'); snapshot.chmod(0o644)
         self.c = dict(schema=1, version=1, serverAddress='127.0.0.1', serverPort=22, workerUser=USER,
                       hostKeys=[self.host_pub], workerAuthorizedKeys=str(self.auth), stateDir=str(self.dir / 'state'),
                       syncFile=str(self.home / '.config/remoteagents/config-sync.json'),
                       nodeCatalog=str(self.home / '.local/share/remote-agents-nodes'), catalogFile=str(self.catalog),
-                      authLog=[str(self.log)], routes=[{'kind': 'direct'}], happier={'home': str(self.home)})
+                      authLog=[str(self.log)], routes=[{'kind': 'direct'}], happier={'home': str(self.home)}, serverConfig=str(snapshot))
         self.c.update(extra)
         native_happier(self.home)
         self.write()
@@ -137,7 +140,7 @@ class ConfigExportTests(unittest.TestCase):
         self.e = Env(self.tmp.name)
         # Защита от ошибки в тесте: ни один путь не должен вести в настоящий HOME.
         c = rc.settings(self.e.cfg)
-        for field in ('workerAuthorizedKeys', 'syncFile', 'nodeCatalog', 'stateDir', 'catalogFile'):
+        for field in ('workerAuthorizedKeys', 'syncFile', 'nodeCatalog', 'stateDir', 'catalogFile', 'serverConfig'):
             self.assertTrue(c[field].startswith(self.tmp.name), field)
 
     def lines(self):
@@ -167,6 +170,16 @@ class ConfigExportTests(unittest.TestCase):
         self.assertNotEqual(rejected.returncode, 0)
         self.assertNotIn(b'INLINE_SECRET_SENTINEL', rejected.stderr)
         self.assertEqual(self.lines(), before)
+
+    def test_program_updates_default_on_and_explicit_override(self):
+        config, _ = self.e.export()
+        self.assertEqual(config['update'], dict(enabled=True, auto=True, intervalHours=6, remoteDir='~/.local/share/remote-agents/dist'))
+        self.e.c['update'] = dict(enabled=False, auto=False, intervalHours=12)
+        self.e.write()
+        config, _ = self.e.export('Без обновлений')
+        self.assertEqual(config['update']['enabled'], False)
+        self.assertEqual(config['update']['auto'], False)
+        self.assertEqual(config['update']['intervalHours'], 12)
 
     def test_export_happier_web_uses_server_port_and_stable_client_origin(self):
         desired = {'serverComponents': {'happier': {'enabled': True}, 'happierWeb': {'enabled': True, 'port': 47833, 'keepChats': 9}}}

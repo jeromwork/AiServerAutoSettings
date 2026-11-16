@@ -30,7 +30,7 @@ namespace RemoteAgents.Launcher
                     parent = Process.GetProcessById(int.Parse(Program.Option(args, "--vpn-parent")));
                     var pinned = parent.Handle; // Pin the original process, never trust a reused PID.
                     if (parent.StartTime.ToUniversalTime().Ticks != long.Parse(Program.Option(args, "--vpn-parent-start"))) return 1;
-                    if (Stopped(home, session, parent)) { state = "off"; return 1; }
+                    if (Stopped(home, session, ref parent)) { state = "off"; return 1; }
                     Files.Atomic(Path.Combine(home, "state/vpn-host.json"), Json.Encode(new { pid = Process.GetCurrentProcess().Id, startedTicks = Process.GetCurrentProcess().StartTime.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture), session }));
                     job = new NativeJob();
                     string powershell = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"WindowsPowerShell\v1.0\powershell.exe");
@@ -38,13 +38,13 @@ namespace RemoteAgents.Launcher
                     using (var prepare = job.StartRedirected(powershell, new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-Home", home, "-Worker", "-Session", session }, Path.GetDirectoryName(script), null)) {
                         var budget = Stopwatch.StartNew();
                         while (!prepare.HasExited) {
-                            if (Stopped(home, session, parent) || budget.ElapsedMilliseconds > 30000) throw new IOException();
+                            if (Stopped(home, session, ref parent) || budget.ElapsedMilliseconds > 30000) throw new IOException();
                             Thread.Sleep(VpnWatchdog.PollMs);
                         }
                         if (prepare.ExitCode != 0) { state = Json.Str(Read(home, "status/vpn.json"), "state"); if (VpnWatchdog.FailureSummary(state).Length == 0) state = "error"; return 1; }
                     }
                     var plan = Read(home, "state/vpn-plan.json");
-                    if (Json.Str(plan, "session") != session || Stopped(home, session, parent)) throw new IOException();
+                    if (Json.Str(plan, "session") != session || Stopped(home, session, ref parent)) throw new IOException();
                     dnsPolicy = Json.Map(Json.Get(plan, "dnsPolicy"));
                     string tag = Json.Str(plan, "tag"), network = Json.Str(plan, "network"), revision = Json.Str(plan, "revision");
                     tunName = Json.Str(plan, "interfaceName");
@@ -67,7 +67,7 @@ namespace RemoteAgents.Launcher
                         DateTime now = DateTime.UtcNow;
                         if ((now - previous).TotalMilliseconds > 3000 || now < previous) { state = "resumed"; break; }
                         previous = now;
-                        if (Stopped(home, session, parent)) { state = "off"; break; }
+                        if (Stopped(home, session, ref parent)) { state = "off"; break; }
                         if (core.HasExited) { state = "core-exited"; break; }
                         if (probe == null && clock.ElapsedMilliseconds >= next) {
                             if (PhysicalFingerprint(physical) != fingerprint) { state = "network-changed"; break; }
@@ -127,8 +127,8 @@ namespace RemoteAgents.Launcher
         }
         static Dictionary<string, object> Read(string home, string relative)
         { try { return Json.Read(Path.Combine(home, relative)); } catch { return Json.Map(null); } }
-        static bool Stopped(string home, string session, Process parent)
-        { return parent.HasExited || File.Exists(Path.Combine(home, "stop")) || File.Exists(Path.Combine(home, "state/vpn.stop")) || Json.Str(Read(home, "state/vpn-session.json"), "session") != session; }
+        static bool Stopped(string home, string session, ref Process parent)
+        { return (parent.HasExited && !VpnUpdateHandoff.Follow(home, session, ref parent)) || File.Exists(Path.Combine(home, "stop")) || File.Exists(Path.Combine(home, "state/vpn.stop")) || Json.Str(Read(home, "state/vpn-session.json"), "session") != session; }
         static string PhysicalFingerprint(string name)
         {
             var net = NetworkInterface.GetAllNetworkInterfaces().FirstOrDefault(n => n.Name == name && n.OperationalStatus == OperationalStatus.Up);

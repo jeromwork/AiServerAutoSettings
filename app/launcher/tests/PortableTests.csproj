@@ -20,6 +20,11 @@
     <IntermediateOutputPath>obj/$(Configuration)/config-e2e/</IntermediateOutputPath>
     <OutputPath>bin/$(Configuration)/config-e2e/</OutputPath>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(UpdateTests)' == 'true'">
+    <StartupObject>RemoteAgents.Launcher.UpdateAutomationTests</StartupObject>
+    <IntermediateOutputPath>obj/$(Configuration)/update-tests/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/update-tests/</OutputPath>
+  </PropertyGroup>
   <ItemGroup>
     <EmbeddedResource Include="../../../transport/product-features.json" LogicalName="RemoteAgents.ProductFeatures.json" />
     <Compile Include="PortableJson.cs" />
@@ -55,6 +60,11 @@
     <Compile Include="../UpgradeInstaller.cs" Link="UpgradeInstaller.cs" />
     <Compile Include="../StatusView.cs" Link="StatusView.cs" />
     <Compile Include="../Data.cs" Link="Data.cs" />
+    <Compile Include="../VpnUpdateHandoff.cs" />
+    <Compile Include="UpdateAutomationTests.cs" />
+    <Compile Include="../UpdateProbe.cs" />
+    <Compile Include="../UpdatePolicy.cs" />
+    <Compile Include="../UpdateEnvironment.cs" />
     <Compile Include="../UpdateEngine.cs" Link="UpdateEngine.cs" />
     <Compile Include="../UpdateSelfTests.cs" Link="UpdateSelfTests.cs" />
     <Compile Include="../SshUpdate.cs" Link="SshUpdate.cs" />

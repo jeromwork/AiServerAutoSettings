@@ -27,6 +27,7 @@
     "serverConfig": { "$ref": "#/$defs/path", "description": "Публичный снимок серверных разделов после server-apply; секреты остаются именованными ссылками" },
     "authLog": { "type": "array", "items": { "$ref": "#/$defs/path" }, "description": "Журналы sshd для «последнего входа»; по умолчанию journalctl (нужен root или группа adm/systemd-journal)" },
     "catalogFile": { "$ref": "#/$defs/path", "description": "Общий каталог связи; по умолчанию ~рабочего/.config/remoteagents/transport-catalog.json" },
+    "update": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "auto": {"type": "boolean"}, "intervalHours": {"type": "integer", "minimum": 1, "maximum": 168}, "remoteDir": {"type": "string", "maxLength": 2048, "minLength": 1}}, "additionalProperties": false},
     "routes": {
       "type": "array", "minItems": 1, "description": "Порядок маршрутов; по умолчанию только direct",
       "items": {

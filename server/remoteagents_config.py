@@ -207,12 +207,18 @@ def settings(path=None):
     require(isinstance(c, dict) and c.get('schema') == 1 and c.get('version') == 1, 'Неизвестная схема настроек выдачи')
     allowed = {'schema', 'version', '$schema', 'serverAddress', 'serverPort', 'hostKeys', 'hostKeyFiles', 'workerUser',
                'workerAuthorizedKeys', 'stateDir', 'syncFile', 'nodeCatalog', 'routes', 'catalogFile', 'vpnBootstrap',
-               'happier', 'authLog', 'serverConfig'}
+               'happier', 'authLog', 'serverConfig', 'update'}
     unknown = set(c) - allowed
     require(not unknown, 'Неизвестные поля в настройках выдачи: ' + ', '.join(sorted(unknown)))
     require(isinstance(c.get('workerUser'), str) and USER_RE.fullmatch(c['workerUser']) and c['workerUser'] != 'root', 'workerUser: рабочий пользователь (не root)')
     require(isinstance(c.get('serverAddress'), str) and HOST_RE.fullmatch(c['serverAddress']), 'serverAddress: адрес сервера')
     require(type(c.get('serverPort')) is int and 1 <= c['serverPort'] <= 65535, 'serverPort: 1–65535')
+    update = c.get('update', {})
+    require(isinstance(update, dict) and not (set(update) - {'enabled', 'auto', 'intervalHours', 'remoteDir'}), 'update: неизвестные поля')
+    for field in ('enabled', 'auto'):
+        require(field not in update or type(update[field]) is bool, 'update.' + field + ': true/false')
+    require(type(update.get('intervalHours', 6)) is int and 1 <= update.get('intervalHours', 6) <= 168, 'update.intervalHours: 1–168')
+    require('remoteDir' not in update or (isinstance(update['remoteDir'], str) and 1 <= len(update['remoteDir']) <= 2048 and not any(ch in update['remoteDir'] for ch in '\r\n\x00')), 'update.remoteDir: непустой путь без переводов строк')
     home = worker_home(c)
     c.setdefault('workerAuthorizedKeys', str(home / '.ssh/authorized_keys'))
     c.setdefault('syncFile', str(home / '.config/remoteagents/config-sync.json'))
@@ -910,6 +916,7 @@ def export(c, args, out=sys.stdout, err=sys.stderr):
     else:
         happier.update(mode='new', label=clean_name(args.happier[4:] or name))  # без названия аккаунт подписан именем компьютера
     config['happier'] = happier
+    config['update'] = {'enabled': True, 'auto': True, 'intervalHours': 6, 'remoteDir': '~/.local/share/remote-agents/dist', **c.get('update', {})}
     config['bridge'] = {'enabled': True, 'allowShell': True}  # конституция 6д
     if folders is not None:
         config['disk'] = {'folders': folders}

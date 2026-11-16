@@ -119,6 +119,8 @@ wait_for_memory() {
   wait_for_memory
   timeout 120 python3 "$here/test_build.py"
   wait_for_memory
+  timeout 120 python3 "$here/test_update_release.py"
+  wait_for_memory
   timeout 60 python3 "$here/test_app_icon.py"
   wait_for_memory
   timeout 120 python3 "$here/test_state_icons.py"

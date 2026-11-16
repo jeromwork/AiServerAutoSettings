@@ -65,6 +65,35 @@ namespace RemoteAgents.Launcher
                 throw;
             }
         }
+        // OTA uses the already verified bundle and the same image receipt / rollback as manual upgrades.
+        public static void ActivatePrepared(string home, UpdateEngine engine, Manifest manifest)
+        {
+            string target = Path.Combine(home, Product.ExeName), backup = Path.Combine(home, Product.Name + ".previous.exe");
+            string source = Path.Combine(engine.Folder(manifest.Version), Product.ExeName);
+            if (engine.Pending || File.Exists(Path.Combine(engine.Root, "exe-upgrade.json"))) throw new InvalidOperationException("Обновление ещё проверяется");
+            if (!File.Exists(target) || !Files.Hash(source).Equals(manifest.LauncherHash, StringComparison.OrdinalIgnoreCase) ||
+                Files.Compare(FileVersionInfo.GetVersionInfo(source).FileVersion, manifest.LauncherVersion) != 0) throw new InvalidDataException("Проверка EXE не прошла");
+            File.Copy(target, backup, true);
+            Json.Write(Path.Combine(engine.Root, "exe-upgrade.json"), new { version = manifest.Version, previous = engine.Current,
+                launcherVersion = manifest.LauncherVersion, startedUtc = DateTime.UtcNow.ToString("o"), previousHash = Files.Hash(backup), currentHash = Files.Hash(source) });
+            try { ReplaceImage(source, target); engine.Activate(manifest.Version); }
+            catch {
+                if (engine.Pending && engine.Current == manifest.Version) engine.Rollback(); else engine.Recover();
+                ReplaceImage(backup, target); File.Delete(Path.Combine(engine.Root, "exe-upgrade.json")); throw;
+            }
+        }
+        public static void NoteImageProcess(string home)
+        {
+            string root = Path.Combine(home, Product.BundleDirectory), receipt = Path.Combine(root, "exe-upgrade.json");
+            if (!File.Exists(receipt)) return;
+            var record = Json.Read(receipt);
+            if (!Files.Hash(ProgramImage()).Equals(Json.Str(record, "currentHash"), StringComparison.OrdinalIgnoreCase)) return;
+            using (var process = Process.GetCurrentProcess()) {
+                record["pid"] = process.Id; record["processStarted"] = process.StartTime.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                Json.Write(receipt, record);
+            }
+        }
+        static string ProgramImage() { return Assembly.GetExecutingAssembly().Location; }
         public static void ReplaceImage(string source, string target)
         {
             string tmp = target + ".install.tmp", retired = target + ".retired";
@@ -93,7 +122,8 @@ namespace RemoteAgents.Launcher
             if (bundleResult == "rollback" || expired || engine.Current != Json.Str(p, "version")) {
                 string backup = Path.Combine(home, Product.Name + ".previous.exe");
                 if (!File.Exists(backup) || !Files.Hash(backup).Equals(Json.Str(p, "previousHash"), StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Нет прежнего EXE");
-                if (engine.Pending) engine.Rollback();
+                if (engine.Pending || (engine.Current == Json.Str(p, "version") && engine.Current != Json.Str(p, "previous"))) engine.Rollback();
+                if (engine.Current != Json.Str(p, "version")) engine.MarkBad(Json.Str(p, "version"));
                 ReplaceImage(backup, Path.Combine(home, Product.ExeName)); File.Delete(record); return "rollback";
             }
             if (healthy && !engine.Pending) { File.Delete(record); return "accepted"; }

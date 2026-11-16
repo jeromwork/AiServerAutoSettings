@@ -67,5 +67,11 @@
   "secrets": {
     "server-key": "",
     "happier-key": ""
+  },
+  "update": {
+    "enabled": true,
+    "auto": true,
+    "intervalHours": 6,
+    "remoteDir": "~/.local/share/remote-agents/dist"
   }
 }

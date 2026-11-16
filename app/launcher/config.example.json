@@ -16,8 +16,10 @@
     }
   },
   "update": {
-    "remoteDir": "~/.local/share/remote-agents/dist",
-    "enabled": false
+    "enabled": true,
+    "auto": true,
+    "intervalHours": 6,
+    "remoteDir": "~/.local/share/remote-agents/dist"
   },
   "happier": {
     "serverUrl": "https://happier-api.example.invalid",

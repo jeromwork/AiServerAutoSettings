@@ -1787,6 +1787,33 @@
       "type": "string",
       "minLength": 0,
       "maxLength": 2048
+    },
+    "update": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "auto": {
+          "type": "boolean"
+        },
+        "intervalHours": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 168
+        },
+        "remoteDir": {
+          "type": "string",
+          "maxLength": 2048,
+          "minLength": 1
+        },
+        "hint": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2048
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false,

@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "components": {"transport": {"enabled": true}, "control": {"enabled": false}},
+  "transport": {"profilePath": "C:\\Users\\Test\\profile.json"}
+}

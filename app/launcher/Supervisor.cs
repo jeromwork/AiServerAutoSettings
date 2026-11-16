@@ -51,9 +51,10 @@ namespace RemoteAgents.Launcher
         }
         public object Snapshot() { return new { name = Definition.Name, title = Definition.Title, enabled = Enabled, critical = Definition.Critical, alive = Alive, ok = Healthy, summary = Summary, pid = Alive && process != null ? (int?)process.Id : null }; }
         public void SetEnabled(bool enabled) { Dispose(); Enabled = enabled; attempted = false; next = DateTime.MinValue; delay = 5; Tick(); }
-        public void Dispose()
+        public void Dispose() { Dispose(false); }
+        public void Dispose(bool preserveCommandManaged)
         {
-            if (Definition.CommandManaged && Definition.StopFile.Length > 0) {
+            if (!preserveCommandManaged && Definition.CommandManaged && Definition.StopFile.Length > 0) {
                 // Only the module-owned stop flag; never stop foreign tasks, processes or routes.
                 try { Files.Atomic(Files.Under(home, Definition.StopFile), "stop\n"); } catch { log.Write("component." + Definition.Name + ".stop.failed"); }
             }

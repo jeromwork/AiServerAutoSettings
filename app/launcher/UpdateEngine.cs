@@ -11,6 +11,7 @@ namespace RemoteAgents.Launcher
     internal sealed class Manifest
     {
         public string Version, FileName, Sha256, Minimum, LauncherVersion, LauncherHash; public long Size;
+        public int ConfigSchema;
         public Dictionary<string, object> Data;
         public static Manifest Parse(string text)
         {
@@ -19,6 +20,7 @@ namespace RemoteAgents.Launcher
                 Minimum = Json.Text(d, "minLauncher", "1.0.0"), LauncherVersion = Json.Str(launcher, "version"), LauncherHash = Json.Str(launcher, "sha256") };
             if (!System.Text.RegularExpressions.Regex.IsMatch(m.FileName, "^[A-Za-z0-9][A-Za-z0-9._-]*\\.zip$") || m.FileName.Contains("..")) throw new InvalidDataException("Недопустимое имя архива");
             if (!long.TryParse(Json.Str(d, "size"), out size) || size < 1 || size > 512L * 1024 * 1024) throw new InvalidDataException("Недопустимый размер");
+            m.ConfigSchema = Json.Int(d, "configSchema", 1); if (d.ContainsKey("configSchema") && (d["configSchema"] is string || d["configSchema"] is bool || !int.TryParse(Json.Str(d, "configSchema"), out m.ConfigSchema)) || m.ConfigSchema < 1) throw new InvalidDataException("Неверная схема конфига в манифесте");
             m.Size = size; Files.HashValid(m.Sha256); Files.SafeVersion(m.Minimum);
             if (m.LauncherVersion.Length != 0) { Files.SafeVersion(m.LauncherVersion); Files.HashValid(m.LauncherHash); }
             return m;
@@ -55,6 +57,7 @@ namespace RemoteAgents.Launcher
                     var exe = Path.Combine(tmp, Product.ExeName);
                     if (!File.Exists(exe) || !Files.Hash(exe).Equals(m.LauncherHash, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Проверка лаунчера не прошла");
                 }
+                if (m.Data.ContainsKey("configSchema") && !File.Exists(Path.Combine(tmp, "selftest.ps1"))) throw new InvalidDataException("Нет самопроверки бандла");
                 if (File.Exists(Path.Combine(tmp, "selftest.ps1")) && !selftest(tmp)) { MarkBad(m.Version); throw new InvalidDataException("Самопроверка бандла не прошла"); }
                 token.ThrowIfCancellationRequested(); Json.Write(Path.Combine(tmp, ".launcher-manifest.json"), m.Data);
                 // Rebuild unactivated leftovers after a power loss, never trust their contents.
