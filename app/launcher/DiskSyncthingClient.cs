@@ -127,8 +127,8 @@ namespace RemoteAgents.Launcher
                 foreach (var row in group) { row.Kind = DiskExplorerKind.Error; row.Detail = "Несколько папок с одинаковым именем"; }
             return snapshot;
         }
-        internal object[] Events(long since, CancellationToken token, bool tail = false)
-        { return Json.Array(rest.Request("GET", tail ? "events?since=0&limit=1&timeout=0" : "events?since=" + since + "&timeout=25", null, token, tail ? 3000 : 30000)); }
+        internal object[] Events(long since, CancellationToken token, bool tail = false, int pollSeconds = 25)
+        { return Json.Array(rest.Request("GET", tail ? "events?since=0&limit=1&timeout=0" : "events?since=" + since + "&timeout=" + pollSeconds, null, token, tail ? 3000 : 30000)); }
         internal static long EventId(object value) { long n; return long.TryParse(Json.Str(Json.Map(value), "id"), out n) ? n : 0; }
         internal static bool ChangesFolders(object value)
         {

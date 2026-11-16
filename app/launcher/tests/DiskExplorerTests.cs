@@ -27,6 +27,12 @@ namespace RemoteAgents.Launcher
         {
             var rest = new DiskSyncthingClient(args[1]); var service = Service(new TestFiles());
             var commands = new DiskShellCommands(rest, args[2], service, new DiskPlaceholderCatalog(args[1]), File.ReadAllText(args[5]), path => Directory.Move(path, args[6]), args.Length > 7 ? int.Parse(args[7]) : 30000, args[1]);
+            if (args[3] == "watch-missing") {
+                var watch = new DiskMissingFolders(args[1], Console.WriteLine);
+                var elapsed = Stopwatch.StartNew();
+                while (elapsed.Elapsed.TotalSeconds < 34) { watch.Reconcile(rest, args[2], None); Thread.Sleep(200); }
+                return 0;
+            }
             if (args[3] == "inspect") {
                 var snapshot = commands.Read(None);
                 Console.WriteLine(Json.Encode(new { folders = snapshot.Folders.Select(f => new { f.Id, kind = f.Kind.ToString(), f.Detail }).ToArray(), tray = new DiskTraySession(args[1]).Read(None) }));
@@ -39,7 +45,7 @@ namespace RemoteAgents.Launcher
         internal static void Run()
         {
             string temp = Path.Combine(Path.GetTempPath(), "disk-explorer-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(temp);
-            try { RecyclePolicy(); States(); FolderErrorsAndRemoval(Path.Combine(temp, "removal")); Metadata(Path.Combine(temp, "metadata")); Registry(); Menu(); MenuIcon(); IconFile(Path.Combine(temp, "icons")); StateIcons(Path.Combine(temp, "state-icons")); Commands(Path.Combine(temp, "actions")); Console.WriteLine("PASS: Explorer model, metadata, registry and action fixtures"); HttpAndEvents(Path.Combine(temp, "http")).GetAwaiter().GetResult(); }
+            try { RecyclePolicy(); States(); MissingFolders(Path.Combine(temp, "missing")); FolderErrorsAndRemoval(Path.Combine(temp, "removal")); Metadata(Path.Combine(temp, "metadata")); Registry(); Menu(); MenuIcon(); IconFile(Path.Combine(temp, "icons")); StateIcons(Path.Combine(temp, "state-icons")); Commands(Path.Combine(temp, "actions")); Console.WriteLine("PASS: Explorer model, metadata, registry and action fixtures"); HttpAndEvents(Path.Combine(temp, "http")).GetAwaiter().GetResult(); }
             finally { if (Directory.Exists(temp)) Directory.Delete(temp, true); }
             Console.WriteLine("PASS: " + checks + " local Syncthing / Explorer checks (REST, events, placeholders, HKCU, shell, recycle rollback)");
         }
@@ -92,9 +98,10 @@ namespace RemoteAgents.Launcher
         {
             readonly Dictionary<string, FileAttributes> attributes = new Dictionary<string, FileAttributes>();
             internal int Writes;
+            internal Func<string, FileAttributes?> Stat;
             public bool DirectoryExists(string p) { return Directory.Exists(p); }
             public bool FileExists(string p) { return File.Exists(p); }
-            public FileAttributes Attributes(string p) { FileAttributes a; return attributes.TryGetValue(p, out a) ? a : File.GetAttributes(p); }
+            public FileAttributes Attributes(string p) { if (Stat != null) { var v = Stat(p); if (v.HasValue) return v.Value; } FileAttributes a; return attributes.TryGetValue(p, out a) ? a : File.GetAttributes(p); }
             public void Attributes(string p, FileAttributes a) { attributes[p] = a; }
             public IEnumerable<string> Entries(string p) { return Directory.GetFileSystemEntries(p); }
             public string Read(string p) { return File.ReadAllText(p); }
@@ -102,6 +109,52 @@ namespace RemoteAgents.Launcher
             public void CreateDirectory(string p) { Directory.CreateDirectory(p); }
             public void DeleteFile(string p) { File.Delete(p); attributes.Remove(p); }
             public void DeleteDirectory(string p) { Directory.Delete(p); attributes.Remove(p); }
+        }
+        static void MissingFolders(string temp)
+        {
+            string root = Path.Combine(temp, "Disk"), home = Path.Combine(temp, "state"), outside = Path.Combine(temp, "External");
+            Directory.CreateDirectory(root); File.WriteAllText(Path.Combine(root, "keep"), "keep");
+            var fs = new TestFiles(); var rest = new FakeRest(); var logs = new List<string>(); double now = 100;
+            Func<string, string, Dictionary<string, object>> folder = (id, path) => Map("{\"id\":" + Json.Encode(id) + ",\"label\":" + Json.Encode(id) + ",\"path\":" + Json.Encode(path) + ",\"devices\":[{\"deviceID\":\"SERVER\"}]}");
+            rest.Folders.Add(folder("external", outside)); rest.Folders.Add(folder("inside", Path.Combine(root, "Gone")));
+            var watch = new DiskMissingFolders(home, logs.Add, fs, () => now, "test");
+            watch.Reconcile(rest, root, None); now = 129.99; watch.Reconcile(rest, root, None);
+            Check(rest.Folders.Count == 2 && logs.Count == 0, "missing paths stay registered before thirty monotonic seconds");
+            // Reload the atomic on-disk state; independent of wall clock and of this instance.
+            watch = new DiskMissingFolders(home, logs.Add, fs, () => now, "test"); now = 130;
+            Check(watch.Reconcile(rest, root, None) && rest.Folders.Count == 0 && logs.Count == 2 && logs.Any(l => l.EndsWith("external")), "inside and external missing folders detach at thirty seconds with one journal line each");
+            watch.Reconcile(rest, root, None); Check(logs.Count == 2 && File.ReadAllText(Path.Combine(root, "keep")) == "keep", "repeat detachment is silent and never removes files");
+            rest.Folders.Add(folder("brief", outside)); now = 200; watch.Reconcile(rest, root, None);
+            Directory.CreateDirectory(outside); now = 229; watch.Reconcile(rest, root, None); Directory.Delete(outside);
+            now = 231; watch.Reconcile(rest, root, None); now = 260; watch.Reconcile(rest, root, None);
+            Check(rest.Folders.Count == 1, "return of same path resets its entire observation");
+            // Access errors, files and links are never absence (even after an earlier observation).
+            foreach (int mode in new[] { 0, 1, 2, 3 }) {
+                fs.Stat = p => { if (p == outside) { if (mode == 0) throw new UnauthorizedAccessException(); if (mode == 1) return FileAttributes.Normal; if (mode == 2) return FileAttributes.ReparsePoint; } if (mode == 3 && p == temp) throw new IOException("unmounted"); return null; };
+                now += 100; watch.Reconcile(rest, root, None);
+            }
+            fs.Stat = null; now += 100; watch.Reconcile(rest, root, None);
+            Check(rest.Folders.Count == 1, "file, dangling link, access error and unavailable parent reset timers");
+            watch = new DiskMissingFolders(home, logs.Add, fs, () => now, "new-process"); now += 100;
+            watch.Reconcile(rest, root, None); Check(rest.Folders.Count == 1, "new process/epoch starts a fresh conservative observation");
+            now -= 50; watch.Reconcile(rest, root, None); now += 29; watch.Reconcile(rest, root, None);
+            Check(rest.Folders.Count == 1, "backwards monotonic sample cannot expire an observation");
+            rest.Folders.Clear(); rest.Folders.Add(folder("empty", Path.Combine(root, "Gone"))); File.Delete(Path.Combine(root, "keep"));
+            now += 100; watch.Reconcile(rest, root, None); now += 100; watch.Reconcile(rest, root, None);
+            Check(rest.Folders.Count == 1, "empty Disk never detaches folders");
+            File.WriteAllText(Path.Combine(root, "keep"), "keep"); watch.Reconcile(rest, root, None);
+            now += 30; int reads = 0;
+            rest.OnFoldersRead = () => { if (++reads == 2) Directory.CreateDirectory(Path.Combine(root, "Gone")); };
+            watch.Reconcile(rest, root, None); Check(rest.Folders.Count == 1 && reads == 2, "filesystem is rechecked after fetching the current registration, immediately before DELETE");
+            rest.OnFoldersRead = null; Directory.Delete(Path.Combine(root, "Gone"));
+            now += 100; watch.Reconcile(rest, root, None); rest.FailDelete = true; now += 30; watch.Reconcile(rest, root, None);
+            Check(rest.Folders.Count == 1, "rejected DELETE keeps registration and observation for retry");
+            rest.FailDelete = false; watch.Reconcile(rest, root, None); Check(rest.Folders.Count == 0, "retry detaches without deleting files");
+            rest.Folders.Add(folder("foreign", outside)); rest.Folders[0]["devices"] = new object[0]; now += 100; watch.Reconcile(rest, root, None); now += 100; watch.Reconcile(rest, root, None);
+            Check(rest.Folders.Count == 1, "foreign registration not shared with our server is untouched");
+            File.WriteAllText(Path.Combine(home, "missing-folders.json"), "{broken\r\n"); rest.Folders[0]["devices"] = new[] { new { deviceID = "SERVER" } };
+            watch.Reconcile(rest, root, None); Check(rest.Folders.Count == 1, "corrupt state starts a fresh observation");
+            Check(!Directory.GetFiles(home, "*.tmp").Any(), "atomic state leaves no temporary files");
         }
         sealed class Icons : IDiskExplorerIcons { public string PathFor(DiskExplorerKind k) { return "/icons/" + k + ".ico"; } public string ApplicationPath() { return "/icons/App.ico"; } }
         sealed class BrokenIcons : IDiskExplorerIcons { public string PathFor(DiskExplorerKind k) { return "/icons/" + k + ".ico"; } public string ApplicationPath() { throw new IOException("the icon cannot be drawn"); } }
@@ -371,7 +424,7 @@ namespace RemoteAgents.Launcher
             internal readonly List<Dictionary<string, object>> Folders = new List<Dictionary<string, object>>();
             internal readonly Dictionary<string, object> Pending = new Dictionary<string, object>();
             internal readonly List<string> Calls = new List<string>();
-            internal Action OnScan; internal Action<int> OnStatus; int statusReads;
+            internal Action OnScan, OnFoldersRead; internal Action<int> OnStatus; int statusReads;
             internal bool FailPost, Connected = true, FailDelete, AppliedThenTimeout, FailVerify;
             bool verifying;
             internal Dictionary<string, object> Local = Map("{\"state\":\"idle\",\"globalBytes\":100,\"needBytes\":0,\"needTotalItems\":0,\"sequence\":1}");
@@ -384,7 +437,7 @@ namespace RemoteAgents.Launcher
             {
                 token.ThrowIfCancellationRequested(); lock (Calls) Calls.Add(method + " " + route);
                 if (route == "system/connections") return new Dictionary<string, object> { { "connections", new Dictionary<string, object> { { Peer, new { connected = Connected } } } } }.ToPortable();
-                if (route == "config/folders" && method == "GET") { if (FailVerify && verifying) { verifying = false; throw new IOException("verification lost"); } verifying = false; return Folders.ToArray(); }
+                if (route == "config/folders" && method == "GET") { if (OnFoldersRead != null) OnFoldersRead(); if (FailVerify && verifying) { verifying = false; throw new IOException("verification lost"); } verifying = false; return Folders.ToArray(); }
                 if (route.StartsWith("cluster/pending/folders")) return Pending;
                 if (route.StartsWith("db/scan") && method == "POST") { if (OnScan != null) OnScan(); return null; }
                  if (route.StartsWith("db/status")) { if (OnStatus != null) OnStatus(++statusReads); Dictionary<string, object> own; return new Dictionary<string, object>(LocalOf.TryGetValue(FolderOf(route), out own) ? own : Local); }

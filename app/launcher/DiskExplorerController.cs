@@ -13,6 +13,7 @@ namespace RemoteAgents.Launcher
         readonly Action<string, bool> notify; readonly Action<string> log;
         readonly CancellationTokenSource stop = new CancellationTokenSource();
         readonly SemaphoreSlim gate = new SemaphoreSlim(1, 1);
+        readonly DiskMissingFolders missing;
         readonly DiskExplorerService metadata; readonly DiskExplorerRegistry registry;
         readonly Task worker; readonly TaskCompletionSource<bool> initialized = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         DiskSnapshot last = new DiskSnapshot(); string lastRoot; bool iconFailed;
@@ -21,6 +22,7 @@ namespace RemoteAgents.Launcher
         {
             this.home = home; this.root = root; this.bundle = bundle; this.enabled = enabled; this.cleanup = cleanup; this.notify = notify; this.log = log;
             this.diskHome = diskHome ?? DefaultDiskHome; this.metadata = metadata; this.registry = registry;
+            missing = new DiskMissingFolders(this.diskHome, log);
             worker = Task.Run((Action)Monitor);
         }
         internal static string DefaultDiskHome { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteDisk"); } }
@@ -59,7 +61,7 @@ namespace RemoteAgents.Launcher
                     try {
                         if (!enabled()) {
                             gate.Wait(stop.Token);
-                            try { Clear(); } finally { gate.Release(); }
+                            try { missing.Reset(); Clear(); } finally { gate.Release(); }
                             if (stop.Token.WaitHandle.WaitOne(5000)) break;
                             continue;
                         }
@@ -68,8 +70,12 @@ namespace RemoteAgents.Launcher
                         DateTime xmlTime = File.GetLastWriteTimeUtc(Path.Combine(diskHome, "state", "config.xml"));
                         Refresh(rest, currentRoot);
                         while (!stop.IsCancellationRequested && enabled() && DiskPaths.Same(root(), currentRoot)) {
-                            var events = model.Events(since, stop.Token);
+                            var events = model.Events(since, stop.Token, pollSeconds: 2);
                             if (File.ReadAllText(Path.Combine(diskHome, "server.txt")).TrimStart('\uFEFF').Replace("\r", "").Trim() != rest.Peer) break;
+                            bool detached;
+                            gate.Wait(stop.Token);
+                            try { detached = missing.Reconcile(rest, currentRoot, stop.Token); } finally { gate.Release(); }
+                            if (detached) Refresh(rest, currentRoot);
                             if (events.Length == 0) {
                                 // Event IDs restart with Syncthing. Check only its event cursor, never periodic folder status.
                                 long tail = model.Events(0, stop.Token, true).Select(DiskRestModel.EventId).DefaultIfEmpty(0).Max();
@@ -86,6 +92,7 @@ namespace RemoteAgents.Launcher
                         }
                     } catch (OperationCanceledException) { break; }
                     catch (Exception) {
+                        missing.Reset();
                         log("disk.explorer.unavailable");
                         gate.Wait(stop.Token);
                         try { Unavailable(); } finally { gate.Release(); }
@@ -103,7 +110,7 @@ namespace RemoteAgents.Launcher
         void Refresh(IDiskRest rest, string currentRoot)
         {
             gate.Wait(stop.Token);
-            try { Publish(currentRoot, Commands(rest, currentRoot).Read(stop.Token)); }
+            try { missing.Reconcile(rest, currentRoot, stop.Token); Publish(currentRoot, Commands(rest, currentRoot).Read(stop.Token)); }
             finally { gate.Release(); }
         }
         void Publish(string currentRoot, DiskSnapshot snapshot)
