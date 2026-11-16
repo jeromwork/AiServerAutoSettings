@@ -3,6 +3,7 @@ set -euo pipefail
 umask 077
 export REMOTE_DISK_SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 python3 - "$@" 3<&0 <<'PY'
+import unicodedata
 import os,sys,json,subprocess,hashlib,tempfile,tarfile,urllib.request,time,socket,base64,re,fcntl,stat,math,xml.etree.ElementTree as E
 from pathlib import Path
 s=Path.home()/'.local/share/remote-disk'; cfg=s/'config.xml'; binary=s/'bin/syncthing'; here=Path(os.environ['REMOTE_DISK_SCRIPT_DIR'])
@@ -10,7 +11,26 @@ a=sys.argv[1:] or ['bootstrap']; action=a[0]
 # systemd-таймер, поставленный прежним install-auto, вызывает reconcile: это та же команда, что bootstrap.
 if action=='reconcile':action='bootstrap'
 # Чтение REST быстрое. PUT папки ждёт перезапуска её движка: на нагруженном сервере это секунды, а папок много.
-API_READ_TIMEOUT,API_WRITE_TIMEOUT=3,30
+def duration(name,default):
+    value=float(os.environ.get('REMOTE_DISK_'+name,default))
+    if not math.isfinite(value) or value<=0:raise ValueError('Недопустимый интервал REMOTE_DISK_'+name)
+    return value
+API_READ_TIMEOUT=duration('API_READ_TIMEOUT_S',3)
+API_WRITE_TIMEOUT=duration('API_WRITE_TIMEOUT_S',30)
+PROCESS_TIMEOUT=duration('PROCESS_TIMEOUT_S',5)
+DOWNLOAD_TIMEOUT=duration('DOWNLOAD_TIMEOUT_S',30)
+GENERATE_TIMEOUT=duration('GENERATE_TIMEOUT_S',10)
+STARTUP_ATTEMPTS=int(duration('STARTUP_ATTEMPTS',80))
+STARTUP_POLL=duration('STARTUP_POLL_S',.1)
+DISCONNECT_TIMEOUT=duration('DISCONNECT_TIMEOUT_S',3)
+DISCONNECT_POLL=duration('DISCONNECT_POLL_S',.2)
+RESUME_RETRY=duration('RESUME_RETRY_S',.5)
+AUTO_INTERVAL=duration('AUTO_INTERVAL_S',2)
+AUTO_ACCURACY=duration('AUTO_ACCURACY_S',1)
+RESCAN_INTERVAL=duration('RESCAN_INTERVAL_S',60)
+WATCHER_DELAY=duration('WATCHER_DELAY_S',2)
+RECONNECT_INTERVAL=duration('RECONNECT_INTERVAL_S',10)
+CHANNEL_PROBE_INTERVAL=duration('CHANNEL_PROBE_INTERVAL_S',60)
 # Свой код, потому что Syncthing не знает, что .stignore с нашим прежним шаблоном — не правила пользователя.
 # SHA-256 точных байтов шаблонов, которые мы сами клали в папки: disk/stignore.txt на app/config (395c2cb, b8cfc4e, f79b03f)
 # и список имён Get-DiskIgnores из RemoteDisk.ps1 до 395c2cb. Их правила теперь живут в .stignore-remoteagents.
@@ -22,68 +42,81 @@ PREVIOUS_TEMPLATES=frozenset((
 def safe(p):
     if any(x.is_symlink() for x in (p,*p.parents)):raise ValueError('Символические ссылки запрещены')
 def folder_path(name):
-    if not isinstance(name,str) or not re.fullmatch(r'\w[\w. ()-]{0,127}',name) or len(name.encode('utf-8'))>240 or '..' in name or name[-1] in ' .' or re.match(r'(?i)^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)',name):raise ValueError('Недопустимое имя папки')
+    if not isinstance(name,str) or not re.fullmatch(r'\w[\w. ()-]{0,127}',name) or len(name.encode('utf-8'))>240 or '..' in name or name[-1] in ' .' or unicodedata.normalize('NFC',name)!=name or re.match(r'(?i)^(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)',name):raise ValueError('Недопустимое имя папки')
     p=Path.home()/'Disk'/name;safe(p);return p
 
+UPLOAD_ID=re.compile(r'rd-upload-v1-[0-9a-f]{32}\Z')
 def incoming_name(label):
-    # Label приходит от другого компьютера: это имя, а не путь. Ограничиваем и байты (Linux), и символы (Windows).
-    name=re.sub(r'[^\w. ()-]','_',label or '').strip(' .')
-    while '..' in name:name=name.replace('..','_')
-    if not name:name='Папка'
-    if not re.match(r'\w',name) or re.match(r'(?i)^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)',name):name='_'+name
-    name=name[:110]
-    while len(name.encode('utf-8'))>220:name=name[:-1]
-    return name.rstrip(' .')
+    # Wire name is exact: never sanitize, truncate or manufacture a default.
+    folder_path(label)
+    return label
+
+def versioning(current=None):
+    value=dict(current or {})
+    value.update(type='staggered',params=dict(value.get('params') or {},maxAge='2592000',cleanInterval='3600'))
+    return value
 
 def incoming_marker(p):
     marker=p/'.stfolder/remote-disk-folder-id';safe(marker);return marker
 
 def new_folder(api,identity,folder_id,p):
     current=api('config/defaults/folder')
-    current.update(id=folder_id,label=p.name,path=str(p),type='sendreceive',paused=False,devices=[dict(deviceID=identity)],maxConflicts=-1,versioning=dict(type='staggered',params=dict(maxAge='0',cleanInterval='3600')),rescanIntervalS=60,fsWatcherEnabled=True,fsWatcherDelayS=2)
+    current.update(id=folder_id,label=p.name,path=str(p),type='sendreceive',paused=False,devices=[dict(deviceID=identity)],maxConflicts=-1,versioning=versioning(),rescanIntervalS=int(RESCAN_INTERVAL),fsWatcherEnabled=True,fsWatcherDelayS=WATCHER_DELAY)
     return current
 
 def configured_paths(folders):
     return [str(Path(os.path.abspath(os.path.expanduser(f['path'])))).casefold().rstrip('/') for f in folders]
 
-def accept_pending(api,identity,folders,devices,reserved,removed=()):
+def put_folder(api,current,folders,state):
+    route='config/folders/'+urllib.parse.quote(current['id'],safe='')
+    try:api(route,'PUT',current)
+    except FOLDER_ERRORS as error:
+        # Treat a committed PUT with a lost response as success only after confirmation.
+        try:applied=api(route)
+        except FOLDER_ERRORS:raise error
+        if applied.get('path')!=current['path']:raise error
+    remember_published(current,state)
+    if not any(f['id']==current['id'] for f in folders):folders.append(current)
+
+def accept_pending(api,identity,folders,devices,reserved,state,generation):
     disk=Path.home()/'Disk'
     for folder_id,offer in sorted(api('cluster/pending/folders').items()):
+        offered=offer.get('offeredBy',{})
+        peers=sorted(set(offered) & set(devices));device=peers[0] if peers else next(iter(offered),'')
         try:
-            # Pending может содержать старое предложение уже удалённого устройства. Никогда не включаем autoAcceptFolders.
-            peers=sorted(set(offer.get('offeredBy',{})) & set(devices))
-            if not peers or folder_id in removed or any(f['id']==folder_id for f in folders):continue
+            if folder_id in state['removed']:
+                record(folder_id,'upload','refused','ID навсегда снят на сервере',device);continue
+            if any(f['id']==folder_id for f in folders):continue
+            if not peers:raise ValueError('Неизвестное устройство')
+            if not UPLOAD_ID.fullmatch(folder_id):raise ValueError('Требуется ID команды Upload версии 1')
+            name=incoming_name(offered[device].get('label'))
+            if generation is None or disk_generation(disk)!=generation:raise ValueError('Disk недоступен или пуст')
             p=reserved.get(folder_id)
             if p is None:
-                name=incoming_name(offer['offeredBy'][peers[0]].get('label') or folder_id)
-                disk.mkdir(exist_ok=True)
-                used={x.name.casefold() for x in disk.iterdir()}
-                paths=configured_paths(folders)
-                n=1
-                while True:
-                    candidate=name if n==1 else name+' ('+str(n)+')'
-                    if candidate.casefold() in used:
-                        n+=1;continue
-                    p=folder_path(candidate);normalized=str(p).casefold()
-                    if any(normalized.startswith(x+'/') for x in paths):raise ValueError('Корень Disk уже входит в другую папку Syncthing')
-                    if not any(x==normalized or x.startswith(normalized+'/') for x in paths):
-                        try:p.mkdir()
-                        except FileExistsError:used.add(candidate.casefold())
-                        else:break
-                    n+=1
-                # Запоминаем ID до PUT: после ошибки REST повтор использует тот же каталог, не создаёт ещё один.
+                p=folder_path(name)
+                if any(x.name.casefold()==name.casefold() for x in disk.iterdir()):raise ValueError('имя занято на сервере')
+            elif p.name!=name:raise ValueError('Имя предложения изменилось после резервирования')
+            safe(p)
+            normalized=str(p).casefold()
+            if any(x==normalized or x.startswith(normalized+'/') or normalized.startswith(x+'/') for x in configured_paths(folders)):raise ValueError('Путь входящей папки уже занят другой папкой Syncthing; имя занято на сервере')
+            record(folder_id,'upload','preparing','Явная загрузка нового проекта',device)
+            if disk_generation(disk)!=generation:raise ValueError('Поколение Disk изменилось')
+            if folder_id not in reserved:
+                p.mkdir()  # Never mkdir Disk or create a suffixed destination.
                 (p/'.stfolder').mkdir()
                 write_atomic(incoming_marker(p),folder_id.encode('utf-8'),p/'.stfolder')
                 reserved[folder_id]=p
-            safe(p)
-            normalized=str(p).casefold()
-            if any(x==normalized or x.startswith(normalized+'/') or normalized.startswith(x+'/') for x in configured_paths(folders)):raise ValueError('Путь входящей папки уже занят другой папкой Syncthing')
+            initialize_project(p)
             ignores(p)
+            exclude_git(p)
+            if disk_generation(disk)!=generation:raise ValueError('Поколение Disk изменилось')
             current=new_folder(api,identity,folder_id,p)
             current['devices'] += [dict(deviceID=d) for d in devices]
-            api('config/folders/'+urllib.parse.quote(folder_id,safe=''),'PUT',current)
-            folders.append(current)
-        except FOLDER_ERRORS as e:skipped(folder_id,e)
+            put_folder(api,current,folders,state)
+            record(folder_id,'upload','accepted',origin_status(p),device)
+        except FOLDER_ERRORS as e:
+            if record(folder_id,'upload','refused',describe(e) if isinstance(e,ValueError) else type(e).__name__,device):
+                skipped(folder_id,e)
 
 def write_atomic(target,content,tmpdir):
     # Атомарная замена; права существующего файла сохраняются (иначе mkstemp сделал бы из 0664 файл 0600).
@@ -95,6 +128,11 @@ def write_atomic(target,content,tmpdir):
             if mode is not None:os.fchmod(out.fileno(),mode)
             os.fsync(out.fileno())
         os.replace(tmp,target)
+        # Persist the rename before any REST side effect can rely on this state.
+        for parent in {target.parent,Path(tmpdir)}:
+            directory=os.open(parent,os.O_RDONLY|os.O_DIRECTORY)
+            try:os.fsync(directory)
+            finally:os.close(directory)
     finally:
         if os.path.exists(tmp):os.unlink(tmp)
 def ignores(p,write=True):
@@ -105,18 +143,53 @@ def ignores(p,write=True):
     # Побайтово наш прежний шаблон: правила переехали в .stignore-remoteagents, остаётся один include. Всё прочее — пользователя.
     if hashlib.sha256(old).hexdigest() in PREVIOUS_TEMPLATES:old=b''
     include=b'#include .stignore-remoteagents'
-    merged=old
-    if include not in [line.strip() for line in old.removeprefix(b'\xef\xbb\xbf').splitlines()]:
-        newline=b'\r\n' if b'\r\n' in old else b'\n'
-        merged=old+(newline if old and not old.endswith(b'\n') else b'')+include+newline
-    if not write:return
+    bom=b'\xef\xbb\xbf' if old.startswith(b'\xef\xbb\xbf') else b''
+    body=old.removeprefix(bom) if bom else old
+    newline=b'\r\n' if b'\r\n' in body else b'\n'
+    # Syncthing uses first-match wins. Move every old managed include ahead of user ! rules.
+    body=b''.join(line for line in body.splitlines(keepends=True) if line.strip()!=include)
+    merged=bom+include+newline+body
+    if not write:return f.is_file() and managed.is_file() and managed.read_bytes()==rules and f.read_bytes()==merged
     marker.mkdir(exist_ok=True)
     # Publish the include target first. User rules stay byte-for-byte intact.
     for target,content in ((managed,rules),(f,merged)):
         if target.exists() and target.read_bytes()==content:continue
         write_atomic(target,content,marker)
-def git(p,*args):
-    r=subprocess.run(['git','-C',str(p),*args],capture_output=True,text=True,timeout=5);return r.stdout.strip() if r.returncode==0 else ''
+def git(p,*args,index=None):
+    env={k:v for k,v in os.environ.items() if not k.startswith('GIT_')}
+    if index is not None:env['GIT_INDEX_FILE']=str(index)
+    r=subprocess.run(['git','-C',str(p),*args],capture_output=True,text=True,timeout=PROCESS_TIMEOUT,env=env)
+    return r.stdout.strip() if r.returncode==0 else ''
+class InvalidProject(ValueError):pass
+def validate_project(p):
+    try:safe(p/'.git')
+    except ValueError as e:raise InvalidProject(str(e))
+    if not (p/'.git').exists():raise InvalidProject('Не git top-level: отсутствует .git')
+    if git(p,'rev-parse','--is-inside-work-tree')!='true' or git(p,'rev-parse','--show-toplevel')!=str(p):raise InvalidProject('Не настоящий git top-level')
+    value=git(p,'rev-parse','--absolute-git-dir')
+    if not value:raise InvalidProject('Некорректный gitdir')
+    gitdir=Path(value)
+    try:safe(gitdir)
+    except ValueError as e:raise InvalidProject(str(e))
+    if not gitdir.is_dir():raise InvalidProject('Некорректный gitdir')
+
+def initialize_project(p):
+    if not (p/'.git').exists():
+        git(p,'-c','init.templateDir=','init','--quiet')
+    validate_project(p)
+    if not git(p,'rev-parse','--verify','HEAD'):
+        # Empty first commit only. Never stage or commit received working-tree data.
+        # A previous failed attempt may have left a user-populated index. Preserve it,
+        # but use an isolated empty index for our single permitted automatic commit.
+        with tempfile.TemporaryDirectory(prefix='initial-index-',dir=s) as temp:
+            git(p,'-c','core.hooksPath=/dev/null','-c','user.name=RemoteDisk','-c','user.email=remote-disk@localhost',
+                '-c','commit.gpgSign=false','commit','--allow-empty','--quiet','-m','Начало проекта RemoteDisk',index=Path(temp)/'index')
+        if not git(p,'rev-parse','--verify','HEAD'):raise ValueError('Не удалось создать первый коммит git')
+
+def origin_status(p):
+    # Ask for the config KEY only: credential-bearing URL never enters our journal.
+    return 'origin настроен' if git(p,'config','--name-only','--get-regexp',r'^remote\.origin\.url$') else 'без удалённого репозитория'
+
 def exclude_git(p):
     value=git(p,'rev-parse','--git-path','info/exclude')
     if not value:return
@@ -131,37 +204,40 @@ def channel(data):
     user=next(x for x in inbound['users'] if x.get('name')=='client');tls=inbound['tls'];reality=tls['reality']
     raw=base64.urlsafe_b64decode(reality['private_key']+'===')
     if len(raw)!=32:raise ValueError('Некорректный Reality key')
-    der=subprocess.run(['openssl','pkey','-inform','DER','-pubout','-outform','DER'],input=bytes.fromhex('302e020100300506032b656e04220420')+raw,capture_output=True,timeout=5)
+    der=subprocess.run(['openssl','pkey','-inform','DER','-pubout','-outform','DER'],input=bytes.fromhex('302e020100300506032b656e04220420')+raw,capture_output=True,timeout=PROCESS_TIMEOUT)
     if der.returncode:raise ValueError('Не удалось получить Reality public key')
     public=base64.urlsafe_b64encode(der.stdout[-32:]).decode().rstrip('=')
     v=dict(type='vless',tag='vless-direct',server=data['server'],server_port=443,uuid=user['uuid'],flow=user.get('flow',''),tls=dict(enabled=True,server_name=tls.get('server_name') or reality['handshake']['server'],utls=dict(enabled=True,fingerprint='chrome'),reality=dict(enabled=True,public_key=public,short_id=reality['short_id'][0])))
     out=[v];tags=['vless-direct']
     if data.get('hop'):out += [dict(v,tag='vless-hop',detour='hop-ssh'),dict(data['hop'],type='ssh',tag='hop-ssh')];tags.append('vless-hop')
-    out.append(dict(type='urltest',tag='server',outbounds=tags,url='https://www.gstatic.com/generate_204',interval='1m',tolerance=300))
+    out.append(dict(type='urltest',tag='server',outbounds=tags,url='https://www.gstatic.com/generate_204',interval='1m' if CHANNEL_PROBE_INTERVAL==60 else f'{max(CHANNEL_PROBE_INTERVAL,1e-9):.9f}s',tolerance=300))
     targets=[('ssh',2222,int(data.get('sshPort',22)))]
     ports=json.loads((s/'ports.json').read_text()) if (s/'ports.json').exists() else {}
     if ports.get('listen'):targets.append(('sync',22001,int(ports['listen'])))
     return dict(log=dict(disabled=True),inbounds=[dict(type='direct',tag=tag,listen='127.0.0.1',listen_port=port,network='tcp',override_address='127.0.0.1',override_port=target) for tag,port,target in targets],outbounds=out,route=dict(final='server',auto_detect_interface=True))
-CRON_LINE=b'* * * * * bash "$HOME/.local/share/remote-disk/server-disk.sh" bootstrap >/dev/null 2>&1'
+CRON_MINUTES=duration('AUTO_CRON_MINUTES',1)
+if not CRON_MINUTES.is_integer() or not 1<=CRON_MINUTES<=59:raise ValueError('Недопустимый интервал cron')
+CRON_COMMAND=b'bash "$HOME/.local/share/remote-disk/server-disk.sh" bootstrap >/dev/null 2>&1'
+CRON_LINE=(('*' if CRON_MINUTES==1 else '*/'+str(int(CRON_MINUTES)))+' * * * * ').encode()+CRON_COMMAND
 def ensure_cron(enabled=True):
     try:
-        old=subprocess.run(['crontab','-l'],capture_output=True,timeout=5)
+        old=subprocess.run(['crontab','-l'],capture_output=True,timeout=PROCESS_TIMEOUT)
         if old.returncode not in (0,1):return
         lines=old.stdout.splitlines(keepends=True)
-        if enabled:
-            if CRON_LINE in old.stdout.splitlines():return
-            content=old.stdout+(b'\n' if old.stdout and not old.stdout.endswith(b'\n') else b'')+CRON_LINE+b'\n'
-        else:
-            content=b''.join(line for line in lines if line.rstrip(b'\r\n')!=CRON_LINE)
-            if content==old.stdout:return
-        subprocess.run(['crontab','-'],input=content,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=5)
+        def ours(line):
+            fields=line.rstrip(b'\r\n').split(None,5)
+            return len(fields)==6 and fields[5]==CRON_COMMAND and all(re.fullmatch(rb'[0-9*/,-]+',field) for field in fields[:5])
+        content=b''.join(line for line in lines if not ours(line))
+        if enabled:content+=(b'\n' if content and not content.endswith(b'\n') else b'')+CRON_LINE+b'\n'
+        if content==old.stdout:return
+        subprocess.run(['crontab','-'],input=content,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=PROCESS_TIMEOUT)
     except (OSError,subprocess.SubprocessError):pass
 
 def ensure_auto():
     # Bootstrap is also the installer/wizard and the old timer's entry point.
     # Update only changed unit files: running every 2 s must not reload/restart itself.
     def systemctl(*args):
-        return subprocess.run(['systemctl','--user',*args],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=5).returncode==0
+        return subprocess.run(['systemctl','--user',*args],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=PROCESS_TIMEOUT).returncode==0
     try:
         if not systemctl('show-environment'):raise OSError('user systemd unavailable')
         units=Path.home()/'.config/systemd/user';safe(units);units.mkdir(parents=True,exist_ok=True)
@@ -169,7 +245,7 @@ def ensure_auto():
         if not script.is_file():raise ValueError('Сначала скопируйте server-disk.sh в ~/.local/share/remote-disk')
         contents={
             'remote-disk-folders.service':'[Unit]\nDescription=RemoteDisk folder discovery\n[Service]\nType=oneshot\n# Runs every 2 s: keep successes out of the journal, errors (stderr) stay visible as warnings.\nStandardOutput=null\nSyslogLevel=warning\nLogLevelMax=notice\nExecStart=/bin/bash "%h/.local/share/remote-disk/server-disk.sh" bootstrap\n',
-            'remote-disk-folders.timer':'[Unit]\nDescription=Discover and accept RemoteDisk folders every 2s\n[Timer]\nOnStartupSec=2\nOnUnitInactiveSec=2\nAccuracySec=1\n[Install]\nWantedBy=timers.target\n'}
+            'remote-disk-folders.timer':f'[Unit]\nDescription=Discover and accept RemoteDisk folders every 2s\n[Timer]\nOnStartupSec={AUTO_INTERVAL:g}\nOnUnitInactiveSec={AUTO_INTERVAL:g}\nAccuracySec={AUTO_ACCURACY:g}\n[Install]\nWantedBy=timers.target\n'}
         stamp=s/'auto-units.sha256';safe(stamp)
         generation=hashlib.sha256(json.dumps(contents,sort_keys=True).encode()).hexdigest().encode()
         changed=not stamp.exists() or stamp.read_bytes()!=generation
@@ -190,10 +266,12 @@ def ensure_auto():
 # Сбой одной папки (недопустимое имя, права доступа, ошибка REST, git не ответил) не должен лишать остальные папки обнаружения.
 FOLDER_ERRORS=(ValueError,OSError,subprocess.SubprocessError)
 def describe(e):return str(e) if isinstance(e,ValueError) else type(e).__name__+': '+str(e)
-def skipped(name,e):print('RemoteDisk: '+name+': '+describe(e),file=sys.stderr)
+def skipped(name,e):
+    clean=lambda value:re.sub(r'[\x00-\x1f\x7f]',' ',str(value))
+    print('RemoteDisk: '+clean(name)+': '+clean(describe(e)),file=sys.stderr)
 # Свой код: Syncthing сохраняет регистрацию исчезнувшего каталога как folder path missing.
 # Не распространяем удаление файлов: снимаем только серверную регистрацию после непрерывного наблюдения.
-MISSING_AFTER_S=30
+MISSING_AFTER_S=duration('MISSING_AFTER_S',30)
 missing_watch=s/'missing-folders.json'
 def disk_generation(disk):
     safe(disk)
@@ -201,88 +279,144 @@ def disk_generation(disk):
     if not stat.S_ISDIR(st.st_mode) or not os.access(disk,os.R_OK|os.X_OK):raise OSError('Disk недоступен')
     if not list(disk.iterdir()):raise OSError('Disk пуст')
     return [st.st_dev,st.st_ino,Path('/proc/sys/kernel/random/boot_id').read_text().strip()]
+server_identity=''
+def record(project_id,source,outcome,reason,device=''):
+    # Local provenance is needed because pending/config carry no history. No file content or remote URLs.
+    journal=s/'project-journal.jsonl';cache=s/'project-journal-last.json'
+    for path in (s,journal,cache):safe(path)
+    s.mkdir(parents=True,exist_ok=True)
+    try:last=json.loads(cache.read_text()) if cache.exists() else {}
+    except ValueError:last={}
+    if not isinstance(last,dict):last={}
+    key=json.dumps([project_id,source,device,outcome],ensure_ascii=False)
+    if last.get(key)==reason:return False
+    event=dict(time=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),projectID=project_id,
+               source=source,hostID=server_identity,device=device,outcome=outcome,reason=reason)
+    with journal.open('ab') as out:
+        out.write((json.dumps(event,ensure_ascii=False)+'\n').encode());out.flush();os.fsync(out.fileno())
+    last[key]=reason
+    write_atomic(cache,json.dumps(last,ensure_ascii=False,sort_keys=True).encode(),s)
+    return True
+
 def save_missing(state):
     safe(missing_watch)
-    if not state.get('folders') and not state.get('removed'):
+    if not any(state.get(k) for k in ('folders','removed','published','guardImported')):
         missing_watch.unlink(missing_ok=True);return
     data=json.dumps(state,sort_keys=True,separators=(',',':')).encode()
     if missing_watch.exists() and missing_watch.read_bytes()==data:return
     missing_watch.parent.mkdir(parents=True,exist_ok=True)
     write_atomic(missing_watch,data,missing_watch.parent)
+
+def load_missing():
+    safe(missing_watch)
+    if not missing_watch.exists():return {}
+    try:state=json.loads(missing_watch.read_text(encoding='utf-8'))
+    except ValueError:raise ValueError('Повреждены долговечные tombstones; изменения остановлены')
+    if not isinstance(state,dict):raise ValueError('Некорректное состояние tombstones')
+    for key in ('removed','published'):
+        value=state.get(key,{})
+        if not isinstance(value,dict) or any(not isinstance(i,str) or not i or not isinstance(path,str) for i,path in value.items()):raise ValueError('Некорректное состояние '+key)
+    return state
+
+def owned_path(raw,disk):
+    if not isinstance(raw,str):return False
+    p=Path(raw)
+    return p.parent==disk and raw==str(p) and raw==str(disk/p.name)
+
+def remember_published(folder,state):
+    state['published'][folder['id']]=folder['path'];save_missing(state)
+
+def retire(state,folder_id,path,source,reason):
+    state['removed'].setdefault(folder_id,path)
+    state['published'].pop(folder_id,None)
+    save_missing(state)  # Before DELETE, even a lost response or interrupted process must not resurrect the ID.
+    record(folder_id,source,'retired',reason)
+
+def import_guard(state,folders,disk):
+    guard=s/'vanish-guard.json';safe(guard)
+    if not guard.exists():return
+    data=guard.read_bytes();digest=hashlib.sha256(data).hexdigest()
+    if state.get('guardDigest')==digest:return
+    try:old=json.loads(data)
+    except ValueError:raise ValueError('Повреждено состояние vanish-guard; изменения остановлены')
+    paused=old.get('paused',[]) if isinstance(old,dict) else None
+    if not isinstance(paused,(list,dict)) or any(not isinstance(i,str) or not i for i in paused):raise ValueError('Некорректные paused ID vanish-guard')
+    for folder_id in paused:
+        current=next((f for f in folders if f['id']==folder_id and owned_path(f.get('path'),disk)),None)
+        retire(state,folder_id,current['path'] if current else state['published'].get(folder_id,''),'guard-migration','Пауза временного сторожа')
+    state.update(guardImported=True,guardDigest=digest);save_missing(state)
+
 def forget_missing(api,folders,disk,now=None):
     now=time.monotonic() if now is None else now
-    safe(missing_watch)
-    try:
-        old=json.loads(missing_watch.read_text(encoding='utf-8'))
-        if not isinstance(old,dict):old={}
-    except (OSError,ValueError):old={}
-    removed=old.get('removed',{})
-    if not isinstance(removed,dict):removed={}
-    # Tombstones survive an unavailable Disk: peers must not resurrect a removed server folder by offering it back.
-    removed={i:p for i,p in removed.items() if isinstance(p,str) and Path(p).parent==disk and p==str(Path(p))}
+    old=load_missing()
+    state=dict(old,removed=dict(old.get('removed',{})),published=dict(old.get('published',{})),folders={})
+    import_guard(state,folders,disk)
+    current={f['id']:f for f in folders}
+    for folder_id,path in list(state['published'].items()):
+        if folder_id not in current or current[folder_id].get('path')!=path:
+            retire(state,folder_id,path,'server-unshare','Регистрация удалена вручную или её путь изменён')
+    for f in folders:
+        if owned_path(f.get('path'),disk):
+            if f['id'] not in state['removed']:state['published'][f['id']]=f['path']
+            elif not state['removed'][f['id']]:state['removed'][f['id']]=f['path']
     try:generation=disk_generation(disk)
     except OSError:
-        state=dict(removed=removed)
-        save_missing(state);return state
+        state.pop('generation',None);save_missing(state);return state
     before=old.get('folders',{}) if old.get('generation')==generation else {}
     if not isinstance(before,dict):before={}
-    pending={}
-
+    state['generation']=generation;pending=state['folders']
     try:
         for f in folders[:]:
             try:
-                raw=f.get('path','');p=Path(raw)
-                # Только точный абсолютный ~/Disk/<имя>; ~, .., вложенные и внешние пути не трогаем.
-                if p.parent!=disk or raw!=str(p) or folder_path(p.name)!=p:continue
-                try:
-                    p.lstat()
-                    if p.is_dir() and not p.is_symlink():removed.pop(f['id'],None)
-                    continue  # Файл или ссылка вместо папки — тоже не отсутствие.
-                except FileNotFoundError:pass
-                entry=before.get(f['id'],{})
-                since=entry.get('since') if isinstance(entry,dict) and entry.get('path')==raw else None
-                if not number(since) or not 0<=since<=now or not math.isfinite(since):since=now
-                pending[f['id']]=dict(path=raw,since=since)
-                if now-since<MISSING_AFTER_S:continue
-                # Повторная проверка непосредственно перед DELETE: Disk мог исчезнуть за время REST/других папок.
-                if disk_generation(disk)!=generation:
-                    pending={};break
-                try:p.lstat();del pending[f['id']];continue
-                except FileNotFoundError:pass
-                current=api('config/folders/'+urllib.parse.quote(f['id'],safe=''))
-                if current.get('path')!=raw:
-                    del pending[f['id']];continue
-                if disk_generation(disk)!=generation:
-                    pending={};break
-                try:p.lstat();del pending[f['id']];continue
-                except FileNotFoundError:pass
-                # До DELETE: потерянный REST-ответ/обрыв процесса не должен воскресить папку через pending.
-                removed[f['id']]=raw
-                save_missing(dict(generation=generation,folders=pending,removed=removed))
+                raw=f.get('path','')
+                if not owned_path(raw,disk):continue
+                p=Path(raw)
+                if folder_path(p.name)!=p:continue
+                retired=f['id'] in state['removed']
+                if not retired:
+                    try:p.lstat();continue  # File/link/access failure is not evidence of absence.
+                    except FileNotFoundError:pass
+                    entry=before.get(f['id'],{})
+                    since=entry.get('since') if isinstance(entry,dict) and entry.get('path')==raw else None
+                    if not number(since) or not math.isfinite(since) or not 0<=since<=now:since=now
+                    pending[f['id']]=dict(path=raw,since=since)
+                    if now-since<MISSING_AFTER_S:continue
+                if disk_generation(disk)!=generation:pending.clear();break
+                if not retired:
+                    try:p.lstat();pending.pop(f['id'],None);continue
+                    except FileNotFoundError:pass
+                fresh=api('config/folders/'+urllib.parse.quote(f['id'],safe=''))
+                if fresh.get('path')!=raw:pending.pop(f['id'],None);continue
+                if disk_generation(disk)!=generation:pending.clear();break
+                if not retired:
+                    try:p.lstat();pending.pop(f['id'],None);continue
+                    except FileNotFoundError:pass
+                    retire(state,f['id'],raw,'server-missing',f'Папка отсутствует не менее {MISSING_AFTER_S:g} с')
                 api('config/folders/'+urllib.parse.quote(f['id'],safe=''),'DELETE')
-                folders.remove(f);del pending[f['id']]
-                print('RemoteDisk: '+p.name+': регистрация снята, папка отсутствует не менее 30 с',file=sys.stderr)
+                folders.remove(f);pending.pop(f['id'],None)
+                if not retired:print(f'RemoteDisk: {p.name}: регистрация снята, папка отсутствует не менее {MISSING_AFTER_S:g} с',file=sys.stderr)
             except FOLDER_ERRORS as e:skipped(f.get('id','папка'),e)
-    finally:
-        state=dict(generation=generation,folders=pending,removed=removed)
-        save_missing(state)
+    finally:save_missing(state)
     return state
 
 def reconcile(api,identity):
+    global server_identity
+    server_identity=identity
     disk=Path.home()/'Disk';safe(disk)
     folders=api('config/folders');devices=[d['deviceID'] for d in api('config/devices') if d['deviceID']!=identity]
-    # До приёма входящих папок: тот не должен создавать непустой Disk и обходить защиту размонтирования.
-    try:missing_state=forget_missing(api,folders,disk)
+    try:state=forget_missing(api,folders,disk)
     except FOLDER_ERRORS as e:
-        skipped('исчезнувшие папки',e)
-        # Не принимаем предложения, если не удалось прочитать/сохранить защиту от воскрешения.
-        return
-    removed=missing_state['removed']
+        skipped('исчезнувшие папки',e);return  # Fail closed if durable retirement cannot be read/written.
+    generation=state.get('generation')
     reserved={};entries=[]
-    for p in sorted(disk.iterdir()) if disk.exists() else []:
+    paths=sorted(disk.iterdir()) if generation is not None else []
+    counts={}
+    for p in paths:counts[p.name.casefold()]=counts.get(p.name.casefold(),0)+1
+    for p in paths:
         try:
             if not p.is_dir() or p.is_symlink():continue
             folder_path(p.name)
+            if counts[p.name.casefold()]!=1:raise ValueError('имя занято на сервере: совпадение без регистра')
             marker=incoming_marker(p)
             if marker.exists():
                 incoming_id=marker.read_text(encoding='utf-8')
@@ -290,43 +424,62 @@ def reconcile(api,identity):
                 if any(f['path'].rstrip('/')==str(p) and f['id']!=incoming_id for f in folders):raise ValueError('ID входящей папки не совпадает с конфигурацией')
                 reserved[incoming_id]=p
             entries.append(p)
-        except FOLDER_ERRORS as e:skipped(p.name,e)
-    # Принимаем прежде регистрации местных папок: даже ID, равный занятому label, не должен незаметно слить их данные.
-    try:accept_pending(api,identity,folders,devices,reserved,removed)
+        except FOLDER_ERRORS as e:
+            record(p.name,'server-discovery','refused',describe(e) if isinstance(e,ValueError) else type(e).__name__)
+            skipped(p.name,e)
+    try:accept_pending(api,identity,folders,devices,reserved,state,generation)
     except FOLDER_ERRORS as e:skipped('входящие папки',e)
     incoming_ids={p:i for i,p in reserved.items()}
     for p in entries:
+        folder_id=p.name
         try:
             matches=[f for f in folders if f['path'].rstrip('/')==str(p)]
             if len(matches)>1:raise ValueError('Несколько ID для одной папки')
             current=matches[0] if matches else None
+            if current:folder_id=current['id']
+            elif p in incoming_ids:folder_id=incoming_ids[p]
+            # Do not undo a manual unshare by publishing the same path under a manufactured replacement ID.
+            if folder_id in state['removed'] or (not current and str(p) in state['removed'].values()):continue
             if p in incoming_ids:
-                # Не выдаём недопринятую папку за новый серверный проект. Нужен повтор предложения от известного peer.
-                if not current and removed.get(incoming_ids[p])!=str(p):continue
-                if current and incoming_ids[p]!=current['id']:raise ValueError('ID входящей папки не совпадает с конфигурацией')
-            folder_id=current['id'] if current else next((i for i,path in removed.items() if path==str(p)),p.name)
+                if not current:continue  # Reserved Upload needs a fresh offer from a known peer.
+                if incoming_ids[p]!=folder_id:raise ValueError('ID входящей папки не совпадает с конфигурацией')
+            try:validate_project(p)
+            except InvalidProject:
+                if current:
+                    retire(state,folder_id,str(p),'server-discovery','Проект больше не является git top-level')
+                    if disk_generation(disk)==generation:
+                        api('config/folders/'+urllib.parse.quote(folder_id,safe=''),'DELETE');folders.remove(current)
+                raise
             if any(f['id']==folder_id and f['path'].rstrip('/')!=str(p) for f in folders):raise ValueError('ID занят')
-            if not current:
-                current=new_folder(api,identity,folder_id,p)
-            conflict_changed=current.get('maxConflicts')!=-1 or current.get('type')!='sendreceive' or current.get('fsWatcherDelayS')!=2 or not current.get('fsWatcherEnabled')
-            current['type']='sendreceive'
-            current['maxConflicts']=-1
-            current['fsWatcherEnabled']=True
-            current['fsWatcherDelayS']=2
+            if not current:current=new_folder(api,identity,folder_id,p)
+            desired=versioning(current.get('versioning'))
+            changed=(current.get('maxConflicts')!=-1 or current.get('type')!='sendreceive' or current.get('fsWatcherDelayS')!=WATCHER_DELAY or not current.get('fsWatcherEnabled') or current.get('versioning')!=desired or current.get('label')!=p.name)
+            current.update(type='sendreceive',maxConflicts=-1,fsWatcherEnabled=True,fsWatcherDelayS=WATCHER_DELAY,versioning=desired,label=p.name)
             missing=[d for d in devices if not any(x['deviceID']==d for x in current['devices'])]
-            ignores(p)
-            # Исключения в Git — косметика (чистый git status): нет git или он завис — папку всё равно предлагаем.
+            migrated=False
+            if matches:
+                route='config/folders/'+urllib.parse.quote(folder_id,safe='')
+                try:policy_current=ignores(p,write=False)
+                except FOLDER_ERRORS:
+                    # A broken policy must stop an already-shared scanner too.
+                    if not current.get('paused'):api(route,'PATCH',dict(paused=True))
+                    raise
+                if not policy_current:
+                    # Confirm pause before replacing rules; any failure leaves it paused.
+                    if not current.get('paused'):api(route,'PATCH',dict(paused=True))
+                    ignores(p);migrated=True
+            else:ignores(p)
             try:exclude_git(p)
-            except FOLDER_ERRORS as e:skipped(p.name,e)
-            if missing or not matches or conflict_changed:
+            except FOLDER_ERRORS as e:skipped(p.name,e)  # Exclude is cosmetic; git admission above is mandatory.
+            if missing or not matches or changed or migrated:
+                if disk_generation(disk)!=generation:raise ValueError('Поколение Disk изменилось')
                 current['devices'] += [dict(deviceID=d) for d in missing]
-                api('config/folders/'+urllib.parse.quote(folder_id,safe=''),'PUT',current)
-                if not matches:folders.append(current)
-            if folder_id in removed:
-                del removed[folder_id]
-                # Новое наблюдение отсутствия начнётся с нуля.
-                save_missing(missing_state)
-        except FOLDER_ERRORS as e:skipped(p.name,e)
+                record(folder_id,'server-discovery','publishing',origin_status(p))
+                put_folder(api,current,folders,state)
+            record(folder_id,'server-discovery','published',origin_status(p))
+        except FOLDER_ERRORS as e:
+            record(folder_id,'server-discovery','refused',describe(e) if isinstance(e,ValueError) else type(e).__name__)
+            skipped(p.name,e)
 
 # Зависшие соединения устройства. Свой код, потому что у Syncthing нет настройки, которая сократила бы 300 с молчания
 # (ReceiveTimeout — константа протокола), а отказ новым соединениям на это время ломает подключение компьютера.
@@ -340,7 +493,8 @@ def reconcile(api,identity):
 # 45-90,6 с), поэтому устройство, у которого ни одно соединение не получило ни байта дольше STALE_AFTER_S, зависло. Это один
 # GET /rest/system/connections за запуск; что видели в прошлый раз — в connection-watch.json. Лечение: pause и сразу resume
 # именно этого устройства (старые соединения закрываются, клиент подключается заново), не чаще раза в HEAL_COOLDOWN_S.
-STALE_AFTER_S,HEAL_COOLDOWN_S=120,60
+STALE_AFTER_S=duration('STALE_AFTER_S',120)
+HEAL_COOLDOWN_S=duration('HEAL_COOLDOWN_S',60)
 watch=s/'connection-watch.json'
 def number(value):return isinstance(value,(int,float)) and not isinstance(value,bool)
 def load_watch():
@@ -371,14 +525,14 @@ def recycle_device(api,device_id):
     # Возобновляем при любом исходе ожидания и повторяем при сбое: устройство не должно остаться на паузе по нашей вине.
     device_call(api,'pause',device_id)
     try:
-        deadline=time.monotonic()+3
-        while api('system/connections')['connections'].get(device_id,{}).get('connected') and time.monotonic()<deadline:time.sleep(.2)
+        deadline=time.monotonic()+DISCONNECT_TIMEOUT
+        while api('system/connections')['connections'].get(device_id,{}).get('connected') and time.monotonic()<deadline:time.sleep(DISCONNECT_POLL)
     finally:
         for attempt in range(3):
             try:device_call(api,'resume',device_id);break
             except FOLDER_ERRORS:
                 if attempt==2:raise
-                time.sleep(.5)
+                time.sleep(RESUME_RETRY)
 def device_label(api,device_id):
     try:name=api('config/devices/'+urllib.parse.quote(device_id,safe='')).get('name')
     except FOLDER_ERRORS:name=None
@@ -440,14 +594,14 @@ def main():
         if not binary.exists():
             archive=Path(a[2]) if len(a)==3 and a[1]=='--archive' else s/'download.tar.gz'
             if archive==s/'download.tar.gz':
-                with urllib.request.urlopen('https://github.com/syncthing/syncthing/releases/download/v2.1.7/syncthing-linux-amd64-v2.1.7.tar.gz',timeout=30) as r:archive.write_bytes(r.read())
+                with urllib.request.urlopen('https://github.com/syncthing/syncthing/releases/download/v2.1.7/syncthing-linux-amd64-v2.1.7.tar.gz',timeout=DOWNLOAD_TIMEOUT) as r:archive.write_bytes(r.read())
             if hashlib.sha256(archive.read_bytes()).hexdigest()!='2edc416e7ed136b7c858ed5f3f02a3b8316589605e54c380228ceea7acbf0142':raise ValueError('SHA256 mismatch')
             binary.parent.mkdir(exist_ok=True)
             with tarfile.open(archive) as t:binary.write_bytes(t.extractfile('syncthing-linux-amd64-v2.1.7/syncthing').read())
             binary.chmod(0o700)
-        if not subprocess.check_output([str(binary),'--version'],timeout=5).startswith(b'syncthing v2.1.7 '):raise ValueError('Требуется Syncthing 2.1.7')
+        if not subprocess.check_output([str(binary),'--version'],timeout=PROCESS_TIMEOUT).startswith(b'syncthing v2.1.7 '):raise ValueError('Требуется Syncthing 2.1.7')
         if not cfg.exists():
-            subprocess.run([str(binary),'generate','--home',str(s),'--no-port-probing'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10)
+            subprocess.run([str(binary),'generate','--home',str(s),'--no-port-probing'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=GENERATE_TIMEOUT)
             tree=E.parse(cfg);root=tree.getroot();opt=root.find('options');socks=[socket.socket() for _ in range(2)]
             for sock in socks:sock.bind(('127.0.0.1',0))
             ports=dict(zip(('listen','gui'),[x.getsockname()[1] for x in socks]))
@@ -456,7 +610,7 @@ def main():
                 for old in parent.findall(n):parent.remove(old)
                 E.SubElement(parent,n).text=str(v)
             for n in ('globalAnnounceEnabled','localAnnounceEnabled','relaysEnabled','natEnabled','startBrowser','crashReportingEnabled'):put(opt,n,'false')
-            for n,v in dict(autoUpgradeIntervalH=0,reconnectionIntervalS=10,urAccepted=-1,listenAddress=f"tcp://127.0.0.1:{ports['listen']}").items():put(opt,n,v)
+            for n,v in dict(autoUpgradeIntervalH=0,reconnectionIntervalS=int(RECONNECT_INTERVAL),urAccepted=-1,listenAddress=f"tcp://127.0.0.1:{ports['listen']}").items():put(opt,n,v)
             put(root.find('gui'),'address',f"127.0.0.1:{ports['gui']}");tree.write(cfg,encoding='utf-8',xml_declaration=True)
             (s/'ports.json').write_text(json.dumps(ports))
             for sock in socks:sock.close()
@@ -471,12 +625,12 @@ def main():
         if not identity:
             with (s/'syncthing.log').open('ab') as log:proc=subprocess.Popen([str(binary),'serve','--home',str(s),'--no-browser','--no-restart','--no-upgrade'],stdin=subprocess.DEVNULL,stdout=log,stderr=log,start_new_session=True,close_fds=True,env={k:v for k,v in os.environ.items() if not k.startswith('ST')})
             (s/'syncthing.pid').write_text(str(proc.pid))
-            for _ in range(80):
+            for _ in range(STARTUP_ATTEMPTS):
                 identity=ready()
                 if identity:break
-                time.sleep(.1)
+                time.sleep(STARTUP_POLL)
         if not identity:raise ValueError('Движок не запустился')
-        api('config/options','PATCH',dict(globalAnnounceEnabled=False,localAnnounceEnabled=False,relaysEnabled=False,natEnabled=False,autoUpgradeIntervalH=0,reconnectionIntervalS=10))
+        api('config/options','PATCH',dict(globalAnnounceEnabled=False,localAnnounceEnabled=False,relaysEnabled=False,natEnabled=False,autoUpgradeIntervalH=0,reconnectionIntervalS=int(RECONNECT_INTERVAL)))
         ensure_auto()
         if action=='add-device':
             device_id=data['deviceId']

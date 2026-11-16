@@ -291,7 +291,7 @@ namespace RemoteAgents.Launcher
             if (openingHappier) return;
             openingHappier = true;
             try {
-                string url = await TrayMenuModel.HappierUrl(config.Data, AccountState());
+                string url = await TrayMenuModel.HappierUrl(config.Data, AccountState(), home);
                 if (closing) return;
                 if (url.Length > 0) Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
                 else ShowMain();

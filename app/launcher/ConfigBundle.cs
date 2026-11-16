@@ -287,8 +287,9 @@ namespace RemoteAgents.Launcher
             var paths = new List<string>();
             foreach (var entry in choice.Entries.Where(e => e.Path.Length > 0)) {
                 string path = NormalizeWindowsPath(entry.Path);
-                // A folder may live anywhere except at the Disk root itself or above it: a Syncthing folder around the root would take the other folders along.
+                // Each accepted project must be a direct child of the configured Disk base.
                 if (WindowsContains(path, normalizedBase)) throw Bad("disk.folders.path содержит корень Disk или совпадает с ним: " + entry.Path);
+                if (!DiskChoice.DirectWindowsChild(path, normalizedBase)) throw Bad("disk.folders.path: только прямые папки внутри базы Disk: " + entry.Path);
                 if (paths.Any(p => WindowsContains(p, path) || WindowsContains(path, p))) throw Bad("Пересекающиеся пути disk.folders: " + entry.Path);
                 paths.Add(path);
                 // Filesystem checks only apply to paths on this Windows computer. Runtime checks again before accepting.

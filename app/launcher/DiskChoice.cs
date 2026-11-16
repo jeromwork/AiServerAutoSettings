@@ -10,7 +10,7 @@ namespace RemoteAgents.Launcher
     internal sealed class DiskFolder { internal string Id = "", Path = "", Source = ""; }
 
     // The folders a config asks to accept at installation: profile «disk», docs/CONFIG.md.
-    //   "disk": { "base": "C:\\Users\\me\\Disk", "folders": [ { "id": "Проект" }, { "id": "Фото", "path": "D:\\Фото" } ] }
+    //   "disk": { "base": "C:\\Disk", "folders": [ { "id": "Проект" }, { "id": "Фото", "path": "C:\\Disk\\Фото" } ] }
     // Without «folders» (or with an empty list) nothing is accepted: the server only offers its folders and the person
     // accepts them in Syncthing Tray. Earlier formats are still read and never rejected: "all", "Проект", "Проект/docs",
     // { "path": "Фото", "direction": "receive" } and «external». What no longer exists (all, directions, folders outside
@@ -47,11 +47,17 @@ namespace RemoteAgents.Launcher
             }
             foreach (object e in Json.Array(Json.Get(disk, "external"))) {
                 var m = Json.Map(e);
-                c.Warnings.Add("disk.external больше не действует: папку «" + Json.Str(m, "path") + "» (на сервере «" + Json.Str(m, "remote") + "») добавьте в Syncthing Tray сами");
+                c.Warnings.Add("disk.external не поддерживается: папку «" + Json.Str(m, "path") + "» (на сервере «" + Json.Str(m, "remote") + "») разместите непосредственно внутри базы Диска и подключите явно");
             }
             return c;
         }
 
+        internal static bool DirectWindowsChild(string path, string root)
+        {
+            path = path.Replace('/', '\\').TrimEnd('\\'); root = root.Replace('/', '\\').TrimEnd('\\');
+            int slash = path.LastIndexOf('\\');
+            return slash >= 0 && string.Equals(path.Substring(0, slash), root, StringComparison.OrdinalIgnoreCase);
+        }
         void Earlier(string path, string direction)
         {
             string id = TopLevel(path);

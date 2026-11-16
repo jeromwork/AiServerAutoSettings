@@ -17,7 +17,7 @@ class InitialMergeTests(unittest.TestCase):
             a, b = stand.sides
             for i, side in enumerate(stand.sides):
                 folder = side['home'] / 'Disk/project'
-                folder.mkdir(parents=True)
+                t.make_project(folder)
                 side['folder'] = folder
                 (folder / 'same-name.txt').write_text('initial-server' if i == 0 else 'initial-local')
                 stamp = time.time() - 60 + i * 5

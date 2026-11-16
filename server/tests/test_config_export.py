@@ -28,6 +28,8 @@ import server_node_catalog as nodes  # noqa: E402
 
 USER = pwd.getpwuid(os.getuid()).pw_name
 MASTER = 'Мастер-пароль 1'
+# The default server deployment exports the stable local UI alongside account selection.
+LOCAL_WEB = dict(enabled=True, port=47831, serverPort=47831)
 # Тот же вектор — в docs/CONFIG-SERVER.md (раздел «Тестовый вектор enc1») для потока A.
 VECTOR = dict(password=MASTER, salt='AAECAwQFBgcICQoLDA0ODw==', iterations=200000, iv=bytes(range(16, 32)),
               aes='4a705d00d0b0eb61e464aac6aa0712bcb93c88417d7db998d56d72cfbb87cb6e',
@@ -93,14 +95,16 @@ class Env:
         self.route_password = self.private('route-password', 'HOP-PASSWORD\n')
         self.log = self.dir / 'auth.log'
         self.cfg = self.dir / 'config-export.json'
-        # Never fall back to this host's live /var/lib/remoteagents-status/server-config.json.
-        snapshot = self.dir / 'server-config.json'
-        snapshot.write_text('{}\n'); snapshot.chmod(0o644)
+        # Never fall back to /var/lib/... on the machine running the suite.
+        # A valid empty desired-state snapshot belongs to this disposable stand.
+        snapshot = self.dir / 'server-desired.json'
+        snapshot.write_text('{}')
+        snapshot.chmod(0o644)
         self.c = dict(schema=1, version=1, serverAddress='127.0.0.1', serverPort=22, workerUser=USER,
                       hostKeys=[self.host_pub], workerAuthorizedKeys=str(self.auth), stateDir=str(self.dir / 'state'),
-                      syncFile=str(self.home / '.config/remoteagents/config-sync.json'),
+                      syncFile=str(self.home / '.config/remoteagents/config-sync.json'), serverConfig=str(snapshot),
                       nodeCatalog=str(self.home / '.local/share/remote-agents-nodes'), catalogFile=str(self.catalog),
-                      authLog=[str(self.log)], routes=[{'kind': 'direct'}], happier={'home': str(self.home)}, serverConfig=str(snapshot))
+                      authLog=[str(self.log)], routes=[{'kind': 'direct'}], happier={'home': str(self.home)})
         self.c.update(extra)
         native_happier(self.home)
         self.write()
@@ -232,7 +236,7 @@ class ConfigExportTests(unittest.TestCase):
         self.assertEqual(server['hostKeys'], [self.e.host_pub])
         self.assertEqual(server['key'], {'secret': 'server-key'})
         self.assertEqual(server['routes'], [{'kind': 'direct'}])
-        self.assertEqual(config['happier'], {'mode': 'same'})
+        self.assertEqual(config['happier'], {'localWeb': LOCAL_WEB, 'mode': 'same'})
         self.assertEqual(config['bridge'], {'enabled': True, 'allowShell': True})
         self.assertEqual(config['agent'], {'sudo': 'full'})
         from test_server_apply import app as reconciler
@@ -262,7 +266,7 @@ class ConfigExportTests(unittest.TestCase):
         self.assertRegex(rows[0]['account'], r'^[a-f0-9]{64}$')
         self.assertNotIn('NATIVE-TOKEN', json.dumps(rows))
         config, p = self.e.export()
-        self.assertEqual(config['happier'], {'mode': 'same'})  # один аккаунт: выбирает шаг «Аккаунт», id не нужен
+        self.assertEqual(config['happier'], {'localWeb': LOCAL_WEB, 'mode': 'same'})  # один аккаунт: выбирает шаг «Аккаунт», id не нужен
         self.assertNotIn('NATIVE-TOKEN', p.stdout.decode() + p.stderr.decode())
         print('PASS --happier same: Happier обычной установки виден выдаче, секретов в ответе нет')
 
@@ -277,9 +281,9 @@ class ConfigExportTests(unittest.TestCase):
         self.assertEqual(self.lines(), ['ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExisting existing@host'])  # ключ не создан
         self.assertFalse((Path(rc.settings(self.e.cfg)['stateDir']) / 'config-events.log').exists())
         config, _ = self.e.export('Новый', '--happier', 'new:Сын')  # новый аккаунт создаёт компьютер — проверка не нужна
-        self.assertEqual(config['happier'], {'mode': 'new', 'label': 'Сын'})
+        self.assertEqual(config['happier'], {'localWeb': LOCAL_WEB, 'mode': 'new', 'label': 'Сын'})
         config, _ = self.e.export('Ноут', '--happier', 'new')  # без названия аккаунт подписан именем компьютера
-        self.assertEqual(config['happier'], {'mode': 'new', 'label': 'Ноут'})
+        self.assertEqual(config['happier'], {'localWeb': LOCAL_WEB, 'mode': 'new', 'label': 'Ноут'})
         print('PASS --happier same без аккаунта на сервере: отказ до ключа; new: выдаётся')
 
     def test_happier_same_native_and_program_needs_choice(self):
@@ -295,16 +299,16 @@ class ConfigExportTests(unittest.TestCase):
         self.assertIn('same:', p.stderr.decode())
         self.assertFalse(self.e.auth.exists() and 'ra-config:' in self.e.auth.read_text())
         config, _ = self.e.export('По подписи', '--happier', 'same:Второй')
-        self.assertEqual(config['happier'], {'mode': 'same', 'account': program})
+        self.assertEqual(config['happier'], {'localWeb': LOCAL_WEB, 'mode': 'same', 'account': program})
         config, _ = self.e.export('По id', '--happier', 'same:' + native)
-        self.assertEqual(config['happier'], {'mode': 'same', 'account': native})
+        self.assertEqual(config['happier'], {'localWeb': LOCAL_WEB, 'mode': 'same', 'account': native})
         p = self.e.cli('export', '--name', 'Мимо', '--happier', 'same:Третий')
         self.assertNotEqual(p.returncode, 0)
         self.assertIn('не найден', p.stderr.decode())
         self.e.c['happier']['account'] = 'Второй'  # подпись из настроек выдачи выбирает однозначно
         self.e.write()
         config, _ = self.e.export('Из настроек')
-        self.assertEqual(config['happier'], {'mode': 'same', 'label': 'Второй', 'account': program})
+        self.assertEqual(config['happier'], {'localWeb': LOCAL_WEB, 'mode': 'same', 'label': 'Второй', 'account': program})
         program_account(self.e.home, 'c' * 64, 'Второй')
         p = self.e.cli('export', '--name', 'Неоднозначно')
         self.assertNotEqual(p.returncode, 0)
@@ -501,7 +505,7 @@ class ConfigExportTests(unittest.TestCase):
         self.assertEqual(vpn['bootstrap']['catalog']['relays'][0]['name'], 'fixture')
         self.assertEqual(json.loads(config['secrets']['vpn-channel'])['outbounds'][0]['uuid'], 'CHANNEL-SECRET-UUID')
         self.assertEqual(config['disk'], {'folders': ['Проект', 'Проект/docs']})
-        self.assertEqual(config['happier'], {'mode': 'new', 'label': 'Сын'})
+        self.assertEqual(config['happier'], {'localWeb': LOCAL_WEB, 'mode': 'new', 'label': 'Сын'})
         for name in config['secrets']:
             self.assertRegex(name, r'^[a-z0-9][a-z0-9._-]{0,63}$')
         on, _ = self.e.export('VPN включён', '--vpn', 'on')

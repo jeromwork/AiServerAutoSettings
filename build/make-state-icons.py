@@ -14,6 +14,7 @@ DiskExplorerKind (DiskShellModel.cs); Explorer shows a folder of the Disk with t
     Pending       folder + grey clock              waiting for Syncthing to confirm
     LocalChanges  folder + orange arrow up         changes to upload before the space can be freed
     ServerRemoved folder + crossed-out grey cloud  the server no longer has the folder; the local copy is kept (not an error)
+    LocalCopy     plain folder, no badge; existing copy awaiting explicit merge
     Local         plain folder, no badge
 
 Frames: 16, 20, 24, 32, 48 and 256 px, all PNG (the container of the icons generated before, which Explorer displayed).
@@ -29,7 +30,7 @@ from pathlib import Path
 
 from icon_art import Layer, compose, ico, lerp, png_frame, png_image
 
-KINDS = ('Local', 'ServerOnly', 'Pending', 'Syncing', 'Synced', 'Paused', 'Error', 'Offline', 'Unavailable', 'LocalChanges', 'ServerRemoved')
+KINDS = ('Local', 'ServerOnly', 'Pending', 'Syncing', 'Synced', 'Paused', 'Error', 'Offline', 'Unavailable', 'LocalChanges', 'ServerRemoved', 'LocalCopy')
 SIZES = (16, 20, 24, 32, 48, 256)
 
 WHITE = (255, 255, 255)
@@ -125,7 +126,7 @@ def draw(kind, size):
     base = Layer(size, scale)
     folder(base, size, kind in GREY_KINDS)
     layers = [(base.image(), FADED if kind == 'ServerOnly' else 1.0)]
-    if kind != 'Local':
+    if kind not in ('Local', 'LocalCopy'):
         top = Layer(size, scale)
         badge(top, size, kind)
         layers.append((top.image(), 1.0))

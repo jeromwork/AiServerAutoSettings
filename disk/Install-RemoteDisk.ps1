@@ -5,7 +5,7 @@ param([string]$Profile,[switch]$HelpersReady,[string]$AcceptFile,[switch]$Uninst
 $script:DiskHome=Join-Path $env:LOCALAPPDATA 'RemoteDisk'
 $tray=Join-Path $script:DiskHome 'tray/syncthingtray.exe';$state=Join-Path $script:DiskHome 'state'
 function Get-DiskPort {$socket=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,0);$socket.Start();try{$socket.LocalEndpoint.Port}finally{$socket.Stop()}}
-function Wait-DiskTransport([int]$TimeoutSeconds=30) {
+function Wait-DiskTransport([double]$TimeoutSeconds=(Get-DiskSeconds TRANSPORT_READY 30)) {
     $budget=$TimeoutSeconds*1000
     $watch=[Diagnostics.Stopwatch]::StartNew()
     while($watch.ElapsedMilliseconds -lt $budget){
@@ -13,17 +13,17 @@ function Wait-DiskTransport([int]$TimeoutSeconds=30) {
         try{
             $port=[int](Get-TransportEffectivePort (Join-Path $env:LOCALAPPDATA 'RemoteAgents') 'sshPort')
             $connect=$client.ConnectAsync('127.0.0.1',$port)
-            if($connect.Wait([int][Math]::Max(1,[Math]::Min(1000,$budget-$watch.ElapsedMilliseconds)))){
+            if($connect.Wait([int][Math]::Max(1,[Math]::Min((Get-DiskMilliseconds TRANSPORT_CONNECT 1000),$budget-$watch.ElapsedMilliseconds)))){
                 $stream=$client.GetStream();$bytes=New-Object byte[] 4;$count=0;$banner=[Diagnostics.Stopwatch]::StartNew()
-                while($count -lt 4 -and $watch.ElapsedMilliseconds -lt $budget -and $banner.ElapsedMilliseconds -lt 5000){
+                while($count -lt 4 -and $watch.ElapsedMilliseconds -lt $budget -and $banner.ElapsedMilliseconds -lt (Get-DiskMilliseconds TRANSPORT_BANNER 5000)){
                     $read=$stream.ReadAsync($bytes,$count,4-$count)
-                    if(-not $read.Wait([int][Math]::Max(1,[Math]::Min(5000-$banner.ElapsedMilliseconds,$budget-$watch.ElapsedMilliseconds)))){break}
+                    if(-not $read.Wait([int][Math]::Max(1,[Math]::Min((Get-DiskMilliseconds TRANSPORT_BANNER 5000)-$banner.ElapsedMilliseconds,$budget-$watch.ElapsedMilliseconds)))){break}
                     if($read.Result -eq 0){break};$count+=$read.Result
                 }
                 if($count -eq 4 -and [Text.Encoding]::ASCII.GetString($bytes) -ceq 'SSH-'){return}
             }
         }catch{}finally{$client.Dispose()}
-        if($watch.ElapsedMilliseconds -lt $budget){Start-Sleep -Milliseconds ([int][Math]::Min(250,$budget-$watch.ElapsedMilliseconds))}
+        if($watch.ElapsedMilliseconds -lt $budget){Start-Sleep -Milliseconds ([int][Math]::Min((Get-DiskMilliseconds TRANSPORT_POLL 250),$budget-$watch.ElapsedMilliseconds))}
     }
     throw ('Связь не поднялась: нет баннера SSH на 127.0.0.1:'+$port+' за '+$TimeoutSeconds+' с. Настройки сохранены; повторите установку.')
 }
@@ -71,7 +71,7 @@ try {
     if($fresh){
         foreach($folder in @($script:Engine.configuration.SelectNodes('folder'))){[void]$script:Engine.configuration.RemoveChild($folder)}
         $script:Engine.configuration.gui.address='127.0.0.1:'+(Get-DiskPort)
-        Save-DiskState @{globalAnnounceEnabled=$false;localAnnounceEnabled=$false;relaysEnabled=$false;natEnabled=$false;autoUpgradeIntervalH=0;reconnectionIntervalS=10;listenAddresses=@(('tcp://127.0.0.1:'+(Get-DiskPort)));startBrowser=$false}
+        Save-DiskState @{globalAnnounceEnabled=$false;localAnnounceEnabled=$false;relaysEnabled=$false;natEnabled=$false;autoUpgradeIntervalH=0;reconnectionIntervalS=[int](Get-DiskSeconds RECONNECT_INTERVAL 10);listenAddresses=@(('tcp://127.0.0.1:'+(Get-DiskPort)));startBrowser=$false}
         Read-DiskState
     }
     $ini=Join-Path $script:DiskHome 'tray/syncthingtray.ini'
@@ -79,7 +79,7 @@ try {
     Set-DiskTrayExternalEngine
     $local=$null;try{$local=Invoke-DiskApi 'system/status'}catch{}
     if(-not $local.myID){Start-DiskHeadless}
-    for($i=0;$i -lt 40 -and -not $local.myID;$i++){Start-Sleep -Milliseconds 250;try{$local=Invoke-DiskApi 'system/status'}catch{}}
+    for($i=0;$i -lt (Get-DiskAttempts INSTALL_READY 40) -and -not $local.myID;$i++){Start-Sleep -Milliseconds (Get-DiskMilliseconds INSTALL_POLL 250);try{$local=Invoke-DiskApi 'system/status'}catch{}}
     if(-not $local.myID){throw 'Движок не запустился'}
     $step='Подключение устройств';Set-DiskServerDevice $peer
     if($pair){

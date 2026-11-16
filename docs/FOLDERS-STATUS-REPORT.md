@@ -1,3 +1,5 @@
+> Историческое, действует [DISK-CONTRACT.md](DISK-CONTRACT.md).
+
 # Состояния папок, история .stignore и причины ошибок
 
 Дата: 13.11.2026. Ветка: `app/folders-status`.

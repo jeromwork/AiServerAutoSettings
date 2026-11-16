@@ -10,7 +10,7 @@ $count=0
 function Assert($Value,[string]$Text){if(-not $Value){throw ('FAIL: '+$Text)};$script:count++}
 try{
     $script:calls=0;$script:pauses=@()
-    function Start-Sleep($Seconds){$script:pauses+=@($Seconds)}
+    function Start-Sleep($Seconds,$Milliseconds){if($Milliseconds){$Seconds=$Milliseconds/1000};$script:pauses+=@($Seconds)}
     $result=Invoke-DiskRetry {$script:calls++;if($script:calls -lt 3){throw 'Тест: временный разрыв'};'success'} 'Тест повтора'
     Assert ($script:calls -eq 3 -and $result -ceq 'success' -and ($script:pauses -join ',') -ceq '1,2') 'idempotent command succeeds on third attempt after two increasing pauses'
     $script:calls=0;$script:pauses=@();$failed=$false

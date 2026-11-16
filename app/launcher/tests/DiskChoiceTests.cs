@@ -27,15 +27,15 @@ namespace RemoteAgents.Launcher
             count = 0;
             var empty = new Dictionary<string, object>();
             // The format: names of server folders, each with an optional absolute path on this computer.
-            var entries = new object[] { D("id", "Проект"), D("id", "Фото", "path", "D:\\Фото") };
+            var entries = new object[] { D("id", "Проект"), D("id", "Фото", "path", "C:\\Disk\\Фото") };
             var p = Parse(D("base", "C:\\Disk", "folders", entries));
             var choice = DiskChoice.FromProfile(p);
-            Check(choice.Folders.Select(f => f.Id).SequenceEqual(new[] { "Проект", "Фото" }) && choice.Folders[0].Path == "" && choice.Folders[1].Path == "D:\\Фото" && choice.Warnings.Count == 0, "ids and optional paths, nothing to warn about");
+            Check(choice.Folders.Select(f => f.Id).SequenceEqual(new[] { "Проект", "Фото" }) && choice.Folders[0].Path == "" && choice.Folders[1].Path == "C:\\Disk\\Фото" && choice.Warnings.Count == 0, "ids and optional paths, nothing to warn about");
             // The request of the wizard's Disk step; Install-RemoteDisk.ps1 -AcceptFile reads the same [{ id, path? }].
             var request = ConfigRequests.Disk(p, "ignored");
             var rows = Json.Array(request["folders"]).Select(Json.Map).ToArray();
             Check(Json.Str(request, "base") == "C:\\Disk" && !Json.Bool(request, "reconnect"), "request base and reconnect");
-            Check(rows.Length == 2 && Json.Str(rows[0], "id") == "Проект" && !rows[0].ContainsKey("path") && Json.Str(rows[1], "id") == "Фото" && Json.Str(rows[1], "path") == "D:\\Фото", "request folders are [{ id, path? }]");
+            Check(rows.Length == 2 && Json.Str(rows[0], "id") == "Проект" && !rows[0].ContainsKey("path") && Json.Str(rows[1], "id") == "Фото" && Json.Str(rows[1], "path") == "C:\\Disk\\Фото", "request folders are [{ id, path? }]");
             Check(!request.ContainsKey("paths") && !request.ContainsKey("directions") && !request.ContainsKey("external"), "no field of the earlier request survives");
             var accept = Json.Map(Json.Parse(Json.Encode(new Dictionary<string, object> { { "folders", request["folders"] } })));
             Check(Json.Array(Json.Get(accept, "folders")).Length == 2, "the folders list alone is the AcceptFile document");
@@ -59,7 +59,7 @@ namespace RemoteAgents.Launcher
             Check(oldChoice.Folders.Select(f => f.Id).SequenceEqual(new[] { "A", "B", "C" }), "earlier paths become their top-level folders, merged");
             Check(oldChoice.Warnings.Count(w => w.Contains("«B/docs»") && w.Contains("«B»")) == 1 && oldChoice.Warnings.Count(w => w.Contains("«B/src»")) == 1, "each nested path is reported once");
             Check(oldChoice.Warnings.Count(w => w.Contains("направление «send»") && w.Contains("«B»")) == 1 && oldChoice.Warnings.Any(w => w.Contains("направление «receive»") && w.Contains("«C»")), "ignored directions are reported once per folder");
-            Check(oldChoice.Warnings.Any(w => w.Contains("disk.external") && w.Contains("D:\\Reports") && w.Contains("«Reports»") && w.Contains("Syncthing Tray")), "external folders are reported");
+            Check(oldChoice.Warnings.Any(w => w.Contains("disk.external") && w.Contains("D:\\Reports") && w.Contains("«Reports»") && w.Contains("внутри базы Диска") && !w.Contains("добавьте в Syncthing Tray")), "external paths require a move inside Disk, not a manual bypass through Tray");
             var oldRequest = ConfigRequests.Disk(old, "x");
             Check(Json.Array(oldRequest["folders"]).Length == 3 && !oldRequest.ContainsKey("external") && !oldRequest.ContainsKey("directions"), "earlier config gives the same kind of request");
             Check(oldChoice.Warnings.All(w => !w.Contains("\n")), "warnings are single lines for the journal");
@@ -102,8 +102,10 @@ namespace RemoteAgents.Launcher
             Reject(D("base", "D:\\Disk", "folders", new object[] { D("id", "A", "path", "d:/Disk") }), "path equal to the Disk root", "корень Disk");
             Reject(D("base", "D:\\Disk\\Work", "folders", new object[] { D("id", "A", "path", "D:\\Disk") }), "path above the Disk root", "корень Disk");
             Accept(D("base", "D:\\Disk", "folders", new object[] { D("id", "A", "path", "d:/Disk/A") }), "a path inside the Disk root");
-            Reject(D("folders", new object[] { D("id", "A", "path", "D:\\X"), D("id", "B", "path", "d:/x/Y") }), "overlapping paths", "Пересекающиеся");
-            Accept(D("folders", new object[] { D("id", "A", "path", "\\\\server\\share\\A"), D("id", "B", "path", "D:\\") }), "UNC and a drive root");
+            Reject(D("base", "D:\\", "folders", new object[] { D("id", "A", "path", "D:\\X"), D("id", "B", "path", "d:/x/Y") }), "nested path", "внутри базы");
+            Accept(D("base", "\\\\server\\share", "folders", new object[] { D("id", "A", "path", "\\\\server\\share\\A") }), "UNC direct child");
+            Reject(D("base", "D:\\Disk", "folders", new object[] { D("id", "A", "path", "D:\\External") }), "external path", "внутри базы");
+            Accept(D("base", "D:\\", "folders", new object[] { D("id", "A", "path", "D:\\A") }), "drive root direct child");
             Reject(D("external", new[] { D("path", "D:\\Reports") }), "earlier external without remote");
             Reject(D("external", new[] { D("path", "D:\\Reports", "remote", "Reports", "direction", "bad") }), "earlier external direction");
             // A stored profile in the earlier format: re-parsing it never fails and never turns into a conflict.

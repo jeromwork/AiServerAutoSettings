@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>7.3</LangVersion>
+    <OutputType>Exe</OutputType>
+    <DefineConstants>PORTABLE_TEST;DISK_FAST</DefineConstants>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <NoWarn>SYSLIB0014;SYSLIB0057;CA1416</NoWarn>
+    <NuGetAudit>false</NuGetAudit>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../app/launcher/tests/PortableJson.cs" />
+    <Compile Include="../../app/launcher/tests/DiskExplorerTests.cs" />
+    <Compile Include="../../app/launcher/Disk*.cs" />
+    <Compile Include="../../app/launcher/Data.cs" />
+    <Compile Include="../../app/launcher/TrayMenuModel.cs" />
+    <Compile Include="../../app/launcher/HappierWebResolver.cs" />
+    <Compile Include="../../app/launcher/StatusView.cs" />
+    <EmbeddedResource Include="../../transport/product-features.json" LogicalName="RemoteAgents.ProductFeatures.json" />
+    <EmbeddedResource Include="../../app/launcher/app.ico" LogicalName="RemoteAgents.App.ico" />
+    <EmbeddedResource Include="../../app/launcher/icons/*.ico" LogicalName="RemoteAgents.Icons.%(Filename)%(Extension)" />
+  </ItemGroup>
+</Project>

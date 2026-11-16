@@ -13,6 +13,7 @@ namespace RemoteAgents.Launcher
         readonly Action<string, bool> notify; readonly Action<string> log;
         readonly CancellationTokenSource stop = new CancellationTokenSource();
         readonly SemaphoreSlim gate = new SemaphoreSlim(1, 1);
+        readonly DiskMissingFolders missing;
         readonly DiskExplorerService metadata; readonly DiskExplorerRegistry registry;
         readonly Task worker; readonly TaskCompletionSource<bool> initialized = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         int pendingCommands;
@@ -23,6 +24,7 @@ namespace RemoteAgents.Launcher
         {
             this.home = home; this.root = root; this.bundle = bundle; this.enabled = enabled; this.cleanup = cleanup; this.notify = notify; this.log = log;
             this.diskHome = diskHome ?? DefaultDiskHome; this.metadata = metadata; this.registry = registry;
+            missing = new DiskMissingFolders(this.diskHome, log);
             worker = Task.Run((Action)Monitor);
         }
         internal static string DefaultDiskHome { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteDisk"); } }
@@ -57,14 +59,14 @@ namespace RemoteAgents.Launcher
         void Monitor()
         {
             try {
-                while (!stop.IsCancellationRequested && !cleanup()) if (stop.Token.WaitHandle.WaitOne(5000)) return;
+                while (!stop.IsCancellationRequested && !cleanup()) if (stop.Token.WaitHandle.WaitOne(DiskTiming.Milliseconds("MONITOR_RETRY", 5000))) return;
                 initialized.TrySetResult(!stop.IsCancellationRequested);
                 while (!stop.IsCancellationRequested) {
                     try {
                         if (!enabled()) {
                             gate.Wait(stop.Token);
-                            try { Clear(); } finally { gate.Release(); }
-                            if (stop.Token.WaitHandle.WaitOne(5000)) break;
+                            try { missing.Reset(); Clear(); } finally { gate.Release(); }
+                            if (stop.Token.WaitHandle.WaitOne(DiskTiming.Milliseconds("MONITOR_RETRY", 5000))) break;
                             continue;
                         }
                         string currentRoot = root(); var rest = new DiskSyncthingClient(diskHome); var model = new DiskRestModel(rest);
@@ -72,8 +74,17 @@ namespace RemoteAgents.Launcher
                         DateTime xmlTime = File.GetLastWriteTimeUtc(Path.Combine(diskHome, "state", "config.xml"));
                         Refresh(rest, currentRoot);
                         while (!stop.IsCancellationRequested && enabled() && DiskPaths.Same(root(), currentRoot)) {
-                            var events = model.Events(since, stop.Token);
+                            var events = model.Events(since, stop.Token, pollSeconds: DiskTiming.Seconds("MONITOR_POLL", 2));
                             if (File.ReadAllText(Path.Combine(diskHome, "server.txt")).TrimStart('\uFEFF').Replace("\r", "").Trim() != rest.Peer) break;
+                            bool detached;
+                            gate.Wait(stop.Token);
+                            try {
+                                detached = missing.Reconcile(rest, currentRoot, stop.Token);
+                                // Explorer moves/deletes produce no Syncthing event for an unaccepted
+                                // placeholder. Reconcile local decoration from the last offer snapshot.
+                                if (!detached && lastRoot != null && DiskPaths.Same(lastRoot, currentRoot) && Directory.Exists(currentRoot)) Publish(currentRoot, last);
+                            } finally { gate.Release(); }
+                            if (detached) Refresh(rest, currentRoot);
                             if (events.Length == 0) {
                                 // Event IDs restart with Syncthing. Check only its event cursor, never periodic folder status.
                                 long tail = model.Events(0, stop.Token, true).Select(DiskRestModel.EventId).DefaultIfEmpty(0).Max();
@@ -84,16 +95,17 @@ namespace RemoteAgents.Launcher
                             since = Math.Max(since, events.Max(DiskRestModel.EventId));
                             if (gap || events.Any(DiskRestModel.ChangesFolders)) {
                                 // Coalesce bursts before reading the expensive db/status endpoint.
-                                if (stop.Token.WaitHandle.WaitOne(150)) break;
+                                if (stop.Token.WaitHandle.WaitOne(DiskTiming.Milliseconds("EVENT_COALESCE", 150))) break;
                                 Refresh(rest, currentRoot);
                             }
                         }
                     } catch (OperationCanceledException) { break; }
                     catch (Exception) {
+                        missing.Reset();
                         log("disk.explorer.unavailable");
                         gate.Wait(stop.Token);
                         try { Unavailable(); } finally { gate.Release(); }
-                        if (stop.Token.WaitHandle.WaitOne(5000)) break;
+                        if (stop.Token.WaitHandle.WaitOne(DiskTiming.Milliseconds("MONITOR_RETRY", 5000))) break;
                     }
                 }
             } catch (OperationCanceledException) { }
@@ -107,7 +119,7 @@ namespace RemoteAgents.Launcher
         void Refresh(IDiskRest rest, string currentRoot)
         {
             gate.Wait(stop.Token);
-            try { Publish(currentRoot, Commands(rest, currentRoot).Read(stop.Token)); }
+            try { missing.Reconcile(rest, currentRoot, stop.Token); Publish(currentRoot, Commands(rest, currentRoot).Read(stop.Token)); }
             finally { gate.Release(); }
         }
         void Publish(string currentRoot, DiskSnapshot snapshot)
@@ -118,8 +130,8 @@ namespace RemoteAgents.Launcher
             if (File.Exists(manifest)) foreach (string old in Json.Strings(Json.Parse(File.ReadAllText(manifest))))
                 if (!paths.Any(p => DiskPaths.Same(p, old))) metadata.CleanupFolder(old, true);
             metadata.Reconcile(currentRoot, snapshot.Folders);
-            // Download is offered only on our empty placeholders, never on an unrelated directory of the same name.
-            registry.Register(ProgramPath, currentRoot, snapshot.Folders.Where(f => !f.ServerOnly || metadata.IsPlaceholder(f.Path)), home, MenuIcon());
+            // Empty placeholders offer download; existing local copies offer an explicit merge.
+            registry.Register(ProgramPath, currentRoot, snapshot.Folders.Where(f => !f.ServerOnly || f.Kind == DiskExplorerKind.LocalCopy || metadata.IsPlaceholder(f.Path)), home, MenuIcon());
             string content = Json.Encode(paths);
             if (!File.Exists(manifest) || File.ReadAllText(manifest) != content) Files.Atomic(manifest, content);
             last = snapshot; lastRoot = currentRoot;
@@ -151,7 +163,7 @@ namespace RemoteAgents.Launcher
                 }
                 registry.Register(ProgramPath, lastRoot, last.Folders, home, MenuIcon());
             }
-            var rows = last.Folders.Select(f => { var copy = f.Copy(); if (!copy.ServerOnly && copy.Kind != DiskExplorerKind.Local) copy.Kind = DiskExplorerKind.Unavailable; return copy; }).ToArray();
+            var rows = last.Folders.Select(f => { var copy = f.Copy(); if (!copy.ServerOnly && copy.Kind != DiskExplorerKind.Local && copy.Kind != DiskExplorerKind.ServerRemoved) copy.Kind = DiskExplorerKind.Unavailable; return copy; }).ToArray();
             metadata.Reconcile(lastRoot, rows);
         }
         void Clear()

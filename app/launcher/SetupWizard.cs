@@ -322,7 +322,17 @@ namespace RemoteAgents.Launcher
             newAccount.CheckedChanged+=(a,b)=>{accountKey.Visible=accountKeyCaption.Visible=!newAccount.Checked;Changed(3);};
             More(3,215);Button(3,"Пропустить",215,()=>Skip("Happier",3),150,110);
             openHappier=new Button {Left=275,Top=215,Width=160,Height=29,Text="Открыть Happier",Visible=false};sections[3].Controls.Add(openHappier);
-            openHappier.Click+=(a,b)=>{try{Process.Start(new ProcessStartInfo(ConfigRequests.Origin(web.Text)){UseShellExecute=true});}catch(Exception e){Append("Ошибка: "+e.Message);}};
+            openHappier.Click+=async(a,b)=>{
+                openHappier.Enabled=false;
+                try {
+                    string url=await HappierWebResolver.ResolveAsync(new Configuration(home).Data,
+                        new Dictionary<string,object>{{"webappUrl",web.Text.Trim()}},home);
+                    if(IsDisposed || closingRequested)return;
+                    if(url.Length==0){Append("Happier недоступен: проверьте канал и адрес страницы.");return;}
+                    Process.Start(new ProcessStartInfo(url){UseShellExecute=true});
+                }catch(Exception){Append("Не удалось открыть Happier. Проверьте канал и адрес страницы.");}
+                finally{if(!IsDisposed)openHappier.Enabled=true;}
+            };
             // A new key is shown once, right after creation; it is never written to the journal.
             newKeyPanel=new Panel {Left=16,Top=250,Width=580,Height=92,Visible=false};sections[3].Controls.Add(newKeyPanel);
             newKeyPanel.Controls.Add(new Label {Left=0,Top=0,Width=575,Height=36,Text="Сохраните ключ: он нужен для других компьютеров и телефона (Happier → Restore with Secret Key). Больше он не будет показан."});
@@ -332,7 +342,7 @@ namespace RemoteAgents.Launcher
             RefreshAccountButtons();
         }
         void RefreshAccountButtons()
-        {if(openHappier!=null)openHappier.Visible=applied[3] && !waiting.ContainsKey(3) && web.Text.Trim().StartsWith("https://",StringComparison.OrdinalIgnoreCase);}
+        {if(openHappier!=null)openHappier.Visible=applied[3] && !waiting.ContainsKey(3) && HappierWebResolver.CanOpen(new Configuration(home).Data,new Dictionary<string,object>{{"webappUrl",web.Text.Trim()}});}
         void ShowNewKey(string key)
         {newKeyText.Text=key;newKeyPanel.Visible=true;}
         void BridgePage(Dictionary<string,object> config)

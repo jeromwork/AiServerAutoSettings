@@ -2,6 +2,16 @@
 set -euo pipefail
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo=$(cd "$here/../../.." && pwd)
+case ${1:-} in
+  '') exec bash "$repo/disk/test-fast.sh" ;;
+  --live) exec bash "$repo/disk/test-live.sh" ;;
+  --full) shift ;;
+  *) echo 'Usage: run.sh [--live|--full]' >&2; exit 2 ;;
+esac
+# Legacy installer fixtures also use millisecond budgets in the explicit full run.
+export REMOTE_DISK_OFFER_TIMEOUT_MS=20 REMOTE_DISK_OFFER_POLL_MS=1 REMOTE_DISK_INSTALL_RETRY_MS=1
+# Do not leave compiler/build daemons holding the caller's inherited flock descriptor.
+export UseSharedCompilation=false DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER=1 MSBUILDDISABLENODEREUSE=1
 dotnet=${DOTNET:-$HOME/.dotnet/dotnet}
 testdir=$(mktemp -d /tmp/remoteagents-launcher-tests.XXXXXX)
 cleanup() {
@@ -28,6 +38,14 @@ wait_for_memory() {
     sleep 60
   done
 }
+# Default to serial groups on the shared host; callers may explicitly opt into overlap.
+export LAUNCHER_TESTS_SERIAL=${LAUNCHER_TESTS_SERIAL:-1}
+# This suite launches two child suites and enforces a 30 s aggregate budget.
+# Keep it out of the server/offline overlap: scheduling contention alone can
+# double its elapsed time without any failed lifecycle/startup assertions.
+wait_for_memory
+timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-install.ps1" < /dev/null
+wait_for_memory
 # These groups touch disjoint temporary HOME/state. Keep .NET builds after the
 # server group (it builds the same projects); independent offline checks overlap
 # SSH wait times. Every child is bounded; the outer caller may set a total limit.
@@ -35,9 +53,13 @@ wait_for_memory() {
   wait_for_memory
   timeout 60 python3 "$here/test_run_modes.py"
   wait_for_memory
+  timeout 60 python3 "$here/test-config-sync.py"
+  wait_for_memory
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-first-install.ps1" -TestHome "$testdir/wizard" < /dev/null
   wait_for_memory
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-accept.ps1" -TestHome "$testdir/disk-accept" < /dev/null
+  wait_for_memory
+  timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-accept-install.ps1" -TestHome "$testdir/disk-accept-install" < /dev/null
   wait_for_memory
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-cleanup.ps1" -TestHome "$testdir/disk-cleanup" < /dev/null
   wait_for_memory
@@ -91,7 +113,7 @@ wait_for_memory() {
   wait_for_memory
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-config-routes.ps1" -TestHome "$testdir/config-routes" < /dev/null
   wait_for_memory
-  timeout 600 python3 "$repo/disk/test-disk.py"
+  timeout 60 bash "$repo/disk/test-live.sh"
   wait_for_memory
   timeout 120 python3 "$repo/disk/test-wizard-merge.py"
   wait_for_memory
@@ -106,8 +128,6 @@ wait_for_memory() {
   LOCALAPPDATA="$testdir/local" timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-config-scheduler.ps1" -TestHome "$testdir/config-scheduler" < /dev/null
   wait_for_memory
   LOCALAPPDATA="$testdir/local" timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-refresh.ps1" -TestHome "$testdir/config-refresh" < /dev/null
-  wait_for_memory
-  timeout 60 python3 "$here/test-config-sync.py"
   wait_for_memory
   timeout 60 python3 "$here/test-server-health.py"
   wait_for_memory
@@ -154,19 +174,12 @@ wait "$server_pid" || failed=1
 cat "$testdir/server.log"
 [[ $failed == 0 ]] || exit 1
 trap cleanup EXIT
-# This suite launches two child suites and enforces a 30 s aggregate budget.
-# Keep it out of the server/offline overlap: scheduling contention alone can
-# double its elapsed time without any failed lifecycle/startup assertions.
-wait_for_memory
-timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-install.ps1" < /dev/null
 wait_for_memory
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -- "$testdir/core"
 wait_for_memory
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ProductName=RemoteVPN -- "$testdir/core-vpn"
-wait_for_memory
-timeout 120 python3 "$here/test-disk-explorer-engine.py"
-wait_for_memory
-timeout 180 python3 "$here/test-disk-safety-engine.py"
+# Disk integration is covered by the bounded test-live.sh above.
+# Extended engine fixtures remain available for focused diagnostics.
 # Config format, enc1, vault and materialization (stream A entry point; own output directory).
 wait_for_memory
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ConfigTests=true

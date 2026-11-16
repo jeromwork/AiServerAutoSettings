@@ -33,6 +33,19 @@ class HappierAccountUiTests(unittest.TestCase):
         failure = ui.split('void HappierActionFailed', 1)[1].split('void ShowHappierAccountCreated', 1)[0]
         self.assertNotIn('Log(', failure)
 
+    def test_all_browser_entry_points_supply_secret_home_without_logging_url(self):
+        main = (LAUNCHER / 'ConfigWindow.Main.cs').read_text()
+        self.assertIn('{ "webappUrl", happierModel.WebUrl } }, home)', main)
+        tray = (LAUNCHER / 'TrayContext.cs').read_text()
+        self.assertIn('TrayMenuModel.HappierUrl(config.Data, AccountState(), home)', tray)
+        wizard = (LAUNCHER / 'SetupWizard.cs').read_text()
+        handler = wizard.split('openHappier.Click+=', 1)[1].split('// A new key', 1)[0]
+        self.assertIn('await HappierWebResolver.ResolveAsync(', handler)
+        self.assertIn('web.Text.Trim()}},home)', handler)
+        self.assertNotIn('ConfigRequests.Origin(', handler)
+        self.assertNotIn('.Message', handler)
+        self.assertNotIn('Journal', handler)
+
     def test_creation_notification_is_marshaled_and_not_just_a_log(self):
         window = (LAUNCHER / 'ConfigWindow.cs').read_text()
         ui = (LAUNCHER / 'ConfigWindow.Main.cs').read_text()

@@ -90,19 +90,23 @@ def archive_path():
     configured = os.environ.get('SYNCTHING_ARCHIVE')
     if configured:
         return Path(configured).resolve()
+    cache = Path.home() / '.cache/remoteagents-vpn-test' / ARCHIVE_NAME
+    if cache.is_file():
+        return cache
     # Reuse an offline release fixture when available; otherwise bootstrap downloads it.
     return next(iter(sorted(Path('/tmp').glob('remote-disk-release-*/' + ARCHIVE_NAME))), None)
 
 
 def run(args, env=None, ok=True, stdin=None):
     result = subprocess.run([str(x) for x in args], env=env, input=stdin,
-                            capture_output=True, timeout=45)
+                            capture_output=True, timeout=float(os.environ.get('REMOTE_DISK_TEST_COMMAND_S', '10')))
     if ok and result.returncode:
         raise AssertionError(f'{args[0]}: exit {result.returncode}: {result.stderr.decode(errors="replace")}')
     return result
 
 
-def wait(predicate, description, seconds=20):
+def wait(predicate, description, seconds=5):
+    seconds = min(seconds, float(os.environ.get('REMOTE_DISK_LIVE_WAIT_S', '5')))
     end = time.monotonic() + seconds
     while time.monotonic() < end:
         if predicate():
@@ -211,10 +215,12 @@ with (Path.home()/'systemctl-calls').open('a') as f:f.write(json.dumps(sys.argv[
         self.api(side, 'db/scan?folder=' + urllib.parse.quote(name, safe=''), 'POST')
 
     def offer(self, side, server, folder_id, label):
-        """A Windows-like upload: local REST shares a folder outside Disk with the server."""
-        source = side['home'] / 'uploads' / folder_id
+        """A Windows-like explicit upload through local REST inside its disposable Disk."""
+        source = side['home'] / 'Disk' / folder_id
         source.mkdir(parents=True)
         (source / 'source.txt').write_text(folder_id)
+        with server_helpers(side['home']) as ns:
+            ns['ignores'](source)
         folder = self.api(side, 'config/defaults/folder')
         folder.update(id=folder_id, label=label, path=str(source), type='sendreceive',
                       fsWatcherEnabled=True, fsWatcherDelayS=2,
@@ -230,13 +236,15 @@ with (Path.home()/'systemctl-calls').open('a') as f:f.write(json.dumps(sys.argv[
         return True
 
 
+_HELPERS = compile((HERE / 'server-disk.sh').read_text().split("<<'PY'\n", 1)[1].split('def main():', 1)[0], 'server-disk-helpers', 'exec')
+
+
 @contextlib.contextmanager
 def server_helpers(home):
     """Only the helper definitions of server-disk.sh (everything before main), with HOME at a disposable directory."""
-    source = (HERE / 'server-disk.sh').read_text().split("<<'PY'\n", 1)[1].split('def main():', 1)[0]
     namespace = {}
     with mock.patch.dict(os.environ, HOME=str(home), REMOTE_DISK_SCRIPT_DIR=str(HERE)):
-        exec(compile(source, 'server-disk-helpers', 'exec'), namespace)
+        exec(_HELPERS, namespace)
         yield namespace
 
 
@@ -552,6 +560,467 @@ def age_watch(side, seconds):
     path.write_text(json.dumps(state))
 
 
+def make_disk(home):
+    disk = home / 'Disk'
+    disk.mkdir(exist_ok=True)
+    (disk / '.mounted').touch()
+    return disk
+
+
+def make_project(path):
+    path.mkdir(parents=True, exist_ok=True)
+    run(['git', 'init', '-q', path])
+    return path
+
+
+class ContractRest(FakeRest):
+    def __init__(self, folders=(), offers=None):
+        super().__init__()
+        self.folders = {f['id']: dict(f) for f in folders}
+        self.offers = offers or {}
+        self.deletes = []
+
+    def __call__(self, route, method='GET', body=None):
+        if route == 'config/folders':
+            return [dict(f) for f in self.folders.values()]
+        if route == 'cluster/pending/folders':
+            return self.offers
+        if route.startswith('config/folders/'):
+            identity = urllib.parse.unquote(route.rsplit('/', 1)[1])
+            if method == 'GET':
+                return dict(self.folders[identity])
+            if method == 'DELETE':
+                self.deletes.append(identity)
+                self.folders.pop(identity, None)
+                return {}
+            if method == 'PUT':
+                self.puts.append(identity)
+                self.folders[identity] = dict(body)
+                return {}
+            if method == 'PATCH':
+                self.folders[identity].update(body)
+                return {}
+        return super().__call__(route, method, body)
+
+
+def upload_id(seed):
+    return 'rd-upload-v1-' + hashlib.md5(seed.encode()).hexdigest()
+
+
+def upload_offer(label, device='PEER'):
+    return {'offeredBy': {device: {'label': label}}}
+
+
+class ContractTests(unittest.TestCase):
+    def test_existing_ignore_migration_pauses_before_writing_and_preserves_pause(self):
+        for paused in (False, True):
+            with self.subTest(paused=paused), tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+                path = make_project(Path(tmp) / 'Disk/Project')
+                (path / '.stignore').write_text('!**\n')
+                rest = ContractRest([dict(id='Project', path=str(path), devices=[], paused=paused)])
+                original = ns['ignores']
+                writes = []
+
+                def guarded_ignores(p, write=True):
+                    if write:
+                        self.assertTrue(rest.folders['Project']['paused'], 'scanner must be paused before policy writes')
+                        writes.append(p)
+                    return original(p, write)
+
+                ns['ignores'] = guarded_ignores
+                ns['reconcile'](rest, 'SERVER')
+                self.assertEqual(writes, [path])
+                self.assertEqual(rest.folders['Project']['paused'], paused)
+                self.assertTrue((path / '.stignore').read_text().startswith('#include .stignore-remoteagents\n'))
+                ns['reconcile'](rest, 'SERVER')
+                self.assertEqual(writes, [path], 'current policy must not interrupt transfers')
+
+    def test_existing_broken_policy_or_failed_write_leaves_scanner_paused(self):
+        for mode in ('directory', 'symlink', 'write-failure'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+                path = make_project(Path(tmp) / 'Disk/Project')
+                (path / 'keep.txt').write_text('preserved')
+                if mode == 'directory':
+                    (path / '.stignore').mkdir()
+                elif mode == 'symlink':
+                    (path / '.stignore').symlink_to('keep.txt')
+                else:
+                    (path / '.stignore').write_text('!**\n')
+                    original = ns['ignores']
+
+                    def failed_ignores(p, write=True):
+                        if write:
+                            raise PermissionError('synthetic failed policy write')
+                        return original(p, write)
+
+                    ns['ignores'] = failed_ignores
+                rest = ContractRest([dict(id='Project', path=str(path), devices=[], paused=False)])
+                with contextlib.redirect_stderr(io.StringIO()):
+                    ns['reconcile'](rest, 'SERVER')
+                self.assertTrue(rest.folders['Project']['paused'])
+                self.assertFalse(rest.puts)
+                self.assertFalse(rest.deletes)
+                self.assertEqual((path / 'keep.txt').read_text(), 'preserved')
+
+    def test_git_top_level_and_valid_gitdir_are_required(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            disk = Path(tmp) / 'Disk'
+            make_project(disk / 'Good')
+            (disk / 'Plain').mkdir()
+            (disk / 'Broken').mkdir()
+            (disk / 'Broken/.git').write_text('gitdir: /missing/gitdir')
+            # An enclosing repository must never turn a plain child into a project.
+            run(['git', 'init', '-q', disk])
+            rest = ContractRest()
+            with contextlib.redirect_stderr(io.StringIO()):
+                ns['reconcile'](rest, 'SERVER')
+            self.assertEqual(rest.puts, ['Good'])
+            events = [json.loads(x) for x in (ns['s'] / 'project-journal.jsonl').read_text().splitlines()]
+            self.assertTrue(any(e['outcome'] == 'refused' and e['projectID'] == 'Plain' for e in events))
+
+    def test_only_upload_ids_are_admitted_and_git_is_initialized_once(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            make_project(Path(tmp) / 'Disk/Existing')
+            good = upload_id('new')
+            rest = ContractRest(offers={good: upload_offer('New'), 'Infraagent': upload_offer('Bad'),
+                                       'PlainTest': upload_offer('Old'), 'rd-upload-v1-short': upload_offer('Short')})
+            ns['reconcile'](rest, 'SERVER')
+            self.assertEqual(set(rest.folders), {'Existing', good})
+            path = Path(tmp) / 'Disk/New'
+            self.assertEqual(run(['git', '-C', path, 'rev-list', '--count', 'HEAD']).stdout.strip(), b'1')
+            self.assertEqual(run(['git', '-C', path, 'ls-tree', '-r', 'HEAD']).stdout, b'')
+            (path / 'source.txt').write_text('ordinary uncommitted source')
+            ns['reconcile'](rest, 'SERVER')
+            self.assertEqual(run(['git', '-C', path, 'rev-list', '--count', 'HEAD']).stdout.strip(), b'1')
+            events = [json.loads(x) for x in (ns['s'] / 'project-journal.jsonl').read_text().splitlines()]
+            accepted = next(e for e in events if e['projectID'] == good and e['outcome'] == 'accepted')
+            self.assertEqual(accepted['device'], 'PEER')
+            self.assertEqual(accepted['source'], 'upload')
+            self.assertEqual(accepted['reason'], 'без удалённого репозитория')
+            self.assertTrue(all({'projectID', 'source', 'hostID', 'device', 'outcome', 'reason'} <= e.keys() for e in events))
+            self.assertEqual({e['projectID'] for e in events if e['outcome'] == 'refused'},
+                             {'Infraagent', 'PlainTest', 'rd-upload-v1-short'})
+
+    def test_name_collision_and_invalid_labels_are_refused_without_sanitizing(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            disk = Path(tmp) / 'Disk'
+            make_project(disk / 'Project')
+            labels = ['project', 'CON', '../escape', 'Name\r\n', 'a..b', '', 'Я' * 121, 'a\u0301', 'COM¹']
+            rest = ContractRest(offers={upload_id(str(i)): upload_offer(label) for i, label in enumerate(labels)})
+            ns['reconcile'](rest, 'SERVER')
+            self.assertEqual(rest.puts, ['Project'])
+            self.assertEqual({p.name for p in disk.iterdir()}, {'Project'})
+            self.assertIn('имя занято на сервере', (ns['s'] / 'project-journal.jsonl').read_text())
+
+    def test_manual_unshare_tombstones_even_existing_path_and_never_returns(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            disk = Path(tmp) / 'Disk'
+            make_project(disk / 'Project')
+            rest = ContractRest()
+            ns['reconcile'](rest, 'SERVER')
+            rest.folders.clear()  # Manual DELETE in Syncthing, not through our script.
+            rest.offers = {'Project': upload_offer('Project')}
+            ns['reconcile'](rest, 'SERVER')
+            ns['reconcile'](rest, 'SERVER')
+            state = json.loads(ns['missing_watch'].read_text())
+            self.assertIn('Project', state['removed'])
+            self.assertEqual(rest.folders, {})
+            self.assertTrue((disk / 'Project/.git').is_dir())
+
+    def test_removed_upload_and_renamed_marker_never_reuse_tombstone(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            disk = Path(tmp) / 'Disk'
+            make_project(disk / 'Existing')
+            identity = upload_id('rename')
+            rest = ContractRest(offers={identity: upload_offer('Upload')})
+            ns['reconcile'](rest, 'SERVER')
+            (disk / 'Upload').rename(disk / 'Renamed')
+            ns['forget_missing'](rest, list(rest.folders.values()), disk, now=1000)
+            ns['forget_missing'](rest, list(rest.folders.values()), disk, now=1030)
+            ns['reconcile'](rest, 'SERVER')
+            self.assertNotIn(identity, rest.folders)
+            self.assertIn(identity, json.loads(ns['missing_watch'].read_text())['removed'])
+            self.assertEqual(len([p for p in disk.iterdir() if p.is_dir()]), 2)
+
+    def test_empty_missing_or_unreadable_root_has_no_mutations_or_mkdir(self):
+        for mode in ('missing', 'empty', 'unreadable'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+                disk = Path(tmp) / 'Disk'
+                if mode != 'missing':
+                    disk.mkdir()
+                if mode == 'unreadable':
+                    (disk / 'sentinel').touch()
+                    disk.chmod(0)
+                identity = upload_id('unsafe-root')
+                rest = ContractRest(offers={identity: upload_offer('New')})
+                try:
+                    ns['reconcile'](rest, 'SERVER')
+                    self.assertEqual(rest.puts, [])
+                    self.assertEqual(rest.deletes, [])
+                finally:
+                    if disk.exists():
+                        disk.chmod(0o700)
+                self.assertFalse((disk / 'New').exists())
+                self.assertEqual(disk.exists(), mode != 'missing')
+
+    def test_mandatory_ignores_precede_negations_and_cover_q8(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            path = make_project(Path(tmp) / 'Disk/Project')
+            user = b'!.git\r\n!.env\r\n!vendor\r\n#include .stignore-remoteagents\r\n'
+            (path / '.stignore').write_bytes(user)
+            ns['ignores'](path)
+            data = (path / '.stignore').read_bytes()
+            self.assertTrue(data.startswith(b'#include .stignore-remoteagents\r\n'))
+            self.assertEqual(data.count(b'#include .stignore-remoteagents'), 1)
+            self.assertIn(b'!.git\r\n!.env\r\n!vendor\r\n', data)
+            rules = (path / '.stignore-remoteagents').read_text()
+            for rule in ('*.pem', '*.crt', '*.crt?', 'token*.json', '.venv', 'venv', '__pycache__', '*.sqlite*', '*.db*', '*.sql', '*.sql.gz'):
+                self.assertIn('(?i)' + rule + '\n', rules)
+
+    def test_versioning_is_migrated_for_existing_folders(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            path = make_project(Path(tmp) / 'Disk/Project')
+            rest = ContractRest([dict(id='old-id', path=str(path), devices=[], versioning={}, paused=True)])
+            ns['reconcile'](rest, 'SERVER')
+            folder = rest.folders['old-id']
+            self.assertEqual(folder['versioning']['type'], 'staggered')
+            self.assertEqual(folder['versioning']['params']['maxAge'], '2592000')
+            self.assertTrue(folder['paused'])
+            before = len(rest.puts)
+            ns['reconcile'](rest, 'SERVER')
+            self.assertEqual(len(rest.puts), before)
+
+    def test_guard_paused_ids_are_imported_before_any_discovery(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            path = make_project(Path(tmp) / 'Disk/Project')
+            ns['s'].mkdir(parents=True)
+            guard = ns['s'] / 'vanish-guard.json'
+            guard.write_text(json.dumps({'paused': ['guard-id'], 'missing': {'other': 1}}))
+            rest = ContractRest([dict(id='guard-id', path=str(path), devices=[], paused=True)])
+            ns['reconcile'](rest, 'SERVER')
+            self.assertEqual(rest.deletes, ['guard-id'])
+            self.assertEqual(rest.puts, [])
+            self.assertIn('guard-id', json.loads(ns['missing_watch'].read_text())['removed'])
+            before = ns['missing_watch'].read_bytes()
+            ns['reconcile'](rest, 'SERVER')
+            self.assertEqual(ns['missing_watch'].read_bytes(), before)
+            self.assertTrue(guard.exists())  # Original is retained for rollback.
+
+    def test_broken_durable_tombstones_fail_closed(self):
+        for content in ('not-json', '[]', '{"removed": []}', '{"removed": {"retired": 3}}'):
+            with self.subTest(content=content), tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+                make_project(Path(tmp) / 'Disk/Project')
+                ns['s'].mkdir(parents=True)
+                ns['missing_watch'].write_text(content)
+                rest = ContractRest(offers={upload_id('unsafe'): upload_offer('New')})
+                with contextlib.redirect_stderr(io.StringIO()):
+                    ns['reconcile'](rest, 'SERVER')
+                self.assertEqual(rest.puts, [])
+                self.assertEqual(rest.deletes, [])
+                self.assertEqual(ns['missing_watch'].read_text(), content)
+
+    def test_existing_nongit_registration_is_retired_without_deleting_data(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            path = Path(tmp) / 'Disk/Plain'
+            path.mkdir(parents=True)
+            (path / 'keep.txt').write_text('must survive')
+            rest = ContractRest([dict(id='old', path=str(path), devices=[])])
+            ns['reconcile'](rest, 'SERVER')
+            self.assertEqual(rest.deletes, ['old'])
+            self.assertEqual(rest.puts, [])
+            self.assertEqual((path / 'keep.txt').read_text(), 'must survive')
+            self.assertIn('old', json.loads(ns['missing_watch'].read_text())['removed'])
+
+    def test_case_colliding_server_names_are_both_refused(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            make_project(Path(tmp) / 'Disk/Project')
+            make_project(Path(tmp) / 'Disk/PROJECT')
+            rest = ContractRest()
+            ns['reconcile'](rest, 'SERVER')
+            self.assertEqual(rest.puts, [])
+
+    def test_origin_status_never_logs_url_or_file_contents(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            path = make_project(Path(tmp) / 'Disk/Project')
+            run(['git', '-C', path, 'remote', 'add', 'origin', 'https://user:synthetic-password@example.invalid/repo'])
+            (path / '.env').write_text('SYNTHETIC_TOKEN=do-not-log')
+            rest = ContractRest()
+            ns['reconcile'](rest, 'SERVER')
+            journal = (ns['s'] / 'project-journal.jsonl').read_text()
+            self.assertNotIn('synthetic-password', journal)
+            self.assertNotIn('do-not-log', journal)
+            self.assertIn('origin настроен', journal)
+            before = (ns['s'] / 'project-journal.jsonl').stat().st_size
+            ns['reconcile'](rest, 'SERVER')
+            self.assertEqual((ns['s'] / 'project-journal.jsonl').stat().st_size, before)
+
+    def test_failed_guard_delete_and_missing_root_preserve_imported_tombstones(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            ns['s'].mkdir(parents=True)
+            (ns['s'] / 'vanish-guard.json').write_text(json.dumps({'paused': {'retired': True}}))
+            rest = ContractRest(offers={'retired': upload_offer('Old')})
+            ns['reconcile'](rest, 'SERVER')
+            self.assertIn('retired', json.loads(ns['missing_watch'].read_text())['removed'])
+            self.assertFalse((Path(tmp) / 'Disk').exists())
+
+    def test_guard_delete_failure_retries_without_republishing(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            path = make_project(Path(tmp) / 'Disk/Project')
+            ns['s'].mkdir(parents=True)
+            (ns['s'] / 'vanish-guard.json').write_text(json.dumps({'paused': ['retired']}))
+            rest = ContractRest([dict(id='retired', path=str(path), devices=[], paused=True)])
+            def failing(route, method='GET', body=None):
+                if method == 'DELETE':
+                    raise urllib.error.URLError('synthetic lost delete')
+                return rest(route, method, body)
+            with contextlib.redirect_stderr(io.StringIO()):
+                ns['reconcile'](failing, 'SERVER')
+            self.assertIn('retired', json.loads(ns['missing_watch'].read_text())['removed'])
+            self.assertEqual(rest.puts, [])
+            ns['reconcile'](rest, 'SERVER')
+            self.assertEqual(rest.folders, {})
+            self.assertTrue((path / '.git').exists())
+
+    def test_manual_path_change_retires_old_id_and_keeps_new_path_data(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            disk = Path(tmp) / 'Disk'
+            path = make_project(disk / 'Project')
+            rest = ContractRest()
+            ns['reconcile'](rest, 'SERVER')
+            path.rename(disk / 'Renamed')
+            rest.folders['Project']['path'] = str(disk / 'Renamed')
+            ns['reconcile'](rest, 'SERVER')
+            self.assertIn('Project', json.loads(ns['missing_watch'].read_text())['removed'])
+            self.assertNotIn('Project', rest.folders)
+            self.assertTrue((disk / 'Renamed/.git').exists())
+
+    def test_manual_unshare_is_remembered_even_when_disk_becomes_empty(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            path = make_project(Path(tmp) / 'Disk/Project')
+            rest = ContractRest()
+            ns['reconcile'](rest, 'SERVER')
+            path.rename(Path(tmp) / 'saved-project')
+            rest.folders.clear()
+            ns['reconcile'](rest, 'SERVER')
+            self.assertIn('Project', json.loads(ns['missing_watch'].read_text())['removed'])
+            self.assertEqual(rest.deletes, [])
+
+    def test_two_uploads_with_same_free_label_accept_exactly_one(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            make_disk(Path(tmp))
+            identities = [upload_id('one'), upload_id('two')]
+            rest = ContractRest(offers={i: upload_offer('New') for i in identities})
+            ns['reconcile'](rest, 'SERVER')
+            self.assertEqual(len(rest.folders), 1)
+            self.assertEqual({p.name for p in (Path(tmp) / 'Disk').iterdir()}, {'.mounted', 'New'})
+            self.assertTrue((Path(tmp) / 'Disk/New/.git').is_dir())
+            self.assertIn('имя занято на сервере', (ns['s'] / 'project-journal.jsonl').read_text())
+
+    def test_gitdir_symlink_is_not_a_valid_project(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            disk = Path(tmp) / 'Disk'
+            make_project(disk / 'Good')
+            (disk / 'Linked').mkdir()
+            (disk / 'Linked/.git').symlink_to(disk / 'Good/.git', target_is_directory=True)
+            rest = ContractRest()
+            with contextlib.redirect_stderr(io.StringIO()):
+                ns['reconcile'](rest, 'SERVER')
+            self.assertEqual(rest.puts, ['Good'])
+
+
+    def test_guard_updates_are_imported_incrementally_and_never_unretire(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            make_disk(Path(tmp))
+            ns['s'].mkdir(parents=True)
+            guard = ns['s'] / 'vanish-guard.json'
+            guard.write_text(json.dumps({'paused': ['first']}))
+            rest = ContractRest()
+            ns['reconcile'](rest, 'SERVER')
+            guard.write_text(json.dumps({'paused': ['second']}))
+            ns['reconcile'](rest, 'SERVER')
+            self.assertEqual(set(json.loads(ns['missing_watch'].read_text())['removed']), {'first', 'second'})
+
+    def test_journal_failure_blocks_new_publication(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            make_project(Path(tmp) / 'Disk/Project')
+            rest = ContractRest()
+            ns['record'] = raiser(PermissionError('synthetic journal unavailable'))
+            with self.assertRaises(PermissionError):
+                ns['reconcile'](rest, 'SERVER')
+            self.assertEqual(rest.puts, [])
+
+    def test_legacy_refusal_stderr_is_single_line_and_deduplicated(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            make_disk(Path(tmp))
+            rest = ContractRest(offers={'legacy\r\nforged': upload_offer('Old')})
+            with contextlib.redirect_stderr(io.StringIO()) as first:
+                ns['reconcile'](rest, 'SERVER')
+            self.assertEqual(len(first.getvalue().splitlines()), 1)
+            with contextlib.redirect_stderr(io.StringIO()) as repeated:
+                ns['reconcile'](rest, 'SERVER')
+            self.assertEqual(repeated.getvalue(), '')
+
+    def test_existing_linked_gitdir_registration_is_retired(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            disk = Path(tmp) / 'Disk'
+            make_project(disk / 'Good')
+            path = disk / 'Linked'
+            path.mkdir()
+            (path / '.git').symlink_to(disk / 'Good/.git', target_is_directory=True)
+            rest = ContractRest([dict(id='linked-id', path=str(path), devices=[])])
+            with contextlib.redirect_stderr(io.StringIO()):
+                ns['reconcile'](rest, 'SERVER')
+            self.assertIn('linked-id', rest.deletes)
+            self.assertTrue((path / '.git').is_symlink())
+
+    def test_unknown_guard_path_is_learned_without_manufacturing_new_identity(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            make_disk(Path(tmp))
+            ns['s'].mkdir(parents=True)
+            (ns['s'] / 'vanish-guard.json').write_text(json.dumps({'paused': ['retired']}))
+            rest = ContractRest()
+            ns['reconcile'](rest, 'SERVER')
+            path = make_project(Path(tmp) / 'Disk/Project')
+            rest.folders['retired'] = dict(id='retired', path=str(path), devices=[])
+            ns['reconcile'](rest, 'SERVER')
+            self.assertEqual(rest.folders, {})
+            self.assertEqual(json.loads(ns['missing_watch'].read_text())['removed']['retired'], str(path))
+
+    def test_initial_commit_is_empty_even_after_interrupted_init_with_staged_data(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            path = make_project(Path(tmp) / 'Disk/Reserved')
+            (path / '.env').write_text('SYNTHETIC_LOCAL_ONLY=preserve-index')
+            run(['git', '-C', path, 'add', '.env'])
+            before = run(['git', '-C', path, 'ls-files', '--stage']).stdout
+            ns['s'].mkdir(parents=True)
+            ns['initialize_project'](path)
+            self.assertEqual(run(['git', '-C', path, 'ls-tree', '-r', 'HEAD']).stdout, b'')
+            self.assertEqual(run(['git', '-C', path, 'ls-files', '--stage']).stdout, before)
+            self.assertEqual((path / '.env').read_text(), 'SYNTHETIC_LOCAL_ONLY=preserve-index')
+
+    def test_tombstone_directory_is_synced_before_rest_delete(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            disk = make_disk(Path(tmp))
+            path = make_project(disk / 'Project')
+            rest = ContractRest()
+            ns['reconcile'](rest, 'SERVER')
+            shutil.rmtree(path)
+            ns['forget_missing'](rest, list(rest.folders.values()), disk, now=1000)
+            synced = set()
+            real_sync = os.fsync
+            def fsync(fd):
+                real_sync(fd)
+                if stat.S_ISDIR(os.fstat(fd).st_mode) and ns['missing_watch'].exists():
+                    synced.update(json.loads(ns['missing_watch'].read_text()).get('removed', {}))
+            def deleting(route, method='GET', body=None):
+                if method == 'DELETE':
+                    self.assertIn('Project', synced, 'durable tombstone must precede REST DELETE')
+                return rest(route, method, body)
+            with mock.patch.object(ns['os'], 'fsync', side_effect=fsync), contextlib.redirect_stderr(io.StringIO()):
+                ns['forget_missing'](deleting, list(rest.folders.values()), disk, now=1030)
+
+
+
 class ServerTests(unittest.TestCase):
     def test_include_preserves_missing_newline_bom_and_existing_include(self):
         with Stand(1) as t:
@@ -563,17 +1032,16 @@ class ServerTests(unittest.TestCase):
             }
             for name, original in cases.items():
                 path = side['home'] / 'Disk' / name
-                path.mkdir(parents=True)
+                make_project(path)
                 (path / '.stignore').write_bytes(original)
             t.server(side, 'bootstrap')
             for name, original in cases.items():
                 with self.subTest(name=name):
                     path = side['home'] / 'Disk' / name
                     policy = (path / '.stignore').read_bytes()
-                    self.assertTrue(policy.startswith(original))
+                    self.assertTrue(policy.startswith(b'\xef\xbb\xbf#include' if original.startswith(b'\xef\xbb\xbf') else b'#include'))
+                    self.assertIn(original.removeprefix(b'\xef\xbb\xbf').replace(b'#include .stignore-remoteagents\n', b''), policy)
                     self.assertEqual(policy.count(b'#include .stignore-remoteagents'), 1)
-                    if name == 'ExistingInclude':
-                        self.assertEqual(policy, original)
                     t.server(side, 'bootstrap')
                     self.assertEqual((path / '.stignore').read_bytes(), policy)
                     self.assertEqual(t.folder(side, name)['id'], name)
@@ -583,7 +1051,7 @@ class ServerTests(unittest.TestCase):
             a, b, c = t.sides
             for name in ('Existing', 'Проект 1'):
                 folder = a['home'] / 'Disk' / name
-                folder.mkdir(parents=True)
+                make_project(folder)
                 (folder / 'keep.txt').write_text(name)
             t.server(a, 'add-device', dict(deviceId=b['deviceId'], deviceName='Laptop'), stdin=True)
             device = next(d for d in t.api(a, 'config/devices') if d['deviceID'] == b['deviceId'])
@@ -605,7 +1073,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(t.api(a, 'config'), before)
             self.assertEqual([p.stat().st_mtime_ns for p in files], mtimes)
             t.server(a, 'add-device', dict(deviceId=c['deviceId'], deviceName='Desktop'))
-            (a['home'] / 'Disk/New').mkdir()
+            make_project(a['home'] / 'Disk/New')
             t.server(a, 'bootstrap')  # The exact entry point used by cron and systemd.
             for name in ('Existing', 'Проект 1', 'New'):
                 self.assertEqual({d['deviceID'] for d in t.folder(a, name)['devices']},
@@ -621,10 +1089,10 @@ class ServerTests(unittest.TestCase):
             source = a['home'] / 'Disk/Shared'
             source.mkdir(parents=True)
             run(['git', 'init', '-q', source])
-            original = b'// custom user rules\r\ncustom.txt\r\n'
+            original = b'// custom user rules\r\ncustom.txt\r\n!.git\r\n!.env\r\n!vendor\r\n!**\r\n'
             (source / '.stignore').write_bytes(original)
             t.register(a, b)
-            self.assertTrue((source / '.stignore').read_bytes().startswith(original))
+            self.assertTrue((source / '.stignore').read_bytes().endswith(original))
             self.assertEqual((source / '.stignore').read_bytes().count(b'#include .stignore-remoteagents'), 1)
             self.assertEqual((source / '.stignore-remoteagents').read_bytes(), (HERE / 'stignore.txt').read_bytes())
             # A CRLF template update changes only our include target, without a hash history.
@@ -654,8 +1122,10 @@ class ServerTests(unittest.TestCase):
             t.api(b, 'config/folders/Shared', 'PUT', folder)  # Native acceptance via local REST.
             (target / '.stignore').write_text('#include .stignore-remoteagents\n')
             shutil.copyfile(a['state'] / 'stignore.txt', target / '.stignore-remoteagents')
-            allowed = {'log/source.py': 'log source', 'db/schema.sql': 'SQL source', 'source.txt': 'source'}
-            denied = ('custom.txt', 'updated-only.txt', '.env', 'identity.key', 'node_modules/a.js', 'build/output')
+            allowed = {'log/source.py': 'log source', 'db/schema.migration': 'SQL source', 'source.txt': 'source'}
+            denied = ('custom.txt', 'updated-only.txt', '.env', 'identity.key', 'node_modules/a.js', 'build/output',
+                      'key.pem', 'cert.crt', 'cert.crtx', 'token-local.json', '.venv/bin/python',
+                      'venv/a', '__pycache__/a.pyc', 'local.sqlite-wal', 'local.db3', 'local.sql.gz', 'db/schema.sql')
             for name, content in {**allowed, **dict.fromkeys(denied, 'private or generated')}.items():
                 path = source / name
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -683,7 +1153,7 @@ class ServerTests(unittest.TestCase):
     def test_watcher_delay_is_migrated_idempotently_by_every_server_entry_point(self):
         with Stand(2) as t:
             a, b = t.sides
-            (a['home'] / 'Disk/Existing').mkdir(parents=True)
+            make_project(a['home'] / 'Disk/Existing')
             t.register(a, b)
             # A folder outside Disk belongs to the user, not to server discovery.
             external = t.api(a, 'config/defaults/folder')
@@ -719,7 +1189,7 @@ class ServerTests(unittest.TestCase):
         pwsh = os.environ.get('PWSH') or str(Path.home() / '.cache/pwsh-test/pwsh')
         with Stand(2) as t:
             a, b = t.sides
-            (a['home'] / 'Disk/Offered').mkdir(parents=True)
+            make_project(a['home'] / 'Disk/Offered')
             t.register(a, b)
             t.register(b, a)
             wait(lambda: 'Offered' in t.api(b, 'cluster/pending/folders'), 'folder offered for PowerShell acceptance')
@@ -735,12 +1205,12 @@ class ServerTests(unittest.TestCase):
             common = str(HERE / 'Disk.Common.ps1').replace("'", "''")
             script.write_text(". '" + common + "'\n" + """
 $request=[Console]::In.ReadToEnd()|ConvertFrom-Json
-$script:Gui=$request.gui;$script:ApiKey=$request.key;$script:DiskHome=Split-Path $request.path -Parent
+$script:Gui=$request.gui;$script:ApiKey=$request.key;$script:DiskHome=$request.home
 Accept-DiskFolders @(@{id='Offered';path=$request.path}) $request.peer $request.local
 Set-DiskWatcherDelay
 """)
             request = dict(gui='127.0.0.1:' + str(b['gui']), key=b['key'],
-                           path=str(b['home'] / 'Accepted'), peer=a['deviceId'], local=b['deviceId'])
+                           path=str(b['home'] / 'Disk/Accepted'), home=str(b['home'] / 'RemoteDisk'), peer=a['deviceId'], local=b['deviceId'])
             encoded = (json.dumps(request, ensure_ascii=False) + '\r\n').encode()
             run([pwsh, '-NoProfile', '-NonInteractive', '-File', script],
                 env={**os.environ, 'USERPROFILE': str(b['home'])}, stdin=encoded)
@@ -761,7 +1231,7 @@ Set-DiskWatcherDelay
         with Stand() as t:
             a, b = t.sides
             project = a['home'] / 'Disk/Existing'
-            project.mkdir(parents=True)
+            make_project(project)
             (project / 'keep.txt').write_text('user content')
             t.server(a, 'bootstrap')
             folder = t.folder(a, 'Existing')
@@ -784,6 +1254,7 @@ Set-DiskWatcherDelay
             a, b = t.sides
             disk = a['home'] / 'Disk'
             (disk / 'Valid/nested').mkdir(parents=True)
+            make_project(disk / 'Valid')
             (disk / 'CON').mkdir()
             (disk / 'bad..name').mkdir()
             (disk / 'trailing.').mkdir()
@@ -913,29 +1384,30 @@ class IncomingFolderTests(unittest.TestCase):
     def test_upload_is_accepted_bidirectionally_and_offered_to_a_third_device(self):
         with Stand(3) as t:
             server, laptop, desktop = t.sides
+            make_disk(server['home'])
             for side, peer in ((server, laptop), (laptop, server), (server, desktop), (desktop, server)):
                 t.register(side, peer)
-            self.assertFalse((server['home'] / 'Disk').exists())
-            source = t.offer(laptop, server, 'disk-opaque-upload-id', 'Проект')
+            self.assertEqual(list((server['home'] / 'Disk').iterdir()), [server['home'] / 'Disk/.mounted'])
+            source = t.offer(laptop, server, 'rd-upload-v1-00000000000000000000000000000001', 'Проект')
             (source / '.env').write_text('test-only-not-a-secret')
-            wait(lambda: 'disk-opaque-upload-id' in t.api(server, 'cluster/pending/folders'), 'upload offered to server')
+            wait(lambda: 'rd-upload-v1-00000000000000000000000000000001' in t.api(server, 'cluster/pending/folders'), 'upload offered to server')
             started = time.monotonic()
             t.server(server, 'reconcile')  # Also the entry point of already installed timers.
             self.assertLess(time.monotonic() - started, 5)
             target = server['home'] / 'Disk/Проект'
-            folder = t.folder(server, 'disk-opaque-upload-id')
+            folder = t.folder(server, 'rd-upload-v1-00000000000000000000000000000001')
             self.assertEqual((folder['path'], folder['label'], folder['type']), (str(target), 'Проект', 'sendreceive'))
             self.assertEqual((folder['fsWatcherEnabled'], folder['fsWatcherDelayS'], folder['maxConflicts']), (True, 2, -1))
             self.assertEqual(folder['versioning']['type'], 'staggered')
             self.assertEqual({d['deviceID'] for d in folder['devices']}, {s['deviceId'] for s in t.sides})
             wait(lambda: (target / 'source.txt').exists(), 'uploaded bytes arrive at the server')
-            self.assertEqual((target / 'source.txt').read_text(), 'disk-opaque-upload-id')
+            self.assertEqual((target / 'source.txt').read_text(), 'rd-upload-v1-00000000000000000000000000000001')
             self.assertFalse((target / '.env').exists())
             (target / 'reply.txt').write_text('server reply')
             wait(lambda: (source / 'reply.txt').exists(), 'server watcher sends a change back without manual scan')
             self.assertEqual((source / 'reply.txt').read_text(), 'server reply')
-            wait(lambda: 'disk-opaque-upload-id' in t.api(desktop, 'cluster/pending/folders'), 'offer reaches third device')
-            pending = t.api(desktop, 'cluster/pending/folders')['disk-opaque-upload-id']
+            wait(lambda: 'rd-upload-v1-00000000000000000000000000000001' in t.api(desktop, 'cluster/pending/folders'), 'offer reaches third device')
+            pending = t.api(desktop, 'cluster/pending/folders')['rd-upload-v1-00000000000000000000000000000001']
             self.assertEqual(pending['offeredBy'][server['deviceId']]['label'], 'Проект')
             self.assertEqual(t.api(desktop, 'config/folders'), [])  # The client can render its cloud placeholder.
             before = t.api(server, 'config')
@@ -945,11 +1417,12 @@ class IncomingFolderTests(unittest.TestCase):
                 t.server(server, 'bootstrap')
             self.assertEqual(t.api(server, 'config'), before)
             self.assertEqual([p.stat().st_mtime_ns for p in files], mtimes)
-            self.assertEqual(sorted(p.name for p in target.parent.iterdir()), ['Проект'])
+            self.assertEqual(sorted(p.name for p in target.parent.iterdir() if p.is_dir()), ['Проект'])
 
     def test_colliding_labels_never_merge_existing_contents_or_registered_paths(self):
         with Stand() as t:
             server, laptop = t.sides
+            make_disk(server['home'])
             t.register(server, laptop)
             t.register(laptop, server)
             disk = server['home'] / 'Disk'
@@ -963,17 +1436,13 @@ class IncomingFolderTests(unittest.TestCase):
                           devices=[dict(deviceID=server['deviceId'])])
             t.api(server, 'config/folders/reserved-path', 'PUT', folder)
             reserved_config = t.folder(server, 'reserved-path')
-            for folder_id in ('upload-a', 'upload-b'):
+            for folder_id in ('rd-upload-v1-00000000000000000000000000000002', 'rd-upload-v1-00000000000000000000000000000003'):
                 t.offer(laptop, server, folder_id, 'Проект')
-            wait(lambda: {'upload-a', 'upload-b'} <= set(t.api(server, 'cluster/pending/folders')), 'same-label uploads')
+            wait(lambda: {'rd-upload-v1-00000000000000000000000000000002', 'rd-upload-v1-00000000000000000000000000000003'} <= set(t.api(server, 'cluster/pending/folders')), 'same-label uploads')
             t.server(server, 'bootstrap')
-            for folder_id, name in (('upload-a', 'Проект (5)'), ('upload-b', 'Проект (6)')):
-                target = disk / name
-                current = t.folder(server, folder_id)
-                self.assertEqual((current['path'], current['label']), (str(target), name))
-                wait(lambda: (target / 'source.txt').exists(), 'separate upload ' + folder_id)
-                self.assertEqual((target / 'source.txt').read_text(), folder_id)
-                self.assertFalse((target / 'keep.txt').exists())
+            self.assertFalse(any(f['id'] in ('rd-upload-v1-00000000000000000000000000000002', 'rd-upload-v1-00000000000000000000000000000003') for f in t.api(server, 'config/folders')))
+            self.assertFalse((disk / 'Проект (5)').exists())
+            self.assertFalse((disk / 'Проект (6)').exists())
             self.assertEqual((disk / 'Проект/keep.txt').read_text(), 'server original')
             self.assertFalse((disk / 'Проект/source.txt').exists())
             self.assertEqual((disk / 'Проект (2)').read_text(), 'ordinary file')
@@ -985,33 +1454,24 @@ class IncomingFolderTests(unittest.TestCase):
             self.assertEqual(t.api(server, 'config/folders'), before)
 
     def test_remote_labels_are_safe_names_including_crlf_and_reserved_names(self):
-        labels = {'upload-path': '../NUL:bad\\dir\r\n', 'upload-con': 'CON', 'upload-empty': '',
-                  'upload-long': 'Я' * 400, 'upload-dots': '...'}
+        labels = {'rd-upload-v1-00000000000000000000000000000004': '../NUL:bad\\dir\r\n', 'rd-upload-v1-00000000000000000000000000000005': 'CON', 'rd-upload-v1-00000000000000000000000000000006': '',
+                  'rd-upload-v1-00000000000000000000000000000007': 'Я' * 400, 'rd-upload-v1-00000000000000000000000000000008': '...'}
         with Stand() as t:
             server, laptop = t.sides
+            make_disk(server['home'])
             t.register(server, laptop)
             t.register(laptop, server)
             for folder_id, label in labels.items():
                 t.offer(laptop, server, folder_id, label)
             wait(lambda: set(labels) <= set(t.api(server, 'cluster/pending/folders')), 'unsafe-label offers')
             t.server(server, 'bootstrap')
-            with server_helpers(server['home']) as ns:
-                for folder_id in labels:
-                    folder = t.folder(server, folder_id)
-                    target = Path(folder['path'])
-                    self.assertEqual(target.parent, server['home'] / 'Disk')
-                    self.assertEqual(ns['folder_path'](target.name), target)
-                    self.assertEqual(folder['label'], target.name)
-                    self.assertNotIn('..', target.name)
-                    self.assertNotRegex(target.name, r'[\r\n/\\:]')
-                    wait(lambda: (target / 'source.txt').exists(), 'safe upload ' + folder_id)
-            self.assertEqual(Path(t.folder(server, 'upload-con')['path']).name, '_CON')
-            self.assertEqual(Path(t.folder(server, 'upload-empty')['path']).name, 'upload-empty')
-            self.assertEqual(len(list((server['home'] / 'Disk').iterdir())), len(labels))
+            self.assertEqual(t.api(server, 'config/folders'), [])
+            self.assertEqual({p.name for p in (server['home'] / 'Disk').iterdir()}, {'.mounted'})
 
     def test_upload_id_equal_to_an_unregistered_local_name_does_not_merge(self):
         with Stand() as t:
             server, laptop = t.sides
+            make_disk(server['home'])
             t.register(server, laptop)
             t.register(laptop, server)
             original = server['home'] / 'Disk/Project'
@@ -1021,9 +1481,8 @@ class IncomingFolderTests(unittest.TestCase):
             wait(lambda: 'Project' in t.api(server, 'cluster/pending/folders'), 'ID/name collision offered')
             result = t.server(server, 'bootstrap', ok=False)
             self.assertEqual(result.returncode, 0, result.stderr.decode())
-            self.assertIn('RemoteDisk: Project: ID занят', result.stderr.decode())
-            self.assertEqual(t.folder(server, 'Project')['path'], str(original.with_name('Project (2)')))
-            wait(lambda: (original.with_name('Project (2)') / 'source.txt').exists(), 'upload accepted separately')
+            self.assertFalse((original.with_name('Project (2)')).exists())
+            self.assertEqual(t.api(server, 'config/folders'), [])
             self.assertFalse((original / 'source.txt').exists())
             self.assertFalse((source / 'keep.txt').exists())
             self.assertEqual((original / 'keep.txt').read_text(), 'unregistered local content')
@@ -1031,63 +1490,66 @@ class IncomingFolderTests(unittest.TestCase):
     def test_retry_after_a_committed_put_with_a_lost_response_is_idempotent(self):
         with Stand() as t:
             server, laptop = t.sides
+            make_disk(server['home'])
             t.register(server, laptop)
             t.register(laptop, server)
-            t.offer(laptop, server, 'lost-response', 'Upload')
-            wait(lambda: 'lost-response' in t.api(server, 'cluster/pending/folders'), 'offer for lost response')
+            t.offer(laptop, server, 'rd-upload-v1-00000000000000000000000000000009', 'Upload')
+            wait(lambda: 'rd-upload-v1-00000000000000000000000000000009' in t.api(server, 'cluster/pending/folders'), 'offer for lost response')
 
             def lost_response(route, method='GET', body=None):
                 result = t.api(server, route, method, body)
-                if method == 'PUT' and route == 'config/folders/lost-response':
+                if method == 'PUT' and route == 'config/folders/rd-upload-v1-00000000000000000000000000000009':
                     raise urllib.error.URLError('test response lost after committed write')
                 return result
 
             with server_helpers(server['home']) as ns, contextlib.redirect_stderr(io.StringIO()):
                 ns['reconcile'](lost_response, server['deviceId'])
-            before = t.folder(server, 'lost-response')
+            before = t.folder(server, 'rd-upload-v1-00000000000000000000000000000009')
             t.server(server, 'bootstrap')
-            self.assertEqual(t.folder(server, 'lost-response'), before)
-            self.assertEqual({p.name for p in (server['home'] / 'Disk').iterdir()}, {'Upload'})
+            self.assertEqual(t.folder(server, 'rd-upload-v1-00000000000000000000000000000009'), before)
+            self.assertEqual({p.name for p in (server['home'] / 'Disk').iterdir() if p.is_dir()}, {'Upload'})
 
     def test_unknown_device_is_not_accepted_until_registered(self):
         with Stand() as t:
             server, stranger = t.sides
+            make_disk(server['home'])
             t.register(stranger, server)  # The server has never seen add-device for this peer.
-            t.offer(stranger, server, 'unknown-upload', 'Чужая папка')
+            t.offer(stranger, server, 'rd-upload-v1-0000000000000000000000000000000a', 'Чужая папка')
             wait(lambda: stranger['deviceId'] in t.api(server, 'cluster/pending/devices'), 'unknown device rejected by engine')
             t.server(server, 'bootstrap')
             self.assertEqual(t.api(server, 'config/folders'), [])
-            self.assertFalse((server['home'] / 'Disk').exists())
+            self.assertEqual(list((server['home'] / 'Disk').iterdir()), [server['home'] / 'Disk/.mounted'])
             t.register(server, stranger)
-            wait(lambda: 'unknown-upload' in t.api(server, 'cluster/pending/folders'), 'offer after explicit registration')
+            wait(lambda: 'rd-upload-v1-0000000000000000000000000000000a' in t.api(server, 'cluster/pending/folders'), 'offer after explicit registration')
             # add-device itself also accepts an offer already waiting at the server.
             t.server(server, 'add-device', dict(deviceId=stranger['deviceId']))
             target = server['home'] / 'Disk/Чужая папка'
             wait(lambda: (target / 'source.txt').exists(), 'registered upload accepted')
-            self.assertEqual((target / 'source.txt').read_text(), 'unknown-upload')
+            self.assertEqual((target / 'source.txt').read_text(), 'rd-upload-v1-0000000000000000000000000000000a')
             self.assertFalse(t.api(server, 'config/devices/' + stranger['deviceId'])['autoAcceptFolders'])
 
     def test_failed_acceptance_reuses_its_reserved_directory_and_other_offers_continue(self):
         with Stand() as t:
             server, laptop = t.sides
+            make_disk(server['home'])
             t.register(server, laptop)
             t.register(laptop, server)
-            for folder_id in ('A-retry', 'B-ok'):
-                t.offer(laptop, server, folder_id, 'Upload')
-            wait(lambda: {'A-retry', 'B-ok'} <= set(t.api(server, 'cluster/pending/folders')), 'retry offers')
+            for folder_id in ('rd-upload-v1-0000000000000000000000000000000b', 'rd-upload-v1-0000000000000000000000000000000c'):
+                t.offer(laptop, server, folder_id, 'Upload' if folder_id.endswith('0b') else 'Other')
+            wait(lambda: {'rd-upload-v1-0000000000000000000000000000000b', 'rd-upload-v1-0000000000000000000000000000000c'} <= set(t.api(server, 'cluster/pending/folders')), 'retry offers')
 
             def failing_api(route, method='GET', body=None):
-                if method == 'PUT' and route == 'config/folders/A-retry':
+                if method == 'PUT' and route == 'config/folders/rd-upload-v1-0000000000000000000000000000000b':
                     raise urllib.error.URLError('test failure before write')
                 return t.api(server, route, method, body)
 
             stderr = io.StringIO()
             with server_helpers(server['home']) as ns, contextlib.redirect_stderr(stderr):
                 ns['reconcile'](failing_api, server['deviceId'])
-            self.assertIn('RemoteDisk: A-retry: ', stderr.getvalue())
-            self.assertEqual({f['id'] for f in t.api(server, 'config/folders')}, {'B-ok'})
+            self.assertIn('RemoteDisk: rd-upload-v1-0000000000000000000000000000000b: ', stderr.getvalue())
+            self.assertEqual({f['id'] for f in t.api(server, 'config/folders')}, {'rd-upload-v1-0000000000000000000000000000000c'})
             reserved = server['home'] / 'Disk/Upload'
-            self.assertEqual((reserved / '.stfolder/remote-disk-folder-id').read_text(), 'A-retry')
+            self.assertEqual((reserved / '.stfolder/remote-disk-folder-id').read_text(), 'rd-upload-v1-0000000000000000000000000000000b')
             # A path registered by another action after the failed PUT must also block reuse of the reservation.
             other = t.api(server, 'config/defaults/folder')
             other.update(id='later-overlap', path=str(reserved / 'nested'), paused=True,
@@ -1096,14 +1558,14 @@ class IncomingFolderTests(unittest.TestCase):
             result = t.server(server, 'bootstrap', ok=False)
             self.assertEqual(result.returncode, 0, result.stderr.decode())
             self.assertIn('Путь входящей папки уже занят', result.stderr.decode())
-            self.assertNotIn('A-retry', {f['id'] for f in t.api(server, 'config/folders')})
+            self.assertNotIn('rd-upload-v1-0000000000000000000000000000000b', {f['id'] for f in t.api(server, 'config/folders')})
             t.api(server, 'config/folders/later-overlap', 'DELETE')
             t.server(server, 'bootstrap')
-            self.assertEqual(t.folder(server, 'A-retry')['path'], str(reserved))
-            self.assertEqual(Path(t.folder(server, 'B-ok')['path']).name, 'Upload (2)')
+            self.assertEqual(t.folder(server, 'rd-upload-v1-0000000000000000000000000000000b')['path'], str(reserved))
+            self.assertEqual(Path(t.folder(server, 'rd-upload-v1-0000000000000000000000000000000c')['path']).name, 'Other')
             wait(lambda: (reserved / 'source.txt').exists(), 'retry transfers data')
-            self.assertEqual({p.name for p in reserved.parent.iterdir()}, {'Upload', 'Upload (2)'})
-            self.assertEqual({f['id'] for f in t.api(server, 'config/folders')}, {'A-retry', 'B-ok'})
+            self.assertEqual({p.name for p in reserved.parent.iterdir() if p.is_dir()}, {'Upload', 'Other'})
+            self.assertEqual({f['id'] for f in t.api(server, 'config/folders')}, {'rd-upload-v1-0000000000000000000000000000000b', 'rd-upload-v1-0000000000000000000000000000000c'})
 
     def test_stale_unknown_offer_does_not_create_a_directory(self):
         with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
@@ -1127,7 +1589,7 @@ class IncomingFolderTests(unittest.TestCase):
 
     def test_failure_reading_pending_offers_does_not_stop_local_discovery(self):
         with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
-            (Path(tmp) / 'Disk/Local').mkdir(parents=True)
+            make_project(Path(tmp) / 'Disk/Local')
             rest = FakeRest()
 
             def failing_api(route, method='GET', body=None):
@@ -1146,7 +1608,7 @@ class ServerHardeningTests(unittest.TestCase):
         with Stand(2) as t:
             a, b = t.sides
             t.server(a, 'add-device', dict(deviceId=b['deviceId'], deviceName='Laptop'))
-            (a['home'] / 'Disk/Fresh').mkdir(parents=True)
+            make_project(a['home'] / 'Disk/Fresh')
             # Word for word the ExecStart of the unit that the earlier install-auto wrote on the real server.
             result = run(['bash', '-c', 'bash "$HOME/.local/share/remote-disk/server-disk.sh" reconcile'], a['env'])
             self.assertEqual(json.loads(result.stdout)['deviceId'], a['deviceId'])
@@ -1160,7 +1622,9 @@ class ServerHardeningTests(unittest.TestCase):
             (disk / 'B_link_ignore').mkdir()
             (disk / 'B_link_ignore/rules.txt').write_text('shared-rules\n')
             (disk / 'B_link_ignore/.stignore').symlink_to('rules.txt')  # ValueError: links are refused
-            (disk / 'C_ok').mkdir()
+            make_project(disk / 'A_dir_ignore')
+            make_project(disk / 'B_link_ignore')
+            make_project(disk / 'C_ok')
             for action, data in (('bootstrap', None), ('add-device', dict(deviceId=b['deviceId'], deviceName='Laptop'))):
                 with self.subTest(action=action):
                     result = t.server(a, action, data, ok=False)
@@ -1185,7 +1649,7 @@ class ServerHardeningTests(unittest.TestCase):
                   'SubprocessError': subprocess.TimeoutExpired(['git'], 5)}
         with tempfile.TemporaryDirectory() as tmp:
             for name in 'ABC':
-                (Path(tmp) / 'Disk' / name).mkdir(parents=True)
+                make_project(Path(tmp) / 'Disk' / name)
             for label, error in errors.items():
                 with self.subTest(error=label), server_helpers(tmp) as ns:
                     def ignores(path, write=True):
@@ -1193,27 +1657,28 @@ class ServerHardeningTests(unittest.TestCase):
                             raise error
                     ns['ignores'] = ignores
                     ns['exclude_git'] = lambda path: None
+                    ns['missing_watch'].unlink(missing_ok=True)
                     rest, stderr = FakeRest(), io.StringIO()
                     with contextlib.redirect_stderr(stderr):
                         ns['reconcile'](rest, 'SERVER')
                     self.assertEqual(rest.puts, ['A', 'C'])
                     self.assertRegex(stderr.getvalue(), r'^RemoteDisk: B: .+\n$')
 
-    def test_git_trouble_never_blocks_sharing(self):
+    def test_git_trouble_blocks_sharing_but_exclude_failure_is_cosmetic(self):
         troubles = {'git timeout': ('git', subprocess.TimeoutExpired(['git'], 5)),
                     'git is missing': ('git', FileNotFoundError(2, 'No such file or directory', 'git')),
                     'linked exclude file': ('exclude_git', ValueError('Символические ссылки запрещены'))}
         with tempfile.TemporaryDirectory() as tmp:
-            (Path(tmp) / 'Disk/Repo').mkdir(parents=True)
+            make_project(Path(tmp) / 'Disk/Repo')
             for label, (name, error) in troubles.items():
                 with self.subTest(trouble=label), server_helpers(tmp) as ns:
                     ns['ignores'] = lambda path, write=True: None
                     ns[name] = raiser(error)
+                    ns['missing_watch'].unlink(missing_ok=True)
                     rest, stderr = FakeRest(), io.StringIO()
                     with contextlib.redirect_stderr(stderr):
                         ns['reconcile'](rest, 'SERVER')
-                    # Git exclusions are cosmetics: the folder is still offered, the cause is reported.
-                    self.assertEqual(rest.puts, ['Repo'])
+                    self.assertEqual(rest.puts, ['Repo'] if name == 'exclude_git' else [])
                     self.assertRegex(stderr.getvalue(), r'^RemoteDisk: Repo: .+\n$')
 
     def test_registration_survives_a_failing_discovery(self):
@@ -1247,7 +1712,7 @@ class ServerHardeningTests(unittest.TestCase):
             disk = side['home'] / 'Disk'
 
             def seed(name, content, mode, file='.stignore'):
-                (disk / name).mkdir(parents=True)
+                make_project(disk / name)
                 (disk / name / file).write_bytes(content)
                 os.chmod(disk / name / file, mode)
 
@@ -1264,7 +1729,7 @@ class ServerHardeningTests(unittest.TestCase):
             seed('Managed', b'stale\n', 0o644, '.stignore-remoteagents')
             result = t.server(side, 'bootstrap', ok=False)
             self.assertEqual((result.returncode, result.stderr), (0, b''))
-            self.assertEqual((disk / 'UserRules/.stignore').read_bytes(), b'my-rules\n' + include)
+            self.assertEqual((disk / 'UserRules/.stignore').read_bytes(), include + b'my-rules\n')
             self.assertEqual(mode('UserRules'), 0o664)
             for label in old:
                 with self.subTest(replaced=label):
@@ -1275,10 +1740,10 @@ class ServerHardeningTests(unittest.TestCase):
                     rules = t.api(side, 'db/ignores?folder=' + name)
                     self.assertEqual((rules['ignore'], rules['error']), (['#include .stignore-remoteagents'], None))
                     self.assertIn('(?i)/.stignore-remoteagents', rules['expanded'])
-            self.assertEqual((disk / 'OldPlusUser/.stignore').read_bytes(), latest + b'my-extra.txt\n' + include)
+            self.assertEqual((disk / 'OldPlusUser/.stignore').read_bytes(), include + latest + b'my-extra.txt\n')
             self.assertEqual((disk / 'OldCRLF/.stignore').read_bytes(),
-                             latest.replace(b'\n', b'\r\n') + include.replace(b'\n', b'\r\n'))
-            self.assertEqual((disk / 'OldBOM/.stignore').read_bytes(), b'\xef\xbb\xbf' + latest + include)
+                             include.replace(b'\n', b'\r\n') + latest.replace(b'\n', b'\r\n'))
+            self.assertEqual((disk / 'OldBOM/.stignore').read_bytes(), b'\xef\xbb\xbf' + include + latest)
             self.assertEqual({mode(n) for n in ('OldPlusUser', 'OldCRLF', 'OldBOM')}, {0o600})
             self.assertEqual((disk / 'Managed/.stignore-remoteagents').read_bytes(), template)
             self.assertEqual(mode('Managed', '.stignore-remoteagents'), 0o644)
@@ -1292,7 +1757,7 @@ class ServerHardeningTests(unittest.TestCase):
     def test_slow_folder_updates_do_not_fail_registration(self):
         with Stand(2) as t:
             a, b = t.sides
-            (a['home'] / 'Disk/Slow').mkdir(parents=True)
+            make_project(a['home'] / 'Disk/Slow')
             t.server(a, 'bootstrap')
             # A loaded server needs seconds to apply one folder: longer than the old 3 s limit, far below the new one.
             with SlowFolderWrites(int(a['gui']), delay=4) as proxy:
@@ -1322,12 +1787,12 @@ class MissingFolderTests(unittest.TestCase):
                                  server['home'] / 'Disk', now=now)
         return stderr.getvalue()
 
-    def test_deleted_project_is_forgotten_after_real_grace_period_and_returns_with_same_id(self):
+    def test_deleted_project_is_forgotten_with_fake_clock_and_never_returns(self):
         with Stand(2) as t:
             server, computer = t.sides
             disk = server['home'] / 'Disk'
             project = disk / 'Ephemeral'
-            project.mkdir(parents=True)
+            make_project(project)
             (disk / '.mounted').touch()  # Disk remains nonempty when the only project disappears.
             (project / 'keep.txt').write_text('client copy must survive')
             t.register(server, computer)
@@ -1342,18 +1807,12 @@ class MissingFolderTests(unittest.TestCase):
             self.assertEqual(completion()['remoteState'], 'valid')
 
             shutil.rmtree(project)  # Only the test simulates the agent deleting its project.
-            self.assertEqual(bootstrap_tick(t, server), '')
-            since = json.loads((server['state'] / 'missing-folders.json').read_text())['folders']['Ephemeral']['since']
-            self.assertEqual(t.folder(server, 'Ephemeral')['id'], 'Ephemeral')
-            logs = []
-            while any(f['id'] == 'Ephemeral' for f in t.api(server, 'config/folders')):
-                self.assertLess(time.monotonic() - since, 45, 'registration was not removed after 30 s')
-                if time.monotonic() - since < 29:
-                    self.assertEqual(t.folder(server, 'Ephemeral')['id'], 'Ephemeral')
-                time.sleep(2)
-                logs.append(bootstrap_tick(t, server))
-            self.assertGreaterEqual(time.monotonic() - since, 30)
-            self.assertEqual(''.join(logs), 'RemoteDisk: Ephemeral: регистрация снята, папка отсутствует не менее 30 с\n')
+            with server_helpers(server['home']) as ns:
+                self.assertEqual(self.forget(t, server, ns, 100), '')
+                self.assertEqual(self.forget(t, server, ns, 129.999), '')
+                self.assertEqual(t.folder(server, 'Ephemeral')['id'], 'Ephemeral')
+                self.assertEqual(self.forget(t, server, ns, 130),
+                    'RemoteDisk: Ephemeral: регистрация снята, папка отсутствует не менее 30 с\n')
             self.assertEqual(t.api(server, 'config/folders'), [])
             wait(lambda: completion()['remoteState'] == 'notSharing', 'client notices server stopped sharing')
             status = t.api(computer, 'db/status?folder=Ephemeral')
@@ -1368,15 +1827,13 @@ class MissingFolderTests(unittest.TestCase):
                 self.assertFalse(project.exists())
                 self.assertEqual(t.api(server, 'config/folders'), [])
 
-            project.mkdir()
-            (project / 'new.txt').write_text('same name, same ID')
+            make_project(project)
+            (project / 'new.txt').write_text('same name must not restore retired ID')
             self.assertEqual(bootstrap_tick(t, server), '')
-            self.assertEqual(t.folder(server, 'Ephemeral')['id'], 'Ephemeral')
-            wait(lambda: completion()['remoteState'] == 'valid' and (local / 'new.txt').exists(), 'same ID shared again')
+            self.assertEqual(t.api(server, 'config/folders'), [])
             self.assertEqual((local / 'keep.txt').read_text(), 'client copy must survive')
-            self.assertEqual((local / 'new.txt').read_text(), 'same name, same ID')
-            self.assertFalse((server['state'] / 'missing-folders.json').exists())
-            self.assertNotEqual(t.api(server, 'db/status?folder=Ephemeral')['state'], 'error')
+            self.assertFalse((local / 'new.txt').exists())
+            self.assertIn('Ephemeral', json.loads((server['state'] / 'missing-folders.json').read_text())['removed'])
 
     def test_unavailable_empty_or_replaced_disk_resets_continuous_absence(self):
         for mode in ('missing', 'empty', 'unreadable', 'replaced'):
@@ -1384,7 +1841,7 @@ class MissingFolderTests(unittest.TestCase):
                 server = t.sides[0]
                 disk = server['home'] / 'Disk'
                 project = disk / 'Project'
-                project.mkdir(parents=True)
+                make_project(project)
                 (disk / '.mounted').touch()
                 t.server(server, 'bootstrap')
                 project.rename(server['home'] / 'saved-project')
@@ -1422,7 +1879,7 @@ class MissingFolderTests(unittest.TestCase):
             server = t.sides[0]
             disk = server['home'] / 'Disk'
             for name in ('Brief', 'Restored', 'LongGone'):
-                (disk / name).mkdir(parents=True)
+                make_project(disk / name)
             t.server(server, 'bootstrap')
             for name in ('Brief', 'Restored', 'LongGone'):
                 (disk / name).rename(server['home'] / name)
@@ -1441,15 +1898,16 @@ class MissingFolderTests(unittest.TestCase):
                 with mock.patch.object(ns['time'], 'monotonic', return_value=1029.5):
                     ns['reconcile'](lambda *args: t.api(server, *args), server['deviceId'])
                 self.assertIn('регистрация снята', self.forget(t, server, ns, 1030))
-            self.assertEqual({f['id'] for f in t.api(server, 'config/folders')}, {'Brief', 'Restored'})
+            self.assertEqual({f['id'] for f in t.api(server, 'config/folders')}, {'Brief'})
 
-    def test_removed_incoming_id_is_not_resurrected_and_can_be_restored_locally(self):
+    def test_removed_incoming_id_is_never_resurrected_even_when_returned_locally(self):
         with Stand(2) as t:
             server, computer = t.sides
+            make_disk(server['home'])
             t.register(server, computer)
             t.register(computer, server)
-            source = t.offer(computer, server, 'incoming-id', 'Upload')
-            wait(lambda: 'incoming-id' in t.api(server, 'cluster/pending/folders'), 'upload offered')
+            source = t.offer(computer, server, 'rd-upload-v1-0000000000000000000000000000000d', 'Upload')
+            wait(lambda: 'rd-upload-v1-0000000000000000000000000000000d' in t.api(server, 'cluster/pending/folders'), 'upload offered')
             t.server(server, 'bootstrap')
             project = server['home'] / 'Disk/Upload'
             wait(lambda: (project / 'source.txt').exists(), 'upload received')
@@ -1458,18 +1916,18 @@ class MissingFolderTests(unittest.TestCase):
             with server_helpers(server['home']) as ns:
                 self.forget(t, server, ns, 1000)
                 self.assertIn('регистрация снята', self.forget(t, server, ns, 1030))
-            self.offer_again(t, computer, server, 'incoming-id')
+            self.offer_again(t, computer, server, 'rd-upload-v1-0000000000000000000000000000000d')
             t.server(server, 'bootstrap')
             self.assertFalse(project.exists())
-            self.assertEqual((source / 'source.txt').read_text(), 'incoming-id')
+            self.assertEqual((source / 'source.txt').read_text(), 'rd-upload-v1-0000000000000000000000000000000d')
             # Remember the removal even across an empty/unavailable root.
             (project.parent / '.mounted').unlink()
             t.server(server, 'bootstrap')
             self.assertFalse(project.exists())
             (server['home'] / 'saved-upload').rename(project)
             t.server(server, 'bootstrap')
-            self.assertEqual(t.folder(server, 'incoming-id')['path'], str(project))
-            self.assertFalse((server['state'] / 'missing-folders.json').exists())
+            self.assertEqual(t.api(server, 'config/folders'), [])
+            self.assertIn('rd-upload-v1-0000000000000000000000000000000d', json.loads((server['state'] / 'missing-folders.json').read_text())['removed'])
 
     def test_only_exact_top_level_paths_are_removed_and_state_is_defensive(self):
         with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
@@ -1487,7 +1945,7 @@ class MissingFolderTests(unittest.TestCase):
                     deletes.append(folder_id)
                     return {}
                 return next(f for f in folders if f['id'] == folder_id)
-            for bad in ('broken JSON', '[]', '{"folders": []}', '{"removed": []}'):
+            for bad in ('{}', '{"folders": []}', '{"folders": {"0": {"since": "bad"}}}', '{"removed": {}}'):
                 with self.subTest(state=bad):
                     ns['missing_watch'].parent.mkdir(parents=True, exist_ok=True)
                     ns['missing_watch'].write_text(bad)
@@ -1502,7 +1960,7 @@ class MissingFolderTests(unittest.TestCase):
             with self.subTest(committed=committed), Stand(1) as t:
                 server = t.sides[0]
                 project = server['home'] / 'Disk/Gone'
-                project.mkdir(parents=True)
+                make_project(project)
                 (project.parent / '.mounted').touch()
                 t.server(server, 'bootstrap')
                 project.rename(server['home'] / 'saved')
@@ -1761,7 +2219,7 @@ class StaleConnectionTests(unittest.TestCase):
     def test_failing_connection_check_never_stops_folder_discovery_or_bootstrap(self):
         with Stand(1) as t:
             side = t.sides[0]
-            (side['home'] / 'Disk/Local').mkdir(parents=True)
+            make_project(side['home'] / 'Disk/Local')
             ports_file = side['state'] / 'ports.json'
             ports = json.loads(ports_file.read_text())
             with FailingRoute(int(side['gui']), 'system/connections') as proxy:
@@ -1831,14 +2289,15 @@ class StaleConnectionTests(unittest.TestCase):
         limit = script_constant('STALE_AFTER_S')
         with Stand(2) as t:
             server, computer = t.sides
+            make_disk(server['home'])
             with TunnelProxy(server['listen']) as proxy:
                 link_through_tunnel(t, server, computer, proxy)
                 wait(lambda: settled(device_connections(t, server, computer)), 'three connections through the tunnel', 90)
                 identity = lambda: sorted((c['address'], c['startedAt']) for c in device_connections(t, server, computer))
                 before = identity()
                 self.assertEqual(bootstrap_tick(t, server), '')
-                source = t.offer(computer, server, 'live-upload', 'Live')
-                wait(lambda: 'live-upload' in t.api(server, 'cluster/pending/folders'), 'folder offered to the server')
+                source = t.offer(computer, server, 'rd-upload-v1-0000000000000000000000000000000e', 'Live')
+                wait(lambda: 'rd-upload-v1-0000000000000000000000000000000e' in t.api(server, 'cluster/pending/folders'), 'folder offered to the server')
                 self.assertEqual(bootstrap_tick(t, server), '')  # сервер принимает папку: индексы пойдут в обе стороны
                 wait(lambda: (server['home'] / 'Disk/Live/source.txt').exists(), 'accepted folder reaches the server')
                 for n in range(3):
@@ -1861,4 +2320,4 @@ class StaleConnectionTests(unittest.TestCase):
 if __name__ == '__main__':
     if len(sys.argv) == 2 and not sys.argv[1].startswith('-'):
         os.environ['SYNCTHING_ARCHIVE'] = sys.argv.pop()
-    unittest.main()
+    unittest.main(failfast=True)

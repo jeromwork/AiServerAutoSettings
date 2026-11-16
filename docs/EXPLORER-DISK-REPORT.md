@@ -1,3 +1,5 @@
+> Историческое, действует [DISK-CONTRACT.md](DISK-CONTRACT.md).
+
 # Диск в Проводнике
 
 Дата: 13.11.2026. Ветка: `app/explorer-disk`, исходная точка `0637c03` (`app/folders-status`).
