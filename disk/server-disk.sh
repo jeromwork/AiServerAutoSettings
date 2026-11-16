@@ -3,7 +3,7 @@ set -euo pipefail
 umask 077
 export REMOTE_DISK_SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 python3 - "$@" 3<&0 <<'PY'
-import os,sys,json,subprocess,hashlib,tempfile,tarfile,urllib.request,time,socket,base64,re,fcntl,stat,xml.etree.ElementTree as E
+import os,sys,json,subprocess,hashlib,tempfile,tarfile,urllib.request,time,socket,base64,re,fcntl,stat,math,xml.etree.ElementTree as E
 from pathlib import Path
 s=Path.home()/'.local/share/remote-disk'; cfg=s/'config.xml'; binary=s/'bin/syncthing'; here=Path(os.environ['REMOTE_DISK_SCRIPT_DIR'])
 a=sys.argv[1:] or ['bootstrap']; action=a[0]
@@ -46,13 +46,13 @@ def new_folder(api,identity,folder_id,p):
 def configured_paths(folders):
     return [str(Path(os.path.abspath(os.path.expanduser(f['path'])))).casefold().rstrip('/') for f in folders]
 
-def accept_pending(api,identity,folders,devices,reserved):
+def accept_pending(api,identity,folders,devices,reserved,removed=()):
     disk=Path.home()/'Disk'
     for folder_id,offer in sorted(api('cluster/pending/folders').items()):
         try:
             # Pending может содержать старое предложение уже удалённого устройства. Никогда не включаем autoAcceptFolders.
             peers=sorted(set(offer.get('offeredBy',{})) & set(devices))
-            if not peers or any(f['id']==folder_id for f in folders):continue
+            if not peers or folder_id in removed or any(f['id']==folder_id for f in folders):continue
             p=reserved.get(folder_id)
             if p is None:
                 name=incoming_name(offer['offeredBy'][peers[0]].get('label') or folder_id)
@@ -191,9 +191,93 @@ def ensure_auto():
 FOLDER_ERRORS=(ValueError,OSError,subprocess.SubprocessError)
 def describe(e):return str(e) if isinstance(e,ValueError) else type(e).__name__+': '+str(e)
 def skipped(name,e):print('RemoteDisk: '+name+': '+describe(e),file=sys.stderr)
+# Свой код: Syncthing сохраняет регистрацию исчезнувшего каталога как folder path missing.
+# Не распространяем удаление файлов: снимаем только серверную регистрацию после непрерывного наблюдения.
+MISSING_AFTER_S=30
+missing_watch=s/'missing-folders.json'
+def disk_generation(disk):
+    safe(disk)
+    st=disk.stat()
+    if not stat.S_ISDIR(st.st_mode) or not os.access(disk,os.R_OK|os.X_OK):raise OSError('Disk недоступен')
+    if not list(disk.iterdir()):raise OSError('Disk пуст')
+    return [st.st_dev,st.st_ino,Path('/proc/sys/kernel/random/boot_id').read_text().strip()]
+def save_missing(state):
+    safe(missing_watch)
+    if not state.get('folders') and not state.get('removed'):
+        missing_watch.unlink(missing_ok=True);return
+    data=json.dumps(state,sort_keys=True,separators=(',',':')).encode()
+    if missing_watch.exists() and missing_watch.read_bytes()==data:return
+    missing_watch.parent.mkdir(parents=True,exist_ok=True)
+    write_atomic(missing_watch,data,missing_watch.parent)
+def forget_missing(api,folders,disk,now=None):
+    now=time.monotonic() if now is None else now
+    safe(missing_watch)
+    try:
+        old=json.loads(missing_watch.read_text(encoding='utf-8'))
+        if not isinstance(old,dict):old={}
+    except (OSError,ValueError):old={}
+    removed=old.get('removed',{})
+    if not isinstance(removed,dict):removed={}
+    # Tombstones survive an unavailable Disk: peers must not resurrect a removed server folder by offering it back.
+    removed={i:p for i,p in removed.items() if isinstance(p,str) and Path(p).parent==disk and p==str(Path(p))}
+    try:generation=disk_generation(disk)
+    except OSError:
+        state=dict(removed=removed)
+        save_missing(state);return state
+    before=old.get('folders',{}) if old.get('generation')==generation else {}
+    if not isinstance(before,dict):before={}
+    pending={}
+
+    try:
+        for f in folders[:]:
+            try:
+                raw=f.get('path','');p=Path(raw)
+                # Только точный абсолютный ~/Disk/<имя>; ~, .., вложенные и внешние пути не трогаем.
+                if p.parent!=disk or raw!=str(p) or folder_path(p.name)!=p:continue
+                try:
+                    p.lstat()
+                    if p.is_dir() and not p.is_symlink():removed.pop(f['id'],None)
+                    continue  # Файл или ссылка вместо папки — тоже не отсутствие.
+                except FileNotFoundError:pass
+                entry=before.get(f['id'],{})
+                since=entry.get('since') if isinstance(entry,dict) and entry.get('path')==raw else None
+                if not number(since) or not 0<=since<=now or not math.isfinite(since):since=now
+                pending[f['id']]=dict(path=raw,since=since)
+                if now-since<MISSING_AFTER_S:continue
+                # Повторная проверка непосредственно перед DELETE: Disk мог исчезнуть за время REST/других папок.
+                if disk_generation(disk)!=generation:
+                    pending={};break
+                try:p.lstat();del pending[f['id']];continue
+                except FileNotFoundError:pass
+                current=api('config/folders/'+urllib.parse.quote(f['id'],safe=''))
+                if current.get('path')!=raw:
+                    del pending[f['id']];continue
+                if disk_generation(disk)!=generation:
+                    pending={};break
+                try:p.lstat();del pending[f['id']];continue
+                except FileNotFoundError:pass
+                # До DELETE: потерянный REST-ответ/обрыв процесса не должен воскресить папку через pending.
+                removed[f['id']]=raw
+                save_missing(dict(generation=generation,folders=pending,removed=removed))
+                api('config/folders/'+urllib.parse.quote(f['id'],safe=''),'DELETE')
+                folders.remove(f);del pending[f['id']]
+                print('RemoteDisk: '+p.name+': регистрация снята, папка отсутствует не менее 30 с',file=sys.stderr)
+            except FOLDER_ERRORS as e:skipped(f.get('id','папка'),e)
+    finally:
+        state=dict(generation=generation,folders=pending,removed=removed)
+        save_missing(state)
+    return state
+
 def reconcile(api,identity):
     disk=Path.home()/'Disk';safe(disk)
     folders=api('config/folders');devices=[d['deviceID'] for d in api('config/devices') if d['deviceID']!=identity]
+    # До приёма входящих папок: тот не должен создавать непустой Disk и обходить защиту размонтирования.
+    try:missing_state=forget_missing(api,folders,disk)
+    except FOLDER_ERRORS as e:
+        skipped('исчезнувшие папки',e)
+        # Не принимаем предложения, если не удалось прочитать/сохранить защиту от воскрешения.
+        return
+    removed=missing_state['removed']
     reserved={};entries=[]
     for p in sorted(disk.iterdir()) if disk.exists() else []:
         try:
@@ -208,7 +292,7 @@ def reconcile(api,identity):
             entries.append(p)
         except FOLDER_ERRORS as e:skipped(p.name,e)
     # Принимаем прежде регистрации местных папок: даже ID, равный занятому label, не должен незаметно слить их данные.
-    try:accept_pending(api,identity,folders,devices,reserved)
+    try:accept_pending(api,identity,folders,devices,reserved,removed)
     except FOLDER_ERRORS as e:skipped('входящие папки',e)
     incoming_ids={p:i for i,p in reserved.items()}
     for p in entries:
@@ -218,9 +302,9 @@ def reconcile(api,identity):
             current=matches[0] if matches else None
             if p in incoming_ids:
                 # Не выдаём недопринятую папку за новый серверный проект. Нужен повтор предложения от известного peer.
-                if not current:continue
-                if incoming_ids[p]!=current['id']:raise ValueError('ID входящей папки не совпадает с конфигурацией')
-            folder_id=current['id'] if current else p.name
+                if not current and removed.get(incoming_ids[p])!=str(p):continue
+                if current and incoming_ids[p]!=current['id']:raise ValueError('ID входящей папки не совпадает с конфигурацией')
+            folder_id=current['id'] if current else next((i for i,path in removed.items() if path==str(p)),p.name)
             if any(f['id']==folder_id and f['path'].rstrip('/')!=str(p) for f in folders):raise ValueError('ID занят')
             if not current:
                 current=new_folder(api,identity,folder_id,p)
@@ -238,6 +322,10 @@ def reconcile(api,identity):
                 current['devices'] += [dict(deviceID=d) for d in missing]
                 api('config/folders/'+urllib.parse.quote(folder_id,safe=''),'PUT',current)
                 if not matches:folders.append(current)
+            if folder_id in removed:
+                del removed[folder_id]
+                # Новое наблюдение отсутствия начнётся с нуля.
+                save_missing(missing_state)
         except FOLDER_ERRORS as e:skipped(p.name,e)
 
 # Зависшие соединения устройства. Свой код, потому что у Syncthing нет настройки, которая сократила бы 300 с молчания
@@ -337,7 +425,7 @@ def watch_connections(api,now=None):
     save_watch(dict(devices=devices,healed=healed,resume=resume))
 
 def main():
-    for path in (s,cfg,binary,s/'ports.json',s/'bootstrap.lock',s/'syncthing.log',s/'syncthing.pid',watch):safe(path)
+    for path in (s,cfg,binary,s/'ports.json',s/'bootstrap.lock',s/'syncthing.log',s/'syncthing.pid',watch,missing_watch):safe(path)
     if action not in ('add-device','channel-config','bootstrap','install-auto'):raise ValueError('Неизвестная команда')
     payload=a[1] if len(a)==2 else None
     if payload=='--stdin':
