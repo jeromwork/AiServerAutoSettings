@@ -451,6 +451,35 @@
             }
           ]
         },
+        "localWeb": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 65535
+            },
+            "serverPort": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 65535
+            },
+            "hint": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 2048
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "port",
+            "serverPort"
+          ]
+        },
         "hint": {
           "type": "string",
           "minLength": 0,
@@ -1342,6 +1371,68 @@
           "type": "string",
           "minLength": 0,
           "maxLength": 2048
+        },
+        "happierWeb": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 65535
+            },
+            "updateIntervalHours": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 168
+            },
+            "keepReleases": {
+              "type": "integer",
+              "minimum": 2,
+              "maximum": 10
+            },
+            "keepChats": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "quotas": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "claudeProbe": {
+                  "type": "boolean"
+                },
+                "claudeProbeSec": {
+                  "type": "integer",
+                  "minimum": 60,
+                  "maximum": 86400
+                },
+                "hint": {
+                  "type": "string",
+                  "minLength": 0,
+                  "maxLength": 2048
+                }
+              },
+              "additionalProperties": false
+            },
+            "hint": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 2048
+            },
+            "serverUrl": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "format": "happier-server-url"
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false

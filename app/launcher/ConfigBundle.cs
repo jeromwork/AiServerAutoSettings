@@ -62,6 +62,8 @@ namespace RemoteAgents.Launcher
         static Dictionary<string, object> User() { return S(32, 1, "^[a-z_][a-z0-9_-]{0,31}$"); }
         static Dictionary<string, object> Url()
         { var d = S(2048, 1); d["format"] = "https-url"; return d; }
+        static Dictionary<string, object> HappierServerUrl()
+        { var d = S(2048, 1); d["format"] = "happier-server-url"; return d; }
         static Dictionary<string, object> Proxy(bool serverExit = false)
         {
             var d = O(D("type", E("socks", "http"), "server", Host(), "port", N(1, 65535), "login", S(256), "password", Ref("proxy-out-password"), "checkUrl", Url()), "type", "server", "port");
@@ -116,7 +118,8 @@ namespace RemoteAgents.Launcher
                     "hostKeys", A(S(4096, 1, "^[^\\r\\n\\x00]+$"), 32), "key", Ref("server-key"), "rootPassword", Ref("server-root-password"), "routes", A(route, 32))),
                 "connection", O(D("enabled", B())),
                 "bridge", O(D("enabled", B(), "allowShell", B())),
-                "happier", O(D("mode", E("same", "new"), "account", S(64, 64, "^[a-f0-9]{64}$"), "label", S(80, 1), "serverUrl", Url(), "webappUrl", Url(), "key", Ref("happier-key"))),
+                "happier", O(D("mode", E("same", "new"), "account", S(64, 64, "^[a-f0-9]{64}$"), "label", S(80, 1), "serverUrl", Url(), "webappUrl", Url(), "key", Ref("happier-key"),
+                    "localWeb", O(D("enabled", B(), "port", N(1024, 65535), "serverPort", N(1024, 65535)), "enabled", "port", "serverPort"))),
                 "disk", DiskSchema(),
                 "vpn", O(D("enabled", B(), "checkUrl", Url(), "dnsServer", S(253, 1), "bootstrap", bootstrap)),
                 "proxyOut", Proxy(true),
@@ -131,6 +134,9 @@ namespace RemoteAgents.Launcher
                 "serverComponents", O(D(
                     "disk", O(D("enabled", B(), "identity", Ref(), "discoveryIntervalSec", N(2, 60))),
                     "bridge", O(D("enabled", B(), "identity", Ref())),
+                    "happierWeb", O(D("enabled", B(), "port", N(1024, 65535), "updateIntervalHours", N(1, 168),
+                        "keepReleases", N(2, 10), "keepChats", N(1, 100),
+                        "quotas", O(D("enabled", B(), "claudeProbe", B(), "claudeProbeSec", N(60, 86400))), "serverUrl", HappierServerUrl())),
                     "happier", O(D("enabled", B(), "identity", Ref(), "channel", E("stable"), "version", S(64, 1, @"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$"))))),
                 "agents", O(D(
                     "codex", O(D("enabled", B(), "version", E("0.166.0"), "auth", Ref())),
@@ -238,6 +244,12 @@ namespace RemoteAgents.Launcher
                 if (Json.Str(schema, "format") == "https-url") {
                     Uri u;
                     if (!Uri.TryCreate(s, UriKind.Absolute, out u) || u.Scheme != "https" || u.UserInfo.Length > 0 || s.Any(char.IsWhiteSpace) || s.IndexOfAny(new[]{'\'', '"', '\\', '`', '$'}) >= 0) throw Bad("Нужен HTTPS URL без пароля: " + path);
+                }
+                if (Json.Str(schema, "format") == "happier-server-url") {
+                    Uri u;
+                    if (!Uri.TryCreate(s, UriKind.Absolute, out u) || (u.Scheme != "https" && u.Scheme != "http") || u.Host.Length == 0 ||
+                        u.UserInfo.Length > 0 || u.AbsolutePath != "/" || u.Query.Length > 0 || u.Fragment.Length > 0 || s.Any(c => c < 33))
+                        throw Bad("Нужен HTTP(S) origin Happier без пути, пароля и параметров: " + path);
                 }
             } else if (type == "integer") {
                 decimal n;

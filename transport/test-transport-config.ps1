@@ -99,6 +99,10 @@ try{
     $pc=@($proxyTunnel.arguments|Where-Object {$_ -like 'ProxyCommand=*'})[0]
     Assert ($pc.Contains('--proxy-connect http 127.0.0.1 1080 %h %p') -and $proxyTunnel.target -eq $p.serverAddress) 'persistent proxy uses local exe and target profile'
     Assert (@($proxyPaths.Candidates|Where-Object {$_.tag -eq 'openssh-proxy'}).Count -eq 1) 'persistent proxy participates in transport selection'
+    $overlay|Add-Member -Force LocalWeb ([pscustomobject]@{enabled=$true;available=$true;port=47831;serverPort=47832})
+    $proxyWeb=New-TransportConfig $overlay $proxyPaths 'test-secret' 'openssh-proxy'
+    Assert (@($proxyWeb.inbounds|Where-Object {$_.tag -eq 'happier-web' -and $_.override_port -eq 47832}).Count -eq 1 -and ($proxyWeb.outbounds|Where-Object {$_.tag -eq 'active'}).default -eq 'openssh-proxy') 'OpenSSH proxy keeps Happier input'
+
     Remove-Item $helper
     $failedPaths=Get-TransportCandidates $overlay $work
     Assert ('openssh-proxy' -notin @($failedPaths.Candidates.tag) -and ($failedPaths.AllCandidates|Where-Object {$_.tag -eq 'openssh-proxy'}).buildFailed) 'proxy without helper fails per candidate'
@@ -160,6 +164,46 @@ try{
     $expected=@('vless-direct','singbox-ssh-direct','vless-relay-relay','vless-sshhop-jump','hy2-edge','hy2obfs-edge','tuic-edge','trojan-edge','reality-edge','shadowtls-edge','ws-direct-edge','ws-cdn-edge','openssh-direct','openssh-jump-jump')
     Assert ($paths.Candidates.Count -eq $expected.Count) 'число кандидатов'
     foreach($tag in $expected){Assert ($tag -in @($paths.Candidates|ForEach-Object {$_.tag})) ('путь '+$tag)}
+    $webRaw=ConvertFrom-Json '{"happier":{"localWeb":{"enabled":true,"port":47831,"serverPort":47832}}}'
+    Assert ((Get-TransportLocalWeb $webRaw).port -eq 47831) 'manual localWeb settings accepted'
+    $webRaw|Add-Member profile (ConvertFrom-Json '{"happier":{"localWeb":{"enabled":false,"port":1024,"serverPort":65535}}}')
+    Assert (-not (Get-TransportLocalWeb $webRaw).enabled) 'disabled profile takes priority over manual settings'
+    Assert (-not (Get-TransportLocalWeb ([pscustomobject]@{})).enabled) 'missing localWeb stays disabled'
+    foreach($invalid in @('null','[]','true','{"enabled":"true","port":47831,"serverPort":47832}','{"enabled":true,"port":1023,"serverPort":47832}','{"enabled":true,"port":47831,"serverPort":65536}','{"enabled":true,"port":47831.5,"serverPort":47832}','{"enabled":true,"port":"47831","serverPort":47832}','{"enabled":true,"port":47831}','{"enabled":true,"port":47831,"serverPort":47832,"extra":true}')){
+        $rejected=$false;try{Get-TransportLocalWeb (ConvertFrom-Json ('{"happier":{"localWeb":'+$invalid+'}}'))|Out-Null}catch{$rejected=$true}
+        Assert $rejected 'invalid manual localWeb rejected'
+    }
+    $revisionRoot=Join-Path $work 'web-revision';[void][IO.Directory]::CreateDirectory($revisionRoot)
+    $revisionFile=Join-Path $revisionRoot 'config.json'
+    Write-TransportJson $revisionFile @{transport=@{}}
+    $noWebRevision=Get-TransportRevision $revisionRoot
+    Write-TransportJson $revisionFile $webRaw
+    $offRevision=Get-TransportRevision $revisionRoot
+    $webRaw.profile.happier.localWeb.enabled=$true;Write-TransportJson $revisionFile $webRaw
+    $onRevision=Get-TransportRevision $revisionRoot
+    Assert ($noWebRevision -ne $offRevision -and $offRevision -ne $onRevision) 'localWeb changes transport revision for hot reload'
+    $webRaw.profile.happier.localWeb.port=47833;Write-TransportJson $revisionFile $webRaw
+    Assert ((Get-TransportRevision $revisionRoot) -ne $onRevision) 'fixed port change triggers reload'
+    # Each candidate carries the same fixed browser origin through active (including OpenSSH -D).
+    $localSettings=Copy-TransportObject $settings
+    $localSettings|Add-Member LocalWeb ([pscustomobject]@{enabled=$true;available=$true;port=47831;serverPort=47832;conflict=$null})
+    foreach($candidate in $paths.Candidates){
+        $webConfig=New-TransportConfig $localSettings $paths 'test-secret' $candidate.tag
+        $web=@($webConfig.inbounds|Where-Object {$_.tag -eq 'happier-web'})
+        Assert ($web.Count -eq 1 -and $web[0].listen -eq '127.0.0.1' -and $web[0].listen_port -eq 47831 -and $web[0].override_address -eq '127.0.0.1' -and $web[0].override_port -eq 47832 -and $web[0].network -eq 'tcp') ('fixed Happier loopback: '+$candidate.tag)
+        Assert (@($webConfig.route.rules|Where-Object {$_.inbound -contains 'happier-web' -and $_.outbound -eq 'active'}).Count -eq 1 -and ($webConfig.outbounds|Where-Object {$_.tag -eq 'active'}).default -eq $candidate.tag) ('Happier uses active: '+$candidate.tag)
+        if($candidate.tag -like 'openssh-*'){
+            $tunnel=$paths.Tunnels|Where-Object {$_.tag -eq $candidate.tag}
+            Assert ($tunnel.arguments -contains '-D' -and ($webConfig.outbounds|Where-Object {$_.tag -eq $candidate.tag}).type -eq 'socks') ('OpenSSH SOCKS carries Happier: '+$candidate.tag)
+        }
+        if($SingBox){$file=Join-Path $work 'happier-check.json';Write-TransportJson $file $webConfig;Test-TransportConfigFile $SingBox $file}
+    }
+    $localSettings.LocalWeb.available=$false
+    $webConfig=New-TransportConfig $localSettings $paths 'test-secret' 'trojan-edge'
+    Assert (@($webConfig.inbounds|Where-Object {$_.tag -eq 'happier-web'}).Count -eq 0 -and @($webConfig.inbounds|Where-Object {$_.tag -in @('ssh','sync')}).Count -eq 2) 'occupied Happier port skips only that input'
+    Assert (@((New-TransportConfig $settings $paths 'test-secret' 'trojan-edge').inbounds|Where-Object {$_.tag -eq 'happier-web'}).Count -eq 0) 'old settings have no Happier listener'
+    $localSettings.LocalWeb.available=$true;$localSettings.LocalWeb.enabled=$false
+    Assert (@((New-TransportConfig $localSettings $paths 'test-secret' 'trojan-edge').inbounds|Where-Object {$_.tag -eq 'happier-web'}).Count -eq 0) 'disabled localWeb has no listener'
     $cfg=New-TransportConfig $settings $paths 'test-secret' 'trojan-edge'
     Assert ($cfg.inbounds.Count -eq $expected.Count+2) 'рабочие и проверочные входы'
     Assert ($cfg.inbounds[0].listen_port -eq 2222 -and $cfg.inbounds[1].listen_port -eq 22001) 'рабочие порты'
