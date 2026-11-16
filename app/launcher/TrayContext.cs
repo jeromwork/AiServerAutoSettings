@@ -284,10 +284,18 @@ namespace RemoteAgents.Launcher
                 previousVersion = engine.Previous, pending = engine.Pending, running = !closing, updatedUtc = DateTime.UtcNow.ToString("o"), update = updateSummary,
                 ok = !closing && (Product.IsVpn ? VpnModulesReady() : runtimes.Any(r => r.Definition.Critical) && runtimes.Where(r => r.Definition.Critical).All(r => r.Healthy)), components = runtimes.Select(r => r.Snapshot()).ToArray() });
         }
-        void OpenHappier()
+        bool openingHappier;
+        async void OpenHappier()
         {
-            string url = TrayMenuModel.HappierUrl(config.Data, AccountState());
-            if (url.Length > 0) Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+            if (openingHappier) return;
+            openingHappier = true;
+            try {
+                string url = await TrayMenuModel.HappierUrl(config.Data, AccountState());
+                if (closing) return;
+                if (url.Length > 0) Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+                else ShowMain();
+            } catch (Exception) { if (!closing) ShowMain(); }
+            finally { openingHappier = false; }
         }
         void RefreshMenu()
         {
