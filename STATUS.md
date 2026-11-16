@@ -1,8 +1,9 @@
 # Что сейчас делается — RemoteAgents.exe (обновлено 16.11.2026)
 
-Всё в `main`, других веток, worktree и stash нет (16.11: влита `app/config-complete`, отложенное — теги `archive/*`). История до 15.11 — в git (`git log -- STATUS.md`).
-Тестовая сборка: GitHub пре-релиз `main-test-20261115` — RemoteAgents.exe `91be29fa…`, RemoteVPN.exe `fc4bbbf8…`
-(хэши скачанного сверены). В канал обновлений сервера (`build/publish.sh`) НЕ выкладывалась.
+Всё готовое — в `main` (16.11: влиты `app/config-complete`, `app/disk-vanish`, `app/disk-vanish-ui`; отложенное — теги `archive/*`). История до 15.11 — в git (`git log -- STATUS.md`).
+Тестовая сборка: GitHub пре-релиз `main-test-20261116` (730d1ea) — RemoteAgents.exe `421fb6cb…`, RemoteVPN.exe `cbf95b46…`
+(хэши скачанного сверены). Диск: ошибка одной папки не красит весь Диск; сервер снимает исчезнувшие папки (в main 16.11; на живой сервер server-disk.sh НЕ ставился — там временный `disk-vanish-guard.timer`).
+В канал обновлений сервера (`build/publish.sh`) НЕ выкладывалась. Незавершённые ветки: `app/uninstall`, `app/vpn-log` (прерваны 16.11 07:24, без коммитов).
 
 | № | Шаг | Состояние |
 |---|-----|-----------|
