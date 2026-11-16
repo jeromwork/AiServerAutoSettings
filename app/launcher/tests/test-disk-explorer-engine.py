@@ -100,4 +100,23 @@ with stand_module.Stand() as stand, tempfile.TemporaryDirectory(prefix='explorer
     assert 'Placeholder=1' in (downloaded / 'desktop.ini').read_text(encoding='utf-16')
     assert not any(f['id'] == 'opaque-folder-id' for f in stand.api(local, 'config/folders'))
     assert any(f['id'] == 'opaque-folder-id' for f in stand.api(server, 'config/folders'))
-    print('PASS: C# Explorer actions / two real Syncthing engines: pending ID != label, download, in-place upload, exclusions, detach, preserved server files, cloud placeholder', flush=True)
+    # The server drops the registration of a folder it shared (the files stay): the real engine reports remoteState=notSharing,
+    # and the Explorer, told by the memory «the server confirmed this folder», shows «removed on the server», not an error.
+    def inspect():
+        args = [DOTNET, DLL, '--disk-engine-action', disk_home, disk, 'inspect', temp / 'unused',
+                ROOT / 'disk/stignore.txt', temp / 'unused-recycle']
+        result = subprocess.run([str(x) for x in args], capture_output=True, text=True, timeout=25)
+        assert result.returncode == 0, ('inspect', result.stdout, result.stderr)
+        return json.loads(result.stdout.strip().splitlines()[-1])
+
+    def kind_of(snapshot):
+        return next(f['kind'] for f in snapshot['folders'] if f['Id'] == 'External')
+
+    wait(lambda: kind_of(inspect()) == 'Synced', 'External confirmed by the server before it is removed there')
+    stand.api(server, 'config/folders/External', 'DELETE')
+    wait(lambda: stand.api(local, 'db/completion?folder=External&device=' + server['deviceId'])['remoteState'] == 'notSharing', 'engine reports the folder as not shared by the server')
+    removed = inspect()
+    assert kind_of(removed) == 'ServerRemoved', removed
+    assert removed['tray'].startswith('Диск: папки удалены на сервере') and 'ошибка' not in removed['tray'], removed['tray']  # External is the only shared folder
+    assert any(f['id'] == 'External' for f in stand.api(local, 'config/folders')) and (server_external / 'upload.txt').is_file() and (external / 'upload.txt').is_file()
+    print('PASS: C# Explorer actions / two real Syncthing engines: pending ID != label, download, in-place upload, exclusions, detach, preserved server files, cloud placeholder, folder removed by the server', flush=True)

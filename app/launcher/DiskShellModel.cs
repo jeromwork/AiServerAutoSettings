@@ -14,7 +14,7 @@ namespace RemoteAgents.Launcher
         internal const string Download = "Скачать на компьютер", KeepServer = "Оставить только на сервере", Upload = "Загрузить на сервер";
         internal const string ServerOnlyHint = "Только на сервере. Правый клик → " + Download;
     }
-    internal enum DiskExplorerKind { Local, ServerOnly, Pending, Syncing, Synced, Paused, Error, Offline, Unavailable, LocalChanges }
+    internal enum DiskExplorerKind { Local, ServerOnly, Pending, Syncing, Synced, Paused, Error, Offline, Unavailable, LocalChanges, ServerRemoved }
     internal sealed class DiskFolderState
     {
         internal string Id = "", Name = "", Path = "", Detail = "";
@@ -39,6 +39,7 @@ namespace RemoteAgents.Launcher
                     case DiskExplorerKind.Error: return "Ошибка синхронизации" + (Detail.Length > 0 ? ": " + Detail : "");
                     case DiskExplorerKind.LocalChanges: return "Есть локальные изменения. Загрузите их на сервер перед освобождением места";
                     case DiskExplorerKind.Unavailable: return "Локальный Syncthing недоступен";
+                    case DiskExplorerKind.ServerRemoved: return "Удалена на сервере, локальная копия сохранена";
                     default: return "Ожидается подтверждение Syncthing";
                 }
             }
@@ -50,7 +51,14 @@ namespace RemoteAgents.Launcher
         internal bool Connected;
         internal static double Number(Dictionary<string, object> m, string key)
         { double n; return double.TryParse(Json.Str(m, key), NumberStyles.Float, CultureInfo.InvariantCulture, out n) ? n : 0; }
-        internal static DiskFolderState Status(DiskFolderState row, Dictionary<string, object> local, Dictionary<string, object> remote, bool connected)
+        // Сервер снял папку: он на связи, но больше ею не делится (remoteState=notSharing). У Syncthing точно так же выглядит новая папка,
+        // которую сервер ещё не принял, поэтому различает их только память «сервер эту папку уже подтверждал» (DiskConfirmedFolders).
+        internal static bool RemovedByServer(Dictionary<string, object> remote, bool connected, bool confirmedBefore)
+        { return connected && confirmedBefore && Json.Str(remote, "remoteState") == "notSharing"; }
+        // Сервер подтверждает папку: делится ею (valid) или держит на паузе (paused).
+        internal static bool ConfirmedByServer(Dictionary<string, object> remote)
+        { string state = Json.Str(remote, "remoteState"); return state == "valid" || state == "paused"; }
+        internal static DiskFolderState Status(DiskFolderState row, Dictionary<string, object> local, Dictionary<string, object> remote, bool connected, bool confirmedBefore = false)
         {
             row.Detail = Json.Str(local, "error");
             string state = Json.Str(local, "state");
@@ -59,6 +67,7 @@ namespace RemoteAgents.Launcher
             double remotePercent = remote.ContainsKey("completion") ? Number(remote, "completion") : 0;
             row.Percent = (int)Math.Max(0, Math.Min(100, Math.Floor(Math.Min(localPercent, remotePercent))));
             if (row.Paused || state == "paused" || Json.Str(remote, "remoteState") == "paused") row.Kind = DiskExplorerKind.Paused;
+            else if (RemovedByServer(remote, connected, confirmedBefore)) { row.Kind = DiskExplorerKind.ServerRemoved; row.Detail = ""; }
             else if (state == "error" || row.Detail.Length > 0 || Number(local, "pullErrors") > 0) row.Kind = DiskExplorerKind.Error;
             else if (Number(local, "receiveOnlyTotalItems") > 0 || Number(local, "receiveOnlyChangedBytes") > 0) { row.Kind = DiskExplorerKind.LocalChanges; row.Detail = "Есть локальные изменения"; }
             else if (!connected) row.Kind = DiskExplorerKind.Offline;
@@ -69,6 +78,40 @@ namespace RemoteAgents.Launcher
                 Number(remote, "needItems") == 0 && Number(remote, "needBytes") == 0 && Number(remote, "needDeletes") == 0 && Json.Str(remote, "remoteState") == "valid") row.Kind = DiskExplorerKind.Synced;
             else { row.Kind = DiskExplorerKind.Syncing; row.Percent = Math.Min(99, row.Percent); }
             return row;
+        }
+    }
+    // Папки, которые сервер уже подтверждал: id -> «сервер ими делился». Хранится в диске программы (explorer-confirmed.json) и привязано к серверу.
+    // Папка с remoteState=notSharing, которой в памяти нет, ещё не принята сервером («ожидает»); которая есть — снята сервером.
+    internal static class DiskConfirmedFolders
+    {
+        static readonly object Gate = new object();
+        static string FileOf(string diskHome) { return System.IO.Path.Combine(diskHome, "explorer-confirmed.json"); }
+        static HashSet<string> Read(string diskHome, string peer)
+        {
+            var known = new HashSet<string>(StringComparer.Ordinal);
+            try {
+                string file = FileOf(diskHome);
+                if (!File.Exists(file)) return known;
+                var data = Json.Read(file);
+                if (Json.Str(data, "peer") == peer) foreach (string id in Json.Strings(Json.Get(data, "folders"))) known.Add(id);
+            } catch (Exception) { known.Clear(); } // Нечитаемая память = пустая: папка просто покажется как ожидающая, не как ошибка.
+            return known;
+        }
+        internal static HashSet<string> Load(string diskHome, string peer) { lock (Gate) return Read(diskHome, peer); }
+        // configured: папки, которыми компьютер делится с сервером (остальные забываются); now: подтверждённые сервером сейчас.
+        // Возвращает память после обновления. Если записать её не удалось, она живёт только до перезапуска.
+        internal static HashSet<string> Update(string diskHome, string peer, IEnumerable<string> configured, IEnumerable<string> now)
+        {
+            lock (Gate) {
+                var wanted = new HashSet<string>(configured, StringComparer.Ordinal);
+                var before = Read(diskHome, peer); var known = new HashSet<string>(before, StringComparer.Ordinal);
+                known.IntersectWith(wanted); foreach (string id in now) if (wanted.Contains(id)) known.Add(id);
+                if (!known.SetEquals(before)) {
+                    try { Json.Write(FileOf(diskHome), new Dictionary<string, object> { { "peer", peer }, { "folders", known.OrderBy(i => i, StringComparer.Ordinal).ToArray() } }); }
+                    catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { }
+                }
+                return known;
+            }
         }
     }
     internal sealed class DiskShellRequest

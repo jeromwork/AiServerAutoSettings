@@ -42,11 +42,11 @@ namespace RemoteAgents.Launcher
     {
         readonly IDiskRest rest; readonly string root, ignoreRules;
         readonly DiskExplorerService metadata; readonly DiskPlaceholderCatalog catalog;
-        readonly Action<string> recycle; readonly int readyTimeout;
-        internal DiskShellCommands(IDiskRest rest, string root, DiskExplorerService metadata, DiskPlaceholderCatalog catalog, string ignoreRules, Action<string> recycle, int readyTimeout = 30000)
-        { this.rest = rest; this.root = root; this.metadata = metadata; this.catalog = catalog; this.ignoreRules = ignoreRules; this.recycle = recycle; this.readyTimeout = readyTimeout; }
+        readonly Action<string> recycle; readonly int readyTimeout; readonly string diskHome;
+        internal DiskShellCommands(IDiskRest rest, string root, DiskExplorerService metadata, DiskPlaceholderCatalog catalog, string ignoreRules, Action<string> recycle, int readyTimeout = 30000, string diskHome = null)
+        { this.rest = rest; this.root = root; this.metadata = metadata; this.catalog = catalog; this.ignoreRules = ignoreRules; this.recycle = recycle; this.readyTimeout = readyTimeout; this.diskHome = diskHome; }
         internal DiskSnapshot Read(CancellationToken token)
-        { var value = new DiskRestModel(rest).Read(root, token); catalog.Merge(rest.Peer, value); return value; }
+        { var value = new DiskRestModel(rest, diskHome).Read(root, token); catalog.Merge(rest.Peer, value); return value; }
         internal string Execute(DiskShellRequest request, CancellationToken token)
         {
             DiskPaths.Plain(request.Path);

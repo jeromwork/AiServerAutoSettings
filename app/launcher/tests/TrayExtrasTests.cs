@@ -31,6 +31,25 @@ namespace RemoteAgents.Launcher
                 idle[key] = 1;
                 Check(DiskTraySession.Summary(folders, states, true).Contains("ошибка"), "folder error " + key); idle.Remove(key);
             }
+            // Ошибка одной папки не делает ошибкой весь Диск; папка, снятая сервером, не ошибка.
+            var a = Data("{\"id\":\"a\",\"label\":\"Альфа\",\"devices\":[{\"deviceID\":\"PEER\"}]}"); var b = Data("{\"id\":\"b\",\"devices\":[{\"deviceID\":\"PEER\"}]}");
+            var broken = Data("{\"state\":\"error\",\"error\":\"folder path missing\",\"globalBytes\":2048,\"needBytes\":0,\"needTotalItems\":0}");
+            var valid = Data("{\"completion\":100,\"needItems\":0,\"needBytes\":0,\"needDeletes\":0,\"remoteState\":\"valid\"}"); var notSharing = Data("{\"completion\":100,\"needItems\":0,\"needBytes\":0,\"needDeletes\":0,\"remoteState\":\"notSharing\"}");
+            string one = DiskTraySession.Summary(new[] { a, b }, new[] { broken, idle }, true, new[] { valid, valid });
+            Check(one == "Диск работает; ошибка в папке Альфа: folder path missing", "one folder in error: the Disk works, the folder is named with the reason (" + one + ")");
+            Check(!one.Contains("ошибка синхронизации"), "an error of one folder is never the error of the Disk");
+            Check(DiskTraySession.Summary(new[] { a, b }, new[] { broken, broken }, true, new[] { valid, valid }) == "Диск работает; ошибки в 2 папках: Альфа, b", "several folders in error are listed shortly");
+            Check(DiskTraySession.Summary(new[] { a, b }, new[] { Data("{\"pullErrors\":3}"), idle }, true, new[] { valid, valid }).Contains("не удалось получить файлов: 3"), "pull errors give a reason");
+            Check(DiskTraySession.Summary(new[] { a, b }, new[] { broken, idle }, false, new[] { valid, valid }) == "Диск: сервер не подключён", "no connection is still a problem of the whole Disk, not of a folder");
+            string gone = DiskTraySession.Summary(new[] { a, b }, new[] { idle, idle }, true, new[] { valid, notSharing }, new[] { "a", "b" });
+            Check(gone == "Диск: синхронизирован · удалена на сервере: b", "a folder the server stopped sharing is not an error; the rest is counted as before (" + gone + ")");
+            Check(DiskTraySession.Summary(new[] { a, b }, new[] { idle, idle }, true, new[] { valid, notSharing }, new[] { "a" }).Contains("состояние уточняется") &&
+                !DiskTraySession.Summary(new[] { a, b }, new[] { idle, idle }, true, new[] { valid, notSharing }, new[] { "a" }).Contains("удален"), "a new folder the server has not accepted yet is waiting, not removed");
+            Check(DiskTraySession.Summary(new[] { a, b }, new[] { idle, idle }, true, new[] { valid, notSharing }).Contains("состояние уточняется"), "without the memory nothing is called removed");
+            Check(DiskTraySession.Summary(new[] { a, b }, new[] { idle, idle }, false, new[] { valid, notSharing }, new[] { "a", "b" }) == "Диск: сервер не подключён", "without a connection nothing is removed");
+            Check(DiskTraySession.Summary(new[] { b }, new[] { idle }, true, new[] { notSharing }, new[] { "b" }) == "Диск: папки удалены на сервере, локальные копии сохранены", "all folders removed on the server");
+            string both = DiskTraySession.Summary(new[] { a, b }, new[] { broken, idle }, true, new[] { valid, notSharing }, new[] { "a", "b" });
+            Check(both == "Диск работает; ошибка в папке Альфа: folder path missing · удалена на сервере: b", "an error and a removal are told together (" + both + ")");
             Check(DiskTraySession.Summary(folders, new[] { Data("{\"state\":\"scanning\"}") }, true).Contains("проверка"), "scan is not success");
             Check(DiskTraySession.Summary(folders, new[] { Data("{\"state\":\"syncing\",\"globalBytes\":2048,\"needBytes\":1024}") }, true).Contains("50%"), "sync percentage");
             Check(DiskTraySession.Summary(folders, new[] { Data("{\"state\":\"idle\",\"needTotalItems\":1}") }, true).Contains("синхронизация"), "zero byte deletions still pending");

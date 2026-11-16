@@ -166,6 +166,16 @@ namespace RemoteAgents.Launcher
             facts.DiskEnabled = true;
             facts.DiskSummary = "Диск: ошибка " + new string('Я', 300) + " · попробуйте снова";
             Check(MainScreenModel.Build(facts).Disk.State == facts.DiskSummary.Substring(6), "long disk explanations are not truncated at punctuation");
+            facts.DiskSummary = "Диск работает; ошибка в папке Альфа: folder path missing";
+            var folderError = MainScreenModel.Build(facts);
+            Check(folderError.Disk.State == "работает; ошибка в папке Альфа: folder path missing" && folderError.Disk.Tone == Tone.Warning && !folderError.Banner.Visible, "an error of one folder is a warning on the card, not an error of the Disk and not a banner");
+            facts.DiskSummary = "Диск: синхронизирован · удалена на сервере: Бета · ↓1 ↑2 КБ/с";
+            var removedCard = MainScreenModel.Build(facts).Disk;
+            Check(removedCard.State == "всё синхронизировано" && removedCard.Tone == Tone.Ok && removedCard.Detail == "удалена на сервере: Бета, локальная копия сохранена", "a folder removed on the server is a note, not an error");
+            facts.DiskSummary = "Диск: папки удалены на сервере, локальные копии сохранены";
+            Check(MainScreenModel.Build(facts).Disk.Tone != Tone.Error && !MainScreenModel.Build(facts).Banner.Visible, "all folders removed on the server is not an error");
+            facts.DiskSummary = "Диск: локальный Syncthing недоступен";
+            Check(MainScreenModel.Build(facts).Disk.Tone == Tone.Error, "an unreachable Syncthing is still an error of the whole Disk");
             facts.DiskSummary = "";
             Check(MainScreenModel.Build(facts).Disk.State == "ожидается проверка", "empty disk waits for proof");
         }

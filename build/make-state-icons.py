@@ -13,6 +13,7 @@ DiskExplorerKind (DiskShellModel.cs); Explorer shows a folder of the Disk with t
     Paused        folder + grey pause bars         paused on purpose
     Pending       folder + grey clock              waiting for Syncthing to confirm
     LocalChanges  folder + orange arrow up         changes to upload before the space can be freed
+    ServerRemoved folder + crossed-out grey cloud  the server no longer has the folder; the local copy is kept (not an error)
     Local         plain folder, no badge
 
 Frames: 16, 20, 24, 32, 48 and 256 px, all PNG (the container of the icons generated before, which Explorer displayed).
@@ -28,13 +29,13 @@ from pathlib import Path
 
 from icon_art import Layer, compose, ico, lerp, png_frame, png_image
 
-KINDS = ('Local', 'ServerOnly', 'Pending', 'Syncing', 'Synced', 'Paused', 'Error', 'Offline', 'Unavailable', 'LocalChanges')
+KINDS = ('Local', 'ServerOnly', 'Pending', 'Syncing', 'Synced', 'Paused', 'Error', 'Offline', 'Unavailable', 'LocalChanges', 'ServerRemoved')
 SIZES = (16, 20, 24, 32, 48, 256)
 
 WHITE = (255, 255, 255)
 BADGE = {'Synced': (40, 160, 70), 'Syncing': (40, 120, 235), 'Error': (215, 45, 35),
          'Paused': (105, 114, 126), 'Pending': (105, 114, 126), 'LocalChanges': (240, 140, 20)}
-CLOUD = {'ServerOnly': (84, 136, 206), 'Offline': (128, 136, 148), 'Unavailable': (128, 136, 148)}
+CLOUD = {'ServerOnly': (84, 136, 206), 'Offline': (128, 136, 148), 'Unavailable': (128, 136, 148), 'ServerRemoved': (128, 136, 148)}
 SLASH = (70, 76, 84)             # the cut across the cloud of a folder that cannot sync now
 GREY_KINDS = ('Offline', 'Unavailable')
 FADED = 0.5                      # opacity of the folder that exists only on the server
@@ -72,7 +73,7 @@ def badge(layer, s, kind):
         outline = max(0.8, 0.045 * s)
         x0, y0, w, h = cloud(layer, s, WHITE, outline)
         cloud(layer, s, CLOUD[kind])
-        if kind in GREY_KINDS:                                    # the connection is cut: a slash across the cloud
+        if kind in GREY_KINDS or kind == 'ServerRemoved':         # the connection is cut / the folder is gone from the server: a slash across the cloud
             width = max(1.5, 0.06 * s)
             a, b = (x0 + 0.14 * w, y0 + 0.10 * h), (x0 + 0.90 * w, y0 + 1.00 * h)
             layer.line(a, b, width + 2 * outline, WHITE)

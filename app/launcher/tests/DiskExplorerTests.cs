@@ -26,7 +26,7 @@ namespace RemoteAgents.Launcher
         internal static int EngineAction(string[] args)
         {
             var rest = new DiskSyncthingClient(args[1]); var service = Service(new TestFiles());
-            var commands = new DiskShellCommands(rest, args[2], service, new DiskPlaceholderCatalog(args[1]), File.ReadAllText(args[5]), path => Directory.Move(path, args[6]), args.Length > 7 ? int.Parse(args[7]) : 30000);
+            var commands = new DiskShellCommands(rest, args[2], service, new DiskPlaceholderCatalog(args[1]), File.ReadAllText(args[5]), path => Directory.Move(path, args[6]), args.Length > 7 ? int.Parse(args[7]) : 30000, args[1]);
             if (args[3] == "inspect") {
                 var snapshot = commands.Read(None);
                 Console.WriteLine(Json.Encode(new { folders = snapshot.Folders.Select(f => new { f.Id, kind = f.Kind.ToString(), f.Detail }).ToArray(), tray = new DiskTraySession(args[1]).Read(None) }));
@@ -39,7 +39,7 @@ namespace RemoteAgents.Launcher
         internal static void Run()
         {
             string temp = Path.Combine(Path.GetTempPath(), "disk-explorer-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(temp);
-            try { RecyclePolicy(); States(); Metadata(Path.Combine(temp, "metadata")); Registry(); Menu(); MenuIcon(); IconFile(Path.Combine(temp, "icons")); StateIcons(Path.Combine(temp, "state-icons")); Commands(Path.Combine(temp, "actions")); Console.WriteLine("PASS: Explorer model, metadata, registry and action fixtures"); HttpAndEvents(Path.Combine(temp, "http")).GetAwaiter().GetResult(); }
+            try { RecyclePolicy(); States(); FolderErrorsAndRemoval(Path.Combine(temp, "removal")); Metadata(Path.Combine(temp, "metadata")); Registry(); Menu(); MenuIcon(); IconFile(Path.Combine(temp, "icons")); StateIcons(Path.Combine(temp, "state-icons")); Commands(Path.Combine(temp, "actions")); Console.WriteLine("PASS: Explorer model, metadata, registry and action fixtures"); HttpAndEvents(Path.Combine(temp, "http")).GetAwaiter().GetResult(); }
             finally { if (Directory.Exists(temp)) Directory.Delete(temp, true); }
             Console.WriteLine("PASS: " + checks + " local Syncthing / Explorer checks (REST, events, placeholders, HKCU, shell, recycle rollback)");
         }
@@ -107,6 +107,46 @@ namespace RemoteAgents.Launcher
         sealed class BrokenIcons : IDiskExplorerIcons { public string PathFor(DiskExplorerKind k) { return "/icons/" + k + ".ico"; } public string ApplicationPath() { throw new IOException("the icon cannot be drawn"); } }
         sealed class Notify : IDiskExplorerNotifier { internal int Count; public void Changed(string path) { Count++; } }
         static DiskExplorerService Service(TestFiles fs) { return new DiskExplorerService(fs, new Icons(), new Notify(), delegate { }); }
+        // Ошибка одной папки не красит весь Диск; папка, снятая сервером, не ошибка, а новая, ещё не принятая, не «удалена».
+        static void FolderErrorsAndRemoval(string temp)
+        {
+            var local = Map("{\"state\":\"idle\",\"globalBytes\":100,\"needBytes\":0,\"needTotalItems\":0}");
+            var remote = Map("{\"completion\":100,\"needBytes\":0,\"needItems\":0,\"needDeletes\":0,\"remoteState\":\"notSharing\"}");
+            var row = new DiskFolderState();
+            Check(DiskSnapshot.Status(row, local, remote, true, true).Kind == DiskExplorerKind.ServerRemoved && row.Tooltip == "Удалена на сервере, локальная копия сохранена", "confirmed folder the server stopped sharing is «removed on server»");
+            Check(DiskSnapshot.Status(row, local, remote, true, false).Kind == DiskExplorerKind.Pending, "a new folder the server has not accepted yet is waiting, not removed");
+            Check(DiskSnapshot.Status(row, local, remote, false, true).Kind == DiskExplorerKind.Offline, "without a connection nothing is known about the server");
+            local["pullErrors"] = 2; local["error"] = "folder path missing";
+            Check(DiskSnapshot.Status(row, local, remote, true, true).Kind == DiskExplorerKind.ServerRemoved && row.Detail.Length == 0, "removal on the server is not an error");
+            Check(DiskSnapshot.Status(row, local, remote, true, false).Kind == DiskExplorerKind.Error, "an error of a folder the server never confirmed stays an error of that folder");
+            remote["remoteState"] = "valid"; Check(DiskSnapshot.Status(row, local, remote, true, true).Kind == DiskExplorerKind.Error, "a folder the server still shares keeps its error");
+            var store = new TestRegistry(); var registry = new DiskExplorerRegistry(store, delegate { });
+            registry.Register(@"C:\app.exe", @"C:\Disk", new[] { new DiskFolderState { Path = @"C:\Disk\Gone", Kind = DiskExplorerKind.ServerRemoved }, new DiskFolderState { Path = @"C:\Disk\Live", Kind = DiskExplorerKind.Synced } });
+            string keep = store.Read(DiskExplorerRegistry.Prefix + "keep-server", "AppliesTo");
+            Check(keep.Contains(@"C:\Disk\Live") && !keep.Contains("Gone"), "«Оставить только на сервере» is not offered on a folder the server removed");
+            // Read: одна папка в ошибке, одна снята сервером, одна новая; память «сервер подтверждал» живёт в диске программы.
+            string diskHome = Path.Combine(temp, "state"), root = Path.Combine(temp, "Disk"); Directory.CreateDirectory(diskHome);
+            var rest = new FakeRest();
+            Func<string, Dictionary<string, object>> folder = id => Map("{\"id\":\"" + id + "\",\"label\":\"" + id + "\",\"path\":" + Json.Encode(Path.Combine(root, id)) + ",\"devices\":[{\"deviceID\":\"SERVER\"}]}");
+            foreach (string id in new[] { "ok", "broken", "gone" }) rest.Folders.Add(folder(id));
+            rest.LocalOf["broken"] = Map("{\"state\":\"error\",\"error\":\"folder path missing\",\"globalBytes\":100,\"needBytes\":0,\"needTotalItems\":0}");
+            var snapshot = new DiskRestModel(rest, diskHome).Read(root, None);
+            Func<string, DiskExplorerKind> kind = id => snapshot.Folders.Single(f => f.Id == id).Kind;
+            Check(kind("ok") == DiskExplorerKind.Synced && kind("broken") == DiskExplorerKind.Error && snapshot.Folders.Single(f => f.Id == "broken").Tooltip.Contains("folder path missing"), "one folder in error: the others stay synchronized");
+            Check(File.Exists(Path.Combine(diskHome, "explorer-confirmed.json")) && DiskConfirmedFolders.Load(diskHome, "SERVER").SetEquals(new[] { "ok", "broken", "gone" }), "folders confirmed by the server are remembered");
+            rest.RemoteOf["gone"] = Map("{\"completion\":100,\"needBytes\":0,\"needItems\":0,\"needDeletes\":0,\"remoteState\":\"notSharing\"}");
+            rest.Folders.Add(folder("fresh")); rest.RemoteOf["fresh"] = Map("{\"completion\":0,\"needBytes\":0,\"needItems\":0,\"needDeletes\":0,\"remoteState\":\"notSharing\"}");
+            snapshot = new DiskRestModel(rest, diskHome).Read(root, None);
+            Check(kind("gone") == DiskExplorerKind.ServerRemoved && kind("fresh") == DiskExplorerKind.Pending && kind("ok") == DiskExplorerKind.Synced, "removed on server vs. new and unconfirmed vs. working");
+            Check(DiskConfirmedFolders.Load(diskHome, "SERVER").Contains("gone") && !DiskConfirmedFolders.Load(diskHome, "SERVER").Contains("fresh"), "the memory keeps a removed folder and does not invent a new one");
+            rest.Connected = false; Check(ReadKinds(rest, diskHome, root)["gone"] == DiskExplorerKind.Offline, "no connection: nothing is «removed on server»"); rest.Connected = true;
+            Check(new DiskRestModel(rest).Read(root, None).Folders.Single(f => f.Id == "gone").Kind == DiskExplorerKind.Pending, "without the memory a removed folder cannot be told from a new one and is not shown as an error");
+            Check(DiskConfirmedFolders.Load(diskHome, "OTHER").Count == 0, "the memory belongs to one server");
+            rest.Folders.RemoveAll(f => Json.Str(f, "id") == "gone"); new DiskRestModel(rest, diskHome).Read(root, None);
+            Check(!DiskConfirmedFolders.Load(diskHome, "SERVER").Contains("gone"), "a folder deleted on the computer is forgotten");
+        }
+        static Dictionary<string, DiskExplorerKind> ReadKinds(FakeRest rest, string diskHome, string root)
+        { return new DiskRestModel(rest, diskHome).Read(root, None).Folders.GroupBy(f => f.Id).ToDictionary(g => g.Key, g => g.First().Kind); }
         static void Metadata(string root)
         {
             var fs = new TestFiles(); var service = Service(fs);
@@ -336,6 +376,9 @@ namespace RemoteAgents.Launcher
             bool verifying;
             internal Dictionary<string, object> Local = Map("{\"state\":\"idle\",\"globalBytes\":100,\"needBytes\":0,\"needTotalItems\":0,\"sequence\":1}");
             internal Dictionary<string, object> Remote = Map("{\"completion\":100,\"needBytes\":0,\"needItems\":0,\"needDeletes\":0,\"remoteState\":\"valid\"}");
+            // Answers of single folders (by id); a folder without an entry gets Local / Remote.
+            internal readonly Dictionary<string, Dictionary<string, object>> LocalOf = new Dictionary<string, Dictionary<string, object>>(), RemoteOf = new Dictionary<string, Dictionary<string, object>>();
+            static string FolderOf(string route) { string v = route.Substring(route.IndexOf("folder=") + 7); int amp = v.IndexOf('&'); return Uri.UnescapeDataString(amp < 0 ? v : v.Substring(0, amp)); }
             internal void Offer(string id, string label, string peer = "SERVER") { Pending[id] = new Dictionary<string, object> { { "offeredBy", new Dictionary<string, object> { { peer, new Dictionary<string, object> { { "label", label } } } } } }; }
             public object Request(string method, string route, object body, CancellationToken token, int timeout = 3000)
             {
@@ -344,8 +387,8 @@ namespace RemoteAgents.Launcher
                 if (route == "config/folders" && method == "GET") { if (FailVerify && verifying) { verifying = false; throw new IOException("verification lost"); } verifying = false; return Folders.ToArray(); }
                 if (route.StartsWith("cluster/pending/folders")) return Pending;
                 if (route.StartsWith("db/scan") && method == "POST") { if (OnScan != null) OnScan(); return null; }
-                 if (route.StartsWith("db/status")) { if (OnStatus != null) OnStatus(++statusReads); return new Dictionary<string, object>(Local); }
-                if (route.StartsWith("db/completion")) return Remote;
+                 if (route.StartsWith("db/status")) { if (OnStatus != null) OnStatus(++statusReads); Dictionary<string, object> own; return new Dictionary<string, object>(LocalOf.TryGetValue(FolderOf(route), out own) ? own : Local); }
+                if (route.StartsWith("db/completion")) { Dictionary<string, object> own; return RemoteOf.TryGetValue(FolderOf(route), out own) ? own : Remote; }
                 if (route == "config/defaults/folder") return Map("{\"rescanIntervalS\":3600,\"fsWatcherEnabled\":true}");
                 if (route == "system/status") return Map("{\"myID\":\"LOCAL\"}");
                 if (route == "config/folders" && method == "POST") {

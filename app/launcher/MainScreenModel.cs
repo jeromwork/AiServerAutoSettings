@@ -180,9 +180,15 @@ namespace RemoteAgents.Launcher
             // Rates belong to the tray's live summary; the card keeps just one state and folder counts.
             int rates = state.IndexOf(" · ↓", StringComparison.Ordinal);
             if (rates >= 0) state = state.Substring(0, rates);
+            // Папки, снятые сервером, не ошибка: состояние остаётся прежним, а карточка говорит о них в подписи.
+            string removed = "";
+            int note = state.IndexOf(" · удал", StringComparison.Ordinal);
+            if (note >= 0) { removed = state.Substring(note + 3); state = state.Substring(0, note); }
             card.Tone = Tone.Warning;
             if (!facts.DiskEnabled) { state = "отключён"; card.Tone = Tone.Off; }
             else if (state.Length == 0) state = "ожидается проверка";
+            // Ошибка одной папки не делает весь Диск ошибкой: карточка предупреждает, баннер не показывается.
+            else if (state.StartsWith("Диск работает; ", StringComparison.Ordinal)) state = state.Substring(5);
             else if (state.IndexOf("ошиб", StringComparison.OrdinalIgnoreCase) >= 0 || state == "локальный Syncthing недоступен") {
                 if (state == "локальный Syncthing недоступен") state = "служба синхронизации недоступна";
                 card.Tone = Tone.Error;
@@ -197,6 +203,7 @@ namespace RemoteAgents.Launcher
             if (facts.DiskFolders >= 0 && facts.DiskServerOnly >= 0)
                 card.Detail = facts.DiskFolders.ToString(CultureInfo.InvariantCulture) + " " + FolderWord(facts.DiskFolders)
                     + " · " + facts.DiskServerOnly.ToString(CultureInfo.InvariantCulture) + " только на сервере";
+            if (removed.Length > 0) card.Detail = (card.Detail.Length > 0 ? card.Detail + " · " : "") + removed + ", локальная копия сохранена";
         }
 
         static string FolderWord(int count)
