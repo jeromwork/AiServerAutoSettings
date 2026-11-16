@@ -108,6 +108,7 @@ namespace RemoteAgents.Launcher
         string engineStart;
         double previousUptime;
         Dictionary<string, object>[] folders, states, remoteStates;
+        ICollection<string> confirmed;
         internal int FolderCount { get { return folders == null ? -1 : folders.Length; } }
         string folderPeer;
         double previousIn, previousOut;
@@ -159,7 +160,7 @@ namespace RemoteAgents.Launcher
             // Events long-poll gates state refresh; connections counters supply the speed.
             // First snapshot also establishes a cursor, so changes during that snapshot are replayed.
             var events = Json.Array(Get("events?since=" + since.ToString(CultureInfo.InvariantCulture) + "&timeout=" + (previousTime < 0 ? "0&limit=1" : "2") +
-                "&events=StateChanged,FolderSummary,FolderErrors,ConfigSaved,DeviceConnected,DeviceDisconnected,FolderCompletion,LocalIndexUpdated,RemoteIndexUpdated", token));
+                "&events=StateChanged,FolderSummary,FolderErrors,ConfigSaved,DeviceConnected,DeviceDisconnected,FolderCompletion,ClusterConfigReceived,LocalIndexUpdated,RemoteIndexUpdated", token));
             foreach (var item in events) since = Math.Max(since, (long)Number(Json.Map(item), "id"));
             var connections = Json.Map(Get("system/connections", token));
             var total = Json.Map(Json.Get(connections, "total")); double now = clock.Elapsed.TotalSeconds;
@@ -179,11 +180,14 @@ namespace RemoteAgents.Launcher
                     completions.Add(paused ? Json.Map(null) : Json.Map(Get("db/completion?folder=" + id + "&device=" + Uri.EscapeDataString(peer), token)));
                 }
                 states = updated.ToArray(); remoteStates = completions.ToArray();
+                // Память «сервер эту папку уже подтверждал»: по ней папка, которую сервер снял, отличается от новой, ещё не принятой.
+                confirmed = DiskConfirmedFolders.Update(Root, peer, folders.Select(f => Json.Str(f, "id")),
+                    folders.Where((f, i) => DiskSnapshot.ConfirmedByServer(remoteStates[i])).Select(f => Json.Str(f, "id")));
             }
             bool connected = Json.Bool(Json.Map(Json.Get(Json.Map(Json.Get(connections, "connections")), peer)), "connected");
             string speed = Rates(previousIn, previousOut, input, output, previousTime < 0 ? 0 : now - previousTime);
             previousIn = input; previousOut = output; previousTime = now;
-            return Summary(folders, states, connected, remoteStates) + speed;
+            return Summary(folders, states, connected, remoteStates, confirmed) + speed;
         }
         void Reset() { since = 0; folders = states = remoteStates = null; previousTime = -1; }
         internal static double Number(Dictionary<string, object> data, string key)
@@ -197,9 +201,43 @@ namespace RemoteAgents.Launcher
             return " · ↓" + ((input - oldIn) / seconds / 1024).ToString("0.#", CultureInfo.InvariantCulture) + " ↑" +
                 ((output - oldOut) / seconds / 1024).ToString("0.#", CultureInfo.InvariantCulture) + " КБ/с";
         }
-        internal static string Summary(Dictionary<string, object>[] folders, Dictionary<string, object>[] states, bool connected, Dictionary<string, object>[] remoteStates = null)
+        // Папка с ошибкой: текст причины для сводки (пусто, если ошибки нет).
+        static string FolderFailure(Dictionary<string, object> state)
         {
-            if (states.Any(s => Number(s, "errors") > 0 || Number(s, "pullErrors") > 0 || Json.Str(s, "state") == "error")) return "Диск: ошибка синхронизации";
+            string error = Json.Str(state, "error").Trim();
+            if (error.Length > 0) return error;
+            if (Number(state, "pullErrors") > 0) return "не удалось получить файлов: " + Number(state, "pullErrors").ToString("0", CultureInfo.InvariantCulture);
+            if (Number(state, "errors") > 0) return "ошибок: " + Number(state, "errors").ToString("0", CultureInfo.InvariantCulture);
+            return Json.Str(state, "state") == "error" ? "сбой" : "";
+        }
+        static string FolderName(Dictionary<string, object> folder) { return folder == null ? "?" : Json.Text(folder, "label", Json.Str(folder, "id")); }
+        static string Names(List<string> names) { return string.Join(", ", names.Take(3)) + (names.Count > 3 ? ", …" : ""); }
+        // Ошибка или снятие одной папки не делает ошибкой весь Диск: такие папки выделяются в отдельную строку, остальные считаются как раньше.
+        // Общая ошибка остаётся для случаев, когда не работает весь Диск (сервер не подключён; локальный Syncthing, см. CheckDisk).
+        internal static string Summary(Dictionary<string, object>[] folders, Dictionary<string, object>[] states, bool connected, Dictionary<string, object>[] remoteStates = null, ICollection<string> confirmed = null)
+        {
+            var failed = new List<string>(); var reasons = new List<string>(); var removed = new List<string>();
+            var keptFolders = new List<Dictionary<string, object>>(); var keptStates = new List<Dictionary<string, object>>(); var keptRemote = new List<Dictionary<string, object>>();
+            bool remoteAligned = remoteStates != null && remoteStates.Length == folders.Length && states.Length == folders.Length;
+            for (int i = 0; i < states.Length; i++) {
+                var folder = i < folders.Length ? folders[i] : null;
+                if (folder != null && remoteAligned && confirmed != null && confirmed.Contains(Json.Str(folder, "id")) && DiskSnapshot.RemovedByServer(remoteStates[i], connected, true)) { removed.Add(FolderName(folder)); continue; }
+                string reason = FolderFailure(states[i]);
+                if (reason.Length > 0) { failed.Add(FolderName(folder)); reasons.Add(reason); continue; }
+                keptStates.Add(states[i]); if (folder != null) keptFolders.Add(folder); if (remoteAligned) keptRemote.Add(remoteStates[i]);
+            }
+            for (int i = states.Length; i < folders.Length; i++) keptFolders.Add(folders[i]);
+            string core = FolderSummary(keptFolders.ToArray(), keptStates.ToArray(), connected, remoteAligned ? keptRemote.ToArray() : null);
+            string note = removed.Count == 0 ? "" : (removed.Count == 1 ? " · удалена на сервере: " : " · удалены на сервере: ") + Names(removed);
+            if (failed.Count == 0 && removed.Count == 0) return core;
+            if (failed.Count > 0 && !connected) return keptFolders.Count > 0 ? core : "Диск: сервер не подключён";
+            if (failed.Count > 0)
+                return "Диск работает; " + (failed.Count == 1 ? "ошибка в папке " + failed[0] + ": " + reasons[0]
+                    : "ошибки в " + failed.Count.ToString(CultureInfo.InvariantCulture) + (failed.Count % 10 == 1 && failed.Count % 100 != 11 ? " папке: " : " папках: ") + Names(failed)) + note;
+            return keptFolders.Count == 0 ? "Диск: папки удалены на сервере, локальные копии сохранены" : core + note;
+        }
+        static string FolderSummary(Dictionary<string, object>[] folders, Dictionary<string, object>[] states, bool connected, Dictionary<string, object>[] remoteStates)
+        {
             if (folders.Length == 0) return "Диск: нет выбранных папок";
             if (folders.Any(f => Json.Bool(f, "paused"))) return "Диск: есть папки на паузе";
             if (!connected) return "Диск: сервер не подключён";
@@ -211,7 +249,6 @@ namespace RemoteAgents.Launcher
             // Explorer and tray use exactly the same local/remote readiness decision.
             if (states.Length != folders.Length || remoteStates == null || remoteStates.Length != folders.Length) return "Диск: состояние уточняется";
             var rows = folders.Select((f, i) => DiskSnapshot.Status(new DiskFolderState { Paused = Json.Bool(f, "paused") }, states[i], remoteStates[i], connected)).ToArray();
-            if (rows.Any(r => r.Kind == DiskExplorerKind.Error)) return "Диск: ошибка синхронизации";
             if (rows.Any(r => r.Kind == DiskExplorerKind.Paused)) return "Диск: есть папки на паузе";
             if (rows.All(r => r.Kind == DiskExplorerKind.Synced)) return "Диск: синхронизирован";
             if (rows.Any(r => r.Kind == DiskExplorerKind.Syncing)) return "Диск: синхронизация " + rows.Min(r => r.Percent).ToString(CultureInfo.InvariantCulture) + "%";

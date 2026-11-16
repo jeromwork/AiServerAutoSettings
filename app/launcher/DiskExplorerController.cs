@@ -47,7 +47,7 @@ namespace RemoteAgents.Launcher
         DiskShellCommands Commands(IDiskRest rest, string currentRoot)
         {
             string rules = File.ReadAllText(Path.Combine(bundle(), "disk", "stignore.txt"));
-            return new DiskShellCommands(rest, currentRoot, metadata, new DiskPlaceholderCatalog(diskHome), rules, Recycle);
+            return new DiskShellCommands(rest, currentRoot, metadata, new DiskPlaceholderCatalog(diskHome), rules, Recycle, diskHome: diskHome);
         }
         static void Recycle(string path) { DiskRecycle.Move(path); }
         void Monitor()

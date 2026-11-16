@@ -50,7 +50,7 @@ namespace RemoteAgents.Launcher
             if (!SafePath(exePath) || !SafePath(root) || (launcherHome != null && !SafePath(launcherHome)) || (iconPath != null && !SafePath(iconPath))) throw new ArgumentException("Недопустимый путь оформления Проводника");
             var rows = folders.Where(f => SafePath(f.Path)).ToArray();
             string[] placeholders = rows.Where(f => f.ServerOnly && f.Kind == DiskExplorerKind.ServerOnly).Select(f => f.Path).ToArray();
-            string[] syncing = rows.Where(f => !f.ServerOnly && f.Kind != DiskExplorerKind.Local).Select(f => f.Path).ToArray();
+            string[] syncing = rows.Where(f => !f.ServerOnly && f.Kind != DiskExplorerKind.Local && f.Kind != DiskExplorerKind.ServerRemoved).Select(f => f.Path).ToArray();
             string[] uploading = rows.Where(f => f.Uploads).Select(f => f.Path).ToArray();
             string icon = "\"" + (iconPath ?? exePath) + "\",0";
             foreach (string action in Actions) {
