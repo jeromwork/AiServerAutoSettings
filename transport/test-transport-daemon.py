@@ -256,7 +256,9 @@ Server(('127.0.0.1',port),API).serve_forever()
                                    for c in s.get('candidates', [])) else None), seconds=10)
         assert 0 < retry_delay(failed) <= 1.1
         (root/'other-failure').unlink()
-        rebound = until(lambda: (s if (s:=status()).get('portConflict') else None), seconds=5)
+        # Process startup/readiness also takes time on a loaded host. The actual
+        # reset backoff remains independently bounded by retry_delay below.
+        rebound = until(lambda: (s if (s:=status()).get('portConflict') else None), seconds=15)
         assert 0 < retry_delay(rebound) <= 5.1, 'Ошибка без bind не сбросила серию'
         # Та же ошибка уже повторилась; смена конфига начинает новую серию.
         before=int((root/'starts').read_text())
