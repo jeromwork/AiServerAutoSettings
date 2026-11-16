@@ -1305,6 +1305,214 @@ class ServerHardeningTests(unittest.TestCase):
             self.assertEqual({d['deviceID'] for d in t.folder(a, 'Slow')['devices']}, {a['deviceId'], b['deviceId']})
 
 
+class MissingFolderTests(unittest.TestCase):
+    def forget(self, t, server, ns, now, api=None):
+        folders = t.api(server, 'config/folders')
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            ns['forget_missing'](api or (lambda *args: t.api(server, *args)), folders,
+                                 server['home'] / 'Disk', now=now)
+        return stderr.getvalue()
+
+    def test_deleted_project_is_forgotten_after_real_grace_period_and_returns_with_same_id(self):
+        with Stand(2) as t:
+            server, computer = t.sides
+            disk = server['home'] / 'Disk'
+            project = disk / 'Ephemeral'
+            project.mkdir(parents=True)
+            (disk / '.mounted').touch()  # Disk remains nonempty when the only project disappears.
+            (project / 'keep.txt').write_text('client copy must survive')
+            t.register(server, computer)
+            t.register(computer, server)
+            wait(lambda: 'Ephemeral' in t.api(computer, 'cluster/pending/folders'), 'server offers project')
+            local = computer['home'] / 'Disk/Ephemeral'
+            folder = t.folder(server, 'Ephemeral')
+            folder['path'] = str(local)
+            t.api(computer, 'config/folders/Ephemeral', 'PUT', folder)
+            wait(lambda: (local / 'keep.txt').exists() and t.settled('Ephemeral'), 'client copy is synced')
+            completion = lambda: t.api(computer, 'db/completion?folder=Ephemeral&device=' + server['deviceId'])
+            self.assertEqual(completion()['remoteState'], 'valid')
+
+            shutil.rmtree(project)  # Only the test simulates the agent deleting its project.
+            self.assertEqual(bootstrap_tick(t, server), '')
+            since = json.loads((server['state'] / 'missing-folders.json').read_text())['folders']['Ephemeral']['since']
+            self.assertEqual(t.folder(server, 'Ephemeral')['id'], 'Ephemeral')
+            logs = []
+            while any(f['id'] == 'Ephemeral' for f in t.api(server, 'config/folders')):
+                self.assertLess(time.monotonic() - since, 45, 'registration was not removed after 30 s')
+                if time.monotonic() - since < 29:
+                    self.assertEqual(t.folder(server, 'Ephemeral')['id'], 'Ephemeral')
+                time.sleep(2)
+                logs.append(bootstrap_tick(t, server))
+            self.assertGreaterEqual(time.monotonic() - since, 30)
+            self.assertEqual(''.join(logs), 'RemoteDisk: Ephemeral: регистрация снята, папка отсутствует не менее 30 с\n')
+            self.assertEqual(t.api(server, 'config/folders'), [])
+            wait(lambda: completion()['remoteState'] == 'notSharing', 'client notices server stopped sharing')
+            status = t.api(computer, 'db/status?folder=Ephemeral')
+            self.assertEqual((status['state'], status['pullErrors'], status.get('error', '')), ('idle', 0, ''))
+            self.assertEqual((local / 'keep.txt').read_text(), 'client copy must survive')
+            self.assertIn(server['deviceId'], {d['deviceID'] for d in t.folder(computer, 'Ephemeral')['devices']})
+            self.assertTrue(t.api(computer, 'system/connections')['connections'][server['deviceId']]['connected'])
+            # The client continues to offer its local registration. Reconcile must not accept it back.
+            wait(lambda: 'Ephemeral' in t.api(server, 'cluster/pending/folders'), 'client offers the retained local copy')
+            for _ in range(2):
+                self.assertEqual(bootstrap_tick(t, server), '')
+                self.assertFalse(project.exists())
+                self.assertEqual(t.api(server, 'config/folders'), [])
+
+            project.mkdir()
+            (project / 'new.txt').write_text('same name, same ID')
+            self.assertEqual(bootstrap_tick(t, server), '')
+            self.assertEqual(t.folder(server, 'Ephemeral')['id'], 'Ephemeral')
+            wait(lambda: completion()['remoteState'] == 'valid' and (local / 'new.txt').exists(), 'same ID shared again')
+            self.assertEqual((local / 'keep.txt').read_text(), 'client copy must survive')
+            self.assertEqual((local / 'new.txt').read_text(), 'same name, same ID')
+            self.assertFalse((server['state'] / 'missing-folders.json').exists())
+            self.assertNotEqual(t.api(server, 'db/status?folder=Ephemeral')['state'], 'error')
+
+    def test_unavailable_empty_or_replaced_disk_resets_continuous_absence(self):
+        for mode in ('missing', 'empty', 'unreadable', 'replaced'):
+            with self.subTest(mode=mode), Stand(1) as t:
+                server = t.sides[0]
+                disk = server['home'] / 'Disk'
+                project = disk / 'Project'
+                project.mkdir(parents=True)
+                (disk / '.mounted').touch()
+                t.server(server, 'bootstrap')
+                project.rename(server['home'] / 'saved-project')
+                with server_helpers(server['home']) as ns:
+                    self.assertEqual(self.forget(t, server, ns, 1000), '')
+                    if mode in ('missing', 'replaced'):
+                        disk.rename(server['home'] / 'saved-disk')
+                        if mode == 'replaced':
+                            disk.mkdir()
+                            (disk / '.other-mount').touch()
+                    elif mode == 'empty':
+                        (disk / '.mounted').unlink()
+                    else:
+                        disk.chmod(0)
+                    try:
+                        self.assertEqual(self.forget(t, server, ns, 1100), '')
+                        self.assertEqual(t.folder(server, 'Project')['id'], 'Project')
+                    finally:
+                        if mode == 'unreadable':
+                            disk.chmod(0o700)
+                    if mode in ('missing', 'replaced'):
+                        if disk.exists():
+                            shutil.rmtree(disk)
+                        (server['home'] / 'saved-disk').rename(disk)
+                    elif mode == 'empty':
+                        (disk / '.mounted').touch()
+                    self.assertEqual(self.forget(t, server, ns, 1101), '')
+                    self.assertEqual(self.forget(t, server, ns, 1130), '')
+                    self.assertEqual(t.folder(server, 'Project')['id'], 'Project')
+                    self.assertIn('регистрация снята', self.forget(t, server, ns, 1131))
+                self.assertTrue((server['home'] / 'saved-project/.stignore').exists())
+
+    def test_short_rename_and_another_restored_project_do_not_reset_other_timers(self):
+        with Stand(1) as t:
+            server = t.sides[0]
+            disk = server['home'] / 'Disk'
+            for name in ('Brief', 'Restored', 'LongGone'):
+                (disk / name).mkdir(parents=True)
+            t.server(server, 'bootstrap')
+            for name in ('Brief', 'Restored', 'LongGone'):
+                (disk / name).rename(server['home'] / name)
+            (disk / '.mounted').touch()
+            with server_helpers(server['home']) as ns:
+                self.forget(t, server, ns, 1000)
+                self.assertEqual(self.forget(t, server, ns, 1029), '')
+                (server['home'] / 'Brief').rename(disk / 'Brief')
+                self.assertEqual(self.forget(t, server, ns, 1029.5), '')
+                # Model an already removed registration returning while another timer is active.
+                t.api(server, 'config/folders/Restored', 'DELETE')
+                state = json.loads(ns['missing_watch'].read_text())
+                state['removed'] = dict(Restored=str(disk / 'Restored'))
+                ns['save_missing'](state)
+                (server['home'] / 'Restored').rename(disk / 'Restored')
+                with mock.patch.object(ns['time'], 'monotonic', return_value=1029.5):
+                    ns['reconcile'](lambda *args: t.api(server, *args), server['deviceId'])
+                self.assertIn('регистрация снята', self.forget(t, server, ns, 1030))
+            self.assertEqual({f['id'] for f in t.api(server, 'config/folders')}, {'Brief', 'Restored'})
+
+    def test_removed_incoming_id_is_not_resurrected_and_can_be_restored_locally(self):
+        with Stand(2) as t:
+            server, computer = t.sides
+            t.register(server, computer)
+            t.register(computer, server)
+            source = t.offer(computer, server, 'incoming-id', 'Upload')
+            wait(lambda: 'incoming-id' in t.api(server, 'cluster/pending/folders'), 'upload offered')
+            t.server(server, 'bootstrap')
+            project = server['home'] / 'Disk/Upload'
+            wait(lambda: (project / 'source.txt').exists(), 'upload received')
+            project.rename(server['home'] / 'saved-upload')
+            (project.parent / '.mounted').touch()
+            with server_helpers(server['home']) as ns:
+                self.forget(t, server, ns, 1000)
+                self.assertIn('регистрация снята', self.forget(t, server, ns, 1030))
+            wait(lambda: 'incoming-id' in t.api(server, 'cluster/pending/folders'), 'old upload offered again')
+            t.server(server, 'bootstrap')
+            self.assertFalse(project.exists())
+            self.assertEqual((source / 'source.txt').read_text(), 'incoming-id')
+            # Remember the removal even across an empty/unavailable root.
+            (project.parent / '.mounted').unlink()
+            t.server(server, 'bootstrap')
+            self.assertFalse(project.exists())
+            (server['home'] / 'saved-upload').rename(project)
+            t.server(server, 'bootstrap')
+            self.assertEqual(t.folder(server, 'incoming-id')['path'], str(project))
+            self.assertFalse((server['state'] / 'missing-folders.json').exists())
+
+    def test_only_exact_top_level_paths_are_removed_and_state_is_defensive(self):
+        with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+            disk = Path(tmp) / 'Disk'
+            disk.mkdir()
+            (disk / '.mounted').touch()
+            paths = [str(disk / 'Gone'), str(disk), str(disk / 'Nested/Gone'),
+                     str(Path(tmp) / 'Outside'), '~/Disk/Relative', str(disk) + '/./Dot',
+                     str(disk) + '/Trailing/', str(disk / '..')]
+            folders = [dict(id=str(i), path=p) for i, p in enumerate(paths)]
+            deletes = []
+            def api(route, method='GET', body=None):
+                folder_id = route.rsplit('/', 1)[1]
+                if method == 'DELETE':
+                    deletes.append(folder_id)
+                    return {}
+                return next(f for f in folders if f['id'] == folder_id)
+            for bad in ('broken JSON', '[]', '{"folders": []}', '{"removed": []}'):
+                with self.subTest(state=bad):
+                    ns['missing_watch'].parent.mkdir(parents=True, exist_ok=True)
+                    ns['missing_watch'].write_text(bad)
+                    ns['forget_missing'](api, folders[:], disk, now=1000)
+                    self.assertEqual(deletes, [])
+            with contextlib.redirect_stderr(io.StringIO()):
+                ns['forget_missing'](api, folders[:], disk, now=1030)
+            self.assertEqual(deletes, ['0'])
+
+    def test_delete_failure_or_lost_response_is_retried_without_accepting_the_client_copy(self):
+        for committed in (False, True):
+            with self.subTest(committed=committed), Stand(1) as t:
+                server = t.sides[0]
+                project = server['home'] / 'Disk/Gone'
+                project.mkdir(parents=True)
+                (project.parent / '.mounted').touch()
+                t.server(server, 'bootstrap')
+                project.rename(server['home'] / 'saved')
+                def failing_api(route, method='GET', body=None):
+                    if method == 'DELETE':
+                        if committed:
+                            t.api(server, route, method, body)
+                        raise urllib.error.URLError('test DELETE response lost')
+                    return t.api(server, route, method, body)
+                with server_helpers(server['home']) as ns:
+                    self.forget(t, server, ns, 1000)
+                    self.assertIn('test DELETE response lost', self.forget(t, server, ns, 1030, failing_api))
+                    self.assertIn('Gone', json.loads(ns['missing_watch'].read_text())['removed'])
+                    self.forget(t, server, ns, 1031)
+                self.assertEqual(t.api(server, 'config/folders'), [])
+                self.assertTrue((server['home'] / 'saved/.stignore').exists())
+
+
 class StaleConnectionTests(unittest.TestCase):
     """Туннель рвётся молча, серверные соединения зависают и не пускают компьютер обратно: bootstrap делает pause/resume."""
     DEVICE = 'AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG-HHHHHHH'
