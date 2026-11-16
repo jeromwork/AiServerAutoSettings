@@ -85,7 +85,7 @@ namespace RemoteAgents.Launcher
                             bool install = external && !command && !(args.Contains("--tray") && args.Contains("--home"));
                             // First setup owns a visible wizard before extraction, selftest or binary downloads.
                             if (install && home.Equals(DefaultHome,StringComparison.OrdinalIgnoreCase) && FirstInstall.Required(home)) {
-                                if(!owned){Forward(name,new[]{"--setup-check"});return 0;}
+                                if(!owned){if(TryForward(name,new[]{"--setup-check"},log)){return 0;}StopInstalled(name,target,home,mutex,log);owned=true;}
                                 firstInstallSource=Exe;
                             }
                             else if (install) {
@@ -96,8 +96,9 @@ namespace RemoteAgents.Launcher
                                     int comparison = File.Exists(target) ? UpgradeInstaller.Compare(Version, bundle, FileVersionInfo.GetVersionInfo(target).FileVersion, engine.Current) : 1;
                                     if (comparison == 0) {
                                         if (args.Contains("--install") || (!args.Contains("--home") && FirstInstall.Required(home))) { firstRun(); return 0; }
-                                        if (!owned) Forward(name, Started(new[] { "--setup-check" }, interactive));
-                                        else launch(target, false);
+                                        if (!owned && TryForward(name, Started(new[] { "--setup-check" }, interactive), log)) return 0;
+                                        if (!owned) { StopInstalled(name, target, home, mutex, log); owned = true; }
+                                        launch(target, false);
                                         return 0;
                                     }
                                     if (comparison < 0 && MessageBox.Show("Запущена более старая версия RemoteAgents. Выполнить откат лаунчера и бандла?", "RemoteAgents — откат", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return 0;
@@ -110,7 +111,11 @@ namespace RemoteAgents.Launcher
                                 } finally { if (File.Exists(zip)) File.Delete(zip); }
                             }
                             if (firstInstallSource==null && (args.Contains("--install") || (!external && args.Length == 0 && FirstInstall.Required(home)))) { firstRun(); return 0; }
-                            if (!owned) { Forward(name, args.Contains("--uninstall") ? new[] { "--exit" } : WindowModel.ForwardArguments(args)); log.Write("ipc.forward.ok"); return 0; }
+                            if (!owned) {
+                                if (TryForward(name, args.Contains("--uninstall") ? new[] { "--exit" } : WindowModel.ForwardArguments(args), log)) { log.Write("ipc.forward.ok"); return 0; }
+                                if (command) throw new IOException("Запущенная копия RemoteAgents не отвечает");
+                                StopInstalled(name, Path.Combine(home, Product.ExeName), home, mutex, log); owned = true;
+                            }
                         } finally { if (installOwned) installer.ReleaseMutex(); }
                     }
                     try {
@@ -121,7 +126,12 @@ namespace RemoteAgents.Launcher
                 }
                 if (restart) StartLauncher(Path.Combine(home, Product.ExeName), home, true);
                 return 0;
-            } catch { if (log != null) log.Write("launcher.fatal"); MessageBox.Show("Действие не выполнено. Проверьте logs\\launcher.log в папке RemoteAgents. Обновление могло быть отклонено самопроверкой или ещё проходить проверку здоровья.", "RemoteAgents"); return 1; }
+            } catch (Exception ex) {
+                string reason = ex.GetType().Name + ": " + (ex.Message ?? "").Replace("\r", " ").Replace("\n", " ");
+                if (reason.Length > 300) reason = reason.Substring(0, 300);
+                if (log != null) log.Write("launcher.fatal " + reason);
+                MessageBox.Show("Действие не выполнено: " + (ex.Message ?? ex.GetType().Name) + "\n\nПодробности — logs\\launcher.log в папке RemoteAgents.", "RemoteAgents"); return 1;
+            }
         }
         static bool WaitMutex(Mutex mutex, int timeout) { try { return mutex.WaitOne(timeout); } catch (AbandonedMutexException) { return true; } }
         internal static void StopInstalled(string name, string target, string home, Mutex mutex, Journal log)
@@ -130,13 +140,18 @@ namespace RemoteAgents.Launcher
             try { var identity = Forward(name, new[] { "--identify" }); if (Path.GetFullPath(Json.Str(identity, "home")).Equals(home, StringComparison.OrdinalIgnoreCase)) pid = Json.Int(identity, "pid", 0); } catch { }
             // Compatibility with the original one-way pipe: identify the installed image, never an arbitrary PID.
             if (pid == 0) foreach (var p in Process.GetProcessesByName(Product.Name)) using (p) { try { if (p.Id != Process.GetCurrentProcess().Id && p.MainModule.FileName.Equals(target, StringComparison.OrdinalIgnoreCase)) { pid = p.Id; break; } } catch { } }
-            try { Forward(name, new[] { "--exit", "--install-stop" }); } catch { log.Write("install.shutdown.ipc.failed"); }
-            // Allow the owned bridge/Disk shutdown budget before last-resort termination.
-            if (WaitMutex(mutex, 60000)) return;
-            if (pid == 0) throw new IOException("Не удалось определить экземпляр");
+            // A hung first-install copy (e.g. the EXE in Downloads) holds the same mutex from another path (16.11.2026):
+            // only our product name, our Windows session; the mutex itself proves it is this home's instance.
+            string image = pid == 0 ? null : target;
+            if (pid == 0) foreach (var p in Process.GetProcessesByName(Product.Name)) using (p) { try { if (p.Id != Process.GetCurrentProcess().Id && p.SessionId == Process.GetCurrentProcess().SessionId) { pid = p.Id; image = p.MainModule.FileName; break; } } catch { } }
+            bool asked = true;
+            try { Forward(name, new[] { "--exit", "--install-stop" }); } catch { asked = false; log.Write("install.shutdown.ipc.failed"); }
+            // Allow the owned bridge/Disk shutdown budget before last-resort termination; a silent instance gets 5 s.
+            if (WaitMutex(mutex, asked ? 60000 : 5000)) return;
+            if (pid == 0) throw new IOException("Не удалось определить зависший экземпляр RemoteAgents");
             using (var process = Process.GetProcessById(pid)) {
                 // Recheck identity immediately before last-resort tree termination (PID reuse).
-                if (!process.MainModule.FileName.Equals(target, StringComparison.OrdinalIgnoreCase)) throw new IOException("Экземпляр изменился");
+                if (!process.MainModule.FileName.Equals(image, StringComparison.OrdinalIgnoreCase)) throw new IOException("Экземпляр изменился");
                 using (var kill = Process.Start(new ProcessStartInfo("taskkill.exe", "/PID " + pid + " /T /F") { UseShellExecute = false, CreateNoWindow = true })) {
                     if (!kill.WaitForExit(10000) || kill.ExitCode != 0) throw new IOException("Не удалось завершить дерево");
                 }
@@ -149,6 +164,9 @@ namespace RemoteAgents.Launcher
         static string[] Started(string[] args, bool interactive) { return interactive && !args.Contains("--started") ? args.Concat(new[] { "--started" }).ToArray() : args; }
         [DllImport("kernel32.dll")] static extern bool AttachConsole(uint processId);
         [DllImport("user32.dll")] static extern bool AllowSetForegroundWindow(uint processId);
+        // A running copy that does not answer within the pipe timeout is treated as hung (16.11.2026).
+        static bool TryForward(string name, string[] args, Journal log)
+        { try { Forward(name, args); return true; } catch (Exception) { log.Write("ipc.forward.failed"); return false; } }
         internal static System.Collections.Generic.Dictionary<string, object> Forward(string name, string[] args)
         {
             // Windows grants foreground activation to the newly launched process. Transfer it to the existing instance.
