@@ -28,6 +28,9 @@ from happier_web_common import ADDON, atomic, resolve_server_url
 
 FIXTURE = Path(__file__).parent / 'fixtures/happier-web'
 PIN = 'RWQ85PZ7FyiukYbL3qv/bKnwgbT68wLVzotapeMFIb8n+c7pBQ7U8W2t'
+# Independent fixture contract: deleting a production guard marker must fail a test.
+LOGIN_CONTRACT = ('./(app)/restore/manual.tsx', 'restore-manual-secret-input', 'restore-manual-submit',
+                  'auth_credentials', '__srv_', 'scopedStorageId', 'normalizeSecretKey', 'authGetToken')
 
 
 def node(script, *args):
@@ -52,9 +55,12 @@ def verify(data, signature, pub=PIN):
     return result.returncode == 0
 
 
-def archive(path, files=None, members=None):
+def archive(path, files=None, members=None, contract=True):
     files = files or {'index.html': b'<html><head></head><body><div id="root"></div><script src="/app-abcdef123456.js"></script></body></html>',
                       'app-abcdef123456.js': b'window.fixture=true;'}
+    files = dict(files)
+    if contract:
+        files['fixture-contract.js'] = b'/* ' + ' '.join(LOGIN_CONTRACT).encode() + b' */'
     with tarfile.open(path, 'w:gz') as tar:
         for name, data in files.items():
             entry = tarfile.TarInfo('ui/' + name); entry.size = len(data)
@@ -63,10 +69,10 @@ def archive(path, files=None, members=None):
             tar.addfile(entry, io.BytesIO(b'') if entry.isfile() else None)
 
 
-def fixture(directory, version='1.0.0', files=None):
+def fixture(directory, version='1.0.0', files=None, contract=True):
     directory.mkdir(parents=True, exist_ok=True)
     a = directory / ('happier-ui-web-v' + version + '-web-any.tar.gz')
-    archive(a, files)
+    archive(a, files, contract=contract)
     checks = directory / ('checksums-happier-ui-web-v' + version + '.txt')
     checks.write_text(hashlib.sha256(a.read_bytes()).hexdigest() + '  ' + a.name + '\n')
     signed = sign(checks.read_bytes())
@@ -90,8 +96,8 @@ class Temp(unittest.TestCase):
         self.base = self.root / 'state'
         self.base.mkdir()
 
-    def install(self, version='1.0.0', files=None, keep=2):
-        a, c, s, pub = fixture(self.root / version, version, files)
+    def install(self, version='1.0.0', files=None, keep=2, contract=True):
+        a, c, s, pub = fixture(self.root / version, version, files, contract=contract)
         def verifier(checks, signature):
             if not verify(Path(checks).read_bytes(), Path(signature).read_text(), pub):
                 raise ValueError('signature rejected')
@@ -100,6 +106,18 @@ class Temp(unittest.TestCase):
 
 
 class ReleaseTests(Temp):
+    def test_login_contract_rejects_update_and_preserves_current(self):
+        self.install()
+        old = (self.base / 'current').readlink()
+        for marker in LOGIN_CONTRACT:
+            with self.subTest(marker=marker):
+                files = {'index.html': b'<html><head></head><script src="/upstream.js"></script></html>',
+                         'upstream.js': ' '.join(m for m in LOGIN_CONTRACT if m != marker).encode()}
+                with self.assertRaisesRegex(ValueError, 'auto-login contract missing'):
+                    self.install('2.0.0', files=files, contract=False)
+                self.assertEqual((self.base / 'current').readlink(), old)
+                self.assertFalse((self.base / 'releases/ui-web-v2.0.0').exists())
+
     def test_official_pinned_signature_and_crlf(self):
         c = FIXTURE / 'checksums-happier-ui-web-v0.2.21.txt'
         s = Path(str(c) + '.minisig')

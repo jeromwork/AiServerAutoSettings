@@ -72,7 +72,7 @@ namespace RemoteAgents.Launcher
                 try {
                     RefreshHappierAccount();
                     string url = await HappierWebResolver.ResolveAsync(new Configuration(home).Data,
-                        new Dictionary<string, object> { { "webappUrl", happierModel.WebUrl } });
+                        new Dictionary<string, object> { { "webappUrl", happierModel.WebUrl } }, home);
                     if (IsDisposed || Disposing) return;
                     if (url.Length == 0) { HappierActionFailed("Happier недоступен: проверьте канал или задайте webappUrl в конфиге."); return; }
                     Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });

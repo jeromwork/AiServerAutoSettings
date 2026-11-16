@@ -12,10 +12,11 @@ namespace RemoteAgents.Launcher
     internal static class HappierWebTests
     {
         static int count;
+        static readonly string TestKey = HappierKey.Format(new byte[32]);
         static void Check(bool ok, string text) { if (!ok) throw new Exception("Happier web: " + text); count++; }
         static Dictionary<string, object> Config(int port)
         { return ConfigBundle.D("happier", ConfigBundle.D("webappUrl", "https://cloud.example.invalid/", "localWeb", ConfigBundle.D("enabled", true, "port", port, "serverPort", 47832))); }
-        static async Task Reply(string body, bool healthy, string status = "200 OK", bool stallBody = false, bool localOnly = false)
+        static async Task Reply(string body, bool healthy, string status = "200 OK", bool stallBody = false, bool localOnly = false, string key = null, string expectedKey = null)
         {
             var listener = new TcpListener(IPAddress.Loopback, 0); listener.Start();
             int port = ((IPEndPoint)listener.LocalEndpoint).Port;
@@ -37,16 +38,19 @@ namespace RemoteAgents.Launcher
                     await stream.WriteAsync(bytes, 0, bytes.Length);
                 }
             });
+            string home = Path.Combine(Path.GetTempPath(), "ra-happier-url-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(home, "secrets"));
+            if (key != null) File.WriteAllText(Path.Combine(home, "secrets", "happier-account.key"), key);
             try {
                 var watch = Stopwatch.StartNew();
-                Task<string> task = TrayMenuModel.HappierUrl(config, ConfigBundle.D());
+                Task<string> task = TrayMenuModel.HappierUrl(config, ConfigBundle.D(), home);
                 Check(watch.ElapsedMilliseconds < 500, "resolver returns without blocking caller");
                 string result = await task;
-                Check(result == (healthy ? "http://127.0.0.1:" + port + "/" : "https://cloud.example.invalid/"), "health selects expected browser URL");
+                Check(result == (healthy ? "http://127.0.0.1:" + port + "/" + (expectedKey != null ? "#ra-login=" + expectedKey : "") : "https://cloud.example.invalid/"), "health selects expected browser URL");
                 if (stallBody) Check(watch.ElapsedMilliseconds < 2500, "body timeout is bounded");
                 Check(Json.Encode(config) == before, "navigation never replaces configured/account origins");
                 await server;
-            } finally { listener.Stop(); }
+            } finally { listener.Stop(); Directory.Delete(home, true); }
         }
         static async Task Tests()
         {
@@ -73,6 +77,19 @@ namespace RemoteAgents.Launcher
             await Reply("{\"ok\":true}", false, "302 Found");
             await Reply("{\"ok\":true}", false, "500 Server Error");
             await Reply("{\"ok\":true}", false, stallBody: true);
+            await Reply("{\"ok\":true}", true, key: TestKey + "\r\n", expectedKey: TestKey);
+            byte[] bytes = new byte[32]; for (int i = 0; i < bytes.Length; i++) bytes[i] = 255;
+            string otherKey = HappierKey.Format(bytes);
+            await Reply("{\"ok\":true}", true, key: otherKey, expectedKey: otherKey);
+            foreach (string bad in new[] { "", "invalid", new string('A', 257), TestKey.Replace("A", "0"), TestKey + "A", TestKey.Substring(0, TestKey.Length - 1) + "B", TestKey + "#evil" })
+                await Reply("{\"ok\":true}", true, key: bad);
+            await Reply("{\"ok\":false}", false, key: TestKey);
+            string home = Path.Combine(Path.GetTempPath(), "ra-happier-cloud-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(home, "secrets"));
+            try {
+                File.WriteAllText(Path.Combine(home, "secrets", "happier-account.key"), TestKey);
+                Check(await HappierWebResolver.ResolveAsync(empty, cloud, home) == "https://account.example.invalid/", "cloud never receives secret even if file exists");
+            } finally { Directory.Delete(home, true); }
         }
         internal static void Run() { Tests().GetAwaiter().GetResult(); Console.WriteLine("OK: " + count + " Happier browser resolver checks (real loopback HTTP)"); }
     }

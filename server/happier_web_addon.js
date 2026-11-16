@@ -2,6 +2,80 @@
 (() => {
     'use strict';
     window.__HAPPIER_WEB_RUNTIME_CONFIG__ = {serverUrl: __REMOTEAGENTS_SERVER_URL__};
+    // One-use handoff. Scrub the URL before any vendor code (or resource) can see it.
+    // The UI itself owns authentication, key normalization and credential storage.
+    const loginSlot = 'remoteagents.happier-login';
+    let restoring = false;
+    const keyFormat = /^(?:[A-Z2-7]{5}-){10}[A-Z2-7][AQ]$/;
+    function hasLogin() {
+        // TokenStorage uses scopedStorageId(`${base}__srv_${serverId}`, null),
+        // with legacy auth_credentials. Preserve ANY saved account, even another server.
+        for (let i = 0; i < localStorage.length; i++) {
+            const name = localStorage.key(i);
+            if (name !== 'auth_credentials' && !name?.startsWith('auth_credentials__srv_')) continue;
+            try {
+                const value = JSON.parse(localStorage.getItem(name));
+                if (typeof value?.token === 'string' && value.token.trim()) return true;
+            } catch { /* A corrupt entry is not a login. */ }
+        }
+        return false;
+    }
+    function autoLogin(event) {
+        try {
+            if (location.hash.startsWith('#ra-login=')) {
+                event?.stopImmediatePropagation(); // Do not route a handoff as an Expo hash link.
+                const key = location.hash.slice('#ra-login='.length);
+                history.replaceState(history.state, '', location.pathname + location.search);
+                sessionStorage.removeItem(loginSlot);
+                if (keyFormat.test(key)) sessionStorage.setItem(loginSlot, JSON.stringify({key, at: Date.now()}));
+            }
+            const raw = sessionStorage.getItem(loginSlot);
+            if (!raw) return;
+            // Consume before parsing, navigation retry or any asynchronous work.
+            sessionStorage.removeItem(loginSlot);
+            const pending = JSON.parse(raw);
+            if (!keyFormat.test(pending.key) || !Number.isFinite(pending.at) ||
+                Date.now() - pending.at > 30000 || hasLogin() || restoring) return;
+            restoring = true;
+            if (location.pathname !== '/restore/manual') {
+                if (pending.navigated) return;
+                sessionStorage.setItem(loginSlot, JSON.stringify({...pending, navigated: true}));
+                location.replace('/restore/manual' + location.search);
+                return;
+            }
+            let secret = pending.key;
+            pending.key = '';
+            const deadline = Date.now() + 20000;
+            const timer = setInterval(() => {
+                try {
+                    if (hasLogin() || Date.now() > deadline) { clearInterval(timer); secret = ''; return; }
+                    const input = document.querySelector('input[data-testid="restore-manual-secret-input"]');
+                    const submit = document.querySelector('[data-testid="restore-manual-submit"]');
+                    if (!input || !submit || submit.getAttribute('aria-disabled') === 'true' || submit.disabled) return;
+                    clearInterval(timer);
+                    // Bypass React's value tracker, then deliver its normal input event.
+                    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                    setValue.call(input, secret);
+                    secret = '';
+                    input.dispatchEvent(new Event('input', {bubbles: true}));
+                    // Allow the controlled field's state/submit closure to commit first.
+                    setTimeout(() => {
+                        try { if (!hasLogin() && input.isConnected && submit.isConnected) submit.click(); }
+                        catch { /* Incompatible UI: leave its ordinary screen. */ }
+                        finally {
+                            setValue.call(input, '');
+                            input.dispatchEvent(new Event('input', {bubbles: true}));
+                        }
+                    }, 0);
+                } catch { clearInterval(timer); secret = ''; }
+            }, 100);
+        } catch {
+            // Storage denied, incompatible UI or malformed handoff: ordinary Happier.
+            try { sessionStorage.removeItem(loginSlot); } catch { /* no storage */ }
+        }
+    }
+    window.addEventListener('hashchange', autoLogin, true);
+    autoLogin();
     const KEY = 'HAPPIER_SYNC_TUNING_JSON';
     let current = {};
     try {

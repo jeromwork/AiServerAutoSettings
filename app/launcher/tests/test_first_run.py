@@ -125,7 +125,7 @@ class FirstRunTests(unittest.TestCase):
         self.assertIn('else if (id == "disk") OpenDisk()', menu)
         for gone in ('"folders"', '"progress"', 'ShowDiskProgress'):
             self.assertNotIn(gone, tray)
-        self.assertIn('TrayMenuModel.HappierUrl(config.Data, AccountState())', tray.split('void OpenHappier()', 1)[1].split('void RefreshMenu()', 1)[0])
+        self.assertIn('TrayMenuModel.HappierUrl(config.Data, AccountState(), home)', tray.split('void OpenHappier()', 1)[1].split('void RefreshMenu()', 1)[0])
         self.assertIn('UseShellExecute = true', tray.split('void OpenHappier()', 1)[1].split('void RefreshMenu()', 1)[0])
         self.assertIn('else if (id == "exit") RequestExit()', menu)
         main = source('ConfigWindow.Main.cs')

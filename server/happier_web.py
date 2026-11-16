@@ -15,7 +15,7 @@ from urllib.parse import unquote, urlsplit
 # -I deliberately removes the script directory; this directory is root-owned in production.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from happier_web_common import ADDON, BASE, read_json, settings, resolve_server_url
-from happier_web_release import release_path
+from happier_web_release import release_path, LoginContractError
 
 MIME = {'.js':'text/javascript', '.mjs':'text/javascript', '.wasm':'application/wasm', '.json':'application/json',
         '.css':'text/css', '.svg':'image/svg+xml', '.woff':'font/woff', '.woff2':'font/woff2',
@@ -177,5 +177,7 @@ def main():
 if __name__ == '__main__':
     try:
         main()
+    except LoginContractError as error:
+        raise SystemExit('Happier Web: ' + str(error))
     except Exception:
         raise SystemExit('Happier Web: operation failed; private details hidden')
