@@ -10,6 +10,9 @@ function Get-TransportHome([string]$Path){
     $full
 }
 function Convert-TransportLF([string]$Text) {$Text.Replace("`r",'').TrimStart([char]0xFEFF)}
+# stdin of child processes uses the OEM code page (cp866 on Russian Windows), servers read UTF-8:
+# send JSON with every non-ASCII character as \uXXXX so names like a Cyrillic user name survive (16.11.2026).
+function ConvertTo-AsciiJson([string]$Json) {$b=New-Object Text.StringBuilder;foreach($c in $Json.ToCharArray()){if([int]$c -gt 126){[void]$b.Append('\u').Append(([int]$c).ToString('x4'))}else{[void]$b.Append($c)}};$b.ToString()}
 function Read-TransportJson([string]$Path) {
     # Держим открытый снимок до конца чтения: атомарная замена оставляет его целым.
     for($attempt=0;;$attempt++){

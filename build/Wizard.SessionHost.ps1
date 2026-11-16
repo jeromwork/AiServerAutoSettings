@@ -22,7 +22,7 @@ param([string]$Root,[string]$Directory,[string]$ProfileFile,[string]$RouteFile)
                     $row=Read-TransportJson $file.FullName
                     if($row.id -cnotmatch '\A[a-f0-9]{32}\z' -or $row.timeout -lt 1 -or $row.timeout -gt 2100){Remove-Item $file.FullName -Force;continue}
                     $active[$row.id]=[DateTime]::UtcNow
-                    $ssh.StandardInput.WriteLine((ConvertTo-Json $row -Compress));$ssh.StandardInput.Flush()
+                    $ssh.StandardInput.WriteLine((ConvertTo-AsciiJson (ConvertTo-Json $row -Compress)));$ssh.StandardInput.Flush()
                     Remove-Item -LiteralPath $file.FullName -Force;$last=[DateTime]::UtcNow
                 }
                 if($line.IsCompleted){

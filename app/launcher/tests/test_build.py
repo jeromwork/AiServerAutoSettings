@@ -124,6 +124,23 @@ class PackagingTests(unittest.TestCase):
         self.assertGreater(len(names), 10)
         self.assertEqual([n for n in names if 'server/' + n not in listed], [])
 
+    def test_json_to_child_stdin_is_ascii(self):
+        # Child stdin uses the OEM code page on Windows (cp866), servers read UTF-8: a Cyrillic profile path
+        # (C:\\Users\\джером) broke the bridge session (16.11.2026). JSON written to stdin must be \\uXXXX-escaped.
+        import re
+        bad = []
+        for path in [ROOT / 'Start-CodexWindowsBridge.ps1'] + sorted((ROOT / 'build').glob('Wizard*.ps1')):
+            for n, line in enumerate(path.read_text(encoding='utf-8-sig').splitlines(), 1):
+                for call in re.findall(r'StandardInput\.WriteLine\((.*)', line):
+                    if ('ConvertTo-Json' in call or 'Config' in call) and 'ConvertTo-AsciiJson' not in call:
+                        bad.append(f'{path.name}:{n}')
+        self.assertEqual(bad, [])
+        helper = (ROOT / 'transport/Transport.Common.ps1').read_text(encoding='utf-8-sig')
+        self.assertIn('function ConvertTo-AsciiJson', helper)
+        self.assertIn('function ConvertTo-AsciiJson', (ROOT / 'Start-CodexWindowsBridge.ps1').read_text(encoding='utf-8-sig'))
+        # The server side accepts the escaped form unchanged.
+        self.assertEqual(json.loads(b'{"w":"C:\\\\Users\\\\\\u0434\\u0436\\u0435\\u0440\\u043e\\u043c"}')['w'], 'C:\\Users\\джером')
+
     def test_ignore_template_upload_preserves_user_rules_without_history(self):
         pwsh = os.environ.get('PWSH', str(Path.home() / '.cache/pwsh-test/pwsh'))
         quote = lambda p: "'" + str(p).replace("'", "''") + "'"
