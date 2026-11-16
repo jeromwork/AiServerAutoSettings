@@ -16,6 +16,7 @@ pwsh=${PWSH:-$HOME/.cache/pwsh-test/pwsh}
 # server group (it builds the same projects); independent offline checks overlap
 # SSH wait times. Every child is bounded; the outer caller may set a total limit.
 (
+  timeout 60 python3 "$here/test_run_modes.py"
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-first-install.ps1" -TestHome "$testdir/wizard" < /dev/null
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-accept.ps1" -TestHome "$testdir/disk-accept" < /dev/null
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-cleanup.ps1" -TestHome "$testdir/disk-cleanup" < /dev/null
@@ -66,13 +67,20 @@ pwsh=${PWSH:-$HOME/.cache/pwsh-test/pwsh}
   timeout 120 python3 "$here/test_server_operations.py"
 ) > "$testdir/offline.log" 2>&1 &
 offline_pid=$!
+# Opt-in for small shared hosts: retain each group's errexit behavior, but do not overlap them.
+failed=0
+server_pid=''
+trap 'kill "$offline_pid" ${server_pid:+"$server_pid"} 2>/dev/null || true; cleanup' EXIT
+if [[ ${LAUNCHER_TESTS_SERIAL:-0} == 1 ]]; then
+  wait "$offline_pid" || failed=1
+fi
 (
   bash "$repo/server/tests/run.sh"
 ) > "$testdir/server.log" 2>&1 &
 server_pid=$!
-trap 'kill "$offline_pid" "$server_pid" 2>/dev/null || true; cleanup' EXIT
-failed=0
-wait "$offline_pid" || failed=1
+if [[ ${LAUNCHER_TESTS_SERIAL:-0} != 1 ]]; then
+  wait "$offline_pid" || failed=1
+fi
 cat "$testdir/offline.log"
 wait "$server_pid" || failed=1
 cat "$testdir/server.log"
