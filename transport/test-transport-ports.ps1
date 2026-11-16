@@ -104,6 +104,28 @@ try{
     $transport|Add-Member -Force apiPort 2222;Write-TransportJson $configFile @{transport=$transport}
     $settings=Resolve-TransportPorts $root $settings 3 3
     Assert ($settings.Options.apiPort -eq 2232) 'API не пересекается с выбранным SSH-входом'
+    # Happier's origin is allocated first and never moved, even if ordinary inputs prefer it.
+    $web=Get-TransportLocalWeb ([pscustomobject]@{profile=[pscustomobject]@{happier=[pscustomobject]@{localWeb=[pscustomobject]@{enabled=$true;port=2222;serverPort=47832}}}})
+    $settings|Add-Member -Force LocalWeb $web
+    $transport.PSObject.Properties.Remove('apiPort')
+    $settings=Resolve-TransportPorts $root $settings 3 3
+    Assert ($web.port -eq 2222 -and $web.available -and $settings.Options.sshPort -eq 2232) 'Happier reserves fixed port before SSH allocation'
+    foreach($key in @('syncPort','channelSocksPort','apiPort','probePortBase','socksPortBase')){
+        $transport|Add-Member -Force $key 2222
+        $settings=Resolve-TransportPorts $root $settings 3 3
+        Assert ($web.port -eq 2222 -and $web.available -and $settings.Options[$key] -ne 2222) ('Happier reserved before '+$key)
+        $transport.PSObject.Properties.Remove($key)
+    }
+    $webListener=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,2222);$webListener.ExclusiveAddressUse=$true;$webListener.Start();[void]$held.Add($webListener)
+    $script:fixtureSnapshot.listeners=@([pscustomobject]@{address='127.0.0.1';port=2222;pid=42})
+    $settings=Resolve-TransportPorts $root $settings 3 3
+    Assert ($web.port -eq 2222 -and -not $web.available -and $settings.Options.sshPort -eq 2232) 'occupied fixed origin is disabled without stopping channel or changing port'
+    Assert ($web.conflict.pid -eq 42 -and $web.conflict.message.Contains('C:\Other\app.exe') -and $web.conflict.message.Contains('Happier') -and $web.conflict.message.Contains('фиксированный')) 'Happier conflict identifies process and recovery action'
+    Assert (([IO.File]::ReadAllText((Join-Path $root 'logs/transport.log'))).Contains('Вход Happier не запущен')) 'fixed-port conflict reaches journal'
+    $webListener.Stop();$held.Clear();$script:fixtureSnapshot.listeners=@()
+    $settings=Resolve-TransportPorts $root $settings 3 3
+    Assert ($web.available -and $web.port -eq 2222 -and $null -eq $web.conflict) 'freed origin recovers at same configured port'
+    $settings.PSObject.Properties.Remove('LocalWeb')
     # Исчерпан детерминированный поиск: ОС выбирает начало целого блока.
     $script:fixtureSnapshot.listeners=@(0..199|ForEach-Object {[pscustomobject]@{address='127.0.0.1';port=(40000+$_*100);pid=0}})
     $selected=@{};$base=Select-TransportPortBlock 40000 3 100 $script:fixtureSnapshot $selected
