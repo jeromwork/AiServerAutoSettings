@@ -147,6 +147,7 @@ def main():
             pasted = json.loads(issued)
             local_web = dict(enabled=True, port=free_port(), serverPort=free_port())
             pasted.setdefault('happier', {})['localWeb'] = local_web
+            cloud_web_url = pasted['happier'].setdefault('webappUrl', 'https://web.example.invalid')
             (d / 'issued.json').write_text(json.dumps(pasted, ensure_ascii=False, indent=2).replace('\n', '\r\n'))
             assert 'ra-config:' in authorized.read_text()
 
@@ -183,7 +184,7 @@ def main():
             web_input = [i for i in generated['inbounds'] if i['tag'] == 'happier-web']
             assert len(web_input) == 1 and web_input[0]['listen'] == '127.0.0.1' and web_input[0]['listen_port'] == local_web['port'] \
                 and web_input[0]['override_address'] == '127.0.0.1' and web_input[0]['override_port'] == local_web['serverPort'], 'fixed localWeb reaches real Connection daemon'
-            assert config['profile']['happier']['webappUrl'].startswith('https://'), 'cloud account origin preserved'
+            assert config['profile']['happier']['webappUrl'] == cloud_web_url, 'cloud account origin preserved exactly'
             manifest = json.loads((root / 'secrets/materialized.json').read_text())
             assert profile['keyPath'] == manifest['serverKeyFile'], 'the issued key, not another one, is used'
             assert not list((root / 'ssh-profiles').rglob('id_ed25519')), 'no extra device key was generated'
