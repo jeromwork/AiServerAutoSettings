@@ -42,11 +42,8 @@
 (?i).vscode
 (?i)android-sdk
 (?i)*.log
-(?i)*.sqlite
-(?i)*.sqlite3
-(?i)*.db
-(?i)*.db-wal
-(?i)*.db-shm
+(?i)*.sqlite*
+(?i)*.db*
 (?i)*.dump
 (?i)*.bak
 // Laravel: загруженные файлы и кэш в storage проекта не передаём
@@ -54,3 +51,17 @@
 (?i)/storage/framework
 // Оформление Проводника принадлежит этому компьютеру; вложенные desktop.ini не трогаем
 (?i)/desktop.ini
+// Дополнительные обязательные имена: ключи, окружения Python и локальные дампы
+(?i)*.pem
+(?i)*.crt
+(?i)*.crt?
+(?i)token*.json
+(?i).venv
+(?i)venv
+(?i)__pycache__
+(?i)*.sql
+(?i)*.sql.gz
+(?i)*.sql.bz2
+(?i)*.sql.xz
+(?i)*.sql.zst
+(?i)*.sql.zip

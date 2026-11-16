@@ -11,7 +11,7 @@
 
 Новый Upload использует `rd-upload-v1-<32 lowercase hex>`, label равен имени без изменений.
 Сервер принимает его только от знакомого устройства, при свободном имени и доступном непустом
-корне. Сначала создаёт git с единственным пустым начальным коммитом, затем регистрацию.
+корне. Сначала создаёт git с единственным пустым начальным коммитом через отдельный индекс, затем регистрацию. Ранее staged данные при повторе не коммитятся и не теряются.
 Origin не придумывает. Legacy/ручные ID отвергаются; `(2)` и неявного merge нет.
 Клиентский генератор этого ID и сообщения об отказах относятся к следующему этапу:
 старые клиенты после этого серверного обновления больше не создают проекты через Upload.
@@ -36,7 +36,7 @@ staggered 30 дней (`maxAge=2592000`, cleanInterval=3600). Пользоват
 Программа не коммитит последующие правки. Версии Syncthing не заменяют git.
 
 `~/.local/share/remote-disk/missing-folders.json` — долговечное состояние: опубликованные ID/пути,
-наблюдения отсутствия, вечные tombstones `removed`, миграция guard. Его нельзя удалять,
+наблюдения отсутствия, вечные tombstones `removed`, миграция guard. Перед DELETE синхронизируются и файл состояния, и его каталог. Его нельзя удалять,
 восстанавливать старой копией или чистить «для лечения». Повреждение этого файла блокирует
 изменения папок; восстановить его следует из проверенного состояния с сохранением всех tombstones.
 Первый запуск знает только текущий config и импорт guard, а не всю прошлую историю.
@@ -99,14 +99,17 @@ state="$HOME/.local/share/remote-disk"
 backup="$state/deploy-backup-$(date -u +%Y%m%dT%H%M%SZ)"
 systemctl --user disable --now remote-disk-folders.timer
 mkdir -m 700 "$backup"
-crontab -l > "$backup/crontab" 2>/dev/null || true
-python3 - "$backup/crontab" <<'PY' | crontab -
+python3 - "$backup/crontab" <<'PYCRON'
 from pathlib import Path
-import sys
-for line in Path(sys.argv[1]).read_text().splitlines():
-    if 'remote-disk/server-disk.sh' not in line:
-        print(line)
-PY
+import subprocess, sys
+old=subprocess.run(['crontab','-l'],capture_output=True)
+if old.returncode not in (0,1):
+    raise SystemExit('Не удалось прочитать crontab; выкладку остановить')
+Path(sys.argv[1]).write_bytes(old.stdout)
+ours=b'* * * * * bash "$HOME/.local/share/remote-disk/server-disk.sh" bootstrap >/dev/null 2>&1'
+new=b''.join(line for line in old.stdout.splitlines(keepends=True) if line.rstrip(b'\r\n')!=ours)
+subprocess.run(['crontab','-'],input=new,check=True)
+PYCRON
 flock "$state/bootstrap.lock" bash -s -- "$state" "$backup" <<'SH'
 set -euo pipefail
 state=$1; backup=$2
