@@ -114,6 +114,16 @@ class PackagingTests(unittest.TestCase):
         for name in runtime + [p.relative_to(ROOT).as_posix() for p in (ROOT / 'build').glob('Wizard*.ps1')]:
             self.assertIn(name, names)
 
+    def test_bundle_has_every_server_apply_upload(self):
+        # Wizard.ServerApply.ps1 uploads these files from the bundle; a missing one fails «Сервер» on the PC (16.11.2026).
+        import re
+        text = (ROOT / 'build/Wizard.ServerApply.ps1').read_text(encoding='utf-8-sig')
+        names = re.findall(r"'([A-Za-z0-9_.-]+)'", re.search(r"\$names=@\(([^)]*)\)", text).group(1))
+        with zipfile.ZipFile(self.zip) as z:
+            listed = set(z.namelist())
+        self.assertGreater(len(names), 10)
+        self.assertEqual([n for n in names if 'server/' + n not in listed], [])
+
     def test_ignore_template_upload_preserves_user_rules_without_history(self):
         pwsh = os.environ.get('PWSH', str(Path.home() / '.cache/pwsh-test/pwsh'))
         quote = lambda p: "'" + str(p).replace("'", "''") + "'"
