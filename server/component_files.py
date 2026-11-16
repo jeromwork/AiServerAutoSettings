@@ -127,7 +127,7 @@ def main():
         assets = {'.local/share/remote-disk/server-disk.sh', '.local/share/remote-disk/stignore.txt',
                   '.local/share/codex-remote/codex-windows-bridge.py', '.local/share/codex-remote/codex-bridge-session.py',
                   '.local/share/codex-remote/server_node_catalog.py', '.local/share/codex-remote/server-agent-handoff.py', '.local/bin/claude',
-                  '.config/remoteagents/claude.env'}
+                  '.config/remoteagents/claude.env', '.config/remoteagents/happier-web.json'}
         for name, value in files.items():
             if action != 'identity' and name not in assets and not re.fullmatch(r'\.config/systemd/user/(?:remoteagents-[a-z0-9.-]+|remote-disk-folders\.(?:timer|service)|tg-gateway\.service)(?:\.d/[a-z0-9.-]+\.conf)?', name):
                 raise ValueError('invalid asset path')

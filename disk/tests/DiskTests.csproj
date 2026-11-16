@@ -14,6 +14,7 @@
     <Compile Include="../../app/launcher/Disk*.cs" />
     <Compile Include="../../app/launcher/Data.cs" />
     <Compile Include="../../app/launcher/TrayMenuModel.cs" />
+    <Compile Include="../../app/launcher/HappierWebResolver.cs" />
     <Compile Include="../../app/launcher/StatusView.cs" />
     <EmbeddedResource Include="../../transport/product-features.json" LogicalName="RemoteAgents.ProductFeatures.json" />
     <EmbeddedResource Include="../../app/launcher/app.ico" LogicalName="RemoteAgents.App.ico" />

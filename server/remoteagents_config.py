@@ -897,6 +897,10 @@ def export(c, args, out=sys.stdout, err=sys.stderr):
     if vpn:
         config['vpn'] = vpn
     happier = {key: value for key, value in (c.get('happier') or {}).items() if key in ('serverUrl', 'webappUrl')}
+    web = deployment.get('serverComponents', {}).get('happierWeb')
+    if web is not None:
+        local = (c.get('happier') or {}).get('localWeb') or {}
+        happier['localWeb'] = dict(enabled=web.get('enabled', False), port=local.get('port', web.get('port', 47831)), serverPort=web.get('port', 47831))
     if same:
         happier['mode'] = 'same'
         if (c.get('happier') or {}).get('account'):

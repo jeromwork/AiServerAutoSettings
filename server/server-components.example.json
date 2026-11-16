@@ -20,6 +20,18 @@
       "enabled": true,
       "channel": "stable",
       "version": "0.2.17"
+    },
+    "happierWeb": {
+      "enabled": true,
+      "port": 47831,
+      "updateIntervalHours": 6,
+      "keepReleases": 2,
+      "keepChats": 8,
+      "quotas": {
+        "enabled": true,
+        "claudeProbe": true,
+        "claudeProbeSec": 600
+      }
     }
   },
   "agents": {

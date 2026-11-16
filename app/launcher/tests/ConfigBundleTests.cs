@@ -33,6 +33,50 @@ namespace RemoteAgents.Launcher
             foreach (string text in new[]{"", "[]", "null", "{\"kind\":\"remoteagents-config\",\"schema\":1,}", "{\"kind\":\"remoteagents-config\",\"schema\":1,\"schema\":1}", "{\"kind\":\"remoteagents-config\",\"schema\":1} trailing", "{'kind':'remoteagents-config','schema':1}"}) Reject(() => ConfigBundle.Parse(text), "invalid JSON");
             var newlineHost = Example(); Json.Map(newlineHost["server"])["address"] = "server.example.invalid\n";
             Reject(() => ConfigBundle.Parse(Json.Encode(newlineHost)),"trailing newline cannot bypass anchored schema pattern");
+            var localWeb = Example();
+            localWeb["happier"] = ConfigBundle.D("localWeb", ConfigBundle.D("enabled", true, "port", 1024, "serverPort", 65535));
+            Check(Json.Bool(Json.Map(Json.Map(ConfigBundle.Parse(Json.Encode(localWeb).Insert(1, "\r\n")).Profile["happier"])["localWeb"]), "enabled"), "localWeb ports at boundaries accepted");
+            Json.Map(Json.Map(localWeb["happier"])["localWeb"])["enabled"] = false;
+            Check(!Json.Bool(Json.Map(Json.Map(ConfigBundle.Parse(Json.Encode(localWeb)).Profile["happier"])["localWeb"]), "enabled"), "localWeb explicit opt-out accepted");
+            foreach (var patch in new[] {
+                ConfigBundle.D("enabled", "true", "port", 47831, "serverPort", 47831),
+                ConfigBundle.D("enabled", true, "port", 1023, "serverPort", 47831),
+                ConfigBundle.D("enabled", true, "port", 65536, "serverPort", 47831),
+                ConfigBundle.D("enabled", true, "port", 47831, "serverPort", 1023),
+                ConfigBundle.D("enabled", true, "port", 47831, "serverPort", 65536),
+                ConfigBundle.D("enabled", true, "port", 47831.5, "serverPort", 47831),
+                ConfigBundle.D("enabled", true, "port", "47831", "serverPort", 47831),
+                ConfigBundle.D("enabled", true, "port", 47831),
+                ConfigBundle.D("enabled", true, "port", 47831, "serverPort", 47831, "unknown", true) }) {
+                localWeb["happier"] = ConfigBundle.D("localWeb", patch);
+                Reject(() => ConfigBundle.Parse(Json.Encode(localWeb)), "invalid localWeb rejected");
+            }
+            localWeb["happier"] = ConfigBundle.D("localWeb", null);
+            Reject(() => ConfigBundle.Parse(Json.Encode(localWeb)), "explicit null localWeb is not an absent field");
+            Check(!Json.Map(Json.Get(ConfigBundle.Parse(Json.Encode(Example())).Profile, "happier")).ContainsKey("localWeb"), "old paste does not enable local web");
+            var webServer = ConfigBundle.D("kind", "remoteagents-config", "schema", 1,
+                "happier", ConfigBundle.D("localWeb", ConfigBundle.D("enabled", true, "port", 47831, "serverPort", 47832)),
+                "serverComponents", ConfigBundle.D("happierWeb", ConfigBundle.D("enabled", true, "port", 47832,
+                    "updateIntervalHours", 6, "keepReleases", 2, "keepChats", 8, "quotas", ConfigBundle.D("enabled", true, "claudeProbe", true, "claudeProbeSec", 600))));
+            Check(ConfigBundle.Parse(Json.Encode(webServer)).Profile.ContainsKey("serverComponents"), "documented single export accepts both server component and computer localWeb");
+            var webComponent = Json.Map(Json.Map(webServer["serverComponents"])["happierWeb"]);
+            foreach (string url in new[] { "https://api.example.invalid", "http://127.0.0.1:3005/" }) {
+                webComponent["serverUrl"] = url;
+                Check(ConfigBundle.Parse(Json.Encode(webServer)).Profile.ContainsKey("serverComponents"), "server export accepts configured Happier HTTP(S) origin");
+            }
+            foreach (string url in new[] { "https://user:pass@example.invalid", "https://api.example.invalid/path", "https://api.example.invalid/?q=1", "file:///tmp/page" }) {
+                webComponent["serverUrl"] = url;
+                Reject(() => ConfigBundle.Parse(Json.Encode(webServer)), "invalid server Happier origin rejected");
+            }
+            webComponent.Remove("serverUrl");
+            foreach (var invalid in new[] { ConfigBundle.D("keepReleases", 1), ConfigBundle.D("keepChats", 101), ConfigBundle.D("updateIntervalHours", 169), ConfigBundle.D("quotas", ConfigBundle.D("claudeProbeSec", 59)) }) {
+                var changed = Json.Map(Json.Parse(Json.Encode(webServer)));
+                var component = Json.Map(Json.Map(changed["serverComponents"])["happierWeb"]);
+                foreach (var pair in invalid) component[pair.Key] = pair.Value;
+                Reject(() => ConfigBundle.Parse(Json.Encode(changed)), "client matches server component ranges");
+            }
+            Json.Map(Json.Map(webServer["serverComponents"])["happierWeb"])["unexpected"] = true;
+            Reject(() => ConfigBundle.Parse(Json.Encode(webServer)), "unknown Happier web server setting refused by client schema");
             // happier.account: the public 64-hex id from the exporter (accounts/server-account.mjs list), nothing else.
             var pinned = Example(); pinned["happier"] = ConfigBundle.D("mode", "same", "account", new string('a', 64));
             Check(Json.Str(Json.Map(ConfigBundle.Parse(Json.Encode(pinned)).Profile["happier"]), "account") == new string('a', 64), "happier.account accepted");

@@ -17,24 +17,20 @@ namespace RemoteAgents.Launcher
     {
         // «Открыть» and the left click lead to Happier; without a usable address the click opens the program window.
         internal static string LeftClickAction(Dictionary<string, object> config, Dictionary<string, object> account)
-        { return HappierUrl(config, account).Length > 0 ? "happier" : "settings"; }
+        { return HappierWebResolver.CanOpen(config, account) ? "happier" : "settings"; }
         internal static bool AcceptLeftClick(int clicks, long elapsedMilliseconds, int doubleClickMilliseconds)
         {
             // NotifyIcon.MouseClick reports Clicks=0; ordinary controls can report 1.
             return (clicks == 0 || clicks == 1) && elapsedMilliseconds > doubleClickMilliseconds;
         }
-        internal static string HappierUrl(Dictionary<string, object> config, Dictionary<string, object> account)
-        {
-            string value = Json.Text(Json.Map(Json.Get(config, "happier")), "webappUrl", Json.Str(account, "webappUrl")).Trim();
-            Uri uri;
-            return Uri.TryCreate(value, UriKind.Absolute, out uri) && (uri.Scheme == "https" || uri.Scheme == "http") && uri.UserInfo.Length == 0 ? uri.AbsoluteUri : "";
-        }
+        internal static System.Threading.Tasks.Task<string> HappierUrl(Dictionary<string, object> config, Dictionary<string, object> account, string home = null)
+        { return HappierWebResolver.ResolveAsync(config, account, home); }
         // One application icon; synchronization UI is an independent window.
         internal static TrayMenuEntry[] Build(Dictionary<string, object> config, Dictionary<string, object> account, Dictionary<string, object> transport, Dictionary<string, object> health, string diskStatus = "Диск: ожидается проверка")
         {
-            string url = HappierUrl(config, account);
+            bool canOpen = HappierWebResolver.CanOpen(config, account);
             return new[] {
-                new TrayMenuEntry("open", "Открыть", url.Length > 0) { Hint = url.Length > 0 ? "Открыть веб-приложение Happier" : "Адрес Happier не задан: укажите happier.webappUrl в настройках" },
+                new TrayMenuEntry("open", "Открыть", canOpen) { Hint = canOpen ? "Открыть веб-приложение Happier" : "Адрес Happier не задан: укажите happier.webappUrl в настройках" },
                 new TrayMenuEntry("settings", "Настройки") { Hint = "Окно программы: конфиг, подробные настройки и сервис" },
                 new TrayMenuEntry("disk", "Диск") { Hint = "Папка Disk в Проводнике" },
                 new TrayMenuEntry("synchronization", "Синхронизация (Syncthing)…") { Hint = "Окно синхронизации; его закрытие не останавливает Диск" },

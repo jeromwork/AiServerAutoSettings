@@ -10,6 +10,9 @@ function Get-TransportHome([string]$Path){
     $full
 }
 function Convert-TransportLF([string]$Text) {$Text.Replace("`r",'').TrimStart([char]0xFEFF)}
+# stdin of child processes uses the OEM code page (cp866 on Russian Windows), servers read UTF-8:
+# send JSON with every non-ASCII character as \uXXXX so names like a Cyrillic user name survive (16.11.2026).
+function ConvertTo-AsciiJson([string]$Json) {$b=New-Object Text.StringBuilder;foreach($c in $Json.ToCharArray()){if([int]$c -gt 126){[void]$b.Append('\u').Append(([int]$c).ToString('x4'))}else{[void]$b.Append($c)}};$b.ToString()}
 function Read-TransportJson([string]$Path) {
     # Держим открытый снимок до конца чтения: атомарная замена оставляет его целым.
     for($attempt=0;;$attempt++){
@@ -81,13 +84,13 @@ function Get-TransportErrorDetail($ErrorRecord) {
 }
 function Write-TransportLog([string]$Root,[string]$Event,$Detail='') {
     # Structured process diagnostics are sanitized with the loaded credential values before logging.
-    $allowed=@('start','ready','switch','probe-ok','probe-failed','network-change','restart','api-failed','process-failed','memory-invalid','network-unavailable','stop','fatal','port-moved','channel-address-moved')
+    $allowed=@('start','ready','switch','probe-ok','probe-failed','network-change','restart','api-failed','process-failed','memory-invalid','network-unavailable','stop','fatal','port-moved','channel-address-moved','happier-port-conflict')
     if($Event -notin $allowed){$Event='process-failed'}
     $dir=Join-Path $Root 'logs';[void][IO.Directory]::CreateDirectory($dir);$path=Join-Path $dir 'transport.log'
     if([IO.File]::Exists($path) -and (Get-Item -LiteralPath $path).Length -ge 1MB){Move-Item -LiteralPath $path -Destination ($path+'.1') -Force}
     $line=[DateTime]::UtcNow.ToString('o')+' '+$Event
     # Plain exception text is rejected; callers supply a sanitized diagnostic or safe script location.
-    if($Event -in @('port-moved','channel-address-moved') -and $Detail -is [pscustomobject] -and $Detail.PSObject.Properties['message']){$line+=' '+([string]$Detail.message -replace '[\r\n]',' ')}
+    if($Event -in @('port-moved','channel-address-moved','happier-port-conflict') -and $Detail -is [pscustomobject] -and $Detail.PSObject.Properties['message']){$line+=' '+([string]$Detail.message -replace '[\r\n]',' ')}
     elseif($Detail -is [pscustomobject] -and $Detail.PSObject.Properties['reason']){$line+=' '+(Format-TransportDiagnostic $Detail)}
     elseif($Detail -match '^(.+) @[\w.-]+:\d+$'){$head=$Matches[1];if($head -match '^[A-Za-z0-9_.]+$' -or ($head -match '[А-Яа-яЁё]' -and $head -notmatch '[A-Za-z0-9+/_=-]{12,}')){$line+=' '+$Detail}}
     [IO.File]::AppendAllText($path,($line+"`n"),(New-Object Text.UTF8Encoding($false)))
@@ -322,6 +325,17 @@ function Resolve-TransportPorts([string]$Root,$Settings,[int]$ProbeCount,[int]$S
     $configured=Get-TransportConfiguredPorts $Settings.Transport $Settings.Profile;$effective=Copy-TransportObject $configured
     $previous=$null;try{$previous=Read-TransportJson (Join-Path $Root 'state/transport-ports.json')}catch{}
     $snapshot=Get-TransportPortSnapshot -ListenersOnly;$selected=@{};$moved=New-Object Collections.ArrayList;$owners=$null
+    # Reserve even an occupied fixed origin before allocating movable inputs/probe/SOCKS blocks.
+    $local=Get-TransportValue $Settings 'LocalWeb' $null
+    if($local -and $local.enabled){
+        $selected[[int]$local.port]=$true;$local.available=Test-TransportPortFree '127.0.0.1' $local.port $snapshot;$local.conflict=$null
+        if(-not $local.available){
+            try{$owners=Get-TransportPortSnapshot}catch{$owners=$snapshot}
+            $local.conflict=Get-TransportPortConflict '127.0.0.1' $local.port $owners
+            $local.conflict.message+=' Вход Happier не запущен; освободите фиксированный порт или измените happier.localWeb.port в конфиге. Доступна облачная страница.'
+            if(-not $Preview){Write-TransportLog $Root 'happier-port-conflict' ([pscustomobject]@{message=$local.conflict.message})}
+        }
+    }
     $keys=@('sshPort');if($Settings.Transport.channelFirst){$keys+=@('channelSocksPort')}
     if(@($Settings.Channel.inbounds|Where-Object {$_.tag -eq 'sync'}).Count){$keys+=@('syncPort')};$keys+=@('apiPort','probePortBase','socksPortBase')
     foreach($key in $keys){
@@ -358,6 +372,21 @@ function Resolve-TransportPorts([string]$Root,$Settings,[int]$ProbeCount,[int]$S
     return $Settings
 }
 
+# The paste profile is desired state; older/manual installations can keep this in config.happier.
+function Get-TransportLocalWeb($Config) {
+    $h=$Config.happier
+    if($Config.profile.happier -and $Config.profile.happier.PSObject.Properties['localWeb']){$h=$Config.profile.happier}
+    if(-not $h -or -not $h.PSObject.Properties['localWeb']){return [pscustomobject]@{enabled=$false;available=$false;port=0;serverPort=0;conflict=$null}}
+    $local=$h.localWeb
+    if($local -isnot [pscustomobject]){throw 'happier.localWeb должен быть объектом'}
+    foreach($property in $local.PSObject.Properties){if($property.Name -cnotin @('enabled','port','serverPort','hint')){throw 'Неизвестное поле happier.localWeb'}}
+    if($local.enabled -isnot [bool]){throw 'happier.localWeb.enabled должен быть boolean'}
+    foreach($key in @('port','serverPort')){
+        $value=$local.$key
+        if($value -isnot [ValueType] -or $value -is [bool] -or [double]$value -ne [Math]::Floor([double]$value) -or [double]$value -lt 1024 -or [double]$value -gt 65535){throw ('Неверный happier.localWeb.'+$key+': нужен целый порт 1024–65535')}
+    }
+    [pscustomobject]@{enabled=$local.enabled;available=$local.enabled;port=[int]$local.port;serverPort=[int]$local.serverPort;conflict=$null}
+}
 function Read-TransportSettings([string]$Root) {
     $config=Read-TransportJson (Join-Path $Root 'config.json');$t=$config.transport
     if(-not $t){throw 'Нет секции transport'}
@@ -380,7 +409,7 @@ function Read-TransportSettings([string]$Root) {
     if(-not $t.serverRoute -and $config.wizard.serverRoute){$overlay=Get-TransportRouteOverlay $config.wizard.serverRoute $Root;if($overlay){$t|Add-Member -Force serverRoute $overlay}}
     Assert-TransportLists $t -ForBuild
     $effective=Get-TransportEffectivePorts $Root;foreach($k in (Get-TransportPortDefaults).Keys){$s[$k]=$effective.$k}
-    [pscustomobject]@{Options=$s;Transport=$t;Profile=$profile;Channel=$channel;Vpn=(Get-TransportValue $config 'vpn' ([pscustomobject]@{enabled=$false}))}
+    [pscustomobject]@{Options=$s;Transport=$t;Profile=$profile;Channel=$channel;LocalWeb=(Get-TransportLocalWeb $config);Vpn=(Get-TransportValue $config 'vpn' ([pscustomobject]@{enabled=$false}))}
 }
 function Get-TransportSshArguments($Profile,[int]$Port,[switch]$UseRoute) {
     # Явные параметры профиля исключают ProxyCommand/forwarding/RemoteCommand из пользовательского config.
@@ -679,6 +708,8 @@ function New-TransportConfig($Settings,$Paths,[string]$Secret,[string]$DefaultTa
     $in=@();$rules=@();$ports=@{}
     $targets=New-Object Collections.ArrayList;[void]$targets.Add(@('ssh',[int]$o.sshPort,(Get-TransportServerPort $Settings.Profile)))
     if($sync.Count){[void]$targets.Add(@('sync',[int]$o.syncPort,[int]$sync[0].override_port))}
+    $local=Get-TransportValue $Settings 'LocalWeb' $null
+    if($local -and $local.enabled -and $local.available){[void]$targets.Add(@('happier-web',[int]$local.port,[int]$local.serverPort))}
     # Channel first (config.transport.channelFirst): a loopback SOCKS entry to the server's sshd through the active path,
     # the same meaning as the 'ssh' entry; the wizard's SSH uses it as a 'proxy' route before any other route.
     if($Settings.Transport.channelFirst){
@@ -918,7 +949,7 @@ function Get-TransportRevision([string]$Root) {
     $route=$config.transport.serverRoute;if(-not $route){$route=$config.wizard.serverRoute}
     if($route.used -eq 'hop' -and $config.transport.profilePath){$p=Read-TransportJson $config.transport.profilePath;$kh=Join-Path (Split-Path $p.knownHostsPath -Parent) 'known_hosts-hop';if(Test-Path $kh){$files+=$kh}}
     $sha=[Security.Cryptography.SHA256]::Create()
-    try{$text=(ConvertTo-Json -InputObject $route -Depth 20 -Compress)+(ConvertTo-Json -InputObject $config.transport -Depth 40 -Compress)+"`n"+((@($files|ForEach-Object {$(if($env:OS -eq 'Windows_NT'){[IO.Path]::GetFullPath($_).Replace('\','/').ToLowerInvariant()}else{[IO.Path]::GetFullPath($_)})+"`n"+(Convert-TransportLF ([IO.File]::ReadAllText($_)))})) -join "`n");[Convert]::ToBase64String($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))}finally{$sha.Dispose()}
+    try{$text=(ConvertTo-Json -InputObject (Get-TransportLocalWeb $config) -Depth 5 -Compress)+(ConvertTo-Json -InputObject $route -Depth 20 -Compress)+(ConvertTo-Json -InputObject $config.transport -Depth 40 -Compress)+"`n"+((@($files|ForEach-Object {$(if($env:OS -eq 'Windows_NT'){[IO.Path]::GetFullPath($_).Replace('\','/').ToLowerInvariant()}else{[IO.Path]::GetFullPath($_)})+"`n"+(Convert-TransportLF ([IO.File]::ReadAllText($_)))})) -join "`n");[Convert]::ToBase64String($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))}finally{$sha.Dispose()}
 }
 function Test-TransportConfigFile([string]$Exe,[string]$File) {
     $check=Start-TransportProcess $Exe @('check','-c',$File)

@@ -7,3 +7,6 @@
 *.txt text eol=crlf
 disk/stignore.txt text eol=lf
 *.ico binary
+# Signed upstream fixture bytes must survive a Windows checkout unchanged.
+server/tests/fixtures/happier-web/checksums-*.txt -text
+server/tests/fixtures/happier-web/*.minisig -text

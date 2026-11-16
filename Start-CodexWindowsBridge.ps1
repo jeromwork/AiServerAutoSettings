@@ -28,6 +28,9 @@ param(
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
 $ProgressPreference = 'SilentlyContinue'
+# stdin of child processes uses the OEM code page (cp866 on Russian Windows), servers read UTF-8:
+# send JSON with every non-ASCII character as \uXXXX so names like a Cyrillic user name survive (16.11.2026).
+function ConvertTo-AsciiJson([string]$Json) {$b=New-Object Text.StringBuilder;foreach($c in $Json.ToCharArray()){if([int]$c -gt 126){[void]$b.Append('\u').Append(([int]$c).ToString('x4'))}else{[void]$b.Append($c)}};$b.ToString()}
 function Quote-Windows([string]$value) {
     # CommandLineToArgvW-compatible quoting; never pass secret in these arguments.
     return '"' + ([regex]::Replace([regex]::Replace($value, '(\\*)"', '$1$1\"'), '(\\+)$', '$1$1')) + '"'
@@ -122,7 +125,7 @@ try {
         $controlConfig.enforce_target=$true
         $localConfig=$controlConfig | ConvertTo-Json -Depth 4 -Compress
     }
-    $executor.StandardInput.WriteLine($localConfig); $executor.StandardInput.Flush(); $localConfig = $null
+    $executor.StandardInput.WriteLine((ConvertTo-AsciiJson $localConfig)); $executor.StandardInput.Flush(); $localConfig = $null
     $ready = (Await-Line $executor 20) | ConvertFrom-Json
     if ($ready.state -ne 'ready') { throw 'Windows executor did not initialize.' }
     Write-BridgeStatus 'ready' ('Windows bridge ready: ' + $DeviceLabel + '. Shell enabled: ' + [bool]$AllowShell)
@@ -143,7 +146,7 @@ try {
         try {
             $ssh = Start-PrivateProcess $SSHExecutable $sshArgs -ForSSH
             $sshErrors = $ssh.StandardError.ReadToEndAsync()
-            $ssh.StandardInput.WriteLine((@{ heartbeat=$true;controlOnly=[bool]$ControlOnly; token = $token; port = $remotePort; device = $DeviceLabel; deviceLabel=$DeviceLabel; projectId=$ProjectId; hostId=$HostId; windowsReplica=[IO.Path]::GetFullPath($Workspace) } | ConvertTo-Json -Compress)); $ssh.StandardInput.Flush()
+            $ssh.StandardInput.WriteLine((@{ heartbeat=$true;controlOnly=[bool]$ControlOnly; token = $token; port = $remotePort; device = $DeviceLabel; deviceLabel=$DeviceLabel; projectId=$ProjectId; hostId=$HostId; windowsReplica=[IO.Path]::GetFullPath($Workspace) } | ConvertTo-Json -Compress | ForEach-Object { ConvertTo-AsciiJson $_ })); $ssh.StandardInput.Flush()
             $remoteReady = (Await-Line $ssh 25) | ConvertFrom-Json
             if ($remoteReady.state -ne 'connected') { throw 'Remote bridge session was not ready.' }
             $attempt = 0

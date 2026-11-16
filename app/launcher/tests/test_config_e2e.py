@@ -143,7 +143,12 @@ def main():
                        input=(MASTER + '\r\n').encode()).stdout.decode()
             secrets = json.loads(issued)['secrets']
             assert MASTER not in issued and secrets['protected'] == 'master-password' and secrets['server-key'].startswith('enc1:'), 'enc1 config expected'
-            (d / 'issued.json').write_text(issued)
+            # Computer-only extension: the parallel server exporter is intentionally not changed here.
+            pasted = json.loads(issued)
+            local_web = dict(enabled=True, port=free_port(), serverPort=free_port())
+            pasted.setdefault('happier', {})['localWeb'] = local_web
+            cloud_web_url = pasted['happier'].setdefault('webappUrl', 'https://web.example.invalid')
+            (d / 'issued.json').write_text(json.dumps(pasted, ensure_ascii=False, indent=2).replace('\n', '\r\n'))
             assert 'ra-config:' in authorized.read_text()
 
             # Stand-only transport knobs (unprivileged ports, Linux sing-box); everything else comes from the config.
@@ -154,6 +159,7 @@ def main():
             # 2. Paste (A): Parse (CRLF) / Unlock / Store / Materialize — the program's own code.
             applied = json.loads(run([DOTNET, harness, '--apply', root, d / 'issued.json'], env=dict(env, RA_E2E_MASTER=MASTER)).stdout)
             assert applied['wrongMasterRefused'] and applied['missing'] == [] and applied['keyMaterialized'], applied
+            assert applied['localWebButtonEnabled'] and applied['localWebUrl'] == f"http://127.0.0.1:{local_web['port']}/", 'pasted config automatically enables local Happier navigation'
             assert applied['aiHasNoKey'] and applied['fullExportRoundtrip'] and applied['deviceName'] == 'Ноутбук сына', applied
             vault = (root / 'secrets/vault.json').read_text()
             assert MASTER not in vault and MASTER not in (root / 'config.json').read_text()
@@ -173,6 +179,12 @@ def main():
                 sections[name]['endMs'] for name in ('account', 'disk')), 'Account/Disk did not overlap after Connection'
             config = json.loads((root / 'config.json').read_text(encoding='utf-8-sig'))
             profile = json.loads(Path(config['transport']['profilePath']).read_text(encoding='utf-8-sig'))
+            assert config['profile']['happier']['localWeb'] == local_web, 'localWeb survives paste/unlock/store'
+            generated = json.loads((root / 'state/transport-sing-box.json').read_text(encoding='utf-8-sig'))
+            web_input = [i for i in generated['inbounds'] if i['tag'] == 'happier-web']
+            assert len(web_input) == 1 and web_input[0]['listen'] == '127.0.0.1' and web_input[0]['listen_port'] == local_web['port'] \
+                and web_input[0]['override_address'] == '127.0.0.1' and web_input[0]['override_port'] == local_web['serverPort'], 'fixed localWeb reaches real Connection daemon'
+            assert config['profile']['happier']['webappUrl'] == cloud_web_url, 'cloud account origin preserved exactly'
             manifest = json.loads((root / 'secrets/materialized.json').read_text())
             assert profile['keyPath'] == manifest['serverKeyFile'], 'the issued key, not another one, is used'
             assert not list((root / 'ssh-profiles').rglob('id_ed25519')), 'no extra device key was generated'

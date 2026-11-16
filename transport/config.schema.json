@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$comment": "Фрагмент: схема значения config.json.transport. Версия всего config.json задаётся лаунчером.",
+  "$comment": "Фрагмент: схема значения config.json.transport. Версия всего config.json задаётся лаунчером. Happier local web is read from config.profile.happier.localWeb (fallback config.happier.localWeb), not from transport.",
   "title": "RemoteAgents transport",
   "type": "object",
   "additionalProperties": false,
@@ -383,6 +383,37 @@
       "type": "string",
       "minLength": 1,
       "description": "Локальный каталог неизменяемого снимка кэшей после доверенного обновления"
+    }
+  },
+  "$defs": {
+    "localWeb": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65535
+        },
+        "serverPort": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65535
+        },
+        "hint": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2048
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "port",
+        "serverPort"
+      ]
     }
   }
 }

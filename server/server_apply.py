@@ -83,6 +83,10 @@ def validate(config):
     if not schema_path.exists():
         schema_path = SOURCE.parent / 'app/launcher/config.paste.schema.json'
     schema = strict_json(schema_path.read_text())
+    # Server-owned additions are shipped independently of the client schema.
+    web = strict_json((SOURCE / 'happier-web.schema.json').read_text())
+    schema['properties']['serverComponents']['properties']['happierWeb'] = web['$defs']['serverComponent']
+    schema['properties']['happier']['properties']['localWeb'] = web['$defs']['localWeb']
     def check(value, rule):
         if 'oneOf' in rule:
             matches = 0
@@ -128,6 +132,11 @@ def validate(config):
                 # C# appends a portable end-of-input assertion to its patterns.
                 pattern = rule['pattern']
                 require(re.search(pattern, value) is not None, 'Неверный формат поля конфига.')
+            if rule.get('format') == 'happier-server-url':
+                try:
+                    module('happier_web_common').server_origin(value)
+                except ValueError:
+                    raise Error('serverComponents.happierWeb.serverUrl: нужен HTTP(S) origin без пароля, пути и query.') from None
             if rule.get('format') == 'https-url':
                 valid_url(value)
         if type(value) is int:
@@ -617,7 +626,8 @@ class Engine:
     def code_files(self):
         target = '/usr/local/lib/remoteagents/server/'
         files = {}
-        for name in ('server_apply.py', 'server-apply.sh', 'lan_vpn.py', 'lan-vpn.sh', 'proxy_out.py', 'proxy-out.sh', 'remoteagents_config.py', 'base_network.py', 'server_recovery.py', 'server_components.py', 'server_packages.py', 'component_files.py', 'lan-config.schema.json'):
+        for name in ('server_apply.py', 'server-apply.sh', 'lan_vpn.py', 'lan-vpn.sh', 'proxy_out.py', 'proxy-out.sh', 'remoteagents_config.py', 'base_network.py', 'server_recovery.py', 'server_components.py', 'server_packages.py', 'component_files.py', 'lan-config.schema.json', 'happier-web.schema.json',
+                     'happier_web.py', 'happier_web_common.py', 'happier_web_release.py', 'happier_web_quotas.py', 'happier_web_verify.cjs', 'happier_web_addon.js'):
             files[target + name] = ((self.s.source / name).read_bytes(), 0o755 if name.endswith('.sh') else 0o644)
         schema = self.s.source / 'config.paste.schema.json'
         if not schema.exists():
@@ -1072,7 +1082,7 @@ class Engine:
         for kind in ('codex', 'claude'):
             if kind in self.config.get('agents', {}):
                 parts.append(('agents:' + kind, lambda kind=kind: components.agents(self, kind, apply)))
-        for kind in ('disk', 'bridge', 'happier'):
+        for kind in ('disk', 'bridge', 'happier', 'happierWeb'):
             if kind in self.config.get('serverComponents', {}):
                 parts.append((kind, lambda kind=kind: getattr(components, kind)(self, apply)))
         parts.append(('extras', lambda: components.extras(self, apply)))

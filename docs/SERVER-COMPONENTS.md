@@ -13,6 +13,7 @@
 | `serverComponents.disk.enabled` | Syncthing 2.1.7 с проверкой SHA256 из существующего установщика, отдельная user-служба, обнаружение папок; `discoveryIntervalSec` 2–60, по умолчанию 2 |
 | `serverComponents.bridge.enabled` | Проверяемые файлы MCP, регистрация для установленных Codex/Claude, сохранение каталога компьютеров и пользовательских SSH-ключей |
 | `serverComponents.happier.enabled` | Официальный stable installer; `version` закрепляет релиз; служба `remoteagents-happier.service` с общим HOME и авторизацией Claude из EnvironmentFile |
+| `serverComponents.happierWeb.enabled` | Подписанный официальный ui-web на loopback, встроенная добавка и кэш лимитов; отдельные user-служба и update timer, `serverUrl` (override/native/default), `port`, `keepChats`, `keepReleases`, `updateIntervalHours`, `quotas`; [контракт и проверка](HAPPIER-WEB.md) |
 | `agents.codex` | `enabled`, закреплённая `version: "0.166.0"`, `auth` — ссылка на полный `auth.json`. Старый проверяемый установщик требует canonical `remoteagents` и root-owned `managed-user-v1`, созданные bootstrap; чужой пользователь не присваивается |
 | `agents.claude` | `enabled`, `channel: "stable"` или точная `version`; `auth` — полный JSON credentials, `token` — OAuth token. Token хранится в пользовательском файле 0600; managed wrapper `claude` и Happier получают его без shell-eval |
 | `desktop` | `enabled`, `backend: "desktop"` ставит существующий desktop-bootstrap (его ограничение Ubuntu 24.04 amd64 остаётся). `native` сообщает blocked: установщика нет |
@@ -21,7 +22,7 @@
 | `ssh` | `keepaliveIntervalSec` (default 30), `keepaliveCountMax` (default 3); проверка эффективных настроек sshd и reload/запуск службы |
 
 Отсутствующий раздел не включает компонент. `enabled:false` отключает управляемые
-службы Диска/Happier, не удаляя данные. Мост — stdio MCP, постоянного демона у него
+службы Диска/Happier/Happier Web и таймер обновления UI, не удаляя данные. Мост — stdio MCP, постоянного демона у него
 нет. Отключение серверного моста не отзывает доступы компьютеров. Клиентская
 регистрация нового компьютера по-прежнему выполняется установщиком компьютера.
 
@@ -108,3 +109,9 @@ Native desktop, project views и личные ручные изменения в
 не превращаются в воспроизводимую установку без исходников/параметров. Для миграции
 109 сначала явно описывают выбранные компоненты и передают их реальные секреты;
 обычный plan со схемным примером не извлекает произвольные секреты ручной установки.
+
+Для сценария «Happier с нашего сервера» включают `happier` и `happierWeb` вместе
+в одном мастер-конфиге (как в примере). Первый управляет daemon, второй — раздачей
+подписанного UI. Экспорт добавляет серверные компоненты и клиентский `happier.localWeb`;
+порт канала берётся из этих настроек. Авторизация daemon переносится полным экспортом
+identity или выполняется владельцем; страница использует выбранный API Happier.

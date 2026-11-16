@@ -41,6 +41,9 @@ with tempfile.TemporaryDirectory(prefix='transport-daemon-test-') as tmp:
         api_port = s.getsockname()[1]
     occupied_ssh = socket.socket()
     occupied_ssh.bind(('127.0.0.1', 2222)); occupied_ssh.listen()
+    occupied_web = socket.socket()
+    occupied_web.bind(('127.0.0.1', 0)); occupied_web.listen()
+    web_port = occupied_web.getsockname()[1]
     race_socket = None
     optional = socket.socket()
     optional.bind(('127.0.0.1', 0))
@@ -114,7 +117,7 @@ Server(('127.0.0.1',port),API).serve_forever()
                      singBoxPath=str(sb), bindPhysical=False, metered='false', openSsh=True,
                      activeIntervalSec=1, rankIntervalSec=1800, stallSeconds=2,
                      probeTimeoutSec=12, restartDelaySec=1, apiPort=api_port, socksPortBase=optional_port)
-    (root / 'config.json').write_text(json.dumps(dict(version=1, transport=transport)))
+    (root / 'config.json').write_text(json.dumps(dict(version=1, transport=transport, happier=dict(localWeb=dict(enabled=True, port=web_port, serverPort=47832)))))
     env = dict(os.environ, LOCALAPPDATA=str(root))
     children = []
     daemon = None
@@ -151,6 +154,12 @@ Server(('127.0.0.1',port),API).serve_forever()
         assert selected['configured']['sshPort']==2222 and selected['effective']['sshPort']==2232
         assert status()['ports']['sshPort']==2232
         assert next(i for i in json.loads((root/'state/transport-sing-box.json').read_text())['inbounds'] if i['tag']=='ssh')['listen_port']==2232
+        web_status = status()['localWeb']
+        assert web_status['port'] == web_port and not web_status['available'] and web_status['conflict']['port'] == web_port
+        assert 'Вход Happier не запущен' in status()['summary'] and status()['ok'], 'Happier conflict must not fail channel status'
+        assert not any(i['tag'] == 'happier-web' for i in json.loads((root/'state/transport-sing-box.json').read_text())['inbounds'])
+        assert 'happier-port-conflict' in (root/'logs/transport.log').read_text(), 'Happier conflict journal'
+        occupied_web.close()
         occupied_ssh.close()
         assert int((root/'starts').read_text()) == 1, 'Занятый порт необязательного SSH заблокировал sing-box'
         optional.close()
@@ -219,6 +228,8 @@ Server(('127.0.0.1',port),API).serve_forever()
         os.kill(first_engine, 9)
         until(lambda: int((root / 'engine.pid').read_text()) != first_engine)
         until(lambda: status().get('ok'))
+        assert status()['localWeb']['port'] == web_port and status()['localWeb']['available'] and not status()['localWeb']['conflict']
+        assert next(i for i in json.loads((root/'state/transport-sing-box.json').read_text())['inbounds'] if i['tag']=='happier-web')['listen_port'] == web_port, 'freed fixed origin restored after restart'
         # Одинаковый bind: причина видна, интервалы 5/10 с, а не быстрый рестарт без конца.
         (root/'bind-failure').touch()
         os.kill(int((root/'engine.pid').read_text()), 9)
@@ -245,7 +256,9 @@ Server(('127.0.0.1',port),API).serve_forever()
                                    for c in s.get('candidates', [])) else None), seconds=10)
         assert 0 < retry_delay(failed) <= 1.1
         (root/'other-failure').unlink()
-        rebound = until(lambda: (s if (s:=status()).get('portConflict') else None), seconds=5)
+        # Process startup/readiness also takes time on a loaded host. The actual
+        # reset backoff remains independently bounded by retry_delay below.
+        rebound = until(lambda: (s if (s:=status()).get('portConflict') else None), seconds=15)
         assert 0 < retry_delay(rebound) <= 5.1, 'Ошибка без bind не сбросила серию'
         # Та же ошибка уже повторилась; смена конфига начинает новую серию.
         before=int((root/'starts').read_text())
@@ -300,7 +313,7 @@ Server(('127.0.0.1',port),API).serve_forever()
         assert stopped(int((root / 'engine.pid').read_text()))
         assert stopped(int((root / 'tunnel.pid').read_text()))
         assert all(stopped(int(pid)) for pid in (root/'probes.pid').read_text().splitlines()), 'SSH probe leaked after timeout/stop'
-        print('OK: failover, pin <=5с, мёртвый pin, auto, hot reload, disabled tag, invalid reload, restart, занятый SSH при старте, optional SSH occupied/VLESS, bind/перевыбор/backoff/reset/status, stop, ParentPid (имитаторы)')
+        print('OK: failover, pin <=5с, мёртвый pin, auto, hot reload, disabled tag, invalid reload, restart, занятый SSH при старте, фиксированный Happier/конфликт/статус/восстановление, optional SSH occupied/VLESS, bind/перевыбор/backoff/reset/status, stop, ParentPid (имитаторы)')
     except Exception:
         print('STATUS', status(), file=sys.stderr)
         log=root/'logs/transport.log'
@@ -309,7 +322,7 @@ Server(('127.0.0.1',port),API).serve_forever()
             if p.poll() is not None: print('EXIT', p.returncode, p.communicate(), file=sys.stderr)
         raise
     finally:
-        optional.close(); occupied_ssh.close()
+        optional.close(); occupied_ssh.close(); occupied_web.close()
         if race_socket: race_socket.close()
         for p in children:
             if p.poll() is None:

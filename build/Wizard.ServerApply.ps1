@@ -9,7 +9,7 @@ function Get-WizardApplyMode([string]$Root,$Request) {
     return Get-WizardAdminMode $Root $Request
 }
 function Get-WizardApplyFiles([string]$Bundle) {
-    $names=@('server_apply.py','server-apply.sh','base_network.py','server_recovery.py','server_components.py','server_packages.py','component_files.py','lan_vpn.py','lan-vpn.sh','lan-config.schema.json','proxy_out.py','proxy-out.sh','remoteagents_config.py')
+    $names=@('server_apply.py','server-apply.sh','base_network.py','server_recovery.py','server_components.py','server_packages.py','component_files.py','happier-web.schema.json','happier_web.py','happier_web_common.py','happier_web_release.py','happier_web_quotas.py','happier_web_verify.cjs','happier_web_addon.js','lan_vpn.py','lan-vpn.sh','lan-config.schema.json','proxy_out.py','proxy-out.sh','remoteagents_config.py')
     $body=Get-WizardNetFiles $Bundle $names
     $body+='mkdir -p "$d/tg-gateway"'+"`n"
     foreach($name in @('config.paste.schema.json','tg-gateway/gateway.py','tg-gateway/tg_gateway_keys.py','tg-gateway/tg_gateway_setup.py','tg-gateway/install.sh','tg-gateway/README.md')){

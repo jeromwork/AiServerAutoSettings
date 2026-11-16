@@ -13,7 +13,8 @@ class HappierAccountUiTests(unittest.TestCase):
         self.assertIn('if (!Visible) HideHappierKey()', ui)
         self.assertIn('if (name != "Главная") HideHappierKey()', (LAUNCHER / 'MainWindow.Settings.cs').read_text())
         self.assertIn('showHappierKey.Visible = copyHappierKey.Visible = current.HasKey;', ui)
-        self.assertIn('openHappier.Enabled = current.WebUrl.Length > 0;', ui)
+        self.assertIn('HappierWebResolver.LocalUrl(', ui)
+        self.assertIn('openHappier.Enabled =', ui)
         self.assertIn('RenderCard(view.Happier, happierCard, happierTitle, happierState, happierDetail)', (LAUNCHER / 'MainWindow.Cards.cs').read_text())
 
     def test_clipboard_and_show_run_on_ui_thread_without_logging_secrets(self):
@@ -21,7 +22,8 @@ class HappierAccountUiTests(unittest.TestCase):
         handlers = ui.split('showHappierKey.Click +=', 1)[1].split('VisibleChanged +=', 1)[0]
         self.assertIn('Clipboard.SetText(ReadHappierKey());', handlers)
         self.assertIn('happierKey.Text = key;', handlers)
-        self.assertIn('ConfigRequests.Origin(happierModel.WebUrl)', handlers)
+        self.assertIn('openHappier.Click += async', ui)
+        self.assertIn('await HappierWebResolver.ResolveAsync(', handlers)
         for forbidden in ('Task.Run', 'Log(', 'Journal', '.Message', '.ToString()', 'throw'):
             self.assertNotIn(forbidden, handlers)
         self.assertIn('[STAThread]', (LAUNCHER / 'EntryPoint.cs').read_text())
@@ -30,6 +32,19 @@ class HappierAccountUiTests(unittest.TestCase):
         self.assertNotIn('Log(', read)
         failure = ui.split('void HappierActionFailed', 1)[1].split('void ShowHappierAccountCreated', 1)[0]
         self.assertNotIn('Log(', failure)
+
+    def test_all_browser_entry_points_supply_secret_home_without_logging_url(self):
+        main = (LAUNCHER / 'ConfigWindow.Main.cs').read_text()
+        self.assertIn('{ "webappUrl", happierModel.WebUrl } }, home)', main)
+        tray = (LAUNCHER / 'TrayContext.cs').read_text()
+        self.assertIn('TrayMenuModel.HappierUrl(config.Data, AccountState(), home)', tray)
+        wizard = (LAUNCHER / 'SetupWizard.cs').read_text()
+        handler = wizard.split('openHappier.Click+=', 1)[1].split('// A new key', 1)[0]
+        self.assertIn('await HappierWebResolver.ResolveAsync(', handler)
+        self.assertIn('web.Text.Trim()}},home)', handler)
+        self.assertNotIn('ConfigRequests.Origin(', handler)
+        self.assertNotIn('.Message', handler)
+        self.assertNotIn('Journal', handler)
 
     def test_creation_notification_is_marshaled_and_not_just_a_log(self):
         window = (LAUNCHER / 'ConfigWindow.cs').read_text()

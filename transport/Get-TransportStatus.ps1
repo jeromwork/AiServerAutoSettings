@@ -9,6 +9,7 @@ try{
     $cost='неизвестна';if($s.metered -eq $true){$cost='лимитная'}elseif($s.metered -eq $false){$cost='без лимита'}
     $speed='не измерена';if($null -ne $s.kbps){$speed=([string]$s.kbps+' КБ/с')}
     Write-Output ('Транспорт: '+$health+'. Путь: '+$s.active+'. Скорость: '+$speed+'. Сеть: '+$cost+'.')
+    if($s.localWeb.conflict){Write-Output ('Happier: '+$s.localWeb.conflict.message)}
     if($s.error){Write-Output $s.error}
     foreach($c in @($s.candidates)){$v='—';if($null -ne $c.kbps){$v=[string]$c.kbps};Write-Output ('  '+$c.title+' ['+$c.tag+']: '+$c.state+'; '+$v+' КБ/с')}
 }catch{Write-Output 'Статус транспорта ещё не записан или недоступен.';exit 1}

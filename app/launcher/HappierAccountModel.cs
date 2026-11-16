@@ -24,7 +24,7 @@ namespace RemoteAgents.Launcher
             catch (IOException) { }
             bool key = name.Length > 0 && hasSecret(name);
             return new HappierAccountModel { Label = label.Length > 0 ? label : "Мой аккаунт", SecretName = name,
-                WebUrl = url, HasKey = key, Visible = key || Json.Str(h, "mode") == "same" || saved.Count > 0 };
+                WebUrl = url, HasKey = key, Visible = key || Json.Str(h, "mode") == "same" || saved.Count > 0 || HappierWebResolver.LocalUrl(config).Length > 0 };
         }
     }
 
