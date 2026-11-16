@@ -462,7 +462,8 @@ class ConfigExportTests(unittest.TestCase):
                          'hostKey': self.e.host_pub, 'key': {'secret': 'hop-relay-key'}, 'password': {'secret': 'hop-relay-password'}}})
         self.assertEqual(config['secrets']['hop-relay-password'], 'HOP-PASSWORD')
         vpn = config['vpn']
-        self.assertEqual((vpn['enabled'], vpn['checkUrl'], vpn['dnsServer']), (True, 'https://check.example.invalid/', '192.0.2.53'))
+        # Конституция 6е: без --vpn в конфиге все пути связи (канал, узлы, переходы, ретрансляторы), VPN выключен.
+        self.assertEqual((vpn['enabled'], vpn['checkUrl'], vpn['dnsServer']), (False, 'https://check.example.invalid/', '192.0.2.53'))
         self.assertEqual(vpn['bootstrap']['channel'], {'secret': 'vpn-channel'})
         self.assertEqual(vpn['bootstrap']['entries'], {'Entry1': {'secret': 'vpn-entry-entry1'}})
         self.assertEqual(vpn['bootstrap']['hops'], {'vhop': {'host': '127.0.0.1', 'port': 2222, 'user': 'hopuser', 'key': {'secret': 'vpn-hop-vhop'}}})
@@ -472,7 +473,11 @@ class ConfigExportTests(unittest.TestCase):
         self.assertEqual(config['happier'], {'mode': 'new', 'label': 'Сын'})
         for name in config['secrets']:
             self.assertRegex(name, r'^[a-z0-9][a-z0-9._-]{0,63}$')
-        off, _ = self.e.export('Без VPN', '--vpn', 'off')
+        on, _ = self.e.export('VPN включён', '--vpn', 'on')
+        self.assertTrue(on['vpn']['enabled'])
+        self.assertEqual(set(on['secrets']), set(config['secrets']))
+        off, p_off = self.e.export('Без VPN', '--vpn', 'off')
+        self.assertIn('только прямой SSH', p_off.stderr.decode())
         self.assertFalse(off['vpn']['enabled'])
         self.assertNotIn('channel', off['vpn'].get('bootstrap', {}))
         self.assertEqual(set(off['secrets']), {'server-key', 'hop-relay-key', 'hop-relay-password'})
@@ -483,7 +488,7 @@ class ConfigExportTests(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0)
         self.assertIn('0600', p.stderr.decode())
         self.assertEqual(self.e.auth.read_text(), before)
-        print('PASS: маршруты direct/proxy/hop и VPN первым → разделы и имена секретов соглашения; плохие права → отказ без ключа')
+        print('PASS: маршруты direct/proxy/hop, по умолчанию все пути связи без VPN → разделы и имена секретов соглашения; плохие права → отказ без ключа')
 
     def test_vpn_channel_export(self):
         # Без vpnBootstrap «канал первым» выдать нельзя — отказ до выдачи ключа.

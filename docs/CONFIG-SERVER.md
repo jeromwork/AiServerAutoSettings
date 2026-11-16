@@ -35,7 +35,7 @@
 
 ```sh
 remoteagents config export --name "Ноутбук сына" --master-password-stdin --output /root/laptop.json
-# необязательно: --vpn on|off|channel (по умолчанию on, если есть vpnBootstrap),
+# необязательно: --vpn channel|on|off (по умолчанию channel — все пути связи, VPN выключен; конституция 6е),
 #                --happier same|same:<подпись или id>|new|new:Имя (по умолчанию same; new без имени = --name),
 #                --folders "Проект,Проект/docs",
 #                --agent-sudo none|apply|full (по умолчанию full)
@@ -112,8 +112,9 @@ remoteagents config export --name "Ноутбук сына" --master-password-st
 
 `rootPassword` не выдаётся: компьютер входит ключом конфига. Ключ Happier не выдаётся (аккаунт
 настраивает действие `Account` по SSH). Бинарник `sing-box.exe` в текстовый конфиг не кладётся: он во встроенном бандле EXE (`build/bundle-binaries.json`, SHA-256).
-`disk.base` не задаётся — компьютер берёт свой (`Get-DiskBase`). `--vpn off` → `vpn.enabled=false`, без канала и узлов.
-`--vpn channel` («канал первым») → `vpn.enabled=false`, но `bootstrap` с каталогом, `channel`, `entries`, `hops` и их секретами
+`disk.base` не задаётся — компьютер берёт свой (`Get-DiskBase`). `--vpn off` → `vpn.enabled=false`, без канала и узлов:
+остаётся только прямой SSH, `export` печатает предупреждение. Только по явному решению владельца (конституция 6е).
+`--vpn channel` («канал первым», по умолчанию при наличии `vpnBootstrap`) → `vpn.enabled=false`, но `bootstrap` с каталогом, `channel`, `entries`, `hops` и их секретами
 как при `--vpn on`: компьютер поднимает демон связи без TUN и ходит к серверу через его SOCKS-вход (docs/CONFIG.md).
 
 ### Тестовый вектор enc1 (общий для Python и C#)

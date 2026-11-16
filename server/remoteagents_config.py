@@ -1145,7 +1145,8 @@ def main(argv=None):
     p.add_argument('--name', required=True)
     p.add_argument('--master-password-stdin', action='store_true')
     p.add_argument('--generate-master-password', action='store_true', help='придумать читаемый мастер-пароль и показать один раз')
-    p.add_argument('--vpn', choices=('on', 'off', 'channel'))
+    p.add_argument('--vpn', choices=('on', 'off', 'channel'),
+                   help='channel (по умолчанию): все пути связи, VPN выключен; on: то же + VPN включён; off: только прямой SSH')
     p.add_argument('--happier', default='same', help='same | same:<подпись или id аккаунта> | new (подпись = --name) | new:Название')
     p.add_argument('--folders', help='all | none | A,B:send,C:receive; без флага программа спросит владельца')
     p.add_argument('--agent-sudo', choices=('none', 'apply', 'full'), default='full',
@@ -1161,7 +1162,12 @@ def main(argv=None):
     c = settings(args.config)
     if args.cmd == 'export':
         if args.vpn is None:
-            args.vpn = 'on' if c.get('vpnBootstrap') else 'off'
+            # Конституция 6е: все пути связи сервера — в конфиг сразу; VPN (TUN) включает владелец на ПК.
+            args.vpn = 'channel' if c.get('vpnBootstrap') else 'off'
+        if args.vpn == 'off':
+            print('Внимание: в конфиге только прямой SSH к серверу — без канала и обходных путей. Если сеть режет SSH, '
+                  'компьютер не подключится (конституция 6е). ' + ('Нет раздела vpnBootstrap в настройках выдачи.'
+                  if not c.get('vpnBootstrap') else 'Выдан с --vpn off по явному выбору.'), file=sys.stderr)
         export(c, args)
     elif args.cmd == 'list':
         show_list(c, args.json)
