@@ -65,7 +65,8 @@ def resolve_server_url(home, configured=None):
     native = read_json(Path(home) / '.happier/settings.json', {})
     if isinstance(native, dict):
         servers = native.get('servers')
-        profile = servers.get(native.get('activeServerId') or 'cloud') if isinstance(servers, dict) else None
+        active = native.get('activeServerId') or 'cloud'
+        profile = servers.get(active) if isinstance(servers, dict) and isinstance(active, str) else None
         if isinstance(profile, dict):
             try:
                 return server_origin(profile.get('serverUrl'))

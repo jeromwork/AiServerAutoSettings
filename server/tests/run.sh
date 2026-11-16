@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Every individual test runs in its own process with a 60 s budget; the whole suite
-# is expected to finish under `timeout 120 bash server/tests/run.sh`.
+# Every test runs in its own process with a 60 s execution budget. Chrome
+# additionally allows 20 one-minute memory waits; full-suite startup has the same gate.
 # Isolated: temporary HOME/authorized_keys, loopback sshd, no live services.
 set -euo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)

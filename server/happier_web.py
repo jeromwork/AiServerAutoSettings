@@ -110,7 +110,7 @@ class Handler(BaseHTTPRequestHandler):
                 selected = active / 'web/index.html'; name = 'index.html'
             else:
                 return self.fail()
-        if selected.is_symlink() or not selected.is_file():
+        if selected.is_symlink() or (active / 'web').is_symlink() or not selected.is_file():
             return self.fail()
         mime = MIME.get(selected.suffix, mimetypes.guess_type(selected.name)[0] or 'application/octet-stream')
         quality = encodings(self.headers.get('Accept-Encoding', ''))

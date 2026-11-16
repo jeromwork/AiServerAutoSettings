@@ -194,8 +194,9 @@ class ServerUrlTests(Temp):
         self.assertEqual(resolve_server_url(home), 'http://127.0.0.1:3005')
         self.assertEqual(resolve_server_url(home,'https://explicit.fixture.invalid/'), 'https://explicit.fixture.invalid')
         self.assertEqual(native.read_bytes(), before)
-        atomic(native, '{broken')
-        self.assertEqual(resolve_server_url(home), 'https://api.happier.dev')
+        for invalid in ('{broken', '{"activeServerId":{},"servers":{}}', '{"servers":[]}'):
+            atomic(native, invalid)
+            self.assertEqual(resolve_server_url(home), 'https://api.happier.dev')
         for url in ('file:///tmp/x','https://user:SECRET@example.invalid','https://example.invalid/path','https://example.invalid?token=SECRET'):
             with self.assertRaises(ValueError):
                 resolve_server_url(home,url)
