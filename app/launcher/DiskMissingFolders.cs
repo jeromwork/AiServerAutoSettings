@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 
@@ -55,8 +56,9 @@ namespace RemoteAgents.Launcher
                 foreach (var value in Json.Array(rest.Request("GET", "config/folders", null, token))) {
                     var row = Json.Map(value); string id = Json.Str(row, "id"), path;
                     if (id.Length == 0 || !Shared(row, rest.Peer) || !DiskPaths.TryFull(Json.Str(row, "path"), out path) || !Missing(path, root)) continue;
-                    var previous = Json.Map(Json.Get(old, id)); double since = DiskSnapshot.Number(previous, "since");
-                    if (Json.Str(previous, "path") != path || !previous.ContainsKey("since") || since > now || since < 0) since = now;
+                    var previous = Json.Map(Json.Get(old, id)); double since;
+                    if (!double.TryParse(Json.Str(previous, "since"), NumberStyles.Float, CultureInfo.InvariantCulture, out since) ||
+                        double.IsNaN(since) || double.IsInfinity(since) || Json.Str(previous, "path") != path || since > now || since < 0) since = now;
                     next[id] = new { path, since };
                     if (now - since < 30) continue;
                     try {

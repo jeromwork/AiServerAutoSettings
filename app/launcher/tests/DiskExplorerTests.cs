@@ -154,6 +154,13 @@ namespace RemoteAgents.Launcher
             Check(rest.Folders.Count == 1, "foreign registration not shared with our server is untouched");
             File.WriteAllText(Path.Combine(home, "missing-folders.json"), "{broken\r\n"); rest.Folders[0]["devices"] = new[] { new { deviceID = "SERVER" } };
             watch.Reconcile(rest, root, None); Check(rest.Folders.Count == 1, "corrupt state starts a fresh observation");
+            foreach (object invalid in new object[] { null, "bad", "NaN", "Infinity", -1, now + 10000 }) {
+                var state = Json.Read(Path.Combine(home, "missing-folders.json"));
+                Json.Map(Json.Get(Json.Map(Json.Get(state, "folders")), "foreign"))["since"] = invalid;
+                Json.Write(Path.Combine(home, "missing-folders.json"), state); now += 100;
+                watch.Reconcile(rest, root, None);
+                Check(rest.Folders.Count == 1, "invalid persisted monotonic time cannot authorize early detachment: " + invalid);
+            }
             Check(!Directory.GetFiles(home, "*.tmp").Any(), "atomic state leaves no temporary files");
         }
         sealed class Icons : IDiskExplorerIcons { public string PathFor(DiskExplorerKind k) { return "/icons/" + k + ".ico"; } public string ApplicationPath() { return "/icons/App.ico"; } }
