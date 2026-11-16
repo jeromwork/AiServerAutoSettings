@@ -96,9 +96,9 @@ class Env:
         self.log = self.dir / 'auth.log'
         self.cfg = self.dir / 'config-export.json'
         # Never fall back to /var/lib/... on the machine running the suite.
-        # A valid empty desired-state snapshot belongs to this disposable stand.
+        # Match the default deployment: localWeb is exported from happierWeb (docs/HAPPIER-WEB.md).
         snapshot = self.dir / 'server-desired.json'
-        snapshot.write_text('{}')
+        snapshot.write_text(json.dumps({'serverComponents': {'happier': {'enabled': True}, 'happierWeb': {'enabled': True}}}))
         snapshot.chmod(0o644)
         self.c = dict(schema=1, version=1, serverAddress='127.0.0.1', serverPort=22, workerUser=USER,
                       hostKeys=[self.host_pub], workerAuthorizedKeys=str(self.auth), stateDir=str(self.dir / 'state'),
