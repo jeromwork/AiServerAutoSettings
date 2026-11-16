@@ -12,58 +12,123 @@ cleanup() {
 }
 trap cleanup EXIT
 pwsh=${PWSH:-$HOME/.cache/pwsh-test/pwsh}
+# Optional gate for a shared host; wait before starting each next test/build, not inside its timeout.
+wait_for_memory() {
+  local minimum=${LAUNCHER_TESTS_MEMORY_MIN_MB:-0} available attempt
+  if (( minimum == 0 )); then return 0; fi
+  for ((attempt=0; attempt<=20; attempt++)); do
+    free -m >&2
+    available=$(free -m | awk '/^Mem:/ {print $7}')
+    if (( available >= minimum )); then return 0; fi
+    if (( attempt == 20 )); then
+      echo "SKIP: available memory below ${minimum} MB after 20 waits" >&2
+      return 77
+    fi
+    echo "Memory wait $((attempt+1))/20 (60 seconds)" >&2
+    sleep 60
+  done
+}
 # These groups touch disjoint temporary HOME/state. Keep .NET builds after the
 # server group (it builds the same projects); independent offline checks overlap
 # SSH wait times. Every child is bounded; the outer caller may set a total limit.
 (
+  wait_for_memory
   timeout 60 python3 "$here/test_run_modes.py"
+  wait_for_memory
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-first-install.ps1" -TestHome "$testdir/wizard" < /dev/null
+  wait_for_memory
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-accept.ps1" -TestHome "$testdir/disk-accept" < /dev/null
+  wait_for_memory
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-cleanup.ps1" -TestHome "$testdir/disk-cleanup" < /dev/null
+  wait_for_memory
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-pairing.ps1" -TestHome "$testdir/disk-pairing" < /dev/null
+  wait_for_memory
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-account.ps1" -TestHome "$testdir/accounts" < /dev/null
+  wait_for_memory
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-wizard.ps1" -TestHome "$testdir/setup-wizard" < /dev/null
+  wait_for_memory
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-wizard-onboarding.ps1" -TestHome "$testdir/onboarding" < /dev/null
+  wait_for_memory
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-wizard-account.ps1" -TestHome "$testdir/wizard-account" < /dev/null
+  wait_for_memory
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-navpane.ps1" -TestHome "$testdir/navpane" < /dev/null
+  wait_for_memory
   timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-server-apply.ps1" -TestHome "$testdir/server-apply" < /dev/null
+  wait_for_memory
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-network.ps1" -TestHome "$testdir/network" < /dev/null
+  wait_for_memory
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-config-account.ps1" -TestHome "$testdir/config-account" < /dev/null
+  wait_for_memory
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-config-bootstrap.ps1" -TestHome "$testdir/config-bootstrap" < /dev/null
+  wait_for_memory
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-config.ps1" < /dev/null
+  wait_for_memory
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-vpn-legacy.ps1" -TestHome "$testdir/vpn-legacy" < /dev/null
+  wait_for_memory
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-vpn-lifecycle.ps1" < /dev/null
+  wait_for_memory
   timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-vpn-dns-policy.ps1" < /dev/null
+  wait_for_memory
   timeout 60 python3 "$repo/transport/test-vpn-lifecycle.py"
+  wait_for_memory
   timeout 60 python3 "$repo/transport/test-vpn-dns.py"
+  wait_for_memory
   timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-tailscale.ps1" < /dev/null
+  wait_for_memory
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-json.ps1" < /dev/null
+  wait_for_memory
   timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-ports.ps1" < /dev/null
+  wait_for_memory
   timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$repo/tools/legacy-cleanup/tests/smoke-plan.ps1" < /dev/null
+  wait_for_memory
   timeout 120 python3 "$repo/transport/test-transport-liveness.py" "$pwsh"
+  wait_for_memory
   timeout 180 python3 "$repo/transport/test-transport-daemon.py" "$pwsh"
+  wait_for_memory
   timeout 120 python3 "$here/test_first_run.py"
+  wait_for_memory
   timeout 60 python3 "$here/test_happier_account_ui.py"
+  wait_for_memory
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-config-routes.ps1" -TestHome "$testdir/config-routes" < /dev/null
+  wait_for_memory
   timeout 600 python3 "$repo/disk/test-disk.py"
+  wait_for_memory
   timeout 120 python3 "$repo/disk/test-wizard-merge.py"
+  wait_for_memory
   timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-disk-errors.ps1"
+  wait_for_memory
   timeout 120 python3 "$repo/transport/test-engine-loopback.py" --without-disk
+  wait_for_memory
   LOCALAPPDATA="$testdir/local" timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-config-engine.ps1" -TestHome "$testdir/config-engine" < /dev/null
+  wait_for_memory
   LOCALAPPDATA="$testdir/local" timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-config-device.ps1" -TestHome "$testdir/config-device" < /dev/null
+  wait_for_memory
   LOCALAPPDATA="$testdir/local" timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-config-scheduler.ps1" -TestHome "$testdir/config-scheduler" < /dev/null
+  wait_for_memory
   LOCALAPPDATA="$testdir/local" timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-refresh.ps1" -TestHome "$testdir/config-refresh" < /dev/null
+  wait_for_memory
   timeout 60 python3 "$here/test-config-sync.py"
+  wait_for_memory
   timeout 60 python3 "$here/test-server-health.py"
+  wait_for_memory
   timeout 120 python3 "$repo/transport/test-config-sync-preflight.py"
+  wait_for_memory
   timeout 120 python3 "$repo/transport/test-server-catalog.py"
+  wait_for_memory
   timeout 120 node "$repo/accounts/test-accounts.mjs"
+  wait_for_memory
   timeout 120 python3 "$here/test_build.py"
+  wait_for_memory
   timeout 60 python3 "$here/test_app_icon.py"
+  wait_for_memory
   timeout 120 python3 "$here/test_state_icons.py"
+  wait_for_memory
   timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-control-supervision.ps1" -TestHome "$testdir/control" < /dev/null
+  wait_for_memory
   timeout 120 python3 "$here/test_bridge_health.py"
+  wait_for_memory
   timeout 120 python3 "$here/test_wizard_boundary.py"
+  wait_for_memory
   timeout 120 python3 "$here/test_server_operations.py"
 ) > "$testdir/offline.log" 2>&1 &
 offline_pid=$!
@@ -75,6 +140,7 @@ if [[ ${LAUNCHER_TESTS_SERIAL:-0} == 1 ]]; then
   wait "$offline_pid" || failed=1
 fi
 (
+  wait_for_memory
   bash "$repo/server/tests/run.sh"
 ) > "$testdir/server.log" 2>&1 &
 server_pid=$!
@@ -89,23 +155,35 @@ trap cleanup EXIT
 # This suite launches two child suites and enforces a 30 s aggregate budget.
 # Keep it out of the server/offline overlap: scheduling contention alone can
 # double its elapsed time without any failed lifecycle/startup assertions.
+wait_for_memory
 timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-install.ps1" < /dev/null
+wait_for_memory
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -- "$testdir/core"
+wait_for_memory
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ProductName=RemoteVPN -- "$testdir/core-vpn"
+wait_for_memory
 timeout 120 python3 "$here/test-disk-explorer-engine.py"
+wait_for_memory
 timeout 180 python3 "$here/test-disk-safety-engine.py"
 # Config format, enc1, vault and materialization (stream A entry point; own output directory).
+wait_for_memory
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ConfigTests=true
+wait_for_memory
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ConfigTests=true -p:ProductName=RemoteVPN
 # End-to-end on a loopback stand: config export -> paste/vault -> orchestrator -> real Server/Connection -> sync -> revoke.
+wait_for_memory
 timeout 120 python3 "$here/test_config_e2e.py"
+wait_for_memory
 timeout 120 "$repo/build/make-bundle.sh" 20261109.235959-test "$testdir/bundles"
 if [[ ${SKIP_LAUNCHER_EXE:-0} == 1 ]]; then
   echo 'SKIP: Windows launcher EXE build/publish (SKIP_LAUNCHER_EXE=1)'
   exit 0
 fi
+wait_for_memory
 timeout 120 "$dotnet" build "$repo/app/launcher/RemoteAgents.Launcher.csproj" -c Release -p:BundlePath="$testdir/bundles/20261109.235959-test.zip" --nologo
+wait_for_memory
 timeout 120 "$dotnet" publish "$repo/app/launcher/RemoteAgents.Launcher.csproj" -c Release -p:BundlePath="$testdir/bundles/20261109.235959-test.zip" -o "$testdir/publish" --nologo
+wait_for_memory
 timeout 120 python3 - "$testdir/publish" <<'PY'
 from pathlib import Path
 import sys
@@ -115,6 +193,8 @@ assert not list(p.glob('*.dll')), 'Unexpected runtime dependencies'
 print('PASS: net48 build/publish; PE EXE exists; no DLL dependencies')
 PY
 # The published EXE must carry app.ico as its application icon (it had none: Explorer showed the stock window icon).
+wait_for_memory
 timeout 60 python3 "$here/test_app_icon.py" "$testdir/publish/RemoteAgents.exe"
 # ... and carry the folder state icons as resources, byte for byte.
+wait_for_memory
 timeout 60 python3 "$here/test_state_icons.py" "$testdir/publish/RemoteAgents.exe"

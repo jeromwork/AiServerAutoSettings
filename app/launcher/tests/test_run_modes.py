@@ -8,7 +8,7 @@ import sys
 import tempfile
 
 source = Path(__file__).with_name('run.sh').read_text()
-start = source.index('(\n  timeout 60 python3 "$here/test_run_modes.py"')
+start = source.index('(\n  wait_for_memory\n  timeout 60 python3 "$here/test_run_modes.py"')
 end = source.index('trap cleanup EXIT', start)
 block = source[start:end]
 first_end = block.index(') > "$testdir/offline.log"')
@@ -35,6 +35,7 @@ for serial in ('0', '1'):
                 script = '''set -euo pipefail
 testdir=$TEST_ROOT
 cleanup() { :; }
+wait_for_memory() { :; }
 fixture() { "$PYTHON" "$testdir/fixture.py" "$@"; }
 wait() { printf '%s\\n' "$1" >> "$testdir/waits"; builtin wait "$@"; }
 ''' + block + '\necho completed\n'
