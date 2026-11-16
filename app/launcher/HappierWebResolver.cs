@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -34,12 +35,24 @@ namespace RemoteAgents.Launcher
         internal static bool CanOpen(Dictionary<string, object> config, Dictionary<string, object> account)
         { return LocalUrl(config).Length > 0 || CloudUrl(config, account).Length > 0; }
 
-        internal static Task<string> ResolveAsync(Dictionary<string, object> config, Dictionary<string, object> account)
+        internal static Task<string> ResolveAsync(Dictionary<string, object> config, Dictionary<string, object> account, string home = null)
         {
             string local = LocalUrl(config), cloud = CloudUrl(config, account);
             if (local.Length == 0) return Task.FromResult(cloud);
             // WebRequest is available in net48. The worker and abort timer bound headers AND a slow response body.
-            return Task.Run(() => Healthy(local) ? local : cloud);
+            return Task.Run(() => Healthy(local) ? WithLogin(local, home) : cloud);
+        }
+        // Called only after our fixed loopback endpoint passes health. Never attach a key to a fallback.
+        static string WithLogin(string local, string home)
+        {
+            if (string.IsNullOrEmpty(home)) return local;
+            try {
+                string file = Path.Combine(home, "secrets", "happier-account.key");
+                if (!File.Exists(file) || new FileInfo(file).Length > 256) return local;
+                string key = File.ReadAllText(file).Trim();
+                // 32 bytes = 52 base32 characters; final character has only one data bit.
+                return Regex.IsMatch(key, @"\A(?:[A-Z2-7]{5}-){10}[A-Z2-7][AQ]\z") ? local + "#ra-login=" + key : local;
+            } catch (Exception) { return local; } // Missing/unreadable secret is an ordinary manual login.
         }
         static bool Healthy(string local)
         {

@@ -33,6 +33,25 @@ def inject(index):
     return result
 
 
+# Public route/testIDs and exported storage/auth contract, observed in official ui-web.
+LOGIN_MARKERS = ('./(app)/restore/manual.tsx', 'restore-manual-secret-input', 'restore-manual-submit',
+                 'auth_credentials', '__srv_', 'scopedStorageId', 'normalizeSecretKey', 'authGetToken')
+
+
+class LoginContractError(ValueError):
+    """Safe, fixed marker names may be reported to the updater journal."""
+
+
+def verify_login_contract(web):
+    # Inspect only bundled JavaScript, never execute release data on the server.
+    found = set()
+    for path in web.rglob('*.js'):
+        text = path.read_text(errors='replace')
+        found.update(marker for marker in LOGIN_MARKERS if marker in text)
+    if found != set(LOGIN_MARKERS):
+        raise LoginContractError('UI auto-login contract missing: ' + ', '.join(sorted(set(LOGIN_MARKERS) - found)))
+
+
 def verify_signature(checksums, signature):
     result = subprocess.run(['node', str(SOURCE / 'happier_web_verify.cjs'), str(checksums), str(signature)],
                             capture_output=True, timeout=20)
@@ -141,6 +160,7 @@ def install(base, tag, archive, checksums, signature, keep=2):
     with tempfile.TemporaryDirectory(prefix='.staging-', dir=base) as tmp:
         stage = Path(tmp); web = private_dir(stage / 'web')
         extract(archive, web)
+        verify_login_contract(web)
         index = web / 'index.html'
         atomic(index, inject(index.read_text()))
         # Stale precompressed index would skip the injected script.
@@ -255,6 +275,7 @@ def rollback(base):
         previous, current = release_path(base, 'previous'), release_path(base)
         if not previous:
             raise ValueError('no previous release')
+        verify_login_contract(previous / 'web')
         smoke(base, previous)
         switch(base, 'current', previous)
         if current:

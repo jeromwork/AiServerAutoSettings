@@ -23,8 +23,8 @@ namespace RemoteAgents.Launcher
             // NotifyIcon.MouseClick reports Clicks=0; ordinary controls can report 1.
             return (clicks == 0 || clicks == 1) && elapsedMilliseconds > doubleClickMilliseconds;
         }
-        internal static System.Threading.Tasks.Task<string> HappierUrl(Dictionary<string, object> config, Dictionary<string, object> account)
-        { return HappierWebResolver.ResolveAsync(config, account); }
+        internal static System.Threading.Tasks.Task<string> HappierUrl(Dictionary<string, object> config, Dictionary<string, object> account, string home = null)
+        { return HappierWebResolver.ResolveAsync(config, account, home); }
         // One application icon; synchronization UI is an independent window.
         internal static TrayMenuEntry[] Build(Dictionary<string, object> config, Dictionary<string, object> account, Dictionary<string, object> transport, Dictionary<string, object> health, string diskStatus = "Диск: ожидается проверка")
         {
