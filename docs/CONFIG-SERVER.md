@@ -35,9 +35,10 @@
 
 ```sh
 remoteagents config export --name "Ноутбук сына" --master-password-stdin --output /root/laptop.json
-# необязательно: --vpn on|off|channel (по умолчанию on, если есть vpnBootstrap),
+# необязательно: --vpn channel|on|off (по умолчанию channel — все пути связи, VPN выключен; конституция 6е),
 #                --happier same|same:<подпись или id>|new|new:Имя (по умолчанию same; new без имени = --name),
-#                --folders "Проект,Проект/docs"
+#                --folders "Проект,Проект/docs",
+#                --agent-sudo none|apply|full (по умолчанию full)
 ```
 
 Что происходит:
@@ -68,6 +69,10 @@ remoteagents config export --name "Ноутбук сына" --master-password-st
 (PBKDF2 и HMAC — из стандартной библиотеки, AES-256-CBC — из `cryptography`); если его нет — понятный отказ,
 экспорт без пароля работает и без него.
 
+Мост всегда выдаётся включённым с командами: `bridge.enabled=true`, `bridge.allowShell=true`. При применении отсутствие секции или поля также означает `true`; мастер включает обе галочки и отдельно не спрашивает. `false` — только явное решение владельца для конкретного компьютера.
+
+Экспорт явно добавляет `"agent": {"sudo": "full"}`, чтобы настройка ПК не останавливалась на `agent: blocked` из-за отсутствия поля (16.11.2026). `--agent-sudo none` или `--agent-sudo apply` задаёт другой режим; флаг, включая умолчание `full`, имеет приоритет над `agent.sudo` из серверного снимка. Остальные поля `agent` сохраняются.
+
 ### Что внутри выданного конфига
 
 ```json
@@ -90,6 +95,7 @@ remoteagents config export --name "Ноутбук сына" --master-password-st
                           "hops": {"vhop": {"host": "…", "port": 22, "user": "…", "key": {"secret": "vpn-hop-vhop"}}} } },
   "happier": { "mode": "same", "label": "Основной", "serverUrl": "…", "webappUrl": "…" },
   "bridge":  { "enabled": true, "allowShell": true },
+  "agent":   { "sudo": "full" },
   "disk":    { "folders": ["Проект", "Проект/docs"] },
   "secrets": { "protected": "master-password", "kdf": {"name": "pbkdf2-sha256", "iterations": 200000, "salt": "…"},
                "check": "enc1:…", "server-key": "enc1:…", "vpn-channel": "enc1:…", … }
@@ -106,8 +112,9 @@ remoteagents config export --name "Ноутбук сына" --master-password-st
 
 `rootPassword` не выдаётся: компьютер входит ключом конфига. Ключ Happier не выдаётся (аккаунт
 настраивает действие `Account` по SSH). Бинарник `sing-box.exe` в текстовый конфиг не кладётся: он во встроенном бандле EXE (`build/bundle-binaries.json`, SHA-256).
-`disk.base` не задаётся — компьютер берёт свой (`Get-DiskBase`). `--vpn off` → `vpn.enabled=false`, без канала и узлов.
-`--vpn channel` («канал первым») → `vpn.enabled=false`, но `bootstrap` с каталогом, `channel`, `entries`, `hops` и их секретами
+`disk.base` не задаётся — компьютер берёт свой (`Get-DiskBase`). `--vpn off` → `vpn.enabled=false`, без канала и узлов:
+остаётся только прямой SSH, `export` печатает предупреждение. Только по явному решению владельца (конституция 6е).
+`--vpn channel` («канал первым», по умолчанию при наличии `vpnBootstrap`) → `vpn.enabled=false`, но `bootstrap` с каталогом, `channel`, `entries`, `hops` и их секретами
 как при `--vpn on`: компьютер поднимает демон связи без TUN и ходит к серверу через его SOCKS-вход (docs/CONFIG.md).
 
 ### Тестовый вектор enc1 (общий для Python и C#)

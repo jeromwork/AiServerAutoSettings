@@ -337,9 +337,8 @@ namespace RemoteAgents.Launcher
         {newKeyText.Text=key;newKeyPanel.Visible=true;}
         void BridgePage(Dictionary<string,object> config)
         {
-            var c=Json.Map(Json.Get(config,"bridge"));Question(4,"Разрешить агенту управлять этим ПК?");
-            bool controlOn=Json.Bool(Json.Map(Json.Get(Json.Map(Json.Get(config,"components")),"control")),"enabled");
-            bridge=Check(4,"Включить мост",95,Json.Bool(c,"enabled",controlOn || !Json.Map(Json.Get(config,"components")).ContainsKey("control")));shell=Check(4,"Разрешить выполнение команд (shell)",135,Json.Bool(c,"allowShell",c.Count==0 && controlOn));
+            var c=Json.Map(Json.Get(config,"bridge"));Question(4,"Мост компьютера");
+            bridge=Check(4,"Включить мост",95,Json.Bool(c,"enabled",true));shell=Check(4,"Разрешить выполнение команд (shell)",135,Json.Bool(c,"allowShell",true));
             var info=Hint(4,"Разрешение shell позволяет выполнять команды от вашего имени. Настройка применяется на компьютере и на сервере. Изменение защищено независимым откатом.",12,100);Technical(4,info);More(4,195);
         }
         void VpnPage(Dictionary<string,object> config)

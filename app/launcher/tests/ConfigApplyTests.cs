@@ -115,7 +115,7 @@ namespace RemoteAgents.Launcher
         internal static void Run()
         {
             DiskChoiceTests.Run();
-            LocalWebPaste(); Plan(); Channel(); Engine(); Conflicts(); Ai(); Sources(); Requests(); Profiles(); DiskWait().GetAwaiter().GetResult();
+            LocalWebPaste(); Plan(); BridgeDefaults(); Channel(); Engine(); Conflicts(); Ai(); Sources(); Requests(); Profiles(); DiskWait().GetAwaiter().GetResult();
             HappierAccountTests.Run();
             Console.WriteLine("OK: " + count + " config engine checks (plan by difference, parallel order, conflicts, AI copy without secrets, sources)");
         }
@@ -134,6 +134,33 @@ namespace RemoteAgents.Launcher
                 Check(TrayMenuModel.LeftClickAction(settings, ConfigBundle.D()) == "happier", "paste enables tray left click without manual account changes");
                 Check(HappierWebResolver.CloudUrl(settings, ConfigBundle.D()).Length == 0, "local origin is not stored as cloud/account URL");
             } finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+        }
+        static void BridgeDefaults()
+        {
+            var empty = new Dictionary<string, object>();
+            var request = ConfigRequests.Bridge(empty, empty);
+            Check(Json.Bool(request, "enabled") && Json.Bool(request, "shell"), "missing bridge enables the bridge and commands");
+            var serverOnly = ConfigBundle.D("server", ConfigBundle.D("address", "server.example.invalid"));
+            Check(ConfigPlan.Build(serverOnly, new Dictionary<string, string>(), new Dictionary<string, bool>()).Contains(ConfigSections.Bridge), "server-only config still plans the default bridge");
+            // Missing fields are independent defaults; an explicit false affects only that field.
+            foreach (bool? enabled in new bool?[] { null, true, false })
+            foreach (bool? allowShell in new bool?[] { null, true, false }) {
+                var bridge = new Dictionary<string, object>();
+                if (enabled.HasValue) bridge["enabled"] = enabled.Value;
+                if (allowShell.HasValue) bridge["allowShell"] = allowShell.Value;
+                var profile = ConfigBundle.D("bridge", bridge);
+                foreach (bool fromSettings in new[] { false, true }) {
+                    request = ConfigRequests.Bridge(fromSettings ? empty : profile, fromSettings ? profile : empty);
+                    Check(Json.Bool(request, "enabled") == (enabled ?? true) && Json.Bool(request, "shell") == (allowShell ?? true), "bridge defaults and explicit opt-outs from profile/settings");
+                }
+                var synced = ConfigProfile.SyncFromSettings(ConfigBundle.D("bridge", ConfigBundle.D("enabled", false, "allowShell", false)), profile, "", "", "");
+                var settings = Json.Map(synced["bridge"]);
+                Check(Json.Bool(settings, "enabled") == (enabled ?? true) && Json.Bool(settings, "allowShell") == (allowShell ?? true), "settings sync defaults missing bridge fields, including an empty object");
+            }
+            request = ConfigRequests.Bridge(ConfigBundle.D("bridge", new Dictionary<string, object>()), ConfigBundle.D("bridge", ConfigBundle.D("enabled", false, "allowShell", false)));
+            Check(Json.Bool(request, "enabled") && Json.Bool(request, "shell"), "an explicit empty profile section uses defaults rather than stale settings");
+            request = ConfigRequests.Bridge(empty, ConfigBundle.D("components", ConfigBundle.D("control", ConfigBundle.D("enabled", false))));
+            Check(Json.Bool(request, "enabled") && Json.Bool(request, "shell"), "legacy control component does not disable bridge defaults");
         }
         static void Plan()
         {

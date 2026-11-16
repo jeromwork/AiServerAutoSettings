@@ -123,6 +123,11 @@ namespace RemoteAgents.Launcher
             var serverExample = ConfigBundle.Parse(File.ReadAllText(Path.Combine(Path.GetDirectoryName(schemaPath), "..", "..", "server", "server-apply.example.json")));
             Check(serverExample.Missing.Contains("tailscale-auth-key") && serverExample.Missing.Contains("lan-clinic-auth"), "server apply example accepts all declarative sections");
             var serverFields = ConfigBundle.Parse("{\"kind\":\"remoteagents-config\",\"schema\":1,\"tailscale\":{\"enabled\":true,\"authKey\":{\"secret\":\"custom-tail-key\"}},\"agent\":{\"sudo\":\"apply\"}}");
+            foreach (string mode in new[] { "none", "apply", "full" }) {
+                var agent = ConfigBundle.Parse(Json.Encode(ConfigBundle.D("kind", "remoteagents-config", "schema", 1, "agent", ConfigBundle.D("sudo", mode))));
+                Check(Json.Str(Json.Map(ServerDeployment.Profile(agent.Profile)["agent"]), "sudo") == mode, "agent.sudo accepted and forwarded: " + mode);
+            }
+            Reject(() => ConfigBundle.Parse(Json.Encode(ConfigBundle.D("kind", "remoteagents-config", "schema", 1, "agent", ConfigBundle.D("sudo", "invalid")))), "invalid agent.sudo");
             Check(serverFields.Hints["custom-tail-key"].Contains("Tailscale"), "Tailscale explanation independent of secret name");
             Reject(() => ConfigBundle.Parse("{\"kind\":\"remoteagents-config\",\"schema\":1,\"tailscale\":{\"advertiseRoutes\":[\"10.0.0.0/8\"]}}"), "no Tailscale subnet advertisement in master config");
             p = ConfigBundle.Parse(Json.Encode(valid));
