@@ -32,6 +32,9 @@ try{
     $initial=@{folders=@(@{id='Keep';path=$keepPath;type='receiveonly';paused=$true;maxConflicts=17;devices=@(@{deviceID='OTHER'})});devices=@(@{deviceID='PEER';addresses=@('tcp://127.0.0.1:22123');autoAcceptFolders=$false;name='Personal name'});writes=0;patches=0;defaults=@{fsWatcherDelayS=10;rescanIntervalS=777;fsWatcherEnabled=$false};polls=0;noOffer=$false;race=$false}
     Write-DiskUtf8 $api ($initial|ConvertTo-Json -Depth 20)
     $mock=@'
+$script:fixtureNow=0
+function Get-DiskNowMilliseconds {$script:fixtureNow}
+function Start-Sleep([int]$Milliseconds) {$script:fixtureNow+=$Milliseconds}
 function Invoke-DiskSsh {throw 'Повторное знакомство через SSH запрещено тестом'}
 function Invoke-DiskServer {throw 'Повторная регистрация на сервере запрещена тестом'}
 function Invoke-DiskApi($Route,$Method='GET',$Body=$null) {
@@ -106,9 +109,9 @@ function Invoke-DiskApi($Route,$Method='GET',$Body=$null) {
     Assert ($data.writes -eq 2 -and @($data.folders|Where-Object {$_.id -ceq 'Race'})[0].type -ceq 'receiveonly') 'acceptance in Tray during wait is preserved'
     $data.noOffer=$true;Write-DiskUtf8 $api ($data|ConvertTo-Json -Depth 30)
     Write-DiskUtf8 $accept '{"folders":[{"id":"Fallback"}]}'
-    $watch=[Diagnostics.Stopwatch]::StartNew();$fallbackOutput=Invoke-DiskFixture $bundle @('-AcceptFile',$accept)
+    $polls=$data.polls;$fallbackOutput=Invoke-DiskFixture $bundle @('-AcceptFile',$accept)
     $data=[IO.File]::ReadAllText($api)|ConvertFrom-Json
-    Assert ($watch.Elapsed.TotalSeconds -ge 29 -and $watch.Elapsed.TotalSeconds -lt 40 -and @($data.folders|Where-Object {$_.id -ceq 'Fallback'}).Count -eq 0 -and -not [IO.Directory]::Exists((Join-Path $base 'Fallback'))) 'without a server offer timeout creates neither ID nor directory'
+    Assert ($data.polls-$polls -eq 10 -and @($data.folders|Where-Object {$_.id -ceq 'Fallback'}).Count -eq 0 -and -not [IO.Directory]::Exists((Join-Path $base 'Fallback'))) 'without a server offer the entire virtual timeout creates neither ID nor directory'
     Assert ($fallbackOutput.Contains('Ожидает сервер: папка Fallback') -and [IO.File]::ReadAllText((Join-Path $script:DiskHome 'install.log')).Contains('Ожидает сервер: папка Fallback')) 'missing offer is reported in output and journal'
     # Laptop update: all four accepted folders have opaque server IDs and custom paths/options.
     $data.noOffer=$false;$data.race=$false;$data.folders=@();$laptop=@()

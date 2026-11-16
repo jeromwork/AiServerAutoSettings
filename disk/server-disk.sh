@@ -149,7 +149,7 @@ def ignores(p,write=True):
     # Syncthing uses first-match wins. Move every old managed include ahead of user ! rules.
     body=b''.join(line for line in body.splitlines(keepends=True) if line.strip()!=include)
     merged=bom+include+newline+body
-    if not write:return
+    if not write:return f.is_file() and managed.is_file() and managed.read_bytes()==rules and f.read_bytes()==merged
     marker.mkdir(exist_ok=True)
     # Publish the include target first. User rules stay byte-for-byte intact.
     for target,content in ((managed,rules),(f,merged)):
@@ -456,10 +456,22 @@ def reconcile(api,identity):
             changed=(current.get('maxConflicts')!=-1 or current.get('type')!='sendreceive' or current.get('fsWatcherDelayS')!=WATCHER_DELAY or not current.get('fsWatcherEnabled') or current.get('versioning')!=desired or current.get('label')!=p.name)
             current.update(type='sendreceive',maxConflicts=-1,fsWatcherEnabled=True,fsWatcherDelayS=WATCHER_DELAY,versioning=desired,label=p.name)
             missing=[d for d in devices if not any(x['deviceID']==d for x in current['devices'])]
-            ignores(p)
+            migrated=False
+            if matches:
+                route='config/folders/'+urllib.parse.quote(folder_id,safe='')
+                try:policy_current=ignores(p,write=False)
+                except FOLDER_ERRORS:
+                    # A broken policy must stop an already-shared scanner too.
+                    if not current.get('paused'):api(route,'PATCH',dict(paused=True))
+                    raise
+                if not policy_current:
+                    # Confirm pause before replacing rules; any failure leaves it paused.
+                    if not current.get('paused'):api(route,'PATCH',dict(paused=True))
+                    ignores(p);migrated=True
+            else:ignores(p)
             try:exclude_git(p)
             except FOLDER_ERRORS as e:skipped(p.name,e)  # Exclude is cosmetic; git admission above is mandatory.
-            if missing or not matches or changed:
+            if missing or not matches or changed or migrated:
                 if disk_generation(disk)!=generation:raise ValueError('Поколение Disk изменилось')
                 current['devices'] += [dict(deviceID=d) for d in missing]
                 record(folder_id,'server-discovery','publishing',origin_status(p))

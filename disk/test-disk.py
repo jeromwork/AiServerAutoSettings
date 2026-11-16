@@ -597,6 +597,9 @@ class ContractRest(FakeRest):
                 self.puts.append(identity)
                 self.folders[identity] = dict(body)
                 return {}
+            if method == 'PATCH':
+                self.folders[identity].update(body)
+                return {}
         return super().__call__(route, method, body)
 
 
@@ -609,6 +612,56 @@ def upload_offer(label, device='PEER'):
 
 
 class ContractTests(unittest.TestCase):
+    def test_existing_ignore_migration_pauses_before_writing_and_preserves_pause(self):
+        for paused in (False, True):
+            with self.subTest(paused=paused), tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+                path = make_project(Path(tmp) / 'Disk/Project')
+                (path / '.stignore').write_text('!**\n')
+                rest = ContractRest([dict(id='Project', path=str(path), devices=[], paused=paused)])
+                original = ns['ignores']
+                writes = []
+
+                def guarded_ignores(p, write=True):
+                    if write:
+                        self.assertTrue(rest.folders['Project']['paused'], 'scanner must be paused before policy writes')
+                        writes.append(p)
+                    return original(p, write)
+
+                ns['ignores'] = guarded_ignores
+                ns['reconcile'](rest, 'SERVER')
+                self.assertEqual(writes, [path])
+                self.assertEqual(rest.folders['Project']['paused'], paused)
+                self.assertTrue((path / '.stignore').read_text().startswith('#include .stignore-remoteagents\n'))
+                ns['reconcile'](rest, 'SERVER')
+                self.assertEqual(writes, [path], 'current policy must not interrupt transfers')
+
+    def test_existing_broken_policy_or_failed_write_leaves_scanner_paused(self):
+        for mode in ('directory', 'symlink', 'write-failure'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
+                path = make_project(Path(tmp) / 'Disk/Project')
+                (path / 'keep.txt').write_text('preserved')
+                if mode == 'directory':
+                    (path / '.stignore').mkdir()
+                elif mode == 'symlink':
+                    (path / '.stignore').symlink_to('keep.txt')
+                else:
+                    (path / '.stignore').write_text('!**\n')
+                    original = ns['ignores']
+
+                    def failed_ignores(p, write=True):
+                        if write:
+                            raise PermissionError('synthetic failed policy write')
+                        return original(p, write)
+
+                    ns['ignores'] = failed_ignores
+                rest = ContractRest([dict(id='Project', path=str(path), devices=[], paused=False)])
+                with contextlib.redirect_stderr(io.StringIO()):
+                    ns['reconcile'](rest, 'SERVER')
+                self.assertTrue(rest.folders['Project']['paused'])
+                self.assertFalse(rest.puts)
+                self.assertFalse(rest.deletes)
+                self.assertEqual((path / 'keep.txt').read_text(), 'preserved')
+
     def test_git_top_level_and_valid_gitdir_are_required(self):
         with tempfile.TemporaryDirectory() as tmp, server_helpers(tmp) as ns:
             disk = Path(tmp) / 'Disk'
