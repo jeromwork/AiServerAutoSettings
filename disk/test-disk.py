@@ -1146,12 +1146,12 @@ class ServerTests(unittest.TestCase):
             common = str(HERE / 'Disk.Common.ps1').replace("'", "''")
             script.write_text(". '" + common + "'\n" + """
 $request=[Console]::In.ReadToEnd()|ConvertFrom-Json
-$script:Gui=$request.gui;$script:ApiKey=$request.key;$script:DiskHome=Split-Path $request.path -Parent
+$script:Gui=$request.gui;$script:ApiKey=$request.key;$script:DiskHome=$request.home
 Accept-DiskFolders @(@{id='Offered';path=$request.path}) $request.peer $request.local
 Set-DiskWatcherDelay
 """)
             request = dict(gui='127.0.0.1:' + str(b['gui']), key=b['key'],
-                           path=str(b['home'] / 'Accepted'), peer=a['deviceId'], local=b['deviceId'])
+                           path=str(b['home'] / 'Disk/Accepted'), home=str(b['home'] / 'RemoteDisk'), peer=a['deviceId'], local=b['deviceId'])
             encoded = (json.dumps(request, ensure_ascii=False) + '\r\n').encode()
             run([pwsh, '-NoProfile', '-NonInteractive', '-File', script],
                 env={**os.environ, 'USERPROFILE': str(b['home'])}, stdin=encoded)

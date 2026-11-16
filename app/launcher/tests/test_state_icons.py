@@ -93,18 +93,19 @@ def check_meaning(images):
             if kind in ('Offline', 'Unavailable'):
                 cloud = pixel(rows, 0.50 * side, 0.84 * side)
                 assert cloud[3] == 255 and spread(cloud) <= 30 and cloud[0] < 170, tag + ': a grey cloud'
-            if kind == 'Local':
+            if kind in ('Local', 'LocalCopy'):
                 assert pixel(rows, 0.69 * side, 0.69 * side) == pixel(rows, 0.60 * side, 0.69 * side), tag + ': plain folder, no badge'
+    assert images['Local'] == images['LocalCopy'], 'local copies use a neutral plain folder'
     assert images['Offline'] == images['Unavailable'], 'no connection and no local Syncthing look the same'
     print('PASS: every state reads as its meaning at all sizes: colours of the folder and the badge, clouds, transparent corners')
 
 
 def check_distinct(images):
     for side, least in ((16, 12), (32, 80)):
-        for a, b in itertools.combinations([k for k in maker.KINDS if k != 'Unavailable'], 2):
+        for a, b in itertools.combinations([k for k in maker.KINDS if k not in ('Unavailable', 'LocalCopy')], 2):
             different = sum(1 for y in range(side) for x in range(side) if max(abs(p - q) for p, q in zip(images[a][side][y][x], images[b][side][y][x])) > 40)
             assert different >= least, '%s and %s look alike at %d px (%d pixels differ)' % (a, b, side, different)
-    print('PASS: all states look different from each other at 16 and 32 px')
+    print('PASS: distinct states look different at 16 and 32 px (LocalCopy intentionally uses the plain Local icon)')
 
 
 def check_preview():

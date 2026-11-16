@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-"""C# Explorer actions against two real disposable Syncthing engines; Linux recycle is a move fixture."""
+"""Disk contract with two real disposable Syncthing engines and a reversible recycle fixture."""
 import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
-import sys
 import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('disk_stand', ROOT / 'disk/test-disk.py')
-stand_module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(stand_module)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
 DOTNET = os.environ.get('DOTNET', str(Path.home() / '.dotnet/dotnet'))
 DLL = ROOT / 'app/launcher/tests/bin/Release/net10.0/PortableTests.dll'
 
 
-def wait(predicate, description, seconds=25):
+def wait(predicate, description, seconds=35):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         try:
@@ -29,94 +29,149 @@ def wait(predicate, description, seconds=25):
     raise AssertionError('timeout: ' + description)
 
 
-with stand_module.Stand() as stand, tempfile.TemporaryDirectory(prefix='explorer-engine-') as temp:
+with module.Stand() as stand, tempfile.TemporaryDirectory(prefix='disk-contract-engine-') as temp:
     temp = Path(temp)
     server, local = stand.sides
     for side, other in ((server, local), (local, server)):
-        stand.api(side, 'config/devices', 'POST', {
-            'deviceID': other['deviceId'], 'name': 'fixture peer',
-            'addresses': [f"tcp://127.0.0.1:{other['listen']}"],
-            'autoAcceptFolders': False,
-        })
-    disk_home = temp / 'RemoteDisk'
-    (disk_home / 'state').mkdir(parents=True)
-    # The client reads its normal config.xml and server.txt locations, with real generated fixture credentials.
-    (disk_home / 'state/config.xml').symlink_to(local['state'] / 'config.xml')
-    (disk_home / 'server.txt').write_text(server['deviceId'] + '\r\n')
+        stand.register(side, other)
+    home = temp / 'RemoteDisk'
+    (home / 'state').mkdir(parents=True)
+    (home / 'state/config.xml').symlink_to(local['state'] / 'config.xml')
+    (home / 'server.txt').write_text(server['deviceId'] + '\r\n')
     disk = temp / 'Disk'
     disk.mkdir()
-    remote_folder = server['home'] / 'Disk/Проект'
-    remote_folder.mkdir(parents=True)
-    (remote_folder / 'hello.txt').write_text('real server contents\n')
-    stand.api(server, 'config/folders', 'POST', {
-        'id': 'opaque-folder-id', 'label': 'Проект', 'path': str(remote_folder),
-        'type': 'sendreceive', 'devices': [{'deviceID': local['deviceId']}],
-    })
-    wait(lambda: 'opaque-folder-id' in stand.api(local, 'cluster/pending/folders'), 'pending server offer')
+    seed = server['home'] / 'Disk/Seed'
+    seed.mkdir(parents=True)
+    module.run(['git', 'init', '-q', seed])
 
-    def action(verb, path, recycled=None):
-        args = [DOTNET, DLL, '--disk-engine-action', disk_home, disk, verb, path,
-                ROOT / 'disk/stignore.txt', recycled or temp / 'unused-recycle']
-        result = subprocess.run([str(x) for x in args], capture_output=True, text=True, timeout=25)
+    def api(side, route, method='GET', body=None):
+        return stand.api(side, route, method, body)
+
+    def args(action, path=None, recycle=None, root=None):
+        return list(map(str, (DOTNET, DLL, '--disk-engine-action', home, root or disk, action,
+                              path or disk / 'unused', ROOT / 'disk/stignore.txt', recycle or temp / 'unused-recycle')))
+
+    def action(verb, path=None, recycle=None):
+        result = subprocess.run(args(verb, path, recycle), capture_output=True, text=True, timeout=40)
         assert result.returncode == 0, (verb, result.stdout, result.stderr)
-        print(verb + ': ' + result.stdout.strip(), flush=True)
+        return result.stdout
 
-    downloaded = disk / 'Проект'
-    action('download', downloaded)
-    wait(lambda: (downloaded / 'hello.txt').read_text() == 'real server contents\n', 'actual download to label path')
-    config = next(f for f in stand.api(local, 'config/folders') if f['id'] == 'opaque-folder-id')
-    assert config['fsWatcherDelayS'] == 2 and config['maxConflicts'] == -1
-    assert config['type'] == 'sendreceive' and config['versioning']['type'] == 'staggered'
-
-    external = temp / 'External'
-    external.mkdir()
-    (external / 'upload.txt').write_text('real external contents\n')
-    (external / '.env').write_text('synthetic ignored fixture\n')
-    (external / '.git').mkdir()
-    (external / '.git/config').write_text('synthetic ignored fixture\n')
-    action('add', external)
-    wait(lambda: 'External' in stand.api(server, 'cluster/pending/folders'), 'external offer reaches server')
-    server_external = server['home'] / 'Disk/External'
-    stand.api(server, 'config/folders', 'POST', {
-        'id': 'External', 'label': 'External', 'path': str(server_external),
-        'type': 'sendreceive', 'devices': [{'deviceID': local['deviceId']}],
-    })
-    wait(lambda: (server_external / 'upload.txt').read_text() == 'real external contents\n', 'actual external upload')
-    assert external.is_dir() and not (server_external / '.env').exists() and not (server_external / '.git').exists()
-
-    def complete():
-        local_status = stand.api(local, 'db/status?folder=opaque-folder-id')
-        remote_status = stand.api(local, 'db/completion?folder=opaque-folder-id&device=' + server['deviceId'])
-        return (local_status['state'] == 'idle' and local_status['needTotalItems'] == 0 and
-                remote_status['completion'] == 100 and remote_status['remoteState'] == 'valid')
-
-    wait(complete, 'confirmed completion before keep-server')
-    recycled = temp / 'RecycleBin/Проект'
-    recycled.parent.mkdir()
-    action('keep-server', downloaded, recycled)
-    assert (recycled / 'hello.txt').read_text() == 'real server contents\n'
-    assert (remote_folder / 'hello.txt').read_text() == 'real server contents\n'
-    assert {p.name for p in downloaded.iterdir()} == {'desktop.ini'}
-    assert 'Placeholder=1' in (downloaded / 'desktop.ini').read_text(encoding='utf-16')
-    assert not any(f['id'] == 'opaque-folder-id' for f in stand.api(local, 'config/folders'))
-    assert any(f['id'] == 'opaque-folder-id' for f in stand.api(server, 'config/folders'))
-    # The server drops the registration of a folder it shared (the files stay): the real engine reports remoteState=notSharing,
-    # and the Explorer, told by the memory «the server confirmed this folder», shows «removed on the server», not an error.
     def inspect():
-        args = [DOTNET, DLL, '--disk-engine-action', disk_home, disk, 'inspect', temp / 'unused',
-                ROOT / 'disk/stignore.txt', temp / 'unused-recycle']
-        result = subprocess.run([str(x) for x in args], capture_output=True, text=True, timeout=25)
-        assert result.returncode == 0, ('inspect', result.stdout, result.stderr)
-        return json.loads(result.stdout.strip().splitlines()[-1])
+        return json.loads(action('inspect').strip().splitlines()[-1])
 
-    def kind_of(snapshot):
-        return next(f['kind'] for f in snapshot['folders'] if f['Id'] == 'External')
+    def upload(name):
+        path = disk / name
+        path.mkdir()
+        (path / 'data.txt').write_text(name + ' preserved')
+        action('add', path)
+        config = next(f for f in api(local, 'config/folders') if f['path'] == str(path))
+        project_id = config['id']
+        assert project_id.startswith('rd-upload-v1-') and len(project_id) == 45
+        wait(lambda: project_id in api(server, 'cluster/pending/folders'), name + ' offer')
+        stand.server(server, 'bootstrap')
+        remote = server['home'] / 'Disk' / name
+        wait(lambda: (remote / 'data.txt').is_file(), name + ' server admission and delivery')
+        assert (remote / '.git').is_dir(), 'Upload admission creates actual git'
+        wait(lambda: next(f for f in inspect()['folders'] if f['Id'] == project_id)['kind'] == 'Synced', name + ' confirmation')
+        return path, project_id, remote
 
-    wait(lambda: kind_of(inspect()) == 'Synced', 'External confirmed by the server before it is removed there')
-    stand.api(server, 'config/folders/External', 'DELETE')
-    wait(lambda: stand.api(local, 'db/completion?folder=External&device=' + server['deviceId'])['remoteState'] == 'notSharing', 'engine reports the folder as not shared by the server')
-    removed = inspect()
-    assert kind_of(removed) == 'ServerRemoved', removed
-    assert removed['tray'].startswith('Диск: папки удалены на сервере') and 'ошибка' not in removed['tray'], removed['tray']  # External is the only shared folder
-    assert any(f['id'] == 'External' for f in stand.api(local, 'config/folders')) and (server_external / 'upload.txt').is_file() and (external / 'upload.txt').is_file()
-    print('PASS: C# Explorer actions / two real Syncthing engines: pending ID != label, download, in-place upload, exclusions, detach, preserved server files, cloud placeholder, folder removed by the server', flush=True)
+    source, project_id, remote = upload('Project')
+    # Keep: server bytes intact; registration gone, empty owned placeholder on PC.
+    recycle = temp / 'Recycled'
+    action('keep-server', source, recycle)
+    assert (remote / 'data.txt').read_text() == 'Project preserved'
+    assert (recycle / 'data.txt').read_text() == 'Project preserved'
+    assert {p.name for p in source.iterdir()} == {'desktop.ini'}
+    # The peer need not resend its unchanged ClusterConfig after our DELETE.
+    # Keep's durable catalog must offer the same ID even before pending reappears.
+    assert next(f for f in inspect()['folders'] if f['Id'] == project_id)['kind'] == 'ServerOnly'
+    action('download', source)
+    wait(lambda: (source / 'data.txt').is_file(), 'explicit re-download')
+    wait(lambda: next(f for f in inspect()['folders'] if f['Id'] == project_id)['kind'] == 'Synced', 're-download confirmed')
+    # H17: confirmed remote withdrawal becomes durable retirement; PC bytes untouched.
+    api(server, 'config/folders/' + project_id, 'DELETE')
+    wait(lambda: api(local, 'db/completion?folder=' + project_id + '&device=' + server['deviceId'])['remoteState'] == 'notSharing', 'remote withdrawal')
+    assert next(f for f in inspect()['folders'] if f['Id'] == project_id)['kind'] == 'ServerRemoved'
+    assert not any(f['id'] == project_id for f in api(local, 'config/folders'))
+    assert (source / 'data.txt').read_text() == 'Project preserved'
+    # An obsolete peer offer cannot revive the local retired ID.
+    api(server, 'config/folders', 'POST', dict(id=project_id, label='Project', path=str(remote), devices=[dict(deviceID=local['deviceId'])]))
+    wait(lambda: project_id in api(local, 'cluster/pending/folders'), 'obsolete offer')
+    assert next(f for f in inspect()['folders'] if f['Id'] == project_id)['kind'] == 'ServerRemoved'
+    assert not any(f['id'] == project_id for f in api(local, 'config/folders'))
+    print('PASS: Upload UUID admission/git, Keep/download, durable server removal without touching local bytes', flush=True)
+
+    # H03: delete, rename and move of the root are detachments, never file deletion events.
+    fixtures = {name: upload(name) for name in ('Deleted', 'Renamed', 'Moved', 'Copied', 'Brief')}
+    shutil.rmtree(fixtures['Deleted'][0])
+    renamed = disk / 'Local renamed'
+    fixtures['Renamed'][0].rename(renamed)
+    moved = temp / 'Outside Disk'
+    fixtures['Moved'][0].rename(moved)
+    copied = temp / 'Copy delete destination'
+    shutil.copytree(fixtures['Copied'][0], copied)
+    shutil.rmtree(fixtures['Copied'][0])
+    brief = disk / 'brief-save'
+    fixtures['Brief'][0].rename(brief)
+    process = subprocess.Popen(args('watch-missing'), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        time.sleep(2)
+        brief.rename(fixtures['Brief'][0])
+        stdout, stderr = process.communicate(timeout=40)
+        assert process.returncode == 0, (stdout, stderr)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+    ids = {f['id'] for f in api(local, 'config/folders')}
+    assert fixtures['Brief'][1] in ids
+    for name in ('Deleted', 'Renamed', 'Moved', 'Copied'):
+        path, retired_id, server_copy = fixtures[name]
+        assert retired_id not in ids and (server_copy / 'data.txt').read_text() == name + ' preserved'
+        # A detached confirmed ID is already offered by the durable local catalog;
+        # no new ClusterConfig/pending event is required from the unchanged server.
+        assert next(f for f in inspect()['folders'] if f['Id'] == retired_id)['kind'] == 'ServerOnly'
+    assert (renamed / 'data.txt').is_file() and (moved / 'data.txt').is_file()
+    assert not any(f['path'] in (str(renamed), str(moved)) for f in api(local, 'config/folders'))
+    # Unavailable whole base is not evidence of deletion of any child.
+    unavailable = temp / 'Disk unavailable'
+    disk.rename(unavailable)
+    process = subprocess.run(args('watch-missing'), capture_output=True, text=True, timeout=40)
+    assert process.returncode == 0, process.stderr
+    assert fixtures['Brief'][1] in {f['id'] for f in api(local, 'config/folders')}
+    unavailable.rename(disk)
+    # Keeping the project root/marker means ordinary two-way file deletion.
+    brief_path, brief_id, brief_remote = fixtures['Brief']
+    (brief_path / 'data.txt').unlink()
+    api(local, 'db/scan?folder=' + brief_id, 'POST')
+    wait(lambda: not (brief_remote / 'data.txt').exists(), 'ordinary content deletion propagates')
+    print('PASS: root delete/rename/external move detach after grace; brief absence and unavailable base preserve registration; server bytes intact', flush=True)
+
+    # Q7: reinstall copy remains local until explicit merge, including both conflict versions.
+    server_copy = server['home'] / 'Disk/Reinstall'
+    server_copy.mkdir()
+    local_copy = disk / 'Reinstall'
+    local_copy.mkdir()
+    for path, content, age in ((server_copy, 'server original', 90), (local_copy, 'local original', 60)):
+        f = path / 'same-name.txt'
+        f.write_text(content)
+        stamp = time.time() - age
+        os.utime(f, (stamp, stamp))
+        (path / ('only-server.txt' if path == server_copy else 'only-local.txt')).write_text(content)
+    api(server, 'config/folders', 'POST', dict(id='reinstall-stable-id', label='Reinstall', path=str(server_copy), maxConflicts=-1, devices=[dict(deviceID=local['deviceId'])]))
+    wait(lambda: 'reinstall-stable-id' in api(local, 'cluster/pending/folders'), 'reinstall offer')
+    assert next(f for f in inspect()['folders'] if f['Id'] == 'reinstall-stable-id')['kind'] == 'LocalCopy'
+    assert not any(f['id'] == 'reinstall-stable-id' for f in api(local, 'config/folders'))
+    action('sync', local_copy)
+
+    def merged():
+        for path in (server_copy, local_copy):
+            files = [path / 'same-name.txt', *path.glob('same-name.sync-conflict-*')]
+            if {p.read_text() for p in files if p.is_file()} != {'server original', 'local original'}:
+                return False
+            if not all((path / name).is_file() for name in ('only-server.txt', 'only-local.txt')):
+                return False
+        return True
+    wait(merged, 'explicit native merge keeps both conflict versions')
+    assert api(local, 'config/folders/reinstall-stable-id')['maxConflicts'] == -1
+    print('PASS: explicit reinstall merge uses server identity and preserves both conflict versions', flush=True)

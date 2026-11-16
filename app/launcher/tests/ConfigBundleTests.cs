@@ -15,7 +15,7 @@ namespace RemoteAgents.Launcher
             return ConfigBundle.D("kind", "remoteagents-config", "schema", 1,
                 "device", ConfigBundle.D("name", "Ноутбук"),
                 "server", ConfigBundle.D("address", "server.example.invalid", "port", 2222, "login", "worker", "key", ConfigBundle.D("secret", "server-key")),
-                "disk", ConfigBundle.D("folders", new object[]{ConfigBundle.D("id", "Project"), ConfigBundle.D("id", "Документы", "path", "D:\\Документы")}),
+                "disk", ConfigBundle.D("folders", new object[]{ConfigBundle.D("id", "Project"), ConfigBundle.D("id", "Документы")}),
                 "secrets", ConfigBundle.D("server-key", "TEST-PRIVATE-KEY\r\nSECOND-LINE\r\n"));
         }
         internal static void Run()

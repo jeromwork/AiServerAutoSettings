@@ -90,6 +90,8 @@ namespace RemoteAgents.Launcher
         internal DiskSnapshot Read(string root, CancellationToken token)
         {
             var snapshot = new DiskSnapshot();
+            var retired = diskHome == null ? null : new DiskRetiredFolders(diskHome, rest.Peer);
+            var removed = retired == null ? new Dictionary<string, object>() : retired.Load();
             var connections = Json.Map(Json.Get(Json.Map(rest.Request("GET", "system/connections", null, token)), "connections"));
             snapshot.Connected = Json.Bool(Json.Map(Json.Get(connections, rest.Peer)), "connected");
             var confirmedBefore = diskHome == null ? new HashSet<string>() : DiskConfirmedFolders.Load(diskHome, rest.Peer);
@@ -103,13 +105,21 @@ namespace RemoteAgents.Launcher
                 var row = new DiskFolderState { Id = id, Name = Json.Text(config, "label", id), Path = path, Config = config, Paused = Json.Bool(config, "paused") };
                 bool shared = Json.Array(Json.Get(config, "devices")).Any(d => Json.Str(Json.Map(d), "deviceID") == rest.Peer);
                 if (shared) sharedIds.Add(id);
-                if (shared && row.Paused) row.Kind = DiskExplorerKind.Paused;
+                if (shared && removed.ContainsKey(id)) {
+                    try { rest.Request("DELETE", "config/folders/" + Uri.EscapeDataString(id), null, token); row.Kind = DiskExplorerKind.ServerRemoved; row.Config = null; }
+                    catch (IOException) { row.Kind = DiskExplorerKind.Unavailable; }
+                }
                 else if (shared) {
                     try {
                         var local = Json.Map(rest.Request("GET", "db/status?folder=" + Uri.EscapeDataString(id), null, token));
                         var remote = Json.Map(rest.Request("GET", "db/completion?folder=" + Uri.EscapeDataString(id) + "&device=" + Uri.EscapeDataString(rest.Peer), null, token));
                         DiskSnapshot.Status(row, local, remote, snapshot.Connected, confirmedBefore.Contains(id));
-                        if (DiskSnapshot.ConfirmedByServer(remote)) confirmedNow.Add(id);
+                        if (snapshot.Connected && DiskSnapshot.ConfirmedByServer(remote)) confirmedNow.Add(id);
+                        if (retired != null && (row.Kind == DiskExplorerKind.ServerRemoved || removed.ContainsKey(id))) {
+                            retired.Remember(row); removed = retired.Load();
+                            rest.Request("DELETE", "config/folders/" + Uri.EscapeDataString(id), null, token);
+                            row.Kind = DiskExplorerKind.ServerRemoved; row.Config = null;
+                        }
                     } catch (IOException) { row.Kind = DiskExplorerKind.Unavailable; }
                 } else row.Kind = DiskExplorerKind.Local;
                 snapshot.Folders.Add(row);
@@ -119,16 +129,20 @@ namespace RemoteAgents.Launcher
             foreach (var pair in pending) {
                 var offer = Json.Map(Json.Get(Json.Map(Json.Get(Json.Map(pair.Value), "offeredBy")), rest.Peer));
                 string name = Json.Text(offer, "label", pair.Key);
-                if (offer.Count == 0 || !DiskPaths.ValidName(name) || Json.Bool(offer, "receiveEncrypted") || Json.Bool(offer, "remoteEncrypted") || snapshot.Folders.Any(f => f.Id == pair.Key)) continue;
+                if (offer.Count == 0 || !DiskPaths.ValidName(name) || Json.Bool(offer, "receiveEncrypted") || Json.Bool(offer, "remoteEncrypted") || snapshot.Folders.Any(f => f.Id == pair.Key) || removed.ContainsKey(pair.Key)) continue;
                 snapshot.Folders.Add(new DiskFolderState { Id = pair.Key, Name = name, Path = System.IO.Path.Combine(root, name), ServerOnly = true, Kind = DiskExplorerKind.ServerOnly });
+            }
+            foreach (var pair in removed) {
+                var saved = Json.Map(pair.Value);
+                if (!snapshot.Folders.Any(f => f.Id == pair.Key)) snapshot.Folders.Add(new DiskFolderState { Id = pair.Key, Path = Json.Str(saved, "path"), Name = Json.Str(saved, "name"), Kind = DiskExplorerKind.ServerRemoved });
             }
             // Ambiguous labels on Windows must never choose an offer arbitrarily.
             foreach (var group in snapshot.Folders.GroupBy(f => f.Path, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
                 foreach (var row in group) { row.Kind = DiskExplorerKind.Error; row.Detail = "Несколько папок с одинаковым именем"; }
             return snapshot;
         }
-        internal object[] Events(long since, CancellationToken token, bool tail = false)
-        { return Json.Array(rest.Request("GET", tail ? "events?since=0&limit=1&timeout=0" : "events?since=" + since + "&timeout=25", null, token, tail ? 3000 : 30000)); }
+        internal object[] Events(long since, CancellationToken token, bool tail = false, int pollSeconds = 25)
+        { return Json.Array(rest.Request("GET", tail ? "events?since=0&limit=1&timeout=0" : "events?since=" + since + "&timeout=" + pollSeconds, null, token, tail ? 3000 : 30000)); }
         internal static long EventId(object value) { long n; return long.TryParse(Json.Str(Json.Map(value), "id"), out n) ? n : 0; }
         internal static bool ChangesFolders(object value)
         {

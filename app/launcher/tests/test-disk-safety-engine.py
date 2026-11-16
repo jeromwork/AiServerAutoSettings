@@ -58,9 +58,9 @@ class SafetyTests(unittest.TestCase):
                       devices=[dict(deviceID=peer['deviceId'])] if share else [])
         self.api(side, 'config/folders', 'POST', config)
 
-    def action(self, action, path=None, budget=30000):
+    def action(self, action, path=None, budget=30000, fault=""):
         return subprocess.run([str(x) for x in (DOTNET, DLL, '--disk-engine-action', self.home,
-            self.disk, action, path or self.source, ROOT / 'disk/stignore.txt', self.recycle, budget)],
+            self.disk, action, path or self.source, ROOT / 'disk/stignore.txt', self.recycle, budget, fault)],
             capture_output=True, text=True, timeout=45)
 
     def inspect(self):
@@ -88,6 +88,108 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.remote / 'data.txt').read_text(), 'just edited before watcher')
         self.assertEqual((self.recycle / 'data.txt').read_text(), 'just edited before watcher')
+
+    def test_keep_refuses_every_local_only_entry_with_list(self):
+        self.paired()
+        for name in ('.env', '.git/config', 'vendor/cache', '.stversions/old', 'token-local.json', '.venv/py', 'local.sqlite'):
+            path = self.source / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('synthetic unique bytes')
+        result = self.action('keep-server')
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        for name in ('.env', '.git', 'vendor', '.stversions', 'token-local.json', '.venv', 'local.sqlite'):
+            self.assertIn(name, result.stderr)
+        self.assertTrue((self.source / '.env').is_file())
+        self.assertFalse(self.recycle.exists())
+        self.assertEqual(len(self.api(self.local, 'config/folders')), 1)
+
+    def test_external_and_nested_upload_never_register(self):
+        for path in (self.temp / 'External', self.source / 'Nested'):
+            path.mkdir(parents=True)
+            result = self.action('add', path)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.api(self.local, 'config/folders'), [])
+
+    def test_tray_registration_migrates_policy_before_next_scan(self):
+        self.paired()
+        (self.source / '.stignore').write_text('!**\n')
+        self.inspect()
+        self.assertTrue((self.source / '.stignore').read_text().startswith('#include .stignore-remoteagents\n!**'))
+        config = self.api(self.local, 'config/folders/Project')
+        self.assertEqual(config['versioning']['params']['maxAge'], '2592000')
+        secrets = ('.env', '.git/config', 'vendor/private', 'node_modules/private', 'key.pem', 'cert.crt2', 'token-user.json', 'local.db', 'backup.sql.gz', '.venv/private', '__pycache__/private')
+        for name in secrets:
+            (self.source / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.source / name).write_text('synthetic secret')
+        self.api(self.local, 'db/scan?folder=Project', 'POST')
+        time.sleep(.5)
+        for name in secrets:
+            self.assertFalse((self.remote / name).exists(), name)
+
+    def test_conflict_files_block_keep_even_after_completion(self):
+        self.paired()
+        (self.source / 'data.sync-conflict-20261116-000000-TEST.txt').write_text('conflicting version')
+        self.api(self.local, 'db/scan?folder=Project', 'POST')
+        wait(lambda: (self.remote / 'data.sync-conflict-20261116-000000-TEST.txt').is_file(), 'conflict delivered')
+        result = self.action('keep-server')
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn('sync-conflict', result.stderr)
+        self.assertFalse(self.recycle.exists())
+
+    def test_accept_process_killed_before_and_after_post_reuses_intent(self):
+        (self.source / 'data.txt').write_text('unique local bytes')
+        result = self.action('add', fault='before-post')
+        self.assertNotEqual(result.returncode, 0)
+        operation = json.loads((self.home / 'disk-operations.json').read_text())['operations'][str(self.source)]
+        project_id = operation['id']
+        self.assertRegex(project_id, r'^rd-upload-v1-[0-9a-f]{32}$')
+        self.assertEqual(self.api(self.local, 'config/folders'), [])
+        self.inspect()
+        result = self.action('add', fault='after-post')
+        self.assertNotEqual(result.returncode, 0)
+        self.inspect()
+        self.assertEqual([f['id'] for f in self.api(self.local, 'config/folders')], [project_id])
+        self.assertEqual((self.source / 'data.txt').read_text(), 'unique local bytes')
+        self.assertEqual(json.loads((self.home / 'disk-operations.json').read_text())['operations'], {})
+
+    def test_partial_recycle_restores_paused_without_propagating_deletes(self):
+        self.paired()
+        result = self.action('keep-server', fault='partial-recycle')
+        self.assertNotEqual(result.returncode, 0)
+        config = self.api(self.local, 'config/folders/Project')
+        self.assertTrue(config['paused'], 'partially recycled directory must not propagate missing files')
+        self.assertEqual((self.recycle / 'data.txt').read_text(), 'initial')
+        self.assertEqual((self.remote / 'data.txt').read_text(), 'initial')
+
+    def test_keep_process_killed_after_detach_restores_registration(self):
+        self.paired()
+        result = self.action('keep-server', fault='after-delete')
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.api(self.local, 'config/folders'), [])
+        self.inspect()
+        self.assertEqual(self.api(self.local, 'config/folders/Project')['path'], str(self.source))
+        self.assertEqual((self.source / 'data.txt').read_text(), 'initial')
+        self.assertFalse(self.recycle.exists())
+
+    def test_keep_process_killed_after_recycle_finishes_only_placeholder(self):
+        self.paired()
+        result = self.action('keep-server', fault='after-recycle')
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertFalse(self.source.exists())
+        self.inspect()
+        self.assertEqual(self.api(self.local, 'config/folders'), [])
+        self.assertEqual((self.recycle / 'data.txt').read_text(), 'initial')
+        self.assertTrue((self.source / 'desktop.ini').is_file())
+        self.inspect()
+        self.assertEqual((self.remote / 'data.txt').read_text(), 'initial')
+
+    def test_keep_process_killed_after_placeholder_is_idempotent(self):
+        self.paired()
+        result = self.action('keep-server', fault='after-placeholder')
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.inspect()
+        self.assertEqual((self.recycle / 'data.txt').read_text(), 'initial')
+        self.assertEqual(json.loads((self.home / 'disk-operations.json').read_text())['operations'], {})
 
     def test_keep_timeout_retains_data_and_registration(self):
         self.paired()
@@ -140,12 +242,13 @@ class SafetyTests(unittest.TestCase):
         (self.source / 'data.txt').write_text('foreign path must not block this project')
         result = self.action('add')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.api(self.local, 'config/folders/Project')['path'], str(self.source))
+        project = next(f for f in self.api(self.local, 'config/folders') if f['path'] == str(self.source))
+        project_id = project['id']
         snapshot = self.inspect()
-        self.assertTrue(any(f['Id'] == 'Project' for f in snapshot['folders']))
-        wait(lambda: 'Project' in self.api(self.server, 'cluster/pending/folders'), 'offer beside foreign path')
-        self.folder(self.server, self.remote)
-        wait(lambda: self.inspect()['folders'][0]['kind'] == 'Synced', 'sync beside foreign path')
+        self.assertTrue(any(f['Id'] == project_id for f in snapshot['folders']))
+        wait(lambda: project_id in self.api(self.server, 'cluster/pending/folders'), 'offer beside foreign path')
+        self.folder(self.server, self.remote, folder_id=project_id)
+        wait(lambda: next(f for f in self.inspect()['folders'] if f['Id'] == project_id)['kind'] == 'Synced', 'sync beside foreign path')
         result = self.action('keep-server')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.recycle / 'data.txt').exists())

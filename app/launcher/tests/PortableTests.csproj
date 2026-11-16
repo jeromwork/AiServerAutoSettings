@@ -63,8 +63,10 @@
     <Compile Include="../LegacyCleanup.cs" Link="LegacyCleanup.cs" />
     <Compile Include="DiskExplorerTests.cs" />
     <Compile Include="../DiskRecycle.cs" Link="DiskRecycle.cs" />
+    <Compile Include="../DiskLifecycle.cs" />
     <Compile Include="../DiskShellModel.cs" Link="DiskShellModel.cs" />
     <Compile Include="../DiskShellCommands.cs" Link="DiskShellCommands.cs" />
+    <Compile Include="../DiskMissingFolders.cs" />
     <Compile Include="../DiskSyncthingClient.cs" Link="DiskSyncthingClient.cs" />
     <Compile Include="../DiskExplorerMetadata.cs" Link="DiskExplorerMetadata.cs" />
     <Compile Include="../DiskExplorerRegistry.cs" Link="DiskExplorerRegistry.cs" />

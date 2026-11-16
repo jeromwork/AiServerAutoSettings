@@ -26,10 +26,11 @@ namespace RemoteAgents.Launcher
     // Static shell verbs need no COM registration, administrator privileges or Explorer extension DLL.
     // The item offered depends on the folder itself, so the menu says what to do with it:
     //   placeholder (only on the server)  -> «Скачать на компьютер»
+    //   existing unregistered copy        -> «Объединить с сервером»
     //   folder that syncs with the server -> «Оставить только на сервере»
     //   any other ordinary folder         -> «Загрузить на сервер»   (never on the Disk root)
     // A folder shared with the server but receive-only gets both of the last two: upload turns it into send and receive.
-    // All three items carry the same icon: the program's tray icon, so they stand out from other programs' items.
+    // All items carry the same icon: the program's tray icon, so they stand out from other programs' items.
     internal sealed class DiskExplorerRegistry
     {
         internal const string Prefix = @"Software\Classes\Directory\shell\RemoteAgents.Disk.";
@@ -40,7 +41,7 @@ namespace RemoteAgents.Launcher
         readonly Action<string> log;
         readonly Action changed;
         bool dirty;
-        static readonly string[] Actions = { "download", "keep-server", "add" };
+        static readonly string[] Actions = { "download", "sync", "keep-server", "add" };
         internal DiskExplorerRegistry(IDiskExplorerRegistry store, Action<string> log, Action changed = null)
         { this.store = store; this.log = log ?? delegate { }; this.changed = changed ?? delegate { }; }
         // iconPath is the program's icon exported as a .ico file. Without it the items fall back to the program file's own icon.
@@ -48,45 +49,37 @@ namespace RemoteAgents.Launcher
         {
             dirty = false;
             if (!SafePath(exePath) || !SafePath(root) || (launcherHome != null && !SafePath(launcherHome)) || (iconPath != null && !SafePath(iconPath))) throw new ArgumentException("Недопустимый путь оформления Проводника");
-            var rows = folders.Where(f => SafePath(f.Path)).ToArray();
+            var rows = folders.Where(f => SafePath(f.Path) && IsChild(f.Path, Plain(root))).ToArray();
             string[] placeholders = rows.Where(f => f.ServerOnly && f.Kind == DiskExplorerKind.ServerOnly).Select(f => f.Path).ToArray();
+            string[] copies = rows.Where(f => f.ServerOnly && f.Kind == DiskExplorerKind.LocalCopy).Select(f => f.Path).ToArray();
             string[] syncing = rows.Where(f => !f.ServerOnly && f.Kind != DiskExplorerKind.Local && f.Kind != DiskExplorerKind.ServerRemoved).Select(f => f.Path).ToArray();
             string[] uploading = rows.Where(f => f.Uploads).Select(f => f.Path).ToArray();
             string icon = "\"" + (iconPath ?? exePath) + "\",0";
             foreach (string action in Actions) {
                 string key = Prefix + action;
                 if (store.Exists(key) && store.Read(key, "RemoteAgentsOwner") != DiskExplorerService.Owner) { log("Проводник: чужой пункт меню пропущен"); continue; }
-                string[] matches = action == "download" ? placeholders : action == "keep-server" ? syncing : null;
+                string[] matches = action == "download" ? placeholders : action == "sync" ? copies : action == "keep-server" ? syncing : null;
                 if (matches != null && matches.Length == 0) { Remove(key); continue; }
-                string applies = matches == null ? UploadScope(root, placeholders.Concat(uploading)) : "(" + string.Join(" OR ", matches.Select(Term)) + ")";
-                if (matches == null && applies.Contains("ItemFolderPathDisplay") && store.Read(key, "AppliesTo") != applies) log("Проводник: папок слишком много для условия меню; «Загрузить на сервер» скрыт на всех папках верхнего уровня Диска");
-                string label = action == "download" ? DiskMenu.Download : action == "keep-server" ? DiskMenu.KeepServer : DiskMenu.Upload;
+                string applies = matches == null ? UploadScope(root, placeholders.Concat(copies).Concat(uploading)) : "(" + string.Join(" OR ", matches.Select(Term)) + ")";
+                if (matches == null && !applies.Contains("ItemFolderPathDisplay") && store.Read(key, "AppliesTo") != applies) log("Проводник: папок слишком много для условия меню; «Загрузить на сервер» скрыт на всех папках верхнего уровня Диска");
+                string label = action == "download" ? DiskMenu.Download : action == "sync" ? DiskMenu.Sync : action == "keep-server" ? DiskMenu.KeepServer : DiskMenu.Upload;
                 Set(key, "RemoteAgentsOwner", DiskExplorerService.Owner); Set(key, "MUIVerb", label); Set(key, "Icon", icon);
                 Set(key, "MultiSelectModel", "Single"); Set(key, "AppliesTo", applies);
                 Set(key + @"\command", "", "\"" + exePath + "\"" + (launcherHome == null ? "" : " --home " + Files.Quote(launcherHome)) + " --disk-shell " + action + " \"%1\"");
             }
             if (dirty) changed();
         }
-        // Where «Загрузить на сервер» applies: an ordinary folder that does not upload yet, in Disk or anywhere else. It is hidden on the
-        // Disk root and on the folders in «hidden»: placeholders and folders that already upload to the server. A folder that Syncthing
-        // has registered but not shared with the server (or shares receive-only) is not hidden: for it the command has work to do.
-        // The condition spells out every hidden folder, but one registry value must stay short. When the list does not fit in
-        // MaxAppliesTo, the safe variant is used: every direct child of Disk is hidden as a whole (placeholders and synced folders live
-        // there) and only the hidden folders outside Disk are listed; if even those do not fit they are left out (the command itself
-        // answers «уже синхронизируется»). The price of the safe variant: a brand-new plain folder placed directly in Disk is not
-        // offered the upload item.
+        // Only direct Disk children can be uploaded. If Explorer's bounded condition
+        // cannot enumerate the exclusions, hide the verb; the command still validates every path.
         internal static string UploadScope(string root, IEnumerable<string> hidden)
         {
             root = Plain(root);
-            string scope = "NOT " + Term(root);
-            string[] paths = hidden.Select(Plain).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(p => p, StringComparer.OrdinalIgnoreCase).ToArray();
-            if (paths.Length == 0) return scope;
+            string scope = "System.ItemFolderPathDisplay:=\"" + root + "\"";
+            string[] paths = hidden.Select(Plain).Where(p => IsChild(p, root)).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(p => p, StringComparer.OrdinalIgnoreCase).ToArray();
             string exact = scope + string.Concat(paths.Select(Exclude));
-            if (exact.Length <= MaxAppliesTo) return exact;
-            scope += " AND NOT System.ItemFolderPathDisplay:=\"" + root + "\"";
-            string listed = scope + string.Concat(paths.Where(p => !IsChild(p, root)).Select(Exclude));
-            return listed.Length <= MaxAppliesTo ? listed : scope;
+            return exact.Length <= MaxAppliesTo ? exact : Term(root) + " AND NOT " + Term(root);
         }
+
         static string Term(string path) { return "System.ItemPathDisplay:=\"" + path + "\""; }
         static string Exclude(string path) { return " AND NOT " + Term(path); }
         // Explorer shows a folder path without the closing backslash, except for a drive root.

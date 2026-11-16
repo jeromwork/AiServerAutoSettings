@@ -282,7 +282,7 @@ function Read-DiskAcceptFile([string]$File) {
 function Assert-DiskAcceptBase([string]$Path) {
     $full=[IO.Path]::GetFullPath($Path).TrimEnd('\','/')
     $base=[IO.Path]::GetFullPath((Get-DiskBase)).TrimEnd('\','/')
-    if($full -ieq $base -or $base.StartsWith($full+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw ('AcceptFile: путь содержит корень Disk: '+$Path)}
+    if(-not $full -or ([IO.Path]::GetDirectoryName($full)).TrimEnd('\','/') -ine $base){throw ('AcceptFile: только прямые папки внутри базы Disk; внешние и вложенные пути запрещены: '+$Path)}
 }
 function Test-DiskFolderAccepted($Folder,$Existing,[string]$Peer) {
     $full=[IO.Path]::GetFullPath([string]$Folder.path).TrimEnd('\','/')
@@ -320,16 +320,60 @@ function Set-DiskFolderIgnores([string]$Path) {
     Assert-DiskPlainPath $managed;Assert-DiskPlainPath $file
     $rules=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'stignore.txt')).Replace("`r",'')
     [void][IO.Directory]::CreateDirectory($Path)
-    # Publish the include target first; append to the user's bytes without rewriting them.
+    # Mandatory policy is first even before a user's negations or includes.
     if(-not [IO.File]::Exists($managed) -or [IO.File]::ReadAllText($managed) -cne $rules){Write-DiskUtf8 $managed $rules}
-    $old='';if([IO.File]::Exists($file)){$old=[IO.File]::ReadAllText($file)}
-    $include='#include .stignore-remoteagents'
-    if(@($old.Replace("`r",'') -split "`n"|Where-Object {$_.Trim() -ceq $include}).Count){return}
+    $old='';$bom=$false;if([IO.File]::Exists($file)){$old=[IO.File]::ReadAllText($file);$raw=[IO.File]::ReadAllBytes($file);$bom=$raw.Length -ge 3 -and $raw[0] -eq 239 -and $raw[1] -eq 187 -and $raw[2] -eq 191}
     $newline="`n";if($old.Contains("`r`n")){$newline="`r`n"}
-    $append=$include+$newline;if($old.Length -and -not $old.EndsWith("`n")){$append=$newline+$append}
-    [IO.File]::AppendAllText($file,$append,(New-Object Text.UTF8Encoding($false)))
+    $include='#include .stignore-remoteagents'
+    $user=([regex]::Split($old,'(?<=\n)')|Where-Object {$_.Trim() -cne $include}) -join ''
+    $next=$include+$newline+$user
+    if($old -cne $next){[IO.File]::WriteAllText($file,$next,(New-Object Text.UTF8Encoding($bom)))}
+}
+
+function Set-DiskAcceptJournal([string]$Peer,$Folder,[string]$Id,$Config,[switch]$Complete) {
+    $file=Join-Path $script:DiskHome 'disk-operations.json';$operations=@{}
+    if([IO.File]::Exists($file)){
+        $old=[IO.File]::ReadAllText($file)|ConvertFrom-Json
+        if($null -eq $old.operations -or $old.operations -is [Array] -or $old.operations -is [string]){throw 'Повреждён журнал операций Диска'}
+        foreach($p in $old.operations.PSObject.Properties){$operations[$p.Name]=$p.Value}
+        if($old.peer -cne $Peer -and $operations.Count){throw 'Есть незавершённые операции прежнего сервера Диска'}
+    }
+    if($Complete){$operations.Remove([string]$Folder.path)}else{
+        $operations[[string]$Folder.path]=@{kind='accept';phase='prepared';id=$Id;path=[string]$Folder.path;name=[string]$Folder.id;config=$Config}
+    }
+    [void][IO.Directory]::CreateDirectory($script:DiskHome)
+    $temp=$file+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
+    try{
+        $bytes=(New-Object Text.UTF8Encoding($false)).GetBytes((@{peer=$Peer;operations=$operations}|ConvertTo-Json -Depth 40 -Compress))
+        $stream=New-Object IO.FileStream($temp,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+        try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
+        if([IO.File]::Exists($file)){[IO.File]::Replace($temp,$file,[System.Management.Automation.Language.NullString]::Value)}else{[IO.File]::Move($temp,$file)}
+    }finally{if([IO.File]::Exists($temp)){[IO.File]::Delete($temp)}}
+}
+function Enter-DiskOperationLock {
+    $file=[IO.Path]::GetFullPath((Join-Path $script:DiskHome 'disk-operations.json')).ToUpperInvariant()
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try{$key=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($file)))).Replace('-','')}finally{$sha.Dispose()}
+    $mutex=New-Object Threading.Mutex($false,('RemoteDiskOperations-'+$key))
+    try{try{if(-not $mutex.WaitOne(35000)){throw 'Диск занят другой операцией'}}catch [Threading.AbandonedMutexException]{};return $mutex}catch{$mutex.Dispose();throw}
+}
+function Test-DiskRetiredId([string]$Peer,[string]$Id) {
+    $file=Join-Path $script:DiskHome ('explorer-retired-'+$Peer+'.json')
+    if(-not [IO.File]::Exists($file)){return $false}
+    $state=[IO.File]::ReadAllText($file)|ConvertFrom-Json
+    if($state.peer -cne $Peer -or $null -eq $state.removed -or $state.removed -is [Array]){throw 'Повреждена память снятых папок Диска'}
+    return $Id -cin @($state.removed.PSObject.Properties|ForEach-Object {$_.Name})
 }
 function Accept-DiskFolders($Folders,[string]$Peer,[string]$LocalId) {
+    $operationLock=Enter-DiskOperationLock
+    try {
+    $journal=Join-Path $script:DiskHome 'disk-operations.json'
+    if([IO.File]::Exists($journal)){
+        $state=[IO.File]::ReadAllText($journal)|ConvertFrom-Json
+        if($null -eq $state.operations -or $state.operations -is [Array] -or $state.operations -is [string]){throw 'Повреждён журнал операций Диска'}
+        if(@($state.operations.PSObject.Properties).Count -gt 0 -and $state.peer -cne $Peer){throw 'Есть незавершённые операции прежнего сервера Диска'}
+        if(@($state.operations.PSObject.Properties|Where-Object {$_.Value.kind -ceq 'keep'}).Count){throw 'Есть незавершённая операция Диска; запустите программу для восстановления'}
+    }
     $existing=@(Invoke-DiskApi 'config/folders')
     $wanted=@($Folders|Where-Object {-not (Test-DiskFolderAccepted $_ $existing $Peer)})
     if(-not $wanted.Count){return}
@@ -349,23 +393,73 @@ function Accept-DiskFolders($Folders,[string]$Peer,[string]$LocalId) {
         $id=$offers[$folder.id]
         if($id -and @($existing|Where-Object {$_.id -ceq $id}).Count){continue}
         Assert-DiskAcceptPath $folder.path $existing
+        if($id -and (Test-DiskRetiredId $Peer $id)){Write-DiskProgress ('Удалена на сервере: '+$folder.id+'. Старая регистрация больше не принимается');continue}
         if(-not $id){
-            $id=$folder.id;$message='Сервер не предложил папку '+$folder.id+' за 30 с; создаю локальную папку с ID '+$id
+            $message='Ожидает сервер: папка '+$folder.id+' не предложена за 30 с; повторите приём позже'
             Write-DiskProgress $message;Write-DiskLog $message
+            continue
         }
+        if([IO.Directory]::Exists($folder.path)){
+            $entries=@(Get-ChildItem -LiteralPath $folder.path -Force)
+            $ini=Join-Path $folder.path 'desktop.ini'
+            $placeholder=$entries.Count -eq 1 -and $entries[0].Name -ceq 'desktop.ini' -and [IO.File]::ReadAllText($ini).Contains('Owner=RemoteAgents.Disk.v2') -and [IO.File]::ReadAllText($ini).Contains('Placeholder=1')
+            if($entries.Count -gt 0 -and -not $placeholder){Write-DiskProgress ('Локальная копия '+$folder.id+': выберите «Объединить с сервером» в Проводнике');continue}
+        }
+        $config=@{id=$id;label=$folder.id;path=$folder.path;type='sendreceive';fsWatcherDelayS=2;maxConflicts=-1;versioning=@{type='staggered';params=@{maxAge='2592000';cleanInterval='3600'}};devices=@(@{deviceID=$LocalId},@{deviceID=$Peer})}
+        Set-DiskAcceptJournal $Peer $folder $id $config
         Set-DiskFolderIgnores $folder.path
-        [void](Invoke-DiskApi 'config/folders' POST @{id=$id;label=$folder.id;path=$folder.path;type='sendreceive';fsWatcherDelayS=2;maxConflicts=-1;versioning=@{type='staggered';params=@{maxAge='0';cleanInterval='3600'}};devices=@(@{deviceID=$LocalId},@{deviceID=$Peer})})
+        [void](Invoke-DiskApi 'config/folders' POST $config)
+        Set-DiskAcceptJournal $Peer $folder $id $config -Complete
     }
+    }finally{$operationLock.ReleaseMutex();$operationLock.Dispose()}
 }
 # REST patches keep paths, versions, ignores and all unrelated user settings intact.
+function Test-DiskFolderIgnoresCurrent([string]$Path) {
+    $managed=Join-Path $Path '.stignore-remoteagents';$file=Join-Path $Path '.stignore'
+    foreach($item in @($managed,$file)){
+        Assert-DiskPlainPath $item
+        if([IO.Directory]::Exists($item)){throw 'Путь обязательных исключений занят каталогом'}
+        if(-not [IO.File]::Exists($item)){return $false}
+    }
+    $rules=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'stignore.txt')).Replace("`r",'')
+    $text=[IO.File]::ReadAllText($file)
+    $include='#include .stignore-remoteagents';$lines=@($text.Replace("`r",'') -split "`n")
+    return [IO.File]::ReadAllText($managed) -ceq $rules -and $lines[0] -ceq $include -and @($lines|Where-Object {$_.Trim() -ceq $include}).Count -eq 1
+}
 function Set-DiskWatcherDelay {
+    $operationLock=Enter-DiskOperationLock
+    try {
     $defaults=Invoke-DiskApi 'config/defaults/folder'
     if($defaults.fsWatcherDelayS -ne 2){[void](Invoke-DiskApi 'config/defaults/folder' PATCH @{fsWatcherDelayS=2})}
+    $peerFile=Join-Path $script:DiskHome 'server.txt'
+    $peer='';if([IO.File]::Exists($peerFile)){$peer=[IO.File]::ReadAllText($peerFile).TrimStart([char]0xFEFF).Trim()}
     foreach($folder in @(Invoke-DiskApi 'config/folders')){
-        if($folder.fsWatcherDelayS -eq 2){continue}
         $route='config/folders/'+[Uri]::EscapeDataString([string]$folder.id)
-        [void](Invoke-DiskApi $route PATCH @{fsWatcherDelayS=2})
+        $patch=@{}
+        if($folder.fsWatcherDelayS -ne 2){$patch.fsWatcherDelayS=2}
+        if($peer -and $peer -cin @($folder.devices|ForEach-Object {$_.deviceID})){
+            try{Assert-DiskAcceptBase $folder.path;Assert-DiskPlainPath $folder.path}catch{continue}
+            if(-not [IO.Directory]::Exists($folder.path)){continue}
+            try{$rulesChanged=-not (Test-DiskFolderIgnoresCurrent $folder.path)}catch{
+                if(-not $folder.paused){[void](Invoke-DiskApi $route PATCH @{paused=$true})}
+                throw
+            }
+            $optionsChanged=$folder.maxConflicts -ne -1 -or $folder.versioning.type -cne 'staggered' -or $folder.versioning.params.maxAge -cne '2592000' -or $folder.versioning.params.cleanInterval -cne '3600'
+            if($rulesChanged -or $optionsChanged){
+                # Pause only a real migration. Repeated startup must not interrupt transfers.
+                if(-not $folder.paused){[void](Invoke-DiskApi $route PATCH @{paused=$true})}
+                Set-DiskFolderIgnores $folder.path
+                $patch.paused=[bool]$folder.paused;$patch.maxConflicts=-1
+                $versions=@{};$parameters=@{}
+                if($folder.versioning){if($folder.versioning -is [Collections.IDictionary]){foreach($key in $folder.versioning.Keys){$versions[$key]=$folder.versioning[$key]}}else{foreach($property in $folder.versioning.PSObject.Properties){$versions[$property.Name]=$property.Value}}}
+                if($folder.versioning.params){if($folder.versioning.params -is [Collections.IDictionary]){foreach($key in $folder.versioning.params.Keys){$parameters[$key]=$folder.versioning.params[$key]}}else{foreach($property in $folder.versioning.params.PSObject.Properties){$parameters[$property.Name]=$property.Value}}}
+                $parameters.maxAge='2592000';$parameters.cleanInterval='3600';$versions.type='staggered';$versions.params=$parameters
+                $patch.versioning=$versions
+            }
+        }
+        if($patch.Count){[void](Invoke-DiskApi $route PATCH $patch)}
     }
+    }finally{$operationLock.ReleaseMutex();$operationLock.Dispose()}
 }
 function Set-DiskServerDevice([string]$Peer) {
     $address='tcp://127.0.0.1:'+[int](Get-TransportEffectivePort (Join-Path $env:LOCALAPPDATA 'RemoteAgents') 'syncPort')

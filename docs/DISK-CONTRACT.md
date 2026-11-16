@@ -1,6 +1,6 @@
 # Диск: действующий контракт
 
-Редакция 1, 16.11.2026. Единственный нормативный документ жизненного цикла Диска.
+Редакция 2, 16.11.2026. Единственный нормативный документ жизненного цикла Диска.
 DISK-MATRIX.md — исторический аудит исходного поведения, а не требования.
 При противоречии PLAN-DISK, SPEC-SYNC, EXPLORER-* и FOLDERS-STATUS-REPORT действует этот контракт.
 
@@ -93,8 +93,9 @@ Syncthing), device (ID предлагающего ПК или пусто), outco
 ## Переходы всех 69 клеток аудита
 
 Ø/P/D/U/RO/J/Z/O/OFF — обозначения из DISK-MATRIX.md. «Есть» — исполняемый тест в
-`disk/test-disk.py`; «часть» — проверяет указанную серверную часть перехода. `ПК: имя` —
-**новый запланированный тест следующего клиентского этапа, ещё не реализован и не пройден**.
+`disk/test-disk.py`; «часть» — проверяет указанную серверную часть перехода.
+`ПК: имя` без ссылки на файл — **план следующих частей, не доказательство готовности**.
+Ссылки `ПК 2А` ведут к реализованным проверкам; результаты прогонов — в DISK-STAGE2A-REPORT.md.
 Контракт определяет конечное требование, а эта колонка честно отделяет его от готовности реализации.
 
 | Клетка / операция × состояние | Ожидаемый исход | Восстановление | Проверка |
@@ -102,40 +103,40 @@ Syncthing), device (ID предлагающего ПК или пусто), outco
 | 1a. Новый git clone с origin непосредственно в `~/Disk/P`; ПК Ø | Git с origin → сервер публикует, ПК Ø→P без файлов. | Забрать явно на нужном ПК. | Есть: ServerTests.test_registration_offers_every_folder_and_is_idempotent |
 | 1b. Новая обычная/тестовая папка без git или git без origin | Non-git не публиковать; git без origin разрешён с отметкой. | Подготовить git; origin задаёт человек. | Есть: ContractTests.test_git_top_level_and_valid_gitdir_are_required; ContractTests.test_only_upload_ids_are_admitted_and_git_is_initialized_once |
 | 1c. Недопустимое имя, symlink, вложенный каталог | Невалидное имя/ссылка/унаследованный repo → отказ; nested не публикуется отдельно. | Исправить имя/путь/gitdir. | Есть: ServerTests.test_only_valid_top_level_directories_are_discovered; ContractTests.test_git_top_level_and_valid_gitdir_are_required |
-| 2a. Папка сервера удалена/вынесена; ПК D, корень Disk доступен и непуст | Grace → tombstone + снять серверную регистрацию; D на ПК сохранить и отсоединить. | Новое намерение только с новым ID. | Часть: MissingFolderTests.test_deleted_project_is_forgotten_after_real_grace_period_and_never_returns; ПК: server_removed_detaches_keeps_bytes |
+| 2a. Папка сервера удалена/вынесена; ПК D, корень Disk доступен и непуст | Grace → tombstone + снять серверную регистрацию; D на ПК сохранить и отсоединить. | Новое намерение только с новым ID. | ПК 2А: test-disk-explorer-engine.py (withdrawal/re-offer), DiskExplorerTests.Lifecycle |
 | 2b. То же, на ПК только P/заглушка | Сервер tombstone; P после подтверждения снятия перестаёт быть доступной. | При отсутствии свежего подтверждения показывать ожидание, не ложное P. | ПК: removed_pending_placeholder |
 | 2c. Удалён последний проект; Disk пуст/пропал/размонтирован | Пустой/пропавший корень → никаких DELETE/mkdir/приёма. | Восстановить корень; последнее удаление подтвердить ручным снятием config. | Есть: ContractTests.test_empty_missing_or_unreadable_root_has_no_mutations_or_mkdir; MissingFolderTests.test_unavailable_empty_or_replaced_disk_resets_continuous_absence |
 | 2d. Переименование серверного проекта без incoming-marker A→B | A после grace снят навсегда; B — новый ID, P(B), без merge с D(A). | Явное новое подключение B, сохранить/сверить A. | Часть: ContractTests.test_manual_unshare_tombstones_even_existing_path_and_never_returns; ПК: server_rename_new_identity |
 | 2e. Переименована серверная папка, ранее загруженная с ПК, с `.stfolder/remote-disk-folder-id` | Marker не воскрешает снятый incoming ID и не блокирует обнаружение ошибки. | После проверки снять старый marker и явно создать новый ID. | Есть: ContractTests.test_removed_upload_and_renamed_marker_never_reuse_tombstone |
-| 3a. «Забрать» / download; P, пустая собственная заглушка | P→локальная регистрация→D; ignores прежде scan, без SSH. | Повторить по тому же ID при потере ответа. | ПК: download_empty_placeholder |
-| 3b. Download; P, но путь занят обычной непустой папкой/чужим desktop.ini | Авто-download запрещён; показать явное «Объединить с сервером». | Явный merge, конфликтные версии сохранить; чужой ini не трогать. | ПК: explicit_merge_local_copy (основа a175d75) |
+| 3a. «Забрать» / download; P, пустая собственная заглушка | P→локальная регистрация→D; ignores прежде scan, без SSH. | Повторить по тому же ID при потере ответа. | ПК 2А: test-disk-explorer-engine.py (Keep/download), DiskExplorerTests.Commands |
+| 3b. Download; P, но путь занят обычной непустой папкой/чужим desktop.ini | Авто-download запрещён; показать явное «Объединить с сервером». | Явный merge, конфликтные версии сохранить; чужой ini не трогать. | ПК 2А: DiskExplorerTests.LocalCopies; test-disk-explorer-engine.py (Reinstall) |
 | 3c. Download; D, U, RO или неизвестный путь | Повторный download D/U/RO и неизвестного пути → отказ без изменений. | Дождаться обмена/выбрать P. | ПК: download_rejects_registered_or_unknown |
 | 3d. Download; сервер O, локальный REST доступен, старое P сохранилось | Локальная очередь допускается, статус ожидания, не готовность сервера. | Дождаться канала и подтверждения; tombstone не обходится. | ПК: offline_download_waits_confirmation |
-| 4a. «Оставить только на сервере»; D, подтверждено Synced | Свежая двусторонняя готовность + полный инвентарь → detach/recycle/P только этого ПК. | При ошибке восстановить регистрацию, файлы сохранить. | ПК: keep_confirmed_inventory |
-| 4b. Keep; U, syncing, pause, O, Z либо RO changes | Отказ, регистрация и данные сохранены. | Восстановить сеть/снять паузу/досинхронизировать; RO явно загрузить. | ПК: keep_rejects_unconfirmed |
-| 4c. Keep; Корзина недоступна/переполнена/отмена; сетевой или съёмный диск | Только безопасная Корзина; отказ/отмена не теряет регистрацию и данные. | Освободить место, повторить после проверки. | ПК: recycle_failure_restores_registration |
-| 4d. Keep; D содержит локальную `.env`, vendor, `.git`, `.stversions` или появилась новая правка после проверки | Отказ со списком уникальных ignored/поздних данных, ничего не перемещать. | Сохранить локальные данные отдельно по решению человека, повторить. | ПК: keep_rejects_ignored_and_late_writes |
-| 4e. Keep; внешняя зарегистрированная папка | Внешний путь не поддерживается, Keep не удаляет его. | Отсоединить старую регистрацию; явно подключить копию внутри базы. | ПК: keep_rejects_external |
+| 4a. «Оставить только на сервере»; D, подтверждено Synced | Свежая двусторонняя готовность + полный инвентарь → detach/recycle/P только этого ПК. | При ошибке восстановить регистрацию, файлы сохранить. | ПК 2А: SafetyTests.test_keep_scans_unindexed_edit_and_waits_for_server |
+| 4b. Keep; U, syncing, pause, O, Z либо RO changes | Отказ, регистрация и данные сохранены. | Восстановить сеть/снять паузу/досинхронизировать; RO явно загрузить. | ПК 2А: DiskExplorerTests.Commands; SafetyTests.test_keep_timeout_retains_data_and_registration; test_receiveonly_changes_are_not_synced_and_keep_is_rejected |
+| 4c. Keep; Корзина недоступна/переполнена/отмена; сетевой или съёмный диск | Только безопасная Корзина; отказ/отмена не теряет регистрацию и данные. | Освободить место, повторить после проверки. | ПК 2А: DiskExplorerTests.Commands / RecyclePolicy (Корзина Linux — move fixture; Windows Shell остаётся smoke-проверкой) |
+| 4d. Keep; D содержит локальную `.env`, vendor, `.git`, `.stversions` или появилась новая правка после проверки | Отказ со списком уникальных ignored/поздних данных, ничего не перемещать. | Сохранить локальные данные отдельно по решению человека, повторить. | ПК 2А: SafetyTests.test_keep_refuses_every_local_only_entry_with_list; DiskExplorerTests.Lifecycle (late write после DELETE) |
+| 4e. Keep; внешняя зарегистрированная папка | Внешний путь не поддерживается, Keep не удаляет его. | Отсоединить старую регистрацию; явно подключить копию внутри базы. | ПК 2А: DiskExplorerTests.Lifecycle / DiskPaths.Location |
 | 5a. Upload новой J, имя свободно и папка — прямой ребёнок Disk | Только новый Upload-ID; свободное имя → init+пустой commit+приём, ПК2→P. | Повтор использует reservation; без origin явно отметить. | Есть: ContractTests.test_only_upload_ids_are_admitted_and_git_is_initialized_once; IncomingFolderTests.test_upload_is_accepted_bidirectionally_and_offered_to_a_third_device |
-| 5b. Upload J вне Disk, например `C:\works\eastclinic`, имя свободно | Внешний/вложенный J → отказ до регистрации. | Переместить как обычные данные в прямого ребёнка базы и явно Upload. | ПК: upload_requires_direct_disk_child |
-| 5c. Upload J, одноимённая папка уже видна в локальном snapshot | Занятое имя → отказ, без суффиксов/неявного merge. | Другое согласованное имя либо явный merge существующего проекта. | Часть: ContractTests.test_name_collision_and_invalid_labels_are_refused_without_sanitizing; IncomingFolderTests.test_colliding_labels_never_merge_existing_contents_or_registered_paths |
+| 5b. Upload J вне Disk, например `C:\works\eastclinic`, имя свободно | Внешний/вложенный J → отказ до регистрации. | Переместить как обычные данные в прямого ребёнка базы и явно Upload. | ПК 2А: SafetyTests.test_external_and_nested_upload_never_register; DiskChoiceTests; disk/test-accept.ps1 |
+| 5c. Upload J, одноимённая папка уже видна в локальном snapshot | Занятое имя → отказ, без суффиксов/неявного merge. | Другое согласованное имя либо явный merge существующего проекта. | ПК 2А: DiskExplorerTests.Lifecycle (Q2, видимая коллизия); серверный collision-тест |
 | 5d. Upload J, серверное имя занято, но клиент ещё этого не знает; другой incoming ID | Занятое имя → отказ, без суффиксов/неявного merge. | Другое согласованное имя либо явный merge существующего проекта. | Часть: ContractTests.test_name_collision_and_invalid_labels_are_refused_without_sanitizing; IncomingFolderTests.test_colliding_labels_never_merge_existing_contents_or_registered_paths |
-| 5e. Upload J; ID=имя совпадает с уже зарегистрированным ID сервера | Новый Upload не использует basename-ID; legacy предложение отвергается. | Существующий серверный проект подключать явно по его ID. | Часть: IncomingFolderTests.test_upload_id_equal_to_an_unregistered_local_name_does_not_merge; ПК: upload_random_id |
-| 5f. Upload вложенной папки D\child либо родителя зарегистрированного проекта | Пересечение с зарегистрированным путём → отказ. | Выбрать отдельного прямого ребёнка Disk. | ПК: upload_rejects_overlap |
-| 5g. Upload вложенной J `Disk\group\project`, если group не зарегистрирована | Внешний/вложенный J → отказ до регистрации. | Переместить как обычные данные в прямого ребёнка базы и явно Upload. | ПК: upload_requires_direct_disk_child |
-| 5h. Upload уже зарегистрированной папки: не shared / receiveonly / уже sendreceive | Существующий серверный ID RO → явное включение sendreceive; уже D → идемпотентно. Чужой legacy ID сервер не принимает. | Без серверного проекта — отсоединить чужую регистрацию, новый Upload. | ПК: upload_existing_registration |
+| 5e. Upload J; ID=имя совпадает с уже зарегистрированным ID сервера | Новый Upload не использует basename-ID; legacy предложение отвергается. | Существующий серверный проект подключать явно по его ID. | ПК 2А: DiskExplorerTests.Lifecycle (UUID Upload); engine test — настоящий server admission |
+| 5f. Upload вложенной папки D\child либо родителя зарегистрированного проекта | Пересечение с зарегистрированным путём → отказ. | Выбрать отдельного прямого ребёнка Disk. | ПК 2А: DiskExplorerTests.Lifecycle / Commands |
+| 5g. Upload вложенной J `Disk\group\project`, если group не зарегистрирована | Внешний/вложенный J → отказ до регистрации. | Переместить как обычные данные в прямого ребёнка базы и явно Upload. | ПК 2А: SafetyTests.test_external_and_nested_upload_never_register |
+| 5h. Upload уже зарегистрированной папки: не shared / receiveonly / уже sendreceive | Существующий серверный ID RO → явное включение sendreceive; уже D → идемпотентно. Чужой legacy ID сервер не принимает. | Без серверного проекта — отсоединить чужую регистрацию, новый Upload. | ПК 2А: SafetyTests.test_add_promotes_existing_receiveonly_shared_registration; DiskExplorerTests.Commands (запрет legacy unshared ID) |
 | 5i. Upload J, в Disk много папок | Upload доступен для любой подходящей J независимо от длины меню. | Действие программы остаётся доступным при ограничении shell. | ПК: upload_large_menu |
-| 6a. Delete в Explorer скачанной D целиком, включая корень/`.stfolder` | Удаление корня → только локальный detach; снова P; сервер и другие ПК целы. | Забрать заново явно. | ПК: delete_root_detaches_recreates_placeholder (основа a0c081c+4d89432) |
-| 6b. Delete **содержимого** D при остающемся корне и `.stfolder` | Удаление содержимого D при сохранённом корне → обычная двусторонняя синхронизация. | Версии Syncthing до 30 дней либо git. | ПК: delete_contents_propagates |
-| 6c. Delete пустой P в Explorer | Удаление корня → только локальный detach; снова P; сервер и другие ПК целы. | Забрать заново явно. | ПК: delete_root_detaches_recreates_placeholder (основа a0c081c+4d89432) |
-| 7a. Move/rename D из Disk в `C:\works\eastclinic` на том же томе | Move/rename отсоединяет старую локальную привязку; новая папка J, без статуса из ini. Сервер цел. | Удалить наше устаревшее оформление по возможности; при желании явно Upload/merge в базе. | ПК: moved_root_detaches_without_file_deletes |
-| 7b. То же между томами / copy+delete, во время работы движка | Move/rename отсоединяет старую локальную привязку; новая папка J, без статуса из ini. Сервер цел. | Удалить наше устаревшее оформление по возможности; при желании явно Upload/merge в базе. | ПК: moved_root_detaches_without_file_deletes |
-| 7c. Move/rename P из Disk наружу | Move/rename отсоединяет старую локальную привязку; новая папка J, без статуса из ini. Сервер цел. | Удалить наше устаревшее оформление по возможности; при желании явно Upload/merge в базе. | ПК: moved_root_detaches_without_file_deletes |
-| 7d. Возврат перемещённой D обратно **в точный прежний path** вместе с `.stfolder`, регистрация ещё существует | До подтверждённого detach точный возврат отменяет наблюдение; после — только явный приём/merge. | Проверить config, не доверять одному marker/ini. | ПК: return_before_and_after_detach |
-| 7e. Внешняя D была зарегистрирована по `C:\works\eastclinic`, затем её перетащили **в Disk** | Внешняя legacy привязка не сохраняется как поддерживаемая; новый путь в базе сам не подключается. | Явно отсоединить старую и merge с сервером. | ПК: external_legacy_moved_into_disk |
+| 6a. Delete в Explorer скачанной D целиком, включая корень/`.stfolder` | Удаление корня → только локальный detach; снова P; сервер и другие ПК целы. | Забрать заново явно. | ПК 2А: test-disk-explorer-engine.py (Deleted); DiskExplorerTests.MissingFolders (включая последний проект) |
+| 6b. Delete **содержимого** D при остающемся корне и `.stfolder` | Удаление содержимого D при сохранённом корне → обычная двусторонняя синхронизация. | Версии Syncthing до 30 дней либо git. | ПК 2А: test-disk-explorer-engine.py (удаление data.txt при сохранённом корне) |
+| 6c. Delete пустой P в Explorer | Удаление корня → только локальный detach; снова P; сервер и другие ПК целы. | Забрать заново явно. | ПК 2А: DiskExplorerTests.Lifecycle / HttpAndEvents (без события Syncthing) |
+| 7a. Move/rename D из Disk в `C:\works\eastclinic` на том же томе | Move/rename отсоединяет старую локальную привязку; новая папка J, без статуса из ini. Сервер цел. | Удалить наше устаревшее оформление по возможности; при желании явно Upload/merge в базе. | ПК 2А: test-disk-explorer-engine.py (Renamed/Moved); DiskExplorerTests.MissingFolders |
+| 7b. То же между томами / copy+delete, во время работы движка | Move/rename отсоединяет старую локальную привязку; новая папка J, без статуса из ini. Сервер цел. | Удалить наше устаревшее оформление по возможности; при желании явно Upload/merge в базе. | ПК 2А: test-disk-explorer-engine.py (Copied: copy+delete); настоящий Windows cross-volume остаётся smoke-проверкой |
+| 7c. Move/rename P из Disk наружу | Move/rename отсоединяет старую локальную привязку; новая папка J, без статуса из ini. Сервер цел. | Удалить наше устаревшее оформление по возможности; при желании явно Upload/merge в базе. | ПК 2А: DiskExplorerTests.Lifecycle (moved placeholder, BoundPath) |
+| 7d. Возврат перемещённой D обратно **в точный прежний path** вместе с `.stfolder`, регистрация ещё существует | До подтверждённого detach точный возврат отменяет наблюдение; после — только явный приём/merge. | Проверить config, не доверять одному marker/ini. | ПК 2А: test-disk-explorer-engine.py (Brief); DiskExplorerTests.MissingFolders |
+| 7e. Внешняя D была зарегистрирована по `C:\works\eastclinic`, затем её перетащили **в Disk** | Внешняя legacy привязка не сохраняется как поддерживаемая; новый путь в базе сам не подключается. | Явно отсоединить старую и merge с сервером. | ПК 2А: DiskExplorerTests.Lifecycle (7e, внешняя регистрация → перенос в Disk) |
 | 7f. Изменение `disk.base` / base.txt вместо переноса отдельных проектов | Смена базы не перемещает/не удаляет данные, не дублирует ID. | Явный перенос с остановкой прежней привязки, проверкой и откатом. | ПК: change_base_preserves_data |
-| 8a. ПК имеет D, сервер снял ID; сервер connected, valid/paused ранее запомнен | Z: сохранить данные, показать снятие при достоверном подтверждении, отсоединить; без истории не угадывать по одному notSharing. | Восстановить подтверждение/проверить журнал; не переотправлять retired ID. | Часть: ContractTests.test_manual_unshare_tombstones_even_existing_path_and_never_returns; ПК: server_removed_with_and_without_history |
-| 8b. Та же папка, память подтверждения отсутствует/потеряна | Z: сохранить данные, показать снятие при достоверном подтверждении, отсоединить; без истории не угадывать по одному notSharing. | Восстановить подтверждение/проверить журнал; не переотправлять retired ID. | Часть: ContractTests.test_manual_unshare_tombstones_even_existing_path_and_never_returns; ПК: server_removed_with_and_without_history |
+| 8a. ПК имеет D, сервер снял ID; сервер connected, valid/paused ранее запомнен | Z: сохранить данные, показать снятие при достоверном подтверждении, отсоединить; без истории не угадывать по одному notSharing. | Восстановить подтверждение/проверить журнал; не переотправлять retired ID. | ПК 2А: DiskExplorerTests.FolderErrorsAndRemoval / Lifecycle; test-disk-explorer-engine.py (withdrawal/re-offer) |
+| 8b. Та же папка, память подтверждения отсутствует/потеряна | Z: сохранить данные, показать снятие при достоверном подтверждении, отсоединить; без истории не угадывать по одному notSharing. | Восстановить подтверждение/проверить журнал; не переотправлять retired ID. | ПК 2А: DiskExplorerTests.FolderErrorsAndRemoval (без памяти notSharing остаётся ожиданием) |
 | 8c. История Infraagent на живой установке | Infraagent/старые ID не принимаются ни при каком pending; происхождение неизвестного прошлого не выдумывать. | Проверить журнал, новое намерение только явным Upload. | Есть: ContractTests.test_only_upload_ids_are_admitted_and_git_is_initialized_once |
 | 9a. ПК1 download P→D; ПК2 P | Download ПК1 локален; ПК2 остаётся P. | На ПК2 отдельный явный download. | ПК: three_peers_download_is_local |
 | 9b. ПК1 Keep D→P; ПК2 D | Keep ПК1 локален; ПК2 D и сервер сохраняют байты. | ПК1 может снова забрать. | ПК: three_peers_keep_is_local |
@@ -144,12 +145,12 @@ Syncthing), device (ID предлагающего ПК или пусто), outco
 | 9e. ПК1 удаляет/переносит корень D или P; ПК2 D/P | Delete/move корня ПК1 не удаляет файлы сервера/ПК2; выбор локален. | ПК1 получает P, старую перенесённую J явно объединить при желании. | ПК: three_peers_root_delete_move |
 | 10a. Новый ПК, `folders=[]` либо поля нет | Новый ПК не принимает исходники автоматически; all игнорируется с предупреждением. | Явно выбрать проект. | ПК: install_default_and_legacy_all_no_download |
 | 10b. Новый ПК, `folders="all"` | Новый ПК не принимает исходники автоматически; all игнорируется с предупреждением. | Явно выбрать проект. | ПК: install_default_and_legacy_all_no_download |
-| 10c. Новый ПК, явный список существующих папок | Явный список принимает только однозначное реальное предложение; непустая копия требует merge. | Уточнить ID при одинаковых label. | ПК: install_accepts_unambiguous_pending |
-| 10d. Новый ПК, явный список с опечаткой/удалённой папкой/сервер не успел предложить | Нет предложения → ожидание, без fallback-create; legacy ID сервер отказывает. | Исправить опечатку/восстановить канал. | Часть: ContractTests.test_only_upload_ids_are_admitted_and_git_is_initialized_once; ПК: installer_no_fallback_create |
+| 10c. Новый ПК, явный список существующих папок | Явный список принимает только однозначное реальное предложение; непустая копия требует merge. | Уточнить ID при одинаковых label. | ПК 2А: disk/test-accept.ps1 (late offer, повтор, непустая копия требует merge) |
+| 10d. Новый ПК, явный список с опечаткой/удалённой папкой/сервер не успел предложить | Нет предложения → ожидание, без fallback-create; legacy ID сервер отказывает. | Исправить опечатку/восстановить канал. | ПК 2А: disk/test-accept.ps1 (реальные 30 секунд, без mkdir/POST fallback) |
 | 10e. Список содержит старый `P/docs`, direction, external | Legacy выбор явно описать в предупреждении; external не поддерживается, nested не маскировать тихим расширением. | Показать итоговый top-level выбор до приёма. | ПК: legacy_choice_reports_effective_scope |
 | 10f. Уже принята папка; применили `folders=[]`, убрали её из списка или указали другой path | Удаление из списка не удаляет данные/регистрацию; чужой ID/путь не считать нужным подключением. | Отдельный явный detach/приём правильного ID. | ПК: apply_choice_preserves_registered_and_rejects_foreign |
-| 11a. Обновление/переустановка EXE, служебный state сохранился | Обновление сохраняет ID/пути, мигрирует обязательные ignores и версии. | При ошибке сохранить данные, журналировать. | Часть: ContractTests.test_versioning_is_migrated_for_existing_folders; ПК: update_migrates_policy |
-| 11b. Потерян служебный state; на диске осталась непустая копия проекта | Непустая копия → явное предложение merge, без автоматического приёма. | «Объединить с сервером», конфликты сохранить. | ПК: reinstall_explicit_merge (основа a175d75) |
+| 11a. Обновление/переустановка EXE, служебный state сохранился | Обновление сохраняет ID/пути, мигрирует обязательные ignores и версии. | При ошибке сохранить данные, журналировать. | ПК 2А: SafetyTests.test_tray_registration_migrates_policy_before_next_scan; disk/test-accept.ps1 |
+| 11b. Потерян служебный state; на диске осталась непустая копия проекта | Непустая копия → явное предложение merge, без автоматического приёма. | «Объединить с сервером», конфликты сохранить. | ПК 2А: DiskExplorerTests.LocalCopies; test-disk-explorer-engine.py (Reinstall/conflicts) |
 | 11c. Новый device ID после полной генерации state | Смена device/server ID требует нового подтверждённого знакомства, старую привязку не выдавать за рабочую. | Переподключить; старое устройство удалить явно, данные не стирать. | ПК: identity_rotation_and_partial_state |
 | 11d. Изменён cert/device ID, но config.xml и server.txt остались; либо сервер сменил ID на том же endpoint | Смена device/server ID требует нового подтверждённого знакомства, старую привязку не выдавать за рабочую. | Переподключить; старое устройство удалить явно, данные не стирать. | ПК: identity_rotation_and_partial_state |
 | 11e. Сознательная смена сервера | Новый сервер — изолированная привязка/база; никаких старых автоматических upload. | Переподключить явно, старые данные сохранить. | ПК: switch_server_isolates_identity |
@@ -158,15 +159,15 @@ Syncthing), device (ID предлагающего ПК или пусто), outco
 | 12a. Одновременные разные правки одного файла, D↔сервер/другой D | Обе конфликтные версии сохранить; 30 дней staggered, без авто-commit. | Человек/агент разрешает конфликт. | Часть: ContractTests.test_versioning_is_migrated_for_existing_folders; ПК: three_peers_conflict_preserves_versions |
 | 12b. Уже есть sync-conflict-файлы, needs=0/idle | Конфликт явен, зелёный статус/Keep запрещены до разрешения. | Сверить и разрешить обе версии. | ПК: conflicts_block_keep |
 | 12c. Файлы сервера отличаются только регистром / недопустимы для Windows | Ошибка имён файлов видна; молчаливой санитизации нет. | Исправить имена на сервере с проверкой обеих версий. | ПК: internal_windows_name_conflicts |
-| 13a. `.git`, vendor/node_modules, `.env*`, перечисленные ключи при новом штатном приёме | Политика до scan, первой; пользовательские negation не включают обязательные имена. | Исправить политику до продолжения обмена. | Часть: ContractTests.test_mandatory_ignores_precede_negations_and_cover_q8; ServerTests.test_foreign_ignores_survive_updates_and_rules_work_in_real_engine |
-| 13b. Пользовательская `.stignore` содержит `!.git` / `!.env` / `!vendor` перед include | Политика до scan, первой; пользовательские negation не включают обязательные имена. | Исправить политику до продолжения обмена. | Часть: ContractTests.test_mandatory_ignores_precede_negations_and_cover_q8; ServerTests.test_foreign_ignores_survive_updates_and_rules_work_in_real_engine |
-| 13c. Уже принятая папка / ручной приём в Syncthing Tray | Мигрировать обязательные правила у существующих managed регистраций; ручной приём не обход безопасности. | Пауза проблемной регистрации до ремонта политики. | Часть: ContractTests.test_mandatory_ignores_precede_negations_and_cover_q8; ПК: manual_accept_policy_migration |
-| 13d. Секрет назван иначе (`token.json`, PEM, служебный config с паролем); зависимости `.venv` и т.п. | Q8-имена запрещены, неизвестные секреты по содержимому не распознаются. | Назвать/добавить секрет в локальные исключения до обмена. | Часть: ContractTests.test_mandatory_ignores_precede_negations_and_cover_q8; ПК: q8_secret_names |
-| 13e. В проект добавлен root desktop.ini / перенос оформления | Root desktop.ini локален; чужое оформление не меняется, перенесённое наше не доказывает статус. | Очистить собственное устаревшее оформление. | ПК: metadata_requires_active_binding |
+| 13a. `.git`, vendor/node_modules, `.env*`, перечисленные ключи при новом штатном приёме | Политика до scan, первой; пользовательские negation не включают обязательные имена. | Исправить политику до продолжения обмена. | ПК 2А: DiskExplorerTests.Lifecycle; SafetyTests.test_tray_registration_migrates_policy_before_next_scan |
+| 13b. Пользовательская `.stignore` содержит `!.git` / `!.env` / `!vendor` перед include | Политика до scan, первой; пользовательские negation не включают обязательные имена. | Исправить политику до продолжения обмена. | ПК 2А: DiskExplorerTests.Lifecycle; disk/test-accept.ps1 (BOM/CRLF/!**) |
+| 13c. Уже принятая папка / ручной приём в Syncthing Tray | Мигрировать обязательные правила у существующих managed регистраций; ручной приём не обход безопасности. | Пауза проблемной регистрации до ремонта политики. | ПК 2А: SafetyTests.test_tray_registration_migrates_policy_before_next_scan; disk/test-accept.ps1 (Tray) |
+| 13d. Секрет назван иначе (`token.json`, PEM, служебный config с паролем); зависимости `.venv` и т.п. | Q8-имена запрещены, неизвестные секреты по содержимому не распознаются. | Назвать/добавить секрет в локальные исключения до обмена. | ПК 2А: SafetyTests.test_tray_registration_migrates_policy_before_next_scan; серверный Q8-тест |
+| 13e. В проект добавлен root desktop.ini / перенос оформления | Root desktop.ini локален; чужое оформление не меняется, перенесённое наше не доказывает статус. | Очистить собственное устаревшее оформление. | ПК 2А: DiskExplorerTests.Lifecycle / Metadata / LocalCopies (BoundPath, чужой ini) |
 | 14a. OFF до команды | OFF → отказ до изменения, честный unavailable/неподтверждённый P. | Восстановить локальный движок и перечитать config. | ПК: engine_off_commands_do_not_mutate |
 | 14b. Канал O, локальный движок жив | O → upload/download в локальной очереди, Keep запрещён; готовность только после подтверждения. | Восстановить канал, дождаться admission и доставки. | ПК: offline_queue_and_admission_status |
-| 14c. POST при add/download применён, ответ потерян | Потеря ответа → проверить config; сохранить ignores, повторить по тому же ID/reservation. | Не создавать новый ID/путь вслепую. | Часть: IncomingFolderTests.test_retry_after_a_committed_put_with_a_lost_response_is_idempotent; IncomingFolderTests.test_failed_acceptance_reuses_its_reserved_directory_and_other_offers_continue; ПК: accept_lost_reply |
-| 14d. Обрыв/падение во время Keep после detach, до/после recycle | Перезапуск между фазами Keep восстанавливает регистрацию при сохранённых данных; непустую J не объявлять P. | Восстановить из локального журнала операции без удаления файлов. | ПК: keep_crash_recovery_each_phase |
+| 14c. POST при add/download применён, ответ потерян | Потеря ответа → проверить config; сохранить ignores, повторить по тому же ID/reservation. | Не создавать новый ID/путь вслепую. | ПК 2А: DiskExplorerTests.Commands (lost reply); SafetyTests.test_accept_process_killed_before_and_after_post_reuses_intent |
+| 14d. Обрыв/падение во время Keep после detach, до/после recycle | Перезапуск между фазами Keep восстанавливает регистрацию при сохранённых данных; непустую J не объявлять P. | Восстановить из локального журнала операции без удаления файлов. | ПК 2А: SafetyTests.test_keep_process_killed_after_detach_restores_registration / after_recycle_finishes_only_placeholder / after_placeholder_is_idempotent |
 | 14e. Молчаливый обрыв канала, сервер держит старые соединения | Монотонное наблюдение ≥120 с, guarded pause/resume, cooldown; живой трафик не прерывать. | Дождаться переподключения; повтор resume после сбоя. | Есть: StaleConnectionTests.test_computer_reconnects_after_the_server_recycles_its_stale_connections; StaleConnectionTests.test_connections_with_real_traffic_are_never_recycled |
 
 ## Границы этапа 1 и разбор app/disk-pc-vanish
@@ -187,3 +188,52 @@ Syncthing), device (ID предлагающего ПК или пусто), outco
 всех фаз. В этом серверном этапе C# и ветка-источник не меняются.
 
 Доказательство готовности серверного этапа и оставшиеся проверки — `docs/DISK-STAGE1-REPORT.md`.
+
+## Клиентский этап 2А: долговечное намерение и восстановление
+
+`disk-operations.json` находится в выбранной Disk home и содержит peer, operations[path],
+kind (accept/keep), project ID, path, name, config, phase и инвентарь Keep. Upload сначала резервирует UUID
+(`reserved`), Accept сохраняет регистрацию (`prepared`), затем exclusions (`ignores-ready`);
+Keep фиксирует `prepared` до DELETE, затем `detached` и `recycled`. Запись — временный файл,
+Flush(true), атомарная замена; единый именованный mutex по Disk home разделяется C# и PowerShell.
+Битый журнал блокирует действия, а не превращается в пустую историю. История завершённых
+C# операций — disk-operation-results.jsonl (без содержимого файлов и config).
+
+При старте и перед командами: применённый Accept проверяется по ID/path/peer, отсутствующий
+Accept автоматически не повторяется; явный retry использует сохранённый UUID, в том числе при
+изменении регистра Windows-пути или его эквивалентной абсолютной записи. Незавершённый
+Keep с оставшимися данными восстанавливает исходную регистрацию; если инвентарь изменился
+(включая частичный рецикл), восстанавливает её **на паузе**, чтобы не передать удаление серверу; с отсутствующей папкой и
+снятой регистрацией восстанавливает только заглушку. Recovery никогда не вызывает Корзину.
+Недоступная база, конфликт ID/пути или чужой peer блокируют восстановление без удаления данных.
+
+Keep сначала снимает SHA-256 инвентарь, запрашивает полный scan, проверяет стабильный sequence,
+готовность обеих сторон и по каждому пользовательскому пути local/global version и availability
+именно сервера. Ignored, конфликты и локальные версии не считаются серверной копией. Затем
+инвентарь сверяется перед DELETE и после него, непосредственно перед Корзиной. Изменения
+включая новые/удалённые файлы отменяют Keep; регистрация восстанавливается. Собственные
+служебные правила/оформление и проверенный marker Syncthing не требуют серверной копии;
+пользовательские .stignore и посторонние данные в .stfolder требуют сохранения.
+Это проверка по локальному REST-индексу Syncthing, не удалённое чтение файлов через SSH.
+
+`explorer-retired-<peer>.json` сохраняется до DELETE подтверждённо снятой регистрации.
+Повторное старое pending не снимает запись; локальные данные не трогаются. Без прежнего
+подтверждения notSharing не позволяет отличить снятие от ещё не принятого Upload.
+Непринятая P не имеет db/completion: её свежесть и полный каталог остаются отдельной частью.
+
+Пропавший корень на ПК наблюдается минимум 30 непрерывных монотонных секунд с доступной
+базой и родителями. Недоступный том/база, файл, ссылка, ошибки доступа, смена поколения базы,
+процесса или некорректные timestamps сбрасывают наблюдение. Пустая **доступная база ПК**
+допускает снятие последнего отсутствующего корня; серверный запрет пустой базы не меняется.
+Перед снятием подтверждённого корня его ID/имя/путь сохраняются в локальном каталоге заглушек:
+Syncthing не обязан повторять неизменённое предложение после локального DELETE. Это сохраняет
+прежнюю P без нового ID, регистрации или ожидания pending. Неподтверждённый Upload в такой
+каталог не попадает и серверной копией не объявляется.
+Legacy external/nested регистрации также отсоединяются после доступного grace, без переноса
+данных. Оформление внутри базы очищается при reconcile, новое оформление содержит BoundPath.
+Локальная сверка оформления выполняется и при пустом ответе event poll: удалённая/перенесённая P
+появляется вновь без нового ID или регистрации. Переименованная P остаётся обычной локальной
+папкой, даже если пуста; у неё снимается только наше оформление. Та же сверка восстанавливает
+старую P после переноса непринятой непустой LocalCopy, сохраняя данные по новому пути.
+Неизвестный внешний destination найти по одному старому пути невозможно, его ini не является
+доказательством действующей регистрации. Windows Shell/cross-volume проверяются отдельно.

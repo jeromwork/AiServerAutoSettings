@@ -11,10 +11,11 @@ namespace RemoteAgents.Launcher
     // so the name lives in one place: the text a person reads in the menu is the text the hint tells them to click.
     internal static class DiskMenu
     {
-        internal const string Download = "Скачать на компьютер", KeepServer = "Оставить только на сервере", Upload = "Загрузить на сервер";
+        internal const string Download = "Скачать на компьютер", KeepServer = "Оставить только на сервере", Upload = "Загрузить на сервер", Sync = "Объединить с сервером";
+        internal const string LocalCopyHint = "Локальная копия, не синхронизируется. Правый клик → " + Sync;
         internal const string ServerOnlyHint = "Только на сервере. Правый клик → " + Download;
     }
-    internal enum DiskExplorerKind { Local, ServerOnly, Pending, Syncing, Synced, Paused, Error, Offline, Unavailable, LocalChanges, ServerRemoved }
+    internal enum DiskExplorerKind { Local, ServerOnly, Pending, Syncing, Synced, Paused, Error, Offline, Unavailable, LocalChanges, ServerRemoved, LocalCopy }
     internal sealed class DiskFolderState
     {
         internal string Id = "", Name = "", Path = "", Detail = "";
@@ -31,6 +32,7 @@ namespace RemoteAgents.Launcher
         {
             get {
                 switch (Kind) {
+                    case DiskExplorerKind.LocalCopy: return DiskMenu.LocalCopyHint;
                     case DiskExplorerKind.ServerOnly: return DiskMenu.ServerOnlyHint;
                     case DiskExplorerKind.Synced: return "Синхронизировано с сервером";
                     case DiskExplorerKind.Syncing: return "Синхронизируется: " + Percent + "%";
@@ -66,8 +68,8 @@ namespace RemoteAgents.Launcher
             double localPercent = total > 0 ? 100 * Math.Max(0, total - need) / total : Number(local, "needTotalItems") > 0 ? 0 : 100;
             double remotePercent = remote.ContainsKey("completion") ? Number(remote, "completion") : 0;
             row.Percent = (int)Math.Max(0, Math.Min(100, Math.Floor(Math.Min(localPercent, remotePercent))));
-            if (row.Paused || state == "paused" || Json.Str(remote, "remoteState") == "paused") row.Kind = DiskExplorerKind.Paused;
-            else if (RemovedByServer(remote, connected, confirmedBefore)) { row.Kind = DiskExplorerKind.ServerRemoved; row.Detail = ""; }
+            if (RemovedByServer(remote, connected, confirmedBefore)) { row.Kind = DiskExplorerKind.ServerRemoved; row.Detail = ""; }
+            else if (row.Paused || state == "paused" || Json.Str(remote, "remoteState") == "paused") row.Kind = DiskExplorerKind.Paused;
             else if (state == "error" || row.Detail.Length > 0 || Number(local, "pullErrors") > 0) row.Kind = DiskExplorerKind.Error;
             else if (Number(local, "receiveOnlyTotalItems") > 0 || Number(local, "receiveOnlyChangedBytes") > 0) { row.Kind = DiskExplorerKind.LocalChanges; row.Detail = "Есть локальные изменения"; }
             else if (!connected) row.Kind = DiskExplorerKind.Offline;
@@ -121,7 +123,7 @@ namespace RemoteAgents.Launcher
         {
             int at = Array.IndexOf(args, "--disk-shell");
             if (at < 0) return null;
-            if (at + 2 >= args.Length || !new[] { "download", "keep-server", "add" }.Contains(args[at + 1])) throw new ArgumentException("Неизвестная команда Диска");
+            if (at + 2 >= args.Length || !new[] { "download", "sync", "keep-server", "add" }.Contains(args[at + 1])) throw new ArgumentException("Неизвестная команда Диска");
             return new DiskShellRequest { Action = args[at + 1], Path = DiskPaths.Full(args[at + 2]) };
         }
     }
@@ -154,9 +156,15 @@ namespace RemoteAgents.Launcher
             for (string p = System.IO.Path.GetFullPath(path); !string.IsNullOrEmpty(p); p = System.IO.Path.GetDirectoryName(p))
                 if ((Directory.Exists(p) || File.Exists(p)) && (File.GetAttributes(p) & FileAttributes.ReparsePoint) != 0) throw new IOException("Папка или её родитель является ссылкой");
         }
+        internal static void Location(string path, string root)
+        {
+            if (Same(path, root) || !Same(System.IO.Path.GetDirectoryName(Full(path)) ?? Full(path), root))
+                throw new IOException("Подключать можно только папки непосредственно внутри базы Диска; внешние и вложенные пути не поддерживаются");
+        }
         internal static void Available(string path, string root, IEnumerable<DiskFolderState> configured)
         {
             Plain(path);
+            Location(path, root);
             if (Same(path, root) || Within(root, path) || Same(path, System.IO.Path.GetPathRoot(path))) throw new IOException("Нельзя подключить корень диска или родителя Disk");
             if (File.Exists(path)) throw new IOException("Путь занят файлом");
             foreach (var row in configured.Where(f => !f.ServerOnly))

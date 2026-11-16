@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Do not leave compiler/build daemons holding the caller's inherited flock descriptor.
+export UseSharedCompilation=false DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER=1 MSBUILDDISABLENODEREUSE=1
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo=$(cd "$here/../../.." && pwd)
 dotnet=${DOTNET:-$HOME/.dotnet/dotnet}
@@ -12,12 +14,18 @@ cleanup() {
 }
 trap cleanup EXIT
 pwsh=${PWSH:-$HOME/.cache/pwsh-test/pwsh}
-# These groups touch disjoint temporary HOME/state. Keep .NET builds after the
-# server group (it builds the same projects); independent offline checks overlap
-# SSH wait times. Every child is bounded; the outer caller may set a total limit.
+# The caller owns /tmp/heavy-tests.lock. Run the offline and server groups in
+# sequence; all data is disposable HOME/state below testdir or /tmp fixtures.
+# Run the wall-clock startup budgets before the large engine/build suites can
+# evict interpreter pages on the shared 8 GB host. Keep their limits unchanged.
+timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-install.ps1" < /dev/null
+set +e
 (
+  set -e
+  timeout 60 python3 "$here/test-config-sync.py"
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-first-install.ps1" -TestHome "$testdir/wizard" < /dev/null
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-accept.ps1" -TestHome "$testdir/disk-accept" < /dev/null
+  timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-accept-install.ps1" -TestHome "$testdir/disk-accept-install" < /dev/null
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-cleanup.ps1" -TestHome "$testdir/disk-cleanup" < /dev/null
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-pairing.ps1" -TestHome "$testdir/disk-pairing" < /dev/null
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-account.ps1" -TestHome "$testdir/accounts" < /dev/null
@@ -52,7 +60,6 @@ pwsh=${PWSH:-$HOME/.cache/pwsh-test/pwsh}
   LOCALAPPDATA="$testdir/local" timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-config-device.ps1" -TestHome "$testdir/config-device" < /dev/null
   LOCALAPPDATA="$testdir/local" timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-config-scheduler.ps1" -TestHome "$testdir/config-scheduler" < /dev/null
   LOCALAPPDATA="$testdir/local" timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-refresh.ps1" -TestHome "$testdir/config-refresh" < /dev/null
-  timeout 60 python3 "$here/test-config-sync.py"
   timeout 60 python3 "$here/test-server-health.py"
   timeout 120 python3 "$repo/transport/test-config-sync-preflight.py"
   timeout 120 python3 "$repo/transport/test-server-catalog.py"
@@ -64,28 +71,16 @@ pwsh=${PWSH:-$HOME/.cache/pwsh-test/pwsh}
   timeout 120 python3 "$here/test_bridge_health.py"
   timeout 120 python3 "$here/test_wizard_boundary.py"
   timeout 120 python3 "$here/test_server_operations.py"
-) > "$testdir/offline.log" 2>&1 &
-offline_pid=$!
-(
-  bash "$repo/server/tests/run.sh"
-) > "$testdir/server.log" 2>&1 &
-server_pid=$!
-trap 'kill "$offline_pid" "$server_pid" 2>/dev/null || true; cleanup' EXIT
-failed=0
-wait "$offline_pid" || failed=1
+) > "$testdir/offline.log" 2>&1
+offline_result=$?
+set -e
 cat "$testdir/offline.log"
-wait "$server_pid" || failed=1
-cat "$testdir/server.log"
-[[ $failed == 0 ]] || exit 1
-trap cleanup EXIT
-# This suite launches two child suites and enforces a 30 s aggregate budget.
-# Keep it out of the server/offline overlap: scheduling contention alone can
-# double its elapsed time without any failed lifecycle/startup assertions.
-timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-install.ps1" < /dev/null
+[[ $offline_result == 0 ]] || exit "$offline_result"
+bash "$repo/server/tests/run.sh"
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -- "$testdir/core"
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ProductName=RemoteVPN -- "$testdir/core-vpn"
-timeout 120 python3 "$here/test-disk-explorer-engine.py"
-timeout 180 python3 "$here/test-disk-safety-engine.py"
+timeout 240 python3 "$here/test-disk-explorer-engine.py"
+timeout 300 python3 "$here/test-disk-safety-engine.py"
 # Config format, enc1, vault and materialization (stream A entry point; own output directory).
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ConfigTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ConfigTests=true -p:ProductName=RemoteVPN

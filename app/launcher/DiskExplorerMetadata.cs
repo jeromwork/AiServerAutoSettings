@@ -116,10 +116,12 @@ namespace RemoteAgents.Launcher
         internal void Reconcile(string root, IEnumerable<DiskFolderState> folders)
         {
             var rows = folders.ToArray();
+            ClassifyLocalCopies(rows);
             if (!fs.DirectoryExists(root) && !fs.FileExists(root) && !HasReparseAncestor(root) && rows.Any(f => f.ServerOnly)) fs.CreateDirectory(root);
             if (!fs.DirectoryExists(root) || HasReparseAncestor(root)) return;
             foreach (var row in rows.Where(f => f.Kind != DiskExplorerKind.Local)) {
                 try {
+                    try { DiskPaths.Location(row.Path, root); } catch (IOException) { CleanupFolder(row.Path); continue; }
                     if (fs.FileExists(row.Path) || HasReparseAncestor(row.Path)) continue;
                     bool created = !fs.DirectoryExists(row.Path);
                     if (created) {
@@ -130,11 +132,8 @@ namespace RemoteAgents.Launcher
                     string ini = Path.Combine(row.Path, "desktop.ini");
                     if ((fs.FileExists(ini) || fs.DirectoryExists(ini)) && metadata == null) continue;
                     bool placeholder = row.ServerOnly && !UserEntries(row.Path).Any() && (created || Flag(metadata, "Placeholder"));
-                    // A pending offer does not give us ownership of a pre-existing local directory.
-                    if (row.ServerOnly && !placeholder) {
-                        if (metadata != null) Apply(row.Path, DiskExplorerKind.Error, "В папке есть локальные файлы; папка не синхронизируется", metadata, false, false);
-                        continue;
-                    }
+                    // A local copy awaits an explicit merge; its files are never an error or an empty placeholder.
+                    if (row.ServerOnly && !placeholder && row.Kind != DiskExplorerKind.LocalCopy) continue;
                     Apply(row.Path, row.Kind, row.Tooltip, metadata, placeholder, created);
                 } catch (Exception e) { Failure(e); }
             }
@@ -143,6 +142,16 @@ namespace RemoteAgents.Launcher
                 if (wanted.Contains(path)) continue;
                 try { if (fs.DirectoryExists(path) && !HasReparseAncestor(path)) CleanupFolder(path, true); }
                 catch (Exception e) { Failure(e); }
+            }
+        }
+        internal void ClassifyLocalCopies(IEnumerable<DiskFolderState> rows)
+        {
+            foreach (var row in rows.Where(f => f.ServerOnly && (f.Kind == DiskExplorerKind.ServerOnly || f.Kind == DiskExplorerKind.LocalCopy))) {
+                try {
+                    if (fs.DirectoryExists(row.Path) && !HasReparseAncestor(row.Path))
+                        row.Kind = IsPlaceholder(row.Path) ? DiskExplorerKind.ServerOnly : DiskExplorerKind.LocalCopy;
+                    else if (!fs.FileExists(row.Path) && !HasReparseAncestor(row.Path)) row.Kind = DiskExplorerKind.ServerOnly;
+                } catch (Exception e) { Failure(e); }
             }
         }
         internal bool HasReparseAncestor(string path)
@@ -167,7 +176,7 @@ namespace RemoteAgents.Launcher
         {
             if (!fs.DirectoryExists(path) || HasReparseAncestor(path)) return false;
             var metadata = ReadOwned(path);
-            return Flag(metadata, "Placeholder") && !UserEntries(path).Any();
+            return Flag(metadata, "Placeholder") && Bound(metadata, path) && !UserEntries(path).Any();
         }
         IEnumerable<string> UserEntries(string path)
         { return fs.Entries(path).Where(p => !string.Equals(Path.GetFileName(p), "desktop.ini", StringComparison.OrdinalIgnoreCase)); }
@@ -185,6 +194,8 @@ namespace RemoteAgents.Launcher
             string owner;
             return values.TryGetValue("Owner", out owner) && owner == Owner && values.ContainsKey("OriginalReadOnly") && (values["OriginalReadOnly"] == "0" || values["OriginalReadOnly"] == "1") ? values : null;
         }
+        static bool Bound(Dictionary<string, string> metadata, string path)
+        { string bound; return metadata != null && (!metadata.TryGetValue("BoundPath", out bound) || DiskPaths.Same(bound, path)); }
         static bool Flag(Dictionary<string, string> metadata, string name)
         { string value; return metadata != null && metadata.TryGetValue(name, out value) && value == "1"; }
         void Apply(string path, DiskExplorerKind kind, string tip, Dictionary<string, string> metadata, bool placeholder, bool created)
@@ -194,7 +205,7 @@ namespace RemoteAgents.Launcher
             string tooltip = tip.Replace("\r", " ").Replace("\n", " ").Replace("\0", "");
             string icon = icons.PathFor(kind);
             if (icon.IndexOfAny(new[] { '\r', '\n', '"' }) >= 0) throw new IOException("Недопустимый путь значка");
-            string content = "[.ShellClassInfo]\r\nIconResource=" + icon + ",0\r\nInfoTip=" + tooltip + "\r\n[RemoteAgents]\r\nOwner=" + Owner + "\r\nOriginalReadOnly=" + (originalReadOnly ? "1" : "0") + "\r\nPlaceholder=" + (placeholder ? "1" : "0") + "\r\nCreatedDirectory=" + ((created || Flag(metadata, "CreatedDirectory")) ? "1" : "0") + "\r\n";
+            string content = "[.ShellClassInfo]\r\nIconResource=" + icon + ",0\r\nInfoTip=" + tooltip + "\r\n[RemoteAgents]\r\nOwner=" + Owner + "\r\nBoundPath=" + Path.GetFullPath(path) + "\r\nOriginalReadOnly=" + (originalReadOnly ? "1" : "0") + "\r\nPlaceholder=" + (placeholder ? "1" : "0") + "\r\nCreatedDirectory=" + ((created || Flag(metadata, "CreatedDirectory")) ? "1" : "0") + "\r\n";
             bool changed = !fs.FileExists(ini) || fs.Read(ini).Replace("\r", "") != content.Replace("\r", "");
             if (changed) {
                 if (fs.FileExists(ini)) fs.Attributes(ini, FileAttributes.Normal);
@@ -220,7 +231,7 @@ namespace RemoteAgents.Launcher
                 if (fs.FileExists(Path.Combine(path, "desktop.ini")) || fs.DirectoryExists(Path.Combine(path, "desktop.ini"))) log("Проводник: чужой desktop.ini оставлен без изменений");
                 return;
             }
-            bool remove = removeEmptyPlaceholder && Flag(metadata, "Placeholder") && Flag(metadata, "CreatedDirectory") && !UserEntries(path).Any();
+            bool remove = removeEmptyPlaceholder && Bound(metadata, path) && Flag(metadata, "Placeholder") && Flag(metadata, "CreatedDirectory") && !UserEntries(path).Any();
             string ini = Path.Combine(path, "desktop.ini");
             FileAttributes attributes = fs.Attributes(path);
             SetAttributes(path, Flag(metadata, "OriginalReadOnly") ? attributes | FileAttributes.ReadOnly : attributes & ~FileAttributes.ReadOnly);
