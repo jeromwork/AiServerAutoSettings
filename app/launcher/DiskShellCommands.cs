@@ -45,8 +45,8 @@ namespace RemoteAgents.Launcher
         readonly DiskExplorerService metadata; readonly DiskPlaceholderCatalog catalog;
         readonly DiskOperationJournal journal;
         readonly Action<string> recycle; readonly int readyTimeout; readonly string diskHome;
-        internal DiskShellCommands(IDiskRest rest, string root, DiskExplorerService metadata, DiskPlaceholderCatalog catalog, string ignoreRules, Action<string> recycle, int readyTimeout = 30000, string diskHome = null)
-        { this.rest = rest; this.root = root; this.metadata = metadata; this.catalog = catalog; this.ignoreRules = ignoreRules; this.recycle = recycle; this.readyTimeout = readyTimeout; this.diskHome = diskHome ?? catalog.Home; journal = new DiskOperationJournal(this.diskHome, rest.Peer); }
+        internal DiskShellCommands(IDiskRest rest, string root, DiskExplorerService metadata, DiskPlaceholderCatalog catalog, string ignoreRules, Action<string> recycle, int readyTimeout = -1, string diskHome = null)
+        { this.rest = rest; this.root = root; this.metadata = metadata; this.catalog = catalog; this.ignoreRules = ignoreRules; this.recycle = recycle; this.readyTimeout = readyTimeout < 0 ? DiskTiming.Milliseconds("KEEP_TIMEOUT", 30000) : readyTimeout; this.diskHome = diskHome ?? catalog.Home; journal = new DiskOperationJournal(this.diskHome, rest.Peer); }
         internal DiskSnapshot Read(CancellationToken token)
         { using (journal.Lock()) { journal.Recover(rest, root, metadata, catalog, token); Migrate(token); var value = new DiskRestModel(rest, diskHome).Read(root, token); catalog.Merge(rest.Peer, value, root); metadata.ClassifyLocalCopies(value.Folders); return value; } }
         internal string Execute(DiskShellRequest request, CancellationToken token)
@@ -108,7 +108,7 @@ namespace RemoteAgents.Launcher
             var local = Json.Map(rest.Request("GET", "system/status", null, token)); string localId = Json.Str(local, "myID");
             if (localId.Length == 0) throw new IOException("Syncthing не сообщил ID компьютера");
             config["id"] = row.Id; config["label"] = row.Name; config["path"] = row.Path; config["type"] = "sendreceive";
-            config["paused"] = false; config["fsWatcherEnabled"] = true; config["fsWatcherDelayS"] = 2; config["maxConflicts"] = -1;
+            config["paused"] = false; config["fsWatcherEnabled"] = true; config["fsWatcherDelayS"] = DiskTiming.Milliseconds("WATCHER_DELAY", 2000) / 1000.0; config["maxConflicts"] = -1;
             config["versioning"] = new { type = "staggered", @params = new { maxAge = "2592000", cleanInterval = "3600" } };
             config["devices"] = new[] { new { deviceID = localId }, new { deviceID = rest.Peer } };
             journal.Begin("accept", row, config);
@@ -182,7 +182,7 @@ namespace RemoteAgents.Launcher
                         // Its zero needs must be measured between two reads of the same post-scan local index.
                         if (stable && status.Kind == DiskExplorerKind.Synced && Json.Str(before, "state") == "idle") { check.ThrowIfCancellationRequested(); return; }
                         if (!stable) rest.Request("POST", "db/scan?folder=" + folder, null, check, readyTimeout);
-                        if (check.WaitHandle.WaitOne(200)) check.ThrowIfCancellationRequested();
+                        if (check.WaitHandle.WaitOne(DiskTiming.Milliseconds("KEEP_POLL", 200))) check.ThrowIfCancellationRequested();
                     }
                 } catch (OperationCanceledException) when (!token.IsCancellationRequested) {
                     throw new IOException("Сервер не подтвердил свежие изменения вовремя. Папка сохранена на компьютере; дождитесь синхронизации и повторите действие");

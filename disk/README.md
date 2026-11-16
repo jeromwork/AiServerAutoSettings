@@ -196,17 +196,67 @@ SH
 
 ## Изолированные проверки
 
-Все fixtures — временные HOME под `/tmp`, настоящие Syncthing на loopback;
-cron/systemd подменены. Живые `~/Disk`, state установки и Windows не используются.
+Обычная правка — быстрый набор, без запуска Syncthing/cron/systemd и без реального ожидания grace:
 
 ```bash
-flock /tmp/heavy-tests.lock python3 disk/test-disk.py -v
-flock /tmp/heavy-tests.lock bash server/tests/run.sh
-bash -n disk/server-disk.sh
-# Клиентский этап (также только под общей блокировкой):
-flock /tmp/heavy-tests.lock bash app/launcher/tests/run.sh
+flock --close /tmp/heavy-tests.lock bash app/launcher/tests/run.sh
+# Равнозначный вход:
+flock --close /tmp/heavy-tests.lock bash disk/test-fast.sh
+# Только перед выкладкой, настоящий loopback Syncthing, временные HOME:
+flock --close /tmp/heavy-tests.lock bash app/launcher/tests/run.sh --live
+# Явно весь launcher, включая прочие компоненты (не быстрая проверка Диска):
+flock --close /tmp/heavy-tests.lock bash app/launcher/tests/run.sh --full
 ```
 
-Для offline Syncthing можно задать `SYNCTHING_ARCHIVE` (архив Linux amd64 v2.1.7).
-Linux-тесты не подтверждают Windows Shell, Корзину, cross-volume move и WinPS 5.1.
-Клиентские незакрытые проверки перечислены по каждой клетке контракта.
+Fast: ≤10 с, внешний `timeout 15`, первая ошибка завершает набор. Время включает проверку
+актуальности/при необходимости сборку C#; превышение 10 с — FAIL даже при успешных assertions.
+50 Python-тестов вызывают настоящие серверные helpers с fake REST/clock; C# проверяет
+production-модель/команды/журнал/оформление с fake REST; PowerShell — приём и readiness с
+виртуальными часами. Fixtures размещаются в небольшом временном каталоге `/dev/shm`;
+`fsync`/`Flush(true)` выполняются настоящими вызовами, каталог удаляется trap.
+При необходимости база задаётся `REMOTE_DISK_TEST_TMP` (дисковая FS может не уложиться в бюджет).
+
+`build-tests.py` использует Roslyn установленного .NET SDK, без NuGet и MSBuild startup.
+Список исходников/ресурсов берётся из `disk/tests/DiskTests.csproj`; хеш всех входов и самого
+builder исключает запуск устаревшей сборки. Этот же проект можно собрать обычным dotnet build.
+Компилятор без демона; число процессоров .NET в test-runner ограничено двумя.
+
+Live: внешний `timeout 60`, две настоящие изолированные машины Syncthing на loopback,
+пять секунд на условие, три секунды на Keep. Проверяет git-admission, передачу, effective ignores
+с положительным sentinel после scan, Keep/download, вечный tombstone и сохранность локальных байтов.
+При тайм-ауте Python выполняет cleanup только своих точных `--home`.
+`SYNCTHING_ARCHIVE` задаёт offline архив v2.1.7; используется также существующий release-кеш
+`~/.cache/remoteagents-vpn-test`. Живая установка не читается и не используется.
+
+Прежние `test-disk.py`, `test-disk-explorer-engine.py`, `test-disk-safety-engine.py` сохранены
+для адресной интеграционной диагностики отдельных методов, не запускаются целиком при правке.
+Серверный grace и клиентский watch-missing теперь используют фальшивое время; 30/34 с не ждут.
+Их массовый запуск не является быстрым набором. Соответствие уже проверенных клеток —
+[DISK-CONTRACT.md](../docs/DISK-CONTRACT.md#быстрые-эквиваленты-интеграционных-проверок).
+Linux не подтверждает Windows Shell, Корзину, cross-volume move и WinPS 5.1.
+Результат этапа — [DISK-STAGE3-REPORT.md](../docs/DISK-STAGE3-REPORT.md).
+
+### Инъекция времени
+
+Сервер: положительные конечные секунды `REMOTE_DISK_<имя>_S`:
+`API_READ_TIMEOUT`, `API_WRITE_TIMEOUT`, `PROCESS_TIMEOUT`, `DOWNLOAD_TIMEOUT`, `GENERATE_TIMEOUT`,
+`STARTUP_POLL`, `DISCONNECT_TIMEOUT`, `DISCONNECT_POLL`, `RESUME_RETRY`, `AUTO_INTERVAL`,
+`AUTO_ACCURACY`, `RESCAN_INTERVAL`, `WATCHER_DELAY`, `RECONNECT_INTERVAL`, `MISSING_AFTER`,
+`STALE_AFTER`, `HEAL_COOLDOWN`, `CHANNEL_PROBE_INTERVAL`. `REMOTE_DISK_STARTUP_ATTEMPTS` — число попыток (по умолчанию 80).
+Монотонное время в missing/watch helpers дополнительно передаётся аргументом `now`.
+Cron по умолчанию минутный; `REMOTE_DISK_AUTO_CRON_MINUTES` задаёт целое 1–59.
+Смена интервала заменяет только собственную cron-строку; в fixtures планировщики подменены.
+
+C#/PowerShell: положительные целые миллисекунды `REMOTE_DISK_<имя>_MS`.
+C#: `MISSING_AFTER`, `OPERATION_LOCK`, `KEEP_TIMEOUT`, `KEEP_POLL`, `MONITOR_RETRY`,
+`MONITOR_POLL`, `EVENT_COALESCE`, `REST_TIMEOUT`, `EVENT_TIMEOUT`, `EVENT_POLL`, `WATCHER_DELAY`.
+REST events использует целые секунды протокола; субсекундное значение превращается в timeout=0.
+`DiskMissingFolders` принимает функцию монотонных часов; `DiskShellCommands` — явный readyTimeout.
+PowerShell: `PROCESS_TIMEOUT`, `PROCESS_INPUT_MIN`, `PROCESS_EXIT`, `PROCESS_STDERR`, `SSH_CONNECT`,
+`INSTALL_RETRY`, `REST_TIMEOUT`, `OPERATION_LOCK`, `OFFER_TIMEOUT`, `OFFER_POLL`, `WATCHER_DELAY`,
+`ENGINE_LOCK`, `ENGINE_STOP`, `ENGINE_READY`, `ENGINE_POLL`, `TRANSPORT_READY`, `TRANSPORT_CONNECT`,
+`TRANSPORT_BANNER`, `TRANSPORT_POLL`, `INSTALL_POLL`, `RECONNECT_INTERVAL`, `TRAY_RECONNECT`, `DOWNLOAD_TIMEOUT`.
+`REMOTE_DISK_INSTALL_READY_ATTEMPTS` сохраняет исходные 40 попыток.
+`Get-DiskNowMilliseconds` и `Start-Sleep` подменяются в fixtures. WinPS 5.1 HTTP/SSH/download
+принимают целые секунды: там округление вверх, минимум 1 с; быстрые тесты мокают I/O.
+Ожидание жизни фонового движка/окна не является тайм-аутом и остаётся до выхода процесса.

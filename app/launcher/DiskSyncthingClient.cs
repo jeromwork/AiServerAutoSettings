@@ -38,6 +38,7 @@ namespace RemoteAgents.Launcher
         }
         public object Request(string method, string route, object body, CancellationToken token, int timeout = 3000)
         {
+            timeout = DiskTiming.Milliseconds("REST_TIMEOUT", timeout);
             token.ThrowIfCancellationRequested();
             if (method != "GET" && File.ReadAllText(System.IO.Path.Combine(diskHome, "server.txt")).TrimStart('\uFEFF').Replace("\r", "").Trim() != Peer)
                 throw new IOException("Сервер Диска изменился. Повторите действие");
@@ -141,8 +142,8 @@ namespace RemoteAgents.Launcher
                 foreach (var row in group) { row.Kind = DiskExplorerKind.Error; row.Detail = "Несколько папок с одинаковым именем"; }
             return snapshot;
         }
-        internal object[] Events(long since, CancellationToken token, bool tail = false, int pollSeconds = 25)
-        { return Json.Array(rest.Request("GET", tail ? "events?since=0&limit=1&timeout=0" : "events?since=" + since + "&timeout=" + pollSeconds, null, token, tail ? 3000 : 30000)); }
+        internal object[] Events(long since, CancellationToken token, bool tail = false, int pollSeconds = -1)
+        { if (pollSeconds < 0) pollSeconds = DiskTiming.Seconds("EVENT_POLL", 25); return Json.Array(rest.Request("GET", tail ? "events?since=0&limit=1&timeout=0" : "events?since=" + since + "&timeout=" + pollSeconds, null, token, tail ? DiskTiming.Milliseconds("REST_TIMEOUT", 3000) : DiskTiming.Milliseconds("EVENT_TIMEOUT", 30000))); }
         internal static long EventId(object value) { long n; return long.TryParse(Json.Str(Json.Map(value), "id"), out n) ? n : 0; }
         internal static bool ChangesFolders(object value)
         {

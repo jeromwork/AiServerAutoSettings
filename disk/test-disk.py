@@ -90,19 +90,23 @@ def archive_path():
     configured = os.environ.get('SYNCTHING_ARCHIVE')
     if configured:
         return Path(configured).resolve()
+    cache = Path.home() / '.cache/remoteagents-vpn-test' / ARCHIVE_NAME
+    if cache.is_file():
+        return cache
     # Reuse an offline release fixture when available; otherwise bootstrap downloads it.
     return next(iter(sorted(Path('/tmp').glob('remote-disk-release-*/' + ARCHIVE_NAME))), None)
 
 
 def run(args, env=None, ok=True, stdin=None):
     result = subprocess.run([str(x) for x in args], env=env, input=stdin,
-                            capture_output=True, timeout=45)
+                            capture_output=True, timeout=float(os.environ.get('REMOTE_DISK_TEST_COMMAND_S', '10')))
     if ok and result.returncode:
         raise AssertionError(f'{args[0]}: exit {result.returncode}: {result.stderr.decode(errors="replace")}')
     return result
 
 
-def wait(predicate, description, seconds=20):
+def wait(predicate, description, seconds=5):
+    seconds = min(seconds, float(os.environ.get('REMOTE_DISK_LIVE_WAIT_S', '5')))
     end = time.monotonic() + seconds
     while time.monotonic() < end:
         if predicate():
@@ -232,13 +236,15 @@ with (Path.home()/'systemctl-calls').open('a') as f:f.write(json.dumps(sys.argv[
         return True
 
 
+_HELPERS = compile((HERE / 'server-disk.sh').read_text().split("<<'PY'\n", 1)[1].split('def main():', 1)[0], 'server-disk-helpers', 'exec')
+
+
 @contextlib.contextmanager
 def server_helpers(home):
     """Only the helper definitions of server-disk.sh (everything before main), with HOME at a disposable directory."""
-    source = (HERE / 'server-disk.sh').read_text().split("<<'PY'\n", 1)[1].split('def main():', 1)[0]
     namespace = {}
     with mock.patch.dict(os.environ, HOME=str(home), REMOTE_DISK_SCRIPT_DIR=str(HERE)):
-        exec(compile(source, 'server-disk-helpers', 'exec'), namespace)
+        exec(_HELPERS, namespace)
         yield namespace
 
 
@@ -1728,7 +1734,7 @@ class MissingFolderTests(unittest.TestCase):
                                  server['home'] / 'Disk', now=now)
         return stderr.getvalue()
 
-    def test_deleted_project_is_forgotten_after_real_grace_period_and_never_returns(self):
+    def test_deleted_project_is_forgotten_with_fake_clock_and_never_returns(self):
         with Stand(2) as t:
             server, computer = t.sides
             disk = server['home'] / 'Disk'
@@ -1748,18 +1754,12 @@ class MissingFolderTests(unittest.TestCase):
             self.assertEqual(completion()['remoteState'], 'valid')
 
             shutil.rmtree(project)  # Only the test simulates the agent deleting its project.
-            self.assertEqual(bootstrap_tick(t, server), '')
-            since = json.loads((server['state'] / 'missing-folders.json').read_text())['folders']['Ephemeral']['since']
-            self.assertEqual(t.folder(server, 'Ephemeral')['id'], 'Ephemeral')
-            logs = []
-            while any(f['id'] == 'Ephemeral' for f in t.api(server, 'config/folders')):
-                self.assertLess(time.monotonic() - since, 45, 'registration was not removed after 30 s')
-                if time.monotonic() - since < 29:
-                    self.assertEqual(t.folder(server, 'Ephemeral')['id'], 'Ephemeral')
-                time.sleep(2)
-                logs.append(bootstrap_tick(t, server))
-            self.assertGreaterEqual(time.monotonic() - since, 30)
-            self.assertEqual(''.join(logs), 'RemoteDisk: Ephemeral: регистрация снята, папка отсутствует не менее 30 с\n')
+            with server_helpers(server['home']) as ns:
+                self.assertEqual(self.forget(t, server, ns, 100), '')
+                self.assertEqual(self.forget(t, server, ns, 129.999), '')
+                self.assertEqual(t.folder(server, 'Ephemeral')['id'], 'Ephemeral')
+                self.assertEqual(self.forget(t, server, ns, 130),
+                    'RemoteDisk: Ephemeral: регистрация снята, папка отсутствует не менее 30 с\n')
             self.assertEqual(t.api(server, 'config/folders'), [])
             wait(lambda: completion()['remoteState'] == 'notSharing', 'client notices server stopped sharing')
             status = t.api(computer, 'db/status?folder=Ephemeral')
@@ -2267,4 +2267,4 @@ class StaleConnectionTests(unittest.TestCase):
 if __name__ == '__main__':
     if len(sys.argv) == 2 and not sys.argv[1].startswith('-'):
         os.environ['SYNCTHING_ARCHIVE'] = sys.argv.pop()
-    unittest.main()
+    unittest.main(failfast=True)

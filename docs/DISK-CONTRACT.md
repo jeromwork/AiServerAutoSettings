@@ -93,7 +93,7 @@ Syncthing), device (ID предлагающего ПК или пусто), outco
 ## Переходы всех 69 клеток аудита
 
 Ø/P/D/U/RO/J/Z/O/OFF — обозначения из DISK-MATRIX.md. «Есть» — исполняемый тест в
-`disk/test-disk.py`; «часть» — проверяет указанную серверную часть перехода.
+`disk/test-disk.py` (helpers также входят в fast); «часть» — проверяет указанную серверную часть перехода.
 `ПК: имя` без ссылки на файл — **план следующих частей, не доказательство готовности**.
 Ссылки `ПК 2А` ведут к реализованным проверкам; результаты прогонов — в DISK-STAGE2A-REPORT.md.
 Контракт определяет конечное требование, а эта колонка честно отделяет его от готовности реализации.
@@ -146,7 +146,7 @@ Syncthing), device (ID предлагающего ПК или пусто), outco
 | 10a. Новый ПК, `folders=[]` либо поля нет | Новый ПК не принимает исходники автоматически; all игнорируется с предупреждением. | Явно выбрать проект. | ПК: install_default_and_legacy_all_no_download |
 | 10b. Новый ПК, `folders="all"` | Новый ПК не принимает исходники автоматически; all игнорируется с предупреждением. | Явно выбрать проект. | ПК: install_default_and_legacy_all_no_download |
 | 10c. Новый ПК, явный список существующих папок | Явный список принимает только однозначное реальное предложение; непустая копия требует merge. | Уточнить ID при одинаковых label. | ПК 2А: disk/test-accept.ps1 (late offer, повтор, непустая копия требует merge) |
-| 10d. Новый ПК, явный список с опечаткой/удалённой папкой/сервер не успел предложить | Нет предложения → ожидание, без fallback-create; legacy ID сервер отказывает. | Исправить опечатку/восстановить канал. | ПК 2А: disk/test-accept.ps1 (реальные 30 секунд, без mkdir/POST fallback) |
+| 10d. Новый ПК, явный список с опечаткой/удалённой папкой/сервер не успел предложить | Нет предложения → ожидание, без fallback-create; legacy ID сервер отказывает. | Исправить опечатку/восстановить канал. | ПК 2А: disk/test-accept.ps1 (виртуальные 30 секунд, без mkdir/POST fallback) |
 | 10e. Список содержит старый `P/docs`, direction, external | Legacy выбор явно описать в предупреждении; external не поддерживается, nested не маскировать тихим расширением. | Показать итоговый top-level выбор до приёма. | ПК: legacy_choice_reports_effective_scope |
 | 10f. Уже принята папка; применили `folders=[]`, убрали её из списка или указали другой path | Удаление из списка не удаляет данные/регистрацию; чужой ID/путь не считать нужным подключением. | Отдельный явный detach/приём правильного ID. | ПК: apply_choice_preserves_registered_and_rejects_foreign |
 | 11a. Обновление/переустановка EXE, служебный state сохранился | Обновление сохраняет ID/пути, мигрирует обязательные ignores и версии. | При ошибке сохранить данные, журналировать. | ПК 2А: SafetyTests.test_tray_registration_migrates_policy_before_next_scan; disk/test-accept.ps1 |
@@ -237,3 +237,30 @@ Legacy external/nested регистрации также отсоединяют�
 старую P после переноса непринятой непустой LocalCopy, сохраняя данные по новому пути.
 Неизвестный внешний destination найти по одному старому пути невозможно, его ini не является
 доказательством действующей регистрации. Windows Shell/cross-volume проверяются отдельно.
+
+
+## Быстрые эквиваленты интеграционных проверок
+
+Этап 3 не меняет ожидаемые переходы и не объявляет готовыми клетки с пометкой «ПК: план».
+Обычный вход — `disk/test-fast.sh` / launcher `tests/run.sh` без флагов; ≤10 с, внешний
+`timeout 15`, fail-fast. Настоящая передача проверяется отдельно `disk/test-live.sh` (≤60 с).
+Ни fake REST, ни таблица ниже не являются доказательством реального Windows Shell/BEP.
+
+| Уже проверявшиеся клетки / ветви медленных fixtures | Быстрая проверка той же логики решения |
+|---|---|
+| 1a–c, 5a, 5d/e, 8c, 9c (серверный допуск/публикация для peers) | `ContractTests` целиком; `TransitionTests.test_discovery_shares_idempotently_and_preserves_pause_and_bytes`; `test_failed_or_lost_put_reuses_reservation_while_other_offers_continue`. Реальная доставка третьему peer остаётся integration-фактом, не симулируется побайтовым копированием. |
+| 2a/c/d/e, 8a: grace, исчезновение/возврат, пустой/недоступный/подменённый корень, ручной unshare/path change, tombstones, retry | `TransitionTests.test_missing_grace_return_reset_delete_retry_and_never_reoffer`; `test_unavailable_empty_or_replaced_base_resets_absence`; `ContractTests`; `DiskExplorerTests.FolderErrorsAndRemoval/Lifecycle`. |
+| 3a/b, 11b: download и явный reinstall merge, исходный серверный ID, unlimited conflicts | `DiskExplorerTests.Commands/LocalCopies/Lifecycle`; сохраняются локальные байты, проверяются REST options/identity. Фактическое создание обеих BEP conflict-версий — отдельный интеграционный fixture. |
+| 4a–e: scan перед Keep, counters/sequence, timeout, recycle rollback, ignored/late/conflict данные | `DiskExplorerTests.Commands/FastSafety/Lifecycle/RecyclePolicy`. В `FastSafety` весь список ignored из прежнего SafetyTests проверяется за один вызов, fake REST не подтверждает их серверную копию. |
+| 5b/c/f/g/h: ограничения пути/коллизии, RO→sendreceive, повтор Upload | `DiskExplorerTests.Lifecycle/Commands/FastSafety`; PowerShell `test-accept.ps1` с fake clock. |
+| 6a/c, 7a–e: delete/rename/move/copy-delete корня, краткий возврат, недоступная база, ini не доказывает привязку | `DiskExplorerTests.MissingFolders/Lifecycle`. Часы передаются функцией, файловые изменения выполняются в disposable FS. Настоящий Windows cross-volume остаётся smoke. |
+| 6b: удаление содержимого при остающемся корне | `DiskExplorerTests.FastSafety`: регистрация остаётся, wrapper не перехватывает обычную BEP-синхронизацию. Саму доставку удаления проверяет сохранённый engine fixture. |
+| 8a/b: notSharing с/без подтверждённой истории | `DiskExplorerTests.FolderErrorsAndRemoval/Lifecycle/States`; снятый ID не возвращается через pending. |
+| 10c/d, 11a: явный список, отсутствующее/позднее предложение, policy migration | `disk/test-accept.ps1` (виртуальные часы); `ContractTests.test_versioning_is_migrated_for_existing_folders`; `Lifecycle`. Нет installer fallback-create. |
+| 12a (только policy), 12b | `ContractTests.test_versioning_is_migrated_for_existing_folders`; `DiskExplorerTests.FastSafety/LocalCopies`. Политика не доказывает хранение каждой промежуточной версии. |
+| Обрыв Upload/Keep до/после записи REST, detach, частичной Корзины, placeholder | `DiskExplorerTests.Recovery`: восстанавливается тот же durable журнал на каждой границе, два повтора; partial recycle восстанавливается paused. |
+| Молчащие соединения, cooldown, resume/retry, ложное устаревание, сбои REST одной папки | Все чистые `StaleConnectionTests` и `ServerHardeningTests` без Stand, с fake clock/REST; без реального туннельного ожидания. |
+
+Медленные fixtures сохранены для адресной проверки настоящего движка; ссылки выше разделяют
+проверку ветвления приложения и интеграционную семантику Syncthing. Состав/результат этапа —
+[DISK-STAGE3-REPORT.md](DISK-STAGE3-REPORT.md).

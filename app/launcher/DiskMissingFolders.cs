@@ -79,7 +79,7 @@ namespace RemoteAgents.Launcher
                     if (!double.TryParse(Json.Str(previous, "since"), NumberStyles.Float, CultureInfo.InvariantCulture, out since) ||
                         double.IsNaN(since) || double.IsInfinity(since) || Json.Str(previous, "path") != path || since > now || since < 0) since = now;
                     next[id] = new { path, since };
-                    if (now - since < 30) continue;
+                    if (now - since < DiskTiming.Milliseconds("MISSING_AFTER", 30000) / 1000.0) continue;
                     try {
                         // Re-read configuration and the filesystem immediately before DELETE.
                         var current = Json.Array(rest.Request("GET", "config/folders", null, token)).Select(Json.Map).SingleOrDefault(f => Json.Str(f, "id") == id);

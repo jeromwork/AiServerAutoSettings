@@ -1,10 +1,11 @@
 ﻿#requires -Version 5.1
 [CmdletBinding()]
 param([Alias('StartTray')][switch]$StartEngine,[switch]$OpenWindow,[Alias('Home')][string]$LauncherHome)
+if(-not (Get-Command Get-DiskMilliseconds -ErrorAction SilentlyContinue)){. (Join-Path $PSScriptRoot 'Disk.Common.ps1')}
 # Shared ownership helpers: same embedded engine and state as the former tray.
 # Installation and component startup share one per-state lock. The component
 # releases it after REST is ready so a later installer can borrow the engine.
-function Enter-DiskEngineLock([string]$DiskRoot,[int]$TimeoutMilliseconds=900000) {
+function Enter-DiskEngineLock([string]$DiskRoot,[int]$TimeoutMilliseconds=(Get-DiskMilliseconds ENGINE_LOCK 900000)) {
     $key=[IO.Path]::GetFullPath($DiskRoot).Replace('/','\').TrimEnd('\').ToLowerInvariant()
     $sha=[Security.Cryptography.SHA256]::Create()
     try{$hash=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($key)))).Replace('-','')}finally{$sha.Dispose()}
@@ -41,18 +42,18 @@ function Stop-DiskEngineProcesses([string]$DiskRoot) {
         if($live -and $live.ExecutablePath -ieq $p.ExecutablePath -and $live.CreationDate -eq $p.CreationDate){
             Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop
             $wait=$null;try{$wait=[Diagnostics.Process]::GetProcessById($p.ProcessId)}catch [ArgumentException]{}
-            if($wait){try{if(-not $wait.WaitForExit(10000)){throw 'Syncthing не завершён'}}finally{$wait.Dispose()}}
+            if($wait){try{if(-not $wait.WaitForExit((Get-DiskMilliseconds ENGINE_STOP 10000))){throw 'Syncthing не завершён'}}finally{$wait.Dispose()}}
         }
     }
     if(@(Get-DiskEngineProcesses $DiskRoot).Count){throw 'Syncthing ещё работает'}
 }
-function Wait-DiskEngineReady([int]$TimeoutSeconds=30) {
-    $watch=[Diagnostics.Stopwatch]::StartNew()
+function Wait-DiskEngineReady([double]$TimeoutSeconds=(Get-DiskSeconds ENGINE_READY 30)) {
+    $start=Get-DiskNowMilliseconds
     do{
         try{$status=Invoke-DiskApi 'system/status';if($status.myID){return $status}}catch{}
-        $remaining=$TimeoutSeconds*1000-$watch.ElapsedMilliseconds
-        if($remaining -gt 0){Start-Sleep -Milliseconds ([int][Math]::Min(250,$remaining))}
-    }while($watch.Elapsed.TotalSeconds -lt $TimeoutSeconds)
+        $remaining=$TimeoutSeconds*1000-((Get-DiskNowMilliseconds)-$start)
+        if($remaining -gt 0){Start-Sleep -Milliseconds ([int][Math]::Min((Get-DiskMilliseconds ENGINE_POLL 250),$remaining))}
+    }while((((Get-DiskNowMilliseconds)-$start)/1000) -lt $TimeoutSeconds)
     throw ('Syncthing уже запущен, но REST не ответил за '+$TimeoutSeconds+' с; повторите запуск позже')
 }
 function Start-DiskHeadless {
@@ -79,7 +80,7 @@ function Stop-DiskHeadless {
     try{
         # The pinned Process handle, never a fresh PID lookup, identifies our worker.
         if(-not $owned.HasExited){$owned.Kill()}
-        if(-not $owned.WaitForExit(10000)){throw 'Временный движок Syncthing не завершён'}
+        if(-not $owned.WaitForExit((Get-DiskMilliseconds ENGINE_STOP 10000))){throw 'Временный движок Syncthing не завершён'}
     }finally{$owned.Dispose();$script:DiskEngine=$null}
 }
 

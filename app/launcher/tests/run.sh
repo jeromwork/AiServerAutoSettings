@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo=$(cd "$here/../../.." && pwd)
+case ${1:-} in
+  '') exec bash "$repo/disk/test-fast.sh" ;;
+  --live) exec bash "$repo/disk/test-live.sh" ;;
+  --full) shift ;;
+  *) echo 'Usage: run.sh [--live|--full]' >&2; exit 2 ;;
+esac
+# Legacy installer fixtures also use millisecond budgets in the explicit full run.
+export REMOTE_DISK_OFFER_TIMEOUT_MS=20 REMOTE_DISK_OFFER_POLL_MS=1 REMOTE_DISK_INSTALL_RETRY_MS=1
 # Do not leave compiler/build daemons holding the caller's inherited flock descriptor.
 export UseSharedCompilation=false DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER=1 MSBUILDDISABLENODEREUSE=1
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -52,7 +62,7 @@ set +e
   timeout 120 python3 "$here/test_first_run.py"
   timeout 60 python3 "$here/test_happier_account_ui.py"
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-config-routes.ps1" -TestHome "$testdir/config-routes" < /dev/null
-  timeout 600 python3 "$repo/disk/test-disk.py"
+  bash "$repo/disk/test-live.sh"
   timeout 120 python3 "$repo/disk/test-wizard-merge.py"
   timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-disk-errors.ps1"
   timeout 120 python3 "$repo/transport/test-engine-loopback.py" --without-disk
@@ -79,8 +89,8 @@ cat "$testdir/offline.log"
 bash "$repo/server/tests/run.sh"
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -- "$testdir/core"
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ProductName=RemoteVPN -- "$testdir/core-vpn"
-timeout 240 python3 "$here/test-disk-explorer-engine.py"
-timeout 300 python3 "$here/test-disk-safety-engine.py"
+# Disk integration is already covered by the bounded test-live.sh above.
+# Extended engine fixtures remain available for focused diagnostics.
 # Config format, enc1, vault and materialization (stream A entry point; own output directory).
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ConfigTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ConfigTests=true -p:ProductName=RemoteVPN

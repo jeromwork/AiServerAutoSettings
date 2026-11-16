@@ -17,7 +17,7 @@ DOTNET = os.environ.get('DOTNET', str(Path.home() / '.dotnet/dotnet'))
 DLL = ROOT / 'app/launcher/tests/bin/Release/net10.0/PortableTests.dll'
 
 
-def wait(predicate, description, seconds=35):
+def wait(predicate, description, seconds=5):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         try:
@@ -25,7 +25,7 @@ def wait(predicate, description, seconds=35):
                 return
         except (OSError, KeyError, ValueError):
             pass
-        time.sleep(.1)
+        time.sleep(.02)
     raise AssertionError('timeout: ' + description)
 
 
@@ -52,7 +52,7 @@ with module.Stand() as stand, tempfile.TemporaryDirectory(prefix='disk-contract-
                               path or disk / 'unused', ROOT / 'disk/stignore.txt', recycle or temp / 'unused-recycle')))
 
     def action(verb, path=None, recycle=None):
-        result = subprocess.run(args(verb, path, recycle), capture_output=True, text=True, timeout=40)
+        result = subprocess.run(args(verb, path, recycle), capture_output=True, text=True, timeout=5)
         assert result.returncode == 0, (verb, result.stdout, result.stderr)
         return result.stdout
 
@@ -113,16 +113,9 @@ with module.Stand() as stand, tempfile.TemporaryDirectory(prefix='disk-contract-
     shutil.rmtree(fixtures['Copied'][0])
     brief = disk / 'brief-save'
     fixtures['Brief'][0].rename(brief)
-    process = subprocess.Popen(args('watch-missing'), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    try:
-        time.sleep(2)
-        brief.rename(fixtures['Brief'][0])
-        stdout, stderr = process.communicate(timeout=40)
-        assert process.returncode == 0, (stdout, stderr)
-    finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
+    action('watch-missing', 100)
+    brief.rename(fixtures['Brief'][0])
+    action('watch-missing', 131)
     ids = {f['id'] for f in api(local, 'config/folders')}
     assert fixtures['Brief'][1] in ids
     for name in ('Deleted', 'Renamed', 'Moved', 'Copied'):
@@ -136,7 +129,7 @@ with module.Stand() as stand, tempfile.TemporaryDirectory(prefix='disk-contract-
     # Unavailable whole base is not evidence of deletion of any child.
     unavailable = temp / 'Disk unavailable'
     disk.rename(unavailable)
-    process = subprocess.run(args('watch-missing'), capture_output=True, text=True, timeout=40)
+    process = subprocess.run(args('watch-missing', 200), capture_output=True, text=True, timeout=5)
     assert process.returncode == 0, process.stderr
     assert fixtures['Brief'][1] in {f['id'] for f in api(local, 'config/folders')}
     unavailable.rename(disk)

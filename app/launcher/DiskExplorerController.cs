@@ -55,14 +55,14 @@ namespace RemoteAgents.Launcher
         void Monitor()
         {
             try {
-                while (!stop.IsCancellationRequested && !cleanup()) if (stop.Token.WaitHandle.WaitOne(5000)) return;
+                while (!stop.IsCancellationRequested && !cleanup()) if (stop.Token.WaitHandle.WaitOne(DiskTiming.Milliseconds("MONITOR_RETRY", 5000))) return;
                 initialized.TrySetResult(!stop.IsCancellationRequested);
                 while (!stop.IsCancellationRequested) {
                     try {
                         if (!enabled()) {
                             gate.Wait(stop.Token);
                             try { missing.Reset(); Clear(); } finally { gate.Release(); }
-                            if (stop.Token.WaitHandle.WaitOne(5000)) break;
+                            if (stop.Token.WaitHandle.WaitOne(DiskTiming.Milliseconds("MONITOR_RETRY", 5000))) break;
                             continue;
                         }
                         string currentRoot = root(); var rest = new DiskSyncthingClient(diskHome); var model = new DiskRestModel(rest);
@@ -70,7 +70,7 @@ namespace RemoteAgents.Launcher
                         DateTime xmlTime = File.GetLastWriteTimeUtc(Path.Combine(diskHome, "state", "config.xml"));
                         Refresh(rest, currentRoot);
                         while (!stop.IsCancellationRequested && enabled() && DiskPaths.Same(root(), currentRoot)) {
-                            var events = model.Events(since, stop.Token, pollSeconds: 2);
+                            var events = model.Events(since, stop.Token, pollSeconds: DiskTiming.Seconds("MONITOR_POLL", 2));
                             if (File.ReadAllText(Path.Combine(diskHome, "server.txt")).TrimStart('\uFEFF').Replace("\r", "").Trim() != rest.Peer) break;
                             bool detached;
                             gate.Wait(stop.Token);
@@ -91,7 +91,7 @@ namespace RemoteAgents.Launcher
                             since = Math.Max(since, events.Max(DiskRestModel.EventId));
                             if (gap || events.Any(DiskRestModel.ChangesFolders)) {
                                 // Coalesce bursts before reading the expensive db/status endpoint.
-                                if (stop.Token.WaitHandle.WaitOne(150)) break;
+                                if (stop.Token.WaitHandle.WaitOne(DiskTiming.Milliseconds("EVENT_COALESCE", 150))) break;
                                 Refresh(rest, currentRoot);
                             }
                         }
@@ -101,7 +101,7 @@ namespace RemoteAgents.Launcher
                         log("disk.explorer.unavailable");
                         gate.Wait(stop.Token);
                         try { Unavailable(); } finally { gate.Release(); }
-                        if (stop.Token.WaitHandle.WaitOne(5000)) break;
+                        if (stop.Token.WaitHandle.WaitOne(DiskTiming.Milliseconds("MONITOR_RETRY", 5000))) break;
                     }
                 }
             } catch (OperationCanceledException) { }

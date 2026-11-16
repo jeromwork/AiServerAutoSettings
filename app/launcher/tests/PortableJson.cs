@@ -31,6 +31,10 @@ namespace RemoteAgents.Launcher
     }
     internal static class TestEntry
     {
-        static int Main(string[] args) { if(args.Length>0 && args[0]=="--proxy-connect")return ProxyRelay.Run(args); if(args.Length>0 && args[0]=="--disk-engine-action")return DiskExplorerTests.EngineAction(args); WindowModelTests.Run(); MainWindowSizingTests.Run(); MainScreenModelTests.Run(); VpnTests.Run(args[0]); TrayExtrasTests.Run(); LegacyCleanupTests.Run(); DiskExplorerTests.Run(); WizardStepTests.Run(); ConfigApplyTests.Run(); ProxyRelayTests.Run(); int code = UpdateSelfTests.Run(args[0]); Console.WriteLine(File.ReadAllText(Path.Combine(args[0], "selftest-result.json"))); return code; }
+#if DISK_FAST
+        static int Main(string[] args) { if(args.Length>0 && args[0]=="--disk-engine-action")return DiskExplorerTests.EngineAction(args); DiskExplorerTests.Run(false); return 0; }
+#else
+        static int Main(string[] args) { if(args.Length>0 && args[0]=="--proxy-connect")return ProxyRelay.Run(args); if(args.Length>0 && args[0]=="--disk-engine-action")return DiskExplorerTests.EngineAction(args); if(args.Length>0 && args[0]=="--disk-fast"){DiskExplorerTests.Run(false);return 0;} WindowModelTests.Run(); MainWindowSizingTests.Run(); MainScreenModelTests.Run(); VpnTests.Run(args[0]); TrayExtrasTests.Run(); LegacyCleanupTests.Run(); DiskExplorerTests.Run(); WizardStepTests.Run(); ConfigApplyTests.Run(); ProxyRelayTests.Run(); int code = UpdateSelfTests.Run(args[0]); Console.WriteLine(File.ReadAllText(Path.Combine(args[0], "selftest-result.json"))); return code; }
+#endif
     }
 }

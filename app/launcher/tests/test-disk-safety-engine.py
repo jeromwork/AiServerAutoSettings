@@ -17,7 +17,7 @@ DOTNET = os.environ.get('DOTNET', str(Path.home() / '.dotnet/dotnet'))
 DLL = ROOT / 'app/launcher/tests/bin/Release/net10.0/PortableTests.dll'
 
 
-def wait(predicate, description, seconds=25):
+def wait(predicate, description, seconds=5):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         try:
@@ -25,7 +25,7 @@ def wait(predicate, description, seconds=25):
                 return
         except (OSError, KeyError, ValueError):
             pass
-        time.sleep(.1)
+        time.sleep(.02)
     raise AssertionError('timeout: ' + description)
 
 
@@ -58,10 +58,10 @@ class SafetyTests(unittest.TestCase):
                       devices=[dict(deviceID=peer['deviceId'])] if share else [])
         self.api(side, 'config/folders', 'POST', config)
 
-    def action(self, action, path=None, budget=30000, fault=""):
+    def action(self, action, path=None, budget=3000, fault=""):
         return subprocess.run([str(x) for x in (DOTNET, DLL, '--disk-engine-action', self.home,
             self.disk, action, path or self.source, ROOT / 'disk/stignore.txt', self.recycle, budget, fault)],
-            capture_output=True, text=True, timeout=45)
+            capture_output=True, text=True, timeout=5)
 
     def inspect(self):
         result = self.action('inspect')
@@ -122,7 +122,7 @@ class SafetyTests(unittest.TestCase):
             (self.source / name).parent.mkdir(parents=True, exist_ok=True)
             (self.source / name).write_text('synthetic secret')
         self.api(self.local, 'db/scan?folder=Project', 'POST')
-        time.sleep(.5)
+        time.sleep(.02)
         for name in secrets:
             self.assertFalse((self.remote / name).exists(), name)
 
@@ -266,4 +266,4 @@ class RecycleContractTests(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    unittest.main()
+    unittest.main(failfast=True)

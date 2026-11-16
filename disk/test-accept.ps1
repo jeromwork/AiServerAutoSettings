@@ -37,6 +37,9 @@ try{
             default {throw ('Unexpected REST '+$Route)}
         }
     }
+    $script:now=0.0
+    function Get-DiskNowMilliseconds { $script:now }
+    function Start-Sleep { param($Milliseconds) $script:now+=$Milliseconds }
     # H02 / 10d: a timeout cannot become a new upload intention.
     $waiting=Join-Path $base 'Waiting'
     Accept-DiskFolders @(@{id='Waiting';path=$waiting}) 'PEER' 'LOCAL'
@@ -92,5 +95,5 @@ try{
     [void](New-Item -ItemType SymbolicLink -Path $managed -Target $target)
     Assert (Refuses {Set-DiskFolderIgnores $tray}) 'no writes through links'
     Assert ([IO.File]::ReadAllText($target) -ceq 'untouched') 'link target unchanged'
-    Write-Output ('PASS: '+$count+' Disk acceptance/policy/path checks; isolated HOME, local REST fixture, real 30-second timeout')
+    Write-Output ('PASS: '+$count+' Disk acceptance/policy/path checks; isolated HOME, local REST fixture, virtual 30-second timeout')
 }finally{$env:LOCALAPPDATA=$oldLocal;$env:USERPROFILE=$oldUser}

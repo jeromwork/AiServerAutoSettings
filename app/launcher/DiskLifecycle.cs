@@ -31,7 +31,7 @@ namespace RemoteAgents.Launcher
         sealed class Lease : IDisposable
         {
             readonly Mutex mutex;
-            internal Lease(string key) { mutex = new Mutex(false, key); try { if (!mutex.WaitOne(35000)) throw new IOException("Диск занят другой операцией"); } catch (AbandonedMutexException) { } }
+            internal Lease(string key) { mutex = new Mutex(false, key); try { if (!mutex.WaitOne(DiskTiming.Milliseconds("OPERATION_LOCK", 35000))) throw new IOException("Диск занят другой операцией"); } catch (AbandonedMutexException) { } }
             public void Dispose() { mutex.ReleaseMutex(); mutex.Dispose(); }
         }
         Dictionary<string, object> Load()

@@ -32,9 +32,9 @@ namespace RemoteAgents.Launcher
             var service = Service(files);
             var commands = new DiskShellCommands(rest, args[2], service, new DiskPlaceholderCatalog(args[1]), File.ReadAllText(args[5]), path => { if (fault == "partial-recycle") { Directory.CreateDirectory(args[6]); File.Move(Path.Combine(path, "data.txt"), Path.Combine(args[6], "data.txt")); throw new IOException("fixture partial recycle"); } Directory.Move(path, args[6]); if (fault == "after-recycle") Process.GetCurrentProcess().Kill(); }, args.Length > 7 ? int.Parse(args[7]) : 30000, args[1]);
             if (args[3] == "watch-missing") {
-                var watch = new DiskMissingFolders(args[1], Console.WriteLine);
-                var elapsed = Stopwatch.StartNew();
-                while (elapsed.Elapsed.TotalSeconds < 34) { watch.Reconcile(rest, args[2], None); Thread.Sleep(200); }
+                double now = double.Parse(args[4], System.Globalization.CultureInfo.InvariantCulture);
+                var watch = new DiskMissingFolders(args[1], Console.WriteLine, seconds: () => now, epoch: "engine-fixture");
+                watch.Reconcile(rest, args[2], None);
                 return 0;
             }
             if (args[3] == "inspect") {
@@ -59,12 +59,73 @@ namespace RemoteAgents.Launcher
                 return value;
             }
         }
-        internal static void Run()
+        internal static void Run(bool http = true)
         {
             string temp = Path.Combine(Path.GetTempPath(), "disk-explorer-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(temp);
-            try { Lifecycle(Path.Combine(temp, "contract")); RecyclePolicy(); States(); MissingFolders(Path.Combine(temp, "missing")); FolderErrorsAndRemoval(Path.Combine(temp, "removal")); Metadata(Path.Combine(temp, "metadata")); LocalCopies(Path.Combine(temp, "local-copies")); Registry(); Menu(); MenuIcon(); IconFile(Path.Combine(temp, "icons")); StateIcons(Path.Combine(temp, "state-icons")); Commands(Path.Combine(temp, "actions")); Console.WriteLine("PASS: Explorer model, metadata, registry and action fixtures"); HttpAndEvents(Path.Combine(temp, "http")).GetAwaiter().GetResult(); }
+            try { Timing(); FastSafety(Path.Combine(temp, "safety")); Recovery(Path.Combine(temp, "recovery")); Lifecycle(Path.Combine(temp, "contract")); RecyclePolicy(); States(); MissingFolders(Path.Combine(temp, "missing")); FolderErrorsAndRemoval(Path.Combine(temp, "removal")); Metadata(Path.Combine(temp, "metadata")); LocalCopies(Path.Combine(temp, "local-copies")); Registry(); Menu(); MenuIcon(); IconFile(Path.Combine(temp, "icons")); StateIcons(Path.Combine(temp, "state-icons")); Commands(Path.Combine(temp, "actions")); Console.WriteLine("PASS: Explorer model, metadata, registry and action fixtures"); if (http) HttpAndEvents(Path.Combine(temp, "http")).GetAwaiter().GetResult(); }
             finally { if (Directory.Exists(temp)) Directory.Delete(temp, true); }
             Console.WriteLine("PASS: " + checks + " local Syncthing / Explorer checks (REST, events, placeholders, HKCU, shell, recycle rollback)");
+        }
+        static void FastSafety(string temp)
+        {
+            string home = Path.Combine(temp, "state"), root = Path.Combine(temp, "Disk"), path = Path.Combine(root, "Project");
+            Directory.CreateDirectory(path);
+            var rest = new FakeRest(); var service = Service(new TestFiles());
+            var commands = new DiskShellCommands(rest, root, service, new DiskPlaceholderCatalog(home), "(?i).env*\n(?i).git\n", p => { throw new Exception("unique data must never be recycled"); }, 10);
+            rest.Folders.Add(Map(Json.Encode(new { id = "stable", label = "Project", path, type = "receiveonly", devices = new[] { new { deviceID = rest.Peer } } })));
+            rest.Local["receiveOnlyChangedBytes"] = 1;
+            Check(commands.Read(None).Folders.Single().Kind == DiskExplorerKind.LocalChanges, "RO local changes are not green");
+            Reject(() => commands.Execute(new DiskShellRequest { Action = "keep-server", Path = path }, None), "RO changes cannot be evicted");
+            commands.Execute(new DiskShellRequest { Action = "add", Path = path }, None);
+            Check(Json.Str(rest.Folders.Single(), "type") == "sendreceive" && Json.Str(rest.Folders.Single(), "id") == "stable", "explicit RO upload preserves server identity");
+            rest.Local.Remove("receiveOnlyChangedBytes");
+            string[] unique = { ".env", ".git/config", "vendor/cache", ".stversions/old", "token-local.json", ".venv/py", "local.sqlite" };
+            foreach (string name in unique) {
+                string file = Path.Combine(path, name); Directory.CreateDirectory(Path.GetDirectoryName(file)); File.WriteAllText(file, "unique");
+                rest.Unindexed.Add(name);
+            }
+            string reason = ""; try { commands.Execute(new DiskShellRequest { Action = "keep-server", Path = path }, None); } catch (IOException e) { reason = e.Message; }
+            Check(unique.All(n => reason.Contains(n.Split('/')[0]) && File.ReadAllText(Path.Combine(path, n)) == "unique") && rest.Folders.Count == 1, "Keep lists all local-only entries and preserves their bytes/config");
+            foreach (string name in unique) File.Delete(Path.Combine(path, name));
+            File.WriteAllText(Path.Combine(path, "data.sync-conflict-test.txt"), "conflict");
+            Reject(() => commands.Execute(new DiskShellRequest { Action = "keep-server", Path = path }, None), "native conflict copy blocks Keep even when completion is 100");
+            File.Delete(Path.Combine(path, "data.sync-conflict-test.txt"));
+            double now = 100;
+            var missing = new DiskMissingFolders(home, delegate { }, seconds: () => now);
+            File.WriteAllText(Path.Combine(path, "ordinary.txt"), "ordinary"); missing.Reconcile(rest, root, None);
+            File.Delete(Path.Combine(path, "ordinary.txt")); now += 100; missing.Reconcile(rest, root, None);
+            Check(rest.Folders.Count == 1 && !rest.Calls.Any(c => c.StartsWith("DELETE")), "6b deleting contents with the root present leaves ordinary BEP sync registered");
+        }
+        static void Recovery(string temp)
+        {
+            foreach (string phase in new[] { "before-post", "after-post", "after-delete", "partial-recycle", "after-recycle", "after-placeholder" }) {
+                string home = Path.Combine(temp, phase, "state"), root = Path.Combine(temp, phase, "Disk"), path = Path.Combine(root, "Project");
+                Directory.CreateDirectory(path); File.WriteAllText(Path.Combine(path, "data.txt"), "preserved");
+                var rest = new FakeRest(); var service = Service(new TestFiles()); var catalog = new DiskPlaceholderCatalog(home);
+                var journal = new DiskOperationJournal(home, rest.Peer);
+                string id = journal.UploadId(path);
+                var config = Map(Json.Encode(new { id, label = "Project", path, devices = new[] { new { deviceID = rest.Peer } } }));
+                if (phase == "after-post") rest.Folders.Add(config);
+                if (phase != "before-post" && phase != "after-post") {
+                    journal.Begin("keep", new DiskFolderState { Id = id, Name = "Project", Path = path }, config, DiskLocalInventory.Capture(path, id));
+                    journal.Phase(path, "detached");
+                    if (phase == "partial-recycle") File.WriteAllText(Path.Combine(path, "data.txt"), "partial change");
+                    if (phase == "after-recycle" || phase == "after-placeholder") Directory.Move(path, path + ".recycled");
+                    if (phase == "after-placeholder") service.MarkPlaceholder(path);
+                }
+                for (int repeat = 0; repeat < 2; repeat++) new DiskOperationJournal(home, rest.Peer).Recover(rest, root, service, catalog, None);
+                if (phase == "before-post") Check(rest.Folders.Count == 0 && journal.UploadId(path) == id, "reserved Upload is retried explicitly with the same ID");
+                else if (phase == "after-post") Check(rest.Folders.Count == 1, "committed Upload is recovered once");
+                else if (phase == "after-recycle" || phase == "after-placeholder") Check(service.IsPlaceholder(path) && rest.Folders.Count == 0 && File.ReadAllText(Path.Combine(path + ".recycled", "data.txt")) == "preserved", "Keep recovery completes only placeholder, never repeats recycle");
+                else Check(rest.Folders.Count == 1 && File.Exists(Path.Combine(path, "data.txt")) && (phase != "partial-recycle" || Json.Bool(rest.Folders[0], "paused")), "Keep recovery restores config; partial recycle stays paused");
+            }
+        }
+        static void Timing()
+        {
+            Check(DiskTiming.Milliseconds("ABSENT_TEST", 123) == 123, "timing default preserved");
+            Environment.SetEnvironmentVariable("REMOTE_DISK_ABSENT_TEST_MS", "7");
+            try { Check(DiskTiming.Milliseconds("ABSENT_TEST", 123) == 7, "millisecond override used"); }
+            finally { Environment.SetEnvironmentVariable("REMOTE_DISK_ABSENT_TEST_MS", null); }
         }
         static void Lifecycle(string temp)
         {
@@ -186,7 +247,9 @@ namespace RemoteAgents.Launcher
             Check(DiskSnapshot.Status(row, local, remote, true).Kind == DiskExplorerKind.Error, "pull errors are explicit");
             Check(!DiskPaths.ValidName("CON.txt") && !DiskPaths.ValidName("a\\b") && !DiskPaths.ValidName("trailing.") && !DiskPaths.ValidName("bad\r\nname") && DiskPaths.ValidName("Проект №1"), "portable Windows name validation");
             Check(DiskPaths.Full(Path.GetPathRoot(Path.GetTempPath())) == Path.GetPathRoot(Path.GetTempPath()), "filesystem root is preserved");
+#if !DISK_FAST
             Check(!WindowModel.ShouldShow(new[] { "--disk-shell", "add", "/folder" }) && !WindowModel.ForwardArguments(new[] { "--disk-shell", "add", "/folder" }).Contains("--show"), "shell IPC stays out of main window");
+#endif
             Reject(() => DiskShellRequest.Parse(new[] { "--disk-shell", "unknown", "/path" }), "unknown shell action rejected");
             Reject(() => DiskShellRequest.Parse(new[] { "--disk-shell", "add", "relative" }), "relative path rejected");
             Check(DiskRestModel.EventId(Json.Parse("{\"id\":5000000000}")) == 5000000000L, "64-bit event cursor");
@@ -564,6 +627,7 @@ namespace RemoteAgents.Launcher
             internal readonly Dictionary<string, object> Pending = new Dictionary<string, object>();
             internal readonly List<string> Calls = new List<string>();
             internal Action OnScan, OnFoldersRead, OnDelete; internal Action<int> OnStatus; int statusReads;
+            internal readonly HashSet<string> Unindexed = new HashSet<string>();
             internal bool FailPost, Connected = true, FailDelete, AppliedThenTimeout, FailVerify;
             bool verifying;
             internal Dictionary<string, object> Local = Map("{\"state\":\"idle\",\"globalBytes\":100,\"needBytes\":0,\"needTotalItems\":0,\"sequence\":1}");
@@ -582,6 +646,7 @@ namespace RemoteAgents.Launcher
                  if (route.StartsWith("db/file?")) {
                     string rel = Uri.UnescapeDataString(route.Substring(route.IndexOf("&file=") + 6));
                     string path = Path.Combine(Json.Str(Folders.Single(f => Json.Str(f, "id") == FolderOf(route)), "path"), rel);
+                    if (Unindexed.Contains(rel)) throw new IOException("not indexed by server");
                     if (new[] { ".env", ".git", "vendor", ".stversions" }.Any(n => rel == n || rel.StartsWith(n + "/"))) throw new IOException("not indexed");
                     var info = new { name = rel, size = File.Exists(path) ? new FileInfo(path).Length : 0, type = Directory.Exists(path) ? "FILE_INFO_TYPE_DIRECTORY" : "FILE_INFO_TYPE_FILE", version = new[] { "SERVER:1" } };
                     return new { local = info, global = info, availability = new[] { new { id = "SERVER", fromTemporary = false } } }.ToPortable();

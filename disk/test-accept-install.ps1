@@ -1,5 +1,7 @@
 ﻿#requires -Version 5.1
 param([string]$TestHome)
+# Real child installers use a millisecond offer deadline, never thirty seconds.
+$env:REMOTE_DISK_OFFER_TIMEOUT_MS='10';$env:REMOTE_DISK_OFFER_POLL_MS='1'
 $ErrorActionPreference='Stop'
 if(-not $TestHome){$TestHome=Join-Path ([IO.Path]::GetTempPath()) ('disk-accept-'+[guid]::NewGuid().ToString('N'))}
 [void][IO.Directory]::CreateDirectory($TestHome)
@@ -195,5 +197,5 @@ function Remove-DiskLegacy {
     function Invoke-DiskApi($Route,$Method='GET',$Body=$null){if($Route -eq 'config/devices'){return};$script:newDevice=$Body;Assert ($Method -ceq 'PUT') 'new server device is registered once'}
     Set-DiskServerDevice 'NEW'
     Assert (-not $script:newDevice.autoAcceptFolders -and $script:newDevice.deviceID -ceq 'NEW') 'new device never accepts unsolicited folders automatically'
-    Write-Output ('PASS: '+$count+' installer AcceptFile/update/device checks (offline REST fixtures; real installer children and 30-second wait)')
+    Write-Output ('PASS: '+$count+' installer AcceptFile/update/device checks (offline REST fixtures; real installer children and millisecond offer deadline)')
 }finally{$env:LOCALAPPDATA=$oldLocal;$env:USERPROFILE=$oldUser}

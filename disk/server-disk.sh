@@ -11,7 +11,26 @@ a=sys.argv[1:] or ['bootstrap']; action=a[0]
 # systemd-таймер, поставленный прежним install-auto, вызывает reconcile: это та же команда, что bootstrap.
 if action=='reconcile':action='bootstrap'
 # Чтение REST быстрое. PUT папки ждёт перезапуска её движка: на нагруженном сервере это секунды, а папок много.
-API_READ_TIMEOUT,API_WRITE_TIMEOUT=3,30
+def duration(name,default):
+    value=float(os.environ.get('REMOTE_DISK_'+name,default))
+    if not math.isfinite(value) or value<=0:raise ValueError('Недопустимый интервал REMOTE_DISK_'+name)
+    return value
+API_READ_TIMEOUT=duration('API_READ_TIMEOUT_S',3)
+API_WRITE_TIMEOUT=duration('API_WRITE_TIMEOUT_S',30)
+PROCESS_TIMEOUT=duration('PROCESS_TIMEOUT_S',5)
+DOWNLOAD_TIMEOUT=duration('DOWNLOAD_TIMEOUT_S',30)
+GENERATE_TIMEOUT=duration('GENERATE_TIMEOUT_S',10)
+STARTUP_ATTEMPTS=int(duration('STARTUP_ATTEMPTS',80))
+STARTUP_POLL=duration('STARTUP_POLL_S',.1)
+DISCONNECT_TIMEOUT=duration('DISCONNECT_TIMEOUT_S',3)
+DISCONNECT_POLL=duration('DISCONNECT_POLL_S',.2)
+RESUME_RETRY=duration('RESUME_RETRY_S',.5)
+AUTO_INTERVAL=duration('AUTO_INTERVAL_S',2)
+AUTO_ACCURACY=duration('AUTO_ACCURACY_S',1)
+RESCAN_INTERVAL=duration('RESCAN_INTERVAL_S',60)
+WATCHER_DELAY=duration('WATCHER_DELAY_S',2)
+RECONNECT_INTERVAL=duration('RECONNECT_INTERVAL_S',10)
+CHANNEL_PROBE_INTERVAL=duration('CHANNEL_PROBE_INTERVAL_S',60)
 # Свой код, потому что Syncthing не знает, что .stignore с нашим прежним шаблоном — не правила пользователя.
 # SHA-256 точных байтов шаблонов, которые мы сами клали в папки: disk/stignore.txt на app/config (395c2cb, b8cfc4e, f79b03f)
 # и список имён Get-DiskIgnores из RemoteDisk.ps1 до 395c2cb. Их правила теперь живут в .stignore-remoteagents.
@@ -42,7 +61,7 @@ def incoming_marker(p):
 
 def new_folder(api,identity,folder_id,p):
     current=api('config/defaults/folder')
-    current.update(id=folder_id,label=p.name,path=str(p),type='sendreceive',paused=False,devices=[dict(deviceID=identity)],maxConflicts=-1,versioning=versioning(),rescanIntervalS=60,fsWatcherEnabled=True,fsWatcherDelayS=2)
+    current.update(id=folder_id,label=p.name,path=str(p),type='sendreceive',paused=False,devices=[dict(deviceID=identity)],maxConflicts=-1,versioning=versioning(),rescanIntervalS=int(RESCAN_INTERVAL),fsWatcherEnabled=True,fsWatcherDelayS=WATCHER_DELAY)
     return current
 
 def configured_paths(folders):
@@ -139,7 +158,7 @@ def ignores(p,write=True):
 def git(p,*args,index=None):
     env={k:v for k,v in os.environ.items() if not k.startswith('GIT_')}
     if index is not None:env['GIT_INDEX_FILE']=str(index)
-    r=subprocess.run(['git','-C',str(p),*args],capture_output=True,text=True,timeout=5,env=env)
+    r=subprocess.run(['git','-C',str(p),*args],capture_output=True,text=True,timeout=PROCESS_TIMEOUT,env=env)
     return r.stdout.strip() if r.returncode==0 else ''
 class InvalidProject(ValueError):pass
 def validate_project(p):
@@ -185,37 +204,40 @@ def channel(data):
     user=next(x for x in inbound['users'] if x.get('name')=='client');tls=inbound['tls'];reality=tls['reality']
     raw=base64.urlsafe_b64decode(reality['private_key']+'===')
     if len(raw)!=32:raise ValueError('Некорректный Reality key')
-    der=subprocess.run(['openssl','pkey','-inform','DER','-pubout','-outform','DER'],input=bytes.fromhex('302e020100300506032b656e04220420')+raw,capture_output=True,timeout=5)
+    der=subprocess.run(['openssl','pkey','-inform','DER','-pubout','-outform','DER'],input=bytes.fromhex('302e020100300506032b656e04220420')+raw,capture_output=True,timeout=PROCESS_TIMEOUT)
     if der.returncode:raise ValueError('Не удалось получить Reality public key')
     public=base64.urlsafe_b64encode(der.stdout[-32:]).decode().rstrip('=')
     v=dict(type='vless',tag='vless-direct',server=data['server'],server_port=443,uuid=user['uuid'],flow=user.get('flow',''),tls=dict(enabled=True,server_name=tls.get('server_name') or reality['handshake']['server'],utls=dict(enabled=True,fingerprint='chrome'),reality=dict(enabled=True,public_key=public,short_id=reality['short_id'][0])))
     out=[v];tags=['vless-direct']
     if data.get('hop'):out += [dict(v,tag='vless-hop',detour='hop-ssh'),dict(data['hop'],type='ssh',tag='hop-ssh')];tags.append('vless-hop')
-    out.append(dict(type='urltest',tag='server',outbounds=tags,url='https://www.gstatic.com/generate_204',interval='1m',tolerance=300))
+    out.append(dict(type='urltest',tag='server',outbounds=tags,url='https://www.gstatic.com/generate_204',interval='1m' if CHANNEL_PROBE_INTERVAL==60 else f'{max(CHANNEL_PROBE_INTERVAL,1e-9):.9f}s',tolerance=300))
     targets=[('ssh',2222,int(data.get('sshPort',22)))]
     ports=json.loads((s/'ports.json').read_text()) if (s/'ports.json').exists() else {}
     if ports.get('listen'):targets.append(('sync',22001,int(ports['listen'])))
     return dict(log=dict(disabled=True),inbounds=[dict(type='direct',tag=tag,listen='127.0.0.1',listen_port=port,network='tcp',override_address='127.0.0.1',override_port=target) for tag,port,target in targets],outbounds=out,route=dict(final='server',auto_detect_interface=True))
-CRON_LINE=b'* * * * * bash "$HOME/.local/share/remote-disk/server-disk.sh" bootstrap >/dev/null 2>&1'
+CRON_MINUTES=duration('AUTO_CRON_MINUTES',1)
+if not CRON_MINUTES.is_integer() or not 1<=CRON_MINUTES<=59:raise ValueError('Недопустимый интервал cron')
+CRON_COMMAND=b'bash "$HOME/.local/share/remote-disk/server-disk.sh" bootstrap >/dev/null 2>&1'
+CRON_LINE=(('*' if CRON_MINUTES==1 else '*/'+str(int(CRON_MINUTES)))+' * * * * ').encode()+CRON_COMMAND
 def ensure_cron(enabled=True):
     try:
-        old=subprocess.run(['crontab','-l'],capture_output=True,timeout=5)
+        old=subprocess.run(['crontab','-l'],capture_output=True,timeout=PROCESS_TIMEOUT)
         if old.returncode not in (0,1):return
         lines=old.stdout.splitlines(keepends=True)
-        if enabled:
-            if CRON_LINE in old.stdout.splitlines():return
-            content=old.stdout+(b'\n' if old.stdout and not old.stdout.endswith(b'\n') else b'')+CRON_LINE+b'\n'
-        else:
-            content=b''.join(line for line in lines if line.rstrip(b'\r\n')!=CRON_LINE)
-            if content==old.stdout:return
-        subprocess.run(['crontab','-'],input=content,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=5)
+        def ours(line):
+            fields=line.rstrip(b'\r\n').split(None,5)
+            return len(fields)==6 and fields[5]==CRON_COMMAND and all(re.fullmatch(rb'[0-9*/,-]+',field) for field in fields[:5])
+        content=b''.join(line for line in lines if not ours(line))
+        if enabled:content+=(b'\n' if content and not content.endswith(b'\n') else b'')+CRON_LINE+b'\n'
+        if content==old.stdout:return
+        subprocess.run(['crontab','-'],input=content,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=PROCESS_TIMEOUT)
     except (OSError,subprocess.SubprocessError):pass
 
 def ensure_auto():
     # Bootstrap is also the installer/wizard and the old timer's entry point.
     # Update only changed unit files: running every 2 s must not reload/restart itself.
     def systemctl(*args):
-        return subprocess.run(['systemctl','--user',*args],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=5).returncode==0
+        return subprocess.run(['systemctl','--user',*args],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=PROCESS_TIMEOUT).returncode==0
     try:
         if not systemctl('show-environment'):raise OSError('user systemd unavailable')
         units=Path.home()/'.config/systemd/user';safe(units);units.mkdir(parents=True,exist_ok=True)
@@ -223,7 +245,7 @@ def ensure_auto():
         if not script.is_file():raise ValueError('Сначала скопируйте server-disk.sh в ~/.local/share/remote-disk')
         contents={
             'remote-disk-folders.service':'[Unit]\nDescription=RemoteDisk folder discovery\n[Service]\nType=oneshot\n# Runs every 2 s: keep successes out of the journal, errors (stderr) stay visible as warnings.\nStandardOutput=null\nSyslogLevel=warning\nLogLevelMax=notice\nExecStart=/bin/bash "%h/.local/share/remote-disk/server-disk.sh" bootstrap\n',
-            'remote-disk-folders.timer':'[Unit]\nDescription=Discover and accept RemoteDisk folders every 2s\n[Timer]\nOnStartupSec=2\nOnUnitInactiveSec=2\nAccuracySec=1\n[Install]\nWantedBy=timers.target\n'}
+            'remote-disk-folders.timer':f'[Unit]\nDescription=Discover and accept RemoteDisk folders every 2s\n[Timer]\nOnStartupSec={AUTO_INTERVAL:g}\nOnUnitInactiveSec={AUTO_INTERVAL:g}\nAccuracySec={AUTO_ACCURACY:g}\n[Install]\nWantedBy=timers.target\n'}
         stamp=s/'auto-units.sha256';safe(stamp)
         generation=hashlib.sha256(json.dumps(contents,sort_keys=True).encode()).hexdigest().encode()
         changed=not stamp.exists() or stamp.read_bytes()!=generation
@@ -249,7 +271,7 @@ def skipped(name,e):
     print('RemoteDisk: '+clean(name)+': '+clean(describe(e)),file=sys.stderr)
 # Свой код: Syncthing сохраняет регистрацию исчезнувшего каталога как folder path missing.
 # Не распространяем удаление файлов: снимаем только серверную регистрацию после непрерывного наблюдения.
-MISSING_AFTER_S=30
+MISSING_AFTER_S=duration('MISSING_AFTER_S',30)
 missing_watch=s/'missing-folders.json'
 def disk_generation(disk):
     safe(disk)
@@ -369,10 +391,10 @@ def forget_missing(api,folders,disk,now=None):
                 if not retired:
                     try:p.lstat();pending.pop(f['id'],None);continue
                     except FileNotFoundError:pass
-                    retire(state,f['id'],raw,'server-missing','Папка отсутствует не менее 30 с')
+                    retire(state,f['id'],raw,'server-missing',f'Папка отсутствует не менее {MISSING_AFTER_S:g} с')
                 api('config/folders/'+urllib.parse.quote(f['id'],safe=''),'DELETE')
                 folders.remove(f);pending.pop(f['id'],None)
-                if not retired:print('RemoteDisk: '+p.name+': регистрация снята, папка отсутствует не менее 30 с',file=sys.stderr)
+                if not retired:print(f'RemoteDisk: {p.name}: регистрация снята, папка отсутствует не менее {MISSING_AFTER_S:g} с',file=sys.stderr)
             except FOLDER_ERRORS as e:skipped(f.get('id','папка'),e)
     finally:save_missing(state)
     return state
@@ -431,8 +453,8 @@ def reconcile(api,identity):
             if any(f['id']==folder_id and f['path'].rstrip('/')!=str(p) for f in folders):raise ValueError('ID занят')
             if not current:current=new_folder(api,identity,folder_id,p)
             desired=versioning(current.get('versioning'))
-            changed=(current.get('maxConflicts')!=-1 or current.get('type')!='sendreceive' or current.get('fsWatcherDelayS')!=2 or not current.get('fsWatcherEnabled') or current.get('versioning')!=desired or current.get('label')!=p.name)
-            current.update(type='sendreceive',maxConflicts=-1,fsWatcherEnabled=True,fsWatcherDelayS=2,versioning=desired,label=p.name)
+            changed=(current.get('maxConflicts')!=-1 or current.get('type')!='sendreceive' or current.get('fsWatcherDelayS')!=WATCHER_DELAY or not current.get('fsWatcherEnabled') or current.get('versioning')!=desired or current.get('label')!=p.name)
+            current.update(type='sendreceive',maxConflicts=-1,fsWatcherEnabled=True,fsWatcherDelayS=WATCHER_DELAY,versioning=desired,label=p.name)
             missing=[d for d in devices if not any(x['deviceID']==d for x in current['devices'])]
             ignores(p)
             try:exclude_git(p)
@@ -459,7 +481,8 @@ def reconcile(api,identity):
 # 45-90,6 с), поэтому устройство, у которого ни одно соединение не получило ни байта дольше STALE_AFTER_S, зависло. Это один
 # GET /rest/system/connections за запуск; что видели в прошлый раз — в connection-watch.json. Лечение: pause и сразу resume
 # именно этого устройства (старые соединения закрываются, клиент подключается заново), не чаще раза в HEAL_COOLDOWN_S.
-STALE_AFTER_S,HEAL_COOLDOWN_S=120,60
+STALE_AFTER_S=duration('STALE_AFTER_S',120)
+HEAL_COOLDOWN_S=duration('HEAL_COOLDOWN_S',60)
 watch=s/'connection-watch.json'
 def number(value):return isinstance(value,(int,float)) and not isinstance(value,bool)
 def load_watch():
@@ -490,14 +513,14 @@ def recycle_device(api,device_id):
     # Возобновляем при любом исходе ожидания и повторяем при сбое: устройство не должно остаться на паузе по нашей вине.
     device_call(api,'pause',device_id)
     try:
-        deadline=time.monotonic()+3
-        while api('system/connections')['connections'].get(device_id,{}).get('connected') and time.monotonic()<deadline:time.sleep(.2)
+        deadline=time.monotonic()+DISCONNECT_TIMEOUT
+        while api('system/connections')['connections'].get(device_id,{}).get('connected') and time.monotonic()<deadline:time.sleep(DISCONNECT_POLL)
     finally:
         for attempt in range(3):
             try:device_call(api,'resume',device_id);break
             except FOLDER_ERRORS:
                 if attempt==2:raise
-                time.sleep(.5)
+                time.sleep(RESUME_RETRY)
 def device_label(api,device_id):
     try:name=api('config/devices/'+urllib.parse.quote(device_id,safe='')).get('name')
     except FOLDER_ERRORS:name=None
@@ -559,14 +582,14 @@ def main():
         if not binary.exists():
             archive=Path(a[2]) if len(a)==3 and a[1]=='--archive' else s/'download.tar.gz'
             if archive==s/'download.tar.gz':
-                with urllib.request.urlopen('https://github.com/syncthing/syncthing/releases/download/v2.1.7/syncthing-linux-amd64-v2.1.7.tar.gz',timeout=30) as r:archive.write_bytes(r.read())
+                with urllib.request.urlopen('https://github.com/syncthing/syncthing/releases/download/v2.1.7/syncthing-linux-amd64-v2.1.7.tar.gz',timeout=DOWNLOAD_TIMEOUT) as r:archive.write_bytes(r.read())
             if hashlib.sha256(archive.read_bytes()).hexdigest()!='2edc416e7ed136b7c858ed5f3f02a3b8316589605e54c380228ceea7acbf0142':raise ValueError('SHA256 mismatch')
             binary.parent.mkdir(exist_ok=True)
             with tarfile.open(archive) as t:binary.write_bytes(t.extractfile('syncthing-linux-amd64-v2.1.7/syncthing').read())
             binary.chmod(0o700)
-        if not subprocess.check_output([str(binary),'--version'],timeout=5).startswith(b'syncthing v2.1.7 '):raise ValueError('Требуется Syncthing 2.1.7')
+        if not subprocess.check_output([str(binary),'--version'],timeout=PROCESS_TIMEOUT).startswith(b'syncthing v2.1.7 '):raise ValueError('Требуется Syncthing 2.1.7')
         if not cfg.exists():
-            subprocess.run([str(binary),'generate','--home',str(s),'--no-port-probing'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10)
+            subprocess.run([str(binary),'generate','--home',str(s),'--no-port-probing'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=GENERATE_TIMEOUT)
             tree=E.parse(cfg);root=tree.getroot();opt=root.find('options');socks=[socket.socket() for _ in range(2)]
             for sock in socks:sock.bind(('127.0.0.1',0))
             ports=dict(zip(('listen','gui'),[x.getsockname()[1] for x in socks]))
@@ -575,7 +598,7 @@ def main():
                 for old in parent.findall(n):parent.remove(old)
                 E.SubElement(parent,n).text=str(v)
             for n in ('globalAnnounceEnabled','localAnnounceEnabled','relaysEnabled','natEnabled','startBrowser','crashReportingEnabled'):put(opt,n,'false')
-            for n,v in dict(autoUpgradeIntervalH=0,reconnectionIntervalS=10,urAccepted=-1,listenAddress=f"tcp://127.0.0.1:{ports['listen']}").items():put(opt,n,v)
+            for n,v in dict(autoUpgradeIntervalH=0,reconnectionIntervalS=int(RECONNECT_INTERVAL),urAccepted=-1,listenAddress=f"tcp://127.0.0.1:{ports['listen']}").items():put(opt,n,v)
             put(root.find('gui'),'address',f"127.0.0.1:{ports['gui']}");tree.write(cfg,encoding='utf-8',xml_declaration=True)
             (s/'ports.json').write_text(json.dumps(ports))
             for sock in socks:sock.close()
@@ -590,12 +613,12 @@ def main():
         if not identity:
             with (s/'syncthing.log').open('ab') as log:proc=subprocess.Popen([str(binary),'serve','--home',str(s),'--no-browser','--no-restart','--no-upgrade'],stdin=subprocess.DEVNULL,stdout=log,stderr=log,start_new_session=True,close_fds=True,env={k:v for k,v in os.environ.items() if not k.startswith('ST')})
             (s/'syncthing.pid').write_text(str(proc.pid))
-            for _ in range(80):
+            for _ in range(STARTUP_ATTEMPTS):
                 identity=ready()
                 if identity:break
-                time.sleep(.1)
+                time.sleep(STARTUP_POLL)
         if not identity:raise ValueError('Движок не запустился')
-        api('config/options','PATCH',dict(globalAnnounceEnabled=False,localAnnounceEnabled=False,relaysEnabled=False,natEnabled=False,autoUpgradeIntervalH=0,reconnectionIntervalS=10))
+        api('config/options','PATCH',dict(globalAnnounceEnabled=False,localAnnounceEnabled=False,relaysEnabled=False,natEnabled=False,autoUpgradeIntervalH=0,reconnectionIntervalS=int(RECONNECT_INTERVAL)))
         ensure_auto()
         if action=='add-device':
             device_id=data['deviceId']
