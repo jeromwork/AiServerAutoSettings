@@ -19,5 +19,6 @@
     "hops": {},
     "vpn": { "checkUrl": "https://check.example.invalid/", "dnsServer": "192.0.2.53" }
   },
-  "happier": { "account": "Основной", "serverUrl": "https://happier.example.invalid", "webappUrl": "https://app.example.invalid" }
+  "serverConfig": "/var/lib/remoteagents-status/server-config.json",
+  "happier": { "account": "Основной", "localWeb": { "port": 47831 }, "serverUrl": "https://happier.example.invalid", "webappUrl": "https://app.example.invalid" }
 }

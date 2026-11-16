@@ -65,6 +65,8 @@
     "happier": { "type": "object", "additionalProperties": false, "properties": {
       "account": { "type": "string", "description": "Подпись аккаунта для --happier same; при нескольких аккаунтах на сервере выбирает один по подписи" },
       "home": { "$ref": "#/$defs/path", "description": "HOME, где искать аккаунты Happier (по умолчанию HOME workerUser)" },
-      "serverUrl": { "type": "string" }, "webappUrl": { "type": "string" } } }
+      "serverUrl": { "type": "string" }, "webappUrl": { "type": "string" },
+      "localWeb": { "type": "object", "additionalProperties": false, "properties": {
+        "enabled": { "type": "boolean" }, "port": { "$ref": "#/$defs/port" }, "serverPort": { "$ref": "#/$defs/port" } } } } }
   }
 }
