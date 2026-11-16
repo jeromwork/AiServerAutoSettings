@@ -61,6 +61,8 @@ def main():
                 else:
                     raise RuntimeError('Container systemd did not become ready')
                 docker('exec',name,'systemctl','start','systemd-user-sessions.service')
+                # /run is tmpfs: ssh.service creates its privilege-separation directory.
+                docker('exec',name,'systemctl','start','ssh.service')
                 docker('exec',name,'useradd','-m','-s','/bin/bash','worker')
                 docker('exec',name,'mkdir','-p','/opt/ui-mirror')
                 for path in files:
@@ -73,7 +75,8 @@ def main():
                 print(result.stdout,end='',flush=True)
                 if mode == 'source':
                     docker('cp',name+':/root/export.json',Path(tmp)/'export.json')
-                    (Path(tmp)/'export.json').chmod(0o600)
+                    # sudo docker cp preserves the root-owned export's 0600.
+                    assert (Path(tmp)/'export.json').stat().st_mode & 0o777 == 0o600
                 # Never keep two systemd containers alive concurrently.
                 docker('rm','-f',name)
     finally:
