@@ -211,5 +211,63 @@ class ComponentsTests(unittest.TestCase):
         self.assertEqual(result.rows[-1]['state'], 'blocked')
 
 
+
+class HappierWebComponentsTests(unittest.TestCase):
+    def test_worker_io_idempotent_disable_and_reconcile_repairs_units(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            class WebServices(UserServices):
+                def __init__(self, root):
+                    super().__init__(root)
+                    self.ui_installed = False
+
+                def run(self, args, **kw):
+                    if args[:2] == ['loginctl', 'enable-linger']:
+                        self.write('/var/lib/systemd/linger/worker', '')
+                    if args[0] == 'runuser' and any(str(a).endswith('happier_web.py') for a in args):
+                        self.calls.append(args)
+                        command = args[-1]
+                        if command == 'update':
+                            self.ui_installed = True
+                            self.system.actions.append('fixture UI update')
+                            return subprocess.CompletedProcess(args, 0, '', '')
+                        ready = self.ui_installed and (command == 'installed' or 'remoteagents-happier-web.service' in self.active)
+                        return subprocess.CompletedProcess(args, 0 if ready else 1, '', '')
+                    return super().run(args, **kw)
+            f = WebServices(tmp)
+            c = config(); c['lan'] = []; c.pop('tailscale'); c.pop('telegramGateway'); c.pop('proxyOut')
+            c['serverComponents'] = {'happierWeb': {'enabled': True,'port':47832,'keepChats':12}}
+            self.assertEqual(f.engine(c).run('plan')['parts'][1]['state'], 'change')
+            first = f.complete(c)
+            self.assertTrue(first['ok'],first)
+            again = f.engine(c).run('apply')
+            self.assertTrue(again['ok'],again); self.assertEqual(again['actions'],[])
+            self.assertEqual(sum(args[-1]=='update' for args in f.calls),1)
+            unit = f.path('/home/worker/.config/systemd/user/remoteagents-happier-web.service')
+            unit.unlink(); f.active.discard('remoteagents-happier-web.service')
+            self.assertTrue(app.module('server_recovery').reconcile(app,f.system))
+            self.assertTrue(unit.is_file())
+            self.assertEqual(f.engine(c).run('apply')['actions'],[])
+            c['serverComponents']['happierWeb']['enabled']=False
+            self.assertTrue(f.engine(c).run('apply')['ok'])
+            self.assertNotIn('remoteagents-happier-web.service',f.active)
+            self.assertNotIn('remoteagents-happier-web-update.timer',f.active)
+            self.assertTrue(unit.is_file()); self.assertTrue(f.ui_installed)
+
+    def test_schema_bounds_and_file_delivery(self):
+        base = {'kind':'remoteagents-config','schema':1,'serverComponents':{'happierWeb':{'enabled':True}}}
+        app.validate(base)
+        for field, value in [('port',0),('keepReleases',1),('keepChats',0),('updateIntervalHours',0),('unknown',True)]:
+            with self.subTest(field=field), self.assertRaises(app.Error):
+                app.validate({**base,'serverComponents':{'happierWeb':{'enabled':True,field:value}}})
+        for field, value in [('claudeProbeSec',0),('claudeProbe','yes')]:
+            with self.assertRaises(app.Error):
+                app.validate({**base,'serverComponents':{'happierWeb':{'quotas':{field:value}}}})
+        with tempfile.TemporaryDirectory() as tmp:
+            e=UserServices(tmp).engine(base)
+            files=e.code_files()
+            for name in ('happier_web.py','happier_web_verify.cjs','happier_web_addon.js','happier-web.schema.json'):
+                self.assertIn('/usr/local/lib/remoteagents/server/'+name,files)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -115,9 +115,25 @@ namespace RemoteAgents.Launcher
         internal static void Run()
         {
             DiskChoiceTests.Run();
-            Plan(); BridgeDefaults(); Channel(); Engine(); Conflicts(); Ai(); Sources(); Requests(); Profiles(); DiskWait().GetAwaiter().GetResult();
+            LocalWebPaste(); Plan(); BridgeDefaults(); Channel(); Engine(); Conflicts(); Ai(); Sources(); Requests(); Profiles(); DiskWait().GetAwaiter().GetResult();
             HappierAccountTests.Run();
             Console.WriteLine("OK: " + count + " config engine checks (plan by difference, parallel order, conflicts, AI copy without secrets, sources)");
+        }
+        static void LocalWebPaste()
+        {
+            string root = Path.Combine(Path.GetTempPath(), "happier-paste-" + Guid.NewGuid().ToString("N"));
+            try {
+                var pasted = ConfigBundle.Parse("{\r\n\"kind\":\"remoteagents-config\",\"schema\":1,\"happier\":{\"localWeb\":{\"enabled\":true,\"port\":47831,\"serverPort\":47832}}\r\n}");
+                ConfigBundle.Store(root, pasted, pasted.Profile.Keys);
+                SecretVault.Materialize(root);
+                var settings = new Configuration(root).Data;
+                Check(HappierWebResolver.LocalUrl(settings) == "http://127.0.0.1:47831/", "stored export fields immediately provide local origin without manual settings");
+                var account = HappierAccountModel.From(settings, _ => false);
+                Check(account.Visible && !account.HasKey && account.WebUrl.Length == 0, "local-only paste makes the parent Happier card visible without replacing account WebUrl");
+                Check(TrayMenuModel.Build(settings, ConfigBundle.D(), ConfigBundle.D(), ConfigBundle.D())[0].Enabled, "paste enables Open even without a cloud address");
+                Check(TrayMenuModel.LeftClickAction(settings, ConfigBundle.D()) == "happier", "paste enables tray left click without manual account changes");
+                Check(HappierWebResolver.CloudUrl(settings, ConfigBundle.D()).Length == 0, "local origin is not stored as cloud/account URL");
+            } finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
         }
         static void BridgeDefaults()
         {
@@ -357,6 +373,10 @@ namespace RemoteAgents.Launcher
             Check(!ConfigRequests.Account(issued, new Dictionary<string, object>(), new Dictionary<string, object>()).ContainsKey("account"), "one account on the server: no id needed");
             Json.Map(issued["happier"])["account"] = new string('a', 64);
             Check(Json.Str(ConfigRequests.Account(issued, new Dictionary<string, object>(), new Dictionary<string, object>()), "account") == new string('a', 64), "pinned account id reaches the engine (Connect-WizardProfileAccount)");
+            var originalRequest = ConfigRequests.Account(issued, new Dictionary<string, object>(), new Dictionary<string, object>());
+            Json.Map(issued["happier"])["localWeb"] = ConfigBundle.D("enabled", true, "port", 47831, "serverPort", 47832);
+            var localRequest = ConfigRequests.Account(issued, new Dictionary<string, object>(), new Dictionary<string, object>());
+            Check(Json.Encode(originalRequest) == Json.Encode(localRequest) && Json.Str(localRequest, "webappUrl") == "https://app.example", "local browser config never changes Account WebUrl or request");
             Throws<IOException>(() => ConfigRequests.Account(new Dictionary<string, object> { { "happier", new Dictionary<string, object>() } }, new Dictionary<string, object>(), new Dictionary<string, object>()), "Happier without addresses refused clearly");
             var lan = ConfigRequests.Lan(home, p, Json.Map(Json.Parse("{\"lan\":{\"connections\":[{\"name\":\"old\"}]}}")));
             Check(lan.Item1.Length == 1 && Json.Str(lan.Item1[0], "name") == "office" && lan.Item2.SequenceEqual(new[] { "old" }), "LAN: add new, remove gone");

@@ -168,6 +168,24 @@ class ConfigExportTests(unittest.TestCase):
         self.assertNotIn(b'INLINE_SECRET_SENTINEL', rejected.stderr)
         self.assertEqual(self.lines(), before)
 
+    def test_export_happier_web_uses_server_port_and_stable_client_origin(self):
+        desired = {'serverComponents': {'happier': {'enabled': True}, 'happierWeb': {'enabled': True, 'port': 47833, 'keepChats': 9}}}
+        path = self.e.dir / 'web-server.json'
+        path.write_text(json.dumps(desired)); path.chmod(0o644)
+        self.e.c['serverConfig'] = str(path)
+        self.e.write()
+        exported, _ = self.e.export()
+        self.assertEqual(exported['happier']['localWeb'], dict(enabled=True, port=47833, serverPort=47833))
+        self.e.c['happier']['localWeb'] = dict(port=47834)
+        self.e.write()
+        exported, _ = self.e.export()
+        self.assertEqual(exported['serverComponents'], desired['serverComponents'])
+        self.assertEqual(exported['happier']['localWeb'], dict(enabled=True, port=47834, serverPort=47833))
+        desired['serverComponents']['happierWeb'] = dict(enabled=False)
+        path.write_text(json.dumps(desired))
+        exported, _ = self.e.export()
+        self.assertEqual(exported['happier']['localWeb'], dict(enabled=False, port=47834, serverPort=47831))
+
     def test_agent_sudo_flag_overrides_server_snapshot(self):
         snapshot = self.e.dir / 'server-desired.json'
         snapshot.write_text(json.dumps({'agent': {'sudo': 'none', 'hint': 'Выбор владельца'}}))

@@ -13,7 +13,8 @@ class HappierAccountUiTests(unittest.TestCase):
         self.assertIn('if (!Visible) HideHappierKey()', ui)
         self.assertIn('if (name != "Главная") HideHappierKey()', (LAUNCHER / 'MainWindow.Settings.cs').read_text())
         self.assertIn('showHappierKey.Visible = copyHappierKey.Visible = current.HasKey;', ui)
-        self.assertIn('openHappier.Enabled = current.WebUrl.Length > 0;', ui)
+        self.assertIn('HappierWebResolver.LocalUrl(', ui)
+        self.assertIn('openHappier.Enabled =', ui)
         self.assertIn('RenderCard(view.Happier, happierCard, happierTitle, happierState, happierDetail)', (LAUNCHER / 'MainWindow.Cards.cs').read_text())
 
     def test_clipboard_and_show_run_on_ui_thread_without_logging_secrets(self):
@@ -21,7 +22,8 @@ class HappierAccountUiTests(unittest.TestCase):
         handlers = ui.split('showHappierKey.Click +=', 1)[1].split('VisibleChanged +=', 1)[0]
         self.assertIn('Clipboard.SetText(ReadHappierKey());', handlers)
         self.assertIn('happierKey.Text = key;', handlers)
-        self.assertIn('ConfigRequests.Origin(happierModel.WebUrl)', handlers)
+        self.assertIn('openHappier.Click += async', ui)
+        self.assertIn('await HappierWebResolver.ResolveAsync(', handlers)
         for forbidden in ('Task.Run', 'Log(', 'Journal', '.Message', '.ToString()', 'throw'):
             self.assertNotIn(forbidden, handlers)
         self.assertIn('[STAThread]', (LAUNCHER / 'EntryPoint.cs').read_text())

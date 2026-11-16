@@ -27,6 +27,8 @@ def prepare(e):
 
 def ensure(e, apply):
     wanted = dict(BASE)
+    if e.config.get('serverComponents', {}).get('happierWeb', {}).get('enabled'):
+        wanted['node'] = 'nodejs'
     if e.config.get('lan'):
         wanted['openvpn'] = 'openvpn'
     if e.config.get('serverNetwork', {}).get('enabled') or e.receipts.get('base-network', {}).get('managed'):

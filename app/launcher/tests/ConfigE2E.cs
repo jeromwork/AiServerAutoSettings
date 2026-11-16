@@ -51,6 +51,8 @@ namespace RemoteAgents.Launcher
                 { "keyMaterialized", File.Exists(Json.Str(manifest, "serverKeyFile")) && File.ReadAllText(Json.Str(manifest, "serverKeyFile")) == Files.LF(key) },
                 { "aiHasNoKey", !forAi.Contains(key.Trim().Split('\n')[1]) && Json.Str(Json.Map(Json.Get(Json.Map(Json.Parse(forAi)), "secrets")), "server-key") == ConfigBundle.Hidden },
                 { "fullExportRoundtrip", back.Secrets["server-key"] == key },
+                { "localWebButtonEnabled", HappierWebResolver.CanOpen(new Configuration(target).Data, ConfigBundle.D()) },
+                { "localWebUrl", HappierWebResolver.LocalUrl(new Configuration(target).Data) },
                 { "deviceName", ConfigProfile.DeviceName(ConfigProfile.Load(target)) } }));
             return 0;
         }

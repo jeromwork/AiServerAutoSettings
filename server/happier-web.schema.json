@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Server-owned schema fragments merged by server_apply.validate; client schema is maintained separately.",
+  "$defs": {
+    "serverComponent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65535,
+          "default": 47831
+        },
+        "updateIntervalHours": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 168,
+          "default": 6
+        },
+        "keepReleases": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 10,
+          "default": 2
+        },
+        "keepChats": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 8
+        },
+        "quotas": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "claudeProbe": {
+              "type": "boolean"
+            },
+            "claudeProbeSec": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 86400,
+              "default": 600
+            }
+          }
+        },
+        "serverUrl": {
+          "type": "string",
+          "format": "happier-server-url",
+          "maxLength": 2048,
+          "pattern": "^https?://"
+        }
+      }
+    },
+    "localWeb": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65535
+        },
+        "serverPort": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65535
+        }
+      }
+    }
+  }
+}

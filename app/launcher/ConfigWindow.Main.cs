@@ -24,6 +24,7 @@ namespace RemoteAgents.Launcher
         readonly Button copyHappierKey = new Button { Text = "Копировать ключ", AutoSize = true };
         readonly Button openHappier = new Button { Text = "Открыть Happier", AutoSize = true };
         readonly Label happierCreated = new Label { AutoSize = true, UseMnemonic = false, Visible = false, Padding = new Padding(8), BackColor = Color.LightGoldenrodYellow };
+        bool openingHappier;
         HappierAccountModel happierModel = new HappierAccountModel();
         MainScreenFacts screenFacts; string screenTechnical = "", bannerAction = "", currentPage = "Главная";
         readonly ContextMenuStrip pathMenu = new ContextMenuStrip();
@@ -65,12 +66,18 @@ namespace RemoteAgents.Launcher
                 try { Clipboard.SetText(ReadHappierKey()); }
                 catch (Exception) { HappierActionFailed("Не удалось скопировать ключ Happier. Повторите попытку."); }
             };
-            openHappier.Click += (s, e) => {
+            openHappier.Click += async (s, e) => {
+                if (openingHappier) return;
+                openingHappier = true; openHappier.Enabled = false;
                 try {
                     RefreshHappierAccount();
-                    string url = ConfigRequests.Origin(happierModel.WebUrl);
+                    string url = await HappierWebResolver.ResolveAsync(new Configuration(home).Data,
+                        new Dictionary<string, object> { { "webappUrl", happierModel.WebUrl } });
+                    if (IsDisposed || Disposing) return;
+                    if (url.Length == 0) { HappierActionFailed("Happier недоступен: проверьте канал или задайте webappUrl в конфиге."); return; }
                     Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
-                } catch (Exception) { HappierActionFailed("Не удалось открыть Happier. Проверьте HTTPS-адрес webappUrl в конфиге."); }
+                } catch (Exception) { if (!IsDisposed) HappierActionFailed("Не удалось открыть Happier. Проверьте канал и webappUrl в конфиге."); }
+                finally { openingHappier = false; if (!IsDisposed) RefreshHappierAccount(); }
             };
             VisibleChanged += (s, e) => { if (!Visible) HideHappierKey(); else RefreshHappierAccount(); };
             happierBody.SizeChanged += (s, e) => {
@@ -84,14 +91,18 @@ namespace RemoteAgents.Launcher
         { happierKey.Clear(); happierKey.Visible = false; showHappierKey.Text = "Показать ключ"; }
         void RefreshHappierAccount()
         {
-            HappierAccountModel current;
-            try { current = HappierAccountModel.From(new Configuration(home).Data, name => SecretVault.Has(home, name)); }
+            HappierAccountModel current; bool localAvailable = false;
+            try {
+                var data = new Configuration(home).Data;
+                current = HappierAccountModel.From(data, name => SecretVault.Has(home, name));
+                localAvailable = HappierWebResolver.LocalUrl(data).Length > 0;
+            }
             catch (Exception) { current = new HappierAccountModel(); }
             if (current.Label != happierModel.Label || current.SecretName != happierModel.SecretName || current.WebUrl != happierModel.WebUrl || !current.HasKey) HideHappierKey();
             happierModel = current;
-            happierAccount.Visible = current.Visible;
+            happierAccount.Visible = current.Visible || localAvailable;
             showHappierKey.Visible = copyHappierKey.Visible = current.HasKey;
-            openHappier.Enabled = current.WebUrl.Length > 0;
+            openHappier.Enabled = !openingHappier && (current.WebUrl.Length > 0 || localAvailable);
         }
         string ReadHappierKey()
         {

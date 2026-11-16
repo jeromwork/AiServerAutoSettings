@@ -502,3 +502,65 @@ def extras(e, apply):
                 same = True
             ok = unit(e, 'remoteagents-close-idle.timer', timer, apply) and same
             e.row('sessions', 'ready' if ok else 'change', 'таймер закрытия чатов проверен' if ok else 'будет установлен таймер закрытия чатов')
+
+
+def happierWeb(e, apply):
+    """UI data and quota cache belong to the worker; root only supplies code/units."""
+    item = section(e, 'happierWeb')
+    service_name = 'remoteagents-happier-web.service'
+    timer_name = 'remoteagents-happier-web-update.timer'
+    update_name = 'remoteagents-happier-web-update.service'
+    if not item.get('enabled'):
+        return disable(e, [service_name, timer_name, update_name], apply)
+    _, _, home = e.worker()
+    path = '.config/remoteagents/happier-web.json'
+    wanted = json.dumps(item, sort_keys=True) + '\n'
+    current = e.s.path(home / path)
+    same = current.is_file() and not current.is_symlink() and current.read_text() == wanted
+    entry = '/usr/local/lib/remoteagents/server/happier_web.py'
+    service = ('[Unit]\nDescription=RemoteAgents Happier Web\nAfter=network-online.target\n'
+               '[Service]\nExecStart=/usr/bin/python3 -I ' + entry + ' serve\n'
+               'Restart=on-failure\nRestartSec=3\nUMask=0077\nNoNewPrivileges=yes\n'
+               '[Install]\nWantedBy=default.target\n')
+    oneshot = ('[Unit]\nDescription=Update signed Happier Web UI\n[Service]\nType=oneshot\n'
+               'ExecStart=/usr/bin/python3 -I ' + entry + ' update\nTimeoutStartSec=15min\nUMask=0077\nNoNewPrivileges=yes\n')
+    timer = ('[Timer]\nOnBootSec=10m\nOnUnitInactiveSec=' + str(item.get('updateIntervalHours', 6)) +
+             'h\nRandomizedDelaySec=5m\n[Install]\nWantedBy=timers.target\n')
+    update_path = '.config/systemd/user/' + update_name
+    update_file = e.s.path(home / update_path)
+    update_same = update_file.is_file() and not update_file.is_symlink() and update_file.read_text() == oneshot
+    code_ok = e.code_current()
+    ready = same and update_same and code_ok
+    # Check health through the same worker boundary. Never poll providers in reconcile.
+    health = False
+    if ready:
+        health = e.s.run(e.user_cmd('python3', '-I', entry, 'check'), check=False).returncode == 0
+    service_ok = unit(e, service_name, service, False)
+    timer_ok = unit(e, timer_name, timer, False)
+    if not apply:
+        ok = ready and health and service_ok and timer_ok
+        return e.row('happierWeb', 'ready' if ok else 'change', 'UI и таймер проверены' if ok else 'будут восстановлены Happier Web и таймер обновления')
+    user_ready(e)
+    e.install_code()
+    if not same or not update_same:
+        io(e, 'bridge', 'assets', {path: wanted, update_path: oneshot})
+        e.s.run(e.user_cmd('systemctl', '--user', 'daemon-reload'), change=True)
+    # Only initial installation uses the network from reconcile. The updater
+    # owns the pointer validation and lock; root never writes release files.
+    installed = e.s.run(e.user_cmd('python3', '-I', entry, 'installed'), check=False).returncode == 0
+    if not installed:
+        if e.s.run(['which', 'node'], check=False).returncode:
+            e.s.run(['apt-get', 'update'], change=True, timeout=300)
+            e.s.run(['apt-get', 'install', '-y', '--no-install-recommends', 'nodejs'], change=True, timeout=300)
+        e.s.run(e.user_cmd('python3', '-I', entry, 'update'), change=True, timeout=900)
+    unit(e, service_name, service, True)
+    if service_ok and (not same or not code_ok):
+        e.s.run(e.user_cmd('systemctl', '--user', 'restart', service_name), change=True)
+    unit(e, timer_name, timer, True)
+    # systemd active alone is insufficient: wait for the loopback listener.
+    import time
+    for attempt in range(30):
+        if e.s.run(e.user_cmd('python3', '-I', entry, 'check'), check=False).returncode == 0:
+            return e.row('happierWeb', 'ready', 'Happier Web отвечает; таймер обновления установлен')
+        time.sleep(.1)
+    raise Error('Happier Web: служба не прошла проверку health')

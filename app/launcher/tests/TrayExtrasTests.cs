@@ -135,7 +135,7 @@ namespace RemoteAgents.Launcher
             Check(menu[7].Text.Contains("диск") && menu[7].Text.Contains("память") && menu[7].Text.Contains("нагрузка"), "server metrics in menu");
             foreach (string url in new[] { "https://first.example.invalid/path", "https://second.example.invalid:8443/", "http://local.example.invalid/" }) {
                 var config = Data(Json.Encode(new { happier = new { webappUrl = url } }));
-                Check(TrayMenuModel.HappierUrl(config, empty) == url, "URL comes from each supplied config");
+                Check(TrayMenuModel.HappierUrl(config, empty).GetAwaiter().GetResult() == url, "URL comes from each supplied config");
                 var withUrl = TrayMenuModel.Build(config, empty, transport, health);
                 Check(withUrl[0].Enabled && withUrl[0].Text == "Открыть" && withUrl[0].Hint == "Открыть веб-приложение Happier", "configured URL enables «Открыть» (Happier)");
             }
@@ -148,8 +148,8 @@ namespace RemoteAgents.Launcher
             var account = Data("{\"webappUrl\":\"https://account.example.invalid/\"}");
             Check(TrayMenuModel.LeftClickAction(empty, account) == "happier", "left click follows account URL");
             Check(TrayMenuModel.LeftClickAction(Data("{\"happier\":{\"webappUrl\":\"file:///tmp/app\"}}"), account) == "settings", "invalid configured URL falls back to window");
-            Check(TrayMenuModel.HappierUrl(empty, account) == "https://account.example.invalid/", "fallback to account state");
-            Check(TrayMenuModel.HappierUrl(Data("{\"happier\":{\"webappUrl\":\"https://config.example.invalid/\"}}"), account) == "https://config.example.invalid/", "config takes priority");
+            Check(TrayMenuModel.HappierUrl(empty, account).GetAwaiter().GetResult() == "https://account.example.invalid/", "fallback to account state");
+            Check(TrayMenuModel.HappierUrl(Data("{\"happier\":{\"webappUrl\":\"https://config.example.invalid/\"}}"), account).GetAwaiter().GetResult() == "https://config.example.invalid/", "config takes priority");
             foreach (string url in new[] { "", "not a url", "file:///tmp/app", "javascript:alert(1)", "https://user:pass@example.invalid" })
                 Check(!TrayMenuModel.Build(Data(Json.Encode(new { happier = new { webappUrl = url } })), empty, transport, health)[0].Enabled, "invalid URL cannot launch: " + url);
             Check(TrayMenuModel.Connection(empty).Contains("ожидается"), "missing transport unknown");
