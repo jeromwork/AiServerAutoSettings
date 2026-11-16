@@ -93,9 +93,14 @@ class Env:
         self.route_password = self.private('route-password', 'HOP-PASSWORD\n')
         self.log = self.dir / 'auth.log'
         self.cfg = self.dir / 'config-export.json'
+        # Never fall back to /var/lib/... on the machine running the suite.
+        # A valid empty desired-state snapshot belongs to this disposable stand.
+        snapshot = self.dir / 'server-desired.json'
+        snapshot.write_text('{}')
+        snapshot.chmod(0o644)
         self.c = dict(schema=1, version=1, serverAddress='127.0.0.1', serverPort=22, workerUser=USER,
                       hostKeys=[self.host_pub], workerAuthorizedKeys=str(self.auth), stateDir=str(self.dir / 'state'),
-                      syncFile=str(self.home / '.config/remoteagents/config-sync.json'),
+                      syncFile=str(self.home / '.config/remoteagents/config-sync.json'), serverConfig=str(snapshot),
                       nodeCatalog=str(self.home / '.local/share/remote-agents-nodes'), catalogFile=str(self.catalog),
                       authLog=[str(self.log)], routes=[{'kind': 'direct'}], happier={'home': str(self.home)})
         self.c.update(extra)
@@ -137,7 +142,7 @@ class ConfigExportTests(unittest.TestCase):
         self.e = Env(self.tmp.name)
         # Защита от ошибки в тесте: ни один путь не должен вести в настоящий HOME.
         c = rc.settings(self.e.cfg)
-        for field in ('workerAuthorizedKeys', 'syncFile', 'nodeCatalog', 'stateDir', 'catalogFile'):
+        for field in ('workerAuthorizedKeys', 'syncFile', 'nodeCatalog', 'stateDir', 'catalogFile', 'serverConfig'):
             self.assertTrue(c[field].startswith(self.tmp.name), field)
 
     def lines(self):
