@@ -136,12 +136,15 @@ export async function loadVendor(root) {
     return {protocol,persistence};
 }
 // Health is the server's own view: this account's token lists the daemon's machine as active.
+// Happier 0.2.x keeps the machine per server (machineIdByServerId); older builds had settings.machineId (16.11.2026).
+export function machineIds(settings){const ids=[settings?.machineId,...Object.values(settings?.machineIdByServerId||{})];return [...new Set(ids.filter(x=>typeof x==='string'&&x))];}
 async function machineActive(serverUrl,token,machineId,request) {
     const endpoint=new URL(serverUrl);
     if(endpoint.protocol!=='https:' || endpoint.username || endpoint.password || endpoint.pathname!=='/')throw Error('url');
     const response=await request(endpoint.origin+'/v1/machines',{headers:{Authorization:'Bearer '+token},signal:AbortSignal.timeout(10000)});
     if(!response.ok)return false;const machines=await response.json();
-    return Array.isArray(machines) && machines.some(m=>m.id===machineId && m.active===true);
+    const ids=Array.isArray(machineId)?machineId:[machineId];
+    return Array.isArray(machines) && machines.some(m=>ids.includes(m.id) && m.active===true);
 }
 export async function inspectAccount(id,home=os.homedir(),request=fetch) {
     if(!/^[a-f0-9]{64}$/.test(id))throw Error('account');
@@ -160,8 +163,8 @@ export async function inspectAccount(id,home=os.homedir(),request=fetch) {
     process.env.HAPPIER_HOME_DIR=path.join(home,'secrets/happier/accounts',id);
     const {persistence}=await loadVendor(path.dirname(fs.realpathSync(path.join(home,'.local/bin/happier'))));
     const credentials=await persistence.readCredentials(),settings=await persistence.readSettings();
-    if(!credentials?.token || !settings?.machineId)return {ok:false};
-    return {ok:await machineActive(metadata.serverUrl,credentials.token,settings.machineId,request)};
+    if(!credentials?.token || !machineIds(settings).length)return {ok:false};
+    return {ok:await machineActive(metadata.serverUrl,credentials.token,machineIds(settings),request)};
 }
 async function main() {
     let raw=''; for await(const chunk of process.stdin) {raw+=chunk;if(raw.length>8192) throw Error('input');}
@@ -196,7 +199,7 @@ async function main() {
             const r=await fetch(process.env.HAPPIER_SERVER_URL+'/v1/machines',{headers:{Authorization:'Bearer '+credentials.token},signal:AbortSignal.timeout(10000)});
             if(!r.ok) throw Error('health');
             const machines=await r.json();
-            if(settings.machineId && Array.isArray(machines) && machines.some(m=>m.id===settings.machineId && m.active===true)){healthy=true;break;}
+            if(Array.isArray(machines) && machines.some(m=>machineIds(settings).includes(m.id) && m.active===true)){healthy=true;break;}
             await new Promise(resolve=>setTimeout(resolve,1000));
         }
         if(!healthy) throw Error('machine-offline');
