@@ -10,6 +10,14 @@ def source(name):
 
 
 class FirstRunTests(unittest.TestCase):
+    def test_bridge_page_defaults_on_without_a_separate_question(self):
+        page = source('SetupWizard.cs').split('void BridgePage(', 1)[1].split('void VpnPage(', 1)[0]
+        self.assertIn('Check(4,"Включить мост",95,Json.Bool(c,"enabled",true))', page)
+        self.assertIn('Check(4,"Разрешить выполнение команд (shell)",135,Json.Bool(c,"allowShell",true))', page)
+        self.assertNotIn('controlOn', page)
+        self.assertNotIn('c.Count', page)
+        self.assertNotIn('?', page)
+
     def test_detailed_disk_uses_profile_request_and_current_ui_paths(self):
         wizard = source('SetupWizard.cs')
         disk = wizard.split('case 2:', 1)[1].split('case 3:', 1)[0]

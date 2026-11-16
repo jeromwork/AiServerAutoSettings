@@ -37,7 +37,8 @@
 remoteagents config export --name "Ноутбук сына" --master-password-stdin --output /root/laptop.json
 # необязательно: --vpn on|off|channel (по умолчанию on, если есть vpnBootstrap),
 #                --happier same|same:<подпись или id>|new|new:Имя (по умолчанию same; new без имени = --name),
-#                --folders "Проект,Проект/docs"
+#                --folders "Проект,Проект/docs",
+#                --agent-sudo none|apply|full (по умолчанию full)
 ```
 
 Что происходит:
@@ -68,6 +69,10 @@ remoteagents config export --name "Ноутбук сына" --master-password-st
 (PBKDF2 и HMAC — из стандартной библиотеки, AES-256-CBC — из `cryptography`); если его нет — понятный отказ,
 экспорт без пароля работает и без него.
 
+Мост всегда выдаётся включённым с командами: `bridge.enabled=true`, `bridge.allowShell=true`. При применении отсутствие секции или поля также означает `true`; мастер включает обе галочки и отдельно не спрашивает. `false` — только явное решение владельца для конкретного компьютера.
+
+Экспорт явно добавляет `"agent": {"sudo": "full"}`, чтобы настройка ПК не останавливалась на `agent: blocked` из-за отсутствия поля (16.11.2026). `--agent-sudo none` или `--agent-sudo apply` задаёт другой режим; флаг, включая умолчание `full`, имеет приоритет над `agent.sudo` из серверного снимка. Остальные поля `agent` сохраняются.
+
 ### Что внутри выданного конфига
 
 ```json
@@ -90,6 +95,7 @@ remoteagents config export --name "Ноутбук сына" --master-password-st
                           "hops": {"vhop": {"host": "…", "port": 22, "user": "…", "key": {"secret": "vpn-hop-vhop"}}} } },
   "happier": { "mode": "same", "label": "Основной", "serverUrl": "…", "webappUrl": "…" },
   "bridge":  { "enabled": true, "allowShell": true },
+  "agent":   { "sudo": "full" },
   "disk":    { "folders": ["Проект", "Проект/docs"] },
   "secrets": { "protected": "master-password", "kdf": {"name": "pbkdf2-sha256", "iterations": 200000, "salt": "…"},
                "check": "enc1:…", "server-key": "enc1:…", "vpn-channel": "enc1:…", … }

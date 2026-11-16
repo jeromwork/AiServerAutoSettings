@@ -910,6 +910,8 @@ def export(c, args, out=sys.stdout, err=sys.stderr):
     if folders is not None:
         config['disk'] = {'folders': folders}
     config.update(deployment)
+    # Export choice (default full) overrides saved sudo; preserve other public fields.
+    config['agent'] = {**config.get('agent', {}), 'sudo': args.agent_sudo}
     # Empty named slots make missing deployment secrets explicit in the receiving program.
     def refs(node):
         if isinstance(node, dict):
@@ -1146,6 +1148,8 @@ def main(argv=None):
     p.add_argument('--vpn', choices=('on', 'off', 'channel'))
     p.add_argument('--happier', default='same', help='same | same:<подпись или id аккаунта> | new (подпись = --name) | new:Название')
     p.add_argument('--folders', help='all | none | A,B:send,C:receive; без флага программа спросит владельца')
+    p.add_argument('--agent-sudo', choices=('none', 'apply', 'full'), default='full',
+                   help='права агента: none | apply | full (по умолчанию full)')
     p.add_argument('--output')
     p.add_argument('--include-server-secrets', action='store_true', help='root-only: включить серверные секреты подтверждённого снимка; требуется --output')
     p = sub.add_parser('list', help='выданные конфиги и последний вход')

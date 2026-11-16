@@ -65,14 +65,14 @@ namespace RemoteAgents.Launcher
             for (int i = 0; i < conflicts.Count; i++) if (take == null || !take.Contains(i)) accept.Remove(ProfileKeyOfConflict(conflicts[i]));
             return accept;
         }
-        // Is the section described in the desired profile? A missing section means «не трогать».
+        // Is the section described in the desired profile? Bridge and Disk also follow the server by default.
         internal static bool Present(Dictionary<string, object> p, string s)
         {
             var vpn = Json.Map(Json.Get(p, "vpn"));
             switch (s) {
                 case Bootstrap: return Json.Map(Json.Get(vpn, "bootstrap")).ContainsKey("channel"); // a public catalog alone needs no channel first
                 case Server: case Connection: return p.ContainsKey("server");
-                case Bridge: return p.ContainsKey("bridge") || Json.Str(Json.Map(Json.Get(p, "device")), "name").Length > 0;
+                case Bridge: return p.ContainsKey("server") || p.ContainsKey("bridge") || Json.Str(Json.Map(Json.Get(p, "device")), "name").Length > 0;
                 case Account: return p.ContainsKey("happier");
                 case Disk: return DiskDescribed(p);
                 case Vpn: return Product.VpnEnabled && vpn.Keys.Any(k => k != "bootstrap");
@@ -360,7 +360,7 @@ namespace RemoteAgents.Launcher
         {
             var p = new Dictionary<string, object>(profile);
             var bridge = Json.Map(Json.Get(config, "bridge"));
-            if (bridge.Count > 0) { var b = new Dictionary<string, object>(Json.Map(Json.Get(p, "bridge"))); b["enabled"] = Json.Bool(bridge, "enabled"); b["allowShell"] = Json.Bool(bridge, "allowShell"); p["bridge"] = b; }
+            if (config.ContainsKey("bridge")) { var b = new Dictionary<string, object>(Json.Map(Json.Get(p, "bridge"))); b["enabled"] = Json.Bool(bridge, "enabled", true); b["allowShell"] = Json.Bool(bridge, "allowShell", true); p["bridge"] = b; }
             var vpn = Json.Map(Json.Get(config, "vpn"));
             if (vpn.Count > 0) {
                 var v = new Dictionary<string, object>(Json.Map(Json.Get(p, "vpn"))); v["enabled"] = Json.Bool(vpn, "enabled");
@@ -437,7 +437,7 @@ namespace RemoteAgents.Launcher
         internal static Dictionary<string, object> Bridge(Dictionary<string, object> p, Dictionary<string, object> config)
         {
             var bridge = p.ContainsKey("bridge") ? Json.Map(Json.Get(p, "bridge")) : Json.Map(Json.Get(config, "bridge"));
-            var request = new Dictionary<string, object> { { "enabled", Json.Bool(bridge, "enabled", true) }, { "shell", Json.Bool(bridge, "allowShell") } };
+            var request = new Dictionary<string, object> { { "enabled", Json.Bool(bridge, "enabled", true) }, { "shell", Json.Bool(bridge, "allowShell", true) } };
             string name = ConfigProfile.DeviceName(p); if (name.Length > 0) request["deviceName"] = name;
             return request;
         }

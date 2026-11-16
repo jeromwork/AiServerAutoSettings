@@ -9,7 +9,7 @@
       "enabled": false
     },
     "control": {
-      "enabled": false
+      "enabled": true
     },
     "vpn": {
       "enabled": false
@@ -25,7 +25,7 @@
     "label": "Мой аккаунт"
   },
   "bridge": {
-    "enabled": false,
-    "allowShell": false
+    "enabled": true,
+    "allowShell": true
   }
 }

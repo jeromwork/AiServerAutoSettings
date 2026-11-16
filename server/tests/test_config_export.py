@@ -154,6 +154,7 @@ class ConfigExportTests(unittest.TestCase):
         exported, result = self.e.export()
         self.assertEqual(exported['proxyOut']['ipv6'], 'block')
         desired['proxyOut']['ipv6'] = 'block'
+        desired['agent']['sudo'] = 'full'  # export policy overrides saved apply/none
         for k, v in desired.items():
             self.assertEqual(exported[k], v)
         self.assertEqual(exported['secrets']['lan-office-ovpn'], '')
@@ -166,6 +167,27 @@ class ConfigExportTests(unittest.TestCase):
         self.assertNotEqual(rejected.returncode, 0)
         self.assertNotIn(b'INLINE_SECRET_SENTINEL', rejected.stderr)
         self.assertEqual(self.lines(), before)
+
+    def test_agent_sudo_flag_overrides_server_snapshot(self):
+        snapshot = self.e.dir / 'server-desired.json'
+        snapshot.write_text(json.dumps({'agent': {'sudo': 'none', 'hint': 'Выбор владельца'}}))
+        snapshot.chmod(0o644)
+        self.e.c['serverConfig'] = str(snapshot)
+        self.e.write()
+        from test_server_apply import app as reconciler
+        for mode in (None, 'none', 'apply', 'full'):
+            with self.subTest(mode=mode):
+                flags = () if mode is None else ('--agent-sudo', mode)
+                config, _ = self.e.export('Тест', *flags)
+                self.assertEqual(config['agent'], {'sudo': mode or 'full', 'hint': 'Выбор владельца'})
+                reconciler.validate(config)
+
+    def test_agent_sudo_invalid_choice_does_not_issue_key(self):
+        result = self.e.cli('export', '--name', 'Тест', '--agent-sudo', 'invalid')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'--agent-sudo', result.stderr)
+        self.assertFalse(self.e.auth.exists())
+        self.assertFalse((self.e.dir / 'state').exists())
 
     def test_export_labelled_key_permissions_and_format(self):
         self.e.auth.write_text('ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExisting existing@host')  # без перевода строки
@@ -181,6 +203,9 @@ class ConfigExportTests(unittest.TestCase):
         self.assertEqual(server['routes'], [{'kind': 'direct'}])
         self.assertEqual(config['happier'], {'mode': 'same'})
         self.assertEqual(config['bridge'], {'enabled': True, 'allowShell': True})
+        self.assertEqual(config['agent'], {'sudo': 'full'})
+        from test_server_apply import app as reconciler
+        reconciler.validate(config)
         self.assertNotIn('protected', config['secrets'])
         private = config['secrets']['server-key']
         self.assertTrue(private.startswith('-----BEGIN OPENSSH PRIVATE KEY-----'))
@@ -600,7 +625,7 @@ class ConfigExportTests(unittest.TestCase):
                 pass
         import argparse
         import io
-        args = argparse.Namespace(name='Обрыв', happier='same', folders='', master_password_stdin=False, vpn='off', output=None)
+        args = argparse.Namespace(name='Обрыв', happier='same', folders='', master_password_stdin=False, vpn='off', output=None, agent_sudo='full')
         with self.assertRaises(BrokenPipeError):
             rc.export(c, args, out=Broken(), err=io.StringIO())
         self.assertNotIn('ra-config:', self.e.auth.read_text() if self.e.auth.exists() else '')

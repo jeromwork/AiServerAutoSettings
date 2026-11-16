@@ -20,9 +20,12 @@
   "connection": {
     "enabled": true
   },
+  "agent": {
+    "sudo": "full"
+  },
   "bridge": {
     "enabled": true,
-    "allowShell": false
+    "allowShell": true
   },
   "happier": {
     "mode": "same",
