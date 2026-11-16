@@ -182,9 +182,11 @@ class Poller:
                         for ident, label in [('primary_window', '5 ч'), ('secondary_window', 'неделя')]:
                             w = rate.get(ident)
                             if isinstance(w, dict):
+                                # The slot does not define the length: a plan may have only a weekly primary window.
                                 seconds = w.get('limit_window_seconds')
-                                if seconds and seconds not in (18000, 604800):
-                                    label = str(round(seconds / 3600, 1)) + ' ч'
+                                if type(seconds) in (float, int) and seconds > 0:
+                                    label = {18000: '5 ч', 86400: 'сутки', 604800: 'неделя'}.get(
+                                        seconds, '%g ч' % round(seconds / 3600, 1))
                                 reset = w.get('reset_at')
                                 if reset is None and type(w.get('reset_after_seconds')) in (float, int):
                                     reset = stamp + w['reset_after_seconds']

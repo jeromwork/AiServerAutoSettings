@@ -324,6 +324,8 @@ class ProviderHandler(BaseHTTPRequestHandler):
         self.end_headers()
         if self.path == '/oauth/usage':
             payload = dict(five_hour=dict(utilization=32,resets_at='2026-12-01T00:00:00Z'),seven_day=dict(utilization=60,resets_at=None))
+        elif getattr(self.server, 'codex_rate', None) is not None:
+            payload = dict(rate_limit=self.server.codex_rate)
         else:
             payload = dict(rate_limit=dict(primary_window=dict(used_percent=10,reset_at=1800000000,limit_window_seconds=18000), secondary_window=dict(used_percent=40,reset_after_seconds=100,limit_window_seconds=604800)))
         payload['unsafe_provider_echo'] = auth
@@ -374,6 +376,16 @@ class QuotaTests(Temp):
             self.assertNotIn(secret, raw)
         self.assertEqual(poller.cache.stat().st_mode & 0o777, 0o600)
         self.assertEqual(poller.cache.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_codex_window_label_follows_length_not_slot(self):
+        # Real plans may report only a weekly primary window.
+        self.credentials(); server = self.server()
+        server.codex_rate = dict(primary_window=dict(used_percent=72,reset_at=1800000000,limit_window_seconds=604800), secondary_window=None)
+        with running(server) as url:
+            poller = quotas.Poller(self.home, self.base/'cache/quotas.json', urls=dict(claude=url+'/oauth/usage',probe=url+'/messages',codex=url+'/wham/usage'))
+            poller.tick()
+        codex = [row for row in poller.accounts.values() if row['provider'] == 'codex'][0]
+        self.assertEqual([(w['label'], w['usedPercent']) for w in codex['windows']], [('неделя', 72)])
 
     def test_401_403_need_login_429_pause_and_restart_honors_retry(self):
         self.credentials(); server = self.server(); now = [1700000000]
