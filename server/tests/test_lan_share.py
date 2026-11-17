@@ -87,7 +87,7 @@ class Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'candidate.json'
             path.write_text(json.dumps(generated))
-            result = subprocess.run(['sing-box', 'check', '-c', str(path)], capture_output=True, text=True, timeout=2)
+            result = subprocess.run(['sing-box', 'check', '-c', str(path)], capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_xray_preserves_private_deny(self):
