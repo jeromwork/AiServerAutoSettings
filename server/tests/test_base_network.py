@@ -50,7 +50,7 @@ class BaseTests(unittest.TestCase):
         c['serverNetwork'] = {'enabled': True}
         c['proxyOut']['ipv6'] = 'block'
         c['lan'] = []
-        c.pop('tailscale'); c.pop('telegramGateway')
+        c.pop('telegramGateway')
         return f, c
 
     def test_managed_inbounds_add_change_remove_and_failed_ssh_rollback(self):

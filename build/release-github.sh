@@ -24,7 +24,7 @@ else
   gh release create "$tag" "$dir/RemoteAgents.exe" "$dir/release-info.json" --prerelease --title "RemoteAgents — последняя сборка" --notes "$notes" >/dev/null
 fi
 tmp=$(mktemp -d); trap 'rm -rf -- "$tmp"' EXIT
-gh release download "$tag" -p RemoteAgents.exe -p -p release-info.json -D "$tmp"
+gh release download "$tag" -p RemoteAgents.exe -p release-info.json -D "$tmp"
 for name in RemoteAgents.exe release-info.json; do
   [[ $(sha256sum "$tmp/$name" | cut -d' ' -f1) == $(sha256sum "$dir/$name" | cut -d' ' -f1) ]] || { echo "Хеш $name не совпал" >&2; exit 1; }
 done

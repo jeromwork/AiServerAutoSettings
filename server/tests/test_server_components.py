@@ -50,7 +50,7 @@ class ComponentsTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.f = UserServices(self.tmp.name)
-        self.c = config(); self.c['lan'] = []; self.c.pop('tailscale'); self.c.pop('telegramGateway')
+        self.c = config(); self.c['lan'] = []; self.c.pop('telegramGateway')
 
     def test_fixed_identity_format_rejects_paths_and_incomplete_disk(self):
         for kind, files in [('bridge', {'../../root/.ssh/authorized_keys': 'SECRET'}),
@@ -234,7 +234,7 @@ class HappierWebComponentsTests(unittest.TestCase):
                         return subprocess.CompletedProcess(args, 0 if ready else 1, '', '')
                     return super().run(args, **kw)
             f = WebServices(tmp)
-            c = config(); c['lan'] = []; c.pop('tailscale'); c.pop('telegramGateway'); c.pop('proxyOut')
+            c = config(); c['lan'] = []; c.pop('telegramGateway'); c.pop('proxyOut')
             c['serverComponents'] = {'happierWeb': {'enabled': True,'port':47832,'keepChats':12}}
             self.assertEqual(next(p for p in f.engine(c).run('plan')['parts'] if p['part'] == 'happierWeb')['state'], 'change')
             f.write('/home/worker/.local/bin/agy', '#!/bin/sh\n')

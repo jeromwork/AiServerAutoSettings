@@ -5,7 +5,7 @@
     <OutputType>Exe</OutputType>
     <StartupObject Condition="'$(ConfigTests)' == 'true'">RemoteAgents.Launcher.ConfigBundleTests</StartupObject>
     <StartupObject Condition="'$(ConfigE2E)' == 'true'">RemoteAgents.Launcher.ConfigE2E</StartupObject>
-    <StartupObject Condition="'$(ConfigTests)' != 'true' And '$(ConfigE2E)' != 'true'">RemoteAgents.Launcher.LanTunTests</StartupObject>
+    <StartupObject Condition="'$(ConfigTests)' != 'true' And '$(ConfigE2E)' != 'true'">RemoteAgents.Launcher.Stage6PortableEntry</StartupObject>
     <DefineConstants>PORTABLE_TEST</DefineConstants>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <NoWarn>SYSLIB0014;SYSLIB0057;CA1416</NoWarn>

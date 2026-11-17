@@ -628,7 +628,11 @@ namespace RemoteAgents.Launcher
         { vpnError = message; if (!fromCard && !closing) MessageBox.Show(message, Product.Name); }
         async void DisableVpn(ComponentRuntime vpn, bool fromCard = false)
         {
-            if (!AllowMutation()) return; actionBusy = vpnActionBusy = true; vpnActionWanted = false; vpnError = ""; RefreshMain();
+            if (!AllowMutation()) return;
+            resumeUpdatedVpn = false;
+            try { var updateState = UpdateState(); updateState["vpnOn"] = false; updateState.Remove("resumeVpn"); Json.Write(UpdateStatePath, updateState); }
+            catch { log.Write("update.resume.cancel.failed"); }
+            actionBusy = vpnActionBusy = true; vpnActionWanted = false; vpnError = ""; RefreshMain();
             try {
                 if (!vpn.Definition.CommandManaged) { EnableRuntime(vpn, false); return; }
                 if (netHelper == null) throw new IOException(HelperClient.PermissionRequired);

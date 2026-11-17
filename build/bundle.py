@@ -104,6 +104,8 @@ def binary_contents(pins=None, cache=None):
     return result
 
 def make(version, outdir, launcher=None, product="RemoteAgents", binaries=False):
+    if product != "RemoteAgents":
+        raise ValueError("Поддерживается только RemoteAgents")
     safe_version(version)
     outdir = Path(outdir).resolve()
     outdir.mkdir(parents=True, exist_ok=True)

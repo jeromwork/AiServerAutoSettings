@@ -282,7 +282,7 @@ logs/launcher.log                локальный журнал; ротация
   "schema": 1,
   "components": [{
     "name": "vpn", "title": "VPN (весь трафик)", "exe": "powershell.exe",
-    "args": ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "{bundle}\\transport\\Vpn.Tun.ps1", "-Home", "{home}", "-ParentPid", "{pid}"],
+    "args": ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "{bundle}\\transport\\Vpn.Tun.ps1", "-Home", "{home}"],
     "cwd": "{bundle}", "restart": "never", "healthFile": "status/vpn.json",
     "healthMaxAgeSec": 180, "enabledByDefault": false, "critical": false,
     "commandManaged": true, "stopFile": "state/vpn.stop"
@@ -543,4 +543,3 @@ RemoteAgents сохраняет проверенный принцип сохра
 ## Снимок сети
 
 См. [Локальные сети и VPN](VPN-LAN.md): действующая схема, настройки, помощник, диагностика и приёмка.
-

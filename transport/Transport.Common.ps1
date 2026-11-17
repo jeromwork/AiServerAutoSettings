@@ -777,11 +777,7 @@ function New-TransportConfig($Settings,$Paths,[string]$Secret,[string]$DefaultTa
     $lan=Get-TransportValue $Settings 'Lan' $null
     if($lan -and $lan.enabled){
         if(@($lan.subnets).Count){$rules+=@{inbound=@('lan-in');ip_cidr=@($lan.subnets);action='route';outbound='active'}}
-        # Legacy TCP forwards stay until stage 6, but never widen the helper's CIDR allowlist.
-        foreach($forward in @($lan.forwards)){
-            $in+=@{type='direct';tag=$forward.tag;listen='127.0.0.1';listen_port=[int]$forward.localPort;network='tcp';override_address=$forward.host;override_port=[int]$forward.port}
-            $rules+=@{inbound=@($forward.tag);action='route';outbound='active'}
-        }
+
     }
     $rules+=@{inbound=@('lan-in');action='reject'}
     $rules+=@{inbound=@('vpn-in');action='route';outbound='active'}
@@ -905,7 +901,7 @@ function Get-TransportFingerprint([string]$GatewayMac,[string]$ProfileName) {
 }
 function Get-TransportNetwork {
     try{
-        $physical=@(Get-NetAdapter -Physical -ErrorAction Stop|Where-Object {$_.Status -eq 'Up' -and ($_.Name+' '+$_.InterfaceDescription) -notmatch '(?i)openvpn|happ|wintun|tap|tun|tunnel|hyper-v'})
+        $physical=@(Get-NetAdapter -Physical -ErrorAction Stop|Where-Object {$_.Status -eq 'Up' -and ($_.Name+' '+$_.InterfaceDescription) -notmatch '(?i)tailscale|openvpn|happ|wintun|tap|tun|tunnel|hyper-v'})
         $routes=@(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction Stop|Where-Object {$_.InterfaceIndex -in @($physical|ForEach-Object {$_.ifIndex}) -and $_.NextHop -ne '0.0.0.0'}|Sort-Object @{Expression={$_.RouteMetric+(Get-NetIPInterface -InterfaceIndex $_.InterfaceIndex -AddressFamily IPv4 -ErrorAction Stop|Select-Object -First 1).InterfaceMetric}})
         if(-not $routes.Count){throw 'Нет физического шлюза'};$route=$routes[0];$adapter=$physical|Where-Object {$_.ifIndex -eq $route.InterfaceIndex}|Select-Object -First 1
         $profile=Get-NetConnectionProfile -InterfaceIndex $route.InterfaceIndex -ErrorAction Stop|Select-Object -First 1

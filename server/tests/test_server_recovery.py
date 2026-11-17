@@ -20,7 +20,7 @@ class RecoveryTests(unittest.TestCase):
         self.c = config()
         self.c['serverNetwork'] = dict(enabled=True)
         self.c['lan'] = []
-        self.c.pop('tailscale'); self.c.pop('telegramGateway')
+        self.c.pop('telegramGateway')
 
     def install(self):
         result = self.f.complete(self.c)
@@ -167,7 +167,7 @@ class RecoveryTests(unittest.TestCase):
 
     def test_no_adoption_of_manual_network_or_world_readable_envelope(self):
         f = Fake(self.tmp.name)
-        c = config(); c['lan'] = []; c.pop('tailscale'); c.pop('telegramGateway')
+        c = config(); c['lan'] = []; c.pop('telegramGateway')
         self.assertTrue(f.complete(c)['ok'])
         self.assertNotIn('singbox', f.read(recovery.ENVELOPE))
         os.chmod(f.path(recovery.ENVELOPE), 0o644)

@@ -60,7 +60,9 @@ namespace RemoteAgents.Launcher
                     var rest = new System.Collections.Generic.List<string>(args); int at = rest.IndexOf("--home"); if (at > 0 && at + 1 < rest.Count) rest.RemoveRange(at, 2);
                     return SecretCommand.Run(home, rest.ToArray());
                 }
-                Directory.CreateDirectory(home); LegacyPacCleanup.Recover(home, new LegacyPacBrowser()); FirstInstall.CleanupLegacyRun(home); log = new Journal(home); log.Write("launcher.start");
+                Directory.CreateDirectory(home); log = new Journal(home); log.Write("launcher.start");
+                try { LegacyPacCleanup.Recover(home, new LegacyPacBrowser()); } catch { log.Write("legacy.pac.cleanup.failed"); }
+                try { FirstInstall.CleanupLegacyRun(home); } catch { log.Write("legacy.run.cleanup.failed"); }
                 if (args.Contains("--uninstall")) { Uninstall.Run(home); log.Write("uninstall.ok"); return 0; }
                 var sid = WindowsIdentity.GetCurrent().User; string name = InstanceName(home, sid);
                 var security = new MutexSecurity(); security.AddAccessRule(new MutexAccessRule(sid, MutexRights.FullControl, AccessControlType.Allow));

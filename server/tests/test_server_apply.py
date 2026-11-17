@@ -42,7 +42,6 @@ def config():
             'lan': [{'name': 'office', 'kind': 'openvpn', 'ovpn': {'secret': 'lan-office-ovpn'},
                      'auth': {'secret': 'lan-office-auth'}, 'host': '10.123.0.1', 'port': 443,
                      'subnets': ['192.168.87.0/24'], 'directEndpoint': True, 'serverFingerprint': PIN}],
-            'tailscale': {},  # Legacy input retained for migration and shared fixtures.
             'telegramGateway': {'enabled': True, 'port': 8444}, 'agent': {'sudo': 'apply'}}
 
 
@@ -139,6 +138,8 @@ class Fake:
                 Path(args[args.index('--output') + 1]).write_bytes(b'OFFICIAL_REPOSITORY_FIXTURE')
             else:
                 out = self.exit + '\r\n'
+        elif args[0] == 'dpkg-query':
+            out = 'install ok installed'
         elif args[0] == 'runuser':
             if any(str(a).endswith('component_files.py') for a in args):
                 import subprocess as sp
@@ -588,7 +589,8 @@ class InputTests(unittest.TestCase):
         parsed, values = app.read_input('-', io.StringIO(json.dumps(cfg)))
         self.assertNotIn('tailscale', parsed)
         self.assertEqual(values, {})
-        self.assertNotIn('tailscale', app.Engine(cfg).config)
+        with tempfile.TemporaryDirectory() as root:
+            self.assertNotIn('tailscale', app.Engine(cfg, system=Fake(root).system).config)
 
     def test_full_export_crlf_and_marker_relay(self):
         cfg = config(); cfg['secrets'] = VALUES

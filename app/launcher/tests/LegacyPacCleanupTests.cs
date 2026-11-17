@@ -1,5 +1,7 @@
 using System;
 using System.IO;
+using System.Reflection;
+using System.Runtime.ExceptionServices;
 namespace RemoteAgents.Launcher
 {
     internal static class LegacyPacCleanupTests
@@ -19,6 +21,8 @@ namespace RemoteAgents.Launcher
                 Action<bool, string> save = (hadPrevious, previous) => Files.Atomic(file, Json.Encode(new { url, hadPrevious, previous }));
                 save(true, "http://previous.example/proxy"); LegacyPacCleanup.Recover(home, browser);
                 if (browser.Pac != "http://previous.example/proxy" || File.Exists(file)) throw new Exception("previous setting not restored");
+                browser.Pac = url; save(true, ""); LegacyPacCleanup.Recover(home, browser);
+                if (browser.Pac != "") throw new Exception("empty setting not restored");
                 browser.Pac = url; save(false, ""); LegacyPacCleanup.Recover(home, browser);
                 if (browser.Pac != null || File.Exists(file)) throw new Exception("absent setting not restored");
                 browser.Pac = "http://foreign.example/proxy"; save(true, "previous"); LegacyPacCleanup.Recover(home, browser);
@@ -30,5 +34,14 @@ namespace RemoteAgents.Launcher
             } finally { if (Directory.Exists(home)) Directory.Delete(home, true); }
         }
         static int Main(string[] args) { Run(); return 0; }
+    }
+    internal static class Stage6PortableEntry
+    {
+        static int Main(string[] args)
+        {
+            if (args.Length == 0 || !args[0].StartsWith("--", StringComparison.Ordinal)) LegacyPacCleanupTests.Run();
+            try { return (int)typeof(LanTunTests).GetMethod("Main", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, new object[] { args }); }
+            catch (TargetInvocationException ex) { ExceptionDispatchInfo.Capture(ex.InnerException).Throw(); throw; }
+        }
     }
 }
