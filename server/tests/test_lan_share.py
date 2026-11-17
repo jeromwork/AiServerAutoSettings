@@ -106,12 +106,16 @@ class Tests(unittest.TestCase):
         calls = []
         failure = []
         def run(args, **kw):
+            if args[:3] == ['systemctl', 'is-active', '--quiet']:
+                return subprocess.CompletedProcess(args, 3 if args[3] == 'remoteagents-happ' else 0, '', '')
             calls.append(args)
             fail = bool(failure and args[:2] == ['systemctl', 'restart'])
             if fail: failure.pop()
             return subprocess.CompletedProcess(args, 1 if fail else 0, '', '')
         system = app.System(root, run)
         system.write('/etc/sing-box/config.json', json.dumps(channel(), indent=2).replace('\n', '\r\n'))
+        # A stopped, never-managed Xray with a local socks inbound must be left alone.
+        system.write('/usr/local/etc/remoteagents-happ/config.json', json.dumps({'inbounds': [{'protocol': 'socks', 'listen': '127.0.0.1', 'port': 1080}]}))
         system.write('/etc/remoteagents/lan/office/config.json', json.dumps({'static': ['10.123.0.0/24']}))
         system.actions.clear()
         e = SimpleNamespace(s=system, config=profile(), ssh_checked=False,
