@@ -1430,6 +1430,28 @@
               "minLength": 1,
               "maxLength": 2048,
               "format": "happier-server-url"
+            },
+            "defaultPermissionMode": {
+              "type": "string",
+              "enum": [
+                "yolo",
+                "default"
+              ]
+            },
+            "claudeAccountLabels": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_:-]{0,63}$(?![\\s\\S])"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              },
+              "maxProperties": 256
             }
           },
           "additionalProperties": false

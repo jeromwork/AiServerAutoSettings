@@ -627,7 +627,7 @@ class Engine:
         target = '/usr/local/lib/remoteagents/server/'
         files = {}
         for name in ('server_apply.py', 'server-apply.sh', 'lan_vpn.py', 'lan-vpn.sh', 'proxy_out.py', 'proxy-out.sh', 'remoteagents_config.py', 'base_network.py', 'server_recovery.py', 'server_components.py', 'server_packages.py', 'component_files.py', 'lan-config.schema.json', 'happier-web.schema.json',
-                     'happier_web.py', 'happier_web_common.py', 'happier_web_release.py', 'happier_web_quotas.py', 'happier_web_verify.cjs', 'happier_web_addon.js'):
+                     'happier_web.py', 'happier_web_common.py', 'happier_web_release.py', 'happier_web_quotas.py', 'happier_web_verify.cjs', 'happier_web_settings.cjs', 'happier_web_addon.js'):
             files[target + name] = ((self.s.source / name).read_bytes(), 0o755 if name.endswith('.sh') else 0o644)
         schema = self.s.source / 'config.paste.schema.json'
         if not schema.exists():

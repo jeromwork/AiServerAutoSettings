@@ -1,6 +1,27 @@
 // The official UI is kept intact; these missing browser options need a head add-on.
 (() => {
     'use strict';
+    const sessionPolicy = __REMOTEAGENTS_SESSION_POLICY__;
+    // Built-in profiles hardcode "default" ahead of account defaults. Wrap only
+    // the new-session default resolver; explicit chat choices and drafts still
+    // belong to the UI. Discover the export by name, never by bundle module id.
+    function wrapDefine(define) {
+        return function(factory, ...args) {
+            return define.call(this, function(...params) {
+                factory.apply(this, params);
+                const exports = params[4]?.exports;
+                const resolve = exports?.resolveNewSessionDefaultPermissionMode;
+                if (sessionPolicy.defaultPermissionMode === 'yolo' && typeof resolve === 'function') {
+                    exports.resolveNewSessionDefaultPermissionMode = options => resolve({...options,
+                        profileDefaultsByTargetKey: null, accountDefaults: {byTargetKey: {}},
+                        legacyProfileDefaultPermissionMode: 'yolo'});
+                }
+            }, ...args);
+        };
+    }
+    if (typeof window.__d === 'function') window.__d = wrapDefine(window.__d);
+    else Object.defineProperty(window, '__d', {configurable: true, get: () => undefined,
+        set: define => Object.defineProperty(window, '__d', {configurable: true, writable: true, value: wrapDefine(define)})});
     window.__HAPPIER_WEB_RUNTIME_CONFIG__ = {serverUrl: __REMOTEAGENTS_SERVER_URL__};
     // One-use handoff. Scrub the URL before any vendor code (or resource) can see it.
     // The UI itself owns authentication, key normalization and credential storage.
@@ -92,6 +113,12 @@
     for (const type of ['visibilitychange', 'webkitvisibilitychange', 'freeze']) {
         window.addEventListener(type, event => event.stopImmediatePropagation(), true);
     }
+    function resetTime(value) {
+        const date = new Date(value);
+        if (!value || !Number.isFinite(date.getTime())) return '';
+        const pad = n => String(n).padStart(2, '0');
+        return `${pad(date.getHours())}:${pad(date.getMinutes())} ${pad(date.getDate())}.${pad(date.getMonth() + 1)}`;
+    }
     function mount() {
         if (document.getElementById('remoteagents-quotas')) return;
         const style = document.createElement('style');
@@ -107,12 +134,29 @@
         bar.id = 'remoteagents-quotas'; bar.setAttribute('role', 'status');
         bar.textContent = 'лимиты: нет данных';
         document.body.append(bar);
+        // The upstream auth selector collapses to an unlabeled key icon on
+        // narrow screens. Expose that same selector without inventing bindings.
+        const accountButton = document.createElement('button');
+        accountButton.type = 'button';
+        accountButton.textContent = 'Аккаунт чата';
+        accountButton.title = Object.entries(sessionPolicy.claudeAccountLabels).map(([id, label]) => `${id}: ${label}`).join(' · ');
+        accountButton.style.cssText = 'margin-right:8px;color:inherit;background:#343c45;border:1px solid #68717c;border-radius:3px;cursor:pointer';
+        const authSelector = () => document.querySelector('[data-testid="new-session-connected-services-auth-chip"]');
+        accountButton.onclick = () => authSelector()?.click();
+        function showAccountSelector() {
+            const present = !!authSelector();
+            if (accountButton.hidden === !present) return;
+            accountButton.hidden = !present;
+        }
+        accountButton.hidden = true;
+        new MutationObserver(showAccountSelector).observe(document.body, {childList:true, subtree:true});
+        showAccountSelector();
         const resize = () => document.documentElement.style.setProperty('--ra-quota-height', `${bar.getBoundingClientRect().height}px`);
         new ResizeObserver(resize).observe(bar); resize();
         function render(data) {
-            bar.replaceChildren();
+            bar.replaceChildren(accountButton);
             const accounts = Array.isArray(data.accounts) ? data.accounts : [];
-            if (!accounts.length) { bar.textContent = 'лимиты: нет данных'; return; }
+            if (!accounts.length) { bar.append(document.createTextNode('лимиты: нет данных')); return; }
             accounts.forEach((account, i) => {
                 if (i) bar.append(document.createTextNode(' | '));
                 const line = document.createElement('span');
@@ -126,12 +170,14 @@
                     const part = document.createElement('span');
                     const used = typeof w.usedPercent === 'number' && Number.isFinite(w.usedPercent) ? w.usedPercent : null;
                     part.textContent = `${w.label} ${used === null ? 'нет данных' : Math.round(used) + '%'}`;
+                    const reset = resetTime(w.resetsAt);
+                    if (typeof w.remainingPercent === 'number' && Number.isFinite(w.remainingPercent)) part.textContent += ` (ост. ${Math.round(w.remainingPercent)}%)`;
+                    if (reset) part.textContent += ` ${reset}`;
                     if (used >= 95) part.style.color = '#ff7777';
                     else if (used >= 80) part.style.color = '#ffd45c';
-                    tips.push(`${w.label}: сброс ${w.resetsAt ? new Date(w.resetsAt).toLocaleString('ru-RU') : 'неизвестен'}`);
+                    tips.push(`${w.label}: ${reset || 'время неизвестно'}`);
                     line.append(part);
                 });
-                if (age !== null) line.append(document.createTextNode(` (${age} мин)`));
                 if (account.retryAt) tips.push(`Следующий опрос: ${new Date(account.retryAt).toLocaleString('ru-RU')}`);
                 line.title = tips.join('\n'); bar.append(line);
             });
@@ -141,7 +187,7 @@
                 const response = await fetch('/_remoteagents/quotas', {cache:'no-store', credentials:'omit'});
                 if (!response.ok) throw Error();
                 render(await response.json());
-            } catch { bar.textContent = 'лимиты: нет данных'; }
+            } catch { bar.replaceChildren(accountButton, document.createTextNode('лимиты: нет данных')); }
         }
         poll(); setInterval(poll, 60000);
     }

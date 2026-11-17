@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import shutil
 import sys
+import subprocess
 import threading
 from urllib.parse import unquote, urlsplit
 
@@ -87,6 +88,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(json.dumps(data, ensure_ascii=False).encode(), 'application/json')
         if path == ADDON:
             script = Path(__file__).with_name('happier_web_addon.js').read_text()
+            script = script.replace('__REMOTEAGENTS_SESSION_POLICY__', json.dumps(self.server.session_policy, ensure_ascii=True))
             script = script.replace('__REMOTEAGENTS_KEEP_CHATS__', str(self.server.keep_chats))
             endpoint = resolve_server_url(self.server.home, self.server.server_url) if self.server.home else (self.server.server_url or 'https://api.happier.dev')
             script = script.replace('__REMOTEAGENTS_SERVER_URL__', json.dumps(endpoint, ensure_ascii=True))
@@ -130,10 +132,11 @@ class Handler(BaseHTTPRequestHandler):
                 shutil.copyfileobj(stream, self.wfile, 64 * 1024)
 
 
-def make_server(base, port=47831, keep_chats=8, release=None, server_url=None, home=None):
+def make_server(base, port=47831, keep_chats=8, release=None, server_url=None, home=None, session_policy=None):
     server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
     server.base, server.keep_chats, server.release = Path(base), keep_chats, release
     server.server_url, server.home = server_url, home
+    server.session_policy = session_policy or dict(defaultPermissionMode='yolo', claudeAccountLabels={'acc1': '20$', 'acc2': '100$'})
     return server
 
 
@@ -145,10 +148,24 @@ def main():
     base = Path.home() / BASE
     options = settings()
     if args.command == 'serve':
+        policy = {k: options[k] for k in ('defaultPermissionMode', 'claudeAccountLabels')}
+        # Reconcile the encrypted account setting using the installed native CLI.
+        # Failure (offline/login/version) must not prevent UI/quotas from serving.
+        def reconcile():
+            import time
+            while True:
+                try:
+                    subprocess.run(['node', str(Path(__file__).with_name('happier_web_settings.cjs'))],
+                        input=json.dumps(policy), text=True, stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL, timeout=90, check=False)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                time.sleep(300)
+        threading.Thread(target=reconcile, daemon=True).start()
         from happier_web_quotas import Poller
-        poller = Poller(Path.home(), base / 'state/quotas.json', options['quotas'])
+        poller = Poller(Path.home(), base / 'state/quotas.json', {**options['quotas'], 'claudeAccountLabels': options['claudeAccountLabels']})
         threading.Thread(target=poller.run, daemon=True).start()
-        server = make_server(base, options['port'], options['keepChats'], server_url=options['serverUrl'], home=Path.home())
+        server = make_server(base, options['port'], options['keepChats'], session_policy=policy, server_url=options['serverUrl'], home=Path.home())
         try:
             server.serve_forever()
         finally:

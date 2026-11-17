@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import os
+import re
 from pathlib import Path
 import threading
 import time
@@ -15,7 +16,9 @@ from happier_web_common import atomic, private_dir, read_json
 
 URLS = dict(claude='https://api.anthropic.com/api/oauth/usage',
             probe='https://api.anthropic.com/v1/messages',
-            codex='https://chatgpt.com/backend-api/wham/usage')
+            codex='https://chatgpt.com/backend-api/wham/usage',
+            gemini='https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels',
+            gemini_project='https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist')
 
 
 def iso(value):
@@ -42,8 +45,22 @@ def window(name, label, used, reset, factor=1):
     return dict(id=name, label=label, usedPercent=percent(used, factor), resetsAt=iso(stamp) if stamp is not None else None)
 
 
-def discover(home):
+def retry_delay(raw, stamp, interval):
+    try:
+        retry = max(0, float(raw))
+        if not math.isfinite(retry):
+            raise ValueError()
+    except ValueError:
+        try:
+            retry = max(0, email.utils.parsedate_to_datetime(raw).timestamp() - stamp)
+        except (TypeError, ValueError, OverflowError):
+            retry = interval * 2
+    return max(interval * 2, retry)
+
+
+def discover(home, labels=None):
     home = Path(home)
+    labels = {'acc1': '20$', 'acc2': '100$', 'default': '100$', 'native': '100$', **(labels or {})}
     result = {}
 
     def add(provider, label, token, scopes=(), account_id=None):
@@ -68,7 +85,7 @@ def discover(home):
     happier = Path(os.environ.get('HAPPIER_HOME') or home / '.happier')
     for path in sorted(happier.glob('servers/*/daemon/connected-services/homes/claude-subscription/*/claude/claude-config/.credentials.json')):
         oauth = claude_oauth(path)
-        add('claude', 'Claude ' + path.parents[2].name, oauth.get('accessToken'), oauth.get('scopes', []))
+        add('claude', 'Claude ' + labels.get(path.parents[2].name, path.parents[2].name), oauth.get('accessToken'), oauth.get('scopes', []))
     oauth = claude_oauth(home / '.claude/.credentials.json')
     add('claude', 'Claude сервера', oauth.get('accessToken'), oauth.get('scopes', []))
     try:
@@ -81,7 +98,53 @@ def discover(home):
     tokens = codex.get('tokens') if isinstance(codex, dict) else None
     tokens = tokens if isinstance(tokens, dict) else {}
     add('codex', 'Codex', tokens.get('access_token'), account_id=tokens.get('account_id'))
+    # agy wraps the standard Go OAuth token in a 'token' object. Never persist it
+    # in the public cache; an expired token is left to agy's own refresh lifecycle.
+    path = home / '.gemini/antigravity-cli/antigravity-oauth-token'
+    agy = read_json(path, {}) or {}
+    token = agy.get('token', agy) if isinstance(agy, dict) else {}
+    if isinstance(token, dict) and isinstance(token.get('access_token'), str) and token['access_token']:
+        add('gemini', 'Gemini', token.get('access_token'))
+        ident = hashlib.sha256(('gemini:' + token['access_token']).encode()).hexdigest()[:24]
+        if ident in result:
+            result[ident]['expires_at'] = epoch(token.get('expiry'))
     return list(result.values())
+
+
+def gemini_windows(payload):
+    """Only requested model quotas; do not infer a window length from resetTime."""
+    models = payload.get('models') or {}
+    images = payload.get('imageGenerationModelIds') or []
+    windows = []
+    if not isinstance(models, dict):
+        return windows
+    for ident, model in sorted(models.items()):
+        if not isinstance(model, dict) or not re.fullmatch(r'[a-zA-Z0-9_.()-]{1,120}', ident):
+            continue
+        label = model.get('displayName') or ident
+        if not isinstance(label, str):
+            continue
+        if not (re.search(r'gemini[- ](?:3[.-]8|4)(?:[- .]|$)', ident + ' ' + label, re.I) or
+                ident in images or re.search(r'(?:gemini.*image|nano[- ]banana)', ident + ' ' + label, re.I)):
+            continue
+        quota = model.get('quotaInfo')
+        if not isinstance(quota, dict):
+            continue
+        label = label[:100]
+        # Current Antigravity responses expose one quotaInfo per model. Retain
+        # explicit 5-hour/weekly observations if the API supplies them as well.
+        entries = [(ident, label, quota)]
+        for key, suffix in [('fiveHour', '5 ч'), ('sevenDay', 'неделя')]:
+            if isinstance(quota.get(key), dict):
+                entries.append((ident + ':' + key, label + ' ' + suffix, quota[key]))
+        for key, title, q in entries:
+            remaining = percent(q.get('remainingFraction'), 100)
+            if remaining is None:
+                continue
+            w = window(key, title, 100 - remaining, q.get('resetTime'))
+            w['remainingPercent'] = remaining
+            windows.append(w)
+    return windows
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -116,6 +179,9 @@ class Poller:
         if probe and not self.options.get('claudeProbe', True):
             row.update(status='disabled', windows=[])
             return row, interval
+        if account.get('expires_at') is not None and account['expires_at'] <= stamp:
+            row['status'] = 'auth_required'
+            return row, interval
         headers = {'Authorization': 'Bearer ' + account['token'], 'Accept': 'application/json', 'User-Agent': 'RemoteAgents-HappierWeb/1'}
         data = None
         if account['provider'] == 'claude':
@@ -127,6 +193,29 @@ class Poller:
             headers['ChatGPT-Account-Id'] = account['account_id']
         url = self.urls['probe' if probe else account['provider']]
         try:
+            if account['provider'] == 'gemini':
+                headers['Content-Type'] = 'application/json'
+                headers['User-Agent'] = 'antigravity'
+                project_request = urllib.request.Request(self.urls['gemini_project'],
+                    data=b'{"metadata":{"ideType":"ANTIGRAVITY"}}', headers=headers)
+                try:
+                    with self.opener.open(project_request, timeout=20) as response:
+                        raw = response.read(1024 * 1024 + 1)
+                        if len(raw) > 1024 * 1024:
+                            raise ValueError('project response too large')
+                        project = json.loads(raw).get('cloudaicompanionProject')
+                except urllib.error.HTTPError as error:
+                    row['status'] = 'auth_required' if error.code in (401, 403) else 'error'
+                    delay = interval
+                    if error.code == 429:
+                        delay = retry_delay(error.headers.get('Retry-After', ''), stamp, interval)
+                        row.update(status='paused', retryAt=iso(stamp + delay))
+                    error.close()
+                    return row, delay
+                project = project.get('id') if isinstance(project, dict) else project
+                if not isinstance(project, str) or not project:
+                    raise ValueError('project unavailable')
+                data = json.dumps({'project': project}).encode()
             request = urllib.request.Request(url, data=data, headers=headers)
             try:
                 response = self.opener.open(request, timeout=20)
@@ -137,17 +226,7 @@ class Poller:
                     row['status'] = 'auth_required'
                     return row, interval
                 if response.status == 429:
-                    raw = response.headers.get('Retry-After', '')
-                    try:
-                        retry = max(0, float(raw))
-                        if not math.isfinite(retry):
-                            raise ValueError()
-                    except ValueError:
-                        try:
-                            retry = max(0, email.utils.parsedate_to_datetime(raw).timestamp() - stamp)
-                        except (TypeError, ValueError, OverflowError):
-                            retry = interval * 2
-                    delay = max(interval * 2, retry)
+                    delay = retry_delay(response.headers.get('Retry-After', ''), stamp, interval)
                     row.update(status='paused', retryAt=iso(stamp + delay))
                     return row, delay
                 if not 200 <= response.status < 300:
@@ -177,6 +256,8 @@ class Poller:
                             w = payload.get(ident)
                             if isinstance(w, dict):
                                 windows.append(window(ident, label, w.get('utilization'), w.get('resets_at')))
+                    elif account['provider'] == 'gemini':
+                        windows = gemini_windows(payload)
                     else:
                         rate = payload.get('rate_limit') or {}
                         for ident, label in [('primary_window', '5 ч'), ('secondary_window', 'неделя')]:
@@ -202,7 +283,7 @@ class Poller:
         if not self.options.get('enabled', True):
             self.accounts = {}
         else:
-            accounts = discover(self.home)
+            accounts = discover(self.home, self.options.get('claudeAccountLabels'))
             present = {a['id'] for a in accounts}
             self.accounts = {k: v for k, v in self.accounts.items() if k in present}
             for account in accounts:

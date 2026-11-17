@@ -61,12 +61,19 @@
 Один опросчик на сервере, страницы читают только кэш.
 - Аккаунты Claude: managed `agents.claude` (`~/.config/remoteagents/claude.env`), `~/.claude/.credentials.json`,
   подключённые профили Happier (`~/.happier/servers/*/daemon/connected-services/homes/claude-subscription/<profile>/claude/claude-config/.credentials.json`).
-  Повторяющиеся токены — одна строка. Подпись — имя профиля Happier или «Claude сервера».
+  Повторяющиеся токены — одна строка. Подписи `acc1` → `20$`, `acc2` (также native/default) → `100$`; остальные — имя профиля или «Claude сервера».
 - Claude со scope `user:profile`: `GET https://api.anthropic.com/api/oauth/usage` (как в Happier), раз в 30 мин.
   Только `user:inference` (setup-token): запрос `POST /v1/messages` с `max_tokens: 1` и чтение заголовков
   `anthropic-ratelimit-unified-{5h,7d}-{utilization,reset}`, `…-status`, раз в `claudeProbeSec` (по умолчанию 600).
   Запрос тратит ничтожную часть лимита; выключается `quotas.claudeProbe: false`.
 - Codex: `~/.codex/auth.json` (OAuth), `GET https://chatgpt.com/backend-api/wham/usage`, раз в 5 мин.
+- Gemini (Antigravity/`agy`): `~/.gemini/antigravity-cli/antigravity-oauth-token`, `token.access_token`.
+  Раз в 5 мин: `loadCodeAssist` (`metadata.ideType=ANTIGRAVITY`, User-Agent `antigravity`), затем
+  `fetchAvailableModels` с project. Показываются Gemini 3.8, Gemini 4 и image/Nano Banana;
+  `quotaInfo.remainingFraction` преобразуется в занято/остаток, `resetTime` — в местное время браузера.
+  Длительность единственного окна Google не выдумывается. Просроченный токен → «нужен вход»;
+  обновление токена остаётся за `agy`, refresh token опросчик не использует и не переписывает.
+- В строке каждого окна видно время и дату (`18:40 17.11`); возраст данных остаётся только в подсказке.
 - 429/`Retry-After` — пауза больше; 401/403 — статус «нужен вход», не 0%. Токены не попадают в JSON и журналы.
 - Ответ: `{"schema":1,"accounts":[{"id","provider","label","status","fetchedAt","windows":[{"id","label","usedPercent","resetsAt"}]}]}`.
 
@@ -76,8 +83,24 @@
 
 ```json
 "happierWeb": {"enabled": true, "port": 47831, "updateIntervalHours": 6, "keepReleases": 2,
-               "keepChats": 8, "quotas": {"enabled": true, "claudeProbe": true, "claudeProbeSec": 600}}
+               "keepChats": 8, "defaultPermissionMode": "yolo",
+               "claudeAccountLabels": {"acc1": "20$", "acc2": "100$"}, "quotas": {"enabled": true, "claudeProbe": true, "claudeProbeSec": 600}}
 ```
+
+При запуске Web и затем каждые 5 мин `happier_web_settings.cjs` согласует настройки активного
+аккаунта через установленный Happier CLI: его шифрование и compare-and-swap для `/v2/account/settings`.
+YOLO выставляется в `sessionDefaultPermissionModeByTargetKey` и в defaults пользовательских backend-профилей.
+Добавка также оборачивает штатный `resolveNewSessionDefaultPermissionMode` по имени экспорта Metro:
+это обходит встроенный профиль с `default`, который иначе имеет приоритет над настройкой аккаунта.
+Подписанные upstream-файлы и списки встроенных профилей не переписываются. Изменения идут в
+зашифрованные настройки аккаунта и native cache CLI; `~/.happier/settings.json` не содержит этих полей.
+Обычный выбор прав внутри чата остаётся доступен; восстановленный черновик сохраняет свой выбор.
+Подписи connected-service профилей записываются в `connectedServicesProfileLabelByKey`, включается
+`featureToggles.connectedServices`. В панели появляется кнопка «Аккаунт чата», открывающая штатный
+выбор подключённых профилей на форме нового чата (оба должны иметь статус connected в relay).
+Если CLI несовместим, нет входа или сети, Web продолжает работать; reconcile повторится через 5 мин.
+После установки нового кода: `systemctl --user restart remoteagents-happier-web.service`, затем
+перезагрузить страницу. Секреты и `.env` этим механизмом не изменяются.
 
 Компьютер (`happier`, конфиг вставкой):
 

@@ -137,6 +137,7 @@ namespace RemoteAgents.Launcher
                     "bridge", O(D("enabled", B(), "identity", Ref())),
                     "happierWeb", O(D("enabled", B(), "port", N(1024, 65535), "updateIntervalHours", N(1, 168),
                         "keepReleases", N(2, 10), "keepChats", N(1, 100),
+                        "defaultPermissionMode", E("yolo", "default"), "claudeAccountLabels", Named(S(100, 1), "^[a-zA-Z0-9][a-zA-Z0-9_:-]{0,63}$"),
                         "quotas", O(D("enabled", B(), "claudeProbe", B(), "claudeProbeSec", N(60, 86400))), "serverUrl", HappierServerUrl())),
                     "happier", O(D("enabled", B(), "identity", Ref(), "channel", E("stable"), "version", S(64, 1, @"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$"))))),
                 "agents", O(D(

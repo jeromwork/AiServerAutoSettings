@@ -93,6 +93,7 @@ server/happier_web.py
 server/happier_web_common.py
 server/happier_web_release.py
 server/happier_web_quotas.py
+server/happier_web_settings.cjs
 server/happier_web_verify.cjs
 server/happier_web_addon.js
 server-codex-v1.sh

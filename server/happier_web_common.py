@@ -44,7 +44,8 @@ def settings(home=None):
     home = Path(home or Path.home())
     item = read_json(home / '.config/remoteagents/happier-web.json', {})
     return dict(port=item.get('port', 47831), keepReleases=item.get('keepReleases', 2),
-                keepChats=item.get('keepChats', 8), quotas=item.get('quotas', {}), serverUrl=item.get('serverUrl'))
+                keepChats=item.get('keepChats', 8), defaultPermissionMode=item.get('defaultPermissionMode', 'yolo'),
+                claudeAccountLabels=item.get('claudeAccountLabels', {'acc1': '20$', 'acc2': '100$'}), quotas=item.get('quotas', {}), serverUrl=item.get('serverUrl'))
 
 
 def server_origin(value):

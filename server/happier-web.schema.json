@@ -56,6 +56,29 @@
           "format": "happier-server-url",
           "maxLength": 2048,
           "pattern": "^https?://"
+        },
+        "defaultPermissionMode": {
+          "type": "string",
+          "enum": [
+            "yolo",
+            "default"
+          ],
+          "default": "yolo"
+        },
+        "claudeAccountLabels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "propertyNames": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_:-]{0,63}$"
+          },
+          "default": {
+            "acc1": "20$",
+            "acc2": "100$"
+          }
         }
       }
     },

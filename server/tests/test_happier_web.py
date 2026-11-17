@@ -201,6 +201,38 @@ class ReleaseTests(Temp):
         self.assertFalse((self.base / 'current').exists())
 
 
+class SessionPolicyTests(Temp):
+    def test_default_policy_and_native_encrypted_settings_patch(self):
+        from happier_web_common import settings
+        policy = settings(self.root)
+        self.assertEqual(policy['defaultPermissionMode'], 'yolo')
+        self.assertEqual(policy['claudeAccountLabels'], {'acc1': '20$', 'acc2': '100$'})
+        script = r"""
+const assert=require('node:assert/strict');const {settingsPatch}=require(process.argv[1]);
+const policy={defaultPermissionMode:'yolo',claudeAccountLabels:{acc1:'20$',acc2:'100$'}};
+const input={unrelated:{keep:42},featureToggles:{voice:true},
+sessionDefaultPermissionModeByTargetKey:{'agent:claude':'default','acp:custom':'auto'},
+connectedServicesProfileLabelByKey:{'openai-codex/work':'work'},
+profiles:[{id:'custom',environmentVariables:[{name:'FIXTURE',value:'keep'}],defaultPermissionMode:'default',defaultPermissionModeByTargetKey:{'agent:claude':'default'}}]};
+const builtins=[{id:'anthropic',isBuiltIn:true,defaultPermissionModeByTargetKey:{'agent:claude':'default'}}];
+const result=settingsPatch(input,policy,builtins);
+assert.equal(result.sessionDefaultPermissionModeByTargetKey['agent:claude'],'yolo');
+assert.equal(result.sessionDefaultPermissionModeByTargetKey['acp:custom'],'yolo');
+assert.equal(result.profiles.length,1);
+assert.equal(result.profiles[0].defaultPermissionModeByTargetKey['agent:claude'],'yolo');
+assert.equal(result.profiles[0].environmentVariables[0].value,'keep');
+assert.deepEqual(result.unrelated,input.unrelated);assert.equal(result.featureToggles.voice,true);
+assert.equal(result.featureToggles.connectedServices,true);
+assert.equal(result.connectedServicesProfileLabelByKey['openai-codex/work'],'work');
+assert.equal(result.connectedServicesProfileLabelByKey['claude-subscription/acc1'],'20$');
+assert.equal(result.connectedServicesProfileLabelByKey['claude-subscription/acc2'],'100$');
+assert.deepEqual(settingsPatch(result,policy,builtins),result);
+assert.equal(input.profiles[0].defaultPermissionMode,'default');
+"""
+        result = node(script, SOURCE / 'happier_web_settings.cjs')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
 class ServerUrlTests(Temp):
     def test_explicit_native_active_and_fallback_without_vendor_import(self):
         home = self.root / 'home'
@@ -281,7 +313,12 @@ class ServingTests(Temp):
         from resource_guard import wait_for_memory
         if not wait_for_memory():
             self.skipTest('available memory below 2000 MiB after 20 waits')
-        bundle = b'''let got=0, page=0;
+        bundle = rb'''let got=0, page=0, accountClicks=0;
+let permissionModule={exports:{}};
+window.__d=factory=>factory(null,null,null,null,permissionModule,permissionModule.exports);
+window.__d((g,r,i,a,m,e)=>{e.resolveNewSessionDefaultPermissionMode=options=>options.profileDefaultsByTargetKey?.['agent:claude']??options.accountDefaults.byTargetKey['agent:claude']??options.legacyProfileDefaultPermissionMode??'default';});
+const resolvedMode=permissionModule.exports.resolveNewSessionDefaultPermissionMode({profileDefaultsByTargetKey:{'agent:claude':'default'},accountDefaults:{byTargetKey:{'agent:claude':'default'}}});
+const auth=document.createElement('button');auth.dataset.testid='new-session-connected-services-auth-chip';auth.onclick=()=>accountClicks++;document.body.append(auth);
 for(const e of ['visibilitychange','webkitvisibilitychange','freeze']) document.addEventListener(e,()=>got++);
 window.addEventListener('visibilitychange',()=>got++);
 window.addEventListener('pagehide',()=>page++);
@@ -289,13 +326,18 @@ for(const e of ['visibilitychange','webkitvisibilitychange','freeze']) document.
 window.dispatchEvent(new Event('pagehide'));
 const check=()=>{const bar=document.getElementById('remoteagents-quotas');
 if(!bar || !bar.textContent.includes('95%')) return setTimeout(check,20);
+const accountButton=bar.querySelector('button');accountButton.click();
+const reset=new Date('2026-12-01T00:00:00Z');
+const pad=n=>String(n).padStart(2,'0');
+const expected=`${pad(reset.getHours())}:${pad(reset.getMinutes())} 01.12`;
+const bannerValid=bar.textContent.includes(expected) && !/\(\d+ \u043c\u0438\u043d\)/.test(bar.textContent) && !bar.textContent.includes('\u0441\u0431\u0440\u043e\u0441') && !bar.textContent.includes('Invalid Date') && bar.textContent.includes('100%') && accountClicks===1 && !accountButton.hidden && accountButton.title.includes('20$') && accountButton.title.includes('100$');
 const modal=document.createElement('div'); modal.id='modal'; modal.style='position:fixed;inset:0;z-index:100;background:white';document.body.append(modal);
 const tuning=JSON.parse(localStorage.HAPPIER_SYNC_TUNING_JSON);
-const valid=got===0 && page===1 && !document.hidden && document.visibilityState==='visible' && window.__HAPPIER_WEB_RUNTIME_CONFIG__.serverUrl==='https://api.happier.dev' && tuning.sessionTranscriptRetentionRecentKeepCount===13 && tuning.custom===42 && tuning.sessionRealtimeProjectionMode==='disabled' && document.getElementById('root').getBoundingClientRect().top>=bar.getBoundingClientRect().bottom && document.elementFromPoint(10,10)===modal && bar.querySelector('span span').style.color==='rgb(255, 119, 119)';
+const valid=resolvedMode==='yolo' && bannerValid && got===0 && page===1 && !document.hidden && document.visibilityState==='visible' && window.__HAPPIER_WEB_RUNTIME_CONFIG__.serverUrl==='https://api.happier.dev' && tuning.sessionTranscriptRetentionRecentKeepCount===13 && tuning.custom===42 && tuning.sessionRealtimeProjectionMode==='disabled' && document.getElementById('root').getBoundingClientRect().top>=bar.getBoundingClientRect().bottom && document.elementFromPoint(10,10)===modal && bar.querySelector('span span').style.color==='rgb(255, 119, 119)';
 document.body.setAttribute('data-result',valid?'PASS':'FAIL');document.body.setAttribute('data-banner',bar.textContent);};check();'''
         html = b'<html><head><style>html,body,#root{height:100%;margin:0}</style></head><body><div id="root"></div><script src="/app-abcdef123456.js"></script></body></html>'
         self.install(files={'index.html':html, 'app-abcdef123456.js':bundle, 'seed.html':b'<script>localStorage.HAPPIER_SYNC_TUNING_JSON=JSON.stringify({custom:42});location.replace("/")</script>'})
-        atomic(self.base / 'state/quotas.json', json.dumps(dict(schema=1, accounts=[dict(id='fixture',provider='claude',label='Claude acc1',status='ok',fetchedAt=quotas.iso(__import__('time').time()),windows=[dict(id='five_hour',label='5 ч',usedPercent=95,resetsAt='2026-12-01T00:00:00Z')])],)))
+        atomic(self.base / 'state/quotas.json', json.dumps(dict(schema=1, accounts=[dict(id='fixture',provider='claude',label='Claude 20$',status='ok',fetchedAt=quotas.iso(__import__('time').time()),windows=[dict(id='five_hour',label='5 ч',usedPercent=95,resetsAt='2026-12-01T00:00:00Z')]),dict(id='gemini',provider='gemini',label='Gemini',status='ok',windows=[dict(id='image',label='Nano Banana',usedPercent=0,remainingPercent=100,resetsAt='invalid')])],)))
         with running(web.make_server(self.base, 0, 13)) as url:
             process = subprocess.Popen(['nice','-n','10','/usr/bin/google-chrome','--headless','--no-sandbox','--disable-gpu',
                 '--disable-dev-shm-usage','--disable-background-networking','--disable-sync','--disable-extensions',
@@ -315,7 +357,8 @@ document.body.setAttribute('data-result',valid?'PASS':'FAIL');document.body.setA
                 process.wait()
         self.assertEqual(result.returncode, 0)
         self.assertIn('data-result="PASS"', result.stdout, result.stdout[-5000:])
-        self.assertIn('Claude acc1: 5 ч 95%', result.stdout)
+        self.assertIn('Claude 20$: 5 ч 95%', result.stdout)
+        self.assertIn('Nano Banana 0% (ост. 100%)', result.stdout)
 
 
 class ProviderHandler(BaseHTTPRequestHandler):
@@ -342,6 +385,10 @@ class ProviderHandler(BaseHTTPRequestHandler):
         self.end_headers()
         if self.path == '/oauth/usage':
             payload = dict(five_hour=dict(utilization=32,resets_at='2026-12-01T00:00:00Z'),seven_day=dict(utilization=60,resets_at=None))
+        elif self.path == '/loadCodeAssist':
+            payload = dict(cloudaicompanionProject=dict(id='fixture-project'))
+        elif self.path == '/fetchAvailableModels':
+            payload = self.server.gemini_models
         elif getattr(self.server, 'codex_rate', None) is not None:
             payload = dict(rate_limit=self.server.codex_rate)
         else:
@@ -373,7 +420,7 @@ class QuotaTests(Temp):
         self.credentials()
         accounts = quotas.discover(self.home)
         self.assertEqual(len(accounts), 3)
-        self.assertEqual(accounts[0]['label'], 'Claude acc1')
+        self.assertEqual(accounts[0]['label'], 'Claude 20$')
         server = self.server()
         with running(server) as url:
             poller = quotas.Poller(self.home, self.base / 'private/quotas.json', urls=dict(claude=url+'/oauth/usage',probe=url+'/messages',codex=url+'/wham/usage'), now=lambda:1700000000)
@@ -404,6 +451,78 @@ class QuotaTests(Temp):
             poller.tick()
         codex = [row for row in poller.accounts.values() if row['provider'] == 'codex'][0]
         self.assertEqual([(w['label'], w['usedPercent']) for w in codex['windows']], [('неделя', 72)])
+
+    def gemini(self):
+        write = self.credentials()
+        write('.gemini/antigravity-cli/antigravity-oauth-token', dict(token=dict(
+            access_token='GEMINI_ACCESS_SENTINEL', refresh_token='GEMINI_REFRESH_SENTINEL', expiry='2030-01-01T00:00:00Z')))
+        account = next(a for a in quotas.discover(self.home) if a['provider'] == 'gemini')
+        return write, account
+
+    def test_claude_profile_labels_and_native_dedup(self):
+        write = self.credentials()
+        prefix = '.happier/servers/cloud/daemon/connected-services/homes/claude-subscription/'
+        for name in ('acc2', 'default', 'native'):
+            write(prefix + name + '/claude/claude-config/.credentials.json', dict(claudeAiOauth=dict(accessToken='SECOND_SENTINEL')))
+        accounts = quotas.discover(self.home)
+        self.assertEqual([a['label'] for a in accounts if a['provider'] == 'claude'], ['Claude 20$', 'Claude 100$', 'Claude сервера'])
+        self.assertEqual(quotas.discover(self.home, {'acc1': 'First'})[0]['label'], 'Claude First')
+
+    def test_gemini_project_post_models_windows_and_no_secrets_in_cache(self):
+        self.gemini(); server = self.server()
+        server.gemini_models = dict(models={
+            'gemini-3.8-flash-tiered': dict(quotaInfo=dict(remainingFraction=.75,resetTime='2026-11-17T17:40:00Z')),
+            'gemini-4-pro': dict(displayName='Gemini 4 Pro',quotaInfo=dict(remainingFraction=.5, resetTime=None,
+                fiveHour=dict(remainingFraction=.8,resetTime='2026-11-17T17:40:00Z'),
+                sevenDay=dict(remainingFraction=.6,resetTime='2026-11-23T17:40:00Z'))),
+            'gemini-3.1-flash-image': dict(displayName='Nano Banana',quotaInfo=dict(remainingFraction=1,resetTime='2026-11-17T17:40:00Z')),
+            'gemini-2.5-pro': dict(quotaInfo=dict(remainingFraction=1)),
+            'gemini-4-unknown': dict(quotaInfo=dict(remainingFraction=None)),
+            'claude-opus': dict(quotaInfo=dict(remainingFraction=.4))}, imageGenerationModelIds=['gemini-3.1-flash-image'])
+        with running(server) as url:
+            urls = dict(quotas.URLS, claude=url+'/oauth/usage',probe=url+'/messages',codex=url+'/wham/usage',
+                gemini_project=url+'/loadCodeAssist',gemini=url+'/fetchAvailableModels')
+            poller = quotas.Poller(self.home,self.base/'cache/quotas.json',urls=urls)
+            poller.tick(); poller.tick()
+        row = next(r for r in poller.accounts.values() if r['provider'] == 'gemini')
+        self.assertEqual(row['status'], 'ok')
+        windows = {w['id']: w for w in row['windows']}
+        self.assertEqual(len(windows),5)
+        self.assertEqual(windows['gemini-3.8-flash-tiered']['usedPercent'],25)
+        self.assertEqual(windows['gemini-3.8-flash-tiered']['remainingPercent'],75)
+        self.assertEqual(windows['gemini-3.8-flash-tiered']['resetsAt'],'2026-11-17T17:40:00Z')
+        self.assertEqual(windows['gemini-3.1-flash-image']['remainingPercent'],100)
+        self.assertEqual(windows['gemini-4-pro:fiveHour']['label'],'Gemini 4 Pro 5 ч')
+        self.assertEqual(windows['gemini-4-pro:sevenDay']['label'],'Gemini 4 Pro неделя')
+        google = [r for r in server.requests if r[0] in ('/loadCodeAssist','/fetchAvailableModels')]
+        self.assertEqual(len(google),2)
+        self.assertEqual([r[1] for r in google],['POST','POST'])
+        self.assertEqual(json.loads(google[0][3]),dict(metadata=dict(ideType='ANTIGRAVITY')))
+        self.assertEqual(json.loads(google[1][3]),dict(project='fixture-project'))
+        self.assertEqual(google[0][2]['user-agent'],'antigravity')
+        self.assertEqual(google[1][2]['authorization'],'Bearer GEMINI_ACCESS_SENTINEL')
+        raw = poller.cache.read_text()
+        for secret in ('GEMINI_ACCESS_SENTINEL','GEMINI_REFRESH_SENTINEL','unsafe_provider_echo','fixture-project'):
+            self.assertNotIn(secret,raw)
+
+    def test_gemini_expired_and_unauthorized_need_auth_without_token_mutation(self):
+        write, account = self.gemini(); server = self.server()
+        native = self.home/'.gemini/antigravity-cli/antigravity-oauth-token'
+        before = native.read_bytes()
+        with running(server) as url:
+            poller = quotas.Poller(self.home,self.base/'cache.json',urls=dict(gemini_project=url+'/loadCodeAssist',gemini=url+'/fetchAvailableModels'))
+            expired = dict(account, expires_at=1)
+            row,_ = poller.fetch(expired)
+            self.assertEqual(row['status'],'auth_required'); self.assertEqual(server.requests,[])
+            for code in (401,403):
+                server.status = code
+                row,_ = poller.fetch(account)
+                self.assertEqual(row['status'],'auth_required')
+                self.assertEqual(row['windows'],[])
+            server.status = 429
+            row,delay = poller.fetch(account)
+            self.assertEqual(row['status'],'paused'); self.assertEqual(delay,4000)
+        self.assertEqual(native.read_bytes(),before)
 
     def test_401_403_need_login_429_pause_and_restart_honors_retry(self):
         self.credentials(); server = self.server(); now = [1700000000]
