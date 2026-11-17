@@ -370,7 +370,12 @@ function Resolve-TransportPorts([string]$Root,$Settings,[int]$ProbeCount,[int]$S
     if($Settings.Lan.enabled){
         $Settings.Lan.proxyPort=[int]$effective.lanProxyPort
         foreach($forward in @($Settings.Lan.forwards)){
-            $forward.localPort=Select-TransportPortBlock ([int]$forward.localPort) 1 10 $snapshot $selected
+            $from=[int]$forward.localPort
+            $forward.localPort=Select-TransportPortBlock $from 1 10 $snapshot $selected
+            if($from -ne $forward.localPort){
+                [void]$moved.Add([pscustomobject]@{key=$forward.tag;from=$from;to=$forward.localPort;pid=0;exe=''})
+                if(-not $Preview){Write-TransportLog $Root 'port-moved' ([pscustomobject]@{message=('Порт '+$from+' занят — '+$forward.tag+' использует '+$forward.localPort)})}
+            }
         }
         $effective|Add-Member -Force lan $Settings.Lan
     }
@@ -415,8 +420,8 @@ function Get-TransportLan($Config) {
     foreach($item in @($Config.profile.lan)){
         if(-not $item -or -not $item.share){$index++;continue}
         $share=$item.share;$names=@{}
-        foreach($subnet in @($share.subnets)){Assert-LanCidr ([string]$subnet);$subnets+=[string]$subnet}
-        foreach($domain in @($share.domains)){Assert-LanDomain ([string]$domain);$domains+=([string]$domain).ToLowerInvariant()}
+        foreach($subnet in @($share.subnets|Where-Object {$null -ne $_})){Assert-LanCidr ([string]$subnet);$subnets+=[string]$subnet}
+        foreach($domain in @($share.domains|Where-Object {$null -ne $_})){Assert-LanDomain ([string]$domain);$domains+=([string]$domain).ToLowerInvariant()}
         foreach($f in @($share.forwards)){
             if(-not $f){continue}
             if([string]$f.name -notmatch '^[a-z][a-z0-9-]{0,31}$' -or $names.ContainsKey([string]$f.name)){throw 'share.forwards: неверное или повторное имя'};$names[[string]$f.name]=$true
@@ -424,11 +429,11 @@ function Get-TransportLan($Config) {
             if([string]$f.host -match '^[0-9.]+$'){Assert-LanCidr ([string]$f.host+'/32')}else{Assert-LanDomain ([string]$f.host);if([string]$f.host -match '\*'){throw 'forward.host: нужен точный хост'}}
             $forwards+=[pscustomobject]@{name=$f.name;tag=('lan-fwd-'+$index+'-'+$f.name);host=([string]$f.host).ToLowerInvariant();port=[int]$f.port;localPort=[int]$f.localPort}
         }
-        if(-not $probeHost -and (@($share.subnets).Count+@($share.domains).Count+@($share.forwards).Count -gt 0)){
+        if(-not $probeHost -and ($subnets.Count+$domains.Count+$forwards.Count -gt 0)){
             $probeHost=[string](Get-TransportValue $item 'testHost' (Get-TransportValue $item 'host' ''))
             $probePort=[int](Get-TransportValue $item 'testPort' (Get-TransportValue $item 'port' 22))
             if(-not $probeHost -and @($share.forwards).Count){$probeHost=[string]$share.forwards[0].host;$probePort=[int]$share.forwards[0].port}
-            if(-not $probeHost){throw 'lan.share: нужен testHost/testPort или первый forward'}
+            if(-not $probeHost -or $probePort -lt 1 -or $probePort -gt 65535 -or $probeHost -notmatch '^[a-zA-Z0-9][a-zA-Z0-9.-]*$'){throw 'lan.share: нужен корректный testHost/testPort или первый forward'}
         }
         $index++
     }

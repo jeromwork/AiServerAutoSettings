@@ -57,15 +57,15 @@ namespace RemoteAgents.Launcher
                 foreach (var f in Json.Array(Json.Get(share, "forwards")).Select(Json.Map)) {
                     if (!names.Add(Json.Str(f, "name"))) throw new InvalidDataException("share.forwards: имена повторяются");
                     string host = Json.Str(f, "host"); IPAddress ip;
-                    if (IPAddress.TryParse(host, out ip)) { uint value = IPv4(host); Cidr(host + "/32"); }
-                    else Domain(host);
+                    if (IPAddress.TryParse(host, out ip)) { IPv4(host); Cidr(host + "/32"); }
+                    else { Domain(host); if (host.StartsWith("*.")) throw new InvalidDataException("forward.host: нужен точный хост"); }
                     one.Forwards.Add(f);
                 }
                 if (!one.Enabled) continue;
                 string probe = Json.Text(lan, "testHost", Json.Str(lan, "host"));
                 int port = Json.Int(lan, "testPort", Json.Int(lan, "port", 22));
                 if (probe.Length == 0 && one.Forwards.Count > 0) { probe = Json.Str(one.Forwards[0], "host"); port = Json.Int(one.Forwards[0], "port", 0); }
-                if (probe.Length == 0 || !one.Allows(probe, port)) throw new InvalidDataException("lan.share: задайте testHost/testPort, разрешённый через share (или первый forward)");
+                if (probe.Length == 0 || port < 1 || port > 65535 || !Regex.IsMatch(probe, @"^[a-zA-Z0-9][a-zA-Z0-9.-]*$") || !one.Allows(probe, port)) throw new InvalidDataException("lan.share: задайте testHost/testPort, разрешённый через share (или первый forward)");
                 if (result.ProbeHost.Length == 0) { result.ProbeHost = probe; result.ProbePort = port; }
                 result.Subnets.AddRange(one.Subnets); result.Domains.AddRange(one.Domains); result.Forwards.AddRange(one.Forwards);
             }

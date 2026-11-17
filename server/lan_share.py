@@ -68,6 +68,7 @@ def policy(config):
             try:
                 ipaddress.ip_address(f['host'])
             except ValueError:
+                require(not f['host'].startswith('*.'), 'forward.host: нужен точный хост.')
                 domain(f['host'])
             else:
                 cidr(f['host'] + '/32')
@@ -119,9 +120,15 @@ def generate(config, p, kind, previous=None):
         direct = next((o['tag'] for o in result.get('outbounds', []) if o.get('type') == 'direct' and o.get('tag') == 'direct-out'), None)
         require(direct, 'Нет штатного direct-out sing-box; чужой выход не подменяется.')
         normal = route.get('final')
-        require(normal and normal != direct, 'Нужен явный обычный route.final сервера.')
+        require(normal, 'Нужен явный обычный route.final сервера.')
         def add(match, outbound=direct):
-            added.append(dict(inbound=tags, **match, action='route', outbound=outbound))
+            # Logical rules accept matchers inside rules, not at the top level.
+            if match.get('type') == 'logical':
+                match = copy.deepcopy(match)
+                match['rules'].insert(0, {'inbound': tags})
+                added.append(dict(**match, action='route', outbound=outbound))
+            else:
+                added.append(dict(inbound=tags, **match, action='route', outbound=outbound))
         if p['subnets']:
             add({'ip_cidr': p['subnets']})
         domains = list(p['domains']) + [f['host'] for f in p['forwards'] if not re.fullmatch(r'[0-9.]+', f['host'])]
@@ -161,7 +168,7 @@ def generate(config, p, kind, previous=None):
             match = {'ip': [f['host'] + '/32']} if re.fullmatch(r'[0-9.]+', f['host']) else {'domain': ['full:' + f['host']]}
             added.append(dict(type='field', **match, port=str(f['port']), outboundTag=direct))
     route['rules'] = added + rules
-    return result, dict(rules=added, dns=dns, createdDns=created_dns)
+    return result, copy.deepcopy(dict(rules=added, dns=dns, createdDns=created_dns))
 
 
 def digest(value):
@@ -187,6 +194,7 @@ def rollback(s, boot=False):
         shutil.rmtree(s.path(STATE))
         if not boot:
             s.run(['systemctl', 'stop', TIMER + '.timer'], check=False)
+            s.run(['systemctl', 'reset-failed', TIMER + '.service'], check=False)
 
 
 def _reconcile(e, apply, transaction):

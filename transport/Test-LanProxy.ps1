@@ -17,7 +17,7 @@ function Test-LanConnect([string]$Target,[int]$Port) {
     if($Target -notmatch '^[a-zA-Z0-9][a-zA-Z0-9.-]*$' -or $Port -lt 1 -or $Port -gt 65535){throw 'Неверная цель пробы'}
     $sink='NUL';if($env:OS -ne 'Windows_NT'){$sink='/dev/null'}
     $curl='curl.exe';if($env:OS -ne 'Windows_NT'){$curl='curl'}
-    $answer=& $curl --disable --silent --connect-timeout 2 --max-time 3 --noproxy '' --proxy ('http://127.0.0.1:'+$lan.proxyPort) --proxytunnel --output $sink --write-out '%{http_connect}' ('http://'+$Target+':'+$Port+'/') 2>$null
+    $answer=Invoke-TransportText $curl @('--disable','--silent','--connect-timeout','2','--max-time','3','--noproxy=','--proxy',('http://127.0.0.1:'+$lan.proxyPort),'--proxytunnel','--output',$sink,'--write-out','%{http_connect}',('http://'+$Target+':'+$Port+'/')) (0..99)
     return (([string]($answer -join '')).Trim() -eq '200')
 }
 $ok=Test-LanConnect ([string]$lan.probeHost) ([int]$lan.probePort)

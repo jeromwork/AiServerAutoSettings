@@ -111,8 +111,14 @@ namespace RemoteAgents.Launcher
                         client.ReceiveTimeout = client.SendTimeout = 1000;
                         using (var stream = client.GetStream()) {
                             var input = new MemoryStream(); int value;
-                            while (input.Length < 4096 && (value = stream.ReadByte()) >= 0) { input.WriteByte((byte)value); if (value == 10) break; }
-                            string line = Encoding.ASCII.GetString(input.ToArray()).TrimEnd('\r', '\n');
+                            var deadline = DateTime.UtcNow.AddSeconds(1);
+                            int previous = 0, beforePrevious = 0, thirdPrevious = 0;
+                            while (input.Length < 4096 && DateTime.UtcNow < deadline && (value = stream.ReadByte()) >= 0) {
+                                input.WriteByte((byte)value);
+                                if (value == 10 && (previous == 10 || previous == 13 && beforePrevious == 10 && thirdPrevious == 13)) break;
+                                thirdPrevious = beforePrevious; beforePrevious = previous; previous = value;
+                            }
+                            string line = Encoding.ASCII.GetString(input.ToArray()).Split('\n')[0].TrimEnd('\r');
                             bool ok = line == "GET " + path + " HTTP/1.1" || line == "GET " + path + " HTTP/1.0";
                             byte[] payload = Encoding.UTF8.GetBytes(ok ? body : "Not found\n");
                             byte[] header = Encoding.ASCII.GetBytes("HTTP/1.1 " + (ok ? "200 OK" : "404 Not Found") + "\r\nContent-Type: application/x-ns-proxy-autoconfig\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: " + payload.Length + "\r\n\r\n");
@@ -157,7 +163,7 @@ namespace RemoteAgents.Launcher
             if (disposed) return;
             try {
                 var access = LanAccess.Read(Json.Map(Json.Get(config, "profile")));
-                if (!access.Enabled) { StopPac(); Publish(false, "off", "не настроена", "", false); return; }
+                if (!access.Enabled) { StopPac(); connected = false; checkedAt = DateTime.MinValue; probeKey = ""; probe = null; Publish(false, "off", "не настроена", "", false); return; }
                 var lan = Json.Map(Json.Get(transport, "lan")); int port = Json.Int(lan, "proxyPort", 0);
                 bool ready = Json.Bool(transport, "ok") && Json.Bool(lan, "enabled") && port > 0 && Json.Str(transport, "configError").Length == 0;
                 // Never apply PAC from a desired profile over a still-running older channel config.
