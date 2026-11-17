@@ -238,6 +238,9 @@ def _reconcile(e, apply, transaction):
         if not file.exists():
             require(path not in manifest, 'Управляемый конфиг канала пропал.')
             continue
+        # A stopped terminator we never managed carries no channel traffic; leave it alone.
+        if path not in manifest and not s.active(unit):
+            continue
         # Main system sing-box may have only a TUN; that is not a channel terminator.
         current = s.read(path)
         if kind == 'singbox' and not any(i.get('type') in ('vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria2', 'tuic', 'hysteria') for i in current.get('inbounds', [])) and path not in manifest:
