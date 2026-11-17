@@ -17,7 +17,7 @@ server-sync.py
 server-sync-runtime.py
 server-install-sync.sh
 # Includes optional launcher path/VPN commands as the transport module is delivered.
-# Снимок сети Collect-NetState.ps1 поставляется тем же glob, что Test-LanProxy.ps1.
+# Снимок сети Collect-NetState.ps1 поставляется общим glob транспортных скриптов.
 transport/*.ps1
 transport/*.json
 # Server bootstrap entry/*.sh stays in source until server rollback acceptance.

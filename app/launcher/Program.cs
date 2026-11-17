@@ -62,7 +62,7 @@ namespace RemoteAgents.Launcher
                     var rest = new System.Collections.Generic.List<string>(args); int at = rest.IndexOf("--home"); if (at > 0 && at + 1 < rest.Count) rest.RemoveRange(at, 2);
                     return SecretCommand.Run(home, rest.ToArray());
                 }
-                Directory.CreateDirectory(home); log = new Journal(home); log.Write("launcher.start");
+                Directory.CreateDirectory(home); LegacyPacCleanup.Recover(home, new LegacyPacBrowser()); log = new Journal(home); log.Write("launcher.start");
                 if (args.Contains("--uninstall")) { if (Product.IsVpn) FirstInstall.UninstallVpn(home); else Uninstall.Run(home); log.Write("uninstall.ok"); return 0; }
                 var sid = WindowsIdentity.GetCurrent().User; string name = InstanceName(home, sid);
                 var security = new MutexSecurity(); security.AddAccessRule(new MutexAccessRule(sid, MutexRights.FullControl, AccessControlType.Allow));

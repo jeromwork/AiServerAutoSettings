@@ -36,7 +36,6 @@ namespace RemoteAgents.Launcher
         int diskFolders = -1;
         bool vpnActionBusy, vpnActionWanted;
         string vpnError = "";
-        LanProxy lanProxy;
         HelperClient netHelper;
         string diskSummary = "Диск: ожидается проверка";
         DateTime diskUpdated = DateTime.MinValue;
@@ -171,10 +170,6 @@ namespace RemoteAgents.Launcher
                 int count = critical.Count(r => r.Healthy); icon.Icon = all ? green : count > 0 ? yellow : red;
                 var transport = StatusView.Read(home, "transport", maxAgeSec: 15);
                 if (netHelper != null) netHelper.UpdateLan(config.Data, transport);
-                if (!Product.IsVpn && (netHelper == null || !netHelper.Installed)) {
-                    if (lanProxy == null) lanProxy = new LanProxy(home);
-                    lanProxy.Tick(config.Data, transport);
-                } else if (lanProxy != null) { lanProxy.Dispose(); lanProxy = null; }
                 if (Product.IsVpn) {
                     var vpnStatus = VpnStatus.Read(home);
                     icon.Icon = Json.Bool(vpnStatus, "ok") && Json.Str(vpnStatus, "state") == "on" ? green : yellow;
@@ -826,7 +821,6 @@ namespace RemoteAgents.Launcher
             if (netHelper != null) netHelper.Dispose();
             bool preserveVpn = RestartRequested && keepVpnOnRestart;
             if (!preserveVpn) try { Files.Atomic(Path.Combine(home, "state/vpn.stop"), "stop\n"); } catch { log.Write("vpn.stop.failed"); }
-            if (lanProxy != null) try { lanProxy.Dispose(); } catch { log.Write("lan.pac.restore.failed"); }
             closing = true; timer.Stop(); stop.Cancel(); BackgroundWork.Disk.Stop();
             if (diskExplorer != null) { diskExplorer.Dispose(); diskExplorer.Wait(3500); }
             if (mainWindow != null && !mainWindow.IsDisposed) mainWindow.Unload();

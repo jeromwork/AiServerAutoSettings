@@ -371,14 +371,6 @@ function Resolve-TransportPorts([string]$Root,$Settings,[int]$ProbeCount,[int]$S
     }
     if($Settings.Lan.enabled){
         $Settings.Lan.proxyPort=[int]$effective.lanProxyPort
-        foreach($forward in @($Settings.Lan.forwards)){
-            $from=[int]$forward.localPort
-            $forward.localPort=Select-TransportPortBlock $from 1 10 $snapshot $selected
-            if($from -ne $forward.localPort){
-                [void]$moved.Add([pscustomobject]@{key=$forward.tag;from=$from;to=$forward.localPort;pid=0;exe=''})
-                if(-not $Preview){Write-TransportLog $Root 'port-moved' ([pscustomobject]@{message=('Порт '+$from+' занят — '+$forward.tag+' использует '+$forward.localPort)})}
-            }
-        }
         $effective|Add-Member -Force lan $Settings.Lan
     }
     if(-not $Preview){Write-TransportJson (Join-Path $Root 'state/transport-ports.json') ([ordered]@{schema=1;defaults=(Get-TransportPortDefaults);configured=$configured;effective=$effective;moved=@($moved.ToArray());updatedAt=[DateTime]::UtcNow.ToString('o')}) -Private}

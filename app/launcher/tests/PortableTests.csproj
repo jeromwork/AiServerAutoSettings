@@ -26,7 +26,7 @@
     <OutputPath>bin/$(Configuration)/update-tests/</OutputPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(LanTests)' == 'true'">
-    <StartupObject>RemoteAgents.Launcher.LanProxyTests</StartupObject>
+    <StartupObject>RemoteAgents.Launcher.LegacyPacCleanupTests</StartupObject>
     <IntermediateOutputPath>obj/$(Configuration)/lan-tests/</IntermediateOutputPath>
     <OutputPath>bin/$(Configuration)/lan-tests/</OutputPath>
   </PropertyGroup>
@@ -61,8 +61,8 @@
     <Compile Include="ConfigBundleTests.cs" />
     <Compile Include="ConfigE2E.cs" />
     <Compile Include="../LanAccess.cs" />
-    <Compile Include="../LanProxy.cs" />
-    <Compile Include="LanProxyTests.cs" />
+    <Compile Include="../LegacyPacCleanup.cs" />
+    <Compile Include="LegacyPacCleanupTests.cs" />
     <Compile Include="../ConfigBundle.cs" Link="ConfigBundle.cs" />
     <Compile Include="../SecretVault.cs" Link="SecretVault.cs" />
     <Compile Include="../SecretPrompt.cs" Link="SecretPrompt.cs" />

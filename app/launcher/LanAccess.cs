@@ -12,9 +12,9 @@ namespace RemoteAgents.Launcher
     {
         internal readonly List<string> Subnets = new List<string>(), Domains = new List<string>(), DnsServers = new List<string>();
         internal readonly List<Dictionary<string, object>> Networks = new List<Dictionary<string, object>>();
-        internal readonly List<Dictionary<string, object>> Forwards = new List<Dictionary<string, object>>();
+        internal readonly List<Dictionary<string, object>> Forwards = new List<Dictionary<string, object>>(); // Compatibility: always empty.
         internal string ProbeHost = ""; internal int ProbePort;
-        internal bool Enabled { get { return Subnets.Count + Domains.Count + Forwards.Count > 0; } }
+        internal bool Enabled { get { return Subnets.Count + Domains.Count > 0; } }
         internal static uint IPv4(string text)
         {
             if (!Regex.IsMatch(text, @"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$")) throw new InvalidDataException("share: нужен IPv4");
@@ -42,7 +42,6 @@ namespace RemoteAgents.Launcher
         }
         internal bool Allows(string host, int port)
         {
-            if (Forwards.Any(f => Json.Str(f, "host").Equals(host, StringComparison.OrdinalIgnoreCase) && Json.Int(f, "port", 0) == port)) return true;
             if (Domains.Any(d => d.StartsWith("*.") ? host.EndsWith(d.Substring(1), StringComparison.OrdinalIgnoreCase) : host.Equals(d, StringComparison.OrdinalIgnoreCase))) return true;
             try { uint ip = IPv4(host); return Subnets.Any(s => { Cidr(s); var p = s.Split('/'); int bits = int.Parse(p[1]); return (ip & (uint.MaxValue << (32 - bits))) == IPv4(p[0]); }); } catch (InvalidDataException) { return false; }
         }
@@ -89,19 +88,6 @@ namespace RemoteAgents.Launcher
                 result.Subnets.AddRange(one.Subnets); result.Domains.AddRange(one.Domains); result.DnsServers.AddRange(one.DnsServers);
             }
             return result;
-        }
-        internal string Pac(int port)
-        {
-            if (port < 1 || port > 65535) throw new ArgumentOutOfRangeException("port");
-            var conditions = new List<string>();
-            // IPv4 literals only: PAC must never ask the computer's DNS for internal names.
-            foreach (string s in Subnets.Distinct()) { var c = Cidr(s); conditions.Add("(v4 && isInNet(host," + Json.Encode(c[0]) + "," + Json.Encode(c[1]) + "))"); }
-            foreach (string d in Domains.Distinct()) conditions.Add(d.StartsWith("*.") ? "shExpMatch(host," + Json.Encode(d) + ")" : "host===" + Json.Encode(d));
-            // A forward grants only host:port, not the host's other browser ports.
-            foreach (var f in Forwards) conditions.Add("(host===" + Json.Encode(Json.Str(f, "host").ToLowerInvariant()) + " && p===" + Json.Int(f, "port", 0) + ")");
-            return "function FindProxyForURL(url,host){host=host.toLowerCase();var v4=/^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$/.test(host);" +
-                "var m=/^[a-z]+:\\/\\/[^\\/]+:(\\d+)(?:\\/|$)/i.exec(url);var p=m?parseInt(m[1],10):(url.indexOf('https:')===0?443:80);" +
-                "if(" + (conditions.Count == 0 ? "false" : string.Join(" || ", conditions)) + ")return 'PROXY 127.0.0.1:" + port + "';return 'DIRECT';}\n";
         }
     }
 }

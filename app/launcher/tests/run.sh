@@ -101,7 +101,6 @@ wait_for_memory
   wait_for_memory
   timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-ports.ps1" < /dev/null
   wait_for_memory
-  timeout 15 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-lan-proxy-config.ps1" < /dev/null
   wait_for_memory
   timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$repo/tools/legacy-cleanup/tests/smoke-plan.ps1" < /dev/null
   wait_for_memory

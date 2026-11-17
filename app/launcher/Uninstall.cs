@@ -23,7 +23,7 @@ namespace RemoteAgents.Launcher
                 } finally { if (held) running.ReleaseMutex(); }
             } } catch (WaitHandleCannotBeOpenedException) { }
             HelperClient.UninstallElevated();
-            LanPacOwnership.Recover(home, new LanWindowsBrowser());
+            LegacyPacCleanup.Recover(home, new LegacyPacBrowser());
             if (Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome), StringComparison.OrdinalIgnoreCase)) {
                 string diskHome = DiskExplorerController.DefaultDiskHome;
                 DiskExplorerController.RemoveIntegration(ConfigProfile.DiskRoot(ConfigProfile.Load(home)), diskHome,
