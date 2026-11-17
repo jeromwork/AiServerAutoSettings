@@ -23,7 +23,7 @@ namespace RemoteAgents.Launcher
             return age >= 0 && age <= 3 && active.Length > 0 && (tag == null || active == tag)
                 && StatusView.Candidates(status).Any(c => Json.Str(c, "tag") == active && Json.Str(c, "state") == "ok" && Json.Bool(c, "enabled", true));
         }
-        internal static string FailureSummary(string state)
+        internal static string FailureSummary(string state, string stage = "")
         {
             switch (state) {
                 case "server-unreachable": return "VPN выключен: сервер не отвечает";
@@ -34,7 +34,14 @@ namespace RemoteAgents.Launcher
                 case "conflict": return "Отключите другой VPN перед включением VPN RemoteAgents";
                 case "no-path": return "VPN не включён: нет живого пути к серверу";
                 case "rollback-error": return "Не удалось подтвердить выключение VPN. Откройте диагностику";
-                case "error": return "VPN не включён: проверьте настройки и разрешение Windows";
+                case "uac-denied": return "Вы не подтвердили запрос Windows. Нажмите «Включить снова» и выберите «Да»";
+                case "legacy-adapter": return "Остался адаптер прошлой версии VPN. Выполните предложенную очистку";
+                case "prepare-timeout": return "Подготовка VPN заняла больше 30 секунд";
+                case "exclusions-dns": return "Не удалось узнать адрес узла связи. Проверьте интернет";
+                case "error":
+                    return !string.IsNullOrEmpty(stage)
+                        ? "VPN не включён: ошибка на шаге «" + stage + "». Скопируйте диагностику"
+                        : "VPN не включён: проверьте настройки и разрешение Windows";
                 default: return "";
             }
         }

@@ -19,7 +19,8 @@ namespace RemoteAgents.Launcher
             string home = Path.GetFullPath(Program.Option(args, "--home") ?? Program.DefaultHome);
             string script = Path.GetFullPath(Program.Option(args, "--vpn-script"));
             string session = Program.Option(args, "--vpn-session");
-            string state = "error", tunName = ""; bool held = false, ran = false;
+            string state = "error", tunName = ""; bool held = false, ran = false, terminalWritten = false;
+            string hostStage = "host-start", hostErrorType = "";
             Dictionary<string, object> dnsPolicy = null;
             NativeJob job = null; VpnLease lease = null; Process parent = null, core = null; VpnProbe probe = null;
             using (var gate = new Mutex(false, VpnWatchdog.OwnerMutex)) {
@@ -35,14 +36,24 @@ namespace RemoteAgents.Launcher
                     job = new NativeJob();
                     string powershell = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"WindowsPowerShell\v1.0\powershell.exe");
                     // Re-inventory conflicts and transport AFTER UAC, before creating any TUN.
+                    hostStage = "prepare";
                     using (var prepare = job.StartRedirected(powershell, new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-Home", home, "-Worker", "-Session", session }, Path.GetDirectoryName(script), null)) {
                         var budget = Stopwatch.StartNew();
                         while (!prepare.HasExited) {
-                            if (Stopped(home, session, ref parent) || budget.ElapsedMilliseconds > 30000) throw new IOException();
+                            if (Stopped(home, session, ref parent)) { state = "off"; return 1; }
+                            if (budget.ElapsedMilliseconds > 30000) { state = "prepare-timeout"; throw new TimeoutException("Подготовка VPN заняла больше 30 секунд"); }
                             Thread.Sleep(VpnWatchdog.PollMs);
                         }
-                        if (prepare.ExitCode != 0) { state = Json.Str(Read(home, "status/vpn.json"), "state"); if (VpnWatchdog.FailureSummary(state).Length == 0) state = "error"; return 1; }
+                        if (prepare.ExitCode != 0) {
+                            var workerStatus = Read(home, "status/vpn.json");
+                            state = Json.Str(workerStatus, "state");
+                            hostStage = Json.Str(workerStatus, "stage");
+                            hostErrorType = Json.Str(workerStatus, "errorType");
+                            if (VpnWatchdog.FailureSummary(state, hostStage).Length == 0) state = "error";
+                            return 1;
+                        }
                     }
+                    hostStage = "plan";
                     var plan = Read(home, "state/vpn-plan.json");
                     if (Json.Str(plan, "session") != session || Stopped(home, session, ref parent)) throw new IOException();
                     dnsPolicy = Json.Map(Json.Get(plan, "dnsPolicy"));
@@ -55,10 +66,12 @@ namespace RemoteAgents.Launcher
                     var url = new Uri(Json.Str(plan, "checkUrl"));
                     string config = Path.Combine(home, "state/vpn-sing-box.json");
                     // No elevated process is ever assigned to an unprivileged launcher's Job.
+                    hostStage = "core-start";
                     lease = new VpnLease(job.Dispose);
                     core = job.Start(Json.Str(plan, "exe"), new[] { "run", "-c", config }, Path.GetDirectoryName(script)); ran = true;
                     Files.Atomic(Path.Combine(home, "state/vpn-owner.json"), Json.Encode(new { pid = core.Id, exe = Json.Str(plan, "exe"), config, startedAt = core.StartTime.ToUniversalTime().ToString("o") }));
-                    Write(home, "starting", "Включается…", true, dnsPolicy);
+                    Write(home, "starting", "Включается…", true, dnsPolicy, hostStage, hostErrorType);
+                    hostStage = "watch";
                     var clock = Stopwatch.StartNew(); long next = 0, began = 0; bool transportOk = false; int tunIndex = 0;
                     DateTime previous = DateTime.UtcNow; var policy = new VpnWatchdog();
                     while (true) {
@@ -76,7 +89,7 @@ namespace RemoteAgents.Launcher
                             transportOk = VpnWatchdog.TransportReady(transport, now, tag);
                             var adapter = NetworkInterface.GetAllNetworkInterfaces().FirstOrDefault(n => n.Name == Json.Str(plan, "interfaceName") && n.OperationalStatus == OperationalStatus.Up);
                             if (adapter != null) {
-                                tunIndex = adapter.GetIPProperties().GetIPv4Properties().Index;
+                                var v4 = adapter.GetIPProperties().GetIPv4Properties(); if (v4 != null) tunIndex = v4.Index;
                                 Files.Atomic(Path.Combine(home, "state/vpn-interface.json"), Json.Encode(new { session, guid = adapter.Id.Trim('{', '}'), name = adapter.Name }));
                             }
                             began = clock.ElapsedMilliseconds; next = began + VpnWatchdog.IntervalMs;
@@ -92,7 +105,16 @@ namespace RemoteAgents.Launcher
                         Thread.Sleep(VpnWatchdog.PollMs);
                     }
                     return 0;
-                } catch { state = "error"; return 1; }
+                } catch (Exception ex) {
+                    if (state != "prepare-timeout") state = "error";
+                    hostErrorType = ex.GetType().Name;
+                    try {
+                        string summary = VpnWatchdog.FailureSummary(state, hostStage);
+                        Write(home, state, summary, false, dnsPolicy, hostStage, hostErrorType);
+                        terminalWritten = true;
+                    } catch { }
+                    return 1;
+                }
                 finally {
                     // Restore the network FIRST. No config mutex, PowerShell or disk journal can delay Job closure.
                     if (job != null) job.Dispose();
@@ -116,7 +138,12 @@ namespace RemoteAgents.Launcher
                         } catch { state = "rollback-error"; }
                     }
                     if (held) {
-                        try { Write(home, state, state == "off" ? "VPN выключен" : VpnWatchdog.FailureSummary(state), false); } catch { }
+                        if (!terminalWritten) {
+                            try {
+                                string summary = state == "off" ? "VPN выключен" : VpnWatchdog.FailureSummary(state, hostStage);
+                                Write(home, state, summary, false, dnsPolicy, hostStage, hostErrorType);
+                            } catch { }
+                        }
                         // Wintun routes and the temporary adapter belong to the core's handle.
                         // Receipts are evidence for the next confirmed legacy cleanup if Windows misbehaves.
                         if (!ran) try { File.Delete(Path.Combine(home, "state/vpn-plan.json")); } catch { }
@@ -136,16 +163,16 @@ namespace RemoteAgents.Launcher
             var ip = net.GetIPProperties();
             return net.Id + ":" + string.Join(",", ip.UnicastAddresses.Select(a => a.Address.ToString()).OrderBy(s => s)) + ":" + string.Join(",", ip.GatewayAddresses.Select(a => a.Address.ToString()).OrderBy(s => s));
         }
-        static void Write(string home, string state, string summary, bool enabled, Dictionary<string, object> dnsPolicy = null)
+        static void Write(string home, string state, string summary, bool enabled, Dictionary<string, object> dnsPolicy = null, string stage = "", string errorType = "")
         {
-            var status = new Dictionary<string, object> { { "ok", state == "on" }, { "enabled", enabled }, { "state", state }, { "summary", summary }, { "dnsPolicy", dnsPolicy }, { "updatedAt", DateTime.UtcNow.ToString("o") } };
+            var status = new Dictionary<string, object> { { "ok", state == "on" }, { "enabled", enabled }, { "state", state }, { "summary", summary }, { "dnsPolicy", dnsPolicy }, { "stage", stage }, { "errorType", errorType }, { "updatedAt", DateTime.UtcNow.ToString("o") } };
             string dns = VpnStatus.DnsSummary(status);
             if (dns.Length > 0) status["summary"] = summary + ". " + dns;
             Files.Atomic(Path.Combine(home, "status/vpn.json"), Json.Encode(status));
             // Fixed categories only; no target, URL, key or process argument logging.
             string log = Path.Combine(home, "logs/vpn.log"); Directory.CreateDirectory(Path.GetDirectoryName(log));
             if (File.Exists(log) && new FileInfo(log).Length > 1024 * 1024) File.Delete(log);
-            File.AppendAllText(log, DateTime.UtcNow.ToString("o") + " " + state + "\n");
+            File.AppendAllText(log, DateTime.UtcNow.ToString("o") + " " + state + " stage=" + stage + " type=" + errorType + "\n");
         }
     }
 }

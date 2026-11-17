@@ -1154,7 +1154,11 @@ function Get-VpnExclusions($Settings,$Paths,$Snapshot,[hashtable]$Resolved=@{},[
         $ip=$null;$addresses=@()
         if([Net.IPAddress]::TryParse([string]$hostName,[ref]$ip)){$addresses=@($ip.ToString())}
         elseif($Resolved.ContainsKey([string]$hostName)){$addresses=@($Resolved[[string]$hostName])}
-        else{$addresses=@([Net.Dns]::GetHostAddresses([string]$hostName)|ForEach-Object {$_.ToString()})}
+        else{
+            try{$addresses=@([Net.Dns]::GetHostAddresses([string]$hostName)|ForEach-Object {$_.ToString()})}catch{
+                $_.Exception.Data['vpnState']='exclusions-dns';throw
+            }
+        }
         if(-not $addresses.Count){throw 'Не удалось исключить внешний узел VPN'}
         foreach($address in $addresses){$cidrs+=ConvertTo-VpnHostCidr $address}
     }
@@ -1200,12 +1204,12 @@ function New-VpnTunConfig($Settings,$Paths,[string]$SelectedTag,[string[]]$Exclu
         @{type='https';tag='vpn-dns';server=$v.dnsServer;path='/dns-query';tls=@{enabled=$true};bind_interface=$Interface});final='vpn-dns'}}
 }
 
-function Write-VpnStatus([string]$Root,[bool]$Ok,[bool]$Enabled,[string]$State,$Conflict,[string]$Summary) {
-    Write-TransportJson (Join-Path $Root 'status/vpn.json') @{ok=$Ok;enabled=$Enabled;state=$State;conflict=$Conflict;summary=$Summary;updatedAt=[DateTime]::UtcNow.ToString('o')}
+function Write-VpnStatus([string]$Root,[bool]$Ok,[bool]$Enabled,[string]$State,$Conflict,[string]$Summary,[string]$Stage='',[string]$ErrorType='') {
+    Write-TransportJson (Join-Path $Root 'status/vpn.json') @{ok=$Ok;enabled=$Enabled;state=$State;conflict=$Conflict;summary=$Summary;stage=$Stage;errorType=$ErrorType;updatedAt=[DateTime]::UtcNow.ToString('o')}
     # Журнал всегда локальный; только категория, без текста исключений и параметров процессов.
     $dir=Join-Path $Root 'logs';[void][IO.Directory]::CreateDirectory($dir);$file=Join-Path $dir 'vpn.log'
     if((Test-Path -LiteralPath $file) -and (Get-Item -LiteralPath $file).Length -ge 1MB){Move-Item -LiteralPath $file -Destination ($file+'.1') -Force}
-    [IO.File]::AppendAllText($file,([DateTime]::UtcNow.ToString('o')+' '+$State+"`n"),(New-Object Text.UTF8Encoding($false)))
+    [IO.File]::AppendAllText($file,([DateTime]::UtcNow.ToString('o')+' '+$State+' stage='+$Stage+' type='+$ErrorType+"`n"),(New-Object Text.UTF8Encoding($false)))
 }
 function Set-VpnEnabled([string]$Root,[bool]$Enabled) {
     $Enabled=$Enabled -and (Test-ProductVpnEnabled)
