@@ -38,6 +38,8 @@
     <Compile Include="MainWindowSizingTests.cs" />
     <Compile Include="../MainWindowSizing.cs" Link="MainWindowSizing.cs" />
     <Compile Include="../VpnWatchdog.cs" />
+    <Compile Include="../VpnTun.cs" />
+    <Compile Include="VpnTunTests.cs" />
     <Compile Include="../VpnStatus.cs" />
     <Compile Include="../VpnProbe.cs" />
     <Compile Include="../VpnLease.cs" />

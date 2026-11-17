@@ -102,7 +102,7 @@ namespace RemoteAgents.Launcher
         // Keep the existing private portable entry point and all its command modes unchanged.
         static int Main(string[] args)
         {
-            if (args.Length == 0 || !args[0].StartsWith("--", StringComparison.Ordinal)) Run();
+            if (args.Length == 0 || !args[0].StartsWith("--", StringComparison.Ordinal)) { Run(); VpnTunTests.Run(args.Length == 0 ? Path.GetTempPath() : args[0]); }
             try { return (int)typeof(TestEntry).GetMethod("Main", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, new object[] { args }); }
             catch (TargetInvocationException ex) { ExceptionDispatchInfo.Capture(ex.InnerException).Throw(); throw; }
         }

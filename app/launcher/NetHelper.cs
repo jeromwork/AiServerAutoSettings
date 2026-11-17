@@ -61,24 +61,25 @@ namespace RemoteAgents.Launcher
     // свой код только как обвязка над SCM и sing-box
     internal sealed class NetHelper : ServiceBase
     {
-        readonly string ownerSid;
+        readonly string ownerSid, home;
+        VpnTunSession vpnTun;
         readonly ManualResetEvent stopping = new ManualResetEvent(false), emergency = new ManualResetEvent(false);
         readonly object pipeGate = new object();
         NamedPipeServerStream pipe;
         Thread worker;
         NetHelperLifetime lifetime;
         NetHelperLog log;
-        internal NetHelper(string ownerSid)
+        internal NetHelper(string ownerSid, string home)
         {
+            this.home = Path.GetFullPath(home);
             this.ownerSid = new SecurityIdentifier(NetHelperInstall.ValidateSid(ownerSid)).Value;
             ServiceName = NetHelperInstall.ServiceName; CanStop = true; CanShutdown = true; AutoLog = false;
         }
         internal static int Run(string[] args)
         {
             try {
-                // Home is recorded by installation for future stages; never read user files as SYSTEM here.
-                Path.GetFullPath(Program.Option(args, "--home") ?? throw new ArgumentException("Нет home"));
-                using (var service = new NetHelper(Program.Option(args, "--owner-sid"))) ServiceBase.Run(service);
+                string home = Path.GetFullPath(Program.Option(args, "--home") ?? throw new ArgumentException("Нет home"));
+                using (var service = new NetHelper(Program.Option(args, "--owner-sid"), home)) ServiceBase.Run(service);
                 return 0;
             } catch { return 1; } // Never open a WinForms error dialog in LocalSystem session 0.
         }
@@ -137,7 +138,7 @@ namespace RemoteAgents.Launcher
                         if (!IsOwner(pipe, ownerSid)) { outcome = "client-denied"; outcomeCode = 5; break; }
                         authenticated = true; lifetime.Connected(); log.Write("connected", 0);
                     }
-                    string reply = NetHelperProtocol.Reply(line, log.Recent);
+                    string reply = NetHelperProtocol.Reply(line, log.Recent, Execute);
                     var write = NetHelperProtocol.WriteLine(pipe, reply);
                     if (!Wait(write, lease, false)) break;
                     write.GetAwaiter().GetResult();
@@ -154,6 +155,29 @@ namespace RemoteAgents.Launcher
                 if (log != null) log.Write(outcome, outcomeCode);
                 lifetime.Shutdown();
             }
+        }
+        string Execute(string command, Dictionary<string, object> request)
+        {
+            try {
+                if (command == "vpn.on") {
+                    var options = VpnTun.Read(request);
+                    if (vpnTun == null) {
+                        vpnTun = new VpnTunSession(home, NetHelperInstall.DataDirectory, Path.Combine(NetHelperInstall.InstallDirectory, "sing-box.exe"), action => {
+                            // User-controlled files are opened under the authenticated pipe owner,
+                            // never with SYSTEM's file access (including reparse targets).
+                            NamedPipeServerStream channel; lock (pipeGate) channel = pipe;
+                            if (channel == null) throw new IOException("Клиент отключился");
+                            channel.RunAsClient(() => action());
+                        }, log.Write);
+                        lifetime.AddJob(vpnTun);
+                    }
+                    vpnTun.Enable(options);
+                } else if (command == "vpn.off") {
+                    if (vpnTun != null) vpnTun.Disable();
+                } else if (command != "status") return "{\"ok\":false,\"error\":\"not-implemented\"}";
+                var vpn = vpnTun == null ? VpnTun.D("owner", "net-helper", "enabled", false, "ok", false, "state", "off", "summary", "VPN выключен", "updatedAt", DateTime.UtcNow.ToString("o")) : vpnTun.Status();
+                return Json.Encode(new { ok = true, state = "ready", helperVersion = NetHelperInstall.HelperVersion, vpn = vpn, log = log.Recent() });
+            } catch { return "{\"ok\":false,\"error\":\"vpn-command-failed\"}"; }
         }
         bool Wait(Task operation, VpnLease lease, bool waitingForClient)
         {

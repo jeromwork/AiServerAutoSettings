@@ -16,9 +16,13 @@ namespace RemoteAgents.Launcher
     internal sealed class VpnProbe : IDisposable
     {
         readonly TcpClient client = new TcpClient(AddressFamily.InterNetwork);
+        readonly System.Threading.Timer deadline;
         internal readonly Task<bool> Result;
-        internal VpnProbe(Uri url, IPAddress address, int tunIndex)
-        { Result = Check(url, address, tunIndex); }
+        internal VpnProbe(Uri url, IPAddress address, int tunIndex, int timeoutMs = VpnWatchdog.ProbeTimeoutMs)
+        {
+            deadline = new System.Threading.Timer(_ => client.Close(), null, timeoutMs, System.Threading.Timeout.Infinite);
+            Result = Check(url, address, tunIndex);
+        }
         async Task<bool> Check(Uri url, IPAddress address, int tunIndex)
         {
             try {
@@ -38,8 +42,9 @@ namespace RemoteAgents.Launcher
                     return text.StartsWith("HTTP/1.", StringComparison.Ordinal) && text.Length > 11 && text[9] == '2' && char.IsDigit(text[10]) && char.IsDigit(text[11]);
                 }
             } catch { return false; }
+            finally { deadline.Dispose(); }
         }
-        public void Dispose() { client.Close(); }
+        public void Dispose() { client.Close(); deadline.Dispose(); }
         [DllImport("iphlpapi.dll")] static extern uint GetBestInterface(uint destination, out uint index);
     }
 }

@@ -52,7 +52,7 @@ namespace RemoteAgents.Launcher
             Check(!policy.Sample(true, false) && !policy.Sample(true, true) && policy.Failures == 0 && !policy.Sample(false, false), "success resets consecutive failures");
             Check(policy.Sample(false, false), "two complete failures disable");
             Check(VpnWatchdog.IntervalMs >= 2000 && VpnWatchdog.IntervalMs <= 3000 && VpnWatchdog.ProbeTimeoutMs <= 3000, "requested cadence and bounded probe");
-            Check(2 * VpnWatchdog.IntervalMs + VpnWatchdog.ProbeTimeoutMs + 3 * VpnWatchdog.PollMs <= 5000, "worst phase and two expired probes fit five seconds including polling");
+            Check(2 * VpnWatchdog.IntervalMs + VpnWatchdog.ProbeTimeoutMs + 3 * VpnWatchdog.PollMs <= VpnTun.HealthDeadlineMs, "new probe cadence fits the absolute helper cutoff");
             DateTime now = DateTime.UtcNow;
             var status = ConfigBundle.D("ok", true, "active", "a", "updatedAt", now.ToString("o"), "candidates", new object[] { ConfigBundle.D("tag", "a", "state", "ok", "enabled", true) });
             Check(VpnWatchdog.TransportReady(status, now, "a"), "fresh checked active path");

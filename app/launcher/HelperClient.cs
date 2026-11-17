@@ -19,7 +19,8 @@ namespace RemoteAgents.Launcher
         internal const string UpdateRequired = "Обновился сетевой помощник — нужно одно разрешение Windows";
         readonly string home;
         readonly Control ui;
-        readonly object gate = new object();
+        readonly object gate = new object(), exchangeGate = new object();
+        NetHelperProtocol.Reader connectionReader;
         NamedPipeClientStream pipe;
         Form notice;
         Label summary;
@@ -68,34 +69,63 @@ namespace RemoteAgents.Launcher
                 uint serverPid;
                 if (!GetNamedPipeServerProcessId(channel.SafePipeHandle, out serverPid) || !IsServiceProcess(serverPid)) throw new IOException("Недостоверный помощник");
                 var reader = new NetHelperProtocol.Reader(channel);
-                Exchange(channel, reader, "ping");
+                lock (exchangeGate) { connectionReader = reader; Exchange(channel, reader, "ping"); }
                 Task.Run(() => Monitor(channel, reader));
             } catch { lock (gate) { if (pipe == channel) pipe = null; } channel.Dispose(); throw; }
         }
-        static void Exchange(NamedPipeClientStream channel, NetHelperProtocol.Reader reader, string command)
+        System.Collections.Generic.Dictionary<string, object> Exchange(NamedPipeClientStream channel, NetHelperProtocol.Reader reader, string command)
+        { return ExchangeRequest(channel, reader, new { cmd = command }, command == "ping"); }
+        System.Collections.Generic.Dictionary<string, object> ExchangeRequest(NamedPipeClientStream channel, NetHelperProtocol.Reader reader, object request, bool ping = false)
         {
-            var write = NetHelperProtocol.WriteLine(channel, Json.Encode(new { cmd = command }));
+            var write = NetHelperProtocol.WriteLine(channel, Json.Encode(request));
             if (!write.Wait(5000)) throw new IOException("Помощник не отвечает");
             var read = reader.ReadLine();
             if (!read.Wait(5000)) throw new IOException("Помощник не отвечает");
             string response = read.GetAwaiter().GetResult();
             if (response == null) throw new IOException("Помощник отключился");
             var result = Json.Map(Json.Parse(response));
-            if (!Json.Bool(result, "ok") || (command == "ping" && Json.Str(result, "reply") != "pong")) throw new IOException("Ошибка помощника");
+            if (!Json.Bool(result, "ok") || (ping && Json.Str(result, "reply") != "pong")) throw new IOException("Ошибка помощника");
+            var vpn = Json.Map(Json.Get(result, "vpn"));
+            if (vpn.Count > 0) Files.Atomic(Path.Combine(home, "status/vpn.json"), Json.Encode(vpn));
+            return result;
         }
+        System.Collections.Generic.Dictionary<string, object> Request(object request)
+        {
+            lock (exchangeGate) {
+                NamedPipeClientStream channel;
+                lock (gate) { if (disposed || pipe == null || !pipe.IsConnected || connectionReader == null) throw new IOException(PermissionRequired); channel = pipe; }
+                try { return ExchangeRequest(channel, connectionReader, request); }
+                catch { channel.Dispose(); throw; } // A timed-out frame must never be reused.
+            }
+        }
+        internal Task<System.Collections.Generic.Dictionary<string, object>> VpnOn(VpnTun options)
+        {
+            return Task.Run(() => {
+                var result = Json.Map(Json.Get(Request(options.Request()), "vpn"));
+                var wait = Stopwatch.StartNew();
+                while (Json.Str(result, "state") == "starting" && wait.ElapsedMilliseconds < 45000) {
+                    Thread.Sleep(200);
+                    result = Json.Map(Json.Get(Request(new { cmd = "status" }), "vpn"));
+                }
+                if (Json.Str(result, "state") == "starting") { Request(new { cmd = "vpn.off" }); throw new IOException("Подготовка VPN не завершена"); }
+                return result;
+            });
+        }
+        internal Task VpnOff() { return Task.Run(() => { Request(new { cmd = "vpn.off" }); }); }
         void Monitor(NamedPipeClientStream channel, NetHelperProtocol.Reader reader)
         {
             try {
                 while (true) {
                     // No reconnect/autorestart: a failed session stays off until an explicit retry.
                     lock (gate) { if (disposed || pipe != channel) return; }
-                    Exchange(channel, reader, "status");
+                    lock (exchangeGate) Exchange(channel, reader, "status");
                     for (int i = 0; i < 20; i++) {
                         lock (gate) { if (disposed || pipe != channel) return; }
                         Thread.Sleep(100);
                     }
                 }
             } catch {
+                try { Files.Atomic(Path.Combine(home, "status/vpn.json"), Json.Encode(new { owner = "net-helper", enabled = false, ok = false, state = "core-exited", stage = "helper-disconnected", summary = "VPN выключен: сетевой помощник отключился", updatedAt = DateTime.UtcNow.ToString("o") })); } catch { }
                 lock (gate) { if (pipe == channel) pipe = null; channel.Dispose(); }
                 Post(() => { if (!disposed) { Status = "Локальные сети и VPN недоступны: помощник отключился"; ShowNotice(Status, false); } });
             }

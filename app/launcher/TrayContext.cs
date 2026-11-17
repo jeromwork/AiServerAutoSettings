@@ -181,7 +181,9 @@ namespace RemoteAgents.Launcher
                 } else {
                     icon.Icon = transport.Count == 0 ? yellow : Json.Bool(transport, "ok") ? green : red;
                     var vpnStatus = VpnStatus.Read(home);
-                    string vpnReason = VpnWatchdog.FailureSummary(Json.Str(vpnStatus, "state"));
+                    string vpnReason = VpnWatchdog.FailureSummary(Json.Str(vpnStatus, "state"), Json.Str(vpnStatus, "stage"));
+                    if (vpnReason.Length > 0 && Json.Str(vpnStatus, "owner") == "net-helper") vpnReason = Json.Text(vpnStatus, "summary", vpnReason);
+                    if (Json.Str(vpnStatus, "state") == "conflict") icon.Icon = yellow;
                     icon.Text = vpnReason.Length > 0 ? TrayMenuModel.Short(vpnReason, 63) : TrayMenuModel.Tooltip(transport, ServerHealthView.Read(home));
                 }
                 if (Product.IsVpn && operationTip.Length > 0) icon.Text = TrayMenuModel.Short(operationTip, 63);
@@ -636,31 +638,19 @@ namespace RemoteAgents.Launcher
         {
             if (!vpn.Definition.CommandManaged) { VpnFailure("Обновите компоненты программы перед включением VPN", fromCard); return; }
             if (!AllowMutation()) return; actionBusy = vpnActionBusy = true; vpnActionWanted = true; vpnError = ""; RefreshMain();
-            bool enabling = false;
             try {
-                if (!VpnWatchdog.TransportReady(StatusView.Read(home, "transport", maxAgeSec: 3), DateTime.UtcNow)) {
-                    VpnFailure("Для VPN нужна проверенная связь с сервером. Дождитесь подключения RemoteAgents.", fromCard); return;
-                }
-                while (!closing) {
-                    var result = Json.Map(Json.Parse(await Task.Run(() => CaptureScript("Test-VpnConflict.ps1", new string[0]))));
-                    if (closing) return;
-                    var items = Json.Get(result, "items");
-                    if (!(Json.Get(result, "conflict") is bool) || !(items is System.Collections.IEnumerable) || items is string || items is System.Collections.IDictionary) throw new InvalidDataException();
-                    if (!Json.Bool(result, "conflict")) {
-                        enabling = true;
-                        if (vpn.Definition.CommandManaged) {
-                            await Task.Run(() => CaptureScript("Vpn.Tun.ps1", new[] { "-Enable", "-ParentPid", Process.GetCurrentProcess().Id.ToString(), "-HostExe", Program.Exe }));
-                            var status = VpnStatus.Read(home);
-                            if (Json.Str(status, "state") != "on") { SignalVpnStop(); VpnFailure(Json.Text(status, "summary", "VPN не включён: соединение не подтверждено"), fromCard); return; }
-                            config.SetVpnIntent(true); config.SetEnabled(vpn.Definition, true);
-                        }
-                        return;
-                    }
-                    VpnFailure("Отключите другой VPN перед включением VPN RemoteAgents", fromCard); return;
-                }
-            } catch (OperationCanceledException) { if (enabling) SignalVpnStop(); }
-            catch { if (enabling) SignalVpnStop(); if (vpn.Definition.CommandManaged) try { config.SetEnabled(vpn.Definition, false); } catch { log.Write("vpn.config.failed"); }
-                if (!closing) { log.Write("vpn.conflict.check.failed"); VpnFailure(enabling ? "Не удалось включить VPN. Проверьте связь с сервером и разрешение Windows на запуск VPN." : "Проверить наличие другого VPN не удалось. VPN RemoteAgents не включён.", fromCard); } }
+                if (netHelper == null) throw new IOException(HelperClient.PermissionRequired);
+                var transport = StatusView.Read(home, "transport", maxAgeSec: 3);
+                var options = new System.Collections.Generic.Dictionary<string, object>(Json.Map(Json.Get(config.Data, "vpn")));
+                // Intent/interface names are not part of the privileged command.
+                options = options.Where(p => new[] { "address", "excludeCidrs", "dnsServer", "checkUrl", "probeAddress" }.Contains(p.Key)).ToDictionary(p => p.Key, p => p.Value);
+                options["socksPort"] = Json.Int(Json.Map(Json.Get(transport, "helper")), "vpnInPort", Json.Int(Json.Map(Json.Get(config.Data, "transport")), "vpnInPort", 17881));
+                var status = await netHelper.VpnOn(VpnTun.Read(options));
+                if (closing) return;
+                if (Json.Str(status, "state") != "on") { if (!fromCard) MessageBox.Show(Json.Text(status, "summary", "VPN не включён: соединение не подтверждено"), Product.Name); return; }
+                config.SetVpnIntent(true); config.SetEnabled(vpn.Definition, true);
+            } catch (OperationCanceledException) { }
+            catch { if (!closing) { log.Write("vpn.helper.failed"); VpnFailure("Не удалось включить VPN. Проверьте подключение сетевого помощника и диагностику.", fromCard); } }
             finally { actionBusy = vpnActionBusy = false; if (!closing) RefreshMenu(); }
         }
         void SignalVpnStop()
@@ -672,7 +662,8 @@ namespace RemoteAgents.Launcher
             if (!AllowMutation()) return; actionBusy = vpnActionBusy = true; vpnActionWanted = false; vpnError = ""; RefreshMain();
             try {
                 if (!vpn.Definition.CommandManaged) { EnableRuntime(vpn, false); return; }
-                await Task.Run(() => CaptureScript("Vpn.Tun.ps1", new[] { "-Disable" }));
+                if (netHelper == null) throw new IOException(HelperClient.PermissionRequired);
+                await netHelper.VpnOff();
                 config.SetVpnIntent(false); config.SetEnabled(vpn.Definition, false);
             }
             catch (OperationCanceledException) { }

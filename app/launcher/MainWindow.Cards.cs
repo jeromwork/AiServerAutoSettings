@@ -8,8 +8,9 @@ namespace RemoteAgents.Launcher
     {
         readonly FlowLayoutPanel homeBody = Stack(), happierBody = Stack();
         readonly InfoBar mainBanner = new InfoBar();
-        readonly ToggleSwitch vpnSwitch = new ToggleSwitch();
-        readonly Label vpnTitle = WrapLabel(), vpnState = WrapLabel(), vpnDetail = WrapLabel(), vpnSwitchText = WrapLabel();
+        readonly Button vpnSwitch = new Button { AutoSize = true, Padding = new Padding(6, 3, 6, 3) };
+        bool vpnOn;
+        readonly Label vpnTitle = WrapLabel(), vpnState = WrapLabel(), vpnDetail = WrapLabel();
         readonly LinkLabel pathLink = new LinkLabel { AutoSize = true, UseMnemonic = false };
         readonly LinkLabel diagnosticPathLink = new LinkLabel { AutoSize = true, UseMnemonic = false };
         readonly Label vpnDnsDetails = WrapLabel();
@@ -42,11 +43,11 @@ namespace RemoteAgents.Launcher
             FlowLayoutPanel body;
             vpnCard = MakeCard(homeBody, vpnTitle, out body);
             var switchRow = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Margin = Padding.Empty };
-            switchRow.Controls.Add(vpnSwitch); switchRow.Controls.Add(vpnSwitchText); body.Controls.Add(switchRow);
+            switchRow.Controls.Add(vpnSwitch); body.Controls.Add(switchRow);
             vpnState.Font = Theme.Big; vpnDetail.ForeColor = Theme.Muted;
             body.Controls.Add(vpnState); body.Controls.Add(vpnDetail); body.Controls.Add(pathLink);
             vpnSwitch.AccessibleName = "VPN";
-            vpnSwitch.Toggled += (s, e) => { if (vpnSwitch.Enabled && VpnRequested != null) VpnRequested(!vpnSwitch.Checked); };
+            vpnSwitch.Click += (s, e) => { if (vpnSwitch.Enabled && VpnRequested != null) VpnRequested(!vpnOn); };
             pathLink.LinkClicked += (s, e) => pathMenu.Show(pathLink, new Point(0, pathLink.Height));
             lanCard = MakeCard(homeBody, lanTitle, out body); body.Controls.Add(lanState); body.Controls.Add(lanDetail); lanDetail.ForeColor = Theme.Muted;
             diskCard = MakeCard(homeBody, diskTitle, out body); body.Controls.Add(diskState); body.Controls.Add(diskDetail);
@@ -68,8 +69,8 @@ namespace RemoteAgents.Launcher
             else mainBanner.HideMessage();
             vpnCard.Visible = view.Vpn.Visible; vpnTitle.Text = view.Vpn.Title;
             vpnState.Text = view.Vpn.State; vpnState.ForeColor = Theme.Ink(view.Vpn.Tone); vpnDetail.Text = view.Vpn.Detail;
-            vpnSwitch.Checked = view.Vpn.On; vpnSwitch.Enabled = view.Vpn.SwitchEnabled;
-            vpnSwitch.Busy = facts.VpnBusy; vpnSwitchText.Text = view.Vpn.SwitchText; vpnSwitch.AccessibleDescription = view.Vpn.SwitchText;
+            vpnOn = view.Vpn.On; vpnSwitch.Enabled = view.Vpn.SwitchEnabled;
+            vpnSwitch.Text = view.Vpn.SwitchText; vpnSwitch.AccessibleDescription = view.Vpn.SwitchText;
             pathLink.Text = diagnosticPathLink.Text = view.Vpn.PathLink;
             pathLink.Enabled = diagnosticPathLink.Enabled = string.IsNullOrEmpty(facts.Operation);
             vpnDnsDetails.Text = MainScreenModel.CleanSecrets(VpnStatus.DnsDetail(facts.Vpn ?? Json.Map(null)));
