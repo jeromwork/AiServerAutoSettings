@@ -1,0 +1,110 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Runtime.ExceptionServices;
+using System.Text;
+
+namespace RemoteAgents.Launcher
+{
+    internal static class NetHelperTests
+    {
+        static int count;
+        static void Check(bool condition, string name) { if (!condition) throw new Exception("NetHelper: " + name); count++; }
+        sealed class Job : IDisposable
+        {
+            readonly Action close;
+            internal Job(Action close) { this.close = close; }
+            public void Dispose() { close(); }
+        }
+        static bool BadFrame(byte[] data)
+        {
+            try { using (var stream = new MemoryStream(data)) new NetHelperProtocol.Reader(stream).ReadLine().GetAwaiter().GetResult(); return false; }
+            catch (InvalidDataException) { return true; }
+        }
+        internal static void Run()
+        {
+            string parsed;
+            foreach (string command in new[] { "status", "ping", "lan.apply", "lan.stop", "vpn.on", "vpn.off" }) {
+                Check(NetHelperProtocol.TryCommand(Json.Encode(new { cmd = command }), out parsed) && parsed == command, "valid " + command);
+                if (command.Contains(".")) Check(NetHelperProtocol.Reply(Json.Encode(new { cmd = command }), () => new string[0]).Contains("not-implemented"), "future command is inert");
+            }
+            Check(NetHelperProtocol.TryCommand(" { \"cmd\" : \"ping\" }\r\n", out parsed) && parsed == "ping", "CRLF and JSON whitespace");
+            Check(NetHelperProtocol.TryCommand("{\"c\\u006dd\":\"p\\u0069ng\"}", out parsed) && parsed == "ping", "escaped JSON strings");
+            foreach (string invalid in new[] { null, "", "{}", "[]", "null", "true", "\"ping\"", "{\"cmd\":null}", "{\"cmd\":1}", "{\"cmd\":true}", "{\"cmd\":[]}", "{\"cmd\":{}}", "{\"cmd\":\"PING\"}", "{\"cmd\":\"unknown\"}", "{\"cmd\":\"ping\",\"extra\":0}", "{\"path\":\"C:\\\\bad\"}", "{\"cmd\":\"ping\",\"cmd\":\"status\"}", "{\"cmd\":\"ping\",\"c\\u006dd\":\"status\"}", "{\"cmd\":\"ping\",}", "{cmd:'ping'}", "{\"cmd\":\"ping\"}{}", "/*x*/{\"cmd\":\"ping\"}", "{\"cmd\":\"pi\nng\"}", "{\"cmd\":\"\\q\"}", "{\"cmd\":\"ping\"", "{\"cmd\":\"ping\"}\u0000" }) {
+                Check(!NetHelperProtocol.TryCommand(invalid, out parsed), "reject invalid command");
+                Check(NetHelperProtocol.Reply(invalid, () => { throw new Exception("must not execute"); }) == NetHelperProtocol.BadRequest, "invalid request executes nothing");
+            }
+            string exact = "{\"cmd\":\"ping\"}".PadRight(NetHelperProtocol.MaxMessageBytes, ' ');
+            Check(NetHelperProtocol.TryCommand(exact, out parsed), "64 KiB accepted");
+            Check(!NetHelperProtocol.TryCommand(exact + " ", out parsed), "over 64 KiB rejected");
+            Check(!NetHelperProtocol.TryCommand("{\"cmd\":\"" + new string('я', 33000) + "\"}", out parsed), "size measured in UTF8 bytes");
+            using (var stream = new MemoryStream(Encoding.UTF8.GetBytes(exact + "\r\n{\"cmd\":\"status\"}\n"))) {
+                var reader = new NetHelperProtocol.Reader(stream);
+                Check(reader.ReadLine().GetAwaiter().GetResult() == exact, "bounded reader accepts CRLF at limit");
+                Check(reader.ReadLine().GetAwaiter().GetResult() == "{\"cmd\":\"status\"}", "preserves buffered next message");
+                Check(reader.ReadLine().GetAwaiter().GetResult() == null, "clean EOF disconnect");
+            }
+            Check(BadFrame(Encoding.UTF8.GetBytes(exact + " \n")), "oversized frame");
+            Check(BadFrame(Encoding.UTF8.GetBytes(exact + "\rX\n")), "extra CR cannot evade limit");
+            Check(BadFrame(Encoding.UTF8.GetBytes("{\"cmd\":\"ping\"}")), "partial EOF is not a message");
+            Check(BadFrame(new byte[] { 0xc3, 0x28, 10 }), "invalid UTF8");
+            int logReads = 0;
+            var status = Json.Map(Json.Parse(NetHelperProtocol.Reply("{\"cmd\":\"status\"}", () => { logReads++; return new[] { "stage=connected code=0" }; })));
+            Check(Json.Bool(status, "ok") && Json.Str(status, "helperVersion") == NetHelperInstall.HelperVersion && Json.Strings(Json.Get(status, "log")).Length == 1 && logReads == 1, "status carries version and diagnostics");
+            Check(NetHelperProtocol.Reply("{\"cmd\":\"ping\"}", () => { throw new Exception(); }).Contains("pong"), "ping does not read logs");
+
+            long now = 7000; var calls = new List<string>();
+            var life = new NetHelperLifetime(() => now, () => calls.Add("cleanup"), () => calls.Add("stop"));
+            life.AddJob(new Job(() => calls.Add("job-lan"))); life.AddJob(new Job(() => calls.Add("job-vpn")));
+            life.Connected(); now += 90000;
+            Check(!life.ConnectionExpired, "connected owner has no idle timeout");
+            life.Shutdown(); life.Shutdown();
+            Check(string.Join(",", calls) == "job-lan,job-vpn,cleanup,stop", "client disconnect closes ALL jobs before cleanup/stop, once");
+            calls.Clear();
+            life = new NetHelperLifetime(() => now, () => calls.Add("cleanup"), () => calls.Add("stop"));
+            life.AddJob(new Job(() => { calls.Add("job-failed"); throw new IOException(); }));
+            life.AddJob(new Job(() => calls.Add("job-next"))); life.Shutdown();
+            Check(string.Join(",", calls) == "job-failed,job-next,cleanup,stop", "failed Job does not prevent other closes");
+            calls.Clear(); now = 100;
+            life = new NetHelperLifetime(() => now, () => calls.Add("cleanup"), () => calls.Add("stop"));
+            now += 29999; Check(!life.ConnectionExpired, "before connection deadline"); now++;
+            Check(life.ConnectionExpired, "30 seconds without owner");
+            if (life.ConnectionExpired) life.Shutdown();
+            Check(string.Join(",", calls) == "cleanup,stop", "fake clock deadline stops service");
+            bool rejected = false;
+            try { life.AddJob(new Job(() => calls.Add("late-job"))); } catch (ObjectDisposedException) { rejected = true; }
+            Check(rejected && calls.Last() == "late-job", "late launch is disposed after shutdown");
+            calls.Clear();
+            life = new NetHelperLifetime(() => 0, () => { calls.Add("cleanup"); throw new IOException(); }, () => calls.Add("stop"));
+            life.AddJob(new Job(() => calls.Add("job")));
+            try { life.Shutdown(); } catch (IOException) { }
+            Check(string.Join(",", calls) == "job,cleanup,stop", "cleanup failure still stops SCM");
+
+            const string sid = "S-1-5-21-123-456-789-1001";
+            string sddl = NetHelperInstall.ServiceSddl(sid);
+            Check(sddl.EndsWith("(A;;RPWPLCLORC;;;" + sid + ")", StringComparison.Ordinal) && sddl.Contains(";;;SY)") && sddl.Contains(";;;BA)"), "standard service SDDL plus owner start/stop/query rights");
+            foreach (string badSid in new[] { "", "S-1-5-21-1)(A;;GA;;;WD)", "S-1-5-21-1\n", "S-1-5-4294967296", "S-1-281474976710656-1" }) {
+                bool failed = false; try { NetHelperInstall.ServiceSddl(badSid); } catch (ArgumentException) { failed = true; } Check(failed, "reject SDDL injection/overflow");
+            }
+            string exe = @"C:\Program Files\RemoteAgents\Helper\RemoteAgents.exe", home = @"C:\Users\Имя Фамилия\RemoteAgents\";
+            string[] create = NetHelperInstall.CreateArguments(exe, home, sid);
+            Check(create[0] == "create" && create[1] == "RemoteAgentsNet" && create[2] == "binPath=", "SCM creation arguments");
+            Check(create[3] == Files.Quote(exe) + " " + Files.Arguments(new[] { "--net-helper-service", "--home", home, "--owner-sid", sid }), "quoted service command including spaced home and trailing slash");
+            Check(string.Join("|", create.Skip(4)) == "start=|demand|obj=|LocalSystem|DisplayName=|RemoteAgents: локальные сети и VPN", "demand LocalSystem service");
+            Check(NetHelperInstall.CreateArguments(exe, home, sid, true)[0] == "config", "upgrade configures existing service");
+            Check(string.Join("|", NetHelperInstall.FailureArguments()) == "failure|RemoteAgentsNet|reset=|60|actions=|", "no SCM restarts");
+            Check(!NetHelperInstall.NeedsInstall(NetHelperInstall.HelperVersion + "\r\n"), "matching version has no UAC");
+            Check(NetHelperInstall.NeedsInstall(null) && NetHelperInstall.NeedsInstall("") && NetHelperInstall.NeedsInstall("old") && NetHelperInstall.NeedsInstall("999"), "missing or different version requires install");
+            Console.WriteLine("PASS: NetHelper " + count + " checks (no service/UAC)");
+        }
+        // Keep the existing private portable entry point and all its command modes unchanged.
+        static int Main(string[] args)
+        {
+            if (args.Length == 0 || !args[0].StartsWith("--", StringComparison.Ordinal)) Run();
+            try { return (int)typeof(TestEntry).GetMethod("Main", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, new object[] { args }); }
+            catch (TargetInvocationException ex) { ExceptionDispatchInfo.Capture(ex.InnerException).Throw(); throw; }
+        }
+    }
+}

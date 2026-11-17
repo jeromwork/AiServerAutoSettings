@@ -22,6 +22,7 @@
   <ItemGroup>
     <EmbeddedResource Include="../../transport/product-features.json" LogicalName="RemoteAgents.ProductFeatures.json" />
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+    <Reference Include="System.ServiceProcess" />
     <Reference Include="System.Windows.Forms" />
     <Reference Include="System.Drawing" />
     <Reference Include="Microsoft.CSharp" />
