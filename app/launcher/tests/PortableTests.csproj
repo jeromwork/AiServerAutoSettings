@@ -48,6 +48,7 @@
     <Compile Include="ConfigBundleTests.cs" />
     <Compile Include="ConfigE2E.cs" />
     <Compile Include="../LanAccess.cs" />
+    <Compile Include="../LanProxy.cs" />
     <Compile Include="../ConfigBundle.cs" Link="ConfigBundle.cs" />
     <Compile Include="../SecretVault.cs" Link="SecretVault.cs" />
     <Compile Include="../SecretPrompt.cs" Link="SecretPrompt.cs" />

@@ -16,7 +16,8 @@ namespace RemoteAgents.Launcher
         readonly Label diskTitle = WrapLabel(), diskState = WrapLabel(), diskDetail = WrapLabel();
         readonly Label happierTitle = WrapLabel(), happierState = WrapLabel(), happierDetail = WrapLabel();
         readonly Label helperTitle = WrapLabel(), helperState = WrapLabel(), helperDetail = WrapLabel();
-        CardPanel vpnCard, diskCard, happierCard, helperCard;
+        readonly Label lanTitle = WrapLabel(), lanState = WrapLabel(), lanDetail = WrapLabel();
+        CardPanel vpnCard, diskCard, happierCard, helperCard, lanCard;
 
         static Label WrapLabel()
         { return new Label { AutoSize = true, UseMnemonic = false, Margin = new Padding(0, 2, 0, 2) }; }
@@ -47,6 +48,7 @@ namespace RemoteAgents.Launcher
             vpnSwitch.AccessibleName = "VPN";
             vpnSwitch.Toggled += (s, e) => { if (vpnSwitch.Enabled && VpnRequested != null) VpnRequested(!vpnSwitch.Checked); };
             pathLink.LinkClicked += (s, e) => pathMenu.Show(pathLink, new Point(0, pathLink.Height));
+            lanCard = MakeCard(homeBody, lanTitle, out body); body.Controls.Add(lanState); body.Controls.Add(lanDetail); lanDetail.ForeColor = Theme.Muted;
             diskCard = MakeCard(homeBody, diskTitle, out body); body.Controls.Add(diskState); body.Controls.Add(diskDetail);
             diskDetail.ForeColor = Theme.Muted; AddButton(body, "Открыть Диск", () => DispatchMainAction("open-disk"));
             happierCard = MakeCard(homeBody, happierTitle, out body); body.Controls.Add(happierState); body.Controls.Add(happierDetail);
@@ -72,6 +74,7 @@ namespace RemoteAgents.Launcher
             pathLink.Enabled = diagnosticPathLink.Enabled = string.IsNullOrEmpty(facts.Operation);
             vpnDnsDetails.Text = MainScreenModel.CleanSecrets(VpnStatus.DnsDetail(facts.Vpn ?? Json.Map(null)));
             vpnDnsDetails.Visible = view.Vpn.Visible && vpnDnsDetails.Text.Length > 0;
+            RenderCard(view.Lan, lanCard, lanTitle, lanState, lanDetail);
             RenderCard(view.Disk, diskCard, diskTitle, diskState, diskDetail);
             RenderCard(view.Happier, happierCard, happierTitle, happierState, happierDetail);
             RenderCard(view.Helper, helperCard, helperTitle, helperState, helperDetail);

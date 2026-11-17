@@ -102,3 +102,6 @@ server-desktop-bootstrap.sh
 close-idle-chats.py
 server/server_packages.py
 server-agent-handoff.py
+
+# LAN access through the existing channel (no client VPN).
+server/lan_share.py

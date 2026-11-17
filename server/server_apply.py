@@ -45,6 +45,7 @@ def module(name):
 
 
 lan = module('lan_vpn')
+lan_share = module('lan_share')
 config_crypto = module('remoteagents_config')
 base = module('base_network')
 packages = module('server_packages')
@@ -142,6 +143,7 @@ def validate(config):
         if type(value) is int:
             require(rule.get('minimum', value) <= value <= rule.get('maximum', value), 'Число вне диапазона.')
     check(config, schema)
+    lan_share.policy(config)
     proxy = config.get('proxyOut')
     if proxy:
         proxy.setdefault('ipv6', 'block')
@@ -626,7 +628,7 @@ class Engine:
     def code_files(self):
         target = '/usr/local/lib/remoteagents/server/'
         files = {}
-        for name in ('server_apply.py', 'server-apply.sh', 'lan_vpn.py', 'lan-vpn.sh', 'proxy_out.py', 'proxy-out.sh', 'remoteagents_config.py', 'base_network.py', 'server_recovery.py', 'server_components.py', 'server_packages.py', 'component_files.py', 'lan-config.schema.json', 'happier-web.schema.json',
+        for name in ('server_apply.py', 'server-apply.sh', 'lan_vpn.py', 'lan-vpn.sh', 'proxy_out.py', 'proxy-out.sh', 'remoteagents_config.py', 'base_network.py', 'lan_share.py', 'server_recovery.py', 'server_components.py', 'server_packages.py', 'component_files.py', 'lan-config.schema.json', 'happier-web.schema.json',
                      'happier_web.py', 'happier_web_common.py', 'happier_web_release.py', 'happier_web_quotas.py', 'happier_web_verify.cjs', 'happier_web_settings.cjs', 'happier_web_addon.js'):
             files[target + name] = ((self.s.source / name).read_bytes(), 0o755 if name.endswith('.sh') else 0o644)
         schema = self.s.source / 'config.paste.schema.json'
@@ -724,7 +726,7 @@ class Engine:
         current = next((p for p in public if p.get('name') == name), {})
         active = self.s.active('remoteagents-lan@' + name + '.service')
         receipt = self.receipts.get(part, {})
-        settings = {k: v for k, v in item.items() if k not in ('hint', 'ovpn', 'password', 'auth', 'login')}
+        settings = {k: v for k, v in item.items() if k not in ('hint', 'ovpn', 'password', 'auth', 'login', 'share')}
         if settings.get('serverFingerprint'):
             settings['serverFingerprint'] = lan.normalize_server_fingerprint(settings['serverFingerprint'])
         profile = self.secrets.get(item['ovpn']['secret'])
@@ -1053,10 +1055,16 @@ class Engine:
         except Missing as exc:
             return self.row(name, 'waiting', 'ждёт секрет «' + exc.name + '»', missing=[exc.name])
         except Exception as exc:
-            return self.row(name, 'error', str(exc) if isinstance(exc, (Error, base.Error, lan.Error, components.Error)) else 'Проверка/команда не выполнена; детали скрыты.')
+            return self.row(name, 'error', str(exc) if isinstance(exc, (Error, base.Error, lan.Error, lan_share.Error, components.Error)) else 'Проверка/команда не выполнена; детали скрыты.')
 
     def run(self, command):
         apply = command == 'apply'
+        # A channel-rules transaction owns its configs until an external new SSH
+        # confirms it. Do not reinstall packages or mutate other network parts.
+        if self.s.path(lan_share.STATE).exists():
+            confirmed = self.part('lanShare', lambda: lan_share.reconcile(self, apply))
+            if not confirmed:
+                return dict(schema=1, command=command, parts=self.rows, actions=list(self.s.actions), ok=False)
         if self.config.get('deployment', {}).get('method', 'host') != 'host':
             self.row('deployment', 'blocked', 'Развёртывание docker ещё не поддерживается')
             return dict(schema=1, command=command, parts=self.rows, actions=[], ok=False)
@@ -1074,6 +1082,8 @@ class Engine:
         if not self.config.get('proxyOut'):
             parts = []
         parts += [('lan:' + item['name'], lambda item=item: self.lan_part(item, apply)) for item in self.config.get('lan', [])]
+        if 'lan' in self.config or self.s.path(lan_share.MANIFEST).exists():
+            parts.append(('lanShare', lambda: lan_share.reconcile(self, apply)))
         if 'tailscale' in self.config:
             parts.append(('tailscale', lambda: self.tailscale(self.config['tailscale'], apply)))
         if 'telegramGateway' in self.config:

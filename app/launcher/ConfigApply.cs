@@ -141,7 +141,7 @@ namespace RemoteAgents.Launcher
             var parts = Json.Array(Json.Get(result, "parts")).Select(Json.Map).ToArray();
             Func<string, bool> ok = part => parts.Any(r => Json.Str(r, "part") == part && Json.Str(r, "state") == "ready");
             if (desired.ContainsKey("proxyOut")) ready[ConfigSections.Proxy] = new[] { "internet", "inbound", "ipv6", "egressWatch" }.All(ok);
-            if (desired.ContainsKey("lan")) ready[ConfigSections.Lan] = Json.Array(Json.Get(desired, "lan")).Select(Json.Map).All(l => ok("lan:" + Json.Str(l, "name")));
+            if (desired.ContainsKey("lan")) ready[ConfigSections.Lan] = Json.Array(Json.Get(desired, "lan")).Select(Json.Map).All(l => ok("lan:" + Json.Str(l, "name"))) && (!LanAccess.Read(desired).Enabled || ok("lanShare"));
         }
     }
 

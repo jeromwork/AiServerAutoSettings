@@ -19,6 +19,7 @@ namespace RemoteAgents.Launcher
         internal Dictionary<string, object> Vpn = new Dictionary<string, object>();        // status/vpn.json (maxAge 15 s)
         internal Dictionary<string, object> Control = new Dictionary<string, object>();    // status/control.json (maxAge 30 s), the bridge
         internal Dictionary<string, object> Health = new Dictionary<string, object>();     // ServerHealthView.Read(home)
+        internal Dictionary<string, object> Lan = new Dictionary<string, object>();
         internal bool VpnInstalled;          // a "vpn" component exists in the definition
         internal bool VpnWanted;             // profile.vpn.enabled / the user's intent
         internal bool VpnBusy;               // enable/disable is in progress (actionBusy around CheckVpn/DisableVpn)
@@ -68,6 +69,7 @@ namespace RemoteAgents.Launcher
         internal Tone Overall;               // must match the tray icon colour for the same facts
         internal BannerView Banner = new BannerView();
         internal VpnCardView Vpn = new VpnCardView();
+        internal CardView Lan = new CardView { Title = "Сеть клиники" };
         internal CardView Disk = new CardView { Title = "Диск" };
         internal CardView Happier = new CardView { Title = "Happier" };
         internal CardView Helper = new CardView { Title = "Помощник" };
@@ -88,6 +90,11 @@ namespace RemoteAgents.Launcher
                 : (transport.Count == 0 ? Tone.Warning : Json.Bool(transport, "ok") ? Tone.Ok : Tone.Error);
             BuildVpn(view.Vpn, facts, transport, vpn);
             BuildDisk(view.Disk, facts);
+            var lan = facts.Lan ?? Json.Map(null);
+            view.Lan.Visible = !facts.IsVpnProduct && Json.Bool(lan, "enabled");
+            view.Lan.State = Json.Text(lan, "summary", "ожидается проверка");
+            view.Lan.Detail = Json.Str(lan, "detail");
+            view.Lan.Tone = Json.Bool(lan, "ok") ? Tone.Ok : Tone.Warning;
             view.Happier.Visible = facts.HappierVisible && !facts.IsVpnProduct;
             view.Happier.State = facts.HappierConfirmed ? "аккаунт подключён"
                 : facts.HappierHasKey || facts.HappierVisible ? "аккаунт не подтверждён" : "не настроен";
