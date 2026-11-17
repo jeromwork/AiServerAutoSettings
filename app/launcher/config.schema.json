@@ -141,6 +141,10 @@
         }
       },
       "additionalProperties": false
+    },
+    "profile": {
+      "$ref": "config.paste.schema.json",
+      "description": "Желаемый переносимый профиль без secrets; lan[].share описывает доступ с ПК"
     }
   },
   "additionalProperties": true

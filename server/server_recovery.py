@@ -14,7 +14,7 @@ ENVELOPE = '/etc/remoteagents/server-apply/recovery.json'
 UNIT = 'remoteagents-reconcile'
 MAX_ENVELOPE = 32 * 1024 * 1024
 PENDING = ('/var/lib/remoteagents/base-network/pending', '/var/lib/remoteagents/lan/pending',
-           '/var/lib/remoteagents/proxy-out/pending', '/var/lib/remoteagents/port-leak/pending')
+           '/var/lib/remoteagents/proxy-out/pending', '/var/lib/remoteagents/port-leak/pending', '/var/lib/remoteagents/lan-share/pending')
 
 
 def units():

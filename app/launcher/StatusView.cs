@@ -76,6 +76,8 @@ namespace RemoteAgents.Launcher
         }
         public static string Metered(Dictionary<string, object> data)
         { var value = Json.Get(data, "metered"); return value is bool ? ((bool)value ? "да" : "нет") : "нет данных"; }
+        internal static string Lan(Dictionary<string, object> data)
+        { return "Сеть клиники: " + (data.Count == 0 ? "ожидается проверка" : Summary(data)); }
         public static string Summary(Dictionary<string, object> data)
         {
             if (data.Count == 0) return "нет данных";

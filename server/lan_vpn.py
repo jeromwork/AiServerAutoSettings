@@ -33,7 +33,7 @@ TABLE = 'remoteagents_lan'
 PUBLIC = Path('/var/lib/remoteagents-status')
 # Every owner-confirmed network transaction; only one may wait for confirm at a time.
 PENDING = (Path('/var/lib/remoteagents/base-network/pending'), Path('/var/lib/remoteagents/lan/pending'), Path('/var/lib/remoteagents/port-leak/pending'),
-           Path('/var/lib/remoteagents/proxy-out/pending'))
+           Path('/var/lib/remoteagents/proxy-out/pending'), Path('/var/lib/remoteagents/lan-share/pending'))
 MARKER = '---remoteagents-stdin---'
 PRIVATE = tuple(ipaddress.ip_network(s) for s in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
 # OS interface name <= 15 bytes (tun-lan- is 8 bytes).

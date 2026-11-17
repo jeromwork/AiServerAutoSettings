@@ -116,7 +116,7 @@ def apply(engine, update=False):
              'Существующий sing-box без TUN: автоматическая замена запрещена; сохраните и проверьте его отдельно.')
     _require(not any(s.path(p).exists() for p in (
         STATE, '/var/lib/remoteagents/lan/pending', '/var/lib/remoteagents/proxy-out/pending',
-        '/var/lib/remoteagents/port-leak/pending')), 'Сначала завершите прежнее изменение сети.')
+        '/var/lib/remoteagents/port-leak/pending', '/var/lib/remoteagents/lan-share/pending')), 'Сначала завершите прежнее изменение сети.')
     old_file = s.path('/etc/sing-box/config.json')
     old = {'text': old_file.read_text(), 'mode': old_file.stat().st_mode & 0o777} if update else None
     if update:

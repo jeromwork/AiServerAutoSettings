@@ -236,7 +236,7 @@ class HappierWebComponentsTests(unittest.TestCase):
             f = WebServices(tmp)
             c = config(); c['lan'] = []; c.pop('tailscale'); c.pop('telegramGateway'); c.pop('proxyOut')
             c['serverComponents'] = {'happierWeb': {'enabled': True,'port':47832,'keepChats':12}}
-            self.assertEqual(f.engine(c).run('plan')['parts'][1]['state'], 'change')
+            self.assertEqual(next(p for p in f.engine(c).run('plan')['parts'] if p['part'] == 'happierWeb')['state'], 'change')
             first = f.complete(c)
             self.assertTrue(first['ok'],first)
             again = f.engine(c).run('apply')

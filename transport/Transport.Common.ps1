@@ -223,17 +223,17 @@ function Get-TransportRouteOverlay($Route,[string]$Root) {
 }
 # Настроенные значения отделены от состояния: выбор порта не меняет ревизию config.json.
 function Get-TransportPortDefaults {
-    @{sshPort=2222;channelSocksPort=2223;channelSshAddress='127.0.0.2';syncPort=22001;probePortBase=26000;socksPortBase=28000;apiPort=29090}
+    @{sshPort=2222;channelSocksPort=2223;channelSshAddress='127.0.0.2';syncPort=22001;lanProxyPort=17880;probePortBase=26000;socksPortBase=28000;apiPort=29090}
 }
 function Get-TransportConfiguredPorts($Transport,$Profile) {
     $ports=[ordered]@{};$defaults=Get-TransportPortDefaults
-    foreach($key in @('sshPort','channelSocksPort','syncPort','apiPort','probePortBase','socksPortBase','channelSshAddress')){$ports[$key]=Get-TransportValue $Transport $key $defaults[$key]}
+    foreach($key in @('sshPort','channelSocksPort','syncPort','lanProxyPort','apiPort','probePortBase','socksPortBase','channelSshAddress')){$ports[$key]=Get-TransportValue $Transport $key $defaults[$key]}
     $ports['serverPort']=Get-TransportServerPort $Profile
     [pscustomobject]$ports
 }
 function Test-TransportPortsEqual($Left,$Right) {
     if(-not $Left -or -not $Right){return $false}
-    foreach($key in @('sshPort','channelSocksPort','syncPort','apiPort','probePortBase','socksPortBase','channelSshAddress','serverPort')){
+    foreach($key in @('sshPort','channelSocksPort','syncPort','lanProxyPort','apiPort','probePortBase','socksPortBase','channelSshAddress','serverPort')){
         if([string]$Left.$key -cne [string]$Right.$key){return $false}
     };return $true
 }
@@ -244,7 +244,7 @@ function Get-TransportEffectivePorts([string]$Root) {
     try{
         $state=Read-TransportJson (Join-Path $Root 'state/transport-ports.json')
         if($state.schema -eq 1 -and (Test-TransportPortsEqual $configured $state.configured)){
-            foreach($key in @('sshPort','channelSocksPort','syncPort','apiPort','probePortBase','socksPortBase','serverPort')){
+            foreach($key in @('sshPort','channelSocksPort','syncPort','lanProxyPort','apiPort','probePortBase','socksPortBase','serverPort')){
                 if([int]$state.effective.$key -lt 1 -or [int]$state.effective.$key -gt 65535){return $configured}
             }
             $ip=$null
@@ -337,7 +337,7 @@ function Resolve-TransportPorts([string]$Root,$Settings,[int]$ProbeCount,[int]$S
         }
     }
     $keys=@('sshPort');if($Settings.Transport.channelFirst){$keys+=@('channelSocksPort')}
-    if(@($Settings.Channel.inbounds|Where-Object {$_.tag -eq 'sync'}).Count){$keys+=@('syncPort')};$keys+=@('apiPort','probePortBase','socksPortBase')
+    if(@($Settings.Channel.inbounds|Where-Object {$_.tag -eq 'sync'}).Count){$keys+=@('syncPort')};$keys+=@('apiPort','probePortBase','socksPortBase');if($Settings.Lan.enabled){$keys+=@('lanProxyPort')}
     foreach($key in $keys){
         $count=1;$step=10
         if($key -eq 'probePortBase'){$count=$ProbeCount}elseif($key -eq 'socksPortBase'){$count=$SocksCount}
@@ -367,6 +367,18 @@ function Resolve-TransportPorts([string]$Root,$Settings,[int]$ProbeCount,[int]$S
             if($old -cne $from){Update-TransportChannelRoute $Root $Settings $from $to}
         }
     }
+    if($Settings.Lan.enabled){
+        $Settings.Lan.proxyPort=[int]$effective.lanProxyPort
+        foreach($forward in @($Settings.Lan.forwards)){
+            $from=[int]$forward.localPort
+            $forward.localPort=Select-TransportPortBlock $from 1 10 $snapshot $selected
+            if($from -ne $forward.localPort){
+                [void]$moved.Add([pscustomobject]@{key=$forward.tag;from=$from;to=$forward.localPort;pid=0;exe=''})
+                if(-not $Preview){Write-TransportLog $Root 'port-moved' ([pscustomobject]@{message=('Порт '+$from+' занят — '+$forward.tag+' использует '+$forward.localPort)})}
+            }
+        }
+        $effective|Add-Member -Force lan $Settings.Lan
+    }
     if(-not $Preview){Write-TransportJson (Join-Path $Root 'state/transport-ports.json') ([ordered]@{schema=1;defaults=(Get-TransportPortDefaults);configured=$configured;effective=$effective;moved=@($moved.ToArray());updatedAt=[DateTime]::UtcNow.ToString('o')}) -Private}
     foreach($key in (Get-TransportPortDefaults).Keys){$Settings.Options[$key]=$effective.$key}
     return $Settings
@@ -387,6 +399,47 @@ function Get-TransportLocalWeb($Config) {
     }
     [pscustomobject]@{enabled=$local.enabled;available=$local.enabled;port=[int]$local.port;serverPort=[int]$local.serverPort;conflict=$null}
 }
+# Parse the optional public profile only; do not inspect VPN secrets or change Windows networking.
+function Assert-LanCidr([string]$Cidr) {
+    if($Cidr -notmatch '^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})$'){throw 'share.subnets: неверный CIDR'}
+    $parts=$Cidr.Split('/');$octets=$parts[0].Split('.');$bits=[int]$parts[1]
+    if($bits -lt 8 -or $bits -gt 32){throw 'share.subnets: нужна подсеть RFC1918'}
+    [uint64]$ip=0
+    foreach($octet in $octets){if([int]$octet -gt 255 -or ($octet.Length -gt 1 -and $octet[0] -eq '0')){throw 'share.subnets: неверный IPv4'};$ip=$ip*256+[int]$octet}
+    $private=($octets[0] -eq '10' -and $bits -ge 8) -or ($octets[0] -eq '172' -and [int]$octets[1] -ge 16 -and [int]$octets[1] -le 31 -and $bits -ge 12) -or ($octets[0] -eq '192' -and $octets[1] -eq '168' -and $bits -ge 16)
+    if(-not $private -or $ip % [Math]::Pow(2,32-$bits) -ne 0){throw 'share.subnets: нужна каноническая подсеть RFC1918'}
+}
+function Assert-LanDomain([string]$Domain) {
+    $name=$Domain;if($name.StartsWith('*.')){$name=$name.Substring(2)}
+    $ip=$null
+    if($name.Length -gt 253 -or -not $name.Contains('.') -or [Net.IPAddress]::TryParse($name,[ref]$ip)){throw 'share.domains: нужно DNS-имя'}
+    foreach($label in $name.Split('.')){if($label -notmatch '^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$'){throw 'share.domains: неверное DNS-имя'}}
+}
+function Get-TransportLan($Config) {
+    $subnets=@();$domains=@();$forwards=@();$probeHost='';$probePort=0;$index=0
+    foreach($item in @($Config.profile.lan)){
+        if(-not $item -or -not $item.share){$index++;continue}
+        $share=$item.share;$names=@{}
+        foreach($subnet in @($share.subnets|Where-Object {$null -ne $_})){Assert-LanCidr ([string]$subnet);$subnets+=[string]$subnet}
+        foreach($domain in @($share.domains|Where-Object {$null -ne $_})){Assert-LanDomain ([string]$domain);$domains+=([string]$domain).ToLowerInvariant()}
+        foreach($f in @($share.forwards)){
+            if(-not $f){continue}
+            if([string]$f.name -notmatch '^[a-z][a-z0-9-]{0,31}$' -or $names.ContainsKey([string]$f.name)){throw 'share.forwards: неверное или повторное имя'};$names[[string]$f.name]=$true
+            foreach($k in @('port','localPort')){if($f.$k -is [bool] -or $f.$k -isnot [ValueType] -or [double]$f.$k -ne [Math]::Floor([double]$f.$k) -or [int]$f.$k -lt 1 -or [int]$f.$k -gt 65535 -or ($k -eq 'localPort' -and [int]$f.$k -lt 1024)){throw 'share.forwards: неверный порт'}}
+            if([string]$f.host -match '^[0-9.]+$'){Assert-LanCidr ([string]$f.host+'/32')}else{Assert-LanDomain ([string]$f.host);if([string]$f.host -match '\*'){throw 'forward.host: нужен точный хост'}}
+            $forwards+=[pscustomobject]@{name=$f.name;tag=('lan-fwd-'+$index+'-'+$f.name);host=([string]$f.host).ToLowerInvariant();port=[int]$f.port;localPort=[int]$f.localPort}
+        }
+        if(-not $probeHost -and ($subnets.Count+$domains.Count+$forwards.Count -gt 0)){
+            $probeHost=[string](Get-TransportValue $item 'testHost' (Get-TransportValue $item 'host' ''))
+            $probePort=[int](Get-TransportValue $item 'testPort' (Get-TransportValue $item 'port' 22))
+            if(-not $probeHost -and @($share.forwards).Count){$probeHost=[string]$share.forwards[0].host;$probePort=[int]$share.forwards[0].port}
+            if(-not $probeHost -or $probePort -lt 1 -or $probePort -gt 65535 -or $probeHost -notmatch '^[a-zA-Z0-9][a-zA-Z0-9.-]*$'){throw 'lan.share: нужен корректный testHost/testPort или первый forward'}
+        }
+        $index++
+    }
+    [pscustomobject]@{enabled=($subnets.Count+$domains.Count+$forwards.Count -gt 0);proxyAddress='127.0.0.1';proxyPort=0;subnets=@($subnets|Select-Object -Unique);domains=@($domains|Select-Object -Unique);forwards=@($forwards);probeHost=$probeHost;probePort=$probePort}
+}
+
 function Read-TransportSettings([string]$Root) {
     $config=Read-TransportJson (Join-Path $Root 'config.json');$t=$config.transport
     if(-not $t){throw 'Нет секции transport'}
@@ -402,14 +455,14 @@ function Read-TransportSettings([string]$Root) {
     $portDefaults=Get-TransportPortDefaults;foreach($k in $portDefaults.Keys){$defaults[$k]=$portDefaults[$k]}
     $s=@{};foreach($k in $defaults.Keys){$s[$k]=Get-TransportValue $t $k $defaults[$k]}
     foreach($k in @('bindPhysical','openSsh')){if($s[$k] -isnot [bool]){throw 'Нужен логический параметр transport'}}
-    foreach($k in @('sshPort','channelSocksPort','syncPort','probePortBase','socksPortBase','apiPort')){if([int]$s[$k] -lt 1 -or [int]$s[$k] -gt 65535){throw 'Неверный порт transport'}}
+    foreach($k in @('sshPort','channelSocksPort','syncPort','lanProxyPort','probePortBase','socksPortBase','apiPort')){if([int]$s[$k] -lt 1 -or [int]$s[$k] -gt 65535){throw 'Неверный порт transport'}}
     if([string]$s.channelSshAddress -notmatch '\A127\.\d{1,3}\.\d{1,3}\.\d{1,3}\z' -or [string]$s.channelSshAddress -eq '127.0.0.1'){throw 'Неверный адрес входа канала'}
     foreach($k in @('activeProbeBytes','rankProbeBytes','activeIntervalSec','meteredActiveIntervalSec','rankIntervalSec','rankConcurrency','topOnMetered','stallSeconds','probeTimeoutSec','restartDelaySec')){if([double]$s[$k] -le 0){throw 'Параметры transport должны быть положительными'}}
     if([string]$s.metered -notin @('auto','true','false','True','False')){throw 'Неверный metered'}
     if(-not $t.serverRoute -and $config.wizard.serverRoute){$overlay=Get-TransportRouteOverlay $config.wizard.serverRoute $Root;if($overlay){$t|Add-Member -Force serverRoute $overlay}}
     Assert-TransportLists $t -ForBuild
     $effective=Get-TransportEffectivePorts $Root;foreach($k in (Get-TransportPortDefaults).Keys){$s[$k]=$effective.$k}
-    [pscustomobject]@{Options=$s;Transport=$t;Profile=$profile;Channel=$channel;LocalWeb=(Get-TransportLocalWeb $config);Vpn=(Get-TransportValue $config 'vpn' ([pscustomobject]@{enabled=$false}))}
+    [pscustomobject]@{Options=$s;Transport=$t;Profile=$profile;Channel=$channel;LocalWeb=(Get-TransportLocalWeb $config);Lan=(Get-TransportLan $config);Vpn=(Get-TransportValue $config 'vpn' ([pscustomobject]@{enabled=$false}))}
 }
 function Get-TransportSshArguments($Profile,[int]$Port,[switch]$UseRoute) {
     # Явные параметры профиля исключают ProxyCommand/forwarding/RemoteCommand из пользовательского config.
@@ -726,6 +779,24 @@ function New-TransportConfig($Settings,$Paths,[string]$Secret,[string]$DefaultTa
         $rules+=@{inbound=@($row[0]);action='route';outbound='active'}
     }
     foreach($c in $Paths.Candidates){$tag='probe-'+$c.tag;$in+=@{type='direct';tag=$tag;listen='127.0.0.1';listen_port=$c.port;network='tcp';override_address='127.0.0.1';override_port=(Get-TransportServerPort $Settings.Profile)};$rules+=@{inbound=@($tag);action='route';outbound=$c.tag}}
+    $lan=Get-TransportValue $Settings 'Lan' $null
+    if($lan -and $lan.enabled){
+        $in+=@{type='mixed';tag='lan-proxy';listen='127.0.0.1';listen_port=[int]$o.lanProxyPort}
+        if(@($lan.subnets).Count){$rules+=@{inbound=@('lan-proxy');ip_cidr=@($lan.subnets);action='route';outbound='active'}}
+        foreach($domain in @($lan.domains)){
+            $rule=@{inbound=@('lan-proxy');action='route';outbound='active'}
+            if($domain.StartsWith('*.')){$rule.domain_regex=@('^.+\.'+[regex]::Escape($domain.Substring(2))+'$')}else{$rule.domain=@($domain)}
+            $rules+=$rule
+        }
+        foreach($forward in @($lan.forwards)){
+            $in+=@{type='direct';tag=$forward.tag;listen='127.0.0.1';listen_port=[int]$forward.localPort;network='tcp';override_address=$forward.host;override_port=[int]$forward.port}
+            $rules+=@{inbound=@($forward.tag);action='route';outbound='active'}
+            $rule=@{inbound=@('lan-proxy');port=@([int]$forward.port);action='route';outbound='active'}
+            if($forward.host -match '^[0-9.]+$'){$rule.ip_cidr=@($forward.host+'/32')}else{$rule.domain=@($forward.host)}
+            $rules+=$rule
+        }
+        $rules+=@{inbound=@('lan-proxy');action='reject'}
+    }
     foreach($port in @(@($in|Where-Object {$_.listen -eq '127.0.0.1'}|ForEach-Object {$_.listen_port})+@([int]$o.apiPort)+@($Paths.Outbounds|Where-Object {$_.type -eq 'socks'}|ForEach-Object {$_.server_port}))){
         if($port -lt 1 -or $port -gt 65535 -or $ports.ContainsKey([int]$port)){throw 'Пересечение или неверный порт'};$ports[[int]$port]=$true
     }
@@ -949,7 +1020,7 @@ function Get-TransportRevision([string]$Root) {
     $route=$config.transport.serverRoute;if(-not $route){$route=$config.wizard.serverRoute}
     if($route.used -eq 'hop' -and $config.transport.profilePath){$p=Read-TransportJson $config.transport.profilePath;$kh=Join-Path (Split-Path $p.knownHostsPath -Parent) 'known_hosts-hop';if(Test-Path $kh){$files+=$kh}}
     $sha=[Security.Cryptography.SHA256]::Create()
-    try{$text=(ConvertTo-Json -InputObject (Get-TransportLocalWeb $config) -Depth 5 -Compress)+(ConvertTo-Json -InputObject $route -Depth 20 -Compress)+(ConvertTo-Json -InputObject $config.transport -Depth 40 -Compress)+"`n"+((@($files|ForEach-Object {$(if($env:OS -eq 'Windows_NT'){[IO.Path]::GetFullPath($_).Replace('\','/').ToLowerInvariant()}else{[IO.Path]::GetFullPath($_)})+"`n"+(Convert-TransportLF ([IO.File]::ReadAllText($_)))})) -join "`n");[Convert]::ToBase64String($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))}finally{$sha.Dispose()}
+    try{$text=(ConvertTo-Json -InputObject (Get-TransportLan $config) -Depth 20 -Compress)+(ConvertTo-Json -InputObject (Get-TransportLocalWeb $config) -Depth 5 -Compress)+(ConvertTo-Json -InputObject $route -Depth 20 -Compress)+(ConvertTo-Json -InputObject $config.transport -Depth 40 -Compress)+"`n"+((@($files|ForEach-Object {$(if($env:OS -eq 'Windows_NT'){[IO.Path]::GetFullPath($_).Replace('\','/').ToLowerInvariant()}else{[IO.Path]::GetFullPath($_)})+"`n"+(Convert-TransportLF ([IO.File]::ReadAllText($_)))})) -join "`n");[Convert]::ToBase64String($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))}finally{$sha.Dispose()}
 }
 function Test-TransportConfigFile([string]$Exe,[string]$File) {
     $check=Start-TransportProcess $Exe @('check','-c',$File)

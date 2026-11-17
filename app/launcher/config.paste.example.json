@@ -65,12 +65,43 @@
   },
   "secrets": {
     "server-key": "",
-    "happier-key": ""
+    "happier-key": "",
+    "lan-office-ovpn": ""
   },
   "update": {
     "enabled": true,
     "auto": true,
     "intervalHours": 6,
     "remoteDir": "~/.local/share/remote-agents/dist"
-  }
+  },
+  "lan": [
+    {
+      "name": "office",
+      "kind": "openvpn",
+      "ovpn": {
+        "secret": "lan-office-ovpn"
+      },
+      "testHost": "10.123.0.10",
+      "testPort": 22,
+      "subnets": [
+        "10.123.0.0/24"
+      ],
+      "share": {
+        "subnets": [
+          "10.123.0.0/24"
+        ],
+        "domains": [
+          "*.example.org"
+        ],
+        "forwards": [
+          {
+            "name": "ssh",
+            "host": "10.123.0.10",
+            "port": 22,
+            "localPort": 18022
+          }
+        ]
+      }
+    }
+  ]
 }
