@@ -384,6 +384,12 @@
       "minLength": 1,
       "description": "Локальный каталог неизменяемого снимка кэшей после доверенного обновления"
     },
+    "vpnInPort": {
+      "type": "integer",
+      "minimum": 1024,
+      "maximum": 65535,
+      "default": 17881
+    },
     "lanProxyPort": {
       "type": "integer",
       "minimum": 1024,
