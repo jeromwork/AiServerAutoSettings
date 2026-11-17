@@ -30,7 +30,7 @@ namespace RemoteAgents.Launcher
         internal static readonly string[] Chain = { Proxy, Lan };
         internal static readonly string[] Order = new[] { Bootstrap, Server, Connection, Bridge, Account, Disk, Vpn, Proxy, Lan }.Where(s => Product.VpnEnabled || s != Vpn).ToArray();
         // Top-level profile keys (config.paste.schema.json). Unknown keys are refused by ConfigBundle.Parse (stream A).
-        internal static readonly string[] ProfileKeys = { "device", "update", "server", "vpn", "happier", "bridge", "disk", "proxyOut", "lan", "deployment", "serverNetwork", "tailscale", "telegramGateway", "agent", "serverComponents", "agents", "desktop", "projectViews", "sessions", "ssh", "components" };
+        internal static readonly string[] ProfileKeys = { "device", "update", "server", "vpn", "happier", "bridge", "disk", "proxyOut", "lan", "deployment", "serverNetwork", "telegramGateway", "agent", "serverComponents", "agents", "desktop", "projectViews", "sessions", "ssh", "components" };
         internal static bool Known(string key) { return ProfileKeys.Contains(key); }
         internal static string Title(string s)
         {
@@ -129,7 +129,7 @@ namespace RemoteAgents.Launcher
 
     internal static class ServerDeployment
     {
-        internal static readonly string[] Keys = { "deployment", "serverNetwork", "proxyOut", "lan", "tailscale", "telegramGateway", "agent", "serverComponents", "agents", "desktop", "projectViews", "sessions", "ssh" };
+        internal static readonly string[] Keys = { "deployment", "serverNetwork", "proxyOut", "lan", "telegramGateway", "agent", "serverComponents", "agents", "desktop", "projectViews", "sessions", "ssh" };
         internal static Dictionary<string, object> Profile(Dictionary<string, object> p, bool server = false)
         {
             var result = Keys.Where(p.ContainsKey).ToDictionary(k => k, k => p[k]);

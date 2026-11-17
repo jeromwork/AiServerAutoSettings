@@ -12,7 +12,7 @@ function Get-VpnLegacyInterfaces([string]$Root) {
     try {
         $config=Read-TransportJson (Join-Path $Root 'config.json')
         $name=[string]$config.vpn.interfaceName
-        # Keep the ownership contract of Get-VpnOptions; never accept Happ/OpenVPN/Tailscale names.
+        # Keep the ownership contract of Get-VpnOptions; never accept Happ/OpenVPN names.
         if($name -match '^RemoteAgents-[a-zA-Z0-9_-]{1,32}$' -and $name -ne 'RemoteAgents-TUN'){$name}
     }catch{}
 }

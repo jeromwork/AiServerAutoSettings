@@ -1463,53 +1463,8 @@
       "uniqueItems": true
     },
     "tailscale": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "hostname": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 63,
-          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$(?![\\s\\S])"
-        },
-        "authKey": {
-          "type": "object",
-          "properties": {
-            "secret": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 64,
-              "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
-            },
-            "hint": {
-              "type": "string",
-              "minLength": 0,
-              "maxLength": 2048
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "secret"
-          ],
-          "description": "Ключ входа Tailscale из панели администратора; используется только для первого входа узла",
-          "examples": [
-            {
-              "secret": "tailscale-auth-key"
-            }
-          ]
-        },
-        "userspace": {
-          "type": "boolean"
-        },
-        "hint": {
-          "type": "string",
-          "minLength": 0,
-          "maxLength": 2048
-        }
-      },
-      "additionalProperties": false
+      "deprecated": true,
+      "description": "Прежнее поле: принимается, игнорируется и не экспортируется"
     },
     "telegramGateway": {
       "type": "object",

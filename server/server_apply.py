@@ -142,12 +142,12 @@ def validate(config):
                 valid_url(value)
         if type(value) is int:
             require(rule.get('minimum', value) <= value <= rule.get('maximum', value), 'Число вне диапазона.')
+    config.pop('tailscale', None)  # Migration: old field is ignored, never reissued.
     check(config, schema)
     lan_share.policy(config)
     proxy = config.get('proxyOut')
     if proxy:
         proxy.setdefault('ipv6', 'block')
-    require(config.get('tailscale', {}).get('userspace', True), 'Tailscale сервера поддерживает только userspace без интерфейса и маршрутов.')
     if proxy:
         if 'exitIp' in proxy:
             ipaddress.ip_address(proxy['exitIp'])
@@ -358,6 +358,7 @@ def nft_normal(text):
 class Engine:
     def __init__(self, config, secrets=None, system=None, ssh_checked=False, public_only=False):
         self.config = json.loads(json.dumps(config))
+        self.config.pop("tailscale", None)  # Ignore old configurations even for direct callers.
         if 'proxyOut' in self.config:
             self.config['proxyOut'].setdefault('ipv6', 'block')
         self.secrets = dict(secrets or {})
@@ -866,87 +867,6 @@ class Engine:
         return ['runuser', '-u', user, '--', 'env', 'HOME=' + str(home), 'XDG_RUNTIME_DIR=/run/user/' + str(uid),
                 'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/' + str(uid) + '/bus', *args]
 
-    def tailscale(self, item, apply):
-        if 'enabled' not in item:
-            return self.row('tailscale', 'ready', 'включение не задано; без изменений')
-        live = self.s.active('tailscaled')
-        enabled = self.s.run(['systemctl', 'is-enabled', '--quiet', 'tailscaled'], check=False).returncode == 0
-        if not item['enabled']:
-            if apply and (live or enabled):
-                self.s.run(['systemctl', 'disable', '--now', 'tailscaled'], change=True)
-            return self.row('tailscale', 'change' if (live or enabled) and not apply else 'ready', 'будет выключен' if (live or enabled) and not apply else 'выключен')
-        defaults = self.s.path('/etc/default/tailscaled')
-        text = defaults.read_text() if defaults.exists() else ''
-        wanted = '--tun=userspace-networking' if item.get('userspace', True) else ''
-        match = re.search(r'(?m)^\s*FLAGS=(.*)$', text)
-        flags = match[1].strip().strip('\"').strip("'") if match else ''
-        mode_ok = re.findall(r'(?:^|\s)--tun=(\S+)', flags) == (['userspace-networking'] if wanted else [])
-        status = self.s.run(['tailscale', 'status', '--json'], check=False)
-        data = json.loads(status.stdout) if status.returncode == 0 and status.stdout else {}
-        logged = data.get('BackendState') == 'Running'
-        hostname_ok = not item.get('hostname') or data.get('Self', {}).get('HostName') == item['hostname']
-        prefs = {}
-        if logged and not self.public_only:
-            value = self.s.run(['tailscale', 'debug', 'prefs'])
-            prefs = json.loads(value.stdout)
-        dirty = bool(prefs.get('AdvertiseRoutes') or prefs.get('ExitNodeID') or prefs.get('ExitNodeIP') or prefs.get('RouteAll') or prefs.get('CorpDNS'))
-        if live and enabled and logged and mode_ok and hostname_ok and not dirty:
-            return self.row('tailscale', 'ready', 'уже так; штатная служба подключена')
-        key = None
-        if not logged and not apply and not self.secrets.get(item.get('authKey', {}).get('secret', 'tailscale-auth-key')):
-            name = item.get('authKey', {}).get('secret', 'tailscale-auth-key')
-            return self.row('tailscale', 'waiting', 'будут установлены официальный пакет и штатная служба; ждёт секрет «' + name + '»', missing=[name])
-        if not logged:
-            key = self.secret(item.get('authKey'), 'tailscale-auth-key')
-        if not apply:
-            return self.row('tailscale', 'change', 'будут установлены официальный пакет и штатная служба Tailscale; раздача подсетей выключена')
-        changed = False
-        if not mode_ok or not defaults.exists():
-            lines = [line for line in text.splitlines() if not re.match(r'^\s*FLAGS=', line)]
-            if not re.search(r'(?m)^\s*PORT=', text):
-                lines.append('PORT="41641"')
-            flags = re.sub(r'(?:^|\s)--tun=\S+', '', flags).strip()
-            flags = ' '.join(value for value in (flags, wanted) if value)
-            lines.append('FLAGS="' + flags.replace('\\', '\\\\').replace('\"', '\\\"') + '"')
-            changed = self.s.write('/etc/default/tailscaled', '\n'.join(lines) + '\n', 0o644)
-        installed = self.s.run(['dpkg-query', '-W', '-f=${Status}', 'tailscale'], check=False)
-        if installed.returncode or 'install ok installed' not in installed.stdout:
-            self.install_tailscale()
-        if changed and live:
-            self.s.run(['systemctl', 'restart', 'tailscaled'], change=True)
-        if not live or not enabled:
-            self.s.run(['systemctl', 'enable', '--now', 'tailscaled'], change=True)
-        if not logged:
-            with self.s.private_file(key) as file:
-                args = ['tailscale', 'up', '--auth-key=file:' + str(file), '--accept-dns=false', '--accept-routes=false', '--timeout=60s']
-                if item.get('hostname'):
-                    args.append('--hostname=' + item['hostname'])
-                self.s.run(args, change=True, timeout=90)
-        elif not hostname_ok:
-            self.s.run(['tailscale', 'set', '--hostname=' + item['hostname']], change=True)
-        if dirty:
-            self.s.run(['tailscale', 'set', '--accept-dns=false', '--accept-routes=false', '--exit-node=',
-                        '--advertise-routes=', '--advertise-exit-node=false'], change=True)
-            checked = json.loads(self.s.run(['tailscale', 'debug', 'prefs']).stdout)
-            require(not any(checked.get(k) for k in ('AdvertiseRoutes', 'ExitNodeID', 'ExitNodeIP', 'RouteAll', 'CorpDNS')), 'Tailscale сохранил посторонние маршруты; проверьте настройки узла.')
-        result = self.s.run(['tailscale', 'status', '--json'])
-        require(json.loads(result.stdout).get('BackendState') == 'Running' and self.s.active('tailscaled'), 'Tailscale пока не подключён.')
-        self.row('tailscale', 'ready', 'штатная служба Tailscale подключена; подсети не раздаются')
-
-    def install_tailscale(self):
-        text = self.s.path('/etc/os-release').read_text()
-        values = dict((k, v.strip('"')) for k, v in (line.split('=', 1) for line in text.splitlines() if '=' in line))
-        distro, codename = values.get('ID', ''), values.get('VERSION_CODENAME', '')
-        require(distro in ('debian', 'ubuntu') and re.fullmatch('[a-z][a-z0-9]{1,30}', codename), 'Автоустановка Tailscale поддерживает Debian/Ubuntu с VERSION_CODENAME.')
-        base = 'https://pkgs.tailscale.com/stable/' + distro + '/' + codename
-        for suffix, path in (('.noarmor.gpg', '/usr/share/keyrings/tailscale-archive-keyring.gpg'),
-                             ('.tailscale-keyring.list', '/etc/apt/sources.list.d/tailscale.list')):
-            with self.s.private_file('') as file:
-                self.s.run(['curl', '--disable', '--noproxy', '*', '--fail', '--silent', '--max-time', '30', '--output', file, base + suffix])
-                self.s.write(path, file.read_bytes(), 0o644)
-        self.s.run(['apt-get', 'update'], change=True, timeout=300)
-        self.s.run(['apt-get', 'install', '-y', '-o', 'Dpkg::Options::=--force-confold', 'tailscale'], change=True, timeout=300)
-
     def telegram(self, item, apply):
         if 'enabled' not in item:
             return self.row('telegramGateway', 'ready', 'включение не задано; без изменений')
@@ -1084,8 +1004,6 @@ class Engine:
         parts += [('lan:' + item['name'], lambda item=item: self.lan_part(item, apply)) for item in self.config.get('lan', [])]
         if 'lan' in self.config or self.s.path(lan_share.MANIFEST).exists():
             parts.append(('lanShare', lambda: lan_share.reconcile(self, apply)))
-        if 'tailscale' in self.config:
-            parts.append(('tailscale', lambda: self.tailscale(self.config['tailscale'], apply)))
         if 'telegramGateway' in self.config:
             parts.append(('telegramGateway', lambda: self.telegram(self.config['telegramGateway'], apply)))
         parts.append(('bridgeState', lambda: components.bridge_state(self, apply)))
@@ -1112,7 +1030,7 @@ class Engine:
                     # pending now; a NEW external SSH must confirm the network.
                     ready = False
         if apply and all(r['state'] in ('ready', 'waiting') or r['state'] == 'blocked' and r['part'] in ('desktop', 'projectViews', 'agents:codex') for r in self.rows):
-            public = {k: v for k, v in self.config.items() if k in ('deployment', 'serverNetwork', 'proxyOut', 'lan', 'tailscale', 'telegramGateway', 'agent', *components.KEYS)}
+            public = {k: v for k, v in self.config.items() if k in ('deployment', 'serverNetwork', 'proxyOut', 'lan', 'telegramGateway', 'agent', *components.KEYS)}
             if self.part('recovery', lambda: self.recovery(True)):
                 self.s.write('/var/lib/remoteagents-status/server-config.json', json.dumps(public, ensure_ascii=False, sort_keys=True) + '\n', 0o644)
                 os.chmod(self.s.path('/var/lib/remoteagents-status'), 0o755)
@@ -1163,26 +1081,6 @@ def egress_watch(engine):
     return ok
 
 
-def tailscale_migrate(system, statedir, user):
-    require(re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}', user or '') and user != 'root', 'Нужен --user рабочего пользователя.')
-    source = Path(statedir).resolve()
-    require(source.is_dir() and (source / 'tailscaled.state').is_file(), 'В исходном каталоге нет tailscaled.state.')
-    destination = system.path('/var/lib/tailscale/tailscaled.state')
-    require(not destination.exists(), 'Штатное состояние уже существует; перезапись запрещена.')
-    require(system.run(['systemctl', 'cat', 'tailscaled.service'], check=False).returncode == 0, 'Перед миграцией установите официальный пакет и штатную службу Tailscale.')
-    # Check all prerequisites before stopping either daemon. Migration is explicit
-    # and never called by apply; no key contents reach stdout or argv.
-    system.run(['systemctl', 'stop', 'tailscaled'], change=True)
-    info = pwd.getpwnam(user) if system.root == Path('/') else None
-    uid = info.pw_uid if info else 1000
-    system.run(['runuser', '-u', user, '--', 'env', 'XDG_RUNTIME_DIR=/run/user/' + str(uid),
-                'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/' + str(uid) + '/bus',
-                'systemctl', '--user', 'disable', '--now', 'ts-test.service'], change=True)
-    system.write('/var/lib/tailscale/tailscaled.state', (source / 'tailscaled.state').read_bytes())
-    os.chmod(destination.parent, 0o700)
-    system.run(['systemctl', 'enable', '--now', 'tailscaled'], change=True)
-
-
 def delegated():
     # Test the trusted code's real location, not SUDO_COMMAND: sudo may accept a
     # symlink to the allowed executable. The wrapper resolves symlinks too.
@@ -1201,16 +1099,8 @@ def main(argv=None):
         if command not in ('_egress-watch', '_network-guard', '_reconcile'):
             p.add_argument('--confirm-ssh-checked', action='store_true', help='Внешний вызывающий уже проверил новое SSH-соединение')
             p.add_argument('--public-only', action='store_true', help='Только публичная сводка ЛВС, без чтения частных профилей')
-    p = sub.add_parser('tailscale-migrate')
-    p.add_argument('--from', dest='statedir', required=True)
-    p.add_argument('--user', required=True)
     args = parser.parse_args(argv)
     require(os.geteuid() == 0 or args.command in ('plan', 'status'), 'Нужен root/sudo.')
-    if args.command == 'tailscale-migrate':
-        require(not delegated(), 'Миграцию запускает администратор с полными правами.')
-        tailscale_migrate(System(), args.statedir, args.user)
-        print('Состояние Tailscale перенесено в штатную службу.')
-        return 0
     restricted = delegated()
     if restricted:
         require(args.command in ('plan', 'status', 'apply'), 'Ограниченное sudo разрешает только plan/status/apply.')
@@ -1246,7 +1136,7 @@ def main(argv=None):
         print(json.dumps(result, ensure_ascii=False))
     else:
         for row in result['parts']:
-            labels = {'inbound': 'Ответы на входящие', 'ipv6': 'IPv6', 'internet': 'Выход в интернет', 'egressWatch': 'Сторож выхода', 'tailscale': 'Tailscale', 'telegramGateway': 'Шлюз Telegram', 'agent': 'Права агента', 'log': 'Журнал', 'sshd': 'Настройка SSH'}
+            labels = {'inbound': 'Ответы на входящие', 'ipv6': 'IPv6', 'internet': 'Выход в интернет', 'egressWatch': 'Сторож выхода', 'telegramGateway': 'Шлюз Telegram', 'agent': 'Права агента', 'log': 'Журнал', 'sshd': 'Настройка SSH'}
             label = 'ЛВС «' + row['part'][4:] + '»' if row['part'].startswith('lan:') else labels.get(row['part'], row['part'])
             print(label + ': ' + row['summary'])
         if args.command == 'apply':

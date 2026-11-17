@@ -47,7 +47,7 @@ $null=New-Item -ItemType Directory -Path $directory
 $worker={param($Part,$NetHome,$Hours,$Names,$Urls,$Overrides)
  $ErrorActionPreference='Stop'
  foreach($key in $Overrides.Keys) {Set-Item -Path ('Function:'+ $key) -Value ([scriptblock]::Create([string]$Overrides[$key]))}
- $pattern='openvpn|wireguard|tailscale|happ|xray|v2ray|sing-box|clash|nekoray|hiddify|amnezia|outline|wintun|RemoteAgents'
+ $pattern='openvpn|wireguard|happ|xray|v2ray|sing-box|clash|nekoray|hiddify|amnezia|outline|wintun|RemoteAgents'
  function Safe($s) {
   $s=[string]$s
   $s=$s -replace '(?i)((?:--(?:password|auth)\b|\b(?:token|key|secret|uuid)\b)\s*(?:[:=]\s*|\s+))(?:"[^"]*"|''[^'']*''|[^\s;,]+)','$1<скрыто>'

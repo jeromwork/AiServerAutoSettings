@@ -112,7 +112,8 @@ namespace RemoteAgents.Launcher
                 var parsedDeploy = ConfigBundle.Parse(Json.Encode(deploy));
                 Check(ServerDeployment.Profile(parsedDeploy.Profile).ContainsKey("deployment"), "deployment method survives server projection: " + method);
             }
-            Reject(() => ConfigBundle.Parse("{\"kind\":\"remoteagents-config\",\"schema\":1,\"tailscale\":{\"userspace\":false}}"), "server kernel Tailscale forbidden");
+            var migrated = ConfigBundle.Parse("{\"kind\":\"remoteagents-config\",\"schema\":1,\"tailscale\":{\"enabled\":true,\"userspace\":false,\"authKey\":{\"secret\":\"old-tail-key\"}}}");
+            Check(!migrated.Profile.ContainsKey("tailscale") && migrated.Missing.Length == 0 && !ConfigBundle.Pack(migrated, null).Contains("tailscale"), "old field ignored and omitted on export");
             var managed = ConfigBundle.Parse("{\"kind\":\"remoteagents-config\",\"schema\":1,\"serverComponents\":{\"disk\":{\"enabled\":true,\"identity\":{\"secret\":\"disk-id\"},\"discoveryIntervalSec\":5},\"bridge\":{\"enabled\":true},\"happier\":{\"enabled\":true,\"channel\":\"stable\"}},\"agents\":{\"codex\":{\"enabled\":true,\"version\":\"0.166.0\"},\"claude\":{\"enabled\":true,\"token\":{\"secret\":\"claude-token\"}}},\"desktop\":{\"enabled\":false},\"projectViews\":{\"enabled\":false},\"sessions\":{\"cleanupEnabled\":true,\"idleHours\":2,\"intervalMinutes\":15},\"ssh\":{\"keepaliveIntervalSec\":30,\"keepaliveCountMax\":3}}");
             Check(managed.Missing.Contains("disk-id") && managed.Missing.Contains("claude-token"), "portable managed identities and provider credentials remain secret refs");
             Check(ServerDeployment.Profile(managed.Profile).ContainsKey("agents") && ServerDeployment.Profile(managed.Profile).ContainsKey("serverComponents"), "EXE forwards user components and agents to root reconciler");
@@ -122,15 +123,12 @@ namespace RemoteAgents.Launcher
             Check(Canonical(Json.Read(schemaPath)) == Canonical(ConfigBundle.SchemaDocument()), "published schema matches compiled schema");
             Check(ConfigBundle.Parse(File.ReadAllText(Path.Combine(Path.GetDirectoryName(schemaPath),"config.paste.example.json"))).Missing.Length == 2,"published example parses with missing secrets");
             var serverExample = ConfigBundle.Parse(File.ReadAllText(Path.Combine(Path.GetDirectoryName(schemaPath), "..", "..", "server", "server-apply.example.json")));
-            Check(serverExample.Missing.Contains("tailscale-auth-key") && serverExample.Missing.Contains("lan-office-auth"), "server apply example accepts all declarative sections");
-            var serverFields = ConfigBundle.Parse("{\"kind\":\"remoteagents-config\",\"schema\":1,\"tailscale\":{\"enabled\":true,\"authKey\":{\"secret\":\"custom-tail-key\"}},\"agent\":{\"sudo\":\"apply\"}}");
+            Check(serverExample.Missing.Contains("lan-office-auth"), "server apply example accepts all declarative sections");
             foreach (string mode in new[] { "none", "apply", "full" }) {
                 var agent = ConfigBundle.Parse(Json.Encode(ConfigBundle.D("kind", "remoteagents-config", "schema", 1, "agent", ConfigBundle.D("sudo", mode))));
                 Check(Json.Str(Json.Map(ServerDeployment.Profile(agent.Profile)["agent"]), "sudo") == mode, "agent.sudo accepted and forwarded: " + mode);
             }
             Reject(() => ConfigBundle.Parse(Json.Encode(ConfigBundle.D("kind", "remoteagents-config", "schema", 1, "agent", ConfigBundle.D("sudo", "invalid")))), "invalid agent.sudo");
-            Check(serverFields.Hints["custom-tail-key"].Contains("Tailscale"), "Tailscale explanation independent of secret name");
-            Reject(() => ConfigBundle.Parse("{\"kind\":\"remoteagents-config\",\"schema\":1,\"tailscale\":{\"advertiseRoutes\":[\"10.0.0.0/8\"]}}"), "no Tailscale subnet advertisement in master config");
             p = ConfigBundle.Parse(Json.Encode(valid));
             string encrypted = ConfigBundle.Pack(p, "Тестовый мастер-пароль");
             var locked = ConfigBundle.Parse(encrypted);

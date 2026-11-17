@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real Ubuntu/systemd/sshd/sing-box/OpenVPN, synthetic credentials, mock Tailscale.
+"""Real Ubuntu/systemd/sshd/sing-box/OpenVPN, synthetic credentials.
 
 Requires Docker via sudo and network for signed Ubuntu/SagerNet packages. Only
 container namespaces are modified. The repository mount is read-only. Every
@@ -92,16 +92,6 @@ def new_vps(label, temp, gateway):
     put(name, '/etc/systemd/system/fixture-topology.service', '[Unit]\nAfter=network.target\nBefore=remoteagents-reconcile.service\n[Service]\nType=oneshot\nExecStart=/usr/sbin/ip route replace 11.123.45.68/32 via ' + gateway_ip + ' dev eth0\n[Install]\nWantedBy=multi-user.target\n', '644')
     inside(name, 'systemctl', 'daemon-reload')
     inside(name, 'systemctl', 'enable', 'fixture-topology.service')
-    # Tailscale is the only mocked service/package; its CLI checks the auth-key
-    # file and userspace flags, and refuses route/DNS acceptance.
-    docker('cp', HERE / 'tailscale_mock.py', name + ':/usr/local/bin/tailscale')
-    inside(name, 'chmod', '755', '/usr/local/bin/tailscale')
-    inside(name, 'mkdir', '-p', '/run/ts/DEBIAN')
-    put(name, '/run/ts/DEBIAN/control', 'Package: tailscale\nVersion: 0.0.0\nArchitecture: all\nMaintainer: Stand\nDescription: fixture\n')
-    inside(name, 'dpkg-deb', '--build', '/run/ts', '/run/tailscale.deb')
-    inside(name, 'dpkg', '-i', '/run/tailscale.deb')
-    put(name, '/etc/systemd/system/tailscaled.service', '[Service]\nExecStart=/bin/sleep infinity\n[Install]\nWantedBy=multi-user.target\n', '644')
-    inside(name, 'systemctl', 'daemon-reload')
     profile = home / 'profile.json'
     profile.write_text(json.dumps(dict(sshExecutable='/usr/bin/ssh', serverAddress=address, login='remoteagents',
                                       keyPath=str(temp / 'key'), knownHostsPath=str(known), configPath=str(sshconf),
@@ -208,7 +198,6 @@ verb 3
                                 exitIp='8.8.8.8', checkUrl='https://11.123.45.67:8443', ipv6='block'),
                   lan=[dict(name='clinic', kind='openvpn', ovpn={'secret': 'clinic-ovpn'}, auth={'secret': 'clinic-auth'},
                             serverFingerprint=pin, subnets=['10.123.0.0/24'], directEndpoint=True, testHost='10.123.0.1', testPort=1194)],
-                  tailscale=dict(enabled=True, userspace=True, authKey={'secret': 'ts-auth'}, hostname='fixture'),
                   telegramGateway=dict(enabled=True, port=8444), agent=dict(sudo='full'),
                   serverComponents=dict(disk=dict(enabled=True, discoveryIntervalSec=2), bridge=dict(enabled=True)),
                   ssh=dict(keepaliveIntervalSec=30, keepaliveCountMax=3),
@@ -216,7 +205,7 @@ verb 3
                   agents=dict(codex=dict(enabled=True, version='0.166.0', auth={'secret': 'codex-auth'}),
                               claude=dict(enabled=True, channel='stable', token={'secret': 'claude-token'})))
     values = {'proxy-pass': 'PROXY_SENTINEL', 'clinic-ovpn': profile, 'clinic-auth': json.dumps(dict(username='fixture', password='LAN_SENTINEL')),
-              'ts-auth': 'TS_SENTINEL', 'server-inbounds': json.dumps([dict(type='mixed', tag='probe443', listen='0.0.0.0', listen_port=443),
+              'unused-auth': 'TS_SENTINEL', 'server-inbounds': json.dumps([dict(type='mixed', tag='probe443', listen='0.0.0.0', listen_port=443),
                                                                    dict(type='mixed', tag='channel-probe', listen='0.0.0.0', listen_port=37091)])}
     values.update({'codex-auth': json.dumps({'OPENAI_API_KEY': 'CODEX_FIXTURE_SENTINEL'}), 'claude-token': 'CLAUDE_FIXTURE_SENTINEL'})
     print('Applying one CRLF config through the production PowerShell engine...', flush=True)
@@ -232,7 +221,7 @@ verb 3
                     detail = detail.replace(secret, '<redacted>')
                 print('INSTALLER DIAGNOSTIC ' + kind + ' rc=' + str(diagnostic.returncode) + ': ' + detail, flush=True)
     assert first['ok'], first
-    print('PASS: clean VPS, real TUN/OpenVPN/new SSH/Telegram, mock Tailscale; actions=' + str(len(first['actions'])), flush=True)
+    print('PASS: clean VPS, real TUN/OpenVPN/new SSH/Telegram; actions=' + str(len(first['actions'])), flush=True)
     config['serverComponents']['happier'] = dict(enabled=True, version='0.2.17', channel='stable')
     waiting = engine(home, config, values)
     assert not waiting['ok'] and any(r['part'] == 'happier' and r['state'] == 'waiting' and 'нужен вход' in r['summary'] for r in waiting['parts']), waiting
@@ -334,7 +323,7 @@ verb 3
          hostKeys=[' '.join(inside(target, 'cat', '/etc/ssh/ssh_host_ed25519_key.pub').stdout.split()[:2])], stateDir='/run/export-state')), '644')
     exported = json.loads(inside(target, 'python3', '-I', '/src/server/remoteagents_config.py', '--config', '/run/export.json',
                                  'export', '--name', 'Clone', '--happier', 'new:Fixture').stdout)
-    for key in ('serverNetwork', 'proxyOut', 'lan', 'tailscale', 'telegramGateway'):
+    for key in ('serverNetwork', 'proxyOut', 'lan', 'telegramGateway'):
         assert {k: v for k, v in exported[key].items() if k != 'identity'} == config[key] if isinstance(config[key], dict) else exported[key] == config[key]
     assert exported['secrets']['clinic-ovpn'] == ''
     print('PASS: config export includes all server sections and separate named secret slots', flush=True)

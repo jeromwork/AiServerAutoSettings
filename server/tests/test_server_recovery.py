@@ -57,13 +57,12 @@ class RecoveryTests(unittest.TestCase):
         self.assertFalse(result['ok'])
 
     def test_rotated_secret_updates_backup_even_when_service_needs_no_change(self):
-        self.c['tailscale'] = dict(enabled=False, authKey={'secret': 'tailscale-auth-key'})
         self.install()
-        values = dict(VALUES, **{'tailscale-auth-key': 'ROTATED_SENTINEL'})
+        values = dict(VALUES, **{'proxy-out-password': 'ROTATED_SENTINEL'})
         plan = self.f.engine(self.c, values).run('plan')
         self.assertEqual(next(r['state'] for r in plan['parts'] if r['part'] == 'recovery'), 'change')
         self.assertTrue(self.f.engine(self.c, values).run('apply')['ok'])
-        self.assertEqual(self.f.read(recovery.ENVELOPE)['secrets']['tailscale-auth-key'], 'ROTATED_SENTINEL')
+        self.assertEqual(self.f.read(recovery.ENVELOPE)['secrets']['proxy-out-password'], 'ROTATED_SENTINEL')
         self.assertEqual(self.f.engine(self.c, values).run('apply')['actions'], [])
         self.assertNotIn('ROTATED_SENTINEL', json.dumps(plan))
 
@@ -182,12 +181,6 @@ class RecoveryTests(unittest.TestCase):
             r = self.f.engine(self.c).run(verb)
             self.assertFalse(r['ok']); self.assertEqual(r['actions'], [])
             self.assertIn('ещё не поддерживается', r['parts'][0]['summary'])
-
-    def test_server_tailscale_cannot_enable_kernel_networking(self):
-        self.c['tailscale'] = dict(enabled=True, userspace=False)
-        with self.assertRaises(app.Error):
-            app.validate(self.c)
-
 
 if __name__ == '__main__':
     unittest.main()

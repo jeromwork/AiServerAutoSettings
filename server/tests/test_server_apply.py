@@ -30,9 +30,9 @@ PROFILE_PRIVATE_SENTINEL
 </key>
 auth-user-pass
 '''
-AUTH_USER, AUTH_PASS, TS_KEY, PROXY_PASS = 'LAN_LOGIN_SENTINEL', 'LAN_PASSWORD_SENTINEL', 'TS_KEY_SENTINEL', 'PROXY_PASSWORD_SENTINEL'
+AUTH_USER, AUTH_PASS, PRIVATE_MARKER, PROXY_PASS = 'LAN_LOGIN_SENTINEL', 'LAN_PASSWORD_SENTINEL', 'PRIVATE_OUTPUT_SENTINEL', 'PROXY_PASSWORD_SENTINEL'
 VALUES = {'lan-office-ovpn': PROFILE, 'lan-office-auth': json.dumps({'username': AUTH_USER, 'password': AUTH_PASS}),
-          'tailscale-auth-key': TS_KEY, 'proxy-out-password': PROXY_PASS}
+          'proxy-out-password': PROXY_PASS}
 
 
 def config():
@@ -42,7 +42,7 @@ def config():
             'lan': [{'name': 'office', 'kind': 'openvpn', 'ovpn': {'secret': 'lan-office-ovpn'},
                      'auth': {'secret': 'lan-office-auth'}, 'host': '10.123.0.1', 'port': 443,
                      'subnets': ['192.168.87.0/24'], 'directEndpoint': True, 'serverFingerprint': PIN}],
-            'tailscale': {'enabled': True, 'hostname': 'node', 'authKey': {'secret': 'tailscale-auth-key'}},
+            'tailscale': {},  # Legacy input retained for migration and shared fixtures.
             'telegramGateway': {'enabled': True, 'port': 8444}, 'agent': {'sudo': 'apply'}}
 
 
@@ -59,10 +59,7 @@ class Fake:
         self.iface = 'enp1s0'
         self.repair = True
         self.exit = '8.8.8.8'
-        self.logged = False
         self.prefs = {}
-        self.defaults_at_install = None
-        self.ts_installed = False
         self.tg = False
         self.fail = None
         self.write('/etc/os-release', 'ID=debian\nVERSION_CODENAME=bookworm\n')
@@ -89,7 +86,7 @@ class Fake:
         self.calls.append(args)
         out, code = '', 0
         if self.fail and self.fail in args:
-            return subprocess.CompletedProcess(args, 1, AUTH_PASS, TS_KEY)
+            return subprocess.CompletedProcess(args, 1, AUTH_PASS, PRIVATE_MARKER)
         if args[0] == 'jq':
             out = json.dumps({'final': self.sb.get('route', {}).get('final'), 'tun': self.sb.get('inbounds', []),
                               'proxy': [{k: v for k, v in o.items() if k in ('type', 'server', 'server_port')} for o in self.sb['outbounds'] if o.get('tag') == 'proxy-out']})
@@ -142,23 +139,6 @@ class Fake:
                 Path(args[args.index('--output') + 1]).write_bytes(b'OFFICIAL_REPOSITORY_FIXTURE')
             else:
                 out = self.exit + '\r\n'
-        elif args[:2] == ['tailscale', 'status']:
-            out = json.dumps({'BackendState': 'Running' if self.logged else 'NeedsLogin', 'Self': {'HostName': 'node'}})
-        elif args[:3] == ['tailscale', 'debug', 'prefs']:
-            out = json.dumps(self.prefs)
-        elif args[:2] == ['tailscale', 'set'] and '--advertise-routes=' in args:
-            self.prefs = {}
-        elif args[:2] == ['tailscale', 'up']:
-            auth = next(a for a in args if a.startswith('--auth-key=file:'))
-            if Path(auth.split('file:', 1)[1]).read_text() != TS_KEY:
-                code = 1
-            self.logged = True
-            out = TS_KEY  # A malicious child output must never be forwarded.
-        elif args[0] == 'dpkg-query':
-            out, code = ('install ok installed', 0) if args[-1] != 'tailscale' or self.ts_installed else ('', 1)
-        elif args[:2] == ['apt-get', 'install'] and 'tailscale' in args:
-            self.defaults_at_install = self.path('/etc/default/tailscaled').read_text()
-            self.ts_installed = True
         elif args[0] == 'runuser':
             if any(str(a).endswith('component_files.py') for a in args):
                 import subprocess as sp
@@ -253,7 +233,7 @@ class ApplyTests(unittest.TestCase):
         for p in f.root.rglob('*'):
             if p.is_file() and ('log' in str(p) or 'remoteagents-status' in str(p)):
                 captured += p.read_text()
-        for secret in (AUTH_USER, AUTH_PASS, TS_KEY, PROXY_PASS, PROFILE, 'PROFILE_PRIVATE_SENTINEL'):
+        for secret in (AUTH_USER, AUTH_PASS, PRIVATE_MARKER, PROXY_PASS, PROFILE, 'PROFILE_PRIVATE_SENTINEL'):
             self.assertNotIn(secret, captured)
         self.assertFalse(list(f.path('/run/remoteagents-server-apply').glob('*')))
         for p in f.path('/usr/local/lib/remoteagents/server').rglob('*'):
@@ -476,14 +456,13 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(next(r for r in result['parts'] if r['part'] == 'lan:office')['state'], 'change')
         self.assertNotIn('NEW_PRIVATE_PASSWORD', json.dumps(result))
 
-    def test_missing_lan_secret_does_not_block_tailscale_or_sudo(self):
+    def test_missing_lan_secret_does_not_block_sudo(self):
         f = self.fake
         values = dict(VALUES)
         del values['lan-office-ovpn']
         result = f.engine(values=values, ssh_checked=True).run('apply')
         row = next(r for r in result['parts'] if r['part'] == 'lan:office')
         self.assertEqual(row['missing'], ['lan-office-ovpn'])
-        self.assertTrue(f.logged)
         self.assertTrue(f.path('/etc/sudoers.d/91-remoteagents-apply').exists())
 
     def test_public_export_does_not_claim_private_profile_hash_was_checked(self):
@@ -501,7 +480,7 @@ class ApplyTests(unittest.TestCase):
         result = f.complete()
         self.assertEqual(next(r for r in result['parts'] if r['part'] == 'telegramGateway')['state'], 'error')
         self.assertTrue(f.path('/etc/sudoers.d/91-remoteagents-apply').exists())
-        for secret in (AUTH_PASS, TS_KEY):
+        for secret in (AUTH_PASS, PRIVATE_MARKER):
             self.assertNotIn(secret, json.dumps(result))
 
     def test_no_ssh_ack_keeps_rollback_then_confirm_on_next_call(self):
@@ -548,35 +527,7 @@ class ApplyTests(unittest.TestCase):
         self.assertTrue(any('-4' in c and 'get' in c for c in f.calls))
         self.assertTrue(any('-6' in c and 'get' in c for c in f.calls))
 
-    def test_userspace_before_package_and_no_advertised_subnets(self):
-        f = self.fake
-        self.assertTrue(f.complete()['ok'])
-        self.assertIn('FLAGS="--tun=userspace-networking"', f.path('/etc/default/tailscaled').read_text())
-        self.assertIn('FLAGS="--tun=userspace-networking"', f.defaults_at_install)
-        f.write('/etc/default/tailscaled', 'FLAGS="--tun=userspace-networking --tun=tailscale0"\n')
-        repaired = f.engine(ssh_checked=True).run('apply')
-        self.assertTrue(repaired['ok'], repaired)
-        self.assertIn('FLAGS="--tun=userspace-networking"', f.path('/etc/default/tailscaled').read_text())
-        self.assertIn(['systemctl', 'restart', 'tailscaled'], f.calls)
-        up = next(c for c in f.calls if c[:2] == ['tailscale', 'up'])
-        self.assertIn('--accept-routes=false', up)
-        self.assertIn('--accept-dns=false', up)
-        self.assertFalse(any('advertise' in a for c in f.calls for a in c))
-        self.assertNotIn(TS_KEY, json.dumps(f.calls))
-        f.calls.clear()
-        f.engine(ssh_checked=True).run('apply')
-        self.assertFalse(any(c[:2] == ['tailscale', 'up'] for c in f.calls))
 
-    def test_existing_tailscale_route_advertisements_are_removed_without_up(self):
-        f = self.fake
-        self.assertTrue(f.complete()['ok'])
-        f.prefs = {'AdvertiseRoutes': ['10.0.0.0/8'], 'ExitNodeIP': '100.64.0.2', 'RouteAll': True}
-        f.calls.clear()
-        result = f.engine(ssh_checked=True).run('apply')
-        self.assertTrue(result['ok'], result)
-        self.assertEqual(f.prefs, {})
-        self.assertFalse(any(c[:2] == ['tailscale', 'up'] for c in f.calls))
-        self.assertTrue(any('--advertise-routes=' in c and '--advertise-exit-node=false' in c for c in f.calls))
 
     def test_watch_repair_and_loud_persistent_failure(self):
         f = self.fake
@@ -628,21 +579,17 @@ class ApplyTests(unittest.TestCase):
         self.assertIn('не сравнены', row['summary'])
         self.assertEqual(result['actions'], [])
 
-    def test_migration_preserves_state_and_refuses_overwrite(self):
-        f = self.fake
-        source = f.root / 'synthetic-state'
-        source.mkdir()
-        (source / 'tailscaled.state').write_text('SYNTHETIC_NODE_ID_AND_PRIVATE_KEY')
-        app.tailscale_migrate(f.system, source, 'worker')
-        dest = f.path('/var/lib/tailscale/tailscaled.state')
-        self.assertEqual(dest.read_text(), 'SYNTHETIC_NODE_ID_AND_PRIVATE_KEY')
-        self.assertEqual(dest.stat().st_mode & 0o777, 0o600)
-        self.assertTrue(any('ts-test.service' in c and '--now' in c for c in f.calls))
-        with self.assertRaises(app.Error):
-            app.tailscale_migrate(f.system, source, 'worker')
 
 
 class InputTests(unittest.TestCase):
+    def test_legacy_tailscale_is_ignored(self):
+        cfg = config()
+        cfg['tailscale'] = {'enabled': True, 'userspace': False, 'authKey': {'secret': 'old-key'}}
+        parsed, values = app.read_input('-', io.StringIO(json.dumps(cfg)))
+        self.assertNotIn('tailscale', parsed)
+        self.assertEqual(values, {})
+        self.assertNotIn('tailscale', app.Engine(cfg).config)
+
     def test_full_export_crlf_and_marker_relay(self):
         cfg = config(); cfg['secrets'] = VALUES
         text = json.dumps(cfg, ensure_ascii=False, indent=2).replace('\n', '\r\n')
@@ -666,7 +613,7 @@ class InputTests(unittest.TestCase):
     def test_invalid_inputs_are_rejected_without_secret_context(self):
         for text in ('{"kind":"remoteagents-config","schema":1,"schema":1}',
                      '{"kind":"remoteagents-config","schema":1,"agent":{"sudo":"bad"}}',
-                     '{"kind":"remoteagents-config","schema":1,"tailscale":{"advertiseRoutes":["10.0.0.0/8"]}}'):
+                     '{"kind":"remoteagents-config","schema":1,"unknown":true}'):
             with self.subTest(text=text), self.assertRaises(app.Error):
                 app.read_input('-', io.StringIO(text))
         app.validate(config())
@@ -679,7 +626,6 @@ class InputTests(unittest.TestCase):
             result = subprocess.run(['bash', str(path / 'server-apply.sh'), '--help'], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0)
             self.assertNotIn('UNTRUSTED_CODE_SENTINEL', result.stdout + result.stderr)
-            self.assertIn('tailscale-migrate', result.stdout)
 
     def test_limited_sudo_cannot_grant_full_rights(self):
         cfg = config(); cfg['agent']['sudo'] = 'full'
@@ -689,8 +635,6 @@ class InputTests(unittest.TestCase):
                  patch.dict(os.environ, {'SUDO_USER': 'worker'}):
                 with self.assertRaises(app.Error):
                     app.main(['apply', '--config', str(path)])
-                with self.assertRaises(app.Error):
-                    app.main(['tailscale-migrate', '--from', root, '--user', 'worker'])
 
     def test_ca_pin_is_proposed_but_never_accepted(self):
         with tempfile.TemporaryDirectory() as root:

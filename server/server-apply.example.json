@@ -49,14 +49,6 @@
       }
     }
   ],
-  "tailscale": {
-    "enabled": true,
-    "hostname": "remoteagents-server",
-    "authKey": {
-      "secret": "tailscale-auth-key"
-    },
-    "userspace": true
-  },
   "telegramGateway": {
     "enabled": true,
     "port": 8444

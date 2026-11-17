@@ -1,12 +1,61 @@
 {
   "kind": "remoteagents-config",
   "schema": 1,
-  "server": {"address": "192.0.2.10", "login": "root", "rootPassword": {"secret": "server-root-password"}},
-  "serverNetwork": {"enabled": true, "tunAddress": "172.30.250.1/30", "inboundPorts": [22, 443, 37091], "inbounds": {"secret": "server-inbounds"}},
-  "proxyOut": {"type": "socks", "server": "198.51.100.20", "port": 1080, "login": "replace-me", "password": {"secret": "proxy-out-password"}, "exitIp": "198.51.100.20", "checkUrl": "https://ip.example.invalid/", "ipv6": "block"},
-  "lan": [{"name": "clinic", "kind": "openvpn", "ovpn": {"secret": "clinic-ovpn"}, "auth": {"secret": "clinic-auth"}, "subnets": ["192.168.87.0/24"], "directEndpoint": true, "testHost": "192.168.87.1", "testPort": 443}],
-  "tailscale": {"enabled": true, "userspace": true, "authKey": {"secret": "tailscale-auth-key"}},
-  "telegramGateway": {"enabled": true, "port": 8444},
-  "agent": {"sudo": "apply"},
+  "server": {
+    "address": "192.0.2.10",
+    "login": "root",
+    "rootPassword": {
+      "secret": "server-root-password"
+    }
+  },
+  "serverNetwork": {
+    "enabled": true,
+    "tunAddress": "172.30.250.1/30",
+    "inboundPorts": [
+      22,
+      443,
+      37091
+    ],
+    "inbounds": {
+      "secret": "server-inbounds"
+    }
+  },
+  "proxyOut": {
+    "type": "socks",
+    "server": "198.51.100.20",
+    "port": 1080,
+    "login": "replace-me",
+    "password": {
+      "secret": "proxy-out-password"
+    },
+    "exitIp": "198.51.100.20",
+    "checkUrl": "https://ip.example.invalid/",
+    "ipv6": "block"
+  },
+  "lan": [
+    {
+      "name": "clinic",
+      "kind": "openvpn",
+      "ovpn": {
+        "secret": "clinic-ovpn"
+      },
+      "auth": {
+        "secret": "clinic-auth"
+      },
+      "subnets": [
+        "192.168.87.0/24"
+      ],
+      "directEndpoint": true,
+      "testHost": "192.168.87.1",
+      "testPort": 443
+    }
+  ],
+  "telegramGateway": {
+    "enabled": true,
+    "port": 8444
+  },
+  "agent": {
+    "sudo": "apply"
+  },
   "hint": "Замените все примерные адреса своими. Для CA без keyUsage добавьте сверенный serverFingerprint. Секрет server-inbounds должен описать реальные входы 443 и порта канала."
 }

@@ -38,7 +38,7 @@ $sshBase=@(Get-TransportSshArguments $prof (Get-TransportServerPort $prof) -UseR
 $fwdBase=$sshBase
 $key=$prof.keyPath
 $wifi=$null
-try{$r=Find-NetRoute -RemoteIPAddress $server -ErrorAction Stop|Select-Object -First 1;$def=Get-NetRoute -DestinationPrefix '0.0.0.0/0'|Sort-Object {$_.RouteMetric+(Get-NetIPInterface -InterfaceIndex $_.InterfaceIndex -AddressFamily IPv4).InterfaceMetric}|Where-Object {(Get-NetAdapter -InterfaceIndex $_.InterfaceIndex).InterfaceDescription -notmatch 'TUN|Tunnel|TAP|Wintun|OpenVPN|Tailscale|Hyper-V'}|Select-Object -First 1;$wifi=(Get-NetIPAddress -InterfaceIndex $def.InterfaceIndex -AddressFamily IPv4|Select-Object -First 1).IPAddress}catch{}
+try{$r=Find-NetRoute -RemoteIPAddress $server -ErrorAction Stop|Select-Object -First 1;$def=Get-NetRoute -DestinationPrefix '0.0.0.0/0'|Sort-Object {$_.RouteMetric+(Get-NetIPInterface -InterfaceIndex $_.InterfaceIndex -AddressFamily IPv4).InterfaceMetric}|Where-Object {(Get-NetAdapter -InterfaceIndex $_.InterfaceIndex).InterfaceDescription -notmatch 'TUN|Tunnel|TAP|Wintun|OpenVPN|Hyper-V'}|Select-Object -First 1;$wifi=(Get-NetIPAddress -InterfaceIndex $def.InterfaceIndex -AddressFamily IPv4|Select-Object -First 1).IPAddress}catch{}
 
 # Пути через sing-box: исходящие берутся из действующего канала, ретрансляторы и прыжки добавляются.
 $channel=Read-TransportJson ([string]$settings.channelPath)

@@ -92,7 +92,6 @@ wait_for_memory
   timeout 60 python3 "$repo/transport/test-vpn-lifecycle.py"
   wait_for_memory
   wait_for_memory
-  timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-tailscale.ps1" < /dev/null
   wait_for_memory
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-json.ps1" < /dev/null
   wait_for_memory

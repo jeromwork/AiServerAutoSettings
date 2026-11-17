@@ -153,7 +153,7 @@ namespace RemoteAgents.Launcher
                 "serverNetwork", O(D("enabled", B(), "tunAddress", S(18, 1), "tunName", S(15, 1, "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,14}$"),
                     "inbounds", Ref(), "inboundPorts", A(N(1, 65535), 32))),
                 "lan", A(LanSchema(), 64),
-                "tailscale", O(D("enabled", B(), "hostname", S(63, 1, "^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$"), "authKey", Ref("tailscale-auth-key"), "userspace", B())),
+                "tailscale", Earlier(D(), "Прежнее поле: принимается, игнорируется и не экспортируется"),
                 "telegramGateway", O(D("enabled", B(), "port", N(1, 65535), "identity", Ref())),
                 "serverComponents", O(D(
                     "disk", O(D("enabled", B(), "identity", Ref(), "discoveryIntervalSec", N(2, 60))),
@@ -194,6 +194,7 @@ namespace RemoteAgents.Launcher
             if (root.ContainsKey("proxyOut") && !exit.ContainsKey("ipv6")) exit["ipv6"] = "block";
             var p = new ParsedConfig { Profile = new Dictionary<string, object>(root), Secrets = new Dictionary<string, string>(StringComparer.Ordinal), Protection = new Dictionary<string, object>() };
             p.Profile.Remove("secrets");
+            p.Profile.Remove("tailscale"); // Migration of previous configurations.
             var secrets = Json.Map(Json.Get(root, "secrets"));
             p.Locked = secrets.ContainsKey("protected");
             foreach (var pair in secrets) {
@@ -297,8 +298,6 @@ namespace RemoteAgents.Launcher
                 string kind = Json.Str(row, "kind");
                 if ((kind != "proxy" && row.ContainsKey("proxy")) || (kind != "hop" && row.ContainsKey("hop"))) throw Bad("Поля маршрута не соответствуют kind");
             }
-            var tail = Json.Map(Json.Get(profile, "tailscale"));
-            if (tail.ContainsKey("userspace") && !Json.Bool(tail, "userspace")) throw Bad("Tailscale сервера поддерживает только userspace без маршрутов");
             // disk.folders: names of server folders (top level in ~/Disk), each with an optional absolute path on this computer.
             // Earlier formats (nested paths, directions, «external») are read and ignored by DiskChoice, never refused here.
             var choice = DiskChoice.FromProfile(profile);
@@ -371,7 +370,6 @@ namespace RemoteAgents.Launcher
                     else if (path == "lan[].auth") standard = "lan-network-auth";
                     else if (path == "lan[].ovpn") standard = "lan-network-ovpn";
                     else if (path == "lan[].password") standard = "lan-network-password";
-                    else if (path == "tailscale.authKey") standard = "tailscale-auth-key";
                     else if (path == "vpn.bootstrap.channel") standard = "vpn-channel";
                     if (!hints.ContainsKey(name) || custom.Length > 0) hints[name] = custom.Length > 0 ? custom : StandardHint(standard);
                 } else foreach (var pair in map) ReferenceHints(pair.Value,path.Length == 0 ? pair.Key : path + "." + pair.Key,hints);
@@ -391,7 +389,6 @@ namespace RemoteAgents.Launcher
                 case "hop-password": return "Пароль SSH промежуточного сервера";
                 case "route-proxy-password":
                 case "proxy-out-password": return "Пароль серверного прокси, выданный его владельцем";
-                case "tailscale-auth-key": return "Ключ входа Tailscale из панели администратора; используется только для первого входа узла";
                 case "vpn-channel": return "JSON канала связи с сервера";
                 default: return "Введите секрет «" + name + "» в этом окне. Он не попадёт в чат или журнал";
             }
