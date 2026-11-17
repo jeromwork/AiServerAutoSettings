@@ -6,7 +6,7 @@ param(
  [Parameter(Mandatory=$true,ParameterSetName='Compare')][string[]]$Compare,
  [ValidateRange(1,168)][int]$EventHours=2,
  [string[]]$ProbeNames=@(), [string[]]$ProbeUrls=@(),
- # Injection seam: command name -> script text; inherited by every isolated job.
+ # Injection seam: command name -> script text; installed in each in-process runspace.
  [hashtable]$Executors=@{},
  [ValidateRange(1,10)][int]$PartTimeout=10
 )
@@ -43,10 +43,9 @@ if ($Label -match '[<>:"/\\|?*\x00-\x1f]' -or $Label -in @('.','..')) {throw 'Н
 $directory=Join-Path $Out ((Get-Date -Format 'yyyyMMdd-HHmmss')+'-'+$Label)
 if(Test-Path -LiteralPath $directory) {throw 'Папка снимка уже существует'}
 $null=New-Item -ItemType Directory -Path $directory
-# All collectors run concurrently. No network/system setting commands are used.
-$worker={param($Part,$NetHome,$Hours,$Names,$Urls,$Overrides)
+# Collectors reuse one in-process runspace sequentially. No settings are changed.
+$worker={param($Part,$NetHome,$Hours,$Names,$Urls,$Probe)
  $ErrorActionPreference='Stop'
- foreach($key in $Overrides.Keys) {Set-Item -Path ('Function:'+ $key) -Value ([scriptblock]::Create([string]$Overrides[$key]))}
  $pattern='openvpn|wireguard|happ|xray|v2ray|sing-box|clash|nekoray|hiddify|amnezia|outline|wintun|RemoteAgents'
  function Safe($s) {
   $s=[string]$s
@@ -95,7 +94,7 @@ $worker={param($Part,$NetHome,$Hours,$Names,$Urls,$Overrides)
   Show 'config lan/vpn' {$c=Read-Config; Sanitize-Config ([pscustomobject]@{lan=$c.lan;vpn=$c.vpn}) | ConvertTo-Json -Depth 50}
  }
  'checks' {
-  # Each probe has its own isolated 5-second deadline; outer collector is capped at 10s.
+  # Return probe specifications; the coordinator runs them in the same warm runspace.
   $tasks=New-Object Collections.Generic.List[object]
   function Probe($title,$code,$values) {$tasks.Add(@($title,$code,$values))}
   Probe 'internet TCP' 'Test-NetConnection 1.1.1.1 -Port 443 -InformationLevel Quiet' @()
@@ -119,41 +118,125 @@ $worker={param($Part,$NetHome,$Hours,$Names,$Urls,$Overrides)
    }
   }
   foreach($url in $Urls){Probe "HTTP $(Safe $url)" 'param($u) curl.exe -sS -o NUL -w "%{http_code} %{time_total}" --max-time 5 $u' @($url)}
-  $jobs=@();try {
-   foreach($t in $tasks) {
-    $j=Start-Job -ScriptBlock {param($code,$vals,$ov)
-     $ErrorActionPreference='Stop';foreach($k in $ov.Keys){Set-Item ('Function:'+$k) ([scriptblock]::Create([string]$ov[$k]))}
-     $global:LASTEXITCODE=0; & ([scriptblock]::Create($code)) @vals; if($LASTEXITCODE -ne 0){throw 'Probe command failed'}
-    } -ArgumentList $t[1],$t[2],$Overrides
-    $jobs+=@{Job=$j;Title=$t[0];Started=[DateTime]::UtcNow}
-   }
-   foreach($t in $jobs) {
-    $remaining=[Math]::Max(0,5-([DateTime]::UtcNow-$t.Started).TotalSeconds)
-    if($t.Job.State -eq 'Completed' -or ($remaining -gt 0 -and (Wait-Job $t.Job -Timeout ([Math]::Ceiling($remaining))))) {
-     Show $t.Title {$r=@(Receive-Job $t.Job -ErrorAction Stop);if($r.Count -eq 1 -and $r[0] -is [bool]) {if($r[0]){'PASS'}else{'FAIL'}}else{'PASS (команда завершена; результат ниже)';$r}}
-    } else {"TIMEOUT: $($t.Title)"}
-   }
-  } finally {foreach($t in $jobs){Remove-Job $t.Job -Force -ErrorAction SilentlyContinue}}
+  $tasks.ToArray()
+ }
+ 'probe' {
+  Show $Probe[0] {
+   $global:LASTEXITCODE=0
+   $values=$Probe[2]
+   $r=@(& ([scriptblock]::Create([string]$Probe[1])) @values)
+   if($LASTEXITCODE -ne 0){throw 'Probe command failed'}
+   if($r.Count -eq 1 -and $r[0] -is [bool]) {if($r[0]){'PASS'}else{'FAIL'}}
+   else {'PASS (команда завершена; результат ниже)';$r}
+  }
  }
  }
 }
 $parts=@('system','adapters','ip','routes','dns','proxy','vpn-processes','vpn-services','firewall','events','remoteagents','checks')
-$jobs=@();$summary=New-Object Collections.Generic.List[string];$clock=[Diagnostics.Stopwatch]::StartNew()
+$summary=New-Object Collections.Generic.List[string]
+$clock=[Diagnostics.Stopwatch]::StartNew()
+# Reserve five seconds for writing the final files. All waits share this deadline.
+$collectionDeadline=85.0
+$pool=$null
+$retired=New-Object Collections.Generic.List[object]
+function Wait-Until($Async,[double]$Deadline) {
+ $milliseconds=[Math]::Max(0,[Math]::Floor(($Deadline-$clock.Elapsed.TotalSeconds)*1000))
+ $Async.IsCompleted -or $Async.AsyncWaitHandle.WaitOne([int]$milliseconds)
+}
+function Close-CollectorPool {
+ if($null -ne $script:pool) {
+  $old=$script:pool;$script:pool=$null
+  # Close/Stop/Dispose may block on a native cmdlet. Never wait synchronously here.
+  $closing=$old.BeginClose($null,$null)
+  $retired.Add(@{Pool=$old;Closing=$closing})
+ }
+}
+function Invoke-CollectorPipeline($Code,$Values,[double]$Deadline) {
+ $ps=[Management.Automation.PowerShell]::Create()
+ $ps.RunspacePool=$script:pool
+ $null=$ps.AddScript([string]$Code)
+ foreach($value in $Values){$null=$ps.AddArgument($value)}
+ $async=$null
+ try {
+  $async=$ps.BeginInvoke()
+  if(!(Wait-Until $async $Deadline)) {
+   $stopping=$ps.BeginStop($null,$null)
+   $retired.Add(@{PowerShell=$ps;Invocation=$async;Stopping=$stopping})
+   $ps=$null
+   Close-CollectorPool
+   return @{TimedOut=$true;Lines=@()}
+  }
+  $lines=@($ps.EndInvoke($async))
+  return @{TimedOut=$false;Lines=$lines}
+ } finally {if($null -ne $ps){$ps.Dispose()}}
+}
+function Open-CollectorPool([double]$Deadline) {
+ if($null -ne $script:pool){return $true}
+ if($clock.Elapsed.TotalSeconds -ge $Deadline){return $false}
+ $state=[Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+ foreach($key in $Executors.Keys) {
+  $entry=New-Object Management.Automation.Runspaces.SessionStateFunctionEntry($key,[string]$Executors[$key])
+  $state.Commands.Add($entry)
+ }
+ $script:pool=[Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1,1,$state,$Host)
+ $opening=$script:pool.BeginOpen($null,$null)
+ if(!(Wait-Until $opening $Deadline)){Close-CollectorPool;return $false}
+ $script:pool.EndOpen($opening)
+ # Import once before timing individual sections, not once per command/job.
+ # A timed-out runspace is replaced; its replacement must also be initialized.
+ if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -or $Executors.ContainsKey('Import-Module')) {
+  $init=Invoke-CollectorPipeline {
+   Import-Module NetAdapter,NetTCPIP,DnsClient,NetSecurity,CimCmdlets,Microsoft.PowerShell.Diagnostics -ErrorAction SilentlyContinue
+  } @() $Deadline
+  return (!$init.TimedOut)
+ }
+ return $true
+}
 try {
+ $ready=Open-CollectorPool $collectionDeadline
  foreach($part in $parts) {
-  $job=Start-Job -ScriptBlock $worker -ArgumentList $part,$NetHome,$EventHours,$ProbeNames,$ProbeUrls,$Executors
-  $jobs+=@{Part=$part;Job=$job;Started=$clock.Elapsed.TotalSeconds}
+  $lines=@();$timedOut=$true
+  if($ready -and $clock.Elapsed.TotalSeconds -lt $collectionDeadline) {
+   $deadline=[Math]::Min($clock.Elapsed.TotalSeconds+$PartTimeout,$collectionDeadline)
+   try {
+    $result=Invoke-CollectorPipeline $worker @($part,$NetHome,$EventHours,$ProbeNames,$ProbeUrls,$null) $deadline
+    $timedOut=$result.TimedOut
+    if(!$timedOut -and $part -eq 'checks') {
+     foreach($probe in $result.Lines) {
+      if($clock.Elapsed.TotalSeconds -ge $deadline){$timedOut=$true;break}
+      $probeDeadline=[Math]::Min($clock.Elapsed.TotalSeconds+5,$deadline)
+      $resultProbe=Invoke-CollectorPipeline $worker @('probe',$NetHome,$EventHours,$ProbeNames,$ProbeUrls,$probe) $probeDeadline
+      if($resultProbe.TimedOut) {
+       $lines+=('TIMEOUT: '+$probe[0])
+       # Only a probe hit its own deadline: continue with a fresh runspace.
+       if($clock.Elapsed.TotalSeconds -ge $deadline -or !(Open-CollectorPool $deadline)){$timedOut=$true;break}
+      } else {$lines+=@($resultProbe.Lines | ForEach-Object {[string]$_})}
+     }
+    } elseif(!$timedOut) {$lines=@($result.Lines | ForEach-Object {[string]$_})}
+   } catch {$timedOut=$false;$lines=@('не собрано: '+$part+' ('+$_.Exception.GetType().Name+')')}
+  }
+  if($timedOut) {$lines=@('TIMEOUT: '+$part);$summary.Add('TIMEOUT: '+$part)}
+  else {
+   $summary.Add($part+': собрано')
+   foreach($line in $lines){foreach($entry in ($line -split "`r?`n")){if($entry -match 'нет прав:|не собрано:|TIMEOUT|PASS|FAIL'){$summary.Add($part+': '+$entry)}}}
+  }
+  Write-Text (Join-Path $directory ($part+'.txt')) $lines
+  # Replacement startup is outside the next section's individual time budget.
+  if($part -ne 'checks'){$ready=Open-CollectorPool $collectionDeadline}
  }
- foreach($item in $jobs) {
-  $remaining=[Math]::Min($PartTimeout-($clock.Elapsed.TotalSeconds-$item.Started),85-$clock.Elapsed.TotalSeconds)
-  $lines=@()
-  if($item.Job.State -eq 'Completed' -or ($remaining -gt 0 -and (Wait-Job $item.Job -Timeout ([Math]::Ceiling($remaining))))) {
-   try {$lines=@(Receive-Job $item.Job -ErrorAction Stop | ForEach-Object {[string]$_})}catch{$lines=@('не собрано: '+$item.Part+' ('+$_.Exception.GetType().Name+')')}
-   $summary.Add($item.Part+': собрано')
-   foreach($line in $lines){foreach($entry in ($line -split "`r?`n")){if($entry -match 'нет прав:|не собрано:|TIMEOUT|PASS|FAIL'){$summary.Add($item.Part+': '+$entry)}}}
-  } else {$lines=@('TIMEOUT: '+$item.Part);$summary.Add('TIMEOUT: '+$item.Part)}
-  Write-Text (Join-Path $directory ($item.Part+'.txt')) $lines
+} finally {
+ Close-CollectorPool
+ # Give asynchronous cleanup a small shared grace period, within the 90s budget.
+ $cleanupDeadline=[Math]::Min($clock.Elapsed.TotalSeconds+0.1,89.0)
+ foreach($item in $retired) {
+  if($item.PowerShell -and $item.Invocation.IsCompleted -and $item.Stopping.IsCompleted) {
+   try {$item.PowerShell.EndStop($item.Stopping);$null=$item.PowerShell.EndInvoke($item.Invocation)} catch {}
+   $item.PowerShell.Dispose()
+  }
+  if($item.Pool -and (Wait-Until $item.Closing $cleanupDeadline)) {
+   $item.Pool.EndClose($item.Closing);$item.Pool.Dispose()
+  }
  }
-} finally {foreach($item in $jobs){Remove-Job $item.Job -Force -ErrorAction SilentlyContinue}}
+}
 Write-Text (Join-Path $directory 'summary.txt') $summary
 $directory
