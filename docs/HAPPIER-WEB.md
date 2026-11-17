@@ -67,12 +67,13 @@
   `anthropic-ratelimit-unified-{5h,7d}-{utilization,reset}`, `…-status`, раз в `claudeProbeSec` (по умолчанию 600).
   Запрос тратит ничтожную часть лимита; выключается `quotas.claudeProbe: false`.
 - Codex: `~/.codex/auth.json` (OAuth), `GET https://chatgpt.com/backend-api/wham/usage`, раз в 5 мин.
-- Gemini (Antigravity/`agy`): `~/.gemini/antigravity-cli/antigravity-oauth-token`, `token.access_token`.
-  Раз в 5 мин: `loadCodeAssist` (`metadata.ideType=ANTIGRAVITY`, User-Agent `antigravity`), затем
-  `fetchAvailableModels` с project. Показываются Gemini 3.8, Gemini 4 и image/Nano Banana;
-  `quotaInfo.remainingFraction` преобразуется в занято/остаток, `resetTime` — в местное время браузера.
-  Длительность единственного окна Google не выдумывается. Просроченный токен → «нужен вход»;
-  обновление токена остаётся за `agy`, refresh token опросчик не использует и не переписывает.
+- Gemini (Antigravity/`agy`): облачные методы (`fetchAvailableModels`, `retrieveUserQuota`) для Gemini 3.8 Flash
+  отдают 100% остатка при реальных тратах, поэтому остаток берётся из `/usage` самого agy.
+  `server/agy_usage_scrape.py` (cron, раз в 10 мин) запускает agy в tmux, вводит `/usage`, разбирает проценты
+  «Weekly/Five Hour Limit Remaining» и время сброса и пишет `~/.cache/remoteagents/agy-usage.json` (0600).
+  Опросчик читает этот файл; снимок старше 30 мин → «нет данных», а не 0%. Картинки (Nano Banana) не показываются.
+  Токены agy скрипт не читает и не пишет: вход держит agy (вход не делать через `gemini` CLI с тем же аккаунтом — слетает).
+- Строка показывает ОСТАТОК (100 − занято); жёлтый ≤ 20%, красный ≤ 5%. В JSON `usedPercent` остаётся «занято».
 - В строке каждого окна видно время и дату (`18:40 17.11`); возраст данных остаётся только в подсказке.
 - 429/`Retry-After` — пауза больше; 401/403 — статус «нужен вход», не 0%. Токены не попадают в JSON и журналы.
 - Ответ: `{"schema":1,"accounts":[{"id","provider","label","status","fetchedAt","windows":[{"id","label","usedPercent","resetsAt"}]}]}`.

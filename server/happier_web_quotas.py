@@ -16,9 +16,7 @@ from happier_web_common import atomic, private_dir, read_json
 
 URLS = dict(claude='https://api.anthropic.com/api/oauth/usage',
             probe='https://api.anthropic.com/v1/messages',
-            codex='https://chatgpt.com/backend-api/wham/usage',
-            gemini='https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels',
-            gemini_project='https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist')
+            codex='https://chatgpt.com/backend-api/wham/usage')
 
 
 def iso(value):
@@ -111,39 +109,23 @@ def discover(home, labels=None):
     return list(result.values())
 
 
-def gemini_windows(payload):
-    """Only requested model quotas; do not infer a window length from resetTime."""
-    models = payload.get('models') or {}
-    images = payload.get('imageGenerationModelIds') or []
+def gemini_windows(path, stamp):
+    """Остаток Gemini 3.8 Flash из снимка `/usage` (agy_usage_scrape.py); облачные методы для него неверны."""
+    data = read_json(path, {}) or {}
+    taken = data.get('fetchedAt') if isinstance(data, dict) else None
+    if type(taken) not in (float, int) or stamp - taken > 1800:
+        return []
+    labels = dict(five_hour='5 ч', seven_day='неделя')
     windows = []
-    if not isinstance(models, dict):
-        return windows
-    for ident, model in sorted(models.items()):
-        if not isinstance(model, dict) or not re.fullmatch(r'[a-zA-Z0-9_.()-]{1,120}', ident):
+    for row in ((data.get('groups') or {}).get('gemini') or []):
+        remaining = percent(row.get('remainingPercent'))
+        if not isinstance(row, dict) or row.get('id') not in labels or remaining is None:
             continue
-        label = model.get('displayName') or ident
-        if not isinstance(label, str):
-            continue
-        if not (re.search(r'gemini[- ](?:3[.-]8|4)(?:[- .]|$)', ident + ' ' + label, re.I) or
-                ident in images or re.search(r'(?:gemini.*image|nano[- ]banana)', ident + ' ' + label, re.I)):
-            continue
-        quota = model.get('quotaInfo')
-        if not isinstance(quota, dict):
-            continue
-        label = label[:100]
-        # Current Antigravity responses expose one quotaInfo per model. Retain
-        # explicit 5-hour/weekly observations if the API supplies them as well.
-        entries = [(ident, label, quota)]
-        for key, suffix in [('fiveHour', '5 ч'), ('sevenDay', 'неделя')]:
-            if isinstance(quota.get(key), dict):
-                entries.append((ident + ':' + key, label + ' ' + suffix, quota[key]))
-        for key, title, q in entries:
-            remaining = percent(q.get('remainingFraction'), 100)
-            if remaining is None:
-                continue
-            w = window(key, title, 100 - remaining, q.get('resetTime'))
-            w['remainingPercent'] = remaining
-            windows.append(w)
+        secs = row.get('resetsInSec')
+        reset = taken + secs if type(secs) in (float, int) else None
+        w = window(row['id'], labels[row['id']], 100 - remaining, reset)
+        w['remainingPercent'] = remaining
+        windows.append(w)
     return windows
 
 
@@ -179,6 +161,10 @@ class Poller:
         if probe and not self.options.get('claudeProbe', True):
             row.update(status='disabled', windows=[])
             return row, interval
+        if account['provider'] == 'gemini':
+            row['windows'] = gemini_windows(self.home / '.cache/remoteagents/agy-usage.json', stamp)
+            row.update(status='ok' if row['windows'] else 'unknown', fetchedAt=iso(stamp) if row['windows'] else row['fetchedAt'])
+            return row, interval
         if account.get('expires_at') is not None and account['expires_at'] <= stamp:
             row['status'] = 'auth_required'
             return row, interval
@@ -193,29 +179,6 @@ class Poller:
             headers['ChatGPT-Account-Id'] = account['account_id']
         url = self.urls['probe' if probe else account['provider']]
         try:
-            if account['provider'] == 'gemini':
-                headers['Content-Type'] = 'application/json'
-                headers['User-Agent'] = 'antigravity'
-                project_request = urllib.request.Request(self.urls['gemini_project'],
-                    data=b'{"metadata":{"ideType":"ANTIGRAVITY"}}', headers=headers)
-                try:
-                    with self.opener.open(project_request, timeout=20) as response:
-                        raw = response.read(1024 * 1024 + 1)
-                        if len(raw) > 1024 * 1024:
-                            raise ValueError('project response too large')
-                        project = json.loads(raw).get('cloudaicompanionProject')
-                except urllib.error.HTTPError as error:
-                    row['status'] = 'auth_required' if error.code in (401, 403) else 'error'
-                    delay = interval
-                    if error.code == 429:
-                        delay = retry_delay(error.headers.get('Retry-After', ''), stamp, interval)
-                        row.update(status='paused', retryAt=iso(stamp + delay))
-                    error.close()
-                    return row, delay
-                project = project.get('id') if isinstance(project, dict) else project
-                if not isinstance(project, str) or not project:
-                    raise ValueError('project unavailable')
-                data = json.dumps({'project': project}).encode()
             request = urllib.request.Request(url, data=data, headers=headers)
             try:
                 response = self.opener.open(request, timeout=20)
@@ -256,8 +219,6 @@ class Poller:
                             w = payload.get(ident)
                             if isinstance(w, dict):
                                 windows.append(window(ident, label, w.get('utilization'), w.get('resets_at')))
-                    elif account['provider'] == 'gemini':
-                        windows = gemini_windows(payload)
                     else:
                         rate = payload.get('rate_limit') or {}
                         for ident, label in [('primary_window', '5 ч'), ('secondary_window', 'неделя')]:

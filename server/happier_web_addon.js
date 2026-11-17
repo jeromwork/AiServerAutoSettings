@@ -176,9 +176,10 @@
                     const isPeriod = !w.label || w.label === '5 ч' || w.label === 'неделя' || w.label === 'сутки' || (typeof w.label === 'string' && /^\d+(\.\d+)? ч$/.test(w.label));
                     const label = isPeriod ? '' : `${w.label} `;
                     const reset = resetTime(w.resetsAt);
-                    part.textContent = `${label}${Math.round(w.usedPercent)}%${reset ? ` (${reset})` : ''}`;
-                    if (w.usedPercent >= 95) part.style.color = '#ff7777';
-                    else if (w.usedPercent >= 80) part.style.color = '#ffd45c';
+                    const left = Math.max(0, 100 - w.usedPercent);
+                    part.textContent = `${label}${Math.round(left)}%${reset ? ` (${reset})` : ''}`;
+                    if (left <= 5) part.style.color = '#ff7777';
+                    else if (left <= 20) part.style.color = '#ffd45c';
                     line.append(part);
                 });
                 if (account.retryAt) tips.push(`Следующий опрос: ${new Date(account.retryAt).toLocaleString('ru-RU')}`);

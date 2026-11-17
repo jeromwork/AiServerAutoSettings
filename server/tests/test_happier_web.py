@@ -325,7 +325,7 @@ window.addEventListener('pagehide',()=>page++);
 for(const e of ['visibilitychange','webkitvisibilitychange','freeze']) document.dispatchEvent(new Event(e,{bubbles:true}));
 window.dispatchEvent(new Event('pagehide'));
 const check=()=>{const bar=document.getElementById('remoteagents-quotas');
-if(!bar || !bar.textContent.includes('95%')) return setTimeout(check,20);
+if(!bar || !bar.textContent.includes('Claude 20$: 5% (')) return setTimeout(check,20);
 const accountButton=bar.querySelector('button');accountButton.click();
 const reset=new Date('2026-12-01T00:00:00Z');
 const pad=n=>String(n).padStart(2,'0');
@@ -361,8 +361,8 @@ document.body.setAttribute('data-result',valid?'PASS':'FAIL');document.body.setA
         import re
         reset_dt = datetime.fromisoformat('2026-12-01T00:00:00Z').astimezone()
         expected_time = f'{reset_dt.hour:02d}:{reset_dt.minute:02d} 01.12'
-        self.assertIn('Claude 20$: 95% (' + expected_time, result.stdout)
-        self.assertIn('Nano Banana 0%', result.stdout)
+        self.assertIn('Claude 20$: 5% (' + expected_time, result.stdout)
+        self.assertIn('Nano Banana 100%', result.stdout)
         self.assertNotIn('ост.', result.stdout)
         banner = re.search(r'data-banner="([^"]*)"', result.stdout).group(1)
         self.assertNotIn('неделя', banner)
@@ -475,61 +475,62 @@ class QuotaTests(Temp):
         self.assertEqual([a['label'] for a in accounts if a['provider'] == 'claude'], ['Claude 20$', 'Claude 100$', 'Claude сервера'])
         self.assertEqual(quotas.discover(self.home, {'acc1': 'First'})[0]['label'], 'Claude First')
 
-    def test_gemini_project_post_models_windows_and_no_secrets_in_cache(self):
-        self.gemini(); server = self.server()
-        server.gemini_models = dict(models={
-            'gemini-3.8-flash-tiered': dict(quotaInfo=dict(remainingFraction=.75,resetTime='2026-11-17T17:40:00Z')),
-            'gemini-4-pro': dict(displayName='Gemini 4 Pro',quotaInfo=dict(remainingFraction=.5, resetTime=None,
-                fiveHour=dict(remainingFraction=.8,resetTime='2026-11-17T17:40:00Z'),
-                sevenDay=dict(remainingFraction=.6,resetTime='2026-11-23T17:40:00Z'))),
-            'gemini-3.1-flash-image': dict(displayName='Nano Banana',quotaInfo=dict(remainingFraction=1,resetTime='2026-11-17T17:40:00Z')),
-            'gemini-2.5-pro': dict(quotaInfo=dict(remainingFraction=1)),
-            'gemini-4-unknown': dict(quotaInfo=dict(remainingFraction=None)),
-            'claude-opus': dict(quotaInfo=dict(remainingFraction=.4))}, imageGenerationModelIds=['gemini-3.1-flash-image'])
-        with running(server) as url:
-            urls = dict(quotas.URLS, claude=url+'/oauth/usage',probe=url+'/messages',codex=url+'/wham/usage',
-                gemini_project=url+'/loadCodeAssist',gemini=url+'/fetchAvailableModels')
-            poller = quotas.Poller(self.home,self.base/'cache/quotas.json',urls=urls)
-            poller.tick(); poller.tick()
+    def agy_usage(self, taken, **extra):
+        path = self.home/'.cache/remoteagents/agy-usage.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(dict(ok=True, fetchedAt=taken, groups=dict(
+            gemini=[dict(id='seven_day', remainingPercent=93.37, resetsInSec=589020),
+                    dict(id='five_hour', remainingPercent=80.31, resetsInSec=2220)],
+            other=[dict(id='five_hour', remainingPercent=10, resetsInSec=60)]), **extra)))
+
+    def test_gemini_windows_from_agy_usage_snapshot_without_network_or_secrets(self):
+        self.gemini(); self.agy_usage(1700000000)
+        poller = quotas.Poller(self.home, self.base/'cache/quotas.json', now=lambda: 1700000100)
+        poller.tick()
         row = next(r for r in poller.accounts.values() if r['provider'] == 'gemini')
         self.assertEqual(row['status'], 'ok')
         windows = {w['id']: w for w in row['windows']}
-        self.assertEqual(len(windows),5)
-        self.assertEqual(windows['gemini-3.8-flash-tiered']['usedPercent'],25)
-        self.assertEqual(windows['gemini-3.8-flash-tiered']['remainingPercent'],75)
-        self.assertEqual(windows['gemini-3.8-flash-tiered']['resetsAt'],'2026-11-17T17:40:00Z')
-        self.assertEqual(windows['gemini-3.1-flash-image']['remainingPercent'],100)
-        self.assertEqual(windows['gemini-4-pro:fiveHour']['label'],'Gemini 4 Pro 5 ч')
-        self.assertEqual(windows['gemini-4-pro:sevenDay']['label'],'Gemini 4 Pro неделя')
-        google = [r for r in server.requests if r[0] in ('/loadCodeAssist','/fetchAvailableModels')]
-        self.assertEqual(len(google),2)
-        self.assertEqual([r[1] for r in google],['POST','POST'])
-        self.assertEqual(json.loads(google[0][3]),dict(metadata=dict(ideType='ANTIGRAVITY')))
-        self.assertEqual(json.loads(google[1][3]),dict(project='fixture-project'))
-        self.assertEqual(google[0][2]['user-agent'],'antigravity')
-        self.assertEqual(google[1][2]['authorization'],'Bearer GEMINI_ACCESS_SENTINEL')
+        self.assertEqual(sorted(windows), ['five_hour', 'seven_day'])
+        self.assertEqual(windows['five_hour']['label'], '5 ч')
+        self.assertEqual(windows['five_hour']['remainingPercent'], 80.31)
+        self.assertAlmostEqual(windows['five_hour']['usedPercent'], 19.69)
+        self.assertEqual(windows['five_hour']['resetsAt'], quotas.iso(1700000000 + 2220))
+        self.assertEqual(windows['seven_day']['label'], 'неделя')
         raw = poller.cache.read_text()
-        for secret in ('GEMINI_ACCESS_SENTINEL','GEMINI_REFRESH_SENTINEL','unsafe_provider_echo','fixture-project'):
-            self.assertNotIn(secret,raw)
+        for secret in ('GEMINI_ACCESS_SENTINEL', 'GEMINI_REFRESH_SENTINEL'):
+            self.assertNotIn(secret, raw)
 
-    def test_gemini_expired_and_unauthorized_need_auth_without_token_mutation(self):
-        write, account = self.gemini(); server = self.server()
-        native = self.home/'.gemini/antigravity-cli/antigravity-oauth-token'
-        before = native.read_bytes()
-        with running(server) as url:
-            poller = quotas.Poller(self.home,self.base/'cache.json',urls=dict(gemini_project=url+'/loadCodeAssist',gemini=url+'/fetchAvailableModels'))
-            expired = dict(account, expires_at=1)
-            row,_ = poller.fetch(expired)
-            self.assertEqual(row['status'],'auth_required'); self.assertEqual(server.requests,[])
-            for code in (401,403):
-                server.status = code
-                row,_ = poller.fetch(account)
-                self.assertEqual(row['status'],'auth_required')
-                self.assertEqual(row['windows'],[])
-            server.status = 429
-            row,delay = poller.fetch(account)
-            self.assertEqual(row['status'],'paused'); self.assertEqual(delay,4000)
-        self.assertEqual(native.read_bytes(),before)
+    def test_gemini_stale_or_missing_snapshot_is_unknown_not_zero(self):
+        self.gemini()
+        poller = quotas.Poller(self.home, self.base/'cache/quotas.json', now=lambda: 1700000000)
+        poller.tick()
+        row = next(r for r in poller.accounts.values() if r['provider'] == 'gemini')
+        self.assertEqual((row['status'], row['windows']), ('unknown', []))
+        self.agy_usage(1700000000 - 3600)
+        poller.next = {}
+        poller.tick()
+        row = next(r for r in poller.accounts.values() if r['provider'] == 'gemini')
+        self.assertEqual((row['status'], row['windows']), ('unknown', []))
+
+    def test_agy_usage_scrape_parses_screen(self):
+        import agy_usage_scrape as scrape
+        screen = """GEMINI MODELS
+  Weekly Limit Remaining
+    [###] 93.37%
+    Refreshes in 163h 37m
+  Five Hour Limit Remaining
+    [###] 80.31%
+    Refreshes in 37m
+CLAUDE AND GPT MODELS
+  Five Hour Limit Remaining
+    [###] 97.05%
+    Refreshes in 38m
+"""
+        groups = scrape.parse(screen)
+        self.assertEqual(groups['gemini'], [dict(id='seven_day', remainingPercent=93.37, resetsInSec=163*3600+37*60),
+                                            dict(id='five_hour', remainingPercent=80.31, resetsInSec=37*60)])
+        self.assertEqual(groups['other'][0]['remainingPercent'], 97.05)
+        self.assertEqual(scrape.parse('Please sign in'), {})
 
     def test_401_403_need_login_429_pause_and_restart_honors_retry(self):
         self.credentials(); server = self.server(); now = [1700000000]
