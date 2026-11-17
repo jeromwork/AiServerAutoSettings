@@ -161,21 +161,24 @@
                 if (i) bar.append(document.createTextNode(' | '));
                 const line = document.createElement('span');
                 const windows = Array.isArray(account.windows) ? account.windows : [];
+                const validWindows = windows.filter(w => typeof w.usedPercent === 'number' && Number.isFinite(w.usedPercent));
                 const status = {auth_required:'нужен вход', paused:'пауза', unknown:'нет данных', disabled:'опрос выключен', error:'ошибка опроса'};
-                line.textContent = `${account.label}: ` + (status[account.status] ? status[account.status] + (windows.length ? '; ' : '') : (windows.length ? '' : 'нет данных'));
+                line.textContent = `${account.label}: ` + (status[account.status] ? status[account.status] + (validWindows.length ? '; ' : '') : (validWindows.length ? '' : 'нет данных'));
                 const age = account.fetchedAt ? Math.max(0, Math.floor((Date.now() - Date.parse(account.fetchedAt)) / 60000)) : null;
                 const tips = [age === null ? 'нет данных' : `Данные: ${age} мин назад`];
-                windows.forEach((w, j) => {
+                windows.forEach(w => {
+                    const reset = resetTime(w.resetsAt);
+                    tips.push(`${w.label}: ${reset || 'время неизвестно'}`);
+                });
+                validWindows.forEach((w, j) => {
                     if (j) line.append(document.createTextNode(' · '));
                     const part = document.createElement('span');
-                    const used = typeof w.usedPercent === 'number' && Number.isFinite(w.usedPercent) ? w.usedPercent : null;
-                    part.textContent = `${w.label} ${used === null ? 'нет данных' : Math.round(used) + '%'}`;
+                    const isPeriod = !w.label || w.label === '5 ч' || w.label === 'неделя' || w.label === 'сутки' || (typeof w.label === 'string' && /^\d+(\.\d+)? ч$/.test(w.label));
+                    const label = isPeriod ? '' : `${w.label} `;
                     const reset = resetTime(w.resetsAt);
-                    if (typeof w.remainingPercent === 'number' && Number.isFinite(w.remainingPercent)) part.textContent += ` (ост. ${Math.round(w.remainingPercent)}%)`;
-                    if (reset) part.textContent += ` ${reset}`;
-                    if (used >= 95) part.style.color = '#ff7777';
-                    else if (used >= 80) part.style.color = '#ffd45c';
-                    tips.push(`${w.label}: ${reset || 'время неизвестно'}`);
+                    part.textContent = `${label}${Math.round(w.usedPercent)}%${reset ? ` (${reset})` : ''}`;
+                    if (w.usedPercent >= 95) part.style.color = '#ff7777';
+                    else if (w.usedPercent >= 80) part.style.color = '#ffd45c';
                     line.append(part);
                 });
                 if (account.retryAt) tips.push(`Следующий опрос: ${new Date(account.retryAt).toLocaleString('ru-RU')}`);

@@ -329,15 +329,15 @@ if(!bar || !bar.textContent.includes('95%')) return setTimeout(check,20);
 const accountButton=bar.querySelector('button');accountButton.click();
 const reset=new Date('2026-12-01T00:00:00Z');
 const pad=n=>String(n).padStart(2,'0');
-const expected=`${pad(reset.getHours())}:${pad(reset.getMinutes())} 01.12`;
-const bannerValid=bar.textContent.includes(expected) && !/\(\d+ \u043c\u0438\u043d\)/.test(bar.textContent) && !bar.textContent.includes('\u0441\u0431\u0440\u043e\u0441') && !bar.textContent.includes('Invalid Date') && bar.textContent.includes('100%') && accountClicks===1 && !accountButton.hidden && accountButton.title.includes('20$') && accountButton.title.includes('100$');
+const expected=`(${pad(reset.getHours())}:${pad(reset.getMinutes())} 01.12)`;
+const bannerValid=bar.textContent.includes(expected) && !/\(\d+ \u043c\u0438\u043d\)/.test(bar.textContent) && !bar.textContent.includes('\u0441\u0431\u0440\u043e\u0441') && !bar.textContent.includes('Invalid Date') && !bar.textContent.includes('\u043e\u0441\u0442.') && !bar.textContent.includes('\u043d\u0435\u0434\u0435\u043b\u044f') && accountClicks===1 && !accountButton.hidden && accountButton.title.includes('20$') && accountButton.title.includes('100$');
 const modal=document.createElement('div'); modal.id='modal'; modal.style='position:fixed;inset:0;z-index:100;background:white';document.body.append(modal);
 const tuning=JSON.parse(localStorage.HAPPIER_SYNC_TUNING_JSON);
 const valid=resolvedMode==='yolo' && bannerValid && got===0 && page===1 && !document.hidden && document.visibilityState==='visible' && window.__HAPPIER_WEB_RUNTIME_CONFIG__.serverUrl==='https://api.happier.dev' && tuning.sessionTranscriptRetentionRecentKeepCount===13 && tuning.custom===42 && tuning.sessionRealtimeProjectionMode==='disabled' && document.getElementById('root').getBoundingClientRect().top>=bar.getBoundingClientRect().bottom && document.elementFromPoint(10,10)===modal && bar.querySelector('span span').style.color==='rgb(255, 119, 119)';
 document.body.setAttribute('data-result',valid?'PASS':'FAIL');document.body.setAttribute('data-banner',bar.textContent);};check();'''
         html = b'<html><head><style>html,body,#root{height:100%;margin:0}</style></head><body><div id="root"></div><script src="/app-abcdef123456.js"></script></body></html>'
         self.install(files={'index.html':html, 'app-abcdef123456.js':bundle, 'seed.html':b'<script>localStorage.HAPPIER_SYNC_TUNING_JSON=JSON.stringify({custom:42});location.replace("/")</script>'})
-        atomic(self.base / 'state/quotas.json', json.dumps(dict(schema=1, accounts=[dict(id='fixture',provider='claude',label='Claude 20$',status='ok',fetchedAt=quotas.iso(__import__('time').time()),windows=[dict(id='five_hour',label='5 ч',usedPercent=95,resetsAt='2026-12-01T00:00:00Z')]),dict(id='gemini',provider='gemini',label='Gemini',status='ok',windows=[dict(id='image',label='Nano Banana',usedPercent=0,remainingPercent=100,resetsAt='invalid')])],)))
+        atomic(self.base / 'state/quotas.json', json.dumps(dict(schema=1, accounts=[dict(id='fixture',provider='claude',label='Claude 20$',status='ok',fetchedAt=quotas.iso(__import__('time').time()),windows=[dict(id='five_hour',label='5 ч',usedPercent=95,resetsAt='2026-12-01T00:00:00Z'),dict(id='seven_day',label='неделя',usedPercent=None,resetsAt='2026-12-01T00:00:00Z')]),dict(id='gemini',provider='gemini',label='Gemini',status='ok',windows=[dict(id='image',label='Nano Banana',usedPercent=0,remainingPercent=100,resetsAt='invalid')])],)))
         with running(web.make_server(self.base, 0, 13)) as url:
             process = subprocess.Popen(['nice','-n','10','/usr/bin/google-chrome','--headless','--no-sandbox','--disable-gpu',
                 '--disable-dev-shm-usage','--disable-background-networking','--disable-sync','--disable-extensions',
@@ -357,8 +357,15 @@ document.body.setAttribute('data-result',valid?'PASS':'FAIL');document.body.setA
                 process.wait()
         self.assertEqual(result.returncode, 0)
         self.assertIn('data-result="PASS"', result.stdout, result.stdout[-5000:])
-        self.assertIn('Claude 20$: 5 ч 95%', result.stdout)
-        self.assertIn('Nano Banana 0% (ост. 100%)', result.stdout)
+        from datetime import datetime
+        import re
+        reset_dt = datetime.fromisoformat('2026-12-01T00:00:00Z').astimezone()
+        expected_time = f'{reset_dt.hour:02d}:{reset_dt.minute:02d} 01.12'
+        self.assertIn('Claude 20$: 95% (' + expected_time, result.stdout)
+        self.assertIn('Nano Banana 0%', result.stdout)
+        self.assertNotIn('ост.', result.stdout)
+        banner = re.search(r'data-banner="([^"]*)"', result.stdout).group(1)
+        self.assertNotIn('неделя', banner)
 
 
 class ProviderHandler(BaseHTTPRequestHandler):
