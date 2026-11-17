@@ -44,7 +44,6 @@ namespace RemoteAgents.Launcher
                 if (args.Contains("--net-helper-service")) return NetHelper.Run(args);
                 if (args.Contains("--net-helper-install")) return NetHelperInstall.Install(args);
                 if (args.Contains("--net-helper-uninstall")) return NetHelperInstall.Uninstall();
-                if (args.Contains("--vpn-host")) return VpnHost.Run(args);
                 // Test modes never create or lock the real user's home.
                 string elevated = Option(args, "--elevated-component");
                 if (elevated != null) return ElevatedTask.RunComponent(Path.GetFullPath(Option(args, "--home") ?? DefaultHome), elevated);

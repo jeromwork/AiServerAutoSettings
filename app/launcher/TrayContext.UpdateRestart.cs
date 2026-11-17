@@ -15,29 +15,29 @@ namespace RemoteAgents.Launcher
             state["runningComponents"] = runtimes.Where(r => r.Enabled && !r.Definition.CommandManaged).Select(r => r.Definition.Name).ToArray();
             var vpn = VpnStatus.Read(home);
             keepVpnOnRestart = Json.Bool(vpn, "ok") && Json.Str(vpn, "state") == "on";
-            var owner = keepVpnOnRestart ? Json.Read(Path.Combine(home, "state", "vpn-session.json")) : Json.Map(null);
-            bool owned = keepVpnOnRestart && Json.Int(owner, "pid", 0) == Process.GetCurrentProcess().Id;
-            state["vpnOn"] = keepVpnOnRestart; state["vpnHandoff"] = owned; Json.Write(UpdateStatePath, state);
-            if (!owned) return;
-            string session = Json.Str(owner, "session");
-            Json.Write(VpnUpdateHandoff.Receipt(home), new { session, parentPid = Process.GetCurrentProcess().Id,
-                expiresUtc = DateTime.UtcNow.AddSeconds(90).ToString("o"), hash = Files.Hash(Path.Combine(home, Product.ExeName)) });
+            // The helper is bound to the pipe lifetime: restart closes its jobs first.
+            // Restore the saved intent only after the new tray authenticates a fresh helper.
+            state["vpnOn"] = keepVpnOnRestart; state.Remove("vpnHandoff"); Json.Write(UpdateStatePath, state);
+            keepVpnOnRestart = false;
         }
+        bool resumeUpdatedVpn;
         void AttachUpdateRestart()
         {
-            string path = VpnUpdateHandoff.Receipt(home); if (!File.Exists(path)) return;
-            var receipt = Json.Read(path);
-            using (var p = Process.GetCurrentProcess()) {
-                if (!Files.Hash(Program.Exe).Equals(Json.Str(receipt, "hash"), StringComparison.OrdinalIgnoreCase)) return;
-                receipt["pid"] = p.Id; receipt["started"] = p.StartTime.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture); Json.Write(path, receipt);
-            }
+            var state = UpdateState();
+            resumeUpdatedVpn = Json.Bool(state, "pending") && Json.Bool(state, "vpnOn");
+        }
+        void ResumeUpdatedVpn(System.Collections.Generic.Dictionary<string, object> transport)
+        {
+            if (!resumeUpdatedVpn || netHelper == null || !netHelper.Ready || !Json.Bool(transport, "ok") || actionBusy || vpnActionBusy) return;
+            resumeUpdatedVpn = false;
+            var vpn = runtimes.FirstOrDefault(c => c.Definition.Name == "vpn");
+            if (vpn != null) CheckVpn(vpn, true);
         }
         bool UpdateHealthReady()
         {
             var state = UpdateState(); if (!Json.Bool(state, "pending")) return true;
             return Json.Strings(Json.Get(state, "runningComponents")).All(name => runtimes.Any(r => r.Definition.Name == name && (name == "disk" ? r.Alive && diskSession != null && diskSession.ServerConnected && (DateTime.UtcNow - diskUpdated).TotalSeconds <= 10 : r.Healthy))) &&
-                (!Json.Bool(state, "vpnOn") || (Json.Bool(VpnStatus.Read(home), "ok") &&
-                    (!Json.Bool(state, "vpnHandoff") || Json.Int(Json.Read(Path.Combine(home, "state", "vpn-session.json")), "pid", 0) == Process.GetCurrentProcess().Id)));
+                (!Json.Bool(state, "vpnOn") || (!resumeUpdatedVpn && netHelper != null && netHelper.Ready && Json.Bool(VpnStatus.Read(home), "ok") && Json.Str(VpnStatus.Read(home), "owner") == "net-helper" && Json.Str(VpnStatus.Read(home), "state") == "on"));
         }
     }
 }

@@ -106,8 +106,6 @@ namespace RemoteAgents.Launcher
             bundle("3.0.0"); File.Copy(candidate, Path.Combine(engine.Folder("3.0.0"), Product.ExeName)); m.Version = "3.0.0";
             UpgradeInstaller.ActivatePrepared(home, engine, m);
             Check(engine.Observe(true) == "accepted" && UpgradeInstaller.ObserveImage(home, engine, true, "accepted") == "accepted", "successful image transaction");
-            var receipt = Json.Map(Json.Parse(Json.Encode(new { session="test-session",parentPid=100,expiresUtc=now.AddSeconds(60).ToString("o") })));
-            Check(VpnUpdateHandoff.Valid(receipt,"test-session",100,now) && !VpnUpdateHandoff.Valid(receipt,"foreign",100,now) && !VpnUpdateHandoff.Valid(receipt,"test-session",101,now) && !VpnUpdateHandoff.Valid(receipt,"test-session",100,now.AddSeconds(91)), "VPN handoff bounded and bound to parent/session");
             Console.WriteLine("PASS: update automation " + checks + " checks");
         }
     }

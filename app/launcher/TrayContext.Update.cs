@@ -37,7 +37,6 @@ namespace RemoteAgents.Launcher
         {
             string message = reason.Length == 0 ? "Программа обновлена до " + version : "Обновление " + version + " не установлено: " + reason;
             if (closing) return;
-            if (reason.Length == 0) try { File.Delete(VpnUpdateHandoff.Receipt(home)); } catch { log.Write("update.resume.cleanup.failed"); }
             var state = UpdateState(); string key = version + ":" + reason;
             // A config refusal may be retried after the config changes, but gives only one balloon per outcome.
             bool notify = Json.Str(state, "notice") != key;

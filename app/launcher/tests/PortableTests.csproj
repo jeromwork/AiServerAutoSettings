@@ -76,7 +76,6 @@
     <Compile Include="../UpgradeInstaller.cs" Link="UpgradeInstaller.cs" />
     <Compile Include="../StatusView.cs" Link="StatusView.cs" />
     <Compile Include="../Data.cs" Link="Data.cs" />
-    <Compile Include="../VpnUpdateHandoff.cs" />
     <Compile Include="UpdateAutomationTests.cs" />
     <Compile Include="../UpdateProbe.cs" />
     <Compile Include="../UpdatePolicy.cs" />

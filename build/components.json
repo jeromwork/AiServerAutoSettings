@@ -92,9 +92,7 @@
         "-File",
         "{bundle}\\transport\\Vpn.Tun.ps1",
         "-Home",
-        "{home}",
-        "-ParentPid",
-        "{pid}"
+        "{home}"
       ],
       "cwd": "{bundle}",
       "restart": "never",

@@ -36,13 +36,6 @@ namespace RemoteAgents.Launcher
                     }
                 } finally { if (original != null) original.Dispose(); }
                 if (!File.Exists(receipt)) return 0;
-                // The broker keeps its original elevated Job; this receipt can only rebind its parent.
-                string vpnReceipt = VpnUpdateHandoff.Receipt(home);
-                if (File.Exists(vpnReceipt) && File.Exists(Path.Combine(home, Product.Name + ".previous.exe"))) {
-                    var vpn = Json.Read(vpnReceipt); vpn["hash"] = Files.Hash(Path.Combine(home, Product.Name + ".previous.exe"));
-                    vpn.Remove("pid"); vpn.Remove("started");
-                    vpn["expiresUtc"] = DateTime.UtcNow.AddSeconds(90).ToString("o"); Json.Write(vpnReceipt, vpn);
-                }
                 var sid = WindowsIdentity.GetCurrent().User; string name = Program.InstanceName(home, sid);
                 using (var mutex = new Mutex(false, "Global\\" + name)) {
                     bool held; try { held = mutex.WaitOne(0); } catch (AbandonedMutexException) { held = true; }

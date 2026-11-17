@@ -76,6 +76,7 @@ namespace RemoteAgents.Launcher
                 } catch { return Json.Map(null); }
             }
         }
+        internal bool Ready { get { return Connected; } }
         bool Connected { get { lock (gate) return !disposed && pipe != null && pipe.IsConnected; } }
         void Connect()
         {

@@ -548,7 +548,7 @@ function Invoke-WizardStep([string]$Root,[string]$Bundle,[string]$Action,$Reques
                     # Only the explicit card/tray action supplies the pinned launcher identity.
                     return @{ok=$true;enabled=$false;summary='VPN настроен. Включите его переключателем в главном окне или меню трея'}
                 }
-                if($previous.enabled){Invoke-InstallChild $Bundle 'transport/Vpn.Tun.ps1' @('-Home',$Root,'-Disable') -TimeoutSeconds 420}
+                if($previous.enabled){throw 'Выключите VPN переключателем в главном окне и повторите настройку'}
                 return @{ok=$true;summary='VPN выключен в настройках; состояние маршрутов — в живом статусе VPN'}
             }catch{
                 Update-LauncherConfig $Root {param($c) if($null -ne $previous){$c|Add-Member -Force vpn $previous}else{$c.PSObject.Properties.Remove('vpn')}}

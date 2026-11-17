@@ -142,7 +142,7 @@ namespace RemoteAgents.Launcher
         bool VpnModulesReady()
         {
             // Disabled VPN is a valid installation; updates must never trigger UAC or require TUN.
-            return runtimes.Any(r => r.Definition.Critical) ? runtimes.Where(r => r.Definition.Critical).All(r => r.Healthy) : File.Exists(TransportScript("Vpn.Tun.ps1")) && File.Exists(TransportScript("Test-VpnConflict.ps1"));
+            return runtimes.Any(r => r.Definition.Critical) ? runtimes.Where(r => r.Definition.Critical).All(r => r.Healthy) : File.Exists(TransportScript("Vpn.Tun.ps1"));
         }
         void LoadComponents()
         {
@@ -170,6 +170,7 @@ namespace RemoteAgents.Launcher
                 int count = critical.Count(r => r.Healthy); icon.Icon = all ? green : count > 0 ? yellow : red;
                 var transport = StatusView.Read(home, "transport", maxAgeSec: 15);
                 if (netHelper != null) netHelper.UpdateLan(config.Data, transport);
+                ResumeUpdatedVpn(transport);
                 if (Product.IsVpn) {
                     var vpnStatus = VpnStatus.Read(home);
                     icon.Icon = Json.Bool(vpnStatus, "ok") && Json.Str(vpnStatus, "state") == "on" ? green : yellow;

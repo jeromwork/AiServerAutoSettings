@@ -87,13 +87,10 @@ wait_for_memory
   wait_for_memory
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-vpn-legacy.ps1" -TestHome "$testdir/vpn-legacy" < /dev/null
   wait_for_memory
-  timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-vpn-lifecycle.ps1" < /dev/null
   wait_for_memory
-  timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-vpn-dns-policy.ps1" < /dev/null
   wait_for_memory
   timeout 60 python3 "$repo/transport/test-vpn-lifecycle.py"
   wait_for_memory
-  timeout 60 python3 "$repo/transport/test-vpn-dns.py"
   wait_for_memory
   timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-tailscale.ps1" < /dev/null
   wait_for_memory
