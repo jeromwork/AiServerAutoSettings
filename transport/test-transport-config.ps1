@@ -52,8 +52,13 @@ try{
     if(Get-Command ssh -ErrorAction SilentlyContinue){
         $spaceKnown=Join-Path $work 'Пользователь с пробелом/known hosts'
         $spaceProfile=[pscustomobject]@{keyPath=$key;login='alice';serverAddress='example.invalid';knownHostsPath=$spaceKnown}
-        $effective=(& ssh -G @(Get-TransportSshArguments $spaceProfile 22371) example.invalid 2>$null) -join "`n"
-        Assert ($LASTEXITCODE -eq 0 -and $effective.Contains('userknownhostsfile '+$spaceKnown)) 'OpenSSH сохраняет путь known_hosts с пробелом и кириллицей'
+        # User SSH config can contain Match exec/CanonicalizeHostname and block even ssh -G.
+        # This offline argument test must use its own empty config.
+        $emptySshConfig=Join-Path $work 'ssh-empty.conf';[IO.File]::WriteAllText($emptySshConfig,'')
+        $sshCommand=Get-Command ssh -CommandType Application|Select-Object -First 1
+        $effective=(Invoke-TransportText $sshCommand.Source (@('-F',$emptySshConfig,'-G')+@(Get-TransportSshArguments $spaceProfile 22371)+@('example.invalid')))
+        Assert ($effective.Contains('hostname example.invalid')) 'OpenSSH -G uses only the isolated test config'
+        Assert ($effective.Contains('userknownhostsfile '+$spaceKnown)) 'OpenSSH сохраняет путь known_hosts с пробелом и кириллицей'
     }
     $reality='AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
     $channel=@{inbounds=@(@{tag='ssh';override_port=22},@{tag='sync';override_port=23456});outbounds=@(@{type='vless';tag='old';server='203.0.113.10';server_port=443;uuid='00000000-0000-4000-8000-000000000001';tls=@{enabled=$true;server_name='example.com';utls=@{enabled=$true;fingerprint='chrome'};reality=@{enabled=$true;public_key=$reality;short_id='abcdef01'}}})}
@@ -291,7 +296,7 @@ try{
     Assert (@($cfg.inbounds|Where-Object {$_.tag -eq 'lan-proxy'}).Count -eq 0) 'старый вход без пароля заменён'
     $emptyLanRules=@($cfg.route.rules|Where-Object {$_.inbound -contains 'lan-in'})
     Assert ($emptyLanRules.Count -eq 1 -and $emptyLanRules[0].action -eq 'reject') 'без сетей lan-in отклоняет всё'
-    $lanRaw=ConvertFrom-Json '{"profile":{"lan":[{"name":"one","enabled":true,"subnets":["10.71.0.0/24"],"testHost":"10.71.0.1","share":{"domains":["*.example.org"],"forwards":[{"name":"ssh","host":"10.99.0.2","port":22,"localPort":18222}]}},{"name":"two","enabled":true,"subnets":["172.22.0.0/16"],"testHost":"172.22.0.1"},{"name":"off","enabled":false,"subnets":["192.168.77.0/24"],"share":{"subnets":["192.168.78.0/24"]}}]}}'
+    $lanRaw=ConvertFrom-Json '{"profile":{"lan":[{"name":"one","enabled":true,"testHost":"10.71.0.1","share":{"subnets":["10.71.0.0/24"],"domains":["*.example.org"],"dnsServers":["10.71.0.53"],"forwards":[{"name":"ssh","host":"10.99.0.2","port":22,"localPort":18222}]}},{"name":"two","enabled":true,"testHost":"172.22.0.1","share":{"subnets":["172.22.0.0/16"]}},{"name":"off","subnets":["192.168.77.0/24"],"share":{"enabled":false,"subnets":["192.168.78.0/24"]}}]}}'
     $lanFile=Join-Path $work 'helper-lan.json'
     [IO.File]::WriteAllText($lanFile,((ConvertTo-Json $lanRaw -Depth 20).Replace("`r",'').Replace("`n","`r`n")))
     $helperSettings=Copy-TransportObject $settings;$helperSettings|Add-Member Lan (Get-TransportLan (Read-TransportJson $lanFile))
@@ -338,7 +343,7 @@ try{
         }
         $options[$portKey]=$old
     }
-    # All preferred ports deliberately collide, including fixed Happier and legacy TCP forward.
+    # All preferred helper/channel ports deliberately collide, including fixed Happier.
     $portRoot=Join-Path $work 'helper-ports';[void][IO.Directory]::CreateDirectory($portRoot)
     $portTransport=[pscustomobject]@{channelFirst=$true;sshPort=26000;syncPort=26000;channelSocksPort=26000;apiPort=26000;probePortBase=26000;socksPortBase=26000;lanProxyPort=26000;vpnInPort=26000}
     $portOptions=Get-TransportPortDefaults
@@ -346,7 +351,6 @@ try{
     $portProfileFile=Join-Path $portRoot 'profile.json';Write-TransportJson $portProfileFile $portProfile
     $portTransport|Add-Member profilePath $portProfileFile
     $portSettings=[pscustomobject]@{Options=$portOptions;Transport=$portTransport;Profile=$portProfile;Channel=$settings.Channel;Lan=(Copy-TransportObject $helperSettings.Lan);LocalWeb=[pscustomobject]@{enabled=$true;available=$true;port=26000;serverPort=47831;conflict=$null}}
-    $portSettings.Lan.forwards[0].localPort=26000
     Write-TransportJson (Join-Path $portRoot 'config.json') @{transport=$portTransport}
     $portSettings=Resolve-TransportPorts $portRoot $portSettings 2 2
     $effective=Get-TransportEffectivePorts $portRoot;$saved=Read-TransportJson (Join-Path $portRoot 'state/transport-ports.json')
@@ -354,7 +358,7 @@ try{
     $portPaths=[pscustomobject]@{Candidates=@([pscustomobject]@{tag='one';port=$portOptions.probePortBase},[pscustomobject]@{tag='two';port=($portOptions.probePortBase+1)});Outbounds=@(@{type='socks';tag='one';server='127.0.0.1';server_port=$portOptions.socksPortBase},@{type='socks';tag='two';server='127.0.0.1';server_port=($portOptions.socksPortBase+1)})}
     $portConfig=New-TransportConfig $portSettings $portPaths 'test-secret' 'one'
     $allPorts=@(@($portConfig.inbounds|Where-Object {$_.listen -eq '127.0.0.1'}|ForEach-Object {$_.listen_port})+@($portOptions.apiPort)+@($portPaths.Outbounds|ForEach-Object {$_.server_port}))
-    Assert (@($allPorts|Select-Object -Unique).Count -eq $allPorts.Count) 'входы помощника не пересекаются с рабочими входами, пробами, SOCKS, API, Happier и forward'
+    Assert (@($allPorts|Select-Object -Unique).Count -eq $allPorts.Count) 'входы помощника не пересекаются с рабочими входами, пробами, SOCKS, API и Happier'
     $portPublic=Get-TransportHelperStatus $portSettings 'one' $portPaths.Outbounds
     Assert ($portPublic.lanInPort -eq $effective.lanProxyPort -and $portPublic.vpnInPort -eq $effective.vpnInPort -and -not $portPublic.udp) 'helper публикует эффективные порты'
     if($SingBox){
