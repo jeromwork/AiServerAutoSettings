@@ -37,6 +37,7 @@ namespace RemoteAgents.Launcher
         bool vpnActionBusy, vpnActionWanted;
         string vpnError = "";
         LanProxy lanProxy;
+        HelperClient netHelper;
         string diskSummary = "Диск: ожидается проверка";
         DateTime diskUpdated = DateTime.MinValue;
         DiskTraySession diskSession;
@@ -82,6 +83,7 @@ namespace RemoteAgents.Launcher
             BackgroundWork.Disk.Changed += () => { try { dispatch.BeginInvoke(new Action(DiskFinished)); } catch (InvalidOperationException) { } };
             dispatch.BeginInvoke(new Action(() => {
                 if (firstSetup) { RunFirstSetup(); return; }
+                netHelper = new HelperClient(home, dispatch); netHelper.EnsureRunning();
                 DeliverUpdateNotice(); CheckLegacyVpn(); StartLegacyDiskCleanup(); Handle(args); DrainCommands(); Tick();
                 if(Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome),StringComparison.OrdinalIgnoreCase)) CheckSetup();
 
@@ -108,6 +110,7 @@ namespace RemoteAgents.Launcher
             if(closing)return;
             if(FirstInstall.Required(home)){ExitThread();return;}
             ReloadSettings();icon.Visible=true;readyForCommands=true;ShowMain();
+            netHelper = new HelperClient(home, dispatch); netHelper.EnsureRunning();
             if(Product.IsVpn)Safe(RegisterVpnRun);
             CheckLegacyVpn();StartLegacyDiskCleanup();DrainCommands();Tick();
         }
@@ -826,6 +829,7 @@ namespace RemoteAgents.Launcher
         protected override void ExitThreadCore()
         {
             if (closing) return;
+            if (netHelper != null) netHelper.Dispose();
             bool preserveVpn = RestartRequested && keepVpnOnRestart;
             if (!preserveVpn) try { Files.Atomic(Path.Combine(home, "state/vpn.stop"), "stop\n"); } catch { log.Write("vpn.stop.failed"); }
             if (lanProxy != null) try { lanProxy.Dispose(); } catch { log.Write("lan.pac.restore.failed"); }

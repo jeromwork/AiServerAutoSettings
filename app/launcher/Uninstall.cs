@@ -22,6 +22,7 @@ namespace RemoteAgents.Launcher
                     if (!held) throw new IOException("Закройте RemoteAgents перед удалением");
                 } finally { if (held) running.ReleaseMutex(); }
             } } catch (WaitHandleCannotBeOpenedException) { }
+            HelperClient.UninstallElevated();
             LanPacOwnership.Recover(home, new LanWindowsBrowser());
             if (Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome), StringComparison.OrdinalIgnoreCase)) {
                 string diskHome = DiskExplorerController.DefaultDiskHome;

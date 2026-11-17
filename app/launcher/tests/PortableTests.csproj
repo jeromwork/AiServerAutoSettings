@@ -5,7 +5,7 @@
     <OutputType>Exe</OutputType>
     <StartupObject Condition="'$(ConfigTests)' == 'true'">RemoteAgents.Launcher.ConfigBundleTests</StartupObject>
     <StartupObject Condition="'$(ConfigE2E)' == 'true'">RemoteAgents.Launcher.ConfigE2E</StartupObject>
-    <StartupObject Condition="'$(ConfigTests)' != 'true' And '$(ConfigE2E)' != 'true'">RemoteAgents.Launcher.TestEntry</StartupObject>
+    <StartupObject Condition="'$(ConfigTests)' != 'true' And '$(ConfigE2E)' != 'true'">RemoteAgents.Launcher.NetHelperTests</StartupObject>
     <DefineConstants>PORTABLE_TEST</DefineConstants>
     <DefineConstants Condition="'$(ProductName)' == 'RemoteVPN'">PORTABLE_TEST;REMOTE_VPN</DefineConstants>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
@@ -42,6 +42,10 @@
     <Compile Include="../VpnProbe.cs" />
     <Compile Include="../VpnLease.cs" />
     <Compile Include="VpnTests.cs" />
+    <Compile Include="../NetHelperProtocol.cs" />
+    <Compile Include="../NetHelperInstall.cs" />
+    <Compile Include="../NetHelper.cs" />
+    <Compile Include="NetHelperTests.cs" />
     <Compile Include="../MainScreenModel.cs" Link="MainScreenModel.cs" />
     <Compile Include="TrayExtrasTests.cs" />
     <Compile Include="../TrayMenuModel.cs" Link="TrayMenuModel.cs" />

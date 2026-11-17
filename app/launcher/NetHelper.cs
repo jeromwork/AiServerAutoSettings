@@ -1,0 +1,259 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading;
+#if !PORTABLE_TEST
+using System.ComponentModel;
+using System.Diagnostics;
+using System.IO.Pipes;
+using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using System.ServiceProcess;
+using System.Threading.Tasks;
+using Microsoft.Win32.SafeHandles;
+#endif
+
+namespace RemoteAgents.Launcher
+{
+    // Pure lifetime policy, shared by the real service and portable tests.
+    internal sealed class NetHelperLifetime
+    {
+        internal const int ConnectionTimeoutMs = 30000;
+        readonly Func<long> clock;
+        readonly long started;
+        readonly Action cleanup, stop;
+        readonly object gate = new object();
+        readonly List<IDisposable> jobs = new List<IDisposable>();
+        bool jobsClosed, connected;
+        int ended;
+        internal NetHelperLifetime(Func<long> clock, Action cleanup, Action stop)
+        { this.clock = clock; started = clock(); this.cleanup = cleanup; this.stop = stop; }
+        internal bool ConnectionExpired { get { return !connected && clock() - started >= ConnectionTimeoutMs; } }
+        internal void Connected() { connected = true; }
+        internal void AddJob(IDisposable job)
+        {
+            lock (gate) {
+                if (jobsClosed) { job.Dispose(); throw new ObjectDisposedException("NetHelperLifetime"); }
+                jobs.Add(job);
+            }
+        }
+        internal void CloseJobs()
+        {
+            lock (gate) {
+                jobsClosed = true;
+                // Attempt every Job even when one close fails. No logging/I/O before this.
+                foreach (var job in jobs) try { job.Dispose(); } catch { }
+                jobs.Clear();
+            }
+        }
+        internal void Shutdown()
+        {
+            // Even concurrent SCM stop/disconnect callers close the Jobs before doing I/O.
+            CloseJobs();
+            if (Interlocked.Exchange(ref ended, 1) != 0) return;
+            try { cleanup(); } finally { stop(); }
+        }
+    }
+
+#if !PORTABLE_TEST
+    // свой код только как обвязка над SCM и sing-box
+    internal sealed class NetHelper : ServiceBase
+    {
+        readonly string ownerSid;
+        readonly ManualResetEvent stopping = new ManualResetEvent(false), emergency = new ManualResetEvent(false);
+        readonly object pipeGate = new object();
+        NamedPipeServerStream pipe;
+        Thread worker;
+        NetHelperLifetime lifetime;
+        NetHelperLog log;
+        internal NetHelper(string ownerSid)
+        {
+            this.ownerSid = new SecurityIdentifier(NetHelperInstall.ValidateSid(ownerSid)).Value;
+            ServiceName = NetHelperInstall.ServiceName; CanStop = true; CanShutdown = true; AutoLog = false;
+        }
+        internal static int Run(string[] args)
+        {
+            try {
+                // Home is recorded by installation for future stages; never read user files as SYSTEM here.
+                Path.GetFullPath(Program.Option(args, "--home") ?? throw new ArgumentException("Нет home"));
+                using (var service = new NetHelper(Program.Option(args, "--owner-sid"))) ServiceBase.Run(service);
+                return 0;
+            } catch { return 1; } // Never open a WinForms error dialog in LocalSystem session 0.
+        }
+        protected override void OnStart(string[] args)
+        {
+            var clock = Stopwatch.StartNew();
+            lifetime = new NetHelperLifetime(() => clock.ElapsedMilliseconds, Cleanup, () => ThreadPool.QueueUserWorkItem(_ => Stop()));
+            worker = new Thread(Loop) { IsBackground = true, Name = "RemoteAgentsNet owner" }; worker.Start();
+        }
+        void Cleanup()
+        {
+            // Stage 4 will add owned NRPT receipts here. Never touch foreign policies.
+            try { NetHelperInstall.RemoveNrpt(); if (log != null) log.Write("cleanup", 0); }
+            catch { if (log != null) log.Write("cleanup", 1); }
+            lock (pipeGate) { if (pipe != null) { pipe.Dispose(); pipe = null; } }
+            if (log != null) log.Write("stopped", 0);
+        }
+        protected override void OnStop()
+        {
+            if (lifetime != null) lifetime.CloseJobs(); // Network FIRST, before pipe disposal, logs or joins.
+            stopping.Set();
+            lock (pipeGate) { if (pipe != null) pipe.Dispose(); }
+            if (worker != null && worker != Thread.CurrentThread) worker.Join(10000);
+        }
+        protected override void OnShutdown() { OnStop(); base.OnShutdown(); }
+        void Loop()
+        {
+            VpnLease lease = null;
+            string outcome = "disconnected"; int outcomeCode = 0;
+            try {
+                lease = new VpnLease(() => { lifetime.CloseJobs(); emergency.Set(); });
+                NetHelperInstall.SecureDirectory(NetHelperInstall.DataDirectory);
+                log = new NetHelperLog(NetHelperInstall.DataDirectory); log.Write("starting", 0);
+                lock (pipeGate) {
+                    if (stopping.WaitOne(0)) return;
+                    pipe = CreatePipe(ownerSid);
+                }
+                Task connection = pipe.WaitForConnectionAsync();
+                if (!Wait(connection, lease, true)) return;
+                connection.GetAwaiter().GetResult();
+                bool authenticated = false;
+                var reader = new NetHelperProtocol.Reader(pipe);
+                while (!stopping.WaitOne(0) && !emergency.WaitOne(0)) {
+                    var read = reader.ReadLine();
+                    if (!Wait(read, lease, !authenticated)) break;
+                    string line;
+                    try { line = read.GetAwaiter().GetResult(); }
+                    catch (InvalidDataException) {
+                        lifetime.CloseJobs(); outcome = "bad-request"; outcomeCode = 87;
+                        var rejected = NetHelperProtocol.WriteLine(pipe, NetHelperProtocol.BadRequest);
+                        if (Wait(rejected, lease, false)) rejected.GetAwaiter().GetResult();
+                        break; // Cannot safely resynchronize an oversized/incomplete frame.
+                    }
+                    if (line == null) break;
+                    if (!authenticated) {
+                        if (!IsOwner(pipe, ownerSid)) { outcome = "client-denied"; outcomeCode = 5; break; }
+                        authenticated = true; lifetime.Connected(); log.Write("connected", 0);
+                    }
+                    string reply = NetHelperProtocol.Reply(line, log.Recent);
+                    var write = NetHelperProtocol.WriteLine(pipe, reply);
+                    if (!Wait(write, lease, false)) break;
+                    write.GetAwaiter().GetResult();
+                }
+            } catch {
+                lifetime.CloseJobs(); // No error log until every network Job has closed.
+                outcome = "loop-error"; outcomeCode = 1;
+            } finally {
+                lifetime.CloseJobs();
+                if (lease != null) lease.Dispose();
+                if (emergency.WaitOne(0)) { outcome = "lease-expired"; outcomeCode = 1460; }
+                else if (lifetime.ConnectionExpired) { outcome = "connection-timeout"; outcomeCode = 1460; }
+                else if (stopping.WaitOne(0)) { outcome = "scm-stop"; outcomeCode = 0; }
+                if (log != null) log.Write(outcome, outcomeCode);
+                lifetime.Shutdown();
+            }
+        }
+        bool Wait(Task operation, VpnLease lease, bool waitingForClient)
+        {
+            while (true) {
+                if (stopping.WaitOne(0) || emergency.WaitOne(0) || lease.Expired || (waitingForClient && lifetime.ConnectionExpired)) return false;
+                lease.Pulse();
+                // Stage 3 proves only owner-loop progress. Network health checks belong to stages 4/5.
+                lease.Confirmed();
+                if (operation.IsCompleted) return true;
+                stopping.WaitOne(50);
+            }
+        }
+        internal enum Core { Lan, Vpn }
+        // Only service-built configs enter this method. No client paths, executable names or JSON configs.
+        internal Process StartSingBox(Core kind, object serviceConfig)
+        {
+            if (kind != Core.Lan && kind != Core.Vpn) throw new ArgumentException("Неизвестное ядро");
+            string config = Path.Combine(NetHelperInstall.DataDirectory, kind == Core.Lan ? "lan.json" : "vpn.json");
+            NetHelperInstall.RejectReparse(NetHelperInstall.DataDirectory);
+            if (File.Exists(config) && (File.GetAttributes(config) & FileAttributes.ReparsePoint) != 0) throw new IOException("Небезопасный конфиг");
+            Files.Atomic(config, Json.Encode(serviceConfig)); // Inherits SYSTEM + Administrators only.
+            var job = new NativeJob(); lifetime.AddJob(job);
+            try {
+                return job.Start(Path.Combine(NetHelperInstall.InstallDirectory, "sing-box.exe"), new[] { "run", "-c", config }, NetHelperInstall.InstallDirectory);
+            } catch { job.Dispose(); throw; }
+        }
+        static NamedPipeServerStream CreatePipe(string sid)
+        {
+            var acl = new PipeSecurity(); acl.SetAccessRuleProtection(true, false);
+            acl.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(sid), PipeAccessRights.ReadWrite, AccessControlType.Allow));
+            acl.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), PipeAccessRights.FullControl, AccessControlType.Allow));
+            byte[] descriptor = acl.GetSecurityDescriptorBinaryForm();
+            var pinned = GCHandle.Alloc(descriptor, GCHandleType.Pinned);
+            try {
+                var security = new SecurityAttributes { length = Marshal.SizeOf(typeof(SecurityAttributes)), descriptor = pinned.AddrOfPinnedObject() };
+                // FIRST_PIPE_INSTANCE refuses a squatted name; REJECT_REMOTE_CLIENTS makes PID identity local.
+                var handle = CreateNamedPipe(@"\\.\pipe\" + NetHelperProtocol.PipeName, 0x40080003, 0x8, 1, 65536, 65536, 0, ref security);
+                if (handle.IsInvalid) { handle.Dispose(); throw new Win32Exception(); }
+                try { return new NamedPipeServerStream(PipeDirection.InOut, true, false, handle); }
+                catch { handle.Dispose(); throw; }
+            } finally { pinned.Free(); }
+        }
+        static bool IsOwner(NamedPipeServerStream stream, string owner)
+        {
+            uint pid;
+            if (!GetNamedPipeClientProcessId(stream.SafePipeHandle, out pid) || pid == 0 || pid > int.MaxValue) return false;
+            using (var process = OpenProcess(0x1000, false, pid)) {
+                if (process.IsInvalid) return false;
+                SafeFileHandle token;
+                if (!OpenProcessToken(process, 8, out token)) return false;
+                using (token)
+                using (var identity = new WindowsIdentity(token.DangerousGetHandle())) {
+                    if (identity.User == null || identity.User.Value != owner) return false;
+                    // Also compare the kernel's pipe impersonation identity, guarding PID exit/reuse.
+                    bool same = false;
+                    stream.RunAsClient(() => { using (var client = WindowsIdentity.GetCurrent()) same = client.User != null && client.User.Value == owner; });
+                    return same;
+                }
+            }
+        }
+        [StructLayout(LayoutKind.Sequential)] struct SecurityAttributes { public int length; public IntPtr descriptor; [MarshalAs(UnmanagedType.Bool)] public bool inherit; }
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern SafePipeHandle CreateNamedPipe(string name, uint openMode, uint pipeMode, uint instances, uint outputSize, uint inputSize, uint timeout, ref SecurityAttributes security);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetNamedPipeClientProcessId(SafePipeHandle pipe, out uint pid);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern SafeFileHandle OpenProcess(uint access, bool inherit, uint pid);
+        [DllImport("advapi32.dll", SetLastError = true)] static extern bool OpenProcessToken(SafeFileHandle process, uint access, out SafeFileHandle token);
+    }
+
+    internal sealed class NetHelperLog
+    {
+        const int Limit = 1024 * 1024;
+        readonly string file;
+        readonly Queue<string> recent = new Queue<string>();
+        readonly object gate = new object();
+        internal NetHelperLog(string directory)
+        {
+            file = Path.Combine(directory, "helper.log");
+            foreach (string path in new[] { file + ".old", file }) {
+                if (!File.Exists(path)) continue;
+                if (new FileInfo(path).Length > Limit) continue;
+                foreach (string line in File.ReadLines(path)) {
+                    // Only our fixed categories, timestamps and numeric codes can enter status.
+                    if (System.Text.RegularExpressions.Regex.IsMatch(line, @"\A[0-9T:Z.+-]+ stage=[a-z-]+ code=[0-9]+\z")) Remember(line);
+                }
+            }
+        }
+        void Remember(string line) { recent.Enqueue(line); while (recent.Count > 50) recent.Dequeue(); }
+        internal void Write(string stage, int code)
+        {
+            string line = DateTime.UtcNow.ToString("o") + " stage=" + stage + " code=" + code.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            lock (gate) {
+                Remember(line);
+                try {
+                    if (File.Exists(file) && new FileInfo(file).Length + NetHelperProtocol.Utf8.GetByteCount(line + "\n") > Limit) {
+                        if (File.Exists(file + ".old")) File.Delete(file + ".old"); File.Move(file, file + ".old");
+                    }
+                    File.AppendAllText(file, line + "\n", NetHelperProtocol.Utf8);
+                } catch { /* Lease and network shutdown must survive disk failures. */ }
+            }
+        }
+        internal string[] Recent() { lock (gate) return recent.ToArray(); }
+    }
+#endif
+}
