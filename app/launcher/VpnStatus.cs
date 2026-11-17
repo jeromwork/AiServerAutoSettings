@@ -47,7 +47,7 @@ namespace RemoteAgents.Launcher
                     // launcher's identity, so killing it cannot lock the next launch forever.
                     if (!File.Exists(Path.Combine(home, "state/vpn.stop")) && IdentityAlive(home, "state/vpn-session.json")) return status;
                     Files.Atomic(Path.Combine(home, "state/vpn.stop"), "stop\n");
-                    status = new Dictionary<string, object> { { "ok", false }, { "enabled", false }, { "state", "off" }, { "summary", "VPN выключен" }, { "updatedAt", DateTime.UtcNow.ToString("o") } };
+                    status = new Dictionary<string, object> { { "ok", false }, { "enabled", false }, { "state", "off" }, { "summary", "VPN выключен" }, { "stage", "" }, { "errorType", "" }, { "updatedAt", DateTime.UtcNow.ToString("o") } };
                     Files.Atomic(Path.Combine(home, "status/vpn.json"), Json.Encode(status)); return status;
                 }
                 bool alive = IdentityAlive(home, "state/vpn-host.json"); DateTime stamp;
@@ -59,7 +59,7 @@ namespace RemoteAgents.Launcher
                 // The host's independent lease has already closed the core Job at 2.5 s.
                 // Also request host exit when it returns from a stalled system call.
                 Files.Atomic(Path.Combine(home, "state/vpn.stop"), "stop\n");
-                status = new Dictionary<string, object> { { "ok", false }, { "enabled", false }, { "state", state }, { "summary", VpnWatchdog.FailureSummary(state) }, { "updatedAt", DateTime.UtcNow.ToString("o") } };
+                status = new Dictionary<string, object> { { "ok", false }, { "enabled", false }, { "state", state }, { "summary", VpnWatchdog.FailureSummary(state) }, { "stage", "" }, { "errorType", "" }, { "updatedAt", DateTime.UtcNow.ToString("o") } };
                 Files.Atomic(Path.Combine(home, "status/vpn.json"), Json.Encode(status)); return status;
             } catch { return Json.Map(null); }
         }
