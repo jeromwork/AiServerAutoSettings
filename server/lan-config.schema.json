@@ -1,5 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Internal server OpenVPN runtime settings. Public computer access is lan[].share in ../app/launcher/config.paste.schema.json: subnets, split-DNS domains, dnsServers (up to four IPv4 inside subnets), enabled (default true); deprecated forwards are ignored on the computer and omitted from config export. OpenVPN credentials remain on the server.",
   "title": "RemoteAgents restricted LAN settings",
   "type": "object",
   "additionalProperties": false,

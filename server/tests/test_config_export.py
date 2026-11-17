@@ -162,9 +162,10 @@ class ConfigExportTests(unittest.TestCase):
         self.assertEqual(exported['proxyOut']['ipv6'], 'block')
         desired['proxyOut']['ipv6'] = 'block'
         desired['agent']['sudo'] = 'full'  # export policy overrides saved apply/none
-        for k, v in desired.items():
+        for k, v in rc.computer_sections(desired).items():
             self.assertEqual(exported[k], v)
-        self.assertEqual(exported['secrets']['lan-office-ovpn'], '')
+        self.assertNotIn('lan-office-ovpn', exported['secrets'])
+        self.assertNotIn('lan-office-auth', exported['secrets'])
         self.assertEqual(exported['secrets']['proxy-out-password'], '')
         self.assertNotIn('LAN_PASSWORD_SENTINEL', result.stdout.decode())
         desired['proxyOut']['password'] = 'INLINE_SECRET_SENTINEL'

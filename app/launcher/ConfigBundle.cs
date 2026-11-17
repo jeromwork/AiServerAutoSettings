@@ -98,10 +98,29 @@ namespace RemoteAgents.Launcher
         }
         static Dictionary<string, object> LanShareSchema()
         {
+            var dns = A(S(15, 7, @"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$"), 4);
+            dns["description"] = "IPv4 DNS-серверы внутри одной из share.subnets; адреса проверяются при чтении конфига";
+            var enabled = B(); enabled["default"] = true;
+            var domains = A(S(253, 1, @"^(?:\*\.)?[a-zA-Z0-9][a-zA-Z0-9.-]*$"), 128);
+            domains["description"] = "Имена этой ЛВС для split-DNS; требуют непустой share.dnsServers";
+            var forwards = A(O(D("name", S(32, 1, @"^[a-z][a-z0-9-]{0,31}$"), "host", Host(),
+                "port", N(1, 65535), "localPort", N(1024, 65535)), "name", "host", "port", "localPort"), 64);
+            forwards["deprecated"] = true;
+            forwards["$comment"] = "Устаревшее поле: принимается для совместимости, игнорируется, config export его не выдаёт";
             return O(D("subnets", A(S(18, 1, @"^[0-9.]+/[0-9]{1,2}$"), 64),
-                "domains", A(S(253, 1, @"^(?:\*\.)?[a-zA-Z0-9][a-zA-Z0-9.-]*$"), 128),
-                "forwards", A(O(D("name", S(32, 1, @"^[a-z][a-z0-9-]{0,31}$"), "host", Host(),
-                    "port", N(1, 65535), "localPort", N(1024, 65535)), "name", "host", "port", "localPort"), 64)));
+                "domains", domains, "dnsServers", dns, "enabled", enabled, "forwards", forwards));
+        }
+
+        static Dictionary<string, object> LanSchema()
+        {
+            var managed = O(D("name", S(64, 1, "^[^/\\\\\\r\\n\\x00]+$"), "kind", E("openvpn"), "ovpn", Ref(),
+                    "login", S(256), "password", Ref(), "auth", Ref(), "host", Host(), "port", N(1, 65535), "testHost", Host(), "testPort", N(1, 65535), "checkUrl", Url(),
+                    "serverFingerprint", S(95, 64, "^(?:[0-9A-Fa-f]{64}|[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){31})$"),
+                    "share", LanShareSchema(), "subnets", A(S(18, 1), 64), "directEndpoint", B(), "dnsDomain", Host(), "dnsServer", Host()), "name", "kind", "ovpn");
+            var clientFields = new Dictionary<string, object>(Json.Map(managed["properties"]));
+            foreach (string key in new[] { "ovpn", "auth", "password", "login" }) clientFields.Remove(key);
+            var client = O(clientFields, "name", "share");
+            return D("oneOf", new object[] { managed, client });
         }
         internal static Dictionary<string, object> SchemaDocument()
         {
@@ -133,10 +152,7 @@ namespace RemoteAgents.Launcher
                 "proxyOut", Proxy(true),
                 "serverNetwork", O(D("enabled", B(), "tunAddress", S(18, 1), "tunName", S(15, 1, "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,14}$"),
                     "inbounds", Ref(), "inboundPorts", A(N(1, 65535), 32))),
-                "lan", A(O(D("name", S(64, 1, "^[^/\\\\\\r\\n\\x00]+$"), "kind", E("openvpn"), "ovpn", Ref(),
-                    "login", S(256), "password", Ref(), "auth", Ref(), "host", Host(), "port", N(1, 65535), "testHost", Host(), "testPort", N(1, 65535), "checkUrl", Url(),
-                    "serverFingerprint", S(95, 64, "^(?:[0-9A-Fa-f]{64}|[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){31})$"),
-                    "share", LanShareSchema(), "subnets", A(S(18, 1), 64), "directEndpoint", B(), "dnsDomain", Host(), "dnsServer", Host()), "name", "kind", "ovpn"), 64),
+                "lan", A(LanSchema(), 64),
                 "tailscale", O(D("enabled", B(), "hostname", S(63, 1, "^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$"), "authKey", Ref("tailscale-auth-key"), "userspace", B())),
                 "telegramGateway", O(D("enabled", B(), "port", N(1, 65535), "identity", Ref())),
                 "serverComponents", O(D(
@@ -538,6 +554,9 @@ namespace RemoteAgents.Launcher
         {
             var settings = ReadSettings(home); var profile = CurrentProfile(home, settings); var secrets = SecretVault.Load(home);
             LegacyValues(home,settings,profile,secrets);
+            // Accept legacy forwards on input, but never reissue them in an export.
+            foreach (var lan in Json.Array(Json.Get(profile, "lan")).Select(Json.Map))
+                Json.Map(Json.Get(lan, "share")).Remove("forwards");
             // Legacy installations already have a key on disk; include that exact key in a
             // recovery export instead of asking for the root password again.
             var server = Json.Map(Json.Get(profile, "server"));

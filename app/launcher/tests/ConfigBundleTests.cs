@@ -21,6 +21,7 @@ namespace RemoteAgents.Launcher
         internal static void Run()
         {
             DiskChoiceTests.Run();
+            LanConfig();
             var valid = Example();
             var p = ConfigBundle.Parse(Json.Encode(valid));
             Check(!p.Locked && p.Missing.Length == 0 && !p.Profile.ContainsKey("secrets"), "public profile separate");
@@ -119,9 +120,9 @@ namespace RemoteAgents.Launcher
             Check(ConfigRequests.SecretsFor(ConfigSections.Server, loginOnly.Profile, n => false).Count == 0, "missing agent auth allows CLI install and server waiting state");
             string schemaPath = FindSchema();
             Check(Canonical(Json.Read(schemaPath)) == Canonical(ConfigBundle.SchemaDocument()), "published schema matches compiled schema");
-            Check(ConfigBundle.Parse(File.ReadAllText(Path.Combine(Path.GetDirectoryName(schemaPath),"config.paste.example.json"))).Missing.Length == 3,"published example parses with missing secrets");
+            Check(ConfigBundle.Parse(File.ReadAllText(Path.Combine(Path.GetDirectoryName(schemaPath),"config.paste.example.json"))).Missing.Length == 2,"published example parses with missing secrets");
             var serverExample = ConfigBundle.Parse(File.ReadAllText(Path.Combine(Path.GetDirectoryName(schemaPath), "..", "..", "server", "server-apply.example.json")));
-            Check(serverExample.Missing.Contains("tailscale-auth-key") && serverExample.Missing.Contains("lan-clinic-auth"), "server apply example accepts all declarative sections");
+            Check(serverExample.Missing.Contains("tailscale-auth-key") && serverExample.Missing.Contains("lan-office-auth"), "server apply example accepts all declarative sections");
             var serverFields = ConfigBundle.Parse("{\"kind\":\"remoteagents-config\",\"schema\":1,\"tailscale\":{\"enabled\":true,\"authKey\":{\"secret\":\"custom-tail-key\"}},\"agent\":{\"sudo\":\"apply\"}}");
             foreach (string mode in new[] { "none", "apply", "full" }) {
                 var agent = ConfigBundle.Parse(Json.Encode(ConfigBundle.D("kind", "remoteagents-config", "schema", 1, "agent", ConfigBundle.D("sudo", mode))));
@@ -340,6 +341,64 @@ namespace RemoteAgents.Launcher
                 }
             } finally { Directory.Delete(home,true); }
             Console.WriteLine("PASS: CONFIG: " + count + " assertions");
+        }
+        static void LanConfig()
+        {
+            Func<Dictionary<string, object>, Dictionary<string, object>> config = item => ConfigBundle.D("kind", "remoteagents-config", "schema", 1, "lan", new[] { item });
+            var row = ConfigBundle.D("name", "office", "testHost", "10.123.0.10", "testPort", 443,
+                "share", ConfigBundle.D("subnets", new[] { "10.123.0.0/24" }));
+            var profile = ConfigBundle.Parse(Json.Encode(config(row)).Insert(1, "\r\n")).Profile;
+            var access = LanAccess.Read(profile);
+            Check(access.Enabled && access.Networks.Count == 1 && Json.Bool(access.Networks[0], "enabled") && access.DnsServers.Count == 0, "old CRLF share defaults to enabled with empty DNS");
+            Check(ConfigBundle.Parse(Json.Encode(config(row))).Missing.Length == 0, "computer share needs no OpenVPN secrets or kind");
+            Check(!ServerDeployment.Profile(profile).ContainsKey("lan"), "computer share never reaches server deployment");
+            Check(ConfigRequests.SecretsFor(ConfigSections.Lan, profile, n => false).Count == 0 && ConfigRequests.SecretsFor(ConfigSections.Server, profile, n => false).Count == 0, "share does not prompt for OpenVPN secrets");
+            var absent = ConfigBundle.D("lan", ConfigBundle.D("connections", new[] { ConfigBundle.D("name", "other") }));
+            Check(!ConfigPlan.Ready(ConfigBundle.D(), absent, profile)[ConfigSections.Lan], "unreported server LAN is not ready");
+            Check(ConfigRequests.LanClientStatus(profile, absent).Summary == "сеть office не подключена на сервере", "missing server LAN has exact status");
+            var requests = ConfigRequests.Lan("unused", profile, absent);
+            Check(requests.Item1.Length == 0 && requests.Item2.Length == 0, "access-only share neither deploys nor removes server LANs");
+            var present = ConfigBundle.D("lan", ConfigBundle.D("connections", new[] { ConfigBundle.D("name", "office") }));
+            var ready = ConfigPlan.Ready(ConfigBundle.D(), present, profile);
+            ServerDeployment.Observe(ConfigBundle.D("parts", new[] { ConfigBundle.D("part", "lan:office", "state", "waiting") }), profile, ready, present);
+            Check(ready[ConfigSections.Lan] && ConfigRequests.LanClientStatus(profile, present).Ok, "server connections determine readiness without deployment receipt");
+            Check(Json.Array(ConfigProfile.SyncFromSettings(profile, absent, "", "", "")["lan"]).Length == 2, "settings sync preserves desired missing share");
+            var share = Json.Map(row["share"]);
+            share["domains"] = new[] { "*.example.org" };
+            try { ConfigBundle.Parse(Json.Encode(config(row))); throw new Exception("missing DNS accepted"); }
+            catch (InvalidDataException e) { Check(e.Message.Contains("Для доменов сети office укажите share.dnsServers (DNS-серверы внутри ЛВС)"), "missing DNS names the LAN"); }
+            share["dnsServers"] = new[] { "10.123.0.53" };
+            share["forwards"] = new[] { ConfigBundle.D("name", "legacy", "host", "legacy.example.net", "port", 5432, "localPort", 15432) };
+            profile = ConfigBundle.Parse(Json.Encode(config(row))).Profile; access = LanAccess.Read(profile);
+            Check(access.DnsServers.SequenceEqual(new[] { "10.123.0.53" }) && access.Forwards.Count == 0 && !access.Allows("legacy.example.net", 5432), "DNS preserved and deprecated forwards ignored");
+            foreach (object invalid in new object[] { new[] { "8.8.8.8" }, new[] { "10.124.0.53" }, new[] { "10.123.0.999" }, new[] { "10.123.0.053" }, new[] { "::1" }, "10.123.0.53", null,
+                new[] { "10.123.0.53", "10.123.0.53" }, new[] { "10.123.0.51", "10.123.0.52", "10.123.0.53", "10.123.0.54", "10.123.0.55" } }) {
+                share["dnsServers"] = invalid;
+                Reject(() => ConfigBundle.Parse(Json.Encode(config(row))), "invalid or foreign DNS rejected");
+            }
+            share["dnsServers"] = new[] { "10.123.0.53" };
+            foreach (object invalid in new object[] { "false", 0, null }) { share["enabled"] = invalid; Reject(() => ConfigBundle.Parse(Json.Encode(config(row))), "invalid enabled rejected"); }
+            share["enabled"] = false; row.Remove("testHost");
+            profile = ConfigBundle.Parse(Json.Encode(config(row))).Profile;
+            Check(!LanAccess.Read(profile).Enabled && LanAccess.Read(profile).Networks.Count == 1 && ConfigRequests.LanClientStatus(profile, absent).Ok, "disabled share retained without probe or server readiness requirement");
+            share["enabled"] = true; row["testHost"] = "10.123.0.10";
+            var second = ConfigBundle.D("name", "branch", "testHost", "10.124.0.10", "testPort", 22,
+                "share", ConfigBundle.D("subnets", new[] { "10.124.0.0/24" }, "domains", new[] { "*.branch.example.org" }, "dnsServers", new[] { "10.124.0.53" }));
+            var multi = config(row); multi["lan"] = new[] { row, second };
+            access = LanAccess.Read(ConfigBundle.Parse(Json.Encode(multi)).Profile);
+            Check(access.Networks.Count == 2 && access.Subnets.Count == 2 && access.DnsServers.Count == 2, "networks stay separate with legacy aggregates");
+            var legacy = ConfigBundle.D("name", "legacy", "kind", "openvpn", "ovpn", ConfigBundle.D("secret", "lan-legacy-ovpn"));
+            Check(ConfigBundle.Parse(Json.Encode(config(legacy)).Insert(1, "\r\n")).Missing.Contains("lan-legacy-ovpn"), "old OpenVPN profile still accepted with CRLF");
+            multi["lan"] = new[] { row, legacy };
+            var managed = Json.Array(ServerDeployment.Profile(ConfigBundle.Parse(Json.Encode(multi)).Profile)["lan"]);
+            Check(managed.Length == 1 && Json.Str(Json.Map(managed[0]), "name") == "legacy", "mixed profile deploys only managed LAN");
+            string home = Path.Combine(Path.GetTempPath(), "ra-lan-config-" + Guid.NewGuid().ToString("N"));
+            try {
+                Directory.CreateDirectory(home);
+                ConfigBundle.Store(home, ConfigBundle.Parse(Json.Encode(config(row))), new[] { "lan" });
+                var exported = ConfigBundle.Parse(ConfigBundle.Export(home, null));
+                Check(!Json.Map(Json.Map(Json.Array(exported.Profile["lan"])[0])["share"]).ContainsKey("forwards") && exported.Missing.Length == 0, "local export omits forwards without requiring LAN secrets");
+            } finally { if (Directory.Exists(home)) Directory.Delete(home, true); }
         }
         static string FindSchema()
         {

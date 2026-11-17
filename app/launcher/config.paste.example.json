@@ -65,8 +65,7 @@
   },
   "secrets": {
     "server-key": "",
-    "happier-key": "",
-    "lan-office-ovpn": ""
+    "happier-key": ""
   },
   "update": {
     "enabled": true,
@@ -78,9 +77,6 @@
     {
       "name": "office",
       "kind": "openvpn",
-      "ovpn": {
-        "secret": "lan-office-ovpn"
-      },
       "testHost": "10.123.0.10",
       "testPort": 22,
       "subnets": [
@@ -93,14 +89,10 @@
         "domains": [
           "*.example.org"
         ],
-        "forwards": [
-          {
-            "name": "ssh",
-            "host": "10.123.0.10",
-            "port": 22,
-            "localPort": 18022
-          }
-        ]
+        "dnsServers": [
+          "10.123.0.53"
+        ],
+        "enabled": true
       }
     }
   ]

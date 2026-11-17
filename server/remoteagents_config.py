@@ -15,6 +15,7 @@ import getpass
 import hashlib
 import hmac
 import importlib.util
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -819,6 +820,47 @@ def server_sections(c):
     return data
 
 
+def computer_sections(deployment):
+    """LAN clients run on the server; the computer gets only public share settings.
+
+    Keep the original snapshot for recovery matching. No OpenVPN references or
+    deprecated forwards may reach the computer, even with server-secret export.
+    """
+    result = dict(deployment)
+    if 'lan' not in deployment:
+        return result
+    rows = []
+    for item in deployment['lan']:
+        source = item.get('share', {})
+        share = {k: v for k, v in source.items() if k != 'forwards'}
+        share.setdefault('subnets', item.get('subnets', []))
+        share.setdefault('domains', [item['dnsDomain']] if item.get('dnsDomain') else [])
+        share.setdefault('dnsServers', [item['dnsServer']] if item.get('dnsServer') else [])
+        share.setdefault('enabled', True)
+        require(type(share['enabled']) is bool, 'share.enabled: нужно true или false.')
+        require(isinstance(share['dnsServers'], list) and len(share['dnsServers']) <= 4,
+                'share.dnsServers: нужен массив, не более 4 IPv4.')
+        require(len({json.dumps(d) for d in share['dnsServers']}) == len(share['dnsServers']), 'share.dnsServers: адреса повторяются.')
+        networks = [ipaddress.IPv4Network(n) for n in share['subnets']]
+        for dns in share['dnsServers']:
+            try:
+                address = ipaddress.IPv4Address(dns)
+            except (ValueError, TypeError):
+                raise Error('share.dnsServers: нужен IPv4.') from None
+            require(isinstance(dns, str) and any(address in n for n in networks),
+                    'share.dnsServers: DNS-сервер должен входить в share.subnets этой сети.')
+        require(not share['domains'] or share['dnsServers'],
+                'Для доменов сети ' + item['name'] + ' укажите share.dnsServers (DNS-серверы внутри ЛВС)')
+        row = dict(name=item['name'], kind=item.get('kind', 'openvpn'), share=share)
+        host = item.get('testHost', item.get('host', ''))
+        port = item.get('testPort', item.get('port', 22))
+        if host:
+            row.update(testHost=host, testPort=port)
+        rows.append(row)
+    result['lan'] = rows
+    return result
+
+
 def server_secret_values(data, deployment):
     """Only explicitly requested deployment refs, never unrelated root secrets."""
     require(isinstance(data, dict) and data.get('schema') == 1 and isinstance(data.get('config'), dict)
@@ -887,6 +929,7 @@ def export(c, args, out=sys.stdout, err=sys.stderr):
     values = {}
     server, vpn = common_sections(c, values, args.vpn)
     deployment = server_sections(c)
+    computer = computer_sections(deployment)
     if getattr(args, 'include_server_secrets', False):
         require(args.output, '--include-server-secrets требует --output, чтобы не печатать секреты в терминал.')
         recovered = read_server_secrets(deployment)
@@ -920,7 +963,19 @@ def export(c, args, out=sys.stdout, err=sys.stderr):
     config['bridge'] = {'enabled': True, 'allowShell': True}  # конституция 6д
     if folders is not None:
         config['disk'] = {'folders': folders}
-    config.update(deployment)
+    # read_server_secrets matched the complete snapshot above, then LAN secrets
+    # are removed before encryption/printing and before empty slots are created.
+    def secret_names(node):
+        if isinstance(node, dict):
+            if 'secret' in node:
+                return {node['secret']}
+            return set().union(*(secret_names(v) for v in node.values()))
+        if isinstance(node, list):
+            return set().union(*(secret_names(v) for v in node))
+        return set()
+    for removed in secret_names(deployment) - secret_names(computer):
+        values.pop(removed, None)
+    config.update(computer)
     # Export choice (default full) overrides saved sudo; preserve other public fields.
     config['agent'] = {**config.get('agent', {}), 'sudo': args.agent_sudo}
     # Empty named slots make missing deployment secrets explicit in the receiving program.
@@ -934,7 +989,7 @@ def export(c, args, out=sys.stdout, err=sys.stderr):
         elif isinstance(node, list):
             for child in node:
                 refs(child)
-    refs(deployment)
+    refs(computer)
     config['secrets'] = protect(values, master) if master else values
     text = json.dumps(config, ensure_ascii=False, indent=2) + '\n'
     require(len(text.encode('utf-8')) <= 4 * 1024 * 1024, 'Экспорт больше 4 МиБ; конфиг не выдан.')
