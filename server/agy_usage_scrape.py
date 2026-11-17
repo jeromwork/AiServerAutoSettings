@@ -56,7 +56,8 @@ def capture():
 
 def scrape():
     tmux('kill-session', '-t', SESSION)
-    tmux('new-session', '-d', '-s', SESSION, '-x', '170', '-y', '60', '-c', '/tmp', 'agy')
+    agy = Path.home() / '.local/bin/agy'
+    tmux('new-session', '-d', '-s', SESSION, '-x', '170', '-y', '60', '-c', '/tmp', str(agy) if agy.is_file() else 'agy')
     try:
         screen = ''
         for _ in range(20):

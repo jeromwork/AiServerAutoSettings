@@ -510,8 +510,9 @@ def happierWeb(e, apply):
     service_name = 'remoteagents-happier-web.service'
     timer_name = 'remoteagents-happier-web-update.timer'
     update_name = 'remoteagents-happier-web-update.service'
+    usage_timer = 'remoteagents-agy-usage.timer'
     if not item.get('enabled'):
-        return disable(e, [service_name, timer_name, update_name], apply)
+        return disable(e, [service_name, timer_name, update_name, usage_timer], apply)
     _, _, home = e.worker()
     path = '.config/remoteagents/happier-web.json'
     wanted = json.dumps(item, sort_keys=True) + '\n'
@@ -526,19 +527,31 @@ def happierWeb(e, apply):
                'ExecStart=/usr/bin/python3 -I ' + entry + ' update\nTimeoutStartSec=15min\nUMask=0077\nNoNewPrivileges=yes\n')
     timer = ('[Timer]\nOnBootSec=10m\nOnUnitInactiveSec=' + str(item.get('updateIntervalHours', 6)) +
              'h\nRandomizedDelaySec=5m\n[Install]\nWantedBy=timers.target\n')
+    # Остаток Gemini берётся из `/usage` agy: снимок раз в 10 минут. Без agy у работника таймер не нужен.
+    agy = e.s.path(home / '.local/bin/agy')
+    usage = agy.is_file() and not agy.is_symlink()
+    usage_service = ('[Unit]\nDescription=Snapshot agy /usage for the quota bar\n[Service]\nType=oneshot\n'
+                     'Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin\n'
+                     'ExecStart=/usr/bin/python3 -I /usr/local/lib/remoteagents/server/agy_usage_scrape.py\n'
+                     'TimeoutStartSec=2min\nUMask=0077\nNoNewPrivileges=yes\n')
+    usage_timer_text = '[Timer]\nOnBootSec=2m\nOnUnitInactiveSec=10m\n[Install]\nWantedBy=timers.target\n'
+    usage_path = '.config/systemd/user/remoteagents-agy-usage.service'
+    usage_file = e.s.path(home / usage_path)
+    usage_same = not usage or (usage_file.is_file() and not usage_file.is_symlink() and usage_file.read_text() == usage_service)
     update_path = '.config/systemd/user/' + update_name
     update_file = e.s.path(home / update_path)
     update_same = update_file.is_file() and not update_file.is_symlink() and update_file.read_text() == oneshot
     code_ok = e.code_current()
-    ready = same and update_same and code_ok
+    ready = same and update_same and usage_same and code_ok
     # Check health through the same worker boundary. Never poll providers in reconcile.
     health = False
     if ready:
         health = e.s.run(e.user_cmd('python3', '-I', entry, 'check'), check=False).returncode == 0
     service_ok = unit(e, service_name, service, False)
     timer_ok = unit(e, timer_name, timer, False)
+    usage_ok = not usage or unit(e, usage_timer, usage_timer_text, False)
     if not apply:
-        ok = ready and health and service_ok and timer_ok
+        ok = ready and health and service_ok and timer_ok and usage_ok
         return e.row('happierWeb', 'ready' if ok else 'change', 'UI и таймер проверены' if ok else 'будут восстановлены Happier Web и таймер обновления')
     user_ready(e)
     e.install_code()
@@ -557,6 +570,13 @@ def happierWeb(e, apply):
     if service_ok and (not same or not code_ok):
         e.s.run(e.user_cmd('systemctl', '--user', 'restart', service_name), change=True)
     unit(e, timer_name, timer, True)
+    if usage:
+        if e.s.run(['which', 'tmux'], check=False).returncode:
+            e.s.run(['apt-get', 'install', '-y', '--no-install-recommends', 'tmux'], change=True, timeout=300)
+        if not usage_same:
+            io(e, 'bridge', 'assets', {usage_path: usage_service})
+            e.s.run(e.user_cmd('systemctl', '--user', 'daemon-reload'), change=True)
+        unit(e, usage_timer, usage_timer_text, True)
     # systemd active alone is insufficient: wait for the loopback listener.
     import time
     for attempt in range(30):

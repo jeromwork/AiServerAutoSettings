@@ -69,9 +69,13 @@
 - Codex: `~/.codex/auth.json` (OAuth), `GET https://chatgpt.com/backend-api/wham/usage`, раз в 5 мин.
 - Gemini (Antigravity/`agy`): облачные методы (`fetchAvailableModels`, `retrieveUserQuota`) для Gemini 3.8 Flash
   отдают 100% остатка при реальных тратах, поэтому остаток берётся из `/usage` самого agy.
-  `server/agy_usage_scrape.py` (cron, раз в 10 мин) запускает agy в tmux, вводит `/usage`, разбирает проценты
+  `server/agy_usage_scrape.py` запускает agy в tmux, вводит `/usage`, разбирает проценты
   «Weekly/Five Hour Limit Remaining» и время сброса и пишет `~/.cache/remoteagents/agy-usage.json` (0600).
-  Опросчик читает этот файл; снимок старше 30 мин → «нет данных», а не 0%. Картинки (Nano Banana) не показываются.
+  Запуск: пользовательский таймер `remoteagents-agy-usage.timer` (каждые 10 мин) + `.service`. Их ставит `server apply`
+  (`serverComponents.happierWeb`, `server_components.py`) вместе со скриптом в `/usr/local/lib/remoteagents/server/`,
+  только если у работника есть `~/.local/bin/agy`; при отсутствии `tmux` ставится из apt. Свои значения в коде не зашиты:
+  путь — домашний каталог работника. На новом сервере достаточно один раз войти в agy (`/login`), дальше всё само.
+  Опросчик читает этот файл; снимок старше 30 мин → «нет данных», а не 0%. Картинки (Nano Banana) не показываются. Порядок окон как у Claude/Codex: 5 ч, потом неделя.
   Токены agy скрипт не читает и не пишет: вход держит agy (вход не делать через `gemini` CLI с тем же аккаунтом — слетает).
 - Строка показывает ОСТАТОК (100 − занято); жёлтый ≤ 20%, красный ≤ 5%. В JSON `usedPercent` остаётся «занято».
 - В строке каждого окна видно время и дату (`18:40 17.11`); возраст данных остаётся только в подсказке.

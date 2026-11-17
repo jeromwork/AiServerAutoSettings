@@ -116,10 +116,12 @@ def gemini_windows(path, stamp):
     if type(taken) not in (float, int) or stamp - taken > 1800:
         return []
     labels = dict(five_hour='5 ч', seven_day='неделя')
+    rows = [r for r in ((data.get('groups') or {}).get('gemini') or []) if isinstance(r, dict) and r.get('id') in labels]
     windows = []
-    for row in ((data.get('groups') or {}).get('gemini') or []):
+    # Как у Claude и Codex: сначала 5 ч, потом неделя.
+    for row in sorted(rows, key=lambda r: list(labels).index(r['id'])):
         remaining = percent(row.get('remainingPercent'))
-        if not isinstance(row, dict) or row.get('id') not in labels or remaining is None:
+        if remaining is None:
             continue
         secs = row.get('resetsInSec')
         reset = taken + secs if type(secs) in (float, int) else None

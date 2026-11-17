@@ -490,7 +490,7 @@ class QuotaTests(Temp):
         row = next(r for r in poller.accounts.values() if r['provider'] == 'gemini')
         self.assertEqual(row['status'], 'ok')
         windows = {w['id']: w for w in row['windows']}
-        self.assertEqual(sorted(windows), ['five_hour', 'seven_day'])
+        self.assertEqual([w['id'] for w in row['windows']], ['five_hour', 'seven_day'])
         self.assertEqual(windows['five_hour']['label'], '5 ч')
         self.assertEqual(windows['five_hour']['remainingPercent'], 80.31)
         self.assertAlmostEqual(windows['five_hour']['usedPercent'], 19.69)

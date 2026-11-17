@@ -237,11 +237,14 @@ class HappierWebComponentsTests(unittest.TestCase):
             c = config(); c['lan'] = []; c.pop('tailscale'); c.pop('telegramGateway'); c.pop('proxyOut')
             c['serverComponents'] = {'happierWeb': {'enabled': True,'port':47832,'keepChats':12}}
             self.assertEqual(next(p for p in f.engine(c).run('plan')['parts'] if p['part'] == 'happierWeb')['state'], 'change')
+            f.write('/home/worker/.local/bin/agy', '#!/bin/sh\n')
             first = f.complete(c)
             self.assertTrue(first['ok'],first)
             again = f.engine(c).run('apply')
             self.assertTrue(again['ok'],again); self.assertEqual(again['actions'],[])
             self.assertEqual(sum(args[-1]=='update' for args in f.calls),1)
+            self.assertIn('remoteagents-agy-usage.timer',f.active)
+            self.assertIn('agy_usage_scrape.py',f.path('/home/worker/.config/systemd/user/remoteagents-agy-usage.service').read_text())
             unit = f.path('/home/worker/.config/systemd/user/remoteagents-happier-web.service')
             unit.unlink(); f.active.discard('remoteagents-happier-web.service')
             self.assertTrue(app.module('server_recovery').reconcile(app,f.system))
@@ -251,6 +254,7 @@ class HappierWebComponentsTests(unittest.TestCase):
             self.assertTrue(f.engine(c).run('apply')['ok'])
             self.assertNotIn('remoteagents-happier-web.service',f.active)
             self.assertNotIn('remoteagents-happier-web-update.timer',f.active)
+            self.assertNotIn('remoteagents-agy-usage.timer',f.active)
             self.assertTrue(unit.is_file()); self.assertTrue(f.ui_installed)
 
     def test_schema_bounds_and_file_delivery(self):
