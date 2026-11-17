@@ -6,6 +6,42 @@ $work=Join-Path ([IO.Path]::GetTempPath()) ('transport-test-'+[guid]::NewGuid().
 $count=0
 function Assert($Condition,[string]$Message){if(-not $Condition){throw ('Тест: '+$Message)};$script:count++}
 try{
+    # LAN contract only: no sockets, TUN, DNS requests or server changes.
+    $lanOld=('{"profile":{"lan":[{"name":"office","kind":"openvpn","testHost":"10.123.0.10","testPort":443,"share":{"subnets":["10.123.0.0/24"]}}]}}'.Insert(1,"`r`n")|ConvertFrom-Json)
+    $lan=Get-TransportLan $lanOld
+    Assert ($lan.enabled -and @($lan.networks).Count -eq 1 -and $lan.networks[0].enabled -and @($lan.networks[0].dnsServers).Count -eq 0) 'old CRLF LAN defaults to enabled and empty DNS'
+    $lanOld.profile.lan[0].share|Add-Member domains @('*.example.org')
+    $message='';try{Get-TransportLan $lanOld|Out-Null}catch{$message=$_.Exception.Message}
+    Assert ($message -eq 'Для доменов сети office укажите share.dnsServers (DNS-серверы внутри ЛВС)') 'domains without DNS name the affected LAN'
+    $lanOld.profile.lan[0].share|Add-Member dnsServers @('10.123.0.53')
+    $lanOld.profile.lan[0].share|Add-Member forwards @([pscustomobject]@{name='legacy';host='legacy.example.net';port=5432;localPort=15432})
+    $lan=Get-TransportLan $lanOld
+    Assert (@($lan.forwards).Count -eq 0 -and $lan.dnsServers[0] -eq '10.123.0.53') 'deprecated forwards ignored, DNS retained'
+    $branch=[pscustomobject]@{name='branch';testHost='10.124.0.10';testPort=22;share=[pscustomobject]@{subnets=@('10.124.0.0/24');domains=@('*.branch.example.org');dnsServers=@('10.124.0.53');enabled=$true}}
+    $lanOld.profile.lan+=@($branch)
+    $lan=Get-TransportLan $lanOld
+    Assert (@($lan.networks).Count -eq 2 -and @($lan.subnets).Count -eq 2 -and @($lan.dnsServers).Count -eq 2 -and $lan.probeHost -eq '10.123.0.10') 'separate LANs retain legacy aggregate and first active probe'
+    Assert ($lan.networks[1].name -eq 'branch' -and $lan.networks[1].subnets[0] -eq '10.124.0.0/24' -and $lan.networks[1].domains[0] -eq '*.branch.example.org' -and $lan.networks[1].dnsServers[0] -eq '10.124.0.53' -and $lan.networks[1].testPort -eq 22) 'each row keeps its own DNS and probe'
+    $lanOld.profile.lan[0].share|Add-Member enabled $false
+    $lan=Get-TransportLan $lanOld
+    Assert (@($lan.networks).Count -eq 2 -and -not $lan.networks[0].enabled -and @($lan.subnets).Count -eq 1 -and $lan.probeHost -eq '10.124.0.10') 'disabled LAN stays listed without legacy destinations'
+    foreach($badDns in @('8.8.8.8','10.124.0.53','10.123.0.999','10.123.0.053','::1')){
+        $bad=Copy-TransportObject $lanOld;$bad.profile.lan[0].share.dnsServers=@($badDns)
+        $rejected=$false;try{Get-TransportLan $bad|Out-Null}catch{$rejected=$true}
+        Assert $rejected ('reject invalid or foreign DNS '+$badDns)
+    }
+    foreach($badDns in @('"10.123.0.53"','null','[null]','[53]','["10.123.0.53","10.123.0.53"]','["10.123.0.51","10.123.0.52","10.123.0.53","10.123.0.54","10.123.0.55"]')){
+        $bad=Copy-TransportObject $lanOld;$bad.profile.lan[0].share.dnsServers=('{"value":'+$badDns+'}'|ConvertFrom-Json).value
+        $rejected=$false;try{Get-TransportLan $bad|Out-Null}catch{$rejected=$true}
+        Assert $rejected 'reject invalid DNS shape, duplicates or count'
+    }
+    foreach($badEnabled in @('false',0)){
+        $bad=Copy-TransportObject $lanOld;$bad.profile.lan[0].share.enabled=$badEnabled
+        $rejected=$false;try{Get-TransportLan $bad|Out-Null}catch{$rejected=$true}
+        Assert $rejected 'enabled is a boolean'
+    }
+    $branch.share.enabled=$false
+    Assert (-not (Get-TransportLan $lanOld).enabled) 'all LANs disabled keep legacy proxy disabled'
     $key=Join-Path $work 'key';$known=Join-Path $work 'known_hosts'
     $keygen=Get-Command ssh-keygen -ErrorAction SilentlyContinue
     if($keygen){[void](Invoke-TransportText $keygen.Source @('-q','-t','ed25519','-N','','-f',$key))}

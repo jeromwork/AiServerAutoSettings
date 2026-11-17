@@ -10,7 +10,8 @@ namespace RemoteAgents.Launcher
     // Public share settings only; all networking and credentials remain in the existing channel.
     internal sealed class LanAccess
     {
-        internal readonly List<string> Subnets = new List<string>(), Domains = new List<string>();
+        internal readonly List<string> Subnets = new List<string>(), Domains = new List<string>(), DnsServers = new List<string>();
+        internal readonly List<Dictionary<string, object>> Networks = new List<Dictionary<string, object>>();
         internal readonly List<Dictionary<string, object>> Forwards = new List<Dictionary<string, object>>();
         internal string ProbeHost = ""; internal int ProbePort;
         internal bool Enabled { get { return Subnets.Count + Domains.Count + Forwards.Count > 0; } }
@@ -45,29 +46,47 @@ namespace RemoteAgents.Launcher
             if (Domains.Any(d => d.StartsWith("*.") ? host.EndsWith(d.Substring(1), StringComparison.OrdinalIgnoreCase) : host.Equals(d, StringComparison.OrdinalIgnoreCase))) return true;
             try { uint ip = IPv4(host); return Subnets.Any(s => { Cidr(s); var p = s.Split('/'); int bits = int.Parse(p[1]); return (ip & (uint.MaxValue << (32 - bits))) == IPv4(p[0]); }); } catch (InvalidDataException) { return false; }
         }
+        static bool Contains(string subnet, uint ip)
+        {
+            Cidr(subnet); var p = subnet.Split('/'); int bits = int.Parse(p[1]);
+            return (ip & (uint.MaxValue << (32 - bits))) == IPv4(p[0]);
+        }
+        internal static bool ClientOnly(Dictionary<string, object> lan)
+        { return lan.ContainsKey("share") && !new[] { "ovpn", "auth", "password" }.Any(lan.ContainsKey); }
+        internal static bool Active(Dictionary<string, object> lan)
+        { var share = Json.Map(Json.Get(lan, "share")); return !ClientOnly(lan) || !share.ContainsKey("enabled") || Json.Bool(share, "enabled"); }
         internal static LanAccess Read(Dictionary<string, object> profile)
         {
             var result = new LanAccess();
+            var names = new HashSet<string>(StringComparer.Ordinal);
             foreach (var lan in Json.Array(Json.Get(profile, "lan")).Select(Json.Map)) {
+                if (!names.Add(Json.Str(lan, "name"))) throw new InvalidDataException("lan: имена сетей повторяются");
                 var share = Json.Map(Json.Get(lan, "share"));
                 var one = new LanAccess();
                 foreach (string s in Json.Strings(Json.Get(share, "subnets"))) { Cidr(s); one.Subnets.Add(s); }
                 foreach (string d in Json.Strings(Json.Get(share, "domains"))) one.Domains.Add(Domain(d));
-                var names = new HashSet<string>();
-                foreach (var f in Json.Array(Json.Get(share, "forwards")).Select(Json.Map)) {
-                    if (!names.Add(Json.Str(f, "name"))) throw new InvalidDataException("share.forwards: имена повторяются");
-                    string host = Json.Str(f, "host"); IPAddress ip;
-                    if (IPAddress.TryParse(host, out ip)) { IPv4(host); Cidr(host + "/32"); }
-                    else { Domain(host); if (host.StartsWith("*.")) throw new InvalidDataException("forward.host: нужен точный хост"); }
-                    one.Forwards.Add(f);
+                var dns = Json.Strings(Json.Get(share, "dnsServers"));
+                if (dns.Length > 4) throw new InvalidDataException("share.dnsServers: не более 4 DNS-серверов");
+                foreach (string server in dns) {
+                    uint ip = IPv4(server);
+                    if (!one.Subnets.Any(n => Contains(n, ip))) throw new InvalidDataException("share.dnsServers: DNS-сервер должен входить в share.subnets этой сети");
+                    one.DnsServers.Add(server);
                 }
-                if (!one.Enabled) continue;
+                if (one.Domains.Count > 0 && one.DnsServers.Count == 0)
+                    throw new InvalidDataException("Для доменов сети " + Json.Str(lan, "name") + " укажите share.dnsServers (DNS-серверы внутри ЛВС)");
+                if (!lan.ContainsKey("share")) continue;
+                bool enabled = !share.ContainsKey("enabled") || Json.Bool(share, "enabled");
+                if (share.ContainsKey("enabled") && !(share["enabled"] is bool)) throw new InvalidDataException("share.enabled: нужно true или false");
                 string probe = Json.Text(lan, "testHost", Json.Str(lan, "host"));
                 int port = Json.Int(lan, "testPort", Json.Int(lan, "port", 22));
-                if (probe.Length == 0 && one.Forwards.Count > 0) { probe = Json.Str(one.Forwards[0], "host"); port = Json.Int(one.Forwards[0], "port", 0); }
-                if (probe.Length == 0 || port < 1 || port > 65535 || !Regex.IsMatch(probe, @"^[a-zA-Z0-9][a-zA-Z0-9.-]*$") || !one.Allows(probe, port)) throw new InvalidDataException("lan.share: задайте testHost/testPort, разрешённый через share (или первый forward)");
+                result.Networks.Add(new Dictionary<string, object> { { "name", Json.Str(lan, "name") }, { "subnets", one.Subnets.ToArray() },
+                    { "domains", one.Domains.ToArray() }, { "dnsServers", one.DnsServers.ToArray() }, { "testHost", probe }, { "testPort", port }, { "enabled", enabled } });
+                // Deprecated forwards are deliberately not used as destinations or probes.
+                if (!enabled) continue;
+                if (!one.Enabled) continue;
+                if (probe.Length == 0 || port < 1 || port > 65535 || !Regex.IsMatch(probe, @"^[a-zA-Z0-9][a-zA-Z0-9.-]*$") || !one.Allows(probe, port)) throw new InvalidDataException("lan.share: задайте testHost/testPort, разрешённый через share");
                 if (result.ProbeHost.Length == 0) { result.ProbeHost = probe; result.ProbePort = port; }
-                result.Subnets.AddRange(one.Subnets); result.Domains.AddRange(one.Domains); result.Forwards.AddRange(one.Forwards);
+                result.Subnets.AddRange(one.Subnets); result.Domains.AddRange(one.Domains); result.DnsServers.AddRange(one.DnsServers);
             }
             return result;
         }

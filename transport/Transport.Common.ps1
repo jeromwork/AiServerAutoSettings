@@ -415,29 +415,59 @@ function Assert-LanDomain([string]$Domain) {
     if($name.Length -gt 253 -or -not $name.Contains('.') -or [Net.IPAddress]::TryParse($name,[ref]$ip)){throw 'share.domains: нужно DNS-имя'}
     foreach($label in $name.Split('.')){if($label -notmatch '^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$'){throw 'share.domains: неверное DNS-имя'}}
 }
-function Get-TransportLan($Config) {
-    $subnets=@();$domains=@();$forwards=@();$probeHost='';$probePort=0;$index=0
-    foreach($item in @($Config.profile.lan)){
-        if(-not $item -or -not $item.share){$index++;continue}
-        $share=$item.share;$names=@{}
-        foreach($subnet in @($share.subnets|Where-Object {$null -ne $_})){Assert-LanCidr ([string]$subnet);$subnets+=[string]$subnet}
-        foreach($domain in @($share.domains|Where-Object {$null -ne $_})){Assert-LanDomain ([string]$domain);$domains+=([string]$domain).ToLowerInvariant()}
-        foreach($f in @($share.forwards)){
-            if(-not $f){continue}
-            if([string]$f.name -notmatch '^[a-z][a-z0-9-]{0,31}$' -or $names.ContainsKey([string]$f.name)){throw 'share.forwards: неверное или повторное имя'};$names[[string]$f.name]=$true
-            foreach($k in @('port','localPort')){if($f.$k -is [bool] -or $f.$k -isnot [ValueType] -or [double]$f.$k -ne [Math]::Floor([double]$f.$k) -or [int]$f.$k -lt 1 -or [int]$f.$k -gt 65535 -or ($k -eq 'localPort' -and [int]$f.$k -lt 1024)){throw 'share.forwards: неверный порт'}}
-            if([string]$f.host -match '^[0-9.]+$'){Assert-LanCidr ([string]$f.host+'/32')}else{Assert-LanDomain ([string]$f.host);if([string]$f.host -match '\*'){throw 'forward.host: нужен точный хост'}}
-            $forwards+=[pscustomobject]@{name=$f.name;tag=('lan-fwd-'+$index+'-'+$f.name);host=([string]$f.host).ToLowerInvariant();port=[int]$f.port;localPort=[int]$f.localPort}
-        }
-        if(-not $probeHost -and ($subnets.Count+$domains.Count+$forwards.Count -gt 0)){
-            $probeHost=[string](Get-TransportValue $item 'testHost' (Get-TransportValue $item 'host' ''))
-            $probePort=[int](Get-TransportValue $item 'testPort' (Get-TransportValue $item 'port' 22))
-            if(-not $probeHost -and @($share.forwards).Count){$probeHost=[string]$share.forwards[0].host;$probePort=[int]$share.forwards[0].port}
-            if(-not $probeHost -or $probePort -lt 1 -or $probePort -gt 65535 -or $probeHost -notmatch '^[a-zA-Z0-9][a-zA-Z0-9.-]*$'){throw 'lan.share: нужен корректный testHost/testPort или первый forward'}
-        }
-        $index++
+function Assert-LanIPv4([string]$Address) {
+    if($Address -notmatch '^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$'){throw 'share.dnsServers: нужен IPv4'}
+    [uint64]$value=0
+    foreach($part in $Address.Split('.')){
+        if([int]$part -gt 255 -or ($part.Length -gt 1 -and $part[0] -eq '0')){throw 'share.dnsServers: неверный IPv4'}
+        $value=$value*256+[int]$part
     }
-    [pscustomobject]@{enabled=($subnets.Count+$domains.Count+$forwards.Count -gt 0);proxyAddress='127.0.0.1';proxyPort=0;subnets=@($subnets|Select-Object -Unique);domains=@($domains|Select-Object -Unique);forwards=@($forwards);probeHost=$probeHost;probePort=$probePort}
+    return $value
+}
+function Assert-LanContains([string]$Address,$Subnets) {
+    $ip=Assert-LanIPv4 $Address
+    foreach($subnet in @($Subnets)){
+        Assert-LanCidr ([string]$subnet)
+        $parts=([string]$subnet).Split('/');$size=[Math]::Pow(2,32-[int]$parts[1]);$network=Assert-LanIPv4 $parts[0]
+        if($ip -ge $network -and $ip -lt $network+$size){return $true}
+    }
+    return $false
+}
+function Get-TransportLan($Config) {
+    $subnets=@();$domains=@();$dnsServers=@();$networks=@();$probeHost='';$probePort=0;$names=@{}
+    foreach($item in @($Config.profile.lan)){
+        if(-not $item){continue}
+        $name=[string]$item.name
+        if($names.ContainsKey($name)){throw 'lan: имена сетей повторяются'};$names[$name]=$true
+        if($null -eq $item.share){continue}
+        $share=$item.share;$oneSubnets=@();$oneDomains=@();$oneDns=@()
+        $keys=if($share -is [Collections.IDictionary]){@($share.Keys)}else{@($share.PSObject.Properties.Name)}
+        foreach($subnet in @($share.subnets|Where-Object {$null -ne $_})){Assert-LanCidr ([string]$subnet);$oneSubnets+=[string]$subnet}
+        foreach($domain in @($share.domains|Where-Object {$null -ne $_})){Assert-LanDomain ([string]$domain);$oneDomains+=([string]$domain).ToLowerInvariant()}
+        if('dnsServers' -in $keys -and $share.dnsServers -isnot [Array]){throw 'share.dnsServers: нужен массив IPv4'}
+        $rawDns=@();if('dnsServers' -in $keys){$rawDns=$share.dnsServers}
+        foreach($dns in $rawDns){
+            if($dns -isnot [string] -or -not (Assert-LanContains ([string]$dns) $oneSubnets)){throw 'share.dnsServers: DNS-сервер должен входить в share.subnets этой сети'}
+            if($dns -in $oneDns){throw 'share.dnsServers: адреса повторяются'};$oneDns+=$dns
+        }
+        if($oneDns.Count -gt 4){throw 'share.dnsServers: не более 4 DNS-серверов'}
+        if($oneDomains.Count -gt 0 -and $oneDns.Count -eq 0){throw ('Для доменов сети '+$name+' укажите share.dnsServers (DNS-серверы внутри ЛВС)')}
+        $enabled=if('enabled' -in $keys){$share.enabled}else{$true}
+        if($enabled -isnot [bool]){throw 'share.enabled: нужно true или false'}
+        $hostName=[string](Get-TransportValue $item 'testHost' (Get-TransportValue $item 'host' ''))
+        $port=Get-TransportValue $item 'testPort' (Get-TransportValue $item 'port' 22)
+        # Keep each network separate, including disabled rows. Deprecated forwards are ignored.
+        $networks+=[pscustomobject]@{name=$name;subnets=@($oneSubnets|Select-Object -Unique);domains=@($oneDomains|Select-Object -Unique);dnsServers=@($oneDns);testHost=$hostName;testPort=$port;enabled=$enabled}
+        if(-not $enabled -or $oneSubnets.Count+$oneDomains.Count -eq 0){continue}
+        if(-not $hostName -or $port -is [bool] -or $port -isnot [ValueType] -or [double]$port -ne [Math]::Floor([double]$port) -or [int]$port -lt 1 -or [int]$port -gt 65535 -or $hostName -notmatch '^[a-zA-Z0-9][a-zA-Z0-9.-]*$'){throw 'lan.share: нужен корректный testHost/testPort'}
+        $allowed=$false
+        if($hostName -match '^[0-9.]+$'){$allowed=Assert-LanContains $hostName $oneSubnets}
+        foreach($domain in $oneDomains){if(($domain.StartsWith('*.') -and $hostName.EndsWith($domain.Substring(1),[StringComparison]::OrdinalIgnoreCase)) -or $hostName -ieq $domain){$allowed=$true}}
+        if(-not $allowed){throw 'lan.share: testHost должен входить в share этой сети'}
+        if(-not $probeHost){$probeHost=$hostName;$probePort=[int]$port}
+        $subnets+=$oneSubnets;$domains+=$oneDomains;$dnsServers+=$oneDns
+    }
+    [pscustomobject]@{networks=@($networks);enabled=($subnets.Count+$domains.Count -gt 0);proxyAddress='127.0.0.1';proxyPort=0;subnets=@($subnets|Select-Object -Unique);domains=@($domains|Select-Object -Unique);dnsServers=@($dnsServers|Select-Object -Unique);forwards=@();probeHost=$probeHost;probePort=$probePort}
 }
 
 function Read-TransportSettings([string]$Root) {

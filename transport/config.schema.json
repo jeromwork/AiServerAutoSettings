@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$comment": "Фрагмент: схема значения config.json.transport. Версия всего config.json задаётся лаунчером. Happier local web is read from config.profile.happier.localWeb (fallback config.happier.localWeb), not from transport.",
+  "$comment": "Фрагмент: схема значения config.json.transport. Версия всего config.json задаётся лаунчером. Happier local web is read from config.profile.happier.localWeb (fallback config.happier.localWeb), not from transport. LAN settings live in config.profile.lan[].share (config.paste.schema.json): subnets, domains for split-DNS, dnsServers (up to four IPv4 inside that network), enabled (default true). Deprecated forwards are accepted and ignored. Get-TransportLan returns networks plus legacy merged fields.",
   "title": "RemoteAgents transport",
   "type": "object",
   "additionalProperties": false,

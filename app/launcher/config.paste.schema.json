@@ -375,6 +375,33 @@
       },
       "additionalProperties": false
     },
+    "update": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "auto": {
+          "type": "boolean"
+        },
+        "intervalHours": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 168
+        },
+        "remoteDir": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "hint": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2048
+        }
+      },
+      "additionalProperties": false
+    },
     "bridge": {
       "type": "object",
       "properties": {
@@ -996,220 +1023,244 @@
     "lan": {
       "type": "array",
       "items": {
-        "type": "object",
-        "properties": {
-          "name": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 64,
-            "pattern": "^[^/\\\\\\r\\n\\x00]+$(?![\\s\\S])"
-          },
-          "kind": {
-            "type": "string",
-            "enum": [
-              "openvpn"
-            ]
-          },
-          "ovpn": {
+        "oneOf": [
+          {
             "type": "object",
             "properties": {
-              "secret": {
+              "name": {
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 64,
-                "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
+                "pattern": "^[^/\\\\\\r\\n\\x00]+$(?![\\s\\S])"
               },
-              "hint": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "openvpn"
+                ]
+              },
+              "ovpn": {
+                "type": "object",
+                "properties": {
+                  "secret": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
+                  },
+                  "hint": {
+                    "type": "string",
+                    "minLength": 0,
+                    "maxLength": 2048
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "secret"
+                ],
+                "description": "Именованная ссылка; значение хранится только в secrets/vault"
+              },
+              "login": {
                 "type": "string",
                 "minLength": 0,
-                "maxLength": 2048
-              }
-            },
-            "additionalProperties": false,
-            "required": [
-              "secret"
-            ],
-            "description": "Именованная ссылка; значение хранится только в secrets/vault"
-          },
-          "login": {
-            "type": "string",
-            "minLength": 0,
-            "maxLength": 256
-          },
-          "password": {
-            "type": "object",
-            "properties": {
-              "secret": {
+                "maxLength": 256
+              },
+              "password": {
+                "type": "object",
+                "properties": {
+                  "secret": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
+                  },
+                  "hint": {
+                    "type": "string",
+                    "minLength": 0,
+                    "maxLength": 2048
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "secret"
+                ],
+                "description": "Именованная ссылка; значение хранится только в secrets/vault"
+              },
+              "auth": {
+                "type": "object",
+                "properties": {
+                  "secret": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
+                  },
+                  "hint": {
+                    "type": "string",
+                    "minLength": 0,
+                    "maxLength": 2048
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "secret"
+                ],
+                "description": "Именованная ссылка; значение хранится только в secrets/vault"
+              },
+              "host": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 64,
-                "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
+                "maxLength": 253,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$(?![\\s\\S])"
               },
-              "hint": {
-                "type": "string",
-                "minLength": 0,
-                "maxLength": 2048
-              }
-            },
-            "additionalProperties": false,
-            "required": [
-              "secret"
-            ],
-            "description": "Именованная ссылка; значение хранится только в secrets/vault"
-          },
-          "auth": {
-            "type": "object",
-            "properties": {
-              "secret": {
+              "port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              },
+              "testHost": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 64,
-                "pattern": "^(?!.*[A-Z])[a-z0-9\\u0080-\\uFFFF][a-z0-9._\\u0080-\\uFFFF-]{0,63}$(?![\\s\\S])"
+                "maxLength": 253,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$(?![\\s\\S])"
               },
-              "hint": {
+              "testPort": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              },
+              "checkUrl": {
                 "type": "string",
-                "minLength": 0,
-                "maxLength": 2048
-              }
-            },
-            "additionalProperties": false,
-            "required": [
-              "secret"
-            ],
-            "description": "Именованная ссылка; значение хранится только в secrets/vault"
-          },
-          "host": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 253,
-            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$(?![\\s\\S])"
-          },
-          "port": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 65535
-          },
-          "testHost": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 253,
-            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$(?![\\s\\S])"
-          },
-          "testPort": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 65535
-          },
-          "checkUrl": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 2048,
-            "format": "https-url"
-          },
-          "serverFingerprint": {
-            "type": "string",
-            "minLength": 64,
-            "maxLength": 95,
-            "pattern": "^(?:[0-9A-Fa-f]{64}|[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){31})$(?![\\s\\S])"
-          },
-          "subnets": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 18
-            },
-            "maxItems": 64,
-            "uniqueItems": true
-          },
-          "directEndpoint": {
-            "type": "boolean"
-          },
-          "dnsDomain": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 253,
-            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$(?![\\s\\S])"
-          },
-          "dnsServer": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 253,
-            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$(?![\\s\\S])"
-          },
-          "hint": {
-            "type": "string",
-            "minLength": 0,
-            "maxLength": 2048
-          },
-          "share": {
-            "type": "object",
-            "properties": {
+                "minLength": 1,
+                "maxLength": 2048,
+                "format": "https-url"
+              },
+              "serverFingerprint": {
+                "type": "string",
+                "minLength": 64,
+                "maxLength": 95,
+                "pattern": "^(?:[0-9A-Fa-f]{64}|[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){31})$(?![\\s\\S])"
+              },
+              "share": {
+                "type": "object",
+                "properties": {
+                  "subnets": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 18,
+                      "pattern": "^[0-9.]+/[0-9]{1,2}$(?![\\s\\S])"
+                    },
+                    "maxItems": 64,
+                    "uniqueItems": true
+                  },
+                  "domains": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 253,
+                      "pattern": "^(?:\\*\\.)?[a-zA-Z0-9][a-zA-Z0-9.-]*$(?![\\s\\S])"
+                    },
+                    "maxItems": 128,
+                    "uniqueItems": true,
+                    "description": "Имена этой ЛВС для split-DNS; требуют непустой share.dnsServers"
+                  },
+                  "dnsServers": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 7,
+                      "maxLength": 15,
+                      "pattern": "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$(?![\\s\\S])"
+                    },
+                    "maxItems": 4,
+                    "uniqueItems": true,
+                    "description": "IPv4 DNS-серверы внутри одной из share.subnets; адреса проверяются при чтении конфига"
+                  },
+                  "enabled": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "forwards": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 32,
+                          "pattern": "^[a-z][a-z0-9-]{0,31}$(?![\\s\\S])"
+                        },
+                        "host": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 253,
+                          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$(?![\\s\\S])"
+                        },
+                        "port": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 65535
+                        },
+                        "localPort": {
+                          "type": "integer",
+                          "minimum": 1024,
+                          "maximum": 65535
+                        },
+                        "hint": {
+                          "type": "string",
+                          "minLength": 0,
+                          "maxLength": 2048
+                        }
+                      },
+                      "additionalProperties": false,
+                      "required": [
+                        "name",
+                        "host",
+                        "port",
+                        "localPort"
+                      ]
+                    },
+                    "maxItems": 64,
+                    "uniqueItems": true,
+                    "deprecated": true,
+                    "$comment": "Устаревшее поле: принимается для совместимости, игнорируется, config export его не выдаёт"
+                  },
+                  "hint": {
+                    "type": "string",
+                    "minLength": 0,
+                    "maxLength": 2048
+                  }
+                },
+                "additionalProperties": false
+              },
               "subnets": {
                 "type": "array",
                 "items": {
                   "type": "string",
                   "minLength": 1,
-                  "maxLength": 18,
-                  "pattern": "^[0-9.]+/[0-9]{1,2}$(?![\\s\\S])"
+                  "maxLength": 18
                 },
                 "maxItems": 64,
                 "uniqueItems": true
               },
-              "domains": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 253,
-                  "pattern": "^(?:\\*\\.)?[a-zA-Z0-9][a-zA-Z0-9.-]*$(?![\\s\\S])"
-                },
-                "maxItems": 128,
-                "uniqueItems": true
+              "directEndpoint": {
+                "type": "boolean"
               },
-              "forwards": {
-                "type": "array",
-                "items": {
-                  "type": "object",
-                  "properties": {
-                    "name": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 32,
-                      "pattern": "^[a-z][a-z0-9-]{0,31}$(?![\\s\\S])"
-                    },
-                    "host": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 253,
-                      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$(?![\\s\\S])"
-                    },
-                    "port": {
-                      "type": "integer",
-                      "minimum": 1,
-                      "maximum": 65535
-                    },
-                    "localPort": {
-                      "type": "integer",
-                      "minimum": 1024,
-                      "maximum": 65535
-                    },
-                    "hint": {
-                      "type": "string",
-                      "minLength": 0,
-                      "maxLength": 2048
-                    }
-                  },
-                  "additionalProperties": false,
-                  "required": [
-                    "name",
-                    "host",
-                    "port",
-                    "localPort"
-                  ]
-                },
-                "maxItems": 64,
-                "uniqueItems": true
+              "dnsDomain": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$(?![\\s\\S])"
+              },
+              "dnsServer": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$(?![\\s\\S])"
               },
               "hint": {
                 "type": "string",
@@ -1217,14 +1268,195 @@
                 "maxLength": 2048
               }
             },
-            "additionalProperties": false
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "kind",
+              "ovpn"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[^/\\\\\\r\\n\\x00]+$(?![\\s\\S])"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "openvpn"
+                ]
+              },
+              "host": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$(?![\\s\\S])"
+              },
+              "port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              },
+              "testHost": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$(?![\\s\\S])"
+              },
+              "testPort": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              },
+              "checkUrl": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048,
+                "format": "https-url"
+              },
+              "serverFingerprint": {
+                "type": "string",
+                "minLength": 64,
+                "maxLength": 95,
+                "pattern": "^(?:[0-9A-Fa-f]{64}|[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){31})$(?![\\s\\S])"
+              },
+              "share": {
+                "type": "object",
+                "properties": {
+                  "subnets": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 18,
+                      "pattern": "^[0-9.]+/[0-9]{1,2}$(?![\\s\\S])"
+                    },
+                    "maxItems": 64,
+                    "uniqueItems": true
+                  },
+                  "domains": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 253,
+                      "pattern": "^(?:\\*\\.)?[a-zA-Z0-9][a-zA-Z0-9.-]*$(?![\\s\\S])"
+                    },
+                    "maxItems": 128,
+                    "uniqueItems": true,
+                    "description": "Имена этой ЛВС для split-DNS; требуют непустой share.dnsServers"
+                  },
+                  "dnsServers": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 7,
+                      "maxLength": 15,
+                      "pattern": "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$(?![\\s\\S])"
+                    },
+                    "maxItems": 4,
+                    "uniqueItems": true,
+                    "description": "IPv4 DNS-серверы внутри одной из share.subnets; адреса проверяются при чтении конфига"
+                  },
+                  "enabled": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "forwards": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 32,
+                          "pattern": "^[a-z][a-z0-9-]{0,31}$(?![\\s\\S])"
+                        },
+                        "host": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 253,
+                          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$(?![\\s\\S])"
+                        },
+                        "port": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 65535
+                        },
+                        "localPort": {
+                          "type": "integer",
+                          "minimum": 1024,
+                          "maximum": 65535
+                        },
+                        "hint": {
+                          "type": "string",
+                          "minLength": 0,
+                          "maxLength": 2048
+                        }
+                      },
+                      "additionalProperties": false,
+                      "required": [
+                        "name",
+                        "host",
+                        "port",
+                        "localPort"
+                      ]
+                    },
+                    "maxItems": 64,
+                    "uniqueItems": true,
+                    "deprecated": true,
+                    "$comment": "Устаревшее поле: принимается для совместимости, игнорируется, config export его не выдаёт"
+                  },
+                  "hint": {
+                    "type": "string",
+                    "minLength": 0,
+                    "maxLength": 2048
+                  }
+                },
+                "additionalProperties": false
+              },
+              "subnets": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 18
+                },
+                "maxItems": 64,
+                "uniqueItems": true
+              },
+              "directEndpoint": {
+                "type": "boolean"
+              },
+              "dnsDomain": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$(?![\\s\\S])"
+              },
+              "dnsServer": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$(?![\\s\\S])"
+              },
+              "hint": {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 2048
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "share"
+            ]
           }
-        },
-        "additionalProperties": false,
-        "required": [
-          "name",
-          "kind",
-          "ovpn"
         ]
       },
       "maxItems": 64,
@@ -1397,6 +1629,90 @@
           },
           "additionalProperties": false
         },
+        "happierWeb": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 65535
+            },
+            "updateIntervalHours": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 168
+            },
+            "keepReleases": {
+              "type": "integer",
+              "minimum": 2,
+              "maximum": 10
+            },
+            "keepChats": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "defaultPermissionMode": {
+              "type": "string",
+              "enum": [
+                "yolo",
+                "default"
+              ]
+            },
+            "claudeAccountLabels": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_:-]{0,63}$(?![\\s\\S])"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              },
+              "maxProperties": 256
+            },
+            "quotas": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "claudeProbe": {
+                  "type": "boolean"
+                },
+                "claudeProbeSec": {
+                  "type": "integer",
+                  "minimum": 60,
+                  "maximum": 86400
+                },
+                "hint": {
+                  "type": "string",
+                  "minLength": 0,
+                  "maxLength": 2048
+                }
+              },
+              "additionalProperties": false
+            },
+            "serverUrl": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "format": "happier-server-url"
+            },
+            "hint": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 2048
+            }
+          },
+          "additionalProperties": false
+        },
         "happier": {
           "type": "object",
           "properties": {
@@ -1448,90 +1764,6 @@
           "type": "string",
           "minLength": 0,
           "maxLength": 2048
-        },
-        "happierWeb": {
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "port": {
-              "type": "integer",
-              "minimum": 1024,
-              "maximum": 65535
-            },
-            "updateIntervalHours": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 168
-            },
-            "keepReleases": {
-              "type": "integer",
-              "minimum": 2,
-              "maximum": 10
-            },
-            "keepChats": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 100
-            },
-            "quotas": {
-              "type": "object",
-              "properties": {
-                "enabled": {
-                  "type": "boolean"
-                },
-                "claudeProbe": {
-                  "type": "boolean"
-                },
-                "claudeProbeSec": {
-                  "type": "integer",
-                  "minimum": 60,
-                  "maximum": 86400
-                },
-                "hint": {
-                  "type": "string",
-                  "minLength": 0,
-                  "maxLength": 2048
-                }
-              },
-              "additionalProperties": false
-            },
-            "hint": {
-              "type": "string",
-              "minLength": 0,
-              "maxLength": 2048
-            },
-            "serverUrl": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 2048,
-              "format": "happier-server-url"
-            },
-            "defaultPermissionMode": {
-              "type": "string",
-              "enum": [
-                "yolo",
-                "default"
-              ]
-            },
-            "claudeAccountLabels": {
-              "type": "object",
-              "propertyNames": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 64,
-                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_:-]{0,63}$(?![\\s\\S])"
-              },
-              "additionalProperties": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 100
-              },
-              "maxProperties": 256
-            }
-          },
-          "additionalProperties": false
         }
       },
       "additionalProperties": false
@@ -1886,33 +2118,6 @@
       "type": "string",
       "minLength": 0,
       "maxLength": 2048
-    },
-    "update": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "auto": {
-          "type": "boolean"
-        },
-        "intervalHours": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 168
-        },
-        "remoteDir": {
-          "type": "string",
-          "maxLength": 2048,
-          "minLength": 1
-        },
-        "hint": {
-          "type": "string",
-          "minLength": 0,
-          "maxLength": 2048
-        }
-      },
-      "additionalProperties": false
     }
   },
   "additionalProperties": false,

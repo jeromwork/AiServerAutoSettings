@@ -133,15 +133,37 @@ namespace RemoteAgents.Launcher
         internal static Dictionary<string, object> Profile(Dictionary<string, object> p, bool server = false)
         {
             var result = Keys.Where(p.ContainsKey).ToDictionary(k => k, k => p[k]);
+            if (result.ContainsKey("lan")) {
+                var managed = Json.Array(result["lan"]).Select(Json.Map).Where(l => !LanAccess.ClientOnly(l)).ToArray();
+                if (managed.Length == 0 && Json.Array(result["lan"]).Length > 0) result.Remove("lan");
+                else result["lan"] = managed.Select(l => {
+                    var row = new Dictionary<string, object>(l);
+                    if (row.ContainsKey("share")) {
+                        var share = new Dictionary<string, object>(Json.Map(row["share"])); share.Remove("forwards");
+                        row["share"] = share;
+                    }
+                    return (object)row;
+                }).ToArray();
+            }
             if (server && p.ContainsKey("server")) result["server"] = p["server"];
             return result;
         }
-        internal static void Observe(Dictionary<string, object> result, Dictionary<string, object> desired, IDictionary<string, bool> ready)
+        internal static void Observe(Dictionary<string, object> result, Dictionary<string, object> desired, IDictionary<string, bool> ready, Dictionary<string, object> config = null)
         {
             var parts = Json.Array(Json.Get(result, "parts")).Select(Json.Map).ToArray();
             Func<string, bool> ok = part => parts.Any(r => Json.Str(r, "part") == part && Json.Str(r, "state") == "ready");
             if (desired.ContainsKey("proxyOut")) ready[ConfigSections.Proxy] = new[] { "internet", "inbound", "ipv6", "egressWatch" }.All(ok);
-            if (desired.ContainsKey("lan")) ready[ConfigSections.Lan] = Json.Array(Json.Get(desired, "lan")).Select(Json.Map).All(l => ok("lan:" + Json.Str(l, "name"))) && (!LanAccess.Read(desired).Enabled || ok("lanShare"));
+            if (desired.ContainsKey("lan")) {
+                var managed = Json.Array(Json.Get(desired, "lan")).Select(Json.Map).Where(l => !LanAccess.ClientOnly(l)).ToArray();
+                if (managed.Length > 0) {
+                    bool clientReady;
+                    ready.TryGetValue(ConfigSections.Lan, out clientReady);
+                    if (config != null) clientReady = ConfigRequests.LanClientStatus(desired, config).Ok;
+                    ready[ConfigSections.Lan] = (!Json.Array(desired["lan"]).Select(Json.Map).Any(l => LanAccess.ClientOnly(l) && LanAccess.Active(l)) || clientReady)
+                        && managed.All(l => ok("lan:" + Json.Str(l, "name")))
+                        && (!LanAccess.Read(new Dictionary<string, object> { { "lan", managed } }).Enabled || ok("lanShare"));
+                }
+            }
         }
     }
 
@@ -178,7 +200,7 @@ namespace RemoteAgents.Launcher
             ready[ConfigSections.Bootstrap] = server;
             ready[ConfigSections.Proxy] = Json.Bool(Json.Map(Json.Get(config, "proxy")), "confirmed");
             var have = new HashSet<string>(Json.Array(Json.Get(Json.Map(Json.Get(config, "lan")), "connections")).Select(r => Json.Str(Json.Map(r), "name")));
-            ready[ConfigSections.Lan] = Json.Array(Json.Get(desired, "lan")).All(r => have.Contains(Json.Str(Json.Map(r), "name")));
+            ready[ConfigSections.Lan] = Json.Array(Json.Get(desired, "lan")).Select(Json.Map).Where(LanAccess.Active).All(r => have.Contains(Json.Str(r, "name")));
             return ready;
         }
     }
@@ -386,7 +408,7 @@ namespace RemoteAgents.Launcher
             var lans = Json.Array(Json.Get(Json.Map(Json.Get(config, "lan")), "connections")).Select(Json.Map).ToArray();
             if (lans.Length > 0 || p.ContainsKey("lan")) {
                 var old = Json.Array(Json.Get(p, "lan")).Select(Json.Map).ToArray();
-                p["lan"] = lans.Select(l => (object)(old.FirstOrDefault(o => Json.Str(o, "name") == Json.Str(l, "name")) ?? new Dictionary<string, object> { { "name", Json.Str(l, "name") }, { "kind", "openvpn" } })).ToArray();
+                p["lan"] = lans.Select(l => (object)(old.FirstOrDefault(o => Json.Str(o, "name") == Json.Str(l, "name")) ?? new Dictionary<string, object> { { "name", Json.Str(l, "name") }, { "kind", "openvpn" } })).Concat(old.Where(l => LanAccess.ClientOnly(l) && !lans.Any(r => Json.Str(r, "name") == Json.Str(l, "name"))).Cast<object>()).ToArray();
             }
             // The Disk root chosen in the step-by-step wizard; the folders to accept stay as the config wrote them.
             if (!string.IsNullOrEmpty(diskBase) && p.ContainsKey("disk")) {
@@ -493,11 +515,19 @@ namespace RemoteAgents.Launcher
             var have = Json.Array(Json.Get(Json.Map(Json.Get(config, "lan")), "connections")).Select(r => Json.Str(Json.Map(r), "name")).ToArray();
             var wanted = Json.Array(Json.Get(p, "lan")).Select(Json.Map).ToArray();
             var manifest = Materialized(home);
-            var add = wanted.Where(l => !have.Contains(Json.Str(l, "name"))).Select(l => new Dictionary<string, object> {
+            var add = wanted.Where(l => !LanAccess.ClientOnly(l) && !have.Contains(Json.Str(l, "name"))).Select(l => new Dictionary<string, object> {
                 { "kind", Json.Text(l, "kind", "openvpn") }, { "name", Json.Str(l, "name") }, { "file", LanFile(manifest, Json.Str(l, "name")) },
                 { "host", Json.Str(l, "host") }, { "port", Json.Int(l, "port", 0) > 0 ? Json.Int(l, "port", 0).ToString(CultureInfo.InvariantCulture) : "" },
                 { "ipCheckUrl", Json.Text(l, "checkUrl", IpCheckUrl(p, config)) } }).ToArray();
-            return Tuple.Create(add, have.Where(n => !wanted.Any(l => Json.Str(l, "name") == n)).ToArray());
+            // An access-only profile never removes server-owned connections.
+            return Tuple.Create(add, wanted.Length > 0 && wanted.All(LanAccess.ClientOnly) ? new string[0] : have.Where(n => !wanted.Any(l => Json.Str(l, "name") == n)).ToArray());
+        }
+        internal static SectionOutcome LanClientStatus(Dictionary<string, object> p, Dictionary<string, object> config)
+        {
+            var have = new HashSet<string>(Json.Array(Json.Get(Json.Map(Json.Get(config, "lan")), "connections")).Select(r => Json.Str(Json.Map(r), "name")));
+            var missing = Json.Array(Json.Get(p, "lan")).Select(Json.Map).Where(l => LanAccess.ClientOnly(l) && LanAccess.Active(l) && !have.Contains(Json.Str(l, "name"))).ToArray();
+            return new SectionOutcome { Ok = missing.Length == 0, Summary = missing.Length == 0 ? "Локальные сети подключены на сервере ✓"
+                : string.Join("; ", missing.Select(l => "сеть " + Json.Str(l, "name") + " не подключена на сервере")) };
         }
         internal static string Origin(string text)
         {
@@ -523,7 +553,7 @@ namespace RemoteAgents.Launcher
                     break; }
                 case ConfigSections.Account: if (Json.Str(Json.Map(Json.Get(p, "happier")), "mode") != "new") need(Json.Get(Json.Map(Json.Get(p, "happier")), "key")); break;
                 case ConfigSections.Proxy: need(Json.Get(Json.Map(Json.Get(p, "proxyOut")), "password")); break;
-                case ConfigSections.Lan: foreach (var l in Json.Array(Json.Get(p, "lan")).Select(Json.Map)) { need(Json.Get(l, "ovpn")); need(Json.Get(l, "password")); need(Json.Get(l, "auth")); } break;
+                case ConfigSections.Lan: foreach (var l in Json.Array(Json.Get(p, "lan")).Select(Json.Map).Where(l => !LanAccess.ClientOnly(l))) { need(Json.Get(l, "ovpn")); need(Json.Get(l, "password")); need(Json.Get(l, "auth")); } break;
                 case ConfigSections.Bootstrap: {
                     var b = Json.Map(Json.Get(Json.Map(Json.Get(p, "vpn")), "bootstrap")); need(Json.Get(b, "channel"));
                     foreach (var e in Json.Map(Json.Get(b, "entries")).Values) need(e);
@@ -800,7 +830,7 @@ namespace RemoteAgents.Launcher
             if (FirstInstall.HasProfile(home) && desired.ContainsKey("server")) {
                 try {
                     var status = await Task.Run(() => Deployment(desired, (a, r) => WizardRunner.Run(home, bundle, a, r, token), true));
-                    ServerDeployment.Observe(status.Result, desired, ready);
+                    ServerDeployment.Observe(status.Result, desired, ready, new Configuration(home).Data);
                     ready[ConfigSections.Server] = ready.ContainsKey(ConfigSections.Server) && ready[ConfigSections.Server] && status.Ok;
                 } catch (OperationCanceledException) { throw; }
                 catch (Exception) { ready[ConfigSections.Server] = false; Log("Сервер: статус развёртывания не получен."); }
@@ -875,7 +905,11 @@ namespace RemoteAgents.Launcher
                     o = SectionOutcome.From(run("Disk", ConfigRequests.Disk(p, DiskBase())), "Диск подключён; папки сервера принимайте в Syncthing Tray"); break; }
                 case ConfigSections.Vpn: o = SectionOutcome.From(run("Vpn", ConfigRequests.Vpn(p)), "VPN настроен", true); break;
                 case ConfigSections.Proxy: o = deploymentOutcome ?? (deploymentOutcome = Deployment(p, run)); break;
-                case ConfigSections.Lan: o = deploymentOutcome ?? (deploymentOutcome = Deployment(p, run)); break;
+                case ConfigSections.Lan:
+                    o = ConfigRequests.LanClientStatus(p, config);
+                    if (o.Ok && Json.Array(Json.Get(p, "lan")).Select(Json.Map).Any(l => !LanAccess.ClientOnly(l)))
+                        o = deploymentOutcome ?? (deploymentOutcome = Deployment(p, run));
+                    break;
                 default: throw new ArgumentException("Неизвестный раздел");
             }
             if (s == ConfigSections.Disk && !DiskStillCurrent()) return DiskApplyWait.Superseded();
