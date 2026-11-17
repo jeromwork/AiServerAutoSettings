@@ -66,8 +66,8 @@ try{
     $realText=${function:Invoke-TransportText};$realHostKeys=${function:Get-TransportHostKeys}
     function Invoke-TransportText($Exe,$Arguments){$script:fakeHop}
     function Get-TransportHostKeys($Ssh,$HostName,$KnownHosts){'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDKtkImHp4iQlyBtwBY4Vx3cBxfNF0Hdga/ucaszwI2r'}
-    $options=@{sshPort=2222;syncPort=22001;probePortBase=26000;socksPortBase=28000;apiPort=29090;bindPhysical=$true;openSsh=$true;stallSeconds=5;probeTimeoutSec=45}
-    $settings=[pscustomobject]@{Options=$options;Transport=$t;Profile=$p;Channel=(Copy-TransportObject $channel)}
+    $options=@{sshPort=2222;syncPort=22001;lanProxyPort=17880;vpnInPort=17881;probePortBase=26000;socksPortBase=28000;apiPort=29090;bindPhysical=$true;openSsh=$true;stallSeconds=5;probeTimeoutSec=45}
+    $settings=[pscustomobject]@{Root=$work;Options=$options;Transport=$t;Profile=$p;Channel=(Copy-TransportObject $channel)}
     $paths=Get-TransportCandidates $settings $work
     foreach($tag in @('singbox-ssh-direct','hop-jump')){
         $sshOut=$paths.Outbounds|Where-Object {$_.tag -eq $tag}
@@ -93,7 +93,7 @@ try{
     # Local hops accept a key path; sing-box uses the same private_key_path field as the target SSH.
     $keyHop=Copy-TransportObject $t;$hopKey=Join-Path $work 'Пользователь с пробелом/hop key'
     $keyHop.hops[0]|Add-Member keyFile $hopKey
-    $keySettings=[pscustomobject]@{Options=$options;Transport=$keyHop;Profile=$p;Channel=(Copy-TransportObject $channel)}
+    $keySettings=[pscustomobject]@{Root=$work;Options=$options;Transport=$keyHop;Profile=$p;Channel=(Copy-TransportObject $channel)}
     $keyPaths=Get-TransportCandidates $keySettings $work
     $jump=@($keyPaths.Tunnels|Where-Object {$_.tag -eq 'openssh-jump-jump'})[0]
     $pc=@($jump.arguments|Where-Object {$_ -like 'ProxyCommand=*'})[0]
@@ -241,16 +241,16 @@ try{
     $localSettings.LocalWeb.available=$true;$localSettings.LocalWeb.enabled=$false
     Assert (@((New-TransportConfig $localSettings $paths 'test-secret' 'trojan-edge').inbounds|Where-Object {$_.tag -eq 'happier-web'}).Count -eq 0) 'disabled localWeb has no listener'
     $cfg=New-TransportConfig $settings $paths 'test-secret' 'trojan-edge'
-    Assert ($cfg.inbounds.Count -eq $expected.Count+2) 'рабочие и проверочные входы'
+    Assert ($cfg.inbounds.Count -eq $expected.Count+4) 'рабочие и проверочные входы'
     Assert ($cfg.inbounds[0].listen_port -eq 2222 -and $cfg.inbounds[1].listen_port -eq 22001) 'рабочие порты'
     Assert ($cfg.inbounds[1].override_port -eq 23456) 'порт синхронизации взят из канала'
-    foreach($inbound in $cfg.inbounds){Assert ($inbound.listen -eq '127.0.0.1' -and $inbound.type -eq 'direct' -and $inbound.override_address -eq '127.0.0.1') 'только loopback direct'}
+    foreach($inbound in $cfg.inbounds|Where-Object {$_.tag -notin @('lan-in','vpn-in')}){Assert ($inbound.listen -eq '127.0.0.1' -and $inbound.type -eq 'direct' -and $inbound.override_address -eq '127.0.0.1') 'только loopback direct'}
     for($i=0;$i -lt $expected.Count;$i++){
         $c=$paths.Candidates[$i];$in=$cfg.inbounds|Where-Object {$_.tag -eq ('probe-'+$c.tag)}
         $rule=$cfg.route.rules|Where-Object {$_.inbound[0] -eq $in.tag}
         Assert ($in.listen_port -eq 26000+$i -and $in.override_port -eq 22 -and $rule.outbound -eq $c.tag) 'проверочный вход ведёт в свой путь'
     }
-    Assert (@($cfg.route.rules|Where-Object {$_.outbound -eq 'active'}).Count -eq 2) 'рабочие входы в selector'
+    Assert (@($cfg.route.rules|Where-Object {$_.outbound -eq 'active'}).Count -eq 3) 'рабочие входы в selector'
     $selector=$cfg.outbounds|Where-Object {$_.tag -eq 'active'}
     Assert ($selector.type -eq 'selector' -and $selector.default -eq 'trojan-edge' -and -not $selector.interrupt_exist_connections) 'selector без обрыва сессий'
     Assert ($selector.outbounds.Count -eq $expected.Count+1) 'selector содержит кандидатов и недоступный путь'
@@ -263,6 +263,104 @@ try{
     $options.bindPhysical=$false;$unbound=New-TransportConfig $settings $paths 'test-secret' '' 'Ethernet'
     Assert (-not $unbound.route.auto_detect_interface -and -not ($unbound.outbounds|Where-Object {$_.tag -eq 'vless-direct'}).bind_interface) 'bindPhysical=false';$options.bindPhysical=$true
     $options.apiPort=2222;$bad=$false;try{New-TransportConfig $settings $paths 'x' '' | Out-Null}catch{$bad=$true};Assert $bad 'конфликт портов отвергнут';$options.apiPort=29090
+    # Helper credentials persist independently of channel/API credentials and are never in public status.
+    $helper=Get-TransportHelperSecret $work;$helperFile=Join-Path $work 'state/helper-socks.json'
+    $helperText=[IO.File]::ReadAllText($helperFile);$helperTime=[IO.File]::GetLastWriteTimeUtc($helperFile)
+    $again=Get-TransportHelperSecret $work
+    Assert ($helper.user -ceq 'ra-helper' -and [Convert]::FromBase64String($helper.password).Length -eq 32) 'секрет помощника: 32 случайных байта base64'
+    Assert ($again.password -ceq $helper.password -and [IO.File]::GetLastWriteTimeUtc($helperFile) -eq $helperTime) 'секрет создаётся один раз, чтение его не переписывает'
+    foreach($invalid in @('{"user":"foreign","password":"bad"}','{"user":"ra-helper","password":"YQ=="}','not-json')){
+        [IO.File]::WriteAllText($helperFile,$invalid);$rejected=$false
+        try{Get-TransportHelperSecret $work|Out-Null}catch{$rejected=$_.Exception.Message -eq 'Неверный секрет помощника'}
+        Assert ($rejected -and [IO.File]::ReadAllText($helperFile) -ceq $invalid) 'повреждённый секрет не заменяется молча'
+    }
+    [IO.File]::WriteAllText($helperFile,$helperText)
+    if($env:OS -eq 'Windows_NT'){
+        $acl=Get-Acl -LiteralPath $helperFile;$userSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $rules=@($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+        Assert ($acl.AreAccessRulesProtected -and $rules.Count -eq 2 -and @($rules|Where-Object {$_.IdentityReference.Value -notin @($userSid,'S-1-5-18') -or $_.AccessControlType -ne 'Allow'}).Count -eq 0) 'ACL секрета: только текущий пользователь и SYSTEM'
+        Assert (@($rules|Where-Object {$_.IdentityReference.Value -eq 'S-1-5-18'}).Count -eq 1) 'SYSTEM читает секрет помощника'
+    }else{
+        $mode=(& stat -c '%a' -- $helperFile)|Out-String
+        Assert ($LASTEXITCODE -eq 0 -and $mode.Trim() -eq '600') 'секрет закрыт mode 600 на Linux'
+    }
+    foreach($tag in @('lan-in','vpn-in')){
+        $helperInput=@($cfg.inbounds|Where-Object {$_.tag -eq $tag})
+        Assert ($helperInput.Count -eq 1 -and $helperInput[0].listen -eq '127.0.0.1' -and $helperInput[0].type -eq 'mixed' -and @($helperInput[0].users).Count -eq 1 -and $helperInput[0].users[0].username -ceq $helper.user -and $helperInput[0].users[0].password -ceq $helper.password) ('защищённый loopback '+$tag)
+    }
+    Assert (@($cfg.inbounds|Where-Object {$_.tag -eq 'lan-proxy'}).Count -eq 0) 'старый вход без пароля заменён'
+    $emptyLanRules=@($cfg.route.rules|Where-Object {$_.inbound -contains 'lan-in'})
+    Assert ($emptyLanRules.Count -eq 1 -and $emptyLanRules[0].action -eq 'reject') 'без сетей lan-in отклоняет всё'
+    $lanRaw=ConvertFrom-Json '{"profile":{"lan":[{"name":"one","enabled":true,"subnets":["10.71.0.0/24"],"testHost":"10.71.0.1","share":{"domains":["*.example.org"],"forwards":[{"name":"ssh","host":"10.99.0.2","port":22,"localPort":18222}]}},{"name":"two","enabled":true,"subnets":["172.22.0.0/16"],"testHost":"172.22.0.1"},{"name":"off","enabled":false,"subnets":["192.168.77.0/24"],"share":{"subnets":["192.168.78.0/24"]}}]}}'
+    $lanFile=Join-Path $work 'helper-lan.json'
+    [IO.File]::WriteAllText($lanFile,((ConvertTo-Json $lanRaw -Depth 20).Replace("`r",'').Replace("`n","`r`n")))
+    $helperSettings=Copy-TransportObject $settings;$helperSettings|Add-Member Lan (Get-TransportLan (Read-TransportJson $lanFile))
+    $helperConfig=New-TransportConfig $helperSettings $paths 'test-secret' 'vless-direct'
+    $lanRules=@($helperConfig.route.rules|Where-Object {$_.inbound -contains 'lan-in'})
+    Assert ($lanRules.Count -eq 2 -and $lanRules[0].action -eq 'route' -and $lanRules[0].outbound -eq 'active' -and ($lanRules[0].ip_cidr -join ',') -eq '10.71.0.0/24,172.22.0.0/16' -and $lanRules[1].action -eq 'reject') 'lan-in: только подсети всех включённых сетей, затем reject'
+    Assert (@($lanRules|Where-Object {$_.domain -or $_.domain_regex -or $_.port}).Count -eq 0 -and '192.168.77.0/24' -notin @($helperSettings.Lan.subnets) -and '192.168.78.0/24' -notin @($helperSettings.Lan.subnets)) 'выключенные сети, domains и forwards не расширяют lan-in'
+    $vpnRules=@($helperConfig.route.rules|Where-Object {$_.inbound -contains 'vpn-in'})
+    Assert ($vpnRules.Count -eq 1 -and $vpnRules[0].action -eq 'route' -and $vpnRules[0].outbound -eq 'active' -and -not $vpnRules[0].ip_cidr) 'vpn-in направляет всё в active'
+    $legacyLan=Get-TransportLan (ConvertFrom-Json '{"profile":{"lan":[{"testHost":"10.72.0.1","share":{"subnets":["10.72.0.0/24"]}}]}}')
+    Assert ($legacyLan.subnets[0] -eq '10.72.0.0/24') 'поддержан прежний share-only профиль'
+    foreach($candidate in $paths.Candidates){
+        $public=Get-TransportHelperStatus $settings $candidate.tag $paths.Outbounds
+        Assert ($public.udp -eq (Test-TransportInternetPath $candidate.tag $paths.Outbounds)) ('helper.udp следует полному пути '+$candidate.tag)
+    }
+    $public=Get-TransportHelperStatus $settings 'singbox-ssh-direct' $paths.Outbounds
+    Assert (-not $public.udp -and $public.lanInPort -eq 17880 -and $public.vpnInPort -eq 17881) 'helper: порты и udp=false для SSH'
+    Assert (-not (Get-TransportHelperStatus $settings 'openssh-direct' $paths.Outbounds).udp -and -not (Get-TransportHelperStatus $settings 'vless-sshhop-jump' $paths.Outbounds).udp -and -not (Get-TransportHelperStatus $settings '' $paths.Outbounds).udp) 'SOCKS, SSH detour и отсутствие пути не обещают UDP'
+    $publicFile=Join-Path $work 'status/helper-test.json';Write-TransportJson $publicFile @{helper=$public}
+    $publicJson=[IO.File]::ReadAllText($publicFile)
+    Assert (-not $publicJson.Contains($helper.password) -and -not $publicJson.Contains('password') -and @($public.PSObject.Properties).Count -eq 3) 'статус содержит только порты и UDP, без секрета'
+    # Execute only the real publisher body, never the daemon/network lifecycle.
+    $daemonAst=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'Transport.Daemon.ps1'),[ref]$null,[ref]$null)
+    $publisher=$daemonAst.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Publish-TransportStatus'},$true).Body.GetScriptBlock()
+    & {
+        param($root,$settings,$paths,$active,$publisher)
+        $rows=@();$engine=$null;$network=$null;$confirmed=$false;$errorText='fixture';$revision='fixture';$exitCode=0;$retryAt=[DateTime]::MinValue;$pin=[pscustomobject]@{mode='auto';tag=$null}
+        & $publisher
+    } $work $settings $paths 'singbox-ssh-direct' $publisher
+    $daemonStatus=Read-TransportJson (Join-Path $work 'status/transport.json')
+    Assert ($daemonStatus.helper.lanInPort -eq 17880 -and $daemonStatus.helper.vpnInPort -eq 17881 -and -not $daemonStatus.helper.udp -and -not ([IO.File]::ReadAllText((Join-Path $work 'status/transport.json'))).Contains($helper.password)) 'настоящий publisher пишет helper без пароля'
+    foreach($external in $paths.Outbounds|Where-Object {-not $_.detour -and $_.type -ne 'socks'}){
+        $actual=$bound.outbounds|Where-Object {$_.tag -eq $external.tag}
+        Assert ($actual.bind_interface -eq 'Ethernet') ('bindPhysical: '+$external.type+' '+$external.tag)
+    }
+    Assert (@($bound.outbounds|Where-Object {$_.detour -and $_.bind_interface}).Count -eq 0) 'detour не получает bind_interface'
+    foreach($portKey in @('lanProxyPort','vpnInPort')){
+        $old=$options[$portKey]
+        foreach($conflictPort in @(2222,22001,29090,26000,28000,17880,17881)){
+            if($conflictPort -eq $old){continue}
+            $options[$portKey]=$conflictPort;$rejected=$false
+            try{New-TransportConfig $settings $paths 'test-secret' ''|Out-Null}catch{$rejected=$_.Exception.Message -eq 'Пересечение или неверный порт'}
+            Assert $rejected ('пересечение порта помощника отклонено: '+$portKey+' '+$conflictPort)
+        }
+        $options[$portKey]=$old
+    }
+    # All preferred ports deliberately collide, including fixed Happier and legacy TCP forward.
+    $portRoot=Join-Path $work 'helper-ports';[void][IO.Directory]::CreateDirectory($portRoot)
+    $portTransport=[pscustomobject]@{channelFirst=$true;sshPort=26000;syncPort=26000;channelSocksPort=26000;apiPort=26000;probePortBase=26000;socksPortBase=26000;lanProxyPort=26000;vpnInPort=26000}
+    $portOptions=Get-TransportPortDefaults
+    $portProfile=Copy-TransportObject $p;$portProfile.arguments=@('-p','22220')
+    $portProfileFile=Join-Path $portRoot 'profile.json';Write-TransportJson $portProfileFile $portProfile
+    $portTransport|Add-Member profilePath $portProfileFile
+    $portSettings=[pscustomobject]@{Options=$portOptions;Transport=$portTransport;Profile=$portProfile;Channel=$settings.Channel;Lan=(Copy-TransportObject $helperSettings.Lan);LocalWeb=[pscustomobject]@{enabled=$true;available=$true;port=26000;serverPort=47831;conflict=$null}}
+    $portSettings.Lan.forwards[0].localPort=26000
+    Write-TransportJson (Join-Path $portRoot 'config.json') @{transport=$portTransport}
+    $portSettings=Resolve-TransportPorts $portRoot $portSettings 2 2
+    $effective=Get-TransportEffectivePorts $portRoot;$saved=Read-TransportJson (Join-Path $portRoot 'state/transport-ports.json')
+    Assert ($saved.defaults.vpnInPort -eq 17881 -and $saved.configured.vpnInPort -eq 26000 -and $effective.vpnInPort -eq $portOptions.vpnInPort -and $effective.vpnInPort -ne 26000 -and $effective.lanProxyPort -ne $effective.vpnInPort) 'vpnInPort выбран, сохранён и прочитан через effective'
+    $portPaths=[pscustomobject]@{Candidates=@([pscustomobject]@{tag='one';port=$portOptions.probePortBase},[pscustomobject]@{tag='two';port=($portOptions.probePortBase+1)});Outbounds=@(@{type='socks';tag='one';server='127.0.0.1';server_port=$portOptions.socksPortBase},@{type='socks';tag='two';server='127.0.0.1';server_port=($portOptions.socksPortBase+1)})}
+    $portConfig=New-TransportConfig $portSettings $portPaths 'test-secret' 'one'
+    $allPorts=@(@($portConfig.inbounds|Where-Object {$_.listen -eq '127.0.0.1'}|ForEach-Object {$_.listen_port})+@($portOptions.apiPort)+@($portPaths.Outbounds|ForEach-Object {$_.server_port}))
+    Assert (@($allPorts|Select-Object -Unique).Count -eq $allPorts.Count) 'входы помощника не пересекаются с рабочими входами, пробами, SOCKS, API, Happier и forward'
+    $portPublic=Get-TransportHelperStatus $portSettings 'one' $portPaths.Outbounds
+    Assert ($portPublic.lanInPort -eq $effective.lanProxyPort -and $portPublic.vpnInPort -eq $effective.vpnInPort -and -not $portPublic.udp) 'helper публикует эффективные порты'
+    if($SingBox){
+        $file=Join-Path $work 'helper-check.json';Write-TransportJson $file $helperConfig;Test-TransportConfigFile $SingBox $file
+        $file=Join-Path $work 'helper-ports-check.json';Write-TransportJson $file $portConfig;Test-TransportConfigFile $SingBox $file
+    }
     $rows=@([pscustomobject]@{tag='a';state='ok';kbps=12;checkedAt='2026-01-01T00:00:00Z'},[pscustomobject]@{tag='b';state='ok';kbps=80;checkedAt='2026-01-01T00:00:00Z'},[pscustomobject]@{tag='c';state='frozen';kbps=900;checkedAt=$null})
     Assert ((Get-TransportBest $rows).tag -eq 'b') 'выбор лучшего живого'
     Assert ((Get-TransportBest $rows @('a')).tag -eq 'a') 'ограничение top набора'
@@ -430,7 +528,7 @@ try{
     $ct|Add-Member cdn @([pscustomobject]@{name='russian-cdn';domain='cdn.example.com';path='/cdn';entry='edge';enabled=$true})
     $ct|Add-Member disabledTags @('trojan-edge')
     $ct.entries+=@([pscustomobject]@{name='offline-node';ssh='unused';enabled=$false;kinds=@('hy2')})
-    $cs=[pscustomobject]@{Options=$options;Transport=$ct;Profile=$p;Channel=(Copy-TransportObject $channel)}
+    $cs=[pscustomobject]@{Root=$work;Options=$options;Transport=$ct;Profile=$p;Channel=(Copy-TransportObject $channel)}
     $realText=${function:Invoke-TransportText};$realHostKeys=${function:Get-TransportHostKeys}
     try{
         function Invoke-TransportText($Exe,$Arguments){$script:fakeHop}

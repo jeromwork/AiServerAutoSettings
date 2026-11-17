@@ -39,23 +39,24 @@ function Copy-TransportObject($Value) {ConvertFrom-Json (ConvertTo-Json -InputOb
 function Get-TransportValue($Object,[string]$Name,$Default) {
     if($null -ne $Object -and $null -ne $Object.$Name){return $Object.$Name};return $Default
 }
-function Protect-TransportPath([string]$Path) {
+function Protect-TransportPath([string]$Path,[switch]$System) {
     if($env:OS -eq 'Windows_NT'){
         $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
         if([IO.Directory]::Exists($Path)){$acl=New-Object Security.AccessControl.DirectorySecurity;$inherit=[Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'}else{$acl=New-Object Security.AccessControl.FileSecurity;$inherit=[Security.AccessControl.InheritanceFlags]::None}
         $acl.SetAccessRuleProtection($true,$false)
         $rule=New-Object Security.AccessControl.FileSystemAccessRule($sid,'FullControl',$inherit,[Security.AccessControl.PropagationFlags]::None,'Allow')
         $acl.AddAccessRule($rule)
+        if($System){$systemSid=New-Object Security.Principal.SecurityIdentifier('S-1-5-18');$acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($systemSid,'FullControl',$inherit,[Security.AccessControl.PropagationFlags]::None,'Allow')))}
         # Только DACL: Set-Acl пишет и SACL и без SeSecurityPrivilege (не админ) падает на PS 5.1.
         if([IO.Directory]::Exists($Path)){[IO.Directory]::SetAccessControl($Path,$acl)}else{[IO.File]::SetAccessControl($Path,$acl)}
     }else{if([IO.Directory]::Exists($Path)){& chmod 700 -- $Path}else{& chmod 600 -- $Path};if($LASTEXITCODE -ne 0){throw 'Не удалось ограничить права'}}
 }
-function Write-TransportJson([string]$Path,$Value,[switch]$Private,[switch]$Durable) {
+function Write-TransportJson([string]$Path,$Value,[switch]$Private,[switch]$Durable,[switch]$System) {
     $dir=[IO.Path]::GetDirectoryName($Path);[void][IO.Directory]::CreateDirectory($dir)
     $tmp=Join-Path $dir ([IO.Path]::GetRandomFileName());$backup=$tmp+'.old'
     try{
         # Файл создаётся внутри закрытого каталога, ACL задаётся до записи секрета.
-        if($Private){Protect-TransportPath $dir;if([IO.File]::Exists($Path)){Protect-TransportPath $Path};[IO.File]::WriteAllText($tmp,'');Protect-TransportPath $tmp}
+        if($Private){Protect-TransportPath $dir;if([IO.File]::Exists($Path)){Protect-TransportPath $Path -System:$System};[IO.File]::WriteAllText($tmp,'');Protect-TransportPath $tmp -System:$System}
         $json=ConvertTo-Json -InputObject $Value -Depth 40
         if($Durable){
             $stream=New-Object IO.FileStream($tmp,[IO.FileMode]::Create,[IO.FileAccess]::Write,[IO.FileShare]::None)
@@ -65,7 +66,7 @@ function Write-TransportJson([string]$Path,$Value,[switch]$Private,[switch]$Dura
             try{if([IO.File]::Exists($Path)){[IO.File]::Replace($tmp,$Path,$backup)}else{[IO.File]::Move($tmp,$Path)};break}
             catch [IO.IOException]{if($attempt -eq 4){throw};Start-Sleep -Milliseconds 20}
         }
-        if($Private){Protect-TransportPath $Path}
+        if($Private){Protect-TransportPath $Path -System:$System}
     }finally{if([IO.File]::Exists($tmp)){[IO.File]::Delete($tmp)};if([IO.File]::Exists($backup)){[IO.File]::Delete($backup)}}
 }
 function Protect-TransportText([string]$Text) {
@@ -223,17 +224,17 @@ function Get-TransportRouteOverlay($Route,[string]$Root) {
 }
 # Настроенные значения отделены от состояния: выбор порта не меняет ревизию config.json.
 function Get-TransportPortDefaults {
-    @{sshPort=2222;channelSocksPort=2223;channelSshAddress='127.0.0.2';syncPort=22001;lanProxyPort=17880;probePortBase=26000;socksPortBase=28000;apiPort=29090}
+    @{sshPort=2222;channelSocksPort=2223;channelSshAddress='127.0.0.2';syncPort=22001;lanProxyPort=17880;vpnInPort=17881;probePortBase=26000;socksPortBase=28000;apiPort=29090}
 }
 function Get-TransportConfiguredPorts($Transport,$Profile) {
     $ports=[ordered]@{};$defaults=Get-TransportPortDefaults
-    foreach($key in @('sshPort','channelSocksPort','syncPort','lanProxyPort','apiPort','probePortBase','socksPortBase','channelSshAddress')){$ports[$key]=Get-TransportValue $Transport $key $defaults[$key]}
+    foreach($key in @('sshPort','channelSocksPort','syncPort','lanProxyPort','vpnInPort','apiPort','probePortBase','socksPortBase','channelSshAddress')){$ports[$key]=Get-TransportValue $Transport $key $defaults[$key]}
     $ports['serverPort']=Get-TransportServerPort $Profile
     [pscustomobject]$ports
 }
 function Test-TransportPortsEqual($Left,$Right) {
     if(-not $Left -or -not $Right){return $false}
-    foreach($key in @('sshPort','channelSocksPort','syncPort','lanProxyPort','apiPort','probePortBase','socksPortBase','channelSshAddress','serverPort')){
+    foreach($key in @('sshPort','channelSocksPort','syncPort','lanProxyPort','vpnInPort','apiPort','probePortBase','socksPortBase','channelSshAddress','serverPort')){
         if([string]$Left.$key -cne [string]$Right.$key){return $false}
     };return $true
 }
@@ -244,7 +245,7 @@ function Get-TransportEffectivePorts([string]$Root) {
     try{
         $state=Read-TransportJson (Join-Path $Root 'state/transport-ports.json')
         if($state.schema -eq 1 -and (Test-TransportPortsEqual $configured $state.configured)){
-            foreach($key in @('sshPort','channelSocksPort','syncPort','lanProxyPort','apiPort','probePortBase','socksPortBase','serverPort')){
+            foreach($key in @('sshPort','channelSocksPort','syncPort','lanProxyPort','vpnInPort','apiPort','probePortBase','socksPortBase','serverPort')){
                 if([int]$state.effective.$key -lt 1 -or [int]$state.effective.$key -gt 65535){return $configured}
             }
             $ip=$null
@@ -322,6 +323,7 @@ function Update-TransportChannelRoute([string]$Root,$Settings,[string]$Old,[stri
     if($changed){Write-TransportLog $Root 'channel-address-moved' ([pscustomobject]@{message=('Адрес входа канала в SSH-профиле изменён: '+$Old+' — '+$New)})}
 }
 function Resolve-TransportPorts([string]$Root,$Settings,[int]$ProbeCount,[int]$SocksCount,[switch]$Preview) {
+    $Settings|Add-Member -Force Root (Get-TransportHome $Root)
     $configured=Get-TransportConfiguredPorts $Settings.Transport $Settings.Profile;$effective=Copy-TransportObject $configured
     $previous=$null;try{$previous=Read-TransportJson (Join-Path $Root 'state/transport-ports.json')}catch{}
     $snapshot=Get-TransportPortSnapshot -ListenersOnly;$selected=@{};$moved=New-Object Collections.ArrayList;$owners=$null
@@ -337,7 +339,7 @@ function Resolve-TransportPorts([string]$Root,$Settings,[int]$ProbeCount,[int]$S
         }
     }
     $keys=@('sshPort');if($Settings.Transport.channelFirst){$keys+=@('channelSocksPort')}
-    if(@($Settings.Channel.inbounds|Where-Object {$_.tag -eq 'sync'}).Count){$keys+=@('syncPort')};$keys+=@('apiPort','probePortBase','socksPortBase');if($Settings.Lan.enabled){$keys+=@('lanProxyPort')}
+    if(@($Settings.Channel.inbounds|Where-Object {$_.tag -eq 'sync'}).Count){$keys+=@('syncPort')};$keys+=@('apiPort','probePortBase','socksPortBase','lanProxyPort','vpnInPort')
     foreach($key in $keys){
         $count=1;$step=10
         if($key -eq 'probePortBase'){$count=$ProbeCount}elseif($key -eq 'socksPortBase'){$count=$SocksCount}
@@ -485,14 +487,14 @@ function Read-TransportSettings([string]$Root) {
     $portDefaults=Get-TransportPortDefaults;foreach($k in $portDefaults.Keys){$defaults[$k]=$portDefaults[$k]}
     $s=@{};foreach($k in $defaults.Keys){$s[$k]=Get-TransportValue $t $k $defaults[$k]}
     foreach($k in @('bindPhysical','openSsh')){if($s[$k] -isnot [bool]){throw 'Нужен логический параметр transport'}}
-    foreach($k in @('sshPort','channelSocksPort','syncPort','lanProxyPort','probePortBase','socksPortBase','apiPort')){if([int]$s[$k] -lt 1 -or [int]$s[$k] -gt 65535){throw 'Неверный порт transport'}}
+    foreach($k in @('sshPort','channelSocksPort','syncPort','lanProxyPort','vpnInPort','probePortBase','socksPortBase','apiPort')){if([int]$s[$k] -lt 1 -or [int]$s[$k] -gt 65535){throw 'Неверный порт transport'}}
     if([string]$s.channelSshAddress -notmatch '\A127\.\d{1,3}\.\d{1,3}\.\d{1,3}\z' -or [string]$s.channelSshAddress -eq '127.0.0.1'){throw 'Неверный адрес входа канала'}
     foreach($k in @('activeProbeBytes','rankProbeBytes','activeIntervalSec','meteredActiveIntervalSec','rankIntervalSec','rankConcurrency','topOnMetered','stallSeconds','probeTimeoutSec','restartDelaySec')){if([double]$s[$k] -le 0){throw 'Параметры transport должны быть положительными'}}
     if([string]$s.metered -notin @('auto','true','false','True','False')){throw 'Неверный metered'}
     if(-not $t.serverRoute -and $config.wizard.serverRoute){$overlay=Get-TransportRouteOverlay $config.wizard.serverRoute $Root;if($overlay){$t|Add-Member -Force serverRoute $overlay}}
     Assert-TransportLists $t -ForBuild
     $effective=Get-TransportEffectivePorts $Root;foreach($k in (Get-TransportPortDefaults).Keys){$s[$k]=$effective.$k}
-    [pscustomobject]@{Options=$s;Transport=$t;Profile=$profile;Channel=$channel;LocalWeb=(Get-TransportLocalWeb $config);Lan=(Get-TransportLan $config);Vpn=(Get-TransportValue $config 'vpn' ([pscustomobject]@{enabled=$false}))}
+    [pscustomobject]@{Root=(Get-TransportHome $Root);Options=$s;Transport=$t;Profile=$profile;Channel=$channel;LocalWeb=(Get-TransportLocalWeb $config);Lan=(Get-TransportLan $config);Vpn=(Get-TransportValue $config 'vpn' ([pscustomobject]@{enabled=$false}))}
 }
 function Get-TransportSshArguments($Profile,[int]$Port,[switch]$UseRoute) {
     # Явные параметры профиля исключают ProxyCommand/forwarding/RemoteCommand из пользовательского config.
@@ -786,7 +788,7 @@ function Get-TransportCandidates($Settings,[string]$Root) {
 }
 
 function New-TransportConfig($Settings,$Paths,[string]$Secret,[string]$DefaultTag,[string]$Interface='') {
-    $o=$Settings.Options;$sync=@($Settings.Channel.inbounds|Where-Object {$_.tag -eq 'sync'}|Select-Object -First 1)
+    $o=$Settings.Options;$portDefaults=Get-TransportPortDefaults;$sync=@($Settings.Channel.inbounds|Where-Object {$_.tag -eq 'sync'}|Select-Object -First 1)
     if($sync.Count -and ([int]$sync[0].override_port -lt 1 -or [int]$sync[0].override_port -gt 65535)){throw 'Неверный порт Syncthing канала'}
     $in=@();$rules=@();$ports=@{}
     $targets=New-Object Collections.ArrayList;[void]$targets.Add(@('ssh',[int]$o.sshPort,(Get-TransportServerPort $Settings.Profile)))
@@ -809,24 +811,21 @@ function New-TransportConfig($Settings,$Paths,[string]$Secret,[string]$DefaultTa
         $rules+=@{inbound=@($row[0]);action='route';outbound='active'}
     }
     foreach($c in $Paths.Candidates){$tag='probe-'+$c.tag;$in+=@{type='direct';tag=$tag;listen='127.0.0.1';listen_port=$c.port;network='tcp';override_address='127.0.0.1';override_port=(Get-TransportServerPort $Settings.Profile)};$rules+=@{inbound=@($tag);action='route';outbound=$c.tag}}
+    $helper=Get-TransportHelperSecret ([string]$Settings.Root)
+    $users=@(@{username=$helper.user;password=$helper.password})
+    $in+=@{type='mixed';tag='lan-in';listen='127.0.0.1';listen_port=[int](Get-TransportValue $o 'lanProxyPort' $portDefaults.lanProxyPort);users=$users}
+    $in+=@{type='mixed';tag='vpn-in';listen='127.0.0.1';listen_port=[int](Get-TransportValue $o 'vpnInPort' $portDefaults.vpnInPort);users=$users}
     $lan=Get-TransportValue $Settings 'Lan' $null
     if($lan -and $lan.enabled){
-        $in+=@{type='mixed';tag='lan-proxy';listen='127.0.0.1';listen_port=[int]$o.lanProxyPort}
-        if(@($lan.subnets).Count){$rules+=@{inbound=@('lan-proxy');ip_cidr=@($lan.subnets);action='route';outbound='active'}}
-        foreach($domain in @($lan.domains)){
-            $rule=@{inbound=@('lan-proxy');action='route';outbound='active'}
-            if($domain.StartsWith('*.')){$rule.domain_regex=@('^.+\.'+[regex]::Escape($domain.Substring(2))+'$')}else{$rule.domain=@($domain)}
-            $rules+=$rule
-        }
+        if(@($lan.subnets).Count){$rules+=@{inbound=@('lan-in');ip_cidr=@($lan.subnets);action='route';outbound='active'}}
+        # Legacy TCP forwards stay until stage 6, but never widen the helper's CIDR allowlist.
         foreach($forward in @($lan.forwards)){
             $in+=@{type='direct';tag=$forward.tag;listen='127.0.0.1';listen_port=[int]$forward.localPort;network='tcp';override_address=$forward.host;override_port=[int]$forward.port}
             $rules+=@{inbound=@($forward.tag);action='route';outbound='active'}
-            $rule=@{inbound=@('lan-proxy');port=@([int]$forward.port);action='route';outbound='active'}
-            if($forward.host -match '^[0-9.]+$'){$rule.ip_cidr=@($forward.host+'/32')}else{$rule.domain=@($forward.host)}
-            $rules+=$rule
         }
-        $rules+=@{inbound=@('lan-proxy');action='reject'}
     }
+    $rules+=@{inbound=@('lan-in');action='reject'}
+    $rules+=@{inbound=@('vpn-in');action='route';outbound='active'}
     foreach($port in @(@($in|Where-Object {$_.listen -eq '127.0.0.1'}|ForEach-Object {$_.listen_port})+@([int]$o.apiPort)+@($Paths.Outbounds|Where-Object {$_.type -eq 'socks'}|ForEach-Object {$_.server_port}))){
         if($port -lt 1 -or $port -gt 65535 -or $ports.ContainsKey([int]$port)){throw 'Пересечение или неверный порт'};$ports[[int]$port]=$true
     }
@@ -845,6 +844,34 @@ function Get-TransportSecret([string]$Root) {
     if(Test-Path -LiteralPath $file){Protect-TransportPath ([IO.Path]::GetDirectoryName($file));Protect-TransportPath $file;$value=Read-TransportJson $file;if($value.secret -match '^[A-Za-z0-9+/=]{40,}$'){return [string]$value.secret};throw 'Неверный секрет API'}
     $bytes=New-Object byte[] 32;$rng=[Security.Cryptography.RandomNumberGenerator]::Create();try{$rng.GetBytes($bytes)}finally{$rng.Dispose()}
     $secret=[Convert]::ToBase64String($bytes);Write-TransportJson $file @{secret=$secret} -Private;$secret
+}
+# A separate credential lets the elevated helper use the channel without its outbound secrets.
+function Get-TransportHelperSecret([string]$Root) {
+    if(-not $Root){throw 'Не задан Home для секрета помощника'}
+    $file=Join-Path $Root 'state/helper-socks.json'
+    $mutex=New-Object Threading.Mutex($false,('Global\RemoteAgentsHelperSocks-'+(Get-TransportFingerprint 'helper' (Get-TransportHome $Root).ToLowerInvariant())));$locked=$false
+    try{
+        try{$locked=$mutex.WaitOne(5000)}catch [Threading.AbandonedMutexException]{$locked=$true}
+        if(-not $locked){throw 'Секрет помощника занят'}
+        if(Test-Path -LiteralPath $file){
+            Protect-TransportPath ([IO.Path]::GetDirectoryName($file));Protect-TransportPath $file -System
+            try{
+                $value=Read-TransportJson $file
+                $bytes=[Convert]::FromBase64String([string]$value.password)
+                if($value.user -cne 'ra-helper' -or $bytes.Length -ne 32 -or [Convert]::ToBase64String($bytes) -cne $value.password){throw 'invalid'}
+            }catch{throw 'Неверный секрет помощника'}
+            return $value
+        }
+        $bytes=New-Object byte[] 32;$rng=[Security.Cryptography.RandomNumberGenerator]::Create()
+        try{$rng.GetBytes($bytes)}finally{$rng.Dispose()}
+        $value=[pscustomobject]@{user='ra-helper';password=[Convert]::ToBase64String($bytes)}
+        Write-TransportJson $file $value -Private -System
+        return $value
+    }finally{if($locked){$mutex.ReleaseMutex()};$mutex.Dispose()}
+}
+function Get-TransportHelperStatus($Settings,[string]$Tag,$Outbounds) {
+    $defaults=Get-TransportPortDefaults
+    [pscustomobject]@{lanInPort=[int](Get-TransportValue $Settings.Options 'lanProxyPort' $defaults.lanProxyPort);vpnInPort=[int](Get-TransportValue $Settings.Options 'vpnInPort' $defaults.vpnInPort);udp=[bool]($Tag -and (Test-TransportInternetPath $Tag $Outbounds))}
 }
 function Set-TransportSelector($Options,[string]$Secret,[string]$Tag) {
     # WebRequest без системного прокси: локальный API не зависит от Happ/WinHTTP.
