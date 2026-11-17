@@ -136,7 +136,7 @@ namespace RemoteAgents.Launcher
                 now = 1000; tun.Tick(); now = 2999; tun.Tick(); Check(platform.Starts == 2, "second failure waits two seconds"); now++; tun.Tick(); Check(platform.Starts == 3, "second retry");
             }
             int executed = 0;
-            Func<Dictionary<string, object>, object> execute = r => { executed++; return new { ok = true }; };
+            Func<string, Dictionary<string, object>, string> execute = (command, r) => { executed++; return Json.Encode(new { ok = true }); };
             string valid = Json.Encode(request);
             Check(Json.Bool(Json.Map(Json.Parse(NetHelperProtocol.Reply(valid + "\r\n", () => new string[0], execute))), "ok") && executed == 1, "wire apply with CRLF");
             Check(Json.Bool(Json.Map(Json.Parse(NetHelperProtocol.Reply("{\"cmd\":\"lan.stop\"}", () => new string[0], execute))), "ok"), "wire stop");

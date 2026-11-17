@@ -26,13 +26,13 @@ namespace RemoteAgents.Launcher
         internal static void Run()
         {
             string parsed;
-            foreach (string command in new[] { "status", "ping", "lan.apply", "lan.stop", "vpn.on", "vpn.off" }) {
+            foreach (string command in new[] { "status", "ping", "lan.stop", "vpn.off" }) {
                 Check(NetHelperProtocol.TryCommand(Json.Encode(new { cmd = command }), out parsed) && parsed == command, "valid " + command);
-                if (command.Contains(".")) Check(NetHelperProtocol.Reply(Json.Encode(new { cmd = command }), () => new string[0]).Contains("not-implemented"), "future command is inert");
+                if (command.Contains(".")) Check(NetHelperProtocol.Reply(Json.Encode(new { cmd = command }), () => new string[0]).Contains("not-implemented"), "command without executor is inert");
             }
             Check(NetHelperProtocol.TryCommand(" { \"cmd\" : \"ping\" }\r\n", out parsed) && parsed == "ping", "CRLF and JSON whitespace");
             Check(NetHelperProtocol.TryCommand("{\"c\\u006dd\":\"p\\u0069ng\"}", out parsed) && parsed == "ping", "escaped JSON strings");
-            foreach (string invalid in new[] { null, "", "{}", "[]", "null", "true", "\"ping\"", "{\"cmd\":null}", "{\"cmd\":1}", "{\"cmd\":true}", "{\"cmd\":[]}", "{\"cmd\":{}}", "{\"cmd\":\"PING\"}", "{\"cmd\":\"unknown\"}", "{\"cmd\":\"ping\",\"extra\":0}", "{\"path\":\"C:\\\\bad\"}", "{\"cmd\":\"ping\",\"cmd\":\"status\"}", "{\"cmd\":\"ping\",\"c\\u006dd\":\"status\"}", "{\"cmd\":\"ping\",}", "{cmd:'ping'}", "{\"cmd\":\"ping\"}{}", "/*x*/{\"cmd\":\"ping\"}", "{\"cmd\":\"pi\nng\"}", "{\"cmd\":\"\\q\"}", "{\"cmd\":\"ping\"", "{\"cmd\":\"ping\"}\u0000" }) {
+            foreach (string invalid in new[] { "{\"cmd\":\"lan.apply\"}", "{\"cmd\":\"vpn.on\"}", null, "", "{}", "[]", "null", "true", "\"ping\"", "{\"cmd\":null}", "{\"cmd\":1}", "{\"cmd\":true}", "{\"cmd\":[]}", "{\"cmd\":{}}", "{\"cmd\":\"PING\"}", "{\"cmd\":\"unknown\"}", "{\"cmd\":\"ping\",\"extra\":0}", "{\"path\":\"C:\\\\bad\"}", "{\"cmd\":\"ping\",\"cmd\":\"status\"}", "{\"cmd\":\"ping\",\"c\\u006dd\":\"status\"}", "{\"cmd\":\"ping\",}", "{cmd:'ping'}", "{\"cmd\":\"ping\"}{}", "/*x*/{\"cmd\":\"ping\"}", "{\"cmd\":\"pi\nng\"}", "{\"cmd\":\"\\q\"}", "{\"cmd\":\"ping\"", "{\"cmd\":\"ping\"}\u0000" }) {
                 Check(!NetHelperProtocol.TryCommand(invalid, out parsed), "reject invalid command");
                 Check(NetHelperProtocol.Reply(invalid, () => { throw new Exception("must not execute"); }) == NetHelperProtocol.BadRequest, "invalid request executes nothing");
             }
@@ -53,6 +53,17 @@ namespace RemoteAgents.Launcher
             int logReads = 0;
             var status = Json.Map(Json.Parse(NetHelperProtocol.Reply("{\"cmd\":\"status\"}", () => { logReads++; return new[] { "stage=connected code=0" }; })));
             Check(Json.Bool(status, "ok") && Json.Str(status, "helperVersion") == NetHelperInstall.HelperVersion && Json.Strings(Json.Get(status, "log")).Length == 1 && logReads == 1, "status carries version and diagnostics");
+            // Both features share the status frame but keep independent enabled states.
+            foreach (bool vpnEnabled in new[] { false, true }) {
+                var combined = Json.Map(Json.Parse(NetHelperProtocol.Status(() => new string[0],
+                    new { enabled = !vpnEnabled, networks = new[] { new { name = "office", state = "ok" } } },
+                    new { enabled = vpnEnabled, state = vpnEnabled ? "on" : "off" })));
+                var lan = Json.Map(Json.Get(combined, "lan"));
+                var vpn = Json.Map(Json.Get(combined, "vpn"));
+                Check(Json.Bool(lan, "enabled") == !vpnEnabled && Json.Array(Json.Get(lan, "networks")).Length == 1 &&
+                    Json.Bool(vpn, "enabled") == vpnEnabled && Json.Str(vpn, "state") == (vpnEnabled ? "on" : "off") &&
+                    Json.Str(combined, "helperVersion") == NetHelperInstall.HelperVersion, "combined status preserves independent LAN/VPN states and version");
+            }
             Check(NetHelperProtocol.Reply("{\"cmd\":\"ping\"}", () => { throw new Exception(); }).Contains("pong"), "ping does not read logs");
 
             long now = 7000; var calls = new List<string>();
@@ -96,13 +107,14 @@ namespace RemoteAgents.Launcher
             Check(NetHelperInstall.CreateArguments(exe, home, sid, true)[0] == "config", "upgrade configures existing service");
             Check(string.Join("|", NetHelperInstall.FailureArguments()) == "failure|RemoteAgentsNet|reset=|60|actions=|", "no SCM restarts");
             Check(!NetHelperInstall.NeedsInstall(NetHelperInstall.HelperVersion + "\r\n"), "matching version has no UAC");
+            Check(NetHelperInstall.NeedsInstall("2"), "stage 4/5 helper requires combined protocol upgrade");
             Check(NetHelperInstall.NeedsInstall(null) && NetHelperInstall.NeedsInstall("") && NetHelperInstall.NeedsInstall("old") && NetHelperInstall.NeedsInstall("999"), "missing or different version requires install");
             Console.WriteLine("PASS: NetHelper " + count + " checks (no service/UAC)");
         }
         // Keep the existing private portable entry point and all its command modes unchanged.
         static int Main(string[] args)
         {
-            if (args.Length == 0 || !args[0].StartsWith("--", StringComparison.Ordinal)) Run();
+            if (args.Length == 0 || !args[0].StartsWith("--", StringComparison.Ordinal)) { Run(); VpnTunTests.Run(args.Length == 0 ? Path.GetTempPath() : args[0]); }
             try { return (int)typeof(TestEntry).GetMethod("Main", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, new object[] { args }); }
             catch (TargetInvocationException ex) { ExceptionDispatchInfo.Capture(ex.InnerException).Throw(); throw; }
         }

@@ -42,6 +42,15 @@ namespace RemoteAgents.Launcher
             try {
                 var status = Json.Read(Path.Combine(home, "status/vpn.json"));
                 if (!Json.Bool(status, "enabled")) return status;
+                if (Json.Str(status, "owner") == "net-helper") {
+                    DateTime updated;
+                    if (DateTime.TryParse(Json.Str(status, "updatedAt"), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out updated)) {
+                        double age = (DateTime.UtcNow - updated.ToUniversalTime()).TotalSeconds;
+                        if (age >= 0 && age <= 3) return status;
+                    }
+                    // The service's independent lease closes only the VPN Job. Never invoke the legacy host.
+                    return VpnTun.D("owner", "net-helper", "enabled", false, "ok", false, "state", "watchdog-stalled", "stage", "helper-heartbeat", "summary", VpnWatchdog.FailureSummary("watchdog-stalled"));
+                }
                 if (Json.Str(status, "state") == "awaiting-uac") {
                     // No host exists yet during UAC. Tie the pending action to the
                     // launcher's identity, so killing it cannot lock the next launch forever.

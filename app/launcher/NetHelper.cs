@@ -65,6 +65,7 @@ namespace RemoteAgents.Launcher
         readonly string ownerSid, home;
         LanTun lan;
         System.Threading.Timer lanTimer;
+        VpnTunSession vpnTun;
         readonly ManualResetEvent stopping = new ManualResetEvent(false), emergency = new ManualResetEvent(false);
         readonly object pipeGate = new object();
         NamedPipeServerStream pipe;
@@ -155,8 +156,7 @@ namespace RemoteAgents.Launcher
                     }
                     // NRPT, route inspection and probes may take seconds. Keep the independent
                     // fail-open lease advancing on the owner loop while the operation is awaited.
-                    var dispatch = Task.Run(() => NetHelperProtocol.Reply(line, log.Recent,
-                        request => Json.Str(request, "cmd") == "lan.stop" ? lan.Stop() : lan.Apply(request), () => lan.Status()));
+                    var dispatch = Task.Run(() => NetHelperProtocol.Reply(line, log.Recent, Execute));
                     if (!Wait(dispatch, lease, false)) break;
                     string reply = dispatch.GetAwaiter().GetResult();
                     var write = NetHelperProtocol.WriteLine(pipe, reply);
@@ -175,6 +175,31 @@ namespace RemoteAgents.Launcher
                 if (log != null) log.Write(outcome, outcomeCode);
                 lifetime.Shutdown();
             }
+        }
+        string Execute(string command, Dictionary<string, object> request)
+        {
+            if (command == "lan.apply") return Json.Encode(lan.Apply(request));
+            if (command == "lan.stop") return Json.Encode(lan.Stop());
+            try {
+                if (command == "vpn.on") {
+                    var options = VpnTun.Read(request);
+                    if (vpnTun == null) {
+                        vpnTun = new VpnTunSession(home, NetHelperInstall.DataDirectory, Path.Combine(NetHelperInstall.InstallDirectory, "sing-box.exe"), action => {
+                            // User-controlled files are opened under the authenticated pipe owner,
+                            // never with SYSTEM's file access (including reparse targets).
+                            NamedPipeServerStream channel; lock (pipeGate) channel = pipe;
+                            if (channel == null) throw new IOException("Клиент отключился");
+                            channel.RunAsClient(() => action());
+                        }, log.Write);
+                        lifetime.AddJob(vpnTun);
+                    }
+                    vpnTun.Enable(options);
+                } else if (command == "vpn.off") {
+                    if (vpnTun != null) vpnTun.Disable();
+                } else if (command != "status") return "{\"ok\":false,\"error\":\"not-implemented\"}";
+                var vpn = vpnTun == null ? VpnTun.D("owner", "net-helper", "enabled", false, "ok", false, "state", "off", "summary", "VPN выключен", "updatedAt", DateTime.UtcNow.ToString("o")) : vpnTun.Status();
+                return NetHelperProtocol.Status(log.Recent, lan.Status(), vpn);
+            } catch { return "{\"ok\":false,\"error\":\"vpn-command-failed\"}"; }
         }
         bool Wait(Task operation, VpnLease lease, bool waitingForClient)
         {

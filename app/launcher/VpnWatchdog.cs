@@ -10,7 +10,7 @@ namespace RemoteAgents.Launcher
     internal sealed class VpnWatchdog
     {
         internal const string OwnerMutex = @"Global\RemoteAgents-VpnHost";
-        internal const int IntervalMs = 2000, ProbeTimeoutMs = 800, PollMs = 50;
+        internal const int IntervalMs = 3000, ProbeTimeoutMs = 3000, PollMs = 50;
         internal int Failures { get; private set; }
         internal bool Sample(bool transportOk, bool probeOk)
         { Failures = transportOk && probeOk ? 0 : Failures + 1; return Failures >= 2; }
@@ -31,7 +31,8 @@ namespace RemoteAgents.Launcher
                 case "resumed": return "VPN выключен после сна: включите снова";
                 case "watchdog-stalled": return "VPN выключен: проверка соединения остановилась";
                 case "core-exited": return "VPN выключен: соединение прервано";
-                case "conflict": return "Отключите другой VPN перед включением VPN RemoteAgents";
+                case "conflict": return stage.Length == 0 ? "Отключите другой VPN перед включением VPN RemoteAgents" : "Сейчас работает " + stage + ". Отключите его и нажмите «Включить VPN» ещё раз";
+                case "no-udp": return "Текущий путь " + (stage.Length == 0 ? "к серверу" : stage) + " не передаёт UDP — выберите другой путь";
                 case "no-path": return "VPN не включён: нет живого пути к серверу";
                 case "rollback-error": return "Не удалось подтвердить выключение VPN. Откройте диагностику";
                 case "uac-denied": return "Вы не подтвердили запрос Windows. Нажмите «Включить снова» и выберите «Да»";
