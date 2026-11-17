@@ -61,11 +61,7 @@ server-disk.sh перед запросом проверено настоящим
 для каждого продукта и net48 build/publish без предупреждений. Транспорт: 223 + 21 legacy;
 диск: test-install, test-disk (85,56 с из лимита 120 с), 13 selective и 5 merge с настоящими Syncthing.
 
-Выпуск N: `build/build-exe.sh`, бандл `20261111.043418-5c0f693`; оба PE и вшитые ZIP проверены
-на совпадение с актуальными скриптами. SHA-256 RemoteAgents:
-`45ab848950b6b47703f0da0b9a1efef7add1d830017f9626714598359d9c084d`;
-RemoteVPN: `1b70c135165ff4fd4c908274bfa13995a454995e0e6c1000b8cfcd4d29c3aad3`.
-Изменения и release в worktree `app/disktree-lazy`, без commit/push и действий на Windows.
+Действующее описание сети: [Локальные сети и VPN](VPN-LAN.md).
 
 ### Что такое аккаунт Happier в текущей установке
 
@@ -239,7 +235,6 @@ systemd+реальный Happier relay/online machine, штатное восст
 разделение продуктов (transport/disk/control против vpn), LF/BOM и отсутствие secret files в payload.
 `release/Start.cmd` сохранён без изменений. Итоговые SHA-256:
 
-- `release/RemoteAgents.exe`: `5359b08b40705006656ac81143ad2eea860844e5cbb1282654013a08c875916e`
-- `release/RemoteVPN.exe`: `a754e41c9a462df74ba84c0610013e4acd25f01de9b2110778fce100c41f761d`
+Действующее описание сети: [Локальные сети и VPN](VPN-LAN.md).
 
 Это артефакты незакоммиченного worktree `app/accounts-selective`, не опубликованный релиз.

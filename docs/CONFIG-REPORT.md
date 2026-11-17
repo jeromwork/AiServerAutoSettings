@@ -6,53 +6,7 @@
 
 ## Что состыковано (по пунктам задания)
 
-1. **D↔C, имена действий и поля.** Трей вызывает `ConfigSync` (было `Sync`), бюджет 300 с. Окно читает ответ по
-   `docs/CONFIG-ENGINE.md`: `ok:false` без `pending` — ❌ (раньше любое `ok:false` становилось ⏳ и даже пропускало «Сервер»
-   дальше), `pending:"disk"|"happier"` — ⏳ со слежением, `pending:"connection"` у Vpn — Vpn повторяется один раз сразу
-   после успешного Connection, неподтверждённый TUN — ⏳. Повторяется только свой раздел. `Server.port`/`hostKeys`/
-   `hop.hostKey` и `Bridge.deviceName` доходят до PowerShell; на пути «чистый VPS по паролю root» порт и ключи хоста
-   раньше игнорировались — исправлено. `--invite-hop` не осталось; пароль hop целиком идёт через `Route.Proxy.ps1`
-   (askpass EXE, в аргументах SSH только путь); неиспользуемый C# `HopRelay`/`--hop-relay` удалён. Без ключа Happier
-   («тот же аккаунт», как выдаёт сервер) запрос Account теперь несёт `mode:"same"`.
-2. **A↔D.** Конфликты A (`server|happier|disk: сейчас X / в конфиге Y`) D разбирает; `"<есть, скрыт>"` = оставить
-   сохранённое (A, проверено). Пути файлов-секретов D берёт **только** из `secrets/materialized.json` (вместо придуманного
-   `secrets/config/<имя>`). `proxyOut.checkUrl`/`lan[].checkUrl` (термин схемы A) вместо `ipCheckUrl`; `lan[].host/port/login`
-   в схеме уже были. Пароли при повторном открытии настроек берутся и из vault. `secret set/status/import` подключены к EXE.
-   Чистый VPS: после «Сервера» по паролю root ключ, которым программа входит, кладётся в vault как `server-key`,
-   `rootPassword` убирается — «Сохранить конфиг в файл» восстанавливает доступ без пароля хостинга.
-3. **A↔B.** Схема принимает вывод `remoteagents config export`: добавлен `vpn.bootstrap.catalog`; остальное (hops с key,
-   disk без base, happier без key, server без rootPassword, имена `hop-*-key/password`, `vpn-entry-*`, `vpn-hop-*`,
-   JSON-текст канала/узлов) подтверждено тестом и сквозным прогоном. Тестовый вектор enc1 из `docs/CONFIG-SERVER.md`
-   добавлен в C#-тесты (расшифровка + неверный пароль). `Materialize` больше не падает целиком из-за одной пустой ссылки
-   (ключ **или** пароль root, ключ нового Happier создаёт сам шаг): пустая ссылка не даёт файла, перечислена в `missing`,
-   старый файл вместо неё не используется.
-4. **A↔C, материализация.** PowerShell читает `secrets/materialized.json`: ключ сервера (`serverKeyFile`), ключи и пароли
-   hop по индексу маршрута, канал/кэши узлов, ключи SSH-переходов «VPN первым» (для них пишется частный ssh config под
-   публичным псевдонимом каталога с ключами хоста из каталога). «VPN первым» запускается только при наличии `channel`.
-5. **B↔C, автообновление.** Один протокол: сервер публикует `~/.config/remoteagents/config-sync.json`, клиент читает его
-   своим ключом (`cat …`), `ConvertFrom-WizardConfigSync` переводит снимок во внутренний формат движка. Описано в обоих
-   документах. Найдено и исправлено: через местный транспорт команды шли с `ssh -n`, живой каталог приходил пустым —
-   каждый sync падал, пока работала связь.
-6. **sing-box для «VPN первым».** `build/bundle-binaries.json` закрепляет архив sing-box 1.14.4 для Windows и сам
-   `sing-box.exe` (обе SHA-256). `build-exe.sh` скачивает его один раз в кэш сборки (`bundle.py fetch`), встраивает в
-   начальный бандл EXE; отдельным файлом в архив обновления по SSH он не попадает (но EXE внутри обновления его содержит). При первом применении копируется в `transport-bin` с проверкой
-   хеша. Нет ни встроенного, ни доступа к GitHub — понятная причина в строке раздела, а не тихий провал.
-   EXE из-за этого вырос примерно на 28 МБ.
-   Попутно: в allowlist бандла не было `Wizard.Engine/Session/SessionHost/Bootstrap.ps1` и был удалённый
-   `Wizard.Invite.ps1` — после слияния бандл не собирался вовсе; добавлен тест, что все модули мастера и ConfigSync в бандле.
-7. **Имя компьютера.** `Start-WindowsControl.ps1` при каждой регистрации берёт `-DeviceName`, иначе `profile.device.name`,
-   иначе `COMPUTERNAME` (тест в `test-windows-control.py`). Смена названия в настройках повторяет `Bridge` (было у D).
-8. **`build/server-ssh-user.sh`**: дописывает в authorized_keys под тем же `flock`, что `config export/revoke`, и только в
-   текущий файл (revoke заменяет его через rename). Тест с параллельными revoke: без исправления воспроизводится потеря строки.
-9. **Устаревшее удалено:** `docs/INVITE.md`, `INVITE-REPORT.md`, `INVITE-UPDATE-REPORT.md`, `TASK-INVITE.md`;
-   `wizard.inviteVpn*`, `transport.inviteBootstrap` (→ `bootstrap`, поле, которое реально пишет движок), имена тестовых
-   каталогов. Оставшиеся совпадения `grep -ri invite` — история в отчётах/задании и список удалённого в CONFIG-SERVER.md;
-   `overlay` в транспорте — это локальный слой каталога, к приглашениям не относится.
-10. **run.sh**: ConfigTests для RemoteAgents и RemoteVPN (собственный каталог сборки — иначе `StartupObject` переиспользовал
-    чужую сборку и запускалась не та точка входа) и сквозной тест.
-11. **`app/launcher/config-ai-prompt.md`**: случаи «сервер уже есть» (проще — `config export` у администратора) и «чистый VPS»
-    (адрес, `root`, подсказка к паролю), только JSON по схеме, секреты — пустые ссылки, пароли не спрашивать и останавливать
-    человека, если пишет их в чат. Пример в нём проходит схему.
+Действующее описание сети: [Локальные сети и VPN](VPN-LAN.md).
 
 ## Сквозной тест
 
@@ -77,18 +31,7 @@ sing-box 1.14.4, PowerShell 7 на Linux:
 
 ## Итоги прогонов
 
-- `timeout 1500 bash app/launcher/tests/run.sh` — **код 0, 5 мин 16 с**. В нём: PowerShell-тесты (setup 16, selective 46,
-  account 25, wizard 88, onboarding 92, wizard-account 42, navpane, network 34, config-account 9, config-bootstrap 32,
-  transport-config 263, config-routes 46, config-engine 37 — пять процессов перекрылись на 819 мс, config-device,
-  config-scheduler 7, refresh 27); Python (liveness, first_run 9, disk tree 9, engine loopback, server catalog 8,
-  accounts 26, build 12, bridge health, wizard boundary 5, server operations 5); вложенный `server/tests/run.sh` — 70 тестов;
-  PortableTests RemoteAgents и RemoteVPN — config engine 86, disk tree 25, proxy relay, самотесты 93/93 каждый;
-  ConfigTests RemoteAgents и RemoteVPN — 125 проверок каждый; сквозной тест — PASS; сборка/публикация net48 — PASS.
-- `timeout 300 bash server/tests/run.sh` отдельно — **70 тестов, все прошли, 36,6 с**.
-- `python3 test-windows-control.py` (корневой, не входит в run.sh) — 12 тестов OK.
-- Ни один тест не обходился. Изменены по решению владельца/контракту: `test-refresh.ps1` (подаёт снимок в формате сервера),
-  `test-config-bootstrap.ps1` (VPN первым требует `channel`), проверка materialize в `ConfigBundleTests.cs`
-  (`missing` вместо отказа целиком), ожидания путей в `ConfigApplyTests` (манифест вместо `secrets/config`).
+Действующее описание сети: [Локальные сети и VPN](VPN-LAN.md).
 
 ## Сборка
 
@@ -97,7 +40,6 @@ sing-box 1.14.4, PowerShell 7 на Linux:
 | Файл | SHA-256 | Размер |
 |---|---|---|
 | `release/RemoteAgents.exe` | `ab199dc2844ab3c11c2f984243e50300b09021fa6ea4c046c78134ce1651250a` | 28 421 632 |
-| `release/RemoteVPN.exe` | `033edb98b33bae63f6c9d01f087c67a25973564655d11cc857f5966bd7f6c87b` | 28 421 120 |
 
 Начальные бандлы обоих продуктов содержат `transport/sing-box.exe` и все модули движка. EXE в git **не закоммичены**
 (28 МБ каждый; прежде release-EXE коммитили, но это решение по объёму репозитория — за координатором/владельцем); они лежат

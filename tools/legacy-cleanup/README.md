@@ -6,8 +6,7 @@
 2. Затем запустите `release\RemoteAgents.exe`.
 3. Если новая не заработала: закройте её (трей → Выход) и запустите `Restore-OldInstall.cmd`.
 
-Что убирается: задачи `RemoteDiskChannel`, `RemoteDiskFolders`, `RemoteAgents*`; значения Run `RemoteDisk`, `RemoteAgents`, `RemoteAgentsControl`, `RemoteVPN`; меню `RemoteDisk_add`/`AiServerSync`; значок Disk в Проводнике (CLSID, NameSpace, HideDesktopIcons); все процессы из `%LOCALAPPDATA%\RemoteAgents` и `RemoteDisk` (кроме запущенных из папки Disk); папка `RemoteDisk` целиком и всё в `RemoteAgents`, включая старые ключи `ssh-profiles` (в конце печатается путь ключа — его можно выбрать в новом мастере кнопкой «Файл ключа…»).
-Ничего не удаляется: всё переносится в `%LOCALAPPDATA%\RemoteAgents-old-backup-<время>\` (`manifest.json`, XML задач, `.reg`, `cleanup.log`).
+Действующее описание сети: [Локальные сети и VPN](../../docs/VPN-LAN.md).
 
 Никогда не трогаются: `~\.ssh`, файлы папки Disk, OpenVPN.
 

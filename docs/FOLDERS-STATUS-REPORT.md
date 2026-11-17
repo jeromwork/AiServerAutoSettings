@@ -53,9 +53,7 @@
 
 После изменений:
 
-- Обычный `SKIP_LAUNCHER_EXE=1 app/launcher/tests/run.sh` выявил описанную ниже зависимость существующего LAN-теста от прав настоящего `/var/lib/remoteagents`; такой прогон не объявляется зелёным.
-- `SKIP_LAUNCHER_EXE=1 PYTHONPATH=/tmp/folders-status-test-isolation app/launcher/tests/run.sh` — **exit 0, весь набор прошёл**: 76 серверных тестов, по 276 проверок модели папок для RemoteAgents/RemoteVPN, новые тесты истории/stderr, CONFIG по 134 проверки, настоящий SSH/sing-box CONFIG/e2e, тестовый ZIP. EXE build/publish явно пропущены.
-- Внешний `sitecustomize.py` добавляет `unittest.mock.patch.object(lan, 'PENDING', (Path(tmp)/'pending',))` исключительно при запуске `test_lan_vpn.SafetyTests.test_timer_failure_prevents_network_mutation`, затем восстанавливает значение. Производственный код, проверки/утверждения теста и остальные случаи не подменяются. Изолированный `server/tests/run.sh` тоже прошёл все 76 тестов.
+Действующее описание сети: [Локальные сети и VPN](VPN-LAN.md).
 
 Это условный результат общего прогона: для обычного запуска на данном исполнителе существующему LAN-тесту нужна изоляция `PENDING` рядом с уже изолированным `STATE`. Она не внесена в репозиторий из-за ограничения задачи не менять VPN.
 

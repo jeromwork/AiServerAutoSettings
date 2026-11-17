@@ -29,12 +29,7 @@
 `app/launcher/ConfigApply.cs`, `app/launcher/ConfigWindow.cs`, `app/launcher/tests/ConfigApplyTests.cs` (CRLF сохранён),
 `server/remoteagents_config.py`, `server/tests/test_config_export.py`, `docs/CONFIG-SERVER.md`, `docs/CONFIG.md`, этот отчёт.
 
-## Проверки
-- `cd app/launcher/tests && timeout 300 ~/.dotnet/dotnet run --project PortableTests.csproj -c Release -p:ConfigTests=true` —
-  `PASS: CONFIG: 125 assertions`; то же с `-p:ProductName=RemoteVPN` — 125, успех.
-- Основные портативные тесты (как `run.sh`): `dotnet run … -- <tmp>/core` — `OK: 93 config engine checks` (было 86, +7 новых),
-  самопроверка обновлений `ok:true, count 93`; вариант `-p:ProductName=RemoteVPN` — тоже успех.
-- `timeout 120 server/tests/run.sh` — `server/tests: 72 тестов, все прошли` (включая новый).
+Действующее описание сети: [Локальные сети и VPN](VPN-LAN.md).
 
 ## Отступления и выбранное
 - В строке `Overview` при наличии канала, но без имён relays/entries, пишется «да» (контракт не задаёт этот случай). Принято координатором.

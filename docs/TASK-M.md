@@ -48,7 +48,6 @@ UTF-8. Это часть дефекта № 1: штатная передача U
 | Packaging | 10 тестов |
 | Bridge heartbeat | 2 теста |
 | Новый boundary-стенд dispatcher/bash/atomic ignores | 4 теста |
-| Portable ядро | 77 RemoteAgents + 77 RemoteVPN |
 | net48 build/publish | exit 0, 0 предупреждений, 0 ошибок; PE без DLL-зависимостей |
 | Transport config, sing-box 1.14.4 | 226 проверок; вызываемый им legacy test — 22 |
 | Отдельный `test-legacy-import.ps1` | 22 проверки |
@@ -139,8 +138,7 @@ PowerShell запускается через `~/.cache/pwsh-test/pwsh`, с `-NoP
 `build/build-exe.sh` — exit 0. Бандл **20261110.171408-76b9d84**, версия EXE 1.4.0.0.
 Оба файла в `release/` пересобраны из незакоммиченного worktree; Start.cmd совпадает с исходным.
 
-- `RemoteAgents.exe`: `8c6d8f9aa346b29d125c2935ec376ce663881214c9dcf6718c387ee7b553e4cd`
-- `RemoteVPN.exe`: `de6927e16ad766cc39044e88aa8057c155c8c737d519030d0a219ed9023546f4`
+Действующее описание сети: [Локальные сети и VPN](VPN-LAN.md).
 
 Это кандидат после Linux-ревью для очной приёмки. Готовность действующих компьютеров
 и единственного рабочего сервера данными стендами не подтверждается.

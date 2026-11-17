@@ -91,7 +91,6 @@
 |---|---|
 | `dotnet build app/launcher/RemoteAgents.Launcher.csproj -c Release` (net48) | 0 ошибок, 0 предупреждений |
 | PortableTests, RemoteAgents | `ConfigApplyTests` 79 проверок OK; DiskTree 25 OK; прокси-ретранслятор OK; самотесты 93/93 |
-| PortableTests, `-p:ProductName=RemoteVPN` | то же: 79 + 25 + 93 OK |
 | `python3 app/launcher/tests/test_first_run.py` | 8 тестов OK (2 новых: окно «Включить», отсутствие приглашений) |
 | Ресурс `RemoteAgents.ConfigAiPrompt.md` в собранном EXE | присутствует (проверено поиском по байтам) |
 
