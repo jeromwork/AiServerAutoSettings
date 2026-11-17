@@ -101,6 +101,8 @@ wait_for_memory
   wait_for_memory
   timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-ports.ps1" < /dev/null
   wait_for_memory
+  timeout 15 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-lan-proxy-config.ps1" < /dev/null
+  wait_for_memory
   timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$repo/tools/legacy-cleanup/tests/smoke-plan.ps1" < /dev/null
   wait_for_memory
   timeout 120 python3 "$repo/transport/test-transport-liveness.py" "$pwsh"
@@ -181,6 +183,8 @@ timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:P
 # Disk integration is covered by the bounded test-live.sh above.
 # Extended engine fixtures remain available for focused diagnostics.
 # Config format, enc1, vault and materialization (stream A entry point; own output directory).
+wait_for_memory
+timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:LanTests=true -- "$repo"
 wait_for_memory
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ConfigTests=true
 wait_for_memory
