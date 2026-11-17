@@ -119,7 +119,7 @@ namespace RemoteAgents.Launcher
             Check(ConfigRequests.SecretsFor(ConfigSections.Server, loginOnly.Profile, n => false).Count == 0, "missing agent auth allows CLI install and server waiting state");
             string schemaPath = FindSchema();
             Check(Canonical(Json.Read(schemaPath)) == Canonical(ConfigBundle.SchemaDocument()), "published schema matches compiled schema");
-            Check(ConfigBundle.Parse(File.ReadAllText(Path.Combine(Path.GetDirectoryName(schemaPath),"config.paste.example.json"))).Missing.Length == 2,"published example parses with missing secrets");
+            Check(ConfigBundle.Parse(File.ReadAllText(Path.Combine(Path.GetDirectoryName(schemaPath),"config.paste.example.json"))).Missing.Length == 3,"published example parses with missing secrets");
             var serverExample = ConfigBundle.Parse(File.ReadAllText(Path.Combine(Path.GetDirectoryName(schemaPath), "..", "..", "server", "server-apply.example.json")));
             Check(serverExample.Missing.Contains("tailscale-auth-key") && serverExample.Missing.Contains("lan-clinic-auth"), "server apply example accepts all declarative sections");
             var serverFields = ConfigBundle.Parse("{\"kind\":\"remoteagents-config\",\"schema\":1,\"tailscale\":{\"enabled\":true,\"authKey\":{\"secret\":\"custom-tail-key\"}},\"agent\":{\"sudo\":\"apply\"}}");

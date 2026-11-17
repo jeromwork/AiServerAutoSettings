@@ -383,6 +383,12 @@
       "type": "string",
       "minLength": 1,
       "description": "Локальный каталог неизменяемого снимка кэшей после доверенного обновления"
+    },
+    "lanProxyPort": {
+      "type": "integer",
+      "minimum": 1024,
+      "maximum": 65535,
+      "default": 17880
     }
   },
   "$defs": {

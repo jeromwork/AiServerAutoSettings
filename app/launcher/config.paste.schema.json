@@ -1141,6 +1141,83 @@
             "type": "string",
             "minLength": 0,
             "maxLength": 2048
+          },
+          "share": {
+            "type": "object",
+            "properties": {
+              "subnets": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 18,
+                  "pattern": "^[0-9.]+/[0-9]{1,2}$(?![\\s\\S])"
+                },
+                "maxItems": 64,
+                "uniqueItems": true
+              },
+              "domains": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 253,
+                  "pattern": "^(?:\\*\\.)?[a-zA-Z0-9][a-zA-Z0-9.-]*$(?![\\s\\S])"
+                },
+                "maxItems": 128,
+                "uniqueItems": true
+              },
+              "forwards": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 32,
+                      "pattern": "^[a-z][a-z0-9-]{0,31}$(?![\\s\\S])"
+                    },
+                    "host": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 253,
+                      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$(?![\\s\\S])"
+                    },
+                    "port": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 65535
+                    },
+                    "localPort": {
+                      "type": "integer",
+                      "minimum": 1024,
+                      "maximum": 65535
+                    },
+                    "hint": {
+                      "type": "string",
+                      "minLength": 0,
+                      "maxLength": 2048
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "name",
+                    "host",
+                    "port",
+                    "localPort"
+                  ]
+                },
+                "maxItems": 64,
+                "uniqueItems": true
+              },
+              "hint": {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 2048
+              }
+            },
+            "additionalProperties": false
           }
         },
         "additionalProperties": false,

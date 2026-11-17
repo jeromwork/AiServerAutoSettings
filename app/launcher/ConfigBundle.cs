@@ -96,6 +96,13 @@ namespace RemoteAgents.Launcher
                     A(D("oneOf", new object[]{ folder, Earlier(DiskPath(), "Прежний формат: путь заменяется папкой верхнего уровня"), earlierFolder })) }),
                 "external", A(external)));
         }
+        static Dictionary<string, object> LanShareSchema()
+        {
+            return O(D("subnets", A(S(18, 1, @"^[0-9.]+/[0-9]{1,2}$"), 64),
+                "domains", A(S(253, 1, @"^(?:\*\.)?[a-zA-Z0-9][a-zA-Z0-9.-]*$"), 128),
+                "forwards", A(O(D("name", S(32, 1, @"^[a-z][a-z0-9-]{0,31}$"), "host", Host(),
+                    "port", N(1, 65535), "localPort", N(1024, 65535)), "name", "host", "port", "localPort"), 64)));
+        }
         internal static Dictionary<string, object> SchemaDocument()
         {
             var route = O(D("kind", E("direct", "proxy", "hop"), "proxy", Proxy(), "hop", Hop()), "kind");
@@ -129,7 +136,7 @@ namespace RemoteAgents.Launcher
                 "lan", A(O(D("name", S(64, 1, "^[^/\\\\\\r\\n\\x00]+$"), "kind", E("openvpn"), "ovpn", Ref(),
                     "login", S(256), "password", Ref(), "auth", Ref(), "host", Host(), "port", N(1, 65535), "testHost", Host(), "testPort", N(1, 65535), "checkUrl", Url(),
                     "serverFingerprint", S(95, 64, "^(?:[0-9A-Fa-f]{64}|[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){31})$"),
-                    "subnets", A(S(18, 1), 64), "directEndpoint", B(), "dnsDomain", Host(), "dnsServer", Host()), "name", "kind", "ovpn"), 64),
+                    "share", LanShareSchema(), "subnets", A(S(18, 1), 64), "directEndpoint", B(), "dnsDomain", Host(), "dnsServer", Host()), "name", "kind", "ovpn"), 64),
                 "tailscale", O(D("enabled", B(), "hostname", S(63, 1, "^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$"), "authKey", Ref("tailscale-auth-key"), "userspace", B())),
                 "telegramGateway", O(D("enabled", B(), "port", N(1, 65535), "identity", Ref())),
                 "serverComponents", O(D(
@@ -267,6 +274,7 @@ namespace RemoteAgents.Launcher
         }
         static void CheckSemantics(Dictionary<string, object> profile)
         {
+            LanAccess.Read(profile); // Optional share: old profiles keep their previous behaviour.
             foreach (var reference in References(profile)) ValidName(Json.Str(reference, "secret"));
             var server = Json.Map(Json.Get(profile, "server"));
             foreach (var row in Json.Array(Json.Get(server, "routes")).Select(Json.Map)) {
