@@ -7,7 +7,7 @@ dotnet=${DOTNET:-$HOME/.dotnet/dotnet}
 work=$(mktemp -d /tmp/remoteagents-update-tests.XXXXXX)
 trap 'rm -rf -- "$work"' EXIT
 cd -- "$repo"
-for product in RemoteAgents RemoteVPN; do
+for product in RemoteAgents; do
   timeout 420 "$dotnet" run --project "$here/PortableTests.csproj" -c Release --no-restore -p:UseSharedCompilation=false -p:UpdateTests=true -p:ProductName="$product" -- "$work/$product"
 done
 timeout 420 "$dotnet" run --project "$here/PortableTests.csproj" -c Release --no-restore -p:UseSharedCompilation=false -p:ConfigTests=true

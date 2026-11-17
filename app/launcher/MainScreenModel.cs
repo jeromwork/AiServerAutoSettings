@@ -14,7 +14,6 @@ namespace RemoteAgents.Launcher
     // No WinForms here: the model is covered by PortableTests.
     internal sealed class MainScreenFacts
     {
-        internal bool IsVpnProduct;                                                        // Product.IsVpn (RemoteVPN build)
         internal Dictionary<string, object> Transport = new Dictionary<string, object>();  // status/transport.json (maxAge 15 s)
         internal Dictionary<string, object> Vpn = new Dictionary<string, object>();        // status/vpn.json (maxAge 15 s)
         internal Dictionary<string, object> Control = new Dictionary<string, object>();    // status/control.json (maxAge 30 s), the bridge
@@ -85,9 +84,7 @@ namespace RemoteAgents.Launcher
             var control = facts.Control ?? Json.Map(null);
             var view = new MainScreenView();
             // Keep this identical to TrayContext.Tick; a deliberately off VPN is grey in its card only.
-            view.Overall = facts.IsVpnProduct
-                ? (Json.Bool(vpn, "ok") && Json.Str(vpn, "state") == "on" ? Tone.Ok : Tone.Warning)
-                : (transport.Count == 0 ? Tone.Warning : Json.Bool(transport, "ok") ? Tone.Ok : Tone.Error);
+            view.Overall = transport.Count == 0 ? Tone.Warning : Json.Bool(transport, "ok") ? Tone.Ok : Tone.Error;
             BuildVpn(view.Vpn, facts, transport, vpn);
             BuildDisk(view.Disk, facts);
             var lan = facts.Lan ?? Json.Map(null);
@@ -96,12 +93,12 @@ namespace RemoteAgents.Launcher
             view.Lan.State = string.Join("\r\n", lanNetworks.Select(n => Json.Str(n, "name") + ": " + Json.Str(n, "state") + " — " + Json.Str(n, "reason")));
             view.Lan.Detail = LanDetails(lan);
             view.Lan.Tone = lanNetworks.Length > 0 && lanNetworks.All(n => Json.Str(n, "state") == "ok") ? Tone.Ok : Tone.Warning;
-            view.Happier.Visible = facts.HappierVisible && !facts.IsVpnProduct;
+            view.Happier.Visible = facts.HappierVisible;
             view.Happier.State = facts.HappierConfirmed ? "аккаунт подключён"
                 : facts.HappierHasKey || facts.HappierVisible ? "аккаунт не подтверждён" : "не настроен";
             view.Happier.Detail = OneLine(facts.HappierLabel);
             view.Happier.Tone = facts.HappierConfirmed ? Tone.Ok : facts.HappierVisible ? Tone.Warning : Tone.Off;
-            view.Helper.Visible = !facts.IsVpnProduct;
+            view.Helper.Visible = true;
             view.Helper.Tone = Json.Bool(control, "ok") ? Tone.Ok : Tone.Warning;
             string helperReason = HelperReason(control, transport);
             view.Helper.State = "Помощник может управлять компьютером: " +
@@ -131,7 +128,7 @@ namespace RemoteAgents.Launcher
         static void BuildVpn(VpnCardView card, MainScreenFacts facts, Dictionary<string, object> transport, Dictionary<string, object> vpn)
         {
             string state = Json.Str(vpn, "state");
-            card.Visible = facts.IsVpnProduct || facts.VpnInstalled;
+            card.Visible = facts.VpnInstalled;
             card.On = facts.VpnBusy ? facts.VpnWanted : state == "on" || Json.Bool(vpn, "enabled") && state != "stopping";
             bool starting = state == "starting" || state == "awaiting-uac";
             card.SwitchEnabled = !facts.VpnBusy && !starting && string.IsNullOrEmpty(facts.Operation);
@@ -182,7 +179,7 @@ namespace RemoteAgents.Launcher
 
         static void BuildDisk(CardView card, MainScreenFacts facts)
         {
-            card.Visible = !facts.IsVpnProduct;
+            card.Visible = true;
             string state = OneLine(facts.DiskSummary);
             if (state.StartsWith("Диск: ", StringComparison.OrdinalIgnoreCase)) state = state.Substring(6);
             // Rates belong to the tray's live summary; the card keeps just one state and folder counts.

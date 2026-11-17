@@ -174,7 +174,6 @@ trap cleanup EXIT
 wait_for_memory
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -- "$testdir/core"
 wait_for_memory
-timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ProductName=RemoteVPN -- "$testdir/core-vpn"
 # Disk integration is covered by the bounded test-live.sh above.
 # Extended engine fixtures remain available for focused diagnostics.
 # Config format, enc1, vault and materialization (stream A entry point; own output directory).
@@ -183,7 +182,6 @@ timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:L
 wait_for_memory
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ConfigTests=true
 wait_for_memory
-timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ConfigTests=true -p:ProductName=RemoteVPN
 # End-to-end on a loopback stand: config export -> paste/vault -> orchestrator -> real Server/Connection -> sync -> revoke.
 wait_for_memory
 timeout 120 python3 "$here/test_config_e2e.py"

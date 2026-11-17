@@ -435,7 +435,7 @@ namespace RemoteAgents.Launcher
                 profile["server"] = D("address", Json.Str(ssh, "serverAddress"), "port", RuntimePort(ssh), "login", Json.Str(ssh, "login"), "key", D("secret", "server-key"));
             }
             string homePath = Path.GetFullPath(home).TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar);
-            if (string.Equals(Path.GetFileName(homePath), "RemoteAgents", StringComparison.OrdinalIgnoreCase) || string.Equals(Path.GetFileName(homePath), "RemoteVPN", StringComparison.OrdinalIgnoreCase)) {
+            if (string.Equals(Path.GetFileName(homePath), "RemoteAgents", StringComparison.OrdinalIgnoreCase)) {
                 string parent = Path.GetDirectoryName(homePath), diskHome = Path.Combine(parent,"RemoteDisk");
                 // Only the root of an installed Disk: the accepted folders live in Syncthing, not in the config.
                 string basePath = Path.Combine(diskHome,"base.txt");

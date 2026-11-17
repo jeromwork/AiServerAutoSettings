@@ -29,12 +29,11 @@ namespace RemoteAgents.Launcher
             Program.StartLauncher(Path.Combine(home, Product.ExeName), home, false);
         }
 
-        public static void UninstallVpn(string home)
+        internal static void CleanupLegacyRun(string home)
         {
-            try { Program.Forward(Program.InstanceName(home, System.Security.Principal.WindowsIdentity.GetCurrent().User), new[] { "--exit" }); } catch { }
             using (var key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run")) {
                 string command = Convert.ToString(key.GetValue("RemoteVPN", ""));
-                if (command.IndexOf(Path.Combine(home, Product.ExeName), StringComparison.OrdinalIgnoreCase) >= 0) key.DeleteValue("RemoteVPN", false);
+                if (command.IndexOf(Path.Combine(home, "RemoteVPN.exe"), StringComparison.OrdinalIgnoreCase) >= 0) key.DeleteValue("RemoteVPN", false);
             }
         }
     }

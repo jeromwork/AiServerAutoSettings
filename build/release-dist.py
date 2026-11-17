@@ -20,8 +20,8 @@ with (root / '.publish.lock').open('a') as lock:
         with tarfile.open(fileobj=sys.stdin.buffer, mode='r|') as archive:
             for member in archive:
                 name = pathlib.PurePosixPath(member.name)
-                if member.isdir() and str(name) in ('agents', 'vpn'): continue
-                if not member.isfile() or len(name.parts) != 2 or name.parts[0] not in ('agents', 'vpn') or name.parts[1] in ('.', '..'):
+                if member.isdir() and str(name) in ('agents',): continue
+                if not member.isfile() or len(name.parts) != 2 or name.parts[0] not in ('agents',) or name.parts[1] in ('.', '..'):
                     raise ValueError('Invalid release path')
                 total += member.size
                 if total > 2 * 1024**3: raise ValueError('Release too large')
@@ -32,22 +32,21 @@ with (root / '.publish.lock').open('a') as lock:
                     shutil.copyfileobj(source, output)
         manifests = []
         sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
-        for folder, product in [('agents', 'RemoteAgents'), ('vpn', 'RemoteVPN')]:
+        for folder, product in [('agents', 'RemoteAgents')]:
             src = stage / folder
             m = json.loads((src / 'manifest.json').read_text())
             if m['product'] != product or m['configSchema'] != 1 or pathlib.PurePath(m['file']).name != m['file']: raise ValueError('Invalid manifest')
             if sha(src / m['file']) != m['sha256'] or (src / m['file']).stat().st_size != m['size'] or sha(src / (product + '.exe')) != m['launcher']['sha256']:
                 raise ValueError('Release SHA-256 mismatch')
             manifests.append(m)
-        if manifests[0]['version'] != manifests[1]['version']: raise ValueError('Mixed release versions')
-        # Check immutability for BOTH products before publishing either manifest.
-        for folder, m in zip(('agents', 'vpn'), manifests):
-            dest = root if folder == 'agents' else root / 'vpn'
+        # Check immutable payload before publishing the manifest.
+        for folder, m in zip(('agents',), manifests):
+            dest = root
             dest.mkdir(exist_ok=True)
             if (dest / m['file']).exists() and sha(dest / m['file']) != m['sha256']: raise ValueError('Version is immutable')
-        for folder, m in zip(('agents', 'vpn'), manifests):
+        for folder, m in zip(('agents',), manifests):
             src = stage / folder
-            dest = root if folder == 'agents' else root / 'vpn'
+            dest = root
             for name in (m['file'], m['product'] + '.exe', 'manifest.json'):
                 os.chmod(src / name, 0o644)
                 os.replace(src / name, dest / name)
@@ -59,9 +58,7 @@ with (root / '.publish.lock').open('a') as lock:
 
 def metadata(stage, output, commit):
     stage = Path(stage)
-    manifests = [json.loads((stage / p / 'manifest.json').read_text()) for p in ('agents', 'vpn')]
-    if manifests[0]['version'] != manifests[1]['version']:
-        raise ValueError('Mixed release versions')
+    manifests = [json.loads((stage / p / 'manifest.json').read_text()) for p in ('agents',)]
     data = {'version': manifests[0]['version'], 'commit': commit,
             'sha256': {m['product'] + '.exe': m['launcher']['sha256'] for m in manifests}}
     Path(output).write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
@@ -71,7 +68,7 @@ def verify(output, commit):
     info = json.loads((output / 'release-info.json').read_text())
     if info['commit'] != commit:
         raise ValueError('Prepared release commit mismatch')
-    for product, archive in [('RemoteAgents', 'bundle.zip'), ('RemoteVPN', 'vpn-bundle.zip')]:
+    for product, archive in [('RemoteAgents', 'bundle.zip')]:
         exe = (output / (product + '.exe')).read_bytes()
         if hashlib.sha256(exe).hexdigest() != info['sha256'][product + '.exe']:
             raise ValueError('Prepared release EXE mismatch')

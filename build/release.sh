@@ -20,7 +20,6 @@ else
 fi
 stage=$(mktemp -d); trap 'rm -rf -- "$stage"' EXIT
 python3 "$here/bundle.py" publish "$out/bundle.zip" "$stage/agents" --launcher "$out/RemoteAgents.exe"
-python3 "$here/bundle.py" publish "$out/vpn-bundle.zip" "$stage/vpn" --launcher "$out/RemoteVPN.exe"
 python3 "$here/release-dist.py" metadata "$stage" "$stage/release-info.json" "$(git -C "$repo" rev-parse HEAD)"
 if [[ ${3:-} == --prepared ]]; then
   cmp -- "$stage/release-info.json" "$out/release-info.json" || { echo 'Подготовленная сборка не совпадает с main HEAD или файлами' >&2; exit 1; }
@@ -30,5 +29,5 @@ fi
 "$here/release-github.sh" "$out"
 # tar stdin contains only local staged payloads; no command/config/credentials cross the shell unquoted.
 remote_command=$(python3 "$here/release-dist.py" command "$dist")
-tar -C "$stage" -cf - agents vpn | ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -- "$server" "$remote_command"
+tar -C "$stage" -cf - agents | ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -- "$server" "$remote_command"
 echo 'Оба источника проверены по SHA-256; версия и EXE совпадают.'

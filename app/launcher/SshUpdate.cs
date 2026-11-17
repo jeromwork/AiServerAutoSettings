@@ -103,7 +103,7 @@ namespace RemoteAgents.Launcher
                 target = user + "127.0.0.1";
             }
             var all = new List<string> { "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "StrictHostKeyChecking=yes", "-T" }; all.AddRange(options); all.Add(target);
-            return new SshSource { Exe = Json.Text(update, "sshExe", Json.Text(profile, "sshExecutable", "ssh.exe")), Args = all.ToArray(), RemoteDir = Json.Text(update, "remoteDir", "~/.local/share/remote-agents/dist").TrimEnd('/') + (Product.IsVpn ? "/vpn" : "") };
+            return new SshSource { Exe = Json.Text(update, "sshExe", Json.Text(profile, "sshExecutable", "ssh.exe")), Args = all.ToArray(), RemoteDir = Json.Text(update, "remoteDir", "~/.local/share/remote-agents/dist").TrimEnd('/') };
         }
         internal static string RemotePath(string dir, string file)
         {

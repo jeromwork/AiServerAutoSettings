@@ -155,8 +155,8 @@ namespace RemoteAgents.Launcher
             var statuses = new Dictionary<string, object> { { "enabled", true }, { "networks", new object[] { new { name = "office", state = "ok", reason = "работает", connectedSubnets = new[] { "10.23.0.0/16" }, dnsServers = new[] { "10.23.0.53" }, nrptOk = true }, new { name = "lab", state = "no-helper", reason = "помощник не установлен", stage = "lan-start" } } } };
             statuses = Decode(statuses); // Same JSON boundary as the real helper response.
             Check(StatusView.Lan(statuses) == "Локальные сети: 1 из 2 работают", "tray aggregate");
-            var view = MainScreenModel.Build(new MainScreenFacts { Lan = statuses, IsVpnProduct = true });
-            Check(view.Lan.Visible && view.Lan.Title == "Локальные сети" && view.Lan.State.Contains("office: ok") && view.Lan.State.Contains("помощник не установлен") && view.Lan.Detail.Contains("10.23.0.53") && view.Lan.Detail.Contains("lan-start"), "automatic multi-network card and details even in VPN product");
+            var view = MainScreenModel.Build(new MainScreenFacts { Lan = statuses });
+            Check(view.Lan.Visible && view.Lan.Title == "Локальные сети" && view.Lan.State.Contains("office: ok") && view.Lan.State.Contains("помощник не установлен") && view.Lan.Detail.Contains("10.23.0.53") && view.Lan.Detail.Contains("lan-start"), "automatic multi-network card and details");
             SingBoxCheck(config);
             Check(timer.ElapsedMilliseconds < 10000, "LAN tests under 10 seconds");
             Console.WriteLine("PASS: LanTun " + count + " checks, " + timer.ElapsedMilliseconds + " ms");

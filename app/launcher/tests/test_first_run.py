@@ -222,7 +222,7 @@ class FirstRunTests(unittest.TestCase):
         self.assertIn('BackgroundWork.Disk.Stop();', tray.split('protected override void ExitThreadCore()', 1)[1])
         self.assertIn('BackgroundWork.Disk.Changed +=', tray)
         self.assertIn('BackgroundWork.Disk.Changed -= diskChanged', window)
-        # RemoteVPN has no Disk; for RemoteAgents the install leaves the plan instead of holding the other sections.
+        # The install leaves the plan instead of holding the other sections.
         self.assertIn('if (Product.IsVpn) plan.Remove(ConfigSections.Disk);', run)
         start = window.split('void StartDisk()', 1)[1].split('async Task RetrySection(', 1)[0]
         self.assertIn('BackgroundWork.Disk.Start(', start)

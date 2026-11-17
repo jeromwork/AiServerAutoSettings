@@ -10,7 +10,7 @@ out=$(cd "$out" && pwd)
 # Pinned third-party binaries (build/bundle-binaries.json; sing-box for VPN-first before the first SSH):
 # downloaded once into the build cache, accepted only with the pinned SHA-256, embedded in the EXE only.
 python3 "$here/bundle.py" fetch
-for product in RemoteAgents RemoteVPN; do
+for product in RemoteAgents; do
   mkdir -p "$out/$product"
   "$here/make-bundle.sh" "$version" "$out/$product" --product "$product" --binaries
   if [[ "$product" == RemoteAgents ]]; then cp "$out/$product/$version.zip" "$out/initial-bundle.zip"; fi
@@ -18,9 +18,8 @@ for product in RemoteAgents RemoteVPN; do
   cp "$out/$product/publish/$product.exe" "$out/$product.exe"
   cp "$out/$product.exe" "$repo/release/$product.exe"
 done
-# Both products use the same build version and independent OTA roots.
+# One program, one OTA root.
 python3 "$here/bundle.py" attach "$out/RemoteAgents/$version.zip" "$out/RemoteAgents.exe" "$out/$version.zip"
 cp "$out/$version.zip" "$out/bundle.zip"
-python3 "$here/bundle.py" attach "$out/RemoteVPN/$version.zip" "$out/RemoteVPN.exe" "$out/vpn-bundle.zip"
 cp "$here/Start.cmd" "$repo/release/Start.cmd"
-sha256sum "$repo/release/RemoteAgents.exe" "$repo/release/RemoteVPN.exe"
+sha256sum "$repo/release/RemoteAgents.exe"

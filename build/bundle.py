@@ -133,10 +133,6 @@ def make(version, outdir, launcher=None, product="RemoteAgents", binaries=False)
             if name in contents:
                 raise ValueError('Повтор файла: ' + name)
             contents[name] = data
-    if product == 'RemoteVPN':
-        # Both products ship shared setup; only runtime supervision differs.
-        contents['components.json'] = (ROOT/'build/components-vpn.json').read_bytes()
-        contents['product.txt'] = b'RemoteVPN\n'
     if binaries:
         for name, data in binary_contents().items():
             if name in contents:
@@ -175,7 +171,7 @@ def attach_launcher(archive, launcher, output):
             # SSH/OTA updates never carry the embedded third-party binaries: the first run copied them
             # out of the initial bundle (transport-bin), an update must stay small.
             pinned_targets = {row['target'] for row in pinned()}
-            product = 'RemoteVPN' if 'product.txt' in source.namelist() and source.read('product.txt').strip() == b'RemoteVPN' else 'RemoteAgents'
+            product = 'RemoteAgents'
             exe_name = product + '.exe'
             names = (set(source.namelist()) - pinned_targets) | {exe_name}
             for name in sorted(names):
@@ -222,7 +218,7 @@ def publish(archive, dest, minimum='1.0.0', launcher=None):
     with zipfile.ZipFile(archive) as z:
         version = safe_version(z.read('bundle-version.txt').decode('utf-8-sig').strip())
         json.loads(z.read('components.json').decode('utf-8-sig'))
-        product = 'RemoteVPN' if 'product.txt' in z.namelist() and z.read('product.txt').strip() == b'RemoteVPN' else 'RemoteAgents'
+        product = 'RemoteAgents'
         embedded_exe = z.read(product + '.exe') if product + '.exe' in z.namelist() else None
     manifest = dict(version=version, file=version+'.zip', sha256=digest(archive), size=archive.stat().st_size, minLauncher=minimum, configSchema=1, product=product)
     if embedded_exe:
@@ -249,7 +245,7 @@ def main():
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest='command', required=True)
     b = sub.add_parser('make')
-    b.add_argument('version'); b.add_argument('outdir'); b.add_argument('--launcher'); b.add_argument('--product', choices=['RemoteAgents','RemoteVPN'], default='RemoteAgents')
+    b.add_argument('version'); b.add_argument('outdir'); b.add_argument('--launcher'); b.add_argument('--product', choices=['RemoteAgents'], default='RemoteAgents')
     b.add_argument('--binaries', action='store_true', help='embed pinned binaries of build/bundle-binaries.json (EXE only)')
     sub.add_parser('fetch')
     a = sub.add_parser('attach')

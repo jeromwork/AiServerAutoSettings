@@ -60,7 +60,7 @@ namespace RemoteAgents.Launcher
             RegisterFlowPage("Локальные сети", lanBody);
             FlowLayoutPanel lanLink; MakeCard(settingsBody, new Label { Text = "Локальные сети", AutoSize = true }, out lanLink);
             AddButton(lanLink, "Открыть", () => { lanState.Text = DeploymentText(); ShowPage("Локальные сети"); });
-            if (!Product.IsVpn) {
+            {
                 AddSetting("Диск", "Папки и синхронизация", 2);
                 AddSetting("Happier", "Аккаунт и адрес приложения", 3);
                 AddSetting("Помощник", "Управление компьютером", 4);

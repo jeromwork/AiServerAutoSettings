@@ -28,19 +28,12 @@ namespace RemoteAgents.Launcher
         static void Colours()
         {
             // The expectations reproduce TrayContext.Tick, including inconsistent/partially known status files.
-            foreach (bool vpnProduct in new[] { false, true })
                 foreach (string transport in new[] { "{}", "{\"ok\":true}", "{\"ok\":false}", "{\"state\":\"starting\"}" })
                     foreach (string vpn in new[] { "{}", "{\"ok\":true,\"state\":\"on\"}", "{\"ok\":false,\"state\":\"on\"}", "{\"ok\":true,\"state\":\"off\"}" }) {
-                        var facts = Healthy(); facts.IsVpnProduct = vpnProduct; facts.Transport = Data(transport); facts.Vpn = Data(vpn);
-                        Tone expected = vpnProduct
-                            ? (Json.Bool(facts.Vpn, "ok") && Json.Str(facts.Vpn, "state") == "on" ? Tone.Ok : Tone.Warning)
-                            : (facts.Transport.Count == 0 ? Tone.Warning : Json.Bool(facts.Transport, "ok") ? Tone.Ok : Tone.Error);
-                        Check(MainScreenModel.Build(facts).Overall == expected, "overall matches tray in both products");
+                        var facts = Healthy(); facts.Transport = Data(transport); facts.Vpn = Data(vpn);
+                        Tone expected = facts.Transport.Count == 0 ? Tone.Warning : Json.Bool(facts.Transport, "ok") ? Tone.Ok : Tone.Error;
+                        Check(MainScreenModel.Build(facts).Overall == expected, "overall matches tray");
                     }
-            var off = Healthy(); off.IsVpnProduct = true; off.VpnWanted = false; off.Vpn = Data("{\"ok\":false,\"state\":\"off\"}");
-            var view = MainScreenModel.Build(off);
-            Check(view.Overall == Tone.Warning && view.Vpn.Tone == Tone.Off, "intentional off card is grey while RemoteVPN tray stays yellow");
-            Check(!view.Disk.Visible && !view.Happier.Visible && !view.Helper.Visible && view.Vpn.Visible, "RemoteVPN hides other product cards");
             Check(MainScreenModel.Build(null).Overall == Tone.Warning, "absent facts wait for proof");
         }
         static void Banners()
@@ -73,9 +66,6 @@ namespace RemoteAgents.Launcher
             Check(banner.ActionId == "details" && banner.Text.StartsWith("Помощник"), "helper precedes account");
             facts.Control = Data("{\"ok\":true}");
             Check(MainScreenModel.Build(facts).Banner.Text.StartsWith("Аккаунт Happier"), "unconfirmed account is last priority");
-            facts.IsVpnProduct = true;
-            facts.DiskSummary = "Диск: ошибка синхронизации"; facts.Control = Data("{\"ok\":false}");
-            Check(!MainScreenModel.Build(facts).Banner.Visible, "RemoteVPN does not show hidden feature warnings");
             facts.VpnError = "transport tag sing-box REST JSON";
             Check(!MainScreenModel.Build(facts).Banner.Text.Contains("transport"), "technical failure becomes a plain explanation");
             facts = Healthy(); facts.VpnInstalled = false; facts.Transport = Data("{\"ok\":false}");
@@ -234,9 +224,6 @@ namespace RemoteAgents.Launcher
             Check(MainScreenModel.CleanSecrets("https:///path").Contains("path"), "URL without authority does not throw");
             facts = Healthy(); facts.VpnError = "Не получено разрешение";
             Check(MainScreenModel.Report(facts, "").Contains(MainScreenModel.Build(facts).Banner.Text), "active banner is included");
-            facts.IsVpnProduct = true;
-            report = MainScreenModel.Report(facts, "Продукт: RemoteVPN");
-            Check(!report.Contains("Happier:") && !report.Contains("Помощник может") && !report.Contains("Диск:"), "RemoteVPN report follows visible product cards");
             string before = Json.Encode(facts.Transport); MainScreenModel.Build(facts); MainScreenModel.Report(facts, "");
             Check(Json.Encode(facts.Transport) == before, "presentation does not mutate input facts");
         }

@@ -266,20 +266,12 @@ $offline=Invoke-WizardStep HOME BUNDLE 'Inspect' ([pscustomobject]@{})
             self.assertIn('RemoteAgents.exe', ota.read('bundle-files.txt').decode().splitlines())
 
     def test_two_products_and_release_not_ignored(self):
-        vpn = bundle.make('20261109.123456-test', self.root/'vpn', product='RemoteVPN')
-        with zipfile.ZipFile(self.zip) as agents, zipfile.ZipFile(vpn) as other:
-            a = json.loads(agents.read('components.json').decode('utf-8-sig'))
-            v = json.loads(other.read('components.json').decode('utf-8-sig'))
-            self.assertEqual([c['name'] for c in a['components']], ['transport','disk','control','vpn'])
-            self.assertEqual([c['name'] for c in v['components']], ['vpn'])
-            self.assertEqual(a['components'][-1], v['components'][0], 'same command-managed VPN component in the single-file installer')
-            self.assertIn('build/Wizard.ps1', other.namelist())
-            self.assertIn('disk/Install-RemoteDisk.ps1', other.namelist())
+        with zipfile.ZipFile(self.zip) as agents:
             self.assertIn('build/Setup.Common.ps1', agents.namelist())
             self.assertIn('build/Uninstall.ps1', agents.namelist())
             self.assertIn('setup-vps-ssh.ps1', agents.namelist())
             self.assertIn('ssh-password-ui.cs', agents.namelist())
-        for name in ('RemoteAgents.exe','RemoteVPN.exe','Start.cmd'):
+        for name in ('RemoteAgents.exe','Start.cmd'):
             result = subprocess.run(['git','check-ignore','-q','release/'+name],cwd=ROOT)
             self.assertEqual(result.returncode, 1, name)
         rules = (ROOT/'disk/stignore.txt').read_text()

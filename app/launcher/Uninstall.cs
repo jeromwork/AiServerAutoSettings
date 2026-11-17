@@ -22,6 +22,7 @@ namespace RemoteAgents.Launcher
                     if (!held) throw new IOException("Закройте RemoteAgents перед удалением");
                 } finally { if (held) running.ReleaseMutex(); }
             } } catch (WaitHandleCannotBeOpenedException) { }
+            FirstInstall.CleanupLegacyRun(home);
             HelperClient.UninstallElevated();
             LegacyPacCleanup.Recover(home, new LegacyPacBrowser());
             if (Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome), StringComparison.OrdinalIgnoreCase)) {

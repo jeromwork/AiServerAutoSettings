@@ -15,11 +15,6 @@ namespace RemoteAgents.Launcher
 {
     internal static class Product
     {
-#if REMOTE_VPN
-        public static bool IsVpn { get { return true; } }
-#else
-        public static bool IsVpn { get { return false; } }
-#endif
         // Build-time capability, shared with PowerShell; user config cannot override it.
         public static readonly bool VpnEnabled = ReadVpnFeature();
         static bool ReadVpnFeature()
@@ -27,10 +22,10 @@ namespace RemoteAgents.Launcher
             using (var stream = typeof(Product).Assembly.GetManifestResourceStream("RemoteAgents.ProductFeatures.json"))
             using (var reader = new StreamReader(stream)) return Json.Bool(Json.Map(Json.Parse(reader.ReadToEnd())), "vpnEnabled");
         }
-        public static string Name { get { return IsVpn ? "RemoteVPN" : "RemoteAgents"; } }
+        public static string Name { get { return "RemoteAgents"; } }
         public static string ExeName { get { return Name + ".exe"; } }
-        public static string BundleDirectory { get { return IsVpn ? "vpn-bundle" : "bundle"; } }
-        public static string StatusName { get { return IsVpn ? "vpn-launcher.json" : "launcher.json"; } }
+        public static string BundleDirectory { get { return "bundle"; } }
+        public static string StatusName { get { return "launcher.json"; } }
     }
     // Framework serializer keeps the distributable a single EXE, without JSON packages.
 #if !PORTABLE_TEST
@@ -152,7 +147,7 @@ namespace RemoteAgents.Launcher
     internal sealed class Journal
     {
         readonly string file; readonly object gate = new object();
-        public Journal(string home) { Directory.CreateDirectory(Path.Combine(home, "logs")); file = Path.Combine(home, "logs", Product.IsVpn ? "vpn-launcher.log" : "launcher.log"); }
+        public Journal(string home) { Directory.CreateDirectory(Path.Combine(home, "logs")); file = Path.Combine(home, "logs", "launcher.log"); }
         // Event codes and validated component identifiers only; no exception messages, SSH arguments, status text or URLs.
         public void Write(string code)
         {

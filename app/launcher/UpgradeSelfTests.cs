@@ -17,8 +17,8 @@ namespace RemoteAgents.Launcher
             Directory.CreateDirectory(root);
             string work = Path.Combine(root, "upgrade-" + Guid.NewGuid().ToString("N")), home = Path.Combine(work, "home");
             Directory.CreateDirectory(home);
-            string neighborExe = Path.Combine(home, Product.IsVpn ? "RemoteAgents.exe" : "RemoteVPN.exe");
-            string neighborBundle = Path.Combine(home, Product.IsVpn ? "bundle" : "vpn-bundle", "current.txt");
+            string neighborExe = Path.Combine(home, "OtherProduct.exe");
+            string neighborBundle = Path.Combine(home, "other-bundle", "current.txt");
             Files.Atomic(neighborExe, "neighbor-image"); Files.Atomic(neighborBundle, "neighbor-version");
             var checks = new List<string>(); Process tray = null; string phase = "initialize";
             Action<string, bool> check = (name, ok) => { phase = name; if (!ok) throw new InvalidOperationException(); checks.Add(name); };
@@ -58,9 +58,9 @@ namespace RemoteAgents.Launcher
                 phase = "restored-tray"; Wait(() => Healthy(home, "0.0.2"), 20000);
                 check("rollback-restarts-tray", Healthy(home, "0.0.2"));
                 check("rollback-preserves-config-state", Files.Hash(Path.Combine(home, "config.json")) == configHash && File.ReadAllText(Path.Combine(home, "state", "preserve.txt")) == "preserve\r\n");
-                Json.Write(Path.Combine(root, (Product.IsVpn ? "selftest-upgrade-vpn-result.json" : "selftest-upgrade-result.json")), new { ok = true, tests = checks.ToArray(), count = checks.Count, home }); return 0;
+                Json.Write(Path.Combine(root, "selftest-upgrade-result.json"), new { ok = true, tests = checks.ToArray(), count = checks.Count, home }); return 0;
             } catch {
-                Json.Write(Path.Combine(root, (Product.IsVpn ? "selftest-upgrade-vpn-result.json" : "selftest-upgrade-result.json")), new { ok = false, failed = phase, tests = checks.ToArray(), count = checks.Count, home }); return 1;
+                Json.Write(Path.Combine(root, "selftest-upgrade-result.json"), new { ok = false, failed = phase, tests = checks.ToArray(), count = checks.Count, home }); return 1;
             } finally {
                 try { Stop(home, Path.Combine(home, Product.ExeName)); } catch { }
                 if (tray != null) { try { if (!tray.WaitForExit(10000)) { using (var kill = Process.Start(new ProcessStartInfo("taskkill.exe", "/PID " + tray.Id + " /T /F") { UseShellExecute = false, CreateNoWindow = true })) kill.WaitForExit(10000); } } catch { } tray.Dispose(); }

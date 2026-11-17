@@ -395,12 +395,11 @@ namespace RemoteAgents.Launcher
             var watch = Stopwatch.StartNew();
             var plan = (forced ?? await session.Plan(cancel.Token)).ToList();
             var profile = ConfigProfile.Load(home);
-            // RemoteVPN has no Disk. For RemoteAgents the Disk leaves the plan: Happier, bridge and VPN never wait
+            // The Disk leaves the plan: Happier, bridge and VPN never wait
             // for it, and it survives closing the window.
-            if (Product.IsVpn) plan.Remove(ConfigSections.Disk);
             diskQueued = plan.Remove(ConfigSections.Disk);
             foreach (var pair in rows) {
-                bool described = ConfigSections.Present(profile, pair.Key) && !(Product.IsVpn && pair.Key == ConfigSections.Disk);
+                bool described = ConfigSections.Present(profile, pair.Key);
                 pair.Value.Visible = described || plan.Contains(pair.Key) || pair.Key == ConfigSections.Disk && (diskQueued || BackgroundWork.Disk.Busy);
                 if (pair.Key == ConfigSections.Disk && BackgroundWork.Disk.Busy) continue;
                 if (pair.Key == ConfigSections.Disk && diskQueued) { pair.Value.Set(SectionState.Waiting, "начнётся в фоне после проверки связи"); continue; }
@@ -455,7 +454,7 @@ namespace RemoteAgents.Launcher
         // during a run is applied right after it, and the result comes back through OnDiskChanged.
         void StartDisk()
         {
-            if (Product.IsVpn || !ConfigSections.DiskDescribed(ConfigProfile.Load(home))) return;
+            if (!ConfigSections.DiskDescribed(ConfigProfile.Load(home))) return;
             if (session == null) { session = new ConfigSession(home, Bundle); session.Log = Log; session.Report = Report; }
             rows[ConfigSections.Disk].Visible = true; rowsPanel.Visible = true; Relayout();
             bool started = BackgroundWork.Disk.Start(async token => {

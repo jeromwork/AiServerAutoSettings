@@ -43,7 +43,7 @@ elif args[:2] in (['release','upload'],['release','create']):
     for name in args[3:]:
         if pathlib.Path(name).is_file():shutil.copyfile(name,assets/pathlib.Path(name).name)
 ''')
-        for folder, product in [('agents','RemoteAgents'),('vpn','RemoteVPN')]:
+        for folder, product in [('agents','RemoteAgents')]:
             exe = self.out/(product+'.exe')
             exe.write_bytes(b'MZ fixture'+product.encode()+'FileVersion\0'.encode('utf-16le')+'1.4.0.0\0'.encode('utf-16le'))
             path = self.root/(folder+'.zip')
@@ -51,9 +51,8 @@ elif args[:2] in (['release','upload'],['release','create']):
                 z.writestr('bundle-version.txt','20261116.120000-fixture\r\n')
                 z.writestr('components.json','[{"name":"test","exe":"unused"}]')
                 z.writestr(product+'.exe',exe.read_bytes())
-                if product=='RemoteVPN': z.writestr('product.txt','RemoteVPN\r\n')
             bundle.publish(path,self.stage/folder,launcher=exe)
-            (self.out/('bundle.zip' if folder=='agents' else 'vpn-bundle.zip')).write_bytes(path.read_bytes())
+            (self.out/'bundle.zip').write_bytes(path.read_bytes())
         release.metadata(self.stage,self.out/'release-info.json','fixture-head')
     def tearDown(self): self.tmp.cleanup()
     def script(self,name,body):
@@ -61,7 +60,7 @@ elif args[:2] in (['release','upload'],['release','create']):
     def tar(self):
         stream=io.BytesIO()
         with tarfile.open(fileobj=stream,mode='w') as tar:
-            for folder in ('agents','vpn'):tar.add(self.stage/folder,arcname=folder)
+            for folder in ('agents',):tar.add(self.stage/folder,arcname=folder)
         return stream.getvalue()
     def publish(self):
         command=subprocess.check_output([sys.executable,str(ROOT/'build/release-dist.py'),'command',str(self.root/'remote dist')],text=True).strip()
@@ -78,31 +77,20 @@ elif 'status' in args:pass
         for _ in range(2):
             result=self.publish();self.assertEqual(result.returncode,0,result.stderr.decode())
         remote=self.root/'remote dist'
-        for folder,dest in [('agents',remote),('vpn',remote/'vpn')]:
+        for folder,dest in [('agents',remote)]:
             manifest=json.loads((dest/'manifest.json').read_text())
             self.assertEqual(manifest['configSchema'],1)
             self.assertEqual(manifest['version'],'20261116.120000-fixture')
             self.assertEqual(bundle.digest(dest/manifest['file']),manifest['sha256'])
             self.assertEqual((dest/(manifest['product']+'.exe')).read_bytes(),(self.out/(manifest['product']+'.exe')).read_bytes())
         self.assertFalse(list(remote.glob('.incoming-*')))
-    def test_corrupt_second_product_keeps_both_manifests(self):
-        self.assertEqual(self.publish().returncode,0)
-        remote=self.root/'remote dist'; before=(remote/'manifest.json').read_bytes(),(remote/'vpn/manifest.json').read_bytes()
-        manifest=json.loads((self.stage/'vpn/manifest.json').read_text())
-        (self.stage/'vpn'/manifest['file']).write_bytes(b'broken')
-        self.assertNotEqual(self.publish().returncode,0)
-        self.assertEqual(before,((remote/'manifest.json').read_bytes(),(remote/'vpn/manifest.json').read_bytes()))
-    def test_mixed_versions_rejected(self):
-        p=self.stage/'vpn/manifest.json';m=json.loads(p.read_text());m['version']='other';p.write_text(json.dumps(m))
-        self.assertNotEqual(self.publish().returncode,0)
-        self.assertFalse((self.root/'remote dist/manifest.json').exists())
     def test_github_both_exes_metadata_and_readback(self):
         self.fake_git()
         result=subprocess.run([str(ROOT/'build/release-github.sh'),str(self.out)],env=self.env,capture_output=True)
         self.assertEqual(result.returncode,0,result.stderr.decode())
-        for name in ('RemoteAgents.exe','RemoteVPN.exe','release-info.json'):
+        for name in ('RemoteAgents.exe','release-info.json'):
             self.assertEqual((self.assets/name).read_bytes(),(self.out/name).read_bytes())
-        self.env['CORRUPT']='RemoteVPN.exe'
+        self.env['CORRUPT']='RemoteAgents.exe'
         result=subprocess.run([str(ROOT/'build/release-github.sh'),str(self.out)],env=self.env,capture_output=True)
         self.assertNotEqual(result.returncode,0)
     def test_branch_guard_before_any_publication_or_build(self):
@@ -120,8 +108,7 @@ elif 'status' in args:pass
         remote=self.root/'remote dist'
         info=json.loads((self.assets/'release-info.json').read_text())
         self.assertEqual(json.loads((remote/'manifest.json').read_text())['version'], info['version'])
-        self.assertEqual(json.loads((remote/'vpn/manifest.json').read_text())['version'], info['version'])
-        for folder,product in [(remote,'RemoteAgents'),(remote/'vpn','RemoteVPN')]:
+        for folder,product in [(remote,'RemoteAgents')]:
             self.assertEqual((folder/(product+'.exe')).read_bytes(),(self.assets/(product+'.exe')).read_bytes())
         old=(self.out/'release-info.json').read_text()
         (self.out/'release-info.json').write_text(old.replace('fixture-head','stale-commit'))

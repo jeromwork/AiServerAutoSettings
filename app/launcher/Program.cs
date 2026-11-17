@@ -53,7 +53,6 @@ namespace RemoteAgents.Launcher
                 if (test != null) { AttachConsole(0xFFFFFFFF); return UpdateSelfTests.Run(Path.GetFullPath(test)); }
                 string home = Path.GetFullPath(Option(args, "--home") ?? DefaultHome);
                 var diskShell = DiskShellRequest.Parse(args);
-                if (diskShell != null && Product.IsVpn) throw new ArgumentException("В RemoteVPN нет Диска");
                 // Agent commands (docs/CONFIG.md «Ввод без раскрытия агенту»): before single-instance, the tray may run.
                 // Output is only «сохранено»/«отменено»/names, never a value.
                 if (args.Length > 0 && args[0] == "secret") {
@@ -61,8 +60,8 @@ namespace RemoteAgents.Launcher
                     var rest = new System.Collections.Generic.List<string>(args); int at = rest.IndexOf("--home"); if (at > 0 && at + 1 < rest.Count) rest.RemoveRange(at, 2);
                     return SecretCommand.Run(home, rest.ToArray());
                 }
-                Directory.CreateDirectory(home); LegacyPacCleanup.Recover(home, new LegacyPacBrowser()); log = new Journal(home); log.Write("launcher.start");
-                if (args.Contains("--uninstall")) { if (Product.IsVpn) FirstInstall.UninstallVpn(home); else Uninstall.Run(home); log.Write("uninstall.ok"); return 0; }
+                Directory.CreateDirectory(home); LegacyPacCleanup.Recover(home, new LegacyPacBrowser()); FirstInstall.CleanupLegacyRun(home); log = new Journal(home); log.Write("launcher.start");
+                if (args.Contains("--uninstall")) { Uninstall.Run(home); log.Write("uninstall.ok"); return 0; }
                 var sid = WindowsIdentity.GetCurrent().User; string name = InstanceName(home, sid);
                 var security = new MutexSecurity(); security.AddAccessRule(new MutexAccessRule(sid, MutexRights.FullControl, AccessControlType.Allow));
                 bool created, owned = false, restart = false;string firstInstallSource=null;

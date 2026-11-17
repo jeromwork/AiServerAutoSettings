@@ -5,9 +5,8 @@
     <StartupObject>RemoteAgents.Launcher.EntryPoint</StartupObject>
     <ApplicationIcon>app.ico</ApplicationIcon>
     <UseWindowsForms>true</UseWindowsForms>
-    <ProductName Condition="'$(ProductName)' == ''">RemoteAgents</ProductName>
-    <AssemblyName>$(ProductName)</AssemblyName>
-    <DefineConstants Condition="'$(ProductName)' == 'RemoteVPN'">$(DefineConstants);REMOTE_VPN</DefineConstants>
+    <ProductName>RemoteAgents</ProductName>
+    <AssemblyName>RemoteAgents</AssemblyName>
     <RootNamespace>RemoteAgents.Launcher</RootNamespace>
     <LangVersion>7.3</LangVersion>
     <Version>1.4.0</Version>

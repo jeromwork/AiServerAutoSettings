@@ -178,8 +178,8 @@ namespace RemoteAgents.Launcher
                 Check("newer-bundle", UpgradeInstaller.Compare("1.1", "2.1", "1.1", "2.0") > 0);
                 Check("mixed-release-needs-downgrade-consent", UpgradeInstaller.Compare("1.2", "1.9", "1.1", "2.0") < 0);
                 string upgradeHome = Path.Combine(work, "upgrade-home"), image = Path.Combine(work, "downloaded.exe");
-                string neighborImage = Path.Combine(upgradeHome, Product.IsVpn ? "RemoteAgents.exe" : "RemoteVPN.exe");
-                string neighborPointer = Path.Combine(upgradeHome, Product.IsVpn ? "bundle" : "vpn-bundle", "current.txt");
+                string neighborImage = Path.Combine(upgradeHome, "OtherProduct.exe");
+                string neighborPointer = Path.Combine(upgradeHome, "other-bundle", "current.txt");
                 Files.Atomic(neighborImage, "neighbor"); Files.Atomic(neighborPointer, "neighbor-current");
                 File.WriteAllText(image, "old-image");
                 var u1 = Archive(work, "20.0.0"); var u2 = Archive(work, "21.0.0");
@@ -210,7 +210,7 @@ namespace RemoteAgents.Launcher
                 Check("upgrade-119-second-grace", UpgradeInstaller.ObserveImage(upgradeHome, ue, false, "", DateTime.UtcNow.AddSeconds(118)) == "" && ue.Pending);
                 Check("upgrade-restores-image-and-bundle", UpgradeInstaller.ObserveImage(upgradeHome, ue, false, "", DateTime.UtcNow.AddSeconds(121)) == "rollback" && ue.Current == u1.Version && File.ReadAllText(installedImage) == "old-image");
                 Check("product-upgrade-and-rollback-preserve-neighbor", File.ReadAllText(neighborImage) == "neighbor" && Files.ReadLine(neighborPointer) == "neighbor-current");
-                Check("product-bundle-storage", ue.Root == Path.Combine(upgradeHome, Product.IsVpn ? "vpn-bundle" : "bundle"));
+                Check("product-bundle-storage", ue.Root == Path.Combine(upgradeHome, "bundle"));
                 var u3 = Archive(work, "22.0.0");
                 Reject("upgrade-failed-selftest", () => UpgradeInstaller.Apply(upgradeHome, image, Path.Combine(work, u3.FileName), "1.1.0", false, f => false));
                 Check("upgrade-failed-selftest-keeps-image", ue.Current == u1.Version && File.ReadAllText(installedImage) == "old-image");
