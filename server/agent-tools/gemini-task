@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""Run one Gemini (agy) task headless: permissions on, live progress, hang watchdog, mandatory report.
+
+Usage: gemini-task -C <dir> (-f brief.md | "task text") [--continue ID] [--effort low|high] [--max-min 20]
+Progress is printed live and saved next to the raw stream in ~/work/briefs/gemini/.
+Exit codes: 0 done, 1 agy error, 2 hung (no activity), 3 time limit.
+"""
+import argparse
+import json
+import os
+import signal
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+MODEL = 'gemini-3.8-flash-high'
+IDLE_SEC = int(os.environ.get('GEMINI_TASK_IDLE_SEC', 180))      # no events and no command running -> hung (e.g. waiting for a background task)
+COMMAND_SEC = 480    # one foreground command may run this long (tests are capped at 420 s)
+
+RULES = '''
+
+---
+ПОСТОЯННЫЕ ПРАВИЛА ЗАПУСКА (дописаны автоматически; при противоречии с заданием выше — сильнее правила владельца о тестах и про фон):
+1. Порядок: сначала прочитай только нужные файлы, затем правь, затем проверки. Не расписывай большой план — делай то, что в задании.
+2. Все команды — только на переднем плане и с ограничением `timeout N`. Никаких фоновых задач, `&`, nohup, watch-режимов,
+   незавершающихся серверов; фоновые задачи не запускать и не ждать.
+3. Тесты (решение владельца 16.11.2026): во время работы не запускать, только проверка синтаксиса изменённых файлов.
+   В конце один раз — только затронутой части, каждая команда под `timeout 420`, всего не дольше 5–7 минут.
+   Полные наборы (`server/tests/run.sh`, `app/launcher/tests/run.sh`) не запускать. Упал/завис не из-за правки —
+   не чинить окружение, записать в отчёт.
+4. Не коммитить, не пушить, не переключать ветки, не трогать `.env*` и секреты — если в задании явно не сказано иное.
+5. Если задача заметно больше ~200 строк правки или неясна — остановись и опиши в отчёте, что мешает; не угадывай.
+6. Последним сообщением — обязательно отчёт:
+   ИТОГ: сделано / частично / не сделано
+   ФАЙЛЫ: изменённые файлы
+   ПРОВЕРКИ: команды и результат (последние строки)
+   ПРОБЛЕМЫ: что не получилось и почему, или «нет»
+'''
+
+
+def short(info):
+    params = info.get('parameters') or {}
+    for key in ('CommandLine', 'TargetFile', 'AbsolutePath', 'Path', 'File', 'SearchPath', 'Query', 'Url'):
+        if isinstance(params.get(key), str):
+            return params[key].replace('\n', ' ')[:160]
+    for value in params.values():
+        if isinstance(value, str):
+            return value.replace('\n', ' ')[:160]
+    return ''
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('-C', dest='cwd', required=True, help='рабочая папка (worktree)')
+    ap.add_argument('-f', dest='file', help='файл задания')
+    ap.add_argument('text', nargs='?', help='текст задания (если нет -f)')
+    ap.add_argument('--continue', dest='conversation', help='id разговора для следующего этапа')
+    ap.add_argument('--effort', choices=['low', 'medium', 'high'])
+    ap.add_argument('--model', default=MODEL)
+    ap.add_argument('--max-min', type=int, default=20, help='общий предел, минут')
+    ap.add_argument('--name', help='имя для журналов')
+    args = ap.parse_args()
+    if not (args.file or args.text):
+        ap.error('нужно задание: -f файл или текст')
+    task = Path(args.file).read_text() if args.file else args.text
+    name = args.name or (Path(args.file).stem if args.file else 'task')
+    logs = Path.home() / 'work/briefs/gemini'
+    logs.mkdir(parents=True, exist_ok=True)
+    base = logs / (time.strftime('%Y%m%d-%H%M%S-') + name)
+    raw, progress = open(str(base) + '.jsonl', 'w'), open(str(base) + '.progress', 'w')
+
+    cmd = ['agy', '-p', task + RULES, '--model', args.model, '--output-format', 'stream-json',
+           '--dangerously-skip-permissions', '--print-timeout', f'{args.max_min}m']
+    if args.conversation:
+        cmd += ['--conversation', args.conversation]
+    if args.effort:
+        cmd += ['--effort', args.effort]
+    start = time.time()
+
+    def say(line):
+        line = f'[{int(time.time() - start) // 60:02d}:{int(time.time() - start) % 60:02d}] {line}'
+        print(line, flush=True)
+        progress.write(line + '\n'); progress.flush()
+
+    say(f'журнал: {base}.progress')
+    proc = subprocess.Popen(cmd, cwd=args.cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, start_new_session=True)
+    state = dict(last=time.time(), active=None, why=None, conv=args.conversation, text=[], result=None)
+
+    def watchdog():
+        while proc.poll() is None:
+            time.sleep(5)
+            now = time.time()
+            limit = COMMAND_SEC if state['active'] else IDLE_SEC
+            if now - start > args.max_min * 60 + 60:
+                state['why'] = 'time'
+            elif now - state['last'] > limit:
+                state['why'] = 'hung'
+            if state['why']:
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM); time.sleep(5); os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                return
+    threading.Thread(target=watchdog, daemon=True).start()
+
+    for line in proc.stdout:
+        raw.write(line); raw.flush()
+        state['last'] = time.time()
+        try:
+            event = json.loads(line)
+        except ValueError:
+            say('agy: ' + line.strip()[:200])
+            continue
+        kind = event.get('event')
+        if kind == 'init':
+            state['conv'] = event.get('conversation_id') or state['conv']
+            say(f'старт, разговор {state["conv"]}')
+        elif kind == 'step_update':
+            step = event.get('step_update') or {}
+            if step.get('step_type') == 'tool':
+                info = step.get('tool_info') or {}
+                if step.get('state') == 'ACTIVE':
+                    state['active'] = step.get('step_index')
+                    say(f'→ {step.get("tool_name")} {short(info)}')
+                elif step.get('state') == 'DONE':
+                    state['active'] = None
+                    if step.get('tool_name') == 'run_command':
+                        out = str(info.get('output', ''))
+                        code = [l for l in out.splitlines() if 'exited with code' in l]
+                        say(f'  готово за {step.get("duration_seconds", 0):.0f} с' + (f'; {code[0].strip()}' if code else ''))
+            elif step.get('step_type') == 'agent_response' and step.get('text_delta'):
+                state['text'].append(step['text_delta'])
+        elif kind == 'result':
+            state['result'] = event.get('result') or {}
+    proc.wait()
+    if state['why']:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)  # leftovers of a stopped run (commands it started)
+        except ProcessLookupError:
+            pass
+
+    result = state['result'] or {}
+    answer = result.get('response') or ''.join(state['text'])
+    print('\n===== ОТВЕТ GEMINI =====\n' + (answer.strip() or '(пусто)'), flush=True)
+    progress.write('\n===== ОТВЕТ GEMINI =====\n' + answer)
+    if state['why'] == 'hung':
+        status, code = f'ЗАВИС: нет активности {IDLE_SEC} с (или команда дольше {COMMAND_SEC} с) — остановлен', 2
+    elif state['why'] == 'time':
+        status, code = f'ПРЕДЕЛ ВРЕМЕНИ {args.max_min} мин — остановлен', 3
+    elif result.get('status') == 'SUCCESS':
+        status, code = 'ГОТОВО', 0
+    else:
+        status, code = f'ОШИБКА agy (status={result.get("status")}, exit={proc.returncode})', 1
+    say(f'{status}; продолжить: gemini-task -C {args.cwd} --continue {state["conv"]} "..."')
+    sys.exit(code)
+
+
+if __name__ == '__main__':
+    main()
