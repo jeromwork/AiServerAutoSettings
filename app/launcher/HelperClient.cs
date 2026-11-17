@@ -1,5 +1,7 @@
 using System;
 using System.ComponentModel;
+using System.Collections.Generic;
+using System.Linq;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -49,6 +51,30 @@ namespace RemoteAgents.Launcher
                 });
             });
         }
+        string lanWanted = "{\"cmd\":\"lan.stop\"}";
+        Dictionary<string, object> lanState = Json.Map(null);
+        DateTime lanUpdated;
+        internal bool Installed { get { return NetHelperInstall.InstalledVersion.Length > 0; } }
+        internal void UpdateLan(Dictionary<string, object> config, Dictionary<string, object> transport)
+        {
+            try {
+                var request = LanTunNetwork.Request(Json.Map(Json.Get(config, "profile")), Json.Int(Json.Map(Json.Get(transport, "helper")), "lanInPort", 0));
+                // Wait for the effective port; never guess it from a default or send invalid input.
+                if (Json.Str(request, "cmd") == "lan.apply" && Json.Int(request, "socksPort", 0) == 0) return;
+                string wanted = Json.Encode(request); lock (gate) lanWanted = wanted;
+            } catch { Status = "Локальные сети: неверный конфиг"; }
+        }
+        internal Dictionary<string, object> LanStatus(Dictionary<string, object> config)
+        {
+            lock (gate) {
+                if (Connected && lanState.Count > 0 && (DateTime.UtcNow - lanUpdated).TotalSeconds <= 15) return lanState;
+                try {
+                    var networks = LanAccess.Read(Json.Map(Json.Get(config, "profile"))).Networks.Where(n => Json.Bool(n, "enabled") && Json.Strings(Json.Get(n, "subnets")).Length > 0)
+                        .Select(n => { var row = new Dictionary<string, object>(n); row["state"] = Installed ? "channel-down" : "no-helper"; row["reason"] = Installed ? (Connected ? "ожидается проверка локальных сетей" : "нет связи с помощником") : "помощник не установлен"; return (object)row; }).ToArray();
+                    return new Dictionary<string, object> { { "enabled", networks.Length > 0 }, { "networks", networks } };
+                } catch { return Json.Map(null); }
+            }
+        }
         bool Connected { get { lock (gate) return !disposed && pipe != null && pipe.IsConnected; } }
         void Connect()
         {
@@ -68,28 +94,33 @@ namespace RemoteAgents.Launcher
                 uint serverPid;
                 if (!GetNamedPipeServerProcessId(channel.SafePipeHandle, out serverPid) || !IsServiceProcess(serverPid)) throw new IOException("Недостоверный помощник");
                 var reader = new NetHelperProtocol.Reader(channel);
-                Exchange(channel, reader, "ping");
+                Exchange(channel, reader, "{\"cmd\":\"ping\"}");
                 Task.Run(() => Monitor(channel, reader));
             } catch { lock (gate) { if (pipe == channel) pipe = null; } channel.Dispose(); throw; }
         }
-        static void Exchange(NamedPipeClientStream channel, NetHelperProtocol.Reader reader, string command)
+        static Dictionary<string, object> Exchange(NamedPipeClientStream channel, NetHelperProtocol.Reader reader, string request)
         {
-            var write = NetHelperProtocol.WriteLine(channel, Json.Encode(new { cmd = command }));
+            var write = NetHelperProtocol.WriteLine(channel, request);
             if (!write.Wait(5000)) throw new IOException("Помощник не отвечает");
             var read = reader.ReadLine();
-            if (!read.Wait(5000)) throw new IOException("Помощник не отвечает");
+            if (!read.Wait(request.Contains("lan.apply") || request.Contains("lan.stop") ? 120000 : 15000)) throw new IOException("Помощник не отвечает");
             string response = read.GetAwaiter().GetResult();
             if (response == null) throw new IOException("Помощник отключился");
             var result = Json.Map(Json.Parse(response));
-            if (!Json.Bool(result, "ok") || (command == "ping" && Json.Str(result, "reply") != "pong")) throw new IOException("Ошибка помощника");
+            if (!Json.Bool(result, "ok") || (request == "{\"cmd\":\"ping\"}" && Json.Str(result, "reply") != "pong")) throw new IOException("Ошибка помощника");
+            return result;
         }
         void Monitor(NamedPipeClientStream channel, NetHelperProtocol.Reader reader)
         {
+            string applied = null;
             try {
                 while (true) {
                     // No reconnect/autorestart: a failed session stays off until an explicit retry.
                     lock (gate) { if (disposed || pipe != channel) return; }
-                    Exchange(channel, reader, "status");
+                    string wanted; lock (gate) wanted = lanWanted;
+                    if (wanted != applied) { Exchange(channel, reader, wanted); applied = wanted; }
+                    var status = Exchange(channel, reader, "{\"cmd\":\"status\"}");
+                    lock (gate) { lanState = Json.Map(Json.Get(status, "lan")); lanUpdated = DateTime.UtcNow; }
                     for (int i = 0; i < 20; i++) {
                         lock (gate) { if (disposed || pipe != channel) return; }
                         Thread.Sleep(100);

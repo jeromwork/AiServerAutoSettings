@@ -170,10 +170,11 @@ namespace RemoteAgents.Launcher
                 if (result == "accepted" || image == "accepted") { log.Write("update.accepted"); UpdateOutcome(engine.Current, ""); }
                 int count = critical.Count(r => r.Healthy); icon.Icon = all ? green : count > 0 ? yellow : red;
                 var transport = StatusView.Read(home, "transport", maxAgeSec: 15);
-                if (!Product.IsVpn) {
+                if (netHelper != null) netHelper.UpdateLan(config.Data, transport);
+                if (!Product.IsVpn && (netHelper == null || !netHelper.Installed)) {
                     if (lanProxy == null) lanProxy = new LanProxy(home);
                     lanProxy.Tick(config.Data, transport);
-                }
+                } else if (lanProxy != null) { lanProxy.Dispose(); lanProxy = null; }
                 if (Product.IsVpn) {
                     var vpnStatus = VpnStatus.Read(home);
                     icon.Icon = Json.Bool(vpnStatus, "ok") && Json.Str(vpnStatus, "state") == "on" ? green : yellow;
@@ -361,8 +362,8 @@ namespace RemoteAgents.Launcher
         TrayMenuEntry[] TrayEntries()
         {
             var entries = TrayMenuModel.Build(config.Data, AccountState(), StatusView.Read(home, "transport", maxAgeSec: 15), ServerHealthView.Read(home), DiskSummary()).ToList();
-            var lanStatus = StatusView.Read(home, "lan-proxy", maxAgeSec: 20);
-            if (!Product.IsVpn && Json.Bool(lanStatus, "enabled")) entries.Insert(0, new TrayMenuEntry("lan-status", StatusView.Lan(lanStatus), false));
+            var lanStatus = LocalLanStatus();
+            if (Json.Bool(lanStatus, "enabled")) entries.Insert(0, new TrayMenuEntry("lan-status", StatusView.Lan(lanStatus), false));
             entries.Insert(entries.Count - 1, new TrayMenuEntry("update-status", updateSummary, false));
             entries.Insert(entries.Count - 1, new TrayMenuEntry("update-check", "Проверить обновления сейчас", !updateChecking && !engine.Pending));
             entries.Insert(entries.Count - 1, VpnMenu()); return entries.ToArray();
@@ -532,6 +533,8 @@ namespace RemoteAgents.Launcher
             if (!closing) MessageBox.Show(mainWindow, conflict, Product.Name);
             return false;
         }
+        Dictionary<string, object> LocalLanStatus()
+        { return netHelper == null ? Json.Map(null) : netHelper.LanStatus(config.Data); }
         void RefreshMain()
         {
             if (mainWindow == null || mainWindow.IsDisposed) return;
@@ -541,7 +544,7 @@ namespace RemoteAgents.Launcher
             try { account = HappierAccountModel.From(config.Data, name => SecretVault.Has(home, name)); }
             catch (Exception) { account = new HappierAccountModel(); }
             var facts = new MainScreenFacts {
-                IsVpnProduct = Product.IsVpn, Transport = transport, Lan = StatusView.Read(home, "lan-proxy", maxAgeSec: 20),
+                IsVpnProduct = Product.IsVpn, Transport = transport, Lan = LocalLanStatus(),
                 Vpn = VpnStatus.Read(home),
                 Control = StatusView.Read(home, "control", maxAgeSec: 30), Health = health,
                 VpnInstalled = definition != null && definition.Components.Any(c => c.Name == "vpn"),

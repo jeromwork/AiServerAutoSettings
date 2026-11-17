@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Collections.Generic;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -30,13 +31,55 @@ namespace RemoteAgents.Launcher
                 }
             } catch (Exception) { return false; } // Both framework and portable JSON decoders fail closed.
         }
-        internal static string Reply(string line, Func<string[]> recentLog)
+        internal static string Reply(string line, Func<string[]> recentLog, Func<Dictionary<string, object>, object> lanCommand = null, Func<object> lanStatus = null)
         {
             string command;
-            if (!TryCommand(line, out command)) return BadRequest;
+            Dictionary<string, object> request = null;
+            if (!TryCommand(line, out command)) {
+                try {
+                    if (line == null || Utf8.GetByteCount(line) > MaxMessageBytes) return BadRequest;
+                    new StrictJson(line).Check();
+                    request = Json.Map(Json.Parse(line));
+                    if (Json.Str(request, "cmd") != "lan.apply") return BadRequest;
+                    LanTunNetwork.Parse(request); command = "lan.apply";
+                } catch { return BadRequest; }
+            }
             if (command == "ping") return "{\"ok\":true,\"reply\":\"pong\"}";
-            if (command == "status") return Json.Encode(new { ok = true, state = "ready", helperVersion = NetHelperInstall.HelperVersion, log = recentLog() });
+            if (command == "status") return Json.Encode(new { ok = true, state = "ready", helperVersion = NetHelperInstall.HelperVersion, log = recentLog(), lan = lanStatus == null ? null : lanStatus() });
+            if (lanCommand != null && (command == "lan.apply" || command == "lan.stop")) {
+                if (command == "lan.apply" && request == null) return BadRequest;
+                return Json.Encode(lanCommand(request ?? new Dictionary<string, object> { { "cmd", command } }));
+            }
             return "{\"ok\":false,\"error\":\"not-implemented\"}";
+        }
+        // Framework's JSON decoder accepts duplicate keys and non-JSON syntax. Validate the
+        // wire grammar before decoding; keys are compared after unescaping, at every depth.
+        sealed class StrictJson
+        {
+            readonly string text; int at;
+            static readonly Regex Token = new Regex(@"\G(?:-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null)");
+            static readonly Regex StringToken = new Regex(@"\G""(?:[^""\\\x00-\x1f]|\\(?:[""\\/bfnrt]|u[0-9a-fA-F]{4}))*""");
+            internal StrictJson(string text) { this.text = text; }
+            void Space() { while (at < text.Length && " \t\r\n".IndexOf(text[at]) >= 0) at++; }
+            bool Take(char c) { Space(); if (at < text.Length && text[at] == c) { at++; return true; } return false; }
+            void Need(char c) { if (!Take(c)) throw new InvalidDataException(); }
+            string String() { Space(); var m = StringToken.Match(text, at); if (!m.Success) throw new InvalidDataException(); at += m.Length; return (string)Json.Parse(m.Value); }
+            void Value(int depth)
+            {
+                if (depth > 16) throw new InvalidDataException();
+                Space(); if (at >= text.Length) throw new InvalidDataException();
+                if (Take('{')) {
+                    var keys = new HashSet<string>(StringComparer.Ordinal);
+                    if (Take('}')) return;
+                    do { if (!keys.Add(String())) throw new InvalidDataException(); Need(':'); Value(depth + 1); } while (Take(','));
+                    Need('}');
+                } else if (Take('[')) {
+                    if (Take(']')) return;
+                    do { Value(depth + 1); } while (Take(',')); Need(']');
+                } else if (text[at] == '"') String();
+                else { var m = Token.Match(text, at); if (!m.Success) throw new InvalidDataException(); at += m.Length; }
+            }
+            internal void Check() { Value(0); Space(); if (at != text.Length) throw new InvalidDataException(); }
         }
         internal static Task WriteLine(Stream stream, string line)
         {

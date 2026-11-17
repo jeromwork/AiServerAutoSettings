@@ -17,7 +17,7 @@ namespace RemoteAgents.Launcher
     internal static class NetHelperInstall
     {
         // Bump manually whenever helper logic or the wire protocol changes.
-        internal const string HelperVersion = "1";
+        internal const string HelperVersion = "2";
         internal const string ServiceName = "RemoteAgentsNet";
         internal const string DisplayName = "RemoteAgents: локальные сети и VPN";
         internal static bool NeedsInstall(string installed) { return (installed ?? "").Trim() != HelperVersion; }

@@ -5,7 +5,7 @@
     <OutputType>Exe</OutputType>
     <StartupObject Condition="'$(ConfigTests)' == 'true'">RemoteAgents.Launcher.ConfigBundleTests</StartupObject>
     <StartupObject Condition="'$(ConfigE2E)' == 'true'">RemoteAgents.Launcher.ConfigE2E</StartupObject>
-    <StartupObject Condition="'$(ConfigTests)' != 'true' And '$(ConfigE2E)' != 'true'">RemoteAgents.Launcher.NetHelperTests</StartupObject>
+    <StartupObject Condition="'$(ConfigTests)' != 'true' And '$(ConfigE2E)' != 'true'">RemoteAgents.Launcher.LanTunTests</StartupObject>
     <DefineConstants>PORTABLE_TEST</DefineConstants>
     <DefineConstants Condition="'$(ProductName)' == 'RemoteVPN'">PORTABLE_TEST;REMOTE_VPN</DefineConstants>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
@@ -45,6 +45,8 @@
     <Compile Include="../NetHelperProtocol.cs" />
     <Compile Include="../NetHelperInstall.cs" />
     <Compile Include="../NetHelper.cs" />
+    <Compile Include="../LanTun.cs" />
+    <Compile Include="LanTunTests.cs" />
     <Compile Include="NetHelperTests.cs" />
     <Compile Include="../MainScreenModel.cs" Link="MainScreenModel.cs" />
     <Compile Include="TrayExtrasTests.cs" />

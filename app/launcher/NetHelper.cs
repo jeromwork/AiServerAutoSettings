@@ -39,6 +39,7 @@ namespace RemoteAgents.Launcher
                 jobs.Add(job);
             }
         }
+        internal void RemoveJob(IDisposable job) { lock (gate) jobs.Remove(job); }
         internal void CloseJobs()
         {
             lock (gate) {
@@ -61,24 +62,27 @@ namespace RemoteAgents.Launcher
     // свой код только как обвязка над SCM и sing-box
     internal sealed class NetHelper : ServiceBase
     {
-        readonly string ownerSid;
+        readonly string ownerSid, home;
+        LanTun lan;
+        System.Threading.Timer lanTimer;
         readonly ManualResetEvent stopping = new ManualResetEvent(false), emergency = new ManualResetEvent(false);
         readonly object pipeGate = new object();
         NamedPipeServerStream pipe;
         Thread worker;
         NetHelperLifetime lifetime;
         NetHelperLog log;
-        internal NetHelper(string ownerSid)
+        internal NetHelper(string ownerSid, string home)
         {
+            this.home = Path.GetFullPath(home);
             this.ownerSid = new SecurityIdentifier(NetHelperInstall.ValidateSid(ownerSid)).Value;
             ServiceName = NetHelperInstall.ServiceName; CanStop = true; CanShutdown = true; AutoLog = false;
         }
         internal static int Run(string[] args)
         {
             try {
-                // Home is recorded by installation for future stages; never read user files as SYSTEM here.
-                Path.GetFullPath(Program.Option(args, "--home") ?? throw new ArgumentException("Нет home"));
-                using (var service = new NetHelper(Program.Option(args, "--owner-sid"))) ServiceBase.Run(service);
+                // Home comes only from the protected SCM command, never from a pipe request.
+                string home = Path.GetFullPath(Program.Option(args, "--home") ?? throw new ArgumentException("Нет home"));
+                using (var service = new NetHelper(Program.Option(args, "--owner-sid"), home)) ServiceBase.Run(service);
                 return 0;
             } catch { return 1; } // Never open a WinForms error dialog in LocalSystem session 0.
         }
@@ -90,8 +94,9 @@ namespace RemoteAgents.Launcher
         }
         void Cleanup()
         {
-            // Stage 4 will add owned NRPT receipts here. Never touch foreign policies.
-            try { NetHelperInstall.RemoveNrpt(); if (log != null) log.Write("cleanup", 0); }
+            if (lanTimer != null) lanTimer.Dispose();
+            // Never touch foreign policies. LAN disposal also waits out any cancelled command.
+            try { if (lan != null) lan.Dispose(); else NetHelperInstall.RemoveNrpt(); if (log != null) log.Write("cleanup", 0); }
             catch { if (log != null) log.Write("cleanup", 1); }
             lock (pipeGate) { if (pipe != null) { pipe.Dispose(); pipe = null; } }
             if (log != null) log.Write("stopped", 0);
@@ -101,7 +106,7 @@ namespace RemoteAgents.Launcher
             if (lifetime != null) lifetime.CloseJobs(); // Network FIRST, before pipe disposal, logs or joins.
             stopping.Set();
             lock (pipeGate) { if (pipe != null) pipe.Dispose(); }
-            if (worker != null && worker != Thread.CurrentThread) worker.Join(10000);
+            if (worker != null && worker != Thread.CurrentThread) worker.Join(30000);
         }
         protected override void OnShutdown() { OnStop(); base.OnShutdown(); }
         void Loop()
@@ -112,6 +117,17 @@ namespace RemoteAgents.Launcher
                 lease = new VpnLease(() => { lifetime.CloseJobs(); emergency.Set(); });
                 NetHelperInstall.SecureDirectory(NetHelperInstall.DataDirectory);
                 log = new NetHelperLog(NetHelperInstall.DataDirectory); log.Write("starting", 0);
+                var lanClock = Stopwatch.StartNew();
+                lan = new LanTun(new WindowsLanTun(home, config => {
+                    IDisposable job; var process = StartSingBox(Core.Lan, config, out job);
+                    return new LanTunProcess(process, job, () => lifetime.RemoveJob(job));
+                }, log.Write, lifetime.AddJob, lifetime.RemoveJob), () => lanClock.ElapsedMilliseconds);
+                // Only one callback may do network I/O. Status/commands also serialize in LanTun.
+                int lanTicking = 0;
+                lanTimer = new System.Threading.Timer(_ => {
+                    if (stopping.WaitOne(0) || Interlocked.Exchange(ref lanTicking, 1) != 0) return;
+                    try { lan.Tick(); } finally { Interlocked.Exchange(ref lanTicking, 0); }
+                }, null, 1000, 1000);
                 lock (pipeGate) {
                     if (stopping.WaitOne(0)) return;
                     pipe = CreatePipe(ownerSid);
@@ -137,7 +153,12 @@ namespace RemoteAgents.Launcher
                         if (!IsOwner(pipe, ownerSid)) { outcome = "client-denied"; outcomeCode = 5; break; }
                         authenticated = true; lifetime.Connected(); log.Write("connected", 0);
                     }
-                    string reply = NetHelperProtocol.Reply(line, log.Recent);
+                    // NRPT, route inspection and probes may take seconds. Keep the independent
+                    // fail-open lease advancing on the owner loop while the operation is awaited.
+                    var dispatch = Task.Run(() => NetHelperProtocol.Reply(line, log.Recent,
+                        request => Json.Str(request, "cmd") == "lan.stop" ? lan.Stop() : lan.Apply(request), () => lan.Status()));
+                    if (!Wait(dispatch, lease, false)) break;
+                    string reply = dispatch.GetAwaiter().GetResult();
                     var write = NetHelperProtocol.WriteLine(pipe, reply);
                     if (!Wait(write, lease, false)) break;
                     write.GetAwaiter().GetResult();
@@ -169,16 +190,23 @@ namespace RemoteAgents.Launcher
         internal enum Core { Lan, Vpn }
         // Only service-built configs enter this method. No client paths, executable names or JSON configs.
         internal Process StartSingBox(Core kind, object serviceConfig)
+        { IDisposable owned; return StartSingBox(kind, serviceConfig, out owned); }
+        Process StartSingBox(Core kind, object serviceConfig, out IDisposable owned)
         {
+            owned = null;
             if (kind != Core.Lan && kind != Core.Vpn) throw new ArgumentException("Неизвестное ядро");
             string config = Path.Combine(NetHelperInstall.DataDirectory, kind == Core.Lan ? "lan.json" : "vpn.json");
             NetHelperInstall.RejectReparse(NetHelperInstall.DataDirectory);
             if (File.Exists(config) && (File.GetAttributes(config) & FileAttributes.ReparsePoint) != 0) throw new IOException("Небезопасный конфиг");
             Files.Atomic(config, Json.Encode(serviceConfig)); // Inherits SYSTEM + Administrators only.
-            var job = new NativeJob(); lifetime.AddJob(job);
+            var job = new NativeJob(); lifetime.AddJob(job); owned = job;
             try {
+                if (kind == Core.Lan) {
+                    using (var check = job.Start(Path.Combine(NetHelperInstall.InstallDirectory, "sing-box.exe"), new[] { "check", "-c", config }, NetHelperInstall.InstallDirectory))
+                        if (!check.WaitForExit(10000) || check.ExitCode != 0) throw new InvalidDataException("Конфиг ЛВС не прошёл проверку");
+                }
                 return job.Start(Path.Combine(NetHelperInstall.InstallDirectory, "sing-box.exe"), new[] { "run", "-c", config }, NetHelperInstall.InstallDirectory);
-            } catch { job.Dispose(); throw; }
+            } catch { job.Dispose(); lifetime.RemoveJob(job); throw; }
         }
         static NamedPipeServerStream CreatePipe(string sid)
         {

@@ -69,7 +69,7 @@ namespace RemoteAgents.Launcher
         internal Tone Overall;               // must match the tray icon colour for the same facts
         internal BannerView Banner = new BannerView();
         internal VpnCardView Vpn = new VpnCardView();
-        internal CardView Lan = new CardView { Title = "Сеть клиники" };
+        internal CardView Lan = new CardView { Title = "Локальные сети" };
         internal CardView Disk = new CardView { Title = "Диск" };
         internal CardView Happier = new CardView { Title = "Happier" };
         internal CardView Helper = new CardView { Title = "Помощник" };
@@ -91,10 +91,11 @@ namespace RemoteAgents.Launcher
             BuildVpn(view.Vpn, facts, transport, vpn);
             BuildDisk(view.Disk, facts);
             var lan = facts.Lan ?? Json.Map(null);
-            view.Lan.Visible = !facts.IsVpnProduct && Json.Bool(lan, "enabled");
-            view.Lan.State = Json.Text(lan, "summary", "ожидается проверка");
-            view.Lan.Detail = Json.Str(lan, "detail");
-            view.Lan.Tone = Json.Bool(lan, "ok") ? Tone.Ok : Tone.Warning;
+            view.Lan.Visible = Json.Bool(lan, "enabled");
+            var lanNetworks = Json.Array(Json.Get(lan, "networks")).Select(Json.Map).ToArray();
+            view.Lan.State = string.Join("\r\n", lanNetworks.Select(n => Json.Str(n, "name") + ": " + Json.Str(n, "state") + " — " + Json.Str(n, "reason")));
+            view.Lan.Detail = LanDetails(lan);
+            view.Lan.Tone = lanNetworks.Length > 0 && lanNetworks.All(n => Json.Str(n, "state") == "ok") ? Tone.Ok : Tone.Warning;
             view.Happier.Visible = facts.HappierVisible && !facts.IsVpnProduct;
             view.Happier.State = facts.HappierConfirmed ? "аккаунт подключён"
                 : facts.HappierHasKey || facts.HappierVisible ? "аккаунт не подтверждён" : "не настроен";
@@ -219,6 +220,14 @@ namespace RemoteAgents.Launcher
             return lastTwo >= 11 && lastTwo <= 14 ? "папок" : last == 1 ? "папка" : last >= 2 && last <= 4 ? "папки" : "папок";
         }
 
+        internal static string LanDetails(Dictionary<string, object> lan)
+        {
+            return CleanSecrets(string.Join("\r\n\r\n", Json.Array(Json.Get(lan, "networks")).Select(Json.Map).Select(n =>
+                Json.Str(n, "name") + "\r\nПодсети: " + string.Join(", ", Json.Strings(Json.Get(n, "connectedSubnets") ?? Json.Get(n, "subnets"))) +
+                "\r\nИсключены: " + string.Join("; ", Json.Array(Json.Get(n, "excludedSubnets")).Select(Json.Map).Select(s => Json.Str(s, "subnet") + " — " + Json.Str(s, "adapter"))) +
+                "\r\nDNS: " + string.Join(", ", Json.Strings(Json.Get(n, "dnsServers"))) + "\r\nДомены: " + string.Join(", ", Json.Strings(Json.Get(n, "domains"))) +
+                "\r\nИмена: " + (Json.Bool(n, "nrptOk") ? "настроены" : "не настроены") + "\r\nПоследняя ошибка: " + Json.Text(n, "stage", "нет"))));
+        }
         static string HelperReason(Dictionary<string, object> control, Dictionary<string, object> transport)
         {
             if (control.Count == 0) return "ожидается проверка";
@@ -270,6 +279,7 @@ namespace RemoteAgents.Launcher
             AppendCard(report, view.Vpn.Title, view.Vpn.State, view.Vpn.Detail, view.Vpn.Visible);
             string dns = VpnStatus.DnsDetail(facts.Vpn ?? Json.Map(null));
             if (view.Vpn.Visible && dns.Length > 0) report.AppendLine(dns);
+            AppendCard(report, view.Lan.Title, view.Lan.State, view.Lan.Detail, view.Lan.Visible);
             AppendCard(report, view.Disk.Title, view.Disk.State, view.Disk.Detail, view.Disk.Visible);
             AppendCard(report, view.Happier.Title, view.Happier.State, view.Happier.Detail, view.Happier.Visible);
             if (view.Helper.Visible) report.AppendLine(view.Helper.State);
