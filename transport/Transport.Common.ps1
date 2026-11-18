@@ -943,7 +943,7 @@ function Get-TransportRemembered($Memory,[string]$Network,$Candidates) {
         if($r){$state=$r.state;if($state -eq 'ok'){$state='remembered'};$speed=$r.kbps;$checked=$r.checkedAt}
         if($c.enabled -eq $false){$state='disabled';$speed=$null;$checked=$null}
         if($c.buildFailed -and $c.enabled -ne $false){$state='fail';$speed=$null;$checked=[DateTime]::UtcNow.ToString('o')}
-        $row=[pscustomobject]@{tag=$c.tag;title=$c.title;kind=$c.kind;via=$c.via;enabled=($c.enabled -ne $false);state=$state;kbps=$speed;checkedAt=$checked}
+        $row=[pscustomobject]@{tag=$c.tag;title=$c.title;kind=$c.kind;via=$c.via;enabled=($c.enabled -ne $false);state=$state;kbps=$speed;checkedAt=$checked;suspect=$false}
         if($c.buildFailed){$row|Add-Member diagnostic $c.diagnostic}
         $row
     }

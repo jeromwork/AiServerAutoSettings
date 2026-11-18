@@ -63,10 +63,11 @@ if '-N' in sys.argv:
     while True: time.sleep(.1)
 with (root/'probes.pid').open('a') as ledger: ledger.write(str(os.getpid())+'\\n')
 port=int(sys.argv[sys.argv.index('-p')+1])
-if (root/'fail-active').exists() and port==int((root/'fail-active').read_text()):
+if (root/'fail-all').exists() or ((root/'fail-active').exists() and port==int((root/'fail-active').read_text())):
     os.write(1,b'x'*16384)
     time.sleep(10)
 else:
+    if (root/'recovery-delay').exists(): time.sleep(1)
     n=int(sys.argv[-1].split()[2]); block=b'x'*8192
     if n==262144 and (root/'slow-rank').exists():
         while True:
@@ -185,10 +186,25 @@ Server(('127.0.0.1',port),API).serve_forever()
         ports={i['tag'][6:]:i['listen_port'] for i in json.loads((root/'state/transport-sing-box.json').read_text())['inbounds'] if i['tag'].startswith('probe-')}
         first_engine = int((root / 'engine.pid').read_text())
         # Активный поток замер: переключение на ранее проверенный путь через PUT без рестарта.
+        (root/'recovery-delay').touch()
         (root / 'fail-active').write_text(str(ports[initial]))
+        degraded=until(lambda: (s if (s:=status()).get('phase')=='degraded' else None))
+        assert degraded['active']==initial and degraded['checkingSince']
+        assert next(c for c in degraded['candidates'] if c['tag']==initial)['suspect']
         until(lambda: status().get('ok') and status().get('active') != initial)
         assert int((root / 'engine.pid').read_text()) == first_engine
         assert status()['active'] in (root / 'switches').read_text()
+        assert status()['phase']=='ok'
+        (root/'recovery-delay').unlink()
+        # Every remembered path must fail a fresh round before red, without switching on stale memory.
+        (root/'fail-all').touch()
+        failed_active=status()['active']
+        until(lambda: status().get('phase')=='degraded')
+        until(lambda: status().get('phase')=='failed')
+        assert status()['active']==failed_active and not status()['ok']
+        (root/'fail-all').unlink()
+        (root/'fail-active').unlink()
+        until(lambda: status().get('ok'))
         # Pin применяется CLI за <=5 секунд; мёртвый pin не сменяется при живых соседях.
         def cli(script, *args):
             subprocess.run([PWSH, '-NoLogo', '-NoProfile', '-File', str(DAEMON.with_name(script)),
@@ -208,7 +224,8 @@ Server(('127.0.0.1',port),API).serve_forever()
         pin_output=pin_cli.communicate(timeout=15)
         assert pin_cli.returncode == 0, pin_output
         (root/'fail-active').write_text(str(ports[pinned]))
-        until(lambda: status().get('active')==pinned and not status().get('ok') and
+        until(lambda: status().get('active')==pinned and status().get('phase')=='degraded')
+        until(lambda: status().get('active')==pinned and status().get('phase')=='failed' and
               'Закреплённый путь не работает' in status().get('error',''))
         time.sleep(2)
         assert status()['active']==pinned and not status()['ok']
