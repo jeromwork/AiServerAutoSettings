@@ -149,7 +149,10 @@ Server(('127.0.0.1',port),API).serve_forever()
     try:
         (root/'optional-busy').touch()
         daemon = start()
+        first = until(lambda: status() or None, seconds=10)
+        assert first.get('phase') in ('checking', 'ok') and (first.get('ok') or first.get('checkingSince')), ('первый статус не должен быть провалом', first)
         until(lambda: status().get('ok') and any(c['tag']=='vless-direct' and c['state']=='ok' for c in status().get('candidates',[])))
+        assert status()['phase'] == 'ok' and status().get('checkingSince') is None
         selected=json.loads((root/'state/transport-ports.json').read_text())
         assert selected['configured']['sshPort']==2222 and selected['effective']['sshPort']==2232
         assert status()['ports']['sshPort']==2232
@@ -199,6 +202,7 @@ Server(('127.0.0.1',port),API).serve_forever()
               'Закреплённый путь не работает' in status().get('error',''))
         time.sleep(2)
         assert status()['active']==pinned and not status()['ok']
+        assert status()['phase'] == 'failed', status()
         assert status()['summary'].startswith('нет связи:')
         assert int((root/'engine.pid').read_text())==first_engine
         # Выключение tag при сохранённом pin закрывает selector, рабочие порты прежние.
@@ -298,6 +302,7 @@ Server(('127.0.0.1',port),API).serve_forever()
         daemon.wait(timeout=10)
         assert daemon.returncode == 0, daemon.communicate()
         assert not status()['ok']
+        assert status()['phase'] == 'stopped'
         assert stopped(int((root / 'engine.pid').read_text()))
         assert stopped(int((root / 'tunnel.pid').read_text()))
         assert all(stopped(int(pid)) for pid in (root/'probes.pid').read_text().splitlines()), 'SSH probe leaked after timeout/stop'
@@ -310,6 +315,7 @@ Server(('127.0.0.1',port),API).serve_forever()
         daemon.wait(timeout=10)
         assert daemon.returncode == 0, daemon.communicate()
         assert not status()['ok']
+        assert status()['phase'] == 'stopped'
         assert stopped(int((root / 'engine.pid').read_text()))
         assert stopped(int((root / 'tunnel.pid').read_text()))
         assert all(stopped(int(pid)) for pid in (root/'probes.pid').read_text().splitlines()), 'SSH probe leaked after timeout/stop'

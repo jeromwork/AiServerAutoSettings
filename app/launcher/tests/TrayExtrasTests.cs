@@ -153,6 +153,19 @@ namespace RemoteAgents.Launcher
             foreach (string url in new[] { "", "not a url", "file:///tmp/app", "javascript:alert(1)", "https://user:pass@example.invalid" })
                 Check(!TrayMenuModel.Build(Data(Json.Encode(new { happier = new { webappUrl = url } })), empty, transport, health)[0].Enabled, "invalid URL cannot launch: " + url);
             Check(TrayMenuModel.Connection(empty).Contains("ожидается"), "missing transport unknown");
+            var checking = Data(Json.Encode(new { ok = false, phase = "checking", checkingSince = DateTime.UtcNow.AddSeconds(-5).ToString("o") }));
+            Check(TrayMenuModel.Connection(checking).Contains("проверяется"), "first check has neutral connection label");
+            Check(TrayMenuModel.Tooltip(checking, empty).Contains("связь проверяется"), "first check has neutral tray tooltip");
+            var rememberedFailure = Data(Json.Encode(new { tag = "a", title = "A", state = "fail", checkedAt = DateTime.UtcNow.AddDays(-1).ToString("o") }));
+            Check(TrayMenuModel.CandidateLine(rememberedFailure, checking).Contains("ранее не работал; ожидается проверка"), "remembered failure waits for a fresh check");
+            rememberedFailure["checkedAt"] = DateTime.UtcNow.ToString("o");
+            string freshFailure = TrayMenuModel.CandidateLine(rememberedFailure, checking);
+            Check(freshFailure.Contains("не работает") && !freshFailure.Contains("ранее"), "fresh candidate failure is still a failure during checking");
+            rememberedFailure["checkedAt"] = DateTime.UtcNow.AddDays(-1).ToString("o");
+            string failedLine = TrayMenuModel.CandidateLine(rememberedFailure, Data("{\"ok\":false,\"phase\":\"failed\"}"));
+            Check(failedLine.Contains("не работает") && !failedLine.Contains("ранее"), "failed transport shows candidate failures normally");
+            rememberedFailure.Remove("checkedAt");
+            Check(TrayMenuModel.CandidateLine(rememberedFailure, checking).Contains("ранее не работал"), "undated candidate failure waits for proof");
             transport["ok"] = false;
             Check(!TrayMenuModel.Connection(transport).Contains("КБ/с") && TrayMenuModel.Connection(transport).Contains("не подтверждена"), "failed transport does not claim a working path/speed");
             Check(!TrayMenuModel.CandidateLine(StatusView.Candidates(transport)[0], transport).Contains("используется"), "failed transport has no confirmed active path");

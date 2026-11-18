@@ -62,7 +62,7 @@ namespace RemoteAgents.Launcher
         internal static string Connection(Dictionary<string, object> transport)
         {
             if (transport.Count == 0) return "Связь: ожидается проверка";
-            return Json.Bool(transport, "ok") ? "Связь: " + ActiveTitle(transport) + " · " + StatusView.Speed(transport) : "Связь: не подтверждена";
+            return Json.Bool(transport, "ok") ? "Связь: " + ActiveTitle(transport) + " · " + StatusView.Speed(transport) : StatusView.Phase(transport) == LinkPhase.Checking ? "Связь: проверяется" : "Связь: не подтверждена";
         }
         internal static string CandidateLine(Dictionary<string, object> candidate, Dictionary<string, object> transport)
         {
@@ -70,7 +70,7 @@ namespace RemoteAgents.Launcher
             if (!Json.Bool(candidate, "enabled", true)) state = "отключён";
             else switch (Json.Str(candidate, "state")) {
                 case "ok": state = "работает"; break;
-                case "fail": case "failed": state = "не работает"; break;
+                case "fail": case "failed": state = StatusView.StaleCandidate(candidate, transport) ? "ранее не работал; ожидается проверка" : "не работает"; break;
                 case "checking": case "pending": state = "проверяется"; break;
                 case "slow": state = "медленный"; break;
                 case "frozen": state = "завис"; break;
@@ -83,7 +83,7 @@ namespace RemoteAgents.Launcher
         }
         internal static string Tooltip(Dictionary<string, object> transport, Dictionary<string, object> health)
         {
-            string connection = Json.Bool(transport, "ok") ? Short(ActiveTitle(transport), 14) + " · " + StatusView.Speed(transport) : "связь не подтверждена";
+            string connection = Json.Bool(transport, "ok") ? Short(ActiveTitle(transport), 14) + " · " + StatusView.Speed(transport) : StatusView.Phase(transport) == LinkPhase.Checking ? "связь проверяется" : "связь не подтверждена";
             return Short(connection + "; " + ServerHealthView.Compact(health), 63);
         }
         internal static string Short(string value, int max)

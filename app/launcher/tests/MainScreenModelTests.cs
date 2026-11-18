@@ -22,8 +22,46 @@ namespace RemoteAgents.Launcher
         }
         internal static void Run()
         {
-            Colours(); Banners(); VpnCard(); DiskCard(); AccountsAndHelper(); Reports();
+            Colours(); Banners(); VpnCard(); DiskCard(); AccountsAndHelper(); Reports(); LinkPhases();
             Console.WriteLine("PASS: " + count + " main screen checks");
+        }
+        static void LinkPhases()
+        {
+            string now = DateTime.UtcNow.AddSeconds(-5).ToString("o"), old = DateTime.UtcNow.AddSeconds(-600).ToString("o");
+            var facts = Healthy();
+            facts.Transport = Data("{\"ok\":false,\"phase\":\"checking\",\"checkingSince\":\"" + now + "\",\"error\":\"Запуск\"}");
+            facts.Vpn = Data("{\"ok\":false,\"enabled\":false}");
+            facts.Control = Data("{\"ok\":false}");
+            facts.DiskSummary = "Диск: сервер не подключён";
+            var view = MainScreenModel.Build(facts);
+            Check(view.Overall == Tone.Warning, "initial connection check is yellow");
+            Check(view.Banner.Tone == Tone.Warning && view.Banner.Text == "Проверяем связь с сервером…" && view.Banner.ActionId == "", "checking banner waits without retry");
+            Check(view.Vpn.State == "Ожидается проверка" && view.Vpn.Tone != Tone.Error, "VPN waits for connection proof");
+            Check(!view.Helper.State.Contains("нет связи с сервером") && view.Helper.State.Contains("проверяем связь с сервером"), "helper does not report a failure before the check");
+            Check(view.Disk.State == "ожидается проверка связи" && view.Disk.Tone == Tone.Warning, "Disk waits for connection proof");
+            Check(StatusView.Line("Связь", facts.Transport, true).StartsWith("⏳"), "transport diagnostics wait during first check");
+            facts.Transport = Data("{\"ok\":false,\"phase\":\"checking\",\"checkingSince\":\"" + old + "\"}");
+            view = MainScreenModel.Build(facts);
+            Check(view.Overall == Tone.Error && view.Banner.ActionId == "retry", "hung connection check is red with retry");
+            Check(StatusView.Line("Связь", facts.Transport, true).StartsWith("❌"), "hung check is a diagnostic failure");
+            facts.Transport = Data("{\"ok\":false,\"phase\":\"failed\"}");
+            view = MainScreenModel.Build(facts);
+            Check(view.Overall == Tone.Error && view.Banner.ActionId == "retry" && view.Disk.State == "нет связи с сервером", "fresh failed check stays red and reaches Disk");
+            Check(view.Vpn.Tone == Tone.Error && view.Helper.State.Contains("нет связи с сервером"), "fresh failure reaches VPN and helper");
+            facts.Transport = Data("{\"ok\":false,\"phase\":\"stopped\"}");
+            Check(MainScreenModel.Build(facts).Overall == Tone.Warning, "stopped transport waits neutrally");
+            Check(StatusView.Line("Связь", facts.Transport, true).StartsWith("⏳"), "stopped diagnostics wait neutrally");
+            facts.Transport = Data("{\"ok\":false}");
+            Check(MainScreenModel.Build(facts).Overall == Tone.Error, "legacy failed status stays red");
+            facts.Transport = Data("{\"ok\":true,\"phase\":\"ok\"}");
+            Check(MainScreenModel.Build(facts).Overall == Tone.Ok, "confirmed connection stays green");
+            Check(StatusView.Phase(Data("{}")) == LinkPhase.Checking && StatusView.Phase(null) == LinkPhase.Checking, "missing status waits for a check");
+            Check(StatusView.Phase(Data("{\"ok\":false,\"phase\":\"checking\"}")) == LinkPhase.Checking, "check with missing timestamp waits");
+            Check(StatusView.Phase(Data("{\"ok\":false,\"phase\":\"checking\",\"checkingSince\":\"invalid\"}")) == LinkPhase.Checking, "check with invalid timestamp waits");
+            var since = DateTime.Parse(now, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
+            var checking = Data("{\"ok\":false,\"phase\":\"checking\",\"checkingSince\":\"" + now + "\"}");
+            Check(StatusView.Phase(checking, since.AddSeconds(StatusView.CheckingLimitSec)) == LinkPhase.Checking &&
+                StatusView.Phase(checking, since.AddSeconds(StatusView.CheckingLimitSec + 1)) == LinkPhase.Failed, "checking timeout boundary");
         }
         static void Colours()
         {

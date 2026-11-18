@@ -173,7 +173,7 @@ namespace RemoteAgents.Launcher
                 ok &= Step("lan", () => { if (netHelper != null) netHelper.UpdateLan(config.Data, transport); });
                 ok &= Step("vpn-resume", () => ResumeUpdatedVpn(transport));
                 ok &= Step("icon", () => {
-                    icon.Icon = transport.Count == 0 ? yellow : Json.Bool(transport, "ok") ? green : red;
+                    var linkPhase = StatusView.Phase(transport); icon.Icon = linkPhase == LinkPhase.Ok ? green : linkPhase == LinkPhase.Checking ? yellow : red;
                     var vpnStatus = VpnStatus.Read(home);
                     string vpnReason = VpnWatchdog.FailureSummary(Json.Str(vpnStatus, "state"), Json.Str(vpnStatus, "stage"));
                     if (vpnReason.Length > 0 && Json.Str(vpnStatus, "owner") == "net-helper") vpnReason = Json.Text(vpnStatus, "summary", vpnReason);

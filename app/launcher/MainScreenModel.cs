@@ -84,7 +84,8 @@ namespace RemoteAgents.Launcher
             var control = facts.Control ?? Json.Map(null);
             var view = new MainScreenView();
             // Keep this identical to TrayContext.Tick; a deliberately off VPN is grey in its card only.
-            view.Overall = transport.Count == 0 ? Tone.Warning : Json.Bool(transport, "ok") ? Tone.Ok : Tone.Error;
+            var phase = StatusView.Phase(transport);
+            view.Overall = phase == LinkPhase.Checking ? Tone.Warning : phase == LinkPhase.Ok ? Tone.Ok : Tone.Error;
             BuildVpn(view.Vpn, facts, transport, vpn);
             BuildDisk(view.Disk, facts);
             var lan = facts.Lan ?? Json.Map(null);
@@ -109,9 +110,9 @@ namespace RemoteAgents.Launcher
                 view.Banner = DisableFailed(facts, vpn)
                     ? Banner(Tone.Error, vpnError, "Подробнее", "details")
                     : Banner(Json.Str(vpn, "state") == "conflict" ? Tone.Warning : Tone.Error, vpnError.StartsWith("VPN выключен", StringComparison.Ordinal) ? vpnError : "Не удалось включить VPN. " + vpnError, "Включить снова", "vpn-on");
-            else if (transport.Count == 0)
+            else if (phase == LinkPhase.Checking)
                 view.Banner = Banner(Tone.Warning, "Проверяем связь с сервером…", "", "");
-            else if (!Json.Bool(transport, "ok"))
+            else if (phase == LinkPhase.Failed)
                 view.Banner = Banner(Tone.Error, "Нет связи с сервером. Проверьте подключение к интернету или повторите проверку.", "Повторить", "retry");
             else if (view.Disk.Visible && view.Disk.Tone == Tone.Error)
                 view.Banner = Banner(Tone.Error, "Диск: " + view.Disk.State + ". Проверьте синхронизацию.", "Открыть синхронизацию", "open-sync");
@@ -140,8 +141,8 @@ namespace RemoteAgents.Launcher
             else if (state == "starting" || state == "awaiting-uac")
                 card.State = state == "awaiting-uac" ? "Ожидается разрешение на включение" : "Включается…";
             else if (state == "off") { card.State = "VPN выключен"; card.Tone = Tone.Off; }
-            else if (vpn.Count == 0 || transport.Count == 0) card.State = "Ожидается проверка";
-            else if (!Json.Bool(transport, "ok")) { card.State = "Нет связи с сервером"; card.Tone = Tone.Error; }
+            else if (vpn.Count == 0 || StatusView.Phase(transport) == LinkPhase.Checking) card.State = "Ожидается проверка";
+            else if (StatusView.Phase(transport) == LinkPhase.Failed) { card.State = "Нет связи с сервером"; card.Tone = Tone.Error; }
             else if (Json.Bool(vpn, "ok") && state == "on") { card.State = "Защита включена"; card.Tone = Tone.Ok; }
             else card.State = card.On ? "Защита ещё не подтверждена" : "Ожидается проверка";
 
@@ -200,7 +201,7 @@ namespace RemoteAgents.Launcher
             }
             else if (state == "синхронизирован") { state = "всё синхронизировано"; card.Tone = Tone.Ok; }
             else if (state.StartsWith("синхронизация", StringComparison.Ordinal)) state = "идёт " + state;
-            else if (state == "сервер не подключён") state = "нет связи с сервером";
+            else if (state == "сервер не подключён") state = StatusView.Phase(facts.Transport ?? Json.Map(null)) == LinkPhase.Checking ? "ожидается проверка связи" : "нет связи с сервером";
             else if (state == "проверка файлов") state = "проверяются файлы";
             else if (state == "состояние не получено" || state == "состояние уточняется") state = "ожидается проверка";
             else if (state == "отключён") card.Tone = Tone.Off;
@@ -228,7 +229,8 @@ namespace RemoteAgents.Launcher
         static string HelperReason(Dictionary<string, object> control, Dictionary<string, object> transport)
         {
             if (control.Count == 0) return "ожидается проверка";
-            if (transport.Count > 0 && !Json.Bool(transport, "ok")) return "нет связи с сервером";
+            if (StatusView.Phase(transport) == LinkPhase.Failed) return "нет связи с сервером";
+            if (transport.Count > 0 && StatusView.Phase(transport) == LinkPhase.Checking) return "проверяем связь с сервером";
             string summary = Json.Str(control, "summary");
             if (summary == "Управление выключено") return "управление выключено";
             if (summary == "Управление: нет данных") return "ожидается проверка управления";
