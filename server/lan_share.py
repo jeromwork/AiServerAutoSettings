@@ -213,7 +213,7 @@ def _reconcile(e, apply, transaction):
             return e.row('lanShare', 'ready', 'Доступ с ПК: правила подтверждены новым SSH')
         return e.row('lanShare', 'pending', 'Доступ с ПК: требуется новое SSH перед подтверждением')
     if not enabled(p) and not manifest:
-        return e.row('lanShare', 'ready', 'Доступ с ПК не задан; прежняя политика сохранена')
+        return e.row('lanShare', 'ready', 'Доступ с ПК не задан; правил канала нет')
     # Use the LAN manager's current discovered routes, not a separate route list.
     for item in e.config.get('lan', []):
         actual = s.read('/etc/remoteagents/lan/' + item['name'] + '/config.json', {})

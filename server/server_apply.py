@@ -1002,7 +1002,9 @@ class Engine:
         if not self.config.get('proxyOut'):
             parts = []
         parts += [('lan:' + item['name'], lambda item=item: self.lan_part(item, apply)) for item in self.config.get('lan', [])]
-        if 'lan' in self.config or self.s.path(lan_share.MANIFEST).exists():
+        # Absent 'lan' = this config does not manage server LANs: keep lanShare as is.
+        # Only an explicit 'lan' (even []) may change or remove the share policy.
+        if 'lan' in self.config:
             parts.append(('lanShare', lambda: lan_share.reconcile(self, apply)))
         if 'telegramGateway' in self.config:
             parts.append(('telegramGateway', lambda: self.telegram(self.config['telegramGateway'], apply)))

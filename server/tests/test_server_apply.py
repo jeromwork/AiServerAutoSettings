@@ -250,6 +250,23 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(before, after)
         self.assertFalse(any(c[0] in ('apt-get', 'loginctl') or c[:2] in (['systemctl', 'restart'], ['systemctl', 'enable']) for c in f.calls))
 
+    def test_absent_lan_keeps_share_manifest_and_rules(self):
+        f = self.fake
+        owned = {'/etc/sing-box/config.json': {'rules': [{'inbound': ['channel'], 'ip_cidr': ['192.168.87.0/24'],
+                 'action': 'route', 'outbound': 'direct-out'}], 'dns': None, 'createdDns': False}}
+        f.write('/etc/remoteagents/server-apply/lan-share.json', json.dumps(owned))
+        cfg = config(); cfg.pop('lan')
+        before = {str(p): p.read_bytes() for p in f.root.rglob('*') if p.is_file()}
+        for command in ('plan', 'status'):
+            result = f.engine(cfg).run(command)
+            self.assertFalse(any(r['part'] == 'lanShare' for r in result['parts']), result)
+            self.assertEqual(result['actions'], [])
+        self.assertEqual(before, {str(p): p.read_bytes() for p in f.root.rglob('*') if p.is_file()})
+        # An explicit 'lan' still reconciles the share policy.
+        explicit = config(); explicit['lan'] = []
+        result = f.engine(explicit).run('plan')
+        self.assertTrue(any(r['part'] == 'lanShare' for r in result['parts']), result)
+
     def test_lan_status_explains_corrupt_state_without_contents_or_mutations(self):
         f = self.fake
         self.assertTrue(f.complete()['ok'])
