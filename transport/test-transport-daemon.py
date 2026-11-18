@@ -68,6 +68,9 @@ if (root/'fail-active').exists() and port==int((root/'fail-active').read_text())
     time.sleep(10)
 else:
     n=int(sys.argv[-1].split()[2]); block=b'x'*8192
+    if n==262144 and (root/'slow-rank').exists():
+        while True:
+            os.write(1,b'x'*1024); time.sleep(.3)
     while n:
         k=min(len(block),n); os.write(1,block[:k]); n-=k
         time.sleep(.002 if port==26000 else (.004 if port==26001 else .008))
@@ -148,11 +151,18 @@ Server(('127.0.0.1',port),API).serve_forever()
 
     try:
         (root/'optional-busy').touch()
+        (root/'slow-rank').touch()
         daemon = start()
         first = until(lambda: status() or None, seconds=10)
         assert first.get('phase') in ('checking', 'ok') and (first.get('ok') or first.get('checkingSince')), ('первый статус не должен быть провалом', first)
         until(lambda: status().get('ok') and any(c['tag']=='vless-direct' and c['state']=='ok' for c in status().get('candidates',[])))
         assert status()['phase'] == 'ok' and status().get('checkingSince') is None
+        rank_active=status()['active']
+        until(lambda: any(c['tag']==rank_active and c.get('rankState')=='slow'
+                          for c in status().get('candidates', [])))
+        assert status()['active']==rank_active and status()['ok'], 'slow rank must not invalidate active liveness'
+        assert next(c for c in status()['candidates'] if c['tag']==rank_active)['state']=='ok'
+        (root/'slow-rank').unlink()
         selected=json.loads((root/'state/transport-ports.json').read_text())
         assert selected['configured']['sshPort']==2222 and selected['effective']['sshPort']==2232
         assert status()['ports']['sshPort']==2232

@@ -63,13 +63,18 @@ function Write-DaemonWizardProgress([string]$Text) {
     # Explicit opt-in only for the wizard's short-lived preflight. Never forward raw subprocess output.
     if($env:REMOTEAGENTS_WIZARD_PROGRESS){try{[IO.File]::AppendAllText($env:REMOTEAGENTS_WIZARD_PROGRESS,((@{text=$Text}|ConvertTo-Json -Compress)+"`n"),(New-Object Text.UTF8Encoding($false)))}catch{}}
 }
+function Get-DaemonProbeKey([string]$Tag,[string]$Purpose) {
+    if($Purpose -eq 'rank'){return 'rank/'+$Tag};return 'health/'+$Tag
+}
+function Test-DaemonHealthProbe([string]$Tag) {$probes.ContainsKey((Get-DaemonProbeKey $Tag 'active'))}
 function Start-DaemonProbe($Candidate,[long]$Bytes,[string]$Purpose) {
-    if($probes.ContainsKey($Candidate.tag)){return}
+    $key=Get-DaemonProbeKey $Candidate.tag $Purpose
+    if($probes.ContainsKey($key)){return}
     Write-DaemonWizardProgress ('Проверяю вариант связи: '+$Candidate.title+'… (до '+$settings.Options.probeTimeoutSec+' с)')
-    try{$probes[$Candidate.tag]=Start-TransportProbe $settings.Profile $Candidate $Bytes $settings.Options $Purpose}
+    try{$probes[$key]=Start-TransportProbe $settings.Profile $Candidate $Bytes $settings.Options $Purpose}
     catch{
-        $row=$rows|Where-Object {$_.tag -eq $Candidate.tag}|Select-Object -First 1;$row.state='fail';$row.kbps=$null;$row.checkedAt=[DateTime]::UtcNow.ToString('o')
-        if($Candidate.tag -eq $active){Fail-TransportActive (-not $rankPending)}
+        $row=$rows|Where-Object {$_.tag -eq $Candidate.tag}|Select-Object -First 1;if($Purpose -eq 'rank'){$row|Add-Member -Force rankState 'fail'}else{$row.state='fail'};$row.checkedAt=[DateTime]::UtcNow.ToString('o')
+        if($Candidate.tag -eq $active){if($Purpose -eq 'rank'){$script:nextActive=[DateTime]::UtcNow}else{Fail-TransportActive}}
         $detail=New-TransportDiagnostic $null $Candidate.tag 'probe-start-failed'
         $row|Add-Member -Force diagnostic $detail
         Write-TransportLog $root 'process-failed' $detail
@@ -80,7 +85,7 @@ function Start-TransportLiveness {
     # мёртвые пути стоят один таймаут на всех, первый ответивший становится активным. Замер скорости (rank) — после.
     # OpenSSH -D candidates need their own login after the engine start: they keep the former 1 s pause.
     $tunnels=@($paths.Tunnels|ForEach-Object {$_.tag})
-    foreach($c in $paths.Candidates){if(-not $probes.ContainsKey($c.tag)){
+    foreach($c in $paths.Candidates){if(-not (Test-DaemonHealthProbe $c.tag)){
         if($c.tag -in $tunnels -and [DateTime]::UtcNow -lt $tunnelLiveAt){$script:liveDeferred+=,$c}else{Start-DaemonProbe $c ([long]$settings.Options.activeProbeBytes) 'live'}
     }}
     $interval=$settings.Options.activeIntervalSec;if($metered -ne $false){$interval=$settings.Options.meteredActiveIntervalSec}
@@ -98,7 +103,6 @@ function Start-TransportRanking {
 function Start-TransportRankNext {
     while($script:rankQueue -and $script:rankQueue.Count -gt 0 -and @($probes.Values|Where-Object {$_.purpose -eq 'rank'}).Count -lt [int]$settings.Options.rankConcurrency){
         $c=$script:rankQueue.Dequeue()
-        if($probes.ContainsKey($c.tag)){Stop-TransportProbe $probes[$c.tag];$probes.Remove($c.tag)}
         Start-DaemonProbe $c ([long]$settings.Options.rankProbeBytes) 'rank'
     }
     $script:nextRank=[DateTime]::UtcNow.AddSeconds([double]$settings.Options.rankIntervalSec)
@@ -305,14 +309,16 @@ try{
                     $retryAt=$now.AddSeconds([double]$settings.Options.restartDelaySec)
                 }
             }
-            foreach($tag in @($probes.Keys)){
-                $probe=$probes[$tag]
+            foreach($key in @($probes.Keys)){
+                $probe=$probes[$key];$tag=$probe.tag
                 if(Receive-TransportProbe $probe){
                     $result=$probe.state;$row=$rows|Where-Object {$_.tag -eq $tag}|Select-Object -First 1
                     # Скорость задаёт рейтинг (равные объёмы); проба активного пути меньше и только подтверждает живость.
                     $row|Add-Member -Force probeMs ([int](([Diagnostics.Stopwatch]::GetTimestamp()-$probe.sink.Started)*1000/[Diagnostics.Stopwatch]::Frequency))
                     $row|Add-Member -Force maxGapMs $result.maxGapMs
-                    $row.state=$result.state;if($probe.purpose -notin @('active','live') -or $result.state -ne 'ok' -or $null -eq $row.kbps){$row.kbps=$result.kbps};$row.checkedAt=$now.ToString('o')
+                    if($probe.purpose -eq 'rank'){$row|Add-Member -Force rankState $result.state;$row.kbps=$result.kbps}
+                    else{$row.state=$result.state;if($result.state -eq 'ok' -and $null -eq $row.kbps){$row.kbps=$result.kbps}}
+                    $row.checkedAt=$now.ToString('o')
                     $reason=if($result.diagnostic.reason -eq 'timeout'){'таймаут '+$settings.Options.probeTimeoutSec+' с'}elseif($result.diagnostic.reason -eq 'stalled'){'нет ответа'}else{'путь недоступен'}
                     Write-DaemonWizardProgress ('Вариант связи: '+$row.title+$(if($result.state -eq 'ok'){' ✓'}else{' ✗ ('+$reason+')'}))
                     $detail=New-TransportDiagnostic $probe.child $tag $result.diagnostic.reason $diagnosticContext
@@ -321,15 +327,16 @@ try{
                         if($underlying){$detail|Add-Member engineStderr $underlying.stderr;$detail.reason=$underlying.reason}
                     }
                     $row|Add-Member -Force diagnostic $detail
-                    Stop-TransportProbe $probe;$probes.Remove($tag)
+                    Stop-TransportProbe $probe;$probes.Remove($key)
                     if($result.state -eq 'ok'){
                         Write-TransportLog $root 'probe-ok' $detail
-                        if($tag -eq $active){$confirmed=$true;$errorText=$null;$bindRetry=$null;$portConflict=$null;Set-DaemonNextActive}
+                        if($probe.purpose -eq 'rank'){}
+                        elseif($tag -eq $active){$confirmed=$true;$errorText=$null;$bindRetry=$null;$portConflict=$null;Set-DaemonNextActive}
                         elseif(-not $confirmed){[void](Switch-TransportActive $tag $true)}
                     }else{
                         Write-TransportLog $root 'probe-failed' $detail
                         if($tag -eq $active){
-                            Fail-TransportActive ($probe.purpose -eq 'active' -or -not $rankPending)
+                            if($probe.purpose -eq 'rank'){if($result.bytes -eq 0){$nextActive=$now}}else{Fail-TransportActive}
                         }
                     }
                     Save-TransportMemory $root $memory $network.id $rows
@@ -348,9 +355,9 @@ try{
             if($liveDeferred.Count -and $now -ge $tunnelLiveAt){foreach($c in $liveDeferred){Start-DaemonProbe $c ([long]$settings.Options.activeProbeBytes) 'live'};$liveDeferred=@()}
             # Живость — параллельно и раньше rank; rank (по очереди, делит канал) ждёт окончания проб живости.
             $live=@($probes.Values|Where-Object {$_.purpose -eq 'live'}).Count
-            if(-not $confirmed -and -not $rankPending -and -not $live -and $pin.mode -eq 'auto' -and $now -ge $nextLive){Start-TransportLiveness;$live=@($probes.Values|Where-Object {$_.purpose -eq 'live'}).Count}
+            if(-not $confirmed -and -not $live -and $pin.mode -eq 'auto' -and $now -ge $nextLive){Start-TransportLiveness;$live=@($probes.Values|Where-Object {$_.purpose -eq 'live'}).Count}
             if($confirmed -and -not $rankPending -and -not $live -and $now -ge $nextRank){Start-TransportRanking}
-            if($active -and $active -in @($paths.Candidates|ForEach-Object {$_.tag}) -and $now -ge $nextActive -and -not $probes.ContainsKey($active)){
+            if($active -and $active -in @($paths.Candidates|ForEach-Object {$_.tag}) -and $now -ge $nextActive -and -not (Test-DaemonHealthProbe $active)){
                 $c=$paths.Candidates|Where-Object {$_.tag -eq $active}|Select-Object -First 1
                 Start-DaemonProbe $c ([long]$settings.Options.activeProbeBytes) 'active'
                 Set-DaemonNextActive
