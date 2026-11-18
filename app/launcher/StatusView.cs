@@ -78,6 +78,7 @@ namespace RemoteAgents.Launcher
         { var value = Json.Get(data, "metered"); return value is bool ? ((bool)value ? "да" : "нет") : "нет данных"; }
         internal static string Lan(Dictionary<string, object> data)
         { var networks = Json.Array(Json.Get(data, "networks")).Select(Json.Map).ToArray();
+            if (networks.Length > 0 && networks.All(n => Json.Str(n, "state") == "no-helper")) return "Локальные сети: помощник не установлен — установите помощник";
             return "Локальные сети: " + networks.Count(n => Json.Str(n, "state") == "ok") + " из " + networks.Length + " работают"; }
         public static string Summary(Dictionary<string, object> data)
         {

@@ -70,9 +70,7 @@ namespace RemoteAgents.Launcher
             lock (gate) {
                 if (Connected && lanState.Count > 0 && (DateTime.UtcNow - lanUpdated).TotalSeconds <= 15) return lanState;
                 try {
-                    var networks = LanAccess.Read(Json.Map(Json.Get(config, "profile"))).Networks.Where(n => Json.Bool(n, "enabled") && Json.Strings(Json.Get(n, "subnets")).Length > 0)
-                        .Select(n => { var row = new Dictionary<string, object>(n); row["state"] = Installed ? "channel-down" : "no-helper"; row["reason"] = Installed ? (Connected ? "ожидается проверка локальных сетей" : "нет связи с помощником") : "помощник не установлен"; return (object)row; }).ToArray();
-                    return new Dictionary<string, object> { { "enabled", networks.Length > 0 }, { "networks", networks } };
+                    return HelperLanStatus.Unavailable(config, Installed, Connected);
                 } catch { return Json.Map(null); }
             }
         }

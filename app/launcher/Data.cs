@@ -148,7 +148,7 @@ namespace RemoteAgents.Launcher
     {
         readonly string file; readonly object gate = new object();
         public Journal(string home) { Directory.CreateDirectory(Path.Combine(home, "logs")); file = Path.Combine(home, "logs", "launcher.log"); }
-        // Event codes and validated component identifiers only; no exception messages, SSH arguments, status text or URLs.
+        // Event codes and validated identifiers; TickFailureLog also supplies bounded, redacted diagnostics.
         public void Write(string code)
         {
             lock (gate) {

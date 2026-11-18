@@ -39,7 +39,7 @@ namespace RemoteAgents.Launcher
     {
         static int Main(string[] args)
         {
-            if (args.Length == 0 || !args[0].StartsWith("--", StringComparison.Ordinal)) LegacyPacCleanupTests.Run();
+            if (args.Length == 0 || !args[0].StartsWith("--", StringComparison.Ordinal)) { LegacyPacCleanupTests.Run(); LanTickTests.Run(args.Length == 0 ? Path.GetTempPath() : args[0]); }
             try { return (int)typeof(LanTunTests).GetMethod("Main", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, new object[] { args }); }
             catch (TargetInvocationException ex) { ExceptionDispatchInfo.Capture(ex.InnerException).Throw(); throw; }
         }

@@ -32,6 +32,10 @@
   <ItemGroup>
     <EmbeddedResource Include="../../../transport/product-features.json" LogicalName="RemoteAgents.ProductFeatures.json" />
     <Compile Include="PortableJson.cs" />
+    <Compile Include="../TrayMenuState.cs" />
+    <Compile Include="../HelperLanStatus.cs" />
+    <Compile Include="../TickFailureLog.cs" />
+    <Compile Include="LanTickTests.cs" />
     <Compile Include="WindowModelTests.cs" />
     <Compile Include="MainScreenModelTests.cs" />
     <Compile Include="MainWindowSizingTests.cs" />

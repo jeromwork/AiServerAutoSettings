@@ -24,6 +24,8 @@ namespace RemoteAgents.Launcher
         readonly CancellationTokenSource stop = new CancellationTokenSource();
         readonly List<ComponentRuntime> runtimes = new List<ComponentRuntime>(); readonly List<NativeJob> actionJobs = new List<NativeJob>();
         readonly Stopwatch trayClickClock = Stopwatch.StartNew();
+        readonly TrayMenuState menuState = new TrayMenuState();
+        readonly TickFailureLog tickFailures = new TickFailureLog();
         long lastTrayClick = -SystemInformation.DoubleClickTime - 1L;
         ConfigWindow mainWindow;
         DiskExplorerController diskExplorer;
@@ -175,7 +177,7 @@ namespace RemoteAgents.Launcher
                 RefreshMenu(); WriteStatus();
                 CheckSync(); CheckServerHealth(); CheckDisk();
                 PollUpdates();
-            } catch { log.Write("supervisor.tick.failed"); icon.Icon = red; }
+            } catch (Exception ex) { tickFailures.Write(log, ex); icon.Icon = red; }
             finally { ticking = false; }
         }
         // Tooltip «Идёт установка: x из y» and a «Готово» balloon. While the wizard window is closed the tray
@@ -294,9 +296,10 @@ namespace RemoteAgents.Launcher
         }
         void RefreshMenu()
         {
-            if (icon.ContextMenuStrip == null) {
+            // One snapshot: LAN can appear after HelperClient starts, or disappear on reload.
+            menuState.Refresh(TrayEntries(), entries => {
                 var menu = new ContextMenuStrip { ShowItemToolTips = true };
-                foreach (var entry in TrayEntries()) {
+                foreach (var entry in entries) {
                     if (entry.Id == "separator") { menu.Items.Add(new ToolStripSeparator()); continue; }
                     string id = entry.Id;
                     var item = new ToolStripMenuItem(entry.Text) { Enabled = entry.Enabled, ToolTipText = entry.Hint };
@@ -311,15 +314,12 @@ namespace RemoteAgents.Launcher
                     });
                     menu.Items.Add(item);
                 }
+                var previous = icon.ContextMenuStrip;
                 icon.ContextMenuStrip = menu;
-            }
-            {
-                var entries = TrayEntries();
-                for (int i = 0; i < entries.Length; i++) {
-                    if (entries[i].Id == "separator") continue;
-                    var item = icon.ContextMenuStrip.Items[i]; item.Text = entries[i].Text; item.Enabled = entries[i].Enabled; item.ToolTipText = entries[i].Hint;
-                }
-            }
+                if (previous != null) previous.Dispose();
+            }, (i, entry) => {
+                var item = icon.ContextMenuStrip.Items[i]; item.Text = entry.Text; item.Enabled = entry.Enabled; item.ToolTipText = entry.Hint;
+            });
             RefreshMain();
         }
         TrayMenuEntry VpnMenu()
