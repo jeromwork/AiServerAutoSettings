@@ -374,7 +374,7 @@ try{
     Assert ($preferred[0].priority -eq 0 -and (Get-TransportPriority 'openssh-direct' @('vless')) -eq 999) 'первый подходящий префикс и fallback'
     Assert ((Get-TransportBest $preferred).tag -eq 'a') 'priority раньше скорости'
     $preferred[0].state='remembered'
-    Assert ((Get-TransportBest $preferred -Remembered).tag -eq 'b') 'свежий ok раньше remembered'
+    Assert ((Get-TransportBest $preferred -Remembered).tag -eq 'a') 'ok и remembered в общей группе перед priority'
     $near=[pscustomobject]@{state='ok';kbps=100};$challenger=[pscustomobject]@{state='ok';kbps=149}
     Assert (-not (Test-TransportBetter $near $challenger @{switchFactor=1.5})) 'близкие скорости не переключают путь'
     $challenger.kbps=150

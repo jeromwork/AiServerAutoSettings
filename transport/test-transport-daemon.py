@@ -51,7 +51,7 @@ with tempfile.TemporaryDirectory(prefix='transport-daemon-test-') as tmp:
     optional_port = optional.getsockname()[1]
     ssh = root / 'ssh.exe'
     sb = root / 'sing-box'
-    write_exe(ssh, '''import os, sys, time
+    write_exe(ssh, '''import os, socket, sys, time
 from pathlib import Path
 root=Path(__file__).parent
 # Туннель для теста остановки дочерних: не читает приватных данных.
@@ -59,6 +59,7 @@ if '-N' in sys.argv:
     # Real occupied optional SOCKS: the daemon must still start sing-box/VLESS.
     if (root/'optional-busy').exists():
         os.write(2,b'bind: Address already in use\\r\\n'); sys.exit(1)
+    listener=socket.socket(); listener.bind(('127.0.0.1',int(sys.argv[sys.argv.index('-D')+1].split(':')[-1]))); listener.listen()
     (root/'tunnel.pid').write_text(str(os.getpid()))
     while True: time.sleep(.1)
 with (root/'probes.pid').open('a') as ledger: ledger.write(str(os.getpid())+'\\n')
@@ -160,7 +161,7 @@ Server(('127.0.0.1',port),API).serve_forever()
         assert status()['phase'] == 'ok' and status().get('checkingSince') is None
         rank_active=status()['active']
         until(lambda: any(c['tag']==rank_active and c.get('rankState')=='slow'
-                          for c in status().get('candidates', [])))
+                          for c in status().get('candidates', [])), seconds=50)
         assert status()['active']==rank_active and status()['ok'], 'slow rank must not invalidate active liveness'
         assert next(c for c in status()['candidates'] if c['tag']==rank_active)['state']=='ok'
         (root/'slow-rank').unlink()

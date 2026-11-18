@@ -898,7 +898,7 @@ function Get-TransportPriority([string]$Tag,$Prefixes) {
     return 999
 }
 function Get-TransportOrdered($Rows) {
-    $Rows|Sort-Object @{Expression={if($_.enabled -eq $false){3}elseif($_.state -eq 'ok'){0}elseif($_.state -eq 'remembered'){1}else{2}}},@{Expression={[int](Get-TransportValue $_ 'priority' 999)}},@{Expression={if($null -eq $_.kbps){-1}else{[double]$_.kbps}};Descending=$true},@{Expression={if($null -eq $_.latencyMs){[double]::MaxValue}else{[double]$_.latencyMs}}},tag
+    $Rows|Sort-Object @{Expression={if($_.enabled -eq $false){2}elseif($_.state -in @('ok','remembered')){0}else{1}}},@{Expression={[int](Get-TransportValue $_ 'priority' 999)}},@{Expression={if($null -eq $_.kbps){-1}else{[double]$_.kbps}};Descending=$true},@{Expression={if($null -eq $_.latencyMs){[double]::MaxValue}else{[double]$_.latencyMs}}},tag
 }
 function Get-TransportBest($Rows,[string[]]$Allowed=@(),[switch]$Remembered) {
     Get-TransportOrdered @($Rows|Where-Object {($_.enabled -ne $false) -and ($_.state -eq 'ok' -or ($Remembered -and $_.state -eq 'remembered')) -and (-not $Allowed.Count -or $_.tag -in $Allowed)})|Select-Object -First 1
