@@ -112,6 +112,7 @@ namespace RemoteAgents.Launcher
         }
         void Bootstrap()
         {
+            try { log.Write("openssh." + PortableTools.EnsureOpenSsh(home)); } catch { log.Write("openssh.failed"); }
             if (installSource==null && engine.Current.Length != 0) { BundleDefinition.Load(engine.Folder(engine.Current)); return; }
             string zip = Path.Combine(engine.Root, "embedded.zip");
             try {

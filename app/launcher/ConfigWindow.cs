@@ -382,12 +382,36 @@ namespace RemoteAgents.Launcher
                 await RunSession(new ConfigSession(home, Bundle, parsed.Secrets, parsed.Hints), null);
             });
         }
+        // The EXE has no compatibility manifest, so Environment.OSVersion reports 6.2.9200 on Windows 8.1/10/11.
+        static string WindowsDescription()
+        {
+            string text = "Windows " + Environment.OSVersion.Version;
+            try {
+                using (var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion")) {
+                    string name = Convert.ToString(key.GetValue("ProductName")), build = Convert.ToString(key.GetValue("CurrentBuildNumber"));
+                    string release = Convert.ToString(key.GetValue("DisplayVersion") ?? key.GetValue("ReleaseId")); object ubr = key.GetValue("UBR");
+                    int number; if (int.TryParse(build, out number) && number >= 22000) name = name.Replace("Windows 10", "Windows 11");
+                    if (name.Length != 0) text = name + (release.Length != 0 ? " " + release : "") + ", сборка " + build + (ubr != null ? "." + ubr : "");
+                }
+            } catch { }
+            try {
+                using (var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full")) {
+                    int release; int.TryParse(Convert.ToString(key.GetValue("Release")), out release);
+                    text += ", .NET " + (release >= 528040 ? "4.8+" : "старше 4.8 (" + release + ") — нужен .NET Framework 4.8");
+                }
+            } catch { }
+            try {
+                using (var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\PowerShell\3\PowerShellEngine"))
+                    text += ", PowerShell " + Convert.ToString(key.GetValue("PowerShellVersion"));
+            } catch { text += ", PowerShell 5.1 не найден"; }
+            return text;
+        }
         async Task RunSession(ConfigSession next, IList<string> forced)
         {
             session = next;
             session.Log = Log; session.Report = Report;
             session.AccountCreated = message => Ui(() => ShowHappierAccountCreated(message));
-            Log(Product.Name + " " + Program.Version + ", Windows " + Environment.OSVersion.Version + (Environment.Is64BitOperatingSystem ? " x64" : "") + ", " + TimeZoneInfo.Local.Id);
+            Log(Product.Name + " " + Program.Version + ", " + WindowsDescription() + (Environment.Is64BitOperatingSystem ? " x64" : "") + ", " + TimeZoneInfo.Local.Id);
             session.AskSecret = (name, why) => { string value = null; Func<string> ask = () => SecretPrompt.Ask(this, name, why); value = InvokeRequired ? (string)Invoke(ask) : ask(); return value; };
             rowsPanel.Visible = true;
             if (!settings) { pasting = false; pastePanel.Visible = false; header.Height = (int)(44 * DeviceDpi / 96F); header.Controls[1].Visible = false; ((Label)header.Controls[0]).Text = "Подключаю"; }
