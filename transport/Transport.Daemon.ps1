@@ -311,6 +311,7 @@ try{
                     $result=$probe.state;$row=$rows|Where-Object {$_.tag -eq $tag}|Select-Object -First 1
                     # Скорость задаёт рейтинг (равные объёмы); проба активного пути меньше и только подтверждает живость.
                     $row|Add-Member -Force probeMs ([int](([Diagnostics.Stopwatch]::GetTimestamp()-$probe.sink.Started)*1000/[Diagnostics.Stopwatch]::Frequency))
+                    $row|Add-Member -Force maxGapMs $result.maxGapMs
                     $row.state=$result.state;if($probe.purpose -notin @('active','live') -or $result.state -ne 'ok' -or $null -eq $row.kbps){$row.kbps=$result.kbps};$row.checkedAt=$now.ToString('o')
                     $reason=if($result.diagnostic.reason -eq 'timeout'){'таймаут '+$settings.Options.probeTimeoutSec+' с'}elseif($result.diagnostic.reason -eq 'stalled'){'нет ответа'}else{'путь недоступен'}
                     Write-DaemonWizardProgress ('Вариант связи: '+$row.title+$(if($result.state -eq 'ok'){' ✓'}else{' ✗ ('+$reason+')'}))

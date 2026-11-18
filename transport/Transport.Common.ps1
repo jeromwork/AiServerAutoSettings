@@ -835,16 +835,16 @@ function Set-TransportSelector($Options,[string]$Secret,[string]$Tag) {
     try{$s=$req.GetRequestStream();try{$s.Write($bytes,0,$bytes.Length)}finally{$s.Dispose()};$response=$req.GetResponse();$response.Dispose()}catch{throw 'Локальный API transport недоступен'}
 }
 function New-TransportProbeState([long]$Target,[double]$Stall,[double]$Timeout) {
-    [pscustomobject]@{target=$Target;stall=$Stall;timeout=$Timeout;bytes=[long]0;first=$null;last=$null;firstBytes=[long]0;state='pending';kbps=$null}
+    [pscustomobject]@{target=$Target;stall=$Stall;timeout=$Timeout;bytes=[long]0;first=$null;last=$null;firstBytes=[long]0;state='pending';kbps=$null;maxGapMs=0}
 }
 function Update-TransportProbeState($State,[long]$Bytes,[double]$Seconds,[bool]$Ended=$false) {
     if($State.state -ne 'pending'){return $State}
-    # Даже при завершении N не принимается после уже случившейся остановки.
-    if($null -ne $State.last -and $Seconds-$State.last -ge $State.stall){$State.state='frozen';return $State}
+    $gap=0;if($null -ne $State.last){$gap=$Seconds-$State.last;$State.maxGapMs=[math]::Max($State.maxGapMs,[math]::Round($gap*1000))}
     if($Bytes -gt $State.bytes){if($null -eq $State.first){$State.first=$Seconds;$State.firstBytes=$Bytes};$State.last=$Seconds;$State.bytes=$Bytes}
     if($Bytes -ge $State.target){
         # Эффективная скорость от начала пробы: ssh.exe отдаёт поток пачками, «от первого байта» даёт сотни МБ/с.
         $State.state='ok';if($Seconds -gt 0){$State.kbps=[math]::Round($Bytes/1KB/$Seconds,2)}
+    }elseif($gap -ge $State.stall){$State.state='frozen'
     }elseif($Ended -or $Seconds -ge $State.timeout){
         if($Bytes -gt 0 -and -not $Ended){$State.state='slow'}else{$State.state='fail'}
     }
@@ -869,11 +869,13 @@ function Receive-TransportProbe($Probe) {
     $elapsed=([Diagnostics.Stopwatch]::GetTimestamp()-$Probe.sink.Started)/$freq
     $s=$Probe.state;$s.bytes=$x[0]
     if($x[1] -ne 0){$s.first=($x[1]-$Probe.sink.Started)/$freq;$s.last=($x[2]-$Probe.sink.Started)/$freq;$s.firstBytes=$x[3]}
-    if($x[4]/$freq -ge $s.stall -or ($null -ne $s.last -and $elapsed-$s.last -ge $s.stall -and $s.bytes -lt $s.target)){$s.state='frozen'}
-    elseif($s.bytes -ge $s.target){
+    $gap=$x[4]/$freq;if($s.bytes -lt $s.target -and $null -ne $s.last){$gap=[math]::Max($gap,$elapsed-$s.last)}
+    $s.maxGapMs=[math]::Round($gap*1000)
+    if($s.bytes -ge $s.target){
         $s.state='ok';$dt=($x[2]-$Probe.sink.Started)/$freq
         if($dt -gt 0){$s.kbps=[math]::Round($s.bytes/1KB/$dt,2)}
-    }elseif($completed){$s.state='fail'}
+    }elseif($gap -ge $s.stall){$s.state='frozen'}
+    elseif($completed){$s.state='fail'}
     elseif($elapsed -ge $s.timeout){if($s.bytes -gt 0){$s.state='slow'}else{$s.state='fail'}}
     if($s.state -ne 'pending' -and $Probe.PSObject.Properties['child']){
         $reason='short-read';if($elapsed -ge $s.timeout){$reason='timeout'}elseif($s.state -eq 'frozen'){$reason='stalled'}elseif($s.state -eq 'ok'){$reason='ok'}

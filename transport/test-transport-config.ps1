@@ -378,7 +378,9 @@ try{
     $s=New-TransportProbeState 65536 5 45;[void](Update-TransportProbeState $s 16384 1);[void](Update-TransportProbeState $s 16384 6)
     Assert ($s.state -eq 'frozen') 'первые 16К и остановка'
     $s=New-TransportProbeState 65536 5 45;[void](Update-TransportProbeState $s 16384 1);[void](Update-TransportProbeState $s 65536 8)
-    Assert ($s.state -eq 'frozen') 'возобновление после stall не считается живым'
+    Assert ($s.state -eq 'ok' -and $s.maxGapMs -eq 7000) 'полная проба успешна даже после stall; пауза сохранена'
+    $s=New-TransportProbeState 65536 5 45;[void](Update-TransportProbeState $s 16384 1);[void](Update-TransportProbeState $s 32768 8)
+    Assert ($s.state -eq 'frozen' -and $s.maxGapMs -eq 7000) 'неполная проба после stall остаётся frozen'
     $s=New-TransportProbeState 65536 5 10;foreach($time in 1..10){[void](Update-TransportProbeState $s ($time*100) $time)}
     Assert ($s.state -eq 'slow') 'течёт, но N не скачал — не жив'
     Assert (-not (Get-TransportBest @([pscustomobject]@{tag='s';state='slow';kbps=10}))) 'slow не допускается как живой'
