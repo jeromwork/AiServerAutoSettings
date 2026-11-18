@@ -60,6 +60,20 @@ namespace RemoteAgents.Launcher
             menu.Refresh(reordered, rebuild, update);
             Check(rebuilds == 4, "same count but changed action order also rebuilds");
 
+            // A new LAN row grows a five-item menu to six before any positional update.
+            var five = Enumerable.Range(0, 5).Select(i => new TrayMenuEntry("item-" + i, "Item " + i, true)).ToArray();
+            var six = new[] { new TrayMenuEntry("lan-status", StatusView.Lan(lan), false) }.Concat(five).ToArray();
+            var growingMenu = new TrayMenuState();
+            int builtCount = 0, growingRebuilds = 0, updatedCount = 0;
+            Action<TrayMenuEntry[]> grow = entries => { growingRebuilds++; builtCount = entries.Length; };
+            Action<int, TrayMenuEntry> boundedUpdate = (i, entry) => {
+                Check(i < builtCount, "growing menu never updates beyond the latest rebuild");
+                updatedCount++;
+            };
+            growingMenu.Refresh(five, grow, boundedUpdate);
+            growingMenu.Refresh(six, grow, boundedUpdate);
+            Check(growingRebuilds == 2 && builtCount == 6 && updatedCount == 11, "five-to-six menu growth rebuilds before updating all items");
+
             // Literal non-ASCII bytes, not Json.Encode (the portable serializer escapes Cyrillic).
             const string summary = "TUN не включён: помощник не установлен — установите помощник";
             string json = "{\"enabled\":false,\"state\":\"error\",\"summary\":\"" + summary + "\",\"updatedAt\":\"2026-11-13T00:00:00Z\"}";
@@ -88,7 +102,31 @@ namespace RemoteAgents.Launcher
             Check(TickFailureLog.Describe(Failure(new string('я', 1000))).Length <= 236, "long messages leave room for type and frame");
             diagnostics.Write(journal, Failure(new string('я', 1000)));
             Check(File.ReadAllLines(logFile).All(line => line.Length <= 300), "entire journal line stays within 300 characters including timestamp and event");
-            Console.WriteLine("PASS: " + count + " LAN tick, menu, UTF-8 and exception diagnostics checks");
+            string isolatedHome = Path.Combine(home, "isolated-steps");
+            var isolatedJournal = new Journal(isolatedHome);
+            var isolated = new TickFailureLog(() => 0);
+            int completed = 0;
+            bool first = isolated.Run(isolatedJournal, "settings", () => { completed++; });
+            bool second = isolated.Run(isolatedJournal, "menu", () => { throw new ArgumentOutOfRangeException("index"); });
+            bool third = isolated.Run(isolatedJournal, "status", () => { completed++; });
+            Check(first && !second && third && completed == 2, "failed menu step returns false and later status step still runs");
+            var isolatedLines = File.ReadAllLines(Path.Combine(isolatedHome, "logs/launcher.log"));
+            Check(isolatedLines.Length == 1 && isolatedLines[0].Contains("supervisor.tick.failed step=menu ArgumentOutOfRangeException"), "failed step logs exactly one named exception");
+
+            string stepsHome = Path.Combine(home, "step-deduplication");
+            var stepsJournal = new Journal(stepsHome);
+            long stepNow = 0;
+            var steps = new TickFailureLog(() => stepNow);
+            steps.Write(stepsJournal, failure, "menu");
+            steps.Write(stepsJournal, failure, "lan");
+            string stepsLog = Path.Combine(stepsHome, "logs/launcher.log");
+            var stepLines = File.ReadAllLines(stepsLog);
+            Check(stepLines.Length == 2 && stepLines[0].Contains("step=menu ") && stepLines[1].Contains("step=lan "), "same exception in different steps logs independently at the same millisecond");
+            stepNow = 1000; steps.Write(stepsJournal, failure, "menu");
+            Check(File.ReadAllLines(stepsLog).Length == 2, "same step is suppressed after one second");
+            stepNow = 61000; steps.Write(stepsJournal, failure, "menu");
+            Check(File.ReadAllLines(stepsLog).Length == 3, "same step logs again after sixty-one seconds");
+            Console.WriteLine("PASS: " + count + " LAN tick, menu, UTF-8, step isolation and exception diagnostics checks");
         }
     }
 }

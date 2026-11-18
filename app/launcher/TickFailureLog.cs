@@ -15,17 +15,24 @@ namespace RemoteAgents.Launcher
             var clock = Stopwatch.StartNew();
             this.milliseconds = milliseconds ?? (() => clock.ElapsedMilliseconds);
         }
-        internal void Write(Journal journal, Exception error)
+        // One failed tick step must not cancel the others; the step name tells which one.
+        internal bool Run(Journal journal, string step, Action action)
+        {
+            try { action(); return true; }
+            catch (Exception error) { Write(journal, error, step); return false; }
+        }
+        internal void Write(Journal journal, Exception error, string step = null)
         {
             string detail = Describe(error);
+            string reason = step + "|" + detail;
             long now = milliseconds();
             long previous;
-            if (reasons.TryGetValue(detail, out previous) && now - previous < 60000) return;
+            if (reasons.TryGetValue(reason, out previous) && now - previous < 60000) return;
             foreach (string key in reasons.Where(r => now - r.Value >= 60000).Select(r => r.Key).ToArray()) reasons.Remove(key);
             // Bound memory even if each tick produces a different failure.
             if (reasons.Count >= 128) return;
-            reasons[detail] = now;
-            journal.Write("supervisor.tick.failed " + detail);
+            reasons[reason] = now;
+            journal.Write("supervisor.tick.failed " + (step == null ? "" : "step=" + step + " ") + detail);
         }
         internal static string Describe(Exception error)
         {
