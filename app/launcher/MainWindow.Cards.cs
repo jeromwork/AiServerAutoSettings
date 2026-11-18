@@ -21,11 +21,12 @@ namespace RemoteAgents.Launcher
         readonly LinkLabel lanDetails = new LinkLabel { Text = "Подробно", AutoSize = true };
         string lanDetailsText = "";
         CardPanel vpnCard, diskCard, happierCard, helperCard, lanCard;
+        readonly MainScreenRenderGate renderGate = new MainScreenRenderGate();
 
         static Label WrapLabel()
         { return new Label { AutoSize = true, UseMnemonic = false, Margin = new Padding(0, 2, 0, 2) }; }
         static FlowLayoutPanel Stack()
-        { return new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, FlowDirection = FlowDirection.TopDown, WrapContents = false, Margin = Padding.Empty }; }
+        { return new BufferedFlowPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, FlowDirection = FlowDirection.TopDown, WrapContents = false, Margin = Padding.Empty }; }
         static Button AddButton(Control body, string text, Action action)
         {
             var button = new Button { Text = text, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(6, 3, 6, 3), Margin = new Padding(0, 4, 4, 0) };
@@ -68,28 +69,44 @@ namespace RemoteAgents.Launcher
         }
         void RenderCards(MainScreenView view, MainScreenFacts facts)
         {
-            bannerAction = view.Banner.ActionId;
-            if (view.Banner.Visible) mainBanner.ShowMessage(view.Banner.Tone, view.Banner.Text, view.Banner.ActionText);
-            else mainBanner.HideMessage();
-            vpnCard.Visible = view.Vpn.Visible; vpnTitle.Text = view.Vpn.Title;
-            vpnState.Text = view.Vpn.State; vpnState.ForeColor = Theme.Ink(view.Vpn.Tone); vpnDetail.Text = view.Vpn.Detail;
-            vpnOn = view.Vpn.On; vpnSwitch.Enabled = view.Vpn.SwitchEnabled;
-            vpnSwitch.Text = view.Vpn.SwitchText; vpnSwitch.AccessibleDescription = view.Vpn.SwitchText;
-            pathLink.Text = diagnosticPathLink.Text = view.Vpn.PathLink;
-            pathLink.Enabled = diagnosticPathLink.Enabled = string.IsNullOrEmpty(facts.Operation);
-            vpnDnsDetails.Text = MainScreenModel.CleanSecrets(VpnStatus.DnsDetail(facts.Vpn ?? Json.Map(null)));
-            vpnDnsDetails.Visible = view.Vpn.Visible && vpnDnsDetails.Text.Length > 0;
-            RenderCard(view.Lan, lanCard, lanTitle, lanState, lanDetail);
-            lanDetailsText = view.Lan.Detail; lanDetail.Visible = false;
-            RenderCard(view.Disk, diskCard, diskTitle, diskState, diskDetail);
-            RenderCard(view.Happier, happierCard, happierTitle, happierState, happierDetail);
-            RenderCard(view.Helper, helperCard, helperTitle, helperState, helperDetail);
-            FitPage(pages["Главная"]);
+            string dns = MainScreenModel.CleanSecrets(VpnStatus.DnsDetail(facts.Vpn ?? Json.Map(null)));
+            bool pathEnabled = string.IsNullOrEmpty(facts.Operation);
+            var step = renderGate.Next(view, pathEnabled, dns);
+            // TrayContext.Tick calls this every second: the same picture must not touch controls or the layout.
+            if (!step.Render) return;
+            homeBody.SuspendLayout();
+            try {
+                bannerAction = view.Banner.ActionId;
+                if (view.Banner.Visible) mainBanner.ShowMessage(view.Banner.Tone, view.Banner.Text, view.Banner.ActionText);
+                else mainBanner.HideMessage();
+                vpnCard.Visible = view.Vpn.Visible; SetText(vpnTitle, view.Vpn.Title);
+                SetText(vpnState, view.Vpn.State); vpnState.ForeColor = Theme.Ink(view.Vpn.Tone); SetText(vpnDetail, view.Vpn.Detail);
+                vpnOn = view.Vpn.On; vpnSwitch.Enabled = view.Vpn.SwitchEnabled;
+                SetText(vpnSwitch, view.Vpn.SwitchText); vpnSwitch.AccessibleDescription = view.Vpn.SwitchText;
+                SetText(pathLink, view.Vpn.PathLink); SetText(diagnosticPathLink, view.Vpn.PathLink);
+                pathLink.Enabled = diagnosticPathLink.Enabled = pathEnabled;
+                SetText(vpnDnsDetails, dns);
+                vpnDnsDetails.Visible = view.Vpn.Visible && dns.Length > 0;
+                // LAN details open in a message box («Подробно»); the label itself stays hidden (no on/off flip per tick).
+                RenderCard(view.Lan, lanCard, lanTitle, lanState, lanDetail, false);
+                lanDetailsText = view.Lan.Detail;
+                RenderCard(view.Disk, diskCard, diskTitle, diskState, diskDetail);
+                RenderCard(view.Happier, happierCard, happierTitle, happierState, happierDetail);
+                RenderCard(view.Helper, helperCard, helperTitle, helperState, helperDetail);
+            } finally { homeBody.ResumeLayout(true); }
+            if (step.Layout) FitPage(pages["Главная"]);
         }
-        static void RenderCard(CardView view, CardPanel card, Label title, Label state, Label detail)
+        static void RenderCard(CardView view, CardPanel card, Label title, Label state, Label detail, bool showDetail = true)
         {
-            card.Visible = view.Visible; title.Text = view.Title; state.Text = view.State; state.ForeColor = Theme.Ink(view.Tone); detail.Text = view.Detail;
-            detail.Visible = view.Detail.Length > 0;
+            card.Visible = view.Visible; SetText(title, view.Title); SetText(state, view.State); state.ForeColor = Theme.Ink(view.Tone); SetText(detail, view.Detail);
+            detail.Visible = showDetail && view.Detail.Length > 0;
+        }
+        // Text only: Visible/Enabled getters also reflect the parent (hidden window), so they are assigned directly —
+        // WinForms itself ignores an unchanged Visible/Enabled/ForeColor.
+        static void SetText(Control control, string value)
+        {
+            value = value ?? "";
+            if (control.Text != value) control.Text = value;
         }
     }
 }

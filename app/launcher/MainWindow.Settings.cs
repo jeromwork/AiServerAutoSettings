@@ -10,7 +10,7 @@ namespace RemoteAgents.Launcher
     internal sealed partial class ConfigWindow
     {
         readonly Dictionary<string, Control> pages = new Dictionary<string, Control>();
-        readonly Panel pageHost = new Panel { Dock = DockStyle.Fill };
+        readonly Panel pageHost = new BufferedPanel { Dock = DockStyle.Fill };
         readonly MainWindowSizing mainSizing = new MainWindowSizing();
         Control pageHeader; Size resizeStart;
         readonly FlowLayoutPanel settingsBody = Stack(), aboutBody = Stack();
@@ -109,7 +109,7 @@ namespace RemoteAgents.Launcher
         { pages.Add(name, page); page.Dock = DockStyle.Fill; pageHost.Controls.Add(page); page.Visible = false; }
         void RegisterFlowPage(string name, FlowLayoutPanel body)
         {
-            var scroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(12, 4, 12, 12) };
+            var scroll = new BufferedPanel { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(12, 4, 12, 12) };
             body.Location = new Point(scroll.Padding.Left, scroll.Padding.Top); scroll.Controls.Add(body);
             // Each nested card/flow receives the viewport width, so long text wraps at every DPI.
             scroll.ClientSizeChanged += (s, e) => FitContent(body, Math.Max(100, scroll.ClientSize.Width - scroll.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth));

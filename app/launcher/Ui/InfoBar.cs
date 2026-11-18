@@ -25,7 +25,7 @@ namespace RemoteAgents.Launcher
             AutoSize = true;
             AutoSizeMode = AutoSizeMode.GrowAndShrink;
             glyph = new Label { AutoSize = true, UseMnemonic = false, Font = Theme.Title };
-            message = new Label { AutoSize = true, UseMnemonic = false, Margin = Padding.Empty };
+            message = new Label { AutoSize = false, UseMnemonic = false, Margin = Padding.Empty };
             action = new Button { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 UseVisualStyleBackColor = true, Padding = new Padding(8, 3, 8, 3), Visible = false };
             details = new LinkLabel { AutoSize = true, Text = "Подробнее", LinkColor = Theme.Accent,
@@ -95,7 +95,9 @@ namespace RemoteAgents.Launcher
             Size textSize = TextRenderer.MeasureText(message.Text.Length == 0 ? " " : message.Text,
                 message.Font, new Size(textWidth, int.MaxValue),
                 TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPrefix);
-            int textHeight = textSize.Height;
+            // The same height for GetPreferredSize (apply=false) and OnLayout (apply=true); a difference made every
+            // parent layout shrink the bar and OnLayout grow it back — the visible jump below the banner.
+            int textHeight = Math.Max(textSize.Height, message.GetPreferredSize(new Size(textWidth, 0)).Height);
             int rightHeight = linkSize.Height + (hasAction ? actionSize.Height + gap : 0);
             int mainHeight = Math.Max(glyphSize.Height, textHeight);
             int rightTop = Padding.Top;
@@ -107,12 +109,7 @@ namespace RemoteAgents.Launcher
 
             if (apply) {
                 glyph.Location = new Point(Padding.Left, Padding.Top);
-                message.MaximumSize = new Size(textWidth, 0);
-                message.Location = new Point(Padding.Left + glyphWidth + gap, Padding.Top);
-                // AutoSize uses the same GDI text measurement as above; allow the label's final height too.
-                int extra = Math.Max(0, message.Height - textHeight);
-                height += extra;
-                if (stacked) rightTop += extra;
+                message.SetBounds(Padding.Left + glyphWidth + gap, Padding.Top, textWidth, textHeight);
                 int rightX = Math.Max(Padding.Left, width - Padding.Right - rightWidth);
                 if (hasAction) {
                     action.SetBounds(rightX, rightTop, Math.Min(actionSize.Width, available), actionSize.Height);

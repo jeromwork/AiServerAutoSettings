@@ -152,6 +152,7 @@ namespace RemoteAgents.Launcher
         void Tick()
         {
             if (closing || ticking || definition == null) return; ticking = true;
+            Icon shown = icon.Icon; // final tray colour of this tick, applied once in finally
             try {
                 bool ok = true, restart = false, coreFailed = false;
                 var transport = Json.Map(null);
@@ -166,18 +167,18 @@ namespace RemoteAgents.Launcher
                     if (image == "rollback") { try { PrepareUpdateRestart(); } catch { keepVpnOnRestart = false; log.Write("update.resume.failed"); } UpdateOutcome(Json.Text(UpdateState(), "target", engine.Previous), "здоровье не подтверждено; выполнен откат"); log.Write("launcher.rollback"); RestartRequested = true; ExitThread(); restart = true; return; }
                     if (result == "rollback") { log.Write("update.rollback"); updateSummary = "обновление откачено: здоровье не подтверждено"; LoadComponents(); foreach (var r in runtimes) r.Tick(); all = false; }
                     if (result == "accepted" || image == "accepted") { log.Write("update.accepted"); UpdateOutcome(engine.Current, ""); }
-                    int count = critical.Count(r => r.Healthy); icon.Icon = all ? green : count > 0 ? yellow : red;
+                    int count = critical.Count(r => r.Healthy); shown = all ? green : count > 0 ? yellow : red;
                 })) { ok = false; coreFailed = true; }
                 if (restart) return;
                 if (!Step("transport", () => { transport = StatusView.Read(home, "transport", maxAgeSec: 15); })) { ok = false; coreFailed = true; }
                 ok &= Step("lan", () => { if (netHelper != null) netHelper.UpdateLan(config.Data, transport); });
                 ok &= Step("vpn-resume", () => ResumeUpdatedVpn(transport));
                 ok &= Step("icon", () => {
-                    var linkPhase = StatusView.Phase(transport); icon.Icon = linkPhase == LinkPhase.Ok ? green : linkPhase == LinkPhase.Checking ? yellow : red;
+                    var linkPhase = StatusView.Phase(transport); shown = linkPhase == LinkPhase.Ok ? green : linkPhase == LinkPhase.Checking ? yellow : red;
                     var vpnStatus = VpnStatus.Read(home);
                     string vpnReason = VpnWatchdog.FailureSummary(Json.Str(vpnStatus, "state"), Json.Str(vpnStatus, "stage"));
                     if (vpnReason.Length > 0 && Json.Str(vpnStatus, "owner") == "net-helper") vpnReason = Json.Text(vpnStatus, "summary", vpnReason);
-                    if (Json.Str(vpnStatus, "state") == "conflict") icon.Icon = yellow;
+                    if (Json.Str(vpnStatus, "state") == "conflict") shown = yellow;
                     icon.Text = vpnReason.Length > 0 ? TrayMenuModel.Short(vpnReason, 63) : TrayMenuModel.Tooltip(transport, ServerHealthView.Read(home));
                 });
                 ok &= Step("operations", () => { if (DateTime.UtcNow >= nextOperationCheck) CheckOperations(); });
@@ -189,9 +190,9 @@ namespace RemoteAgents.Launcher
                 ok &= Step("disk", CheckDisk);
                 ok &= Step("updates", PollUpdates);
                 // Honest icon: a broken core step is red; any other broken step must not leave it green.
-                if (coreFailed) icon.Icon = red; else if (!ok && icon.Icon == green) icon.Icon = yellow;
-            } catch (Exception ex) { tickFailures.Write(log, ex, "tick"); icon.Icon = red; }
-            finally { ticking = false; }
+                if (coreFailed) shown = red; else if (!ok && shown == green) shown = yellow;
+            } catch (Exception ex) { tickFailures.Write(log, ex, "tick"); shown = red; }
+            finally { ticking = false; if (!closing && icon.Icon != shown) icon.Icon = shown; }
         }
         bool Step(string name, Action action) { return tickFailures.Run(log, name, action); }
         // Tooltip «Идёт установка: x из y» and a «Готово» balloon. While the wizard window is closed the tray

@@ -22,7 +22,7 @@ namespace RemoteAgents.Launcher
         }
         internal static void Run()
         {
-            Colours(); Banners(); VpnCard(); DiskCard(); AccountsAndHelper(); Reports(); LinkPhases();
+            Colours(); Banners(); VpnCard(); DiskCard(); AccountsAndHelper(); Reports(); LinkPhases(); RenderGate();
             Console.WriteLine("PASS: " + count + " main screen checks");
         }
         static void LinkPhases()
@@ -265,5 +265,60 @@ namespace RemoteAgents.Launcher
             string before = Json.Encode(facts.Transport); MainScreenModel.Build(facts); MainScreenModel.Report(facts, "");
             Check(Json.Encode(facts.Transport) == before, "presentation does not mutate input facts");
         }
+        static void RenderGate()
+        {
+            var gate = new MainScreenRenderGate();
+            var first = gate.Next(MainScreenModel.Build(Healthy()), true, "");
+            Check(first.Render && first.Layout, "first frame renders and lays out");
+            var same = gate.Next(MainScreenModel.Build(Healthy()), true, "");
+            Check(!same.Render && !same.Layout, "identical facts once a second touch neither controls nor layout");
+
+            // Every rendered field reaches the key; text-only changes do not re-fit the page.
+            var textOnly = new List<KeyValuePair<string, Action<MainScreenView>>> {
+                Edit("banner tone", v => v.Banner.Tone = v.Banner.Tone == Tone.Error ? Tone.Ok : Tone.Error),
+                Edit("banner text", v => v.Banner.Text += "!"), Edit("banner action", v => v.Banner.ActionText += "!"),
+                Edit("banner action id", v => v.Banner.ActionId += "x"),
+                Edit("vpn title", v => v.Vpn.Title += "!"), Edit("vpn state", v => v.Vpn.State += "!"),
+                Edit("vpn tone", v => v.Vpn.Tone = v.Vpn.Tone == Tone.Error ? Tone.Ok : Tone.Error),
+                Edit("vpn detail (speed)", v => v.Vpn.Detail += "1"), Edit("vpn on", v => v.Vpn.On = !v.Vpn.On),
+                Edit("vpn switch enabled", v => v.Vpn.SwitchEnabled = !v.Vpn.SwitchEnabled),
+                Edit("vpn switch text", v => v.Vpn.SwitchText += "!"), Edit("vpn path link", v => v.Vpn.PathLink += "!"),
+                Edit("lan state", v => v.Lan.State += "!"), Edit("lan detail", v => v.Lan.Detail += "!"),
+                Edit("lan tone", v => v.Lan.Tone = v.Lan.Tone == Tone.Error ? Tone.Ok : Tone.Error),
+                Edit("disk state", v => v.Disk.State += "!"), Edit("disk detail", v => v.Disk.Detail += "!"),
+                Edit("disk tone", v => v.Disk.Tone = v.Disk.Tone == Tone.Error ? Tone.Ok : Tone.Error),
+                Edit("happier title", v => v.Happier.Title += "!"), Edit("happier state", v => v.Happier.State += "!"),
+                Edit("happier detail", v => v.Happier.Detail += "!"),
+                Edit("helper state", v => v.Helper.State += "!"),
+                Edit("helper tone", v => v.Helper.Tone = v.Helper.Tone == Tone.Error ? Tone.Ok : Tone.Error),
+            };
+            foreach (var edit in textOnly) {
+                var g = new MainScreenRenderGate(); g.Next(MainScreenModel.Build(Healthy()), true, "");
+                var view = MainScreenModel.Build(Healthy()); edit.Value(view);
+                var step = g.Next(view, true, "");
+                Check(step.Render && !step.Layout, "text change re-renders without re-fit: " + edit.Key);
+            }
+            var shape = new List<KeyValuePair<string, Action<MainScreenView>>> {
+                Edit("banner shown", v => v.Banner.Visible = !v.Banner.Visible), Edit("vpn card", v => v.Vpn.Visible = !v.Vpn.Visible),
+                Edit("lan card", v => v.Lan.Visible = !v.Lan.Visible), Edit("disk card", v => v.Disk.Visible = !v.Disk.Visible),
+                Edit("happier card", v => v.Happier.Visible = !v.Happier.Visible), Edit("helper card", v => v.Helper.Visible = !v.Helper.Visible),
+                Edit("disk detail gone", v => v.Disk.Detail = ""), Edit("happier detail gone", v => v.Happier.Detail = ""),
+                Edit("helper detail appears", v => v.Helper.Detail = "x"),
+            };
+            foreach (var edit in shape) {
+                var g = new MainScreenRenderGate(); g.Next(MainScreenModel.Build(Healthy()), true, "");
+                var view = MainScreenModel.Build(Healthy()); edit.Value(view);
+                var step = g.Next(view, true, "");
+                Check(step.Render && step.Layout, "appearing/disappearing part re-fits the page: " + edit.Key);
+            }
+            var path = gate.Next(MainScreenModel.Build(Healthy()), false, "");
+            Check(path.Render && !path.Layout, "path link enabled state is rendered");
+            var dns = gate.Next(MainScreenModel.Build(Healthy()), false, "DNS: проверка");
+            Check(dns.Render && dns.Layout, "DNS details line appears");
+            gate.Reset();
+            Check(gate.Next(MainScreenModel.Build(Healthy()), false, "DNS: проверка").Render, "reset renders again");
+        }
+        static KeyValuePair<string, Action<MainScreenView>> Edit(string name, Action<MainScreenView> change)
+        { return new KeyValuePair<string, Action<MainScreenView>>(name, change); }
     }
 }

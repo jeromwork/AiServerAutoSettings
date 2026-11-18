@@ -144,7 +144,7 @@ namespace RemoteAgents.Launcher
             });
             FitPage(pages["Настройки"]); FitPage(pages["Диагностика"]);
         }
-        internal void UpdateActivity(string text) { syncStatus.Text = text; }
+        internal void UpdateActivity(string text) { SetText(syncStatus, text); }
         internal void UpdateMain(MainScreenFacts facts, string technical, Dictionary<string, object> transport, Dictionary<string, object> health)
         {
             if (IsDisposed) return;
@@ -153,10 +153,10 @@ namespace RemoteAgents.Launcher
             var view = MainScreenModel.Build(facts);
             RenderCards(view, facts);
             apply.Enabled = !running && string.IsNullOrEmpty(facts.Operation);
-            technicalStatus.Text = technical;
-            serverHealthDetails.Text = ServerHealthView.Detail(health);
+            SetText(technicalStatus, technical);
+            SetText(serverHealthDetails, ServerHealthView.Detail(health));
             var candidates = StatusView.Candidates(transport);
-            pathStates.Text = "Связь: пути к серверу\r\n" + (candidates.Length == 0 ? "Ожидается проверка путей" : string.Join("\r\n", candidates.Select(c => TrayMenuModel.CandidateLine(c, transport))));
+            SetText(pathStates, "Связь: пути к серверу\r\n" + (candidates.Length == 0 ? "Ожидается проверка путей" : string.Join("\r\n", candidates.Select(c => TrayMenuModel.CandidateLine(c, transport)))));
             // Do not replace a menu underneath a pointer; its commands retain the same PathSelection policy.
             if (pathMenu.Visible) return;
             string selected = pathSelection.Update(transport);
