@@ -247,7 +247,7 @@ function Connect-WizardExistingKey([string]$Root,$Profile,[string]$User,[string]
         try{[void](Invoke-WizardLogin $q $User $Command $Payload -Timeout 600);Write-WizardProgress ('Пробую ключ '+$key+'… ✓ ключ этого компьютера добавлен на сервер');return $true}catch{$e=[string]$_.Exception.Message}
         $why='не подошёл'
         if($e -notmatch 'код выхода 255'){$why=if($e -match 'код выхода'){'вход выполнен, но настройка рабочего пользователя не удалась'}else{'сервер не ответил вовремя'}}
-        else{try{$keygen=@(Get-Command ssh-keygen -CommandType Application -ErrorAction Stop)[0].Source;[void](Invoke-DiskProcess $keygen @('-y','-P','','-f',$key) -TimeoutSeconds 10)}catch{$why='защищён паролем (или не в формате OpenSSH), пропускаю'}}
+        else{try{$keygen=Get-WizardKeygen $Profile.sshExecutable;[void](Invoke-DiskProcess $keygen @('-y','-P','','-f',$key) -TimeoutSeconds 10)}catch{$why='защищён паролем (или не в формате OpenSSH), пропускаю'}}
         Write-WizardProgress ('Пробую ключ '+$key+'… ✗ '+$why)
     }
     return $false
@@ -274,8 +274,7 @@ function Connect-WizardServer([string]$Root,[string]$Bundle,$Request) {
     $dir=Join-Path $Root ('ssh-profiles/'+$id+'/project-connections/'+(Get-WizardHostId $Root))
     [void][IO.Directory]::CreateDirectory($dir);Protect-TransportPath $dir
     $file=Join-Path $dir 'ssh-transport.json'
-    $p=[pscustomobject]@{sshExecutable=@(Get-Command ssh -CommandType Application -ErrorAction Stop)[0].Source;serverAddress=$address;login=$user;keyPath=(Join-Path $dir 'id_ed25519');knownHostsPath=(Join-Path $dir 'known_hosts');configPath=(Join-Path $dir 'ssh.conf')}
-    if($env:OS -eq 'Windows_NT'){$p.sshExecutable=@(Get-Command ssh.exe -CommandType Application -ErrorAction Stop)[0].Source}
+    $p=[pscustomobject]@{sshExecutable=(Find-WizardSsh $Root $Bundle);serverAddress=$address;login=$user;keyPath=(Join-Path $dir 'id_ed25519');knownHostsPath=(Join-Path $dir 'known_hosts');configPath=(Join-Path $dir 'ssh.conf')}
     # Config fields server.port / server.hostKeys (docs/CONFIG.md) also on the root-password path of a clean VPS.
     $port=22;if($Request.port){$port=[int]$Request.port;if($port -lt 1 -or $port -gt 65535){throw 'Некорректный порт сервера'}}
     Write-DiskUtf8 $p.configPath ("Host *`n    Port "+$port+"`n    ConnectTimeout 5`n")
@@ -287,7 +286,7 @@ function Connect-WizardServer([string]$Root,[string]$Bundle,$Request) {
     if($pins.Count){Write-DiskUtf8 $p.knownHostsPath (($pins -join "`n")+"`n");$p|Add-Member -Force strictHostKey $true}
     if(-not (Test-Path $p.keyPath)){
         Write-WizardProgress 'Создаю ключ этого компьютера…'
-        $keygen=@(Get-Command ssh-keygen -CommandType Application -ErrorAction Stop)[0].Source
+        $keygen=Get-WizardKeygen $p.sshExecutable
         [void](Invoke-DiskProcess $keygen @('-q','-t','ed25519','-N','','-f',$p.keyPath));Protect-TransportPath $p.keyPath
     }
     $worker=if($user -ceq 'root'){'remoteagents'}else{$user}
@@ -366,6 +365,61 @@ function Initialize-WizardTransport([string]$Root,[string]$Bundle,$Transport) {
         $Transport|Add-Member -Force channelPath $file
     }
     Ensure-WizardTransportBinary $Root $Bundle $Transport
+}
+# SSH client of the core: always the pinned portable Win32-OpenSSH of this EXE (openssh/*, build/bundle-binaries.json), the same
+# version on every PC. The launcher writes it to <Home>\transport-bin\openssh from its own resources (PortableTools.cs); the
+# initial bundle folder is a second source. The Windows OpenSSH is only a fallback when the embedded one is absent or does not run.
+$script:WizardBundleDefault=Split-Path $PSScriptRoot -Parent
+$script:WizardSshChecked=@{}
+$script:WizardNoSshText='Не найден клиент SSH: встроенный в RemoteAgents.exe не запустился, а в Windows «Клиент OpenSSH» не установлен. Скачайте свежий RemoteAgents.exe из релиза GitHub и запустите его; если не поможет — пришлите администратору журнал (logs\setup.log)'
+function Get-WizardSystemSsh {
+    $name=if($env:OS -eq 'Windows_NT'){'ssh.exe'}else{'ssh'}
+    $found=@(Get-Command $name -CommandType Application -ErrorAction SilentlyContinue)
+    if($found.Count){return [string]$found[0].Source}
+    if($env:OS -eq 'Windows_NT' -and $env:WINDIR){
+        foreach($dir in @('System32','Sysnative')){$path=Join-Path $env:WINDIR ($dir+'\OpenSSH\ssh.exe');if(Test-Path -LiteralPath $path -PathType Leaf){return $path}}
+    }
+    return $null
+}
+function Test-WizardSshRuns([string]$Ssh) {
+    if($script:WizardSshChecked.ContainsKey($Ssh)){return $script:WizardSshChecked[$Ssh]}
+    $ok=$false;try{[void](Invoke-DiskProcess $Ssh @('-V') '' -TimeoutSeconds 10);$ok=$true}catch{}
+    $script:WizardSshChecked[$Ssh]=$ok;return $ok
+}
+# Copies openssh/* of the bundle folder to <Home>\transport-bin\openssh when the launcher has not done it yet.
+function Copy-WizardBundledSsh([string]$Root,[string]$Bundle) {
+    $dest=Join-Path $Root 'transport-bin/openssh';$pins=Join-Path $Bundle 'build/bundle-binaries.json';$rows=@()
+    if(Test-Path -LiteralPath $pins -PathType Leaf){$rows=@((Read-TransportJson $pins).binaries|Where-Object {$_ -and ([string]$_.target).StartsWith('openssh/')})}
+    if(-not $rows.Count){return}
+    foreach($row in $rows){
+        $src=Join-Path $Bundle ([string]$row.target)
+        if(-not (Test-Path -LiteralPath $src -PathType Leaf)){return}
+        if((Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash -ine [string]$row.memberSha256){Write-SetupLog $Root 'openssh.embedded.mismatch';return}
+    }
+    [void][IO.Directory]::CreateDirectory($dest)
+    # ssh.exe is copied last: its presence means the folder is complete.
+    foreach($row in @($rows|Sort-Object {[string]$_.target -eq 'openssh/ssh.exe'})){
+        $src=Join-Path $Bundle ([string]$row.target);$to=Join-Path $dest (Split-Path ([string]$row.target) -Leaf)
+        $temp=$to+'.'+[guid]::NewGuid().ToString('N')+'.tmp';Copy-Item -LiteralPath $src -Destination $temp
+        Move-Item -LiteralPath $temp -Destination $to -Force
+    }
+}
+function Find-WizardSsh([string]$Root,[string]$Bundle=$script:WizardBundleDefault) {
+    $own=Join-Path $Root 'transport-bin/openssh/ssh.exe'
+    if(-not (Test-Path -LiteralPath $own -PathType Leaf)){Copy-WizardBundledSsh $Root $Bundle}
+    if((Test-Path -LiteralPath $own -PathType Leaf) -and (Test-WizardSshRuns $own)){return $own}
+    $system=Get-WizardSystemSsh
+    if($system){
+        Write-SetupLog $Root 'openssh.embedded.unavailable'
+        if(Get-Command Write-WizardProgress -ErrorAction SilentlyContinue){Write-WizardProgress '· встроенный ssh недоступен — использую OpenSSH Windows'}
+        return $system
+    }
+    throw $script:WizardNoSshText
+}
+# ssh-keygen of the same OpenSSH as the chosen ssh (next to ssh.exe), otherwise from PATH.
+function Get-WizardKeygen([string]$SshExecutable) {
+    if($SshExecutable){foreach($name in @('ssh-keygen.exe','ssh-keygen')){$keygen=Join-Path (Split-Path $SshExecutable -Parent) $name;if(Test-Path -LiteralPath $keygen -PathType Leaf){return $keygen}}}
+    return @(Get-Command ssh-keygen -CommandType Application -ErrorAction Stop)[0].Source
 }
 function Ensure-WizardTransportBinary([string]$Root,[string]$Bundle,$Transport) {
     if($Transport.singBoxPath -and (Test-Path -LiteralPath ([string]$Transport.singBoxPath) -PathType Leaf)){return}

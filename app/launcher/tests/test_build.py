@@ -103,6 +103,16 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(real['binaries'][0]['sha256'], '99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df')
         self.assertIn(real['binaries'][0]['sha256'], (ROOT / 'build/Wizard.Server.ps1').read_text(encoding='utf-8-sig'))
 
+    def test_portable_openssh_pinned(self):
+        # Owner 18.11.2026: the core's SSH client is the embedded Win32-OpenSSH on every PC (a PC without ssh broke setup).
+        real = json.loads((ROOT / 'build/bundle-binaries.json').read_text())
+        self.assertEqual(real['binaries'][0]['name'], 'sing-box')
+        rows = [r for r in real['binaries'] if r['target'].startswith('openssh/')]
+        self.assertTrue({'openssh/ssh.exe', 'openssh/ssh-keygen.exe'} <= {r['target'] for r in rows})
+        self.assertEqual(len({(r['url'], r['sha256']) for r in rows}), 1)
+        self.assertEqual(rows[-1]['target'], 'openssh/ssh.exe')
+        self.assertIn("'transport-bin/openssh/ssh.exe'", (ROOT / 'build/Wizard.Server.ps1').read_text(encoding='utf-8-sig'))
+
     def test_bundle_has_every_wizard_module(self):
         # Every dot-sourced wizard library and the ConfigSync runtime copy must ship in the EXE bundle.
         import re

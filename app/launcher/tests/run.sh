@@ -83,6 +83,8 @@ wait_for_memory
   wait_for_memory
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-config-bootstrap.ps1" -TestHome "$testdir/config-bootstrap" < /dev/null
   wait_for_memory
+  timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-ssh-resolve.ps1" -TestHome "$testdir/ssh-resolve" < /dev/null
+  wait_for_memory
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-config.ps1" < /dev/null
   wait_for_memory
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-vpn-legacy.ps1" -TestHome "$testdir/vpn-legacy" < /dev/null

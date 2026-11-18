@@ -52,6 +52,8 @@ PS не читает vault и не разыменовывает `{"secret":...}`
 - VPN первым запускается только если в `profile.vpn.bootstrap` есть `channel`; один публичный `catalog`
   (`config export --vpn off`) — не VPN.
 
+Клиент SSH ядра — всегда встроенный Win32-OpenSSH (`openssh/*` бандла EXE, SHA-256 по `build/bundle-binaries.json`), лаунчер кладёт его в `H\transport-bin\openssh`; одна версия на всех ПК. OpenSSH Windows — только запасной, если встроенный не запускается (`ssh -V`), с записью `openssh.embedded.unavailable` в журнал. Нет обоих — ошибка «Не найден клиент SSH» (`Find-WizardSsh`, `build/Wizard.Server.ps1`). Требования к Windows: Windows PowerShell 5.1, .NET Framework 4.8, полный языковой режим PowerShell (без AppLocker/WDAC-ограничения); Windows 10/11 x64 — поддерживаемые.
+
 Учётные данные прокси маршрута (`routes[i].proxy.credentialsFile`) материализуются, но `--proxy-connect` их пока не
 использует: маршрут через прокси с паролем не поддержан (честное ограничение).
 
