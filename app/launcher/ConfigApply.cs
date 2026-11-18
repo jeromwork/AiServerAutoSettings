@@ -522,12 +522,29 @@ namespace RemoteAgents.Launcher
             // An access-only profile never removes server-owned connections.
             return Tuple.Create(add, wanted.Length > 0 && wanted.All(LanAccess.ClientOnly) ? new string[0] : have.Where(n => !wanted.Any(l => Json.Str(l, "name") == n)).ToArray());
         }
-        internal static SectionOutcome LanClientStatus(Dictionary<string, object> p, Dictionary<string, object> config)
+        // NetStatus (build/Wizard.Network.ps1 Get-WizardNetStatus): rows {name, state, ok}; servers own networks
+        // added by hand (lan-vpn.sh) appear here too, without a lan.connections record on this computer.
+        internal static Dictionary<string, Dictionary<string, object>> LanServerRows(Dictionary<string, object> netStatus)
+        {
+            var raw = Json.Get(netStatus, "lans");
+            var rows = raw is IDictionary ? new[] { Json.Map(raw) } : Json.Array(raw).Select(Json.Map).ToArray();
+            var result = new Dictionary<string, Dictionary<string, object>>(StringComparer.Ordinal);
+            foreach (var row in rows) { string name = Json.Str(row, "name"); if (name.Length > 0) result[name] = row; }
+            return result;
+        }
+        internal static SectionOutcome LanClientStatus(Dictionary<string, object> p, Dictionary<string, object> config,
+            Dictionary<string, Dictionary<string, object>> server = null)
         {
             var have = new HashSet<string>(Json.Array(Json.Get(Json.Map(Json.Get(config, "lan")), "connections")).Select(r => Json.Str(Json.Map(r), "name")));
-            var missing = Json.Array(Json.Get(p, "lan")).Select(Json.Map).Where(l => LanAccess.ClientOnly(l) && LanAccess.Active(l) && !have.Contains(Json.Str(l, "name"))).ToArray();
-            return new SectionOutcome { Ok = missing.Length == 0, Summary = missing.Length == 0 ? "Локальные сети подключены на сервере ✓"
-                : string.Join("; ", missing.Select(l => "сеть " + Json.Str(l, "name") + " не подключена на сервере")) };
+            var problems = new List<string>();
+            foreach (var l in Json.Array(Json.Get(p, "lan")).Select(Json.Map).Where(l => LanAccess.ClientOnly(l) && LanAccess.Active(l))) {
+                string name = Json.Str(l, "name"); Dictionary<string, object> row;
+                if (server == null) { if (!have.Contains(name)) problems.Add("сеть " + name + " не подключена на сервере"); continue; }
+                // The server is authoritative once it answered: a local record alone proves nothing.
+                if (!server.TryGetValue(name, out row) || Json.Str(row, "state") == "нет на сервере") problems.Add("сеть " + name + " не подключена на сервере");
+                else if (!Json.Bool(row, "ok")) problems.Add("сеть " + name + " на сервере не работает: " + Json.Str(row, "state"));
+            }
+            return new SectionOutcome { Ok = problems.Count == 0, Summary = problems.Count == 0 ? "Локальные сети подключены на сервере ✓" : string.Join("; ", problems) };
         }
         internal static string Origin(string text)
         {
@@ -905,11 +922,19 @@ namespace RemoteAgents.Launcher
                     o = SectionOutcome.From(run("Disk", ConfigRequests.Disk(p, DiskBase())), "Диск подключён; папки сервера принимайте в Syncthing Tray"); break; }
                 case ConfigSections.Vpn: o = SectionOutcome.From(run("Vpn", ConfigRequests.Vpn(p)), "VPN настроен", true); break;
                 case ConfigSections.Proxy: o = deploymentOutcome ?? (deploymentOutcome = Deployment(p, run)); break;
-                case ConfigSections.Lan:
-                    o = ConfigRequests.LanClientStatus(p, config);
+                case ConfigSections.Lan: {
+                    // Access-only networks: ask the server (read-only NetStatus, no root). Networks set up by hand
+                    // with lan-vpn.sh have no lan.connections record on this computer.
+                    Dictionary<string, Dictionary<string, object>> server = null; string note = "";
+                    if (Json.Array(Json.Get(p, "lan")).Select(Json.Map).Any(l => LanAccess.ClientOnly(l) && LanAccess.Active(l))) {
+                        try { server = ConfigRequests.LanServerRows(run("NetStatus", new { })); }
+                        catch (Exception e) when (!(e is OperationCanceledException)) { note = " (состояние сервера не получено: " + e.Message + ")"; Log(ConfigSections.Title(s) + ": NetStatus: " + e.Message); }
+                    }
+                    o = ConfigRequests.LanClientStatus(p, config, server);
+                    if (!o.Ok && note.Length > 0) o.Summary += note;
                     if (o.Ok && Json.Array(Json.Get(p, "lan")).Select(Json.Map).Any(l => !LanAccess.ClientOnly(l)))
                         o = deploymentOutcome ?? (deploymentOutcome = Deployment(p, run));
-                    break;
+                    break; }
                 default: throw new ArgumentException("Неизвестный раздел");
             }
             if (s == ConfigSections.Disk && !DiskStillCurrent()) return DiskApplyWait.Superseded();

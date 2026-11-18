@@ -360,6 +360,18 @@ namespace RemoteAgents.Launcher
             var ready = ConfigPlan.Ready(ConfigBundle.D(), present, profile);
             ServerDeployment.Observe(ConfigBundle.D("parts", new[] { ConfigBundle.D("part", "lan:office", "state", "waiting") }), profile, ready, present);
             Check(ready[ConfigSections.Lan] && ConfigRequests.LanClientStatus(profile, present).Ok, "server connections determine readiness without deployment receipt");
+            Func<object[], Dictionary<string, Dictionary<string, object>>> server = rows => ConfigRequests.LanServerRows(ConfigBundle.D("lans", rows));
+            var manual = ConfigRequests.LanClientStatus(profile, absent, server(new object[] { ConfigBundle.D("name", "office", "state", "подключена ✓", "ok", true) }));
+            Check(manual.Ok && manual.Summary == "Локальные сети подключены на сервере ✓", "сеть, поднятая на сервере вручную, готова без записи на ПК");
+            var failed = ConfigRequests.LanClientStatus(profile, absent, server(new object[] { ConfigBundle.D("name", "office", "state", "ошибка: клиент не активен — x", "ok", false) }));
+            Check(!failed.Ok && failed.Summary == "сеть office на сервере не работает: ошибка: клиент не активен — x", "неработающая сеть сообщает состояние сервера");
+            var missing = ConfigRequests.LanClientStatus(profile, present, server(new object[0]));
+            Check(!missing.Ok && missing.Summary == "сеть office не подключена на сервере", "ответ сервера важнее локальной записи");
+            var removed = ConfigRequests.LanClientStatus(profile, present, server(new object[] { ConfigBundle.D("name", "office", "state", "нет на сервере", "ok", false) }));
+            Check(removed.Summary == "сеть office не подключена на сервере", "состояние нет на сервере сообщает об отсутствующей сети");
+            var single = ConfigRequests.LanServerRows(ConfigBundle.D("lans", ConfigBundle.D("name", "office", "ok", true)));
+            Check(single.Count == 1 && single.ContainsKey("office"), "NetStatus принимает одиночный объект сети");
+            Check(ConfigRequests.LanServerRows(ConfigBundle.D()).Count == 0, "NetStatus без lans даёт пустой список сетей");
             Check(Json.Array(ConfigProfile.SyncFromSettings(profile, absent, "", "", "")["lan"]).Length == 2, "settings sync preserves desired missing share");
             var share = Json.Map(row["share"]);
             share["domains"] = new[] { "*.example.org" };
@@ -379,6 +391,7 @@ namespace RemoteAgents.Launcher
             share["enabled"] = false; row.Remove("testHost");
             profile = ConfigBundle.Parse(Json.Encode(config(row))).Profile;
             Check(!LanAccess.Read(profile).Enabled && LanAccess.Read(profile).Networks.Count == 1 && ConfigRequests.LanClientStatus(profile, absent).Ok, "disabled share retained without probe or server readiness requirement");
+            Check(ConfigRequests.LanClientStatus(profile, absent, server(new object[0])).Ok, "выключенный share не требует сервера и при ответе сервера");
             share["enabled"] = true; row["testHost"] = "10.123.0.10";
             var second = ConfigBundle.D("name", "branch", "testHost", "10.124.0.10", "testPort", 22,
                 "share", ConfigBundle.D("subnets", new[] { "10.124.0.0/24" }, "domains", new[] { "*.branch.example.org" }, "dnsServers", new[] { "10.124.0.53" }));
