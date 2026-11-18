@@ -91,9 +91,9 @@ namespace RemoteAgents.Launcher
             var lan = facts.Lan ?? Json.Map(null);
             view.Lan.Visible = Json.Bool(lan, "enabled");
             var lanNetworks = Json.Array(Json.Get(lan, "networks")).Select(Json.Map).ToArray();
-            view.Lan.State = string.Join("\r\n", lanNetworks.Select(n => Json.Str(n, "name") + ": " + Json.Str(n, "state") + " — " + Json.Str(n, "reason")));
+            view.Lan.State = string.Join("\r\n", lanNetworks.Select(n => Json.Str(n, "name") + ": " + Json.Str(n, "reason")));
             view.Lan.Detail = LanDetails(lan);
-            view.Lan.Tone = lanNetworks.Length > 0 && lanNetworks.All(n => Json.Str(n, "state") == "ok") ? Tone.Ok : Tone.Warning;
+            view.Lan.Tone = LanTone(lanNetworks);
             view.Happier.Visible = facts.HappierVisible;
             view.Happier.State = facts.HappierConfirmed ? "аккаунт подключён"
                 : facts.HappierHasKey || facts.HappierVisible ? "аккаунт не подтверждён" : "не настроен";
@@ -218,13 +218,21 @@ namespace RemoteAgents.Launcher
             return lastTwo >= 11 && lastTwo <= 14 ? "папок" : last == 1 ? "папка" : last >= 2 && last <= 4 ? "папки" : "папок";
         }
 
+        internal static Tone LanTone(Dictionary<string, object>[] networks)
+        {
+            if (networks.Length > 0 && networks.All(n => Json.Str(n, "state") == "ok" && Json.Str(n, "stage").Length == 0)) return Tone.Ok;
+            // A fresh failure or an unreachable host is red; starting, link checks and conflicts are yellow.
+            if (networks.Any(n => Json.Str(n, "state") == "failed" || Json.Str(n, "state") == "host-down")) return Tone.Error;
+            return Tone.Warning;
+        }
+
         internal static string LanDetails(Dictionary<string, object> lan)
         {
             return CleanSecrets(string.Join("\r\n\r\n", Json.Array(Json.Get(lan, "networks")).Select(Json.Map).Select(n =>
                 Json.Str(n, "name") + "\r\nПодсети: " + string.Join(", ", Json.Strings(Json.Get(n, "connectedSubnets") ?? Json.Get(n, "subnets"))) +
                 "\r\nИсключены: " + string.Join("; ", Json.Array(Json.Get(n, "excludedSubnets")).Select(Json.Map).Select(s => Json.Str(s, "subnet") + " — " + Json.Str(s, "adapter"))) +
                 "\r\nDNS: " + string.Join(", ", Json.Strings(Json.Get(n, "dnsServers"))) + "\r\nДомены: " + string.Join(", ", Json.Strings(Json.Get(n, "domains"))) +
-                "\r\nИмена: " + (Json.Bool(n, "nrptOk") ? "настроены" : "не настроены") + "\r\nПоследняя ошибка: " + Json.Text(n, "stage", "нет"))));
+                "\r\nИмена: " + (Json.Bool(n, "nrptOk") ? "настроены" : "не настроены") + "\r\nПоследняя ошибка: " + LanStages.Text(Json.Str(n, "stage")))));
         }
         static string HelperReason(Dictionary<string, object> control, Dictionary<string, object> transport)
         {

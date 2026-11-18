@@ -29,15 +29,16 @@ namespace RemoteAgents.Launcher
             internal LanTunSnapshot SnapshotValue = new LanTunSnapshot();
             internal readonly List<string> Commands = new List<string>(), Stages = new List<string>();
             internal Core Core;
-            internal int Starts, Cleaned, Snapshots, Index = 7, Probes;
+            internal int Starts, Cleaned, Snapshots, Index = 7, Probes, TunnelChecks;
             internal bool Channel = true, Host = true, NrptOk = true, StartFails;
             internal object Config;
+            internal Action BeforeStart;
             public LanTunSnapshot Snapshot() { Snapshots++; return SnapshotValue; }
             public Dictionary<string, object> Credentials() { return new Dictionary<string, object> { { "user", "fixture" }, { "password", "synthetic-only" } }; }
-            public ILanTunCore Start(object config) { Starts++; if (StartFails) throw new IOException(); Config = config; return Core = new Core(); }
+            public ILanTunCore Start(object config) { if (BeforeStart != null) BeforeStart(); Starts++; if (StartFails) throw new IOException(); Config = config; return Core = new Core(); }
             public void CleanAdapter() { Cleaned++; }
             public bool Nrpt(string command) { Commands.Add(command); return NrptOk; }
-            public int TunnelIndex() { return Index; }
+            public int TunnelIndex() { TunnelChecks++; return Index; }
             public bool Probe(LanTunNetwork network, string[] subnets, int index) { Probes++; return Host && index == Index; }
             public bool ChannelReady() { return Channel; }
             public void Log(string stage, int code) { Stages.Add(stage); }
@@ -119,6 +120,9 @@ namespace RemoteAgents.Launcher
             using (var tun = new LanTun(platform, () => now)) {
                 tun.Apply(request); now = 1000; tun.Tick();
                 Check(platform.Core.Alive && Rows(tun).All(n => Json.Str(n, "reason").Contains("не настроены") && Json.Str(n, "stage") == "lan-nrpt"), "NRPT failure preserves IP connectivity with error stage");
+                Check(MainScreenModel.LanTone(Rows(tun)) == Tone.Warning, "DNS warning is yellow despite IP connectivity");
+                platform.NrptOk = true; now = 11000; tun.Tick();
+                Check(Rows(tun).All(n => Json.Bool(n, "nrptOk") && Json.Str(n, "stage") == "") && MainScreenModel.LanTone(Rows(tun)) == Tone.Ok, "DNS recovery clears the last error and restores green");
             }
             now = 0; var retry = new LanTunRetry(() => now);
             foreach (int seconds in new[] { 1, 2, 5, 10, 30, 30, 30 }) { retry.Failed(); Check(!retry.Ready, "restart scheduled"); now += seconds * 1000 - 1; Check(!retry.Ready, "before retry deadline"); now++; Check(retry.Ready, "retry deadline"); }
@@ -128,12 +132,52 @@ namespace RemoteAgents.Launcher
                 tun.Apply(request); platform.Core.Running = false; tun.Tick();
                 Check(platform.Starts == 1 && platform.Stages.Contains("lan-core-exited"), "dead core waits before restart");
                 now = 999; tun.Tick(); Check(platform.Starts == 1, "no early restart"); now++; tun.Tick(); Check(platform.Starts == 2 && platform.Snapshots == 2, "restart after 1 second with fresh route check");
-                platform.Index = 0; now = 12000; tun.Tick(); Check(platform.Stages.Contains("lan-adapter-down"), "missing adapter after resume restarts core");
+                now = 2000; tun.Tick(); Check(platform.Stages.Contains("lan-adapter-ready") && Rows(tun).All(n => Json.Str(n, "stage") == ""), "adapter seen clears core-exited error");
+                platform.Index = 0; now = 12000; tun.Tick(); Check(platform.Stages.Contains("lan-adapter-down") && Rows(tun).All(n => Json.Str(n, "state") == "failed"), "lost adapter after resume restarts core and is a fresh failure");
             }
             platform = new Platform { StartFails = true }; now = 0;
             using (var tun = new LanTun(platform, () => now)) {
                 tun.Apply(request); Check(Rows(tun).All(n => Json.Str(n, "stage") == "lan-start"), "start error reported");
                 now = 1000; tun.Tick(); now = 2999; tun.Tick(); Check(platform.Starts == 2, "second failure waits two seconds"); now++; tun.Tick(); Check(platform.Starts == 3, "second retry");
+            }
+            // Slow adapter: no failure inside the 30 s window, 1 s polling, start time counted after the real start.
+            platform = new Platform { Index = 0 }; now = 0;
+            platform.BeforeStart = () => now += 8000; // cleanup + config check took 8 s
+            using (var tun = new LanTun(platform, () => now)) {
+                tun.Apply(request);
+                Check(Rows(tun).All(n => Json.Str(n, "state") == "starting"), "apply shows starting, not a failure");
+                for (now = 9000; now <= 37000; now += 1000) tun.Tick();
+                Check(!platform.Stages.Contains("lan-adapter-timeout") && !platform.Stages.Contains("lan-adapter-down") && platform.Starts == 1, "adapter wait counts from the real start");
+                Check(platform.TunnelChecks == 29, "missing adapter is polled each second");
+                Check(Rows(tun).All(n => Json.Str(n, "state") == "starting") && MainScreenModel.LanTone(Rows(tun)) == Tone.Warning, "starting is yellow");
+                platform.Index = 7; now = 38000; tun.Tick();
+                Check(Rows(tun).All(n => Json.Str(n, "state") == "ok" && Json.Str(n, "stage") == "") && MainScreenModel.LanTone(Rows(tun)) == Tone.Ok, "late adapter becomes ok without error");
+            }
+            // Adapter never appears: timeout, red, human text, automatic retry, and the error does not stick after success.
+            platform = new Platform { Index = 0 }; now = 0;
+            using (var tun = new LanTun(platform, () => now)) {
+                tun.Apply(request);
+                for (now = 1000; now < 30000; now += 1000) tun.Tick();
+                Check(!platform.Stages.Contains("lan-adapter-timeout"), "no timeout before 30 s");
+                now = 30000; tun.Tick();
+                Check(platform.Stages.Contains("lan-adapter-timeout") && Rows(tun).All(n => Json.Str(n, "state") == "failed" && Json.Str(n, "reason").Contains("не появился")), "timeout after 30 s is a failure with plain text");
+                Check(MainScreenModel.LanTone(Rows(tun)) == Tone.Error, "fresh failure is red");
+                var card = MainScreenModel.Build(new MainScreenFacts { Lan = Decode(tun.Status()) });
+                Check(card.Lan.Detail.Contains("не появился за 30 секунд") && !card.Lan.Detail.Contains("lan-adapter") && !card.Lan.State.Contains("failed"), "details show text, not codes");
+                now = 31000; tun.Tick();
+                Check(platform.Starts == 2 && Rows(tun).All(n => Json.Str(n, "state") == "starting" && Json.Str(n, "reason").Contains("повторное подключение")), "retry after 1 s is shown as starting");
+                platform.Index = 7; now = 32000; tun.Tick();
+                Check(Rows(tun).All(n => Json.Str(n, "state") == "ok" && Json.Str(n, "stage") == ""), "success clears the last error");
+                var healed = MainScreenModel.Build(new MainScreenFacts { Lan = Decode(tun.Status()) });
+                Check(healed.Lan.Tone == Tone.Ok && healed.Lan.Detail.Contains("Последняя ошибка: нет"), "healthy card is green with no stale error");
+            }
+            // Host that never answered is shown as starting during the grace period, then red host-down.
+            platform = new Platform { Host = false }; now = 0;
+            using (var tun = new LanTun(platform, () => now)) {
+                tun.Apply(request); now = 1000; tun.Tick();
+                Check(Rows(tun).All(n => Json.Str(n, "state") == "starting"), "no false host-down right after start");
+                now = 16000; tun.Tick();
+                Check(Rows(tun).All(n => Json.Str(n, "state") == "host-down" && Json.Str(n, "reason").Contains("не отвечает")) && MainScreenModel.LanTone(Rows(tun)) == Tone.Error, "host-down after grace is red");
             }
             int executed = 0;
             Func<string, Dictionary<string, object>, string> execute = (command, r) => { executed++; return Json.Encode(new { ok = true }); };
@@ -156,7 +200,14 @@ namespace RemoteAgents.Launcher
             statuses = Decode(statuses); // Same JSON boundary as the real helper response.
             Check(StatusView.Lan(statuses) == "Локальные сети: 1 из 2 работают", "tray aggregate");
             var view = MainScreenModel.Build(new MainScreenFacts { Lan = statuses });
-            Check(view.Lan.Visible && view.Lan.Title == "Локальные сети" && view.Lan.State.Contains("office: ok") && view.Lan.State.Contains("помощник не установлен") && view.Lan.Detail.Contains("10.23.0.53") && view.Lan.Detail.Contains("lan-start"), "automatic multi-network card and details");
+            Check(view.Lan.Visible && view.Lan.Title == "Локальные сети" && view.Lan.State.Contains("office: работает") && !view.Lan.State.Contains(": ok") && view.Lan.State.Contains("помощник не установлен") && view.Lan.Detail.Contains("10.23.0.53") && view.Lan.Detail.Contains("не удалось запустить") && !view.Lan.Detail.Contains("lan-start"), "automatic multi-network card and details");
+            foreach (string state in new[] { "starting", "channel-down", "busy", "no-helper" }) {
+                var waiting = Decode(new { state = state, stage = "" });
+                Check(MainScreenModel.LanTone(new[] { waiting }) == Tone.Warning, state + " is yellow");
+                var failed = Decode(new { state = "failed", stage = "lan-start" });
+                Check(MainScreenModel.LanTone(new[] { waiting, failed }) == Tone.Error, "fresh failure takes priority over " + state);
+            }
+            Check(MainScreenModel.LanTone(new Dictionary<string, object>[0]) == Tone.Warning, "empty LAN state is yellow");
             SingBoxCheck(config);
             Check(timer.ElapsedMilliseconds < 10000, "LAN tests under 10 seconds");
             Console.WriteLine("PASS: LanTun " + count + " checks, " + timer.ElapsedMilliseconds + " ms");
@@ -179,6 +230,10 @@ namespace RemoteAgents.Launcher
         static int Main(string[] args)
         {
             if (args.Length == 1 && args[0] == "--lan-tun") { Run(); return 0; }
+            // Focused UI/tick coverage without running unrelated disk/update suites.
+            if (args.Length == 2 && args[0] == "--lan-ui") {
+                MainScreenModelTests.Run(); LanTickTests.Run(args[1]); return 0;
+            }
             if (args.Length == 0 || !args[0].StartsWith("--", StringComparison.Ordinal)) Run();
             try { return (int)typeof(NetHelperTests).GetMethod("Main", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, new object[] { args }); }
             catch (TargetInvocationException ex) { ExceptionDispatchInfo.Capture(ex.InnerException).Throw(); throw; }

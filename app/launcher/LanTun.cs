@@ -16,6 +16,28 @@ using System.Runtime.InteropServices;
 
 namespace RemoteAgents.Launcher
 {
+    // Human texts for helper stage codes. Codes stay in helper.log; the UI shows only these texts.
+    internal static class LanStages
+    {
+        internal const int AdapterWaitSeconds = 30;
+        internal static bool IsCore(string stage)
+        { return stage == "lan-start" || stage == "lan-core-exited" || stage == "lan-adapter-timeout" || stage == "lan-adapter-down" || stage == "lan-watchdog"; }
+        internal static string Text(string stage)
+        {
+            switch (stage ?? "") {
+                case "": return "нет";
+                case "lan-start": return "не удалось запустить подключение к локальным сетям";
+                case "lan-core-exited": return "подключение к локальным сетям неожиданно остановилось";
+                case "lan-adapter-timeout": return "сетевой адаптер RemoteAgents-LAN не появился за " + AdapterWaitSeconds + " секунд";
+                case "lan-adapter-down": return "сетевой адаптер RemoteAgents-LAN пропал (например, после сна компьютера)";
+                case "lan-watchdog": return "не удалось проверить сетевые маршруты компьютера";
+                case "lan-nrpt": return "не удалось настроить имена сети (DNS)";
+                case "lan-nrpt-remove": return "не удалось убрать прежние настройки имён сети (DNS)";
+                default: return "внутренняя ошибка (" + stage + ")";
+            }
+        }
+    }
+
     internal sealed class LanTunNetwork
     {
         internal string Name, TestHost;
@@ -130,6 +152,7 @@ namespace RemoteAgents.Launcher
     internal sealed class LanTun : IDisposable
     {
         internal const string InterfaceName = "RemoteAgents-LAN";
+        internal const long AdapterWaitMs = LanStages.AdapterWaitSeconds * 1000L, StartupGraceMs = 15000;
         internal const string RemoveNrpt = "$ErrorActionPreference='Stop'; Get-DnsClientNrptRule | Where-Object { $_.Comment -like 'RemoteAgents:*' } | Remove-DnsClientNrptRule -Force";
         readonly object gate = new object();
         readonly ILanTunPlatform platform;
@@ -144,6 +167,8 @@ namespace RemoteAgents.Launcher
         long nextRoutes, nextHealth, started;
         volatile bool disposed;
         bool nrptDirty;
+        bool adapterSeen;
+        readonly HashSet<string> reached = new HashSet<string>();
         volatile Dictionary<string, object> published = new Dictionary<string, object>();
         internal LanTun(ILanTunPlatform platform, Func<long> clock) { this.platform = platform; this.clock = clock; retry = new LanTunRetry(clock); }
         internal static int Prefix(string subnet) { return int.Parse(subnet.Split('/')[1], CultureInfo.InvariantCulture); }
@@ -188,7 +213,7 @@ namespace RemoteAgents.Launcher
             lock (gate) {
                 if (disposed) return new { ok = false, error = "stopped" };
                 StopCore(); networks = wanted; port = Json.Int(request, "socksPort", 0); signature = ""; retry.Reset(); states.Clear(); connected.Clear();
-                foreach (var n in networks) states[n.Name] = new Dictionary<string, object> { { "name", n.Name }, { "state", "channel-down" }, { "reason", "нет связи с сервером" }, { "stage", "" }, { "nrptOk", false }, { "domains", n.Domains }, { "dnsServers", n.DnsServers } };
+                foreach (var n in networks) states[n.Name] = new Dictionary<string, object> { { "name", n.Name }, { "state", "starting" }, { "reason", "подключается…" }, { "stage", "" }, { "nrptOk", false }, { "domains", n.Domains }, { "dnsServers", n.DnsServers } };
                 nextRoutes = nextHealth = 0;
                 try { TickLocked(); } finally { Publish(); }
                 return new { ok = true };
@@ -208,7 +233,11 @@ namespace RemoteAgents.Launcher
         void Error(string stage)
         {
             platform.Log(stage, 1);
-            foreach (var state in states.Values) { state["stage"] = stage; state["state"] = "host-down"; state["reason"] = "локальные сети: ошибка на шаге " + stage; }
+            foreach (var state in states.Values) {
+                state["stage"] = stage;
+                if (Json.Str(state, "state") == "busy") continue;
+                state["state"] = "failed"; state["reason"] = LanStages.Text(stage) + "; повторим автоматически";
+            }
         }
         internal void Tick() { lock (gate) { if (!disposed) { try { TickLocked(); } finally { Publish(); } } } }
         void TickLocked()
@@ -236,15 +265,27 @@ namespace RemoteAgents.Launcher
                     try {
                         platform.CleanAdapter();
                         core = platform.Start(Config(networks, connected, port, platform.Credentials(), tunAddress, LogPath));
-                        started = now; nextHealth = now + 1000;
+                        // Cleanup and config check can take seconds: count the adapter wait from the real start.
+                        long launched = clock();
+                        started = launched; nextHealth = launched + 1000; adapterSeen = false; reached.Clear();
+                        MarkStarting();
                         if (platform.ChannelReady()) InstallNrpt();
                     } catch { StopCore(); Error("lan-start"); retry.Failed(); }
                 }
                 if (now >= nextHealth) {
-                    nextHealth = now + 10000;
                     int index = core == null ? 0 : platform.TunnelIndex();
-                    // Recheck after resume too; a loopback SOCKS endpoint needs no Wi-Fi rebinding.
-                    if (core != null && index == 0 && now - started >= 5000) { StopCore(); Error("lan-adapter-down"); retry.Failed(); }
+                    long checkedAt = clock();
+                    if (core != null && index > 0) {
+                        if (!adapterSeen) { platform.Log("lan-adapter-ready", (int)Math.Min(int.MaxValue, Math.Max(0, (checkedAt - started) / 1000))); ClearCoreStage(); }
+                        adapterSeen = true;
+                    } else if (core != null && adapterSeen) {
+                        // Recheck after resume too; a loopback SOCKS endpoint needs no Wi-Fi rebinding.
+                        StopCore(); Error("lan-adapter-down"); retry.Failed();
+                    } else if (core != null && checkedAt - started >= AdapterWaitMs) {
+                        StopCore(); Error("lan-adapter-timeout"); retry.Failed();
+                    }
+                    // While waiting for the adapter poll every second, otherwise every 10 s.
+                    nextHealth = checkedAt + (core != null && !adapterSeen ? 1000 : 10000);
                     bool channel = platform.ChannelReady();
                     if (!channel) {
                         if (!platform.Nrpt(RemoveNrpt)) platform.Log("lan-nrpt-remove", 1);
@@ -256,10 +297,21 @@ namespace RemoteAgents.Launcher
                     Task.WaitAll(probes.Select(p => p.task).ToArray());
                     SetHealth(channel, probes.ToDictionary(p => p.Name, p => p.task.Result));
                     if (core != null && core.Alive && now - started >= 30000) retry.Reset();
-
                 }
             } catch { StopCore(); Error("lan-watchdog"); retry.Failed(); nextRoutes = now + 30000; }
         }
+        void MarkStarting()
+        {
+            foreach (var n in networks) {
+                var state = states[n.Name];
+                if (connected[n.Name].Length == 0 || Json.Str(state, "busyReason").Length > 0) continue;
+                state["state"] = "starting"; state["reason"] = StartingReason(Json.Str(state, "stage"));
+            }
+        }
+        static string StartingReason(string stage)
+        { return LanStages.IsCore(stage) ? "повторное подключение после сбоя: " + LanStages.Text(stage) : "подключается…"; }
+        void ClearCoreStage()
+        { foreach (var state in states.Values) if (LanStages.IsCore(Json.Str(state, "stage"))) state["stage"] = ""; }
         internal static string LogPath {
             get {
 #if PORTABLE_TEST
@@ -279,17 +331,27 @@ namespace RemoteAgents.Launcher
             foreach (var n in networks) {
                 bool ok = n.Domains.Length == 0 || (added && eligible.Any(x => x.network == n));
                 states[n.Name]["nrptOk"] = ok;
+                if (ok && (Json.Str(states[n.Name], "stage") == "lan-nrpt" || Json.Str(states[n.Name], "stage") == "lan-nrpt-remove")) states[n.Name]["stage"] = "";
                 if (!ok) { states[n.Name]["stage"] = "lan-nrpt"; platform.Log("lan-nrpt", 1); }
             }
         }
         void SetHealth(bool channel, Dictionary<string, bool> probes)
         {
+            long t = clock();
             foreach (var n in networks) {
-                var state = states[n.Name]; string busy = Json.Str(state, "busyReason");
+                var state = states[n.Name]; string busy = Json.Str(state, "busyReason"), stage = Json.Str(state, "stage");
                 bool ok; probes.TryGetValue(n.Name, out ok);
-                string status = connected[n.Name].Length == 0 || busy.Length > 0 ? "busy" : !channel ? "channel-down" : ok ? "ok" : "host-down";
-                string reason = status == "busy" ? (connected[n.Name].Length == 0 ? "не подключена: адреса заняты; " : "") + busy : status == "channel-down" ? "нет связи с сервером" : status == "ok" ? "работает" : "сервер на связи, но хост сети не отвечает (сеть на сервере выключена или хост недоступен)";
-                if (!Json.Bool(state, "nrptOk") && n.Domains.Length > 0) reason += "; имена сети " + n.Name + " не настроены";
+                if (ok && core != null) reached.Add(n.Name);
+                bool warming = core == null || !adapterSeen || (!reached.Contains(n.Name) && t - started < StartupGraceMs);
+                string status, reason;
+                if (connected[n.Name].Length == 0 || busy.Length > 0) { status = "busy"; reason = (connected[n.Name].Length == 0 ? "не подключена: адреса заняты; " : "") + busy; }
+                else if (core == null && LanStages.IsCore(stage)) { status = "failed"; reason = LanStages.Text(stage) + "; повторим автоматически"; }
+                else if (!channel) { status = "channel-down"; reason = "нет связи с сервером"; }
+                else if (ok) { status = "ok"; reason = "работает"; }
+                else if (warming) { status = "starting"; reason = StartingReason(stage); }
+                else { status = "host-down"; reason = "сервер на связи, но проверочный адрес " + n.TestHost + ":" + n.TestPort + " не отвечает (сеть на сервере выключена или адрес недоступен)"; }
+                if (!Json.Bool(state, "nrptOk") && n.Domains.Length > 0 && status != "failed" && status != "starting") reason += "; имена сети " + n.Name + " не настроены";
+                if (status == "ok" && (Json.Bool(state, "nrptOk") || n.Domains.Length == 0)) state["stage"] = "";
                 state["state"] = status; state["reason"] = reason;
             }
         }
