@@ -7,18 +7,19 @@ param([Alias('Home')][string]$TransportHome=(Join-Path $env:LOCALAPPDATA 'Remote
 $root=(Get-TransportHome $TransportHome);$engine=$null;$tunnelChildren=@{};$probes=@{};$rows=@();$active=$null;$confirmed=$false;$errorText='Запуск';$network=$null;$memory=$null;$secret=$null
 $parent=$null;$mutex=$null;$locked=$false;$settings=$null;$paths=$null;$rankPending=$false;$rankTags=@();$rankQueue=$null;$exitCode=0
 $pin=[pscustomobject]@{mode='auto';tag=$null};$nextControl=[DateTime]::MinValue;$revision='';$reloadJob=$null;$reloadError=$null;$failedRevision=$null;$pendingRevision=$null;$nextReload=[DateTime]::MinValue
-$portConflict=$null;$bindRetry=$null
-$diagnosticContext=$null;$liveDeferred=@();$tunnelLiveAt=[DateTime]::MinValue;$daemonStarted=[DateTime]::Now;$checkingSince=[DateTime]::UtcNow;$stopping=$false
+$portConflict=$null;$bindRetry=$null;$recoveryRound=$false;$recoveryWon=$false;$allLiveRound=$false
+$diagnosticContext=$null;$liveDeferred=@();$tunnelReadyUntil=@{};$daemonStarted=[DateTime]::Now;$checkingSince=[DateTime]::UtcNow;$stopping=$false
 try{$daemonStarted=(Get-Process -Id $PID).StartTime}catch{}
-$lastStatus=[DateTime]::MinValue;$nextActive=[DateTime]::MinValue;$nextRank=[DateTime]::MinValue;$nextNetwork=[DateTime]::MinValue;$retryAt=[DateTime]::MinValue;$nextLive=[DateTime]::MinValue
+$lastStatus=[DateTime]::MinValue;$nextActive=[DateTime]::MinValue;$nextRank=[DateTime]::MinValue;$nextNetwork=[DateTime]::MinValue;$retryAt=[DateTime]::MinValue;$nextLive=[DateTime]::MinValue;$nextAllLive=[DateTime]::MinValue
 function Test-TransportStop {
     try{if([IO.File]::Exists((Join-Path $root 'stop')) -or [IO.File]::Exists((Join-Path $root 'state/transport.stop'))){return $true}}catch{}
     if($parent){try{return $parent.HasExited}catch{return $true}};return $false
 }
 function Stop-TransportProbes {
-    foreach($probe in @($probes.Values)){Stop-TransportProbe $probe};$probes.Clear();$script:liveDeferred=@()
+    foreach($probe in @($probes.Values)){Stop-TransportProbe $probe};$probes.Clear();$script:liveDeferred=@();$script:recoveryRound=$false;$script:recoveryWon=$false;$script:allLiveRound=$false;foreach($r in $rows){$r.suspect=$false}
 }
 function Publish-TransportStatus {
+    $script:rows=@(Get-TransportOrdered $rows);$order=0;foreach($r in $rows){$order++;$r|Add-Member -Force order $order}
     $speed=$null;$row=$rows|Where-Object {$_.tag -eq $active}|Select-Object -First 1
     if($confirmed -and $row){$speed=$row.kbps}
     $alive=$false;if($engine){try{$alive=-not $engine.Process.HasExited}catch{}}
@@ -26,10 +27,11 @@ function Publish-TransportStatus {
     $summary='нет связи: '+$(if($errorText){$errorText}else{'нет проверенного пути'})
     if($alive -and $confirmed -and $row){$summary=$row.title;if($null -ne $speed){$summary+=' · '+([Math]::Round([double]$speed,1)).ToString([Globalization.CultureInfo]::InvariantCulture)+' КБ/с'}}
     if($settings -and $settings.LocalWeb.conflict){$summary+=' · Happier: '+$settings.LocalWeb.conflict.message}
-    $isOk=[bool]($alive -and $confirmed)
-    if($isOk){$script:checkingSince=$null}
-    $phase=if($isOk){'ok'}elseif($stopping){'stopped'}elseif($script:checkingSince){'checking'}else{'failed'}
-    Write-TransportJson (Join-Path $root 'status/transport.json') ([ordered]@{endpoints=@($paths.Outbounds|Where-Object {$_.server -and $_.server -notin @('127.0.0.1','::1')}|ForEach-Object {[string]$_.server}|Sort-Object -Unique);ports=$(if($settings){Get-TransportConfiguredPorts ([pscustomobject]$settings.Options) $settings.Profile}else{$null});localWeb=$(if($settings){$settings.LocalWeb}else{$null});lan=$(if($settings){$settings.Lan}else{$null});helper=$(if($settings){Get-TransportHelperStatus $settings $active $paths.Outbounds}else{$null});portConflict=$portConflict;retryAt=$retryAt.ToUniversalTime().ToString('o');configRevision=$revision;fatal=($exitCode -ne 0);summary=$summary;ok=[bool]($alive -and $confirmed);phase=$phase;checkingSince=$(if($script:checkingSince){$script:checkingSince.ToString('o')}else{$null});active=$active;kbps=$speed;network=$id;metered=$metered;mode=$pin.mode;pinnedTag=$pin.tag;candidates=@($rows);configError=$reloadError;updatedAt=[DateTime]::UtcNow.ToString('o');error=$errorText})
+    $degraded=[bool](($row -and $row.suspect) -or ($recoveryRound -and -not $recoveryWon))
+    $isOk=[bool]($alive -and $confirmed -and -not $degraded)
+    if($isOk -and -not $recoveryRound){$script:checkingSince=$null}
+    $phase=if($stopping){'stopped'}elseif($degraded){'degraded'}elseif($isOk){'ok'}elseif($script:checkingSince){'checking'}else{'failed'}
+    Write-TransportJson (Join-Path $root 'status/transport.json') ([ordered]@{endpoints=@($paths.Outbounds|Where-Object {$_.server -and $_.server -notin @('127.0.0.1','::1')}|ForEach-Object {[string]$_.server}|Sort-Object -Unique);ports=$(if($settings){Get-TransportConfiguredPorts ([pscustomobject]$settings.Options) $settings.Profile}else{$null});localWeb=$(if($settings){$settings.LocalWeb}else{$null});lan=$(if($settings){$settings.Lan}else{$null});helper=$(if($settings){Get-TransportHelperStatus $settings $active $paths.Outbounds}else{$null});portConflict=$portConflict;retryAt=$retryAt.ToUniversalTime().ToString('o');configRevision=$revision;fatal=($exitCode -ne 0);summary=$summary;ok=$isOk;phase=$phase;checkingSince=$(if($script:checkingSince){$script:checkingSince.ToString('o')}else{$null});active=$active;kbps=$speed;network=$id;metered=$metered;mode=$pin.mode;pinnedTag=$pin.tag;candidates=@($rows);configError=$reloadError;updatedAt=[DateTime]::UtcNow.ToString('o');error=$errorText})
     $script:lastStatus=[DateTime]::UtcNow
 }
 function Set-DaemonNextActive {
@@ -45,46 +47,76 @@ function Switch-TransportActive([string]$Tag,[bool]$Verified) {
         $script:active=$Tag;$script:confirmed=$Verified
         # A successful live/rank probe already proves this path. Schedule the next health check normally.
         if($Verified){Set-DaemonNextActive}else{$script:nextActive=[DateTime]::UtcNow}
-        if($Verified){$script:errorText=$null;$script:bindRetry=$null;$script:portConflict=$null}elseif($pin.mode -eq 'pinned'){$script:errorText='Закреплённый путь ещё не проверен или недоступен'}else{$script:errorText='Путь из памяти ещё не проверен'}
+        if($Verified){foreach($r in $rows){$r.suspect=$false};$script:errorText=$null;$script:bindRetry=$null;$script:portConflict=$null}elseif($pin.mode -eq 'pinned'){$script:errorText='Закреплённый путь ещё не проверен или недоступен'}else{$script:errorText='Путь из памяти ещё не проверен'}
         Write-TransportLog $root 'switch';return $true
     }catch{$script:confirmed=$false;$script:errorText='Не удалось переключить selector';Write-TransportLog $root 'api-failed' (Get-TransportErrorDetail $_);return $false}
 }
-function Fail-TransportActive([bool]$RequestRank=$true) {
-    $script:confirmed=$false;$script:errorText='Активный путь не прошёл пробу или завершился'
-    if($pin.mode -eq 'pinned'){$script:errorText='Закреплённый путь не работает';return}
-    $best=Get-TransportBest $rows
-    if($best){[void](Switch-TransportActive $best.tag $true)}else{
-        $best=Get-TransportBest $rows -Remembered
-        if($best){[void](Switch-TransportActive $best.tag $false)}
+function Fail-TransportActive {
+    if($script:recoveryRound -or -not $confirmed){return}
+    $row=$rows|Where-Object {$_.tag -eq $active}|Select-Object -First 1
+    if($row){$row.suspect=$true}
+    $script:checkingSince=[DateTime]::UtcNow;$script:recoveryRound=$true;$script:recoveryWon=$false
+    $script:errorText='Связь нестабильна, ищу другой путь'
+    # Start a fresh health round, including the suspect active path. Speed probes keep running.
+    foreach($key in @($probes.Keys)){if($probes[$key].purpose -ne 'rank'){Stop-TransportProbe $probes[$key];$probes.Remove($key)}}
+    $script:liveDeferred=@()
+    Start-TransportLiveness -Recovery
+    Publish-TransportStatus
+    $script:lastStatus=[DateTime]::MinValue
+}
+function Complete-DaemonLivenessRound {
+    if(-not $script:allLiveRound -and -not $script:recoveryRound){return}
+    if($liveDeferred.Count -or @($probes.Values|Where-Object {$_.purpose -ne 'rank'}).Count){return}
+    if($script:allLiveRound){
+        $interval=$settings.Options.allLivenessIntervalSec;if($metered -ne $false){$interval=$settings.Options.meteredAllLivenessIntervalSec}
+        $script:nextAllLive=[DateTime]::UtcNow.AddSeconds([double]$interval);$script:allLiveRound=$false
     }
-    if($RequestRank){$script:nextRank=[DateTime]::UtcNow}
+    if($script:recoveryRound){
+        if(-not $script:recoveryWon){
+            $script:confirmed=$false;$script:checkingSince=$null
+            $script:errorText=if($pin.mode -eq 'pinned'){'Закреплённый путь не работает'}else{'Ни один путь не прошёл проверку'}
+            foreach($r in $rows){$r.suspect=$false}
+        }
+        if($script:recoveryWon){$script:checkingSince=$null}
+        $script:recoveryRound=$false;$script:recoveryWon=$false
+        $script:lastStatus=[DateTime]::MinValue
+    }elseif(-not $confirmed){$script:checkingSince=$null}
 }
 function Write-DaemonWizardProgress([string]$Text) {
     # Explicit opt-in only for the wizard's short-lived preflight. Never forward raw subprocess output.
     if($env:REMOTEAGENTS_WIZARD_PROGRESS){try{[IO.File]::AppendAllText($env:REMOTEAGENTS_WIZARD_PROGRESS,((@{text=$Text}|ConvertTo-Json -Compress)+"`n"),(New-Object Text.UTF8Encoding($false)))}catch{}}
 }
+function Get-DaemonProbeKey([string]$Tag,[string]$Purpose) {
+    if($Purpose -eq 'rank'){return 'rank/'+$Tag};return 'health/'+$Tag
+}
+function Test-DaemonHealthProbe([string]$Tag) {$probes.ContainsKey((Get-DaemonProbeKey $Tag 'active'))}
 function Start-DaemonProbe($Candidate,[long]$Bytes,[string]$Purpose) {
-    if($probes.ContainsKey($Candidate.tag)){return}
+    $key=Get-DaemonProbeKey $Candidate.tag $Purpose
+    if($probes.ContainsKey($key)){return}
     Write-DaemonWizardProgress ('Проверяю вариант связи: '+$Candidate.title+'… (до '+$settings.Options.probeTimeoutSec+' с)')
-    try{$probes[$Candidate.tag]=Start-TransportProbe $settings.Profile $Candidate $Bytes $settings.Options $Purpose}
+    try{$probes[$key]=Start-TransportProbe $settings.Profile $Candidate $Bytes $settings.Options $Purpose}
     catch{
-        $row=$rows|Where-Object {$_.tag -eq $Candidate.tag}|Select-Object -First 1;$row.state='fail';$row.kbps=$null;$row.checkedAt=[DateTime]::UtcNow.ToString('o')
-        if($Candidate.tag -eq $active){Fail-TransportActive (-not $rankPending)}
+        $row=$rows|Where-Object {$_.tag -eq $Candidate.tag}|Select-Object -First 1;if($Purpose -eq 'rank'){$row|Add-Member -Force rankState 'fail'}else{$row.state='fail';$row.lastFailAt=[DateTime]::UtcNow.ToString('o')};$row.checkedAt=[DateTime]::UtcNow.ToString('o')
+        if($Candidate.tag -eq $active){if($Purpose -eq 'rank'){$script:nextActive=[DateTime]::UtcNow}else{Fail-TransportActive}}
         $detail=New-TransportDiagnostic $null $Candidate.tag 'probe-start-failed'
         $row|Add-Member -Force diagnostic $detail
         Write-TransportLog $root 'process-failed' $detail
     }
 }
-function Start-TransportLiveness {
+function Start-TransportLiveness([switch]$Recovery,[switch]$Periodic) {
+    $script:allLiveRound=$true
     # Пока нет подтверждённого пути, короткая проба живости (activeProbeBytes) идёт по всем кандидатам сразу:
     # мёртвые пути стоят один таймаут на всех, первый ответивший становится активным. Замер скорости (rank) — после.
-    # OpenSSH -D candidates need their own login after the engine start: they keep the former 1 s pause.
+    # Poll local OpenSSH SOCKS readiness without holding up other paths; at most 3 s per tunnel.
     $tunnels=@($paths.Tunnels|ForEach-Object {$_.tag})
-    foreach($c in $paths.Candidates){if(-not $probes.ContainsKey($c.tag)){
-        if($c.tag -in $tunnels -and [DateTime]::UtcNow -lt $tunnelLiveAt){$script:liveDeferred+=,$c}else{Start-DaemonProbe $c ([long]$settings.Options.activeProbeBytes) 'live'}
+    $allowed=@();if($Periodic){$allowed=@(Get-TransportRankTags $rows $paths.Candidates $settings.Options $metered)}
+    foreach($c in $paths.Candidates){if($Periodic -and $c.tag -notin $allowed){continue};if($Recovery -and $pin.mode -eq 'pinned' -and $c.tag -ne $pin.tag){continue};if(-not (Test-DaemonHealthProbe $c.tag)){
+        if($c.tag -in $tunnels -and -not (Test-DaemonTunnelReady $c.tag)){$script:liveDeferred+=,$c}else{Start-DaemonProbe $c ([long]$settings.Options.activeProbeBytes) 'live'}
     }}
     $interval=$settings.Options.activeIntervalSec;if($metered -ne $false){$interval=$settings.Options.meteredActiveIntervalSec}
     $script:nextLive=[DateTime]::UtcNow.AddSeconds([double]$interval)
+    $allInterval=$settings.Options.allLivenessIntervalSec;if($metered -ne $false){$allInterval=$settings.Options.meteredAllLivenessIntervalSec}
+    $script:nextAllLive=[DateTime]::UtcNow.AddSeconds([double]$allInterval)
 }
 function Start-TransportRanking {
     $tags=@(Get-TransportRankTags $rows $paths.Candidates $settings.Options $metered)
@@ -98,10 +130,17 @@ function Start-TransportRanking {
 function Start-TransportRankNext {
     while($script:rankQueue -and $script:rankQueue.Count -gt 0 -and @($probes.Values|Where-Object {$_.purpose -eq 'rank'}).Count -lt [int]$settings.Options.rankConcurrency){
         $c=$script:rankQueue.Dequeue()
-        if($probes.ContainsKey($c.tag)){Stop-TransportProbe $probes[$c.tag];$probes.Remove($c.tag)}
         Start-DaemonProbe $c ([long]$settings.Options.rankProbeBytes) 'rank'
     }
     $script:nextRank=[DateTime]::UtcNow.AddSeconds([double]$settings.Options.rankIntervalSec)
+}
+function Test-DaemonTunnelReady([string]$Tag) {
+    if(-not $tunnelReadyUntil.ContainsKey($Tag)){return $true}
+    if([DateTime]::UtcNow -ge $tunnelReadyUntil[$Tag]){return $true}
+    if($tunnelChildren.ContainsKey($Tag) -and $tunnelChildren[$Tag].Process.HasExited){return $true}
+    $outbound=$paths.Outbounds|Where-Object {$_.tag -eq $Tag}|Select-Object -First 1
+    try{if(@([Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()|Where-Object {$_.Port -eq [int]$outbound.server_port}).Count){$script:tunnelReadyUntil.Remove($Tag);return $true}}catch{}
+    return $false
 }
 function Wait-TransportEngineReady([int]$Port,[int]$TimeoutMs) {
     # sing-box 1.14 binds the Clash API after all inbounds: its listener means the probe ports accept connections.
@@ -136,7 +175,7 @@ function Get-DaemonRestartDelay($Detail) {
 }
 function Start-TransportEngine {
     [void](Reset-DaemonPorts)
-    $script:confirmed=$false
+    $script:confirmed=$false;$script:checkingSince=[DateTime]::UtcNow
     $interface='';if($network -and $settings.Options.bindPhysical){$interface=[string]$network.interface}
     if($settings.Options.bindPhysical -and -not $interface){throw 'Физический интерфейс недоступен'}
     $cfg=New-TransportConfig $settings $paths $secret $active $interface
@@ -150,10 +189,9 @@ function Start-TransportEngine {
         $a=@($tunnel.arguments)
         if($settings.Options.bindPhysical -and $tunnel.bind){if(-not $network.ip){throw 'Нет физического IPv4 для OpenSSH'};$a+=@('-b',[string]$network.ip)}
         $script:tunnelChildren[$tunnel.tag]=Start-TransportProcess $settings.Profile.sshExecutable ($a+@([string]$tunnel.target))
+        $script:tunnelReadyUntil[$tunnel.tag]=[DateTime]::UtcNow.AddSeconds(3)
     }
-    $script:tunnelLiveAt=[DateTime]::UtcNow.AddSeconds(1)
-    # Probes start as soon as sing-box listens (was a fixed 1 s pause, plus up to one 300 ms loop turn); the pause stays
-    # only when readiness is not visible within 3 s.
+    # Start health probes as soon as the listener is ready; no fixed post-start pause.
     $ready=Wait-TransportEngineReady ([int]$settings.Options.apiPort) 3000
     # Успешный запуск сбрасывает серию bind, даже если сеть ещё не прошла пробу.
     if($ready -and -not $engine.Process.HasExited){
@@ -164,9 +202,10 @@ function Start-TransportEngine {
             $script:bindRetry=$null;$script:portConflict=$null
         }catch{}
     }
-    $at=if($ready){[DateTime]::MinValue}else{[DateTime]::UtcNow.AddSeconds(1)}
+    $at=[DateTime]::MinValue
     $script:nextRank=[DateTime]::UtcNow.AddSeconds(1);$script:nextActive=$at;$script:nextLive=$at;Write-TransportLog $root 'ready'
     if($ready){Write-DaemonWizardProgress ('· модуль связи готов '+[int]([DateTime]::Now-$daemonStarted).TotalMilliseconds+' мс от запуска процесса')}
+    Start-TransportLiveness
 }
 $metered=$null
 try{
@@ -196,6 +235,8 @@ try{
             $nextControl=$now.AddSeconds(1)
             try{$newPin=Read-TransportPin $root}catch{$newPin=[pscustomobject]@{mode='pinned';tag='invalid-pin'}; $errorText='Неверный transport-pin.json'}
             if($newPin.mode -ne $pin.mode -or $newPin.tag -ne $pin.tag -or ($newPin.mode -eq 'pinned' -and $active -ne $newPin.tag)){
+                foreach($key in @($probes.Keys)){if($probes[$key].purpose -ne 'rank'){Stop-TransportProbe $probes[$key];$probes.Remove($key)}}
+                $liveDeferred=@();$recoveryRound=$false;$recoveryWon=$false;$allLiveRound=$false;foreach($r in $rows){$r.suspect=$false}
                 $pin=$newPin;$desired=Get-TransportSelection $pin $rows $paths.Candidates $active
                 $row=$rows|Where-Object {$_.tag -eq $desired}|Select-Object -First 1
                 if($engine){[void](Switch-TransportActive $desired ([bool]($row -and $row.state -eq 'ok')))}else{$active=$desired;$confirmed=$false}
@@ -259,13 +300,13 @@ try{
                     foreach($child in @($tunnelChildren.Values)){Stop-TransportProcess $child};$tunnelChildren.Clear();$retryAt=$now
                 }
                 if(-not $newNetwork.available){$errorText='Не удалось определить физическую сеть';Write-TransportLog $root 'network-unavailable'}
-            }elseif($costChanged){Stop-TransportProbes;$rankPending=$false;$rankQueue=$null;$nextRank=$now;$nextActive=$now}
+            }elseif($costChanged){Stop-TransportProbes;$rankPending=$false;$rankQueue=$null;$nextRank=$now;$nextActive=$now;$nextAllLive=$now}
         }
         if($engine -and $engine.Process.HasExited){
             $detail=New-TransportDiagnostic $engine 'sing-box' 'process-exited' $diagnosticContext
             Write-TransportLog $root 'process-failed' $detail
             foreach($row in $rows){if($row.enabled){$perRow=Copy-TransportObject $detail;$perRow.candidate=$row.tag;$row|Add-Member -Force diagnostic $perRow}}
-            Stop-TransportProbes;$rankPending=$false;$rankQueue=$null;Stop-TransportProcess $engine;$engine=$null;$confirmed=$false;$errorText='sing-box завершился, ожидается перезапуск';$checkingSince=$null
+            Stop-TransportProbes;$rankPending=$false;$rankQueue=$null;Stop-TransportProcess $engine;$engine=$null;$confirmed=$false;$errorText='sing-box завершился, ожидается перезапуск';$checkingSince=$now
             foreach($child in @($tunnelChildren.Values)){Stop-TransportProcess $child};$tunnelChildren.Clear()
             foreach($row in $rows){if($row.state -eq 'ok'){$row.state='remembered'}}
             $portConflict=$detail.portConflict
@@ -283,7 +324,7 @@ try{
                 foreach($row in $rows){if($row.enabled){$perRow=Copy-TransportObject $detail;$perRow.candidate=$row.tag;$row|Add-Member -Force diagnostic $perRow}}
                 Write-TransportLog $root 'process-failed' $detail
                 Stop-TransportProcess $engine;$engine=$null;foreach($child in @($tunnelChildren.Values)){Stop-TransportProcess $child};$tunnelChildren.Clear()
-                $confirmed=$false;$errorText='Не удалось запустить транспорт; проверьте конфиг и физическую сеть';$checkingSince=$null
+                $confirmed=$false;$errorText='Не удалось запустить транспорт; проверьте конфиг и физическую сеть';$checkingSince=$now
                 $portConflict=$detail.portConflict
                 if($portConflict){$errorText=$portConflict.message}
                 $bindRetry=Get-TransportBindRetry $bindRetry $detail
@@ -301,17 +342,31 @@ try{
                     if($active -eq $tunnel.tag){Fail-TransportActive}
                 }
                 if(-not $tunnelChildren.ContainsKey($tunnel.tag) -and $now -ge $retryAt){
-                    try{$a=@($tunnel.arguments);if($settings.Options.bindPhysical -and $tunnel.bind){$a+=@('-b',[string]$network.ip)};$tunnelChildren[$tunnel.tag]=Start-TransportProcess $settings.Profile.sshExecutable ($a+@($tunnel.target))}catch{Write-TransportLog $root 'process-failed' (New-TransportDiagnostic $null $tunnel.tag 'tunnel-start-failed')}
+                    try{
+                        $a=@($tunnel.arguments);if($settings.Options.bindPhysical -and $tunnel.bind){$a+=@('-b',[string]$network.ip)}
+                        $tunnelChildren[$tunnel.tag]=Start-TransportProcess $settings.Profile.sshExecutable ($a+@($tunnel.target))
+                        $tunnelReadyUntil[$tunnel.tag]=[DateTime]::UtcNow.AddSeconds(3)
+                        # A restarted tunnel needs a fresh health proof, even when it is not active.
+                        $candidate=$paths.Candidates|Where-Object {$_.tag -eq $tunnel.tag}|Select-Object -First 1
+                        if($candidate -and -not $recoveryRound -and -not (Test-DaemonHealthProbe $tunnel.tag) -and $tunnel.tag -notin @($liveDeferred|ForEach-Object {$_.tag})){$liveDeferred+=,$candidate}
+                    }catch{Write-TransportLog $root 'process-failed' (New-TransportDiagnostic $null $tunnel.tag 'tunnel-start-failed')}
                     $retryAt=$now.AddSeconds([double]$settings.Options.restartDelaySec)
                 }
             }
-            foreach($tag in @($probes.Keys)){
-                $probe=$probes[$tag]
+            foreach($key in @($probes.Keys)){
+                if(-not $probes.ContainsKey($key)){continue}
+                $probe=$probes[$key];$tag=$probe.tag
                 if(Receive-TransportProbe $probe){
                     $result=$probe.state;$row=$rows|Where-Object {$_.tag -eq $tag}|Select-Object -First 1
                     # Скорость задаёт рейтинг (равные объёмы); проба активного пути меньше и только подтверждает живость.
                     $row|Add-Member -Force probeMs ([int](([Diagnostics.Stopwatch]::GetTimestamp()-$probe.sink.Started)*1000/[Diagnostics.Stopwatch]::Frequency))
-                    $row.state=$result.state;if($probe.purpose -notin @('active','live') -or $result.state -ne 'ok' -or $null -eq $row.kbps){$row.kbps=$result.kbps};$row.checkedAt=$now.ToString('o')
+                    $row|Add-Member -Force maxGapMs $result.maxGapMs
+                    if($probe.purpose -eq 'rank'){$row|Add-Member -Force rankState $result.state;$row.kbps=$result.kbps}
+                    else{
+                        $row.state=$result.state;$row.latencyMs=$result.latencyMs
+                        if($result.state -eq 'ok'){$row.lastOkAt=$now.ToString('o');if($null -eq $row.kbps){$row.kbps=$result.kbps}}else{$row.lastFailAt=$now.ToString('o')}
+                    }
+                    $row.checkedAt=$now.ToString('o')
                     $reason=if($result.diagnostic.reason -eq 'timeout'){'таймаут '+$settings.Options.probeTimeoutSec+' с'}elseif($result.diagnostic.reason -eq 'stalled'){'нет ответа'}else{'путь недоступен'}
                     Write-DaemonWizardProgress ('Вариант связи: '+$row.title+$(if($result.state -eq 'ok'){' ✓'}else{' ✗ ('+$reason+')'}))
                     $detail=New-TransportDiagnostic $probe.child $tag $result.diagnostic.reason $diagnosticContext
@@ -320,37 +375,46 @@ try{
                         if($underlying){$detail|Add-Member engineStderr $underlying.stderr;$detail.reason=$underlying.reason}
                     }
                     $row|Add-Member -Force diagnostic $detail
-                    Stop-TransportProbe $probe;$probes.Remove($tag)
+                    Stop-TransportProbe $probe;$probes.Remove($key)
                     if($result.state -eq 'ok'){
                         Write-TransportLog $root 'probe-ok' $detail
-                        if($tag -eq $active){$confirmed=$true;$errorText=$null;$bindRetry=$null;$portConflict=$null;Set-DaemonNextActive}
-                        elseif(-not $confirmed){[void](Switch-TransportActive $tag $true)}
+                        if($probe.purpose -eq 'rank'){}
+                        elseif($recoveryRound -and -not $recoveryWon){
+                            if(Switch-TransportActive $tag $true){$recoveryWon=$true}
+                        }
+                        elseif($tag -eq $active){$row.suspect=$false;$confirmed=$true;$errorText=$null;$bindRetry=$null;$portConflict=$null;Set-DaemonNextActive}
+                        elseif(-not $confirmed -and -not $recoveryRound){[void](Switch-TransportActive $tag $true)}
                     }else{
                         Write-TransportLog $root 'probe-failed' $detail
                         if($tag -eq $active){
-                            Fail-TransportActive ($probe.purpose -eq 'active' -or -not $rankPending)
+                            if($probe.purpose -eq 'rank'){if($result.bytes -eq 0){$nextActive=$now}}else{Fail-TransportActive}
                         }
                     }
                     Save-TransportMemory $root $memory $network.id $rows
                     # The result reaches status/transport.json in this turn, not up to 1 s later (Bootstrap waits on it).
                     $lastStatus=[DateTime]::MinValue
-                    # Все пробы живости/активного пути этой проверки закончились без подтверждения: это свежий провал.
-                    if(-not $confirmed -and $checkingSince -and $liveDeferred.Count -eq 0 -and @($probes.Values|Where-Object {$_.purpose -in @('live','active')}).Count -eq 0){$checkingSince=$null}
                 }
             }
+            Complete-DaemonLivenessRound
             if($rankPending){Start-TransportRankNext}
             if($rankPending -and @($probes.Values|Where-Object {$_.purpose -eq 'rank'}).Count -eq 0 -and (-not $rankQueue -or $rankQueue.Count -eq 0)){
                 $rankPending=$false;$best=Get-TransportBest $rows $rankTags
-                if($best -and $best.tag -ne $active){[void](Switch-TransportActive $best.tag $true)}
+                $current=$rows|Where-Object {$_.tag -eq $active}|Select-Object -First 1
+                if($best -and $best.tag -ne $active -and -not $recoveryRound -and (Test-TransportBetter $current $best $settings.Options)){[void](Switch-TransportActive $best.tag $true)}
                 Save-TransportMemory $root $memory $network.id $rows
             }
-            if($liveDeferred.Count -and $now -ge $tunnelLiveAt){foreach($c in $liveDeferred){Start-DaemonProbe $c ([long]$settings.Options.activeProbeBytes) 'live'};$liveDeferred=@()}
+            if($liveDeferred.Count){
+                $deferred=@($liveDeferred);$liveDeferred=@()
+                foreach($c in $deferred){if(Test-DaemonTunnelReady $c.tag){Start-DaemonProbe $c ([long]$settings.Options.activeProbeBytes) 'live'}else{$liveDeferred+=,$c}}
+            }
             # Живость — параллельно и раньше rank; rank (по очереди, делит канал) ждёт окончания проб живости.
             $live=@($probes.Values|Where-Object {$_.purpose -eq 'live'}).Count
-            if(-not $confirmed -and -not $rankPending -and -not $live -and $pin.mode -eq 'auto' -and $now -ge $nextLive){Start-TransportLiveness;$live=@($probes.Values|Where-Object {$_.purpose -eq 'live'}).Count}
-            if($confirmed -and -not $rankPending -and -not $live -and $now -ge $nextRank){Start-TransportRanking}
-            if($active -and $active -in @($paths.Candidates|ForEach-Object {$_.tag}) -and $now -ge $nextActive -and -not $probes.ContainsKey($active)){
+            if(-not $confirmed -and -not $recoveryRound -and -not $live -and $pin.mode -eq 'auto' -and $now -ge $nextLive){Start-TransportLiveness;$live=@($probes.Values|Where-Object {$_.purpose -eq 'live'}).Count}
+            if($confirmed -and -not $recoveryRound -and $now -ge $nextAllLive -and $liveDeferred.Count -eq 0 -and @($probes.Values|Where-Object {$_.purpose -ne 'rank'}).Count -eq 0){Start-TransportLiveness -Periodic;$live=@($probes.Values|Where-Object {$_.purpose -eq 'live'}).Count}
+            if($confirmed -and -not $recoveryRound -and -not $rankPending -and -not $live -and $liveDeferred.Count -eq 0 -and $now -ge $nextRank){Start-TransportRanking}
+            if(-not $recoveryRound -and $active -and $active -notin @($liveDeferred|ForEach-Object {$_.tag}) -and $active -in @($paths.Candidates|ForEach-Object {$_.tag}) -and $now -ge $nextActive -and -not (Test-DaemonHealthProbe $active)){
                 $c=$paths.Candidates|Where-Object {$_.tag -eq $active}|Select-Object -First 1
+                if(-not $confirmed -and $checkingSince){$allLiveRound=$true}
                 Start-DaemonProbe $c ([long]$settings.Options.activeProbeBytes) 'active'
                 Set-DaemonNextActive
             }
@@ -360,7 +424,7 @@ try{
         $statusInterval=1;if($portConflict -and $now -lt $retryAt){$statusInterval=5}
         if(($now-$lastStatus).TotalSeconds -ge $statusInterval){Publish-TransportStatus}
         # While the first path is being proved, probe results are read every 100 ms instead of 300 ms.
-        Start-Sleep -Milliseconds $(if(-not $confirmed -and $probes.Count){100}else{300})
+        Start-Sleep -Milliseconds $(if($liveDeferred.Count){50}elseif(-not $confirmed -and $probes.Count){100}else{300})
     }
     $errorText='Транспорт остановлен';$stopping=$true
 }catch{

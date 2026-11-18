@@ -475,13 +475,16 @@ function Read-TransportSettings([string]$Root) {
     $channelPath=[string]$t.channelPath
     if(-not $channelPath){throw 'Нет transport.channelPath в config.json'}
     $channel=Read-TransportJson $channelPath
-    $defaults=@{bindPhysical=$true;activeProbeBytes=65536;rankProbeBytes=262144;activeIntervalSec=120;meteredActiveIntervalSec=300;rankIntervalSec=1800;rankConcurrency=1;topOnMetered=3;stallSeconds=5;probeTimeoutSec=45;metered='auto';restartDelaySec=3;openSsh=$true;singBoxPath=(Join-Path $PSScriptRoot 'sing-box.exe')}
+    $defaults=@{bindPhysical=$true;activeProbeBytes=65536;rankProbeBytes=262144;activeIntervalSec=120;meteredActiveIntervalSec=300;allLivenessIntervalSec=600;meteredAllLivenessIntervalSec=1800;switchFactor=1.5;rankIntervalSec=1800;rankConcurrency=1;topOnMetered=3;stallSeconds=5;probeTimeoutSec=45;metered='auto';restartDelaySec=3;openSsh=$true;singBoxPath=(Join-Path $PSScriptRoot 'sing-box.exe')}
     $portDefaults=Get-TransportPortDefaults;foreach($k in $portDefaults.Keys){$defaults[$k]=$portDefaults[$k]}
     $s=@{};foreach($k in $defaults.Keys){$s[$k]=Get-TransportValue $t $k $defaults[$k]}
     foreach($k in @('bindPhysical','openSsh')){if($s[$k] -isnot [bool]){throw 'Нужен логический параметр transport'}}
     foreach($k in @('sshPort','channelSocksPort','syncPort','lanProxyPort','vpnInPort','probePortBase','socksPortBase','apiPort')){if([int]$s[$k] -lt 1 -or [int]$s[$k] -gt 65535){throw 'Неверный порт transport'}}
     if([string]$s.channelSshAddress -notmatch '\A127\.\d{1,3}\.\d{1,3}\.\d{1,3}\z' -or [string]$s.channelSshAddress -eq '127.0.0.1'){throw 'Неверный адрес входа канала'}
-    foreach($k in @('activeProbeBytes','rankProbeBytes','activeIntervalSec','meteredActiveIntervalSec','rankIntervalSec','rankConcurrency','topOnMetered','stallSeconds','probeTimeoutSec','restartDelaySec')){if([double]$s[$k] -le 0){throw 'Параметры transport должны быть положительными'}}
+    foreach($k in @('activeProbeBytes','rankProbeBytes','activeIntervalSec','meteredActiveIntervalSec','allLivenessIntervalSec','meteredAllLivenessIntervalSec','switchFactor','rankIntervalSec','rankConcurrency','topOnMetered','stallSeconds','probeTimeoutSec','restartDelaySec')){if([double]$s[$k] -le 0){throw 'Параметры transport должны быть положительными'}}
+    if([double]$s.switchFactor -lt 1){throw 'switchFactor должен быть не меньше 1'}
+    if($null -ne $t.priority -and $t.priority -isnot [Array]){throw 'priority должен быть массивом префиксов'}
+    if($null -ne $t.priority){foreach($prefix in @($t.priority)){if($null -eq $prefix -or $prefix -isnot [string] -or -not $prefix.Trim()){throw 'Неверный префикс priority'}}}
     if([string]$s.metered -notin @('auto','true','false','True','False')){throw 'Неверный metered'}
     if(-not $t.serverRoute -and $config.wizard.serverRoute){$overlay=Get-TransportRouteOverlay $config.wizard.serverRoute $Root;if($overlay){$t|Add-Member -Force serverRoute $overlay}}
     Assert-TransportLists $t -ForBuild
@@ -739,6 +742,7 @@ function Get-TransportCandidates($Settings,[string]$Root) {
         $meta=Get-TransportCandidateInfo $failure.tag $t
         [void]$all.Add([pscustomobject]@{tag=$failure.tag;port=0;title=$meta.title;kind=$meta.kind;via=$meta.via;enabled=($failure.tag -notin @($t.disabledTags));tunCapable=$false;buildFailed=$true;diagnostic=$failure.diagnostic})
     }
+    foreach($candidate in $all){$candidate|Add-Member -Force priority (Get-TransportPriority $candidate.tag @($t.priority))}
     $enabled=@($all.ToArray()|Where-Object {$_.enabled -and -not $_.buildFailed});$enabledTags=@($enabled|ForEach-Object {$_.tag})
     if(-not $enabled.Count){throw 'Нет доступных кандидатов транспорта'}
     # Не оставляем выключенные внешние сокеты/SSH-туннели в рабочем процессе.
@@ -835,16 +839,16 @@ function Set-TransportSelector($Options,[string]$Secret,[string]$Tag) {
     try{$s=$req.GetRequestStream();try{$s.Write($bytes,0,$bytes.Length)}finally{$s.Dispose()};$response=$req.GetResponse();$response.Dispose()}catch{throw 'Локальный API transport недоступен'}
 }
 function New-TransportProbeState([long]$Target,[double]$Stall,[double]$Timeout) {
-    [pscustomobject]@{target=$Target;stall=$Stall;timeout=$Timeout;bytes=[long]0;first=$null;last=$null;firstBytes=[long]0;state='pending';kbps=$null}
+    [pscustomobject]@{target=$Target;stall=$Stall;timeout=$Timeout;bytes=[long]0;first=$null;last=$null;firstBytes=[long]0;state='pending';kbps=$null;maxGapMs=0;latencyMs=$null}
 }
 function Update-TransportProbeState($State,[long]$Bytes,[double]$Seconds,[bool]$Ended=$false) {
     if($State.state -ne 'pending'){return $State}
-    # Даже при завершении N не принимается после уже случившейся остановки.
-    if($null -ne $State.last -and $Seconds-$State.last -ge $State.stall){$State.state='frozen';return $State}
-    if($Bytes -gt $State.bytes){if($null -eq $State.first){$State.first=$Seconds;$State.firstBytes=$Bytes};$State.last=$Seconds;$State.bytes=$Bytes}
+    $gap=0;if($null -ne $State.last){$gap=$Seconds-$State.last;$State.maxGapMs=[math]::Max($State.maxGapMs,[math]::Round($gap*1000))}
+    if($Bytes -gt $State.bytes){if($null -eq $State.first){$State.first=$Seconds;$State.latencyMs=[math]::Max(1,[math]::Ceiling($Seconds*1000));$State.firstBytes=$Bytes};$State.last=$Seconds;$State.bytes=$Bytes}
     if($Bytes -ge $State.target){
         # Эффективная скорость от начала пробы: ssh.exe отдаёт поток пачками, «от первого байта» даёт сотни МБ/с.
         $State.state='ok';if($Seconds -gt 0){$State.kbps=[math]::Round($Bytes/1KB/$Seconds,2)}
+    }elseif($gap -ge $State.stall){$State.state='frozen'
     }elseif($Ended -or $Seconds -ge $State.timeout){
         if($Bytes -gt 0 -and -not $Ended){$State.state='slow'}else{$State.state='fail'}
     }
@@ -856,12 +860,12 @@ function Initialize-TransportCounter {Initialize-TransportDiagnostics}
 function Start-TransportProbe($Profile,$Candidate,[long]$Bytes,$Options,[string]$Purpose) {
     Initialize-TransportCounter
     $a=@(Get-TransportSshArguments $Profile $Candidate.port)+@('127.0.0.1',('head -c '+$Bytes+' /dev/urandom'))
-    $child=Start-TransportProcess $Profile.sshExecutable $a -Probe
+    $sink=New-Object RemoteAgents.TransportCounter;$child=$null
     try{
-        $sink=New-Object RemoteAgents.TransportCounter
+        $child=Start-TransportProcess $Profile.sshExecutable $a -Probe
         $copy=$child.Process.StandardOutput.BaseStream.CopyToAsync($sink)
         [pscustomobject]@{tag=$Candidate.tag;purpose=$Purpose;child=$child;sink=$sink;copy=$copy;state=(New-TransportProbeState $Bytes $Options.stallSeconds $Options.probeTimeoutSec)}
-    }catch{Stop-TransportProcess $child;throw 'Не удалось начать чтение SSH'}
+    }catch{Stop-TransportProcess $child;$sink.Dispose();throw 'Не удалось начать чтение SSH'}
 }
 function Receive-TransportProbe($Probe) {
     # Завершённость фиксируем ДО снимка: CopyToAsync может дописать последние байты между ними.
@@ -869,11 +873,14 @@ function Receive-TransportProbe($Probe) {
     $elapsed=([Diagnostics.Stopwatch]::GetTimestamp()-$Probe.sink.Started)/$freq
     $s=$Probe.state;$s.bytes=$x[0]
     if($x[1] -ne 0){$s.first=($x[1]-$Probe.sink.Started)/$freq;$s.last=($x[2]-$Probe.sink.Started)/$freq;$s.firstBytes=$x[3]}
-    if($x[4]/$freq -ge $s.stall -or ($null -ne $s.last -and $elapsed-$s.last -ge $s.stall -and $s.bytes -lt $s.target)){$s.state='frozen'}
-    elseif($s.bytes -ge $s.target){
+    if($null -ne $s.first){$s.latencyMs=[math]::Max(1,[math]::Ceiling($s.first*1000))}
+    $gap=$x[4]/$freq;if($s.bytes -lt $s.target -and $null -ne $s.last){$gap=[math]::Max($gap,$elapsed-$s.last)}
+    $s.maxGapMs=[math]::Round($gap*1000)
+    if($s.bytes -ge $s.target){
         $s.state='ok';$dt=($x[2]-$Probe.sink.Started)/$freq
         if($dt -gt 0){$s.kbps=[math]::Round($s.bytes/1KB/$dt,2)}
-    }elseif($completed){$s.state='fail'}
+    }elseif($gap -ge $s.stall){$s.state='frozen'}
+    elseif($completed){$s.state='fail'}
     elseif($elapsed -ge $s.timeout){if($s.bytes -gt 0){$s.state='slow'}else{$s.state='fail'}}
     if($s.state -ne 'pending' -and $Probe.PSObject.Properties['child']){
         $reason='short-read';if($elapsed -ge $s.timeout){$reason='timeout'}elseif($s.state -eq 'frozen'){$reason='stalled'}elseif($s.state -eq 'ok'){$reason='ok'}
@@ -886,13 +893,25 @@ function Stop-TransportProbe($Probe) {
     try{[void]$Probe.copy.Wait(1000)}catch{}
     $Probe.sink.Dispose()
 }
+function Get-TransportPriority([string]$Tag,$Prefixes) {
+    for($i=0;$i -lt $Prefixes.Count;$i++){if($null -ne $Prefixes[$i] -and $Tag.StartsWith([string]$Prefixes[$i],[StringComparison]::OrdinalIgnoreCase)){return $i}}
+    return 999
+}
+function Get-TransportOrdered($Rows) {
+    $Rows|Sort-Object @{Expression={if($_.enabled -eq $false){2}elseif($_.state -in @('ok','remembered')){0}else{1}}},@{Expression={[int](Get-TransportValue $_ 'priority' 999)}},@{Expression={if($null -eq $_.kbps){-1}else{[double]$_.kbps}};Descending=$true},@{Expression={if($null -eq $_.latencyMs){[double]::MaxValue}else{[double]$_.latencyMs}}},tag
+}
 function Get-TransportBest($Rows,[string[]]$Allowed=@(),[switch]$Remembered) {
-    @($Rows|Where-Object {($_.enabled -ne $false) -and ($_.state -eq 'ok' -or ($Remembered -and $_.state -eq 'remembered')) -and (-not $Allowed.Count -or $_.tag -in $Allowed)}|Sort-Object @{Expression={if($null -eq $_.kbps){-1}else{[double]$_.kbps}};Descending=$true},tag|Select-Object -First 1)|ForEach-Object {$_}
+    Get-TransportOrdered @($Rows|Where-Object {($_.enabled -ne $false) -and ($_.state -eq 'ok' -or ($Remembered -and $_.state -eq 'remembered')) -and (-not $Allowed.Count -or $_.tag -in $Allowed)})|Select-Object -First 1
+}
+function Test-TransportBetter($Current,$Best,$Options) {
+    if(-not $Best){return $false}
+    if(-not $Current -or $Current.state -ne 'ok'){return $true}
+    [double]$Best.kbps -gt 0 -and [double]$Best.kbps -ge ([double]$Current.kbps*[double]$Options.switchFactor)
 }
 function Get-TransportRankTags($Rows,$Candidates,$Options,$Metered) {
     if($Metered -eq $false){return @($Candidates|ForEach-Object {$_.tag})}
     # Неизвестная стоимость тоже экономная; память имеет приоритет над непроверенными.
-    @($Rows|Where-Object {$_.enabled -ne $false -and $_.tag -in @($Candidates|ForEach-Object {$_.tag})}|Sort-Object @{Expression={if($_.state -in @('ok','remembered')){0}else{1}}},@{Expression={if($null -eq $_.kbps){-1}else{[double]$_.kbps}};Descending=$true},tag|Select-Object -First ([int]$Options.topOnMetered)|ForEach-Object {$_.tag})
+    Get-TransportOrdered @($Rows|Where-Object {$_.enabled -ne $false -and $_.tag -in @($Candidates|ForEach-Object {$_.tag})})|Select-Object -First ([int]$Options.topOnMetered)|ForEach-Object {$_.tag}
 }
 function Get-TransportFingerprint([string]$GatewayMac,[string]$ProfileName) {
     $text=(Convert-TransportLF $GatewayMac).Trim().Replace(':','').Replace('-','').ToUpperInvariant()+"`n"+(Convert-TransportLF $ProfileName).Trim()
@@ -941,7 +960,7 @@ function Get-TransportRemembered($Memory,[string]$Network,$Candidates) {
         if($r){$state=$r.state;if($state -eq 'ok'){$state='remembered'};$speed=$r.kbps;$checked=$r.checkedAt}
         if($c.enabled -eq $false){$state='disabled';$speed=$null;$checked=$null}
         if($c.buildFailed -and $c.enabled -ne $false){$state='fail';$speed=$null;$checked=[DateTime]::UtcNow.ToString('o')}
-        $row=[pscustomobject]@{tag=$c.tag;title=$c.title;kind=$c.kind;via=$c.via;enabled=($c.enabled -ne $false);state=$state;kbps=$speed;checkedAt=$checked}
+        $row=[pscustomobject]@{tag=$c.tag;title=$c.title;kind=$c.kind;via=$c.via;enabled=($c.enabled -ne $false);state=$state;kbps=$speed;checkedAt=$checked;suspect=$false;priority=[int](Get-TransportValue $c 'priority' 999);order=0;latencyMs=$r.latencyMs;lastOkAt=$r.lastOkAt;lastFailAt=$r.lastFailAt;rankState=$null;maxGapMs=$null}
         if($c.buildFailed){$row|Add-Member diagnostic $c.diagnostic}
         $row
     }

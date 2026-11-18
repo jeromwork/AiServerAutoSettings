@@ -40,14 +40,16 @@ with tempfile.TemporaryDirectory(prefix='transport-liveness-test-') as tmp:
         s.bind(('127.0.0.1', 0))
         api_port = s.getsockname()[1]
     ssh, sb = root / 'ssh.exe', root / 'sing-box'
-    write_exe(ssh, '''import json, os, sys, time
+    write_exe(ssh, '''import json, os, socket, sys, time
 from pathlib import Path
 root=Path(__file__).parent
 if '-N' in sys.argv:
+    time.sleep(.2)
+    listener=socket.socket(); listener.bind(('127.0.0.1',int(sys.argv[sys.argv.index('-D')+1].split(':')[-1]))); listener.listen()
     while True: time.sleep(.1)
 port=int(sys.argv[sys.argv.index('-p')+1]); n=int(sys.argv[-1].split()[2])
 with (root/'probes.jsonl').open('a') as f: f.write(json.dumps({'port':port,'bytes':n,'start':time.time(),'pid':os.getpid()})+'\\n')
-if port==26000: time.sleep(60)
+if port==26000 and not (root/'wake-all').exists(): time.sleep(60)
 time.sleep(%d)
 block=b'x'*8192
 while n:
@@ -78,7 +80,8 @@ Server(('127.0.0.1',port),API).serve_forever()
     (root / 'channel.json').write_text(json.dumps(channel))
     transport = dict(profilePath=str(root / 'profile.json'), channelPath=str(root / 'channel.json'),
                      singBoxPath=str(sb), bindPhysical=False, metered='false', openSsh=True,
-                     activeIntervalSec=600, rankIntervalSec=1800, stallSeconds=2,
+                     activeIntervalSec=600, allLivenessIntervalSec=2, priority=['singbox-ssh-direct', 'vless'],
+                     rankIntervalSec=1800, stallSeconds=2,
                      probeTimeoutSec=TIMEOUT, restartDelaySec=1, apiPort=api_port)
     (root / 'config.json').write_text(json.dumps(dict(version=1, transport=transport)))
     env = dict(os.environ, LOCALAPPDATA=str(root))
@@ -125,6 +128,15 @@ Server(('127.0.0.1',port),API).serve_forever()
         assert status().get('ok')
         live_counts = [p['port'] for p in probes() if p['bytes'] == 65536]
         assert sorted(live_counts) == [26000, 26001, 26002], 'verified active path must wait for activeIntervalSec before another health probe'
+        before={c['tag']: c.get('lastOkAt') or '' for c in status()['candidates']}
+        (root/'wake-all').touch()
+        refreshed=until(lambda: (s if len((s:=status()).get('candidates', []))==3 and
+                                all(c.get('lastOkAt') and c['lastOkAt']>before[c['tag']]
+                                    for c in s['candidates']) else None), seconds=TIMEOUT+20)
+        assert all(c['latencyMs']>0 for c in refreshed['candidates']), refreshed
+        assert sorted(c['order'] for c in refreshed['candidates'])==[1,2,3]
+        priorities={c['tag']:c['priority'] for c in refreshed['candidates']}
+        assert priorities=={'singbox-ssh-direct':0,'vless-direct':1,'openssh-direct':999}, priorities
         (root / 'stop').touch()
         daemon.wait(timeout=15)
         assert daemon.returncode == 0, daemon.communicate()

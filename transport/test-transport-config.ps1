@@ -368,6 +368,21 @@ try{
     $rows=@([pscustomobject]@{tag='a';state='ok';kbps=12;checkedAt='2026-01-01T00:00:00Z'},[pscustomobject]@{tag='b';state='ok';kbps=80;checkedAt='2026-01-01T00:00:00Z'},[pscustomobject]@{tag='c';state='frozen';kbps=900;checkedAt=$null})
     Assert ((Get-TransportBest $rows).tag -eq 'b') 'выбор лучшего живого'
     Assert ((Get-TransportBest $rows @('a')).tag -eq 'a') 'ограничение top набора'
+    $preferred=Copy-TransportObject $rows
+    $preferred[0]|Add-Member priority (Get-TransportPriority 'vless-direct' @('vless','vless-direct'))
+    $preferred[1]|Add-Member priority 999
+    Assert ($preferred[0].priority -eq 0 -and (Get-TransportPriority 'openssh-direct' @('vless')) -eq 999) 'первый подходящий префикс и fallback'
+    Assert ((Get-TransportBest $preferred).tag -eq 'a') 'priority раньше скорости'
+    $preferred[0].state='remembered'
+    Assert ((Get-TransportBest $preferred -Remembered).tag -eq 'a') 'ok и remembered в общей группе перед priority'
+    $near=[pscustomobject]@{state='ok';kbps=100};$challenger=[pscustomobject]@{state='ok';kbps=149}
+    Assert (-not (Test-TransportBetter $near $challenger @{switchFactor=1.5})) 'близкие скорости не переключают путь'
+    $challenger.kbps=150
+    Assert (Test-TransportBetter $near $challenger @{switchFactor=1.5}) 'порог гистерезиса включителен'
+    $near.state='fail';$challenger.kbps=1
+    Assert (Test-TransportBetter $near $challenger @{switchFactor=1.5}) 'неисправный активный путь не удерживается гистерезисом'
+    $ties=@([pscustomobject]@{tag='a';state='ok';kbps=100;latencyMs=20},[pscustomobject]@{tag='b';state='ok';kbps=100;latencyMs=10})
+    Assert ((Get-TransportBest $ties).tag -eq 'b') 'задержка разрешает равенство скоростей'
     $rankOptions=@{topOnMetered=1}
     Assert (@(Get-TransportRankTags $rows @($rows|ForEach-Object {[pscustomobject]@{tag=$_.tag}}) $rankOptions $true)[0] -eq 'b') 'на лимитной сети лучший из памяти'
     Assert (@(Get-TransportRankTags $rows @($rows|ForEach-Object {[pscustomobject]@{tag=$_.tag}}) $rankOptions $null).Count -eq 1) 'неизвестная стоимость экономит трафик'
@@ -378,7 +393,9 @@ try{
     $s=New-TransportProbeState 65536 5 45;[void](Update-TransportProbeState $s 16384 1);[void](Update-TransportProbeState $s 16384 6)
     Assert ($s.state -eq 'frozen') 'первые 16К и остановка'
     $s=New-TransportProbeState 65536 5 45;[void](Update-TransportProbeState $s 16384 1);[void](Update-TransportProbeState $s 65536 8)
-    Assert ($s.state -eq 'frozen') 'возобновление после stall не считается живым'
+    Assert ($s.state -eq 'ok' -and $s.maxGapMs -eq 7000) 'полная проба успешна даже после stall; пауза сохранена'
+    $s=New-TransportProbeState 65536 5 45;[void](Update-TransportProbeState $s 16384 1);[void](Update-TransportProbeState $s 32768 8)
+    Assert ($s.state -eq 'frozen' -and $s.maxGapMs -eq 7000) 'неполная проба после stall остаётся frozen'
     $s=New-TransportProbeState 65536 5 10;foreach($time in 1..10){[void](Update-TransportProbeState $s ($time*100) $time)}
     Assert ($s.state -eq 'slow') 'течёт, но N не скачал — не жив'
     Assert (-not (Get-TransportBest @([pscustomobject]@{tag='s';state='slow';kbps=10}))) 'slow не допускается как живой'
@@ -426,6 +443,7 @@ try{
         $defaults=Read-TransportSettings $work
         Assert ($defaults.Options.bindPhysical -and $defaults.Options.activeProbeBytes -eq 65536 -and $defaults.Options.rankProbeBytes -eq 262144) 'реальные значения по умолчанию'
         Assert ($defaults.Options.activeIntervalSec -eq 120 -and $defaults.Options.meteredActiveIntervalSec -eq 300 -and $defaults.Options.rankIntervalSec -eq 1800) 'интервалы по умолчанию'
+        Assert ($defaults.Options.allLivenessIntervalSec -eq 600 -and $defaults.Options.meteredAllLivenessIntervalSec -eq 1800 -and $defaults.Options.switchFactor -eq 1.5) 'периодическая живость и гистерезис по умолчанию'
         Assert ($defaults.Options.topOnMetered -eq 3 -and $defaults.Options.apiPort -eq 29090) 'экономный режим и API по умолчанию'
         $personalConfig=Read-TransportJson (Join-Path $work 'config.json')
         $personalConfig|Add-Member wizard ([pscustomobject]@{serverRoute=$personal})
@@ -479,6 +497,14 @@ try{
         $state=New-TransportProbeState 32768 5 45;$probe=[pscustomobject]@{sink=$sink;copy=[Threading.Tasks.Task]::FromResult(0);state=$state}
         Assert ((Receive-TransportProbe $probe) -and $state.state -eq 'ok' -and $state.kbps -gt 0) 'реальный счётчик даёт живой поток'
     }finally{$sink.Dispose()}
+    # Snapshot с уже полученными байтами и большой паузой: реальные Receive-TransportProbe правила.
+    $freq=[long][Diagnostics.Stopwatch]::Frequency
+    $gapSink=[pscustomobject]@{Started=([Diagnostics.Stopwatch]::GetTimestamp()-10*$freq);bytes=65536;freq=$freq}
+    $gapSink|Add-Member ScriptMethod Snapshot {[long[]]@($this.bytes,($this.Started+$this.freq),($this.Started+8*$this.freq),16384,(7*$this.freq))}
+    $gapProbe=[pscustomobject]@{sink=$gapSink;copy=[Threading.Tasks.Task]::FromResult(0);state=(New-TransportProbeState 65536 5 45)}
+    Assert ((Receive-TransportProbe $gapProbe) -and $gapProbe.state.state -eq 'ok' -and $gapProbe.state.maxGapMs -eq 7000 -and $gapProbe.state.latencyMs -eq 1000) 'полная проба с паузой успешна; задержка и пауза измерены'
+    $gapSink.bytes=32768;$gapProbe.state=New-TransportProbeState 65536 5 45
+    Assert ((Receive-TransportProbe $gapProbe) -and $gapProbe.state.state -eq 'frozen') 'неполный snapshot с паузой frozen'
     # Регрессия: копирование заканчивается между чтением счётчика и проверкой IsCompleted.
     $source=New-Object 'Threading.Tasks.TaskCompletionSource[int]'
     $freq=[long][Diagnostics.Stopwatch]::Frequency
