@@ -68,6 +68,7 @@ namespace RemoteAgents.Launcher
         {
             string state;
             if (!Json.Bool(candidate, "enabled", true)) state = "отключён";
+            else if (Json.Bool(candidate, "suspect")) state = "проверяется";
             else switch (Json.Str(candidate, "state")) {
                 case "ok": state = "работает"; break;
                 case "fail": case "failed": state = StatusView.StaleCandidate(candidate, transport) ? "ранее не работал; ожидается проверка" : "не работает"; break;
@@ -78,8 +79,29 @@ namespace RemoteAgents.Launcher
                 case "disabled": state = "отключён"; break;
                 default: state = "не проверен"; break;
             }
-            bool active = Json.Bool(transport, "ok") && Json.Str(candidate, "tag") == Json.Str(transport, "active");
-            return PathTitle(candidate) + " — " + state + (active ? " · используется" : "") + " · " + StatusView.Speed(candidate);
+            var phase = StatusView.Phase(transport);
+            bool active = Json.Str(candidate, "tag") == Json.Str(transport, "active") &&
+                (phase == LinkPhase.Ok || phase == LinkPhase.Checking && Json.Str(transport, "phase") == "degraded");
+            int order;
+            string prefix = int.TryParse(Json.Str(candidate, "order"), NumberStyles.Integer, CultureInfo.InvariantCulture, out order) && order >= 0
+                ? "№" + order.ToString(CultureInfo.CurrentCulture) + " · " : "";
+            double latency;
+            string delay = Measurement(candidate, "latencyMs", out latency) ? " · " + latency.ToString("0.#", CultureInfo.CurrentCulture) + " мс" : "";
+            return prefix + PathTitle(candidate) + " — " + state + (active ? " · используется" : "") + " · " + CandidateSpeed(candidate) + delay;
+        }
+        static bool Measurement(Dictionary<string, object> data, string key, out double value)
+        {
+            return double.TryParse(Json.Str(data, key), NumberStyles.Float, CultureInfo.InvariantCulture, out value)
+                && !double.IsNaN(value) && !double.IsInfinity(value) && value >= 0;
+        }
+        static string CandidateSpeed(Dictionary<string, object> candidate)
+        {
+            double kbps;
+            if (!Measurement(candidate, "kbps", out kbps)) return "скорость: нет данных";
+            // The daemon's historical kbps field is bytes / 1KB / second (KiB/s); show decimal bit rates.
+            double mbps = kbps * (8192.0 / 1000000);
+            return mbps >= 1 ? mbps.ToString("0.#", CultureInfo.CurrentCulture) + " Мбит/с"
+                : (mbps * 1000).ToString("0.#", CultureInfo.CurrentCulture) + " Кбит/с";
         }
         internal static string Tooltip(Dictionary<string, object> transport, Dictionary<string, object> health)
         {

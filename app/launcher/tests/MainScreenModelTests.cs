@@ -65,7 +65,11 @@ namespace RemoteAgents.Launcher
             foreach (bool ok in new[] { false, true }) {
                 foreach (string phase in new[] { "degraded", "future-phase" }) {
                     facts.Transport = Data(Json.Encode(new { ok = ok, phase = phase, checkingSince = now }));
-                    Check(MainScreenModel.Build(facts).Overall == Tone.Warning, phase + " is yellow even with a retained active path");
+                    view = MainScreenModel.Build(facts);
+                    Check(view.Overall == Tone.Warning, phase + " is yellow even with a retained active path");
+                    Check(StatusView.Line("Связь", facts.Transport, true).StartsWith("⏳"), phase + " diagnostics wait even with retained ok flag");
+                    Check(view.Banner.Tone == Tone.Warning && view.Banner.ActionId == "" &&
+                        view.Banner.Text == (phase == "degraded" ? "Связь нестабильна, ищу другой путь…" : "Проверяем связь с сервером…"), phase + " has a warning banner without retry");
                 }
             }
             var degraded = Data(Json.Encode(new { ok = true, phase = "degraded", checkingSince = now }));
@@ -159,7 +163,9 @@ namespace RemoteAgents.Launcher
             Check(MainScreenModel.Build(facts).Vpn.PathLink == "SSH напрямую ▾", "missing pinned candidate uses existing path naming");
             facts.Transport["latencyMs"] = 42;
             Check(MainScreenModel.Build(facts).Vpn.Detail == "через «Основной», 42 мс", "explicit transport latency");
-            var active = StatusView.Candidates(facts.Transport)[0]; active["rttMs"] = 17;
+            var active = StatusView.Candidates(facts.Transport)[0]; active["latencyMs"] = 25; active["rttMs"] = 17;
+            Check(MainScreenModel.Build(facts).Vpn.Detail.EndsWith("25 мс"), "active latencyMs wins over other and transport measurements");
+            active.Remove("latencyMs");
             Check(MainScreenModel.Build(facts).Vpn.Detail.EndsWith("17 мс"), "active candidate measurement wins");
             active["rttMs"] = -1; facts.Transport["latencyMs"] = "NaN";
             Check(MainScreenModel.Build(facts).Vpn.Detail.Contains("КБ/с"), "invalid latency falls back to speed");

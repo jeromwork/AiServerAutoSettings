@@ -55,9 +55,11 @@ namespace RemoteAgents.Launcher
         internal static string Line(string title, Dictionary<string, object> data, bool transport = false)
         {
             if (data.Count == 0) return "⏳ " + title + ": ожидается проверка";
-            if (Json.Bool(data, "ok")) return "✅ " + title + ": " + (transport ? "подключено; " + Title(data) : Summary(data));
+            if (Json.Bool(data, "ok") && (!transport || Phase(data) == LinkPhase.Ok)) return "✅ " + title + ": " + (transport ? "подключено; " + Title(data) : Summary(data));
             string state = Json.Str(data, "state");
-            bool waiting = state == "starting" || state == "checking" || state == "pending" || state == "off" || Json.Get(data, "ok") == null || transport && Phase(data) == LinkPhase.Checking;
+            // Legacy diagnostics without phase keep their explicit ok result; named phases follow the current protocol.
+            bool waiting = state == "starting" || state == "checking" || state == "pending" || state == "off" || Json.Get(data, "ok") == null
+                || transport && Json.Str(data, "phase").Length > 0 && Phase(data) == LinkPhase.Checking;
             return (waiting ? "⏳ " : "❌ ") + title + ": " + (transport ? Json.Text(data, "error", "связь не подтверждена") : Summary(data));
         }
         internal static string Happier(string home)

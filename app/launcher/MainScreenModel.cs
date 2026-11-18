@@ -111,7 +111,8 @@ namespace RemoteAgents.Launcher
                     ? Banner(Tone.Error, vpnError, "Подробнее", "details")
                     : Banner(Json.Str(vpn, "state") == "conflict" ? Tone.Warning : Tone.Error, vpnError.StartsWith("VPN выключен", StringComparison.Ordinal) ? vpnError : "Не удалось включить VPN. " + vpnError, "Включить снова", "vpn-on");
             else if (phase == LinkPhase.Checking)
-                view.Banner = Banner(Tone.Warning, "Проверяем связь с сервером…", "", "");
+                view.Banner = Banner(Tone.Warning, Json.Str(transport, "phase") == "degraded"
+                    ? "Связь нестабильна, ищу другой путь…" : "Проверяем связь с сервером…", "", "");
             else if (phase == LinkPhase.Failed)
                 view.Banner = Banner(Tone.Error, "Нет связи с сервером. Проверьте подключение к интернету или повторите проверку.", "Повторить", "retry");
             else if (view.Disk.Visible && view.Disk.Tone == Tone.Error)
@@ -168,7 +169,7 @@ namespace RemoteAgents.Launcher
 
         static string Latency(Dictionary<string, object> data)
         {
-            // Current probes publish speed; accept explicit millisecond measurements when available.
+            // Prefer the active candidate's first-byte latency; tolerate older status files and missing measurements.
             foreach (string key in new[] { "latencyMs", "rttMs", "pingMs", "delayMs", "latency" }) {
                 double value;
                 if (double.TryParse(Json.Str(data, key), NumberStyles.Float, CultureInfo.InvariantCulture, out value)
