@@ -18,7 +18,7 @@
 | `agents.claude` | `enabled`, `channel: "stable"` или точная `version`; `auth` — полный JSON credentials, `token` — OAuth token. Token хранится в пользовательском файле 0600; managed wrapper `claude` и Happier получают его без shell-eval |
 | `desktop` | `enabled`, `backend: "desktop"` ставит существующий desktop-bootstrap (его ограничение Ubuntu 24.04 amd64 остаётся). `native` сообщает blocked: установщика нет |
 | `projectViews.enabled` | При true честный blocked: исходника установленного на 109 root-скрипта в репозитории нет; его нужно перенести отдельно |
-| `sessions` | `cleanupEnabled`, `idleHours` (0–720, default 2), `intervalMinutes` (1–1440, default 15); user timer вызывает существующий `close-idle-chats.py` |
+| `sessions` | `cleanupEnabled`, `idleHours` (0–720, default 2), `intervalMinutes` (1–1440, default 15); user timer вызывает существующий `close-idle-chats.py`; скрипт обходит аккаунт по умолчанию и все аккаунты из `~/secrets/happier/accounts` (тот же `happier` с их `HAPPIER_HOME_DIR`), журнал с полем `account` |
 | `ssh` | `keepaliveIntervalSec` (default 30), `keepaliveCountMax` (default 3); проверка эффективных настроек sshd и reload/запуск службы |
 
 Отсутствующий раздел не включает компонент. `enabled:false` отключает управляемые
