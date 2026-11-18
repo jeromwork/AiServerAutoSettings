@@ -31,10 +31,11 @@ namespace RemoteAgents.Launcher
         internal static LinkPhase Phase(Dictionary<string, object> transport, DateTime? utcNow = null)
         {
             if (transport == null || transport.Count == 0) return LinkPhase.Checking;
-            if (Json.Bool(transport, "ok")) return LinkPhase.Ok;
             string phase = Json.Str(transport, "phase");
+            if (phase == "failed") return LinkPhase.Failed;
             if (phase == "stopped") return LinkPhase.Checking;
-            if (phase != "checking") return LinkPhase.Failed;   // "failed" и старое ядро без phase — как раньше
+            if (phase != "checking" && phase != "degraded")
+                return (phase == "ok" || phase.Length == 0) && Json.Bool(transport, "ok") ? LinkPhase.Ok : LinkPhase.Checking;
             DateTime since;
             if (!DateTime.TryParse(Json.Str(transport, "checkingSince"), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out since))
                 return LinkPhase.Checking;

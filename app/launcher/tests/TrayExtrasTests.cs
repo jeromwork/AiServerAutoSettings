@@ -166,9 +166,11 @@ namespace RemoteAgents.Launcher
             Check(failedLine.Contains("не работает") && !failedLine.Contains("ранее"), "failed transport shows candidate failures normally");
             rememberedFailure.Remove("checkedAt");
             Check(TrayMenuModel.CandidateLine(rememberedFailure, checking).Contains("ранее не работал"), "undated candidate failure waits for proof");
+            transport["phase"] = "failed";
             transport["ok"] = false;
             Check(!TrayMenuModel.Connection(transport).Contains("КБ/с") && TrayMenuModel.Connection(transport).Contains("не подтверждена"), "failed transport does not claim a working path/speed");
             Check(!TrayMenuModel.CandidateLine(StatusView.Candidates(transport)[0], transport).Contains("используется"), "failed transport has no confirmed active path");
+            transport["phase"] = "ok";
             transport["ok"] = true;
             Check(TrayMenuModel.CandidateLine(StatusView.Candidates(transport)[0], transport).Contains("работает · используется"), "active candidate marked with speed");
             Check(TrayMenuModel.CandidateLine(StatusView.Candidates(transport)[1], transport).Contains("не работает"), "failed candidate translated");

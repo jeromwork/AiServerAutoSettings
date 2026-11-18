@@ -52,7 +52,7 @@ namespace RemoteAgents.Launcher
             Check(MainScreenModel.Build(facts).Overall == Tone.Warning, "stopped transport waits neutrally");
             Check(StatusView.Line("Связь", facts.Transport, true).StartsWith("⏳"), "stopped diagnostics wait neutrally");
             facts.Transport = Data("{\"ok\":false}");
-            Check(MainScreenModel.Build(facts).Overall == Tone.Error, "legacy failed status stays red");
+            Check(MainScreenModel.Build(facts).Overall == Tone.Warning, "legacy status without phase waits for proof");
             facts.Transport = Data("{\"ok\":true,\"phase\":\"ok\"}");
             Check(MainScreenModel.Build(facts).Overall == Tone.Ok, "confirmed connection stays green");
             Check(StatusView.Phase(Data("{}")) == LinkPhase.Checking && StatusView.Phase(null) == LinkPhase.Checking, "missing status waits for a check");
@@ -62,6 +62,18 @@ namespace RemoteAgents.Launcher
             var checking = Data("{\"ok\":false,\"phase\":\"checking\",\"checkingSince\":\"" + now + "\"}");
             Check(StatusView.Phase(checking, since.AddSeconds(StatusView.CheckingLimitSec)) == LinkPhase.Checking &&
                 StatusView.Phase(checking, since.AddSeconds(StatusView.CheckingLimitSec + 1)) == LinkPhase.Failed, "checking timeout boundary");
+            foreach (bool ok in new[] { false, true }) {
+                foreach (string phase in new[] { "degraded", "future-phase" }) {
+                    facts.Transport = Data(Json.Encode(new { ok = ok, phase = phase, checkingSince = now }));
+                    Check(MainScreenModel.Build(facts).Overall == Tone.Warning, phase + " is yellow even with a retained active path");
+                }
+            }
+            var degraded = Data(Json.Encode(new { ok = true, phase = "degraded", checkingSince = now }));
+            Check(StatusView.Phase(degraded, since.AddSeconds(StatusView.CheckingLimitSec)) == LinkPhase.Checking &&
+                StatusView.Phase(degraded, since.AddSeconds(StatusView.CheckingLimitSec + 1)) == LinkPhase.Failed, "degraded timeout boundary even when ok is retained");
+            foreach (string stamp in new[] { "", "invalid" })
+                Check(StatusView.Phase(Data(Json.Encode(new { phase = "degraded", checkingSince = stamp }))) == LinkPhase.Checking, "degraded tolerates absent or invalid timestamp");
+            Check(StatusView.Phase(Data("{\"ok\":true,\"phase\":\"failed\"}")) == LinkPhase.Failed, "explicit failure wins over retained ok flag");
         }
         static void Colours()
         {
@@ -69,7 +81,7 @@ namespace RemoteAgents.Launcher
                 foreach (string transport in new[] { "{}", "{\"ok\":true}", "{\"ok\":false}", "{\"state\":\"starting\"}" })
                     foreach (string vpn in new[] { "{}", "{\"ok\":true,\"state\":\"on\"}", "{\"ok\":false,\"state\":\"on\"}", "{\"ok\":true,\"state\":\"off\"}" }) {
                         var facts = Healthy(); facts.Transport = Data(transport); facts.Vpn = Data(vpn);
-                        Tone expected = facts.Transport.Count == 0 ? Tone.Warning : Json.Bool(facts.Transport, "ok") ? Tone.Ok : Tone.Error;
+                        Tone expected = Json.Bool(facts.Transport, "ok") ? Tone.Ok : Tone.Warning;
                         Check(MainScreenModel.Build(facts).Overall == expected, "overall matches tray");
                     }
             Check(MainScreenModel.Build(null).Overall == Tone.Warning, "absent facts wait for proof");
@@ -78,7 +90,7 @@ namespace RemoteAgents.Launcher
         {
             var facts = Healthy();
             Check(!MainScreenModel.Build(facts).Banner.Visible, "healthy screen has no banner");
-            facts.Transport = Data("{\"ok\":false}"); facts.Control = Data("{\"ok\":false}");
+            facts.Transport = Data("{\"ok\":false,\"phase\":\"failed\"}"); facts.Control = Data("{\"ok\":false}");
             var banner = MainScreenModel.Build(facts).Banner;
             Check(banner.Visible && banner.ActionId == "retry" && banner.Text.StartsWith("Нет связи с сервером"), "connection loss subsumes helper loss");
             Check(banner.Tone == Tone.Error && banner.ActionText == "Повторить", "connection error offers retry");
@@ -106,7 +118,7 @@ namespace RemoteAgents.Launcher
             Check(MainScreenModel.Build(facts).Banner.Text.StartsWith("Аккаунт Happier"), "unconfirmed account is last priority");
             facts.VpnError = "transport tag sing-box REST JSON";
             Check(!MainScreenModel.Build(facts).Banner.Text.Contains("transport"), "technical failure becomes a plain explanation");
-            facts = Healthy(); facts.VpnInstalled = false; facts.Transport = Data("{\"ok\":false}");
+            facts = Healthy(); facts.VpnInstalled = false; facts.Transport = Data("{\"ok\":false,\"phase\":\"failed\"}");
             var view = MainScreenModel.Build(facts);
             Check(!view.Vpn.Visible && view.Banner.ActionId == "retry" && view.Overall == Tone.Error, "no installed VPN does not hide server loss");
             foreach (string state in new[] { "conflict", "error", "rolled-back" }) {
