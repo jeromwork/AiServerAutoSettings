@@ -113,6 +113,21 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(rows[-1]['target'], 'openssh/ssh.exe')
         self.assertIn("'transport-bin/openssh/ssh.exe'", (ROOT / 'build/Wizard.Server.ps1').read_text(encoding='utf-8-sig'))
 
+    def test_core_has_no_hidden_windows_tool_dependencies(self):
+        # Owner 18.11.2026: the core must not rely on programs of the Windows installation (ssh, curl, git, python, tar, winget…).
+        import re
+        core = sorted((ROOT / 'build').glob('Wizard*.ps1')) + [ROOT / 'build/Setup.Common.ps1', ROOT / 'Start-WindowsControl.ps1', ROOT / 'Start-CodexWindowsBridge.ps1'] \
+            + sorted((ROOT / 'transport').glob('Transport.*.ps1')) + [ROOT / 'transport/Route.Proxy.ps1']
+        bad = []
+        tool = r'(?:ssh|scp|sftp|curl|git|python3?|node|tar|winget|choco|wsl|bash)(?:\.exe)?'
+        for path in core:
+            for n, line in enumerate(path.read_text(encoding='utf-8-sig').splitlines(), 1):
+                if re.search(r"Get-Command\s+['\"]?" + tool + r"\b", line) or re.search(r"(?:Invoke-DiskProcess|Invoke-TransportText|Start-TransportProcess|&)\s+['\"]" + tool + r"['\"]", line):
+                    bad.append(f'{path.relative_to(ROOT)}:{n}')
+        # The only allowed lookups: ssh-keygen fallback next to the chosen ssh.
+        self.assertEqual([b for b in bad if not b.startswith('build/Wizard.Server.ps1')], [])
+        self.assertLessEqual(len(bad), 1, bad)
+
     def test_bundle_has_every_wizard_module(self):
         # Every dot-sourced wizard library and the ConfigSync runtime copy must ship in the EXE bundle.
         import re

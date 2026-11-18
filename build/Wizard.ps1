@@ -1,6 +1,8 @@
 ﻿#requires -Version 5.1
 [CmdletBinding()]
 param([Alias('Home')][string]$LauncherHome,[ValidateSet('Bootstrap','ConfigSync','RetireConfigSync','ServerHealth','ServerApply','Server','Lan','LanRemove','NetStatus','AdminProbe','Proxy','Skip','Catalog','Connection','DiskNavPane','Disk','AccountList','Account','ResumeAccount','Operation','Bridge','Vpn','Inspect','Activate','RollbackNetwork','RollbackBridge')][string]$Action,[string]$RequestFile,[string]$Session,[string]$ProgressFile)
+# AppLocker/WDAC put PowerShell into ConstrainedLanguage: Add-Type and .NET calls of the core fail with cryptic errors.
+if($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage'){@{ok=$false;reason='PowerShell на этом компьютере в ограниченном режиме (политика AppLocker/WDAC организации): RemoteAgents не может работать. Администратору: разрешите сценарии из папки %LOCALAPPDATA%\RemoteAgents'}|ConvertTo-Json -Compress;exit 1}
 $ErrorActionPreference='Stop'
 $env:REMOTEAGENTS_WIZARD_SESSION=$(if($Action -in @('ServerApply','Proxy','Lan','LanRemove','AdminProbe')){'0'}else{'1'})
 # Machine-readable JSON must preserve filenames on non-Russian Windows too.
