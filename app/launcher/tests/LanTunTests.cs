@@ -3,6 +3,11 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Reflection;
 using System.Runtime.ExceptionServices;
 
@@ -42,6 +47,28 @@ namespace RemoteAgents.Launcher
             public bool Probe(LanTunNetwork network, string[] subnets, int index) { Probes++; return Host && index == Index; }
             public bool ChannelReady() { return Channel; }
             public void Log(string stage, int code) { Stages.Add(stage); }
+        }
+        static byte[] ReadExactly(Stream stream, int length)
+        {
+            var bytes = new byte[length]; int offset = 0;
+            while (offset < length) { int n = stream.Read(bytes, offset, length - offset); if (n == 0) throw new EndOfStreamException(); offset += n; }
+            return bytes;
+        }
+        static bool Probe(int logicalPort, int timeoutMs, Action<NetworkStream> server, Action<long> elapsed = null)
+        {
+            var listener = new TcpListener(IPAddress.Loopback, 0); listener.Start();
+            try {
+                var serve = Task.Run(() => { using (var c = listener.AcceptTcpClient()) { c.ReceiveTimeout = c.SendTimeout = 3000; try { server(c.GetStream()); } catch (IOException) { } } });
+                using (var client = new TcpClient()) {
+                    client.Connect(IPAddress.Loopback, ((IPEndPoint)listener.LocalEndpoint).Port);
+                    var timer = Stopwatch.StartNew();
+                    bool ok = LanProbe.Exchange(client.GetStream(), "portal.example.test", logicalPort, timeoutMs);
+                    timer.Stop(); client.Close();
+                    if (elapsed != null) elapsed(timer.ElapsedMilliseconds);
+                    Check(serve.Wait(3000), "loopback server completed");
+                    return ok;
+                }
+            } finally { listener.Stop(); }
         }
         internal static void Run()
         {
@@ -208,6 +235,38 @@ namespace RemoteAgents.Launcher
                 Check(MainScreenModel.LanTone(new[] { waiting, failed }) == Tone.Error, "fresh failure takes priority over " + state);
             }
             Check(MainScreenModel.LanTone(new Dictionary<string, object>[0]) == Tone.Warning, "empty LAN state is yellow");
+            var probes = Stopwatch.StartNew();
+            foreach (int port in new[] { 443, 465, 636, 993, 995, 5986, 8443 }) {
+                Check(Probe(port, 1000, stream => {
+                    var header = ReadExactly(stream, 5);
+                    Check(header[0] == 0x16, "TLS ClientHello sent");
+                    ReadExactly(stream, header[3] * 256 + header[4]);
+                    var alert = new byte[] { 0x15, 3, 3, 0, 2, 2, 0x28 }; stream.Write(alert, 0, alert.Length);
+                }), "ответ TLS подтверждает хост: " + port);
+            }
+            Check(!Probe(443, 1000, stream => { }), "закрытие без байтов = хост недоступен (как сбой dial на сервере)");
+            Check(!Probe(443, 300, stream => Thread.Sleep(1500), ms => Check(ms < 1200, "молчание укладывается в бюджет")), "молчащий TLS не подтверждает хост");
+            Check(Probe(53, 1000, stream => {
+                var prefix = ReadExactly(stream, 2); int length = prefix[0] * 256 + prefix[1];
+                Check(length == 17, "DNS TCP length 17");
+                var query = ReadExactly(stream, length);
+                Check(query[0] == 0x52 && query[1] == 0x41 && query[5] == 1 && query[12] == 0 && query[14] == 2 && query[16] == 1, "DNS root NS IN question");
+                stream.Write(new byte[] { 0, 17 }, 0, 2);
+            }), "ответ DNS по TCP подтверждает хост");
+            foreach (int port in new[] { 80, 8080 }) {
+                Check(Probe(port, 1000, stream => {
+                    var requestText = new StringBuilder();
+                    while (!requestText.ToString().EndsWith("\r\n\r\n", StringComparison.Ordinal) && requestText.Length < 4096) {
+                        int b = stream.ReadByte(); if (b < 0) throw new EndOfStreamException(); requestText.Append((char)b);
+                    }
+                    Check(requestText.ToString().StartsWith("HEAD / HTTP/1.0\r\nHost: portal.example.test\r\n\r\n", StringComparison.Ordinal), "HTTP HEAD request");
+                    var response = Encoding.ASCII.GetBytes("HTTP/1.0 200 OK\r\n\r\n"); stream.Write(response, 0, response.Length);
+                }), "ответ HTTP подтверждает хост: " + port);
+            }
+            Check(Probe(22, 1000, stream => { var banner = Encoding.ASCII.GetBytes("SSH-2.0-x\r\n"); stream.Write(banner, 0, banner.Length); }), "баннер SSH подтверждает хост");
+            Check(!Probe(22, 300, stream => { stream.ReadByte(); }, ms => Check(ms < 1200, "баннер укладывается в бюджет")), "молчащий SSH не подтверждает хост");
+            Check(!LanProbe.Exchange(Stream.Null, "portal.example.test", 443, 0), "исчерпанный бюджет не запускает пробу");
+            Check(probes.ElapsedMilliseconds < 5000, "protocol probes under 5 seconds");
             SingBoxCheck(config);
             Check(timer.ElapsedMilliseconds < 10000, "LAN tests under 10 seconds");
             Console.WriteLine("PASS: LanTun " + count + " checks, " + timer.ElapsedMilliseconds + " ms");

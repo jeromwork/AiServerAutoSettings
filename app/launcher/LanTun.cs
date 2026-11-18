@@ -7,6 +7,8 @@ using System.Linq;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Net.Security;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -362,6 +364,52 @@ namespace RemoteAgents.Launcher
         public void Dispose() { disposed = true; lock (gate) StopCore(); }
     }
 
+    // Локальный TUN (стек system) сам принимает TCP, поэтому connect ничего не доказывает.
+    // Хост ЛВС подтверждён, только если с дальнего конца пришёл хотя бы один байт.
+    internal static class LanProbe
+    {
+        static readonly int[] TlsPorts = { 443, 465, 636, 993, 995, 5986, 8443 };
+        sealed class Counting : Stream
+        {
+            readonly Stream inner; int read;
+            internal Counting(Stream inner) { this.inner = inner; }
+            internal int BytesRead { get { return Volatile.Read(ref read); } }
+            public override int Read(byte[] buffer, int offset, int count) { int n = inner.Read(buffer, offset, count); if (n > 0) Interlocked.Add(ref read, n); return n; }
+            public override void Write(byte[] buffer, int offset, int count) { inner.Write(buffer, offset, count); }
+            public override void Flush() { inner.Flush(); }
+            public override bool CanRead { get { return true; } }
+            public override bool CanWrite { get { return true; } }
+            public override bool CanSeek { get { return false; } }
+            public override long Length { get { throw new NotSupportedException(); } }
+            public override long Position { get { throw new NotSupportedException(); } set { throw new NotSupportedException(); } }
+            public override long Seek(long o, SeekOrigin s) { throw new NotSupportedException(); }
+            public override void SetLength(long v) { throw new NotSupportedException(); }
+        }
+        internal static byte[] DnsQuery()
+        {
+            // TCP DNS: длина 17, id 0x5241, RD, 1 вопрос: "." NS IN.
+            return new byte[] { 0, 17, 0x52, 0x41, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1 };
+        }
+        internal static bool Exchange(Stream stream, string host, int port, int timeoutMs)
+        {
+            if (timeoutMs <= 0) return false;
+            var counting = new Counting(stream);
+            try {
+                Task work;
+                if (TlsPorts.Contains(port)) {
+                    // Только проверка доступности: данные не передаются, поэтому сертификат не проверяется.
+                    var tls = new SslStream(counting, true, (a, b, c, d) => true);
+                    work = tls.AuthenticateAsClientAsync(host);
+                } else {
+                    byte[] request = port == 53 ? DnsQuery() : port == 80 || port == 8080 ? Encoding.ASCII.GetBytes("HEAD / HTTP/1.0\r\nHost: " + host + "\r\n\r\n") : new byte[0];
+                    work = Task.Run(() => { if (request.Length > 0) { counting.Write(request, 0, request.Length); counting.Flush(); } counting.ReadByte(); });
+                }
+                try { work.Wait(timeoutMs); } catch (AggregateException) { }
+            } catch { }
+            return counting.BytesRead > 0;
+        }
+    }
+
 #if !PORTABLE_TEST
     internal sealed class WindowsLanTun : ILanTunPlatform
     {
@@ -431,7 +479,8 @@ namespace RemoteAgents.Launcher
                     using (var client = new TcpClient(AddressFamily.InterNetwork)) {
                         var connect = client.ConnectAsync(address, network.TestPort);
                         if (!connect.Wait(remaining)) return false;
-                        if (client.Connected && GetBestInterface(BitConverter.ToUInt32(address.GetAddressBytes(), 0), out actual) == 0 && actual == index) return true;
+                        if (!client.Connected || GetBestInterface(BitConverter.ToUInt32(address.GetAddressBytes(), 0), out actual) != 0 || actual != index) continue;
+                        if (LanProbe.Exchange(client.GetStream(), network.TestHost, network.TestPort, 2000 - (int)budget.ElapsedMilliseconds)) return true;
                     }
                 }
             } catch { }
