@@ -166,9 +166,11 @@ namespace RemoteAgents.Launcher
             Check(failedLine.Contains("не работает") && !failedLine.Contains("ранее"), "failed transport shows candidate failures normally");
             rememberedFailure.Remove("checkedAt");
             Check(TrayMenuModel.CandidateLine(rememberedFailure, checking).Contains("ранее не работал"), "undated candidate failure waits for proof");
+            transport["phase"] = "failed";
             transport["ok"] = false;
             Check(!TrayMenuModel.Connection(transport).Contains("КБ/с") && TrayMenuModel.Connection(transport).Contains("не подтверждена"), "failed transport does not claim a working path/speed");
             Check(!TrayMenuModel.CandidateLine(StatusView.Candidates(transport)[0], transport).Contains("используется"), "failed transport has no confirmed active path");
+            transport["phase"] = "ok";
             transport["ok"] = true;
             Check(TrayMenuModel.CandidateLine(StatusView.Candidates(transport)[0], transport).Contains("работает · используется"), "active candidate marked with speed");
             Check(TrayMenuModel.CandidateLine(StatusView.Candidates(transport)[1], transport).Contains("не работает"), "failed candidate translated");
@@ -177,6 +179,30 @@ namespace RemoteAgents.Launcher
             Check(TrayMenuModel.CandidateLine(Data("{\"tag\":\"vless-direct\"}"), transport).Contains("не проверен"), "unknown candidate translated");
             foreach (var state in new[] { new[] { "slow", "медленный" }, new[] { "frozen", "завис" }, new[] { "remembered", "ранее работал" }, new[] { "pending", "проверяется" }, new[] { "disabled", "отключён" } })
                 Check(TrayMenuModel.CandidateLine(Data(Json.Encode(new { tag = "vless-direct", state = state[0], kbps = 42 })), transport).Contains(state[1]), "real daemon state: " + state[0]);
+            var measured = Data("{\"tag\":\"vless-relay-fixture\",\"state\":\"ok\",\"kbps\":128,\"latencyMs\":42,\"order\":2,\"priority\":0}");
+            string measuredLine = TrayMenuModel.CandidateLine(measured, transport);
+            Check(measuredLine.StartsWith("№2 · ") && measuredLine.Contains("1 Мбит/с") && measuredLine.Contains("42 мс") && measuredLine.Contains("используется"), "path shows daemon order, bit rate, latency and active marker");
+            measured["kbps"] = 31.25;
+            Check(TrayMenuModel.CandidateLine(measured, transport).Contains("256 Кбит/с"), "sub-megabit speed converts daemon KiB/s to bits");
+            var degraded = Data(Json.Encode(new { ok = false, phase = "degraded", active = "vless-relay-fixture", checkingSince = DateTime.UtcNow.ToString("o") }));
+            measured["suspect"] = true;
+            string suspectLine = TrayMenuModel.CandidateLine(measured, degraded);
+            Check(suspectLine.Contains("проверяется · используется") && !suspectLine.Contains("работает"), "suspect active path stays marked while being rechecked");
+            degraded["ok"] = true;
+            Check(TrayMenuModel.CandidateLine(measured, degraded).Contains("проверяется · используется"), "suspect marker also works with retained ok flag");
+            degraded["phase"] = "failed";
+            Check(!TrayMenuModel.CandidateLine(measured, degraded).Contains("используется"), "failed phase removes active marker even with retained ok flag");
+            measured["enabled"] = false;
+            Check(TrayMenuModel.CandidateLine(measured, transport).Contains("отключён"), "disabled state wins over suspect flag");
+            foreach (string invalid in new[] { "NaN", "Infinity", "-1", "invalid" }) {
+                var invalidMetrics = Data(Json.Encode(new { tag = "vless-direct", kbps = invalid, latencyMs = invalid, order = invalid }));
+                string line = TrayMenuModel.CandidateLine(invalidMetrics, transport);
+                Check(line.Contains("скорость: нет данных") && !line.Contains(" мс") && !line.Contains("№"), "invalid optional measurements are hidden: " + invalid);
+            }
+            string legacyLine = TrayMenuModel.CandidateLine(Data("{\"tag\":\"vless-direct\",\"state\":\"ok\",\"kbps\":0}"), transport);
+            Check(legacyLine.Contains("0 Кбит/с") && !legacyLine.Contains(" мс") && !legacyLine.Contains("№"), "older candidates without new fields remain readable");
+            var missingMetrics = Data("{\"tag\":\"vless-direct\",\"kbps\":null,\"latencyMs\":null,\"order\":null,\"suspect\":null}");
+            Check(TrayMenuModel.CandidateLine(missingMetrics, transport).Contains("скорость: нет данных"), "null optional candidate fields remain readable");
             var selection = new PathSelection();
             var pinned = Data("{\"mode\":\"pinned\",\"pinnedTag\":\"vless-direct\"}");
             Check(selection.Update(pinned) == "vless-direct", "initial choice follows pinned mode");
