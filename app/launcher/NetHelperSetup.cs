@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,8 +12,10 @@ namespace RemoteAgents.Launcher
     internal sealed class NetHelperSetup
     {
         internal const string PermissionRequired = "Нужно разрешение администратора. Локальные сети и VPN недоступны; нажмите «Установить помощника».";
+        internal const string BusyTimeout = "Сетевой помощник занят более 60 секунд. Дождитесь завершения установки и повторите подключение.";
         readonly SemaphoreSlim gate = new SemaphoreSlim(1, 1);
         bool attempted;
+        bool? cachedReady;
         internal int InstallGeneration { get; private set; }
         internal string Warning { get; private set; } = "";
 
@@ -34,6 +37,26 @@ namespace RemoteAgents.Launcher
             catch (Exception error) { failure(error); return false; }
         }
 
+        // Shared with HelperClient so a stalled background connection cannot hang VPN activation.
+        internal static async Task WaitForIdle(Func<bool> busy, CancellationToken token, int timeoutMs = 60000)
+        {
+            var clock = Stopwatch.StartNew();
+            token.ThrowIfCancellationRequested();
+            while (busy()) {
+                int remaining = timeoutMs - (int)clock.ElapsedMilliseconds;
+                if (remaining <= 0) throw new TimeoutException(BusyTimeout);
+                await Task.Delay(Math.Min(100, remaining), token);
+            }
+        }
+
+        async Task<bool> CheckReady(Func<bool> ready, CancellationToken token)
+        {
+            // Called under gate. Hashing and SCM reads must never run on the window thread.
+            if (!cachedReady.HasValue) cachedReady = await Task.Run(ready, token);
+            token.ThrowIfCancellationRequested();
+            return cachedReady.Value;
+        }
+
         internal async Task<bool> Ensure(bool required, Func<bool> ready, Func<Task> prepare, Func<Task<int>> install,
             Action<string> progress, CancellationToken token, bool retry = false)
         {
@@ -41,7 +64,8 @@ namespace RemoteAgents.Launcher
             await gate.WaitAsync(token);
             try {
                 token.ThrowIfCancellationRequested();
-                if (ready()) { Warning = ""; return true; }
+                if (retry) cachedReady = null;
+                if (await CheckReady(ready, token)) { Warning = ""; return true; }
                 if (attempted && !retry) { progress(Warning); return false; }
                 attempted = true;
                 Warning = "Сетевой помощник не установлен. Нажмите «Установить помощника»; журнал: logs\\launcher.log.";
@@ -55,13 +79,14 @@ namespace RemoteAgents.Launcher
                     Warning = PermissionRequired;
                     throw; // Keep the native cancellation reachable in the UI's 1223 branch.
                 }
+                finally { cachedReady = null; } // Even a failed/cancelled installer may have changed files.
                 // Wait for the elevated installer even if the caller cancels while UAC is open.
                 if (code == 1223) { Warning = PermissionRequired; throw new Win32Exception(1223); }
                 if (code != 0) {
                     Warning = "Сетевой помощник не установлен (код " + code.ToString(System.Globalization.CultureInfo.InvariantCulture) + "). Нажмите «Установить помощника».";
                     throw new Win32Exception(code);
                 }
-                if (!ready()) {
+                if (!await CheckReady(ready, CancellationToken.None)) {
                     Warning = "Установка не подтвердила версию и файлы службы RemoteAgentsNet. Нажмите «Установить помощника».";
                     throw new IOException(Warning);
                 }

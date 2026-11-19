@@ -151,7 +151,7 @@ namespace RemoteAgents.Launcher
         // A deliberate VPN-on action can be the first request for a helper in this session.
         internal async Task<bool> EnsureReady(CancellationToken token)
         {
-            while (busy) { await Task.Delay(100, token); }
+            await NetHelperSetup.WaitForIdle(() => busy, token);
             if (Connected) return true;
             busy = true; connectionAttempted = true;
             try {

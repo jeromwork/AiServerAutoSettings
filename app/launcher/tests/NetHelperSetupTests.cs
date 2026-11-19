@@ -46,6 +46,48 @@ namespace RemoteAgents.Launcher
                     "no LAN and VPN off: no SCM, no preparation, no UAC");
             }
             {
+                var setup = new NetHelperSetup(); int reads = 0, prompts = 0; bool current = true;
+                Func<Task<bool>> ensure = () => setup.Ensure(true, () => { reads++; return current; },
+                    () => Task.CompletedTask, () => { prompts++; current = true; return Task.FromResult(0); }, progress, CancellationToken.None);
+                Check(await ensure() && await ensure() && await ensure() && reads == 1, "wizard steps share one session readiness/hash check");
+                current = false;
+                Check(await setup.Ensure(true, () => { reads++; return current; }, () => Task.CompletedTask,
+                    () => { prompts++; current = true; return Task.FromResult(0); }, progress, CancellationToken.None, retry: true) &&
+                    prompts == 1 && reads == 3, "button invalidates ready cache and installation verifies fresh files");
+                Check(await ensure() && reads == 3, "post-install readiness is cached for the session");
+            }
+            {
+                var setup = new NetHelperSetup(); var entered = new TaskCompletionSource<bool>();
+                using (var release = new ManualResetEventSlim()) {
+                    var pending = setup.Ensure(true, () => {
+                        entered.SetResult(true);
+                        if (!release.Wait(2000)) throw new Exception("readiness blocked its caller");
+                        return true;
+                    }, () => Task.CompletedTask, () => { throw new Exception("no UAC"); }, progress, CancellationToken.None);
+                    await entered.Task;
+                    Check(!pending.IsCompleted, "slow hash check yields to the window caller");
+                    release.Set(); Check(await pending, "background readiness completes normally");
+                }
+            }
+            {
+                await NetHelperSetup.WaitForIdle(() => false, CancellationToken.None);
+                var entered = new TaskCompletionSource<bool>(); bool busy = true; int polls = 0;
+                var pending = NetHelperSetup.WaitForIdle(() => { polls++; entered.TrySetResult(true); return busy; }, CancellationToken.None);
+                Check(!pending.IsCompleted, "busy operation yields while connection is pending");
+                await entered.Task; busy = false; await pending;
+                Check(polls >= 2, "completed busy operation allows connection after recheck");
+                bool timedOut = false;
+                try { await NetHelperSetup.WaitForIdle(() => true, CancellationToken.None, timeoutMs: 1); }
+                catch (TimeoutException error) { timedOut = error.Message == NetHelperSetup.BusyTimeout; }
+                Check(timedOut, "stuck busy has a bounded wait and actionable error");
+                using (var cancelled = new CancellationTokenSource()) {
+                    pending = NetHelperSetup.WaitForIdle(() => true, cancelled.Token); cancelled.Cancel();
+                    bool propagated = false;
+                    try { await pending; } catch (OperationCanceledException) { propagated = true; }
+                    Check(propagated, "busy wait still honours cancellation");
+                }
+            }
+            {
                 var setup = new NetHelperSetup(); int prompts = 0, failures = 0; bool installed = false;
                 Func<Task<bool>> ensure = () => NetHelperSetup.ContinueApply(() => setup.Ensure(true, () => installed,
                     () => Task.CompletedTask, () => { prompts++; throw new Win32Exception(1223); }, progress, CancellationToken.None),
@@ -86,10 +128,12 @@ namespace RemoteAgents.Launcher
                 }
             }
             {
-                var setup = new NetHelperSetup(); var release = new TaskCompletionSource<int>(); bool installed = false;
+                var setup = new NetHelperSetup(); var release = new TaskCompletionSource<int>();
+                var entered = new TaskCompletionSource<bool>(); bool installed = false;
                 using (var cancelled = new CancellationTokenSource()) {
                     var pending = setup.Ensure(true, () => installed, () => Task.CompletedTask,
-                        async () => { int code = await release.Task; installed = true; return code; }, progress, cancelled.Token);
+                        async () => { entered.SetResult(true); int code = await release.Task; installed = true; return code; }, progress, cancelled.Token);
+                    await entered.Task;
                     cancelled.Cancel();
                     Check(!pending.IsCompleted, "cancellation waits for elevated installer to finish");
                     release.SetResult(0); bool propagated = false;
@@ -103,11 +147,25 @@ namespace RemoteAgents.Launcher
                 string exe = Path.Combine(root, "current.exe"), installedExe = Path.Combine(root, "RemoteAgents.exe"), transport = Path.Combine(root, "sing-box.exe");
                 File.WriteAllText(exe, "expected EXE"); File.Copy(exe, installedExe); File.WriteAllText(transport, "expected transport");
                 string hash = Files.Hash(transport);
-                Check(NetHelperInstall.ImagesMatch(root, exe, hash), "expected installed code and transport match");
-                File.WriteAllText(installedExe, "old EXE, same version marker");
-                Check(!NetHelperInstall.ImagesMatch(root, exe, hash), "changed code detected even with current version marker");
-                File.Copy(exe, installedExe, true); File.WriteAllText(transport, "wrong sing-box");
-                Check(!NetHelperInstall.ImagesMatch(root, exe, hash), "changed sing-box detected even with current version marker");
+                Check(NetHelperInstall.ImagesMatch(root, hash), "installed EXE exists and transport matches pin");
+                File.WriteAllText(exe, "new launcher after OTA");
+                Check(Files.Hash(exe) != Files.Hash(installedExe) && NetHelperInstall.ImagesMatch(root, hash), "new launcher hash with compatible helper is current");
+                foreach (string scenario in new[] { "OTA same helper", "OTA older helper", "wrong sing-box" }) {
+                    var coordinator = new NetHelperSetup(); int prompts = 0;
+                    string version = scenario == "OTA older helper" ? "5" : NetHelperInstall.HelperVersion;
+                    if (scenario == "wrong sing-box") File.WriteAllText(transport, "wrong sing-box");
+                    Func<Task<bool>> ensure = () => coordinator.Ensure(true,
+                        () => !NetHelperInstall.NeedsInstall(version) && NetHelperInstall.ImagesMatch(root, hash),
+                        () => Task.CompletedTask, () => {
+                            prompts++; version = NetHelperInstall.HelperVersion; File.WriteAllText(transport, "expected transport");
+                            return Task.FromResult(0);
+                        }, progress, CancellationToken.None);
+                    Check(await ensure() && await ensure() && prompts == (scenario == "OTA same helper" ? 0 : 1), scenario + ": expected UAC count");
+                }
+                File.Delete(installedExe);
+                Check(!NetHelperInstall.ImagesMatch(root, hash), "missing service EXE is not current");
+                File.Copy(exe, installedExe); File.WriteAllText(transport, "wrong sing-box");
+                Check(!NetHelperInstall.ImagesMatch(root, hash), "changed sing-box detected even with current version marker");
                 var setup = new NetHelperSetup(); int copies = 0;
                 bool ok = await NetHelperSetup.ContinueApply(() => setup.Ensure(true, () => false,
                     () => { PinnedTransport.ReadVerified(root, root, hash); return Task.CompletedTask; },

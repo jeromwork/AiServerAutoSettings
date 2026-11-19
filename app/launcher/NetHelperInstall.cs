@@ -16,17 +16,18 @@ namespace RemoteAgents.Launcher
     // свой код только как обвязка над SCM и sing-box
     internal static class NetHelperInstall
     {
-        // Bump manually whenever helper logic or the wire protocol changes.
+        // Bump when installed helper code/protocol must change; launcher-only OTA keeps this version.
         internal const string HelperVersion = "6";
         internal const string ServiceName = "RemoteAgentsNet";
         internal const string DisplayName = "RemoteAgents: локальные сети и VPN";
         internal static bool NeedsInstall(string installed)
         { int version; return !int.TryParse((installed ?? "").Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out version) || version < int.Parse(HelperVersion, CultureInfo.InvariantCulture); }
-        // No writable marker can attest to the actual installed code or privileged transport.
-        internal static bool ImagesMatch(string directory, string expectedExe, string expectedTransportHash)
+        // The service EXE is compatible by HelperVersion, not by the launcher's changing OTA hash.
+        // Still require its presence and verify the privileged transport against the EXE's trusted pin.
+        internal static bool ImagesMatch(string directory, string expectedTransportHash)
         {
             try {
-                return Files.Hash(Path.Combine(directory, "RemoteAgents.exe")) == Files.Hash(expectedExe) &&
+                return File.Exists(Path.Combine(directory, "RemoteAgents.exe")) &&
                     Files.Hash(Path.Combine(directory, "sing-box.exe")) == expectedTransportHash;
             } catch (IOException) { return false; }
             catch (UnauthorizedAccessException) { return false; }
@@ -55,7 +56,7 @@ namespace RemoteAgents.Launcher
         internal static string InstallDirectory { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "RemoteAgents", "Helper"); } }
         internal static string DataDirectory { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "RemoteAgents", "Helper"); } }
         internal static string InstalledVersion { get { try { return File.ReadAllText(Path.Combine(InstallDirectory, "version.txt")).Trim(); } catch { return ""; } } }
-        internal static bool IsCurrent { get { return !NeedsInstall(InstalledVersion) && Exists() && ImagesMatch(InstallDirectory, Program.Exe, PinnedTransport.ExpectedHash); } }
+        internal static bool IsCurrent { get { return !NeedsInstall(InstalledVersion) && Exists() && ImagesMatch(InstallDirectory, PinnedTransport.ExpectedHash); } }
         internal static bool IsAdministrator { get { using (var identity = WindowsIdentity.GetCurrent()) return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator); } }
         internal static bool Exists()
         {
