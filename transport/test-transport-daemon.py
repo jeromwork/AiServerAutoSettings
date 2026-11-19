@@ -18,14 +18,14 @@ DAEMON = Path(__file__).with_name('Transport.Daemon.ps1').resolve()
 START = time.monotonic()
 
 
-def until(check, seconds=15):
-    deadline = min(time.monotonic() + seconds, START + 165)
+def until(check, seconds=15, *, deadline=None, label='local fixture'):
+    deadline = min(deadline if deadline is not None else time.monotonic() + seconds, START + 165)
     while time.monotonic() < deadline:
         value = check()
         if value:
             return value
         time.sleep(.08)
-    raise AssertionError('Local fixture timed out')
+    raise AssertionError('Deadline exceeded: '+label)
 
 
 def executable(path, source):
@@ -99,7 +99,11 @@ from pathlib import Path
 sys.path.insert(0,FAKE_MODULE)
 from clash_ws_fake import websocket
 root=Path(__file__).parent
-if sys.argv[1]=='check': sys.exit(0)
+if sys.argv[1]=='check':
+    with (root/'checks.jsonl').open('a') as f: f.write(json.dumps(dict(at=time.time()))+'\n')
+    deadline=time.monotonic()+10
+    while (root/'hold-validation').exists() and time.monotonic()<deadline: time.sleep(.02)
+    sys.exit(2 if (root/'hold-validation').exists() else 0)
 c=json.loads(Path(sys.argv[-1]).read_text()); api=c['experimental']['clash_api']
 (root/'engine.pid').write_text(str(os.getpid()))
 class Banner(socketserver.BaseRequestHandler):
@@ -168,15 +172,60 @@ HTTP(('127.0.0.1',int(api['external_controller'].split(':')[-1])),API).serve_for
         # Wait for the initial round AND both real WS subscriptions before injection.
         until(lambda: len(records(root/'subscriptions.jsonl'))>=2)
     def reload(cancel=False):
+        began=time.monotonic(); requested_at=time.time(); checks=len(records(root/'checks.jsonl'))
         old=engine_pid(); subscriptions=len(records(root/'subscriptions.jsonl')); revision=status()['configRevision']
+        if cancel: (root/'hold-validation').touch()
         transport['restartDelaySec']=1 if transport['restartDelaySec']==2 else 2
         target=root/'config.tmp'; target.write_text(json.dumps(config)); target.replace(root/'config.json')
-        # Cancellation is measured at the old process, excluding new-engine startup.
-        if cancel: until(lambda: stopped(old),seconds=5.8)
-        until(lambda: engine_pid()!=old,seconds=15)
-        until(lambda: len(records(root/'subscriptions.jsonl'))>=subscriptions+2)
-        until(lambda: status().get('configRevision')!=revision and status().get('ok') and all(c['state']=='ok' for c in status()['candidates']))
+        # One bounded deadline covers validation job, engine replacement, subscriptions
+        # and initial proof. Do not confuse slow job startup with failed cancellation.
+        deadline=time.monotonic()+30
+        if cancel:
+            # Validation runs asynchronously while the old engine stays available.
+            # Hold the fixture validator, then create a REAL in-flight gate just
+            # before releasing it. Cancellation timing excludes job startup.
+            until(lambda: len(records(root/'checks.jsonl'))>checks,
+                  deadline=deadline,label='reload validation started')
+            banners=len(records(root/'banners.jsonl')); dial(status()['active'])
+            until(lambda: len(records(root/'banners.jsonl'))>banners,
+                  deadline=deadline,label='gate running during validated reload')
+            assert not stopped(old), 'old engine stopped before validation finished'
+            modes({}); (root/'hold-validation').unlink()
+            cancel_began=time.monotonic()
+            until(lambda: stopped(old),seconds=5.8,label='validated reload cancels old engine')
+            print('CANCEL: old engine stopped %.2fs after validation release' %
+                  (time.monotonic()-cancel_began),flush=True)
+        def replaced():
+            assert daemon.poll() is None, 'daemon exited during reload'
+            assert not status().get('configError'), status()
+            return stopped(old) and engine_pid()!=old
+        until(replaced,deadline=deadline,label='reload replaces engine after validation')
+        replaced_after=time.monotonic()-began
+        until(lambda: len(records(root/'subscriptions.jsonl'))>=subscriptions+2,
+              deadline=deadline,label='reload WebSocket subscriptions')
+        until(lambda: status().get('configRevision')!=revision and status().get('ok') and
+              all(c['state']=='ok' for c in status()['candidates']),
+              deadline=deadline,label='reload revision and initial path proof')
+        validation=records(root/'checks.jsonl')[checks:]
+        assert validation, 'reload skipped sing-box config validation'
+        print('RELOAD: validation %.2fs; replaced %.2fs; paths/subscriptions ready %.2fs' %
+              (validation[0]['at']-requested_at,replaced_after,time.monotonic()-began),flush=True)
         return old
+    def reset_generation():
+        # Reset gate/reducer state through the real pin control, without paying for
+        # another validation process/engine restart between unrelated scenarios.
+        # Reload itself is covered after site errors/rate limiting and during a check.
+        old=engine_pid(); deadline=time.monotonic()+12
+        pin_file=root/'state/transport-pin.json'; tag=status()['active']
+        pin_file.write_text(json.dumps(dict(mode='pinned',tag=tag)))
+        until(lambda: status().get('mode')=='pinned' and status().get('ok'),
+              deadline=deadline,label='pin generation ready')
+        pin_file.write_text(json.dumps(dict(mode='auto',tag=None)))
+        until(lambda: status().get('mode')=='auto' and status().get('ok') and
+              all(c['state']=='ok' for c in status()['candidates']),
+              deadline=deadline,label='automatic generation ready')
+        assert engine_pid()==old, 'pin reset restarted engine'
+        assert_clean()
     def pass_test(name): print('PASS: '+name,flush=True)
     def stall(tag,stop_when,seconds=7):
         deadline=time.monotonic()+seconds; seq=0
@@ -238,13 +287,13 @@ HTTP(('127.0.0.1',int(api['external_controller'].split(':')[-1])),API).serve_for
         assert len(puts())==baseline and engine_pid()==pid
         assert all(c['penaltyStep']==0 for c in status()['candidates'])
         pass_test('local-network-down')
-        reload()
+        reset_generation()
         # 5: real connection snapshots -> 64 KiB confirmation, success then frozen variant.
         a=status()['active']; count=len(probes()); baseline=len(puts())
         stall(a,lambda: len(probes())>count)
         until(lambda: status().get('phase')=='ok'); time.sleep(.5)
         assert len(puts())==baseline and probes()[count]['bytes']==65536 and probes()[count]['port']==ports[a]
-        reload()  # reset reducer's 60 s ignore-after-success window
+        reset_generation()  # reset reducer's 60 s ignore-after-success window
         a=status()['active']; count=len(probes()); pid=engine_pid()
         modes({str(ports[a]):dict(probe='hang')})
         stall(a,lambda: len(probes())>count)
@@ -252,12 +301,11 @@ HTTP(('127.0.0.1',int(api['external_controller'].split(':')[-1])),API).serve_for
         assert status()['switches'][-1]['why']=='path-stalled' and engine_pid()==pid,status()
         assert probes()[count]['bytes']==65536 and probes()[count]['port']==ports[a]
         pass_test('stall-confirm')
-        modes({}); reload()
+        modes({}); reset_generation()
         # 9: cancel a REAL gate by hot reload before its 6 s timeout, with results discarded.
-        a=status()['active']; count=len(records(root/'banners.jsonl'))
-        modes({str(ports[a]):dict(banner='dead')}); dial(a)
-        until(lambda: len(records(root/'banners.jsonl'))>count)
-        modes({}); reload(cancel=True)
+        a=status()['active']
+        modes({str(ports[a]):dict(banner='dead')})
+        reload(cancel=True)
         assert_clean(); time.sleep(1.2); assert_clean()
         pass_test('cancel-no-penalty')
         # 8: reader and reducer see pinned A only; failures never select B.
@@ -269,9 +317,10 @@ HTTP(('127.0.0.1',int(api['external_controller'].split(':')[-1])),API).serve_for
         assert status()['active']==a and all(x['tag']==a for x in puts()[baseline:]),status()
         pass_test('pinned-no-switch')
         modes({}); (root/'state/transport-pin.json').write_text(json.dumps(dict(mode='auto',tag=None)))
-        until(lambda: status().get('mode')=='auto' and status().get('ok'))
+        until(lambda: status().get('mode')=='auto' and status().get('ok') and
+              all(c['state']=='ok' for c in status()['candidates']))
         # 7: both banners fail together -> both penalized, engine stays alive.
-        reload(); pid=engine_pid()
+        assert_clean(); pid=engine_pid()
         modes({str(p):dict(banner='dead',probe='hang') for p in ports.values()})
         for t in ports: dial(t)
         until(lambda: status().get('phase')=='searching' and status().get('reason',{}).get('code') in
@@ -307,7 +356,7 @@ HTTP(('127.0.0.1',int(api['external_controller'].split(':')[-1])),API).serve_for
         print('PASS: child-cleanup; real A/B integration %.1f s' % (time.monotonic()-START),flush=True)
     except Exception:
         print('STATUS',status(),file=sys.stderr)
-        for name in ('stderr','logs/transport.log','puts.jsonl','probes.jsonl','banners.jsonl'):
+        for name in ('stderr','logs/transport.log','puts.jsonl','probes.jsonl','banners.jsonl','checks.jsonl'):
             if (root/name).exists(): print(name,(root/name).read_text(),file=sys.stderr)
         raise
     finally:

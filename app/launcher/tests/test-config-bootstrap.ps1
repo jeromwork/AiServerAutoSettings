@@ -184,6 +184,7 @@ function Start-WizardWorkingTransport($Root,$Bundle){& $realStart $Root $Bundle}
 Reset
 $watch=[Diagnostics.Stopwatch]::StartNew();$r=Invoke-WizardStep $root $bundle 'Bootstrap' $request
 $exitMs=$watch.ElapsedMilliseconds
+Write-Host ('MEASURE: immediately exited fixture Bootstrap '+$exitMs+' ms (limit <3000 ms)')
 Assert (-not $r.ok -and $exitMs -lt 3000 -and $r.summary -like '*Нет файла канала @fixture.ps1:7*' -and $r.summary -notlike '*старая причина*') ('an immediately exited daemon fails Bootstrap in less than three seconds with the new fatal reason: '+$exitMs+' мс; '+$r.summary)
 Assert ($r.summary -notlike '*short-test*' -and $r.summary -like '*<redacted>*') 'raw daemon output is sanitized before the summary'
 $raw=[IO.File]::ReadAllText((Join-Path $root 'logs/transport-daemon.out'))
@@ -253,7 +254,7 @@ Assert (-not $r.ok -and $r.vpn -eq 'channel-failed') 'channel hop without its ma
 
 # Daemon config: the channel SOCKS entry and its rules come first; without channelFirst nothing changes.
 $options=@{channelSshAddress=(Get-TransportPortDefaults).channelSshAddress;sshPort=2222;channelSocksPort=2223;syncPort=22001;probePortBase=26000;socksPortBase=28000;apiPort=29090;bindPhysical=$false;openSsh=$true}
-$settings=[pscustomobject]@{Options=$options;Transport=[pscustomobject]@{channelFirst=$true};Profile=[pscustomobject]@{arguments=@('-p','2022')};Channel=[pscustomobject]@{inbounds=@();outbounds=@()}}
+$settings=[pscustomobject]@{Root=$root;Options=$options;Transport=[pscustomobject]@{channelFirst=$true};Profile=[pscustomobject]@{arguments=@('-p','2022')};Channel=[pscustomobject]@{inbounds=@();outbounds=@()}}
 $paths=[pscustomobject]@{Candidates=@();Outbounds=@()}
 $cfg=New-TransportConfig $settings $paths 'fixture-secret' 'unavailable'
 $in=@($cfg.inbounds|Where-Object {$_.tag -eq 'channel-socks'})

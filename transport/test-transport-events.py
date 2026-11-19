@@ -481,8 +481,9 @@ try {
     $candidate=[pscustomobject]@{tag='path-a';port=26000}
     foreach ($mode in @('ok','stall','timeout','exit')) {
         [IO.File]::WriteAllText((Join-Path $Root 'mode'),$mode)
-        # Leave startup/scheduling headroom before the total deadline; stall is still 300 ms.
-        $check=Start-TransportPathCheck $candidate $profile -ConfirmStall -TimeoutSeconds 3 -StallSeconds .3
+        # Include fake ssh startup in the total budget; partial-transfer stall stays 300 ms.
+        $checkTimeout=6;if ($mode -eq 'stall') {$checkTimeout=3}
+        $check=Start-TransportPathCheck $candidate $profile -ConfirmStall -TimeoutSeconds $checkTimeout -StallSeconds .3
         $e=Wait-Check $check 'path';$expected=switch($mode) {'ok' {'ok'} 'stall' {'stalled'} 'timeout' {'timeout'} 'exit' {'process-exited'}}
         Assert ($e.code -eq $expected) ("64 KiB check "+$mode+': '+$e.code+'; '+$e.detail)
         if ($mode -eq 'ok') {Assert ($e.detail -match 'bytes=65536') 'Exactly 64 KiB required'}
