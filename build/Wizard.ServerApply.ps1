@@ -26,6 +26,8 @@ function Get-WizardApplyFiles([string]$Bundle) {
 }
 function Invoke-WizardApplyCommand([string]$Root,[string]$Bundle,$Request,[string]$Mode,[string]$Command,[string]$Payload,[bool]$Confirm=$false) {
     $args=$Command+' --json'+$(if($Confirm){' --confirm-ssh-checked'}else{''})
+    $sshExit=$null
+    try {
     # The delegated rule authorizes only the installed root-owned entry point.
     if($Mode -eq 'delegated'){
         $p=Read-TransportJson (Find-InstallProfile $Root)
@@ -39,9 +41,35 @@ function Invoke-WizardApplyCommand([string]$Root,[string]$Bundle,$Request,[strin
             $text=Invoke-DiskProcess $p.sshExecutable ((Get-WizardNetArgs $p ([string]$p.login) $Root)+@('-o','BatchMode=yes',$p.serverAddress,'sudo -n bash -s')) $script -TimeoutSeconds 900
         }else{$text=Invoke-WizardAdmin $Root $Request $Mode $script 900}
     }
+    # Invoke-DiskProcess returns text only for exit 0; nonzero exits throw.
+    $sshExit=0
+    }catch{
+        if($_.Exception.Message -match 'код выхода (\d+)'){$sshExit=[int]$Matches[1]}
+        throw
+    }finally{if($null -ne $sshExit){Write-WizardProgress ($Command+': ssh exit='+$sshExit)}}
     try{$result=ConvertFrom-Json (Convert-TransportLF $text)}catch{throw 'Сервер вернул неверный отчёт развёртывания; таймер отката сохраняется'}
-    if(-not $result.parts){throw 'Сервер не смог прочитать конфиг; проверьте схему и доступность установленного server-apply'}
-    foreach($part in @($result.parts)){Write-WizardProgress ($part.part+': '+$part.state+' — '+$part.summary)}
+    $result|Add-Member -Force clientMode $Mode
+    $result|Add-Member -Force clientCommand $Command
+    $result|Add-Member -Force sshExit $sshExit
+    # Persist before any validation/throw, including failures outside server sections.
+    Write-TransportJson (Join-Path $Root 'state/server-apply.json') $result
+    if($result.code -and -not $script:WizardApplyCodeLogged){
+        Write-WizardProgress ('сервер-код: sha='+$result.code.sha+' python='+$result.code.python+' режим='+$Mode)
+        $script:WizardApplyCodeLogged=$true
+    }
+    if(-not $result.PSObject.Properties['parts']){
+        if($result.error){throw ([string]$result.error)}
+        throw 'Сервер не смог прочитать конфиг; проверьте схему и доступность установленного server-apply'
+    }
+    foreach($part in @($result.parts)){
+        Write-WizardProgress ($part.part+': '+$part.state+' — '+$part.summary)
+        if($part.diag){
+            Write-WizardProgress ('  diag part='+$part.part+' id='+$part.diag.id+' type='+$part.diag.type)
+            Write-WizardProgress ('  message: '+$part.diag.message)
+            Write-WizardProgress ('  where: '+(@($part.diag.where) -join ' > '))
+            Write-WizardProgress ('  cause: '+$part.diag.cause)
+        }
+    }
     return $result
 }
 function Get-WizardApplyPorts($Config) {
@@ -63,7 +91,7 @@ function Invoke-WizardServerApply([string]$Root,[string]$Bundle,$Request) {
     if(-not $config -or $config.kind -cne 'remoteagents-config'){throw 'Нужен единый конфиг программы'}
     $mode=Get-WizardApplyMode $Root $Request
     if($mode -eq 'command'){
-        $blocked=@{ok=$false;parts=@(@{part='agent';state='blocked';summary='Нет root/sudo для автоматического развёртывания; нужен пароль root в server.rootPassword'});actions=@();summary='Нет прав на настройку сервера'}
+        $blocked=@{ok=$false;clientMode=$mode;parts=@(@{part='agent';state='blocked';summary='Нет root/sudo для автоматического развёртывания; нужен пароль root в server.rootPassword'});actions=@();summary='Нет прав на настройку сервера'}
         Write-TransportJson (Join-Path $Root 'state/server-apply.json') $blocked
         return $blocked
     }
@@ -72,6 +100,9 @@ function Invoke-WizardServerApply([string]$Root,[string]$Bundle,$Request) {
     return Invoke-WizardServerApplyPayload $Root $Bundle $Request $mode $payload
 }
 function Invoke-WizardServerApplyPayload([string]$Root,[string]$Bundle,$Request,[string]$Mode,[string]$Payload) {
+    $script:WizardApplyCodeLogged=$false
+    $saved=Join-Path $Root 'state/server-apply.json'
+    if(Test-Path -LiteralPath $saved){Remove-Item -LiteralPath $saved -Force}
     $config=$Request.config
     $verb=if($Request.statusOnly){'status'}else{'plan'}
     $actions=@()
