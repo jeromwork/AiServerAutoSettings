@@ -76,6 +76,7 @@
     <Compile Include="WizardStepTests.cs" />
     <Compile Include="DiskChoiceTests.cs" />
     <Compile Include="ConfigApplyTests.cs" />
+    <Compile Include="../DiagnosticReport.cs" Link="DiagnosticReport.cs" />
     <Compile Include="../ConfigApply.cs" Link="ConfigApply.cs" />
     <Compile Include="ProxyRelayTests.cs" />
     <Compile Include="../ProxyRelay.cs" Link="ProxyRelay.cs" />

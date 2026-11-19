@@ -96,7 +96,6 @@ namespace RemoteAgents.Launcher
         Task<string> preparing; Task following; ConfigSession followingSession; ConfigSession session; bool diskApplying, running, closeChecked, closingRequested, filling, replaceOnPaste; string defaultName;
         // Disk is never part of the window's plan: it runs in BackgroundWork.Disk, started once the connection is proved.
         bool diskQueued; DiskRun seenDisk; readonly Action diskChanged; WheelRouter wheel;
-        static readonly object logGate = new object();
 
         internal static bool First(string home, Func<Task<string>> prepare)
         { using (var form = new ConfigWindow(home, null, prepare, false)) { form.ShowDialog(); return form.Manual; } }
@@ -114,8 +113,8 @@ namespace RemoteAgents.Launcher
             HandleCreated += (a, b) => { if (wheel == null) { wheel = new WheelRouter(this); Application.AddMessageFilter(wheel); } };
             bottom.Controls.Add(done); bottom.Controls.Add(new Label { Dock = DockStyle.Right, Width = 8 }); bottom.Controls.Add(close);
             var copyLog = new Button { Text = "Скопировать журнал", Width = 150, Dock = DockStyle.Left };
-            tip.SetToolTip(copyLog, "Весь журнал в буфер — для чата с администратором или ИИ. Секреты в журнал не пишутся.");
-            copyLog.Click += (a, b) => { try { Clipboard.SetText(journal.TextLength > 0 ? journal.Text : "Журнал пуст"); Log("Журнал скопирован."); } catch (Exception e) { Log("Журнал не скопирован: " + e.Message); } };
+            tip.SetToolTip(copyLog, "Копирует весь журнал программы; пароли и ключи скрыты");
+            copyLog.Click += (a, b) => CopyDiagnosticLog();
             bottom.Controls.Add(copyLog);
             if (settings) BuildSettings(); else BuildPaste();
             // Status rows scroll inside their own area; the journal cannot cover them and the footer stays visible.
@@ -307,10 +306,15 @@ namespace RemoteAgents.Launcher
         }
         void Log(string text)
         {
-            string line = DateTime.Now.ToString("HH:mm:ss") + " " + (text ?? "").Replace("\r\n", "\n").Replace("\n", "\r\n") + "\r\n";
-            // The same journal on disk, also after the window is closed (a background Disk run keeps logging).
-            lock (logGate) { try { Directory.CreateDirectory(Path.Combine(home, "logs")); File.AppendAllText(Path.Combine(home, "logs", "config-window.log"), line, Files.Utf8); } catch (Exception) { } }
+            string line = DiagnosticReport.WriteWindowLog(Path.Combine(home, "logs"), text, DiagnosticReport.KnownSecrets(home));
             Ui(() => { journal.AppendText(line); if (!journal.Visible) { journal.Visible = true; Relayout(); } });
+        }
+        void CopyDiagnosticLog()
+        {
+            try {
+                Clipboard.SetText(DiagnosticReport.BuildCopyText(Path.Combine(home, "logs"), Path.Combine(home, "state")));
+                Log("Журнал скопирован — вставьте его в чат");
+            } catch (Exception e) { Log("Журнал не скопирован: " + e.Message); }
         }
         void Report(string section, SectionState state, string text)
         {
@@ -563,6 +567,8 @@ namespace RemoteAgents.Launcher
                 while (form.ShowDialog(owner) == DialogResult.OK) {
                     if (first.Text.Length == 0) continue;
                     if (confirm && first.Text != second.Text) { MessageBox.Show(form, "Пароли не совпадают", Product.Name); second.Clear(); continue; }
+                    var window = owner as ConfigWindow;
+                    if (window != null) DiagnosticReport.RememberSecrets(window.home, new[] { first.Text });
                     return first.Text;
                 }
                 return null;
