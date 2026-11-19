@@ -8,6 +8,15 @@ namespace RemoteAgents.Launcher
     {
         static int count;
         static void Check(bool ok, string name) { if (!ok) throw new Exception("VPN: " + name); count++; }
+#if PORTABLE_TEST
+        // Focused entry point; do not invoke the unrelated portable suites.
+        static int Main(string[] args)
+        {
+            string root = args.Length > 0 ? args[0] : Path.Combine(Path.GetTempPath(), "vpn-tests-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            Run(root); VpnTunTests.Run(root); return 0;
+        }
+#endif
         internal static void Run(string root)
         {
             Check(Product.VpnEnabled, "VPN capability is restored");
@@ -34,29 +43,15 @@ namespace RemoteAgents.Launcher
             }
             Check(VpnLease.DeadlineMs < 5000, "blocked host fail-open deadline");
             closed = 0;
-            using (var lease = new VpnLease(() => System.Threading.Interlocked.Increment(ref closed), 1000, 150)) {
-                var slowChecks = Stopwatch.StartNew();
-                while (closed == 0 && slowChecks.ElapsedMilliseconds < 1500) { lease.Pulse(); System.Threading.Thread.Sleep(20); }
-                Check(lease.Expired && closed == 1, "progressing slow checks cannot renew the last successful health proof");
+            using (var lease = new VpnLease(() => System.Threading.Interlocked.Increment(ref closed), 1000)) {
+                var waitingForNetwork = Stopwatch.StartNew();
+                while (waitingForNetwork.ElapsedMilliseconds < 5000) { lease.Pulse(); System.Threading.Thread.Sleep(50); }
+                Check(!lease.Expired && closed == 0, "progress beyond former 4.5 second health deadline never closes a Job without network proof");
             }
-            closed = 0;
-            using (var lease = new VpnLease(() => System.Threading.Interlocked.Increment(ref closed), 1000, 200)) {
-                for (int i = 0; i < 6; i++) { lease.Pulse(); lease.Confirmed(); System.Threading.Thread.Sleep(50); }
-                Check(!lease.Expired && closed == 0, "only confirmed health renews the health deadline");
-            }
-            Check(VpnLease.HealthDeadlineMs + VpnWatchdog.PollMs < 5000, "absolute health cutoff has shutdown headroom within five seconds");
-            var policy = new VpnWatchdog();
-            Check(!policy.Sample(false, true) && policy.Failures == 1, "transport failure counts even if HTTPS works");
-            Check(policy.Sample(true, false), "second consecutive failure disables, including mixed causes");
-            policy = new VpnWatchdog();
-            Check(!policy.Sample(true, false) && !policy.Sample(true, true) && policy.Failures == 0 && !policy.Sample(false, false), "success resets consecutive failures");
-            Check(policy.Sample(false, false), "two complete failures disable");
-            Check(VpnWatchdog.IntervalMs >= 2000 && VpnWatchdog.IntervalMs <= 3000 && VpnWatchdog.ProbeTimeoutMs <= 3000, "requested cadence and bounded probe");
-            Check(2 * VpnWatchdog.IntervalMs + VpnWatchdog.ProbeTimeoutMs + 3 * VpnWatchdog.PollMs <= VpnTun.HealthDeadlineMs, "new probe cadence fits the absolute helper cutoff");
             DateTime now = DateTime.UtcNow;
             var status = ConfigBundle.D("ok", true, "active", "a", "updatedAt", now.ToString("o"), "candidates", new object[] { ConfigBundle.D("tag", "a", "state", "ok", "enabled", true) });
             Check(VpnWatchdog.TransportReady(status, now, "a"), "fresh checked active path");
-            Check(!VpnWatchdog.TransportReady(status, now, "b"), "changed path cannot reuse previous VPN config");
+            Check(!VpnWatchdog.TransportReady(status, now, "b"), "optional tag filter rejects another path");
             Check(!VpnWatchdog.TransportReady(status, now.AddSeconds(4)), "stale transport is a failure");
             Check(!VpnWatchdog.TransportReady(status, now.AddSeconds(-1)), "future proof is rejected");
             status["candidates"] = new object[] { ConfigBundle.D("tag", "a", "state", "remembered") };
@@ -66,7 +61,7 @@ namespace RemoteAgents.Launcher
             var home = Path.Combine(root, "vpn-status"); Directory.CreateDirectory(Path.Combine(home, "state")); Directory.CreateDirectory(Path.Combine(home, "status"));
             string file = Path.Combine(home, "status/vpn.json");
             Files.Atomic(file, Json.Encode(new { enabled = false, state = "server-unreachable", summary = VpnWatchdog.FailureSummary("server-unreachable"), updatedAt = now.AddDays(-1).ToString("o") }));
-            Check(Json.Str(VpnStatus.Read(home), "state") == "server-unreachable", "automatic stop reason persists after status heartbeat expires");
+            Check(Json.Str(VpnStatus.Read(home), "state") == "server-unreachable", "legacy terminal reason persists after status heartbeat expires");
             Files.Atomic(file, Json.Encode(new { enabled = true, state = "on", updatedAt = DateTime.UtcNow.ToString("o") }));
             using (var self = Process.GetCurrentProcess()) {
                 Files.Atomic(Path.Combine(home, "state/vpn-host.json"), Json.Encode(new { pid = self.Id, startedTicks = "0" }));

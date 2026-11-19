@@ -4,11 +4,11 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
-using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace RemoteAgents.Launcher
 {
@@ -16,7 +16,6 @@ namespace RemoteAgents.Launcher
     internal sealed class VpnTun
     {
         internal const string InterfaceName = "RemoteAgents-VPN";
-        internal const int HealthDeadlineMs = 10000, RecoveryMs = 10000;
         internal int SocksPort;
         internal string[] Address = { "172.31.255.1/30", "fdfe:7261::1/126" }, ExcludeCidrs = new string[0];
         internal string DnsServer = "1.1.1.1", CheckUrl = "https://example.com/", ProbeAddress = "198.18.0.1";
@@ -73,7 +72,7 @@ namespace RemoteAgents.Launcher
                 bool full = prefixes.Contains("0.0.0.0/0") || prefixes.Contains("::/0") || prefixes.Contains("0.0.0.0/1") && prefixes.Contains("128.0.0.0/1") || prefixes.Contains("::/1") && prefixes.Contains("8000::/1");
                 bool partial = prefixes.Any(p => !new[] { "0.0.0.0/0", "::/0", "0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1" }.Contains(p));
                 // A known routed partial WireGuard/OpenVPN is compatible. Unknown Up TUNs fail closed.
-                if (Virtual(a) && full || Match(text, "TUN|Wintun|WireGuard|TAP") && !(partial && Match(text, "OpenVPN|WireGuard|Tailscale")) && !Match(text, "OpenVPN|Tailscale")) return Json.Text(a, "Name", "другой VPN");
+                if (Virtual(a) && full || Match(text, "TUN|Wintun|WireGuard|TAP") && !(partial && Match(text, "OpenVPN|WireGuard|Tailscale")) && !Match(text, "OpenVPN|Tailscale")) return MainScreenModel.CleanSecrets(Json.Text(a, "Name", "другой VPN"));
             }
             return "";
         }
@@ -120,32 +119,78 @@ namespace RemoteAgents.Launcher
         }
     }
 
-    internal sealed class VpnTunRecovery
+    // The same step drives the running session and portable lifecycle tests. Only a
+    // stalled owner loop may call stop; transport/conflict evidence changes status.
+    internal sealed class VpnTunMonitor
     {
-        bool armed, spent; long healthySince = -1;
-        internal void Reset() { armed = spent = false; healthySince = -1; }
-        internal void Stopped(string reason) { armed = !spent && (reason == "server-unreachable" || reason == "no-path"); healthySince = -1; }
-        internal bool Observe(long now, bool ready)
+        readonly Action<Dictionary<string, object>> publish;
+        readonly Action<string> stop;
+        readonly Action restart;
+        readonly Dictionary<string, object> policy;
+        long pulse, nextRestart, changedUntil;
+        string revision, network, reasonCode = "", since = "";
+        internal VpnTunMonitor(long now, Dictionary<string, object> transport, Dictionary<string, object> policy,
+            Action<Dictionary<string, object>> publish, Action<string> stop, Action restart)
         {
-            if (!armed || spent) return false;
-            if (!ready) { healthySince = -1; return false; }
-            if (healthySince < 0) healthySince = now;
-            if (now - healthySince < VpnTun.RecoveryMs) return false;
-            spent = true; armed = false; return true;
+            pulse = now; revision = Json.Str(transport, "configRevision"); network = Json.Str(transport, "network");
+            this.policy = policy; this.publish = publish; this.stop = stop; this.restart = restart;
+        }
+        internal bool Step(long now, DateTime utcNow, bool coreAlive, Dictionary<string, object> transport, string conflict, bool inventoryFailed = false)
+        {
+            if (now - pulse > VpnLease.DeadlineMs) { stop("watchdog-stalled"); return false; }
+            pulse = now;
+            string state = "on", code = "ok", text = "";
+            string path = VpnTun.PathState(transport, utcNow);
+            if (VpnWatchdog.TransportReady(transport, utcNow)) {
+                if (revision != Json.Str(transport, "configRevision") || network != Json.Str(transport, "network")) changedUntil = now + 500;
+                revision = Json.Str(transport, "configRevision"); network = Json.Str(transport, "network");
+            }
+            if (!coreAlive) { state = "searching"; code = "path-process-exited"; text = "Сбой канала, перезапускаю"; }
+            else if (conflict.Length > 0) { state = "conflict"; code = "vpn-conflict"; text = VpnWatchdog.FailureSummary("conflict", conflict); }
+            else if (inventoryFailed) { state = "searching"; code = "conflict-check-failed"; text = "Не удалось проверить другие VPN"; }
+            else if (path.Length > 0 || Json.Str(transport, "phase") == "searching" || Json.Str(transport, "localNet") == "down" || now < changedUntil) {
+                state = "searching"; code = path.Length > 0 ? path : now < changedUntil ? "path-changed" : "no-path";
+                text = code == "no-udp" ? "Текущий путь не передаёт UDP" : code == "path-changed" ? "Сменился путь канала" : "Нет живого пути к серверу";
+                var reason = Json.Map(Json.Get(transport, "reason"));
+                if (code != "no-udp" && code != "path-changed" && Json.Str(reason, "code").Length > 0 && Json.Str(reason, "code") != "ok" && Json.Str(reason, "text").Length > 0) {
+                    code = MainScreenModel.CleanSecrets(Json.Str(reason, "code"));
+                    text = MainScreenModel.CleanSecrets(Json.Str(reason, "text"));
+                }
+                if (Json.Str(transport, "localNet") == "down") { code = "local-network-down"; text = "Нет интернета у вас (сеть), жду"; }
+            }
+            if (code != reasonCode) { reasonCode = code; since = utcNow.ToString("o"); }
+            publish(VpnTun.D("owner", "net-helper", "ok", state == "on", "enabled", true, "state", state, "stage", "monitor",
+                "summary", state == "on" ? "VPN включён" : state == "conflict" ? text : VpnWatchdog.FailureSummary("searching") + ": " + text,
+                "reason", VpnTun.D("code", code, "text", text, "since", since), "localNet", Json.Text(transport, "localNet", "unknown"),
+                "conflictName", conflict, "dnsPolicy", policy, "updatedAt", utcNow.ToString("o")));
+            // Restart a dead process inside the existing Job, never toggle VPN off/on.
+            // Repeated immediate exits are bounded to one launch per second.
+            if (!coreAlive && now >= nextRestart) { nextRestart = now + 1000; restart(); }
+            return true;
         }
     }
 
-    // A pure monotonic-clock model also covers immediate core death and both independent cutoffs.
-    internal sealed class VpnTunHealth
+    // Slow PowerShell inventory must not block the owner-loop lease. At most one
+    // fixed snapshot is in flight; results are consumed by the owner thread only.
+    internal sealed class VpnTunConflictScan
     {
-        readonly VpnWatchdog failures = new VpnWatchdog();
-        long pulse, confirmed;
-        internal VpnTunHealth(long now) { pulse = confirmed = now; }
-        internal void Pulse(long now) { pulse = now; }
-        internal string Tick(long now, bool coreAlive)
-        { return !coreAlive ? "core-exited" : now - pulse > VpnLease.DeadlineMs ? "watchdog-stalled" : now - confirmed > VpnTun.HealthDeadlineMs ? "server-unreachable" : ""; }
-        internal bool Sample(long now, bool pathOk, bool probeOk)
-        { if (pathOk && probeOk) confirmed = now; return failures.Sample(pathOk, probeOk); }
+        internal const int IntervalMs = 5000;
+        readonly Func<Dictionary<string, object>> snapshot;
+        Task<Dictionary<string, object>> pending;
+        long next;
+        internal string Conflict { get; private set; }
+        internal bool Failed { get; private set; }
+        internal VpnTunConflictScan(long now, Func<Dictionary<string, object>> snapshot)
+        { next = now + IntervalMs; this.snapshot = snapshot; Conflict = ""; }
+        internal void Tick(long now)
+        {
+            if (pending != null && pending.IsCompleted) {
+                try { Conflict = MainScreenModel.CleanSecrets(VpnTun.Conflict(pending.GetAwaiter().GetResult())); Failed = false; }
+                catch { Failed = true; }
+                pending = null; next = now + IntervalMs;
+            }
+            if (pending == null && now >= next) { next = now + IntervalMs; pending = Task.Run(snapshot); }
+        }
     }
 
     // Runtime has no WinForms or user-supplied executable/config paths. Each VPN owns its own Jobs.
@@ -158,7 +203,6 @@ namespace RemoteAgents.Launcher
         readonly ManualResetEvent wake = new ManualResetEvent(false);
         readonly Thread thread;
         readonly Stopwatch clock = Stopwatch.StartNew();
-        readonly VpnTunRecovery recovery = new VpnTunRecovery();
         Dictionary<string, object> status = VpnTun.D("enabled", false, "ok", false, "state", "off", "summary", "VPN выключен");
         NativeJob coreJob, preparationJob;
         Process core;
@@ -179,13 +223,13 @@ namespace RemoteAgents.Launcher
             lock (gate) {
                 if (disposed) throw new ObjectDisposedException("VpnTunSession");
                 if (coreJob != null || pending || Json.Str(status, "state") == "starting") return;
-                generation++; requested = options; pending = true; recovery.Reset(); Set("starting", "prepare");
+                generation++; requested = options; pending = true; Set("starting", "prepare");
             }
             wake.Set();
         }
         internal void Disable()
         {
-            lock (gate) { CloseJobs(); generation++; pending = false; requested = null; recovery.Reset(); Set("off", "button"); }
+            lock (gate) { CloseJobs(); generation++; pending = false; requested = null; Set("off", "button"); }
             wake.Set();
         }
         void CloseJobs()
@@ -198,12 +242,13 @@ namespace RemoteAgents.Launcher
         Dictionary<string, object> Read(string relative)
         { Dictionary<string, object> result = null; asOwner(() => result = Json.Read(Path.Combine(home, relative))); return result; }
         Dictionary<string, object> Transport() { try { return Read("status/transport.json"); } catch { return Json.Map(null); } }
-        Dictionary<string, object> Snapshot(int epoch)
+        Dictionary<string, object> Snapshot(int epoch, bool adaptersOnly = false)
         {
             // Fixed inventory only. Never execute a script from the owner's writable home as SYSTEM.
             const string script = "$ErrorActionPreference='Stop';[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false);@{Adapters=@(Get-NetAdapter -IncludeHidden|Select-Object Name,InterfaceDescription,ifIndex,Status,HardwareInterface,Virtual);Routes=@(Get-NetRoute|Select-Object InterfaceIndex,DestinationPrefix);DnsServers=@(Get-DnsClientServerAddress|Select-Object InterfaceIndex,ServerAddresses);DnsClients=@(Get-DnsClient|Select-Object InterfaceIndex,ConnectionSpecificSuffix,ConnectionSpecificSuffixSearchList);Nrpt=@(Get-DnsClientNrptPolicy -Effective|Select-Object Namespace,NameServers,DirectAccessDnsServers)}|ConvertTo-Json -Depth 10 -Compress";
-            string file = Path.Combine(directory, "vpn-inventory.json");
-            RunPreparation(Files.Executable("powershell.exe"), new[] { "-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(Encoding.Unicode.GetBytes(script)) }, file, epoch);
+            const string adapterScript = "$ErrorActionPreference='Stop';[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false);@{Adapters=@(Get-NetAdapter -IncludeHidden|Select-Object Name,InterfaceDescription,ifIndex,Status,HardwareInterface,Virtual);Routes=@(Get-NetRoute|Select-Object InterfaceIndex,DestinationPrefix)}|ConvertTo-Json -Depth 10 -Compress";
+            string file = Path.Combine(directory, adaptersOnly ? "vpn-adapters.json" : "vpn-inventory.json");
+            RunPreparation(Files.Executable("powershell.exe"), new[] { "-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(Encoding.Unicode.GetBytes(adaptersOnly ? adapterScript : script)) }, file, epoch);
             if (new FileInfo(file).Length > 4 * 1024 * 1024) throw new InvalidDataException("Снимок сети слишком велик");
             return Json.Read(file);
         }
@@ -221,22 +266,17 @@ namespace RemoteAgents.Launcher
         }
         void Stop(string reason, string stage, int epoch, string name = "")
         {
-            CloseJobs(); // Must precede state, recovery and log I/O.
+            CloseJobs(); // Must precede state and log I/O.
             lock (gate) {
                 if (generation != epoch) return;
-                recovery.Stopped(reason); Set(reason, stage, name);
+                Set(reason, stage, name);
             }
             log("vpn-" + reason + "-" + stage, 1);
-        }
-        static int TunIndex()
-        {
-            var adapter = NetworkInterface.GetAllNetworkInterfaces().FirstOrDefault(a => a.Name == VpnTun.InterfaceName && a.OperationalStatus == OperationalStatus.Up);
-            return adapter == null ? 0 : adapter.GetIPProperties().GetIPv4Properties().Index;
         }
         void Run(VpnTun options, int epoch)
         {
             string stage = "inventory";
-            VpnLease lease = null; VpnProbe probe = null;
+            VpnLease lease = null;
             try {
                 var snapshot = Snapshot(epoch);
                 string conflict = VpnTun.Conflict(snapshot);
@@ -280,58 +320,43 @@ namespace RemoteAgents.Launcher
                     if (disposed || epoch != generation) { launchJob.Dispose(); return; }
                     coreJob = launchJob;
                 }
-                long progressAt = clock.ElapsedMilliseconds;
-                string leaseFailure = null;
                 lease = new VpnLease(() => {
-                    CloseJobs(); // This callback does no file/network/log I/O.
-                    string reason = clock.ElapsedMilliseconds - Interlocked.Read(ref progressAt) > VpnLease.DeadlineMs ? "watchdog-stalled" : "server-unreachable";
-                    Interlocked.CompareExchange(ref leaseFailure, reason, null);
-                    lock (gate) if (epoch == generation) Set(reason, "lease-expired");
-                }, VpnLease.DeadlineMs, VpnTun.HealthDeadlineMs);
-                // Never hold the status/command lock across CreateProcess. A slow VPN launch
-                // must not stall the helper's pipe loop and expire the independent LAN lifetime.
+                    CloseJobs(); // No network/file/log I/O in the independent cutoff.
+                    lock (gate) if (epoch == generation) Set("watchdog-stalled", "lease-expired");
+                });
+                // Never hold the status/command lock across CreateProcess.
                 core = launchJob.Start(executable, new[] { "run", "-c", config }, directory);
-                var health = new VpnTunHealth(clock.ElapsedMilliseconds);
-                string revision = Json.Str(transport, "configRevision"), network = Json.Str(transport, "network");
-                long nextSample = clock.ElapsedMilliseconds, nextRead = 0, probeStarted = 0, nextStatus = 0;
-                bool pathOk = false; string failure = "server-unreachable";
-                stage = "https-probe";
+                var monitor = new VpnTunMonitor(clock.ElapsedMilliseconds, transport, policy,
+                    value => { lock (gate) if (epoch == generation && !lease.Expired) status = value; },
+                    reason => Stop(reason, "owner-loop", epoch),
+                    () => {
+                        lock (gate) if (disposed || epoch != generation || lease.Expired) return;
+                        if (core != null) { core.Dispose(); core = null; }
+                        try { core = launchJob.Start(executable, new[] { "run", "-c", config }, directory); }
+                        catch { log("vpn-core-restart-failed", 1); }
+                    });
+                var scan = new VpnTunConflictScan(clock.ElapsedMilliseconds, () => Snapshot(epoch, true));
+                long nextRead = 0;
+                stage = "monitor";
                 while (true) {
                     lock (gate) if (disposed || epoch != generation) return;
+                    if (lease.Expired) return;
                     long now = clock.ElapsedMilliseconds;
-                    bool alive = core != null && !core.WaitForExit(0);
-                    string cutoff = Interlocked.CompareExchange(ref leaseFailure, null, null) ?? (lease.Expired ? (now - Interlocked.Read(ref progressAt) > VpnLease.DeadlineMs ? "watchdog-stalled" : "server-unreachable") : health.Tick(now, alive));
-                    if (cutoff.Length > 0 || lease.Expired) { Stop(cutoff.Length > 0 ? cutoff : "watchdog-stalled", stage, epoch); return; }
-                    lease.Pulse(); Interlocked.Exchange(ref progressAt, now); health.Pulse(now);
-                    if (now >= nextRead) {
-                        transport = Transport(); nextRead = now + 500;
-                        pathState = VpnTun.PathState(transport, DateTime.UtcNow);
-                        if (pathState == "no-udp") { Stop("no-udp", "path", epoch, TrayMenuModel.ActiveTitle(transport)); return; }
-                        if (revision != Json.Str(transport, "configRevision") && pathState.Length == 0 || network != Json.Str(transport, "network") && pathState.Length == 0) { Stop("no-path", "path-changed", epoch); return; }
-                    }
-                    if (probe == null && now >= nextSample) {
-                        int index = TunIndex();
-                        if (index == 0 && now - nextSample < VpnWatchdog.ProbeTimeoutMs) { wake.WaitOne(50); continue; }
-                        pathOk = VpnTun.PathState(transport, DateTime.UtcNow).Length == 0;
-                        failure = pathOk ? "server-unreachable" : "no-path";
-                        probeStarted = now; probe = new VpnProbe(new Uri(options.CheckUrl), IPAddress.Parse(options.ProbeAddress), index);
-                    }
-                    if (probe != null && (probe.Result.IsCompleted || now - probeStarted >= VpnWatchdog.ProbeTimeoutMs)) {
-                        bool ok = probe.Result.IsCompleted && probe.Result.GetAwaiter().GetResult(); probe.Dispose(); probe = null;
-                        pathOk = pathOk && VpnTun.PathState(transport, DateTime.UtcNow).Length == 0;
-                        if (!pathOk) failure = "no-path";
-                        if (health.Sample(now, pathOk, ok)) { Stop(failure, pathOk ? "https-probe" : "path", epoch); return; }
-                        if (pathOk && ok) { lease.Confirmed(); lock (gate) if (epoch == generation) Set("on", "healthy", policy: policy); }
-                        nextSample = Math.Max(probeStarted + VpnWatchdog.IntervalMs, now + 1);
-                    }
-                    if (now >= nextStatus) { lock (gate) if (epoch == generation) status["updatedAt"] = DateTime.UtcNow.ToString("o"); nextStatus = now + 500; }
+                    if (now >= nextRead) { transport = Transport(); nextRead = now + 500; }
+                    scan.Tick(now);
+                    if (!monitor.Step(clock.ElapsedMilliseconds, DateTime.UtcNow, core != null && !core.WaitForExit(0), transport, scan.Conflict, scan.Failed)) return;
+                    if (lease.Expired) return;
+                    lease.Pulse();
                     wake.WaitOne(VpnWatchdog.PollMs); wake.Reset();
                 }
             } catch (OperationCanceledException) { }
-            catch { Stop("error", stage, epoch); }
+            catch { Stop(lease != null && lease.Expired ? "watchdog-stalled" : "error", stage, epoch); }
             finally {
+                // Invalidate a queued inventory before closing its Job: it must not
+                // start another PowerShell after this session has ended.
+                lock (gate) if (epoch == generation) generation++;
                 CloseJobs();
-                if (probe != null) probe.Dispose(); if (lease != null) lease.Dispose();
+                if (lease != null) lease.Dispose();
                 if (core != null) { core.Dispose(); core = null; }
             }
         }
@@ -341,14 +366,7 @@ namespace RemoteAgents.Launcher
                 VpnTun options; int epoch;
                 lock (gate) { if (disposed) return; options = pending ? requested : null; pending = false; epoch = generation; }
                 if (options != null) Run(options, epoch);
-                else {
-                    var transport = Transport();
-                    lock (gate) {
-                        if (disposed) return;
-                        if (requested != null && recovery.Observe(clock.ElapsedMilliseconds, VpnTun.PathState(transport, DateTime.UtcNow).Length == 0)) { pending = true; Set("starting", "auto-retry"); }
-                    }
-                    wake.WaitOne(250); wake.Reset();
-                }
+                else { wake.WaitOne(250); wake.Reset(); }
             }
         }
         public void Dispose()
