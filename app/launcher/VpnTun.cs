@@ -95,7 +95,7 @@ namespace RemoteAgents.Launcher
         }
         internal static string PathState(Dictionary<string, object> transport, DateTime now)
         { return !VpnWatchdog.TransportReady(transport, now) ? "no-path" : !Json.Bool(Json.Map(Json.Get(transport, "helper")), "udp") ? "no-udp" : ""; }
-        internal object Config(string user, string password, IEnumerable<string> endpoints, IEnumerable<string> lanSubnets, Dictionary<string, object> snapshot, Dictionary<string, object> dnsPolicy)
+        internal object Config(string user, string password, IEnumerable<string> endpoints, IEnumerable<string> lanSubnets, Dictionary<string, object> snapshot, Dictionary<string, object> dnsPolicy, int? socksPort = null)
         {
             var exclusions = new List<string> { "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16", "224.0.0.0/4", "127.0.0.0/8", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8" };
             exclusions.AddRange(ExcludeCidrs); exclusions.AddRange(lanSubnets);
@@ -108,7 +108,7 @@ namespace RemoteAgents.Launcher
             var check = new Uri(CheckUrl); string[] excluded = exclusions.Distinct().ToArray();
             return D("log", D("disabled", true),
                 "inbounds", new[] { D("type", "tun", "tag", "vpn-tun", "interface_name", InterfaceName, "address", Address, "stack", "system", "auto_route", true, "strict_route", Json.Bool(dnsPolicy, "strictRoute"), "route_exclude_address", excluded) },
-                "outbounds", new[] { D("type", "socks", "tag", "vpn-active", "server", "127.0.0.1", "server_port", SocksPort, "version", "5", "username", user, "password", password), D("type", "direct", "tag", "vpn-direct") },
+                "outbounds", new[] { D("type", "socks", "tag", "vpn-active", "server", "127.0.0.1", "server_port", socksPort ?? SocksPort, "version", "5", "username", user, "password", password), D("type", "direct", "tag", "vpn-direct") },
                 "route", D("auto_detect_interface", true, "final", "vpn-active", "rules", new[] {
                     D("inbound", new[] { "vpn-tun" }, "network", "tcp", "ip_cidr", new[] { ProbeAddress + "/32" }, "port", new[] { check.Port }, "action", "route-options", "override_address", check.DnsSafeHost, "override_port", check.Port),
                     D("inbound", new[] { "vpn-tun" }, "domain", new[] { check.DnsSafeHost }, "action", "resolve", "server", "vpn-dns", "disable_cache", true, "disable_optimistic_cache", true, "timeout", "3000ms"),
@@ -119,6 +119,114 @@ namespace RemoteAgents.Launcher
         }
     }
 
+    // Immutable evidence kept with the config actually launched, not merely the
+    // latest transport status. DNS ordering/duplicates cannot cause a restart.
+    internal sealed class VpnTunBinding
+    {
+        internal readonly int Port;
+        internal readonly string[] Ips;
+        internal readonly string Revision, Hosts;
+        internal VpnTunBinding(int port, IEnumerable<string> ips, string revision, string hosts)
+        { Port = port; Ips = ips.Select(ip => IPAddress.Parse(ip).ToString()).Distinct().OrderBy(ip => ip, StringComparer.Ordinal).ToArray(); Revision = revision; Hosts = hosts; }
+        internal static int PortOf(Dictionary<string, object> transport)
+        { int port = Json.Int(Json.Map(Json.Get(transport, "helper")), "vpnInPort", 0); return port > 0 && port <= 65535 ? port : 0; }
+        internal static string HostsOf(Dictionary<string, object> transport)
+        { return string.Join("\n", Json.Strings(Json.Get(transport, "endpoints")).Distinct().OrderBy(host => host, StringComparer.Ordinal)); }
+        internal static string Key(Dictionary<string, object> transport)
+        { return PortOf(transport) + "\n" + Json.Str(transport, "configRevision") + "\n" + HostsOf(transport); }
+        internal bool Same(VpnTunBinding other) { return Port == other.Port && Ips.SequenceEqual(other.Ips); }
+        internal static VpnTunBinding Resolve(Dictionary<string, object> transport, Func<string, IEnumerable<string>> resolve, int fallbackPort = 0)
+        {
+            var hosts = Json.Strings(Json.Get(transport, "endpoints"));
+            if (hosts.Length == 0 || hosts.Length > 256) throw new InvalidDataException("Нет списка узлов канала");
+            var ips = new List<string>();
+            foreach (string host in hosts.Distinct()) {
+                IPAddress ip;
+                var addresses = IPAddress.TryParse(host, out ip) ? new[] { ip.ToString() } : resolve(host).ToArray();
+                if (addresses.Length == 0) throw new InvalidDataException("Нет адресов узла канала");
+                ips.AddRange(addresses);
+            }
+            int port = PortOf(transport);
+            return new VpnTunBinding(port == 0 ? fallbackPort : port, ips, Json.Str(transport, "configRevision"), HostsOf(transport));
+        }
+    }
+
+    // Only the owner thread consumes results or changes the running binding.
+    // Resolution, config construction, file I/O and sing-box check run off-loop.
+    internal sealed class VpnTunRebind
+    {
+        internal const int IntervalMs = 5000, RetryMs = 10000;
+        sealed class Result { internal VpnTunBinding Binding; internal string Config, Key; }
+        sealed class Work { internal Task<Result> Task; internal volatile bool Changed; }
+        readonly Func<Dictionary<string, object>, VpnTunBinding> resolve;
+        readonly Func<VpnTunBinding, Dictionary<string, object>, string, string> build;
+        readonly Func<string, bool> activate;
+        Work pending;
+        Result prepared;
+        long nextScan, nextRestart, nextBuild, retryAfter;
+        string lastRequest;
+        internal VpnTunBinding Binding { get; private set; }
+        internal string Config { get; private set; }
+        internal bool Failed { get; private set; }
+        internal bool Preparing { get { return pending != null; } }
+        internal VpnTunRebind(long now, VpnTunBinding binding, string config,
+            Func<Dictionary<string, object>, VpnTunBinding> resolve,
+            Func<VpnTunBinding, Dictionary<string, object>, string, string> build, Func<string, bool> activate)
+        {
+            Binding = binding; Config = config; this.resolve = resolve; this.build = build; this.activate = activate;
+            nextScan = now + IntervalMs; lastRequest = binding.Port + "\n" + binding.Revision + "\n" + binding.Hosts;
+        }
+        static bool Ready(Dictionary<string, object> transport, DateTime now)
+        { return VpnWatchdog.TransportReady(transport, now) && VpnTunBinding.PortOf(transport) != 0 && Json.Str(transport, "configRevision").Length > 0 && VpnTunBinding.HostsOf(transport).Length > 0; }
+        internal bool Searching(Dictionary<string, object> transport)
+        {
+            int port = VpnTunBinding.PortOf(transport);
+            string hosts = VpnTunBinding.HostsOf(transport);
+            return port != 0 && port != Binding.Port || hosts.Length > 0 && hosts != Binding.Hosts || Failed || prepared != null || pending != null && pending.Changed;
+        }
+        internal void Tick(long now, DateTime utcNow, Dictionary<string, object> transport)
+        {
+            bool ready = Ready(transport, utcNow); string key = VpnTunBinding.Key(transport);
+            if (pending != null && pending.Task.IsCompleted) {
+                try {
+                    var result = pending.Task.GetAwaiter().GetResult();
+                    // A discarded build also counts against the construction limit.
+                    if (!Binding.Same(result.Binding)) nextBuild = now + IntervalMs;
+                    if (ready && result.Key == key) {
+                        Failed = false;
+                        if (Binding.Same(result.Binding)) { Binding = result.Binding; nextScan = now + IntervalMs; }
+                        else prepared = result;
+                    } else nextScan = now;
+                } catch { Failed = true; retryAfter = nextScan = now + RetryMs; }
+                pending = null;
+            }
+            if (prepared != null && (!ready || prepared.Key != key)) { prepared = null; nextScan = now; }
+            if (pending == null && prepared == null && ready && now >= retryAfter && now >= nextRestart && now >= nextBuild && (now >= nextScan || key != lastRequest)) {
+                // Freeze publisher-owned dictionaries before handing them to a worker.
+                var evidence = Json.Map(Json.Parse(Json.Encode(transport)));
+                var running = Binding; string config = Config;
+                var work = new Work(); lastRequest = key; nextScan = nextBuild = now + IntervalMs;
+                work.Task = Task.Run(() => {
+                    var binding = resolve(evidence); work.Changed = !running.Same(binding);
+                    return new Result { Binding = binding, Key = key, Config = work.Changed ? build(binding, evidence, config) : config };
+                });
+                pending = work;
+            }
+        }
+        // Called after publishing searching, so even an immediate successful launch
+        // cannot publish on using the previous process's coreAlive observation.
+        internal bool Apply(long now)
+        {
+            if (prepared == null || now < nextRestart) return false;
+            var result = prepared; prepared = null; nextRestart = now + IntervalMs;
+            bool started = false;
+            try { started = activate(result.Config); } catch { }
+            if (started) { Binding = result.Binding; Config = result.Config; Failed = false; nextScan = now + IntervalMs; }
+            else { Failed = true; retryAfter = nextScan = now + RetryMs; }
+            return true;
+        }
+    }
+
     // The same step drives the running session and portable lifecycle tests. Only a
     // stalled owner loop may call stop; transport/conflict evidence changes status.
     internal sealed class VpnTunMonitor
@@ -126,14 +234,15 @@ namespace RemoteAgents.Launcher
         readonly Action<Dictionary<string, object>> publish;
         readonly Action<string> stop;
         readonly Action restart;
+        readonly VpnTunRebind rebind;
         readonly Dictionary<string, object> policy;
         long pulse, nextRestart, changedUntil;
         string revision, network, reasonCode = "", since = "";
         internal VpnTunMonitor(long now, Dictionary<string, object> transport, Dictionary<string, object> policy,
-            Action<Dictionary<string, object>> publish, Action<string> stop, Action restart)
+            Action<Dictionary<string, object>> publish, Action<string> stop, Action restart, VpnTunRebind rebind = null)
         {
             pulse = now; revision = Json.Str(transport, "configRevision"); network = Json.Str(transport, "network");
-            this.policy = policy; this.publish = publish; this.stop = stop; this.restart = restart;
+            this.policy = policy; this.publish = publish; this.stop = stop; this.restart = restart; this.rebind = rebind;
         }
         internal bool Step(long now, DateTime utcNow, bool coreAlive, Dictionary<string, object> transport, string conflict, bool inventoryFailed = false)
         {
@@ -141,11 +250,13 @@ namespace RemoteAgents.Launcher
             pulse = now;
             string state = "on", code = "ok", text = "";
             string path = VpnTun.PathState(transport, utcNow);
+            if (rebind != null) rebind.Tick(now, utcNow, transport);
             if (VpnWatchdog.TransportReady(transport, utcNow)) {
                 if (revision != Json.Str(transport, "configRevision") || network != Json.Str(transport, "network")) changedUntil = now + 500;
                 revision = Json.Str(transport, "configRevision"); network = Json.Str(transport, "network");
             }
-            if (!coreAlive) { state = "searching"; code = "path-process-exited"; text = "Сбой канала, перезапускаю"; }
+            if (rebind != null && rebind.Searching(transport)) { state = "searching"; code = "vpn-rebind"; text = rebind.Failed ? "Не удалось обновить настройки VPN, повторяю" : "Обновляю VPN под новые настройки связи"; }
+            else if (!coreAlive) { state = "searching"; code = "path-process-exited"; text = "Сбой канала, перезапускаю"; }
             else if (conflict.Length > 0) { state = "conflict"; code = "vpn-conflict"; text = VpnWatchdog.FailureSummary("conflict", conflict); }
             else if (inventoryFailed) { state = "searching"; code = "conflict-check-failed"; text = "Не удалось проверить другие VPN"; }
             else if (path.Length > 0 || Json.Str(transport, "phase") == "searching" || Json.Str(transport, "localNet") == "down" || now < changedUntil) {
@@ -165,7 +276,8 @@ namespace RemoteAgents.Launcher
                 "conflictName", conflict, "dnsPolicy", policy, "updatedAt", utcNow.ToString("o")));
             // Restart a dead process inside the existing Job, never toggle VPN off/on.
             // Repeated immediate exits are bounded to one launch per second.
-            if (!coreAlive && now >= nextRestart) { nextRestart = now + 1000; restart(); }
+            bool rebound = rebind != null && rebind.Apply(now);
+            if (!coreAlive && !rebound && now >= nextRestart) { nextRestart = now + 1000; restart(); }
             return true;
         }
     }
@@ -199,7 +311,7 @@ namespace RemoteAgents.Launcher
         readonly string home, directory, executable;
         readonly Action<Action> asOwner;
         readonly Action<string, int> log;
-        readonly object gate = new object();
+        readonly object gate = new object(), preparationGate = new object();
         readonly ManualResetEvent wake = new ManualResetEvent(false);
         readonly Thread thread;
         readonly Stopwatch clock = Stopwatch.StartNew();
@@ -254,6 +366,12 @@ namespace RemoteAgents.Launcher
         }
         void RunPreparation(string exe, string[] args, string output, int epoch)
         {
+            // Conflict inventory and rebind validation share the cancellable slot.
+            // Both callers are background workers once the owner lease is active.
+            lock (preparationGate) RunPreparationLocked(exe, args, output, epoch);
+        }
+        void RunPreparationLocked(string exe, string[] args, string output, int epoch)
+        {
             var job = new NativeJob();
             lock (gate) { if (disposed || generation != epoch) { job.Dispose(); throw new OperationCanceledException(); } preparationJob = job; }
             try {
@@ -273,6 +391,36 @@ namespace RemoteAgents.Launcher
             }
             log("vpn-" + reason + "-" + stage, 1);
         }
+        VpnTunBinding ResolveBinding(Dictionary<string, object> transport, int epoch, int fallbackPort)
+        {
+            var elapsed = Stopwatch.StartNew();
+            return VpnTunBinding.Resolve(transport, host => {
+                lock (gate) if (disposed || epoch != generation) throw new OperationCanceledException();
+                if (elapsed.ElapsedMilliseconds > 15000) throw new TimeoutException();
+                var lookup = Dns.GetHostAddressesAsync(host);
+                if (!lookup.Wait(3000)) throw new TimeoutException();
+                return lookup.GetAwaiter().GetResult().Select(ip => ip.ToString());
+            }, fallbackPort);
+        }
+        // Run sessions are serialized on the owner thread. Reuse two slots across
+        // enables, and only write the slot that is not used by the running core.
+        internal static string ConfigPath(string directory, string current = null)
+        {
+            string first = Path.Combine(directory, "vpn-tun-a.json");
+            return current == first ? Path.Combine(directory, "vpn-tun-b.json") : first;
+        }
+        string PrepareConfig(VpnTun options, VpnTunBinding binding, Dictionary<string, object> transport,
+            Dictionary<string, object> snapshot, Dictionary<string, object> policy, int epoch, string config)
+        {
+            lock (gate) if (disposed || epoch != generation) throw new OperationCanceledException();
+            var credential = Read("state/helper-socks.json");
+            byte[] password = Convert.FromBase64String(Json.Str(credential, "password"));
+            if (Json.Str(credential, "user") != "ra-helper" || password.Length != 32) throw new InvalidDataException("Нет учётных данных помощника");
+            var lan = Json.Map(Json.Get(transport, "lan"));
+            Files.Atomic(config, Json.Encode(options.Config("ra-helper", Json.Str(credential, "password"), binding.Ips, Json.Strings(Json.Get(lan, "subnets")), snapshot, policy, binding.Port)));
+            RunPreparation(executable, new[] { "check", "-c", config }, null, epoch);
+            return config;
+        }
         void Run(VpnTun options, int epoch)
         {
             string stage = "inventory";
@@ -285,35 +433,14 @@ namespace RemoteAgents.Launcher
                 var transport = Transport(); string pathState = VpnTun.PathState(transport, DateTime.UtcNow);
                 if (pathState.Length > 0) { lock (gate) if (epoch == generation) Set(pathState, "path", TrayMenuModel.ActiveTitle(transport)); return; }
                 stage = "exclusions";
-                // Only public endpoint names from the channel publisher; no channel credentials/configs.
-                var hosts = Json.Strings(Json.Get(transport, "endpoints"));
-                if (hosts.Length == 0 || hosts.Length > 256) throw new InvalidDataException("Нет списка узлов канала");
-                string preparedRevision = Json.Str(transport, "configRevision");
-                var ips = new List<string>(); var preparationClock = Stopwatch.StartNew();
-                foreach (var host in hosts.Distinct()) {
-                    lock (gate) if (disposed || epoch != generation) return;
-                    if (preparationClock.ElapsedMilliseconds > 15000) throw new TimeoutException();
-                    IPAddress ip;
-                    if (IPAddress.TryParse(host, out ip)) ips.Add(ip.ToString());
-                    else {
-                        var lookup = Dns.GetHostAddressesAsync(host);
-                        if (!lookup.Wait(3000)) throw new TimeoutException();
-                        ips.AddRange(lookup.GetAwaiter().GetResult().Select(a => a.ToString()));
-                    }
-                }
-                var lan = Json.Map(Json.Get(transport, "lan"));
-                var credential = Read("state/helper-socks.json");
-                byte[] password = Convert.FromBase64String(Json.Str(credential, "password"));
-                if (Json.Str(credential, "user") != "ra-helper" || password.Length != 32) throw new InvalidDataException("Нет учётных данных помощника");
-                if (Json.Int(Json.Map(Json.Get(transport, "helper")), "vpnInPort", 0) != options.SocksPort) throw new InvalidDataException("Изменился порт канала");
+                // The same resolver/builder is used again while VPN stays enabled.
+                var binding = ResolveBinding(transport, epoch, options.SocksPort);
                 stage = "config-check";
-                string config = Path.Combine(directory, "vpn-tun.json");
-                Files.Atomic(config, Json.Encode(options.Config("ra-helper", Json.Str(credential, "password"), ips, Json.Strings(Json.Get(lan, "subnets")), snapshot, policy)));
-                RunPreparation(executable, new[] { "check", "-c", config }, null, epoch);
+                string config = PrepareConfig(options, binding, transport, snapshot, policy, epoch, ConfigPath(directory));
                 // Recheck fresh channel evidence immediately before creating the TUN.
                 transport = Transport(); pathState = VpnTun.PathState(transport, DateTime.UtcNow);
                 if (pathState.Length > 0) { lock (gate) if (epoch == generation) Set(pathState, "path", TrayMenuModel.ActiveTitle(transport)); return; }
-                if (preparedRevision != Json.Str(transport, "configRevision") || Json.Int(Json.Map(Json.Get(transport, "helper")), "vpnInPort", 0) != options.SocksPort) { lock (gate) if (epoch == generation) Set("no-path", "path-changed"); return; }
+                if (binding.Revision != Json.Str(transport, "configRevision") || VpnTunBinding.PortOf(transport) != 0 && VpnTunBinding.PortOf(transport) != binding.Port || binding.Hosts != VpnTunBinding.HostsOf(transport)) { lock (gate) if (epoch == generation) Set("no-path", "path-changed"); return; }
                 stage = "core-start";
                 var launchJob = new NativeJob();
                 lock (gate) {
@@ -326,15 +453,30 @@ namespace RemoteAgents.Launcher
                 });
                 // Never hold the status/command lock across CreateProcess.
                 core = launchJob.Start(executable, new[] { "run", "-c", config }, directory);
+                var rebind = new VpnTunRebind(clock.ElapsedMilliseconds, binding, config,
+                    evidence => ResolveBinding(evidence, epoch, options.SocksPort),
+                    (updated, evidence, current) => PrepareConfig(options, updated, evidence, snapshot, policy, epoch, ConfigPath(directory, current)),
+                    candidate => {
+                        lock (gate) if (disposed || epoch != generation || lease.Expired) return false;
+                        try {
+                            if (core != null) {
+                                if (!core.WaitForExit(0)) core.Kill();
+                                if (!core.WaitForExit(1000)) return false;
+                                core.Dispose(); core = null;
+                            }
+                            core = launchJob.Start(executable, new[] { "run", "-c", candidate }, directory);
+                            return true;
+                        } catch { log("vpn-core-rebind-failed", 1); return false; }
+                    });
                 var monitor = new VpnTunMonitor(clock.ElapsedMilliseconds, transport, policy,
                     value => { lock (gate) if (epoch == generation && !lease.Expired) status = value; },
                     reason => Stop(reason, "owner-loop", epoch),
                     () => {
                         lock (gate) if (disposed || epoch != generation || lease.Expired) return;
                         if (core != null) { core.Dispose(); core = null; }
-                        try { core = launchJob.Start(executable, new[] { "run", "-c", config }, directory); }
+                        try { core = launchJob.Start(executable, new[] { "run", "-c", rebind.Config }, directory); }
                         catch { log("vpn-core-restart-failed", 1); }
-                    });
+                    }, rebind);
                 var scan = new VpnTunConflictScan(clock.ElapsedMilliseconds, () => Snapshot(epoch, true));
                 long nextRead = 0;
                 stage = "monitor";
