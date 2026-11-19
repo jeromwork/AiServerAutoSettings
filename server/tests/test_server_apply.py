@@ -219,6 +219,18 @@ class ApplyTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.fake = Fake(self.tmp.name)
 
+    def test_missing_payload_file_is_a_known_plan_error(self):
+        source = Path(self.tmp.name) / 'payload'
+        shutil.copytree(SOURCE, source)
+        missing = 'lan_pc_access.py'
+        (source / missing).unlink()
+        self.fake.system.source = source
+        result = self.fake.engine().run('plan')
+        rows = [row for row in result['parts'] if missing in row['summary']]
+        self.assertTrue(rows, result)
+        self.assertTrue(all(row['state'] == 'error' for row in rows))
+        self.assertNotIn('детали скрыты', json.dumps(result, ensure_ascii=False))
+
     def test_second_apply_has_zero_actions_and_secret_free_output(self):
         f = self.fake
         with contextlib.redirect_stdout(io.StringIO()) as stdout, contextlib.redirect_stderr(io.StringIO()) as stderr:

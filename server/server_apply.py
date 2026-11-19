@@ -26,6 +26,8 @@ from urllib.parse import urlsplit
 MARKER = '---remoteagents-stdin---'
 HIDDEN = '<есть, скрыт>'
 SOURCE = Path(__file__).resolve().parent
+CODE_FILES = ('server_apply.py', 'server-apply.sh', 'lan_vpn.py', 'lan-vpn.sh', 'proxy_out.py', 'proxy-out.sh', 'remoteagents_config.py', 'base_network.py', 'lan_share.py', 'lan_pc_access.py', 'server_recovery.py', 'server_components.py', 'server_packages.py', 'component_files.py', 'lan-config.schema.json', 'happier-web.schema.json',
+                     'happier_web.py', 'happier_web_common.py', 'happier_web_release.py', 'happier_web_quotas.py', 'agy_usage_scrape.py', 'happier_web_verify.cjs', 'happier_web_settings.cjs', 'happier_web_addon.js')
 
 
 class Error(Exception):
@@ -629,17 +631,23 @@ class Engine:
     def code_files(self):
         target = '/usr/local/lib/remoteagents/server/'
         files = {}
-        for name in ('server_apply.py', 'server-apply.sh', 'lan_vpn.py', 'lan-vpn.sh', 'proxy_out.py', 'proxy-out.sh', 'remoteagents_config.py', 'base_network.py', 'lan_share.py', 'lan_pc_access.py', 'server_recovery.py', 'server_components.py', 'server_packages.py', 'component_files.py', 'lan-config.schema.json', 'happier-web.schema.json',
-                     'happier_web.py', 'happier_web_common.py', 'happier_web_release.py', 'happier_web_quotas.py', 'agy_usage_scrape.py', 'happier_web_verify.cjs', 'happier_web_settings.cjs', 'happier_web_addon.js'):
-            files[target + name] = ((self.s.source / name).read_bytes(), 0o755 if name.endswith('.sh') else 0o644)
+
+        def read(path):
+            try:
+                return path.read_bytes()
+            except FileNotFoundError:
+                raise Error('Пакет кода сервера неполный: нет файла «' + path.name + '». Обновите программу на ПК.') from None
+
+        for name in CODE_FILES:
+            files[target + name] = (read(self.s.source / name), 0o755 if name.endswith('.sh') else 0o644)
         schema = self.s.source / 'config.paste.schema.json'
         if not schema.exists():
             schema = self.s.source.parent / 'app/launcher/config.paste.schema.json'
-        files[target + 'config.paste.schema.json'] = (schema.read_bytes(), 0o644)
+        files[target + 'config.paste.schema.json'] = (read(schema), 0o644)
         for name in ('gateway.py', 'tg_gateway_keys.py', 'tg_gateway_setup.py', 'install.sh', 'README.md'):
-            files[target + 'tg-gateway/' + name] = ((self.s.source / 'tg-gateway' / name).read_bytes(), 0o755 if name.endswith('.sh') else 0o644)
+            files[target + 'tg-gateway/' + name] = (read(self.s.source / 'tg-gateway' / name), 0o755 if name.endswith('.sh') else 0o644)
         for name, path in components.assets(self.s.source):
-            files[target + 'assets/' + name] = (path.read_bytes(), 0o644)
+            files[target + 'assets/' + name] = (read(path), 0o644)
         return files
 
     def code_current(self):
