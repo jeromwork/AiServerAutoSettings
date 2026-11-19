@@ -17,7 +17,7 @@ namespace RemoteAgents.Launcher
         internal bool Enabled { get { return Subnets.Count + Domains.Count > 0; } }
         internal static uint IPv4(string text)
         {
-            if (!Regex.IsMatch(text, @"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$")) throw new InvalidDataException("share: нужен IPv4");
+            if (!Regex.IsMatch(text, @"\A(?:[0-9]{1,3}\.){3}[0-9]{1,3}\z")) throw new InvalidDataException("share: нужен IPv4");
             uint value = 0;
             foreach (string part in text.Split('.')) { uint n; if (!uint.TryParse(part, out n) || n > 255 || part.Length > 1 && part[0] == '0') throw new InvalidDataException("share: неверный IPv4"); value = (value << 8) | n; }
             return value;
@@ -36,9 +36,19 @@ namespace RemoteAgents.Launcher
         {
             string name = text.StartsWith("*.", StringComparison.Ordinal) ? text.Substring(2) : text;
             IPAddress ip;
-            if (name.Length > 253 || name.IndexOf('.') < 0 || IPAddress.TryParse(name, out ip) || name.Split('.').Any(p => !Regex.IsMatch(p, @"^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$")))
+            if (name.Length > 253 || name.IndexOf('.') < 0 || IPAddress.TryParse(name, out ip) || name.Split('.').Any(p => !Regex.IsMatch(p, @"\A[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\z")))
                 throw new InvalidDataException("share.domains: нужно DNS-имя или *.домен");
             return text.ToLowerInvariant();
+        }
+        internal const int MaxHosts = 100;
+        // Explicit LAN host name for the hosts file: full name, no wildcard, under one of the network's domains.
+        internal static string HostName(string text, IEnumerable<string> domains)
+        {
+            if (text.IndexOf('*') >= 0) throw new InvalidDataException("share.hosts: шаблоны с * не поддерживаются, укажите полные имена");
+            string name = Domain(text);
+            if (!domains.Any(d => { string root = d.TrimStart('*', '.').ToLowerInvariant(); return name == root || name.EndsWith("." + root, StringComparison.Ordinal); }))
+                throw new InvalidDataException("share.hosts: имя " + text + " должно входить в share.domains этой сети");
+            return name;
         }
         internal bool Allows(string host, int port)
         {
@@ -73,17 +83,28 @@ namespace RemoteAgents.Launcher
                 }
                 if (one.Domains.Count > 0 && one.DnsServers.Count == 0)
                     throw new InvalidDataException("Для доменов сети " + Json.Str(lan, "name") + " укажите share.dnsServers (DNS-серверы внутри ЛВС)");
+                var hostsRaw = Json.Get(share, "hosts");
+                if (hostsRaw != null && !(hostsRaw is System.Collections.IEnumerable) || hostsRaw is string) throw new InvalidDataException("share.hosts: нужен массив имён");
+                var hostNames = Json.Strings(hostsRaw);
+                if (hostNames.Length > MaxHosts) throw new InvalidDataException("share.hosts: не более " + MaxHosts + " имён");
+                var hostList = new List<string>();
+                foreach (string h in hostNames) {
+                    string name = HostName(h, one.Domains);
+                    if (hostList.Contains(name)) throw new InvalidDataException("share.hosts: имена повторяются");
+                    hostList.Add(name);
+                }
+                if (hostList.Count > 0 && one.DnsServers.Count == 0) throw new InvalidDataException("Для share.hosts сети " + Json.Str(lan, "name") + " укажите share.dnsServers");
                 if (!lan.ContainsKey("share")) continue;
                 bool enabled = !share.ContainsKey("enabled") || Json.Bool(share, "enabled");
                 if (share.ContainsKey("enabled") && !(share["enabled"] is bool)) throw new InvalidDataException("share.enabled: нужно true или false");
                 string probe = Json.Text(lan, "testHost", Json.Str(lan, "host"));
                 int port = Json.Int(lan, "testPort", Json.Int(lan, "port", 22));
                 result.Networks.Add(new Dictionary<string, object> { { "name", Json.Str(lan, "name") }, { "subnets", one.Subnets.ToArray() },
-                    { "domains", one.Domains.ToArray() }, { "dnsServers", one.DnsServers.ToArray() }, { "testHost", probe }, { "testPort", port }, { "enabled", enabled } });
+                    { "domains", one.Domains.ToArray() }, { "dnsServers", one.DnsServers.ToArray() }, { "hosts", hostList.ToArray() }, { "testHost", probe }, { "testPort", port }, { "enabled", enabled } });
                 // Deprecated forwards are deliberately not used as destinations or probes.
                 if (!enabled) continue;
                 if (!one.Enabled) continue;
-                if (probe.Length == 0 || port < 1 || port > 65535 || !Regex.IsMatch(probe, @"^[a-zA-Z0-9][a-zA-Z0-9.-]*$") || !one.Allows(probe, port)) throw new InvalidDataException("lan.share: задайте testHost/testPort, разрешённый через share");
+                if (probe.Length == 0 || port < 1 || port > 65535 || !Regex.IsMatch(probe, @"\A[a-zA-Z0-9][a-zA-Z0-9.-]*\z") || !one.Allows(probe, port)) throw new InvalidDataException("lan.share: задайте testHost/testPort, разрешённый через share");
                 if (result.ProbeHost.Length == 0) { result.ProbeHost = probe; result.ProbePort = port; }
                 result.Subnets.AddRange(one.Subnets); result.Domains.AddRange(one.Domains); result.DnsServers.AddRange(one.DnsServers);
             }

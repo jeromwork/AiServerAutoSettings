@@ -36,6 +36,7 @@ namespace RemoteAgents.Launcher
             internal Core Core;
             internal int Starts, Cleaned, Snapshots, Index = 7, Probes, TunnelChecks;
             internal bool Channel = true, Host = true, NrptOk = true, StartFails;
+            internal LanDnsProbe Dns53 = LanDnsProbe.Open; internal int DnsProbes;
             internal object Config;
             internal Action BeforeStart;
             public LanTunSnapshot Snapshot() { Snapshots++; return SnapshotValue; }
@@ -43,6 +44,7 @@ namespace RemoteAgents.Launcher
             public ILanTunCore Start(object config) { if (BeforeStart != null) BeforeStart(); Starts++; if (StartFails) throw new IOException(); Config = config; return Core = new Core(); }
             public void CleanAdapter() { Cleaned++; }
             public bool Nrpt(string command) { Commands.Add(command); return NrptOk; }
+            public LanDnsProbe ProbeDns(string dnsServer) { DnsProbes++; return Dns53; }
             public int TunnelIndex() { TunnelChecks++; return Index; }
             public bool Probe(LanTunNetwork network, string[] subnets, int index) { Probes++; return Host && index == Index; }
             public bool ChannelReady() { return Channel; }
@@ -206,6 +208,9 @@ namespace RemoteAgents.Launcher
                 now = 16000; tun.Tick();
                 Check(Rows(tun).All(n => Json.Str(n, "state") == "host-down" && Json.Str(n, "reason").Contains("не отвечает")) && MainScreenModel.LanTone(Rows(tun)) == Tone.Error, "host-down after grace is red");
             }
+            DnsMode(request);
+            HostsWithTun(request);
+            ParseHosts(request);
             int executed = 0;
             Func<string, Dictionary<string, object>, string> execute = (command, r) => { executed++; return Json.Encode(new { ok = true }); };
             string valid = Json.Encode(request);
@@ -271,6 +276,69 @@ namespace RemoteAgents.Launcher
             Check(timer.ElapsedMilliseconds < 10000, "LAN tests under 10 seconds");
             Console.WriteLine("PASS: LanTun " + count + " checks, " + timer.ElapsedMilliseconds + " ms");
         }
+        static bool Adds(Platform p) { return p.Commands.Any(c => c.Contains("Add-DnsClientNrptRule")); }
+        // Port 53 blocked by another VPN client: NRPT is removed and stays away; it returns when the port opens.
+        static void DnsMode(Dictionary<string, object> request)
+        {
+            long now = 0; var platform = new Platform { Dns53 = LanDnsProbe.Denied };
+            using (var tun = new LanTun(platform, () => now)) {
+                tun.Apply(request); Check(Adds(platform), "NRPT is installed before the first probe (default mode)");
+                now = 1000; tun.Tick();
+                Check(platform.DnsProbes == 1 && platform.Commands.Last() == LanTun.RemoveNrpt, "denied port 53 removes our NRPT");
+                Check(Rows(tun).All(n => Json.Str(n, "dns") == "hosts" && Json.Bool(n, "nrptOk") && Json.Str(n, "state") == "ok" && !Json.Str(n, "reason").Contains("не настроены")), "hosts mode is reported and counts as configured names");
+                platform.Commands.Clear(); now = 11000; tun.Tick(); now = 21000; tun.Tick();
+                Check(!Adds(platform) && platform.DnsProbes == 1, "no NRPT and no extra probe within 60 s");
+                platform.Dns53 = LanDnsProbe.Unknown; now = 61000; tun.Tick();
+                Check(platform.DnsProbes == 2 && !Adds(platform) && Rows(tun).All(n => Json.Str(n, "dns") == "hosts"), "unknown probe result keeps the mode");
+                platform.Dns53 = LanDnsProbe.Open; now = 121000; tun.Tick();
+                Check(platform.DnsProbes == 3 && Adds(platform) && Rows(tun).All(n => Json.Str(n, "dns") == "nrpt" && Json.Bool(n, "nrptOk")), "open port 53 restores NRPT");
+                platform.Channel = false; platform.Dns53 = LanDnsProbe.Denied; now = 181000; tun.Tick();
+                Check(platform.DnsProbes == 3, "no probe while the channel is down");
+            }
+        }
+        // The service owns the hosts block: written while the channel is up, kept through a blip, removed on stop.
+        static void HostsWithTun(Dictionary<string, object> request)
+        {
+            var named = Json.Map(Json.Parse(Json.Encode(request)));
+            Json.Map(Json.Array(named["networks"])[0])["hosts"] = new[] { "portal.office.test" };
+            var fake = new FakeHosts { Dns = { { "portal.office.test", new[] { "10.23.0.80" } } } };
+            fake.Text = "127.0.0.1 localhost\r\n";
+            long now = 0; var platform = new Platform();
+            using (var tun = new LanTun(platform, () => now, new LanHosts(fake, a => a()))) {
+                Check(Json.Bool(Decode(tun.Apply(named)), "ok"), "apply with hosts");
+                now = 1000; tun.Tick();
+                Check(fake.Text.Contains("10.23.0.80 portal.office.test # RemoteAgents:office") && fake.Writes == 1, "block written after the channel is ready");
+                Check(Rows(tun).Single(n => Json.Str(n, "name") == "office")["hostsNames"].Equals(1) && Json.Str(Rows(tun)[0], "hostsUpdated").Length > 0, "status shows names and update time");
+                platform.Channel = false; now = 11000; tun.Tick(); now = 21000; tun.Tick();
+                Check(fake.Text.Contains("portal.office.test") && fake.Writes == 1, "channel blip leaves the block");
+                platform.Channel = true; now = 31000; tun.Tick();
+                var again = Json.Map(Json.Parse(Json.Encode(request)));
+                tun.Apply(again); Check(!fake.Text.Contains("RemoteAgents:lan"), "lan.apply without names removes the block");
+                tun.Apply(named); now = 40000; tun.Tick(); Check(fake.Text.Contains("portal.office.test"), "names back");
+                fake.Dns["portal.office.test"] = new[] { "10.23.0.81" };
+                platform.SnapshotValue.Addresses.Add(new LanTunRoute("192.168.77.5/32", "Wi-Fi")); now = 71000; tun.Tick();
+                Check(fake.Text.Contains("10.23.0.81 portal.office.test"), "change of the physical network refreshes the block at once");
+                tun.Stop(); Check(fake.Text == "127.0.0.1 localhost\r\n", "stop removes the block");
+            }
+        }
+        static void ParseHosts(Dictionary<string, object> request)
+        {
+            var six = LanTunNetwork.Parse(request);
+            Check(six.All(n => n.Hosts.Length == 0), "six keys parse with no names (older tray)");
+            var seven = Json.Map(Json.Parse(Json.Encode(request)));
+            Json.Map(Json.Array(seven["networks"])[0])["hosts"] = new[] { "portal.office.test", "a.b.office.test" };
+            var parsed = LanTunNetwork.Parse(seven);
+            Check(parsed[0].Hosts.SequenceEqual(new[] { "portal.office.test", "a.b.office.test" }) && parsed[1].Hosts.Length == 0, "seven keys carry the names");
+            Func<Action<Dictionary<string, object>>, bool> rejected = edit => {
+                var r = Json.Map(Json.Parse(Json.Encode(request))); edit(Json.Map(Json.Array(r["networks"])[0]));
+                try { LanTunNetwork.Parse(r); return false; } catch (InvalidDataException) { return true; }
+            };
+            Check(rejected(m => m["hosts"] = new[] { "*.office.test" }) && rejected(m => m["hosts"] = new[] { "x.example.org" }) && rejected(m => m["hosts"] = new[] { "A.office.test" })
+                && rejected(m => m["hosts"] = new[] { "a.office.test", "a.office.test" }) && rejected(m => m["hosts"] = new object[] { 5 }) && rejected(m => m["hosts"] = "a.office.test")
+                && rejected(m => m["hosts"] = Enumerable.Range(0, 101).Select(i => "h" + i + ".office.test").ToArray()) && rejected(m => m["extra"] = new string[0]),
+                "bad names, duplicates, non-lists, more than 100 and unknown keys are refused");
+            Check(!rejected(m => m["hosts"] = Enumerable.Range(0, 100).Select(i => "h" + i + ".office.test").ToArray()), "exactly 100 names allowed");
+        }
         static void SingBoxCheck(object config)
         {
             string binary = Environment.GetEnvironmentVariable("SINGBOX");
@@ -289,11 +357,13 @@ namespace RemoteAgents.Launcher
         static int Main(string[] args)
         {
             if (args.Length == 1 && args[0] == "--lan-tun") { Run(); return 0; }
+            if (args.Length == 1 && args[0] == "--lan-hosts") { LanHostsTests.Run(); return 0; }
+            if (args.Length == 6 && args[0] == "--lan-hosts-resolve") return LanHostsTests.Resolve(args);
             // Focused UI/tick coverage without running unrelated disk/update suites.
             if (args.Length == 2 && args[0] == "--lan-ui") {
                 MainScreenModelTests.Run(); LanTickTests.Run(args[1]); return 0;
             }
-            if (args.Length == 0 || !args[0].StartsWith("--", StringComparison.Ordinal)) Run();
+            if (args.Length == 0 || !args[0].StartsWith("--", StringComparison.Ordinal)) { Run(); LanHostsTests.Run(); }
             try { return (int)typeof(NetHelperTests).GetMethod("Main", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, new object[] { args }); }
             catch (TargetInvocationException ex) { ExceptionDispatchInfo.Capture(ex.InnerException).Throw(); throw; }
         }

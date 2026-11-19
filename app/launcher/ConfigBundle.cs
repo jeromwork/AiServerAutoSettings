@@ -103,12 +103,14 @@ namespace RemoteAgents.Launcher
             var enabled = B(); enabled["default"] = true;
             var domains = A(S(253, 1, @"^(?:\*\.)?[a-zA-Z0-9][a-zA-Z0-9.-]*$"), 128);
             domains["description"] = "Имена этой ЛВС для split-DNS; требуют непустой share.dnsServers";
+            var hosts = A(S(253, 1, @"^[a-zA-Z0-9][a-zA-Z0-9.-]*$"), 100);
+            hosts["description"] = "Полные имена хостов этой ЛВС (без *), каждое под одним из share.domains: служба пишет их адреса в hosts, когда другой VPN-клиент закрыл DNS-порт 53; адреса берутся из DNS ЛВС, только из share.subnets. Требует share.dnsServers";
             var forwards = A(O(D("name", S(32, 1, @"^[a-z][a-z0-9-]{0,31}$"), "host", Host(),
                 "port", N(1, 65535), "localPort", N(1024, 65535)), "name", "host", "port", "localPort"), 64);
             forwards["deprecated"] = true;
             forwards["$comment"] = "Устаревшее поле: принимается для совместимости, игнорируется, config export его не выдаёт";
             return O(D("subnets", A(S(18, 1, @"^[0-9.]+/[0-9]{1,2}$"), 64),
-                "domains", domains, "dnsServers", dns, "enabled", enabled, "forwards", forwards));
+                "domains", domains, "dnsServers", dns, "hosts", hosts, "enabled", enabled, "forwards", forwards));
         }
 
         static Dictionary<string, object> LanSchema()

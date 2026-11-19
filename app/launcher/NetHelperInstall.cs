@@ -17,7 +17,7 @@ namespace RemoteAgents.Launcher
     internal static class NetHelperInstall
     {
         // Bump manually whenever helper logic or the wire protocol changes.
-        internal const string HelperVersion = "3";
+        internal const string HelperVersion = "4";
         internal const string ServiceName = "RemoteAgentsNet";
         internal const string DisplayName = "RemoteAgents: локальные сети и VPN";
         internal static bool NeedsInstall(string installed) { return (installed ?? "").Trim() != HelperVersion; }
@@ -91,6 +91,7 @@ namespace RemoteAgents.Launcher
             StopService();
             if (Exists()) Sc(new[] { "delete", ServiceName });
             RemoveNrpt();
+            try { WindowsLanHosts.RemoveBlock(); } catch { /* A busy hosts file must not block removal; the block only maps private LAN names. */ }
             // Run this command from the program's EXE, never the service image being removed.
             DeleteDirectory(InstallDirectory); DeleteDirectory(DataDirectory);
             return 0;

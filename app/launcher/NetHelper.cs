@@ -119,10 +119,12 @@ namespace RemoteAgents.Launcher
                 NetHelperInstall.SecureDirectory(NetHelperInstall.DataDirectory);
                 log = new NetHelperLog(NetHelperInstall.DataDirectory); log.Write("starting", 0);
                 var lanClock = Stopwatch.StartNew();
-                lan = new LanTun(new WindowsLanTun(home, config => {
+                var lanPlatform = new WindowsLanTun(home, config => {
                     IDisposable job; var process = StartSingBox(Core.Lan, config, out job);
                     return new LanTunProcess(process, job, () => lifetime.RemoveJob(job));
-                }, log.Write, lifetime.AddJob, lifetime.RemoveJob), () => lanClock.ElapsedMilliseconds);
+                }, log.Write, lifetime.AddJob, lifetime.RemoveJob);
+                // Names of the LAN for programs that cannot use NRPT (another VPN client blocks DNS port 53): a hosts block kept by this service.
+                lan = new LanTun(lanPlatform, () => lanClock.ElapsedMilliseconds, new LanHosts(new WindowsLanHosts(lanPlatform.Credentials, log.Write), a => Task.Run(a)));
                 // Only one callback may do network I/O. Status/commands also serialize in LanTun.
                 int lanTicking = 0;
                 lanTimer = new System.Threading.Timer(_ => {

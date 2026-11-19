@@ -70,6 +70,31 @@ class LanConfigExportTests(unittest.TestCase):
         public = rc.computer_sections(data)
         self.assertEqual(public['lan'][1]['share'], data['lan'][1]['share'])
 
+    def test_share_hosts_pass_through_and_are_validated(self):
+        data = {'lan': networks()}
+        data['lan'][0]['share']['hosts'] = ['portal.example.org', 'crm-api.example.org']
+        public = rc.computer_sections(data)
+        self.assertEqual(public['lan'][0]['share']['hosts'], ['portal.example.org', 'crm-api.example.org'])
+        self.assertNotIn('hosts', public['lan'][1]['share'], 'empty list is not exported')
+        data = {'lan': networks()}
+        data['lan'][0]['share']['hosts'] = []
+        self.assertNotIn('hosts', rc.computer_sections(data)['lan'][0]['share'], 'explicit empty list is not exported')
+        too_many = ['h%d.example.org' % i for i in range(101)]
+        bad = (['*.example.org'], ['portal.example.com'], ['example.com'], ['PORTAL.example.org'], ['10.123.0.5'], ['portal'],
+               ['a.example.org', 'a.example.org'], 'portal.example.org', [5], too_many, ['bad name.example.org'])
+        for hosts in bad:
+            data = {'lan': networks()}
+            data['lan'][0]['share']['hosts'] = hosts
+            with self.subTest(hosts=hosts), self.assertRaises(rc.Error):
+                rc.computer_sections(data)
+        data = {'lan': networks()}
+        data['lan'][0]['share']['hosts'] = ['h%d.example.org' % i for i in range(100)]
+        self.assertEqual(len(rc.computer_sections(data)['lan'][0]['share']['hosts']), 100)
+        data = {'lan': networks()}
+        data['lan'][1]['share'] = dict(subnets=['10.124.0.0/24'], domains=[], dnsServers=[], hosts=['x.branch.example.org'])
+        with self.assertRaises(rc.Error):
+            rc.computer_sections(data)
+
 
 if __name__ == '__main__':
     unittest.main()
