@@ -19,6 +19,8 @@ server-install-sync.sh
 # Includes optional launcher path/VPN commands as the transport module is delivered.
 # Снимок сети Collect-NetState.ps1 поставляется общим glob транспортных скриптов.
 transport/*.ps1
+# тесты в пакет не кладём
+!transport/test-*.ps1
 transport/*.json
 # Server bootstrap entry/*.sh stays in source until server rollback acceptance.
 disk/Install-RemoteDisk.ps1
