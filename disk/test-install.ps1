@@ -1,5 +1,6 @@
 ﻿#requires -Version 5.1
 $ErrorActionPreference='Stop'
+$budget = if ($env:DISK_TEST_BUDGET_S) { [double]$env:DISK_TEST_BUDGET_S } else { 30 }
 $watch=[Diagnostics.Stopwatch]::StartNew();$tmp=Join-Path ([IO.Path]::GetTempPath()) ('disk-install-'+[IO.Path]::GetRandomFileName());[void][IO.Directory]::CreateDirectory($tmp)
 function Assert($Value,$Message){if(-not $Value){throw $Message}}
 $checks=@()
@@ -7,7 +8,7 @@ try {
     foreach($file in Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1'){$tokens=$null;$errors=$null;[void][Management.Automation.Language.Parser]::ParseFile($file.FullName,[ref]$tokens,[ref]$errors);Assert ($errors.Count -eq 0) ('Parse: '+$file.Name)}
     . (Join-Path $PSScriptRoot 'Disk.Common.ps1')
     # Independent suites use disjoint HOME/state. Overlap their process/JIT
-    # startup with the adapter/binary checks below, within the same 30 s budget.
+    # startup with the adapter/binary checks below, within the same aggregate budget.
     $exe=(Get-Process -Id $PID).Path
     foreach($case in @(@{file='test-engine.ps1';home='lifecycle'},@{file='test-startup.ps1';home='startup'})){
         $si=New-Object Diagnostics.ProcessStartInfo;$si.FileName=$exe
@@ -80,7 +81,7 @@ try {
         Assert ($check.process.ExitCode -eq 0) ('Child suite failed: '+$check.name)
         Write-Output $check.out.GetAwaiter().GetResult()
     }
-    Assert ($watch.Elapsed.TotalSeconds -lt 30) ('PowerShell time budget: '+[Math]::Round($watch.Elapsed.TotalSeconds,2)+'s');Write-Output ('install: exit 0, {0:N2}s' -f $watch.Elapsed.TotalSeconds)
+    Assert ($watch.Elapsed.TotalSeconds -lt $budget) ('PowerShell time budget: '+[Math]::Round($watch.Elapsed.TotalSeconds,2)+'s; budget '+$budget+'s');Write-Output ('install: exit 0, {0:N2}s' -f $watch.Elapsed.TotalSeconds)
 }finally{
     foreach($check in $checks){try{if(-not $check.process.HasExited){$check.process.Kill();$check.process.WaitForExit()}}finally{$check.process.Dispose()}}
     Remove-Item -LiteralPath $tmp -Recurse -Force

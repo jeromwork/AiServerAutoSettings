@@ -56,12 +56,18 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(next(r['state'] for r in result['parts'] if r['part'] == 'recovery'), 'change')
         self.assertFalse(result['ok'])
 
-    def test_rotated_secret_updates_backup_even_when_service_needs_no_change(self):
+    def test_rotated_proxy_password_updates_backup_after_ssh_confirm(self):
         self.install()
         values = dict(VALUES, **{'proxy-out-password': 'ROTATED_SENTINEL'})
         plan = self.f.engine(self.c, values).run('plan')
         self.assertEqual(next(r['state'] for r in plan['parts'] if r['part'] == 'recovery'), 'change')
-        self.assertTrue(self.f.engine(self.c, values).run('apply')['ok'])
+        # A proxy password change must wait for a new SSH before it is saved.
+        pending = self.f.engine(self.c, values).run('apply')
+        self.assertFalse(pending['ok'], pending)
+        self.assertEqual(next(r['state'] for r in pending['parts'] if r['part'] == 'internet'), 'pending')
+        self.assertEqual(self.f.read(recovery.ENVELOPE)['secrets']['proxy-out-password'], VALUES['proxy-out-password'])
+        confirmed = self.f.engine(self.c, values, ssh_checked=True).run('apply')
+        self.assertTrue(confirmed['ok'], confirmed)
         self.assertEqual(self.f.read(recovery.ENVELOPE)['secrets']['proxy-out-password'], 'ROTATED_SENTINEL')
         self.assertEqual(self.f.engine(self.c, values).run('apply')['actions'], [])
         self.assertNotIn('ROTATED_SENTINEL', json.dumps(plan))

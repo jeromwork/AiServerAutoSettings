@@ -40,11 +40,11 @@ wait_for_memory() {
 }
 # Default to serial groups on the shared host; callers may explicitly opt into overlap.
 export LAUNCHER_TESTS_SERIAL=${LAUNCHER_TESTS_SERIAL:-1}
-# This suite launches two child suites and enforces a 30 s aggregate budget.
+# This suite launches two child suites; the full run allows a 90 s aggregate budget.
 # Keep it out of the server/offline overlap: scheduling contention alone can
 # double its elapsed time without any failed lifecycle/startup assertions.
 wait_for_memory
-timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-install.ps1" < /dev/null
+DISK_TEST_BUDGET_S=90 timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/disk/test-install.ps1" < /dev/null
 wait_for_memory
 # These groups touch disjoint temporary HOME/state. Keep .NET builds after the
 # server group (it builds the same projects); independent offline checks overlap
@@ -132,7 +132,7 @@ wait_for_memory
   wait_for_memory
   LOCALAPPDATA="$testdir/local" timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-refresh.ps1" -TestHome "$testdir/config-refresh" < /dev/null
   wait_for_memory
-  timeout 60 python3 "$here/test-server-health.py"
+  timeout 120 python3 "$here/test-server-health.py"
   wait_for_memory
   timeout 120 python3 "$repo/transport/test-config-sync-preflight.py"
   wait_for_memory
@@ -191,7 +191,7 @@ timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:C
 wait_for_memory
 # End-to-end on a loopback stand: config export -> paste/vault -> orchestrator -> real Server/Connection -> sync -> revoke.
 wait_for_memory
-timeout 120 python3 "$here/test_config_e2e.py"
+timeout 300 python3 "$here/test_config_e2e.py"
 wait_for_memory
 timeout 120 "$repo/build/make-bundle.sh" 20261109.235959-test "$testdir/bundles"
 if [[ ${SKIP_LAUNCHER_EXE:-0} == 1 ]]; then

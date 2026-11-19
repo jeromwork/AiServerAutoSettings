@@ -151,7 +151,7 @@ class FirstRunTests(unittest.TestCase):
         self.assertIn('Clipboard.SetText(MainScreenModel.Report(screenFacts, screenTechnical))', main)
         self.assertNotIn('NotImplementedException', main + cards)
         self.assertNotIn('StatusView.Line(', cards)
-        self.assertIn('VpnRequested(!vpnSwitch.Checked)', cards)
+        self.assertIn('VpnRequested(!vpnOn)', cards)
         self.assertIn('if (enabled) CheckVpn(vpn, true); else DisableVpn(vpn, true);', tray)
         self.assertIn('pathSelection.Choose(tag); if (choosePath != null) choosePath(tag)', main)
         self.assertIn('ScriptCommand("Set-TransportPath.ps1"', tray)
@@ -223,8 +223,8 @@ class FirstRunTests(unittest.TestCase):
         self.assertIn('BackgroundWork.Disk.Stop();', tray.split('protected override void ExitThreadCore()', 1)[1])
         self.assertIn('BackgroundWork.Disk.Changed +=', tray)
         self.assertIn('BackgroundWork.Disk.Changed -= diskChanged', window)
-        # The install leaves the plan instead of holding the other sections.
-        self.assertIn('if (Product.IsVpn) plan.Remove(ConfigSections.Disk);', run)
+        # Disk scheduling no longer depends on the removed VPN product.
+        self.assertNotIn('Product.IsVpn', window)
         start = window.split('void StartDisk()', 1)[1].split('async Task RetrySection(', 1)[0]
         self.assertIn('BackgroundWork.Disk.Start(', start)
         self.assertIn('current.ApplyDisk(token)', start)
