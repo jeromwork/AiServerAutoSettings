@@ -5,6 +5,7 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace RemoteAgents.Launcher
 {
@@ -29,12 +30,16 @@ namespace RemoteAgents.Launcher
         }
 
         // Hash names as well as contents, so additions, removals and renames also invalidate the pin.
-        // Ignore checkout line endings and UTF-8 BOMs, but preserve all other source text.
+        // Ignore checkout line endings, UTF-8 BOMs and launcher version values; preserve all other source text.
         static string Fingerprint(IEnumerable<string> sources, Func<string, string> read)
         {
             var text = new StringBuilder();
-            foreach (string source in sources)
-                text.Append(source).Append('\n').Append(Files.LF(read(source).TrimStart('\uFEFF'))).Append('\0');
+            foreach (string source in sources) {
+                string content = Files.LF(read(source).TrimStart('\uFEFF'));
+                if (source == "app/launcher/RemoteAgents.Launcher.csproj")
+                    content = Regex.Replace(content, @"(<(Version|AssemblyVersion|FileVersion)>)[^<]*(</\2>)", "$1$3");
+                text.Append(source).Append('\n').Append(content).Append('\0');
+            }
             using (var sha = SHA256.Create())
                 return BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(text.ToString()))).Replace("-", "").ToLowerInvariant();
         }
