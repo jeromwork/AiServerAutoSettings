@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Без подтверждённого пути демон проверяет живость всех кандидатов одновременно; rank (по очереди) — после.
+"""Без подтверждённого пути демон проверяет живость всех кандидатов одновременно; после раунда плановых проб нет.
 Поддельные SSH/sing-box, только loopback API, без внешней сети. Запуск: python3 transport/test-transport-liveness.py /path/to/pwsh
 Это проверка оркестрации на Linux, не приёмка настоящей Windows/SSH.
 """
@@ -80,8 +80,8 @@ Server(('127.0.0.1',port),API).serve_forever()
     (root / 'channel.json').write_text(json.dumps(channel))
     transport = dict(profilePath=str(root / 'profile.json'), channelPath=str(root / 'channel.json'),
                      singBoxPath=str(sb), bindPhysical=False, metered='false', openSsh=True,
-                     activeIntervalSec=600, allLivenessIntervalSec=2, priority=['singbox-ssh-direct', 'vless'],
-                     rankIntervalSec=1800, stallSeconds=2,
+                     priority=['singbox-ssh-direct', 'vless'],
+                     stallSeconds=2,
                      probeTimeoutSec=TIMEOUT, restartDelaySec=1, apiPort=api_port)
     (root / 'config.json').write_text(json.dumps(dict(version=1, transport=transport)))
     env = dict(os.environ, LOCALAPPDATA=str(root))
@@ -98,15 +98,16 @@ Server(('127.0.0.1',port),API).serve_forever()
         except OSError:
             return []
 
-    # Fault injection: rank is already due while liveness is not due yet.
-    # On a real start the deadlines differ by microseconds; a scheduler tick
-    # between them used to start serial ranking before any liveness probes.
+    # Override only direct-check I/O: no external traffic from a failed startup path.
     source = DAEMON.read_text(encoding='utf-8-sig')
-    original = "$script:nextRank=[DateTime]::UtcNow.AddSeconds(1);"
-    assert original in source
-    source = source.replace(original, "$script:nextRank=[DateTime]::MinValue;")
-    common = str(DAEMON.with_name('Transport.Common.ps1')).replace("'", "''")
-    source = source.replace("(Join-Path $PSScriptRoot 'Transport.Common.ps1')", "'" + common + "'")
+    for name in ('Common', 'Decide', 'Events'):
+        target = str(DAEMON.with_name('Transport.'+name+'.ps1')).replace("'", "''")
+        source = source.replace("(Join-Path $PSScriptRoot 'Transport."+name+".ps1')", "'"+target+"'")
+    source = source.replace("$metered=$null\ntry{", """function Start-TransportDirectCheck { @{result=(New-DaemonEvent 'net-up' '' 'ok')} }
+function Receive-TransportDirectCheck($Check) { $Check.result }
+function Stop-TransportDirectCheck($Check) {}
+$metered=$null
+try{""")
     fixture_daemon = root / 'daemon.ps1'
     fixture_daemon.write_text(source, encoding='utf-8-sig')
     daemon = subprocess.Popen([PWSH, '-NoLogo', '-NoProfile', '-File', str(fixture_daemon), '-Home', str(root)],
@@ -122,25 +123,18 @@ Server(('127.0.0.1',port),API).serve_forever()
         assert ok_at - first < TIMEOUT - 2, 'a working path is confirmed before the silent path times out (%.1f s)' % (ok_at - first)
         assert status()['active'] != 'vless-direct', 'the silent remembered-first path is not the active one'
         assert not [p for p in probes() if p['bytes'] == 262144], 'speed ranking does not start before the connection works'
-        # Rank (по очереди) начинается только после окончания проб живости, включая таймаут молчащего пути.
-        rank = until(lambda: [p for p in probes() if p['bytes'] == 262144], seconds=TIMEOUT + 20)
-        assert min(p['start'] for p in rank) >= first + TIMEOUT - .5, 'ranking waits for the liveness round'
+        # Wait past the silent startup timeout and several former schedule intervals.
+        time.sleep(TIMEOUT + 3)
+        assert not [p for p in probes() if p['bytes'] != 65536], probes()
+        assert len(probes()) == 3, 'no periodic active/all-candidate/ranking probes after startup'
         assert status().get('ok')
-        live_counts = [p['port'] for p in probes() if p['bytes'] == 65536]
-        assert sorted(live_counts) == [26000, 26001, 26002], 'verified active path must wait for activeIntervalSec before another health probe'
-        before={c['tag']: c.get('lastOkAt') or '' for c in status()['candidates']}
-        (root/'wake-all').touch()
-        refreshed=until(lambda: (s if len((s:=status()).get('candidates', []))==3 and
-                                all(c.get('lastOkAt') and c['lastOkAt']>before[c['tag']]
-                                    for c in s['candidates']) else None), seconds=TIMEOUT+20)
-        assert all(c['latencyMs']>0 for c in refreshed['candidates']), refreshed
-        assert sorted(c['order'] for c in refreshed['candidates'])==[1,2,3]
-        priorities={c['tag']:c['priority'] for c in refreshed['candidates']}
+        assert sorted(c['order'] for c in status()['candidates']) == [1, 2, 3]
+        priorities={c['tag']:c['priority'] for c in status()['candidates']}
         assert priorities=={'singbox-ssh-direct':0,'vless-direct':1,'openssh-direct':999}, priorities
         (root / 'stop').touch()
         daemon.wait(timeout=15)
         assert daemon.returncode == 0, daemon.communicate()
-        print('OK: liveness probes in parallel (%.1f s to a working path with a %d s silent one), rank afterwards (имитаторы)' % (ok_at - first, TIMEOUT))
+        print('OK: liveness probes in parallel (%.1f s to a working path with a %d s silent one), no periodic probes afterwards (имитаторы)' % (ok_at - first, TIMEOUT))
     except Exception:
         print('STATUS', status(), file=sys.stderr)
         print('PROBES', probes(), file=sys.stderr)

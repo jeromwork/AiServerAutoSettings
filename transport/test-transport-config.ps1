@@ -172,8 +172,6 @@ try{
     $failedRows=@(Get-TransportRemembered $oldMemory 'fixture' $brokenPaths.AllCandidates)
     Assert (@($failedRows|Where-Object {$_.tag -in $badTags -and $_.state -eq 'fail' -and $_.diagnostic.reason -eq 'hop-host-key-missing' -and $_.diagnostic.stderr -eq 'Нет ключа хоста промежуточного сервера' -and $null -eq $_.kbps}).Count -eq 2) 'both overlay candidates have a safe failure, overriding remembered success'
     Assert (-not (Get-TransportBest $failedRows -Remembered)) 'failed construction never selected from memory'
-    $rank=@(Get-TransportRankTags $failedRows $brokenPaths.Candidates @{topOnMetered=100} $true)
-    Assert (@($rank|Where-Object {$_ -in $badTags}).Count -eq 0 -and $rank.Count -eq $brokenPaths.Candidates.Count) 'failed candidates do not consume metered ranking slots'
     for($i=0;$i -lt $brokenPaths.Candidates.Count;$i++){Assert ($brokenPaths.Candidates[$i].port -eq 26000+$i) 'probe ports remain contiguous after a skipped candidate'}
     $selector=(New-TransportConfig $broken $brokenPaths 'fixture' 'vless-relay-relay').outbounds|Where-Object {$_.tag -eq 'active'}
     Assert (@($selector.outbounds|Where-Object {$_ -in $badTags}).Count -eq 0) 'generated selector has no failed dependencies'
@@ -320,13 +318,20 @@ try{
     Assert (-not $publicJson.Contains($helper.password) -and -not $publicJson.Contains('password') -and @($public.PSObject.Properties).Count -eq 3) 'статус содержит только порты и UDP, без секрета'
     # Execute only the real publisher body, never the daemon/network lifecycle.
     $daemonAst=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'Transport.Daemon.ps1'),[ref]$null,[ref]$null)
+    $clockBody=$daemonAst.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-DaemonTime'},$true).Body.GetScriptBlock()
+    Assert ([Math]::Abs((& $clockBody)-[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) -lt 1000) 'Unix-время демона независимо от локального часового пояса'
     $publisher=$daemonAst.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Publish-TransportStatus'},$true).Body.GetScriptBlock()
     & {
         param($root,$settings,$paths,$active,$publisher)
         $rows=@();$engine=$null;$network=$null;$confirmed=$false;$errorText='fixture';$revision='fixture';$exitCode=0;$retryAt=[DateTime]::MinValue;$pin=[pscustomobject]@{mode='auto';tag=$null}
+        $verdict=@{action='searching';localNet='down';reason=@{code='local-network-down';text='Нет интернета у вас (сеть), жду';since=0}}
+        $decision=@{switches=@(@{at=0;from='a';to='b';why='path-stalled'})}
         & $publisher
     } $work $settings $paths 'singbox-ssh-direct' $publisher
     $daemonStatus=Read-TransportJson (Join-Path $work 'status/transport.json')
+    $statusText=[IO.File]::ReadAllText((Join-Path $work 'status/transport.json'))
+    Assert ($statusText -match '"since"\s*:\s*"1970-01-01T00:00:00.0000000Z"' -and $statusText -match '"at"\s*:\s*"1970-01-01T00:00:00.0000000Z"') 'reason/switches используют ISO UTC'
+    Assert ($daemonStatus.phase -eq 'searching' -and $daemonStatus.localNet -eq 'down') 'publisher сохраняет поиск и локальную причину'
     Assert ($daemonStatus.helper.lanInPort -eq 17880 -and $daemonStatus.helper.vpnInPort -eq 17881 -and -not $daemonStatus.helper.udp -and -not ([IO.File]::ReadAllText((Join-Path $work 'status/transport.json'))).Contains($helper.password)) 'настоящий publisher пишет helper без пароля'
     foreach($external in $paths.Outbounds|Where-Object {-not $_.detour -and $_.type -ne 'socks'}){
         $actual=$bound.outbounds|Where-Object {$_.tag -eq $external.tag}
@@ -366,7 +371,7 @@ try{
         $file=Join-Path $work 'helper-ports-check.json';Write-TransportJson $file $portConfig;Test-TransportConfigFile $SingBox $file
     }
     $rows=@([pscustomobject]@{tag='a';state='ok';kbps=12;checkedAt='2026-01-01T00:00:00Z'},[pscustomobject]@{tag='b';state='ok';kbps=80;checkedAt='2026-01-01T00:00:00Z'},[pscustomobject]@{tag='c';state='frozen';kbps=900;checkedAt=$null})
-    Assert ((Get-TransportBest $rows).tag -eq 'b') 'выбор лучшего живого'
+    Assert ((Get-TransportBest $rows).tag -eq 'a') 'скорость не создаёт рейтинг путей'
     Assert ((Get-TransportBest $rows @('a')).tag -eq 'a') 'ограничение top набора'
     $preferred=Copy-TransportObject $rows
     $preferred[0]|Add-Member priority (Get-TransportPriority 'vless-direct' @('vless','vless-direct'))
@@ -375,18 +380,9 @@ try{
     Assert ((Get-TransportBest $preferred).tag -eq 'a') 'priority раньше скорости'
     $preferred[0].state='remembered'
     Assert ((Get-TransportBest $preferred -Remembered).tag -eq 'a') 'ok и remembered в общей группе перед priority'
-    $near=[pscustomobject]@{state='ok';kbps=100};$challenger=[pscustomobject]@{state='ok';kbps=149}
-    Assert (-not (Test-TransportBetter $near $challenger @{switchFactor=1.5})) 'близкие скорости не переключают путь'
-    $challenger.kbps=150
-    Assert (Test-TransportBetter $near $challenger @{switchFactor=1.5}) 'порог гистерезиса включителен'
-    $near.state='fail';$challenger.kbps=1
-    Assert (Test-TransportBetter $near $challenger @{switchFactor=1.5}) 'неисправный активный путь не удерживается гистерезисом'
-    $ties=@([pscustomobject]@{tag='a';state='ok';kbps=100;latencyMs=20},[pscustomobject]@{tag='b';state='ok';kbps=100;latencyMs=10})
-    Assert ((Get-TransportBest $ties).tag -eq 'b') 'задержка разрешает равенство скоростей'
-    $rankOptions=@{topOnMetered=1}
-    Assert (@(Get-TransportRankTags $rows @($rows|ForEach-Object {[pscustomobject]@{tag=$_.tag}}) $rankOptions $true)[0] -eq 'b') 'на лимитной сети лучший из памяти'
-    Assert (@(Get-TransportRankTags $rows @($rows|ForEach-Object {[pscustomobject]@{tag=$_.tag}}) $rankOptions $null).Count -eq 1) 'неизвестная стоимость экономит трафик'
-    Assert (@(Get-TransportRankTags $rows $paths.Candidates $rankOptions $false).Count -eq $paths.Candidates.Count) 'без лимита полный рейтинг'
+    $ties=@([pscustomobject]@{tag='a';state='ok';kbps=900;latencyMs=20},[pscustomobject]@{tag='b';state='ok';kbps=1;latencyMs=10})
+    Assert ((Get-TransportBest $ties).tag -eq 'b') 'задержка выбирает путь независимо от скорости'
+    Assert ($cfg.log.level -eq 'warn') 'события ошибок доступны при уровне warn'
     $s=New-TransportProbeState 65536 5 45
     [void](Update-TransportProbeState $s 16384 1);[void](Update-TransportProbeState $s 65536 2)
     Assert ($s.state -eq 'ok' -and $s.kbps -eq 32) 'жив и эффективная скорость от начала пробы'
@@ -425,7 +421,7 @@ try{
             @([pscustomobject]@{ifIndex=1;Name='Tailscale';InterfaceDescription='Tailscale';Status='Up'},[pscustomobject]@{ifIndex=2;Name='Wi-Fi';InterfaceDescription='Wireless';Status='Up'},[pscustomobject]@{ifIndex=3;Name='Ethernet';InterfaceDescription='Ethernet';Status='Up'})
         }
         $net=Get-TransportNetwork
-        Assert ($net.available -and $net.interface -eq 'Ethernet' -and $net.id -eq $n1) 'физический шлюз: исключение VPN и сумма метрик'
+        Assert ($net.available -and $net.interface -eq 'Ethernet' -and $net.ifIndex -eq 3 -and $net.id -eq $n1) 'физический шлюз: исключение VPN и сумма метрик'
     }finally{
         foreach($name in $mockNames){Remove-Item ('function:'+$name);if($priorFunctions.ContainsKey($name)){Set-Item ('function:'+$name) $priorFunctions[$name]}}
     }
@@ -496,6 +492,7 @@ try{
     Write-TransportJson (Join-Path $voff 'status/vpn.json') @{state='off'};Assert (Test-TransportVpnOff $voff) 'vpn off'
     Write-TransportLog $voff 'bind-mode' ([pscustomobject]@{message='bind=none reason=no-physical-interface'})
     Assert ((Get-Content -Raw (Join-Path $voff 'logs/transport.log')) -match 'bind-mode bind=none reason=no-physical-interface') 'журнал: bind=none reason=...'
+    $rows[0]|Add-Member -Force latencyMs 20;$rows[1]|Add-Member -Force latencyMs 10
     $memory=Read-TransportMemory $work;Save-TransportMemory $work $memory $n1 $rows
     $memory=Read-TransportMemory $work;$remembered=@(Get-TransportRemembered $memory $n1 @([pscustomobject]@{tag='a'},[pscustomobject]@{tag='b'}))
     Assert ((Get-TransportBest $remembered -Remembered).tag -eq 'b') 'память per-network'
@@ -508,10 +505,18 @@ try{
         Write-TransportJson $profileFile $p;Write-TransportJson $channelFile $channel
         Write-TransportJson (Join-Path $work 'config.json') @{version=1;transport=@{profilePath=$profileFile;channelPath=$channelFile}}
         $defaults=Read-TransportSettings $work
-        Assert ($defaults.Options.bindPhysical -and $defaults.Options.activeProbeBytes -eq 65536 -and $defaults.Options.rankProbeBytes -eq 262144) 'реальные значения по умолчанию'
-        Assert ($defaults.Options.activeIntervalSec -eq 120 -and $defaults.Options.meteredActiveIntervalSec -eq 300 -and $defaults.Options.rankIntervalSec -eq 1800) 'интервалы по умолчанию'
-        Assert ($defaults.Options.allLivenessIntervalSec -eq 600 -and $defaults.Options.meteredAllLivenessIntervalSec -eq 1800 -and $defaults.Options.switchFactor -eq 1.5) 'периодическая живость и гистерезис по умолчанию'
-        Assert ($defaults.Options.topOnMetered -eq 3 -and $defaults.Options.apiPort -eq 29090) 'экономный режим и API по умолчанию'
+        Assert ($defaults.Options.bindPhysical -and $defaults.Options.apiPort -eq 29090) 'значения запуска по умолчанию'
+        Assert ($defaults.Options.switchStallSeconds -eq 8 -and $defaults.Options.switchStallConns -eq 2) 'пороги подозрения на зависание по умолчанию'
+        Assert (-not $defaults.Options.ContainsKey('rankProbeBytes') -and -not $defaults.Options.ContainsKey('activeIntervalSec')) 'нет планировщика и рейтинга в опциях'
+        $custom=Read-TransportJson (Join-Path $work 'config.json');$custom.transport|Add-Member switch ([pscustomobject]@{stallSeconds=11;stallConns=3})
+        Write-TransportJson (Join-Path $work 'config.json') $custom
+        $configured=Read-TransportSettings $work
+        Assert ($configured.Options.switchStallSeconds -eq 11 -and $configured.Options.switchStallConns -eq 3) 'настройки transport.switch читаются'
+        foreach($invalid in @(0,-1,1.5,$true,'8',3601)){
+            $custom.transport.switch.stallSeconds=$invalid;Write-TransportJson (Join-Path $work 'config.json') $custom
+            $rejected=$false;try{Read-TransportSettings $work|Out-Null}catch{$rejected=$true};Assert $rejected 'неверный stallSeconds отклонён'
+        }
+        $custom.transport.PSObject.Properties.Remove('switch');Write-TransportJson (Join-Path $work 'config.json') $custom
         $personalConfig=Read-TransportJson (Join-Path $work 'config.json')
         $personalConfig|Add-Member wizard ([pscustomobject]@{serverRoute=$personal})
         Write-TransportJson (Join-Path $work 'config.json') $personalConfig
@@ -681,7 +686,8 @@ try{
 
     # АСТ содержит только синтаксис PS 5.1: запрещаем PS7-only операторы.
     foreach($scriptFile in Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1'){
-        $source=[IO.File]::ReadAllBytes($scriptFile.FullName);Assert ($source.Length -ge 3 -and $source[0] -eq 239 -and $source[1] -eq 187 -and $source[2] -eq 191) ('UTF-8 BOM '+$scriptFile.Name)
+        $source=[IO.File]::ReadAllBytes($scriptFile.FullName);$bom=($source.Length -ge 3 -and $source[0] -eq 239 -and $source[1] -eq 187 -and $source[2] -eq 191)
+        Assert ($bom -or [Text.Encoding]::UTF8.GetString($source) -notmatch '[^\x00-\x7F]') ('UTF-8 BOM для Unicode либо чистый ASCII '+$scriptFile.Name)
         $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($scriptFile.FullName,[ref]$tokens,[ref]$errors)
         Assert (@($errors).Count -eq 0) ('парсер '+$scriptFile.Name)
         Assert (@($tokens|Where-Object {$_.Kind.ToString() -in @('QuestionQuestion','QuestionQuestionEquals','QuestionMark','AndAnd','OrOr')}).Count -eq 0) ('нет PS7 операторов '+$scriptFile.Name)

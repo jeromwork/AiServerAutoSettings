@@ -475,14 +475,20 @@ function Read-TransportSettings([string]$Root) {
     $channelPath=[string]$t.channelPath
     if(-not $channelPath){throw 'Нет transport.channelPath в config.json'}
     $channel=Read-TransportJson $channelPath
-    $defaults=@{bindPhysical=$true;activeProbeBytes=65536;rankProbeBytes=262144;activeIntervalSec=120;meteredActiveIntervalSec=300;allLivenessIntervalSec=600;meteredAllLivenessIntervalSec=1800;switchFactor=1.5;rankIntervalSec=1800;rankConcurrency=1;topOnMetered=3;stallSeconds=5;probeTimeoutSec=45;metered='auto';restartDelaySec=3;openSsh=$true;singBoxPath=(Join-Path $PSScriptRoot 'sing-box.exe')}
+    $defaults=@{bindPhysical=$true;stallSeconds=5;probeTimeoutSec=45;metered='auto';restartDelaySec=3;openSsh=$true;singBoxPath=(Join-Path $PSScriptRoot 'sing-box.exe')}
     $portDefaults=Get-TransportPortDefaults;foreach($k in $portDefaults.Keys){$defaults[$k]=$portDefaults[$k]}
     $s=@{};foreach($k in $defaults.Keys){$s[$k]=Get-TransportValue $t $k $defaults[$k]}
     foreach($k in @('bindPhysical','openSsh')){if($s[$k] -isnot [bool]){throw 'Нужен логический параметр transport'}}
     foreach($k in @('sshPort','channelSocksPort','syncPort','lanProxyPort','vpnInPort','probePortBase','socksPortBase','apiPort')){if([int]$s[$k] -lt 1 -or [int]$s[$k] -gt 65535){throw 'Неверный порт transport'}}
     if([string]$s.channelSshAddress -notmatch '\A127\.\d{1,3}\.\d{1,3}\.\d{1,3}\z' -or [string]$s.channelSshAddress -eq '127.0.0.1'){throw 'Неверный адрес входа канала'}
-    foreach($k in @('activeProbeBytes','rankProbeBytes','activeIntervalSec','meteredActiveIntervalSec','allLivenessIntervalSec','meteredAllLivenessIntervalSec','switchFactor','rankIntervalSec','rankConcurrency','topOnMetered','stallSeconds','probeTimeoutSec','restartDelaySec')){if([double]$s[$k] -le 0){throw 'Параметры transport должны быть положительными'}}
-    if([double]$s.switchFactor -lt 1){throw 'switchFactor должен быть не меньше 1'}
+    foreach($k in @('stallSeconds','probeTimeoutSec','restartDelaySec')){if([double]$s[$k] -le 0){throw 'Параметры transport должны быть положительными'}}
+    $switch=Get-TransportValue $t 'switch' $null
+    if($null -ne $switch -and $switch -isnot [Collections.IDictionary] -and $switch -isnot [pscustomobject]){throw 'transport.switch должен быть объектом'}
+    foreach($item in @(@('stallSeconds',8,3600),@('stallConns',2,1024))){
+        $value=Get-TransportValue $switch $item[0] $item[1]
+        if($value -is [bool] -or $value -isnot [ValueType] -or [double]$value -ne [Math]::Floor([double]$value) -or [double]$value -lt 1 -or [double]$value -gt $item[2]){throw 'Неверный параметр transport.switch'}
+        $s['switch'+$item[0].Substring(0,1).ToUpperInvariant()+$item[0].Substring(1)]=[int]$value
+    }
     if($null -ne $t.priority -and $t.priority -isnot [Array]){throw 'priority должен быть массивом префиксов'}
     if($null -ne $t.priority){foreach($prefix in @($t.priority)){if($null -eq $prefix -or $prefix -isnot [string] -or -not $prefix.Trim()){throw 'Неверный префикс priority'}}}
     if([string]$s.metered -notin @('auto','true','false','True','False')){throw 'Неверный metered'}
@@ -796,7 +802,7 @@ function New-TransportConfig($Settings,$Paths,[string]$Secret,[string]$DefaultTa
     }
     $outs+=@{type='socks';tag='unavailable';server='127.0.0.1';server_port=1;version='5'}
     $outs+=@{type='selector';tag='active';outbounds=$tags;default=$DefaultTag;interrupt_exist_connections=$false}
-    @{log=@{disabled=$false;level='error';timestamp=$false};inbounds=$in;outbounds=$outs;route=@{rules=$rules;final='active';auto_detect_interface=[bool]$o.bindPhysical};experimental=@{clash_api=@{external_controller=('127.0.0.1:'+$o.apiPort);secret=$Secret}}}
+    @{log=@{disabled=$false;level='warn';timestamp=$false};inbounds=$in;outbounds=$outs;route=@{rules=$rules;final='active';auto_detect_interface=[bool]$o.bindPhysical};experimental=@{clash_api=@{external_controller=('127.0.0.1:'+$o.apiPort);secret=$Secret}}}
 }
 function Get-TransportSecret([string]$Root) {
     $file=Join-Path $Root 'state/transport-secret.json'
@@ -898,20 +904,10 @@ function Get-TransportPriority([string]$Tag,$Prefixes) {
     return 999
 }
 function Get-TransportOrdered($Rows) {
-    $Rows|Sort-Object @{Expression={if($_.enabled -eq $false){2}elseif($_.state -in @('ok','remembered')){0}else{1}}},@{Expression={[int](Get-TransportValue $_ 'priority' 999)}},@{Expression={if($null -eq $_.kbps){-1}else{[double]$_.kbps}};Descending=$true},@{Expression={if($null -eq $_.latencyMs){[double]::MaxValue}else{[double]$_.latencyMs}}},tag
+    $Rows|Sort-Object @{Expression={if($_.enabled -eq $false){2}elseif($_.state -in @('ok','remembered')){0}else{1}}},@{Expression={[int](Get-TransportValue $_ 'priority' 999)}},@{Expression={if($null -eq $_.latencyMs){[double]::MaxValue}else{[double]$_.latencyMs}}},tag
 }
 function Get-TransportBest($Rows,[string[]]$Allowed=@(),[switch]$Remembered) {
     Get-TransportOrdered @($Rows|Where-Object {($_.enabled -ne $false) -and ($_.state -eq 'ok' -or ($Remembered -and $_.state -eq 'remembered')) -and (-not $Allowed.Count -or $_.tag -in $Allowed)})|Select-Object -First 1
-}
-function Test-TransportBetter($Current,$Best,$Options) {
-    if(-not $Best){return $false}
-    if(-not $Current -or $Current.state -ne 'ok'){return $true}
-    [double]$Best.kbps -gt 0 -and [double]$Best.kbps -ge ([double]$Current.kbps*[double]$Options.switchFactor)
-}
-function Get-TransportRankTags($Rows,$Candidates,$Options,$Metered) {
-    if($Metered -eq $false){return @($Candidates|ForEach-Object {$_.tag})}
-    # Неизвестная стоимость тоже экономная; память имеет приоритет над непроверенными.
-    Get-TransportOrdered @($Rows|Where-Object {$_.enabled -ne $false -and $_.tag -in @($Candidates|ForEach-Object {$_.tag})})|Select-Object -First ([int]$Options.topOnMetered)|ForEach-Object {$_.tag}
 }
 function Get-TransportFingerprint([string]$GatewayMac,[string]$ProfileName) {
     $text=(Convert-TransportLF $GatewayMac).Trim().Replace(':','').Replace('-','').ToUpperInvariant()+"`n"+(Convert-TransportLF $ProfileName).Trim()
@@ -932,8 +928,8 @@ function Get-TransportNetwork {
         if(-not $mac){$mac=[string]$route.InterfaceIndex+'|'+[string]$route.NextHop}
         $ip=Get-NetIPAddress -InterfaceIndex $route.InterfaceIndex -AddressFamily IPv4 -ErrorAction Stop|Where-Object {$_.AddressState -eq 'Preferred'}|Select-Object -First 1
         $id=Get-TransportFingerprint $mac $profileName
-        [pscustomobject]@{id=$id;name=$profileName;interface=$adapter.Name;ip=$ip.IPAddress;available=[bool]($id -and $ip.IPAddress)}
-    }catch{[pscustomobject]@{id=$null;name=$null;interface=$null;ip=$null;available=$false}}
+        [pscustomobject]@{id=$id;name=$profileName;interface=$adapter.Name;ip=$ip.IPAddress;ifIndex=[int]$route.InterfaceIndex;available=[bool]($id -and $ip.IPAddress)}
+    }catch{[pscustomobject]@{id=$null;name=$null;interface=$null;ip=$null;ifIndex=0;available=$false}}
 }
 function Test-TransportNetworkChanged($Old,$New) {
     # Смена default route (Wi-Fi -> Ethernet) меняет interface/ip/id и перезапускает движок с новой привязкой.
@@ -998,7 +994,7 @@ function Get-TransportRemembered($Memory,[string]$Network,$Candidates) {
         if($r){$state=$r.state;if($state -eq 'ok'){$state='remembered'};$speed=$r.kbps;$checked=$r.checkedAt}
         if($c.enabled -eq $false){$state='disabled';$speed=$null;$checked=$null}
         if($c.buildFailed -and $c.enabled -ne $false){$state='fail';$speed=$null;$checked=[DateTime]::UtcNow.ToString('o')}
-        $row=[pscustomobject]@{tag=$c.tag;title=$c.title;kind=$c.kind;via=$c.via;enabled=($c.enabled -ne $false);state=$state;kbps=$speed;checkedAt=$checked;suspect=$false;priority=[int](Get-TransportValue $c 'priority' 999);order=0;latencyMs=$r.latencyMs;lastOkAt=$r.lastOkAt;lastFailAt=$r.lastFailAt;rankState=$null;maxGapMs=$null}
+        $row=[pscustomobject]@{tag=$c.tag;title=$c.title;kind=$c.kind;via=$c.via;enabled=($c.enabled -ne $false);state=$state;kbps=$speed;checkedAt=$checked;suspect=$false;priority=[int](Get-TransportValue $c 'priority' 999);order=0;latencyMs=$r.latencyMs;lastOkAt=$r.lastOkAt;lastFailAt=$r.lastFailAt;maxGapMs=$r.maxGapMs;penaltyStep=0;penaltyUntil=$null}
         if($c.buildFailed){$row|Add-Member diagnostic $c.diagnostic}
         $row
     }
