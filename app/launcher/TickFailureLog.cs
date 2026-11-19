@@ -34,6 +34,13 @@ namespace RemoteAgents.Launcher
             reasons[reason] = now;
             journal.Write("supervisor.tick.failed " + (step == null ? "" : "step=" + step + " ") + detail);
         }
+        internal static string HelperFailure(string stage, Exception error)
+        {
+            while (error.InnerException != null) error = error.InnerException;
+            return "helper.failed stage=" + stage + " type=" + error.GetType().Name + " code=" + ErrorCode(error).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+        internal static int ErrorCode(Exception error)
+        { var native = error as System.ComponentModel.Win32Exception; return native == null ? error.HResult : native.NativeErrorCode; }
         internal static string Describe(Exception error)
         {
             // Never format StackTrace.ToString(): it includes source paths. Only method identity is needed.

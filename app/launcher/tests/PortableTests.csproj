@@ -30,6 +30,8 @@
     <OutputPath>bin/$(Configuration)/lan-tests/</OutputPath>
   </PropertyGroup>
   <ItemGroup>
+    <EmbeddedResource Include="../../../server/lan-pc-access.clinic.example.json" LogicalName="RemoteAgents.ClinicFixture.json" />
+    <EmbeddedResource Include="../../../build/bundle-binaries.json" LogicalName="RemoteAgents.BundleBinaries.json" />
     <EmbeddedResource Include="../../../transport/product-features.json" LogicalName="RemoteAgents.ProductFeatures.json" />
     <Compile Include="PortableJson.cs" />
     <Compile Include="../TrayMenuState.cs" />
@@ -49,12 +51,15 @@
     <Compile Include="VpnTests.cs" />
     <Compile Include="../NetHelperProtocol.cs" />
     <Compile Include="../NetHelperInstall.cs" />
+    <Compile Include="../NetHelperSetup.cs" />
+    <Compile Include="../PinnedTransport.cs" />
     <Compile Include="../NetHelper.cs" />
     <Compile Include="../LanTun.cs" />
     <Compile Include="../LanHosts.cs" />
     <Compile Include="LanHostsTests.cs" />
     <Compile Include="LanTunTests.cs" />
     <Compile Include="NetHelperTests.cs" />
+    <Compile Include="NetHelperSetupTests.cs" />
     <Compile Include="../MainScreenModel.cs" Link="MainScreenModel.cs" />
     <Compile Include="../MainScreenRender.cs" Link="MainScreenRender.cs" />
     <Compile Include="TrayExtrasTests.cs" />

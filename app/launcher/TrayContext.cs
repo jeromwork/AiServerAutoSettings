@@ -84,8 +84,10 @@ namespace RemoteAgents.Launcher
             // The folder choice keeps applying after its window closed; the tray reports the result.
             BackgroundWork.Disk.Changed += () => { try { dispatch.BeginInvoke(new Action(DiskFinished)); } catch (InvalidOperationException) { } };
             dispatch.BeginInvoke(new Action(() => {
+                netHelper = new HelperClient(home, dispatch);
                 if (firstSetup) { RunFirstSetup(); return; }
-                netHelper = new HelperClient(home, dispatch); netHelper.EnsureRunning();
+                // A new EXE after OTA follows the same required/version/image check as a clean install.
+                netHelper.EnsureRunning();
                 DeliverUpdateNotice(); CheckLegacyVpn(); StartLegacyDiskCleanup(); Handle(args); DrainCommands(); Tick();
                 if(Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome),StringComparison.OrdinalIgnoreCase)) CheckSetup();
 
@@ -110,11 +112,13 @@ namespace RemoteAgents.Launcher
             if(closing)return;
             if(FirstInstall.Required(home)){ExitThread();return;}
             ReloadSettings();icon.Visible=true;readyForCommands=true;ShowMain();
-            netHelper = new HelperClient(home, dispatch); netHelper.EnsureRunning();
+            netHelper.EnsureRunning();
             CheckLegacyVpn();StartLegacyDiskCleanup();DrainCommands();Tick();
         }
         void Bootstrap()
         {
+            try { log.Write("transport.binary." + PinnedTransport.Ensure(home, engine.Current.Length == 0 ? home : engine.Folder(engine.Current))); }
+            catch (Exception error) { log.Write(TickFailureLog.HelperFailure("binary-restore", error)); }
             try { log.Write("openssh." + PortableTools.EnsureOpenSsh(home)); } catch { log.Write("openssh.failed"); }
             if (installSource==null && engine.Current.Length != 0) { BundleDefinition.Load(engine.Folder(engine.Current)); return; }
             string zip = Path.Combine(engine.Root, "embedded.zip");
@@ -172,7 +176,7 @@ namespace RemoteAgents.Launcher
                 })) { ok = false; coreFailed = true; }
                 if (restart) return;
                 if (!Step("transport", () => { transport = StatusView.Read(home, "transport", maxAgeSec: 15); })) { ok = false; coreFailed = true; }
-                ok &= Step("lan", () => { if (netHelper != null) netHelper.UpdateLan(config.Data, transport); });
+                ok &= Step("lan", () => { if (netHelper != null) { netHelper.UpdateLan(config.Data, transport); netHelper.ConnectWhenInstalled(NetHelperSetup.Required(config.Data)); } });
                 ok &= Step("vpn-resume", () => ResumeUpdatedVpn(transport));
                 ok &= Step("icon", () => {
                     var linkPhase = StatusView.Phase(transport); shown = linkPhase == LinkPhase.Ok ? green : linkPhase == LinkPhase.Failed ? red : yellow;
@@ -630,6 +634,7 @@ namespace RemoteAgents.Launcher
             if (!AllowMutation()) return; actionBusy = vpnActionBusy = true; vpnActionWanted = true; vpnError = ""; RefreshMain();
             try {
                 if (netHelper == null) throw new IOException(HelperClient.PermissionRequired);
+                if (!await netHelper.EnsureReady(stop.Token)) { VpnFailure(HelperClient.SetupWarning, fromCard); return; }
                 var transport = StatusView.Read(home, "transport", maxAgeSec: 3);
                 var options = new System.Collections.Generic.Dictionary<string, object>(Json.Map(Json.Get(config.Data, "vpn")));
                 // Intent/interface names are not part of the privileged command.
@@ -640,7 +645,8 @@ namespace RemoteAgents.Launcher
                 if (Json.Str(status, "state") != "on") { if (!fromCard) MessageBox.Show(Json.Text(status, "summary", "VPN не включён: соединение не подтверждено"), Product.Name); return; }
                 config.SetVpnIntent(true); config.SetEnabled(vpn.Definition, true);
             } catch (OperationCanceledException) { }
-            catch { if (!closing) { log.Write("vpn.helper.failed"); VpnFailure("Не удалось включить VPN. Проверьте подключение сетевого помощника и диагностику.", fromCard); } }
+            catch (TimeoutException error) { if (!closing) { log.Write("vpn.helper.failed " + TickFailureLog.HelperFailure("vpn-on", error)); VpnFailure(NetHelperSetup.BusyTimeout, fromCard); } }
+            catch (Exception error) { if (!closing) { log.Write("vpn.helper.failed " + TickFailureLog.HelperFailure("vpn-on", error)); VpnFailure("Не удалось включить VPN. Проверьте подключение сетевого помощника и диагностику.", fromCard); } }
             finally { actionBusy = vpnActionBusy = false; if (!closing) RefreshMenu(); }
         }
         void SignalVpnStop()

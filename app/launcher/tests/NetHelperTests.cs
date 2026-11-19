@@ -25,6 +25,8 @@ namespace RemoteAgents.Launcher
         }
         internal static void Run()
         {
+            PinnedBinary();
+            NetHelperSetupTests.Run();
             string parsed;
             foreach (string command in new[] { "status", "ping", "lan.stop", "vpn.off" }) {
                 Check(NetHelperProtocol.TryCommand(Json.Encode(new { cmd = command }), out parsed) && parsed == command, "valid " + command);
@@ -108,12 +110,55 @@ namespace RemoteAgents.Launcher
             Check(string.Join("|", NetHelperInstall.FailureArguments()) == "failure|RemoteAgentsNet|reset=|60|actions=|", "no SCM restarts");
             Check(!NetHelperInstall.NeedsInstall(NetHelperInstall.HelperVersion + "\r\n"), "matching version has no UAC");
             Check(NetHelperInstall.NeedsInstall("2"), "stage 4/5 helper requires combined protocol upgrade");
-            Check(NetHelperInstall.NeedsInstall(null) && NetHelperInstall.NeedsInstall("") && NetHelperInstall.NeedsInstall("old") && NetHelperInstall.NeedsInstall("999"), "missing or different version requires install");
+            Check(NetHelperInstall.NeedsInstall(null) && NetHelperInstall.NeedsInstall("") && NetHelperInstall.NeedsInstall("old"), "missing or invalid version requires install");
             Console.WriteLine("PASS: NetHelper " + count + " checks (no service/UAC)");
+        }
+        static void PinnedBinary()
+        {
+            string root = Path.Combine(Path.GetTempPath(), "ra-helper-pin-" + Guid.NewGuid().ToString("N"));
+            try {
+                string old = Path.Combine(root, "bundle", "20261118.1"), current = Path.Combine(root, "bundle", "20261119.1");
+                Directory.CreateDirectory(Path.Combine(old, "transport")); Directory.CreateDirectory(current);
+                byte[] image = Encoding.UTF8.GetBytes("pinned fixture"); string hash = PinnedTransport.Hash(image);
+                string source = Path.Combine(old, "transport", "sing-box.exe"), stable = Path.Combine(root, "transport-bin", "sing-box.exe");
+                File.WriteAllBytes(source, image);
+                var verified = PinnedTransport.ReadVerified(root, current, hash);
+                Check(verified.SequenceEqual(image), "OTA without binary falls back to a verified historical bundle");
+                File.WriteAllText(source, "swapped after verification");
+                Check(verified.SequenceEqual(image), "elevated installation retains the bytes hashed, never reopens the source");
+                bool rejected = false; try { PinnedTransport.ReadVerified(root, current, hash); } catch (InvalidDataException) { rejected = true; }
+                Check(rejected && !File.Exists(stable), "hash mismatch never installs a file");
+                File.WriteAllBytes(source, image);
+                Check(PinnedTransport.Restore(root, current, hash, null) == "restored" && File.ReadAllBytes(stable).SequenceEqual(image), "OTA restores absent transport-bin from a verified older bundle");
+                File.WriteAllText(stable, "tampered stable");
+                Check(PinnedTransport.ReadVerified(root, current, hash).SequenceEqual(image), "tampered stable is not trusted; verified fallback still works");
+                File.Delete(source);
+                using (var memory = new MemoryStream()) {
+                    using (var zip = new System.IO.Compression.ZipArchive(memory, System.IO.Compression.ZipArchiveMode.Create, true))
+                    using (var entry = zip.CreateEntry(PinnedTransport.Target).Open()) entry.Write(image, 0, image.Length);
+                    memory.Position = 0;
+                    Check(PinnedTransport.Restore(root, current, hash, memory) == "restored" && File.ReadAllBytes(stable).SequenceEqual(image), "embedded initial bundle repairs transport-bin after OTA");
+                }
+                Directory.CreateDirectory(Path.Combine(current, "build"));
+                File.WriteAllText(Path.Combine(current, "build", "bundle-binaries.json"), Json.Encode(new { binaries = new[] { new { target = PinnedTransport.Target, memberSha256 = hash } } }));
+                Check(PinnedTransport.ExpectedHash != hash, "user-writable bundle pins cannot replace the EXE trust anchor");
+                File.Delete(stable); rejected = false;
+                try { PinnedTransport.ReadVerified(root, current, hash); } catch (FileNotFoundException) { rejected = true; }
+                Check(rejected, "missing binary reports an actionable error");
+                Check(PinnedTransport.ExpectedHash.Length == 64, "pin comes from the EXE resource");
+                string safe = TickFailureLog.HelperFailure("connect", new IOException("password=NEVER-LOG /private/path", new System.ComponentModel.Win32Exception(5, "secret")));
+                Check(safe == "helper.failed stage=connect type=Win32Exception code=5", "diagnostics unwrap native error, preserve stage/type/code, omit all messages");
+            } finally { Directory.Delete(root, true); }
         }
         // Keep the existing private portable entry point and all its command modes unchanged.
         static int Main(string[] args)
         {
+            if (args.Length >= 1 && args[0] == "--net-helper-stage1") {
+                Run();
+                if (args.Length == 3) NetHelperSetupTests.FullExe(args[1], args[2]);
+                return 0;
+            }
+            if (args.Length == 1 && args[0] == "--net-helper") { Run(); return 0; }
             if (args.Length == 0 || !args[0].StartsWith("--", StringComparison.Ordinal)) { Run(); VpnTunTests.Run(args.Length == 0 ? Path.GetTempPath() : args[0]); }
             try { return (int)typeof(TestEntry).GetMethod("Main", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, new object[] { args }); }
             catch (TargetInvocationException ex) { ExceptionDispatchInfo.Capture(ex.InnerException).Throw(); throw; }

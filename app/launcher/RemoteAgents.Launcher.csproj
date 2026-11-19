@@ -19,6 +19,7 @@
     <BundlePath Condition="'$(BundlePath)' == ''">$(MSBuildThisFileDirectory)../../build/out/initial-bundle.zip</BundlePath>
   </PropertyGroup>
   <ItemGroup>
+    <EmbeddedResource Include="../../build/bundle-binaries.json" LogicalName="RemoteAgents.BundleBinaries.json" />
     <EmbeddedResource Include="../../transport/product-features.json" LogicalName="RemoteAgents.ProductFeatures.json" />
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
     <Reference Include="System.ServiceProcess" />
@@ -40,5 +41,6 @@
   </ItemGroup>
   <Target Name="RequireBundleOnPublish" BeforeTargets="Publish">
     <Error Condition="!Exists('$(BundlePath)')" Text="Сначала соберите начальный бандл: build/build-exe.sh" />
+    <Exec Command="python3 &quot;$(MSBuildThisFileDirectory)../../build/bundle.py&quot; verify-initial &quot;$(BundlePath)&quot;" />
   </Target>
 </Project>
