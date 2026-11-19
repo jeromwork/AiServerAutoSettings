@@ -156,14 +156,24 @@ class TCP(socketserver.BaseRequestHandler):
                 self.request.sendall(b'pre-banner\r\nSSH-2.0-fake\r\n')
             elif mode == 'partial':
                 self.request.sendall(b'SSH-2.0-')
-                time.sleep(2)
+                time.sleep(5)
             elif mode == 'hang':
-                time.sleep(2)
+                time.sleep(5)
+            elif mode == 'fin':
+                time.sleep(.2)  # Let the client finish connect and enter the banner read.
+                # Explicit graceful EOF: keep the read side alive until the client closes.
+                self.request.shutdown(socket.SHUT_WR)
+                self.request.settimeout(5)
+                self.request.recv(1)
+            elif mode == 'rst':
+                time.sleep(.2)  # Exercise a read reset rather than racing async connect.
+                # Abortive close without banner bytes, distinct from FIN and a silent peer.
+                self.request.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+                self.request.close()
             elif mode == 'trickle':
-                for _ in range(20):
+                for _ in range(60):
                     self.request.sendall(b'x')
                     time.sleep(.09)
-            # eof closes immediately
         except OSError:
             pass
 
@@ -186,7 +196,7 @@ api = Server(('127.0.0.1', 0), API)
 api_port = serve(api)
 servers = []
 ports = {}
-for mode in ('direct', 'banner', 'partial', 'hang', 'eof', 'trickle'):
+for mode in ('direct', 'banner', 'partial', 'hang', 'fin', 'rst', 'trickle'):
     server = TCPServer(('127.0.0.1', 0), TCP)
     server.mode = mode
     ports[mode] = serve(server)
@@ -233,6 +243,37 @@ function Wait-Check($Handle,[string]$Type) {
     throw "Check timeout: $Type"
 }
 Initialize-TransportEvents
+# Emulate delayed cancellation on older .NET without depending on network scheduling.
+# The production reader still owns and cancels its real subscriptions.
+Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+using System.Reflection;
+using System.Threading;
+public static class DelayedTransportWorkers {
+    public static long Stop(object reader) {
+        Thread[] workers=(Thread[])reader.GetType().GetField("workers",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(reader);
+        Thread[] original=(Thread[])workers.Clone();
+        using(ManualResetEvent release=new ManualResetEvent(false)) {
+            for(int i=0;i<workers.Length;i++) {
+                workers[i]=new Thread(delegate() {release.WaitOne();});
+                workers[i].IsBackground=true;
+                workers[i].Start();
+            }
+            try {
+                Stopwatch watch=Stopwatch.StartNew();
+                ((IDisposable)reader).Dispose();
+                return watch.ElapsedMilliseconds;
+            } finally {
+                release.Set();
+                foreach(Thread worker in workers) worker.Join();
+                Array.Copy(original,workers,workers.Length);
+                foreach(Thread worker in original) worker.Join(1000);
+            }
+        }
+    }
+}
+'@
 $reader=$null;$check=$null
 try {
     $reader=Start-TransportEvents -ApiPort $Port -Secret ''' + ps_quote(SECRET) + ''' -Tags @('path-a','path-b') -StallSeconds .4 -StallConns 2
@@ -266,6 +307,16 @@ try {
     Mode 'idle'
     Assert (-not (Test-Path (Join-Path $Root 'probe-pid'))) 'Passive subscriptions launched a probe'
 
+    Mode 'logs'
+    $reader=Start-TransportEvents -ApiPort $Port -Secret ''' + ps_quote(SECRET) + ''' -Tags @()
+    $events=@(Collect $reader .6)
+    Assert ($reader.LogsStatus -eq 'connected' -and $reader.ConnectionsStatus -eq 'connected') 'Empty tags must create a working reader'
+    Assert (@($events|Where-Object {$_.tag -ne ''}).Count -eq 0) 'Empty allowlist must not trust any path tag'
+    $elapsed=[DelayedTransportWorkers]::Stop($reader)
+    Assert ($elapsed -lt 1500) ("Dispose waited for workers sequentially: "+$elapsed+' ms')
+    Stop-TransportEvents $reader;$reader=$null
+    Mode 'idle'
+
     # Direct checks are tested via loopback endpoints; production wrapper has the two fixed public IPs.
     $up=New-Object Net.IPEndPoint ([Net.IPAddress]::Loopback),''' + str(ports['direct']) + '''
     $down=New-Object Net.IPEndPoint ([Net.IPAddress]::Loopback),''' + str(ports['refused']) + '''
@@ -280,23 +331,26 @@ try {
     Stop-TransportDirectCheck $check;$check=$null
 
     $ports=''' + ('@{' + ';'.join(k+'='+str(v) for k, v in ports.items()) + '}') + '''
-    foreach ($mode in @('banner','partial','hang','eof','refused','trickle')) {
+    foreach ($mode in @('banner','partial','hang','fin','rst','refused','trickle')) {
         $candidate=[pscustomobject]@{tag='path-a';port=$ports[$mode]}
-        $check=Start-TransportPathCheck $candidate -TimeoutSeconds .35
+        $check=Start-TransportPathCheck $candidate -TimeoutSeconds 1.5
         $watch=[Diagnostics.Stopwatch]::StartNew();$e=Wait-Check $check 'path'
-        $expected=switch($mode) {'banner' {'ok'} 'partial' {'stalled'} 'hang' {'timeout'} 'eof' {'process-exited'} 'refused' {'refused'} 'trickle' {'stalled'}}
+        $expected=switch($mode) {'banner' {'ok'} 'partial' {'stalled'} 'hang' {'timeout'} 'fin' {'process-exited'} 'rst' {'process-exited'} 'refused' {'refused'} 'trickle' {'stalled'}}
         Assert ($e.kind -eq 'path-check' -and $e.tag -eq 'path-a' -and $e.code -eq $expected) ("Banner check "+$mode+': '+$e.code)
-        Assert ($watch.Elapsed.TotalSeconds -lt 1) 'Banner timeout exceeded by trickle'
+        if ($mode -in @('fin','rst','hang')) {Assert ($e.detail -match 'bytes=0$') 'Close/timeout without banner must report zero bytes'}
+        Assert ($watch.Elapsed.TotalSeconds -lt 3) 'Banner timeout exceeded by trickle'
         Stop-TransportPathCheck $check;Stop-TransportPathCheck $check;$check=$null
     }
     $profile=[pscustomobject]@{sshExecutable=(Join-Path $Root 'ssh.exe');keyPath='test-key';login='test';knownHostsPath='test-hosts';serverAddress='server.invalid'}
     $candidate=[pscustomobject]@{tag='path-a';port=26000}
     foreach ($mode in @('ok','stall','timeout','exit')) {
         [IO.File]::WriteAllText((Join-Path $Root 'mode'),$mode)
-        $check=Start-TransportPathCheck $candidate $profile -ConfirmStall -TimeoutSeconds .8 -StallSeconds .3
+        # Leave startup/scheduling headroom before the total deadline; stall is still 300 ms.
+        $check=Start-TransportPathCheck $candidate $profile -ConfirmStall -TimeoutSeconds 3 -StallSeconds .3
         $e=Wait-Check $check 'path';$expected=switch($mode) {'ok' {'ok'} 'stall' {'stalled'} 'timeout' {'timeout'} 'exit' {'process-exited'}}
-        Assert ($e.code -eq $expected) ("64 KiB check "+$mode+': '+$e.code)
+        Assert ($e.code -eq $expected) ("64 KiB check "+$mode+': '+$e.code+'; '+$e.detail)
         if ($mode -eq 'ok') {Assert ($e.detail -match 'bytes=65536') 'Exactly 64 KiB required'}
+        if ($mode -eq 'stall') {Assert ($e.detail -match 'bytes=16384$') 'Stall requires a partial transfer before silence'}
         Stop-TransportPathCheck $check;$check=$null
     }
     $profile.sshExecutable=Join-Path $Root 'missing-ssh'
@@ -304,6 +358,7 @@ try {
     $e=Wait-Check $check 'path';Assert ($e.code -eq 'process-exited') 'Start failure must produce contract event'
     Stop-TransportPathCheck $check;$check=$null
     'PASS: event subscriptions, classifier, stall continuity, reconnect, checks, cleanup'
+    'PASS: FIN/RST -> process-exited, silent peer -> timeout, empty tags, shared Dispose deadline'
 } finally {
     if ($reader) {Stop-TransportEvents $reader}
     if ($check) {if ($check.PSObject.Properties['mode']) {Stop-TransportPathCheck $check} else {Stop-TransportDirectCheck $check}}

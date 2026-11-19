@@ -69,7 +69,7 @@ namespace RemoteAgents {
   public string ConnectionsStatus {get;private set;}
   public TransportEvents(int port,string secret,string[] tags,double stallSeconds,int stallConns) {
    if(port<1 || port>65535 || stallSeconds<=0 || stallConns<1) throw new ArgumentException("Invalid event options");
-   this.port=port; this.secret=secret; this.tags=new HashSet<string>(tags);
+   this.port=port; this.secret=secret; this.tags=new HashSet<string>(tags ?? new string[0]);
    this.stallSeconds=stallSeconds; this.stallConns=stallConns;
    for(int i=0;i<2;i++) {int n=i; workers[i]=new Thread(delegate(){Read(n);}); workers[i].IsBackground=true; workers[i].Start();}
   }
@@ -182,8 +182,10 @@ namespace RemoteAgents {
    }
   }
   public void Dispose() {
+   Stopwatch wait=Stopwatch.StartNew();
    lock(gate) {if(stop.IsCancellationRequested) return; stop.Cancel(); foreach(ClientWebSocket ws in sockets) if(ws!=null) ws.Abort();}
-   foreach(Thread worker in workers) worker.Join(1000);
+   // Both workers unwind concurrently; share one deadline rather than waiting a second each.
+   foreach(Thread worker in workers) worker.Join((int)Math.Max(0,1000-wait.ElapsedMilliseconds));
    // Keep the cancelled source alive until background workers unwind on older .NET.
   }
  }
@@ -213,6 +215,16 @@ namespace RemoteAgents {
    return s;
   }
   string Detail(long bytes) {return "ms="+clock.ElapsedMilliseconds+"; bytes="+bytes;}
+  static string BannerFailure(Exception error,int bytes) {
+   // NetworkStream wraps socket failures in IOException; inspect the complete inner chain.
+   for(Exception current=error;current!=null;current=current.InnerException) {
+    SocketException socket=current as SocketException;
+    if(socket==null) continue;
+    if(socket.SocketErrorCode==SocketError.ConnectionReset || socket.SocketErrorCode==SocketError.ConnectionAborted) return "process-exited";
+    if(socket.SocketErrorCode==SocketError.ConnectionRefused) return "refused";
+   }
+   return bytes>0?"stalled":"timeout";
+  }
   public TransportCheck(string bindIP,int interfaceIndex,IPEndPoint[] targets,int timeoutMs) {
    if(targets==null || targets.Length==0 || timeoutMs<1) throw new ArgumentException("Invalid direct check options");
    remaining=targets.Length;
@@ -243,7 +255,8 @@ namespace RemoteAgents {
       }
       if(code!="ok" && code!="process-exited" && bytes>0) code="stalled";
      }
-    } catch(SocketException e) {code=e.SocketErrorCode==SocketError.ConnectionRefused?"refused":bytes>0?"stalled":"timeout";}
+    } catch(SocketException e) {code=BannerFailure(e,bytes);}
+      catch(IOException e) {code=BannerFailure(e,bytes);}
       catch(Exception) {code=bytes>0?"stalled":"timeout";}
     finally {if(s!=null) s.Close();}
     Finish(TransportEvent.Make("path-check",tag,code,false,Detail(bytes)));
@@ -258,9 +271,10 @@ namespace RemoteAgents {
 }
 
 function Start-TransportEvents {
-    param([int]$ApiPort,[string]$Secret,[string[]]$Tags,[double]$StallSeconds=8,[int]$StallConns=2)
+    param([int]$ApiPort,[string]$Secret,[string[]]$Tags=@(),[double]$StallSeconds=8,[int]$StallConns=2)
     Initialize-TransportEvents
-    New-Object RemoteAgents.TransportEvents -ArgumentList $ApiPort,$Secret,$Tags,$StallSeconds,$StallConns
+    # Typed construction preserves an empty string[] (New-Object can bind it as null).
+    [RemoteAgents.TransportEvents]::new($ApiPort,$Secret,$Tags,$StallSeconds,$StallConns)
 }
 function Receive-TransportEvents($Reader) { $Reader.Drain() }
 function Stop-TransportEvents($Reader) { if ($Reader) { $Reader.Dispose() } }
