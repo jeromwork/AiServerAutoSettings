@@ -14,6 +14,7 @@ import importlib.util
 import ipaddress
 import json
 import os
+import platform
 from pathlib import Path
 import pwd
 import re
@@ -194,29 +195,65 @@ def secret_values(value):
             yield from secret_values(parsed)
 
 
-def hidden_exception(system, exc, mode, part, values=(), fallback='Проверка/команда не выполнена; детали скрыты.'):
+def sanitized_diag(exc, part, mode, values=()):
+    """One redaction path for the client response and the private journal."""
+    known = sorted(set(secret_values(values)), key=len, reverse=True)
+
+    def redact_token(match):
+        token = match.group()
+        # Mixed-case alphanumeric segments can be unpadded base64, not names.
+        secret_segment = any(len(segment) >= 12 and
+                             all(re.search(pattern, segment) for pattern in (r'[A-Z]', r'[a-z]', r'[0-9]'))
+                             for segment in token.split('/'))
+        base64 = (not token.startswith('/') and re.fullmatch(r'[A-Za-z0-9+/]+={0,2}', token) and
+                  any(c in token for c in '+='))
+        if '/' in token and not (base64 or secret_segment):
+            return re.sub(r'[A-Za-z0-9+=_-]{32,}', '***', token)
+        return '***'
+
+    def redact(message):
+        for value in known:
+            message = message.replace(value, '***')
+        message = re.sub(r'(?i)(password|token|secret|key)=\S+', r'\1=***', message)
+        return re.sub(r'[A-Za-z0-9+/=_-]{32,}', redact_token, message)[:500]
+
+    cause = exc.__cause__ or exc.__context__
+    return dict(id=secrets.token_hex(4), mode=mode, part=part, type=redact(type(exc).__name__),
+                message=redact(str(exc)),
+                where=[redact(Path(frame.filename).name + ':' + str(frame.lineno) + ':' + frame.name)
+                       for frame in traceback.extract_tb(exc.__traceback__)[-5:]],
+                cause=redact(type(cause).__name__ + ': ' + str(cause)) if cause is not None else '')
+
+
+def hidden_exception(system, exc, mode, part, values=(), fallback='Проверка/команда не выполнена; детали скрыты.', diag=None):
     # Diagnostic failures must never alter the original operation's result.
     try:
-        known = sorted(set(secret_values(values)) | system.diagnostic_values, key=len, reverse=True)
-
-        def redact(message):
-            for value in known:
-                message = message.replace(value, '***')
-            message = re.sub(r'(?i)(password|token|secret|key)=\S+', r'\1=***', message)
-            return re.sub(r'[A-Za-z0-9+/=_-]{32,}', '***', message)[:500]
-
-        cause = exc.__cause__ or exc.__context__
-        record = dict(mode=mode, part=part, type=type(exc).__name__, message=redact(str(exc)),
-                      where=[Path(frame.filename).name + ':' + str(frame.lineno) + ':' + frame.name
-                             for frame in traceback.extract_tb(exc.__traceback__)[-5:]])
-        if cause is not None:
-            record['cause'] = redact(type(cause).__name__ + ': ' + str(cause))
-        ident = system.diag(record)
-        if ident:
-            return fallback.removesuffix('.') + ' (журнал сервера, запись ' + ident + ').'
+        record = sanitized_diag(exc, part, mode, [values, list(system.diagnostic_values)])
     except Exception:
-        pass
-    return fallback
+        record = dict(id=secrets.token_hex(4), part=part, type=type(exc).__name__)
+    try:
+        written = system.diag(record)
+    except Exception:
+        written = None
+    if not written:
+        record['journal'] = False
+    if diag is not None:
+        diag.update(record)
+    return fallback.removesuffix('.') + ' (журнал сервера, запись ' + record['id'] + ').'
+
+
+def code_version():
+    return {'sha': hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12],
+            'python': platform.python_version()}
+
+
+def failure_result(system, exc, mode):
+    diag = {}
+    message = hidden_exception(system, exc, mode, 'main',
+                               fallback='Ошибка файла/команды; детали скрыты.', diag=diag)
+    if isinstance(exc, Error):
+        message = str(exc)
+    return {'ok': False, 'error': message, 'diag': diag, 'code': code_version()}
 
 
 def read_input(path, stream, secret_stdin=False, diagnostic=None):
@@ -339,7 +376,7 @@ class System:
         if self.root == Path('/') and os.geteuid() != 0:
             return None
         try:
-            ident = secrets.token_hex(4)
+            ident = record.get('id') or secrets.token_hex(4)
             self._journal('/var/log/remoteagents/server-apply-errors.log',
                           dict(record, id=ident, at=int(time.time())), private=True)
             return ident
@@ -1061,9 +1098,12 @@ class Engine:
         except Missing as exc:
             return self.row(name, 'waiting', 'ждёт секрет «' + exc.name + '»', missing=[exc.name])
         except Exception as exc:
-            message = str(exc) if isinstance(exc, (Error, base.Error, lan.Error, lan_share.Error, components.Error)) else hidden_exception(
-                self.s, exc, self.command, name, [self.secrets, self.managed_secrets, self.config.get('secrets', {})])
-            return self.row(name, 'error', message)
+            if isinstance(exc, (Error, base.Error, lan.Error, lan_share.Error, components.Error)):
+                return self.row(name, 'error', str(exc))
+            diag = {}
+            message = hidden_exception(self.s, exc, self.command, name,
+                                       [self.secrets, self.managed_secrets, self.config.get('secrets', {})], diag=diag)
+            return self.row(name, 'error', message, diag=diag)
 
     def run(self, command):
         self.command = command
@@ -1133,7 +1173,7 @@ class Engine:
 
     def result(self, command):
         degraded = [r for r in self.rows if r['part'] in OPTIONAL_PARTS and r['state'] not in ('ready', 'change', 'pending')]
-        result = {'schema': 1, 'command': command, 'parts': self.rows, 'actions': list(self.s.actions),
+        result = {'schema': 1, 'code': code_version(), 'command': command, 'parts': self.rows, 'actions': list(self.s.actions),
                   'ok': all(r['state'] == 'ready' for r in self.rows if r['part'] not in OPTIONAL_PARTS),
                   'degraded': [r['part'] for r in degraded]}
         if degraded:
@@ -1248,12 +1288,9 @@ if __name__ == '__main__':
     try:
         sys.exit(main(system=system))
     except Exception as exc:
-        # Never interpolate subprocess, JSON, crypto or OS exception strings.
-        message = str(exc) if isinstance(exc, Error) else hidden_exception(
-            system, exc, sys.argv[1] if len(sys.argv) > 1 else 'main', 'main',
-            fallback='Ошибка файла/команды; детали скрыты.')
+        result = failure_result(system, exc, sys.argv[1] if len(sys.argv) > 1 else 'main')
         if '--json' in sys.argv:
-            print(json.dumps({'ok': False, 'error': message}, ensure_ascii=False))
+            print(json.dumps(result, ensure_ascii=False))
         else:
-            print('Ошибка: ' + message, file=sys.stderr)
+            print('Ошибка: ' + result['error'], file=sys.stderr)
         sys.exit(1)

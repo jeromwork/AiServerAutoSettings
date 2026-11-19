@@ -300,6 +300,7 @@ namespace RemoteAgents.Launcher
             if (action == "Vpn" && !Product.VpnEnabled)
                 return new Dictionary<string, object> { { "ok", true }, { "enabled", false }, { "summary", "VPN отключено в этой версии" } };
             string requestFile = Path.Combine(home, "state", "wizard-request-" + Guid.NewGuid().ToString("N") + ".json"), output = requestFile + ".out", live = requestFile + ".progress";
+            DiagnosticReport.KnownSecrets(home);
             var gate = new object(); int readLines = 0;
             Action read = () => {
                 if (progress == null) return;
@@ -323,6 +324,7 @@ namespace RemoteAgents.Launcher
                     catch (TimeoutException) { new Journal(home).Write("wizard." + action + ".timeout"); throw; }
                 }
                 read();
+                if (action == "ServerApply" && progress != null) progress("· ServerApply: код выхода шага=" + code);
                 Dictionary<string, object> response; string raw = "";
                 try { raw = Files.LF(External.ReadPowerShellOutput(output)); response = Json.Map(Json.Parse(raw)); }
                 catch (Exception) {
@@ -330,10 +332,16 @@ namespace RemoteAgents.Launcher
                     try { string logs = Path.Combine(home, "logs"); Directory.CreateDirectory(logs); if (File.Exists(output)) File.Copy(output, Path.Combine(logs, "wizard-" + action + "-" + DateTime.Now.ToString("HHmmss", CultureInfo.InvariantCulture) + ".out"), true); }
                     catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { }
                     string excerpt = Excerpt(raw);
-                    throw new IOException("Шаг не вернул результат (код " + code + "). Проверьте журнал соответствующего модуля и повторите" + (excerpt.Length > 0 ? ". Вывод шага: «" + excerpt + "»" : ". Вывод шага пуст"));
+                    var error = new IOException("Шаг не вернул результат (код " + code + "). Проверьте журнал соответствующего модуля и повторите" + (excerpt.Length > 0 ? ". Вывод шага: «" + excerpt + "»" : ". Вывод шага пуст"));
+                    error.Data["ExitCode"] = code; throw error;
                 }
-                if (code != 0 || !Json.Bool(response, "ok")) throw new IOException((Json.Text(response, "reason", "Шаг не подтверждён: проверьте журнал и повторите") + ". " + Json.Str(response, "remedy")).Trim());
-                return Json.Map(Json.Get(response, "result"));
+                if (code != 0 || !Json.Bool(response, "ok")) {
+                    var error = new IOException((Json.Text(response, "reason", "Шаг не подтверждён: проверьте журнал и повторите") + ". " + Json.Str(response, "remedy")).Trim());
+                    error.Data["ExitCode"] = code; throw error;
+                }
+                var result = Json.Map(Json.Get(response, "result"));
+                if (action == "ServerApply") result["wizardExit"] = code;
+                return result;
             } finally { foreach (string f in new[] { requestFile, output, live }) try { if (File.Exists(f)) File.Delete(f); } catch (IOException) { } }
         }
         // Unreadable step output for the error text: one line, long key-like runs masked before the 300-character cut.
@@ -835,6 +843,8 @@ namespace RemoteAgents.Launcher
         internal ConfigSession(string home, Func<Task<string>> bundle, IDictionary<string, string> secrets = null, IDictionary<string, string> hints = null)
         {
             this.home = home; bundleSource = bundle; accountCreation = new HappierAccountCreation(home);
+            DiagnosticReport.RememberSecrets(home, (secrets ?? new Dictionary<string, string>()).Values);
+            DiagnosticReport.KnownSecrets(home);
             this.secrets = new Dictionary<string, string>(secrets ?? new Dictionary<string, string>()); this.hints = new Dictionary<string, string>(hints ?? new Dictionary<string, string>());
         }
         internal void RebindBundle(string current) { bundle = current; }
@@ -866,8 +876,11 @@ namespace RemoteAgents.Launcher
         string Value(object field)
         {
             string n = ConfigRequests.SecretName(field), v; if (n.Length == 0) return "";
-            if (secrets.TryGetValue(n, out v) && v.Length > 0 && v != ConfigAi.Hidden) return v;
-            try { return SecretVault.Get(home, n) ?? ""; } catch (InvalidDataException) { return ""; }
+            if (!(secrets.TryGetValue(n, out v) && v.Length > 0 && v != ConfigAi.Hidden)) {
+                try { v = SecretVault.Get(home, n) ?? ""; } catch (InvalidDataException) { v = ""; }
+            }
+            DiagnosticReport.RememberSecrets(home, new[] { v });
+            return v;
         }
         string Hint(string name, Dictionary<string, object> p)
         {
@@ -890,6 +903,7 @@ namespace RemoteAgents.Launcher
                 foreach (string name in ConfigRequests.SecretsFor(s, p, Available)) {
                     string value = AskSecret(name, ConfigRequests.Why(name, p, Hint(name, p)));
                     if (string.IsNullOrEmpty(value)) { Log(ConfigSections.Title(s) + ": секрет «" + name + "» не задан — раздел может не пройти"); continue; }
+                    DiagnosticReport.RememberSecrets(home, new[] { value });
                     SecretVault.Set(home, name, value); secrets[name] = value;
                 }
             SecretVault.Materialize(home);
@@ -1030,6 +1044,7 @@ namespace RemoteAgents.Launcher
             }
             if (create) {
                 // A new account becomes «same» with its key in the vault: «Сохранить конфиг» carries it, a re-apply never creates another one.
+                DiagnosticReport.RememberSecrets(home, new[] { key });
                 SecretVault.Set(home, name, key); secrets[name] = key;
                 ConfigProfile.Update(home, pr => { var hh = new Dictionary<string, object>(Json.Map(Json.Get(pr, "happier"))); hh["mode"] = "same"; hh["key"] = new Dictionary<string, object> { { "secret", name } }; pr["happier"] = hh; });
                 hash = ConfigSections.Hash(ConfigProfile.Load(home), ConfigSections.Account);
@@ -1065,14 +1080,30 @@ namespace RemoteAgents.Launcher
             using (var relay = new PasswordRelay(Json.Encode(values))) {
                 var request = new Dictionary<string, object> { { "config", profile }, { "secretPipe", relay.Name }, { "statusOnly", statusOnly } };
                 AddRoot(request, access);
-                var result = run("ServerApply", request);
-                foreach (var row in Json.Array(Json.Get(result, "parts")).Select(Json.Map)) {
-                    string line = Json.Str(row, "part") + ": " + Json.Str(row, "state") + " — " + Json.Str(row, "summary");
-                    Log("Сервер: " + line);
-                    Report(Json.Str(row, "part").StartsWith("lan:", StringComparison.Ordinal) ? ConfigSections.Lan : ConfigSections.Server,
-                        SectionOutcome.PartState(row), line);
+                string exitCode = "неизвестно", failure = "";
+                // A failed transport must not make an older server report look current.
+                string reportPath = Path.Combine(home, "state", "server-apply.json");
+                try { if (File.Exists(reportPath)) File.Delete(reportPath); } catch (IOException) { }
+                try {
+                    var result = run("ServerApply", request);
+                    exitCode = Json.Text(result, "wizardExit", "0");
+                    foreach (var row in Json.Array(Json.Get(result, "parts")).Select(Json.Map)) {
+                        string line = Json.Str(row, "part") + ": " + Json.Str(row, "state") + " — " + Json.Str(row, "summary");
+                        Log("Сервер: " + line);
+                        Report(Json.Str(row, "part").StartsWith("lan:", StringComparison.Ordinal) ? ConfigSections.Lan : ConfigSections.Server,
+                            SectionOutcome.PartState(row), line);
+                    }
+                    return SectionOutcome.From(result, "Сервер настроен и проверен ✓");
+                } catch (Exception e) {
+                    failure = e.Message;
+                    if (e.Data.Contains("ExitCode")) exitCode = Convert.ToString(e.Data["ExitCode"], CultureInfo.InvariantCulture);
+                    throw;
+                } finally {
+                    string json = null;
+                    try { if (File.Exists(reportPath)) json = Files.ReadSharedText(reportPath); }
+                    catch (Exception) { failure += " server-apply.json не удалось прочитать"; }
+                    Log(DiagnosticReport.FormatServerApply(json, Program.Version, exitCode, failure, access.Item1));
                 }
-                return SectionOutcome.From(result, "Сервер настроен и проверен ✓");
             }
         }
 

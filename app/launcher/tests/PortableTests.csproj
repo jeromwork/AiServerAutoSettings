@@ -3,7 +3,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <LangVersion>7.3</LangVersion>
     <OutputType>Exe</OutputType>
-    <StartupObject Condition="'$(ConfigTests)' == 'true'">RemoteAgents.Launcher.ConfigBundleTests</StartupObject>
+    <StartupObject Condition="'$(ConfigTests)' == 'true'">RemoteAgents.Launcher.DiagnosticReportTests</StartupObject>
     <StartupObject Condition="'$(ConfigE2E)' == 'true'">RemoteAgents.Launcher.ConfigE2E</StartupObject>
     <StartupObject Condition="'$(ConfigTests)' != 'true' And '$(ConfigE2E)' != 'true'">RemoteAgents.Launcher.Stage6PortableEntry</StartupObject>
     <DefineConstants>PORTABLE_TEST</DefineConstants>
@@ -76,6 +76,8 @@
     <Compile Include="WizardStepTests.cs" />
     <Compile Include="DiskChoiceTests.cs" />
     <Compile Include="ConfigApplyTests.cs" />
+    <Compile Include="DiagnosticReportTests.cs" />
+    <Compile Include="../DiagnosticReport.cs" Link="DiagnosticReport.cs" />
     <Compile Include="../ConfigApply.cs" Link="ConfigApply.cs" />
     <Compile Include="ProxyRelayTests.cs" />
     <Compile Include="../ProxyRelay.cs" Link="ProxyRelay.cs" />

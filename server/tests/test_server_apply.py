@@ -302,7 +302,145 @@ class ApplyTests(unittest.TestCase):
             raise RuntimeError('boom')
         self.assertFalse(engine.part('probe', fail))
         self.assertEqual(engine.rows[-1]['state'], 'error')
-        self.assertEqual(engine.rows[-1]['summary'], 'Проверка/команда не выполнена; детали скрыты.')
+        self.assertIn('запись ' + engine.rows[-1]['diag']['id'], engine.rows[-1]['summary'])
+
+    def test_part_exception_diag_in_json(self):
+        engine = self.fake.engine()
+        def fail():
+            raise KeyError('x')
+        engine.part('probe', fail)
+        raw_stdout = json.dumps(engine.result('plan'), ensure_ascii=False)
+        row = json.loads(raw_stdout)['parts'][-1]
+        self.assertEqual(row['state'], 'error')
+        diag = row['diag']
+        self.assertEqual(diag['type'], 'KeyError')
+        self.assertTrue(diag['where'])
+        self.assertRegex(diag['id'], r'^[0-9a-f]{8}$')
+        self.assertIn('запись ' + diag['id'], row['summary'])
+        _, journal = self.diagnostic_record()
+        self.assertEqual({k: journal[k] for k in diag}, diag)
+        self.assertTrue(all('/' not in frame for frame in diag['where']))
+
+    def test_part_exception_diag_masks_input_secret(self):
+        secret, key = 'S3cr3t-Value-For-Test-123', 'A' * 40
+        cfg = config()
+        cfg['secrets'] = {'test': secret}
+        engine = self.fake.engine(cfg)
+        def fail():
+            try:
+                raise ValueError(secret + ' ' + key)
+            except ValueError as cause:
+                raise RuntimeError(secret + ' ' + key) from cause
+        engine.part('probe', fail)
+        raw_stdout = json.dumps(engine.result('plan'), ensure_ascii=False)
+        self.assertNotIn(secret, raw_stdout)
+        self.assertNotIn(key, raw_stdout)
+        self.assertIn('***', raw_stdout)
+        self.assertIn('***', engine.rows[-1]['diag']['cause'])
+
+    def test_main_exception_diag_in_json(self):
+        cfg = config()
+        secret = 'main-test-secret'
+        cfg['secrets'] = {'test': secret}
+        with patch.object(app.sys, 'stdin', io.StringIO(json.dumps(cfg))), patch.object(app, 'Engine', side_effect=RuntimeError(secret)):
+            try:
+                app.main(['plan', '--json'], system=self.fake.system)
+            except RuntimeError as exc:
+                result = app.failure_result(self.fake.system, exc, 'plan')
+        out = io.StringIO()
+        print(json.dumps(result), file=out)
+        self.assertNotIn(secret, out.getvalue())
+        result = json.loads(out.getvalue())
+        self.assertFalse(result['ok'])
+        self.assertIn('error', result)
+        self.assertEqual(result['diag']['type'], 'RuntimeError')
+        self.assertRegex(result['code']['sha'], r'^[0-9a-f]{12}$')
+
+    def test_sanitized_diag_preserves_actionable_details(self):
+        path = '/usr/local/lib/remoteagents/lan_pc_access.py'
+        long_message = 'The server could not finish applying the requested configuration because a required helper file is missing. ' * 2
+        details = [path, path.lstrip('/'), 'path=' + path, 'server_apply.py:1061:part', 'sha=012345abcdef', long_message]
+        try:
+            raise RuntimeError('\n'.join(details)) from KeyError('lan_pc_access.py')
+        except RuntimeError as exc:
+            diag = app.sanitized_diag(exc, 'probe', 'plan')
+        self.assertEqual(diag['cause'], "KeyError: 'lan_pc_access.py'")
+        for detail in details:
+            self.assertIn(detail, diag['message'])
+        self.assertTrue(diag['where'])
+        self.assertEqual(app.sanitized_diag(RuntimeError('monkey: banana'), 'probe', 'plan')['message'],
+                         'monkey: banana')
+        config_path = '/home/remoteagents/.local/share/remoteagents/happier-web/config.json'
+        self.assertEqual(app.sanitized_diag(RuntimeError(config_path), 'probe', 'plan')['message'], config_path)
+
+    def test_sanitized_diag_masks_credentials_and_long_path_segments(self):
+        token, password, root_password, short = 'T' * 37, 'fixture-password', 'root-json-password', 'q7Z!'
+        export = json.dumps({'root': {'password': root_password}})
+        base64 = 'A' * 16 + '/' + 'B' * 16 + '=='
+        message = '\n'.join([token, 'password=' + password, export, short, base64,
+                             '/usr/' + token + '/lan_pc_access.py'])
+        diag = app.sanitized_diag(RuntimeError(message), 'probe', 'plan', [export, short])
+        for value in (token, password, root_password, short, base64):
+            self.assertNotIn(value, diag['message'])
+        self.assertIn('/usr/***/lan_pc_access.py', diag['message'])
+        self.assertEqual(app.sanitized_diag(RuntimeError('A' * 31 + '/' + 'B' * 31), 'probe', 'plan')['message'],
+                         'A' * 31 + '/' + 'B' * 31)
+        self.assertEqual(app.sanitized_diag(RuntimeError('/usr/' + 'A' * 32 + '/file'), 'probe', 'plan')['message'],
+                         '/usr/***/file')
+
+    def test_sanitized_diag_masks_unpadded_base64_with_slashes(self):
+        for token in ('Q2xpZW50U2VjcmV0/S2V5MTIzNDU2Nzg5MGFiY2Rl',
+                      'aGVsbG8gd29ybGQ/dGhpcyBpcyBhIHNlY3JldA/xyzABC',
+                      'a' * 10 + 'A1/' + 'b' * 20,
+                      '/' + 'b' * 20 + '/' + 'a' * 10 + 'A1'):
+            with self.subTest(token=token):
+                self.assertEqual(app.sanitized_diag(RuntimeError('v ' + token + ' end'), 'probe', 'plan')['message'],
+                                 'v *** end')
+        # Below 12 characters, or missing any character class, still looks like a name.
+        for segment in ('a' * 9 + 'A1', 'a' * 11 + 'A', 'a' * 11 + '1', 'A' * 11 + '1'):
+            message = 'v ' + segment + '/' + 'b' * 20 + ' end'
+            with self.subTest(segment=segment):
+                self.assertEqual(app.sanitized_diag(RuntimeError(message), 'probe', 'plan')['message'], message)
+
+    def test_unprintable_exception_keeps_run_result_and_minimal_diag(self):
+        class UnprintableError(Exception):
+            def __str__(self):
+                raise RuntimeError('must not escape diagnostics')
+        engine = self.fake.engine()
+        with patch.object(engine, 'egress', side_effect=UnprintableError()):
+            result = engine.run('plan')
+        self.assertFalse(result['ok'])
+        row = next(row for row in result['parts'] if row['part'] == 'internet')
+        diag = row['diag']
+        self.assertEqual(set(diag), {'id', 'part', 'type'})
+        self.assertEqual((diag['part'], diag['type']), ('internet', 'UnprintableError'))
+        self.assertRegex(diag['id'], r'^[0-9a-f]{8}$')
+        self.assertIn('запись ' + diag['id'], row['summary'])
+        _, record = self.diagnostic_record()
+        self.assertEqual({key: record[key] for key in diag}, diag)
+        result = app.failure_result(self.fake.system, UnprintableError(), 'plan')
+        self.assertFalse(result['ok'])
+        self.assertEqual(set(result['diag']), {'id', 'part', 'type'})
+        self.assertEqual(result['diag']['part'], 'main')
+
+    def test_code_version_present(self):
+        result = self.fake.engine().result('plan')
+        self.assertEqual(result['schema'], 1)
+        self.assertRegex(result['code']['sha'], r'^[0-9a-f]{12}$')
+        self.assertTrue(result['code']['python'])
+        import hashlib
+        self.assertEqual(result['code']['sha'], hashlib.sha256((SOURCE / 'server_apply.py').read_bytes()).hexdigest()[:12])
+
+    def test_diag_without_journal(self):
+        engine = self.fake.engine()
+        def fail():
+            raise KeyError('x')
+        with patch.object(self.fake.system, 'diag', side_effect=OSError('unavailable')):
+            engine.part('probe', fail)
+        diag = json.loads(json.dumps(engine.result('plan')))['parts'][-1]['diag']
+        self.assertFalse(diag['journal'])
+        self.assertRegex(diag['id'], r'^[0-9a-f]{8}$')
+        self.assertIn('запись ' + diag['id'], engine.rows[-1]['summary'])
 
     def test_secrets_from_input_and_cause_are_redacted(self):
         cfg = config()

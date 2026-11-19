@@ -91,6 +91,7 @@ namespace RemoteAgents.Launcher
             serviceActions.Controls.Add(syncStatus); serviceActions.Controls.Add(serverHealthDetails); serviceActions.Controls.Add(pathStates);
             var deployDiagnostic = WrapLabel(); deployDiagnostic.Text = DeploymentText(); serviceActions.Controls.Add(deployDiagnostic);
             AddButton(serviceActions, "Состояние развёртывания сервера", () => { deployDiagnostic.Text = DeploymentText(); ShowPage("Сервер"); });
+            AddButton(serviceActions, "Скопировать журнал", CopyDiagnosticLog);
             serviceActions.Controls.Add(diagnosticPathLink);
             serviceActions.Controls.Add(vpnDnsDetails);
             diagnosticPathLink.LinkClicked += (s, e) => pathMenu.Show(diagnosticPathLink, new Point(0, diagnosticPathLink.Height));
@@ -173,7 +174,7 @@ namespace RemoteAgents.Launcher
         {
             try {
                 var result = Json.Read(Path.Combine(home, "state", "server-apply.json"));
-                return string.Join("\r\n", Json.Array(Json.Get(result, "parts")).Select(Json.Map).Select(r => Json.Str(r, "part") + ": " + Json.Str(r, "state") + " — " + Json.Str(r, "summary")));
+                return DiagnosticReport.Clean(DiagnosticReport.FormatServerApply(Json.Encode(result), Program.Version, "см. журнал шага"), DiagnosticReport.KnownSecrets(home));
             } catch (Exception) { return "Состояние развёртывания ещё не получено. Нажмите «Сверить состояние»."; }
         }
         void OpenDiagnostics()

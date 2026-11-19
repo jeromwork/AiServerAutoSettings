@@ -62,4 +62,33 @@ function Invoke-WizardLogin {param($Profile,$User,$Command,$InputText='', $Crede
 $keyProfile=[pscustomobject]@{keyPath='own-key'}
 Assert (Connect-WizardExistingKey $TestHome $keyProfile 'root' 'bootstrap' 'fixture-stdin' '') 'existing root key supports slow clean-VPS dependency bootstrap'
 Assert ($script:keyBootstrapTimeout -eq 600) 'key and password bootstrap share the 600s budget'
+# Exercise the real command parser with fake SSH, including top-level failures.
+. (Join-Path $repo 'build/Wizard.ServerApply.ps1')
+$script:progress=@()
+function Write-WizardProgress([string]$Text){$script:progress+=@($Text)}
+function Find-InstallProfile([string]$Root){return 'fixture-profile'}
+function Read-TransportJson([string]$Path){return [pscustomobject]@{sshExecutable='fixture-ssh';login='worker';serverAddress='fixture.invalid'}}
+function Get-WizardNetArgs {param($Profile,$Login,$Root) return @()}
+$script:sshResponse='{"ok":true,"code":{"sha":"012345abcdef","python":"3.13.1"},"parts":[{"part":"happierWeb","state":"error","summary":"fixture error","diag":{"id":"1234abcd","type":"KeyError","message":"fixture message","where":["server_apply.py:42:apply"],"cause":"fixture cause"}}]}'
+function Invoke-DiskProcess {param($Exe,$Arguments,$InputText,$TimeoutSeconds) return $script:sshResponse}
+$script:WizardApplyCodeLogged=$false
+$r=Invoke-WizardApplyCommand $TestHome $repo $request 'delegated' 'plan' '{}'
+$lines=$script:progress -join "`n"
+foreach($expected in @('diag part=happierWeb id=1234abcd type=KeyError','message: fixture message','where: server_apply.py:42:apply','cause: fixture cause','сервер-код: sha=012345abcdef','plan: ssh exit=0')){
+    Assert ($lines.Contains($expected)) ('progress retains '+$expected)
+}
+$saved=Get-Content -Raw (Join-Path $TestHome 'state/server-apply.json')|ConvertFrom-Json
+Assert ($saved.parts[0].diag.id -eq '1234abcd' -and $saved.code.sha -eq '012345abcdef' -and $saved.clientMode -eq 'delegated') 'complete diagnostic response persisted'
+[void](Invoke-WizardApplyCommand $TestHome $repo $request 'delegated' 'apply' '{}')
+Assert (@($script:progress|Where-Object {$_ -like 'сервер-код:*'}).Count -eq 1) 'server version reported once per run'
+$script:sshResponse='{"ok":false,"error":"E-TEXT","diag":{"id":"8765abcd","type":"RuntimeError","message":"fixture"},"code":{"sha":"012345abcdef","python":"3.13.1"}}'
+$failure=''
+try{Invoke-WizardApplyCommand $TestHome $repo $request 'delegated' 'plan' '{}'|Out-Null}catch{$failure=$_.Exception.Message}
+Assert ($failure.Contains('E-TEXT')) 'server top-level error reaches caller'
+$saved=Get-Content -Raw (Join-Path $TestHome 'state/server-apply.json')|ConvertFrom-Json
+Assert ($saved.error -eq 'E-TEXT' -and $saved.diag.id -eq '8765abcd' -and $saved.code.sha -eq '012345abcdef') 'top-level failure persisted before throw'
+# Transport failures expose their actual exit code without contacting a host.
+function Invoke-DiskProcess {throw 'fixture (код выхода 255)'}
+try{Invoke-WizardApplyCommand $TestHome $repo $request 'delegated' 'plan' '{}'|Out-Null}catch{}
+Assert ($script:progress[-1] -eq 'plan: ssh exit=255') 'failed SSH exit code reported'
 Write-Host ('PASS: server-apply engine '+$count+' checks')
