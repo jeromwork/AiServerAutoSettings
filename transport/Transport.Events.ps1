@@ -208,6 +208,9 @@ namespace RemoteAgents {
    }
    if(!String.IsNullOrEmpty(bindIP)) s.Bind(new IPEndPoint(IPAddress.Parse(bindIP),0));
    IAsyncResult pending=s.BeginConnect(target,null,null);
+   // Core may wrap a shared completed Task: never create/dispose its shared wait handle.
+   // A pending operation has its own completion handle, retained through EndConnect below.
+   if(pending.IsCompleted) {s.EndConnect(pending); return s;}
    using(WaitHandle wait=pending.AsyncWaitHandle) {
     if(!wait.WaitOne(timeoutMs)) throw new TimeoutException();
     s.EndConnect(pending);
