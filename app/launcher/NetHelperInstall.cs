@@ -17,10 +17,20 @@ namespace RemoteAgents.Launcher
     internal static class NetHelperInstall
     {
         // Bump manually whenever helper logic or the wire protocol changes.
-        internal const string HelperVersion = "5";
+        internal const string HelperVersion = "6";
         internal const string ServiceName = "RemoteAgentsNet";
         internal const string DisplayName = "RemoteAgents: локальные сети и VPN";
-        internal static bool NeedsInstall(string installed) { return (installed ?? "").Trim() != HelperVersion; }
+        internal static bool NeedsInstall(string installed)
+        { int version; return !int.TryParse((installed ?? "").Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out version) || version < int.Parse(HelperVersion, CultureInfo.InvariantCulture); }
+        // No writable marker can attest to the actual installed code or privileged transport.
+        internal static bool ImagesMatch(string directory, string expectedExe, string expectedTransportHash)
+        {
+            try {
+                return Files.Hash(Path.Combine(directory, "RemoteAgents.exe")) == Files.Hash(expectedExe) &&
+                    Files.Hash(Path.Combine(directory, "sing-box.exe")) == expectedTransportHash;
+            } catch (IOException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
+        }
         internal static string ValidateSid(string sid)
         {
             if (!Regex.IsMatch(sid ?? "", @"\AS-1-[0-9]+(?:-[0-9]+){1,15}\z", RegexOptions.CultureInvariant)) throw new ArgumentException("Недопустимый SID");
@@ -45,6 +55,7 @@ namespace RemoteAgents.Launcher
         internal static string InstallDirectory { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "RemoteAgents", "Helper"); } }
         internal static string DataDirectory { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "RemoteAgents", "Helper"); } }
         internal static string InstalledVersion { get { try { return File.ReadAllText(Path.Combine(InstallDirectory, "version.txt")).Trim(); } catch { return ""; } } }
+        internal static bool IsCurrent { get { return !NeedsInstall(InstalledVersion) && Exists() && ImagesMatch(InstallDirectory, Program.Exe, PinnedTransport.ExpectedHash); } }
         internal static bool IsAdministrator { get { using (var identity = WindowsIdentity.GetCurrent()) return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator); } }
         internal static bool Exists()
         {
@@ -80,6 +91,10 @@ namespace RemoteAgents.Launcher
             Sc(new[] { "sdset", ServiceName, ServiceSddl(sid) });
             Sc(FailureArguments());
             // SYSTEM/Administrators can write; Users can only read the executable and marker.
+            using (var service = new ServiceController(ServiceName)) {
+                service.Start();
+                service.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(20));
+            }
             File.WriteAllText(version, HelperVersion + "\n", NetHelperProtocol.Utf8);
             return 0;
         }

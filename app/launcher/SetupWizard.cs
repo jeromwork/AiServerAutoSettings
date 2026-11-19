@@ -14,6 +14,8 @@ namespace RemoteAgents.Launcher
     // One UI and one production step dispatcher for first run and tray settings, in both EXEs.
     internal sealed partial class SetupWizard : Form
     {
+        const int VpnSection = 5, LanSection = 6;
+        string helperWarning = "";
         readonly string home; string bundle; readonly bool first; readonly Func<Task<string>> prepare; bool preparing;
         readonly WizardNavigation steps = new WizardNavigation();
         readonly Panel pages = new Panel { Dock = DockStyle.Fill };
@@ -363,7 +365,7 @@ namespace RemoteAgents.Launcher
         void Changed(int index){if(busy || initializing)return;dirty[index]=true;applied[index]=false;results[index]="Есть неприменённые изменения";RefreshSummary();}
         void RefreshSummary()
         {
-            if(summary!=null)summary.Text=string.Join("\r\n",order.Where(i=>i!=7).Select(i=>titles[i]+": "+(results[i].Length>72?results[i].Substring(0,69)+"…":results[i])));
+            if(summary!=null)summary.Text=string.Join("\r\n",order.Where(i=>i!=7).Select(i=>titles[i]+": "+(results[i].Length>72?results[i].Substring(0,69)+"…":results[i])))+(helperWarning.Length>0?"\r\n"+helperWarning:"");
             for(int i=0;i<sections.Length;i++){if(states[i]!=null){states[i].Text=results[i];states[i].ForeColor=results[i].StartsWith("Ошибка")?Color.Firebrick:SystemColors.ControlText;}steps.Mark(i,(i!=7 && applied[i])?"✓":waiting.ContainsKey(i)?"⏳":results[i].StartsWith("Ошибка")?"✗":"…");}
             RefreshAccountButtons();
             steps.Invalidate();
@@ -403,9 +405,16 @@ namespace RemoteAgents.Launcher
             int page=section<0?steps.Section:section;
             busy=true;stepCancellation=new CancellationTokenSource();steps.Enabled=false;pages.Enabled=false;foreach(var panel in details)panel.Enabled=false;back.Enabled=next.Enabled=false;close.Enabled=true;progress.Style=ProgressBarStyle.Marquee;
             try {
-                if (FirstInstall.Required(home) || page == 5 || page == 6)
-                    await HelperClient.EnsureInstalled(home, bundle, Append, stepCancellation.Token);
-                await action();lastSuccess=true;if(SettingsApplied!=null && !IsDisposed)SettingsApplied();
+                // Actual order is 0,1,8,4,2,3,6,5,7: VPN/LAN are stable section IDs, not navigation positions.
+                bool needsHelper = NetHelperSetup.Required(new Configuration(home).Data) || page == VpnSection && vpn != null && vpn.Checked;
+                bool helperReady = await HelperClient.EnsureInstalled(home, bundle, Append, stepCancellation.Token, required: needsHelper);
+                await action();
+                // LAN setup may have just imported a public lan[] from the server.
+                if (helperReady && page == LanSection)
+                    helperReady = await HelperClient.EnsureInstalled(home, bundle, Append, stepCancellation.Token);
+                helperWarning = helperReady ? "" : HelperClient.SetupWarning;
+                if (helperWarning.Length > 0) Append(helperWarning);
+                lastSuccess=true;if(SettingsApplied!=null && !IsDisposed)SettingsApplied();
             }
             catch(OperationCanceledException) {if(!IsDisposed){if(page!=7)applied[page]=false;results[page]="Шаг отменён; готовность не подтверждена";Append(results[page]);}}
             catch(Exception e) {if(!IsDisposed){if(page==0)password.Enabled=true;if(page!=7)applied[page]=false;results[page]="Ошибка: "+e.Message;Append(results[page]);}}

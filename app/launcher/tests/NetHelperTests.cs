@@ -26,6 +26,7 @@ namespace RemoteAgents.Launcher
         internal static void Run()
         {
             PinnedBinary();
+            NetHelperSetupTests.Run();
             string parsed;
             foreach (string command in new[] { "status", "ping", "lan.stop", "vpn.off" }) {
                 Check(NetHelperProtocol.TryCommand(Json.Encode(new { cmd = command }), out parsed) && parsed == command, "valid " + command);
@@ -109,7 +110,7 @@ namespace RemoteAgents.Launcher
             Check(string.Join("|", NetHelperInstall.FailureArguments()) == "failure|RemoteAgentsNet|reset=|60|actions=|", "no SCM restarts");
             Check(!NetHelperInstall.NeedsInstall(NetHelperInstall.HelperVersion + "\r\n"), "matching version has no UAC");
             Check(NetHelperInstall.NeedsInstall("2"), "stage 4/5 helper requires combined protocol upgrade");
-            Check(NetHelperInstall.NeedsInstall(null) && NetHelperInstall.NeedsInstall("") && NetHelperInstall.NeedsInstall("old") && NetHelperInstall.NeedsInstall("999"), "missing or different version requires install");
+            Check(NetHelperInstall.NeedsInstall(null) && NetHelperInstall.NeedsInstall("") && NetHelperInstall.NeedsInstall("old"), "missing or invalid version requires install");
             Console.WriteLine("PASS: NetHelper " + count + " checks (no service/UAC)");
         }
         static void PinnedBinary()
@@ -152,6 +153,11 @@ namespace RemoteAgents.Launcher
         // Keep the existing private portable entry point and all its command modes unchanged.
         static int Main(string[] args)
         {
+            if (args.Length >= 1 && args[0] == "--net-helper-stage1") {
+                Run();
+                if (args.Length == 3) NetHelperSetupTests.FullExe(args[1], args[2]);
+                return 0;
+            }
             if (args.Length == 1 && args[0] == "--net-helper") { Run(); return 0; }
             if (args.Length == 0 || !args[0].StartsWith("--", StringComparison.Ordinal)) { Run(); VpnTunTests.Run(args.Length == 0 ? Path.GetTempPath() : args[0]); }
             try { return (int)typeof(TestEntry).GetMethod("Main", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, new object[] { args }); }

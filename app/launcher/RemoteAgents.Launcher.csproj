@@ -41,5 +41,6 @@
   </ItemGroup>
   <Target Name="RequireBundleOnPublish" BeforeTargets="Publish">
     <Error Condition="!Exists('$(BundlePath)')" Text="Сначала соберите начальный бандл: build/build-exe.sh" />
+    <Exec Command="python3 &quot;$(MSBuildThisFileDirectory)../../build/bundle.py&quot; verify-initial &quot;$(BundlePath)&quot;" />
   </Target>
 </Project>

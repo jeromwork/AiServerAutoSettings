@@ -85,6 +85,7 @@ namespace RemoteAgents.Launcher
             dispatch.BeginInvoke(new Action(() => {
                 netHelper = new HelperClient(home, dispatch);
                 if (firstSetup) { RunFirstSetup(); return; }
+                // A new EXE after OTA follows the same required/version/image check as a clean install.
                 netHelper.EnsureRunning();
                 DeliverUpdateNotice(); CheckLegacyVpn(); StartLegacyDiskCleanup(); Handle(args); DrainCommands(); Tick();
                 if(Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome),StringComparison.OrdinalIgnoreCase)) CheckSetup();
@@ -174,7 +175,7 @@ namespace RemoteAgents.Launcher
                 })) { ok = false; coreFailed = true; }
                 if (restart) return;
                 if (!Step("transport", () => { transport = StatusView.Read(home, "transport", maxAgeSec: 15); })) { ok = false; coreFailed = true; }
-                ok &= Step("lan", () => { if (netHelper != null) { netHelper.UpdateLan(config.Data, transport); netHelper.ConnectWhenInstalled(); } });
+                ok &= Step("lan", () => { if (netHelper != null) { netHelper.UpdateLan(config.Data, transport); netHelper.ConnectWhenInstalled(NetHelperSetup.Required(config.Data)); } });
                 ok &= Step("vpn-resume", () => ResumeUpdatedVpn(transport));
                 ok &= Step("icon", () => {
                     var linkPhase = StatusView.Phase(transport); shown = linkPhase == LinkPhase.Ok ? green : linkPhase == LinkPhase.Checking ? yellow : red;
@@ -628,6 +629,7 @@ namespace RemoteAgents.Launcher
             if (!AllowMutation()) return; actionBusy = vpnActionBusy = true; vpnActionWanted = true; vpnError = ""; RefreshMain();
             try {
                 if (netHelper == null) throw new IOException(HelperClient.PermissionRequired);
+                if (!await netHelper.EnsureReady(stop.Token)) { VpnFailure(HelperClient.SetupWarning, fromCard); return; }
                 var transport = StatusView.Read(home, "transport", maxAgeSec: 3);
                 var options = new System.Collections.Generic.Dictionary<string, object>(Json.Map(Json.Get(config.Data, "vpn")));
                 // Intent/interface names are not part of the privileged command.

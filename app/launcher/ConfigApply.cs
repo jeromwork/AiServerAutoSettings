@@ -911,7 +911,7 @@ namespace RemoteAgents.Launcher
         internal async Task<Dictionary<string, SectionOutcome>> Execute(IList<string> plan, CancellationToken token)
         {
             await Bundle();
-            await HelperClient.EnsureInstalled(home, bundle, Log, token);
+            bool helperReady = await HelperClient.EnsureInstalled(home, bundle, Log, token);
             deploymentOutcome = null;
             var result = await ConfigEngine.Execute(plan, (s, t) => Task.Run(() => RunSection(s, t), t), (s, state, text) => Report(s, state, text), token);
             foreach (var pair in result) {
@@ -920,6 +920,7 @@ namespace RemoteAgents.Launcher
                 new Journal(home).Write("config." + pair.Key + (pair.Value.Ok ? ".ok " : pair.Value.Pending ? ".pending " : ".failed ") + pair.Value.Ms + "ms");
                 Log(ConfigSections.Title(pair.Key) + ": " + pair.Value.Summary + " (" + (pair.Value.Ms / 1000.0).ToString("0.0", CultureInfo.InvariantCulture) + " с)");
             }
+            if (!helperReady) Log(HelperClient.SetupWarning);
             return result;
         }
         SectionOutcome RunSection(string s, CancellationToken token)
@@ -1211,8 +1212,9 @@ namespace RemoteAgents.Launcher
         internal async Task<SectionOutcome> Activate(CancellationToken token)
         {
             await Bundle();
-            await HelperClient.EnsureInstalled(home, bundle, Log, token);
+            bool helperReady = await HelperClient.EnsureInstalled(home, bundle, Log, token);
             var r = await Task.Run(() => WizardRunner.Run(home, bundle, "Activate", new { }, token, line => Log("Итог: " + line)));
+            if (!helperReady) Log(HelperClient.SetupWarning);
             return SectionOutcome.From(r, "Настройки сохранены");
         }
         internal static string DiskBase()

@@ -17,8 +17,7 @@ namespace RemoteAgents.Launcher
     // Owns one authenticated connection for precisely the tray's lifetime.
     internal sealed class HelperClient : IDisposable
     {
-        internal const string PermissionRequired = "Локальные сети и VPN недоступны: помощник не установлен (нужно разрешение Windows)";
-        internal const string UpdateRequired = "Обновился сетевой помощник — нужно одно разрешение Windows";
+        internal const string PermissionRequired = NetHelperSetup.PermissionRequired;
         readonly string home;
         readonly Control ui;
         readonly Journal journal;
@@ -31,34 +30,46 @@ namespace RemoteAgents.Launcher
         volatile bool disposed;
         bool busy, connectionAttempted;
         static readonly NetHelperSetup setup = new NetHelperSetup();
+        static event Action<bool> SetupCompleted;
+        internal static string SetupWarning { get { return setup.Warning; } }
         internal string Status { get; private set; }
-        internal HelperClient(string home, Control ui) { this.home = home; this.ui = ui; journal = new Journal(home); }
+        internal HelperClient(string home, Control ui) { this.home = home; this.ui = ui; journal = new Journal(home); SetupCompleted += OnSetupCompleted; }
+        // Every new tray (including the EXE started after OTA) enters this shared setup gate.
         internal void EnsureRunning()
         {
             if (disposed || busy) return;
             busy = true; connectionAttempted = true;
-            Task.Run(() => {
-                bool reinstall = true;
-                string message;
+            Task.Run(async () => {
+                bool reinstall = false, needed = false;
+                string message = "";
                 try {
-                    string version = NetHelperInstall.InstalledVersion;
-                    bool exists = NetHelperInstall.Exists();
-                    reinstall = !exists || NetHelperInstall.NeedsInstall(version);
-                    if (reinstall) { message = version.Length == 0 || !exists ? PermissionRequired : UpdateRequired; }
-                    else { Connect(); message = "Сетевой помощник подключён"; }
+                    needed = NetHelperSetup.Required(new Configuration(home).Data);
+                    if (needed) {
+                        var engine = new UpdateEngine(home, Program.Version);
+                        reinstall = !await EnsureInstalled(home, engine.Current.Length == 0 ? home : engine.Folder(engine.Current),
+                            text => Post(() => { Status = text; ShowNotice(text, true); }), CancellationToken.None);
+                        if (reinstall) message = setup.Warning;
+                        else { Connect(); message = "Сетевой помощник подключён"; }
+                    }
                 } catch (Exception error) { journal.Write(TickFailureLog.HelperFailure("connect", error)); message = "Локальные сети и VPN недоступны: не удалось подключиться к помощнику"; }
                 Post(() => {
-                    busy = false; Status = message;
+                    busy = false; if (!needed) connectionAttempted = false; Status = message;
                     if (notice != null && !notice.IsDisposed && !reinstall && Connected) { notice.Close(); return; }
-                    if (!Connected) ShowNotice(message, reinstall);
+                    if (needed && !Connected) ShowNotice(message, reinstall);
                 });
             });
         }
-        // During first setup the tray already owns the client, but must not show a second install dialog.
-        // The version marker is written last by the installer. Connect once it appears, then Tick sends lan[].
-        internal void ConnectWhenInstalled()
+        void OnSetupCompleted(bool ready)
         {
-            if (!connectionAttempted && !NetHelperInstall.NeedsInstall(NetHelperInstall.InstalledVersion)) EnsureRunning();
+            Post(() => {
+                if (ready) { if (!busy) { connectionAttempted = false; EnsureRunning(); } }
+                else { connectionAttempted = true; Status = setup.Warning; ShowNotice(Status, true); }
+            });
+        }
+        // A config can first acquire lan[] while the initial wizard is still open.
+        internal void ConnectWhenInstalled(bool required)
+        {
+            if (required && !connectionAttempted && setup.Warning.Length == 0 && !NetHelperInstall.NeedsInstall(NetHelperInstall.InstalledVersion)) EnsureRunning();
         }
         string lanWanted = "{\"cmd\":\"lan.stop\"}";
         Dictionary<string, object> lanState = Json.Map(null);
@@ -137,6 +148,23 @@ namespace RemoteAgents.Launcher
                 catch (Exception error) { journal.Write(TickFailureLog.HelperFailure("request", error)); channel.Dispose(); throw; } // A timed-out frame must never be reused.
             }
         }
+        // A deliberate VPN-on action can be the first request for a helper in this session.
+        internal async Task<bool> EnsureReady(CancellationToken token)
+        {
+            while (busy) { await Task.Delay(100, token); }
+            if (Connected) return true;
+            busy = true; connectionAttempted = true;
+            try {
+                var engine = new UpdateEngine(home, Program.Version);
+                bool ready = await EnsureInstalled(home, engine.Current.Length == 0 ? home : engine.Folder(engine.Current),
+                    text => { Status = text; ShowNotice(text, true); }, token, required: true);
+                if (!ready) return false;
+                await Task.Run(() => Connect(), token);
+                Status = "Сетевой помощник подключён";
+                if (notice != null && !notice.IsDisposed) notice.Close();
+                return true;
+            } finally { busy = false; if (install != null && !install.IsDisposed) install.Enabled = true; }
+        }
         internal Task<System.Collections.Generic.Dictionary<string, object>> VpnOn(VpnTun options)
         {
             return Task.Run(() => {
@@ -194,10 +222,9 @@ namespace RemoteAgents.Launcher
                     try {
                         var engine = new UpdateEngine(home, Program.Version);
                         if (engine.Current.Length == 0) throw new IOException("Нет установленного бандла");
-                        await EnsureInstalled(home, engine.Folder(engine.Current), text => { Status = text; summary.Text = text; }, CancellationToken.None);
-                        result = "";
-                    } catch (Win32Exception ex) { journal.Write(TickFailureLog.HelperFailure("install", ex)); result = ex.NativeErrorCode == 1223 ? PermissionRequired : "Не удалось установить сетевой помощник"; }
-                    catch (Exception error) { journal.Write(TickFailureLog.HelperFailure("install", error)); result = "Не удалось установить сетевой помощник"; }
+                        bool ready = await EnsureInstalled(home, engine.Folder(engine.Current), text => { Status = text; summary.Text = text; }, CancellationToken.None, retry: true);
+                        result = ready ? "" : setup.Warning;
+                    } catch (Exception error) { journal.Write(TickFailureLog.HelperFailure("install", error)); result = "Не удалось установить сетевой помощник"; }
                     busy = false;
                     if (disposed) return;
                     if (!install.IsDisposed) install.Enabled = true;
@@ -205,21 +232,28 @@ namespace RemoteAgents.Launcher
                 };
                 notice.Controls.Add(summary); notice.Controls.Add(install);
             }
-            summary.Text = message; install.Text = needsInstall ? (NetHelperInstall.InstalledVersion.Length == 0 ? "Установить помощник" : "Обновить помощник") : "Подключить помощник";
+            summary.Text = message; install.Text = needsInstall ? "Установить помощника" : "Подключить помощник";
             install.Tag = needsInstall; install.Enabled = !busy;
             notice.Show();
         }
-        internal static async Task EnsureInstalled(string home, string bundle, Action<string> progress, CancellationToken token)
+        // Setup errors are warnings: unrelated config sections and wizard actions must still run.
+        internal static async Task<bool> EnsureInstalled(string home, string bundle, Action<string> progress, CancellationToken token,
+            bool retry = false, bool? required = null)
         {
-            try {
-                await setup.Ensure(
-                    () => !NetHelperInstall.NeedsInstall(NetHelperInstall.InstalledVersion) && NetHelperInstall.Exists(),
-                    () => Task.Run(() => PinnedTransport.Ensure(home, bundle), token),
-                    () => Task.Run(() => InstallElevated(home, bundle)), progress, token);
-            } catch (Exception error) {
-                new Journal(home).Write(TickFailureLog.HelperFailure("setup", error));
-                throw;
+            int generation = setup.InstallGeneration;
+            bool ready = await NetHelperSetup.ContinueApply(() => setup.Ensure(
+                required ?? NetHelperSetup.Required(new Configuration(home).Data),
+                () => NetHelperInstall.IsCurrent,
+                () => Task.Run(() => PinnedTransport.Ensure(home, bundle), token),
+                () => Task.Run(() => InstallElevated(home, bundle)), progress, token, retry),
+                error => new Journal(home).Write(TickFailureLog.HelperFailure(
+                    error is Win32Exception && ((Win32Exception)error).NativeErrorCode == 1223 ? "setup-uac" : "setup", error)));
+            if (!ready) progress(setup.Warning);
+            // Do not signal an installation for a config that needs no helper.
+            if (!ready || setup.InstallGeneration != generation) {
+                var changed = SetupCompleted; if (changed != null) changed(ready);
             }
+            return ready;
         }
         static int InstallElevated(string home, string bundle)
         {
@@ -243,6 +277,7 @@ namespace RemoteAgents.Launcher
         }
         public void Dispose()
         {
+            SetupCompleted -= OnSetupCompleted;
             lock (gate) { if (disposed) return; disposed = true; if (pipe != null) { pipe.Dispose(); pipe = null; } }
             if (notice != null && !notice.IsDisposed) notice.Dispose();
         }
