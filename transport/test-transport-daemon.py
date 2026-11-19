@@ -347,7 +347,48 @@ Server(('127.0.0.1',port),API).serve_forever()
         assert stopped(int((root / 'engine.pid').read_text()))
         assert stopped(int((root / 'tunnel.pid').read_text()))
         assert all(stopped(int(pid)) for pid in (root/'probes.pid').read_text().splitlines()), 'SSH probe leaked after timeout/stop'
-        print('OK: failover, pin <=5с, мёртвый pin, auto, hot reload, disabled tag, invalid reload, restart, занятый SSH при старте, фиксированный Happier/конфликт/статус/восстановление, optional SSH occupied/VLESS, bind/перевыбор/backoff/reset/status, stop, ParentPid (имитаторы)')
+        # Happ: физический интерфейс не найден (Linux-стенд его не имеет). Паузы 3/5/10 с и error= в журнале;
+        # резервный режим bind=none только при vpn off, после 3 подряд неудач.
+        root2 = root / 'bind-home'
+        (root2 / 'status').mkdir(parents=True)
+        (root2 / 'state').mkdir()
+        cfg2 = json.loads((root / 'config.json').read_text())
+        cfg2['transport'].update(bindPhysical=True)
+        with socket.socket() as s2:
+            s2.bind(('127.0.0.1', 0)); cfg2['transport']['apiPort'] = s2.getsockname()[1]
+        cfg2['happier']['localWeb']['enabled'] = False
+        (root2 / 'config.json').write_text(json.dumps(cfg2))
+        (root2 / 'status/vpn.json').write_text(json.dumps(dict(state='on')))
+        for name in ('starts', 'engine.pid'):
+            if (root / name).exists(): (root / name).unlink()
+        log2 = root2 / 'logs/transport.log'
+
+        def failures():
+            if not log2.exists(): return []
+            return [l.split()[0] for l in log2.read_text(encoding='utf-8').splitlines()
+                    if ' process-failed ' in l and 'error=Физический интерфейс недоступен' in l]
+        daemon = subprocess.Popen([PWSH, '-NoLogo', '-NoProfile', '-File', str(DAEMON), '-Home', str(root2), '-ParentPid', '0'],
+                                  env=dict(os.environ, LOCALAPPDATA=str(root2)), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        children.append(daemon)
+        def stamp(line):
+            return datetime.fromisoformat(line.split()[0][:26] + '+00:00').timestamp()
+        until(lambda: len(failures()) >= 2, seconds=25)
+        assert not (root / 'starts').exists(), 'движок не должен стартовать без привязки при vpn on'
+        assert 'bind-mode' not in log2.read_text(encoding='utf-8'), 'vpn не off: резервного режима быть не должно'
+        # Третья попытка при vpn off входит в резервный режим; пауза до неё 5 с, до второй неудачи 3 с.
+        (root2 / 'status/vpn.json').write_text(json.dumps(dict(state='off')))
+        until(lambda: 'bind=none reason=no-physical-interface' in log2.read_text(encoding='utf-8'), seconds=25)
+        lines = log2.read_text(encoding='utf-8').splitlines()
+        fails = [stamp(l) for l in lines if ' process-failed ' in l and 'error=Физический интерфейс недоступен' in l]
+        bind = stamp(next(l for l in lines if 'bind=none reason=no-physical-interface' in l))
+        assert 1.5 <= fails[1] - fails[0] <= 5.5 and 3.0 <= bind - fails[1] <= 9, ('паузы 3 -> 5 с', fails, bind)
+        until(lambda: (root / 'starts').exists(), seconds=10)
+        sb_cfg = json.loads((root2 / 'state/transport-sing-box.json').read_text())
+        assert sb_cfg['route']['auto_detect_interface'] is False
+        assert not any('bind_interface' in o for o in sb_cfg['outbounds']), 'bind=none: без привязки сокетов'
+        (root2 / 'stop').touch()
+        daemon.wait(timeout=10)
+        print('OK: failover, pin <=5с, мёртвый pin, auto, hot reload, disabled tag, invalid reload, restart, занятый SSH при старте, фиксированный Happier/конфликт/статус/восстановление, optional SSH occupied/VLESS, bind/перевыбор/backoff/reset/status, паузы 3/5 с и error=, bind=none только при vpn off, stop, ParentPid (имитаторы)')
     except Exception:
         print('STATUS', status(), file=sys.stderr)
         log=root/'logs/transport.log'

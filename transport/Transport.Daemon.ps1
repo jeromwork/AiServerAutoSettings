@@ -7,7 +7,7 @@ param([Alias('Home')][string]$TransportHome=(Join-Path $env:LOCALAPPDATA 'Remote
 $root=(Get-TransportHome $TransportHome);$engine=$null;$tunnelChildren=@{};$probes=@{};$rows=@();$active=$null;$confirmed=$false;$errorText='Запуск';$network=$null;$memory=$null;$secret=$null
 $parent=$null;$mutex=$null;$locked=$false;$settings=$null;$paths=$null;$rankPending=$false;$rankTags=@();$rankQueue=$null;$exitCode=0
 $pin=[pscustomobject]@{mode='auto';tag=$null};$nextControl=[DateTime]::MinValue;$revision='';$reloadJob=$null;$reloadError=$null;$failedRevision=$null;$pendingRevision=$null;$nextReload=[DateTime]::MinValue
-$portConflict=$null;$bindRetry=$null;$recoveryRound=$false;$recoveryWon=$false;$allLiveRound=$false
+$portConflict=$null;$bindRetry=$null;$startFailures=0;$bindState=@{failures=0;none=$false};$nextBindRetry=[DateTime]::MinValue;$recoveryRound=$false;$recoveryWon=$false;$allLiveRound=$false
 $diagnosticContext=$null;$liveDeferred=@();$tunnelReadyUntil=@{};$daemonStarted=[DateTime]::Now;$checkingSince=[DateTime]::UtcNow;$stopping=$false
 try{$daemonStarted=(Get-Process -Id $PID).StartTime}catch{}
 $lastStatus=[DateTime]::MinValue;$nextActive=[DateTime]::MinValue;$nextRank=[DateTime]::MinValue;$nextNetwork=[DateTime]::MinValue;$retryAt=[DateTime]::MinValue;$nextLive=[DateTime]::MinValue;$nextAllLive=[DateTime]::MinValue
@@ -176,9 +176,18 @@ function Get-DaemonRestartDelay($Detail) {
 function Start-TransportEngine {
     [void](Reset-DaemonPorts)
     $script:confirmed=$false;$script:checkingSince=[DateTime]::UtcNow
-    $interface='';if($network -and $settings.Options.bindPhysical){$interface=[string]$network.interface}
-    if($settings.Options.bindPhysical -and -not $interface){throw 'Физический интерфейс недоступен'}
-    $cfg=New-TransportConfig $settings $paths $secret $active $interface
+    $interface='';$cfgSettings=$settings
+    if($settings.Options.bindPhysical){
+        $bind=Resolve-TransportBind $bindState $network (Test-TransportVpnOff $root)
+        if($bind.event){Write-TransportLog $root 'bind-mode' ([pscustomobject]@{message=$bind.event})}
+        if($bind.mode -eq 'fail'){throw 'Физический интерфейс недоступен'}
+        if($bind.mode -eq 'physical'){$interface=[string]$network.interface}
+        else{
+            # Резервный режим: без bind_interface/auto_detect_interface и без -b у OpenSSH; трафик идёт по маршрутам ОС.
+            $cfgSettings=Copy-TransportObject $settings;$cfgSettings.Options.bindPhysical=$false;$script:nextBindRetry=[DateTime]::UtcNow.AddSeconds(60)
+        }
+    }
+    $cfg=New-TransportConfig $cfgSettings $paths $secret $active $interface
     $file=Join-Path $root 'state/transport-sing-box.json';Write-TransportJson $file $cfg -Private
     # Валидация до запуска; stdout/stderr не публикуются, т.к. могут содержать адреса и секреты.
     Test-TransportConfigFile $settings.Options.singBoxPath $file
@@ -187,7 +196,7 @@ function Start-TransportEngine {
     foreach($tunnel in $paths.Tunnels){
         if($tunnelChildren.ContainsKey($tunnel.tag)){continue}
         $a=@($tunnel.arguments)
-        if($settings.Options.bindPhysical -and $tunnel.bind){if(-not $network.ip){throw 'Нет физического IPv4 для OpenSSH'};$a+=@('-b',[string]$network.ip)}
+        if($cfgSettings.Options.bindPhysical -and $tunnel.bind){if(-not $network.ip){throw 'Нет физического IPv4 для OpenSSH'};$a+=@('-b',[string]$network.ip)}
         $script:tunnelChildren[$tunnel.tag]=Start-TransportProcess $settings.Profile.sshExecutable ($a+@([string]$tunnel.target))
         $script:tunnelReadyUntil[$tunnel.tag]=[DateTime]::UtcNow.AddSeconds(3)
     }
@@ -203,7 +212,7 @@ function Start-TransportEngine {
         }catch{}
     }
     $at=[DateTime]::MinValue
-    $script:nextRank=[DateTime]::UtcNow.AddSeconds(1);$script:nextActive=$at;$script:nextLive=$at;Write-TransportLog $root 'ready'
+    $script:startFailures=0;$script:nextRank=[DateTime]::UtcNow.AddSeconds(1);$script:nextActive=$at;$script:nextLive=$at;Write-TransportLog $root 'ready'
     if($ready){Write-DaemonWizardProgress ('· модуль связи готов '+[int]([DateTime]::Now-$daemonStarted).TotalMilliseconds+' мс от запуска процесса')}
     Start-TransportLiveness
 }
@@ -282,7 +291,7 @@ try{
         }
         if($now -ge $nextNetwork){
             $nextNetwork=$now.AddSeconds(5);$newNetwork=Get-TransportNetwork;$newMetered=Get-TransportMetered $settings.Options
-            $changed=($newNetwork.id -ne $network.id -or $newNetwork.interface -ne $network.interface -or $newNetwork.ip -ne $network.ip)
+            $changed=Test-TransportNetworkChanged $network $newNetwork
             $costChanged=($newMetered -ne $metered);$metered=$newMetered
             if($changed){
                 Stop-TransportProbes;$rankPending=$false;$rankQueue=$null;$network=$newNetwork
@@ -302,6 +311,14 @@ try{
                 if(-not $newNetwork.available){$errorText='Не удалось определить физическую сеть';Write-TransportLog $root 'network-unavailable'}
             }elseif($costChanged){Stop-TransportProbes;$rankPending=$false;$rankQueue=$null;$nextRank=$now;$nextActive=$now;$nextAllLive=$now}
         }
+        if($engine -and $bindState.none -and $now -ge $nextBindRetry){
+            # Резервный режим: раз в 60 с пробуем вернуть привязку; при появлении интерфейса или включении VPN движок пересоздаётся.
+            $nextBindRetry=$now.AddSeconds(60);$probeNet=Get-TransportNetwork
+            if($probeNet.interface -or -not (Test-TransportVpnOff $root)){
+                $network=$probeNet;Stop-TransportProbes;$rankPending=$false;$rankQueue=$null;$confirmed=$false
+                Stop-TransportProcess $engine;$engine=$null;foreach($child in @($tunnelChildren.Values)){Stop-TransportProcess $child};$tunnelChildren.Clear();$retryAt=$now
+            }
+        }
         if($engine -and $engine.Process.HasExited){
             $detail=New-TransportDiagnostic $engine 'sing-box' 'process-exited' $diagnosticContext
             Write-TransportLog $root 'process-failed' $detail
@@ -316,19 +333,27 @@ try{
             Publish-TransportStatus
         }
         if(-not $engine -and $now -ge $retryAt){
-            try{Start-TransportEngine;$errorText='Ожидается проверка пути'}
+            try{
+                # После неудачи сеть определяется заново, а не ждёт 5-секундной проверки смены сети.
+                if($startFailures -gt 0 -and $settings.Options.bindPhysical){$network=Get-TransportNetwork;$nextNetwork=$now.AddSeconds(5)}
+                Start-TransportEngine;$errorText='Ожидается проверка пути'
+            }
             catch{
+                $startError=Format-TransportStartError $_ $diagnosticContext
                 $detail=$_.Exception.Data['transportDiagnostic']
                 if(-not $detail){$detail=New-TransportDiagnostic $engine 'sing-box' 'engine-start-failed' $diagnosticContext}
                 $detail.stderr=Protect-TransportDiagnostic $detail.stderr $diagnosticContext
+                $detail|Add-Member -Force error $startError
                 foreach($row in $rows){if($row.enabled){$perRow=Copy-TransportObject $detail;$perRow.candidate=$row.tag;$row|Add-Member -Force diagnostic $perRow}}
                 Write-TransportLog $root 'process-failed' $detail
                 Stop-TransportProcess $engine;$engine=$null;foreach($child in @($tunnelChildren.Values)){Stop-TransportProcess $child};$tunnelChildren.Clear()
-                $confirmed=$false;$errorText='Не удалось запустить транспорт; проверьте конфиг и физическую сеть';$checkingSince=$now
+                $confirmed=$false;$errorText='Не удалось запустить транспорт: '+$startError;$checkingSince=$now
                 $portConflict=$detail.portConflict
                 if($portConflict){$errorText=$portConflict.message}
                 $bindRetry=Get-TransportBindRetry $bindRetry $detail
+                $startFailures++
                 $retryAt=$now.AddSeconds((Get-DaemonRestartDelay $detail))
+                if(-not $portConflict){$retryAt=$now.AddSeconds((Get-TransportStartPause $startFailures))}
                 Publish-TransportStatus
             }
         }
@@ -343,7 +368,7 @@ try{
                 }
                 if(-not $tunnelChildren.ContainsKey($tunnel.tag) -and $now -ge $retryAt){
                     try{
-                        $a=@($tunnel.arguments);if($settings.Options.bindPhysical -and $tunnel.bind){$a+=@('-b',[string]$network.ip)}
+                        $a=@($tunnel.arguments);if($settings.Options.bindPhysical -and -not $bindState.none -and $tunnel.bind -and $network.ip){$a+=@('-b',[string]$network.ip)}
                         $tunnelChildren[$tunnel.tag]=Start-TransportProcess $settings.Profile.sshExecutable ($a+@($tunnel.target))
                         $tunnelReadyUntil[$tunnel.tag]=[DateTime]::UtcNow.AddSeconds(3)
                         # A restarted tunnel needs a fresh health proof, even when it is not active.
