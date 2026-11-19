@@ -77,10 +77,12 @@ namespace RemoteAgents.Launcher
         static string RedactLongToken(Match match)
         {
             string token = match.Value;
-            // Check path segments separately; padded/base64 + forms remain whole tokens.
+            // Mixed-case alphanumeric segments can be unpadded base64, not names.
+            bool secretSegment = token.Split('/').Any(segment => segment.Length >= 12 &&
+                Regex.IsMatch(segment, "[A-Z]") && Regex.IsMatch(segment, "[a-z]") && Regex.IsMatch(segment, "[0-9]"));
             bool base64 = !token.StartsWith("/", StringComparison.Ordinal) &&
                 Regex.IsMatch(token, "^[A-Za-z0-9+/]+={0,2}$") && token.IndexOfAny(new[] { '+', '=' }) >= 0;
-            if (token.Contains("/") && !base64)
+            if (token.Contains("/") && !(base64 || secretSegment))
                 return Regex.Replace(token, "[A-Za-z0-9+=_-]{32,}", "<secret>");
             return "<secret>";
         }

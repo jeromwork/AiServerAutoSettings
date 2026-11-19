@@ -201,11 +201,13 @@ def sanitized_diag(exc, part, mode, values=()):
 
     def redact_token(match):
         token = match.group()
-        # Slash-separated paths are checked one segment at a time. Keep the
-        # whole-token rule for base64 with padding/+ rather than a path shape.
+        # Mixed-case alphanumeric segments can be unpadded base64, not names.
+        secret_segment = any(len(segment) >= 12 and
+                             all(re.search(pattern, segment) for pattern in (r'[A-Z]', r'[a-z]', r'[0-9]'))
+                             for segment in token.split('/'))
         base64 = (not token.startswith('/') and re.fullmatch(r'[A-Za-z0-9+/]+={0,2}', token) and
                   any(c in token for c in '+='))
-        if '/' in token and not base64:
+        if '/' in token and not (base64 or secret_segment):
             return re.sub(r'[A-Za-z0-9+=_-]{32,}', '***', token)
         return '***'
 

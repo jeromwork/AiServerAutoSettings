@@ -28,6 +28,7 @@ namespace RemoteAgents.Launcher
             string path = "/usr/local/lib/remoteagents/lan_pc_access.py";
             string longMessage = string.Concat(Enumerable.Repeat("The server could not finish applying the requested configuration because a required helper file is missing. ", 2));
             var details = new[] { "KeyError: 'lan_pc_access.py'", path, path.TrimStart('/'), "path=" + path,
+                "/home/remoteagents/.local/share/remoteagents/happier-web/config.json",
                 "server_apply.py:1061:part", "sha=012345abcdef", longMessage,
                 "monkey: banana", "причина: MissingKeyException: 'lan_pc_access.py'" };
             clean = DiagnosticReport.Clean(string.Join("\n", details), null);
@@ -48,6 +49,17 @@ namespace RemoteAgents.Launcher
             string shortSegments = new string('A', 31) + "/" + new string('B', 31);
             Check(DiagnosticReport.Clean(shortSegments, null) == shortSegments, "31-character path segments retained");
             Check(DiagnosticReport.Clean("/usr/" + new string('A', 32) + "/file", null) == "/usr/<secret>/file", "32-character path segment hidden");
+            foreach (string token in new[] { "Q2xpZW50U2VjcmV0/S2V5MTIzNDU2Nzg5MGFiY2Rl",
+                "aGVsbG8gd29ybGQ/dGhpcyBpcyBhIHNlY3JldA/xyzABC",
+                new string('a', 10) + "A1/" + new string('b', 20),
+                "/" + new string('b', 20) + "/" + new string('a', 10) + "A1" })
+                Check(DiagnosticReport.Clean("v " + token + " end", null) == "v <secret> end", "unpadded base64 hidden as a whole token");
+            // Below 12 characters, or missing any character class, still looks like a name.
+            foreach (string segment in new[] { new string('a', 9) + "A1", new string('a', 11) + "A",
+                new string('a', 11) + "1", new string('A', 11) + "1" }) {
+                string message = "v " + segment + "/" + new string('b', 20) + " end";
+                Check(DiagnosticReport.Clean(message, null) == message, "name-like path segment retained");
+            }
             foreach (string field in new[] { "key", "apiKey", "apikey", "private_key", "clientKey", "keyMaterial", "API_KEY" })
                 NoSecrets(DiagnosticReport.Clean(field + "=field-credential", null), "field-credential");
             clean = DiagnosticReport.Clean("{\"apiKey\":\"escaped\\\"value\\\\tail\",\"public\":42}\nauthorization: Bearer auth-value\nvless://url-uuid@example.invalid:443", null);

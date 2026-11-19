@@ -370,6 +370,8 @@ class ApplyTests(unittest.TestCase):
         self.assertTrue(diag['where'])
         self.assertEqual(app.sanitized_diag(RuntimeError('monkey: banana'), 'probe', 'plan')['message'],
                          'monkey: banana')
+        config_path = '/home/remoteagents/.local/share/remoteagents/happier-web/config.json'
+        self.assertEqual(app.sanitized_diag(RuntimeError(config_path), 'probe', 'plan')['message'], config_path)
 
     def test_sanitized_diag_masks_credentials_and_long_path_segments(self):
         token, password, root_password, short = 'T' * 37, 'fixture-password', 'root-json-password', 'q7Z!'
@@ -385,6 +387,20 @@ class ApplyTests(unittest.TestCase):
                          'A' * 31 + '/' + 'B' * 31)
         self.assertEqual(app.sanitized_diag(RuntimeError('/usr/' + 'A' * 32 + '/file'), 'probe', 'plan')['message'],
                          '/usr/***/file')
+
+    def test_sanitized_diag_masks_unpadded_base64_with_slashes(self):
+        for token in ('Q2xpZW50U2VjcmV0/S2V5MTIzNDU2Nzg5MGFiY2Rl',
+                      'aGVsbG8gd29ybGQ/dGhpcyBpcyBhIHNlY3JldA/xyzABC',
+                      'a' * 10 + 'A1/' + 'b' * 20,
+                      '/' + 'b' * 20 + '/' + 'a' * 10 + 'A1'):
+            with self.subTest(token=token):
+                self.assertEqual(app.sanitized_diag(RuntimeError('v ' + token + ' end'), 'probe', 'plan')['message'],
+                                 'v *** end')
+        # Below 12 characters, or missing any character class, still looks like a name.
+        for segment in ('a' * 9 + 'A1', 'a' * 11 + 'A', 'a' * 11 + '1', 'A' * 11 + '1'):
+            message = 'v ' + segment + '/' + 'b' * 20 + ' end'
+            with self.subTest(segment=segment):
+                self.assertEqual(app.sanitized_diag(RuntimeError(message), 'probe', 'plan')['message'], message)
 
     def test_unprintable_exception_keeps_run_result_and_minimal_diag(self):
         class UnprintableError(Exception):
