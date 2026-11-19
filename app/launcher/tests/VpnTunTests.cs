@@ -206,7 +206,7 @@ namespace RemoteAgents.Launcher
                 f.Step(0); f.Await(1, () => f.Rebind.Failed, "DNS failure becomes searching status");
                 Check(f.Rebind.Config == before && f.RunningPort == 17881 && f.Builds == 0 && f.Restarts == 0 && f.Stops == 0 && Json.Str(f.Status, "state") == "searching", "failed resolution keeps the previous config and never calls Stop");
                 f.Transport["configRevision"] = "r2"; f.Advance(10000);
-                Check(f.Resolves == 1 && Json.Str(f.Status, "state") != "on", "DNS error retry is delayed ten seconds even when revision changes");
+                Check(f.Resolves == 1 && !f.Rebind.Preparing && Json.Str(f.Status, "state") != "on", "DNS error retry is delayed ten seconds even when revision changes");
                 f.ResolveFails = false; f.Step(10001); f.Await(10002, () => f.Restarts == 1, "DNS recovers automatically after retry delay");
                 Check(f.RunningPort == 17891 && f.Stops == 0, "recovered binding needs no manual disable or enable");
             }
@@ -228,6 +228,30 @@ namespace RemoteAgents.Launcher
                 f.Step(0); f.Await(1, () => f.Rebind.Failed, "config check/start failure is contained by rebind");
                 Check(f.Rebind.Config == before && f.Rebind.Binding.Port == 17881 && f.Stops == 0 && Json.Str(f.Status, "state") == "searching", "failed config check or core launch cannot mark candidate as running");
             }
+        }
+        static void ConfigFileChecks(string root, VpnTun settings, Dictionary<string, object> snapshot, Dictionary<string, object> policy)
+        {
+            string directory = Path.Combine(root, "vpn-config-slots");
+            Directory.CreateDirectory(directory);
+            // Exercise the production slot selector and file writer over repeated
+            // enable/rebind/disable cycles, without Windows Jobs or real secrets.
+            for (int session = 0; session < 6; session++) {
+                string current = null;
+                for (int update = 0; update < 4; update++) {
+                    string candidate = VpnTunSession.ConfigPath(directory, current);
+                    Check(candidate != current, "rebind writes the inactive config slot");
+                    Files.Atomic(candidate, Json.Encode(settings.Config("ra-helper", Convert.ToBase64String(new byte[32]),
+                        new[] { "198.51.100.7" }, new string[0], snapshot, policy, 17881 + session)));
+                    current = candidate;
+                    Check(Directory.GetFiles(directory, "vpn-tun*.json").Length <= 2, "repeated enable/rebind/disable never accumulates credential configs");
+                }
+                // Disable ends this simulated core lifetime; the next enable starts
+                // from the same first slot, without retaining the session number.
+            }
+            var files = Directory.GetFiles(directory, "vpn-tun*.json");
+            Check(files.Select(Path.GetFileName).OrderBy(name => name).SequenceEqual(new[] { "vpn-tun-a.json", "vpn-tun-b.json" }), "only the two fixed config filenames remain");
+            foreach (string file in files)
+                Check(Json.Int(Json.Map(Json.Array(Json.Read(file)["outbounds"])[0]), "server_port", 0) == 17886, "both config slots overwrite previous sessions");
         }
         internal static void Run(string root)
         {
@@ -274,6 +298,7 @@ namespace RemoteAgents.Launcher
             MonitorChecks(now, transport, strict);
             ConflictScanChecks();
             RebindChecks();
+            ConfigFileChecks(root, settings, snapshot, strict);
             string command; Dictionary<string, object> request;
             Check(NetHelperProtocol.TryRequest(Json.Encode(settings.Request()) + "\r\n", out command, out request) && command == "vpn.on", "typed VPN command with CRLF");
             foreach (string invalid in new[] { "{\"cmd\":\"vpn.on\",\"socksPort\":17881,\"socksPort\":9}", "{\"cmd\":\"vpn.on\",\"socksPort\":17881,\"c\\u006dd\":\"vpn.off\"}", "{\"cmd\":\"vpn.on\",\"socksPort\":17881,\"path\":\"bad\"}", "{\"cmd\":\"vpn.on\",\"socksPort\":0}", "{\"cmd\":\"vpn.on\",\"socksPort\":17881,\"excludeCidrs\":[\"bad\"]}", "{\"cmd\":\"vpn.on\",\"socksPort\":17881,\"dnsServer\":{}}", "{\"cmd\":\"vpn.on\",\"socksPort\":17881,\"excludeCidrs\":{}}", "{\"cmd\":\"vpn.on\",\"socksPort\":\"17881\"}" })

@@ -402,6 +402,13 @@ namespace RemoteAgents.Launcher
                 return lookup.GetAwaiter().GetResult().Select(ip => ip.ToString());
             }, fallbackPort);
         }
+        // Run sessions are serialized on the owner thread. Reuse two slots across
+        // enables, and only write the slot that is not used by the running core.
+        internal static string ConfigPath(string directory, string current = null)
+        {
+            string first = Path.Combine(directory, "vpn-tun-a.json");
+            return current == first ? Path.Combine(directory, "vpn-tun-b.json") : first;
+        }
         string PrepareConfig(VpnTun options, VpnTunBinding binding, Dictionary<string, object> transport,
             Dictionary<string, object> snapshot, Dictionary<string, object> policy, int epoch, string config)
         {
@@ -429,9 +436,7 @@ namespace RemoteAgents.Launcher
                 // The same resolver/builder is used again while VPN stays enabled.
                 var binding = ResolveBinding(transport, epoch, options.SocksPort);
                 stage = "config-check";
-                string configA = Path.Combine(directory, "vpn-tun-" + epoch + "-a.json");
-                string configB = Path.Combine(directory, "vpn-tun-" + epoch + "-b.json");
-                string config = PrepareConfig(options, binding, transport, snapshot, policy, epoch, configA);
+                string config = PrepareConfig(options, binding, transport, snapshot, policy, epoch, ConfigPath(directory));
                 // Recheck fresh channel evidence immediately before creating the TUN.
                 transport = Transport(); pathState = VpnTun.PathState(transport, DateTime.UtcNow);
                 if (pathState.Length > 0) { lock (gate) if (epoch == generation) Set(pathState, "path", TrayMenuModel.ActiveTitle(transport)); return; }
@@ -450,7 +455,7 @@ namespace RemoteAgents.Launcher
                 core = launchJob.Start(executable, new[] { "run", "-c", config }, directory);
                 var rebind = new VpnTunRebind(clock.ElapsedMilliseconds, binding, config,
                     evidence => ResolveBinding(evidence, epoch, options.SocksPort),
-                    (updated, evidence, current) => PrepareConfig(options, updated, evidence, snapshot, policy, epoch, current == configA ? configB : configA),
+                    (updated, evidence, current) => PrepareConfig(options, updated, evidence, snapshot, policy, epoch, ConfigPath(directory, current)),
                     candidate => {
                         lock (gate) if (disposed || epoch != generation || lease.Expired) return false;
                         try {
