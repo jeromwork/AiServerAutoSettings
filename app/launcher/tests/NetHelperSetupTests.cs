@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
@@ -19,7 +20,8 @@ namespace RemoteAgents.Launcher
         { return Json.Map(Json.Parse("{\"profile\":" + profile + ",\"vpn\":" + legacy + "}")); }
         static async Task Scenarios()
         {
-            Check(NetHelperInstall.HelperVersion == "6" && NetHelperInstall.NeedsInstall("5"), "v5 must receive changed service code");
+            string previous = (int.Parse(NetHelperInstall.HelperVersion, CultureInfo.InvariantCulture) - 1).ToString(CultureInfo.InvariantCulture);
+            Check(NetHelperInstall.NeedsInstall("6") && NetHelperInstall.NeedsInstall(previous) && !NetHelperInstall.NeedsInstall(NetHelperInstall.HelperVersion), "installed v6 (shipped in e8e68db) and the previous version must receive changed service code");
             Check(NetHelperSetup.Required(Config("{\"lan\":[{\"name\":\"clinic\"}]}")), "LAN requires helper even with VPN off");
             Check(NetHelperSetup.Required(Config("{\"vpn\":{\"enabled\":true}}")), "enabled VPN requires helper");
             Check(NetHelperSetup.Required(Config("{}", "{\"enabled\":true}")), "manual/legacy VPN requires helper");
@@ -27,14 +29,14 @@ namespace RemoteAgents.Launcher
             Check(!NetHelperInstall.NeedsInstall("999"), "a newer helper version alone does not request a downgrade");
             var messages = new List<string>();
             Action<string> progress = messages.Add;
-            foreach (string version in new[] { "", "5" }) {
+            foreach (string version in new[] { "", previous }) {
                 var setup = new NetHelperSetup(); string installed = version;
                 int prompts = 0, preparations = 0;
                 Func<Task<bool>> ensure = () => setup.Ensure(true, () => !NetHelperInstall.NeedsInstall(installed),
                     () => { preparations++; return Task.CompletedTask; },
                     () => { prompts++; installed = NetHelperInstall.HelperVersion; return Task.FromResult(0); }, progress, CancellationToken.None);
                 Check(await ensure() && await ensure(), "clean install / OTA becomes ready for all subsequent callers");
-                Check(prompts == 1 && preparations == 1, version == "" ? "clean install exactly one UAC" : "OTA v5 exactly one UAC");
+                Check(prompts == 1 && preparations == 1, version == "" ? "clean install exactly one UAC" : "OTA previous version exactly one UAC");
             }
             {
                 var setup = new NetHelperSetup(); int prompts = 0;
@@ -155,7 +157,7 @@ namespace RemoteAgents.Launcher
                 Check(Files.Hash(exe) != Files.Hash(installedExe) && NetHelperInstall.ImagesMatch(root, hash), "new launcher hash with compatible helper is current");
                 foreach (string scenario in new[] { "OTA same helper", "OTA older helper", "wrong sing-box" }) {
                     var coordinator = new NetHelperSetup(); int prompts = 0;
-                    string version = scenario == "OTA older helper" ? "5" : NetHelperInstall.HelperVersion;
+                    string version = scenario == "OTA older helper" ? previous : NetHelperInstall.HelperVersion;
                     if (scenario == "wrong sing-box") File.WriteAllText(transport, "wrong sing-box");
                     Func<Task<bool>> ensure = () => coordinator.Ensure(true,
                         () => !NetHelperInstall.NeedsInstall(version) && NetHelperInstall.ImagesMatch(root, hash),
