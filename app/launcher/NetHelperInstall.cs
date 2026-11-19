@@ -16,10 +16,10 @@ namespace RemoteAgents.Launcher
     // свой код только как обвязка над SCM и sing-box
     internal static class NetHelperInstall
     {
-        // Bump when installed helper code/protocol must change; launcher-only OTA keeps this version.
-        // NetHelperSources.json pins this version's service/protocol sources (LF UTF-8).
-        // After a service change, bump HelperVersion and update that fingerprint; LanTests checks both.
-        internal const string HelperVersion = "6";
+        // NetHelperVersionTests (LanTests in app/launcher/tests/run.sh --full) checks the version/source SHA-256 pin.
+        // It detects source changes without a pin update, but cannot decide whether HelperVersion must increase.
+        // Reviewers must bump HelperVersion for every change to installed service behavior, then update the pin.
+        internal const string HelperVersion = "7";
         internal const string ServiceName = "RemoteAgentsNet";
         internal const string DisplayName = "RemoteAgents: локальные сети и VPN";
         internal static bool NeedsInstall(string installed)
