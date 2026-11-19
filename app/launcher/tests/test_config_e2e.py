@@ -116,8 +116,11 @@ def main():
         write_sshd_conf(d, port, authorized, server_home, bindir)
         # B: issuing settings (normally /etc/remoteagents/config-export.json), all inside the stand.
         export_cfg = d / 'config-export.json'
+        lan_pc_access = d / 'lan-pc-access.json'
+        lan_pc_access.write_text(json.dumps({'lans': []}))
+        lan_pc_access.chmod(0o600)
         settings = dict(schema=1, version=1, serverAddress='127.0.0.1', serverPort=port, workerUser=USER, hostKeys=[host_pub],
-                        workerAuthorizedKeys=str(authorized), stateDir=str(d / 'issued'), syncFile=str(conf_dir / 'config-sync.json'),
+                        lanPcAccess=str(lan_pc_access), workerAuthorizedKeys=str(authorized), stateDir=str(d / 'issued'), syncFile=str(conf_dir / 'config-sync.json'),
                         nodeCatalog=str(server_home / '.local/share/remote-agents-nodes'), catalogFile=str(catalog),
                         authLog=[str(d / 'sshd.log')], routes=[{'kind': 'direct'}], happier=native_happier(server_home))
 
@@ -638,8 +641,11 @@ def main_channel(upgrade=False):
         try:
             with ChannelStand(d) as stand:
                 export_cfg = d / 'config-export.json'
+                lan_pc_access = d / 'lan-pc-access.json'
+                lan_pc_access.write_text(json.dumps({'lans': []}))
+                lan_pc_access.chmod(0o600)
                 settings = dict(schema=1, version=1, serverAddress='127.0.0.2', serverPort=stand.port, workerUser=USER, hostKeys=[stand.host_pub],
-                                workerAuthorizedKeys=str(stand.authorized), stateDir=str(d / 'issued'), syncFile=str(stand.conf_dir / 'config-sync.json'),
+                                lanPcAccess=str(lan_pc_access), workerAuthorizedKeys=str(stand.authorized), stateDir=str(d / 'issued'), syncFile=str(stand.conf_dir / 'config-sync.json'),
                                 nodeCatalog=str(stand.server_home / '.local/share/remote-agents-nodes'), catalogFile=str(stand.catalog),
                                 authLog=[str(d / 'sshd.log')], routes=[{'kind': 'direct'}], happier=native_happier(stand.server_home),
                                 vpnBootstrap=dict(channelFile=str(d / 'channel.json'), vpn=dict(checkUrl=f'https://{SNI}/generate_204', dnsServer='127.0.0.1')))
