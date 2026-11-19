@@ -323,7 +323,7 @@ try{
     $publisher=$daemonAst.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Publish-TransportStatus'},$true).Body.GetScriptBlock()
     & {
         param($root,$settings,$paths,$active,$publisher)
-        $rows=@();$engine=$null;$network=$null;$confirmed=$false;$errorText='fixture';$revision='fixture';$exitCode=0;$retryAt=[DateTime]::MinValue;$pin=[pscustomobject]@{mode='auto';tag=$null}
+        $rows=@();$engine=@{Process=@{HasExited=$false}};$network=$null;$confirmed=$false;$errorText='fixture';$revision='fixture';$exitCode=0;$retryAt=[DateTime]::MinValue;$pin=[pscustomobject]@{mode='auto';tag=$null}
         $verdict=@{action='searching';localNet='down';reason=@{code='local-network-down';text='Нет интернета у вас (сеть), жду';since=0}}
         $decision=@{switches=@(@{at=0;from='a';to='b';why='path-stalled'})}
         & $publisher
@@ -516,7 +516,22 @@ try{
             $custom.transport.switch.stallSeconds=$invalid;Write-TransportJson (Join-Path $work 'config.json') $custom
             $rejected=$false;try{Read-TransportSettings $work|Out-Null}catch{$rejected=$true};Assert $rejected 'неверный stallSeconds отклонён'
         }
+        $custom.transport.switch.stallSeconds=8
+        foreach($invalid in @(0,-1,1.5,$true,'2',1025)){
+            $custom.transport.switch.stallConns=$invalid;Write-TransportJson (Join-Path $work 'config.json') $custom
+            $rejected=$false;try{Read-TransportSettings $work|Out-Null}catch{$rejected=$true};Assert $rejected 'неверный stallConns отклонён'
+        }
+        # Retained schema keys are accepted but never become runtime scheduling options.
+        foreach($key in @('activeProbeBytes','rankProbeBytes','activeIntervalSec','meteredActiveIntervalSec','allLivenessIntervalSec','meteredAllLivenessIntervalSec','rankIntervalSec','rankConcurrency','topOnMetered','switchFactor')){
+            $custom.transport|Add-Member -Force $key 'ignored-invalid-old-value'
+        }
         $custom.transport.PSObject.Properties.Remove('switch');Write-TransportJson (Join-Path $work 'config.json') $custom
+        $legacy=Read-TransportSettings $work
+        Assert (-not $legacy.Options.ContainsKey('activeProbeBytes') -and -not $legacy.Options.ContainsKey('switchFactor') -and $legacy.Options.switchStallConns -eq 2) 'старые ключи молча игнорируются'
+        $schema=Read-TransportJson (Join-Path $PSScriptRoot 'config.schema.json')
+        foreach($key in @('activeProbeBytes','rankProbeBytes','activeIntervalSec','meteredActiveIntervalSec','allLivenessIntervalSec','meteredAllLivenessIntervalSec','rankIntervalSec','rankConcurrency','topOnMetered','switchFactor')){
+            Assert ($schema.properties.$key.deprecated -eq $true -and $schema.properties.$key.description -eq 'не используется: переключение по событиям') ('схема сохраняет устаревший '+$key)
+        }
         $personalConfig=Read-TransportJson (Join-Path $work 'config.json')
         $personalConfig|Add-Member wizard ([pscustomobject]@{serverRoute=$personal})
         Write-TransportJson (Join-Path $work 'config.json') $personalConfig

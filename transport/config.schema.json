@@ -385,6 +385,74 @@
         "minLength": 1
       },
       "description": "Префиксы для первичного выбора из памяти и порядка отображения"
+    },
+    "activeProbeBytes": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 65536,
+      "deprecated": true,
+      "description": "не используется: переключение по событиям"
+    },
+    "rankProbeBytes": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 262144,
+      "deprecated": true,
+      "description": "не используется: переключение по событиям"
+    },
+    "activeIntervalSec": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 120,
+      "deprecated": true,
+      "description": "не используется: переключение по событиям"
+    },
+    "meteredActiveIntervalSec": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 300,
+      "deprecated": true,
+      "description": "не используется: переключение по событиям"
+    },
+    "allLivenessIntervalSec": {
+      "type": "number",
+      "minimum": 0,
+      "deprecated": true,
+      "description": "не используется: переключение по событиям"
+    },
+    "meteredAllLivenessIntervalSec": {
+      "type": "number",
+      "minimum": 0,
+      "deprecated": true,
+      "description": "не используется: переключение по событиям"
+    },
+    "rankIntervalSec": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1800,
+      "deprecated": true,
+      "description": "не используется: переключение по событиям"
+    },
+    "topOnMetered": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 3,
+      "deprecated": true,
+      "description": "не используется: переключение по событиям"
+    },
+    "rankConcurrency": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 16,
+      "default": 1,
+      "description": "не используется: переключение по событиям",
+      "deprecated": true
+    },
+    "switchFactor": {
+      "type": "number",
+      "minimum": 0,
+      "deprecated": true,
+      "description": "не используется: переключение по событиям"
     }
   },
   "$defs": {

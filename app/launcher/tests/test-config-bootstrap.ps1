@@ -95,6 +95,7 @@ $old.transport|Add-Member entries @([pscustomobject]@{name='old-entry';ssh='old-
 $old.transport|Add-Member hops @([pscustomobject]@{name='wizard-server-route';ssh='old.example.invalid'})
 $old.transport|Add-Member relays @([pscustomobject]@{name='old-relay';host='old.example.invalid';port=443})
 $old.transport|Add-Member cdn @([pscustomobject]@{name='old-cdn';domain='old.example.invalid';entry='old-entry'})
+$old.transport|Add-Member switch ([pscustomobject]@{stallSeconds=17;stallConns=4})
 $old.transport|Add-Member sshPort 2233;$old.transport|Add-Member metered 'true';$old.transport|Add-Member rankConcurrency 2
 Write-TransportJson $file $old
 Write-TransportJson (Join-Path $root 'status/transport.json') @{ok=$true;active='old-channel';updatedAt=[DateTime]::UtcNow.ToString('o')}
@@ -105,6 +106,7 @@ Assert ($r.ok -and $c.transport.profilePath -ne $profileFile -and (Read-Transpor
 Assert (-not $c.transport.serverRoute -and -not $c.wizard.serverRoute) 'upgrade clears both sources of the previous personal route'
 Assert (-not $c.transport.disabledTags -and -not $c.transport.hops -and -not $c.transport.cdn -and $c.transport.entries[0].name -eq 'fixture' -and $c.transport.relays[0].name -eq 'sparfum') 'upgrade takes candidate catalog only from pasted config'
 Assert ($c.transport.sshPort -eq 2233 -and $c.transport.metered -eq 'true' -and $c.transport.rankConcurrency -eq 2 -and $c.transport.singBoxPath -eq $binary) 'upgrade keeps local ports, metering, rank policy and binary'
+Assert ($c.transport.switch.stallSeconds -eq 17 -and $c.transport.switch.stallConns -eq 4) 'upgrade preserves transport.switch thresholds'
 Assert ($c.transport.cacheRoot -ne $old.transport.cacheRoot -and (Read-TransportJson (Join-Path $c.transport.cacheRoot 'secrets/entries/fixture.json')).server -eq 'fixture.example.invalid') 'new cache contains only current materialization'
 Assert (-not (Test-Path (Join-Path (Split-Path $c.transport.profilePath -Parent) 'known_hosts-hop'))) 'upgrade new profile has no previous hop pins'
 $upgradePaths=Get-TransportCandidates (Read-TransportSettings $root) $root

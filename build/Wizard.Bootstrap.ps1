@@ -173,7 +173,7 @@ function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request,[int]$Time
         $prepare=[Diagnostics.Stopwatch]::StartNew()
         # Carry only local preferences. Routes, catalog, cache and profile belong to the pasted server.
         $t=[pscustomobject]@{}
-        foreach($field in @('singBoxPath','sshPort','channelSocksPort','channelSshAddress','syncPort','probePortBase','socksPortBase','apiPort','bindPhysical','metered','activeProbeBytes','rankProbeBytes','activeIntervalSec','meteredActiveIntervalSec','rankIntervalSec','rankConcurrency','topOnMetered','stallSeconds','probeTimeoutSec','restartDelaySec')){
+        foreach($field in @('singBoxPath','sshPort','channelSocksPort','channelSshAddress','syncPort','probePortBase','socksPortBase','apiPort','bindPhysical','metered','activeProbeBytes','rankProbeBytes','activeIntervalSec','meteredActiveIntervalSec','rankIntervalSec','rankConcurrency','topOnMetered','stallSeconds','probeTimeoutSec','restartDelaySec','switch')){
             if($null -ne $config.transport.$field){$t|Add-Member $field $config.transport.$field}
         }
         # Compatibility for a runtime-only profile without a portable server section.

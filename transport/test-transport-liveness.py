@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import threading
 
 PWSH = sys.argv[1] if len(sys.argv) > 1 else 'pwsh'
 DAEMON = Path(__file__).with_name('Transport.Daemon.ps1').resolve()
@@ -98,19 +99,17 @@ Server(('127.0.0.1',port),API).serve_forever()
         except OSError:
             return []
 
-    # Override only direct-check I/O: no external traffic from a failed startup path.
-    source = DAEMON.read_text(encoding='utf-8-sig')
-    for name in ('Common', 'Decide', 'Events'):
-        target = str(DAEMON.with_name('Transport.'+name+'.ps1')).replace("'", "''")
-        source = source.replace("(Join-Path $PSScriptRoot 'Transport."+name+".ps1')", "'"+target+"'")
-    source = source.replace("$metered=$null\ntry{", """function Start-TransportDirectCheck { @{result=(New-DaemonEvent 'net-up' '' 'ok')} }
-function Receive-TransportDirectCheck($Check) { $Check.result }
-function Stop-TransportDirectCheck($Check) {}
-$metered=$null
-try{""")
-    fixture_daemon = root / 'daemon.ps1'
-    fixture_daemon.write_text(source, encoding='utf-8-sig')
-    daemon = subprocess.Popen([PWSH, '-NoLogo', '-NoProfile', '-File', str(fixture_daemon), '-Home', str(root)],
+    # Real direct wrapper uses the documented loopback hook, without source rewriting.
+    direct = socket.socket(); direct.bind(('127.0.0.1', 0)); direct.listen()
+    def accept_direct():
+        while True:
+            try:
+                client, _ = direct.accept(); client.close()
+            except OSError: return
+    threading.Thread(target=accept_direct, daemon=True).start()
+    endpoint='127.0.0.1:%d' % direct.getsockname()[1]
+    env['REMOTEAGENTS_TEST_DIRECT_TARGETS']=endpoint+','+endpoint
+    daemon = subprocess.Popen([PWSH, '-NoLogo', '-NoProfile', '-File', str(DAEMON), '-Home', str(root)],
                               env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         until(lambda: status().get('ok'))
@@ -143,6 +142,7 @@ try{""")
             print(log.read_text(), file=sys.stderr)
         raise
     finally:
+        direct.close()
         if daemon.poll() is None:
             (root / 'stop').touch()
             try:

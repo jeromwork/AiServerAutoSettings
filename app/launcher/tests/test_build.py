@@ -26,6 +26,11 @@ class PackagingTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_event_transport_modules_are_bundled(self):
+        with zipfile.ZipFile(self.zip) as z:
+            for name in ('Transport.Events.ps1', 'Transport.Decide.ps1', 'Transport.Daemon.ps1'):
+                self.assertIn('transport/' + name, z.namelist())
+
     def test_allowlist_no_downloaded_binaries(self):
         with zipfile.ZipFile(self.zip) as z:
             names = z.namelist()
