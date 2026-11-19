@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 # Diagnostics for the clinic LAN channel while Happ is on. Manual run only (not part of the EXE).
 # Userspace only: no admin rights, no changes to the system. Secrets are never printed.
 #   -Mode check           A..F checks from vpn104-lan-fix.md section 3 (hosts block mode) + summary + VERDICT
