@@ -852,6 +852,17 @@ def computer_sections(deployment):
                     'share.dnsServers: DNS-сервер должен входить в share.subnets этой сети.')
         require(not share['domains'] or share['dnsServers'],
                 'Для доменов сети ' + item['name'] + ' укажите share.dnsServers (DNS-серверы внутри ЛВС)')
+        hosts = share.get('hosts', [])  # omitted when empty: older programs reject unknown share keys
+        require(isinstance(hosts, list) and len(hosts) <= 100, 'share.hosts: нужен массив, не более 100 имён.')
+        require(len({h if isinstance(h, str) else json.dumps(h) for h in hosts}) == len(hosts), 'share.hosts: имена повторяются.')
+        require(not hosts or share['dnsServers'], 'Для share.hosts сети ' + item['name'] + ' укажите share.dnsServers.')
+        roots = [d[2:] if isinstance(d, str) and d.startswith('*.') else d for d in share['domains']]
+        for host in hosts:
+            require(isinstance(host, str) and re.fullmatch(r'(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', host)
+                    and len(host) <= 253 and not re.fullmatch(r'[0-9.]+', host),
+                    'share.hosts: нужны полные DNS-имена в нижнем регистре без * (hosts не поддерживает шаблоны).')
+            require(any(host == r.lower() or host.endswith('.' + r.lower()) for r in roots if isinstance(r, str)),
+                    'share.hosts: имя ' + host + ' должно входить в share.domains этой сети.')
         row = dict(name=item['name'], kind=item.get('kind', 'openvpn'), share=share)
         host = item.get('testHost', item.get('host', ''))
         port = item.get('testPort', item.get('port', 22))

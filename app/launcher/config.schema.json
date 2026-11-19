@@ -144,7 +144,7 @@
     },
     "profile": {
       "$ref": "config.paste.schema.json",
-      "description": "Желаемый переносимый профиль без secrets; lan[].share: subnets, domains для split-DNS, dnsServers (до 4 IPv4 внутри subnets), enabled (по умолчанию true). ЛВС доступа с ПК не требуют ovpn/auth/password; forwards устарел и игнорируется."
+      "description": "Желаемый переносимый профиль без secrets; lan[].share: subnets, domains для split-DNS, dnsServers (до 4 IPv4 внутри subnets), hosts (полные имена хостов ЛВС, до 100, под domains: служба пишет их в hosts, когда другой VPN закрыл DNS), enabled (по умолчанию true). ЛВС доступа с ПК не требуют ovpn/auth/password; forwards устарел и игнорируется."
     }
   },
   "additionalProperties": true

@@ -1,7 +1,7 @@
 #requires -Version 5.1
 # Diagnostics for the clinic LAN channel while Happ is on. Manual run only (not part of the EXE).
 # Userspace only: no admin rights, no changes to the system. Secrets are never printed.
-#   -Mode check           A..E checks from vpn104-lan-fix.md section 3 + summary + VERDICT
+#   -Mode check           A..F checks from vpn104-lan-fix.md section 3 (hosts block mode) + summary + VERDICT
 #   -Mode probe-loopback  which loopback address can be used for port 53 while Happ is on
 param(
     [ValidateSet('check','probe-loopback')][string]$Mode = 'check',
@@ -43,6 +43,39 @@ function Test-Resolve([string]$Server, [bool]$Tcp, [string]$Query = $Name, [int]
     } $Sec @{ q = $Query; s = $Server; t = $Tcp }
     if (-not $r.Done) { return 'timeout' }
     [string]($r.Result | Select-Object -First 1)
+}
+
+function Test-SystemDns {
+    $r = Invoke-Timed { param($n) try { ([System.Net.Dns]::GetHostAddresses($n) | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | ForEach-Object { $_.ToString() }) -join ',' } catch { 'fail ' + $_.Exception.Message.Split("`n")[0] } } 10 $Name
+    if (-not $r.Done) { return 'timeout' }
+    $t = [string]($r.Result | Select-Object -First 1); if ($t) { $t } else { 'empty' }
+}
+function Test-ResolveSystem {
+    $r = Invoke-Timed { param($n) try { (Resolve-DnsName -Name $n -Type A -ErrorAction Stop | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress }) -join ',' } catch { 'fail ' + $_.Exception.Message.Split("`n")[0] } } 10 $Name
+    if (-not $r.Done) { return 'timeout' }
+    $t = [string]($r.Result | Select-Object -First 1); if ($t) { $t } else { 'empty' }
+}
+function Measure-ResolveMs([string]$Query) {
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    [void](Invoke-Timed { param($n) try { [void](Resolve-DnsName -Name $n -Type A -ErrorAction Stop) } catch { } } 10 $Query)
+    [int]$sw.ElapsedMilliseconds
+}
+# Reads (never writes) the hosts file: our marked block and manual lines for the name outside it.
+function Get-HostsInfo {
+    $info = [pscustomobject]@{ Begin = $false; Names = 0; HasName = $false; Manual = 0 }
+    try {
+        $inBlock = $false
+        foreach ($line in Get-Content -LiteralPath (Join-Path $env:WINDIR 'System32\drivers\etc\hosts') -ErrorAction Stop) {
+            if ($line -match '^\s*# RemoteAgents:lan begin') { $inBlock = $true; $info.Begin = $true; continue }
+            if ($line -match '^\s*# RemoteAgents:lan end') { $inBlock = $false; continue }
+            $body = ($line -replace '#.*$', '').Trim()
+            if (-not $body) { continue }
+            $tokens = $body -split '\s+'
+            if ($inBlock) { $info.Names++; if ($tokens -contains $Name) { $info.HasName = $true } }
+            elseif ($tokens.Count -gt 1 -and ($tokens[1..($tokens.Count - 1)] -contains $Name)) { $info.Manual++ }
+        }
+    } catch { }
+    $info
 }
 
 function Test-Curl([string[]]$ExtraArgs) {
@@ -210,12 +243,18 @@ function Invoke-Check {
 
     $a = Test-Curl @('--resolve', "${Name}:443:$Ip", "https://$Name/yawizard"); Out-Line "A tcp443 via --resolve = $a"
     $b = if ($sock) { Test-SocksDns $sock.user $sock.password $ClinicDns $Name } else { 'no-credentials' }; Out-Line "B dns via SOCKS ($ClinicDns) = $b"
-    $c1 = Test-Resolve '192.168.87.1' $true; Out-Line "C1 Resolve-DnsName -Server 192.168.87.1 -TcpOnly = $c1"
+    $c1 = Test-Resolve '192.168.87.1' $true; Out-Line "C1 Resolve-DnsName -Server 192.168.87.1 -TcpOnly = $c1   (10013/fail with B ok = Happ blocks port 53, expected)"
     $c2 = Test-Resolve '1.1.1.1' $false; Out-Line "C2 Resolve-DnsName -Server 1.1.1.1 = $c2"
-    $lbBound = [bool](Get-NetUDPEndpoint -LocalAddress $LoopbackDns -LocalPort 53 -ErrorAction SilentlyContinue)
-    $d1 = if ($lbBound) { Test-Resolve $LoopbackDns $false } else { 'not-listening (stage P1 not installed)' }; Out-Line "D1 Resolve-DnsName -Server $LoopbackDns = $d1"
-    $d2 = Test-Resolve $null $false; Out-Line "D2 Resolve-DnsName (system/NRPT) = $d2"
+    # D: the system resolver WITHOUT -DnsOnly, so the hosts file is consulted (this is what browsers, git, curl, .NET see).
+    $d1 = Test-SystemDns; Out-Line "D1 [Dns]::GetHostAddresses = $d1"
+    $d2 = Test-ResolveSystem; Out-Line "D2 Resolve-DnsName (hosts + DNS) = $d2"
     $e = Test-Curl @("https://$Name/yawizard"); Out-Line "E tcp443 by name = $e"
+    # F: a public name under the clinic domain must not hang on our NRPT while another VPN blocks port 53.
+    $fMs = Measure-ResolveMs "www.$($Name.Substring($Name.IndexOf('.') + 1))"; Out-Line "F Resolve-DnsName www.* = $fMs ms (expected < 2000 while Happ is on)"
+    $hostsInfo = Get-HostsInfo
+    Out-Line "hosts block: begin=$($hostsInfo.Begin) names=$($hostsInfo.Names) has-$Name=$($hostsInfo.HasName) manual-lines-for-name=$($hostsInfo.Manual)"
+    $ourNrpt = @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { $_.Comment -like 'RemoteAgents:*' }).Count
+    Out-Line "own NRPT rules = $ourNrpt (mode dns=hosts means 0; dns=nrpt means one per domain)"
 
     Out-Line '-- summary'
     Out-Line ('adapters Up: ' + ((Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object Status -eq 'Up' | ForEach-Object { $_.Name }) -join '; '))
@@ -236,8 +275,14 @@ function Invoke-Check {
 
     $aOk = $a -match '^[1-9]\d\d$'; $bOk = $b -like "ok*$Ip*"
     $cBlocked = ($c1 -notlike 'ok*') -and ($c2 -notlike 'ok*')
-    $verdict = if (-not $aOk -or -not $bOk) { 'our-path-broken' } elseif ($e -match '^[1-9]\d\d$') { 'ok' } elseif ($cBlocked) { 'happ-blocks-dns' } else { 'our-path-broken' }
-    Out-Line ("A=$a B=$($b -replace '^(ok).*','$1') C-blocked=$cBlocked E=$e elapsed={0:n0}s" -f ((Get-Date) - $t0).TotalSeconds)
+    $dOk = ($d1 -split ',') -contains $Ip -and ($d2 -split ',') -contains $Ip
+    $eOk = $e -match '^[1-9]\d\d$'
+    # ok = names resolve (D) and the portal answers by name (E). F is reported only: it depends on the other VPN client.
+    $verdict = if ($dOk -and $eOk) { 'ok' }
+        elseif (-not $aOk -or -not $bOk) { 'our-path-broken' }
+        elseif ($cBlocked) { 'happ-blocks-dns-no-hosts-block' }
+        else { 'our-path-broken' }
+    Out-Line ("A=$a B=$($b -replace '^(ok).*','$1') C-blocked=$cBlocked D-ok=$dOk E=$e F=${fMs}ms hosts-block=$($hostsInfo.Begin) own-nrpt=$ourNrpt elapsed={0:n0}s" -f ((Get-Date) - $t0).TotalSeconds)
     Out-Line "VERDICT: $verdict"
 }
 

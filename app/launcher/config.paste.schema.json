@@ -1179,6 +1179,18 @@
                     "uniqueItems": true,
                     "description": "IPv4 DNS-серверы внутри одной из share.subnets; адреса проверяются при чтении конфига"
                   },
+                  "hosts": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 253,
+                      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.-]*$(?![\\s\\S])"
+                    },
+                    "maxItems": 100,
+                    "uniqueItems": true,
+                    "description": "Полные имена хостов этой ЛВС (без *), каждое под одним из share.domains: служба пишет их адреса в hosts, когда другой VPN-клиент закрыл DNS-порт 53; адреса берутся из DNS ЛВС, только из share.subnets. Требует share.dnsServers"
+                  },
                   "enabled": {
                     "type": "boolean",
                     "default": true
@@ -1361,6 +1373,18 @@
                     "maxItems": 4,
                     "uniqueItems": true,
                     "description": "IPv4 DNS-серверы внутри одной из share.subnets; адреса проверяются при чтении конфига"
+                  },
+                  "hosts": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 253,
+                      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.-]*$(?![\\s\\S])"
+                    },
+                    "maxItems": 100,
+                    "uniqueItems": true,
+                    "description": "Полные имена хостов этой ЛВС (без *), каждое под одним из share.domains: служба пишет их адреса в hosts, когда другой VPN-клиент закрыл DNS-порт 53; адреса берутся из DNS ЛВС, только из share.subnets. Требует share.dnsServers"
                   },
                   "enabled": {
                     "type": "boolean",

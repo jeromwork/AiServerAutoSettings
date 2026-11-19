@@ -40,6 +40,16 @@ namespace RemoteAgents.Launcher
                 throw new InvalidDataException("share.domains: нужно DNS-имя или *.домен");
             return text.ToLowerInvariant();
         }
+        internal const int MaxHosts = 100;
+        // Explicit LAN host name for the hosts file: full name, no wildcard, under one of the network's domains.
+        internal static string HostName(string text, IEnumerable<string> domains)
+        {
+            if (text.IndexOf('*') >= 0) throw new InvalidDataException("share.hosts: шаблоны с * не поддерживаются, укажите полные имена");
+            string name = Domain(text);
+            if (!domains.Any(d => { string root = d.TrimStart('*', '.').ToLowerInvariant(); return name == root || name.EndsWith("." + root, StringComparison.Ordinal); }))
+                throw new InvalidDataException("share.hosts: имя " + text + " должно входить в share.domains этой сети");
+            return name;
+        }
         internal bool Allows(string host, int port)
         {
             if (Domains.Any(d => d.StartsWith("*.") ? host.EndsWith(d.Substring(1), StringComparison.OrdinalIgnoreCase) : host.Equals(d, StringComparison.OrdinalIgnoreCase))) return true;
@@ -73,13 +83,24 @@ namespace RemoteAgents.Launcher
                 }
                 if (one.Domains.Count > 0 && one.DnsServers.Count == 0)
                     throw new InvalidDataException("Для доменов сети " + Json.Str(lan, "name") + " укажите share.dnsServers (DNS-серверы внутри ЛВС)");
+                var hostsRaw = Json.Get(share, "hosts");
+                if (hostsRaw != null && !(hostsRaw is System.Collections.IEnumerable) || hostsRaw is string) throw new InvalidDataException("share.hosts: нужен массив имён");
+                var hostNames = Json.Strings(hostsRaw);
+                if (hostNames.Length > MaxHosts) throw new InvalidDataException("share.hosts: не более " + MaxHosts + " имён");
+                var hostList = new List<string>();
+                foreach (string h in hostNames) {
+                    string name = HostName(h, one.Domains);
+                    if (hostList.Contains(name)) throw new InvalidDataException("share.hosts: имена повторяются");
+                    hostList.Add(name);
+                }
+                if (hostList.Count > 0 && one.DnsServers.Count == 0) throw new InvalidDataException("Для share.hosts сети " + Json.Str(lan, "name") + " укажите share.dnsServers");
                 if (!lan.ContainsKey("share")) continue;
                 bool enabled = !share.ContainsKey("enabled") || Json.Bool(share, "enabled");
                 if (share.ContainsKey("enabled") && !(share["enabled"] is bool)) throw new InvalidDataException("share.enabled: нужно true или false");
                 string probe = Json.Text(lan, "testHost", Json.Str(lan, "host"));
                 int port = Json.Int(lan, "testPort", Json.Int(lan, "port", 22));
                 result.Networks.Add(new Dictionary<string, object> { { "name", Json.Str(lan, "name") }, { "subnets", one.Subnets.ToArray() },
-                    { "domains", one.Domains.ToArray() }, { "dnsServers", one.DnsServers.ToArray() }, { "testHost", probe }, { "testPort", port }, { "enabled", enabled } });
+                    { "domains", one.Domains.ToArray() }, { "dnsServers", one.DnsServers.ToArray() }, { "hosts", hostList.ToArray() }, { "testHost", probe }, { "testPort", port }, { "enabled", enabled } });
                 // Deprecated forwards are deliberately not used as destinations or probes.
                 if (!enabled) continue;
                 if (!one.Enabled) continue;
