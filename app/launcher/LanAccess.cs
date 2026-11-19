@@ -17,7 +17,7 @@ namespace RemoteAgents.Launcher
         internal bool Enabled { get { return Subnets.Count + Domains.Count > 0; } }
         internal static uint IPv4(string text)
         {
-            if (!Regex.IsMatch(text, @"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$")) throw new InvalidDataException("share: нужен IPv4");
+            if (!Regex.IsMatch(text, @"\A(?:[0-9]{1,3}\.){3}[0-9]{1,3}\z")) throw new InvalidDataException("share: нужен IPv4");
             uint value = 0;
             foreach (string part in text.Split('.')) { uint n; if (!uint.TryParse(part, out n) || n > 255 || part.Length > 1 && part[0] == '0') throw new InvalidDataException("share: неверный IPv4"); value = (value << 8) | n; }
             return value;
@@ -36,7 +36,7 @@ namespace RemoteAgents.Launcher
         {
             string name = text.StartsWith("*.", StringComparison.Ordinal) ? text.Substring(2) : text;
             IPAddress ip;
-            if (name.Length > 253 || name.IndexOf('.') < 0 || IPAddress.TryParse(name, out ip) || name.Split('.').Any(p => !Regex.IsMatch(p, @"^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$")))
+            if (name.Length > 253 || name.IndexOf('.') < 0 || IPAddress.TryParse(name, out ip) || name.Split('.').Any(p => !Regex.IsMatch(p, @"\A[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\z")))
                 throw new InvalidDataException("share.domains: нужно DNS-имя или *.домен");
             return text.ToLowerInvariant();
         }
@@ -104,7 +104,7 @@ namespace RemoteAgents.Launcher
                 // Deprecated forwards are deliberately not used as destinations or probes.
                 if (!enabled) continue;
                 if (!one.Enabled) continue;
-                if (probe.Length == 0 || port < 1 || port > 65535 || !Regex.IsMatch(probe, @"^[a-zA-Z0-9][a-zA-Z0-9.-]*$") || !one.Allows(probe, port)) throw new InvalidDataException("lan.share: задайте testHost/testPort, разрешённый через share");
+                if (probe.Length == 0 || port < 1 || port > 65535 || !Regex.IsMatch(probe, @"\A[a-zA-Z0-9][a-zA-Z0-9.-]*\z") || !one.Allows(probe, port)) throw new InvalidDataException("lan.share: задайте testHost/testPort, разрешённый через share");
                 if (result.ProbeHost.Length == 0) { result.ProbeHost = probe; result.ProbePort = port; }
                 result.Subnets.AddRange(one.Subnets); result.Domains.AddRange(one.Domains); result.DnsServers.AddRange(one.DnsServers);
             }

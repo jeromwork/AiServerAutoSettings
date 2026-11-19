@@ -852,7 +852,9 @@ def computer_sections(deployment):
                     'share.dnsServers: DNS-сервер должен входить в share.subnets этой сети.')
         require(not share['domains'] or share['dnsServers'],
                 'Для доменов сети ' + item['name'] + ' укажите share.dnsServers (DNS-серверы внутри ЛВС)')
-        hosts = share.get('hosts', [])  # omitted when empty: older programs reject unknown share keys
+        hosts = share.get('hosts', [])
+        if hosts == []:
+            share.pop('hosts', None)  # omitted when empty: older programs reject unknown share keys
         require(isinstance(hosts, list) and len(hosts) <= 100, 'share.hosts: нужен массив, не более 100 имён.')
         require(len({h if isinstance(h, str) else json.dumps(h) for h in hosts}) == len(hosts), 'share.hosts: имена повторяются.')
         require(not hosts or share['dnsServers'], 'Для share.hosts сети ' + item['name'] + ' укажите share.dnsServers.')

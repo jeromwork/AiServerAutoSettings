@@ -181,6 +181,7 @@ namespace RemoteAgents.Launcher
         // for every process but itself, NRPT cannot work, names come from the hosts block instead.
         string dnsMode = "nrpt";
         long nextDnsProbe;
+        string physicalKey = "";
         bool adapterSeen;
         readonly HashSet<string> reached = new HashSet<string>();
         volatile Dictionary<string, object> published = new Dictionary<string, object>();
@@ -276,7 +277,10 @@ namespace RemoteAgents.Launcher
                     }
                     string address = Address(snapshot, networks.SelectMany(n => n.Subnets));
                     string current = address + Json.Encode(connected);
-                    if (hosts != null && (hostsDirty || signature != current)) { hosts.Configure(networks, connected, port, now, hostsDirty); hostsDirty = false; }
+                    // A change of the physical network (other adapter/address) also refreshes the hosts block at once.
+                    string physical = string.Join(",", snapshot.Addresses.Where(a => a.Adapter != InterfaceName).Select(a => a.Adapter + "@" + a.Subnet).OrderBy(x => x, StringComparer.Ordinal));
+                    bool networkChanged = physical != physicalKey; physicalKey = physical;
+                    if (hosts != null && (hostsDirty || networkChanged || signature != current)) { hosts.Configure(networks, connected, port, now, hostsDirty || networkChanged); hostsDirty = false; }
                     if (signature != current) { nextDnsProbe = 0; StopCore(); signature = current; tunAddress = address; retry.Reset(); SetHealth(platform.ChannelReady(), new Dictionary<string, bool>()); }
                 }
                 if (!connected.Values.Any(s => s.Length > 0)) { SetHealth(false, new Dictionary<string, bool>()); return; }

@@ -193,7 +193,7 @@ namespace RemoteAgents.Launcher
         {
             var domains = new[] { "eastclinic.ru", "*.eastclinic.local" };
             Check(LanAccess.HostName("Portal.EastClinic.ru", domains) == "portal.eastclinic.ru" && LanAccess.HostName("a.eastclinic.local", domains) == "a.eastclinic.local" && LanAccess.HostName("eastclinic.ru", domains) == "eastclinic.ru", "names under domains (wildcard domain root counts)");
-            foreach (string bad in new[] { "*.eastclinic.ru", "portal.example.org", "noteastclinic.ru", "eastclinic.ru.evil.com", "10.0.0.1", "portal", "a b.eastclinic.ru", "" }) {
+            foreach (string bad in new[] { "*.eastclinic.ru", "portal.example.org", "noteastclinic.ru", "eastclinic.ru.evil.com", "10.0.0.1", "portal", "a b.eastclinic.ru", "portal.eastclinic.ru\n", "" }) {
                 bool rejected = false; try { LanAccess.HostName(bad, domains); } catch (InvalidDataException) { rejected = true; }
                 Check(rejected, "rejected name: " + bad);
             }

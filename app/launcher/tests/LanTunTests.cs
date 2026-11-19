@@ -315,6 +315,9 @@ namespace RemoteAgents.Launcher
                 var again = Json.Map(Json.Parse(Json.Encode(request)));
                 tun.Apply(again); Check(!fake.Text.Contains("RemoteAgents:lan"), "lan.apply without names removes the block");
                 tun.Apply(named); now = 40000; tun.Tick(); Check(fake.Text.Contains("portal.office.test"), "names back");
+                fake.Dns["portal.office.test"] = new[] { "10.23.0.81" };
+                platform.SnapshotValue.Addresses.Add(new LanTunRoute("192.168.77.5/32", "Wi-Fi")); now = 71000; tun.Tick();
+                Check(fake.Text.Contains("10.23.0.81 portal.office.test"), "change of the physical network refreshes the block at once");
                 tun.Stop(); Check(fake.Text == "127.0.0.1 localhost\r\n", "stop removes the block");
             }
         }

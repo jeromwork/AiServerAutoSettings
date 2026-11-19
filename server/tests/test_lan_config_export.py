@@ -76,6 +76,9 @@ class LanConfigExportTests(unittest.TestCase):
         public = rc.computer_sections(data)
         self.assertEqual(public['lan'][0]['share']['hosts'], ['portal.example.org', 'crm-api.example.org'])
         self.assertNotIn('hosts', public['lan'][1]['share'], 'empty list is not exported')
+        data = {'lan': networks()}
+        data['lan'][0]['share']['hosts'] = []
+        self.assertNotIn('hosts', rc.computer_sections(data)['lan'][0]['share'], 'explicit empty list is not exported')
         too_many = ['h%d.example.org' % i for i in range(101)]
         bad = (['*.example.org'], ['portal.example.com'], ['example.com'], ['PORTAL.example.org'], ['10.123.0.5'], ['portal'],
                ['a.example.org', 'a.example.org'], 'portal.example.org', [5], too_many, ['bad name.example.org'])
