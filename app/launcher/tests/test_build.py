@@ -31,6 +31,47 @@ class PackagingTests(unittest.TestCase):
             for name in ('Transport.Events.ps1', 'Transport.Decide.ps1', 'Transport.Daemon.ps1'):
                 self.assertIn('transport/' + name, z.namelist())
 
+    def assert_runtime_bundle_has_no_tests(self, archive):
+        with zipfile.ZipFile(archive) as z:
+            names = set(z.namelist())
+            for name in names:
+                self.assertFalse(Path(name).name.startswith(('test-', 'test_')), name)
+                self.assertNotIn('/tests/', '/' + name, name)
+                self.assertNotIn('clash_ws_fake', name, name)
+            for name in ('Transport.Daemon.ps1', 'Transport.Common.ps1', 'Transport.Decide.ps1',
+                         'Transport.Events.ps1', 'Collect-NetState.ps1'):
+                self.assertIn('transport/' + name, names)
+            self.assertEqual(set(z.read('bundle-files.txt').decode().splitlines()), names - {'bundle-files.txt'})
+
+    def test_bundle_has_no_test_payloads(self):
+        self.assert_runtime_bundle_has_no_tests(self.zip)
+
+    def test_allowlist_exclusions(self):
+        fixture = self.root / 'fixture'
+        (fixture / 'build').mkdir(parents=True)
+        (fixture / 'dir').mkdir()
+        for name in ('runtime.ps1', 'test-helper.ps1'):
+            (fixture / 'dir' / name).write_text('Write-Output "fixture"\n')
+        real = bundle.ROOT
+        try:
+            bundle.ROOT = fixture
+            for lines in (
+                'dir/*.ps1\n!dir/test-*.ps1\n',
+                '!dir/test-*.ps1\ndir/*.ps1\n',
+                'dir/*.ps1\ndir/test-helper.ps1 => renamed.ps1\n!dir/test-*.ps1\n',
+            ):
+                with self.subTest(lines=lines):
+                    (fixture / 'build/bundle-files.txt').write_text(
+                        '# comment\n\n?missing/*.ps1\n!missing/*.ps1\n' + lines)
+                    path = bundle.make('1.0.0', self.root / 'fixture-out')
+                    with zipfile.ZipFile(path) as z:
+                        self.assertEqual(set(z.namelist()),
+                                         {'dir/runtime.ps1', 'bundle-version.txt', 'bundle-files.txt'})
+                        self.assertEqual(set(z.read('bundle-files.txt').decode().splitlines()),
+                                         {'dir/runtime.ps1', 'bundle-version.txt'})
+        finally:
+            bundle.ROOT = real
+
     def test_allowlist_no_downloaded_binaries(self):
         with zipfile.ZipFile(self.zip) as z:
             names = z.namelist()
@@ -110,6 +151,7 @@ class PackagingTests(unittest.TestCase):
         try:
             out = bundle.make('20261109.123457-test', self.root / 'with-binaries', binaries=True)
             self.assertTrue(bundle.verify_initial(out, pins))
+            self.assert_runtime_bundle_has_no_tests(out)
             with zipfile.ZipFile(out) as z:
                 self.assertEqual(z.read('transport/sing-box.exe'), member)
                 self.assertIn('build/bundle-binaries.json', z.namelist())
