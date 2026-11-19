@@ -31,6 +31,7 @@ OPTIONAL_PARTS = frozenset({'happierWeb'})
 SOURCE = Path(__file__).resolve().parent
 CODE_FILES = ('server_apply.py', 'server-apply.sh', 'lan_vpn.py', 'lan-vpn.sh', 'proxy_out.py', 'proxy-out.sh', 'remoteagents_config.py', 'base_network.py', 'lan_share.py', 'lan_pc_access.py', 'server_recovery.py', 'server_components.py', 'server_packages.py', 'component_files.py', 'lan-config.schema.json', 'happier-web.schema.json',
                      'happier_web.py', 'happier_web_common.py', 'happier_web_release.py', 'happier_web_quotas.py', 'agy_usage_scrape.py', 'happier_web_verify.cjs', 'happier_web_settings.cjs', 'happier_web_addon.js')
+TG_GATEWAY_FILES = ('gateway.py', 'tg_gateway_keys.py', 'tg_gateway_setup.py', 'install.sh', 'README.md')
 
 
 class Error(Exception):
@@ -721,7 +722,7 @@ class Engine:
         if not schema.exists():
             schema = self.s.source.parent / 'app/launcher/config.paste.schema.json'
         files[target + 'config.paste.schema.json'] = (read(schema), 0o644)
-        for name in ('gateway.py', 'tg_gateway_keys.py', 'tg_gateway_setup.py', 'install.sh', 'README.md'):
+        for name in TG_GATEWAY_FILES:
             files[target + 'tg-gateway/' + name] = (read(self.s.source / 'tg-gateway' / name), 0o755 if name.endswith('.sh') else 0o644)
         for name, path in components.assets(self.s.source):
             files[target + 'assets/' + name] = (read(path), 0o644)
