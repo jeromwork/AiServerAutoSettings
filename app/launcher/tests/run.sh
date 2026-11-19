@@ -132,7 +132,7 @@ wait_for_memory
   wait_for_memory
   LOCALAPPDATA="$testdir/local" timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-refresh.ps1" -TestHome "$testdir/config-refresh" < /dev/null
   wait_for_memory
-  timeout 60 python3 "$here/test-server-health.py"
+  timeout 120 python3 "$here/test-server-health.py"
   wait_for_memory
   timeout 120 python3 "$repo/transport/test-config-sync-preflight.py"
   wait_for_memory

@@ -134,7 +134,7 @@ Write-Output 'PASS: standalone runtime loads Wizard.Common.ps1'
     # Один и тот же файл состояния задаёт эффективные адрес и порт для обеих форм канала.
     config['transport']['channelFirst']=True
     (root/'config.json').write_text(json.dumps(config))
-    configured=dict(sshPort=2222,channelSocksPort=2223,syncPort=22001,apiPort=29090,
+    configured=dict(sshPort=2222,channelSocksPort=2223,syncPort=22001,lanProxyPort=17880,vpnInPort=17881,apiPort=29090,
                     probePortBase=26000,socksPortBase=28000,channelSshAddress='127.0.0.3',serverPort=22255)
     effective={**configured,'sshPort':2232,'channelSshAddress':'127.0.0.4'}
     ports_file=root/'state/transport-ports.json'
