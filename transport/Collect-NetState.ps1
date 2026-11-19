@@ -147,8 +147,11 @@ function Close-CollectorPool {
  if($null -ne $script:pool) {
   $old=$script:pool;$script:pool=$null
   # Close/Stop/Dispose may block on a native cmdlet. Never wait synchronously here.
-  $closing=$old.BeginClose($null,$null)
-  $retired.Add(@{Pool=$old;Closing=$closing})
+  $item=@{Pool=$old;Closing=$null}
+  $retired.Add($item)
+  try {$item.Closing=$old.BeginClose($null,$null)} catch {
+   # Keep the detached pool alive; a failed close request must not block collection.
+  }
  }
 }
 function Invoke-CollectorPipeline($Code,$Values,[double]$Deadline) {
@@ -160,9 +163,14 @@ function Invoke-CollectorPipeline($Code,$Values,[double]$Deadline) {
  try {
   $async=$ps.BeginInvoke()
   if(!(Wait-Until $async $Deadline)) {
-   $stopping=$ps.BeginStop($null,$null)
-   $retired.Add(@{PowerShell=$ps;Invocation=$async;Stopping=$stopping})
+   # Detach BEFORE requesting cancellation: if BeginStop throws, finally must
+   # still avoid synchronous Dispose on a pipeline stuck in a native call.
+   $item=@{PowerShell=$ps;Invocation=$async;Stopping=$null}
+   $retired.Add($item)
    $ps=$null
+   try {$item.Stopping=$item.PowerShell.BeginStop($null,$null)} catch {
+    # Best effort only; the timeout and the next section must still be reported.
+   }
    Close-CollectorPool
    return @{TimedOut=$true;Lines=@()}
   }
@@ -229,11 +237,11 @@ try {
  # Give asynchronous cleanup a small shared grace period, within the 90s budget.
  $cleanupDeadline=[Math]::Min($clock.Elapsed.TotalSeconds+0.1,89.0)
  foreach($item in $retired) {
-  if($item.PowerShell -and $item.Invocation.IsCompleted -and $item.Stopping.IsCompleted) {
+  if($item.PowerShell -and $item.Invocation.IsCompleted -and $item.Stopping -and $item.Stopping.IsCompleted) {
    try {$item.PowerShell.EndStop($item.Stopping);$null=$item.PowerShell.EndInvoke($item.Invocation)} catch {}
    $item.PowerShell.Dispose()
   }
-  if($item.Pool -and (Wait-Until $item.Closing $cleanupDeadline)) {
+  if($item.Pool -and $item.Closing -and (Wait-Until $item.Closing $cleanupDeadline)) {
    $item.Pool.EndClose($item.Closing);$item.Pool.Dispose()
   }
  }

@@ -46,6 +46,12 @@ try {
  Assert ((Get-Content (Join-Path $a 'remoteagents.txt') -Raw) -notmatch 'DO-NOT-EXPORT|"ovpn"') 'config leaked'
  Assert ((Get-Content (Join-Path $a 'firewall.txt') -Raw).Trim() -eq 'TIMEOUT: firewall') 'firewall timeout detail missing'
  Assert ((Get-Content (Join-Path $a 'summary.txt') -Raw) -match '(?m)^TIMEOUT: firewall\r?$') 'timeout missing'
+ $summary=Get-Content (Join-Path $a 'summary.txt') -Raw
+ foreach($part in @('system','adapters','ip','routes','dns','proxy','vpn-processes','vpn-services','events','remoteagents','checks')) {
+  Assert ($summary -match ('(?m)^'+[regex]::Escape($part)+': собрано\r?$')) "section lost after firewall timeout: $part"
+ }
+ Assert (@($summary -split "`r?`n" | Where-Object {$_ -match '^TIMEOUT:'}).Count -eq 1) 'unexpected section timeout'
+ 'PASS: native section exceeds PartTimeout; TIMEOUT: firewall; all other sections collected in < 15 s (< 90 s)'
  Assert ((Get-Content (Join-Path $a 'firewall.txt') -Raw) -notmatch 'LATE FIREWALL RESULT') 'timed out pipeline leaked output'
  $b=Join-Path $root B;$null=New-Item -ItemType Directory $b
  Copy-Item (Join-Path $a '*.txt') $b
