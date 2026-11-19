@@ -107,8 +107,90 @@ namespace RemoteAgents.Launcher
                 } finally { listener.Stop(); server.GetAwaiter().GetResult(); Directory.Delete(dir, true); }
             }
         }
+        internal static void RunSwitchStatus()
+        {
+            var empty = Data("{}"); var ok = Data("{\"ok\":true,\"phase\":\"ok\"}");
+            string reason = "Все пути временно недоступны, повторяю";
+            var search = Data(Json.Encode(new { phase = "searching", ok = true, active = "previous", kbps = 100,
+                reason = new { text = reason } }));
+            Check(TrayMenuModel.Connection(search) == "Нет связи, ищу путь. " + reason, "menu gives search and reason precedence over retained ok/speed");
+            Check(TrayMenuModel.Tooltip(search, empty) == reason, "tooltip prioritizes the complete reason");
+            search["localNet"] = "down";
+            Check(TrayMenuModel.Tooltip(search, empty).StartsWith("Нет интернета у вас (сеть)"), "tooltip prioritizes local network loss");
+            search.Remove("localNet");
+            var vpnSearch = Data("{\"state\":\"searching\"}");
+            Check(TrayMenuModel.Tooltip(ok, empty, vpnSearch) == "Нет связи, ищу путь", "VPN search heartbeat reaches tooltip before transport catches up");
+            var conflict = Data("{\"state\":\"conflict\",\"summary\":\"Сейчас работает Happ. Отключите его…\"}");
+            Check(TrayMenuModel.Tooltip(search, empty, conflict) == Json.Str(conflict, "summary"), "conflict takes priority in tooltip");
+            foreach (object optional in new object[] { null, "invalid", new object[0], new { code = "unknown" } }) {
+                search["reason"] = optional;
+                Check(TrayMenuModel.Tooltip(search, empty) == "Нет связи, ищу путь", "missing/malformed optional reason is safe");
+            }
+            search["reason"] = Data(Json.Encode(new { text = "Жду token=reason-secret" }));
+            Check(!TrayMenuModel.Connection(search).Contains("reason-secret") && !TrayMenuModel.Tooltip(search, empty).Contains("reason-secret") &&
+                !StatusView.Line("Связь", search, true).Contains("reason-secret"), "reason is masked in menu, tooltip and diagnostics");
+            search["reason"] = Data(Json.Encode(new { text = new string('Я', 61) + "😀 хвост" }));
+            string tip = TrayMenuModel.Tooltip(search, empty);
+            Check(tip.Length <= 63 && !char.IsHighSurrogate(tip[tip.Length - 2]), "search tooltip respects Windows limit and surrogate pairs");
+            search["reason"] = Data(Json.Encode(new { text = reason }));
+            Check(TrayMenuModel.Connection(ok).StartsWith("Связь:"), "legacy connection still works without additions");
+            Check(TrayMenuModel.SwitchLines(empty).Length == 0, "old status needs no switch fields");
+            search["switches"] = null;
+            Check(TrayMenuModel.SwitchLines(search).Length == 0, "null switch history is safe");
+            search["switches"] = Enumerable.Range(0, 12).Select(i => Data(Json.Encode(new { at = 1000L * i, from = "old" + i, to = "openssh-direct", why = "cause" + i }))).ToArray();
+            string[] history = TrayMenuModel.SwitchLines(search);
+            Check(history.Length == 10 && history[0].Contains("old2 → SSH напрямую · cause2") && history[9].Contains("old11 → SSH напрямую · cause11"), "history retains latest ten in order");
+            search["switches"] = new object[] { null, "invalid", Data(Json.Encode(new { at = "invalid", from = "token=from-secret", to = "primary", why = new { text = "password=why-secret" } })) };
+            Check(TrayMenuModel.SwitchLines(search).Length == 1 && !TrayMenuModel.SwitchLines(search)[0].Contains("-secret"), "malformed rows ignored and history text masked");
+            var candidate = Data(Json.Encode(new { tag = "primary", penaltyStep = 3, penaltyUntil = DateTime.UtcNow.AddMinutes(2).ToString("o") }));
+            Check(TrayMenuModel.CandidateLine(candidate, search).Contains("пауза до") && TrayMenuModel.CandidateLine(candidate, search).Contains("ступень 3"), "candidate details show active penalty");
+            candidate["penaltyUntil"] = "invalid";
+            Check(!TrayMenuModel.CandidateLine(candidate, search).Contains("пауза"), "invalid penalty date is safe");
+            candidate["penaltyUntil"] = DateTime.UtcNow.AddMinutes(-2).ToString("o");
+            Check(!TrayMenuModel.CandidateLine(candidate, search).Contains("пауза"), "expired penalty is not shown as active");
+
+            var notices = new TrayStatusNotifications(); var now = new DateTime(2026, 11, 19, 12, 0, 0, DateTimeKind.Utc);
+            Check(notices.Observe(ok, empty, now) == null, "startup ok is silent");
+            var lost = notices.Observe(search, empty, now.AddSeconds(1));
+            Check(lost != null && !lost.Recovered && lost.Text.Contains(reason), "ok to searching gives one warning with reason");
+            Check(notices.Observe(search, empty, now.AddSeconds(100)) == null, "unchanged search never repeats after cooldown");
+            search["reason"] = Data("{\"text\":\"Путь не отвечает, пробую другой\"}");
+            Check(notices.Observe(search, empty, now.AddSeconds(101)) == null, "reason change is not a new transition");
+            var recovered = notices.Observe(ok, empty, now.AddSeconds(102));
+            Check(recovered != null && recovered.Recovered && recovered.Text == "Связь восстановлена", "search to ok gives one recovery notice");
+            Check(notices.Observe(ok, empty, now.AddSeconds(200)) == null, "unchanged recovery never repeats");
+            var clash = notices.Observe(ok, conflict, now.AddSeconds(201));
+            Check(clash != null && !clash.Recovered && clash.Text.Contains("Happ"), "runtime conflict gives one warning");
+            Check(notices.Observe(ok, conflict, now.AddSeconds(300)) == null, "unchanged conflict never repeats");
+
+            notices = new TrayStatusNotifications(); notices.Observe(ok, empty, now); notices.Observe(search, empty, now.AddSeconds(1));
+            Check(notices.Observe(ok, empty, now.AddSeconds(2)) == null, "quick recovery is throttled");
+            Check(notices.Observe(ok, empty, now.AddSeconds(60)) == null, "notice stays quiet just before sixty seconds");
+            Check(notices.Observe(empty, empty, now.AddSeconds(61)) == null, "missing heartbeat cannot deliver pending recovery");
+            recovered = notices.Observe(ok, empty, now.AddSeconds(61));
+            Check(recovered != null && recovered.Recovered, "pending latest transition emits exactly at sixty seconds");
+            Check(notices.Observe(ok, empty, now.AddSeconds(121)) == null, "pending recovery is consumed once");
+            Check(notices.Observe(search, empty, now.AddSeconds(122)) != null, "later loss can notify again");
+            notices.Observe(ok, empty, now.AddSeconds(123)); notices.Observe(search, conflict, now.AddSeconds(124));
+            clash = notices.Observe(search, conflict, now.AddSeconds(182));
+            Check(clash != null && clash.Text.Contains("Happ") && !clash.Recovered, "latest conflict replaces pending recovery during cooldown");
+            Check(notices.Observe(search, conflict, now.AddSeconds(242)) == null, "deferred conflict is consumed once");
+            notices = new TrayStatusNotifications();
+            Check(notices.Observe(search, empty, now) == null, "startup search does not invent an ok-to-search transition");
+            Check(notices.Observe(ok, empty, now.AddSeconds(1)).Recovered, "recovery from startup search is reported");
+            notices = new TrayStatusNotifications();
+            Check(notices.Observe(ok, conflict, now) != null, "existing conflict is shown once on startup");
+            conflict["summary"] = "Сейчас работает Happ. token=conflict-secret";
+            notices = new TrayStatusNotifications();
+            Check(!notices.Observe(ok, conflict, now).Text.Contains("conflict-secret") && !TrayMenuModel.Tooltip(ok, empty, conflict).Contains("conflict-secret"), "conflict text is masked in balloon and tooltip");
+            search["reason"] = Data("{\"text\":\"token=balloon-secret\"}");
+            notices = new TrayStatusNotifications(); notices.Observe(ok, empty, now);
+            Check(!notices.Observe(search, empty, now.AddSeconds(1)).Text.Contains("balloon-secret"), "balloon uses shared reason masking");
+            Console.WriteLine("PASS: switch UI status/tray transitions");
+        }
         internal static void Run()
         {
+            RunSwitchStatus();
             var empty = Data("{}"); var transport = Data("{\r\n\"ok\":true,\"active\":\"vless-relay-fixture\",\"kbps\":96.8,\"candidates\":[{\"tag\":\"vless-relay-fixture\",\"state\":\"ok\",\"kbps\":96.8},{\"tag\":\"vless-direct\",\"state\":\"fail\"}]\r\n}");
             var health = Health(40000, 50000); var menu = TrayMenuModel.Build(empty, empty, transport, health);
             // Application actions, separate synchronization window, and local REST summary.
@@ -153,9 +235,24 @@ namespace RemoteAgents.Launcher
             foreach (string url in new[] { "", "not a url", "file:///tmp/app", "javascript:alert(1)", "https://user:pass@example.invalid" })
                 Check(!TrayMenuModel.Build(Data(Json.Encode(new { happier = new { webappUrl = url } })), empty, transport, health)[0].Enabled, "invalid URL cannot launch: " + url);
             Check(TrayMenuModel.Connection(empty).Contains("ожидается"), "missing transport unknown");
+            var checking = Data(Json.Encode(new { ok = false, phase = "checking", checkingSince = DateTime.UtcNow.AddSeconds(-5).ToString("o") }));
+            Check(TrayMenuModel.Connection(checking).Contains("проверяется"), "first check has neutral connection label");
+            Check(TrayMenuModel.Tooltip(checking, empty).Contains("связь проверяется"), "first check has neutral tray tooltip");
+            var rememberedFailure = Data(Json.Encode(new { tag = "a", title = "A", state = "fail", checkedAt = DateTime.UtcNow.AddDays(-1).ToString("o") }));
+            Check(TrayMenuModel.CandidateLine(rememberedFailure, checking).Contains("ранее не работал; ожидается проверка"), "remembered failure waits for a fresh check");
+            rememberedFailure["checkedAt"] = DateTime.UtcNow.ToString("o");
+            string freshFailure = TrayMenuModel.CandidateLine(rememberedFailure, checking);
+            Check(freshFailure.Contains("не работает") && !freshFailure.Contains("ранее"), "fresh candidate failure is still a failure during checking");
+            rememberedFailure["checkedAt"] = DateTime.UtcNow.AddDays(-1).ToString("o");
+            string failedLine = TrayMenuModel.CandidateLine(rememberedFailure, Data("{\"ok\":false,\"phase\":\"failed\"}"));
+            Check(failedLine.Contains("не работает") && !failedLine.Contains("ранее"), "failed transport shows candidate failures normally");
+            rememberedFailure.Remove("checkedAt");
+            Check(TrayMenuModel.CandidateLine(rememberedFailure, checking).Contains("ранее не работал"), "undated candidate failure waits for proof");
+            transport["phase"] = "failed";
             transport["ok"] = false;
             Check(!TrayMenuModel.Connection(transport).Contains("КБ/с") && TrayMenuModel.Connection(transport).Contains("не подтверждена"), "failed transport does not claim a working path/speed");
             Check(!TrayMenuModel.CandidateLine(StatusView.Candidates(transport)[0], transport).Contains("используется"), "failed transport has no confirmed active path");
+            transport["phase"] = "ok";
             transport["ok"] = true;
             Check(TrayMenuModel.CandidateLine(StatusView.Candidates(transport)[0], transport).Contains("работает · используется"), "active candidate marked with speed");
             Check(TrayMenuModel.CandidateLine(StatusView.Candidates(transport)[1], transport).Contains("не работает"), "failed candidate translated");
@@ -164,6 +261,30 @@ namespace RemoteAgents.Launcher
             Check(TrayMenuModel.CandidateLine(Data("{\"tag\":\"vless-direct\"}"), transport).Contains("не проверен"), "unknown candidate translated");
             foreach (var state in new[] { new[] { "slow", "медленный" }, new[] { "frozen", "завис" }, new[] { "remembered", "ранее работал" }, new[] { "pending", "проверяется" }, new[] { "disabled", "отключён" } })
                 Check(TrayMenuModel.CandidateLine(Data(Json.Encode(new { tag = "vless-direct", state = state[0], kbps = 42 })), transport).Contains(state[1]), "real daemon state: " + state[0]);
+            var measured = Data("{\"tag\":\"vless-relay-fixture\",\"state\":\"ok\",\"kbps\":128,\"latencyMs\":42,\"order\":2,\"priority\":0}");
+            string measuredLine = TrayMenuModel.CandidateLine(measured, transport);
+            Check(measuredLine.StartsWith("№2 · ") && measuredLine.Contains("1 Мбит/с") && measuredLine.Contains("42 мс") && measuredLine.Contains("используется"), "path shows daemon order, bit rate, latency and active marker");
+            measured["kbps"] = 31.25;
+            Check(TrayMenuModel.CandidateLine(measured, transport).Contains("256 Кбит/с"), "sub-megabit speed converts daemon KiB/s to bits");
+            var degraded = Data(Json.Encode(new { ok = false, phase = "degraded", active = "vless-relay-fixture", checkingSince = DateTime.UtcNow.ToString("o") }));
+            measured["suspect"] = true;
+            string suspectLine = TrayMenuModel.CandidateLine(measured, degraded);
+            Check(suspectLine.Contains("проверяется · используется") && !suspectLine.Contains("работает"), "suspect active path stays marked while being rechecked");
+            degraded["ok"] = true;
+            Check(TrayMenuModel.CandidateLine(measured, degraded).Contains("проверяется · используется"), "suspect marker also works with retained ok flag");
+            degraded["phase"] = "failed";
+            Check(!TrayMenuModel.CandidateLine(measured, degraded).Contains("используется"), "failed phase removes active marker even with retained ok flag");
+            measured["enabled"] = false;
+            Check(TrayMenuModel.CandidateLine(measured, transport).Contains("отключён"), "disabled state wins over suspect flag");
+            foreach (string invalid in new[] { "NaN", "Infinity", "-1", "invalid" }) {
+                var invalidMetrics = Data(Json.Encode(new { tag = "vless-direct", kbps = invalid, latencyMs = invalid, order = invalid }));
+                string line = TrayMenuModel.CandidateLine(invalidMetrics, transport);
+                Check(line.Contains("скорость: нет данных") && !line.Contains(" мс") && !line.Contains("№"), "invalid optional measurements are hidden: " + invalid);
+            }
+            string legacyLine = TrayMenuModel.CandidateLine(Data("{\"tag\":\"vless-direct\",\"state\":\"ok\",\"kbps\":0}"), transport);
+            Check(legacyLine.Contains("0 Кбит/с") && !legacyLine.Contains(" мс") && !legacyLine.Contains("№"), "older candidates without new fields remain readable");
+            var missingMetrics = Data("{\"tag\":\"vless-direct\",\"kbps\":null,\"latencyMs\":null,\"order\":null,\"suspect\":null}");
+            Check(TrayMenuModel.CandidateLine(missingMetrics, transport).Contains("скорость: нет данных"), "null optional candidate fields remain readable");
             var selection = new PathSelection();
             var pinned = Data("{\"mode\":\"pinned\",\"pinnedTag\":\"vless-direct\"}");
             Check(selection.Update(pinned) == "vless-direct", "initial choice follows pinned mode");

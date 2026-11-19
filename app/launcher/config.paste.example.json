@@ -92,6 +92,9 @@
         "dnsServers": [
           "10.123.0.53"
         ],
+        "hosts": [
+          "portal.example.org"
+        ],
         "enabled": true
       }
     }

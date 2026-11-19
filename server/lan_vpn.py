@@ -29,6 +29,8 @@ SB = Path('/etc/sing-box/config.json')
 BIN = Path('/usr/local/lib/remoteagents/lan')
 LOG = Path('/var/log/remoteagents/lan.log')
 TABLE = 'remoteagents_lan'
+UNIT_DIR = Path('/etc/systemd/system')
+OLD_WATCH_UNITS = ('remoteagents-lan-watch.timer', 'remoteagents-lan-watch.service')
 # World-readable, secret-free status for the settings window (no sudo needed to read).
 PUBLIC = Path('/var/lib/remoteagents-status')
 # Every owner-confirmed network transaction; only one may wait for confirm at a time.
@@ -42,19 +44,22 @@ BLOCKS = {'ca', 'cert', 'key', 'tls-auth', 'tls-crypt', 'tls-crypt-v2', 'auth-us
 # No arbitrary file paths, executable hooks, plugin, management, setenv, config,
 # connection, daemon, log, writepid, user/group, route-delay or route-method.
 OPTIONS = {
-    'client', 'tls-client', 'nobind', 'remote', 'proto', 'port', 'float', 'passtos', 'resolv-retry',
-    'connect-retry', 'connect-retry-max', 'connect-timeout', 'server-poll-timeout',
+    'client', 'tls-client', 'nobind', 'remote', 'proto', 'port', 'float', 'passtos',
+    'connect-retry-max', 'connect-timeout', 'server-poll-timeout',
     'remote-random', 'remote-random-hostname', 'remote-cert-tls', 'verify-x509-name',
     'auth', 'cipher', 'data-ciphers', 'data-ciphers-fallback', 'tls-version-min',
     'tls-version-max', 'tls-cipher', 'tls-ciphersuites', 'key-direction',
-    'auth-nocache', 'reneg-sec', 'hand-window', 'tran-window', 'ping',
-    'ping-restart', 'ping-exit', 'explicit-exit-notify', 'sndbuf', 'rcvbuf',
+    'auth-nocache', 'reneg-sec', 'hand-window', 'tran-window',
+    'explicit-exit-notify', 'sndbuf', 'rcvbuf',
     'tun-mtu', 'mssfix', 'auth-retry', 'tls-timeout', 'verb', 'mute',
 }
 STRIP = {'dev', 'dev-type', 'persist-key', 'persist-tun', 'pull', 'route-noexec',
          'route-nopull', 'redirect-gateway', 'redirect-private', 'dhcp-option',
          'route-ipv6', 'ifconfig-ipv6', 'block-outside-dns', 'register-dns',
-         'ip-win32', 'windows-driver', 'route-metric', 'route-gateway', 'topology'}
+         'ip-win32', 'windows-driver', 'route-metric', 'route-gateway', 'topology',
+         'keepalive', 'ping', 'ping-restart', 'ping-exit', 'resolv-retry', 'connect-retry'}
+# Lines owned by us (rewritten by `regen`); the client is a plain service that survives ping-restart.
+MANAGED = ('persist-tun', 'persist-key', 'keepalive 10 60', 'resolv-retry infinite', 'connect-retry 5 60')
 
 
 class Error(Exception):
@@ -251,7 +256,7 @@ def import_client(name, source, extra=(), auth=None, direct_endpoint=False, serv
         lines.extend('remote {ip} {port} {proto}'.format(**e) for e in gateways)
     # A profile cannot weaken the selected server certificate verification.
     lines.extend(['client', 'dev tun-lan-' + name, 'dev-type tun', 'nobind',
-                  verification, 'auth-nocache', 'route-noexec',
+                  verification, 'auth-nocache', *MANAGED, 'route-noexec',
                   'pull-filter ignore "redirect-gateway"',
                   'pull-filter ignore "redirect-private"',
                   'pull-filter ignore "dhcp-option"',
@@ -264,6 +269,41 @@ def import_client(name, source, extra=(), auth=None, direct_endpoint=False, serv
                   'route-up "/usr/local/lib/remoteagents/lan/lan-vpn.sh _hook ' + name + '"',
                   'verb 3', 'log ' + str(openvpn_log(name))])
     return '\n'.join(lines) + '\n', networks(subnets), gateways
+
+
+def regen_client(text):
+    """Rewrite only the managed lines of an existing client.conf; everything else (inline secrets) is kept verbatim."""
+    drop = {m.split()[0] for m in MANAGED} | {'ping', 'ping-restart', 'ping-exit'}
+    out, block = [], None
+    for line in text.replace('\r\n', '\n').split('\n'):
+        stripped = line.strip()
+        if block:
+            if stripped == '</' + block + '>':
+                block = None
+            out.append(line)
+            continue
+        if stripped.startswith('<') and stripped.endswith('>') and not stripped.startswith('</'):
+            block = stripped[1:-1]
+            out.append(line)
+            continue
+        if stripped.split(None, 1)[:1] and stripped.split(None, 1)[0].removeprefix('--') in drop:
+            continue
+        out.append(line)
+    require(block is None, 'Незакрытый inline-блок в client.conf.')
+    while out and out[-1] == '':
+        out.pop()
+    at = next((i for i, l in enumerate(out) if l.strip() == 'route-noexec'), None)
+    require(at is not None, 'В client.conf нет route-noexec; перезапишите профиль через add --replace.')
+    out[at:at] = list(MANAGED)
+    return '\n'.join(out) + '\n'
+
+
+def regen(name):
+    path = ETC / name / 'client.conf'
+    require(path.is_file(), 'ЛВС не добавлена.')
+    atomic(path, regen_client(path.read_text()), 0o600)
+    event(name, 'regen: обновлены только управляемые строки client.conf; клиент не перезапускался', False)
+    print('client.conf обновлён (persist-tun, keepalive, retry); клиент не перезапущен — перезапустит владелец.')
 
 
 def pushed_routes(env):
@@ -743,15 +783,17 @@ Description=Restricted LAN OpenVPN client %i
 Requires=remoteagents-lan-firewall.service
 After=network-online.target sing-box.service remoteagents-lan-firewall.service remoteagents-lan-recover.service
 Wants=network-online.target
+StartLimitIntervalSec=0
 [Service]
 Type=simple
 ExecStartPre=/usr/local/lib/remoteagents/lan/lan-vpn.sh _prestart %i
 ExecStart=/usr/sbin/openvpn --config /etc/remoteagents/lan/%i/client.conf
 ExecStopPost=/usr/local/lib/remoteagents/lan/lan-vpn.sh _down %i
-Restart=no
+Restart=always
+RestartSec=10
 UMask=0077
 StandardOutput=null
-StandardError=null
+StandardError=journal
 [Install]
 WantedBy=multi-user.target
 ''',
@@ -775,30 +817,24 @@ Type=oneshot
 ExecStart=/usr/local/lib/remoteagents/lan/lan-vpn.sh _recover
 [Install]
 WantedBy=multi-user.target
-''',
-        'remoteagents-lan-watch.service': '''[Unit]
-Description=Check LAN firewall and routes
-After=remoteagents-lan-firewall.service
-[Service]
-Type=oneshot
-ExecStart=/usr/local/lib/remoteagents/lan/lan-vpn.sh _watch
-UMask=0077
-''',
-        'remoteagents-lan-watch.timer': '''[Unit]
-Description=Check LAN safety every minute
-[Timer]
-OnBootSec=1min
-OnUnitActiveSec=1min
-AccuracySec=1s
-[Install]
-WantedBy=timers.target
-'''}
+''',}
     for name, text in units.items():
-        atomic(Path('/etc/systemd/system') / name, text, 0o644)
-    run(['systemd-analyze', 'verify', *[str(Path('/etc/systemd/system') / n) for n in units]])
+        atomic(UNIT_DIR / name, text, 0o644)
+    run(['systemd-analyze', 'verify', *[str(UNIT_DIR / n) for n in units]])
     run(['systemctl', 'daemon-reload'])
-    run(['systemctl', 'enable', 'remoteagents-lan-recover.service', 'remoteagents-lan-firewall.service', 'remoteagents-lan-watch.timer'])
-    run(['systemctl', 'start', 'remoteagents-lan-watch.timer'])
+    run(['systemctl', 'enable', 'remoteagents-lan-recover.service', 'remoteagents-lan-firewall.service'])
+    retire_watch_units()
+
+
+def retire_watch_units():
+    # One-time migration: the LAN watchdog was removed (owner decision 19.11); idempotent.
+    found = [UNIT_DIR / n for n in OLD_WATCH_UNITS if (UNIT_DIR / n).exists()]
+    if not found:
+        return
+    run(['systemctl', 'disable', '--now', *OLD_WATCH_UNITS], check=False)
+    for path in found:
+        path.unlink(missing_ok=True)
+    run(['systemctl', 'daemon-reload'])
 
 
 def confirmed_at(name, data):
@@ -1089,7 +1125,7 @@ def disable(name, remove=False):
                 (STATE / (name + suffix)).unlink(missing_ok=True)
         if not active():
             run(['systemctl', 'disable', '--now', 'remoteagents-lan-firewall.service',
-                 'remoteagents-lan-watch.timer', 'remoteagents-lan-recover.service'])
+                 'remoteagents-lan-recover.service'])
         print('ЛВС удалена.' if remove else 'ЛВС выключена.')
     except Exception:
         if (STATE / 'pending').exists():
@@ -1191,58 +1227,6 @@ def add_profile(name, client, static, gateways, dns, fingerprint, direct, url, r
     enable(name, url)
 
 
-def audit_all_tunnels():
-    for family in ('-4', '-6'):
-        routes = json.loads(run(['ip', '-j', family, 'route', 'show', 'table', 'all']).stdout)
-        for route in routes:
-            devices = [route.get('dev', '')] + [h.get('dev', '') for h in route.get('nexthops', [])]
-            if not any(d.startswith('tun-lan-') for d in devices):
-                continue
-            dst = route.get('dst', 'default')
-            require(dst != 'default', 'Обнаружен default через ЛВС.')
-            if family == '-4':
-                networks([dst])
-            else:
-                require(ipaddress.ip_network(dst, strict=False).subnet_of(ipaddress.ip_network('fe80::/10')),
-                        'Обнаружен IPv6 через ЛВС.')
-
-
-def watch():
-    data = active()
-    if not data:
-        return
-    try:
-        require(nft_identity() == read(STATE / 'firewall.json'), 'Kernel guard отсутствует/изменён.')
-        audit_all_tunnels()
-        for name, p in data.items():
-            require(run(['systemctl', 'is-active', '--quiet', service(name)], check=False).returncode == 0,
-                    'Клиент не активен.')
-            require(p.get('ready'), 'Подключение не готово.')
-            audit_routes(name, p)
-    except Exception:
-        # Block every LAN packet immediately if nft is available; still attempt
-        # every client stop if the kernel firewall tool itself is unavailable.
-        with contextlib.suppress(Exception):
-            firewall({})
-        stop_clients(data)
-        for name, p in data.items():
-            run(['systemctl', 'disable', service(name)], check=False)
-            route_ops(name, p, remove=True)
-            p.update(enabled=False, ready=False)
-            update(name, p)
-            event(name, 'unsafe: watchdog остановил все ЛВС; проверьте nft/маршруты/клиент')
-        firewall({})
-        sync_singbox()
-        return
-    for name, p in data.items():
-        # Keep the historical confirmation; this run does not retest the host.
-        confirmed = confirmed_at(name, p)
-        message = 'guard checked: nft/маршруты/процесс проверены; доступность хоста не проверялась'
-        if confirmed:
-            message += '; профиль подтверждён ранее; последняя проверка ' + confirmed
-        event(name, message, bool(confirmed))
-
-
 def read_auth(args):
     if args.auth_stdin:
         text = sys.stdin.read().replace('\r\n', '\n')
@@ -1279,7 +1263,7 @@ def main():
             auth.add_argument('--auth-stdin', action='store_true', help='LAN login/password as JSON on stdin after the marker line')
             auth.add_argument('--ask-auth', action='store_true', help='Ask LAN login/password without echo')
         p.add_argument('--ip-check-url', required=True, help='HTTPS endpoint returning one public IP; selected by owner')
-    for command in ('disable', 'remove', 'confirm', 'test', '_hook', '_prestart', '_down'):
+    for command in ('disable', 'remove', 'confirm', 'test', 'regen', '_hook', '_prestart', '_down'):
         p = sub.add_parser(command)
         p.add_argument('name')
         if command == 'confirm':
@@ -1287,7 +1271,7 @@ def main():
         if command == 'test':
             p.add_argument('host')
             p.add_argument('port', nargs='?', type=int)
-    for command in ('list', 'status', 'public-status', 'rollback', '_watch', '_firewall', '_recover'):
+    for command in ('list', 'status', 'public-status', 'rollback', '_firewall', '_recover'):
         sub.add_parser(command)
     args = parser.parse_args()
     if args.cmd == 'add' and args.server_fingerprint is not None:
@@ -1311,8 +1295,10 @@ def main():
         except Exception as e:
             # Error texts are fixed strings of this script; other exceptions only by type.
             reason = str(e) if isinstance(e, Error) else type(e).__name__
-            event(args.name, 'hook failed: ' + reason + '; запрошена остановка клиента')
-            run(['systemctl', 'stop', '--no-block', service(args.name)], check=False)
+            event(args.name, 'hook failed: ' + reason + '; клиент завершён, systemd перезапустит')
+            print('hook failed: ' + reason, file=sys.stderr, flush=True)
+            # kill (not stop): Restart=always brings the client back; stop would leave it down.
+            run(['systemctl', 'kill', '-s', 'SIGTERM', service(args.name)], check=False)
             raise
         return
     if args.cmd == '_firewall':
@@ -1355,8 +1341,8 @@ def main():
             test_host(args.name, args.host, args.port)
         elif args.cmd == 'rollback':
             rollback()
-        elif args.cmd == '_watch':
-            watch()
+        elif args.cmd == 'regen':
+            regen(args.name)
         elif args.cmd == '_recover':
             if (STATE / 'pending').exists():
                 rollback(boot=True)

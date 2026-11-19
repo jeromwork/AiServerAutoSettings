@@ -26,6 +26,11 @@ class PackagingTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_event_transport_modules_are_bundled(self):
+        with zipfile.ZipFile(self.zip) as z:
+            for name in ('Transport.Events.ps1', 'Transport.Decide.ps1', 'Transport.Daemon.ps1'):
+                self.assertIn('transport/' + name, z.namelist())
+
     def test_allowlist_no_downloaded_binaries(self):
         with zipfile.ZipFile(self.zip) as z:
             names = z.namelist()
@@ -62,6 +67,31 @@ class PackagingTests(unittest.TestCase):
                     path = args[args.index('-File')+1].replace('{bundle}\\', '').replace('\\', '/')
                     self.assertIn(path, names)
 
+    def test_initial_bundle_rejects_missing_corrupt_and_duplicate_pinned_image(self):
+        pins = self.root / 'initial-pins.json'
+        image = b'MZ expected pinned helper'
+        pins.write_text(json.dumps({'binaries': [dict(name='sing-box', url='https://example.invalid/helper.zip',
+            sha256='0' * 64, member='sing-box.exe', memberSha256=hashlib.sha256(image).hexdigest(), target='transport/sing-box.exe')]}))
+        archive = self.root / 'initial.zip'
+        with zipfile.ZipFile(archive, 'w') as z:
+            z.writestr('bundle-version.txt', '20261119.000000-stage1')
+        with self.assertRaisesRegex(ValueError, 'transport/sing-box.exe'):
+            bundle.verify_initial(archive, pins)
+        with zipfile.ZipFile(archive, 'w') as z:
+            z.writestr('transport/sing-box.exe', b'corrupt')
+        with self.assertRaisesRegex(ValueError, 'SHA-256'):
+            bundle.verify_initial(archive, pins)
+        with zipfile.ZipFile(archive, 'w') as z:
+            z.writestr('transport/sing-box.exe', image)
+        self.assertTrue(bundle.verify_initial(archive, pins))
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            with zipfile.ZipFile(archive, 'a') as z:
+                z.writestr('transport/sing-box.exe', image)
+        with self.assertRaisesRegex(ValueError, 'transport/sing-box.exe'):
+            bundle.verify_initial(archive, pins)
+
     def test_pinned_binaries_only_with_both_hashes_and_not_in_updates(self):
         # build-exe.sh embeds pinned third-party binaries (sing-box for VPN-first) — verified twice, never in OTA.
         cache = self.root / 'cache'; cache.mkdir()
@@ -79,6 +109,7 @@ class PackagingTests(unittest.TestCase):
         os.environ['REMOTEAGENTS_BINARY_CACHE'] = str(cache)
         try:
             out = bundle.make('20261109.123457-test', self.root / 'with-binaries', binaries=True)
+            self.assertTrue(bundle.verify_initial(out, pins))
             with zipfile.ZipFile(out) as z:
                 self.assertEqual(z.read('transport/sing-box.exe'), member)
                 self.assertIn('build/bundle-binaries.json', z.namelist())
@@ -102,6 +133,31 @@ class PackagingTests(unittest.TestCase):
         real = json.loads((ROOT / 'build/bundle-binaries.json').read_text())
         self.assertEqual(real['binaries'][0]['sha256'], '99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df')
         self.assertIn(real['binaries'][0]['sha256'], (ROOT / 'build/Wizard.Server.ps1').read_text(encoding='utf-8-sig'))
+
+    def test_portable_openssh_pinned(self):
+        # Owner 18.11.2026: the core's SSH client is the embedded Win32-OpenSSH on every PC (a PC without ssh broke setup).
+        real = json.loads((ROOT / 'build/bundle-binaries.json').read_text())
+        self.assertEqual(real['binaries'][0]['name'], 'sing-box')
+        rows = [r for r in real['binaries'] if r['target'].startswith('openssh/')]
+        self.assertTrue({'openssh/ssh.exe', 'openssh/ssh-keygen.exe'} <= {r['target'] for r in rows})
+        self.assertEqual(len({(r['url'], r['sha256']) for r in rows}), 1)
+        self.assertEqual(rows[-1]['target'], 'openssh/ssh.exe')
+        self.assertIn("'transport-bin/openssh/ssh.exe'", (ROOT / 'build/Wizard.Server.ps1').read_text(encoding='utf-8-sig'))
+
+    def test_core_has_no_hidden_windows_tool_dependencies(self):
+        # Owner 18.11.2026: the core must not rely on programs of the Windows installation (ssh, curl, git, python, tar, winget…).
+        import re
+        core = sorted((ROOT / 'build').glob('Wizard*.ps1')) + [ROOT / 'build/Setup.Common.ps1', ROOT / 'Start-WindowsControl.ps1', ROOT / 'Start-CodexWindowsBridge.ps1'] \
+            + sorted((ROOT / 'transport').glob('Transport.*.ps1')) + [ROOT / 'transport/Route.Proxy.ps1']
+        bad = []
+        tool = r'(?:ssh|scp|sftp|curl|git|python3?|node|tar|winget|choco|wsl|bash)(?:\.exe)?'
+        for path in core:
+            for n, line in enumerate(path.read_text(encoding='utf-8-sig').splitlines(), 1):
+                if re.search(r"Get-Command\s+['\"]?" + tool + r"\b", line) or re.search(r"(?:Invoke-DiskProcess|Invoke-TransportText|Start-TransportProcess|&)\s+['\"]" + tool + r"['\"]", line):
+                    bad.append(f'{path.relative_to(ROOT)}:{n}')
+        # The only allowed lookups: ssh-keygen fallback next to the chosen ssh.
+        self.assertEqual([b for b in bad if not b.startswith('build/Wizard.Server.ps1')], [])
+        self.assertLessEqual(len(bad), 1, bad)
 
     def test_bundle_has_every_wizard_module(self):
         # Every dot-sourced wizard library and the ConfigSync runtime copy must ship in the EXE bundle.

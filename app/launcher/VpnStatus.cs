@@ -48,8 +48,12 @@ namespace RemoteAgents.Launcher
                         double age = (DateTime.UtcNow - updated.ToUniversalTime()).TotalSeconds;
                         if (age >= 0 && age <= 3) return status;
                     }
-                    // The service's independent lease closes only the VPN Job. Never invoke the legacy host.
-                    return VpnTun.D("owner", "net-helper", "enabled", false, "ok", false, "state", "watchdog-stalled", "stage", "helper-heartbeat", "summary", VpnWatchdog.FailureSummary("watchdog-stalled"));
+                    // File age cannot prove that the service or its core stopped (a long
+                    // LAN request can delay publication). Keep the last enabled intent.
+                    var stale = new Dictionary<string, object>(status);
+                    stale["ok"] = false; stale["statusStale"] = true;
+                    stale["summary"] = "Статус VPN устарел: помощник не отвечает";
+                    return stale;
                 }
                 if (Json.Str(status, "state") == "awaiting-uac") {
                     // No host exists yet during UAC. Tie the pending action to the

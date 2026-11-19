@@ -118,7 +118,8 @@ class FirstRunTests(unittest.TestCase):
     def test_main_window_and_minimal_tray_are_wired_to_existing_views(self):
         tray = source('TrayContext.cs')
         menu = tray.split('void RefreshMenu()', 1)[1].split('bool Configured()', 1)[0]
-        self.assertIn('foreach (var entry in TrayEntries())', menu)
+        self.assertIn('menuState.Refresh(TrayEntries()', menu)
+        self.assertIn('foreach (var entry in entries)', menu)
         self.assertIn('TrayMenuModel.Build(config.Data, AccountState()', menu)
         # «Открыть» and the left click lead to Happier; «Настройки» is the program window; «Диск» is the Disk root.
         self.assertIn('if (id == "open") OpenHappier()', menu)

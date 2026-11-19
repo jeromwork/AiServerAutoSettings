@@ -256,6 +256,30 @@ namespace RemoteAgents.Launcher
             Check(called.Count == 2 && blocked[ConfigSections.Disk] == SectionState.Blocked && !failed[ConfigSections.Disk].Ok, "failed server blocks the rest without running it");
             Check(failed[ConfigSections.Bootstrap].Summary == "канал недоступен", "error text reaches the row");
 
+            var serverReply = ConfigBundle.D("ok", true, "degraded", new[] { "happierWeb" },
+                "summary", "работает частично: happierWeb — ошибка",
+                "parts", new[] { ConfigBundle.D("part", "bridge", "state", "ready"),
+                    ConfigBundle.D("part", "happierWeb", "state", "error", "optional", true, "summary", "ошибка") });
+            called = new ConcurrentBag<string>();
+            var degraded = ConfigEngine.Execute(plan, (s, t) => {
+                called.Add(s);
+                return Task.FromResult(s == ConfigSections.Server ? SectionOutcome.From(serverReply, "server fallback") : new SectionOutcome { Ok = true });
+            }, (s, st, text) => blocked[s] = st, CancellationToken.None).GetAwaiter().GetResult();
+            Check(blocked[ConfigSections.Server] == SectionState.Degraded && degraded[ConfigSections.Server].Summary == Json.Str(serverReply, "summary"), "degraded server keeps the server summary and warning state");
+            foreach (string s in new[] { ConfigSections.Connection, ConfigSections.Bridge, ConfigSections.Vpn, ConfigSections.Account, ConfigSections.Disk, ConfigSections.Proxy, ConfigSections.Lan })
+                Check(called.Contains(s) && blocked[s] == SectionState.Done && degraded[s].Ok, "degraded happierWeb allows " + s + " to execute");
+            Check(WindowModel.CanFinish(false, blocked), "degraded is a completed window state");
+            var optionalRow = Json.Map(Json.Array(Json.Get(serverReply, "parts"))[1]);
+            Check(SectionOutcome.PartState(optionalRow) == SectionState.Degraded, "optional error row is a warning");
+            optionalRow["optional"] = false;
+            Check(SectionOutcome.PartState(optionalRow) == SectionState.Waiting, "critical error row retains its existing presentation");
+            var critical = SectionOutcome.From(ConfigBundle.D("ok", false, "summary", "ждёт сервер"), "fallback");
+            called = new ConcurrentBag<string>();
+            var criticalResult = ConfigEngine.Execute(plan, (s, t) => {
+                called.Add(s); return Task.FromResult(s == ConfigSections.Server ? critical : new SectionOutcome { Ok = true });
+            }, (s, st, text) => blocked[s] = st, CancellationToken.None).GetAwaiter().GetResult();
+            Check(called.Count == 2 && criticalResult[ConfigSections.Connection].Summary == "ждёт сервер" && blocked[ConfigSections.Connection] == SectionState.Blocked, "ok:false without degraded still gates the rest");
+
             var pending = ConfigEngine.Execute(new[] { ConfigSections.Account }, (s, t) => Task.FromResult(SectionOutcome.From(Json.Map(Json.Parse("{\"ok\":false,\"pending\":\"happier\",\"summary\":\"Happier устанавливается\"}")), "x")), (s, st, text) => blocked[s] = st, CancellationToken.None).GetAwaiter().GetResult();
             Check(pending[ConfigSections.Account].Pending && pending[ConfigSections.Account].Operation == "happier" && blocked[ConfigSections.Account] == SectionState.Pending, "detached install is ⏳, not ❌");
             var refused = SectionOutcome.From(Json.Map(Json.Parse("{\"ok\":false,\"vpn\":\"unavailable\",\"summary\":\"нет\"}")), "x");

@@ -10,7 +10,7 @@ namespace RemoteAgents.Launcher
     internal sealed partial class ConfigWindow
     {
         readonly Dictionary<string, Control> pages = new Dictionary<string, Control>();
-        readonly Panel pageHost = new Panel { Dock = DockStyle.Fill };
+        readonly Panel pageHost = new BufferedPanel { Dock = DockStyle.Fill };
         readonly MainWindowSizing mainSizing = new MainWindowSizing();
         Control pageHeader; Size resizeStart;
         readonly FlowLayoutPanel settingsBody = Stack(), aboutBody = Stack();
@@ -91,6 +91,7 @@ namespace RemoteAgents.Launcher
             serviceActions.Controls.Add(syncStatus); serviceActions.Controls.Add(serverHealthDetails); serviceActions.Controls.Add(pathStates);
             var deployDiagnostic = WrapLabel(); deployDiagnostic.Text = DeploymentText(); serviceActions.Controls.Add(deployDiagnostic);
             AddButton(serviceActions, "Состояние развёртывания сервера", () => { deployDiagnostic.Text = DeploymentText(); ShowPage("Сервер"); });
+            AddButton(serviceActions, "Скопировать журнал", CopyDiagnosticLog);
             serviceActions.Controls.Add(diagnosticPathLink);
             serviceActions.Controls.Add(vpnDnsDetails);
             diagnosticPathLink.LinkClicked += (s, e) => pathMenu.Show(diagnosticPathLink, new Point(0, diagnosticPathLink.Height));
@@ -109,7 +110,7 @@ namespace RemoteAgents.Launcher
         { pages.Add(name, page); page.Dock = DockStyle.Fill; pageHost.Controls.Add(page); page.Visible = false; }
         void RegisterFlowPage(string name, FlowLayoutPanel body)
         {
-            var scroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(12, 4, 12, 12) };
+            var scroll = new BufferedPanel { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(12, 4, 12, 12) };
             body.Location = new Point(scroll.Padding.Left, scroll.Padding.Top); scroll.Controls.Add(body);
             // Each nested card/flow receives the viewport width, so long text wraps at every DPI.
             scroll.ClientSizeChanged += (s, e) => FitContent(body, Math.Max(100, scroll.ClientSize.Width - scroll.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth));
@@ -173,7 +174,7 @@ namespace RemoteAgents.Launcher
         {
             try {
                 var result = Json.Read(Path.Combine(home, "state", "server-apply.json"));
-                return string.Join("\r\n", Json.Array(Json.Get(result, "parts")).Select(Json.Map).Select(r => Json.Str(r, "part") + ": " + Json.Str(r, "state") + " — " + Json.Str(r, "summary")));
+                return DiagnosticReport.Clean(DiagnosticReport.FormatServerApply(Json.Encode(result), Program.Version, "см. журнал шага"), DiagnosticReport.KnownSecrets(home));
             } catch (Exception) { return "Состояние развёртывания ещё не получено. Нажмите «Сверить состояние»."; }
         }
         void OpenDiagnostics()

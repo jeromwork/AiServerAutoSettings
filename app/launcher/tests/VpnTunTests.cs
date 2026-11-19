@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading;
 
 namespace RemoteAgents.Launcher
 {
@@ -15,6 +16,73 @@ namespace RemoteAgents.Launcher
         {
             return D("Adapters", new[] { D("Name", name, "InterfaceDescription", description, "ifIndex", 7, "Status", "Up", "Virtual", true) },
                 "Routes", routes.Select(r => D("InterfaceIndex", 7, "DestinationPrefix", r)).ToArray(), "DnsServers", new object[0], "DnsClients", new object[0], "Nrpt", new object[0]);
+        }
+        static void MonitorChecks(DateTime now, Dictionary<string, object> transport, Dictionary<string, object> policy)
+        {
+            int stops = 0, restarts = 0; string stopped = "";
+            Dictionary<string, object> status = null;
+            var monitor = new VpnTunMonitor(0, transport, policy, value => status = value, reason => { stops++; stopped = reason; }, () => restarts++);
+            Check(monitor.Step(0, now, true, transport, "") && Json.Str(status, "state") == "on", "running TUN starts healthy");
+            transport["ok"] = false;
+            transport["reason"] = D("code", "all-paths-penalized", "text", "Все пути временно недоступны, повторяю");
+            for (int ms = 500; ms <= 120000; ms += 500) Check(monitor.Step(ms, now.AddMilliseconds(ms), true, transport, ""), "unavailable path never stops the loop");
+            string since = Json.Str(Json.Map(status["reason"]), "since");
+            Check(stops == 0 && restarts == 0 && Json.Bool(status, "enabled") && !Json.Bool(status, "ok") && Json.Str(status, "state") == "searching", "two minutes without path keeps the same TUN Job, without ten second auto retry");
+            Check(Json.Str(Json.Map(status["reason"]), "code") == "all-paths-penalized" && since == now.AddMilliseconds(500).ToString("o"), "contract reason and stable since survive waiting");
+            transport["localNet"] = "down";
+            monitor.Step(120500, now.AddMilliseconds(120500), true, transport, "");
+            Check(stops == 0 && Json.Str(Json.Map(status["reason"]), "code") == "local-network-down", "local network outage reports searching without Stop");
+            transport["ok"] = true; transport["localNet"] = "ok"; transport["reason"] = D();
+            transport["updatedAt"] = now.AddMilliseconds(121000).ToString("o");
+            monitor.Step(121000, now.AddMilliseconds(121000), true, transport, "");
+            Check(Json.Bool(status, "ok") && Json.Bool(status, "enabled") && Json.Str(status, "state") == "on" && stops == 0 && restarts == 0, "ok to searching to ok retains the same Job");
+            Json.Map(transport["helper"])["udp"] = false;
+            monitor.Step(121500, now.AddMilliseconds(121500), true, transport, "");
+            Check(Json.Str(status, "state") == "searching" && Json.Str(Json.Map(status["reason"]), "code") == "no-udp" && stops == 0, "loss of UDP is status only");
+            Json.Map(transport["helper"])["udp"] = true;
+            transport["configRevision"] = "new"; transport["network"] = "new-network";
+            monitor.Step(122000, now.AddMilliseconds(122000), true, transport, "");
+            Check(Json.Str(Json.Map(status["reason"]), "code") == "path-changed" && stops == 0, "revision and network change cannot close the Job");
+            monitor.Step(122500, now.AddMilliseconds(122500), true, transport, "");
+            Check(Json.Str(status, "state") == "on", "new ready path resumes without restart");
+            var conflict = VpnTun.Conflict(Snapshot("Happ TUN", "Wintun", "0.0.0.0/0"));
+            monitor.Step(123000, now.AddMilliseconds(123000), true, transport, conflict);
+            Check(Json.Str(status, "state") == "conflict" && Json.Bool(status, "enabled") && Json.Str(status, "summary").Contains("Сейчас работает Happ TUN. Отключите его") && stops == 0 && restarts == 0, "foreign VPN appearing after enable is visible without closing or restarting our core");
+            transport["updatedAt"] = now.AddMilliseconds(123500).ToString("o");
+            monitor.Step(123500, now.AddMilliseconds(123500), true, transport, "");
+            Check(Json.Str(status, "state") == "on", "removing conflict resumes in place");
+            monitor.Step(124000, now.AddMilliseconds(124000), true, transport, "", true);
+            Check(Json.Str(status, "state") == "searching" && stops == 0, "inventory failure cannot close a healthy core");
+            monitor.Step(124500, now.AddMilliseconds(124500), false, transport, "");
+            monitor.Step(124550, now.AddMilliseconds(124550), false, transport, "");
+            Check(Json.Str(status, "state") == "searching" && Json.Bool(status, "enabled") && restarts == 1 && stops == 0, "core exit restarts inside Job, repeated exits are rate limited");
+            monitor.Step(124600, now.AddMilliseconds(124600), true, transport, "");
+            Check(Json.Str(status, "state") == "on", "restarted core returns to on");
+            Check(!monitor.Step(127101, now.AddMilliseconds(127101), true, transport, "") && stops == 1 && stopped == "watchdog-stalled", "owner-loop hang still invokes Stop");
+            transport["ok"] = false; transport["reason"] = D("code", "path-dial-failed", "text", "password=private-value");
+            var masked = new VpnTunMonitor(0, transport, policy, value => status = value, reason => stops++, () => restarts++);
+            masked.Step(0, now, true, transport, "");
+            Check(!Json.Encode(status).Contains("private-value"), "transport reason uses existing secret masking");
+        }
+        static void ConflictScanChecks()
+        {
+            int calls = 0;
+            using (var entered = new ManualResetEvent(false))
+            using (var release = new ManualResetEvent(false)) {
+                var scan = new VpnTunConflictScan(0, () => { int call = Interlocked.Increment(ref calls); entered.Set(); release.WaitOne(); return call == 1 ? Snapshot("Happ TUN", "Wintun", "0.0.0.0/0") : Snapshot("OpenVPN", "TAP OpenVPN", "192.168.9.0/24"); });
+                scan.Tick(4999); Check(calls == 0, "adapter scan starts at five seconds");
+                try {
+                    scan.Tick(5000); Check(entered.WaitOne(1500), "fixed adapter snapshot starts asynchronously");
+                    scan.Tick(15000); Check(calls == 1 && scan.Conflict == "", "slow inventory never blocks the owner tick or overlaps another snapshot");
+                } finally { release.Set(); }
+                Check(SpinWait.SpinUntil(() => { scan.Tick(15001); return scan.Conflict == "Happ TUN"; }, 1500), "completed snapshot detects foreign VPN on the running session");
+                scan.Tick(20000); Check(calls == 1, "slow snapshot cannot queue catch-up scans");
+                scan.Tick(20001);
+                Check(SpinWait.SpinUntil(() => { scan.Tick(20002); return scan.Conflict == ""; }, 1500) && calls == 2, "next adapter snapshot detects removal without changing either VPN");
+            }
+            var failed = new VpnTunConflictScan(0, () => { throw new IOException("inventory unavailable"); });
+            failed.Tick(5000);
+            Check(SpinWait.SpinUntil(() => { failed.Tick(5001); return failed.Failed; }, 1500), "inventory exception is consumed as status");
         }
         internal static void Run(string root)
         {
@@ -58,19 +126,8 @@ namespace RemoteAgents.Launcher
             Check(VpnTun.PathState(transport, now) == "no-udp", "TCP-only path refuses full VPN");
             Json.Map(transport["helper"])["udp"] = true;
             Check(VpnTun.PathState(transport, now) == "" && VpnTun.PathState(transport, now.AddSeconds(4)) == "no-path" && VpnTun.PathState(transport, now.AddSeconds(-1)) == "no-path", "only fresh checked path is accepted");
-            var health = new VpnTunHealth(0);
-            Check(!health.Sample(100, false, true) && health.Sample(200, true, false), "two mixed failures disable VPN");
-            health = new VpnTunHealth(0);
-            Check(!health.Sample(100, false, false) && !health.Sample(200, true, true) && !health.Sample(300, false, false) && health.Sample(400, false, false), "success resets failures");
-            Check(health.Tick(400, false) == "core-exited", "core death disables immediately");
-            health = new VpnTunHealth(0); Check(health.Tick(2501, true) == "watchdog-stalled", "lease expires without cycle progress");
-            health.Pulse(10001); Check(health.Tick(10001, true) == "server-unreachable", "absolute health expires despite progress");
-            var recovery = new VpnTunRecovery(); recovery.Stopped("server-unreachable");
-            Check(!recovery.Observe(100, true) && !recovery.Observe(10099, true), "retry waits ten continuous seconds");
-            Check(!recovery.Observe(10100, false) && !recovery.Observe(20000, true) && recovery.Observe(30000, true), "interruption restarts retry timer");
-            recovery.Stopped("no-path"); Check(!recovery.Observe(50000, true) && !recovery.Observe(70000, true), "failed automatic attempt cannot rearm itself");
-            foreach (string reason in new[] { "conflict", "no-udp", "core-exited", "off" }) { recovery.Reset(); recovery.Stopped(reason); Check(!recovery.Observe(0, true) && !recovery.Observe(20000, true), "no auto retry for " + reason); }
-            recovery.Reset(); recovery.Stopped("no-path"); Check(!recovery.Observe(0, true) && recovery.Observe(10000, true), "explicit button restores one retry allowance");
+            MonitorChecks(now, transport, strict);
+            ConflictScanChecks();
             string command; Dictionary<string, object> request;
             Check(NetHelperProtocol.TryRequest(Json.Encode(settings.Request()) + "\r\n", out command, out request) && command == "vpn.on", "typed VPN command with CRLF");
             foreach (string invalid in new[] { "{\"cmd\":\"vpn.on\",\"socksPort\":17881,\"socksPort\":9}", "{\"cmd\":\"vpn.on\",\"socksPort\":17881,\"c\\u006dd\":\"vpn.off\"}", "{\"cmd\":\"vpn.on\",\"socksPort\":17881,\"path\":\"bad\"}", "{\"cmd\":\"vpn.on\",\"socksPort\":0}", "{\"cmd\":\"vpn.on\",\"socksPort\":17881,\"excludeCidrs\":[\"bad\"]}", "{\"cmd\":\"vpn.on\",\"socksPort\":17881,\"dnsServer\":{}}", "{\"cmd\":\"vpn.on\",\"socksPort\":17881,\"excludeCidrs\":{}}", "{\"cmd\":\"vpn.on\",\"socksPort\":\"17881\"}" })
@@ -85,7 +142,15 @@ namespace RemoteAgents.Launcher
             Check(Json.Str(VpnStatus.Read(home), "state") == "on", "helper status does not require a legacy host receipt");
             serviceStatus["updatedAt"] = DateTime.UtcNow.AddSeconds(-4).ToString("o");
             Files.Atomic(Path.Combine(home, "status/vpn.json"), Json.Encode(serviceStatus));
-            Check(!Json.Bool(VpnStatus.Read(home), "enabled") && !File.Exists(Path.Combine(home, "state/vpn.stop")), "stale helper evidence is off without legacy stop side effects");
+            var stale = VpnStatus.Read(home);
+            Check(Json.Bool(stale, "enabled") && !Json.Bool(stale, "ok") && Json.Bool(stale, "statusStale") && Json.Str(stale, "state") == "on" && !File.Exists(Path.Combine(home, "state/vpn.stop")), "stale file cannot claim service shutdown or request a legacy stop");
+            Check(Json.Str(Json.Read(Path.Combine(home, "status/vpn.json")), "state") == "on", "stale read never rewrites service status");
+            foreach (string state in new[] { "searching", "conflict" }) {
+                serviceStatus["state"] = state; serviceStatus["reason"] = D("code", "no-candidates", "text", "Нет подходящих путей", "since", now.ToString("o"));
+                Files.Atomic(Path.Combine(home, "status/vpn.json"), Json.Encode(serviceStatus));
+                var retained = VpnStatus.Read(home);
+                Check(Json.Bool(retained, "enabled") && Json.Str(retained, "state") == state && Json.Str(Json.Map(retained["reason"]), "code") == "no-candidates", "stale active " + state + " preserves intent and reason");
+            }
             string singbox = Environment.GetEnvironmentVariable("SINGBOX");
             if (!string.IsNullOrEmpty(singbox)) {
                 Directory.CreateDirectory(root); string file = Path.Combine(root, "vpn-tun-check.json"); Files.Atomic(file, Json.Encode(config));

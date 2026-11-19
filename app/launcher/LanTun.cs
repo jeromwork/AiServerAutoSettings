@@ -7,6 +7,8 @@ using System.Linq;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Net.Security;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -16,11 +18,33 @@ using System.Runtime.InteropServices;
 
 namespace RemoteAgents.Launcher
 {
+    // Human texts for helper stage codes. Codes stay in helper.log; the UI shows only these texts.
+    internal static class LanStages
+    {
+        internal const int AdapterWaitSeconds = 30;
+        internal static bool IsCore(string stage)
+        { return stage == "lan-start" || stage == "lan-core-exited" || stage == "lan-adapter-timeout" || stage == "lan-adapter-down" || stage == "lan-watchdog"; }
+        internal static string Text(string stage)
+        {
+            switch (stage ?? "") {
+                case "": return "нет";
+                case "lan-start": return "не удалось запустить подключение к локальным сетям";
+                case "lan-core-exited": return "подключение к локальным сетям неожиданно остановилось";
+                case "lan-adapter-timeout": return "сетевой адаптер RemoteAgents-LAN не появился за " + AdapterWaitSeconds + " секунд";
+                case "lan-adapter-down": return "сетевой адаптер RemoteAgents-LAN пропал (например, после сна компьютера)";
+                case "lan-watchdog": return "не удалось проверить сетевые маршруты компьютера";
+                case "lan-nrpt": return "не удалось настроить имена сети (DNS)";
+                case "lan-nrpt-remove": return "не удалось убрать прежние настройки имён сети (DNS)";
+                default: return "внутренняя ошибка (" + stage + ")";
+            }
+        }
+    }
+
     internal sealed class LanTunNetwork
     {
         internal string Name, TestHost;
         internal int TestPort;
-        internal string[] Subnets, Domains, DnsServers;
+        internal string[] Subnets, Domains, DnsServers, Hosts = new string[0];
         internal static LanTunNetwork[] Parse(Dictionary<string, object> request)
         {
             if (request.Count != 3 || !request.ContainsKey("cmd") || !request.ContainsKey("networks") || !request.ContainsKey("socksPort")) throw new InvalidDataException();
@@ -32,8 +56,11 @@ namespace RemoteAgents.Launcher
             foreach (var row in rows) {
                 var map = Json.Map(row);
                 string[] keys = { "name", "subnets", "domains", "dnsServers", "testHost", "testPort" };
-                if (map.Count != keys.Length || keys.Any(k => !map.ContainsKey(k)) || !(map["name"] is string) || !(map["testHost"] is string)) throw new InvalidDataException();
+                // "hosts" (explicit LAN names for the hosts file) is optional: an older tray sends 6 keys.
+                bool withHosts = map.ContainsKey("hosts");
+                if (map.Count != keys.Length + (withHosts ? 1 : 0) || keys.Any(k => !map.ContainsKey(k)) || !(map["name"] is string) || !(map["testHost"] is string)) throw new InvalidDataException();
                 var n = new LanTunNetwork { Name = Json.Str(map, "name"), TestHost = Json.Str(map, "testHost"), TestPort = Json.Int(map, "testPort", 0), Subnets = Strings(map, "subnets"), Domains = Strings(map, "domains"), DnsServers = Strings(map, "dnsServers") };
+                if (withHosts) n.Hosts = Strings(map, "hosts");
                 if (!Regex.IsMatch(n.Name, @"\A[a-z][a-z0-9]{0,6}\z") || !names.Add(n.Name) || n.Subnets.Length == 0 || n.Subnets.Length > 64 || n.Domains.Length > 64 || n.DnsServers.Length > 4 || map["testPort"] is string || n.TestPort < 1 || n.TestPort > 65535) throw new InvalidDataException();
                 foreach (var subnet in n.Subnets) {
                     LanAccess.Cidr(subnet);
@@ -44,6 +71,9 @@ namespace RemoteAgents.Launcher
                 foreach (string dns in n.DnsServers) if (!n.Subnets.Any(s => LanTun.Contains(s, LanAccess.IPv4(dns)))) throw new InvalidDataException();
                 foreach (string domain in n.Domains) LanAccess.Domain(domain);
                 if (n.Domains.Length > 0 && n.DnsServers.Length == 0) throw new InvalidDataException();
+                if (n.Hosts.Length > LanAccess.MaxHosts || n.Hosts.Length > 0 && n.DnsServers.Length == 0) throw new InvalidDataException();
+                var seenHosts = new HashSet<string>();
+                foreach (string host in n.Hosts) if (LanAccess.HostName(host, n.Domains) != host || !seenHosts.Add(host)) throw new InvalidDataException();
                 IPAddress address;
                 if (IPAddress.TryParse(n.TestHost, out address)) {
                     if (address.AddressFamily != AddressFamily.InterNetwork || !n.Subnets.Any(s => LanTun.Contains(s, LanAccess.IPv4(n.TestHost)))) throw new InvalidDataException();
@@ -64,7 +94,7 @@ namespace RemoteAgents.Launcher
         internal static Dictionary<string, object> Request(Dictionary<string, object> profile, int port)
         {
             var networks = LanAccess.Read(profile).Networks.Where(n => Json.Bool(n, "enabled") && Json.Strings(Json.Get(n, "subnets")).Length > 0)
-                .Select(n => (object)n.Where(p => p.Key != "enabled").ToDictionary(p => p.Key, p => p.Value)).ToArray();
+                .Select(n => (object)n.Where(p => p.Key != "enabled" && !(p.Key == "hosts" && Json.Strings(p.Value).Length == 0)).ToDictionary(p => p.Key, p => p.Value)).ToArray();
             return networks.Length == 0 ? new Dictionary<string, object> { { "cmd", "lan.stop" } } : new Dictionary<string, object> { { "cmd", "lan.apply" }, { "networks", networks }, { "socksPort", port } };
         }
     }
@@ -109,6 +139,7 @@ namespace RemoteAgents.Launcher
         ILanTunCore Start(object config);
         void CleanAdapter();
         bool Nrpt(string command);
+        LanDnsProbe ProbeDns(string dnsServer);
         int TunnelIndex();
         bool Probe(LanTunNetwork network, string[] subnets, int index);
         bool ChannelReady();
@@ -130,6 +161,7 @@ namespace RemoteAgents.Launcher
     internal sealed class LanTun : IDisposable
     {
         internal const string InterfaceName = "RemoteAgents-LAN";
+        internal const long AdapterWaitMs = LanStages.AdapterWaitSeconds * 1000L, StartupGraceMs = 15000;
         internal const string RemoveNrpt = "$ErrorActionPreference='Stop'; Get-DnsClientNrptRule | Where-Object { $_.Comment -like 'RemoteAgents:*' } | Remove-DnsClientNrptRule -Force";
         readonly object gate = new object();
         readonly ILanTunPlatform platform;
@@ -143,9 +175,17 @@ namespace RemoteAgents.Launcher
         string signature = "", tunAddress = "";
         long nextRoutes, nextHealth, started;
         volatile bool disposed;
-        bool nrptDirty;
+        bool nrptDirty, hostsDirty;
+        readonly LanHosts hosts;
+        // "nrpt": Windows resolves LAN names through our NRPT rule. "hosts": another VPN client blocks port 53
+        // for every process but itself, NRPT cannot work, names come from the hosts block instead.
+        string dnsMode = "nrpt";
+        long nextDnsProbe;
+        string physicalKey = "";
+        bool adapterSeen;
+        readonly HashSet<string> reached = new HashSet<string>();
         volatile Dictionary<string, object> published = new Dictionary<string, object>();
-        internal LanTun(ILanTunPlatform platform, Func<long> clock) { this.platform = platform; this.clock = clock; retry = new LanTunRetry(clock); }
+        internal LanTun(ILanTunPlatform platform, Func<long> clock, LanHosts hosts = null) { this.platform = platform; this.clock = clock; this.hosts = hosts; retry = new LanTunRetry(clock); }
         internal static int Prefix(string subnet) { return int.Parse(subnet.Split('/')[1], CultureInfo.InvariantCulture); }
         internal static uint Mask(int bits) { return bits == 0 ? 0 : uint.MaxValue << (32 - bits); }
         internal static bool Contains(string subnet, uint ip) { return (ip & Mask(Prefix(subnet))) == LanAccess.IPv4(subnet.Split('/')[0]); }
@@ -188,15 +228,19 @@ namespace RemoteAgents.Launcher
             lock (gate) {
                 if (disposed) return new { ok = false, error = "stopped" };
                 StopCore(); networks = wanted; port = Json.Int(request, "socksPort", 0); signature = ""; retry.Reset(); states.Clear(); connected.Clear();
-                foreach (var n in networks) states[n.Name] = new Dictionary<string, object> { { "name", n.Name }, { "state", "channel-down" }, { "reason", "нет связи с сервером" }, { "stage", "" }, { "nrptOk", false }, { "domains", n.Domains }, { "dnsServers", n.DnsServers } };
-                nextRoutes = nextHealth = 0;
+                foreach (var n in networks) states[n.Name] = new Dictionary<string, object> { { "name", n.Name }, { "state", "starting" }, { "reason", "подключается…" }, { "stage", "" }, { "nrptOk", false }, { "domains", n.Domains }, { "dnsServers", n.DnsServers } };
+                nextRoutes = nextHealth = nextDnsProbe = 0; hostsDirty = true;
                 try { TickLocked(); } finally { Publish(); }
                 return new { ok = true };
             }
         }
         internal object Stop()
         {
-            lock (gate) { StopCore(); networks = new LanTunNetwork[0]; states.Clear(); connected.Clear(); signature = ""; retry.Reset(); Publish(); return new { ok = true }; }
+            lock (gate) {
+                StopCore(); networks = new LanTunNetwork[0]; states.Clear(); connected.Clear(); signature = ""; retry.Reset();
+                if (hosts != null) hosts.Remove();
+                Publish(); return new { ok = true };
+            }
         }
         void StopCore()
         {
@@ -208,7 +252,11 @@ namespace RemoteAgents.Launcher
         void Error(string stage)
         {
             platform.Log(stage, 1);
-            foreach (var state in states.Values) { state["stage"] = stage; state["state"] = "host-down"; state["reason"] = "локальные сети: ошибка на шаге " + stage; }
+            foreach (var state in states.Values) {
+                state["stage"] = stage;
+                if (Json.Str(state, "state") == "busy") continue;
+                state["state"] = "failed"; state["reason"] = LanStages.Text(stage) + "; повторим автоматически";
+            }
         }
         internal void Tick() { lock (gate) { if (!disposed) { try { TickLocked(); } finally { Publish(); } } } }
         void TickLocked()
@@ -229,23 +277,41 @@ namespace RemoteAgents.Launcher
                     }
                     string address = Address(snapshot, networks.SelectMany(n => n.Subnets));
                     string current = address + Json.Encode(connected);
-                    if (signature != current) { StopCore(); signature = current; tunAddress = address; retry.Reset(); SetHealth(platform.ChannelReady(), new Dictionary<string, bool>()); }
+                    // A change of the physical network (other adapter/address) also refreshes the hosts block at once.
+                    string physical = string.Join(",", snapshot.Addresses.Where(a => a.Adapter != InterfaceName).Select(a => a.Adapter + "@" + a.Subnet).OrderBy(x => x, StringComparer.Ordinal));
+                    bool networkChanged = physical != physicalKey; physicalKey = physical;
+                    if (hosts != null && (hostsDirty || networkChanged || signature != current)) { hosts.Configure(networks, connected, port, now, hostsDirty || networkChanged); hostsDirty = false; }
+                    if (signature != current) { nextDnsProbe = 0; StopCore(); signature = current; tunAddress = address; retry.Reset(); SetHealth(platform.ChannelReady(), new Dictionary<string, bool>()); }
                 }
                 if (!connected.Values.Any(s => s.Length > 0)) { SetHealth(false, new Dictionary<string, bool>()); return; }
                 if (core == null && retry.Ready) {
                     try {
                         platform.CleanAdapter();
                         core = platform.Start(Config(networks, connected, port, platform.Credentials(), tunAddress, LogPath));
-                        started = now; nextHealth = now + 1000;
+                        // Cleanup and config check can take seconds: count the adapter wait from the real start.
+                        long launched = clock();
+                        started = launched; nextHealth = launched + 1000; adapterSeen = false; reached.Clear();
+                        MarkStarting();
                         if (platform.ChannelReady()) InstallNrpt();
                     } catch { StopCore(); Error("lan-start"); retry.Failed(); }
                 }
                 if (now >= nextHealth) {
-                    nextHealth = now + 10000;
                     int index = core == null ? 0 : platform.TunnelIndex();
-                    // Recheck after resume too; a loopback SOCKS endpoint needs no Wi-Fi rebinding.
-                    if (core != null && index == 0 && now - started >= 5000) { StopCore(); Error("lan-adapter-down"); retry.Failed(); }
+                    long checkedAt = clock();
+                    if (core != null && index > 0) {
+                        if (!adapterSeen) { platform.Log("lan-adapter-ready", (int)Math.Min(int.MaxValue, Math.Max(0, (checkedAt - started) / 1000))); ClearCoreStage(); }
+                        adapterSeen = true;
+                    } else if (core != null && adapterSeen) {
+                        // Recheck after resume too; a loopback SOCKS endpoint needs no Wi-Fi rebinding.
+                        StopCore(); Error("lan-adapter-down"); retry.Failed();
+                    } else if (core != null && checkedAt - started >= AdapterWaitMs) {
+                        StopCore(); Error("lan-adapter-timeout"); retry.Failed();
+                    }
+                    // While waiting for the adapter poll every second, otherwise every 10 s.
+                    nextHealth = checkedAt + (core != null && !adapterSeen ? 1000 : 10000);
                     bool channel = platform.ChannelReady();
+                    if (channel && core != null && adapterSeen && now >= nextDnsProbe) { nextDnsProbe = now + 60000; ProbeDnsMode(); }
+                    if (hosts != null) hosts.Tick(now, channel);
                     if (!channel) {
                         if (!platform.Nrpt(RemoveNrpt)) platform.Log("lan-nrpt-remove", 1);
                         foreach (var state in states.Values) state["nrptOk"] = false;
@@ -256,10 +322,21 @@ namespace RemoteAgents.Launcher
                     Task.WaitAll(probes.Select(p => p.task).ToArray());
                     SetHealth(channel, probes.ToDictionary(p => p.Name, p => p.task.Result));
                     if (core != null && core.Alive && now - started >= 30000) retry.Reset();
-
                 }
             } catch { StopCore(); Error("lan-watchdog"); retry.Failed(); nextRoutes = now + 30000; }
         }
+        void MarkStarting()
+        {
+            foreach (var n in networks) {
+                var state = states[n.Name];
+                if (connected[n.Name].Length == 0 || Json.Str(state, "busyReason").Length > 0) continue;
+                state["state"] = "starting"; state["reason"] = StartingReason(Json.Str(state, "stage"));
+            }
+        }
+        static string StartingReason(string stage)
+        { return LanStages.IsCore(stage) ? "повторное подключение после сбоя: " + LanStages.Text(stage) : "подключается…"; }
+        void ClearCoreStage()
+        { foreach (var state in states.Values) if (LanStages.IsCore(Json.Str(state, "stage"))) state["stage"] = ""; }
         internal static string LogPath {
             get {
 #if PORTABLE_TEST
@@ -269,9 +346,27 @@ namespace RemoteAgents.Launcher
 #endif
             }
         }
+        // Port 53 closed for us (WSAEACCES) -> our NRPT would only make *.domain lookups hang: use the hosts block.
+        void ProbeDnsMode()
+        {
+            var first = networks.Where(n => n.Domains.Length > 0).SelectMany(n => n.DnsServers.Where(d => connected[n.Name].Any(s => Contains(s, LanAccess.IPv4(d))))).FirstOrDefault();
+            if (first == null) return;
+            var result = platform.ProbeDns(first);
+            if (result == LanDnsProbe.Denied && dnsMode != "hosts") { dnsMode = "hosts"; platform.Log("lan-dns-hosts", 0); InstallNrpt(); }
+            else if (result == LanDnsProbe.Open && dnsMode != "nrpt") { dnsMode = "nrpt"; platform.Log("lan-dns-nrpt", 0); nrptDirty = true; }
+        }
         void InstallNrpt()
         {
             bool removed = platform.Nrpt(RemoveNrpt);
+            if (dnsMode == "hosts") {
+                nrptDirty = !removed;
+                foreach (var n in networks) {
+                    states[n.Name]["nrptOk"] = removed;
+                    if (removed && (Json.Str(states[n.Name], "stage") == "lan-nrpt" || Json.Str(states[n.Name], "stage") == "lan-nrpt-remove")) states[n.Name]["stage"] = "";
+                }
+                if (!removed) platform.Log("lan-nrpt-remove", 1);
+                return;
+            }
             var eligible = networks.Select(n => new { network = n, dns = n.DnsServers.Where(d => connected[n.Name].Any(s => Contains(s, LanAccess.IPv4(d)))).ToArray() })
                 .Where(x => x.network.Domains.Length > 0 && x.dns.Length > 0).ToArray();
             bool added = removed && (eligible.Length == 0 || platform.Nrpt(string.Join("; ", eligible.Select(x => AddNrpt(x.network, x.dns)))));
@@ -279,25 +374,88 @@ namespace RemoteAgents.Launcher
             foreach (var n in networks) {
                 bool ok = n.Domains.Length == 0 || (added && eligible.Any(x => x.network == n));
                 states[n.Name]["nrptOk"] = ok;
+                if (ok && (Json.Str(states[n.Name], "stage") == "lan-nrpt" || Json.Str(states[n.Name], "stage") == "lan-nrpt-remove")) states[n.Name]["stage"] = "";
                 if (!ok) { states[n.Name]["stage"] = "lan-nrpt"; platform.Log("lan-nrpt", 1); }
             }
         }
         void SetHealth(bool channel, Dictionary<string, bool> probes)
         {
+            long t = clock();
             foreach (var n in networks) {
-                var state = states[n.Name]; string busy = Json.Str(state, "busyReason");
+                var state = states[n.Name]; string busy = Json.Str(state, "busyReason"), stage = Json.Str(state, "stage");
                 bool ok; probes.TryGetValue(n.Name, out ok);
-                string status = connected[n.Name].Length == 0 || busy.Length > 0 ? "busy" : !channel ? "channel-down" : ok ? "ok" : "host-down";
-                string reason = status == "busy" ? (connected[n.Name].Length == 0 ? "не подключена: адреса заняты; " : "") + busy : status == "channel-down" ? "нет связи с сервером" : status == "ok" ? "работает" : "сервер на связи, но хост сети не отвечает (сеть на сервере выключена или хост недоступен)";
-                if (!Json.Bool(state, "nrptOk") && n.Domains.Length > 0) reason += "; имена сети " + n.Name + " не настроены";
+                if (ok && core != null) reached.Add(n.Name);
+                bool warming = core == null || !adapterSeen || (!reached.Contains(n.Name) && t - started < StartupGraceMs);
+                string status, reason;
+                if (connected[n.Name].Length == 0 || busy.Length > 0) { status = "busy"; reason = (connected[n.Name].Length == 0 ? "не подключена: адреса заняты; " : "") + busy; }
+                else if (core == null && LanStages.IsCore(stage)) { status = "failed"; reason = LanStages.Text(stage) + "; повторим автоматически"; }
+                else if (!channel) { status = "channel-down"; reason = "нет связи с сервером"; }
+                else if (ok) { status = "ok"; reason = "работает"; }
+                else if (warming) { status = "starting"; reason = StartingReason(stage); }
+                else { status = "host-down"; reason = "сервер на связи, но проверочный адрес " + n.TestHost + ":" + n.TestPort + " не отвечает (сеть на сервере выключена или адрес недоступен)"; }
+                if (!Json.Bool(state, "nrptOk") && n.Domains.Length > 0 && status != "failed" && status != "starting") reason += "; имена сети " + n.Name + " не настроены";
+                if (status == "ok" && (Json.Bool(state, "nrptOk") || n.Domains.Length == 0)) state["stage"] = "";
                 state["state"] = status; state["reason"] = reason;
             }
         }
         void Publish()
-        { published = new Dictionary<string, object> { { "enabled", networks.Length > 0 }, { "networks", states.Values.Select(s => (object)new Dictionary<string, object>(s)).ToArray() } }; }
+        {
+            string updated = hosts != null && hosts.UpdatedAt > 0 ? DateTimeOffset.FromUnixTimeSeconds(hosts.UpdatedAt).ToString("o", CultureInfo.InvariantCulture) : "";
+            published = new Dictionary<string, object> { { "enabled", networks.Length > 0 }, { "networks", states.Values.Select(s => {
+                var row = new Dictionary<string, object>(s);
+                row["dns"] = dnsMode; row["hostsNames"] = hosts == null ? 0 : hosts.Count(Json.Str(s, "name")); row["hostsUpdated"] = updated;
+                return (object)row;
+            }).ToArray() } };
+        }
         // Immutable snapshots keep status/ping available during slow NRPT/route operations.
         internal Dictionary<string, object> Status() { return published; }
         public void Dispose() { disposed = true; lock (gate) StopCore(); }
+    }
+
+    // Локальный TUN (стек system) сам принимает TCP, поэтому connect ничего не доказывает.
+    // Хост ЛВС подтверждён, только если с дальнего конца пришёл хотя бы один байт.
+    internal static class LanProbe
+    {
+        static readonly int[] TlsPorts = { 443, 465, 636, 993, 995, 5986, 8443 };
+        sealed class Counting : Stream
+        {
+            readonly Stream inner; int read;
+            internal Counting(Stream inner) { this.inner = inner; }
+            internal int BytesRead { get { return Volatile.Read(ref read); } }
+            public override int Read(byte[] buffer, int offset, int count) { int n = inner.Read(buffer, offset, count); if (n > 0) Interlocked.Add(ref read, n); return n; }
+            public override void Write(byte[] buffer, int offset, int count) { inner.Write(buffer, offset, count); }
+            public override void Flush() { inner.Flush(); }
+            public override bool CanRead { get { return true; } }
+            public override bool CanWrite { get { return true; } }
+            public override bool CanSeek { get { return false; } }
+            public override long Length { get { throw new NotSupportedException(); } }
+            public override long Position { get { throw new NotSupportedException(); } set { throw new NotSupportedException(); } }
+            public override long Seek(long o, SeekOrigin s) { throw new NotSupportedException(); }
+            public override void SetLength(long v) { throw new NotSupportedException(); }
+        }
+        internal static byte[] DnsQuery()
+        {
+            // TCP DNS: длина 17, id 0x5241, RD, 1 вопрос: "." NS IN.
+            return new byte[] { 0, 17, 0x52, 0x41, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1 };
+        }
+        internal static bool Exchange(Stream stream, string host, int port, int timeoutMs)
+        {
+            if (timeoutMs <= 0) return false;
+            var counting = new Counting(stream);
+            try {
+                Task work;
+                if (TlsPorts.Contains(port)) {
+                    // Только проверка доступности: данные не передаются, поэтому сертификат не проверяется.
+                    var tls = new SslStream(counting, true, (a, b, c, d) => true);
+                    work = tls.AuthenticateAsClientAsync(host);
+                } else {
+                    byte[] request = port == 53 ? DnsQuery() : port == 80 || port == 8080 ? Encoding.ASCII.GetBytes("HEAD / HTTP/1.0\r\nHost: " + host + "\r\n\r\n") : new byte[0];
+                    work = Task.Run(() => { if (request.Length > 0) { counting.Write(request, 0, request.Length); counting.Flush(); } counting.ReadByte(); });
+                }
+                try { work.Wait(timeoutMs); } catch (AggregateException) { }
+            } catch { }
+            return counting.BytesRead > 0;
+        }
     }
 
 #if !PORTABLE_TEST
@@ -354,6 +512,20 @@ namespace RemoteAgents.Launcher
         public bool Nrpt(string command)
         { try { Run(@"WindowsPowerShell\v1.0\powershell.exe", new[] { "-NoProfile", "-NonInteractive", "-Command", command }, 10000, command == LanTun.RemoveNrpt); return true; } catch { return false; } }
         public bool ChannelReady() { return Json.Bool(StatusView.Read(home, "transport", maxAgeSec: 15), "ok"); }
+        public LanDnsProbe ProbeDns(string dnsServer)
+        {
+            // Through our TUN the connect reaches the Windows filtering platform: a protective VPN client answers 10013.
+            try {
+                using (var client = new TcpClient(AddressFamily.InterNetwork)) {
+                    var connect = client.ConnectAsync(IPAddress.Parse(dnsServer), 53);
+                    return connect.Wait(2000) && client.Connected ? LanDnsProbe.Open : LanDnsProbe.Unknown;
+                }
+            } catch (AggregateException e) {
+                var socket = e.InnerException as SocketException;
+                return socket != null && socket.SocketErrorCode == SocketError.AccessDenied ? LanDnsProbe.Denied : LanDnsProbe.Unknown;
+            } catch (SocketException e) { return e.SocketErrorCode == SocketError.AccessDenied ? LanDnsProbe.Denied : LanDnsProbe.Unknown; }
+            catch { return LanDnsProbe.Unknown; }
+        }
         public bool Probe(LanTunNetwork network, string[] subnets, int index)
         {
             // Includes DNS resolution in the 2 s budget. No connect starts after a DNS timeout.
@@ -369,7 +541,8 @@ namespace RemoteAgents.Launcher
                     using (var client = new TcpClient(AddressFamily.InterNetwork)) {
                         var connect = client.ConnectAsync(address, network.TestPort);
                         if (!connect.Wait(remaining)) return false;
-                        if (client.Connected && GetBestInterface(BitConverter.ToUInt32(address.GetAddressBytes(), 0), out actual) == 0 && actual == index) return true;
+                        if (!client.Connected || GetBestInterface(BitConverter.ToUInt32(address.GetAddressBytes(), 0), out actual) != 0 || actual != index) continue;
+                        if (LanProbe.Exchange(client.GetStream(), network.TestHost, network.TestPort, 2000 - (int)budget.ElapsedMilliseconds)) return true;
                     }
                 }
             } catch { }

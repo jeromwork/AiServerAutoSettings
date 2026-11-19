@@ -12,12 +12,7 @@
     "bindPhysical": true,
     "openSsh": true,
     "metered": "auto",
-    "activeProbeBytes": 65536,
-    "rankProbeBytes": 262144,
-    "activeIntervalSec": 120,
-    "meteredActiveIntervalSec": 300,
-    "rankIntervalSec": 1800,
-    "topOnMetered": 3,
+    "priority": [],
     "stallSeconds": 5,
     "probeTimeoutSec": 45,
     "restartDelaySec": 3,
@@ -51,7 +46,11 @@
         "enabled": false
       }
     ],
-    "disabledTags": []
+    "disabledTags": [],
+    "switch": {
+      "stallSeconds": 8,
+      "stallConns": 2
+    }
   },
   "vpn": {
     "enabled": false,

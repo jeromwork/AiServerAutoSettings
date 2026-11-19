@@ -192,7 +192,7 @@ function Remove-WizardLan([string]$Root,[string]$Bundle,$Request) {
 }
 function Get-WizardNetStatus([string]$Root) {
     # Secret-free public status; reading it needs no root.
-    $text=Invoke-WizardSsh $Root 'b=/usr/local/lib/remoteagents/lan/lan-vpn.sh; if [ -x "$b" ]; then "$b" public-status; fi; echo "#proxy"; cat /var/lib/remoteagents-status/proxy.json 2>/dev/null || true'
+    $text=Invoke-WizardSsh $Root 'b=/usr/local/lib/remoteagents/lan/lan-vpn.sh; if [ -x "$b" ]; then "$b" public-status; elif sudo -n test -x "$b" 2>/dev/null; then sudo -n "$b" public-status; fi; echo "#proxy"; cat /var/lib/remoteagents-status/proxy.json 2>/dev/null || true'
     $parts=(Convert-TransportLF $text) -split "#proxy`n?",2
     $server=@{};foreach($line in ($parts[0] -split "`n")){if($line.Trim()){$row=$line|ConvertFrom-Json;$server[[string]$row.name]=$row}}
     $config=Read-TransportJson (Join-Path $Root 'config.json');$rows=@()

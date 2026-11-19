@@ -119,10 +119,12 @@ namespace RemoteAgents.Launcher
                 NetHelperInstall.SecureDirectory(NetHelperInstall.DataDirectory);
                 log = new NetHelperLog(NetHelperInstall.DataDirectory); log.Write("starting", 0);
                 var lanClock = Stopwatch.StartNew();
-                lan = new LanTun(new WindowsLanTun(home, config => {
+                var lanPlatform = new WindowsLanTun(home, config => {
                     IDisposable job; var process = StartSingBox(Core.Lan, config, out job);
                     return new LanTunProcess(process, job, () => lifetime.RemoveJob(job));
-                }, log.Write, lifetime.AddJob, lifetime.RemoveJob), () => lanClock.ElapsedMilliseconds);
+                }, log.Write, lifetime.AddJob, lifetime.RemoveJob);
+                // Names of the LAN for programs that cannot use NRPT (another VPN client blocks DNS port 53): a hosts block kept by this service.
+                lan = new LanTun(lanPlatform, () => lanClock.ElapsedMilliseconds, new LanHosts(new WindowsLanHosts(lanPlatform.Credentials, log.Write), a => Task.Run(a)));
                 // Only one callback may do network I/O. Status/commands also serialize in LanTun.
                 int lanTicking = 0;
                 lanTimer = new System.Threading.Timer(_ => {
@@ -199,15 +201,16 @@ namespace RemoteAgents.Launcher
                 } else if (command != "status") return "{\"ok\":false,\"error\":\"not-implemented\"}";
                 var vpn = vpnTun == null ? VpnTun.D("owner", "net-helper", "enabled", false, "ok", false, "state", "off", "summary", "VPN выключен", "updatedAt", DateTime.UtcNow.ToString("o")) : vpnTun.Status();
                 return NetHelperProtocol.Status(log.Recent, lan.Status(), vpn);
-            } catch { return "{\"ok\":false,\"error\":\"vpn-command-failed\"}"; }
+            } catch (Exception error) {
+                log.Write(command == "vpn.on" ? "vpn-on" : command == "vpn.off" ? "vpn-off" : "status", TickFailureLog.ErrorCode(error), error.GetType().Name);
+                return Json.Encode(new { ok = false, error = "vpn-command-failed", errorCode = TickFailureLog.ErrorCode(error) });
+            }
         }
         bool Wait(Task operation, VpnLease lease, bool waitingForClient)
         {
             while (true) {
                 if (stopping.WaitOne(0) || emergency.WaitOne(0) || lease.Expired || (waitingForClient && lifetime.ConnectionExpired)) return false;
                 lease.Pulse();
-                // Stage 3 proves only owner-loop progress. Network health checks belong to stages 4/5.
-                lease.Confirmed();
                 if (operation.IsCompleted) return true;
                 stopping.WaitOne(50);
             }
@@ -288,14 +291,15 @@ namespace RemoteAgents.Launcher
                 if (new FileInfo(path).Length > Limit) continue;
                 foreach (string line in File.ReadLines(path)) {
                     // Only our fixed categories, timestamps and numeric codes can enter status.
-                    if (System.Text.RegularExpressions.Regex.IsMatch(line, @"\A[0-9T:Z.+-]+ stage=[a-z-]+ code=[0-9]+\z")) Remember(line);
+                    if (System.Text.RegularExpressions.Regex.IsMatch(line, @"\A[0-9T:Z.+-]+ stage=[a-z-]+ code=-?[0-9]+(?: type=[A-Za-z0-9]+)?\z")) Remember(line);
                 }
             }
         }
         void Remember(string line) { recent.Enqueue(line); while (recent.Count > 50) recent.Dequeue(); }
-        internal void Write(string stage, int code)
+        internal void Write(string stage, int code) { Write(stage, code, null); }
+        internal void Write(string stage, int code, string type)
         {
-            string line = DateTime.UtcNow.ToString("o") + " stage=" + stage + " code=" + code.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            string line = DateTime.UtcNow.ToString("o") + " stage=" + stage + " code=" + code.ToString(System.Globalization.CultureInfo.InvariantCulture) + (type == null ? "" : " type=" + type);
             lock (gate) {
                 Remember(line);
                 try {

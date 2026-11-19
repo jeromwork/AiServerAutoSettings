@@ -16,11 +16,24 @@ namespace RemoteAgents.Launcher
     // свой код только как обвязка над SCM и sing-box
     internal static class NetHelperInstall
     {
-        // Bump manually whenever helper logic or the wire protocol changes.
-        internal const string HelperVersion = "3";
+        // Bump when installed helper code/protocol must change; launcher-only OTA keeps this version.
+        // NetHelperSources.json pins this version's service/protocol sources (LF UTF-8).
+        // After a service change, bump HelperVersion and update that fingerprint; LanTests checks both.
+        internal const string HelperVersion = "6";
         internal const string ServiceName = "RemoteAgentsNet";
         internal const string DisplayName = "RemoteAgents: локальные сети и VPN";
-        internal static bool NeedsInstall(string installed) { return (installed ?? "").Trim() != HelperVersion; }
+        internal static bool NeedsInstall(string installed)
+        { int version; return !int.TryParse((installed ?? "").Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out version) || version < int.Parse(HelperVersion, CultureInfo.InvariantCulture); }
+        // The service EXE is compatible by HelperVersion, not by the launcher's changing OTA hash.
+        // Still require its presence and verify the privileged transport against the EXE's trusted pin.
+        internal static bool ImagesMatch(string directory, string expectedTransportHash)
+        {
+            try {
+                return File.Exists(Path.Combine(directory, "RemoteAgents.exe")) &&
+                    Files.Hash(Path.Combine(directory, "sing-box.exe")) == expectedTransportHash;
+            } catch (IOException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
+        }
         internal static string ValidateSid(string sid)
         {
             if (!Regex.IsMatch(sid ?? "", @"\AS-1-[0-9]+(?:-[0-9]+){1,15}\z", RegexOptions.CultureInvariant)) throw new ArgumentException("Недопустимый SID");
@@ -45,6 +58,7 @@ namespace RemoteAgents.Launcher
         internal static string InstallDirectory { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "RemoteAgents", "Helper"); } }
         internal static string DataDirectory { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "RemoteAgents", "Helper"); } }
         internal static string InstalledVersion { get { try { return File.ReadAllText(Path.Combine(InstallDirectory, "version.txt")).Trim(); } catch { return ""; } } }
+        internal static bool IsCurrent { get { return !NeedsInstall(InstalledVersion) && Exists() && ImagesMatch(InstallDirectory, PinnedTransport.ExpectedHash); } }
         internal static bool IsAdministrator { get { using (var identity = WindowsIdentity.GetCurrent()) return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator); } }
         internal static bool Exists()
         {
@@ -69,18 +83,21 @@ namespace RemoteAgents.Launcher
             string sid = new SecurityIdentifier(ValidateSid(Program.Option(args, "--owner-sid"))).Value;
             // The unprivileged client names its installed bundle, never a path in a pipe command.
             string bundle = Path.GetFullPath(Program.Option(args, "--helper-bundle") ?? throw new ArgumentException("Нет бандла"));
-            string source = Path.Combine(bundle, "transport", "sing-box.exe");
-            if (!File.Exists(source)) throw new FileNotFoundException("В бандле нет сетевого помощника");
+            byte[] image = PinnedTransport.ReadVerified(home, bundle, PinnedTransport.ExpectedHash);
             bool existing = Exists(); StopService();
             SecureDirectory(InstallDirectory); SecureDirectory(DataDirectory);
             string version = Path.Combine(InstallDirectory, "version.txt");
             if (File.Exists(version)) File.Delete(version); // A failed installation must never claim this version.
             CopyImage(Program.Exe, Path.Combine(InstallDirectory, "RemoteAgents.exe"));
-            CopyImage(source, Path.Combine(InstallDirectory, "sing-box.exe"));
+            CopyImage(() => File.WriteAllBytes(Path.Combine(InstallDirectory, "sing-box.exe"), image));
             Sc(CreateArguments(Path.Combine(InstallDirectory, "RemoteAgents.exe"), home, sid, existing));
             Sc(new[] { "sdset", ServiceName, ServiceSddl(sid) });
             Sc(FailureArguments());
             // SYSTEM/Administrators can write; Users can only read the executable and marker.
+            using (var service = new ServiceController(ServiceName)) {
+                service.Start();
+                service.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(20));
+            }
             File.WriteAllText(version, HelperVersion + "\n", NetHelperProtocol.Utf8);
             return 0;
         }
@@ -91,16 +108,19 @@ namespace RemoteAgents.Launcher
             StopService();
             if (Exists()) Sc(new[] { "delete", ServiceName });
             RemoveNrpt();
+            try { WindowsLanHosts.RemoveBlock(); } catch { /* A busy hosts file must not block removal; the block only maps private LAN names. */ }
             // Run this command from the program's EXE, never the service image being removed.
             DeleteDirectory(InstallDirectory); DeleteDirectory(DataDirectory);
             return 0;
         }
         static void CopyImage(string source, string destination)
+        { CopyImage(() => File.Copy(source, destination, true)); }
+        static void CopyImage(Action copy)
         {
             // SCM may report STOPPED just before the service process releases its image.
             var clock = Stopwatch.StartNew();
             while (true) {
-                try { File.Copy(source, destination, true); return; }
+                try { copy(); return; }
                 catch (IOException ex) {
                     int code = ex.HResult & 0xffff;
                     if ((code != 32 && code != 33 && code != 1224) || clock.ElapsedMilliseconds >= 5000) throw;

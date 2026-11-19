@@ -103,6 +103,20 @@ def binary_contents(pins=None, cache=None):
         result[row['target']] = data
     return result
 
+def verify_initial(archive, pins=None):
+    """Reject a thin/corrupt initial bundle before publishing a full EXE; never download here."""
+    rows = pinned(pins)
+    if sum(row['target'] == 'transport/sing-box.exe' for row in rows) != 1:
+        raise ValueError('Нет единственного пина transport/sing-box.exe')
+    with zipfile.ZipFile(archive) as z:
+        for row in rows:
+            matches = [info for info in z.infolist() if info.filename == row['target']]
+            if len(matches) != 1 or matches[0].file_size > MAX_BINARY:
+                raise ValueError('Начальный бандл должен содержать проверенный ' + row['target'])
+            if hashlib.sha256(z.read(matches[0])).hexdigest() != row['memberSha256']:
+                raise ValueError('SHA-256 ' + row['target'] + ' не совпал с build/bundle-binaries.json')
+    return True
+
 def make(version, outdir, launcher=None, product="RemoteAgents", binaries=False):
     if product != "RemoteAgents":
         raise ValueError("Поддерживается только RemoteAgents")
@@ -250,6 +264,7 @@ def main():
     b.add_argument('version'); b.add_argument('outdir'); b.add_argument('--launcher'); b.add_argument('--product', choices=['RemoteAgents'], default='RemoteAgents')
     b.add_argument('--binaries', action='store_true', help='embed pinned binaries of build/bundle-binaries.json (EXE only)')
     sub.add_parser('fetch')
+    v = sub.add_parser('verify-initial'); v.add_argument('archive')
     a = sub.add_parser('attach')
     a.add_argument('archive'); a.add_argument('launcher'); a.add_argument('output')
     d = sub.add_parser('publish')
@@ -260,6 +275,9 @@ def main():
         make(a.version, a.outdir, a.launcher, a.product, a.binaries)
     elif a.command == 'fetch':
         fetch()
+    elif a.command == 'verify-initial':
+        verify_initial(a.archive)
+        print('verified initial bundle', a.archive)
     elif a.command == 'attach':
         attach_launcher(a.archive, a.launcher, a.output)
     else:

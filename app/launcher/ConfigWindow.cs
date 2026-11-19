@@ -31,11 +31,11 @@ namespace RemoteAgents.Launcher
         internal void Set(SectionState state, string message)
         {
             State = state; bool runningNow = state == SectionState.Running;
-            icon.Text = state == SectionState.Done || state == SectionState.Unchanged ? "✅" : state == SectionState.Failed || state == SectionState.Blocked ? "❌" : state == SectionState.Waiting ? "•" : "⏳";
+            icon.Text = state == SectionState.Done || state == SectionState.Unchanged ? "✅" : state == SectionState.Failed || state == SectionState.Blocked ? "❌" : state == SectionState.Degraded ? "⚠" : state == SectionState.Waiting ? "•" : "⏳";
             icon.ForeColor = state == SectionState.Done || state == SectionState.Unchanged ? Color.ForestGreen : state == SectionState.Failed || state == SectionState.Blocked ? Color.Firebrick : state == SectionState.Waiting ? SystemColors.GrayText : Color.DarkGoldenrod;
             bar.Visible = runningNow; text.Left = runningNow ? 190 : 140; text.Width = Retry.Left - text.Left - 4;
-            text.Text = message ?? ""; text.ForeColor = state == SectionState.Failed || state == SectionState.Blocked ? Color.Firebrick : SystemColors.ControlText;
-            tip.SetToolTip(text, text.Text); Retry.Visible = state == SectionState.Failed || state == SectionState.Blocked;
+            text.Text = message ?? ""; text.ForeColor = state == SectionState.Failed || state == SectionState.Blocked ? Color.Firebrick : state == SectionState.Degraded ? Color.DarkGoldenrod : SystemColors.ControlText;
+            tip.SetToolTip(text, text.Text); Retry.Visible = state == SectionState.Failed || state == SectionState.Blocked || state == SectionState.Degraded;
         }
     }
 
@@ -96,7 +96,6 @@ namespace RemoteAgents.Launcher
         Task<string> preparing; Task following; ConfigSession followingSession; ConfigSession session; bool diskApplying, running, closeChecked, closingRequested, filling, replaceOnPaste; string defaultName;
         // Disk is never part of the window's plan: it runs in BackgroundWork.Disk, started once the connection is proved.
         bool diskQueued; DiskRun seenDisk; readonly Action diskChanged; WheelRouter wheel;
-        static readonly object logGate = new object();
 
         internal static bool First(string home, Func<Task<string>> prepare)
         { using (var form = new ConfigWindow(home, null, prepare, false)) { form.ShowDialog(); return form.Manual; } }
@@ -114,8 +113,8 @@ namespace RemoteAgents.Launcher
             HandleCreated += (a, b) => { if (wheel == null) { wheel = new WheelRouter(this); Application.AddMessageFilter(wheel); } };
             bottom.Controls.Add(done); bottom.Controls.Add(new Label { Dock = DockStyle.Right, Width = 8 }); bottom.Controls.Add(close);
             var copyLog = new Button { Text = "Скопировать журнал", Width = 150, Dock = DockStyle.Left };
-            tip.SetToolTip(copyLog, "Весь журнал в буфер — для чата с администратором или ИИ. Секреты в журнал не пишутся.");
-            copyLog.Click += (a, b) => { try { Clipboard.SetText(journal.TextLength > 0 ? journal.Text : "Журнал пуст"); Log("Журнал скопирован."); } catch (Exception e) { Log("Журнал не скопирован: " + e.Message); } };
+            tip.SetToolTip(copyLog, "Копирует весь журнал программы; пароли и ключи скрыты");
+            copyLog.Click += (a, b) => CopyDiagnosticLog();
             bottom.Controls.Add(copyLog);
             if (settings) BuildSettings(); else BuildPaste();
             // Status rows scroll inside their own area; the journal cannot cover them and the footer stays visible.
@@ -307,10 +306,15 @@ namespace RemoteAgents.Launcher
         }
         void Log(string text)
         {
-            string line = DateTime.Now.ToString("HH:mm:ss") + " " + (text ?? "").Replace("\r\n", "\n").Replace("\n", "\r\n") + "\r\n";
-            // The same journal on disk, also after the window is closed (a background Disk run keeps logging).
-            lock (logGate) { try { Directory.CreateDirectory(Path.Combine(home, "logs")); File.AppendAllText(Path.Combine(home, "logs", "config-window.log"), line, Files.Utf8); } catch (Exception) { } }
+            string line = DiagnosticReport.WriteWindowLog(Path.Combine(home, "logs"), text, DiagnosticReport.KnownSecrets(home));
             Ui(() => { journal.AppendText(line); if (!journal.Visible) { journal.Visible = true; Relayout(); } });
+        }
+        void CopyDiagnosticLog()
+        {
+            try {
+                Clipboard.SetText(DiagnosticReport.BuildCopyText(Path.Combine(home, "logs"), Path.Combine(home, "state")));
+                Log("Журнал скопирован — вставьте его в чат");
+            } catch (Exception e) { Log("Журнал не скопирован: " + e.Message); }
         }
         void Report(string section, SectionState state, string text)
         {
@@ -382,12 +386,36 @@ namespace RemoteAgents.Launcher
                 await RunSession(new ConfigSession(home, Bundle, parsed.Secrets, parsed.Hints), null);
             });
         }
+        // The EXE has no compatibility manifest, so Environment.OSVersion reports 6.2.9200 on Windows 8.1/10/11.
+        static string WindowsDescription()
+        {
+            string text = "Windows " + Environment.OSVersion.Version;
+            try {
+                using (var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion")) {
+                    string name = Convert.ToString(key.GetValue("ProductName")), build = Convert.ToString(key.GetValue("CurrentBuildNumber"));
+                    string release = Convert.ToString(key.GetValue("DisplayVersion") ?? key.GetValue("ReleaseId")); object ubr = key.GetValue("UBR");
+                    int number; if (int.TryParse(build, out number) && number >= 22000) name = name.Replace("Windows 10", "Windows 11");
+                    if (name.Length != 0) text = name + (release.Length != 0 ? " " + release : "") + ", сборка " + build + (ubr != null ? "." + ubr : "");
+                }
+            } catch { }
+            try {
+                using (var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full")) {
+                    int release; int.TryParse(Convert.ToString(key.GetValue("Release")), out release);
+                    text += ", .NET " + (release >= 528040 ? "4.8+" : "старше 4.8 (" + release + ") — нужен .NET Framework 4.8");
+                }
+            } catch { }
+            try {
+                using (var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\PowerShell\3\PowerShellEngine"))
+                    text += ", PowerShell " + Convert.ToString(key.GetValue("PowerShellVersion"));
+            } catch { text += ", PowerShell 5.1 не найден"; }
+            return text;
+        }
         async Task RunSession(ConfigSession next, IList<string> forced)
         {
             session = next;
             session.Log = Log; session.Report = Report;
             session.AccountCreated = message => Ui(() => ShowHappierAccountCreated(message));
-            Log(Product.Name + " " + Program.Version + ", Windows " + Environment.OSVersion.Version + (Environment.Is64BitOperatingSystem ? " x64" : "") + ", " + TimeZoneInfo.Local.Id);
+            Log(Product.Name + " " + Program.Version + ", " + WindowsDescription() + (Environment.Is64BitOperatingSystem ? " x64" : "") + ", " + TimeZoneInfo.Local.Id);
             session.AskSecret = (name, why) => { string value = null; Func<string> ask = () => SecretPrompt.Ask(this, name, why); value = InvokeRequired ? (string)Invoke(ask) : ask(); return value; };
             rowsPanel.Visible = true;
             if (!settings) { pasting = false; pastePanel.Visible = false; header.Height = (int)(44 * DeviceDpi / 96F); header.Controls[1].Visible = false; ((Label)header.Controls[0]).Text = "Подключаю"; }
@@ -539,6 +567,8 @@ namespace RemoteAgents.Launcher
                 while (form.ShowDialog(owner) == DialogResult.OK) {
                     if (first.Text.Length == 0) continue;
                     if (confirm && first.Text != second.Text) { MessageBox.Show(form, "Пароли не совпадают", Product.Name); second.Clear(); continue; }
+                    var window = owner as ConfigWindow;
+                    if (window != null) DiagnosticReport.RememberSecrets(window.home, new[] { first.Text });
                     return first.Text;
                 }
                 return null;

@@ -103,6 +103,7 @@ class Env:
         self.c = dict(schema=1, version=1, serverAddress='127.0.0.1', serverPort=22, workerUser=USER,
                       hostKeys=[self.host_pub], workerAuthorizedKeys=str(self.auth), stateDir=str(self.dir / 'state'),
                       syncFile=str(self.home / '.config/remoteagents/config-sync.json'), serverConfig=str(snapshot),
+                      lanPcAccess=str(self.private('pc-access.json', '{"lans":[]}')),
                       nodeCatalog=str(self.home / '.local/share/remote-agents-nodes'), catalogFile=str(self.catalog),
                       authLog=[str(self.log)], routes=[{'kind': 'direct'}], happier={'home': str(self.home)})
         self.c.update(extra)

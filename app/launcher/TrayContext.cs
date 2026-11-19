@@ -24,6 +24,9 @@ namespace RemoteAgents.Launcher
         readonly CancellationTokenSource stop = new CancellationTokenSource();
         readonly List<ComponentRuntime> runtimes = new List<ComponentRuntime>(); readonly List<NativeJob> actionJobs = new List<NativeJob>();
         readonly Stopwatch trayClickClock = Stopwatch.StartNew();
+        readonly TrayMenuState menuState = new TrayMenuState();
+        readonly TrayStatusNotifications statusNotifications = new TrayStatusNotifications();
+        readonly TickFailureLog tickFailures = new TickFailureLog();
         long lastTrayClick = -SystemInformation.DoubleClickTime - 1L;
         ConfigWindow mainWindow;
         DiskExplorerController diskExplorer;
@@ -81,8 +84,10 @@ namespace RemoteAgents.Launcher
             // The folder choice keeps applying after its window closed; the tray reports the result.
             BackgroundWork.Disk.Changed += () => { try { dispatch.BeginInvoke(new Action(DiskFinished)); } catch (InvalidOperationException) { } };
             dispatch.BeginInvoke(new Action(() => {
+                netHelper = new HelperClient(home, dispatch);
                 if (firstSetup) { RunFirstSetup(); return; }
-                netHelper = new HelperClient(home, dispatch); netHelper.EnsureRunning();
+                // A new EXE after OTA follows the same required/version/image check as a clean install.
+                netHelper.EnsureRunning();
                 DeliverUpdateNotice(); CheckLegacyVpn(); StartLegacyDiskCleanup(); Handle(args); DrainCommands(); Tick();
                 if(Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome),StringComparison.OrdinalIgnoreCase)) CheckSetup();
 
@@ -107,11 +112,14 @@ namespace RemoteAgents.Launcher
             if(closing)return;
             if(FirstInstall.Required(home)){ExitThread();return;}
             ReloadSettings();icon.Visible=true;readyForCommands=true;ShowMain();
-            netHelper = new HelperClient(home, dispatch); netHelper.EnsureRunning();
+            netHelper.EnsureRunning();
             CheckLegacyVpn();StartLegacyDiskCleanup();DrainCommands();Tick();
         }
         void Bootstrap()
         {
+            try { log.Write("transport.binary." + PinnedTransport.Ensure(home, engine.Current.Length == 0 ? home : engine.Folder(engine.Current))); }
+            catch (Exception error) { log.Write(TickFailureLog.HelperFailure("binary-restore", error)); }
+            try { log.Write("openssh." + PortableTools.EnsureOpenSsh(home)); } catch { log.Write("openssh.failed"); }
             if (installSource==null && engine.Current.Length != 0) { BundleDefinition.Load(engine.Folder(engine.Current)); return; }
             string zip = Path.Combine(engine.Root, "embedded.zip");
             try {
@@ -149,34 +157,53 @@ namespace RemoteAgents.Launcher
         void Tick()
         {
             if (closing || ticking || definition == null) return; ticking = true;
+            Icon shown = icon.Icon; // final tray colour of this tick, applied once in finally
             try {
-                RetireConfigSyncTask(); TryDeleteOld(); ReloadSettings(); foreach (var r in runtimes) r.Tick();
-                var critical = runtimes.Where(r => r.Definition.Critical).ToArray();
-                bool all = critical.Length > 0 && critical.Where(r => r.Enabled).All(r => r.Healthy);
-                all = all && UpdateHealthReady();
-                string result = engine.Observe(all);
-                string image = UpgradeInstaller.ObserveImage(home, engine, all, result);
-                if (image == "rollback") { try { PrepareUpdateRestart(); } catch { keepVpnOnRestart = false; log.Write("update.resume.failed"); } UpdateOutcome(Json.Text(UpdateState(), "target", engine.Previous), "здоровье не подтверждено; выполнен откат"); log.Write("launcher.rollback"); RestartRequested = true; ExitThread(); return; }
-                if (result == "rollback") { log.Write("update.rollback"); updateSummary = "обновление откачено: здоровье не подтверждено"; LoadComponents(); foreach (var r in runtimes) r.Tick(); all = false; }
-                if (result == "accepted" || image == "accepted") { log.Write("update.accepted"); UpdateOutcome(engine.Current, ""); }
-                int count = critical.Count(r => r.Healthy); icon.Icon = all ? green : count > 0 ? yellow : red;
-                var transport = StatusView.Read(home, "transport", maxAgeSec: 15);
-                if (netHelper != null) netHelper.UpdateLan(config.Data, transport);
-                ResumeUpdatedVpn(transport);
-
-                icon.Icon = transport.Count == 0 ? yellow : Json.Bool(transport, "ok") ? green : red;
-                var vpnStatus = VpnStatus.Read(home);
-                string vpnReason = VpnWatchdog.FailureSummary(Json.Str(vpnStatus, "state"), Json.Str(vpnStatus, "stage"));
-                if (vpnReason.Length > 0 && Json.Str(vpnStatus, "owner") == "net-helper") vpnReason = Json.Text(vpnStatus, "summary", vpnReason);
-                if (Json.Str(vpnStatus, "state") == "conflict") icon.Icon = yellow;
-                icon.Text = vpnReason.Length > 0 ? TrayMenuModel.Short(vpnReason, 63) : TrayMenuModel.Tooltip(transport, ServerHealthView.Read(home));
-                if (DateTime.UtcNow >= nextOperationCheck) CheckOperations();
-                RefreshMenu(); WriteStatus();
-                CheckSync(); CheckServerHealth(); CheckDisk();
-                PollUpdates();
-            } catch { log.Write("supervisor.tick.failed"); icon.Icon = red; }
-            finally { ticking = false; }
+                bool ok = true, restart = false, coreFailed = false;
+                var transport = Json.Map(null);
+                ok &= Step("settings", () => { RetireConfigSyncTask(); TryDeleteOld(); ReloadSettings(); });
+                if (!Step("components", () => { foreach (var r in runtimes) r.Tick(); })) { ok = false; coreFailed = true; }
+                if (!Step("update", () => {
+                    var critical = runtimes.Where(r => r.Definition.Critical).ToArray();
+                    bool all = critical.Length > 0 && critical.Where(r => r.Enabled).All(r => r.Healthy);
+                    all = all && UpdateHealthReady();
+                    string result = engine.Observe(all);
+                    string image = UpgradeInstaller.ObserveImage(home, engine, all, result);
+                    if (image == "rollback") { try { PrepareUpdateRestart(); } catch { keepVpnOnRestart = false; log.Write("update.resume.failed"); } UpdateOutcome(Json.Text(UpdateState(), "target", engine.Previous), "здоровье не подтверждено; выполнен откат"); log.Write("launcher.rollback"); RestartRequested = true; ExitThread(); restart = true; return; }
+                    if (result == "rollback") { log.Write("update.rollback"); updateSummary = "обновление откачено: здоровье не подтверждено"; LoadComponents(); foreach (var r in runtimes) r.Tick(); all = false; }
+                    if (result == "accepted" || image == "accepted") { log.Write("update.accepted"); UpdateOutcome(engine.Current, ""); }
+                    int count = critical.Count(r => r.Healthy); shown = all ? green : count > 0 ? yellow : red;
+                })) { ok = false; coreFailed = true; }
+                if (restart) return;
+                if (!Step("transport", () => { transport = StatusView.Read(home, "transport", maxAgeSec: 15); })) { ok = false; coreFailed = true; }
+                ok &= Step("lan", () => { if (netHelper != null) { netHelper.UpdateLan(config.Data, transport); netHelper.ConnectWhenInstalled(NetHelperSetup.Required(config.Data)); } });
+                ok &= Step("vpn-resume", () => ResumeUpdatedVpn(transport));
+                ok &= Step("icon", () => {
+                    var linkPhase = StatusView.Phase(transport); shown = linkPhase == LinkPhase.Ok ? green : linkPhase == LinkPhase.Failed ? red : yellow;
+                    var vpnStatus = VpnStatus.Read(home);
+                    string vpnReason = VpnWatchdog.FailureSummary(Json.Str(vpnStatus, "state"), Json.Str(vpnStatus, "stage"));
+                    if (vpnReason.Length > 0 && Json.Str(vpnStatus, "owner") == "net-helper") vpnReason = Json.Text(vpnStatus, "summary", vpnReason);
+                    bool searching = TrayMenuModel.Searching(transport, vpnStatus), conflict = Json.Str(vpnStatus, "state") == "conflict";
+                    if (searching || conflict) shown = yellow;
+                    icon.Text = vpnReason.Length > 0 && !searching && !conflict ? TrayMenuModel.Short(StatusView.DisplayText(vpnReason), 63)
+                        : TrayMenuModel.Tooltip(transport, ServerHealthView.Read(home), vpnStatus);
+                    var notice = statusNotifications.Observe(transport, vpnStatus, DateTime.UtcNow);
+                    if (notice != null) icon.ShowBalloonTip(8000, Product.Name, notice.Text, notice.Recovered ? ToolTipIcon.Info : ToolTipIcon.Warning);
+                });
+                ok &= Step("operations", () => { if (DateTime.UtcNow >= nextOperationCheck) CheckOperations(); });
+                ok &= Step("menu", RefreshMenuItems);
+                ok &= Step("main", RefreshMain);
+                ok &= Step("status", WriteStatus);
+                ok &= Step("sync", CheckSync);
+                ok &= Step("server-health", CheckServerHealth);
+                ok &= Step("disk", CheckDisk);
+                ok &= Step("updates", PollUpdates);
+                // Honest icon: a broken core step is red; any other broken step must not leave it green.
+                if (coreFailed) shown = red; else if (!ok && shown == green) shown = yellow;
+            } catch (Exception ex) { tickFailures.Write(log, ex, "tick"); shown = red; }
+            finally { ticking = false; if (!closing && icon.Icon != shown) icon.Icon = shown; }
         }
+        bool Step(string name, Action action) { return tickFailures.Run(log, name, action); }
         // Tooltip «Идёт установка: x из y» and a «Готово» balloon. While the wizard window is closed the tray
         // follows the installs itself (short status call every 15 s) and connects a saved Happier key.
         async void CheckOperations()
@@ -291,11 +318,13 @@ namespace RemoteAgents.Launcher
             } catch (Exception) { if (!closing) ShowMain(); }
             finally { openingHappier = false; }
         }
-        void RefreshMenu()
+        void RefreshMenu() { RefreshMenuItems(); RefreshMain(); }
+        void RefreshMenuItems()
         {
-            if (icon.ContextMenuStrip == null) {
+            // One snapshot: LAN can appear after HelperClient starts, or disappear on reload.
+            menuState.Refresh(TrayEntries(), entries => {
                 var menu = new ContextMenuStrip { ShowItemToolTips = true };
-                foreach (var entry in TrayEntries()) {
+                foreach (var entry in entries) {
                     if (entry.Id == "separator") { menu.Items.Add(new ToolStripSeparator()); continue; }
                     string id = entry.Id;
                     var item = new ToolStripMenuItem(entry.Text) { Enabled = entry.Enabled, ToolTipText = entry.Hint };
@@ -310,16 +339,12 @@ namespace RemoteAgents.Launcher
                     });
                     menu.Items.Add(item);
                 }
+                var previous = icon.ContextMenuStrip;
                 icon.ContextMenuStrip = menu;
-            }
-            {
-                var entries = TrayEntries();
-                for (int i = 0; i < entries.Length; i++) {
-                    if (entries[i].Id == "separator") continue;
-                    var item = icon.ContextMenuStrip.Items[i]; item.Text = entries[i].Text; item.Enabled = entries[i].Enabled; item.ToolTipText = entries[i].Hint;
-                }
-            }
-            RefreshMain();
+                if (previous != null) previous.Dispose();
+            }, (i, entry) => {
+                var item = icon.ContextMenuStrip.Items[i]; item.Text = entry.Text; item.Enabled = entry.Enabled; item.ToolTipText = entry.Hint;
+            });
         }
         TrayMenuEntry VpnMenu()
         {
@@ -609,6 +634,7 @@ namespace RemoteAgents.Launcher
             if (!AllowMutation()) return; actionBusy = vpnActionBusy = true; vpnActionWanted = true; vpnError = ""; RefreshMain();
             try {
                 if (netHelper == null) throw new IOException(HelperClient.PermissionRequired);
+                if (!await netHelper.EnsureReady(stop.Token)) { VpnFailure(HelperClient.SetupWarning, fromCard); return; }
                 var transport = StatusView.Read(home, "transport", maxAgeSec: 3);
                 var options = new System.Collections.Generic.Dictionary<string, object>(Json.Map(Json.Get(config.Data, "vpn")));
                 // Intent/interface names are not part of the privileged command.
@@ -619,7 +645,7 @@ namespace RemoteAgents.Launcher
                 if (Json.Str(status, "state") != "on") { if (!fromCard) MessageBox.Show(Json.Text(status, "summary", "VPN не включён: соединение не подтверждено"), Product.Name); return; }
                 config.SetVpnIntent(true); config.SetEnabled(vpn.Definition, true);
             } catch (OperationCanceledException) { }
-            catch { if (!closing) { log.Write("vpn.helper.failed"); VpnFailure("Не удалось включить VPN. Проверьте подключение сетевого помощника и диагностику.", fromCard); } }
+            catch (Exception error) { if (!closing) { log.Write("vpn.helper.failed " + TickFailureLog.HelperFailure("vpn-on", error)); VpnFailure(NetHelperSetup.VpnFailureMessage(error), fromCard); } }
             finally { actionBusy = vpnActionBusy = false; if (!closing) RefreshMenu(); }
         }
         void SignalVpnStop()

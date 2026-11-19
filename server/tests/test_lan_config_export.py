@@ -4,8 +4,9 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from test_config_export import Env, rc
+from test_config_export import Env, rc, ROOT
 
 
 def networks():
@@ -20,6 +21,60 @@ def networks():
 
 
 class LanConfigExportTests(unittest.TestCase):
+    def test_export_clinic_from_pc_access_when_snapshot_has_no_lan(self):
+        with tempfile.TemporaryDirectory(prefix='clinic-export-') as directory:
+            env = Env(directory)
+            conf = json.loads((ROOT / 'server/lan-pc-access.clinic.example.json').read_text())
+            runtime = Path(directory) / 'runtime' / 'clinic'
+            runtime.mkdir(parents=True)
+            subnets = conf['lans'][0]['subnets']
+            (runtime / 'subnets').write_text('\n'.join(subnets))
+            # Only confirmed subnet files are read, not VPN profiles or credentials.
+            (runtime / 'profile.ovpn').write_text('SECRET-OVPN-SENTINEL')
+            conf['lans'][0]['subnets'] = 'auto'
+            access = Path(directory) / 'pc-access.json'
+            access.write_text(json.dumps(conf)); access.chmod(0o600)
+            env.c.update(lanPcAccess=str(access), lanRuntimeDir=str(runtime.parent)); env.write()
+            snapshot = Path(env.c['serverConfig'])
+            before = snapshot.read_bytes()
+            exported, process = env.export()
+            row = exported['lan'][0]
+            self.assertEqual(set(row), {'name', 'share', 'testHost', 'testPort'})
+            self.assertEqual((row['name'], row['testHost'], row['testPort']), ('clinic', '192.168.88.244', 22))
+            self.assertEqual(set(row['share']['subnets']), set(subnets))
+            self.assertEqual(len(row['share']['subnets']), 20)
+            self.assertEqual(row['share']['domains'], ['*.eastclinic.ru'])
+            self.assertEqual(row['share']['dnsServers'], ['192.168.88.11'])
+            self.assertEqual(row['share']['hosts'], ['portal.eastclinic.ru'])
+            self.assertNotIn('SECRET-OVPN-SENTINEL', process.stdout.decode())
+            self.assertFalse(any(k.startswith('lan-') for k in exported['secrets']))
+            self.assertEqual(snapshot.read_bytes(), before)
+
+    def test_local_source_priority_missing_and_invalid(self):
+        with tempfile.TemporaryDirectory(prefix='pc-source-') as directory:
+            access = Path(directory) / 'pc-access.json'
+            settings = {'lanPcAccess': str(access)}
+            with self.assertRaises(rc.Error):
+                rc.computer_lans(settings, {})
+            with patch.object(rc, 'DEFAULT_LAN_PC_ACCESS', str(access)):
+                self.assertEqual(rc.computer_lans({}, {'lan': []}), {'lan': []})
+            access.write_text(json.dumps({'lans': [dict(name='office', subnets='obsolete')]})); access.chmod(0o600)
+            explicit = rc.computer_sections({'lan': networks()})
+            before = copy.deepcopy(explicit)
+            self.assertEqual(rc.computer_lans(settings, explicit), explicit)
+            self.assertEqual(explicit, before)
+            access.write_text(json.dumps({'lans': [dict(name='office', subnets=['10.1.0.0/16'], testHost='10.1.0.1',
+                                                       domains=['*.example.org'], testPort=22)]}))
+            with self.assertRaises(rc.Error):
+                rc.computer_lans(settings, {})
+            access.write_text('{"lans":[{"name":"clinic","ovpn":"SECRET-SENTINEL"}]}')
+            with self.assertRaises(rc.Error) as error:
+                rc.computer_lans(settings, {})
+            self.assertNotIn('SECRET-SENTINEL', str(error.exception))
+            access.chmod(0o666)
+            with self.assertRaises(rc.Error):
+                rc.computer_lans(settings, {})
+
     def test_full_export_all_networks_without_openvpn_refs_and_slots(self):
         with tempfile.TemporaryDirectory(prefix='lan-config-export-') as directory:
             env = Env(directory)
@@ -69,6 +124,31 @@ class LanConfigExportTests(unittest.TestCase):
         data['lan'][1]['share'] = dict(subnets=['10.124.0.0/24'], domains=[], dnsServers=[], enabled=False)
         public = rc.computer_sections(data)
         self.assertEqual(public['lan'][1]['share'], data['lan'][1]['share'])
+
+    def test_share_hosts_pass_through_and_are_validated(self):
+        data = {'lan': networks()}
+        data['lan'][0]['share']['hosts'] = ['portal.example.org', 'crm-api.example.org']
+        public = rc.computer_sections(data)
+        self.assertEqual(public['lan'][0]['share']['hosts'], ['portal.example.org', 'crm-api.example.org'])
+        self.assertNotIn('hosts', public['lan'][1]['share'], 'empty list is not exported')
+        data = {'lan': networks()}
+        data['lan'][0]['share']['hosts'] = []
+        self.assertNotIn('hosts', rc.computer_sections(data)['lan'][0]['share'], 'explicit empty list is not exported')
+        too_many = ['h%d.example.org' % i for i in range(101)]
+        bad = (['*.example.org'], ['portal.example.com'], ['example.com'], ['PORTAL.example.org'], ['10.123.0.5'], ['portal'],
+               ['a.example.org', 'a.example.org'], 'portal.example.org', [5], too_many, ['bad name.example.org'])
+        for hosts in bad:
+            data = {'lan': networks()}
+            data['lan'][0]['share']['hosts'] = hosts
+            with self.subTest(hosts=hosts), self.assertRaises(rc.Error):
+                rc.computer_sections(data)
+        data = {'lan': networks()}
+        data['lan'][0]['share']['hosts'] = ['h%d.example.org' % i for i in range(100)]
+        self.assertEqual(len(rc.computer_sections(data)['lan'][0]['share']['hosts']), 100)
+        data = {'lan': networks()}
+        data['lan'][1]['share'] = dict(subnets=['10.124.0.0/24'], domains=[], dnsServers=[], hosts=['x.branch.example.org'])
+        with self.assertRaises(rc.Error):
+            rc.computer_sections(data)
 
 
 if __name__ == '__main__':

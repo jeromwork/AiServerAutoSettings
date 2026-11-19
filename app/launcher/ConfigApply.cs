@@ -205,9 +205,10 @@ namespace RemoteAgents.Launcher
         }
     }
 
-    internal enum SectionState { Waiting, Running, Done, Pending, Failed, Blocked, Unchanged }
+    internal enum SectionState { Waiting, Running, Done, Pending, Failed, Blocked, Unchanged, Degraded }
     internal sealed class SectionOutcome
     {
+        internal string[] Degraded = new string[0];
         internal bool Ok, Pending; internal string Summary = "", Operation = ""; internal Dictionary<string, object> Result = new Dictionary<string, object>(); internal long Ms;
         // docs/CONFIG-ENGINE.md: readiness is result.ok; «pending» names what it waits for (a detached server install
         // «disk»/«happier», or «connection»). ok:false without pending is a failure, except an unconfirmed request
@@ -216,7 +217,13 @@ namespace RemoteAgents.Launcher
         {
             string pending = Json.Str(result, "pending"); bool ok = Json.Bool(result, "ok", true);
             return new SectionOutcome { Ok = ok, Pending = !ok && (pending.Length > 0 || unconfirmedIsPending), Operation = pending, Result = result,
+                Degraded = Json.Array(Json.Get(result, "degraded")).OfType<string>().ToArray(),
                 Summary = Json.Text(result, "summary", success) + (ok || pending.Length > 0 ? "" : unconfirmedIsPending ? " (ещё не подтверждено)" : "") };
+        }
+        internal static SectionState PartState(Dictionary<string, object> row)
+        {
+            return Json.Str(row, "state") == "ready" ? SectionState.Unchanged
+                : Json.Bool(row, "optional") && Json.Str(row, "state") == "error" ? SectionState.Degraded : SectionState.Waiting;
         }
         // Detached installs on the server that ServerOperations/«Operation» can follow.
         internal static bool ServerOperation(string operation) { return operation == "disk" || operation == "happier"; }
@@ -241,7 +248,7 @@ namespace RemoteAgents.Launcher
                 catch (OperationCanceledException) { outcomes[s] = new SectionOutcome { Summary = "отменено", Ms = watch.ElapsedMilliseconds }; report(s, SectionState.Failed, "отменено; готовность не подтверждена"); throw; }
                 catch (Exception e) { o = new SectionOutcome { Summary = e.Message }; }
                 o.Ms = watch.ElapsedMilliseconds; outcomes[s] = o;
-                report(s, o.Ok ? SectionState.Done : o.Pending ? SectionState.Pending : SectionState.Failed, o.Summary);
+                report(s, o.Ok ? (o.Degraded.Length > 0 ? SectionState.Degraded : SectionState.Done) : o.Pending ? SectionState.Pending : SectionState.Failed, o.Summary);
                 return o.Ok || o.Pending;
             };
             await one(ConfigSections.Bootstrap);
@@ -293,6 +300,7 @@ namespace RemoteAgents.Launcher
             if (action == "Vpn" && !Product.VpnEnabled)
                 return new Dictionary<string, object> { { "ok", true }, { "enabled", false }, { "summary", "VPN отключено в этой версии" } };
             string requestFile = Path.Combine(home, "state", "wizard-request-" + Guid.NewGuid().ToString("N") + ".json"), output = requestFile + ".out", live = requestFile + ".progress";
+            DiagnosticReport.KnownSecrets(home);
             var gate = new object(); int readLines = 0;
             Action read = () => {
                 if (progress == null) return;
@@ -316,6 +324,7 @@ namespace RemoteAgents.Launcher
                     catch (TimeoutException) { new Journal(home).Write("wizard." + action + ".timeout"); throw; }
                 }
                 read();
+                if (action == "ServerApply" && progress != null) progress("· ServerApply: код выхода шага=" + code);
                 Dictionary<string, object> response; string raw = "";
                 try { raw = Files.LF(External.ReadPowerShellOutput(output)); response = Json.Map(Json.Parse(raw)); }
                 catch (Exception) {
@@ -323,10 +332,16 @@ namespace RemoteAgents.Launcher
                     try { string logs = Path.Combine(home, "logs"); Directory.CreateDirectory(logs); if (File.Exists(output)) File.Copy(output, Path.Combine(logs, "wizard-" + action + "-" + DateTime.Now.ToString("HHmmss", CultureInfo.InvariantCulture) + ".out"), true); }
                     catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { }
                     string excerpt = Excerpt(raw);
-                    throw new IOException("Шаг не вернул результат (код " + code + "). Проверьте журнал соответствующего модуля и повторите" + (excerpt.Length > 0 ? ". Вывод шага: «" + excerpt + "»" : ". Вывод шага пуст"));
+                    var error = new IOException("Шаг не вернул результат (код " + code + "). Проверьте журнал соответствующего модуля и повторите" + (excerpt.Length > 0 ? ". Вывод шага: «" + excerpt + "»" : ". Вывод шага пуст"));
+                    error.Data["ExitCode"] = code; throw error;
                 }
-                if (code != 0 || !Json.Bool(response, "ok")) throw new IOException((Json.Text(response, "reason", "Шаг не подтверждён: проверьте журнал и повторите") + ". " + Json.Str(response, "remedy")).Trim());
-                return Json.Map(Json.Get(response, "result"));
+                if (code != 0 || !Json.Bool(response, "ok")) {
+                    var error = new IOException((Json.Text(response, "reason", "Шаг не подтверждён: проверьте журнал и повторите") + ". " + Json.Str(response, "remedy")).Trim());
+                    error.Data["ExitCode"] = code; throw error;
+                }
+                var result = Json.Map(Json.Get(response, "result"));
+                if (action == "ServerApply") result["wizardExit"] = code;
+                return result;
             } finally { foreach (string f in new[] { requestFile, output, live }) try { if (File.Exists(f)) File.Delete(f); } catch (IOException) { } }
         }
         // Unreadable step output for the error text: one line, long key-like runs masked before the 300-character cut.
@@ -522,12 +537,29 @@ namespace RemoteAgents.Launcher
             // An access-only profile never removes server-owned connections.
             return Tuple.Create(add, wanted.Length > 0 && wanted.All(LanAccess.ClientOnly) ? new string[0] : have.Where(n => !wanted.Any(l => Json.Str(l, "name") == n)).ToArray());
         }
-        internal static SectionOutcome LanClientStatus(Dictionary<string, object> p, Dictionary<string, object> config)
+        // NetStatus (build/Wizard.Network.ps1 Get-WizardNetStatus): rows {name, state, ok}; servers own networks
+        // added by hand (lan-vpn.sh) appear here too, without a lan.connections record on this computer.
+        internal static Dictionary<string, Dictionary<string, object>> LanServerRows(Dictionary<string, object> netStatus)
+        {
+            var raw = Json.Get(netStatus, "lans");
+            var rows = raw is IDictionary ? new[] { Json.Map(raw) } : Json.Array(raw).Select(Json.Map).ToArray();
+            var result = new Dictionary<string, Dictionary<string, object>>(StringComparer.Ordinal);
+            foreach (var row in rows) { string name = Json.Str(row, "name"); if (name.Length > 0) result[name] = row; }
+            return result;
+        }
+        internal static SectionOutcome LanClientStatus(Dictionary<string, object> p, Dictionary<string, object> config,
+            Dictionary<string, Dictionary<string, object>> server = null)
         {
             var have = new HashSet<string>(Json.Array(Json.Get(Json.Map(Json.Get(config, "lan")), "connections")).Select(r => Json.Str(Json.Map(r), "name")));
-            var missing = Json.Array(Json.Get(p, "lan")).Select(Json.Map).Where(l => LanAccess.ClientOnly(l) && LanAccess.Active(l) && !have.Contains(Json.Str(l, "name"))).ToArray();
-            return new SectionOutcome { Ok = missing.Length == 0, Summary = missing.Length == 0 ? "Локальные сети подключены на сервере ✓"
-                : string.Join("; ", missing.Select(l => "сеть " + Json.Str(l, "name") + " не подключена на сервере")) };
+            var problems = new List<string>();
+            foreach (var l in Json.Array(Json.Get(p, "lan")).Select(Json.Map).Where(l => LanAccess.ClientOnly(l) && LanAccess.Active(l))) {
+                string name = Json.Str(l, "name"); Dictionary<string, object> row;
+                if (server == null) { if (!have.Contains(name)) problems.Add("сеть " + name + " не подключена на сервере"); continue; }
+                // The server is authoritative once it answered: a local record alone proves nothing.
+                if (!server.TryGetValue(name, out row) || Json.Str(row, "state") == "нет на сервере") problems.Add("сеть " + name + " не подключена на сервере");
+                else if (!Json.Bool(row, "ok")) problems.Add("сеть " + name + " на сервере не работает: " + Json.Str(row, "state"));
+            }
+            return new SectionOutcome { Ok = problems.Count == 0, Summary = problems.Count == 0 ? "Локальные сети подключены на сервере ✓" : string.Join("; ", problems) };
         }
         internal static string Origin(string text)
         {
@@ -811,6 +843,8 @@ namespace RemoteAgents.Launcher
         internal ConfigSession(string home, Func<Task<string>> bundle, IDictionary<string, string> secrets = null, IDictionary<string, string> hints = null)
         {
             this.home = home; bundleSource = bundle; accountCreation = new HappierAccountCreation(home);
+            DiagnosticReport.RememberSecrets(home, (secrets ?? new Dictionary<string, string>()).Values);
+            DiagnosticReport.KnownSecrets(home);
             this.secrets = new Dictionary<string, string>(secrets ?? new Dictionary<string, string>()); this.hints = new Dictionary<string, string>(hints ?? new Dictionary<string, string>());
         }
         internal void RebindBundle(string current) { bundle = current; }
@@ -842,8 +876,11 @@ namespace RemoteAgents.Launcher
         string Value(object field)
         {
             string n = ConfigRequests.SecretName(field), v; if (n.Length == 0) return "";
-            if (secrets.TryGetValue(n, out v) && v.Length > 0 && v != ConfigAi.Hidden) return v;
-            try { return SecretVault.Get(home, n) ?? ""; } catch (InvalidDataException) { return ""; }
+            if (!(secrets.TryGetValue(n, out v) && v.Length > 0 && v != ConfigAi.Hidden)) {
+                try { v = SecretVault.Get(home, n) ?? ""; } catch (InvalidDataException) { v = ""; }
+            }
+            DiagnosticReport.RememberSecrets(home, new[] { v });
+            return v;
         }
         string Hint(string name, Dictionary<string, object> p)
         {
@@ -866,6 +903,7 @@ namespace RemoteAgents.Launcher
                 foreach (string name in ConfigRequests.SecretsFor(s, p, Available)) {
                     string value = AskSecret(name, ConfigRequests.Why(name, p, Hint(name, p)));
                     if (string.IsNullOrEmpty(value)) { Log(ConfigSections.Title(s) + ": секрет «" + name + "» не задан — раздел может не пройти"); continue; }
+                    DiagnosticReport.RememberSecrets(home, new[] { value });
                     SecretVault.Set(home, name, value); secrets[name] = value;
                 }
             SecretVault.Materialize(home);
@@ -873,6 +911,7 @@ namespace RemoteAgents.Launcher
         internal async Task<Dictionary<string, SectionOutcome>> Execute(IList<string> plan, CancellationToken token)
         {
             await Bundle();
+            bool helperReady = await HelperClient.EnsureInstalled(home, bundle, Log, token);
             deploymentOutcome = null;
             var result = await ConfigEngine.Execute(plan, (s, t) => Task.Run(() => RunSection(s, t), t), (s, state, text) => Report(s, state, text), token);
             foreach (var pair in result) {
@@ -881,6 +920,7 @@ namespace RemoteAgents.Launcher
                 new Journal(home).Write("config." + pair.Key + (pair.Value.Ok ? ".ok " : pair.Value.Pending ? ".pending " : ".failed ") + pair.Value.Ms + "ms");
                 Log(ConfigSections.Title(pair.Key) + ": " + pair.Value.Summary + " (" + (pair.Value.Ms / 1000.0).ToString("0.0", CultureInfo.InvariantCulture) + " с)");
             }
+            if (!helperReady) Log(HelperClient.SetupWarning);
             return result;
         }
         SectionOutcome RunSection(string s, CancellationToken token)
@@ -905,11 +945,19 @@ namespace RemoteAgents.Launcher
                     o = SectionOutcome.From(run("Disk", ConfigRequests.Disk(p, DiskBase())), "Диск подключён; папки сервера принимайте в Syncthing Tray"); break; }
                 case ConfigSections.Vpn: o = SectionOutcome.From(run("Vpn", ConfigRequests.Vpn(p)), "VPN настроен", true); break;
                 case ConfigSections.Proxy: o = deploymentOutcome ?? (deploymentOutcome = Deployment(p, run)); break;
-                case ConfigSections.Lan:
-                    o = ConfigRequests.LanClientStatus(p, config);
+                case ConfigSections.Lan: {
+                    // Access-only networks: ask the server (read-only NetStatus, no root). Networks set up by hand
+                    // with lan-vpn.sh have no lan.connections record on this computer.
+                    Dictionary<string, Dictionary<string, object>> server = null; string note = "";
+                    if (Json.Array(Json.Get(p, "lan")).Select(Json.Map).Any(l => LanAccess.ClientOnly(l) && LanAccess.Active(l))) {
+                        try { server = ConfigRequests.LanServerRows(run("NetStatus", new { })); }
+                        catch (Exception e) when (!(e is OperationCanceledException)) { note = " (состояние сервера не получено: " + e.Message + ")"; Log(ConfigSections.Title(s) + ": NetStatus: " + e.Message); }
+                    }
+                    o = ConfigRequests.LanClientStatus(p, config, server);
+                    if (!o.Ok && note.Length > 0) o.Summary += note;
                     if (o.Ok && Json.Array(Json.Get(p, "lan")).Select(Json.Map).Any(l => !LanAccess.ClientOnly(l)))
                         o = deploymentOutcome ?? (deploymentOutcome = Deployment(p, run));
-                    break;
+                    break; }
                 default: throw new ArgumentException("Неизвестный раздел");
             }
             if (s == ConfigSections.Disk && !DiskStillCurrent()) return DiskApplyWait.Superseded();
@@ -998,6 +1046,7 @@ namespace RemoteAgents.Launcher
             }
             if (create) {
                 // A new account becomes «same» with its key in the vault: «Сохранить конфиг» carries it, a re-apply never creates another one.
+                DiagnosticReport.RememberSecrets(home, new[] { key });
                 SecretVault.Set(home, name, key); secrets[name] = key;
                 ConfigProfile.Update(home, pr => { var hh = new Dictionary<string, object>(Json.Map(Json.Get(pr, "happier"))); hh["mode"] = "same"; hh["key"] = new Dictionary<string, object> { { "secret", name } }; pr["happier"] = hh; });
                 hash = ConfigSections.Hash(ConfigProfile.Load(home), ConfigSections.Account);
@@ -1033,14 +1082,30 @@ namespace RemoteAgents.Launcher
             using (var relay = new PasswordRelay(Json.Encode(values))) {
                 var request = new Dictionary<string, object> { { "config", profile }, { "secretPipe", relay.Name }, { "statusOnly", statusOnly } };
                 AddRoot(request, access);
-                var result = run("ServerApply", request);
-                foreach (var row in Json.Array(Json.Get(result, "parts")).Select(Json.Map)) {
-                    string line = Json.Str(row, "part") + ": " + Json.Str(row, "state") + " — " + Json.Str(row, "summary");
-                    Log("Сервер: " + line);
-                    Report(Json.Str(row, "part").StartsWith("lan:", StringComparison.Ordinal) ? ConfigSections.Lan : ConfigSections.Server,
-                        Json.Str(row, "state") == "ready" ? SectionState.Unchanged : SectionState.Waiting, line);
+                string exitCode = "неизвестно", failure = "";
+                // A failed transport must not make an older server report look current.
+                string reportPath = Path.Combine(home, "state", "server-apply.json");
+                try { if (File.Exists(reportPath)) File.Delete(reportPath); } catch (IOException) { }
+                try {
+                    var result = run("ServerApply", request);
+                    exitCode = Json.Text(result, "wizardExit", "0");
+                    foreach (var row in Json.Array(Json.Get(result, "parts")).Select(Json.Map)) {
+                        string line = Json.Str(row, "part") + ": " + Json.Str(row, "state") + " — " + Json.Str(row, "summary");
+                        Log("Сервер: " + line);
+                        Report(Json.Str(row, "part").StartsWith("lan:", StringComparison.Ordinal) ? ConfigSections.Lan : ConfigSections.Server,
+                            SectionOutcome.PartState(row), line);
+                    }
+                    return SectionOutcome.From(result, "Сервер настроен и проверен ✓");
+                } catch (Exception e) {
+                    failure = e.Message;
+                    if (e.Data.Contains("ExitCode")) exitCode = Convert.ToString(e.Data["ExitCode"], CultureInfo.InvariantCulture);
+                    throw;
+                } finally {
+                    string json = null;
+                    try { if (File.Exists(reportPath)) json = Files.ReadSharedText(reportPath); }
+                    catch (Exception) { failure += " server-apply.json не удалось прочитать"; }
+                    Log(DiagnosticReport.FormatServerApply(json, Program.Version, exitCode, failure, access.Item1));
                 }
-                return SectionOutcome.From(result, "Сервер настроен и проверен ✓");
             }
         }
 
@@ -1147,7 +1212,9 @@ namespace RemoteAgents.Launcher
         internal async Task<SectionOutcome> Activate(CancellationToken token)
         {
             await Bundle();
+            bool helperReady = await HelperClient.EnsureInstalled(home, bundle, Log, token);
             var r = await Task.Run(() => WizardRunner.Run(home, bundle, "Activate", new { }, token, line => Log("Итог: " + line)));
+            if (!helperReady) Log(HelperClient.SetupWarning);
             return SectionOutcome.From(r, "Настройки сохранены");
         }
         internal static string DiskBase()

@@ -1,5 +1,5 @@
 ﻿#requires -Version 5.1
-function Initialize-WizardSettingsProfile([string]$Root,$Request) {
+function Initialize-WizardSettingsProfile([string]$Root,$Request,[string]$Bundle=$script:WizardBundleDefault) {
     $data=$Request.data;if(-not $data){$data=Read-TransportJson ([string]$Request.path)}
     if($data.schema -ne 1 -or [string]$data.serverAddress -notmatch '\A[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}\z' -or [string]$data.workerUser -notmatch '\A[a-z_][a-z0-9_-]{0,31}\z'){throw 'Неверный профиль сервера'}
     $port=[int]$data.serverPort;if($port -lt 1 -or $port -gt 65535){throw 'Некорректный порт сервера'}
@@ -8,7 +8,7 @@ function Initialize-WizardSettingsProfile([string]$Root,$Request) {
     if($hostId -cnotmatch '\A[a-z0-9][a-z0-9_-]{0,63}\z'){throw 'Неверный hostId компьютера'}
     $dir=Join-Path $Root ('ssh-profiles/'+$id+'/project-connections/'+$hostId)
     [void][IO.Directory]::CreateDirectory($dir);Protect-TransportPath $dir
-    $p=[pscustomobject]@{sshExecutable=@(Get-Command ssh -CommandType Application -ErrorAction Stop)[0].Source;serverAddress=[string]$data.serverAddress;login=[string]$data.workerUser;keyPath=(Join-Path $dir 'id_ed25519');knownHostsPath=(Join-Path $dir 'known_hosts');configPath=(Join-Path $dir 'ssh.conf');strictHostKey=$true}
+    $p=[pscustomobject]@{sshExecutable=(Find-WizardSsh $Root $Bundle);serverAddress=[string]$data.serverAddress;login=[string]$data.workerUser;keyPath=(Join-Path $dir 'id_ed25519');knownHostsPath=(Join-Path $dir 'known_hosts');configPath=(Join-Path $dir 'ssh.conf');strictHostKey=$true}
     $file=Join-Path $dir 'ssh-transport.json'
     Write-DiskUtf8 $p.configPath ("Host *`n    Port "+$port+"`n    ConnectTimeout 5`n")
     $hostName=if($port -eq 22){$p.serverAddress}else{'['+$p.serverAddress+']:'+$port}
@@ -173,7 +173,7 @@ function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request,[int]$Time
         $prepare=[Diagnostics.Stopwatch]::StartNew()
         # Carry only local preferences. Routes, catalog, cache and profile belong to the pasted server.
         $t=[pscustomobject]@{}
-        foreach($field in @('singBoxPath','sshPort','channelSocksPort','channelSshAddress','syncPort','probePortBase','socksPortBase','apiPort','bindPhysical','metered','activeProbeBytes','rankProbeBytes','activeIntervalSec','meteredActiveIntervalSec','rankIntervalSec','rankConcurrency','topOnMetered','stallSeconds','probeTimeoutSec','restartDelaySec')){
+        foreach($field in @('singBoxPath','sshPort','channelSocksPort','channelSshAddress','syncPort','probePortBase','socksPortBase','apiPort','bindPhysical','metered','activeProbeBytes','rankProbeBytes','activeIntervalSec','meteredActiveIntervalSec','rankIntervalSec','rankConcurrency','topOnMetered','stallSeconds','probeTimeoutSec','restartDelaySec','switch')){
             if($null -ne $config.transport.$field){$t|Add-Member $field $config.transport.$field}
         }
         # Compatibility for a runtime-only profile without a portable server section.
@@ -183,7 +183,7 @@ function Start-WizardBootstrap([string]$Root,[string]$Bundle,$Request,[int]$Time
             $s=$config.profile.server
             $data=[pscustomobject]@{schema=1;serverAddress=$s.address;serverPort=$(if($s.port){[int]$s.port}else{22});workerUser=$s.login;hostKeys=@($s.hostKeys)}
             $key=Get-WizardMaterializedServerKey $Root $config
-            $prepared=Initialize-WizardSettingsProfile $Root ([pscustomobject]@{data=$data;keyPath=$key;allowTrustOnFirstUse=$true})
+            $prepared=Initialize-WizardSettingsProfile $Root ([pscustomobject]@{data=$data;keyPath=$key;allowTrustOnFirstUse=$true}) $Bundle
             $t|Add-Member -Force profilePath $prepared.file
         }
         if($initial.catalog){

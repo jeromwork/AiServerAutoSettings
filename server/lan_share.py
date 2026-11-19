@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import sys
 
 STATE = '/var/lib/remoteagents/lan-share/pending'
 MANIFEST = '/etc/remoteagents/server-apply/lan-share.json'
@@ -20,6 +21,17 @@ TIMER = 'remoteagents-lan-share-rollback'
 TARGETS = (('/etc/sing-box/config.json', 'sing-box', 'singbox'),
            ('/usr/local/etc/remoteagents-happ/config.json', 'remoteagents-happ', 'xray'))
 DNS_TAG = 'lan-share-system-dns'
+LAN_NAME = re.compile(r'[a-z][a-z0-9]{0,6}\Z')  # как lan_vpn.NAME: интерфейс tun-lan-ИМЯ
+
+
+def lan_tag(name):
+    return 'lan-' + name + '-out'
+
+
+def lan_outbound(name):
+    # auto_detect_interface привязывает direct-out к внешнему интерфейсу;
+    # тогда ядро не может взять маршрут таблицы ЛВС и даёт no route to host.
+    return {'type': 'direct', 'tag': lan_tag(name), 'bind_interface': 'tun-lan-' + name}
 
 
 class Error(Exception):
@@ -53,7 +65,7 @@ def domain(text):
 
 
 def policy(config):
-    result = dict(subnets=[], domains=[], forwards=[], lanSubnets=[])
+    result = dict(subnets=[], domains=[], forwards=[], lanSubnets=[], lans=[])
     for item in config.get('lan', []):
         share = item.get('share', {})
         for text in share.get('subnets', []):
@@ -74,6 +86,9 @@ def policy(config):
                 cidr(f['host'] + '/32')
             result['forwards'].append(dict(host=f['host'].lower(), port=f['port']))
         if any(share.get(k) for k in ('subnets', 'domains', 'forwards')):
+            name = item.get('name', '')
+            require(isinstance(name, str) and LAN_NAME.fullmatch(name),
+                    'lan.name: для доступа с ПК имя должно совпадать с ЛВС сервера ([a-z][a-z0-9]{0,6}).')
             host = item.get('testHost', item.get('host', ''))
             port = item.get('testPort', item.get('port', 22))
             if not host and share.get('forwards'):
@@ -85,8 +100,15 @@ def policy(config):
                 pass
             allowed |= any(host.lower().endswith(d[1:].lower()) if d.startswith('*.') else host.lower() == d.lower() for d in share.get('domains', []))
             require(host and allowed, 'lan.share: нужен разрешённый testHost/testPort или первый forward.')
+            result['lans'].append(dict(
+                name=name,
+                subnets=sorted(set(share.get('subnets', []))),
+                lanSubnets=sorted(set(item.get('subnets', []) + share.get('subnets', []))),
+                domains=sorted(set(domain(d) for d in share.get('domains', []))),
+                forwards=[dict(host=f['host'].lower(), port=f['port']) for f in share.get('forwards', [])]))
     for key in ('subnets', 'domains', 'lanSubnets'):
         result[key] = sorted(set(result[key]))
+    result['lans'].sort(key=lambda x: x['name'])
     return result
 
 
@@ -113,7 +135,11 @@ def generate(config, p, kind, previous=None):
         servers.remove(previous['dns'])
         if previous.get('createdDns') and result.get('dns') == {'servers': []}:
             del result['dns']
-    added, dns, created_dns = [], None, False
+    for out in previous.get('outbounds', []):
+        outs = result.get('outbounds', [])
+        require(out in outs, 'Управляемый выход share изменён вручную; требуется сверка.')
+        outs.remove(out)
+    added, dns, created_dns, owned = [], None, False, []
     if enabled(p) and kind == 'singbox':
         tags = [i['tag'] for i in result.get('inbounds', []) if i.get('type') in ('vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria2', 'tuic', 'hysteria') and i.get('tag')]
         require(tags, 'Нет именованных серверных входов канала sing-box.')
@@ -129,8 +155,6 @@ def generate(config, p, kind, previous=None):
                 added.append(dict(**match, action='route', outbound=outbound))
             else:
                 added.append(dict(inbound=tags, **match, action='route', outbound=outbound))
-        if p['subnets']:
-            add({'ip_cidr': p['subnets']})
         domains = list(p['domains']) + [f['host'] for f in p['forwards'] if not re.fullmatch(r'[0-9.]+', f['host'])]
         if domains:
             created_dns = 'dns' not in result
@@ -138,21 +162,30 @@ def generate(config, p, kind, previous=None):
             require(not any(s.get('tag') == DNS_TAG for s in servers if isinstance(s, dict)), 'Имя DNS share уже занято.')
             dns = dict(type='local', tag=DNS_TAG)
             servers.append(dns)
-        for d in p['domains']:
-            match = domain_match(d)
-            added.append(dict(inbound=tags, **match, action='resolve', server=DNS_TAG, strategy='ipv4_only'))
-            if p['lanSubnets']:
-                add({'type': 'logical', 'mode': 'and', 'rules': [match, {'ip_cidr': p['lanSubnets']}]})
-            add({'type': 'logical', 'mode': 'and', 'rules': [match, {'ip_is_private': True, 'invert': True}]}, normal)
-        for f in p['forwards']:
-            match = {'ip_cidr': [f['host'] + '/32']} if re.fullmatch(r'[0-9.]+', f['host']) else {'domain': [f['host']]}
-            if 'domain' in match:
-                added.append(dict(inbound=tags, **match, port=[f['port']], action='resolve', server=DNS_TAG, strategy='ipv4_only'))
-                if p['lanSubnets']:
-                    add({'type': 'logical', 'mode': 'and', 'rules': [match, {'ip_cidr': p['lanSubnets']}, {'port': [f['port']]}]})
-                add({'type': 'logical', 'mode': 'and', 'rules': [match, {'ip_is_private': True, 'invert': True}, {'port': [f['port']]}]}, normal)
-            else:
-                add(dict(match, port=[f['port']]))
+        for lan in p['lans']:
+            out = lan_outbound(lan['name'])
+            outs = result.setdefault('outbounds', [])
+            require(not any(o.get('tag') == out['tag'] for o in outs), 'Тег ' + out['tag'] + ' уже занят чужим выходом.')
+            outs.append(out)
+            owned.append(out)
+            egress = out['tag']
+            if lan['subnets']:
+                add({'ip_cidr': lan['subnets']}, egress)
+            for d in lan['domains']:
+                match = domain_match(d)
+                added.append(dict(inbound=tags, **match, action='resolve', server=DNS_TAG, strategy='ipv4_only'))
+                if lan['lanSubnets']:
+                    add({'type': 'logical', 'mode': 'and', 'rules': [match, {'ip_cidr': lan['lanSubnets']}]}, egress)
+                add({'type': 'logical', 'mode': 'and', 'rules': [match, {'ip_is_private': True, 'invert': True}]}, normal)
+            for f in lan['forwards']:
+                match = {'ip_cidr': [f['host'] + '/32']} if re.fullmatch(r'[0-9.]+', f['host']) else {'domain': [f['host']]}
+                if 'domain' in match:
+                    added.append(dict(inbound=tags, **match, port=[f['port']], action='resolve', server=DNS_TAG, strategy='ipv4_only'))
+                    if lan['lanSubnets']:
+                        add({'type': 'logical', 'mode': 'and', 'rules': [match, {'ip_cidr': lan['lanSubnets']}, {'port': [f['port']]}]}, egress)
+                    add({'type': 'logical', 'mode': 'and', 'rules': [match, {'ip_is_private': True, 'invert': True}, {'port': [f['port']]}]}, normal)
+                else:
+                    add(dict(match, port=[f['port']]), egress)
     elif enabled(p):
         # This installer has a single authenticated VLESS terminator. Do not grant
         # a bypass to an unrelated, anonymous inbound in a hand-written config.
@@ -168,7 +201,43 @@ def generate(config, p, kind, previous=None):
             match = {'ip': [f['host'] + '/32']} if re.fullmatch(r'[0-9.]+', f['host']) else {'domain': ['full:' + f['host']]}
             added.append(dict(type='field', **match, port=str(f['port']), outboundTag=direct))
     route['rules'] = added + rules
-    return result, copy.deepcopy(dict(rules=added, dns=dns, createdDns=created_dns))
+    return result, copy.deepcopy(dict(rules=added, dns=dns, createdDns=created_dns, outbounds=owned))
+
+
+CONDITIONAL = {'domain', 'domain_suffix', 'domain_keyword', 'domain_regex', 'port', 'port_range', 'source_ip_cidr',
+               'source_port', 'protocol', 'network', 'rule_set', 'type', 'invert', 'auth_user', 'process_name'}
+
+
+def egress_issues(config, lans):
+    """Проверка без IO: каждая подсеть канала должна идти в свой tun-lan-ИМЯ."""
+    issues = []
+    outs = {o.get('tag'): o for o in config.get('outbounds', []) if isinstance(o, dict)}
+    rules = config.get('route', {}).get('rules', [])
+    channel = {i['tag'] for i in config.get('inbounds', []) if i.get('type') in
+               ('vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria2', 'tuic', 'hysteria') and i.get('tag')}
+    for lan in lans:
+        want = lan_outbound(lan['name'])
+        for text in lan['subnets']:
+            net = ipaddress.IPv4Network(text)
+            decider = None
+            for r in rules:
+                if r.get('action', 'route') != 'route' or set(r).intersection(CONDITIONAL):
+                    continue
+                if 'inbound' in r and not channel.intersection(r['inbound'] if isinstance(r['inbound'], list) else [r['inbound']]):
+                    continue
+                cidrs = r.get('ip_cidr', [])
+                cidrs = cidrs if isinstance(cidrs, list) else [cidrs]
+                if any(net.subnet_of(ipaddress.IPv4Network(c, strict=False)) for c in cidrs if ':' not in c) or r.get('ip_is_private') is True:
+                    decider = r
+                    break
+            if decider is None:
+                issues.append(lan['name'] + ' ' + text + ': нет правила, уходит в route.final')
+                continue
+            got = outs.get(decider.get('outbound'))
+            if decider.get('outbound') != want['tag'] or not got or got.get('type') != 'direct' or got.get('bind_interface') != want['bind_interface']:
+                issues.append(lan['name'] + ' ' + text + ': правило ведёт в ' + str(decider.get('outbound')) +
+                              ', нужен выход ' + want['tag'] + ' с bind_interface ' + want['bind_interface'])
+    return issues
 
 
 def digest(value):
@@ -201,6 +270,14 @@ def _reconcile(e, apply, transaction):
     s, p = e.s, policy(e.config)
     manifest = s.read(MANIFEST, {})
     pending = s.read(STATE + '/state.json')
+    # The periodic reconcile never starts or re-arms a share transaction (the 17-18.11 loop:
+    # rollback timer undoes it, reconcile applies again). Only an owner apply/confirm may.
+    periodic = getattr(e, 'periodic', False)
+    if periodic:
+        apply = False
+    if pending and periodic:
+        print('lan-share pending ждёт confirm или отката', file=sys.stderr, flush=True)
+        return e.row('lanShare', 'ready', 'lan-share pending ждёт confirm или отката; периодический reconcile ничего не применяет')
     if pending:
         require(pending['policyHash'] == digest(p), 'share изменён до confirm; дождитесь отката.')
         if apply and e.ssh_checked:
@@ -213,7 +290,7 @@ def _reconcile(e, apply, transaction):
             return e.row('lanShare', 'ready', 'Доступ с ПК: правила подтверждены новым SSH')
         return e.row('lanShare', 'pending', 'Доступ с ПК: требуется новое SSH перед подтверждением')
     if not enabled(p) and not manifest:
-        return e.row('lanShare', 'ready', 'Доступ с ПК не задан; прежняя политика сохранена')
+        return e.row('lanShare', 'ready', 'Доступ с ПК не задан; правил канала нет')
     # Use the LAN manager's current discovered routes, not a separate route list.
     for item in e.config.get('lan', []):
         actual = s.read('/etc/remoteagents/lan/' + item['name'] + '/config.json', {})
@@ -224,6 +301,9 @@ def _reconcile(e, apply, transaction):
             discovered = [str(cidr(n)) for n in subnet_file.read_text().split()]
             p['lanSubnets'] += discovered
             actual_subnets += discovered
+        for lan in p['lans']:
+            if lan['name'] == item['name']:
+                lan['lanSubnets'] = sorted(set(lan['lanSubnets'] + actual_subnets))
         if apply:
             networks = [cidr(n) for n in actual_subnets]
             for subnet in item.get('share', {}).get('subnets', []):
@@ -246,6 +326,9 @@ def _reconcile(e, apply, transaction):
         if kind == 'singbox' and not any(i.get('type') in ('vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria2', 'tuic', 'hysteria') for i in current.get('inbounds', [])) and path not in manifest:
             continue
         generated, record = generate(current, p, kind, manifest.get(path))
+        if kind == 'singbox' and enabled(p):
+            issues = egress_issues(generated, p['lans'])
+            require(not issues, 'Маршрут ЛВС в sing-box неверен: ' + '; '.join(issues))
         records[path] = record
         if generated != current:
             changes[path] = (generated, unit, kind)
@@ -254,7 +337,8 @@ def _reconcile(e, apply, transaction):
     if not changes:
         return e.row('lanShare', 'ready', 'Доступ с ПК: назначения разрешены; остальные правила сохранены')
     if not apply:
-        return e.row('lanShare', 'change', 'Нужно обновить разрешённые назначения канала')
+        return e.row('lanShare', 'change', 'Нужно обновить разрешённые назначения канала' +
+                     ('; периодический reconcile их не применяет — нужен apply владельца' if periodic else ''))
     # Do not enable bypasses for an unverified LAN. Its manager proves route get,
     # interface tun-lan-NAME and the host TCP probe before this part is reached.
     for item in e.config.get('lan', []):
@@ -309,9 +393,20 @@ def reconcile(e, apply):
         raise
 
 
+def check(argv, path='/etc/sing-box/config.json'):
+    """lan_share.py check ИМЯ CIDR [CIDR...] — только чтение, 0 = верно, 1 = проблемы."""
+    require(len(argv) >= 2 and LAN_NAME.fullmatch(argv[0]), 'Использование: lan_share.py check ИМЯ CIDR [CIDR...]')
+    subnets = [str(cidr(c)) for c in argv[1:]]
+    issues = egress_issues(json.loads(Path(path).read_text()), [dict(name=argv[0], subnets=subnets)])
+    print('\n'.join(issues) if issues else 'OK: подсети ' + ', '.join(subnets) + ' ведут в ' + lan_tag(argv[0]))
+    return 1 if issues else 0
+
+
 def main():
     import importlib.util
     import sys
+    if sys.argv[1:2] == ['check']:
+        raise SystemExit(check(sys.argv[2:]))
     spec = importlib.util.spec_from_file_location('server_apply_share', Path(__file__).with_name('server_apply.py'))
     m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
     require(os.geteuid() == 0, 'Нужен root.')

@@ -22,8 +22,111 @@ namespace RemoteAgents.Launcher
         }
         internal static void Run()
         {
-            Colours(); Banners(); VpnCard(); DiskCard(); AccountsAndHelper(); Reports();
+            Colours(); Banners(); VpnCard(); DiskCard(); AccountsAndHelper(); Reports(); LinkPhases(); SearchingStatus(); RenderGate();
             Console.WriteLine("PASS: " + count + " main screen checks");
+        }
+        // Focused entry point: -p:StartupObject=RemoteAgents.Launcher.MainScreenModelTests.
+        // No unrelated transport/service/disk/update suites and no application processes.
+        static int Main()
+        {
+            Run(); TrayExtrasTests.RunSwitchStatus(); WindowModelTests.Run(); return 0;
+        }
+        static void SearchingStatus()
+        {
+            var facts = Healthy();
+            string reason = "Все пути временно недоступны, повторяю";
+            foreach (bool ok in new[] { false, true }) {
+                facts.Transport = Data(Json.Encode(new { ok = ok, phase = "searching", checkingSince = "2020-01-01T00:00:00Z",
+                    localNet = "unknown", reason = new { code = "all-paths-penalized", text = reason, since = "2020-01-01T00:00:00Z" } }));
+                var view = MainScreenModel.Build(facts);
+                Check(StatusView.Phase(facts.Transport, new DateTime(2040, 1, 1)) == LinkPhase.Searching, "search never expires into a failure");
+                Check(view.Overall == Tone.Warning && view.Banner.Tone == Tone.Warning && view.Banner.Text == "Нет связи, ищу путь. " + reason,
+                    "search banner uses the supplied reason even with retained ok");
+                Check(view.Banner.ActionId == "" && view.Vpn.On && view.Vpn.State == "VPN включён · нет связи, ищу путь" &&
+                    view.Vpn.SwitchText == "Выключить VPN" && view.Vpn.SwitchEnabled && view.Vpn.Tone == Tone.Warning, "search preserves enabled VPN and allows manual off");
+                Check(view.Vpn.Detail.Contains(reason) && !view.Vpn.Detail.Contains("КБ/с"), "search card shows reason instead of stale speed");
+                Check(StatusView.Line("Связь", facts.Transport, true).StartsWith("⏳") && StatusView.Line("Связь", facts.Transport, true).Contains(reason), "diagnostics show search reason");
+            }
+            facts.Transport["localNet"] = "down";
+            facts.Transport["reason"] = Data("{\"text\":\"Нет интернета у вас (сеть), жду\"}");
+            var offline = MainScreenModel.Build(facts);
+            Check(offline.Banner.Text == "Нет интернета у вас (сеть), жду" && offline.Vpn.On && offline.Vpn.State.Contains("нет интернета у вас (сеть)"), "local network loss is explicit and VPN stays on");
+            facts.Transport["phase"] = "ok";
+            Check(MainScreenModel.Build(facts).Overall == Tone.Warning, "localNet down wins over a retained ok phase");
+            facts.Transport.Remove("localNet"); facts.Transport["phase"] = "searching"; facts.Transport["reason"] = null;
+            Check(MainScreenModel.Build(facts).Banner.Text == "Нет связи, ищу путь", "missing optional reason is tolerated");
+            facts.Vpn = Data("{\"state\":\"off\",\"enabled\":false}");
+            Check(!MainScreenModel.Build(facts).Vpn.On && MainScreenModel.Build(facts).Vpn.State == "VPN выключен", "transport search never turns on an intentionally off VPN");
+            facts = Healthy();
+            facts.Vpn = Data("{\"state\":\"searching\",\"enabled\":true,\"ok\":false,\"owner\":\"net-helper\",\"summary\":\"Нет связи, ищу путь\",\"reason\":{\"text\":\"Путь не отвечает, пробую другой\"}}");
+            var searchingVpn = MainScreenModel.Build(facts);
+            Check(searchingVpn.Overall == Tone.Warning && searchingVpn.Vpn.On && searchingVpn.Vpn.Tone == Tone.Warning && searchingVpn.Banner.Text.Contains("Путь не отвечает"), "VPN search heartbeat is a warning even before transport catches up");
+            Check(!searchingVpn.Banner.Text.Contains("Не удалось включить") && searchingVpn.Banner.ActionId == "", "service search summary is not an enable error");
+            facts.Vpn.Remove("enabled");
+            Check(MainScreenModel.Build(facts).Vpn.On, "searching state preserves on position when enabled is absent");
+            facts.Vpn = Data("{\"state\":\"conflict\",\"enabled\":true,\"owner\":\"net-helper\",\"summary\":\"Сейчас работает Happ. Отключите его…\"}");
+            var conflict = MainScreenModel.Build(facts);
+            Check(conflict.Overall == Tone.Warning && conflict.Vpn.On && conflict.Banner.Tone == Tone.Warning && conflict.Banner.ActionId == "details" &&
+                conflict.Banner.Text == "Сейчас работает Happ. Отключите его…", "runtime conflict keeps enabled VPN and explains conflict without claiming enable failure");
+            facts = Healthy();
+            Check(!MainScreenModel.Report(facts, "").Contains("Последние переключения:"), "old status has no invented switch history");
+            facts.Transport["switches"] = new object[] { Data(Json.Encode(new { at = 0L, from = "primary", to = "openssh-direct", why = "path-dial-failed" })) };
+            string report = MainScreenModel.Report(facts, "");
+            Check(report.Contains("Последние переключения:") && report.Contains("Основной → SSH напрямую · path-dial-failed"), "details report contains switch history with path titles");
+        }
+        static void LinkPhases()
+        {
+            string now = DateTime.UtcNow.AddSeconds(-5).ToString("o"), old = DateTime.UtcNow.AddSeconds(-600).ToString("o");
+            var facts = Healthy();
+            facts.Transport = Data("{\"ok\":false,\"phase\":\"checking\",\"checkingSince\":\"" + now + "\",\"error\":\"Запуск\"}");
+            facts.Vpn = Data("{\"ok\":false,\"enabled\":false}");
+            facts.Control = Data("{\"ok\":false}");
+            facts.DiskSummary = "Диск: сервер не подключён";
+            var view = MainScreenModel.Build(facts);
+            Check(view.Overall == Tone.Warning, "initial connection check is yellow");
+            Check(view.Banner.Tone == Tone.Warning && view.Banner.Text == "Проверяем связь с сервером…" && view.Banner.ActionId == "", "checking banner waits without retry");
+            Check(view.Vpn.State == "Ожидается проверка" && view.Vpn.Tone != Tone.Error, "VPN waits for connection proof");
+            Check(!view.Helper.State.Contains("нет связи с сервером") && view.Helper.State.Contains("проверяем связь с сервером"), "helper does not report a failure before the check");
+            Check(view.Disk.State == "ожидается проверка связи" && view.Disk.Tone == Tone.Warning, "Disk waits for connection proof");
+            Check(StatusView.Line("Связь", facts.Transport, true).StartsWith("⏳"), "transport diagnostics wait during first check");
+            facts.Transport = Data("{\"ok\":false,\"phase\":\"checking\",\"checkingSince\":\"" + old + "\"}");
+            view = MainScreenModel.Build(facts);
+            Check(view.Overall == Tone.Error && view.Banner.ActionId == "retry", "hung connection check is red with retry");
+            Check(StatusView.Line("Связь", facts.Transport, true).StartsWith("❌"), "hung check is a diagnostic failure");
+            facts.Transport = Data("{\"ok\":false,\"phase\":\"failed\"}");
+            view = MainScreenModel.Build(facts);
+            Check(view.Overall == Tone.Error && view.Banner.ActionId == "retry" && view.Disk.State == "нет связи с сервером", "fresh failed check stays red and reaches Disk");
+            Check(view.Vpn.Tone == Tone.Error && view.Helper.State.Contains("нет связи с сервером"), "fresh failure reaches VPN and helper");
+            facts.Transport = Data("{\"ok\":false,\"phase\":\"stopped\"}");
+            Check(MainScreenModel.Build(facts).Overall == Tone.Warning, "stopped transport waits neutrally");
+            Check(StatusView.Line("Связь", facts.Transport, true).StartsWith("⏳"), "stopped diagnostics wait neutrally");
+            facts.Transport = Data("{\"ok\":false}");
+            Check(MainScreenModel.Build(facts).Overall == Tone.Warning, "legacy status without phase waits for proof");
+            facts.Transport = Data("{\"ok\":true,\"phase\":\"ok\"}");
+            Check(MainScreenModel.Build(facts).Overall == Tone.Ok, "confirmed connection stays green");
+            Check(StatusView.Phase(Data("{}")) == LinkPhase.Checking && StatusView.Phase(null) == LinkPhase.Checking, "missing status waits for a check");
+            Check(StatusView.Phase(Data("{\"ok\":false,\"phase\":\"checking\"}")) == LinkPhase.Checking, "check with missing timestamp waits");
+            Check(StatusView.Phase(Data("{\"ok\":false,\"phase\":\"checking\",\"checkingSince\":\"invalid\"}")) == LinkPhase.Checking, "check with invalid timestamp waits");
+            var since = DateTime.Parse(now, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
+            var checking = Data("{\"ok\":false,\"phase\":\"checking\",\"checkingSince\":\"" + now + "\"}");
+            Check(StatusView.Phase(checking, since.AddSeconds(StatusView.CheckingLimitSec)) == LinkPhase.Checking &&
+                StatusView.Phase(checking, since.AddSeconds(StatusView.CheckingLimitSec + 1)) == LinkPhase.Failed, "checking timeout boundary");
+            foreach (bool ok in new[] { false, true }) {
+                foreach (string phase in new[] { "degraded", "future-phase" }) {
+                    facts.Transport = Data(Json.Encode(new { ok = ok, phase = phase, checkingSince = now }));
+                    view = MainScreenModel.Build(facts);
+                    Check(view.Overall == Tone.Warning, phase + " is yellow even with a retained active path");
+                    Check(StatusView.Line("Связь", facts.Transport, true).StartsWith("⏳"), phase + " diagnostics wait even with retained ok flag");
+                    Check(view.Banner.Tone == Tone.Warning && view.Banner.ActionId == "" &&
+                        view.Banner.Text == (phase == "degraded" ? "Связь нестабильна, ищу другой путь…" : "Проверяем связь с сервером…"), phase + " has a warning banner without retry");
+                }
+            }
+            var degraded = Data(Json.Encode(new { ok = true, phase = "degraded", checkingSince = now }));
+            Check(StatusView.Phase(degraded, since.AddSeconds(StatusView.CheckingLimitSec)) == LinkPhase.Checking &&
+                StatusView.Phase(degraded, since.AddSeconds(StatusView.CheckingLimitSec + 1)) == LinkPhase.Failed, "degraded timeout boundary even when ok is retained");
+            foreach (string stamp in new[] { "", "invalid" })
+                Check(StatusView.Phase(Data(Json.Encode(new { phase = "degraded", checkingSince = stamp }))) == LinkPhase.Checking, "degraded tolerates absent or invalid timestamp");
+            Check(StatusView.Phase(Data("{\"ok\":true,\"phase\":\"failed\"}")) == LinkPhase.Failed, "explicit failure wins over retained ok flag");
         }
         static void Colours()
         {
@@ -31,7 +134,7 @@ namespace RemoteAgents.Launcher
                 foreach (string transport in new[] { "{}", "{\"ok\":true}", "{\"ok\":false}", "{\"state\":\"starting\"}" })
                     foreach (string vpn in new[] { "{}", "{\"ok\":true,\"state\":\"on\"}", "{\"ok\":false,\"state\":\"on\"}", "{\"ok\":true,\"state\":\"off\"}" }) {
                         var facts = Healthy(); facts.Transport = Data(transport); facts.Vpn = Data(vpn);
-                        Tone expected = facts.Transport.Count == 0 ? Tone.Warning : Json.Bool(facts.Transport, "ok") ? Tone.Ok : Tone.Error;
+                        Tone expected = Json.Bool(facts.Transport, "ok") ? Tone.Ok : Tone.Warning;
                         Check(MainScreenModel.Build(facts).Overall == expected, "overall matches tray");
                     }
             Check(MainScreenModel.Build(null).Overall == Tone.Warning, "absent facts wait for proof");
@@ -40,7 +143,7 @@ namespace RemoteAgents.Launcher
         {
             var facts = Healthy();
             Check(!MainScreenModel.Build(facts).Banner.Visible, "healthy screen has no banner");
-            facts.Transport = Data("{\"ok\":false}"); facts.Control = Data("{\"ok\":false}");
+            facts.Transport = Data("{\"ok\":false,\"phase\":\"failed\"}"); facts.Control = Data("{\"ok\":false}");
             var banner = MainScreenModel.Build(facts).Banner;
             Check(banner.Visible && banner.ActionId == "retry" && banner.Text.StartsWith("Нет связи с сервером"), "connection loss subsumes helper loss");
             Check(banner.Tone == Tone.Error && banner.ActionText == "Повторить", "connection error offers retry");
@@ -68,7 +171,7 @@ namespace RemoteAgents.Launcher
             Check(MainScreenModel.Build(facts).Banner.Text.StartsWith("Аккаунт Happier"), "unconfirmed account is last priority");
             facts.VpnError = "transport tag sing-box REST JSON";
             Check(!MainScreenModel.Build(facts).Banner.Text.Contains("transport"), "technical failure becomes a plain explanation");
-            facts = Healthy(); facts.VpnInstalled = false; facts.Transport = Data("{\"ok\":false}");
+            facts = Healthy(); facts.VpnInstalled = false; facts.Transport = Data("{\"ok\":false,\"phase\":\"failed\"}");
             var view = MainScreenModel.Build(facts);
             Check(!view.Vpn.Visible && view.Banner.ActionId == "retry" && view.Overall == Tone.Error, "no installed VPN does not hide server loss");
             foreach (string state in new[] { "conflict", "error", "rolled-back" }) {
@@ -109,7 +212,9 @@ namespace RemoteAgents.Launcher
             Check(MainScreenModel.Build(facts).Vpn.PathLink == "SSH напрямую ▾", "missing pinned candidate uses existing path naming");
             facts.Transport["latencyMs"] = 42;
             Check(MainScreenModel.Build(facts).Vpn.Detail == "через «Основной», 42 мс", "explicit transport latency");
-            var active = StatusView.Candidates(facts.Transport)[0]; active["rttMs"] = 17;
+            var active = StatusView.Candidates(facts.Transport)[0]; active["latencyMs"] = 25; active["rttMs"] = 17;
+            Check(MainScreenModel.Build(facts).Vpn.Detail.EndsWith("25 мс"), "active latencyMs wins over other and transport measurements");
+            active.Remove("latencyMs");
             Check(MainScreenModel.Build(facts).Vpn.Detail.EndsWith("17 мс"), "active candidate measurement wins");
             active["rttMs"] = -1; facts.Transport["latencyMs"] = "NaN";
             Check(MainScreenModel.Build(facts).Vpn.Detail.Contains("КБ/с"), "invalid latency falls back to speed");
@@ -227,5 +332,60 @@ namespace RemoteAgents.Launcher
             string before = Json.Encode(facts.Transport); MainScreenModel.Build(facts); MainScreenModel.Report(facts, "");
             Check(Json.Encode(facts.Transport) == before, "presentation does not mutate input facts");
         }
+        static void RenderGate()
+        {
+            var gate = new MainScreenRenderGate();
+            var first = gate.Next(MainScreenModel.Build(Healthy()), true, "");
+            Check(first.Render && first.Layout, "first frame renders and lays out");
+            var same = gate.Next(MainScreenModel.Build(Healthy()), true, "");
+            Check(!same.Render && !same.Layout, "identical facts once a second touch neither controls nor layout");
+
+            // Every rendered field reaches the key; text-only changes do not re-fit the page.
+            var textOnly = new List<KeyValuePair<string, Action<MainScreenView>>> {
+                Edit("banner tone", v => v.Banner.Tone = v.Banner.Tone == Tone.Error ? Tone.Ok : Tone.Error),
+                Edit("banner text", v => v.Banner.Text += "!"), Edit("banner action", v => v.Banner.ActionText += "!"),
+                Edit("banner action id", v => v.Banner.ActionId += "x"),
+                Edit("vpn title", v => v.Vpn.Title += "!"), Edit("vpn state", v => v.Vpn.State += "!"),
+                Edit("vpn tone", v => v.Vpn.Tone = v.Vpn.Tone == Tone.Error ? Tone.Ok : Tone.Error),
+                Edit("vpn detail (speed)", v => v.Vpn.Detail += "1"), Edit("vpn on", v => v.Vpn.On = !v.Vpn.On),
+                Edit("vpn switch enabled", v => v.Vpn.SwitchEnabled = !v.Vpn.SwitchEnabled),
+                Edit("vpn switch text", v => v.Vpn.SwitchText += "!"), Edit("vpn path link", v => v.Vpn.PathLink += "!"),
+                Edit("lan state", v => v.Lan.State += "!"), Edit("lan detail", v => v.Lan.Detail += "!"),
+                Edit("lan tone", v => v.Lan.Tone = v.Lan.Tone == Tone.Error ? Tone.Ok : Tone.Error),
+                Edit("disk state", v => v.Disk.State += "!"), Edit("disk detail", v => v.Disk.Detail += "!"),
+                Edit("disk tone", v => v.Disk.Tone = v.Disk.Tone == Tone.Error ? Tone.Ok : Tone.Error),
+                Edit("happier title", v => v.Happier.Title += "!"), Edit("happier state", v => v.Happier.State += "!"),
+                Edit("happier detail", v => v.Happier.Detail += "!"),
+                Edit("helper state", v => v.Helper.State += "!"),
+                Edit("helper tone", v => v.Helper.Tone = v.Helper.Tone == Tone.Error ? Tone.Ok : Tone.Error),
+            };
+            foreach (var edit in textOnly) {
+                var g = new MainScreenRenderGate(); g.Next(MainScreenModel.Build(Healthy()), true, "");
+                var view = MainScreenModel.Build(Healthy()); edit.Value(view);
+                var step = g.Next(view, true, "");
+                Check(step.Render && !step.Layout, "text change re-renders without re-fit: " + edit.Key);
+            }
+            var shape = new List<KeyValuePair<string, Action<MainScreenView>>> {
+                Edit("banner shown", v => v.Banner.Visible = !v.Banner.Visible), Edit("vpn card", v => v.Vpn.Visible = !v.Vpn.Visible),
+                Edit("lan card", v => v.Lan.Visible = !v.Lan.Visible), Edit("disk card", v => v.Disk.Visible = !v.Disk.Visible),
+                Edit("happier card", v => v.Happier.Visible = !v.Happier.Visible), Edit("helper card", v => v.Helper.Visible = !v.Helper.Visible),
+                Edit("disk detail gone", v => v.Disk.Detail = ""), Edit("happier detail gone", v => v.Happier.Detail = ""),
+                Edit("helper detail appears", v => v.Helper.Detail = "x"),
+            };
+            foreach (var edit in shape) {
+                var g = new MainScreenRenderGate(); g.Next(MainScreenModel.Build(Healthy()), true, "");
+                var view = MainScreenModel.Build(Healthy()); edit.Value(view);
+                var step = g.Next(view, true, "");
+                Check(step.Render && step.Layout, "appearing/disappearing part re-fits the page: " + edit.Key);
+            }
+            var path = gate.Next(MainScreenModel.Build(Healthy()), false, "");
+            Check(path.Render && !path.Layout, "path link enabled state is rendered");
+            var dns = gate.Next(MainScreenModel.Build(Healthy()), false, "DNS: проверка");
+            Check(dns.Render && dns.Layout, "DNS details line appears");
+            gate.Reset();
+            Check(gate.Next(MainScreenModel.Build(Healthy()), false, "DNS: проверка").Render, "reset renders again");
+        }
+        static KeyValuePair<string, Action<MainScreenView>> Edit(string name, Action<MainScreenView> change)
+        { return new KeyValuePair<string, Action<MainScreenView>>(name, change); }
     }
 }

@@ -219,6 +219,292 @@ class ApplyTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.fake = Fake(self.tmp.name)
 
+    def isolated_components(self, failure, failing_part='happierWeb', command='plan'):
+        cfg = {'kind': 'remoteagents-config', 'schema': 1, 'server': {'login': 'worker'},
+               'serverComponents': {'happierWeb': {'enabled': True}, 'bridge': {'enabled': True}}}
+        engine = self.fake.engine(cfg, {})
+        with contextlib.ExitStack() as stack:
+            for method, name in (('egress', 'internet'), ('sudo', 'agent'), ('sshd', 'sshd'), ('recovery', 'recovery')):
+                stack.enter_context(patch.object(engine, method, side_effect=lambda apply, name=name: engine.row(name, 'ready', 'готово')))
+            for method in ('bridge_state', 'bridge', 'happierWeb', 'extras'):
+                name = 'bridgeState' if method == 'bridge_state' else method
+                def component(e, apply, name=name):
+                    if name == failing_part:
+                        raise failure
+                    return e.row(name, 'ready', 'готово')
+                stack.enter_context(patch.object(app.components, method, side_effect=component))
+            return engine.run(command)
+
+    def test_happier_web_failures_degrade_without_blocking_critical_parts(self):
+        for command in ('plan', 'status', 'apply'):
+            for failure in (app.components.Error('web unavailable'), RuntimeError('web exploded')):
+                with self.subTest(command=command, failure=type(failure).__name__):
+                    result = self.isolated_components(failure, command=command)
+                    self.assertTrue(result['ok'], result)
+                    self.assertEqual(result['degraded'], ['happierWeb'])
+                    web = next(row for row in result['parts'] if row['part'] == 'happierWeb')
+                    self.assertTrue(web['optional'])
+                    self.assertEqual(web['state'], 'error')
+                    self.assertIn('работает частично: happierWeb — ' + web['summary'], result['summary'])
+                    for row in result['parts']:
+                        if row['part'] != 'happierWeb':
+                            self.assertEqual(row['state'], 'ready')
+                            self.assertNotIn('optional', row)
+
+    def test_critical_failure_still_fails_server(self):
+        result = self.isolated_components(app.components.Error('bridge unavailable'), 'bridge')
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['degraded'], [])
+
+    def test_optional_change_pending_and_waiting_states(self):
+        for state in ('ready', 'change', 'pending', 'waiting', 'blocked', 'error'):
+            with self.subTest(state=state):
+                engine = self.fake.engine()
+                engine.row('internet', 'ready', 'готово')
+                engine.row('happierWeb', state, 'web state')
+                result = engine.result('plan')
+                self.assertTrue(result['ok'])
+                self.assertEqual(result['degraded'], [] if state in ('ready', 'change', 'pending') else ['happierWeb'])
+
+    def diagnostic_record(self):
+        path = self.fake.path('/var/log/remoteagents/server-apply-errors.log')
+        lines = path.read_text().splitlines()
+        self.assertEqual(len(lines), 1)
+        return path, json.loads(lines[0])
+
+    def test_unknown_exception_is_private_and_identified(self):
+        engine = self.fake.engine()
+        engine.command = 'status'
+        def fail():
+            raise RuntimeError('boom token=abcd1234SECRET')
+        self.assertFalse(engine.part('probe', fail))
+        path, record = self.diagnostic_record()
+        self.assertEqual(record['type'], 'RuntimeError')
+        self.assertEqual(record['message'], 'boom token=***')
+        self.assertEqual((record['mode'], record['part']), ('status', 'probe'))
+        self.assertRegex(record['id'], r'^[0-9a-f]{8}$')
+        self.assertTrue(record['where'][-1].endswith(':fail'))
+        summary = engine.rows[-1]['summary']
+        self.assertIn('запись ' + record['id'], summary)
+        self.assertNotIn('boom', summary)
+        self.assertNotIn('abcd1234SECRET', path.read_text())
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+        if os.geteuid() == 0:
+            self.assertEqual((path.stat().st_uid, path.stat().st_gid), (0, 0))
+            self.assertEqual((path.parent.stat().st_uid, path.parent.stat().st_gid), (0, 0))
+        self.assertEqual(self.fake.system.actions, [])
+
+    def test_unknown_exception_survives_unavailable_journal(self):
+        self.fake.write('/var/log/remoteagents', 'not a directory')
+        engine = self.fake.engine()
+        def fail():
+            raise RuntimeError('boom')
+        self.assertFalse(engine.part('probe', fail))
+        self.assertEqual(engine.rows[-1]['state'], 'error')
+        self.assertIn('запись ' + engine.rows[-1]['diag']['id'], engine.rows[-1]['summary'])
+
+    def test_part_exception_diag_in_json(self):
+        engine = self.fake.engine()
+        def fail():
+            raise KeyError('x')
+        engine.part('probe', fail)
+        raw_stdout = json.dumps(engine.result('plan'), ensure_ascii=False)
+        row = json.loads(raw_stdout)['parts'][-1]
+        self.assertEqual(row['state'], 'error')
+        diag = row['diag']
+        self.assertEqual(diag['type'], 'KeyError')
+        self.assertTrue(diag['where'])
+        self.assertRegex(diag['id'], r'^[0-9a-f]{8}$')
+        self.assertIn('запись ' + diag['id'], row['summary'])
+        _, journal = self.diagnostic_record()
+        self.assertEqual({k: journal[k] for k in diag}, diag)
+        self.assertTrue(all('/' not in frame for frame in diag['where']))
+
+    def test_part_exception_diag_masks_input_secret(self):
+        secret, key = 'S3cr3t-Value-For-Test-123', 'A' * 40
+        cfg = config()
+        cfg['secrets'] = {'test': secret}
+        engine = self.fake.engine(cfg)
+        def fail():
+            try:
+                raise ValueError(secret + ' ' + key)
+            except ValueError as cause:
+                raise RuntimeError(secret + ' ' + key) from cause
+        engine.part('probe', fail)
+        raw_stdout = json.dumps(engine.result('plan'), ensure_ascii=False)
+        self.assertNotIn(secret, raw_stdout)
+        self.assertNotIn(key, raw_stdout)
+        self.assertIn('***', raw_stdout)
+        self.assertIn('***', engine.rows[-1]['diag']['cause'])
+
+    def test_main_exception_diag_in_json(self):
+        cfg = config()
+        secret = 'main-test-secret'
+        cfg['secrets'] = {'test': secret}
+        with patch.object(app.sys, 'stdin', io.StringIO(json.dumps(cfg))), patch.object(app, 'Engine', side_effect=RuntimeError(secret)):
+            try:
+                app.main(['plan', '--json'], system=self.fake.system)
+            except RuntimeError as exc:
+                result = app.failure_result(self.fake.system, exc, 'plan')
+        out = io.StringIO()
+        print(json.dumps(result), file=out)
+        self.assertNotIn(secret, out.getvalue())
+        result = json.loads(out.getvalue())
+        self.assertFalse(result['ok'])
+        self.assertIn('error', result)
+        self.assertEqual(result['diag']['type'], 'RuntimeError')
+        self.assertRegex(result['code']['sha'], r'^[0-9a-f]{12}$')
+
+    def test_sanitized_diag_preserves_actionable_details(self):
+        path = '/usr/local/lib/remoteagents/lan_pc_access.py'
+        long_message = 'The server could not finish applying the requested configuration because a required helper file is missing. ' * 2
+        details = [path, path.lstrip('/'), 'path=' + path, 'server_apply.py:1061:part', 'sha=012345abcdef', long_message]
+        try:
+            raise RuntimeError('\n'.join(details)) from KeyError('lan_pc_access.py')
+        except RuntimeError as exc:
+            diag = app.sanitized_diag(exc, 'probe', 'plan')
+        self.assertEqual(diag['cause'], "KeyError: 'lan_pc_access.py'")
+        for detail in details:
+            self.assertIn(detail, diag['message'])
+        self.assertTrue(diag['where'])
+        self.assertEqual(app.sanitized_diag(RuntimeError('monkey: banana'), 'probe', 'plan')['message'],
+                         'monkey: banana')
+        config_path = '/home/remoteagents/.local/share/remoteagents/happier-web/config.json'
+        self.assertEqual(app.sanitized_diag(RuntimeError(config_path), 'probe', 'plan')['message'], config_path)
+
+    def test_sanitized_diag_masks_credentials_and_long_path_segments(self):
+        token, password, root_password, short = 'T' * 37, 'fixture-password', 'root-json-password', 'q7Z!'
+        export = json.dumps({'root': {'password': root_password}})
+        base64 = 'A' * 16 + '/' + 'B' * 16 + '=='
+        message = '\n'.join([token, 'password=' + password, export, short, base64,
+                             '/usr/' + token + '/lan_pc_access.py'])
+        diag = app.sanitized_diag(RuntimeError(message), 'probe', 'plan', [export, short])
+        for value in (token, password, root_password, short, base64):
+            self.assertNotIn(value, diag['message'])
+        self.assertIn('/usr/***/lan_pc_access.py', diag['message'])
+        self.assertEqual(app.sanitized_diag(RuntimeError('A' * 31 + '/' + 'B' * 31), 'probe', 'plan')['message'],
+                         'A' * 31 + '/' + 'B' * 31)
+        self.assertEqual(app.sanitized_diag(RuntimeError('/usr/' + 'A' * 32 + '/file'), 'probe', 'plan')['message'],
+                         '/usr/***/file')
+
+    def test_sanitized_diag_masks_unpadded_base64_with_slashes(self):
+        for token in ('Q2xpZW50U2VjcmV0/S2V5MTIzNDU2Nzg5MGFiY2Rl',
+                      'aGVsbG8gd29ybGQ/dGhpcyBpcyBhIHNlY3JldA/xyzABC',
+                      'a' * 10 + 'A1/' + 'b' * 20,
+                      '/' + 'b' * 20 + '/' + 'a' * 10 + 'A1'):
+            with self.subTest(token=token):
+                self.assertEqual(app.sanitized_diag(RuntimeError('v ' + token + ' end'), 'probe', 'plan')['message'],
+                                 'v *** end')
+        # Below 12 characters, or missing any character class, still looks like a name.
+        for segment in ('a' * 9 + 'A1', 'a' * 11 + 'A', 'a' * 11 + '1', 'A' * 11 + '1'):
+            message = 'v ' + segment + '/' + 'b' * 20 + ' end'
+            with self.subTest(segment=segment):
+                self.assertEqual(app.sanitized_diag(RuntimeError(message), 'probe', 'plan')['message'], message)
+
+    def test_unprintable_exception_keeps_run_result_and_minimal_diag(self):
+        class UnprintableError(Exception):
+            def __str__(self):
+                raise RuntimeError('must not escape diagnostics')
+        engine = self.fake.engine()
+        with patch.object(engine, 'egress', side_effect=UnprintableError()):
+            result = engine.run('plan')
+        self.assertFalse(result['ok'])
+        row = next(row for row in result['parts'] if row['part'] == 'internet')
+        diag = row['diag']
+        self.assertEqual(set(diag), {'id', 'part', 'type'})
+        self.assertEqual((diag['part'], diag['type']), ('internet', 'UnprintableError'))
+        self.assertRegex(diag['id'], r'^[0-9a-f]{8}$')
+        self.assertIn('запись ' + diag['id'], row['summary'])
+        _, record = self.diagnostic_record()
+        self.assertEqual({key: record[key] for key in diag}, diag)
+        result = app.failure_result(self.fake.system, UnprintableError(), 'plan')
+        self.assertFalse(result['ok'])
+        self.assertEqual(set(result['diag']), {'id', 'part', 'type'})
+        self.assertEqual(result['diag']['part'], 'main')
+
+    def test_code_version_present(self):
+        result = self.fake.engine().result('plan')
+        self.assertEqual(result['schema'], 1)
+        self.assertRegex(result['code']['sha'], r'^[0-9a-f]{12}$')
+        self.assertTrue(result['code']['python'])
+        import hashlib
+        self.assertEqual(result['code']['sha'], hashlib.sha256((SOURCE / 'server_apply.py').read_bytes()).hexdigest()[:12])
+
+    def test_diag_without_journal(self):
+        engine = self.fake.engine()
+        def fail():
+            raise KeyError('x')
+        with patch.object(self.fake.system, 'diag', side_effect=OSError('unavailable')):
+            engine.part('probe', fail)
+        diag = json.loads(json.dumps(engine.result('plan')))['parts'][-1]['diag']
+        self.assertFalse(diag['journal'])
+        self.assertRegex(diag['id'], r'^[0-9a-f]{8}$')
+        self.assertIn('запись ' + diag['id'], engine.rows[-1]['summary'])
+
+    def test_secrets_from_input_and_cause_are_redacted(self):
+        cfg = config()
+        cfg['secrets'] = {'config-secret': 'short-secret'}
+        relay = {'masterPassword': 'master-value', 'secrets': {'relay-secret': 'relay-value',
+                 'json-secret': json.dumps({'password': 'nested-value'})}}
+        source = json.dumps(cfg) + '\n' + app.MARKER + '\n' + json.dumps(relay)
+        cfg, values = app.read_input('-', io.StringIO(source), diagnostic=self.fake.system)
+        engine = self.fake.engine(cfg, values)
+        def fail():
+            try:
+                raise ValueError('short-secret relay-value master-value nested-value')
+            except ValueError as exc:
+                raise RuntimeError('short-secret relay-value master-value nested-value ' + 'A' * 40 + ' ' + 'x ' * 400) from exc
+        engine.part('probe', fail)
+        path, record = self.diagnostic_record()
+        for value in ('short-secret', 'relay-value', 'master-value', 'nested-value', 'A' * 40):
+            self.assertNotIn(value, path.read_text())
+        self.assertLessEqual(len(record['message']), 500)
+        self.assertIn('ValueError: ***', record['cause'])
+        self.assertLessEqual(len(record['where']), 5)
+
+    def test_main_failure_keeps_input_secrets_for_diagnostics(self):
+        cfg = config()
+        cfg['secrets'] = {'secret': 'main-sentinel'}
+        with patch.object(app.sys, 'stdin', io.StringIO(json.dumps(cfg))), patch.object(app, 'Engine', side_effect=RuntimeError('main-sentinel')):
+            try:
+                app.main(['plan', '--json'], system=self.fake.system)
+            except RuntimeError as exc:
+                summary = app.hidden_exception(self.fake.system, exc, 'plan', 'main')
+        path, record = self.diagnostic_record()
+        self.assertEqual((record['part'], record['message']), ('main', '***'))
+        self.assertIn('запись ' + record['id'], summary)
+        self.assertNotIn('main-sentinel', path.read_text())
+
+    def test_diag_rotation_and_symlink_refusal(self):
+        path = self.fake.path('/var/log/remoteagents/server-apply-errors.log')
+        self.fake.write('/var/log/remoteagents/server-apply-errors.log', 'x' * (1024 * 1024 + 1))
+        self.assertIsNotNone(self.fake.system.diag({'message': 'new'}))
+        archive = path.with_name(path.name + '.1')
+        self.assertGreater(archive.stat().st_size, 1024 * 1024)
+        self.assertEqual(archive.stat().st_mode & 0o777, 0o600)
+        path.unlink()
+        path.symlink_to(archive)
+        self.assertIsNone(self.fake.system.diag({'message': 'refused'}))
+        self.assertGreater(archive.stat().st_size, 1024 * 1024)
+
+    def test_real_diag_is_disabled_without_root(self):
+        with patch.object(app.os, 'geteuid', return_value=1001), patch.object(app.System, '_journal') as write:
+            self.assertIsNone(app.System().diag({'message': 'refused'}))
+            write.assert_not_called()
+
+    def test_missing_payload_file_is_a_known_plan_error(self):
+        source = Path(self.tmp.name) / 'payload'
+        shutil.copytree(SOURCE, source)
+        missing = 'lan_pc_access.py'
+        (source / missing).unlink()
+        self.fake.system.source = source
+        result = self.fake.engine().run('plan')
+        rows = [row for row in result['parts'] if missing in row['summary']]
+        self.assertTrue(rows, result)
+        self.assertTrue(all(row['state'] == 'error' for row in rows))
+        self.assertNotIn('детали скрыты', json.dumps(result, ensure_ascii=False))
+
     def test_second_apply_has_zero_actions_and_secret_free_output(self):
         f = self.fake
         with contextlib.redirect_stdout(io.StringIO()) as stdout, contextlib.redirect_stderr(io.StringIO()) as stderr:
@@ -249,6 +535,23 @@ class ApplyTests(unittest.TestCase):
         after = {str(p): p.read_bytes() for p in f.root.rglob('*') if p.is_file()}
         self.assertEqual(before, after)
         self.assertFalse(any(c[0] in ('apt-get', 'loginctl') or c[:2] in (['systemctl', 'restart'], ['systemctl', 'enable']) for c in f.calls))
+
+    def test_absent_lan_keeps_share_manifest_and_rules(self):
+        f = self.fake
+        owned = {'/etc/sing-box/config.json': {'rules': [{'inbound': ['channel'], 'ip_cidr': ['192.168.87.0/24'],
+                 'action': 'route', 'outbound': 'direct-out'}], 'dns': None, 'createdDns': False}}
+        f.write('/etc/remoteagents/server-apply/lan-share.json', json.dumps(owned))
+        cfg = config(); cfg.pop('lan')
+        before = {str(p): p.read_bytes() for p in f.root.rglob('*') if p.is_file()}
+        for command in ('plan', 'status'):
+            result = f.engine(cfg).run(command)
+            self.assertFalse(any(r['part'] == 'lanShare' for r in result['parts']), result)
+            self.assertEqual(result['actions'], [])
+        self.assertEqual(before, {str(p): p.read_bytes() for p in f.root.rglob('*') if p.is_file()})
+        # An explicit 'lan' still reconciles the share policy.
+        explicit = config(); explicit['lan'] = []
+        result = f.engine(explicit).run('plan')
+        self.assertTrue(any(r['part'] == 'lanShare' for r in result['parts']), result)
 
     def test_lan_status_explains_corrupt_state_without_contents_or_mutations(self):
         f = self.fake

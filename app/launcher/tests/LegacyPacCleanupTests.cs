@@ -33,13 +33,14 @@ namespace RemoteAgents.Launcher
                 Console.WriteLine("PASS: LegacyPacCleanup");
             } finally { if (Directory.Exists(home)) Directory.Delete(home, true); }
         }
-        static int Main(string[] args) { Run(); return 0; }
+        // -p:LanTests=true includes helper setup/protocol regressions alongside the LAN suites.
+        static int Main(string[] args) { Run(); LanTunTests.Run(); LanHostsTests.Run(); NetHelperTests.Run(); return 0; }
     }
     internal static class Stage6PortableEntry
     {
         static int Main(string[] args)
         {
-            if (args.Length == 0 || !args[0].StartsWith("--", StringComparison.Ordinal)) LegacyPacCleanupTests.Run();
+            if (args.Length == 0 || !args[0].StartsWith("--", StringComparison.Ordinal)) { LegacyPacCleanupTests.Run(); LanTickTests.Run(args.Length == 0 ? Path.GetTempPath() : args[0]); }
             try { return (int)typeof(LanTunTests).GetMethod("Main", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, new object[] { args }); }
             catch (TargetInvocationException ex) { ExceptionDispatchInfo.Capture(ex.InnerException).Throw(); throw; }
         }

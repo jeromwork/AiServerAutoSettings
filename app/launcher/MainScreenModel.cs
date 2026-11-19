@@ -84,15 +84,17 @@ namespace RemoteAgents.Launcher
             var control = facts.Control ?? Json.Map(null);
             var view = new MainScreenView();
             // Keep this identical to TrayContext.Tick; a deliberately off VPN is grey in its card only.
-            view.Overall = transport.Count == 0 ? Tone.Warning : Json.Bool(transport, "ok") ? Tone.Ok : Tone.Error;
+            var phase = StatusView.Phase(transport);
+            view.Overall = phase == LinkPhase.Ok ? Tone.Ok : phase == LinkPhase.Failed ? Tone.Error : Tone.Warning;
+            if (TrayMenuModel.Searching(transport, vpn) || Json.Str(vpn, "state") == "conflict") view.Overall = Tone.Warning;
             BuildVpn(view.Vpn, facts, transport, vpn);
             BuildDisk(view.Disk, facts);
             var lan = facts.Lan ?? Json.Map(null);
             view.Lan.Visible = Json.Bool(lan, "enabled");
             var lanNetworks = Json.Array(Json.Get(lan, "networks")).Select(Json.Map).ToArray();
-            view.Lan.State = string.Join("\r\n", lanNetworks.Select(n => Json.Str(n, "name") + ": " + Json.Str(n, "state") + " — " + Json.Str(n, "reason")));
+            view.Lan.State = string.Join("\r\n", lanNetworks.Select(n => Json.Str(n, "name") + ": " + Json.Str(n, "reason")));
             view.Lan.Detail = LanDetails(lan);
-            view.Lan.Tone = lanNetworks.Length > 0 && lanNetworks.All(n => Json.Str(n, "state") == "ok") ? Tone.Ok : Tone.Warning;
+            view.Lan.Tone = LanTone(lanNetworks);
             view.Happier.Visible = facts.HappierVisible;
             view.Happier.State = facts.HappierConfirmed ? "аккаунт подключён"
                 : facts.HappierHasKey || facts.HappierVisible ? "аккаунт не подтверждён" : "не настроен";
@@ -106,12 +108,17 @@ namespace RemoteAgents.Launcher
 
             string vpnError = VpnProblem(facts, vpn);
             if (vpnError.Length > 0)
-                view.Banner = DisableFailed(facts, vpn)
+                view.Banner = Json.Str(vpn, "state") == "conflict" && view.Vpn.On
+                    ? Banner(Tone.Warning, vpnError, "Подробнее", "details")
+                    : DisableFailed(facts, vpn)
                     ? Banner(Tone.Error, vpnError, "Подробнее", "details")
                     : Banner(Json.Str(vpn, "state") == "conflict" ? Tone.Warning : Tone.Error, vpnError.StartsWith("VPN выключен", StringComparison.Ordinal) ? vpnError : "Не удалось включить VPN. " + vpnError, "Включить снова", "vpn-on");
-            else if (transport.Count == 0)
-                view.Banner = Banner(Tone.Warning, "Проверяем связь с сервером…", "", "");
-            else if (!Json.Bool(transport, "ok"))
+            else if (TrayMenuModel.Searching(transport, vpn))
+                view.Banner = Banner(Tone.Warning, TrayMenuModel.SearchingText(transport, vpn), "", "");
+            else if (phase == LinkPhase.Checking)
+                view.Banner = Banner(Tone.Warning, Json.Str(transport, "phase") == "degraded"
+                    ? "Связь нестабильна, ищу другой путь…" : "Проверяем связь с сервером…", "", "");
+            else if (phase == LinkPhase.Failed)
                 view.Banner = Banner(Tone.Error, "Нет связи с сервером. Проверьте подключение к интернету или повторите проверку.", "Повторить", "retry");
             else if (view.Disk.Visible && view.Disk.Tone == Tone.Error)
                 view.Banner = Banner(Tone.Error, "Диск: " + view.Disk.State + ". Проверьте синхронизацию.", "Открыть синхронизацию", "open-sync");
@@ -129,7 +136,7 @@ namespace RemoteAgents.Launcher
         {
             string state = Json.Str(vpn, "state");
             card.Visible = facts.VpnInstalled;
-            card.On = facts.VpnBusy ? facts.VpnWanted : state == "on" || Json.Bool(vpn, "enabled") && state != "stopping";
+            card.On = facts.VpnBusy ? facts.VpnWanted : state == "on" || state == "searching" || Json.Bool(vpn, "enabled") && state != "stopping";
             bool starting = state == "starting" || state == "awaiting-uac";
             card.SwitchEnabled = !facts.VpnBusy && !starting && string.IsNullOrEmpty(facts.Operation);
             card.SwitchText = starting ? "Включается…" : facts.VpnBusy ? (facts.VpnWanted ? "Включается…" : "Выключается…") : card.On ? "Выключить VPN" : "Включить VPN";
@@ -140,8 +147,10 @@ namespace RemoteAgents.Launcher
             else if (state == "starting" || state == "awaiting-uac")
                 card.State = state == "awaiting-uac" ? "Ожидается разрешение на включение" : "Включается…";
             else if (state == "off") { card.State = "VPN выключен"; card.Tone = Tone.Off; }
-            else if (vpn.Count == 0 || transport.Count == 0) card.State = "Ожидается проверка";
-            else if (!Json.Bool(transport, "ok")) { card.State = "Нет связи с сервером"; card.Tone = Tone.Error; }
+            else if (card.On && TrayMenuModel.Searching(transport, vpn))
+                card.State = "VPN включён · " + (Json.Str(transport, "localNet") == "down" ? "нет интернета у вас (сеть)" : "нет связи, ищу путь");
+            else if (vpn.Count == 0 || StatusView.Phase(transport) == LinkPhase.Checking) card.State = "Ожидается проверка";
+            else if (StatusView.Phase(transport) == LinkPhase.Failed) { card.State = "Нет связи с сервером"; card.Tone = Tone.Error; }
             else if (Json.Bool(vpn, "ok") && state == "on") { card.State = "Защита включена"; card.Tone = Tone.Ok; }
             else card.State = card.On ? "Защита ещё не подтверждена" : "Ожидается проверка";
 
@@ -152,6 +161,7 @@ namespace RemoteAgents.Launcher
             if (metric.Length == 0) metric = StatusView.Speed(transport);
             bool hasPath = Json.Str(transport, "active").Length > 0 || Json.Str(transport, "title").Length > 0;
             card.Detail = hasPath ? "через «" + OneLine(TrayMenuModel.ActiveTitle(transport)) + "», " + metric : metric;
+            if (card.On && TrayMenuModel.Searching(transport, vpn)) card.Detail = TrayMenuModel.SearchingText(transport, vpn);
             string dns = VpnStatus.DnsSummary(vpn);
             if (dns.Length > 0) {
                 card.Detail += " · " + OneLine(dns);
@@ -167,7 +177,7 @@ namespace RemoteAgents.Launcher
 
         static string Latency(Dictionary<string, object> data)
         {
-            // Current probes publish speed; accept explicit millisecond measurements when available.
+            // Prefer the active candidate's first-byte latency; tolerate older status files and missing measurements.
             foreach (string key in new[] { "latencyMs", "rttMs", "pingMs", "delayMs", "latency" }) {
                 double value;
                 if (double.TryParse(Json.Str(data, key), NumberStyles.Float, CultureInfo.InvariantCulture, out value)
@@ -200,7 +210,7 @@ namespace RemoteAgents.Launcher
             }
             else if (state == "синхронизирован") { state = "всё синхронизировано"; card.Tone = Tone.Ok; }
             else if (state.StartsWith("синхронизация", StringComparison.Ordinal)) state = "идёт " + state;
-            else if (state == "сервер не подключён") state = "нет связи с сервером";
+            else if (state == "сервер не подключён") state = StatusView.Phase(facts.Transport ?? Json.Map(null)) == LinkPhase.Checking ? "ожидается проверка связи" : "нет связи с сервером";
             else if (state == "проверка файлов") state = "проверяются файлы";
             else if (state == "состояние не получено" || state == "состояние уточняется") state = "ожидается проверка";
             else if (state == "отключён") card.Tone = Tone.Off;
@@ -217,18 +227,27 @@ namespace RemoteAgents.Launcher
             return lastTwo >= 11 && lastTwo <= 14 ? "папок" : last == 1 ? "папка" : last >= 2 && last <= 4 ? "папки" : "папок";
         }
 
+        internal static Tone LanTone(Dictionary<string, object>[] networks)
+        {
+            if (networks.Length > 0 && networks.All(n => Json.Str(n, "state") == "ok" && Json.Str(n, "stage").Length == 0)) return Tone.Ok;
+            // A fresh failure or an unreachable host is red; starting, link checks and conflicts are yellow.
+            if (networks.Any(n => Json.Str(n, "state") == "failed" || Json.Str(n, "state") == "host-down")) return Tone.Error;
+            return Tone.Warning;
+        }
+
         internal static string LanDetails(Dictionary<string, object> lan)
         {
             return CleanSecrets(string.Join("\r\n\r\n", Json.Array(Json.Get(lan, "networks")).Select(Json.Map).Select(n =>
                 Json.Str(n, "name") + "\r\nПодсети: " + string.Join(", ", Json.Strings(Json.Get(n, "connectedSubnets") ?? Json.Get(n, "subnets"))) +
                 "\r\nИсключены: " + string.Join("; ", Json.Array(Json.Get(n, "excludedSubnets")).Select(Json.Map).Select(s => Json.Str(s, "subnet") + " — " + Json.Str(s, "adapter"))) +
                 "\r\nDNS: " + string.Join(", ", Json.Strings(Json.Get(n, "dnsServers"))) + "\r\nДомены: " + string.Join(", ", Json.Strings(Json.Get(n, "domains"))) +
-                "\r\nИмена: " + (Json.Bool(n, "nrptOk") ? "настроены" : "не настроены") + "\r\nПоследняя ошибка: " + Json.Text(n, "stage", "нет"))));
+                "\r\nИмена: " + (Json.Bool(n, "nrptOk") ? "настроены" : "не настроены") + "\r\nПоследняя ошибка: " + LanStages.Text(Json.Str(n, "stage")))));
         }
         static string HelperReason(Dictionary<string, object> control, Dictionary<string, object> transport)
         {
             if (control.Count == 0) return "ожидается проверка";
-            if (transport.Count > 0 && !Json.Bool(transport, "ok")) return "нет связи с сервером";
+            if (StatusView.Phase(transport) == LinkPhase.Failed) return "нет связи с сервером";
+            if (transport.Count > 0 && StatusView.Phase(transport) == LinkPhase.Checking) return "проверяем связь с сервером";
             string summary = Json.Str(control, "summary");
             if (summary == "Управление выключено") return "управление выключено";
             if (summary == "Управление: нет данных") return "ожидается проверка управления";
@@ -246,8 +265,8 @@ namespace RemoteAgents.Launcher
                 return PlainReason(facts.VpnError, "Проверьте настройки и разрешение на включение.");
             string reason = Json.Str(vpn, "owner") == "net-helper" ? Json.Str(vpn, "summary") : "";
             if (reason.Length == 0) reason = VpnWatchdog.FailureSummary(Json.Str(vpn, "state"), Json.Str(vpn, "stage"));
-            if (Json.Str(vpn, "state") == "on" || Json.Str(vpn, "state") == "off" || Json.Str(vpn, "state") == "starting") reason = "";
-            if (reason.Length > 0) return reason;
+            if (Json.Str(vpn, "state") == "searching" || Json.Str(vpn, "state") == "on" || Json.Str(vpn, "state") == "off" || Json.Str(vpn, "state") == "starting") reason = "";
+            if (reason.Length > 0) return StatusView.DisplayText(reason);
             switch (Json.Str(vpn, "state")) {
                 case "conflict": return "Работает другой VPN. Отключите его перед включением этого VPN.";
                 case "error": return "Проверьте настройки и разрешение на включение.";
@@ -286,6 +305,11 @@ namespace RemoteAgents.Launcher
             report.AppendLine("Пути:");
             foreach (var candidate in StatusView.Candidates(transport))
                 report.AppendLine("  " + TrayMenuModel.CandidateLine(candidate, transport));
+            var switches = TrayMenuModel.SwitchLines(transport);
+            if (switches.Length > 0) {
+                report.AppendLine("Последние переключения:");
+                foreach (string change in switches) report.AppendLine("  " + change);
+            }
             report.AppendLine(ServerHealthView.Detail(facts.Health ?? Json.Map(null)));
             // Clean the complete result: labels, path names and server errors are also untrusted text.
             return CleanSecrets(report.ToString());
@@ -296,78 +320,7 @@ namespace RemoteAgents.Launcher
             if (visible) report.AppendLine(title + ": " + state + (detail.Length > 0 ? " · " + detail : ""));
         }
 
-        static readonly Regex SecretField = new Regex(
-            @"(?<name>[""']?[\w.-]*(?:key|token|password|passwd|secret|uuid|authorization)[\w.-]*[""']?\s*[:=]\s*)",
-            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-
-        // Handles JSON fields, log-style key=value pairs, URL query credentials and multiline key material.
-        // Redact entire structured values rather than exposing children of a secret object/array.
         internal static string CleanSecrets(string value)
-        {
-            value = (value ?? "").Replace("\r\n", "\n").Replace('\r', '\n');
-            value = Regex.Replace(value, @"-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)",
-                "[скрыто]", RegexOptions.IgnoreCase);
-            // Mask URLs first: a user name such as "token" must not be mistaken for a log field,
-            // which could otherwise leave part of its password after a semicolon.
-            value = Regex.Replace(value, @"\b[a-z][a-z0-9+.-]*://[^\s<>""']+", CleanUrl, RegexOptions.IgnoreCase);
-            var clean = new StringBuilder();
-            int position = 0;
-            for (Match field = SecretField.Match(value); field.Success; field = SecretField.Match(value, position)) {
-                clean.Append(value, position, field.Index - position);
-                clean.Append(field.Groups["name"].Value).Append("\"[скрыто]\"");
-                position = SecretValueEnd(value, field.Index + field.Length);
-            }
-            clean.Append(value, position, value.Length - position);
-            return clean.ToString();
-        }
-
-        static string CleanUrl(Match match)
-        {
-            string url = match.Value;
-            int authority = url.IndexOf("://", StringComparison.Ordinal) + 3;
-            int end = url.IndexOfAny(new[] { '/', '?', '#' }, authority);
-            if (end < 0) end = url.Length;
-            if (end > authority) {
-                int at = url.LastIndexOf('@', end - 1, end - authority);
-                if (at >= authority) url = url.Substring(0, authority) + "[скрыто]@" + url.Substring(at + 1);
-            }
-            int query = url.IndexOf('?'), fragment = url.IndexOf('#');
-            if (query < 0 || fragment >= 0 && fragment < query) return url;
-            int queryEnd = fragment < 0 ? url.Length : fragment;
-            string[] pairs = url.Substring(query + 1, queryEnd - query - 1).Split('&');
-            for (int i = 0; i < pairs.Length; i++) {
-                int equals = pairs[i].IndexOf('=');
-                if (equals < 0) continue;
-                string name = pairs[i].Substring(0, equals);
-                // Encoded parameter names are just as sensitive as plain ones.
-                try { name = Uri.UnescapeDataString(name); } catch (UriFormatException) { pairs[i] = "[скрыто]"; continue; }
-                if (Regex.IsMatch(name, @"key|token|password|passwd|secret|uuid|authorization", RegexOptions.IgnoreCase))
-                    pairs[i] = pairs[i].Substring(0, equals + 1) + "[скрыто]";
-            }
-            return url.Substring(0, query + 1) + string.Join("&", pairs) + url.Substring(queryEnd);
-        }
-
-        static int SecretValueEnd(string value, int start)
-        {
-            // An unquoted log value has no reliable punctuation delimiter: passwords can contain
-            // commas, semicolons and brackets. Hide the rest of that line rather than guessing.
-            if (start < value.Length && value[start] != '"' && value[start] != '\'' && value[start] != '{' && value[start] != '[') {
-                int newline = value.IndexOf('\n', start);
-                return newline < 0 ? value.Length : newline;
-            }
-            var closers = new Stack<char>();
-            char quote = '\0';
-            for (int i = start; i < value.Length; i++) {
-                char ch = value[i];
-                if (quote != '\0') {
-                    if (ch == '\\') { i++; continue; }
-                    if (ch == quote) { quote = '\0'; if (closers.Count == 0) return i + 1; }
-                } else if (ch == '\"' || ch == '\'') quote = ch;
-                else if (ch == '{' || ch == '[') closers.Push(ch == '{' ? '}' : ']');
-                else if (closers.Count > 0 && ch == closers.Peek()) { closers.Pop(); if (closers.Count == 0) return i + 1; }
-                else if (closers.Count == 0 && (ch == '\n' || ch == ',' || ch == ';' || ch == '&' || ch == '}' || ch == ']')) return i;
-            }
-            return value.Length;
-        }
+        { return StatusText.CleanSecrets(value); }
     }
 }
