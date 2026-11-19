@@ -261,17 +261,45 @@ sudo bash server/lan-vpn.sh remove "$LAN_NAME"
 выключает их автозапуск. Прежние сессии сами не переподключаются.
 `disable/remove` тоже используют защитную транзакцию; после локальной проверки
 таймер снимается. Последняя удалённая сеть убирает свои routes/DNS/firewall и
-выключает общие guard/watch/recovery units; установленный код units остаётся.
+выключает общие guard/recovery units; установленный код units остаётся.
 `lan_share.py` хранит прежние правила и их владение до нового SSH; ошибка запуска,
 пять минут без confirm или reboot до подтверждения возвращают прежние файлы.
 
 Конфиг применения без ключа `lan` (например, только сети «доступ с ПК», которые программа на сервер не передаёт) политику `lanShare` не меняет; снять её можно только конфигом с явным `lan` (в т.ч. `"lan": []`).
 
-`remoteagents-lan-watch.timer` раз в минуту сверяет клиентов, все маршруты через
-свои TUN и содержимое своей nft-таблицы. При нарушении ставит deny-only guard,
-останавливает все управляемые ЛВС и снимает автозапуск/свои policy routes.
-Автоматического перезапуска после такого нарушения нет. Сторож не подтверждает
-доступность контрольного хоста без `test`.
+### Клиент — обычная служба
+
+`remoteagents-lan@ИМЯ.service`: `Restart=always`, `RestartSec=10`, `StartLimitIntervalSec=0`,
+в `client.conf` управляемые строки `persist-tun`, `persist-key`, `keepalive 10 60`,
+`resolv-retry infinite`, `connect-retry 5 60` (импортированные такие же строки и `ping*`
+вырезаются). Упал или ping-restart — клиент сам поднялся, tun и маршруты таблицы 42000+N
+живут, хук при повторном подключении идемпотентен. Ошибка хука пишется в stderr (journald)
+и завершает клиента `systemctl kill -s SIGTERM`; поднимет его systemd (не `stop`).
+Сторожа и авто-лечения нет (решение владельца 19.11): таймер `remoteagents-lan-watch`
+удалён, `install_runtime` при установке сам снимает и удаляет его старые юниты.
+Если отвалилась сама клиника, это не наша проблема. Периодический
+`remoteagents-reconcile` не применяет и не повторяет транзакцию lan-share (пишет
+«lan-share pending ждёт confirm или отката»); применяет её только `apply` владельца,
+откатывает только одноразовый таймер. `lan-vpn.sh regen ИМЯ` переписывает управляемые
+строки существующего `client.conf` (секреты не выводятся, клиент не перезапускается).
+Одноразовые откаты `enable/test/confirm` остаются.
+
+### Статичная защита
+
+Работает без сторожа и переживает рестарт и перезагрузку.
+
+| Защита | Где | Когда действует |
+|---|---|---|
+| `pull-filter ignore` redirect-gateway/redirect-private/dhcp-option/dns/route-ipv6/ifconfig-ipv6/block-ipv6, `route-noexec` | `/etc/remoteagents/lan/ИМЯ/client.conf` | всегда: клиника не навязывает маршруты и DNS |
+| Только наши маршруты: таблица 42000+N (подсети в `tun-lan-ИМЯ` + `unreachable default`), `ip rule pref 1000+N to <подсеть>` | `route_ops` через хук | ставятся при каждом подключении |
+| nft `inet remoteagents_lan`: из `tun-lan-*` только established, forward запрещён, в `tun-lan-*` только подсети профиля, к шлюзу клиники только root udp/tcp его порта | `remoteagents-lan-firewall.service` | при загрузке, до клиента |
+| `_prestart`: клиент не стартует без nft-таблицы или при её подмене | `ExecStartPre` | каждый запуск |
+| Исключение endpoint клиники точным `ip rule pref 2000 /32 uid 0` (не `route_exclude_address` TUN sing-box; причина аварии 15.11) | `endpoint_ops` | всегда |
+| inbound-guard: nft `inet remoteagents_inbound` (ct mark 0x5241) + `ip rule pref 8990 fwmark 0x5241 lookup main`; ответы на входящие SSH/443/8444 идут через main | `server_apply.py`, `remoteagents-network-guard.service` | **только при заданном `proxyOut`** |
+
+Интернет через клинику пойти не может: достаточно любой из трёх защит (pull-filter и
+route-noexec; правила pref 1000 только для подсетей профиля; nft-egress только в подсети
+профиля).
 
 Состояние сети — `/var/lib/remoteagents/lan/ИМЯ.json`, общий публичный снимок —
 `/var/lib/remoteagents-status/lan.json`. Журнал событий без секретов —

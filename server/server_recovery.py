@@ -190,6 +190,7 @@ def reconcile(app, system=None):
     app.require(data.get('schema') == 1, 'Неизвестный формат восстановления.')
     app.validate(data['config'])
     engine = app.Engine(data['config'], data['secrets'], s)
+    engine.periodic = True  # lan-share changes are never (re)applied from here
     # Dependencies must exist before jq/nft/sing-box/OpenVPN can inspect or heal.
     # Every manager's rollback and external confirmation keep precedence. The
     # watchdog must never replace an in-flight change or acknowledge its own SSH.

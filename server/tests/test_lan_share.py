@@ -159,6 +159,25 @@ class Tests(unittest.TestCase):
             # Rollback removal restores the previously confirmed rules.
             self.assertTrue(share.reconcile(SimpleNamespace(**{**vars(e), 'config': profile()}), False))
 
+    def test_reconcile_never_reapplies_pending_lan_share(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            e, calls, _ = self.transaction(tmp)
+            self.assertFalse(share.reconcile(e, True))  # owner apply creates the transaction
+            self.assertTrue(e.s.path(share.STATE).exists())
+            e.periodic = True
+            before = list(calls)
+            self.assertTrue(share.reconcile(e, True))  # pending: waits, exit-0 style row
+            self.assertEqual(calls, before)
+            self.assertTrue(e.s.path(share.STATE).exists())
+            # After the one-shot rollback the periodic run must not apply it again either.
+            share.rollback(e.s)
+            original = e.s.read('/etc/sing-box/config.json')
+            calls.clear()
+            self.assertFalse(share.reconcile(e, True))
+            self.assertFalse(e.s.path(share.STATE).exists())
+            self.assertEqual(e.s.read('/etc/sing-box/config.json'), original)
+            self.assertFalse([c for c in calls if c[0] in ('systemd-run', 'systemctl')])
+
     def test_restart_failure_restores_files_and_route_bounds(self):
         with tempfile.TemporaryDirectory() as tmp:
             e, calls, failure = self.transaction(tmp)

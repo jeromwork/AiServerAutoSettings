@@ -262,22 +262,6 @@ class SafetyTests(unittest.TestCase):
                 self.assertEqual(bool(restarts), not boot)
                 self.assertFalse(pending.exists())
 
-    def test_global_route_audit_rejects_unknown_tunnel_internet_and_multipath(self):
-        for route in [
-            {'dst': 'default', 'dev': 'tun-lan-rogue'},
-            {'dst': '0.0.0.0/1', 'dev': 'tun-lan-office'},
-            {'dst': '128.0.0.0/1', 'nexthops': [{'dev': 'tun-lan-office'}]},
-            {'dst': '203.0.113.0/24', 'dev': 'tun-lan-office'}]:
-            def run(args, **kwargs):
-                return subprocess.CompletedProcess(args, 0, json.dumps([route]) if '-4' in args else '[]', '')
-            with patch.object(lan, 'run', side_effect=run), self.assertRaises(lan.Error):
-                lan.audit_all_tunnels()
-        def ipv6(args, **kwargs):
-            return subprocess.CompletedProcess(args, 0, '[]' if '-4' in args else
-                                               '[{"dst":"::/0","dev":"tun-lan-office"}]', '')
-        with patch.object(lan, 'run', side_effect=ipv6), self.assertRaises(lan.Error):
-            lan.audit_all_tunnels()
-
     def test_stop_all_attempts_remaining_clients_if_one_fails(self):
         called = []
         def stop(name, boot):
@@ -289,29 +273,119 @@ class SafetyTests(unittest.TestCase):
                 lan.stop_clients(['office', 'other'])
         self.assertEqual(called, ['office', 'other'])
 
-    def test_watchdog_denies_traffic_and_stops_every_client(self):
+
+class PlainServiceTests(unittest.TestCase):
+    """Owner decision 19.11: no LAN watchdog; the client is an ordinary self-restarting service."""
+    def install(self, tmp, existing=()):
+        units = Path(tmp) / 'units'
+        units.mkdir(exist_ok=True)
+        for name in existing:
+            (units / name).write_text('old')
         calls = []
-        data = {n: {'subnets': ['10.123.0.0/16'], 'table': 42000 + i, 'priority': 1000 + i}
-                for i, n in enumerate(['office', 'other'])}
         def run(args, **kwargs):
-            calls.append(args)
-            if args[:2] == ['systemctl', 'is-active'] or args[:4] == ['ip', '-j', 'link', 'show']:
-                return subprocess.CompletedProcess(args, 1, '', '')
+            calls.append([str(a) for a in args])
+            if args[0] == 'systemctl' and args[1] == 'disable' and '--now' in args:
+                self.assertTrue(all((units / n).exists() for n in lan.OLD_WATCH_UNITS if (units / n).name in existing))
             return subprocess.CompletedProcess(args, 0, '', '')
-        def fw(profiles):
-            calls.append(['firewall', profiles])
-        with patch.object(lan, 'active', return_value=data), \
-             patch.object(lan, 'nft_identity', side_effect=lan.Error('missing')), \
+        stack = contextlib.ExitStack()
+        for target, value in (('UNIT_DIR', units), ('ETC', Path(tmp) / 'etc'), ('BIN', Path(tmp) / 'bin')):
+            stack.enter_context(patch.object(lan, target, value))
+        stack.enter_context(patch.object(lan.shutil, 'which', return_value='/usr/bin/x'))
+        stack.enter_context(patch.object(lan, 'run', side_effect=run))
+        with stack:
+            lan.install_runtime()
+        return units, calls
+
+    def test_install_runtime_has_no_watch_units_and_migrates_old(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            units, calls = self.install(tmp, existing=lan.OLD_WATCH_UNITS)
+            self.assertFalse(any('lan-watch' in n for n in os.listdir(units)))
+            self.assertFalse(any('lan-watch' in ' '.join(c) and c[1] != 'disable' for c in calls))
+            disable = [c for c in calls if c[:3] == ['systemctl', 'disable', '--now']]
+            self.assertEqual(len(disable), 1)
+            self.assertIn('remoteagents-lan-watch.timer', disable[0])
+            self.assertIn(['systemctl', 'daemon-reload'], calls)
+            for _, text in ((n, (units / n).read_text()) for n in os.listdir(units)):
+                self.assertNotIn('_watch', text)
+        with tempfile.TemporaryDirectory() as tmp:
+            units, calls = self.install(tmp)
+            self.assertFalse([c for c in calls if '--now' in c or 'lan-watch' in ' '.join(c)])
+            self.assertEqual(sorted(os.listdir(units)), ['remoteagents-lan-firewall.service', 'remoteagents-lan-recover.service',
+                                                         'remoteagents-lan@.service'])
+
+    def test_client_unit_restart_always(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            units, _ = self.install(tmp)
+            text = (units / 'remoteagents-lan@.service').read_text()
+        self.assertIn('\nRestart=always\n', text)
+        self.assertIn('\nRestartSec=10\n', text)
+        self.assertIn('\nStartLimitIntervalSec=0\n', text.split('[Service]')[0])
+        self.assertIn('\nStandardError=journal\n', text)
+        self.assertIn('\nExecStartPre=/usr/local/lib/remoteagents/lan/lan-vpn.sh _prestart %i\n', text)
+        self.assertIn('\nExecStopPost=/usr/local/lib/remoteagents/lan/lan-vpn.sh _down %i\n', text)
+        self.assertNotIn('Restart=no', text)
+
+    def test_client_conf_managed_lines(self):
+        extra = 'keepalive 5 20\nping 3\nping-restart 9\nresolv-retry 7\nconnect-retry 1\n'
+        client, _ = ImportTests.render(self, FIXTURE.read_text() + extra)
+        lines = client.split('\n')
+        for managed in ('persist-tun', 'persist-key', 'keepalive 10 60', 'resolv-retry infinite', 'connect-retry 5 60', 'route-noexec'):
+            self.assertEqual(lines.count(managed), 1, managed)
+        for pushed in ('redirect-gateway', 'redirect-private', 'dhcp-option', 'dns', 'route-ipv6', 'ifconfig-ipv6', 'block-ipv6'):
+            self.assertIn('pull-filter ignore "' + pushed + '"', client)
+        self.assertNotIn('pull-filter accept', client)
+        for imported in ('redirect-gateway def1', 'route 0.0.0.0', 'keepalive 5', 'ping 3', 'ping-restart', 'resolv-retry 7', 'connect-retry 1', 'dhcp-option DNS'):
+            self.assertNotIn(imported, client)
+        self.assertFalse([l for l in lines if l.startswith('route ')])
+
+    def test_regen_keeps_secrets_and_rewrites_managed_only(self):
+        old = ('client\nping-restart 9\nkeepalive 1 2\npersist-tun\nresolv-retry 3\nconnect-retry 1\n'
+               '<key>\nTEST_ONLY_SECRET_NEVER_PRINT\npersist-tun\nkeepalive 1 2\n</key>\n'
+               'route-noexec\npull-filter ignore "dns"\nscript-security 2\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'etc/office/client.conf'
+            path.parent.mkdir(parents=True)
+            path.write_text(old)
+            out, err = io.StringIO(), io.StringIO()
+            with patch.object(lan, 'ETC', Path(tmp) / 'etc'), patch.object(lan, 'event'), \
+                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                lan.regen('office')
+            new = path.read_text()
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertNotIn('SECRET', out.getvalue() + err.getvalue())
+        self.assertIn('<key>\nTEST_ONLY_SECRET_NEVER_PRINT\npersist-tun\nkeepalive 1 2\n</key>', new)
+        outside = new.replace(new[new.index('<key>'):new.index('</key>')], '')
+        for managed in lan.MANAGED:
+            self.assertEqual(outside.split('\n').count(managed), 1, managed)
+        self.assertNotIn('ping-restart', outside)
+        self.assertNotIn('resolv-retry 3', new)
+        self.assertLess(new.index('persist-tun'), new.index('route-noexec'))
+        self.assertIn('pull-filter ignore "dns"\nscript-security 2\n', new)
+        self.assertEqual(lan.regen_client(new), new)  # idempotent
+
+    def test_hook_failure_kills_not_stops(self):
+        calls = []
+        def run(args, **kwargs):
+            calls.append([str(a) for a in args])
+            return subprocess.CompletedProcess(args, 0, '', '')
+        err = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, patch.object(lan, 'STATE', Path(tmp)), patch.object(lan, 'ETC', Path(tmp)), \
+             patch.object(lan.os, 'geteuid', return_value=0), patch.object(lan.os, 'chmod'), patch.object(lan.os, 'chown'), \
+             patch.object(lan, 'hook', side_effect=lan.Error('причина')), patch.object(lan, 'event'), \
              patch.object(lan, 'run', side_effect=run), \
-             patch.object(lan, 'route_ops'), patch.object(lan, 'update'), \
-             patch.object(lan, 'event'), patch.object(lan, 'revert_dns'), patch.object(lan, 'sync_singbox'), \
-             patch.object(lan, 'firewall', side_effect=fw):
-            lan.watch()
-        stopped = [c for c in calls if c[:2] == ['systemctl', 'stop']]
-        self.assertEqual(len(stopped), 2)
-        self.assertEqual(calls[0], ['firewall', {}])
-        self.assertEqual(calls[-1], ['firewall', {}])
-        self.assertTrue(all(not p['enabled'] for p in data.values()))
+             patch.object(lan.sys, 'argv', ['lan', '_hook', 'office']), contextlib.redirect_stderr(err):
+            with self.assertRaises(lan.Error):
+                lan.main()
+        self.assertIn(['systemctl', 'kill', '-s', 'SIGTERM', 'remoteagents-lan@office.service'], calls)
+        self.assertFalse([c for c in calls if c[:2] == ['systemctl', 'stop']])
+        self.assertIn('причина', err.getvalue())
+
+    def test_no_watch_commands_left(self):
+        self.assertFalse(hasattr(lan, 'watch'))
+        self.assertFalse(hasattr(lan, 'audit_all_tunnels'))
+        with patch.object(lan.sys, 'argv', ['lan', '_watch']), contextlib.redirect_stderr(io.StringIO()), \
+             self.assertRaises(SystemExit):
+            lan.main()
 
 
 class ReconnectRouteTests(unittest.TestCase):
