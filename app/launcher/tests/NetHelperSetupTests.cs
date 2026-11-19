@@ -78,8 +78,11 @@ namespace RemoteAgents.Launcher
                 Check(polls >= 2, "completed busy operation allows connection after recheck");
                 bool timedOut = false;
                 try { await NetHelperSetup.WaitForIdle(() => true, CancellationToken.None, timeoutMs: 1); }
-                catch (TimeoutException error) { timedOut = error.Message == NetHelperSetup.BusyTimeout; }
-                Check(timedOut, "stuck busy has a bounded wait and actionable error");
+                catch (NetHelperBusyTimeoutException error) { timedOut = NetHelperSetup.VpnFailureMessage(error) == NetHelperSetup.BusyTimeout; }
+                Check(timedOut, "stuck busy has a bounded wait and actionable VPN error");
+                foreach (var error in new Exception[] { new TimeoutException(), new TimeoutException(NetHelperSetup.BusyTimeout), new IOException() })
+                    Check(NetHelperSetup.VpnFailureMessage(error) == "Не удалось включить VPN. Проверьте подключение сетевого помощника и диагностику.",
+                        "pipe connection timeout / other failure must not suggest waiting for installation");
                 using (var cancelled = new CancellationTokenSource()) {
                     pending = NetHelperSetup.WaitForIdle(() => true, cancelled.Token); cancelled.Cancel();
                     bool propagated = false;

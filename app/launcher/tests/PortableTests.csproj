@@ -59,6 +59,7 @@
     <Compile Include="LanHostsTests.cs" />
     <Compile Include="LanTunTests.cs" />
     <Compile Include="NetHelperTests.cs" />
+    <Compile Include="NetHelperVersionTests.cs" />
     <Compile Include="NetHelperSetupTests.cs" />
     <Compile Include="../MainScreenModel.cs" Link="MainScreenModel.cs" />
     <Compile Include="../MainScreenRender.cs" Link="MainScreenRender.cs" />
