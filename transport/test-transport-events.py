@@ -362,8 +362,9 @@ public static class DelayedTransportWorkers {
         return Task.Factory.StartNew(delegate() {return Stop(reader);});
     }
     public static long Stop(object reader) {
-        Thread[] workers=(Thread[])reader.GetType().GetField("workers",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(reader);
-        Thread[] original=(Thread[])workers.Clone();
+        FieldInfo field=reader.GetType().GetField("workers",BindingFlags.NonPublic|BindingFlags.Instance);
+        Thread[] original=(Thread[])field.GetValue(reader);
+        Thread[] workers=new Thread[6];
         using(ManualResetEvent release=new ManualResetEvent(false)) {
             for(int i=0;i<workers.Length;i++) {
                 workers[i]=new Thread(delegate() {release.WaitOne();});
@@ -371,13 +372,14 @@ public static class DelayedTransportWorkers {
                 workers[i].Start();
             }
             try {
+                field.SetValue(reader,workers);
                 Stopwatch watch=Stopwatch.StartNew();
                 ((IDisposable)reader).Dispose();
                 return watch.ElapsedMilliseconds;
             } finally {
                 release.Set();
                 foreach(Thread worker in workers) worker.Join();
-                Array.Copy(original,workers,workers.Length);
+                field.SetValue(reader,original);
                 foreach(Thread worker in original) worker.Join(1000);
             }
         }
@@ -408,7 +410,7 @@ try {
     Assert ($events.Count -eq 0) 'Reconnect must break sample continuity'
     Mode 'stall';$events=@(Collect-Until $reader {param($events,$progress) $events.Count -gt 0} 'first stall suspicion')
     $events+=@(Wait-Mode $reader 1.3 6)
-    Assert ($events.Count -gt 0 -and @($events|Where-Object {$_.kind -ne 'stall-suspect' -or $_.tag -ne 'path-a'}).Count -eq 0) 'Two persistent upload-only connections should suspect their path'
+    Assert ($events.Count -gt 0 -and $events.Count -le 2 -and @($events|Where-Object {$_.kind -ne 'stall-suspect' -or $_.tag -ne 'path-a'}).Count -eq 0) 'Two persistent upload-only connections should suspect their path at most twice'
     Mode 'download';$null=Wait-Mode $reader 0 2
     Mode 'stall';$events=@(Collect-Until $reader {param($events,$progress) $events.Count -gt 0} 'suspicion after recovery')
     Assert ($events.Count -gt 0 -and @($events|Where-Object {$_.kind -ne 'stall-suspect' -or $_.tag -ne 'path-a'}).Count -eq 0) 'Recovery must reset suspicion'
@@ -430,10 +432,10 @@ try {
     Assert ($events.Count -eq 17) 'Empty allowlist must still parse the complete error batch'
     Assert (@($events|Where-Object {$_.tag -ne ''}).Count -eq 0) 'Empty allowlist must not trust any path tag'
     $stop=[DelayedTransportWorkers]::BeginStop($reader)
-    # Bound completion with scheduler headroom; 1.5 s cannot reliably distinguish
-    # Join budgets of 1 s and 2 s on a loaded host. Production keeps the shared deadline.
-    $null=Wait-Until {$stop.IsCompleted} 'Dispose with blocked workers' (1+5)
+    # Six blocked workers separate a shared 1 s deadline from sequential 6 s waits.
+    $null=Wait-Until {$stop.IsCompleted} 'Dispose with blocked workers' 10
     Assert (-not $stop.IsFaulted) ("Dispose failed: "+$stop.Exception)
+    Assert ($stop.Result -lt 4000) ("Dispose exceeded shared deadline: "+$stop.Result+' ms')
     Stop-TransportEvents $reader;$reader=$null
     Mode 'idle'
 
@@ -451,6 +453,14 @@ try {
     Stop-TransportDirectCheck $check;$check=$null
 
     $ports=''' + ('@{' + ';'.join(k+'='+str(v) for k, v in ports.items()) + '}') + '''
+    # Inject WSAECONNABORTED: a loopback peer cannot deterministically cause a local stack abort.
+    $failure=[RemoteAgents.TransportCheck].GetMethod('BannerFailure',[Reflection.BindingFlags]'NonPublic,Static')
+    $aborted=[Net.Sockets.SocketException]::new([int][Net.Sockets.SocketError]::ConnectionAborted)
+    Assert ($aborted.SocketErrorCode -eq [Net.Sockets.SocketError]::ConnectionAborted) 'Abort fixture socket code'
+    foreach ($abortError in @($aborted,[IO.IOException]::new('test abort',$aborted))) {
+        Assert ($failure.Invoke($null,[object[]]@($abortError,0)) -eq 'timeout') 'Local abort without bytes must remain timeout'
+        Assert ($failure.Invoke($null,[object[]]@($abortError,12)) -eq 'stalled') 'Local abort after partial bytes must remain stalled'
+    }
     [TransportCheckFailures]::Start()
     $bannerTimeout=3;$schedulerSlack=5
     foreach ($mode in @('banner','partial','hang','fin','rst','refused','trickle')) {
@@ -484,7 +494,7 @@ try {
     $e=Wait-Check $check 'path';Assert ($e.code -eq 'process-exited') 'Start failure must produce contract event'
     Stop-TransportPathCheck $check;$check=$null
     'PASS: event subscriptions, classifier, stall continuity, reconnect, checks, cleanup'
-    'PASS: FIN/RST -> process-exited, silent peer -> timeout, empty tags, bounded Dispose cleanup'
+    'PASS: FIN/RST -> process-exited, local abort -> timeout/stalled, empty tags, shared Dispose deadline'
 } finally {
     if ($reader) {Stop-TransportEvents $reader}
     if ($check) {if ($check.PSObject.Properties['mode']) {Stop-TransportPathCheck $check} else {Stop-TransportDirectCheck $check}}

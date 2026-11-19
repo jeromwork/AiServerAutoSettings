@@ -223,7 +223,8 @@ namespace RemoteAgents {
    for(Exception current=error;current!=null;current=current.InnerException) {
     SocketException socket=current as SocketException;
     if(socket==null) continue;
-    if(socket.SocketErrorCode==SocketError.ConnectionReset || socket.SocketErrorCode==SocketError.ConnectionAborted) return "process-exited";
+    if(socket.SocketErrorCode==SocketError.ConnectionReset) return "process-exited";
+    // ConnectionAborted can originate in the local stack; use timeout/stalled below.
     if(socket.SocketErrorCode==SocketError.ConnectionRefused) return "refused";
    }
    return bytes>0?"stalled":"timeout";
