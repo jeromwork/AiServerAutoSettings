@@ -13,6 +13,8 @@
   lan_pc_access.py install   положить код и включить таймер (root)
 """
 import importlib.util
+import ipaddress
+import re
 import json
 import os
 from pathlib import Path
@@ -65,16 +67,65 @@ def policy(conf, lan_dir=LAN_DIR):
     lans = []
     share.require(isinstance(conf, dict) and isinstance(conf.get('lans', []), list), 'lans: нужен список.')
     for item in conf.get('lans', []):
+        share.require(isinstance(item, dict), 'lans: нужен объект сети.')
+        share.require(not set(item) - {'name', 'subnets', 'domains', 'dnsServers', 'hosts', 'testHost', 'testPort'},
+                      'lans: неизвестные поля; секреты VPN здесь не нужны.')
         name = item.get('name', '')
         share.require(isinstance(name, str) and share.LAN_NAME.fullmatch(name), 'lans.name: [a-z][a-z0-9]{0,6}.')
         subnets = item.get('subnets', 'auto')
+        share.require(subnets == 'auto' or isinstance(subnets, list) and all(isinstance(n, str) for n in subnets), 'lans.subnets: auto или массив CIDR.')
         subnets = auto_subnets(name, lan_dir) if subnets == 'auto' else sorted(set(str(share.cidr(n)) for n in subnets))
         share.require(subnets, 'ЛВС ' + name + ': нет подсетей (подтверждённых менеджером ЛВС или в файле).')
-        domains = sorted(set(share.domain(d) for d in item.get('domains', [])))
-        lans.append(dict(name=name, subnets=subnets, lanSubnets=subnets, domains=domains, forwards=[]))
+        domains = item.get('domains', [])
+        share.require(isinstance(domains, list) and all(isinstance(d, str) for d in domains), 'lans.domains: нужен массив имён.')
+        domains = sorted(set(share.domain(d) for d in domains))
+        dns = item.get('dnsServers', [])
+        share.require(isinstance(dns, list) and len(dns) <= 4 and all(isinstance(d, str) for d in dns), 'lans.dnsServers: массив до 4 IPv4.')
+        share.require(len(dns) == len(set(dns)), 'lans.dnsServers: адреса повторяются.')
+        for address in dns:
+            try:
+                ip = ipaddress.IPv4Address(address)
+            except ValueError:
+                raise Error('lans.dnsServers: нужен IPv4.') from None
+            share.require(any(ip in share.cidr(n) for n in subnets), 'lans.dnsServers: DNS должен входить в подсети этой сети.')
+        hosts = item.get('hosts', [])
+        share.require(isinstance(hosts, list) and len(hosts) <= 100 and all(isinstance(h, str) for h in hosts), 'lans.hosts: массив до 100 имён.')
+        share.require(len(hosts) == len(set(hosts)), 'lans.hosts: имена повторяются.')
+        for host in hosts:
+            share.require(not host.startswith('*.') and share.domain(host) == host and any(
+                host.endswith(d[1:]) if d.startswith('*.') else host == d for d in domains),
+                'lans.hosts: полное имя должно входить в domains своей сети.')
+        share.require(not hosts or dns, 'lans.hosts: нужны dnsServers.')
+        row = dict(name=name, subnets=subnets, lanSubnets=subnets, domains=domains, forwards=[], dnsServers=dns, hosts=hosts)
+        if 'testHost' in item or 'testPort' in item:
+            host, port = item.get('testHost'), item.get('testPort', 22)
+            share.require(isinstance(host, str) and re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9.-]*', host)
+                          and type(port) is int and 1 <= port <= 65535, 'lans: нужен корректный testHost/testPort.')
+            try:
+                allowed = any(ipaddress.IPv4Address(host) in share.cidr(n) for n in subnets)
+            except ValueError:
+                allowed = any(host.lower().endswith(d[1:]) if d.startswith('*.') else host.lower() == d for d in domains)
+            share.require(allowed, 'lans.testHost: хост должен входить в подсети или domains этой сети.')
+            row.update(testHost=host, testPort=port)
+        share.require(not any(x['name'] == name for x in lans), 'lans.name: имена повторяются.')
+        lans.append(row)
     lans.sort(key=lambda x: x['name'])
     return dict(subnets=sorted({n for x in lans for n in x['subnets']}), domains=sorted({d for x in lans for d in x['domains']}),
                 forwards=[], lanSubnets=sorted({n for x in lans for n in x['subnets']}), lans=lans)
+
+
+def computer_networks(conf, lan_dir=LAN_DIR):
+    """Only the public LAN contract; never read runtime VPN credentials."""
+    rows = []
+    for item in policy(conf, lan_dir)['lans']:
+        share.require(item.get('testHost'), 'ЛВС ' + item['name'] + ': для экспорта задайте testHost/testPort в lan-pc-access.json.')
+        share.require(not item['domains'] or item['dnsServers'], 'ЛВС ' + item['name'] + ': для экспорта доменов задайте dnsServers.')
+        public = {k: item[k] for k in ('subnets', 'domains', 'dnsServers')}
+        public['enabled'] = True
+        if item['hosts']:
+            public['hosts'] = item['hosts']
+        rows.append(dict(name=item['name'], testHost=item['testHost'], testPort=item['testPort'], share=public))
+    return rows
 
 
 def plan(current, conf, previous, lan_dir=LAN_DIR):

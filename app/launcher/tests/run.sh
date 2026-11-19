@@ -184,6 +184,7 @@ wait_for_memory
 # Extended engine fixtures remain available for focused diagnostics.
 # Config format, enc1, vault and materialization (stream A entry point; own output directory).
 wait_for_memory
+# LAN entry point also runs NetHelperVersionTests: service/protocol fingerprint and HelperVersion gate.
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:LanTests=true -- "$repo"
 wait_for_memory
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ConfigTests=true

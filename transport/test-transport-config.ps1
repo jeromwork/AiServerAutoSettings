@@ -1,11 +1,75 @@
 ﻿#requires -Version 5.1
 [CmdletBinding()]
-param([string]$OutputConfig='',[string]$SingBox='')
+param([string]$OutputConfig='',[string]$SingBox='',[switch]$LanOnly)
 . (Join-Path $PSScriptRoot 'Transport.Common.ps1')
 $work=Join-Path ([IO.Path]::GetTempPath()) ('transport-test-'+[guid]::NewGuid().ToString('N'));[void][IO.Directory]::CreateDirectory($work)
 $count=0
 function Assert($Condition,[string]$Message){if(-not $Condition){throw ('Тест: '+$Message)};$script:count++}
+
+# Evaluate the generated ACL with supplied DNS answers: no DNS queries or sockets.
+function Test-LanRuleMatch($Rule,[string]$Name,[string]$Address) {
+    if($Rule.type -eq 'logical'){
+        $values=@($Rule.rules|ForEach-Object {Test-LanRuleMatch $_ $Name $Address})
+        if($Rule.mode -eq 'and'){return $false -notin $values}
+        return $true -in $values
+    }
+    if($Rule.inbound -and 'lan-in' -notin $Rule.inbound){return $false}
+    if($Rule.domain){return $Name -in $Rule.domain}
+    if($Rule.domain_regex){foreach($pattern in $Rule.domain_regex){if($Name -match $pattern){return $true}};return $false}
+    if($Rule.ip_cidr){
+        foreach($answer in $Address.Split(',')){
+            $ip=Assert-LanIPv4 $answer
+            foreach($cidr in $Rule.ip_cidr){$parts=$cidr.Split('/');$start=Assert-LanIPv4 $parts[0];if($ip -ge $start -and $ip -lt $start+[Math]::Pow(2,32-[int]$parts[1])){return $true}}
+        }
+        return $false
+    }
+    return $true
+}
+function Get-LanDecision($Config,[string]$Name,[string]$Address) {
+    foreach($rule in $Config.route.rules){
+        if($rule.action -eq 'resolve'){continue}
+        if(Test-LanRuleMatch $rule $Name $Address){return $rule.action}
+    }
+    return 'fallthrough'
+}
+function Test-LanIngress($Root) {
+    $fixture=Read-TransportJson (Join-Path $PSScriptRoot '../server/lan-pc-access.clinic.example.json')
+    $clinic=$fixture.lans[0]
+    $raw=[pscustomobject]@{profile=[pscustomobject]@{lan=@(
+        [pscustomobject]@{name=$clinic.name;testHost=$clinic.testHost;testPort=$clinic.testPort;share=[pscustomobject]@{subnets=$clinic.subnets;domains=$clinic.domains;dnsServers=$clinic.dnsServers;hosts=$clinic.hosts}},
+        [pscustomobject]@{name='off';testHost='10.90.0.1';testPort=22;share=[pscustomobject]@{enabled=$false;subnets=@('10.90.0.0/24');domains=@('*.off.example.org');dnsServers=@('10.90.0.53')}},
+        [pscustomobject]@{name='other';testHost='10.91.0.1';testPort=22;share=[pscustomobject]@{subnets=@('10.91.0.0/24');domains=@('*.other.example.org');dnsServers=@('10.91.0.53')}}
+    )}}
+    $settings=[pscustomobject]@{Root=$Root;Options=@{sshPort=2222;syncPort=22001;lanProxyPort=17880;vpnInPort=17881;apiPort=29090;bindPhysical=$false};Profile=[pscustomobject]@{};Channel=[pscustomobject]@{inbounds=@()};Transport=[pscustomobject]@{};Lan=(Get-TransportLan $raw)}
+    $paths=[pscustomobject]@{Candidates=@([pscustomobject]@{tag='fixture';port=26000});Outbounds=@(@{type='socks';tag='fixture';server='127.0.0.1';server_port=28000})}
+    $cfg=New-TransportConfig $settings $paths 'test-secret' 'fixture'
+    Assert (@($cfg.dns.servers|Where-Object {$_.tag -like 'lan-dns-*'}).Count -eq 2 -and $cfg.dns.servers[1].type -eq 'tcp' -and $cfg.dns.servers[1].server -eq '192.168.88.11' -and $cfg.dns.servers[1].detour -eq 'active') 'каждая включённая ЛВС резолвится своим DNS по TCP через канал'
+    Assert ($cfg.dns.final -eq 'transport-local' -and $cfg.dns.servers[0].type -eq 'local') 'обычные имена транспорта сохраняют системный DNS'
+    Assert ($settings.Lan.networks[0].hosts[0] -eq 'portal.eastclinic.ru') 'hosts доходят до транспорта'
+    Assert ((Get-LanDecision $cfg 'portal.eastclinic.ru' '192.168.88.244') -eq 'route') 'CONNECT по имени с ответом DNS из своей подсети разрешён'
+    Assert ((Get-LanDecision $cfg 'portal.eastclinic.ru' '10.91.0.10') -eq 'reject') 'имя не получает доступ к подсети другой включённой ЛВС'
+    foreach($public in @('151.236.83.93','212.41.27.201')){
+        Assert ((Get-LanDecision $cfg 'eastclinic.ru' $public) -eq 'reject') 'корень wildcard не разрешён'
+        Assert ((Get-LanDecision $cfg 'mobile.eastclinic.ru' $public) -eq 'reject') 'публичный ответ для разрешённого имени не уходит в ЛВС'
+    }
+    Assert ((Get-LanDecision $cfg 'portal.eastclinic.ru' '192.168.88.244,151.236.83.93') -eq 'reject') 'смешанный частный и публичный DNS-ответ отклоняется целиком'
+    Assert ((Get-LanDecision $cfg 'eastclinic.ru' '192.168.88.244') -eq 'reject') '*.домен не включает корень даже с частным ответом'
+    Assert ((Get-LanDecision $cfg 'unlisted.example.org' '192.168.88.244') -eq 'reject') 'неразрешённое имя не проходит через агрегат подсетей'
+    Assert ((Get-LanDecision $cfg 'x.off.example.org' '10.90.0.10') -eq 'reject') 'выключенная сеть не разрешает имена'
+    Assert ((Get-LanDecision $cfg '' '192.168.88.244') -eq 'route') 'числовые адреса ЛВС сохранены'
+    Assert ((Get-LanDecision $cfg '' '151.236.83.93') -eq 'reject') 'завершающий reject числовых публичных адресов сохранён'
+    $raw.profile.lan[0].share.domains=@('portal.eastclinic.ru')
+    $settings.Lan=Get-TransportLan $raw
+    $exact=New-TransportConfig $settings $paths 'test-secret' 'fixture'
+    Assert ((Get-LanDecision $exact 'portal.eastclinic.ru' '192.168.88.244') -eq 'route' -and (Get-LanDecision $exact 'sub.portal.eastclinic.ru' '192.168.88.244') -eq 'reject') 'точное имя не включает поддомены'
+    $raw.profile.lan[0].share|Add-Member -Force enabled $false;$raw.profile.lan[2].share|Add-Member -Force enabled $false
+    $settings.Lan=Get-TransportLan $raw
+    $disabled=New-TransportConfig $settings $paths 'test-secret' 'fixture'
+    Assert (-not $disabled.dns -and (Get-LanDecision $disabled 'portal.eastclinic.ru' '192.168.88.244') -eq 'reject') 'все сети выключены: нет DNS, доступ закрыт'
+    if($SingBox){$file=Join-Path $Root 'lan-only-check.json';Write-TransportJson $file $cfg;Test-TransportConfigFile $SingBox $file}
+}
 try{
+    if($LanOnly){Test-LanIngress $work;Write-Output ('OK: '+$count+' LAN проверок без сети');return}
     # LAN contract only: no sockets, TUN, DNS requests or server changes.
     $lanOld=('{"profile":{"lan":[{"name":"office","kind":"openvpn","testHost":"10.123.0.10","testPort":443,"share":{"subnets":["10.123.0.0/24"]}}]}}'.Insert(1,"`r`n")|ConvertFrom-Json)
     $lan=Get-TransportLan $lanOld
@@ -300,8 +364,8 @@ try{
     $helperSettings=Copy-TransportObject $settings;$helperSettings|Add-Member Lan (Get-TransportLan (Read-TransportJson $lanFile))
     $helperConfig=New-TransportConfig $helperSettings $paths 'test-secret' 'vless-direct'
     $lanRules=@($helperConfig.route.rules|Where-Object {$_.inbound -contains 'lan-in'})
-    Assert ($lanRules.Count -eq 2 -and $lanRules[0].action -eq 'route' -and $lanRules[0].outbound -eq 'active' -and ($lanRules[0].ip_cidr -join ',') -eq '10.71.0.0/24,172.22.0.0/16' -and $lanRules[1].action -eq 'reject') 'lan-in: только подсети всех включённых сетей, затем reject'
-    Assert (@($lanRules|Where-Object {$_.domain -or $_.domain_regex -or $_.port}).Count -eq 0 -and '192.168.77.0/24' -notin @($helperSettings.Lan.subnets) -and '192.168.78.0/24' -notin @($helperSettings.Lan.subnets)) 'выключенные сети, domains и forwards не расширяют lan-in'
+    Assert ($lanRules[-1].action -eq 'reject' -and @($lanRules|Where-Object {$_.action -eq 'route' -and ($_.ip_cidr -join ',') -eq '10.71.0.0/24,172.22.0.0/16'}).Count -eq 1) 'lan-in: числовые адреса включённых сетей и завершающий reject'
+    Assert (@($lanRules|Where-Object {$_.port}).Count -eq 0 -and '192.168.77.0/24' -notin @($helperSettings.Lan.subnets) -and '192.168.78.0/24' -notin @($helperSettings.Lan.subnets)) 'выключенные сети и forwards не расширяют lan-in';Test-LanIngress $work
     $vpnRules=@($helperConfig.route.rules|Where-Object {$_.inbound -contains 'vpn-in'})
     Assert ($vpnRules.Count -eq 1 -and $vpnRules[0].action -eq 'route' -and $vpnRules[0].outbound -eq 'active' -and -not $vpnRules[0].ip_cidr) 'vpn-in направляет всё в active'
     $legacyLan=Get-TransportLan (ConvertFrom-Json '{"profile":{"lan":[{"testHost":"10.72.0.1","share":{"subnets":["10.72.0.0/24"]}}]}}')

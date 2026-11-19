@@ -24,7 +24,14 @@
 
 Состав задаёт `bundle-files.txt`: явные файлы, разрешённые шаблоны; `?` означает необязательный шаблон.
 Тексты нормализуются в LF, PowerShell получает UTF-8 BOM для Windows PowerShell 5.1.
-Syncthing/sing-box и личные профили не упаковываются. Загрузку их закреплённых версий выполняют мастер и Install-RemoteDisk.ps1 (SHA256);
+Полный EXE содержит `RemoteAgents.InitialBundle.zip` с sing-box и OpenSSH из
+`bundle-binaries.json`: сборка проверяет SHA-256 архива и каждого бинарника.
+`bundle.py verify-initial <zip>` и publish проекта отклоняют начальный бандл без
+этих файлов или с неверным хешем. OTA удаляет отдельные бинарники из внешнего ZIP,
+но сохраняет полный EXE с его встроенным архивом. Поэтому помощник восстанавливает
+sing-box после OTA без загрузки из сети. Обычный `dotnet build` без BundlePath
+допускает тонкий EXE только для разработки; выпуск — через `build-exe.sh`.
+Syncthing и личные профили не упаковываются; Syncthing загружает Install-RemoteDisk.ps1 (SHA256);
 формат `binaries` поддерживает будущую загрузку отдельных файлов по HTTPS с SHA256 и кэшем.
 
 Подробности и проверки Windows: [docs/LAUNCHER.md](../docs/LAUNCHER.md).

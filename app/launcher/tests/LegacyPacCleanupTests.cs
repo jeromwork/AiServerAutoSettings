@@ -33,8 +33,8 @@ namespace RemoteAgents.Launcher
                 Console.WriteLine("PASS: LegacyPacCleanup");
             } finally { if (Directory.Exists(home)) Directory.Delete(home, true); }
         }
-        // -p:LanTests=true entry point: the LAN suites (TUN/NRPT/DNS mode, hosts block) run together with the PAC cleanup.
-        static int Main(string[] args) { Run(); LanTunTests.Run(); LanHostsTests.Run(); return 0; }
+        // -p:LanTests=true includes helper setup/protocol regressions alongside the LAN suites.
+        static int Main(string[] args) { Run(); LanTunTests.Run(); LanHostsTests.Run(); NetHelperTests.Run(); return 0; }
     }
     internal static class Stage6PortableEntry
     {

@@ -434,7 +434,7 @@ function Get-TransportLan($Config) {
         $name=[string]$item.name
         if($names.ContainsKey($name)){throw 'lan: имена сетей повторяются'};$names[$name]=$true
         if($null -eq $item.share){continue}
-        $share=$item.share;$oneSubnets=@();$oneDomains=@();$oneDns=@()
+        $share=$item.share;$oneSubnets=@();$oneDomains=@();$oneDns=@();$oneHosts=@()
         $keys=if($share -is [Collections.IDictionary]){@($share.Keys)}else{@($share.PSObject.Properties.Name)}
         foreach($subnet in @($share.subnets|Where-Object {$null -ne $_})){Assert-LanCidr ([string]$subnet);$oneSubnets+=[string]$subnet}
         foreach($domain in @($share.domains|Where-Object {$null -ne $_})){Assert-LanDomain ([string]$domain);$oneDomains+=([string]$domain).ToLowerInvariant()}
@@ -446,12 +446,22 @@ function Get-TransportLan($Config) {
         }
         if($oneDns.Count -gt 4){throw 'share.dnsServers: не более 4 DNS-серверов'}
         if($oneDomains.Count -gt 0 -and $oneDns.Count -eq 0){throw ('Для доменов сети '+$name+' укажите share.dnsServers (DNS-серверы внутри ЛВС)')}
+        if('hosts' -in $keys -and $share.hosts -isnot [Array]){throw 'share.hosts: нужен массив полных имён'}
+        foreach($hostEntry in @($share.hosts|Where-Object {$null -ne $_})){
+            if($hostEntry -isnot [string] -or $hostEntry.StartsWith('*.')){throw 'share.hosts: нужно полное имя без *'}
+            Assert-LanDomain $hostEntry
+            $hostEntry=$hostEntry.ToLowerInvariant();$allowedHost=$false
+            foreach($domain in $oneDomains){if(($domain.StartsWith('*.') -and $hostEntry.EndsWith($domain.Substring(1),[StringComparison]::Ordinal)) -or $hostEntry -ceq $domain){$allowedHost=$true}}
+            if(-not $allowedHost -or $hostEntry -in $oneHosts){throw 'share.hosts: нужны уникальные имена из domains этой сети'}
+            $oneHosts+=$hostEntry
+        }
+        if($oneHosts.Count -gt 100 -or ($oneHosts.Count -gt 0 -and $oneDns.Count -eq 0)){throw 'share.hosts: не более 100 имён; нужны dnsServers'}
         $enabled=if('enabled' -in $keys){$share.enabled}else{$true}
         if($enabled -isnot [bool]){throw 'share.enabled: нужно true или false'}
         $hostName=[string](Get-TransportValue $item 'testHost' (Get-TransportValue $item 'host' ''))
         $port=Get-TransportValue $item 'testPort' (Get-TransportValue $item 'port' 22)
         # Keep each network separate, including disabled rows. Deprecated forwards are ignored.
-        $networks+=[pscustomobject]@{name=$name;subnets=@($oneSubnets|Select-Object -Unique);domains=@($oneDomains|Select-Object -Unique);dnsServers=@($oneDns);testHost=$hostName;testPort=$port;enabled=$enabled}
+        $networks+=[pscustomobject]@{name=$name;subnets=@($oneSubnets|Select-Object -Unique);domains=@($oneDomains|Select-Object -Unique);dnsServers=@($oneDns);hosts=@($oneHosts);testHost=$hostName;testPort=$port;enabled=$enabled}
         if(-not $enabled -or $oneSubnets.Count+$oneDomains.Count -eq 0){continue}
         if(-not $hostName -or $port -is [bool] -or $port -isnot [ValueType] -or [double]$port -ne [Math]::Floor([double]$port) -or [int]$port -lt 1 -or [int]$port -gt 65535 -or $hostName -notmatch '^[a-zA-Z0-9][a-zA-Z0-9.-]*$'){throw 'lan.share: нужен корректный testHost/testPort'}
         $allowed=$false
@@ -756,6 +766,31 @@ function Get-TransportCandidates($Settings,[string]$Root) {
     [pscustomobject]@{Outbounds=@($out.ToArray()|Where-Object {$needed.ContainsKey($_.tag)});Candidates=$enabled;AllCandidates=@($all.ToArray());Tunnels=@($tunnels.ToArray()|Where-Object {$_.tag -in $enabledTags})}
 }
 
+# Complement the IPv4 allowlist: sing-box's CIDR matcher accepts ANY resolved A address.
+# Rejecting this set before routing also rejects mixed private/public DNS answers.
+function Get-LanExcludedCidrs($Subnets) {
+    $ranges=@($Subnets|ForEach-Object {
+        Assert-LanCidr $_
+        $parts=$_.Split('/');[uint64]$start=Assert-LanIPv4 $parts[0]
+        [pscustomobject]@{start=$start;end=($start+[uint64][Math]::Pow(2,32-[int]$parts[1])-1)}
+    }|Sort-Object start)
+    [uint64]$cursor=0;$gaps=@()
+    foreach($range in $ranges){
+        if($range.start -gt $cursor){$gaps+=@{start=$cursor;end=($range.start-1)}}
+        if($range.end+1 -gt $cursor){$cursor=[uint64]($range.end+1)}
+    }
+    if($cursor -lt 4294967296){$gaps+=@{start=$cursor;end=[uint64]4294967295}}
+    foreach($gap in $gaps){
+        [uint64]$first=$gap.start
+        while($first -le $gap.end){
+            $bits=32;[uint64]$size=1
+            while($bits -gt 0 -and $first % ($size*2) -eq 0 -and $first+$size*2-1 -le $gap.end){$size*=2;$bits--}
+            $ip=(@([Math]::Floor($first/16777216),([Math]::Floor($first/65536)%256),([Math]::Floor($first/256)%256),($first%256)) -join '.')
+            $ip+'/'+$bits;$first+=$size
+        }
+    }
+}
+
 function New-TransportConfig($Settings,$Paths,[string]$Secret,[string]$DefaultTag,[string]$Interface='') {
     $o=$Settings.Options;$portDefaults=Get-TransportPortDefaults;$sync=@($Settings.Channel.inbounds|Where-Object {$_.tag -eq 'sync'}|Select-Object -First 1)
     if($sync.Count -and ([int]$sync[0].override_port -lt 1 -or [int]$sync[0].override_port -gt 65535)){throw 'Неверный порт Syncthing канала'}
@@ -784,10 +819,29 @@ function New-TransportConfig($Settings,$Paths,[string]$Secret,[string]$DefaultTa
     $users=@(@{username=$helper.user;password=$helper.password})
     $in+=@{type='mixed';tag='lan-in';listen='127.0.0.1';listen_port=[int](Get-TransportValue $o 'lanProxyPort' $portDefaults.lanProxyPort);users=$users}
     $in+=@{type='mixed';tag='vpn-in';listen='127.0.0.1';listen_port=[int](Get-TransportValue $o 'vpnInPort' $portDefaults.vpnInPort);users=$users}
-    $lan=Get-TransportValue $Settings 'Lan' $null
+    $lanDns=@();$lan=Get-TransportValue $Settings 'Lan' $null
     if($lan -and $lan.enabled){
+        $networkIndex=0
+        foreach($network in @($lan.networks|Where-Object {$_.enabled})){
+            $matches=@();$exact=@($network.domains|Where-Object {-not $_.StartsWith('*.')})+@($network.hosts|Where-Object {$_})
+            if($exact.Count){$matches+=@{domain=@($exact|Select-Object -Unique)}}
+            $wildcards=@($network.domains|Where-Object {$_.StartsWith('*.')}|ForEach-Object {'^.+\.'+[regex]::Escape($_.Substring(2))+'$'})
+            if($wildcards.Count){$matches+=@{domain_regex=$wildcards}}
+            if(-not $matches.Count){continue}
+            if(-not @($network.dnsServers).Count){throw 'lan-in: для имён нужен DNS этой ЛВС'}
+            $dnsTag='lan-dns-'+$networkIndex;$networkIndex++
+            # DNS uses TCP through the selected channel, even when Happ blocks local port 53.
+            $lanDns+=@{type='tcp';tag=$dnsTag;server=[string]$network.dnsServers[0];server_port=53;detour='active'}
+            $nameMatch=@{type='logical';mode='or';rules=$matches}
+            $rules+=@{type='logical';mode='and';rules=@(@{inbound=@('lan-in')},$nameMatch);action='resolve';server=$dnsTag;strategy='ipv4_only'}
+            $rules+=@{type='logical';mode='and';rules=@(@{inbound=@('lan-in')},$nameMatch,@{ip_cidr=@(Get-LanExcludedCidrs $network.subnets)});action='reject'}
+            # Domain and CIDR must be separate logical operands: default matchers combine them with OR.
+            $rules+=@{type='logical';mode='and';rules=@(@{inbound=@('lan-in')},$nameMatch,@{ip_cidr=@($network.subnets)});action='route';outbound='active'}
+            $rules+=@{type='logical';mode='and';rules=@(@{inbound=@('lan-in')},$nameMatch);action='reject'}
+        }
+        # Unknown names and public/foreign DNS answers must never fall through to the aggregate IP rule.
+        if($lanDns.Count){$rules+=@{inbound=@('lan-in');domain_regex=@('.+');action='reject'}}
         if(@($lan.subnets).Count){$rules+=@{inbound=@('lan-in');ip_cidr=@($lan.subnets);action='route';outbound='active'}}
-
     }
     $rules+=@{inbound=@('lan-in');action='reject'}
     $rules+=@{inbound=@('vpn-in');action='route';outbound='active'}
@@ -802,7 +856,9 @@ function New-TransportConfig($Settings,$Paths,[string]$Secret,[string]$DefaultTa
     }
     $outs+=@{type='socks';tag='unavailable';server='127.0.0.1';server_port=1;version='5'}
     $outs+=@{type='selector';tag='active';outbounds=$tags;default=$DefaultTag;interrupt_exist_connections=$false}
-    @{log=@{disabled=$false;level='warn';timestamp=$false};inbounds=$in;outbounds=$outs;route=@{rules=$rules;final='active';auto_detect_interface=[bool]$o.bindPhysical};experimental=@{clash_api=@{external_controller=('127.0.0.1:'+$o.apiPort);secret=$Secret}}}
+    $config=@{log=@{disabled=$false;level='warn';timestamp=$false};inbounds=$in;outbounds=$outs;route=@{rules=$rules;final='active';auto_detect_interface=[bool]$o.bindPhysical};experimental=@{clash_api=@{external_controller=('127.0.0.1:'+$o.apiPort);secret=$Secret}}}
+    if($lanDns.Count){$config.dns=@{servers=(@(@{type='local';tag='transport-local'})+$lanDns);final='transport-local';strategy='ipv4_only'}}
+    return $config
 }
 function Get-TransportSecret([string]$Root) {
     $file=Join-Path $Root 'state/transport-secret.json'

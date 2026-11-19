@@ -67,6 +67,31 @@ class PackagingTests(unittest.TestCase):
                     path = args[args.index('-File')+1].replace('{bundle}\\', '').replace('\\', '/')
                     self.assertIn(path, names)
 
+    def test_initial_bundle_rejects_missing_corrupt_and_duplicate_pinned_image(self):
+        pins = self.root / 'initial-pins.json'
+        image = b'MZ expected pinned helper'
+        pins.write_text(json.dumps({'binaries': [dict(name='sing-box', url='https://example.invalid/helper.zip',
+            sha256='0' * 64, member='sing-box.exe', memberSha256=hashlib.sha256(image).hexdigest(), target='transport/sing-box.exe')]}))
+        archive = self.root / 'initial.zip'
+        with zipfile.ZipFile(archive, 'w') as z:
+            z.writestr('bundle-version.txt', '20261119.000000-stage1')
+        with self.assertRaisesRegex(ValueError, 'transport/sing-box.exe'):
+            bundle.verify_initial(archive, pins)
+        with zipfile.ZipFile(archive, 'w') as z:
+            z.writestr('transport/sing-box.exe', b'corrupt')
+        with self.assertRaisesRegex(ValueError, 'SHA-256'):
+            bundle.verify_initial(archive, pins)
+        with zipfile.ZipFile(archive, 'w') as z:
+            z.writestr('transport/sing-box.exe', image)
+        self.assertTrue(bundle.verify_initial(archive, pins))
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            with zipfile.ZipFile(archive, 'a') as z:
+                z.writestr('transport/sing-box.exe', image)
+        with self.assertRaisesRegex(ValueError, 'transport/sing-box.exe'):
+            bundle.verify_initial(archive, pins)
+
     def test_pinned_binaries_only_with_both_hashes_and_not_in_updates(self):
         # build-exe.sh embeds pinned third-party binaries (sing-box for VPN-first) — verified twice, never in OTA.
         cache = self.root / 'cache'; cache.mkdir()
@@ -84,6 +109,7 @@ class PackagingTests(unittest.TestCase):
         os.environ['REMOTEAGENTS_BINARY_CACHE'] = str(cache)
         try:
             out = bundle.make('20261109.123457-test', self.root / 'with-binaries', binaries=True)
+            self.assertTrue(bundle.verify_initial(out, pins))
             with zipfile.ZipFile(out) as z:
                 self.assertEqual(z.read('transport/sing-box.exe'), member)
                 self.assertIn('build/bundle-binaries.json', z.namelist())
