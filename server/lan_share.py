@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import sys
 
 STATE = '/var/lib/remoteagents/lan-share/pending'
 MANIFEST = '/etc/remoteagents/server-apply/lan-share.json'
@@ -269,6 +270,14 @@ def _reconcile(e, apply, transaction):
     s, p = e.s, policy(e.config)
     manifest = s.read(MANIFEST, {})
     pending = s.read(STATE + '/state.json')
+    # The periodic reconcile never starts or re-arms a share transaction (the 17-18.11 loop:
+    # rollback timer undoes it, reconcile applies again). Only an owner apply/confirm may.
+    periodic = getattr(e, 'periodic', False)
+    if periodic:
+        apply = False
+    if pending and periodic:
+        print('lan-share pending ждёт confirm или отката', file=sys.stderr, flush=True)
+        return e.row('lanShare', 'ready', 'lan-share pending ждёт confirm или отката; периодический reconcile ничего не применяет')
     if pending:
         require(pending['policyHash'] == digest(p), 'share изменён до confirm; дождитесь отката.')
         if apply and e.ssh_checked:
@@ -328,7 +337,8 @@ def _reconcile(e, apply, transaction):
     if not changes:
         return e.row('lanShare', 'ready', 'Доступ с ПК: назначения разрешены; остальные правила сохранены')
     if not apply:
-        return e.row('lanShare', 'change', 'Нужно обновить разрешённые назначения канала')
+        return e.row('lanShare', 'change', 'Нужно обновить разрешённые назначения канала' +
+                     ('; периодический reconcile их не применяет — нужен apply владельца' if periodic else ''))
     # Do not enable bypasses for an unverified LAN. Its manager proves route get,
     # interface tun-lan-NAME and the host TCP probe before this part is reached.
     for item in e.config.get('lan', []):
