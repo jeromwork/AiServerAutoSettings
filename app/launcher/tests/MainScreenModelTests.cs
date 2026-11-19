@@ -22,8 +22,57 @@ namespace RemoteAgents.Launcher
         }
         internal static void Run()
         {
-            Colours(); Banners(); VpnCard(); DiskCard(); AccountsAndHelper(); Reports(); LinkPhases(); RenderGate();
+            Colours(); Banners(); VpnCard(); DiskCard(); AccountsAndHelper(); Reports(); LinkPhases(); SearchingStatus(); RenderGate();
             Console.WriteLine("PASS: " + count + " main screen checks");
+        }
+        // Focused entry point: -p:StartupObject=RemoteAgents.Launcher.MainScreenModelTests.
+        // No unrelated transport/service/disk/update suites and no application processes.
+        static int Main()
+        {
+            Run(); TrayExtrasTests.RunSwitchStatus(); WindowModelTests.Run(); return 0;
+        }
+        static void SearchingStatus()
+        {
+            var facts = Healthy();
+            string reason = "Все пути временно недоступны, повторяю";
+            foreach (bool ok in new[] { false, true }) {
+                facts.Transport = Data(Json.Encode(new { ok = ok, phase = "searching", checkingSince = "2020-01-01T00:00:00Z",
+                    localNet = "unknown", reason = new { code = "all-paths-penalized", text = reason, since = "2020-01-01T00:00:00Z" } }));
+                var view = MainScreenModel.Build(facts);
+                Check(StatusView.Phase(facts.Transport, new DateTime(2040, 1, 1)) == LinkPhase.Searching, "search never expires into a failure");
+                Check(view.Overall == Tone.Warning && view.Banner.Tone == Tone.Warning && view.Banner.Text == "Нет связи, ищу путь. " + reason,
+                    "search banner uses the supplied reason even with retained ok");
+                Check(view.Banner.ActionId == "" && view.Vpn.On && view.Vpn.State == "VPN включён · нет связи, ищу путь" &&
+                    view.Vpn.SwitchText == "Выключить VPN" && view.Vpn.SwitchEnabled && view.Vpn.Tone == Tone.Warning, "search preserves enabled VPN and allows manual off");
+                Check(view.Vpn.Detail.Contains(reason) && !view.Vpn.Detail.Contains("КБ/с"), "search card shows reason instead of stale speed");
+                Check(StatusView.Line("Связь", facts.Transport, true).StartsWith("⏳") && StatusView.Line("Связь", facts.Transport, true).Contains(reason), "diagnostics show search reason");
+            }
+            facts.Transport["localNet"] = "down";
+            facts.Transport["reason"] = Data("{\"text\":\"Нет интернета у вас (сеть), жду\"}");
+            var offline = MainScreenModel.Build(facts);
+            Check(offline.Banner.Text == "Нет интернета у вас (сеть), жду" && offline.Vpn.On && offline.Vpn.State.Contains("нет интернета у вас (сеть)"), "local network loss is explicit and VPN stays on");
+            facts.Transport["phase"] = "ok";
+            Check(MainScreenModel.Build(facts).Overall == Tone.Warning, "localNet down wins over a retained ok phase");
+            facts.Transport.Remove("localNet"); facts.Transport["phase"] = "searching"; facts.Transport["reason"] = null;
+            Check(MainScreenModel.Build(facts).Banner.Text == "Нет связи, ищу путь", "missing optional reason is tolerated");
+            facts.Vpn = Data("{\"state\":\"off\",\"enabled\":false}");
+            Check(!MainScreenModel.Build(facts).Vpn.On && MainScreenModel.Build(facts).Vpn.State == "VPN выключен", "transport search never turns on an intentionally off VPN");
+            facts = Healthy();
+            facts.Vpn = Data("{\"state\":\"searching\",\"enabled\":true,\"ok\":false,\"owner\":\"net-helper\",\"summary\":\"Нет связи, ищу путь\",\"reason\":{\"text\":\"Путь не отвечает, пробую другой\"}}");
+            var searchingVpn = MainScreenModel.Build(facts);
+            Check(searchingVpn.Overall == Tone.Warning && searchingVpn.Vpn.On && searchingVpn.Vpn.Tone == Tone.Warning && searchingVpn.Banner.Text.Contains("Путь не отвечает"), "VPN search heartbeat is a warning even before transport catches up");
+            Check(!searchingVpn.Banner.Text.Contains("Не удалось включить") && searchingVpn.Banner.ActionId == "", "service search summary is not an enable error");
+            facts.Vpn.Remove("enabled");
+            Check(MainScreenModel.Build(facts).Vpn.On, "searching state preserves on position when enabled is absent");
+            facts.Vpn = Data("{\"state\":\"conflict\",\"enabled\":true,\"owner\":\"net-helper\",\"summary\":\"Сейчас работает Happ. Отключите его…\"}");
+            var conflict = MainScreenModel.Build(facts);
+            Check(conflict.Overall == Tone.Warning && conflict.Vpn.On && conflict.Banner.Tone == Tone.Warning && conflict.Banner.ActionId == "details" &&
+                conflict.Banner.Text == "Сейчас работает Happ. Отключите его…", "runtime conflict keeps enabled VPN and explains conflict without claiming enable failure");
+            facts = Healthy();
+            Check(!MainScreenModel.Report(facts, "").Contains("Последние переключения:"), "old status has no invented switch history");
+            facts.Transport["switches"] = new object[] { Data(Json.Encode(new { at = 0L, from = "primary", to = "openssh-direct", why = "path-dial-failed" })) };
+            string report = MainScreenModel.Report(facts, "");
+            Check(report.Contains("Последние переключения:") && report.Contains("Основной → SSH напрямую · path-dial-failed"), "details report contains switch history with path titles");
         }
         static void LinkPhases()
         {

@@ -25,6 +25,7 @@ namespace RemoteAgents.Launcher
         readonly List<ComponentRuntime> runtimes = new List<ComponentRuntime>(); readonly List<NativeJob> actionJobs = new List<NativeJob>();
         readonly Stopwatch trayClickClock = Stopwatch.StartNew();
         readonly TrayMenuState menuState = new TrayMenuState();
+        readonly TrayStatusNotifications statusNotifications = new TrayStatusNotifications();
         readonly TickFailureLog tickFailures = new TickFailureLog();
         long lastTrayClick = -SystemInformation.DoubleClickTime - 1L;
         ConfigWindow mainWindow;
@@ -174,12 +175,16 @@ namespace RemoteAgents.Launcher
                 ok &= Step("lan", () => { if (netHelper != null) netHelper.UpdateLan(config.Data, transport); });
                 ok &= Step("vpn-resume", () => ResumeUpdatedVpn(transport));
                 ok &= Step("icon", () => {
-                    var linkPhase = StatusView.Phase(transport); shown = linkPhase == LinkPhase.Ok ? green : linkPhase == LinkPhase.Checking ? yellow : red;
+                    var linkPhase = StatusView.Phase(transport); shown = linkPhase == LinkPhase.Ok ? green : linkPhase == LinkPhase.Failed ? red : yellow;
                     var vpnStatus = VpnStatus.Read(home);
                     string vpnReason = VpnWatchdog.FailureSummary(Json.Str(vpnStatus, "state"), Json.Str(vpnStatus, "stage"));
                     if (vpnReason.Length > 0 && Json.Str(vpnStatus, "owner") == "net-helper") vpnReason = Json.Text(vpnStatus, "summary", vpnReason);
-                    if (Json.Str(vpnStatus, "state") == "conflict") shown = yellow;
-                    icon.Text = vpnReason.Length > 0 ? TrayMenuModel.Short(vpnReason, 63) : TrayMenuModel.Tooltip(transport, ServerHealthView.Read(home));
+                    bool searching = TrayMenuModel.Searching(transport, vpnStatus), conflict = Json.Str(vpnStatus, "state") == "conflict";
+                    if (searching || conflict) shown = yellow;
+                    icon.Text = vpnReason.Length > 0 && !searching && !conflict ? TrayMenuModel.Short(StatusView.DisplayText(vpnReason), 63)
+                        : TrayMenuModel.Tooltip(transport, ServerHealthView.Read(home), vpnStatus);
+                    var notice = statusNotifications.Observe(transport, vpnStatus, DateTime.UtcNow);
+                    if (notice != null) icon.ShowBalloonTip(8000, Product.Name, notice.Text, notice.Recovered ? ToolTipIcon.Info : ToolTipIcon.Warning);
                 });
                 ok &= Step("operations", () => { if (DateTime.UtcNow >= nextOperationCheck) CheckOperations(); });
                 ok &= Step("menu", RefreshMenuItems);
