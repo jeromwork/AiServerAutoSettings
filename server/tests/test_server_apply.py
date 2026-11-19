@@ -302,7 +302,78 @@ class ApplyTests(unittest.TestCase):
             raise RuntimeError('boom')
         self.assertFalse(engine.part('probe', fail))
         self.assertEqual(engine.rows[-1]['state'], 'error')
-        self.assertEqual(engine.rows[-1]['summary'], 'Проверка/команда не выполнена; детали скрыты.')
+        self.assertIn('запись ' + engine.rows[-1]['diag']['id'], engine.rows[-1]['summary'])
+
+    def test_part_exception_diag_in_json(self):
+        engine = self.fake.engine()
+        def fail():
+            raise KeyError('x')
+        engine.part('probe', fail)
+        raw_stdout = json.dumps(engine.result('plan'), ensure_ascii=False)
+        row = json.loads(raw_stdout)['parts'][-1]
+        self.assertEqual(row['state'], 'error')
+        diag = row['diag']
+        self.assertEqual(diag['type'], 'KeyError')
+        self.assertTrue(diag['where'])
+        self.assertRegex(diag['id'], r'^[0-9a-f]{8}$')
+        self.assertIn('запись ' + diag['id'], row['summary'])
+        _, journal = self.diagnostic_record()
+        self.assertEqual({k: journal[k] for k in diag}, diag)
+        self.assertTrue(all('/' not in frame for frame in diag['where']))
+
+    def test_part_exception_diag_masks_input_secret(self):
+        secret, key = 'S3cr3t-Value-For-Test-123', 'A' * 40
+        cfg = config()
+        cfg['secrets'] = {'test': secret}
+        engine = self.fake.engine(cfg)
+        def fail():
+            try:
+                raise ValueError(secret + ' ' + key)
+            except ValueError as cause:
+                raise RuntimeError(secret + ' ' + key) from cause
+        engine.part('probe', fail)
+        raw_stdout = json.dumps(engine.result('plan'), ensure_ascii=False)
+        self.assertNotIn(secret, raw_stdout)
+        self.assertNotIn(key, raw_stdout)
+        self.assertIn('***', raw_stdout)
+        self.assertIn('***', engine.rows[-1]['diag']['cause'])
+
+    def test_main_exception_diag_in_json(self):
+        cfg = config()
+        secret = 'main-test-secret'
+        cfg['secrets'] = {'test': secret}
+        with patch.object(app.sys, 'stdin', io.StringIO(json.dumps(cfg))), patch.object(app, 'Engine', side_effect=RuntimeError(secret)):
+            try:
+                app.main(['plan', '--json'], system=self.fake.system)
+            except RuntimeError as exc:
+                result = app.failure_result(self.fake.system, exc, 'plan')
+        out = io.StringIO()
+        print(json.dumps(result), file=out)
+        self.assertNotIn(secret, out.getvalue())
+        result = json.loads(out.getvalue())
+        self.assertFalse(result['ok'])
+        self.assertIn('error', result)
+        self.assertEqual(result['diag']['type'], 'RuntimeError')
+        self.assertRegex(result['code']['sha'], r'^[0-9a-f]{12}$')
+
+    def test_code_version_present(self):
+        result = self.fake.engine().result('plan')
+        self.assertEqual(result['schema'], 1)
+        self.assertRegex(result['code']['sha'], r'^[0-9a-f]{12}$')
+        self.assertTrue(result['code']['python'])
+        import hashlib
+        self.assertEqual(result['code']['sha'], hashlib.sha256((SOURCE / 'server_apply.py').read_bytes()).hexdigest()[:12])
+
+    def test_diag_without_journal(self):
+        engine = self.fake.engine()
+        def fail():
+            raise KeyError('x')
+        with patch.object(self.fake.system, 'diag', side_effect=OSError('unavailable')):
+            engine.part('probe', fail)
+        diag = json.loads(json.dumps(engine.result('plan')))['parts'][-1]['diag']
+        self.assertFalse(diag['journal'])
+        self.assertRegex(diag['id'], r'^[0-9a-f]{8}$')
+        self.assertIn('запись ' + diag['id'], engine.rows[-1]['summary'])
 
     def test_secrets_from_input_and_cause_are_redacted(self):
         cfg = config()
