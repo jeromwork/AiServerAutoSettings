@@ -8,6 +8,12 @@ using System.Threading.Tasks;
 
 namespace RemoteAgents.Launcher
 {
+    // Only the launcher's busy wait may produce the installation-wait hint.
+    internal sealed class NetHelperBusyTimeoutException : TimeoutException
+    {
+        internal NetHelperBusyTimeoutException() : base(NetHelperSetup.BusyTimeout) { }
+    }
+
     // One coordinator per launcher session: config, wizard, OTA launch and explicit retry share it.
     internal sealed class NetHelperSetup
     {
@@ -37,6 +43,12 @@ namespace RemoteAgents.Launcher
             catch (Exception error) { failure(error); return false; }
         }
 
+        internal static string VpnFailureMessage(Exception error)
+        {
+            return error is NetHelperBusyTimeoutException ? BusyTimeout :
+                "Не удалось включить VPN. Проверьте подключение сетевого помощника и диагностику.";
+        }
+
         // Shared with HelperClient so a stalled background connection cannot hang VPN activation.
         internal static async Task WaitForIdle(Func<bool> busy, CancellationToken token, int timeoutMs = 60000)
         {
@@ -44,7 +56,7 @@ namespace RemoteAgents.Launcher
             token.ThrowIfCancellationRequested();
             while (busy()) {
                 int remaining = timeoutMs - (int)clock.ElapsedMilliseconds;
-                if (remaining <= 0) throw new TimeoutException(BusyTimeout);
+                if (remaining <= 0) throw new NetHelperBusyTimeoutException();
                 await Task.Delay(Math.Min(100, remaining), token);
             }
         }
