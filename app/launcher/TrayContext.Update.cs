@@ -109,7 +109,7 @@ namespace RemoteAgents.Launcher
                 var source = SshSource.Load(Configuration.ForUpdate(Json.Encode(config.Update)), home);
                 string hash = SettingsHash();
                 string ready = await Task.Run(() => engine.Prepare(manifest, p => source.Fetch(manifest.FileName, p, manifest.Size, stop.Token),
-                    f => External.UpdateSelfTest(f, home, stop.Token), (d, f) => UpdateEngine.InstallBinaries(d, f, home, stop.Token), stop.Token));
+                    f => External.UpdateSelfTest(f, home, stop.Token), (d, f) => { log.Write("transport.binary." + PinnedTransport.Ensure(home, f)); UpdateEngine.InstallBinaries(d, f, home, stop.Token); }, stop.Token));
                 if (closing || ready == null) return;
                 if (SettingsHash() != hash) { updateSchedule.Retry(); updateSummary = "Конфиг изменился; обновление будет проверено снова"; return; }
                 offeredVersion = ready; PrepareUpdateRestart();

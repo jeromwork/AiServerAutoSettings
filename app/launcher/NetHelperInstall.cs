@@ -17,7 +17,7 @@ namespace RemoteAgents.Launcher
     internal static class NetHelperInstall
     {
         // Bump manually whenever helper logic or the wire protocol changes.
-        internal const string HelperVersion = "4";
+        internal const string HelperVersion = "5";
         internal const string ServiceName = "RemoteAgentsNet";
         internal const string DisplayName = "RemoteAgents: локальные сети и VPN";
         internal static bool NeedsInstall(string installed) { return (installed ?? "").Trim() != HelperVersion; }
@@ -69,14 +69,13 @@ namespace RemoteAgents.Launcher
             string sid = new SecurityIdentifier(ValidateSid(Program.Option(args, "--owner-sid"))).Value;
             // The unprivileged client names its installed bundle, never a path in a pipe command.
             string bundle = Path.GetFullPath(Program.Option(args, "--helper-bundle") ?? throw new ArgumentException("Нет бандла"));
-            string source = Path.Combine(bundle, "transport", "sing-box.exe");
-            if (!File.Exists(source)) throw new FileNotFoundException("В бандле нет сетевого помощника");
+            byte[] image = PinnedTransport.ReadVerified(home, bundle, PinnedTransport.ExpectedHash);
             bool existing = Exists(); StopService();
             SecureDirectory(InstallDirectory); SecureDirectory(DataDirectory);
             string version = Path.Combine(InstallDirectory, "version.txt");
             if (File.Exists(version)) File.Delete(version); // A failed installation must never claim this version.
             CopyImage(Program.Exe, Path.Combine(InstallDirectory, "RemoteAgents.exe"));
-            CopyImage(source, Path.Combine(InstallDirectory, "sing-box.exe"));
+            CopyImage(() => File.WriteAllBytes(Path.Combine(InstallDirectory, "sing-box.exe"), image));
             Sc(CreateArguments(Path.Combine(InstallDirectory, "RemoteAgents.exe"), home, sid, existing));
             Sc(new[] { "sdset", ServiceName, ServiceSddl(sid) });
             Sc(FailureArguments());
@@ -97,11 +96,13 @@ namespace RemoteAgents.Launcher
             return 0;
         }
         static void CopyImage(string source, string destination)
+        { CopyImage(() => File.Copy(source, destination, true)); }
+        static void CopyImage(Action copy)
         {
             // SCM may report STOPPED just before the service process releases its image.
             var clock = Stopwatch.StartNew();
             while (true) {
-                try { File.Copy(source, destination, true); return; }
+                try { copy(); return; }
                 catch (IOException ex) {
                     int code = ex.HResult & 0xffff;
                     if ((code != 32 && code != 33 && code != 1224) || clock.ElapsedMilliseconds >= 5000) throw;

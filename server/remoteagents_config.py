@@ -29,6 +29,7 @@ import tempfile
 import time
 
 DEFAULT_CONFIG = '/etc/remoteagents/config-export.json'
+DEFAULT_LAN_PC_ACCESS = '/etc/remoteagents/lan-pc-access.json'
 USER_CONFIG = '.config/remoteagents/config-export.json'
 LABEL = 'ra-config:'
 CONFIG_KIND = 'remoteagents-config'
@@ -208,7 +209,7 @@ def settings(path=None):
     require(isinstance(c, dict) and c.get('schema') == 1 and c.get('version') == 1, 'Неизвестная схема настроек выдачи')
     allowed = {'schema', 'version', '$schema', 'serverAddress', 'serverPort', 'hostKeys', 'hostKeyFiles', 'workerUser',
                'workerAuthorizedKeys', 'stateDir', 'syncFile', 'nodeCatalog', 'routes', 'catalogFile', 'vpnBootstrap',
-               'happier', 'authLog', 'serverConfig', 'update'}
+               'happier', 'authLog', 'serverConfig', 'lanPcAccess', 'lanRuntimeDir', 'update'}
     unknown = set(c) - allowed
     require(not unknown, 'Неизвестные поля в настройках выдачи: ' + ', '.join(sorted(unknown)))
     require(isinstance(c.get('workerUser'), str) and USER_RE.fullmatch(c['workerUser']) and c['workerUser'] != 'root', 'workerUser: рабочий пользователь (не root)')
@@ -220,6 +221,8 @@ def settings(path=None):
         require(field not in update or type(update[field]) is bool, 'update.' + field + ': true/false')
     require(type(update.get('intervalHours', 6)) is int and 1 <= update.get('intervalHours', 6) <= 168, 'update.intervalHours: 1–168')
     require('remoteDir' not in update or (isinstance(update['remoteDir'], str) and 1 <= len(update['remoteDir']) <= 2048 and not any(ch in update['remoteDir'] for ch in '\r\n\x00')), 'update.remoteDir: непустой путь без переводов строк')
+    for field in ('lanPcAccess', 'lanRuntimeDir'):
+        require(field not in c or isinstance(c[field], str) and Path(c[field]).is_absolute(), field + ': нужен абсолютный путь.')
     home = worker_home(c)
     c.setdefault('workerAuthorizedKeys', str(home / '.ssh/authorized_keys'))
     c.setdefault('syncFile', str(home / '.config/remoteagents/config-sync.json'))
@@ -875,6 +878,39 @@ def computer_sections(deployment):
     return result
 
 
+def computer_lans(c, computer):
+    """Merge server-managed PC access, without changing the recovery snapshot.
+
+    Explicit snapshot rows take precedence by name. Runtime is used only for
+    confirmed subnets (auto); OpenVPN profiles/auth are never opened here.
+    """
+    path = Path(c.get('lanPcAccess', DEFAULT_LAN_PC_ACCESS))
+    try:
+        exists = path.exists()
+    except OSError:
+        raise Error('Нет доступа к настройкам ЛВС для ПК; выполните экспорт с правами чтения lanPcAccess.') from None
+    if not exists:
+        require('lanPcAccess' not in c, 'Нет файла lanPcAccess; экспорт не выдан.')
+        return computer
+    spec = importlib.util.spec_from_file_location('lan_pc_access_export', Path(__file__).with_name('lan_pc_access.py'))
+    access = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(access)
+    try:
+        conf = json.loads(read_trusted(path, 'Настройки доступа с ПК'))
+        # Snapshot definitions override even an obsolete local row of the same name.
+        names = {row['name'] for row in computer.get('lan', [])}
+        require(isinstance(conf, dict) and isinstance(conf.get('lans', []), list), 'lanPcAccess: нужен объект с lans.')
+        conf = dict(conf, lans=[row for row in conf.get('lans', []) if not isinstance(row, dict) or row.get('name') not in names])
+        rows = access.computer_networks(conf, c.get('lanRuntimeDir', access.LAN_DIR))
+    except (access.Error, ValueError, TypeError, AttributeError):
+        raise Error('Настройки доступа с ПК неверны: проверьте subnets, domains, dnsServers, hosts, testHost/testPort; значения скрыты.') from None
+    if not rows:
+        return computer
+    result = dict(computer)
+    result['lan'] = computer.get('lan', []) + rows
+    return result
+
+
 def server_secret_values(data, deployment):
     """Only explicitly requested deployment refs, never unrelated root secrets."""
     require(isinstance(data, dict) and data.get('schema') == 1 and isinstance(data.get('config'), dict)
@@ -943,7 +979,7 @@ def export(c, args, out=sys.stdout, err=sys.stderr):
     values = {}
     server, vpn = common_sections(c, values, args.vpn)
     deployment = server_sections(c)
-    computer = computer_sections(deployment)
+    computer = computer_lans(c, computer_sections(deployment))
     if getattr(args, 'include_server_secrets', False):
         require(args.output, '--include-server-secrets требует --output, чтобы не печатать секреты в терминал.')
         recovered = read_server_secrets(deployment)

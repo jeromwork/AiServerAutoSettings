@@ -356,6 +356,7 @@ namespace RemoteAgents.Launcher
         // Preserve all existing portable modes and suites. --lan-tun is a focused optional mode.
         static int Main(string[] args)
         {
+            if (args.Length == 1 && args[0] == "--lan-config") { ConfigBundleTests.LanConfig(); Console.WriteLine("PASS: LAN ConfigBundle"); return 0; }
             if (args.Length == 1 && args[0] == "--lan-tun") { Run(); return 0; }
             if (args.Length == 1 && args[0] == "--lan-hosts") { LanHostsTests.Run(); return 0; }
             if (args.Length == 6 && args[0] == "--lan-hosts-resolve") return LanHostsTests.Resolve(args);

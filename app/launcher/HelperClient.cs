@@ -21,6 +21,7 @@ namespace RemoteAgents.Launcher
         internal const string UpdateRequired = "Обновился сетевой помощник — нужно одно разрешение Windows";
         readonly string home;
         readonly Control ui;
+        readonly Journal journal;
         readonly object gate = new object(), exchangeGate = new object();
         NetHelperProtocol.Reader connectionReader;
         NamedPipeClientStream pipe;
@@ -30,7 +31,7 @@ namespace RemoteAgents.Launcher
         volatile bool disposed;
         bool busy;
         internal string Status { get; private set; }
-        internal HelperClient(string home, Control ui) { this.home = home; this.ui = ui; }
+        internal HelperClient(string home, Control ui) { this.home = home; this.ui = ui; journal = new Journal(home); }
         internal void EnsureRunning()
         {
             if (disposed || busy) return;
@@ -44,7 +45,7 @@ namespace RemoteAgents.Launcher
                     reinstall = !exists || NetHelperInstall.NeedsInstall(version);
                     if (reinstall) { message = version.Length == 0 || !exists ? PermissionRequired : UpdateRequired; }
                     else { Connect(); message = "Сетевой помощник подключён"; }
-                } catch { message = "Локальные сети и VPN недоступны: не удалось подключиться к помощнику"; }
+                } catch (Exception error) { journal.Write(TickFailureLog.HelperFailure("connect", error)); message = "Локальные сети и VPN недоступны: не удалось подключиться к помощнику"; }
                 Post(() => {
                     busy = false; Status = message;
                     if (notice != null && !notice.IsDisposed && !reinstall && Connected) { notice.Close(); return; }
@@ -111,7 +112,11 @@ namespace RemoteAgents.Launcher
             string response = read.GetAwaiter().GetResult();
             if (response == null) throw new IOException("Помощник отключился");
             var result = Json.Map(Json.Parse(response));
-            if (!Json.Bool(result, "ok") || (ping && Json.Str(result, "reply") != "pong")) throw new IOException("Ошибка помощника");
+            if (!Json.Bool(result, "ok") || (ping && Json.Str(result, "reply") != "pong")) {
+                // No remote message/secret enters the journal; the service records the original exception.
+                journal.Write("helper.reply.failed stage=" + command + " code=" + Json.Int(result, "errorCode", 0).ToString(System.Globalization.CultureInfo.InvariantCulture));
+                throw new IOException("Ошибка помощника");
+            }
             var vpn = Json.Map(Json.Get(result, "vpn"));
             if (vpn.Count > 0) Files.Atomic(Path.Combine(home, "status/vpn.json"), Json.Encode(vpn));
             return result;
@@ -122,7 +127,7 @@ namespace RemoteAgents.Launcher
                 NamedPipeClientStream channel;
                 lock (gate) { if (disposed || pipe == null || !pipe.IsConnected || connectionReader == null) throw new IOException(PermissionRequired); channel = pipe; }
                 try { return ExchangeRequest(channel, connectionReader, request); }
-                catch { channel.Dispose(); throw; } // A timed-out frame must never be reused.
+                catch (Exception error) { journal.Write(TickFailureLog.HelperFailure("request", error)); channel.Dispose(); throw; } // A timed-out frame must never be reused.
             }
         }
         internal Task<System.Collections.Generic.Dictionary<string, object>> VpnOn(VpnTun options)
@@ -158,7 +163,8 @@ namespace RemoteAgents.Launcher
                         Thread.Sleep(100);
                     }
                 }
-            } catch {
+            } catch (Exception error) {
+                journal.Write(TickFailureLog.HelperFailure("monitor", error));
                 try { Files.Atomic(Path.Combine(home, "status/vpn.json"), Json.Encode(new { owner = "net-helper", enabled = false, ok = false, state = "core-exited", stage = "helper-disconnected", summary = "VPN выключен: сетевой помощник отключился", updatedAt = DateTime.UtcNow.ToString("o") })); } catch { }
                 lock (gate) { if (pipe == channel) pipe = null; channel.Dispose(); }
                 Post(() => { if (!disposed) { Status = "Локальные сети и VPN недоступны: помощник отключился"; ShowNotice(Status, false); } });
@@ -180,9 +186,10 @@ namespace RemoteAgents.Launcher
                     string result;
                     try {
                         int code = await Task.Run(() => InstallElevated());
+                        if (code != 0) journal.Write("helper.install.failed stage=elevated code=" + code.ToString(System.Globalization.CultureInfo.InvariantCulture));
                         result = code == 0 ? "" : "Локальные сети и VPN недоступны: установка помощника не завершена";
-                    } catch (Win32Exception ex) { result = ex.NativeErrorCode == 1223 ? PermissionRequired : "Не удалось установить сетевой помощник"; }
-                    catch { result = "Не удалось установить сетевой помощник"; }
+                    } catch (Win32Exception ex) { journal.Write(TickFailureLog.HelperFailure("install", ex)); result = ex.NativeErrorCode == 1223 ? PermissionRequired : "Не удалось установить сетевой помощник"; }
+                    catch (Exception error) { journal.Write(TickFailureLog.HelperFailure("install", error)); result = "Не удалось установить сетевой помощник"; }
                     busy = false;
                     if (disposed) return;
                     if (!install.IsDisposed) install.Enabled = true;

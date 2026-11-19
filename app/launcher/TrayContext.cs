@@ -114,6 +114,8 @@ namespace RemoteAgents.Launcher
         }
         void Bootstrap()
         {
+            try { log.Write("transport.binary." + PinnedTransport.Ensure(home, engine.Current.Length == 0 ? home : engine.Folder(engine.Current))); }
+            catch (Exception error) { log.Write(TickFailureLog.HelperFailure("binary-restore", error)); }
             try { log.Write("openssh." + PortableTools.EnsureOpenSsh(home)); } catch { log.Write("openssh.failed"); }
             if (installSource==null && engine.Current.Length != 0) { BundleDefinition.Load(engine.Folder(engine.Current)); return; }
             string zip = Path.Combine(engine.Root, "embedded.zip");
@@ -635,7 +637,7 @@ namespace RemoteAgents.Launcher
                 if (Json.Str(status, "state") != "on") { if (!fromCard) MessageBox.Show(Json.Text(status, "summary", "VPN не включён: соединение не подтверждено"), Product.Name); return; }
                 config.SetVpnIntent(true); config.SetEnabled(vpn.Definition, true);
             } catch (OperationCanceledException) { }
-            catch { if (!closing) { log.Write("vpn.helper.failed"); VpnFailure("Не удалось включить VPN. Проверьте подключение сетевого помощника и диагностику.", fromCard); } }
+            catch (Exception error) { if (!closing) { log.Write("vpn.helper.failed " + TickFailureLog.HelperFailure("vpn-on", error)); VpnFailure("Не удалось включить VPN. Проверьте подключение сетевого помощника и диагностику.", fromCard); } }
             finally { actionBusy = vpnActionBusy = false; if (!closing) RefreshMenu(); }
         }
         void SignalVpnStop()
