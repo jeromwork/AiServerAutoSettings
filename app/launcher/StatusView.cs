@@ -3,11 +3,13 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text;
+using System.Text.RegularExpressions;
 
 namespace RemoteAgents.Launcher
 {
     // Связь: «проверяем» (нет данных, идёт проверка, модуль перезапускается) — жёлтое; красное только после свежего провала.
-    internal enum LinkPhase { Checking, Ok, Failed }
+    internal enum LinkPhase { Checking, Ok, Failed, Searching }
 
     internal static class StatusView
     {
@@ -32,6 +34,8 @@ namespace RemoteAgents.Launcher
         {
             if (transport == null || transport.Count == 0) return LinkPhase.Checking;
             string phase = Json.Str(transport, "phase");
+            // Searching is a live waiting state, even when checkingSince is old or ok was retained.
+            if (phase == "searching" || Json.Str(transport, "localNet") == "down") return LinkPhase.Searching;
             if (phase == "failed") return LinkPhase.Failed;
             if (phase == "stopped") return LinkPhase.Checking;
             if (phase != "checking" && phase != "degraded")
@@ -41,6 +45,17 @@ namespace RemoteAgents.Launcher
                 return LinkPhase.Checking;
             double age = ((utcNow ?? DateTime.UtcNow) - since.ToUniversalTime()).TotalSeconds;
             return age > CheckingLimitSec ? LinkPhase.Failed : LinkPhase.Checking;
+        }
+        internal static string DisplayText(string value)
+        { return StatusText.CleanSecrets(value).Replace("\r", " ").Replace("\n", " ").Trim(); }
+        internal static string Reason(Dictionary<string, object> data)
+        { return DisplayText(Json.Str(Json.Map(Json.Get(data, "reason")), "text")); }
+        internal static string SearchingText(Dictionary<string, object> data)
+        {
+            string title = Json.Str(data, "localNet") == "down" ? "Нет интернета у вас (сеть)" : "Нет связи, ищу путь";
+            string reason = Reason(data);
+            if (reason.StartsWith(title, StringComparison.Ordinal)) return reason;
+            return title + (reason.Length == 0 ? "" : ". " + reason);
         }
         // Провал пути из прошлой проверки (из памяти) во время новой проверки — ещё не свежий результат.
         internal static bool StaleCandidate(Dictionary<string, object> candidate, Dictionary<string, object> transport, DateTime? utcNow = null)
@@ -56,6 +71,7 @@ namespace RemoteAgents.Launcher
         {
             if (data.Count == 0) return "⏳ " + title + ": ожидается проверка";
             if (Json.Bool(data, "ok") && (!transport || Phase(data) == LinkPhase.Ok)) return "✅ " + title + ": " + (transport ? "подключено; " + Title(data) : Summary(data));
+            if (transport && Phase(data) == LinkPhase.Searching) return "⏳ " + title + ": " + SearchingText(data);
             string state = Json.Str(data, "state");
             // Legacy diagnostics without phase keep their explicit ok result; named phases follow the current protocol.
             bool waiting = state == "starting" || state == "checking" || state == "pending" || state == "off" || Json.Get(data, "ok") == null
@@ -86,6 +102,7 @@ namespace RemoteAgents.Launcher
         }
         public static string Tooltip(Dictionary<string, object> data)
         {
+            if (Phase(data) == LinkPhase.Searching) return TrayMenuModel.Short(SearchingText(data), 63);
             const string prefix = "RemoteAgents: "; string suffix = " " + Speed(data), title = Title(data);
             int room = Math.Max(1, 63 - prefix.Length - suffix.Length);
             if (title.Length > room) {
@@ -114,6 +131,84 @@ namespace RemoteAgents.Launcher
         {
             if (data.Count == 0) return "нет данных";
             return Json.Text(data, "summary", Json.Get(data, "ok") is bool ? (Json.Bool(data, "ok") ? "работает" : "не работает") : "нет данных");
+        }
+    }
+    // Shared by status/tray text and the main screen, including the focused Disk build.
+    // The existing masking implementation lives here so every surface uses the same rules.
+    internal static class StatusText
+    {
+        static readonly Regex SecretField = new Regex(
+            @"(?<name>[""']?[\w.-]*(?:key|token|password|passwd|secret|uuid|authorization)[\w.-]*[""']?\s*[:=]\s*)",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        // Handles JSON fields, log-style key=value pairs, URL query credentials and multiline key material.
+        // Redact entire structured values rather than exposing children of a secret object/array.
+        internal static string CleanSecrets(string value)
+        {
+            value = (value ?? "").Replace("\r\n", "\n").Replace('\r', '\n');
+            value = Regex.Replace(value, @"-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)",
+                "[скрыто]", RegexOptions.IgnoreCase);
+            // Mask URLs first: a user name such as "token" must not be mistaken for a log field,
+            // which could otherwise leave part of its password after a semicolon.
+            value = Regex.Replace(value, @"\b[a-z][a-z0-9+.-]*://[^\s<>""']+", CleanUrl, RegexOptions.IgnoreCase);
+            var clean = new StringBuilder();
+            int position = 0;
+            for (Match field = SecretField.Match(value); field.Success; field = SecretField.Match(value, position)) {
+                clean.Append(value, position, field.Index - position);
+                clean.Append(field.Groups["name"].Value).Append("\"[скрыто]\"");
+                position = SecretValueEnd(value, field.Index + field.Length);
+            }
+            clean.Append(value, position, value.Length - position);
+            return clean.ToString();
+        }
+
+        static string CleanUrl(Match match)
+        {
+            string url = match.Value;
+            int authority = url.IndexOf("://", StringComparison.Ordinal) + 3;
+            int end = url.IndexOfAny(new[] { '/', '?', '#' }, authority);
+            if (end < 0) end = url.Length;
+            if (end > authority) {
+                int at = url.LastIndexOf('@', end - 1, end - authority);
+                if (at >= authority) url = url.Substring(0, authority) + "[скрыто]@" + url.Substring(at + 1);
+            }
+            int query = url.IndexOf('?'), fragment = url.IndexOf('#');
+            if (query < 0 || fragment >= 0 && fragment < query) return url;
+            int queryEnd = fragment < 0 ? url.Length : fragment;
+            string[] pairs = url.Substring(query + 1, queryEnd - query - 1).Split('&');
+            for (int i = 0; i < pairs.Length; i++) {
+                int equals = pairs[i].IndexOf('=');
+                if (equals < 0) continue;
+                string name = pairs[i].Substring(0, equals);
+                // Encoded parameter names are just as sensitive as plain ones.
+                try { name = Uri.UnescapeDataString(name); } catch (UriFormatException) { pairs[i] = "[скрыто]"; continue; }
+                if (Regex.IsMatch(name, @"key|token|password|passwd|secret|uuid|authorization", RegexOptions.IgnoreCase))
+                    pairs[i] = pairs[i].Substring(0, equals + 1) + "[скрыто]";
+            }
+            return url.Substring(0, query + 1) + string.Join("&", pairs) + url.Substring(queryEnd);
+        }
+
+        static int SecretValueEnd(string value, int start)
+        {
+            // An unquoted log value has no reliable punctuation delimiter: passwords can contain
+            // commas, semicolons and brackets. Hide the rest of that line rather than guessing.
+            if (start < value.Length && value[start] != '"' && value[start] != '\'' && value[start] != '{' && value[start] != '[') {
+                int newline = value.IndexOf('\n', start);
+                return newline < 0 ? value.Length : newline;
+            }
+            var closers = new Stack<char>();
+            char quote = '\0';
+            for (int i = start; i < value.Length; i++) {
+                char ch = value[i];
+                if (quote != '\0') {
+                    if (ch == '\\') { i++; continue; }
+                    if (ch == quote) { quote = '\0'; if (closers.Count == 0) return i + 1; }
+                } else if (ch == '\"' || ch == '\'') quote = ch;
+                else if (ch == '{' || ch == '[') closers.Push(ch == '{' ? '}' : ']');
+                else if (closers.Count > 0 && ch == closers.Peek()) { closers.Pop(); if (closers.Count == 0) return i + 1; }
+                else if (closers.Count == 0 && (ch == '\n' || ch == ',' || ch == ';' || ch == '&' || ch == '}' || ch == ']')) return i;
+            }
+            return value.Length;
         }
     }
 }

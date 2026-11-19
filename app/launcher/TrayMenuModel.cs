@@ -62,7 +62,9 @@ namespace RemoteAgents.Launcher
         internal static string Connection(Dictionary<string, object> transport)
         {
             if (transport.Count == 0) return "Связь: ожидается проверка";
-            return Json.Bool(transport, "ok") ? "Связь: " + ActiveTitle(transport) + " · " + StatusView.Speed(transport) : StatusView.Phase(transport) == LinkPhase.Checking ? "Связь: проверяется" : "Связь: не подтверждена";
+            var phase = StatusView.Phase(transport);
+            if (phase == LinkPhase.Searching) return StatusView.SearchingText(transport);
+            return phase == LinkPhase.Ok ? "Связь: " + ActiveTitle(transport) + " · " + StatusView.Speed(transport) : phase == LinkPhase.Checking ? "Связь: проверяется" : "Связь: не подтверждена";
         }
         internal static string CandidateLine(Dictionary<string, object> candidate, Dictionary<string, object> transport)
         {
@@ -87,7 +89,44 @@ namespace RemoteAgents.Launcher
                 ? "№" + order.ToString(CultureInfo.CurrentCulture) + " · " : "";
             double latency;
             string delay = Measurement(candidate, "latencyMs", out latency) ? " · " + latency.ToString("0.#", CultureInfo.CurrentCulture) + " мс" : "";
-            return prefix + PathTitle(candidate) + " — " + state + (active ? " · используется" : "") + " · " + CandidateSpeed(candidate) + delay;
+            return prefix + PathTitle(candidate) + " — " + state + (active ? " · используется" : "") + " · " + CandidateSpeed(candidate) + delay + Penalty(candidate);
+        }
+        static string Penalty(Dictionary<string, object> candidate)
+        {
+            int step = Json.Int(candidate, "penaltyStep", 0); DateTime until;
+            if (step < 1 || step > 5 || !DateTime.TryParse(Json.Str(candidate, "penaltyUntil"), CultureInfo.InvariantCulture,
+                DateTimeStyles.RoundtripKind, out until) || until.ToUniversalTime() <= DateTime.UtcNow) return "";
+            return " · пауза до " + until.ToLocalTime().ToString("HH:mm:ss", CultureInfo.CurrentCulture) + " (ступень " + step + ")";
+        }
+        // The contract may be read before the VPN writer has caught up with the transport (and vice versa).
+        internal static bool Searching(Dictionary<string, object> transport, Dictionary<string, object> vpn)
+        { return StatusView.Phase(transport) == LinkPhase.Searching || Json.Str(vpn, "state") == "searching"; }
+        internal static string SearchingText(Dictionary<string, object> transport, Dictionary<string, object> vpn)
+        { return StatusView.SearchingText(StatusView.Phase(transport) == LinkPhase.Searching ? transport : vpn); }
+        internal static string ConflictText(Dictionary<string, object> vpn)
+        { return StatusView.DisplayText(Json.Text(vpn, "summary", "Работает другой VPN. Отключите его перед включением этого VPN.")); }
+        internal static string[] SwitchLines(Dictionary<string, object> transport)
+        {
+            var changes = Json.Array(Json.Get(transport, "switches")).Select(Json.Map).Where(c => c.Count > 0).ToArray();
+            return changes.Skip(Math.Max(0, changes.Length - 10)).Select(c => {
+                object why = Json.Get(c, "why");
+                string reason = why is string ? (string)why : Json.Str(Json.Map(why), "text");
+                return StatusView.DisplayText(SwitchTime(c) + " · " + SwitchPath(transport, Json.Str(c, "from")) +
+                    " → " + SwitchPath(transport, Json.Str(c, "to")) + (reason.Length == 0 ? "" : " · " + reason));
+            }).ToArray();
+        }
+        static string SwitchTime(Dictionary<string, object> change)
+        {
+            string value = Json.Str(change, "at"); DateTime stamp; long milliseconds;
+            if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out milliseconds) && milliseconds >= 0 && milliseconds <= 253402300799999L)
+                stamp = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddMilliseconds(milliseconds);
+            else if (!DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out stamp)) return value;
+            return stamp.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.CurrentCulture);
+        }
+        static string SwitchPath(Dictionary<string, object> transport, string tag)
+        {
+            var candidate = StatusView.Candidates(transport).FirstOrDefault(c => Json.Str(c, "tag") == tag);
+            return PathTitle(candidate ?? new Dictionary<string, object> { { "tag", tag } });
         }
         static bool Measurement(Dictionary<string, object> data, string key, out double value)
         {
@@ -103,9 +142,16 @@ namespace RemoteAgents.Launcher
             return mbps >= 1 ? mbps.ToString("0.#", CultureInfo.CurrentCulture) + " Мбит/с"
                 : (mbps * 1000).ToString("0.#", CultureInfo.CurrentCulture) + " Кбит/с";
         }
-        internal static string Tooltip(Dictionary<string, object> transport, Dictionary<string, object> health)
+        internal static string Tooltip(Dictionary<string, object> transport, Dictionary<string, object> health, Dictionary<string, object> vpn = null)
         {
-            string connection = Json.Bool(transport, "ok") ? Short(ActiveTitle(transport), 14) + " · " + StatusView.Speed(transport) : StatusView.Phase(transport) == LinkPhase.Checking ? "связь проверяется" : "связь не подтверждена";
+            if (Json.Str(vpn, "state") == "conflict") return Short(ConflictText(vpn), 63);
+            // Reason takes priority over speed and server metrics in the 63-character Windows tooltip.
+            if (Searching(transport, vpn)) {
+                var source = StatusView.Phase(transport) == LinkPhase.Searching ? transport : vpn;
+                string reason = StatusView.Reason(source);
+                return Short(Json.Str(source, "localNet") == "down" || reason.Length == 0 ? StatusView.SearchingText(source) : reason, 63);
+            }
+            string connection = StatusView.Phase(transport) == LinkPhase.Ok ? Short(ActiveTitle(transport), 14) + " · " + StatusView.Speed(transport) : StatusView.Phase(transport) == LinkPhase.Checking ? "связь проверяется" : "связь не подтверждена";
             return Short(connection + "; " + ServerHealthView.Compact(health), 63);
         }
         internal static string Short(string value, int max)
@@ -114,6 +160,33 @@ namespace RemoteAgents.Launcher
             if (value.Length <= max) return value;
             int length = max - 1; if (length > 0 && char.IsHighSurrogate(value[length - 1])) length--;
             return value.Substring(0, length) + "…";
+        }
+    }
+    internal sealed class TrayStatusNotice
+    {
+        internal string Text;
+        internal bool Recovered;
+    }
+    // One notice per transition; keep the latest transition pending during the 60-second quiet period.
+    // Missing/stale heartbeats do not create a new transition or deliver an outdated pending notice.
+    internal sealed class TrayStatusNotifications
+    {
+        string observed, pending;
+        DateTime next = DateTime.MinValue;
+        internal TrayStatusNotice Observe(Dictionary<string, object> transport, Dictionary<string, object> vpn, DateTime now)
+        {
+            string current = Json.Str(vpn, "state") == "conflict" ? "conflict" : TrayMenuModel.Searching(transport, vpn)
+                ? "searching" : StatusView.Phase(transport) == LinkPhase.Ok ? "ok" : null;
+            if (current == null) return null;
+            if (current != observed) {
+                bool notify = current == "conflict" || observed == "ok" && current == "searching" || observed == "searching" && current == "ok";
+                pending = notify ? current : null;
+                observed = current;
+            }
+            if (pending == null || now < next) return null;
+            pending = null; next = now.AddSeconds(60);
+            return new TrayStatusNotice { Recovered = current == "ok", Text = current == "ok" ? "Связь восстановлена"
+                : current == "conflict" ? TrayMenuModel.ConflictText(vpn) : TrayMenuModel.SearchingText(transport, vpn) };
         }
     }
     // Local REST only. The API key stays in memory and never enters arguments/logs.

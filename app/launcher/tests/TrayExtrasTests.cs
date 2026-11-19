@@ -107,8 +107,90 @@ namespace RemoteAgents.Launcher
                 } finally { listener.Stop(); server.GetAwaiter().GetResult(); Directory.Delete(dir, true); }
             }
         }
+        internal static void RunSwitchStatus()
+        {
+            var empty = Data("{}"); var ok = Data("{\"ok\":true,\"phase\":\"ok\"}");
+            string reason = "Все пути временно недоступны, повторяю";
+            var search = Data(Json.Encode(new { phase = "searching", ok = true, active = "previous", kbps = 100,
+                reason = new { text = reason } }));
+            Check(TrayMenuModel.Connection(search) == "Нет связи, ищу путь. " + reason, "menu gives search and reason precedence over retained ok/speed");
+            Check(TrayMenuModel.Tooltip(search, empty) == reason, "tooltip prioritizes the complete reason");
+            search["localNet"] = "down";
+            Check(TrayMenuModel.Tooltip(search, empty).StartsWith("Нет интернета у вас (сеть)"), "tooltip prioritizes local network loss");
+            search.Remove("localNet");
+            var vpnSearch = Data("{\"state\":\"searching\"}");
+            Check(TrayMenuModel.Tooltip(ok, empty, vpnSearch) == "Нет связи, ищу путь", "VPN search heartbeat reaches tooltip before transport catches up");
+            var conflict = Data("{\"state\":\"conflict\",\"summary\":\"Сейчас работает Happ. Отключите его…\"}");
+            Check(TrayMenuModel.Tooltip(search, empty, conflict) == Json.Str(conflict, "summary"), "conflict takes priority in tooltip");
+            foreach (object optional in new object[] { null, "invalid", new object[0], new { code = "unknown" } }) {
+                search["reason"] = optional;
+                Check(TrayMenuModel.Tooltip(search, empty) == "Нет связи, ищу путь", "missing/malformed optional reason is safe");
+            }
+            search["reason"] = Data(Json.Encode(new { text = "Жду token=reason-secret" }));
+            Check(!TrayMenuModel.Connection(search).Contains("reason-secret") && !TrayMenuModel.Tooltip(search, empty).Contains("reason-secret") &&
+                !StatusView.Line("Связь", search, true).Contains("reason-secret"), "reason is masked in menu, tooltip and diagnostics");
+            search["reason"] = Data(Json.Encode(new { text = new string('Я', 61) + "😀 хвост" }));
+            string tip = TrayMenuModel.Tooltip(search, empty);
+            Check(tip.Length <= 63 && !char.IsHighSurrogate(tip[tip.Length - 2]), "search tooltip respects Windows limit and surrogate pairs");
+            search["reason"] = Data(Json.Encode(new { text = reason }));
+            Check(TrayMenuModel.Connection(ok).StartsWith("Связь:"), "legacy connection still works without additions");
+            Check(TrayMenuModel.SwitchLines(empty).Length == 0, "old status needs no switch fields");
+            search["switches"] = null;
+            Check(TrayMenuModel.SwitchLines(search).Length == 0, "null switch history is safe");
+            search["switches"] = Enumerable.Range(0, 12).Select(i => Data(Json.Encode(new { at = 1000L * i, from = "old" + i, to = "openssh-direct", why = "cause" + i }))).ToArray();
+            string[] history = TrayMenuModel.SwitchLines(search);
+            Check(history.Length == 10 && history[0].Contains("old2 → SSH напрямую · cause2") && history[9].Contains("old11 → SSH напрямую · cause11"), "history retains latest ten in order");
+            search["switches"] = new object[] { null, "invalid", Data(Json.Encode(new { at = "invalid", from = "token=from-secret", to = "primary", why = new { text = "password=why-secret" } })) };
+            Check(TrayMenuModel.SwitchLines(search).Length == 1 && !TrayMenuModel.SwitchLines(search)[0].Contains("-secret"), "malformed rows ignored and history text masked");
+            var candidate = Data(Json.Encode(new { tag = "primary", penaltyStep = 3, penaltyUntil = DateTime.UtcNow.AddMinutes(2).ToString("o") }));
+            Check(TrayMenuModel.CandidateLine(candidate, search).Contains("пауза до") && TrayMenuModel.CandidateLine(candidate, search).Contains("ступень 3"), "candidate details show active penalty");
+            candidate["penaltyUntil"] = "invalid";
+            Check(!TrayMenuModel.CandidateLine(candidate, search).Contains("пауза"), "invalid penalty date is safe");
+            candidate["penaltyUntil"] = DateTime.UtcNow.AddMinutes(-2).ToString("o");
+            Check(!TrayMenuModel.CandidateLine(candidate, search).Contains("пауза"), "expired penalty is not shown as active");
+
+            var notices = new TrayStatusNotifications(); var now = new DateTime(2026, 11, 19, 12, 0, 0, DateTimeKind.Utc);
+            Check(notices.Observe(ok, empty, now) == null, "startup ok is silent");
+            var lost = notices.Observe(search, empty, now.AddSeconds(1));
+            Check(lost != null && !lost.Recovered && lost.Text.Contains(reason), "ok to searching gives one warning with reason");
+            Check(notices.Observe(search, empty, now.AddSeconds(100)) == null, "unchanged search never repeats after cooldown");
+            search["reason"] = Data("{\"text\":\"Путь не отвечает, пробую другой\"}");
+            Check(notices.Observe(search, empty, now.AddSeconds(101)) == null, "reason change is not a new transition");
+            var recovered = notices.Observe(ok, empty, now.AddSeconds(102));
+            Check(recovered != null && recovered.Recovered && recovered.Text == "Связь восстановлена", "search to ok gives one recovery notice");
+            Check(notices.Observe(ok, empty, now.AddSeconds(200)) == null, "unchanged recovery never repeats");
+            var clash = notices.Observe(ok, conflict, now.AddSeconds(201));
+            Check(clash != null && !clash.Recovered && clash.Text.Contains("Happ"), "runtime conflict gives one warning");
+            Check(notices.Observe(ok, conflict, now.AddSeconds(300)) == null, "unchanged conflict never repeats");
+
+            notices = new TrayStatusNotifications(); notices.Observe(ok, empty, now); notices.Observe(search, empty, now.AddSeconds(1));
+            Check(notices.Observe(ok, empty, now.AddSeconds(2)) == null, "quick recovery is throttled");
+            Check(notices.Observe(ok, empty, now.AddSeconds(60)) == null, "notice stays quiet just before sixty seconds");
+            Check(notices.Observe(empty, empty, now.AddSeconds(61)) == null, "missing heartbeat cannot deliver pending recovery");
+            recovered = notices.Observe(ok, empty, now.AddSeconds(61));
+            Check(recovered != null && recovered.Recovered, "pending latest transition emits exactly at sixty seconds");
+            Check(notices.Observe(ok, empty, now.AddSeconds(121)) == null, "pending recovery is consumed once");
+            Check(notices.Observe(search, empty, now.AddSeconds(122)) != null, "later loss can notify again");
+            notices.Observe(ok, empty, now.AddSeconds(123)); notices.Observe(search, conflict, now.AddSeconds(124));
+            clash = notices.Observe(search, conflict, now.AddSeconds(182));
+            Check(clash != null && clash.Text.Contains("Happ") && !clash.Recovered, "latest conflict replaces pending recovery during cooldown");
+            Check(notices.Observe(search, conflict, now.AddSeconds(242)) == null, "deferred conflict is consumed once");
+            notices = new TrayStatusNotifications();
+            Check(notices.Observe(search, empty, now) == null, "startup search does not invent an ok-to-search transition");
+            Check(notices.Observe(ok, empty, now.AddSeconds(1)).Recovered, "recovery from startup search is reported");
+            notices = new TrayStatusNotifications();
+            Check(notices.Observe(ok, conflict, now) != null, "existing conflict is shown once on startup");
+            conflict["summary"] = "Сейчас работает Happ. token=conflict-secret";
+            notices = new TrayStatusNotifications();
+            Check(!notices.Observe(ok, conflict, now).Text.Contains("conflict-secret") && !TrayMenuModel.Tooltip(ok, empty, conflict).Contains("conflict-secret"), "conflict text is masked in balloon and tooltip");
+            search["reason"] = Data("{\"text\":\"token=balloon-secret\"}");
+            notices = new TrayStatusNotifications(); notices.Observe(ok, empty, now);
+            Check(!notices.Observe(search, empty, now.AddSeconds(1)).Text.Contains("balloon-secret"), "balloon uses shared reason masking");
+            Console.WriteLine("PASS: switch UI status/tray transitions");
+        }
         internal static void Run()
         {
+            RunSwitchStatus();
             var empty = Data("{}"); var transport = Data("{\r\n\"ok\":true,\"active\":\"vless-relay-fixture\",\"kbps\":96.8,\"candidates\":[{\"tag\":\"vless-relay-fixture\",\"state\":\"ok\",\"kbps\":96.8},{\"tag\":\"vless-direct\",\"state\":\"fail\"}]\r\n}");
             var health = Health(40000, 50000); var menu = TrayMenuModel.Build(empty, empty, transport, health);
             // Application actions, separate synchronization window, and local REST summary.
