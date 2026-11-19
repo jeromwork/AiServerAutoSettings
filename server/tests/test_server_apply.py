@@ -219,6 +219,53 @@ class ApplyTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.fake = Fake(self.tmp.name)
 
+    def isolated_components(self, failure, failing_part='happierWeb', command='plan'):
+        cfg = {'kind': 'remoteagents-config', 'schema': 1, 'server': {'login': 'worker'},
+               'serverComponents': {'happierWeb': {'enabled': True}, 'bridge': {'enabled': True}}}
+        engine = self.fake.engine(cfg, {})
+        with contextlib.ExitStack() as stack:
+            for method, name in (('egress', 'internet'), ('sudo', 'agent'), ('sshd', 'sshd'), ('recovery', 'recovery')):
+                stack.enter_context(patch.object(engine, method, side_effect=lambda apply, name=name: engine.row(name, 'ready', 'готово')))
+            for method in ('bridge_state', 'bridge', 'happierWeb', 'extras'):
+                name = 'bridgeState' if method == 'bridge_state' else method
+                def component(e, apply, name=name):
+                    if name == failing_part:
+                        raise failure
+                    return e.row(name, 'ready', 'готово')
+                stack.enter_context(patch.object(app.components, method, side_effect=component))
+            return engine.run(command)
+
+    def test_happier_web_failures_degrade_without_blocking_critical_parts(self):
+        for command in ('plan', 'status', 'apply'):
+            for failure in (app.components.Error('web unavailable'), RuntimeError('web exploded')):
+                with self.subTest(command=command, failure=type(failure).__name__):
+                    result = self.isolated_components(failure, command=command)
+                    self.assertTrue(result['ok'], result)
+                    self.assertEqual(result['degraded'], ['happierWeb'])
+                    web = next(row for row in result['parts'] if row['part'] == 'happierWeb')
+                    self.assertTrue(web['optional'])
+                    self.assertEqual(web['state'], 'error')
+                    self.assertIn('работает частично: happierWeb — ' + web['summary'], result['summary'])
+                    for row in result['parts']:
+                        if row['part'] != 'happierWeb':
+                            self.assertEqual(row['state'], 'ready')
+                            self.assertNotIn('optional', row)
+
+    def test_critical_failure_still_fails_server(self):
+        result = self.isolated_components(app.components.Error('bridge unavailable'), 'bridge')
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['degraded'], [])
+
+    def test_optional_change_pending_and_waiting_states(self):
+        for state in ('ready', 'change', 'pending', 'waiting', 'blocked', 'error'):
+            with self.subTest(state=state):
+                engine = self.fake.engine()
+                engine.row('internet', 'ready', 'готово')
+                engine.row('happierWeb', state, 'web state')
+                result = engine.result('plan')
+                self.assertTrue(result['ok'])
+                self.assertEqual(result['degraded'], [] if state in ('ready', 'change', 'pending') else ['happierWeb'])
+
     def diagnostic_record(self):
         path = self.fake.path('/var/log/remoteagents/server-apply-errors.log')
         lines = path.read_text().splitlines()

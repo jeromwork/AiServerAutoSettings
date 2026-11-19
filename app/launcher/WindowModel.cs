@@ -44,7 +44,7 @@ namespace RemoteAgents.Launcher
         // Pending (VPN not yet confirmed, a server install) is handed to the tray and does not hold up «Готово»;
         // Disk runs in the background (BackgroundWork.Disk) and never gates it.
         internal static bool CanFinish(bool running, IDictionary<string, SectionState> states)
-        { return !running && states.Where(s => s.Key != ConfigSections.Disk).All(s => s.Value == SectionState.Done || s.Value == SectionState.Unchanged || s.Value == SectionState.Failed || s.Value == SectionState.Blocked || s.Value == SectionState.Pending); }
+        { return !running && states.Where(s => s.Key != ConfigSections.Disk).All(s => s.Value == SectionState.Done || s.Value == SectionState.Unchanged || s.Value == SectionState.Failed || s.Value == SectionState.Blocked || s.Value == SectionState.Pending || s.Value == SectionState.Degraded); }
         internal const string DiskInBackground = "Диск устанавливается в фоне — окно можно закрыть, программа продолжит сама. Папки сервера принимайте в Syncthing Tray.";
         internal static string Conflict(string operation)
         { return string.IsNullOrEmpty(operation) ? "" : "Идёт " + operation + ", подождите"; }

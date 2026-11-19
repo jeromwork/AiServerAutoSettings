@@ -76,7 +76,7 @@ function Invoke-WizardServerApplyPayload([string]$Root,[string]$Bundle,$Request,
     $verb=if($Request.statusOnly){'status'}else{'plan'}
     $actions=@()
     $result=Invoke-WizardApplyCommand $Root $Bundle $Request $mode $verb $payload
-    if(-not $Request.statusOnly -and -not $result.ok){
+    if(-not $Request.statusOnly){
         # A missing secret/invalid configuration is reviewable and requires no mutation.
         $canApply=@($result.parts|Where-Object {$_.state -in @('change','pending')}).Count -gt 0
         if($canApply){
@@ -93,7 +93,8 @@ function Invoke-WizardServerApplyPayload([string]$Root,[string]$Bundle,$Request,
         }
     }
     $result|Add-Member -Force actions $actions
-    $result|Add-Member -Force summary ((@($result.parts|ForEach-Object {$_.part+': '+$_.state+' — '+$_.summary})) -join '; ')
+    $summary=if($result.summary){[string]$result.summary}else{(@($result.parts|ForEach-Object {$_.part+': '+$_.state+' — '+$_.summary})) -join '; '}
+    $result|Add-Member -Force summary $summary
     Write-TransportJson (Join-Path $Root 'state/server-apply.json') $result
     return $result
 }

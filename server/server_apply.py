@@ -27,6 +27,7 @@ from urllib.parse import urlsplit
 
 MARKER = '---remoteagents-stdin---'
 HIDDEN = '<есть, скрыт>'
+OPTIONAL_PARTS = frozenset({'happierWeb'})
 SOURCE = Path(__file__).resolve().parent
 CODE_FILES = ('server_apply.py', 'server-apply.sh', 'lan_vpn.py', 'lan-vpn.sh', 'proxy_out.py', 'proxy-out.sh', 'remoteagents_config.py', 'base_network.py', 'lan_share.py', 'lan_pc_access.py', 'server_recovery.py', 'server_components.py', 'server_packages.py', 'component_files.py', 'lan-config.schema.json', 'happier-web.schema.json',
                      'happier_web.py', 'happier_web_common.py', 'happier_web_release.py', 'happier_web_quotas.py', 'agy_usage_scrape.py', 'happier_web_verify.cjs', 'happier_web_settings.cjs', 'happier_web_addon.js')
@@ -449,6 +450,8 @@ class Engine:
 
     def row(self, part, state, message, **fields):
         result = dict(part=part, state=state, summary=message, **fields)
+        if part in OPTIONAL_PARTS:
+            result['optional'] = True
         self.rows.append(result)
         return state == 'ready'
 
@@ -1069,10 +1072,10 @@ class Engine:
         if self.s.path(lan_share.STATE).exists():
             confirmed = self.part('lanShare', lambda: lan_share.reconcile(self, apply))
             if not confirmed:
-                return dict(schema=1, command=command, parts=self.rows, actions=list(self.s.actions), ok=False)
+                return self.result(command)
         if self.config.get('deployment', {}).get('method', 'host') != 'host':
             self.row('deployment', 'blocked', 'Развёртывание docker ещё не поддерживается')
-            return dict(schema=1, command=command, parts=self.rows, actions=[], ok=False)
+            return self.result(command)
         if self.receipts.get('base-network', {}).get('managed') or self.s.path('/etc/remoteagents/server-apply/recovery.json').exists():
             self.part('packages', lambda: packages.ensure(self, apply))
         ready = self.part('internet', lambda: self.egress(apply))
@@ -1116,7 +1119,7 @@ class Engine:
                     # Do not spend the rollback window downloading CLIs. Return
                     # pending now; a NEW external SSH must confirm the network.
                     ready = False
-        if apply and all(r['state'] in ('ready', 'waiting') or r['state'] == 'blocked' and r['part'] in ('desktop', 'projectViews', 'agents:codex') for r in self.rows):
+        if apply and all(r['part'] in OPTIONAL_PARTS and r['state'] in ('error', 'waiting', 'blocked') or r['state'] in ('ready', 'waiting') or r['state'] == 'blocked' and r['part'] in ('desktop', 'projectViews', 'agents:codex') for r in self.rows):
             public = {k: v for k, v in self.config.items() if k in ('deployment', 'serverNetwork', 'proxyOut', 'lan', 'telegramGateway', 'agent', *components.KEYS)}
             if self.part('recovery', lambda: self.recovery(True)):
                 self.s.write('/var/lib/remoteagents-status/server-config.json', json.dumps(public, ensure_ascii=False, sort_keys=True) + '\n', 0o644)
@@ -1125,8 +1128,16 @@ class Engine:
             self.part('recovery', lambda: self.recovery(False))
         if apply:
             self.part('log', lambda: self.s.audit(self.rows))
-        return {'schema': 1, 'command': command, 'parts': self.rows, 'actions': list(self.s.actions),
-                'ok': all(r['state'] == 'ready' for r in self.rows)}
+        return self.result(command)
+
+    def result(self, command):
+        degraded = [r for r in self.rows if r['part'] in OPTIONAL_PARTS and r['state'] not in ('ready', 'change', 'pending')]
+        result = {'schema': 1, 'command': command, 'parts': self.rows, 'actions': list(self.s.actions),
+                  'ok': all(r['state'] == 'ready' for r in self.rows if r['part'] not in OPTIONAL_PARTS),
+                  'degraded': [r['part'] for r in degraded]}
+        if degraded:
+            result['summary'] = 'работает частично: ' + '; '.join(r['part'] + ' — ' + r['summary'] for r in degraded)
+        return result
 
 
 class Missing(Error):

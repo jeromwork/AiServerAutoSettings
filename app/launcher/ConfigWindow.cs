@@ -31,11 +31,11 @@ namespace RemoteAgents.Launcher
         internal void Set(SectionState state, string message)
         {
             State = state; bool runningNow = state == SectionState.Running;
-            icon.Text = state == SectionState.Done || state == SectionState.Unchanged ? "✅" : state == SectionState.Failed || state == SectionState.Blocked ? "❌" : state == SectionState.Waiting ? "•" : "⏳";
+            icon.Text = state == SectionState.Done || state == SectionState.Unchanged ? "✅" : state == SectionState.Failed || state == SectionState.Blocked ? "❌" : state == SectionState.Degraded ? "⚠" : state == SectionState.Waiting ? "•" : "⏳";
             icon.ForeColor = state == SectionState.Done || state == SectionState.Unchanged ? Color.ForestGreen : state == SectionState.Failed || state == SectionState.Blocked ? Color.Firebrick : state == SectionState.Waiting ? SystemColors.GrayText : Color.DarkGoldenrod;
             bar.Visible = runningNow; text.Left = runningNow ? 190 : 140; text.Width = Retry.Left - text.Left - 4;
-            text.Text = message ?? ""; text.ForeColor = state == SectionState.Failed || state == SectionState.Blocked ? Color.Firebrick : SystemColors.ControlText;
-            tip.SetToolTip(text, text.Text); Retry.Visible = state == SectionState.Failed || state == SectionState.Blocked;
+            text.Text = message ?? ""; text.ForeColor = state == SectionState.Failed || state == SectionState.Blocked ? Color.Firebrick : state == SectionState.Degraded ? Color.DarkGoldenrod : SystemColors.ControlText;
+            tip.SetToolTip(text, text.Text); Retry.Visible = state == SectionState.Failed || state == SectionState.Blocked || state == SectionState.Degraded;
         }
     }
 
