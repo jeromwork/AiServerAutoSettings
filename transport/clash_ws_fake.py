@@ -31,11 +31,12 @@ def websocket(handler, root, secret):
     handler.send_header('Sec-WebSocket-Accept', base64.b64encode(hashlib.sha1(key.encode()).digest()).decode())
     handler.end_headers()
     stream = urlsplit(handler.path).path[1:]
-    with (root / 'subscriptions.jsonl').open('a') as f:
-        f.write(json.dumps(dict(stream=stream, at=time.time())) + '\n')
     queue = root / 'ws.jsonl'
     with queue.open() as f:
         f.seek(0, 2)
+        # This is a readiness marker: an event appended after it must be read.
+        with (root / 'subscriptions.jsonl').open('a') as subscriptions:
+            subscriptions.write(json.dumps(dict(stream=stream, at=time.time())) + '\n')
         try:
             while True:
                 position = f.tell()

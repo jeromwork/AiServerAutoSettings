@@ -178,14 +178,19 @@ Assert (@($trace|Where-Object {$_ -ceq '· vless-relay-sparfum: ok 640 мс'}).C
 [IO.File]::WriteAllText($fixture,('﻿param([Alias(''Home'')][string]$TransportHome)' + "`r`n" +
     '. (Join-Path ''REPO'' ''transport/Transport.Common.ps1'')'.Replace('REPO',$repo.Replace("'","''")) + "`r`n" +
     'Write-TransportLog $TransportHome ''fatal'' ''Нет файла канала @fixture.ps1:7''' + "`r`n" +
-    '[Console]::Out.WriteLine(''stdout password=short-test'');[Console]::Error.WriteLine(''stderr token=short-test'');exit 9' + "`r`n"))
+    '[Console]::Out.WriteLine(''stdout password=short-test'');[Console]::Error.WriteLine(''stderr token=short-test'')' + "`r`n" +
+    '[IO.File]::WriteAllText((Join-Path $TransportHome ''state/fixture-exited-at''),[DateTime]::UtcNow.Ticks.ToString());exit 9' + "`r`n"))
 [IO.File]::WriteAllText((Join-Path $root 'logs/transport.log'),"2000-01-01T00:00:00Z fatal старая причина @old.ps1:1`r`n")
 function Start-WizardWorkingTransport($Root,$Bundle){& $realStart $Root $Bundle}
 Reset
 $watch=[Diagnostics.Stopwatch]::StartNew();$r=Invoke-WizardStep $root $bundle 'Bootstrap' $request
 $exitMs=$watch.ElapsedMilliseconds
-Write-Host ('MEASURE: immediately exited fixture Bootstrap '+$exitMs+' ms (limit <3000 ms)')
-Assert (-not $r.ok -and $exitMs -lt 3000 -and $r.summary -like '*Нет файла канала @fixture.ps1:7*' -and $r.summary -notlike '*старая причина*') ('an immediately exited daemon fails Bootstrap in less than three seconds with the new fatal reason: '+$exitMs+' мс; '+$r.summary)
+# The final fixture timestamp excludes pwsh startup and loading Common from the
+# response measurement; process shutdown is still included in the 1.5 s budget.
+$fixtureExit=New-Object DateTime ([long][IO.File]::ReadAllText((Join-Path $root 'state/fixture-exited-at'))),([DateTimeKind]::Utc)
+$afterExitMs=([DateTime]::UtcNow-$fixtureExit).TotalMilliseconds
+Write-Host ('MEASURE: immediately exited fixture Bootstrap total '+$exitMs+' ms (<10000); after exit '+[int]$afterExitMs+' ms (<1500)')
+Assert (-not $r.ok -and $exitMs -lt 10000 -and $afterExitMs -ge 0 -and $afterExitMs -lt 1500 -and $r.summary -like '*Нет файла канала @fixture.ps1:7*' -and $r.summary -notlike '*старая причина*') ('an immediately exited daemon fails Bootstrap within 1500 ms after exit and 10000 ms total with the new fatal reason: total '+$exitMs+' ms; after exit '+[int]$afterExitMs+' ms; '+$r.summary)
 Assert ($r.summary -notlike '*short-test*' -and $r.summary -like '*<redacted>*') 'raw daemon output is sanitized before the summary'
 $raw=[IO.File]::ReadAllText((Join-Path $root 'logs/transport-daemon.out'))
 Assert ($raw.Contains('stdout password=short-test') -and $raw.Contains('stderr token=short-test')) 'both daemon pipes persist in the private file'
@@ -227,7 +232,7 @@ Write-TransportJson (Join-Path $root 'status/transport.json') @{configRevision='
 try{Wait-WizardChannel $root (Get-FreePort) 6|Out-Null}catch{}
 $trace=[IO.File]::ReadAllText($script:WizardProgressFile)
 Assert ($trace.Contains('модуль связи работает со старыми настройками (ревизия не совпала)') -and $trace.Contains('прежняя ошибка') -and $trace.Contains('не удалось применить конфиг')) 'stale revision and both errors are reported after five seconds'
-Write-Host ('FAST timings: daemon exit '+$exitMs+' ms; all fail '+$allFailMs+' ms')
+Write-Host ('FAST timings: daemon exit '+$exitMs+' ms total, '+[int]$afterExitMs+' ms after exit; all fail '+$allFailMs+' ms')
 
 # The contracted bootstrap form needs no extra public catalog field.
 $initial.Remove('catalog');$initial.entries=@{fixture=@{secret='vpn-entry-fixture'}}

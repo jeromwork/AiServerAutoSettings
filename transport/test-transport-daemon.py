@@ -90,6 +90,8 @@ if mode=='hang':
     os.write(1,b'x'*16384); time.sleep(60)
 elif mode=='dead': time.sleep(60)
 else:
+    if mode=='hold-ok':
+        while (root/'hold-proof').exists(): time.sleep(.02)
     # Deterministic startup first A, while still checking every candidate concurrently.
     time.sleep(.05 if port==26000 else .15)
     os.write(1,b'x'*n)
@@ -115,10 +117,23 @@ class Banner(socketserver.BaseRequestHandler):
 class TCP(socketserver.ThreadingTCPServer):
     allow_reuse_address=True
     daemon_threads=True
+banner_servers={}
 for i in c['inbounds']:
     if i['tag'].startswith('probe-'):
         server=TCP(('127.0.0.1',i['listen_port']),Banner)
-        threading.Thread(target=server.serve_forever,daemon=True).start()
+        banner_servers[i['listen_port']]=server
+        threading.Thread(target=server.serve_forever,kwargs=dict(poll_interval=.02),daemon=True).start()
+def close_refused_banners():
+    # A real refused TCP connect lets the cooldown scenario enter recovery by
+    # condition, without spending six seconds of the ten-second switch window.
+    while True:
+        modes=json.loads((root/'modes.json').read_text())
+        for port,server in list(banner_servers.items()):
+            if modes.get(str(port),{}).get('banner')=='refused':
+                server.shutdown(); server.server_close(); del banner_servers[port]
+                (root/('banner-closed-'+str(port))).touch()
+        time.sleep(.02)
+threading.Thread(target=close_refused_banners,daemon=True).start()
 class API(http.server.BaseHTTPRequestHandler):
     protocol_version='HTTP/1.1'
     def do_GET(self): websocket(self,root,api['secret'])
@@ -211,18 +226,31 @@ HTTP(('127.0.0.1',int(api['external_controller'].split(':')[-1])),API).serve_for
         print('RELOAD: validation %.2fs; replaced %.2fs; paths/subscriptions ready %.2fs' %
               (validation[0]['at']-requested_at,replaced_after,time.monotonic()-began),flush=True)
         return old
-    def reset_generation():
+    def reset_generation(tag=None):
         # Reset gate/reducer state through the real pin control, without paying for
         # another validation process/engine restart between unrelated scenarios.
+        # Wait for PUBLISHED fresh results: exited SSH children alone can still
+        # have undelivered ok events that would erase the next injected failure.
         # Reload itself is covered after site errors/rate limiting and during a check.
-        old=engine_pid(); deadline=time.monotonic()+12
-        pin_file=root/'state/transport-pin.json'; tag=status()['active']
+        old=engine_pid(); deadline=time.monotonic()+12; probe_start=len(probes())
+        subscriptions=len(records(root/'subscriptions.jsonl'))
+        def subscribed():
+            return {'logs','connections'} <= {r['stream'] for r in records(root/'subscriptions.jsonl')[subscriptions:]}
+        def fresh(tags,since):
+            current=[c for c in status().get('candidates',[]) if c['tag'] in tags]
+            return len(current)==len(tags) and all(c.get('checkedAt') and
+                datetime.fromisoformat(c['checkedAt']).timestamp()>=since for c in current)
+        pin_at=time.time()
+        pin_file=root/'state/transport-pin.json'; tag=tag or status()['active']
         pin_file.write_text(json.dumps(dict(mode='pinned',tag=tag)))
-        until(lambda: status().get('mode')=='pinned' and status().get('ok'),
+        until(lambda: status().get('mode')=='pinned' and status().get('active')==tag and status().get('ok') and
+              len(probes())>probe_start and all(stopped(p['pid']) for p in probes()[probe_start:]) and subscribed() and fresh([tag],pin_at),
               deadline=deadline,label='pin generation ready')
+        probe_start=len(probes()); subscriptions=len(records(root/'subscriptions.jsonl')); auto_at=time.time()
         pin_file.write_text(json.dumps(dict(mode='auto',tag=None)))
         until(lambda: status().get('mode')=='auto' and status().get('ok') and
-              all(c['state']=='ok' for c in status()['candidates']),
+              all(c['state']=='ok' for c in status()['candidates']) and
+              len(probes())>=probe_start+len(ports) and all(stopped(p['pid']) for p in probes()[probe_start:]) and subscribed() and fresh(ports,auto_at),
               deadline=deadline,label='automatic generation ready')
         assert engine_pid()==old, 'pin reset restarted engine'
         assert_clean()
@@ -258,26 +286,64 @@ HTTP(('127.0.0.1',int(api['external_controller'].split(':')[-1])),API).serve_for
         assert len(puts())==baseline and row(a)['penaltyStep']==0 and status()['phase']=='ok',status()
         assert len(records(root/'banners.jsonl'))==banner_count+1
         pass_test('site-failure-no-switch')
-        reload()  # resets the gate window and reducer generation
-        # 1: silent banner -> timeout -> REAL loopback direct proof -> selector failover.
+        # The pin/auto generation below resets the gate; reload is exercised
+        # after rate limiting and while a real gate is running.
+        # 1: refused banner -> REAL loopback direct proof -> selector failover.
+        # Force a recent real selector change, then return to auto. The first
+        # failure must meet the 10 s cooldown, so recovery starts BEFORE failover.
+        reset_generation(next(t for t in ports if t!=status()['active']))
         a=status()['active']; b=next(t for t in ports if t!=a); pid=engine_pid()
-        modes({str(ports[a]):dict(banner='dead',probe='hang')})
+        selection=datetime.fromisoformat(status()['switches'][-1]['at']).timestamp()
+        recovery_start=len(probes())
+        modes({str(ports[a]):dict(banner='refused',probe='hang')})
+        until(lambda: (root/('banner-closed-'+str(ports[a]))).exists(),label='refused banner listener closed')
         began=time.monotonic(); dial(a)
-        until(lambda: status().get('ok') and status().get('active')==b,seconds=15)
+        deadline=began+15
+        until(lambda: status().get('phase')=='searching' and
+              status().get('reason',{}).get('code')=='path-dial-failed' and
+              len(probes())>=recovery_start+2,deadline=deadline,label='recovery before first failover')
+        recovery=probes()[recovery_start:]
+        assert sorted(p['port'] for p in recovery)==sorted(ports.values()),recovery
+        assert all(p['at']<selection+10 for p in recovery),recovery
+        until(lambda: all(stopped(p['pid']) for p in recovery) and row(a)['state']=='fail',
+              deadline=deadline,label='recovery finishes with failed target')
+        until(lambda: status().get('ok') and status().get('active')==b,
+              deadline=deadline,label='first failover after recovery')
         assert time.monotonic()-began<=15 and engine_pid()==pid
         assert row(a)['penaltyStep']>=1 and status()['switches'][-1]['why']=='path-dial-failed',status()
         assert direct_calls and all(c==b'' for c in direct_calls)
         pass_test('failover')
-        # 6: second confirmed failure within 10 seconds is deferred to cooldown expiry.
+        # 6: recovery is already spent for 60 s and A's row is still fail.
+        # Hold A's new proof until the real selector AND failed row are observed:
+        # an acknowledgement alone must not make the watchdog consider it ready.
+        assert row(a)['state']=='fail',status()
         first_switch=datetime.fromisoformat(status()['switches'][-1]['at']).timestamp()
-        modes({str(ports[b]):dict(banner='dead',probe='hang')})  # A now responds to recovery
-        baseline=len(puts()); dial(b)
-        while time.time()<first_switch+9.7:
-            assert len(puts())==baseline,puts()
-            time.sleep(.1)
-        until(lambda: status().get('ok') and status().get('active')==a,seconds=12)
+        (root/'hold-proof').touch()
+        modes({str(ports[b]):dict(banner='dead',probe='hang'),str(ports[a]):dict(probe='hold-ok')})
+        baseline=len(puts()); proof_start=len(probes()); began=time.monotonic(); dial(b)
+        deadline=began+15
+        until(lambda: status().get('active')==b and row(b)['penaltyStep']>=1 and
+              status().get('phase')=='searching',deadline=deadline,label='second failure inside cooldown')
+        assert time.time()<first_switch+10 and row(a)['state']=='fail',status()
+        def switched_back():
+            changes=puts()[baseline:]
+            if not changes: return False
+            assert all(p['at']>=first_switch+10 for p in changes),changes
+            return any(p['tag']==a for p in changes)
+        until(switched_back,deadline=deadline,label='second failover respects 10 s cooldown')
+        switched_at=time.monotonic()
+        until(lambda: status().get('active')==a and row(a)['state']=='fail' and not status().get('ok'),
+              deadline=deadline,label='selected path still requires proof')
+        until(lambda: any(p['port']==ports[a] for p in probes()[proof_start:]),
+              deadline=deadline,label='independent 64 KiB selected-path check')
+        (root/'hold-proof').unlink()
+        until(lambda: status().get('ok') and status().get('active')==a and row(a)['state']=='ok',
+              deadline=deadline,label='selected failed row becomes watchdog-ready within 15 s')
+        assert time.monotonic()-switched_at<=15 and engine_pid()==pid
         history=status()['switches']; times=[datetime.fromisoformat(x['at']).timestamp() for x in history]
-        assert all(y-x>=10 for x,y in zip(times,times[1:])),history
+        assert all(y-x>=10 for x,y in zip(times,times[1:]) if y>=selection+10),history
+        print('RECOVERY: completed before second failure; selected failed row confirmed %.2fs after switch' %
+              (time.monotonic()-switched_at),flush=True)
         pass_test('switch-rate-limit')
         modes({}); reload()
         # 4: B's local classification rolls back penalties without selector/process changes.
@@ -356,7 +422,7 @@ HTTP(('127.0.0.1',int(api['external_controller'].split(':')[-1])),API).serve_for
         print('PASS: child-cleanup; real A/B integration %.1f s' % (time.monotonic()-START),flush=True)
     except Exception:
         print('STATUS',status(),file=sys.stderr)
-        for name in ('stderr','logs/transport.log','puts.jsonl','probes.jsonl','banners.jsonl','checks.jsonl'):
+        for name in ('stderr','logs/transport.log','puts.jsonl','probes.jsonl','banners.jsonl','checks.jsonl','subscriptions.jsonl','ws.jsonl','modes.json'):
             if (root/name).exists(): print(name,(root/name).read_text(),file=sys.stderr)
         raise
     finally:
