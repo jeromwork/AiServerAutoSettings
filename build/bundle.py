@@ -124,9 +124,11 @@ def make(version, outdir, launcher=None, product="RemoteAgents", binaries=False)
     outdir = Path(outdir).resolve()
     outdir.mkdir(parents=True, exist_ok=True)
     contents = {}
-    for raw in (ROOT / 'build/bundle-files.txt').read_text(encoding='utf-8-sig').splitlines():
-        line = raw.strip()
-        if not line or line.startswith('#'):
+    lines = [raw.strip() for raw in (ROOT / 'build/bundle-files.txt').read_text(encoding='utf-8-sig').splitlines()]
+    excluded = {Path(filename) for line in lines if line.startswith('!')
+                for filename in glob.glob(str(ROOT / line[1:]))}
+    for line in lines:
+        if not line or line.startswith(('#', '!')):
             continue
         optional = line.startswith('?')
         line = line.lstrip('?')
@@ -136,6 +138,8 @@ def make(version, outdir, launcher=None, product="RemoteAgents", binaries=False)
             raise ValueError('Нет обязательного файла: ' + source)
         for filename in matches:
             p = Path(filename)
+            if p in excluded:
+                continue
             if not p.is_file() or p.is_symlink() or ROOT not in p.resolve().parents:
                 raise ValueError('Требуется обычный файл внутри репозитория: ' + source)
             name = target or p.relative_to(ROOT).as_posix()
