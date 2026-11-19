@@ -24,6 +24,38 @@ class PcAccess(unittest.TestCase):
         (Path(d) / 'corp' / 'subnets').write_text('10.124.0.0/23\n')
         return d
 
+    def test_public_clinic_contract_and_auto_subnets(self):
+        conf = json.loads((ROOT / 'server/lan-pc-access.clinic.example.json').read_text())
+        public = m.computer_networks(conf)
+        row = public[0]
+        self.assertEqual(set(row), {'name', 'share', 'testHost', 'testPort'})
+        self.assertEqual((row['name'], row['testHost'], row['testPort']), ('clinic', '192.168.88.244', 22))
+        self.assertEqual(len(row['share']['subnets']), 20)
+        self.assertEqual(row['share']['domains'], ['*.eastclinic.ru'])
+        self.assertEqual(row['share']['dnsServers'], ['192.168.88.11'])
+        self.assertEqual(row['share']['hosts'], ['portal.eastclinic.ru'])
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory) / 'clinic'
+            runtime.mkdir()
+            (runtime / 'config.json').write_text(json.dumps({'subnets': row['share']['subnets'][:10]}))
+            (runtime / 'subnets').write_text('\n'.join(row['share']['subnets'][10:]))
+            conf['lans'][0]['subnets'] = 'auto'
+            self.assertEqual(m.computer_networks(conf, directory), public)
+
+    def test_invalid_public_settings_fail_closed(self):
+        source = json.loads((ROOT / 'server/lan-pc-access.clinic.example.json').read_text())['lans'][0]
+        for patch in ({'dnsServers': ['8.8.8.8']}, {'dnsServers': ['192.168.88.011']}, {'dnsServers': None},
+                      {'dnsServers': ['192.168.88.11'] * 2}, {'hosts': ['eastclinic.ru']}, {'hosts': ['*.eastclinic.ru']},
+                      {'hosts': ['foreign.example.org']}, {'hosts': ['PORTAL.eastclinic.ru']}, {'hosts': [None]},
+                      {'testPort': True}, {'testPort': 65536}, {'testHost': '8.8.8.8'}, {'testHost': 'eastclinic.ru'},
+                      {'subnets': '10.0.0.0/8'}, {'ovpn': 'SECRET-SENTINEL'}):
+            with self.subTest(patch=patch), self.assertRaises(m.Error):
+                m.computer_networks({'lans': [dict(source, **patch)]})
+        with self.assertRaises(m.Error):
+            m.computer_networks({'lans': [source, source]})
+        with self.assertRaises(m.Error):
+            m.computer_networks({'lans': [{'name': 'corp', 'subnets': ['10.0.0.0/8']}]})
+
     def test_auto_subnets_route_to_bound_outbound(self):
         d = self.lan_dir()
         generated, record, _ = m.plan(BASE, {'lans': [{'name': 'corp'}]}, None, d)

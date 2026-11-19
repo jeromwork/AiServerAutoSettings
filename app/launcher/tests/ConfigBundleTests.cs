@@ -340,8 +340,26 @@ namespace RemoteAgents.Launcher
             } finally { Directory.Delete(home,true); }
             Console.WriteLine("PASS: CONFIG: " + count + " assertions");
         }
-        static void LanConfig()
+        static void ClinicConfig()
         {
+            Dictionary<string, object> row;
+            using (var stream = System.Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream("RemoteAgents.ClinicFixture.json"))
+            using (var reader = new StreamReader(stream)) row = Json.Map(Json.Array(Json.Map(Json.Parse(reader.ReadToEnd()))["lans"])[0]);
+            var share = row.Where(p => new[] { "subnets", "domains", "dnsServers", "hosts" }.Contains(p.Key)).ToDictionary(p => p.Key, p => p.Value);
+            var item = ConfigBundle.D("name", row["name"], "testHost", row["testHost"], "testPort", row["testPort"], "share", share);
+            var parsed = ConfigBundle.Parse(Json.Encode(ConfigBundle.D("kind", "remoteagents-config", "schema", 1, "lan", new[] { item })));
+            Check(parsed.Missing.Length == 0 && LanAccess.Read(parsed.Profile).Subnets.Count == 20, "clinic public export imports all 20 subnets without OpenVPN secrets");
+            string home = Path.Combine(Path.GetTempPath(), "ra-clinic-config-" + Guid.NewGuid().ToString("N"));
+            try {
+                ConfigBundle.Store(home, parsed, new[] { "lan" });
+                var request = LanTunNetwork.Request(Json.Map(Json.Read(Path.Combine(home, "config.json"))["profile"]), 17880);
+                var network = Json.Map(Json.Array(request["networks"])[0]);
+                Check(Json.Strings(network["subnets"]).Length == 20 && Json.Strings(network["dnsServers"]).SequenceEqual(new[] { "192.168.88.11" }) && Json.Strings(network["hosts"]).SequenceEqual(new[] { "portal.eastclinic.ru" }), "stored profile reaches helper with clinic DNS/hosts/subnets");
+            } finally { if (Directory.Exists(home)) Directory.Delete(home, true); }
+        }
+        internal static void LanConfig()
+        {
+            ClinicConfig();
             Func<Dictionary<string, object>, Dictionary<string, object>> config = item => ConfigBundle.D("kind", "remoteagents-config", "schema", 1, "lan", new[] { item });
             var row = ConfigBundle.D("name", "office", "testHost", "10.123.0.10", "testPort", 443,
                 "share", ConfigBundle.D("subnets", new[] { "10.123.0.0/24" }));

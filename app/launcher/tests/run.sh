@@ -102,6 +102,10 @@ wait_for_memory
   wait_for_memory
   timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$repo/tools/legacy-cleanup/tests/smoke-plan.ps1" < /dev/null
   wait_for_memory
+  timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-decide.ps1" < /dev/null
+  wait_for_memory
+  timeout 120 python3 "$repo/transport/test-transport-events.py" "$pwsh"
+  wait_for_memory
   timeout 120 python3 "$repo/transport/test-transport-liveness.py" "$pwsh"
   wait_for_memory
   timeout 180 python3 "$repo/transport/test-transport-daemon.py" "$pwsh"
@@ -180,6 +184,7 @@ wait_for_memory
 # Extended engine fixtures remain available for focused diagnostics.
 # Config format, enc1, vault and materialization (stream A entry point; own output directory).
 wait_for_memory
+# LAN entry point also runs NetHelperVersionTests: service/protocol fingerprint and HelperVersion gate.
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:LanTests=true -- "$repo"
 wait_for_memory
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ConfigTests=true
