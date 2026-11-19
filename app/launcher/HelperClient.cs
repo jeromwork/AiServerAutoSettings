@@ -29,13 +29,14 @@ namespace RemoteAgents.Launcher
         Label summary;
         Button install;
         volatile bool disposed;
-        bool busy;
+        bool busy, connectionAttempted;
+        static readonly NetHelperSetup setup = new NetHelperSetup();
         internal string Status { get; private set; }
         internal HelperClient(string home, Control ui) { this.home = home; this.ui = ui; journal = new Journal(home); }
         internal void EnsureRunning()
         {
             if (disposed || busy) return;
-            busy = true;
+            busy = true; connectionAttempted = true;
             Task.Run(() => {
                 bool reinstall = true;
                 string message;
@@ -52,6 +53,12 @@ namespace RemoteAgents.Launcher
                     if (!Connected) ShowNotice(message, reinstall);
                 });
             });
+        }
+        // During first setup the tray already owns the client, but must not show a second install dialog.
+        // The version marker is written last by the installer. Connect once it appears, then Tick sends lan[].
+        internal void ConnectWhenInstalled()
+        {
+            if (!connectionAttempted && !NetHelperInstall.NeedsInstall(NetHelperInstall.InstalledVersion)) EnsureRunning();
         }
         string lanWanted = "{\"cmd\":\"lan.stop\"}";
         Dictionary<string, object> lanState = Json.Map(null);
@@ -185,9 +192,10 @@ namespace RemoteAgents.Launcher
                     busy = true; install.Enabled = false;
                     string result;
                     try {
-                        int code = await Task.Run(() => InstallElevated());
-                        if (code != 0) journal.Write("helper.install.failed stage=elevated code=" + code.ToString(System.Globalization.CultureInfo.InvariantCulture));
-                        result = code == 0 ? "" : "Локальные сети и VPN недоступны: установка помощника не завершена";
+                        var engine = new UpdateEngine(home, Program.Version);
+                        if (engine.Current.Length == 0) throw new IOException("Нет установленного бандла");
+                        await EnsureInstalled(home, engine.Folder(engine.Current), text => { Status = text; summary.Text = text; }, CancellationToken.None);
+                        result = "";
                     } catch (Win32Exception ex) { journal.Write(TickFailureLog.HelperFailure("install", ex)); result = ex.NativeErrorCode == 1223 ? PermissionRequired : "Не удалось установить сетевой помощник"; }
                     catch (Exception error) { journal.Write(TickFailureLog.HelperFailure("install", error)); result = "Не удалось установить сетевой помощник"; }
                     busy = false;
@@ -201,13 +209,24 @@ namespace RemoteAgents.Launcher
             install.Tag = needsInstall; install.Enabled = !busy;
             notice.Show();
         }
-        int InstallElevated()
+        internal static async Task EnsureInstalled(string home, string bundle, Action<string> progress, CancellationToken token)
         {
-            var engine = new UpdateEngine(home, Program.Version);
-            if (engine.Current.Length == 0) throw new IOException("Нет установленного бандла");
+            try {
+                await setup.Ensure(
+                    () => !NetHelperInstall.NeedsInstall(NetHelperInstall.InstalledVersion) && NetHelperInstall.Exists(),
+                    () => Task.Run(() => PinnedTransport.Ensure(home, bundle), token),
+                    () => Task.Run(() => InstallElevated(home, bundle)), progress, token);
+            } catch (Exception error) {
+                new Journal(home).Write(TickFailureLog.HelperFailure("setup", error));
+                throw;
+            }
+        }
+        static int InstallElevated(string home, string bundle)
+        {
             string sid;
             using (var identity = WindowsIdentity.GetCurrent()) sid = identity.User.Value;
-            return Elevated(new[] { "--net-helper-install", "--home", home, "--owner-sid", sid, "--helper-bundle", engine.Folder(engine.Current) });
+            var args = new[] { "--net-helper-install", "--home", home, "--owner-sid", sid, "--helper-bundle", bundle };
+            return NetHelperInstall.IsAdministrator ? NetHelperInstall.Install(args) : Elevated(args);
         }
         internal static void UninstallElevated()
         {

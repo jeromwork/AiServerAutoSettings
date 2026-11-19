@@ -51,6 +51,7 @@
     <Compile Include="VpnTests.cs" />
     <Compile Include="../NetHelperProtocol.cs" />
     <Compile Include="../NetHelperInstall.cs" />
+    <Compile Include="../NetHelperSetup.cs" />
     <Compile Include="../PinnedTransport.cs" />
     <Compile Include="../NetHelper.cs" />
     <Compile Include="../LanTun.cs" />

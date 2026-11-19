@@ -83,8 +83,9 @@ namespace RemoteAgents.Launcher
             // The folder choice keeps applying after its window closed; the tray reports the result.
             BackgroundWork.Disk.Changed += () => { try { dispatch.BeginInvoke(new Action(DiskFinished)); } catch (InvalidOperationException) { } };
             dispatch.BeginInvoke(new Action(() => {
+                netHelper = new HelperClient(home, dispatch);
                 if (firstSetup) { RunFirstSetup(); return; }
-                netHelper = new HelperClient(home, dispatch); netHelper.EnsureRunning();
+                netHelper.EnsureRunning();
                 DeliverUpdateNotice(); CheckLegacyVpn(); StartLegacyDiskCleanup(); Handle(args); DrainCommands(); Tick();
                 if(Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome),StringComparison.OrdinalIgnoreCase)) CheckSetup();
 
@@ -109,7 +110,7 @@ namespace RemoteAgents.Launcher
             if(closing)return;
             if(FirstInstall.Required(home)){ExitThread();return;}
             ReloadSettings();icon.Visible=true;readyForCommands=true;ShowMain();
-            netHelper = new HelperClient(home, dispatch); netHelper.EnsureRunning();
+            netHelper.EnsureRunning();
             CheckLegacyVpn();StartLegacyDiskCleanup();DrainCommands();Tick();
         }
         void Bootstrap()
@@ -173,7 +174,7 @@ namespace RemoteAgents.Launcher
                 })) { ok = false; coreFailed = true; }
                 if (restart) return;
                 if (!Step("transport", () => { transport = StatusView.Read(home, "transport", maxAgeSec: 15); })) { ok = false; coreFailed = true; }
-                ok &= Step("lan", () => { if (netHelper != null) netHelper.UpdateLan(config.Data, transport); });
+                ok &= Step("lan", () => { if (netHelper != null) { netHelper.UpdateLan(config.Data, transport); netHelper.ConnectWhenInstalled(); } });
                 ok &= Step("vpn-resume", () => ResumeUpdatedVpn(transport));
                 ok &= Step("icon", () => {
                     var linkPhase = StatusView.Phase(transport); shown = linkPhase == LinkPhase.Ok ? green : linkPhase == LinkPhase.Checking ? yellow : red;

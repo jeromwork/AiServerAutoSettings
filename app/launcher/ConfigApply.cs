@@ -911,6 +911,7 @@ namespace RemoteAgents.Launcher
         internal async Task<Dictionary<string, SectionOutcome>> Execute(IList<string> plan, CancellationToken token)
         {
             await Bundle();
+            await HelperClient.EnsureInstalled(home, bundle, Log, token);
             deploymentOutcome = null;
             var result = await ConfigEngine.Execute(plan, (s, t) => Task.Run(() => RunSection(s, t), t), (s, state, text) => Report(s, state, text), token);
             foreach (var pair in result) {
@@ -1210,6 +1211,7 @@ namespace RemoteAgents.Launcher
         internal async Task<SectionOutcome> Activate(CancellationToken token)
         {
             await Bundle();
+            await HelperClient.EnsureInstalled(home, bundle, Log, token);
             var r = await Task.Run(() => WizardRunner.Run(home, bundle, "Activate", new { }, token, line => Log("Итог: " + line)));
             return SectionOutcome.From(r, "Настройки сохранены");
         }

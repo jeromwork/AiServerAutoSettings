@@ -402,7 +402,11 @@ namespace RemoteAgents.Launcher
             if (MutationConflict != null) { string conflict = MutationConflict(); if (conflict.Length > 0) { Append(conflict); return false; } }
             int page=section<0?steps.Section:section;
             busy=true;stepCancellation=new CancellationTokenSource();steps.Enabled=false;pages.Enabled=false;foreach(var panel in details)panel.Enabled=false;back.Enabled=next.Enabled=false;close.Enabled=true;progress.Style=ProgressBarStyle.Marquee;
-            try {await action();lastSuccess=true;if(SettingsApplied!=null && !IsDisposed)SettingsApplied();}
+            try {
+                if (FirstInstall.Required(home) || page == 5 || page == 6)
+                    await HelperClient.EnsureInstalled(home, bundle, Append, stepCancellation.Token);
+                await action();lastSuccess=true;if(SettingsApplied!=null && !IsDisposed)SettingsApplied();
+            }
             catch(OperationCanceledException) {if(!IsDisposed){if(page!=7)applied[page]=false;results[page]="Шаг отменён; готовность не подтверждена";Append(results[page]);}}
             catch(Exception e) {if(!IsDisposed){if(page==0)password.Enabled=true;if(page!=7)applied[page]=false;results[page]="Ошибка: "+e.Message;Append(results[page]);}}
             finally {busy=false;stepCancellation.Dispose();stepCancellation=null;if(!IsDisposed){foreach(var panel in details)panel.Enabled=true;steps.Enabled=pages.Enabled=close.Enabled=true;back.Enabled=Array.IndexOf(order,steps.Section)>0;next.Enabled=!showingInstall;progress.Style=ProgressBarStyle.Continuous;RefreshSummary();if(closingRequested)Close();}}
