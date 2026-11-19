@@ -5,15 +5,11 @@ using System.Linq;
 
 namespace RemoteAgents.Launcher
 {
-    // Pure policy, shared by the host and portable tests. Scheduling uses Stopwatch;
-    // wall clock is used only to reject stale/future transport evidence and resume gaps.
+    // Transport evidence is status only; it never grants or revokes the core lifetime.
     internal sealed class VpnWatchdog
     {
         internal const string OwnerMutex = @"Global\RemoteAgents-VpnHost";
-        internal const int IntervalMs = 3000, ProbeTimeoutMs = 3000, PollMs = 50;
-        internal int Failures { get; private set; }
-        internal bool Sample(bool transportOk, bool probeOk)
-        { Failures = transportOk && probeOk ? 0 : Failures + 1; return Failures >= 2; }
+        internal const int ProbeTimeoutMs = 3000, PollMs = 50;
         internal static bool TransportReady(Dictionary<string, object> status, DateTime now, string tag = null)
         {
             DateTime stamp;
@@ -29,9 +25,10 @@ namespace RemoteAgents.Launcher
                 case "server-unreachable": return "VPN выключен: сервер не отвечает";
                 case "network-changed": return "VPN выключен: сеть изменилась";
                 case "resumed": return "VPN выключен после сна: включите снова";
-                case "watchdog-stalled": return "VPN выключен: проверка соединения остановилась";
+                case "watchdog-stalled": return "VPN выключен: служба перестала отвечать";
+                case "searching": return "Нет связи, ищу путь";
                 case "core-exited": return "VPN выключен: соединение прервано";
-                case "conflict": return stage.Length == 0 ? "Отключите другой VPN перед включением VPN RemoteAgents" : "Сейчас работает " + stage + ". Отключите его и нажмите «Включить VPN» ещё раз";
+                case "conflict": return stage.Length == 0 ? "Отключите другой VPN перед включением VPN RemoteAgents" : "Сейчас работает " + stage + ". Отключите его, чтобы продолжить работу VPN RemoteAgents";
                 case "no-udp": return "Текущий путь " + (stage.Length == 0 ? "к серверу" : stage) + " не передаёт UDP — выберите другой путь";
                 case "no-path": return "VPN не включён: нет живого пути к серверу";
                 case "rollback-error": return "Не удалось подтвердить выключение VPN. Откройте диагностику";

@@ -208,8 +208,6 @@ namespace RemoteAgents.Launcher
             while (true) {
                 if (stopping.WaitOne(0) || emergency.WaitOne(0) || lease.Expired || (waitingForClient && lifetime.ConnectionExpired)) return false;
                 lease.Pulse();
-                // Stage 3 proves only owner-loop progress. Network health checks belong to stages 4/5.
-                lease.Confirmed();
                 if (operation.IsCompleted) return true;
                 stopping.WaitOne(50);
             }
