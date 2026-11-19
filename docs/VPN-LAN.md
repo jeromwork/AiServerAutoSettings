@@ -441,6 +441,7 @@ route-noexec; правила pref 1000 только для подсетей пр
 `transport/Collect-NetState.ps1` только собирает сведения и сравнивает снимки,
 не меняет сеть. В комплекте — маршруты, адаптеры, DNS/NRPT, процессы/службы,
 настройки прокси и журналы. Не добавляйте секреты в Label/ProbeUrls.
+Разделы собираются последовательно в runspace текущего процесса (Windows PowerShell 5.1), модули загружаются заранее; тайм-аут раздела — 10 с, общий предел — 90 с.
 
 ```powershell
 powershell -NoProfile -File transport/Collect-NetState.ps1 -Label до
