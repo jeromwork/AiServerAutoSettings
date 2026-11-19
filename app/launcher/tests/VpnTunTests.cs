@@ -84,6 +84,151 @@ namespace RemoteAgents.Launcher
             failed.Tick(5000);
             Check(SpinWait.SpinUntil(() => { failed.Tick(5001); return failed.Failed; }, 1500), "inventory exception is consumed as status");
         }
+        // Fake time and gated workers exercise the production monitor without DNS,
+        // Windows processes, real network changes or sleeps in the owner loop.
+        sealed class RebindFixture : IDisposable
+        {
+            readonly DateTime utc = DateTime.UtcNow;
+            readonly VpnTun settings = VpnTun.Read(D("socksPort", 17881));
+            readonly Dictionary<string, object> snapshot = Snapshot("OpenVPN", "TAP OpenVPN", "192.168.9.0/24");
+            internal readonly ManualResetEvent ResolveEntered = new ManualResetEvent(false), ResolveRelease = new ManualResetEvent(true);
+            internal readonly ManualResetEvent BuildEntered = new ManualResetEvent(false), BuildRelease = new ManualResetEvent(true);
+            internal readonly Dictionary<string, object> Transport;
+            internal readonly VpnTunRebind Rebind;
+            internal readonly VpnTunMonitor Monitor;
+            internal Dictionary<string, object> Status, RunningConfig;
+            internal int Resolves, Builds, Restarts, DeadRestarts, Stops;
+            internal bool ResolveFails, BuildFails, StartFails;
+            internal string[] Addresses = { "198.51.100.7" };
+            internal readonly List<long> BuildTimes = new List<long>(), RestartTimes = new List<long>();
+            long time;
+            internal RebindFixture()
+            {
+                Transport = D("ok", true, "active", "a", "updatedAt", utc.ToString("o"), "configRevision", "r1", "network", "wifi1", "localNet", "ok",
+                    "helper", D("udp", true, "vpnInPort", 17881), "endpoints", new[] { "relay.example" }, "lan", D("subnets", new[] { "192.168.77.0/24" }),
+                    "candidates", new[] { D("tag", "a", "state", "ok", "enabled", true) });
+                var binding = VpnTunBinding.Resolve(Transport, host => Addresses);
+                RunningConfig = MakeConfig(binding, Transport);
+                Rebind = new VpnTunRebind(0, binding, Json.Encode(RunningConfig), evidence => {
+                    Interlocked.Increment(ref Resolves); ResolveEntered.Set(); ResolveRelease.WaitOne();
+                    if (ResolveFails) throw new IOException("fake DNS failure");
+                    return VpnTunBinding.Resolve(evidence, host => Addresses);
+                }, (updated, evidence, current) => {
+                    Interlocked.Increment(ref Builds); lock (BuildTimes) BuildTimes.Add(Interlocked.Read(ref time));
+                    BuildEntered.Set(); BuildRelease.WaitOne();
+                    if (BuildFails) throw new InvalidDataException("fake config check failure");
+                    return Json.Encode(MakeConfig(updated, evidence));
+                }, candidate => {
+                    Restarts++; RestartTimes.Add(time);
+                    Check(Json.Bool(Status, "enabled") && Json.Str(Status, "state") == "searching" && Json.Str(Json.Map(Status["reason"]), "code") == "vpn-rebind", "searching is published before replacing the core in its Job");
+                    if (StartFails) return false;
+                    RunningConfig = Json.Map(Json.Parse(candidate)); return true;
+                });
+                Monitor = new VpnTunMonitor(0, Transport, VpnTun.DnsPolicy(snapshot), value => {
+                    Status = value;
+                    Check(Json.Bool(value, "enabled"), "rebind preserves enabled on every publication");
+                }, reason => Stops++, () => DeadRestarts++, Rebind);
+            }
+            Dictionary<string, object> MakeConfig(VpnTunBinding binding, Dictionary<string, object> evidence)
+            { return Json.Map(Json.Parse(Json.Encode(settings.Config("ra-helper", Convert.ToBase64String(new byte[32]), binding.Ips, Json.Strings(Json.Get(Json.Map(evidence["lan"]), "subnets")), snapshot, VpnTun.DnsPolicy(snapshot), binding.Port)))); }
+            internal int RunningPort { get { return Json.Int(Json.Map(Json.Array(RunningConfig["outbounds"])[0]), "server_port", 0); } }
+            internal void Port(int port) { Json.Map(Transport["helper"])["vpnInPort"] = port; }
+            internal void Step(long ms, bool alive = true)
+            {
+                Interlocked.Exchange(ref time, ms); var now = utc.AddMilliseconds(ms); Transport["updatedAt"] = now.ToString("o");
+                Check(Monitor.Step(ms, now, alive, Transport, ""), "rebind owner loop keeps progressing");
+            }
+            internal void Advance(long ms)
+            { while (time < ms) Step(Math.Min(time + 500, ms)); }
+            internal void Await(long ms, Func<bool> done, string name)
+            { Check(SpinWait.SpinUntil(() => { Step(ms); return done(); }, 1500), name); }
+            public void Dispose() { ResolveRelease.Set(); BuildRelease.Set(); }
+        }
+        static void RebindChecks()
+        {
+            // (a), (d), (f): keep DNS gated over five seconds of injected time.
+            using (var f = new RebindFixture()) {
+                f.ResolveRelease.Reset(); f.Port(17891);
+                f.Step(0);
+                Check(f.ResolveEntered.WaitOne(1500), "rebind resolver runs in the background");
+                Check(Json.Str(f.Status, "state") == "searching" && Json.Str(Json.Map(f.Status["reason"]), "code") == "vpn-rebind", "port mismatch never reports on while resolver is pending");
+                string since = Json.Str(Json.Map(f.Status["reason"]), "since");
+                var elapsed = Stopwatch.StartNew();
+                for (int ms = 500; ms <= 5000; ms += 500) {
+                    f.Step(ms);
+                    Check(Json.Str(f.Status, "state") != "on" && f.RunningPort == 17881, "old core cannot report on with a different transport port");
+                }
+                Check(elapsed.ElapsedMilliseconds < 500 && f.Resolves == 1 && f.Builds == 0 && f.Stops == 0 && f.DeadRestarts == 0, "five second simulated DNS delay neither blocks steps nor overlaps work nor triggers emergency Stop");
+                Check(Json.Str(Json.Map(f.Status["reason"]), "since") == since, "vpn-rebind since remains stable during resolution");
+                f.ResolveRelease.Set();
+                f.Await(5001, () => f.Restarts == 1, "new port prepared and activated once");
+                Check(f.Builds == 1 && f.RunningPort == 17891 && f.Rebind.Binding.Port == 17891 && f.Stops == 0, "one rebuild and one core restart use the new SOCKS port without Stop");
+                f.Step(5002); Check(Json.Str(f.Status, "state") == "on", "on resumes only after observing the new running core");
+                f.Step(5003, false);
+                Check(f.DeadRestarts == 1 && f.Rebind.Config == Json.Encode(f.RunningConfig), "dead-core restart retains the updated working config");
+            }
+            // (b): DNS changes for the same host/revision are picked up periodically.
+            using (var f = new RebindFixture()) {
+                f.Addresses = new[] { "2001:db8::9", "198.51.100.8", "198.51.100.8" };
+                f.Advance(5000); f.Await(5001, () => f.Restarts == 1, "changed resolved endpoint set triggers rebind without revision change");
+                var excluded = Json.Strings(Json.Map(Json.Array(f.RunningConfig["inbounds"])[0])["route_exclude_address"]);
+                Check(excluded.Contains("198.51.100.8/32") && excluded.Contains("2001:db8::9/128") && !excluded.Contains("198.51.100.7/32") && excluded.Contains("192.168.77.0/24") && excluded.Contains("192.168.9.0/24"), "new config replaces server exclusions and preserves LAN/foreign-adapter routes");
+                f.Addresses = new[] { "198.51.100.8", "2001:0db8::9" };
+                f.Transport["endpoints"] = new[] { "other.example" }; f.Transport["configRevision"] = "r2";
+                f.Advance(10001); f.Await(10002, () => f.Rebind.Binding.Revision == "r2", "new endpoint name with same resolved IP set is consumed");
+                Check(f.Builds == 1 && f.Restarts == 1 && f.Stops == 0, "endpoint alias, duplicate IPs and DNS answer order do not restart a matching config");
+                f.Transport["endpoints"] = new[] { "198.51.100.9" }; f.Transport["configRevision"] = "r3";
+                f.Advance(15002); f.Await(15003, () => f.Restarts == 2, "changed publisher endpoint list rebuilds VPN");
+                Check(f.Rebind.Binding.Ips.SequenceEqual(new[] { "198.51.100.9" }) && f.Stops == 0, "published literal endpoint replaces resolved server set");
+            }
+            // (c): network/revision alone cause no construction or restart.
+            using (var f = new RebindFixture()) {
+                f.Transport["configRevision"] = "r2"; f.Transport["network"] = "wifi2";
+                f.Step(0); f.Await(1, () => f.Rebind.Binding.Revision == "r2", "unchanged binding accepts new network/revision");
+                f.Step(500);
+                Check(f.Builds == 0 && f.Restarts == 0 && f.Stops == 0 && Json.Str(f.Status, "state") == "on", "Wi-Fi and revision changes leave identical VPN config/core alone");
+                f.Transport.Remove("helper"); f.Transport.Remove("endpoints"); f.Transport.Remove("configRevision");
+                f.Advance(15000);
+                Check(f.Builds == 0 && f.Restarts == 0 && f.Resolves == 1, "old transport status without binding fields never loops through rebuilds");
+            }
+            // (e): a second change one second later waits for the five second bound.
+            using (var f = new RebindFixture()) {
+                f.Port(17891); f.Step(0); f.Await(1, () => f.Restarts == 1, "first rapid port update applied");
+                f.Port(17901); f.Advance(1001);
+                Check(f.Builds == 1 && f.Restarts == 1 && Json.Str(f.Status, "state") == "searching", "second port change at one second is deferred");
+                f.Advance(5000); Check(f.Builds == 1 && f.Restarts == 1, "no second construction/restart before five seconds");
+                f.Step(5001); f.Await(5002, () => f.Restarts == 2, "latest port is eventually applied after cooldown");
+                Check(f.RunningPort == 17901 && f.RestartTimes[1] - f.RestartTimes[0] >= 5000 && f.BuildTimes[1] - f.BuildTimes[0] >= 5000 && f.Stops == 0, "both config construction and restart obey five second rate limit");
+            }
+            // (g): resolver/check failures never damage the current config; retry >=10s.
+            using (var f = new RebindFixture()) {
+                string before = f.Rebind.Config; f.ResolveFails = true; f.Port(17891);
+                f.Step(0); f.Await(1, () => f.Rebind.Failed, "DNS failure becomes searching status");
+                Check(f.Rebind.Config == before && f.RunningPort == 17881 && f.Builds == 0 && f.Restarts == 0 && f.Stops == 0 && Json.Str(f.Status, "state") == "searching", "failed resolution keeps the previous config and never calls Stop");
+                f.Transport["configRevision"] = "r2"; f.Advance(10000);
+                Check(f.Resolves == 1 && Json.Str(f.Status, "state") != "on", "DNS error retry is delayed ten seconds even when revision changes");
+                f.ResolveFails = false; f.Step(10001); f.Await(10002, () => f.Restarts == 1, "DNS recovers automatically after retry delay");
+                Check(f.RunningPort == 17891 && f.Stops == 0, "recovered binding needs no manual disable or enable");
+            }
+            // A completed background result may already be obsolete. Also gate
+            // construction itself to prove it never executes inside Step.
+            using (var f = new RebindFixture()) {
+                f.BuildRelease.Reset(); f.Port(17891); f.Step(0);
+                Check(f.BuildEntered.WaitOne(1500), "config construction runs on the worker");
+                f.Port(17901); f.Advance(1000);
+                Check(f.Restarts == 0 && Json.Str(f.Status, "state") == "searching", "blocked config construction does not block owner ticks");
+                f.BuildRelease.Set();
+                f.Await(1001, () => !f.Rebind.Preparing, "obsolete background build is discarded");
+                f.Advance(6001);
+                f.Await(6002, () => f.Restarts == 1, "stale result discarded and latest binding activated");
+                Check(f.RunningPort == 17901 && f.Builds == 2 && f.Stops == 0, "obsolete config is never launched");
+            }
+            foreach (bool failBuild in new[] { true, false }) using (var f = new RebindFixture()) {
+                string before = f.Rebind.Config; f.BuildFails = failBuild; f.StartFails = !failBuild; f.Port(17891);
+                f.Step(0); f.Await(1, () => f.Rebind.Failed, "config check/start failure is contained by rebind");
+                Check(f.Rebind.Config == before && f.Rebind.Binding.Port == 17881 && f.Stops == 0 && Json.Str(f.Status, "state") == "searching", "failed config check or core launch cannot mark candidate as running");
+            }
+        }
         internal static void Run(string root)
         {
             var watch = Stopwatch.StartNew();
@@ -128,6 +273,7 @@ namespace RemoteAgents.Launcher
             Check(VpnTun.PathState(transport, now) == "" && VpnTun.PathState(transport, now.AddSeconds(4)) == "no-path" && VpnTun.PathState(transport, now.AddSeconds(-1)) == "no-path", "only fresh checked path is accepted");
             MonitorChecks(now, transport, strict);
             ConflictScanChecks();
+            RebindChecks();
             string command; Dictionary<string, object> request;
             Check(NetHelperProtocol.TryRequest(Json.Encode(settings.Request()) + "\r\n", out command, out request) && command == "vpn.on", "typed VPN command with CRLF");
             foreach (string invalid in new[] { "{\"cmd\":\"vpn.on\",\"socksPort\":17881,\"socksPort\":9}", "{\"cmd\":\"vpn.on\",\"socksPort\":17881,\"c\\u006dd\":\"vpn.off\"}", "{\"cmd\":\"vpn.on\",\"socksPort\":17881,\"path\":\"bad\"}", "{\"cmd\":\"vpn.on\",\"socksPort\":0}", "{\"cmd\":\"vpn.on\",\"socksPort\":17881,\"excludeCidrs\":[\"bad\"]}", "{\"cmd\":\"vpn.on\",\"socksPort\":17881,\"dnsServer\":{}}", "{\"cmd\":\"vpn.on\",\"socksPort\":17881,\"excludeCidrs\":{}}", "{\"cmd\":\"vpn.on\",\"socksPort\":\"17881\"}" })
