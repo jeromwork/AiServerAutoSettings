@@ -219,6 +219,95 @@ class ApplyTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.fake = Fake(self.tmp.name)
 
+    def diagnostic_record(self):
+        path = self.fake.path('/var/log/remoteagents/server-apply-errors.log')
+        lines = path.read_text().splitlines()
+        self.assertEqual(len(lines), 1)
+        return path, json.loads(lines[0])
+
+    def test_unknown_exception_is_private_and_identified(self):
+        engine = self.fake.engine()
+        engine.command = 'status'
+        def fail():
+            raise RuntimeError('boom token=abcd1234SECRET')
+        self.assertFalse(engine.part('probe', fail))
+        path, record = self.diagnostic_record()
+        self.assertEqual(record['type'], 'RuntimeError')
+        self.assertEqual(record['message'], 'boom token=***')
+        self.assertEqual((record['mode'], record['part']), ('status', 'probe'))
+        self.assertRegex(record['id'], r'^[0-9a-f]{8}$')
+        self.assertTrue(record['where'][-1].endswith(':fail'))
+        summary = engine.rows[-1]['summary']
+        self.assertIn('запись ' + record['id'], summary)
+        self.assertNotIn('boom', summary)
+        self.assertNotIn('abcd1234SECRET', path.read_text())
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+        if os.geteuid() == 0:
+            self.assertEqual((path.stat().st_uid, path.stat().st_gid), (0, 0))
+            self.assertEqual((path.parent.stat().st_uid, path.parent.stat().st_gid), (0, 0))
+        self.assertEqual(self.fake.system.actions, [])
+
+    def test_unknown_exception_survives_unavailable_journal(self):
+        self.fake.write('/var/log/remoteagents', 'not a directory')
+        engine = self.fake.engine()
+        def fail():
+            raise RuntimeError('boom')
+        self.assertFalse(engine.part('probe', fail))
+        self.assertEqual(engine.rows[-1]['state'], 'error')
+        self.assertEqual(engine.rows[-1]['summary'], 'Проверка/команда не выполнена; детали скрыты.')
+
+    def test_secrets_from_input_and_cause_are_redacted(self):
+        cfg = config()
+        cfg['secrets'] = {'config-secret': 'short-secret'}
+        relay = {'masterPassword': 'master-value', 'secrets': {'relay-secret': 'relay-value',
+                 'json-secret': json.dumps({'password': 'nested-value'})}}
+        source = json.dumps(cfg) + '\n' + app.MARKER + '\n' + json.dumps(relay)
+        cfg, values = app.read_input('-', io.StringIO(source), diagnostic=self.fake.system)
+        engine = self.fake.engine(cfg, values)
+        def fail():
+            try:
+                raise ValueError('short-secret relay-value master-value nested-value')
+            except ValueError as exc:
+                raise RuntimeError('short-secret relay-value master-value nested-value ' + 'A' * 40 + ' ' + 'x ' * 400) from exc
+        engine.part('probe', fail)
+        path, record = self.diagnostic_record()
+        for value in ('short-secret', 'relay-value', 'master-value', 'nested-value', 'A' * 40):
+            self.assertNotIn(value, path.read_text())
+        self.assertLessEqual(len(record['message']), 500)
+        self.assertIn('ValueError: ***', record['cause'])
+        self.assertLessEqual(len(record['where']), 5)
+
+    def test_main_failure_keeps_input_secrets_for_diagnostics(self):
+        cfg = config()
+        cfg['secrets'] = {'secret': 'main-sentinel'}
+        with patch.object(app.sys, 'stdin', io.StringIO(json.dumps(cfg))), patch.object(app, 'Engine', side_effect=RuntimeError('main-sentinel')):
+            try:
+                app.main(['plan', '--json'], system=self.fake.system)
+            except RuntimeError as exc:
+                summary = app.hidden_exception(self.fake.system, exc, 'plan', 'main')
+        path, record = self.diagnostic_record()
+        self.assertEqual((record['part'], record['message']), ('main', '***'))
+        self.assertIn('запись ' + record['id'], summary)
+        self.assertNotIn('main-sentinel', path.read_text())
+
+    def test_diag_rotation_and_symlink_refusal(self):
+        path = self.fake.path('/var/log/remoteagents/server-apply-errors.log')
+        self.fake.write('/var/log/remoteagents/server-apply-errors.log', 'x' * (1024 * 1024 + 1))
+        self.assertIsNotNone(self.fake.system.diag({'message': 'new'}))
+        archive = path.with_name(path.name + '.1')
+        self.assertGreater(archive.stat().st_size, 1024 * 1024)
+        self.assertEqual(archive.stat().st_mode & 0o777, 0o600)
+        path.unlink()
+        path.symlink_to(archive)
+        self.assertIsNone(self.fake.system.diag({'message': 'refused'}))
+        self.assertGreater(archive.stat().st_size, 1024 * 1024)
+
+    def test_real_diag_is_disabled_without_root(self):
+        with patch.object(app.os, 'geteuid', return_value=1001), patch.object(app.System, '_journal') as write:
+            self.assertIsNone(app.System().diag({'message': 'refused'}))
+            write.assert_not_called()
+
     def test_missing_payload_file_is_a_known_plan_error(self):
         source = Path(self.tmp.name) / 'payload'
         shutil.copytree(SOURCE, source)
