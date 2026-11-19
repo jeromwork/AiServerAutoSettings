@@ -9,7 +9,7 @@ function Get-WizardApplyMode([string]$Root,$Request) {
     return Get-WizardAdminMode $Root $Request
 }
 function Get-WizardApplyFiles([string]$Bundle) {
-    $names=@('server_apply.py','server-apply.sh','base_network.py','lan_share.py','server_recovery.py','server_components.py','server_packages.py','component_files.py','happier-web.schema.json','happier_web.py','happier_web_common.py','happier_web_release.py','happier_web_quotas.py','agy_usage_scrape.py','happier_web_settings.cjs','happier_web_verify.cjs','happier_web_addon.js','lan_vpn.py','lan-vpn.sh','lan-config.schema.json','proxy_out.py','proxy-out.sh','remoteagents_config.py')
+    $names=@('server_apply.py','server-apply.sh','base_network.py','lan_share.py','lan_pc_access.py','server_recovery.py','server_components.py','server_packages.py','component_files.py','happier-web.schema.json','happier_web.py','happier_web_common.py','happier_web_release.py','happier_web_quotas.py','agy_usage_scrape.py','happier_web_settings.cjs','happier_web_verify.cjs','happier_web_addon.js','lan_vpn.py','lan-vpn.sh','lan-config.schema.json','proxy_out.py','proxy-out.sh','remoteagents_config.py')
     $body=Get-WizardNetFiles $Bundle $names
     $body+='mkdir -p "$d/tg-gateway"'+"`n"
     foreach($name in @('config.paste.schema.json','tg-gateway/gateway.py','tg-gateway/tg_gateway_keys.py','tg-gateway/tg_gateway_setup.py','tg-gateway/install.sh','tg-gateway/README.md')){
@@ -76,7 +76,7 @@ function Invoke-WizardServerApplyPayload([string]$Root,[string]$Bundle,$Request,
     $verb=if($Request.statusOnly){'status'}else{'plan'}
     $actions=@()
     $result=Invoke-WizardApplyCommand $Root $Bundle $Request $mode $verb $payload
-    if(-not $Request.statusOnly -and -not $result.ok){
+    if(-not $Request.statusOnly){
         # A missing secret/invalid configuration is reviewable and requires no mutation.
         $canApply=@($result.parts|Where-Object {$_.state -in @('change','pending')}).Count -gt 0
         if($canApply){
@@ -93,7 +93,8 @@ function Invoke-WizardServerApplyPayload([string]$Root,[string]$Bundle,$Request,
         }
     }
     $result|Add-Member -Force actions $actions
-    $result|Add-Member -Force summary ((@($result.parts|ForEach-Object {$_.part+': '+$_.state+' — '+$_.summary})) -join '; ')
+    $summary=if($result.summary){[string]$result.summary}else{(@($result.parts|ForEach-Object {$_.part+': '+$_.state+' — '+$_.summary})) -join '; '}
+    $result|Add-Member -Force summary $summary
     Write-TransportJson (Join-Path $Root 'state/server-apply.json') $result
     return $result
 }

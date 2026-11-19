@@ -17,15 +17,21 @@ import os
 from pathlib import Path
 import pwd
 import re
+import secrets
 import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from urllib.parse import urlsplit
 
 MARKER = '---remoteagents-stdin---'
 HIDDEN = '<есть, скрыт>'
+OPTIONAL_PARTS = frozenset({'happierWeb'})
 SOURCE = Path(__file__).resolve().parent
+CODE_FILES = ('server_apply.py', 'server-apply.sh', 'lan_vpn.py', 'lan-vpn.sh', 'proxy_out.py', 'proxy-out.sh', 'remoteagents_config.py', 'base_network.py', 'lan_share.py', 'lan_pc_access.py', 'server_recovery.py', 'server_components.py', 'server_packages.py', 'component_files.py', 'lan-config.schema.json', 'happier-web.schema.json',
+                     'happier_web.py', 'happier_web_common.py', 'happier_web_release.py', 'happier_web_quotas.py', 'agy_usage_scrape.py', 'happier_web_verify.cjs', 'happier_web_settings.cjs', 'happier_web_addon.js')
+TG_GATEWAY_FILES = ('gateway.py', 'tg_gateway_keys.py', 'tg_gateway_setup.py', 'install.sh', 'README.md')
 
 
 class Error(Exception):
@@ -170,11 +176,56 @@ def validate(config):
         require(not (item.get('port') and item.get('testPort') and item['port'] != item['testPort']), 'port и testPort ЛВС отличаются.')
 
 
-def read_input(path, stream, secret_stdin=False):
+def secret_values(value):
+    """Also cover individual credentials inside JSON secret exports."""
+    if isinstance(value, dict):
+        for child in value.values():
+            yield from secret_values(child)
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            yield from secret_values(child)
+    elif isinstance(value, str) and len(value) >= 4:
+        yield value
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError):
+            return
+        if isinstance(parsed, (dict, list)):
+            yield from secret_values(parsed)
+
+
+def hidden_exception(system, exc, mode, part, values=(), fallback='Проверка/команда не выполнена; детали скрыты.'):
+    # Diagnostic failures must never alter the original operation's result.
+    try:
+        known = sorted(set(secret_values(values)) | system.diagnostic_values, key=len, reverse=True)
+
+        def redact(message):
+            for value in known:
+                message = message.replace(value, '***')
+            message = re.sub(r'(?i)(password|token|secret|key)=\S+', r'\1=***', message)
+            return re.sub(r'[A-Za-z0-9+/=_-]{32,}', '***', message)[:500]
+
+        cause = exc.__cause__ or exc.__context__
+        record = dict(mode=mode, part=part, type=type(exc).__name__, message=redact(str(exc)),
+                      where=[Path(frame.filename).name + ':' + str(frame.lineno) + ':' + frame.name
+                             for frame in traceback.extract_tb(exc.__traceback__)[-5:]])
+        if cause is not None:
+            record['cause'] = redact(type(cause).__name__ + ': ' + str(cause))
+        ident = system.diag(record)
+        if ident:
+            return fallback.removesuffix('.') + ' (журнал сервера, запись ' + ident + ').'
+    except Exception:
+        pass
+    return fallback
+
+
+def read_input(path, stream, secret_stdin=False, diagnostic=None):
     text = stream.read() if path == '-' or secret_stdin else ''
     text = text.replace('\r\n', '\n')
     before, marker, after = text.partition(MARKER + '\n')
     config = strict_json(before if path == '-' else Path(path).read_text(encoding='utf-8-sig'))
+    if diagnostic is not None and isinstance(config, dict):
+        diagnostic.diagnostic_values.update(secret_values(config.get('secrets', {})))
     validate(config)
     relay = strict_json(after) if marker else {}
     require(isinstance(relay, dict), 'После маркера нужен JSON-объект.')
@@ -182,6 +233,8 @@ def read_input(path, stream, secret_stdin=False):
     # carry the master password without putting it in argv or environment.
     master = relay.get('masterPassword') if 'secrets' in relay or 'masterPassword' in relay else None
     extra = relay.get('secrets', {}) if 'secrets' in relay or 'masterPassword' in relay else relay
+    if diagnostic is not None:
+        diagnostic.diagnostic_values.update(secret_values([master, extra]))
     require(isinstance(extra, dict) and all(isinstance(v, str) for v in extra.values()), 'Неверный словарь секретов.')
     section = config.get('secrets', {})
     if section.get('protected'):
@@ -194,6 +247,8 @@ def read_input(path, stream, secret_stdin=False):
                 section = config_crypto.unprotect(section, master)
             except Exception:
                 raise Error('Не удалось открыть секреты: проверьте мастер-пароль и полный экспорт.') from None
+    if diagnostic is not None:
+        diagnostic.diagnostic_values.update(secret_values([master, section]))
     values = {**section, **extra}
     require(all(isinstance(v, str) for v in values.values()), 'Неверный словарь секретов.')
     return config, {k: v for k, v in values.items() if v and v != HIDDEN}
@@ -204,6 +259,7 @@ class System:
         self.root, self.runner, self.source = Path(root), runner or subprocess.run, Path(source)
         self.actions = []
         self.download_proxy = None
+        self.diagnostic_values = set()
 
     def path(self, absolute):
         return self.root / str(absolute).lstrip('/')
@@ -274,18 +330,39 @@ class System:
             yield
 
     def audit(self, rows):
-        # Operational logging does not count as a configuration action. Readers
-        # never call this; only our fixed summaries/public identifiers are logged.
-        path = self.path('/var/log/remoteagents/server-apply.log')
+        # Operational logging does not count as a configuration action.
+        self._journal('/var/log/remoteagents/server-apply.log',
+                      {'at': int(time.time()), 'parts': rows})
+
+    def diag(self, record):
+        # Disposable roots support unprivileged tests; the real journal is root-only.
+        if self.root == Path('/') and os.geteuid() != 0:
+            return None
+        try:
+            ident = secrets.token_hex(4)
+            self._journal('/var/log/remoteagents/server-apply-errors.log',
+                          dict(record, id=ident, at=int(time.time())), private=True)
+            return ident
+        except Exception:
+            return None
+
+    def _journal(self, absolute, record, private=False):
+        path = self.path(absolute)
         for parent in (path, *path.parents):
             require(not parent.is_symlink(), 'Журнал не должен быть символической ссылкой.')
             if parent == self.root:
                 break
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if private:
+            os.chmod(path.parent, 0o700)
+            if os.geteuid() == 0:
+                os.chown(path.parent, 0, 0)
         # The periodic reconciler calls this every 30 s. Keep one bounded
         # archive instead of growing the operational journal indefinitely.
         if path.exists() and path.stat().st_size > 1024 * 1024:
             archive = path.with_name(path.name + '.1')
+            if private:
+                require(not archive.is_symlink(), 'Журнал не должен быть символической ссылкой.')
             os.replace(path, archive)
             os.chmod(archive, 0o600)
             if os.geteuid() == 0:
@@ -295,7 +372,7 @@ class System:
             os.fchmod(out.fileno(), 0o600)
             if os.geteuid() == 0:
                 os.fchown(out.fileno(), 0, 0)
-            out.write(json.dumps({'at': int(time.time()), 'parts': rows}, ensure_ascii=False) + '\n')
+            out.write(json.dumps(record, ensure_ascii=False) + '\n')
 
     @contextlib.contextmanager
     def private_file(self, data):
@@ -365,6 +442,7 @@ class Engine:
         self.s = system or System()
         self.ssh_checked, self.public_only = ssh_checked, public_only
         self.rows = []
+        self.command = 'plan'
         self.receipts = self.s.read('/var/lib/remoteagents/server-apply/receipts.json', {})
         self.module_files = component_files
         self.managed_secrets = {}
@@ -373,6 +451,8 @@ class Engine:
 
     def row(self, part, state, message, **fields):
         result = dict(part=part, state=state, summary=message, **fields)
+        if part in OPTIONAL_PARTS:
+            result['optional'] = True
         self.rows.append(result)
         return state == 'ready'
 
@@ -629,17 +709,23 @@ class Engine:
     def code_files(self):
         target = '/usr/local/lib/remoteagents/server/'
         files = {}
-        for name in ('server_apply.py', 'server-apply.sh', 'lan_vpn.py', 'lan-vpn.sh', 'proxy_out.py', 'proxy-out.sh', 'remoteagents_config.py', 'base_network.py', 'lan_share.py', 'lan_pc_access.py', 'server_recovery.py', 'server_components.py', 'server_packages.py', 'component_files.py', 'lan-config.schema.json', 'happier-web.schema.json',
-                     'happier_web.py', 'happier_web_common.py', 'happier_web_release.py', 'happier_web_quotas.py', 'agy_usage_scrape.py', 'happier_web_verify.cjs', 'happier_web_settings.cjs', 'happier_web_addon.js'):
-            files[target + name] = ((self.s.source / name).read_bytes(), 0o755 if name.endswith('.sh') else 0o644)
+
+        def read(path):
+            try:
+                return path.read_bytes()
+            except FileNotFoundError:
+                raise Error('Пакет кода сервера неполный: нет файла «' + path.name + '». Обновите программу на ПК.') from None
+
+        for name in CODE_FILES:
+            files[target + name] = (read(self.s.source / name), 0o755 if name.endswith('.sh') else 0o644)
         schema = self.s.source / 'config.paste.schema.json'
         if not schema.exists():
             schema = self.s.source.parent / 'app/launcher/config.paste.schema.json'
-        files[target + 'config.paste.schema.json'] = (schema.read_bytes(), 0o644)
-        for name in ('gateway.py', 'tg_gateway_keys.py', 'tg_gateway_setup.py', 'install.sh', 'README.md'):
-            files[target + 'tg-gateway/' + name] = ((self.s.source / 'tg-gateway' / name).read_bytes(), 0o755 if name.endswith('.sh') else 0o644)
+        files[target + 'config.paste.schema.json'] = (read(schema), 0o644)
+        for name in TG_GATEWAY_FILES:
+            files[target + 'tg-gateway/' + name] = (read(self.s.source / 'tg-gateway' / name), 0o755 if name.endswith('.sh') else 0o644)
         for name, path in components.assets(self.s.source):
-            files[target + 'assets/' + name] = (path.read_bytes(), 0o644)
+            files[target + 'assets/' + name] = (read(path), 0o644)
         return files
 
     def code_current(self):
@@ -975,19 +1061,22 @@ class Engine:
         except Missing as exc:
             return self.row(name, 'waiting', 'ждёт секрет «' + exc.name + '»', missing=[exc.name])
         except Exception as exc:
-            return self.row(name, 'error', str(exc) if isinstance(exc, (Error, base.Error, lan.Error, lan_share.Error, components.Error)) else 'Проверка/команда не выполнена; детали скрыты.')
+            message = str(exc) if isinstance(exc, (Error, base.Error, lan.Error, lan_share.Error, components.Error)) else hidden_exception(
+                self.s, exc, self.command, name, [self.secrets, self.managed_secrets, self.config.get('secrets', {})])
+            return self.row(name, 'error', message)
 
     def run(self, command):
+        self.command = command
         apply = command == 'apply'
         # A channel-rules transaction owns its configs until an external new SSH
         # confirms it. Do not reinstall packages or mutate other network parts.
         if self.s.path(lan_share.STATE).exists():
             confirmed = self.part('lanShare', lambda: lan_share.reconcile(self, apply))
             if not confirmed:
-                return dict(schema=1, command=command, parts=self.rows, actions=list(self.s.actions), ok=False)
+                return self.result(command)
         if self.config.get('deployment', {}).get('method', 'host') != 'host':
             self.row('deployment', 'blocked', 'Развёртывание docker ещё не поддерживается')
-            return dict(schema=1, command=command, parts=self.rows, actions=[], ok=False)
+            return self.result(command)
         if self.receipts.get('base-network', {}).get('managed') or self.s.path('/etc/remoteagents/server-apply/recovery.json').exists():
             self.part('packages', lambda: packages.ensure(self, apply))
         ready = self.part('internet', lambda: self.egress(apply))
@@ -1031,7 +1120,7 @@ class Engine:
                     # Do not spend the rollback window downloading CLIs. Return
                     # pending now; a NEW external SSH must confirm the network.
                     ready = False
-        if apply and all(r['state'] in ('ready', 'waiting') or r['state'] == 'blocked' and r['part'] in ('desktop', 'projectViews', 'agents:codex') for r in self.rows):
+        if apply and all(r['part'] in OPTIONAL_PARTS and r['state'] in ('error', 'waiting', 'blocked') or r['state'] in ('ready', 'waiting') or r['state'] == 'blocked' and r['part'] in ('desktop', 'projectViews', 'agents:codex') for r in self.rows):
             public = {k: v for k, v in self.config.items() if k in ('deployment', 'serverNetwork', 'proxyOut', 'lan', 'telegramGateway', 'agent', *components.KEYS)}
             if self.part('recovery', lambda: self.recovery(True)):
                 self.s.write('/var/lib/remoteagents-status/server-config.json', json.dumps(public, ensure_ascii=False, sort_keys=True) + '\n', 0o644)
@@ -1040,8 +1129,16 @@ class Engine:
             self.part('recovery', lambda: self.recovery(False))
         if apply:
             self.part('log', lambda: self.s.audit(self.rows))
-        return {'schema': 1, 'command': command, 'parts': self.rows, 'actions': list(self.s.actions),
-                'ok': all(r['state'] == 'ready' for r in self.rows)}
+        return self.result(command)
+
+    def result(self, command):
+        degraded = [r for r in self.rows if r['part'] in OPTIONAL_PARTS and r['state'] not in ('ready', 'change', 'pending')]
+        result = {'schema': 1, 'command': command, 'parts': self.rows, 'actions': list(self.s.actions),
+                  'ok': all(r['state'] == 'ready' for r in self.rows if r['part'] not in OPTIONAL_PARTS),
+                  'degraded': [r['part'] for r in degraded]}
+        if degraded:
+            result['summary'] = 'работает частично: ' + '; '.join(r['part'] + ' — ' + r['summary'] for r in degraded)
+        return result
 
 
 class Missing(Error):
@@ -1089,7 +1186,8 @@ def delegated():
     return SOURCE == Path('/usr/local/lib/remoteagents/server') and bool(os.environ.get('SUDO_USER')) and os.environ['SUDO_USER'] != 'root'
 
 
-def main(argv=None):
+def main(argv=None, system=None):
+    system = system or System()
     os.umask(0o077)
     parser = argparse.ArgumentParser(description='Настроить сервер из мастер-конфига под root.')
     sub = parser.add_subparsers(dest='command', required=True)
@@ -1107,17 +1205,16 @@ def main(argv=None):
     if restricted:
         require(args.command in ('plan', 'status', 'apply'), 'Ограниченное sudo разрешает только plan/status/apply.')
     if args.command == '_reconcile':
-        system = System()
         lockdir = system.path('/run/remoteagents-server-apply')
         lockdir.mkdir(mode=0o700, parents=True, exist_ok=True)
         with (lockdir / 'apply.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             return 0 if module('server_recovery').reconcile(sys.modules[__name__], system) else 1
-    config, secrets = read_input(args.config, sys.stdin, args.secrets_stdin)
+    config, secrets = read_input(args.config, sys.stdin, args.secrets_stdin, diagnostic=system)
     if restricted:
         require(config.get('server', {}).get('login') == os.environ.get('SUDO_USER') and
                 config.get('agent', {}).get('sudo', 'apply') == 'apply', 'Ограниченное sudo не может менять пользователя или расширять права.')
-    engine = Engine(config, secrets, ssh_checked=getattr(args, 'confirm_ssh_checked', False), public_only=getattr(args, 'public_only', False))
+    engine = Engine(config, secrets, system, ssh_checked=getattr(args, 'confirm_ssh_checked', False), public_only=getattr(args, 'public_only', False))
     if args.command in ('_egress-watch', '_network-guard', '_reconcile'):
         with engine.s.network_lock():
             if args.command == '_network-guard':
@@ -1147,11 +1244,14 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
+    system = System()
     try:
-        sys.exit(main())
+        sys.exit(main(system=system))
     except Exception as exc:
         # Never interpolate subprocess, JSON, crypto or OS exception strings.
-        message = str(exc) if isinstance(exc, Error) else 'Ошибка файла/команды; детали скрыты.'
+        message = str(exc) if isinstance(exc, Error) else hidden_exception(
+            system, exc, sys.argv[1] if len(sys.argv) > 1 else 'main', 'main',
+            fallback='Ошибка файла/команды; детали скрыты.')
         if '--json' in sys.argv:
             print(json.dumps({'ok': False, 'error': message}, ensure_ascii=False))
         else:

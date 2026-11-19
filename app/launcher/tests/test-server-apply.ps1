@@ -10,6 +10,10 @@ $script:calls=@();$script:probes=0;$script:scenario='change'
 function Invoke-WizardApplyCommand([string]$Root,[string]$Bundle,$Request,[string]$Mode,[string]$Command,[string]$Payload,[bool]$Confirm=$false){
     $script:calls+=@([pscustomobject]@{command=$Command;confirm=$Confirm})
     if($script:scenario -eq 'ready'){return [pscustomobject]@{ok=$true;parts=@(@{part='internet';state='ready';summary='готово'});actions=@()}}
+    if($script:scenario -eq 'optional-change'){
+        if($Command -eq 'plan'){return [pscustomobject]@{ok=$true;degraded=@();parts=@(@{part='happierWeb';state='change';optional=$true;summary='нужно обновить'});actions=@()}}
+        return [pscustomobject]@{ok=$true;degraded=@('happierWeb');summary='работает частично: happierWeb — ошибка';parts=@(@{part='happierWeb';state='error';optional=$true;summary='ошибка'});actions=@('web-attempt')}
+    }
     if($Command -in @('status','plan')){return [pscustomobject]@{ok=$false;parts=@(@{part='internet';state='change';summary='нужно включить'});actions=@()}}
     $applies=@($script:calls|Where-Object {$_.command -eq 'apply'}).Count
     if($applies -lt 3){return [pscustomobject]@{ok=$false;parts=@(@{part=$(if($applies -eq 1){'internet'}else{'lan:clinic'});state='pending';summary='нужно новое SSH'});actions=@('изменение-'+$applies)}}
@@ -27,6 +31,13 @@ Assert (@($r.actions).Count -eq 3) 'actions from all rounds remain reviewable'
 $script:calls=@();$script:scenario='ready';$script:probes=0
 $r=Invoke-WizardServerApplyPayload $TestHome $repo $request 'profile' $payload
 Assert ($r.ok -and $script:calls.Count -eq 1 -and $script:calls[0].command -eq 'plan' -and @($r.actions).Count -eq 0) 'unchanged apply has no mutation'
+$script:calls=@();$script:scenario='optional-change';$script:probes=0
+$r=Invoke-WizardServerApplyPayload $TestHome $repo $request 'profile' $payload
+Assert (($script:calls.command -join ',') -eq 'plan,apply') 'optional happierWeb change applies even when plan ok is true'
+Assert ($r.ok -and $r.summary -eq 'работает частично: happierWeb — ошибка' -and $script:probes -eq 0) 'degraded server summary survives launcher reporting'
+$script:calls=@();$request.statusOnly=$true
+$r=Invoke-WizardServerApplyPayload $TestHome $repo $request 'profile' $payload
+Assert (($script:calls.command -join ',') -eq 'status') 'status never applies an optional change'
 $script:calls=@();$script:scenario='change';$request.statusOnly=$true
 $r=Invoke-WizardServerApplyPayload $TestHome $repo $request 'profile' $payload
 Assert ($script:calls.Count -eq 1 -and $script:calls[0].command -eq 'status') 'startup observation only runs status'
@@ -38,7 +49,7 @@ $bootstrap=Get-WizardBootstrapScript $repo 'http://fixture:PROXY_TEST_SENTINEL@p
 Assert ($bootstrap.Contains('export ra_download_proxy') -and -not $bootstrap.Contains('PROXY_TEST_SENTINEL')) 'bootstrap proxy travels only encoded in SSH stdin'
 Assert (-not $bootstrap.Contains("`r")) 'bootstrap script uses LF'
 $files=Get-WizardApplyFiles $repo
-Assert ($files.Contains('base_network.py') -and $files.Contains('lan-config.schema.json') -and $files.Contains('tg-gateway/gateway.py') -and $files.Contains('config.paste.schema.json')) 'complete root payload'
+Assert ($files.Contains('base_network.py') -and $files.Contains('lan_pc_access.py') -and $files.Contains('lan-config.schema.json') -and $files.Contains('tg-gateway/gateway.py') -and $files.Contains('config.paste.schema.json')) 'complete root payload'
 # Key-based clean-VPS bootstrap runs the same apt work as password bootstrap.
 # Model a healthy 90s bootstrap without sleeping or contacting any server.
 function Get-WizardKeyCandidates {param($Root,$Own,$Chosen) 'fixture-root-key'}

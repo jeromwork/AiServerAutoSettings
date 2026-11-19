@@ -205,9 +205,10 @@ namespace RemoteAgents.Launcher
         }
     }
 
-    internal enum SectionState { Waiting, Running, Done, Pending, Failed, Blocked, Unchanged }
+    internal enum SectionState { Waiting, Running, Done, Pending, Failed, Blocked, Unchanged, Degraded }
     internal sealed class SectionOutcome
     {
+        internal string[] Degraded = new string[0];
         internal bool Ok, Pending; internal string Summary = "", Operation = ""; internal Dictionary<string, object> Result = new Dictionary<string, object>(); internal long Ms;
         // docs/CONFIG-ENGINE.md: readiness is result.ok; «pending» names what it waits for (a detached server install
         // «disk»/«happier», or «connection»). ok:false without pending is a failure, except an unconfirmed request
@@ -216,7 +217,13 @@ namespace RemoteAgents.Launcher
         {
             string pending = Json.Str(result, "pending"); bool ok = Json.Bool(result, "ok", true);
             return new SectionOutcome { Ok = ok, Pending = !ok && (pending.Length > 0 || unconfirmedIsPending), Operation = pending, Result = result,
+                Degraded = Json.Array(Json.Get(result, "degraded")).OfType<string>().ToArray(),
                 Summary = Json.Text(result, "summary", success) + (ok || pending.Length > 0 ? "" : unconfirmedIsPending ? " (ещё не подтверждено)" : "") };
+        }
+        internal static SectionState PartState(Dictionary<string, object> row)
+        {
+            return Json.Str(row, "state") == "ready" ? SectionState.Unchanged
+                : Json.Bool(row, "optional") && Json.Str(row, "state") == "error" ? SectionState.Degraded : SectionState.Waiting;
         }
         // Detached installs on the server that ServerOperations/«Operation» can follow.
         internal static bool ServerOperation(string operation) { return operation == "disk" || operation == "happier"; }
@@ -241,7 +248,7 @@ namespace RemoteAgents.Launcher
                 catch (OperationCanceledException) { outcomes[s] = new SectionOutcome { Summary = "отменено", Ms = watch.ElapsedMilliseconds }; report(s, SectionState.Failed, "отменено; готовность не подтверждена"); throw; }
                 catch (Exception e) { o = new SectionOutcome { Summary = e.Message }; }
                 o.Ms = watch.ElapsedMilliseconds; outcomes[s] = o;
-                report(s, o.Ok ? SectionState.Done : o.Pending ? SectionState.Pending : SectionState.Failed, o.Summary);
+                report(s, o.Ok ? (o.Degraded.Length > 0 ? SectionState.Degraded : SectionState.Done) : o.Pending ? SectionState.Pending : SectionState.Failed, o.Summary);
                 return o.Ok || o.Pending;
             };
             await one(ConfigSections.Bootstrap);
@@ -1063,7 +1070,7 @@ namespace RemoteAgents.Launcher
                     string line = Json.Str(row, "part") + ": " + Json.Str(row, "state") + " — " + Json.Str(row, "summary");
                     Log("Сервер: " + line);
                     Report(Json.Str(row, "part").StartsWith("lan:", StringComparison.Ordinal) ? ConfigSections.Lan : ConfigSections.Server,
-                        Json.Str(row, "state") == "ready" ? SectionState.Unchanged : SectionState.Waiting, line);
+                        SectionOutcome.PartState(row), line);
                 }
                 return SectionOutcome.From(result, "Сервер настроен и проверен ✓");
             }
