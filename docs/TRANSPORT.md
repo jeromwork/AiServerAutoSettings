@@ -28,6 +28,29 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Transport.Daemon.ps1 -
 30 секунд (с учётом `restartDelaySec`, максимум 30 с). Во время этой паузы статус
 обновляется раз в пять секунд; `retryAt` показывает время следующей попытки.
 
+### Запуск при Happ и без физического интерфейса
+
+Событие `process-failed` при `engine-start-failed` содержит `error=<текст>`: сообщение исключения одной
+строкой, не длиннее 300 символов; UUID, токены, ключи и пароли заменены (`<uuid>`, `<secret>`, `<redacted>`).
+Тот же текст попадает в `error` статуса.
+
+Паузы между неудачными запусками движка (не bind-конфликт): 3, 5, 10, 20, 30 с; после `ready` серия
+сбрасывается. Перед каждой повторной попыткой сеть определяется заново (`Get-TransportNetwork`), а не ждёт
+5-секундной проверки смены сети.
+
+`Get-TransportNetwork`: сосед шлюза не обязателен (нет записи ARP, Stale/Probe/Delay), профиль сети тоже.
+Без MAC `id` считается по `ifIndex + NextHop + имя профиля (или адаптера)`. Адаптер выбирается среди физических
+(`-Physical`, `HardwareInterface`, не Tailscale/Happ/Wintun/TAP) по default-маршруту с NextHop на нём; чужой
+default (например `happ-xray`, метрика 0) выбор не сбивает. Смена default route (Wi-Fi -> Ethernet)
+меняет `interface/ip/id`, и движок пересоздаётся с новой привязкой.
+
+Резервный режим без привязки: если физический интерфейс не найден 3 раза подряд **и** `status\vpn.json`
+содержит `state=off`, движок стартует без `bind_interface`/`auto_detect_interface` (и без `-b` у OpenSSH);
+в журнале `bind-mode bind=none reason=no-physical-interface`. Трафик к relay идёт по маршрутам ОС (через Happ).
+Раз в 60 с (и при смене сети) повторяется привязка; при успехе движок пересоздаётся и пишется
+`bind-mode bind=physical restored`. Если `vpn.json` отсутствует или `state` не `off`, режим запрещён
+(иначе петля через свой TUN), запуск ждёт интерфейса как раньше.
+
 `<Home>\state\transport-ports.json` хранит `schema:1`, `configured`, `effective`,
 `moved` и `updatedAt`. Поле `defaults` хранит значения по умолчанию из общего кода для
 сверки в лаунчере, без второй копии чисел в C#.

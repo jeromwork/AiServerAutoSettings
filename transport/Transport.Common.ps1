@@ -85,13 +85,13 @@ function Get-TransportErrorDetail($ErrorRecord) {
 }
 function Write-TransportLog([string]$Root,[string]$Event,$Detail='') {
     # Structured process diagnostics are sanitized with the loaded credential values before logging.
-    $allowed=@('start','ready','switch','probe-ok','probe-failed','network-change','restart','api-failed','process-failed','memory-invalid','network-unavailable','stop','fatal','port-moved','channel-address-moved','happier-port-conflict')
+    $allowed=@('start','ready','switch','probe-ok','probe-failed','network-change','restart','api-failed','process-failed','memory-invalid','network-unavailable','stop','fatal','port-moved','channel-address-moved','happier-port-conflict','bind-mode')
     if($Event -notin $allowed){$Event='process-failed'}
     $dir=Join-Path $Root 'logs';[void][IO.Directory]::CreateDirectory($dir);$path=Join-Path $dir 'transport.log'
     if([IO.File]::Exists($path) -and (Get-Item -LiteralPath $path).Length -ge 1MB){Move-Item -LiteralPath $path -Destination ($path+'.1') -Force}
     $line=[DateTime]::UtcNow.ToString('o')+' '+$Event
     # Plain exception text is rejected; callers supply a sanitized diagnostic or safe script location.
-    if($Event -in @('port-moved','channel-address-moved','happier-port-conflict') -and $Detail -is [pscustomobject] -and $Detail.PSObject.Properties['message']){$line+=' '+([string]$Detail.message -replace '[\r\n]',' ')}
+    if($Event -in @('port-moved','channel-address-moved','happier-port-conflict','bind-mode') -and $Detail -is [pscustomobject] -and $Detail.PSObject.Properties['message']){$line+=' '+([string]$Detail.message -replace '[\r\n]',' ')}
     elseif($Detail -is [pscustomobject] -and $Detail.PSObject.Properties['reason']){$line+=' '+(Format-TransportDiagnostic $Detail)}
     elseif($Detail -match '^(.+) @[\w.-]+:\d+$'){$head=$Matches[1];if($head -match '^[A-Za-z0-9_.]+$' -or ($head -match '[А-Яа-яЁё]' -and $head -notmatch '[A-Za-z0-9+/_=-]{12,}')){$line+=' '+$Detail}}
     [IO.File]::AppendAllText($path,($line+"`n"),(New-Object Text.UTF8Encoding($false)))
@@ -920,15 +920,53 @@ function Get-TransportFingerprint([string]$GatewayMac,[string]$ProfileName) {
 }
 function Get-TransportNetwork {
     try{
-        $physical=@(Get-NetAdapter -Physical -ErrorAction Stop|Where-Object {$_.Status -eq 'Up' -and ($_.Name+' '+$_.InterfaceDescription) -notmatch '(?i)tailscale|openvpn|happ|wintun|tap|tun|tunnel|hyper-v'})
-        $routes=@(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction Stop|Where-Object {$_.InterfaceIndex -in @($physical|ForEach-Object {$_.ifIndex}) -and $_.NextHop -ne '0.0.0.0'}|Sort-Object @{Expression={$_.RouteMetric+(Get-NetIPInterface -InterfaceIndex $_.InterfaceIndex -AddressFamily IPv4 -ErrorAction Stop|Select-Object -First 1).InterfaceMetric}})
+        # -Physical отсекает Happ/Wintun/Tailscale; имя и HardwareInterface страхуют от виртуальных адаптеров, помеченных иначе.
+        $physical=@(Get-NetAdapter -Physical -ErrorAction Stop|Where-Object {$_.Status -eq 'Up' -and $_.HardwareInterface -ne $false -and ($_.Name+' '+$_.InterfaceDescription) -notmatch '(?i)tailscale|openvpn|happ|wintun|tap|tun|tunnel|hyper-v'})
+        # Только default-маршруты на физических адаптерах: чужой default (happ-xray, метрика 0) выбор не сбивает.
+        $routes=@(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction Stop|Where-Object {$_.InterfaceIndex -in @($physical|ForEach-Object {$_.ifIndex}) -and $_.NextHop -ne '0.0.0.0'}|Sort-Object @{Expression={
+            $m=0;try{$m=[int](Get-NetIPInterface -InterfaceIndex $_.InterfaceIndex -AddressFamily IPv4 -ErrorAction Stop|Select-Object -First 1).InterfaceMetric}catch{};$_.RouteMetric+$m}})
         if(-not $routes.Count){throw 'Нет физического шлюза'};$route=$routes[0];$adapter=$physical|Where-Object {$_.ifIndex -eq $route.InterfaceIndex}|Select-Object -First 1
-        $profile=Get-NetConnectionProfile -InterfaceIndex $route.InterfaceIndex -ErrorAction Stop|Select-Object -First 1
-        $neighbor=Get-NetNeighbor -InterfaceIndex $route.InterfaceIndex -IPAddress $route.NextHop -ErrorAction Stop|Where-Object {$_.State -notin @('Unreachable','Incomplete') -and $_.LinkLayerAddress -notmatch '^(00[:-]){5}00$'}|Select-Object -First 1
+        $profileName=[string]$adapter.Name;try{$profile=Get-NetConnectionProfile -InterfaceIndex $route.InterfaceIndex -ErrorAction Stop|Select-Object -First 1;if($profile -and $profile.Name){$profileName=[string]$profile.Name}}catch{}
+        # Сосед шлюза не обязателен: при Happ/сне записи ARP нет или она Stale/Probe/Delay. Без MAC id считается по ifIndex+NextHop.
+        $mac='';try{$neighbor=Get-NetNeighbor -InterfaceIndex $route.InterfaceIndex -IPAddress $route.NextHop -ErrorAction Stop|Where-Object {$_.State -notin @('Unreachable','Incomplete') -and $_.LinkLayerAddress -notmatch '^(00[:-]){5}00$'}|Select-Object -First 1;if($neighbor){$mac=[string]$neighbor.LinkLayerAddress}}catch{}
+        if(-not $mac){$mac=[string]$route.InterfaceIndex+'|'+[string]$route.NextHop}
         $ip=Get-NetIPAddress -InterfaceIndex $route.InterfaceIndex -AddressFamily IPv4 -ErrorAction Stop|Where-Object {$_.AddressState -eq 'Preferred'}|Select-Object -First 1
-        $id=Get-TransportFingerprint $neighbor.LinkLayerAddress $profile.Name
-        [pscustomobject]@{id=$id;name=$profile.Name;interface=$adapter.Name;ip=$ip.IPAddress;available=[bool]($id -and $ip.IPAddress)}
+        $id=Get-TransportFingerprint $mac $profileName
+        [pscustomobject]@{id=$id;name=$profileName;interface=$adapter.Name;ip=$ip.IPAddress;available=[bool]($id -and $ip.IPAddress)}
     }catch{[pscustomobject]@{id=$null;name=$null;interface=$null;ip=$null;available=$false}}
+}
+function Test-TransportNetworkChanged($Old,$New) {
+    # Смена default route (Wi-Fi -> Ethernet) меняет interface/ip/id и перезапускает движок с новой привязкой.
+    [bool]($New.id -ne $Old.id -or $New.interface -ne $Old.interface -or $New.ip -ne $Old.ip)
+}
+# Паузы между попытками запуска движка: 3, 5, 10, 20, 30 с; сброс после ready.
+function Get-TransportStartPause([int]$Failures) {
+    $steps=@(3,5,10,20,30);$steps[[Math]::Min([Math]::Max($Failures,1),$steps.Count)-1]
+}
+# Причина неудачи запуска для журнала: одна строка, <=300 символов, UUID/ключи/пароли замаскированы.
+function Format-TransportStartError($ErrorRecord,$Settings=$null) {
+    $m=[string]$ErrorRecord.Exception.Message;if(-not $m){$m=$ErrorRecord.Exception.GetType().FullName}
+    $t=(Protect-TransportDiagnostic $m $Settings) -replace '\s+',' '
+    if($t.Length -gt 300){$t=$t.Substring(0,300)};$t.Trim()
+}
+function Test-TransportVpnOff([string]$Root) {
+    # Резервный режим без привязки допустим только при явно выключенном нашем полном VPN (иначе петля через свой TUN).
+    try{(Read-TransportJson (Join-Path $Root 'status/vpn.json')).state -eq 'off'}catch{$false}
+}
+# Решение о привязке: physical при найденном интерфейсе; none после 3 подряд неудач и vpn off; иначе fail (бросить).
+# $State: @{failures;none}. Событие — строка журнала при смене режима.
+function Resolve-TransportBind($State,$Network,[bool]$VpnOff) {
+    if($Network -and $Network.interface){
+        $restored=[bool]$State.none;$State.none=$false;$State.failures=0
+        return [pscustomobject]@{mode='physical';event=$(if($restored){'bind=physical restored'}else{$null})}
+    }
+    $State.failures=[int]$State.failures+1
+    if($State.failures -ge 3 -and $VpnOff){
+        $entered=-not $State.none;$State.none=$true
+        return [pscustomobject]@{mode='none';event=$(if($entered){'bind=none reason=no-physical-interface'}else{$null})}
+    }
+    $State.none=$false
+    [pscustomobject]@{mode='fail';event=$null}
 }
 function Get-TransportMetered($Options) {
     $configured=([string]$Options.metered).ToLowerInvariant();if($configured -ne 'auto'){return ($configured -eq 'true')}
@@ -1350,7 +1388,7 @@ function New-TransportDiagnostic($Child,[string]$Candidate,[string]$Reason,$Sett
 }
 function Format-TransportDiagnostic($Detail) {
     if($Detail.portConflict){return $Detail.portConflict.message}
-    'candidate='+$Detail.candidate+' reason='+$Detail.reason+' exit='+$(if($null -eq $Detail.exitCode){'running/unknown'}else{[string]$Detail.exitCode})+' stderr='+$Detail.stderr+$(if($Detail.engineStderr){' sing-box='+$Detail.engineStderr}else{''})
+    'candidate='+$Detail.candidate+' reason='+$Detail.reason+' exit='+$(if($null -eq $Detail.exitCode){'running/unknown'}else{[string]$Detail.exitCode})+' stderr='+$Detail.stderr+$(if($Detail.engineStderr){' sing-box='+$Detail.engineStderr}else{''})+$(if($Detail.PSObject.Properties['error'] -and $Detail.error){' error='+$Detail.error}else{''})
 }
 
 function Get-TransportDiagnosticContext($Settings,[string]$Root) {

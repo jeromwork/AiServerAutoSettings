@@ -429,6 +429,73 @@ try{
     }finally{
         foreach($name in $mockNames){Remove-Item ('function:'+$name);if($priorFunctions.ContainsKey($name)){Set-Item ('function:'+$name) $priorFunctions[$name]}}
     }
+    # Happ: happ-xray (виртуальный, default метрика 0) и Wi-Fi (default метрика 0), записи соседа шлюза нет.
+    $happState=@{ifaceMetric=@{5=0;7=25};wifi='Wi-Fi';ip='192.168.43.20';gw='192.168.43.1'}
+    try{
+        function Get-NetRoute {param($DestinationPrefix,$ErrorAction)
+            @([pscustomobject]@{InterfaceIndex=5;NextHop='172.19.0.2';RouteMetric=0},[pscustomobject]@{InterfaceIndex=7;NextHop=$happState.gw;RouteMetric=0})
+        }
+        function Get-NetIPInterface {param($InterfaceIndex,$AddressFamily,$ErrorAction) [pscustomobject]@{InterfaceMetric=$happState.ifaceMetric[[int]$InterfaceIndex]}}
+        function Get-NetConnectionProfile {param($InterfaceIndex,$ErrorAction) throw 'нет профиля'}
+        function Get-NetNeighbor {param($InterfaceIndex,$IPAddress,$ErrorAction) throw 'нет записи ARP'}
+        function Get-NetIPAddress {param($InterfaceIndex,$AddressFamily,$ErrorAction) [pscustomobject]@{AddressState='Preferred';IPAddress=$happState.ip}}
+        function Get-NetAdapter {param([switch]$Physical,$ErrorAction)
+            @([pscustomobject]@{ifIndex=5;Name='happ-xray';InterfaceDescription='Wintun Userspace Tunnel';Status='Up'},[pscustomobject]@{ifIndex=7;Name=$happState.wifi;InterfaceDescription='Wireless';Status='Up';HardwareInterface=$true})
+        }
+        $happNet=Get-TransportNetwork
+        Assert ($happNet.available -and $happNet.interface -eq 'Wi-Fi' -and $happNet.ip -eq '192.168.43.20') 'Happ: default happ-xray и Wi-Fi, сосед отсутствует -> available на Wi-Fi'
+        Assert ($happNet.id -and $happNet.id.Length -eq 64) 'Happ: id без MAC считается по ifIndex+профиль+NextHop'
+        # Сосед в Stale: сеть остаётся доступной, id берётся из MAC.
+        function Get-NetNeighbor {param($InterfaceIndex,$IPAddress,$ErrorAction) [pscustomobject]@{State='Stale';LinkLayerAddress='AA:BB:CC:DD:EE:01'}}
+        Assert ((Get-TransportNetwork).available) 'сосед Stale не делает сеть недоступной'
+        # Смена default route Wi-Fi -> Ethernet: изменение распознаётся, движок пересоздаётся с новым интерфейсом.
+        $before=Get-TransportNetwork
+        function Get-NetRoute {param($DestinationPrefix,$ErrorAction)
+            @([pscustomobject]@{InterfaceIndex=5;NextHop='172.19.0.2';RouteMetric=0},[pscustomobject]@{InterfaceIndex=9;NextHop='10.0.0.1';RouteMetric=0})
+        }
+        $happState.ifaceMetric[9]=10;$happState.ip='10.0.0.7'
+        function Get-NetAdapter {param([switch]$Physical,$ErrorAction)
+            @([pscustomobject]@{ifIndex=5;Name='happ-xray';InterfaceDescription='Wintun Userspace Tunnel';Status='Up'},[pscustomobject]@{ifIndex=9;Name='Ethernet';InterfaceDescription='Ethernet';Status='Up';HardwareInterface=$true})
+        }
+        $after=Get-TransportNetwork
+        Assert ($after.available -and $after.interface -eq 'Ethernet') 'после смены default выбран Ethernet'
+        Assert (Test-TransportNetworkChanged $before $after) 'смена default route Wi-Fi -> Ethernet распознана как смена сети'
+        Assert (-not (Test-TransportNetworkChanged $after $after)) 'без изменений сеть не меняется'
+    }finally{
+        foreach($name in $mockNames){Remove-Item ('function:'+$name) -ErrorAction SilentlyContinue;if($priorFunctions.ContainsKey($name)){Set-Item ('function:'+$name) $priorFunctions[$name]}}
+    }
+    # Паузы 3/5/10/20/30 растут и ограничены; после ready счётчик обнуляется (сброс в демоне, паузы от первого шага).
+    Assert ((@(1,2,3,4,5,6,9)|ForEach-Object {Get-TransportStartPause $_}) -join ',' -eq '3,5,10,20,30,30,30') 'паузы 3/5/10/20/30'
+    Assert ((Get-TransportStartPause 0) -eq 3) 'после сброса снова 3 с'
+    # error=: текст исключения в одну строку, <=300 символов, UUID/ключи/пароль замаскированы.
+    $secretSettings=[pscustomobject]@{password='hunter2'}
+    try{throw ("сбой uuid 11111111-2222-3333-4444-555555555555 token=abcdef pass hunter2 key "+('A'*80)+"`r`nвторая строка "+('я'*400))}catch{$startError=Format-TransportStartError $_ $secretSettings}
+    Assert ($startError.Length -le 300 -and $startError -notmatch "[\r\n]") 'error= одна строка до 300 символов'
+    Assert ($startError.Contains('сбой') -and $startError.Contains('<uuid>') -and -not $startError.Contains('11111111') -and -not $startError.Contains('hunter2') -and -not $startError.Contains('abcdef') -and -not $startError.Contains('AAAAAAAAAAAAAAAAAAAA')) 'error= маскирует uuid, пароль, токен и ключ'
+    $diag=New-TransportDiagnostic $null 'sing-box' 'engine-start-failed';$diag|Add-Member -Force error 'Физический интерфейс недоступен'
+    Assert ((Format-TransportDiagnostic $diag).EndsWith(' error=Физический интерфейс недоступен')) 'error= попадает в строку журнала'
+    # Резервный режим bind=none: только после 3 подряд неудач и vpn off; снимается при появлении интерфейса.
+    $none=[pscustomobject]@{available=$false;interface=$null}
+    $st=@{failures=0;none=$false}
+    $m1=(Resolve-TransportBind $st $none $true).mode;$m2=(Resolve-TransportBind $st $none $true).mode;$m3=(Resolve-TransportBind $st $none $true).mode
+    Assert ($m1 -eq 'fail' -and $m2 -eq 'fail' -and $m3 -eq 'none') 'bind=none на 3-й неудаче при vpn off'
+    $st=@{failures=0;none=$false}
+    foreach($i in 1..6){$r=Resolve-TransportBind $st $none $false}
+    Assert ($r.mode -eq 'fail' -and -not $st.none) 'vpn не off: резервный режим запрещён'
+    $st=@{failures=0;none=$false};[void](Resolve-TransportBind $st $none $true);[void](Resolve-TransportBind $st $none $true)
+    $r=Resolve-TransportBind $st $none $true
+    Assert ($r.mode -eq 'none' -and $r.event -eq 'bind=none reason=no-physical-interface' -and $st.none) 'вход в bind=none пишет строку журнала'
+    Assert ((Resolve-TransportBind $st $none $true).event -eq $null) 'повтор в bind=none не дублирует строку'
+    $r=Resolve-TransportBind $st ([pscustomobject]@{available=$true;interface='Wi-Fi'}) $true
+    Assert ($r.mode -eq 'physical' -and $r.event -eq 'bind=physical restored' -and -not $st.none -and $st.failures -eq 0) 'интерфейс появился: bind=physical restored'
+    $st=@{failures=0;none=$false};[void](Resolve-TransportBind $st $none $true);[void](Resolve-TransportBind $st ([pscustomobject]@{interface='Wi-Fi'}) $true)
+    Assert ((Resolve-TransportBind $st $none $true).mode -eq 'fail') 'найденный интерфейс сбрасывает серию неудач'
+    $voff=Join-Path $work 'vpnoff';[void][IO.Directory]::CreateDirectory((Join-Path $voff 'status'))
+    Assert (-not (Test-TransportVpnOff $voff)) 'нет vpn.json: резервный режим запрещён'
+    Write-TransportJson (Join-Path $voff 'status/vpn.json') @{state='on'};Assert (-not (Test-TransportVpnOff $voff)) 'vpn on'
+    Write-TransportJson (Join-Path $voff 'status/vpn.json') @{state='off'};Assert (Test-TransportVpnOff $voff) 'vpn off'
+    Write-TransportLog $voff 'bind-mode' ([pscustomobject]@{message='bind=none reason=no-physical-interface'})
+    Assert ((Get-Content -Raw (Join-Path $voff 'logs/transport.log')) -match 'bind-mode bind=none reason=no-physical-interface') 'журнал: bind=none reason=...'
     $memory=Read-TransportMemory $work;Save-TransportMemory $work $memory $n1 $rows
     $memory=Read-TransportMemory $work;$remembered=@(Get-TransportRemembered $memory $n1 @([pscustomobject]@{tag='a'},[pscustomobject]@{tag='b'}))
     Assert ((Get-TransportBest $remembered -Remembered).tag -eq 'b') 'память per-network'
