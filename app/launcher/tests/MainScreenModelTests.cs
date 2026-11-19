@@ -22,7 +22,7 @@ namespace RemoteAgents.Launcher
         }
         internal static void Run()
         {
-            Colours(); Banners(); VpnCard(); DiskCard(); AccountsAndHelper(); Reports(); LinkPhases(); SearchingStatus(); RenderGate();
+            Colours(); Banners(); VpnCard(); DiskCard(); AccountsAndHelper(); Reports(); LinkPhases(); SearchingStatus(); DiagnosticSwitches(); RenderGate();
             Console.WriteLine("PASS: " + count + " main screen checks");
         }
         // Focused entry point: -p:StartupObject=RemoteAgents.Launcher.MainScreenModelTests.
@@ -73,6 +73,47 @@ namespace RemoteAgents.Launcher
             facts.Transport["switches"] = new object[] { Data(Json.Encode(new { at = 0L, from = "primary", to = "openssh-direct", why = "path-dial-failed" })) };
             string report = MainScreenModel.Report(facts, "");
             Check(report.Contains("Последние переключения:") && report.Contains("Основной → SSH напрямую · path-dial-failed"), "details report contains switch history with path titles");
+        }
+        static void DiagnosticSwitches()
+        {
+            // WinForms is excluded from PortableTests: check the actual panel wiring as well as its shared formatter.
+            string root = System.IO.Directory.GetCurrentDirectory();
+            while (!System.IO.File.Exists(System.IO.Path.Combine(root, "app/launcher/ConfigWindow.Main.cs"))) {
+                var parent = System.IO.Directory.GetParent(root);
+                if (parent == null) throw new Exception("Cannot locate ConfigWindow.Main.cs for diagnostics wiring check");
+                root = parent.FullName;
+            }
+            string source = System.IO.File.ReadAllText(System.IO.Path.Combine(root, "app/launcher/ConfigWindow.Main.cs"));
+            int start = source.IndexOf("var switches = TrayMenuModel.SwitchLines(transport);", StringComparison.Ordinal);
+            int end = start < 0 ? -1 : source.IndexOf("// Do not replace a menu", start, StringComparison.Ordinal);
+            Check(start >= 0 && end > start, "diagnostics use the shared switches formatter before the menu visibility gate");
+            string panel = source.Substring(start, end - start);
+            Check(panel.Contains("SetText(pathStates,") && panel.Contains("Последние переключения:") &&
+                panel.Contains("switches.Length == 0 ? \"Переключений не было\" : string.Join(\"\\r\\n\", switches)"),
+                "diagnostics display formatted history or the explicit empty state");
+            Check(panel.Contains("StatusView.Phase(transport) == LinkPhase.Searching ? StatusView.SearchingText(transport) +") &&
+                panel.Contains("+ searching +"), "diagnostics display shared reason/local network text during search");
+            var transport = Healthy().Transport;
+            foreach (object value in new object[] { null, new object[0], "old malformed history" }) {
+                transport["switches"] = value;
+                Check(TrayMenuModel.SwitchLines(transport).Length == 0, "empty or invalid history selects the empty panel state");
+            }
+            transport.Remove("switches");
+            Check(TrayMenuModel.SwitchLines(transport).Length == 0, "legacy status without switches selects the empty panel state");
+            transport["switches"] = new object[] {
+                Data(Json.Encode(new { at = 0L, from = "primary", to = "openssh-direct", why = new { text = "Путь не отвечает, пробую другой" } })),
+                Data(Json.Encode(new { at = 1000L, from = "openssh-direct", to = "primary", why = "Связь восстановлена" }))
+            };
+            string[] lines = TrayMenuModel.SwitchLines(transport);
+            Check(lines.Length == 2 && lines[0].Contains("Основной → SSH напрямую · Путь не отвечает, пробую другой") &&
+                lines[1].Contains("SSH напрямую → Основной · Связь восстановлена"), "panel history comes from switches in order with shared path titles and reasons");
+            transport["phase"] = "searching";
+            transport["reason"] = Data("{\"text\":\"Все пути временно недоступны, повторяю\"}");
+            Check(StatusView.SearchingText(transport).Contains("Все пути временно недоступны, повторяю"), "panel search includes reason.text");
+            transport["localNet"] = "down";
+            Check(StatusView.SearchingText(transport).StartsWith("Нет интернета у вас (сеть)"), "panel search explains local network loss");
+            transport.Remove("reason"); transport.Remove("localNet");
+            Check(StatusView.SearchingText(transport) == "Нет связи, ищу путь", "panel tolerates old searching status without optional fields");
         }
         static void LinkPhases()
         {

@@ -156,7 +156,11 @@ namespace RemoteAgents.Launcher
             SetText(technicalStatus, technical);
             SetText(serverHealthDetails, ServerHealthView.Detail(health));
             var candidates = StatusView.Candidates(transport);
-            SetText(pathStates, "Связь: пути к серверу\r\n" + (candidates.Length == 0 ? "Ожидается проверка путей" : string.Join("\r\n", candidates.Select(c => TrayMenuModel.CandidateLine(c, transport)))));
+            var switches = TrayMenuModel.SwitchLines(transport);
+            string searching = StatusView.Phase(transport) == LinkPhase.Searching ? StatusView.SearchingText(transport) + "\r\n" : "";
+            SetText(pathStates, "Связь: пути к серверу\r\n" + searching +
+                (candidates.Length == 0 ? "Ожидается проверка путей" : string.Join("\r\n", candidates.Select(c => TrayMenuModel.CandidateLine(c, transport)))) +
+                "\r\n\r\nПоследние переключения:\r\n" + (switches.Length == 0 ? "Переключений не было" : string.Join("\r\n", switches)));
             // Do not replace a menu underneath a pointer; its commands retain the same PathSelection policy.
             if (pathMenu.Visible) return;
             string selected = pathSelection.Update(transport);
