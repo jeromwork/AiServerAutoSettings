@@ -72,7 +72,69 @@ namespace RemoteAgents.Launcher
                 string encoded = Json.Encode(value);
                 if (encoded.Length >= 2) text = text.Replace(encoded.Substring(1, encoded.Length - 2), "<secret>");
             }
-            return Regex.Replace(MainScreenModel.CleanSecrets(text), "[A-Za-z0-9+/_=-]{32,}", "<secret>");
+            return Regex.Replace(CleanFields(text), "[A-Za-z0-9+/_=-]{32,}", RedactLongToken);
+        }
+        static string RedactLongToken(Match match)
+        {
+            string token = match.Value;
+            // Check path segments separately; padded/base64 + forms remain whole tokens.
+            bool base64 = !token.StartsWith("/", StringComparison.Ordinal) &&
+                Regex.IsMatch(token, "^[A-Za-z0-9+/]+={0,2}$") && token.IndexOfAny(new[] { '+', '=' }) >= 0;
+            if (token.Contains("/") && !base64)
+                return Regex.Replace(token, "[A-Za-z0-9+=_-]{32,}", "<secret>");
+            return "<secret>";
+        }
+        static bool IsSecretField(string name)
+        {
+            // Exception names can appear inside a JSON cause string, followed by more sections.
+            if (Regex.IsMatch(name, @"^\w*(?:Error|Exception)$")) return false;
+            if (Regex.IsMatch(name, "token|password|passwd|secret|uuid|authorization", RegexOptions.IgnoreCase)) return true;
+            // Recognize key, apiKey, private_key, etc., without treating monkey as a credential.
+            string words = Regex.Replace(name, "([a-z0-9])([A-Z])", "$1_$2");
+            return Regex.IsMatch(words, @"(?:^|[_.-])key(?:$|[_.-])", RegexOptions.IgnoreCase) ||
+                Regex.IsMatch(name, "^(?:api|ssh|private|public|access|auth|encryption|signing)key$", RegexOptions.IgnoreCase);
+        }
+        static string CleanFields(string value)
+        {
+            value = Files.LF(value).Replace('\r', '\n');
+            value = Regex.Replace(value, @"-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)",
+                "[скрыто]", RegexOptions.IgnoreCase);
+            // Reuse the shared URL handling, including encoded query names and user info.
+            value = Regex.Replace(value, @"\b[a-z][a-z0-9+.-]*://[^\s<>""']+",
+                m => MainScreenModel.CleanSecrets(m.Value), RegexOptions.IgnoreCase);
+            var fields = new Regex(@"(?<![\w.-])[""']?(?<name>[\w.-]+)[""']?\s*[:=]\s*");
+            var clean = new StringBuilder();
+            int position = 0;
+            for (Match field = fields.Match(value); field.Success; field = fields.Match(value, position)) {
+                clean.Append(value, position, field.Index - position).Append(field.Value);
+                position = field.Index + field.Length;
+                if (!IsSecretField(field.Groups["name"].Value)) continue;
+                clean.Append("\"[скрыто]\"");
+                position = SecretValueEnd(value, position);
+            }
+            return clean.Append(value, position, value.Length - position).ToString();
+        }
+        static int SecretValueEnd(string value, int start)
+        {
+            // Match the shared boundary: quoted/structured values end precisely; an
+            // unquoted credential may contain punctuation, so hide the rest of its line.
+            if (start < value.Length && value[start] != '"' && value[start] != '\'' && value[start] != '{' && value[start] != '[') {
+                int newline = value.IndexOf('\n', start);
+                return newline < 0 ? value.Length : newline;
+            }
+            var closers = new Stack<char>();
+            char quote = '\0';
+            for (int i = start; i < value.Length; i++) {
+                char ch = value[i];
+                if (quote != '\0') {
+                    if (ch == '\\') { i++; continue; }
+                    if (ch == quote) { quote = '\0'; if (closers.Count == 0) return i + 1; }
+                } else if (ch == '"' || ch == '\'') quote = ch;
+                else if (ch == '{' || ch == '[') closers.Push(ch == '{' ? '}' : ']');
+                else if (closers.Count > 0 && ch == closers.Peek()) { closers.Pop(); if (closers.Count == 0) return i + 1; }
+                else if (closers.Count == 0 && (ch == '\n' || ch == ',' || ch == ';' || ch == '&' || ch == '}' || ch == ']')) return i;
+            }
+            return value.Length;
         }
         internal static string WriteWindowLog(string logsDir, string text, IEnumerable<string> secretValues)
         {

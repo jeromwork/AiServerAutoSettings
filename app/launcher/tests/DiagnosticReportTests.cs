@@ -25,6 +25,40 @@ namespace RemoteAgents.Launcher
             string multiline = "line-one\r\nline-two", punctuation = "pass\"with\\slash";
             NoSecrets(DiagnosticReport.Clean(Json.Encode(new { message = punctuation }), new[] { punctuation }), "pass", "with", "slash");
             NoSecrets(DiagnosticReport.Clean("line-one\nline-two", new[] { multiline }), "line-one", "line-two");
+            string path = "/usr/local/lib/remoteagents/lan_pc_access.py";
+            string longMessage = string.Concat(Enumerable.Repeat("The server could not finish applying the requested configuration because a required helper file is missing. ", 2));
+            var details = new[] { "KeyError: 'lan_pc_access.py'", path, path.TrimStart('/'), "path=" + path,
+                "server_apply.py:1061:part", "sha=012345abcdef", longMessage,
+                "monkey: banana", "причина: MissingKeyException: 'lan_pc_access.py'" };
+            clean = DiagnosticReport.Clean(string.Join("\n", details), null);
+            foreach (string detail in details) Check(clean.Contains(detail), "clean retains " + detail);
+            string inline = Json.Encode(ConfigBundle.D("cause", "KeyError: 'lan_pc_access.py'", "parts",
+                new[] { ConfigBundle.D("part", "lan:share", "state", "ready", "summary", longMessage) }));
+            Check(DiagnosticReport.Clean(inline, null) == inline, "inline JSON cause retains following sections");
+            inline = Json.Encode(ConfigBundle.D("cause", "MissingKeyException: file unavailable", "parts", new[] { "agent", "lan:share" }));
+            Check(DiagnosticReport.Clean(inline, null) == inline, "unquoted exception message retains inline sections");
+
+            string token37 = new string('T', 37), rootPassword = "root-json-password", shortSecret = "q7Z!";
+            string base64 = new string('A', 16) + "/" + new string('B', 16) + "==";
+            string rootJson = Json.Encode(ConfigBundle.D("root", ConfigBundle.D("password", rootPassword), "public", "kept"));
+            clean = DiagnosticReport.Clean(token37 + "\npassword=fixture-password\n" + rootJson + "\n" + shortSecret +
+                "\n" + base64 + "\n/usr/" + token37 + "/lan_pc_access.py", new[] { shortSecret });
+            NoSecrets(clean, token37, "fixture-password", rootPassword, shortSecret, base64);
+            Check(clean.Contains("/usr/<secret>/lan_pc_access.py") && clean.Contains("kept"), "redaction retains surrounding paths and JSON");
+            string shortSegments = new string('A', 31) + "/" + new string('B', 31);
+            Check(DiagnosticReport.Clean(shortSegments, null) == shortSegments, "31-character path segments retained");
+            Check(DiagnosticReport.Clean("/usr/" + new string('A', 32) + "/file", null) == "/usr/<secret>/file", "32-character path segment hidden");
+            foreach (string field in new[] { "key", "apiKey", "apikey", "private_key", "clientKey", "keyMaterial", "API_KEY" })
+                NoSecrets(DiagnosticReport.Clean(field + "=field-credential", null), "field-credential");
+            clean = DiagnosticReport.Clean("{\"apiKey\":\"escaped\\\"value\\\\tail\",\"public\":42}\nauthorization: Bearer auth-value\nvless://url-uuid@example.invalid:443", null);
+            NoSecrets(clean, "escaped", "value", "tail", "auth-value", "url-uuid");
+            Check(clean.Contains("\"public\":42"), "escaped credential retains next JSON field");
+            clean = DiagnosticReport.Clean("key=[\"array-value\",{\"child\":\"child-value\"}]\npublic=ok", null);
+            NoSecrets(clean, "array-value", "child-value");
+            Check(clean.EndsWith("public=ok"), "structured credential retains next line");
+            clean = DiagnosticReport.Clean("https://token:part-one;part-two@example.invalid/path?%61piKey=query-one;query-two&mode=auto", null);
+            NoSecrets(clean, "part-one", "part-two", "query-one", "query-two");
+            Check(clean.Contains("mode=auto"), "URL retains public query");
             string home = Path.Combine(Path.GetTempPath(), "ra-diagnostic-" + Guid.NewGuid().ToString("N"));
             string logs = Path.Combine(home, "logs"), state = Path.Combine(home, "state");
             try {
@@ -33,8 +67,9 @@ namespace RemoteAgents.Launcher
                 // This is the same registration used for request values before creating a PasswordRelay.
                 DiagnosticReport.RememberSecrets(home, new[] { requested, Json.Encode(ConfigBundle.D("password", nested)) });
                 string missed = stored + " " + requested + " " + nested;
-                var diag = ConfigBundle.D("id", "1234abcd", "type", "RuntimeError", "message", missed, "cause", missed,
-                    "where", new[] { "server_apply.py:42:apply " + missed }, "journal", false);
+                var diag = ConfigBundle.D("id", "1234abcd", "type", "RuntimeError", "message", path + " " + longMessage + missed,
+                    "cause", "KeyError: 'lan_pc_access.py' " + missed,
+                    "where", new[] { "server_apply.py:1061:part " + missed }, "journal", false);
                 var result = ConfigBundle.D("ok", true, "degraded", new[] { "happierWeb" }, "summary", missed,
                     "clientMode", "delegated", "sshExit", 0, "code", ConfigBundle.D("sha", "012345abcdef", "python", "3.13.1"),
                     "parts", new[] {
@@ -50,6 +85,8 @@ namespace RemoteAgents.Launcher
                 NoSecrets(onDisk, stored, requested, nested);
                 foreach (string expected in new[] { "тип=RuntimeError", "запись=1234abcd", "Программа: RemoteAgents 1.4.1.0", "сервер-код: sha=012345abcdef", "Секции: agent=ready, happierWeb=error, lan:share=ready", "Код выхода: 1; SSH 0", "журнал сервера недоступен" })
                     Check(onDisk.Contains(expected), "file retains " + expected);
+                foreach (string expected in new[] { "KeyError: 'lan_pc_access.py'", path, longMessage, "server_apply.py:1061:part" })
+                    Check(onDisk.Contains(expected), "window log retains diagnostic detail " + expected);
                 Check(Regex.IsMatch(onDisk, @"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} "), "log includes calendar date");
                 Check(File.ReadAllText(reportPath).Contains(stored), "fixture models a real server redaction miss");
                 File.WriteAllLines(Path.Combine(logs, "launcher.log"), Enumerable.Range(0, 220).Select(i => "event-" + i.ToString("000")));
@@ -59,6 +96,8 @@ namespace RemoteAgents.Launcher
                 string copied = DiagnosticReport.BuildCopyText(logs, state);
                 NoSecrets(copied, stored, requested, nested);
                 Check(copied.Contains("тип=RuntimeError") && copied.Contains("запись=1234abcd") && copied.Contains("Секции:"), "copy preserves actionable diagnostics");
+                foreach (string expected in new[] { "KeyError: 'lan_pc_access.py'", path, longMessage, "server_apply.py:1061:part", "sha=012345abcdef", "lan:share" })
+                    Check(copied.Contains(expected), "copy retains diagnostic detail " + expected);
                 Check(copied.Contains("event-219") && !copied.Contains("event-019") && copied.Contains("event-020"), "copy uses only the last 200 launcher lines");
                 Check(copied.Contains("wizard-latest.out") && copied.Contains("LATEST-WIZARD-MARKER") && !copied.Contains("OLD-WIZARD-MARKER"), "copy includes only the newest wizard output");
                 Check(copied.Contains("UTC:") && copied.Contains("RemoteAgents ") && copied.Contains("Windows:"), "copy includes version, OS and time");

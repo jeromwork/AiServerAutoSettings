@@ -199,11 +199,21 @@ def sanitized_diag(exc, part, mode, values=()):
     """One redaction path for the client response and the private journal."""
     known = sorted(set(secret_values(values)), key=len, reverse=True)
 
+    def redact_token(match):
+        token = match.group()
+        # Slash-separated paths are checked one segment at a time. Keep the
+        # whole-token rule for base64 with padding/+ rather than a path shape.
+        base64 = (not token.startswith('/') and re.fullmatch(r'[A-Za-z0-9+/]+={0,2}', token) and
+                  any(c in token for c in '+='))
+        if '/' in token and not base64:
+            return re.sub(r'[A-Za-z0-9+=_-]{32,}', '***', token)
+        return '***'
+
     def redact(message):
         for value in known:
             message = message.replace(value, '***')
         message = re.sub(r'(?i)(password|token|secret|key)=\S+', r'\1=***', message)
-        return re.sub(r'[A-Za-z0-9+/=_-]{32,}', '***', message)[:500]
+        return re.sub(r'[A-Za-z0-9+/=_-]{32,}', redact_token, message)[:500]
 
     cause = exc.__cause__ or exc.__context__
     return dict(id=secrets.token_hex(4), mode=mode, part=part, type=redact(type(exc).__name__),
@@ -214,8 +224,11 @@ def sanitized_diag(exc, part, mode, values=()):
 
 
 def hidden_exception(system, exc, mode, part, values=(), fallback='Проверка/команда не выполнена; детали скрыты.', diag=None):
-    record = sanitized_diag(exc, part, mode, [values, list(system.diagnostic_values)])
     # Diagnostic failures must never alter the original operation's result.
+    try:
+        record = sanitized_diag(exc, part, mode, [values, list(system.diagnostic_values)])
+    except Exception:
+        record = dict(id=secrets.token_hex(4), part=part, type=type(exc).__name__)
     try:
         written = system.diag(record)
     except Exception:

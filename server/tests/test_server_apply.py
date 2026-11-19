@@ -356,6 +356,57 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(result['diag']['type'], 'RuntimeError')
         self.assertRegex(result['code']['sha'], r'^[0-9a-f]{12}$')
 
+    def test_sanitized_diag_preserves_actionable_details(self):
+        path = '/usr/local/lib/remoteagents/lan_pc_access.py'
+        long_message = 'The server could not finish applying the requested configuration because a required helper file is missing. ' * 2
+        details = [path, path.lstrip('/'), 'path=' + path, 'server_apply.py:1061:part', 'sha=012345abcdef', long_message]
+        try:
+            raise RuntimeError('\n'.join(details)) from KeyError('lan_pc_access.py')
+        except RuntimeError as exc:
+            diag = app.sanitized_diag(exc, 'probe', 'plan')
+        self.assertEqual(diag['cause'], "KeyError: 'lan_pc_access.py'")
+        for detail in details:
+            self.assertIn(detail, diag['message'])
+        self.assertTrue(diag['where'])
+        self.assertEqual(app.sanitized_diag(RuntimeError('monkey: banana'), 'probe', 'plan')['message'],
+                         'monkey: banana')
+
+    def test_sanitized_diag_masks_credentials_and_long_path_segments(self):
+        token, password, root_password, short = 'T' * 37, 'fixture-password', 'root-json-password', 'q7Z!'
+        export = json.dumps({'root': {'password': root_password}})
+        base64 = 'A' * 16 + '/' + 'B' * 16 + '=='
+        message = '\n'.join([token, 'password=' + password, export, short, base64,
+                             '/usr/' + token + '/lan_pc_access.py'])
+        diag = app.sanitized_diag(RuntimeError(message), 'probe', 'plan', [export, short])
+        for value in (token, password, root_password, short, base64):
+            self.assertNotIn(value, diag['message'])
+        self.assertIn('/usr/***/lan_pc_access.py', diag['message'])
+        self.assertEqual(app.sanitized_diag(RuntimeError('A' * 31 + '/' + 'B' * 31), 'probe', 'plan')['message'],
+                         'A' * 31 + '/' + 'B' * 31)
+        self.assertEqual(app.sanitized_diag(RuntimeError('/usr/' + 'A' * 32 + '/file'), 'probe', 'plan')['message'],
+                         '/usr/***/file')
+
+    def test_unprintable_exception_keeps_run_result_and_minimal_diag(self):
+        class UnprintableError(Exception):
+            def __str__(self):
+                raise RuntimeError('must not escape diagnostics')
+        engine = self.fake.engine()
+        with patch.object(engine, 'egress', side_effect=UnprintableError()):
+            result = engine.run('plan')
+        self.assertFalse(result['ok'])
+        row = next(row for row in result['parts'] if row['part'] == 'internet')
+        diag = row['diag']
+        self.assertEqual(set(diag), {'id', 'part', 'type'})
+        self.assertEqual((diag['part'], diag['type']), ('internet', 'UnprintableError'))
+        self.assertRegex(diag['id'], r'^[0-9a-f]{8}$')
+        self.assertIn('запись ' + diag['id'], row['summary'])
+        _, record = self.diagnostic_record()
+        self.assertEqual({key: record[key] for key in diag}, diag)
+        result = app.failure_result(self.fake.system, UnprintableError(), 'plan')
+        self.assertFalse(result['ok'])
+        self.assertEqual(set(result['diag']), {'id', 'part', 'type'})
+        self.assertEqual(result['diag']['part'], 'main')
+
     def test_code_version_present(self):
         result = self.fake.engine().result('plan')
         self.assertEqual(result['schema'], 1)
