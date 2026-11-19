@@ -102,6 +102,10 @@ wait_for_memory
   wait_for_memory
   timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$repo/tools/legacy-cleanup/tests/smoke-plan.ps1" < /dev/null
   wait_for_memory
+  timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-decide.ps1" < /dev/null
+  wait_for_memory
+  timeout 120 python3 "$repo/transport/test-transport-events.py" "$pwsh"
+  wait_for_memory
   timeout 120 python3 "$repo/transport/test-transport-liveness.py" "$pwsh"
   wait_for_memory
   timeout 180 python3 "$repo/transport/test-transport-daemon.py" "$pwsh"
