@@ -185,17 +185,33 @@ print(json.dumps(dict(id=ident,met=other.exists(),ssh=os.environ['SSH_CONNECTION
  $config=Read-TransportJson (Join-Path $Root 'config.json')
  if(@((Read-TransportJson $config.transport.channelPath).inbounds|Where-Object {$_.tag -eq 'sync'}).Count -ne 1){throw 'late disk inbound missing'}
  $session=@(Get-ChildItem -Path (Join-Path $Root 'state/wizard-control/*/ready.json'))[0].DirectoryName
- Write-DiskUtf8 (Join-Path $session 'stop') 'stop'
- $deadline=[Diagnostics.Stopwatch]::StartNew()
- while(Test-Path (Join-Path $session 'ready.json')){if($deadline.Elapsed.TotalSeconds -gt 10){throw 'control stop timeout'};Start-Sleep -Milliseconds 30}
- # ready.json disappears before the old host finishes its queue cleanup.
- # Its serving lock covers that entire cleanup, so the orphan belongs to the new host.
- Invoke-WizardResourceLock $Root ('control-serve-'+(Split-Path $session -Leaf)) {} -TimeoutMs 20000
+ $oldHost=Get-Process -Id (Read-TransportJson (Join-Path $session 'ready.json')).pid
+ try{
+  Write-DiskUtf8 (Join-Path $session 'stop') 'stop'
+  $deadline=[Diagnostics.Stopwatch]::StartNew()
+  while(Test-Path (Join-Path $session 'ready.json')){if($deadline.Elapsed.TotalSeconds -gt 10){throw 'control stop timeout'};Start-Sleep -Milliseconds 30}
+  # ready.json disappears before the old host finishes its queue cleanup.
+  Invoke-WizardResourceLock $Root ('control-serve-'+(Split-Path $session -Leaf)) {} -TimeoutMs 20000
+  # Also observe process exit so the no-serving-lock mutation still tests the new host.
+  if(-not $oldHost.WaitForExit(20000)){throw 'old control host exit timeout'}
+ }finally{$oldHost.Dispose()}
  Remove-Item -LiteralPath (Join-Path $session 'stop') -Force
  $orphan=[pscustomobject]@{id=('a'*32);timeout=1;command=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('touch "$HOME/orphan-replayed"'));input=''}
  Write-WizardSessionMessage (Join-Path $session (('a'*32)+'.request.json')) $orphan
- $clean=Invoke-WizardSsh $Root 'if [ -e "$HOME/orphan-replayed" ]; then echo replayed; else echo clean; fi'
- if($clean.Trim() -cne 'clean'){throw 'an orphan modifying request was replayed after controller restart'}
+ # The worker runs requests concurrently: this probe may start before the orphan's touch.
+ # Observe for five seconds, beyond the orphan's one-second execution timeout.
+ $orphanProbe=@'
+import time
+from pathlib import Path
+replayed=Path.home()/'orphan-replayed'
+deadline=time.monotonic()+5
+while not replayed.exists() and time.monotonic()<deadline:
+ time.sleep(.1)
+print('replayed' if replayed.exists() else 'clean')
+'@
+ $probeEncoded=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($orphanProbe))
+ $clean=Invoke-WizardSsh $Root ('python3 -c ''import base64;exec(base64.b64decode("'+$probeEncoded+'"))''')
+ if($clean.Trim() -cne 'clean' -or (Test-Path -LiteralPath (Join-Path $session (('a'*32)+'.reply.json')))){throw 'an orphan modifying request was replayed after controller restart'}
 
 
 }
