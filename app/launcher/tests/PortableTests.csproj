@@ -65,6 +65,7 @@
     <Compile Include="../MainScreenRender.cs" Link="MainScreenRender.cs" />
     <Compile Include="TrayExtrasTests.cs" />
     <Compile Include="../TrayMenuModel.cs" Link="TrayMenuModel.cs" />
+    <Compile Include="../TrayBridge.cs" Link="TrayBridge.cs" />
     <Compile Include="../WindowModel.cs" Link="WindowModel.cs" />
     <Compile Include="../HappierWebResolver.cs" />
     <Compile Include="HappierWebTests.cs" />

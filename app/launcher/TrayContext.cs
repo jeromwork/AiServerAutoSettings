@@ -354,10 +354,11 @@ namespace RemoteAgents.Launcher
             var card = MainScreenModel.Build(new MainScreenFacts { VpnInstalled = true, Vpn = VpnStatus.Read(home), VpnBusy = vpnActionBusy, VpnWanted = vpnActionWanted, Operation = MutationConflict() }).Vpn;
             return new TrayMenuEntry("vpn", card.On ? "Выключить VPN" : "Включить VPN", card.SwitchEnabled) { Hint = card.State };
         }
+        bool ControlDefault() { var c = definition == null ? null : definition.Components.FirstOrDefault(x => x.Name == "control"); return c != null && c.Default; }
         CardView BridgeCard()
         {
             return MainScreenModel.Build(new MainScreenFacts {
-                BridgeEnabled = bridgeActionBusy ? bridgeActionWanted : Json.Bool(Json.Map(Json.Get(config.Data, "bridge")), "enabled", true),
+                BridgeEnabled = bridgeActionBusy ? bridgeActionWanted : TrayBridge.Enabled(config.Data, ControlDefault()),
                 BridgeBusy = bridgeActionBusy, Operation = MutationConflict() }).Helper;
         }
         void ToggleBridge()
@@ -381,7 +382,7 @@ namespace RemoteAgents.Launcher
             entries.Insert(entries.Count - 1, new TrayMenuEntry("update-status", updateSummary, false));
             entries.Insert(entries.Count - 1, new TrayMenuEntry("update-check", "Проверить обновления сейчас", !updateChecking && !engine.Pending));
             entries.Insert(entries.Count - 1, VpnMenu());
-            entries.Insert(entries.Count - 1, TrayMenuModel.BridgeEntry(BridgeCard())); return entries.ToArray();
+            entries.Insert(entries.Count - 1, TrayBridge.Entry(BridgeCard())); return entries.ToArray();
         }
         bool Configured()
         { return Json.Bool(Json.Map(Json.Get(new Configuration(home).Data, "wizard")), "configured"); }
@@ -560,7 +561,7 @@ namespace RemoteAgents.Launcher
                 VpnInstalled = definition != null && definition.Components.Any(c => c.Name == "vpn"),
                 VpnWanted = vpnActionBusy ? vpnActionWanted : Json.Bool(Json.Map(Json.Get(Json.Map(Json.Get(config.Data, "profile")), "vpn")), "enabled"),
                 VpnBusy = vpnActionBusy, VpnError = vpnError, VpnDisableFailed = vpnError.Length > 0 && !vpnActionWanted, Operation = MutationConflict(),
-                BridgeEnabled = bridgeActionBusy ? bridgeActionWanted : Json.Bool(Json.Map(Json.Get(config.Data, "bridge")), "enabled", true),
+                BridgeEnabled = bridgeActionBusy ? bridgeActionWanted : TrayBridge.Enabled(config.Data, ControlDefault()),
                 BridgeBusy = bridgeActionBusy, BridgeError = bridgeError,
                 DiskEnabled = runtimes.Any(r => r.Definition.Name == "disk" && r.Enabled), DiskSummary = DiskSummary(),
                 DiskFolders = (DateTime.UtcNow - diskUpdated).TotalSeconds <= 10 ? diskFolders : -1, DiskServerOnly = -1,
@@ -579,9 +580,9 @@ namespace RemoteAgents.Launcher
         {
             if (!AllowMutation()) return;
             actionBusy = bridgeActionBusy = true; bridgeActionWanted = enabled; bridgeError = "";
-            RefreshMain();
             var monitor = runtimes.FirstOrDefault(r => r.Definition.Name == "control");
             try {
+                RefreshMain();
                 // Stop supervision while the wizard changes intent and installs/uninstalls the bridge.
                 // Otherwise its missing-process recovery could race an explicit off request.
                 if (monitor != null && monitor.Enabled) monitor.SetEnabled(false);
@@ -591,20 +592,14 @@ namespace RemoteAgents.Launcher
                 request["enabled"] = enabled;
                 await Task.Run(() => WizardRunner.Run(home, bundle, "Bridge", request, stop.Token));
                 // Keep the desired profile in step so a later config apply preserves this choice.
-                config.Edit(latest => {
-                    var profile = new Dictionary<string, object>(Json.Map(Json.Get(latest, "profile")));
-                    var bridge = new Dictionary<string, object>(Json.Map(Json.Get(profile, "bridge")));
-                    var actual = Json.Map(Json.Get(latest, "bridge"));
-                    bridge["enabled"] = Json.Bool(actual, "enabled", true);
-                    bridge["allowShell"] = Json.Bool(actual, "allowShell", true);
-                    profile["bridge"] = bridge; latest["profile"] = profile;
-                });
+                config.Edit(TrayBridge.SyncProfile);
                 log.Write(enabled ? "bridge.on.ok" : "bridge.off.ok");
             } catch (OperationCanceledException) { log.Write("bridge.cancelled"); }
             catch (Exception error) {
                 log.Write("bridge.failed " + error.GetType().Name);
                 bridgeError = enabled ? "Не удалось включить удалённое управление. Проверьте настройки и журналы."
                     : "Не удалось выключить удалённое управление. Выключение не подтверждено; проверьте настройки и журналы.";
+                if (!closing) icon.ShowBalloonTip(10000, Product.Name, bridgeError, ToolTipIcon.Warning);
             } finally {
                 actionBusy = bridgeActionBusy = false;
                 if (!closing) {

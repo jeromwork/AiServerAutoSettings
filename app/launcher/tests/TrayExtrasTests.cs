@@ -191,16 +191,25 @@ namespace RemoteAgents.Launcher
         static void RunBridgeEntry()
         {
             var on = new MainScreenFacts { BridgeEnabled = true };
-            var entry = TrayMenuModel.BridgeEntry(MainScreenModel.Build(on).Helper);
+            var entry = TrayBridge.Entry(MainScreenModel.Build(on).Helper);
             Check(entry.Id == "bridge" && entry.Text == MainScreenModel.Build(on).Helper.SwitchText && entry.Text.Contains("вкл") && entry.Enabled, "bridge entry on");
-            entry = TrayMenuModel.BridgeEntry(MainScreenModel.Build(new MainScreenFacts { BridgeEnabled = false }).Helper);
+            entry = TrayBridge.Entry(MainScreenModel.Build(new MainScreenFacts { BridgeEnabled = false }).Helper);
             Check(entry.Text.Contains("выкл") && entry.Enabled, "bridge entry off");
-            entry = TrayMenuModel.BridgeEntry(MainScreenModel.Build(new MainScreenFacts { BridgeEnabled = true, BridgeBusy = true }).Helper);
+            entry = TrayBridge.Entry(MainScreenModel.Build(new MainScreenFacts { BridgeEnabled = true, BridgeBusy = true }).Helper);
             Check(entry.Text == "Включается…" && !entry.Enabled, "bridge entry enabling");
-            entry = TrayMenuModel.BridgeEntry(MainScreenModel.Build(new MainScreenFacts { BridgeEnabled = false, BridgeBusy = true }).Helper);
+            entry = TrayBridge.Entry(MainScreenModel.Build(new MainScreenFacts { BridgeEnabled = false, BridgeBusy = true }).Helper);
             Check(entry.Text == "Выключается…" && !entry.Enabled, "bridge entry disabling");
-            entry = TrayMenuModel.BridgeEntry(MainScreenModel.Build(new MainScreenFacts { BridgeEnabled = true, Operation = "обновление" }).Helper);
+            entry = TrayBridge.Entry(MainScreenModel.Build(new MainScreenFacts { BridgeEnabled = true, Operation = "обновление" }).Helper);
             Check(!entry.Enabled, "bridge entry disabled during foreign operation");
+            var bare = Data("{}");
+            Check(!TrayBridge.Enabled(bare, false) && TrayBridge.Enabled(bare, true), "bridge default follows control component default");
+            Check(!TrayBridge.Enabled(Data("{\"components\":{\"control\":{\"enabled\":false}}}"), true), "bridge default follows components.control.enabled");
+            Check(TrayBridge.Enabled(Data("{\"bridge\":{\"enabled\":true},\"components\":{\"control\":{\"enabled\":false}}}"), false), "bridge.enabled wins");
+            var noProfile = Data("{\"bridge\":{\"enabled\":true}}"); TrayBridge.SyncProfile(noProfile);
+            Check(!noProfile.ContainsKey("profile"), "SyncProfile does not create a missing profile");
+            var withProfile = Data("{\"profile\":{\"device\":{}},\"bridge\":{\"enabled\":false,\"allowShell\":false}}"); TrayBridge.SyncProfile(withProfile);
+            var synced = Json.Map(Json.Get(Json.Map(Json.Get(withProfile, "profile")), "bridge"));
+            Check(!Json.Bool(synced, "enabled", true) && !Json.Bool(synced, "allowShell", true) && withProfile["profile"] is Dictionary<string, object> && ((Dictionary<string, object>)withProfile["profile"]).ContainsKey("device"), "SyncProfile updates existing profile");
             Console.WriteLine("PASS: bridge tray entry");
         }
         internal static void Run()
