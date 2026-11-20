@@ -493,6 +493,62 @@ HTTP(('127.0.0.1',int(api['external_controller'].split(':')[-1])),API).serve_for
         modes({}); (root/'state/transport-pin.json').write_text(json.dumps(dict(mode='auto',tag=None)))
         until(lambda: status().get('mode')=='auto' and status().get('ok') and
               all(c['state']=='ok' for c in status()['candidates']))
+        # T6: killed engine of the active path restarts the SAME path; no switch follows the restart.
+        assert_clean(); a=status()['active']; old=engine_pid()
+        log_path=root/'logs/transport.log'
+        def log_lines(): return log_path.read_text().splitlines() if log_path.exists() else []
+        log_before=len(log_lines()); kill_at=time.monotonic()
+        os.kill(old,9)
+        until(lambda: any(l.endswith(' ready') for l in log_lines()[log_before:]) and engine_pid()!=old and
+              status().get('ok'),seconds=EVENT_WAIT,label='killed engine restarted and ready')
+        ready_at=time.monotonic()
+        time.sleep(max(0,15-(time.monotonic()-ready_at)))
+        after=[l.split(' ',1)[1].split(' ')[0] for l in log_lines()[log_before:] if ' ' in l]
+        assert 'restart' in after and 'ready' in after,after
+        assert 'switch' not in after,('switch after engine restart',after,status()['switches'][-2:],status()['candidates'])
+        assert status()['active']==a and row(a)['penaltyStep']==0,status()
+        pass_test('engine-restart-no-switch')
+        # T7: network change keeps the live path (function level: the fixture cannot fake the physical network on Linux).
+        harness=root/'netchange.ps1'
+        harness.write_text(r'''$ErrorActionPreference='Stop'
+$src=$args[0];$dir=$args[1]
+. (Join-Path $dir 'Transport.Common.ps1');. (Join-Path $dir 'Transport.Decide.ps1')
+$ast=[Management.Automation.Language.Parser]::ParseFile($src,[ref]$null,[ref]$null)
+foreach($name in 'Get-DaemonTime','Update-DaemonNetworkRows'){
+    $fn=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true);Invoke-Expression $fn.Extent.Text
+}
+$script:calls=@();$script:logs=@()
+function Switch-TransportActive([string]$Tag,[bool]$Verified){$script:calls+=,$Tag;$true}
+function Write-TransportLog($Root,$Event,$Detail=''){$script:logs+=,$Event}
+function Check($ok,$text){if(-not $ok){throw ('T7 failed: '+$text)}}
+function Cand($tag){[pscustomobject]@{tag=$tag;title=$tag;kind='x';via='x';enabled=$true;priority=1}}
+$root='';$network=[pscustomobject]@{id='n2'};$pin=[pscustomobject]@{mode='auto';tag=$null};$engine=1;$settings=@{Options=@{bindPhysical=$false}}
+$memory=@{networks=@{n2=@{candidates=@(@{tag='A';state='ok';kbps=100},@{tag='B';state='ok';kbps=200})}}}
+$script:confirmed=$true;$script:errorText=$null
+function Run($active,$candTags,$lastSwitchAgoMs){
+    $script:calls=@();$script:logs=@();$script:active=$active
+    $all=@('A','B')|ForEach-Object {Cand $_};$script:paths=@{AllCandidates=$all;Candidates=@($candTags|ForEach-Object {Cand $_})}
+    $script:decision=New-TransportDecisionState (Get-DaemonTime) $active
+    if($null -ne $lastSwitchAgoMs){$decision.lastSwitchAt=(Get-DaemonTime)-$lastSwitchAgoMs}
+    $prev=@{A=(New-TransportDecisionPath);B=(New-TransportDecisionPath)};$prev.A.step=2;$prev.A.failed=$true;$prev.A.restartingSince=1
+    Update-DaemonNetworkRows $prev
+}
+Run 'A' @('A','B') $null
+Check ($calls.Count -eq 0) 'switched although the current path is a candidate'
+Check ($logs -contains 'network-change') 'network-change not logged'
+Check ($decision.paths.A.step -eq 2 -and -not $decision.paths.A.failed -and -not $decision.paths.A.ContainsKey('restartingSince')) 'penalty state'
+Run 'A' @('A','B') 60000
+Check ($calls.Count -eq 0) 'switched with recent switch'
+Run 'Z' @('A','B') 60000
+Check ($calls.Count -eq 1) 'no move when current is missing from the new network'
+Run 'Z' @('A','B') 1000
+Check ($calls.Count -eq 0) '10 s limit ignored'
+Write-Output 'T7-OK'
+''')
+        r=subprocess.run([PWSH,'-NoProfile','-NonInteractive','-File',str(harness),str(DAEMON),str(DAEMON.parent)],
+                         stdin=subprocess.DEVNULL,capture_output=True,text=True,timeout=60)
+        assert r.returncode==0 and 'T7-OK' in r.stdout,(r.stdout,r.stderr)
+        pass_test('network-change-keeps-path')
         # 7: both banners fail together -> both penalized, engine stays alive.
         assert_clean(); pid=engine_pid()
         modes({str(p):dict(banner='dead',probe='hang') for p in ports.values()})

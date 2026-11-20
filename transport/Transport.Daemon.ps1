@@ -14,7 +14,7 @@ $reader=$null;$directCheck=$null;$pathChecks=@{};$gateOkUntil=@{};$decision=$nul
 $diagnosticContext=$null;$liveDeferred=@();$tunnelReadyUntil=@{};$daemonStarted=[DateTime]::Now;$checkingSince=[DateTime]::UtcNow;$stopping=$false
 try{$daemonStarted=(Get-Process -Id $PID).StartTime}catch{}
 $script:engineAttempted=$false;$checkingSince=$daemonStarted.ToUniversalTime()
-$lastStatus=[DateTime]::MinValue;$nextNetwork=[DateTime]::MinValue;$retryAt=[DateTime]::MinValue
+$holdActive=$false;$lastStatus=[DateTime]::MinValue;$nextNetwork=[DateTime]::MinValue;$retryAt=[DateTime]::MinValue
 function Test-TransportStop {
     try{if([IO.File]::Exists((Join-Path $root 'stop')) -or [IO.File]::Exists((Join-Path $root 'state/transport.stop'))){return $true}}catch{}
     if($parent){try{return $parent.HasExited}catch{return $true}};return $false
@@ -203,6 +203,26 @@ function Publish-TransportStatus {
     Write-TransportJson (Join-Path $root 'status/transport.json') ([ordered]@{endpoints=@($paths.Outbounds|Where-Object {$_.server -and $_.server -notin @('127.0.0.1','::1')}|ForEach-Object {[string]$_.server}|Sort-Object -Unique);ports=$(if($settings){Get-TransportConfiguredPorts ([pscustomobject]$settings.Options) $settings.Profile}else{$null});localWeb=$(if($settings){$settings.LocalWeb}else{$null});lan=$(if($settings){$settings.Lan}else{$null});helper=$(if($settings){Get-TransportHelperStatus $settings $active $paths.Outbounds}else{$null});portConflict=$portConflict;retryAt=$retryAt.ToUniversalTime().ToString('o');configRevision=$revision;fatal=($exitCode -ne 0);summary=$summary;reason=$(if($verdict){@{code=$verdict.reason.code;text=$(if($verdict.reason.code -eq 'ok'){''}else{$verdict.reason.text});since=([DateTime]::SpecifyKind([DateTime]'1970-01-01',[DateTimeKind]::Utc)).AddMilliseconds([long]$verdict.reason.since).ToString('o')}}else{@{code='ok';text='';since=[DateTime]::UtcNow.ToString('o')}});localNet=$(if($verdict){$verdict.localNet}else{'unknown'});switches=@($(if($decision){foreach($item in $decision.switches){@{at=([DateTime]::SpecifyKind([DateTime]'1970-01-01',[DateTimeKind]::Utc)).AddMilliseconds([long]$item.at).ToString('o');from=$item.from;to=$item.to;why=$item.why}}}));ok=$isOk;phase=$phase;checkingSince=$(if($script:checkingSince){$script:checkingSince.ToString('o')}else{$null});active=$active;kbps=$speed;network=$id;metered=$metered;mode=$pin.mode;pinnedTag=$pin.tag;candidates=@($rows);configError=$reloadError;updatedAt=[DateTime]::UtcNow.ToString('o');error=$errorText})
     $script:lastStatus=[DateTime]::UtcNow
 }
+function Update-DaemonNetworkRows($PreviousPaths) {
+    # A network change restarts/rebinds the SAME path: no penalties, no failed mark, ladder steps stay.
+    $script:rows=@(Get-TransportRemembered $memory $network.id $paths.AllCandidates);$script:confirmed=$false
+    Write-TransportLog $root 'network-change'
+    if($PreviousPaths -and $decision){
+        foreach($tag in @($PreviousPaths.Keys)){
+            $kept=New-TransportDecisionPath;$old=$PreviousPaths[$tag]
+            if($old -and $old.ContainsKey('step')){$kept.step=[int]$old.step}
+            $decision.paths[$tag]=$kept
+        }
+    }
+    $currentInRows=[bool]($active -and @($rows|Where-Object {$_.tag -eq $active -and $_.enabled}).Count -and $active -in @($paths.Candidates.tag))
+    if($currentInRows){$script:holdActive=$true;return}
+    # The current path is not a candidate of the new network: remembered best, within the 10 s switch limit.
+    $best=Get-TransportBest $rows -Remembered
+    if($best -and $pin.mode -eq 'auto' -and ($null -eq $decision.lastSwitchAt -or ((Get-DaemonTime)-$decision.lastSwitchAt) -ge 10000)){
+        if($engine -and -not $settings.Options.bindPhysical){[void](Switch-TransportActive $best.tag $false)}
+        else{$script:active=$best.tag;$script:errorText='Путь из памяти ещё не проверен'}
+    }
+}
 function Confirm-DaemonSelection([string]$Tag) {
     if(-not $decision -or $Tag -eq $decision.currentTag){return}
     # Pinning a paused path changes the selector, not the known failure/backoff.
@@ -301,7 +321,7 @@ function Start-TransportEngine {
     Stop-TransportEvents $reader;$script:reader=$null
     [void](Reset-DaemonPorts)
     $script:confirmed=$false
-    if($script:engineAttempted){$script:checkingSince=[DateTime]::UtcNow}
+    if($script:engineAttempted){$script:checkingSince=[DateTime]::UtcNow;$script:holdActive=$true}
     $interface='';$cfgSettings=$settings
     if($settings.Options.bindPhysical){
         $bind=Resolve-TransportBind $bindState $network (Test-TransportVpnOff $root)
@@ -341,6 +361,8 @@ function Start-TransportEngine {
         }catch{}
     }
     $script:startFailures=0;Write-TransportLog $root 'ready'
+    # Restart finished: tell the reducer, so a prior engine-exit is not a path failure. The reducer decides about switching.
+    if($ready -and -not $engine.Process.HasExited -and $script:engineAttempted){Add-DaemonEvent (New-DaemonEvent 'engine-ready' ([string]$active) 'ready')}
     if($ready -and -not $engine.Process.HasExited){
         Start-DaemonReader -NewEngine
         Write-DaemonWizardProgress ('· модуль связи готов '+[int]([DateTime]::Now-$daemonStarted).TotalMilliseconds+' мс от запуска процесса')
@@ -430,14 +452,10 @@ try{
             $changed=Test-TransportNetworkChanged $network $newNetwork
             $metered=$newMetered
             if($changed){
+                $previousPaths=$null;if($decision){$previousPaths=$decision.paths}
                 Stop-TransportProbes;Stop-DaemonObservation;$network=$newNetwork
-                $rows=@(Get-TransportRemembered $memory $network.id $paths.AllCandidates);$confirmed=$false
-                $best=Get-TransportBest $rows -Remembered
-                if($best -and $pin.mode -eq 'auto' -and ($null -eq $decision.lastSwitchAt -or ((Get-DaemonTime)-$decision.lastSwitchAt) -ge 10000)){
-                    if($engine -and -not $settings.Options.bindPhysical){[void](Switch-TransportActive $best.tag $false)}
-                    else{$active=$best.tag;$errorText='Путь из памяти ещё не проверен'}
-                }
-                $checkingSince=$now;Write-TransportLog $root 'network-change'
+                Update-DaemonNetworkRows $previousPaths
+                $checkingSince=$now
                 # bind_interface и OpenSSH -b задаются на сокете. При смене NIC нужен новый процесс;
                 # обычный failover selector никогда не перезапускает sing-box.
                 if($settings.Options.bindPhysical){
@@ -509,6 +527,7 @@ try{
                         $a=@($tunnel.arguments);if($settings.Options.bindPhysical -and -not $bindState.none -and $tunnel.bind -and $network.ip){$a+=@('-b',[string]$network.ip)}
                         $tunnelChildren[$tunnel.tag]=Start-TransportProcess $settings.Profile.sshExecutable ($a+@($tunnel.target))
                         $tunnelReadyUntil[$tunnel.tag]=[DateTime]::UtcNow.AddSeconds(3)
+                        Add-DaemonEvent (New-DaemonEvent 'engine-ready' $tunnel.tag 'ready')
                     }catch{Write-TransportLog $root 'process-failed' (New-TransportDiagnostic $null $tunnel.tag 'tunnel-start-failed')}
                     $retryAt=$now.AddSeconds([double]$settings.Options.restartDelaySec)
                 }
@@ -526,7 +545,11 @@ try{
                 Stop-TransportProbe $probe;$probes.Remove($key)
                 Add-DaemonEvent (New-DaemonEvent 'path-check' $key $code)
                 Write-DaemonWizardProgress ('Вариант связи: '+$r.title+$(if($code -eq 'ok'){' ✓'}else{' ✗'}))
-                if($code -eq 'ok' -and $initialRound -and -not $confirmed -and -not ($decision -and $decision.localNet -eq 'down')){[void](Switch-TransportActive $key $true)}
+                if($code -eq 'ok' -and $initialRound -and -not $confirmed -and -not ($decision -and $decision.localNet -eq 'down')){
+                    # After an engine restart or a network change the same path is re-proved; a faster other path must not take over.
+                    if($holdActive -and $key -eq $active){$holdActive=$false;$confirmed=$true;$errorText=$null;foreach($sr in $rows){$sr.suspect=$false}}
+                    elseif(-not $holdActive -or $active -notin @($paths.Candidates.tag)){$holdActive=$false;[void](Switch-TransportActive $key $true)}
+                }
                 Save-TransportMemory $root $memory $network.id $rows;$lastStatus=[DateTime]::MinValue
             }
             if($liveDeferred.Count){
