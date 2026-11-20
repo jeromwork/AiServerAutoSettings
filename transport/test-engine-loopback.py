@@ -43,6 +43,7 @@ def psq(x):
 
 with tempfile.TemporaryDirectory(prefix='config-c-loopback-') as tmp:
     d = Path(tmp); home = d/'server-home'; home.mkdir()
+    rendezvous = d/'rendezvous'; rendezvous.mkdir()
     repo = args.repo
     if args.baseline:
         repo = d/'baseline-bundle'; repo.mkdir()
@@ -147,13 +148,24 @@ if($Baseline){
  if($first -cne $second){throw 'unchanged helper rewritten'}
  $peer2=Invoke-WizardSsh $Root 'printf %s "$SSH_CONNECTION"'
  if($peer -cne $peer2){throw 'control session changed'}
- $remoteCode='import time,os,json;start=time.time();time.sleep(1);print(json.dumps(dict(begin=start,end=time.time(),peer=os.environ["SSH_CONNECTION"])))'
+ $remoteCode=@'
+import time,os,json,sys
+from pathlib import Path
+ident,directory=sys.argv[1:]
+directory=Path(directory)
+other=directory/('ready-'+('b' if ident=='a' else 'a'))
+(directory/('ready-'+ident)).touch()
+deadline=time.monotonic()+20
+while not other.exists() and time.monotonic()<deadline:
+ time.sleep(.02)
+print(json.dumps(dict(id=ident,met=other.exists(),ssh=os.environ['SSH_CONNECTION'])))
+'@
  $encoded=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($remoteCode))
- $remote='python3 -c ''import base64;exec(base64.b64decode("'+$encoded+'"))'''
- $childCode='. '+("'"+(Join-Path $Repo 'build/Wizard.Common.ps1').Replace("'","''")+"'")+'; Invoke-WizardSsh '+("'"+$Root.Replace("'","''")+"'")+' '+("'"+$remote.Replace("'","''")+"'")
  $children=@()
  try{
-  foreach($n in @(1,2)){
+  foreach($id in @('a','b')){
+   $remote='python3 -c ''import base64;exec(base64.b64decode("'+$encoded+'"))'' '+$id+' '+(Quote-Transport $Rendezvous)
+   $childCode='. '+("'"+(Join-Path $Repo 'build/Wizard.Common.ps1').Replace("'","''")+"'")+'; Invoke-WizardSsh '+("'"+$Root.Replace("'","''")+"'")+' '+("'"+$remote.Replace("'","''")+"'")
    $si=New-Object Diagnostics.ProcessStartInfo;$si.FileName=Get-TransportPowerShell
    $si.Arguments=((@('-NoProfile','-NonInteractive','-Command',$childCode)|ForEach-Object {Quote-Transport $_}) -join ' ')
    $si.UseShellExecute=$false;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true
@@ -161,23 +173,45 @@ if($Baseline){
    $children+=@{p=$p;out=$p.StandardOutput.ReadToEndAsync();err=$p.StandardError.ReadToEndAsync()}
   }
   $rows=@()
-  foreach($c in $children){if(-not $c.p.WaitForExit(20000) -or $c.p.ExitCode -ne 0){throw ('shared control child failed '+$c.err.GetAwaiter().GetResult())};$rows+=ConvertFrom-Json $c.out.GetAwaiter().GetResult()}
-  if($rows[0].peer -cne $peer -or $rows[1].peer -cne $peer){throw 'actions did not share one authenticated SSH connection'}
-  if(($rows|Measure-Object begin -Maximum).Maximum -ge ($rows|Measure-Object end -Minimum).Minimum){throw 'remote commands were serialized'}
+  foreach($c in $children){if(-not $c.p.WaitForExit(35000) -or $c.p.ExitCode -ne 0){throw ('shared control child failed '+$c.err.GetAwaiter().GetResult())};$rows+=ConvertFrom-Json $c.out.GetAwaiter().GetResult()}
+  if($rows.Count -ne 2 -or $rows[0].id -cne 'a' -or $rows[1].id -cne 'b' -or $rows[0].met -ne $true -or $rows[1].met -ne $true){
+   $ready=@(Get-ChildItem -LiteralPath $Rendezvous -Filter 'ready-*'|Sort-Object Name|ForEach-Object {$_.Name})
+   throw ('remote commands were serialized; ready: '+($ready -join ', ')+'; rows: '+(ConvertTo-Json -InputObject $rows -Compress))
+  }
+  if($rows[0].ssh -cne $peer -or $rows[1].ssh -cne $peer){throw 'actions did not share one authenticated SSH connection'}
  }finally{foreach($c in $children){if(-not $c.p.HasExited){$c.p.Kill()};$c.p.Dispose()}}
  [void](Invoke-WizardSsh $Root 'mkdir -p "$HOME/.local/share/remote-disk"; cat > "$HOME/.local/share/remote-disk/ports.json"' '{"listen":23456}')
  Set-WizardDiskChannel $Root
  $config=Read-TransportJson (Join-Path $Root 'config.json')
  if(@((Read-TransportJson $config.transport.channelPath).inbounds|Where-Object {$_.tag -eq 'sync'}).Count -ne 1){throw 'late disk inbound missing'}
  $session=@(Get-ChildItem -Path (Join-Path $Root 'state/wizard-control/*/ready.json'))[0].DirectoryName
- Write-DiskUtf8 (Join-Path $session 'stop') 'stop'
- $deadline=[Diagnostics.Stopwatch]::StartNew()
- while(Test-Path (Join-Path $session 'ready.json')){if($deadline.Elapsed.TotalSeconds -gt 10){throw 'control stop timeout'};Start-Sleep -Milliseconds 30}
+ $oldHost=Get-Process -Id (Read-TransportJson (Join-Path $session 'ready.json')).pid
+ try{
+  Write-DiskUtf8 (Join-Path $session 'stop') 'stop'
+  $deadline=[Diagnostics.Stopwatch]::StartNew()
+  while(Test-Path (Join-Path $session 'ready.json')){if($deadline.Elapsed.TotalSeconds -gt 10){throw 'control stop timeout'};Start-Sleep -Milliseconds 30}
+  # ready.json disappears before the old host finishes its queue cleanup.
+  Invoke-WizardResourceLock $Root ('control-serve-'+(Split-Path $session -Leaf)) {} -TimeoutMs 20000
+  # Also observe process exit so the no-serving-lock mutation still tests the new host.
+  if(-not $oldHost.WaitForExit(20000)){throw 'old control host exit timeout'}
+ }finally{$oldHost.Dispose()}
  Remove-Item -LiteralPath (Join-Path $session 'stop') -Force
  $orphan=[pscustomobject]@{id=('a'*32);timeout=1;command=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('touch "$HOME/orphan-replayed"'));input=''}
- Write-TransportJson (Join-Path $session (('a'*32)+'.request.json')) $orphan -Private
- $clean=Invoke-WizardSsh $Root 'if [ -e "$HOME/orphan-replayed" ]; then echo replayed; else echo clean; fi'
- if($clean.Trim() -cne 'clean'){throw 'an orphan modifying request was replayed after controller restart'}
+ Write-WizardSessionMessage (Join-Path $session (('a'*32)+'.request.json')) $orphan
+ # The worker runs requests concurrently: this probe may start before the orphan's touch.
+ # Observe for five seconds, beyond the orphan's one-second execution timeout.
+ $orphanProbe=@'
+import time
+from pathlib import Path
+replayed=Path.home()/'orphan-replayed'
+deadline=time.monotonic()+5
+while not replayed.exists() and time.monotonic()<deadline:
+ time.sleep(.1)
+print('replayed' if replayed.exists() else 'clean')
+'@
+ $probeEncoded=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($orphanProbe))
+ $clean=Invoke-WizardSsh $Root ('python3 -c ''import base64;exec(base64.b64decode("'+$probeEncoded+'"))''')
+ if($clean.Trim() -cne 'clean' -or (Test-Path -LiteralPath (Join-Path $session (('a'*32)+'.reply.json')))){throw 'an orphan modifying request was replayed after controller restart'}
 
 
 }
@@ -189,7 +223,7 @@ if($Baseline){
                               ('late disk', ' Set-WizardDiskChannel $Root'), ('control stop', ' $session=@(Get-ChildItem'),
                               ('orphan', ' $clean=Invoke-WizardSsh')]:
             body = body.replace(needle, "[Console]::Error.WriteLine('loopback: " + label + "');\n" + needle)
-        header = f"param([string]$Repo={psq(repo)},[string]$Root={psq(root)},[string]$Login={psq(user)},[bool]$Baseline=${str(args.baseline).lower()})\n"
+        header = f"param([string]$Repo={psq(repo)},[string]$Root={psq(root)},[string]$Login={psq(user)},[string]$Rendezvous={psq(rendezvous)},[bool]$Baseline=${str(args.baseline).lower()})\n"
         # Record total immediately after Connection, excluding helper-cache assertions.
         body = body.replace("# Baseline returns", "$connectionMs=$watch.ElapsedMilliseconds\n# Baseline returns")
         body = body.replace('connectionMs=$watch.ElapsedMilliseconds;', 'connectionMs=$connectionMs;')

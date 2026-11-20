@@ -73,15 +73,20 @@ with tempfile.TemporaryDirectory(prefix='transport-daemon-test-') as tmp:
     direct = socket.socket()
     direct.bind(('127.0.0.1', 0)); direct.listen()
     direct_calls = []
+    direct_errors = []
+    direct_done = threading.Event()
 
     def accept_direct():
         while True:
             try:
                 c, _ = direct.accept()
-                c.settimeout(4)
-                direct_calls.append(c.recv(1))  # connect only: no payload
-                c.close()
-            except OSError:
+                with c:
+                    c.settimeout(4)
+                    direct_calls.append(c.recv(1))  # connect only: no payload
+                    direct_done.set()
+            except OSError as exc:
+                direct_errors.append(repr(exc))
+                direct_done.set()
                 return
     threading.Thread(target=accept_direct, daemon=True).start()
     with socket.socket() as s:
@@ -392,6 +397,7 @@ HTTP(('127.0.0.1',int(api['external_controller'].split(':')[-1])),API).serve_for
         recovery_start=len(probes())
         modes({str(ports[a]):dict(banner='refused',probe='hang')})
         until(lambda: (root/('banner-closed-'+str(ports[a]))).exists(),label='refused banner listener closed')
+        direct_done.clear()
         dial(a); deadline=time.monotonic()+EVENT_WAIT
         failure=until(lambda: (s:=rate_status(selection)) and row(a,s)['penaltyStep']>=1 and
                       len(probes())>=recovery_start+2 and s,
@@ -409,7 +415,8 @@ HTTP(('127.0.0.1',int(api['external_controller'].split(':')[-1])),API).serve_for
         assert 0<=stamp(first['switches'][-1]['at'])-failed_at<=15,first
         assert engine_pid()==pid
         assert row(a)['penaltyStep']>=1 and status()['switches'][-1]['why']=='path-dial-failed',status()
-        assert direct_calls and all(c==b'' for c in direct_calls)
+        direct_done.wait(max(0, min(15, START+BUDGET-time.monotonic())))
+        assert direct_calls and all(c==b'' for c in direct_calls), (direct_calls, direct_errors)
         pass_test('failover')
         # 6: recovery is already spent for 60 s and A's row is still fail.
         # The SSH fixture records the real selector AND failed row before proof:
@@ -502,8 +509,22 @@ HTTP(('127.0.0.1',int(api['external_controller'].split(':')[-1])),API).serve_for
         for c in s['candidates']:
             assert 0<=c['penaltyStep']<=5
             if c['penaltyUntil']: datetime.fromisoformat(c['penaltyUntil'])
-        cli=subprocess.run([PWSH,'-NoProfile','-NonInteractive','-File',str(DAEMON.with_name('Get-TransportStatus.ps1')),
-                            '-Home',str(root)],env=env,stdin=subprocess.DEVNULL,capture_output=True,text=True,timeout=8)
+        cli_timeout=max(8, min(30, START+BUDGET-time.monotonic()))
+        cli_started=time.monotonic()
+        try:
+            cli=subprocess.run([PWSH,'-NoProfile','-NonInteractive','-File',str(DAEMON.with_name('Get-TransportStatus.ps1')),
+                                '-Home',str(root)],env=env,stdin=subprocess.DEVNULL,capture_output=True,text=True,timeout=cli_timeout)
+        except subprocess.TimeoutExpired as exc:
+            elapsed=time.monotonic()-cli_started
+            try:
+                uptime=subprocess.run(['uptime'],capture_output=True,text=True,timeout=2).stdout.strip()
+            except (OSError, subprocess.TimeoutExpired) as uptime_error:
+                uptime='unavailable: '+str(uptime_error)
+            raise AssertionError('FAIL: status CLI timed out after %.2fs (timeout %.2fs); uptime: %s' %
+                                 (elapsed,cli_timeout,uptime)) from exc
+        finally:
+            print('STATUS CLI: elapsed %.2fs; timeout %.2fs' %
+                  (time.monotonic()-cli_started,cli_timeout),flush=True)
         assert cli.returncode==0,cli.stderr
         pass_test('status-fields')
         # Preserve stop/child cleanup assertions and parent-driven shutdown, with a real fake tunnel.
