@@ -63,7 +63,10 @@ namespace RemoteAgents.Launcher
             {
                 AddSetting("Диск", "Папки и синхронизация", 2);
                 AddSetting("Happier", "Аккаунт и адрес приложения", 3);
-                AddSetting("Помощник", "Управление компьютером", 4);
+                var helperBody = AddSetting("Помощник", "Управление компьютером", 4);
+                settingsBridgeSwitch = new Button { AutoSize = true, Padding = new Padding(6, 3, 6, 3), AccessibleName = "Удалённое управление" };
+                helperBody.Controls.Add(settingsBridgeSwitch);
+                settingsBridgeSwitch.Click += (s, e) => { if (settingsBridgeSwitch.Enabled) DispatchMainAction(bridgeOn ? "bridge-off" : "bridge-on"); };
             }
             FlowLayoutPanel about;
             MakeCard(settingsBody, new Label { Text = "О программе", AutoSize = true }, out about);
@@ -99,12 +102,13 @@ namespace RemoteAgents.Launcher
             detailsHost = new Panel { Dock = DockStyle.Fill, AutoScroll = true }; RegisterPage("Раздел настроек", detailsHost);
             ShowPage("Главная");
         }
-        void AddSetting(string title, string description, int section)
+        FlowLayoutPanel AddSetting(string title, string description, int section)
         {
             FlowLayoutPanel body;
             MakeCard(settingsBody, new Label { Text = title, AutoSize = true }, out body);
             var detail = WrapLabel(); detail.Text = description; detail.ForeColor = Theme.Muted; body.Controls.Add(detail);
             AddButton(body, "Открыть", () => OpenDetails(section));
+            return body;
         }
         void RegisterPage(string name, Control page)
         { pages.Add(name, page); page.Dock = DockStyle.Fill; pageHost.Controls.Add(page); page.Visible = false; }
@@ -138,7 +142,7 @@ namespace RemoteAgents.Launcher
             var body = page.Controls.OfType<FlowLayoutPanel>().FirstOrDefault();
             if (body != null) FitContent(body, Math.Max(100, page.ClientSize.Width - page.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth));
         }
-        void ShowPage(string name)
+        internal void ShowPage(string name)
         {
             string operation = MutationConflict == null ? "" : MutationConflict();
             if (!WindowModel.CanOpen(name, operation)) { ReportConflict(operation); return; }

@@ -188,9 +188,34 @@ namespace RemoteAgents.Launcher
             Check(!notices.Observe(search, empty, now.AddSeconds(1)).Text.Contains("balloon-secret"), "balloon uses shared reason masking");
             Console.WriteLine("PASS: switch UI status/tray transitions");
         }
+        static void RunBridgeEntry()
+        {
+            var on = new MainScreenFacts { BridgeEnabled = true };
+            var entry = TrayBridge.Entry(MainScreenModel.Build(on).Helper);
+            Check(entry.Id == "bridge" && entry.Text == MainScreenModel.Build(on).Helper.SwitchText && entry.Text.Contains("вкл") && entry.Enabled, "bridge entry on");
+            entry = TrayBridge.Entry(MainScreenModel.Build(new MainScreenFacts { BridgeEnabled = false }).Helper);
+            Check(entry.Text.Contains("выкл") && entry.Enabled, "bridge entry off");
+            entry = TrayBridge.Entry(MainScreenModel.Build(new MainScreenFacts { BridgeEnabled = true, BridgeBusy = true }).Helper);
+            Check(entry.Text == "Включается…" && !entry.Enabled, "bridge entry enabling");
+            entry = TrayBridge.Entry(MainScreenModel.Build(new MainScreenFacts { BridgeEnabled = false, BridgeBusy = true }).Helper);
+            Check(entry.Text == "Выключается…" && !entry.Enabled, "bridge entry disabling");
+            entry = TrayBridge.Entry(MainScreenModel.Build(new MainScreenFacts { BridgeEnabled = true, Operation = "обновление" }).Helper);
+            Check(!entry.Enabled, "bridge entry disabled during foreign operation");
+            var bare = Data("{}");
+            Check(TrayBridge.Enabled(bare), "bridge without any config counts as on");
+            Check(!TrayBridge.Enabled(Data("{\"components\":{\"control\":{\"enabled\":false}}}")), "components.control.enabled=false means off");
+            Check(!TrayBridge.Enabled(Data("{\"bridge\":{\"enabled\":false}}")), "bridge.enabled=false means off");
+            Check(TrayBridge.Enabled(Data("{\"bridge\":{\"enabled\":true},\"components\":{\"control\":{\"enabled\":false}}}")), "bridge.enabled wins");
+            var noProfile = Data("{\"bridge\":{\"enabled\":true}}"); TrayBridge.SyncProfile(noProfile);
+            Check(!noProfile.ContainsKey("profile"), "SyncProfile does not create a missing profile");
+            var withProfile = Data("{\"profile\":{\"device\":{}},\"bridge\":{\"enabled\":false,\"allowShell\":false}}"); TrayBridge.SyncProfile(withProfile);
+            var synced = Json.Map(Json.Get(Json.Map(Json.Get(withProfile, "profile")), "bridge"));
+            Check(!Json.Bool(synced, "enabled", true) && !Json.Bool(synced, "allowShell", true) && withProfile["profile"] is Dictionary<string, object> && ((Dictionary<string, object>)withProfile["profile"]).ContainsKey("device"), "SyncProfile updates existing profile");
+            Console.WriteLine("PASS: bridge tray entry");
+        }
         internal static void Run()
         {
-            RunSwitchStatus();
+            RunSwitchStatus(); RunBridgeEntry();
             var empty = Data("{}"); var transport = Data("{\r\n\"ok\":true,\"active\":\"vless-relay-fixture\",\"kbps\":96.8,\"candidates\":[{\"tag\":\"vless-relay-fixture\",\"state\":\"ok\",\"kbps\":96.8},{\"tag\":\"vless-direct\",\"state\":\"fail\"}]\r\n}");
             var health = Health(40000, 50000); var menu = TrayMenuModel.Build(empty, empty, transport, health);
             // Application actions, separate synchronization window, and local REST summary.

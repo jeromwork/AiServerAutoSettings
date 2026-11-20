@@ -39,6 +39,8 @@ namespace RemoteAgents.Launcher
         int diskFolders = -1;
         bool vpnActionBusy, vpnActionWanted;
         string vpnError = "";
+        bool bridgeActionBusy, bridgeActionWanted;
+        string bridgeError = "";
         HelperClient netHelper;
         string diskSummary = "Диск: ожидается проверка";
         DateTime diskUpdated = DateTime.MinValue;
@@ -331,10 +333,11 @@ namespace RemoteAgents.Launcher
                     item.Click += (s, e) => Safe(() => {
                         if (id == "update-check") CheckUpdates();
                         else if (id == "open") OpenHappier();
-                        else if (id == "settings") ShowMain();
+                        else if (id == "settings") ShowMain("Настройки");
                         else if (id == "disk") OpenDisk();
                         else if (id == "synchronization") OpenSynchronization();
                         else if (id == "vpn") ToggleVpn();
+                        else if (id == "bridge") ToggleBridge();
                         else if (id == "exit") RequestExit();
                     });
                     menu.Items.Add(item);
@@ -351,6 +354,18 @@ namespace RemoteAgents.Launcher
             var card = MainScreenModel.Build(new MainScreenFacts { VpnInstalled = true, Vpn = VpnStatus.Read(home), VpnBusy = vpnActionBusy, VpnWanted = vpnActionWanted, Operation = MutationConflict() }).Vpn;
             return new TrayMenuEntry("vpn", card.On ? "Выключить VPN" : "Включить VPN", card.SwitchEnabled) { Hint = card.State };
         }
+        CardView BridgeCard()
+        {
+            return MainScreenModel.Build(new MainScreenFacts {
+                BridgeEnabled = bridgeActionBusy ? bridgeActionWanted : TrayBridge.Enabled(config.Data),
+                BridgeBusy = bridgeActionBusy, Operation = MutationConflict() }).Helper;
+        }
+        void ToggleBridge()
+        {
+            var helper = BridgeCard();
+            if (!helper.SwitchEnabled) return;
+            SetBridge(!helper.On);
+        }
         void ToggleVpn()
         {
             var vpn = runtimes.FirstOrDefault(r => r.Definition.Name == "vpn"); if (vpn == null) return;
@@ -365,7 +380,8 @@ namespace RemoteAgents.Launcher
             if (Json.Bool(lanStatus, "enabled")) entries.Insert(0, new TrayMenuEntry("lan-status", StatusView.Lan(lanStatus), false));
             entries.Insert(entries.Count - 1, new TrayMenuEntry("update-status", updateSummary, false));
             entries.Insert(entries.Count - 1, new TrayMenuEntry("update-check", "Проверить обновления сейчас", !updateChecking && !engine.Pending));
-            entries.Insert(entries.Count - 1, VpnMenu()); return entries.ToArray();
+            entries.Insert(entries.Count - 1, VpnMenu());
+            entries.Insert(entries.Count - 1, TrayBridge.Entry(BridgeCard())); return entries.ToArray();
         }
         bool Configured()
         { return Json.Bool(Json.Map(Json.Get(new Configuration(home).Data, "wizard")), "configured"); }
@@ -409,10 +425,10 @@ namespace RemoteAgents.Launcher
         void ReloadSettings()
         {
             try {var file=Path.Combine(home,"config.json");var written=File.GetLastWriteTimeUtc(file);if(written==settingsWritten)return;var latest=new Configuration(home).Data;config.Data.Clear();foreach(var pair in latest)config.Data[pair.Key]=pair.Value;settingsWritten=written;
-                foreach(var runtime in runtimes.Where(r=>!r.Definition.CommandManaged)){bool enabled=Wanted(runtime.Definition);if(runtime.Enabled!=enabled)runtime.SetEnabled(enabled);}
+                foreach(var runtime in runtimes.Where(r=>!r.Definition.CommandManaged && !(bridgeActionBusy && r.Definition.Name == "control"))){bool enabled=Wanted(runtime.Definition);if(runtime.Enabled!=enabled)runtime.SetEnabled(enabled);}
             }catch{log.Write("setup.config.refresh.failed");}
         }
-        void ShowMain()
+        void ShowMain(string page = null)
         {
             if (closing) return;
             // During first installation the existing paste/step window remains the only window.
@@ -431,6 +447,7 @@ namespace RemoteAgents.Launcher
                 };
                 mainWindow.MainAction = action => Safe(() => {
                     if (action == "retry") { if (AllowMutation()) LoadComponents(); }
+                    else if (action == "bridge-on" || action == "bridge-off") SetBridge(action == "bridge-on");
                     else if (action == "open-sync") OpenSynchronization();
                     else if (action == "open-disk") OpenDisk();
                 });
@@ -451,7 +468,7 @@ namespace RemoteAgents.Launcher
                     Service("Список путей", () => ScriptCommand("Edit-Transport.ps1", new[] { "-List" }, true))
                 }, tag => ScriptCommand("Set-TransportPath.ps1", tag.Length == 0 ? new[] { "-Auto" } : new[] { "-Tag", tag }, false));
             }
-            window.Show(); RefreshMain(); ActivateWindow(mainWindow);
+            window.Show(); RefreshMain(); if (page != null) mainWindow.ShowPage(page); ActivateWindow(mainWindow);
         }
         KeyValuePair<string, Action> Service(string title, Action action)
         { return new KeyValuePair<string, Action>(title, () => Safe(action)); }
@@ -543,6 +560,8 @@ namespace RemoteAgents.Launcher
                 VpnInstalled = definition != null && definition.Components.Any(c => c.Name == "vpn"),
                 VpnWanted = vpnActionBusy ? vpnActionWanted : Json.Bool(Json.Map(Json.Get(Json.Map(Json.Get(config.Data, "profile")), "vpn")), "enabled"),
                 VpnBusy = vpnActionBusy, VpnError = vpnError, VpnDisableFailed = vpnError.Length > 0 && !vpnActionWanted, Operation = MutationConflict(),
+                BridgeEnabled = bridgeActionBusy ? bridgeActionWanted : TrayBridge.Enabled(config.Data),
+                BridgeBusy = bridgeActionBusy, BridgeError = bridgeError,
                 DiskEnabled = runtimes.Any(r => r.Definition.Name == "disk" && r.Enabled), DiskSummary = DiskSummary(),
                 DiskFolders = (DateTime.UtcNow - diskUpdated).TotalSeconds <= 10 ? diskFolders : -1, DiskServerOnly = -1,
                 HappierVisible = account.Visible, HappierHasKey = account.HasKey, HappierLabel = account.Label,
@@ -554,6 +573,40 @@ namespace RemoteAgents.Launcher
                 "\r\nПуть: " + StatusView.Title(transport) + "; " + StatusView.Speed(transport) + "; проверен: " + StatusView.CheckedAt(transport) +
                 "\r\nСеть: " + StatusView.Network(transport) + "; лимитная: " + StatusView.Metered(transport) +
                 (Json.Str(transport, "configError").Length > 0 ? "\r\nНастройки: " + Json.Str(transport, "configError") : ""), transport, health);
+        }
+
+        async void SetBridge(bool enabled)
+        {
+            if (!AllowMutation()) return;
+            actionBusy = bridgeActionBusy = true; bridgeActionWanted = enabled; bridgeError = "";
+            var monitor = runtimes.FirstOrDefault(r => r.Definition.Name == "control");
+            try {
+                RefreshMain();
+                // Stop supervision while the wizard changes intent and installs/uninstalls the bridge.
+                // Otherwise its missing-process recovery could race an explicit off request.
+                if (monitor != null && monitor.Enabled) monitor.SetEnabled(false);
+                string bundle = engine.Folder(engine.Current);
+                var settings = new Configuration(home).Data;
+                var request = ConfigRequests.Bridge(new Dictionary<string, object>(), settings);
+                request["enabled"] = enabled;
+                await Task.Run(() => WizardRunner.Run(home, bundle, "Bridge", request, stop.Token));
+                // Keep the desired profile in step so a later config apply preserves this choice.
+                config.Edit(TrayBridge.SyncProfile);
+                log.Write(enabled ? "bridge.on.ok" : "bridge.off.ok");
+            } catch (OperationCanceledException) { log.Write("bridge.cancelled"); }
+            catch (Exception error) {
+                log.Write("bridge.failed " + error.GetType().Name);
+                bridgeError = enabled ? "Не удалось включить удалённое управление. Проверьте настройки и журналы."
+                    : "Не удалось выключить удалённое управление. Выключение не подтверждено; проверьте настройки и журналы.";
+                if (!closing) icon.ShowBalloonTip(10000, Product.Name, bridgeError, ToolTipIcon.Warning);
+            } finally {
+                actionBusy = bridgeActionBusy = false;
+                if (!closing) {
+                    ReloadSettings();
+                    if (monitor != null && monitor.Enabled != Wanted(monitor.Definition)) monitor.SetEnabled(Wanted(monitor.Definition));
+                    RefreshMenu();
+                }
+            }
         }
 
         string TransportScript(string name) { return Path.Combine(engine.Folder(engine.Current), "transport", name); }

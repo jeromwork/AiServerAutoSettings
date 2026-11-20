@@ -24,6 +24,9 @@ namespace RemoteAgents.Launcher
         internal bool VpnBusy;               // enable/disable is in progress (actionBusy around CheckVpn/DisableVpn)
         internal bool VpnDisableFailed;       // the last failed request was to disable, never offer to enable it
         internal string VpnError = "";       // last enable/disable failure in plain words, "" when none
+        internal bool BridgeEnabled = true; // config bridge.enabled, independent of a stale heartbeat
+        internal bool BridgeBusy;            // the Bridge wizard action is running
+        internal string BridgeError = "";
         internal bool DiskEnabled;           // the "disk" component is enabled
         internal string DiskSummary = "";    // TrayContext disk summary, e.g. "Диск: синхронизирован" (DiskTraySession.Summary texts)
         internal int DiskFolders = -1;       // number of server folders, -1 = unknown
@@ -41,6 +44,8 @@ namespace RemoteAgents.Launcher
         internal string Title = "", State = "", Detail = "";
         internal Tone Tone;
         internal bool Visible = true;
+        internal bool On, SwitchEnabled;
+        internal string SwitchText = "";
     }
 
     internal sealed class VpnCardView
@@ -101,10 +106,20 @@ namespace RemoteAgents.Launcher
             view.Happier.Detail = OneLine(facts.HappierLabel);
             view.Happier.Tone = facts.HappierConfirmed ? Tone.Ok : facts.HappierVisible ? Tone.Warning : Tone.Off;
             view.Helper.Visible = true;
-            view.Helper.Tone = Json.Bool(control, "ok") ? Tone.Ok : Tone.Warning;
+            view.Helper.On = facts.BridgeEnabled;
+            view.Helper.SwitchEnabled = !facts.BridgeBusy && string.IsNullOrEmpty(facts.Operation);
+            view.Helper.SwitchText = facts.BridgeBusy ? (facts.BridgeEnabled ? "Включается…" : "Выключается…")
+                : "Удалённое управление: " + (facts.BridgeEnabled ? "вкл" : "выкл");
+            view.Helper.Tone = !facts.BridgeEnabled ? Tone.Off : Json.Bool(control, "ok") ? Tone.Ok : Tone.Warning;
             string helperReason = HelperReason(control, transport);
-            view.Helper.State = "Помощник может управлять компьютером: " +
-                (Json.Bool(control, "ok") ? "подключён" : "нет связи — " + helperReason);
+            view.Helper.State = facts.BridgeBusy ? view.Helper.SwitchText
+                : !facts.BridgeEnabled ? "Удалённое управление выключено"
+                : "Помощник может управлять компьютером: " + (Json.Bool(control, "ok") ? "подключён" : "нет связи — " + helperReason);
+            if (facts.BridgeBusy) view.Helper.Tone = Tone.Warning;
+            else if (!string.IsNullOrEmpty(facts.BridgeError)) {
+                view.Helper.Detail = facts.BridgeError;
+                view.Helper.Tone = Tone.Error;
+            }
 
             string vpnError = VpnProblem(facts, vpn);
             if (vpnError.Length > 0)
@@ -122,7 +137,9 @@ namespace RemoteAgents.Launcher
                 view.Banner = Banner(Tone.Error, "Нет связи с сервером. Проверьте подключение к интернету или повторите проверку.", "Повторить", "retry");
             else if (view.Disk.Visible && view.Disk.Tone == Tone.Error)
                 view.Banner = Banner(Tone.Error, "Диск: " + view.Disk.State + ". Проверьте синхронизацию.", "Открыть синхронизацию", "open-sync");
-            else if (view.Helper.Visible && !Json.Bool(control, "ok"))
+            else if (!facts.BridgeBusy && !string.IsNullOrEmpty(facts.BridgeError))
+                view.Banner = Banner(Tone.Error, facts.BridgeError, "Подробнее", "details");
+            else if (view.Helper.Visible && facts.BridgeEnabled && !facts.BridgeBusy && !Json.Bool(control, "ok"))
                 view.Banner = Banner(Tone.Warning, "Помощник не на связи: " + helperReason + ".", "Подробнее", "details");
             else if (view.Happier.Visible && !facts.HappierConfirmed)
                 view.Banner = Banner(Tone.Warning, "Аккаунт Happier не подтверждён. Проверьте подключение аккаунта в настройках.", "Подробнее", "details");

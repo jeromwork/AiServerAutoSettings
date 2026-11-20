@@ -39,7 +39,7 @@ namespace RemoteAgents.Launcher
             var v = view.Vpn;
             Add(b, v.Title, v.State, v.Tone, v.Detail, v.On, v.SwitchEnabled, v.SwitchText, v.PathLink, pathEnabled, dns);
             foreach (var card in new[] { view.Lan, view.Disk, view.Happier, view.Helper })
-                Add(b, card.Title, card.State, card.Tone, card.Detail);
+                Add(b, card.Title, card.State, card.Tone, card.Detail, card.On, card.SwitchEnabled, card.SwitchText);
             return b.ToString();
         }
 

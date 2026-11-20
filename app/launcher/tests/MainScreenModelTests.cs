@@ -22,14 +22,14 @@ namespace RemoteAgents.Launcher
         }
         internal static void Run()
         {
-            Colours(); Banners(); VpnCard(); DiskCard(); AccountsAndHelper(); Reports(); LinkPhases(); SearchingStatus(); DiagnosticSwitches(); RenderGate();
+            Colours(); Banners(); VpnCard(); DiskCard(); AccountsAndHelper(); BridgeCard(); Reports(); LinkPhases(); SearchingStatus(); DiagnosticSwitches(); RenderGate();
             Console.WriteLine("PASS: " + count + " main screen checks");
         }
         // Focused entry point: -p:StartupObject=RemoteAgents.Launcher.MainScreenModelTests.
         // No unrelated transport/service/disk/update suites and no application processes.
         static int Main()
         {
-            Run(); TrayExtrasTests.RunSwitchStatus(); WindowModelTests.Run(); return 0;
+            Run(); return 0;
         }
         static void SearchingStatus()
         {
@@ -339,6 +339,48 @@ namespace RemoteAgents.Launcher
             facts.Control["error"] = "REST JSON transport";
             Check(!MainScreenModel.Build(facts).Helper.State.Contains("REST"), "technical helper reason translated");
         }
+        static void BridgeCard()
+        {
+            var facts = Healthy();
+            var view = MainScreenModel.Build(facts);
+            Check(view.Helper.On && view.Helper.SwitchEnabled && view.Helper.SwitchText == "Удалённое управление: вкл", "enabled bridge offers off switch");
+            facts.BridgeEnabled = false;
+            foreach (var control in new[] { Healthy().Control, Data("{\"ok\":false}"), Data("{}") }) {
+                facts.Control = control;
+                view = MainScreenModel.Build(facts);
+                Check(!view.Helper.On && view.Helper.SwitchEnabled && view.Helper.SwitchText == "Удалённое управление: выкл", "disabled bridge offers on switch regardless of heartbeat");
+                Check(view.Helper.State == "Удалённое управление выключено" && view.Helper.Tone == Tone.Off && !view.Banner.Visible,
+                    "explicit off overrides stale, missing and failed heartbeat without offline banner");
+            }
+            foreach (bool enabled in new[] { false, true }) {
+                facts.BridgeEnabled = enabled; facts.BridgeBusy = true;
+                view = MainScreenModel.Build(facts);
+                string text = enabled ? "Включается…" : "Выключается…";
+                Check(view.Helper.On == enabled && !view.Helper.SwitchEnabled && view.Helper.SwitchText == text && view.Helper.State == text,
+                    "bridge transition shows intent and locks duplicate clicks");
+                Check(view.Helper.Tone == Tone.Warning && !view.Banner.Visible, "pending bridge change suppresses offline banner");
+            }
+            facts.BridgeBusy = false;
+            view = MainScreenModel.Build(facts);
+            Check(view.Helper.Tone == Tone.Warning && view.Banner.Text.StartsWith("Помощник не на связи"), "enabled bridge without heartbeat retains warning");
+            facts.Operation = "применение настроек";
+            Check(!MainScreenModel.Build(facts).Helper.SwitchEnabled, "other mutations lock bridge switch");
+            facts.Operation = "";
+            facts.BridgeError = "Не удалось выключить удалённое управление. Выключение не подтверждено.";
+            view = MainScreenModel.Build(facts);
+            Check(view.Helper.On && view.Helper.SwitchEnabled && view.Helper.Detail == facts.BridgeError && view.Helper.Tone == Tone.Error,
+                "failed off keeps actual intent, explains failure and allows retry");
+            Check(view.Banner.Text == facts.BridgeError, "bridge failure replaces generic offline warning");
+            facts.BridgeEnabled = false;
+            facts.BridgeError = "Не удалось включить удалённое управление.";
+            view = MainScreenModel.Build(facts);
+            Check(!view.Helper.On && view.Helper.State == "Удалённое управление выключено" && view.Banner.Text == facts.BridgeError,
+                "failed on keeps confirmed off state and reports action failure");
+            facts.BridgeError = "";
+            facts.Transport = Data("{\"phase\":\"failed\",\"ok\":false}");
+            Check(MainScreenModel.Build(facts).Banner.Text.StartsWith("Нет связи с сервером"), "disabled bridge does not hide unrelated server failures");
+        }
+
         static void Reports()
         {
             var facts = Healthy();
@@ -397,6 +439,9 @@ namespace RemoteAgents.Launcher
                 Edit("disk tone", v => v.Disk.Tone = v.Disk.Tone == Tone.Error ? Tone.Ok : Tone.Error),
                 Edit("happier title", v => v.Happier.Title += "!"), Edit("happier state", v => v.Happier.State += "!"),
                 Edit("happier detail", v => v.Happier.Detail += "!"),
+                Edit("helper on", v => v.Helper.On = !v.Helper.On),
+                Edit("helper switch enabled", v => v.Helper.SwitchEnabled = !v.Helper.SwitchEnabled),
+                Edit("helper switch text", v => v.Helper.SwitchText += "!"),
                 Edit("helper state", v => v.Helper.State += "!"),
                 Edit("helper tone", v => v.Helper.Tone = v.Helper.Tone == Tone.Error ? Tone.Ok : Tone.Error),
             };
