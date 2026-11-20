@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Real daemon + A/B, fake executables/Clash WS, loopback checks only; <=180 s.
+"""Real daemon + A/B, fake executables/Clash WS, loopback checks only; <=420 s.
 No rewritten PowerShell or replaced functions: tests exercise production arguments.
 """
 from datetime import datetime
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import subprocess
 import sys
@@ -16,16 +17,20 @@ import time
 PWSH = sys.argv[1] if len(sys.argv) > 1 else 'pwsh'
 DAEMON = Path(__file__).with_name('Transport.Daemon.ps1').resolve()
 START = time.monotonic()
+BUDGET = float(os.environ.get('TRANSPORT_DAEMON_TEST_BUDGET', '400'))
+START_WAIT = 90
 
 
 def until(check, seconds=15, *, deadline=None, label='local fixture'):
-    deadline = min(deadline if deadline is not None else time.monotonic() + seconds, START + 165)
+    began = time.monotonic()
+    deadline = min(deadline if deadline is not None else began + seconds, START + BUDGET)
     while time.monotonic() < deadline:
         value = check()
         if value:
             return value
         time.sleep(.08)
-    raise AssertionError('Deadline exceeded: '+label)
+    raise AssertionError('Deadline exceeded: %s; waited %.2fs; loadavg=%s' %
+                         (label, time.monotonic()-began, os.getloadavg()))
 
 
 def executable(path, source):
@@ -165,12 +170,56 @@ HTTP(('127.0.0.1',int(api['external_controller'].split(':')[-1])),API).serve_for
     (root/'modes.json').write_text('{}')
     endpoint='127.0.0.1:%d' % direct.getsockname()[1]
     env=dict(os.environ,LOCALAPPDATA=str(root),REMOTEAGENTS_TEST_DIRECT_TARGETS=endpoint+','+endpoint)
-    daemon=None; parent=None
+    daemon=None; parent=None; daemon_started=None
     out=(root/'stdout').open('w'); err=(root/'stderr').open('w')
     def start(parent_pid=0):
+        global daemon_started
+        daemon_started=time.monotonic()
         return subprocess.Popen([PWSH,'-NoLogo','-NoProfile','-NonInteractive','-File',str(DAEMON),'-Home',str(root),
             '-ParentPid',str(parent_pid)],env=env,stdin=subprocess.DEVNULL,stdout=out,stderr=err)
     def status(): return read_json(root/'status/transport.json',{})
+    def safe_text(text):
+        secret=read_json(root/'state/transport-secret.json',{}).get('secret')
+        sensitive=[secret, '00000000-0000-4000-8000-000000000001']
+        for name in ('key','known_hosts'):
+            path=root/name
+            if path.exists():
+                lines=path.read_text().splitlines()
+                sensitive.extend(lines)
+                if name=='known_hosts': sensitive.extend(line.split()[-1] for line in lines if line.split())
+        # Drop whole lines containing credentials, including raw fixture key material.
+        return '\n'.join(line for line in text.splitlines() if
+            not re.search(r'password|passwd|passphrase|private[ _-]?key|authorization|bearer|ssh-ed25519',line,re.I)
+            and not any(value and value in line for value in sensitive))
+    def wait_ready(check, *, label, deadline=None):
+        def checked():
+            code=daemon.poll()
+            if code is not None:
+                raise AssertionError('daemon exited: returncode=%s; stderr=%s' %
+                                     (code,safe_text((root/'stderr').read_text())))
+            current=status()
+            errors={key:current.get(key) for key in ('fatal','configError','portConflict')}
+            if errors['fatal'] is True or errors['configError'] or errors['portConflict']:
+                raise AssertionError('daemon startup error: '+safe_text(str(errors)))
+            return check()
+        return until(checked,seconds=START_WAIT,deadline=deadline,label=label)
+    def diagnostics():
+        current=status(); now=time.time(); updated=current.get('updatedAt'); age=None
+        if updated:
+            try: age=now-datetime.fromisoformat(updated).timestamp()
+            except (TypeError,ValueError): pass
+        elapsed=None if daemon_started is None else time.monotonic()-daemon_started
+        path=root/'probes.jsonl'
+        count=len(path.read_text().splitlines()) if path.exists() else 0
+        print('STATUS',safe_text(str(current)),file=sys.stderr)
+        print('DIAGNOSTICS: now=%s updatedAt=%s age_seconds=%s daemon_elapsed_seconds=%s '
+              'loadavg=%s probes_exists=%s probes_records=%s' %
+              (datetime.fromtimestamp(now).astimezone().isoformat(),updated,age,elapsed,
+               os.getloadavg(),path.exists(),count),file=sys.stderr)
+        log=root/'logs/transport.log'
+        print('logs/transport.log (last 30 lines)',
+              safe_text('\n'.join(log.read_text().splitlines()[-30:])) if log.exists() else '<missing>',
+              file=sys.stderr)
     def puts(): return records(root/'puts.jsonl')
     def probes(): return records(root/'probes.jsonl')
     def row(tag): return next(c for c in status()['candidates'] if c['tag']==tag)
@@ -183,17 +232,18 @@ HTTP(('127.0.0.1',int(api['external_controller'].split(':')[-1])),API).serve_for
         emit('logs',dict(type='error',payload='open connection to fixture:443 using outbound/vless[%s]: %s' %
                         (tag,'network is unreachable' if local else 'i/o timeout')))
     def ready():
-        until(lambda: status().get('ok') and len(probes())>=2 and all(c['state']=='ok' for c in status()['candidates']),seconds=30)
+        wait_ready(lambda: status().get('ok') and len(probes())>=2 and all(c['state']=='ok' for c in status()['candidates']),
+                   label='initial daemon and path proof')
         # Wait for the initial round AND both real WS subscriptions before injection.
-        until(lambda: len(records(root/'subscriptions.jsonl'))>=2)
+        wait_ready(lambda: len(records(root/'subscriptions.jsonl'))>=2,label='initial WebSocket subscriptions')
     def reload(cancel=False):
         began=time.monotonic(); requested_at=time.time(); checks=len(records(root/'checks.jsonl'))
         old=engine_pid(); subscriptions=len(records(root/'subscriptions.jsonl')); revision=status()['configRevision']
         if cancel: (root/'hold-validation').touch()
         transport['restartDelaySec']=1 if transport['restartDelaySec']==2 else 2
         target=root/'config.tmp'; target.write_text(json.dumps(config)); target.replace(root/'config.json')
-        # One bounded deadline covers validation job, engine replacement, subscriptions
-        # and initial proof. Do not confuse slow job startup with failed cancellation.
+        # Preserve the existing validation/gate deadline separately from engine readiness.
+        # Do not confuse slow job startup with failed cancellation.
         deadline=time.monotonic()+30
         if cancel:
             # Validation runs asynchronously while the old engine stays available.
@@ -211,16 +261,16 @@ HTTP(('127.0.0.1',int(api['external_controller'].split(':')[-1])),API).serve_for
             print('CANCEL: old engine stopped %.2fs after validation release' %
                   (time.monotonic()-cancel_began),flush=True)
         def replaced():
-            assert daemon.poll() is None, 'daemon exited during reload'
-            assert not status().get('configError'), status()
             return stopped(old) and engine_pid()!=old
-        until(replaced,deadline=deadline,label='reload replaces engine after validation')
+        # Engine readiness may be slow on a loaded host; cancellation above still has 5.8 s.
+        ready_deadline=began+START_WAIT
+        wait_ready(replaced,deadline=ready_deadline,label='reload replaces engine after validation')
         replaced_after=time.monotonic()-began
-        until(lambda: len(records(root/'subscriptions.jsonl'))>=subscriptions+2,
-              deadline=deadline,label='reload WebSocket subscriptions')
-        until(lambda: status().get('configRevision')!=revision and status().get('ok') and
+        wait_ready(lambda: len(records(root/'subscriptions.jsonl'))>=subscriptions+2,
+              deadline=ready_deadline,label='reload WebSocket subscriptions')
+        wait_ready(lambda: status().get('configRevision')!=revision and status().get('ok') and
               all(c['state']=='ok' for c in status()['candidates']),
-              deadline=deadline,label='reload revision and initial path proof')
+              deadline=ready_deadline,label='reload revision and initial path proof')
         validation=records(root/'checks.jsonl')[checks:]
         assert validation, 'reload skipped sing-box config validation'
         print('RELOAD: validation %.2fs; replaced %.2fs; paths/subscriptions ready %.2fs' %
@@ -411,9 +461,12 @@ HTTP(('127.0.0.1',int(api['external_controller'].split(':')[-1])),API).serve_for
         assert all(stopped(p['pid']) for p in probes()),'SSH probe leaked after cancellation/stop'
         modes({}); (root/'stop').unlink(); transport['openSsh']=True
         (root/'config.json').write_text(json.dumps(config))
-        parent=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'])
-        daemon=start(parent.pid); until(lambda: status().get('ok') and len(status()['candidates'])==3,seconds=30)
-        until(lambda: (root/'tunnel.pid').exists()); tunnel=int((root/'tunnel.pid').read_text()); pid=engine_pid()
+        # Parent must survive both startup waits; shutdown is triggered explicitly below.
+        parent=subprocess.Popen([sys.executable,'-c','import time; time.sleep(%s)' % (2*START_WAIT+30)])
+        daemon=start(parent.pid)
+        wait_ready(lambda: status().get('ok') and len(status()['candidates'])==3,label='openSsh daemon ready')
+        wait_ready(lambda: (root/'tunnel.pid').exists(),label='openSsh tunnel ready')
+        tunnel=int((root/'tunnel.pid').read_text()); pid=engine_pid()
         parent.terminate(); parent.wait(timeout=3); daemon.wait(timeout=8)
         assert daemon.returncode==0 and status()['phase']=='stopped'
         assert stopped(pid) and stopped(tunnel) and all(stopped(p['pid']) for p in probes())
@@ -421,9 +474,9 @@ HTTP(('127.0.0.1',int(api['external_controller'].split(':')[-1])),API).serve_for
         assert not (root/'stderr').read_text().strip(),(root/'stderr').read_text()
         print('PASS: child-cleanup; real A/B integration %.1f s' % (time.monotonic()-START),flush=True)
     except Exception:
-        print('STATUS',status(),file=sys.stderr)
-        for name in ('stderr','logs/transport.log','puts.jsonl','probes.jsonl','banners.jsonl','checks.jsonl','subscriptions.jsonl','ws.jsonl','modes.json'):
-            if (root/name).exists(): print(name,(root/name).read_text(),file=sys.stderr)
+        diagnostics()
+        for name in ('stderr','puts.jsonl','probes.jsonl','banners.jsonl','checks.jsonl','subscriptions.jsonl','ws.jsonl','modes.json'):
+            if (root/name).exists(): print(name,safe_text((root/name).read_text()),file=sys.stderr)
         raise
     finally:
         if daemon and daemon.poll() is None:

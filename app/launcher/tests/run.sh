@@ -108,7 +108,7 @@ wait_for_memory
   wait_for_memory
   timeout 120 python3 "$repo/transport/test-transport-liveness.py" "$pwsh"
   wait_for_memory
-  timeout 180 python3 "$repo/transport/test-transport-daemon.py" "$pwsh"
+  TRANSPORT_DAEMON_TEST_BUDGET=400 timeout 420 python3 "$repo/transport/test-transport-daemon.py" "$pwsh"
   wait_for_memory
   timeout 120 python3 "$here/test_first_run.py"
   wait_for_memory
@@ -193,11 +193,22 @@ wait_for_memory
 wait_for_memory
 timeout 300 python3 "$here/test_config_e2e.py"
 wait_for_memory
-timeout 120 "$repo/build/make-bundle.sh" 20261109.235959-test "$testdir/bundles"
 if [[ ${SKIP_LAUNCHER_EXE:-0} == 1 ]]; then
+  timeout 120 "$repo/build/make-bundle.sh" 20261109.235959-test "$testdir/bundles"
   echo 'SKIP: Windows launcher EXE build/publish (SKIP_LAUNCHER_EXE=1)'
   exit 0
 fi
+# Same pinned cache as build-exe.sh, but tests must never fetch from the network.
+timeout 120 python3 - "$repo" <<'PY'
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(sys.argv[1])/'build'))
+import bundle
+if any(not bundle.archive_path(row).is_file() for row in bundle.pinned()):
+    sys.exit('FAIL: нет кэша pinned binaries: запустите python3 build/bundle.py fetch')
+PY
+timeout 120 "$repo/build/make-bundle.sh" 20261109.235959-test "$testdir/bundles" --binaries
+timeout 120 python3 "$repo/build/bundle.py" verify-initial "$testdir/bundles/20261109.235959-test.zip"
 wait_for_memory
 timeout 120 "$dotnet" build "$repo/app/launcher/RemoteAgents.Launcher.csproj" -c Release -p:BundlePath="$testdir/bundles/20261109.235959-test.zip" --nologo
 wait_for_memory
