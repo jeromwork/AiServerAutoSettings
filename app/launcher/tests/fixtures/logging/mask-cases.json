@@ -114,5 +114,17 @@
  {
   "in": "KeyError: 'lan_pc_access.py'",
   "out": "KeyError: 'lan_pc_access.py'"
+ },
+ {
+  "in": ".......................................................password=value",
+  "out": ".......................................................password=***"
+ },
+ {
+  "in": "[ 'db.password': 'abc' ]",
+  "out": "[ 'db.password': *** ]"
+ },
+ {
+  "in": "token = abc; next=ok",
+  "out": "token = ***; next=ok"
  }
 ]

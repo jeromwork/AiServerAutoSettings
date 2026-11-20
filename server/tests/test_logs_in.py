@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -68,16 +69,20 @@ class LogsIn(unittest.TestCase):
         self.assertIn(' new ', text)
 
     def test_dangerous_device_names(self):
-        for device, host in (('../x', 'h'), ('a/b', 'h'), ('..', '..'), ('Ноутбук Ева', 'WIN-2'), ('x' * 200, 'h')):
+        self.root = str(Path(self.tmp.name) / 'root')
+        Path(self.root).mkdir()
+        outside_before = set(Path(self.root).parent.iterdir())
+        for device, host in (('../x', 'h'), ('a/b', 'h'), ('..', '..'), ('Ноутбук Ева', 'WIN-2'), ('x' * 200, 'h'), ('Я' * 64, 'Я' * 64)):
             gz, _ = batch([line(1)], device=device, host=host, batch_id='d')
             logs_in.recv(gz, self.root)
         for d in Path(self.root).iterdir():
-            self.assertEqual(d.parent, Path(self.root))
+            self.assertTrue(d.resolve().is_relative_to(Path(self.root).resolve()))
             self.assertTrue(d.is_dir() or d.name == '_receiver.log')
         names = sorted(d.name for d in Path(self.root).iterdir() if d.is_dir())
         self.assertTrue(all('/' not in n and n not in ('.', '..') for n in names), names)
         self.assertIn('Ноутбук_Ева--WIN-2', names)
-        self.assertTrue(all(len(n) <= 64 + 2 + 64 for n in names))
+        self.assertTrue(all(len(n.encode()) <= 64 + 2 + 64 for n in names))
+        self.assertEqual(set(Path(self.root).parent.iterdir()), outside_before)
 
     def test_too_big_and_bad_input(self):
         big = gzip.compress(b'RA-LOGS 1 batch=b device=%s host=h\n@@ launcher fp=aa from=0 to=1 lines=1\n' % b64url('d').encode() + b'x' * (9 * 1024 * 1024))
@@ -104,6 +109,84 @@ class LogsIn(unittest.TestCase):
         self.assertIn('other-2026-11-20.log', names[0])
         self.assertLessEqual(len(self.files()[names[0]].read_text().splitlines()[0]), logs_in.MAX_LINE + 20)
 
+    def test_mask_linear_time(self):
+        for text in ('.' * 8192, '_-' * 4000):
+            logs_in.mask(text)
+            started = time.perf_counter()
+            self.assertEqual(logs_in.mask(text), text)
+            self.assertLess(time.perf_counter() - started, .050)
+
+    def test_overlap_uses_original_bytes(self):
+        # Обрезка длинной строки, пустые строки, CR и неверный UTF-8 не меняют курсор.
+        rows = [b'.' * 12288 + b'\n', b'\n', ('Я' * 5000).encode() + b'\n', b'bad \xff\r\n']
+        header = ('RA-LOGS 1 batch=raw device=%s host=h\n' % b64url('d')).encode()
+        body = b''.join(rows)
+        def raw_batch(body, count):
+            return gzip.compress(header + ('@@ launcher fp=aa from=0 to=%d lines=%d\n' % (len(body), count)).encode() + body)
+        self.assertIn('stored=4', logs_in.recv(raw_batch(body, 4), self.root))
+        self.assertIn('stored=1', logs_in.recv(raw_batch(body + b'new line\n', 5), self.root))
+        text = next(v for k, v in self.files().items() if k.endswith('.log')).read_bytes()
+        self.assertIn(b'new line\n', text)
+        self.assertTrue(all(len(row) <= logs_in.MAX_LINE for row in text.split(b'\n')))
+
+    def test_cursor_shapes_and_controls(self):
+        gz, _ = batch([line(1, rest='msg=ok\x1b[31m\x00\x7f')])
+        header, _ = logs_in.parse_batch(gz)
+        directory = Path(logs_in.device_dir(header, self.root))
+        directory.mkdir(mode=0o700)
+        for value in ([], {'launcher|aa': 'x'}, {'launcher|aa': None}, {'launcher|aa': {}}):
+            (directory / '.cursors.json').write_text(json.dumps(value))
+            self.assertIn('stored=1', logs_in.recv(gz, self.root))
+        text = next(directory.glob('*.log')).read_text()
+        self.assertNotRegex(text, r'[\x00-\x08\x0b-\x1f\x7f]')
+
+    def test_only_complete_segment_headers_and_bounded_offsets(self):
+        for text in ('@@ launcher fp=aa from=0 to=999999999 lines=1', '@@ anything'):
+            gz, _ = batch([text, line(2, 'new')])
+            self.assertIn('stored=2', logs_in.recv(gz, self.root))
+            # Вложенная строка заголовка осталась данными, курсор не отравлен.
+            _, segments = logs_in.parse_batch(gz)
+            self.assertEqual(len(segments), 1)
+            (Path(logs_in.device_dir(logs_in.parse_batch(gz)[0], self.root)) / '.cursors.json').unlink()
+        gz, _ = batch([line(1)])
+        raw = gzip.decompress(gz).replace(b'from=0 to=', b'from=999999999999 to=')
+        with self.assertRaises(logs_in.ReceiveError):
+            logs_in.recv(gzip.compress(raw), self.root)
+
+    def test_no_symlinks_followed(self):
+        gz, _ = batch([line(1)])
+        header, _ = logs_in.parse_batch(gz)
+        directory = Path(logs_in.device_dir(header, self.root))
+        with tempfile.TemporaryDirectory() as outside:
+            target = Path(outside)
+            directory.symlink_to(target, target_is_directory=True)
+            with self.assertRaises(OSError):
+                logs_in.recv(gz, self.root)
+            self.assertEqual(list(target.iterdir()), [])
+            directory.unlink()
+            directory.mkdir()
+            for name in ('.lock', '.cursors.json', '.cursors.json.tmp', 'launcher-2026-11-20.log'):
+                victim = target / 'victim'
+                victim.write_text('untouched')
+                link = directory / name
+                link.unlink(missing_ok=True)
+                link.symlink_to(victim)
+                if name == '.cursors.json':
+                    # Чтение ссылки игнорируется как повреждённый курсор; replace заменяет саму ссылку.
+                    logs_in.recv(gz, self.root)
+                else:
+                    (directory / '.cursors.json').unlink(missing_ok=True)
+                    with self.assertRaises(OSError):
+                        logs_in.recv(gz, self.root)
+                self.assertEqual(victim.read_text(), 'untouched')
+                link.unlink(missing_ok=True)
+
+    def test_zlib_errors_are_bad_gzip(self):
+        with mock.patch.object(logs_in.gzip.GzipFile, 'read', side_effect=logs_in.zlib.error('bad')):
+            with self.assertRaises(logs_in.ReceiveError) as caught:
+                logs_in.parse_batch(gzip.compress(b'x'))
+        self.assertEqual(caught.exception.code, 'bad-gzip')
+
     def test_prune_by_age_and_size(self):
         d = Path(self.root) / 'dev--h'
         d.mkdir()
@@ -126,6 +209,8 @@ class LogsIn(unittest.TestCase):
         run = subprocess.run([sys.executable, '-c', 'import base64;exec(base64.b64decode("%s"))' % code, 'recv'], input=gz, capture_output=True, env=env, timeout=30)
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(run.stdout.decode().strip(), 'OK batch=prod1 stored=2')
+        for path in Path(self.root).rglob('*'):
+            self.assertEqual(path.stat().st_mode & 0o077, 0, str(path))
         bad = subprocess.run([sys.executable, '-c', 'import base64;exec(base64.b64decode("%s"))' % code, 'recv'], input=b'junk', capture_output=True, env=env, timeout=30)
         self.assertEqual(bad.returncode, 2)
         self.assertTrue(bad.stdout.decode().startswith('ERR bad-gzip'))

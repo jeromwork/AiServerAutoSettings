@@ -31,6 +31,19 @@ foreach($c in @([IO.File]::ReadAllText((Join-Path $fx 'mask-cases.json'),$utf8)|
     Assert ($got -ceq [string]$c.out) ('mask: '+$c.in+' -> '+$got)
 }
 
+# Длинные строки без разделителя не должны вызывать квадратичный поиск поля.
+foreach($inputText in @(('.'*8192),('_-'*4000))){
+    $null=Protect-RaLogText $inputText # прогрев JIT
+    $watch=[Diagnostics.Stopwatch]::StartNew()
+    $got=Protect-RaLogText $inputText
+    $watch.Stop()
+    Assert ($got -ceq $inputText -and $watch.Elapsed.TotalMilliseconds -lt 50) ('mask linear <50ms: '+$watch.Elapsed.TotalMilliseconds)
+}
+# Литерал \n, настоящий перенос, кавычки и обратные слеши разбираются за один проход.
+$value='path C:\new\name literal \n quote " and newline'+"`n"+'end'
+$encoded=Format-RaLogLine $now 'INFO' 'transport' 'test' ([ordered]@{msg=$value}) '1234'
+Assert ((ConvertFrom-RaLogLine $encoded).Text -ceq $value) 'quoted msg roundtrip'
+
 # 3. Write-TransportLog: старое событие, новое событие, чужое имя, секрет.
 $work=Join-Path ([IO.Path]::GetTempPath()) ('ra-ralog-'+[guid]::NewGuid().ToString('N').Substring(0,8))
 [void][IO.Directory]::CreateDirectory($work)

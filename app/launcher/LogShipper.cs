@@ -16,7 +16,7 @@ namespace RemoteAgents.Launcher
         internal string Err = "", Stderr = "", Path = "";
         internal int Exit;
     }
-    internal interface ILogSender { SendResult Send(byte[] gz, string batchId, string path); }
+    internal interface ILogSender { SendResult Send(byte[] gz, string batchId, string path, int timeoutMs); }
 
     // Отправка журналов на сервер пачками. Курсор двигается только после подтверждения «OK» (docs/LOGS.md).
     internal sealed class LogShipper
@@ -35,7 +35,8 @@ namespace RemoteAgents.Launcher
         readonly Func<DateTime> utcNow;
         readonly object gate = new object();
         int running, failures;
-        DateTime nextAt = DateTime.MinValue, lastOkLog = DateTime.MinValue;
+        DateTime nextAt = DateTime.MinValue;
+        readonly HashSet<string> gaps = new HashSet<string>();
         bool kicked;
 
         internal LogShipper(string logsDir, string stateDir, ILogSender sender, Action<LogLevel, string, string[]> log, string device, string host, string version, Func<DateTime> utcNow = null)
@@ -48,28 +49,35 @@ namespace RemoteAgents.Launcher
         internal DateTime NextAt { get { return nextAt; } }
 
         // ---- расписание ------------------------------------------------------------------
-        internal void Kick() { lock (gate) { kicked = true; var soon = utcNow().AddSeconds(5); if (nextAt > soon) nextAt = soon; } }
+        internal void Kick() { lock (gate) { if (failures > 0) return; kicked = true; var soon = utcNow().AddSeconds(5); if (nextAt > soon) nextAt = soon; } }
         // Раз в секунду из Tick: дешёвое решение; сама отправка — в фоне.
         internal void Tick()
         {
             if (utcNow() < nextAt) return;
             if (Interlocked.CompareExchange(ref running, 1, 0) != 0) return;
-            System.Threading.Tasks.Task.Run(() => { try { Cycle(false); } catch (Exception e) { log(LogLevel.Warn, "ship.error", new[] { "err", e.GetType().Name }); } finally { Interlocked.Exchange(ref running, 0); } });
+            System.Threading.Tasks.Task.Run(() => { try { Cycle(false, DateTime.MaxValue); } catch (Exception e) { log(LogLevel.Warn, "ship.error", new[] { "err", e.GetType().Name }); } finally { Interlocked.Exchange(ref running, 0); } });
         }
         // При выходе: синхронно, не дольше timeout.
         internal void Flush(TimeSpan timeout)
         {
             var end = DateTime.UtcNow + timeout;
             while (Interlocked.CompareExchange(ref running, 1, 0) != 0) { if (DateTime.UtcNow >= end) return; Thread.Sleep(50); }
-            try { Cycle(true); } catch { } finally { Interlocked.Exchange(ref running, 0); }
+            // Даже задержка диска или ошибочный sender не держат UI дольше общего срока.
+            var flush = System.Threading.Tasks.Task.Run(() => {
+                try { Cycle(true, end); } catch { } finally { Interlocked.Exchange(ref running, 0); }
+            });
+            int left = Remaining(end);
+            if (left > 0) flush.Wait(left);
         }
         internal static int DelaySeconds(int failures) { return failures <= 0 ? IntervalSec : Backoff[Math.Min(failures, Backoff.Length) - 1]; }
 
         // Один цикл: до 8 пачек. Возвращает число отправленных пачек (для тестов).
-        internal int Cycle(bool flushing)
+        internal int Cycle(bool flushing, DateTime? deadline = null)
         {
+            var end = deadline ?? (flushing ? DateTime.UtcNow.AddSeconds(5) : DateTime.MaxValue);
+            lock (gate) { kicked = false; }
             int sent = 0; long bytes = 0; var watch = System.Diagnostics.Stopwatch.StartNew(); string path = "";
-            for (int n = 0; n < MaxBatchesPerCycle; n++) {
+            for (int n = 0; n < (flushing ? 2 : MaxBatchesPerCycle) && Remaining(end) > 0; n++) {
                 var cursors = LoadCursors();
                 var segments = Collect(cursors);
                 if (segments.Count == 0) break;
@@ -77,10 +85,10 @@ namespace RemoteAgents.Launcher
                 byte[] gz = Pack(batchId, segments);
                 SendResult result = null; var failed = new List<SendResult>();
                 foreach (string p in Paths) {
-                    result = sender.Send(gz, batchId, p); result.Path = p;
+                    int left = Remaining(end); if (left <= 0) break;
+                    result = sender.Send(gz, batchId, p, Math.Min(20000, left)); result.Path = p;
                     if (result.Ok) break;
                     failed.Add(result);
-                    if (flushing) break;
                 }
                 if (result == null || !result.Ok) {
                     failures++; int delay = DelaySeconds(failures);
@@ -91,13 +99,14 @@ namespace RemoteAgents.Launcher
                 Advance(cursors, segments);
                 failures = 0; sent++; bytes += gz.Length; path = result.Path;
             }
-            lock (gate) { kicked = false; nextAt = utcNow().AddSeconds(IntervalSec); }
+            lock (gate) { nextAt = utcNow().AddSeconds(kicked ? 5 : IntervalSec); kicked = false; }
             if (sent > 0) {
-                var now = utcNow(); bool loud = now - lastOkLog >= TimeSpan.FromMinutes(10); if (loud) lastOkLog = now;
-                log(loud ? LogLevel.Info : LogLevel.Debug, "ship.ok", new[] { "path", path, "batches", sent.ToString(CultureInfo.InvariantCulture), "bytes", bytes.ToString(CultureInfo.InvariantCulture), "ms", watch.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture) });
+                log(LogLevel.Debug, "ship.ok", new[] { "path", path, "batches", sent.ToString(CultureInfo.InvariantCulture), "bytes", bytes.ToString(CultureInfo.InvariantCulture), "ms", watch.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture) });
             }
             return sent;
         }
+        static int Remaining(DateTime end)
+        { return (int)Math.Max(0, Math.Min(int.MaxValue, (end - DateTime.UtcNow).TotalMilliseconds)); }
         static string Tail(string text) { text = (text ?? "").Trim(); return text.Length > 300 ? text.Substring(text.Length - 300) : text; }
 
         // ---- курсоры -----------------------------------------------------------------------
@@ -163,8 +172,8 @@ namespace RemoteAgents.Launcher
                     for (int i = files.Length - 1; i >= 0 && found < 0; i--) {
                         try { int actual; if (new FileInfo(files[i]).Length >= cursor.FpLen && Fingerprint(files[i], cursor.FpLen, out actual) == cursor.Fp && actual == cursor.FpLen) found = i; } catch { }
                     }
-                    if (found < 0) { log(LogLevel.Warn, "ship.gap", new[] { "stream", stream, "lost", "unknown" }); }
-                    else { startIndex = found; startOffset = cursor.Off; }
+                    if (found < 0) { if (gaps.Add(stream + "|" + cursor.Fp)) log(LogLevel.Warn, "ship.gap", new[] { "stream", stream, "lost", "unknown" }); }
+                    else { gaps.RemoveWhere(g => g.StartsWith(stream + "|", StringComparison.Ordinal)); startIndex = found; startOffset = cursor.Off; }
                 }
                 for (int i = startIndex; i < files.Length && budget > 0; i++) {
                     long offset = i == startIndex ? startOffset : 0;

@@ -114,6 +114,7 @@ namespace RemoteAgents.Launcher
         {
             try {
                 if (string.IsNullOrEmpty(dir)) return;
+                if (level == LogLevel.Debug && comp == "ship") return; // Отправщик не создаёт себе новые данные.
                 AppendLine(dir, stream, Format(Clock(), level, comp, evt, fields, Session));
             } catch { /* Журнал не должен ронять работу. */ }
         }

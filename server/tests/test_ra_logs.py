@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -24,6 +25,7 @@ SAMPLE = '''\
 2026-11-20T09:33:00.000Z 12:33:00.000+03:00 WARN  core      core.exit      s=dddd code=1 ms_alive=5000 tail="FATAL boom\\nsecond"
 2026-11-20T09:34:00.000Z 12:34:00.000+03:00 WARN  ship      ship.gap       s=aaaa stream=core lost=unknown
 2026-11-20T09:35:00.000Z old-format-event some text here
+2026-11-20T09:36:00.000Z 12:36:00.000+03:00 ERROR launcher launcher.failed s=aaaa err=example
 this line is not a log line
 '''
 
@@ -63,7 +65,7 @@ class RaLogs(unittest.TestCase):
     def test_list(self):
         out = self.run_tool('list')
         self.assertIn('Компьютер--WIN-1', out)
-        self.assertIn('ошибка: -', out) if 'ERROR' not in SAMPLE else None
+        self.assertIn('ошибка: 2026-11-20T09:36:00.000Z launcher.failed', out)
 
     def test_show_filters(self):
         out = self.run_tool('show', 'win-1', '--hours', '2', '--comp', 'net', '--level', 'WARN')
@@ -87,6 +89,37 @@ class RaLogs(unittest.TestCase):
         self.assertIn('код 1', out)
         self.assertIn('пропусков: 1', out)
         self.assertIn('Ступень отказа: 4 port-closed', out)
+
+    def test_latest_failure_wins_across_groups(self):
+        directory = Path(self.tmp.name) / 'Компьютер--WIN-1'
+        with (directory / 'launcher-2026-11-20.log').open('a') as handle:
+            handle.write('2026-11-20T09:40:00Z WARN vpn vpn.on.step att=on-later step=8 result=fail reason=http-fail\n')
+        self.assertIn('Ступень отказа: 8 http-fail', self.run_tool('diag', 'WIN-1'))
+
+    def test_fractional_time_sort_and_huge_hours_and_log_directory(self):
+        directory = Path(self.tmp.name) / 'Компьютер--WIN-1'
+        (directory / 'core-2026-11-20.log').mkdir()
+        with (directory / 'launcher-2026-11-20.log').open('a') as handle:
+            handle.write('2026-11-20T09:50:00Z INFO net first msg=ok\n')
+            handle.write('2026-11-20T09:50:00.100Z INFO net second msg=ok\x1b[31m\x7f\n')
+        output = self.run_tool('show', 'WIN-1', '--hours', '1e12')
+        self.assertLess(output.index(' first '), output.index(' second '))
+        self.assertNotIn('\x1b', output)
+        self.assertNotIn('\x7f', output)
+        self.run_tool('diag', 'WIN-1', '--hours', '1e12')
+        self.run_tool('list')
+
+    def test_last_error_does_not_read_older_files(self):
+        directory = Path(self.tmp.name) / 'Компьютер--WIN-1'
+        old = directory / 'core-2026-11-19.log'
+        old.write_text('2026-11-19T23:59:00Z ERROR core older msg=error\n')
+        module = load()
+        original = module.events_in_file
+        def checked(path, stream):
+            self.assertNotEqual(Path(path), old)
+            return original(path, stream)
+        with mock.patch.object(module, 'events_in_file', side_effect=checked):
+            self.assertIn('launcher.failed', module.last_error(str(directory)))
 
 
 if __name__ == '__main__':

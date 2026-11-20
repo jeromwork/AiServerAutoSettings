@@ -748,8 +748,9 @@ namespace RemoteAgents.Launcher
         void FlushLogs()
         {
             try {
+                var end = DateTime.UtcNow.AddSeconds(5);
                 if (mirror != null) { var pull = Task.Run(() => { try { mirror.Pull(); } catch { } }); pull.Wait(3000); }
-                if (shipper != null) shipper.Flush(TimeSpan.FromSeconds(5));
+                if (shipper != null) shipper.Flush(end > DateTime.UtcNow ? end - DateTime.UtcNow : TimeSpan.Zero);
             } catch { }
         }
         void SignalVpnStop()
@@ -955,17 +956,18 @@ namespace RemoteAgents.Launcher
         protected override void ExitThreadCore()
         {
             if (closing) return;
-            if (netHelper != null) netHelper.Dispose();
             bool preserveVpn = RestartRequested && keepVpnOnRestart;
-            if (!preserveVpn) try { Files.Atomic(Path.Combine(home, "state/vpn.stop"), "stop\n"); } catch { log.Write("vpn.stop.failed"); }
             closing = true; timer.Stop(); stop.Cancel(); BackgroundWork.Disk.Stop();
             if (diskExplorer != null) { diskExplorer.Dispose(); diskExplorer.Wait(3500); }
             if (mainWindow != null && !mainWindow.IsDisposed) mainWindow.Unload();
             lock (pipeGate) { if (server != null) server.Dispose(); }
+            log.Write("launcher.exit"); FlushLogs();
+            if (!preserveVpn) try { Files.Atomic(Path.Combine(home, "state/vpn.stop"), "stop\n"); } catch { log.Write("vpn.stop.failed"); }
+            if (netHelper != null) netHelper.Dispose();
             try { StopManagedComponents(); } catch { log.Write("components.stop.failed"); }
             foreach (var r in runtimes) r.Dispose(preserveVpn); foreach (var job in actionJobs) job.Dispose();
             try { WriteStatus(); } catch { log.Write("status.write.failed"); }
-            FlushLogs(); log.Write("launcher.exit"); icon.Visible = false; icon.Dispose(); timer.Dispose();
+            icon.Visible = false; icon.Dispose(); timer.Dispose();
             green.Dispose(); yellow.Dispose(); red.Dispose(); dispatch.Dispose(); base.ExitThreadCore();
         }
     }

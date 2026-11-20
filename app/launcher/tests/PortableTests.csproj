@@ -60,6 +60,7 @@
     <Compile Include="../LogMask.cs" />
     <Compile Include="../NetLadder.cs" />
     <Compile Include="../LogShipper.cs" />
+    <Compile Include="../LogShipper.Ssh.cs" />
     <Compile Include="../HelperLogMirror.cs" />
     <Compile Include="LoggingTests.cs" />
     <Compile Include="../LanTun.cs" />

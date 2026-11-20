@@ -29,7 +29,7 @@ namespace RemoteAgents.Launcher
 
         internal static int Run(string[] args)
         {
-            Golden(); Mask(); Rotation(); Encoding_(); JournalMapping(); Conflicts(); Ladder(); HelperEvents(); Protocol(); CorePump(); Shipper(); Mirror();
+            Golden(); Mask(); Rotation(); Encoding_(); JournalMapping(); Conflicts(); Ladder(); HelperEvents(); Protocol(); CorePump(); Shipper(); ShipperRisks(); SshSender(); Mirror();
             Console.WriteLine("PASS: Logging " + count + " checks");
             return 0;
         }
@@ -61,6 +61,11 @@ namespace RemoteAgents.Launcher
             var cases = Json.Array(Json.Parse(File.ReadAllText(Path.Combine(Fixtures(), "mask-cases.json"), Encoding.UTF8))).Select(Json.Map).ToArray();
             Check(cases.Length >= 15, "mask case count");
             foreach (var c in cases) { string got = LogMask.Clean(Json.Str(c, "in")); Check(got == Json.Str(c, "out"), "mask [" + Json.Str(c, "in") + "] -> [" + got + "]"); }
+            foreach (string input in new[] { new string('.', 8192), string.Concat(Enumerable.Repeat("_-", 4000)) }) {
+                LogMask.Clean(input); // JIT вне измерения
+                var watch = System.Diagnostics.Stopwatch.StartNew(); string got = LogMask.Clean(input); watch.Stop();
+                Check(got == input && watch.Elapsed.TotalMilliseconds < 50, "mask 8 KiB <50 ms: " + watch.Elapsed.TotalMilliseconds);
+            }
             Check(LogMask.Clean("x SECRETVALUE y", new[] { "SECRETVALUE" }) == "x *** y", "known secret values are hidden");
             RaLog.Secrets = () => new[] { "HIDDEN-VALUE" };
             try {
@@ -262,9 +267,12 @@ namespace RemoteAgents.Launcher
         {
             internal readonly List<string> Texts = new List<string>(); internal readonly List<string> PathsTried = new List<string>();
             internal bool FailChannel, FailDirect;
-            public SendResult Send(byte[] gz, string batchId, string path)
+            internal bool IgnoreTimeout; internal int SleepMs; internal Action DuringSend; internal readonly List<int> Timeouts = new List<int>();
+            public SendResult Send(byte[] gz, string batchId, string path, int timeoutMs)
             {
-                PathsTried.Add(path);
+                PathsTried.Add(path); Timeouts.Add(timeoutMs);
+                if (DuringSend != null) DuringSend();
+                if (SleepMs > 0) { System.Threading.Thread.Sleep(IgnoreTimeout ? SleepMs : Math.Min(SleepMs, timeoutMs)); if (timeoutMs < SleepMs) return new SendResult { Err = "timeout" }; }
                 if ((path == "channel" && FailChannel) || (path == "direct" && FailDirect)) return new SendResult { Err = "ssh-exit", Exit = 255, Stderr = "refused" };
                 using (var ms = new MemoryStream(gz)) using (var z = new GZipStream(ms, CompressionMode.Decompress)) using (var r = new StreamReader(z, Encoding.UTF8)) Texts.Add(r.ReadToEnd());
                 return new SendResult { Ok = true };
@@ -294,6 +302,7 @@ namespace RemoteAgents.Launcher
                 Check(shipper.Cycle(false) == 0 && !File.Exists(Path.Combine(state, "log-ship.json")), "cursor does not move without OK");
                 Check(sender.PathsTried.SequenceEqual(new[] { "channel", "direct" }) && events.Any(e => e.StartsWith("ship.failed path,channel")) && events.Any(e => e.StartsWith("ship.failed path,direct")), "channel then direct are tried and logged");
                 Check(shipper.FailureCount == 1 && (shipper.NextAt - clock).TotalSeconds == 60, "backoff 60 s");
+                shipper.Kick(); Check((shipper.NextAt - clock).TotalSeconds == 60, "ERROR cannot shorten failure backoff");
                 shipper.Cycle(false); Check((shipper.NextAt - clock).TotalSeconds == 120, "backoff 120 s");
                 shipper.Cycle(false); shipper.Cycle(false); Check((shipper.NextAt - clock).TotalSeconds == 300 && LogShipper.DelaySeconds(9) == 300, "backoff stops at 300 s");
                 sender.FailChannel = true; sender.FailDirect = false; sender.Texts.Clear(); sender.PathsTried.Clear();
@@ -313,10 +322,14 @@ namespace RemoteAgents.Launcher
                 sender.Texts.Clear();
                 shipper.Cycle(false);
                 string all = string.Join("\n", sender.Texts);
-                Check(Lines(all) == 4 && all.Contains("n=5") && all.Contains("n=8") && !all.Contains("n=4 ") && !all.Contains("n=3 "), "rotation: rest of the old file plus the new file, no duplicates");
+                Check(Lines(all) == 4 && all.Contains("n=5") && all.Contains("n=8") && !all.Contains("n=4\n") && !all.Contains("n=3\n"), "rotation: rest of the old file plus the new file, no duplicates");
                 // Потеря: отпечаток неизвестен.
                 File.WriteAllText(Path.Combine(state, "log-ship.json"), "{\"streams\":{\"launcher\":{\"fp\":\"deadbeef\",\"fpLen\":10,\"off\":\"5\"}}}");
                 events.Clear(); sender.Texts.Clear();
+                sender.FailChannel = sender.FailDirect = true;
+                shipper.Cycle(false); shipper.Cycle(false);
+                Check(events.Count(e => e.StartsWith("ship.gap")) == 1, "one ship.gap per missing fingerprint across retries");
+                sender.FailChannel = sender.FailDirect = false;
                 shipper.Cycle(false);
                 Check(events.Any(e => e.StartsWith("ship.gap stream,launcher,lost,unknown")) && sender.Texts.Count == 1, "unknown fingerprint gives ship.gap and restarts from the oldest file");
                 // Лимит пачки 512 КБ.
@@ -329,6 +342,64 @@ namespace RemoteAgents.Launcher
                 WriteLog(Path.Combine(logs, "core.log"), 0, 80000, true);
                 sender.Texts.Clear();
                 Check(shipper.Cycle(false) == 8, "at most eight batches per cycle");
+            } finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+
+        static void SshSender()
+        {
+            var source = new[] { "-o", "ConnectTimeout=15", "-o", "StrictHostKeyChecking=yes", "-n", "-p", "2222", "user@server.example" };
+            var args = SshLogSender.BuildArguments(source, "channel-alias", "c2NyaXB0");
+            Check(args.Contains("HostKeyAlias=channel-alias") && args.Contains("user@server.example") && args.Contains("2222") && !args.Contains("-n"), "direct SSH keeps alias, server and port, accepts stdin");
+            Check(Array.IndexOf(args, "ConnectTimeout=8") < Array.IndexOf(args, "ConnectTimeout=15"), "ship timeout precedes base timeout");
+            string home = Temp("ssh-source");
+            try {
+                var update = new Dictionary<string, object> { { "args", source }, { "hostKeyAlias", "channel-alias" }, { "viaLocalPort", 2345 } };
+                var channel = SshSource.Load(Configuration.ForUpdate(Json.Encode(update)), home);
+                update.Remove("viaLocalPort");
+                var direct = SshSource.Load(Configuration.ForUpdate(Json.Encode(update)), home);
+                var directArgs = SshLogSender.BuildArguments(direct.Args, direct.HostKeyAlias, "script");
+                Check(channel.HostKeyAlias == direct.HostKeyAlias && directArgs.Contains("HostKeyAlias=channel-alias") && directArgs.Contains("user@server.example") && directArgs.Contains("2222") && !directArgs.Contains("2345") && !directArgs.Contains("-n"), "direct config preserves channel alias and original remote port");
+            } finally { Directory.Delete(home, true); }
+            string id = Guid.NewGuid().ToString("N"), ok = "OK batch=" + id + " stored=12";
+            Check(SshLogSender.ValidReply(0, ok + "\n", id) && SshLogSender.ValidReply(0, ok, id), "exact successful acknowledgement");
+            foreach (string bad in new[] { "OK batch=foreign stored=1", ok + "extra", ok + "\nextra\n", "\n" + ok, ok + "\n\n", "ERR failed" })
+                Check(!SshLogSender.ValidReply(0, bad, id), "reject malformed/foreign acknowledgement");
+            Check(!SshLogSender.ValidReply(255, ok, id), "nonzero exit rejects OK");
+        }
+
+        static void ShipperRisks()
+        {
+            string dir = Temp("ship-risks"), logs = Path.Combine(dir, "logs"), state = Path.Combine(dir, "state");
+            Directory.CreateDirectory(logs); Directory.CreateDirectory(state);
+            try {
+                var sender = new FakeSender();
+                var shipper = new LogShipper(logs, state, sender,
+                    (level, evt, kv) => RaLog.WriteTo(logs, "launcher", level, "ship", evt, RaLog.Pairs(kv)), "device", "host", "1");
+                WriteLog(Path.Combine(logs, "launcher.log"), 0, 3, true);
+                Check(shipper.Cycle(false) == 1, "success through actual RaLog writer");
+                sender.Texts.Clear();
+                Check(shipper.Cycle(false) == 0 && sender.Texts.Count == 0, "ship DEBUG never feeds the next cycle");
+                RaLog.WriteTo(logs, "launcher", LogLevel.Debug, "ship", "ship.test", null);
+                Check(!File.ReadAllText(Path.Combine(logs, "launcher.log")).Contains("ship.test"), "RaLog filters ship DEBUG");
+                WriteLog(Path.Combine(logs, "launcher.log"), 3, 1, false);
+                sender.DuringSend = () => shipper.Kick();
+                shipper.Cycle(false);
+                Check((shipper.NextAt - DateTime.UtcNow).TotalSeconds <= 5.1, "Kick during successful cycle schedules +5s");
+                sender.DuringSend = null;
+                WriteLog(Path.Combine(logs, "launcher.log"), 4, 1, false);
+                sender.FailChannel = true; sender.PathsTried.Clear();
+                shipper.Flush(TimeSpan.FromSeconds(5));
+                Check(sender.PathsTried.SequenceEqual(new[] { "channel", "direct" }), "Flush can fall back to direct before stopping components");
+                sender.FailChannel = false;
+                // Две пачки по 3 с: второй sender получает только оставшиеся ~2 с.
+                WriteLog(Path.Combine(logs, "core.log"), 0, 18000, true);
+                sender.SleepMs = 3000; sender.IgnoreTimeout = true; sender.PathsTried.Clear(); sender.Timeouts.Clear(); sender.Texts.Clear();
+                var watch = System.Diagnostics.Stopwatch.StartNew();
+                shipper.Flush(TimeSpan.FromSeconds(5)); watch.Stop();
+                Check(watch.Elapsed.TotalSeconds < 6, "Flush(5s) is bounded with slow sender: " + watch.Elapsed.TotalSeconds);
+                Check(sender.Texts.Count <= 2 && sender.Timeouts.Count == 2 && sender.Timeouts[1] < 2500, "Flush sends at most two batches with shared remaining time");
+                // Дождаться завершения фоновой уборки без ещё одного цикла.
+                System.Threading.Thread.Sleep(1200);
             } finally { try { Directory.Delete(dir, true); } catch { } }
         }
 

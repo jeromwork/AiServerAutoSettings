@@ -18,6 +18,9 @@ import os
 import re
 import sys
 import time
+import zlib
+import stat
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 MAX_UNPACKED = 8 * 1024 * 1024
@@ -40,7 +43,7 @@ _PUBKEY = re.compile(r'ssh-(ed25519|rsa) AAAA[A-Za-z0-9+/=]+')
 _USERINFO = re.compile(r'://[^/\s@]+@')
 _BASIC = re.compile(r'(Authorization[:=]\s*)Basic\s+\S+', re.I)
 _BEARER = re.compile(r'Bearer\s+[A-Za-z0-9._~+/=-]+', re.I)
-_FIELD = re.compile(r'''(?<![A-Za-z0-9])(["']?)([A-Za-z0-9_.-]+)\1(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;&"']+)''')
+_FIELD = re.compile(r'''(?<![A-Za-z0-9_.-])(["']?)([A-Za-z0-9_.-]{1,64})\1(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;&"']+)''')
 _UUID = re.compile(r'\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b')
 _BLOB = re.compile(r'[A-Za-z0-9+/=_-]{41,}')
 _SUBSTR = re.compile(r'token|password|passwd|passphrase|secret|authorization|cookie|uuid', re.I)
@@ -79,9 +82,9 @@ def mask(text):
 
 # ---- разбор ----
 def safe(value):
-    out = ''.join(c if (c.isalpha() or c.isdigit() or c in '-_.') else '_' for c in value)[:64]
+    out = ''.join(c if (c.isalpha() or c.isdigit() or c in '-_.') else '_' for c in value).encode('utf-8')[:64].decode('utf-8', 'ignore')
     if not out.strip('.'):
-        out = '_' + out.replace('.', '_')
+        out = '_' + out.replace('.', '_')[:63]
     return out
 
 
@@ -93,17 +96,16 @@ def _b64url_decode(text):
 
 
 def parse_batch(raw):
-    """raw — байты gzip. Возвращает (header, segments); segment = dict(stream, fp, from, to, lines[list[str]])."""
+    """raw — байты gzip. Возвращает (header, segments); segment = dict(stream, fp, from, to, lines[list[(raw_bytes, source_size)]])."""
     try:
         with gzip.GzipFile(fileobj=io.BytesIO(raw)) as handle:
             data = handle.read(MAX_UNPACKED + 1)
-    except (OSError, EOFError):
+    except (OSError, EOFError, zlib.error):
         raise ReceiveError('bad-gzip', 'not a gzip stream')
     if len(data) > MAX_UNPACKED:
         raise ReceiveError('too-big', 'batch is larger than %d bytes' % MAX_UNPACKED)
-    text = data.decode('utf-8', 'replace')
-    rows = text.split('\n')
-    head = rows[0].split(' ')
+    rows = data.split(b'\n')
+    head = rows[0].decode('utf-8', 'replace').split(' ')
     if len(head) < 2 or head[0] != 'RA-LOGS' or head[1] != '1':
         raise ReceiveError('bad-header', 'expected RA-LOGS 1')
     header = {}
@@ -119,18 +121,28 @@ def parse_batch(raw):
     header['device_name'] = _b64url_decode(header['device'])
     segments = []
     current = None
-    for row in rows[1:]:
-        if row.startswith('@@ '):
-            fields = row[3:].split(' ')
-            attrs = dict(p.split('=', 1) for p in fields[1:] if '=' in p)
-            stream = fields[0] if fields and fields[0] in STREAMS else 'other'
-            try:
-                current = {'stream': stream, 'fp': re.sub(r'[^0-9a-fA-F]', '', attrs.get('fp', ''))[:64], 'from': int(attrs.get('from', '0')), 'to': int(attrs.get('to', '0')), 'lines': []}
-            except ValueError:
-                raise ReceiveError('bad-segment', 'bad offsets')
+    # Разбираем исходные байты: пустые строки и неверный UTF-8 тоже занимают смещения.
+    segment_header = re.compile(rb'@@ ([^\s]+) fp=([0-9a-fA-F]{1,64}) from=([0-9]+) to=([0-9]+) lines=([0-9]+)')
+    for index, row in enumerate(rows[1:], 1):
+        if index == len(rows) - 1 and row == b'':
+            break  # конечный разделитель, не дополнительная пустая строка
+        m = segment_header.fullmatch(row)
+        # Заголовок распознаётся только вне заявленного тела предыдущего сегмента.
+        if m and (current is None or len(current['lines']) >= current['count']):
+            stream, fp, start, end, count = m.groups()
+            start, end, count = int(start), int(end), int(count)
+            if end < start or end - start > len(data) or count > len(data):
+                raise ReceiveError('bad-segment', 'bad offsets or line count')
+            stream = stream.decode('ascii', 'replace')
+            current = {'stream': stream if stream in STREAMS else 'other', 'fp': fp.decode('ascii'),
+                       'from': start, 'to': end, 'count': count, 'lines': []}
             segments.append(current)
-        elif current is not None and row != '':
-            current['lines'].append(row[:MAX_LINE])
+        elif current is not None:
+            size = len(row) + (1 if index < len(rows) - 1 else 0)
+            current['lines'].append((row, size))
+    for seg in segments:
+        if len(seg['lines']) != seg['count'] or sum(size for _, size in seg['lines']) != seg['to'] - seg['from']:
+            raise ReceiveError('bad-segment', 'body does not match offsets or line count')
     return header, segments
 
 
@@ -147,46 +159,77 @@ def device_dir(header, root=None):
     return os.path.join(root or _root(), safe(header['device_name']) + '--' + safe(header['host']))
 
 
+_CONTROLS = re.compile(r'[\x00-\x08\x0b-\x1f\x7f]')
+
+
+@contextmanager
+def private_directory(path):
+    """Открывает каждый компонент через dir_fd/O_NOFOLLOW, включая родителей корня."""
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for name in os.path.abspath(path).split(os.sep):
+            if not name:
+                continue
+            try:
+                os.mkdir(name, mode=0o700, dir_fd=fd)
+            except FileExistsError:
+                pass
+            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def open_private(directory_fd, name, mode):
+    flags = {'a': os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+             'w': os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 'r': os.O_RDONLY}[mode[0]]
+    fd = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=directory_fd)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise OSError('not a regular log file')
+    return os.fdopen(fd, mode, **({} if 'b' in mode else {'encoding': 'utf-8'}))
+
+
 def store(header, segments, root=None):
-    """Дедупликация по курсорам stream+fp -> max to; запись append+fsync, затем атомарное обновление курсоров."""
+    """Смещения относятся к исходным байтам; маскирование и обрезка выполняются после дедупликации."""
     directory = device_dir(header, root)
-    os.makedirs(directory, exist_ok=True)
     today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     stored = 0
-    with open(os.path.join(directory, '.lock'), 'a') as lock:
+    with private_directory(directory) as dfd, open_private(dfd, '.lock', 'a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        cursor_file = os.path.join(directory, '.cursors.json')
         try:
-            with open(cursor_file, encoding='utf-8') as handle:
+            with open_private(dfd, '.cursors.json', 'r') as handle:
                 cursors = json.load(handle)
         except (OSError, ValueError):
+            cursors = {}
+        if not isinstance(cursors, dict):
             cursors = {}
         opened = {}
         try:
             for seg in segments:
                 key = seg['stream'] + '|' + seg['fp']
-                saved = int(cursors.get(key, 0))
+                try:
+                    saved = max(0, int(cursors.get(key, 0)))
+                except (ValueError, TypeError, OverflowError):
+                    saved = 0
                 if seg['to'] <= saved:
                     continue
-                lines = seg['lines']
-                if seg['from'] < saved:
-                    # Частичное перекрытие: отбрасываем уже принятые байты (границы смещений — концы строк).
-                    skip = saved - seg['from']
-                    consumed = 0
-                    kept = []
-                    for line in lines:
-                        size = len(line.encode('utf-8')) + 1
-                        if consumed >= skip:
-                            kept.append(line)
-                        consumed += size
-                    lines = kept
-                for line in lines:
-                    line = mask(line)
+                consumed = seg['from']
+                for raw, size in seg['lines']:
+                    offset = consumed
+                    consumed += size
+                    if offset < saved:
+                        continue
+                    # Сначала маскируем: обрезка не должна оставить часть длинного секрета.
+                    line = _CONTROLS.sub('', mask(raw.decode('utf-8', 'replace')))
+                    encoded = line.encode('utf-8')[:MAX_LINE].decode('utf-8', 'ignore').encode('utf-8')
                     name = '%s-%s.log' % (seg['stream'], _line_date(line, today))
                     handle = opened.get(name)
                     if handle is None:
-                        handle = opened[name] = open(os.path.join(directory, name), 'ab')
-                    handle.write(line.encode('utf-8') + b'\n')
+                        handle = opened[name] = open_private(dfd, name, 'ab')
+                    handle.write(encoded + b'\n')
                     stored += 1
                 cursors[key] = max(saved, seg['to'])
             for handle in opened.values():
@@ -195,12 +238,11 @@ def store(header, segments, root=None):
         finally:
             for handle in opened.values():
                 handle.close()
-        tmp = cursor_file + '.tmp'
-        with open(tmp, 'w', encoding='utf-8') as handle:
+        with open_private(dfd, '.cursors.json.tmp', 'w') as handle:
             json.dump(cursors, handle)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp, cursor_file)
+        os.replace('.cursors.json.tmp', '.cursors.json', src_dir_fd=dfd, dst_dir_fd=dfd)
     return stored
 
 
@@ -208,27 +250,26 @@ def prune(directory, now=None, max_days=None, max_bytes=None):
     now = now or time.time()
     max_days = MAX_DAYS if max_days is None else max_days
     max_bytes = MAX_BYTES if max_bytes is None else max_bytes
-    files = []
-    for name in os.listdir(directory):
-        path = os.path.join(directory, name)
-        if name.endswith('.log') and os.path.isfile(path):
-            files.append((os.path.getmtime(path), os.path.getsize(path), path))
-    files.sort()
-    total = sum(f[1] for f in files)
-    for mtime, size, path in files:
-        if now - mtime > max_days * 86400 or total > max_bytes:
-            try:
-                os.remove(path)
-                total -= size
-            except OSError:
-                pass
+    with private_directory(directory) as dfd:
+        files = []
+        for name in os.listdir(dfd):
+            info = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+            if name.endswith('.log') and stat.S_ISREG(info.st_mode):
+                files.append((info.st_mtime, info.st_size, name))
+        files.sort()
+        total = sum(f[1] for f in files)
+        for mtime, size, name in files:
+            if now - mtime > max_days * 86400 or total > max_bytes:
+                try:
+                    os.unlink(name, dir_fd=dfd)
+                    total -= size
+                except OSError:
+                    pass
 
 
 def _receiver_log(batch, device, stored, status, root=None):
     try:
-        base = root or _root()
-        os.makedirs(base, exist_ok=True)
-        with open(os.path.join(base, '_receiver.log'), 'a', encoding='utf-8') as handle:
+        with private_directory(root or _root()) as dfd, open_private(dfd, '_receiver.log', 'a') as handle:
             handle.write('%s %s batch=%s device=%s stored=%s\n' % (datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'), status, batch, safe(device), stored))
     except OSError:
         pass
@@ -246,6 +287,7 @@ def recv(raw, root=None):
 
 
 def main(argv):
+    os.umask(0o077)
     if not argv or argv[-1] != 'recv':
         sys.stdout.write('ERR usage use: recv\n')
         return 2

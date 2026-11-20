@@ -91,28 +91,43 @@ function Test-RaLogSecretName([string]$Name) {
     $words=[regex]::Replace($Name,'([a-z0-9])([A-Z])','$1_$2')
     [bool]($words -match '(?i)(?:^|[_.-])(?:key|pass|auth|psk|private|apikey)(?:$|[_.-])')
 }
+# Компилируем регулярки и преобразуем MatchEvaluator один раз при загрузке, а не для каждой строки.
+$script:RaLogMaskRegex=@{
+    Private=[regex]::new('-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)',[Text.RegularExpressions.RegexOptions]'Compiled,IgnoreCase')
+    Public=[regex]::new('ssh-(ed25519|rsa) AAAA[A-Za-z0-9+/=]+',[Text.RegularExpressions.RegexOptions]::Compiled)
+    UserInfo=[regex]::new('://[^/\s@]+@',[Text.RegularExpressions.RegexOptions]::Compiled)
+    Basic=[regex]::new('(Authorization[:=]\s*)Basic\s+\S+',[Text.RegularExpressions.RegexOptions]'Compiled,IgnoreCase')
+    Bearer=[regex]::new('Bearer\s+[A-Za-z0-9._~+/=-]+',[Text.RegularExpressions.RegexOptions]'Compiled,IgnoreCase')
+    Field=[regex]::new('(?<![A-Za-z0-9_.-])(["'']?)([A-Za-z0-9_.-]{1,64})\1(\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s,;&"'']+)',[Text.RegularExpressions.RegexOptions]::Compiled)
+    Uuid=[regex]::new('\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b',[Text.RegularExpressions.RegexOptions]::Compiled)
+    Blob=[regex]::new('[A-Za-z0-9+/=_-]{41,}',[Text.RegularExpressions.RegexOptions]::Compiled)
+}
+$script:RaLogFieldEvaluator=[Text.RegularExpressions.MatchEvaluator]{
+    param($m)
+    if(Test-RaLogSecretName $m.Groups[2].Value){$m.Groups[1].Value+$m.Groups[2].Value+$m.Groups[1].Value+$m.Groups[3].Value+'***'}else{$m.Value}
+}
+$script:RaLogUuidEvaluator=[Text.RegularExpressions.MatchEvaluator]{param($m) 'uuid:****'+$m.Value.Substring($m.Value.Length-4)}
+$script:RaLogBlobEvaluator=[Text.RegularExpressions.MatchEvaluator]{
+    param($m)
+    $v=$m.Value
+    $digit=$v -cmatch '[0-9]';$upper=$v -cmatch '[A-Z]';$lower=$v -cmatch '[a-z]'
+    $hex=$v -match '^[0-9a-fA-F]+$'
+    if($hex -or ($digit -and $upper -and $lower) -or ($digit -and $v.IndexOf('/') -lt 0 -and ($upper -or $lower))){'[blob:'+$v.Length+']'}else{$v}
+}
 function Protect-RaLogText([string]$Text) {
     # Те же правила, что LogMask.cs (общий файл фикстур mask-cases.json).
     if([string]::IsNullOrEmpty($Text)){return ''}
-    $t=[regex]::Replace($Text,'-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)','[private-key]','IgnoreCase')
-    $t=[regex]::Replace($t,'ssh-(ed25519|rsa) AAAA[A-Za-z0-9+/=]+','ssh-$1 [pubkey]')
-    $t=[regex]::Replace($t,'://[^/\s@]+@','://***@')
-    $t=[regex]::Replace($t,'(Authorization[:=]\s*)Basic\s+\S+','$1Basic ***','IgnoreCase')
-    $t=[regex]::Replace($t,'Bearer\s+[A-Za-z0-9._~+/=-]+','Bearer ***','IgnoreCase')
-    $t=[regex]::Replace($t,'(?<![A-Za-z0-9])(["'']?)([A-Za-z0-9_.-]+)\1(\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s,;&"'']+)',{
-        param($m)
-        if(Test-RaLogSecretName $m.Groups[2].Value){$m.Groups[1].Value+$m.Groups[2].Value+$m.Groups[1].Value+$m.Groups[3].Value+'***'}else{$m.Value}
-    })
-    $t=[regex]::Replace($t,'\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b',{param($m) 'uuid:****'+$m.Value.Substring($m.Value.Length-4)})
-    $t=[regex]::Replace($t,'[A-Za-z0-9+/=_-]{41,}',{
-        param($m)
-        $v=$m.Value
-        $digit=$v -cmatch '[0-9]';$upper=$v -cmatch '[A-Z]';$lower=$v -cmatch '[a-z]'
-        $hex=$v -match '^[0-9a-fA-F]+$'
-        if($hex -or ($digit -and $upper -and $lower) -or ($digit -and $v.IndexOf('/') -lt 0 -and ($upper -or $lower))){'[blob:'+$v.Length+']'}else{$v}
-    })
-    $t
+    $rx=$script:RaLogMaskRegex
+    $t=$rx.Private.Replace($Text,'[private-key]')
+    $t=$rx.Public.Replace($t,'ssh-$1 [pubkey]')
+    $t=$rx.UserInfo.Replace($t,'://***@')
+    $t=$rx.Basic.Replace($t,'$1Basic ***')
+    $t=$rx.Bearer.Replace($t,'Bearer ***')
+    $t=$rx.Field.Replace($t,$script:RaLogFieldEvaluator)
+    $t=$rx.Uuid.Replace($t,$script:RaLogUuidEvaluator)
+    $rx.Blob.Replace($t,$script:RaLogBlobEvaluator)
 }
+
 function ConvertTo-RaLogValue([string]$Value) {
     $needs=($Value.Length -eq 0) -or $Value.IndexOfAny([char[]]@(' ','"','=',"`n","`r","`t")) -ge 0
     if(-not $needs){return $Value}
@@ -187,7 +202,7 @@ function ConvertFrom-RaLogLine([string]$Line) {
     $Line=$Line.TrimStart([char]0xFEFF)
     if($Line -match '^(\S+) \S+ +(DEBUG|INFO|WARN|ERROR) +(\S+) +(\S+)(?: +(.*))?$'){
         $utc=$Matches[1];$level=$Matches[2];$comp=$Matches[3];$evt=$Matches[4];$rest=[string]$Matches[5];$text=$rest
-        if($rest -match '(?:^|\s)msg=(?:"((?:[^"\\]|\\.)*)"|(\S*))'){$text=if($Matches[1]){([string]$Matches[1] -replace '\\n',"`n" -replace '\\"','"' -replace '\\\\','\')}else{[string]$Matches[2]}}
+        if($rest -match '(?:^|\s)msg=(?:"((?:[^"\\]|\\.)*)"|(\S*))'){$text=if($Matches[1]){[regex]::Replace([string]$Matches[1],'\\(.)',{param($m) if($m.Groups[1].Value -ceq 'n'){"`n"}else{$m.Groups[1].Value}})}else{[string]$Matches[2]}}
         else{$text=[regex]::Replace($rest,'^s=\S+\s*','')}
         return [pscustomobject]@{Utc=$utc;Level=$level;Comp=$comp;Event=$evt;Text=$text}
     }

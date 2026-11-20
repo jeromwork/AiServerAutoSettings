@@ -8,6 +8,8 @@
 import argparse
 import collections
 import json
+import math
+import itertools
 import os
 import re
 import sys
@@ -41,7 +43,7 @@ def parse_line(line):
         return None
     utc, local, level, comp, event, rest = m.groups()
     try:
-        when = datetime.strptime(utc[:19], '%Y-%m-%dT%H:%M:%S').replace(tzinfo=timezone.utc)
+        when = datetime.fromisoformat(utc.replace('Z', '+00:00'))
     except ValueError:
         return None
     fields = {k: unquote(v) for k, v in _FIELD.findall(rest or '')}
@@ -62,41 +64,69 @@ def device_dirs(pattern=None):
     return result
 
 
-def read_events(directory, since=None):
-    events = []
-    for name in sorted(os.listdir(directory)):
-        m = re.match(r'^(.+)-(\d{4}-\d\d-\d\d)\.log$', name)
-        if not m:
+def log_files(directory, since=None):
+    files = []
+    for name in os.listdir(directory):
+        m = re.fullmatch(r'(.+)-(\d{4}-\d\d-\d\d)\.log', name)
+        path = os.path.join(directory, name)
+        if not m or os.path.islink(path) or not os.path.isfile(path):
             continue
-        if since and m.group(2) < (since - timedelta(days=1)).strftime('%Y-%m-%d'):
+        if since and m.group(2) < since.strftime('%Y-%m-%d'):
             continue
-        with open(os.path.join(directory, name), encoding='utf-8', errors='replace') as handle:
+        files.append((m.group(2), path, m.group(1)))
+    return sorted(files, reverse=True)
+
+
+def events_in_file(path, stream):
+    try:
+        with open(path, encoding='utf-8', errors='replace') as handle:
             for line in handle:
                 event = parse_line(line)
-                if event and (since is None or event['time'] >= since):
-                    event['stream'] = m.group(1)
-                    events.append(event)
-    events.sort(key=lambda e: e['utc'])
+                if event:
+                    event['stream'] = stream
+                    yield event
+    except OSError:
+        return
+
+
+def read_events(directory, since=None):
+    events = [event for _, path, stream in log_files(directory, since)
+              for event in events_in_file(path, stream) if since is None or event['time'] >= since]
+    events.sort(key=lambda e: e['time'])
     return events
 
 
+def last_error(directory):
+    # Сначала новые даты. Для одной даты сравниваем время во всех потоках.
+    for _, files in itertools.groupby(log_files(directory), key=lambda f: f[0]):
+        errors = [e for _, path, stream in files for e in events_in_file(path, stream) if e['level'] == 'ERROR']
+        if errors:
+            event = max(errors, key=lambda e: e['time'])
+            return event['utc'] + ' ' + event['event']
+    return ''
+
+
+def since_hours(hours):
+    try:
+        return now() - timedelta(hours=hours)
+    except OverflowError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
 def fmt(event):
-    return '%s %-5s %-9s %s %s' % (event['utc'], event['level'], event['comp'], event['event'], event['rest'].strip())
+    text = '%s %-5s %-9s %s %s' % (event['utc'], event['level'], event['comp'], event['event'], event['rest'].strip())
+    return re.sub(r'[\x00-\x08\x0b-\x1f\x7f]', '', text)
 
 
 def cmd_list(args):
     rows = 0
     for directory in device_dirs():
-        files = [os.path.join(directory, f) for f in os.listdir(directory) if f.endswith('.log')]
+        files = [path for _, path, _ in log_files(directory)]
         size = sum(os.path.getsize(f) for f in files)
         last = max((os.path.getmtime(f) for f in files), default=0)
-        last_error = ''
-        for event in reversed(read_events(directory)):
-            if event['level'] == 'ERROR':
-                last_error = event['utc'] + ' ' + event['event']
-                break
+        error = last_error(directory)
         print('%-40s последний приём %s  %7.1f КБ  ошибка: %s' % (os.path.basename(directory),
-              datetime.fromtimestamp(last, timezone.utc).strftime('%Y-%m-%d %H:%M:%SZ') if last else '-', size / 1024.0, last_error or '-'))
+              datetime.fromtimestamp(last, timezone.utc).strftime('%Y-%m-%d %H:%M:%SZ') if last else '-', size / 1024.0, error or '-'))
         rows += 1
     if not rows:
         print('Устройств нет (корень: %s)' % root())
@@ -111,7 +141,7 @@ def select(pattern):
 
 
 def cmd_show(args):
-    since = now() - timedelta(hours=args.hours)
+    since = since_hours(args.hours)
     comps = set(c.strip() for c in args.comp.split(',')) if args.comp else None
     minimum = LEVELS.get(args.level.upper(), 0) if args.level else 0
     dirs = select(args.device)
@@ -135,10 +165,19 @@ def ms_between(a, b):
 
 
 def diag_device(directory, hours):
-    since = now() - timedelta(hours=hours)
+    since = since_hours(hours)
     events = read_events(directory, since)
     out = ['== %s, за %s ч, событий: %d ==' % (os.path.basename(directory), hours, len(events))]
     last_fail = None
+    for e in events:
+        f = e['fields']
+        if ((e['event'] == 'net.state' and f.get('to') == 'fail') or
+                (e['event'] == 'net.e2e' and f.get('result') == 'fail') or
+                (e['event'] == 'vpn.on.step' and f.get('result') in ('fail', 'conflict', 'error')) or
+                (e['event'] == 'vpn.on.response' and f.get('state') not in (None, 'on')) or
+                e['event'] == 'vpn.helper.failed'):
+            last_fail = (f.get('stage') or f.get('step') or 'helper',
+                         f.get('reason') or f.get('err') or f.get('result') or f.get('state') or 'helper-failed')
 
     attempts = collections.OrderedDict()
     for e in events:
@@ -166,14 +205,8 @@ def diag_device(directory, hours):
                 f = i['fields']
                 if f.get('result') == 'fail':
                     verdict, detail = 'включён, сеть не идёт', 'ступень %s: %s %s' % (f.get('stage'), f.get('reason'), f.get('detail', ''))
-                    last_fail = (f.get('stage'), f.get('reason'))
                 elif f.get('result') == 'ok' and verdict == 'включён':
                     detail = 'сквозная проверка ok, выход %s' % f.get('egress', '-')
-        if verdict == 'отказ':
-            for i in items:
-                f = i['fields']
-                if i['event'] == 'vpn.on.step' and f.get('result') in ('fail', 'conflict', 'error'):
-                    last_fail = last_fail or (f.get('step'), f.get('reason') or f.get('err') or f.get('result'))
         out.append('  %s %s: %s, %d мс. %s' % (items[0]['utc'], att, verdict, ms_between(items[0], items[-1]), detail))
 
     out.append('\nПереходы сторожа:')
@@ -184,7 +217,6 @@ def diag_device(directory, hours):
         f = e['fields']
         if f.get('to') == 'fail':
             out.append('  %s ok->fail ступень %s %s %s' % (e['utc'], f.get('stage'), f.get('reason'), f.get('detail', '')))
-            last_fail = (f.get('stage'), f.get('reason'))
         else:
             out.append('  %s ->ok, простой %s мс' % (e['utc'], f.get('down_ms', '?')))
 
@@ -246,13 +278,23 @@ def cmd_diag(args):
     return 0 if dirs else 1
 
 
+def hours_value(value):
+    try:
+        hours = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError('hours must be a number')
+    if not math.isfinite(hours) or hours < 0:
+        raise argparse.ArgumentTypeError('hours must be finite and non-negative')
+    return hours
+
+
 def main(argv):
     parser = argparse.ArgumentParser(prog='ra-logs', description='Журналы компьютеров RemoteAgents')
     sub = parser.add_subparsers(dest='command')
     sub.add_parser('list').set_defaults(run=cmd_list)
     show = sub.add_parser('show')
     show.add_argument('device')
-    show.add_argument('--hours', type=float, default=6)
+    show.add_argument('--hours', type=hours_value, default=6)
     show.add_argument('--comp')
     show.add_argument('--att')
     show.add_argument('--level')
@@ -260,7 +302,7 @@ def main(argv):
     show.set_defaults(run=cmd_show)
     diag = sub.add_parser('diag')
     diag.add_argument('device')
-    diag.add_argument('--hours', type=float, default=6)
+    diag.add_argument('--hours', type=hours_value, default=6)
     diag.set_defaults(run=cmd_diag)
     args = parser.parse_args(argv)
     if not getattr(args, 'run', None):
