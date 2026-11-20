@@ -202,9 +202,10 @@ namespace RemoteAgents.Launcher
             entry = TrayBridge.Entry(MainScreenModel.Build(new MainScreenFacts { BridgeEnabled = true, Operation = "обновление" }).Helper);
             Check(!entry.Enabled, "bridge entry disabled during foreign operation");
             var bare = Data("{}");
-            Check(!TrayBridge.Enabled(bare, false) && TrayBridge.Enabled(bare, true), "bridge default follows control component default");
-            Check(!TrayBridge.Enabled(Data("{\"components\":{\"control\":{\"enabled\":false}}}"), true), "bridge default follows components.control.enabled");
-            Check(TrayBridge.Enabled(Data("{\"bridge\":{\"enabled\":true},\"components\":{\"control\":{\"enabled\":false}}}"), false), "bridge.enabled wins");
+            Check(TrayBridge.Enabled(bare), "bridge without any config counts as on");
+            Check(!TrayBridge.Enabled(Data("{\"components\":{\"control\":{\"enabled\":false}}}")), "components.control.enabled=false means off");
+            Check(!TrayBridge.Enabled(Data("{\"bridge\":{\"enabled\":false}}")), "bridge.enabled=false means off");
+            Check(TrayBridge.Enabled(Data("{\"bridge\":{\"enabled\":true},\"components\":{\"control\":{\"enabled\":false}}}")), "bridge.enabled wins");
             var noProfile = Data("{\"bridge\":{\"enabled\":true}}"); TrayBridge.SyncProfile(noProfile);
             Check(!noProfile.ContainsKey("profile"), "SyncProfile does not create a missing profile");
             var withProfile = Data("{\"profile\":{\"device\":{}},\"bridge\":{\"enabled\":false,\"allowShell\":false}}"); TrayBridge.SyncProfile(withProfile);

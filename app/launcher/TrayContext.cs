@@ -354,11 +354,10 @@ namespace RemoteAgents.Launcher
             var card = MainScreenModel.Build(new MainScreenFacts { VpnInstalled = true, Vpn = VpnStatus.Read(home), VpnBusy = vpnActionBusy, VpnWanted = vpnActionWanted, Operation = MutationConflict() }).Vpn;
             return new TrayMenuEntry("vpn", card.On ? "Выключить VPN" : "Включить VPN", card.SwitchEnabled) { Hint = card.State };
         }
-        bool ControlDefault() { var c = definition == null ? null : definition.Components.FirstOrDefault(x => x.Name == "control"); return c != null && c.Default; }
         CardView BridgeCard()
         {
             return MainScreenModel.Build(new MainScreenFacts {
-                BridgeEnabled = bridgeActionBusy ? bridgeActionWanted : TrayBridge.Enabled(config.Data, ControlDefault()),
+                BridgeEnabled = bridgeActionBusy ? bridgeActionWanted : TrayBridge.Enabled(config.Data),
                 BridgeBusy = bridgeActionBusy, Operation = MutationConflict() }).Helper;
         }
         void ToggleBridge()
@@ -561,7 +560,7 @@ namespace RemoteAgents.Launcher
                 VpnInstalled = definition != null && definition.Components.Any(c => c.Name == "vpn"),
                 VpnWanted = vpnActionBusy ? vpnActionWanted : Json.Bool(Json.Map(Json.Get(Json.Map(Json.Get(config.Data, "profile")), "vpn")), "enabled"),
                 VpnBusy = vpnActionBusy, VpnError = vpnError, VpnDisableFailed = vpnError.Length > 0 && !vpnActionWanted, Operation = MutationConflict(),
-                BridgeEnabled = bridgeActionBusy ? bridgeActionWanted : TrayBridge.Enabled(config.Data, ControlDefault()),
+                BridgeEnabled = bridgeActionBusy ? bridgeActionWanted : TrayBridge.Enabled(config.Data),
                 BridgeBusy = bridgeActionBusy, BridgeError = bridgeError,
                 DiskEnabled = runtimes.Any(r => r.Definition.Name == "disk" && r.Enabled), DiskSummary = DiskSummary(),
                 DiskFolders = (DateTime.UtcNow - diskUpdated).TotalSeconds <= 10 ? diskFolders : -1, DiskServerOnly = -1,

@@ -11,14 +11,14 @@ namespace RemoteAgents.Launcher
             return new TrayMenuEntry("bridge", text, !string.IsNullOrEmpty(helper.SwitchText) && helper.SwitchEnabled) { Hint = helper.State ?? "" };
         }
 
-        // bridge.enabled wins; without it the installed state of the control component decides, so an
-        // installation without a bridge section does not claim that remote control is on.
-        internal static bool Enabled(Dictionary<string, object> config, bool controlDefault)
+        // Same rule as the wizard and ConfigApply.Bridge: bridge.enabled decides when present; otherwise
+        // components.control.enabled; with no control key at all the bridge counts as on.
+        internal static bool Enabled(Dictionary<string, object> config)
         {
             var bridge = Json.Map(Json.Get(config, "bridge"));
             if (Json.Get(bridge, "enabled") is bool) return Json.Bool(bridge, "enabled");
             var control = Json.Map(Json.Get(Json.Map(Json.Get(config, "components")), "control"));
-            return Json.Bool(control, "enabled", controlDefault);
+            return Json.Bool(control, "enabled", true);
         }
 
         // Mirrors the applied bridge state into profile.bridge only when the profile already exists:
