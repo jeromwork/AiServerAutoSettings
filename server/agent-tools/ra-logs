@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+"""Чтение журналов компьютеров, принятых server/logs_in.py (корень ~/work/logs-in или RA_LOGS_IN_ROOT).
+
+  ra-logs list
+  ra-logs show <устройство-подстрока> [--hours 6] [--comp vpn,net] [--att id] [--level WARN] [--grep текст]
+  ra-logs diag <устройство-подстрока> [--hours 6]
+"""
+import argparse
+import collections
+import json
+import os
+import re
+import sys
+from datetime import datetime, timedelta, timezone
+
+LEVELS = {'DEBUG': 0, 'INFO': 1, 'WARN': 2, 'ERROR': 3}
+_LINE = re.compile(r'^(\d{4}-\d\d-\d\dT[\d:.]+Z)\s+(?:(\d\d:[\d:.]+[+-]\d\d:\d\d)\s+)?(?:(DEBUG|INFO|WARN|ERROR)\s+(\S+)\s+)?(\S+)(?:\s+(.*))?$')
+_FIELD = re.compile(r'([A-Za-z0-9_.-]+)=("(?:[^"\\]|\\.)*"|\S*)')
+
+
+def root():
+    return os.environ.get('RA_LOGS_IN_ROOT') or os.path.expanduser('~/work/logs-in')
+
+
+def now():
+    value = os.environ.get('RA_LOGS_NOW')
+    return datetime.strptime(value, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc) if value else datetime.now(timezone.utc)
+
+
+def unquote(value):
+    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        return re.sub(r'\\(.)', lambda m: '\n' if m.group(1) == 'n' else m.group(1), value[1:-1])
+    return value
+
+
+def parse_line(line):
+    """Общий разбор строки. Старый формат (UTC событие текст, без уровня) показывается как INFO. Не-журнальные строки -> None."""
+    line = line.lstrip('\ufeff').rstrip('\r\n')
+    m = _LINE.match(line)
+    if not m:
+        return None
+    utc, local, level, comp, event, rest = m.groups()
+    try:
+        when = datetime.strptime(utc[:19], '%Y-%m-%dT%H:%M:%S').replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    fields = {k: unquote(v) for k, v in _FIELD.findall(rest or '')}
+    legacy = level is None
+    return {'time': when, 'utc': utc, 'level': level or 'INFO', 'comp': comp or (event.split('.')[0] if '.' in event else 'launcher'),
+            'event': event, 'fields': fields, 'raw': line, 'legacy': legacy, 'rest': rest or ''}
+
+
+def device_dirs(pattern=None):
+    base = root()
+    if not os.path.isdir(base):
+        return []
+    result = []
+    for name in sorted(os.listdir(base)):
+        path = os.path.join(base, name)
+        if os.path.isdir(path) and not name.startswith('_') and (pattern is None or pattern.lower() in name.lower()):
+            result.append(path)
+    return result
+
+
+def read_events(directory, since=None):
+    events = []
+    for name in sorted(os.listdir(directory)):
+        m = re.match(r'^(.+)-(\d{4}-\d\d-\d\d)\.log$', name)
+        if not m:
+            continue
+        if since and m.group(2) < (since - timedelta(days=1)).strftime('%Y-%m-%d'):
+            continue
+        with open(os.path.join(directory, name), encoding='utf-8', errors='replace') as handle:
+            for line in handle:
+                event = parse_line(line)
+                if event and (since is None or event['time'] >= since):
+                    event['stream'] = m.group(1)
+                    events.append(event)
+    events.sort(key=lambda e: e['utc'])
+    return events
+
+
+def fmt(event):
+    return '%s %-5s %-9s %s %s' % (event['utc'], event['level'], event['comp'], event['event'], event['rest'].strip())
+
+
+def cmd_list(args):
+    rows = 0
+    for directory in device_dirs():
+        files = [os.path.join(directory, f) for f in os.listdir(directory) if f.endswith('.log')]
+        size = sum(os.path.getsize(f) for f in files)
+        last = max((os.path.getmtime(f) for f in files), default=0)
+        last_error = ''
+        for event in reversed(read_events(directory)):
+            if event['level'] == 'ERROR':
+                last_error = event['utc'] + ' ' + event['event']
+                break
+        print('%-40s последний приём %s  %7.1f КБ  ошибка: %s' % (os.path.basename(directory),
+              datetime.fromtimestamp(last, timezone.utc).strftime('%Y-%m-%d %H:%M:%SZ') if last else '-', size / 1024.0, last_error or '-'))
+        rows += 1
+    if not rows:
+        print('Устройств нет (корень: %s)' % root())
+    return 0
+
+
+def select(pattern):
+    found = device_dirs(pattern)
+    if not found:
+        print('Нет устройства по подстроке: ' + pattern, file=sys.stderr)
+    return found
+
+
+def cmd_show(args):
+    since = now() - timedelta(hours=args.hours)
+    comps = set(c.strip() for c in args.comp.split(',')) if args.comp else None
+    minimum = LEVELS.get(args.level.upper(), 0) if args.level else 0
+    dirs = select(args.device)
+    for directory in dirs:
+        print('# ' + os.path.basename(directory))
+        for e in read_events(directory, since):
+            if comps and e['comp'] not in comps:
+                continue
+            if args.att and e['fields'].get('att') != args.att:
+                continue
+            if LEVELS[e['level']] < minimum:
+                continue
+            if args.grep and args.grep.lower() not in e['raw'].lower():
+                continue
+            print(fmt(e))
+    return 0 if dirs else 1
+
+
+def ms_between(a, b):
+    return int((b['time'] - a['time']).total_seconds() * 1000)
+
+
+def diag_device(directory, hours):
+    since = now() - timedelta(hours=hours)
+    events = read_events(directory, since)
+    out = ['== %s, за %s ч, событий: %d ==' % (os.path.basename(directory), hours, len(events))]
+    last_fail = None
+
+    attempts = collections.OrderedDict()
+    for e in events:
+        att = e['fields'].get('att', '')
+        if att.startswith('on-'):
+            attempts.setdefault(att, []).append(e)
+    out.append('\nПопытки включения VPN:')
+    if not attempts:
+        out.append('  нет')
+    for att, items in attempts.items():
+        names = [i['event'] for i in items]
+        verdict, detail = 'неизвестно', ''
+        for i in items:
+            f = i['fields']
+            if i['event'] == 'vpn.on.response' and f.get('state') not in (None, 'on'):
+                verdict, detail = 'отказ', 'state=%s stage=%s conflict=%s' % (f.get('state'), f.get('stage'), f.get('conflict', ''))
+            if i['event'] == 'vpn.on.step' and f.get('result') in ('fail', 'conflict', 'error'):
+                verdict, detail = 'отказ', 'шаг %s: %s %s' % (f.get('step'), f.get('result'), f.get('reason', f.get('err', '')))
+            if i['event'] == 'vpn.helper.failed':
+                verdict, detail = 'отказ', 'помощник: ' + i['rest'].strip()[:120]
+        if 'vpn.on.ok' in names and verdict == 'неизвестно':
+            verdict = 'включён'
+        for i in items:
+            if i['event'] == 'net.e2e':
+                f = i['fields']
+                if f.get('result') == 'fail':
+                    verdict, detail = 'включён, сеть не идёт', 'ступень %s: %s %s' % (f.get('stage'), f.get('reason'), f.get('detail', ''))
+                    last_fail = (f.get('stage'), f.get('reason'))
+                elif f.get('result') == 'ok' and verdict == 'включён':
+                    detail = 'сквозная проверка ok, выход %s' % f.get('egress', '-')
+        if verdict == 'отказ':
+            for i in items:
+                f = i['fields']
+                if i['event'] == 'vpn.on.step' and f.get('result') in ('fail', 'conflict', 'error'):
+                    last_fail = last_fail or (f.get('step'), f.get('reason') or f.get('err') or f.get('result'))
+        out.append('  %s %s: %s, %d мс. %s' % (items[0]['utc'], att, verdict, ms_between(items[0], items[-1]), detail))
+
+    out.append('\nПереходы сторожа:')
+    trans = [e for e in events if e['event'] == 'net.state']
+    if not trans:
+        out.append('  нет')
+    for e in trans:
+        f = e['fields']
+        if f.get('to') == 'fail':
+            out.append('  %s ok->fail ступень %s %s %s' % (e['utc'], f.get('stage'), f.get('reason'), f.get('detail', '')))
+            last_fail = (f.get('stage'), f.get('reason'))
+        else:
+            out.append('  %s ->ok, простой %s мс' % (e['utc'], f.get('down_ms', '?')))
+
+    out.append('\nКонфликты и подозреваемые:')
+    seen = collections.OrderedDict()
+    for e in events:
+        if e['event'] in ('conflict.detected', 'conflict.suspect'):
+            key = (e['event'].split('.')[1], e['fields'].get('name', ''), e['fields'].get('iface', e['fields'].get('kind', '')))
+            seen.setdefault(key, [e['utc'], e['utc'], 0])
+            seen[key][1] = e['utc']
+            seen[key][2] += 1
+    for (kind, name, extra), (first, last, count) in seen.items():
+        out.append('  %s %s (%s): %s .. %s, раз: %d' % ('КОНФЛИКТ' if kind == 'detected' else 'подозрение', name, extra, first, last, count))
+    if not seen:
+        out.append('  нет')
+
+    out.append('\nТранспорт:')
+    lines = 0
+    for e in events:
+        if e['event'] == 'switch':
+            f = e['fields']
+            out.append('  %s переключение %s -> %s, причина: %s' % (e['utc'], f.get('from', '?'), f.get('to', '?'), f.get('why', '?')))
+            lines += 1
+        elif e['event'] == 'path.check' and e['fields'].get('result') == 'fail':
+            f = e['fields']
+            out.append('  %s путь %s не прошёл: %s' % (e['utc'], f.get('candidate'), f.get('reason')))
+            lines += 1
+        elif e['event'] == 'network-change':
+            out.append('  %s смена сети %s -> %s' % (e['utc'], e['fields'].get('from_iface', '?'), e['fields'].get('to_iface', '?')))
+            lines += 1
+    if not lines:
+        out.append('  нет событий')
+
+    out.append('\nПадения ядра:')
+    exits = [e for e in events if e['event'] == 'core.exit']
+    for e in exits:
+        tail = e['fields'].get('tail', '').replace('\n', ' | ')
+        out.append('  %s код %s, жило %s мс. %s' % (e['utc'], e['fields'].get('code'), e['fields'].get('ms_alive'), tail[:300]))
+    if not exits:
+        out.append('  нет')
+
+    out.append('\nОтправка журналов:')
+    ship = [e for e in events if e['event'] in ('ship.gap', 'ship.failed')]
+    gaps = [e for e in ship if e['event'] == 'ship.gap']
+    failed = [e for e in ship if e['event'] == 'ship.failed']
+    out.append('  пропусков: %d, неудачных отправок: %d%s' % (len(gaps), len(failed), (' (последняя: %s %s)' % (failed[-1]['utc'], failed[-1]['fields'].get('err', ''))) if failed else ''))
+
+    if last_fail:
+        out.append('\nСтупень отказа: %s %s' % last_fail)
+    else:
+        out.append('\nСтупень отказа: нет отказов в окне')
+    return '\n'.join(out)
+
+
+def cmd_diag(args):
+    dirs = select(args.device)
+    for directory in dirs:
+        print(diag_device(directory, args.hours))
+    return 0 if dirs else 1
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(prog='ra-logs', description='Журналы компьютеров RemoteAgents')
+    sub = parser.add_subparsers(dest='command')
+    sub.add_parser('list').set_defaults(run=cmd_list)
+    show = sub.add_parser('show')
+    show.add_argument('device')
+    show.add_argument('--hours', type=float, default=6)
+    show.add_argument('--comp')
+    show.add_argument('--att')
+    show.add_argument('--level')
+    show.add_argument('--grep')
+    show.set_defaults(run=cmd_show)
+    diag = sub.add_parser('diag')
+    diag.add_argument('device')
+    diag.add_argument('--hours', type=float, default=6)
+    diag.set_defaults(run=cmd_diag)
+    args = parser.parse_args(argv)
+    if not getattr(args, 'run', None):
+        parser.print_help()
+        return 2
+    return args.run(args)
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

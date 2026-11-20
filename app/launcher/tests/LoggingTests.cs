@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -28,7 +29,7 @@ namespace RemoteAgents.Launcher
 
         internal static int Run(string[] args)
         {
-            Golden(); Mask(); Rotation(); Encoding_(); JournalMapping(); Conflicts(); Ladder(); HelperEvents(); Protocol(); CorePump();
+            Golden(); Mask(); Rotation(); Encoding_(); JournalMapping(); Conflicts(); Ladder(); HelperEvents(); Protocol(); CorePump(); Shipper(); Mirror();
             Console.WriteLine("PASS: Logging " + count + " checks");
             return 0;
         }
@@ -254,6 +255,106 @@ namespace RemoteAgents.Launcher
                 File.WriteAllText(Path.Combine(dir, CoreLogPump.FileName), new string('x', 100) + "\n");
                 pump.RotateIfLarge(10);
                 Check(File.Exists(Path.Combine(dir, CoreLogPump.FileName + ".1")) && !File.Exists(Path.Combine(dir, CoreLogPump.FileName)), "core log rotates before a restart");
+            } finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+
+        sealed class FakeSender : ILogSender
+        {
+            internal readonly List<string> Texts = new List<string>(); internal readonly List<string> PathsTried = new List<string>();
+            internal bool FailChannel, FailDirect;
+            public SendResult Send(byte[] gz, string batchId, string path)
+            {
+                PathsTried.Add(path);
+                if ((path == "channel" && FailChannel) || (path == "direct" && FailDirect)) return new SendResult { Err = "ssh-exit", Exit = 255, Stderr = "refused" };
+                using (var ms = new MemoryStream(gz)) using (var z = new GZipStream(ms, CompressionMode.Decompress)) using (var r = new StreamReader(z, Encoding.UTF8)) Texts.Add(r.ReadToEnd());
+                return new SendResult { Ok = true };
+            }
+        }
+        static void WriteLog(string path, int from, int count, bool bom)
+        {
+            var text = new StringBuilder();
+            for (int i = from; i < from + count; i++) text.Append("2026-11-20T09:00:" + (i % 60).ToString("00") + ".000Z 12:00:00.000+03:00 INFO  vpn       tick           s=1111 n=" + i + "\n");
+            using (var f = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)) {
+                if (bom && f.Length == 0) f.Write(new byte[] { 0xEF, 0xBB, 0xBF }, 0, 3);
+                var bytes = new UTF8Encoding(false).GetBytes(text.ToString()); f.Write(bytes, 0, bytes.Length);
+            }
+        }
+        static int Lines(string text) { return text.Split('\n').Count(l => l.Contains(" tick ")); }
+
+        static void Shipper()
+        {
+            string dir = Temp("ship"); string logs = Path.Combine(dir, "logs"), state = Path.Combine(dir, "state"); Directory.CreateDirectory(logs); Directory.CreateDirectory(state);
+            try {
+                var clock = new DateTime(2026, 11, 20, 9, 0, 0, DateTimeKind.Utc);
+                var events = new List<string>(); var sender = new FakeSender();
+                var shipper = new LogShipper(logs, state, sender, (lvl, evt, kv) => events.Add(evt + " " + string.Join(",", kv)), "Компьютер", "WIN-1", "1.0", () => clock);
+                WriteLog(Path.Combine(logs, "launcher.log"), 0, 3, true);
+                File.AppendAllText(Path.Combine(logs, "launcher.log"), "partial line without end");
+                sender.FailChannel = sender.FailDirect = true;
+                Check(shipper.Cycle(false) == 0 && !File.Exists(Path.Combine(state, "log-ship.json")), "cursor does not move without OK");
+                Check(sender.PathsTried.SequenceEqual(new[] { "channel", "direct" }) && events.Any(e => e.StartsWith("ship.failed path,channel")) && events.Any(e => e.StartsWith("ship.failed path,direct")), "channel then direct are tried and logged");
+                Check(shipper.FailureCount == 1 && (shipper.NextAt - clock).TotalSeconds == 60, "backoff 60 s");
+                shipper.Cycle(false); Check((shipper.NextAt - clock).TotalSeconds == 120, "backoff 120 s");
+                shipper.Cycle(false); shipper.Cycle(false); Check((shipper.NextAt - clock).TotalSeconds == 300 && LogShipper.DelaySeconds(9) == 300, "backoff stops at 300 s");
+                sender.FailChannel = true; sender.FailDirect = false; sender.Texts.Clear(); sender.PathsTried.Clear();
+                Check(shipper.Cycle(false) == 1 && sender.PathsTried.SequenceEqual(new[] { "channel", "direct" }), "direct path works when the channel is down");
+                string first = sender.Texts[0];
+                Check(first.StartsWith("RA-LOGS 1 batch=") && first.Contains("device=" + LogShipper.Base64Url("Компьютер")) && first.Contains("host=WIN-1") && Lines(first) == 3 && !first.Contains("partial line"), "header, three whole lines, partial tail is not sent");
+                Check(shipper.FailureCount == 0 && (shipper.NextAt - clock).TotalSeconds == 60, "success resets the backoff");
+                sender.Texts.Clear(); sender.FailChannel = false;
+                Check(shipper.Cycle(false) == 0 && sender.Texts.Count == 0, "nothing new -> nothing sent");
+                File.AppendAllText(Path.Combine(logs, "launcher.log"), " finished\n");
+                WriteLog(Path.Combine(logs, "launcher.log"), 3, 2, false);
+                Check(shipper.Cycle(false) == 1 && Lines(sender.Texts[0]) == 2 && sender.Texts[0].Contains("partial line without end finished"), "only new lines, the completed line is sent once");
+                // Ротация: хвост уходит в .1, появляется новый файл — без дублей.
+                WriteLog(Path.Combine(logs, "launcher.log"), 5, 2, false);
+                File.Move(Path.Combine(logs, "launcher.log"), Path.Combine(logs, "launcher.log.1"));
+                WriteLog(Path.Combine(logs, "launcher.log"), 7, 2, true);
+                sender.Texts.Clear();
+                shipper.Cycle(false);
+                string all = string.Join("\n", sender.Texts);
+                Check(Lines(all) == 4 && all.Contains("n=5") && all.Contains("n=8") && !all.Contains("n=4 ") && !all.Contains("n=3 "), "rotation: rest of the old file plus the new file, no duplicates");
+                // Потеря: отпечаток неизвестен.
+                File.WriteAllText(Path.Combine(state, "log-ship.json"), "{\"streams\":{\"launcher\":{\"fp\":\"deadbeef\",\"fpLen\":10,\"off\":\"5\"}}}");
+                events.Clear(); sender.Texts.Clear();
+                shipper.Cycle(false);
+                Check(events.Any(e => e.StartsWith("ship.gap stream,launcher,lost,unknown")) && sender.Texts.Count == 1, "unknown fingerprint gives ship.gap and restarts from the oldest file");
+                // Лимит пачки 512 КБ.
+                WriteLog(Path.Combine(logs, "transport.log"), 0, 12000, true);
+                sender.Texts.Clear();
+                int batches = shipper.Cycle(false);
+                Check(batches >= 2 && sender.Texts.Where(t => t.Contains("@@ transport")).All(t => Encoding.UTF8.GetByteCount(t) <= LogShipper.MaxRawBytes + 2048), "batches are limited to 512 KiB of text");
+                Check(Lines(string.Join("\n", sender.Texts.Where(t => t.Contains("@@ transport")))) == 12000, "all lines of a large file arrive exactly once");
+                // Не больше 8 пачек за цикл.
+                WriteLog(Path.Combine(logs, "core.log"), 0, 80000, true);
+                sender.Texts.Clear();
+                Check(shipper.Cycle(false) == 8, "at most eight batches per cycle");
+            } finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+
+        static void Mirror()
+        {
+            string dir = Temp("mirror"); string logs = Path.Combine(dir, "logs"), state = Path.Combine(dir, "state"); Directory.CreateDirectory(logs); Directory.CreateDirectory(state);
+            try {
+                int calls = 0; string version = "9"; bool ready = true; var events = new List<string>();
+                Func<ulong, int, Dictionary<string, object>> read = (after, max) => {
+                    calls++;
+                    if (after >= 3) return Json.Map(Json.Parse("{\"ok\":true,\"lines\":[],\"next\":3,\"lost\":0,\"reset\":false}"));
+                    return Json.Map(Json.Parse("{\"ok\":true,\"lines\":[\"2026-11-20T09:00:00.000Z 12:00:00.000+03:00 INFO  helper    stage s=1 seq=1\",\"2026-11-20T09:00:01.000Z 12:00:01.000+03:00 WARN  core      core.line s=1 seq=2 text=x\",\"2026-11-20T09:00:02.000Z 12:00:02.000+03:00 INFO  helper    cmd.done s=1 seq=3\"],\"next\":3,\"lost\":2,\"reset\":false}"));
+                };
+                var mirror = new HelperLogMirror(logs, state, () => ready, () => version, read, (lvl, evt, kv) => events.Add(evt));
+                Check(mirror.Pull() == -1 && calls == 0, "helper v9 is never asked (a bad command would close the pipe)");
+                version = "10"; ready = false; Check(mirror.Pull() == -1 && calls == 0, "disconnected helper is not asked");
+                ready = true;
+                Check(mirror.Pull() == 3, "three lines are mirrored");
+                string helper = File.ReadAllText(Path.Combine(logs, "helper.log"), Encoding.UTF8), core = File.ReadAllText(Path.Combine(logs, "core.log"), Encoding.UTF8);
+                Check(helper.Contains("seq=1") && helper.Contains("seq=3") && !helper.Contains("seq=2") && core.Contains("seq=2") && !core.Contains("seq=1"), "core lines go to core.log, the rest to helper.log");
+                Check(events.Contains("helper.log-lost"), "lost lines are reported");
+                int before = calls; Check(mirror.Pull() == 0 && calls == before + 1 && File.ReadAllText(Path.Combine(state, "helper-log-cursor.json")).Contains("\"3\""), "cursor is stored and nothing is duplicated");
+                var failing = new HelperLogMirror(logs, state, () => true, () => "10", (a, m) => { throw new IOException("pipe closed"); }, (lvl, evt, kv) => events.Add(evt));
+                Check(failing.Pull() == -1 && events.Contains("helper.unreachable"), "a read exception is caught and reported once");
+                var resetMirror = new HelperLogMirror(logs, state, () => true, () => "10", (a, m) => Json.Map(Json.Parse("{\"ok\":true,\"lines\":[],\"next\":1,\"lost\":0,\"reset\":true}")), (lvl, evt, kv) => events.Add(evt));
+                resetMirror.Pull(); Check(events.Contains("helper.log-reset") && File.ReadAllText(Path.Combine(state, "helper-log-cursor.json")).Contains("\"1\""), "journal reset moves the cursor back");
             } finally { try { Directory.Delete(dir, true); } catch { } }
         }
     }

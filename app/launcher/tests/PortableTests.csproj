@@ -59,6 +59,8 @@
     <Compile Include="../RaLog.cs" />
     <Compile Include="../LogMask.cs" />
     <Compile Include="../NetLadder.cs" />
+    <Compile Include="../LogShipper.cs" />
+    <Compile Include="../HelperLogMirror.cs" />
     <Compile Include="LoggingTests.cs" />
     <Compile Include="../LanTun.cs" />
     <Compile Include="../LanHosts.cs" />

@@ -38,6 +38,8 @@ namespace RemoteAgents.Launcher
         internal static void Configure(string logsDir) { defaultDir = logsDir; }
         // Известные значения секретов (DiagnosticReport.KnownSecrets) прячутся в каждой записи; задаёт лаунчер.
         internal static Func<IEnumerable<string>> Secrets;
+        // Вызывается после записи строки уровня ERROR (лаунчер ускоряет отправку на сервер).
+        internal static Action OnError;
         static IEnumerable<string> KnownSecrets() { try { var f = Secrets; return f == null ? null : f().ToArray(); } catch { return null; } }
 
         // ---- формат (чистая функция) -------------------------------------------------------
@@ -143,6 +145,7 @@ namespace RemoteAgents.Launcher
                             f.Write(bytes, 0, bytes.Length);
                         }
                         failures[path] = 0;
+                        if (OnError != null && line.IndexOf(" ERROR ", StringComparison.Ordinal) is int e && e > 0 && e < 60) try { OnError(); } catch { }
                     } catch { failures[path] = failures.TryGetValue(path, out failed) ? failed + 1 : 1; }
                 } finally {
                     if (mutex != null) { try { if (held) mutex.ReleaseMutex(); } catch { } mutex.Dispose(); }

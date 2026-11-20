@@ -43,6 +43,7 @@ namespace RemoteAgents.Launcher
         string bridgeError = "";
         HelperClient netHelper;
         NetLadderService ladder;
+        LogShipper shipper; HelperLogMirror mirror;
         volatile string netNote = "";
         string diskSummary = "Диск: ожидается проверка";
         DateTime diskUpdated = DateTime.MinValue;
@@ -181,6 +182,11 @@ namespace RemoteAgents.Launcher
                 if (restart) return;
                 if (!Step("transport", () => { transport = StatusView.Read(home, "transport", maxAgeSec: 15); })) { ok = false; coreFailed = true; }
                 ok &= Step("netwatch", () => { if (ladder == null) { ladder = new NetLadderService(home, log, () => StatusView.Read(home, "transport", maxAgeSec: 15), () => VpnStatus.Read(home)); ladder.Note = SetNetNote; } ladder.Tick(transport, Json.Str(VpnStatus.Read(home), "state") == "on"); });
+                ok &= Step("logship", () => {
+                    EnsureLogShipping();
+                    if (mirror != null && DateTime.UtcNow >= nextMirror) { nextMirror = DateTime.UtcNow.AddSeconds(60); Task.Run(() => { try { mirror.Pull(); } catch { } }); }
+                    if (shipper != null) shipper.Tick();
+                });
                 ok &= Step("lan", () => { if (netHelper != null) { netHelper.UpdateLan(config.Data, transport); netHelper.ConnectWhenInstalled(NetHelperSetup.Required(config.Data)); } });
                 ok &= Step("vpn-resume", () => ResumeUpdatedVpn(transport));
                 ok &= Step("icon", () => {
@@ -716,6 +722,7 @@ namespace RemoteAgents.Launcher
                 if (Json.Str(status, "state") != "on") { log.Write("vpn.on.not-on att=" + att + " state=" + Json.Str(status, "state")); if (!fromCard) MessageBox.Show(Json.Text(status, "summary", "VPN не включён: соединение не подтверждено"), Product.Name); return; }
                 config.SetVpnIntent(true); config.SetEnabled(vpn.Definition, true); log.Write("vpn.on.ok att=" + att + " ms=" + vpnWatch.ElapsedMilliseconds);
                 if (ladder != null) ladder.RunE2E(att);
+                if (mirror != null) Task.Run(() => { try { mirror.Pull(); } catch { } });
             } catch (OperationCanceledException) { log.Write("vpn.on.cancelled att=" + att); }
             catch (Exception error) { if (!closing) { log.Write("vpn.helper.failed att=" + att + " " + TickFailureLog.HelperFailure("vpn-on", error)); VpnFailure(NetHelperSetup.VpnFailureMessage(error), fromCard); } }
             finally { actionBusy = vpnActionBusy = false; if (!closing) RefreshMenu(); }
@@ -723,6 +730,28 @@ namespace RemoteAgents.Launcher
         // Заметка проверки сети — только в подсказку трея, пока VPN включён; не пишется после выключения.
         void SetNetNote(string text)
         { if (text.Length == 0 || (!closing && vpnActionWanted && Json.Str(VpnStatus.Read(home), "state") == "on")) netNote = text; }
+        DateTime nextMirror = DateTime.MinValue;
+        void EnsureLogShipping()
+        {
+            if (shipper != null || engine.Current.Length == 0) return;
+            string logs = Path.Combine(home, "logs"), state = Path.Combine(home, "state");
+            Directory.CreateDirectory(state);
+            Action<LogLevel, string, string[]> write = (level, evt, kv) => log.Write(level, evt.StartsWith("ship") ? "ship" : "helper", evt, kv);
+            string device = ""; try { device = ConfigProfile.DeviceName(ConfigProfile.Load(home)); } catch { }
+            mirror = new HelperLogMirror(logs, state, () => netHelper != null && netHelper.Ready, () => NetHelperInstall.InstalledVersion,
+                (after, max) => netHelper.LogRead(after, max), write);
+            shipper = new LogShipper(logs, state, new SshLogSender(home, () => engine.Folder(engine.Current)), write, device, Environment.MachineName, Program.Version);
+            RaLog.OnError = () => { var s = shipper; if (s != null) s.Kick(); };
+            if (ladder != null) ladder.Changed += r => { if (!r.Ok && shipper != null) shipper.Kick(); };
+        }
+        // Выход и перезапуск: сначала свежие строки помощника, затем отправка (до 5 с).
+        void FlushLogs()
+        {
+            try {
+                if (mirror != null) { var pull = Task.Run(() => { try { mirror.Pull(); } catch { } }); pull.Wait(3000); }
+                if (shipper != null) shipper.Flush(TimeSpan.FromSeconds(5));
+            } catch { }
+        }
         void SignalVpnStop()
         { try { Files.Atomic(Path.Combine(home, "state/vpn.stop"), "stop\n"); } catch { log.Write("vpn.stop.failed"); } }
         // Снимок сети уходит в фон: перечисление процессов и адаптеров не должно задерживать окно.
@@ -769,7 +798,7 @@ namespace RemoteAgents.Launcher
             try {
                 if (!vpn.Definition.CommandManaged) { EnableRuntime(vpn, false); return; }
                 if (netHelper == null) throw new IOException(HelperClient.PermissionRequired);
-                await netHelper.VpnOff(); log.Write("vpn.off.step att=" + att + " step=request ms=" + offWatch.ElapsedMilliseconds); log.Write("vpn.off.ok att=" + att + " ms=" + offWatch.ElapsedMilliseconds); LogNetSnapshot("vpn.off.after", att);
+                await netHelper.VpnOff(); if (mirror != null) Task.Run(() => { try { mirror.Pull(); } catch { } }); log.Write("vpn.off.step att=" + att + " step=request ms=" + offWatch.ElapsedMilliseconds); log.Write("vpn.off.ok att=" + att + " ms=" + offWatch.ElapsedMilliseconds); LogNetSnapshot("vpn.off.after", att);
                 config.SetVpnIntent(false); config.SetEnabled(vpn.Definition, false);
             }
             catch (OperationCanceledException) { log.Write("vpn.off.cancelled att=" + att); }
@@ -936,7 +965,7 @@ namespace RemoteAgents.Launcher
             try { StopManagedComponents(); } catch { log.Write("components.stop.failed"); }
             foreach (var r in runtimes) r.Dispose(preserveVpn); foreach (var job in actionJobs) job.Dispose();
             try { WriteStatus(); } catch { log.Write("status.write.failed"); }
-            log.Write("launcher.exit"); icon.Visible = false; icon.Dispose(); timer.Dispose();
+            FlushLogs(); log.Write("launcher.exit"); icon.Visible = false; icon.Dispose(); timer.Dispose();
             green.Dispose(); yellow.Dispose(); red.Dispose(); dispatch.Dispose(); base.ExitThreadCore();
         }
     }
