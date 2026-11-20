@@ -109,7 +109,7 @@ namespace RemoteAgents.Launcher
                 bool gateway = mine.Any(r => (Json.Str(r, "DestinationPrefix") == "0.0.0.0/0" || Json.Str(r, "DestinationPrefix") == "::/0") && !new[] { "", "0.0.0.0", "::" }.Contains(Json.Str(r, "NextHop")));
                 string label = Label(text);
                 string why = null;
-                if (full && (virt || label != null || only || (runningLabels.Count > 0 && !gateway))) why = virt ? "virtual-full-route" : label != null ? "known-vpn-full-route" : only ? "ip-only-tunnel" : "vpn-process-without-gateway";
+                if (full && (virt || label != null || only || (runningLabels.Count > 0 && !gateway))) why = only ? "ip-only-tunnel" : virt ? "virtual-full-route" : label != null ? "known-vpn-full-route" : "vpn-process-without-gateway";
                 // Неизвестный поднятый TUN без маршрута проверять нельзя: как раньше, закрываем включение.
                 else if (Match(text, "TUN|Wintun|WireGuard|TAP") && !(partial && Match(text, "OpenVPN|WireGuard|Tailscale")) && !Match(text, "OpenVPN|Tailscale")) why = "tun-adapter";
                 if (why != null) {

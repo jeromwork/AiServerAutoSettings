@@ -1,0 +1,12 @@
+2026-11-20T09:13:05.123Z 12:13:05.123+03:00 INFO  vpn       on.ok          s=7f3a att=on-091305-2c ms=1834
+2026-11-20T09:13:05.123Z 12:13:05.123+03:00 WARN  vpn       on.response    s=7f3a att=on-091305-2c state=conflict conflict="Happ (happ-xray)" summary="Отключите Happ"
+2026-11-20T09:13:05.123Z 12:13:05.123+03:00 INFO  launcher  config.window  s=7f3a msg="Беспроводная сеть"
+2026-11-20T09:13:05.123Z 12:13:05.123+03:00 ERROR core      core.exit      s=7f3a code=1 tail="say \"hi\" now"
+2026-11-20T09:13:05.123Z 12:13:05.123+03:00 INFO  net       net.state      s=7f3a detail="" reason=port-closed
+2026-11-20T09:13:05.123Z 12:13:05.123+03:00 WARN  helper    stage          s=7f3a msg="line1\nline2 tab"
+2026-11-20T09:13:05.123Z 12:13:05.123+03:00 INFO  transport path.check     s=7f3a candidate=vless-direct detail="ms=123; bytes=0"
+2026-11-20T09:13:05.123Z 12:13:05.123+03:00 DEBUG ship      ship.ok        s=7f3a token=*** path=channel
+2026-11-20T09:13:05.123Z 12:13:05.123+03:00 INFO  config    x              s=7f3a msg="header Authorization: *** *** end"
+2026-11-20T09:13:05.123Z 12:13:05.123+03:00 INFO  disk      folder         s=7f3a path=C:\Users\Ева\Disk msg="C:\\Program Files\\App"
+2026-11-20T09:13:05.123Z 12:13:05.123+03:00 WARN  vpn       bad-event-     s=7f3a a_b=1
+@long

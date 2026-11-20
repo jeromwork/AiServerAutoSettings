@@ -358,6 +358,7 @@ namespace RemoteAgents.Launcher
         {
             if (args.Length == 1 && args[0] == "--lan-config") { ConfigBundleTests.LanConfig(); Console.WriteLine("PASS: LAN ConfigBundle"); return 0; }
             if (args.Length == 1 && args[0] == "--lan-tun") { Run(); return 0; }
+            if (args.Length == 1 && args[0] == "--logging") return LoggingTests.Run(args);
             if (args.Length == 1 && args[0] == "--lan-hosts") { LanHostsTests.Run(); return 0; }
             if (args.Length == 6 && args[0] == "--lan-hosts-resolve") return LanHostsTests.Resolve(args);
             // Focused UI/tick coverage without running unrelated disk/update suites.

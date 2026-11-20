@@ -154,8 +154,8 @@ function Write-RaLogFile([string]$Dir,[string]$Stream,[string]$Line) {
             [IO.File]::Move($path,$path+'.1')
         }
         $fresh=(-not [IO.File]::Exists($path)) -or ((New-Object IO.FileInfo($path)).Length -eq 0)
-        $stream=New-Object IO.FileStream($path,[IO.FileMode]::Append,[IO.FileAccess]::Write,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
-        try{if($fresh){$stream.Write([byte[]]@(0xEF,0xBB,0xBF),0,3)};$stream.Write($bytes,0,$bytes.Length)}finally{$stream.Dispose()}
+        $fs=New-Object IO.FileStream($path,[IO.FileMode]::Append,[IO.FileAccess]::Write,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+        try{if($fresh){$fs.Write([byte[]]@(0xEF,0xBB,0xBF),0,3)};$fs.Write($bytes,0,$bytes.Length)}finally{$fs.Dispose()}
     }catch{}
     finally{if($mutex){try{if($held){$mutex.ReleaseMutex()}}catch{};$mutex.Dispose()}}
 }

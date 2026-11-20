@@ -1,0 +1,82 @@
+[
+ {
+  "in": "token=abc123secret",
+  "out": "token=***"
+ },
+ {
+  "in": "password: hunter2 rest",
+  "out": "password: *** rest"
+ },
+ {
+  "in": "{\"apiKey\":\"AbCd1234\"}",
+  "out": "{\"apiKey\":***}"
+ },
+ {
+  "in": "key=value other=1",
+  "out": "key=*** other=1"
+ },
+ {
+  "in": "Authorization: Bearer abc.def-123",
+  "out": "Authorization: *** ***"
+ },
+ {
+  "in": "see Bearer tok_en123 end",
+  "out": "see Bearer *** end"
+ },
+ {
+  "in": "cookie=sessionid=abc; path=/",
+  "out": "cookie=***; path=/"
+ },
+ {
+  "in": "uuid=123e4567-e89b-12d3-a456-426614174000",
+  "out": "uuid=***"
+ },
+ {
+  "in": "id 123e4567-e89b-12d3-a456-426614174000 ok",
+  "out": "id uuid:****4000 ok"
+ },
+ {
+  "in": "-----BEGIN OPENSSH PRIVATE KEY-----\nabcdef\n-----END OPENSSH PRIVATE KEY----- tail",
+  "out": "[private-key] tail"
+ },
+ {
+  "in": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIabc comment",
+  "out": "ssh-ed25519 [pubkey] comment"
+ },
+ {
+  "in": "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC0 x",
+  "out": "ssh-rsa [pubkey] x"
+ },
+ {
+  "in": "blob a1B2c3D4a1B2c3D4a1B2c3D4a1B2c3D4a1B2c3D4a1B2c3D4a1B2c3D4 end",
+  "out": "blob [blob:56] end"
+ },
+ {
+  "in": "hex 0123456789abcdef0123456789abcdef0123456789abcdef end",
+  "out": "hex [blob:48] end"
+ },
+ {
+  "in": "path /usr/local/lib/remoteagents/lan_pc_access.py ok",
+  "out": "path /usr/local/lib/remoteagents/lan_pc_access.py ok"
+ },
+ {
+  "in": "Беспроводная сеть, порт 2222",
+  "out": "Беспроводная сеть, порт 2222"
+ },
+ {
+  "in": "monkey=banana",
+  "out": "monkey=banana"
+ },
+ {
+  "in": "ssh_key=abc",
+  "out": "ssh_key=***"
+ },
+ {
+  "in": "PASSWORD=Top",
+  "out": "PASSWORD=***"
+ },
+ {
+  "in": "short abc",
+  "out": "short abc"
+ }
+]

@@ -1,0 +1,181 @@
+[
+ {
+  "level": "INFO",
+  "comp": "vpn",
+  "evt": "on.ok",
+  "fields": [
+   [
+    "att",
+    "on-091305-2c"
+   ],
+   [
+    "ms",
+    "1834"
+   ]
+  ]
+ },
+ {
+  "level": "WARN",
+  "comp": "vpn",
+  "evt": "on.response",
+  "fields": [
+   [
+    "att",
+    "on-091305-2c"
+   ],
+   [
+    "state",
+    "conflict"
+   ],
+   [
+    "conflict",
+    "Happ (happ-xray)"
+   ],
+   [
+    "summary",
+    "Отключите Happ"
+   ]
+  ]
+ },
+ {
+  "level": "INFO",
+  "comp": "launcher",
+  "evt": "config.window",
+  "fields": [
+   [
+    "msg",
+    "Беспроводная сеть"
+   ]
+  ]
+ },
+ {
+  "level": "ERROR",
+  "comp": "core",
+  "evt": "core.exit",
+  "fields": [
+   [
+    "code",
+    "1"
+   ],
+   [
+    "tail",
+    "say \"hi\" now"
+   ]
+  ]
+ },
+ {
+  "level": "INFO",
+  "comp": "net",
+  "evt": "net.state",
+  "fields": [
+   [
+    "detail",
+    ""
+   ],
+   [
+    "reason",
+    "port-closed"
+   ]
+  ]
+ },
+ {
+  "level": "WARN",
+  "comp": "helper",
+  "evt": "stage",
+  "fields": [
+   [
+    "msg",
+    "line1\nline2\ttab"
+   ]
+  ]
+ },
+ {
+  "level": "INFO",
+  "comp": "transport",
+  "evt": "path.check",
+  "fields": [
+   [
+    "candidate",
+    "vless-direct"
+   ],
+   [
+    "detail",
+    "ms=123; bytes=0"
+   ]
+  ]
+ },
+ {
+  "level": "DEBUG",
+  "comp": "ship",
+  "evt": "ship.ok",
+  "fields": [
+   [
+    "token",
+    "abc123secret"
+   ],
+   [
+    "path",
+    "channel"
+   ]
+  ]
+ },
+ {
+  "level": "INFO",
+  "comp": "config",
+  "evt": "x",
+  "fields": [
+   [
+    "msg",
+    "header Authorization: Bearer abcDEF123.xyz end"
+   ]
+  ]
+ },
+ {
+  "level": "INFO",
+  "comp": "disk",
+  "evt": "folder",
+  "fields": [
+   [
+    "path",
+    "C:\\Users\\Ева\\Disk"
+   ],
+   [
+    "msg",
+    "C:\\Program Files\\App"
+   ]
+  ]
+ },
+ {
+  "level": "WARN",
+  "comp": "vpn",
+  "evt": "Bad_Event!",
+  "fields": [
+   [
+    "a b",
+    "1"
+   ],
+   [
+    "s",
+    "override"
+   ]
+  ]
+ },
+ {
+  "level": "INFO",
+  "comp": "launcher",
+  "evt": "long",
+  "fields": [
+   [
+    "msg",
+    ""
+   ]
+  ],
+  "repeat": {
+   "index": 0,
+   "text": "word ",
+   "count": 1500
+  },
+  "expectLength": 4102,
+  "endsWith": "…[cut]"
+ }
+]

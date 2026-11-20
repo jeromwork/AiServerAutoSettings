@@ -47,8 +47,8 @@ try{
             self.assertNotIn('pw',log)
             self.assertNotIn('aa',log)
             self.assertNotIn('bb',log)
-            self.assertIn('probe-failed candidate=entry-fixture reason=timeout',log)
-            self.assertIn('dial tcp: i/o timeout password=<redacted>',log)
+            self.assertRegex(log,r'probe-failed\s+s=[0-9a-f]{4} candidate=entry-fixture reason=timeout')
+            self.assertIn('dial tcp: i/o timeout password=***',log)
 
     def test_refresh_cache_secrets_remain_redacted(self):
         with tempfile.TemporaryDirectory() as tmp:

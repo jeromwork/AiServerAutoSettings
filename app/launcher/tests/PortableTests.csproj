@@ -58,6 +58,7 @@
     <Compile Include="../VpnConflictScan.cs" />
     <Compile Include="../RaLog.cs" />
     <Compile Include="../LogMask.cs" />
+    <Compile Include="../NetLadder.cs" />
     <Compile Include="LoggingTests.cs" />
     <Compile Include="../LanTun.cs" />
     <Compile Include="../LanHosts.cs" />
