@@ -112,7 +112,7 @@ namespace RemoteAgents.Launcher
             return D("log", D("disabled", true),
                 "inbounds", new[] { D("type", "tun", "tag", "vpn-tun", "interface_name", InterfaceName, "address", Address, "stack", "system", "auto_route", true, "strict_route", Json.Bool(dnsPolicy, "strictRoute"), "route_exclude_address", excluded) },
                 "outbounds", new[] { D("type", "socks", "tag", "vpn-active", "server", "127.0.0.1", "server_port", socksPort ?? SocksPort, "version", "5", "username", user, "password", password), D("type", "direct", "tag", "vpn-direct") },
-                "route", D("auto_detect_interface", true, "final", "vpn-active", "rules", new[] {
+                "route", D("auto_detect_interface", true, "final", "vpn-active", "default_domain_resolver", D("server", "vpn-local"), "rules", new[] {
                     D("inbound", new[] { "vpn-tun" }, "network", "tcp", "ip_cidr", new[] { ProbeAddress + "/32" }, "port", new[] { check.Port }, "action", "route-options", "override_address", check.DnsSafeHost, "override_port", check.Port),
                     D("inbound", new[] { "vpn-tun" }, "domain", new[] { check.DnsSafeHost }, "action", "resolve", "server", "vpn-dns", "disable_cache", true, "disable_optimistic_cache", true, "timeout", "3000ms"),
                     D("inbound", new[] { "vpn-tun" }, "domain", new[] { check.DnsSafeHost }, "action", "route", "outbound", "vpn-active"),
