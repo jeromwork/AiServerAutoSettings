@@ -123,7 +123,7 @@ class FirstRunTests(unittest.TestCase):
         self.assertIn('TrayMenuModel.Build(config.Data, AccountState()', menu)
         # «Открыть» and the left click lead to Happier; «Настройки» is the program window; «Диск» is the Disk root.
         self.assertIn('if (id == "open") OpenHappier()', menu)
-        self.assertIn('else if (id == "settings") ShowMain()', menu)
+        self.assertIn('else if (id == "settings") ShowMain("Настройки")', menu)
         self.assertIn('else if (id == "disk") OpenDisk()', menu)
         for gone in ('"folders"', '"progress"', 'ShowDiskProgress'):
             self.assertNotIn(gone, tray)
