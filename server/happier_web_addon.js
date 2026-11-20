@@ -66,30 +66,35 @@
             }
             let secret = pending.key;
             pending.key = '';
-            const deadline = Date.now() + 20000;
-            const timer = setInterval(() => {
-                try {
-                    if (hasLogin() || Date.now() > deadline) { clearInterval(timer); secret = ''; return; }
-                    const input = document.querySelector('input[data-testid="restore-manual-secret-input"]');
-                    const submit = document.querySelector('[data-testid="restore-manual-submit"]');
-                    if (!input || !submit || submit.getAttribute('aria-disabled') === 'true' || submit.disabled) return;
-                    clearInterval(timer);
-                    // Bypass React's value tracker, then deliver its normal input event.
-                    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-                    setValue.call(input, secret);
-                    secret = '';
-                    input.dispatchEvent(new Event('input', {bubbles: true}));
-                    // Allow the controlled field's state/submit closure to commit first.
-                    setTimeout(() => {
-                        try { if (!hasLogin() && input.isConnected && submit.isConnected) submit.click(); }
-                        catch { /* Incompatible UI: leave its ordinary screen. */ }
-                        finally {
-                            setValue.call(input, '');
-                            input.dispatchEvent(new Event('input', {bubbles: true}));
-                        }
-                    }, 0);
-                } catch { clearInterval(timer); secret = ''; }
-            }, 100);
+            // Deferred UI bundles must finish before the form polling budget starts.
+            const startRestore = () => {
+                const deadline = Date.now() + 60000;
+                const timer = setInterval(() => {
+                    try {
+                        if (hasLogin() || Date.now() > deadline) { clearInterval(timer); secret = ''; return; }
+                        const input = document.querySelector('input[data-testid="restore-manual-secret-input"]');
+                        const submit = document.querySelector('[data-testid="restore-manual-submit"]');
+                        if (!input || !submit || submit.getAttribute('aria-disabled') === 'true' || submit.disabled) return;
+                        clearInterval(timer);
+                        // Bypass React's value tracker, then deliver its normal input event.
+                        const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                        setValue.call(input, secret);
+                        secret = '';
+                        input.dispatchEvent(new Event('input', {bubbles: true}));
+                        // Allow the controlled field's state/submit closure to commit first.
+                        setTimeout(() => {
+                            try { if (!hasLogin() && input.isConnected && submit.isConnected) submit.click(); }
+                            catch { /* Incompatible UI: leave its ordinary screen. */ }
+                            finally {
+                                setValue.call(input, '');
+                                input.dispatchEvent(new Event('input', {bubbles: true}));
+                            }
+                        }, 0);
+                    } catch { clearInterval(timer); secret = ''; }
+                }, 100);
+            };
+            if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startRestore, {once:true});
+            else startRestore();
         } catch {
             // Storage denied, incompatible UI or malformed handoff: ordinary Happier.
             try { sessionStorage.removeItem(loginSlot); } catch { /* no storage */ }

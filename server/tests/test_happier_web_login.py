@@ -14,6 +14,12 @@ from resource_guard import wait_for_memory
 
 class NativeLoginTests(unittest.TestCase):
     def test_chrome_official_ui_native_login(self):
+        self.check_native_login()
+
+    def test_chrome_official_ui_native_login_slow_bundles(self):
+        self.check_native_login(js_delay_ms=25000)
+
+    def check_native_login(self, js_delay_ms=0):
         self.assertTrue(Path('/usr/bin/google-chrome').is_file(), 'Chrome is required')
         self.assertTrue(wait_for_memory(attempts=0), 'not enough memory for required real-UI check')
         with tempfile.TemporaryDirectory(prefix='ra-native-login-') as tmp:
@@ -31,9 +37,10 @@ class NativeLoginTests(unittest.TestCase):
             with running(web.make_server(base, 0)) as origin:
                 process = subprocess.Popen(['nice', '-n', '10', 'node', str(SOURCE / 'tests/happier_web_login.cjs'),
                                             origin, str(root / 'chrome')], stdout=subprocess.PIPE,
-                                           stderr=subprocess.PIPE, text=True, start_new_session=True)
+                                           stderr=subprocess.PIPE, text=True, start_new_session=True,
+                                           env=dict(os.environ, HAPPIER_TEST_JS_DELAY_MS=str(js_delay_ms)))
                 try:
-                    stdout, stderr = process.communicate(timeout=100)
+                    stdout, stderr = process.communicate(timeout=100 + js_delay_ms / 1000)
                     result = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
                 finally:
                     # Only our Node/Chrome group, including helpers on timeout.
@@ -44,6 +51,8 @@ class NativeLoginTests(unittest.TestCase):
                     process.wait()
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn('PASS: official ui-web', result.stdout)
+            if js_delay_ms:
+                self.assertIn(f'PASS: UI script delay {js_delay_ms} ms', result.stdout)
             print(result.stdout.strip())
 
 
