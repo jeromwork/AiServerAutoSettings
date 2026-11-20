@@ -270,8 +270,9 @@ namespace RemoteAgents {
  }
 }
 '@
+    # .NET Framework resolves ReadObject overloads against XmlReader even for a Stream argument.
     if ($PSVersionTable.PSEdition -eq 'Core') { Add-Type -TypeDefinition $source }
-    else { Add-Type -TypeDefinition $source -ReferencedAssemblies System.dll,System.Core.dll,System.Runtime.Serialization.dll }
+    else { Add-Type -TypeDefinition $source -ReferencedAssemblies System.dll,System.Core.dll,System.Runtime.Serialization.dll,System.Xml.dll }
 }
 
 function Start-TransportEvents {
