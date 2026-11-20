@@ -21,6 +21,8 @@ from urllib.parse import urlsplit, parse_qs
 
 PWSH = sys.argv[1] if len(sys.argv) > 1 else 'pwsh'
 EVENTS = Path(__file__).with_name('Transport.Events.ps1').resolve()
+# Core integration alone cannot catch missing .NET Framework references.
+subprocess.run([sys.executable, str(EVENTS.with_name('test-transport-events-references.py'))], check=True)
 SECRET = 'test-api-secret-do-not-publish'
 lock = threading.Lock()
 state = dict(mode='idle', version=0, requests=[], connects=0, data=[], progress={})
