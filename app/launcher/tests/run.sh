@@ -18,10 +18,50 @@ cleanup() {
   # CleanupLegacy fixtures deliberately preserve read-only directories. On Linux
   # remove that fixture permission before deleting our own disposable test root.
   chmod -R u+rwX -- "$testdir" 2>/dev/null || true
-  rm -rf -- "$testdir"
+  if [[ ${BARRIER_RETRY_DIR:-} == "$testdir/retries" ]]; then
+    # Keep attempt logs for barrier review, but remove the disposable fixtures.
+    find "$testdir" -mindepth 1 -maxdepth 1 ! -name retries -exec rm -rf -- {} +
+  else
+    rm -rf -- "$testdir"
+  fi
 }
 trap cleanup EXIT
 pwsh=${PWSH:-$HOME/.cache/pwsh-test/pwsh}
+# BEGIN barrier retry (extracted by test_barrier_retry.py).
+BARRIER_RETRIES=${BARRIER_RETRIES:-0}
+BARRIER_RETRY_DIR=${BARRIER_RETRY_DIR:-$testdir/retries}
+mkdir -p -- "$BARRIER_RETRY_DIR"
+flaky() {
+  local name=$1 attempt code started load1 deadline remaining
+  shift
+  for ((attempt=1; attempt<=1+BARRIER_RETRIES; attempt++)); do
+    started=$SECONDS
+    # A conditional pipeline keeps errexit from aborting before PIPESTATUS is read.
+    # The function itself is called directly, so its final failure still stops a group.
+    if "$@" 2>&1 | tee "$BARRIER_RETRY_DIR/$name.attempt$attempt.log"; then
+      code=${PIPESTATUS[0]}
+    else
+      code=${PIPESTATUS[0]}
+    fi
+    read -r load1 _ < /proc/loadavg
+    printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$attempt" "$code" "$((SECONDS-started))" "$load1" >> "$BARRIER_RETRY_DIR/retries.tsv"
+    if (( code == 0 )); then return 0; fi
+    if (( attempt <= BARRIER_RETRIES )); then
+      echo "RETRY[$name] attempt $attempt failed (exit $code), retrying"
+      deadline=$((SECONDS+120))
+      while (( SECONDS < deadline )); do
+        read -r load1 _ < /proc/loadavg
+        if LC_ALL=C awk -v load="$load1" 'BEGIN {exit !(load <= 4)}'; then break; fi
+        remaining=$((deadline-SECONDS))
+        if (( remaining <= 0 )); then break; fi
+        if (( remaining > 5 )); then remaining=5; fi
+        sleep "$remaining"
+      done
+    fi
+  done
+  return "$code"
+}
+# END barrier retry.
 # Optional gate for a shared host; wait before starting each next test/build, not inside its timeout.
 wait_for_memory() {
   local minimum=${LAUNCHER_TESTS_MEMORY_MIN_MB:-0} available attempt
@@ -53,6 +93,8 @@ wait_for_memory
   wait_for_memory
   timeout 60 python3 "$here/test_run_modes.py"
   wait_for_memory
+  timeout 60 python3 "$here/test_barrier_retry.py"
+  wait_for_memory
   timeout 60 python3 "$here/test-config-sync.py"
   wait_for_memory
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-first-install.ps1" -TestHome "$testdir/wizard" < /dev/null
@@ -81,7 +123,7 @@ wait_for_memory
   wait_for_memory
   LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-config-account.ps1" -TestHome "$testdir/config-account" < /dev/null
   wait_for_memory
-  LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-config-bootstrap.ps1" -TestHome "$testdir/config-bootstrap" < /dev/null
+  flaky config-bootstrap env LOCALAPPDATA="$testdir/local" timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-config-bootstrap.ps1" -TestHome "$testdir/config-bootstrap" < /dev/null
   wait_for_memory
   timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-ssh-resolve.ps1" -TestHome "$testdir/ssh-resolve" < /dev/null
   wait_for_memory
@@ -104,11 +146,11 @@ wait_for_memory
   wait_for_memory
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-decide.ps1" < /dev/null
   wait_for_memory
-  timeout 120 python3 "$repo/transport/test-transport-events.py" "$pwsh"
+  flaky transport-events timeout 120 python3 "$repo/transport/test-transport-events.py" "$pwsh"
   wait_for_memory
-  timeout 120 python3 "$repo/transport/test-transport-liveness.py" "$pwsh"
+  flaky transport-liveness timeout 120 python3 "$repo/transport/test-transport-liveness.py" "$pwsh"
   wait_for_memory
-  TRANSPORT_DAEMON_TEST_BUDGET=400 timeout 420 python3 "$repo/transport/test-transport-daemon.py" "$pwsh"
+  flaky transport-daemon env TRANSPORT_DAEMON_TEST_BUDGET=400 timeout 420 python3 "$repo/transport/test-transport-daemon.py" "$pwsh"
   wait_for_memory
   timeout 120 python3 "$here/test_first_run.py"
   wait_for_memory
@@ -122,7 +164,7 @@ wait_for_memory
   wait_for_memory
   timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-disk-errors.ps1"
   wait_for_memory
-  timeout 120 python3 "$repo/transport/test-engine-loopback.py" --without-disk
+  flaky engine-loopback timeout 120 python3 "$repo/transport/test-engine-loopback.py" --without-disk
   wait_for_memory
   LOCALAPPDATA="$testdir/local" timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-config-engine.ps1" -TestHome "$testdir/config-engine" < /dev/null
   wait_for_memory
@@ -138,7 +180,7 @@ wait_for_memory
   wait_for_memory
   timeout 120 python3 "$repo/transport/test-server-catalog.py"
   wait_for_memory
-  timeout 120 node "$repo/accounts/test-accounts.mjs"
+  flaky accounts timeout 120 node "$repo/accounts/test-accounts.mjs"
   wait_for_memory
   timeout 120 python3 "$here/test_build.py"
   wait_for_memory
@@ -166,7 +208,7 @@ if [[ ${LAUNCHER_TESTS_SERIAL:-0} == 1 ]]; then
 fi
 (
   wait_for_memory
-  bash "$repo/server/tests/run.sh"
+  flaky server bash "$repo/server/tests/run.sh"
 ) > "$testdir/server.log" 2>&1 &
 server_pid=$!
 if [[ ${LAUNCHER_TESTS_SERIAL:-0} != 1 ]]; then
