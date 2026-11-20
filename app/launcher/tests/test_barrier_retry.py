@@ -29,7 +29,8 @@ class BarrierRetryTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='launcher-barrier-retry-')
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name)/'test'
+        self.root.mkdir()
         self.logs = self.root/'retries'
 
     def run_shell(self, body=COMMAND, retries=None, mode='fail', load='0.00', custom=False):
@@ -39,7 +40,7 @@ class BarrierRetryTests(unittest.TestCase):
         if retries is not None:
             env['BARRIER_RETRIES'] = str(retries)
         if custom:
-            self.logs = self.root/'custom'/'attempts'
+            self.logs = Path(self.tmp.name)/'custom'/self.root.name/'attempts'
             env['BARRIER_RETRY_DIR'] = str(self.logs)
         # Supply deterministic load samples and advance Bash's clock instead of waiting.
         script = 'set -euo pipefail\nunset SECONDS\nSECONDS=0\ntestdir=$TEST_ROOT\n' + RETRY_BLOCK + '''
@@ -113,18 +114,33 @@ exit "$code"
         waits = [int(value) for value in (self.root/'sleeps').read_text().splitlines()]
         self.assertEqual(sum(waits), 120)
         self.assertTrue(all(0 < value <= 5 for value in waits))
+        # The same path must skip waiting at low load; a broken awk predicate
+        # otherwise looks exactly like a permanently busy host.
+        (self.root/'sleeps').unlink()
+        result = self.run_shell(body='flaky x false\n', retries=1, load='0.00')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertFalse((self.root/'sleeps').exists(), result.stderr)
 
     def test_default_logs_survive_cleanup(self):
         start = SOURCE.index('cleanup() {')
         cleanup = SOURCE[start:SOURCE.index('trap cleanup EXIT', start)]
-        result = self.run_shell(cleanup + '''mkdir "$testdir/fixture"
-flaky x echo saved
-cleanup
-''')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.logs/'x.attempt1.log').read_text(), 'saved\n')
-        self.assertTrue((self.logs/'retries.tsv').is_file())
-        self.assertFalse((self.root/'fixture').exists())
+        base = self.root
+        for custom in (False, True):
+            for code in (0, 7):
+                with self.subTest(custom=custom, code=code):
+                    self.root = base/f'{custom}-{code}'
+                    self.root.mkdir()
+                    self.logs = self.root/'retries'
+                    result = self.run_shell(cleanup + '''trap cleanup EXIT
+mkdir "$testdir/fixture"
+flaky x bash -c 'echo saved; exit ''' + str(code) + "'\n", custom=custom)
+                    self.assertEqual(result.returncode, code, result.stderr)
+                    self.assertEqual((self.logs/'x.attempt1.log').read_text(), 'saved\n')
+                    summary = (self.logs/'retries.tsv').read_text()
+                    self.assertIn(f'BARRIER_RETRY_DIR={self.logs}\n', result.stdout)
+                    self.assertIn(f'BARRIER_RETRY_TSV={self.logs}/retries.tsv\n', result.stdout)
+                    self.assertIn('NAME\tattempt\texit\tseconds\tload1\n' + summary, result.stdout)
+                    self.assertFalse((self.root/'fixture').exists())
 
     def test_closed_retry_list(self):
         # Keep this list synchronized with section 0 of exe-build.md.

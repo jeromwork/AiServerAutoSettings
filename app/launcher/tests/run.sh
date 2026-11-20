@@ -15,6 +15,14 @@ export UseSharedCompilation=false DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER=1 MSBUILD
 dotnet=${DOTNET:-$HOME/.dotnet/dotnet}
 testdir=$(mktemp -d /tmp/remoteagents-launcher-tests.XXXXXX)
 cleanup() {
+  if [[ -n ${BARRIER_RETRY_DIR:-} ]]; then
+    printf 'BARRIER_RETRY_DIR=%s\n' "$BARRIER_RETRY_DIR"
+    printf 'BARRIER_RETRY_TSV=%s/retries.tsv\n' "$BARRIER_RETRY_DIR"
+    if [[ -f $BARRIER_RETRY_DIR/retries.tsv ]]; then
+      printf 'NAME\tattempt\texit\tseconds\tload1\n'
+      cat -- "$BARRIER_RETRY_DIR/retries.tsv"
+    fi
+  fi
   # CleanupLegacy fixtures deliberately preserve read-only directories. On Linux
   # remove that fixture permission before deleting our own disposable test root.
   chmod -R u+rwX -- "$testdir" 2>/dev/null || true
@@ -51,7 +59,7 @@ flaky() {
       deadline=$((SECONDS+120))
       while (( SECONDS < deadline )); do
         read -r load1 _ < /proc/loadavg
-        if LC_ALL=C awk -v load="$load1" 'BEGIN {exit !(load <= 4)}'; then break; fi
+        if LC_ALL=C awk -v l="$load1" 'BEGIN {exit !(l <= 4)}'; then break; fi
         remaining=$((deadline-SECONDS))
         if (( remaining <= 0 )); then break; fi
         if (( remaining > 5 )); then remaining=5; fi
