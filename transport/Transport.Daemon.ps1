@@ -13,6 +13,7 @@ $portConflict=$null;$bindRetry=$null;$startFailures=0;$bindState=@{failures=0;no
 $reader=$null;$directCheck=$null;$pathChecks=@{};$gateOkUntil=@{};$decision=$null;$verdict=$null;$eventQueue=@();$lastRecoveryAt=$null;$pathCheckStartedAt=@{}
 $diagnosticContext=$null;$liveDeferred=@();$tunnelReadyUntil=@{};$daemonStarted=[DateTime]::Now;$checkingSince=[DateTime]::UtcNow;$stopping=$false
 try{$daemonStarted=(Get-Process -Id $PID).StartTime}catch{}
+$script:engineAttempted=$false;$checkingSince=$daemonStarted.ToUniversalTime()
 $lastStatus=[DateTime]::MinValue;$nextNetwork=[DateTime]::MinValue;$retryAt=[DateTime]::MinValue
 function Test-TransportStop {
     try{if([IO.File]::Exists((Join-Path $root 'stop')) -or [IO.File]::Exists((Join-Path $root 'state/transport.stop'))){return $true}}catch{}
@@ -185,14 +186,20 @@ function Publish-TransportStatus {
     if($confirmed -and $row){$speed=$row.kbps}
     $alive=$false;if($engine){try{$alive=-not $engine.Process.HasExited}catch{}}
     $id=$null;if($network){$id=$network.id}
+    $starting=(-not $script:engineAttempted -and $exitCode -eq 0 -and -not $reloadError -and -not $portConflict -and -not $stopping)
     $summary='нет связи: '+$(if($errorText){$errorText}else{'нет проверенного пути'})
     if($alive -and $confirmed -and $row){$summary=$row.title;if($null -ne $speed){$summary+=' · '+([Math]::Round([double]$speed,1)).ToString([Globalization.CultureInfo]::InvariantCulture)+' КБ/с'}}
+    if($starting){$summary='запуск модуля связи'}
     if($settings -and $settings.LocalWeb.conflict){$summary+=' · Happier: '+$settings.LocalWeb.conflict.message}
     $searching=[bool]($verdict -and ($verdict.action -in @('searching','rollback-penalties') -or $verdict.localNet -eq 'down' -or (-not $confirmed -and -not $initialRound)))
     $degraded=[bool]($confirmed -and $decision -and $active -and $decision.pending.ContainsKey($active))
     $isOk=[bool]($alive -and $confirmed -and -not $degraded -and -not $searching -and -not $reloadError -and -not $portConflict -and $exitCode -eq 0 -and -not $stopping)
     if($isOk){$script:checkingSince=$null}
-    $phase=if($stopping){'stopped'}elseif($exitCode -ne 0 -or $reloadError -or $portConflict -or -not $alive){'failed'}elseif($initialRound -and -not $confirmed){'checking'}elseif($searching){'searching'}elseif($degraded){'degraded'}elseif($isOk){'ok'}elseif($script:checkingSince){'checking'}else{'failed'}
+    if($starting){
+        $isOk=$false
+        if(-not $script:checkingSince){$script:checkingSince=$daemonStarted.ToUniversalTime()}
+    }
+    $phase=if($starting){'checking'}elseif($stopping){'stopped'}elseif($exitCode -ne 0 -or $reloadError -or $portConflict -or -not $alive){'failed'}elseif($initialRound -and -not $confirmed){'checking'}elseif($searching){'searching'}elseif($degraded){'degraded'}elseif($isOk){'ok'}elseif($script:checkingSince){'checking'}else{'failed'}
     Write-TransportJson (Join-Path $root 'status/transport.json') ([ordered]@{endpoints=@($paths.Outbounds|Where-Object {$_.server -and $_.server -notin @('127.0.0.1','::1')}|ForEach-Object {[string]$_.server}|Sort-Object -Unique);ports=$(if($settings){Get-TransportConfiguredPorts ([pscustomobject]$settings.Options) $settings.Profile}else{$null});localWeb=$(if($settings){$settings.LocalWeb}else{$null});lan=$(if($settings){$settings.Lan}else{$null});helper=$(if($settings){Get-TransportHelperStatus $settings $active $paths.Outbounds}else{$null});portConflict=$portConflict;retryAt=$retryAt.ToUniversalTime().ToString('o');configRevision=$revision;fatal=($exitCode -ne 0);summary=$summary;reason=$(if($verdict){@{code=$verdict.reason.code;text=$(if($verdict.reason.code -eq 'ok'){''}else{$verdict.reason.text});since=([DateTime]::SpecifyKind([DateTime]'1970-01-01',[DateTimeKind]::Utc)).AddMilliseconds([long]$verdict.reason.since).ToString('o')}}else{@{code='ok';text='';since=[DateTime]::UtcNow.ToString('o')}});localNet=$(if($verdict){$verdict.localNet}else{'unknown'});switches=@($(if($decision){foreach($item in $decision.switches){@{at=([DateTime]::SpecifyKind([DateTime]'1970-01-01',[DateTimeKind]::Utc)).AddMilliseconds([long]$item.at).ToString('o');from=$item.from;to=$item.to;why=$item.why}}}));ok=$isOk;phase=$phase;checkingSince=$(if($script:checkingSince){$script:checkingSince.ToString('o')}else{$null});active=$active;kbps=$speed;network=$id;metered=$metered;mode=$pin.mode;pinnedTag=$pin.tag;candidates=@($rows);configError=$reloadError;updatedAt=[DateTime]::UtcNow.ToString('o');error=$errorText})
     $script:lastStatus=[DateTime]::UtcNow
 }
@@ -243,6 +250,8 @@ function Start-DaemonRecovery {
 function Start-TransportLiveness([switch]$Recovery) {
     if($liveRound){return}
     $script:liveRound=$true;$script:initialRound=(-not $Recovery)
+    # Counter initialization (Add-Type on Windows) can block before the first probe.
+    Publish-TransportStatus
     foreach($c in $paths.Candidates){
         if($pin.mode -eq 'pinned' -and $c.tag -ne $pin.tag){continue}
         if($pathChecks.ContainsKey($c.tag)){continue}
@@ -291,7 +300,8 @@ function Get-DaemonRestartDelay($Detail) {
 function Start-TransportEngine {
     Stop-TransportEvents $reader;$script:reader=$null
     [void](Reset-DaemonPorts)
-    $script:confirmed=$false;$script:checkingSince=[DateTime]::UtcNow
+    $script:confirmed=$false
+    if($script:engineAttempted){$script:checkingSince=[DateTime]::UtcNow}
     $interface='';$cfgSettings=$settings
     if($settings.Options.bindPhysical){
         $bind=Resolve-TransportBind $bindState $network (Test-TransportVpnOff $root)
@@ -306,8 +316,10 @@ function Start-TransportEngine {
     $cfg=New-TransportConfig $cfgSettings $paths $secret $active $interface
     $file=Join-Path $root 'state/transport-sing-box.json';Write-TransportJson $file $cfg -Private
     # Валидация до запуска; stdout/stderr не публикуются, т.к. могут содержать адреса и секреты.
+    Publish-TransportStatus
     Test-TransportConfigFile $settings.Options.singBoxPath $file
     $script:engine=Start-TransportProcess $settings.Options.singBoxPath @('run','-c',$file)
+    Publish-TransportStatus
     Save-TransportOwner $root 'transport' $engine $settings.Options.singBoxPath $file
     foreach($tunnel in $paths.Tunnels){
         if($tunnelChildren.ContainsKey($tunnel.tag)){continue}
@@ -461,7 +473,8 @@ try{
             try{
                 # После неудачи сеть определяется заново, а не ждёт 5-секундной проверки смены сети.
                 if($startFailures -gt 0 -and $settings.Options.bindPhysical){$network=Get-TransportNetwork;$nextNetwork=$now.AddSeconds(5)}
-                Start-TransportEngine;$errorText='Ожидается проверка пути'
+                try{Start-TransportEngine}finally{$script:engineAttempted=$true}
+                $errorText='Ожидается проверка пути'
             }
             catch{
                 $startError=Format-TransportStartError $_ $diagnosticContext

@@ -258,8 +258,20 @@ HTTP(('127.0.0.1',int(api['external_controller'].split(':')[-1])),API).serve_for
         emit('logs',dict(type='error',payload='open connection to fixture:443 using outbound/vless[%s]: %s' %
                         (tag,'network is unreachable' if local else 'i/o timeout')))
     def ready():
-        wait_ready(lambda: status().get('ok') and len(probes())>=2 and all(c['state']=='ok' for c in status()['candidates']),
-                   label='initial daemon and path proof')
+        startup=[]
+        def startup_ready():
+            current=status()
+            if current and (not startup or startup[-1][0]!='ok'):
+                updated=current['updatedAt']
+                startup.append((current['phase'],updated,time.time()-stamp(updated)))
+            return current.get('ok') and len(probes())>=2 and all(c['state']=='ok' for c in current['candidates'])
+        wait_ready(startup_ready,label='initial daemon and path proof')
+        assert startup and startup[-1][0]=='ok', ('missing first ok',startup)
+        assert not any(phase=='failed' for phase,_,_ in startup), ('failed before first ok',startup)
+        assert all(age<=10 for _,_,age in startup), ('stale status during startup',startup)
+        print('PASS: startup-checking-fresh; observed phases=%s; max status age=%.2fs; ready in %.2fs' %
+              (sorted({phase for phase,_,_ in startup}),max(age for _,_,age in startup),
+               time.monotonic()-daemon_started),flush=True)
         # Wait for the initial round AND both real WS subscriptions before injection.
         wait_ready(lambda: len(records(root/'subscriptions.jsonl'))>=2,label='initial WebSocket subscriptions')
     def reload(cancel=False):
@@ -362,8 +374,9 @@ HTTP(('127.0.0.1',int(api['external_controller'].split(':')[-1])),API).serve_for
         gate=until(lambda: (s:=status()) and row(a,s).get('lastOkAt')!=last_ok and s,
                    seconds=EVENT_WAIT,label='successful gate proof')
         gate_at=stamp(row(a,gate)['lastOkAt'])
+        dial_at=time.time()
         dial(a)
-        until(lambda: stamp(status()['updatedAt'])>=gate_at+2.6,
+        until(lambda: stamp(status()['updatedAt'])>=max(gate_at+2.6,dial_at+1.2),
               seconds=EVENT_WAIT,label='daemon ticks after repeated site error')
         assert len(puts())==baseline and row(a)['penaltyStep']==0 and status()['phase']=='ok',status()
         assert len(records(root/'banners.jsonl'))==banner_count+1
