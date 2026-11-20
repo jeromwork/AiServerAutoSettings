@@ -43,12 +43,12 @@ try{
                                      '-Exe',str(child),'-Root',tmp], stdin=subprocess.DEVNULL, capture_output=True, timeout=45)
             self.assertEqual(result.returncode,0,result.stderr.decode())
             log=(root/'logs/transport.log').read_text()
-            self.assertIn('candidate=entry-fixture reason=connection-refused exit=42 stderr=Connection refused: <redacted> <redacted> <redacted>',log)
+            self.assertIn('candidate=entry-fixture reason=connection-refused exit=42 stderr="Connection refused: <redacted> <redacted> <redacted>"',log)
             self.assertNotIn('pw',log)
             self.assertNotIn('aa',log)
             self.assertNotIn('bb',log)
-            self.assertIn('probe-failed candidate=entry-fixture reason=timeout',log)
-            self.assertIn('dial tcp: i/o timeout password=<redacted>',log)
+            self.assertRegex(log,r'probe-failed\s+s=[0-9a-f]{4} candidate=entry-fixture reason=timeout')
+            self.assertIn('dial tcp: i/o timeout password=***',log)
 
     def test_refresh_cache_secrets_remain_redacted(self):
         with tempfile.TemporaryDirectory() as tmp:

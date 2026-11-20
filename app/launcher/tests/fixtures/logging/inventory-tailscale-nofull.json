@@ -1,0 +1,38 @@
+{
+ "Adapters": [
+  {
+   "Name": "Wi-Fi",
+   "InterfaceDescription": "Intel(R) Wi-Fi 6 AX201",
+   "ifIndex": 5,
+   "Status": "Up",
+   "HardwareInterface": true,
+   "Virtual": false
+  },
+  {
+   "Name": "Tailscale",
+   "InterfaceDescription": "Tailscale Tunnel",
+   "ifIndex": 9,
+   "Status": "Up",
+   "HardwareInterface": false,
+   "Virtual": true
+  }
+ ],
+ "Routes": [
+  {
+   "InterfaceIndex": 5,
+   "DestinationPrefix": "0.0.0.0/0",
+   "NextHop": "192.168.1.1",
+   "RouteMetric": 25
+  },
+  {
+   "InterfaceIndex": 9,
+   "DestinationPrefix": "100.64.0.0/10",
+   "NextHop": "0.0.0.0",
+   "RouteMetric": 5
+  }
+ ],
+ "IpInterfaces": [],
+ "Procs": [],
+ "Services": [],
+ "errors": []
+}

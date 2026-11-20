@@ -83,18 +83,150 @@ function Get-TransportErrorDetail($ErrorRecord) {
     $text=if($m -match '[А-Яа-яЁё]' -and $m -notmatch '[A-Za-z0-9+/_=-]{12,}'){$m}else{$e.GetType().FullName}
     $text+' @'+(Split-Path -Leaf ([string]$ErrorRecord.InvocationInfo.ScriptName))+':'+$ErrorRecord.InvocationInfo.ScriptLineNumber
 }
+# ---- Единый журнал (формат — docs/LOGS.md; тот же формат пишут RaLog.cs и logs_in.py) ----
+$script:RaLogSession=([guid]::NewGuid().ToString('N')).Substring(0,4)
+function Test-RaLogSecretName([string]$Name) {
+    if(-not $Name -or $Name -cmatch '^\w*(?:Error|Exception)$'){return $false}
+    if($Name -match '(?i)token|password|passwd|passphrase|secret|authorization|cookie|uuid'){return $true}
+    $words=[regex]::Replace($Name,'([a-z0-9])([A-Z])','$1_$2')
+    [bool]($words -match '(?i)(?:^|[_.-])(?:key|pass|auth|psk|private|apikey)(?:$|[_.-])')
+}
+# Компилируем регулярки и преобразуем MatchEvaluator один раз при загрузке, а не для каждой строки.
+$script:RaLogMaskRegex=@{
+    Private=[regex]::new('-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)',[Text.RegularExpressions.RegexOptions]'Compiled,IgnoreCase')
+    Public=[regex]::new('ssh-(ed25519|rsa) AAAA[A-Za-z0-9+/=]+',[Text.RegularExpressions.RegexOptions]::Compiled)
+    UserInfo=[regex]::new('://[^/\s@]+@',[Text.RegularExpressions.RegexOptions]::Compiled)
+    Basic=[regex]::new('(Authorization[:=]\s*)Basic\s+\S+',[Text.RegularExpressions.RegexOptions]'Compiled,IgnoreCase')
+    Bearer=[regex]::new('Bearer\s+[A-Za-z0-9._~+/=-]+',[Text.RegularExpressions.RegexOptions]'Compiled,IgnoreCase')
+    Field=[regex]::new('(?<![A-Za-z0-9_.-])(["'']?)([A-Za-z0-9_.-]{1,256})\1(\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s,;&"'']+)',[Text.RegularExpressions.RegexOptions]::Compiled)
+    Uuid=[regex]::new('\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b',[Text.RegularExpressions.RegexOptions]::Compiled)
+    Blob=[regex]::new('[A-Za-z0-9+/=_-]{41,}',[Text.RegularExpressions.RegexOptions]::Compiled)
+}
+$script:RaLogFieldEvaluator=[Text.RegularExpressions.MatchEvaluator]{
+    param($m)
+    if(Test-RaLogSecretName $m.Groups[2].Value){$m.Groups[1].Value+$m.Groups[2].Value+$m.Groups[1].Value+$m.Groups[3].Value+'***'}else{$m.Value}
+}
+$script:RaLogUuidEvaluator=[Text.RegularExpressions.MatchEvaluator]{param($m) 'uuid:****'+$m.Value.Substring($m.Value.Length-4)}
+$script:RaLogBlobEvaluator=[Text.RegularExpressions.MatchEvaluator]{
+    param($m)
+    $v=$m.Value
+    $digit=$v -cmatch '[0-9]';$upper=$v -cmatch '[A-Z]';$lower=$v -cmatch '[a-z]'
+    $hex=$v -match '^[0-9a-fA-F]+$'
+    if($hex -or ($digit -and $upper -and $lower) -or ($digit -and $v.IndexOf('/') -lt 0 -and ($upper -or $lower))){'[blob:'+$v.Length+']'}else{$v}
+}
+function Protect-RaLogText([string]$Text) {
+    # Те же правила, что LogMask.cs (общий файл фикстур mask-cases.json).
+    if([string]::IsNullOrEmpty($Text)){return ''}
+    $rx=$script:RaLogMaskRegex
+    $t=$rx.Private.Replace($Text,'[private-key]')
+    $t=$rx.Public.Replace($t,'ssh-$1 [pubkey]')
+    $t=$rx.UserInfo.Replace($t,'://***@')
+    $t=$rx.Basic.Replace($t,'$1Basic ***')
+    $t=$rx.Bearer.Replace($t,'Bearer ***')
+    $t=$rx.Field.Replace($t,$script:RaLogFieldEvaluator)
+    $t=$rx.Uuid.Replace($t,$script:RaLogUuidEvaluator)
+    $rx.Blob.Replace($t,$script:RaLogBlobEvaluator)
+}
+
+function ConvertTo-RaLogValue([string]$Value) {
+    $needs=($Value.Length -eq 0) -or $Value.IndexOfAny([char[]]@(' ','"','=',"`n","`r","`t")) -ge 0
+    if(-not $needs){return $Value}
+    $sb=New-Object Text.StringBuilder;[void]$sb.Append('"')
+    for($i=0;$i -lt $Value.Length;$i++){
+        $c=$Value[$i]
+        if($c -eq "`r"){if($i+1 -lt $Value.Length -and $Value[$i+1] -eq "`n"){continue};[void]$sb.Append('\n')}
+        elseif($c -eq "`n"){[void]$sb.Append('\n')}
+        elseif($c -eq "`t"){[void]$sb.Append(' ')}
+        elseif($c -eq '\'){[void]$sb.Append('\\')}
+        elseif($c -eq '"'){[void]$sb.Append('\"')}
+        else{[void]$sb.Append($c)}
+    }
+    [void]$sb.Append('"');$sb.ToString()
+}
+function Format-RaLogLine([DateTimeOffset]$Now,[string]$Level,[string]$Comp,[string]$Event,$Fields,[string]$Session=$script:RaLogSession) {
+    $inv=[Globalization.CultureInfo]::InvariantCulture
+    $comp=([regex]::Replace($Comp.ToLowerInvariant(),'[^a-z0-9._-]','-'));if(-not $comp){$comp='launcher'}
+    $evt=[regex]::Replace($Event.ToLowerInvariant(),'[^a-z0-9.-]','-');if(-not $evt){$evt='event'}
+    $line=New-Object Text.StringBuilder
+    [void]$line.Append($Now.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'",$inv)).Append(' ')
+    [void]$line.Append($Now.ToString('HH:mm:ss.fffzzz',$inv)).Append(' ')
+    [void]$line.Append($Level.ToUpperInvariant().PadRight(5)).Append(' ').Append($comp.PadRight(9)).Append(' ').Append($evt.PadRight(14)).Append(' s=').Append($Session)
+    if($Fields){
+        foreach($entry in $Fields.GetEnumerator()){
+            $key=[regex]::Replace([string]$entry.Key,'[^A-Za-z0-9_.-]','_')
+            if(-not $key -or $key -ceq 's'){continue}
+            $raw=if($null -eq $entry.Value){''}else{[string]$entry.Value}
+            $value=if(Test-RaLogSecretName $key){'***'}else{Protect-RaLogText $raw}
+            [void]$line.Append(' ').Append($key).Append('=').Append((ConvertTo-RaLogValue $value))
+        }
+    }
+    $text=$line.ToString()
+    if($text.Length -gt 4096){$text=$text.Substring(0,4096)+[string][char]0x2026+'[cut]'}
+    $text
+}
+function Write-RaLogFile([string]$Dir,[string]$Stream,[string]$Line) {
+    # BOM только при создании файла; ротация .1…5 при 2 МБ; ошибки записи наружу не идут.
+    $mutex=$null;$held=$false
+    try{
+        try{$mutex=New-Object Threading.Mutex($false,'Local\RemoteAgents-log-'+$Stream);$held=$mutex.WaitOne(200)}catch [Threading.AbandonedMutexException]{$held=$true}catch{$mutex=$null}
+        [void][IO.Directory]::CreateDirectory($Dir)
+        $path=Join-Path $Dir ($Stream+'.log');$utf8=New-Object Text.UTF8Encoding($false)
+        $bytes=$utf8.GetBytes($Line+"`n")
+        if([IO.File]::Exists($path) -and ((New-Object IO.FileInfo($path)).Length+$bytes.Length) -gt 2MB){
+            try{
+                $oldest=$path+'.5';if([IO.File]::Exists($oldest)){[IO.File]::Delete($oldest)}
+                for($i=4;$i -ge 1;$i--){$from=$path+'.'+$i;if([IO.File]::Exists($from)){[IO.File]::Move($from,$path+'.'+($i+1))}}
+                [IO.File]::Move($path,$path+'.1')
+            }catch{}  # ротация не удалась: строку всё равно пишем
+        }
+        $fresh=(-not [IO.File]::Exists($path)) -or ((New-Object IO.FileInfo($path)).Length -eq 0)
+        $fs=New-Object IO.FileStream($path,[IO.FileMode]::Append,[IO.FileAccess]::Write,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+        try{if($fresh){$fs.Write([byte[]]@(0xEF,0xBB,0xBF),0,3)};$fs.Write($bytes,0,$bytes.Length)}finally{$fs.Dispose()}
+    }catch{}
+    finally{if($mutex){try{if($held){$mutex.ReleaseMutex()}}catch{};$mutex.Dispose()}}
+}
+function Write-RaLog([string]$LogDir,[string]$Stream,[string]$Level,[string]$Comp,[string]$Event,$Fields=$null) {
+    try{Write-RaLogFile $LogDir $Stream (Format-RaLogLine ([DateTimeOffset]::Now) $Level $Comp $Event $Fields)}catch{}
+}
+function ConvertTo-RaLogFields([string]$Text) {
+    # "k=v k2=v2 свободный текст" -> k, k2, msg (как Journal.Write в C#).
+    $fields=[ordered]@{};$free=@()
+    foreach($token in ($Text -split ' ' | Where-Object {$_})){
+        if($token -match '^([A-Za-z0-9_.-]+)=(.*)$' -and -not $fields.Contains($Matches[1])){$fields[$Matches[1]]=$Matches[2]}else{$free+=$token}
+    }
+    if($free.Count){$fields['msg']=($free -join ' ')}
+    $fields
+}
+function ConvertFrom-RaLogLine([string]$Line) {
+    # Разбор строки журнала: новый формат (UTC, местное время, уровень, компонент, событие, k=v) и старый (UTC событие текст).
+    $Line=$Line.TrimStart([char]0xFEFF)
+    if($Line -match '^(\S+) \S+ +(DEBUG|INFO|WARN|ERROR) +(\S+) +(\S+)(?: +(.*))?$'){
+        $utc=$Matches[1];$level=$Matches[2];$comp=$Matches[3];$evt=$Matches[4];$rest=[string]$Matches[5];$text=$rest
+        if($rest -match '(?:^|\s)msg=(?:"((?:[^"\\]|\\.)*)"|(\S*))'){$text=if($Matches[1]){[regex]::Replace([string]$Matches[1],'\\(.)',{param($m) if($m.Groups[1].Value -ceq 'n'){"`n"}else{$m.Groups[1].Value}})}else{[string]$Matches[2]}}
+        else{$text=[regex]::Replace($rest,'^s=\S+\s*','')}
+        return [pscustomobject]@{Utc=$utc;Level=$level;Comp=$comp;Event=$evt;Text=$text}
+    }
+    if($Line -match '^(\S+) (\S+)(?: (.*))?$'){return [pscustomobject]@{Utc=$Matches[1];Level='';Comp='';Event=$Matches[2];Text=[string]$Matches[3]}}
+    $null
+}
 function Write-TransportLog([string]$Root,[string]$Event,$Detail='') {
-    # Structured process diagnostics are sanitized with the loaded credential values before logging.
-    $allowed=@('start','ready','switch','probe-ok','probe-failed','network-change','restart','api-failed','process-failed','memory-invalid','network-unavailable','stop','fatal','port-moved','channel-address-moved','happier-port-conflict','bind-mode')
-    if($Event -notin $allowed){$Event='process-failed'}
-    $dir=Join-Path $Root 'logs';[void][IO.Directory]::CreateDirectory($dir);$path=Join-Path $dir 'transport.log'
-    if([IO.File]::Exists($path) -and (Get-Item -LiteralPath $path).Length -ge 1MB){Move-Item -LiteralPath $path -Destination ($path+'.1') -Force}
-    $line=[DateTime]::UtcNow.ToString('o')+' '+$Event
-    # Plain exception text is rejected; callers supply a sanitized diagnostic or safe script location.
-    if($Event -in @('port-moved','channel-address-moved','happier-port-conflict','bind-mode') -and $Detail -is [pscustomobject] -and $Detail.PSObject.Properties['message']){$line+=' '+([string]$Detail.message -replace '[\r\n]',' ')}
-    elseif($Detail -is [pscustomobject] -and $Detail.PSObject.Properties['reason']){$line+=' '+(Format-TransportDiagnostic $Detail)}
-    elseif($Detail -match '^(.+) @[\w.-]+:\d+$'){$head=$Matches[1];if($head -match '^[A-Za-z0-9_.]+$' -or ($head -match '[А-Яа-яЁё]' -and $head -notmatch '[A-Za-z0-9+/_=-]{12,}')){$line+=' '+$Detail}}
-    [IO.File]::AppendAllText($path,($line+"`n"),(New-Object Text.UTF8Encoding($false)))
+    # Любое событие с именем [a-z0-9.-]+ допустимо; прочее — process-failed. Подробности — только безопасные (как раньше).
+    if($Event -cnotmatch '^[a-z0-9.-]+$'){$Event='process-failed'}
+    $fields=[ordered]@{}
+    if($Event -in @('port-moved','channel-address-moved','happier-port-conflict','bind-mode') -and $Detail -is [pscustomobject] -and $Detail.PSObject.Properties['message']){$fields['msg']=([string]$Detail.message -replace '[\r\n]',' ')}
+    elseif($Detail -is [pscustomobject] -and $Detail.PSObject.Properties['reason']){
+        if($Detail.portConflict){$fields['msg']=[string]$Detail.portConflict.message}
+        else{
+            $fields['candidate']=[string]$Detail.candidate;$fields['reason']=[string]$Detail.reason
+            $fields['exit']=$(if($null -eq $Detail.exitCode){'running/unknown'}else{[string]$Detail.exitCode});$fields['stderr']=[string]$Detail.stderr
+            if($Detail.engineStderr){$fields['sing-box']=[string]$Detail.engineStderr}
+            if($Detail.PSObject.Properties['error'] -and $Detail.error){$fields['error']=[string]$Detail.error}
+        }
+    }
+    elseif($Detail -is [string] -and $Detail -match '^(.+) @[\w.-]+:\d+$'){$head=$Matches[1];if($head -match '^[A-Za-z0-9_.]+$' -or ($head -match '[А-Яа-яЁё]' -and $head -notmatch '[A-Za-z0-9+/_=-]{12,}')){$fields['msg']=[string]$Detail}}
+    elseif($Detail -is [System.Collections.IDictionary]){foreach($k in $Detail.Keys){$fields[[string]$k]=$Detail[$k]}}
+    $level=if($Event -match 'fatal'){'ERROR'}elseif($Event -match 'fail|unavailable|invalid'){'WARN'}else{'INFO'}
+    Write-RaLog (Join-Path $Root 'logs') 'transport' $level 'transport' $Event $fields
 }
 function Quote-Transport([string]$Value) {'"'+[regex]::Replace([regex]::Replace($Value,'(\\*)"','$1$1\"'),'(\\+)$','$1$1')+'"'}
 function Get-TransportPowerShell {
@@ -1197,10 +1329,8 @@ function Assert-VpnCidr([string]$Cidr) {
 }
 function Write-VpnStatus([string]$Root,[bool]$Ok,[bool]$Enabled,[string]$State,$Conflict,[string]$Summary,[string]$Stage='',[string]$ErrorType='') {
     Write-TransportJson (Join-Path $Root 'status/vpn.json') @{ok=$Ok;enabled=$Enabled;state=$State;conflict=$Conflict;summary=$Summary;stage=$Stage;errorType=$ErrorType;updatedAt=[DateTime]::UtcNow.ToString('o')}
-    # Журнал всегда локальный; только категория, без текста исключений и параметров процессов.
-    $dir=Join-Path $Root 'logs';[void][IO.Directory]::CreateDirectory($dir);$file=Join-Path $dir 'vpn.log'
-    if((Test-Path -LiteralPath $file) -and (Get-Item -LiteralPath $file).Length -ge 1MB){Move-Item -LiteralPath $file -Destination ($file+'.1') -Force}
-    [IO.File]::AppendAllText($file,([DateTime]::UtcNow.ToString('o')+' '+$State+' stage='+$Stage+' type='+$ErrorType+"`n"),(New-Object Text.UTF8Encoding($false)))
+    # Журнал — общий формат (поток transport, компонент vpn); только категория, без текста исключений.
+    Write-RaLog (Join-Path $Root 'logs') 'transport' $(if($State -eq 'error' -or $ErrorType){'WARN'}else{'INFO'}) 'vpn' 'status' ([ordered]@{state=$State;stage=$Stage;type=$ErrorType})
 }
 function Set-VpnEnabled([string]$Root,[bool]$Enabled) {
     $Enabled=$Enabled -and (Test-ProductVpnEnabled)

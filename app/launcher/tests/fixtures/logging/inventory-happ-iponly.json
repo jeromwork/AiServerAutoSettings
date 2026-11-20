@@ -1,0 +1,39 @@
+{
+ "Adapters": [
+  {
+   "Name": "Wi-Fi",
+   "InterfaceDescription": "Intel(R) Wi-Fi 6 AX201",
+   "ifIndex": 5,
+   "Status": "Up",
+   "HardwareInterface": true,
+   "Virtual": false
+  }
+ ],
+ "Routes": [
+  {
+   "InterfaceIndex": 5,
+   "DestinationPrefix": "0.0.0.0/0",
+   "NextHop": "192.168.1.1",
+   "RouteMetric": 25
+  },
+  {
+   "InterfaceIndex": 30,
+   "DestinationPrefix": "0.0.0.0/0",
+   "NextHop": "0.0.0.0",
+   "RouteMetric": 0
+  }
+ ],
+ "IpInterfaces": [
+  {
+   "InterfaceIndex": 5,
+   "InterfaceAlias": "Wi-Fi"
+  },
+  {
+   "InterfaceIndex": 30,
+   "InterfaceAlias": "happ-default-tun"
+  }
+ ],
+ "Procs": [],
+ "Services": [],
+ "errors": []
+}

@@ -146,19 +146,37 @@ namespace RemoteAgents.Launcher
     }
     internal sealed class Journal
     {
-        readonly string file; readonly object gate = new object();
-        public Journal(string home) { Directory.CreateDirectory(Path.Combine(home, "logs")); file = Path.Combine(home, "logs", "launcher.log"); }
+        readonly string dir;
+        public Journal(string home) { dir = Path.Combine(home, "logs"); try { Directory.CreateDirectory(dir); } catch { } }
+        internal string LogsDir { get { return dir; } }
+        static readonly Regex FieldStart = new Regex("^[A-Za-z0-9_.-]+=");
         // Event codes and validated identifiers; TickFailureLog also supplies bounded, redacted diagnostics.
+        // "vpn.on.ok ms=5" -> component vpn, event vpn.on.ok, fields ms=5 (docs/LOGS.md).
         public void Write(string code)
         {
-            lock (gate) {
-                try {
-                    var line = DateTime.UtcNow.ToString("o") + " " + code + "\n";
-                    if (File.Exists(file) && new FileInfo(file).Length + Files.Utf8.GetByteCount(line) > 1048576) { if (File.Exists(file + ".old")) File.Delete(file + ".old"); File.Move(file, file + ".old"); }
-                    File.AppendAllText(file, line, Files.Utf8);
-                } catch { /* Disk failure must not stop supervision. */ }
-            }
+            try {
+                code = (code ?? "").Trim();
+                int space = code.IndexOf(' ');
+                string evt = (space < 0 ? code : code.Substring(0, space)).ToLowerInvariant();
+                string rest = space < 0 ? "" : code.Substring(space + 1);
+                var fields = new List<KeyValuePair<string, string>>();
+                string msg = "";
+                foreach (string token in rest.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)) {
+                    if (FieldStart.IsMatch(token)) {
+                        int eq = token.IndexOf('=');
+                        fields.Add(new KeyValuePair<string, string>(token.Substring(0, eq), token.Substring(eq + 1)));
+                    } else msg = msg.Length == 0 ? token : msg + " " + token;
+                }
+                if (msg.Length > 0) fields.Add(new KeyValuePair<string, string>("msg", msg));
+                string dotted = evt.Contains(".") ? evt.Substring(0, evt.IndexOf('.')) : evt;
+                string comp = Array.IndexOf(RaLog.Components, dotted) >= 0 ? dotted : "launcher";
+                LogLevel level = Regex.IsMatch(evt, "fatal|crash") ? LogLevel.Error
+                    : Regex.IsMatch(evt, "failed|error|not-on|unavailable") ? LogLevel.Warn : LogLevel.Info;
+                RaLog.WriteTo(dir, "launcher", level, comp, evt, fields);
+            } catch { /* Disk failure must not stop supervision. */ }
         }
+        public void Write(LogLevel level, string comp, string evt, params string[] kv)
+        { RaLog.WriteTo(dir, "launcher", level, comp, evt, RaLog.Pairs(kv)); }
     }
     internal sealed class Configuration
     {

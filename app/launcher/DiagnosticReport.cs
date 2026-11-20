@@ -143,17 +143,9 @@ namespace RemoteAgents.Launcher
             string cleaned = Clean(text, secretValues);
             string stamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + " ";
             string line = stamp + cleaned.Replace("\n", "\r\n" + stamp) + "\r\n";
-            lock (gate) {
-                try {
-                    Directory.CreateDirectory(logsDir);
-                    string path = Path.Combine(logsDir, "config-window.log");
-                    if (File.Exists(path) && new FileInfo(path).Length + Files.Utf8.GetByteCount(line) > 1048576) {
-                        if (File.Exists(path + ".old")) File.Delete(path + ".old");
-                        File.Move(path, path + ".old");
-                    }
-                    File.AppendAllText(path, line, Files.Utf8);
-                } catch (Exception) { /* Logging must not stop the window or background work. */ }
-            }
+            // Файл ведёт общий писатель (формат, ротация .1…5, BOM); на экран уходит прежняя строка.
+            foreach (string part in Files.LF(cleaned).Split('\n'))
+                RaLog.WriteTo(logsDir, "config-window", LogLevel.Info, "config", "window.text", new[] { new KeyValuePair<string, string>("msg", part) });
             return line;
         }
 

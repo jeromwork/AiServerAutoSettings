@@ -48,7 +48,7 @@ namespace RemoteAgents.Launcher
     }
     internal sealed class SshSource
     {
-        public string Exe, RemoteDir; public string[] Args;
+        public string Exe, RemoteDir, HostKeyAlias; public string[] Args;
         public static SshSource Load(Configuration config, string home)
         {
             var update = config.Update; Dictionary<string, object> profile = new Dictionary<string, object>();
@@ -85,12 +85,14 @@ namespace RemoteAgents.Launcher
                 if (a.Length == 2 && valued.IndexOf(a[1]) >= 0) { if (++i >= args.Length) throw new InvalidDataException("Нет значения SSH-опции"); options.Add(args[i]); }
             }
             if (string.IsNullOrWhiteSpace(target) || target.Contains("\n") || target.Contains("\r")) throw new InvalidDataException("Нет адреса SSH");
+            int aliasAt = target.LastIndexOf('@');
+            string alias = Json.Text(update, "hostKeyAlias", Json.Text(profile, "serverAddress", aliasAt >= 0 ? target.Substring(aliasAt + 1) : target));
             int port = Json.Int(update, "viaLocalPort", 0);
             if (port != 0) {
                 port = TransportPorts.LocalSsh(home, port);
                 if (port < 1 || port > 65535) throw new InvalidDataException("Неверный локальный порт");
                 int at = target.LastIndexOf('@'); string user = at >= 0 ? target.Substring(0, at + 1) : "";
-                string host = Json.Text(update, "hostKeyAlias", Json.Text(profile, "serverAddress", at >= 0 ? target.Substring(at + 1) : target));
+                string host = alias;
                 var kept = new List<string>();
                 for (int i = 0; i < options.Count; i++) {
                     string a = options[i]; char key = a.Length > 1 ? a[1] : '\0';
@@ -103,7 +105,7 @@ namespace RemoteAgents.Launcher
                 target = user + "127.0.0.1";
             }
             var all = new List<string> { "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "StrictHostKeyChecking=yes", "-T" }; all.AddRange(options); all.Add(target);
-            return new SshSource { Exe = Json.Text(update, "sshExe", Json.Text(profile, "sshExecutable", "ssh.exe")), Args = all.ToArray(), RemoteDir = Json.Text(update, "remoteDir", "~/.local/share/remote-agents/dist").TrimEnd('/') };
+            return new SshSource { HostKeyAlias = alias, Exe = Json.Text(update, "sshExe", Json.Text(profile, "sshExecutable", "ssh.exe")), Args = all.ToArray(), RemoteDir = Json.Text(update, "remoteDir", "~/.local/share/remote-agents/dist").TrimEnd('/') };
         }
         internal static string RemotePath(string dir, string file)
         {

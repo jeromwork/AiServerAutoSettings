@@ -65,20 +65,9 @@ namespace RemoteAgents.Launcher
         static bool Virtual(Dictionary<string, object> a)
         { return Json.Get(a, "HardwareInterface") is bool && !Json.Bool(a, "HardwareInterface") || Json.Bool(a, "Virtual") || Match(Json.Str(a, "Name") + " " + Json.Str(a, "InterfaceDescription"), "VPN|Tailscale|TUN|Wintun|WireGuard|TAP|virtual"); }
         static bool Up(Dictionary<string, object> a) { return Json.Str(a, "Status").Equals("Up", StringComparison.OrdinalIgnoreCase); }
+        // Имена конфликтующих VPN через запятую; правила — VpnConflict (VpnConflictScan.cs).
         internal static string Conflict(Dictionary<string, object> snapshot)
-        {
-            var routes = Json.Array(Json.Get(snapshot, "Routes")).Select(Json.Map).ToArray();
-            foreach (var a in Json.Array(Json.Get(snapshot, "Adapters")).Select(Json.Map)) {
-                if (!Up(a) || Own(a) || Transition(a)) continue;
-                string text = Json.Str(a, "Name") + " " + Json.Str(a, "InterfaceDescription");
-                var prefixes = routes.Where(r => Json.Int(r, "InterfaceIndex", -1) == Json.Int(a, "ifIndex", -2)).Select(r => Json.Str(r, "DestinationPrefix")).ToArray();
-                bool full = prefixes.Contains("0.0.0.0/0") || prefixes.Contains("::/0") || prefixes.Contains("0.0.0.0/1") && prefixes.Contains("128.0.0.0/1") || prefixes.Contains("::/1") && prefixes.Contains("8000::/1");
-                bool partial = prefixes.Any(p => !new[] { "0.0.0.0/0", "::/0", "0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1" }.Contains(p));
-                // A known routed partial WireGuard/OpenVPN is compatible. Unknown Up TUNs fail closed.
-                if (Virtual(a) && full || Match(text, "TUN|Wintun|WireGuard|TAP") && !(partial && Match(text, "OpenVPN|WireGuard|Tailscale")) && !Match(text, "OpenVPN|Tailscale")) return MainScreenModel.CleanSecrets(Json.Text(a, "Name", "другой VPN"));
-            }
-            return "";
-        }
+        { return MainScreenModel.CleanSecrets(VpnConflict.Evaluate(snapshot).Names); }
         static string[] Values(Dictionary<string, object> map, string key)
         { var value = Json.Get(map, key); return value is string ? (string.IsNullOrEmpty((string)value) ? new string[0] : new[] { (string)value }) : Json.Strings(value); }
         internal static Dictionary<string, object> DnsPolicy(Dictionary<string, object> snapshot)
@@ -109,7 +98,7 @@ namespace RemoteAgents.Launcher
             var probe = IPAddress.Parse(ProbeAddress);
             if (exclusions.Any(c => Contains(c, probe))) throw new InvalidDataException("Проба VPN исключена из TUN");
             var check = new Uri(CheckUrl); string[] excluded = exclusions.Distinct().ToArray();
-            return D("log", D("disabled", true),
+            return D("log", D("level", "warn", "timestamp", true),
                 "inbounds", new[] { D("type", "tun", "tag", "vpn-tun", "interface_name", InterfaceName, "address", Address, "stack", "system", "auto_route", true, "strict_route", Json.Bool(dnsPolicy, "strictRoute"), "route_exclude_address", excluded) },
                 "outbounds", new[] { D("type", "socks", "tag", "vpn-active", "server", "127.0.0.1", "server_port", socksPort ?? SocksPort, "version", "5", "username", user, "password", password), D("type", "direct", "tag", "vpn-direct") },
                 "route", D("auto_detect_interface", true, "final", "vpn-active", "default_domain_resolver", D("server", "vpn-local"), "rules", new[] {
@@ -294,16 +283,24 @@ namespace RemoteAgents.Launcher
     {
         internal const int IntervalMs = 5000;
         readonly Func<Dictionary<string, object>> snapshot;
+        readonly Action<Dictionary<string, object>, VpnConflictResult> observe;
+        readonly string ownDirectory;
         Task<Dictionary<string, object>> pending;
         long next;
         internal string Conflict { get; private set; }
+        internal string Suspects { get; private set; }
         internal bool Failed { get; private set; }
-        internal VpnTunConflictScan(long now, Func<Dictionary<string, object>> snapshot)
-        { next = now + IntervalMs; this.snapshot = snapshot; Conflict = ""; }
+        internal VpnTunConflictScan(long now, Func<Dictionary<string, object>> snapshot, Action<Dictionary<string, object>, VpnConflictResult> observe = null, string ownDirectory = null)
+        { next = now + IntervalMs; this.snapshot = snapshot; this.observe = observe; this.ownDirectory = ownDirectory; Conflict = ""; Suspects = ""; }
         internal void Tick(long now)
         {
             if (pending != null && pending.IsCompleted) {
-                try { Conflict = MainScreenModel.CleanSecrets(VpnTun.Conflict(pending.GetAwaiter().GetResult())); Failed = false; }
+                try {
+                    var taken = pending.GetAwaiter().GetResult();
+                    var result = VpnConflict.Evaluate(taken, ownDirectory);
+                    Conflict = MainScreenModel.CleanSecrets(result.Names); Suspects = MainScreenModel.CleanSecrets(result.SuspectNames); Failed = false;
+                    if (observe != null) try { observe(taken, result); } catch { }
+                }
                 catch { Failed = true; }
                 pending = null; next = now + IntervalMs;
             }
@@ -324,6 +321,25 @@ namespace RemoteAgents.Launcher
         Dictionary<string, object> status = VpnTun.D("enabled", false, "ok", false, "state", "off", "summary", "VPN выключен");
         NativeJob coreJob, preparationJob;
         Process core;
+        // Журнал помощника (helper-events) и перенос вывода ядра; задаются службой, в тестах могут быть null.
+        internal HelperEventLog Events;
+        internal CoreLogPump CorePump;
+        void Ev(LogLevel level, string evt, params string[] kv)
+        {
+            try { var events = Events; if (events != null) events.Write(level, evt.StartsWith("core.") ? "core" : evt.StartsWith("conflict.") ? "conflict" : "vpn", evt, kv); } catch { }
+        }
+        static string Ms(Stopwatch watch) { return watch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture); }
+        Process StartCore(NativeJob job, string config)
+        {
+            var pump = CorePump;
+            if (pump != null) pump.RotateIfLarge();
+            var process = pump != null ? job.StartLogged(executable, new[] { "run", "-c", config }, directory, pump.FilePath) : job.Start(executable, new[] { "run", "-c", config }, directory);
+            string cfg = Path.GetFileNameWithoutExtension(config).EndsWith("-b") ? "b" : "a";
+            try { Ev(LogLevel.Info, "core.start", "pid", process.Id.ToString(System.Globalization.CultureInfo.InvariantCulture), "cfg", cfg); } catch { }
+            return process;
+        }
+        DateTime coreStarted;
+        string suspects = "";
         VpnTun requested;
         bool pending, disposed;
         int generation;
@@ -347,7 +363,9 @@ namespace RemoteAgents.Launcher
         }
         internal void Disable()
         {
+            var off = Stopwatch.StartNew();
             lock (gate) { CloseJobs(); generation++; pending = false; requested = null; Set("off", "button"); }
+            Ev(LogLevel.Info, "vpn.off.step", "step", "close-jobs", "ms", Ms(off), "result", "ok");
             wake.Set();
         }
         void CloseJobs()
@@ -355,20 +373,29 @@ namespace RemoteAgents.Launcher
         void Set(string state, string stage, string name = "", Dictionary<string, object> policy = null)
         {
             lock (gate) status = VpnTun.D("ok", state == "on", "enabled", state == "on" || state == "starting", "state", state, "stage", stage,
-                "summary", state == "on" ? "VPN включён" : state == "off" ? "VPN выключен" : state == "starting" ? "Включается…" : VpnWatchdog.FailureSummary(state, name.Length > 0 ? name : stage), "dnsPolicy", policy, "conflictName", state == "conflict" ? name : "", "updatedAt", DateTime.UtcNow.ToString("o"));
+                "summary", state == "on" ? "VPN включён" : state == "off" ? "VPN выключен" : state == "starting" ? "Включается…" : VpnWatchdog.FailureSummary(state, name.Length > 0 ? name : stage), "dnsPolicy", policy, "conflictName", state == "conflict" ? name : "", "suspects", suspects, "updatedAt", DateTime.UtcNow.ToString("o"));
         }
         Dictionary<string, object> Read(string relative)
         { Dictionary<string, object> result = null; asOwner(() => result = Json.Read(Path.Combine(home, relative))); return result; }
         Dictionary<string, object> Transport() { try { return Read("status/transport.json"); } catch { return Json.Map(null); } }
+        // Фиксированный снимок сети. Вывод PowerShell при перенаправлении идёт в OEM-кодировке, поэтому
+        // все символы вне ASCII экранируются \uXXXX: файл не зависит от кодовой страницы.
+        const string InventoryHead = @"$ErrorActionPreference='Stop';[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false);$e=New-Object Collections.ArrayList;function T($n,[scriptblock]$b){try{& $b}catch{[void]$e.Add($n)}};$k='(?i)(^|[^a-z])(happd?|happservice|xray|v2rayn?|sing-box|clash[a-z]*|mihomo|hiddify|nekoray|nekobox|outline|amnezia[a-z]*|wireguard|openvpn[a-z]*|tap-windows|proton(vpn)?|nordvpn|expressvpn|windscribe|tailscaled?|zerotier(one)?|radmin)([^a-z]|$)';";
+        const string InventoryCore = @"Adapters=@(Get-NetAdapter -IncludeHidden|Select-Object Name,InterfaceDescription,ifIndex,Status,HardwareInterface,Virtual);Routes=@(Get-NetRoute -PolicyStore ActiveStore|Select-Object InterfaceIndex,DestinationPrefix,NextHop,RouteMetric);";
+        const string InventoryDns = @"DnsServers=@(Get-DnsClientServerAddress|Select-Object InterfaceIndex,ServerAddresses);DnsClients=@(Get-DnsClient|Select-Object InterfaceIndex,ConnectionSpecificSuffix,ConnectionSpecificSuffixSearchList);Nrpt=@(Get-DnsClientNrptPolicy -Effective|Select-Object Namespace,NameServers,DirectAccessDnsServers);";
+        const string InventoryExtra = @"IpInterfaces=@(T 'ipif' {Get-NetIPInterface -ConnectionState Connected|Select-Object InterfaceIndex,InterfaceAlias,AddressFamily,InterfaceMetric});Procs=@(T 'procs' {Get-Process -ErrorAction SilentlyContinue|Where-Object{$_.Name -match $k}|Select-Object Name,Path});Services=@(T 'services' {Get-Service -ErrorAction SilentlyContinue|Where-Object{$_.Status -eq 'Running' -and ($_.Name -match $k -or $_.DisplayName -match $k)}|Select-Object Name,DisplayName});";
+        const string InventoryTail = @"$r.errors=@($e);$j=$r|ConvertTo-Json -Depth 10 -Compress;[regex]::Replace($j,'[^\x00-\x7F]',{param($m)('\u{0:x4}' -f [int][char]$m.Value)})";
+        internal static string InventoryScript(bool adaptersOnly)
+        { return InventoryHead + "$r=@{" + InventoryCore + (adaptersOnly ? "" : InventoryDns) + InventoryExtra + "};" + InventoryTail; }
         Dictionary<string, object> Snapshot(int epoch, bool adaptersOnly = false)
         {
             // Fixed inventory only. Never execute a script from the owner's writable home as SYSTEM.
-            const string script = "$ErrorActionPreference='Stop';[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false);@{Adapters=@(Get-NetAdapter -IncludeHidden|Select-Object Name,InterfaceDescription,ifIndex,Status,HardwareInterface,Virtual);Routes=@(Get-NetRoute|Select-Object InterfaceIndex,DestinationPrefix);DnsServers=@(Get-DnsClientServerAddress|Select-Object InterfaceIndex,ServerAddresses);DnsClients=@(Get-DnsClient|Select-Object InterfaceIndex,ConnectionSpecificSuffix,ConnectionSpecificSuffixSearchList);Nrpt=@(Get-DnsClientNrptPolicy -Effective|Select-Object Namespace,NameServers,DirectAccessDnsServers)}|ConvertTo-Json -Depth 10 -Compress";
-            const string adapterScript = "$ErrorActionPreference='Stop';[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false);@{Adapters=@(Get-NetAdapter -IncludeHidden|Select-Object Name,InterfaceDescription,ifIndex,Status,HardwareInterface,Virtual);Routes=@(Get-NetRoute|Select-Object InterfaceIndex,DestinationPrefix)}|ConvertTo-Json -Depth 10 -Compress";
+            string script = InventoryScript(adaptersOnly);
             string file = Path.Combine(directory, adaptersOnly ? "vpn-adapters.json" : "vpn-inventory.json");
-            RunPreparation(Files.Executable("powershell.exe"), new[] { "-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(Encoding.Unicode.GetBytes(adaptersOnly ? adapterScript : script)) }, file, epoch);
+            RunPreparation(Files.Executable("powershell.exe"), new[] { "-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(Encoding.Unicode.GetBytes(script)) }, file, epoch);
             if (new FileInfo(file).Length > 4 * 1024 * 1024) throw new InvalidDataException("Снимок сети слишком велик");
-            return Json.Read(file);
+            // Старый вывод мог быть в OEM: строгий UTF-8, иначе OEM (как External.ReadPowerShellOutput).
+            return Json.Map(Json.Parse(External.ReadPowerShellOutput(file)));
         }
         void RunPreparation(string exe, string[] args, string output, int epoch)
         {
@@ -396,6 +423,7 @@ namespace RemoteAgents.Launcher
                 Set(reason, stage, name);
             }
             log("vpn-" + reason + "-" + stage, 1);
+            Ev(LogLevel.Warn, "vpn.stop", "reason", reason, "stage", stage, "name", name);
         }
         VpnTunBinding ResolveBinding(Dictionary<string, object> transport, int epoch, int fallbackPort)
         {
@@ -431,23 +459,32 @@ namespace RemoteAgents.Launcher
         {
             string stage = "inventory";
             VpnLease lease = null;
+            var step = Stopwatch.StartNew();
             try {
+                Ev(LogLevel.Info, "vpn.on.step", "step", "preflight", "ms", "0", "result", "begin");
                 var snapshot = Snapshot(epoch);
-                string conflict = VpnTun.Conflict(snapshot);
+                var found = VpnConflict.Evaluate(snapshot, directory);
+                string conflict = MainScreenModel.CleanSecrets(found.Names);
+                Ev(LogLevel.Info, "vpn.inventory", new[] { "phase", "before" }.Concat(VpnConflict.Describe(snapshot)).ToArray());
+                suspects = MainScreenModel.CleanSecrets(found.SuspectNames);
+                LogConflicts(found);
+                Ev(conflict.Length > 0 ? LogLevel.Warn : LogLevel.Info, "vpn.on.step", "step", "inventory", "ms", Ms(step), "result", conflict.Length > 0 ? "conflict" : "ok", "reason", conflict.Length > 0 ? "conflict" : "", "conflict", conflict);
                 if (conflict.Length > 0) { lock (gate) if (epoch == generation) Set("conflict", "conflicts", conflict); return; }
                 var policy = VpnTun.DnsPolicy(snapshot);
                 var transport = Transport(); string pathState = VpnTun.PathState(transport, DateTime.UtcNow);
-                if (pathState.Length > 0) { lock (gate) if (epoch == generation) Set(pathState, "path", TrayMenuModel.ActiveTitle(transport)); return; }
-                stage = "exclusions";
+                if (pathState.Length > 0) { Ev(LogLevel.Warn, "vpn.on.step", "step", "path", "ms", Ms(step), "result", "fail", "reason", pathState); lock (gate) if (epoch == generation) Set(pathState, "path", TrayMenuModel.ActiveTitle(transport)); return; }
+                stage = "exclusions"; step.Restart();
                 // The same resolver/builder is used again while VPN stays enabled.
                 var binding = ResolveBinding(transport, epoch, options.SocksPort);
-                stage = "config-check";
+                Ev(LogLevel.Info, "vpn.on.step", "step", "exclusions", "ms", Ms(step), "result", "ok", "endpoints", binding.Ips.Length.ToString(System.Globalization.CultureInfo.InvariantCulture), "port", binding.Port.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                stage = "config-check"; step.Restart();
                 string config = PrepareConfig(options, binding, transport, snapshot, policy, epoch, ConfigPath(directory));
+                Ev(LogLevel.Info, "vpn.on.step", "step", "config-check", "ms", Ms(step), "result", "ok");
                 // Recheck fresh channel evidence immediately before creating the TUN.
                 transport = Transport(); pathState = VpnTun.PathState(transport, DateTime.UtcNow);
                 if (pathState.Length > 0) { lock (gate) if (epoch == generation) Set(pathState, "path", TrayMenuModel.ActiveTitle(transport)); return; }
                 if (binding.Revision != Json.Str(transport, "configRevision") || VpnTunBinding.PortOf(transport) != 0 && VpnTunBinding.PortOf(transport) != binding.Port || binding.Hosts != VpnTunBinding.HostsOf(transport)) { lock (gate) if (epoch == generation) Set("no-path", "path-changed"); return; }
-                stage = "core-start";
+                stage = "core-start"; step.Restart();
                 var launchJob = new NativeJob();
                 lock (gate) {
                     if (disposed || epoch != generation) { launchJob.Dispose(); return; }
@@ -458,7 +495,8 @@ namespace RemoteAgents.Launcher
                     lock (gate) if (epoch == generation) Set("watchdog-stalled", "lease-expired");
                 });
                 // Never hold the status/command lock across CreateProcess.
-                core = launchJob.Start(executable, new[] { "run", "-c", config }, directory);
+                core = StartCore(launchJob, config); coreStarted = DateTime.UtcNow;
+                Ev(LogLevel.Info, "vpn.on.step", "step", "core-start", "ms", Ms(step), "result", "ok");
                 var rebind = new VpnTunRebind(clock.ElapsedMilliseconds, binding, config,
                     evidence => ResolveBinding(evidence, epoch, options.SocksPort),
                     (updated, evidence, current) => PrepareConfig(options, updated, evidence, snapshot, policy, epoch, ConfigPath(directory, current)),
@@ -470,35 +508,52 @@ namespace RemoteAgents.Launcher
                                 if (!core.WaitForExit(1000)) return false;
                                 core.Dispose(); core = null;
                             }
-                            core = launchJob.Start(executable, new[] { "run", "-c", candidate }, directory);
+                            Ev(LogLevel.Info, "core.restart", "why", "rebind");
+                            core = StartCore(launchJob, candidate); coreStarted = DateTime.UtcNow;
                             return true;
-                        } catch { log("vpn-core-rebind-failed", 1); return false; }
+                        } catch { log("vpn-core-rebind-failed", 1); Ev(LogLevel.Warn, "vpn.on.step", "step", "rebind", "result", "failed", "reason", "core-rebind-failed"); return false; }
                     });
+                string lastMonitor = ""; bool coreExitLogged = false;
                 var monitor = new VpnTunMonitor(clock.ElapsedMilliseconds, transport, policy,
-                    value => { lock (gate) if (epoch == generation && !lease.Expired) status = value; },
+                    value => {
+                        value["suspects"] = suspects;
+                        lock (gate) if (epoch == generation && !lease.Expired) status = value;
+                        string key = Json.Str(value, "state") + "/" + Json.Str(Json.Map(Json.Get(value, "reason")), "code");
+                        if (key != lastMonitor) { lastMonitor = key; Ev(Json.Str(value, "state") == "on" ? LogLevel.Info : LogLevel.Warn, "vpn.monitor", "state", Json.Str(value, "state"), "reason", Json.Str(Json.Map(Json.Get(value, "reason")), "code"), "text", Json.Str(Json.Map(Json.Get(value, "reason")), "text")); }
+                    },
                     reason => Stop(reason, "owner-loop", epoch),
                     () => {
                         lock (gate) if (disposed || epoch != generation || lease.Expired) return;
                         if (core != null) { core.Dispose(); core = null; }
-                        try { core = launchJob.Start(executable, new[] { "run", "-c", rebind.Config }, directory); }
-                        catch { log("vpn-core-restart-failed", 1); }
+                        try { Ev(LogLevel.Warn, "core.restart", "why", "exited"); core = StartCore(launchJob, rebind.Config); coreStarted = DateTime.UtcNow; coreExitLogged = false; }
+                        catch { log("vpn-core-restart-failed", 1); Ev(LogLevel.Warn, "vpn.on.step", "step", "restart", "result", "failed", "reason", "core-restart-failed"); }
                     }, rebind);
-                var scan = new VpnTunConflictScan(clock.ElapsedMilliseconds, () => Snapshot(epoch, true));
-                long nextRead = 0;
-                stage = "monitor";
+                string lastConflictKey = found.Key; bool afterLogged = false;
+                var scan = new VpnTunConflictScan(clock.ElapsedMilliseconds, () => Snapshot(epoch, true), (taken, result) => {
+                    suspects = MainScreenModel.CleanSecrets(result.SuspectNames);
+                    if (!afterLogged) { afterLogged = true; Ev(LogLevel.Info, "vpn.inventory", new[] { "phase", "after" }.Concat(VpnConflict.Describe(taken)).ToArray()); }
+                    if (result.Key != lastConflictKey) { lastConflictKey = result.Key; LogConflicts(result); }
+                }, directory);
+                long nextRead = 0, nextPump = 0;
+                stage = "monitor"; step.Restart();
                 while (true) {
                     lock (gate) if (disposed || epoch != generation) return;
                     if (lease.Expired) return;
                     long now = clock.ElapsedMilliseconds;
                     if (now >= nextRead) { transport = Transport(); nextRead = now + 500; }
                     scan.Tick(now);
+                    if (core != null && core.WaitForExit(0) && !coreExitLogged) { coreExitLogged = true; LogCoreExit(core); }
+                    if (now >= nextPump) { nextPump = now + 2000; var pump = CorePump; if (pump != null) pump.Pump(); }
                     if (!monitor.Step(clock.ElapsedMilliseconds, DateTime.UtcNow, core != null && !core.WaitForExit(0), transport, scan.Conflict, scan.Failed)) return;
                     if (lease.Expired) return;
                     lease.Pulse();
                     wake.WaitOne(VpnWatchdog.PollMs); wake.Reset();
                 }
             } catch (OperationCanceledException) { }
-            catch { Stop(lease != null && lease.Expired ? "watchdog-stalled" : "error", stage, epoch); }
+            catch (Exception failure) {
+                Ev(LogLevel.Error, "vpn.on.step", "step", stage, "ms", Ms(step), "result", "error", "err", failure.GetType().Name, "code", TickFailureLog.ErrorCode(failure).ToString(System.Globalization.CultureInfo.InvariantCulture));
+                Stop(lease != null && lease.Expired ? "watchdog-stalled" : "error", stage, epoch);
+            }
             finally {
                 // Invalidate a queued inventory before closing its Job: it must not
                 // start another PowerShell after this session has ended.
@@ -507,6 +562,22 @@ namespace RemoteAgents.Launcher
                 if (lease != null) lease.Dispose();
                 if (core != null) { core.Dispose(); core = null; }
             }
+        }
+        void LogConflicts(VpnConflictResult result)
+        {
+            foreach (var c in result.Conflicts)
+                Ev(LogLevel.Warn, "conflict.detected", "name", c.Name, "iface", c.Iface, "ifIndex", c.IfIndex.ToString(System.Globalization.CultureInfo.InvariantCulture), "route", c.Route, "metric", c.Metric.ToString(System.Globalization.CultureInfo.InvariantCulture), "why", c.Why);
+            foreach (var x in result.Suspects) Ev(LogLevel.Info, "conflict.suspect", "name", x.Name, "kind", x.Kind);
+            if (result.Conflicts.Count == 0 && result.Suspects.Count == 0) Ev(LogLevel.Info, "conflict.clear");
+        }
+        void LogCoreExit(Process exited)
+        {
+            try {
+                var pump = CorePump; if (pump != null) pump.Pump();
+                string code = "?"; try { code = exited.ExitCode.ToString(System.Globalization.CultureInfo.InvariantCulture); } catch { }
+                long alive = (long)Math.Max(0, (DateTime.UtcNow - coreStarted).TotalMilliseconds);
+                Ev(LogLevel.Warn, "core.exit", "code", code, "ms_alive", alive.ToString(System.Globalization.CultureInfo.InvariantCulture), "tail", pump == null ? "" : pump.Tail(15));
+            } catch { }
         }
         void Loop()
         {

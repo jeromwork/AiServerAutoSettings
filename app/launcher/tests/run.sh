@@ -237,6 +237,10 @@ wait_for_memory
 # LAN entry point also runs NetHelperVersionTests: service/protocol fingerprint and HelperVersion gate.
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:LanTests=true -- "$repo"
 wait_for_memory
+# Журналы: формат, маскирование, ротация, конфликты, лестница, журнал помощника; PowerShell-копия формата.
+timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -- --logging
+timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-ralog.ps1" "$repo" < /dev/null
+wait_for_memory
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ConfigTests=true
 wait_for_memory
 # End-to-end on a loopback stand: config export -> paste/vault -> orchestrator -> real Server/Connection -> sync -> revoke.

@@ -77,7 +77,7 @@ try{
     $saved=Read-TransportJson $profileFile
     Assert ($saved.arguments -contains 'HostName=127.0.0.3' -and $saved.arguments -contains 'HostName=127.0.0.20') 'Сохранённые SSH options обновлены только при точном совпадении'
     $log=[IO.File]::ReadAllText((Join-Path $root 'logs/transport.log'))
-    Assert ($log.Contains('Порт 2222 занят другой программой (C:\Other\app.exe, PID 42) — использую 2232')) 'Журнал объясняет перенос порта, программу и PID'
+    Assert ($log.Contains('Порт 2222 занят другой программой (C:\\Other\\app.exe, PID 42) — использую 2232')) 'Журнал объясняет перенос порта, программу и PID'
     # Сохранённый маршрут через наш SOCKS не должен помнить настроенный порт.
     [IO.File]::WriteAllText((Join-Path $root 'RemoteAgents.exe'),'fixture')
     $transport|Add-Member -Force channelSocksPort 2222

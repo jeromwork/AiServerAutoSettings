@@ -99,7 +99,7 @@ namespace RemoteAgents.Launcher
                     Check(onDisk.Contains(expected), "file retains " + expected);
                 foreach (string expected in new[] { "KeyError: 'lan_pc_access.py'", path, longMessage, "server_apply.py:1061:part" })
                     Check(onDisk.Contains(expected), "window log retains diagnostic detail " + expected);
-                Check(Regex.IsMatch(onDisk, @"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} "), "log includes calendar date");
+                Check(Regex.IsMatch(onDisk, @"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z "), "log includes calendar date");
                 Check(File.ReadAllText(reportPath).Contains(stored), "fixture models a real server redaction miss");
                 File.WriteAllLines(Path.Combine(logs, "launcher.log"), Enumerable.Range(0, 220).Select(i => "event-" + i.ToString("000")));
                 string oldWizard = Path.Combine(logs, "wizard-old.out"), newWizard = Path.Combine(logs, "wizard-latest.out");
@@ -116,9 +116,9 @@ namespace RemoteAgents.Launcher
                 Console.WriteLine(DiagnosticReport.Clean(block, DiagnosticReport.KnownSecrets(home)));
 
                 // Rotation and I/O failures use the exact writer called by ConfigWindow.Log.
-                File.WriteAllText(Path.Combine(logs, "config-window.log"), new string('x', 1048577));
+                File.WriteAllText(Path.Combine(logs, "config-window.log"), new string('x', 2097153));
                 DiagnosticReport.WriteWindowLog(logs, "after rotation " + missed, DiagnosticReport.KnownSecrets(home));
-                Check(File.Exists(Path.Combine(logs, "config-window.log.old")), "oversized log rotated");
+                Check(File.Exists(Path.Combine(logs, "config-window.log.1")), "oversized log rotated");
                 Check(new FileInfo(Path.Combine(logs, "config-window.log")).Length < 1024, "new log is small");
                 NoSecrets(File.ReadAllText(Path.Combine(logs, "config-window.log")), stored, requested, nested);
                 File.WriteAllText(Path.Combine(logs, "config-window.log"), "OLD-LARGE-PREFIX\n" + new string('x', 210 * 1024) + "\nWINDOW-TAIL\n");

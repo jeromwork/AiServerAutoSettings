@@ -25,13 +25,18 @@ namespace RemoteAgents.Launcher
                 if (!(Json.Get(map, "cmd") is string)) return false;
                 string value = Json.Str(map, "cmd");
                 switch (value) {
-                    case "status": case "ping": case "lan.apply": case "lan.stop": case "vpn.on": case "vpn.off": break;
+                    case "status": case "ping": case "lan.apply": case "lan.stop": case "vpn.on": case "vpn.off": case "log.read": break;
                     default: return false;
                 }
                 if (value == "vpn.on") {
                     foreach (var key in map.Keys)
                         if (key != "cmd" && key != "socksPort" && key != "excludeCidrs" && key != "directDomains" && key != "address" && key != "dnsServer" && key != "checkUrl" && key != "probeAddress") return false;
                     VpnTun.Read(map);
+                } else if (value == "log.read") {
+                    foreach (var key in map.Keys) if (key != "cmd" && key != "after" && key != "max") return false;
+                    ulong after; int max;
+                    if (map.ContainsKey("after") && (Json.Get(map, "after") is string || Json.Get(map, "after") is bool || !ulong.TryParse(Json.Str(map, "after"), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out after))) return false;
+                    if (map.ContainsKey("max") && (Json.Get(map, "max") is string || Json.Get(map, "max") is bool || !int.TryParse(Json.Str(map, "max"), out max) || max < 1 || max > 40000)) return false;
                 } else if (value == "lan.apply") {
                     LanTunNetwork.Parse(map);
                 } else if (map.Count != 1) return false;

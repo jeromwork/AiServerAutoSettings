@@ -54,6 +54,15 @@
     <Compile Include="../NetHelperSetup.cs" />
     <Compile Include="../PinnedTransport.cs" />
     <Compile Include="../NetHelper.cs" />
+    <Compile Include="../NetHelperEvents.cs" />
+    <Compile Include="../VpnConflictScan.cs" />
+    <Compile Include="../RaLog.cs" />
+    <Compile Include="../LogMask.cs" />
+    <Compile Include="../NetLadder.cs" />
+    <Compile Include="../LogShipper.cs" />
+    <Compile Include="../LogShipper.Ssh.cs" />
+    <Compile Include="../HelperLogMirror.cs" />
+    <Compile Include="LoggingTests.cs" />
     <Compile Include="../LanTun.cs" />
     <Compile Include="../LanHosts.cs" />
     <Compile Include="LanHostsTests.cs" />
