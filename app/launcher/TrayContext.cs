@@ -643,7 +643,7 @@ namespace RemoteAgents.Launcher
                 var transport = StatusView.Read(home, "transport", maxAgeSec: 3);
                 var options = new System.Collections.Generic.Dictionary<string, object>(Json.Map(Json.Get(config.Data, "vpn")));
                 // Intent/interface names are not part of the privileged command.
-                options = options.Where(p => new[] { "address", "excludeCidrs", "dnsServer", "checkUrl", "probeAddress" }.Contains(p.Key)).ToDictionary(p => p.Key, p => p.Value);
+                options = options.Where(p => new[] { "address", "excludeCidrs", "directDomains", "dnsServer", "checkUrl", "probeAddress" }.Contains(p.Key)).ToDictionary(p => p.Key, p => p.Value);
                 options["socksPort"] = Json.Int(Json.Map(Json.Get(transport, "helper")), "vpnInPort", Json.Int(Json.Map(Json.Get(config.Data, "transport")), "vpnInPort", 17881));
                 log.Write("vpn.on.request socksPort=" + options["socksPort"]);
                 var status = await netHelper.VpnOn(VpnTun.Read(options));

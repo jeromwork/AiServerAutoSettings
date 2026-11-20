@@ -18,6 +18,7 @@ namespace RemoteAgents.Launcher
         internal const string InterfaceName = "RemoteAgents-VPN";
         internal int SocksPort;
         internal string[] Address = { "172.31.255.1/30", "fdfe:7261::1/126" }, ExcludeCidrs = new string[0];
+        internal string[] DirectDomains = { ".ru", ".su", ".xn--p1ai", "yandex.net", "yastatic.net", "yandex.com", "ya.ru", "vk.com", "userapi.com", "vk-cdn.net", "mycdn.me", "dzen.ru", "mail.ru", "ok.ru" };
         internal string DnsServer = "1.1.1.1", CheckUrl = "https://example.com/", ProbeAddress = "198.18.0.1";
         internal static Dictionary<string, object> D(params object[] pairs)
         { var d = new Dictionary<string, object>(); for (int i = 0; i < pairs.Length; i += 2) d.Add((string)pairs[i], pairs[i + 1]); return d; }
@@ -31,10 +32,12 @@ namespace RemoteAgents.Launcher
             var o = new VpnTun(); o.SocksPort = Json.Int(value, "socksPort", 0);
             if (value.ContainsKey("address")) o.Address = Strings(value, "address");
             if (value.ContainsKey("excludeCidrs")) o.ExcludeCidrs = Strings(value, "excludeCidrs");
+            if (value.ContainsKey("directDomains")) o.DirectDomains = Strings(value, "directDomains");
             o.DnsServer = Json.Text(value, "dnsServer", o.DnsServer); o.CheckUrl = Json.Text(value, "checkUrl", o.CheckUrl); o.ProbeAddress = Json.Text(value, "probeAddress", o.ProbeAddress);
             Uri uri; IPAddress ip;
             if (Json.Get(value, "socksPort") is string || Json.Get(value, "socksPort") is bool || o.SocksPort < 1 || o.SocksPort > 65535 || o.Address.Length == 0 || o.Address.Length > 4 || o.ExcludeCidrs.Length > 256) throw new InvalidDataException("Неверные параметры VPN");
             foreach (var cidr in o.Address.Concat(o.ExcludeCidrs)) Cidr(cidr);
+            if (o.DirectDomains.Length > 64 || o.DirectDomains.Any(d => d.Length == 0 || d.Length > 253 || !Regex.IsMatch(d, "^[a-z0-9.-]+$", RegexOptions.CultureInvariant))) throw new InvalidDataException("Неверный список прямых доменов VPN");
             if (!Uri.TryCreate(o.CheckUrl, UriKind.Absolute, out uri) || uri.Scheme != "https" || uri.HostNameType != UriHostNameType.Dns || uri.UserInfo.Length > 0 || uri.Fragment.Length > 0) throw new InvalidDataException("Для проверки VPN нужен HTTPS URL с доменом");
             if (!IPAddress.TryParse(o.DnsServer, out ip) || !IPAddress.TryParse(o.ProbeAddress, out ip) || ip.AddressFamily != AddressFamily.InterNetwork) throw new InvalidDataException("Неверный IP VPN");
             // A probe inside an excluded prefix cannot prove that the default route works.
@@ -48,7 +51,7 @@ namespace RemoteAgents.Launcher
             return items.Cast<string>().ToArray();
         }
         internal object Request()
-        { return D("cmd", "vpn.on", "socksPort", SocksPort, "address", Address, "excludeCidrs", ExcludeCidrs, "dnsServer", DnsServer, "checkUrl", CheckUrl, "probeAddress", ProbeAddress); }
+        { return D("cmd", "vpn.on", "socksPort", SocksPort, "address", Address, "excludeCidrs", ExcludeCidrs, "directDomains", DirectDomains, "dnsServer", DnsServer, "checkUrl", CheckUrl, "probeAddress", ProbeAddress); }
         internal static bool Contains(string cidr, IPAddress ip)
         {
             Cidr(cidr); var p = cidr.Split('/'); byte[] network = IPAddress.Parse(p[0]).GetAddressBytes(), bytes = ip.GetAddressBytes(); int bits = int.Parse(p[1]);
@@ -114,8 +117,11 @@ namespace RemoteAgents.Launcher
                     D("inbound", new[] { "vpn-tun" }, "domain", new[] { check.DnsSafeHost }, "action", "resolve", "server", "vpn-dns", "disable_cache", true, "disable_optimistic_cache", true, "timeout", "3000ms"),
                     D("inbound", new[] { "vpn-tun" }, "domain", new[] { check.DnsSafeHost }, "action", "route", "outbound", "vpn-active"),
                     D("process_name", new[] { "powershell.exe", "python.exe", "pythonw.exe", "ssh.exe", "sing-box.exe", "syncthing.exe", "SyncthingTray.exe" }, "action", "route", "outbound", "vpn-direct"),
-                    D("ip_cidr", excluded, "action", "route", "outbound", "vpn-direct"), D("protocol", "dns", "action", "hijack-dns"), D("port", new[] { 53 }, "action", "hijack-dns") }),
-                "dns", D("servers", new[] { D("type", "https", "tag", "vpn-dns", "server", DnsServer, "path", "/dns-query", "tls", D("enabled", true), "detour", "vpn-active") }, "final", "vpn-dns"));
+                    D("inbound", new[] { "vpn-tun" }, "action", "sniff"), D("protocol", "dns", "action", "hijack-dns"),
+                    D("domain_suffix", DirectDomains, "action", "route", "outbound", "vpn-direct"),
+                    D("ip_cidr", excluded, "action", "route", "outbound", "vpn-direct"), D("port", new[] { 53 }, "action", "hijack-dns") }),
+                "dns", D("servers", new[] { D("type", "https", "tag", "vpn-dns", "server", DnsServer, "path", "/dns-query", "tls", D("enabled", true), "detour", "vpn-active"), D("type", "local", "tag", "vpn-local") },
+                    "rules", new[] { D("domain_suffix", DirectDomains, "action", "route", "server", "vpn-local") }, "final", "vpn-dns"));
         }
     }
 

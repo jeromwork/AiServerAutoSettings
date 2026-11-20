@@ -30,7 +30,7 @@ namespace RemoteAgents.Launcher
                 }
                 if (value == "vpn.on") {
                     foreach (var key in map.Keys)
-                        if (key != "cmd" && key != "socksPort" && key != "excludeCidrs" && key != "address" && key != "dnsServer" && key != "checkUrl" && key != "probeAddress") return false;
+                        if (key != "cmd" && key != "socksPort" && key != "excludeCidrs" && key != "directDomains" && key != "address" && key != "dnsServer" && key != "checkUrl" && key != "probeAddress") return false;
                     VpnTun.Read(map);
                 } else if (value == "lan.apply") {
                     LanTunNetwork.Parse(map);
