@@ -21,10 +21,16 @@ not mutated. Keep the returned state even for action=none. notes contain only fi
 codes, never event detail, endpoints or exception text. No VPN stop action exists.
 
 path-check/ok also represents a successful dial (the event contract has no dial-ok).
-engine-exit (empty tag means CurrentTag) / path-check process-exited prove a dead process without a network check;
+engine-exit (empty tag means CurrentTag) / two engine-exit events within 60 s, or no engine-ready within 20 s of engine-exit, prove a dead process
+without a network check (one exit alone is a restart; engine-ready clears it); probe process-exited is a
+network-like failure like the rest;
 all network-like failures, including refused, require a fresh check-direct result.
 check-path always requests the contract's 64 KiB confirmation/recovery probe.
 #>
+
+# Engine restart handling: one exit is a restart of the same path, not a failure.
+$script:TransportExitWindowMs=60000     # two exits within this window are a real failure
+$script:TransportReadyTimeoutMs=20000   # engine-ready must arrive within this time after an exit
 
 function Get-TransportDecisionValue($Object,[string]$Name,$Default=$null) {
     if($null -eq $Object){return $Default}
@@ -91,7 +97,7 @@ function Add-TransportDecisionPenalty($State,[string]$Tag,[string]$Reason,[long]
 
 function Reset-TransportDecisionPath($State,[string]$Tag,[long]$At) {
     $p=$State.paths[$Tag]
-    $p.step=0;$p.until=$null;$p.failures=0;$p.failed=$false;$p.reason='ok';$p.lastResultAt=$At
+    $p.step=0;$p.until=$null;$p.failures=0;$p.failed=$false;$p.reason='ok';$p.lastResultAt=$At;$p.restartingSince=$null
     $State.history=@($State.history|Where-Object {$_.tag -ne $Tag})
     [void]$State.pending.Remove($Tag)
     $State.consecutiveFailures=0;$State.roundSince=$null
@@ -107,6 +113,7 @@ function Undo-TransportDecisionPenalties($State,[long]$Now) {
         if($entry.at -ge $since){$State.paths[$entry.tag]=Copy-TransportDecisionValue $entry.before}
     }
     $State.history=@($State.history|Where-Object {$_.at -lt $since})
+    foreach($k in @($State.paths.Keys)){$State.paths[$k].restartingSince=$null}
     $State.pending=@{};$State.directRequestedAt=$null;$State.proposal=$null
     $State.roundSince=$null;$State.consecutiveFailures=0
     $State.localNet='down';$State.localNetAt=$Now
@@ -181,7 +188,7 @@ function Invoke-TransportDecision {
             }
             continue
         }
-        if($kind -eq 'engine-exit' -and -not $tag){$tag=$CurrentTag}
+        if($kind -in @('engine-exit','engine-ready') -and -not $tag){$tag=$CurrentTag}
         if(-not $s.paths.ContainsKey($tag) -or $tag -notin $tags){continue}
         $p=$s.paths[$tag]
         if($null -ne $p.lastResultAt -and $at -lt $p.lastResultAt){continue}
@@ -197,15 +204,12 @@ function Invoke-TransportDecision {
             if($wasStall){$p.stallIgnoreUntil=$Now+60000}
             continue
         }
+        if($kind -eq 'engine-ready'){$p.restartingSince=$null;continue}
         if($s.localNet -eq 'down'){continue}
         if($kind -eq 'path-check'){
             if($s.pending.ContainsKey($tag) -and $at -lt $s.pending[$tag].at){continue}
-            if($code -ne 'process-exited' -and $s.pending.ContainsKey($tag) -and $s.pending[$tag].stage -eq 'direct'){continue}
+            if($s.pending.ContainsKey($tag) -and $s.pending[$tag].stage -eq 'direct'){continue}
             if($null -ne $p.until -and $Now -lt $p.until){continue}
-            if($code -eq 'process-exited'){
-                if($null -eq $s.roundSince){$s.roundSince=$at}
-                Add-TransportDecisionPenalty $s $tag 'path-process-exited' $Now $at;continue
-            }
             $reason='path-dial-failed'
             if($code -eq 'stalled' -or ($s.pending.ContainsKey($tag) -and $s.pending[$tag].reason -eq 'path-stalled')){$reason='path-stalled'}
             $s.pending[$tag]=@{at=$at;stage='direct';reason=$reason;requested=$false}
@@ -221,11 +225,30 @@ function Invoke-TransportDecision {
         $p.lastSignalAt=$at
         if($null -eq $s.roundSince){$s.roundSince=$at}
         if($kind -eq 'engine-exit'){
-            Add-TransportDecisionPenalty $s $tag 'path-process-exited' $Now $at;continue
+            $exits=@(@(Get-TransportDecisionValue $p 'exitTimes' @())|Where-Object {$at-[long]$_ -lt $script:TransportExitWindowMs})
+            $exits=@($exits)+@($at);$p.exitTimes=@($exits)
+            if($exits.Count -ge 2){
+                $p.restartingSince=$null
+                Add-TransportDecisionPenalty $s $tag 'path-process-exited' $Now $at
+            }elseif($null -eq (Get-TransportDecisionValue $p 'restartingSince')){$p.restartingSince=$at}
+            continue
         }
         $stage='direct';$reason='path-dial-failed'
         if($kind -eq 'stall-suspect'){$stage='path';$reason='path-stalled'}
         $s.pending[$tag]=@{at=$at;stage=$stage;reason=$reason;requested=$false}
+    }
+    # engine-ready did not arrive in time: the restart failed, so the path is really dead.
+    if($s.localNet -ne 'down'){
+        foreach($key in @($s.paths.Keys|Sort-Object)){
+            $rp=$s.paths[$key];$since=Get-TransportDecisionValue $rp 'restartingSince'
+            if($null -ne $since -and $key -in $tags -and ($Now-[long]$since) -ge $script:TransportReadyTimeoutMs){
+                $rp.restartingSince=$null
+                if($null -eq $rp.until -or $Now -ge $rp.until){
+                    if($null -eq $s.roundSince){$s.roundSince=$Now}
+                    Add-TransportDecisionPenalty $s $key 'path-process-exited' $Now $Now
+                }
+            }
+        }
     }
     # A successful probe may have removed the last waiter while direct I/O was running.
     $direct=@($s.pending.Keys|Where-Object {$s.pending[$_].stage -eq 'direct'}|Sort-Object)
