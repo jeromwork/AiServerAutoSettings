@@ -48,7 +48,7 @@ _WORDS = re.compile(r'(?:^|[_.-])(?:key|pass|auth|psk|private|apikey)(?:$|[_.-])
 
 
 def _secret_name(name):
-    if not name:
+    if not name or re.fullmatch(r'\w*(?:Error|Exception)', name):
         return False
     if _SUBSTR.search(name):
         return True

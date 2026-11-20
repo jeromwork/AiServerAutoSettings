@@ -86,7 +86,7 @@ function Get-TransportErrorDetail($ErrorRecord) {
 # ---- Единый журнал (формат — docs/LOGS.md; тот же формат пишут RaLog.cs и logs_in.py) ----
 $script:RaLogSession=([guid]::NewGuid().ToString('N')).Substring(0,4)
 function Test-RaLogSecretName([string]$Name) {
-    if(-not $Name){return $false}
+    if(-not $Name -or $Name -cmatch '^\w*(?:Error|Exception)$'){return $false}
     if($Name -match '(?i)token|password|passwd|passphrase|secret|authorization|cookie|uuid'){return $true}
     $words=[regex]::Replace($Name,'([a-z0-9])([A-Z])','$1_$2')
     [bool]($words -match '(?i)(?:^|[_.-])(?:key|pass|auth|psk|private|apikey)(?:$|[_.-])')

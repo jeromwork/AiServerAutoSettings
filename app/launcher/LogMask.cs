@@ -24,7 +24,7 @@ namespace RemoteAgents.Launcher
 
         internal static bool IsSecretName(string name)
         {
-            if (string.IsNullOrEmpty(name)) return false;
+            if (string.IsNullOrEmpty(name) || Regex.IsMatch(name, @"^\w*(?:Error|Exception)$")) return false; // KeyError: имя исключения, не ключ
             if (SubstringNames.IsMatch(name)) return true;
             return WordNames.IsMatch(Regex.Replace(name, "([a-z0-9])([A-Z])", "$1_$2"));
         }

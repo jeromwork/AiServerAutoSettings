@@ -110,5 +110,9 @@
  {
   "in": "x-api-key: abc",
   "out": "x-api-key: ***"
+ },
+ {
+  "in": "KeyError: 'lan_pc_access.py'",
+  "out": "KeyError: 'lan_pc_access.py'"
  }
 ]
