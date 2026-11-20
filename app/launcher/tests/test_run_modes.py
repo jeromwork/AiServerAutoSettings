@@ -13,7 +13,7 @@ end = source.index('trap cleanup EXIT', start)
 block = source[start:end]
 first_end = block.index(') > "$testdir/offline.log"')
 block = '(\n  fixture offline "$OFFLINE_EXIT"\n' + block[first_end:]
-block = block.replace('  bash "$repo/server/tests/run.sh"', '  fixture server "$SERVER_EXIT"')
+block = block.replace('  flaky server bash "$repo/server/tests/run.sh"', '  fixture server "$SERVER_EXIT"')
 fixture = '''import json, os, sys, time
 from pathlib import Path
 name, code = sys.argv[1:]
