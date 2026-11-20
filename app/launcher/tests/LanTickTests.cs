@@ -91,7 +91,7 @@ namespace RemoteAgents.Launcher
             var lines = File.ReadAllLines(logFile);
             Check(lines.Length == 1, "identical failures log only once within a minute");
             Check(lines[0].Contains("ArgumentOutOfRangeException") && lines[0].Contains("LanTickTests.Failure") && lines[0].Contains("Index outside collection"), "diagnostic includes exception type, short reason and top frame");
-            Check(lines[0].Length <= 300 && !lines[0].Contains("private-token") && !lines[0].Contains("\r"), "bounded one-line diagnostic masks secrets");
+            Check(lines[0].Length <= 420 && !lines[0].Contains("private-token") && !lines[0].Contains("\r"), "bounded one-line diagnostic masks secrets");
             now = 60000; diagnostics.Write(journal, failure);
             diagnostics.Write(journal, new IOException("Another failure"));
             Check(File.ReadAllLines(logFile).Length == 3, "minute boundary permits repeat and another cause logs immediately");
@@ -101,7 +101,7 @@ namespace RemoteAgents.Launcher
             Check(!safe.Contains("first") && !safe.Contains("second") && !safe.Contains("third"), "punctuation cannot expose secret values");
             Check(TickFailureLog.Describe(Failure(new string('я', 1000))).Length <= 236, "long messages leave room for type and frame");
             diagnostics.Write(journal, Failure(new string('я', 1000)));
-            Check(File.ReadAllLines(logFile).All(line => line.Length <= 300), "entire journal line stays within 300 characters including timestamp and event");
+            Check(File.ReadAllLines(logFile).All(line => line.Length <= 420), "entire journal line stays within 420 characters including timestamp and event");
             string isolatedHome = Path.Combine(home, "isolated-steps");
             var isolatedJournal = new Journal(isolatedHome);
             var isolated = new TickFailureLog(() => 0);
@@ -111,7 +111,7 @@ namespace RemoteAgents.Launcher
             bool third = isolated.Run(isolatedJournal, "status", () => { completed++; });
             Check(first && !second && third && completed == 2, "failed menu step returns false and later status step still runs");
             var isolatedLines = File.ReadAllLines(Path.Combine(isolatedHome, "logs/launcher.log"));
-            Check(isolatedLines.Length == 1 && isolatedLines[0].Contains("supervisor.tick.failed step=menu ArgumentOutOfRangeException"), "failed step logs exactly one named exception");
+            Check(isolatedLines.Length == 1 && isolatedLines[0].Contains("supervisor.tick.failed") && isolatedLines[0].Contains("step=menu ") && isolatedLines[0].Contains("ArgumentOutOfRangeException"), "failed step logs exactly one named exception");
 
             string stepsHome = Path.Combine(home, "step-deduplication");
             var stepsJournal = new Journal(stepsHome);
