@@ -387,7 +387,30 @@ try{
     $publisher=$daemonAst.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Publish-TransportStatus'},$true).Body.GetScriptBlock()
     & {
         param($root,$settings,$paths,$active,$publisher)
-        $rows=@();$engine=@{Process=@{HasExited=$false}};$network=$null;$confirmed=$false;$errorText='fixture';$revision='fixture';$exitCode=0;$retryAt=[DateTime]::MinValue;$pin=[pscustomobject]@{mode='auto';tag=$null}
+        # Parent-scope reads of Publish-TransportStatus: root, settings, paths, active,
+        # rows, engine, network, confirmed, errorText, revision, exitCode, retryAt, pin,
+        # verdict, decision, initialRound, reloadError, portConflict, stopping, metered,
+        # daemonStarted, script:engineAttempted and script:checkingSince.
+        # Match daemon initialization; only root/settings/paths/active/revision are fixture data.
+        $rows=@();$engine=$null;$network=$null;$confirmed=$false;$errorText='Запуск';$revision='fixture';$exitCode=0;$retryAt=[DateTime]::MinValue;$pin=[pscustomobject]@{mode='auto';tag=$null}
+        $verdict=$null;$decision=$null;$initialRound=$false;$reloadError=$null;$portConflict=$null;$stopping=$false;$metered=$null
+        $daemonStarted=[DateTime]::Now
+        try{$daemonStarted=(Get-Process -Id $PID).StartTime}catch{}
+        $script:engineAttempted=$false;$script:checkingSince=$daemonStarted.ToUniversalTime()
+        & $publisher
+        $startupStatus=Read-TransportJson (Join-Path $root 'status/transport.json')
+        Assert ($startupStatus.phase -eq 'checking' -and -not $startupStatus.ok -and $startupStatus.summary -ceq 'запуск модуля связи') 'до первой попытки запуска движка publisher сообщает checking, а не failed'
+        Assert ((Convert-TransportUtc $startupStatus.checkingSince) -eq $daemonStarted.ToUniversalTime()) 'checkingSince начинается со времени запуска процесса демона'
+        # Exercise the fallback that exposed the missing daemonStarted in this fixture.
+        $script:checkingSince=$null
+        & $publisher
+        $startupStatus=Read-TransportJson (Join-Path $root 'status/transport.json')
+        Assert ($startupStatus.phase -eq 'checking' -and -not $startupStatus.ok -and $startupStatus.summary -ceq 'запуск модуля связи' -and (Convert-TransportUtc $startupStatus.checkingSince) -eq $daemonStarted.ToUniversalTime()) 'publisher восстанавливает отсутствующий checkingSince из daemonStarted'
+        $script:engineAttempted=$true;$errorText='fixture'
+        & $publisher
+        $failedStatus=Read-TransportJson (Join-Path $root 'status/transport.json')
+        Assert ($failedStatus.phase -eq 'failed' -and -not $failedStatus.ok -and $failedStatus.summary -ceq 'нет связи: fixture') 'после неудачной попытки запуска движка publisher сохраняет failed и причину'
+        $engine=@{Process=@{HasExited=$false}}
         $verdict=@{action='searching';localNet='down';reason=@{code='local-network-down';text='Нет интернета у вас (сеть), жду';since=0}}
         $decision=@{switches=@(@{at=0;from='a';to='b';why='path-stalled'})}
         & $publisher
@@ -395,7 +418,7 @@ try{
     $daemonStatus=Read-TransportJson (Join-Path $work 'status/transport.json')
     $statusText=[IO.File]::ReadAllText((Join-Path $work 'status/transport.json'))
     Assert ($statusText -match '"since"\s*:\s*"1970-01-01T00:00:00.0000000Z"' -and $statusText -match '"at"\s*:\s*"1970-01-01T00:00:00.0000000Z"') 'reason/switches используют ISO UTC'
-    Assert ($daemonStatus.phase -eq 'searching' -and $daemonStatus.localNet -eq 'down') 'publisher сохраняет поиск и локальную причину'
+    Assert ($daemonStatus.phase -eq 'searching' -and -not $daemonStatus.ok -and $daemonStatus.localNet -eq 'down' -and $daemonStatus.summary -ceq 'нет связи: fixture') 'после попытки запуска publisher сохраняет поиск и локальную причину'
     Assert ($daemonStatus.helper.lanInPort -eq 17880 -and $daemonStatus.helper.vpnInPort -eq 17881 -and -not $daemonStatus.helper.udp -and -not ([IO.File]::ReadAllText((Join-Path $work 'status/transport.json'))).Contains($helper.password)) 'настоящий publisher пишет helper без пароля'
     foreach($external in $paths.Outbounds|Where-Object {-not $_.detour -and $_.type -ne 'socks'}){
         $actual=$bound.outbounds|Where-Object {$_.tag -eq $external.tag}
