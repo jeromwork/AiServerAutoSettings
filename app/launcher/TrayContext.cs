@@ -39,6 +39,8 @@ namespace RemoteAgents.Launcher
         int diskFolders = -1;
         bool vpnActionBusy, vpnActionWanted;
         string vpnError = "";
+        bool bridgeActionBusy, bridgeActionWanted;
+        string bridgeError = "";
         HelperClient netHelper;
         string diskSummary = "Диск: ожидается проверка";
         DateTime diskUpdated = DateTime.MinValue;
@@ -409,7 +411,7 @@ namespace RemoteAgents.Launcher
         void ReloadSettings()
         {
             try {var file=Path.Combine(home,"config.json");var written=File.GetLastWriteTimeUtc(file);if(written==settingsWritten)return;var latest=new Configuration(home).Data;config.Data.Clear();foreach(var pair in latest)config.Data[pair.Key]=pair.Value;settingsWritten=written;
-                foreach(var runtime in runtimes.Where(r=>!r.Definition.CommandManaged)){bool enabled=Wanted(runtime.Definition);if(runtime.Enabled!=enabled)runtime.SetEnabled(enabled);}
+                foreach(var runtime in runtimes.Where(r=>!r.Definition.CommandManaged && !(bridgeActionBusy && r.Definition.Name == "control"))){bool enabled=Wanted(runtime.Definition);if(runtime.Enabled!=enabled)runtime.SetEnabled(enabled);}
             }catch{log.Write("setup.config.refresh.failed");}
         }
         void ShowMain()
@@ -431,6 +433,7 @@ namespace RemoteAgents.Launcher
                 };
                 mainWindow.MainAction = action => Safe(() => {
                     if (action == "retry") { if (AllowMutation()) LoadComponents(); }
+                    else if (action == "bridge-on" || action == "bridge-off") SetBridge(action == "bridge-on");
                     else if (action == "open-sync") OpenSynchronization();
                     else if (action == "open-disk") OpenDisk();
                 });
@@ -543,6 +546,8 @@ namespace RemoteAgents.Launcher
                 VpnInstalled = definition != null && definition.Components.Any(c => c.Name == "vpn"),
                 VpnWanted = vpnActionBusy ? vpnActionWanted : Json.Bool(Json.Map(Json.Get(Json.Map(Json.Get(config.Data, "profile")), "vpn")), "enabled"),
                 VpnBusy = vpnActionBusy, VpnError = vpnError, VpnDisableFailed = vpnError.Length > 0 && !vpnActionWanted, Operation = MutationConflict(),
+                BridgeEnabled = bridgeActionBusy ? bridgeActionWanted : Json.Bool(Json.Map(Json.Get(config.Data, "bridge")), "enabled", true),
+                BridgeBusy = bridgeActionBusy, BridgeError = bridgeError,
                 DiskEnabled = runtimes.Any(r => r.Definition.Name == "disk" && r.Enabled), DiskSummary = DiskSummary(),
                 DiskFolders = (DateTime.UtcNow - diskUpdated).TotalSeconds <= 10 ? diskFolders : -1, DiskServerOnly = -1,
                 HappierVisible = account.Visible, HappierHasKey = account.HasKey, HappierLabel = account.Label,
@@ -554,6 +559,46 @@ namespace RemoteAgents.Launcher
                 "\r\nПуть: " + StatusView.Title(transport) + "; " + StatusView.Speed(transport) + "; проверен: " + StatusView.CheckedAt(transport) +
                 "\r\nСеть: " + StatusView.Network(transport) + "; лимитная: " + StatusView.Metered(transport) +
                 (Json.Str(transport, "configError").Length > 0 ? "\r\nНастройки: " + Json.Str(transport, "configError") : ""), transport, health);
+        }
+
+        async void SetBridge(bool enabled)
+        {
+            if (!AllowMutation()) return;
+            actionBusy = bridgeActionBusy = true; bridgeActionWanted = enabled; bridgeError = "";
+            RefreshMain();
+            var monitor = runtimes.FirstOrDefault(r => r.Definition.Name == "control");
+            try {
+                // Stop supervision while the wizard changes intent and installs/uninstalls the bridge.
+                // Otherwise its missing-process recovery could race an explicit off request.
+                if (monitor != null && monitor.Enabled) monitor.SetEnabled(false);
+                string bundle = engine.Folder(engine.Current);
+                var settings = new Configuration(home).Data;
+                var request = ConfigRequests.Bridge(new Dictionary<string, object>(), settings);
+                request["enabled"] = enabled;
+                await Task.Run(() => WizardRunner.Run(home, bundle, "Bridge", request, stop.Token));
+                // Keep the desired profile in step so a later config apply preserves this choice.
+                config.Edit(latest => {
+                    var profile = new Dictionary<string, object>(Json.Map(Json.Get(latest, "profile")));
+                    var bridge = new Dictionary<string, object>(Json.Map(Json.Get(profile, "bridge")));
+                    var actual = Json.Map(Json.Get(latest, "bridge"));
+                    bridge["enabled"] = Json.Bool(actual, "enabled", true);
+                    bridge["allowShell"] = Json.Bool(actual, "allowShell", true);
+                    profile["bridge"] = bridge; latest["profile"] = profile;
+                });
+                log.Write(enabled ? "bridge.on.ok" : "bridge.off.ok");
+            } catch (OperationCanceledException) { log.Write("bridge.cancelled"); }
+            catch (Exception error) {
+                log.Write("bridge.failed " + error.GetType().Name);
+                bridgeError = enabled ? "Не удалось включить удалённое управление. Проверьте настройки и журналы."
+                    : "Не удалось выключить удалённое управление. Выключение не подтверждено; проверьте настройки и журналы.";
+            } finally {
+                actionBusy = bridgeActionBusy = false;
+                if (!closing) {
+                    ReloadSettings();
+                    if (monitor != null && monitor.Enabled != Wanted(monitor.Definition)) monitor.SetEnabled(Wanted(monitor.Definition));
+                    RefreshMenu();
+                }
+            }
         }
 
         string TransportScript(string name) { return Path.Combine(engine.Folder(engine.Current), "transport", name); }

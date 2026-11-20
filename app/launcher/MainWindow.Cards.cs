@@ -9,7 +9,8 @@ namespace RemoteAgents.Launcher
         readonly FlowLayoutPanel homeBody = Stack(), happierBody = Stack();
         readonly InfoBar mainBanner = new InfoBar();
         readonly Button vpnSwitch = new Button { AutoSize = true, Padding = new Padding(6, 3, 6, 3) };
-        bool vpnOn;
+        readonly Button bridgeSwitch = new Button { AutoSize = true, Padding = new Padding(6, 3, 6, 3) };
+        bool vpnOn, bridgeOn;
         readonly Label vpnTitle = WrapLabel(), vpnState = WrapLabel(), vpnDetail = WrapLabel();
         readonly LinkLabel pathLink = new LinkLabel { AutoSize = true, UseMnemonic = false };
         readonly LinkLabel diagnosticPathLink = new LinkLabel { AutoSize = true, UseMnemonic = false };
@@ -59,7 +60,10 @@ namespace RemoteAgents.Launcher
             diskDetail.ForeColor = Theme.Muted; AddButton(body, "Открыть Диск", () => DispatchMainAction("open-disk"));
             happierCard = MakeCard(homeBody, happierTitle, out body); body.Controls.Add(happierState); body.Controls.Add(happierDetail);
             happierDetail.ForeColor = Theme.Muted; body.Controls.Add(happierCreated); body.Controls.Add(happierBody);
-            helperCard = MakeCard(homeBody, helperTitle, out body); body.Controls.Add(helperState); body.Controls.Add(helperDetail); helperDetail.ForeColor = Theme.Muted;
+            helperCard = MakeCard(homeBody, helperTitle, out body);
+            body.Controls.Add(bridgeSwitch); body.Controls.Add(helperState); body.Controls.Add(helperDetail); helperDetail.ForeColor = Theme.Muted;
+            bridgeSwitch.AccessibleName = "Удалённое управление";
+            bridgeSwitch.Click += (s, e) => { if (bridgeSwitch.Enabled) DispatchMainAction(bridgeOn ? "bridge-off" : "bridge-on"); };
         }
         void DispatchMainAction(string action)
         {
@@ -93,6 +97,8 @@ namespace RemoteAgents.Launcher
                 RenderCard(view.Disk, diskCard, diskTitle, diskState, diskDetail);
                 RenderCard(view.Happier, happierCard, happierTitle, happierState, happierDetail);
                 RenderCard(view.Helper, helperCard, helperTitle, helperState, helperDetail);
+                bridgeOn = view.Helper.On; bridgeSwitch.Enabled = view.Helper.SwitchEnabled;
+                SetText(bridgeSwitch, view.Helper.SwitchText); bridgeSwitch.AccessibleDescription = view.Helper.SwitchText;
             } finally { homeBody.ResumeLayout(true); }
             if (step.Layout) FitPage(pages["Главная"]);
         }
