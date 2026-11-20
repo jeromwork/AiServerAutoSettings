@@ -3,6 +3,8 @@ const {spawn} = require('node:child_process');
 const {verify, createPublicKey, createPrivateKey} = require('node:crypto');
 const assert = require('node:assert/strict');
 const [origin, profile] = process.argv.slice(2);
+const jsDelayMs = Number(process.env.HAPPIER_TEST_JS_DELAY_MS || 0);
+assert(Number.isFinite(jsDelayMs) && jsDelayMs >= 0, 'invalid UI script delay');
 const chrome = spawn('/usr/bin/google-chrome', ['--headless', '--no-sandbox', '--disable-gpu',
     '--disable-dev-shm-usage', '--disable-background-networking', '--disable-sync', '--disable-extensions',
     '--no-first-run', '--no-default-browser-check', '--no-proxy-server',
@@ -10,7 +12,22 @@ const chrome = spawn('/usr/bin/google-chrome', ['--headless', '--no-sandbox', '-
     '--user-data-dir=' + profile, '--remote-debugging-pipe'],
     {stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe']});
 let seq = 0, buffer = '', session, calls = [], fatal;
+let closingChrome = false, delayNativeLogin = true, delayedScripts = 0;
 const waiting = new Map();
+function pipeError(error) {
+    if (closingChrome && ['ECONNRESET', 'EPIPE'].includes(error.code)) return;
+    fatal = error;
+    process.exitCode = 1;
+    console.error('Chrome CDP pipe error:', error);
+    for (const callback of waiting.values()) callback.reject(error);
+    waiting.clear();
+}
+chrome.stdio[3].on('error', pipeError);
+chrome.stdio[4].on('error', pipeError);
+function closeChrome() {
+    closingChrome = true;
+    chrome.kill('SIGKILL');
+}
 function send(method, params = {}, sid = session) {
     const id = ++seq;
     return new Promise((resolve, reject) => {
@@ -36,9 +53,17 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const key = Array(10).fill('AAAAA').concat('AA').join('-'); // public test seed: 32 zero bytes
 const token = Buffer.from('{}').toString('base64url') + '.' +
     Buffer.from(JSON.stringify({sub:'ra-browser-fixture', exp:4102444800})).toString('base64url') + '.fixture';
-async function intercept({requestId, request}, sid) {
+async function intercept({requestId, request, resourceType}, sid) {
     assert(!request.url.includes(key), 'secret in request URL');
-    if (request.url.startsWith(origin + '/')) return send('Fetch.continueRequest', {requestId}, sid);
+    if (request.url.startsWith(origin + '/')) {
+        // Delay only vendor scripts for the first login; the handoff add-on runs immediately.
+        if (delayNativeLogin && jsDelayMs && resourceType === 'Script' &&
+            new URL(request.url).pathname !== '/_remoteagents/addon.js') {
+            delayedScripts++;
+            await sleep(jsDelayMs);
+        }
+        return send('Fetch.continueRequest', {requestId}, sid);
+    }
     const url = new URL(request.url);
     calls.push({path: url.pathname, method: request.method});
     let body = {}, responseCode = 200;
@@ -73,8 +98,9 @@ async function evaluate(expression) {
     if (result.exceptionDetails) throw Error(result.exceptionDetails.text);
     return result.result.value;
 }
-async function until(expression, label) {
-    for (let i = 0; i < 200; i++) {
+async function until(expression, label, timeoutMs = 20000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
         if (fatal) throw fatal;
         try {if (await evaluate(`Boolean(${expression})`)) return;} catch (e) {if (!e.message.includes('context')) throw e;}
         await sleep(100);
@@ -93,7 +119,9 @@ let rejectAuth = false;
     await send('Network.setBlockedURLs', {urls:['ws://*', 'wss://*']});
     await send('Fetch.enable', {patterns:[{urlPattern:'*'}]});
     await send('Page.navigate', {url:origin + '/?handoff=kept#ra-login=' + key});
-    await until(`Object.keys(${credentials}).length === 1`, 'native login saves credentials');
+    await until(`Object.keys(${credentials}).length === 1`, 'native login saves credentials', 20000 + jsDelayMs);
+    delayNativeLogin = false;
+    if (jsDelayMs) assert(delayedScripts > 0, 'UI scripts must actually be delayed');
     assert.equal(authCalls(), 1);
     assert.equal(await evaluate('location.hash'), '');
     assert.equal(await evaluate('location.search'), '?handoff=kept');
@@ -144,9 +172,8 @@ let rejectAuth = false;
     assert.equal(await evaluate('location.hash'), '');
     assert(!calls.some(x=>x.method === 'POST' && !['/v1/auth', '/v1/kv/bulk'].includes(x.path)), 'unexpected signup or mutation');
     if (fatal) throw fatal;
+    if (jsDelayMs) console.log(`PASS: UI script delay ${jsDelayMs} ms, ${delayedScripts} intercepted scripts`);
     console.log('PASS: official ui-web native login, signed challenge, fragment/query, existing accounts, invalid/missing key, single failed attempt');
-})().catch(e => {console.error(e); process.exitCode=1;}).finally(() => {
-    chrome.kill('SIGKILL');
-});
-process.on('exit', () => chrome.kill('SIGKILL'));
-setTimeout(() => {console.error('Chrome login deadline'); process.exit(1);}, 90000).unref();
+})().catch(e => {console.error(e); process.exitCode=1;}).finally(closeChrome);
+process.on('exit', closeChrome);
+setTimeout(() => {console.error('Chrome login deadline'); process.exit(1);}, 90000 + jsDelayMs).unref();
