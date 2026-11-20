@@ -10,6 +10,7 @@ namespace RemoteAgents.Launcher
         readonly InfoBar mainBanner = new InfoBar();
         readonly Button vpnSwitch = new Button { AutoSize = true, Padding = new Padding(6, 3, 6, 3) };
         readonly Button bridgeSwitch = new Button { AutoSize = true, Padding = new Padding(6, 3, 6, 3) };
+        Button settingsBridgeSwitch;
         bool vpnOn, bridgeOn;
         readonly Label vpnTitle = WrapLabel(), vpnState = WrapLabel(), vpnDetail = WrapLabel();
         readonly LinkLabel pathLink = new LinkLabel { AutoSize = true, UseMnemonic = false };
@@ -99,6 +100,7 @@ namespace RemoteAgents.Launcher
                 RenderCard(view.Helper, helperCard, helperTitle, helperState, helperDetail);
                 bridgeOn = view.Helper.On; bridgeSwitch.Enabled = view.Helper.SwitchEnabled;
                 SetText(bridgeSwitch, view.Helper.SwitchText); bridgeSwitch.AccessibleDescription = view.Helper.SwitchText;
+                if (settingsBridgeSwitch != null) { settingsBridgeSwitch.Enabled = view.Helper.SwitchEnabled; SetText(settingsBridgeSwitch, view.Helper.SwitchText); settingsBridgeSwitch.AccessibleDescription = view.Helper.SwitchText; }
             } finally { homeBody.ResumeLayout(true); }
             if (step.Layout) FitPage(pages["Главная"]);
         }

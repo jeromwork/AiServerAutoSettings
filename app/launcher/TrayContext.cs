@@ -333,10 +333,11 @@ namespace RemoteAgents.Launcher
                     item.Click += (s, e) => Safe(() => {
                         if (id == "update-check") CheckUpdates();
                         else if (id == "open") OpenHappier();
-                        else if (id == "settings") ShowMain();
+                        else if (id == "settings") ShowMain("Настройки");
                         else if (id == "disk") OpenDisk();
                         else if (id == "synchronization") OpenSynchronization();
                         else if (id == "vpn") ToggleVpn();
+                        else if (id == "bridge") ToggleBridge();
                         else if (id == "exit") RequestExit();
                     });
                     menu.Items.Add(item);
@@ -353,6 +354,18 @@ namespace RemoteAgents.Launcher
             var card = MainScreenModel.Build(new MainScreenFacts { VpnInstalled = true, Vpn = VpnStatus.Read(home), VpnBusy = vpnActionBusy, VpnWanted = vpnActionWanted, Operation = MutationConflict() }).Vpn;
             return new TrayMenuEntry("vpn", card.On ? "Выключить VPN" : "Включить VPN", card.SwitchEnabled) { Hint = card.State };
         }
+        CardView BridgeCard()
+        {
+            return MainScreenModel.Build(new MainScreenFacts {
+                BridgeEnabled = bridgeActionBusy ? bridgeActionWanted : Json.Bool(Json.Map(Json.Get(config.Data, "bridge")), "enabled", true),
+                BridgeBusy = bridgeActionBusy, Operation = MutationConflict() }).Helper;
+        }
+        void ToggleBridge()
+        {
+            var helper = BridgeCard();
+            if (!helper.SwitchEnabled) return;
+            SetBridge(!helper.On);
+        }
         void ToggleVpn()
         {
             var vpn = runtimes.FirstOrDefault(r => r.Definition.Name == "vpn"); if (vpn == null) return;
@@ -367,7 +380,8 @@ namespace RemoteAgents.Launcher
             if (Json.Bool(lanStatus, "enabled")) entries.Insert(0, new TrayMenuEntry("lan-status", StatusView.Lan(lanStatus), false));
             entries.Insert(entries.Count - 1, new TrayMenuEntry("update-status", updateSummary, false));
             entries.Insert(entries.Count - 1, new TrayMenuEntry("update-check", "Проверить обновления сейчас", !updateChecking && !engine.Pending));
-            entries.Insert(entries.Count - 1, VpnMenu()); return entries.ToArray();
+            entries.Insert(entries.Count - 1, VpnMenu());
+            entries.Insert(entries.Count - 1, TrayMenuModel.BridgeEntry(BridgeCard())); return entries.ToArray();
         }
         bool Configured()
         { return Json.Bool(Json.Map(Json.Get(new Configuration(home).Data, "wizard")), "configured"); }
@@ -414,7 +428,7 @@ namespace RemoteAgents.Launcher
                 foreach(var runtime in runtimes.Where(r=>!r.Definition.CommandManaged && !(bridgeActionBusy && r.Definition.Name == "control"))){bool enabled=Wanted(runtime.Definition);if(runtime.Enabled!=enabled)runtime.SetEnabled(enabled);}
             }catch{log.Write("setup.config.refresh.failed");}
         }
-        void ShowMain()
+        void ShowMain(string page = null)
         {
             if (closing) return;
             // During first installation the existing paste/step window remains the only window.
@@ -454,7 +468,7 @@ namespace RemoteAgents.Launcher
                     Service("Список путей", () => ScriptCommand("Edit-Transport.ps1", new[] { "-List" }, true))
                 }, tag => ScriptCommand("Set-TransportPath.ps1", tag.Length == 0 ? new[] { "-Auto" } : new[] { "-Tag", tag }, false));
             }
-            window.Show(); RefreshMain(); ActivateWindow(mainWindow);
+            window.Show(); RefreshMain(); if (page != null) mainWindow.ShowPage(page); ActivateWindow(mainWindow);
         }
         KeyValuePair<string, Action> Service(string title, Action action)
         { return new KeyValuePair<string, Action>(title, () => Safe(action)); }
