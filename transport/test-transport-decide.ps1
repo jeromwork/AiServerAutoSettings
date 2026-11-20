@@ -15,6 +15,8 @@ function Event([long]$At,[string]$Kind,[string]$Tag='a',[string]$Code='timeout',
 function Decide($State,[long]$Now,$Events=@(),$Rows=@((Row 'a'),(Row 'b' 'remembered' 120)),[string]$Current='a',[switch]$Improve) {
     return Invoke-TransportDecision -State $State -Candidates $Rows -Now $Now -Events $Events -CurrentTag $Current -AllowImprovement:$Improve
 }
+# A real failure: two exits within 60 s (one exit is only a restart).
+function Dead([long]$At,[string]$Tag='a'){return @((Event $At 'engine-exit' $Tag),(Event $At 'engine-exit' $Tag))}
 function Json($Value){return ConvertTo-Json -InputObject $Value -Depth 30 -Compress}
 
 # Failure is only a suspicion until direct connectivity is independently confirmed.
@@ -38,7 +40,7 @@ Assert ($r.verdict.action -eq 'switch') 'failed selector request can be retried 
 $r=Decide $r.state 2100 @() $rows 'b'
 Assert ($r.verdict.action -eq 'none' -and $r.state.lastSwitchAt -eq 2100) 'actual selector change starts stay and rate limits'
 Assert ($r.state.switches.Count -eq 1 -and $r.state.switches[0].from -eq 'a' -and $r.state.switches[0].to -eq 'b' -and $r.state.switches[0].why -eq 'path-dial-failed') 'acknowledged history records failure reason'
-$r=Decide $r.state 2700 @((Event 2700 'engine-exit' 'b')) $rows 'b'
+$r=Decide $r.state 2700 @(Dead 2700 'b') $rows 'b'
 Assert ($r.verdict.action -eq 'searching' -and $r.verdict.reason.code -eq 'all-paths-penalized') 'all paths paused means searching'
 $r=Decide $r.state 8000 @() $rows 'b'
 Assert ($r.verdict.action -eq 'searching' -and $r.verdict.notes -contains 'switch-rate-limited') 'new failure bypasses minStay but cannot violate ten seconds'
@@ -49,7 +51,7 @@ Assert ($r.verdict.action -eq 'switch' -and $r.verdict.tag -eq 'a') 'deferred fa
 $s=New-TransportDecisionState 0 'a';$single=@((Row 'a'));$now=1000
 $delays=@(5000,15000,45000,120000,300000,300000)
 for($i=0;$i -lt $delays.Count;$i++){
-    $r=Decide $s $now @((Event $now 'engine-exit')) $single
+    $r=Decide $s $now @(Dead $now 'a') $single
     Assert ($r.verdict.penalties.a.step -eq [Math]::Min(5,$i+1) -and $r.verdict.penalties.a.until -eq ($now+$delays[$i])) ('penalty ladder step '+$i)
     Assert ($r.verdict.action -eq 'searching') 'single paused path never disables VPN'
     $s=$r.state;$now=$r.verdict.penalties.a.until
@@ -71,11 +73,11 @@ Assert ($r.verdict.action -eq 'check-direct' -and $r.verdict.penalties.a.step -e
 
 # Local indications immediately roll back and freeze all path punishment and movement.
 foreach($kind in @('dial-fail','conn-closed-error','net-down')){
-    $r=Decide (New-TransportDecisionState 0 'a') 1000 @((Event 1000 'engine-exit'))
+    $r=Decide (New-TransportDecisionState 0 'a') 1000 @(Dead 1000 'a')
     $r=Decide $r.state 2000 @((Event 2000 $kind 'a' '10051' $true))
     Assert ($r.verdict.action -eq 'rollback-penalties' -and $r.verdict.localNet -eq 'down' -and $r.verdict.penalties.a.step -eq 0) ($kind+' rolls back recent penalty')
     Assert ($r.verdict.reason.code -eq 'local-network-down' -and $r.verdict.reason.text -ceq 'Нет интернета у вас (сеть), жду') 'shared Russian local network reason'
-    $r=Decide $r.state 5000 @((Event 5000 'dial-fail'),(Event 5000 'engine-exit' 'b'))
+    $r=Decide $r.state 5000 (@((Event 5000 'dial-fail'))+@(Dead 5000 'b'))
     Assert ($r.verdict.action -eq 'searching' -and $r.verdict.penalties.a.step -eq 0 -and $r.verdict.penalties.b.step -eq 0 -and $r.state.pending.Count -eq 0) 'no path checks, switches or penalties while down'
     Assert ($r.verdict.reason.since -eq 2000) 'reason since remains stable while waiting'
     $r=Decide $r.state 6000 @((Event 6000 'net-up' ''))
@@ -90,21 +92,21 @@ $r=Decide $r.state 2200 @((Event 2200 'path-check' 'a' 'ok'))
 Assert ($r.verdict.localNet -eq 'ok') 'new successful path probe proves recovery'
 
 # Rollback includes a long unfinished round, but preserves older unrelated penalties.
-$r=Decide (New-TransportDecisionState 0 'a') 1000 @((Event 1000 'engine-exit'))
+$r=Decide (New-TransportDecisionState 0 'a') 1000 @(Dead 1000 'a')
 $r=Decide $r.state 70000 @((Event 70000 'net-down' ''))
 Assert ($r.verdict.penalties.a.step -eq 0 -and $r.state.paths.a.failures -eq 0) 'unfinished round older than 45 seconds is fully rolled back'
-$r=Decide (New-TransportDecisionState 0 'a') 1000 @((Event 1000 'engine-exit'))
+$r=Decide (New-TransportDecisionState 0 'a') 1000 @(Dead 1000 'a')
 $r=Decide $r.state 2000 @((Event 2000 'path-check' 'b' 'ok'))
-$r=Decide $r.state 60000 @((Event 60000 'engine-exit'))
+$r=Decide $r.state 60000 @(Dead 60000 'a')
 Assert ($r.verdict.penalties.a.step -eq 2) 'old penalty streak survives time without success on that path'
 $r=Decide $r.state 61000 @((Event 61000 'net-down' ''))
 Assert ($r.verdict.penalties.a.step -eq 1 -and $r.verdict.penalties.a.until -eq 6000 -and $r.state.paths.a.failures -eq 1) 'rollback restores previous older step and failure count exactly'
-$r=Decide (New-TransportDecisionState 0 'a') 1000 @((Event 1000 'engine-exit'))
+$r=Decide (New-TransportDecisionState 0 'a') 1000 @(Dead 1000 'a')
 $r=Decide $r.state 1100 @((Event 1100 'path-check' 'a' 'ok'))
 $r=Decide $r.state 2000 @((Event 2000 'net-down' ''))
 Assert ($r.verdict.penalties.a.step -eq 0) 'rollback never resurrects penalties cleared by success'
 $four=@((Row 'a'),(Row 'b'),(Row 'c'),(Row 'd'),(Row 'e'))
-$r=Decide (New-TransportDecisionState 0 'a') 1000 @((Event 1000 'engine-exit' 'a'),(Event 1000 'engine-exit' 'b'),(Event 1000 'engine-exit' 'c'),(Event 1000 'engine-exit' 'd')) $four
+$r=Decide (New-TransportDecisionState 0 'a') 1000 (@(Dead 1000 'a')+@(Dead 1000 'b')+@(Dead 1000 'c')+@(Dead 1000 'd')) $four
 Assert ($r.state.consecutiveFailures -eq 4 -and $r.verdict.localNet -ne 'down') 'four failures alone cannot declare local outage'
 $r=Decide $r.state 2000 @((Event 2000 'net-down' '')) $four
 Assert ($r.verdict.localNet -eq 'down' -and $r.state.consecutiveFailures -eq 0 -and $r.verdict.penalties.a.step -eq 0 -and $r.verdict.penalties.d.step -eq 0) 'four-failure no-success round is discarded when direct connectivity fails'
@@ -132,11 +134,11 @@ $r=Decide (New-TransportDecisionState 0 'a') 1000 @((Event 1000 'stall-suspect')
 $r=Decide $r.state 2000 @((Event 2000 'path-check' 'a' 'cancelled'))
 Assert ($r.verdict.action -eq 'none' -and $r.state.pending.Count -eq 0) 'cancelled stall check clears request without punishment'
 $r=Decide (New-TransportDecisionState 0 'a') 1000 @((Event 1000 'dial-fail'))
-$r=Decide $r.state 1200 @((Event 1200 'engine-exit'))
+$r=Decide $r.state 1200 @(Dead 1200 'a')
 Assert ($r.verdict.action -eq 'switch' -and $r.verdict.reason.code -eq 'path-process-exited') 'dead process overrides an unconfirmed network suspicion'
-$r=Decide (New-TransportDecisionState 0 'a') 1000 @((Event 1000 'engine-exit' ''))
+$r=Decide (New-TransportDecisionState 0 'a') 1000 @(Dead 1000 'a')
 Assert ($r.verdict.action -eq 'switch' -and $r.verdict.penalties.a.step -eq 1) 'whole engine exit with empty tag fails the current path'
-$r=Decide (New-TransportDecisionState 0 'a') 1000 @((Event 1000 'engine-exit'),(Event 1000 'stall-suspect' 'b')) @((Row 'a'),(Row 'b'),(Row 'c'))
+$r=Decide (New-TransportDecisionState 0 'a') 1000 (@(Dead 1000 'a')+@((Event 1000 'stall-suspect' 'b'))) @((Row 'a'),(Row 'b'),(Row 'c'))
 Assert ($r.verdict.action -eq 'switch' -and $r.verdict.tag -eq 'c') 'current confirmed failure does not wait for unrelated suspect candidate'
 $r=Decide (New-TransportDecisionState 0 'a') 2000 @((Event 1000 'net-down' ''),(Event 1500 'net-up' ''))
 Assert ($r.verdict.localNet -eq 'ok' -and $r.verdict.action -eq 'none') 'ordered recovery in a delayed event batch is respected'
@@ -153,7 +155,9 @@ $r=Decide $r.state 1500 @((Event 1500 'dial-fail'))
 Assert ($r.verdict.action -eq 'check-direct') 'debounce is fixed to first event, not sliding'
 $r=Decide (New-TransportDecisionState 0 'a') 1000 @((Event 1000 'path-check' 'a' 'process-exited'))
 $r=Decide $r.state 1000 @((Event 1000 'path-check' 'a' 'process-exited'))
-Assert ($r.verdict.penalties.a.step -eq 1) 'replayed probe result is applied exactly once'
+Assert ($r.verdict.penalties.a.step -eq 0 -and $r.verdict.action -eq 'none' -and $r.state.pending.Count -eq 1) 'replayed probe process-exited is queued once for direct check, not penalized'
+$r=Decide $r.state 2000 @((Event 2000 'net-up' ''))
+Assert ($r.verdict.penalties.a.step -eq 1) 'replayed probe result is applied exactly once after direct confirmation'
 $r=Decide (New-TransportDecisionState 0 'a') 1000 @((Event 1000 'dial-fail'))
 $r=Decide $r.state 2000 @((Event 2000 'path-check' 'a' 'ok'))
 $r=Decide $r.state 3000 @((Event 3000 'net-up' ''))
@@ -186,7 +190,7 @@ $r=Decide (New-TransportDecisionState 0 '') 1000 @() @($disabled,$broken,$noLate
 Assert ($r.verdict.tag -eq 'measured') 'disabled/build-failed candidates excluded and missing latency sorts last'
 $r=Decide (New-TransportDecisionState 0 '') 1000 @() @() ''
 Assert ($r.verdict.action -eq 'searching' -and $r.verdict.reason.code -eq 'no-candidates') 'no candidates has its own reason'
-$r=Decide (New-TransportDecisionState 0 'a') 1000 @((Event 1000 'engine-exit')) @((Row 'a' 'ok' 1),(Row 'b' 'unknown' 9999))
+$r=Decide (New-TransportDecisionState 0 'a') 1000 @(Dead 1000 'a') @((Row 'a' 'ok' 1),(Row 'b' 'unknown' 9999))
 Assert ($r.verdict.tag -eq 'b') 'confirmed failure switches immediately even to a slower unknown candidate'
 
 # Planned improvement uses existing measurements, strict max(30ms,20%) and minStay.
@@ -224,4 +228,45 @@ $rejected=$false;try{Decide $s 0|Out-Null}catch{$rejected=$true}
 Assert $rejected 'backwards decision clock is rejected'
 $r=Decide (New-TransportDecisionState 0 'a') 1000 @((Event 2000 'dial-fail'),(Event 1000 'unknown-kind'),(Event 1000 'dial-fail' 'not-a-candidate'))
 Assert ($r.verdict.action -eq 'none' -and $r.state.pending.Count -eq 0) 'future, unknown and unrelated events cannot change selection'
+
+# Engine restart is not a path failure (T1-T5): only repeated exits or a missing engine-ready penalize.
+$t0=100000
+$s=New-TransportDecisionState 0 'a'
+$r=Decide $s $t0 @((Event $t0 'engine-exit' 'a'));$s=$r.state
+Assert ($r.verdict.action -eq 'none' -and $r.verdict.penalties.a.step -eq 0) 'T1 single engine exit is held, not penalized'
+$r=Decide $s ($t0+4000) @((Event ($t0+4000) 'engine-ready' 'a'));$s=$r.state
+for($k=5000;$k -le 40000;$k+=1000){
+    $r=Decide $s ($t0+$k);$s=$r.state
+    Assert ($r.verdict.action -ne 'switch' -and $r.verdict.penalties.a.step -eq 0 -and -not $s.paths.a.failed) ('T1 no switch/failed after ready at +'+$k)
+}
+$s=(Decide (New-TransportDecisionState 0 'a') $t0 @((Event $t0 'engine-exit' 'a'))).state
+$r=Decide $s ($t0+30000) @((Event ($t0+30000) 'engine-exit' 'a'))
+Assert ($r.verdict.action -eq 'switch' -and $r.verdict.tag -eq 'b' -and $r.verdict.reason.code -eq 'path-process-exited') 'T2 second exit within 60s switches'
+$s=(Decide (New-TransportDecisionState 0 'a') $t0 @((Event $t0 'engine-exit' 'a'))).state
+$s=(Decide $s ($t0+4000) @((Event ($t0+4000) 'engine-ready' 'a'))).state
+$r=Decide $s ($t0+61000) @((Event ($t0+61000) 'engine-exit' 'a'))
+Assert ($r.verdict.action -eq 'none' -and $r.verdict.penalties.a.step -eq 0) 'T2b exits more than 60s apart do not accumulate'
+$s=(Decide (New-TransportDecisionState 0 'a') $t0 @((Event $t0 'engine-exit' 'a'))).state
+$r=Decide $s ($t0+19999);Assert ($r.verdict.action -ne 'switch' -and $r.verdict.penalties.a.step -eq 0) 'T3 no switch before 20s without ready'
+$r=Decide $r.state ($t0+20000)
+Assert ($r.verdict.action -eq 'switch' -and $r.verdict.tag -eq 'b' -and $r.verdict.penalties.a.step -eq 1) 'T3 switch after 20s without ready'
+$r=Decide (New-TransportDecisionState 0 'a') 1000 @((Event 1000 'path-check' 'a' 'process-exited'))
+Assert ($r.verdict.action -eq 'check-direct' -and $r.verdict.tag -eq 'a' -and $r.verdict.penalties.a.step -eq 0) 'T4 probe process-exited asks for direct check, no penalty'
+$r=Decide $r.state 2000 @((Event 2000 'net-down' ''))
+Assert ($r.verdict.penalties.a.step -eq 0 -and $r.verdict.action -ne 'switch') 'T4 localNet gives no penalty'
+$r=Decide (New-TransportDecisionState 0 'a') 1000 @((Event 1000 'path-check' 'a' 'process-exited'))
+$r=Decide $r.state 2000 @((Event 2000 'net-up' ''))
+Assert ($r.verdict.action -eq 'switch' -and $r.verdict.penalties.a.step -eq 1) 'T4 direct ok confirms the probe failure'
+# T5: live log scenario, exit+ready of A, then B probe fails with process-exited.
+$s=New-TransportDecisionState 0 'a';$t0=100000
+$s=(Decide $s $t0 @((Event $t0 'engine-exit' 'a'))).state
+$s=(Decide $s ($t0+4000) @((Event ($t0+4000) 'engine-ready' 'a'))).state
+$sw=0;$last=$null;$cur='a'
+for($k=5000;$k -le 60000;$k+=1000){
+    $ev=@();if($k -eq 6000){$ev=@((Event ($t0+$k) 'path-check' 'b' 'process-exited'))}
+    if($k -eq 7000){$ev=@((Event ($t0+$k) 'net-up' ''))}
+    $r=Decide $s ($t0+$k) $ev $rows $cur;$s=$r.state
+    if($r.verdict.action -eq 'switch'){$sw++;$cur=$r.verdict.tag;if($null -ne $last){Assert (($k-$last) -ge 30000) 'T5 no flapping faster than 30s'};$last=$k}
+}
+Assert ($s.paths.a.step -eq 0 -and $sw -eq 0) 'T5 exit+ready of A and probe noise on B cause no switch'
 Write-Host ('PASS: transport decision reducer, '+$count+' assertions; no network/process/VPN operations')
