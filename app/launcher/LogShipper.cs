@@ -26,7 +26,7 @@ namespace RemoteAgents.Launcher
         internal const int MaxRawBytes = 512 * 1024, MaxBatchesPerCycle = 8, IntervalSec = 60;
         internal static readonly int[] Backoff = { 60, 120, 300 };
 
-        sealed class Segment { internal string Stream, Fp; internal long From, To; internal int Lines, FpLen; internal string Text; }
+        sealed class Segment { internal string Stream, Fp; internal long From, To; internal int Lines, FpLen; internal byte[] Data; }
         sealed class Cursor { internal string Fp = ""; internal int FpLen; internal long Off; }
 
         readonly string logsDir, cursorFile, device, host, version;
@@ -178,7 +178,7 @@ namespace RemoteAgents.Launcher
                 for (int i = startIndex; i < files.Length && budget > 0; i++) {
                     long offset = i == startIndex ? startOffset : 0;
                     var seg = ReadSegment(stream, files[i], offset, budget);
-                    if (seg != null) { result.Add(seg); budget -= Encoding.UTF8.GetByteCount(seg.Text); }
+                    if (seg != null) { result.Add(seg); budget -= seg.Data.Length; }
                 }
             }
             return result;
@@ -197,9 +197,12 @@ namespace RemoteAgents.Launcher
                     int end = read; while (end > 0 && buffer[end - 1] != 10) end--;
                     if (end == 0) return null;
                     int skip = offset == 0 && end >= 3 && buffer[0] == 0xEF && buffer[1] == 0xBB && buffer[2] == 0xBF ? 3 : 0;
-                    string text = new UTF8Encoding(false).GetString(buffer, skip, end - skip);
+                    var data = new byte[end - skip];
+                    Buffer.BlockCopy(buffer, skip, data, 0, data.Length);
+                    int lines = 0;
+                    foreach (byte value in data) if (value == 10) lines++;
                     int fpActual; string fp = Fingerprint(file, 256, out fpActual);
-                    return new Segment { Stream = stream, Fp = fp, FpLen = fpActual, From = offset + skip, To = offset + end, Lines = text.Count(c => c == '\n'), Text = text };
+                    return new Segment { Stream = stream, Fp = fp, FpLen = fpActual, From = offset + skip, To = offset + end, Lines = lines, Data = data };
                 }
             } catch { return null; }
         }
@@ -209,13 +212,20 @@ namespace RemoteAgents.Launcher
             var text = new StringBuilder();
             text.Append("RA-LOGS 1 batch=").Append(batchId).Append(" device=").Append(Base64Url(device)).Append(" host=").Append(host)
                 .Append(" ver=").Append(version).Append(" sent=").Append(utcNow().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture)).Append('\n');
-            foreach (var s in segments) {
-                text.Append("@@ ").Append(s.Stream).Append(" fp=").Append(s.Fp).Append(" from=").Append(s.From.ToString(CultureInfo.InvariantCulture))
-                    .Append(" to=").Append(s.To.ToString(CultureInfo.InvariantCulture)).Append(" lines=").Append(s.Lines.ToString(CultureInfo.InvariantCulture)).Append('\n').Append(s.Text);
-                if (!s.Text.EndsWith("\n")) text.Append('\n');
-            }
             using (var ms = new MemoryStream()) {
-                using (var gz = new GZipStream(ms, CompressionMode.Compress, true)) { var bytes = new UTF8Encoding(false).GetBytes(text.ToString()); gz.Write(bytes, 0, bytes.Length); }
+                using (var gz = new GZipStream(ms, CompressionMode.Compress, true)) {
+                    var header = Encoding.UTF8.GetBytes(text.ToString());
+                    gz.Write(header, 0, header.Length);
+                    foreach (var s in segments) {
+                        text.Clear();
+                        text.Append("@@ ").Append(s.Stream).Append(" fp=").Append(s.Fp).Append(" from=").Append(s.From.ToString(CultureInfo.InvariantCulture))
+                            .Append(" to=").Append(s.To.ToString(CultureInfo.InvariantCulture)).Append(" lines=").Append(s.Lines.ToString(CultureInfo.InvariantCulture)).Append('\n');
+                        header = Encoding.UTF8.GetBytes(text.ToString());
+                        gz.Write(header, 0, header.Length);
+                        // Смещения и число строк относятся к исходным байтам, включая неверный UTF-8.
+                        gz.Write(s.Data, 0, s.Data.Length);
+                    }
+                }
                 return ms.ToArray();
             }
         }

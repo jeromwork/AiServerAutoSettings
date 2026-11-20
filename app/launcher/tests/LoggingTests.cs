@@ -29,7 +29,8 @@ namespace RemoteAgents.Launcher
 
         internal static int Run(string[] args)
         {
-            Golden(); Mask(); Rotation(); Encoding_(); JournalMapping(); Conflicts(); Ladder(); HelperEvents(); Protocol(); CorePump(); Shipper(); ShipperRisks(); SshSender(); Mirror();
+            NetHelperVersionTests.Run();
+            Golden(); Mask(); Rotation(); Encoding_(); JournalMapping(); Conflicts(); Ladder(); HelperEvents(); Protocol(); CorePump(); Shipper(); ShipperInvalidUtf8(); ShipperRisks(); SshSender(); Mirror();
             Console.WriteLine("PASS: Logging " + count + " checks");
             return 0;
         }
@@ -268,13 +269,16 @@ namespace RemoteAgents.Launcher
             internal readonly List<string> Texts = new List<string>(); internal readonly List<string> PathsTried = new List<string>();
             internal bool FailChannel, FailDirect;
             internal bool IgnoreTimeout; internal int SleepMs; internal Action DuringSend; internal readonly List<int> Timeouts = new List<int>();
+            internal readonly List<byte[]> Bodies = new List<byte[]>();
             public SendResult Send(byte[] gz, string batchId, string path, int timeoutMs)
             {
                 PathsTried.Add(path); Timeouts.Add(timeoutMs);
                 if (DuringSend != null) DuringSend();
                 if (SleepMs > 0) { System.Threading.Thread.Sleep(IgnoreTimeout ? SleepMs : Math.Min(SleepMs, timeoutMs)); if (timeoutMs < SleepMs) return new SendResult { Err = "timeout" }; }
                 if ((path == "channel" && FailChannel) || (path == "direct" && FailDirect)) return new SendResult { Err = "ssh-exit", Exit = 255, Stderr = "refused" };
-                using (var ms = new MemoryStream(gz)) using (var z = new GZipStream(ms, CompressionMode.Decompress)) using (var r = new StreamReader(z, Encoding.UTF8)) Texts.Add(r.ReadToEnd());
+                using (var ms = new MemoryStream(gz)) using (var z = new GZipStream(ms, CompressionMode.Decompress)) using (var raw = new MemoryStream()) {
+                    z.CopyTo(raw); var body = raw.ToArray(); Bodies.Add(body); Texts.Add(Encoding.UTF8.GetString(body));
+                }
                 return new SendResult { Ok = true };
             }
         }
@@ -365,6 +369,28 @@ namespace RemoteAgents.Launcher
             foreach (string bad in new[] { "OK batch=foreign stored=1", ok + "extra", ok + "\nextra\n", "\n" + ok, ok + "\n\n", "ERR failed" })
                 Check(!SshLogSender.ValidReply(0, bad, id), "reject malformed/foreign acknowledgement");
             Check(!SshLogSender.ValidReply(255, ok, id), "nonzero exit rejects OK");
+        }
+
+        static void ShipperInvalidUtf8()
+        {
+            string dir = Temp("ship-invalid-utf8"), logs = Path.Combine(dir, "logs"), state = Path.Combine(dir, "state");
+            Directory.CreateDirectory(logs); Directory.CreateDirectory(state);
+            try {
+                var body = Encoding.UTF8.GetBytes("first Я\nbad ").Concat(new byte[] { 0xFF }).Concat(Encoding.UTF8.GetBytes(" middle\ntail\n")).ToArray();
+                var source = new byte[] { 0xEF, 0xBB, 0xBF }.Concat(body).ToArray();
+                File.WriteAllBytes(Path.Combine(logs, "launcher.log"), source);
+                var sender = new FakeSender();
+                var shipper = new LogShipper(logs, state, sender, (level, evt, kv) => { }, "device", "host", "1");
+                Check(shipper.Cycle(false) == 1 && sender.Bodies.Count == 1, "invalid UTF-8 file is shipped once");
+                byte[] packed = sender.Bodies.Single();
+                int bodyStart = Array.IndexOf(packed, (byte)10, Array.IndexOf(packed, (byte)10) + 1) + 1;
+                Check(packed.Skip(bodyStart).SequenceEqual(body), "0xFF and original UTF-8 bytes survive gzip packing exactly");
+                string metadata = Encoding.UTF8.GetString(packed, 0, bodyStart);
+                Check(metadata.Contains(" from=3 to=" + source.Length + " lines=3\n"), "byte offsets and newline count match the raw body");
+                var cursors = Json.Map(Json.Get(Json.Read(Path.Combine(state, "log-ship.json")), "streams"));
+                Check(Json.Str(Json.Map(cursors["launcher"]), "off") == source.Length.ToString(), "invalid UTF-8 cursor advances to the file end after OK");
+                Check(shipper.Cycle(false) == 0 && sender.Bodies.Count == 1, "next cycle has nothing to ship after invalid UTF-8");
+            } finally { try { Directory.Delete(dir, true); } catch { } }
         }
 
         static void ShipperRisks()

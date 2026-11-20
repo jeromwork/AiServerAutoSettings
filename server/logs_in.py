@@ -43,7 +43,7 @@ _PUBKEY = re.compile(r'ssh-(ed25519|rsa) AAAA[A-Za-z0-9+/=]+')
 _USERINFO = re.compile(r'://[^/\s@]+@')
 _BASIC = re.compile(r'(Authorization[:=]\s*)Basic\s+\S+', re.I)
 _BEARER = re.compile(r'Bearer\s+[A-Za-z0-9._~+/=-]+', re.I)
-_FIELD = re.compile(r'''(?<![A-Za-z0-9_.-])(["']?)([A-Za-z0-9_.-]{1,64})\1(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;&"']+)''')
+_FIELD = re.compile(r'''(?<![A-Za-z0-9_.-])(["']?)([A-Za-z0-9_.-]{1,256})\1(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;&"']+)''')
 _UUID = re.compile(r'\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b')
 _BLOB = re.compile(r'[A-Za-z0-9+/=_-]{41,}')
 _SUBSTR = re.compile(r'token|password|passwd|passphrase|secret|authorization|cookie|uuid', re.I)
@@ -96,7 +96,11 @@ def _b64url_decode(text):
 
 
 def parse_batch(raw):
-    """raw — байты gzip. Возвращает (header, segments); segment = dict(stream, fp, from, to, lines[list[(raw_bytes, source_size)]])."""
+    """raw — байты gzip. Возвращает (header, segments).
+
+    Сегмент содержит stream/fp/from/to, lines[(raw_bytes, source_size)]
+    и bad (причина пропуска либо None).
+    """
     try:
         with gzip.GzipFile(fileobj=io.BytesIO(raw)) as handle:
             data = handle.read(MAX_UNPACKED + 1)
@@ -127,22 +131,25 @@ def parse_batch(raw):
         if index == len(rows) - 1 and row == b'':
             break  # конечный разделитель, не дополнительная пустая строка
         m = segment_header.fullmatch(row)
-        # Заголовок распознаётся только вне заявленного тела предыдущего сегмента.
-        if m and (current is None or len(current['lines']) >= current['count']):
+        # Внутри заявленного тела строки, похожие на заголовок, остаются данными.
+        # Достижение числа строк ИЛИ байтов позволяет отделить следующий сегмент,
+        # даже если второе значение предыдущего сегмента повреждено.
+        if m and (current is None or current['bad'] or len(current['lines']) >= current['count']
+                  or current['size'] >= current['to'] - current['from']):
             stream, fp, start, end, count = m.groups()
             start, end, count = int(start), int(end), int(count)
-            if end < start or end - start > len(data) or count > len(data):
-                raise ReceiveError('bad-segment', 'bad offsets or line count')
+            bad = 'bad offsets or line count' if end < start or end - start > len(data) or count > len(data) else None
             stream = stream.decode('ascii', 'replace')
             current = {'stream': stream if stream in STREAMS else 'other', 'fp': fp.decode('ascii'),
-                       'from': start, 'to': end, 'count': count, 'lines': []}
+                       'from': start, 'to': end, 'count': count, 'lines': [], 'size': 0, 'bad': bad}
             segments.append(current)
         elif current is not None:
             size = len(row) + (1 if index < len(rows) - 1 else 0)
             current['lines'].append((row, size))
+            current['size'] += size
     for seg in segments:
-        if len(seg['lines']) != seg['count'] or sum(size for _, size in seg['lines']) != seg['to'] - seg['from']:
-            raise ReceiveError('bad-segment', 'body does not match offsets or line count')
+        if len(seg['lines']) != seg['count'] or seg['size'] != seg['to'] - seg['from']:
+            seg['bad'] = seg['bad'] or 'body does not match offsets or line count'
     return header, segments
 
 
@@ -214,6 +221,10 @@ def store(header, segments, root=None):
                     saved = max(0, int(cursors.get(key, 0)))
                 except (ValueError, TypeError, OverflowError):
                     saved = 0
+                if seg.get('bad'):
+                    # OK подтверждает и пропуск: ни этот сегмент, ни другие потоки не застрянут.
+                    cursors[key] = max(saved, seg['to'])
+                    continue
                 if seg['to'] <= saved:
                     continue
                 consumed = seg['from']
@@ -278,6 +289,11 @@ def _receiver_log(batch, device, stored, status, root=None):
 def recv(raw, root=None):
     header, segments = parse_batch(raw)
     stored = store(header, segments, root)
+    for seg in segments:
+        if seg.get('bad'):
+            status = 'bad-segment stream=%s fp=%s from=%d to=%d reason=%s' % (
+                seg['stream'], seg['fp'], seg['from'], seg['to'], seg['bad'])
+            _receiver_log(header['batch'], header['device_name'], 0, status, root)
     try:
         prune(device_dir(header, root))
     except OSError:

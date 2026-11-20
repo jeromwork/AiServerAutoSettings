@@ -16,7 +16,7 @@ namespace RemoteAgents.Launcher
         static readonly Regex Basic = new Regex(@"(Authorization[:=]\s*)Basic\s+\S+", RegexOptions.IgnoreCase);
         static readonly Regex Bearer = new Regex(@"Bearer\s+[A-Za-z0-9._~+/=-]+", RegexOptions.IgnoreCase);
         // Любое «имя: значение»; решает IsSecretName (camelCase: accessToken, secretKey, privateKey; psk).
-        static readonly Regex Field = new Regex(@"(?<![A-Za-z0-9_.-])([""']?)([A-Za-z0-9_.-]{1,64})\1(\s*[:=]\s*)(""[^""]*""|'[^']*'|[^\s,;&""']+)");
+        static readonly Regex Field = new Regex(@"(?<![A-Za-z0-9_.-])([""']?)([A-Za-z0-9_.-]{1,256})\1(\s*[:=]\s*)(""[^""]*""|'[^']*'|[^\s,;&""']+)");
         static readonly Regex Uuid = new Regex(@"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b");
         static readonly Regex Blob = new Regex(@"[A-Za-z0-9+/=_-]{41,}");
         static readonly Regex SubstringNames = new Regex("token|password|passwd|passphrase|secret|authorization|cookie|uuid", RegexOptions.IgnoreCase);

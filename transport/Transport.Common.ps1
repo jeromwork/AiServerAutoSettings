@@ -98,7 +98,7 @@ $script:RaLogMaskRegex=@{
     UserInfo=[regex]::new('://[^/\s@]+@',[Text.RegularExpressions.RegexOptions]::Compiled)
     Basic=[regex]::new('(Authorization[:=]\s*)Basic\s+\S+',[Text.RegularExpressions.RegexOptions]'Compiled,IgnoreCase')
     Bearer=[regex]::new('Bearer\s+[A-Za-z0-9._~+/=-]+',[Text.RegularExpressions.RegexOptions]'Compiled,IgnoreCase')
-    Field=[regex]::new('(?<![A-Za-z0-9_.-])(["'']?)([A-Za-z0-9_.-]{1,64})\1(\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s,;&"'']+)',[Text.RegularExpressions.RegexOptions]::Compiled)
+    Field=[regex]::new('(?<![A-Za-z0-9_.-])(["'']?)([A-Za-z0-9_.-]{1,256})\1(\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s,;&"'']+)',[Text.RegularExpressions.RegexOptions]::Compiled)
     Uuid=[regex]::new('\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b',[Text.RegularExpressions.RegexOptions]::Compiled)
     Blob=[regex]::new('[A-Za-z0-9+/=_-]{41,}',[Text.RegularExpressions.RegexOptions]::Compiled)
 }

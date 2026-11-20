@@ -150,8 +150,40 @@ class LogsIn(unittest.TestCase):
             (Path(logs_in.device_dir(logs_in.parse_batch(gz)[0], self.root)) / '.cursors.json').unlink()
         gz, _ = batch([line(1)])
         raw = gzip.decompress(gz).replace(b'from=0 to=', b'from=999999999999 to=')
-        with self.assertRaises(logs_in.ReceiveError):
-            logs_in.recv(gzip.compress(raw), self.root)
+        self.assertEqual(logs_in.recv(gzip.compress(raw), self.root), 'OK batch=b1 stored=0')
+        self.assertIn('bad-segment', (Path(self.root) / '_receiver.log').read_text())
+
+    def test_bad_segment_does_not_block_good_segment(self):
+        good, good_end = batch([line(2, 'good')], stream='transport', fp='bb')
+        good_segment = gzip.decompress(good).split(b'\n', 1)[1]
+        bad, bad_end = batch([line(1, 'bad', rest='password=never-store-this')])
+        original = gzip.decompress(bad)
+        # Ошибка длины в обе стороны, неверное число строк и недопустимые смещения.
+        mutations = (
+            (b'to=%d' % bad_end, b'to=%d' % (bad_end + 1), bad_end + 1),
+            (b'to=%d' % bad_end, b'to=%d' % (bad_end - 1), bad_end - 1),
+            (b'lines=1', b'lines=2', bad_end),
+            (b'lines=1', b'lines=0', bad_end),
+            (b'lines=1', b'lines=999999999', bad_end),
+            (b'from=0', b'from=999999999', bad_end),
+            (b'to=%d' % bad_end, b'to=999999999', 999999999),
+        )
+        for old, new, skipped_to in mutations:
+            with self.subTest(mutation=new), tempfile.TemporaryDirectory() as root:
+                mixed = gzip.compress(original.replace(old, new, 1) + good_segment)
+                self.assertEqual(logs_in.recv(mixed, root), 'OK batch=b1 stored=1')
+                header, segments = logs_in.parse_batch(mixed)
+                self.assertEqual(len(segments), 2)
+                directory = Path(logs_in.device_dir(header, root))
+                self.assertFalse(list(directory.glob('launcher-*.log')))
+                self.assertIn(' good ', next(directory.glob('transport-*.log')).read_text())
+                cursors = json.loads((directory / '.cursors.json').read_text())
+                self.assertEqual(cursors['launcher|aa'], skipped_to)
+                self.assertEqual(cursors['transport|bb'], good_end)
+                receiver_log = (Path(root) / '_receiver.log').read_text()
+                self.assertIn('bad-segment stream=launcher fp=aa', receiver_log)
+                self.assertNotIn('never-store-this', receiver_log)
+                self.assertEqual(logs_in.recv(mixed, root), 'OK batch=b1 stored=0')
 
     def test_no_symlinks_followed(self):
         gz, _ = batch([line(1)])
