@@ -42,6 +42,7 @@ namespace RemoteAgents.Launcher
         bool bridgeActionBusy, bridgeActionWanted;
         string bridgeError = "";
         HelperClient netHelper;
+        NetLadderService ladder;
         string diskSummary = "Диск: ожидается проверка";
         DateTime diskUpdated = DateTime.MinValue;
         DiskTraySession diskSession;
@@ -178,6 +179,7 @@ namespace RemoteAgents.Launcher
                 })) { ok = false; coreFailed = true; }
                 if (restart) return;
                 if (!Step("transport", () => { transport = StatusView.Read(home, "transport", maxAgeSec: 15); })) { ok = false; coreFailed = true; }
+                ok &= Step("netwatch", () => { if (ladder == null) ladder = new NetLadderService(home, log, () => StatusView.Read(home, "transport", maxAgeSec: 15), () => VpnStatus.Read(home)); ladder.Tick(transport, Json.Str(VpnStatus.Read(home), "state") == "on"); });
                 ok &= Step("lan", () => { if (netHelper != null) { netHelper.UpdateLan(config.Data, transport); netHelper.ConnectWhenInstalled(NetHelperSetup.Required(config.Data)); } });
                 ok &= Step("vpn-resume", () => ResumeUpdatedVpn(transport));
                 ok &= Step("icon", () => {
@@ -684,52 +686,70 @@ namespace RemoteAgents.Launcher
         async void CheckVpn(ComponentRuntime vpn, bool fromCard = false)
         {
             if (!vpn.Definition.CommandManaged) { VpnFailure("Обновите компоненты программы перед включением VPN", fromCard); return; }
-            if (!AllowMutation()) { log.Write("vpn.click.ignored busy-or-closing"); return; }
+            string att = RaLog.Attempt.New("on");
+            if (!AllowMutation()) { log.Write("vpn.click.ignored att=" + att + " msg=busy-or-closing"); return; }
             actionBusy = vpnActionBusy = true; vpnActionWanted = true; vpnError = ""; RefreshMain();
-            log.Write("vpn.click.on fromCard=" + fromCard); LogNetSnapshot("vpn.on.before");
+            log.Write("vpn.click.on att=" + att + " fromCard=" + fromCard); LogNetSnapshot("vpn.on.before", att);
             var vpnWatch = System.Diagnostics.Stopwatch.StartNew();
             try {
                 if (netHelper == null) throw new IOException(HelperClient.PermissionRequired);
                 bool helperReady = await netHelper.EnsureReady(stop.Token);
-                log.Write("vpn.helper.ready=" + helperReady + " ms=" + vpnWatch.ElapsedMilliseconds);
-                if (!helperReady) { log.Write("vpn.on.refused helper-not-ready"); VpnFailure(HelperClient.SetupWarning, fromCard); return; }
+                log.Write("vpn.helper.ready att=" + att + " ready=" + helperReady + " ms=" + vpnWatch.ElapsedMilliseconds);
+                log.Write(LogLevel.Info, "vpn", "vpn.on.step", "att", att, "step", "helper-ready", "ms", vpnWatch.ElapsedMilliseconds.ToString(), "result", helperReady ? "ok" : "fail");
+                if (!helperReady) { log.Write("vpn.on.refused att=" + att + " reason=helper-not-ready"); VpnFailure(HelperClient.SetupWarning, fromCard); return; }
                 var transport = StatusView.Read(home, "transport", maxAgeSec: 3);
                 var options = new System.Collections.Generic.Dictionary<string, object>(Json.Map(Json.Get(config.Data, "vpn")));
                 // Intent/interface names are not part of the privileged command.
                 options = options.Where(p => new[] { "address", "excludeCidrs", "directDomains", "dnsServer", "checkUrl", "probeAddress" }.Contains(p.Key)).ToDictionary(p => p.Key, p => p.Value);
                 options["socksPort"] = Json.Int(Json.Map(Json.Get(transport, "helper")), "vpnInPort", Json.Int(Json.Map(Json.Get(config.Data, "transport")), "vpnInPort", 17881));
-                log.Write("vpn.on.request socksPort=" + options["socksPort"]);
+                log.Write("vpn.on.request att=" + att + " socksPort=" + options["socksPort"]);
+                var requestWatch = System.Diagnostics.Stopwatch.StartNew();
                 var status = await netHelper.VpnOn(VpnTun.Read(options));
-                log.Write("vpn.on.response state=" + Json.Str(status, "state") + " stage=" + Json.Str(status, "stage") + " conflict=" + Json.Str(status, "conflictName") + " summary=" + MainScreenModel.CleanSecrets(Json.Str(status, "summary")) + " ms=" + vpnWatch.ElapsedMilliseconds);
-                LogNetSnapshot("vpn.on.after");
+                log.Write(LogLevel.Info, "vpn", "vpn.on.step", "att", att, "step", "request", "ms", requestWatch.ElapsedMilliseconds.ToString(), "result", Json.Str(status, "state"));
+                log.Write(Json.Str(status, "state") == "on" ? LogLevel.Info : LogLevel.Warn, "vpn", "vpn.on.response", "att", att, "state", Json.Str(status, "state"), "stage", Json.Str(status, "stage"),
+                    "conflict", Json.Str(status, "conflictName"), "suspects", Json.Str(status, "suspects"), "summary", MainScreenModel.CleanSecrets(Json.Str(status, "summary")),
+                    "helperVersion", NetHelperInstall.InstalledVersion, "ms", vpnWatch.ElapsedMilliseconds.ToString());
+                LogNetSnapshot("vpn.on.after", att);
                 if (closing) return;
-                if (Json.Str(status, "state") != "on") { log.Write("vpn.on.not-on state=" + Json.Str(status, "state")); if (!fromCard) MessageBox.Show(Json.Text(status, "summary", "VPN не включён: соединение не подтверждено"), Product.Name); return; }
-                config.SetVpnIntent(true); config.SetEnabled(vpn.Definition, true); log.Write("vpn.on.ok ms=" + vpnWatch.ElapsedMilliseconds);
-            } catch (OperationCanceledException) { log.Write("vpn.on.cancelled"); }
-            catch (Exception error) { if (!closing) { log.Write("vpn.helper.failed " + TickFailureLog.HelperFailure("vpn-on", error)); VpnFailure(NetHelperSetup.VpnFailureMessage(error), fromCard); } }
+                if (Json.Str(status, "state") != "on") { log.Write("vpn.on.not-on att=" + att + " state=" + Json.Str(status, "state")); if (!fromCard) MessageBox.Show(Json.Text(status, "summary", "VPN не включён: соединение не подтверждено"), Product.Name); return; }
+                config.SetVpnIntent(true); config.SetEnabled(vpn.Definition, true); log.Write("vpn.on.ok att=" + att + " ms=" + vpnWatch.ElapsedMilliseconds);
+                if (ladder != null) ladder.RunE2E(att, text => { vpnError = text; });
+            } catch (OperationCanceledException) { log.Write("vpn.on.cancelled att=" + att); }
+            catch (Exception error) { if (!closing) { log.Write("vpn.helper.failed att=" + att + " " + TickFailureLog.HelperFailure("vpn-on", error)); VpnFailure(NetHelperSetup.VpnFailureMessage(error), fromCard); } }
             finally { actionBusy = vpnActionBusy = false; if (!closing) RefreshMenu(); }
         }
         void SignalVpnStop()
         { try { Files.Atomic(Path.Combine(home, "state/vpn.stop"), "stop\n"); } catch { log.Write("vpn.stop.failed"); } }
-        void LogNetSnapshot(string tag)
+        void LogNetSnapshot(string tag, string att = "")
         {
             try {
                 var up = System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
                     .Where(n => n.OperationalStatus == System.Net.NetworkInformation.OperationalStatus.Up && n.NetworkInterfaceType != System.Net.NetworkInformation.NetworkInterfaceType.Loopback)
-                    .Select(n => { string gw = ""; try { gw = string.Join(",", n.GetIPProperties().GatewayAddresses.Select(g => g.Address.ToString()).Where(a => a != "0.0.0.0" && a != "::")); } catch { } return n.Name + (gw.Length > 0 ? "(gw " + gw + ")" : ""); });
-                log.Write(tag + " adapters-up=" + string.Join("|", up));
+                    .Select(n => {
+                        string gw = "", dns = "", metric = "";
+                        try { var props = n.GetIPProperties();
+                            gw = string.Join(",", props.GatewayAddresses.Select(g => g.Address.ToString()).Where(a => a != "0.0.0.0" && a != "::"));
+                            dns = string.Join(",", props.DnsAddresses.Select(d => d.ToString()));
+                            try { metric = props.GetIPv4Properties().Index + "/" + (n.Supports(System.Net.NetworkInformation.NetworkInterfaceComponent.IPv4) ? "v4" : ""); } catch { }
+                        } catch { }
+                        return n.Name + "(" + (gw.Length > 0 ? "gw " + gw : "no-gw") + (dns.Length > 0 ? ", dns " + dns : "") + (metric.Length > 0 ? ", if " + metric : "") + ")";
+                    });
+                string procs = "";
+                try { procs = string.Join(",", System.Diagnostics.Process.GetProcesses().Select(p => { try { return p.ProcessName; } catch { return ""; } }).Where(n => n.Length > 0 && VpnConflict.KnownLabel(n) != null).Distinct().OrderBy(n => n)); } catch { }
+                log.Write(LogLevel.Info, "vpn", tag, "att", att, "adapters-up", string.Join("|", up), "procs", procs);
             } catch (Exception error) { log.Write(tag + " snapshot.failed " + error.GetType().Name); }
             try {
                 var vpn = StatusView.Read(home, "vpn", maxAgeSec: 3600); var tr = StatusView.Read(home, "transport", maxAgeSec: 3600);
-                log.Write(tag + " vpn.status=" + Json.Str(vpn, "state") + "/" + Json.Str(vpn, "stage") + " conflict=" + Json.Str(vpn, "conflictName") + " transport=" + Json.Str(tr, "phase") + "/" + Json.Str(tr, "active") + " localNet=" + Json.Str(tr, "localNet"));
+                log.Write(LogLevel.Info, "vpn", tag, "att", att, "vpn.status", Json.Str(vpn, "state") + "/" + Json.Str(vpn, "stage"), "conflict", Json.Str(vpn, "conflictName"), "transport", Json.Str(tr, "phase") + "/" + Json.Str(tr, "active"), "localNet", Json.Str(tr, "localNet"));
             } catch { }
         }
         void VpnFailure(string message, bool fromCard)
         { log.Write("vpn.failure " + MainScreenModel.CleanSecrets(message)); vpnError = message; if (!fromCard && !closing) MessageBox.Show(message, Product.Name); }
         async void DisableVpn(ComponentRuntime vpn, bool fromCard = false)
         {
-            log.Write("vpn.click.off fromCard=" + fromCard); LogNetSnapshot("vpn.off.before");
-            if (!AllowMutation()) { log.Write("vpn.click.ignored busy-or-closing"); return; }
+            string att = RaLog.Attempt.New("off"); var offWatch = System.Diagnostics.Stopwatch.StartNew();
+            log.Write("vpn.click.off att=" + att + " fromCard=" + fromCard); LogNetSnapshot("vpn.off.before", att);
+            if (!AllowMutation()) { log.Write("vpn.click.ignored att=" + att + " msg=busy-or-closing"); return; }
             resumeUpdatedVpn = false;
             try { var updateState = UpdateState(); updateState["vpnOn"] = false; updateState.Remove("resumeVpn"); Json.Write(UpdateStatePath, updateState); }
             catch { log.Write("update.resume.cancel.failed"); }
@@ -737,11 +757,11 @@ namespace RemoteAgents.Launcher
             try {
                 if (!vpn.Definition.CommandManaged) { EnableRuntime(vpn, false); return; }
                 if (netHelper == null) throw new IOException(HelperClient.PermissionRequired);
-                await netHelper.VpnOff(); log.Write("vpn.off.ok"); LogNetSnapshot("vpn.off.after");
+                await netHelper.VpnOff(); log.Write("vpn.off.step att=" + att + " step=request ms=" + offWatch.ElapsedMilliseconds); log.Write("vpn.off.ok att=" + att + " ms=" + offWatch.ElapsedMilliseconds); LogNetSnapshot("vpn.off.after", att);
                 config.SetVpnIntent(false); config.SetEnabled(vpn.Definition, false);
             }
-            catch (OperationCanceledException) { log.Write("vpn.off.cancelled"); }
-            catch (Exception offError) { log.Write("vpn.off.failed " + TickFailureLog.HelperFailure("vpn-off", offError)); if (!closing) VpnFailure("Запрос выключения VPN не выполнен. Проверьте статус и журналы; выключение ещё не подтверждено.", fromCard); }
+            catch (OperationCanceledException) { log.Write("vpn.off.cancelled att=" + att); }
+            catch (Exception offError) { log.Write("vpn.off.failed att=" + att + " " + TickFailureLog.HelperFailure("vpn-off", offError)); if (!closing) VpnFailure("Запрос выключения VPN не выполнен. Проверьте статус и журналы; выключение ещё не подтверждено.", fromCard); }
             finally { actionBusy = vpnActionBusy = false; if (!closing) RefreshMenu(); }
         }
         internal static bool VpnConflictDialog(string found)

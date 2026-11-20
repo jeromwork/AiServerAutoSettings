@@ -38,6 +38,21 @@ namespace RemoteAgents.Launcher
                 }
             }
         }
+        // stdout и stderr процесса — в один файл (дозапись, общий доступ на чтение). Без pipe: читатель не может зависнуть.
+        public Process StartLogged(string exe, string[] args, string cwd, string output)
+        {
+            lock (inheritGate) {
+                IntPtr input = IntPtr.Zero, stdout = IntPtr.Zero, stderr = IntPtr.Zero;
+                try {
+                    input = OpenInherited("NUL", 0x80000000, 3);
+                    stdout = OpenInherited(output, 0x00000004, 4); // FILE_APPEND_DATA, OPEN_ALWAYS
+                    stderr = OpenInherited(output, 0x00000004, 4);
+                    return StartCore(exe, args, cwd, new StartupInfo { cb = Marshal.SizeOf(typeof(StartupInfo)), flags = 0x100, stdInput = input, stdOutput = stdout, stdError = stderr }, true);
+                } finally {
+                    foreach (var h in new[] { input, stdout, stderr }) if (h != IntPtr.Zero && h != new IntPtr(-1)) CloseHandle(h);
+                }
+            }
+        }
         static IntPtr OpenInherited(string path, uint access, uint disposition)
         {
             var security = new SecurityAttributes { length = Marshal.SizeOf(typeof(SecurityAttributes)), inherit = true };

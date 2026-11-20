@@ -499,11 +499,11 @@ HTTP(('127.0.0.1',int(api['external_controller'].split(':')[-1])),API).serve_for
         def log_lines(): return log_path.read_text().splitlines() if log_path.exists() else []
         log_before=len(log_lines()); kill_at=time.monotonic()
         os.kill(old,9)
-        until(lambda: any(l.endswith(' ready') for l in log_lines()[log_before:]) and engine_pid()!=old and
+        until(lambda: any(len(l.split())>4 and l.split()[4]=='ready' for l in log_lines()[log_before:]) and engine_pid()!=old and
               status().get('ok'),seconds=EVENT_WAIT,label='killed engine restarted and ready')
         ready_at=time.monotonic()
         time.sleep(max(0,15-(time.monotonic()-ready_at)))
-        after=[l.split(' ',1)[1].split(' ')[0] for l in log_lines()[log_before:] if ' ' in l]
+        after=[l.split()[4] for l in log_lines()[log_before:] if len(l.split())>4]
         assert 'restart' in after and 'ready' in after,after
         assert 'switch' not in after,('switch after engine restart',after,status()['switches'][-2:],status()['candidates'])
         assert status()['active']==a and row(a)['penaltyStep']==0,status()

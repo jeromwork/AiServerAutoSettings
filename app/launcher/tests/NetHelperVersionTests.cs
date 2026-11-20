@@ -23,7 +23,7 @@ namespace RemoteAgents.Launcher
             return service.Concat(new[] {
                 "app/launcher/Data.cs", "app/launcher/EntryPoint.cs", "app/launcher/NativeJob.cs",
                 "app/launcher/PinnedTransport.cs", "app/launcher/Program.cs", "app/launcher/StatusView.cs",
-                "app/launcher/TickFailureLog.cs", "app/launcher/TrayMenuModel.cs",
+                "app/launcher/TickFailureLog.cs", "app/launcher/TrayMenuModel.cs", "app/launcher/RaLog.cs", "app/launcher/LogMask.cs",
                 "app/launcher/RemoteAgents.Launcher.csproj", "build/bundle-binaries.json",
                 "transport/product-features.json"
             }).Distinct().OrderBy(path => path, StringComparer.Ordinal).ToArray();

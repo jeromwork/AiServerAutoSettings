@@ -578,7 +578,7 @@ try{
     Write-TransportJson (Join-Path $voff 'status/vpn.json') @{state='on'};Assert (-not (Test-TransportVpnOff $voff)) 'vpn on'
     Write-TransportJson (Join-Path $voff 'status/vpn.json') @{state='off'};Assert (Test-TransportVpnOff $voff) 'vpn off'
     Write-TransportLog $voff 'bind-mode' ([pscustomobject]@{message='bind=none reason=no-physical-interface'})
-    Assert ((Get-Content -Raw (Join-Path $voff 'logs/transport.log')) -match 'bind-mode bind=none reason=no-physical-interface') 'журнал: bind=none reason=...'
+    Assert ((Get-Content -Raw (Join-Path $voff 'logs/transport.log')) -match 'bind-mode\s.*bind=none reason=no-physical-interface') 'журнал: bind=none reason=...'
     $rows[0]|Add-Member -Force latencyMs 20;$rows[1]|Add-Member -Force latencyMs 10
     $memory=Read-TransportMemory $work;Save-TransportMemory $work $memory $n1 $rows
     $memory=Read-TransportMemory $work;$remembered=@(Get-TransportRemembered $memory $n1 @([pscustomobject]@{tag='a'},[pscustomobject]@{tag='b'}))
@@ -659,8 +659,8 @@ try{
     Write-TransportLog $work 'switch';Write-TransportLog $work 'password=do-not-log'
     $log=[IO.File]::ReadAllText((Join-Path $work 'logs/transport.log'))
     Assert ($log -notmatch 'do-not-log|password=') 'секреты не попали в журнал'
-    [IO.File]::WriteAllText((Join-Path $work 'logs/transport.log'),('x'*1MB));Write-TransportLog $work 'start'
-    Assert (Test-Path -LiteralPath (Join-Path $work 'logs/transport.log.1')) 'ротация 1 МБ'
+    [IO.File]::WriteAllText((Join-Path $work 'logs/transport.log'),('x'*(2MB+1)));Write-TransportLog $work 'start'
+    Assert (Test-Path -LiteralPath (Join-Path $work 'logs/transport.log.1')) 'ротация 2 МБ'
     $status=Join-Path $work 'status/transport.json';Write-TransportJson $status @{ok=$false};Write-TransportJson $status @{ok=$true}
     Assert ((Read-TransportJson $status).ok) 'атомарная замена JSON'
     # Тест настоящего счётчика и pipeline CopyToAsync без SSH/сети.

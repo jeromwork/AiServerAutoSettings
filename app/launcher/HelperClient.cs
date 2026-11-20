@@ -178,6 +178,9 @@ namespace RemoteAgents.Launcher
                 return result;
             });
         }
+        // Новые строки журнала помощника (seq > after); см. HelperLogMirror.
+        internal Dictionary<string, object> LogRead(ulong after, int max)
+        { return Request(new { cmd = "log.read", after = after, max = max }); }
         internal Task VpnOff() { return Task.Run(() => { Request(new { cmd = "vpn.off" }); }); }
         void Monitor(NamedPipeClientStream channel, NetHelperProtocol.Reader reader)
         {

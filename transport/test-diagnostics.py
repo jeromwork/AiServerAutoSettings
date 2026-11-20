@@ -43,7 +43,7 @@ try{
                                      '-Exe',str(child),'-Root',tmp], stdin=subprocess.DEVNULL, capture_output=True, timeout=45)
             self.assertEqual(result.returncode,0,result.stderr.decode())
             log=(root/'logs/transport.log').read_text()
-            self.assertIn('candidate=entry-fixture reason=connection-refused exit=42 stderr=Connection refused: <redacted> <redacted> <redacted>',log)
+            self.assertIn('candidate=entry-fixture reason=connection-refused exit=42 stderr="Connection refused: <redacted> <redacted> <redacted>"',log)
             self.assertNotIn('pw',log)
             self.assertNotIn('aa',log)
             self.assertNotIn('bb',log)

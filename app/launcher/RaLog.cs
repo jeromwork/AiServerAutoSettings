@@ -21,6 +21,9 @@ namespace RemoteAgents.Launcher
         // Параметры можно менять в тестах.
         internal static long MaxBytes = 2L * 1024 * 1024;
         internal static int MaxArchives = 5;
+        // Отдельные потоки могут хранить меньше архивов (helper-events: 3 по 2 МБ).
+        internal static readonly Dictionary<string, int> ArchivesByStream = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        static int ArchivesFor(string stream) { int n; lock (ArchivesByStream) return ArchivesByStream.TryGetValue(stream, out n) ? n : MaxArchives; }
         internal static long TotalLimit = 60L * 1024 * 1024;
         internal static Func<DateTimeOffset> Clock = () => DateTimeOffset.Now;
         internal static readonly string Session = NewSession();
@@ -146,9 +149,10 @@ namespace RemoteAgents.Launcher
         static void Rotate(string path, int incoming)
         {
             if (!File.Exists(path) || new FileInfo(path).Length + incoming <= MaxBytes) return;
-            string oldest = path + "." + MaxArchives.ToString(CultureInfo.InvariantCulture);
+            int archives = ArchivesFor(Path.GetFileNameWithoutExtension(path));
+            string oldest = path + "." + archives.ToString(CultureInfo.InvariantCulture);
             if (File.Exists(oldest)) File.Delete(oldest);
-            for (int i = MaxArchives - 1; i >= 1; i--) {
+            for (int i = archives - 1; i >= 1; i--) {
                 string from = path + "." + i.ToString(CultureInfo.InvariantCulture), to = path + "." + (i + 1).ToString(CultureInfo.InvariantCulture);
                 if (File.Exists(from)) File.Move(from, to);
             }
@@ -180,7 +184,7 @@ namespace RemoteAgents.Launcher
         {
             var list = new List<string>();
             string path = Path.Combine(dir, stream + ".log");
-            for (int i = MaxArchives; i >= 1; i--) { string a = path + "." + i.ToString(CultureInfo.InvariantCulture); if (File.Exists(a)) list.Add(a); }
+            for (int i = ArchivesFor(stream); i >= 1; i--) { string a = path + "." + i.ToString(CultureInfo.InvariantCulture); if (File.Exists(a)) list.Add(a); }
             if (File.Exists(path)) list.Add(path);
             return list.ToArray();
         }

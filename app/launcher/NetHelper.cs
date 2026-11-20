@@ -180,6 +180,20 @@ namespace RemoteAgents.Launcher
         }
         string Execute(string command, Dictionary<string, object> request)
         {
+            if (command == "log.read") {
+                ulong after; ulong.TryParse(Json.Str(request, "after", "0"), out after);
+                log.Core.Pump();
+                return HelperEventLog.Reply(log.Events.Read(after, Json.Int(request, "max", HelperEventLog.MaxRead)), NetHelperInstall.HelperVersion);
+            }
+            bool noisy = command == "status";
+            var timer = Stopwatch.StartNew();
+            if (!noisy) log.Events.Write(LogLevel.Info, "helper", "cmd.recv", "cmd", command);
+            string reply = null;
+            try { reply = ExecuteCommand(command, request); return reply; }
+            finally { if (!noisy) log.Events.Write(LogLevel.Info, "helper", "cmd.done", "cmd", command, "ms", timer.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture), "ok", (reply != null && reply.StartsWith("{\"ok\":false") ? "false" : "true")); }
+        }
+        string ExecuteCommand(string command, Dictionary<string, object> request)
+        {
             if (command == "lan.apply") return Json.Encode(lan.Apply(request));
             if (command == "lan.stop") return Json.Encode(lan.Stop());
             try {
@@ -192,7 +206,7 @@ namespace RemoteAgents.Launcher
                             NamedPipeServerStream channel; lock (pipeGate) channel = pipe;
                             if (channel == null) throw new IOException("Клиент отключился");
                             channel.RunAsClient(() => action());
-                        }, log.Write);
+                        }, log.Write) { Events = log.Events, CorePump = log.Core };
                         lifetime.AddJob(vpnTun);
                     }
                     vpnTun.Enable(options);
@@ -283,9 +297,12 @@ namespace RemoteAgents.Launcher
         readonly string file;
         readonly Queue<string> recent = new Queue<string>();
         readonly object gate = new object();
+        internal readonly HelperEventLog Events;
+        internal readonly CoreLogPump Core;
         internal NetHelperLog(string directory)
         {
             file = Path.Combine(directory, "helper.log");
+            Events = new HelperEventLog(directory); Core = new CoreLogPump(directory, Events);
             foreach (string path in new[] { file + ".old", file }) {
                 if (!File.Exists(path)) continue;
                 if (new FileInfo(path).Length > Limit) continue;
@@ -300,6 +317,8 @@ namespace RemoteAgents.Launcher
         internal void Write(string stage, int code, string type)
         {
             string line = DateTime.UtcNow.ToString("o") + " stage=" + stage + " code=" + code.ToString(System.Globalization.CultureInfo.InvariantCulture) + (type == null ? "" : " type=" + type);
+            // Тот же факт — в едином формате (helper-events.log), чтобы его видно в серверных журналах.
+            Events.Write(code != 0 ? LogLevel.Warn : LogLevel.Info, "helper", "stage", "stage", stage, "code", code.ToString(System.Globalization.CultureInfo.InvariantCulture), "type", type ?? "");
             lock (gate) {
                 Remember(line);
                 try {
