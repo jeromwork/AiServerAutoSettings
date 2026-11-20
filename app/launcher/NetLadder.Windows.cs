@@ -21,6 +21,8 @@ namespace RemoteAgents.Launcher
         readonly Func<Dictionary<string, object>> transport, vpn;
         internal WindowsNetProbe(string home, Func<Dictionary<string, object>> transport, Func<Dictionary<string, object>> vpn)
         { this.home = home; this.transport = transport; this.vpn = vpn; }
+        bool ChannelFirst()
+        { try { return Json.Bool(Json.Map(Json.Get(Json.Read(Path.Combine(home, "config.json")), "transport")), "channelFirst"); } catch { return false; } }
         [DllImport("iphlpapi.dll")] static extern int GetBestInterface(uint address, out uint index);
 
         static StageResult Timed(int stage, Func<string> body, string code)
@@ -70,7 +72,7 @@ namespace RemoteAgents.Launcher
         public StageResult Ports(bool vpnOn)
         {
             var watch = Stopwatch.StartNew();
-            var entries = NetPorts.Entries(transport(), vpnOn);
+            var entries = NetPorts.Entries(transport(), vpnOn, ChannelFirst());
             var tasks = entries.Select(e => Task.Run(() => { string err; return Connect(e.Host, e.Port, 300, out err) ? null : NetPorts.Describe(e) + "(" + err + ")"; })).ToArray();
             Task.WaitAll(tasks);
             var closed = tasks.Select(t => t.Result).Where(r => r != null).ToArray();
@@ -141,25 +143,29 @@ namespace RemoteAgents.Launcher
         static class Dns_ { internal static Task<IPAddress[]> GetHostAddressesAsync(string host) { return System.Net.Dns.GetHostAddressesAsync(host); } }
     }
 
-    // Сторож и сквозная проверка после «Включить». Один прогон за раз, всё в фоновом потоке.
+    // Сторож и сквозная проверка после «Включить». Один прогон за раз (общий флаг для сторожа и RunE2E), всё в фоне.
     internal sealed class NetLadderService
     {
-        readonly string home;
+        const long BannerEveryMs = 5 * 60000;
         readonly Journal log;
         readonly INetProbe probe;
-        readonly Func<Dictionary<string, object>> transport;
         readonly Stopwatch clock = Stopwatch.StartNew();
         readonly NetSchedule schedule;
         readonly NetWatch watch = new NetWatch();
         int running;
-        string lastNetwork, lastActive;
+        string lastNetwork, lastActive, lastPortsState = "";
+        long lastBannerMs = -BannerEveryMs;
+        // Заметка для трея: текст при отказе ступеней 6–8 при включённом VPN, пустая строка — всё хорошо.
+        internal Action<string> Note;
         internal event Action<LadderResult> Changed; // ok -> fail / fail -> ok (для LogShipper.Kick)
         internal NetLadderService(string home, Journal log, Func<Dictionary<string, object>> transport, Func<Dictionary<string, object>> vpn)
         {
-            this.home = home; this.log = log; this.transport = transport;
+            this.log = log;
             probe = new WindowsNetProbe(home, transport, vpn);
             schedule = new NetSchedule(clock.ElapsedMilliseconds);
         }
+        bool TryEnter() { return Interlocked.CompareExchange(ref running, 1, 0) == 0; }
+        void Leave() { Interlocked.Exchange(ref running, 0); }
         // Раз в секунду из Tick: дешёвое решение, нужен ли прогон.
         internal void Tick(Dictionary<string, object> transportNow, bool vpnOn)
         {
@@ -168,17 +174,29 @@ namespace RemoteAgents.Launcher
             lastNetwork = network; lastActive = active;
             long now = clock.ElapsedMilliseconds;
             int level = schedule.Due(now, vpnOn);
-            if (level == 0 || Interlocked.CompareExchange(ref running, 1, 0) != 0) return;
+            if (level == 0 || !TryEnter()) return;
             schedule.Started(now, vpnOn, level);
             Task.Run(() => {
                 try { Watch(vpnOn, level); }
                 catch (Exception e) { log.Write(LogLevel.Warn, "net", "net.watch-error", "err", e.GetType().Name); }
-                finally { Interlocked.Exchange(ref running, 0); }
+                finally { Leave(); }
             });
         }
         void Watch(bool vpnOn, int level)
         {
-            var result = NetLadder.Run(probe, vpnOn, level);
+            // Ступени 1–4 — только локальные проверки. Баннер SSH (ступень 5, обращение к серверу) —
+            // не чаще раза в 5 мин или при смене результата ступени 4.
+            var result = NetLadder.Run(probe, vpnOn, level, null, false);
+            var ports = result.Stages.FirstOrDefault(s => s.Stage == 4);
+            string portsState = ports == null ? "" : ports.Ok ? "ok" : "fail";
+            long now = clock.ElapsedMilliseconds;
+            if (result.Ok && (portsState != lastPortsState || now - lastBannerMs >= BannerEveryMs)) {
+                lastBannerMs = now;
+                var banner = Guarded(probe.Banner);
+                var all = result.Stages.Where(s => s.Stage != 5).Concat(new[] { banner }).ToArray();
+                result = NetLadder.Evaluate(all);
+            }
+            lastPortsState = portsState;
             var change = watch.Track(result, DateTime.UtcNow);
             if (change != null) {
                 var fields = new List<string> { "from", change.From, "to", change.To, "vpn", vpnOn ? "on" : "off" };
@@ -188,25 +206,39 @@ namespace RemoteAgents.Launcher
                 log.Write(change.To == "fail" ? LogLevel.Warn : LogLevel.Info, "net", "net.state", fields.ToArray());
                 var changed = Changed; if (changed != null) try { changed(result); } catch { }
             }
+            Publish(result, vpnOn);
             if (schedule.HeartbeatDue(clock.ElapsedMilliseconds))
                 log.Write(LogLevel.Info, "net", "net.heartbeat", "state", watch.State, "vpn", vpnOn ? "on" : "off", "stages", Stages(result));
+        }
+        static StageResult Guarded(Func<StageResult> f) { try { return f(); } catch (Exception e) { return StageResult.Fail(5, 0, "probe-error", e.GetType().Name); } }
+        // «Интернет через VPN не идёт» — только при отказе ступеней 6–8.
+        void Publish(LadderResult result, bool vpnOn)
+        {
+            var note = Note; if (note == null) return;
+            bool internetDown = vpnOn && !result.Ok && result.FailStage >= 6 && result.FailStage <= 8;
+            try { note(internetDown ? "VPN включён, но интернет через него не идёт: " + result.Reason + (result.Detail.Length > 0 ? " (" + result.Detail + ")" : "") : ""); } catch { }
         }
         static string Stages(LadderResult r)
         { return string.Join(",", r.Stages.Where(s => !s.Skipped).Select(s => s.Stage + ":" + (s.Ok ? "ok" : s.Code) + "/" + s.Ms)); }
         internal void Kick() { schedule.Kick(); }
 
-        // После vpn.on.ok: полная лестница в фоне; итог — net.e2e. onFail получает причину для строки в трее.
-        internal void RunE2E(string att, Action<string> onFail)
+        // После vpn.on.ok: полная лестница в фоне; ждёт свободного места среди прогонов сторожа (до 30 с).
+        internal void RunE2E(string att)
         {
             Task.Run(() => {
+                bool entered = false;
                 try {
+                    for (int i = 0; i < 60 && !(entered = TryEnter()); i++) Thread.Sleep(500);
+                    if (!entered) { log.Write(LogLevel.Warn, "net", "net.e2e", "att", att, "result", "skipped", "reason", "busy"); return; }
                     var result = NetLadder.Run(probe, true, NetLadder.Full);
                     var fields = new List<string> { "att", att, "result", result.Ok ? "ok" : "fail", "stage", result.FailStage.ToString(CultureInfo.InvariantCulture), "reason", result.Reason, "detail", result.Detail, "ms_total", result.TotalMs.ToString(CultureInfo.InvariantCulture) };
                     foreach (var s in result.Stages.Where(s => !s.Skipped)) fields.AddRange(new[] { "s" + s.Stage + "ms", s.Ms.ToString(CultureInfo.InvariantCulture) });
                     fields.AddRange(new[] { "egress", result.Egress });
                     log.Write(result.Ok ? LogLevel.Info : LogLevel.Warn, "net", "net.e2e", fields.ToArray());
-                    if (!result.Ok && onFail != null) onFail("VPN включён, но интернет через него не идёт: " + result.Reason + (result.Detail.Length > 0 ? " (" + result.Detail + ")" : ""));
+                    lastBannerMs = clock.ElapsedMilliseconds;
+                    Publish(result, true);
                 } catch (Exception e) { log.Write(LogLevel.Warn, "net", "net.e2e", "att", att, "result", "error", "err", e.GetType().Name); }
+                finally { if (entered) Leave(); }
             });
         }
     }

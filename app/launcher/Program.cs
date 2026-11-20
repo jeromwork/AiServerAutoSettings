@@ -69,7 +69,7 @@ namespace RemoteAgents.Launcher
                     var rest = new System.Collections.Generic.List<string>(args); int at = rest.IndexOf("--home"); if (at > 0 && at + 1 < rest.Count) rest.RemoveRange(at, 2);
                     return SecretCommand.Run(home, rest.ToArray());
                 }
-                Directory.CreateDirectory(home); log = new Journal(home); RaLog.Configure(log.LogsDir); LogStart(log, home);
+                Directory.CreateDirectory(home); log = new Journal(home); RaLog.Configure(log.LogsDir); RaLog.Secrets = () => DiagnosticReport.KnownSecrets(home); LogStart(log, home);
                 try { LegacyPacCleanup.Recover(home, new LegacyPacBrowser()); } catch { log.Write("legacy.pac.cleanup.failed"); }
                 try { FirstInstall.CleanupLegacyRun(home); } catch { log.Write("legacy.run.cleanup.failed"); }
                 if (args.Contains("--uninstall")) { Uninstall.Run(home); log.Write("uninstall.ok"); return 0; }

@@ -261,13 +261,14 @@ function Get-WizardChannelFailure([string]$Root,[DateTime]$StartedAt,$Daemon) {
     $details=@();$log=Join-Path $Root 'logs/transport.log'
     if(Test-Path -LiteralPath $log){
         # These log details are already sanitized. Ignore earlier runs, including rotated history.
-        $recent=@(Get-Content -LiteralPath $log -Encoding UTF8 -Tail 100 | Where-Object {
-            if($_ -match '^(\S+) (fatal|process-failed) (.+)$'){
-                try{(Convert-TransportUtc $Matches[1]) -ge $StartedAt}catch{$false}
+        $recent=@(Get-Content -LiteralPath $log -Encoding UTF8 -Tail 100 | ForEach-Object {
+            $row=ConvertFrom-RaLogLine ([string]$_)
+            if($row -and $row.Event -in @('fatal','process-failed')){
+                try{if((Convert-TransportUtc $row.Utc) -ge $StartedAt){[pscustomobject]@{Event=$row.Event;Text=($row.Event+' '+$row.Text)}}}catch{}
             }
         })
-        $fatal=@($recent|Where-Object {$_ -match '^\S+ fatal '})
-        if($fatal.Count){$details+=$fatal[-1]}elseif($recent.Count){$details+=$recent[-1]}
+        $fatal=@($recent|Where-Object {$_.Event -eq 'fatal'})
+        if($fatal.Count){$details+=$fatal[-1].Text}elseif($recent.Count){$details+=$recent[-1].Text}
     }
     if($Daemon -and $Daemon.OutputDrain){try{[void]$Daemon.OutputDrain.Wait(200)}catch{}}
     $output=Join-Path $Root 'logs/transport-daemon.out'

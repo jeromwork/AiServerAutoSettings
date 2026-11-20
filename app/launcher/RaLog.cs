@@ -36,10 +36,14 @@ namespace RemoteAgents.Launcher
         static string NewSession() { return Guid.NewGuid().ToString("N").Substring(0, 4); }
 
         internal static void Configure(string logsDir) { defaultDir = logsDir; }
+        // Известные значения секретов (DiagnosticReport.KnownSecrets) прячутся в каждой записи; задаёт лаунчер.
+        internal static Func<IEnumerable<string>> Secrets;
+        static IEnumerable<string> KnownSecrets() { try { var f = Secrets; return f == null ? null : f().ToArray(); } catch { return null; } }
 
         // ---- формат (чистая функция) -------------------------------------------------------
         internal static string Format(DateTimeOffset now, LogLevel level, string comp, string evt, IList<KeyValuePair<string, string>> fields, string session)
         {
+            var secrets = KnownSecrets();
             var line = new StringBuilder(160);
             line.Append(now.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture)).Append(' ');
             line.Append(now.ToString("HH:mm:ss.fffzzz", CultureInfo.InvariantCulture)).Append(' ');
@@ -51,7 +55,7 @@ namespace RemoteAgents.Launcher
                 foreach (var f in fields) {
                     string key = Regex.Replace(f.Key ?? "", "[^A-Za-z0-9_.-]", "_");
                     if (key.Length == 0 || key == "s") continue;
-                    string value = LogMask.IsSecretKey(key) ? "***" : LogMask.Clean(f.Value ?? "");
+                    string value = LogMask.IsSecretKey(key) ? "***" : LogMask.Clean(f.Value ?? "", secrets);
                     line.Append(' ').Append(key).Append('=').Append(QuoteValue(value));
                 }
             string text = line.ToString();
@@ -132,7 +136,7 @@ namespace RemoteAgents.Launcher
                         System.IO.Directory.CreateDirectory(dir);
                         string text = pending + line + "\n";
                         byte[] bytes = new UTF8Encoding(false).GetBytes(text);
-                        Rotate(path, bytes.Length);
+                        try { Rotate(path, bytes.Length); } catch { /* ротация не удалась: строку всё равно пишем */ }
                         bool fresh = !File.Exists(path) || new FileInfo(path).Length == 0;
                         using (var f = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete)) {
                             if (fresh) f.Write(new byte[] { 0xEF, 0xBB, 0xBF }, 0, 3);

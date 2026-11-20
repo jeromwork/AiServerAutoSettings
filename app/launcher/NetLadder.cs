@@ -55,7 +55,8 @@ namespace RemoteAgents.Launcher
         }
 
         // level: Quick = ступени 1–5 (+6 при включённом VPN), Slow = +7,8, Full = +9 (после включения).
-        internal static LadderResult Run(INetProbe probe, bool vpnOn, int level, Action<int> sleep = null)
+        // includeBanner=false: ступень 5 пропускается (SSH к серверу открывается редко, см. NetLadderService).
+        internal static LadderResult Run(INetProbe probe, bool vpnOn, int level, Action<int> sleep = null, bool includeBanner = true)
         {
             sleep = sleep ?? (ms => System.Threading.Thread.Sleep(ms));
             var stages = new List<StageResult>();
@@ -66,7 +67,7 @@ namespace RemoteAgents.Launcher
             stages.Add(once(2, probe.Conflict));
             stages.Add(once(3, probe.Transport));
             stages.Add(twice(4, () => probe.Ports(vpnOn)));
-            stages.Add(twice(5, probe.Banner));
+            stages.Add(includeBanner ? twice(5, probe.Banner) : StageResult.Skip(5));
             stages.Add(vpnOn ? once(6, probe.Route) : StageResult.Skip(6));
             stages.Add(vpnOn && level >= Slow ? twice(7, probe.Dns) : StageResult.Skip(7));
             stages.Add(vpnOn && level >= Slow ? twice(8, probe.Http) : StageResult.Skip(8));
@@ -134,18 +135,21 @@ namespace RemoteAgents.Launcher
         { int n = Json.Int(ports, key, 0); return n > 0 && n <= 65535 ? n : fallback; }
         internal static string Host(System.Collections.Generic.Dictionary<string, object> ports, string key, string fallback)
         { string v = Json.Str(ports, key); return v.Length > 0 ? v : fallback; }
-        internal static Entry[] Entries(System.Collections.Generic.Dictionary<string, object> transport, bool vpnOn)
+        // Только локальные входы (без обращения к серверу). Образец: status/transport.json ->
+        // ports{sshPort, channelSocksPort, channelSshAddress, vpnInPort, serverPort...}, localWeb{enabled, available, port}.
+        // Вход канала (адрес channelSshAddress, порт SSH сервера) и SOCKS канала есть только при transport.channelFirst.
+        internal static Entry[] Entries(System.Collections.Generic.Dictionary<string, object> transport, bool vpnOn, bool channelFirst = false)
         {
             var ports = Json.Map(Json.Get(transport, "ports"));
-            int ssh = Port(ports, "sshPort", 2222);
-            var list = new List<Entry> {
-                new Entry { Name = "ssh", Host = "127.0.0.1", Port = ssh },
-                new Entry { Name = "ssh-channel", Host = Host(ports, "channelSshAddress", "127.0.0.2"), Port = ssh },
-                new Entry { Name = "socks-channel", Host = "127.0.0.1", Port = Port(ports, "channelSocksPort", 2223) }
-            };
+            var list = new List<Entry> { new Entry { Name = "ssh", Host = "127.0.0.1", Port = Port(ports, "sshPort", 2222) } };
+            if (channelFirst) {
+                list.Add(new Entry { Name = "channel-ssh", Host = Host(ports, "channelSshAddress", "127.0.0.2"), Port = Port(ports, "serverPort", 22) });
+                list.Add(new Entry { Name = "channel-socks", Host = "127.0.0.1", Port = Port(ports, "channelSocksPort", 2223) });
+            }
             if (vpnOn) list.Add(new Entry { Name = "vpn-in", Host = "127.0.0.1", Port = Port(ports, "vpnInPort", 17881) });
-            foreach (var key in ports.Keys.Where(k => k.IndexOf("happier", StringComparison.OrdinalIgnoreCase) >= 0 && k.EndsWith("Port", StringComparison.OrdinalIgnoreCase)))
-                if (Port(ports, key, 0) > 0) list.Add(new Entry { Name = key, Host = "127.0.0.1", Port = Port(ports, key, 0) });
+            var web = Json.Map(Json.Get(transport, "localWeb"));
+            if (Json.Bool(web, "enabled") && Json.Bool(web, "available") && Port(web, "port", 0) > 0)
+                list.Add(new Entry { Name = "happier-web", Host = "127.0.0.1", Port = Port(web, "port", 0) });
             return list.ToArray();
         }
         internal static string Describe(Entry e) { return e.Name + ":" + e.Port.ToString(CultureInfo.InvariantCulture); }

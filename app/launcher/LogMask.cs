@@ -9,16 +9,26 @@ namespace RemoteAgents.Launcher
     // copies use the same patterns and the same fixture file (tests/fixtures/logging/mask-cases.json).
     internal static class LogMask
     {
-        const string SecretNames = "token|password|passwd|passphrase|pass|secret|key|apikey|api_key|auth|authorization|cookie|uuid|private";
+        const string SecretNames = "token|password|passwd|passphrase|pass|secret|key|apikey|api_key|auth|authorization|cookie|uuid|private|psk";
         static readonly Regex PrivateKey = new Regex(@"-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)", RegexOptions.IgnoreCase);
         static readonly Regex PublicKey = new Regex(@"ssh-(ed25519|rsa) AAAA[A-Za-z0-9+/=]+");
+        static readonly Regex UserInfo = new Regex(@"://[^/\s@]+@");
+        static readonly Regex Basic = new Regex(@"(Authorization[:=]\s*)Basic\s+\S+", RegexOptions.IgnoreCase);
         static readonly Regex Bearer = new Regex(@"Bearer\s+[A-Za-z0-9._~+/=-]+", RegexOptions.IgnoreCase);
-        static readonly Regex Field = new Regex(@"(?<![A-Za-z0-9])([""']?)(" + SecretNames + @")\1(\s*[:=]\s*)(""[^""]*""|'[^']*'|[^\s,;&""']+)", RegexOptions.IgnoreCase);
+        // Любое «имя: значение»; решает IsSecretName (camelCase: accessToken, secretKey, privateKey; psk).
+        static readonly Regex Field = new Regex(@"(?<![A-Za-z0-9])([""']?)([A-Za-z0-9_.-]+)\1(\s*[:=]\s*)(""[^""]*""|'[^']*'|[^\s,;&""']+)");
         static readonly Regex Uuid = new Regex(@"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b");
         static readonly Regex Blob = new Regex(@"[A-Za-z0-9+/=_-]{41,}");
-        static readonly Regex SecretKey = new Regex("^(?:" + SecretNames + ")$", RegexOptions.IgnoreCase);
+        static readonly Regex SubstringNames = new Regex("token|password|passwd|passphrase|secret|authorization|cookie|uuid", RegexOptions.IgnoreCase);
+        static readonly Regex WordNames = new Regex(@"(?:^|[_.-])(?:key|pass|auth|psk|private|apikey)(?:$|[_.-])", RegexOptions.IgnoreCase);
 
-        internal static bool IsSecretKey(string key) { return key != null && SecretKey.IsMatch(key); }
+        internal static bool IsSecretName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            if (SubstringNames.IsMatch(name)) return true;
+            return WordNames.IsMatch(Regex.Replace(name, "([a-z0-9])([A-Z])", "$1_$2"));
+        }
+        internal static bool IsSecretKey(string key) { return IsSecretName(key); }
 
         internal static string Clean(string text) { return Clean(text, null); }
 
@@ -30,8 +40,10 @@ namespace RemoteAgents.Launcher
                     text = text.Replace(secret, "***");
             text = PrivateKey.Replace(text, "[private-key]");
             text = PublicKey.Replace(text, "ssh-$1 [pubkey]");
+            text = UserInfo.Replace(text, "://***@");
+            text = Basic.Replace(text, "$1Basic ***");
             text = Bearer.Replace(text, "Bearer ***");
-            text = Field.Replace(text, "$1$2$1$3***");
+            text = Field.Replace(text, m => IsSecretName(m.Groups[2].Value) ? m.Groups[1].Value + m.Groups[2].Value + m.Groups[1].Value + m.Groups[3].Value + "***" : m.Value);
             text = Uuid.Replace(text, m => "uuid:****" + m.Value.Substring(m.Value.Length - 4));
             text = Blob.Replace(text, BlobValue);
             return text;

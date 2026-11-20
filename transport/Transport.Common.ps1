@@ -85,15 +85,24 @@ function Get-TransportErrorDetail($ErrorRecord) {
 }
 # ---- Единый журнал (формат — docs/LOGS.md; тот же формат пишут RaLog.cs и logs_in.py) ----
 $script:RaLogSession=([guid]::NewGuid().ToString('N')).Substring(0,4)
-$script:RaLogSecretNames='token|password|passwd|passphrase|pass|secret|key|apikey|api_key|auth|authorization|cookie|uuid|private'
+function Test-RaLogSecretName([string]$Name) {
+    if(-not $Name){return $false}
+    if($Name -match '(?i)token|password|passwd|passphrase|secret|authorization|cookie|uuid'){return $true}
+    $words=[regex]::Replace($Name,'([a-z0-9])([A-Z])','$1_$2')
+    [bool]($words -match '(?i)(?:^|[_.-])(?:key|pass|auth|psk|private|apikey)(?:$|[_.-])')
+}
 function Protect-RaLogText([string]$Text) {
     # Те же правила, что LogMask.cs (общий файл фикстур mask-cases.json).
     if([string]::IsNullOrEmpty($Text)){return ''}
-    $names=$script:RaLogSecretNames
     $t=[regex]::Replace($Text,'-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)','[private-key]','IgnoreCase')
     $t=[regex]::Replace($t,'ssh-(ed25519|rsa) AAAA[A-Za-z0-9+/=]+','ssh-$1 [pubkey]')
+    $t=[regex]::Replace($t,'://[^/\s@]+@','://***@')
+    $t=[regex]::Replace($t,'(Authorization[:=]\s*)Basic\s+\S+','$1Basic ***','IgnoreCase')
     $t=[regex]::Replace($t,'Bearer\s+[A-Za-z0-9._~+/=-]+','Bearer ***','IgnoreCase')
-    $t=[regex]::Replace($t,('(?<![A-Za-z0-9])(["'']?)('+$names+')\1(\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s,;&"'']+)'),'$1$2$1$3***','IgnoreCase')
+    $t=[regex]::Replace($t,'(?<![A-Za-z0-9])(["'']?)([A-Za-z0-9_.-]+)\1(\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s,;&"'']+)',{
+        param($m)
+        if(Test-RaLogSecretName $m.Groups[2].Value){$m.Groups[1].Value+$m.Groups[2].Value+$m.Groups[1].Value+$m.Groups[3].Value+'***'}else{$m.Value}
+    })
     $t=[regex]::Replace($t,'\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b',{param($m) 'uuid:****'+$m.Value.Substring($m.Value.Length-4)})
     $t=[regex]::Replace($t,'[A-Za-z0-9+/=_-]{41,}',{
         param($m)
@@ -132,7 +141,7 @@ function Format-RaLogLine([DateTimeOffset]$Now,[string]$Level,[string]$Comp,[str
             $key=[regex]::Replace([string]$entry.Key,'[^A-Za-z0-9_.-]','_')
             if(-not $key -or $key -ceq 's'){continue}
             $raw=if($null -eq $entry.Value){''}else{[string]$entry.Value}
-            $value=if($key -match ('^(?:'+$script:RaLogSecretNames+')$')){'***'}else{Protect-RaLogText $raw}
+            $value=if(Test-RaLogSecretName $key){'***'}else{Protect-RaLogText $raw}
             [void]$line.Append(' ').Append($key).Append('=').Append((ConvertTo-RaLogValue $value))
         }
     }
@@ -149,9 +158,11 @@ function Write-RaLogFile([string]$Dir,[string]$Stream,[string]$Line) {
         $path=Join-Path $Dir ($Stream+'.log');$utf8=New-Object Text.UTF8Encoding($false)
         $bytes=$utf8.GetBytes($Line+"`n")
         if([IO.File]::Exists($path) -and ((New-Object IO.FileInfo($path)).Length+$bytes.Length) -gt 2MB){
-            $oldest=$path+'.5';if([IO.File]::Exists($oldest)){[IO.File]::Delete($oldest)}
-            for($i=4;$i -ge 1;$i--){$from=$path+'.'+$i;if([IO.File]::Exists($from)){[IO.File]::Move($from,$path+'.'+($i+1))}}
-            [IO.File]::Move($path,$path+'.1')
+            try{
+                $oldest=$path+'.5';if([IO.File]::Exists($oldest)){[IO.File]::Delete($oldest)}
+                for($i=4;$i -ge 1;$i--){$from=$path+'.'+$i;if([IO.File]::Exists($from)){[IO.File]::Move($from,$path+'.'+($i+1))}}
+                [IO.File]::Move($path,$path+'.1')
+            }catch{}  # ротация не удалась: строку всё равно пишем
         }
         $fresh=(-not [IO.File]::Exists($path)) -or ((New-Object IO.FileInfo($path)).Length -eq 0)
         $fs=New-Object IO.FileStream($path,[IO.FileMode]::Append,[IO.FileAccess]::Write,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
@@ -170,6 +181,18 @@ function ConvertTo-RaLogFields([string]$Text) {
     }
     if($free.Count){$fields['msg']=($free -join ' ')}
     $fields
+}
+function ConvertFrom-RaLogLine([string]$Line) {
+    # Разбор строки журнала: новый формат (UTC, местное время, уровень, компонент, событие, k=v) и старый (UTC событие текст).
+    $Line=$Line.TrimStart([char]0xFEFF)
+    if($Line -match '^(\S+) \S+ +(DEBUG|INFO|WARN|ERROR) +(\S+) +(\S+)(?: +(.*))?$'){
+        $utc=$Matches[1];$level=$Matches[2];$comp=$Matches[3];$evt=$Matches[4];$rest=[string]$Matches[5];$text=$rest
+        if($rest -match '(?:^|\s)msg=(?:"((?:[^"\\]|\\.)*)"|(\S*))'){$text=if($Matches[1]){([string]$Matches[1] -replace '\\n',"`n" -replace '\\"','"' -replace '\\\\','\')}else{[string]$Matches[2]}}
+        else{$text=[regex]::Replace($rest,'^s=\S+\s*','')}
+        return [pscustomobject]@{Utc=$utc;Level=$level;Comp=$comp;Event=$evt;Text=$text}
+    }
+    if($Line -match '^(\S+) (\S+)(?: (.*))?$'){return [pscustomobject]@{Utc=$Matches[1];Level='';Comp='';Event=$Matches[2];Text=[string]$Matches[3]}}
+    $null
 }
 function Write-TransportLog([string]$Root,[string]$Event,$Detail='') {
     # Любое событие с именем [a-z0-9.-]+ допустимо; прочее — process-failed. Подробности — только безопасные (как раньше).

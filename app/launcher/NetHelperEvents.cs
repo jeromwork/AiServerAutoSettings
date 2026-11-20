@@ -71,12 +71,14 @@ namespace RemoteAgents.Launcher
         {
             internal readonly List<string> Lines = new List<string>();
             internal ulong Next, Lost;
+            internal bool Reset; // курсор больше последнего seq: журнал пересоздан
         }
         // Строки с seq > after, не больше max байт (с запасом на экранирование JSON).
         internal Page Read(ulong after, int max)
         {
             if (max <= 0 || max > MaxRead) max = MaxRead;
             var page = new Page { Next = after };
+            lock (gate) { if (after > seq) { page.Next = seq; page.Reset = true; return page; } }
             var found = new List<KeyValuePair<ulong, string>>();
             string[] files = RaLog.StreamFiles(dir, Stream);
             lock (gate) {
@@ -113,7 +115,7 @@ namespace RemoteAgents.Launcher
         {
             var sb = new StringBuilder("{\"ok\":true,\"state\":\"ready\",\"helperVersion\":\"" + helperVersion + "\",\"lines\":[");
             for (int i = 0; i < page.Lines.Count; i++) { if (i > 0) sb.Append(','); sb.Append(JsonString(page.Lines[i])); }
-            return sb.Append("],\"next\":").Append(page.Next.ToString(CultureInfo.InvariantCulture)).Append(",\"lost\":").Append(page.Lost.ToString(CultureInfo.InvariantCulture)).Append('}').ToString();
+            return sb.Append("],\"next\":").Append(page.Next.ToString(CultureInfo.InvariantCulture)).Append(",\"lost\":").Append(page.Lost.ToString(CultureInfo.InvariantCulture)).Append(",\"reset\":").Append(page.Reset ? "true" : "false").Append('}').ToString();
         }
         static string JsonString(string text)
         {

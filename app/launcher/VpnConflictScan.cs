@@ -87,17 +87,17 @@ namespace RemoteAgents.Launcher
             foreach (var a in adapters) {
                 string name = Json.Str(a, "Name"), text = name + " " + Json.Str(a, "InterfaceDescription");
                 if (!Json.Str(a, "Status").Equals("Up", StringComparison.OrdinalIgnoreCase) || Own(name) || Transition(text)) continue;
-                interfaces.Add(new Dictionary<string, object> { { "name", name }, { "text", text }, { "ifIndex", Json.Int(a, "ifIndex", -1) }, { "virtual", VirtualAdapter(a) }, { "ipOnly", false } });
+                interfaces.Add(new Dictionary<string, object> { { "name", name }, { "text", text }, { "ifIndex", Json.Int(a, "ifIndex", -1) }, { "virtual", VirtualAdapter(a) }, { "ipOnly", false }, { "physical", Json.Get(a, "HardwareInterface") is bool && Json.Bool(a, "HardwareInterface") && !VirtualAdapter(a) } });
             }
             foreach (var i in ipOnly) {
                 string name = Json.Str(i, "InterfaceAlias");
                 if (Own(name) || Transition(name) || Loopback(name)) continue;
-                interfaces.Add(new Dictionary<string, object> { { "name", name }, { "text", name }, { "ifIndex", Json.Int(i, "InterfaceIndex", -1) }, { "virtual", false }, { "ipOnly", true } });
+                interfaces.Add(new Dictionary<string, object> { { "name", name }, { "text", name }, { "ifIndex", Json.Int(i, "InterfaceIndex", -1) }, { "virtual", false }, { "ipOnly", true }, { "physical", false } });
             }
             var named = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var f in interfaces) {
                 string name = (string)f["name"], text = (string)f["text"]; int index = (int)f["ifIndex"];
-                bool virt = (bool)f["virtual"], only = (bool)f["ipOnly"];
+                bool virt = (bool)f["virtual"], only = (bool)f["ipOnly"], physical = (bool)f["physical"];
                 var mine = routes.Where(r => Json.Int(r, "InterfaceIndex", -1) == index).ToArray();
                 var prefixes = mine.Select(r => Json.Str(r, "DestinationPrefix")).ToArray();
                 bool v4pair = prefixes.Contains("0.0.0.0/1") && prefixes.Contains("128.0.0.0/1"), v6pair = prefixes.Contains("::/1") && prefixes.Contains("8000::/1");
@@ -109,13 +109,12 @@ namespace RemoteAgents.Launcher
                 bool gateway = mine.Any(r => (Json.Str(r, "DestinationPrefix") == "0.0.0.0/0" || Json.Str(r, "DestinationPrefix") == "::/0") && !new[] { "", "0.0.0.0", "::" }.Contains(Json.Str(r, "NextHop")));
                 string label = Label(text);
                 string why = null;
-                if (full && (virt || label != null || only || (runningLabels.Count > 0 && !gateway))) why = only ? "ip-only-tunnel" : virt ? "virtual-full-route" : label != null ? "known-vpn-full-route" : "vpn-process-without-gateway";
+                if (full && (virt || label != null || only || (runningLabels.Count > 0 && !gateway && !physical))) why = only ? "ip-only-tunnel" : virt ? "virtual-full-route" : label != null ? "known-vpn-full-route" : "vpn-process-without-gateway";
                 // Неизвестный поднятый TUN без маршрута проверять нельзя: как раньше, закрываем включение.
                 else if (Match(text, "TUN|Wintun|WireGuard|TAP") && !(partial && Match(text, "OpenVPN|WireGuard|Tailscale")) && !Match(text, "OpenVPN|Tailscale")) why = "tun-adapter";
                 if (why != null) {
-                    string friendly = Friendly(label ?? runningLabels.Select(r => r.Key).FirstOrDefault(), name);
-                    // Имя берём от интерфейса, если процессы нашли другое имя, чем адаптер без метки.
-                    if (label == null && !only && !virt) friendly = Friendly(null, name);
+                    // Имя: метка самого интерфейса; от запущенных процессов — только «Happ» (чужую службу Tailscale адаптеру не приписываем).
+                    string friendly = Friendly(label ?? (runningLabels.Any(r => r.Key == "Happ") && (only || virt) ? "Happ" : null), name);
                     result.Conflicts.Add(new VpnConflictItem { Name = friendly, Iface = name, IfIndex = index, Route = route, Metric = metric, Why = why });
                     named.Add(label ?? friendly);
                 } else if (label != null) {

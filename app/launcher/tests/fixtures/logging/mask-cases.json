@@ -78,5 +78,37 @@
  {
   "in": "short abc",
   "out": "short abc"
+ },
+ {
+  "in": "accessToken=abc123",
+  "out": "accessToken=***"
+ },
+ {
+  "in": "{\"secretKey\":\"zzz\"}",
+  "out": "{\"secretKey\":***}"
+ },
+ {
+  "in": "privateKey=xyz and psk=abc",
+  "out": "privateKey=*** and psk=***"
+ },
+ {
+  "in": "https://user:pw@host/x",
+  "out": "https://***@host/x"
+ },
+ {
+  "in": "Authorization: Basic dXNlcjpwdw==",
+  "out": "Authorization: *** ***"
+ },
+ {
+  "in": "keyboard=us monkey=1",
+  "out": "keyboard=us monkey=1"
+ },
+ {
+  "in": "ssh://git@host/repo",
+  "out": "ssh://***@host/repo"
+ },
+ {
+  "in": "x-api-key: abc",
+  "out": "x-api-key: ***"
  }
 ]

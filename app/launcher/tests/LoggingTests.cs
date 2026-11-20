@@ -61,6 +61,11 @@ namespace RemoteAgents.Launcher
             Check(cases.Length >= 15, "mask case count");
             foreach (var c in cases) { string got = LogMask.Clean(Json.Str(c, "in")); Check(got == Json.Str(c, "out"), "mask [" + Json.Str(c, "in") + "] -> [" + got + "]"); }
             Check(LogMask.Clean("x SECRETVALUE y", new[] { "SECRETVALUE" }) == "x *** y", "known secret values are hidden");
+            RaLog.Secrets = () => new[] { "HIDDEN-VALUE" };
+            try {
+                string line = RaLog.Format(DateTimeOffset.Now, LogLevel.Info, "launcher", "t", new[] { new KeyValuePair<string, string>("msg", "a HIDDEN-VALUE b") }, "0000");
+                Check(!line.Contains("HIDDEN-VALUE") && line.Contains("a *** b"), "RaLog.Format hides known secrets");
+            } finally { RaLog.Secrets = null; }
         }
 
         static void Rotation()
@@ -135,6 +140,14 @@ namespace RemoteAgents.Launcher
             Check(r.Conflicts.Count == 0 && r.Suspects.Count == 0, "RemoteAgents-* and our own sing-box are ignored");
             r = VpnConflict.Evaluate(Inventory("inventory-xray-proc.json"));
             Check(r.Conflicts.Count == 0 && r.Suspects.Any(s => s.Name == "Xray" && s.Kind == "proc"), "xray process without route -> suspect");
+            r = VpnConflict.Evaluate(Inventory("inventory-wifi-happ-installed.json"));
+            Check(r.Conflicts.Count == 0 && r.Suspects.Any(x => x.Name == "Happ"), "Wi-Fi with default route + installed Happ -> suspects only");
+            r = VpnConflict.Evaluate(Inventory("inventory-modem-tailscaled.json"));
+            Check(r.Conflicts.Count == 0 && r.Suspects.Any(x => x.Name == "Tailscale"), "modem without gateway + tailscaled -> not a conflict");
+            r = VpnConflict.Evaluate(Inventory("inventory-physical-v6only.json"));
+            Check(r.Conflicts.Count == 0, "physical adapter with only ::/0 is not a conflict");
+            r = VpnConflict.Evaluate(Inventory("inventory-single-half.json"));
+            Check(r.Conflicts.Count == 0, "a single /1 route is not a full route");
             Check(VpnConflict.KnownLabel("Happier") == null && VpnConflict.KnownLabel("happ-xray") == "Happ", "Happier is not Happ");
             Check(VpnTun.Conflict(Inventory("inventory-happ-hardware.json")) == "Happ", "VpnTun.Conflict returns the friendly name");
             var script = VpnTunSession.InventoryScript(false);
@@ -175,9 +188,15 @@ namespace RemoteAgents.Launcher
             schedule.Started(130000, false, NetLadder.Quick);
             Check(schedule.Due(150000, false) == 0 && schedule.Due(190000, false) == NetLadder.Quick, "VPN off: quick every 60 s");
             schedule.Kick(); Check(schedule.Due(131000, false) == NetLadder.Quick, "kick forces a run");
-            var ports = NetPorts.Entries(Json.Map(Json.Parse("{\"ports\":{\"sshPort\":2300,\"channelSshAddress\":\"127.0.0.9\",\"channelSocksPort\":2301,\"vpnInPort\":17999,\"happierWebPort\":3005}}")), true);
-            Check(ports.Any(p => p.Name == "ssh" && p.Port == 2300) && ports.Any(p => p.Host == "127.0.0.9") && ports.Any(p => p.Name == "vpn-in" && p.Port == 17999) && ports.Any(p => p.Name == "happierWebPort" && p.Port == 3005), "ports come from transport.json");
-            Check(NetPorts.Entries(Json.Map(null), false).Any(p => p.Port == 2222) && !NetPorts.Entries(Json.Map(null), false).Any(p => p.Name == "vpn-in"), "defaults without transport.json; vpn-in only when VPN is on");
+            // Образец status/transport.json: ports{...serverPort}, localWeb{enabled, available, port}; channelFirst — из config.json.
+            const string sample = "{\"ports\":{\"sshPort\":2300,\"channelSocksPort\":2301,\"vpnInPort\":17999,\"channelSshAddress\":\"127.0.0.9\",\"serverPort\":2200},\"localWeb\":{\"enabled\":true,\"available\":true,\"port\":3005,\"serverPort\":3005}}";
+            var transport = Json.Map(Json.Parse(sample));
+            var plain = NetPorts.Entries(transport, false);
+            Check(plain.Length == 2 && plain.Any(p => p.Name == "ssh" && p.Port == 2300) && plain.Any(p => p.Name == "happier-web" && p.Port == 3005), "without channelFirst only the local ssh entry and Happier web are checked");
+            var channel = NetPorts.Entries(transport, true, true);
+            Check(channel.Any(p => p.Name == "channel-ssh" && p.Host == "127.0.0.9" && p.Port == 2200) && channel.Any(p => p.Name == "channel-socks" && p.Port == 2301) && channel.Any(p => p.Name == "vpn-in" && p.Port == 17999), "channelFirst adds channel ssh (server port) and socks; VPN adds vpn-in");
+            Check(!NetPorts.Entries(Json.Parse("{\"localWeb\":{\"enabled\":true,\"available\":false,\"port\":3005}}") as Dictionary<string, object>, false).Any(p => p.Name == "happier-web"), "unavailable local web is not checked");
+            Check(NetPorts.Entries(Json.Map(null), false).Single().Port == 2222, "defaults without transport.json");
         }
 
         static void HelperEvents()
@@ -192,6 +211,8 @@ namespace RemoteAgents.Launcher
                 var rest = log.Read(page.Next, 40000);
                 Check(rest.Lines.Count == 50 - page.Lines.Count && rest.Next == 50, "next page continues without gaps");
                 Check(log.Read(50, 1000).Lines.Count == 0 && log.Read(50, 1000).Next == 50, "nothing new gives an empty page");
+                var reset = log.Read(500, 1000);
+                Check(reset.Reset && reset.Next == 50 && reset.Lines.Count == 0 && Json.Bool(Json.Map(Json.Parse(HelperEventLog.Reply(reset, "10"))), "reset"), "a cursor ahead of the journal resets to the last seq");
                 Check(HelperEventLog.SeqOf(page.Lines[0]) == 1, "seq is parsed from the line");
                 var again = new HelperEventLog(dir);
                 Check(again.Last == 50 && again.Write(LogLevel.Info, "helper", "restart") == 51, "seq continues after a service restart");
