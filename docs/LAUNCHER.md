@@ -359,19 +359,68 @@ Manifest: `{version,file,sha256,size,minLauncher,configSchema:1,product,launcher
 flock --close /tmp/heavy-tests.lock ./build/release.sh <ssh-alias> '~/.local/share/remote-agents/dist'
 ```
 
-Команда требует чистый main с HEAD в origin/main, один раз вызывает `build/build-exe.sh` и получает оба EXE,
-`bundle.zip` и `vpn-bundle.zip` с одной UTC-версией `yyyyMMdd.HHmmss-<git hash>`.
-`release-github.sh` заменяет оба EXE и `release-info.json` в единственном `main-latest`, скачивает обратно
-все три файла и сверяет SHA-256. Затем поток tar через SSH с проверкой ключа хоста передаёт подготовленный
-dist. На сервере нужны только Python 3, POSIX flock, место под текущую/новую сборку и права рабочего пользователя.
-Оба архива и EXE проверяются до публикации любого manifest; каждый manifest заменяется последним атомарно,
-после чего SHA-256 и JSON читаются с диска ещё раз. Номер версии неизменяем: другой архив с тем же номером запрещён.
-Два внешних хранилища не образуют общую атомарную транзакцию: при частичном сбое нужно повторить публикацию
-той же подготовленной сборки: `build/release.sh <ssh-alias> '<remote-dist>' --prepared build/out`,
-затем сверить оба источника. Повтор использует уже созданный release-info.json и требует тот же main HEAD.
+### Каналы выпусков (решение владельца 21.11.2026, поправка конституции §7а)
 
-`DOTNET` задаёт SDK, `REMOTEAGENTS_BUILD_OUT` — выходную папку; для тестов сборки доступен
-`REMOTEAGENTS_BUNDLE_VERSION`. `build/build-exe.sh` только собирает, ничего не выкладывает.
+Поддерживаются два изолированных канала выпуска:
+1. **Основной канал (`main`, по умолчанию):**
+   - Вызов: `./build/release.sh <ssh-alias>` (или `--channel main`)
+   - Источник: ветка `main` с HEAD в `origin/main`, чистое дерево.
+   - Продукт: `RemoteAgents` (`RemoteAgents.exe`, `-p:UpdateChannel=main`).
+   - GitHub: релиз `main-latest`.
+   - Сервер: каталог `~/.local/share/remote-agents/dist`.
+2. **Тестовый канал (`test`):**
+   - Вызов: `./build/release.sh --channel test <ssh-alias>`
+   - Источник: ветка `int/vpn-master` (HEAD = `origin/int/vpn-master`), чистое дерево.
+   - Продукт: тот же `RemoteAgents` (`RemoteAgents.exe`: имя EXE, продукт, службы, адаптер, порты прежние).
+     Отличается только канал обновления: сборка с `-p:UpdateChannel=test` (символ `UPDATE_CHANNEL_TEST`,
+     версия с меткой `-test`) берёт обновления из `~/.local/share/remote-agents/dist-test`, а `remoteDir`
+     из `config.json` игнорирует (иначе настроенный конфиг вернул бы сборку на основной `dist`).
+   - Тестовая сборка устанавливается ВМЕСТО основной и обновляется из `dist-test`. Возврат на основную —
+     установить основной `RemoteAgents.exe` (из `main-latest`); он снова обновляется из `dist`.
+   - Выходная папка: `build/out-test`.
+   - GitHub: prerelease `test-latest` (ассеты перезаписываются).
+   - Сервер: каталог `~/.local/share/remote-agents/dist-test`.
+   - Изоляция назначения: разрешён только буквальный путь `~/.local/share/remote-agents/dist-test`;
+     абсолютные пути, завершающий `/`, `/.` и пути с `..` отвергаются до сборки и публикации.
+     Скрипты test-канала используют только тег `test-latest` и не пишут в `dist` или `main-latest`.
+   - Если `origin/int/vpn-master` отсутствует, выпуск запрещён; локальная ветка его не заменяет.
+
+Для локальной сборки EXE тестового канала:
+```bash
+./build/build-exe.sh --channel test
+```
+
+Микро-тесты каналов:
+```bash
+./build/test-release-channel.sh
+```
+
+Команда требует ветку и коммит выбранного канала, один раз вызывает `build/build-exe.sh`
+и получает один EXE (`RemoteAgents.exe`) и `bundle.zip`
+с UTC-версией `yyyyMMdd.HHmmss-<git hash>`. Начальный архив с закреплёнными бинарниками —
+`initial-bundle.zip`; OTA-архив `bundle.zip` их не содержит.
+`release-github.sh` проверяет коммит, EXE и архив по `release-info.json`, заменяет EXE и метаданные
+в релизе выбранного канала, скачивает оба файла обратно и сверяет SHA-256. Затем поток tar
+через SSH с проверкой ключа хоста передаёт подготовленный dist. На сервере нужны только
+Python 3, POSIX flock, место под текущую/новую сборку и права рабочего пользователя.
+Архив и EXE проверяются до публикации manifest; manifest заменяется последним атомарно,
+после чего SHA-256 и JSON читаются с диска ещё раз. Номер версии неизменяем: другой архив
+с тем же номером запрещён. Два внешних хранилища не образуют общую атомарную транзакцию:
+при частичном сбое нужно повторить публикацию той же подготовленной сборки и сверить оба источника:
+
+```bash
+build/release.sh <ssh-alias> --prepared build/out
+build/release.sh --channel test <ssh-alias> --prepared build/out-test
+# Явное назначение также допустимо перед --prepared:
+build/release.sh --channel test <ssh-alias> '~/.local/share/remote-agents/dist-test' --prepared build/out-test
+```
+
+Повтор использует уже созданный `release-info.json` и требует тот же HEAD выбранного канала.
+Лишние аргументы и `--prepared` без папки завершаются кодом 2.
+`DOTNET` задаёт SDK, `REMOTEAGENTS_BUILD_OUT` — выходную папку (по умолчанию `build/out`
+для main и `build/out-test` для test; для test назначения внутри `build/out` и `release` запрещены); для тестов сборки доступен `REMOTEAGENTS_BUNDLE_VERSION`.
+`build/build-exe.sh` только собирает, ничего не выкладывает. Только main копирует EXE и
+`Start.cmd` в версионируемый каталог `release/`; test хранит все артефакты в своей выходной папке.
 `build/publish.sh <zip> <dist> --launcher <exe>` переиспользует прежний атомарный издатель; реальные назначения
 также требуют main. Временные назначения под `/tmp` разрешены для изолированных тестов упаковки.
 Тексты при упаковке приводятся к LF, PS1 получают UTF-8 BOM для PS 5.1. Секреты и личные профили не входят в ZIP.

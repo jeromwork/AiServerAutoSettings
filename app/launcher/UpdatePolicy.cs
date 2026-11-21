@@ -19,7 +19,7 @@ namespace RemoteAgents.Launcher
             // Builds before auto-update wrote {"enabled": false} by themselves; that was never a decision.
             // An explicit opt-out always carries "auto" (owner decision 16.11.2026: updates are on by default).
             if (!update.ContainsKey("auto") && update.ContainsKey("enabled")) { update["enabled"] = true; changed = true; }
-            foreach (var pair in new Dictionary<string, object> { { "enabled", true }, { "auto", true }, { "intervalHours", 6 }, { "remoteDir", "~/.local/share/remote-agents/dist" } })
+            foreach (var pair in new Dictionary<string, object> { { "enabled", true }, { "auto", true }, { "intervalHours", 6 }, { "remoteDir", UpdateChannel.RemoteDir } })
                 if (!update.ContainsKey(pair.Key)) { update[pair.Key] = pair.Value; changed = true; }
             settings["update"] = update; return changed;
         }

@@ -120,6 +120,7 @@
     <Compile Include="UpdateButtonModelTests.cs" />
     <Compile Include="../UpdateProbe.cs" />
     <Compile Include="../UpdatePolicy.cs" />
+    <Compile Include="../UpdateChannel.cs" />
     <Compile Include="../UpdateEnvironment.cs" />
     <Compile Include="../UpdateEngine.cs" Link="UpdateEngine.cs" />
     <Compile Include="../UpdateSelfTests.cs" Link="UpdateSelfTests.cs" />

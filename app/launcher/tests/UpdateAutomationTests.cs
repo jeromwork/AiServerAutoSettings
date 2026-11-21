@@ -28,6 +28,9 @@ namespace RemoteAgents.Launcher
         internal static void Run(string temp)
         {
             string root = Path.Combine(temp, "automation"); Directory.CreateDirectory(root);
+            Check(!UpdateChannel.IsTest && UpdateChannel.RemoteDir == "~/.local/share/remote-agents/dist", "main channel uses dist");
+            Check(UpdateChannel.ResolveRemoteDir(false, "~/custom/dist") == "~/custom/dist" && UpdateChannel.ResolveRemoteDir(false, "") == "~/.local/share/remote-agents/dist", "main honours configured remoteDir");
+            Check(UpdateChannel.ResolveRemoteDir(true, "~/.local/share/remote-agents/dist") == "~/.local/share/remote-agents/dist-test" && UpdateChannel.ResolveRemoteDir(true, "~/custom/dist") == "~/.local/share/remote-agents/dist-test" && UpdateChannel.ResolveRemoteDir(true, "") == "~/.local/share/remote-agents/dist-test", "test channel ignores configured remoteDir");
             var settings = Json.Map(null); Check(UpdatePolicy.Defaults(settings), "missing update migrated");
             var update = Json.Map(settings["update"]);
             Check(Json.Bool(update, "enabled") && Json.Bool(update, "auto") && UpdatePolicy.Interval(update) == 6, "all defaults enabled");
