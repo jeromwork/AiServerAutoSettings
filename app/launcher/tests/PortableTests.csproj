@@ -5,12 +5,18 @@
     <OutputType>Exe</OutputType>
     <StartupObject Condition="'$(ConfigTests)' == 'true'">RemoteAgents.Launcher.DiagnosticReportTests</StartupObject>
     <StartupObject Condition="'$(ConfigE2E)' == 'true'">RemoteAgents.Launcher.ConfigE2E</StartupObject>
-    <StartupObject Condition="'$(ConfigTests)' != 'true' And '$(ConfigE2E)' != 'true'">RemoteAgents.Launcher.Stage6PortableEntry</StartupObject>
+    <StartupObject Condition="'$(EventBusTests)' == 'true'">RemoteAgents.Launcher.EventBusTests</StartupObject>
+    <StartupObject Condition="'$(ConfigTests)' != 'true' And '$(ConfigE2E)' != 'true' And '$(EventBusTests)' != 'true'">RemoteAgents.Launcher.Stage6PortableEntry</StartupObject>
     <DefineConstants>PORTABLE_TEST</DefineConstants>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <NoWarn>SYSLIB0014;SYSLIB0057;CA1416</NoWarn>
   </PropertyGroup>
   <!-- A different entry point must not reuse the other build's output (StartupObject alone does not trigger a rebuild). -->
+  <PropertyGroup Condition="'$(EventBusTests)' == 'true'">
+    <StartupObject>RemoteAgents.Launcher.EventBusTests</StartupObject>
+    <IntermediateOutputPath>obj/$(Configuration)/eventbus-tests/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/eventbus-tests/</OutputPath>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(ConfigTests)' == 'true'">
     <IntermediateOutputPath>obj/$(Configuration)/config-tests/</IntermediateOutputPath>
     <OutputPath>bin/$(Configuration)/config-tests/</OutputPath>
@@ -58,6 +64,7 @@
     <Compile Include="../VpnConflictScan.cs" />
     <Compile Include="../EventBus.cs" />
     <Compile Include="../BusTopics.cs" />
+    <Compile Include="EventBusTests.cs" />
     <Compile Include="../RaLog.cs" />
     <Compile Include="../LogMask.cs" />
     <Compile Include="../NetLadder.cs" />
