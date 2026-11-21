@@ -10,13 +10,16 @@ namespace RemoteAgents.Launcher
     {
         internal const string OwnerMutex = @"Global\RemoteAgents-VpnHost";
         internal const int ProbeTimeoutMs = 3000, PollMs = 50;
+        // Конституция 4а: предел устаревания должен быть не меньше 3× периода
+        // сердцебиения демона (5 с, Transport.Daemon.ps1); возраст не доказывает готовность.
+        internal const int TransportStatusMaxAgeSec = 15;
         internal static bool TransportReady(Dictionary<string, object> status, DateTime now, string tag = null)
         {
             DateTime stamp;
             if (!Json.Bool(status, "ok") || !DateTime.TryParse(Json.Str(status, "updatedAt"), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out stamp)) return false;
             double age = (now - stamp.ToUniversalTime()).TotalSeconds;
             string active = Json.Str(status, "active");
-            return age >= 0 && age <= 3 && active.Length > 0 && (tag == null || active == tag)
+            return age >= 0 && age <= TransportStatusMaxAgeSec && active.Length > 0 && (tag == null || active == tag)
                 && StatusView.Candidates(status).Any(c => Json.Str(c, "tag") == active && Json.Str(c, "state") == "ok" && Json.Bool(c, "enabled", true));
         }
         internal static string FailureSummary(string state, string stage = "")

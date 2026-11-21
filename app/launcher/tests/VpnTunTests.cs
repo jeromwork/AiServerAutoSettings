@@ -325,7 +325,7 @@ namespace RemoteAgents.Launcher
             var transport = D("ok", true, "active", "a", "updatedAt", now.ToString("o"), "helper", D("udp", false), "candidates", new[] { D("tag", "a", "state", "ok", "enabled", true) });
             Check(VpnTun.PathState(transport, now) == "no-udp", "TCP-only path refuses full VPN");
             Json.Map(transport["helper"])["udp"] = true;
-            Check(VpnTun.PathState(transport, now) == "" && VpnTun.PathState(transport, now.AddSeconds(4)) == "no-path" && VpnTun.PathState(transport, now.AddSeconds(-1)) == "no-path", "only fresh checked path is accepted");
+            Check(VpnTun.PathState(transport, now) == "" && VpnTun.PathState(transport, now.AddSeconds(4)) == "" && VpnTun.PathState(transport, now.AddSeconds(16)) == "no-path" && VpnTun.PathState(transport, now.AddSeconds(-1)) == "no-path", "only fresh checked path is accepted");
             MonitorChecks(now, transport, strict);
             ConflictScanChecks();
             RebindChecks();
@@ -342,7 +342,7 @@ namespace RemoteAgents.Launcher
             var serviceStatus = D("owner", "net-helper", "enabled", true, "ok", true, "state", "on", "updatedAt", DateTime.UtcNow.ToString("o"));
             Files.Atomic(Path.Combine(home, "status/vpn.json"), Json.Encode(serviceStatus));
             Check(Json.Str(VpnStatus.Read(home), "state") == "on", "helper status does not require a legacy host receipt");
-            serviceStatus["updatedAt"] = DateTime.UtcNow.AddSeconds(-4).ToString("o");
+            serviceStatus["updatedAt"] = DateTime.UtcNow.AddSeconds(-16).ToString("o");
             Files.Atomic(Path.Combine(home, "status/vpn.json"), Json.Encode(serviceStatus));
             var stale = VpnStatus.Read(home);
             Check(Json.Bool(stale, "enabled") && !Json.Bool(stale, "ok") && Json.Bool(stale, "statusStale") && Json.Str(stale, "state") == "on" && !File.Exists(Path.Combine(home, "state/vpn.stop")), "stale file cannot claim service shutdown or request a legacy stop");

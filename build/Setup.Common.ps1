@@ -98,10 +98,15 @@ function Remove-ExplorerNavPane([string]$LauncherRoot='') {
     if($LauncherRoot){$c=Read-TransportJson (Join-Path $LauncherRoot 'config.json');if($c.disk.home){$script:DiskHome=[string]$c.disk.home}}
     Remove-DiskLegacy
 }
-function Test-StatusFresh([string]$Root,[string]$Name){
+function Test-StatusFresh([string]$Root,[string]$Name,[DateTime]$UtcNow=[DateTime]::UtcNow){
     $file=Join-Path $Root ('status/'+$Name+'.json')
     if(-not (Test-Path $file)){return $false}
-    $c=Read-TransportJson $file;if($Name -eq 'transport' -and $c.configError){return $false};$age=([DateTime]::UtcNow-(Convert-TransportUtc $c.updatedAt)).TotalSeconds
+    $c=Read-TransportJson $file;if($Name -eq 'transport' -and $c.configError){return $false};$age=($UtcNow.ToUniversalTime()-(Convert-TransportUtc $c.updatedAt)).TotalSeconds
+    if($Name -in @('transport','vpn')){
+        # Same 15 s limit as VpnWatchdog.TransportStatusMaxAgeSec: three daemon heartbeats.
+        # Future evidence cannot prove readiness; other components keep their own allowance.
+        return [bool]($c.ok -and $age -ge 0 -and $age -le 15)
+    }
     [bool]($c.ok -and $age -ge -5 -and $age -le 30)
 }
 function Test-LocalSsh([string]$Root,[int]$Port){
