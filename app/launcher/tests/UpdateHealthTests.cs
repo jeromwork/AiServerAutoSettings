@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Threading;
 
 namespace RemoteAgents.Launcher
 {
@@ -14,11 +15,17 @@ namespace RemoteAgents.Launcher
         static void Check(bool value, string message) { if (!value) throw new Exception(message); checks++; }
         public static int Main(string[] args)
         {
+            if (args.Contains("--review-fixes2")) {
+                ReviewFixes2();
+                Console.WriteLine("PASS: UpdateHealthTests review fixes 2 (" + checks + " checks; manual events, fake clock)");
+                return 0;
+            }
             if (args.Contains("--review-fixes")) {
                 ReviewFixes();
                 Console.WriteLine("PASS: UpdateHealthTests review fixes (" + checks + " checks; manual events, fake clock)");
                 return 0;
             }
+            ReviewFixes2();
             ReviewFixes();
             NoNetworkSourceAccepts();
             CrashLoopCountsByComponent();
@@ -28,6 +35,90 @@ namespace RemoteAgents.Launcher
             ObserverEventsRollbackTransaction();
             Console.WriteLine("PASS: UpdateHealthTests (" + checks + " checks; manual events, fake clock)");
             return 0;
+        }
+        static void ReviewFixes2()
+        {
+            WithHome(NewProcessRestartsProgress);
+            WithHome(RollbackExceptionDisarmsRestart);
+            WithHome(CleanExitsAreBounded);
+            ReceiptReadWaitsForProcessExit();
+        }
+        static void NewProcessRestartsProgress(string home)
+        {
+            string receipt = Path.Combine(home, Product.BundleDirectory, "exe-upgrade.json");
+            DateTime old = Now.AddDays(-1);
+            Json.Write(receipt, new { version = "2.0.0", currentHash = "image", pid = 42, processStarted = "123",
+                startedUtc = old.ToString("o"), lastHealthUtc = old.ToString("o"), cleanExitCount = 1 });
+            UpgradeInstaller.NoteImageProcess(home, 43, "124", Now, "other-image");
+            Check(Json.Str(Json.Read(receipt), "lastHealthUtc") == old.ToString("o"), "another image cannot change transaction progress");
+            UpgradeInstaller.NoteImageProcess(home, 43, "124", Now, "image");
+            var record = Json.Read(receipt);
+            Check(!record.ContainsKey("lastHealthUtc") && Json.Str(record, "startedUtc") == Now.ToString("o"), "unclean restart discards yesterday's progress");
+            Check(UpdateObservation.SameProcess(record, 43, "124") && Json.Int(record, "cleanExitCount", 0) == 1, "new identity is persisted without resetting clean-exit counter");
+            var board = new HealthBoard(new[] { "transport" }, DateTime.Parse(Json.Str(record, "startedUtc"), null, System.Globalization.DateTimeStyles.RoundtripKind));
+            Check(!board.FuseExpired(Now), "new process is not rejected using stale progress after power loss");
+            DateTime progress = Now.AddTicks(1); UpgradeInstaller.NoteHealthProgress(home, progress);
+            UpgradeInstaller.NoteImageProcess(home, 43, "124", Now.AddTicks(2), "image");
+            Check(Json.Str(Json.Read(receipt), "lastHealthUtc") == progress.ToString("o"), "same process cannot restart progress by registering twice");
+            UpgradeInstaller.NoteImageProcess(home, 43, "125", Now.AddTicks(3), "image");
+            Check(!Json.Read(receipt).ContainsKey("lastHealthUtc"), "PID reuse also resets stale progress");
+            UpgradeInstaller.NoteHealthProgress(home, old);
+            UpgradeInstaller.PrepareImageLaunch(home, Now);
+            record = Json.Read(receipt);
+            Check(!record.ContainsKey("pid") && !record.ContainsKey("processStarted") && !record.ContainsKey("lastHealthUtc") && Json.Str(record, "startedUtc") == Now.ToString("o"), "observer armed before EXE sees fresh progress even without cleanExit");
+        }
+        static void RollbackExceptionDisarmsRestart(string home)
+        {
+            string statePath = Path.Combine(home, Product.BundleDirectory, "update-state.json");
+            Json.Write(statePath, new { pending = true, version = "2.0.0", userField = "keep" });
+            var log = new List<string>();
+            foreach (Exception error in new Exception[] { new InvalidDataException("missing previous EXE"), new IOException("stop failed"), new ArgumentException("corrupt receipt") }) {
+                bool preserveFailure = UpdateObservation.TryRollback(() => { throw error; }, reason => {
+                    log.Add(reason); UpdateObservation.RecordRollbackFailure(home, reason);
+                });
+                var state = Json.Read(statePath);
+                Check(!preserveFailure, "rollback exception does not rearm restart: " + error.GetType().Name);
+                Check(Json.Str(state, "failureReason") == "rollback-failed:" + error.GetType().Name && !Json.Bool(state, "pending"), "rollback failure is persisted independently of receipt");
+            }
+            Check(log.Count == 3 && Json.Str(Json.Read(statePath), "userField") == "keep", "one diagnostic per attempt preserves existing state");
+            Check(UpdateObservation.TryRollback(() => { }, reason => { throw new Exception("unexpected report"); }), "successful rollback remains distinct from failed rollback");
+            File.WriteAllText(statePath, "{broken\r\n");
+            Check(!UpdateObservation.TryRollback(() => { throw new InvalidDataException(); }, reason => UpdateObservation.RecordRollbackFailure(home, reason)) &&
+                Json.Str(Json.Read(statePath), "failureReason") == "rollback-failed:InvalidDataException", "corrupt state cannot hide rollback failure or rearm restart");
+        }
+        static void CleanExitsAreBounded(string home)
+        {
+            string receipt = Path.Combine(home, Product.BundleDirectory, "exe-upgrade.json");
+            Json.Write(receipt, new { version = "2.0.0", currentHash = "image" });
+            for (int n = 1; n <= UpdateObservation.CleanExitLimit; n++) {
+                string started = n.ToString();
+                UpgradeInstaller.NoteImageProcess(home, 42, started, Now, "image");
+                int count = UpgradeInstaller.NoteCleanExit(home, 42, started);
+                Check(count == n && UpgradeInstaller.NoteCleanExit(home, 42, started) == n, "session-ending and Application.Run count one exit per process");
+                Check(UpdateObservation.Decide(true, false, true, false, true, count) == (n == 3 ? "clean-exit-loop" : ""), "third clean/code-zero exit before acceptance fails without a timer");
+                Check(UpdateObservation.Decide(true, false, false, false, true, count) == (n == 3 ? "clean-exit-loop" : ""), "persisted cleanExit marker obeys the same limit");
+                UpgradeInstaller.PrepareImageLaunch(home, Now);
+            }
+            UpgradeInstaller.NoteImageProcess(home, 42, "4", Now, "image");
+            Check(UpgradeInstaller.NoteCleanExit(home, 42, "old") == -1 && !Json.Bool(Json.Read(receipt), "cleanExit"), "old process handle cannot mark new process clean");
+            Check(UpgradeInstaller.NoteCleanExit(home) == 3, "clean-exit count saturates at three under repeated launches");
+            UpgradeInstaller.PrepareImageLaunch(home, Now);
+            UpgradeInstaller.NoteHealthAccepted(home);
+            Check(UpdateObservation.Decide(false, true, true, true, true, 3) == "", "completed transaction ignores old clean-exit count");
+            Json.Write(receipt, new { healthAccepted = true });
+            Check(UpgradeInstaller.NoteCleanExit(home) == 0, "accepted receipt does not accumulate clean exits");
+        }
+        static void ReceiptReadWaitsForProcessExit()
+        {
+            using (var failed = new ManualResetEvent(false))
+            using (var changed = new ManualResetEvent(false))
+            using (var exited = new ManualResetEvent(false)) {
+                Check(UpdateObservation.TryRead(() => { throw new IOException("replace"); }) == null, "manual read error selects receipt-wait branch");
+                var handles = UpdateObservation.OutcomeHandles(failed, changed, exited);
+                exited.Set();
+                Check(handles.Length == 3 && WaitHandle.WaitAny(handles, 0) == 2, "receipt read failure can wake on process exit without file change");
+                Check(UpdateObservation.OutcomeHandles(failed, changed, null).Length == 2, "unregistered process waits only on existing handles");
+            }
         }
         static void ReviewFixes()
         {

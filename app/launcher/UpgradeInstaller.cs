@@ -86,19 +86,24 @@ namespace RemoteAgents.Launcher
         }
         public static void NoteImageProcess(string home)
         {
+            if (!File.Exists(Path.Combine(home, Product.BundleDirectory, "exe-upgrade.json"))) return;
+            using (var process = Process.GetCurrentProcess())
+                NoteImageProcess(home, process.Id, process.StartTime.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture), DateTime.UtcNow, Files.Hash(ProgramImage()));
+        }
+        internal static void NoteImageProcess(string home, int pid, string processStarted, DateTime utc, string imageHash)
+        {
             lock (ReceiptGate) {
                 string root = Path.Combine(home, Product.BundleDirectory), receipt = Path.Combine(root, "exe-upgrade.json");
                 if (!File.Exists(receipt)) return;
                 var record = Json.Read(receipt);
-                if (!Files.Hash(ProgramImage()).Equals(Json.Str(record, "currentHash"), StringComparison.OrdinalIgnoreCase)) return;
-                using (var process = Process.GetCurrentProcess()) {
-                    record["pid"] = process.Id; record["processStarted"] = process.StartTime.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture);
-                    // Новая сессия после штатного выхода получает собственный отсчёт прогресса.
-                    if (Json.Bool(record, "cleanExit")) {
-                        record["startedUtc"] = DateTime.UtcNow.ToString("o"); record.Remove("lastHealthUtc");
-                    }
-                    record.Remove("cleanExit"); Json.Write(receipt, record);
+                if (!imageHash.Equals(Json.Str(record, "currentHash"), StringComparison.OrdinalIgnoreCase)) return;
+                // Любая новая сессия, в том числе после питания/BSOD, получает свой отсчёт.
+                if (!UpdateObservation.SameProcess(record, pid, processStarted)) {
+                    record["startedUtc"] = utc.ToString("o"); record.Remove("lastHealthUtc");
+                    record.Remove("cleanExit");
                 }
+                record["pid"] = pid; record["processStarted"] = processStarted;
+                Json.Write(receipt, record);
             }
         }
         internal static void PrepareImageLaunch(string home, DateTime utc)
@@ -107,7 +112,7 @@ namespace RemoteAgents.Launcher
                 string receipt = Path.Combine(home, Product.BundleDirectory, "exe-upgrade.json");
                 if (!File.Exists(receipt)) return;
                 var record = Json.Read(receipt);
-                if (!Json.Bool(record, "cleanExit")) return;
+                // Наблюдатель стартует раньше EXE: не оставляем ему старый PID/отсчёт даже после обрыва.
                 record.Remove("cleanExit"); record.Remove("pid"); record.Remove("processStarted"); record.Remove("lastHealthUtc");
                 record["startedUtc"] = utc.ToString("o"); Json.Write(receipt, record);
             }
@@ -136,12 +141,19 @@ namespace RemoteAgents.Launcher
                 record["healthAccepted"] = true; Json.Write(receipt, record);
             }
         }
-        internal static void NoteCleanExit(string home)
+        internal static int NoteCleanExit(string home, int pid = 0, string processStarted = null)
         {
             lock (ReceiptGate) {
                 string receipt = Path.Combine(home, Product.BundleDirectory, "exe-upgrade.json");
-                if (!File.Exists(receipt)) return;
-                var record = Json.Read(receipt); record["cleanExit"] = true; Json.Write(receipt, record);
+                if (!File.Exists(receipt)) return 0;
+                var record = Json.Read(receipt);
+                // Хэндл мог завершиться одновременно с регистрацией уже следующего процесса.
+                if (pid > 0 && !UpdateObservation.SameProcess(record, pid, processStarted)) return -1;
+                int count = Math.Max(0, Math.Min(UpdateObservation.CleanExitLimit, Json.Int(record, "cleanExitCount", 0)));
+                if (!Json.Bool(record, "healthAccepted") && !Json.Bool(record, "cleanExit"))
+                    count = Math.Min(UpdateObservation.CleanExitLimit, count + 1);
+                record["cleanExitCount"] = count; record["cleanExit"] = true; Json.Write(receipt, record);
+                return count;
             }
         }
         internal static bool IsRejectedImage(string home, string hash)
