@@ -19,7 +19,7 @@ namespace RemoteAgents.Launcher
         // NetHelperVersionTests (LanTests in app/launcher/tests/run.sh --full) checks the version/source SHA-256 pin.
         // It detects source changes without a pin update, but cannot decide whether HelperVersion must increase.
         // Reviewers must bump HelperVersion for every change to installed service behavior, then update the pin.
-        internal const string HelperVersion = "13";
+        internal const string HelperVersion = "14";
         internal const string ServiceName = "RemoteAgentsNet";
         internal const string DisplayName = "RemoteAgents: локальные сети и VPN";
         internal static bool NeedsInstall(string installed)

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Diagnostics;
 using System.Linq;
 
 namespace RemoteAgents.Launcher
@@ -10,17 +11,33 @@ namespace RemoteAgents.Launcher
     {
         internal const string OwnerMutex = @"Global\RemoteAgents-VpnHost";
         internal const int ProbeTimeoutMs = 3000, PollMs = 50;
-        // Конституция 4а: предел устаревания должен быть не меньше 3× периода
-        // сердцебиения демона (5 с, Transport.Daemon.ps1); возраст не доказывает готовность.
+        // Только совместимость VpnStatus (W3): транспорт эту величину не читает.
         internal const int TransportStatusMaxAgeSec = 15;
-        internal static bool TransportReady(Dictionary<string, object> status, DateTime now, string tag = null)
+        // Pure readiness policy; the process check is injectable and never reads file age.
+        internal static bool TransportReady(Dictionary<string, object> status, Func<int, DateTime, bool> processAlive = null, string tag = null)
+        { return TransportProblem(status, processAlive, tag).Length == 0; }
+        internal static string TransportProblem(Dictionary<string, object> status, Func<int, DateTime, bool> processAlive = null, string tag = null)
         {
-            DateTime stamp;
-            if (!Json.Bool(status, "ok") || !DateTime.TryParse(Json.Str(status, "updatedAt"), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out stamp)) return false;
-            double age = (now - stamp.ToUniversalTime()).TotalSeconds;
+            int pid = Json.Int(status, "pid", 0);
+            if (pid <= 0) return "old-daemon"; // Старый демон: нет идентификатора владельца статуса.
+            DateTime started;
+            if (!DateTime.TryParse(Json.Str(status, "startedAt"), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out started)
+                || started.Kind == DateTimeKind.Unspecified) return "invalid-process-start";
             string active = Json.Str(status, "active");
-            return age >= 0 && age <= TransportStatusMaxAgeSec && active.Length > 0 && (tag == null || active == tag)
-                && StatusView.Candidates(status).Any(c => Json.Str(c, "tag") == active && Json.Str(c, "state") == "ok" && Json.Bool(c, "enabled", true));
+            if (!Json.Bool(status, "ok") || active.Length == 0 || tag != null && active != tag
+                || !StatusView.Candidates(status).Any(c => Json.Str(c, "tag") == active && Json.Str(c, "state") == "ok" && Json.Bool(c, "enabled"))) return "no-path";
+            try { return (processAlive ?? ProcessAlive)(pid, started.ToUniversalTime()) ? "" : "daemon-exited"; }
+            catch { return "daemon-exited"; }
+        }
+        internal static bool ProcessStartMatches(DateTime actual, DateTime expected)
+        {
+            // Допуск 2 с — точность округления времени старта процесса, а не ожидание готовности.
+            return Math.Abs((actual.ToUniversalTime() - expected.ToUniversalTime()).TotalMilliseconds) <= 2000;
+        }
+        internal static bool ProcessAlive(int pid, DateTime started)
+        {
+            try { using (var process = Process.GetProcessById(pid)) return !process.HasExited && ProcessStartMatches(process.StartTime, started); }
+            catch { return false; }
         }
         internal static string FailureSummary(string state, string stage = "")
         {
