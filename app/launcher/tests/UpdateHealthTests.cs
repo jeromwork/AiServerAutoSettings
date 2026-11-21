@@ -25,6 +25,11 @@ namespace RemoteAgents.Launcher
                 return prepareRefused && directRefused ? 0 : 3;
             }
             if (args.Length == 2 && args[0] == "--receipt-holder-child") return ReceiptHolderChild(args[1]);
+            if (args.Contains("--review-fixes5")) {
+                ReviewFixes5();
+                Console.WriteLine("PASS: UpdateHealthTests review fixes 5 (" + checks + " checks; real activation races and resumable recovery)");
+                return 0;
+            }
             if (args.Contains("--review-fixes4")) {
                 ReviewFixes4();
                 Console.WriteLine("PASS: UpdateHealthTests review fixes 4 (" + checks + " checks; live mutex holder, real Copy/Delete failures)");
@@ -46,6 +51,7 @@ namespace RemoteAgents.Launcher
                 Console.WriteLine("PASS: UpdateHealthTests review fixes (" + checks + " checks; manual events, fake clock)");
                 return 0;
             }
+            ReviewFixes5();
             ReviewFixes4();
             ReviewFixes3();
             ReviewFixes2();
@@ -58,6 +64,235 @@ namespace RemoteAgents.Launcher
             ObserverEventsRollbackTransaction();
             Console.WriteLine("PASS: UpdateHealthTests (" + checks + " checks; manual events, fake clock)");
             return 0;
+        }
+        static void ReviewFixes5()
+        {
+            WithHome(ApplyCannotOverwriteConcurrentActivation);
+            WithHome(ParallelPrepareOwnsItsFiles);
+            WithHome(RecoveryResumesWithoutReceipt);
+            WithHome(RecoveryIoFailureThenNewApply);
+            WithHome(RecoveryWaitsForBundleRollback);
+            WithHome(RecoveryMarkerDeleteCanRetry);
+        }
+        static UpdateEngine SeedBundle(string home)
+        {
+            var engine = new UpdateEngine(home, "1.0.0", () => Now);
+            WriteBundle(engine.Folder("1.0.0")); engine.Activate("1.0.0");
+            File.WriteAllText(Path.Combine(home, Product.ExeName), "original image"); return engine;
+        }
+        static void WriteBundle(string folder)
+        {
+            Directory.CreateDirectory(folder);
+            Json.Write(Path.Combine(folder, "components.json"), new[] { new { name = "transport", exe = "unused", critical = true } });
+        }
+        static string BundleZip(string home, string version, string contents = "candidate")
+        {
+            string zip = Path.Combine(home, Guid.NewGuid().ToString("N") + ".zip");
+            using (var archive = ZipFile.Open(zip, ZipArchiveMode.Create)) {
+                foreach (var entry in new Dictionary<string, string> {
+                    { "bundle-version.txt", version }, { "components.json", "[{\"name\":\"transport\",\"exe\":\"unused\",\"critical\":true}]" },
+                    { "selftest.ps1", "# injected selftest" }, { "payload.txt", contents }
+                }) using (var writer = new StreamWriter(archive.CreateEntry(entry.Key).Open())) writer.Write(entry.Value);
+            }
+            return zip;
+        }
+        static string TreeSnapshot(string folder)
+        {
+            return string.Join("\n", Directory.GetFiles(folder, "*", SearchOption.AllDirectories).OrderBy(p => p, StringComparer.Ordinal)
+                .Select(p => p.Substring(folder.Length) + ":" + Files.Hash(p)));
+        }
+        static void ApplyCannotOverwriteConcurrentActivation(string home)
+        {
+            foreach (string mode in new[] { "pending", "accepted", "rollback-target", "foreign-receipt" }) {
+                string folder = Path.Combine(home, mode); var engine = SeedBundle(folder);
+                string zipA = BundleZip(folder, "2.0.0", "A"), zipB = BundleZip(folder, "2.0.0", "B");
+                string sourceA = Path.Combine(folder, "A.exe"), sourceB = Path.Combine(folder, "B.exe");
+                File.WriteAllText(sourceA, "A image"); File.WriteAllText(sourceB, "B image");
+                Exception failure = null;
+                using (var stopped = new ManualResetEvent(false))
+                using (var resume = new ManualResetEvent(false)) {
+                    var a = new Thread(() => {
+                        try { UpgradeInstaller.Apply(folder, sourceA, zipA, "1.0.0", false, f => {
+                            stopped.Set(); if (!resume.WaitOne(10000)) throw new Exception("A resume deadline"); return true;
+                        }); } catch (Exception ex) { failure = ex; }
+                    }); a.Start();
+                    try {
+                        Check(stopped.WaitOne(10000), "A passed Eligible and reached real extracted selftest");
+                        UpgradeInstaller.Apply(folder, sourceB, zipB, "1.0.0", false, f => {
+                            var holder = StartHolder(folder); ReleaseHolder(holder); return true;
+                        });
+                        File.WriteAllText(Path.Combine(engine.Folder("2.0.0"), "B-owned.txt"), "must survive A");
+                        if (mode == "accepted" || mode == "rollback-target") {
+                            string result = engine.Observe(true); UpgradeInstaller.ObserveImage(folder, engine, true, result);
+                            if (mode == "rollback-target") UpgradeInstaller.Apply(folder, sourceB, BundleZip(folder, "3.0.0"), "1.0.0", false, f => true);
+                        } else if (mode == "foreign-receipt") {
+                            // A different launcher-only transaction can leave Current unchanged.
+                            engine.Rollback();
+                        }
+                        string tree = TreeSnapshot(engine.Folder("2.0.0")), receipt = UpgradeInstaller.ReceiptPath(folder);
+                        string record = File.Exists(receipt) ? File.ReadAllText(receipt) : "absent";
+                        string backup = Files.Hash(Path.Combine(folder, Product.Name + ".previous.exe"));
+                        string image = Files.Hash(Path.Combine(folder, Product.ExeName)), current = engine.Current;
+                        resume.Set(); Check(a.Join(10000), "A completes after B activation");
+                        Check(failure is InvalidOperationException, "A refuses changed state: " + mode);
+                        Check(TreeSnapshot(engine.Folder("2.0.0")) == tree && engine.Current == current, "A preserves B bundle/rollback target byte for byte: " + mode);
+                        Check((File.Exists(receipt) ? File.ReadAllText(receipt) : "absent") == record && Files.Hash(Path.Combine(folder, Product.Name + ".previous.exe")) == backup &&
+                            Files.Hash(Path.Combine(folder, Product.ExeName)) == image, "A preserves B receipt, backup and installed EXE: " + mode);
+                        Check(Directory.GetDirectories(engine.Root, ".stage-*.tmp").Length == 0, "A only removes its own staging");
+                    } finally { resume.Set(); if (!a.Join(10000)) throw new Exception("A did not finish"); }
+                }
+            }
+        }
+        static void ParallelPrepareOwnsItsFiles(string home)
+        {
+            var engine = SeedBundle(home); string zip = BundleZip(home, "2.0.0");
+            var manifest = Manifest.Parse(Json.Encode(new { version = "2.0.0", file = "test.zip", size = new FileInfo(zip).Length, sha256 = Files.Hash(zip) }));
+            string pathA = null, pathB = null, result = null; Exception errorA = null, errorB = null;
+            using (var enteredA = new ManualResetEvent(false))
+            using (var enteredB = new ManualResetEvent(false))
+            using (var resumeA = new ManualResetEvent(false))
+            using (var resumeB = new ManualResetEvent(false)) {
+                var a = new Thread(() => {
+                    try { engine.Prepare(manifest, p => { pathA = p; File.Copy(zip, p); enteredA.Set(); if (!resumeA.WaitOne(10000)) throw new Exception("A deadline"); throw new IOException("A download failed"); },
+                        f => true, (d, f) => { }, CancellationToken.None); } catch (Exception ex) { errorA = ex; }
+                });
+                var b = new Thread(() => {
+                    try { result = engine.Prepare(manifest, p => { pathB = p; File.Copy(zip, p); enteredB.Set(); if (!resumeB.WaitOne(10000)) throw new Exception("B deadline"); },
+                        f => true, (d, f) => { }, CancellationToken.None); } catch (Exception ex) { errorB = ex; }
+                });
+                a.Start(); b.Start();
+                try {
+                    Check(enteredA.WaitOne(10000) && enteredB.WaitOne(10000), "two real Prepare calls simultaneously own downloaded files");
+                    Check(pathA != pathB && File.Exists(pathA) && File.Exists(pathB), "archive and staging paths are unique per invocation");
+                    string other = Path.Combine(Path.GetDirectoryName(pathB), "bundle", "B-owned"); File.WriteAllText(other, "B");
+                    resumeA.Set(); Check(a.Join(10000) && errorA is IOException, "failed A finishes cleanup");
+                    Check(!File.Exists(pathA) && Files.Hash(pathB) == Files.Hash(zip) && File.ReadAllText(other) == "B", "A cleanup leaves B archive and extracted files untouched");
+                    engine.Cleanup(); Check(File.Exists(other), "ordinary version cleanup ignores in-flight staging");
+                    resumeB.Set(); Check(b.Join(10000) && errorB == null && result == "2.0.0", "B finishes Prepare after A cleanup");
+                    Check(File.ReadAllText(Path.Combine(engine.Folder("2.0.0"), "B-owned")) == "B", "B publishes its own files");
+                    Check(Directory.GetDirectories(engine.Root, ".stage-*.tmp").Length == 0, "both Prepare calls clean only their staging");
+                } finally { resumeA.Set(); resumeB.Set(); if (!a.Join(10000) || !b.Join(10000)) throw new Exception("Prepare did not finish"); }
+            }
+            // Even an explicit downgrade cannot replace an already referenced rollback bundle.
+            engine.Activate("2.0.0"); engine.Observe(true);
+            string protectedTree = TreeSnapshot(engine.Folder("1.0.0"));
+            string previousZip = BundleZip(home, "1.0.0");
+            var previous = Manifest.Parse(Json.Encode(new { version = "1.0.0", file = "test.zip", size = new FileInfo(previousZip).Length, sha256 = Files.Hash(previousZip) }));
+            bool refused = false;
+            try { engine.Prepare(previous, p => File.Copy(previousZip, p), f => true, (d, f) => { }, CancellationToken.None, true); }
+            catch (InvalidOperationException) { refused = true; }
+            Check(refused && TreeSnapshot(engine.Folder("1.0.0")) == protectedTree, "Prepare never rebuilds existing rollback version even with explicit downgrade");
+        }
+        static void RecoverySnapshot(string home, UpdateEngine engine, string hash)
+        {
+            Json.Write(UpgradeInstaller.RecoveryBlockPath(home), new { format = 1, receiptHash = hash, current = engine.Current,
+                rollbackTarget = engine.Pending ? "1.0.0" : "" });
+        }
+        static void RecoveryResumesWithoutReceipt(string home)
+        {
+            foreach (string mode in new[] { "archive", "no-archive", "activation-interrupted", "rollback-interrupted" }) {
+                bool archivePresent = mode != "no-archive";
+                string folder = Path.Combine(home, mode); var engine = SeedBundle(folder);
+                WriteBundle(engine.Folder("2.0.0")); engine.Activate("2.0.0");
+                string receipt = UpgradeInstaller.ReceiptPath(folder); File.WriteAllText(receipt, "{broken");
+                if (mode == "activation-interrupted") Files.Atomic(Path.Combine(engine.Root, "current.txt"), "1.0.0\n");
+                RecoverySnapshot(folder, engine, Files.Hash(receipt));
+                if (mode == "rollback-interrupted") Files.Atomic(Path.Combine(engine.Root, "current.txt"), "1.0.0\n");
+                if (archivePresent) File.Copy(receipt, receipt + ".invalid");
+                File.Delete(receipt); // durable state at process interruption, before independent rollback
+                if (mode == "archive") {
+                    string marker = File.ReadAllText(UpgradeInstaller.RecoveryBlockPath(folder)), current = engine.Current;
+                    var holder = StartHolder(folder);
+                    try {
+                        bool refused = false;
+                        try { UpgradeInstaller.RequireReceiptRecovery(folder); } catch (InvalidDataException) { refused = true; }
+                        Check(refused && File.ReadAllText(UpgradeInstaller.RecoveryBlockPath(folder)) == marker && engine.Current == current && engine.Pending,
+                            "recovery cannot clear marker or rollback without owning receipt-mutex");
+                    } finally { ReleaseHolder(holder); }
+                }
+                UpgradeInstaller.PrepareImageLaunch(folder, Now);
+                Check(engine.Current == "1.0.0" && !engine.Pending && !UpgradeInstaller.ReceiptRecoveryBlocked(folder), "missing receipt resumes independent rollback before clearing marker: " + mode);
+                UpgradeInstaller.Apply(folder, Path.Combine(folder, Product.ExeName), BundleZip(folder, "3.0.0"), "1.0.0", false, f => true);
+                Check(engine.Current == "3.0.0" && engine.Pending && File.Exists(receipt), "recovered interrupted cleanup permits a new Apply");
+            }
+            string legacy = Path.Combine(home, "legacy"); var old = SeedBundle(legacy);
+            Files.Atomic(UpgradeInstaller.RecoveryBlockPath(legacy), "invalid-receipt\n");
+            UpgradeInstaller.RequireReceiptRecovery(legacy);
+            Check(!UpgradeInstaller.ReceiptRecoveryBlocked(legacy) && old.Current == "1.0.0", "legacy orphan marker is checked against a valid independent bundle");
+        }
+        static void RecoveryIoFailureThenNewApply(string home)
+        {
+            foreach (bool denyDelete in new[] { false, true }) {
+                string folder = Path.Combine(home, denyDelete ? "delete" : "copy"); var engine = SeedBundle(folder);
+                WriteBundle(engine.Folder("2.0.0")); engine.Activate("2.0.0");
+                string receipt = UpgradeInstaller.ReceiptPath(folder), archive = receipt + ".invalid";
+                File.WriteAllText(receipt, "{broken"); File.WriteAllText(archive, "old evidence");
+                bool windows = Environment.OSVersion.Platform == PlatformID.Win32NT;
+                FileStream held = null; UnixFileMode mode = 0;
+                try {
+                    if (windows) {
+                        if (denyDelete) File.SetAttributes(receipt, FileAttributes.ReadOnly);
+                        else held = new FileStream(archive, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+                    } else if (denyDelete) {
+                        mode = File.GetUnixFileMode(engine.Root); File.SetUnixFileMode(engine.Root, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+                    } else File.SetUnixFileMode(archive, UnixFileMode.UserRead);
+                    Exception failure = null;
+                    try { UpgradeInstaller.RollbackObservedImage(folder, engine, "invalid-receipt"); } catch (Exception ex) { failure = ex; }
+                    Check(failure != null && UpgradeInstaller.ReceiptRecoveryBlocked(folder), "real Copy/Delete failure leaves durable recovery state");
+                    bool refused = false;
+                    try { UpgradeInstaller.RequireReceiptRecovery(folder); } catch (InvalidDataException) { refused = true; }
+                    Check(refused && UpgradeInstaller.ReceiptRecoveryBlocked(folder) && File.Exists(receipt), "unfixed file denial keeps launch/update blocked");
+                } finally {
+                    if (held != null) held.Dispose();
+                    if (windows) File.SetAttributes(receipt, FileAttributes.Normal);
+                    else {
+                        if (denyDelete) File.SetUnixFileMode(engine.Root, mode);
+                        File.SetUnixFileMode(archive, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                    }
+                }
+                UpgradeInstaller.RequireReceiptRecovery(folder);
+                Check(!UpgradeInstaller.ReceiptRecoveryBlocked(folder) && !File.Exists(receipt) && engine.Current == "1.0.0" && !engine.Pending,
+                    "after permissions are fixed, receipt cleanup and independent rollback both complete");
+                UpgradeInstaller.Apply(folder, Path.Combine(folder, Product.ExeName), BundleZip(folder, "3.0.0"), "1.0.0", false, f => true);
+                Check(engine.Current == "3.0.0" && engine.Pending && File.Exists(receipt), "new Apply succeeds after real file refusal is repaired");
+            }
+        }
+        static void RecoveryWaitsForBundleRollback(string home)
+        {
+            var engine = SeedBundle(home); WriteBundle(engine.Folder("2.0.0")); engine.Activate("2.0.0");
+            string receipt = UpgradeInstaller.ReceiptPath(home); File.WriteAllText(receipt, "{broken");
+            File.WriteAllText(Path.Combine(engine.Folder("1.0.0"), "components.json"), "{broken");
+            bool failed = false;
+            try { UpgradeInstaller.RollbackObservedImage(home, engine, "invalid-receipt"); } catch { failed = true; }
+            Check(failed && !File.Exists(receipt) && File.Exists(receipt + ".invalid"), "receipt deletion can precede failure of independent bundle rollback");
+            Check(UpgradeInstaller.ReceiptRecoveryBlocked(home) && engine.Pending && engine.Current == "2.0.0", "failed rollback never clears launch prohibition");
+            bool refused = false;
+            try { UpgradeInstaller.PrepareImageLaunch(home, Now); } catch { refused = true; }
+            Check(refused && UpgradeInstaller.ReceiptRecoveryBlocked(home), "missing receipt does not bypass failed rollback");
+            WriteBundle(engine.Folder("1.0.0"));
+            UpgradeInstaller.RequireReceiptRecovery(home);
+            Check(!UpgradeInstaller.ReceiptRecoveryBlocked(home) && !engine.Pending && engine.Current == "1.0.0", "fixed rollback resumes without receipt and only then clears prohibition");
+            // A changed evidence file is not the recovery transaction we recorded.
+            File.WriteAllText(receipt, "{broken"); RecoverySnapshot(home, engine, Files.Hash(receipt)); File.Move(receipt, receipt + ".invalid", true);
+            File.WriteAllText(receipt + ".invalid", "foreign evidence"); refused = false;
+            try { UpgradeInstaller.RequireReceiptRecovery(home); } catch (InvalidDataException) { refused = true; }
+            Check(refused && UpgradeInstaller.ReceiptRecoveryBlocked(home), "foreign archive cannot complete a specific recovery transaction");
+        }
+        static void RecoveryMarkerDeleteCanRetry(string home)
+        {
+            var engine = SeedBundle(home); string receipt = UpgradeInstaller.ReceiptPath(home);
+            File.WriteAllText(receipt, "{broken"); RecoverySnapshot(home, engine, Files.Hash(receipt)); File.Move(receipt, receipt + ".invalid");
+            bool windows = Environment.OSVersion.Platform == PlatformID.Win32NT;
+            FileStream held = null; UnixFileMode mode = 0; string state = Path.GetDirectoryName(UpgradeInstaller.RecoveryBlockPath(home));
+            try {
+                if (windows) held = new FileStream(UpgradeInstaller.RecoveryBlockPath(home), FileMode.Open, FileAccess.Read, FileShare.Read);
+                else { mode = File.GetUnixFileMode(state); File.SetUnixFileMode(state, UnixFileMode.UserRead | UnixFileMode.UserExecute); }
+                bool refused = false;
+                try { UpgradeInstaller.RequireReceiptRecovery(home); } catch (InvalidDataException) { refused = true; }
+                Check(refused && UpgradeInstaller.ReceiptRecoveryBlocked(home) && !File.Exists(receipt), "real marker-delete refusal leaves recoverable state without receipt");
+            } finally { if (held != null) held.Dispose(); if (!windows) File.SetUnixFileMode(state, mode); }
+            UpgradeInstaller.NoteImageProcess(home);
+            Check(!UpgradeInstaller.ReceiptRecoveryBlocked(home) && engine.Current == "1.0.0", "startup validates completed recovery and retries marker deletion after access is fixed");
         }
         static void ReviewFixes4()
         {

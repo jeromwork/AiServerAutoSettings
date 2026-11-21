@@ -44,75 +44,125 @@ namespace RemoteAgents.Launcher
         { Files.SafeVersion(version); var values = Files.LF(Files.ReadLine(Path.Combine(Root, "bad.txt"))).Split('\n').Where(v => v.Length != 0).ToList(); if (!values.Contains(version)) values.Add(version); Files.Atomic(Path.Combine(Root, "bad.txt"), string.Join("\n", values) + "\n"); }
         public bool Eligible(Manifest m, bool downgrade = false)
         { return !Pending && (downgrade || !IsBad(m.Version)) && (Current.Length == 0 || Files.Compare(m.Version, Current) > 0 || (downgrade && m.Version != Current)) && Files.Compare(m.Minimum, launcherVersion) <= 0; }
-        public string Prepare(Manifest m, Action<string> fetch, Func<string, bool> selftest, Action<BundleDefinition, string> binaries, CancellationToken token, bool downgrade = false)
+        // A preparation owns only this random directory; Cleanup and concurrent calls ignore it.
+        internal sealed class PreparedBundle : IDisposable
         {
-            if (!Eligible(m, downgrade)) return null;
-            var part = Path.Combine(Root, m.Version + ".part"); var tmp = Folder(m.Version) + ".tmp";
+            internal readonly Manifest Manifest;
+            internal readonly string DirectoryPath, BundlePath, Current, Previous;
+            internal readonly bool Downgrade;
+            internal PreparedBundle(UpdateEngine engine, Manifest manifest, bool downgrade)
+            {
+                Manifest = manifest; Downgrade = downgrade; Current = engine.Current; Previous = engine.Previous;
+                DirectoryPath = Path.Combine(engine.Root, ".stage-" + manifest.Version + "-" + Guid.NewGuid().ToString("N") + ".tmp");
+                BundlePath = Path.Combine(DirectoryPath, "bundle");
+            }
+            public void Dispose() { if (Directory.Exists(DirectoryPath)) Directory.Delete(DirectoryPath, true); }
+        }
+        internal PreparedBundle Stage(Manifest m, Action<string> fetch, Func<string, bool> selftest, Action<BundleDefinition, string> binaries, CancellationToken token, bool downgrade)
+        {
+            PreparedBundle staged;
+            using (UpgradeInstaller.LockReceipt(Home, token, 1000)) {
+                UpgradeInstaller.RequireReceiptRecovery(Home);
+                if (!Eligible(m, downgrade) || File.Exists(UpgradeInstaller.ReceiptPath(Home))) return null;
+                staged = new PreparedBundle(this, m, downgrade);
+            }
             try {
+                string part = Path.Combine(staged.DirectoryPath, "archive.part"), tmp = staged.BundlePath;
+                Directory.CreateDirectory(tmp);
                 token.ThrowIfCancellationRequested(); fetch(part); token.ThrowIfCancellationRequested();
                 if (new FileInfo(part).Length != m.Size || !Files.Hash(part).Equals(m.Sha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Проверка архива не прошла");
-                if (Directory.Exists(tmp)) Directory.Delete(tmp, true); Directory.CreateDirectory(tmp);
                 Extract(part, tmp); var definition = BundleDefinition.Load(tmp); binaries(definition, tmp); token.ThrowIfCancellationRequested();
                 if (m.LauncherVersion.Length > 0) {
                     var exe = Path.Combine(tmp, Product.ExeName);
                     if (!File.Exists(exe) || !Files.Hash(exe).Equals(m.LauncherHash, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Проверка лаунчера не прошла");
                 }
                 if (m.Data.ContainsKey("configSchema") && !File.Exists(Path.Combine(tmp, "selftest.ps1"))) throw new InvalidDataException("Нет самопроверки бандла");
-                if (File.Exists(Path.Combine(tmp, "selftest.ps1")) && !selftest(tmp)) { MarkBad(m.Version); throw new InvalidDataException("Самопроверка бандла не прошла"); }
+                if (File.Exists(Path.Combine(tmp, "selftest.ps1")) && !selftest(tmp)) {
+                    using (UpgradeInstaller.LockReceipt(Home, token, 1000)) { if (Eligible(m, downgrade)) MarkBad(m.Version); }
+                    throw new InvalidDataException("Самопроверка бандла не прошла");
+                }
                 token.ThrowIfCancellationRequested(); Json.Write(Path.Combine(tmp, ".launcher-manifest.json"), m.Data);
-                // Rebuild unactivated leftovers after a power loss, never trust their contents.
-                if (Directory.Exists(Folder(m.Version))) Directory.Delete(Folder(m.Version), true);
-                Directory.Move(tmp, Folder(m.Version)); return m.Version;
-            } finally { if (File.Exists(part)) File.Delete(part); if (Directory.Exists(tmp)) Directory.Delete(tmp, true); }
+                return staged;
+            } catch { staged.Dispose(); throw; }
+        }
+        // Caller holds receipt-mutex through publication and (for Apply) activation.
+        internal string Publish(PreparedBundle staged, CancellationToken token)
+        {
+            UpgradeInstaller.RequireReceiptRecovery(Home);
+            var m = staged.Manifest;
+            if (Current != staged.Current || Previous != staged.Previous || !Eligible(m, staged.Downgrade) ||
+                File.Exists(UpgradeInstaller.ReceiptPath(Home)) || string.Equals(m.Version, Current, StringComparison.OrdinalIgnoreCase) || string.Equals(m.Version, Previous, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Состояние обновления изменилось; повторите установку");
+            token.ThrowIfCancellationRequested();
+            // Only unreferenced leftovers can be rebuilt. Active and rollback bundles are immutable.
+            if (Directory.Exists(Folder(m.Version))) Directory.Delete(Folder(m.Version), true);
+            Directory.Move(staged.BundlePath, Folder(m.Version)); return m.Version;
+        }
+        public string Prepare(Manifest m, Action<string> fetch, Func<string, bool> selftest, Action<BundleDefinition, string> binaries, CancellationToken token, bool downgrade = false)
+        {
+            using (var staged = Stage(m, fetch, selftest, binaries, token, downgrade)) {
+                if (staged == null) return null;
+                using (UpgradeInstaller.LockReceipt(Home, token, 1000)) return Publish(staged, token);
+            }
         }
         public void Activate(string version, bool accept = false)
         {
-            Files.SafeVersion(version); BundleDefinition.Load(Folder(version));
-            if (Pending) throw new InvalidOperationException("Уже ожидается проверка здоровья");
-            string old = Current;
-            // Accepted activation (unfinished first setup): nothing works yet, so no health deadline or rollback.
-            if (accept && old.Length != 0) { Files.Atomic(Path.Combine(Root, "previous.txt"), old + "\n"); Files.Atomic(Path.Combine(Root, "current.txt"), version + "\n"); Cleanup(); return; }
-            if (old.Length == 0) { Files.Atomic(Path.Combine(Root, "current.txt"), version + "\n"); Cleanup(); return; }
-            // Write recovery record first; interrupted activation is recognized by Recover().
-            Json.Write(PendingPath, new { version, previous = old, startedUtc = now().ToString("o") });
-            Files.Atomic(Path.Combine(Root, "previous.txt"), old + "\n");
-            Files.Atomic(Path.Combine(Root, "current.txt"), version + "\n"); Cleanup();
+            using (UpgradeInstaller.LockReceipt(Home)) {
+                Files.SafeVersion(version); BundleDefinition.Load(Folder(version));
+                if (Pending) throw new InvalidOperationException("Уже ожидается проверка здоровья");
+                string old = Current;
+                // Accepted activation (unfinished first setup): nothing works yet, so no health deadline or rollback.
+                if (accept && old.Length != 0) { Files.Atomic(Path.Combine(Root, "previous.txt"), old + "\n"); Files.Atomic(Path.Combine(Root, "current.txt"), version + "\n"); Cleanup(); return; }
+                if (old.Length == 0) { Files.Atomic(Path.Combine(Root, "current.txt"), version + "\n"); Cleanup(); return; }
+                // Write recovery record first; interrupted activation is recognized by Recover().
+                Json.Write(PendingPath, new { version, previous = old, startedUtc = now().ToString("o") });
+                Files.Atomic(Path.Combine(Root, "previous.txt"), old + "\n");
+                Files.Atomic(Path.Combine(Root, "current.txt"), version + "\n"); Cleanup();
+            }
         }
         public void Recover()
         {
-            if (Pending) {
-                var p = Json.Read(PendingPath); string version = Files.SafeVersion(Json.Str(p, "version"));
-                if (Current != version) File.Delete(PendingPath); // interrupted activation, or completed rollback
+            using (UpgradeInstaller.LockReceipt(Home)) {
+                if (Pending) {
+                    var p = Json.Read(PendingPath); string version = Files.SafeVersion(Json.Str(p, "version"));
+                    if (Current != version) File.Delete(PendingPath); // interrupted activation, or completed rollback
+                }
+                if (Current.Length == 0) return;
+                try { BundleDefinition.Load(Folder(Current)); }
+                catch { Rollback(); } // A broken components.json must not prevent reaching the recovery path.
             }
-            if (Current.Length == 0) return;
-            try { BundleDefinition.Load(Folder(Current)); }
-            catch { Rollback(); } // A broken components.json must not prevent reaching the recovery path.
         }
         public string Observe(bool allCriticalHealthy, bool failed = false)
         {
-            if (!Pending) return "";
-            var p = Json.Read(PendingPath);
-            if (Current != Json.Str(p, "version")) { Recover(); return ""; }
-            if (failed) { Rollback(); return "rollback"; }
-            if (allCriticalHealthy) { File.Delete(PendingPath); Cleanup(); return "accepted"; }
-            return "";
+            using (UpgradeInstaller.LockReceipt(Home)) {
+                if (!Pending) return "";
+                var p = Json.Read(PendingPath);
+                if (Current != Json.Str(p, "version")) { Recover(); return ""; }
+                if (failed) { Rollback(); return "rollback"; }
+                if (allCriticalHealthy) { File.Delete(PendingPath); Cleanup(); return "accepted"; }
+                return "";
+            }
         }
         public void Rollback()
         {
-            string target = Pending ? Files.SafeVersion(Json.Str(Json.Read(PendingPath), "previous")) : Previous;
-            if (target.Length == 0 || target == Current || !Directory.Exists(Folder(target))) throw new InvalidOperationException("Нет предыдущего бандла");
-            BundleDefinition.Load(Folder(target)); string bad = Current; MarkBad(bad);
-            Files.Atomic(Path.Combine(Root, "current.txt"), target + "\n");
-            if (Pending) File.Delete(PendingPath);
-            Files.Atomic(Path.Combine(Root, "previous.txt"), ""); Cleanup();
+            using (UpgradeInstaller.LockReceipt(Home)) {
+                string target = Pending ? Files.SafeVersion(Json.Str(Json.Read(PendingPath), "previous")) : Previous;
+                if (target.Length == 0 || target == Current || !Directory.Exists(Folder(target))) throw new InvalidOperationException("Нет предыдущего бандла");
+                BundleDefinition.Load(Folder(target)); string bad = Current; MarkBad(bad);
+                Files.Atomic(Path.Combine(Root, "current.txt"), target + "\n");
+                if (Pending) File.Delete(PendingPath);
+                Files.Atomic(Path.Combine(Root, "previous.txt"), ""); Cleanup();
+            }
         }
         public void Cleanup()
         {
-            var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Current, Previous };
-            if (Pending) { var p = Json.Read(PendingPath); keep.Add(Json.Str(p, "version")); keep.Add(Json.Str(p, "previous")); }
-            var versions = Directory.GetDirectories(Root).Where(d => File.Exists(Path.Combine(d, "components.json")) && !d.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)).OrderByDescending(d => Path.GetFileName(d), Comparer<string>.Create(Files.Compare)).ToList();
-            foreach (var dir in versions) if (keep.Count(v => v.Length > 0) < 3) keep.Add(Path.GetFileName(dir));
-            foreach (var dir in versions) if (!keep.Contains(Path.GetFileName(dir))) Directory.Delete(dir, true);
+            using (UpgradeInstaller.LockReceipt(Home)) {
+                var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Current, Previous };
+                if (Pending) { var p = Json.Read(PendingPath); keep.Add(Json.Str(p, "version")); keep.Add(Json.Str(p, "previous")); }
+                var versions = Directory.GetDirectories(Root).Where(d => File.Exists(Path.Combine(d, "components.json")) && !d.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)).OrderByDescending(d => Path.GetFileName(d), Comparer<string>.Create(Files.Compare)).ToList();
+                foreach (var dir in versions) if (keep.Count(v => v.Length > 0) < 3) keep.Add(Path.GetFileName(dir));
+                foreach (var dir in versions) if (!keep.Contains(Path.GetFileName(dir))) Directory.Delete(dir, true);
+            }
         }
         public static void Extract(string zip, string folder)
         {
@@ -142,7 +192,7 @@ namespace RemoteAgents.Launcher
                 string cache = Path.Combine(home, "cache", hash); Directory.CreateDirectory(Path.GetDirectoryName(cache));
                 if (!File.Exists(cache) || !Files.Hash(cache).Equals(hash, StringComparison.OrdinalIgnoreCase)) {
                     var uri = new Uri(Json.Str(binary, "url")); if (uri.Scheme != "https") throw new InvalidDataException("Бинарники требуют HTTPS");
-                    string part = cache + ".part";
+                    string part = cache + "." + Guid.NewGuid().ToString("N") + ".part";
                     try {
                         ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
                         var request = (HttpWebRequest)WebRequest.Create(uri); request.Timeout = 90000; request.ReadWriteTimeout = 90000;
@@ -151,7 +201,11 @@ namespace RemoteAgents.Launcher
                             while ((n = stream.Read(bytes, 0, bytes.Length)) > 0) { token.ThrowIfCancellationRequested(); size += n; if (size > 512L * 1024 * 1024) throw new InvalidDataException("Бинарник слишком большой"); file.Write(bytes, 0, n); }
                         }
                         if (!Files.Hash(part).Equals(hash, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Неверный SHA256 бинарника");
-                        if (File.Exists(cache)) File.Delete(cache); File.Move(part, cache);
+                        using (UpgradeInstaller.LockReceipt(home, token, 1000)) {
+                            if (!File.Exists(cache) || !Files.Hash(cache).Equals(hash, StringComparison.OrdinalIgnoreCase)) {
+                                if (File.Exists(cache)) File.Delete(cache); File.Move(part, cache);
+                            }
+                        }
                     } finally { if (File.Exists(part)) File.Delete(part); }
                 }
                 Directory.CreateDirectory(Path.GetDirectoryName(path)); File.Copy(cache, path, true);
