@@ -707,7 +707,7 @@ namespace RemoteAgents.Launcher
                 log.Write("vpn.helper.ready att=" + att + " ready=" + helperReady + " ms=" + vpnWatch.ElapsedMilliseconds);
                 log.Write(LogLevel.Info, "vpn", "vpn.on.step", "att", att, "step", "helper-ready", "ms", vpnWatch.ElapsedMilliseconds.ToString(), "result", helperReady ? "ok" : "fail");
                 if (!helperReady) { log.Write("vpn.on.refused att=" + att + " reason=helper-not-ready"); VpnAttemptEnd(att, "helper-not-ready"); VpnFailure(HelperClient.SetupWarning, fromCard); return; }
-                var transport = StatusView.Read(home, "transport", maxAgeSec: 3);
+                var transport = StatusView.Read(home, "transport", maxAgeSec: VpnWatchdog.TransportStatusMaxAgeSec);
                 var options = new System.Collections.Generic.Dictionary<string, object>(Json.Map(Json.Get(config.Data, "vpn")));
                 // Intent/interface names are not part of the privileged command.
                 options = options.Where(p => new[] { "address", "excludeCidrs", "directDomains", "dnsServer", "checkUrl", "probeAddress" }.Contains(p.Key)).ToDictionary(p => p.Key, p => p.Value);

@@ -12,13 +12,80 @@ namespace RemoteAgents.Launcher
         // Focused entry point; do not invoke the unrelated portable suites.
         static int Main(string[] args)
         {
-            string root = args.Length > 0 ? args[0] : Path.Combine(Path.GetTempPath(), "vpn-tests-" + Guid.NewGuid().ToString("N"));
+            bool freshnessOnly = args.Length == 1 && args[0] == "--freshness-only";
+            string root = args.Length > 0 && !freshnessOnly ? args[0] : Path.Combine(Path.GetTempPath(), "vpn-tests-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
+            if (freshnessOnly) { try { Freshness(root); } finally { Directory.Delete(root, true); } return 0; }
             Run(root); VpnTunTests.Run(root); VpnReadyTests.Run(); return 0;
         }
 #endif
+        // Fixed clocks and manually supplied heartbeats: no real waits or network access.
+        static void Freshness(string root, [System.Runtime.CompilerServices.CallerFilePath] string caller = "")
+        {
+            int before = count;
+            string repo = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(caller), "../../.."));
+            var heartbeat = System.Text.RegularExpressions.Regex.Match(
+                File.ReadAllText(Path.Combine(repo, "transport/Transport.Daemon.ps1")), @"(?m)^\$StatusHeartbeatMs=(\d+)");
+            Check(heartbeat.Success, "daemon heartbeat is declared");
+            int heartbeatMs = int.Parse(heartbeat.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+            Check(heartbeatMs > 0 && (long)VpnWatchdog.TransportStatusMaxAgeSec * 1000 >= 3L * heartbeatMs,
+                "freshness window covers at least three daemon heartbeats");
+            DateTime now = new DateTime(2026, 11, 21, 12, 0, 0, DateTimeKind.Utc);
+            var transport = ConfigBundle.D("ok", true, "active", "a", "updatedAt", now.ToString("o"),
+                "helper", ConfigBundle.D("udp", true), "candidates", new object[] { ConfigBundle.D("tag", "a", "state", "ok", "enabled", true) });
+            string home = Path.Combine(root, "freshness");
+            Directory.CreateDirectory(Path.Combine(home, "state")); Directory.CreateDirectory(Path.Combine(home, "status"));
+            string file = Path.Combine(home, "status/vpn.json"), transportFile = Path.Combine(home, "status/transport.json");
+            using (var self = Process.GetCurrentProcess()) {
+                Files.Atomic(Path.Combine(home, "state/vpn-host.json"), Json.Encode(new {
+                    pid = self.Id, startedTicks = self.StartTime.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                }));
+                foreach (int age in new[] { 0, 4, 5, 6, 14, 15, 16, -1 }) {
+                    DateTime clock = now.AddSeconds(age);
+                    bool fresh = age >= 0 && age <= 15;
+                    Check(VpnWatchdog.TransportReady(transport, clock, "a") == fresh, "transport freshness at age " + age);
+                    Check(VpnTun.PathState(transport, clock) == (fresh ? "" : "no-path"), "TUN freshness at age " + age);
+                    Files.Atomic(transportFile, Json.Encode(transport) + "\r\n");
+                    File.SetLastWriteTimeUtc(transportFile, now);
+                    if (age >= 0)
+                        Check((StatusView.Read(home, "transport", clock, VpnWatchdog.TransportStatusMaxAgeSec).Count > 0) == fresh,
+                            "tray transport read at age " + age);
+                    foreach (string owner in new[] { "net-helper", "legacy-host" }) {
+                        File.Delete(Path.Combine(home, "state/vpn.stop"));
+                        Files.Atomic(file, Json.Encode(new { ok = true, enabled = true, state = "on", owner, updatedAt = now.ToString("o") }) + "\r\n");
+                        var read = VpnStatus.Read(home, clock);
+                        Check(Json.Bool(read, "ok") == fresh, owner + " VPN freshness at age " + age);
+                        if (owner == "net-helper") {
+                            Check(Json.Bool(read, "enabled") && Json.Bool(read, "statusStale") == !fresh,
+                                "helper preserves intent and marks stale/future status at age " + age);
+                            Check(Json.Bool(Json.Read(file), "ok"), "helper stale read never rewrites status at age " + age);
+                        }
+                        Check(Json.Str(read, "state") == (fresh || owner == "net-helper" ? "on" : "watchdog-stalled"),
+                            owner + " stale/future status handling at age " + age);
+                        Check(File.Exists(Path.Combine(home, "state/vpn.stop")) == (!fresh && owner != "net-helper"),
+                            owner + " stop handling at age " + age);
+                    }
+                }
+            }
+            transport["ok"] = false;
+            Check(!VpnWatchdog.TransportReady(transport, now), "recent failure is not ready");
+            transport["ok"] = true;
+            transport["updatedAt"] = "invalid";
+            Check(!VpnWatchdog.TransportReady(transport, now), "invalid timestamp is not ready");
+            int stops = 0, restarts = 0;
+            System.Collections.Generic.Dictionary<string, object> published = null;
+            var monitor = new VpnTunMonitor(0, transport, ConfigBundle.D(), value => published = value, reason => stops++, () => restarts++);
+            for (int ms = 0; ms <= 4 * heartbeatMs; ms += 1000) {
+                if (ms % heartbeatMs == 0) transport["updatedAt"] = now.AddMilliseconds(ms).ToString("o");
+                Check(monitor.Step(ms, now.AddMilliseconds(ms), true, transport, "") && Json.Bool(published, "ok")
+                    && Json.Str(published, "state") == "on", "heartbeat gap does not flicker at fake millisecond " + ms);
+            }
+            Check(stops == 0 && restarts == 0, "heartbeat gaps never stop or restart the core");
+            Console.WriteLine("PASS: VPN freshness (" + (count - before) + " checks, fake clocks; Watchdog/Status/TUN/tray, heartbeat gaps)");
+        }
         internal static void Run(string root)
         {
+            Freshness(root);
             Check(Product.VpnEnabled, "VPN capability is restored");
             string gateName = VpnWatchdog.OwnerMutex + "-test-" + Guid.NewGuid().ToString("N");
             using (var ownerGate = new System.Threading.Mutex(false, gateName)) {
@@ -52,7 +119,7 @@ namespace RemoteAgents.Launcher
             var status = ConfigBundle.D("ok", true, "active", "a", "updatedAt", now.ToString("o"), "candidates", new object[] { ConfigBundle.D("tag", "a", "state", "ok", "enabled", true) });
             Check(VpnWatchdog.TransportReady(status, now, "a"), "fresh checked active path");
             Check(!VpnWatchdog.TransportReady(status, now, "b"), "optional tag filter rejects another path");
-            Check(!VpnWatchdog.TransportReady(status, now.AddSeconds(4)), "stale transport is a failure");
+            Check(!VpnWatchdog.TransportReady(status, now.AddSeconds(16)), "stale transport is a failure");
             Check(!VpnWatchdog.TransportReady(status, now.AddSeconds(-1)), "future proof is rejected");
             status["candidates"] = new object[] { ConfigBundle.D("tag", "a", "state", "remembered") };
             Check(!VpnWatchdog.TransportReady(status, now), "remembered path is not current proof");
@@ -70,7 +137,7 @@ namespace RemoteAgents.Launcher
                 Files.Atomic(Path.Combine(home, "state/vpn-host.json"), Json.Encode(new { pid = self.Id, startedTicks = self.StartTime.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture) }));
                 Check(Json.Str(VpnStatus.Read(home), "state") == "on", "live pinned owner retains status");
             }
-            Files.Atomic(file, Json.Encode(new { enabled = true, state = "on", updatedAt = now.AddSeconds(-4).ToString("o") }));
+            Files.Atomic(file, Json.Encode(new { enabled = true, state = "on", updatedAt = now.AddSeconds(-16).ToString("o") }));
             Check(Json.Str(VpnStatus.Read(home), "state") == "watchdog-stalled" && File.Exists(Path.Combine(home, "state/vpn.stop")), "stale heartbeat never displays active protection");
             File.Delete(Path.Combine(home, "state/vpn.stop"));
             using (var self = Process.GetCurrentProcess()) {
