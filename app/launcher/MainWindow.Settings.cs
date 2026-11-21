@@ -19,6 +19,19 @@ namespace RemoteAgents.Launcher
         // Owner 16.11.2026: a visible «check updates» icon on the main screen, next to settings.
         readonly Button updateButton = new Button { Text = "⟳", AutoSize = true, AccessibleName = "Проверить обновления", Visible = false };
         Action updateCheck;
+        readonly ToolTip updateTip = new ToolTip();
+        readonly Label updateStatus = new Label { AutoSize = true, Visible = false, Margin = new Padding(0, 6, 8, 0), ForeColor = SystemColors.GrayText };
+        int updateSpin;
+        // Состояние кнопки «Обновить» из модели: недоступна на время работы, значок «крутится» по событиям прогресса (без таймера).
+        internal void SetUpdateButton(bool enabled, bool spinning, string text)
+        {
+            if (IsDisposed) return;
+            updateButton.Enabled = enabled;
+            updateButton.Text = spinning ? new[] { "◐", "◓", "◑", "◒" }[updateSpin++ & 3] : "⟳";
+            updateStatus.Text = text ?? ""; updateStatus.Visible = updateStatus.Text.Length > 0;
+            updateStatus.MaximumSize = new Size(Theme.Px(this, 320), 0);
+            updateTip.SetToolTip(updateButton, string.IsNullOrEmpty(text) ? "Проверить обновления" : text);
+        }
         Expander advanced;
         Label aboutInfo;
 
@@ -30,8 +43,8 @@ namespace RemoteAgents.Launcher
             top.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); top.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             pageTitle.Font = Theme.Big; pageTitle.Anchor = AnchorStyles.Left; pageBack.Visible = false;
             top.Controls.Add(pageBack, 0, 0); top.Controls.Add(pageTitle, 1, 0); var corner = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
-            corner.Controls.Add(updateButton); corner.Controls.Add(settingsButton); top.Controls.Add(corner, 2, 0);
-            new ToolTip().SetToolTip(updateButton, "Проверить обновления"); new ToolTip().SetToolTip(settingsButton, "Настройки");
+            corner.Controls.Add(updateStatus); corner.Controls.Add(updateButton); corner.Controls.Add(settingsButton); top.Controls.Add(corner, 2, 0);
+            updateTip.SetToolTip(updateButton, "Проверить обновления"); new ToolTip().SetToolTip(settingsButton, "Настройки");
             updateButton.Click += (s, e) => updateCheck?.Invoke();
             pageBack.Click += (s, e) => ShowPage(currentPage == "Настройки" ? "Главная" : "Настройки");
             settingsButton.Click += (s, e) => ShowPage("Настройки");
