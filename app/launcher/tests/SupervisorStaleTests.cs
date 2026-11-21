@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Reflection;
 
 namespace RemoteAgents.Launcher
 {
@@ -16,6 +18,8 @@ namespace RemoteAgents.Launcher
             ProcessJustStartedGivesNothing();
             FuseMinimumThirtySeconds();
             HangBeforeFirstWriteIsKilled();
+            MissingStatusRestartsRuntimeOnce();
+            UnmonitoredRuntimesAreSkipped();
             ClockJumpDoesNotKill();
             BusyUiGapSkipsOnceThenWorks();
             SkippedStatusStillTracksResume();
@@ -87,6 +91,79 @@ namespace RemoteAgents.Launcher
             Check(Math.Abs(SupervisorStale.AgeMs(oldFile, started.AddSeconds(31), started) - 31000) < 1, "age counted from start");
         }
 
+        static Component Definition(bool periodic = true)
+        {
+            var raw = new Dictionary<string, object> {
+                { "name", "transport" }, { "exe", "unused.exe" }, { "restart", "always" }, { "healthMaxAgeSec", 15 }
+            };
+            if (periodic) raw["healthFile"] = "status/transport.json";
+            return Component.Read(raw);
+        }
+
+        // Настоящий ComponentRuntime; только Windows-задача заменена объектом в памяти (ни одного процесса/ожидания).
+        static FieldInfo RuntimeField(string name) { return typeof(ComponentRuntime).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic); }
+
+        static void MissingStatusRestartsRuntimeOnce()
+        {
+            ExerciseRuntime(Definition(), enabled: true, running: true, shouldRestart: true);
+        }
+
+        static void UnmonitoredRuntimesAreSkipped()
+        {
+            ExerciseRuntime(Definition(), enabled: false, running: true, shouldRestart: false);
+            ExerciseRuntime(Definition(), enabled: true, running: false, shouldRestart: false);
+            var noPeriodicStatus = Definition(periodic: false);
+            Check(!noPeriodicStatus.HasPeriodicStatus && noPeriodicStatus.HealthFile.Length > 0,
+                "default status path does not promise periodic writes (Syncthing)");
+            ExerciseRuntime(noPeriodicStatus, enabled: true, running: true, shouldRestart: false);
+            var noRestart = Definition(); noRestart.Restart = "never";
+            ExerciseRuntime(noRestart, enabled: true, running: true, shouldRestart: false);
+            var commandManaged = Definition(); commandManaged.CommandManaged = true;
+            ExerciseRuntime(commandManaged, enabled: true, running: true, shouldRestart: false);
+        }
+
+        static void ExerciseRuntime(Component definition, bool enabled, bool running, bool shouldRestart)
+        {
+            string home = Path.Combine(Path.GetTempPath(), "r1-stale-" + Guid.NewGuid().ToString("N"));
+            var started = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            var task = new ElevatedTask(home, definition.Name);
+            if (running) task.Start();
+            var runtime = new ComponentRuntime(definition, enabled, home, home, new Journal(home));
+            runtime.Enabled = enabled; runtime.Alive = running;
+            RuntimeField("started").SetValue(runtime, started);
+            if (running) RuntimeField("elevated").SetValue(runtime, task);
+            try {
+                using (var bus = new EventBus(manualDispatch: true)) {
+                    runtime.Bus = bus;
+                    var events = new List<BusEvent>();
+                    bus.Subscribe(BusTopics.ComponentStaleRestart, e => events.Add(e));
+                    DateTime now = started;
+                    using (TrayBusWiring.WireSupervisorTick(bus, () => runtime.CheckStale(now))) {
+                        // Ожидаемого файла нет на ВСЕХ тиках, включая тики после остановки и назначения backoff.
+                        for (int i = 0; i <= 13; i++) {
+                            now = started.AddSeconds(i * 5);
+                            bus.FireTick(BusTopics.Ticks.Supervisor); bus.DrainOnce();
+                            Check(!File.Exists(Path.Combine(home, "status", "transport.json")), "status file remains absent");
+                            Check(task.DisposeCalls == (shouldRestart && i >= 10 ? 1 : 0), "one termination after missing status ages");
+                        }
+                    }
+                    Check(events.Count == (shouldRestart ? 1 : 0), "one stale-restart event or explicit skip");
+                    if (shouldRestart) {
+                        Check(!runtime.Alive && !runtime.Healthy && !task.Alive, "stale runtime stopped");
+                        Check(RuntimeField("elevated").GetValue(runtime) == null, "stopped task released");
+                        Check((DateTime)RuntimeField("next").GetValue(runtime) == started.AddSeconds(55), "restart scheduled with normal backoff");
+                        Check((int)RuntimeField("delay").GetValue(runtime) == 10, "backoff advanced once");
+                        Check(events[0].Get("name") == "transport", "restart names missing-status component");
+                    } else {
+                        Check((DateTime)RuntimeField("next").GetValue(runtime) == DateTime.MinValue, "skipped component has no scheduled restart");
+                    }
+                }
+            } finally {
+                runtime.Dispose();
+                Directory.Delete(home, recursive: true);
+            }
+        }
+
         static void ClockJumpDoesNotKill()
         {
             var started = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
@@ -151,10 +228,10 @@ namespace RemoteAgents.Launcher
             Check(c.Check(null, started, 5, started) == SupervisorDecision.None, "no status -> none");
             var woke = started.AddHours(3);
             Check(c.Check(null, woke, 5, started) == SupervisorDecision.None, "resume without status -> none");
-            Check(c.AgeMs(started, woke, started) == 0, "resume remembered without status");
+            Check(c.AgeMs(null, woke, started) == 0, "resume remembered without status");
             for (int seconds = 5; seconds <= 30; seconds += 5)
-                Check(c.Check(started, woke.AddSeconds(seconds), 5, started) == SupervisorDecision.None, "status becomes available after resume " + seconds);
-            Check(c.Check(started, woke.AddSeconds(35), 5, started) == SupervisorDecision.KillAndRestart, "missing status does not block later stale decision");
+                Check(c.Check(null, woke.AddSeconds(seconds), 5, started) == SupervisorDecision.None, "status still missing after resume " + seconds);
+            Check(c.Check(null, woke.AddSeconds(35), 5, started) == SupervisorDecision.KillAndRestart, "missing status ages from resume and triggers recovery");
         }
 
         static void WireSupervisorTickAndEvent()
@@ -177,4 +254,15 @@ namespace RemoteAgents.Launcher
             }
         }
     }
+
+    // Подмена только для portable harness: не обращается к COM/Task Scheduler и не запускает процессы.
+    internal sealed class ElevatedTask : IDisposable
+    {
+        public bool Alive { get; private set; }
+        public int DisposeCalls { get; private set; }
+        public ElevatedTask(string home, string name) { }
+        public void Start() { Alive = true; }
+        public void Dispose() { DisposeCalls++; Alive = false; }
+    }
+
 }

@@ -60,21 +60,22 @@ namespace RemoteAgents.Launcher
         DateTime lastCheckUtc = DateTime.MinValue;
         DateTime resyncUtc = DateTime.MinValue;
 
-        // null: нет проверяемого статуса; время тика всё равно учитывается, решение об убийстве не принимается.
-        public SupervisorDecision Check(DateTime? fileModifiedUtc, DateTime nowUtc, int maxAgeSec, DateTime startedUtc)
+        // null: ожидаемый файл ещё не появился — возраст от старта/resyncUtc. statusExpected=false:
+        // компонент не проверяется (отключён, остановлен или не пишет периодический статус); тик всё равно учитывается.
+        public SupervisorDecision Check(DateTime? fileModifiedUtc, DateTime nowUtc, int maxAgeSec, DateTime startedUtc, bool statusExpected = true)
         {
             bool jumped = SupervisorStale.ClockJumped(lastCheckUtc, nowUtc, maxAgeSec);
             lastCheckUtc = nowUtc;
             if (jumped) resyncUtc = nowUtc;
-            if (jumped || !fileModifiedUtc.HasValue) return SupervisorDecision.None;
-            return AgeMs(fileModifiedUtc.Value, nowUtc, startedUtc) > SupervisorStale.FuseMs(maxAgeSec)
+            if (jumped || !statusExpected) return SupervisorDecision.None;
+            return AgeMs(fileModifiedUtc, nowUtc, startedUtc) > SupervisorStale.FuseMs(maxAgeSec)
                 ? SupervisorDecision.KillAndRestart
                 : SupervisorDecision.None;
         }
 
-        public double AgeMs(DateTime fileModifiedUtc, DateTime nowUtc, DateTime startedUtc)
+        public double AgeMs(DateTime? fileModifiedUtc, DateTime nowUtc, DateTime startedUtc)
         {
-            return SupervisorStale.AgeMs(fileModifiedUtc, nowUtc, startedUtc, resyncUtc);
+            return SupervisorStale.AgeMs(fileModifiedUtc ?? startedUtc, nowUtc, startedUtc, resyncUtc);
         }
     }
 }

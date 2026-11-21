@@ -263,7 +263,7 @@ namespace RemoteAgents.Launcher
     }
     internal sealed class Component
     {
-        public string Name, Title, Exe, Cwd, Restart, HealthFile, StopFile, Priority; public string[] Args, RequiredConfig; public bool Default, Critical, Elevated, CommandManaged; public int MaxAge; public MenuAction[] Menu;
+        public string Name, Title, Exe, Cwd, Restart, HealthFile, StopFile, Priority; public string[] Args, RequiredConfig; public bool Default, Critical, Elevated, CommandManaged, HasPeriodicStatus; public int MaxAge; public MenuAction[] Menu;
         public static Component Read(object value)
         {
             var d = Json.Map(value); var c = new Component {
@@ -274,6 +274,8 @@ namespace RemoteAgents.Launcher
                 Menu = Json.Array(Json.Get(d, "menu")).Select(MenuAction.Read).ToArray()
             };
             if (!Regex.IsMatch(c.Name, "^[a-z][a-z0-9_-]{0,63}$") || string.IsNullOrWhiteSpace(c.Exe) || (c.Restart != "always" && c.Restart != "never") || c.MaxAge < 1 || (c.Priority != "normal" && c.Priority != "above-normal")) throw new InvalidDataException("Неверный компонент");
+            // Только явно заданный healthFile обещает периодические записи; например, Syncthing их не делает.
+            c.HasPeriodicStatus = !string.IsNullOrWhiteSpace(c.HealthFile);
             if (string.IsNullOrEmpty(c.HealthFile)) c.HealthFile = "status/" + c.Name + ".json";
             return c;
         }
