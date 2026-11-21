@@ -18,6 +18,9 @@ namespace RemoteAgents.Launcher
         public const string ComponentStart = "component.start";
         public const string ComponentExit = "component.exit";
 
+        // Аварийные топики
+        public const string Unhandled = "unhandled";
+
         // sing-box: singbox.started|singbox.fatal|singbox.line|singbox.iface {core: vpn|transport, line}
         public const string SingboxStarted = "singbox.started";
         public const string SingboxFatal = "singbox.fatal";

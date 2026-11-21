@@ -249,6 +249,7 @@ timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:H
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:UpdateButtonTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:EventBusTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:BusJournalTests=true
+timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:HealthJournalTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:NetNotifyTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:TrayBusTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:VpnReasonsTests=true

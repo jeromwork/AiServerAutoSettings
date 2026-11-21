@@ -21,6 +21,11 @@
     <IntermediateOutputPath>obj/$(Configuration)/busjournal-tests/</IntermediateOutputPath>
     <OutputPath>bin/$(Configuration)/busjournal-tests/</OutputPath>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(HealthJournalTests)' == 'true'">
+    <StartupObject>RemoteAgents.Launcher.HealthJournalTests</StartupObject>
+    <IntermediateOutputPath>obj/$(Configuration)/healthjournal-tests/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/healthjournal-tests/</OutputPath>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(NetNotifyTests)' == 'true'">
     <StartupObject>RemoteAgents.Launcher.NetNotifyTests</StartupObject>
     <IntermediateOutputPath>obj/$(Configuration)/netnotify-tests/</IntermediateOutputPath>
@@ -103,6 +108,8 @@
     <Compile Include="EventBusTests.cs" />
     <Compile Include="../BusJournal.cs" />
     <Compile Include="BusJournalTests.cs" />
+    <Compile Include="../HealthJournal.cs" />
+    <Compile Include="HealthJournalTests.cs" />
     <Compile Include="../NetNotify.cs" />
     <Compile Include="../NetRoute.cs" />
     <Compile Include="../VpnReady.cs" />
