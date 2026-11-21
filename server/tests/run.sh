@@ -4,6 +4,7 @@
 # Isolated: temporary HOME/authorized_keys, loopback sshd, no live services.
 set -euo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+timeout 60 python3 "$repo/tests/timer-guard.py" < /dev/null
 export PYTHONPATH="$repo/server/tests${PYTHONPATH:+:$PYTHONPATH}"
 if ! python3 "$repo/server/tests/resource_guard.py"; then
   echo 'server/tests: SKIP full suite (memory guard)'

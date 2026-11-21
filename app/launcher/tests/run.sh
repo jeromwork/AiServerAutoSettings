@@ -2,6 +2,7 @@
 set -euo pipefail
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo=$(cd "$here/../../.." && pwd)
+timeout 60 python3 "$repo/tests/timer-guard.py" < /dev/null
 case ${1:-} in
   '') exec bash "$repo/disk/test-fast.sh" ;;
   --live) exec bash "$repo/disk/test-live.sh" ;;

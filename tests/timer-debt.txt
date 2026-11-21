@@ -1,0 +1,341 @@
+# count: 330
+# Explicit baseline; never regenerate to make CI pass.
+# W2: transport; W3: launcher/control/disk; W4: server/tests; W5: further audit.
+# WARNING: lexical matches include metadata and generated fixtures; review before removal.
+# WARNING W4: transport/test-transport-bus.ps1: AssertFinalStatus is unstable;
+# Completion.Run uses Complete(1000): 1 s budget can fail under host load.
+# This is tracked test debt, not a timer signature or permission to retry/skip.
+
+[code]
+app/RemoteAgents.Core/FirstConnection.cs: for(int i=0;i<20;i++) { var r=await ssh.RunAsync(command+" resume"+args,token:token); if(r.ExitCode==0) {journal.Write("setup","configure","ok");return;} await Task.Delay(500,token); } # W5
+app/RemoteAgents.Tray/Program.cs: readonly System.Windows.Forms.Timer timer=new(){Interval=5000}; # W5
+app/launcher/BusTopics.cs: public const string ComponentStaleRestart = "component.stale-restart"; # W5
+app/launcher/ConfigApply.cs: await Task.Delay(12000, token); # W5
+app/launcher/ConfigApply.cs: using (var poll = new Timer(_ => read(), null, 150, 150)) { # W5
+app/launcher/ConfigApply.cs: }), ct => Task.Delay(12000, ct), (state, text) => Report(ConfigSections.Disk, state, text), Log, token); # W5
+app/launcher/Data.cs: MaxAge = Json.Int(d, "healthMaxAgeSec", 90), Default = Json.Bool(d, "enabledByDefault"), Critical = Json.Bool(d, "critical"), Elevated = Json.Bool(d, "elevated"), CommandManaged = Json.Bool(d, "commandManaged"), Bus = Json.Bool(d, "bus"), StopFile = Json.Str(d, "stopFile"), Priority = Json.Text(d, "priority", "normal"), # W5
+app/launcher/Data.cs: System.Threading.Thread.Sleep(50); # W5
+app/launcher/Data.cs: if (!Regex.IsMatch(c.Name, "^[a-z][a-z0-9_-]{0,63}$") || string.IsNullOrWhiteSpace(c.Exe) || (c.Restart != "always" && c.Restart != "never") || c.MaxAge < 1 || (c.Priority != "normal" && c.Priority != "above-normal")) throw new InvalidDataException("Неверный компонент"); # W5
+app/launcher/Data.cs: public string Name, Title, Exe, Cwd, Restart, HealthFile, StopFile, Priority; public string[] Args, RequiredConfig; public bool Default, Critical, Elevated, CommandManaged, HasPeriodicStatus, Bus; public int MaxAge; public MenuAction[] Menu; # W5
+app/launcher/DiagnosticReport.cs: var latest = new DirectoryInfo(logsDir).GetFiles("wizard-*.out").OrderByDescending(f => f.LastWriteTimeUtc).ThenBy(f => f.Name, StringComparer.Ordinal).FirstOrDefault(); # W5
+app/launcher/DiskExplorerController.cs: DateTime xmlTime = File.GetLastWriteTimeUtc(Path.Combine(diskHome, "state", "config.xml")); # W3
+app/launcher/DiskExplorerController.cs: if (tail < since || File.GetLastWriteTimeUtc(Path.Combine(diskHome, "state", "config.xml")) != xmlTime) break; # W3
+app/launcher/ElevatedTask.cs: var watch = Stopwatch.StartNew(); while (Alive && watch.ElapsedMilliseconds < 5000) Thread.Sleep(100); # W5
+app/launcher/HelperClient.cs: Thread.Sleep(200); # W3
+app/launcher/HelperClient.cs: if (Connected && lanState.Count > 0 && (DateTime.UtcNow - lanUpdated).TotalSeconds <= 15) return lanState; # W3
+app/launcher/LogLimits.cs: if (now.UtcDateTime - f.LastWriteTimeUtc > ArchiveMaxAge) { try { f.Delete(); removed++; } catch { } } # W5
+app/launcher/LogLimits.cs: internal static TimeSpan ArchiveMaxAge = TimeSpan.FromDays(14); # W5
+app/launcher/LogShipper.cs: while (Interlocked.CompareExchange(ref running, 1, 0) != 0) { if (DateTime.UtcNow >= end) return; Thread.Sleep(50); } # W5
+app/launcher/NetHelper.cs: lanTimer = new System.Threading.Timer(_ => { # W5
+app/launcher/NetHelperInstall.cs: Thread.Sleep(100); # W5
+app/launcher/NetHelperSetup.cs: await Task.Delay(Math.Min(100, remaining), token); # W5
+app/launcher/NetLadder.Windows.cs: for (int i = 0; i < 60 && !(entered = TryEnter()); i++) Thread.Sleep(500); # W5
+app/launcher/NetLadder.cs: sleep = sleep ?? (ms => System.Threading.Thread.Sleep(ms)); # W5
+app/launcher/ProxyRelay.cs: while(down.IsAlive){if(!up.IsAlive){down.Join(2000);break;}Thread.Sleep(20);} # W5
+app/launcher/RaLog.cs: foreach (var f in files.Select(x => new { x, n = ArchiveNumber(x.Name) }).Where(x => x.n > 0).OrderByDescending(x => x.n).ThenBy(x => x.x.LastWriteTimeUtc)) { # W5
+app/launcher/SetupWizard.cs: if(!form.applied[1] && Enumerable.Range(0,6).All(i=>i==1 || form.applied[i])){await Task.Delay(20000);await form.Inspect();} # W5
+app/launcher/SetupWizard.cs: readonly System.Windows.Forms.Timer operationTimer = new System.Windows.Forms.Timer { Interval = 12000 }; # W5
+app/launcher/StatusView.cs: age = (now - updated.ToUniversalTime()).TotalSeconds; if (age > maxAgeSec || age < -5) return Json.Map(null); # W2
+app/launcher/StatusView.cs: double age = ((utcNow ?? DateTime.UtcNow) - since.ToUniversalTime()).TotalSeconds; # W2
+app/launcher/StatusView.cs: double age = (now - File.GetLastWriteTimeUtc(file)).TotalSeconds; # W2
+app/launcher/StatusView.cs: if (!File.Exists(file) || age > maxAgeSec || age < -5) return Json.Map(null); # W2
+app/launcher/StatusView.cs: internal static bool StaleCandidate(Dictionary<string, object> candidate, Dictionary<string, object> transport, DateTime? utcNow = null) # W2
+app/launcher/StatusView.cs: public static Dictionary<string, object> Read(string home, string name, DateTime? utcNow = null, int maxAgeSec = 300) # W2
+app/launcher/Supervisor.cs: Healthy = Enabled && Alive && Json.Bool(status, "ok") && age >= -5 && age <= Definition.MaxAge && modified >= started; # W3
+app/launcher/Supervisor.cs: TrayBusWiring.ComponentStaleRestart(Bus, Definition.Name); # W3
+app/launcher/Supervisor.cs: if (File.Exists(file)) modified = File.GetLastWriteTimeUtc(file); # W3
+app/launcher/Supervisor.cs: if (age > Definition.MaxAge || age < -5) Summary += " (данные устарели)"; # W3
+app/launcher/Supervisor.cs: public void CheckStale() { CheckStale(DateTime.UtcNow); } # W3
+app/launcher/Supervisor.cs: public void CheckStale(DateTime now) # W3
+app/launcher/Supervisor.cs: readonly StaleChecker staleChecker = new StaleChecker(); # W3
+app/launcher/Supervisor.cs: var modified = File.GetLastWriteTimeUtc(file); double age = (now - modified).TotalSeconds; # W3
+app/launcher/Supervisor.cs: var status = StatusView.Read(home, Definition.Name, maxAgeSec: 15); # W3
+app/launcher/Supervisor.cs: void KillStale(DateTime now, double ageSec) # W3
+app/launcher/SupervisorStale.cs: bool jumped = SupervisorStale.ClockJumped(lastCheckUtc, nowUtc, maxAgeSec); # W5
+app/launcher/SupervisorStale.cs: public SupervisorDecision Check(DateTime? fileModifiedUtc, DateTime nowUtc, int maxAgeSec, DateTime startedUtc, bool statusExpected = true) # W5
+app/launcher/SupervisorStale.cs: public sealed class StaleChecker # W5
+app/launcher/SupervisorStale.cs: public static SupervisorDecision Decide(DateTime fileModifiedUtc, DateTime nowUtc, int maxAgeSec, DateTime startedUtc) # W5
+app/launcher/SupervisorStale.cs: public static bool ClockJumped(DateTime lastCheckUtc, DateTime nowUtc, int maxAgeSec) # W5
+app/launcher/SupervisorStale.cs: public static bool IsStale(DateTime fileModifiedUtc, DateTime nowUtc, int maxAgeSec, DateTime startedUtc) # W5
+app/launcher/SupervisorStale.cs: public static class SupervisorStale # W5
+app/launcher/SupervisorStale.cs: public static int FuseMs(int maxAgeSec) # W5
+app/launcher/SupervisorStale.cs: return (nowUtc - lastCheckUtc).TotalMilliseconds > FuseMs(maxAgeSec) / 2; # W5
+app/launcher/SupervisorStale.cs: return AgeMs(fileModifiedUtc, nowUtc, startedUtc) > FuseMs(maxAgeSec); # W5
+app/launcher/SupervisorStale.cs: return AgeMs(fileModifiedUtc, nowUtc, startedUtc) > SupervisorStale.FuseMs(maxAgeSec) # W5
+app/launcher/SupervisorStale.cs: return IsStale(fileModifiedUtc, nowUtc, maxAgeSec, startedUtc) # W5
+app/launcher/SupervisorStale.cs: return Math.Max(StaleRestartFuseMs, 3 * maxAgeSec * 1000); # W5
+app/launcher/SupervisorStale.cs: return SupervisorStale.AgeMs(fileModifiedUtc ?? startedUtc, nowUtc, startedUtc, resyncUtc); # W5
+app/launcher/TrayBus.cs: internal static void ComponentStaleRestart(EventBus bus, string name) # W5
+app/launcher/TrayBus.cs: this.lastWrite = lastWrite ?? (p => File.GetLastWriteTimeUtc(p)); # W5
+app/launcher/TrayBus.cs: { if (bus != null) bus.Publish(BusTopics.ComponentStaleRestart, BusTopics.Sources.Tray, "name", name); } # W5
+app/launcher/TrayContext.Bus.cs: supervisorTickGate.Deliver(TryPostUi, () => { if (closing) return; foreach (var r in runtimes.ToArray()) r.CheckStale(); }); # W5
+app/launcher/TrayContext.UpdateRestart.cs: return Json.Strings(Json.Get(state, "runningComponents")).All(name => runtimes.Any(r => r.Definition.Name == name && (name == "disk" ? r.Alive && diskSession != null && diskSession.ServerConnected && (DateTime.UtcNow - diskUpdated).TotalSeconds <= 10 : r.Healthy))) && # W5
+app/launcher/TrayContext.cs: Control = StatusView.Read(home, "control", maxAgeSec: 30), Health = health, # W3
+app/launcher/TrayContext.cs: DiskFolders = (DateTime.UtcNow - diskUpdated).TotalSeconds <= 10 ? diskFolders : -1, DiskServerOnly = -1, # W3
+app/launcher/TrayContext.cs: await Task.Delay(15000,stop.Token); # W2
+app/launcher/TrayContext.cs: await Task.Delay(3000,stop.Token); # W2
+app/launcher/TrayContext.cs: bool windowPolls = (DateTime.UtcNow - ServerOperations.Updated(state)).TotalSeconds < 30; # W3
+app/launcher/TrayContext.cs: readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 1000 }; # W3
+app/launcher/TrayContext.cs: return (DateTime.UtcNow - diskUpdated).TotalSeconds <= 10 ? diskSummary : "Диск: состояние не получено"; # W3
+app/launcher/TrayContext.cs: try {var file=Path.Combine(home,"config.json");var written=File.GetLastWriteTimeUtc(file);if(written==settingsWritten)return;var latest=new Configuration(home).Data;config.Data.Clear();foreach(var pair in latest)config.Data[pair.Key]=pair.Value;settingsWritten=written; # W3
+app/launcher/TrayContext.cs: var vpn = StatusView.Read(home, "vpn", maxAgeSec: 3600); var tr = StatusView.Read(home, "transport", maxAgeSec: 3600); # W2
+app/launcher/TrayMenuModel.cs: (age = ((utcNow ?? DateTime.UtcNow) - stamp.ToUniversalTime()).TotalSeconds) > 360 || age < -5) # W3
+app/launcher/TrayMenuModel.cs: case "fail": case "failed": state = StatusView.StaleCandidate(candidate, transport) ? "ранее не работал; ожидается проверка" : "не работает"; break; # W3
+app/launcher/VpnStatus.cs: if (age >= 0 && age <= VpnWatchdog.VpnStatusMaxAgeSec) return status; # W3
+app/launcher/VpnStatus.cs: if (age >= 0 && age <= VpnWatchdog.VpnStatusMaxAgeSec) return status; # W3
+app/launcher/VpnWatchdog.cs: internal const int VpnStatusMaxAgeSec = 15; # W3
+app/launcher/control/Control.Status.ps1: $contact=Convert-TransportUtc $heartbeat.updatedAt # W3
+app/launcher/control/Control.Status.ps1: $result=@{ok=$false;summary='Управление выключено';processAlive=$false;managed=$false;lastContact=$null;updatedAt=[DateTime]::UtcNow.ToString('o')} # W3
+app/launcher/control/Control.Status.ps1: for($i=0;$i -lt 10;$i++){if(($parent -and $parent.HasExited) -or (Test-Path -LiteralPath (Join-Path $LauncherHome 'stop'))){return};Start-Sleep -Seconds 1} # W3
+build/Setup.Common.ps1: $c=Read-TransportJson $file;if($Name -eq 'transport' -and $c.configError){return $false};$age=($UtcNow.ToUniversalTime()-(Convert-TransportUtc $c.updatedAt)).TotalSeconds # W2
+build/Setup.Common.ps1: do{if(Test-StatusFresh $Root transport){return};Start-Sleep -Seconds 1}while([DateTime]::UtcNow -lt $deadline) # W2
+build/Wizard.Bootstrap.ps1: Start-Sleep -Milliseconds 100 # W2
+build/Wizard.Bootstrap.ps1: Start-Sleep -Milliseconds 500 # W2
+build/Wizard.Bootstrap.ps1: if($status -and $status.fatal -and (Convert-TransportUtc $status.updatedAt) -ge $StartedAt -and (-not $status.configRevision -or $status.configRevision -ceq $revision)){ # W2
+build/Wizard.Bootstrap.ps1: if($watch.Elapsed.TotalSeconds -ge $TimeoutSeconds){break} # W2
+build/Wizard.Bootstrap.ps1: if($watch.Elapsed.TotalSeconds -ge $nextWaiting){ # W2
+build/Wizard.Common.ps1: Start-Sleep -Seconds 1 # W2
+build/Wizard.Common.ps1: Start-Sleep -Seconds 3 # W2
+build/Wizard.Common.ps1: if(-not (Test-Path $status) -or (Get-Item $status).LastWriteTimeUtc -le $Mark -or -not (Test-StatusFresh $Root transport)){return $false} # W2
+build/Wizard.Common.ps1: while($watch.Elapsed.TotalSeconds -lt 120){ # W2
+build/Wizard.Engine.ps1: Start-Sleep -Milliseconds 200 # W2
+build/Wizard.Engine.ps1: while($watch.Elapsed.TotalSeconds -lt $Timeout){ # W2
+build/Wizard.Server.ps1: Start-Sleep -Milliseconds 100 # W5
+build/Wizard.Server.ps1: if($best -and (-not $earlier -or $expired -or ($now-$firstOk).TotalSeconds -ge $script:WizardProbeGrace)){$chosen=$best;break} # W5
+build/Wizard.Session.ps1: Start-Sleep -Milliseconds 25 # W5
+build/Wizard.Session.ps1: Start-Sleep -Milliseconds 30 # W5
+build/Wizard.Session.ps1: if($child.HasExited -or $watch.Elapsed.TotalSeconds -gt 12){throw 'Управляющий SSH-сеанс не запущен'} # W5
+build/Wizard.Session.ps1: if($watch.Elapsed.TotalSeconds -gt ($Timeout+15)){throw 'Таймаут управляющего SSH-сеанса'} # W5
+build/Wizard.Session.ps1: if(-not (Test-Path $ready) -or ([DateTime]::UtcNow-(Get-Item $ready).LastWriteTimeUtc).TotalSeconds -gt 8){throw 'Управляющий SSH-сеанс прерван; повторите раздел'} # W5
+build/Wizard.Session.ps1: if(Test-Path $ready){$live=([DateTime]::UtcNow-(Get-Item $ready).LastWriteTimeUtc).TotalSeconds -lt 5} # W5
+build/Wizard.Session.ps1: while(-not (Test-Path $ready) -or ([DateTime]::UtcNow-(Get-Item $ready).LastWriteTimeUtc).TotalSeconds -ge 5){ # W5
+build/Wizard.SessionHost.ps1: Start-Sleep -Milliseconds 20 # W5
+build/Wizard.SessionHost.ps1: foreach($file in @(Get-ChildItem -LiteralPath $Directory -Filter '*.reply.json')){if(([DateTime]::UtcNow-$file.LastWriteTimeUtc).TotalSeconds -gt 30){Remove-Item -LiteralPath $file.FullName -Force}} # W5
+build/Wizard.SessionHost.ps1: if(-not $active.Count -and ([DateTime]::UtcNow-$last).TotalSeconds -gt $idle){break} # W5
+build/Wizard.SessionHost.ps1: if(-not (Test-Path $ready) -or ([DateTime]::UtcNow-(Get-Item $ready).LastWriteTimeUtc).TotalMilliseconds -gt 500){Write-TransportJson $ready @{pid=$PID}} # W5
+build/server-ssh-user.sh: [ "$(stat -c %u "$managed_path")" = 0 ] # W5
+build/server-ssh-user.sh: if [ "$(stat -L -c %d:%i /dev/fd/9)" = "$(stat -c %d:%i "$ak")" ]; then # W5
+server/agy_usage_scrape.py: time.sleep(1) # W4
+server/agy_usage_scrape.py: time.sleep(1) # W4
+server/agy_usage_scrape.py: time.sleep(1) # W4
+server/agy_usage_scrape.py: time.sleep(1) # W4
+server/base_network.py: time.sleep(0.5) # W4
+server/happier_web.py: time.sleep(300) # W4
+server/lan_pc_access.py: time.sleep(1) # W4
+server/lan_vpn.py: time.sleep(0.2) # W4
+server/logs_in.py: files.append((info.st_mtime, info.st_size, name)) # W5
+server/oneshot_link.py: time.sleep(2); server.shutdown() # W4
+server/remoteagents_config.py: (current.st_ino, current.st_size, current.st_mtime_ns) == (before.st_ino, before.st_size, before.st_mtime_ns)) # W5
+server/server_components.py: time.sleep(.1) # W4
+server/server_components.py: time.sleep(.5) # W4
+server/server_recovery.py: time.sleep(.5) # W4
+server/server_recovery.py: time.sleep(.5) # W4
+server/tg-gateway/gateway.py: signature = (stat.st_mtime_ns, stat.st_ino, stat.st_size) # W5
+server/tg-gateway/tg_gateway_setup.py: time.sleep(0.2) # W4
+transport/Collect-NetState.ps1: if($clock.Elapsed.TotalSeconds -ge $Deadline){return $false} # W5
+transport/Collect-NetState.ps1: if($clock.Elapsed.TotalSeconds -ge $deadline -or !(Open-CollectorPool $deadline)){$timedOut=$true;break} # W5
+transport/Collect-NetState.ps1: if($clock.Elapsed.TotalSeconds -ge $deadline){$timedOut=$true;break} # W5
+transport/Collect-NetState.ps1: if($ready -and $clock.Elapsed.TotalSeconds -lt $collectionDeadline) { # W5
+transport/Get-TransportStatus.ps1: $s=Read-TransportJson (Join-Path $TransportHome 'status/transport.json');$age=([DateTime]::UtcNow-(Convert-TransportUtc $s.updatedAt)).TotalSeconds # W2
+transport/Route.Proxy.ps1: while(-not $process.HasExited){if(-not $inputClosed -and $inputCopy.IsCompleted){$process.StandardInput.Close();$inputClosed=$true};Start-Sleep -Milliseconds 20} # W5
+transport/Test-Transports.ps1: Start-Sleep -Milliseconds 250;$now=$sw.Elapsed.TotalSeconds # W5
+transport/Test-Transports.ps1: Start-Sleep -Seconds 5 # W5
+transport/Test-Transports.ps1: finally{foreach($p in $procs){Stop-TransportProcess $p};Start-Sleep -Milliseconds 500;Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue} # W5
+transport/Test-Transports.ps1: while($sw.Elapsed.TotalSeconds -lt $ProbeSeconds -and ($okAt.Count+$frozen.Count) -lt $paths.Count){ # W5
+transport/Test-Transports.ps1: while(-not (Receive-TransportProbe $probe)){Start-Sleep -Milliseconds 100} # W5
+transport/Transport.Common.ps1: $record.updatedAt=[DateTimeOffset]::FromUnixTimeMilliseconds($Now).UtcDateTime.ToString('o');$record.lastSeenMs=$Now # W2
+transport/Transport.Common.ps1: Start-Sleep -Milliseconds 50 # W2
+transport/Transport.Common.ps1: Write-TransportJson (Join-Path $Root 'status/vpn.json') @{ok=$Ok;enabled=$Enabled;state=$State;conflict=$Conflict;summary=$Summary;stage=$Stage;errorType=$ErrorType;updatedAt=[DateTime]::UtcNow.ToString('o')} # W2
+transport/Transport.Common.ps1: catch [IO.IOException]{if($attempt -eq 4){throw};Start-Sleep -Milliseconds 20} # W2
+transport/Transport.Common.ps1: if(-not $Preview){Write-TransportJson (Join-Path $Root 'state/transport-ports.json') ([ordered]@{schema=1;defaults=(Get-TransportPortDefaults);configured=$configured;effective=$effective;moved=@($moved.ToArray());updatedAt=[DateTime]::UtcNow.ToString('o')}) -Private} # W2
+transport/Transport.Common.ps1: try{$i=New-Object IO.FileInfo($Path);if($i.Exists){return $Path+'|'+$i.Length+'|'+$i.LastWriteTimeUtc.Ticks}}catch{} # W2
+transport/Transport.Daemon.ps1: Start-Sleep -Milliseconds 50 # W2
+transport/Transport.Daemon.ps1: if(($now-$lastStatus).TotalSeconds -ge $statusInterval){Publish-TransportStatus;Publish-DaemonBusStatus} # W2
+transport/clash_ws_fake.py: time.sleep(.03) # W5
+transport/entry/install-entry.sh: sleep 2; systemctl is-active "$UNIT" # W5
+
+[tests]
+app/RemoteAgents.Tests/SyncthingIntegrationTests.cs: File.WriteAllText(Path.Combine(work[1],"after-pause.txt"),"paused");await Task.Delay(1500); # W4
+app/RemoteAgents.Tests/SyncthingIntegrationTests.cs: await Task.Delay(1100);File.WriteAllText(Path.Combine(work[0],"from-a.txt"),"version-two"); # W4
+app/RemoteAgents.Tests/SyncthingIntegrationTests.cs: {var clock=Stopwatch.StartNew();while(clock.Elapsed<TimeSpan.FromSeconds(60)){if(await condition())return;await Task.Delay(200);}Assert.Fail("Timed out waiting for real Syncthing");} # W4
+app/launcher/UpdateSelfTests.cs: var fill = System.Threading.Tasks.Task.Run(() => { Thread.Sleep(250); Files.Atomic(shared, "{\"ok\":true}\r\n"); }); # W4
+app/launcher/UpgradeSelfTests.cs: { "components.json", Json.Encode(new[] { new { name = "fixture", title = "Fixture", exe = "powershell.exe", args = new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "{bundle}\\fixture.ps1", "-Home", "{home}" }, restart = "always", enabledByDefault = true, critical = true, healthMaxAgeSec = 5 } }) }, # W4
+app/launcher/UpgradeSelfTests.cs: { var watch = Stopwatch.StartNew(); while (watch.ElapsedMilliseconds < milliseconds) { if (condition()) return; Thread.Sleep(200); } throw new TimeoutException(); } # W4
+app/launcher/tests/ConfigApplyTests.cs: if (s == ConfigSections.Connection) { await Task.Delay(100, t); return new SectionOutcome { Pending = connectionPending, Summary = "канал недоступен" }; } # W4
+app/launcher/tests/ConfigApplyTests.cs: if (s == ConfigSections.Connection) { await Task.Delay(300); connectionDone = vpnClock.ElapsedMilliseconds; return new SectionOutcome { Ok = true }; } # W4
+app/launcher/tests/ConfigApplyTests.cs: starts[s] = clock.ElapsedMilliseconds; await Task.Delay(400, t); ends[s] = clock.ElapsedMilliseconds; # W4
+app/launcher/tests/ConfigE2E.cs: Thread.Sleep(1500); o = new SectionOutcome { Ok = true, Summary = "стенд (Windows/Happier/Syncthing недоступны на Linux)" }; break; # W4
+app/launcher/tests/DiskExplorerTests.cs: if (context.Request.QueryString["limit"] == null && since >= EventId) { Interlocked.Increment(ref LongPolls); int seconds = int.Parse(context.Request.QueryString["timeout"] ?? "30"); await Task.WhenAny(changed.Task, Task.Delay(seconds * 1000, stop.Token)); stop.Token.ThrowIfCancellationRequested(); } # W4
+app/launcher/tests/DiskExplorerTests.cs: int calls = api.Requests; await Task.Delay(200); Check(api.Requests == calls, "quiet long-poll does not poll statuses"); # W4
+app/launcher/tests/DiskExplorerTests.cs: { for (int i = 0; i < 150; i++) { if (predicate()) return; await Task.Delay(20); } throw new Exception("Disk Explorer: timed out waiting for event"); } # W4
+app/launcher/tests/HappierWebTests.cs: if (stallBody) { await Task.Delay(1800); return; } # W4
+app/launcher/tests/LanTunTests.cs: Check(!Probe(443, 300, stream => Thread.Sleep(1500), ms => Check(ms < 1200, "молчание укладывается в бюджет")), "молчащий TLS не подтверждает хост"); # W4
+app/launcher/tests/ProxyRelayTests.cs: Check(error.Length > 0 && (DateTime.UtcNow - started).TotalSeconds < 5, kind + ": silent proxy times out"); # W4
+app/launcher/tests/ProxyRelayTests.cs: if (mode == "silent") { Thread.Sleep(15000); return; } # W4
+app/launcher/tests/RollbackTests.cs: WithHome(LegacyUpdateAfterCompletedRollback); WithHome(StaleJournalWithForeignRecovery); WithHome(ImpossibleLiveJournal); # W4
+app/launcher/tests/RollbackTests.cs: static void StaleJournalWithForeignRecovery(string home) # W4
+app/launcher/tests/SupervisorStaleTests.cs: Check(!SupervisorStale.ClockJumped(DateTime.MinValue, t, 5), "first check is not a jump"); # W4
+app/launcher/tests/SupervisorStaleTests.cs: Check(!SupervisorStale.IsStale(fileWritten, now, 15, started), "fresh status -> not stale"); # W4
+app/launcher/tests/SupervisorStaleTests.cs: Check(!SupervisorStale.IsStale(fileWritten, nowAtBoundary, maxAge, started), "boundary at 45s IsStale is false"); # W4
+app/launcher/tests/SupervisorStaleTests.cs: Check(!SupervisorStale.IsStale(oldFile, now, 15, started), "file older than start -> not stale"); # W4
+app/launcher/tests/SupervisorStaleTests.cs: Check(Math.Abs(SupervisorStale.AgeMs(oldFile, started.AddSeconds(31), started) - 31000) < 1, "age counted from start"); # W4
+app/launcher/tests/SupervisorStaleTests.cs: Check(SupervisorStale.ClockJumped(t, woke, maxAge), "gap > fuse/2 is a clock jump"); # W4
+app/launcher/tests/SupervisorStaleTests.cs: Check(SupervisorStale.Decide(fileWritten, now, 15, started) == SupervisorDecision.None, "fresh status -> None"); # W4
+app/launcher/tests/SupervisorStaleTests.cs: Check(SupervisorStale.Decide(fileWritten, nowAtBoundary, maxAge, started) == SupervisorDecision.None, "boundary at 45s gives None"); # W4
+app/launcher/tests/SupervisorStaleTests.cs: Check(SupervisorStale.Decide(fileWritten, nowStale, maxAge, started) == SupervisorDecision.KillAndRestart, "age > fuse returns KillAndRestart"); # W4
+app/launcher/tests/SupervisorStaleTests.cs: Check(SupervisorStale.Decide(fileWritten, started.AddSeconds(269), 90, started) == SupervisorDecision.None, "269s < 270s fuse -> None"); # W4
+app/launcher/tests/SupervisorStaleTests.cs: Check(SupervisorStale.Decide(fileWritten, started.AddSeconds(271), 90, started) == SupervisorDecision.KillAndRestart, "271s > 270s fuse -> KillAndRestart"); # W4
+app/launcher/tests/SupervisorStaleTests.cs: Check(SupervisorStale.Decide(fileWritten, started.AddSeconds(29), 5, started) == SupervisorDecision.None, "29s < 30s fuse -> None"); # W4
+app/launcher/tests/SupervisorStaleTests.cs: Check(SupervisorStale.Decide(fileWritten, started.AddSeconds(31), 5, started) == SupervisorDecision.KillAndRestart, "31s > 30s fuse -> KillAndRestart"); # W4
+app/launcher/tests/SupervisorStaleTests.cs: Check(SupervisorStale.Decide(oldFile, now, 15, started) == SupervisorDecision.None, "file older than start -> None"); # W4
+app/launcher/tests/SupervisorStaleTests.cs: Check(SupervisorStale.Decide(oldFile, started.AddSeconds(29), 5, started) == SupervisorDecision.None, "old file, 29s after start -> None"); # W4
+app/launcher/tests/SupervisorStaleTests.cs: Check(SupervisorStale.Decide(oldFile, started.AddSeconds(31), 5, started) == SupervisorDecision.KillAndRestart, "old file, 31s after start -> kill"); # W4
+app/launcher/tests/SupervisorStaleTests.cs: Check(SupervisorStale.FuseMs(5) == 30000, "fuse for maxAge 5 is 30000 ms"); # W4
+app/launcher/tests/SupervisorStaleTests.cs: Check(SupervisorStale.FuseMs(90) == 270000, "fuse for maxAge 90 is 270000 ms"); # W4
+app/launcher/tests/SupervisorStaleTests.cs: Check(SupervisorStale.IsStale(fileWritten, nowStale, maxAge, started), "age > fuse IsStale is true"); # W4
+app/launcher/tests/SupervisorStaleTests.cs: Check(seen[0].Topic == BusTopics.ComponentStaleRestart, "topic matches ComponentStaleRestart"); # W4
+app/launcher/tests/SupervisorStaleTests.cs: StaleDecisionTriggersKillAndRestart(); # W4
+app/launcher/tests/SupervisorStaleTests.cs: TrayBusWiring.ComponentStaleRestart(bus, "transport"); # W4
+app/launcher/tests/SupervisorStaleTests.cs: TrayBusWiring.ComponentStaleRestart(null, "transport"); // null bus does not throw # W4
+app/launcher/tests/SupervisorStaleTests.cs: bus.Subscribe(BusTopics.ComponentStaleRestart, e => events.Add(e)); # W4
+app/launcher/tests/SupervisorStaleTests.cs: public static class SupervisorStaleTests # W4
+app/launcher/tests/SupervisorStaleTests.cs: static void StaleDecisionTriggersKillAndRestart() # W4
+app/launcher/tests/SupervisorStaleTests.cs: using (TrayBusWiring.WireSupervisorTick(bus, () => runtime.CheckStale(now))) { # W4
+app/launcher/tests/SupervisorStaleTests.cs: var c = new StaleChecker(); # W4
+app/launcher/tests/SupervisorStaleTests.cs: var c = new StaleChecker(); # W4
+app/launcher/tests/SupervisorStaleTests.cs: var c2 = new StaleChecker(); # W4
+app/launcher/tests/SupervisorStaleTests.cs: var cc = new StaleChecker(); # W4
+app/launcher/tests/SupervisorStaleTests.cs: var nowStale = fileWritten.AddSeconds(46); # W4
+app/launcher/tests/TrayBusTests.cs: StaleStatusFileIgnored(); # W4
+app/launcher/tests/TrayBusTests.cs: static void StaleStatusFileIgnored() # W4
+app/launcher/tests/VpnReasonsTests.cs: ButtonOffMakesE2eStale(); # W4
+app/launcher/tests/VpnReasonsTests.cs: StaleAttemptAndNoAttemptIgnored(); # W4
+app/launcher/tests/VpnReasonsTests.cs: static void ButtonOffMakesE2eStale() # W4
+app/launcher/tests/VpnReasonsTests.cs: static void StaleAttemptAndNoAttemptIgnored() # W4
+app/launcher/tests/VpnTests.cs: for (int i = 0; i < 5; i++) { lease.Pulse(); System.Threading.Thread.Sleep(50); } # W4
+app/launcher/tests/VpnTests.cs: while (waitingForNetwork.ElapsedMilliseconds < 5000) { lease.Pulse(); System.Threading.Thread.Sleep(50); } # W4
+app/launcher/tests/WindowModelTests.cs: Check(StatusView.Line("Связь", StatusView.Read(dir, "transport", maxAgeSec: 15), true).StartsWith("⏳"), "expired ok does not claim connectivity"); # W4
+app/launcher/tests/WindowModelTests.cs: Check(StatusView.Line("Связь", StatusView.Read(dir, "transport", maxAgeSec: 15), true).StartsWith("✅"), "actual CRLF transport file feeds connection line"); # W4
+app/launcher/tests/WindowModelTests.cs: Check(StatusView.Read(dir, "transport", maxAgeSec: 15).Count == 0, "old embedded timestamp cannot look fresh after file rewrite"); # W4
+app/launcher/tests/WindowModelTests.cs: Check(await Task.WhenAny(connection.Task, Task.Delay(3000)) == connection.Task, "Connection reports ready before long Account finishes"); # W4
+app/launcher/tests/WindowModelTests.cs: runner.Start(async token => { try { await Task.Delay(Timeout.Infinite, token); } catch (OperationCanceledException) { cancelled.SetResult(true); throw; } return null; }); # W4
+app/launcher/tests/lan-hosts-socks-test.sh: for _ in $(seq 50); do [[ -s $work/port ]] && break; sleep 0.1; done # W4
+app/launcher/tests/run.sh: sleep "$remaining" # W4
+app/launcher/tests/run.sh: sleep 60 # W4
+app/launcher/tests/test-config-bootstrap.ps1: $status=@{configRevision=$revision;ok=($state -eq 'ok');active='vless-relay-sparfum';candidates=@($row,@{tag='vless-direct';state='unknown';enabled=$true});updatedAt=[DateTime]::UtcNow.ToString('o')} # W4
+app/launcher/tests/test-config-bootstrap.ps1: Assert ($reply -eq 'ok' -and $script:calls -eq 2 -and $watch.Elapsed.TotalSeconds -ge 2.9) 'one repeat after 3 s' # W4
+app/launcher/tests/test-config-bootstrap.ps1: Assert ($watch.Elapsed.TotalSeconds -lt 1 -and $failure -like 'все варианты канала не прошли: *vless-direct: timeout*vless-relay-sparfum: connection-refused*') 'all fail exits immediately with reason codes' # W4
+app/launcher/tests/test-config-bootstrap.ps1: Start-Sleep -Milliseconds 700 # W4
+app/launcher/tests/test-config-bootstrap.ps1: Write-TransportJson (Join-Path $Root 'status/transport.json') ([ordered]@{configRevision=(Get-TransportRevision $Root);summary='fixture';ok=$true;active='vless-relay-sparfum';candidates=@(@{tag='vless-direct';enabled=$true},@{tag='vless-relay-sparfum';enabled=$true});updatedAt=[DateTime]::UtcNow.ToString('o');error=$null}) # W4
+app/launcher/tests/test-config-bootstrap.ps1: Write-TransportJson (Join-Path $root 'status/transport.json') ([ordered]@{configRevision='other';ok=$false;active=$null;candidates=@();updatedAt=[DateTime]::UtcNow.ToString('o');error='нет связи'}) # W4
+app/launcher/tests/test-config-bootstrap.ps1: Write-TransportJson (Join-Path $root 'status/transport.json') @{configRevision=$Revision;ok=$false;candidates=@($Rows);updatedAt=[DateTime]::UtcNow.ToString('o');error=$ErrorText} # W4
+app/launcher/tests/test-config-bootstrap.ps1: Write-TransportJson (Join-Path $root 'status/transport.json') @{configRevision='';fatal=$true;error='Нет настроек';updatedAt=[DateTime]::UtcNow.ToString('o')} # W4
+app/launcher/tests/test-config-bootstrap.ps1: Write-TransportJson (Join-Path $root 'status/transport.json') @{configRevision='';fatal=$true;error='старый fatal';updatedAt='2000-01-01T00:00:00Z'} # W4
+app/launcher/tests/test-config-bootstrap.ps1: Write-TransportJson (Join-Path $root 'status/transport.json') @{ok=$true;active='old-channel';updatedAt=[DateTime]::UtcNow.ToString('o')} # W4
+app/launcher/tests/test-config-bootstrap.ps1: function Start-WizardWorkingTransport($Root,$Bundle){[void]$script:events.Add('daemon');Write-TransportJson (Join-Path $Root 'status/transport.json') ([ordered]@{configRevision=(Get-TransportRevision $Root);ok=$true;active='vless-direct';candidates=@(@{tag='vless-direct';enabled=$true});updatedAt=[DateTime]::UtcNow.ToString('o')})} # W4
+app/launcher/tests/test-config-engine.ps1: Start-Sleep -Milliseconds 900 # W4
+app/launcher/tests/test-config-engine.ps1: while(-not (Test-Path $Gate)){if($watch.Elapsed.TotalSeconds -gt 20){throw 'gate timeout'};Start-Sleep -Milliseconds 20} # W4
+app/launcher/tests/test-config-engine.ps1: while(@($Actions|Where-Object {-not (Test-Path (Join-Path $root ($_+'.ready')))}).Count){if($watch.Elapsed.TotalSeconds -gt 20){throw 'children did not reach barrier'};Start-Sleep -Milliseconds 20} # W4
+app/launcher/tests/test-config-sync.py: if mode=='timeout': time.sleep(40);sys.exit(255) # W4
+app/launcher/tests/test-config-sync.py: if sys.argv[-2]!='127.0.0.3': time.sleep(40);sys.exit(255) # W4
+app/launcher/tests/test-config-sync.py: time.sleep(.05) # W4
+app/launcher/tests/test-control-supervision.ps1: Write-TransportJson (Join-Path $foreign 'heartbeat.json') @{ok=$true;pid=201;updatedAt=$now.ToString('o')} # W4
+app/launcher/tests/test-control-supervision.ps1: Write-TransportJson (Join-Path $managed 'heartbeat.json') @{ok=$true;pid=101;updatedAt=$now.ToString('o')} # W4
+app/launcher/tests/test-disk-explorer-engine.py: time.sleep(.02) # W4
+app/launcher/tests/test-disk-safety-engine.py: time.sleep(.02) # W4
+app/launcher/tests/test-disk-safety-engine.py: time.sleep(.02) # W4
+app/launcher/tests/test-first-install.ps1: Assert ($failed -and $readyWatch.Elapsed.TotalSeconds -ge 1 -and $readyWatch.Elapsed.TotalSeconds -lt 3) 'REST wait is bounded and reports the unavailable running engine' # W4
+app/launcher/tests/test-first-install.ps1: Start-Sleep -Milliseconds 150 # W4
+app/launcher/tests/test-network.ps1: function Get-Calls([string]$Pattern){@(Get-ChildItem $log -Filter $Pattern|Sort-Object LastWriteTime)} # W4
+app/launcher/tests/test-server-health.py: if mode=='timeout':time.sleep(30) # W4
+app/launcher/tests/test-wizard-onboarding.ps1: Assert ($watch.Elapsed.TotalSeconds -lt $script:WizardProbeTimeout) ('hop chosen within one probe timeout, not the sum of timeouts: '+[int]$watch.Elapsed.TotalSeconds+' s') # W4
+app/launcher/tests/test-wizard-onboarding.ps1: Assert ($watch.Elapsed.TotalSeconds -lt 1.5*$script:WizardProbeTimeout) ('all routes silent: one timeout in total, not three: '+[int]$watch.Elapsed.TotalSeconds+' s') # W4
+app/launcher/tests/test_config_e2e.py: time.sleep(.03) # W4
+app/launcher/tests/test_config_e2e.py: time.sleep(.2) # W4
+app/launcher/tests/test_config_e2e.py: time.sleep(.3) # W4
+app/launcher/tests/test_config_e2e.py: time.sleep(.3) # W4
+app/launcher/tests/test_config_e2e.py: time.sleep(1) # W4
+app/launcher/tests/test_config_e2e.py: time.sleep(1) # W4
+app/launcher/tests/test_run_modes.py: time.sleep(.2 if name=='offline' else .05) # W4
+app/launcher/tests/test_server_operations.py: time.sleep(0.05) # W4
+app/launcher/tests/test_server_operations.py: time.sleep(0.05) # W4
+app/launcher/tests/test_server_operations.py: time.sleep(0.05) # W4
+app/launcher/tests/test_server_operations.py: time.sleep(0.3) # W4
+app/launcher/tests/test_server_operations.py: while [ ! -f "$HOME/release-$1" ]; do sleep 0.05; done # W4
+app/launcher/tests/test_wizard_boundary.py: time.sleep(.02) # W4
+app/launcher/tests/windows-smoke.ps1: Start-Sleep -Seconds 1 # W4
+app/launcher/tests/windows-smoke.ps1: while($true){Start-Sleep -Seconds 1} # W4
+app/launcher/tests/windows-smoke.ps1: while((Get-Date) -lt $until){try{if(& $Test){return}}catch{};Start-Sleep -Milliseconds 250} # W4
+server/tests/autodeploy/happier_web.py: time.sleep(.2) # W4
+server/tests/autodeploy/run.py: time.sleep(.2) # W4
+server/tests/autodeploy/run.py: time.sleep(.2) # W4
+server/tests/autodeploy/run.py: time.sleep(1) # W4
+server/tests/autodeploy/run.py: time.sleep(2) # W4
+server/tests/resource_guard.py: time.sleep(60) # W4
+server/tests/test_config_export.py: time.sleep(.02) # W4
+server/tests/test_config_export.py: time.sleep(1.1) # W4
+server/tg-gateway/test_gateway.py: time.sleep(0.02) # W4
+server/tg-gateway/test_gateway.py: time.sleep(0.02) # W4
+server/tg-gateway/test_gateway.py: time.sleep(0.05) # W4
+server/tg-gateway/test_gateway.py: time.sleep(0.05) # W4
+server/tg-gateway/test_gateway.py: time.sleep(0.1) # W4
+server/tg-gateway/test_gateway.py: time.sleep(0.1)  # Allow the readiness probe's worker to release its slot. # W4
+server/tg-gateway/test_gateway.py: time.sleep(2.05) # W4
+server/tg-gateway/test_gateway.py: time.sleep(3) # W4
+server/tg-gateway/test_install.py: time.sleep(.02) # W4
+server/tg-gateway/test_install.py: time.sleep(.3) # W4
+transport/test-collect-netstate.ps1: Assert ($timer.Elapsed.TotalSeconds -lt 15) 'probe timeout blocked next probe' # W4
+transport/test-collect-netstate.ps1: Assert ($timer.Elapsed.TotalSeconds -lt 15) 'timed out runspace blocked collection/cleanup' # W4
+transport/test-collect-netstate.ps1: Assert ($timer.Elapsed.TotalSeconds -lt 6) 'overall deadline exceeded' # W4
+transport/test-config-sync-preflight.py: except OSError:time.sleep(.03) # W4
+transport/test-diagnostics.py: while True: time.sleep(.1) # W4
+transport/test-diagnostics.py: while True: time.sleep(.1) # W4
+transport/test-engine-loopback.py: time.sleep(.02) # W4
+transport/test-engine-loopback.py: time.sleep(.03) # W4
+transport/test-engine-loopback.py: time.sleep(.1) # W4
+transport/test-engine-loopback.py: time.sleep(.1) # W4
+transport/test-engine-loopback.py: time.sleep(1) # W4
+transport/test-server-catalog.py: f=self.home/'.config/remoteagents/transport-catalog.json';before=f.stat().st_mtime_ns # W4
+transport/test-server-catalog.py: self.assertEqual(self.get(),self.empty);self.assertEqual(f.stat().st_mtime_ns,before) # W4
+transport/test-transport-bus.ps1: $large=[ordered]@{phase='ok';ok=$true;candidates=@(('x'*10000));summary=('я'*10000);updatedAt='excluded'} # W4
+transport/test-transport-config.ps1: $bytes=New-Object byte[] 16384;$sink.Write($bytes,0,$bytes.Length);Start-Sleep -Milliseconds 20;$sink.Write($bytes,0,$bytes.Length) # W4
+transport/test-transport-config.ps1: $helperText=[IO.File]::ReadAllText($helperFile);$helperTime=[IO.File]::GetLastWriteTimeUtc($helperFile) # W4
+transport/test-transport-config.ps1: Assert ($again.password -ceq $helper.password -and [IO.File]::GetLastWriteTimeUtc($helperFile) -eq $helperTime) 'секрет создаётся один раз, чтение его не переписывает' # W4
+transport/test-transport-config.ps1: Write-TransportJson (Join-Path $work 'status/transport.json') @{ok=$true;updatedAt=[DateTime]::UtcNow.AddMinutes(1).ToString('o');candidates=@()} # W4
+transport/test-transport-config.ps1: try{Set-TransportSelector $apiOptions 'test-secret' 'hy2-edge';$ready=$true;break}catch{Start-Sleep -Milliseconds 100} # W4
+transport/test-transport-daemon.py: assert_clean(); time.sleep(1.2); assert_clean() # W4
+transport/test-transport-daemon.py: before=probes(); direct_before=len(direct_calls); time.sleep(20) # W4
+transport/test-transport-daemon.py: elif mode=='dead': time.sleep(60) # W4
+transport/test-transport-daemon.py: if mode=='dead': time.sleep(15) # W4
+transport/test-transport-daemon.py: os.write(1,b'x'*16384); time.sleep(60) # W4
+transport/test-transport-daemon.py: time.sleep(.02) # W4
+transport/test-transport-daemon.py: time.sleep(.02) # W4
+transport/test-transport-daemon.py: time.sleep(.05 if port==26000 else .15) # W4
+transport/test-transport-daemon.py: time.sleep(.08) # W4
+transport/test-transport-daemon.py: time.sleep(.15) # W4
+transport/test-transport-daemon.py: time.sleep(.4); baseline=len(puts()) # W4
+transport/test-transport-daemon.py: time.sleep(max(0,15-(time.monotonic()-ready_at))) # W4
+transport/test-transport-daemon.py: until(lambda: status().get('phase')=='ok'); time.sleep(.5) # W4
+transport/test-transport-daemon.py: while (root/'hold-validation').exists() and time.monotonic()<deadline: time.sleep(.02) # W4
+transport/test-transport-daemon.py: while True: time.sleep(.1) # W4
+transport/test-transport-events.py: if mode=='stall': time.sleep(30) # W4
+transport/test-transport-events.py: if mode=='timeout': time.sleep(30) # W4
+transport/test-transport-events.py: time.sleep(.03) # W4
+transport/test-transport-events.py: time.sleep(.03) # W4
+transport/test-transport-events.py: time.sleep(.09) # W4
+transport/test-transport-events.py: time.sleep(.1) # W4
+transport/test-transport-events.py: time.sleep(.2)  # Exercise a read reset rather than racing async connect. # W4
+transport/test-transport-events.py: time.sleep(.2)  # Let the client finish connect and enter the banner read. # W4
+transport/test-transport-json.ps1: [void]$fill.AddScript({param($common,$file) . $common;Start-Sleep -Milliseconds 250;Write-TransportJson $file @{ok=$true}}).AddArgument($common).AddArgument($file) # W4
+transport/test-transport-json.ps1: try{[IO.File]::WriteAllText((Join-Path $work 'locked'),'');Start-Sleep -Milliseconds 350}finally{$s.Dispose()} # W4
+transport/test-transport-json.ps1: while(-not (Test-Path (Join-Path $work 'locked'))){if($watch.Elapsed.TotalSeconds -gt 15){throw 'Блокировка не создана'};Start-Sleep -Milliseconds 10} # W4
+transport/test-transport-leak.ps1: $pf=Join-Path $h 'profile.json';[IO.File]::WriteAllText($pf,'{"p":11111}');$stamp0=(Get-Item $pf).LastWriteTimeUtc # W4
+transport/test-transport-leak.ps1: Assert ($parsed.updatedAt -and $parsed.error -eq 'другое' -and $script:lastStatusWriteMs -gt ((Get-DaemonTime)-5000)) 'статус: сердцебиение обновляет файл' # W4
+transport/test-transport-leak.ps1: [IO.File]::WriteAllText($pf,'{"p":22222}');(Get-Item $pf).LastWriteTimeUtc=$stamp0 # W4
+transport/test-transport-liveness.py: if port==26000 and not (root/'wake-all').exists(): time.sleep(60) # W4
+transport/test-transport-liveness.py: time.sleep(%d) # W4
+transport/test-transport-liveness.py: time.sleep(.05) # W4
+transport/test-transport-liveness.py: time.sleep(.2) # W4
+transport/test-transport-liveness.py: time.sleep(TIMEOUT + 3) # W4
+transport/test-transport-liveness.py: while True: time.sleep(.1) # W4
+transport/test-transport-quality.ps1: $m.networks.n00=@{updatedAt='2026-01-01T00:00:00Z';candidates=@('newest')} # W4

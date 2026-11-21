@@ -23,6 +23,7 @@ namespace RemoteAgents.Launcher
             healthBoard = new HealthBoard(HealthBoard.ExpectedBlocks(state), DateTime.UtcNow,
                 runtimes.Where(r => r.Definition.Critical && r.Enabled).Select(r => r.Definition.Name),
                 accepted: UpgradeInstaller.ImageHealthAccepted(home));
+            // Предохранитель (конституция 4а): последний block.ready недоступен при зависании блока; UpdateNoProgressFuseMs вызывает отказ/откат, успех не объявляет.
             healthFuse = new System.Threading.Timer(_ => HealthFuse(), null, Timeout.Infinite, Timeout.Infinite); // timer-ok: C — последний block.ready недоступен при зависании блока; UpdateNoProgressFuseMs даёт только отказ/откат.
             busParts.Add(healthFuse);
             if (!healthBoard.Accepted) ArmHealthFuse();

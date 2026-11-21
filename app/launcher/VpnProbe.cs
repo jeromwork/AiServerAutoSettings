@@ -20,6 +20,7 @@ namespace RemoteAgents.Launcher
         internal readonly Task<bool> Result;
         internal VpnProbe(Uri url, IPAddress address, int tunIndex, int timeoutMs = VpnWatchdog.ProbeTimeoutMs)
         {
+            // timer-ok: D — Предохранитель (конституция 4а): ответ HTTPS недоступен при зависшем TCP/TLS; закрывает клиент, успех не объявляет.
             deadline = new System.Threading.Timer(_ => client.Close(), null, timeoutMs, System.Threading.Timeout.Infinite);
             Result = Check(url, address, tunIndex);
         }

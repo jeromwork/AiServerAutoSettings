@@ -59,6 +59,7 @@ namespace RemoteAgents.Launcher
             var request = (HttpWebRequest)WebRequest.Create(local + "_remoteagents/health");
             request.Proxy = null; request.AllowAutoRedirect = false; request.Method = "GET";
             request.Timeout = request.ReadWriteTimeout = 1500;
+            // timer-ok: D — Предохранитель (конституция 4а): ответ health недоступен при зависшем HTTP; Abort прерывает запрос, успех не объявляет.
             using (var timer = new Timer(_ => request.Abort(), null, 1500, Timeout.Infinite)) {
                 try {
                     using (var response = (HttpWebResponse)request.GetResponse()) {
