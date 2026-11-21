@@ -13,6 +13,8 @@ $parent=$null;$mutex=$null;$locked=$false;$settings=$null;$paths=$null;$exitCode
 $pin=[pscustomobject]@{mode='auto';tag=$null};$nextControl=[DateTime]::MinValue;$revision='';$reloadJob=$null;$reloadError=$null;$failedRevision=$null;$pendingRevision=$null;$nextReload=[DateTime]::MinValue
 $portConflict=$null;$bindRetry=$null;$startFailures=0;$bindState=@{failures=0;none=$false};$nextBindRetry=[DateTime]::MinValue;$liveRound=$false;$initialRound=$false
 $reader=$null;$directCheck=$null;$pathChecks=@{};$gateOkUntil=@{};$decision=$null;$verdict=$null;$eventQueue=@();$lastRecoveryAt=$null;$pathCheckStartedAt=@{}
+# §4б: at most 512 pending events; overflow drops the oldest, counted in transport.mem.
+$DaemonEventLimit=512;$script:daemonEventsDropped=[long]0;$script:daemonCheckPolls=[long]0;$script:daemonEventsQueued=[long]0;$script:daemonProbesStarted=[long]0
 $diagnosticContext=$null;$liveDeferred=@();$tunnelReadyUntil=@{};$daemonStarted=[DateTime]::Now;$checkingSince=[DateTime]::UtcNow;$stopping=$false
 try{$daemonStarted=(Get-Process -Id $PID).StartTime}catch{}
 $script:engineAttempted=$false;$checkingSince=$daemonStarted.ToUniversalTime()
@@ -43,6 +45,8 @@ function Reset-DaemonDecision {
     $script:decision=New-TransportDecisionState -Now (Get-DaemonTime) -CurrentTag $active
     if($previous){$decision.switches=$previous.switches;$decision.lastSwitchAt=$previous.lastSwitchAt}
     $script:verdict=$null;$script:lastRecoveryAt=$null
+    # A new generation cannot retain tags removed from configuration.
+    $script:pathLogState=@{}
     foreach($r in $rows){$r.penaltyStep=0;$r.penaltyUntil=$null;$r.suspect=$false}
 }
 function Stop-DaemonObservation([switch]$EngineRestart) {
@@ -57,7 +61,7 @@ function Stop-DaemonObservation([switch]$EngineRestart) {
     }
     foreach($ticket in @($pathChecks.Values)){
         try{Stop-TransportPathCheck $ticket.handle}catch{}
-        if($EngineRestart){$script:eventQueue+=@(New-DaemonEvent 'path-check' $ticket.tag 'cancelled')}
+        if($EngineRestart){Add-DaemonQueuedEvent (New-DaemonEvent 'path-check' $ticket.tag 'cancelled')}
     }
     $pathChecks.Clear();$gateOkUntil.Clear();$pathCheckStartedAt.Clear()
     if(-not $EngineRestart){Reset-DaemonDecision}
@@ -107,6 +111,7 @@ function Start-DaemonPath([string]$Tag,[switch]$Gate) {
     }catch{$ticket.until=Get-DaemonTime}
 }
 function Receive-DaemonChecks {
+    $script:daemonCheckPolls++
     if($directCheck){
         $event=$null
         try{if($directCheck.handle){$event=Receive-TransportDirectCheck $directCheck.handle}}catch{$directCheck.until=Get-DaemonTime}
@@ -115,7 +120,7 @@ function Receive-DaemonChecks {
             try{Stop-TransportDirectCheck $directCheck.handle}catch{};$script:directCheck=$null
             # Timestamp delivery after the reducer's direct-check request.
             $event.at=Get-DaemonTime
-            $script:eventQueue+=@($event)
+            Add-DaemonQueuedEvent $event
         }
     }
     foreach($tag in @($pathChecks.Keys)){
@@ -130,10 +135,31 @@ function Receive-DaemonChecks {
     }
 }
 $script:pathLogState=@{}
+function Add-DaemonQueuedEvent($Event) {
+    $script:daemonEventsQueued++
+    if($eventQueue.Count -ge $DaemonEventLimit){
+        [Array]::Copy($eventQueue,1,$eventQueue,0,$DaemonEventLimit-1)
+        $script:eventQueue[$DaemonEventLimit-1]=$Event
+        $script:daemonEventsDropped++
+    }else{$script:eventQueue+=@($Event)}
+}
+function Get-DaemonRetentionFields {
+    # Fixed keys only; counts are sampled on the existing memory tick, never on a new timer.
+    [ordered]@{events=$eventQueue.Count;eventsDropped=$daemonEventsDropped;eventsQueued=$daemonEventsQueued;checkPolls=$daemonCheckPolls;probesStarted=$daemonProbesStarted;
+        probes=$probes.Count;pathChecks=$pathChecks.Count;directChecks=[int][bool]$directCheck;reloadJobs=[int][bool]$reloadJob;
+        pathLog=$pathLogState.Count;deferred=$liveDeferred.Count;tunnels=$tunnelChildren.Count;
+        decisionPaths=$(if($decision){$decision.paths.Count}else{0});decisionHistory=$(if($decision){$decision.history.Count}else{0});
+        decisionPending=$(if($decision){$decision.pending.Count}else{0});networks=$(if($memory){$memory.networks.Count}else{0});
+        wsMessages=$(if($reader){$reader.Messages}else{0});wsSamples=$(if($reader){$reader.RetainedSamples}else{0});
+        wsContexts=$(if($reader){$reader.RetainedContexts}else{0});wsQueued=$(if($reader){$reader.QueuedEvents}else{0});
+        wsDropped=$(if($reader){$reader.Dropped}else{0});wsOversized=$(if($reader){$reader.OversizedSnapshots}else{0})}
+}
 function Write-DaemonPathCheck($E) {
     # path.check: только при смене результата у кандидата или при отказе (иначе журнал заполнят успешные пробы).
     if($E.code -in @('cancelled','canceled','operation-canceled','operation-cancelled','context-canceled','aborted')){return}
     $result=if($E.code -eq 'ok'){'ok'}else{'fail'}
+    # §4б: last-value storage only for the current configured allowlist.
+    if($E.tag -notin @($paths.Candidates.tag)){return}
     $previous=$script:pathLogState[[string]$E.tag];$script:pathLogState[[string]$E.tag]=$result
     if($result -eq 'ok' -and $previous -eq 'ok'){return}
     $level=if($result -eq 'ok'){'INFO'}else{'WARN'}
@@ -154,7 +180,7 @@ function Add-DaemonEvent($Event) {
         $r=$rows|Where-Object {$_.tag -eq $e.tag}|Select-Object -First 1
         if($r){$r.state='ok';$r.checkedAt=[DateTime]::UtcNow.ToString('o');$r.lastOkAt=$r.checkedAt;Save-TransportMemory $root $memory $network.id $rows}
     }
-    $script:eventQueue+=@($e)
+    Add-DaemonQueuedEvent $e
 }
 function Invoke-DaemonDecision {
     Receive-DaemonChecks
@@ -287,7 +313,7 @@ function Start-DaemonProbe($Candidate) {
     if($probes.ContainsKey($Candidate.tag)){return}
     $pathCheckStartedAt[$Candidate.tag]=Get-DaemonTime
     Write-DaemonWizardProgress ('Проверяю вариант связи: '+$Candidate.title+'… (до '+$settings.Options.probeTimeoutSec+' с)')
-    try{$probes[$Candidate.tag]=Start-TransportProbe $settings.Profile $Candidate 65536 $settings.Options 'live'}
+    try{$probes[$Candidate.tag]=Start-TransportProbe $settings.Profile $Candidate 65536 $settings.Options 'live';$script:daemonProbesStarted++}
     catch{Add-DaemonEvent (New-DaemonEvent 'path-check' $Candidate.tag 'process-exited')}
 }
 function Start-DaemonRecovery {
@@ -604,7 +630,9 @@ try{
             $nextMem=$now.AddSeconds((Get-TransportMemIntervalSec))
             $memLimitMb=400;if($settings){$memLimitMb=[int]$settings.Options.memSoftLimitMb}
             $sample=Get-TransportMemSample
-            Write-RaLog (Join-Path $root 'logs') 'transport' 'INFO' 'transport' 'transport.mem' (Get-TransportMemFields $sample $memLimitMb)
+            $memFields=Get-TransportMemFields $sample $memLimitMb
+            $retention=Get-DaemonRetentionFields;foreach($key in $retention.Keys){$memFields[$key]=$retention[$key]}
+            Write-RaLog (Join-Path $root 'logs') 'transport' 'INFO' 'transport' 'transport.mem' $memFields
             # Предохранитель (конституция 4а): событие утечки памяти недоступно, если демон течёт; при срабатывании — чистый выход с кодом 75 и перезапуск Supervisor, успех не объявляет.
             if(Test-TransportMemoryHigh $sample.private $memLimitMb){
                 Write-RaLog (Join-Path $root 'logs') 'transport' 'WARN' 'transport' 'transport.mem-high' (Get-TransportMemFields $sample $memLimitMb)
