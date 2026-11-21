@@ -368,8 +368,142 @@
     },
     "switch": {
       "type": "object",
-      "additionalProperties": false,
       "properties": {
+        "blipMs": {
+          "type": "object",
+          "properties": {
+            "default": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 300000
+            },
+            "min": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 300000
+            },
+            "max": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 300000
+            },
+            "hint": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 2048
+            }
+          },
+          "additionalProperties": false
+        },
+        "hardFailMs": {
+          "type": "object",
+          "properties": {
+            "default": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 300000
+            },
+            "min": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 300000
+            },
+            "max": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 300000
+            },
+            "hint": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 2048
+            }
+          },
+          "additionalProperties": false
+        },
+        "stageMs": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 300000
+          },
+          "maxItems": 2,
+          "uniqueItems": true,
+          "minItems": 2
+        },
+        "classK": {
+          "type": "object",
+          "properties": {
+            "fixed": {
+              "type": "number",
+              "minimum": 0.01,
+              "maximum": 10
+            },
+            "wifi": {
+              "type": "number",
+              "minimum": 0.01,
+              "maximum": 10
+            },
+            "mobile-hotspot": {
+              "type": "number",
+              "minimum": 0.01,
+              "maximum": 10
+            },
+            "mobile": {
+              "type": "number",
+              "minimum": 0.01,
+              "maximum": 10
+            },
+            "hint": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 2048
+            }
+          },
+          "additionalProperties": false
+        },
+        "minStayMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600000
+        },
+        "flapWindowMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1800000
+        },
+        "flapSwitches": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "probeBudgetKiBPer10m": {
+          "type": "object",
+          "properties": {
+            "default": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1048576
+            },
+            "mobile": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1048576
+            },
+            "hint": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 2048
+            }
+          },
+          "additionalProperties": false
+        },
+        "tspuMemoryHours": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 720
+        },
         "stallSeconds": {
           "type": "integer",
           "minimum": 1,
@@ -381,8 +515,14 @@
           "minimum": 1,
           "maximum": 1024,
           "default": 2
+        },
+        "hint": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2048
         }
-      }
+      },
+      "additionalProperties": false
     },
     "priority": {
       "type": "array",

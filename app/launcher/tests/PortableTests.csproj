@@ -99,6 +99,11 @@
     <IntermediateOutputPath>obj/$(Configuration)/main-screen-tests/</IntermediateOutputPath>
     <OutputPath>bin/$(Configuration)/main-screen-tests/</OutputPath>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(NetClassTests)' == 'true'">
+    <StartupObject>RemoteAgents.Launcher.NetClassTests</StartupObject>
+    <IntermediateOutputPath>obj/$(Configuration)/netclass-tests/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/netclass-tests/</OutputPath>
+  </PropertyGroup>
   <ItemGroup>
     <Compile Include="../HelperUpdate.cs" />
     <Compile Include="HelperUpdateTests.cs" />
@@ -139,6 +144,8 @@
     <Compile Include="HealthJournalTests.cs" />
     <Compile Include="../NetNotify.cs" />
     <Compile Include="../NetRoute.cs" />
+    <Compile Include="../NetClass.cs" />
+    <Compile Include="NetClassTests.cs" />
     <Compile Include="../VpnReady.cs" />
     <Compile Include="VpnReadyTests.cs" />
     <Compile Include="NetNotifyTests.cs" />

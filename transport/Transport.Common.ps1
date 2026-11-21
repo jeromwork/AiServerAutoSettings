@@ -625,6 +625,9 @@ function Read-TransportSettings([string]$Root) {
     if([string]$s.channelSshAddress -notmatch '\A127\.\d{1,3}\.\d{1,3}\.\d{1,3}\z' -or [string]$s.channelSshAddress -eq '127.0.0.1'){throw 'Неверный адрес входа канала'}
     foreach($k in @('stallSeconds','probeTimeoutSec','restartDelaySec')){if([double]$s[$k] -le 0){throw 'Параметры transport должны быть положительными'}}
     if($s.memSoftLimitMb -is [bool] -or $s.memSoftLimitMb -isnot [ValueType] -or [double]$s.memSoftLimitMb -ne [Math]::Floor([double]$s.memSoftLimitMb) -or [double]$s.memSoftLimitMb -lt 64 -or [double]$s.memSoftLimitMb -gt 16384){throw 'Неверный transport.memSoftLimitMb'}
+    # The same semantic validation as Q; never accept inverted ranges/stages at runtime.
+    . (Join-Path $PSScriptRoot 'Transport.Quality.ps1')
+    $null=Get-TransportQualityConfig @{transport=$t}
     $switch=Get-TransportValue $t 'switch' $null
     if($null -ne $switch -and $switch -isnot [Collections.IDictionary] -and $switch -isnot [pscustomobject]){throw 'transport.switch должен быть объектом'}
     foreach($item in @(@('stallSeconds',8,3600),@('stallConns',2,1024))){
@@ -1236,8 +1239,48 @@ function Read-TransportMemory([string]$Root) {
         @{version=1;networks=$n}
     }catch{Write-TransportLog $Root 'memory-invalid';@{version=1;networks=@{}}}
 }
-function Save-TransportMemory([string]$Root,$Memory,[string]$Network,$Rows) {
-    if(-not $Network){return};$Memory.networks[$Network]=@{updatedAt=[DateTime]::UtcNow.ToString('o');candidates=@($Rows)}
+function Get-TransportMemoryLastSeen($Record) {
+    $last=Get-TransportValue $Record 'lastSeenMs' $null
+    if($null -ne $last){return [long]$last}
+    $date=[DateTimeOffset]::MinValue
+    if([DateTimeOffset]::TryParse([string](Get-TransportValue $Record 'updatedAt' ''),[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::AssumeUniversal,[ref]$date)){return $date.ToUnixTimeMilliseconds()}
+    return 0L
+}
+function Limit-TransportMemory($Memory,[long]$Now) {
+    # Both save paths share the disk cap: latest appearance wins; ties evict ordinal id first.
+    foreach($id in @($Memory.networks.Keys)){
+        $old=$Memory.networks[$id];$record=@{}
+        if($old -is [Collections.IDictionary]){foreach($key in $old.Keys){$record[$key]=$old[$key]}}
+        else{foreach($property in $old.PSObject.Properties){$record[$property.Name]=$property.Value}}
+        $record.lastSeenMs=Get-TransportMemoryLastSeen $record
+        $quality=Get-TransportValue $record 'quality' $null
+        if($quality){
+            $tspu=Get-TransportValue $quality 'tspu' $null;$live=@{}
+            $tags=if($tspu -is [Collections.IDictionary]){@($tspu.Keys)}else{@($tspu.PSObject.Properties.Name)}
+            foreach($tag in $tags){$v=Get-TransportValue $tspu $tag $null;if([long](Get-TransportValue $v 'until' 0) -gt $Now){$live[$tag]=$v}}
+            if($live.Count){$record.quality=@{tspu=$live}}else{$record.Remove('quality')}
+        }
+        $Memory.networks[$id]=$record
+    }
+    while($Memory.networks.Count -gt 32){
+        $oldest=$null
+        foreach($id in $Memory.networks.Keys){
+            if($null -eq $oldest -or $Memory.networks[$id].lastSeenMs -lt $Memory.networks[$oldest].lastSeenMs -or
+                ($Memory.networks[$id].lastSeenMs -eq $Memory.networks[$oldest].lastSeenMs -and [string]::CompareOrdinal($id,$oldest) -lt 0)){$oldest=$id}
+        }
+        $Memory.networks.Remove($oldest)
+    }
+}
+function Save-TransportMemory([string]$Root,$Memory,[string]$Network,$Rows,[long]$Now=-1) {
+    if(-not $Network){return}
+    if($Now -lt 0){$Now=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()}
+    # Q owns quality metadata on the same network record; candidate saves must retain it.
+    $record=@{};$old=$Memory.networks[$Network]
+    if($old -is [Collections.IDictionary]){foreach($key in $old.Keys){$record[$key]=$old[$key]}}
+    elseif($old){foreach($property in $old.PSObject.Properties){$record[$property.Name]=$property.Value}}
+    $record.updatedAt=[DateTimeOffset]::FromUnixTimeMilliseconds($Now).UtcDateTime.ToString('o');$record.lastSeenMs=$Now
+    $record.candidates=@($Rows);$Memory.networks[$Network]=$record
+    Limit-TransportMemory $Memory $Now
     Write-TransportJson (Join-Path $Root 'state/transport-memory.json') $Memory -Private
 }
 function Get-TransportRemembered($Memory,[string]$Network,$Candidates) {

@@ -364,3 +364,131 @@ client.json только для уже заданного SSH-узла.
 ## Входы помощника
 
 См. [Локальные сети и VPN](VPN-LAN.md): действующая схема, настройки, помощник, диагностика и приёмка.
+
+## Класс сети и качество (Q)
+
+`NetClassPublisher` в лаунчере реагирует на `win.iface.changed`, `win.route.changed`,
+`win.addr.changed`, `net.change` и готовность нового демона. Он публикует
+`net.change {id, class, ifIndex, classifier:q}` без опроса по таймеру. Профиль WinRT
+сопоставляется с физическим адаптером default-маршрута по GUID: WWAN → `mobile`,
+Wi-Fi с Fixed/Variable, metered, roaming или лимитом → `mobile-hotspot`, прочий
+Wi-Fi → `wifi`, Ethernet → `fixed`. При недоступном адаптере класс `unknown` и
+коэффициент 1. Полученный извне `net.change.id` сохраняется при обогащении класса.
+Исходный id лаунчера — SHA256 от GUID адаптера, шлюзов и имени профиля, без публикации SSID.
+WinRT читается только при событиях, в отдельном рабочем потоке, без блокировки раздачи
+шины. Одновременно выполняется одно чтение; изменения во время чтения сливаются
+в один повтор. Собственные адаптеры исключаются также по именам
+`VpnTun.InterfaceName` (`RemoteAgents-VPN`) и `LanTun.InterfaceName` (`RemoteAgents-LAN`).
+Недоступность API оставляет классификацию по типу адаптера.
+
+Политика в `config.json.transport.switch` (при вставленном профиле приоритет у
+`config.json.profile.transport.switch`), в экспортируемом конфиге — `transport.switch`:
+
+```json
+{"transport":{"switch":{
+  "blipMs":{"default":10000,"min":3000,"max":30000},
+  "hardFailMs":{"default":3000,"min":1000,"max":10000},
+  "stageMs":[1000,3000],
+  "classK":{"fixed":0.5,"wifi":0.8,"mobile-hotspot":1.3,"mobile":1.5},
+  "minStayMs":30000,"flapWindowMs":600000,"flapSwitches":3,
+  "probeBudgetKiBPer10m":{"default":512,"mobile":192},"tspuMemoryHours":24
+}}}
+```
+
+Без `switch` берутся эти значения. Частичный объект дополняется ими; `min <= default <= max`,
+две возрастающие ступени не выше `blipMs.default`. Старые `stallSeconds` / `stallConns`
+остаются совместимыми. Настройки выдачи `server/remoteagents_config.py` принимают
+такую же секцию `transport`. Экспорт выдаёт нормализованную политику только при явно
+заданной секции в настройках сервера, после её проверки. Старые настройки дают
+выгрузку без `transport`, которую принимает старый EXE. Config-sync не включает
+`transport`: этот путь не применяет политику, revision старых установок сохраняется.
+Публичный профиль допускает только `switch`, без путей к исполняемым файлам.
+
+`Transport.Quality.ps1` — событийный модуль для демона: сам он не создаёт трафик,
+таймеры или потоки. Все функции получают `Now` (Unix ms) от вызывающего кода.
+`Update-TransportQuality` публикует `net.quality` через переданный callback после
+нового факта; результаты старой сети и повторы `eventId` игнорируются.
+
+Контракт подключения для T2 (Q не изменяет `Transport.Daemon.ps1` и `Transport.Decide.ps1`):
+
+T2 загружает Quality в демоне, подаёт перечисленные ниже события и публикует
+`net.quality` через мост шины. T2 передаёт адаптивные пороги в Decide.
+`ConfigApply.cs` сохраняет вставленную секцию только в профиле: T2 доставляет
+`profile.transport.switch` до `config.json.transport.switch` транспорта, сохраняя
+прочие runtime-поля. Приоритет у профиля. `Get-WizardRuntimeFiles` в
+`build/Wizard.Engine.ps1` включает `Transport.Quality.ps1` как зависимость проверки
+`Read-TransportSettings`.
+
+Интегратор T2 ловит исключение `Get-TransportQualityConfig`, записывает отказ
+конфига и создаёт состояние со значениями по умолчанию (`New-TransportQualityState`
+без конфига). `Read-TransportSettings` также проверяет `min <= default <= max`
+и порядок `stageMs`; исключение этой проверки должно приводить к тому же явному
+откату политики, без повторного применения неверной секции.
+
+Демон отбрасывает входящий `net.change`, если одновременно совпали **id и class**
+последнего принятого состояния. При изменении класса того же id обновляет качество.
+Это обязательно для разрыва петли `ready → net.change → проба → ready`;
+собственные события классификатора лаунчер также отбрасывает.
+
+1. Dot-source `Transport.Quality.ps1`; создать `New-TransportQualityState $config`.
+   После `Read-TransportMemory` вызвать `Import-TransportQualityMemory $q $memory.networks $now`.
+2. Передать `Update-TransportQuality $q 'net.change' $fields $now $publish`, где
+   `$publish` принимает `(topic, fields)` и отправляет их существующим мостом шины.
+   Использовать **тот же** id в поколении проб, памяти и последующих событиях.
+3. Новые факты передавать как `light-probe {id,eventId,tag,probeId,ok,ms}`,
+   `probe64 {id,eventId,tag,probeId,ok,ms}`, `episode {id,eventId}`,
+   `switch {id,eventId}` и `stall-suspect {id,eventId}`. `ok` — boolean;
+   `probeId` связывает успешный баннер с последующей пробой 64 КиБ ровно один раз,
+   `eventId` уникален для результата (для эпизода — идентификатор эпизода).
+   Прерванную пробу при смене поколения не передавать как отказ.
+4. В начале эпизода взять снимок `net.quality` / `Get-TransportQualitySnapshot`,
+   сохранить `blipMs`, `hardFailMs`, `stage1Ms`, `stage2Ms` до следующего эпизода.
+   `minStayMs` и параметры антикачелей брать из `$q.config`. Текущий эпизод
+   не пересчитывает пороги после каждой пробы.
+5. Упорядоченные, доступные и неоштрафованные кандидаты передать в
+   `Get-TransportQualityRound $q $candidates $active $now`. Он сохраняет порядок
+   внутри групп, опускает ТСПУ вниз, задаёт `maxParallel=4`. При исчерпанном бюджете
+   оставляет активного и двух лучших, отключает 64 КиБ и возвращает текст статуса.
+   Перед каждой пробой вызвать `Request-TransportQualityProbe` с purpose `light`
+   или `post-switch-verify`: false запрещает старт. Лимиты на эпизод — три лёгких
+   активному, одна остальным, одна 64 КиБ одному пути. Резервируется 1 КиБ за
+   лёгкую и 64 КиБ за полную пробу; уже идущую плановую живость / превышение
+   резерва учитывать событием `traffic {id,eventId,bytes}` (не считать резерв дважды).
+   Бюджет проверяется также для `light` до резервирования; отказ не расходует
+   попытку эпизода. `net.quality.budgetExhausted` и `status` отражают исчерпание
+   и пропуск 64 КиБ при недостаточном остатке. `postSwitchVerify=false` и текст
+   пропуска включить в статус демона.
+6. `Save-TransportQualityMemory $root $memory $q $now` сохраняет
+   `networks[id].quality.tspu[tag] = {count,until}` и `lastSeenMs` в существующий приватный файл
+   памяти, не меняя кандидатов. Сохранение кандидатов через `Save-TransportMemory`
+   сохраняет поле `quality`. Статус `net.quality.status` показывает причину понижения пути.
+
+`net.quality` содержит `class`, `lightP50Ms`, `kib64Ms` (последняя успешная 64 КиБ),
+`episodes10m`, `switches10m`, `stalls10m`, `tspuSuspect`, `tspuRatio` (доля отказов
+среди **сопоставленных** пар баннер/64 КиБ), использование бюджета и пороги.
+Две независимые пары «баннер прошёл, 64 КиБ нет» помечают путь по id сети на 24 ч.
+Память ограничена 32 сетями в процессе и в файле, история каждого вида — 4096
+измерениями. Обе функции сохранения удаляют истёкшие `quality.tspu` во всех сетях,
+включая не посещённые в этом процессе; пустой блок `quality` удаляется. Сохраняются
+32 сети с последним появлением (`lastSeenMs`, для старых записей — `updatedAt`,
+если даты нет — 0). При равной дате первым вытесняется меньший id по ordinal.
+Для оставшихся сетей сохраняются кандидаты и живые метки других сетей.
+`Import-TransportQualityMemory` применяет такой же однозначный предел.
+
+Пороги: `clamp(default * classK * stabilityK * flapK, min, max)`.
+Начальное `stabilityK=1`; возможные ступени `0.6, 1, 1.5, 2`.
+Переход не больше одной ступени в начале нового эпизода: тихие 30 минут наблюдения
+с последним успешным замером 64 КиБ <1500 ms дают 0.6. Последний замер хранится
+отдельно одним значением за пределами десятиминутного окна статистики; ≥3 эпизодов за 10 минут — 1.5, вместе
+с ТСПУ — 2. Ступени `stageMs` ограничены пропорциональными границами hardFail
+(в wire-схеме отдельного min/max для stage нет). При трёх переключениях за окно
+`flapK=2`, в пределах clamp; `flapWindowMs` ограничено 1 800 000 ms (окном истории); `allowImprovement=false`. Окна и срок памяти
+обновляются по новым событиям, собственных tick-источников нет.
+
+Микро-проверки Q (без Windows и реального ожидания):
+
+```sh
+timeout 120 dotnet run --project app/launcher/tests/PortableTests.csproj -nodeReuse:false -p:UseSharedCompilation=false -p:NetClassTests=true
+timeout 120 pwsh -NoProfile -File transport/test-transport-quality.ps1
+timeout 120 python3 server/tests/test_transport_quality_config.py
+```
