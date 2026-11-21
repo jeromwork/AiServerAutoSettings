@@ -82,6 +82,16 @@ namespace RemoteAgents.Launcher
 
     internal static class MainScreenModel
     {
+        // Shared with TrayContext.Tick so a VPN refusal cannot leave a green tray icon.
+        internal static Tone LinkTone(Dictionary<string, object> transport, Dictionary<string, object> vpn)
+        {
+            if (SearchPresentation.VpnFailureText(vpn).Length > 0) return Tone.Error;
+            var phase = StatusView.Phase(transport);
+            if (TrayMenuModel.Searching(transport, vpn) || Json.Str(vpn, "state") == "conflict" ||
+                Json.Str(vpn, "state") == "checking") return Tone.Warning;
+            return phase == LinkPhase.Ok ? Tone.Ok : phase == LinkPhase.Failed ? Tone.Error : Tone.Warning;
+        }
+
         internal static MainScreenView Build(MainScreenFacts facts)
         {
             facts = facts ?? new MainScreenFacts();
@@ -90,10 +100,8 @@ namespace RemoteAgents.Launcher
             var vpn = link.Vpn;
             var control = facts.Control ?? Json.Map(null);
             var view = new MainScreenView();
-            // Keep this identical to TrayContext.Tick; a deliberately off VPN is grey in its card only.
             var phase = StatusView.Phase(transport);
-            view.Overall = phase == LinkPhase.Ok ? Tone.Ok : phase == LinkPhase.Failed ? Tone.Error : Tone.Warning;
-            if (TrayMenuModel.Searching(transport, vpn) || Json.Str(vpn, "state") == "conflict") view.Overall = Tone.Warning;
+            view.Overall = LinkTone(transport, vpn);
             BuildVpn(view.Vpn, facts, transport, vpn);
             BuildDisk(view.Disk, facts);
             var lan = facts.Lan ?? Json.Map(null);

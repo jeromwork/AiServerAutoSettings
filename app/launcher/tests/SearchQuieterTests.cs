@@ -19,7 +19,7 @@ namespace RemoteAgents.Launcher
         }
         static int Main()
         {
-            ShortDips(); LongDip(); RepeatedDips(); Presentations(); Priorities();
+            ShortDips(); LongDip(); RepeatedDips(); Presentations(); Startup(); Priorities(); CurrentProtection();
             Console.WriteLine("PASS: " + checks + " SearchQuieter checks (fake clock)");
             return 0;
         }
@@ -111,22 +111,100 @@ namespace RemoteAgents.Launcher
                 SameView(MainScreenModel.Build(Facts(ok, on, recovered)), healthy, "recovery restores all views immediately");
                 Check(Json.Encode(new { transport, vpn }) == raw, "raw diagnostic facts remain unchanged");
             }
-            // Startup has no saved connected snapshot, but the same calm presentation applies.
-            var startup = SearchPresentation.Build(Data("{\"phase\":\"searching\"}"), Data("{\"state\":\"searching\"}"), false);
-            var startupView = MainScreenModel.Build(Facts(startup.Transport, startup.Vpn));
-            Check(startupView.Overall == Tone.Ok && startupView.Vpn.Tone == Tone.Ok && !startupView.Banner.Visible, "startup search waits for threshold too");
+        }
+        static void Startup()
+        {
+            var search = Data("{\"phase\":\"searching\",\"ok\":false,\"localNet\":\"down\",\"checkingSince\":\"2000-01-01T00:00:00Z\"}");
+            var vpn = Data("{\"state\":\"searching\",\"ok\":false,\"enabled\":true,\"reason\":{\"text\":\"Нет живого пути к серверу\"}}");
+            var ok = Data("{\"phase\":\"ok\",\"ok\":true}");
+            // No snapshot, an unconfirmed snapshot, and transport proof without VPN proof.
+            foreach (var previous in new[] { null, new SearchPresentation(search, vpn),
+                new SearchPresentation(ok, Data("{\"state\":\"on\",\"ok\":false}")) }) {
+                foreach (var transport in new[] { search, ok }) {
+                    string raw = Json.Encode(new { transport, vpn });
+                    var link = SearchPresentation.Build(transport, vpn, false, previous);
+                    var view = MainScreenModel.Build(Facts(transport, vpn, link));
+                    Check(view.Overall == Tone.Warning && MainScreenModel.LinkTone(link.Transport, link.Vpn) == Tone.Warning &&
+                        view.Vpn.Tone == Tone.Warning && view.Vpn.State != "Защита включена", "startup cannot claim successful protection");
+                    Check(!Json.Bool(link.Vpn, "ok") && Json.Str(link.Vpn, "state") == "checking", "unconfirmed VPN waits neutrally");
+                    if (previous == null || StatusView.Phase(previous.Transport) != LinkPhase.Ok) {
+                        if (object.ReferenceEquals(transport, search))
+                            Check(StatusView.Phase(link.Transport) == LinkPhase.Checking && !Json.Bool(link.Transport, "ok"), "startup transport cannot invent success");
+                    }
+                    Check(!TrayMenuModel.Searching(link.Transport, link.Vpn) && !view.Banner.Text.Contains("ищу путь") &&
+                        !view.Vpn.State.Contains("ищу путь") && !link.Tooltip(Data("{}")).Contains("ищу путь") &&
+                        !TrayMenuModel.Connection(link.Transport).Contains("ищу путь"), "startup delays only search wording across all surfaces");
+                    Check(Json.Encode(new { transport, vpn }) == raw, "startup keeps raw facts unchanged");
+                }
+            }
+            var on = Data("{\"state\":\"on\",\"ok\":true,\"enabled\":true}");
+            var recovery = SearchPresentation.Build(ok, on, false);
+            Check(MainScreenModel.Build(Facts(ok, on, recovery)).Vpn.Tone == Tone.Ok, "real success appears immediately");
+            var shown = SearchPresentation.Build(search, vpn, true);
+            Check(TrayMenuModel.Searching(shown.Transport, shown.Vpn) &&
+                MainScreenModel.Build(Facts(search, vpn, shown)).Banner.Text == TrayMenuModel.SearchingText(search, vpn), "startup long search uses original wording");
         }
         static void Priorities()
         {
-            var search = Data("{\"phase\":\"searching\"}");
-            foreach (string state in new[] { "off", "starting", "stopping", "conflict", "error", "rollback-error" }) {
-                var vpn = Data(Json.Encode(new { state }));
-                var link = SearchPresentation.Build(search, vpn, false);
-                Check(object.ReferenceEquals(link.Vpn, vpn), "preserve explicit VPN state: " + state);
+            var search = Data("{\"phase\":\"searching\",\"ok\":false}");
+            var connected = new SearchPresentation(Data("{\"phase\":\"ok\",\"ok\":true}"),
+                Data("{\"state\":\"on\",\"ok\":true,\"enabled\":true}"));
+            foreach (string state in new[] { "off", "starting", "stopping", "conflict", "error", "core-exited", "rollback-error", "rolled-back",
+                "server-unreachable", "network-changed", "resumed", "watchdog-stalled", "no-udp", "no-path", "uac-denied", "prepare-timeout" }) {
+                foreach (bool show in new[] { false, true })
+                foreach (var previous in new[] { null, connected }) {
+                    var vpn = Data(Json.Encode(new { state, ok = false, enabled = true }));
+                    string raw = Json.Encode(new { search, vpn });
+                    var link = SearchPresentation.Build(search, vpn, show, previous);
+                    Check(object.ReferenceEquals(link.Vpn, vpn), "preserve explicit VPN state: " + state);
+                    var view = MainScreenModel.Build(Facts(search, vpn, link));
+                    if (state == "conflict") {
+                        Check(view.Overall == Tone.Warning && view.Vpn.Tone == Tone.Warning && view.Banner.Tone == Tone.Warning &&
+                            link.Tooltip(Data("{}")) == TrayMenuModel.Short(TrayMenuModel.ConflictText(vpn), 63),
+                            "conflict retains priority across surfaces");
+                    } else if (state != "off" && state != "starting" && state != "stopping") {
+                        Check(StatusView.Phase(link.Transport) == LinkPhase.Searching, "failure cannot turn transport into ok: " + state);
+                        Check(view.Overall == Tone.Error && MainScreenModel.LinkTone(link.Transport, link.Vpn) == Tone.Error &&
+                            view.Vpn.Tone == Tone.Error && view.Banner.Visible && view.Banner.Tone == Tone.Error, "failure is red on banner/card/window/tray: " + state);
+                        SameView(view, MainScreenModel.Build(Facts(search, vpn)), "failure keeps original banner/card wording: " + state);
+                        Check(link.Tooltip(Data("{}")) == TrayMenuModel.Short(SearchPresentation.VpnFailureText(vpn), 63) &&
+                            !link.Tooltip(Data("{}")).Contains("ищу путь"), "failure outranks search in tooltip: " + state);
+                        Check(TrayMenuModel.Connection(link.Transport) == TrayMenuModel.Connection(search), "failure keeps transport evidence in menu");
+                    }
+                    Check(Json.Encode(new { search, vpn }) == raw, "failure filtering keeps raw facts unchanged");
+                }
             }
+            var helperError = Data("{\"state\":\"error\",\"owner\":\"net-helper\",\"summary\":\"Ошибка маршрута. token=hidden-secret\"}");
+            string tip = new SearchPresentation(search, helperError).Tooltip(Data("{}"));
+            Check(tip.Contains("Ошибка маршрута") && !tip.Contains("hidden-secret"), "helper failure summary takes priority and masks secrets");
             var failed = Data("{\"phase\":\"failed\"}");
             Check(object.ReferenceEquals(SearchPresentation.Build(failed, Data("{\"state\":\"searching\"}"), false).Transport, failed),
                 "explicit transport failure remains visible");
+        }
+        static void CurrentProtection()
+        {
+            var ok = Data("{\"phase\":\"ok\",\"ok\":true}");
+            var on = Data("{\"state\":\"on\",\"enabled\":true,\"ok\":true,\"owner\":\"old-owner\",\"dnsPolicy\":{\"strictRoute\":true}}");
+            var connected = new SearchPresentation(ok, on);
+            foreach (bool strict in new[] { false, true }) {
+                // Exercise both appearance and removal of a current protection warning.
+                var vpn = Data(Json.Encode(new { state = "searching", enabled = true, ok = false, owner = "net-helper", stage = "current-stage",
+                    error = "current-error", dnsPolicy = new { strictRoute = strict, networks = new[] { new { name = "Клиника" } } } }));
+                string raw = Json.Encode(new { on, vpn });
+                foreach (bool show in new[] { false, true }) {
+                    var link = SearchPresentation.Build(Data("{\"phase\":\"searching\",\"ok\":false}"), vpn, show, connected);
+                    var view = MainScreenModel.Build(Facts(link.Transport, vpn, link));
+                    Check(object.ReferenceEquals(Json.Get(link.Vpn, "dnsPolicy"), Json.Get(vpn, "dnsPolicy")) &&
+                        VpnStatus.DnsSummary(link.Vpn) == VpnStatus.DnsSummary(vpn) && VpnStatus.DnsDetail(link.Vpn) == VpnStatus.DnsDetail(vpn),
+                        "short and long search retain current DNS policy");
+                    Check(Json.Str(link.Vpn, "owner") == "net-helper" && Json.Str(link.Vpn, "stage") == "current-stage" &&
+                        Json.Str(link.Vpn, "error") == "current-error" && Json.Bool(link.Vpn, "enabled"), "current ownership and diagnostics are retained");
+                    Check(view.Vpn.Detail.Contains("DNS: защита частичная") == !strict &&
+                        view.Vpn.Tone == (!strict || show ? Tone.Warning : Tone.Ok), "current DNS warning reaches card immediately");
+                }
+                Check(Json.Encode(new { on, vpn }) == raw, "DNS filtering leaves old and current diagnostic facts unchanged");
+                on["dnsPolicy"] = Json.Get(vpn, "dnsPolicy");
+            }
         }
     }
 }

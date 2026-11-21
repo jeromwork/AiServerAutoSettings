@@ -196,14 +196,10 @@ namespace RemoteAgents.Launcher
                     var rawVpn = VpnStatus.Read(home);
                     ObserveSearch(transport, rawVpn);
                     var link = SearchView(transport, rawVpn);
-                    var linkPhase = StatusView.Phase(link.Transport); shown = linkPhase == LinkPhase.Ok ? green : linkPhase == LinkPhase.Failed ? red : yellow;
+                    var tone = MainScreenModel.LinkTone(link.Transport, link.Vpn);
+                    shown = tone == Tone.Ok ? green : tone == Tone.Error ? red : yellow;
                     var vpnStatus = link.Vpn;
-                    string vpnReason = VpnWatchdog.FailureSummary(Json.Str(vpnStatus, "state"), Json.Str(vpnStatus, "stage"));
-                    if (vpnReason.Length > 0 && Json.Str(vpnStatus, "owner") == "net-helper") vpnReason = Json.Text(vpnStatus, "summary", vpnReason);
-                    bool searching = TrayMenuModel.Searching(link.Transport, vpnStatus), conflict = Json.Str(vpnStatus, "state") == "conflict";
-                    if (searching || conflict) shown = yellow;
-                    icon.Text = vpnReason.Length > 0 && !searching && !conflict ? TrayMenuModel.Short(StatusView.DisplayText(vpnReason), 63)
-                        : TrayMenuModel.Tooltip(link.Transport, ServerHealthView.Read(home), vpnStatus);
+                    icon.Text = link.Tooltip(ServerHealthView.Read(home));
                     if (netNote.Length > 0 && !TrayMenuModel.Searching(transport, rawVpn) && Json.Str(vpnStatus, "state") == "on") icon.Text = TrayMenuModel.Short(netNote, 63);
                     var notice = statusNotifications.Observe(link.Transport, vpnStatus, DateTime.UtcNow);
                     if (notice != null) icon.ShowBalloonTip(8000, Product.Name, notice.Text, notice.Recovered ? ToolTipIcon.Info : ToolTipIcon.Warning);

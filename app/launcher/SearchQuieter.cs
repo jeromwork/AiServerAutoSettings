@@ -47,24 +47,46 @@ namespace RemoteAgents.Launcher
         internal SearchPresentation(Dictionary<string, object> transport, Dictionary<string, object> vpn)
         { Transport = transport ?? Json.Map(null); Vpn = vpn ?? Json.Map(null); }
 
+        // The tray uses this presentation for its tooltip as well as its colour and menu.
+        internal string Tooltip(Dictionary<string, object> health)
+        {
+            string failure = VpnFailureText(Vpn);
+            return failure.Length > 0 ? TrayMenuModel.Short(failure, 63) : TrayMenuModel.Tooltip(Transport, health, Vpn);
+        }
+
+        internal static string VpnFailureText(Dictionary<string, object> vpn)
+        {
+            string state = Json.Str(vpn, "state");
+            if (state == "searching" || state == "conflict") return "";
+            string reason = VpnWatchdog.FailureSummary(state, Json.Str(vpn, "stage"));
+            if (state == "rolled-back") reason = "Защита автоматически выключена: проверка подключения не прошла.";
+            if (reason.Length == 0) return "";
+            return StatusView.DisplayText(Json.Str(vpn, "owner") == "net-helper" ? Json.Text(vpn, "summary", reason) : reason);
+        }
+
         internal static SearchPresentation Build(Dictionary<string, object> transport, Dictionary<string, object> vpn,
             bool showSearching, SearchPresentation connected = null)
         {
             var view = new SearchPresentation(transport, vpn);
-            if (showSearching || !TrayMenuModel.Searching(view.Transport, view.Vpn)) return view;
+            if (showSearching || !TrayMenuModel.Searching(view.Transport, view.Vpn) ||
+                VpnFailureText(view.Vpn).Length > 0 || Json.Str(view.Vpn, "state") == "conflict") return view;
             transport = view.Transport; vpn = view.Vpn;
-            // During a short dip retain the last connected path/measurements. At startup there
-            // is no previous sample: use a calm on/ok presentation until the threshold is met.
+            bool wasConnected = connected != null && StatusView.Phase(connected.Transport) == LinkPhase.Ok;
+            bool wasProtected = wasConnected && Json.Str(connected.Vpn, "state") == "on" && Json.Bool(connected.Vpn, "ok");
+            // A short dip may retain verified success, but cannot create it at startup.
             if (StatusView.Phase(transport) == LinkPhase.Searching ||
                 Json.Str(vpn, "state") == "searching" && StatusView.Phase(transport) == LinkPhase.Checking) {
-                transport = new Dictionary<string, object>(connected == null ? transport : connected.Transport);
-                transport["phase"] = "ok"; transport["ok"] = true;
+                transport = new Dictionary<string, object>(wasConnected ? connected.Transport : transport);
+                transport["phase"] = wasConnected ? "ok" : "checking"; transport["ok"] = wasConnected;
                 transport.Remove("localNet"); transport.Remove("reason");
+                if (!wasConnected) transport.Remove("checkingSince");
             }
             if (Json.Str(vpn, "state") == "searching") {
-                vpn = new Dictionary<string, object>(connected != null && Json.Str(connected.Vpn, "state") == "on" ? connected.Vpn : vpn);
-                vpn["state"] = "on"; vpn["ok"] = true;
-                vpn["summary"] = "VPN включён"; vpn.Remove("reason");
+                // Keep current DNS policy, ownership, enabled flag and diagnostic fields.
+                // Only the search-specific presentation is replaced with the previous proof or waiting.
+                vpn = new Dictionary<string, object>(vpn);
+                vpn["state"] = wasProtected ? "on" : "checking"; vpn["ok"] = wasProtected;
+                vpn["summary"] = wasProtected ? "VPN включён" : "Ожидается проверка"; vpn.Remove("reason");
             }
             return new SearchPresentation(transport, vpn);
         }
