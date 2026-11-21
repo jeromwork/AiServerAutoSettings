@@ -1,0 +1,12 @@
+{
+  "id": "03-tg-keys-rotate-stage1",
+  "type": "CLI и тесты",
+  "complexity": "средняя",
+  "size": "100–180 строк",
+  "allowed_files": [
+    "server/tg-gateway/tg_gateway_keys.py",
+    "server/tg-gateway/test_gateway.py"
+  ],
+  "description": "Ротация ключа Telegram и list --json, Этап 1",
+  "acceptance": "Синтаксис, справка rotate/list и семь целевых тестов проходят."
+}

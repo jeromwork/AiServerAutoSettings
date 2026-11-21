@@ -1,0 +1,11 @@
+{
+  "id": "01-component-files-tests",
+  "type": "тесты",
+  "complexity": "простая",
+  "size": "120–160 строк",
+  "allowed_files": [
+    "server/tests/test_component_files.py"
+  ],
+  "description": "Тесты белого списка, symlink и приватной записи component_files",
+  "acceptance": "Тесты проходят; component_files.py не изменён."
+}

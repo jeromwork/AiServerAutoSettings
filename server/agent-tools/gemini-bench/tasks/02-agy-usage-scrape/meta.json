@@ -1,0 +1,12 @@
+{
+  "id": "02-agy-usage-scrape",
+  "type": "исправление",
+  "complexity": "средняя",
+  "size": "100–160 строк",
+  "allowed_files": [
+    "server/agy_usage_scrape.py",
+    "server/tests/test_agy_usage_scrape.py"
+  ],
+  "description": "Дни и секунды квоты, устойчивая запись снимка",
+  "acceptance": "П1–П4 проходят; parse_duration даёт 589020 589020 45 None."
+}

@@ -1,0 +1,12 @@
+{
+  "id": "04-oneshot-link-stage1",
+  "type": "рефакторинг",
+  "complexity": "средняя",
+  "size": "140–200 строк",
+  "allowed_files": [
+    "server/oneshot_link.py",
+    "server/tests/test_oneshot_link.py"
+  ],
+  "description": "Link, make_server, --bind и базовые HTTP-тесты, Этап 1",
+  "acceptance": "Синтаксис, --bind и три базовых теста проходят."
+}
