@@ -32,6 +32,8 @@ $script:q=$null;$script:qualitySnapshot=$null;$script:qualityClass='unknown';$sc
 $LightProbeFuseMs=3000
 # Предохранитель (конституция 4а): событие результата 64 КиБ недоступно, если SSH завис; при срабатывании — timeout решателю, успех не объявляет.
 $VerifyProbeFuseMs=12000
+# Предохранитель (конституция 4а): engine-ready недоступно при зависшем запуске; закрывает ожидающий эпизод с engine-ready-timeout, успех не объявляет. Проверяется существующим tick решателя.
+$EngineReadyFuseMs=20000;$script:engineWait=$null
 # tick.transport-revision-full: полный пересчёт хэша содержимого раз в столько секунд, запасной ход на правку той же длины и того же времени записи (кэш по штампу её не видит). Не условие успеха.
 $RevisionFullTickSec=60;$nextRevisionFull=[DateTime]::MinValue
 # Сердцебиение статуса: файл переписывается без изменений содержимого не реже этого, чтобы Supervisor и читатели видели свежий updatedAt (предел устаревания 15 с).
@@ -59,6 +61,7 @@ function Reset-DaemonDecision {
     foreach($r in $rows){$r.penaltyStep=0;$r.penaltyUntil=$null;$r.suspect=$false}
 }
 function Stop-DaemonObservation([switch]$EngineRestart) {
+    $script:engineWait=$null
     $script:checkGeneration++;$script:episodeDeferred=@();$script:lightProof=@{}
     if(-not $EngineRestart -and $decision -and $decision.episode -and $decision.episode.status -ne 'closed'){
         Publish-DaemonEpisode 'close' 'cancelled'
@@ -103,6 +106,54 @@ function Initialize-DaemonQuality {
     else{$script:q=New-TransportQualityState @{transport=$settings.Transport};Import-TransportQualityMemory $q $memory.networks (Get-DaemonTime)}
     $script:qualitySnapshot=$null
     Update-DaemonQuality 'net.change' @{id=$network.id;class=$qualityClass}
+}
+function Test-DaemonEngineReady([switch]$Probe) {
+    if(-not $engine -or $engine.Process.HasExited -or -not $script:busEngineReady){return $false}
+    if($Probe -and ($networkRefreshPending -or @($eventQueue|Where-Object {$_.kind -in @('net-change','net.change','win.route.changed','win.iface.changed','win.addr.changed')}).Count)){return $false}
+    return $true
+}
+function Suspend-DaemonEpisode {
+    if(-not $engineWait){
+        $script:engineWait=@{at=(Get-DaemonTime);expired=$false}
+        $script:checkGeneration++;$script:episodeDeferred=@();$script:lightProof=@{}
+        foreach($ticket in @($pathChecks.Values)){Stop-TransportPathCheck $ticket.handle};$pathChecks.Clear()
+        if($directCheck){Stop-TransportDirectCheck $directCheck.handle;$script:directCheck=$null}
+        Stop-TransportProbes;$script:confirmed=$false
+    }
+    if(-not $engineWait.expired -and ((Get-DaemonTime)-$engineWait.at) -ge $EngineReadyFuseMs){
+        $engineWait.expired=$true;$script:errorText='Движок не готов: engine-ready-timeout'
+        if($decision.episode -and $decision.episode.status -ne 'closed'){
+            $decision.episode.open=$false;$decision.episode.status='closed'
+            Publish-DaemonEpisode 'close' 'engine-ready-timeout'
+        }
+    }
+}
+function Resume-DaemonEpisode {
+    if(-not $engineWait -or -not (Test-DaemonEngineReady)){return}
+    $script:engineWait=$null;$script:checkGeneration++;$script:lightProof=@{}
+    # Results and opening times from the stopped engine cannot prove path failure.
+    $script:eventQueue=@($eventQueue|Where-Object {$_.kind -eq 'transport.switch'})
+    $ep=$decision.episode
+    if($ep -and $ep.status -eq 'verifying'){
+        $ep.verifyAt=Get-DaemonTime
+        $script:episodeSerial++;$script:episodeId=([string]$checkGeneration+':'+$episodeSerial)
+        Start-DaemonVerification $active
+    }else{
+        if($ep -and $ep.status -ne 'closed'){Publish-DaemonEpisode 'close' 'engine-restarted'}
+        $decision.episode=$null;$decision.pending=@{}
+        # Reopen even when an episode was already open: start its clocks at readiness.
+        Add-DaemonQueuedEvent (New-DaemonEvent 'dial-fail' ([string]$active) 'engine-ready')
+    }
+}
+function Get-DaemonDecisionRows($Candidates) {
+    $n=$null;if($q){$n=Get-TransportQualityNetwork $q (Get-DaemonTime)}
+    foreach($candidate in $Candidates){
+        $row=Copy-TransportDecisionValue $candidate;$tag=[string]$row.tag
+        $penalty=[bool](Get-TransportDecisionValue $row 'recentPenalty' $false)
+        if($n -and $n.tspu.ContainsKey($tag) -and $n.tspu[$tag].count -ge 2){$penalty=$true}
+        $row['qualityPenalty']=$penalty
+        $row
+    }
 }
 function Get-DaemonSwitchPolicy {
     $policy=@{}
@@ -153,6 +204,7 @@ function Publish-DaemonSwitch([string]$From,[string]$To,[string]$Why) {
     Update-DaemonQuality 'switch' @{id=$network.id;eventId=([string]$fields.at+':'+$From+':'+$To)}
 }
 function Start-DaemonEpisodeCheck([string]$Tag,[switch]$Verify) {
+    if(-not (Test-DaemonEngineReady -Probe)){Suspend-DaemonEpisode;return}
     $c=$paths.Candidates|Where-Object {$_.tag -eq $Tag}|Select-Object -First 1
     if(-not $c -or $pathChecks.ContainsKey($Tag)){return}
     $purpose=if($Verify){'post-switch-verify'}else{'light'}
@@ -175,6 +227,7 @@ function Start-DaemonEpisodeCheck([string]$Tag,[switch]$Verify) {
     }catch{$ticket.until=$nowMs}
 }
 function Start-DaemonVerification([string]$Tag) {
+    if(-not (Test-DaemonEngineReady -Probe)){Suspend-DaemonEpisode;return}
     # No older path-check (including a gate/banner) may satisfy this verification.
     foreach($key in @($pathChecks.Keys)){Stop-TransportPathCheck $pathChecks[$key].handle;$pathChecks.Remove($key)}
     $script:episodeDeferred=@()
@@ -183,6 +236,7 @@ function Start-DaemonVerification([string]$Tag) {
     Start-DaemonEpisodeCheck $Tag -Verify
 }
 function Receive-DaemonEpisodeRound {
+    if(-not (Test-DaemonEngineReady -Probe)){return}
     if(-not $decision -or -not $decision.episode -or $decision.episode.status -ne 'open'){$script:episodeDeferred=@();return}
     $remaining=@()
     foreach($c in $episodeDeferred){
@@ -241,6 +295,12 @@ function Start-DaemonPath([string]$Tag,[switch]$Gate) {
 }
 function Receive-DaemonChecks {
     $script:daemonCheckPolls++
+    # Invalidate before polling: refused on a vanished local listener is no Q/path result.
+    if(-not (Test-DaemonEngineReady)){
+        if($pathChecks.Count -or $directCheck -or $decision.episode -or $eventQueue.Count -or $engineWait){Suspend-DaemonEpisode}
+        return
+    }
+    if(-not (Test-DaemonEngineReady -Probe)){return}
     if($directCheck){
         $event=$null
         try{if($directCheck.handle){$event=Receive-TransportDirectCheck $directCheck.handle}}catch{$directCheck.until=Get-DaemonTime}
@@ -351,6 +411,7 @@ function Write-DaemonPathCheck($E) {
     Write-RaLog (Join-Path $root 'logs') 'transport' $level 'transport' 'path.check' ([ordered]@{candidate=[string]$E.tag;result=$result;reason=[string]$E.code;detail=[string]$E.detail})
 }
 function Add-DaemonEvent($Event) {
+    if($Event.kind -eq 'engine-ready' -and $Event.tag -eq $active){Resume-DaemonEpisode}
     $e=@{};foreach($name in @('at','kind','tag','code','local','detail')){$e[$name]=$Event.$name}
     if($e.kind -in @('path-check','post-switch-verify')){try{Write-DaemonPathCheck $e}catch{}}
     if($e.kind -in @('dial-fail','conn-closed-error') -and -not $e.local -and -not ($decision -and $decision.episodeEnabled)){
@@ -370,8 +431,10 @@ function Add-DaemonEvent($Event) {
     Add-DaemonQueuedEvent $e
 }
 function Invoke-DaemonDecision {
+    if(-not (Test-DaemonEngineReady) -or $engineWait){Suspend-DaemonEpisode;return}
+    if($networkRefreshPending){return}
     Receive-DaemonChecks
-    $eligible=@($rows|Where-Object {$_.tag -in @($paths.Candidates.tag) -and ($pin.mode -ne 'pinned' -or $_.tag -eq $pin.tag)})
+    $eligible=@(Get-DaemonDecisionRows @($rows|Where-Object {$_.tag -in @($paths.Candidates.tag) -and ($pin.mode -ne 'pinned' -or $_.tag -eq $pin.tag)}))
     foreach($e in $eventQueue){if($e.kind -eq 'net-change' -and $e.topic -in @('win.iface.changed','net.change')){$e.kind=$e.topic}}
     $previousEpisode=Copy-TransportDecisionValue $decision.episode
     $result=Invoke-TransportDecision -State $decision -Candidates $eligible -CurrentTag $active -Now (Get-DaemonTime) -Events $eventQueue -SwitchEpisode:$true -AllowImprovement:(Test-DaemonImprovement) -SwitchConfig (Get-DaemonSwitchPolicy)
@@ -484,7 +547,7 @@ function Confirm-DaemonSelection([string]$Tag) {
     $pinnedFailure=($pin.mode -eq 'pinned' -and $decision.paths.ContainsKey($Tag) -and ($decision.paths[$Tag].failed -or $null -ne $decision.paths[$Tag].until))
     # A selector change is acknowledged before publishing or starting another round.
     $previousEpisode=Copy-TransportDecisionValue $decision.episode
-    $ack=Invoke-TransportDecision -State $decision -Candidates @($rows|Where-Object {$_.tag -in @($paths.Candidates.tag) -and ($pin.mode -ne 'pinned' -or $_.tag -eq $pin.tag)}) -CurrentTag $Tag -Now (Get-DaemonTime) -Events $eventQueue -SwitchEpisode:$true -AllowImprovement:(Test-DaemonImprovement) -SwitchConfig (Get-DaemonSwitchPolicy)
+    $ack=Invoke-TransportDecision -State $decision -Candidates @(Get-DaemonDecisionRows @($rows|Where-Object {$_.tag -in @($paths.Candidates.tag) -and ($pin.mode -ne 'pinned' -or $_.tag -eq $pin.tag)})) -CurrentTag $Tag -Now (Get-DaemonTime) -Events $eventQueue -SwitchEpisode:$true -AllowImprovement:(Test-DaemonImprovement) -SwitchConfig (Get-DaemonSwitchPolicy)
     $script:eventQueue=@()
     $script:decision=$ack.state;$script:verdict=$ack.verdict
     Update-DaemonEpisode $previousEpisode
@@ -532,6 +595,10 @@ function Start-DaemonRecovery {
     Start-TransportLiveness -Recovery
 }
 function Start-TransportLiveness([switch]$Recovery,[switch]$Light,[string[]]$Tags=@()) {
+    # A queued opening signal owns the next round; engine startup must not race it
+    # with the legacy full probe before the reducer opens/resumes its episode.
+    if(-not $Light -and @($eventQueue|Where-Object {$_.kind -in @('net-change','net.change','win.iface.changed','dial-fail','conn-closed-error','stall-suspect','engine-exit')}).Count){return}
+    if(-not (Test-DaemonEngineReady -Probe)){Suspend-DaemonEpisode;return}
     if($Light){
         Stop-TransportProbes
         foreach($ticket in @($pathChecks.Values)){Stop-TransportPathCheck $ticket.handle};$pathChecks.Clear()
@@ -645,8 +712,8 @@ function Start-TransportEngine {
     }
     $script:startFailures=0;Write-TransportLog $root 'ready'
     # Restart finished: tell the reducer, so a prior engine-exit is not a path failure. The reducer decides about switching.
-    if($ready -and -not $engine.Process.HasExited -and $script:engineAttempted){Add-DaemonEvent (New-DaemonEvent 'engine-ready' ([string]$active) 'ready')}
-    if($ready -and -not $engine.Process.HasExited){
+    if($script:busEngineReady -and -not $engine.Process.HasExited){Add-DaemonEvent (New-DaemonEvent 'engine-ready' ([string]$active) 'ready')}
+    if($script:busEngineReady -and -not $engine.Process.HasExited){
         Start-DaemonReader -NewEngine
         Write-DaemonWizardProgress ('· модуль связи готов '+[int]([DateTime]::Now-$daemonStarted).TotalMilliseconds+' мс от запуска процесса')
         Start-TransportLiveness
@@ -785,7 +852,7 @@ try{
             Publish-TransportStatus
             Publish-DaemonBusStatus
         }
-        if(-not $engine -and $now -ge $retryAt -and -not $directCheck -and -not $pathChecks.Count -and -not $eventQueue.Count){
+        if(-not $engine -and $now -ge $retryAt -and -not $directCheck -and -not $pathChecks.Count -and (-not $eventQueue.Count -or $engineWait)){
             try{
                 # После неудачи повторяем тяжёлую пробу: прежняя ошибка CIM/WMI могла быть временной.
                 if($startFailures -gt 0 -and $settings.Options.bindPhysical){$netSnapshot=Get-TransportNetworkSnapshot $settings.Options -Force;$network=$netSnapshot.network;$metered=$netSnapshot.metered;$nextNetwork=$now.AddSeconds(5)}

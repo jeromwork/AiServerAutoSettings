@@ -511,7 +511,8 @@ function Get-TransportSwitchCandidates($State,$Rows,$Episode,[long]$Now) {
         }
         $row
     })
-    return @($eligible|Sort-Object @{Expression={Get-TransportDecisionHealth $_ $State.paths[[string]$_.tag]}},@{Expression={Get-TransportDecisionMetric $_ 'latencyMs'}},@{Expression={$State.paths[[string]$_.tag].failures+[double](Get-TransportDecisionValue $_ 'failures' 0)}},@{Expression={Get-TransportDecisionMetric $_ 'maxGapMs'}},@{Expression={[string]$_.tag}})
+    # Optional Q annotation on rows: absent means the original health/latency order.
+    return @($eligible|Sort-Object @{Expression={[int][bool](Get-TransportDecisionValue $_ 'qualityPenalty' $false)}},@{Expression={Get-TransportDecisionHealth $_ $State.paths[[string]$_.tag]}},@{Expression={Get-TransportDecisionMetric $_ 'latencyMs'}},@{Expression={$State.paths[[string]$_.tag].failures+[double](Get-TransportDecisionValue $_ 'failures' 0)}},@{Expression={Get-TransportDecisionMetric $_ 'maxGapMs'}},@{Expression={[string]$_.tag}})
 }
 
 function Invoke-TransportSwitchEpisode {

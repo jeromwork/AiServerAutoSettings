@@ -606,8 +606,16 @@ function Get-TransportLan($Config) {
     [pscustomobject]@{networks=@($networks);enabled=($subnets.Count+$domains.Count -gt 0);proxyAddress='127.0.0.1';proxyPort=0;subnets=@($subnets|Select-Object -Unique);domains=@($domains|Select-Object -Unique);dnsServers=@($dnsServers|Select-Object -Unique);forwards=@();probeHost=$probeHost;probePort=$probePort}
 }
 
+function Get-TransportEffectiveTransport($Config) {
+    $t=Copy-TransportObject $Config.transport
+    # ConfigApply stores the public application profile separately from the SSH profile.
+    # The profile owns switch as a whole; all other runtime transport fields survive.
+    $profileSwitch=Get-TransportValue $Config.profile.transport 'switch' $null
+    if($null -ne $profileSwitch -and $t){$t|Add-Member -Force switch (Copy-TransportObject $profileSwitch)}
+    return $t
+}
 function Read-TransportSettings([string]$Root) {
-    $config=Read-TransportJson (Join-Path $Root 'config.json');$t=$config.transport
+    $config=Read-TransportJson (Join-Path $Root 'config.json');$t=Get-TransportEffectiveTransport $config
     if(-not $t){throw 'Нет секции transport'}
     $profilePath=[string]$t.profilePath
     if(-not $profilePath){throw 'Нет transport.profilePath в config.json'}

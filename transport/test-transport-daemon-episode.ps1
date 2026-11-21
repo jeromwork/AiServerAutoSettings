@@ -46,6 +46,7 @@ function Fixture([int]$Candidates=3){
     }
     $script:active='p0';$script:pin=@{mode='auto';tag=$null};$script:memory=@{networks=@{}}
     $script:engine=@{Process=@{HasExited=$false}};$script:secret=''
+    $script:busEngineReady=$true;$script:networkRefreshPending=$false;$script:engineWait=$null;$script:EngineReadyFuseMs=20000
     $script:decision=New-TransportDecisionState 0 'p0' -SwitchEpisode:$true
     $script:verdict=$null;$script:eventQueue=@();$script:pathChecks=@{};$script:gateOkUntil=@{};$script:pathCheckStartedAt=@{}
     $script:probes=@{};$script:liveDeferred=@();$script:liveRound=$false;$script:initialRound=$false;$script:directCheck=$null
@@ -88,6 +89,95 @@ foreach($site in $sites){
 Fixture
 Reset-DaemonDecision
 Assert $decision.episodeEnabled 'reset lost episode mode'
+# bindPhysical network transition: no local probes or Q failures while stopped.
+Fixture
+Add-DaemonQueuedEvent (New-DaemonEvent 'net.change' 'p0' 'network-change')
+Start-DaemonEpisodeCheck 'p0'
+Assert ($started.Count -eq 0 -and $qualitySnapshot.budgetUsedKiB -eq 0) 'queued network change started/reserved a local probe'
+Fixture
+$script:settings.Options.bindPhysical=$true
+Stop-DaemonObservation
+Add-DaemonQueuedEvent (New-DaemonEvent 'net.change' 'p0' 'network-change')
+$script:engine=$null
+Invoke-DaemonDecision
+Assert ($started.Count -eq 0 -and $pathChecks.Count -eq 0 -and $engineWait) 'stopped engine started a network round'
+$script:clockMs=4000;Invoke-DaemonDecision
+Assert ($verdict.reason.code -ne 'server-unavailable' -and $q.networks[$network.id].banner.Count -eq 0) 'absent probe listeners produced path/Q failures'
+$script:networkRefreshPending=$false;$script:engine=@{Process=@{HasExited=$false}};$script:busEngineReady=$false
+Invoke-DaemonDecision
+Assert ($started.Count -eq 0) 'live engine without engine-ready started probes'
+$script:busEngineReady=$true
+Add-DaemonEvent (New-DaemonEvent 'engine-ready' 'p0' 'ready')
+Start-TransportLiveness
+Invoke-DaemonDecision
+Assert ($started.Count -eq 3 -and $decision.episode.status -eq 'open' -and -not $engineWait) 'engine-ready lost the deferred network round'
+$script:clockMs=4100;Deliver 'p0' 'ok';Invoke-DaemonDecision
+Assert ($confirmed -and $decision.episode.status -eq 'closed' -and $verdict.reason.code -ne 'server-unavailable') 'network round did not recover after engine-ready'
+# An already open episode resumes with fresh clocks/tickets; stale refused is discarded.
+Fixture;Open-Episode
+$old=$pathChecks.p0.handle;$oldGeneration=$checkGeneration;$oldEpisode=$episodeId
+$script:engine=$null;$old.event=New-DaemonEvent 'path-check' 'p0' 'refused'
+Receive-DaemonChecks
+Assert ($old.stopped -and $q.networks[$network.id].banner.Count -eq 0 -and $eventQueue.Count -eq 0) 'stopped-engine refused reached Q/reducer'
+$script:clockMs=15000;Invoke-DaemonDecision
+Assert ($decision.episode.status -eq 'open' -and $verdict.reason.code -ne 'server-unavailable') 'waiting episode expired as path failure'
+$script:engine=@{Process=@{HasExited=$false}}
+Add-DaemonEvent (New-DaemonEvent 'engine-ready' 'p0' 'ready');Invoke-DaemonDecision
+Assert ($started.Count -eq 6 -and $checkGeneration -gt $oldGeneration -and $episodeId -ne $oldEpisode -and $decision.episode.openedAt -eq 15000) 'open episode did not resume with a fresh generation/clock'
+$script:clockMs=15100;Deliver 'p0' 'ok';Invoke-DaemonDecision
+Assert ($confirmed -and $decision.episode.status -eq 'closed') 'resumed episode hung'
+# Readiness fuse reports an engine failure, never success; later readiness still resumes.
+Fixture;Open-Episode;$script:engine=$null;Invoke-DaemonDecision
+$script:clockMs=20100;Invoke-DaemonDecision
+Assert ($engineWait.expired -and $decision.episode.status -eq 'closed' -and -not $confirmed -and $errorText -match 'engine-ready-timeout') 'readiness fuse did not close waiting episode as failure'
+$script:clockMs=20200;$script:engine=@{Process=@{HasExited=$false}}
+Add-DaemonEvent (New-DaemonEvent 'engine-ready' 'p0' 'ready');Invoke-DaemonDecision
+Assert ($pathChecks.Count -eq 3 -and $decision.episode.status -eq 'open') 'late engine-ready lost the round after fuse'
+# Verify is deferred too, without spending its single Q reservation before readiness.
+Fixture;Open-Episode;Answer-Round
+$script:clockMs=3100
+# Simulate selector acknowledgement arriving as engine readiness is invalidated.
+$script:active='p1';$decision.currentTag='p1';$decision.episode.open=$false;$decision.episode.status='verifying';$decision.episode.verifyAt=3100
+$script:busEngineReady=$false;Start-DaemonVerification 'p1'
+Assert (-not $q.verified -and @($started|Where-Object {$_.verify}).Count -eq 0) 'unready verification consumed Q or started I/O'
+$script:clockMs=6000;$script:busEngineReady=$true
+Add-DaemonEvent (New-DaemonEvent 'engine-ready' 'p1' 'ready')
+Assert ($pathChecks.p1.purpose -eq 'post-switch-verify' -and $pathChecks.p1.generation -eq $checkGeneration -and $decision.episode.verifyAt -eq 6000) 'engine-ready did not resume deferred verification'
+$script:clockMs=6100;Deliver 'p1' 'ok';Invoke-DaemonDecision
+Assert ($confirmed -and $decision.episode.status -eq 'closed') 'resumed verification did not close on its real result'
+# Q annotations survive parallel probes and choose healthy p2 over faster TSPU p1.
+Fixture
+$q.networks[$network.id].tspu.p1=@{count=2;until=999999}
+Open-Episode
+$script:clockMs=200;Deliver 'p0' 'refused';Deliver 'p1' 'ok';Receive-DaemonChecks
+$script:clockMs=250;Deliver 'p2' 'ok';$directCheck.handle.event=New-DaemonEvent 'net-up' '' 'ok';Invoke-DaemonDecision
+$script:clockMs=3100;Invoke-DaemonDecision
+Assert ($active -eq 'p2' -and $decision.episode.status -eq 'verifying') 'Q TSPU ordering was lost at final selection'
+# Public profile -> actual Read-TransportSettings -> initial Q and reload of the same state.
+Fixture
+$configRoot=Join-Path ([IO.Path]::GetTempPath()) ('t2-profile-'+[guid]::NewGuid().ToString('N'))
+[void][IO.Directory]::CreateDirectory($configRoot)
+try{
+    $sshFile=Join-Path $configRoot 'ssh.json';$channelFile=Join-Path $configRoot 'channel.json'
+    Write-TransportJson $sshFile @{sshExecutable='ssh';serverAddress='example.test';login='user';keyPath='unused';knownHostsPath='unused'}
+    Write-TransportJson $channelFile @{outbounds=@()}
+    $config=@{transport=@{profilePath=$sshFile;channelPath=$channelFile;bindPhysical=$false;apiPort=29095;priority=@('p');entries=@()};profile=@{transport=@{switch=@{probeBudgetKiBPer10m=@{mobile=64}}}}}
+    $configFile=Join-Path $configRoot 'config.json';Write-TransportJson $configFile $config
+    $script:settings=Read-TransportSettings $configRoot;$script:q=$null;$script:qualityClass='mobile'
+    Initialize-DaemonQuality
+    Assert ($qualitySnapshot.budgetKiB -eq 64 -and $settings.Options.apiPort -eq 29095 -and $settings.Transport.profilePath -eq $sshFile -and $settings.Transport.priority[0] -eq 'p') 'public switch missing at startup or runtime fields lost'
+    $originalQ=$q
+    $config.transport.switch=@{probeBudgetKiBPer10m=@{mobile=192};minStayMs=99999}
+    $config.profile.transport.switch.probeBudgetKiBPer10m.mobile=80
+    Write-TransportJson $configFile $config
+    $script:settings=Read-TransportSettings $configRoot;Initialize-DaemonQuality
+    Assert ([object]::ReferenceEquals($originalQ,$q) -and $qualitySnapshot.budgetKiB -eq 80 -and $q.config.minStayMs -eq 30000 -and $settings.Transport.channelPath -eq $channelFile) 'profile priority/reload did not replace runtime switch while preserving Q/runtime fields'
+    $config.profile.transport.switch=@{probeBudgetKiBPer10m=@{mobile=64}}
+    [void]$config.transport.Remove('switch');Write-TransportJson $configFile $config
+    $script:settings=Read-TransportSettings $configRoot;Initialize-DaemonQuality
+    Assert ($qualitySnapshot.budgetKiB -eq 64) 'reload without runtime switch lost profile mobile budget'
+}finally{Remove-Item -LiteralPath $configRoot -Recurse -Force}
+Fixture
 Open-Episode
 Assert ($verdict.action -eq 'probe-round' -and $started.Count -eq 3 -and $directStarts -eq 1) 'round/direct verdict not executed immediately'
 Assert (-not $confirmed -and @($started|Where-Object {$_.verify}).Count -eq 0) 'light round announced success or started bulk probe'
