@@ -94,6 +94,9 @@
     <Compile Include="../BusJournal.cs" />
     <Compile Include="BusJournalTests.cs" />
     <Compile Include="../NetNotify.cs" />
+    <Compile Include="../NetRoute.cs" />
+    <Compile Include="../VpnReady.cs" />
+    <Compile Include="VpnReadyTests.cs" />
     <Compile Include="NetNotifyTests.cs" />
     <Compile Include="../TrayBus.cs" />
     <Compile Include="TrayBusTests.cs" />

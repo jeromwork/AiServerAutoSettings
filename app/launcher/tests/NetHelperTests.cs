@@ -161,7 +161,7 @@ namespace RemoteAgents.Launcher
                 return 0;
             }
             if (args.Length == 1 && args[0] == "--net-helper") { Run(); return 0; }
-            if (args.Length == 0 || !args[0].StartsWith("--", StringComparison.Ordinal)) { Run(); VpnTunTests.Run(args.Length == 0 ? Path.GetTempPath() : args[0]); }
+            if (args.Length == 0 || !args[0].StartsWith("--", StringComparison.Ordinal)) { Run(); VpnTunTests.Run(args.Length == 0 ? Path.GetTempPath() : args[0]); VpnReadyTests.Run(); }
             try { return (int)typeof(TestEntry).GetMethod("Main", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, new object[] { args }); }
             catch (TargetInvocationException ex) { ExceptionDispatchInfo.Capture(ex.InnerException).Throw(); throw; }
         }

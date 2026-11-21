@@ -1,0 +1,107 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Net;
+using System.Threading;
+
+namespace RemoteAgents.Launcher
+{
+    internal enum VpnGateOutcome { Ready, Fatal, CoreExited, Off, Fuse, RoutesOk, RoutesFuse }
+
+    // Ворота готовности VPN (V3, vpn-events-plan 1.3/1.4). Подписаны на шину службы:
+    //   готовность ядра = singbox.started core=vpn; падение = singbox.fatal core=vpn или выход процесса;
+    //   выключение = vpn.off; перепроверка маршрута = win.route.changed / win.iface.changed / win.addr.changed.
+    // Ожидание — по событию. Кусок WaitAny(PollMs) нужен ТОЛЬКО ради пульса аренды (lease.Pulse) и проверки выхода
+    // процесса/отмены; он не условие готовности. Подписываться надо ДО запуска ядра (событие не теряется).
+    internal sealed class VpnReadyGate : IDisposable
+    {
+        // Предохранитель (конституция 4а): событие singbox.started недоступно, если ядро зависло внутри Start;
+        // при срабатывании — остановить ядро, состояние error/core-not-ready, успех не объявляет.
+        // Сумма предохранителей службы при включении: exclusions 15 + check 15 + ready 20 + routes 10 с (меньше VpnOnFuseMs трея).
+        internal const int CoreReadyFuseMs = 20000;
+        // Предохранитель (конституция 4а): события win.route/iface.changed недоступны (уведомление не зарегистрировано
+        // или маршрут так и не появился), если за это время маршрут на TUN не подтверждён; при срабатывании — остановить ядро,
+        // состояние error/routes-not-ours, успех не объявляет.
+        internal const int RouteFuseMs = 10000;
+
+        readonly List<IDisposable> subs = new List<IDisposable>();
+        readonly ManualResetEvent ready = new ManualResetEvent(false), fatal = new ManualResetEvent(false), off = new ManualResetEvent(false);
+        readonly AutoResetEvent netChanged = new AutoResetEvent(false);
+        volatile string readyLine = "", fatalLine = "", offReason = "";
+        readonly string core;
+
+        internal VpnReadyGate(EventBus bus, string core = "vpn")
+        {
+            if (bus == null) throw new ArgumentNullException("bus");
+            this.core = core;
+            subs.Add(bus.Subscribe(BusTopics.SingboxStarted, e => { if (e.Get("core") == this.core) { readyLine = e.Get("line"); ready.Set(); } }));
+            subs.Add(bus.Subscribe(BusTopics.SingboxFatal, e => { if (e.Get("core") == this.core) { fatalLine = e.Get("line"); fatal.Set(); } }));
+            subs.Add(bus.Subscribe(BusTopics.VpnOff, e => { offReason = e.Get("reason"); off.Set(); }));
+            subs.Add(bus.Subscribe(BusTopics.WinRouteChanged, e => netChanged.Set()));
+            subs.Add(bus.Subscribe(BusTopics.WinIfaceChanged, e => netChanged.Set()));
+            subs.Add(bus.Subscribe(BusTopics.WinAddrChanged, e => netChanged.Set()));
+        }
+        internal string ReadyLine { get { return readyLine; } }
+        internal string FatalLine { get { return fatalLine; } }
+        internal string OffReason { get { return offReason; } }
+
+        // Ждёт первое из: готовность ядра, fatal, выход процесса, выключение, предохранитель. Порядок при одновременности:
+        // выключение, fatal, выход процесса, готовность (ядро, которое сказало «started» и тут же упало, готовым не считается).
+        internal VpnGateOutcome AwaitCore(Func<bool> coreExited, Func<bool> cancelled, Action pulse, Func<bool> fuse, int sliceMs = VpnWatchdog.PollMs)
+        {
+            var handles = new WaitHandle[] { ready, fatal, off };
+            while (true) {
+                if (off.WaitOne(0) || cancelled()) return VpnGateOutcome.Off;
+                if (fatal.WaitOne(0)) return VpnGateOutcome.Fatal;
+                if (coreExited()) return VpnGateOutcome.CoreExited;
+                if (ready.WaitOne(0)) return VpnGateOutcome.Ready;
+                if (fuse()) return VpnGateOutcome.Fuse;
+                pulse();
+                WaitHandle.WaitAny(handles, sliceMs); // пульс аренды, не условие готовности
+            }
+        }
+
+        // Первая проверка маршрута сразу; повторная — только после уведомления Windows о смене маршрутов/интерфейсов.
+        // result — последняя проверка (для журнала).
+        internal VpnGateOutcome AwaitRoute(Func<VpnRouteResult> probe, Func<bool> cancelled, Action pulse, Func<bool> fuse, out VpnRouteResult result, int sliceMs = VpnWatchdog.PollMs)
+        {
+            var handles = new WaitHandle[] { netChanged, off };
+            bool first = true;
+            result = null;
+            while (true) {
+                if (off.WaitOne(0) || cancelled()) return VpnGateOutcome.Off;
+                if (first || netChanged.WaitOne(0)) {
+                    first = false;
+                    result = probe();
+                    if (result != null && result.Ok) return VpnGateOutcome.RoutesOk;
+                    continue;
+                }
+                if (fuse()) return VpnGateOutcome.RoutesFuse;
+                pulse();
+                WaitHandle.WaitAny(handles, sliceMs); // пульс аренды, не условие
+            }
+        }
+
+        // Проверка факта маршрута: Best(1.1.1.1) и Best(проба) == ifIndex TUN.
+        internal static VpnRouteResult ProbeRoute(Func<IPAddress, int> best, Func<string, int> indexByName, Func<int, string> nameOf, IPAddress probe, string tunName)
+        {
+            var r = new VpnRouteResult { TunIf = indexByName(tunName) };
+            r.Best1111 = best(IPAddress.Parse("1.1.1.1")); r.BestProbe = best(probe);
+            r.Best1111Name = r.Best1111 > 0 ? nameOf(r.Best1111) : ""; r.BestProbeName = r.BestProbe > 0 ? nameOf(r.BestProbe) : "";
+            return r;
+        }
+
+        // Предохранитель по реальным часам; в тестах подставляется ручной сигнал.
+        internal static Func<bool> FuseAfter(int ms)
+        {
+            var watch = Stopwatch.StartNew();
+            return () => watch.ElapsedMilliseconds >= ms;
+        }
+
+        public void Dispose()
+        {
+            foreach (var s in subs) { try { s.Dispose(); } catch { } }
+            subs.Clear();
+        }
+    }
+}
