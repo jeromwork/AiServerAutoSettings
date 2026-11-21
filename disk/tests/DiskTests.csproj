@@ -14,6 +14,7 @@
     <Compile Include="../../app/launcher/Disk*.cs" />
     <Compile Include="../../app/launcher/Data.cs" />
     <Compile Include="../../app/launcher/RaLog.cs" />
+    <Compile Include="../../app/launcher/LogLimits.cs" />
     <Compile Include="../../app/launcher/LogMask.cs" />
     <Compile Include="../../app/launcher/UpdatePolicy.cs" />
     <Compile Include="../../app/launcher/ConfigBundle.cs" />

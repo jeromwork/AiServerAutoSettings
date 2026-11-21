@@ -72,6 +72,7 @@
     <Compile Include="../BusTopics.cs" />
     <Compile Include="EventBusTests.cs" />
     <Compile Include="../RaLog.cs" />
+    <Compile Include="../LogLimits.cs" />
     <Compile Include="../LogMask.cs" />
     <Compile Include="../NetLadder.cs" />
     <Compile Include="../LogShipper.cs" />

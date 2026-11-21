@@ -30,7 +30,9 @@ namespace RemoteAgents.Launcher
         internal static int Run(string[] args)
         {
             NetHelperVersionTests.Run();
-            Golden(); Mask(); Rotation(); Encoding_(); JournalMapping(); Conflicts(); Ladder(); HelperEvents(); Protocol(); CorePump(); Shipper(); ShipperInvalidUtf8(); ShipperRisks(); SshSender(); Mirror();
+            // Старые проверки пишут много однотипных строк подряд: лимитер повторов для них выключен (окно 0), его проверяет Limits().
+            LogLimits.RepeatWindow = TimeSpan.Zero; LogLimits.EventBurstLines = int.MaxValue;
+            Golden(); Mask(); Rotation(); Encoding_(); JournalMapping(); Conflicts(); Ladder(); HelperEvents(); Protocol(); CorePump(); Shipper(); ShipperInvalidUtf8(); ShipperRisks(); SshSender(); Mirror(); Limits();
             Console.WriteLine("PASS: Logging " + count + " checks");
             return 0;
         }
@@ -73,6 +75,50 @@ namespace RemoteAgents.Launcher
                 string line = RaLog.Format(DateTimeOffset.Now, LogLevel.Info, "launcher", "t", new[] { new KeyValuePair<string, string>("msg", "a HIDDEN-VALUE b") }, "0000");
                 Check(!line.Contains("HIDDEN-VALUE") && line.Contains("a *** b"), "RaLog.Format hides known secrets");
             } finally { RaLog.Secrets = null; }
+        }
+
+        // Микро-тест ограничений журнала: фальшивые часы, без ожиданий.
+        static void Limits()
+        {
+            string dir = Temp("limits");
+            var oldClock = RaLog.Clock; var oldLimits = RaLog.Limits; var oldWindow = LogLimits.RepeatWindow; int oldBurst = LogLimits.EventBurstLines; var oldAge = LogLimits.ArchiveMaxAge; long oldTotal = LogLimits.ArchivesTotalLimit;
+            try {
+                LogLimits.RepeatWindow = TimeSpan.FromSeconds(60); LogLimits.EventBurstLines = 5; LogLimits.ArchiveMaxAge = TimeSpan.FromDays(14); LogLimits.ArchivesTotalLimit = 20L * 1024 * 1024;
+                RaLog.Limits = new LogLimits();
+                var t = new DateTimeOffset(2026, 11, 21, 12, 0, 0, TimeSpan.Zero);
+                RaLog.Clock = () => t;
+                var same = new[] { new KeyValuePair<string, string>("path", "x") };
+                for (int i = 0; i < 13; i++) { RaLog.WriteTo(dir, "launcher", LogLevel.Warn, "disk", "disk.explorer.unavailable", same); t = t.AddSeconds(5); }
+                string text = File.ReadAllText(Path.Combine(dir, "launcher.log"), Encoding.UTF8);
+                Check(Regex.Matches(text, "unavailable s=").Count == 2 && text.Contains(" repeat ") && text.Contains("count=11 of=disk.explorer.unavailable"), "identical lines inside the window collapse into repeat count=N: " + text);
+                // Разные поля одного события: не больше EventBurstLines за окно, остаток считается как reason=rate.
+                t = t.AddSeconds(120);
+                for (int i = 0; i < 9; i++) RaLog.WriteTo(dir, "launcher", LogLevel.Info, "net", "net.noise", new[] { new KeyValuePair<string, string>("n", i.ToString()) });
+                RaLog.WriteTo(dir, "launcher", LogLevel.Error, "net", "net.noise", new[] { new KeyValuePair<string, string>("n", "err") });
+                text = File.ReadAllText(Path.Combine(dir, "launcher.log"), Encoding.UTF8);
+                Check(Regex.Matches(text, @"net\.noise\s+s=").Count == 6 && text.Contains("n=err"), "burst cap keeps 5 lines of one event, ERROR is never cut");
+                t = t.AddSeconds(61);
+                RaLog.WriteTo(dir, "launcher", LogLevel.Info, "net", "net.other", null);
+                text = File.ReadAllText(Path.Combine(dir, "launcher.log"), Encoding.UTF8);
+                Check(text.Contains("count=4 of=net.noise reason=rate"), "expired counters are flushed by the next write (no timer)");
+                // Чистка архивов по сроку и размеру.
+                string cdir = Temp("purge");
+                string old = Path.Combine(cdir, "a.log.1"), fresh = Path.Combine(cdir, "a.log.2"), big = Path.Combine(cdir, "b.log.1"), live = Path.Combine(cdir, "a.log");
+                File.WriteAllText(old, "x"); File.WriteAllText(fresh, "x"); File.WriteAllText(live, "x"); File.WriteAllBytes(big, new byte[100]);
+                File.SetLastWriteTimeUtc(old, t.UtcDateTime.AddDays(-15)); File.SetLastWriteTimeUtc(fresh, t.UtcDateTime.AddDays(-1)); File.SetLastWriteTimeUtc(big, t.UtcDateTime.AddDays(-2));
+                LogLimits.PurgeArchives(cdir, t);
+                Check(!File.Exists(old) && File.Exists(fresh) && File.Exists(big) && File.Exists(live), "archives older than the age limit are removed, live log stays");
+                LogLimits.ArchivesTotalLimit = 50; LogLimits.PurgeArchives(cdir, t);
+                Check(!File.Exists(big) && File.Exists(fresh) && File.Exists(live), "oversized archive set drops the oldest files");
+                try { Directory.Delete(cdir, true); } catch { }
+                // Таблица ключей ограничена.
+                var small = new LogLimits(); int oldKeys = LogLimits.MaxTrackedKeys; LogLimits.MaxTrackedKeys = 8;
+                try { var sink = new List<LogLimits.Summary>(); for (int i = 0; i < 100; i++) small.Allow(dir, "s", LogLevel.Info, "c", "e", new[] { new KeyValuePair<string, string>("i", i.ToString()) }, t, sink); Check(small.Tracked <= 8 + 1, "tracked keys are bounded"); }
+                finally { LogLimits.MaxTrackedKeys = oldKeys; }
+            } finally {
+                RaLog.Clock = oldClock; RaLog.Limits = oldLimits; LogLimits.RepeatWindow = oldWindow; LogLimits.EventBurstLines = oldBurst; LogLimits.ArchiveMaxAge = oldAge; LogLimits.ArchivesTotalLimit = oldTotal;
+                try { Directory.Delete(dir, true); } catch { }
+            }
         }
 
         static void Rotation()
