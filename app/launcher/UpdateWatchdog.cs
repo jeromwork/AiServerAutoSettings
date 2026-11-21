@@ -38,7 +38,7 @@ namespace RemoteAgents.Launcher
             try {
                 using (var failed = FailureEvent(home)) {
                     failed.Set();
-                    if (!File.Exists(Path.Combine(home, Product.BundleDirectory, "exe-upgrade.json"))) return false;
+                    if (!UpgradeInstaller.HasObservableReceipt(home)) return false;
                     if (!IsWatching(home)) Start(home, Path.Combine(home, Product.Name + ".previous.exe"), preserveFailure: true);
                     return IsWatching(home);
                 }
@@ -46,7 +46,7 @@ namespace RemoteAgents.Launcher
         }
         internal static void Start(string home, string observerExe, bool preserveFailure = false)
         {
-            if (!File.Exists(Path.Combine(home, Product.BundleDirectory, "exe-upgrade.json"))) return;
+            if (!UpgradeInstaller.HasObservableReceipt(home)) return;
             using (var ready = Event(EventName(Instance(home), "UpdateWatching"))) {
                 if (IsWatching(home)) return;
                 ready.Reset();
@@ -85,7 +85,6 @@ namespace RemoteAgents.Launcher
                             }
                             failed.Set(); // исключить приёмку, пока внешний наблюдатель останавливает новый EXE
                             var log = new Journal(home); log.Write("update.failed reason=" + reason);
-                            restart = true;
                             try {
                                 preserveFailure = UpdateObservation.TryRollback(() => {
                                     using (var mutex = new Mutex(false, "Global\\" + name)) {
@@ -103,6 +102,9 @@ namespace RemoteAgents.Launcher
                                 // Даже ошибка записи update-state не оставляет отказ взведённым навечно.
                                 if (!preserveFailure) failed.Reset();
                             }
+                            // Ошибка отката имеет конечный исход: не запускаем снова
+                            // EXE с той же неустранённой причиной автоматической остановки.
+                            restart = preserveFailure;
                             return preserveFailure ? 0 : 1;
                         }
                     } finally { if (held) singleton.ReleaseMutex(); }
@@ -138,7 +140,7 @@ namespace RemoteAgents.Launcher
         }
         static string WaitForOutcome(string home, string receipt, WaitHandle changed, WaitHandle failed)
         {
-            return UpdateObservation.WaitForOutcome(() => File.Exists(receipt), () => UpdateObservation.ReadReceipt(receipt),
+            return UpdateObservation.WaitForOutcome(() => UpgradeInstaller.HasObservableReceipt(home), () => UpdateObservation.ReadReceipt(receipt),
                 changed, failed, (pid, started) => new ImageProcess(pid, started),
                 (pid, started) => UpgradeInstaller.NoteCleanExit(home, pid, started), () => DateTime.UtcNow,
                 (handles, remaining) => WaitHandle.WaitAny(handles, remaining));

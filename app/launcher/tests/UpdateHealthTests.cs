@@ -17,6 +17,19 @@ namespace RemoteAgents.Launcher
         static void Check(bool value, string message) { if (!value) throw new Exception(message); checks++; }
         public static int Main(string[] args)
         {
+            if (args.Length == 2 && args[0] == "--receipt-recovery-child") {
+                if (UpgradeInstaller.HasObservableReceipt(args[1])) return 2;
+                bool prepareRefused = false, directRefused = false;
+                try { UpgradeInstaller.PrepareImageLaunch(args[1], Now); } catch (InvalidDataException) { prepareRefused = true; }
+                try { UpgradeInstaller.NoteImageProcess(args[1]); } catch (InvalidDataException) { directRefused = true; }
+                return prepareRefused && directRefused ? 0 : 3;
+            }
+            if (args.Length == 2 && args[0] == "--receipt-holder-child") return ReceiptHolderChild(args[1]);
+            if (args.Contains("--review-fixes4")) {
+                ReviewFixes4();
+                Console.WriteLine("PASS: UpdateHealthTests review fixes 4 (" + checks + " checks; live mutex holder, real Copy/Delete failures)");
+                return 0;
+            }
             if (args.Length == 2 && args[0] == "--receipt-race-child") return ReceiptRaceChild(args[1]);
             if (args.Contains("--review-fixes3")) {
                 ReviewFixes3();
@@ -33,6 +46,7 @@ namespace RemoteAgents.Launcher
                 Console.WriteLine("PASS: UpdateHealthTests review fixes (" + checks + " checks; manual events, fake clock)");
                 return 0;
             }
+            ReviewFixes4();
             ReviewFixes3();
             ReviewFixes2();
             ReviewFixes();
@@ -44,6 +58,147 @@ namespace RemoteAgents.Launcher
             ObserverEventsRollbackTransaction();
             Console.WriteLine("PASS: UpdateHealthTests (" + checks + " checks; manual events, fake clock)");
             return 0;
+        }
+        static void ReviewFixes4()
+        {
+            WithHome(ReceiptDeadlineAndCancellation);
+            WithHome(ApplyPreparesWithoutReceiptLock);
+            WithHome(CorruptReceiptIoFailureIsTerminal);
+        }
+        static int ReceiptHolderChild(string home)
+        {
+            using (UpgradeInstaller.LockReceipt(home)) {
+                Console.WriteLine("held"); Console.Out.Flush();
+                return Console.ReadLine() == "release" ? 0 : 2;
+            }
+        }
+        static Process StartHolder(string home)
+        {
+            var child = Process.Start(new ProcessStartInfo("dotnet", Files.Quote(Assembly.GetExecutingAssembly().Location) + " --receipt-holder-child " + Files.Quote(home)) {
+                UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardInput = true, RedirectStandardError = true
+            });
+            try {
+                var ready = child.StandardOutput.ReadLineAsync();
+                Check(ready.Wait(10000) && ready.Result == "held", "live child acquired receipt mutex");
+                return child;
+            } catch { if (!child.HasExited) child.Kill(); child.Dispose(); throw; }
+        }
+        static void ReleaseHolder(Process child)
+        {
+            try {
+                child.StandardInput.WriteLine("release"); child.StandardInput.Flush();
+                Check(child.WaitForExit(10000) && child.ExitCode == 0, "holder only releases after all deadline checks");
+            } finally { if (!child.HasExited) { child.Kill(); child.WaitForExit(10000); } child.Dispose(); }
+        }
+        static void ReceiptDeadlineAndCancellation(string home)
+        {
+            string receipt = UpgradeInstaller.ReceiptPath(home);
+            Json.Write(receipt, new { pid = 42, processStarted = "A", startedUtc = Now.ToString("o") });
+            string original = File.ReadAllText(receipt);
+            var child = StartHolder(home);
+            try {
+                var elapsed = Stopwatch.StartNew(); bool busy = false;
+                try { using (UpgradeInstaller.LockReceipt(home, CancellationToken.None, 150)) { throw new Exception("unowned transaction ran"); } }
+                catch (UpgradeInstaller.ReceiptBusyException) { busy = true; }
+                Check(busy && elapsed.ElapsedMilliseconds >= 100 && elapsed.ElapsedMilliseconds < 1500 && !child.HasExited,
+                    "deadline expires while another live process still holds mutex");
+                elapsed.Restart(); busy = false;
+                try { UpgradeInstaller.NoteCleanExit(home, 42, "A"); } catch (UpgradeInstaller.ReceiptBusyException) { busy = true; }
+                Check(busy && elapsed.ElapsedMilliseconds < 500, "UI exit write refuses within short receipt deadline");
+                busy = false; elapsed.Restart();
+                try { UpgradeInstaller.TryFinishObservation(home, () => { throw new Exception("unowned retirement"); }); }
+                catch (UpgradeInstaller.ReceiptBusyException) { busy = true; }
+                Check(busy && elapsed.ElapsedMilliseconds < 500, "observer retirement cannot wait forever outside outcome fuse");
+                using (var cancel = new CancellationTokenSource()) {
+                    elapsed.Restart(); cancel.CancelAfter(80); bool canceled = false;
+                    try { using (UpgradeInstaller.LockReceipt(home, cancel.Token, 5000)) { throw new Exception("canceled transaction ran"); } }
+                    catch (OperationCanceledException) { canceled = true; }
+                    Check(canceled && elapsed.ElapsedMilliseconds < 1500 && !child.HasExited, "cancellation interrupts live-holder wait before long deadline");
+                }
+                Check(File.ReadAllText(receipt) == original, "timeout and cancellation never permit receipt writes");
+                File.Delete(receipt); elapsed.Restart();
+                UpgradeInstaller.NoteCurrentImageCleanExit(home);
+                Check(elapsed.ElapsedMilliseconds < 500 && !child.HasExited, "first setup exit without receipt bypasses occupied mutex");
+            } finally { ReleaseHolder(child); }
+            using (UpgradeInstaller.LockReceipt(home)) { Check(true, "failed acquisition leaks no mutex ownership"); }
+        }
+        static void ApplyPreparesWithoutReceiptLock(string home)
+        {
+            var engine = new UpdateEngine(home, "1.0.0");
+            Directory.CreateDirectory(engine.Folder("1.0.0"));
+            Json.Write(Path.Combine(engine.Folder("1.0.0"), "components.json"), new[] { new { name = "transport", exe = "unused", critical = true } });
+            engine.Activate("1.0.0");
+            string source = Path.Combine(home, "source.exe"), zip = Path.Combine(home, "bundle.zip");
+            File.WriteAllText(source, "image");
+            using (var archive = ZipFile.Open(zip, ZipArchiveMode.Create))
+            using (var writer = new StreamWriter(archive.CreateEntry("bundle-version.txt").Open())) writer.Write("1.0.0");
+            bool tested = false;
+            UpgradeInstaller.Apply(home, source, zip, "1.0.0", false, folder => {
+                var child = StartHolder(home); // another process can acquire during real Apply selftest
+                try {
+                    UpgradeInstaller.NoteCurrentImageCleanExit(home);
+                    tested = true; return true;
+                } finally { ReleaseHolder(child); }
+            });
+            Check(tested && File.ReadAllText(Path.Combine(home, Product.ExeName)) == "image", "Apply selftest runs outside mutex and final activation succeeds");
+        }
+        static void CorruptReceiptIoFailureIsTerminal(string home)
+        {
+            foreach (bool denyDelete in new[] { false, true }) {
+                string folder = Path.Combine(home, denyDelete ? "delete" : "copy");
+                var engine = new UpdateEngine(folder, "1.0.0", () => Now);
+                string receipt = UpgradeInstaller.ReceiptPath(folder), archive = receipt + ".invalid";
+                File.WriteAllText(receipt, "{broken\r\n"); File.WriteAllText(archive, "previous diagnostic");
+                FileStream held = null;
+                UnixFileMode mode = 0;
+                bool windows = Environment.OSVersion.Platform == PlatformID.Win32NT;
+                try {
+                    if (windows) {
+                        if (denyDelete) File.SetAttributes(receipt, FileAttributes.ReadOnly);
+                        else held = new FileStream(archive, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+                    } else if (denyDelete) {
+                        // Existing writable archive can be overwritten; parent 0555 denies unlink.
+                        // The write-ahead marker lives separately in state/ and remains writable.
+                        mode = File.GetUnixFileMode(engine.Root);
+                        File.SetUnixFileMode(engine.Root, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+                    } else File.SetUnixFileMode(archive, UnixFileMode.UserRead);
+                    Exception failure = null;
+                    try { UpgradeInstaller.RollbackObservedImage(folder, engine, "invalid-receipt"); }
+                    catch (Exception ex) { failure = ex; }
+                    Check(failure is IOException || failure is UnauthorizedAccessException, "real filesystem refusal reaches " + (denyDelete ? "Delete" : "Copy"));
+                    Check(File.Exists(receipt) && File.ReadAllText(archive) == (denyDelete ? "{broken\r\n" : "previous diagnostic"),
+                        denyDelete ? "Copy succeeded before real Delete denial" : "real Copy denial preserves existing archive and active receipt");
+                    Check(UpgradeInstaller.ReceiptRecoveryBlocked(folder) && !UpgradeInstaller.HasObservableReceipt(folder), "durable marker suppresses failed corrupt receipt");
+                    bool refused = false;
+                    try { UpgradeInstaller.PrepareImageLaunch(folder, Now); } catch (InvalidDataException) { refused = true; }
+                    Check(refused, "next launch explicitly refuses before stopping/restarting image");
+                    refused = false;
+                    try { UpgradeInstaller.NoteImageProcess(folder); } catch (InvalidDataException) { refused = true; }
+                    Check(refused, "direct startup also checks durable marker before observer");
+                    using (var next = Process.Start(new ProcessStartInfo("dotnet", Files.Quote(Assembly.GetExecutingAssembly().Location) + " --receipt-recovery-child " + Files.Quote(folder)) {
+                        UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true
+                    })) {
+                        try { Check(next.WaitForExit(10000) && next.ExitCode == 0, "new process honors durable suppression on next startup"); }
+                        finally { if (!next.HasExited) { next.Kill(); next.WaitForExit(10000); } }
+                    }
+                    using (var changed = new ManualResetEvent(false))
+                    using (var failed = new ManualResetEvent(true)) {
+                        Check(UpdateObservation.WaitForOutcome(() => UpgradeInstaller.HasObservableReceipt(folder),
+                            () => { throw new Exception("suppressed receipt read again"); }, changed, failed,
+                            (pid, started) => null, (pid, started) => 0, () => Now,
+                            (handles, ms) => { throw new Exception("suppressed receipt observed again"); }) == "", "next observer does not retry even with queued failure");
+                    }
+                    UpgradeInstaller.RollbackObservedImage(folder, new UpdateEngine(folder, "1.0.0"), "invalid-receipt");
+                    Check(File.ReadAllText(archive) == (denyDelete ? "{broken\r\n" : "previous diagnostic"), "new engine instance never repeats Copy/Delete after durable refusal");
+                } finally {
+                    if (held != null) held.Dispose();
+                    if (windows) File.SetAttributes(receipt, FileAttributes.Normal);
+                    else {
+                        if (denyDelete) File.SetUnixFileMode(engine.Root, mode);
+                        File.SetUnixFileMode(archive, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                    }
+                }
+            }
         }
         static void ReviewFixes3()
         {
@@ -105,7 +260,8 @@ namespace RemoteAgents.Launcher
                 Console.WriteLine("blocked"); Console.Out.Flush();
             }
             // Реальные писатели в другом процессе: должны дождаться окончания R/M/W наблюдателя A.
-            UpgradeInstaller.NoteImageProcess(home, 43, "B", Now.AddTicks(1), "image");
+            using (UpgradeInstaller.LockReceipt(home, CancellationToken.None, 5000))
+                UpgradeInstaller.NoteImageProcess(home, 43, "B", Now.AddTicks(1), "image");
             UpgradeInstaller.NoteHealthProgress(home, Now.AddTicks(2));
             return 0;
         }
