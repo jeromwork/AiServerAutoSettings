@@ -41,7 +41,8 @@ namespace RemoteAgents.Launcher
         public const string NetE2E = "net.e2e";
 
         // Транспорт (T0/T2): transport.status, transport.episode, transport.switch, transport.mem, transport.command, transport.mem-high
-        // Демон объявляет готовность после запуска UTF-8 читателя stdin (B4).
+        // stdin.ready opens event forwarding; ready proves an engine-ready, checked path.
+        public const string TransportStdinReady = "transport.stdin.ready";
         public const string TransportReady = "transport.ready";
         public const string TransportStatus = "transport.status";
         public const string TransportEpisode = "transport.episode";

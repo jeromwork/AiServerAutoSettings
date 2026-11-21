@@ -18,6 +18,7 @@ using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Xml;
 namespace RemoteAgents {
  public sealed class TransportEvent {
   public long at {get;set;}
@@ -48,6 +49,150 @@ namespace RemoteAgents {
  }
  [DataContract] public sealed class ClashMetadata {
   [DataMember(Name="type")] public string Type;
+ }
+ // B4B: pipe I/O is confined to background workers; the daemon only drains/queues.
+ public sealed class TransportBusEvent {
+  public string topic;
+  public Dictionary<string,string> fields;
+ }
+ public sealed class TransportBus : IDisposable {
+  public const int MaxLineBytes=8192, MaxQueuedEvents=512;
+  readonly object gate=new object();
+  readonly Queue<TransportBusEvent> incoming=new Queue<TransportBusEvent>();
+  readonly Queue<string> outgoing=new Queue<string>();
+  // Fixed outgoing allowlist also bounds the last-value deduplication table.
+  readonly Dictionary<string,string> last=new Dictionary<string,string>();
+  readonly AutoResetEvent wake=new AutoResetEvent(false);
+  readonly Stream input;
+  readonly TextWriter output;
+  volatile bool stopped, connected, inputClosed, completing;
+  Thread writer;
+  bool drained;
+  bool networkPending;
+  int started;
+  long rejected, inputDropped, outputDropped, outputRejected, writeErrors;
+  public bool Connected {get {return connected;}}
+  public bool InputClosed {get {return inputClosed;}}
+  public long Rejected {get {return Interlocked.Read(ref rejected);}}
+  public long InputDropped {get {return Interlocked.Read(ref inputDropped);}}
+  public long OutputDropped {get {return Interlocked.Read(ref outputDropped);}}
+  public long OutputRejected {get {return Interlocked.Read(ref outputRejected);}}
+  public long WriteErrors {get {return Interlocked.Read(ref writeErrors);}}
+  public TransportBus(Stream input,TextWriter output) {this.input=input; this.output=output;}
+  public void Start() {
+   if(Interlocked.Exchange(ref started,1)!=0) return;
+   if(input!=null) {Thread t=new Thread(ReadInput);t.IsBackground=true;t.Name="transport-stdin";t.Start();} else inputClosed=true;
+   if(output!=null) {writer=new Thread(WriteLoop);writer.IsBackground=true;writer.Name="transport-stdout";writer.Start();}
+  }
+  static bool AllowedInput(string topic) {
+   return topic!=null && (topic.StartsWith("win.",StringComparison.Ordinal) || topic=="net.change" ||
+    topic.StartsWith("tick.transport-",StringComparison.Ordinal) || topic=="transport.command");
+  }
+  static bool AllowedOutput(string topic) {
+   return topic=="transport.stdin.ready" || topic=="transport.status" || topic=="transport.ready" || topic=="transport.mem" ||
+    topic=="transport.switch" || topic=="transport.episode";
+  }
+  static string Name(XmlElement e) {return e.HasAttribute("item")?e.GetAttribute("item"):e.LocalName;}
+  static TransportBusEvent Parse(string line) {
+   if(!line.StartsWith("@bus ",StringComparison.Ordinal)) return null;
+   byte[] bytes=Encoding.UTF8.GetBytes(line.Substring(5));
+   using(XmlDictionaryReader reader=JsonReaderWriterFactory.CreateJsonReader(bytes,new XmlDictionaryReaderQuotas {MaxDepth=16,MaxStringContentLength=8192,MaxArrayLength=8192,MaxBytesPerRead=8192,MaxNameTableCharCount=16384})) {
+    XmlDocument doc=new XmlDocument();doc.XmlResolver=null;doc.Load(reader);
+    XmlElement root=doc.DocumentElement;
+    if(root.GetAttribute("type")!="object") return null;
+    string topic=null; Dictionary<string,string> fields=null;
+    foreach(XmlNode node in root.ChildNodes) {
+     XmlElement e=node as XmlElement;if(e==null) return null;
+     if(Name(e)=="topic" && topic==null && e.GetAttribute("type")=="string") topic=e.InnerText;
+     else if(Name(e)=="fields" && fields==null && e.GetAttribute("type")=="object") {
+      fields=new Dictionary<string,string>(StringComparer.Ordinal);
+      foreach(XmlNode field in e.ChildNodes) {
+       XmlElement f=field as XmlElement;if(f==null) return null;
+       string type=f.GetAttribute("type"),key=Name(f);
+       if(key.Length==0 || fields.ContainsKey(key) || (type!="string" && type!="number" && type!="boolean" && type!="null")) return null;
+       fields.Add(key,type=="null"?"":f.InnerText);
+      }
+     } else return null;
+    }
+    return AllowedInput(topic) && fields!=null?new TransportBusEvent {topic=topic,fields=fields}:null;
+   }
+  }
+  void Consume(byte[] bytes,int count) {
+   if(count>0 && bytes[count-1]==13) count--;
+   try {
+    TransportBusEvent e=Parse(new UTF8Encoding(false,true).GetString(bytes,0,count));
+    if(e==null) {Interlocked.Increment(ref rejected);return;}
+    lock(gate) {
+     connected=true; // Lifetime latch: EOF must never silently re-enable polling.
+     if(e.topic=="win.route.changed" || e.topic=="win.iface.changed" || e.topic=="win.addr.changed" || e.topic=="net.change") networkPending=true;
+     if(incoming.Count>=MaxQueuedEvents) {incoming.Dequeue();Interlocked.Increment(ref inputDropped);}
+     incoming.Enqueue(e);
+    }
+   } catch(Exception) {Interlocked.Increment(ref rejected);}
+  }
+  void ReadInput() {
+   // Announce from the reader itself, before waiting for the first input or a working path.
+   Queue("transport.stdin.ready", "@bus {\"topic\":\"transport.stdin.ready\",\"fields\":{}}");
+   byte[] chunk=new byte[4096],line=new byte[MaxLineBytes+1];int used=0;bool skipping=false;
+   try {
+    while(!stopped) {
+     int n=input.Read(chunk,0,chunk.Length);if(n<=0) break;
+     for(int i=0;i<n;i++) {
+      byte b=chunk[i];
+      if(b==10) {if(!skipping) Consume(line,used);used=0;skipping=false;}
+      else if(!skipping) {
+       if(used==MaxLineBytes+1 || (used==MaxLineBytes && b!=13)) {
+        Interlocked.Increment(ref rejected);used=0;skipping=true;
+       } else line[used++]=b;
+      }
+     }
+    }
+    if(!stopped && !skipping && used>0) Consume(line,used);
+   } catch(Exception) {} finally {inputClosed=true;}
+  }
+  public TransportBusEvent[] Drain(out bool refresh) {
+   lock(gate) {TransportBusEvent[] result=incoming.ToArray();incoming.Clear();refresh=networkPending;networkPending=false;return result;}
+  }
+  public bool Queue(string topic,string line) {return Enqueue(topic,line,false);}
+  public bool QueueFinalStatus(string line) {return Enqueue("transport.status",line,true);}
+  bool Enqueue(string topic,string line,bool final) {
+   if(!AllowedOutput(topic) || line==null || Encoding.UTF8.GetByteCount(line)>MaxLineBytes || line.IndexOfAny(new[]{'\r','\n'})>=0) {Interlocked.Increment(ref outputRejected);return false;}
+   lock(gate) {
+    if(stopped || completing) return false;
+    string previous;if(!final && last.TryGetValue(topic,out previous) && previous==line) return true;
+    if(outgoing.Count>=MaxQueuedEvents) {Interlocked.Increment(ref outputDropped);if(final) outgoing.Dequeue();else return false;}
+    outgoing.Enqueue(line);last[topic]=line;if(final) completing=true;wake.Set();return true;
+   }
+  }
+  void WritePending() {
+   while(!stopped) {
+    string line;lock(gate) {if(outgoing.Count==0) return;line=outgoing.Dequeue();}
+    output.WriteLine(line);output.Flush();
+   }
+  }
+  void WriteLoop() {
+   try {while(!stopped) {
+    wake.WaitOne();WritePending();
+    lock(gate) {if(completing && outgoing.Count==0 && !stopped) {drained=true;return;}}
+   }}
+   catch(Exception) {Interlocked.Increment(ref writeErrors);}
+  }
+  public bool Complete(int timeoutMs) {
+   // Shutdown only: reject further publications, drain through Flush, then join with a hard fuse.
+   // Dispose remains non-blocking for aborts; blocked pipe workers are background threads.
+   lock(gate) {completing=true;wake.Set();}
+   Start();
+   Thread t=writer;
+   bool done=t!=null && t.Join(Math.Max(0,Math.Min(timeoutMs,1000)));
+   bool delivered;lock(gate) {delivered=done && drained;}
+   Dispose();
+   return delivered;
+  }
+  public void Dispose() {
+   // No Join/Flush/pipe close on the daemon thread: a full stdout or open stdin may block forever.
+   stopped=true;wake.Set();lock(gate) {incoming.Clear();outgoing.Clear();last.Clear();}
+   // Background workers and their wait handle live until process exit if pipe I/O is blocked.
+  }
  }
  public sealed class TransportEvents : IDisposable {
   sealed class Sample { public string Tag,Start; public long Up,Down; public double Since,Seen; }
@@ -351,4 +496,41 @@ function Stop-TransportPathCheck($Check) {
     if (-not $Check -or $Check.stopped) { return }
     $Check.stopped=$true
     if ($Check.mode -eq 'bytes') { Stop-TransportProbe $Check.probe } elseif ($Check.probe) { $Check.probe.Dispose() }
+}
+
+function Start-TransportBus {
+    Initialize-TransportEvents
+    try{[Console]::InputEncoding=New-Object Text.UTF8Encoding($false)}catch{}
+    [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
+    $inputStream=$null;try{$inputStream=[Console]::OpenStandardInput()}catch{}
+    $bus=[RemoteAgents.TransportBus]::new($inputStream,[Console]::Out)
+    $bus.Start()
+    $bus
+}
+function Send-TransportBusEvent($Bus,[string]$Topic,[Collections.IDictionary]$Fields,[switch]$PassThru,[switch]$Final) {
+    if(-not $Bus){return}
+    # Receiver accepts scalar fields only. Structured status values are JSON strings.
+    $safe=[ordered]@{}
+    foreach($key in $Fields.Keys){
+        $value=$Fields[$key]
+        if($null -ne $value -and $value -isnot [string] -and $value -isnot [ValueType]){$value=ConvertTo-Json -InputObject $value -Depth 40 -Compress}
+        $safe[[string]$key]=$value
+    }
+    $line='@bus '+(ConvertTo-Json -InputObject ([ordered]@{topic=$Topic;fields=$safe}) -Depth 4 -Compress)
+    if($Topic -eq 'transport.status' -and [Text.Encoding]::UTF8.GetByteCount($line) -gt 8192){
+        # Full file state may contain hundreds of candidates. Keep a bounded status summary on the bus;
+        # the unchanged transport.json remains the detailed snapshot. Nested fields are JSON strings.
+        foreach($key in @('candidates','switches','endpoints','ports','localWeb','lan','helper','portConflict')){$safe.Remove($key)}
+        $safe['detailsOmitted']=$true
+        $line='@bus '+(ConvertTo-Json -InputObject ([ordered]@{topic=$Topic;fields=$safe}) -Depth 4 -Compress)
+        while([Text.Encoding]::UTF8.GetByteCount($line) -gt 8192){
+            $longest=@($safe.Keys|Where-Object {$safe[$_] -is [string] -and $safe[$_].Length -gt 32}|Sort-Object {$safe[$_].Length} -Descending|Select-Object -First 1)
+            if(-not $longest.Count){break}
+            $key=$longest[0];$safe[$key]=$safe[$key].Substring(0,[int]($safe[$key].Length/2))
+            $safe['fieldsTruncated']=$true
+            $line='@bus '+(ConvertTo-Json -InputObject ([ordered]@{topic=$Topic;fields=$safe}) -Depth 4 -Compress)
+        }
+    }
+    $sent=if($Final -and $Topic -eq 'transport.status'){$Bus.QueueFinalStatus($line)}else{$Bus.Queue($Topic,$line)}
+    if($PassThru){$sent}
 }
