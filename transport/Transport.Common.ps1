@@ -1237,7 +1237,12 @@ function Read-TransportMemory([string]$Root) {
     }catch{Write-TransportLog $Root 'memory-invalid';@{version=1;networks=@{}}}
 }
 function Save-TransportMemory([string]$Root,$Memory,[string]$Network,$Rows) {
-    if(-not $Network){return};$Memory.networks[$Network]=@{updatedAt=[DateTime]::UtcNow.ToString('o');candidates=@($Rows)}
+    if(-not $Network){return}
+    # Q owns quality metadata on the same network record; candidate saves must retain it.
+    $record=@{};$old=$Memory.networks[$Network]
+    if($old -is [Collections.IDictionary]){foreach($key in $old.Keys){$record[$key]=$old[$key]}}
+    elseif($old){foreach($property in $old.PSObject.Properties){$record[$property.Name]=$property.Value}}
+    $record.updatedAt=[DateTime]::UtcNow.ToString('o');$record.candidates=@($Rows);$Memory.networks[$Network]=$record
     Write-TransportJson (Join-Path $Root 'state/transport-memory.json') $Memory -Private
 }
 function Get-TransportRemembered($Memory,[string]$Network,$Candidates) {
