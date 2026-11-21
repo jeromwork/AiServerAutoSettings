@@ -110,6 +110,51 @@ class TimerGuardTests(unittest.TestCase):
                 self.assertEqual(len(guard.scan(self.root)), 1)
                 (self.root / ('app/A' + ext)).unlink()
 
+    def test_executable_interpolations(self):
+        fixtures = {
+            '.sh': ['echo "$(sleep 1)"', 'echo "`sleep 1`"', 'echo `sleep 1`',
+                    'echo "$(echo "$(sleep 1)")"', 'echo "$(echo "safe") $(sleep 1)"'],
+            '.ps1': ['Write-Output "$(Start-Sleep 1)"', 'Write-Output "$(if ($true) { Start-Sleep 1 })"'],
+            '.py': ['text = f"{time.sleep(1)}"', "text = f'{time.sleep(1)}'",
+                    'text = f"{dict(x=time.sleep(1))}"', 'text = rf"{time.sleep(1)}"',
+                    'text = f"{value:{time.sleep(1)}}"', 'text = f"{{{time.sleep(1)}}}"',
+                    'text = f"{len("safe")} {time.sleep(1)}"'],
+            '.cs': ['var text = $"{Task.Delay(1)}";', 'var text = $@"{Task.Delay(1)}";',
+                    'var text = @$"{Task.Delay(1)}";', 'var text = $"{{literal}} {Task.Delay(1)}";',
+                    'var text = $"{F("safe")} {Task.Delay(1)}";',
+                    'var url = "http://example"; Task.Delay(1);']}
+        for ext, lines in fixtures.items():
+            for line in lines:
+                with self.subTest(line=line):
+                    self.write('app/A' + ext, line + '\r\n')
+                    self.assertEqual(len(guard.scan(self.root)), 1)
+            (self.root / ('app/A' + ext)).unlink()
+
+    def test_interpolation_literal_text(self):
+        fixtures = {
+            '.sh': ['echo "sleep 1"', "echo '$(sleep 1)'", "echo '`sleep 1`'",
+                    r'echo "\$(sleep 1)"', r'echo "\`sleep 1\`"', 'echo "$(echo \'sleep 1\')"'],
+            '.ps1': ['Write-Output "Start-Sleep 1"', "Write-Output '$(Start-Sleep 1)'",
+                     'Write-Output "`$(Start-Sleep 1)"', 'Write-Output "$(echo \'Start-Sleep 1\')"'],
+            '.py': ['text = f"time.sleep(1) {value}"', 'text = f"{{time.sleep(1)}}"',
+                    'text = f"{value:time.sleep(1)}"',
+                    'text = "{time.sleep(1)}"', 'text = f"{str(\'time.sleep(1)\')}"'],
+            '.cs': ['var text = $"Task.Delay(1) {value}";', 'var text = $"{{Task.Delay(1)}}";',
+                    'var text = $"{value:Task.Delay(1)}";',
+                    'var text = $@"{{Task.Delay(1)}}";', 'var text = $"{F(\'x\', \"Task.Delay(1)\")}";',
+                    'var url = "http://example";']}
+        for ext, lines in fixtures.items():
+            self.write('app/A' + ext, '\n'.join(lines))
+        self.assertEqual(guard.scan(self.root), [])
+
+    def test_real_shell_substitutions(self):
+        lines = (SCRIPT.parent.parent / 'build/server-ssh-user.sh').read_text().splitlines()
+        self.write('build/fixture.sh', '\n'.join(lines[index - 1] for index in (35, 60)))
+        errors = guard.scan(self.root)
+        self.assertEqual(len(errors), 2)
+        for index in (35, 60):
+            self.assertTrue(any(lines[index - 1].strip() in error for error in errors))
+
     def test_allowed_does_not_consume_debt(self):
         site = 'Task.Delay(1);\n'
         allowed = '// timer-ok: D — operation hang protection only\n' + site

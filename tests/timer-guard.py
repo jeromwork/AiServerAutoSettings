@@ -17,39 +17,81 @@ OK = re.compile(r'timer-ok:\s*([BCDE])\s*[—–-]\s*(.{15,})')
 
 
 def lex(line, ext, block):
-    """Separate code and real comments; strings leave an inert code marker."""
-    code, comments, i = [], [], 0
+    """Keep executable interpolations, masking literal text and collecting comments."""
+    code, comments = [], []
     ps = ext in ('.ps1', '.psm1', '.psd1')
-    while i < len(line):
-        if block:
-            end = line.find(block, i)
-            comments.append(line[i:end] if end >= 0 else line[i:])
-            if end < 0:
-                break
-            i, block = end + len(block), None
-        elif (ext == '.cs' and line.startswith('/*', i)) or (ps and line.startswith('<#', i)):
-            block, i = ('*/' if ext == '.cs' else '#>'), i + 2
-        elif (ext == '.cs' and line.startswith('//', i)) or (ext != '.cs' and line[i] == '#'):
-            comments.append(line[i + (2 if ext == '.cs' else 1):])
-            break
-        elif line[i] in ('"', "'"):
-            quote = line[i]
-            verbatim = ext == '.cs' and i > 0 and line[i - 1] == '@'
-            code.append('""')
-            i += 1
-            while i < len(line):
-                if line[i] == quote:
-                    if (ps or verbatim) and line[i:i + 2] == quote * 2:
-                        i += 2
-                        continue
-                    i += 1
-                    break
-                if not verbatim and line[i] == ('`' if ps else '\\') and not ((ps or ext == '.sh') and quote == "'"):
-                    i += 1
+
+    def quoted(i):
+        quote, prefix = line[i], line[:i]
+        verbatim = ext == '.cs' and prefix.endswith(('@', '@$', '$@'))
+        braces = ((ext == '.cs' and prefix.endswith(('$', '$@', '@$')))
+                  or (ext == '.py' and re.search(r'(?i)(?<![\w])(?:f|fr|rf)$', prefix)))
+        expanded = quote == '"' and (ps or ext == '.sh')
+        code.append('""')
+        i += 1
+        while i < len(line):
+            if line[i] == quote:
+                if (ps or verbatim) and line[i:i + 2] == quote * 2:
+                    i += 2
+                    continue
+                return i + 1
+            if not verbatim and line[i] == ('`' if ps else '\\') and not ((ps or ext == '.sh') and quote == "'"):
+                # Python f-string braces are not escaped by a backslash.
+                i += 1 if braces and line[i:i + 2] in ('\\{', '\\}') else 2
+            elif expanded and line.startswith('$(', i):
+                i = walk(i + 2, ')')
+            elif expanded and ext == '.sh' and line[i] == '`':
+                i = walk(i + 1, '`')
+            elif braces and line[i:i + 2] in ('{{', '}}'):
+                i += 2
+            elif braces and line[i] == '{':
+                i = walk(i + 1, '}', True)
+            else:
                 i += 1
-        else:
-            code.append(line[i])
-            i += 1
+        return i
+
+    def format_text(i):
+        # Format specifiers are literal text; Python permits nested replacement fields.
+        while i < len(line) and line[i] != '}':
+            i = walk(i + 1, '}', True) if ext == '.py' and line[i] == '{' else i + 1
+        code.append(' ')
+        return i + 1
+
+    def walk(i, stop=None, field=False):
+        nonlocal block
+        while i < len(line):
+            if block:
+                end = line.find(block, i)
+                comments.append(line[i:end] if end >= 0 else line[i:])
+                if end < 0:
+                    return len(line)
+                i, block = end + len(block), None
+            elif stop and line[i] == stop:
+                code.append(line[i])
+                return i + 1
+            elif field and line[i] == ':' and not (line.startswith('::', i) or line[i - 1] == ':'):
+                return format_text(i + 1)
+            elif (ext == '.cs' and line.startswith('/*', i)) or (ps and line.startswith('<#', i)):
+                block, i = ('*/' if ext == '.cs' else '#>'), i + 2
+            elif (ext == '.cs' and line.startswith('//', i)) or (ext != '.cs' and line[i] == '#'):
+                comments.append(line[i + (2 if ext == '.cs' else 1):])
+                return len(line)
+            elif line[i] in ('"', "'"):
+                i = quoted(i)
+            elif ext == '.sh' and line[i] == '`':
+                i = walk(i + 1, '`')
+            elif line[i] == ('`' if ps else '\\') and ext != '.cs':
+                code.append(' ')
+                i += 2
+            elif line[i] in '([{':
+                code.append(line[i])
+                i = walk(i + 1, {'(': ')', '[': ']', '{': '}'}[line[i]])
+            else:
+                code.append(line[i])
+                i += 1
+        return i
+
+    walk(0)
     return ''.join(code), comments, block
 
 
