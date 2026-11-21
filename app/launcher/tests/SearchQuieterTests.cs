@@ -82,22 +82,19 @@ namespace RemoteAgents.Launcher
             var connected = new SearchPresentation(ok, on);
             var healthy = MainScreenModel.Build(Facts(ok, on));
             var empty = Data("{}");
-            var epoch = new DateTime(2026, 11, 21, 0, 0, 0, DateTimeKind.Utc);
             // Both writers, either writer alone, and localNet=down all share the same threshold.
             for (int source = 0; source < 4; source++) {
                 var transport = source == 1 ? ok : Data("{\"ok\":false,\"phase\":\"searching\",\"reason\":{\"text\":\"Нет живого пути к серверу\"}}");
                 if (source == 3) transport["localNet"] = "down";
                 var vpn = source == 0 || source == 3 ? on : Data("{\"state\":\"searching\",\"enabled\":true,\"ok\":false,\"reason\":{\"text\":\"Нет живого пути к серверу\"}}");
                 string raw = Json.Encode(new { transport, vpn });
-                var r = new Rig(); var notices = new TrayStatusNotifications();
-                Check(notices.Observe(ok, on, epoch) == null, "healthy presentation has no balloon");
+                var r = new Rig();
                 foreach (long now in new long[] { 0, 2000, 29000 }) {
                     r.Observe(TrayMenuModel.Searching(transport, vpn), now);
                     var link = SearchPresentation.Build(transport, vpn, r.Quiet.ShowSearching, connected);
                     SameView(MainScreenModel.Build(Facts(transport, vpn, link)), healthy, "hidden search keeps banner/card/icon state and text");
                     Check(TrayMenuModel.Connection(link.Transport) == TrayMenuModel.Connection(ok) &&
                         TrayMenuModel.Tooltip(link.Transport, empty, link.Vpn) == TrayMenuModel.Tooltip(ok, empty, on), "menu/tooltip stay connected");
-                    Check(notices.Observe(link.Transport, link.Vpn, epoch.AddMilliseconds(now)) == null, "hidden dip cannot notify");
                 }
                 Check(r.Observe(true, 31000) == SearchTransition.Shown, "31 second interval becomes visible");
                 var shown = SearchPresentation.Build(transport, vpn, r.Quiet.ShowSearching, connected);
@@ -105,7 +102,6 @@ namespace RemoteAgents.Launcher
                 SameView(MainScreenModel.Build(Facts(transport, vpn, shown)), MainScreenModel.Build(Facts(transport, vpn)), "shown banner/card/icon keep existing texts");
                 Check(TrayMenuModel.Connection(shown.Transport) == TrayMenuModel.Connection(transport) &&
                     TrayMenuModel.Tooltip(shown.Transport, empty, shown.Vpn) == TrayMenuModel.Tooltip(transport, empty, vpn), "shown menu/tooltip keep existing texts");
-                Check(notices.Observe(shown.Transport, shown.Vpn, epoch.AddMilliseconds(31000)) != null, "long search can notify");
                 r.Observe(false, 31000);
                 var recovered = SearchPresentation.Build(ok, on, r.Quiet.ShowSearching, connected);
                 SameView(MainScreenModel.Build(Facts(ok, on, recovered)), healthy, "recovery restores all views immediately");

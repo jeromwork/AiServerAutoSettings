@@ -5,7 +5,7 @@ using System.Windows.Forms;
 
 namespace RemoteAgents.Launcher
 {
-    // Привязка модели кнопки «Обновить» (UpdateButtonModel) к трею: события модели -> строка в окне/меню и update.phase в журнале.
+    // Привязка модели кнопки «Обновить» (UpdateButtonModel): подпись кнопки, подсказка и update.phase в журнале.
     internal sealed partial class TrayContext
     {
         readonly UpdateButtonModel updateButton = new UpdateButtonModel();
@@ -75,7 +75,8 @@ namespace RemoteAgents.Launcher
         void ApplyUpdateButton()
         {
             if (mainWindow == null || mainWindow.IsDisposed) return;
-            mainWindow.SetUpdateButton(updateButton.ButtonEnabled && !engine.Pending, updateButton.ShowSpinner, updateButton.StatusText, updateButton.DetailText);
+            mainWindow.SetUpdateButton(updateButton.ButtonEnabled && !engine.Pending, updateButton.ButtonText,
+                updateButton.DetailText.Length > 0 ? updateButton.DetailText : updateButton.StatusText);
         }
 
         // Если модель занята (кнопку нажали или идёт установка) — переводит её в итоговое состояние; фоновые проверки кнопку не трогают.

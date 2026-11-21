@@ -9,6 +9,24 @@ namespace RemoteAgents.Launcher
         static void Check(bool condition, string name)
         { if (!condition) throw new Exception("Main window sizing: " + name); count++; }
 
+        internal static void HeaderLayout()
+        {
+            int before = count;
+            foreach (int dpi in new[] { 96, 144, 192 }) {
+                double scale = dpi / 96.0;
+                int update = (int)Math.Round(MainWindowHeaderMetrics.UpdateWidth * scale);
+                int title = (int)Math.Round(MainWindowHeaderMetrics.TitleWidth * scale);
+                int settings = (int)Math.Round(MainWindowHeaderMetrics.SettingsWidth * scale);
+                int spacing = (int)Math.Round((2 * MainWindowHeaderMetrics.HorizontalPadding + 2 * MainWindowHeaderMetrics.Gap) * scale);
+                int minimum = (int)Math.Round(MainWindowHeaderMetrics.MinClientWidth * scale);
+                Check(minimum - update - settings - spacing >= title, "minimum width reserves entire title at " + dpi);
+                Check(minimum <= (int)Math.Round(420 * scale), "header fits initial compact viewport at " + dpi);
+                int settingsPage = minimum + (int)Math.Round((MainWindowHeaderMetrics.BackWidth - MainWindowHeaderMetrics.SettingsWidth) * scale);
+                Check(settingsPage <= (int)Math.Round(420 * scale), "back button also fits compact viewport at " + dpi);
+            }
+            Console.WriteLine("PASS: " + (count - before) + " update UI2 header layout checks");
+        }
+
         internal static void Run()
         {
             foreach (int dpi in new[] { 96, 144, 192 }) {

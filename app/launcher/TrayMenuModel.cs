@@ -162,33 +162,6 @@ namespace RemoteAgents.Launcher
             return value.Substring(0, length) + "…";
         }
     }
-    internal sealed class TrayStatusNotice
-    {
-        internal string Text;
-        internal bool Recovered;
-    }
-    // One notice per transition; keep the latest transition pending during the 60-second quiet period.
-    // Missing/stale heartbeats do not create a new transition or deliver an outdated pending notice.
-    internal sealed class TrayStatusNotifications
-    {
-        string observed, pending;
-        DateTime next = DateTime.MinValue;
-        internal TrayStatusNotice Observe(Dictionary<string, object> transport, Dictionary<string, object> vpn, DateTime now)
-        {
-            string current = Json.Str(vpn, "state") == "conflict" ? "conflict" : TrayMenuModel.Searching(transport, vpn)
-                ? "searching" : StatusView.Phase(transport) == LinkPhase.Ok ? "ok" : null;
-            if (current == null) return null;
-            if (current != observed) {
-                bool notify = current == "conflict" || observed == "ok" && current == "searching" || observed == "searching" && current == "ok";
-                pending = notify ? current : null;
-                observed = current;
-            }
-            if (pending == null || now < next) return null;
-            pending = null; next = now.AddSeconds(60);
-            return new TrayStatusNotice { Recovered = current == "ok", Text = current == "ok" ? "Связь восстановлена"
-                : current == "conflict" ? TrayMenuModel.ConflictText(vpn) : TrayMenuModel.SearchingText(transport, vpn) };
-        }
-    }
     // Local REST only. The API key stays in memory and never enters arguments/logs.
     internal sealed class DiskTraySession
     {
