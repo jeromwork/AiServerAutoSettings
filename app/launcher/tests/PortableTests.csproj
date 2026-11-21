@@ -11,6 +11,11 @@
     <NoWarn>SYSLIB0014;SYSLIB0057;CA1416</NoWarn>
   </PropertyGroup>
   <!-- A different entry point must not reuse the other build's output (StartupObject alone does not trigger a rebuild). -->
+  <PropertyGroup Condition="'$(EventBusTests)' == 'true'">
+    <StartupObject>RemoteAgents.Launcher.EventBusTests</StartupObject>
+    <IntermediateOutputPath>obj/$(Configuration)/eventbus-tests/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/eventbus-tests/</OutputPath>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(ConfigTests)' == 'true'">
     <IntermediateOutputPath>obj/$(Configuration)/config-tests/</IntermediateOutputPath>
     <OutputPath>bin/$(Configuration)/config-tests/</OutputPath>
@@ -63,6 +68,9 @@
     <Compile Include="../NetHelper.cs" />
     <Compile Include="../NetHelperEvents.cs" />
     <Compile Include="../VpnConflictScan.cs" />
+    <Compile Include="../EventBus.cs" />
+    <Compile Include="../BusTopics.cs" />
+    <Compile Include="EventBusTests.cs" />
     <Compile Include="../RaLog.cs" />
     <Compile Include="../LogMask.cs" />
     <Compile Include="../NetLadder.cs" />
