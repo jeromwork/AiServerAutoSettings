@@ -153,12 +153,13 @@ namespace RemoteAgents.Launcher
                 using (UpgradeInstaller.LockReceipt(Home, token, 1000)) return Publish(staged, token);
             }
         }
-        public void Activate(string version, bool accept = false)
+        public void Activate(string version, bool accept = false, bool imagePrepared = false)
         {
             using (UpgradeInstaller.LockReceipt(Home)) {
                 Files.SafeVersion(version); BundleDefinition.Load(Folder(version));
                 if (Pending) throw new InvalidOperationException("Уже ожидается проверка здоровья");
                 string old = Current;
+                if (!imagePrepared) UpgradeInstaller.SaveBundlePrevious(Home, this, old);
                 // Accepted activation (unfinished first setup): nothing works yet, so no health deadline or rollback.
                 if (accept && old.Length != 0) { Files.Atomic(Path.Combine(Root, "previous.txt"), old + "\n"); Files.Atomic(Path.Combine(Root, "current.txt"), version + "\n"); Cleanup(); return; }
                 if (old.Length == 0) { Files.Atomic(Path.Combine(Root, "current.txt"), version + "\n"); Cleanup(); return; }
@@ -199,7 +200,7 @@ namespace RemoteAgents.Launcher
                 BundleDefinition.Load(Folder(target)); string bad = Current; MarkBad(bad);
                 Files.Atomic(Path.Combine(Root, "current.txt"), target + "\n");
                 if (Pending) File.Delete(PendingPath);
-                Files.Atomic(Path.Combine(Root, "previous.txt"), ""); Cleanup();
+                Files.Atomic(Path.Combine(Root, "previous.txt"), ""); UpgradeInstaller.DiscardPrevious(Home); Cleanup();
             }
         }
         public void Cleanup()
