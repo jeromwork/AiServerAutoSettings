@@ -18,6 +18,22 @@ else
   "$here/build-exe.sh"
   out=${REMOTEAGENTS_BUILD_OUT:-$here/out}
 fi
+# P1: sign only when the lead has provisioned a key; no key is generated here.
+# Instance is checked against the EXE name and its separate compiled public anchor.
+helper_instance=${REMOTEAGENTS_HELPER_INSTANCE:-Main}
+case "$helper_instance" in
+  Main) helper_key=${REMOTEAGENTS_HELPER_SIGNING_KEY:-$HOME/.config/remote-agents/helper-signing.key} ;;
+  Test) helper_key=${REMOTEAGENTS_HELPER_SIGNING_KEY:-$HOME/.config/remote-agents/helper-signing-test.key} ;;
+  *) echo 'Unknown helper instance' >&2; exit 2 ;;
+esac
+if [[ -f "$helper_key" ]]; then
+  helper_product=RemoteAgents
+  [[ $helper_instance == Main ]] || helper_product=RemoteAgentsTest
+  "$here/sign-helper.sh" "$helper_key" "$helper_instance" "${REMOTEAGENTS_HELPER_BUILD:-auto}" \
+    "$out/bundle.zip" "$out/$helper_product.exe" "$out/initial-bundle.zip"
+else
+  echo 'helper-update: key absent; helper self-update manifest is not produced.' >&2
+fi
 stage=$(mktemp -d); trap 'rm -rf -- "$stage"' EXIT
 python3 "$here/bundle.py" publish "$out/bundle.zip" "$stage/agents" --launcher "$out/RemoteAgents.exe"
 python3 "$here/release-dist.py" metadata "$stage" "$stage/release-info.json" "$(git -C "$repo" rev-parse HEAD)"
