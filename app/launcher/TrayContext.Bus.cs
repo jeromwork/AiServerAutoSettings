@@ -37,6 +37,7 @@ namespace RemoteAgents.Launcher
             })));
             busParts.Add(TrayBusWiring.WireTransportReady(bus, () => PostUi(() => { transportReady = true; if (ladder != null) ladder.TransportReady(); })));
             busParts.Add(bus.Subscribe(BusTopics.TickLogship, e => PumpLogs()));
+            busParts.Add(bus.Subscribe(BusTopics.TickSupervisor, e => { foreach (var r in runtimes) r.CheckStale(); }));
             busParts.Add(bus.Subscribe(BusTopics.TickTray, e => {
                 // Одна невыполненная доставка за раз: если UI занят, тики не копятся; не смогли отправить — счётчик сброшен.
                 trayTickGate.Deliver(TryPostUi, Tick);
@@ -49,6 +50,7 @@ namespace RemoteAgents.Launcher
             busParts.Add(bus.Every(BusTopics.Ticks.Logship, 5000));
             // Тик трея 1 с (§4а-долг: остальное содержимое Tick пока опрашивает состояние само).
             busParts.Add(bus.Every(BusTopics.Ticks.Tray, 1000));
+            busParts.Add(bus.Every(BusTopics.Ticks.Supervisor, 1000));
             try {
                 blocks = new BlockStatusTracker(bus, busStartedUtc);
                 statusWatcher = new StatusDirWatcher(Path.Combine(home, "status"), blocks);
