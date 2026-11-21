@@ -53,6 +53,7 @@ with (root / '.publish.lock').open('a') as lock:
             dest = root
             dest.mkdir(exist_ok=True)
             if (dest / m['file']).exists() and sha(dest / m['file']) != m['sha256']: raise ValueError('Version is immutable')
+        if globals().get("validate_only", False): sys.exit(0)
         for folder, m in zip(('agents',), manifests):
             src = stage / folder
             dest = root
@@ -110,14 +111,38 @@ def command(dist, product='RemoteAgents', channel='main'):
     check_channel(channel)
     return 'python3 -c ' + shlex.quote(REMOTE) + ' ' + shlex.quote(dist) + ' ' + shlex.quote(product) + ' ' + shlex.quote(channel)
 
+def local_destination(dist, channel):
+    check_channel(channel)
+    # Resolve symlinks and '..' before comparing with the channel's fixed destination.
+    expected = Path('~/.local/share/remote-agents/' +
+                    ('dist-test' if channel == 'test' else 'dist')).expanduser()
+    root = Path(dist).expanduser()
+    if root.resolve() != expected.absolute() or not root.is_dir():
+        raise ValueError('Local destination must be the existing canonical channel directory')
+    return root.resolve()
+
+
+def local_publish(dist, product, channel, validate_only=False):
+    check_product(product)
+    root = local_destination(dist, channel)
+    # Use the SSH publisher verbatim, including locking, hashes, immutable versions,
+    # permissions, staging on the destination filesystem and manifest-last replace.
+    old_argv = sys.argv
+    try:
+        sys.argv = ['local', str(root), product, channel]
+        exec(compile(REMOTE, '<release-publisher>', 'exec'),
+             {'validate_only': validate_only})
+    finally:
+        sys.argv = old_argv
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest='command', required=True)
-    for name in ('metadata', 'verify', 'command'):
+    for name in ('metadata', 'verify', 'command', 'local-check', 'local-verify', 'local-publish'):
         p = sub.add_parser(name)
         p.add_argument('--product', choices=('RemoteAgents',), default='RemoteAgents')
         p.add_argument('--channel', choices=('main', 'test'), default='main')
-        if name == 'command':
+        if name == 'command' or name.startswith('local-'):
             p.add_argument('dist')
         else:
             p.add_argument('directory')
@@ -125,7 +150,11 @@ if __name__ == '__main__':
                 p.add_argument('output')
             p.add_argument('commit')
     args = parser.parse_args()
-    if args.command == 'command':
+    if args.command == 'local-check':
+        local_destination(args.dist, args.channel)
+    elif args.command in ('local-verify', 'local-publish'):
+        local_publish(args.dist, args.product, args.channel, args.command == 'local-verify')
+    elif args.command == 'command':
         print(command(args.dist, args.product, args.channel))
     elif args.command == 'verify':
         verify(args.directory, args.commit, args.product, args.channel)
