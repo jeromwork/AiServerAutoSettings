@@ -7,7 +7,7 @@
 
 | Место | Файлы |
 |---|---|
-| Компьютер, `%LOCALAPPDATA%\RemoteAgents\logs\` | `launcher.log`, `transport.log`, `helper.log` (зеркало журнала помощника), `core.log` (зеркало sing-box), `config-window.log`, `bus.log` (журнал шины событий трея: первое событие сразу, повторы — `repeat count=N`, шум — `bus.noise-summary`; журнал шины службы идёт в `helper.log` с компонентом `bus`); архивы `.1…5` |
+| Компьютер, `%LOCALAPPDATA%\RemoteAgents\logs\` | `launcher.log`, `transport.log`, `helper.log` (зеркало журнала помощника), `core.log` (зеркало sing-box), `config-window.log`, `bus.log` (журнал шины событий трея: первое событие сразу, повторы — `repeat count=N`, шум — `bus.noise-summary`; журнал шины службы идёт в `helper.log` с компонентом `bus`; события `vpn.*`/`helper.*`/`win.*`, которые служба пересылает в трей, лежат в обоих местах: в `helper.log` (компонент `bus`) и в трейном `bus.log`; `singbox.line` в журнал службы не пишется — строки ядра там только как `core.line`); архивы `.1…5` |
 | Компьютер, `%ProgramData%\RemoteAgents\Helper\` (только SYSTEM и администраторы) | `helper-events.log` (3 архива), `helper.log` (старый формат), `vpn-core.log` (вывод sing-box) |
 | Сервер, `~/work/logs-in/<имя>--<компьютер>/` | `<поток>-YYYY-MM-DD.log`, `.cursors.json`; общий журнал приёма `~/work/logs-in/_receiver.log` |
 

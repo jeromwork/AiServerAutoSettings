@@ -41,6 +41,7 @@ namespace RemoteAgents.Launcher
             TestKeySanitized();
             TestTrayTickNoiseOnlySummary();
             TestHelperSinkGetsSeqAndIsReadable();
+            TestCoreLineNotDuplicatedInHelperEvents();
 
             Console.WriteLine($"PASS: BusJournalTests ({_assertions} assertions passed)");
         }
@@ -352,16 +353,60 @@ namespace RemoteAgents.Launcher
             try
             {
                 var events = new HelperEventLog(dir);
+                // Номер помощника уже > 1 до события шины (у шины свой seq=1).
+                events.Write(LogLevel.Info, "helper", "a");
+                events.Write(LogLevel.Info, "helper", "b");
+                events.Write(LogLevel.Info, "helper", "c");
                 using (var bus = new EventBus(manualDispatch: true))
                 using (var journal = new BusJournal(bus, sink: l => events.WriteLine(l)))
                 {
                     bus.Publish("vpn.state", "vpn-core", "state", "on");
                     bus.DrainOnce();
+                    events.Write(LogLevel.Info, "helper", "d");
                 }
                 var page = events.Read(0, 40000);
-                Assert(page.Lines.Count == 1, "one line readable, got " + page.Lines.Count);
-                Assert(HelperEventLog.SeqOf(page.Lines[0]) == 1, "helper seq first: " + page.Lines[0]);
-                Assert(page.Lines[0].Contains(" bus ") && page.Lines[0].Contains(" vpn.state "), "bus component kept: " + page.Lines[0]);
+                Assert(page.Lines.Count == 5, "five lines readable, got " + page.Lines.Count);
+                string busLine = null;
+                foreach (var l in page.Lines) if (l.Contains(" vpn.state ")) busLine = l;
+                Assert(busLine != null, "bus line present");
+                Assert(HelperEventLog.SeqOf(busLine) == 4, "helper seq (4), not bus seq (1): " + busLine);
+                Assert(busLine.Contains(" bus ") && busLine.Contains("source=vpn-core"), "bus component kept: " + busLine);
+                // Курсор посередине: без потерь и повторов.
+                var rest = events.Read(3, 40000);
+                Assert(rest.Lines.Count == 2 && HelperEventLog.SeqOf(rest.Lines[0]) == 4 && HelperEventLog.SeqOf(rest.Lines[1]) == 5, "cursor 3 gives seq 4,5");
+                Assert(rest.Lost == 0 && rest.Next == 5, "no loss, next=5");
+                var none = events.Read(rest.Next, 40000);
+                Assert(none.Lines.Count == 0, "no repeats after cursor");
+            }
+            finally
+            {
+                try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { }
+            }
+        }
+
+        // Строка ERROR ядра, прошедшая через Drain, попадает в helper-events ровно один раз (core.line), не дублируясь шиной.
+        private static void TestCoreLineNotDuplicatedInHelperEvents()
+        {
+            string dir = Path.Combine(Path.GetTempPath(), "bus-journal-core-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            try
+            {
+                var events = new HelperEventLog(dir);
+                using (var bus = new EventBus(manualDispatch: true))
+                using (var journal = new BusJournal(bus, sink: l => events.WriteLine(l), excludeTopics: new[] { BusTopics.SingboxLine }))
+                {
+                    Action<string, string[]> publish = (t, kv) => bus.Publish(t, BusTopics.Sources.VpnCore, kv);
+                    var bytes = System.Text.Encoding.UTF8.GetBytes("+0300 ERROR outbound/x: dial failed\n");
+                    var reader = new CoreOutputReader(new MemoryStream(bytes), null, "vpn", publish);
+                    reader.Start();
+                    Assert(reader.Join(5000), "reader ends at end of stream");
+                    Assert(reader.Drain(events) == 1, "one line drained");
+                    bus.DrainOnce();
+                }
+                string all = string.Join("\n", events.Read(0, 40000).Lines);
+                int count = 0, idx = 0;
+                while ((idx = all.IndexOf("dial failed", idx, StringComparison.Ordinal)) >= 0) { count++; idx++; }
+                Assert(count == 1, "ERROR line exactly once in helper-events, got " + count + ": " + all);
+                Assert(all.Contains("core.line"), "it is the core.line record");
             }
             finally
             {

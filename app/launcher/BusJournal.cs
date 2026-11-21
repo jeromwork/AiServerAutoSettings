@@ -22,6 +22,7 @@ namespace RemoteAgents.Launcher
         private readonly EventBus _bus;
         private readonly string _logsDir;
         private readonly Action<string> _sink;
+        private readonly HashSet<string> _exclude;
         private readonly IDisposable _subscription;
         private readonly object _lock = new object();
 
@@ -55,11 +56,13 @@ namespace RemoteAgents.Launcher
             get { lock (_lock) return _repeatCount; }
         }
 
-        public BusJournal(EventBus bus, string logsDir = null, Action<string> sink = null)
+        public BusJournal(EventBus bus, string logsDir = null, Action<string> sink = null, IEnumerable<string> excludeTopics = null)
         {
             _bus = bus ?? throw new ArgumentNullException(nameof(bus));
             _logsDir = logsDir;
             _sink = sink;
+            // Исключённые топики не пишутся и не считаются (служба: singbox.line уже есть как core.line).
+            if (excludeTopics != null) _exclude = new HashSet<string>(excludeTopics, StringComparer.Ordinal);
             _subscription = _bus.Subscribe("*", OnEvent);
         }
 
@@ -98,6 +101,7 @@ namespace RemoteAgents.Launcher
         private void OnEvent(BusEvent evt)
         {
             if (evt == null) return;
+            if (_exclude != null && evt.Topic != null && _exclude.Contains(evt.Topic)) return;
             try
             {
                 lock (_lock)

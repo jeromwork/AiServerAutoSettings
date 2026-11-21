@@ -129,7 +129,7 @@ namespace RemoteAgents.Launcher
                 log = new NetHelperLog(NetHelperInstall.DataDirectory); log.Write("starting", 0);
                 bus = new EventBus(defaultSource: BusTopics.Sources.Helper);
                 busSender = new HelperBusSender(bus);
-                busJournal = new BusJournal(bus, sink: log.Events.WriteLine); // журнал шины службы: helper-events, на сервере helper.log (comp bus)
+                busJournal = new BusJournal(bus, sink: l => log.Events.WriteLine(l), excludeTopics: new[] { BusTopics.SingboxLine }); // журнал шины службы: helper-events (singbox.line исключён: уже есть как core.line), на сервере helper.log (comp bus)
                 HelperBus.Bus = bus; // читатель вывода ядра (V1) публикует singbox.* через неё
                 log.Core.Bus = bus;
                 bus.Publish(BusTopics.HelperVersion, BusTopics.Sources.Helper, "version", NetHelperInstall.HelperVersion);
