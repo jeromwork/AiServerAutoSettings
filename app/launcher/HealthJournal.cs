@@ -39,6 +39,7 @@ namespace RemoteAgents.Launcher
                 _bus.Subscribe(BusTopics.Unhandled, OnEvent),
                 _bus.Subscribe(BusTopics.BlockReady, OnEvent),
                 _bus.Subscribe(BusTopics.BlockDegraded, OnEvent),
+                _bus.Subscribe(BusTopics.BlockFailed, OnEvent),
                 _bus.Subscribe("health.*", OnEvent)
             };
         }
@@ -102,7 +103,8 @@ namespace RemoteAgents.Launcher
                 return true;
 
             if (string.Equals(topic, BusTopics.BlockReady, StringComparison.Ordinal) ||
-                string.Equals(topic, BusTopics.BlockDegraded, StringComparison.Ordinal))
+                string.Equals(topic, BusTopics.BlockDegraded, StringComparison.Ordinal) ||
+                string.Equals(topic, BusTopics.BlockFailed, StringComparison.Ordinal))
                 return true;
 
             if (topic.StartsWith("health.", StringComparison.Ordinal) || string.Equals(topic, "health", StringComparison.Ordinal))
