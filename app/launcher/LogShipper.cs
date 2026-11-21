@@ -21,7 +21,7 @@ namespace RemoteAgents.Launcher
     // Отправка журналов на сервер пачками. Курсор двигается только после подтверждения «OK» (docs/LOGS.md).
     internal sealed class LogShipper
     {
-        internal static readonly string[] Streams = { "launcher", "transport", "helper", "core", "config-window" };
+        internal static readonly string[] Streams = { "launcher", "transport", "helper", "core", "config-window", "bus" };
         internal static readonly string[] Paths = { "channel", "direct" };
         internal const int MaxRawBytes = 512 * 1024, MaxBatchesPerCycle = 8, IntervalSec = 60;
         internal static readonly int[] Backoff = { 60, 120, 300 };
