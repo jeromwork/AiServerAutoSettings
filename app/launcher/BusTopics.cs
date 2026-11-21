@@ -80,9 +80,10 @@ namespace RemoteAgents.Launcher
         public const string TickUpdate = "tick.update";
         public const string TickLogship = "tick.logship";
 
-        // Внутренние события шины: bus.overflow, bus.handler-error
+        // Внутренние события шины: bus.overflow, bus.handler-error, bus.noise-summary
         public const string BusOverflow = "bus.overflow";
         public const string BusHandlerError = "bus.handler-error";
+        public const string BusNoiseSummary = "bus.noise-summary";
 
         /// <summary>
         /// Имена тиков без префикса (для вызова Every/FireTick).

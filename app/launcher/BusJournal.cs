@@ -1,0 +1,286 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Text.RegularExpressions;
+using System.Threading;
+
+namespace RemoteAgents.Launcher
+{
+    /// <summary>
+    /// Журнал шины событий (BusJournal, шаг B1).
+    /// Подписчик на "*" шины, пишет события в logs\bus.log через RaLog (формат jsonl).
+    /// Конституция 4б: шумные топики (tick.*, singbox.line INFO) подавляются и считаются,
+    /// сводка bus.noise-summary пишется каждые 1000 подавленных; одинаковые события сворачиваются (до 100 повторов).
+    /// </summary>
+    public sealed class BusJournal : IDisposable
+    {
+        public const int NoiseSummaryThreshold = 1000;
+        public const int CollapseThreshold = 100;
+        public const int MaxValue = 1024;
+
+        private readonly EventBus _bus;
+        private readonly string _logsDir;
+        private readonly Action<string> _sink;
+        private readonly IDisposable _subscription;
+        private readonly object _lock = new object();
+
+        private long _suppressedCount;
+        private long _tickCount;
+        private long _singboxCount;
+
+        // Последнее записанное событие: только для сравнения с повторами; само оно уже на диске (4б).
+        private BusEvent _last;
+        private int _repeatCount;
+        private long _summarizedAt;
+        private int _disposed;
+
+        public long SuppressedCount
+        {
+            get { lock (_lock) return _suppressedCount; }
+        }
+
+        public long TickCount
+        {
+            get { lock (_lock) return _tickCount; }
+        }
+
+        public long SingboxCount
+        {
+            get { lock (_lock) return _singboxCount; }
+        }
+
+        public int PendingCount
+        {
+            get { lock (_lock) return _repeatCount; }
+        }
+
+        public BusJournal(EventBus bus, string logsDir = null, Action<string> sink = null)
+        {
+            _bus = bus ?? throw new ArgumentNullException(nameof(bus));
+            _logsDir = logsDir;
+            _sink = sink;
+            _subscription = _bus.Subscribe("*", OnEvent);
+        }
+
+        public void Flush()
+        {
+            lock (_lock)
+            {
+                FlushPendingLocked();
+            }
+        }
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+                return;
+
+            try
+            {
+                _subscription?.Dispose();
+            }
+            catch
+            {
+            }
+
+            lock (_lock)
+            {
+                FlushPendingLocked();
+                if (_suppressedCount > _summarizedAt)
+                {
+                    WriteLineLocked(FormatNoiseSummary(DateTime.UtcNow));
+                    _summarizedAt = _suppressedCount;
+                }
+            }
+        }
+
+        private void OnEvent(BusEvent evt)
+        {
+            if (evt == null) return;
+            try
+            {
+                lock (_lock)
+                {
+                    if (Volatile.Read(ref _disposed) != 0) return;
+
+                    if (IsNoisy(evt))
+                    {
+                        _suppressedCount++;
+                        if (evt.Topic == "tick" || evt.Topic.StartsWith(BusTopics.TickPrefix, StringComparison.Ordinal))
+                        {
+                            _tickCount++;
+                        }
+                        else if (string.Equals(evt.Topic, BusTopics.SingboxLine, StringComparison.Ordinal))
+                        {
+                            _singboxCount++;
+                        }
+
+                        if (_suppressedCount % NoiseSummaryThreshold == 0)
+                        {
+                            WriteLineLocked(FormatNoiseSummary(evt.Utc));
+                            _summarizedAt = _suppressedCount;
+                        }
+                        return;
+                    }
+
+                    if (_last != null && AreIdentical(_last, evt))
+                    {
+                        _repeatCount++;
+                        if (_repeatCount >= CollapseThreshold)
+                        {
+                            FlushPendingLocked();
+                        }
+                        return;
+                    }
+
+                    // Смена события: итог повторов предыдущего, затем новое пишется сразу.
+                    FlushPendingLocked();
+                    _last = evt;
+                    WriteLineLocked(FormatEvent(evt));
+                }
+            }
+            catch
+            {
+                // Ошибка записи журнала не должна ронять шину
+            }
+        }
+
+        private void FlushPendingLocked()
+        {
+            if (_last == null || _repeatCount == 0) return;
+
+            int count = _repeatCount;
+            _repeatCount = 0;
+            WriteLineLocked(FormatRepeat(_last, count));
+        }
+
+        private void WriteLineLocked(string line)
+        {
+            if (string.IsNullOrEmpty(line)) return;
+            try
+            {
+                if (_sink != null)
+                {
+                    _sink(line);
+                    return;
+                }
+
+                string dir = !string.IsNullOrEmpty(_logsDir) ? _logsDir : RaLog.DefaultDir;
+                if (!string.IsNullOrEmpty(dir))
+                {
+                    RaLog.AppendLine(dir, "bus", line);
+                }
+            }
+            catch
+            {
+                // Ошибка записи журнала не роняет шину
+            }
+        }
+
+        private static bool IsNoisy(BusEvent evt)
+        {
+            if (evt == null || string.IsNullOrEmpty(evt.Topic)) return false;
+            if (evt.Topic == "tick" || evt.Topic.StartsWith(BusTopics.TickPrefix, StringComparison.Ordinal))
+                return true;
+
+            if (string.Equals(evt.Topic, BusTopics.SingboxLine, StringComparison.Ordinal))
+            {
+                string level = evt["level"];
+                if (!string.IsNullOrEmpty(level))
+                {
+                    return string.Equals(level, "info", StringComparison.OrdinalIgnoreCase) ||
+                           string.Equals(level, "debug", StringComparison.OrdinalIgnoreCase);
+                }
+
+                string line = evt["line"];
+                if (string.IsNullOrEmpty(line)) line = evt["msg"];
+                if (string.IsNullOrEmpty(line)) line = evt["text"];
+                if (string.IsNullOrEmpty(line)) return true; // По умолчанию уровень INFO
+
+                if (Regex.IsMatch(line, @"\b(FATAL|PANIC|ERROR|WARN|WARNING)\b", RegexOptions.IgnoreCase))
+                    return false;
+
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool AreIdentical(BusEvent a, BusEvent b)
+        {
+            if (ReferenceEquals(a, b)) return true;
+            if (a == null || b == null) return false;
+            if (!string.Equals(a.Topic, b.Topic, StringComparison.Ordinal)) return false;
+            if (!string.Equals(a.Source, b.Source, StringComparison.Ordinal)) return false;
+
+            var fa = a.Fields;
+            var fb = b.Fields;
+            int ca = fa != null ? fa.Count : 0;
+            int cb = fb != null ? fb.Count : 0;
+            if (ca != cb) return false;
+            if (ca == 0) return true;
+
+            foreach (var pair in fa)
+            {
+                if (!fb.TryGetValue(pair.Key, out var bVal)) return false;
+                if (!string.Equals(pair.Value, bVal, StringComparison.Ordinal)) return false;
+            }
+
+            return true;
+        }
+
+        private static DateTimeOffset ToOffset(DateTime utc)
+        {
+            if (utc == default(DateTime)) utc = DateTime.UtcNow;
+            return new DateTimeOffset(DateTime.SpecifyKind(utc, DateTimeKind.Utc)).ToLocalTime();
+        }
+
+        private static string Cut(string value)
+        {
+            if (value == null) return string.Empty;
+            return value.Length > MaxValue ? value.Substring(0, MaxValue) + "…[cut]" : value;
+        }
+
+        private static string FormatEvent(BusEvent evt)
+        {
+            var fields = new List<KeyValuePair<string, string>>();
+            fields.Add(new KeyValuePair<string, string>("seq", evt.Seq.ToString(CultureInfo.InvariantCulture)));
+            fields.Add(new KeyValuePair<string, string>("source", Cut(evt.Source)));
+            if (evt.Fields != null)
+            {
+                foreach (var kvp in evt.Fields)
+                {
+                    string key = kvp.Key ?? string.Empty;
+                    if (key.Length == 0) continue;
+                    // Совпадение с служебными ключами не теряем, а переименовываем.
+                    if (key == "seq" || key == "source" || key == "count") key = "field_" + key;
+                    fields.Add(new KeyValuePair<string, string>(key, Cut(kvp.Value)));
+                }
+            }
+
+            return RaLog.Format(ToOffset(evt.Utc), LogLevel.Info, "bus", evt.Topic, fields, RaLog.Session);
+        }
+
+        private static string FormatRepeat(BusEvent evt, int count)
+        {
+            var fields = new List<KeyValuePair<string, string>>
+            {
+                new KeyValuePair<string, string>("topic", Cut(evt.Topic)),
+                new KeyValuePair<string, string>("count", count.ToString(CultureInfo.InvariantCulture))
+            };
+            return RaLog.Format(ToOffset(evt.Utc), LogLevel.Info, "bus", "repeat", fields, RaLog.Session);
+        }
+
+        private string FormatNoiseSummary(DateTime utc)
+        {
+            var fields = new List<KeyValuePair<string, string>>
+            {
+                new KeyValuePair<string, string>("suppressed", _suppressedCount.ToString(CultureInfo.InvariantCulture)),
+                new KeyValuePair<string, string>("tick", _tickCount.ToString(CultureInfo.InvariantCulture)),
+                new KeyValuePair<string, string>("singbox", _singboxCount.ToString(CultureInfo.InvariantCulture))
+            };
+            return RaLog.Format(ToOffset(utc), LogLevel.Info, "bus", BusTopics.BusNoiseSummary, fields, RaLog.Session);
+        }
+    }
+}

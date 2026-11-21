@@ -28,6 +28,7 @@ namespace RemoteAgents.Launcher
         internal static Func<DateTimeOffset> Clock = () => DateTimeOffset.Now;
         internal static readonly string Session = NewSession();
         static string defaultDir;
+        internal static string DefaultDir => defaultDir;
         static readonly Dictionary<string, object> gates = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
         static readonly Dictionary<string, int> failures = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         static readonly Random random = new Random(Guid.NewGuid().GetHashCode());
