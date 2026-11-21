@@ -11,7 +11,27 @@ namespace RemoteAgents.Launcher
     {
         readonly EventBus bus; readonly object gate = new object();
         readonly Dictionary<string, bool> ready = new Dictionary<string, bool>(StringComparer.Ordinal);
-        internal BlockStatusTracker(EventBus bus) { this.bus = bus; }
+        // Файл статуса учитывается, только если записан не раньше since: запуска трея или последнего component.start/exit блока.
+        readonly Dictionary<string, DateTime> since = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        readonly DateTime started; readonly Func<DateTime> clock; readonly Func<string, DateTime> lastWrite;
+        // clock/lastWrite передаются параметрами, чтобы тесты не зависели от реального времени и файловой системы.
+        internal BlockStatusTracker(EventBus bus, DateTime startedUtc, Func<DateTime> clock = null, Func<string, DateTime> lastWrite = null)
+        {
+            this.bus = bus; started = startedUtc;
+            this.clock = clock ?? (() => DateTime.UtcNow);
+            this.lastWrite = lastWrite ?? (p => File.GetLastWriteTimeUtc(p));
+            // Перезапуск компонента делает прежний файл статуса устаревшим: ждём новой записи.
+            bus.Subscribe("component.", e => { if (e.Topic == BusTopics.ComponentStart || e.Topic == BusTopics.ComponentExit) Reset(e.Get("name")); });
+        }
+        internal void Reset(string block)
+        {
+            if (string.IsNullOrEmpty(block)) return;
+            lock (gate) { ready.Remove(block); since[block] = clock(); }
+        }
+        bool Fresh(string block, DateTime modified)
+        {
+            lock (gate) { DateTime s; if (!since.TryGetValue(block, out s) || s < started) s = started; return modified >= s; }
+        }
 
         // Тот же смысл «готов», что у Supervisor для файлов статуса: ok, а для vpn ещё и state=on.
         internal static bool IsReady(string block, Dictionary<string, object> status)
@@ -42,7 +62,9 @@ namespace RemoteAgents.Launcher
         {
             try {
                 if (!File.Exists(path)) return;
-                Observe(Path.GetFileNameWithoutExtension(path), Json.Read(path));
+                string block = Path.GetFileNameWithoutExtension(path);
+                if (!Fresh(block, lastWrite(path))) return; // файл от прошлого запуска: не факт о текущем
+                Observe(block, Json.Read(path));
             } catch (Exception) { } // файл пойман посреди записи или недоступен: ждём следующего события
         }
         internal void ScanAll(string dir)
@@ -67,6 +89,22 @@ namespace RemoteAgents.Launcher
             tracker.ScanAll(dir); // текущее состояние до первых изменений
         }
         public void Dispose() { try { watcher.Dispose(); } catch { } }
+    }
+
+    // Одна ждущая доставка тика в UI: пока предыдущая не выполнена, новые тики отбрасываются.
+    internal sealed class TickGate
+    {
+        int pending;
+        // post ставит действие в UI и возвращает false, если не смог (окно закрыто): тогда счётчик сбрасывается.
+        internal bool Deliver(Func<Action, bool> post, Action work)
+        {
+            if (System.Threading.Interlocked.CompareExchange(ref pending, 1, 0) != 0) return false;
+            bool posted = false;
+            try { posted = post(() => { try { work(); } finally { System.Threading.Interlocked.Exchange(ref pending, 0); } }); }
+            finally { if (!posted) System.Threading.Interlocked.Exchange(ref pending, 0); }
+            return posted;
+        }
+        internal bool Pending { get { return System.Threading.Volatile.Read(ref pending) != 0; } }
     }
 
     internal static class TrayBusWiring
