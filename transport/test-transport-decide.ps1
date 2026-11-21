@@ -13,7 +13,7 @@ function Event([long]$At,[string]$Kind,[string]$Tag='a',[string]$Code='timeout',
     return @{at=$At;kind=$Kind;tag=$Tag;code=$Code;local=$Local;detail='must-never-escape password=TOP_SECRET host=private.example'}
 }
 function Decide($State,[long]$Now,$Events=@(),$Rows=@((Row 'a'),(Row 'b' 'remembered' 120)),[string]$Current='a',[switch]$Improve) {
-    return Invoke-TransportDecision -State $State -Candidates $Rows -Now $Now -Events $Events -CurrentTag $Current -AllowImprovement:$Improve
+    return Invoke-TransportDecision -State $State -Candidates $Rows -Now $Now -Events $Events -CurrentTag $Current -AllowImprovement:$Improve -SwitchEpisode:$false
 }
 # A real failure: two exits within 60 s (one exit is only a restart).
 function Dead([long]$At,[string]$Tag='a'){return @((Event $At 'engine-exit' $Tag),(Event $At 'engine-exit' $Tag))}
