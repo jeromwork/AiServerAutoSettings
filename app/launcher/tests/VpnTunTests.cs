@@ -270,6 +270,21 @@ namespace RemoteAgents.Launcher
             Check(Json.Str(dns, "type") == "https" && Json.Str(dns, "detour") == "vpn-active" && !dns.ContainsKey("bind_interface"), "DoH crosses SOCKS");
             var route = Json.Map(config["route"]); var rules = Json.Array(route["rules"]).Select(Json.Map).ToArray();
             Check(Json.Str(route, "final") == "vpn-active" && Json.Str(rules[0], "override_address") == "example.com" && Json.Strings(rules[0]["ip_cidr"]).Contains("198.18.0.1/32") && Json.Bool(rules[1], "disable_cache") && Json.Str(rules[1], "server") == "vpn-dns", "synthetic probe and uncached DNS precede exclusions");
+            Check(Json.Str(Json.Map(config["log"]), "level") == "info", "core log level info (readiness line)");
+            Check(Json.Str(rules[3], "action") == "reject" && Json.Int(rules[3], "ip_version", 0) == 6 && Json.Strings(rules[4]["process_name"]).Contains("sing-box.exe"), "IPv6 reject after probe rules, before process_name/sniff");
+            var dnsRule = Json.Map(Json.Array(Json.Map(config["dns"])["rules"])[0]);
+            Check(Json.Strings(dnsRule["query_type"]).SequenceEqual(new[] { "AAAA" }) && Json.Str(dnsRule, "action") == "predefined" && Json.Str(dnsRule, "rcode") == "NOERROR", "AAAA answered empty first");
+            var direct = Json.Map(Json.Array(config["outbounds"])[1]);
+            Check(Json.Str(Json.Map(direct["domain_resolver"]), "strategy") == "ipv4_only" && Json.Str(Json.Map(direct["domain_resolver"]), "server") == "vpn-local", "vpn-direct resolves IPv4 only");
+            var built = settings.Config("ra-helper", "S3CR3T-PASSWORD-VALUE", new[] { "198.51.100.7" }, new string[0], snapshot, strict, 17881);
+            string text = Json.Encode(built);
+            var cfgFacts = settings.ConfigFacts(built, text);
+            string Fact(string[] f, string name) { for (int i = 0; i + 1 < f.Length; i += 2) if (f[i] == name) return f[i + 1]; return null; }
+            Check(Fact(cfgFacts, "json") != null && !Fact(cfgFacts, "json").Contains("S3CR3T-PASSWORD-VALUE") && Fact(cfgFacts, "json").Contains("***") && Fact(cfgFacts, "level") == "info" && Fact(cfgFacts, "covers1111") == "0" && Fact(cfgFacts, "covers_probe") == "0" && Fact(cfgFacts, "sha256").Length == 64 && Fact(cfgFacts, "truncated") == "0", "vpn.config facts mask secrets");
+            Check(Fact(settings.ConfigFacts(built, text, 100), "truncated") == "1", "long config is truncated and flagged");
+            var tunSnapshot = D("Adapters", new[] { D("Name", "RemoteAgents-VPN", "ifIndex", 21) }, "Routes", new[] { D("InterfaceIndex", 21, "DestinationPrefix", "1.0.0.0/8"), D("InterfaceIndex", 21, "DestinationPrefix", "2.0.0.0/7"), D("InterfaceIndex", 21, "DestinationPrefix", "fdfe:7261::/126"), D("InterfaceIndex", 5, "DestinationPrefix", "0.0.0.0/0") });
+            var tr = VpnTun.TunRoutes(tunSnapshot, "RemoteAgents-VPN");
+            Check(tr[1] == "2" && tr[3] == "1" && tr[5] == "1.0.0.0/8,2.0.0.0/7,fdfe:7261::/126", "tunroutes counted per family on the TUN interface");
             Check(VpnTun.Conflict(Snapshot("Happ TUN", "Wintun", "0.0.0.0/0")) == "Happ TUN", "Happ full TUN conflicts");
             Check(VpnTun.Conflict(Snapshot("Happ TUN", "Wintun")).Length > 0, "unknown Up TUN conflicts without route evidence");
             Check(VpnTun.Conflict(Snapshot("Happ TUN", "Wintun", "172.20.0.0/24")).Length > 0, "an attached subnet does not hide unknown Up TUN");

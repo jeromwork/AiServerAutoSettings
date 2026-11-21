@@ -98,19 +98,64 @@ namespace RemoteAgents.Launcher
             var probe = IPAddress.Parse(ProbeAddress);
             if (exclusions.Any(c => Contains(c, probe))) throw new InvalidDataException("Проба VPN исключена из TUN");
             var check = new Uri(CheckUrl); string[] excluded = exclusions.Distinct().ToArray();
-            return D("log", D("level", "warn", "timestamp", true),
+            // Уровень info: строка готовности ядра («sing-box started») пишется на info; ниже уровнем её не видно.
+            return D("log", D("level", "info", "timestamp", true),
                 "inbounds", new[] { D("type", "tun", "tag", "vpn-tun", "interface_name", InterfaceName, "address", Address, "stack", "system", "auto_route", true, "strict_route", Json.Bool(dnsPolicy, "strictRoute"), "route_exclude_address", excluded) },
-                "outbounds", new[] { D("type", "socks", "tag", "vpn-active", "server", "127.0.0.1", "server_port", socksPort ?? SocksPort, "version", "5", "username", user, "password", password), D("type", "direct", "tag", "vpn-direct") },
+                "outbounds", new[] { D("type", "socks", "tag", "vpn-active", "server", "127.0.0.1", "server_port", socksPort ?? SocksPort, "version", "5", "username", user, "password", password), D("type", "direct", "tag", "vpn-direct", "domain_resolver", D("server", "vpn-local", "strategy", "ipv4_only")) },
                 "route", D("auto_detect_interface", true, "final", "vpn-active", "default_domain_resolver", D("server", "vpn-local"), "rules", new[] {
                     D("inbound", new[] { "vpn-tun" }, "network", "tcp", "ip_cidr", new[] { ProbeAddress + "/32" }, "port", new[] { check.Port }, "action", "route-options", "override_address", check.DnsSafeHost, "override_port", check.Port),
                     D("inbound", new[] { "vpn-tun" }, "domain", new[] { check.DnsSafeHost }, "action", "resolve", "server", "vpn-dns", "disable_cache", true, "disable_optimistic_cache", true, "timeout", "3000ms"),
                     D("inbound", new[] { "vpn-tun" }, "domain", new[] { check.DnsSafeHost }, "action", "route", "outbound", "vpn-active"),
+                    // IPv6 под VPN: адрес TUN fdfe:7261::1/126 остаётся, но v6-трафик отклоняется, AAAA-ответы пустые (без ошибки) — приложения сразу идут по IPv4.
+                    D("ip_version", 6, "action", "reject"),
                     D("process_name", new[] { "powershell.exe", "python.exe", "pythonw.exe", "ssh.exe", "sing-box.exe", "syncthing.exe", "SyncthingTray.exe" }, "action", "route", "outbound", "vpn-direct"),
                     D("inbound", new[] { "vpn-tun" }, "action", "sniff"), D("protocol", "dns", "action", "hijack-dns"),
                     D("domain_suffix", DirectDomains, "action", "route", "outbound", "vpn-direct"),
                     D("ip_cidr", excluded, "action", "route", "outbound", "vpn-direct"), D("port", new[] { 53 }, "action", "hijack-dns") }),
                 "dns", D("servers", new[] { D("type", "https", "tag", "vpn-dns", "server", DnsServer, "path", "/dns-query", "tls", D("enabled", true), "detour", "vpn-active"), D("type", "local", "tag", "vpn-local") },
-                    "rules", new[] { D("domain_suffix", DirectDomains, "action", "route", "server", "vpn-local") }, "final", "vpn-dns"));
+                    "rules", new[] { D("query_type", new[] { "AAAA" }, "action", "predefined", "rcode", "NOERROR"), D("domain_suffix", DirectDomains, "action", "route", "server", "vpn-local") }, "final", "vpn-dns"));
+        }
+
+        static readonly string[] SecretKeys = { "password", "uuid", "private_key", "secret", "token" };
+        // Копия конфигурации с замаскированными секретами (значения ключей password|uuid|private_key|secret|token → ***).
+        internal static object MaskSecrets(object node)
+        {
+            var map = node as Dictionary<string, object>;
+            if (map != null) {
+                var copy = new Dictionary<string, object>();
+                foreach (var pair in map) copy[pair.Key] = Array.IndexOf(SecretKeys, pair.Key) >= 0 ? (object)"***" : MaskSecrets(pair.Value);
+                return copy;
+            }
+            var list = node as System.Collections.IEnumerable;
+            if (list != null && !(node is string)) { var items = new List<object>(); foreach (var item in list) items.Add(MaskSecrets(item)); return items.ToArray(); }
+            return node;
+        }
+        // Поля события vpn.config: что именно ушло в ядро, без секретов. Сам конфиг — json= (маска, ≤16000 знаков).
+        internal string[] ConfigFacts(object config, string text, int maxJson = 16000)
+        {
+            var root = config as Dictionary<string, object> ?? new Dictionary<string, object>();
+            var inbound = Json.Array(Json.Get(root, "inbounds")).Select(Json.Map).FirstOrDefault() ?? new Dictionary<string, object>();
+            var excluded = Json.Strings(Json.Get(inbound, "route_exclude_address"));
+            Func<string, IPAddress, bool> covers = (c, ip) => { try { return Contains(c, ip); } catch { return false; } };
+            var wide = excluded.Where(c => { int bits; var parts = c.Split('/'); return parts.Length == 2 && int.TryParse(parts[1], out bits) && bits < 9; }).Take(20).ToArray();
+            string json = LogMask.Clean(Json.Encode(MaskSecrets(config)));
+            bool cut = json.Length > maxJson; if (cut) json = json.Substring(0, maxJson);
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            string hash; using (var sha = System.Security.Cryptography.SHA256.Create()) hash = BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(text ?? ""))).Replace("-", "").ToLowerInvariant();
+            return new[] { "sha256", hash, "bytes", Encoding.UTF8.GetByteCount(text ?? "").ToString(inv),
+                "level", Json.Str(Json.Map(Json.Get(root, "log")), "level"), "strict", Json.Bool(inbound, "strict_route") ? "1" : "0",
+                "excl4", excluded.Count(c => c.IndexOf(':') < 0).ToString(inv), "excl6", excluded.Count(c => c.IndexOf(':') >= 0).ToString(inv),
+                "excl_wide", string.Join(",", wide), "covers1111", excluded.Any(c => covers(c, IPAddress.Parse("1.1.1.1"))) ? "1" : "0",
+                "covers_probe", excluded.Any(c => covers(c, IPAddress.Parse(ProbeAddress))) ? "1" : "0", "direct_domains", DirectDomains.Length.ToString(inv),
+                "truncated", cut ? "1" : "0", "json", json };
+        }
+        // Маршруты на TUN из снимка сети: sing-tun ставит не 0/0 и не 0/1+128/1, а набор дополнений — считаем и показываем начало.
+        internal static string[] TunRoutes(Dictionary<string, object> snapshot, string interfaceName)
+        {
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            string index = Json.Array(Json.Get(snapshot, "Adapters")).Select(Json.Map).Where(a => Json.Str(a, "Name") == interfaceName).Select(a => Json.Str(a, "ifIndex")).FirstOrDefault();
+            var prefixes = index == null ? new string[0] : Json.Array(Json.Get(snapshot, "Routes")).Select(Json.Map).Where(r => Json.Str(r, "InterfaceIndex") == index).Select(r => Json.Str(r, "DestinationPrefix")).ToArray();
+            return new[] { "tunroutes4", prefixes.Count(x => x.IndexOf(':') < 0).ToString(inv), "tunroutes6", prefixes.Count(x => x.IndexOf(':') >= 0).ToString(inv), "tunsample", string.Join(",", prefixes.Take(5)) };
         }
     }
 
@@ -397,20 +442,23 @@ namespace RemoteAgents.Launcher
             // Старый вывод мог быть в OEM: строгий UTF-8, иначе OEM (как External.ReadPowerShellOutput).
             return Json.Map(Json.Parse(External.ReadPowerShellOutput(file)));
         }
-        void RunPreparation(string exe, string[] args, string output, int epoch)
+        int lastPreparationExit = -1;
+        static string Msg(string text) { text = LogMask.Clean(text ?? "").Replace("\r", " ").Replace("\n", " "); return text.Length > 500 ? text.Substring(0, 500) : text; }
+        void RunPreparation(string exe, string[] args, string output, int epoch, bool merge = false)
         {
             // Conflict inventory and rebind validation share the cancellable slot.
             // Both callers are background workers once the owner lease is active.
-            lock (preparationGate) RunPreparationLocked(exe, args, output, epoch);
+            lock (preparationGate) RunPreparationLocked(exe, args, output, epoch, merge);
         }
-        void RunPreparationLocked(string exe, string[] args, string output, int epoch)
+        void RunPreparationLocked(string exe, string[] args, string output, int epoch, bool merge)
         {
             var job = new NativeJob();
             lock (gate) { if (disposed || generation != epoch) { job.Dispose(); throw new OperationCanceledException(); } preparationJob = job; }
             try {
-                using (var process = job.StartRedirected(exe, args, directory, output)) {
+                using (var process = merge ? job.StartLogged(exe, args, directory, output) : job.StartRedirected(exe, args, directory, output)) {
                     var elapsed = Stopwatch.StartNew();
                     while (!process.WaitForExit(50)) { lock (gate) if (disposed || generation != epoch) throw new OperationCanceledException(); if (elapsed.ElapsedMilliseconds > 15000) throw new TimeoutException(); }
+                    lastPreparationExit = process.ExitCode;
                     if (process.ExitCode != 0) throw new InvalidDataException("Подготовка VPN отклонена");
                 }
             } finally { job.Dispose(); lock (gate) if (preparationJob == job) preparationJob = null; }
@@ -451,8 +499,21 @@ namespace RemoteAgents.Launcher
             byte[] password = Convert.FromBase64String(Json.Str(credential, "password"));
             if (Json.Str(credential, "user") != "ra-helper" || password.Length != 32) throw new InvalidDataException("Нет учётных данных помощника");
             var lan = Json.Map(Json.Get(transport, "lan"));
-            Files.Atomic(config, Json.Encode(options.Config("ra-helper", Json.Str(credential, "password"), binding.Ips, Json.Strings(Json.Get(lan, "subnets")), snapshot, policy, binding.Port)));
-            RunPreparation(executable, new[] { "check", "-c", config }, null, epoch);
+            var built = options.Config("ra-helper", Json.Str(credential, "password"), binding.Ips, Json.Strings(Json.Get(lan, "subnets")), snapshot, policy, binding.Port);
+            string text = Json.Encode(built);
+            Files.Atomic(config, text);
+            // Журнал пишется сразу, до и независимо от исхода проверки: итоговый конфиг (без секретов) и вывод sing-box check.
+            string outFile = Path.Combine(directory, "vpn-check.out");
+            try { File.Delete(outFile); } catch { }
+            Exception checkError = null;
+            try { RunPreparation(executable, new[] { "check", "-c", config }, outFile, epoch, true); } catch (Exception e) { checkError = e; }
+            string output = "";
+            try { using (var s = new FileStream(outFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) { if (s.Length > 4096) s.Seek(-4096, SeekOrigin.End); using (var r = new StreamReader(s, new UTF8Encoding(false), true)) output = r.ReadToEnd(); } } catch { }
+            string code = checkError == null ? "0" : lastPreparationExit.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            string shown = LogMask.Clean(output).Trim(); if (shown.Length > 2000) shown = shown.Substring(shown.Length - 2000);
+            Ev(checkError == null ? LogLevel.Info : LogLevel.Warn, "vpn.check", "code", code, "result", checkError == null ? "ok" : "fail", "err", checkError == null ? "" : checkError.GetType().Name, "out", shown);
+            try { Ev(LogLevel.Info, "vpn.config", options.ConfigFacts(built, text)); } catch (Exception e) { Ev(LogLevel.Warn, "vpn.config", "err", e.GetType().Name); }
+            if (checkError != null) throw checkError;
             return config;
         }
         void Run(VpnTun options, int epoch)
@@ -531,7 +592,7 @@ namespace RemoteAgents.Launcher
                 string lastConflictKey = found.Key; bool afterLogged = false;
                 var scan = new VpnTunConflictScan(clock.ElapsedMilliseconds, () => Snapshot(epoch, true), (taken, result) => {
                     suspects = MainScreenModel.CleanSecrets(result.SuspectNames);
-                    if (!afterLogged) { afterLogged = true; Ev(LogLevel.Info, "vpn.inventory", new[] { "phase", "after" }.Concat(VpnConflict.Describe(taken)).ToArray()); }
+                    if (!afterLogged) { afterLogged = true; Ev(LogLevel.Info, "vpn.inventory", new[] { "phase", "after" }.Concat(VpnConflict.Describe(taken)).Concat(VpnTun.TunRoutes(taken, VpnTun.InterfaceName)).ToArray()); }
                     if (result.Key != lastConflictKey) { lastConflictKey = result.Key; LogConflicts(result); }
                 }, directory);
                 long nextRead = 0, nextPump = 0;
@@ -551,7 +612,7 @@ namespace RemoteAgents.Launcher
                 }
             } catch (OperationCanceledException) { }
             catch (Exception failure) {
-                Ev(LogLevel.Error, "vpn.on.step", "step", stage, "ms", Ms(step), "result", "error", "err", failure.GetType().Name, "code", TickFailureLog.ErrorCode(failure).ToString(System.Globalization.CultureInfo.InvariantCulture));
+                Ev(LogLevel.Error, "vpn.on.step", "step", stage, "ms", Ms(step), "result", "error", "err", failure.GetType().Name, "msg", Msg(failure.Message), "code", TickFailureLog.ErrorCode(failure).ToString(System.Globalization.CultureInfo.InvariantCulture));
                 Stop(lease != null && lease.Expired ? "watchdog-stalled" : "error", stage, epoch);
             }
             finally {
