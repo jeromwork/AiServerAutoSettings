@@ -155,6 +155,8 @@ wait_for_memory
   wait_for_memory
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-decide.ps1" < /dev/null
   wait_for_memory
+  timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-decide-switch.ps1" < /dev/null
+  wait_for_memory
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-leak.ps1" < /dev/null
   wait_for_memory
   flaky transport-events timeout 120 python3 "$repo/transport/test-transport-events.py" "$pwsh"
