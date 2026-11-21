@@ -271,7 +271,8 @@ namespace RemoteAgents.Launcher
             var route = Json.Map(config["route"]); var rules = Json.Array(route["rules"]).Select(Json.Map).ToArray();
             Check(Json.Str(route, "final") == "vpn-active" && Json.Str(rules[0], "override_address") == "example.com" && Json.Strings(rules[0]["ip_cidr"]).Contains("198.18.0.1/32") && Json.Bool(rules[1], "disable_cache") && Json.Str(rules[1], "server") == "vpn-dns", "synthetic probe and uncached DNS precede exclusions");
             Check(Json.Str(Json.Map(config["log"]), "level") == "info", "core log level info (readiness line)");
-            Check(Json.Str(rules[3], "action") == "reject" && Json.Int(rules[3], "ip_version", 0) == 6 && Json.Strings(rules[4]["process_name"]).Contains("sing-box.exe"), "IPv6 reject after probe rules, before process_name/sniff");
+            Check(Json.Str(rules[3], "action") == "hijack-dns" && Json.Int(rules[3], "ip_version", 0) == 6 && Json.Strings(rules[3]["port"]).SequenceEqual(new[] { "53" }) && Json.Strings(rules[3]["inbound"]).SequenceEqual(new[] { "vpn-tun" }), "IPv6 DNS hijack precedes IPv6 reject");
+            Check(Json.Str(rules[4], "action") == "reject" && Json.Int(rules[4], "ip_version", 0) == 6 && Json.Strings(rules[5]["process_name"]).Contains("sing-box.exe"), "IPv6 reject after probe rules, before process_name/sniff");
             var dnsRule = Json.Map(Json.Array(Json.Map(config["dns"])["rules"])[0]);
             Check(Json.Strings(dnsRule["query_type"]).SequenceEqual(new[] { "AAAA" }) && Json.Str(dnsRule, "action") == "predefined" && Json.Str(dnsRule, "rcode") == "NOERROR", "AAAA answered empty first");
             var direct = Json.Map(Json.Array(config["outbounds"])[1]);
@@ -280,8 +281,23 @@ namespace RemoteAgents.Launcher
             string text = Json.Encode(built);
             var cfgFacts = settings.ConfigFacts(built, text);
             string Fact(string[] f, string name) { for (int i = 0; i + 1 < f.Length; i += 2) if (f[i] == name) return f[i + 1]; return null; }
-            Check(Fact(cfgFacts, "json") != null && !Fact(cfgFacts, "json").Contains("S3CR3T-PASSWORD-VALUE") && Fact(cfgFacts, "json").Contains("***") && Fact(cfgFacts, "level") == "info" && Fact(cfgFacts, "covers1111") == "0" && Fact(cfgFacts, "covers_probe") == "0" && Fact(cfgFacts, "sha256").Length == 64 && Fact(cfgFacts, "truncated") == "0", "vpn.config facts mask secrets");
-            Check(Fact(settings.ConfigFacts(built, text, 100), "truncated") == "1", "long config is truncated and flagged");
+            Check(Fact(cfgFacts, "level") == "info" && Fact(cfgFacts, "covers1111") == "0" && Fact(cfgFacts, "covers_probe") == "0" && Fact(cfgFacts, "sha256").Length == 64 && Fact(cfgFacts, "json") == null, "vpn.config facts have no inline json");
+            // Конфиг по частям: каждая строка журнала целиком (без [cut]), части склеиваются в исходный JSON; обрезка — флаг truncated=1.
+            Func<string[][], string[]> lines = parts => parts.Select(f => RaLog.Format(DateTimeOffset.UtcNow, LogLevel.Info, "vpn", "vpn.config.json", new[] { new KeyValuePair<string, string>(f[0], f[1]), new KeyValuePair<string, string>(f[2], f[3]), new KeyValuePair<string, string>(f[4], f[5]) }, "abcd")).ToArray();
+            Func<string, string> jsonOf = line => { string v = line.Substring(line.IndexOf(" json=", StringComparison.Ordinal) + 6); if (v.StartsWith("\"")) v = v.Substring(1, v.Length - 2).Replace("\\\"", "\"").Replace("\\\\", "\\"); return v; };
+            string whole = LogMask.Clean(Json.Encode(VpnTun.MaskSecrets(built)));
+            Func<string[][], string> joined = parts => string.Concat(lines(parts).Select(jsonOf));
+            var partsAll = VpnTun.ConfigJsonParts(built, 16000, 800); var partsDefault = lines(VpnTun.ConfigJsonParts(built)); var linesAll = lines(partsAll);
+            Check(partsAll.Length > 1 && partsAll.All(f => f[3] == "0") && partsAll[0][1] == "1/" + partsAll.Length && Fact(cfgFacts, "json_parts") == partsDefault.Length.ToString(), "vpn.config.json part numbering");
+            Check(linesAll.All(l => l.Length <= RaLog.MaxLine && !l.EndsWith("[cut]")), "vpn.config.json lines fit MaxLine");
+            Check(joined(partsAll) == whole && string.Concat(partsDefault.Select(jsonOf)) == whole, "vpn.config.json parts restore whole json");
+            Check(!whole.Contains("S3CR3T-PASSWORD-VALUE") && whole.Contains("***"), "config json parts mask secrets");
+            var partsCut = VpnTun.ConfigJsonParts(built, 1000, 300);
+            Check(partsCut.Length > 1 && partsCut.All(f => f[3] == "1") && joined(partsCut) == LogMask.Clean(Json.Encode(VpnTun.MaskSecrets(built)).Substring(0, 1000)), "truncation flagged in every part and matches what was logged");
+            var quoted = VpnTun.ConfigJsonParts(D("a", new string('"', 50)), 16000, 40);
+            Check(quoted.All(f => f[5].Length + f[5].Count(ch => ch == '"' || ch == '\\') <= 40) && string.Concat(quoted.Select(f => f[5])) == Json.Encode(D("a", new string('"', 50))), "escaped quotes counted twice when splitting");
+            var failFields = VpnTun.CheckFields(new InvalidDataException("x"), "7", "bad config pw-Zq9 end", "pw-Zq9");
+            Check(Array.IndexOf(failFields, "result") >= 0 && failFields[Array.IndexOf(failFields, "result") + 1] == "fail" && failFields[1] == "7" && !string.Join(" ", failFields).Contains("pw-Zq9") && VpnTun.CheckLevel(new InvalidDataException()) == LogLevel.Warn && VpnTun.CheckLevel(null) == LogLevel.Info && VpnTun.CheckFields(null, "7", "", "pw")[1] == "0", "vpn.check fields: fail/Warn, code kept, password masked");
             var tunSnapshot = D("Adapters", new[] { D("Name", "RemoteAgents-VPN", "ifIndex", 21) }, "Routes", new[] { D("InterfaceIndex", 21, "DestinationPrefix", "1.0.0.0/8"), D("InterfaceIndex", 21, "DestinationPrefix", "2.0.0.0/7"), D("InterfaceIndex", 21, "DestinationPrefix", "fdfe:7261::/126"), D("InterfaceIndex", 5, "DestinationPrefix", "0.0.0.0/0") });
             var tr = VpnTun.TunRoutes(tunSnapshot, "RemoteAgents-VPN");
             Check(tr[1] == "2" && tr[3] == "1" && tr[5] == "1.0.0.0/8,2.0.0.0/7,fdfe:7261::/126", "tunroutes counted per family on the TUN interface");
