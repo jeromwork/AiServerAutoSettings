@@ -31,8 +31,9 @@ namespace RemoteAgents.Launcher
         internal static readonly string Session = NewSession();
         static string defaultDir;
         internal static string DefaultDir => defaultDir;
-        static readonly Dictionary<string, object> gates = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-        static readonly Dictionary<string, int> failures = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        // Счётчик принадлежит одному пути и защищён тем же gate, что и запись.
+        sealed class PathState { internal int Failures; }
+        static readonly Dictionary<string, PathState> gates = new Dictionary<string, PathState>(StringComparer.OrdinalIgnoreCase);
         static readonly Random random = new Random(Guid.NewGuid().GetHashCode());
         static readonly Regex EventName = new Regex("^[a-z0-9.-]+$");
 
@@ -138,12 +139,19 @@ namespace RemoteAgents.Launcher
         }
 
         // Строка уже в формате (зеркало журнала помощника, ядра).
-        internal static void AppendLine(string dir, string stream, string line)
+        // true — тело записано; false — вызывающий может повторить первую строку.
+        internal static bool AppendLine(string dir, string stream, string line)
+        {
+            try { return TryAppendLine(dir, stream, line); }
+            catch { return false; }
+        }
+
+        static bool TryAppendLine(string dir, string stream, string line)
         {
             string path = Path.Combine(dir, stream + ".log");
-            object gate;
+            PathState gate;
             bool firstUse = false;
-            lock (gates) { if (!gates.TryGetValue(path, out gate)) { gate = new object(); gates[path] = gate; firstUse = true; } }
+            lock (gates) { if (!gates.TryGetValue(path, out gate)) { gate = new PathState(); gates[path] = gate; firstUse = true; } }
             if (firstUse) LogLimits.PurgeArchives(dir, Clock()); // старые архивы чистятся при первой записи потока, а не по таймеру
             lock (gate) {
                 Mutex mutex = null; bool held = false;
@@ -152,8 +160,8 @@ namespace RemoteAgents.Launcher
                     catch (AbandonedMutexException) { held = true; }
                     catch { mutex = null; }
                     string pending = "";
-                    int failed;
-                    if (failures.TryGetValue(path, out failed) && failed > 0)
+                    int failed = gate.Failures;
+                    if (failed > 0)
                         pending = Format(Clock(), LogLevel.Warn, "launcher", "log.write-failed", new[] { new KeyValuePair<string, string>("n", failed.ToString(CultureInfo.InvariantCulture)) }, Session) + "\n";
                     try {
                         System.IO.Directory.CreateDirectory(dir);
@@ -162,7 +170,8 @@ namespace RemoteAgents.Launcher
                         byte[] bytes = new byte[marker.Length + body.Length];
                         Buffer.BlockCopy(marker, 0, bytes, 0, marker.Length);
                         Buffer.BlockCopy(body, 0, bytes, marker.Length, body.Length);
-                        if (bytes.Length + 3 > MaxBytes) bytes = body;
+                        bool markerFits = bytes.Length + 3 <= MaxBytes;
+                        if (!markerFits) bytes = body;
                         // Резервируем BOM до ротации: каждый из шести файлов строго <= MaxBytes.
                         // Если ротация недоступна, рост запрещён; следующая успешная запись сообщит log.write-failed.
                         Rotate(path, bytes.Length + 3);
@@ -171,9 +180,10 @@ namespace RemoteAgents.Launcher
                             if (fresh) f.Write(new byte[] { 0xEF, 0xBB, 0xBF }, 0, 3);
                             f.Write(bytes, 0, bytes.Length);
                         }
-                        failures[path] = 0;
+                        if (markerFits) gate.Failures = 0;
                         if (OnError != null && line.IndexOf(" ERROR ", StringComparison.Ordinal) is int e && e > 0 && e < 60) try { OnError(); } catch { }
-                    } catch { failures[path] = failures.TryGetValue(path, out failed) ? failed + 1 : 1; }
+                        return true;
+                    } catch { if (gate.Failures < int.MaxValue) gate.Failures++; return false; }
                 } finally {
                     if (mutex != null) { try { if (held) mutex.ReleaseMutex(); } catch { } mutex.Dispose(); }
                 }

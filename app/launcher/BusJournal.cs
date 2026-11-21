@@ -97,8 +97,8 @@ namespace RemoteAgents.Launcher
                 FlushPendingLocked();
                 if (_suppressedCount > _summarizedAt)
                 {
-                    WriteLineLocked(FormatNoiseSummary(DateTime.UtcNow));
-                    _summarizedAt = _suppressedCount;
+                    if (WriteLineLocked(FormatNoiseSummary(DateTime.UtcNow)))
+                        _summarizedAt = _suppressedCount;
                 }
             }
         }
@@ -127,8 +127,8 @@ namespace RemoteAgents.Launcher
 
                         if (_suppressedCount % NoiseSummaryThreshold == 0)
                         {
-                            WriteLineLocked(FormatNoiseSummary(evt.Utc));
-                            _summarizedAt = _suppressedCount;
+                            if (WriteLineLocked(FormatNoiseSummary(evt.Utc)))
+                                _summarizedAt = _suppressedCount;
                         }
                         return;
                     }
@@ -136,7 +136,7 @@ namespace RemoteAgents.Launcher
                     string key = Identity(evt);
                     if (_last != null && _lastKey == key)
                     {
-                        _repeatCount++;
+                        if (_repeatCount < int.MaxValue) _repeatCount++;
                         _repeatUtc = evt.Utc;
                         if (_repeatCount >= CollapseThreshold)
                         {
@@ -146,12 +146,13 @@ namespace RemoteAgents.Launcher
                     }
 
                     // Смена события: итог повторов предыдущего, затем новое пишется сразу.
-                    FlushPendingLocked();
+                    if (!FlushPendingLocked()) return;
+                    _last = null; _lastKey = null;
+                    if (!WriteLineLocked(FormatEvent(evt))) return;
                     // Не удерживаем исходные поля/длинные значения между событиями: только SHA-256 и метаданные.
                     _lastKey = key;
                     _last = new BusEvent(evt.Seq, Cut(evt.Topic), Cut(evt.Source), evt.Utc, null);
                     _repeatUtc = evt.Utc;
-                    WriteLineLocked(FormatEvent(evt));
                 }
             }
             catch
@@ -160,36 +161,38 @@ namespace RemoteAgents.Launcher
             }
         }
 
-        private void FlushPendingLocked()
+        private bool FlushPendingLocked()
         {
-            if (_last == null || _repeatCount == 0) return;
+            if (_last == null || _repeatCount == 0) return true;
 
             int count = _repeatCount;
+            if (!WriteLineLocked(FormatRepeat(_last, count, _repeatUtc))) return false;
             _repeatCount = 0;
-            WriteLineLocked(FormatRepeat(_last, count, _repeatUtc));
+            return true;
         }
 
-        private void WriteLineLocked(string line)
+        private bool WriteLineLocked(string line)
         {
-            if (string.IsNullOrEmpty(line)) return;
+            if (string.IsNullOrEmpty(line)) return true;
             try
             {
                 if (_sink != null)
                 {
                     _sink(line);
-                    return;
+                    return true;
                 }
 
                 string dir = !string.IsNullOrEmpty(_logsDir) ? _logsDir : RaLog.DefaultDir;
                 if (!string.IsNullOrEmpty(dir))
                 {
-                    RaLog.AppendLine(dir, "bus", line);
+                    return RaLog.AppendLine(dir, "bus", line);
                 }
             }
             catch
             {
                 // Ошибка записи журнала не роняет шину
             }
+            return false;
         }
 
         private static bool IsNoisy(BusEvent evt)

@@ -17,26 +17,26 @@ namespace RemoteAgents.Launcher
         static readonly Regex TextField = new Regex(@"(?:^| )text=(""(?:\\.|[^""\\])*""|[^ ]*)");
         // Внутренние часы sing-box не входят в тождество сообщения. ID соединения сохраняется.
         static readonly Regex Preamble = new Regex(@"^(?:[+-]\d{4}\s+)?(?:\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?\s+)?(DEBUG|INFO|WARN|WARNING|ERROR|FATAL|PANIC)\s+", RegexOptions.IgnoreCase);
-        readonly Action<string> sink;
+        readonly Func<string, bool> sink;
         string lastKey;
         int repeats, noise;
         LogLevel lastLevel;
-        internal CoreJournal(Action<string> sink) { this.sink = sink; }
+        internal CoreJournal(Func<string, bool> sink) { this.sink = sink; }
 
-        internal void Write(string line)
+        internal bool Write(string line)
         {
             string clean = Ansi.Replace(line ?? "", "");
             var record = Record.Match(clean);
             if (!record.Success || record.Groups[2].Value != "core.line") {
-                Flush(); lastKey = null; sink(clean); return;
+                if (!Flush()) return false; lastKey = null; return sink(clean);
             }
             var field = TextField.Match(record.Groups[4].Value);
-            if (!field.Success) { Flush(); lastKey = null; sink(clean); return; }
+            if (!field.Success) { if (!Flush()) return false; lastKey = null; return sink(clean); }
             string text = field.Groups[1].Value;
             // RaLog использует JSON-совместимые кавычки и экранирование.
             if (text.StartsWith("\"", StringComparison.Ordinal)) {
                 try { text = Json.Parse(text) as string ?? text; }
-                catch { Flush(); lastKey = null; sink(clean); return; }
+                catch { if (!Flush()) return false; lastKey = null; return sink(clean); }
             }
             var embedded = Preamble.Match(text);
             string level = embedded.Success ? embedded.Groups[1].Value.ToUpperInvariant() : record.Groups[1].Value;
@@ -45,38 +45,46 @@ namespace RemoteAgents.Launcher
             LogLevel outer; if (Enum.TryParse(record.Groups[1].Value, true, out outer) && outer > severity) severity = outer;
             // Главный фактический источник: INFO router: found process path. Ошибки не фильтруются.
             if (embedded.Success && severity <= LogLevel.Info && text.IndexOf("router: found process", StringComparison.OrdinalIgnoreCase) >= 0) {
+                if (noise >= NoiseThreshold && !FlushNoise()) return false;
                 if (++noise == NoiseThreshold) FlushNoise();
-                return;
+                return true;
             }
             string body = embedded.Success ? text.Substring(embedded.Length) : text;
             string key;
             using (var sha = SHA256.Create())
                 key = Convert.ToBase64String(sha.ComputeHash(Encoding.UTF8.GetBytes(record.Groups[3].Value + "\0" + severity + "\0" + body)));
             if (key == lastKey) {
+                if (repeats >= CollapseThreshold && !FlushRepeats()) return false;
                 if (++repeats == CollapseThreshold) FlushRepeats();
-                return;
+                return true;
             }
-            Flush(); lastKey = key; lastLevel = severity;
+            if (!Flush()) return false;
+            lastKey = null;
             // Исправляем внешний уровень старого помощника, не меняя UTC, seq и исходный текст.
             int offset = record.Groups[1].Index;
             clean = clean.Substring(0, offset) + severity.ToString().ToUpperInvariant().PadRight(record.Groups[1].Length) + clean.Substring(offset + record.Groups[1].Length);
-            sink(clean);
+            if (!sink(clean)) return false;
+            lastKey = key; lastLevel = severity;
+            return true;
         }
-        void Summary(LogLevel level, string evt, params string[] fields)
-        { sink(RaLog.Format(RaLog.Clock(), level, "core", evt, RaLog.Pairs(fields), RaLog.Session)); }
-        void FlushRepeats()
+        bool Summary(LogLevel level, string evt, params string[] fields)
+        { return sink(RaLog.Format(RaLog.Clock(), level, "core", evt, RaLog.Pairs(fields), RaLog.Session)); }
+        bool FlushRepeats()
         {
-            if (repeats == 0) return;
-            Summary(lastLevel, "repeat", "of", "core.line", "count", repeats.ToString(CultureInfo.InvariantCulture));
-            repeats = 0;
+            if (repeats == 0) return true;
+            if (!Summary(lastLevel, "repeat", "of", "core.line", "count", repeats.ToString(CultureInfo.InvariantCulture))) return false;
+            repeats = 0; return true;
         }
-        void FlushNoise()
+        bool FlushNoise()
         {
-            if (noise == 0) return;
-            Summary(LogLevel.Info, "core.noise-summary", "of", "router.found-process", "suppressed", noise.ToString(CultureInfo.InvariantCulture));
-            noise = 0;
+            if (noise == 0) return true;
+            if (!Summary(LogLevel.Info, "core.noise-summary", "of", "router.found-process", "suppressed", noise.ToString(CultureInfo.InvariantCulture))) return false;
+            noise = 0; return true;
         }
         // Конец полученной пачки/смена сообщения закрывают счётчики; новых периодических задач нет.
-        internal void Flush() { FlushRepeats(); FlushNoise(); }
+        internal bool Flush() { return FlushRepeats() && FlushNoise(); }
+        // После ограниченного числа отказов зеркало учитывает незаписанные сводки как lost.
+        internal int DiscardPending()
+        { int lost = repeats + noise; repeats = noise = 0; lastKey = null; return lost; }
     }
 }

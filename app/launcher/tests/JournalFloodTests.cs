@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 
 namespace RemoteAgents.Launcher
 {
@@ -19,7 +20,7 @@ namespace RemoteAgents.Launcher
             Directory.CreateDirectory(dir);
             var oldClock = RaLog.Clock; RaLog.Clock = () => new DateTimeOffset(Now);
             try {
-                StatusTransitions(dir); BusRepeats(); CoreRepeats(); Mirror(dir); Rotation(dir);
+                StatusTransitions(dir); BusRepeats(); CoreRepeats(); WriteRecovery(dir); Mirror(dir); MirrorRecovery(dir); MirrorSummaryRecovery(dir); ParallelWrites(dir); Rotation(dir);
                 Console.WriteLine("PASS: JournalFloodTests (" + checks + " checks, manual events, no timers)");
                 return 0;
             } finally { RaLog.Clock = oldClock; Directory.Delete(dir, true); }
@@ -62,8 +63,10 @@ namespace RemoteAgents.Launcher
                     File.WriteAllText(vpn, "{\"ok\":true,\"state\":\"starting\"}"); tracker.ScanFile(vpn); bus.DrainOnce();
                     Check(!tracker.IsBlockReady("vpn"), "starting VPN is not ready");
                     File.WriteAllText(vpn, "{\"ok\":true,\"state\":\"on\"}");
-                    tracker.ScanFile(vpn + "~RF1234.TMP"); tracker.ScanFile(vpn); bus.DrainOnce();
-                    Check(events.Count == 5 && events.Last().Get("block") == "vpn", "RF hint reads final vpn once with stable identity");
+                    // Единственный RF-сигнал после замены; временный файл намеренно противоречит конечному.
+                    File.WriteAllText(vpn + "~RF1234.TMP", "{\"ok\":false,\"phase\":\"failed\"}");
+                    tracker.ScanFile(vpn + "~RF1234.TMP"); bus.DrainOnce();
+                    Check(events.Count == 5 && events.Last().Get("block") == "vpn", "isolated RF hint reads final VPN, ignoring temporary failed state");
                     var board = new HealthBoard(HealthBoard.ExpectedBlocks(Status("{\"runningComponents\":[\"bridge\"],\"vpnOn\":true}")), Now);
                     bus.Subscribe(BusTopics.BlockReady, e => board.Ready(e.Get("block"), Now));
                     board.Ready("vpn", Now);
@@ -138,7 +141,7 @@ namespace RemoteAgents.Launcher
         }
         static void CoreRepeats()
         {
-            var lines = new List<string>(); var journal = new CoreJournal(lines.Add);
+            var lines = new List<string>(); var journal = new CoreJournal(line => { lines.Add(line); return true; });
             for (int i = 0; i < 4; i++) journal.Write(Core(i, "+0300 2026-11-21 12:00:0" + i + " \u001b[31mERROR\u001b[0m dns: connection refused"));
             Check(lines.Count == 1 && lines[0].Contains(" ERROR ") && !lines[0].Contains("[31m"), "first core error immediate, ANSI level repaired");
             journal.Write(Core(4, "+0300 2026-11-21 12:00:04 [33mWARN[0m network: slow"));
@@ -188,6 +191,120 @@ namespace RemoteAgents.Launcher
             Check(Json.Str(Json.Read(Path.Combine(state, "helper-log-cursor.json")), "after") == "4", "filtered lines advance helper cursor exactly once");
             Check(File.ReadAllText(Path.Combine(logs, "helper.log")).Contains("vpn.state"), "helper/VPN diagnostics retained in helper stream");
             Check(mirror.Pull() == 0, "no duplicate mirror page after saved cursor");
+        }
+
+        static void WriteRecovery(string dir)
+        {
+            string logs = Path.Combine(dir, "core-recovery"), path = Path.Combine(logs, "core.log");
+            Directory.CreateDirectory(path); // FileStream не может открыть каталог как журнал.
+            var journal = new CoreJournal(line => RaLog.AppendLine(logs, "core", line));
+            Check(!journal.Write(Core(1, "ERROR original diagnostic")) && journal.Flush(), "failed first core line is not accepted");
+            Directory.Delete(path);
+            Check(journal.Write(Core(2, "ERROR original diagnostic")) && journal.Flush(), "next batch retries identical core error as first");
+            string text = File.ReadAllText(path);
+            Check(text.Contains("original diagnostic") && text.Contains(" ERROR ") && text.Contains("log.write-failed") && !text.Contains("of=core.line"), "recovery contains first error text and failure count");
+            journal.Write(Core(3, "ERROR original diagnostic")); Directory.CreateDirectory(path + ".blocked");
+            File.Move(path, path + ".saved"); Directory.Move(path + ".blocked", path);
+            Check(!journal.Flush(), "failed repeat summary stays pending");
+            Check(!journal.Write(Core(4, "WARN next warning")), "failed prior summary does not consume warning");
+            Directory.Delete(path);
+            Check(journal.Write(Core(5, "WARN next warning")) && journal.Flush(), "warning retries after pending summary recovery");
+            text = File.ReadAllText(path);
+            Check(text.Contains("count=1") && text.Contains("next warning") && text.Contains(" WARN "), "repeat count and warning text survive refusal");
+
+            logs = Path.Combine(dir, "bus-recovery"); path = Path.Combine(logs, "bus.log"); Directory.CreateDirectory(path);
+            using (var bus = new EventBus(manualDispatch: true))
+            using (var busJournal = new BusJournal(bus, logs)) {
+                bus.Publish("vpn.failed", "helper", "reason", "original bus error"); bus.DrainOnce();
+                Directory.Delete(path);
+                bus.Publish("vpn.failed", "helper", "reason", "original bus error"); bus.DrainOnce(); busJournal.Flush();
+                text = File.ReadAllText(path);
+                Check(text.Contains("original bus error") && text.Contains("vpn.failed") && text.Contains("log.write-failed") && !text.Contains("first_seq="), "bus retries failed first event with original fields");
+            }
+        }
+
+        static void MirrorRecovery(string dir)
+        {
+            foreach (string stream in new[] { "core", "helper" }) {
+                string logs = Path.Combine(dir, "mirror-retry-" + stream), state = logs + "-state", path = Path.Combine(logs, stream + ".log");
+                Directory.CreateDirectory(path);
+                string[] lines = stream == "core" ? new[] { Core(1, "WARN mirror warning"), Core(2, "ERROR mirror error") } :
+                    new[] { RaLog.Format(new DateTimeOffset(Now), LogLevel.Error, "helper", "vpn.failed", RaLog.Pairs(new[] { "reason", "mirror error" }), "abcd") };
+                int calls = 0;
+                var mirror = new HelperLogMirror(logs, state, () => true, () => "15", (after, max) => {
+                    calls++;
+                    return new Dictionary<string, object> { { "next", 2 }, { "lines", after == 0 ? lines : new string[0] } };
+                }, (level, evt, fields) => { });
+                Check(mirror.Pull() == 0 && calls == 1 && !File.Exists(Path.Combine(state, "helper-log-cursor.json")), "failed mirror line keeps cursor: " + stream);
+                Directory.Delete(path);
+                Check(mirror.Pull() == lines.Length, "mirror retries saved page after recovery: " + stream);
+                string text = File.ReadAllText(path);
+                Check(text.Contains("mirror error") && text.Contains(" ERROR ") && (stream != "core" || text.Contains("mirror warning") && text.Contains(" WARN ")), "mirror preserves WARN/ERROR text: " + stream);
+
+                logs += "-permanent"; state += "-permanent"; path = Path.Combine(logs, stream + ".log"); Directory.CreateDirectory(path);
+                calls = 0;
+                mirror = new HelperLogMirror(logs, state, () => true, () => "15", (after, max) => {
+                    calls++;
+                    return new Dictionary<string, object> { { "next", 2 }, { "lines", after == 0 ? lines : new string[0] } };
+                }, (level, evt, fields) => { });
+                for (int i = 0; i < HelperLogMirror.MaxWriteAttempts * lines.Length; i++) mirror.Pull();
+                Check(Json.Str(Json.Read(Path.Combine(state, "helper-log-cursor.json")), "after") == "2" && calls <= HelperLogMirror.Iterations, "permanent refusal advances after bounded retries: " + stream);
+                Directory.Delete(path); mirror.Pull();
+                text = File.ReadAllText(path);
+                Check(text.Contains("lost") && text.Contains("n=" + lines.Length) && text.Contains("log.write-failed"), "first successful write reports lost original records: " + stream);
+            }
+        }
+
+        static void MirrorSummaryRecovery(string dir)
+        {
+            string logs = Path.Combine(dir, "mirror-summary"), state = logs + "-state", path = Path.Combine(logs, "core.log");
+            var oldOnError = RaLog.OnError;
+            RaLog.OnError = () => { File.Move(path, path + ".saved"); Directory.CreateDirectory(path); };
+            try {
+                var mirror = new HelperLogMirror(logs, state, () => true, () => "15", (after, max) =>
+                    new Dictionary<string, object> { { "next", 3 }, { "lines", after == 0 ? new[] {
+                        Core(1, "ERROR summary diagnostic"), Core(2, "ERROR summary diagnostic"),
+                        Core(3, "INFO router: found process path: example.exe") } : new string[0] } }, (level, evt, fields) => { });
+                Check(mirror.Pull() == 3 && !File.Exists(Path.Combine(state, "helper-log-cursor.json")), "failed batch summary prevents cursor commit");
+                RaLog.OnError = oldOnError; Directory.Delete(path);
+                Check(mirror.Pull() == 0 && Json.Str(Json.Read(Path.Combine(state, "helper-log-cursor.json")), "after") == "3", "recovered summary commits page without replaying accepted rows");
+                string text = File.ReadAllText(path);
+                Check(text.Contains("count=1") && text.Contains("suppressed=1") && text.Contains("log.write-failed"), "repeat/noise counters survive failed batch flush exactly once");
+            } finally { RaLog.OnError = oldOnError; }
+        }
+
+        static void ParallelWrites(string dir)
+        {
+            const int workers = 8, count = 100;
+            string logs = Path.Combine(dir, "parallel"); Directory.CreateDirectory(logs);
+            using (var barrier = new Barrier(workers)) {
+                var threads = new Thread[workers]; var errors = new Exception[workers];
+                for (int i = 0; i < workers; i++) {
+                    int worker = i;
+                    threads[i] = new Thread(() => {
+                        try {
+                            string stream = "parallel-" + worker, path = Path.Combine(logs, stream + ".log");
+                            Directory.CreateDirectory(path);
+                            for (int n = 0; n < count; n++) {
+                                if (!barrier.SignalAndWait(3000)) throw new Exception("parallel barrier timeout");
+                                if (RaLog.AppendLine(logs, stream, "blocked")) throw new Exception("blocked write succeeded");
+                            }
+                            Directory.Delete(path);
+                            for (int n = 0; n < count; n++) {
+                                if (!barrier.SignalAndWait(3000)) throw new Exception("recovery barrier timeout");
+                                if (!RaLog.AppendLine(logs, stream, "record=" + n)) throw new Exception("recovery write failed");
+                            }
+                        } catch (Exception e) { errors[worker] = e; }
+                    });
+                    threads[i].IsBackground = true; threads[i].Start();
+                }
+                foreach (var thread in threads) Check(thread.Join(10000), "manual parallel thread completed within seconds");
+                for (int i = 0; i < workers; i++) {
+                    Check(errors[i] == null, "parallel stream has no dictionary errors: " + errors[i]);
+                    string[] text = File.ReadAllLines(Path.Combine(logs, "parallel-" + i + ".log"));
+                    Check(text.Count(l => l.Contains("log.write-failed") && l.Contains("n=100")) == 1 && text.Count(l => l.StartsWith("record=")) == count, "per-path failures and all recovered records retained: " + i);
+                }
+            }
         }
 
         static void Rotation(string dir)

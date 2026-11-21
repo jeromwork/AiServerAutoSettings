@@ -86,7 +86,8 @@ namespace RemoteAgents.Launcher
         {
             try {
                 // ReplaceFile (Files.Atomic) на Windows создаёт служебные *.json~RF<hex>.TMP.
-                // DOS/8.3-маска FileSystemWatcher может пропустить их даже с фильтром *.json.
+                // FileSystemWatcher выдаёт Renamed, если фильтру соответствует хотя бы старое имя:
+                // launcher.json → launcher.json~RF….TMP проходит по старому имени.
                 // Такой сигнал лишь перечитывает конечный .json; содержимое временного файла не есть готовность.
                 var match = Regex.Match(Path.GetFileName(path), @"^([a-z0-9_-]{1,64})\.json(?:~RF[0-9a-f]+(?:\.tmp)?)?$", RegexOptions.IgnoreCase);
                 if (!match.Success) return;
