@@ -16,8 +16,8 @@ namespace RemoteAgents.Launcher
         // Focused executable: the default runs every VpnTun check, without unrelated suites.
         static int Main(string[] args)
         {
-            if (args.Length == 1 && args[0] == "--vpn-route-watch-only") { RouteWatchChecks(); return 0; }
-            if (args.Length == 1 && args[0] == "--vpn-scan-events-only") { ScanEventChecks(); NetHelperVersionTests.Run(); return 0; }
+            if (args.Length == 1 && args[0] == "--vpn-route-watch-only") { RouteWatchChecks(); RebindRouteWatchChecks(); return 0; }
+            if (args.Length == 1 && args[0] == "--vpn-scan-events-only") { ScanEventChecks(); RebindChecks(); NetHelperVersionTests.Run(); return 0; }
             string root = Path.Combine(Path.GetTempPath(), "vpn-tun-tests-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
             try {
@@ -87,11 +87,11 @@ namespace RemoteAgents.Launcher
         {
             foreach (string topic in new[] { BusTopics.WinRouteChanged, BusTopics.WinIfaceChanged, BusTopics.WinAddrChanged, BusTopics.TickVpnScan }) {
                 using (var bus = new EventBus(manualDispatch: true)) {
-                    int best = 7, tun = 7, probes = 0, scans = 0, stops = 0, wakes = 0;
+                    int best = 7, bestProbe = 7, tun = 7, probes = 0, scans = 0, stops = 0, wakes = 0;
                     var health = new List<BusEvent>();
                     using (bus.Subscribe(BusTopics.VpnHealth, e => health.Add(e)))
-                    using (var watch = new VpnRouteWatch(bus, () => { probes++; return best; }, () => tun,
-                        () => scans++, () => stops++, () => wakes++)) {
+                    using (var watch = new VpnRouteWatch(bus, () => { probes++; return new VpnRouteResult { TunIf = tun, Best1111 = best, BestProbe = bestProbe }; },
+                        () => scans++, reason => stops++, () => wakes++)) {
                         Check(watch.Process() && probes == 1 && scans == 1, "initial fact check closes subscribe race");
                         for (int i = 0; i < 8; i++) bus.Publish(topic, BusTopics.Sources.Windows);
                         bus.DrainOnce();
@@ -105,7 +105,7 @@ namespace RemoteAgents.Launcher
                         Check(!watch.Process() && probes == 3 && scans == 2 && stops == 1, "lost route rolls back once before scans");
                         bus.DrainOnce();
                         Check(health.Count == 1 && health[0].Get("result") == "fail" && health[0].Get("reason") == "routes-lost"
-                            && health[0].Get("best1111") == "9" && health[0].Get("tunIf") == "7", "health contains failed route facts");
+                            && health[0].Get("best1111") == "9:" && health[0].Get("bestProbe") == "7:" && health[0].Get("tunIf") == "7", "health contains failed route facts");
                         bus.Publish(topic, BusTopics.Sources.Windows); bus.DrainOnce();
                         Check(!watch.Process() && probes == 3 && stops == 1 && health.Count == 1, "later events cannot repeat rollback");
                         int previousWakes = wakes;
@@ -118,8 +118,27 @@ namespace RemoteAgents.Launcher
             foreach (int badTun in new[] { -1, 0, 7 }) {
                 using (var bus = new EventBus(manualDispatch: true)) {
                     int stops = 0;
-                    using (var watch = new VpnRouteWatch(bus, () => -1, () => badTun, () => { }, () => stops++, () => { }))
+                    using (var watch = new VpnRouteWatch(bus, () => new VpnRouteResult { TunIf = badTun, Best1111 = -1, BestProbe = 7 }, () => { }, reason => stops++, () => { }))
                         Check(!watch.Process() && stops == 1, "missing TUN or failed API fails closed");
+                }
+            }
+            using (var bus = new EventBus(manualDispatch: true)) {
+                int bestProbe = 7, stops = 0;
+                var health = new List<BusEvent>();
+                using (bus.Subscribe(BusTopics.VpnHealth, e => health.Add(e)))
+                using (var watch = new VpnRouteWatch(bus,
+                    () => VpnReadyGate.ProbeRoute(ip => ip.ToString() == "1.1.1.1" ? 7 : bestProbe,
+                        name => 7, index => "fake", System.Net.IPAddress.Parse("198.18.0.9"), VpnTun.InterfaceName),
+                    () => { }, reason => stops++, () => { })) {
+                    Check(watch.Process(), "both initial routes belong to TUN");
+                    bestProbe = 9;
+                    bus.Publish(BusTopics.WinRouteChanged, BusTopics.Sources.Windows); bus.DrainOnce();
+                    Check(!watch.Process() && stops == 1, "probe route alone leaving TUN rolls back");
+                    bus.DrainOnce();
+                    Check(health.Count == 1 && health[0].Get("reason") == "routes-lost" && health[0].Get("best1111") == "7:fake"
+                        && health[0].Get("bestProbe") == "9:fake", "probe-only loss retains both route facts");
+                    bus.Publish(BusTopics.WinRouteChanged, BusTopics.Sources.Windows); bus.DrainOnce();
+                    Check(!watch.Process() && stops == 1 && health.Count == 1, "probe-only loss rolls back exactly once");
                 }
             }
             Console.WriteLine("PASS: V5 route watch (manual bus, healthy/lost/missing routes, burst, single rollback, disposal)");
@@ -138,8 +157,8 @@ namespace RemoteAgents.Launcher
                     rebind.Tick(now, ProcessStarted, transport, FakeDaemonAlive); scan.Tick(now);
                     Check(!rebind.Preparing && !scan.Preparing, "elapsed time does not schedule DNS/inventory");
                 }
-                using (var watch = new VpnRouteWatch(bus, () => 7, () => 7,
-                    () => { rebind.RequestScan(); scan.RequestScan(); }, () => { throw new Exception("unexpected rollback"); }, () => { })) {
+                using (var watch = new VpnRouteWatch(bus, () => new VpnRouteResult { TunIf = 7, Best1111 = 7, BestProbe = 7 },
+                    () => { rebind.RequestScan(); scan.RequestScan(); }, reason => { throw new Exception("unexpected rollback"); }, () => { })) {
                     bus.Publish(BusTopics.WinIfaceChanged, BusTopics.Sources.Windows);
                     bus.FireTick(BusTopics.Ticks.VpnScan);
                     bus.DrainOnce(); Check(watch.Process(), "interface/tick requests coalesce");
@@ -189,8 +208,13 @@ namespace RemoteAgents.Launcher
             internal bool ResolveFails, BuildFails, StartFails;
             internal string[] Addresses = { "198.51.100.7" };
             internal readonly List<long> BuildTimes = new List<long>(), RestartTimes = new List<long>();
+            internal readonly EventBus Bus;
+            internal readonly VpnRouteWatch Watch;
+            internal int Tun = 7, Best1111 = 7, BestProbe = 7, Probes;
+            internal string StopReason = "";
+            internal bool QueueOldReady;
             long time;
-            internal RebindFixture()
+            internal RebindFixture(bool watchRoutes = false)
             {
                 Transport = D("pid", 42, "startedAt", ProcessStarted.ToString("o"), "ok", true, "active", "a", "updatedAt", utc.ToString("o"), "configRevision", "r1", "network", "wifi1", "localNet", "ok",
                     "helper", D("udp", true, "vpnInPort", 17881), "endpoints", new[] { "relay.example" }, "lan", D("subnets", new[] { "192.168.77.0/24" }),
@@ -209,14 +233,36 @@ namespace RemoteAgents.Launcher
                 }, candidate => {
                     Restarts++; RestartTimes.Add(time);
                     Check(Json.Bool(Status, "enabled") && Json.Str(Status, "state") == "searching" && Json.Str(Json.Map(Status["reason"]), "code") == "vpn-rebind", "searching is published before replacing the core in its Job");
+                    BeginCoreRestart();
                     if (StartFails) return false;
                     RunningConfig = Json.Map(Json.Parse(candidate)); return true;
                 });
                 Monitor = new VpnTunMonitor(0, Transport, VpnTun.DnsPolicy(snapshot), value => {
                     Status = value;
                     Check(Json.Bool(value, "enabled"), "rebind preserves enabled on every publication");
-                }, reason => Stops++, () => DeadRestarts++, Rebind, FakeDaemonAlive);
+                }, reason => { Stops++; StopReason = reason; }, () => { DeadRestarts++; BeginCoreRestart(); }, Rebind, FakeDaemonAlive);
+                if (watchRoutes) {
+                    Bus = new EventBus(manualDispatch: true);
+                    Watch = new VpnRouteWatch(Bus, () => {
+                        Probes++; return new VpnRouteResult { TunIf = Tun, Best1111 = Best1111, BestProbe = BestProbe };
+                    }, () => Rebind.RequestScan(), reason => { Stops++; StopReason = reason; }, () => { });
+                }
             }
+            void BeginCoreRestart()
+            {
+                if (Watch == null) return;
+                if (QueueOldReady) { Bus.Publish(BusTopics.SingboxStarted, BusTopics.Sources.VpnCore, "core", "vpn"); QueueOldReady = false; }
+                Watch.BeginRestart(time);
+                Tun = Best1111 = BestProbe = -1;
+                NetworkChanged();
+            }
+            internal void NetworkChanged()
+            { Bus.Publish(BusTopics.WinRouteChanged, BusTopics.Sources.Windows); Bus.DrainOnce(); }
+            internal void CoreReady()
+            { Bus.Publish(BusTopics.SingboxStarted, BusTopics.Sources.VpnCore, "core", "vpn", "line", "new ready"); Bus.DrainOnce(); }
+            internal void RestoreRoutes()
+            { Tun = Best1111 = BestProbe = 7; NetworkChanged(); }
+
             Dictionary<string, object> MakeConfig(VpnTunBinding binding, Dictionary<string, object> evidence)
             { return Json.Map(Json.Parse(Json.Encode(settings.Config("ra-helper", Convert.ToBase64String(new byte[32]), binding.Ips, Json.Strings(Json.Get(Json.Map(evidence["lan"]), "subnets")), snapshot, VpnTun.DnsPolicy(snapshot), binding.Port)))); }
             internal int RunningPort { get { return Json.Int(Json.Map(Json.Array(RunningConfig["outbounds"])[0]), "server_port", 0); } }
@@ -224,16 +270,62 @@ namespace RemoteAgents.Launcher
             internal void Step(long ms, bool alive = true)
             {
                 Interlocked.Exchange(ref time, ms); var now = utc.AddMilliseconds(ms); Transport["updatedAt"] = now.ToString("o");
-                Check(Monitor.Step(ms, now, alive, Transport, ""), "rebind owner loop keeps progressing");
+                if (Watch != null) { Bus.DrainOnce(); if (!Watch.Process(ms, alive)) return; }
+                Check(Monitor.Step(ms, now, alive, Transport, "", routesReady: Watch == null || Watch.Ready), "rebind owner loop keeps progressing");
             }
             internal void Advance(long ms)
             { while (time < ms) Step(Math.Min(time + 500, ms)); }
             internal void Await(long ms, Func<bool> done, string name)
             { Check(SpinWait.SpinUntil(() => { Step(ms); return done(); }, 1500), name); }
-            public void Dispose() { ResolveRelease.Set(); BuildRelease.Set(); }
+            public void Dispose() { ResolveRelease.Set(); BuildRelease.Set(); if (Watch != null) Watch.Dispose(); if (Bus != null) Bus.Dispose(); }
+        }
+        static void RebindRouteWatchChecks()
+        {
+            using (var f = new RebindFixture(watchRoutes: true)) {
+                f.Step(0); f.Await(1, () => !f.Rebind.Preparing, "initial event scan finishes");
+                // Queue an old ready before replacement; it must not arm the new core.
+                f.QueueOldReady = true;
+                f.Port(17891); f.Advance(5001); f.Await(5002, () => f.Restarts == 1, "rebind starts replacement with route watch attached");
+                f.Step(5003);
+                Check(f.Stops == 0 && !f.Watch.Ready && Json.Str(f.Status, "state") == "searching", "route deletion during rebind does not roll back or reuse old ready");
+                int beforeReady = f.Probes;
+                f.Advance(6000); Check(f.Probes == beforeReady, "no route probes before replacement ready");
+                f.CoreReady(); f.Step(6001);
+                Check(f.Stops == 0 && !f.Watch.Ready && Json.Str(f.Status, "state") != "on", "ready alone does not confirm missing routes");
+                int beforeEvent = f.Probes;
+                f.Tun = f.Best1111 = f.BestProbe = 7; f.Step(6002);
+                Check(f.Probes == beforeEvent && !f.Watch.Ready, "route recovery is rechecked by event, not owner polling");
+                f.NetworkChanged(); f.Step(6003);
+                Check(f.Watch.Ready && f.Stops == 0 && Json.Str(f.Status, "state") == "on", "new ready plus restored routes resumes VPN without rollback");
+                // A crash and its route deletion must still reach the automatic restart.
+                f.Tun = f.Best1111 = f.BestProbe = -1; f.NetworkChanged(); f.Step(6500, false);
+                Check(f.DeadRestarts == 1 && f.Stops == 0 && !f.Watch.Ready, "dead core restarts before route-loss rollback");
+                f.RestoreRoutes(); f.Step(6501);
+                Check(!f.Watch.Ready && Json.Str(f.Status, "state") != "on", "automatic restart also needs a fresh ready event");
+                f.CoreReady(); f.Step(6502);
+                Check(f.Watch.Ready && f.Stops == 0 && Json.Str(f.Status, "state") == "on", "automatic restart confirms ready and both routes");
+            }
+            using (var f = new RebindFixture(watchRoutes: true)) {
+                f.Port(17891); f.Step(0); f.Await(1, () => f.Restarts == 1, "missing-route case replaces core");
+                f.CoreReady(); f.Step(2); f.Advance(10001);
+                Check(f.Stops == 0 && !f.Watch.Ready, "missing routes wait until route fuse");
+                f.Step(10002); f.Bus.DrainOnce();
+                Check(f.Stops == 1 && f.StopReason == "routes-not-ours", "missing replacement routes fail once at fuse");
+                f.NetworkChanged(); f.CoreReady(); f.RestoreRoutes(); f.Step(10003);
+                Check(f.Stops == 1, "late events cannot repeat or undo restart failure");
+            }
+            using (var f = new RebindFixture(watchRoutes: true)) {
+                f.Port(17891); f.Step(0); f.Await(1, () => f.Restarts == 1, "missing-ready case replaces core");
+                f.RestoreRoutes(); f.Advance(20000);
+                Check(f.Stops == 0 && !f.Watch.Ready, "restored routes cannot bypass new core ready");
+                f.Step(20001); f.Step(20002);
+                Check(f.Stops == 1 && f.StopReason == "core-not-ready", "missing ready fails once at core fuse");
+            }
+            Console.WriteLine("PASS: Rebind + route watch (new ready, event-driven route recovery, fuses, automatic dead-core restart)");
         }
         static void RebindChecks()
         {
+            int checksBefore = count;
             // (a), (d), (f): keep DNS gated over five seconds of injected time.
             using (var f = new RebindFixture()) {
                 f.ResolveRelease.Reset(); f.Port(17891);
@@ -292,9 +384,9 @@ namespace RemoteAgents.Launcher
                 string before = f.Rebind.Config; f.ResolveFails = true; f.Port(17891);
                 f.Step(0); f.Await(1, () => f.Rebind.Failed, "DNS failure becomes searching status");
                 Check(f.Rebind.Config == before && f.RunningPort == 17881 && f.Builds == 0 && f.Restarts == 0 && f.Stops == 0 && Json.Str(f.Status, "state") == "searching", "failed resolution keeps the previous config and never calls Stop");
-                f.Transport["configRevision"] = "r2"; f.Advance(10000);
-                Check(f.Resolves == 1 && !f.Rebind.Preparing && Json.Str(f.Status, "state") != "on", "DNS error retry is delayed ten seconds even when revision changes");
-                f.ResolveFails = false; f.Rebind.RequestScan(); f.Step(10001); f.Await(10002, () => f.Restarts == 1, "DNS recovers automatically after retry delay");
+                f.Advance(10000);
+                Check(f.Resolves == 1 && !f.Rebind.Preparing && Json.Str(f.Status, "state") != "on", "DNS error retry is delayed ten seconds without another event");
+                f.ResolveFails = false; f.Step(10001); f.Await(10002, () => f.Restarts == 1, "DNS recovers automatically after retry delay");
                 Check(f.RunningPort == 17891 && f.Stops == 0, "recovered binding needs no manual disable or enable");
             }
             // A completed background result may already be obsolete. Also gate
@@ -314,7 +406,12 @@ namespace RemoteAgents.Launcher
                 string before = f.Rebind.Config; f.BuildFails = failBuild; f.StartFails = !failBuild; f.Port(17891);
                 f.Step(0); f.Await(1, () => f.Rebind.Failed, "config check/start failure is contained by rebind");
                 Check(f.Rebind.Config == before && f.Rebind.Binding.Port == 17881 && f.Stops == 0 && Json.Str(f.Status, "state") == "searching", "failed config check or core launch cannot mark candidate as running");
+                f.BuildFails = f.StartFails = false; f.Advance(10000);
+                Check(!f.Rebind.Preparing && f.Resolves == 1, "check/start retry remains bounded for ten seconds");
+                f.Step(10001); f.Await(10002, () => f.Rebind.Binding.Port == 17891, "check/start failure retries without a new RequestScan");
+                Check(f.RunningPort == 17891 && f.Stops == 0, "autonomous retry commits the recovered candidate");
             }
+            Console.WriteLine("PASS: Rebind " + (count - checksBefore) + " checks (fake time, bounded autonomous retries)");
         }
         static void ConfigFileChecks(string root, VpnTun settings, Dictionary<string, object> snapshot, Dictionary<string, object> policy)
         {
@@ -441,7 +538,7 @@ namespace RemoteAgents.Launcher
             Check(VpnTun.PathState(transport, now, FakeDaemonAlive) == "", "day-old snapshot remains ready while its daemon is alive");
             Check(VpnTun.PathState(transport, now, (pid, started) => false) == "no-path", "dead daemon refuses VPN regardless of snapshot age");
             MonitorChecks(now, transport, strict);
-            RouteWatchChecks(); ScanEventChecks();
+            RouteWatchChecks(); RebindRouteWatchChecks(); ScanEventChecks();
             ConflictScanChecks();
             RebindChecks();
             ConfigFileChecks(root, settings, snapshot, strict);

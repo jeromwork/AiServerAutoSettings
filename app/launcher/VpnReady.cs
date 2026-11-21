@@ -34,8 +34,9 @@ namespace RemoteAgents.Launcher
         {
             if (bus == null) throw new ArgumentNullException("bus");
             this.core = core;
-            subs.Add(bus.Subscribe(BusTopics.SingboxStarted, e => { if (e.Get("core") == this.core) { readyLine = e.Get("line"); ready.Set(); } }));
-            subs.Add(bus.Subscribe(BusTopics.SingboxFatal, e => { if (e.Get("core") == this.core) { fatalLine = e.Get("line"); fatal.Set(); } }));
+            long after = bus.LastSeq; // Ignore queued events from the previous process.
+            subs.Add(bus.Subscribe(BusTopics.SingboxStarted, e => { if (e.Seq > after && e.Get("core") == this.core) { readyLine = e.Get("line"); ready.Set(); } }));
+            subs.Add(bus.Subscribe(BusTopics.SingboxFatal, e => { if (e.Seq > after && e.Get("core") == this.core) { fatalLine = e.Get("line"); fatal.Set(); } }));
             subs.Add(bus.Subscribe(BusTopics.VpnOff, e => { offReason = e.Get("reason"); off.Set(); }));
             subs.Add(bus.Subscribe(BusTopics.WinRouteChanged, e => netChanged.Set()));
             subs.Add(bus.Subscribe(BusTopics.WinIfaceChanged, e => netChanged.Set()));
@@ -45,6 +46,14 @@ namespace RemoteAgents.Launcher
         internal string FatalLine { get { return fatalLine; } }
         internal string OffReason { get { return offReason; } }
 
+        // Nonblocking owner-loop view, shared with the initial blocking gate.
+        internal VpnGateOutcome? CoreStatus(bool coreExited)
+        {
+            if (fatal.WaitOne(0)) return VpnGateOutcome.Fatal;
+            if (coreExited) return VpnGateOutcome.CoreExited;
+            return ready.WaitOne(0) ? (VpnGateOutcome?)VpnGateOutcome.Ready : null;
+        }
+
         // Ждёт первое из: готовность ядра, fatal, выход процесса, выключение, предохранитель. Порядок при одновременности:
         // выключение, fatal, выход процесса, готовность (ядро, которое сказало «started» и тут же упало, готовым не считается).
         internal VpnGateOutcome AwaitCore(Func<bool> coreExited, Func<bool> cancelled, Action pulse, Func<bool> fuse, int sliceMs = VpnWatchdog.PollMs)
@@ -53,9 +62,8 @@ namespace RemoteAgents.Launcher
             while (true) {
                 if (cancelled()) return VpnGateOutcome.Off;
                 off.Reset(); // vpn.off без реальной отмены этой попытки (устаревшее событие прошлого Disable) игнорируется
-                if (fatal.WaitOne(0)) return VpnGateOutcome.Fatal;
-                if (coreExited()) return VpnGateOutcome.CoreExited;
-                if (ready.WaitOne(0)) return VpnGateOutcome.Ready;
+                var outcome = CoreStatus(coreExited());
+                if (outcome.HasValue) return outcome.Value;
                 if (fuse()) return VpnGateOutcome.Fuse;
                 pulse();
                 WaitHandle.WaitAny(handles, sliceMs); // пульс аренды, не условие готовности

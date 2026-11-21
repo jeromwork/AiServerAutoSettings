@@ -230,19 +230,26 @@ namespace RemoteAgents.Launcher
         // tick только запрашивает проверку фактов, сам по себе успех не объявляет.
         internal const int ScanPeriodMs = 60000;
         readonly EventBus bus;
-        readonly Func<int> bestInterface, tunInterface;
-        readonly Action scan, rollback, wake;
+        readonly Func<VpnRouteResult> probe;
+        readonly Action scan, wake;
+        readonly Action<string> rollback;
         readonly List<IDisposable> subscriptions = new List<IDisposable>();
+        VpnReadyGate restarting;
+        bool waitingCore;
+        long deadline;
         int requested, ended;
-        internal VpnRouteWatch(EventBus bus, Func<int> bestInterface, Func<int> tunInterface,
-            Action scan, Action rollback, Action wake)
+        internal bool Ready { get; private set; }
+        internal VpnRouteWatch(EventBus bus, Func<VpnRouteResult> probe,
+            Action scan, Action<string> rollback, Action wake)
         {
-            this.bus = bus; this.bestInterface = bestInterface; this.tunInterface = tunInterface;
+            this.bus = bus; this.probe = probe;
             this.scan = scan; this.rollback = rollback; this.wake = wake;
+            Ready = true; // Initial launch has already passed VpnReadyGate.
             subscriptions.Add(bus.Subscribe(BusTopics.WinRouteChanged, e => Request()));
             subscriptions.Add(bus.Subscribe(BusTopics.WinIfaceChanged, e => Request()));
             subscriptions.Add(bus.Subscribe(BusTopics.WinAddrChanged, e => Request()));
             subscriptions.Add(bus.Subscribe(BusTopics.TickVpnScan, e => Request()));
+            subscriptions.Add(bus.Subscribe(BusTopics.SingboxStarted, e => { if (e.Get("core") == "vpn") Request(); }));
             Request(); // Закрывает окно между подтверждением маршрутов и подпиской.
         }
         void Request()
@@ -251,27 +258,62 @@ namespace RemoteAgents.Launcher
             Interlocked.Exchange(ref requested, 1);
             wake();
         }
+        // Owner thread, after the previous core has exited and BEFORE starting its
+        // replacement. Each launch needs its own ready event, never the old latch.
+        internal void BeginRestart(long now)
+        {
+            if (restarting != null) restarting.Dispose();
+            restarting = new VpnReadyGate(bus);
+            Ready = false; waitingCore = true;
+            deadline = now + VpnReadyGate.CoreReadyFuseMs;
+            Request();
+        }
         // false means this watch already rolled the session back (or was disposed).
-        internal bool Process()
+        // A dead core belongs to the monitor's automatic restart policy. Its route
+        // removal is not evidence of route loss in a running, ready TUN.
+        internal bool Process(long now = 0, bool coreAlive = true)
         {
             if (Volatile.Read(ref ended) != 0) return false;
-            if (Interlocked.Exchange(ref requested, 0) == 0) return true;
-            int tun = tunInterface(), best = bestInterface();
-            if (tun <= 0 || best != tun) {
-                if (Interlocked.Exchange(ref ended, 1) == 0) {
-                    bus.Publish(BusTopics.VpnHealth, BusTopics.Sources.Helper, "result", "fail", "reason", "routes-lost",
-                        "best1111", best.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                        "tunIf", tun.ToString(System.Globalization.CultureInfo.InvariantCulture));
-                    rollback();
-                }
-                return false;
+            if (!coreAlive) { Ready = false; return true; }
+            if (restarting != null && waitingCore) {
+                var outcome = restarting.CoreStatus(false);
+                if (outcome == VpnGateOutcome.Fatal) return Fail("core-exited", null);
+                if (outcome != VpnGateOutcome.Ready)
+                    return now < deadline || Fail("core-not-ready", null);
+                waitingCore = false; deadline = now + VpnReadyGate.RouteFuseMs;
+                Request(); // First route check immediately after the NEW ready.
             }
-            scan();
+            if (Interlocked.Exchange(ref requested, 0) != 0) {
+                var route = probe();
+                if (route == null || !route.Ok) {
+                    if (restarting == null) return Fail("routes-lost", route);
+                } else {
+                    if (restarting != null) { restarting.Dispose(); restarting = null; }
+                    Ready = true;
+                    scan();
+                    return true;
+                }
+            }
+            // Предохранитель: маршруты нового ядра не подтверждены, а событие
+            // Windows не пришло. Истечение только отказывает, не объявляет успех.
+            if (restarting != null && !waitingCore && now >= deadline) return Fail("routes-not-ours", null);
             return true;
+        }
+        bool Fail(string reason, VpnRouteResult route)
+        {
+            if (Interlocked.Exchange(ref ended, 1) == 0) {
+                Ready = false;
+                var fields = new List<string> { "result", "fail", "reason", reason };
+                if (route != null) fields.AddRange(route.Fields());
+                bus.Publish(BusTopics.VpnHealth, BusTopics.Sources.Helper, fields.ToArray());
+                rollback(reason);
+            }
+            return false;
         }
         public void Dispose()
         {
             Interlocked.Exchange(ref ended, 1);
+            if (restarting != null) { restarting.Dispose(); restarting = null; }
             foreach (var subscription in subscriptions) subscription.Dispose();
         }
     }
@@ -325,7 +367,7 @@ namespace RemoteAgents.Launcher
                         if (Binding.Same(result.Binding)) { Binding = result.Binding; }
                         else prepared = result;
                     } else scanRequested = true;
-                } catch { Failed = true; retryAfter = now + RetryMs; }
+                } catch { Failed = true; scanRequested = true; retryAfter = now + RetryMs; }
                 pending = null;
             }
             if (prepared != null && (!ready || prepared.Key != key)) { prepared = null; scanRequested = true; }
@@ -350,7 +392,7 @@ namespace RemoteAgents.Launcher
             bool started = false;
             try { started = activate(result.Config); } catch { }
             if (started) { Binding = result.Binding; Config = result.Config; Failed = false; }
-            else { Failed = true; retryAfter = now + RetryMs; }
+            else { Failed = true; scanRequested = true; retryAfter = now + RetryMs; }
             return true;
         }
     }
@@ -373,7 +415,7 @@ namespace RemoteAgents.Launcher
             pulse = now; revision = Json.Str(transport, "configRevision"); network = Json.Str(transport, "network");
             this.policy = policy; this.publish = publish; this.stop = stop; this.restart = restart; this.rebind = rebind; this.processAlive = processAlive;
         }
-        internal bool Step(long now, DateTime utcNow, bool coreAlive, Dictionary<string, object> transport, string conflict, bool inventoryFailed = false)
+        internal bool Step(long now, DateTime utcNow, bool coreAlive, Dictionary<string, object> transport, string conflict, bool inventoryFailed = false, bool routesReady = true)
         {
             if (now - pulse > VpnLease.DeadlineMs) { stop("watchdog-stalled"); return false; }
             pulse = now;
@@ -386,6 +428,7 @@ namespace RemoteAgents.Launcher
             }
             if (rebind != null && rebind.Searching(transport)) { state = "searching"; code = "vpn-rebind"; text = rebind.Failed ? "Не удалось обновить настройки VPN, повторяю" : "Обновляю VPN под новые настройки связи"; }
             else if (!coreAlive) { state = "searching"; code = "path-process-exited"; text = "Сбой канала, перезапускаю"; }
+            else if (!routesReady) { state = "searching"; code = "vpn-ready"; text = "Жду готовности ядра и маршрутов VPN"; }
             else if (conflict.Length > 0) { state = "conflict"; code = "vpn-conflict"; text = VpnWatchdog.FailureSummary("conflict", conflict); }
             else if (inventoryFailed) { state = "searching"; code = "conflict-check-failed"; text = "Не удалось проверить другие VPN"; }
             else if (path.Length > 0 || Json.Str(transport, "phase") == "searching" || Json.Str(transport, "localNet") == "down" || now < changedUntil) {
@@ -757,6 +800,7 @@ namespace RemoteAgents.Launcher
                                 core.Dispose(); core = null;
                             }
                             Ev(LogLevel.Info, "core.restart", "why", "rebind");
+                            if (routeWatch != null) routeWatch.BeginRestart(clock.ElapsedMilliseconds);
                             core = StartCore(launchJob, candidate); coreStarted = DateTime.UtcNow;
                             return true;
                         } catch { log("vpn-core-rebind-failed", 1); Ev(LogLevel.Warn, "vpn.on.step", "step", "rebind", "result", "failed", "reason", "core-rebind-failed"); return false; }
@@ -773,7 +817,7 @@ namespace RemoteAgents.Launcher
                     () => {
                         lock (gate) if (disposed || epoch != generation || lease.Expired) return;
                         if (core != null) { core.Dispose(); core = null; }
-                        try { Ev(LogLevel.Warn, "core.restart", "why", "exited"); core = StartCore(launchJob, rebind.Config); coreStarted = DateTime.UtcNow; coreExitLogged = false; }
+                        try { Ev(LogLevel.Warn, "core.restart", "why", "exited"); if (routeWatch != null) routeWatch.BeginRestart(clock.ElapsedMilliseconds); core = StartCore(launchJob, rebind.Config); coreStarted = DateTime.UtcNow; coreExitLogged = false; }
                         catch { log("vpn-core-restart-failed", 1); Ev(LogLevel.Warn, "vpn.on.step", "step", "restart", "result", "failed", "reason", "core-restart-failed"); }
                     }, rebind);
                 string lastConflictKey = found.Key; bool afterLogged = false;
@@ -784,10 +828,10 @@ namespace RemoteAgents.Launcher
                 }, directory);
                 var watchBus = Bus;
                 if (watchBus != null) routeWatch = new VpnRouteWatch(watchBus,
-                    () => NetRoute.BestInterface(System.Net.IPAddress.Parse("1.1.1.1")),
-                    () => NetRoute.IndexByName(VpnTun.InterfaceName),
+                    () => VpnReadyGate.ProbeRoute(NetRoute.BestInterface, NetRoute.IndexByName, NetRoute.NameOf,
+                        IPAddress.Parse(options.ProbeAddress), VpnTun.InterfaceName),
                     () => { rebind.RequestScan(); scan.RequestScan(); },
-                    () => Stop("error", "routes-lost", epoch), () => wake.Set());
+                    reason => Stop("error", reason, epoch), () => wake.Set());
                 long nextRead = 0;
                 stage = "monitor"; step.Restart();
                 while (true) {
@@ -795,14 +839,16 @@ namespace RemoteAgents.Launcher
                     if (lease.Expired) return;
                     long now = clock.ElapsedMilliseconds;
                     if (now >= nextRead) { transport = Transport(); nextRead = now + 500; } // timer-ok: B — перечитывание, решение по фактам; замена на наблюдатель в W2
+                    scan.Tick(now);
+                    bool coreAlive = core != null && !core.WaitForExit(0);
+                    if (!coreAlive && core != null && !coreExitLogged) { coreExitLogged = true; LogCoreExit(core); }
+                    { var reader = CoreReader; if (reader != null) reader.Drain(Events); } // очередь строк ядра на каждом проходе (не таймер)
                     lock (gate) {
                         if (disposed || epoch != generation) return;
-                        if (routeWatch != null && !routeWatch.Process()) return;
+                        if (routeWatch != null && !routeWatch.Process(now, coreAlive)) return;
                     }
-                    scan.Tick(now);
-                    if (core != null && core.WaitForExit(0) && !coreExitLogged) { coreExitLogged = true; LogCoreExit(core); }
-                    { var reader = CoreReader; if (reader != null) reader.Drain(Events); } // очередь строк ядра на каждом проходе (не таймер)
-                    if (!monitor.Step(clock.ElapsedMilliseconds, DateTime.UtcNow, core != null && !core.WaitForExit(0), transport, scan.Conflict, scan.Failed)) return;
+                    if (!monitor.Step(clock.ElapsedMilliseconds, DateTime.UtcNow, coreAlive, transport, scan.Conflict, scan.Failed,
+                        routeWatch == null || routeWatch.Ready)) return;
                     if (lease.Expired) return;
                     lease.Pulse();
                     wake.WaitOne(VpnWatchdog.PollMs); wake.Reset();
