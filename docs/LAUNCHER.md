@@ -359,6 +359,33 @@ Manifest: `{version,file,sha256,size,minLauncher,configSchema:1,product,launcher
 flock --close /tmp/heavy-tests.lock ./build/release.sh <ssh-alias> '~/.local/share/remote-agents/dist'
 ```
 
+### Каналы выпусков (решение владельца 21.11.2026, поправка конституции §7а)
+
+Поддерживаются два изолированных канала выпуска:
+1. **Основной канал (`main`, по умолчанию):**
+   - Вызов: `./build/release.sh <ssh-alias>` (или `--channel main`)
+   - Источник: ветка `main` с HEAD в `origin/main`, чистое дерево.
+   - Продукт: `RemoteAgents` (`RemoteAgents.exe`, `-p:Instance=Main`).
+   - GitHub: релиз `main-latest`.
+   - Сервер: каталог `~/.local/share/remote-agents/dist`.
+2. **Тестовый канал (`test`):**
+   - Вызов: `./build/release.sh --channel test <ssh-alias>`
+   - Источник: ветка `int/vpn-master` (HEAD = `origin/int/vpn-master`), чистое дерево.
+   - Продукт: `RemoteAgentsTest` (`RemoteAgentsTest.exe`, `-p:Instance=Test`).
+   - GitHub: prerelease `test-latest` (ассеты перезаписываются).
+   - Сервер: каталог `~/.local/share/remote-agents/dist-test`.
+   - Физическая изоляция: тестовая сборка физически не может писать в `dist` или `main-latest`.
+
+Для локальной сборки EXE тестового канала:
+```bash
+./build/build-exe.sh --channel test
+```
+
+Микро-тесты каналов:
+```bash
+./build/test-release-channel.sh
+```
+
 Команда требует чистый main с HEAD в origin/main, один раз вызывает `build/build-exe.sh` и получает оба EXE,
 `bundle.zip` и `vpn-bundle.zip` с одной UTC-версией `yyyyMMdd.HHmmss-<git hash>`.
 `release-github.sh` заменяет оба EXE и `release-info.json` в единственном `main-latest`, скачивает обратно
