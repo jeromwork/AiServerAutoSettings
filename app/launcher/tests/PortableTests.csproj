@@ -67,6 +67,11 @@
     <IntermediateOutputPath>obj/$(Configuration)/healthboard-tests/</IntermediateOutputPath>
     <OutputPath>bin/$(Configuration)/healthboard-tests/</OutputPath>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(TransportFaultTests)' == 'true'">
+    <StartupObject>RemoteAgents.Launcher.TransportFaultTests</StartupObject>
+    <IntermediateOutputPath>obj/$(Configuration)/transport-fault-tests/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/transport-fault-tests/</OutputPath>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(TransportBusTests)' == 'true'">
     <StartupObject>RemoteAgents.Launcher.TransportBusTests</StartupObject>
     <IntermediateOutputPath>obj/$(Configuration)/transportbus-tests/</IntermediateOutputPath>
@@ -172,6 +177,8 @@
     <Compile Include="../HealthBoard.cs" />
     <Compile Include="HealthBoardTests.cs" />
     <Compile Include="../TransportBusBridge.cs" />
+    <Compile Include="../TransportFaultCommand.cs" />
+    <Compile Include="TransportFaultTests.cs" />
     <Compile Include="TransportBusTests.cs" />
     <Compile Include="../HelperBusBridge.cs" />
     <Compile Include="HelperBusTests.cs" />

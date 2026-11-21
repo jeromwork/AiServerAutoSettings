@@ -109,12 +109,15 @@ namespace RemoteAgents.Launcher
         }
 
         public static bool IsAllowedOutgoing(string topic)
+        { return IsAllowedOutgoing(topic, UpdateChannel.IsTest); }
+
+        internal static bool IsAllowedOutgoing(string topic, bool isTest)
         {
             if (string.IsNullOrEmpty(topic)) return false;
             return topic.StartsWith("win.", StringComparison.Ordinal) ||
                    topic == BusTopics.NetChange ||
                    topic.StartsWith(BusTopics.TickPrefix + "transport-", StringComparison.Ordinal) ||
-                   topic == BusTopics.TransportCommand;
+                   (isTest && topic == BusTopics.TransportCommand);
         }
 
         public static string FormatOutgoing(BusEvent e)

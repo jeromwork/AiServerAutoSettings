@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 [CmdletBinding()]
-param([Alias('Home')][string]$TransportHome=(Join-Path $env:LOCALAPPDATA 'RemoteAgents'),[int]$ParentPid=0)
+param([Alias('Home')][string]$TransportHome=(Join-Path $env:LOCALAPPDATA 'RemoteAgents'),[int]$ParentPid=0,[ValidateSet('main','test')][string]$UpdateChannel='main')
 # Persisted pipe output has a known encoding on Windows PowerShell 5.1 too.
 [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
 . (Join-Path $PSScriptRoot 'Transport.Common.ps1')
@@ -8,6 +8,11 @@ param([Alias('Home')][string]$TransportHome=(Join-Path $env:LOCALAPPDATA 'Remote
 . (Join-Path $PSScriptRoot 'Transport.Events.ps1')
 . (Join-Path $PSScriptRoot 'Transport.Quality.ps1')
 # Диагностические выключатели (бисекция утечки): только из переменной окружения; Main-лаунчер её не передаёт.
+$script:TransportTestBuild=($UpdateChannel -ceq 'test')
+$script:transportFaults=@{};$script:faultRejectedSeen=0L
+# Предохранитель (конституция 4а): tick.transport-decide недоступно, если stdin/лаунчер остановлен; при срабатывании — снять blip, успех не объявляет.
+$FaultClearFuseMs=2000
+$TransportFaultLimit=32
 $script:TransportDiag=Get-TransportDiagFlags $env:RA_TRANSPORT_DIAG
 $root=(Get-TransportHome $TransportHome);$engine=$null;$tunnelChildren=@{};$probes=@{};$rows=@();$active=$null;$confirmed=$false;$errorText='Запуск';$network=$null;$memory=$null;$secret=$null
 $parent=$null;$mutex=$null;$locked=$false;$settings=$null;$paths=$null;$exitCode=0
@@ -45,6 +50,78 @@ function Test-TransportStop {
     if($parent){try{return $parent.HasExited}catch{return $true}};return $false
 }
 function Get-DaemonTime { [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
+function Test-DaemonFault([string]$Tag) {
+    return [bool]($script:TransportTestBuild -and $script:transportFaults -and $script:transportFaults.ContainsKey($Tag))
+}
+function Get-DaemonFaultSnapshot {
+    if(-not $script:TransportTestBuild){return}
+    foreach($tag in @($script:transportFaults.Keys|Sort-Object)){
+        $f=$script:transportFaults[$tag]
+        @{tag=$tag;fault=$f.fault;at=$f.at;until=$f.until}
+    }
+}
+function Publish-DaemonFault {
+    # Publish immediately; normal open/decide/close episode frames carry the same snapshot.
+    Publish-TransportStatus;Publish-DaemonBusStatus
+}
+function Remove-DaemonFault([string]$Tag,[string]$Reason='command') {
+    if(-not (Test-DaemonFault $Tag)){return}
+    [void]$script:transportFaults.Remove($Tag)
+    Write-TransportLog $root 'fault.clear' @{tag=$Tag;reason=$Reason}
+    if($Tag -eq $active -and $engine -and -not $engine.Process.HasExited){
+        [void](Switch-TransportActive $active $false 'fault-clear')
+    }
+    # Removing an injection proves nothing. Only a new real result may close/recover
+    # an episode or supply the reducer's ordinary improvement policy.
+    if($Tag -in @($paths.Candidates.tag) -and (Test-DaemonEngineReady -Probe)){
+        if($pathChecks.ContainsKey($Tag)){Stop-TransportPathCheck $pathChecks[$Tag].handle;$pathChecks.Remove($Tag)}
+        Start-DaemonEpisodeCheck $Tag
+    }
+    Publish-DaemonFault
+}
+function Update-DaemonFaults([switch]$Fuse) {
+    if(-not $script:TransportTestBuild){return}
+    $nowMs=Get-DaemonTime
+    foreach($tag in @($script:transportFaults.Keys)){
+        $f=$script:transportFaults[$tag]
+        $deadline=$f.until;if($Fuse){$deadline+=$FaultClearFuseMs}
+        if($f.fault -eq 'blip' -and $nowMs -ge $deadline){
+            $reason=if($Fuse){'tick-fuse'}else{'tick'}
+            Remove-DaemonFault $tag $reason
+        }
+    }
+}
+function Invoke-DaemonFaultCommand($Fields) {
+    if(-not $script:TransportTestBuild){Write-TransportLog $root 'fault.reject' @{reason='test-build-only'};return}
+    $fault=[string]$Fields['fault'];$tag=[string]$Fields['tag'];$ms=0L
+    $valid=$fault -cin @('drop','blip','clear') -and $tag -cmatch '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,95}$' -and $tag -cne 'unavailable' -and $tag -cin @($paths.Candidates.tag)
+    foreach($key in $Fields.Keys){if($key -cnotin @('fault','tag','ms')){$valid=$false}}
+    if($fault -ceq 'blip'){
+        $valid=$valid -and [long]::TryParse([string]$Fields['ms'],[Globalization.NumberStyles]::None,[Globalization.CultureInfo]::InvariantCulture,[ref]$ms) -and $ms -ge 1 -and $ms -le 60000
+    }elseif($Fields.ContainsKey('ms') -and [string]$Fields['ms'] -cne '0'){$valid=$false}
+    if(-not $valid){Write-TransportLog $root 'fault.reject' @{reason='invalid-command'};return}
+    if($fault -ceq 'clear'){Remove-DaemonFault $tag;return}
+    if(-not $script:transportFaults.ContainsKey($tag) -and $script:transportFaults.Count -ge $TransportFaultLimit){Write-TransportLog $root 'fault.reject' @{reason='fault-limit'};return}
+    $nowMs=Get-DaemonTime
+    $script:transportFaults[$tag]=@{fault=$fault;at=$nowMs;until=$(if($fault -ceq 'blip'){$nowMs+$ms}else{$null})}
+    # Retire in-flight successes for this tag. Do not reset episode/Q/generation history.
+    $verifyFault=$false
+    if($pathChecks.ContainsKey($tag)){
+        $ticket=$pathChecks[$tag];Stop-TransportPathCheck $ticket.handle;$pathChecks.Remove($tag)
+        $verifyFault=($ticket.purpose -eq 'post-switch-verify')
+    }
+    if($probes.ContainsKey($tag)){Stop-TransportProbe $probes[$tag];$probes.Remove($tag)}
+    $script:eventQueue=@($eventQueue|Where-Object {$_.tag -ne $tag -or $_.kind -notin @('path-check','post-switch-verify')})
+    if($verifyFault){Add-DaemonQueuedEvent (New-DaemonEvent 'post-switch-verify' $tag 'timeout')}
+    [void]$gateOkUntil.Remove($tag);[void]$lightProof.Remove($tag)
+    Write-TransportLog $root 'fault.apply' @{fault=$fault;tag=$tag;ms=$ms}
+    if($tag -eq $active){
+        $script:confirmed=$false
+        if($engine -and -not $engine.Process.HasExited){[void](Switch-TransportActive $active $false 'fault-apply')}
+        Add-DaemonQueuedEvent (New-DaemonEvent 'dial-fail' $tag 'timeout')
+    }else{Add-DaemonQueuedEvent (New-DaemonEvent 'path-check' $tag 'timeout')}
+    Publish-DaemonFault
+}
 function New-DaemonEvent([string]$Kind,[string]$Tag,[string]$Code,[bool]$Local=$false) {
     @{at=(Get-DaemonTime);kind=$Kind;tag=$Tag;code=$Code;local=$Local;detail=''}
 }
@@ -60,6 +137,7 @@ function Reset-DaemonDecision {
     $script:verdict=$null;$script:lastRecoveryAt=$null
     # A new generation cannot retain tags removed from configuration.
     $script:pathLogState=@{}
+    foreach($tag in @($script:transportFaults.Keys)){if($tag -notin @($paths.Candidates.tag)){Remove-DaemonFault $tag 'config-removed'}}
     foreach($r in $rows){$r.penaltyStep=0;$r.penaltyUntil=$null;$r.suspect=$false}
 }
 function Stop-DaemonObservation([switch]$EngineRestart) {
@@ -169,7 +247,7 @@ function Test-DaemonImprovement {
 }
 function Publish-DaemonEpisode([string]$Phase,[string]$Reason) {
     $ep=$decision.episode
-    $fields=[ordered]@{id=$network.id;episodeId=$episodeId;at=(Get-DaemonTime);phase=$Phase;tag=$active;reason=$Reason;openedAt=$ep.openedAt}
+    $fields=[ordered]@{faults=@(Get-DaemonFaultSnapshot);id=$network.id;episodeId=$episodeId;at=(Get-DaemonTime);phase=$Phase;tag=$active;reason=$Reason;openedAt=$ep.openedAt}
     Write-TransportLog $root 'switch.episode' $fields
     Send-TransportBusEvent $bus 'transport.episode' $fields
 }
@@ -211,7 +289,9 @@ function Start-DaemonEpisodeCheck([string]$Tag,[switch]$Verify) {
     $c=$paths.Candidates|Where-Object {$_.tag -eq $Tag}|Select-Object -First 1
     if(-not $c -or $pathChecks.ContainsKey($Tag)){return}
     $purpose=if($Verify){'post-switch-verify'}else{'light'}
-    if(-not (Request-TransportQualityProbe $q $Tag $active $purpose (Get-DaemonTime))){
+    $injected=Test-DaemonFault $Tag
+    # Synthetic failures do no I/O: preserve Q's real-probe budget and retry allowance.
+    if(-not $injected -and -not (Request-TransportQualityProbe $q $Tag $active $purpose (Get-DaemonTime))){
         $script:qualityNotice=if($Verify){'Проверка 64 КиБ пропущена: бюджет Q или лимит эпизода'}else{'Лёгкая проба пропущена: бюджет Q или лимит эпизода'}
         if($Verify){Add-DaemonQueuedEvent (New-DaemonEvent 'post-switch-verify' $Tag 'skipped')}
         return
@@ -221,9 +301,10 @@ function Start-DaemonEpisodeCheck([string]$Tag,[switch]$Verify) {
     $script:checkRequest++;$nowMs=Get-DaemonTime
     $fuseMs=$LightProbeFuseMs;if($Verify){$fuseMs=$VerifyProbeFuseMs}
     $ticket=@{handle=$null;until=($nowMs+$fuseMs);tag=$Tag;gate=$false;purpose=$purpose;generation=$checkGeneration;
-        request=$checkRequest;episode=$episodeId;started=$nowMs;probeId=([string]$checkGeneration+':'+$checkRequest)}
+        request=$checkRequest;episode=$episodeId;started=$nowMs;injected=$injected;probeId=([string]$checkGeneration+':'+$checkRequest)}
     if($Verify -and $lightProof.ContainsKey($Tag)){$ticket.probeId=$lightProof[$Tag]}
     $pathChecks[$Tag]=$ticket
+    if(Test-DaemonFault $Tag){$ticket.until=$nowMs;return}
     try{
         $ticket.handle=Start-TransportPathCheck -Candidate $c -Profile $settings.Profile -ConfirmStall:$Verify -TimeoutSeconds ($fuseMs/1000.0) -StallSeconds $settings.Options.switchStallSeconds
         $script:daemonProbesStarted++
@@ -291,7 +372,7 @@ function Start-DaemonPath([string]$Tag,[switch]$Gate) {
     $seconds=12;if($Gate){$seconds=6}
     $ticket=@{handle=$null;until=((Get-DaemonTime)+[long]($seconds*1000));tag=$Tag;gate=[bool]$Gate};$pathChecks[$Tag]=$ticket
     try{
-        if(-not $c){throw 'Missing path'}
+        if(-not $c -or (Test-DaemonFault $Tag)){throw 'Missing path'}
         if($Gate){$ticket.handle=Start-TransportPathCheck -Candidate $c -Profile $settings.Profile -TimeoutSeconds 6}
         else{$ticket.handle=Start-TransportPathCheck -Candidate $c -Profile $settings.Profile -ConfirmStall -StallSeconds $settings.Options.switchStallSeconds -TimeoutSeconds 12}
     }catch{$ticket.until=Get-DaemonTime}
@@ -318,6 +399,7 @@ function Receive-DaemonChecks {
     foreach($tag in @($pathChecks.Keys)){
         $ticket=$pathChecks[$tag];$event=$null
         try{if($ticket.handle){$event=Receive-TransportPathCheck $ticket.handle}}catch{$ticket.until=Get-DaemonTime}
+        if(Test-DaemonFault $tag){$event=New-DaemonEvent 'path-check' $tag 'timeout'}
         if(-not $event -and (Get-DaemonTime) -ge $ticket.until){$event=New-DaemonEvent 'path-check' $tag 'timeout'}
         if($event){
             try{Stop-TransportPathCheck $ticket.handle}catch{};$pathChecks.Remove($tag)
@@ -327,7 +409,7 @@ function Receive-DaemonChecks {
                 $kind='light-probe';if($ticket.purpose -eq 'post-switch-verify'){$kind='probe64'}
                 $ms=[Math]::Max(0,((Get-DaemonTime)-$ticket.started))
                 if($event.detail -match 'ms=([0-9]+)'){$ms=[long]$Matches[1]}
-                Update-DaemonQuality $kind @{id=$network.id;eventId=([string]$ticket.generation+':'+$ticket.request);tag=$tag;probeId=$ticket.probeId;ok=($event.code -eq 'ok');ms=$ms}
+                if(-not $ticket.injected){Update-DaemonQuality $kind @{id=$network.id;eventId=([string]$ticket.generation+':'+$ticket.request);tag=$tag;probeId=$ticket.probeId;ok=($event.code -eq 'ok');ms=$ms}}
                 if($kind -eq 'light-probe' -and $event.code -eq 'ok'){$lightProof[$tag]=$ticket.probeId}
                 $converted=New-DaemonEvent 'path-check' $tag $event.code
                 $converted.detail=$event.detail;$event=$converted
@@ -359,9 +441,15 @@ function Receive-DaemonBus {
     if(-not $bus){return}
     $refresh=$false;$events=$bus.Drain([ref]$refresh)
     if($bus.Connected){$script:TransportBusConnected=$true}
+    if($bus.RejectedCommands -gt $script:faultRejectedSeen){
+        $script:faultRejectedSeen=$bus.RejectedCommands
+        Write-TransportLog $root 'fault.reject' @{reason='test-build-only';count=$script:faultRejectedSeen}
+    }
     # A network notification survives bounded input queue loss, just like reducer queue loss.
     if($refresh){$script:networkRefreshPending=$true}
     foreach($event in $events){
+        if($event.topic -eq 'transport.command'){Invoke-DaemonFaultCommand $event.fields;continue}
+        if($event.topic -eq 'tick.transport-decide'){Update-DaemonFaults}
         $kind=if($event.topic -in @('win.route.changed','win.iface.changed','win.addr.changed','net.change')){'net-change'}else{$event.topic}
         if($q -and $event.topic -eq 'net.change'){
             $id=[string]$event.fields['id'];$class=[string]$event.fields['class']
@@ -414,6 +502,7 @@ function Write-DaemonPathCheck($E) {
     Write-RaLog (Join-Path $root 'logs') 'transport' $level 'transport' 'path.check' ([ordered]@{candidate=[string]$E.tag;result=$result;reason=[string]$E.code;detail=[string]$E.detail})
 }
 function Add-DaemonEvent($Event) {
+    if((Test-DaemonFault ([string]$Event.tag)) -and $Event.kind -in @('path-check','post-switch-verify')){$Event.code='timeout'}
     if($Event.kind -eq 'engine-ready' -and $Event.tag -eq $active){Resume-DaemonEpisode}
     $e=@{};foreach($name in @('at','kind','tag','code','local','detail')){$e[$name]=$Event.$name}
     if($e.kind -in @('path-check','post-switch-verify')){try{Write-DaemonPathCheck $e}catch{}}
@@ -472,7 +561,7 @@ function Invoke-DaemonDecision {
         if($verdict.penalties.ContainsKey($r.tag)){$penalty=$verdict.penalties[$r.tag];$step=$penalty.step;if($null -ne $penalty.until){$until=([DateTime]::SpecifyKind([DateTime]'1970-01-01',[DateTimeKind]::Utc)).AddMilliseconds([long]$penalty.until).ToString('o')}}
         Set-TransportRowField $r penaltyStep $step;Set-TransportRowField $r penaltyUntil $until
     }
-    if($verdict.localNet -eq 'ok' -and $active -and $decision.paths.ContainsKey($active) -and -not $decision.paths[$active].failed -and -not $decision.pending.ContainsKey($active)){
+    if($verdict.localNet -eq 'ok' -and $active -and -not (Test-DaemonFault $active) -and $decision.paths.ContainsKey($active) -and -not $decision.paths[$active].failed -and -not $decision.pending.ContainsKey($active)){
         $r=$rows|Where-Object {$_.tag -eq $active}|Select-Object -First 1
         if($r -and $r.state -eq 'ok' -and (-not $decision.episode -or $decision.episode.status -eq 'closed') -and (-not $decision.episode.verifySkipped -or $decision.paths[$active].lastCheckAt -gt $decision.episode.verifyAt)){$script:confirmed=$true;$script:errorText=$null}
     }
@@ -508,7 +597,7 @@ function Publish-TransportStatus {
         $process=[Diagnostics.Process]::GetCurrentProcess()
         try{$script:transportProcessStartedAt=$process.StartTime.ToUniversalTime().ToString('o')}finally{$process.Dispose()}
     }
-    $doc=[ordered]@{pid=$PID;startedAt=$script:transportProcessStartedAt;endpoints=@($paths.Outbounds|Where-Object {$_.server -and $_.server -notin @('127.0.0.1','::1')}|ForEach-Object {[string]$_.server}|Sort-Object -Unique);ports=$(if($settings){Get-TransportConfiguredPorts ([pscustomobject]$settings.Options) $settings.Profile}else{$null});localWeb=$(if($settings){$settings.LocalWeb}else{$null});lan=$(if($settings){$settings.Lan}else{$null});helper=$(if($settings){Get-TransportHelperStatus $settings $active $paths.Outbounds}else{$null});portConflict=$portConflict;retryAt=$retryAt.ToUniversalTime().ToString('o');configRevision=$revision;fatal=($exitCode -ne 0 -and $exitCode -ne 75);summary=$summary;reason=$(if($verdict){@{code=$verdict.reason.code;text=$(if($verdict.reason.code -eq 'ok'){''}else{$verdict.reason.text});since=([DateTime]::SpecifyKind([DateTime]'1970-01-01',[DateTimeKind]::Utc)).AddMilliseconds([long]$verdict.reason.since).ToString('o')}}else{@{code='ok';text='';since=$daemonStarted.ToUniversalTime().ToString('o')}});localNet=$(if($verdict){$verdict.localNet}else{'unknown'});switches=@($(if($decision){foreach($item in $decision.switches){@{at=([DateTime]::SpecifyKind([DateTime]'1970-01-01',[DateTimeKind]::Utc)).AddMilliseconds([long]$item.at).ToString('o');from=$item.from;to=$item.to;why=$item.why}}}));ok=$isOk;phase=$phase;checkingSince=$(if($script:checkingSince){$script:checkingSince.ToString('o')}else{$null});active=$active;kbps=$speed;network=$id;metered=$metered;mode=$pin.mode;pinnedTag=$pin.tag;candidates=@($rows);configError=$reloadError;error=$errorText}
+    $doc=[ordered]@{faults=@(Get-DaemonFaultSnapshot);pid=$PID;startedAt=$script:transportProcessStartedAt;endpoints=@($paths.Outbounds|Where-Object {$_.server -and $_.server -notin @('127.0.0.1','::1')}|ForEach-Object {[string]$_.server}|Sort-Object -Unique);ports=$(if($settings){Get-TransportConfiguredPorts ([pscustomobject]$settings.Options) $settings.Profile}else{$null});localWeb=$(if($settings){$settings.LocalWeb}else{$null});lan=$(if($settings){$settings.Lan}else{$null});helper=$(if($settings){Get-TransportHelperStatus $settings $active $paths.Outbounds}else{$null});portConflict=$portConflict;retryAt=$retryAt.ToUniversalTime().ToString('o');configRevision=$revision;fatal=($exitCode -ne 0 -and $exitCode -ne 75);summary=$summary;reason=$(if($verdict){@{code=$verdict.reason.code;text=$(if($verdict.reason.code -eq 'ok'){''}else{$verdict.reason.text});since=([DateTime]::SpecifyKind([DateTime]'1970-01-01',[DateTimeKind]::Utc)).AddMilliseconds([long]$verdict.reason.since).ToString('o')}}else{@{code='ok';text='';since=$daemonStarted.ToUniversalTime().ToString('o')}});localNet=$(if($verdict){$verdict.localNet}else{'unknown'});switches=@($(if($decision){foreach($item in $decision.switches){@{at=([DateTime]::SpecifyKind([DateTime]'1970-01-01',[DateTimeKind]::Utc)).AddMilliseconds([long]$item.at).ToString('o');from=$item.from;to=$item.to;why=$item.why}}}));ok=$isOk;phase=$phase;checkingSince=$(if($script:checkingSince){$script:checkingSince.ToString('o')}else{$null});active=$active;kbps=$speed;network=$id;metered=$metered;mode=$pin.mode;pinnedTag=$pin.tag;candidates=@($rows);configError=$reloadError;error=$errorText}
     if($q){
         $doc['quality']=Get-TransportQualitySnapshot $q (Get-DaemonTime)
         $doc['postSwitchVerify']=(-not $q.verified -and $doc.quality.budgetUsedKiB+64 -le $doc.quality.budgetKiB)
@@ -560,7 +649,7 @@ function Confirm-DaemonSelection([string]$Tag) {
     elseif($verdict.action -eq 'check-path'){Start-DaemonPath $verdict.tag}
 }
 function Get-DaemonSelectorTarget([string]$Tag) {
-    if($Tag -in @($paths.Candidates.tag)){return $Tag}
+    if($Tag -in @($paths.Candidates.tag) -and -not (Test-DaemonFault $Tag)){return $Tag}
     return 'unavailable'
 }
 function Switch-TransportActive([string]$Tag,[bool]$Verified,[string]$Why='selection') {
@@ -751,7 +840,7 @@ function Start-TransportEngine {
             $cfgSettings=Copy-TransportObject $settings;$cfgSettings.Options.bindPhysical=$false;$script:nextBindRetry=[DateTime]::UtcNow.AddSeconds(60)
         }
     }
-    $cfg=New-TransportConfig $cfgSettings $paths $secret $active $interface
+    $cfg=New-TransportConfig $cfgSettings $paths $secret (Get-DaemonSelectorTarget $active) $interface
     $script:engineApiTarget=($cfg.outbounds|Where-Object {$_.tag -eq 'active'}|Select-Object -First 1).default
     $file=Join-Path $root 'state/transport-sing-box.json';Write-TransportJson $file $cfg -Private
     # Валидация до запуска; stdout/stderr не публикуются, т.к. могут содержать адреса и секреты.
@@ -851,7 +940,7 @@ try{
     $hash=Get-TransportFingerprint 'local' $root.ToLowerInvariant();$mutex=New-Object Threading.Mutex($false,('Global\RemoteAgentsTransport-'+$hash))
     try{$locked=$mutex.WaitOne(0)}catch [Threading.AbandonedMutexException]{$locked=$true}
     if(-not $locked){throw 'Транспорт уже запущен'}
-    $bus=Start-TransportBus
+    $bus=Start-TransportBus -TestBuild:$script:TransportTestBuild
     Write-TransportLog $root 'start'
     if($ParentPid -gt 0){$parent=[Diagnostics.Process]::GetProcessById($ParentPid);[void]$parent.Handle}
     # Keep the input revision even when settings/cache/candidates/network initialization fails.
@@ -1013,7 +1102,7 @@ try{
             }
             if($liveRound -and -not $probes.Count -and -not $liveDeferred.Count){$liveRound=$false;$initialRound=$false;$checkingSince=$null}
         }
-        if(Test-TransportDecisionDue $eventQueue.Count (Get-DaemonTime) $nextDecideMs){$nextDecideMs=(Get-DaemonTime)+$DecideTickMs;Invoke-DaemonDecision}
+        if(Test-TransportDecisionDue $eventQueue.Count (Get-DaemonTime) $nextDecideMs){$nextDecideMs=(Get-DaemonTime)+$DecideTickMs;Update-DaemonFaults -Fuse;Invoke-DaemonDecision}
         if($pin.mode -eq 'pinned' -and $pin.tag -notin @($paths.Candidates|ForEach-Object {$_.tag})){$confirmed=$false;$errorText='Закреплённый путь не работает: отключён или отсутствует';$checkingSince=$null}
         if($portConflict){$errorText=$portConflict.message}
         $statusInterval=1;if($portConflict -and $now -lt $retryAt){$statusInterval=5}

@@ -896,6 +896,12 @@ namespace RemoteAgents.Launcher
                         if (read.Wait(5000) && !stop.IsCancellationRequested) {
                             if (read.Result.Contains("--identify")) {
                                 using (var writer = new StreamWriter(pipe, Files.Utf8, 4096, true)) { writer.WriteLine(Json.Encode(new { pid = Process.GetCurrentProcess().Id, home, launcherVersion = Program.Version, bundleVersion = engine.Current })); writer.Flush(); }
+                            } else if (TransportFaultCommand.IsRequested(read.Result)) {
+                                string faultError = null;
+                                try { TransportFaultCommand.Parse(read.Result, UpdateChannel.IsTest); }
+                                catch (ArgumentException ex) { faultError = ex.Message; }
+                                if (faultError == null) { commands.Enqueue(read.Result); if (readyForCommands) dispatch.BeginInvoke(new Action(DrainCommands)); }
+                                using (var writer = new StreamWriter(pipe, Files.Utf8, 4096, true)) { writer.WriteLine(Json.Encode(new { ok = faultError == null, error = faultError })); writer.Flush(); }
                             } else { commands.Enqueue(read.Result); if (readyForCommands) dispatch.BeginInvoke(new Action(DrainCommands)); }
                         }
                     }
@@ -907,6 +913,10 @@ namespace RemoteAgents.Launcher
         void Handle(string[] args)
         {
             Safe(() => {
+                if (TransportFaultCommand.IsRequested(args)) {
+                    var fault = TransportFaultCommand.Parse(args, UpdateChannel.IsTest);
+                    fault.Publish(bus); return;
+                }
                 WindowCommand command = WindowModel.Route(args);
                 if (args.Contains("--exit") || args.Contains("--uninstall")) { RequestExit(); return; }
                 var diskShell = DiskShellRequest.Parse(args);

@@ -157,7 +157,7 @@ namespace RemoteAgents.Launcher
             Check(TransportBusBridge.FormatOutgoing(BusTopics.VpnState, null) == null, "foreign outgoing topic rejected");
             Check(TransportBusBridge.IsAllowedOutgoing(BusTopics.WinRouteChanged) &&
                 TransportBusBridge.IsAllowedOutgoing(BusTopics.TickTransportMem) &&
-                TransportBusBridge.IsAllowedOutgoing(BusTopics.TransportCommand), "outgoing whitelist");
+                TransportBusBridge.IsAllowedOutgoing(BusTopics.TransportCommand) == UpdateChannel.IsTest, "outgoing whitelist");
             using (var bus = new EventBus(manualDispatch: true)) {
                 var stream = new MemoryStream();
                 var bridge = new TransportBusBridge(null, stream, bus);

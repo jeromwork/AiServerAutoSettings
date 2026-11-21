@@ -4,6 +4,8 @@ $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Transport.Common.ps1')
 . (Join-Path $PSScriptRoot 'Transport.Decide.ps1')
 . (Join-Path $PSScriptRoot 'Transport.Quality.ps1')
+. (Join-Path $PSScriptRoot 'Transport.Events.ps1')
+$script:realSendBus=${function:Send-TransportBusEvent}
 $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'Transport.Daemon.ps1'),[ref]$null,[ref]$errors)
 if($errors){throw ($errors|Out-String)}
@@ -11,6 +13,8 @@ foreach($fn in $ast.FindAll({param($n) $n -is [Management.Automation.Language.Fu
     . ([scriptblock]::Create($fn.Extent.Text))
 }
 $script:testEngineApiReady=${function:Test-TransportEngineApiReady}
+$script:testPublishStatus=${function:Publish-TransportStatus}
+$script:testPublishBusStatus=${function:Publish-DaemonBusStatus}
 $count=0
 function Assert($Value,[string]$Text){if(-not $Value){throw ('T2: '+$Text)};$script:count++}
 function Get-DaemonTime {$script:clockMs}
@@ -97,6 +101,7 @@ function Engine-Step {
     Update-DaemonEngine ([DateTime]'2026-01-01Z').AddMilliseconds($script:clockMs)
 }
 function Fixture([int]$Candidates=3){
+    $script:TransportTestBuild=$false;$script:transportFaults=@{};$script:faultRejectedSeen=0L;$script:FaultClearFuseMs=2000;$script:TransportFaultLimit=32
     $script:clockMs=100;$script:root='/unused';$script:network=@{id='test-net';available=$true;interface='fake';ip='192.0.2.1'}
     $script:settings=@{Transport=@{};Profile=@{};Options=@{switchStallSeconds=8;switchStallConns=2;apiPort=29095;restartDelaySec=3}}
     $script:paths=@{Candidates=@();Tunnels=@();Outbounds=@()};$script:rows=@()
@@ -445,7 +450,8 @@ Fixture;Open-Episode
 $pathChecks.p0.generation=-1;$script:clockMs=200;Deliver 'p0' 'ok';Receive-DaemonChecks
 Assert (@($eventQueue|Where-Object {$_.tag -eq 'p0'}).Count -eq 0) 'old generation ticket accepted'
 # Real B4B output serializer/allowlist: manually pump the writer, no worker threads.
-. (Join-Path $PSScriptRoot 'Transport.Events.ps1')
+$script:captureSendBus=${function:Send-TransportBusEvent}
+Set-Item Function:Send-TransportBusEvent $script:realSendBus
 Initialize-TransportEvents
 $writer=[IO.StringWriter]::new()
 $wireBus=[RemoteAgents.TransportBus]::new([IO.MemoryStream]::new(),$writer)
@@ -456,4 +462,118 @@ foreach($topic in @('transport.episode','transport.switch','net.quality')){
 $frames=@($writer.ToString().Trim().Split("`n")|ForEach-Object {ConvertFrom-Json $_.Substring(5)})
 Assert ($frames.Count -eq 3 -and $frames[2].topic -eq 'net.quality' -and $frames[1].fields.changed -eq $true) 'real bus rejected quality/episode/switch frame'
 [void]$wireBus.Complete(0)
-'T2 daemon episode PASS ('+$count+' assertions)'
+Set-Item Function:Send-TransportBusEvent $script:captureSendBus
+# T3: exercise real input parsing -> daemon fault handling -> T2 reducer, with fake time.
+function Fault-Frame([string]$Fault,[string]$Tag='p0',[long]$Ms=0){
+    '@bus '+(ConvertTo-Json -Compress @{topic='transport.command';fields=@{fault=$Fault;tag=$Tag;ms=$Ms}})
+}
+function Fault-Input([string]$Text,[bool]$TestBuild=$true){
+    $script:bus=[RemoteAgents.TransportBus]::new([IO.MemoryStream]::new([Text.Encoding]::UTF8.GetBytes($Text)),[IO.StringWriter]::new(),$TestBuild)
+    [void]$bus.GetType().GetMethod('ReadInput',[Reflection.BindingFlags]'Instance,NonPublic').Invoke($bus,@())
+    Receive-DaemonBus
+    $bus.Dispose();$script:bus=$null
+}
+Fixture
+Fault-Input (Fault-Frame 'drop') $false
+Assert ($transportFaults.Count -eq 0 -and $eventQueue.Count -eq 0 -and $logged[-1].name -eq 'fault.reject') 'Main accepted command on stdin or did not log rejection'
+Invoke-DaemonFaultCommand @{fault='drop';tag='p0'}
+Assert ($transportFaults.Count -eq 0 -and (Get-DaemonSelectorTarget 'p0') -eq 'p0') 'Main bypass event applied a fault'
+Fixture;$script:TransportTestBuild=$true
+Fault-Input (Fault-Frame 'drop')
+Assert ((Get-DaemonSelectorTarget 'p0') -eq 'unavailable' -and $actualSelector -eq 'unavailable' -and -not $confirmed) 'Test drop did not select unavailable'
+Assert ($active -eq 'p0' -and $decision.switches.Count -eq 0) 'fault application invented a switch/selection'
+Assert (@(Get-DaemonFaultSnapshot).Count -eq 1) 'fault snapshot missing'
+# Run the production file/status serializers across a capture-only filesystem boundary.
+$script:statusDoc=$null
+$saveWriter=${function:Write-TransportJson}
+function Get-TransportConfiguredPorts {$null}
+function Get-TransportHelperStatus {$null}
+function Write-TransportJson($Path,$Value){$script:statusDoc=$Value}
+try{
+    $script:lastStatusKey=$null;$script:lastStatusWriteMs=0;$script:StatusHeartbeatMs=5000
+    $script:exitCode=0;$script:stopping=$false
+    & $script:testPublishStatus
+    Assert ($statusDoc.faults.Count -eq 1 -and $statusDoc.faults[0].fault -eq 'drop' -and -not $statusDoc.ok) 'fault absent from actual transport.json state'
+    $statusWriter=[IO.StringWriter]::new();$script:bus=[RemoteAgents.TransportBus]::new([IO.MemoryStream]::new(),$statusWriter)
+    $script:busStatusKey=$null
+    Set-Item Function:Send-TransportBusEvent $script:realSendBus
+    & $script:testPublishBusStatus
+    [void]$bus.GetType().GetMethod('WritePending',[Reflection.BindingFlags]'Instance,NonPublic').Invoke($bus,@())
+    $statusFrame=ConvertFrom-Json $statusWriter.ToString().Trim().Substring(5)
+    $statusFaults=ConvertFrom-Json $statusFrame.fields.faults
+    Assert ($statusFrame.topic -eq 'transport.status' -and $statusFaults[0].tag -eq 'p0') 'fault absent from actual status bus frame'
+    $bus.Dispose();$script:bus=$null
+}finally{Set-Item Function:Write-TransportJson $saveWriter;Set-Item Function:Send-TransportBusEvent $script:captureSendBus}
+Invoke-DaemonDecision
+Assert (@($published|Where-Object {$_.topic -eq 'transport.episode' -and $_.fields.faults[0].fault -eq 'drop'}).Count -eq 1) 'fault metadata missing from episode'
+Assert ($decision.episode.status -eq 'open' -and $pathChecks.p0 -and -not $pathChecks.p0.handle -and $started.Count -eq 2) 'drop failed to open normal episode or started I/O for injected path'
+Assert (-not $q.attempts.ContainsKey('p0') -and $qualitySnapshot.budgetUsedKiB -eq 2) 'synthetic fault spent real-probe retry/bandwidth allowance'
+$script:clockMs=200;Deliver 'p1' 'ok';Deliver 'p2' 'ok';$directCheck.handle.event=New-DaemonEvent 'net-up' '' 'ok';Invoke-DaemonDecision
+# A passive success while faulted is a failure, never recovery.
+Add-DaemonEvent (New-DaemonEvent 'path-check' 'p0' 'ok');Invoke-DaemonDecision
+Assert ($decision.episode.status -eq 'open' -and -not $confirmed) 'a real/late success escaped fault overlay'
+$script:clockMs=10099;Invoke-DaemonDecision
+Assert ($active -eq 'p0') 'drop bypassed blip threshold'
+$script:clockMs=10100;Invoke-DaemonDecision
+Assert ($active -eq 'p1' -and $actualSelector -eq 'p1' -and $decision.episode.status -eq 'verifying') 'drop did not switch via reducer to healthy candidate'
+$script:clockMs=10200;Deliver 'p1' 'ok';Invoke-DaemonDecision
+Assert ($confirmed -and $decision.episode.status -eq 'closed') 'drop broke normal post-switch verification'
+$script:clockMs=10300;Fault-Input (Fault-Frame 'clear')
+Assert ($active -eq 'p1' -and -not (Test-DaemonFault 'p0') -and (Get-DaemonSelectorTarget 'p0') -eq 'p0') 'clear forced fallback selection instead of allowing improvement'
+$script:clockMs=10400;Deliver 'p0' 'ok';Invoke-DaemonDecision
+$rows[0].latencyMs=10;$rows[1].latencyMs=120
+Assert ($active -eq 'p1') 'clear ignored minStay'
+$script:clockMs=40400;Add-DaemonEvent (New-DaemonEvent 'path-check' 'p0' 'ok');Invoke-DaemonDecision
+Assert ($active -eq 'p0' -and $decision.episode.status -eq 'verifying') 'cleared path could not return through ordinary improvement'
+# blip 5000 opens an episode, expires by tick, and only a real success closes it.
+Fixture;$script:TransportTestBuild=$true
+Fault-Input (Fault-Frame 'blip' 'p0' 5000);Invoke-DaemonDecision
+$script:clockMs=200;Deliver 'p1' 'ok';Deliver 'p2' 'ok';$directCheck.handle.event=New-DaemonEvent 'net-up' '' 'ok';Invoke-DaemonDecision
+$script:clockMs=1100;Invoke-DaemonDecision
+$script:clockMs=3100;Invoke-DaemonDecision
+$script:clockMs=5099
+Fault-Input '@bus {"topic":"tick.transport-decide","fields":{}}'
+Assert (Test-DaemonFault 'p0') 'blip cleared before duration'
+$script:clockMs=5100
+Fault-Input '@bus {"topic":"tick.transport-decide","fields":{}}'
+Assert (-not (Test-DaemonFault 'p0') -and $actualSelector -eq 'p0' -and -not $confirmed -and $active -eq 'p0') 'tick did not remove blip or announced success'
+Assert ($q.attempts.p0 -eq 1 -and $pathChecks.p0.purpose -eq 'light') 'clear bypassed Q or synthetic retries exhausted the recovery slot'
+$script:clockMs=5200;Deliver 'p0' 'ok';Invoke-DaemonDecision
+Assert ($decision.episode.status -eq 'closed' -and $confirmed -and $decision.switches.Count -eq 0) 'short blip switched or failed to recover on real result'
+Assert (@($logged|Where-Object {$_.name -eq 'fault.clear' -and $_.fields.reason -eq 'tick'}).Count -eq 1) 'tick clear log missing'
+# No stdin ticks: the existing decision pass fuse rolls back only the injection.
+Fixture;$script:TransportTestBuild=$true
+Fault-Input (Fault-Frame 'blip' 'p0' 5000)
+$script:clockMs=7099;Update-DaemonFaults -Fuse
+Assert (Test-DaemonFault 'p0') 'fuse fired early'
+$script:clockMs=7100;Update-DaemonFaults -Fuse
+Assert (-not (Test-DaemonFault 'p0') -and -not $confirmed -and $logged[-1].fields.reason -ne 'ok') 'fuse failed to roll back blip without success'
+# drop does not expire, repeated blip replaces its deadline, and clear is idempotent.
+Fixture;$script:TransportTestBuild=$true
+Fault-Input (Fault-Frame 'drop');$script:clockMs=999999;Update-DaemonFaults;Update-DaemonFaults -Fuse
+Assert (Test-DaemonFault 'p0') 'drop expired without clear'
+Fault-Input (Fault-Frame 'blip' 'p0' 1000);$script:clockMs+=500
+Fault-Input (Fault-Frame 'blip' 'p0' 5000);$script:clockMs+=500;Update-DaemonFaults
+Assert (Test-DaemonFault 'p0') 'old blip deadline cleared new injection'
+Fault-Input (Fault-Frame 'clear');$clears=@($logged|Where-Object {$_.name -eq 'fault.clear'}).Count
+Fault-Input (Fault-Frame 'clear')
+Assert (@($logged|Where-Object {$_.name -eq 'fault.clear'}).Count -eq $clears) 'clear is not idempotent'
+# Applying during verification must produce its failure, rather than strand a cancelled ticket.
+Fixture;Open-Episode;Answer-Round;Select-Second;$script:TransportTestBuild=$true
+Fault-Input (Fault-Frame 'drop' 'p1');Invoke-DaemonDecision
+Assert ($active -eq 'p2') 'fault during verification stranded episode'
+# Invalid metadata never changes state and is never echoed to logs/bus.
+Fixture;$script:TransportTestBuild=$true
+foreach($fields in @(@{fault='drop';tag='foreign'},@{fault='DROP';tag='p0'},@{fault='blip';tag='p0';ms='60001'},@{fault='blip';tag='p0';ms='NaN'},@{fault='drop';tag='p0';password='sentinel-secret'},@{fault='drop';tag="p0`nforged"})){
+    Invoke-DaemonFaultCommand $fields
+}
+Assert ($transportFaults.Count -eq 0 -and (ConvertTo-Json @($logged,$published) -Depth 30 -Compress) -notmatch 'sentinel-secret|forged|NaN') 'invalid input changed state or leaked secret/raw fields'
+# Bounded map and pruning on configuration generation changes.
+Fixture 34;$script:TransportTestBuild=$true
+for($i=0;$i -lt 34;$i++){Invoke-DaemonFaultCommand @{fault='drop';tag=('p'+$i)}}
+Assert ($transportFaults.Count -eq 32 -and $logged[-1].fields.reason -eq 'fault-limit') 'fault map unbounded'
+$paths.Candidates=@($paths.Candidates|Where-Object {$_.tag -ne 'p1'});Reset-DaemonDecision
+Assert (-not (Test-DaemonFault 'p1') -and $transportFaults.Count -eq 31) 'removed candidate retained injection'
+'T3 fault injection PASS'
+
+'T2/T3 daemon episode PASS ('+$count+' assertions)'

@@ -40,6 +40,16 @@ namespace RemoteAgents.Launcher
         }
         [STAThread] internal static int Run(string[] args)
         {
+            if (TransportFaultCommand.IsRequested(args)) {
+                AttachConsole(0xFFFFFFFF);
+                try {
+                    TransportFaultCommand.Parse(args, UpdateChannel.IsTest);
+                    string faultHome = Path.GetFullPath(Option(args, "--home") ?? DefaultHome);
+                    var reply = Forward(InstanceName(faultHome, WindowsIdentity.GetCurrent().User), args);
+                    if (!Json.Bool(reply, "ok")) throw new InvalidOperationException(Json.Text(reply, "error", "Команда не принята"));
+                    Console.WriteLine("Команда передана тестовой программе"); return 0;
+                } catch (Exception ex) { Console.Error.WriteLine(ex is ArgumentException || ex is InvalidOperationException ? ex.Message : "Тестовая программа не отвечает"); return 21; }
+            }
             string watchUpdate = Option(args, "--watch-update");
             if (watchUpdate != null) return UpdateWatchdog.Run(Path.GetFullPath(watchUpdate));
             string checkConfig = Option(args, "--check-update-config");
@@ -220,11 +230,11 @@ namespace RemoteAgents.Launcher
             if (WindowModel.ShouldShow(args)) {
                 try { var identity = Forward(name, new[] { "--identify" }); int pid = Json.Int(identity, "pid", 0); if (pid > 0) AllowSetForegroundWindow((uint)pid); } catch { }
             }
-            using (var pipe = new NamedPipeClientStream(".", name, args.Contains("--identify") ? PipeDirection.InOut : PipeDirection.Out, PipeOptions.Asynchronous)) {
+            using (var pipe = new NamedPipeClientStream(".", name, (args.Contains("--identify") || TransportFaultCommand.IsRequested(args)) ? PipeDirection.InOut : PipeDirection.Out, PipeOptions.Asynchronous)) {
                 pipe.Connect(args.Contains("--disk-shell") ? 750 : 10000);
                 using (var writer = new StreamWriter(pipe, Files.Utf8, 4096, true)) { writer.WriteLine(Json.Encode(args)); writer.Flush(); }
-                // Older launchers do not acknowledge commands; only identify needs a reply.
-                if (!args.Contains("--identify")) return Json.Map(null);
+                // Fault commands require acknowledgement of the receiving build channel too.
+                if (!args.Contains("--identify") && !TransportFaultCommand.IsRequested(args)) return Json.Map(null);
                 using (var reader = new StreamReader(pipe, Files.Utf8, true, 4096, true)) {
                     var read = reader.ReadLineAsync(); if (!read.Wait(5000)) throw new IOException("Канал не ответил");
                     return Json.Map(Json.Parse(read.Result));
