@@ -28,6 +28,8 @@ namespace RemoteAgents.Launcher
         public const string WinRouteChanged = "win.route.changed";
         public const string WinIfaceChanged = "win.iface.changed";
         public const string WinAddrChanged = "win.addr.changed";
+        // Сбой регистрации уведомления Windows: win.notify.error {api, rc}
+        public const string WinNotifyError = "win.notify.error";
 
         // Сеть (Q): net.change {id, class}, net.quality {...}, net.e2e
         public const string NetChange = "net.change";

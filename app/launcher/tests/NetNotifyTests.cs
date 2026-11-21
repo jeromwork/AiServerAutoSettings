@@ -18,9 +18,13 @@ namespace RemoteAgents.Launcher
         {
             public Action<int, int, int> Route, Iface, Addr;
             public Action<bool> Avail;
+            public Action<string, int> Err;
+            public Exception ThrowOnStart;
             public int CancelCount;
-            public void Start(Action<int, int, int> r, Action<int, int, int> i, Action<int, int, int> a, Action<bool> v)
+            public void Start(Action<int, int, int> r, Action<int, int, int> i, Action<int, int, int> a, Action<bool> v, Action<string, int> err)
             {
+                Err = err;
+                if (ThrowOnStart != null) throw ThrowOnStart;
                 Route = r; Iface = i; Addr = a; Avail = v;
             }
             public void Dispose() { CancelCount++; }
@@ -38,6 +42,9 @@ namespace RemoteAgents.Launcher
             _assertions = 0;
             TestFields();
             TestCoalesce();
+            TestAvailabilityLast();
+            TestDroppedNotSticky();
+            TestErrors();
             TestDispose();
             Console.WriteLine("PASS: NetNotifyTests (" + _assertions + " assertions passed)");
         }
@@ -83,6 +90,75 @@ namespace RemoteAgents.Launcher
                 src.Route(2, 7, 1);
                 bus.DrainOnce();
                 Assert(got.Count == 3, "after delivery a new event is published");
+                n.Dispose();
+            }
+        }
+
+        private static void TestAvailabilityLast()
+        {
+            using (var bus = new EventBus(manualDispatch: true))
+            {
+                var src = new FakeSource();
+                var got = new List<BusEvent>();
+                bus.Subscribe("win.", e => got.Add(e));
+                var n = new NetNotify(bus, src);
+                n.Start();
+                src.Avail(false);
+                src.Avail(true);
+                bus.DrainOnce();
+                Assert(got.Count == 2, "both availability values delivered");
+                Assert(got[got.Count - 1].Get("available") == "true", "last value is true");
+                n.Dispose();
+            }
+        }
+
+        private static void TestDroppedNotSticky()
+        {
+            using (var bus = new EventBus(manualDispatch: true, queueLimit: 2))
+            {
+                var src = new FakeSource();
+                var got = new List<BusEvent>();
+                bus.Subscribe("win.", e => got.Add(e));
+                var n = new NetNotify(bus, src);
+                n.Start();
+                src.Route(2, 1, 1);
+                src.Route(2, 2, 1);
+                src.Route(2, 3, 1); // очередь полна: отброшено
+                Assert(n.PendingCount == 2, "dropped event does not stay pending");
+                bus.DrainOnce();
+                src.Route(2, 3, 1);
+                bus.DrainOnce();
+                int c3 = 0;
+                foreach (var e in got) if (e.Get("ifIndex") == "3") c3++;
+                Assert(c3 == 1, "same event published again after queue drained");
+                n.Dispose();
+            }
+        }
+
+        private static void TestErrors()
+        {
+            using (var bus = new EventBus(manualDispatch: true))
+            {
+                var src = new FakeSource();
+                var errs = new List<BusEvent>();
+                bus.Subscribe(BusTopics.WinNotifyError, e => errs.Add(e));
+                var n = new NetNotify(bus, src);
+                n.Start();
+                src.Err("NotifyRouteChange2", 5);
+                bus.DrainOnce();
+                Assert(errs.Count == 1 && errs[0].Get("api") == "NotifyRouteChange2" && errs[0].Get("rc") == "5", "error event fields");
+                n.Dispose();
+            }
+            using (var bus = new EventBus(manualDispatch: true))
+            {
+                var src = new FakeSource { ThrowOnStart = new DllNotFoundException("x") };
+                var errs = new List<BusEvent>();
+                bus.Subscribe(BusTopics.WinNotifyError, e => errs.Add(e));
+                var n = new NetNotify(bus, src);
+                n.Start(); // не бросает
+                bus.DrainOnce();
+                Assert(errs.Count == 1 && errs[0].Get("rc") == "-1", "start exception -> error event");
+                Assert(src.CancelCount == 1, "failed source disposed");
                 n.Dispose();
             }
         }

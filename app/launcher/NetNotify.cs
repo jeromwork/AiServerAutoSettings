@@ -12,7 +12,7 @@ namespace RemoteAgents.Launcher
     public interface INetNotifySource : IDisposable
     {
         /// <summary>Начать приём. Каждый обработчик: (family, ifIndex, type).</summary>
-        void Start(Action<int, int, int> onRoute, Action<int, int, int> onIface, Action<int, int, int> onAddr, Action<bool> onAvailability);
+        void Start(Action<int, int, int> onRoute, Action<int, int, int> onIface, Action<int, int, int> onAddr, Action<bool> onAvailability, Action<string, int> onError);
     }
 
     /// <summary>
@@ -54,17 +54,46 @@ namespace RemoteAgents.Launcher
                 _started = true;
             }
             // Подписка снимает признак «в очереди», когда событие дошло до подписчиков.
-            _deliverySub = _bus.Subscribe("win.", OnDelivered);
-            _source.Start(
-                (f, i, t) => Raise(BusTopics.WinRouteChanged, f, i, t),
-                (f, i, t) => Raise(BusTopics.WinIfaceChanged, f, i, t),
-                (f, i, t) => Raise(BusTopics.WinAddrChanged, f, i, t),
-                available => RaiseAvailability(available));
+            IDisposable sub = _bus.Subscribe("win.", OnDelivered);
+            lock (_lock)
+            {
+                if (_disposed) { try { sub.Dispose(); } catch { } return; }
+                _deliverySub = sub;
+            }
+            try
+            {
+                _source.Start(
+                    (f, i, t) => Raise(BusTopics.WinRouteChanged, f, i, t),
+                    (f, i, t) => Raise(BusTopics.WinIfaceChanged, f, i, t),
+                    (f, i, t) => Raise(BusTopics.WinAddrChanged, f, i, t),
+                    available => RaiseAvailability(available),
+                    (api, rc) => RaiseError(api, rc));
+            }
+            catch (Exception ex)
+            {
+                // Источник не стартовал: сообщаем событием, снимаем источник и подписку, вызывающего не роняем.
+                RaiseError("start:" + ex.GetType().Name, -1);
+                try { _source.Dispose(); } catch { }
+                IDisposable toDrop;
+                lock (_lock) { toDrop = _deliverySub; _deliverySub = null; _pending.Clear(); }
+                try { if (toDrop != null) toDrop.Dispose(); } catch { }
+            }
         }
 
-        private static string Key(string topic, string family, string ifIndex, string type)
+        private void RaiseError(string api, int rc)
         {
-            return topic + "|" + family + "|" + ifIndex + "|" + type;
+            lock (_lock) { if (_disposed) return; }
+            try
+            {
+                _bus.Publish(BusTopics.WinNotifyError, _busSource, "api", api,
+                    "rc", rc.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            }
+            catch { }
+        }
+
+        private static string Key(string topic, string family, string ifIndex, string type, string available)
+        {
+            return topic + "|" + family + "|" + ifIndex + "|" + type + "|" + available;
         }
 
         public static string FamilyName(int family)
@@ -99,7 +128,7 @@ namespace RemoteAgents.Launcher
 
         private void Publish(string topic, string family, string ifIndex, string type, string available)
         {
-            string key = Key(topic, family, ifIndex, type);
+            string key = Key(topic, family, ifIndex, type, available ?? "");
             lock (_lock)
             {
                 if (_disposed) return;
@@ -118,7 +147,7 @@ namespace RemoteAgents.Launcher
 
         private void OnDelivered(BusEvent e)
         {
-            string key = Key(e.Topic, e.Get("family"), e.Get("ifIndex"), e.Get("type"));
+            string key = Key(e.Topic, e.Get("family"), e.Get("ifIndex"), e.Get("type"), e.Get("available"));
             lock (_lock) { _pending.Remove(key); }
         }
 
@@ -173,13 +202,13 @@ namespace RemoteAgents.Launcher
         private NetworkAvailabilityChangedEventHandler _availHandler;
         private bool _disposed;
 
-        public void Start(Action<int, int, int> onRoute, Action<int, int, int> onIface, Action<int, int, int> onAddr, Action<bool> onAvailability)
+        public void Start(Action<int, int, int> onRoute, Action<int, int, int> onIface, Action<int, int, int> onAddr, Action<bool> onAvailability, Action<string, int> onError)
         {
             // Смещения структур: MIB_IPFORWARD_ROW2 — ifIndex 8, family 12; MIB_IPINTERFACE_ROW — family 0, ifIndex 16;
             // MIB_UNICASTIPADDRESS_ROW — family 0, ifIndex 40.
-            Register(onRoute, 12, 8, NotifyRouteChange2);
-            Register(onIface, 0, 16, NotifyIpInterfaceChange);
-            Register(onAddr, 0, 40, NotifyUnicastIpAddressChange);
+            Register(onRoute, onError, "NotifyRouteChange2", 12, 8, NotifyRouteChange2);
+            Register(onIface, onError, "NotifyIpInterfaceChange", 0, 16, NotifyIpInterfaceChange);
+            Register(onAddr, onError, "NotifyUnicastIpAddressChange", 0, 40, NotifyUnicastIpAddressChange);
 
             lock (_lock)
             {
@@ -196,7 +225,7 @@ namespace RemoteAgents.Launcher
 
         private delegate int RegisterFn(ushort family, ChangeCallback cb, IntPtr ctx, bool initial, out IntPtr handle);
 
-        private void Register(Action<int, int, int> handler, int familyOffset, int ifIndexOffset, RegisterFn fn)
+        private void Register(Action<int, int, int> handler, Action<string, int> onError, string api, int familyOffset, int ifIndexOffset, RegisterFn fn)
         {
             // В колбэке только читаем поля строки и вызываем обработчик; iphlpapi отсюда не вызывается.
             ChangeCallback cb = (ctx, row, type) =>
@@ -220,11 +249,40 @@ namespace RemoteAgents.Launcher
                 _mine.Add(cb);
             }
             lock (KeepAlive) { KeepAlive.Add(cb); }
-            IntPtr h;
-            int rc = fn(AfUnspec, cb, IntPtr.Zero, false, out h);
+            IntPtr h = IntPtr.Zero;
+            int rc;
+            try
+            {
+                rc = fn(AfUnspec, cb, IntPtr.Zero, false, out h);
+            }
+            catch (Exception ex) when (ex is DllNotFoundException || ex is EntryPointNotFoundException)
+            {
+                rc = -1;
+                h = IntPtr.Zero;
+            }
+            bool keep = false;
+            bool closed = false;
             if (rc == 0 && h != IntPtr.Zero)
             {
-                lock (_lock) { _handles.Add(h); }
+                lock (_lock)
+                {
+                    if (_disposed) closed = true;
+                    else { _handles.Add(h); keep = true; }
+                }
+            }
+            if (closed)
+            {
+                // Dispose успел раньше: сами снимаем регистрацию, и только потом отпускаем делегат.
+                try { CancelMibChangeNotify2(h); } catch { }
+            }
+            if (!keep)
+            {
+                lock (_lock) { _mine.Remove(cb); }
+                lock (KeepAlive) { KeepAlive.Remove(cb); }
+            }
+            if (rc != 0 && onError != null)
+            {
+                try { onError(api, rc); } catch { }
             }
         }
 
