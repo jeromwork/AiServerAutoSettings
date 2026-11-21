@@ -18,6 +18,7 @@ $DaemonEventLimit=512;$script:daemonEventsDropped=[long]0;$script:daemonCheckPol
 $diagnosticContext=$null;$liveDeferred=@();$tunnelReadyUntil=@{};$daemonStarted=[DateTime]::Now;$checkingSince=[DateTime]::UtcNow;$stopping=$false
 try{$daemonStarted=(Get-Process -Id $PID).StartTime}catch{}
 $script:engineAttempted=$false;$checkingSince=$daemonStarted.ToUniversalTime()
+$script:networkRefreshPending=$false
 $holdActive=$false;$lastStatus=[DateTime]::MinValue;$nextNetwork=[DateTime]::MinValue;$retryAt=[DateTime]::MinValue
 $revState=@{};$nextMem=[DateTime]::MinValue;$nextDecideMs=[long]0;$memFuse=$false;$lastStatusKey=$null;$lastStatusWriteMs=[long]0
 # Источники tick (до шины событий — проверка времени в цикле; конституция 4а п.1). Не условия успеха.
@@ -136,6 +137,8 @@ function Receive-DaemonChecks {
 }
 $script:pathLogState=@{}
 function Add-DaemonQueuedEvent($Event) {
+    # Latch invalidation before the reducer drains or a bounded queue drops the event.
+    if($Event.kind -eq 'net-change'){$script:networkRefreshPending=$true}
     $script:daemonEventsQueued++
     if($eventQueue.Count -ge $DaemonEventLimit){
         [Array]::Copy($eventQueue,1,$eventQueue,0,$DaemonEventLimit-1)
@@ -440,7 +443,7 @@ try{
     $settings=Read-TransportSettings $root;Sync-TransportEntryCache $settings $root;$revision=Get-TransportRevision $root;$settings=Read-TransportSettings $root
     $paths=Get-TransportCandidates $settings $root;$secret=Get-TransportSecret $root;$memory=Read-TransportMemory $root
     $diagnosticContext=@(Get-TransportDiagnosticContext $settings $root)
-    $network=Get-TransportNetwork;$metered=Get-TransportMetered $settings.Options
+    $netSnapshot=Get-TransportNetworkSnapshot $settings.Options;$network=$netSnapshot.network;$metered=$netSnapshot.metered
     # Just detected: the loop's 5 s network check need not repeat it before the engine starts (CIM on Windows).
     $nextNetwork=[DateTime]::UtcNow.AddSeconds(5)
     $observedRevision=$revision
@@ -496,6 +499,7 @@ try{
                 if(-not $result -or $reloadJob.State -ne 'Completed'){throw 'Reload failed'}
                 Stop-TransportProbes;Stop-DaemonObservation
                 Stop-TransportProcess $engine;$engine=$null;$settings=$result.Settings;$paths=$result.Paths;$revision=$result.Revision
+                $netSnapshot=Get-TransportNetworkSnapshot $settings.Options;$metered=$netSnapshot.metered
                 $diagnosticContext=@(Get-TransportDiagnosticContext $settings $root)
                 $rows=@(Get-TransportRemembered $memory $network.id $paths.AllCandidates)
                 $desired=Get-TransportSelection $pin $rows $paths.Candidates $active
@@ -507,8 +511,11 @@ try{
             }catch{$reloadError='Новый конфиг не применён; проверьте списки узлов и кэш секретов';$nextReload=[DateTime]::UtcNow.AddSeconds(5)}
             finally{Remove-Job $reloadJob -Force;$reloadJob=$null}
         }
-        if($now -ge $nextNetwork){
-            $nextNetwork=$now.AddSeconds(5);$newNetwork=Get-TransportNetwork;$newMetered=Get-TransportMetered $settings.Options
+        if($networkRefreshPending -or $now -ge $nextNetwork){
+            $forceNetwork=$networkRefreshPending;$networkRefreshPending=$false
+            $nextNetwork=$now.AddSeconds(5)
+            $netSnapshot=Get-TransportNetworkSnapshot $settings.Options -Force:$forceNetwork
+            $newNetwork=$netSnapshot.network;$newMetered=$netSnapshot.metered
             $changed=Test-TransportNetworkChanged $network $newNetwork
             $metered=$newMetered
             if($changed){
@@ -528,7 +535,7 @@ try{
         }
         if($engine -and $bindState.none -and $now -ge $nextBindRetry -and -not $directCheck -and -not $pathChecks.Count -and -not $eventQueue.Count){
             # Резервный режим: раз в 60 с пробуем вернуть привязку; при появлении интерфейса или включении VPN движок пересоздаётся.
-            $nextBindRetry=$now.AddSeconds(60);$probeNet=Get-TransportNetwork
+            $nextBindRetry=$now.AddSeconds(60);$netSnapshot=Get-TransportNetworkSnapshot $settings.Options;$probeNet=$netSnapshot.network;$metered=$netSnapshot.metered
             if($probeNet.interface -or -not (Test-TransportVpnOff $root)){
                 $network=$probeNet;Stop-TransportProbes;Stop-DaemonObservation;$confirmed=$false
                 Stop-TransportProcess $engine;$engine=$null;foreach($child in @($tunnelChildren.Values)){Stop-TransportProcess $child};$tunnelChildren.Clear();$retryAt=$now
@@ -549,8 +556,8 @@ try{
         }
         if(-not $engine -and $now -ge $retryAt -and -not $directCheck -and -not $pathChecks.Count -and -not $eventQueue.Count){
             try{
-                # После неудачи сеть определяется заново, а не ждёт 5-секундной проверки смены сети.
-                if($startFailures -gt 0 -and $settings.Options.bindPhysical){$network=Get-TransportNetwork;$nextNetwork=$now.AddSeconds(5)}
+                # После неудачи проверяем .NET-сигнатуру сразу; неизменная сеть берётся из кэша.
+                if($startFailures -gt 0 -and $settings.Options.bindPhysical){$netSnapshot=Get-TransportNetworkSnapshot $settings.Options;$network=$netSnapshot.network;$metered=$netSnapshot.metered;$nextNetwork=$now.AddSeconds(5)}
                 try{Start-TransportEngine}finally{$script:engineAttempted=$true}
                 $errorText='Ожидается проверка пути'
             }
