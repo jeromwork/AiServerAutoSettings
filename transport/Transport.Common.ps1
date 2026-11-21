@@ -1107,8 +1107,8 @@ $script:TransportDiag=@{}
 $script:TransportNetProbes=[long]0;$script:TransportNetFingerprintChecks=[long]0;$script:TransportMeteredCalls=[long]0
 # §4б: один последний снимок сети/стоимости; старое поколение заменяется, история не хранится.
 $script:TransportNetworkSnapshot=$null
-# Предохранитель (конституция 4а): событие net-change недоступно, пока нет доставки в демон; при срабатывании — замена снимка повторной пробой, успех не объявляет.
-$script:TransportNetworkSuccessFuseMs=[long]300000;$script:TransportNetworkFailureFuseMs=[long]30000
+$script:TransportBusConnected=$false
+$script:TransportNetworkFallbackFuseMs=[long]300000
 function Get-TransportDiagFlags([string]$Raw) {
     $flags=@{}
     foreach($part in ([string]$Raw).Split(',')){$name=$part.Trim().ToLowerInvariant();if($name -in $script:TransportDiagKnown){$flags[$name]=$true}}
@@ -1208,12 +1208,18 @@ function Get-TransportNetwork {
     $result
 }
 function Get-TransportNetworkSnapshot($Options,[switch]$Force) {
-    # Called by the existing daemon pass; no separate refresh loop or wait.
-    $signature=if(Test-TransportDiag 'no-network'){'net:disabled'}else{Get-TransportNetworkSignature}
     $cached=$script:TransportNetworkSnapshot;$now=Get-DaemonTime
-    $snapshotFuseMs=if($cached -and -not $cached.network.available){$script:TransportNetworkFailureFuseMs}else{$script:TransportNetworkSuccessFuseMs}
-    $expired=$cached -and ($now-$cached.at) -ge $snapshotFuseMs # timer-ok: C — перепроверка снимка сети: net-change в демон не доставляется (B4/B не сделан); не объявляет успех, ничего не блокирует
-    if($Force -or -not $cached -or $expired -or $signature -cne $cached.signature){
+    $signature=if($cached){$cached.signature}else{$null};$fallbackExpired=$false
+    if(-not $script:TransportBusConnected){
+        $signature=if(Test-TransportDiag 'no-network'){'net:disabled'}else{Get-TransportNetworkSignature}
+        # timer-ok: C. Предохранитель (конституция 4а): событие win.*/net.change недоступно, если за жизнь демона не принято ни одного @bus;
+        # при срабатывании — повторная проба снимка (старый режим: 300 с / 30 с при ошибке), успех не объявляет.
+        # Первый принятый кадр навсегда отключает и этот предохранитель, и 5-секундный опрос, даже после EOF.
+        $snapshotFuseMs=$script:TransportNetworkFallbackFuseMs
+        if($cached -and -not $cached.network.available){$snapshotFuseMs=[long]($snapshotFuseMs/10)}
+        $fallbackExpired=$cached -and ($now-$cached.at) -ge $snapshotFuseMs
+    }
+    if($Force -or -not $cached -or $fallbackExpired -or $signature -cne $cached.signature){
         $net=Get-TransportNetwork
         # Keep the automatic cost with the network generation, independent of the config override.
         $autoMetered=Get-TransportMetered ([pscustomobject]@{metered='auto'})

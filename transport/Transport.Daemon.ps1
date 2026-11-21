@@ -19,6 +19,7 @@ $diagnosticContext=$null;$liveDeferred=@();$tunnelReadyUntil=@{};$daemonStarted=
 try{$daemonStarted=(Get-Process -Id $PID).StartTime}catch{}
 $script:engineAttempted=$false;$checkingSince=$daemonStarted.ToUniversalTime()
 $script:networkRefreshPending=$false
+$bus=$null;$script:busEngineReady=$false;$script:busReadySent=$false;$script:busStatusKey=$null
 $holdActive=$false;$lastStatus=[DateTime]::MinValue;$nextNetwork=[DateTime]::MinValue;$retryAt=[DateTime]::MinValue
 $revState=@{};$nextMem=[DateTime]::MinValue;$nextDecideMs=[long]0;$memFuse=$false;$lastStatusKey=$null;$lastStatusWriteMs=[long]0
 # Источники tick (до шины событий — проверка времени в цикле; конституция 4а п.1). Не условия успеха.
@@ -138,13 +139,39 @@ function Receive-DaemonChecks {
 $script:pathLogState=@{}
 function Add-DaemonQueuedEvent($Event) {
     # Latch invalidation before the reducer drains or a bounded queue drops the event.
-    if($Event.kind -eq 'net-change'){$script:networkRefreshPending=$true}
+    if($Event.kind -in @('net-change','net.change','win.route.changed','win.iface.changed','win.addr.changed')){$script:networkRefreshPending=$true}
     $script:daemonEventsQueued++
     if($eventQueue.Count -ge $DaemonEventLimit){
         [Array]::Copy($eventQueue,1,$eventQueue,0,$DaemonEventLimit-1)
         $script:eventQueue[$DaemonEventLimit-1]=$Event
         $script:daemonEventsDropped++
     }else{$script:eventQueue+=@($Event)}
+}
+function Receive-DaemonBus {
+    if(-not $bus){return}
+    $refresh=$false;$events=$bus.Drain([ref]$refresh)
+    if($bus.Connected){$script:TransportBusConnected=$true}
+    # A network notification survives bounded input queue loss, just like reducer queue loss.
+    if($refresh){$script:networkRefreshPending=$true}
+    foreach($event in $events){
+        $kind=if($event.topic -in @('win.route.changed','win.iface.changed','win.addr.changed','net.change')){'net-change'}else{$event.topic}
+        $queued=New-DaemonEvent $kind '' 'bus'
+        $queued.topic=$event.topic;$queued.fields=$event.fields
+        Add-DaemonQueuedEvent $queued
+    }
+}
+function Publish-DaemonBusStatus {
+    # Publish-TransportStatus owns file format/heartbeat; reuse its content key without changing it.
+    if(-not $bus -or -not $script:lastStatusKey -or $script:busStatusKey -ceq $script:lastStatusKey){return}
+    $status=ConvertFrom-Json $script:lastStatusKey
+    $fields=[ordered]@{}
+    foreach($property in $status.PSObject.Properties){if($property.Name -ne 'updatedAt'){$fields[$property.Name]=$property.Value}}
+    if(Send-TransportBusEvent $bus 'transport.status' $fields -PassThru){$script:busStatusKey=$script:lastStatusKey}
+}
+function Publish-DaemonBusReady {
+    if($bus -and $script:busEngineReady -and $engine -and -not $engine.Process.HasExited -and -not $script:busReadySent){
+        if(Send-TransportBusEvent $bus 'transport.ready' ([ordered]@{}) -PassThru){$script:busReadySent=$true}
+    }
 }
 function Get-DaemonRetentionFields {
     # Fixed keys only; counts are sampled on the existing memory tick, never on a new timer.
@@ -153,6 +180,8 @@ function Get-DaemonRetentionFields {
         pathLog=$pathLogState.Count;deferred=$liveDeferred.Count;tunnels=$tunnelChildren.Count;
         decisionPaths=$(if($decision){$decision.paths.Count}else{0});decisionHistory=$(if($decision){$decision.history.Count}else{0});
         decisionPending=$(if($decision){$decision.pending.Count}else{0});networks=$(if($memory){$memory.networks.Count}else{0});
+        busRejected=$(if($bus){$bus.Rejected}else{0});busInputDropped=$(if($bus){$bus.InputDropped}else{0});
+        busOutputDropped=$(if($bus){$bus.OutputDropped}else{0});busOutputRejected=$(if($bus){$bus.OutputRejected}else{0});busWriteErrors=$(if($bus){$bus.WriteErrors}else{0});
         wsMessages=$(if($reader){$reader.Messages}else{0});wsSamples=$(if($reader){$reader.RetainedSamples}else{0});
         wsContexts=$(if($reader){$reader.RetainedContexts}else{0});wsQueued=$(if($reader){$reader.QueuedEvents}else{0});
         wsDropped=$(if($reader){$reader.Dropped}else{0});wsOversized=$(if($reader){$reader.OversizedSnapshots}else{0})}
@@ -180,6 +209,7 @@ function Add-DaemonEvent($Event) {
         Start-DaemonPath $e.tag -Gate;return
     }
     if($e.kind -eq 'path-check' -and $e.code -eq 'ok'){
+        if($e.tag -in @($paths.Candidates.tag)){Publish-DaemonBusReady}
         $r=$rows|Where-Object {$_.tag -eq $e.tag}|Select-Object -First 1
         if($r){$r.state='ok';$r.checkedAt=[DateTime]::UtcNow.ToString('o');$r.lastOkAt=$r.checkedAt;Save-TransportMemory $root $memory $network.id $rows}
     }
@@ -305,7 +335,10 @@ function Switch-TransportActive([string]$Tag,[bool]$Verified,[string]$Why='selec
         if($changed){Confirm-DaemonSelection $Tag}
         if($Verified){foreach($r in $rows){$r.suspect=$false};$script:errorText=$null;$script:bindRetry=$null;$script:portConflict=$null}
         elseif($pin.mode -eq 'pinned'){$script:errorText='Закреплённый путь ещё не проверен или недоступен'}else{$script:errorText='Путь из памяти ещё не проверен'}
-        Write-TransportLog $root 'switch' ([ordered]@{from=$previousActive;to=$Tag;why=$Why;verified=$Verified;changed=$changed});return $true
+        $switchFields=[ordered]@{from=$previousActive;to=$Tag;why=$Why;verified=$Verified;changed=$changed}
+        Write-TransportLog $root 'switch' $switchFields
+        Send-TransportBusEvent $bus 'transport.switch' $switchFields
+        return $true
     }catch{$script:confirmed=$false;$script:errorText='Не удалось переключить selector';Write-TransportLog $root 'api-failed' (Get-TransportErrorDetail $_);return $false}
 }
 function Write-DaemonWizardProgress([string]$Text) {
@@ -331,6 +364,7 @@ function Start-TransportLiveness([switch]$Recovery) {
     $script:liveRound=$true;$script:initialRound=(-not $Recovery)
     # Counter initialization (Add-Type on Windows) can block before the first probe.
     Publish-TransportStatus
+    Publish-DaemonBusStatus
     foreach($c in $paths.Candidates){
         if($pin.mode -eq 'pinned' -and $c.tag -ne $pin.tag){continue}
         if($pathChecks.ContainsKey($c.tag)){continue}
@@ -377,6 +411,7 @@ function Get-DaemonRestartDelay($Detail) {
     Get-TransportRestartDelay ([double]$settings.Options.restartDelaySec) $(if($bindRetry){$bindRetry.failures}else{0})
 }
 function Start-TransportEngine {
+    $script:busEngineReady=$false
     Stop-TransportEvents $reader;$script:reader=$null
     [void](Reset-DaemonPorts)
     $script:confirmed=$false
@@ -396,10 +431,12 @@ function Start-TransportEngine {
     $file=Join-Path $root 'state/transport-sing-box.json';Write-TransportJson $file $cfg -Private
     # Валидация до запуска; stdout/stderr не публикуются, т.к. могут содержать адреса и секреты.
     Publish-TransportStatus
+    Publish-DaemonBusStatus
     Test-TransportConfigFile $settings.Options.singBoxPath $file
     $script:engine=Start-TransportProcess $settings.Options.singBoxPath @('run','-c',$file)
     [void](Set-TransportProcessPriority $engine)
     Publish-TransportStatus
+    Publish-DaemonBusStatus
     Save-TransportOwner $root 'transport' $engine $settings.Options.singBoxPath $file
     foreach($tunnel in $paths.Tunnels){
         if($tunnelChildren.ContainsKey($tunnel.tag)){continue}
@@ -416,6 +453,7 @@ function Start-TransportEngine {
         try{
             $target=($cfg.outbounds|Where-Object {$_.tag -eq 'active'}|Select-Object -First 1).default
             Set-TransportSelector $settings.Options $secret $target
+            $script:busEngineReady=$true
             if($target -eq $active){Confirm-DaemonSelection $active}
             $script:bindRetry=$null;$script:portConflict=$null
         }catch{}
@@ -436,6 +474,7 @@ try{
     $hash=Get-TransportFingerprint 'local' $root.ToLowerInvariant();$mutex=New-Object Threading.Mutex($false,('Global\RemoteAgentsTransport-'+$hash))
     try{$locked=$mutex.WaitOne(0)}catch [Threading.AbandonedMutexException]{$locked=$true}
     if(-not $locked){throw 'Транспорт уже запущен'}
+    $bus=Start-TransportBus
     Write-TransportLog $root 'start'
     if($ParentPid -gt 0){$parent=[Diagnostics.Process]::GetProcessById($ParentPid);[void]$parent.Handle}
     # Keep the input revision even when settings/cache/candidates/network initialization fails.
@@ -444,14 +483,16 @@ try{
     $paths=Get-TransportCandidates $settings $root;$secret=Get-TransportSecret $root;$memory=Read-TransportMemory $root
     $diagnosticContext=@(Get-TransportDiagnosticContext $settings $root)
     $netSnapshot=Get-TransportNetworkSnapshot $settings.Options;$network=$netSnapshot.network;$metered=$netSnapshot.metered
-    # Just detected: the loop's 5 s network check need not repeat it before the engine starts (CIM on Windows).
+    # The 5 s legacy pass is used only until the first valid bus event (timer-ok: C in Common).
     $nextNetwork=[DateTime]::UtcNow.AddSeconds(5)
     $observedRevision=$revision
     $rows=@(Get-TransportRemembered $memory $network.id $paths.AllCandidates)
     $pin=Read-TransportPin $root;$active=Get-TransportSelection $pin $rows $paths.Candidates
     $decision=New-TransportDecisionState (Get-DaemonTime) $active
     Publish-TransportStatus
+    Publish-DaemonBusStatus
     while(-not (Test-TransportStop)){
+        Receive-DaemonBus
         Receive-DaemonChecks
         $now=[DateTime]::UtcNow
         # Короткий управляющий цикл: pin не ждёт сетевых проб или SSH -G при reload.
@@ -511,7 +552,7 @@ try{
             }catch{$reloadError='Новый конфиг не применён; проверьте списки узлов и кэш секретов';$nextReload=[DateTime]::UtcNow.AddSeconds(5)}
             finally{Remove-Job $reloadJob -Force;$reloadJob=$null}
         }
-        if($networkRefreshPending -or $now -ge $nextNetwork){
+        if($networkRefreshPending -or (-not $script:TransportBusConnected -and $now -ge $nextNetwork)){
             $forceNetwork=$networkRefreshPending;$networkRefreshPending=$false
             $nextNetwork=$now.AddSeconds(5)
             $netSnapshot=Get-TransportNetworkSnapshot $settings.Options -Force:$forceNetwork
@@ -553,6 +594,7 @@ try{
             $bindRetry=Get-TransportBindRetry $bindRetry $detail
             $retryAt=$now.AddSeconds((Get-DaemonRestartDelay $detail));Write-TransportLog $root 'restart' ([ordered]@{why='process-failed';reason=[string]$detail.reason;retry_in_s=[int](Get-DaemonRestartDelay $detail)})
             Publish-TransportStatus
+            Publish-DaemonBusStatus
         }
         if(-not $engine -and $now -ge $retryAt -and -not $directCheck -and -not $pathChecks.Count -and -not $eventQueue.Count){
             try{
@@ -578,6 +620,7 @@ try{
                 $retryAt=$now.AddSeconds((Get-DaemonRestartDelay $detail))
                 if(-not $portConflict){$retryAt=$now.AddSeconds((Get-TransportStartPause $startFailures))}
                 Publish-TransportStatus
+                Publish-DaemonBusStatus
             }
         }
         if($engine){
@@ -630,7 +673,7 @@ try{
         if($portConflict){$errorText=$portConflict.message}
         $statusInterval=1;if($portConflict -and $now -lt $retryAt){$statusInterval=5}
         $statusInterval=Get-TransportStatusIntervalSec $statusInterval
-        if(($now-$lastStatus).TotalSeconds -ge $statusInterval){Publish-TransportStatus}
+        if(($now-$lastStatus).TotalSeconds -ge $statusInterval){Publish-TransportStatus;Publish-DaemonBusStatus}
         [void](Invoke-TransportDiagGc)
         # tick.transport-mem: журнал памяти демона (раз в 60 с, в режиме диагностики раз в 10 с).
         if($now -ge $nextMem){
@@ -640,6 +683,7 @@ try{
             $memFields=Get-TransportMemFields $sample $memLimitMb
             $retention=Get-DaemonRetentionFields;foreach($key in $retention.Keys){$memFields[$key]=$retention[$key]}
             Write-RaLog (Join-Path $root 'logs') 'transport' 'INFO' 'transport' 'transport.mem' $memFields
+            Send-TransportBusEvent $bus 'transport.mem' $memFields
             # Предохранитель (конституция 4а): событие утечки памяти недоступно, если демон течёт; при срабатывании — чистый выход с кодом 75 и перезапуск Supervisor, успех не объявляет.
             if(Test-TransportMemoryHigh $sample.private $memLimitMb){
                 Write-RaLog (Join-Path $root 'logs') 'transport' 'WARN' 'transport' 'transport.mem-high' (Get-TransportMemFields $sample $memLimitMb)
@@ -660,7 +704,8 @@ try{
     if($reloadJob){Stop-Job $reloadJob;Remove-Job $reloadJob -Force}
     Stop-TransportProbes;Stop-DaemonObservation
     foreach($child in @($tunnelChildren.Values)){Stop-TransportProcess $child};Stop-TransportProcess $engine;$engine=$null;$confirmed=$false
-    if($locked){try{Publish-TransportStatus;Write-TransportLog $root 'stop'}finally{$mutex.ReleaseMutex()}}
+    if($locked){try{Publish-TransportStatus;Publish-DaemonBusStatus;Write-TransportLog $root 'stop'}finally{$mutex.ReleaseMutex()}}
+    if($bus){$bus.Dispose()}
     if($mutex){$mutex.Dispose()};if($parent){$parent.Dispose()}
 }
 

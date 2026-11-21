@@ -17,7 +17,7 @@ function Get-DaemonTime {$script:fakeNow}
 foreach($fn in $daemonAst.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in @('Add-DaemonQueuedEvent','Start-DaemonReader')},$true)){
     . ([scriptblock]::Create($fn.Extent.Text))
 }
-$networkPass=$daemonAst.FindAll({param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Clauses[0].Item1.Extent.Text -eq '$networkRefreshPending -or $now -ge $nextNetwork'},$true)
+$networkPass=$daemonAst.FindAll({param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Clauses[0].Item1.Extent.Text -eq '$networkRefreshPending -or (-not $script:TransportBusConnected -and $now -ge $nextNetwork)'},$true)
 Assert ($networkPass.Count -eq 1) 'daemon network pass not found'
 $networkPass=[scriptblock]::Create($networkPass[0].Extent.Text)
 function New-FakeNic([string]$Id,[string]$Name,[string]$Status,[string[]]$Addresses,[string[]]$Gateways,[Net.NetworkInformation.NetworkInterfaceType]$Type='Wireless80211'){
@@ -143,34 +143,29 @@ $cached=Get-TransportNetworkSnapshot $auto
 Assert ([object]::ReferenceEquals($failed,$cached) -and $TransportNetProbes -eq 1) 'failed snapshot not cached'
 $recovered=Get-TransportNetworkSnapshot $auto -Force
 Assert ($recovered.network.available -and $recovered.signature -ceq $failed.signature -and $TransportNetProbes -eq 2) 'Force did not recover with unchanged signature'
-# Failed-generation safeguard uses only a manually supplied clock.
+# Once a bus event has been accepted, only explicit invalidation refreshes even a failed generation.
+$script:TransportBusConnected=$true
 $source.throwNetwork=$true
 $failed=Get-TransportNetworkSnapshot $auto -Force
 $source.throwNetwork=$false;$before=$TransportNetProbes
-$script:fakeNow=$failed.at+29999
 $cached=Get-TransportNetworkSnapshot $auto
-Assert ([object]::ReferenceEquals($failed,$cached) -and $TransportNetProbes -eq $before) 'failed snapshot refreshed before safeguard'
-$script:fakeNow=$failed.at+30000
-$recovered=Get-TransportNetworkSnapshot $auto
-Assert ($recovered.network.available -and $recovered.signature -ceq $failed.signature -and $recovered.at -eq $fakeNow -and $TransportNetProbes -eq ($before+1)) 'failed safeguard did not recover'
-[void](Get-TransportNetworkSnapshot $auto)
-Assert ($TransportNetProbes -eq ($before+1)) 'failed safeguard repeated without clock change'
-'probe exception / Force recovery / failed snapshot safeguard PASS'
-# Cost changes are invisible to the signature; the successful-generation safeguard refreshes both sources.
+Assert ([object]::ReferenceEquals($failed,$cached) -and $TransportNetProbes -eq $before) 'connected failed snapshot retried without event'
+Add-DaemonQueuedEvent @{kind='win.route.changed'}
+. $networkPass
+Assert ($network.available -and $TransportNetProbes -eq ($before+1)) 'route notification did not recover failed snapshot'
+# Cost changes invisible to the signature are picked up by net.change, without periodic probing.
 $cost.NetworkCostType='Unrestricted'
 $unmetered=Get-TransportNetworkSnapshot $auto -Force
 Assert ($unmetered.network.available -and $unmetered.metered -eq $false) 'initial unmetered snapshot lost'
-$cost.NetworkCostType='Fixed';$before=$TransportNetProbes;$meteredBefore=$TransportMeteredCalls
-$script:fakeNow=$unmetered.at+299999
-$cached=Get-TransportNetworkSnapshot $auto
-Assert ([object]::ReferenceEquals($unmetered,$cached) -and $cached.metered -eq $false -and $TransportNetProbes -eq $before -and $TransportMeteredCalls -eq $meteredBefore) 'successful snapshot refreshed before safeguard'
-$script:fakeNow=$unmetered.at+300000
-$meteredSnapshot=Get-TransportNetworkSnapshot $auto
-Assert ($meteredSnapshot.signature -ceq $unmetered.signature -and $meteredSnapshot.metered -eq $true -and $meteredSnapshot.at -eq $fakeNow) 'stale metered cost did not refresh'
-Assert ($TransportNetProbes -eq ($before+1) -and $TransportMeteredCalls -eq ($meteredBefore+1)) 'successful safeguard must refresh exactly once'
-[void](Get-TransportNetworkSnapshot $auto)
-Assert ($TransportNetProbes -eq ($before+1) -and $TransportMeteredCalls -eq ($meteredBefore+1)) 'successful safeguard repeated without clock change'
-'stale metered cost / successful snapshot safeguard PASS'
+$cost.NetworkCostType='Fixed';$before=$TransportNetProbes;$meteredBefore=$TransportMeteredCalls;$fingerprintsBefore=$TransportNetFingerprintChecks
+for($i=0;$i -lt 10;$i++){. $networkPass;[void](Get-TransportNetworkSnapshot $auto)}
+Assert ($TransportNetProbes -eq $before -and $TransportMeteredCalls -eq $meteredBefore -and $TransportNetFingerprintChecks -eq $fingerprintsBefore) 'connected cache still polls network/cost/signature'
+Add-DaemonQueuedEvent @{kind='net-change'}
+. $networkPass
+Assert ($metered -eq $true -and $TransportNetProbes -eq ($before+1) -and $TransportMeteredCalls -eq ($meteredBefore+1)) 'network event did not refresh cost exactly once'
+. $networkPass
+Assert ($TransportNetProbes -eq ($before+1)) 'network event refreshed more than once'
+'connected snapshot / route event recovery / net.change cost refresh PASS'
 # Both existing daemon recovery paths must force a fresh probe.
 $recoveryTests=@{
     bind='$engine -and $bindState.none -and $now -ge $nextBindRetry -and -not $directCheck -and -not $pathChecks.Count -and -not $eventQueue.Count'
