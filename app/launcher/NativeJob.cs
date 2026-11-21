@@ -75,6 +75,13 @@ namespace RemoteAgents.Launcher
                 }
             }
         }
+        // Чистая функция: дескрипторы без повторов и нулей, порядок сохраняется.
+        internal static IntPtr[] UniqueHandles(params IntPtr[] all)
+        {
+            var list = new System.Collections.Generic.List<IntPtr>();
+            foreach (var h in all) if (h != IntPtr.Zero && !list.Contains(h)) list.Add(h);
+            return list.ToArray();
+        }
         static IntPtr OpenInherited(string path, uint access, uint disposition)
         {
             var security = new SecurityAttributes { length = Marshal.SizeOf(typeof(SecurityAttributes)), inherit = true };
@@ -103,11 +110,11 @@ namespace RemoteAgents.Launcher
                 // between CreateProcess(CREATE_SUSPENDED) and a later Assign call.
                 if (!UpdateProcThreadAttribute(attributes, 0, new IntPtr(0x0002000D), jobs, new IntPtr(IntPtr.Size), IntPtr.Zero, IntPtr.Zero)) throw new Win32Exception();
                 if (inherit) {
-                    handles = Marshal.AllocHGlobal(3 * IntPtr.Size);
-                    Marshal.WriteIntPtr(handles, 0, startup.stdInput);
-                    Marshal.WriteIntPtr(handles, IntPtr.Size, startup.stdOutput);
-                    Marshal.WriteIntPtr(handles, 2 * IntPtr.Size, startup.stdError);
-                    if (!UpdateProcThreadAttribute(attributes, 0, new IntPtr(0x00020002), handles, new IntPtr(3 * IntPtr.Size), IntPtr.Zero, IntPtr.Zero)) throw new Win32Exception();
+                    // Повторы в списке наследуемых дескрипторов дают ERROR_INVALID_PARAMETER (stdout == stderr у pipe).
+                    var unique = UniqueHandles(startup.stdInput, startup.stdOutput, startup.stdError);
+                    handles = Marshal.AllocHGlobal(unique.Length * IntPtr.Size);
+                    for (int i = 0; i < unique.Length; i++) Marshal.WriteIntPtr(handles, i * IntPtr.Size, unique[i]);
+                    if (!UpdateProcThreadAttribute(attributes, 0, new IntPtr(0x00020002), handles, new IntPtr(unique.Length * IntPtr.Size), IntPtr.Zero, IntPtr.Zero)) throw new Win32Exception();
                 }
                 startup.cb = Marshal.SizeOf(typeof(StartupInfoEx));
                 var extended = new StartupInfoEx { Startup = startup, Attributes = attributes };

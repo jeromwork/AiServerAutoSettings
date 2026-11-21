@@ -30,7 +30,7 @@ namespace RemoteAgents.Launcher
         internal static int Run(string[] args)
         {
             NetHelperVersionTests.Run();
-            Golden(); Mask(); Rotation(); Encoding_(); JournalMapping(); Conflicts(); Ladder(); HelperEvents(); Protocol(); CorePump(); CoreReaderEvents(); Shipper(); ShipperInvalidUtf8(); ShipperRisks(); SshSender(); Mirror();
+            Golden(); Mask(); Rotation(); Encoding_(); JournalMapping(); Conflicts(); Ladder(); HelperEvents(); Protocol(); CorePump(); CoreReaderEvents(); UniqueHandlesTest(); Shipper(); ShipperInvalidUtf8(); ShipperRisks(); SshSender(); Mirror();
             Console.WriteLine("PASS: Logging " + count + " checks");
             return 0;
         }
@@ -270,11 +270,41 @@ namespace RemoteAgents.Launcher
                 Check(File.ReadAllText(path).Contains("inbound connection") && File.ReadAllText(path).Contains("partial"), "the local file keeps every line");
                 reader.WriteStats(events); reader.WriteStats(events);
                 Check(string.Join("\n", events.Read(0, 40000).Lines).Split(new[] { "core.stats" }, StringSplitOptions.None).Length == 2, "stats are written once");
+                CoreReaderRotation();
                 Check(reader.Tail(2).Contains("partial"), "in-memory tail is available without the file");
                 var many = new StringBuilder(); for (int i = 0; i < CoreOutputReader.QueueLimit + 5; i++) many.Append("WARN x\n");
                 var flood = new CoreOutputReader(new ChunkedStream(Encoding.UTF8.GetBytes(many.ToString()), 4096), null, "vpn", null); flood.Start(); flood.Join(5000);
                 Check(flood.Sent == CoreOutputReader.QueueLimit && flood.Dropped == 5, "the queue is bounded, overflow is counted");
             } finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+        static void CoreReaderRotation()
+        {
+            string dir = Temp("corerotate");
+            try {
+                string path = Path.Combine(dir, CoreLogPump.FileName);
+                string line = "INFO router: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n";
+                var data = Encoding.UTF8.GetBytes(string.Concat(Enumerable.Repeat(line, 6)));
+                var r = new CoreOutputReader(new ChunkedStream(data, line.Length), path, "vpn", null, 120);
+                r.Start();
+                Check(r.Join(5000) && r.Lines == 6, "rotation: every line is still read");
+                Check(File.Exists(path + ".1") && new FileInfo(path).Length < new FileInfo(path + ".1").Length + line.Length && File.ReadAllText(path).StartsWith("INFO"), "rotation: .1 appears and the file starts anew");
+                // Move не удаётся (.1 — каталог): одна запись в шину, файл усекается, а не растёт.
+                string dir2 = Temp("corerotate2");
+                try {
+                    string path2 = Path.Combine(dir2, CoreLogPump.FileName); Directory.CreateDirectory(path2 + ".1");
+                    var seen = new List<string>();
+                    var r2 = new CoreOutputReader(new ChunkedStream(Encoding.UTF8.GetBytes(string.Concat(Enumerable.Repeat(line, 20))), line.Length), path2, "vpn", (t, kv) => seen.Add(t), 120);
+                    r2.Start();
+                    Check(r2.Join(5000) && r2.Lines == 20, "rotation failure: reading continues");
+                    Check(seen.Count(x => x == BusTopics.SingboxLine) == 1, "rotation failure: reported once, got " + seen.Count);
+                    Check(new FileInfo(path2).Length <= 120 + line.Length, "rotation failure: file is truncated, growth is bounded");
+                } finally { try { Directory.Delete(dir2, true); } catch { } }
+            } finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+        static void UniqueHandlesTest()
+        {
+            var u = NativeJob.UniqueHandles(new IntPtr(4), new IntPtr(8), new IntPtr(8), IntPtr.Zero);
+            Check(u.Length == 2 && u[0] == new IntPtr(4) && u[1] == new IntPtr(8), "inherited handle list has no duplicates");
         }
         sealed class ChunkedStream : MemoryStream
         {

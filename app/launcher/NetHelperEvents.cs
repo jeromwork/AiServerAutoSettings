@@ -149,6 +149,8 @@ namespace RemoteAgents.Launcher
     {
         internal const int QueueLimit = 2000, RingLines = 40, MaxLineChars = 1000;
         internal const long RotateBytes = 5L * 1024 * 1024;
+        readonly long rotateBytes;
+        bool rotateFailed, writesStopped;
         readonly Stream input;
         readonly string filePath, core;
         readonly Action<string, string[]> publish;
@@ -162,8 +164,9 @@ namespace RemoteAgents.Launcher
         FileStream file;
         Thread thread;
 
-        internal CoreOutputReader(Stream input, string filePath, string core, Action<string, string[]> publish)
+        internal CoreOutputReader(Stream input, string filePath, string core, Action<string, string[]> publish, long rotateBytes = RotateBytes)
         {
+            this.rotateBytes = rotateBytes;
             this.input = input; this.filePath = filePath; this.core = core ?? "vpn"; this.publish = publish ?? ((t, kv) => { });
         }
         internal WaitHandle Ready { get { return ready; } }
@@ -202,15 +205,29 @@ namespace RemoteAgents.Launcher
                 try { if (pending.Length > 0) Line(pending); } catch { }
             } finally {
                 try { if (file != null) file.Dispose(); } catch { }
+                try { input.Dispose(); } catch { }
                 eof.Set();
             }
         }
         void AppendFile(byte[] data, int count)
         {
+            if (writesStopped) return;
             try {
-                if (file != null && file.Length > RotateBytes) {
+                if (file != null && file.Length > rotateBytes) {
                     file.Dispose(); file = null;
-                    try { if (File.Exists(filePath + ".1")) File.Delete(filePath + ".1"); File.Move(filePath, filePath + ".1"); } catch { }
+                    if (!rotateFailed) {
+                        try { if (File.Exists(filePath + ".1")) File.Delete(filePath + ".1"); File.Move(filePath, filePath + ".1"); }
+                        catch {
+                            // Один раз: запись в шину; дальше при переполнении файл просто усекается, без повторных Move.
+                            rotateFailed = true;
+                            try { publish(BusTopics.SingboxLine, new[] { "core", core, "line", "WARN vpn-core.log: rotation failed, file will be truncated at the limit" }); } catch { }
+                        }
+                    }
+                    if (rotateFailed) {
+                        // Усечение; если и оно не удалось, ниже file == null и запись пропускается (рост ограничен).
+                        try { using (new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete)) { } }
+                        catch { writesStopped = true; return; }
+                    }
                 }
                 if (file == null && filePath != null) file = new FileStream(filePath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
                 if (file != null) { file.Write(data, 0, count); file.Flush(); }
@@ -231,7 +248,7 @@ namespace RemoteAgents.Launcher
                 if (first) publish(BusTopics.SingboxStarted, new[] { "core", core, "line", clean });
             }
             if (Regex.IsMatch(text, @"\b(FATAL|PANIC)\b")) {
-                lastFatal = clean;
+                lastFatal = clean.Length > 500 ? clean.Substring(0, 500) : clean;
                 publish(BusTopics.SingboxFatal, new[] { "core", core, "line", clean });
             }
             if (!ShouldSend(text)) return;
