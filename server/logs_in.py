@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 
 MAX_UNPACKED = 8 * 1024 * 1024
 MAX_LINE = 8 * 1024
-STREAMS = ('launcher', 'transport', 'helper', 'core', 'config-window')
+STREAMS = ('launcher', 'transport', 'helper', 'core', 'config-window', 'bus')
 MAX_DAYS = int(os.environ.get('RA_LOGS_IN_MAX_DAYS', '30'))
 MAX_BYTES = int(os.environ.get('RA_LOGS_IN_MAX_BYTES', str(200 * 1024 * 1024)))
 

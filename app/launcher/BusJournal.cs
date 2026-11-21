@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -16,6 +17,7 @@ namespace RemoteAgents.Launcher
     {
         public const int NoiseSummaryThreshold = 1000;
         public const int CollapseThreshold = 100;
+        public const int MaxValue = 1024;
 
         private readonly EventBus _bus;
         private readonly string _logsDir;
@@ -27,8 +29,10 @@ namespace RemoteAgents.Launcher
         private long _tickCount;
         private long _singboxCount;
 
-        private BusEvent _pendingEvent;
-        private int _pendingCount;
+        // Последнее записанное событие: только для сравнения с повторами; само оно уже на диске (4б).
+        private BusEvent _last;
+        private int _repeatCount;
+        private long _summarizedAt;
         private int _disposed;
 
         public long SuppressedCount
@@ -48,7 +52,7 @@ namespace RemoteAgents.Launcher
 
         public int PendingCount
         {
-            get { lock (_lock) return _pendingCount; }
+            get { lock (_lock) return _repeatCount; }
         }
 
         public BusJournal(EventBus bus, string logsDir = null, Action<string> sink = null)
@@ -83,6 +87,11 @@ namespace RemoteAgents.Launcher
             lock (_lock)
             {
                 FlushPendingLocked();
+                if (_suppressedCount > _summarizedAt)
+                {
+                    WriteLineLocked(FormatNoiseSummary(DateTime.UtcNow));
+                    _summarizedAt = _suppressedCount;
+                }
             }
         }
 
@@ -98,7 +107,7 @@ namespace RemoteAgents.Launcher
                     if (IsNoisy(evt))
                     {
                         _suppressedCount++;
-                        if (evt.Topic.StartsWith("tick", StringComparison.Ordinal))
+                        if (evt.Topic == "tick" || evt.Topic.StartsWith(BusTopics.TickPrefix, StringComparison.Ordinal))
                         {
                             _tickCount++;
                         }
@@ -109,33 +118,26 @@ namespace RemoteAgents.Launcher
 
                         if (_suppressedCount % NoiseSummaryThreshold == 0)
                         {
-                            FlushPendingLocked();
-                            string summaryLine = FormatNoiseSummary(evt);
-                            WriteLineLocked(summaryLine);
+                            WriteLineLocked(FormatNoiseSummary(evt.Utc));
+                            _summarizedAt = _suppressedCount;
                         }
                         return;
                     }
 
-                    if (_pendingEvent == null)
+                    if (_last != null && AreIdentical(_last, evt))
                     {
-                        _pendingEvent = evt;
-                        _pendingCount = 1;
-                    }
-                    else if (AreIdentical(_pendingEvent, evt))
-                    {
-                        _pendingCount++;
-                        if (_pendingCount >= CollapseThreshold)
+                        _repeatCount++;
+                        if (_repeatCount >= CollapseThreshold)
                         {
                             FlushPendingLocked();
                         }
+                        return;
                     }
-                    else
-                    {
-                        // При смене события — сбросить накопленное
-                        FlushPendingLocked();
-                        _pendingEvent = evt;
-                        _pendingCount = 1;
-                    }
+
+                    // Смена события: итог повторов предыдущего, затем новое пишется сразу.
+                    FlushPendingLocked();
+                    _last = evt;
+                    WriteLineLocked(FormatEvent(evt));
                 }
             }
             catch
@@ -146,15 +148,11 @@ namespace RemoteAgents.Launcher
 
         private void FlushPendingLocked()
         {
-            if (_pendingEvent == null) return;
+            if (_last == null || _repeatCount == 0) return;
 
-            var evt = _pendingEvent;
-            int count = _pendingCount;
-            _pendingEvent = null;
-            _pendingCount = 0;
-
-            string line = FormatEvent(evt, count);
-            WriteLineLocked(line);
+            int count = _repeatCount;
+            _repeatCount = 0;
+            WriteLineLocked(FormatRepeat(_last, count));
         }
 
         private void WriteLineLocked(string line)
@@ -232,55 +230,57 @@ namespace RemoteAgents.Launcher
             return true;
         }
 
-        private static string FormatEvent(BusEvent evt, int count)
+        private static DateTimeOffset ToOffset(DateTime utc)
         {
-            var doc = new Dictionary<string, object>(StringComparer.Ordinal);
-            doc["seq"] = evt.Seq;
-            doc["topic"] = evt.Topic;
-            doc["source"] = evt.Source;
-            if (count > 1)
-            {
-                doc["count"] = count;
-            }
+            if (utc == default(DateTime)) utc = DateTime.UtcNow;
+            return new DateTimeOffset(DateTime.SpecifyKind(utc, DateTimeKind.Utc)).ToLocalTime();
+        }
 
+        private static string Cut(string value)
+        {
+            if (value == null) return string.Empty;
+            return value.Length > MaxValue ? value.Substring(0, MaxValue) + "…[cut]" : value;
+        }
+
+        private static string FormatEvent(BusEvent evt)
+        {
+            var fields = new List<KeyValuePair<string, string>>();
+            fields.Add(new KeyValuePair<string, string>("seq", evt.Seq.ToString(CultureInfo.InvariantCulture)));
+            fields.Add(new KeyValuePair<string, string>("source", Cut(evt.Source)));
             if (evt.Fields != null)
             {
                 foreach (var kvp in evt.Fields)
                 {
                     string key = kvp.Key ?? string.Empty;
-                    if (string.IsNullOrEmpty(key)) continue;
-
-                    string val = kvp.Value ?? string.Empty;
-                    string cleanVal = LogMask.IsSecretKey(key) ? "***" : LogMask.Clean(val);
-
-                    if (!doc.ContainsKey(key))
-                    {
-                        doc[key] = cleanVal;
-                    }
-                    else
-                    {
-                        doc["field_" + key] = cleanVal;
-                    }
+                    if (key.Length == 0) continue;
+                    // Совпадение с служебными ключами не теряем, а переименовываем.
+                    if (key == "seq" || key == "source" || key == "count") key = "field_" + key;
+                    fields.Add(new KeyValuePair<string, string>(key, Cut(kvp.Value)));
                 }
             }
 
-            return Json.Encode(doc);
+            return RaLog.Format(ToOffset(evt.Utc), LogLevel.Info, "bus", evt.Topic, fields, RaLog.Session);
         }
 
-        private string FormatNoiseSummary(BusEvent evt)
+        private static string FormatRepeat(BusEvent evt, int count)
         {
-            var doc = new Dictionary<string, object>(StringComparer.Ordinal)
+            var fields = new List<KeyValuePair<string, string>>
             {
-                { "seq", evt.Seq },
-                { "topic", BusTopics.BusNoiseSummary },
-                { "source", "bus" },
-                { "suppressed", _suppressedCount },
-                { "count", _suppressedCount },
-                { "tick", _tickCount },
-                { "singbox", _singboxCount }
+                new KeyValuePair<string, string>("topic", Cut(evt.Topic)),
+                new KeyValuePair<string, string>("count", count.ToString(CultureInfo.InvariantCulture))
             };
+            return RaLog.Format(ToOffset(evt.Utc), LogLevel.Info, "bus", "repeat", fields, RaLog.Session);
+        }
 
-            return Json.Encode(doc);
+        private string FormatNoiseSummary(DateTime utc)
+        {
+            var fields = new List<KeyValuePair<string, string>>
+            {
+                new KeyValuePair<string, string>("suppressed", _suppressedCount.ToString(CultureInfo.InvariantCulture)),
+                new KeyValuePair<string, string>("tick", _tickCount.ToString(CultureInfo.InvariantCulture)),
+                new KeyValuePair<string, string>("singbox", _singboxCount.ToString(CultureInfo.InvariantCulture))
+            };
+            return RaLog.Format(ToOffset(utc), LogLevel.Info, "bus", BusTopics.BusNoiseSummary, fields, RaLog.Session);
         }
     }
 }

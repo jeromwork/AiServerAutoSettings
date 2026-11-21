@@ -34,6 +34,11 @@ namespace RemoteAgents.Launcher
             TestCollapseConsecutiveIdentical();
             TestWriteErrorDoesNotCrashBus();
             TestDiskWriteWithRaLog();
+            TestFirstEventWrittenImmediately();
+            TestLineStartsWithIsoAndSession();
+            TestLongValueAndLineCut();
+            TestDisposeWritesNoiseRemainder();
+            TestKeySanitized();
 
             Console.WriteLine($"PASS: BusJournalTests ({_assertions} assertions passed)");
         }
@@ -53,22 +58,21 @@ namespace RemoteAgents.Launcher
                     "state", "connected");
 
                 bus.DrainOnce();
-                journal.Flush();
 
                 Assert(lines.Count == 1, $"Expected 1 line, got {lines.Count}");
                 string line = lines[0];
 
-                Assert(line.Contains("\"topic\":\"vpn.state\""), "Topic must be vpn.state");
-                Assert(line.Contains("\"source\":\"vpn-core\""), "Source must be vpn-core");
-                Assert(line.Contains("\"seq\":1"), "Seq must be 1");
-                Assert(line.Contains("\"state\":\"connected\""), "State field must be connected");
+                Assert(line.Contains(" vpn.state "), "Topic must be vpn.state");
+                Assert(line.Contains("source=vpn-core"), "Source must be vpn-core");
+                Assert(line.Contains("seq=1 "), "Seq must be 1");
+                Assert(line.Contains("state=connected"), "State field must be connected");
 
                 // Маскирование секретов
                 Assert(!line.Contains("SuperSecretPass123"), "Secret password must not be in journal");
-                Assert(line.Contains("\"secret\":\"***\""), "Secret key value must be masked with ***");
-                Assert(line.Contains("\"auth\":\"***\""), "Auth key value must be masked with ***");
+                Assert(line.Contains("secret=***"), "Secret key value must be masked with ***");
+                Assert(line.Contains("auth=***"), "Auth key value must be masked with ***");
                 Assert(!line.Contains("my-secret-bearer-token"), "Bearer token must not be in journal");
-                Assert(line.Contains("\"note\":\"Bearer ***\""), "Bearer token in non-secret key must be masked");
+                Assert(line.Contains("note=\"Bearer ***\""), "Bearer token in non-secret key must be masked");
             }
         }
 
@@ -97,7 +101,6 @@ namespace RemoteAgents.Launcher
                 bus.Publish("net.change", "windows", "id", "1");
 
                 bus.DrainOnce();
-                journal.Flush();
 
                 Assert(journal.SuppressedCount == 6, $"Suppressed count must be 6, was {journal.SuppressedCount}");
                 Assert(journal.TickCount == 3, $"Tick count must be 3, was {journal.TickCount}");
@@ -105,9 +108,9 @@ namespace RemoteAgents.Launcher
 
                 // Подавленные не записались, записались только 3 не-INFO события
                 Assert(lines.Count == 3, $"Expected 3 lines, got {lines.Count}");
-                Assert(lines[0].Contains("\"singbox.line\"") && lines[0].Contains("WARN"), "WARN singbox.line must be written");
-                Assert(lines[1].Contains("\"singbox.line\"") && lines[1].Contains("ERROR"), "ERROR singbox.line must be written");
-                Assert(lines[2].Contains("\"net.change\""), "net.change must be written");
+                Assert(lines[0].Contains(" singbox.line ") && lines[0].Contains("WARN"), "WARN singbox.line must be written");
+                Assert(lines[1].Contains(" singbox.line ") && lines[1].Contains("ERROR"), "ERROR singbox.line must be written");
+                Assert(lines[2].Contains(" net.change "), "net.change must be written");
             }
         }
 
@@ -131,24 +134,23 @@ namespace RemoteAgents.Launcher
                 }
 
                 bus.DrainOnce();
-                journal.Flush();
 
                 Assert(journal.SuppressedCount == 2500, $"Suppressed count must be 2500, was {journal.SuppressedCount}");
                 Assert(lines.Count == 2, $"Expected exactly 2 lines of bus.noise-summary for 2500 suppressed, got {lines.Count}");
 
                 string line1 = lines[0];
-                Assert(line1.Contains("\"topic\":\"bus.noise-summary\""), "Line 1 topic must be bus.noise-summary");
-                Assert(line1.Contains("\"source\":\"bus\""), "Line 1 source must be bus");
-                Assert(line1.Contains("\"suppressed\":1000") || line1.Contains("\"count\":1000"), "Line 1 must report 1000 suppressed");
+                Assert(line1.Contains(" bus.noise-summary "), "Line 1 topic must be bus.noise-summary");
+                Assert(line1.Contains(" bus "), "Line 1 comp must be bus");
+                Assert(line1.Contains("suppressed=1000"), "Line 1 must report 1000 suppressed");
 
                 string line2 = lines[1];
-                Assert(line2.Contains("\"topic\":\"bus.noise-summary\""), "Line 2 topic must be bus.noise-summary");
-                Assert(line2.Contains("\"source\":\"bus\""), "Line 2 source must be bus");
-                Assert(line2.Contains("\"suppressed\":2000") || line2.Contains("\"count\":2000"), "Line 2 must report 2000 suppressed");
+                Assert(line2.Contains(" bus.noise-summary "), "Line 2 topic must be bus.noise-summary");
+                Assert(line2.Contains(" bus "), "Line 2 comp must be bus");
+                Assert(line2.Contains("suppressed=2000"), "Line 2 must report 2000 suppressed");
             }
         }
 
-        // 4. 150 одинаковых подряд → 2 строки со count (первая на 100, вторая на 50)
+        // 4. 150 одинаковых подряд: первое сразу, repeat count=100 на 100-м повторе, остаток при Flush
         private static void TestCollapseConsecutiveIdentical()
         {
             var lines = new List<string>();
@@ -161,17 +163,15 @@ namespace RemoteAgents.Launcher
                 }
 
                 bus.DrainOnce();
+                Assert(lines.Count == 2, $"Before Flush expected event + repeat 100, got {lines.Count}");
+                Assert(lines[0].Contains(" vpn.state ") && !lines[0].Contains("count="), "Line 1 is the first event");
+                Assert(lines[1].Contains(" repeat ") && lines[1].Contains("count=100") && lines[1].Contains("topic=vpn.state"), "Line 2 repeat count=100: " + lines[1]);
+
                 journal.Flush();
-
-                Assert(lines.Count == 2, $"Expected exactly 2 lines for 150 identical events, got {lines.Count}");
-
-                string line1 = lines[0];
-                Assert(line1.Contains("\"topic\":\"vpn.state\""), "Line 1 topic must be vpn.state");
-                Assert(line1.Contains("\"count\":100"), $"Line 1 must have count 100, got: {line1}");
-
-                string line2 = lines[1];
-                Assert(line2.Contains("\"topic\":\"vpn.state\""), "Line 2 topic must be vpn.state");
-                Assert(line2.Contains("\"count\":50"), $"Line 2 must have count 50, got: {line2}");
+                Assert(lines.Count == 3, $"Expected 3 lines, got {lines.Count}");
+                Assert(lines[2].Contains("count=49"), "Line 3 repeat count=49: " + lines[2]);
+                journal.Flush();
+                Assert(lines.Count == 3, "Second Flush must not duplicate");
             }
         }
 
@@ -188,8 +188,7 @@ namespace RemoteAgents.Launcher
                 {
                     bus.Publish("test.error", "tray", "k", "v");
                     bus.DrainOnce();
-                    journal.Flush();
-                }
+                    }
 
                 // Шина осталась рабочей и доставляет последующие события
                 bool aliveDelivered = false;
@@ -213,14 +212,13 @@ namespace RemoteAgents.Launcher
                 {
                     bus.Publish("disk.event", "tray", "action", "disk-val");
                     bus.DrainOnce();
-                    journal.Flush();
-
+    
                     string logFile = Path.Combine(tempDir, "bus.log");
                     Assert(File.Exists(logFile), "logs/bus.log must exist on disk");
 
                     string text = File.ReadAllText(logFile);
-                    Assert(text.Contains("\"topic\":\"disk.event\""), "bus.log must contain topic disk.event");
-                    Assert(text.Contains("\"action\":\"disk-val\""), "bus.log must contain action disk-val");
+                    Assert(text.Contains(" disk.event "), "bus.log must contain topic disk.event");
+                    Assert(text.Contains("action=disk-val"), "bus.log must contain action disk-val");
                 }
             }
             finally
@@ -232,6 +230,100 @@ namespace RemoteAgents.Launcher
                 catch
                 {
                 }
+            }
+        }
+
+        // 7. Одно событие + DrainOnce без Flush = ровно одна строка
+        private static void TestFirstEventWrittenImmediately()
+        {
+            var lines = new List<string>();
+            using (var bus = new EventBus(manualDispatch: true))
+            using (var journal = new BusJournal(bus, sink: lines.Add))
+            {
+                bus.Publish("vpn.state", "vpn-core", "state", "on");
+                bus.DrainOnce();
+                Assert(lines.Count == 1, $"Expected 1 line without Flush, got {lines.Count}");
+                Assert(journal.PendingCount == 0, "No pending repeats");
+            }
+            Assert(lines.Count == 1, "Dispose must add nothing");
+        }
+
+        // 8. Строка начинается с ISO-времени из evt.Utc, есть s=<сессия>
+        private static void TestLineStartsWithIsoAndSession()
+        {
+            var lines = new List<string>();
+            using (var bus = new EventBus(manualDispatch: true))
+            using (var journal = new BusJournal(bus, sink: lines.Add))
+            {
+                bus.Publish("vpn.state", "vpn-core", "state", "on");
+                bus.DrainOnce();
+                string l = lines[0];
+                Assert(System.Text.RegularExpressions.Regex.IsMatch(l, @"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z "), "ISO prefix: " + l);
+                Assert(l.Contains(" s=" + RaLog.Session + " "), "Session s= expected: " + l);
+                Assert(l.Contains(" INFO  bus "), "Level and component: " + l);
+            }
+        }
+
+        // 9. Длинное значение режется до 1024, строка — до MaxLine
+        private static void TestLongValueAndLineCut()
+        {
+            var lines = new List<string>();
+            using (var bus = new EventBus(manualDispatch: true))
+            using (var journal = new BusJournal(bus, sink: lines.Add))
+            {
+                bus.Publish("big.one", "t", "v", new string('x', 5000));
+                bus.DrainOnce();
+                Assert(lines[0].Contains(new string('x', 1024) + "…[cut]"), "Value cut at 1024");
+                Assert(!lines[0].Contains(new string('x', 1025)), "Value must not exceed 1024");
+
+                var args = new List<string>();
+                for (int i = 0; i < 20; i++) { args.Add("k" + i); args.Add(new string('y', 9) + " " + string.Concat(System.Linq.Enumerable.Repeat("word ", 190)) + i); }
+                bus.Publish("big.two", "t", args.ToArray());
+                bus.DrainOnce();
+                Assert(lines.Count == 2, "Second line written");
+                Assert(lines[1].Length <= RaLog.MaxLine + 6, "Line cut to MaxLine, was " + lines[1].Length);
+                Assert(lines[1].EndsWith("…[cut]"), "Line cut marker");
+            }
+        }
+
+        // 10. Dispose пишет остаток подавленных
+        private static void TestDisposeWritesNoiseRemainder()
+        {
+            var lines = new List<string>();
+            using (var bus = new EventBus(manualDispatch: true))
+            {
+                var journal = new BusJournal(bus, sink: lines.Add);
+                for (int i = 0; i < 7; i++) bus.Publish("tick.x", "timer");
+                bus.DrainOnce();
+                Assert(lines.Count == 0, "No summary before threshold");
+                journal.Dispose();
+                Assert(lines.Count == 1 && lines[0].Contains(" bus.noise-summary ") && lines[0].Contains("suppressed=7") && lines[0].Contains("tick=7"), "Dispose summary: " + string.Join("|", lines));
+                journal.Dispose();
+                Assert(lines.Count == 1, "Second Dispose writes nothing");
+            }
+
+            var exact = new List<string>();
+            using (var bus = new EventBus(manualDispatch: true))
+            {
+                var journal = new BusJournal(bus, sink: exact.Add);
+                for (int i = 0; i < 1000; i++) bus.Publish("tick.x", "timer");
+                bus.DrainOnce();
+                journal.Dispose();
+                Assert(exact.Count == 1, "No duplicate summary when remainder is zero, got " + exact.Count);
+            }
+        }
+
+        // 11. Ключи полей очищаются как в RaLog.Format
+        private static void TestKeySanitized()
+        {
+            var lines = new List<string>();
+            using (var bus = new EventBus(manualDispatch: true))
+            using (var journal = new BusJournal(bus, sink: lines.Add))
+            {
+                bus.Publish("key.test", "t", "a b=c\"d", "1", "ok-name.1", "2");
+                bus.DrainOnce();
+                Assert(lines[0].Contains(" a_b_c_d=1"), "Key sanitized: " + lines[0]);
+                Assert(lines[0].Contains(" ok-name.1=2"), "Good key kept: " + lines[0]);
             }
         }
     }
