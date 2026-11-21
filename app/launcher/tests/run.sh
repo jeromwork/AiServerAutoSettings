@@ -259,6 +259,7 @@ timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:T
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:SupervisorStaleTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:VpnReasonsTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:HealthBoardTests=true
+timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:UpdateHealthTests=true -nodeReuse:false -p:UseSharedCompilation=false
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:TransportBusTests=true
 wait_for_memory
 # End-to-end on a loopback stand: config export -> paste/vault -> orchestrator -> real Server/Connection -> sync -> revoke.

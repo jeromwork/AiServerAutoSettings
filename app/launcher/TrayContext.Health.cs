@@ -21,10 +21,11 @@ namespace RemoteAgents.Launcher
             var state = UpdateState();
             if (!Json.Bool(state, "pending") && !engine.Pending && !File.Exists(Path.Combine(engine.Root, "exe-upgrade.json"))) return; // нет ожидающей приёмки транзакции
             healthBoard = new HealthBoard(HealthBoard.ExpectedBlocks(state), DateTime.UtcNow,
-                runtimes.Where(r => r.Definition.Critical && r.Enabled).Select(r => r.Definition.Name));
+                runtimes.Where(r => r.Definition.Critical && r.Enabled).Select(r => r.Definition.Name),
+                accepted: UpgradeInstaller.ImageHealthAccepted(home));
             healthFuse = new System.Threading.Timer(_ => HealthFuse(), null, Timeout.Infinite, Timeout.Infinite); // timer-ok: C — последний block.ready недоступен при зависании блока; UpdateNoProgressFuseMs даёт только отказ/откат.
             busParts.Add(healthFuse);
-            ArmHealthFuse();
+            if (!healthBoard.Accepted) ArmHealthFuse();
             busParts.Add(bus.Subscribe(BusTopics.HealthAccepted, e => PostUi(CommitHealth)));
             busParts.Add(bus.Subscribe(BusTopics.ComponentExit, e => {
                 lock (healthGate) { if (healthBoard.ComponentExit(e.Get("name"))) HealthFailed(healthBoard.Failure); }
@@ -39,6 +40,7 @@ namespace RemoteAgents.Launcher
             }));
             EventHandler idle = null; idle = (s, a) => { Application.Idle -= idle; bus.Publish(BusTopics.BlockReady, BusTopics.Sources.Tray, "block", "tray", "via", "idle"); };
             Application.Idle += idle; // источник готовности tray: первый простой цикла сообщений
+            if (healthBoard.Accepted) PostUi(CommitHealth); // повторяем только финализацию уже сохранённой приёмки
         }
 
         void HealthReport(BusEvent e, bool ready)
@@ -47,13 +49,13 @@ namespace RemoteAgents.Launcher
                 var board = healthBoard; if (board == null || healthSettled) return;
                 string block = e.Get("block");
                 // Диск считается готовым только по подтверждённой связи с сервером (как прежняя проверка), а не по файлу статуса.
-                if (block == "disk" && e.Get("via") != "server-connected") return;
+                if (ready && block == "disk" && e.Get("via") != "server-connected") return;
                 var r = ready ? board.Ready(block, DateTime.UtcNow) : board.Degraded(block, e.Get("reason"), DateTime.UtcNow);
                 log.Write("health.block block=" + block + " event=" + (ready ? "ready" : "degraded") + " reason=" + e.Get("reason") + " counted=" + r.Counted + " missing=" + string.Join(",", board.Missing));
                 if (r.Counted) {
                     // Прогресс сохраняется для независимого наблюдателя, даже если затем UI зависнет.
-                    string receipt = Path.Combine(engine.Root, "exe-upgrade.json");
-                    if (File.Exists(receipt)) { var record = Json.Read(receipt); record["lastHealthUtc"] = board.LastEventUtc.ToString("o"); Json.Write(receipt, record); }
+                    try { UpgradeInstaller.NoteHealthProgress(home, board.LastEventUtc); }
+                    catch (Exception ex) { log.Write("update.health.progress.failed kind=" + ex.GetType().Name); }
                     ArmHealthFuse();
                 }
                 if (!r.Completed) return;
@@ -80,13 +82,15 @@ namespace RemoteAgents.Launcher
         void HealthFailed(string reason)
         {
             log.Write("update.failed reason=" + reason);
-            UpdateWatchdog.SignalFailure(home); // прежний EXE откатывает независимо от работоспособности UI
-            if (File.Exists(Path.Combine(engine.Root, "exe-upgrade.json"))) return;
+            // Если наблюдатель погиб, SignalFailure заново вооружает прежний EXE, сохраняя отказ.
+            bool watching = UpdateWatchdog.SignalFailure(home);
+            if (File.Exists(Path.Combine(engine.Root, "exe-upgrade.json")) && watching) return;
             PostUi(() => {
                 lock (healthGate) {
                     if (closing || healthSettled) return; healthSettled = true;
                     string version = engine.Current;
                     engine.Observe(false, failed: true);
+                    UpgradeInstaller.ObserveImage(home, engine, false, "rollback");
                     UpdateOutcome(version, "здоровье не подтверждено; выполнен откат");
                     log.Write("update.rollback"); RestartRequested = true; ExitThread();
                 }
@@ -96,12 +100,16 @@ namespace RemoteAgents.Launcher
         {
             lock (healthGate) {
                 if (closing || healthSettled || !healthBoard.Accepted || healthBoard.Failure.Length > 0) return;
-                using (var failed = UpdateWatchdog.FailureEvent(home)) if (failed.WaitOne(0)) return;
-                string result = engine.Observe(true);
-                string image = UpgradeInstaller.ObserveImage(home, engine, true, result);
-                healthSettled = true;
-                if (result == "accepted" || image == "accepted") { log.Write("update.accepted"); UpdateOutcome(engine.Current, ""); }
-                RefreshMenu();
+                try {
+                    using (var failed = UpdateWatchdog.FailureEvent(home)) if (failed.WaitOne(0)) return;
+                    // Решение доски сохраняется до финализации: ошибка уборки не отвергает принятую версию.
+                    UpgradeInstaller.NoteHealthAccepted(home);
+                    string result = engine.Observe(true);
+                    string image = UpgradeInstaller.ObserveImage(home, engine, true, result);
+                    healthSettled = true;
+                    if (result == "accepted" || image == "accepted") { log.Write("update.accepted"); UpdateOutcome(engine.Current, ""); }
+                    RefreshMenu();
+                } catch (Exception ex) { log.Write("update.health.commit.failed kind=" + ex.GetType().Name); }
             }
         }
 

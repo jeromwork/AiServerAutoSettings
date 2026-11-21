@@ -23,7 +23,7 @@
 ## Что уже есть (не писать заново, конституция §2)
 
 - `app/launcher/UpdateEngine.cs` — транзакция обновления: `Prepare` (проверка размера и SHA-256, распаковка,
-  `selftest.ps1`, бинарники), `Activate`, 120 с проверки здоровья, автоматический откат, `bad.txt`.
+  `selftest.ps1`, бинарники), `Activate`, проверка здоровья по событиям готовности (предохранитель отсутствия прогресса — 5 мин), автоматический откат, `bad.txt`.
   `TrySelfUpdate` в `TrayContext.cs` заменяет сам EXE (`.launcher-manifest.json`).
 - `app/launcher/SshUpdate.cs` — источник обновления на нашем сервере по SSH, с проверкой ключа хоста.
   Из `update.remoteDir` (по умолчанию `~/.local/share/remote-agents/dist`) он читает `manifest.json`

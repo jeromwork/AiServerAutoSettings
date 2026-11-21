@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 
 namespace RemoteAgents.Launcher
@@ -13,6 +14,12 @@ namespace RemoteAgents.Launcher
         static void Check(bool value, string message) { if (!value) throw new Exception(message); checks++; }
         public static int Main(string[] args)
         {
+            if (args.Contains("--review-fixes")) {
+                ReviewFixes();
+                Console.WriteLine("PASS: UpdateHealthTests review fixes (" + checks + " checks; manual events, fake clock)");
+                return 0;
+            }
+            ReviewFixes();
             NoNetworkSourceAccepts();
             CrashLoopCountsByComponent();
             ReadinessResetsExitCount();
@@ -21,6 +28,142 @@ namespace RemoteAgents.Launcher
             ObserverEventsRollbackTransaction();
             Console.WriteLine("PASS: UpdateHealthTests (" + checks + " checks; manual events, fake clock)");
             return 0;
+        }
+        static void ReviewFixes()
+        {
+            OfflineDependentsAccept();
+            FuseUsesFakeClock();
+            ReceiptReadRetriesOnNextEvent();
+            ProcessIdentityChanges();
+            WithHome(ProgressAndCleanExitReceipt);
+            WithHome(AcceptedReceiptFinalizes);
+            WithHome(RejectedLauncherIsNotInstalledAgain);
+        }
+        static void WithHome(Action<string> test)
+        {
+            string home = Path.Combine(Path.GetTempPath(), "ra-h2-fix-" + Guid.NewGuid().ToString("N"));
+            try { Directory.CreateDirectory(home); test(home); }
+            finally { if (Directory.Exists(home)) Directory.Delete(home, true); }
+        }
+        static void OfflineDependentsAccept()
+        {
+            var state = Json.Map(Json.Parse("{\"runningComponents\":[\"disk\",\"bridge\"],\"vpnOn\":true}\r\n"));
+            var board = new HealthBoard(HealthBoard.ExpectedBlocks(state), Now, new[] { "transport", "disk", "control" });
+            board.Ready("tray", Now);
+            using (var bus = new EventBus(manualDispatch: true)) {
+                bus.Subscribe(BusTopics.BlockDegraded, e => board.Degraded(e.Get("block"), e.Get("reason"), Now));
+                var tracker = new BlockStatusTracker(bus, Now, () => Now);
+                tracker.Observe("transport", new Dictionary<string, object> { { "localNet", "down" }, { "ok", false } });
+                bus.DrainOnce();
+            }
+            Check(board.Accepted && board.Missing.Length == 0 && board.Failure == "", "offline transport reports disk, vpn and control without rollback");
+            var other = new HealthBoard(new[] { "tray", "transport", "disk", "vpn", "control", "local-tool" }, Now);
+            other.Ready("tray", Now); other.Degraded("transport", "no-network", Now);
+            Check(other.Missing.SequenceEqual(new[] { "local-tool" }), "offline exemption is limited to known network dependencies");
+            var pendingTray = new HealthBoard(new[] { "tray", "transport", "disk", "vpn", "control" }, Now, new[] { "control" });
+            pendingTray.Degraded("transport", "no-network", Now);
+            pendingTray.Degraded("disk", "disconnected", Now); pendingTray.Degraded("vpn", "starting", Now); pendingTray.ComponentExit("control");
+            Check(pendingTray.Ready("tray", Now).Completed, "later dependent status/exit cannot undo active no-network report before tray is ready");
+            var crashing = new HealthBoard(new[] { "tray", "transport", "control" }, Now, new[] { "control" });
+            crashing.Degraded("transport", "no-network", Now); crashing.ComponentExit("control"); crashing.ComponentExit("control");
+            Check(crashing.ComponentExit("control") && !crashing.Accepted, "offline mode still detects actual critical crash-loop");
+            var failed = new HealthBoard(new[] { "transport", "disk", "vpn" }, Now);
+            failed.Degraded("transport", "engine-failed", Now);
+            Check(failed.Missing.Length == 3 && !failed.Accepted, "other transport failures do not exempt dependencies");
+        }
+        static void FuseUsesFakeClock()
+        {
+            var board = new HealthBoard(new[] { "tray", "transport" }, Now);
+            DateTime progress = Now.AddTicks(10); board.Ready("tray", progress);
+            DateTime boundary = progress.AddMilliseconds(HealthBoard.UpdateNoProgressFuseMs);
+            Check(!board.FuseExpired(boundary.AddTicks(-1)), "fake clock: one instant before last progress + fuse is not expired");
+            Check(board.FuseExpired(boundary), "fake clock: last progress + fuse is expired");
+            board.Ready("transport", boundary);
+            Check(!board.FuseExpired(boundary.AddDays(1)), "acceptance disables fuse");
+            var failed = new HealthBoard(new[] { "transport" }, Now); failed.Fail("manual");
+            Check(!failed.FuseExpired(Now.AddDays(1)), "failure disables fuse");
+        }
+        static void ReceiptReadRetriesOnNextEvent()
+        {
+            int events = 0;
+            Func<Dictionary<string, object>> read = () => {
+                events++;
+                if (events == 1) throw new IOException("replace");
+                if (events == 2) throw new UnauthorizedAccessException("replace");
+                return new Dictionary<string, object> { { "pid", 42 } };
+            };
+            Check(UpdateObservation.TryRead(read) == null && events == 1, "IOException waits for another event without retry loop or failure");
+            Check(UpdateObservation.TryRead(read) == null && events == 2, "UnauthorizedAccessException waits for another event");
+            Check(Json.Int(UpdateObservation.TryRead(read), "pid", 0) == 42 && events == 3, "next manual changed event reads receipt successfully");
+            Check(UpdateObservation.Decide(true, false, true, false, cleanExit: true) == "", "clean process exit suspends observation without rollback");
+            Check(UpdateObservation.Decide(true, true, true, false, cleanExit: true) == "UpdateFailed", "explicit failure is not hidden by clean shutdown during rollback");
+            Check(UpdateObservation.Decide(true, false, true, false) == "process-exited", "abnormal process exit still rolls back");
+        }
+        static void ProcessIdentityChanges()
+        {
+            var record = new Dictionary<string, object> { { "pid", 42 }, { "processStarted", "123" } };
+            Check(UpdateObservation.SameProcess(record, 42, "123"), "unchanged PID and start keep pinned handle");
+            Check(!UpdateObservation.SameProcess(record, 43, "123"), "new PID requires another handle");
+            Check(!UpdateObservation.SameProcess(record, 42, "124"), "PID reuse requires another handle");
+        }
+        static void ProgressAndCleanExitReceipt(string home)
+        {
+            string receipt = Path.Combine(home, Product.BundleDirectory, "exe-upgrade.json");
+            Json.Write(receipt, new { version = "2.0.0", previous = "1.0.0", startedUtc = Now.ToString("o"), pid = 42, processStarted = "123" });
+            DateTime progress = Now.AddTicks(123);
+            UpgradeInstaller.NoteHealthProgress(home, progress);
+            var record = Json.Read(receipt);
+            Check(Json.Str(record, "lastHealthUtc") == progress.ToString("o") && Json.Int(record, "pid", 0) == 42 && Json.Str(record, "version") == "2.0.0", "lastHealthUtc is durably saved without losing transaction/process fields");
+            UpgradeInstaller.NoteCleanExit(home);
+            // Поздний отчёт готовности сохраняет отметку штатного выхода.
+            UpgradeInstaller.NoteHealthProgress(home, progress);
+            Check(File.Exists(receipt) && Json.Bool(Json.Read(receipt), "cleanExit"), "clean exit keeps receipt and survives subsequent progress");
+            DateTime resumed = Now.AddDays(1); UpgradeInstaller.PrepareImageLaunch(home, resumed);
+            record = Json.Read(receipt);
+            Check(!Json.Bool(record, "cleanExit") && !record.ContainsKey("pid") && !record.ContainsKey("processStarted") && !record.ContainsKey("lastHealthUtc") && Json.Str(record, "startedUtc") == resumed.ToString("o"), "resumed launch clears old identity and restarts progress with fake clock");
+            UpgradeInstaller.NoteHealthAccepted(home);
+            Check(Json.Bool(Json.Read(receipt), "healthAccepted"), "accepted decision survives finalization errors/restart");
+        }
+        static void AcceptedReceiptFinalizes(string home)
+        {
+            var engine = new UpdateEngine(home, "1.0.0", () => Now);
+            foreach (string v in new[] { "1.0.0", "2.0.0" }) {
+                Directory.CreateDirectory(engine.Folder(v));
+                Json.Write(Path.Combine(engine.Folder(v), "components.json"), new[] { new { name = "transport", exe = "unused", critical = true } });
+                engine.Activate(v);
+            }
+            string receipt = Path.Combine(engine.Root, "exe-upgrade.json");
+            Json.Write(receipt, new { version = "2.0.0", previous = "1.0.0" });
+            var offline = new HealthBoard(new[] { "tray", "transport", "disk", "vpn", "control" }, Now);
+            offline.Ready("tray", Now); offline.Degraded("transport", "no-network", Now);
+            Check(offline.Accepted, "offline transaction accepts before finalization");
+            UpgradeInstaller.NoteHealthAccepted(home);
+            // Имитируем обрыв между сохранённым решением и финализацией: создаём доску нового сеанса.
+            var resumed = new HealthBoard(new[] { "tray", "transport" }, Now, new[] { "transport" }, accepted: UpgradeInstaller.ImageHealthAccepted(home));
+            Check(resumed.Accepted && !resumed.Fail("late-error") && !resumed.ComponentExit("transport"), "saved acceptance is terminal after restart/finalization error");
+            string result = engine.Observe(resumed.Accepted);
+            Check(result == "accepted" && UpgradeInstaller.ObserveImage(home, engine, true, result) == "accepted" && !engine.Pending && !engine.IsBad("2.0.0") && !File.Exists(receipt), "offline accepted transaction finalizes without rollback or bad.txt");
+        }
+        static void RejectedLauncherIsNotInstalledAgain(string home)
+        {
+            var engine = new UpdateEngine(home, "1.0.0", () => Now);
+            Directory.CreateDirectory(engine.Folder("1.0.0"));
+            Json.Write(Path.Combine(engine.Folder("1.0.0"), "components.json"), new[] { new { name = "transport", exe = "unused", critical = true } });
+            engine.Activate("1.0.0");
+            string target = Path.Combine(home, Product.ExeName), backup = Path.Combine(home, Product.Name + ".previous.exe"), rejected = Path.Combine(home, "candidate.exe");
+            File.WriteAllText(target, "new launcher"); File.WriteAllText(rejected, "new launcher"); File.WriteAllText(backup, "old launcher");
+            Json.Write(Path.Combine(engine.Root, "exe-upgrade.json"), new { version = "1.0.0", previous = "1.0.0", previousHash = Files.Hash(backup), currentHash = Files.Hash(target), launcherVersion = "2.0.0" });
+            Check(UpgradeInstaller.ObserveImage(home, engine, false, "rollback") == "rollback" && File.ReadAllText(target) == "old launcher", "launcher-only rollback restores previous bytes");
+            Check(!engine.IsBad("1.0.0") && UpgradeInstaller.IsRejectedImage(home, Files.Hash(rejected)), "working bundle stays allowed; rejected launcher hash is persisted");
+            string zip = Path.Combine(home, "bundle.zip");
+            using (var archive = ZipFile.Open(zip, ZipArchiveMode.Create))
+            using (var writer = new StreamWriter(archive.CreateEntry("bundle-version.txt").Open())) writer.Write("1.0.0\r\n");
+            bool refused = false, selftestCalled = false;
+            try { UpgradeInstaller.Apply(home, rejected, zip, "2.0.0", false, d => { selftestCalled = true; return true; }); }
+            catch (InvalidDataException) { refused = true; }
+            Check(refused && !selftestCalled && !engine.Pending && File.ReadAllText(target) == "old launcher" && !File.Exists(Path.Combine(engine.Root, "exe-upgrade.json")), "same downloaded EXE cannot repeat rejected launcher-only installation");
+            File.WriteAllText(rejected, "different launcher");
+            Check(!UpgradeInstaller.IsRejectedImage(home, Files.Hash(rejected)), "different image is not banned");
         }
         static void NoNetworkSourceAccepts()
         {

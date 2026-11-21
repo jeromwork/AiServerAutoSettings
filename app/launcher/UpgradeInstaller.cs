@@ -11,6 +11,7 @@ namespace RemoteAgents.Launcher
     // Shared by the downloaded-EXE installer and the upgrade selftest. Never replaces user directories.
     internal static class UpgradeInstaller
     {
+        static readonly object ReceiptGate = new object();
         public static string ExtractEmbedded(string destination)
         {
             using (var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("RemoteAgents.InitialBundle.zip")) {
@@ -37,6 +38,7 @@ namespace RemoteAgents.Launcher
             var engine = new UpdateEngine(home, launcherVersion); engine.Recover();
             if (engine.Pending) throw new InvalidOperationException("Предыдущее обновление ещё проверяется");
             string version = BundleVersion(zip), old = engine.Current;
+            if (!downgrade && !accept && IsRejectedImage(home, Files.Hash(sourceExe))) throw new InvalidDataException("Этот EXE ранее отклонён");
             string target = Path.Combine(home, Product.ExeName), backup = Path.Combine(home, Product.Name + ".previous.exe");
             if (File.Exists(Path.Combine(engine.Root, "exe-upgrade.json"))) throw new InvalidOperationException("Лаунчер ещё проверяется");
             if (version != old) {
@@ -84,14 +86,68 @@ namespace RemoteAgents.Launcher
         }
         public static void NoteImageProcess(string home)
         {
-            string root = Path.Combine(home, Product.BundleDirectory), receipt = Path.Combine(root, "exe-upgrade.json");
-            if (!File.Exists(receipt)) return;
-            var record = Json.Read(receipt);
-            if (!Files.Hash(ProgramImage()).Equals(Json.Str(record, "currentHash"), StringComparison.OrdinalIgnoreCase)) return;
-            using (var process = Process.GetCurrentProcess()) {
-                record["pid"] = process.Id; record["processStarted"] = process.StartTime.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture);
-                Json.Write(receipt, record);
+            lock (ReceiptGate) {
+                string root = Path.Combine(home, Product.BundleDirectory), receipt = Path.Combine(root, "exe-upgrade.json");
+                if (!File.Exists(receipt)) return;
+                var record = Json.Read(receipt);
+                if (!Files.Hash(ProgramImage()).Equals(Json.Str(record, "currentHash"), StringComparison.OrdinalIgnoreCase)) return;
+                using (var process = Process.GetCurrentProcess()) {
+                    record["pid"] = process.Id; record["processStarted"] = process.StartTime.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    // Новая сессия после штатного выхода получает собственный отсчёт прогресса.
+                    if (Json.Bool(record, "cleanExit")) {
+                        record["startedUtc"] = DateTime.UtcNow.ToString("o"); record.Remove("lastHealthUtc");
+                    }
+                    record.Remove("cleanExit"); Json.Write(receipt, record);
+                }
             }
+        }
+        internal static void PrepareImageLaunch(string home, DateTime utc)
+        {
+            lock (ReceiptGate) {
+                string receipt = Path.Combine(home, Product.BundleDirectory, "exe-upgrade.json");
+                if (!File.Exists(receipt)) return;
+                var record = Json.Read(receipt);
+                if (!Json.Bool(record, "cleanExit")) return;
+                record.Remove("cleanExit"); record.Remove("pid"); record.Remove("processStarted"); record.Remove("lastHealthUtc");
+                record["startedUtc"] = utc.ToString("o"); Json.Write(receipt, record);
+            }
+        }
+        internal static void NoteHealthProgress(string home, DateTime utc)
+        {
+            lock (ReceiptGate) {
+                string receipt = Path.Combine(home, Product.BundleDirectory, "exe-upgrade.json");
+                if (!File.Exists(receipt)) return;
+                var record = Json.Read(receipt); record["lastHealthUtc"] = utc.ToString("o"); Json.Write(receipt, record);
+            }
+        }
+        internal static bool ImageHealthAccepted(string home)
+        {
+            lock (ReceiptGate) {
+                string receipt = Path.Combine(home, Product.BundleDirectory, "exe-upgrade.json");
+                return File.Exists(receipt) && Json.Bool(Json.Read(receipt), "healthAccepted");
+            }
+        }
+        internal static void NoteHealthAccepted(string home)
+        {
+            lock (ReceiptGate) {
+                string receipt = Path.Combine(home, Product.BundleDirectory, "exe-upgrade.json");
+                if (!File.Exists(receipt)) return;
+                var record = Json.Read(receipt); if (Json.Bool(record, "healthAccepted")) return;
+                record["healthAccepted"] = true; Json.Write(receipt, record);
+            }
+        }
+        internal static void NoteCleanExit(string home)
+        {
+            lock (ReceiptGate) {
+                string receipt = Path.Combine(home, Product.BundleDirectory, "exe-upgrade.json");
+                if (!File.Exists(receipt)) return;
+                var record = Json.Read(receipt); record["cleanExit"] = true; Json.Write(receipt, record);
+            }
+        }
+        internal static bool IsRejectedImage(string home, string hash)
+        {
+            string path = Path.Combine(home, Product.BundleDirectory, "rejected-image.json");
+            return File.Exists(path) && Json.Str(Json.Read(path), "sha256").Equals(hash, StringComparison.OrdinalIgnoreCase);
         }
         static string ProgramImage() { return Assembly.GetExecutingAssembly().Location; }
         public static void ReplaceImage(string source, string target)
@@ -115,17 +171,23 @@ namespace RemoteAgents.Launcher
         }
         public static string ObserveImage(string home, UpdateEngine engine, bool healthy, string bundleResult)
         {
-            string record = Path.Combine(engine.Root, "exe-upgrade.json"); if (!File.Exists(record)) return "";
-            var p = Json.Read(record);
-            if (bundleResult == "rollback" || engine.Current != Json.Str(p, "version")) {
-                string backup = Path.Combine(home, Product.Name + ".previous.exe");
-                if (!File.Exists(backup) || !Files.Hash(backup).Equals(Json.Str(p, "previousHash"), StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Нет прежнего EXE");
-                if (engine.Pending || (engine.Current == Json.Str(p, "version") && engine.Current != Json.Str(p, "previous"))) engine.Rollback();
-                if (engine.Current != Json.Str(p, "version")) engine.MarkBad(Json.Str(p, "version"));
-                ReplaceImage(backup, Path.Combine(home, Product.ExeName)); File.Delete(record); return "rollback";
+            lock (ReceiptGate) {
+                string record = Path.Combine(engine.Root, "exe-upgrade.json"); if (!File.Exists(record)) return "";
+                var p = Json.Read(record);
+                if (bundleResult == "rollback" || engine.Current != Json.Str(p, "version")) {
+                    string backup = Path.Combine(home, Product.Name + ".previous.exe");
+                    if (!File.Exists(backup) || !Files.Hash(backup).Equals(Json.Str(p, "previousHash"), StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Нет прежнего EXE");
+                    if (engine.Pending || (engine.Current == Json.Str(p, "version") && engine.Current != Json.Str(p, "previous"))) engine.Rollback();
+                    if (engine.Current != Json.Str(p, "version")) engine.MarkBad(Json.Str(p, "version"));
+                    // При прежнем бандле нельзя заносить его в bad.txt: отвергнут только образ лаунчера.
+                    // Одно последнее значение ограничивает размер хранилища (§4б).
+                    if (Json.Str(p, "version") == Json.Str(p, "previous") && Json.Str(p, "currentHash").Length > 0)
+                        Json.Write(Path.Combine(engine.Root, "rejected-image.json"), new { sha256 = Json.Str(p, "currentHash"), launcherVersion = Json.Str(p, "launcherVersion") });
+                    ReplaceImage(backup, Path.Combine(home, Product.ExeName)); File.Delete(record); return "rollback";
+                }
+                if (healthy && !engine.Pending) { File.Delete(record); return "accepted"; }
+                return "";
             }
-            if (healthy && !engine.Pending) { File.Delete(record); return "accepted"; }
-            return "";
         }
     }
 }

@@ -22,20 +22,42 @@ namespace RemoteAgents.Launcher
             bool created; return new EventWaitHandle(false, EventResetMode.ManualReset, name, out created, security);
         }
         internal static EventWaitHandle FailureEvent(string home) { return Event(EventName(Instance(home), "UpdateFailed")); }
-        internal static void SignalFailure(string home)
-        { try { using (var failed = FailureEvent(home)) failed.Set(); } catch { } }
-        internal static void Start(string home, string observerExe)
+        internal static bool IsWatching(string home)
+        {
+            using (var ready = Event(EventName(Instance(home), "UpdateWatching"))) {
+                if (!ready.WaitOne(0)) return false;
+                using (var singleton = new Mutex(false, EventName(Instance(home), "UpdateObserver"))) {
+                    bool held; try { held = singleton.WaitOne(0); } catch (AbandonedMutexException) { held = true; }
+                    if (!held) return true;
+                    singleton.ReleaseMutex(); return false; // взведённое событие без живого владельца устарело
+                }
+            }
+        }
+        internal static bool SignalFailure(string home)
+        {
+            try {
+                using (var failed = FailureEvent(home)) {
+                    failed.Set();
+                    if (!File.Exists(Path.Combine(home, Product.BundleDirectory, "exe-upgrade.json"))) return false;
+                    if (!IsWatching(home)) Start(home, Path.Combine(home, Product.Name + ".previous.exe"), preserveFailure: true);
+                    return IsWatching(home);
+                }
+            } catch (Exception ex) { new Journal(home).Write("update.observer.restart.failed kind=" + ex.GetType().Name); return false; }
+        }
+        internal static void Start(string home, string observerExe, bool preserveFailure = false)
         {
             if (!File.Exists(Path.Combine(home, Product.BundleDirectory, "exe-upgrade.json"))) return;
             using (var ready = Event(EventName(Instance(home), "UpdateWatching"))) {
-                if (ready.WaitOne(0)) return; // наблюдатель H2 уже вооружён вызывающим процессом
-                using (var failed = FailureEvent(home)) failed.Reset(); // новая транзакция: прежний отказ не переносится
+                if (IsWatching(home)) return;
+                ready.Reset();
+                if (!preserveFailure) using (var failed = FailureEvent(home)) failed.Reset();
                 using (var process = Process.Start(new ProcessStartInfo(observerExe, "--watch-update " + Files.Quote(home)) { UseShellExecute = false, CreateNoWindow = true })) { }
                 if (!ready.WaitOne(WatcherStartTimeoutMs)) throw new IOException("Наблюдатель обновления не запустился"); // timer-ok: D — ответ старого EXE недоступен при сбое запуска; прервать активацию, успех не объявлять.
             }
         }
         internal static int Run(string home)
         {
+            bool restart = false;
             try {
                 string name = Instance(home);
                 using (var singleton = new Mutex(false, EventName(name, "UpdateObserver"))) {
@@ -55,25 +77,38 @@ namespace RemoteAgents.Launcher
                             string reason = WaitForOutcome(receipt, changed, failed);
                             if (reason.Length == 0) return 0;
                             failed.Set(); // исключить приёмку, пока внешний наблюдатель останавливает новый EXE
-                            new Journal(home).Write("update.failed reason=" + reason);
+                            var log = new Journal(home); log.Write("update.failed reason=" + reason);
+                            restart = true;
                             using (var mutex = new Mutex(false, "Global\\" + name)) {
                                 bool owned; try { owned = mutex.WaitOne(0); } catch (AbandonedMutexException) { owned = true; }
-                                if (!owned) Program.StopInstalled(name, Path.Combine(home, Product.ExeName), home, mutex, new Journal(home));
-                                try {
+                                if (!owned) {
+                                    try { Program.StopInstalled(name, Path.Combine(home, Product.ExeName), home, mutex, log); owned = true; }
+                                    catch (Exception ex) { log.Write("update.stop.failed kind=" + ex.GetType().Name); }
+                                }
+                                // Без владения экземпляром образ не переключаем; квитанция остаётся для повтора.
+                                if (owned) try {
                                     if (File.Exists(receipt)) {
-                                        string version = Json.Str(Json.Read(receipt), "version");
-                                        UpgradeInstaller.ObserveImage(home, engine, false, "rollback");
-                                        string path = Path.Combine(engine.Root, "update-state.json");
-                                        var state = File.Exists(path) ? Json.Read(path) : Json.Map(null);
-                                        state["queuedFailure"] = version; state["pending"] = false; state["failureReason"] = reason; Json.Write(path, state);
-                                    } // Приёмка могла завершиться перед остановкой: всё равно перезапустить остановленный трей.
+                                        var record = Json.Read(receipt);
+                                        if (!Json.Bool(record, "healthAccepted")) {
+                                            string version = Json.Str(record, "version");
+                                            UpgradeInstaller.ObserveImage(home, engine, false, "rollback");
+                                            string path = Path.Combine(engine.Root, "update-state.json");
+                                            var state = File.Exists(path) ? Json.Read(path) : Json.Map(null);
+                                            state["queuedFailure"] = version; state["pending"] = false; state["failureReason"] = reason; Json.Write(path, state);
+                                        }
+                                    }
                                 } finally { mutex.ReleaseMutex(); }
                             }
+                            return 0;
                         }
-                        Program.StartLauncher(Path.Combine(home, Product.ExeName), home, true); return 0;
                     } finally { singleton.ReleaseMutex(); }
                 }
-            } catch { return 1; }
+            } catch (Exception ex) { new Journal(home).Write("update.observer.failed kind=" + ex.GetType().Name); return 1; }
+            finally {
+                // Мьютекс наблюдателя уже отпущен: новый трей сможет вооружить своё наблюдение.
+                if (restart) try { Program.StartLauncher(Path.Combine(home, Product.ExeName), home, true, preserveUpdateFailure: true); }
+                catch (Exception ex) { new Journal(home).Write("update.restart.failed kind=" + ex.GetType().Name); }
+            }
         }
         sealed class ProcessWaitHandle : WaitHandle
         {
@@ -81,21 +116,37 @@ namespace RemoteAgents.Launcher
         }
         static string WaitForOutcome(string receipt, WaitHandle changed, WaitHandle failed)
         {
-            Process process = null; WaitHandle exited = null;
+            Process process = null; WaitHandle exited = null; int pid = 0; string processStarted = "";
             try {
                 while (File.Exists(receipt)) {
-                    System.Collections.Generic.Dictionary<string, object> record;
-                    try { record = Json.Read(receipt); } catch (FileNotFoundException) { return ""; }
+                    var record = UpdateObservation.TryRead(() => {
+                        // Одно чтение с разрешённой атомарной заменой; без скрытых повторов/Sleep.
+                        using (var stream = new FileStream(receipt, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                        using (var reader = new StreamReader(stream)) return Json.Map(Json.Parse(reader.ReadToEnd()));
+                    });
+                    if (record == null) {
+                        // Ошибка доступа во время Replace — ждём следующую доставку changed, это не исход.
+                        if (!File.Exists(receipt)) return "";
+                        if (WaitHandle.WaitAny(new[] { failed, changed }) == 0) return "UpdateFailed";
+                        continue;
+                    }
+                    if (Json.Bool(record, "healthAccepted")) return "";
                     if (failed.WaitOne(0)) return "UpdateFailed";
-                    if (process == null && Json.Int(record, "pid", 0) > 0) {
-                        try {
-                            process = Process.GetProcessById(Json.Int(record, "pid", 0)); var pinned = process.Handle;
-                            if (process.StartTime.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture) != Json.Str(record, "processStarted")) return "process-exited";
+                    if (Json.Bool(record, "cleanExit")) return "";
+                    if (!UpdateObservation.SameProcess(record, pid, processStarted)) {
+                        if (exited != null) { exited.Dispose(); exited = null; }
+                        if (process != null) { process.Dispose(); process = null; }
+                        pid = Json.Int(record, "pid", 0); processStarted = Json.Str(record, "processStarted");
+                        if (pid > 0) try {
+                            process = Process.GetProcessById(pid); var pinned = process.Handle;
+                            if (process.StartTime.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture) != processStarted) return "process-exited";
                             exited = new ProcessWaitHandle(pinned);
                         } catch (ArgumentException) { return "process-exited"; }
                         catch (InvalidOperationException) { return "process-exited"; }
                         catch (System.ComponentModel.Win32Exception) { return "process-unavailable"; }
                     }
+                    if (process != null && process.HasExited)
+                        return UpdateObservation.Decide(true, false, true, false, process.ExitCode == 0);
                     DateTime progress;
                     if (!DateTime.TryParse(Json.Text(record, "lastHealthUtc", Json.Str(record, "startedUtc")), null, System.Globalization.DateTimeStyles.RoundtripKind, out progress)) return "invalid-receipt";
                     var board = new HealthBoard(new string[0], progress.ToUniversalTime());
@@ -103,10 +154,8 @@ namespace RemoteAgents.Launcher
                     if (board.FuseExpired(now)) return UpdateObservation.Decide(File.Exists(receipt), false, false, true);
                     int remaining = (int)Math.Max(1, Math.Min(HealthBoard.UpdateNoProgressFuseMs, Math.Ceiling(HealthBoard.UpdateNoProgressFuseMs - (now - board.LastEventUtc).TotalMilliseconds)));
                     var handles = exited == null ? new[] { failed, changed } : new[] { failed, changed, exited };
-                    int signal = WaitHandle.WaitAny(handles, remaining); // timer-ok: C — health.accepted недоступен при зависшем новом EXE; UpdateNoProgressFuseMs от последней готовности даёт только откат.
-                    if (signal == WaitHandle.WaitTimeout) continue; // перечитать прогресс перед решением предохранителя
-                    string decision = UpdateObservation.Decide(File.Exists(receipt), signal == 0, signal == 2, false);
-                    if (decision != null) return decision;
+                    WaitHandle.WaitAny(handles, remaining); // timer-ok: C — health.accepted недоступен при зависшем новом EXE; UpdateNoProgressFuseMs от последней готовности даёт только откат.
+                    // После ЛЮБОГО сигнала сначала перечитываем квитанцию: PID мог смениться, приёмка/штатный выход — завершиться.
                 }
                 return "";
             } finally { if (exited != null) exited.Dispose(); if (process != null) process.Dispose(); }

@@ -941,6 +941,7 @@ namespace RemoteAgents.Launcher
         {
             bool applying = actionBusy && !vpnActionBusy && !firstSetup || BackgroundWork.Disk.Busy || Application.OpenForms.Cast<Form>().Any(f => f is ConfigWindow && ((ConfigWindow)f).IsApplying || f is SetupWizard && ((SetupWizard)f).IsApplying);
             if (window.Exit(applying) == WindowExit.ConfirmApplying && MessageBox.Show(mainWindow, "Идёт применение настроек. Прервать?", Product.Name, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            try { UpgradeInstaller.NoteCleanExit(home); } catch { log.Write("update.clean-exit.write.failed"); }
             if (mainWindow != null) mainWindow.Unload();
             foreach (var form in Application.OpenForms.Cast<Form>().ToArray()) { var wizard = form as SetupWizard; if (wizard != null) wizard.CancelEmbedded(); form.Dispose(); }
             ExitThread();

@@ -29,13 +29,13 @@ namespace RemoteAgents.Launcher
         readonly HashSet<string> reported = new HashSet<string>(StringComparer.Ordinal);
         readonly HashSet<string> critical;
         readonly Dictionary<string, int> exits = new Dictionary<string, int>(StringComparer.Ordinal);
-        bool accepted; string failure = ""; DateTime lastEventUtc;
+        bool accepted, noNetwork; string failure = ""; DateTime lastEventUtc;
 
-        internal HealthBoard(IEnumerable<string> expectedBlocks, DateTime nowUtc, IEnumerable<string> criticalBlocks = null)
+        internal HealthBoard(IEnumerable<string> expectedBlocks, DateTime nowUtc, IEnumerable<string> criticalBlocks = null, bool accepted = false)
         {
             foreach (var b in expectedBlocks ?? new string[0]) { string n = Normalize(b); if (n.Length > 0) expected.Add(n); }
             critical = new HashSet<string>((criticalBlocks ?? new string[0]).Select(Normalize), StringComparer.Ordinal);
-            lastEventUtc = nowUtc;
+            lastEventUtc = nowUtc; this.accepted = accepted; // сохранённое решение приёмки терминально и после перезапуска
         }
 
         internal bool Accepted { get { lock (gate) return accepted; } }
@@ -55,7 +55,7 @@ namespace RemoteAgents.Launcher
             lock (gate) {
                 var r = new Result(); string n = Normalize(block);
                 if (accepted || failure.Length > 0) return r;
-                if (ready) exits.Remove(n);
+                if (ready) { exits.Remove(n); if (n == "transport") noNetwork = false; }
                 if (!expected.Contains(n)) return r;
                 if (!reported.Add(n)) return r;
                 lastEventUtc = nowUtc; r.Counted = true;
@@ -67,21 +67,42 @@ namespace RemoteAgents.Launcher
         // block.degraded: «нет сети» (Р8) засчитывается как отчёт блока; иная деградация снимает отметку блока.
         internal Result Degraded(string block, string reason, DateTime nowUtc)
         {
-            if (string.Equals((reason ?? "").Trim(), "no-network", StringComparison.OrdinalIgnoreCase)) return Report(block, nowUtc, false);
+            if (string.Equals((reason ?? "").Trim(), "no-network", StringComparison.OrdinalIgnoreCase)) {
+                lock (gate) {
+                    var result = new Result();
+                    // Транспорт подтверждает отсутствие сети также для зависимых блоков (Р8).
+                    // Это отчёт о деградации, а не готовность; счётчики падений не сбрасываются.
+                    if (Normalize(block) == "transport") {
+                        noNetwork = true;
+                        foreach (string dependent in new[] { "disk", "vpn", "control" }) {
+                            var r = Report(dependent, nowUtc, false); result.Counted |= r.Counted; result.Completed |= r.Completed;
+                        }
+                    }
+                    var own = Report(block, nowUtc, false); result.Counted |= own.Counted; result.Completed |= own.Completed;
+                    return result;
+                }
+            }
             lock (gate) {
                 var r = new Result(); string n = Normalize(block);
                 if (accepted || failure.Length > 0 || !expected.Contains(n)) return r;
+                if (n == "transport") noNetwork = false;
+                // Поздняя деградация зависимого блока не отменяет действующее подтверждение «нет сети».
+                if (noNetwork && NetworkDependent(n)) return Report(n, nowUtc, false);
                 reported.Remove(n);
                 return r;
             }
         }
+
+        static bool NetworkDependent(string block) { return block == "disk" || block == "vpn" || block == "control"; }
 
         // Три выхода одного критичного блока без block.ready между ними — терминальный отказ.
         internal bool ComponentExit(string block)
         {
             lock (gate) {
                 string n = Normalize(block); if (accepted || failure.Length > 0 || !critical.Contains(n)) return false;
-                reported.Remove(n); int count; exits.TryGetValue(n, out count); exits[n] = ++count;
+                if (n == "transport") noNetwork = false;
+                if (!noNetwork || !NetworkDependent(n)) reported.Remove(n);
+                int count; exits.TryGetValue(n, out count); exits[n] = ++count;
                 if (count < 3) return false;
                 failure = "crash-loop:" + n; return true;
             }
