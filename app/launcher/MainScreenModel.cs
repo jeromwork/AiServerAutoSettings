@@ -15,6 +15,7 @@ namespace RemoteAgents.Launcher
     internal sealed class MainScreenFacts
     {
         internal Dictionary<string, object> Transport = new Dictionary<string, object>();  // status/transport.json (maxAge 15 s)
+        internal SearchPresentation SearchView; // shared quiet presentation; null = show raw facts (diagnostics/tests)
         internal Dictionary<string, object> Vpn = new Dictionary<string, object>();        // status/vpn.json (maxAge 15 s)
         internal Dictionary<string, object> Control = new Dictionary<string, object>();    // status/control.json (maxAge 30 s), the bridge
         internal Dictionary<string, object> Health = new Dictionary<string, object>();     // ServerHealthView.Read(home)
@@ -81,17 +82,26 @@ namespace RemoteAgents.Launcher
 
     internal static class MainScreenModel
     {
+        // Shared with TrayContext.Tick; a VPN refusal must remain visible during search.
+        internal static Tone LinkTone(Dictionary<string, object> transport, Dictionary<string, object> vpn, bool awaitingSearchProof = false)
+        {
+            if (TrayMenuModel.Searching(transport, vpn) && SearchPresentation.VpnFailureText(vpn).Length > 0) return Tone.Error;
+            var phase = StatusView.Phase(transport);
+            if (TrayMenuModel.Searching(transport, vpn) || Json.Str(vpn, "state") == "conflict" ||
+                awaitingSearchProof) return Tone.Warning;
+            return phase == LinkPhase.Ok ? Tone.Ok : phase == LinkPhase.Failed ? Tone.Error : Tone.Warning;
+        }
+
         internal static MainScreenView Build(MainScreenFacts facts)
         {
             facts = facts ?? new MainScreenFacts();
-            var transport = facts.Transport ?? Json.Map(null);
-            var vpn = facts.Vpn ?? Json.Map(null);
+            var link = facts.SearchView ?? new SearchPresentation(facts.Transport, facts.Vpn);
+            var transport = link.Transport;
+            var vpn = link.Vpn;
             var control = facts.Control ?? Json.Map(null);
             var view = new MainScreenView();
-            // Keep this identical to TrayContext.Tick; a deliberately off VPN is grey in its card only.
             var phase = StatusView.Phase(transport);
-            view.Overall = phase == LinkPhase.Ok ? Tone.Ok : phase == LinkPhase.Failed ? Tone.Error : Tone.Warning;
-            if (TrayMenuModel.Searching(transport, vpn) || Json.Str(vpn, "state") == "conflict") view.Overall = Tone.Warning;
+            view.Overall = LinkTone(transport, vpn, link.AwaitingSearchProof);
             BuildVpn(view.Vpn, facts, transport, vpn);
             BuildDisk(view.Disk, facts);
             var lan = facts.Lan ?? Json.Map(null);

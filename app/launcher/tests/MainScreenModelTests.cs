@@ -22,7 +22,7 @@ namespace RemoteAgents.Launcher
         }
         internal static void Run()
         {
-            Colours(); Banners(); VpnCard(); DiskCard(); AccountsAndHelper(); BridgeCard(); Reports(); LinkPhases(); SearchingStatus(); DiagnosticSwitches(); RenderGate();
+            Colours(); VpnFailureLinkColours(); Banners(); VpnCard(); DiskCard(); AccountsAndHelper(); BridgeCard(); Reports(); LinkPhases(); SearchingStatus(); DiagnosticSwitches(); RenderGate();
             Console.WriteLine("PASS: " + count + " main screen checks");
         }
         // Focused entry point: -p:StartupObject=RemoteAgents.Launcher.MainScreenModelTests.
@@ -30,6 +30,23 @@ namespace RemoteAgents.Launcher
         static int Main()
         {
             Run(); return 0;
+        }
+        static void VpnFailureLinkColours()
+        {
+            foreach (string state in new[] { "resumed", "uac-denied", "server-unreachable", "no-path", "rolled-back" }) {
+                var facts = Healthy();
+                facts.Vpn = Data(Json.Encode(new { state, ok = false, enabled = true }));
+                var view = MainScreenModel.Build(facts);
+                Check(view.Overall == Tone.Ok && MainScreenModel.LinkTone(facts.Transport, facts.Vpn) == Tone.Ok &&
+                    view.Vpn.Tone == Tone.Error && view.Banner.Tone == Tone.Error,
+                    "healthy transport keeps its colour with VPN failure: " + state);
+                facts.Transport = Data("{\"phase\":\"searching\",\"ok\":false}");
+                view = MainScreenModel.Build(facts);
+                Check(view.Overall == Tone.Error && view.Vpn.Tone == Tone.Error, "VPN failure retains priority during search: " + state);
+            }
+            var checking = Healthy();
+            checking.Vpn = Data("{\"state\":\"checking\",\"ok\":false}");
+            Check(MainScreenModel.Build(checking).Overall == Tone.Ok, "raw VPN checking does not recolour healthy transport");
         }
         static void SearchingStatus()
         {
