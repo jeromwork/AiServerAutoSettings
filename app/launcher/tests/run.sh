@@ -269,6 +269,9 @@ timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:V
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:HealthBoardTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:TransportBusTests=true
 wait_for_memory
+# Uses the launcher assembly just built to exercise both stdio peers in one process.
+timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-bus.ps1" < /dev/null
+wait_for_memory
 # End-to-end on a loopback stand: config export -> paste/vault -> orchestrator -> real Server/Connection -> sync -> revoke.
 wait_for_memory
 timeout 300 python3 "$here/test_config_e2e.py"

@@ -28,7 +28,7 @@ namespace RemoteAgents.Launcher
             }
             if (process != null && process.HasExited) {
                 int exitCode = -1; try { exitCode = process.ExitCode; } catch { }
-                if (transportBridge != null) { transportBridge.Dispose(); transportBridge = null; }
+                if (transportBridge != null) { transportBridge.CompleteAfterProcessExit(); transportBridge = null; }
                 process.Dispose(); process = null; if (job != null) job.Dispose(); job = null;
                 // Код выхода в журнал: перезапуск по предохранителю памяти (75) отличается от падений; пауза общая, 5 с до 60 с.
                 next = now.AddSeconds(delay); delay = Math.Min(60, delay * 2); log.Write("component." + Definition.Name + ".exit code=" + exitCode); TrayBusWiring.ComponentExit(Bus, Definition.Name, exitCode);
