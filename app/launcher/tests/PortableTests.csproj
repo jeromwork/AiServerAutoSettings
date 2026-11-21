@@ -56,6 +56,11 @@
     <IntermediateOutputPath>obj/$(Configuration)/vpnreasons-tests/</IntermediateOutputPath>
     <OutputPath>bin/$(Configuration)/vpnreasons-tests/</OutputPath>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(RollbackTests)' == 'true'">
+    <StartupObject>RemoteAgents.Launcher.RollbackTests</StartupObject>
+    <IntermediateOutputPath>obj/$(Configuration)/rollback-tests/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/rollback-tests/</OutputPath>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(UpdateHealthTests)' == 'true'">
     <StartupObject>RemoteAgents.Launcher.UpdateHealthTests</StartupObject>
     <DefineConstants>$(DefineConstants);UPDATE_HEALTH_TESTS</DefineConstants>
@@ -189,6 +194,7 @@
     <Compile Include="../LogShipper.cs" />
     <Compile Include="../LogShipper.Ssh.cs" />
     <Compile Include="../HelperLogMirror.cs" />
+    <Compile Include="../CoreJournal.cs" />
     <Compile Include="LoggingTests.cs" />
     <Compile Include="../LanTun.cs" />
     <Compile Include="../LanHosts.cs" />
@@ -227,6 +233,10 @@
     <Compile Include="ProxyRelayTests.cs" />
     <Compile Include="../ProxyRelay.cs" Link="ProxyRelay.cs" />
     <Compile Include="../UpgradeInstaller.cs" Link="UpgradeInstaller.cs" />
+    <Compile Include="../UpgradeInstaller.Rollback.cs" />
+    <Compile Include="../NetHelperInstall.Version.cs" />
+    <Compile Include="RollbackTests.cs" />
+    <Compile Include="../Program.Startup.cs" />
     <Compile Include="../StatusView.cs" Link="StatusView.cs" />
     <Compile Include="../Data.cs" Link="Data.cs" />
     <Compile Include="UpdateAutomationTests.cs" />
@@ -264,6 +274,44 @@
     <IntermediateOutputPath>obj/$(Configuration)/helper-update-tests/</IntermediateOutputPath>
     <OutputPath>bin/$(Configuration)/helper-update-tests/</OutputPath>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(JournalFloodTests)' == 'true'">
+    <StartupObject>RemoteAgents.Launcher.JournalFloodTests</StartupObject>
+    <DefineConstants>$(DefineConstants);JOURNAL_FLOOD_TESTS</DefineConstants>
+    <IntermediateOutputPath>obj/$(Configuration)/journal-flood-tests/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/journal-flood-tests/</OutputPath>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(JournalFloodTests)' == 'true'">
+    <Compile Remove="@(Compile)" />
+    <Compile Include="PortableJson.cs" />
+    <Compile Include="JournalFloodTests.cs" />
+    <Compile Include="../NetHelperEvents.cs" />
+    <Compile Include="NetHelperVersionTests.cs" />
+    <Compile Include="BusJournalTests.cs" />
+    <Compile Include="../UpdateObservation.cs" />
+    <Compile Include="../UpdatePolicy.cs" />
+    <Compile Include="../UpdateChannel.cs" />
+    <Compile Include="../UpgradeInstaller.cs" />
+    <Compile Include="../UpgradeInstaller.Rollback.cs" />
+    <Compile Include="../NetHelperInstall.Version.cs" />
+    <Compile Include="../Program.Startup.cs" />
+    <Compile Include="../UpdateEngine.cs" />
+    <Compile Include="../Data.cs" />
+    <Compile Include="../ConfigBundle.cs" />
+    <Compile Include="../SecretVault.cs" />
+    <Compile Include="../LanAccess.cs" />
+    <Compile Include="../DiskChoice.cs" />
+    <Compile Include="../RaLog.cs" />
+    <Compile Include="../LogLimits.cs" />
+    <Compile Include="../LogMask.cs" />
+    <Compile Include="../EventBus.cs" />
+    <Compile Include="../BusTopics.cs" />
+    <Compile Include="../TrayBus.cs" />
+    <Compile Include="../HealthBoard.cs" />
+    <Compile Include="../HealthJournal.cs" />
+    <Compile Include="../BusJournal.cs" />
+    <Compile Include="../CoreJournal.cs" />
+    <Compile Include="../HelperLogMirror.cs" />
+  </ItemGroup>
   <!-- H2 is a micro-suite: compile its production dependencies, not every portable test. -->
   <ItemGroup Condition="'$(UpdateHealthTests)' == 'true'">
     <Compile Remove="@(Compile)" />
@@ -280,6 +328,8 @@
     <Compile Include="../UpdatePolicy.cs" />
     <Compile Include="../UpdateChannel.cs" />
     <Compile Include="../UpgradeInstaller.cs" />
+    <Compile Include="../UpgradeInstaller.Rollback.cs" />
+    <Compile Include="../NetHelperInstall.Version.cs" />
     <Compile Include="../UpdateEngine.cs" />
     <Compile Include="../HealthBoard.cs" />
     <Compile Include="../UpdateObservation.cs" />

@@ -29,7 +29,7 @@ namespace RemoteAgents.Launcher
         public static string Encode(object value) { return JsonSerializer.Serialize(value); }
         public static void Write(string path, object value) { Files.Atomic(path, Encode(value) + "\n"); }
     }
-#if !UPDATE_HEALTH_TESTS
+#if !UPDATE_HEALTH_TESTS && !JOURNAL_FLOOD_TESTS
     internal static class TestEntry
     {
 #if DISK_FAST

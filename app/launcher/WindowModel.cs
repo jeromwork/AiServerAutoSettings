@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 
 namespace RemoteAgents.Launcher
 {
-    internal enum WindowCommand { None, Show, Exit, Logs, Restart, Rollback, CheckUpdates, SetupCheck }
+    internal enum WindowCommand { None, Show, Exit, Logs, Restart, Rollback, RollbackPrevious, CheckUpdates, SetupCheck }
     internal enum WindowExit { Unload, ConfirmApplying }
 
     // Pure policy, shared by startup, IPC and the window; no WinForms or process state.
@@ -21,6 +21,7 @@ namespace RemoteAgents.Launcher
         {
             if (args.Contains("--exit") || args.Contains("--uninstall")) return WindowCommand.Exit;
             if (args.Contains("--restart-components")) return WindowCommand.Restart;
+            if (args.Contains("--rollback-previous")) return WindowCommand.RollbackPrevious;
             if (args.Contains("--rollback")) return WindowCommand.Rollback;
             if (args.Contains("--logs")) return WindowCommand.Logs;
             if (args.Contains("--check-updates")) return WindowCommand.CheckUpdates;
@@ -29,7 +30,7 @@ namespace RemoteAgents.Launcher
         }
         internal static bool ShouldShow(string[] args)
         {
-            if (args.Any(a => new[] { "--exit", "--uninstall", "--identify", "--install-stop", "--restart-components", "--rollback", "--logs", "--check-updates", "--disk-shell", "--transport-fault" }.Contains(a))) return false;
+            if (args.Any(a => new[] { "--exit", "--uninstall", "--identify", "--install-stop", "--restart-components", "--rollback", "--rollback-previous", "--logs", "--check-updates", "--disk-shell", "--transport-fault" }.Contains(a))) return false;
             if (args.Any(a => new[] { "--show", "--started", "--settings" }.Contains(a))) return true;
             return !args.Contains("--tray") && !args.Contains("--after-update") && !args.Contains("--setup-check");
         }

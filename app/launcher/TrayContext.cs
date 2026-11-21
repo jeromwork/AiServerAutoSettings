@@ -63,6 +63,7 @@ namespace RemoteAgents.Launcher
         public TrayContext(string home, Journal log, string pipeName, SecurityIdentifier sid, string[] args, string installSource = null)
         {
             this.home = home; this.log = log; this.installSource=installSource;
+            rollbackInstallMutex = "Global\\" + pipeName + ".Install";
             window = new WindowModel(File.Exists(Path.Combine(home, "state", "tray-hint-shown"))); dispatch.CreateControl(); var unused = dispatch.Handle;
             Directory.CreateDirectory(Path.Combine(home, "status"));
             config = new Configuration(home); engine = new UpdateEngine(home, Program.Version); InitUpdateButton();
@@ -95,7 +96,7 @@ namespace RemoteAgents.Launcher
                 if (firstSetup) { RunFirstSetup(); return; }
                 // A new EXE after OTA follows the same required/version/image check as a clean install.
                 netHelper.EnsureRunning();
-                DeliverUpdateNotice(); CheckLegacyVpn(); StartLegacyDiskCleanup(); Handle(args); DrainCommands(); Tick();
+                DeliverUpdateNotice(); RefreshPreviousVersion(); CheckLegacyVpn(); StartLegacyDiskCleanup(); Handle(args); DrainCommands(); Tick();
                 if(Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome),StringComparison.OrdinalIgnoreCase)) CheckSetup();
 
             }));
@@ -349,12 +350,14 @@ namespace RemoteAgents.Launcher
             // One snapshot: LAN can appear after HelperClient starts, or disappear on reload.
             menuState.Refresh(TrayEntries(), entries => {
                 var menu = new ContextMenuStrip { ShowItemToolTips = true };
+                menu.Opening += (s, e) => RefreshPreviousVersion();
                 foreach (var entry in entries) {
                     if (entry.Id == "separator") { menu.Items.Add(new ToolStripSeparator()); continue; }
                     string id = entry.Id;
                     var item = new ToolStripMenuItem(entry.Text) { Enabled = entry.Enabled, ToolTipText = entry.Hint };
                     item.Click += (s, e) => Safe(() => {
                         if (id == "update-check") CheckUpdates();
+                        else if (id == "rollback-previous") RollbackPrevious();
                         else if (id == "open") OpenHappier();
                         else if (id == "settings") ShowMain("Настройки");
                         else if (id == "disk") OpenDisk();
@@ -406,6 +409,7 @@ namespace RemoteAgents.Launcher
             if (Json.Bool(lanStatus, "enabled")) entries.Insert(0, new TrayMenuEntry("lan-status", StatusView.Lan(lanStatus), false));
             entries.Insert(entries.Count - 1, new TrayMenuEntry("update-status", updateSummary, false));
             entries.Insert(entries.Count - 1, new TrayMenuEntry("update-check", "Проверить обновления сейчас", !updateChecking && !engine.Pending && !updateButton.IsBusy));
+            var rollback = RollbackEntry(); if (rollback != null) entries.Insert(entries.Count - 1, rollback);
             entries.Insert(entries.Count - 1, VpnMenu());
             entries.Insert(entries.Count - 1, TrayBridge.Entry(BridgeCard())); return entries.ToArray();
         }
@@ -596,6 +600,7 @@ namespace RemoteAgents.Launcher
             };
             mainWindow.UpdateActivity(syncSummary + "\r\n" + updateSummary);
             ApplyUpdateButton();
+            mainWindow.SetPreviousRollback(RollbackEntry(), RollbackPrevious);
             mainWindow.UpdateMain(facts,
                 "Версия: " + Program.Version + "; бандл: " + engine.Current + "\r\nПапка: " + home +
                 "\r\nПуть: " + StatusView.Title(transport) + "; " + StatusView.Speed(transport) + "; проверен: " + StatusView.CheckedAt(transport) +
@@ -918,6 +923,7 @@ namespace RemoteAgents.Launcher
                     fault.Publish(bus); return;
                 }
                 WindowCommand command = WindowModel.Route(args);
+                if (args.Contains("--rollback-previous")) { RollbackPrevious(); return; }
                 if (args.Contains("--exit") || args.Contains("--uninstall")) { RequestExit(); return; }
                 var diskShell = DiskShellRequest.Parse(args);
                 if (diskShell != null) {

@@ -2,6 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 
@@ -9,7 +12,7 @@ namespace RemoteAgents.Launcher
 {
     /// <summary>
     /// Журнал шины событий (BusJournal, шаг B1).
-    /// Подписчик на "*" шины, пишет события в logs\bus.log через RaLog (формат jsonl).
+    /// Подписчик на "*" шины, пишет события в logs\bus.log через RaLog (формат docs/LOGS.md).
     /// Конституция 4б: шумные топики (tick.*, singbox.line INFO) подавляются и считаются,
     /// сводка bus.noise-summary пишется каждые 1000 подавленных; одинаковые события сворачиваются (до 100 повторов).
     /// </summary>
@@ -22,6 +25,7 @@ namespace RemoteAgents.Launcher
         private readonly EventBus _bus;
         private readonly string _logsDir;
         private readonly Action<string> _sink;
+        private readonly Func<string, bool> _trySink;
         private readonly HashSet<string> _exclude;
         private readonly IDisposable _subscription;
         private readonly object _lock = new object();
@@ -32,6 +36,8 @@ namespace RemoteAgents.Launcher
 
         // Последнее записанное событие: только для сравнения с повторами; само оно уже на диске (4б).
         private BusEvent _last;
+        private string _lastKey;
+        private DateTime _repeatUtc;
         private int _repeatCount;
         private long _summarizedAt;
         private int _disposed;
@@ -56,11 +62,13 @@ namespace RemoteAgents.Launcher
             get { lock (_lock) return _repeatCount; }
         }
 
-        public BusJournal(EventBus bus, string logsDir = null, Action<string> sink = null, IEnumerable<string> excludeTopics = null)
+        public BusJournal(EventBus bus, string logsDir = null, Action<string> sink = null, IEnumerable<string> excludeTopics = null,
+            Func<string, bool> trySink = null)
         {
             _bus = bus ?? throw new ArgumentNullException(nameof(bus));
             _logsDir = logsDir;
             _sink = sink;
+            _trySink = trySink;
             // Исключённые топики не пишутся и не считаются (служба: singbox.line уже есть как core.line).
             if (excludeTopics != null) _exclude = new HashSet<string>(excludeTopics, StringComparer.Ordinal);
             _subscription = _bus.Subscribe("*", OnEvent);
@@ -92,8 +100,8 @@ namespace RemoteAgents.Launcher
                 FlushPendingLocked();
                 if (_suppressedCount > _summarizedAt)
                 {
-                    WriteLineLocked(FormatNoiseSummary(DateTime.UtcNow));
-                    _summarizedAt = _suppressedCount;
+                    if (WriteLineLocked(FormatNoiseSummary(DateTime.UtcNow)))
+                        _summarizedAt = _suppressedCount;
                 }
             }
         }
@@ -122,15 +130,17 @@ namespace RemoteAgents.Launcher
 
                         if (_suppressedCount % NoiseSummaryThreshold == 0)
                         {
-                            WriteLineLocked(FormatNoiseSummary(evt.Utc));
-                            _summarizedAt = _suppressedCount;
+                            if (WriteLineLocked(FormatNoiseSummary(evt.Utc)))
+                                _summarizedAt = _suppressedCount;
                         }
                         return;
                     }
 
-                    if (_last != null && AreIdentical(_last, evt))
+                    string key = Identity(evt);
+                    if (_last != null && _lastKey == key)
                     {
-                        _repeatCount++;
+                        if (_repeatCount < int.MaxValue) _repeatCount++;
+                        _repeatUtc = evt.Utc;
                         if (_repeatCount >= CollapseThreshold)
                         {
                             FlushPendingLocked();
@@ -139,9 +149,13 @@ namespace RemoteAgents.Launcher
                     }
 
                     // Смена события: итог повторов предыдущего, затем новое пишется сразу.
-                    FlushPendingLocked();
-                    _last = evt;
-                    WriteLineLocked(FormatEvent(evt));
+                    if (!FlushPendingLocked()) return;
+                    _last = null; _lastKey = null;
+                    if (!WriteLineLocked(FormatEvent(evt))) return;
+                    // Не удерживаем исходные поля/длинные значения между событиями: только SHA-256 и метаданные.
+                    _lastKey = key;
+                    _last = new BusEvent(evt.Seq, Cut(evt.Topic), Cut(evt.Source), evt.Utc, null);
+                    _repeatUtc = evt.Utc;
                 }
             }
             catch
@@ -150,36 +164,40 @@ namespace RemoteAgents.Launcher
             }
         }
 
-        private void FlushPendingLocked()
+        private bool FlushPendingLocked()
         {
-            if (_last == null || _repeatCount == 0) return;
+            if (_last == null || _repeatCount == 0) return true;
 
             int count = _repeatCount;
+            if (!WriteLineLocked(FormatRepeat(_last, count, _repeatUtc))) return false;
             _repeatCount = 0;
-            WriteLineLocked(FormatRepeat(_last, count));
+            return true;
         }
 
-        private void WriteLineLocked(string line)
+        private bool WriteLineLocked(string line)
         {
-            if (string.IsNullOrEmpty(line)) return;
+            if (string.IsNullOrEmpty(line)) return true;
             try
             {
+                // Адаптеры файловых журналов подтверждают фактическую запись; Action оставлен для прежних вызовов.
+                if (_trySink != null) return _trySink(line);
                 if (_sink != null)
                 {
                     _sink(line);
-                    return;
+                    return true;
                 }
 
                 string dir = !string.IsNullOrEmpty(_logsDir) ? _logsDir : RaLog.DefaultDir;
                 if (!string.IsNullOrEmpty(dir))
                 {
-                    RaLog.AppendLine(dir, "bus", line);
+                    return RaLog.AppendLine(dir, "bus", line);
                 }
             }
             catch
             {
                 // Ошибка записи журнала не роняет шину
             }
+            return false;
         }
 
         private static bool IsNoisy(BusEvent evt)
@@ -211,27 +229,20 @@ namespace RemoteAgents.Launcher
             return false;
         }
 
-        private static bool AreIdentical(BusEvent a, BusEvent b)
+        // Хеш исходных значений до маскирования/обрезки: разные длинные строки не становятся повторами.
+        private static string Identity(BusEvent evt)
         {
-            if (ReferenceEquals(a, b)) return true;
-            if (a == null || b == null) return false;
-            if (!string.Equals(a.Topic, b.Topic, StringComparison.Ordinal)) return false;
-            if (!string.Equals(a.Source, b.Source, StringComparison.Ordinal)) return false;
-
-            var fa = a.Fields;
-            var fb = b.Fields;
-            int ca = fa != null ? fa.Count : 0;
-            int cb = fb != null ? fb.Count : 0;
-            if (ca != cb) return false;
-            if (ca == 0) return true;
-
-            foreach (var pair in fa)
-            {
-                if (!fb.TryGetValue(pair.Key, out var bVal)) return false;
-                if (!string.Equals(pair.Value, bVal, StringComparison.Ordinal)) return false;
+            using (var sha = SHA256.Create())
+            using (var stream = new CryptoStream(Stream.Null, sha, CryptoStreamMode.Write))
+            using (var writer = new BinaryWriter(stream, Encoding.UTF8)) {
+                writer.Write(evt.Topic); writer.Write(evt.Source); writer.Write(evt.Fields.Count);
+                foreach (var pair in evt.Fields.OrderBy(p => p.Key, StringComparer.Ordinal)) {
+                    writer.Write(pair.Key); writer.Write(pair.Value != null);
+                    if (pair.Value != null) writer.Write(pair.Value);
+                }
+                writer.Flush(); stream.FlushFinalBlock();
+                return Convert.ToBase64String(sha.Hash);
             }
-
-            return true;
         }
 
         private static DateTimeOffset ToOffset(DateTime utc)
@@ -266,14 +277,16 @@ namespace RemoteAgents.Launcher
             return RaLog.Format(ToOffset(evt.Utc), LogLevel.Info, "bus", evt.Topic, fields, RaLog.Session);
         }
 
-        private static string FormatRepeat(BusEvent evt, int count)
+        private static string FormatRepeat(BusEvent evt, int count, DateTime utc)
         {
             var fields = new List<KeyValuePair<string, string>>
             {
                 new KeyValuePair<string, string>("topic", Cut(evt.Topic)),
+                new KeyValuePair<string, string>("source", evt.Source),
+                new KeyValuePair<string, string>("first_seq", evt.Seq.ToString(CultureInfo.InvariantCulture)),
                 new KeyValuePair<string, string>("count", count.ToString(CultureInfo.InvariantCulture))
             };
-            return RaLog.Format(ToOffset(evt.Utc), LogLevel.Info, "bus", "repeat", fields, RaLog.Session);
+            return RaLog.Format(ToOffset(utc), LogLevel.Info, "bus", "repeat", fields, RaLog.Session);
         }
 
         private string FormatNoiseSummary(DateTime utc)

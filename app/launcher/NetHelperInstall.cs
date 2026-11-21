@@ -14,12 +14,11 @@ using System.Threading;
 namespace RemoteAgents.Launcher
 {
     // свой код только как обвязка над SCM и sing-box
-    internal static class NetHelperInstall
+    internal static partial class NetHelperInstall
     {
         // NetHelperVersionTests (LanTests in app/launcher/tests/run.sh --full) checks the version/source SHA-256 pin.
         // It detects source changes without a pin update, but cannot decide whether HelperVersion must increase.
         // Reviewers must bump HelperVersion for every change to installed service behavior, then update the pin.
-        internal const string HelperVersion = "15";
         internal const string ServiceName = "RemoteAgentsNet";
         internal const string DisplayName = "RemoteAgents: локальные сети и VPN";
         internal static bool NeedsInstall(string installed)
