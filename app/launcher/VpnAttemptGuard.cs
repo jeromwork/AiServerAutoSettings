@@ -99,6 +99,9 @@ namespace RemoteAgents.Launcher
         internal bool RolledBack(string attempt)
         { lock (gate) return att == attempt && rolledBack; }
 
+        // Сбой после отката: окно и перезапись заметки не нужны (откат уже объяснил причину). rolled — снимок RolledBack ДО End.
+        internal static bool ShowFailureWindow(bool rolledBack) { return !rolledBack; }
+
         // Выключение кнопкой: текущая попытка больше не нужна, какой бы она ни была.
         internal void EndCurrent(string why)
         {

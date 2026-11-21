@@ -26,6 +26,7 @@ namespace RemoteAgents.Launcher
             ReasonTextsEverywhere();
             OpCounterReleasesOnlyOnLast();
             HelperRoutesCodeRollsBackAsRoutes();
+            RolledBackSnapshotMustPrecedeEnd();
             Console.WriteLine("PASS: VpnReasonsTests (" + assertions + " assertions passed)");
             return 0;
         }
@@ -180,6 +181,20 @@ namespace RemoteAgents.Launcher
                 r.Guard.Begin("f1");
                 r.Pub(BusTopics.BlockFailed, "block", "control");
                 Check(r.Rollbacks.Count == 1 && r.Rollbacks[0] == "f1|0|broke-bridge", "block.failed control -> broke-bridge, one rollback");
+            }
+        }
+
+        static void RolledBackSnapshotMustPrecedeEnd()
+        {
+            using (var r = new Rig()) {
+                r.Guard.Begin("s1");
+                r.Pub(BusTopics.BlockDegraded, "block", "transport", "reason", "x");
+                Check(r.Guard.RolledBack("s1"), "rolled back before End");
+                bool snapshot = r.Guard.RolledBack("s1");
+                r.Guard.End("s1", "error");
+                Check(!r.Guard.RolledBack("s1"), "End clears the attempt: RolledBack is false afterwards, so the snapshot must be taken first");
+                Check(!VpnAttemptGuard.ShowFailureWindow(snapshot), "after rollback no failure window");
+                Check(VpnAttemptGuard.ShowFailureWindow(false), "no rollback: failure window shown");
             }
         }
 

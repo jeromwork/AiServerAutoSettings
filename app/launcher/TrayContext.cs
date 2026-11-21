@@ -697,9 +697,10 @@ namespace RemoteAgents.Launcher
             if (!vpn.Definition.CommandManaged) { VpnFailure("Обновите компоненты программы перед включением VPN", fromCard); return; }
             string att = RaLog.Attempt.New("on");
             if (!AllowMutation()) { log.Write("vpn.click.ignored att=" + att + " msg=busy-or-closing"); return; }
-            actionBusy = vpnActionBusy = true; vpnActionWanted = true; vpnError = ""; netNote = ""; VpnAttemptBegin(att); vpnOps.Enter(); RefreshMain();
+            actionBusy = vpnActionBusy = true; vpnActionWanted = true; vpnError = ""; netNote = ""; VpnAttemptBegin(att); RefreshMain();
             log.Write("vpn.click.on att=" + att + " fromCard=" + fromCard); LogNetSnapshot("vpn.on.before", att);
             var vpnWatch = System.Diagnostics.Stopwatch.StartNew();
+            vpnOps.Enter(); // прямо перед try: finally всегда сделает Exit
             try {
                 if (netHelper == null) throw new IOException(HelperClient.PermissionRequired);
                 bool helperReady = await netHelper.EnsureReady(stop.Token);
@@ -729,7 +730,7 @@ namespace RemoteAgents.Launcher
                 VpnAttemptOn(att); // e2e запускает VpnAttemptGuard (один раз на попытку; vpn.state on мог прийти раньше)
                 if (mirror != null) Task.Run(() => { try { mirror.Pull(); } catch { } });
             } catch (OperationCanceledException) { log.Write("vpn.on.cancelled att=" + att); VpnAttemptEnd(att, "cancelled"); }
-            catch (Exception error) { VpnAttemptEnd(att, "error"); if (!closing) { log.Write("vpn.helper.failed att=" + att + " " + TickFailureLog.HelperFailure("vpn-on", error)); if (VpnAttemptRolledBack(att)) log.Write("vpn.on.rolledback att=" + att + " msg=failure-after-rollback"); else VpnFailure(NetHelperSetup.VpnFailureMessage(error), fromCard); } }
+            catch (Exception error) { bool rolled = VpnAttemptRolledBack(att); VpnAttemptEnd(att, "error"); /* End обнуляет попытку: решение об откате берём ДО него */ if (!closing) { log.Write("vpn.helper.failed att=" + att + " " + TickFailureLog.HelperFailure("vpn-on", error)); if (!VpnAttemptGuard.ShowFailureWindow(rolled)) log.Write("vpn.on.rolledback att=" + att + " msg=failure-after-rollback"); else VpnFailure(NetHelperSetup.VpnFailureMessage(error), fromCard); } }
             finally { if (vpnOps.Exit()) actionBusy = vpnActionBusy = false; if (!closing) RefreshMenu(); }
         }
         // Заметка проверки сети — только в подсказку трея, пока VPN включён; не пишется после выключения.
