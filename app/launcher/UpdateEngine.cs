@@ -156,6 +156,7 @@ namespace RemoteAgents.Launcher
         public void Activate(string version, bool accept = false, bool imagePrepared = false)
         {
             using (UpgradeInstaller.LockReceipt(Home)) {
+                UpgradeInstaller.RecoverPreviousRollback(Home);
                 Files.SafeVersion(version); BundleDefinition.Load(Folder(version));
                 if (Pending) throw new InvalidOperationException("Уже ожидается проверка здоровья");
                 string old = Current;

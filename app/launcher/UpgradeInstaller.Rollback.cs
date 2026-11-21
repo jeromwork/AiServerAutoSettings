@@ -88,21 +88,70 @@ namespace RemoteAgents.Launcher
                 p["fromVersion"] = engine.Current; p["fromHash"] = Files.Hash(Path.Combine(home, Product.ExeName));
                 p["previousVersion"] = engine.Previous; p["blockCurrent"] = blockCurrent;
                 p["descriptorHash"] = Files.Hash(PreviousPath(home));
-                // Write ahead: every step below is idempotent after process/power loss. No H2 receipt is made.
-                Json.Write(ManualRollbackPath(home), p);
-                CompletePreviousRollback(home, engine, p);
+                // Prove atomic replacement of this target before ANY durable state changes.
+                using (var image = Json.Str(p, "fromHash").Equals(Json.Str(p, "exeSha256"), StringComparison.OrdinalIgnoreCase) ? null :
+                    new PreviousReplacement(PreviousImage(home), Path.Combine(home, Product.ExeName), Json.Str(p, "exeSha256"))) {
+                    Json.Write(ManualRollbackPath(home), p);
+                    PreviousRollbackBoundary("journal");
+                    CompletePreviousRollback(home, engine, p, image);
+                }
                 return version;
             }
         }
-        internal static void RecoverPreviousRollback(string home)
+        internal static bool RecoverPreviousRollback(string home)
         {
-            if (!File.Exists(ManualRollbackPath(home))) return;
+            if (!File.Exists(ManualRollbackPath(home))) return false;
             using (LockReceipt(home, default(CancellationToken), ReceiptWorkerFuseMs)) {
-                if (!File.Exists(ManualRollbackPath(home))) return;
+                if (!File.Exists(ManualRollbackPath(home))) return false;
                 CompletePreviousRollback(home, new UpdateEngine(home, "0.0.0"), UpdateObservation.ReadReceipt(ManualRollbackPath(home)));
+                return true;
             }
         }
-        static void CompletePreviousRollback(string home, UpdateEngine engine, Dictionary<string, object> p)
+#if PORTABLE_TEST && !UPDATE_HEALTH_TESTS
+        [ThreadStatic] internal static Action<string> PreviousRollbackCheckpoint;
+#endif
+        static void PreviousRollbackBoundary(string step)
+        {
+#if PORTABLE_TEST && !UPDATE_HEALTH_TESTS
+            if (PreviousRollbackCheckpoint != null) PreviousRollbackCheckpoint(step);
+#endif
+        }
+        // Separate from H2's ReplaceImage: never rename away the installed executable.
+        sealed class PreviousReplacement : IDisposable
+        {
+            readonly string target, temp;
+            internal PreviousReplacement(string source, string target, string expectedHash)
+            {
+                this.target = target; temp = target + ".rollback.tmp";
+                string check = target + ".rollback-check.tmp", backup = target + ".rollback-probe.bak";
+                try {
+                    File.Copy(source, temp, true); FlushImage(temp);
+                    if (!Files.Hash(temp).Equals(expectedHash, StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidDataException("SHA256 подготовленного EXE ручного отката не совпадает");
+                    // A byte-identical atomic swap tests target ACLs, image locks and filesystem support.
+                    // A failure leaves the original target and ALL state files untouched; no rename fallback.
+                    File.Copy(target, check, true); FlushImage(check);
+                    ReplaceAtomic(check, target, backup);
+                    File.Delete(backup);
+                    PreviousRollbackBoundary("preflight");
+                } catch {
+                    Dispose(); throw;
+                } finally { if (File.Exists(check)) File.Delete(check); }
+            }
+            static void FlushImage(string path)
+            { using (var f = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.Read)) f.Flush(true); }
+            internal void Commit() { ReplaceAtomic(temp, target, null); }
+            static void ReplaceAtomic(string source, string target, string backup)
+            {
+                try { File.Replace(source, target, backup); }
+                catch (Exception ex) {
+                    if (!(ex is IOException) && !(ex is UnauthorizedAccessException) && !(ex is PlatformNotSupportedException)) throw;
+                    throw new IOException("Атомарная замена EXE недоступна; состояние сохранено. Устраните отказ доступа и повторите запуск.", ex);
+                }
+            }
+            public void Dispose() { if (File.Exists(temp)) File.Delete(temp); }
+        }
+        static void CompletePreviousRollback(string home, UpdateEngine engine, Dictionary<string, object> p, PreviousReplacement prepared = null)
         {
             if (ReceiptRecoveryBlocked(home) || File.Exists(ReceiptPath(home)) || engine.Pending)
                 throw new InvalidOperationException("Ручной откат заблокирован другой квитанцией обновления");
@@ -115,28 +164,42 @@ namespace RemoteAgents.Launcher
             if (!Path.GetFullPath(Json.Str(p, "bundleDir")).Equals(Path.GetFullPath(engine.Folder(version)), StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("Путь ручного отката изменился");
             BundleDefinition.Load(engine.Folder(version));
-            if (!File.Exists(PreviousImage(home)) || !Files.Hash(PreviousImage(home)).Equals(hash, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException("Образ ручного отката отсутствует или SHA256 не совпадает");
             if (File.Exists(PreviousPath(home)) && Files.Hash(PreviousPath(home)) != descriptorHash)
                 throw new InvalidDataException("Описание предыдущей версии изменилось");
             string target = Path.Combine(home, Product.ExeName);
-            // ReplaceImage's Windows rename fallback can be interrupted with only .retired present.
-            string actual = File.Exists(target) ? Files.Hash(target) : Files.Hash(target + ".retired");
-            if (!actual.Equals(fromHash, StringComparison.OrdinalIgnoreCase) && !actual.Equals(hash, StringComparison.OrdinalIgnoreCase))
+            if (!File.Exists(target)) throw new InvalidDataException("Установленный EXE ручного отката отсутствует");
+            string actual = Files.Hash(target);
+            bool installed = actual.Equals(hash, StringComparison.OrdinalIgnoreCase);
+            if (!actual.Equals(fromHash, StringComparison.OrdinalIgnoreCase) && !installed)
                 throw new InvalidDataException("Установленный EXE изменился во время отката");
-            if (!File.Exists(target) || !actual.Equals(hash, StringComparison.OrdinalIgnoreCase)) ReplaceImage(PreviousImage(home), target);
-            Files.Atomic(Path.Combine(engine.Root, "current.txt"), version + "\n");
-            Files.Atomic(Path.Combine(engine.Root, "previous.txt"), "");
-            if (Json.Bool(p, "blockCurrent")) engine.MarkBad(from);
-            string statePath = Path.Combine(engine.Root, "update-state.json");
-            var state = File.Exists(statePath) ? Json.Read(statePath) : Json.Map(null);
-            state["pending"] = false; state.Remove("queuedFailure"); state.Remove("failureReason"); state.Remove("target");
-            state["summary"] = "Возвращена предыдущая версия " + version; Json.Write(statePath, state);
-            // Consume the descriptor: a second click/restart cannot bounce between images.
-            if (File.Exists(PreviousPath(home))) File.Delete(PreviousPath(home));
-            engine.Cleanup();
-            File.Delete(ManualRollbackPath(home));
-            new Journal(home).Write("update.rollback.manual version=" + version + " blocked=" + Json.Bool(p, "blockCurrent"));
+            if (!installed && (!File.Exists(PreviousImage(home)) || !Files.Hash(PreviousImage(home)).Equals(hash, StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidDataException("Образ ручного отката отсутствует или SHA256 не совпадает");
+            // On recovery, preflight before resuming state writes. A final-swap failure keeps the
+            // journal and coherent target-version state for the next startup/Apply/OTA attempt.
+            using (var image = prepared ?? (installed ? null : new PreviousReplacement(PreviousImage(home), target, hash))) {
+                Files.Atomic(Path.Combine(engine.Root, "current.txt"), version + "\n");
+                PreviousRollbackBoundary("current");
+                Files.Atomic(Path.Combine(engine.Root, "previous.txt"), "");
+                PreviousRollbackBoundary("previous");
+                if (Json.Bool(p, "blockCurrent")) engine.MarkBad(from);
+                PreviousRollbackBoundary("bad");
+                string statePath = Path.Combine(engine.Root, "update-state.json");
+                var state = File.Exists(statePath) ? Json.Read(statePath) : Json.Map(null);
+                state["pending"] = false; state.Remove("queuedFailure"); state.Remove("failureReason"); state.Remove("target");
+                state["summary"] = "Возвращена предыдущая версия " + version; Json.Write(statePath, state);
+                PreviousRollbackBoundary("update-state");
+                if (File.Exists(PreviousPath(home))) File.Delete(PreviousPath(home));
+                PreviousRollbackBoundary("descriptor");
+                engine.Cleanup();
+                PreviousRollbackBoundary("bundle");
+                new Journal(home).Write("update.rollback.manual.prepared version=" + version + " blocked=" + Json.Bool(p, "blockCurrent"));
+                PreviousRollbackBoundary("before-exe");
+                // LAST mutation except journal removal. The previous EXE may predate H4 entirely.
+                if (!installed) image.Commit();
+                PreviousRollbackBoundary("exe");
+                PreviousRollbackBoundary("before-journal-delete");
+                File.Delete(ManualRollbackPath(home));
+            }
         }
     }
 }

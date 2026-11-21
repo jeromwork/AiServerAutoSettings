@@ -103,8 +103,7 @@ namespace RemoteAgents.Launcher
                             bool command = args.Any(a => new[] { "--exit", "--uninstall", "--logs", "--rollback", "--rollback-previous", "--restart-components", "--check-updates", "--settings", "--disk-shell" }.Contains(a));
                             // --tray with --home is also the isolated development/smoke entry point.
                             bool install = external && !command && !(args.Contains("--tray") && args.Contains("--home"));
-                            if (owned && File.Exists(UpgradeInstaller.ManualRollbackPath(home))) {
-                                UpgradeInstaller.RecoverPreviousRollback(home);
+                            if (owned && UpgradeInstaller.RecoverPreviousRollback(home)) {
                                 launch(target, false); return 0;
                             }
                             if (owned && args.Contains("--rollback-previous")) {

@@ -57,7 +57,7 @@ namespace RemoteAgents.Launcher
         {
             var before = Snapshot(home); bool refused = false;
             try { action(); } catch (Exception ex) {
-                if (!(ex is IOException) && !(ex is InvalidDataException) && !(ex is InvalidOperationException)) throw;
+                if (!(ex is IOException) && !(ex is UnauthorizedAccessException) && !(ex is InvalidDataException) && !(ex is InvalidOperationException)) throw;
                 Check(ex.Message.Length > 0, reason + ": readable reason"); refused = true;
             }
             Check(refused, reason + ": refused");
@@ -129,34 +129,195 @@ namespace RemoteAgents.Launcher
                 finally { release.Set(); thread.Join(); }
             }
         }
+        static void WriteZip(string path, string version)
+        {
+            using (var archive = ZipFile.Open(path, ZipArchiveMode.Create)) {
+                using (var w = new StreamWriter(archive.CreateEntry("bundle-version.txt").Open())) w.Write(version + "\n");
+                using (var w = new StreamWriter(archive.CreateEntry("components.json").Open()))
+                    w.Write(Json.Encode(new[] { new { name = "transport", exe = "unused", critical = true } }));
+            }
+        }
+        static int Child(string home, string mode, string extra, bool installed = false)
+        {
+            // Execute the actual installed managed image after a crash, using the fixture's runtime config.
+            var start = new ProcessStartInfo("dotnet") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
+            start.ArgumentList.Add("exec"); start.ArgumentList.Add("--runtimeconfig");
+            start.ArgumentList.Add(Path.ChangeExtension(Image, ".runtimeconfig.json"));
+            start.ArgumentList.Add(installed ? Target(home) : Image);
+            start.ArgumentList.Add(mode); start.ArgumentList.Add(home); start.ArgumentList.Add(extra);
+            using (var process = Process.Start(start)) {
+                var output = process.StandardOutput.ReadToEndAsync(); var error = process.StandardError.ReadToEndAsync();
+                if (!process.WaitForExit(15000)) { process.Kill(true); throw new Exception("child startup fuse: " + mode); }
+                string details = output.GetAwaiter().GetResult() + error.GetAwaiter().GetResult();
+                Check(process.ExitCode == (mode == "--interrupt" ? 73 : 0), mode + " child failed: " + details);
+                return process.ExitCode;
+            }
+        }
+        static void ConsistentTargetState(string home, string hash, bool legacy = false)
+        {
+            var engine = Engine(home);
+            Check(File.Exists(Target(home)) && Files.Hash(Target(home)) == hash, "installed target remains launchable with verified bytes");
+            Check(engine.Current == "1.0.0" && engine.Previous == "" && !engine.Pending && engine.IsBad("2.0.0"), "all version state agrees with restored EXE");
+            var state = Json.Read(Path.Combine(engine.Root, "update-state.json"));
+            Check(!Json.Bool(state, "pending") && !state.ContainsKey("queuedFailure") && !state.ContainsKey("failureReason") && !state.ContainsKey("target") && Json.Bool(state, "resumeVpn"), "target update-state is complete");
+            Check(!File.Exists(UpgradeInstaller.PreviousPath(home)) && !File.Exists(UpgradeInstaller.ReceiptPath(home)), "descriptor consumed without H2 receipt");
+            if (!legacy) Check(!File.Exists(UpgradeInstaller.ManualRollbackPath(home)), "startup consumed transaction journal");
+            BundleDefinition.Load(engine.Folder(engine.Current));
+        }
+        static int ChildMain(string[] args)
+        {
+            string mode = args[0], home = args[1], extra = args[2];
+            if (mode == "--interrupt") {
+                var p = Json.Read(UpgradeInstaller.PreviousPath(home)); string oldHash = Json.Str(p, "exeSha256"), fromHash = Files.Hash(Target(home));
+                UpgradeInstaller.PreviousRollbackCheckpoint = step => {
+                    Check(File.Exists(Target(home)), "main EXE exists at EVERY transaction boundary: " + step);
+                    string actual = Files.Hash(Target(home));
+                    Check(actual == oldHash || actual == fromHash, "main EXE hash at boundary: " + step);
+                    if (step == "exe" || step == "before-journal-delete") ConsistentTargetState(home, oldHash, legacy: true);
+                    if (step == extra) Environment.Exit(73); // Actual process termination: no finally/shared memory recovery.
+                };
+                UpgradeInstaller.RollbackPrevious(home, Engine(home), true);
+                throw new Exception("missing interruption boundary " + extra);
+            }
+            if (mode == "--commit-failure") {
+                string original = Files.Hash(Target(home));
+                UpgradeInstaller.PreviousRollbackCheckpoint = step => {
+                    if (step == "before-exe") File.Delete(Target(home) + ".rollback.tmp"); // Real source loss after successful preflight.
+                };
+                bool refused = false;
+                try { UpgradeInstaller.RollbackPrevious(home, Engine(home), true); }
+                catch (IOException ex) { Check(ex.Message.Contains("Атомарная замена EXE недоступна"), "final swap diagnostic"); refused = true; }
+                Check(refused && Files.Hash(Target(home)) == original && File.Exists(UpgradeInstaller.ManualRollbackPath(home)), "final atomic failure retains original EXE and recovery journal");
+                var failedEngine = Engine(home);
+                Check(failedEngine.Current == "1.0.0" && failedEngine.Previous == "" && failedEngine.IsBad("2.0.0") && !failedEngine.Pending, "final failure preserves completed target state");
+                return 0;
+            }
+            if (mode == "--legacy-start") {
+                // Emulate an EXE predating H4: ordinary bundle/state reads, NO manual journal recovery.
+                ConsistentTargetState(home, extra, legacy: true); return 0;
+            }
+            if (mode == "--start") {
+                // Exactly the recovery entry used by Program before normal startup/StartLauncher.
+                UpgradeInstaller.RecoverPreviousRollback(home);
+                Engine(home).Recover(); ConsistentTargetState(home, extra);
+                UpgradeInstaller.RecoverPreviousRollback(home); ConsistentTargetState(home, extra); return 0;
+            }
+            if (mode.StartsWith("--blocked-", StringComparison.Ordinal)) {
+                bool refused = false;
+                try {
+                    var blockedEngine = Engine(home);
+                    if (mode == "--blocked-start") UpgradeInstaller.RecoverPreviousRollback(home);
+                    else if (mode == "--blocked-apply") UpgradeInstaller.Apply(home, Image, Path.Combine(home, "next.zip"), "1.0.0", false, _ => true);
+                    else if (mode == "--blocked-ota") UpgradeInstaller.ActivatePrepared(home, blockedEngine, new Manifest { Version = "3.0.0" });
+                    else blockedEngine.Activate("3.0.0");
+                } catch (Exception ex) {
+                    if (!(ex is IOException) && !(ex is UnauthorizedAccessException)) throw;
+                    Check(ex.Message.Length > 0, "atomic recovery refusal has diagnostic"); refused = true;
+                }
+                Check(refused && File.Exists(Target(home)) && File.Exists(UpgradeInstaller.ManualRollbackPath(home)) &&
+                    !File.Exists(UpgradeInstaller.ReceiptPath(home)) && !Engine(home).Pending, "blocked recovery never starts next transaction");
+                return 0;
+            }
+            var engine = Engine(home);
+            if (mode == "--apply") {
+                UpgradeInstaller.Apply(home, Image, Path.Combine(home, "next.zip"), "1.0.0", false,
+                    _ => { ConsistentTargetState(home, extra); return true; });
+            } else if (mode == "--ota") {
+                string source = Path.Combine(engine.Folder("3.0.0"), Product.ExeName);
+                UpgradeInstaller.ActivatePrepared(home, engine, new Manifest { Version = "3.0.0", LauncherHash = Files.Hash(source),
+                    LauncherVersion = FileVersionInfo.GetVersionInfo(source).FileVersion });
+            } else if (mode == "--bundle") engine.Activate("3.0.0");
+            else throw new Exception("unknown child mode " + mode);
+            Check(engine.Current == "3.0.0" && engine.Previous == "1.0.0" && engine.Pending, "next activation uses recovered version as previous");
+            Check(!File.Exists(UpgradeInstaller.ManualRollbackPath(home)) && Files.Hash(Backup(home)) == extra, "manual recovery precedes backup/H2 receipt creation");
+            Check(File.Exists(UpgradeInstaller.ReceiptPath(home)) == (mode != "--bundle"), "next activation preserves H2 receipt contract");
+            return 0;
+        }
         static void RecoverInterrupted(string home)
         {
-            foreach (string boundary in new[] { "prepared", "renamed", "exe", "current", "previous", "descriptor" }) {
-                string sub = Path.Combine(home, boundary); var engine = Seed(sub); Upgrade(sub, engine, "2.0.0"); Accept(sub, engine);
-                var p = Json.Read(UpgradeInstaller.PreviousPath(sub));
-                p["fromVersion"] = engine.Current; p["fromHash"] = Files.Hash(Target(sub)); p["previousVersion"] = engine.Previous;
-                p["blockCurrent"] = true; p["descriptorHash"] = Files.Hash(UpgradeInstaller.PreviousPath(sub));
-                Json.Write(UpgradeInstaller.ManualRollbackPath(sub), p);
-                if (boundary == "renamed") { File.Delete(Target(sub) + ".retired"); File.Move(Target(sub), Target(sub) + ".retired"); }
-                if (new[] { "exe", "current", "previous", "descriptor" }.Contains(boundary)) UpgradeInstaller.ReplaceImage(Backup(sub), Target(sub));
-                if (new[] { "current", "previous", "descriptor" }.Contains(boundary)) Files.Atomic(Path.Combine(engine.Root, "current.txt"), "1.0.0\n");
-                if (new[] { "previous", "descriptor" }.Contains(boundary)) Files.Atomic(Path.Combine(engine.Root, "previous.txt"), "");
-                if (boundary == "descriptor") File.Delete(UpgradeInstaller.PreviousPath(sub));
-                UpgradeInstaller.RequireReceiptRecovery(sub);
-                Check(engine.Current == "1.0.0" && File.ReadAllText(Target(sub)) == "image 1" && engine.IsBad("2.0.0"), "restart resumes write-ahead boundary: " + boundary);
-                Check(!File.Exists(UpgradeInstaller.ManualRollbackPath(sub)) && !engine.Pending && !File.Exists(UpgradeInstaller.ReceiptPath(sub)), "recovery is terminal: " + boundary);
-                UpgradeInstaller.RequireReceiptRecovery(sub);
+            string[] boundaries = { "preflight", "journal", "current", "previous", "bad", "update-state", "descriptor", "bundle", "before-exe", "exe", "before-journal-delete" };
+            foreach (string boundary in boundaries) foreach (string mode in new[] { "--start", "--apply", "--ota", "--bundle" }) {
+                string sub = Path.Combine(home, boundary + mode); var engine = Seed(sub);
+                // Both images really execute; an appended marker gives the legacy fixture a distinct SHA256.
+                File.Copy(Image, Target(sub), true); using (var f = new FileStream(Target(sub), FileMode.Append)) f.WriteByte(0);
+                string oldHash = Files.Hash(Target(sub)); Upgrade(sub, engine, "2.0.0"); Accept(sub, engine);
+                Json.Write(Path.Combine(engine.Root, "update-state.json"), new { pending = true, queuedFailure = "old", failureReason = "old", target = "2.0.0", resumeVpn = true });
+                // Do not create a new bundle until after the interruption (Cleanup is allowed to retire history).
+                Child(sub, "--interrupt", boundary);
+                Check(File.Exists(Target(sub)), "main EXE exists after process termination: " + boundary);
+                bool committed = boundary == "exe" || boundary == "before-journal-delete";
+                Check(Files.Hash(Target(sub)) == (committed ? oldHash : Files.Hash(Image)), "real EXE hash at interrupted boundary: " + boundary);
+                if (committed) {
+                    var before = Snapshot(sub);
+                    Child(sub, "--legacy-start", oldHash, installed: true);
+                    Check(Snapshot(sub).All(p => before[p.Key] == p.Value), "pre-H4 startup needs no journal writes");
+                    // Committed recovery must not depend on retaining the old backup image.
+                    if (mode == "--start") File.Delete(Backup(sub));
+                }
+                if (boundary == "preflight") {
+                    Check(!File.Exists(UpgradeInstaller.ManualRollbackPath(sub)) && engine.Current == "2.0.0", "preflight crash leaves old state intact");
+                    // No transaction was started: explicitly retry the requested rollback in a fresh process.
+                    Child(sub, "--interrupt", "journal");
+                }
+                if (mode == "--apply") WriteZip(Path.Combine(sub, "next.zip"), "3.0.0");
+                if (mode == "--ota" || mode == "--bundle") {
+                    Bundle(engine, "3.0.0"); File.Copy(Image, Path.Combine(engine.Folder("3.0.0"), Product.ExeName));
+                }
+                Child(sub, mode, oldHash, installed: true);
+                if (mode == "--start") Child(sub, "--legacy-start", oldHash, installed: true);
             }
+        }
+        static void AtomicReplaceRefusal(string home)
+        {
+            var engine = Seed(home); Upgrade(home, engine, "2.0.0"); Accept(home, engine);
+            // File.Replace itself fails creating its backup over a directory. No mocked replacement result.
+            string denied = Target(home) + ".rollback-probe.bak"; Directory.CreateDirectory(denied);
+            RefuseUnchanged(home, () => UpgradeInstaller.RollbackPrevious(home, engine, true), "real atomic File.Replace refusal before journal/state");
+            Check(File.Exists(Target(home)) && !File.Exists(UpgradeInstaller.ManualRollbackPath(home)), "replace refusal keeps main EXE and starts no transaction");
+            Directory.Delete(denied);
+            UpgradeInstaller.RollbackPrevious(home, engine, true);
+            Check(engine.Current == "1.0.0", "atomic replacement can be retried after fixing access");
+        }
+        static void RecoveryReplaceRefusal(string home)
+        {
+            var engine = Seed(home); File.Copy(Image, Target(home), true);
+            using (var f = new FileStream(Target(home), FileMode.Append)) f.WriteByte(0);
+            string hash = Files.Hash(Target(home)); Upgrade(home, engine, "2.0.0"); Accept(home, engine);
+            Json.Write(Path.Combine(engine.Root, "update-state.json"), new { pending = true, queuedFailure = "old", failureReason = "old", target = "2.0.0", resumeVpn = true });
+            Child(home, "--interrupt", "before-exe");
+            string denied = Target(home) + ".rollback-probe.bak"; Directory.CreateDirectory(denied);
+            WriteZip(Path.Combine(home, "next.zip"), "3.0.0"); Bundle(engine, "3.0.0");
+            // Crash scratch files are disposable, not durable recovery inputs. Start without one:
+            // each failed retry must clean its own scratch and preserve EVERY existing file below.
+            File.Delete(Target(home) + ".rollback.tmp");
+            var before = Snapshot(home);
+            foreach (string mode in new[] { "--blocked-start", "--blocked-apply", "--blocked-ota", "--blocked-bundle" }) {
+                Child(home, mode, hash, installed: true);
+                var after = Snapshot(home);
+                Check(before.Count == after.Count && before.All(p => after.ContainsKey(p.Key) && after[p.Key] == p.Value), "failed recovery preserves files before " + mode);
+            }
+            Directory.Delete(denied);
+            Child(home, "--start", hash, installed: true);
+        }
+        static void FinalReplaceFailure(string home)
+        {
+            var engine = Seed(home); File.Copy(Image, Target(home), true);
+            using (var f = new FileStream(Target(home), FileMode.Append)) f.WriteByte(0);
+            string hash = Files.Hash(Target(home)); Upgrade(home, engine, "2.0.0"); Accept(home, engine);
+            Json.Write(Path.Combine(engine.Root, "update-state.json"), new { resumeVpn = true });
+            Child(home, "--commit-failure", hash);
+            Child(home, "--start", hash, installed: true);
         }
         static void RealWriteFailure(string home)
         {
             var engine = Seed(home); Upgrade(home, engine, "2.0.0"); Accept(home, engine);
+            string hash = Files.Hash(Target(home));
             string state = Path.Combine(engine.Root, "update-state.json"); Directory.CreateDirectory(state);
             bool failed = false;
             try { UpgradeInstaller.RollbackPrevious(home, engine, true); } catch (IOException) { failed = true; }
-            Check(failed && File.Exists(UpgradeInstaller.ManualRollbackPath(home)), "real atomic-write failure leaves recovery journal");
-            Directory.Delete(state); UpgradeInstaller.RequireReceiptRecovery(home);
-            Check(engine.Current == "1.0.0" && File.ReadAllText(Target(home)) == "image 1" && !File.Exists(UpgradeInstaller.ManualRollbackPath(home)), "retry completes failed manual transaction");
+            Check(failed && File.Exists(UpgradeInstaller.ManualRollbackPath(home)) && Files.Hash(Target(home)) == hash, "real state-write failure keeps old EXE and recovery journal");
+            Directory.Delete(state); UpgradeInstaller.RecoverPreviousRollback(home);
+            Check(engine.Current == "1.0.0" && File.ReadAllText(Target(home)) == "image 1" && !File.Exists(UpgradeInstaller.ManualRollbackPath(home)), "startup entry retries failed state write");
         }
         static void AutoRollbackConsumesDescriptor(string home)
         {
@@ -196,10 +357,11 @@ namespace RemoteAgents.Launcher
             var args = new[] { "--rollback-previous", "--home", "unused" };
             Check(WindowModel.Route(args) == WindowCommand.RollbackPrevious && !WindowModel.ShouldShow(args) && !WindowModel.ForwardArguments(args).Contains("--show"), "CLI routes and forwards rollback without opening main window");
         }
-        public static int Main()
+        public static int Main(string[] args)
         {
+            if (args.Length > 0) return ChildMain(args);
             WithHome(ActivationAndRetention); WithHome(h => SuccessfulRollback(h, false)); WithHome(h => SuccessfulRollback(h, true));
-            WithHome(Refusals); WithHome(h => BusyMutex(h, false)); WithHome(h => BusyMutex(h, true)); WithHome(RecoverInterrupted); WithHome(RealWriteFailure);
+            WithHome(Refusals); WithHome(h => BusyMutex(h, false)); WithHome(h => BusyMutex(h, true)); WithHome(RecoverInterrupted); WithHome(AtomicReplaceRefusal); WithHome(RecoveryReplaceRefusal); WithHome(FinalReplaceFailure); WithHome(RealWriteFailure);
             WithHome(AutoRollbackConsumesDescriptor); WithHome(ApplyAndBundleOnly); Presentation();
             NetHelperVersionTests.Run();
             Console.WriteLine("PASS: RollbackTests (" + checks + " checks; manual events, local transactions, no Windows/network)"); return 0;
