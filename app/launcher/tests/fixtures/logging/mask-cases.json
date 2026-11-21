@@ -138,5 +138,13 @@
  {
   "in": "ws=120 private=300 gcHeap=40 private_key=abc",
   "out": "ws=120 private=300 gcHeap=40 private_key=***"
+ },
+ {
+  "in": "private-key=hyphen-secret next=ok",
+  "out": "private-key=*** next=ok"
+ },
+ {
+  "in": "{\"private_key\": \"json-secret\"}",
+  "out": "{\"private_key\": ***}"
  }
 ]

@@ -101,6 +101,7 @@ namespace RemoteAgents.Launcher
             catch { if (log != null) log.Write("cleanup", 1); }
             lock (pipeGate) { if (pipe != null) { pipe.Dispose(); pipe = null; } }
             if (log != null) log.Write("stopped", 0);
+            RaLog.FlushLimits();
         }
         protected override void OnStop()
         {
