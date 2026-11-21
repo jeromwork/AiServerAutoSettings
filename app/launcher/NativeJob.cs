@@ -53,6 +53,28 @@ namespace RemoteAgents.Launcher
                 }
             }
         }
+        // stdout и stderr процесса — в анонимный pipe; читатель (CoreOutputReader) получает события по мере записи.
+        // Конец чтения не наследуется; конец записи закрывается в родителе сразу после старта.
+        public Process StartPiped(string exe, string[] args, string cwd, out SafeFileHandle readEnd)
+        {
+            lock (inheritGate) {
+                IntPtr input = IntPtr.Zero, read = IntPtr.Zero, write = IntPtr.Zero;
+                bool started = false;
+                try {
+                    var security = new SecurityAttributes { length = Marshal.SizeOf(typeof(SecurityAttributes)), inherit = true };
+                    if (!CreatePipe(out read, out write, ref security, 64 * 1024)) throw new Win32Exception();
+                    if (!SetHandleInformation(read, 1, 0)) throw new Win32Exception(); // HANDLE_FLAG_INHERIT off
+                    input = OpenInherited("NUL", 0x80000000, 3);
+                    var process = StartCore(exe, args, cwd, new StartupInfo { cb = Marshal.SizeOf(typeof(StartupInfo)), flags = 0x100, stdInput = input, stdOutput = write, stdError = write }, true);
+                    started = true;
+                    readEnd = new SafeFileHandle(read, true); read = IntPtr.Zero;
+                    return process;
+                } finally {
+                    foreach (var h in new[] { input, write }) if (h != IntPtr.Zero && h != new IntPtr(-1)) CloseHandle(h);
+                    if (!started && read != IntPtr.Zero) CloseHandle(read);
+                }
+            }
+        }
         static IntPtr OpenInherited(string path, uint access, uint disposition)
         {
             var security = new SecurityAttributes { length = Marshal.SizeOf(typeof(SecurityAttributes)), inherit = true };
@@ -129,6 +151,8 @@ namespace RemoteAgents.Launcher
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool CreateProcess(string app, StringBuilder command, IntPtr processAttributes, IntPtr threadAttributes, bool inherit, uint flags, IntPtr environment, string cwd, ref StartupInfoEx startup, out ProcessInfo info);
         [DllImport("kernel32.dll", SetLastError = true)] static extern uint ResumeThread(IntPtr thread);
         [DllImport("kernel32.dll")] static extern bool TerminateProcess(IntPtr process, uint code);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern bool CreatePipe(out IntPtr read, out IntPtr write, ref SecurityAttributes security, uint size);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
         [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
     }
 }

@@ -182,7 +182,7 @@ namespace RemoteAgents.Launcher
         {
             if (command == "log.read") {
                 ulong after; ulong.TryParse(Json.Str(request, "after", "0"), out after);
-                log.Core.Pump();
+                log.Core.Flush();
                 return HelperEventLog.Reply(log.Events.Read(after, Json.Int(request, "max", HelperEventLog.MaxRead)), NetHelperInstall.HelperVersion);
             }
             bool noisy = command == "status";

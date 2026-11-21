@@ -324,6 +324,7 @@ namespace RemoteAgents.Launcher
         // Журнал помощника (helper-events) и перенос вывода ядра; задаются службой, в тестах могут быть null.
         internal HelperEventLog Events;
         internal CoreLogPump CorePump;
+        internal volatile CoreOutputReader CoreReader;
         void Ev(LogLevel level, string evt, params string[] kv)
         {
             try { var events = Events; if (events != null) events.Write(level, evt.StartsWith("core.") ? "core" : evt.StartsWith("conflict.") ? "conflict" : "vpn", evt, kv); } catch { }
@@ -333,7 +334,15 @@ namespace RemoteAgents.Launcher
         {
             var pump = CorePump;
             if (pump != null) pump.RotateIfLarge();
-            var process = pump != null ? job.StartLogged(executable, new[] { "run", "-c", config }, directory, pump.FilePath) : job.Start(executable, new[] { "run", "-c", config }, directory);
+            Process process;
+            if (pump != null) {
+                var previous = CoreReader; if (previous != null) { previous.Drain(Events); previous.WriteStats(Events); }
+                Microsoft.Win32.SafeHandles.SafeFileHandle readEnd;
+                process = job.StartPiped(executable, new[] { "run", "-c", config }, directory, out readEnd);
+                // Вывод ядра читается событийно из pipe (singbox.started / singbox.fatal / singbox.line в шину), а не опросом файла.
+                var reader = new CoreOutputReader(new FileStream(readEnd, FileAccess.Read, 4096, false), pump.FilePath, "vpn", HelperBus.Publish);
+                CoreReader = reader; pump.Reader = reader; reader.Start();
+            } else process = job.Start(executable, new[] { "run", "-c", config }, directory);
             string cfg = Path.GetFileNameWithoutExtension(config).EndsWith("-b") ? "b" : "a";
             try { Ev(LogLevel.Info, "core.start", "pid", process.Id.ToString(System.Globalization.CultureInfo.InvariantCulture), "cfg", cfg); } catch { }
             return process;
@@ -534,7 +543,7 @@ namespace RemoteAgents.Launcher
                     if (!afterLogged) { afterLogged = true; Ev(LogLevel.Info, "vpn.inventory", new[] { "phase", "after" }.Concat(VpnConflict.Describe(taken)).ToArray()); }
                     if (result.Key != lastConflictKey) { lastConflictKey = result.Key; LogConflicts(result); }
                 }, directory);
-                long nextRead = 0, nextPump = 0;
+                long nextRead = 0;
                 stage = "monitor"; step.Restart();
                 while (true) {
                     lock (gate) if (disposed || epoch != generation) return;
@@ -543,7 +552,7 @@ namespace RemoteAgents.Launcher
                     if (now >= nextRead) { transport = Transport(); nextRead = now + 500; }
                     scan.Tick(now);
                     if (core != null && core.WaitForExit(0) && !coreExitLogged) { coreExitLogged = true; LogCoreExit(core); }
-                    if (now >= nextPump) { nextPump = now + 2000; var pump = CorePump; if (pump != null) pump.Pump(); }
+                    { var reader = CoreReader; if (reader != null) reader.Drain(Events); } // очередь строк ядра на каждом проходе (не таймер)
                     if (!monitor.Step(clock.ElapsedMilliseconds, DateTime.UtcNow, core != null && !core.WaitForExit(0), transport, scan.Conflict, scan.Failed)) return;
                     if (lease.Expired) return;
                     lease.Pulse();
@@ -559,6 +568,7 @@ namespace RemoteAgents.Launcher
                 // start another PowerShell after this session has ended.
                 lock (gate) if (epoch == generation) generation++;
                 CloseJobs();
+                { var reader = CoreReader; if (reader != null) { reader.Drain(Events); reader.WriteStats(Events); } }
                 if (lease != null) lease.Dispose();
                 if (core != null) { core.Dispose(); core = null; }
             }
@@ -573,10 +583,12 @@ namespace RemoteAgents.Launcher
         void LogCoreExit(Process exited)
         {
             try {
-                var pump = CorePump; if (pump != null) pump.Pump();
+                var pump = CorePump; var reader = CoreReader;
+                if (reader != null) reader.Drain(Events);
                 string code = "?"; try { code = exited.ExitCode.ToString(System.Globalization.CultureInfo.InvariantCulture); } catch { }
                 long alive = (long)Math.Max(0, (DateTime.UtcNow - coreStarted).TotalMilliseconds);
-                Ev(LogLevel.Warn, "core.exit", "code", code, "ms_alive", alive.ToString(System.Globalization.CultureInfo.InvariantCulture), "tail", pump == null ? "" : pump.Tail(15));
+                Ev(LogLevel.Warn, "core.exit", "code", code, "ms_alive", alive.ToString(System.Globalization.CultureInfo.InvariantCulture), "tail", reader != null ? reader.Tail(15) : pump == null ? "" : pump.Tail(15));
+                if (reader != null) reader.WriteStats(Events);
             } catch { }
         }
         void Loop()
