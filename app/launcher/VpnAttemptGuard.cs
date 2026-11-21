@@ -81,6 +81,17 @@ namespace RemoteAgents.Launcher
             Log("vpn.attempt.begin", "att", attempt);
         }
 
+        // Эту попытку уже откатывали (откат выключил VPN): intent=true писать нельзя.
+        internal bool RolledBack(string attempt)
+        { lock (gate) return att == attempt && rolledBack; }
+
+        // Выключение кнопкой: текущая попытка больше не нужна, какой бы она ни была.
+        internal void EndCurrent(string why)
+        {
+            string a; lock (gate) { a = att; att = ""; }
+            if (a.Length > 0) Log("vpn.attempt.end", "att", a, "why", why);
+        }
+
         // Попытка закончилась без e2e (отказ, ошибка): больше ничего не ждём.
         internal void End(string attempt, string why)
         {
@@ -103,6 +114,9 @@ namespace RemoteAgents.Launcher
             if (current.Length == 0) return;
             if (state == "on") { VpnOn(current); return; }
             if (state == "starting" || state == "searching") return;
+            // off — это и снимок сохранённого состояния при подключении помощника (helper-start/button): не провал попытки.
+            // Выключение кнопкой закрывает попытку явно (EndCurrent из DisableVpn).
+            if (state == "off") { Log("vpn.attempt.state-off.ignored", "att", current, "reason", e.Get("reason")); return; }
             // off / error / conflict / ...: попытка не удалась, причина — простыми словами (если код известен).
             string reason = e.Get("reason"), text = VpnReasons.Text(reason);
             Log("vpn.attempt.failed", "att", current, "state", state, "reason", reason);
@@ -153,7 +167,7 @@ namespace RemoteAgents.Launcher
         {
             bool first;
             lock (gate) { first = att == current && !rolledBack; if (first) rolledBack = true; } // att остаётся: повторные сигналы этой попытки попадут в журнал как ignored
-            if (!first) { Log("vpn.rollback.ignored", "att", current, "reason", reason); return; }
+            if (!first) { Log("vpn.rollback.ignored", "att", current, "reason", reason, "note", "после отката"); return; }
             Log("vpn.rollback", "att", current, "stage", stage.ToString(CultureInfo.InvariantCulture), "reason", reason, "detail", detail);
             try { bus.Publish(BusTopics.VpnRollback, BusTopics.Sources.Tray, "att", current, "stage", stage.ToString(CultureInfo.InvariantCulture), "reason", reason); } catch { }
             if (note != null) note(VpnReasons.RollbackNote(reason, stage));

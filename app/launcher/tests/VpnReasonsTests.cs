@@ -21,6 +21,8 @@ namespace RemoteAgents.Launcher
             TwoSignalsOneRollback();
             ButtonOffMakesE2eStale();
             BridgeFailureRollsBack();
+            RollbackBeforeVpnOnBlocksE2e();
+            SnapshotOffDoesNotEndAttempt();
             ReasonTextsEverywhere();
             Console.WriteLine("PASS: VpnReasonsTests (" + assertions + " assertions passed)");
             return 0;
@@ -138,10 +140,35 @@ namespace RemoteAgents.Launcher
         {
             using (var r = new Rig()) {
                 r.Guard.Begin("e1");
-                r.Pub(BusTopics.VpnState, "state", "off", "reason", "button");
+                r.Guard.EndCurrent("button-off"); // DisableVpn закрывает попытку явно
                 r.Pub(BusTopics.NetE2E, "att", "e1", "result", "fail", "stage", "7");
                 Check(r.Rollbacks.Count == 0, "e2e after button off does not roll back");
                 Check(r.Log.Contains("vpn.attempt.e2e-stale"), "late e2e logged as stale");
+            }
+        }
+
+        static void RollbackBeforeVpnOnBlocksE2e()
+        {
+            using (var r = new Rig()) {
+                r.Guard.Begin("g1");
+                r.Pub(BusTopics.BlockDegraded, "block", "transport", "reason", "x");
+                r.Guard.VpnOn("g1"); // помощник ответил on уже после отката
+                Check(r.E2E.Count == 0, "e2e does not start after rollback");
+                Check(r.Rollbacks.Count == 1 && r.Rollbacks[0] == "g1|0|broke-transport", "exactly one rollback");
+                Check(r.Guard.RolledBack("g1") && !r.Guard.RolledBack("other"), "RolledBack tells CheckVpn not to write intent=true");
+                r.Pub(BusTopics.BlockDegraded, "block", "transport");
+                Check(r.Rollbacks.Count == 1, "late degraded after rollback does not roll back again");
+            }
+        }
+
+        static void SnapshotOffDoesNotEndAttempt()
+        {
+            using (var r = new Rig()) {
+                r.Guard.Begin("h1");
+                r.Pub(BusTopics.VpnState, "state", "off", "reason", "helper-start");
+                Check(r.Guard.Active, "snapshot off at helper connect keeps the attempt");
+                r.Guard.VpnOn("h1");
+                Check(r.E2E.Count == 1 && r.E2E[0] == "h1", "e2e starts once after snapshot off");
             }
         }
 

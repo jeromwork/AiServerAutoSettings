@@ -9,7 +9,7 @@ namespace RemoteAgents.Launcher
     // за попытку -> один откат (vpn.off). Логика — в VpnAttemptGuard; здесь только связка с трей-действиями. Таймеров нет.
     internal sealed partial class TrayContext
     {
-        VpnAttemptGuard vpnGuard;
+        VpnAttemptGuard vpnGuard; int rollbackRunning;
 
         void StartVpnGuard()
         {
@@ -17,12 +17,14 @@ namespace RemoteAgents.Launcher
             vpnGuard = new VpnAttemptGuard(bus,
                 att => { var l = ladder; if (l != null) l.RunE2E(att); else VpnAttemptEnd(att, "no-ladder"); },
                 (att, stage, reason, detail) => PostUi(() => RollbackVpn(att, stage, reason, detail)),
-                (evt, kv) => log.Write(evt.Contains("rollback") || evt.Contains("failed") ? LogLevel.Warn : LogLevel.Info, "vpn", evt, kv),
+                (evt, kv) => log.Write(evt == "vpn.rollback.ignored" ? LogLevel.Info : evt.Contains("rollback") || evt.Contains("failed") ? LogLevel.Warn : LogLevel.Info, "vpn", evt, kv),
                 text => { vpnError = text; PostUi(() => { if (!closing) RefreshMain(); }); });
             busParts.Add(vpnGuard);
         }
 
         void VpnAttemptBegin(string att) { var g = vpnGuard; if (g != null) g.Begin(att); }
+        void VpnAttemptEndCurrent(string why) { var g = vpnGuard; if (g != null) g.EndCurrent(why); }
+        bool VpnAttemptRolledBack(string att) { var g = vpnGuard; return g != null && g.RolledBack(att); }
         void VpnAttemptEnd(string att, string why) { var g = vpnGuard; if (g != null) g.End(att, why); }
         // Ответ vpn.on ok (или vpn.state on): e2e стартует один раз. Без шины — прежний прямой запуск.
         void VpnAttemptOn(string att)
@@ -55,7 +57,7 @@ namespace RemoteAgents.Launcher
             var watch = System.Diagnostics.Stopwatch.StartNew();
             log.Write(LogLevel.Warn, "vpn", "vpn.rollback.start", "att", att, "stage", stage.ToString(), "reason", reason, "detail", MainScreenModel.CleanSecrets(detail ?? ""));
             if (closing) { log.Write("vpn.rollback.skipped att=" + att + " msg=closing"); return; }
-            vpnActionWanted = false;
+            vpnActionWanted = false; rollbackRunning++; actionBusy = vpnActionBusy = true; // как DisableVpn: повторное «Включить» ждёт конца отката
             try {
                 if (netHelper == null) throw new System.IO.IOException(HelperClient.PermissionRequired);
                 await netHelper.VpnOff();
@@ -67,7 +69,7 @@ namespace RemoteAgents.Launcher
             } catch (Exception error) {
                 log.Write("vpn.rollback.failed att=" + att + " reason=" + reason + " " + TickFailureLog.HelperFailure("vpn-off", error));
                 vpnError = "VPN не удалось выключить автоматически. Выключите его кнопкой в трее и откройте журналы.";
-            } finally { if (!closing) { RefreshMenu(); RefreshMain(); } }
+            } finally { if (--rollbackRunning <= 0) { rollbackRunning = 0; actionBusy = vpnActionBusy = false; } if (!closing) { RefreshMenu(); RefreshMain(); } }
         }
     }
 }

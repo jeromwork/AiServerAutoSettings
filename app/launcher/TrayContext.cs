@@ -720,12 +720,13 @@ namespace RemoteAgents.Launcher
                 LogNetSnapshot("vpn.on.after", att);
                 if (closing) return;
                 if (Json.Str(status, "state") != "on") { VpnRefused(att, status, fromCard); return; }
+                if (VpnAttemptRolledBack(att)) { log.Write("vpn.on.rolledback att=" + att + " msg=intent-not-written"); return; } // откат уже выключил VPN: конфиг не включать
                 config.SetVpnIntent(true); config.SetEnabled(vpn.Definition, true); log.Write("vpn.on.ok att=" + att + " ms=" + vpnWatch.ElapsedMilliseconds);
                 VpnAttemptOn(att); // e2e запускает VpnAttemptGuard (один раз на попытку; vpn.state on мог прийти раньше)
                 if (mirror != null) Task.Run(() => { try { mirror.Pull(); } catch { } });
             } catch (OperationCanceledException) { log.Write("vpn.on.cancelled att=" + att); VpnAttemptEnd(att, "cancelled"); }
             catch (Exception error) { VpnAttemptEnd(att, "error"); if (!closing) { log.Write("vpn.helper.failed att=" + att + " " + TickFailureLog.HelperFailure("vpn-on", error)); VpnFailure(NetHelperSetup.VpnFailureMessage(error), fromCard); } }
-            finally { actionBusy = vpnActionBusy = false; if (!closing) RefreshMenu(); }
+            finally { if (rollbackRunning == 0) actionBusy = vpnActionBusy = false; if (!closing) RefreshMenu(); }
         }
         // Заметка проверки сети — только в подсказку трея, пока VPN включён; не пишется после выключения.
         void SetNetNote(string text)
@@ -796,7 +797,7 @@ namespace RemoteAgents.Launcher
             resumeUpdatedVpn = false;
             try { var updateState = UpdateState(); updateState["vpnOn"] = false; updateState.Remove("resumeVpn"); Json.Write(UpdateStatePath, updateState); }
             catch { log.Write("update.resume.cancel.failed"); }
-            actionBusy = vpnActionBusy = true; vpnActionWanted = false; vpnError = ""; netNote = ""; RefreshMain();
+            actionBusy = vpnActionBusy = true; vpnActionWanted = false; vpnError = ""; netNote = ""; VpnAttemptEndCurrent("button-off"); RefreshMain();
             try {
                 if (!vpn.Definition.CommandManaged) { EnableRuntime(vpn, false); return; }
                 if (netHelper == null) throw new IOException(HelperClient.PermissionRequired);
