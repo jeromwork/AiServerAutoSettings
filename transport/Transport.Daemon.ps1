@@ -73,7 +73,11 @@ function Remove-DaemonFault([string]$Tag,[string]$Reason='command') {
     }
     # Removing an injection proves nothing. Only a new real result may close/recover
     # an episode or supply the reducer's ordinary improvement policy.
-    if($Tag -in @($paths.Candidates.tag) -and (Test-DaemonEngineReady -Probe)){
+    # Let the cancelled verify fail through the reducer. A light success in the
+    # same drain must not replace the mandatory post-switch 64 KiB result.
+    $verifying=($decision -and $decision.episode -and $decision.episode.status -eq 'verifying' -and $Tag -eq $active)
+    $pendingVerify=@($eventQueue|Where-Object {$_.kind -eq 'post-switch-verify' -and $_.tag -eq $Tag}).Count -gt 0
+    if(-not $verifying -and -not $pendingVerify -and $Tag -in @($paths.Candidates.tag) -and (Test-DaemonEngineReady -Probe)){
         if($pathChecks.ContainsKey($Tag)){Stop-TransportPathCheck $pathChecks[$Tag].handle;$pathChecks.Remove($Tag)}
         Start-DaemonEpisodeCheck $Tag
     }
@@ -135,9 +139,7 @@ function Reset-DaemonDecision {
     $script:decision=New-TransportDecisionState -Now (Get-DaemonTime) -CurrentTag $active -SwitchEpisode:$true
     if($previous){$decision.switches=$previous.switches;$decision.flapHistory=$previous.flapHistory;$decision.lastSwitchAt=$previous.lastSwitchAt;$decision.selectedAt=$previous.selectedAt}
     $script:verdict=$null;$script:lastRecoveryAt=$null
-    # A new generation cannot retain tags removed from configuration.
     $script:pathLogState=@{}
-    foreach($tag in @($script:transportFaults.Keys)){if($tag -notin @($paths.Candidates.tag)){Remove-DaemonFault $tag 'config-removed'}}
     foreach($r in $rows){$r.penaltyStep=0;$r.penaltyUntil=$null;$r.suspect=$false}
 }
 function Stop-DaemonObservation([switch]$EngineRestart) {
@@ -166,6 +168,15 @@ function Stop-DaemonObservation([switch]$EngineRestart) {
     }
     $pathChecks.Clear();$gateOkUntil.Clear();$pathCheckStartedAt.Clear()
     if(-not $EngineRestart){$script:engineReadyTimeouts=0;Reset-DaemonDecision}
+}
+function Accept-DaemonReload($Result) {
+    # Cancel observations against the OLD configuration before accepting the new one.
+    Stop-TransportProbes;Stop-DaemonObservation
+    Stop-TransportProcess $engine;$script:engine=$null
+    $script:settings=$Result.Settings;$script:paths=$Result.Paths;$script:revision=$Result.Revision
+    # Reset-DaemonDecision above still saw the old candidates. Prune only now;
+    # otherwise a removed tag retains its injection when it is later re-added.
+    foreach($tag in @($script:transportFaults.Keys)){if($tag -notin @($paths.Candidates.tag)){Remove-DaemonFault $tag 'config-removed'}}
 }
 function Start-DaemonReader([switch]$NewEngine) {
     Stop-TransportEvents $reader;$script:reader=$null
@@ -1005,8 +1016,7 @@ try{
             try{
                 $result=Receive-Job $reloadJob -ErrorAction Stop
                 if(-not $result -or $reloadJob.State -ne 'Completed'){throw 'Reload failed'}
-                Stop-TransportProbes;Stop-DaemonObservation
-                Stop-TransportProcess $engine;$engine=$null;$settings=$result.Settings;$paths=$result.Paths;$revision=$result.Revision
+                Accept-DaemonReload $result
                 Initialize-DaemonQuality
                 $netSnapshot=Get-TransportNetworkSnapshot $settings.Options;$metered=$netSnapshot.metered
                 $diagnosticContext=@(Get-TransportDiagnosticContext $settings $root)

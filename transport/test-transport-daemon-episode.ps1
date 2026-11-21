@@ -562,6 +562,22 @@ Assert (@($logged|Where-Object {$_.name -eq 'fault.clear'}).Count -eq $clears) '
 Fixture;Open-Episode;Answer-Round;Select-Second;$script:TransportTestBuild=$true
 Fault-Input (Fault-Frame 'drop' 'p1');Invoke-DaemonDecision
 Assert ($active -eq 'p2') 'fault during verification stranded episode'
+# One stdin drain can cancel verify and clear the fault before the reducer runs.
+# Model the old race: if clear starts a light probe, its real success arrives first.
+Fixture;Open-Episode;Answer-Round;Select-Second;$script:TransportTestBuild=$true
+$cancelledVerify=$pathChecks.p1.handle;$before=$started.Count
+$script:clockMs=3200
+Fault-Input ((Fault-Frame 'drop' 'p1')+"`n"+(Fault-Frame 'clear' 'p1'))
+$script:clockMs=3300
+if($pathChecks.ContainsKey('p1') -and $pathChecks.p1.purpose -eq 'light'){Deliver 'p1' 'ok'}
+Assert ($cancelledVerify.stopped -and -not (Test-DaemonFault 'p1') -and -not $confirmed) 'drop/clear lost verify cancellation or manufactured success'
+Assert (@($eventQueue|Where-Object {$_.kind -eq 'post-switch-verify' -and $_.tag -eq 'p1' -and $_.code -eq 'timeout'}).Count -eq 1) 'clear discarded cancelled verify failure'
+Invoke-DaemonDecision
+Assert (-not $confirmed -and $active -eq 'p2' -and $decision.episode.status -eq 'verifying') 'drop/clear confirmed cancelled verify via light success instead of normal failure handling'
+Assert (@($started|Select-Object -Skip $before|Where-Object {$_.tag -eq 'p1' -and -not $_.verify}).Count -eq 0) 'clear launched light probe before cancelled verify was reduced'
+Assert (@($eventQueue|Where-Object {$_.kind -eq 'post-switch-verify' -and $_.tag -eq 'p2' -and $_.code -eq 'skipped'}).Count -eq 1) 'next selected path bypassed ordinary Q verification budget'
+$script:clockMs=3400;Invoke-DaemonDecision
+Assert (-not $confirmed -and $decision.episode.verifySkipped) 'Q refusal after cancelled verify manufactured confirmation'
 # Invalid metadata never changes state and is never echoed to logs/bus.
 Fixture;$script:TransportTestBuild=$true
 foreach($fields in @(@{fault='drop';tag='foreign'},@{fault='DROP';tag='p0'},@{fault='blip';tag='p0';ms='60001'},@{fault='blip';tag='p0';ms='NaN'},@{fault='drop';tag='p0';password='sentinel-secret'},@{fault='drop';tag="p0`nforged"})){
@@ -572,8 +588,21 @@ Assert ($transportFaults.Count -eq 0 -and (ConvertTo-Json @($logged,$published) 
 Fixture 34;$script:TransportTestBuild=$true
 for($i=0;$i -lt 34;$i++){Invoke-DaemonFaultCommand @{fault='drop';tag=('p'+$i)}}
 Assert ($transportFaults.Count -eq 32 -and $logged[-1].fields.reason -eq 'fault-limit') 'fault map unbounded'
-$paths.Candidates=@($paths.Candidates|Where-Object {$_.tag -ne 'p1'});Reset-DaemonDecision
-Assert (-not (Test-DaemonFault 'p1') -and $transportFaults.Count -eq 31) 'removed candidate retained injection'
+$allCandidates=$paths.Candidates
+Start-DaemonPath 'p33' -Gate;$oldCheck=$pathChecks.p33.handle;$oldEngine=$engine;$generation=$checkGeneration
+$reload=@{Settings=$settings;Paths=@{Candidates=@($allCandidates|Where-Object {$_.tag -ne 'p1'});Tunnels=@();Outbounds=@()};Revision='without-p1'}
+# Call the same acceptance path as production: stop/reset with OLD paths, then
+# accept NEW paths and prune, then restart. Reset alone cannot implement pruning.
+Accept-DaemonReload $reload
+Assert ($oldCheck.stopped -and $oldEngine.stopped -and $checkGeneration -eq $generation+1 -and $pathChecks.Count -eq 0) 'reload failed to retire old observations before restart'
+Assert ($revision -eq 'without-p1' -and -not (Test-DaemonFault 'p1') -and $transportFaults.Count -eq 31 -and (Test-DaemonFault 'p2')) 'reload retained removed injection or discarded retained candidate fault'
+Assert (@($logged|Where-Object {$_.name -eq 'fault.clear' -and $_.fields.tag -eq 'p1' -and $_.fields.reason -eq 'config-removed'}).Count -eq 1) 'reload pruning did not log config-removed'
+Start-TransportEngine
+$reload.Paths=@{Candidates=$allCandidates;Tunnels=@();Outbounds=@()};$reload.Revision='p1-returned'
+Accept-DaemonReload $reload;Start-TransportEngine
+Assert ($revision -eq 'p1-returned' -and -not (Test-DaemonFault 'p1') -and (Get-DaemonSelectorTarget 'p1') -eq 'p1' -and $transportFaults.Count -eq 31) 're-added candidate resurrected stale fault'
+Invoke-DaemonFaultCommand @{fault='drop';tag='p32'}
+Assert ($transportFaults.Count -eq 32 -and (Test-DaemonFault 'p32')) 'removed injection did not release bounded-map capacity'
 'T3 fault injection PASS'
 
 'T2/T3 daemon episode PASS ('+$count+' assertions)'
