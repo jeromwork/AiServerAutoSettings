@@ -195,7 +195,7 @@ namespace RemoteAgents.Launcher
                     var rawVpn = VpnStatus.Read(home);
                     ObserveSearch(transport, rawVpn);
                     var link = SearchView(transport, rawVpn);
-                    var tone = MainScreenModel.LinkTone(link.Transport, link.Vpn);
+                    var tone = MainScreenModel.LinkTone(link.Transport, link.Vpn, link.AwaitingSearchProof);
                     shown = tone == Tone.Ok ? green : tone == Tone.Error ? red : yellow;
                     var vpnStatus = link.Vpn;
                     icon.Text = link.Tooltip(ServerHealthView.Read(home));
@@ -230,8 +230,7 @@ namespace RemoteAgents.Launcher
         {
             bool searching = TrayMenuModel.Searching(transport, vpn);
             var transition = searchQuieter.Observe(searching, searchClock.ElapsedMilliseconds);
-            if (!searching && StatusView.Phase(transport) == LinkPhase.Ok)
-                connectedSearchView = new SearchPresentation(transport, vpn);
+            connectedSearchView = SearchPresentation.UpdateConnected(transport, vpn, connectedSearchView);
             if ((transition & SearchTransition.Started) != 0) log.Write("searching.start ms=0");
             if ((transition & SearchTransition.Shown) != 0) log.Write("searching.shown ms=" + searchQuieter.DurationMs.ToString(System.Globalization.CultureInfo.InvariantCulture));
             if ((transition & SearchTransition.Ended) != 0) log.Write("searching.end ms=" + searchQuieter.DurationMs.ToString(System.Globalization.CultureInfo.InvariantCulture));

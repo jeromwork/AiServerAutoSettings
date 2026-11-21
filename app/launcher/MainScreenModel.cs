@@ -82,13 +82,13 @@ namespace RemoteAgents.Launcher
 
     internal static class MainScreenModel
     {
-        // Shared with TrayContext.Tick so a VPN refusal cannot leave a green tray icon.
-        internal static Tone LinkTone(Dictionary<string, object> transport, Dictionary<string, object> vpn)
+        // Shared with TrayContext.Tick; a VPN refusal must remain visible during search.
+        internal static Tone LinkTone(Dictionary<string, object> transport, Dictionary<string, object> vpn, bool awaitingSearchProof = false)
         {
-            if (SearchPresentation.VpnFailureText(vpn).Length > 0) return Tone.Error;
+            if (TrayMenuModel.Searching(transport, vpn) && SearchPresentation.VpnFailureText(vpn).Length > 0) return Tone.Error;
             var phase = StatusView.Phase(transport);
             if (TrayMenuModel.Searching(transport, vpn) || Json.Str(vpn, "state") == "conflict" ||
-                Json.Str(vpn, "state") == "checking") return Tone.Warning;
+                awaitingSearchProof) return Tone.Warning;
             return phase == LinkPhase.Ok ? Tone.Ok : phase == LinkPhase.Failed ? Tone.Error : Tone.Warning;
         }
 
@@ -101,7 +101,7 @@ namespace RemoteAgents.Launcher
             var control = facts.Control ?? Json.Map(null);
             var view = new MainScreenView();
             var phase = StatusView.Phase(transport);
-            view.Overall = LinkTone(transport, vpn);
+            view.Overall = LinkTone(transport, vpn, link.AwaitingSearchProof);
             BuildVpn(view.Vpn, facts, transport, vpn);
             BuildDisk(view.Disk, facts);
             var lan = facts.Lan ?? Json.Map(null);

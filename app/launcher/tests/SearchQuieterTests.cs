@@ -19,7 +19,7 @@ namespace RemoteAgents.Launcher
         }
         static int Main()
         {
-            ShortDips(); LongDip(); RepeatedDips(); Presentations(); Startup(); Priorities(); CurrentProtection();
+            ShortDips(); LongDip(); RepeatedDips(); Presentations(); Startup(); Priorities(); CurrentProtection(); SnapshotSequences();
             Console.WriteLine("PASS: " + checks + " SearchQuieter checks (fake clock)");
             return 0;
         }
@@ -120,7 +120,7 @@ namespace RemoteAgents.Launcher
                     string raw = Json.Encode(new { transport, vpn });
                     var link = SearchPresentation.Build(transport, vpn, false, previous);
                     var view = MainScreenModel.Build(Facts(transport, vpn, link));
-                    Check(view.Overall == Tone.Warning && MainScreenModel.LinkTone(link.Transport, link.Vpn) == Tone.Warning &&
+                    Check(view.Overall == Tone.Warning && MainScreenModel.LinkTone(link.Transport, link.Vpn, link.AwaitingSearchProof) == Tone.Warning &&
                         view.Vpn.Tone == Tone.Warning && view.Vpn.State != "Защита включена", "startup cannot claim successful protection");
                     Check(!Json.Bool(link.Vpn, "ok") && Json.Str(link.Vpn, "state") == "checking", "unconfirmed VPN waits neutrally");
                     if (previous == null || StatusView.Phase(previous.Transport) != LinkPhase.Ok) {
@@ -160,7 +160,7 @@ namespace RemoteAgents.Launcher
                             "conflict retains priority across surfaces");
                     } else if (state != "off" && state != "starting" && state != "stopping") {
                         Check(StatusView.Phase(link.Transport) == LinkPhase.Searching, "failure cannot turn transport into ok: " + state);
-                        Check(view.Overall == Tone.Error && MainScreenModel.LinkTone(link.Transport, link.Vpn) == Tone.Error &&
+                        Check(view.Overall == Tone.Error && MainScreenModel.LinkTone(link.Transport, link.Vpn, link.AwaitingSearchProof) == Tone.Error &&
                             view.Vpn.Tone == Tone.Error && view.Banner.Visible && view.Banner.Tone == Tone.Error, "failure is red on banner/card/window/tray: " + state);
                         SameView(view, MainScreenModel.Build(Facts(search, vpn)), "failure keeps original banner/card wording: " + state);
                         Check(link.Tooltip(Data("{}")) == TrayMenuModel.Short(SearchPresentation.VpnFailureText(vpn), 63) &&
@@ -173,9 +173,51 @@ namespace RemoteAgents.Launcher
             var helperError = Data("{\"state\":\"error\",\"owner\":\"net-helper\",\"summary\":\"Ошибка маршрута. token=hidden-secret\"}");
             string tip = new SearchPresentation(search, helperError).Tooltip(Data("{}"));
             Check(tip.Contains("Ошибка маршрута") && !tip.Contains("hidden-secret"), "helper failure summary takes priority and masks secrets");
+            var stale = Data("{\"state\":\"searching\",\"owner\":\"net-helper\",\"statusStale\":true,\"ok\":false,\"summary\":\"Статус VPN устарел: помощник не отвечает\"}");
+            var staleView = SearchPresentation.Build(search, stale, false, connected);
+            Check(object.ReferenceEquals(staleView.Transport, search) && object.ReferenceEquals(staleView.Vpn, stale) &&
+                !Json.Bool(staleView.Vpn, "ok") && MainScreenModel.Build(Facts(search, stale, staleView)).Overall == Tone.Warning,
+                "stale helper is never masked by previous verified protection");
             var failed = Data("{\"phase\":\"failed\"}");
             Check(object.ReferenceEquals(SearchPresentation.Build(failed, Data("{\"state\":\"searching\"}"), false).Transport, failed),
                 "explicit transport failure remains visible");
+        }
+        static void SnapshotSequences()
+        {
+            var ok = Data("{\"phase\":\"ok\",\"ok\":true,\"active\":\"old-path\",\"kbps\":128}");
+            var on = Data("{\"state\":\"on\",\"ok\":true,\"enabled\":true}");
+            var search = Data("{\"phase\":\"searching\",\"ok\":false}");
+            var vpnSearch = Data("{\"state\":\"searching\",\"ok\":false,\"enabled\":true}");
+            foreach (string phase in new[] { "failed", "checking" }) {
+                var connected = SearchPresentation.UpdateConnected(ok, on, null);
+                Check(connected != null, "verified connection stores snapshot");
+                connected = SearchPresentation.UpdateConnected(Data(Json.Encode(new { phase, ok = false })), on, connected);
+                Check(connected == null, phase + " invalidates old connected snapshot");
+                connected = SearchPresentation.UpdateConnected(search, vpnSearch, connected);
+                var link = SearchPresentation.Build(search, vpnSearch, false, connected);
+                var view = MainScreenModel.Build(Facts(search, vpnSearch, link));
+                Check(view.Overall == Tone.Warning && view.Vpn.State == "Ожидается проверка" && !Json.Bool(link.Vpn, "ok") &&
+                    StatusView.Phase(link.Transport) == LinkPhase.Checking && !Json.Bool(link.Transport, "ok"),
+                    "ok -> " + phase + " -> searching cannot resurrect success");
+                Check(!TrayMenuModel.Connection(link.Transport).Contains("old-path") && !link.Transport.ContainsKey("kbps"),
+                    "invalidated snapshot cannot resurrect old path/speed");
+                connected = SearchPresentation.UpdateConnected(ok, on, connected);
+                connected = SearchPresentation.UpdateConnected(search, vpnSearch, connected);
+                link = SearchPresentation.Build(search, vpnSearch, false, connected);
+                Check(MainScreenModel.Build(Facts(search, vpnSearch, link)).Overall == Tone.Ok, "new real success restores short-dip retention");
+            }
+            foreach (var revoked in new[] { Data("{\"state\":\"off\",\"ok\":false}"),
+                Data("{\"state\":\"on\",\"ok\":false}"), Data("{\"state\":\"checking\",\"ok\":false}"),
+                Data("{\"state\":\"searching\",\"statusStale\":true,\"ok\":false}") }) {
+                foreach (var transport in new[] { ok, search }) {
+                    var connected = SearchPresentation.UpdateConnected(ok, on, null);
+                    connected = SearchPresentation.UpdateConnected(transport, revoked, connected);
+                    connected = SearchPresentation.UpdateConnected(search, vpnSearch, connected);
+                    var link = SearchPresentation.Build(search, vpnSearch, false, connected);
+                    Check(MainScreenModel.Build(Facts(search, vpnSearch, link)).Overall == Tone.Warning &&
+                        !Json.Bool(link.Vpn, "ok") && Json.Str(link.Vpn, "state") == "checking", "revoked VPN proof never returns in the next search");
+                }
+            }
         }
         static void CurrentProtection()
         {

@@ -11,6 +11,7 @@ namespace RemoteAgents.Launcher
     {
         // §4а: порог только для отображения, не подтверждение связи; существующий tick.tray,
         // без нового таймера. Позже порог можно сделать адаптивным.
+        // Каждый ok начинает отсчёт заново: повторные провалы короче порога намеренно не показываются.
         internal const int SearchShowAfterMs = 30000;
         bool searching;
         long startedAt;
@@ -44,8 +45,25 @@ namespace RemoteAgents.Launcher
     internal sealed class SearchPresentation
     {
         internal readonly Dictionary<string, object> Transport, Vpn;
-        internal SearchPresentation(Dictionary<string, object> transport, Dictionary<string, object> vpn)
-        { Transport = transport ?? Json.Map(null); Vpn = vpn ?? Json.Map(null); }
+        internal readonly bool AwaitingSearchProof;
+        internal SearchPresentation(Dictionary<string, object> transport, Dictionary<string, object> vpn, bool awaitingSearchProof = false)
+        { Transport = transport ?? Json.Map(null); Vpn = vpn ?? Json.Map(null); AwaitingSearchProof = awaitingSearchProof; }
+
+        // Only contiguous verified connectivity can survive a short search. A real failure/check
+        // invalidates the old path; explicit VPN changes or a stale helper revoke VPN proof too.
+        internal static SearchPresentation UpdateConnected(Dictionary<string, object> transport, Dictionary<string, object> vpn,
+            SearchPresentation connected)
+        {
+            var current = new SearchPresentation(transport, vpn);
+            if (!TrayMenuModel.Searching(current.Transport, current.Vpn))
+                return StatusView.Phase(current.Transport) == LinkPhase.Ok ? current : null;
+            if (StatusView.Phase(current.Transport) == LinkPhase.Failed) return null;
+            string state = Json.Str(current.Vpn, "state");
+            if (connected != null && (Json.Bool(current.Vpn, "statusStale") ||
+                state != "searching" && (state != "on" || !Json.Bool(current.Vpn, "ok"))))
+                return new SearchPresentation(connected.Transport, current.Vpn);
+            return connected;
+        }
 
         // The tray uses this presentation for its tooltip as well as its colour and menu.
         internal string Tooltip(Dictionary<string, object> health)
@@ -69,10 +87,13 @@ namespace RemoteAgents.Launcher
         {
             var view = new SearchPresentation(transport, vpn);
             if (showSearching || !TrayMenuModel.Searching(view.Transport, view.Vpn) ||
-                VpnFailureText(view.Vpn).Length > 0 || Json.Str(view.Vpn, "state") == "conflict") return view;
+                VpnFailureText(view.Vpn).Length > 0 || Json.Str(view.Vpn, "state") == "conflict" ||
+                Json.Bool(view.Vpn, "statusStale")) return view;
             transport = view.Transport; vpn = view.Vpn;
             bool wasConnected = connected != null && StatusView.Phase(connected.Transport) == LinkPhase.Ok;
-            bool wasProtected = wasConnected && Json.Str(connected.Vpn, "state") == "on" && Json.Bool(connected.Vpn, "ok");
+            bool wasProtected = wasConnected && Json.Str(connected.Vpn, "state") == "on" && Json.Bool(connected.Vpn, "ok") &&
+                !Json.Bool(connected.Vpn, "statusStale");
+            bool awaitingSearchProof = Json.Str(vpn, "state") == "searching" && !wasProtected;
             // A short dip may retain verified success, but cannot create it at startup.
             if (StatusView.Phase(transport) == LinkPhase.Searching ||
                 Json.Str(vpn, "state") == "searching" && StatusView.Phase(transport) == LinkPhase.Checking) {
@@ -88,7 +109,7 @@ namespace RemoteAgents.Launcher
                 vpn["state"] = wasProtected ? "on" : "checking"; vpn["ok"] = wasProtected;
                 vpn["summary"] = wasProtected ? "VPN включён" : "Ожидается проверка"; vpn.Remove("reason");
             }
-            return new SearchPresentation(transport, vpn);
+            return new SearchPresentation(transport, vpn, awaitingSearchProof);
         }
     }
 }
