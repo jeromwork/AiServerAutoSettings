@@ -31,6 +31,11 @@
     <IntermediateOutputPath>obj/$(Configuration)/traybus-tests/</IntermediateOutputPath>
     <OutputPath>bin/$(Configuration)/traybus-tests/</OutputPath>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(HelperBusTests)' == 'true'">
+    <StartupObject>RemoteAgents.Launcher.HelperBusTests</StartupObject>
+    <IntermediateOutputPath>obj/$(Configuration)/helperbus-tests/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/helperbus-tests/</OutputPath>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(ConfigTests)' == 'true'">
     <IntermediateOutputPath>obj/$(Configuration)/config-tests/</IntermediateOutputPath>
     <OutputPath>bin/$(Configuration)/config-tests/</OutputPath>
@@ -92,6 +97,8 @@
     <Compile Include="NetNotifyTests.cs" />
     <Compile Include="../TrayBus.cs" />
     <Compile Include="TrayBusTests.cs" />
+    <Compile Include="../HelperBusBridge.cs" />
+    <Compile Include="HelperBusTests.cs" />
     <Compile Include="../RaLog.cs" />
     <Compile Include="../LogMask.cs" />
     <Compile Include="../NetLadder.cs" />

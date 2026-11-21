@@ -298,6 +298,8 @@ namespace RemoteAgents.Launcher
         readonly HelperEventLog events;
         readonly object gate = new object();
         long offset;
+        // Шина службы (шаг B3): каждая строка ядра VPN уходит как singbox.line {core=vpn, level, line}.
+        internal EventBus Bus;
         internal CoreLogPump(string directory, HelperEventLog events)
         {
             dir = directory; this.events = events;
@@ -340,7 +342,11 @@ namespace RemoteAgents.Launcher
                             if (buffer[i] != 10) continue;
                             string line = Encoding.UTF8.GetString(buffer, start, i - start).TrimEnd('\r');
                             start = i + 1;
-                            if (line.Trim().Length > 0) { events.Write(Level(line), "core", "core.line", "text", line); count++; }
+                            if (line.Trim().Length > 0) {
+                                var level = Level(line);
+                                events.Write(level, "core", "core.line", "text", line); count++;
+                                var bus = Bus; if (bus != null) bus.Publish(BusTopics.SingboxLine, BusTopics.Sources.VpnCore, "core", "vpn", "level", level.ToString().ToLowerInvariant(), "line", line);
+                            }
                         }
                         if (start == 0 && read == buffer.Length && read > 0) start = read; // строка без конца длиннее буфера
                         offset += start; // неполная последняя строка дочитывается в следующий раз

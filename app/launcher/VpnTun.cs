@@ -325,8 +325,21 @@ namespace RemoteAgents.Launcher
         internal HelperEventLog Events;
         internal CoreLogPump CorePump;
         internal volatile CoreOutputReader CoreReader;
+        // Шина службы (шаг B3): сюда публикуются vpn.state/vpn.step/singbox.fatal по выходу ядра (singbox.started и строки ядра — читатель вывода V1 через HelperBus); в тестах может быть null.
+        internal EventBus Bus;
+        void PublishBus(string evt, string[] kv)
+        {
+            var bus = Bus; if (bus == null) return;
+            string topic = evt == "core.exit" ? BusTopics.SingboxFatal : evt == "vpn.on.step" || evt == "vpn.off.step" ? BusTopics.VpnStep : null;
+            if (topic == null) return;
+            var all = new List<string>(kv ?? new string[0]);
+            if (topic == BusTopics.VpnStep) { all.Add("phase"); all.Add(evt == "vpn.on.step" ? "on" : "off"); }
+            else { all.Add("core"); all.Add("vpn"); }
+            bus.Publish(topic, topic == BusTopics.VpnStep ? BusTopics.Sources.Helper : BusTopics.Sources.VpnCore, all.ToArray());
+        }
         void Ev(LogLevel level, string evt, params string[] kv)
         {
+            try { PublishBus(evt, kv); } catch { }
             try { var events = Events; if (events != null) events.Write(level, evt.StartsWith("core.") ? "core" : evt.StartsWith("conflict.") ? "conflict" : "vpn", evt, kv); } catch { }
         }
         static string Ms(Stopwatch watch) { return watch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture); }
@@ -381,6 +394,8 @@ namespace RemoteAgents.Launcher
         { lock (gate) { if (coreJob != null) { coreJob.Dispose(); coreJob = null; } if (preparationJob != null) { preparationJob.Dispose(); preparationJob = null; } } }
         void Set(string state, string stage, string name = "", Dictionary<string, object> policy = null)
         {
+            var bus = Bus;
+            if (bus != null) bus.Publish(BusTopics.VpnState, BusTopics.Sources.Helper, "state", state, "reason", stage, "enabled", state == "on" || state == "starting" ? "true" : "false", "ok", state == "on" ? "true" : "false", "name", name);
             lock (gate) status = VpnTun.D("ok", state == "on", "enabled", state == "on" || state == "starting", "state", state, "stage", stage,
                 "summary", state == "on" ? "VPN включён" : state == "off" ? "VPN выключен" : state == "starting" ? "Включается…" : VpnWatchdog.FailureSummary(state, name.Length > 0 ? name : stage), "dnsPolicy", policy, "conflictName", state == "conflict" ? name : "", "suspects", suspects, "updatedAt", DateTime.UtcNow.ToString("o"));
         }
@@ -528,7 +543,7 @@ namespace RemoteAgents.Launcher
                         value["suspects"] = suspects;
                         lock (gate) if (epoch == generation && !lease.Expired) status = value;
                         string key = Json.Str(value, "state") + "/" + Json.Str(Json.Map(Json.Get(value, "reason")), "code");
-                        if (key != lastMonitor) { lastMonitor = key; Ev(Json.Str(value, "state") == "on" ? LogLevel.Info : LogLevel.Warn, "vpn.monitor", "state", Json.Str(value, "state"), "reason", Json.Str(Json.Map(Json.Get(value, "reason")), "code"), "text", Json.Str(Json.Map(Json.Get(value, "reason")), "text")); }
+                        if (key != lastMonitor) { lastMonitor = key; var monitorBus = Bus; if (monitorBus != null) monitorBus.Publish(BusTopics.VpnState, BusTopics.Sources.Helper, "state", Json.Str(value, "state"), "reason", Json.Str(Json.Map(Json.Get(value, "reason")), "code"), "enabled", "true", "ok", Json.Str(value, "state") == "on" ? "true" : "false", "name", ""); Ev(Json.Str(value, "state") == "on" ? LogLevel.Info : LogLevel.Warn, "vpn.monitor", "state", Json.Str(value, "state"), "reason", Json.Str(Json.Map(Json.Get(value, "reason")), "code"), "text", Json.Str(Json.Map(Json.Get(value, "reason")), "text")); }
                     },
                     reason => Stop(reason, "owner-loop", epoch),
                     () => {

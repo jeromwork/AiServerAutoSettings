@@ -26,6 +26,7 @@ namespace RemoteAgents.Launcher
         internal static void Run()
         {
             NetHelperVersionTests.Run();
+            HelperBusTests.Run();
             PinnedBinary();
             NetHelperSetupTests.Run();
             string parsed;

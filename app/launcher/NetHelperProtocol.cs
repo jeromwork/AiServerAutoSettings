@@ -10,6 +10,10 @@ namespace RemoteAgents.Launcher
     {
         internal const int MaxMessageBytes = 64 * 1024;
         internal const string PipeName = "RemoteAgentsNet";
+        // Второй pipe (шаг B3): только поток событий шины «служба -> трей»; команд не принимает.
+        internal const string EventsPipeName = PipeName + ".events";
+        // Единственная строка клиента: нужна, чтобы служба прочитала данные и смогла проверить SID владельца.
+        internal const string EventsHello = "{\"hello\":\"events\"}";
         internal const string BadRequest = "{\"ok\":false,\"error\":\"bad-request\"}";
         internal static readonly UTF8Encoding Utf8 = new UTF8Encoding(false, true);
 
@@ -43,6 +47,8 @@ namespace RemoteAgents.Launcher
                 command = value; return true;
             } catch { map = null; return false; }
         }
+        // Тот же строгий разбор для кадров событий моста шины (шаг B3).
+        internal static void ValidateJson(string line) { new Grammar(line).Validate(); }
         internal static bool TryCommand(string line, out string command)
         { System.Collections.Generic.Dictionary<string, object> map; return TryRequest(line, out command, out map); }
         sealed class Grammar
