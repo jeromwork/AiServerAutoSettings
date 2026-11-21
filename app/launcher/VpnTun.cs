@@ -247,17 +247,17 @@ namespace RemoteAgents.Launcher
             Binding = binding; Config = config; this.resolve = resolve; this.build = build; this.activate = activate;
             nextScan = now + IntervalMs; lastRequest = binding.Port + "\n" + binding.Revision + "\n" + binding.Hosts;
         }
-        static bool Ready(Dictionary<string, object> transport)
-        { return VpnWatchdog.TransportReady(transport) && VpnTunBinding.PortOf(transport) != 0 && Json.Str(transport, "configRevision").Length > 0 && VpnTunBinding.HostsOf(transport).Length > 0; }
+        static bool Ready(Dictionary<string, object> transport, Func<int, DateTime, bool> processAlive)
+        { return VpnWatchdog.TransportReady(transport, processAlive) && VpnTunBinding.PortOf(transport) != 0 && Json.Str(transport, "configRevision").Length > 0 && VpnTunBinding.HostsOf(transport).Length > 0; }
         internal bool Searching(Dictionary<string, object> transport)
         {
             int port = VpnTunBinding.PortOf(transport);
             string hosts = VpnTunBinding.HostsOf(transport);
             return port != 0 && port != Binding.Port || hosts.Length > 0 && hosts != Binding.Hosts || Failed || prepared != null || pending != null && pending.Changed;
         }
-        internal void Tick(long now, DateTime utcNow, Dictionary<string, object> transport)
+        internal void Tick(long now, DateTime utcNow, Dictionary<string, object> transport, Func<int, DateTime, bool> processAlive = null)
         {
-            bool ready = Ready(transport); string key = VpnTunBinding.Key(transport);
+            bool ready = Ready(transport, processAlive); string key = VpnTunBinding.Key(transport);
             if (pending != null && pending.Task.IsCompleted) {
                 try {
                     var result = pending.Task.GetAwaiter().GetResult();
@@ -322,7 +322,7 @@ namespace RemoteAgents.Launcher
             pulse = now;
             string state = "on", code = "ok", text = "";
             string path = VpnTun.PathState(transport, utcNow, processAlive);
-            if (rebind != null) rebind.Tick(now, utcNow, transport);
+            if (rebind != null) rebind.Tick(now, utcNow, transport, processAlive);
             if (VpnWatchdog.TransportReady(transport, processAlive)) {
                 if (revision != Json.Str(transport, "configRevision") || network != Json.Str(transport, "network")) changedUntil = now + 500;
                 revision = Json.Str(transport, "configRevision"); network = Json.Str(transport, "network");
@@ -389,21 +389,21 @@ namespace RemoteAgents.Launcher
     internal sealed class VpnPathWait
     {
         // Предохранитель (конституция 4а): изменение transport.json недоступно, если демон не подтвердил путь; при срабатывании — no-path, успех не объявляет.
-        internal const int VpnStartFuseMs = 70000; // Тот же бюджет включения, что HelperClient.VpnStartFuseMs (контракт в VpnTests).
+        internal const int VpnPathWaitFuseMs = 25000; // timer-ok: C — после перезапуска демон обычно подтверждает путь за 10–20 с; оставляем время exclusions/check/ready/routes в клиентских 70 с, при срабатывании — no-path.
         readonly long fuseAt;
         readonly Func<int, DateTime, bool> processAlive;
         internal Dictionary<string, object> Transport { get; private set; }
         internal string State { get; private set; }
         internal bool Complete { get; private set; }
         internal VpnPathWait(long now, Func<int, DateTime, bool> processAlive = null)
-        { fuseAt = now + VpnStartFuseMs; this.processAlive = processAlive; State = "no-path"; Transport = Json.Map(null); }
+        { fuseAt = now + VpnPathWaitFuseMs; this.processAlive = processAlive; State = "no-path"; Transport = Json.Map(null); }
         internal void Changed(Dictionary<string, object> transport)
         {
             if (Complete) return;
             Transport = transport; State = VpnTun.PathState(transport, processAlive: processAlive);
             Complete = State != "no-path";
         }
-        internal int Remaining(long now) { return (int)Math.Max(0, Math.Min(VpnStartFuseMs, fuseAt - now)); }
+        internal int Remaining(long now) { return (int)Math.Max(0, Math.Min(VpnPathWaitFuseMs, fuseAt - now)); }
         internal void CheckFuse(long now) { if (!Complete && Remaining(now) == 0) { State = "no-path"; Complete = true; } }
     }
 
@@ -528,14 +528,17 @@ namespace RemoteAgents.Launcher
                         var error = Interlocked.CompareExchange(ref watchError, null, null);
                         if (error != null) throw error;
                         waiting.CheckFuse(clock.ElapsedMilliseconds);
-                        if (waiting.Complete) return Json.Map(null);
+                        if (waiting.Complete) {
+                            Ev(LogLevel.Warn, "vpn.path.wait", "result", "fuse", "reason", "no-path", "problem", VpnWatchdog.TransportProblem(waiting.Transport));
+                            return Json.Map(null); // Предохранитель завершает отказом даже при позднем восстановлении процесса.
+                        }
                         waiting.Changed(Transport());
                         if (waiting.Complete) return waiting.Transport;
                         WaitHandle.WaitAny(new WaitHandle[] { changed, wake }, waiting.Remaining(clock.ElapsedMilliseconds)); // timer-ok: C — нет события готовности пути; предохранитель возвращает no-path, успех не объявляет.
                     }
                 } catch (OperationCanceledException) { throw; }
                 catch (Exception error) {
-                    Ev(LogLevel.Warn, "vpn.path.watch", "result", "failed", "err", error.GetType().Name, "msg", Msg(error.Message), "reason", "no-path");
+                    Ev(LogLevel.Warn, "vpn.path.watch", "result", "failed", "err", error.GetType().Name, "msg", Msg(error.Message), "reason", "no-path", "problem", VpnWatchdog.TransportProblem(waiting.Transport));
                     return Json.Map(null); // Честный отказ без запасного опроса.
                 } finally { if (watcher != null) watcher.Dispose(); }
             }
@@ -654,7 +657,7 @@ namespace RemoteAgents.Launcher
                 var policy = VpnTun.DnsPolicy(snapshot);
                 stage = "path"; step.Restart();
                 var transport = AwaitTransport(epoch); string pathState = VpnTun.PathState(transport);
-                if (pathState.Length > 0) { Ev(LogLevel.Warn, "vpn.on.step", "step", "path", "ms", Ms(step), "result", "fail", "reason", pathState); lock (gate) if (epoch == generation) Set(pathState, "path", TrayMenuModel.ActiveTitle(transport)); return; }
+                if (pathState.Length > 0) { Ev(LogLevel.Warn, "vpn.on.step", "step", "path", "ms", Ms(step), "result", "fail", "reason", pathState, "problem", VpnWatchdog.TransportProblem(transport)); lock (gate) if (epoch == generation) Set(pathState, "path", TrayMenuModel.ActiveTitle(transport)); return; }
                 stage = "exclusions"; step.Restart();
                 // The same resolver/builder is used again while VPN stays enabled.
                 var binding = ResolveBinding(transport, epoch, options.SocksPort);
@@ -664,7 +667,7 @@ namespace RemoteAgents.Launcher
                 Ev(LogLevel.Info, "vpn.on.step", "step", "config-check", "ms", Ms(step), "result", "ok");
                 // Recheck channel/process facts immediately before creating the TUN.
                 transport = Transport(); pathState = VpnTun.PathState(transport);
-                if (pathState.Length > 0) { lock (gate) if (epoch == generation) Set(pathState, "path", TrayMenuModel.ActiveTitle(transport)); return; }
+                if (pathState.Length > 0) { Ev(LogLevel.Warn, "vpn.on.step", "step", "path", "result", "fail", "reason", pathState, "problem", VpnWatchdog.TransportProblem(transport)); lock (gate) if (epoch == generation) Set(pathState, "path", TrayMenuModel.ActiveTitle(transport)); return; }
                 if (binding.Revision != Json.Str(transport, "configRevision") || VpnTunBinding.PortOf(transport) != 0 && VpnTunBinding.PortOf(transport) != binding.Port || binding.Hosts != VpnTunBinding.HostsOf(transport)) { lock (gate) if (epoch == generation) Set("no-path", "path-changed"); return; }
                 stage = "core-start"; step.Restart();
                 var launchJob = new NativeJob();

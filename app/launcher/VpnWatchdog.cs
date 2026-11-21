@@ -11,8 +11,8 @@ namespace RemoteAgents.Launcher
     {
         internal const string OwnerMutex = @"Global\RemoteAgents-VpnHost";
         internal const int ProbeTimeoutMs = 3000, PollMs = 50;
-        // Только совместимость VpnStatus (W3): транспорт эту величину не читает.
-        internal const int TransportStatusMaxAgeSec = 15;
+        // Долг W3: возраст vpn.json службы; транспорт эту величину не читает.
+        internal const int VpnStatusMaxAgeSec = 15;
         // Pure readiness policy; the process check is injectable and never reads file age.
         internal static bool TransportReady(Dictionary<string, object> status, Func<int, DateTime, bool> processAlive = null, string tag = null)
         { return TransportProblem(status, processAlive, tag).Length == 0; }
@@ -25,7 +25,7 @@ namespace RemoteAgents.Launcher
                 || started.Kind == DateTimeKind.Unspecified) return "invalid-process-start";
             string active = Json.Str(status, "active");
             if (!Json.Bool(status, "ok") || active.Length == 0 || tag != null && active != tag
-                || !StatusView.Candidates(status).Any(c => Json.Str(c, "tag") == active && Json.Str(c, "state") == "ok" && Json.Bool(c, "enabled"))) return "no-path";
+                || !StatusView.Candidates(status).Any(c => Json.Str(c, "tag") == active && Json.Str(c, "state") == "ok" && Json.Bool(c, "enabled", true))) return "no-path";
             try { return (processAlive ?? ProcessAlive)(pid, started.ToUniversalTime()) ? "" : "daemon-exited"; }
             catch { return "daemon-exited"; }
         }

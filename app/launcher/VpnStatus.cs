@@ -44,10 +44,12 @@ namespace RemoteAgents.Launcher
                 var status = Json.Read(Path.Combine(home, "status/vpn.json"));
                 if (!Json.Bool(status, "enabled")) return status;
                 if (Json.Str(status, "owner") == "net-helper") {
+                    // Служба ограничивает включение собственными предохранителями; ожидание пути не heartbeat.
+                    if (Json.Str(status, "state") == "starting") return status;
                     DateTime updated;
                     if (DateTime.TryParse(Json.Str(status, "updatedAt"), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out updated)) {
                         double age = (now - updated.ToUniversalTime()).TotalSeconds;
-                        if (age >= 0 && age <= VpnWatchdog.TransportStatusMaxAgeSec) return status;
+                        if (age >= 0 && age <= VpnWatchdog.VpnStatusMaxAgeSec) return status;
                     }
                     // File age cannot prove that the service or its core stopped (a long
                     // LAN request can delay publication). Keep the last enabled intent.
@@ -67,7 +69,7 @@ namespace RemoteAgents.Launcher
                 bool alive = IdentityAlive(home, "state/vpn-host.json"); DateTime stamp;
                 if (alive && DateTime.TryParse(Json.Str(status, "updatedAt"), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out stamp)) {
                     double age = (now - stamp.ToUniversalTime()).TotalSeconds;
-                    if (age >= 0 && age <= VpnWatchdog.TransportStatusMaxAgeSec) return status;
+                    if (age >= 0 && age <= VpnWatchdog.VpnStatusMaxAgeSec) return status;
                 }
                 string state = alive ? "watchdog-stalled" : "core-exited";
                 // The host's independent lease has already closed the core Job at 2.5 s.

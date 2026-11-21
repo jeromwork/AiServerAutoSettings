@@ -41,7 +41,7 @@ namespace RemoteAgents.Launcher
         }
         static void DeadDaemonNotReady()
         {
-            Check(!VpnWatchdog.TransportReady(ReadyTransport(), (pid, started) => false), "(b) DeadDaemonNotReady");
+            Check(!VpnWatchdog.TransportReady(ReadyTransport(), (pid, started) => false) && VpnWatchdog.TransportProblem(ReadyTransport(), (pid, started) => false) == "daemon-exited", "(b) DeadDaemonNotReady retains diagnostic reason");
             Check(!VpnWatchdog.TransportReady(ReadyTransport(), (pid, started) => { throw new InvalidOperationException(); }), "(b) process access exception fails closed");
         }
         static void ReusedPidNotReady()
@@ -56,7 +56,7 @@ namespace RemoteAgents.Launcher
             var transport = ReadyTransport(); transport.Remove("pid");
             Check(!VpnWatchdog.TransportReady(transport, FakeDaemonAlive) && VpnWatchdog.TransportProblem(transport, FakeDaemonAlive) == "old-daemon", "(d) LegacyDaemonNotReady: explicit old daemon reason");
             transport["pid"] = 42; transport["startedAt"] = "invalid";
-            Check(!VpnWatchdog.TransportReady(transport, FakeDaemonAlive), "(d) malformed process identity fails closed");
+            Check(!VpnWatchdog.TransportReady(transport, FakeDaemonAlive) && VpnWatchdog.TransportProblem(transport, FakeDaemonAlive) == "invalid-process-start", "(d) malformed process identity fails closed with diagnostic reason");
             transport.Remove("startedAt");
             Check(!VpnWatchdog.TransportReady(transport, FakeDaemonAlive), "(d) missing process start fails closed");
         }
@@ -67,11 +67,13 @@ namespace RemoteAgents.Launcher
             foreach (var candidate in new[] {
                 ConfigBundle.D("tag", "a", "state", "remembered", "enabled", true),
                 ConfigBundle.D("tag", "a", "state", "ok", "enabled", false),
-                ConfigBundle.D("tag", "a", "state", "ok"),
                 ConfigBundle.D("tag", "b", "state", "ok", "enabled", true) }) {
                 transport["candidates"] = new object[] { candidate };
                 Check(!VpnWatchdog.TransportReady(transport, FakeDaemonAlive), "(e) ActiveCandidateMustBeOkEnabled");
             }
+            transport = ReadyTransport();
+            Json.Map(Json.Array(transport["candidates"])[0]).Remove("enabled");
+            Check(VpnWatchdog.TransportReady(transport, FakeDaemonAlive), "(e) absent enabled preserves the legacy true default");
             transport = ReadyTransport(); transport["ok"] = false;
             Check(!VpnWatchdog.TransportReady(transport, FakeDaemonAlive), "(e) failed status is not ready");
             transport = ReadyTransport(); transport["active"] = "";
@@ -93,7 +95,8 @@ namespace RemoteAgents.Launcher
         {
             long clock = 100;
             var waiting = new VpnPathWait(clock, FakeDaemonAlive); waiting.Changed(ConfigBundle.D());
-            clock += VpnPathWait.VpnStartFuseMs; waiting.CheckFuse(clock); // Fake clock; no timer or timeout is executed.
+            Check(VpnPathWait.VpnPathWaitFuseMs == 25000, "(g) path wait leaves room for remaining client startup steps");
+            clock += VpnPathWait.VpnPathWaitFuseMs; waiting.CheckFuse(clock); // Fake clock; no timer or timeout is executed.
             Check(waiting.Complete && waiting.State == "no-path", "(g) StartFuseNoPath: fuse gives the former refusal");
             waiting.Changed(ReadyTransport());
             Check(waiting.State == "no-path", "(g) late notification cannot reverse refusal");
@@ -120,7 +123,7 @@ namespace RemoteAgents.Launcher
             foreach (string source in new[] { "TrayContext.cs", "LanTun.cs", "SetupWizard.cs" })
                 Check(File.ReadAllText(Path.Combine(repo, "app/launcher", source)).Contains("StatusView.ReadTransport(home)"), source + " uses common facts policy");
             string client = File.ReadAllText(Path.Combine(repo, "app/launcher/HelperClient.cs"));
-            Check(client.Contains("VpnStartFuseMs = " + VpnPathWait.VpnStartFuseMs + ";"), "path wait shares the existing client fuse budget");
+            Check(client.Contains("VpnStartFuseMs = 70000;") && VpnPathWait.VpnPathWaitFuseMs < 70000, "path wait is shorter than the unchanged client startup fuse");
             Console.WriteLine("PASS: R0 path readiness (" + (count - before) + " checks; fake processes, clock and file-change events; a-h)");
         }
         internal static void Run(string root)
