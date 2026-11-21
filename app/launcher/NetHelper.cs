@@ -68,8 +68,13 @@ namespace RemoteAgents.Launcher
         VpnTunSession vpnTun;
         readonly ManualResetEvent stopping = new ManualResetEvent(false), emergency = new ManualResetEvent(false);
         readonly object pipeGate = new object();
-        NamedPipeServerStream pipe;
-        Thread worker;
+        NamedPipeServerStream pipe, eventsPipe;
+        Thread worker, eventsWorker;
+        EventBus bus;
+        HelperBusSender busSender;
+        // Предохранитель (конституция 4а): событие «клиент прислал hello» недоступно, если клиент подключился и молчит; при срабатывании — канал событий закрывается, успех не объявляет.
+        internal const int EventsHelloFuseMs = 10000;
+        const int EventsQueueLimit = 2000;
         NetHelperLifetime lifetime;
         NetHelperLog log;
         internal NetHelper(string ownerSid, string home)
@@ -99,7 +104,9 @@ namespace RemoteAgents.Launcher
             // Never touch foreign policies. LAN disposal also waits out any cancelled command.
             try { if (lan != null) lan.Dispose(); else NetHelperInstall.RemoveNrpt(); if (log != null) log.Write("cleanup", 0); }
             catch { if (log != null) log.Write("cleanup", 1); }
-            lock (pipeGate) { if (pipe != null) { pipe.Dispose(); pipe = null; } }
+            lock (pipeGate) { if (pipe != null) { pipe.Dispose(); pipe = null; } if (eventsPipe != null) { eventsPipe.Dispose(); eventsPipe = null; } }
+            if (busSender != null) busSender.Dispose();
+            if (bus != null) bus.Dispose();
             if (log != null) log.Write("stopped", 0);
             RaLog.FlushLimits();
         }
@@ -107,7 +114,7 @@ namespace RemoteAgents.Launcher
         {
             if (lifetime != null) lifetime.CloseJobs(); // Network FIRST, before pipe disposal, logs or joins.
             stopping.Set();
-            lock (pipeGate) { if (pipe != null) pipe.Dispose(); }
+            lock (pipeGate) { if (pipe != null) pipe.Dispose(); if (eventsPipe != null) eventsPipe.Dispose(); }
             if (worker != null && worker != Thread.CurrentThread) worker.Join(30000);
         }
         protected override void OnShutdown() { OnStop(); base.OnShutdown(); }
@@ -119,6 +126,12 @@ namespace RemoteAgents.Launcher
                 lease = new VpnLease(() => { lifetime.CloseJobs(); emergency.Set(); });
                 NetHelperInstall.SecureDirectory(NetHelperInstall.DataDirectory);
                 log = new NetHelperLog(NetHelperInstall.DataDirectory); log.Write("starting", 0);
+                bus = new EventBus(defaultSource: BusTopics.Sources.Helper);
+                busSender = new HelperBusSender(bus);
+                HelperBus.Bus = bus; // читатель вывода ядра (V1) публикует singbox.* через неё
+                log.Core.Bus = bus;
+                bus.Publish(BusTopics.HelperVersion, BusTopics.Sources.Helper, "version", NetHelperInstall.HelperVersion);
+                bus.Publish(BusTopics.VpnState, BusTopics.Sources.Helper, "state", "off", "reason", "helper-start", "enabled", "false", "ok", "false", "name", "");
                 var lanClock = Stopwatch.StartNew();
                 var lanPlatform = new WindowsLanTun(home, config => {
                     IDisposable job; var process = StartSingBox(Core.Lan, config, out job);
@@ -134,8 +147,9 @@ namespace RemoteAgents.Launcher
                 }, null, 1000, 1000);
                 lock (pipeGate) {
                     if (stopping.WaitOne(0)) return;
-                    pipe = CreatePipe(ownerSid);
+                    pipe = CreatePipe(ownerSid, NetHelperProtocol.PipeName);
                 }
+                eventsWorker = new Thread(EventsLoop) { IsBackground = true, Name = "RemoteAgentsNet events" }; eventsWorker.Start();
                 Task connection = pipe.WaitForConnectionAsync();
                 if (!Wait(connection, lease, true)) return;
                 connection.GetAwaiter().GetResult();
@@ -179,11 +193,38 @@ namespace RemoteAgents.Launcher
                 lifetime.Shutdown();
             }
         }
+        // Второй pipe: помощник -> трей, только события шины из белого списка. Основной pipe команд не занят.
+        void EventsLoop()
+        {
+            while (!stopping.WaitOne(0) && !emergency.WaitOne(0)) {
+                NamedPipeServerStream channel = null;
+                try {
+                    lock (pipeGate) {
+                        if (stopping.WaitOne(0)) return;
+                        channel = CreatePipe(ownerSid, NetHelperProtocol.EventsPipeName); eventsPipe = channel;
+                    }
+                } catch { return; } // События необязательны: без второго pipe команды и VPN работают как раньше.
+                try {
+                    channel.WaitForConnectionAsync().GetAwaiter().GetResult(); // остановка службы закрывает pipe и прерывает ожидание
+                    var reader = new NetHelperProtocol.Reader(channel);
+                    var hello = reader.ReadLine();
+                    if (!hello.Wait(EventsHelloFuseMs) || hello.GetAwaiter().GetResult() != NetHelperProtocol.EventsHello || !IsOwner(channel, ownerSid)) continue;
+                    using (var queue = new System.Collections.Concurrent.BlockingCollection<string>(EventsQueueLimit)) {
+                        // Клиент после hello молчит: завершение чтения = он отключился.
+                        reader.ReadLine().ContinueWith(_ => { try { queue.CompleteAdding(); } catch { } }, TaskContinuationOptions.ExecuteSynchronously);
+                        using (busSender.Attach(frame => { try { queue.TryAdd(frame); } catch { } })) {
+                            foreach (string line in queue.GetConsumingEnumerable()) NetHelperProtocol.WriteLine(channel, line).GetAwaiter().GetResult();
+                        }
+                    }
+                } catch { /* клиент ушёл или pipe закрыт при остановке: новый экземпляр pipe */ }
+                finally { lock (pipeGate) { if (eventsPipe == channel) eventsPipe = null; } channel.Dispose(); }
+            }
+        }
         string Execute(string command, Dictionary<string, object> request)
         {
             if (command == "log.read") {
                 ulong after; ulong.TryParse(Json.Str(request, "after", "0"), out after);
-                log.Core.Pump();
+                log.Core.Flush();
                 return HelperEventLog.Reply(log.Events.Read(after, Json.Int(request, "max", HelperEventLog.MaxRead)), NetHelperInstall.HelperVersion);
             }
             bool noisy = command == "status";
@@ -207,7 +248,7 @@ namespace RemoteAgents.Launcher
                             NamedPipeServerStream channel; lock (pipeGate) channel = pipe;
                             if (channel == null) throw new IOException("Клиент отключился");
                             channel.RunAsClient(() => action());
-                        }, log.Write) { Events = log.Events, CorePump = log.Core };
+                        }, log.Write) { Events = log.Events, CorePump = log.Core, Bus = bus };
                         lifetime.AddJob(vpnTun);
                     }
                     vpnTun.Enable(options);
@@ -251,7 +292,7 @@ namespace RemoteAgents.Launcher
                 return job.Start(Path.Combine(NetHelperInstall.InstallDirectory, "sing-box.exe"), new[] { "run", "-c", config }, NetHelperInstall.InstallDirectory);
             } catch { job.Dispose(); lifetime.RemoveJob(job); throw; }
         }
-        static NamedPipeServerStream CreatePipe(string sid)
+        static NamedPipeServerStream CreatePipe(string sid, string pipeName)
         {
             var acl = new PipeSecurity(); acl.SetAccessRuleProtection(true, false);
             acl.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(sid), PipeAccessRights.ReadWrite, AccessControlType.Allow));
@@ -261,7 +302,7 @@ namespace RemoteAgents.Launcher
             try {
                 var security = new SecurityAttributes { length = Marshal.SizeOf(typeof(SecurityAttributes)), descriptor = pinned.AddrOfPinnedObject() };
                 // FIRST_PIPE_INSTANCE refuses a squatted name; REJECT_REMOTE_CLIENTS makes PID identity local.
-                var handle = CreateNamedPipe(@"\\.\pipe\" + NetHelperProtocol.PipeName, 0x40080003, 0x8, 1, 65536, 65536, 0, ref security);
+                var handle = CreateNamedPipe(@"\\.\pipe\" + pipeName, 0x40080003, 0x8, 1, 65536, 65536, 0, ref security);
                 if (handle.IsInvalid) { handle.Dispose(); throw new Win32Exception(); }
                 try { return new NamedPipeServerStream(PipeDirection.InOut, true, false, handle); }
                 catch { handle.Dispose(); throw; }

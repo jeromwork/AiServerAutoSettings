@@ -33,7 +33,21 @@ namespace RemoteAgents.Launcher
         static event Action<bool> SetupCompleted;
         internal static string SetupWarning { get { return setup.Warning; } }
         internal string Status { get; private set; }
-        internal HelperClient(string home, Control ui) { this.home = home; this.ui = ui; journal = new Journal(home); SetupCompleted += OnSetupCompleted; }
+        // Шина трея (B2 передаёт свою; без неё — собственная). События помощника попадают сюда с source=helper.
+        readonly EventBus bus;
+        readonly HelperBusReceiver receiver;
+        readonly AutoResetEvent monitorWake = new AutoResetEvent(false);
+        NamedPipeClientStream eventsPipe;
+        volatile bool eventsConnected;
+        // Период синхронизации состояния ЛВС (tick-источник; события ЛВС от службы вне шага B3): § 4а-долг, см. отчёт.
+        internal const int LanSyncPeriodMs = 2000;
+        // Предохранитель (конституция 4а): событие vpn.state недоступно, если помощник завис при включении; при срабатывании — VPN выключается, успех не объявляет.
+        internal const int VpnStartFuseMs = 45000;
+        // Предохранитель (конституция 4а): pipe событий недоступен, если помощник старой версии; при срабатывании — остаёмся на прежнем опросе status, успех не объявляет.
+        internal const int EventsConnectFuseMs = 5000;
+        internal bool EventsConnected { get { return eventsConnected; } }
+        internal HelperClient(string home, Control ui, EventBus bus = null)
+        { this.home = home; this.ui = ui; journal = new Journal(home); this.bus = bus ?? new EventBus(); receiver = new HelperBusReceiver(this.bus); SetupCompleted += OnSetupCompleted; }
         // Every new tray (including the EXE started after OTA) enters this shared setup gate.
         internal void EnsureRunning()
         {
@@ -82,6 +96,7 @@ namespace RemoteAgents.Launcher
                 // Wait for the effective port; never guess it from a default or send invalid input.
                 if (Json.Str(request, "cmd") == "lan.apply" && Json.Int(request, "socksPort", 0) == 0) return;
                 string wanted = Json.Encode(request); lock (gate) lanWanted = wanted;
+                monitorWake.Set();
             } catch { Status = "Локальные сети: неверный конфиг"; }
         }
         internal Dictionary<string, object> LanStatus(Dictionary<string, object> config)
@@ -115,7 +130,33 @@ namespace RemoteAgents.Launcher
                 var reader = new NetHelperProtocol.Reader(channel);
                 lock (exchangeGate) { connectionReader = reader; Exchange(channel, reader, "ping"); }
                 Task.Run(() => Monitor(channel, reader));
+                Task.Run(() => RunEvents(channel));
             } catch { lock (gate) { if (pipe == channel) pipe = null; } channel.Dispose(); throw; }
+        }
+        // Поток событий помощника: второй pipe, только чтение. Нет pipe (старая служба) — работает прежний опрос.
+        void RunEvents(NamedPipeClientStream main)
+        {
+            NamedPipeClientStream channel = null;
+            try {
+                channel = new NamedPipeClientStream(".", NetHelperProtocol.EventsPipeName, PipeDirection.InOut, PipeOptions.Asynchronous, TokenImpersonationLevel.Impersonation);
+                lock (gate) { if (disposed || pipe != main) { channel.Dispose(); return; } eventsPipe = channel; }
+                channel.Connect(EventsConnectFuseMs);
+                uint serverPid;
+                if (!GetNamedPipeServerProcessId(channel.SafePipeHandle, out serverPid) || !IsServiceProcess(serverPid)) throw new IOException("Недостоверный помощник");
+                if (!NetHelperProtocol.WriteLine(channel, NetHelperProtocol.EventsHello).Wait(5000)) throw new IOException("Помощник не отвечает");
+                var reader = new NetHelperProtocol.Reader(channel);
+                eventsConnected = true;
+                while (true) {
+                    string line = reader.ReadLine().GetAwaiter().GetResult();
+                    if (line == null) break;
+                    receiver.Ingest(line);
+                }
+            } catch (Exception error) { if (!disposed) journal.Write(TickFailureLog.HelperFailure("events", error)); }
+            finally {
+                eventsConnected = false;
+                lock (gate) { if (eventsPipe == channel) eventsPipe = null; }
+                if (channel != null) channel.Dispose();
+            }
         }
         System.Collections.Generic.Dictionary<string, object> Exchange(NamedPipeClientStream channel, NetHelperProtocol.Reader reader, string command)
         { return ExchangeRequest(channel, reader, new { cmd = command }, command == "ping"); }
@@ -168,11 +209,25 @@ namespace RemoteAgents.Launcher
         internal Task<System.Collections.Generic.Dictionary<string, object>> VpnOn(VpnTun options)
         {
             return Task.Run(() => {
-                var result = Json.Map(Json.Get(Request(options.Request()), "vpn"));
                 var wait = Stopwatch.StartNew();
-                while (Json.Str(result, "state") == "starting" && wait.ElapsedMilliseconds < 45000) {
-                    Thread.Sleep(200);
-                    result = Json.Map(Json.Get(Request(new { cmd = "status" }), "vpn"));
+                var result = Json.Map(Json.Get(Request(options.Request()), "vpn"));
+                if (eventsConnected) {
+                    // Ждём vpn.state из шины, а не опрашиваем status: подписка раньше запроса состояния — гонки нет.
+                    while (Json.Str(result, "state") == "starting" && wait.ElapsedMilliseconds < VpnStartFuseMs) {
+                        using (var awaiter = new VpnStateAwaiter(bus, state => state != "starting", false)) {
+                            result = Json.Map(Json.Get(Request(new { cmd = "status" }), "vpn"));
+                            if (Json.Str(result, "state") != "starting") break;
+                            long left = VpnStartFuseMs - wait.ElapsedMilliseconds;
+                            if (left > 0) awaiter.Task.Wait((int)left);
+                        }
+                        result = Json.Map(Json.Get(Request(new { cmd = "status" }), "vpn"));
+                    }
+                } else {
+                    // Помощник без pipe событий (старая версия): прежний опрос.
+                    while (Json.Str(result, "state") == "starting" && wait.ElapsedMilliseconds < VpnStartFuseMs) {
+                        Thread.Sleep(200);
+                        result = Json.Map(Json.Get(Request(new { cmd = "status" }), "vpn"));
+                    }
                 }
                 if (Json.Str(result, "state") == "starting") { Request(new { cmd = "vpn.off" }); throw new IOException("Подготовка VPN не завершена"); }
                 return result;
@@ -196,10 +251,9 @@ namespace RemoteAgents.Launcher
                         var status = Exchange(channel, reader, "status");
                         lock (gate) { lanState = Json.Map(Json.Get(status, "lan")); lanUpdated = DateTime.UtcNow; }
                     }
-                    for (int i = 0; i < 20; i++) {
-                        lock (gate) { if (disposed || pipe != channel) return; }
-                        Thread.Sleep(100);
-                    }
+                    // Период — tick-источник; Dispose и новый конфиг ЛВС будят цикл сразу.
+                    monitorWake.WaitOne(LanSyncPeriodMs);
+                    lock (gate) { if (disposed || pipe != channel) return; }
                 }
             } catch (Exception error) {
                 journal.Write(TickFailureLog.HelperFailure("monitor", error));
@@ -281,7 +335,8 @@ namespace RemoteAgents.Launcher
         public void Dispose()
         {
             SetupCompleted -= OnSetupCompleted;
-            lock (gate) { if (disposed) return; disposed = true; if (pipe != null) { pipe.Dispose(); pipe = null; } }
+            lock (gate) { if (disposed) return; disposed = true; if (pipe != null) { pipe.Dispose(); pipe = null; } if (eventsPipe != null) { eventsPipe.Dispose(); eventsPipe = null; } }
+            monitorWake.Set();
             if (notice != null && !notice.IsDisposed) notice.Dispose();
         }
         static bool IsServiceProcess(uint pid)

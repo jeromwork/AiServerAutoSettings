@@ -41,17 +41,17 @@ namespace RemoteAgents.Launcher
             // A config refusal may be retried after the config changes, but gives only one balloon per outcome.
             bool notify = Json.Str(state, "notice") != key;
             try { SaveUpdateState(message, key); } catch { updateSummary = message; log.Write("update.state.write.failed"); }
+            if (reason.Length == 0) updateButton.OnUpdated(version); else ButtonDo(b => b.OnFailed(reason));
             if (notify) icon.ShowBalloonTip(8000, Product.Name, message, reason.Length == 0 ? ToolTipIcon.Info : ToolTipIcon.Warning);
         }
         bool UpdateOccupied()
         {
-            return !UpdateSchedule.Safe(MutationConflict(), BackgroundWork.Disk.Busy || (diskExplorer != null && diskExplorer.Busy),
-                Application.OpenForms.Cast<Form>().Any(f => f is ConfigWindow && ((ConfigWindow)f).IsApplying || f is SetupWizard && ((SetupWizard)f).IsApplying), false);
+            return UpdateOccupiedReason().Length > 0;
         }
         string SettingsHash() { return Files.Hash(Path.Combine(home, "config.json")); }
-        void CheckUpdates() { StartUpdateCheck(true); }
         void PollUpdates()
         {
+            PollButtonRelease();
             if (engine.Pending || File.Exists(Path.Combine(engine.Root, "exe-upgrade.json")) || updateChecking || closing) return;
             if (offeredUpdate != null) {
                 if (!Json.Bool(config.Update, "enabled", true) || !Json.Bool(config.Update, "auto", true)) { offeredUpdate = null; return; }
@@ -59,15 +59,15 @@ namespace RemoteAgents.Launcher
                 return;
             }
             if (checkRequested && !UpdateOccupied()) { StartUpdateCheck(true); return; }
-            if (updateSchedule.Due(DateTime.UtcNow, config.Update, UpdateOccupied())) StartUpdateCheck(false);
         }
         async void StartUpdateCheck(bool manual)
         {
-            if (updateChecking || engine.Pending || offeredUpdate != null || closing) return;
-            if (!Json.Bool(config.Update, "enabled", true)) { updateSummary = "Обновления выключены в конфиге"; RefreshMenu(); return; }
-            if (UpdateOccupied()) { if (manual) { checkRequested = true; updateSummary = "Проверка обновлений ожидает окончания текущей операции"; } return; }
+            // Кнопка не должна зависнуть в «Проверяю…»: каждый ранний выход переводит её в итоговое состояние (идущую проверку закончит её собственный finally).
+            if (updateChecking || engine.Pending || offeredUpdate != null || closing) { if (engine.Pending && !closing) ButtonDo(b => b.OnFailed("предыдущее обновление ещё проверяется")); return; }
+            if (!Json.Bool(config.Update, "enabled", true)) { updateSummary = "Обновления выключены в конфиге"; ButtonDo(b => b.OnFailed("обновления выключены в конфиге")); RefreshMenu(); return; }
+            if (UpdateOccupied()) { if (manual) ButtonDo(b => b.OnDeferred(UpdateOccupiedReason(), () => new ReleaseWait(this), () => UpdateOccupied())); return; }
             checkRequested = false; updateChecking = true; updateSchedule.Started(DateTime.UtcNow, config.Update);
-            string snapshot, hash; Manifest manifest = null;
+            string snapshot, hash; Manifest manifest = null; bool installNow = false;
             try {
                 snapshot = Json.Encode(config.Update); hash = SettingsHash();
                 // Only manifest.json. A failed connection never changes transport, VPN, Disk or server files.
@@ -79,41 +79,50 @@ namespace RemoteAgents.Launcher
                 var state = UpdateState(); state["checkedUtc"] = DateTime.UtcNow.ToString("o"); Json.Write(UpdateStatePath, state);
                 if (probe.Offer == UpdateOffer.Current) {
                     SaveUpdateState("Установлена последняя версия " + engine.Current + ", проверено " + DateTime.Now.ToString("g"));
+                    ButtonDo(b => b.OnUpToDate(engine.Current));
                 } else if (probe.Offer == UpdateOffer.Bad) {
                     // Keep the original reason instead of repeating the failed install or its notification.
                     updateSummary = Json.Str(state, "notice").StartsWith(manifest.Version + ":", StringComparison.Ordinal) ? Json.Str(state, "summary") : "Обновление " + manifest.Version + " ранее отклонено; сохранена версия " + engine.Current;
+                    string rejected = manifest.Version; ButtonDo(b => b.OnFailed("версия " + rejected + " ранее отклонена"));
                 } else if (probe.Offer == UpdateOffer.NeedsInstaller) {
                     UpdateOutcome(manifest.Version, "нужна разовая установка нового EXE администратором");
                 } else if (Json.Str(state, "blockedVersion") == manifest.Version && Json.Str(state, "blockedConfig") == hash) {
-                    updateSummary = Json.Str(state, "summary");
+                    updateSummary = Json.Str(state, "summary"); string blocked = updateSummary; ButtonDo(b => b.OnFailed(blocked));
                 } else if (probe.Offer == UpdateOffer.Available) {
                     offeredUpdate = manifest; offeredSettings = hash;
                     updateSummary = "Обновляется до " + manifest.Version + "; ожидается безопасный момент";
-                } else SaveUpdateState("Доступна версия " + manifest.Version + "; автоустановка выключена в конфиге");
+                    // Нажатая кнопка не ждёт тика: сразу ставим (после finally, чтобы флаги не затёрлись).
+                    installNow = updateButton.IsBusy;
+                } else { SaveUpdateState("Доступна версия " + manifest.Version + "; автоустановка выключена в конфиге"); string off = manifest.Version; ButtonDo(b => b.OnFailed("доступна версия " + off + ", автоустановка выключена в конфиге")); }
                 log.Write("update.check.complete");
             } catch (OperationCanceledException) { }
             catch {
                 log.Write("update.check.failed");
                 // Connection/manifest failures do not claim the installed version is current.
                 updateSummary = "Установлена версия " + engine.Current + "; обновления не проверены: нет связи или неверный манифест";
+                ButtonDo(b => b.OnFailed("нет связи или неверный манифест"));
             } finally { updateChecking = false; if (!closing) RefreshMenu(); }
+            if (closing) return;
+            if (!installNow) { ButtonSettle("проверка не завершена"); return; }
+            if (UpdateOccupied()) ButtonDo(b => b.OnDeferred(UpdateOccupiedReason(), () => new ReleaseWait(this), () => UpdateOccupied()));
+            else InstallOfferedUpdate();
         }
         async void InstallOfferedUpdate()
         {
             UpdateEnvironment lease = null; Manifest manifest = offeredUpdate;
             try {
-                lease = UpdateEnvironment.TryReserve(); if (lease == null) return;
-                if (SettingsHash() != offeredSettings) { offeredUpdate = null; updateSchedule.Retry(); return; }
-                offeredUpdate = null; busy = true; updateChecking = true;
+                lease = UpdateEnvironment.TryReserve(); if (lease == null) { ButtonDo(b => b.OnFailed("идёт другая операция обновления")); return; }
+                if (SettingsHash() != offeredSettings) { offeredUpdate = null; updateSchedule.Retry(); ButtonDo(b => b.OnFailed("конфиг изменился; обновление будет проверено снова")); return; }
+                offeredUpdate = null; busy = true; updateChecking = true; updateButton.OnChecking();
                 updateSummary = "Обновляется до " + manifest.Version; RefreshMenu();
                 var source = SshSource.Load(Configuration.ForUpdate(Json.Encode(config.Update)), home);
                 string hash = SettingsHash();
-                string ready = await Task.Run(() => engine.Prepare(manifest, p => source.Fetch(manifest.FileName, p, manifest.Size, stop.Token),
+                string ready = await Task.Run(() => engine.Prepare(manifest, p => { source.Fetch(manifest.FileName, p, manifest.Size, stop.Token, ButtonBytes(manifest.Size)); updateButton.OnDownloadProgress(new FileInfo(p).Length, manifest.Size); updateButton.OnVerifying(); },
                     f => External.UpdateSelfTest(f, home, stop.Token), (d, f) => { log.Write("transport.binary." + PinnedTransport.Ensure(home, f)); UpdateEngine.InstallBinaries(d, f, home, stop.Token); }, stop.Token));
                 if (closing || ready == null) return;
-                if (SettingsHash() != hash) { updateSchedule.Retry(); updateSummary = "Конфиг изменился; обновление будет проверено снова"; return; }
+                if (SettingsHash() != hash) { updateSchedule.Retry(); updateSummary = "Конфиг изменился; обновление будет проверено снова"; ButtonDo(b => b.OnFailed("конфиг изменился; обновление будет проверено снова")); return; }
                 offeredVersion = ready; PrepareUpdateRestart();
-                SaveUpdateState("Обновляется до " + ready, pending: true);
+                SaveUpdateState("Обновляется до " + ready, pending: true); updateButton.OnInstalling();
                 if (!TrySelfUpdate(ready)) throw new InvalidDataException();
             } catch (ConfigCompatibilityException) {
                 try { var state = UpdateState(); state["blockedVersion"] = manifest.Version; state["blockedConfig"] = SettingsHash(); Json.Write(UpdateStatePath, state); } catch { log.Write("update.state.write.failed"); }
@@ -123,6 +132,7 @@ namespace RemoteAgents.Launcher
             catch { if (!closing) UpdateOutcome(manifest.Version, "загрузка или установка не завершена; сохранена прежняя версия"); log.Write("update.install.failed"); }
             finally {
                 if (lease != null) try { lease.Dispose(); } catch { log.Write("update.lease.release.failed"); }
+                ButtonSettle("обновление не установлено");
                 busy = updateChecking = false; if (!closing) RefreshMenu();
             }
         }

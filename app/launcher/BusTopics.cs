@@ -132,6 +132,11 @@ namespace RemoteAgents.Launcher
         };
 
         /// <summary>
+        /// Топики с сохраняемым (retained) состоянием: мост помощника шлёт их новому клиенту первыми.
+        /// </summary>
+        public static IEnumerable<string> RetainedTopics { get { return RetainedTopicSet; } }
+
+        /// <summary>
         /// Проверка, входит ли топик в белый список сохраняемых (retained) состояний.
         /// </summary>
         public static bool IsRetainedTopic(string topic)

@@ -26,6 +26,16 @@
     <IntermediateOutputPath>obj/$(Configuration)/netnotify-tests/</IntermediateOutputPath>
     <OutputPath>bin/$(Configuration)/netnotify-tests/</OutputPath>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(TrayBusTests)' == 'true'">
+    <StartupObject>RemoteAgents.Launcher.TrayBusTests</StartupObject>
+    <IntermediateOutputPath>obj/$(Configuration)/traybus-tests/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/traybus-tests/</OutputPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(HelperBusTests)' == 'true'">
+    <StartupObject>RemoteAgents.Launcher.HelperBusTests</StartupObject>
+    <IntermediateOutputPath>obj/$(Configuration)/helperbus-tests/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/helperbus-tests/</OutputPath>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(ConfigTests)' == 'true'">
     <IntermediateOutputPath>obj/$(Configuration)/config-tests/</IntermediateOutputPath>
     <OutputPath>bin/$(Configuration)/config-tests/</OutputPath>
@@ -85,6 +95,10 @@
     <Compile Include="BusJournalTests.cs" />
     <Compile Include="../NetNotify.cs" />
     <Compile Include="NetNotifyTests.cs" />
+    <Compile Include="../TrayBus.cs" />
+    <Compile Include="TrayBusTests.cs" />
+    <Compile Include="../HelperBusBridge.cs" />
+    <Compile Include="HelperBusTests.cs" />
     <Compile Include="../RaLog.cs" />
     <Compile Include="../LogLimits.cs" />
     <Compile Include="../LogMask.cs" />

@@ -63,7 +63,7 @@ namespace RemoteAgents.Launcher
             this.home = home; this.log = log; this.installSource=installSource;
             window = new WindowModel(File.Exists(Path.Combine(home, "state", "tray-hint-shown"))); dispatch.CreateControl(); var unused = dispatch.Handle;
             Directory.CreateDirectory(Path.Combine(home, "status"));
-            config = new Configuration(home); engine = new UpdateEngine(home, Program.Version);
+            config = new Configuration(home); engine = new UpdateEngine(home, Program.Version); InitUpdateButton();
             firstSetup = Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome),StringComparison.OrdinalIgnoreCase) && FirstInstall.Required(home);
             // Accept secondary launches while first-install selftest / binary downloads are still running.
             pipeWorker = Task.Run(() => Listen(pipeName, sid));
@@ -85,7 +85,7 @@ namespace RemoteAgents.Launcher
                 throw;
             }
             readyForCommands = true;
-            timer.Tick += (s, e) => Tick(); timer.Start();
+            StartBus(); // тик трея теперь tick.tray шины (бывший WinForms-таймер 1 с)
             // The folder choice keeps applying after its window closed; the tray reports the result.
             BackgroundWork.Disk.Changed += () => { try { dispatch.BeginInvoke(new Action(DiskFinished)); } catch (InvalidOperationException) { } };
             dispatch.BeginInvoke(new Action(() => {
@@ -155,7 +155,7 @@ namespace RemoteAgents.Launcher
             foreach (var j in actionJobs) j.Dispose(); actionJobs.Clear();
             definition = BundleDefinition.Load(engine.Folder(engine.Current));
             if (mainWindow != null && !mainWindow.IsDisposed) mainWindow.RebindBundle(engine.Folder(engine.Current));
-            foreach (var c in definition.Components.Where(c => Product.VpnEnabled || c.Name != "vpn")) runtimes.Add(new ComponentRuntime(c, Wanted(c), home, engine.Folder(engine.Current), log));
+            foreach (var c in definition.Components.Where(c => Product.VpnEnabled || c.Name != "vpn")) runtimes.Add(new ComponentRuntime(c, Wanted(c), home, engine.Folder(engine.Current), log) { Bus = bus });
             RefreshMenu();
         }
         bool Wanted(Component c) { return c.Name != "vpn" && config.Wanted(c); }
@@ -181,11 +181,9 @@ namespace RemoteAgents.Launcher
                 })) { ok = false; coreFailed = true; }
                 if (restart) return;
                 if (!Step("transport", () => { transport = StatusView.Read(home, "transport", maxAgeSec: 15); })) { ok = false; coreFailed = true; }
-                ok &= Step("netwatch", () => { if (ladder == null) { ladder = new NetLadderService(home, log, () => StatusView.Read(home, "transport", maxAgeSec: 15), () => VpnStatus.Read(home)); ladder.Note = SetNetNote; } ladder.Tick(transport, Json.Str(VpnStatus.Read(home), "state") == "on"); });
+                ok &= Step("netwatch", () => { if (ladder == null) { ladder = new NetLadderService(home, log, () => StatusView.Read(home, "transport", maxAgeSec: 15), () => VpnStatus.Read(home)); ladder.Note = SetNetNote; AttachLadderToBus(); } ladder.Tick(transport, Json.Str(VpnStatus.Read(home), "state") == "on"); });
                 ok &= Step("logship", () => {
                     EnsureLogShipping();
-                    if (mirror != null && DateTime.UtcNow >= nextMirror) { nextMirror = DateTime.UtcNow.AddSeconds(60); Task.Run(() => { try { mirror.Pull(); } catch { } }); }
-                    if (shipper != null) shipper.Tick();
                 });
                 ok &= Step("lan", () => { if (netHelper != null) { netHelper.UpdateLan(config.Data, transport); netHelper.ConnectWhenInstalled(NetHelperSetup.Required(config.Data)); } });
                 ok &= Step("vpn-resume", () => ResumeUpdatedVpn(transport));
@@ -389,7 +387,7 @@ namespace RemoteAgents.Launcher
             var lanStatus = LocalLanStatus();
             if (Json.Bool(lanStatus, "enabled")) entries.Insert(0, new TrayMenuEntry("lan-status", StatusView.Lan(lanStatus), false));
             entries.Insert(entries.Count - 1, new TrayMenuEntry("update-status", updateSummary, false));
-            entries.Insert(entries.Count - 1, new TrayMenuEntry("update-check", "Проверить обновления сейчас", !updateChecking && !engine.Pending));
+            entries.Insert(entries.Count - 1, new TrayMenuEntry("update-check", "Проверить обновления сейчас", !updateChecking && !engine.Pending && !updateButton.IsBusy));
             entries.Insert(entries.Count - 1, VpnMenu());
             entries.Insert(entries.Count - 1, TrayBridge.Entry(BridgeCard())); return entries.ToArray();
         }
@@ -578,6 +576,7 @@ namespace RemoteAgents.Launcher
                 HappierConfirmed = Json.Bool(AccountState(), "ok"), HappierUrl = account.WebUrl
             };
             mainWindow.UpdateActivity(syncSummary + "\r\n" + updateSummary);
+            ApplyUpdateButton();
             mainWindow.UpdateMain(facts,
                 "Версия: " + Program.Version + "; бандл: " + engine.Current + "\r\nПапка: " + home +
                 "\r\nПуть: " + StatusView.Title(transport) + "; " + StatusView.Speed(transport) + "; проверен: " + StatusView.CheckedAt(transport) +
@@ -958,7 +957,7 @@ namespace RemoteAgents.Launcher
         {
             if (closing) return;
             bool preserveVpn = RestartRequested && keepVpnOnRestart;
-            closing = true; timer.Stop(); stop.Cancel(); BackgroundWork.Disk.Stop();
+            closing = true; timer.Stop(); StopBus(); stop.Cancel(); BackgroundWork.Disk.Stop();
             if (diskExplorer != null) { diskExplorer.Dispose(); diskExplorer.Wait(3500); }
             if (mainWindow != null && !mainWindow.IsDisposed) mainWindow.Unload();
             lock (pipeGate) { if (server != null) server.Dispose(); }

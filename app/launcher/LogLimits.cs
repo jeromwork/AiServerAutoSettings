@@ -14,8 +14,9 @@ namespace RemoteAgents.Launcher
     internal sealed class LogLimits
     {
         // Только launcher ниже Warn, кроме vpn/net/helper/core/config: одинаковая строка пишется не чаще раза в окно.
-        // Warn и ERROR не схлопываются по дедупу и не режутся по EventBurstLines. Остальные повторы считаются и
-        // выводятся одной строкой «repeat count=N». 60 с: цикл повторов раз в 5 с (disk.explorer.unavailable) даёт ~12 строк/мин -> 1.
+        // Warn и ERROR не схлопываются по дедупу и не режутся по EventBurstLines (шум на Warn гасится в источнике:
+        // disk.explorer.unavailable пишется только при переходе, см. ExplorerOutage). Остальные повторы считаются и
+        // выводятся одной строкой «repeat count=N»; 60 с: повтор раз в 5 с даёт ~12 строк/мин -> 1.
         internal static TimeSpan RepeatWindow = TimeSpan.FromSeconds(60);
         // Не больше стольких строк одного события (поток+компонент+событие) за окно, даже если поля разные. 20/мин
         // на событие держит launcher.log далеко ниже ~1 МБ за 2 минуты; исключения те же, что у RepeatWindow.

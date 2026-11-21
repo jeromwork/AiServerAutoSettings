@@ -21,7 +21,8 @@ namespace RemoteAgents.Launcher
                 .Where(path => Path.GetFileName(path) != "NetHelperSetup.cs")
                 .Select(path => "app/launcher/" + Path.GetFileName(path));
             return service.Concat(new[] {
-                "app/launcher/Data.cs", "app/launcher/EntryPoint.cs", "app/launcher/NativeJob.cs",
+                "app/launcher/Data.cs", "app/launcher/EntryPoint.cs",
+                "app/launcher/HelperBusBridge.cs", "app/launcher/EventBus.cs", "app/launcher/BusTopics.cs", "app/launcher/NativeJob.cs",
                 "app/launcher/PinnedTransport.cs", "app/launcher/Program.cs", "app/launcher/StatusView.cs",
                 "app/launcher/TickFailureLog.cs", "app/launcher/TrayMenuModel.cs", "app/launcher/RaLog.cs", "app/launcher/LogLimits.cs", "app/launcher/LogMask.cs",
                 "app/launcher/RemoteAgents.Launcher.csproj", "build/bundle-binaries.json",

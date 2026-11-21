@@ -106,15 +106,20 @@ namespace RemoteAgents.Launcher
     // Расписание сторожа. При VPN: ступени 1–6 раз в 30 с, 7–8 раз в 120 с. Без VPN: 1–5 раз в 60 с.
     internal sealed class NetSchedule
     {
-        internal const long QuickOnMs = 30000, QuickOffMs = 60000, SlowMs = 120000, HeartbeatMs = 15 * 60000L, StartDelayMs = 10000;
-        long nextQuick, nextSlow, nextHeartbeat;
-        bool kicked;
-        internal NetSchedule(long nowMs) { nextQuick = nowMs + StartDelayMs; nextSlow = nowMs + StartDelayMs; nextHeartbeat = nowMs + HeartbeatMs; }
+        internal const long QuickOnMs = 30000, QuickOffMs = 60000, SlowMs = 120000, HeartbeatMs = 15 * 60000L;
+        // Предохранитель (конституция 4а): событие block.ready transport недоступно, если транспорт так и не стал готов; при срабатывании — первый прогон лестницы (она как раз диагностирует неготовый транспорт), успех не объявляет.
+        internal const long StartFuseMs = 90000;
+        long nextQuick, nextSlow, nextHeartbeat, fuseAt;
+        bool kicked, ready;
+        internal NetSchedule(long nowMs) { fuseAt = nowMs + StartFuseMs; nextHeartbeat = nowMs + HeartbeatMs; }
         internal void Kick() { kicked = true; }
+        // Первый прогон — по событию block.ready transport (вместо задержки старта).
+        internal void TransportReady(long nowMs) { if (ready) return; ready = true; nextQuick = nowMs; nextSlow = nowMs; }
         // 0 — ничего, иначе уровень NetLadder.Quick/Slow. Вызывающий отмечает запуск через Started.
         internal int Due(long nowMs, bool vpnOn)
         {
             if (kicked) return vpnOn ? NetLadder.Slow : NetLadder.Quick;
+            if (!ready) { if (nowMs < fuseAt) return 0; TransportReady(nowMs); }
             if (vpnOn && nowMs >= nextSlow) return NetLadder.Slow;
             return nowMs >= nextQuick ? NetLadder.Quick : 0;
         }
@@ -124,6 +129,7 @@ namespace RemoteAgents.Launcher
             nextQuick = nowMs + (vpnOn ? QuickOnMs : QuickOffMs);
             if (level >= NetLadder.Slow) nextSlow = nowMs + SlowMs;
         }
+        internal bool IsReady { get { return ready; } }
         internal bool HeartbeatDue(long nowMs) { if (nowMs < nextHeartbeat) return false; nextHeartbeat = nowMs + HeartbeatMs; return true; }
     }
 
