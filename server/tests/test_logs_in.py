@@ -118,6 +118,15 @@ class LogsIn(unittest.TestCase):
         self.assertTrue(names[0].endswith('/bus-2026-11-20.log'), names[0])
         self.assertIn('state=on', self.files()[names[0]].read_text(encoding='utf-8'))
 
+    def test_health_stream_is_stored_by_line_date(self):
+        health_line = '2026-11-20T09:05:00.123Z 12:05:00.123+03:00 INFO  health    component.exit s=1111 seq=1 source=supervisor name=sing-box code=1'
+        gz, _ = batch([health_line], stream='health')
+        self.assertEqual(logs_in.recv(gz, self.root), 'OK batch=b1 stored=1')
+        names = [k for k in self.files() if k.endswith('.log') and not k.endswith('_receiver.log')]
+        self.assertEqual(len(names), 1)
+        self.assertTrue(names[0].endswith('/health-2026-11-20.log'), names[0])
+        self.assertIn('code=1', self.files()[names[0]].read_text(encoding='utf-8'))
+
     def test_mask_linear_time(self):
         for text in ('.' * 8192, '_-' * 4000):
             logs_in.mask(text)
