@@ -47,6 +47,8 @@ namespace RemoteAgents.Launcher
             DeferredUnsubscribesOnFailed();
             InjectedClockUsedForUpToDate();
             SubscribeFailureTransitionsToFailed();
+            RecheckAfterSubscribeReleases();
+            ProgressHandlerNeverThrows();
             DeadlockFreedomWithStateChangedAndOtherThread();
             PhaseChangedEventFires();
             ShowSpinnerFlag();
@@ -531,6 +533,52 @@ namespace RemoteAgents.Launcher
                 Check(!sourceClosed, "source open while CountingStream active");
             }
             Check(sourceClosed, "CountingStream.Dispose closes underlying stream");
+        }
+
+        static void RecheckAfterSubscribeReleases()
+        {
+            // Занятое освободилось между проверкой и подпиской: после подписки перепроверка зовёт OnReleased().
+            var model = new UpdateButtonModel();
+            int disposed = 0;
+            var phases = new List<string>();
+            model.PhaseChanged += (from, to, ms, bytes) => phases.Add(from + ">" + to);
+            Check(model.OnClick("диск", () => new ActionDisposable(() => disposed++), () => false), "click returns true when released right after subscribe");
+            Check(model.State == UpdateButtonState.Checking, "released at once -> Checking");
+            Check(disposed == 1 && !model.HasReleaseSubscription, "subscription disposed on release");
+            Check(phases.Count == 2 && phases[0] == "Idle>Deferred" && phases[1] == "Deferred>Checking", "deferred then checking events in order");
+
+            // Всё ещё занято: остаётся Deferred с подпиской; потом событие освобождения вручную.
+            var model2 = new UpdateButtonModel();
+            Check(model2.OnClick("диск", () => new TestDisposable(), () => true), "click occupied");
+            Check(model2.State == UpdateButtonState.Deferred && model2.HasReleaseSubscription, "still occupied -> Deferred with subscription");
+            Check(model2.OnReleased() && model2.State == UpdateButtonState.Checking, "manual release event -> Checking");
+
+            // Проверка занятости бросила: считаем свободным, не зависаем в Deferred.
+            var model3 = new UpdateButtonModel();
+            model3.OnClick("диск", () => new TestDisposable(), () => { throw new InvalidOperationException("x"); });
+            Check(model3.State == UpdateButtonState.Checking, "occupancy check failure treated as free");
+        }
+
+        static void ProgressHandlerNeverThrows()
+        {
+            var model = new UpdateButtonModel();
+            model.OnClick();
+            model.StateChanged += m => { throw new InvalidOperationException("ui"); };
+            bool threw = false;
+            try { Check(!model.OnDownloadProgress(10, 100), "progress reports false when handler throws"); }
+            catch (InvalidOperationException) { threw = true; }
+            Check(!threw, "OnDownloadProgress does not throw");
+
+            // CountingStream: падение обработчика не обрывает чтение.
+            int calls = 0;
+            using (var cs = new CountingStream(new MemoryStream(new byte[300]), 300, (b, t) => { calls++; throw new InvalidOperationException("ui"); }, true))
+            {
+                var buf = new byte[100];
+                int total = 0, n;
+                while ((n = cs.Read(buf, 0, buf.Length)) > 0) total += n;
+                Check(total == 300, "stream fully read despite throwing handler");
+                Check(calls > 0, "handler was invoked");
+            }
         }
 
         private sealed class TestDisposable : IDisposable

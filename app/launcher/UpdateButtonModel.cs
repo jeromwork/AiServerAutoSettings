@@ -67,7 +67,8 @@ namespace RemoteAgents.Launcher
                                    State == UpdateButtonState.Verifying ||
                                    State == UpdateButtonState.Installing;
 
-        public bool OnClick(string occupiedReason = null, Func<IDisposable> subscribe = null)
+        // Вход «занято» (occupiedReason) вызывать только из UI-потока: занятость и подписка проверяются в одном потоке.
+        public bool OnClick(string occupiedReason = null, Func<IDisposable> subscribe = null, Func<bool> stillOccupied = null)
         {
             if (!string.IsNullOrEmpty(occupiedReason))
             {
@@ -78,7 +79,7 @@ namespace RemoteAgents.Launcher
                         return false;
                     }
                 }
-                return OnDeferred(occupiedReason, subscribe);
+                return OnDeferred(occupiedReason, subscribe, stillOccupied);
             }
 
             UpdateButtonState prev;
@@ -207,9 +208,16 @@ namespace RemoteAgents.Launcher
 
         public bool OnDownloadProgress(long bytes, long size)
         {
-            // TODO (этап 2): обработчик прогресса не должен бросать исключения
-            int pct = size > 0 ? (int)Math.Min(100, Math.Max(0, bytes * 100 / size)) : 0;
-            return OnDownloading(pct, bytes, size);
+            // Обработчик прогресса не бросает: ошибка UI не должна обрывать скачивание.
+            try
+            {
+                int pct = size > 0 ? (int)Math.Min(100, Math.Max(0, bytes * 100 / size)) : 0;
+                return OnDownloading(pct, bytes, size);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
         }
 
         public bool OnVerifying()
@@ -328,7 +336,7 @@ namespace RemoteAgents.Launcher
             return true;
         }
 
-        public bool OnDeferred(string what, Func<IDisposable> subscribe = null)
+        public bool OnDeferred(string what, Func<IDisposable> subscribe = null, Func<bool> stillOccupied = null)
         {
             UpdateButtonState prev;
             long elapsedMs;
@@ -383,19 +391,30 @@ namespace RemoteAgents.Launcher
                 {
                     activeSubscription = sub;
                     sub = null;
-                    // TODO (этап 2): после подписки перепроверить занятость и при свободном вызвать OnReleased()
                 }
             }
             sub?.Dispose();
 
             PhaseChanged?.Invoke(prev, UpdateButtonState.Deferred, elapsedMs, currentBytes);
             StateChanged?.Invoke(this);
+
+            // Окно гонки: занятое могло освободиться до подписки и событие уже прошло — перепроверяем после подписки.
+            if (stillOccupied != null && State == UpdateButtonState.Deferred)
+            {
+                bool occupied;
+                try { occupied = stillOccupied(); }
+                catch (Exception) { occupied = false; }
+                if (!occupied)
+                {
+                    OnReleased();
+                }
+            }
             return true;
         }
 
-        public bool OnOccupied(string what, Func<IDisposable> subscribe = null)
+        public bool OnOccupied(string what, Func<IDisposable> subscribe = null, Func<bool> stillOccupied = null)
         {
-            return OnDeferred(what, subscribe);
+            return OnDeferred(what, subscribe, stillOccupied);
         }
 
         public bool OnReleased()
@@ -552,12 +571,12 @@ namespace RemoteAgents.Launcher
                 if (this.expectedSize > 0)
                 {
                     lastReportedPct = 0;
-                    onProgress(0, this.expectedSize);
+                    try { onProgress(0, this.expectedSize); } catch (Exception) { }
                 }
                 else
                 {
                     lastReportedMb = 0;
-                    onProgress(0, 0);
+                    try { onProgress(0, 0); } catch (Exception) { }
                 }
             }
         }
@@ -606,8 +625,9 @@ namespace RemoteAgents.Launcher
             }
             if (shouldReport)
             {
-                // TODO (этап 2): обработчик прогресса не должен бросать исключения
-                onProgress?.Invoke(current, expectedSize);
+                // Обработчик прогресса не должен бросать: исключение UI не обрывает чтение потока.
+                try { onProgress?.Invoke(current, expectedSize); }
+                catch (Exception) { }
             }
         }
 

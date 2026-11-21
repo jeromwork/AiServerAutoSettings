@@ -63,7 +63,7 @@ namespace RemoteAgents.Launcher
             this.home = home; this.log = log; this.installSource=installSource;
             window = new WindowModel(File.Exists(Path.Combine(home, "state", "tray-hint-shown"))); dispatch.CreateControl(); var unused = dispatch.Handle;
             Directory.CreateDirectory(Path.Combine(home, "status"));
-            config = new Configuration(home); engine = new UpdateEngine(home, Program.Version);
+            config = new Configuration(home); engine = new UpdateEngine(home, Program.Version); InitUpdateButton();
             firstSetup = Path.GetFullPath(home).Equals(Path.GetFullPath(Program.DefaultHome),StringComparison.OrdinalIgnoreCase) && FirstInstall.Required(home);
             // Accept secondary launches while first-install selftest / binary downloads are still running.
             pipeWorker = Task.Run(() => Listen(pipeName, sid));
@@ -389,7 +389,7 @@ namespace RemoteAgents.Launcher
             var lanStatus = LocalLanStatus();
             if (Json.Bool(lanStatus, "enabled")) entries.Insert(0, new TrayMenuEntry("lan-status", StatusView.Lan(lanStatus), false));
             entries.Insert(entries.Count - 1, new TrayMenuEntry("update-status", updateSummary, false));
-            entries.Insert(entries.Count - 1, new TrayMenuEntry("update-check", "Проверить обновления сейчас", !updateChecking && !engine.Pending));
+            entries.Insert(entries.Count - 1, new TrayMenuEntry("update-check", "Проверить обновления сейчас", !updateChecking && !engine.Pending && !updateButton.IsBusy));
             entries.Insert(entries.Count - 1, VpnMenu());
             entries.Insert(entries.Count - 1, TrayBridge.Entry(BridgeCard())); return entries.ToArray();
         }
@@ -578,6 +578,7 @@ namespace RemoteAgents.Launcher
                 HappierConfirmed = Json.Bool(AccountState(), "ok"), HappierUrl = account.WebUrl
             };
             mainWindow.UpdateActivity(syncSummary + "\r\n" + updateSummary);
+            ApplyUpdateButton();
             mainWindow.UpdateMain(facts,
                 "Версия: " + Program.Version + "; бандл: " + engine.Current + "\r\nПапка: " + home +
                 "\r\nПуть: " + StatusView.Title(transport) + "; " + StatusView.Speed(transport) + "; проверен: " + StatusView.CheckedAt(transport) +

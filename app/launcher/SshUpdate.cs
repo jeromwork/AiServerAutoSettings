@@ -12,11 +12,11 @@ namespace RemoteAgents.Launcher
 {
     internal static class External
     {
-        public static int Run(string exe, string[] args, string cwd, string output, int timeoutMs, long maxBytes, CancellationToken token)
+        public static int Run(string exe, string[] args, string cwd, string output, int timeoutMs, long maxBytes, CancellationToken token, Action<long> onBytes = null)
         {
             token.ThrowIfCancellationRequested();
             using (var job = new NativeJob()) using (var process = job.StartRedirected(exe, args, cwd, output)) {
-                return WizardStep.Wait(process, output, timeoutMs, maxBytes, token);
+                return WizardStep.Wait(process, output, timeoutMs, maxBytes, token, onBytes);
             }
         }
         [System.Runtime.InteropServices.DllImport("kernel32.dll")] static extern uint GetOEMCP();
@@ -115,10 +115,10 @@ namespace RemoteAgents.Launcher
             return ShellQuote(dir.TrimEnd('/') + "/" + file);
         }
         static string ShellQuote(string value) { return "'" + value.Replace("'", "'\"'\"'") + "'"; }
-        public void Fetch(string file, string output, long limit, CancellationToken token)
+        public void Fetch(string file, string output, long limit, CancellationToken token, Action<long> onBytes = null)
         {
             var args = Args.Concat(new[] { "cat -- " + RemotePath(RemoteDir, file) }).ToArray();
-            if (External.Run(Exe, args, Path.GetDirectoryName(output), output, 300000, limit, token) != 0) throw new IOException("Нет связи для обновления");
+            if (External.Run(Exe, args, Path.GetDirectoryName(output), output, 300000, limit, token, onBytes) != 0) throw new IOException("Нет связи для обновления");
         }
         public Manifest Manifest(string home, CancellationToken token)
         {

@@ -59,14 +59,19 @@ namespace RemoteAgents.Launcher
             }
         }
         // Shared by real external steps and the portable process tests. NativeJob owns the process tree.
-        internal static int Wait(Process process, string output, int timeoutMs, long maxBytes, CancellationToken token)
+        internal static int Wait(Process process, string output, int timeoutMs, long maxBytes, CancellationToken token, Action<long> onBytes = null)
         {
-            var watch = Stopwatch.StartNew();
+            var watch = Stopwatch.StartNew(); long reported = 0;
             while (!process.WaitForExit(100)) {
                 token.ThrowIfCancellationRequested();
                 if (watch.ElapsedMilliseconds >= timeoutMs)
                     throw new TimeoutException("Превышено время ожидания (" + (timeoutMs / 1000) + " с). Проверьте связь и повторите шаг.");
-                if (output != null && new FileInfo(output).Length > maxBytes) throw new IOException("Вывод команды слишком велик");
+                if (output != null) {
+                    long length = new FileInfo(output).Length;
+                    if (length > maxBytes) throw new IOException("Вывод команды слишком велик");
+                    // Прогресс — по росту файла (байты), не по времени; обработчик не должен ронять ожидание.
+                    if (onBytes != null && length > reported) { reported = length; try { onBytes(length); } catch { } }
+                }
             }
             token.ThrowIfCancellationRequested();
             if (output != null && new FileInfo(output).Length > maxBytes) throw new IOException("Вывод команды слишком велик");
