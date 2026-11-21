@@ -30,6 +30,8 @@
     <OutputPath>bin/$(Configuration)/lan-tests/</OutputPath>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../HelperUpdate.cs" />
+    <Compile Include="HelperUpdateTests.cs" />
     <EmbeddedResource Include="../../../server/lan-pc-access.clinic.example.json" LogicalName="RemoteAgents.ClinicFixture.json" />
     <EmbeddedResource Include="../../../build/bundle-binaries.json" LogicalName="RemoteAgents.BundleBinaries.json" />
     <EmbeddedResource Include="../../../transport/product-features.json" LogicalName="RemoteAgents.ProductFeatures.json" />
@@ -127,4 +129,9 @@
     <EmbeddedResource Include="../app.ico" LogicalName="RemoteAgents.App.ico" />
     <EmbeddedResource Include="../icons/*.ico" LogicalName="RemoteAgents.Icons.%(Filename)%(Extension)" />
   </ItemGroup>
+  <PropertyGroup Condition="'$(HelperUpdateTests)' == 'true'">
+    <StartupObject>RemoteAgents.Launcher.HelperUpdateTests</StartupObject>
+    <IntermediateOutputPath>obj/$(Configuration)/helper-update-tests/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/helper-update-tests/</OutputPath>
+  </PropertyGroup>
 </Project>
