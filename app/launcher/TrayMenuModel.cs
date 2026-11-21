@@ -15,6 +15,8 @@ namespace RemoteAgents.Launcher
     // Pure presentation model: the same facts feed the menu, tooltip and window.
     internal static class TrayMenuModel
     {
+        internal static TrayMenuEntry Rollback(string previousVersion, bool occupied)
+        { return string.IsNullOrEmpty(previousVersion) ? null : new TrayMenuEntry("rollback-previous", "Вернуть предыдущую версию (" + previousVersion + ")", !occupied); }
         // «Открыть» and the left click lead to Happier; without a usable address the click opens the program window.
         internal static string LeftClickAction(Dictionary<string, object> config, Dictionary<string, object> account)
         { return HappierWebResolver.CanOpen(config, account) ? "happier" : "settings"; }

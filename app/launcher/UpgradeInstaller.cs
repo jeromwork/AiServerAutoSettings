@@ -12,7 +12,7 @@ using System.Threading;
 namespace RemoteAgents.Launcher
 {
     // Shared by the downloaded-EXE installer and the upgrade selftest. Never replaces user directories.
-    internal static class UpgradeInstaller
+    internal static partial class UpgradeInstaller
     {
         // Один замок на home для установщика, трея и внешнего наблюдателя; Mutex рекурсивен.
         internal static string ReceiptMutexName(string home)
@@ -59,6 +59,7 @@ namespace RemoteAgents.Launcher
         internal static bool HasObservableReceipt(string home) { return !ReceiptRecoveryBlocked(home) && File.Exists(ReceiptPath(home)); }
         internal static void RequireReceiptRecovery(string home)
         {
+            RecoverPreviousRollback(home);
             if (!ReceiptRecoveryBlocked(home)) return;
             try { RecoverBlockedReceipt(home, new UpdateEngine(home, "0.0.0")); }
             catch (Exception ex) {
@@ -262,7 +263,8 @@ namespace RemoteAgents.Launcher
                         if (old.Length != 0 && hadExe && !accept) Json.Write(Path.Combine(engine.Root, "exe-upgrade.json"), new {
                             version, previous = old, launcherVersion, startedUtc = DateTime.UtcNow.ToString("o"), previousHash = Files.Hash(backup), currentHash = sourceHash
                         });
-                        if (version != old) engine.Activate(version, accept);
+                        if (old.Length != 0 && hadExe) SavePrevious(home, engine, old, backup);
+                        if (version != old) engine.Activate(version, accept, imagePrepared: true);
                     } catch {
                         if (hadExe) ReplaceImage(backup, target);
                         else if (File.Exists(target)) File.Delete(target);
@@ -286,7 +288,7 @@ namespace RemoteAgents.Launcher
                 File.Copy(target, backup, true);
                 Json.Write(Path.Combine(engine.Root, "exe-upgrade.json"), new { version = manifest.Version, previous = engine.Current,
                     launcherVersion = manifest.LauncherVersion, startedUtc = DateTime.UtcNow.ToString("o"), previousHash = Files.Hash(backup), currentHash = Files.Hash(source) });
-                try { ReplaceImage(source, target); engine.Activate(manifest.Version); }
+                try { ReplaceImage(source, target); SavePrevious(home, engine, engine.Current, backup); engine.Activate(manifest.Version, imagePrepared: true); }
                 catch {
                     if (engine.Pending && engine.Current == manifest.Version) engine.Rollback(); else engine.Recover();
                     ReplaceImage(backup, target); File.Delete(Path.Combine(engine.Root, "exe-upgrade.json")); throw;
@@ -413,7 +415,8 @@ namespace RemoteAgents.Launcher
                     // Одно последнее значение ограничивает размер хранилища (§4б).
                     if (Json.Str(p, "version") == Json.Str(p, "previous") && Json.Str(p, "currentHash").Length > 0)
                         Json.Write(Path.Combine(engine.Root, "rejected-image.json"), new { sha256 = Json.Str(p, "currentHash"), launcherVersion = Json.Str(p, "launcherVersion") });
-                    ReplaceImage(backup, Path.Combine(home, Product.ExeName)); File.Delete(record); return "rollback";
+                    ReplaceImage(backup, Path.Combine(home, Product.ExeName)); File.Delete(record);
+                    DiscardPrevious(home); return "rollback";
                 }
                 if (healthy && !engine.Pending) { File.Delete(record); return "accepted"; }
                 return "";
