@@ -90,7 +90,7 @@ namespace RemoteAgents {
   }
   static bool AllowedOutput(string topic) {
    return topic=="transport.stdin.ready" || topic=="transport.status" || topic=="transport.ready" || topic=="transport.mem" ||
-    topic=="transport.switch" || topic=="transport.episode";
+    topic=="transport.switch" || topic=="transport.episode" || topic=="net.quality";
   }
   static string Name(XmlElement e) {return e.HasAttribute("item")?e.GetAttribute("item"):e.LocalName;}
   static TransportBusEvent Parse(string line) {
