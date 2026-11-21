@@ -16,7 +16,12 @@
     <AutoGenerateBindingRedirects>false</AutoGenerateBindingRedirects>
     <DebugType>none</DebugType>
     <EnableDefaultEmbeddedResourceItems>false</EnableDefaultEmbeddedResourceItems>
+    <UpdateChannel Condition="'$(UpdateChannel)' == ''">main</UpdateChannel>
     <BundlePath Condition="'$(BundlePath)' == ''">$(MSBuildThisFileDirectory)../../build/out/initial-bundle.zip</BundlePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(UpdateChannel)' == 'test'">
+    <DefineConstants>$(DefineConstants);UPDATE_CHANNEL_TEST</DefineConstants>
+    <InformationalVersion>$(Version)-test</InformationalVersion>
   </PropertyGroup>
   <ItemGroup>
     <EmbeddedResource Include="../../build/bundle-binaries.json" LogicalName="RemoteAgents.BundleBinaries.json" />

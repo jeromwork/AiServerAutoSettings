@@ -13,7 +13,7 @@ import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
-PRODUCTS = ('RemoteAgents', 'RemoteAgentsTest')
+PRODUCTS = ('RemoteAgents',)
 
 def check_product(product):
     if product not in PRODUCTS:

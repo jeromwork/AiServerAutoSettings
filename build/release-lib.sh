@@ -8,7 +8,6 @@ resolve_channel() {
     main|"")
       RELEASE_CHANNEL="main"
       RELEASE_PRODUCT="RemoteAgents"
-      RELEASE_INSTANCE="Main"
       RELEASE_EXE="RemoteAgents.exe"
       RELEASE_TAG="main-latest"
       RELEASE_DIST_DEFAULT='~/.local/share/remote-agents/dist'
@@ -17,9 +16,8 @@ resolve_channel() {
       ;;
     test)
       RELEASE_CHANNEL="test"
-      RELEASE_PRODUCT="RemoteAgentsTest"
-      RELEASE_INSTANCE="Test"
-      RELEASE_EXE="RemoteAgentsTest.exe"
+      RELEASE_PRODUCT="RemoteAgents"
+      RELEASE_EXE="RemoteAgents.exe"
       RELEASE_TAG="test-latest"
       RELEASE_DIST_DEFAULT='~/.local/share/remote-agents/dist-test'
       RELEASE_SOURCE_BRANCH="int/vpn-master"
@@ -30,7 +28,7 @@ resolve_channel() {
       return 1
       ;;
   esac
-  export RELEASE_CHANNEL RELEASE_PRODUCT RELEASE_INSTANCE RELEASE_EXE RELEASE_TAG RELEASE_DIST_DEFAULT RELEASE_SOURCE_BRANCH RELEASE_SOURCE_REF
+  export RELEASE_CHANNEL RELEASE_PRODUCT RELEASE_EXE RELEASE_TAG RELEASE_DIST_DEFAULT RELEASE_SOURCE_BRANCH RELEASE_SOURCE_REF
 }
 
 check_channel_isolation() {
@@ -82,7 +80,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   case "$field" in
     channel) echo "$RELEASE_CHANNEL" ;;
     product) echo "$RELEASE_PRODUCT" ;;
-    instance) echo "$RELEASE_INSTANCE" ;;
     exe) echo "$RELEASE_EXE" ;;
     tag) echo "$RELEASE_TAG" ;;
     dist) echo "$RELEASE_DIST_DEFAULT" ;;
@@ -91,7 +88,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     info)
       echo "RELEASE_CHANNEL=$RELEASE_CHANNEL"
       echo "RELEASE_PRODUCT=$RELEASE_PRODUCT"
-      echo "RELEASE_INSTANCE=$RELEASE_INSTANCE"
       echo "RELEASE_EXE=$RELEASE_EXE"
       echo "RELEASE_TAG=$RELEASE_TAG"
       echo "RELEASE_DIST_DEFAULT=$RELEASE_DIST_DEFAULT"

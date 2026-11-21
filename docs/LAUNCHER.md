@@ -365,13 +365,19 @@ flock --close /tmp/heavy-tests.lock ./build/release.sh <ssh-alias> '~/.local/sha
 1. **Основной канал (`main`, по умолчанию):**
    - Вызов: `./build/release.sh <ssh-alias>` (или `--channel main`)
    - Источник: ветка `main` с HEAD в `origin/main`, чистое дерево.
-   - Продукт: `RemoteAgents` (`RemoteAgents.exe`, `-p:Instance=Main`).
+   - Продукт: `RemoteAgents` (`RemoteAgents.exe`, `-p:UpdateChannel=main`).
    - GitHub: релиз `main-latest`.
    - Сервер: каталог `~/.local/share/remote-agents/dist`.
 2. **Тестовый канал (`test`):**
    - Вызов: `./build/release.sh --channel test <ssh-alias>`
    - Источник: ветка `int/vpn-master` (HEAD = `origin/int/vpn-master`), чистое дерево.
-   - Продукт: `RemoteAgentsTest` (`RemoteAgentsTest.exe`, `-p:Instance=Test`).
+   - Продукт: тот же `RemoteAgents` (`RemoteAgents.exe`: имя EXE, продукт, службы, адаптер, порты прежние).
+     Отличается только канал обновления: сборка с `-p:UpdateChannel=test` (символ `UPDATE_CHANNEL_TEST`,
+     версия с меткой `-test`) берёт обновления из `~/.local/share/remote-agents/dist-test`, а `remoteDir`
+     из `config.json` игнорирует (иначе настроенный конфиг вернул бы сборку на основной `dist`).
+   - Тестовая сборка устанавливается ВМЕСТО основной и обновляется из `dist-test`. Возврат на основную —
+     установить основной `RemoteAgents.exe` (из `main-latest`); он снова обновляется из `dist`.
+   - Выходная папка: `build/out-test`.
    - GitHub: prerelease `test-latest` (ассеты перезаписываются).
    - Сервер: каталог `~/.local/share/remote-agents/dist-test`.
    - Изоляция назначения: разрешён только буквальный путь `~/.local/share/remote-agents/dist-test`;
@@ -390,7 +396,7 @@ flock --close /tmp/heavy-tests.lock ./build/release.sh <ssh-alias> '~/.local/sha
 ```
 
 Команда требует ветку и коммит выбранного канала, один раз вызывает `build/build-exe.sh`
-и получает один EXE (`RemoteAgents.exe` или `RemoteAgentsTest.exe`) и `bundle.zip`
+и получает один EXE (`RemoteAgents.exe`) и `bundle.zip`
 с UTC-версией `yyyyMMdd.HHmmss-<git hash>`. Начальный архив с закреплёнными бинарниками —
 `initial-bundle.zip`; OTA-архив `bundle.zip` их не содержит.
 `release-github.sh` проверяет коммит, EXE и архив по `release-info.json`, заменяет EXE и метаданные

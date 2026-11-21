@@ -122,11 +122,12 @@ exec bash -c "${!#}"
 ''')
         fixtures = self.root / 'executables'
         fixtures.mkdir()
-        for product in ('RemoteAgents', 'RemoteAgentsTest'):
+        for product in ('RemoteAgents',):
             (fixtures / (product + '.exe')).write_bytes(b'MZ fixture' + product.encode() + 'FileVersion\0'.encode('utf-16le') + '1.4.0.0\0'.encode('utf-16le'))
         self.env['FIXTURES'] = str(fixtures)
         self.shell_stub('dotnet', r'''printf '["dotnet",[]]\n' >> "$FAKE_LOG"
 [[ "$1" == publish ]] || exit 95
+printf '%s\n' "$@" >> "$FAKE_LOG.dotnet"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -p:AssemblyName=*) product="${1#*=}"; shift ;;
@@ -190,8 +191,12 @@ exec ''' + shlex.quote(sys.executable) + ' "$@"\n')
                 rows.extend([name, call.split('\0')] for call in path.read_text().split('\0\0') if call)
         return [args for name, args in rows if name == tool] if tool else rows
 
+    def dotnet_args(self):
+        path = Path(str(self.calls) + '.dotnet')
+        return path.read_text().split() if path.exists() else []
+
     def prepare(self, channel):
-        product = 'RemoteAgentsTest' if channel == 'test' else 'RemoteAgents'
+        product = 'RemoteAgents'
         self.env['BRANCH'] = 'int/vpn-master' if channel == 'test' else 'main'
         out = self.root / ('prepared-' + channel)
         out.mkdir(exist_ok=True)
@@ -224,13 +229,12 @@ exec ''' + shlex.quote(sys.executable) + ' "$@"\n')
 
     def test_make_bundle_forwards_product(self):
         for channel in ('main', 'test'):
-            product = 'RemoteAgentsTest' if channel == 'test' else 'RemoteAgents'
+            product = 'RemoteAgents'
             exe = self.root / (product + '.exe')
             exe.write_bytes(b'fixture')
             self.run_script('make-bundle.sh', '20261121.1', self.root, '--channel', channel, '--launcher', exe)
             with zipfile.ZipFile(self.root / '20261121.1.zip') as z:
                 self.assertIn(product + '.exe', z.namelist())
-                self.assertNotIn(('RemoteAgents' if channel == 'test' else 'RemoteAgentsTest') + '.exe', z.namelist())
 
     def test_github_test_tag_and_assets(self):
         out, product = self.prepare('test')
@@ -364,13 +368,17 @@ exec ''' + shlex.quote(sys.executable) + ' "$@"\n')
             (main / name).write_bytes(b'main sentinel')
         self.run_script('release.sh', '--channel', 'test', 'fixture.invalid')
         out = self.build / 'out-test'
-        self.assertTrue((out / 'RemoteAgentsTest.exe').is_file())
+        self.assertTrue((out / 'RemoteAgents.exe').is_file())
+        args = self.dotnet_args()
+        self.assertIn('-p:UpdateChannel=test', args)
+        self.assertIn('-p:AssemblyName=RemoteAgents', args)
+        self.assertIn('-p:ProductName=RemoteAgents', args)
+        self.assertFalse([a for a in args if a.startswith('-p:Instance')])
         self.assertFalse((self.build.parent / 'release').exists())
         with zipfile.ZipFile(out / 'bundle.zip') as z:
-            self.assertIn('RemoteAgentsTest.exe', z.namelist())
-            self.assertNotIn('RemoteAgents.exe', z.namelist())
+            self.assertIn('RemoteAgents.exe', z.namelist())
             self.assertNotIn('transport/sing-box.exe', z.namelist())
-        self.assert_publication('test', 'RemoteAgentsTest', out)
+        self.assert_publication('test', 'RemoteAgents', out)
         for p in main.iterdir():self.assertEqual(p.read_bytes(), b'main sentinel')
         (out / 'bundle.zip').unlink()
         self.env['FAIL_ATTACH'] = '1'

@@ -13,7 +13,7 @@ REMOTE = r'''
 import fcntl, hashlib, json, os, pathlib, sys, tarfile, tempfile
 root = pathlib.Path(sys.argv[1]).expanduser()
 product = sys.argv[2]
-if product not in ('RemoteAgents', 'RemoteAgentsTest'): raise ValueError('Invalid product')
+if product not in ('RemoteAgents',): raise ValueError('Invalid product')
 root.mkdir(parents=True, exist_ok=True)
 with (root / '.publish.lock').open('a') as lock:
     fcntl.flock(lock, fcntl.LOCK_EX)
@@ -60,7 +60,7 @@ with (root / '.publish.lock').open('a') as lock:
 '''
 
 def check_product(product):
-    if product not in ('RemoteAgents', 'RemoteAgentsTest'):
+    if product not in ('RemoteAgents',):
         raise ValueError('Invalid product')
 
 def metadata(stage, output, commit, product='RemoteAgents'):
@@ -98,7 +98,7 @@ if __name__ == '__main__':
     sub = parser.add_subparsers(dest='command', required=True)
     for name in ('metadata', 'verify', 'command'):
         p = sub.add_parser(name)
-        p.add_argument('--product', choices=('RemoteAgents', 'RemoteAgentsTest'), default='RemoteAgents')
+        p.add_argument('--product', choices=('RemoteAgents',), default='RemoteAgents')
         if name == 'command':
             p.add_argument('dist')
         else:

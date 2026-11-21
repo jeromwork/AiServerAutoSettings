@@ -37,8 +37,8 @@ python3 "$here/release-dist.py" verify "$dir" "$commit" --product "$RELEASE_PROD
 sums=$(cd "$dir" && sha256sum "$exe_name")
 
 if [[ "$RELEASE_CHANNEL" == "test" ]]; then
-  title="RemoteAgentsTest — тестовая сборка"
-  notes="Тестовая сборка RemoteAgentsTest из int/vpn-master ($(git rev-parse --short "$commit"), $(date -u +%d.%m.%Y)). Ссылка на файл постоянная.
+  title="RemoteAgents — тестовая сборка (заменяет основную)"
+  notes="Тестовая сборка RemoteAgents (канал обновления dist-test) из int/vpn-master ($(git rev-parse --short "$commit"), $(date -u +%d.%m.%Y)). Ссылка на файл постоянная.
 
 SHA-256:
 $sums"

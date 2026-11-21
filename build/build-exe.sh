@@ -37,7 +37,6 @@ mkdir -p "$out"
 out=$(cd "$out" && pwd)
 
 product="$RELEASE_PRODUCT"
-instance="$RELEASE_INSTANCE"
 exe_name="$RELEASE_EXE"
 
 # Pinned third-party binaries (build/bundle-binaries.json; sing-box for VPN-first before the first SSH):
@@ -52,7 +51,7 @@ cp "$out/$product/$version.zip" "$out/initial-bundle.zip"
 "$dotnet" publish "$repo/app/launcher/RemoteAgents.Launcher.csproj" -c Release \
   -p:ProductName="$product" \
   -p:AssemblyName="$product" \
-  -p:Instance="$instance" \
+  -p:UpdateChannel="$RELEASE_CHANNEL" \
   -p:BundlePath="$out/$product/$version.zip" \
   -o "$out/$product/publish"
 
