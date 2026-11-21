@@ -352,9 +352,6 @@ function Get-TransportSwitchThreshold($Value,[long]$Fallback) {
 # Предохранитель (конституция 4а): событие результата пробы недоступно, если процесс завис; при срабатывании — отказ от ожидания пробы, успех не объявляет.
 $script:TransportLightProbeFuseMs=3000L
 
-# Allow a bus timestamp just before selector acknowledgement, not an older switch.
-$script:TransportSwitchAckToleranceMs=3000L
-
 # §4б: at most 256 candidate keys, 512 input events and 1024 undo/switch records.
 # Candidate removal drops its state; overflow drops oldest records, never invents success.
 function Get-TransportDecisionRows($Candidates,[string]$CurrentTag='') {
@@ -397,21 +394,14 @@ function Limit-TransportDecisionState($State,$Tags,[long]$Now) {
     elseif($State.paths.Count -lt 192 -and $State.history.Count -lt 768 -and $State.flapHistory.Count -lt 768){$State.boundsOverflow=$false}
 }
 
-# Each observed selector acknowledgement or standalone bus switch is one change.
-# Inserting an older bus fact also tightens intervals on both sides of that fact.
+# Only authoritative bus events enter switch history; acknowledgement is minStay only.
 function Add-TransportSwitchChange($State,$Change) {
-    $ack=[long]$Change.ackAt;$before=$null
-    foreach($entry in @($State.flapHistory)+@($State.switches)){
-        $entryAck=Get-TransportDecisionValue $entry 'ackAt' $entry.at
-        $entryBefore=Get-TransportDecisionValue $entry 'eventBefore'
-        if($entryAck -le $ack){
-            if($null -eq $entryBefore -or $ack -lt $entryBefore){$entry.eventBefore=$ack}
-        }elseif($null -eq $before -or $entryAck -lt $before){$before=$entryAck}
-    }
-    $Change.eventBefore=$before
+    if(@(@($State.flapHistory)+@($State.switches)|Where-Object {
+        $_.at -eq $Change.at -and $_.from -eq $Change.from -and $_.to -eq $Change.to
+    }).Count){return}
     if($State.flapHistory.Count -ge 1024){$State.boundsOverflow=$true}
-    $order=@('at',@{Expression={Get-TransportDecisionValue $_ 'ackAt' $_.at}})
-    $State.flapHistory=@(@($State.flapHistory)+@($Change)|Sort-Object -Property $order|Select-Object -Last 1024)
+    $order=@('at','from','to')
+    $State.flapHistory=@(@($State.flapHistory)+@($Change)|Where-Object {$_.at -gt $State.now-1800000}|Sort-Object -Property $order|Select-Object -Last 1024)
     $State.switches=@(@($State.switches)+@($Change)|Sort-Object -Property $order|Select-Object -Last 10)
 }
 
@@ -426,8 +416,8 @@ function Get-TransportSwitchPolicy($Config,[long]$Stage1Ms,[long]$Stage2Ms,[long
     $b=Get-TransportSwitchThreshold (Get-TransportDecisionValue $Config 'stage2Ms' $(if($st.Count -ge 2){$st[1]})) 3000
     $blip=Get-TransportSwitchThreshold (Get-TransportDecisionValue $Config 'blipMs' $BlipMs) 10000
     $hard=Get-TransportSwitchThreshold (Get-TransportDecisionValue $Config 'hardFailMs' $HardFailMs) 3000
-    # Q clamps adaptive stages and blip independently; stage2 may exceed blip.
-    if($a -ge $b){$a=1000L;$b=3000L;$hard=3000L;$blip=10000L}
+    # Q rounds/clamps stages independently: equality and stage2 > blip are valid.
+    if($a -gt $b){$a=1000L;$b=3000L}
     $ladder=@(@(Get-TransportDecisionValue $Config 'penaltyMs' @(5000,15000,45000,120000,300000))|Select-Object -First 6)
     $valid=$ladder.Count -eq 5;$last=0L;$parsed=@()
     foreach($v in $ladder){$n=0L;if(-not [long]::TryParse([string]$v,[ref]$n) -or $n -lt $last -or $n -lt 1 -or $n -gt 3600000){$valid=$false};$parsed+=@($n);$last=$n}
@@ -543,24 +533,9 @@ function Invoke-TransportSwitchEpisode {
     if(@($Candidates).Count -gt 256 -or @($Events).Count -gt 512){$s.boundsOverflow=$true}
     foreach($tag in $tags){if(-not $s.paths.ContainsKey($tag)){$s.paths[$tag]=New-TransportDecisionPath}}
     $ep=$s.episode;$acknowledged=$false
-    if($CurrentTag -ne $s.currentTag){
-        $ackAt=$Now;$eventAckAt=$null
-        foreach($ev in @($Events|Select-Object -Last 512)){
-            $at=0L;$to=[string](Get-TransportDecisionValue $ev 'to' (Get-TransportDecisionValue $ev 'tag' ''))
-            if((Get-TransportDecisionValue $ev 'kind') -eq 'transport.switch' -and $to -eq $CurrentTag -and
-                (Get-TransportDecisionValue $ev 'from' '') -eq $s.currentTag -and
-                (Get-TransportDecisionValue $ev 'changed' $true) -ne $false -and
-                [long]::TryParse([string](Get-TransportDecisionValue $ev 'at'),[ref]$at) -and $at -ge 0 -and $at -ge $s.selectedAt -and $at -le $Now){
-                if(@($s.flapHistory|Where-Object {-not (Get-TransportDecisionValue $_ 'awaitingEvent' $false) -and $_.at -eq $at -and $_.from -eq $s.currentTag -and $_.to -eq $CurrentTag}).Count){continue}
-                if($null -eq $eventAckAt -or $at -gt $eventAckAt){$eventAckAt=$at}
-            }
-        }
-        if($null -ne $eventAckAt){$ackAt=$eventAckAt}
-        $why='ok';if($s.proposal -and $s.proposal.tag -eq $CurrentTag){$why=$s.proposal.reason}
-        # ackAt remains fixed when a later bus event refines at (also after JSON).
-        $change=@{at=$ackAt;from=$s.currentTag;to=$CurrentTag;why=$why;awaitingEvent=$true;ackAt=$ackAt;eventBefore=$null}
-        Add-TransportSwitchChange $s $change
-        $s.currentTag=$CurrentTag;$s.selectedAt=$ackAt;$s.lastSwitchAt=$ackAt;$s.proposal=$null
+    $selectionChanged=$CurrentTag -ne $s.currentTag
+    if($selectionChanged){
+        $s.currentTag=$CurrentTag;$s.proposal=$null
         if($ep -and $ep.status -eq 'switched' -and $ep.switchedTo -eq $CurrentTag){
             $ep.status='verifying';$ep.verifyAt=$Now;$acknowledged=$true
         }elseif($ep){$ep.open=$false;$ep.status='closed'}
@@ -577,38 +552,17 @@ function Invoke-TransportSwitchEpisode {
             $from=[string](Get-TransportDecisionValue $ev 'from' '')
             $to=[string](Get-TransportDecisionValue $ev 'to' $tag)
             if($from -eq $to -or (Get-TransportDecisionValue $ev 'changed' $true) -eq $false -or
-                ($from -ne '' -and $from -notmatch '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,95}$') -or $to -notin $tags){continue}
-            # Only already received events deduplicate: an exact-time pending ack
-            # still needs its first event. Check before consuming any other ack.
-            if(@($s.flapHistory|Where-Object {-not (Get-TransportDecisionValue $_ 'awaitingEvent' $false) -and $_.at -eq $at -and $_.from -eq $from -and $_.to -eq $to}).Count){continue}
-            $confirmed=@($s.flapHistory|Where-Object {
-                $ack=Get-TransportDecisionValue $_ 'ackAt' $_.at
-                $before=Get-TransportDecisionValue $_ 'eventBefore'
-                (Get-TransportDecisionValue $_ 'awaitingEvent' $false) -and $_.from -eq $from -and $_.to -eq $to -and
-                    $at -ge $ack-$script:TransportSwitchAckToleranceMs -and ($null -eq $before -or $at -lt $before)
-            }|Sort-Object @{Expression={[Math]::Abs($at-(Get-TransportDecisionValue $_ 'ackAt' $_.at))}},@{Expression={Get-TransportDecisionValue $_ 'ackAt' $_.at};Descending=$true}|Select-Object -First 1)
-            if($confirmed.Count){
-                $change=$confirmed[0];$ack=Get-TransportDecisionValue $change 'ackAt' $change.at
-                # switches and flapHistory may no longer share objects after JSON/copy.
-                foreach($entry in $s.switches){
-                    if((Get-TransportDecisionValue $entry 'awaitingEvent' $false) -and (Get-TransportDecisionValue $entry 'ackAt' $entry.at) -eq $ack -and $entry.from -eq $from -and $entry.to -eq $to){$entry.at=$at;$entry.awaitingEvent=$false}
-                }
-                $change.at=$at;$change.awaitingEvent=$false
-            }else{
-                $change=@{at=$at;from=$from;to=$to;why='ok';awaitingEvent=$false;ackAt=$at;eventBefore=$null}
-                Add-TransportSwitchChange $s $change
-            }
-            continue
+                $from -notmatch '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,95}$' -or $from -eq 'unavailable' -or $to -notin $tags){continue}
+            Add-TransportSwitchChange $s @{at=$at;from=$from;to=$to;why='ok'}
         }
     }
-    # Delayed batches can contain intermediate switches and repeated from/to pairs.
-    # Order by actual time so minStay and the journal describe the latest selection.
-    $order=@('at',@{Expression={Get-TransportDecisionValue $_ 'ackAt' $_.at}})
-    $s.flapHistory=@($s.flapHistory|Sort-Object -Property $order)
-    $s.switches=@($s.switches|Sort-Object -Property $order)
-    if($s.switches.Count -and $s.switches[-1].to -eq $CurrentTag){
-        $s.selectedAt=$s.switches[-1].at;$s.lastSwitchAt=$s.selectedAt
-    }
+    # A known event at/after selectedAt supplies the selection time. Otherwise a
+    # changed CurrentTag starts minStay at Now, without inventing a history entry.
+    # Delayed events can only move this time forward; no ack/event correlation.
+    $latest=@($s.switches|Where-Object {$_.to -eq $CurrentTag -and $_.at -ge $s.selectedAt}|Select-Object -Last 1)
+    if($latest.Count){
+        $s.selectedAt=[Math]::Max([long]$s.selectedAt,[long]$latest[0].at);$s.lastSwitchAt=$s.selectedAt
+    }elseif($selectionChanged){$s.selectedAt=$Now;$s.lastSwitchAt=$Now}
     $opened=$false
     # Find the opening timestamp first, so older results cannot close this episode.
     if((-not $ep -or $ep.status -eq 'closed') -and -not $acknowledged){
