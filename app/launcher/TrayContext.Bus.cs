@@ -36,6 +36,7 @@ namespace RemoteAgents.Launcher
             busParts.Add(TrayBusWiring.WireTransportReady(bus, () => PostUi(() => { transportReady = true; if (ladder != null) ladder.TransportReady(); })));
             busParts.Add(bus.Subscribe(BusTopics.TickLogship, e => PumpLogs()));
             busParts.Add(bus.Subscribe(BusTopics.TickTray, e => {
+                updateButton.OnTick(); // итог кнопки «Обновить» сам сбрасывается через N тиков (StateChanged -> UI)
                 // Одна невыполненная доставка за раз: если UI занят, тики не копятся; не смогли отправить — счётчик сброшен.
                 trayTickGate.Deliver(TryPostUi, Tick);
             }));

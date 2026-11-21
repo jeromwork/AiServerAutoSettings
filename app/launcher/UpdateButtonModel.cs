@@ -24,6 +24,15 @@ namespace RemoteAgents.Launcher
         private readonly Func<DateTime> clock;
         private DateTime phaseStart;
         private IDisposable activeSubscription;
+        private int shownTicks;
+
+        // Сколько тиков tick.tray (1 с каждый, B2) итог остаётся на кнопке, потом она сама возвращается в Idle.
+        // Считаем по событиям шины, а не таймером (конституция 4а). Ошибку держим дольше, но не навсегда.
+        public const int UpToDateShowTicks = 5;
+        public const int UpdatedShowTicks = 5;
+        public const int FailedShowTicks = 15;
+        // Предел длины текста причины в строке статуса (чтобы метка в окне не обрезалась); полный текст — в DetailText.
+        public const int MaxReasonChars = 40;
 
         public UpdateButtonModel(Func<DateTime> clock = null)
         {
@@ -33,6 +42,8 @@ namespace RemoteAgents.Launcher
 
         public UpdateButtonState State { get; private set; } = UpdateButtonState.Idle;
         public string StatusText { get; private set; } = "";
+        // Полный текст (версия, время, причина целиком): для подсказки и журнала, в строку статуса не выводится.
+        public string DetailText { get; private set; } = "";
         public int DownloadPercent { get; private set; }
         public long BytesDownloaded { get; private set; }
         public long TotalBytes { get; private set; }
@@ -67,6 +78,27 @@ namespace RemoteAgents.Launcher
                                    State == UpdateButtonState.Verifying ||
                                    State == UpdateButtonState.Installing;
 
+        // Событие tick.tray: итоговое состояние (последняя версия/ошибка/обновлено) показывается N тиков и сбрасывается в Idle.
+        public bool OnTick()
+        {
+            int limit;
+            lock (sync)
+            {
+                if (State == UpdateButtonState.UpToDate) limit = UpToDateShowTicks;
+                else if (State == UpdateButtonState.Updated) limit = UpdatedShowTicks;
+                else if (State == UpdateButtonState.Failed) limit = FailedShowTicks;
+                else return false;
+                if (++shownTicks < limit) return false;
+            }
+            return OnIdle();
+        }
+
+        static string Short(string text)
+        {
+            text = (text ?? "").Replace("\r", " ").Replace("\n", " ").Trim();
+            return text.Length <= MaxReasonChars ? text : text.Substring(0, MaxReasonChars - 1).TrimEnd() + "…";
+        }
+
         // Вход «занято» (occupiedReason) вызывать только из UI-потока: занятость и подписка проверяются в одном потоке.
         public bool OnClick(string occupiedReason = null, Func<IDisposable> subscribe = null, Func<bool> stillOccupied = null)
         {
@@ -100,6 +132,7 @@ namespace RemoteAgents.Launcher
                 prev = State;
                 State = UpdateButtonState.Checking;
                 StatusText = "Проверяю…";
+                DetailText = "";
                 DownloadPercent = 0;
                 BytesDownloaded = 0;
                 TotalBytes = 0;
@@ -141,6 +174,7 @@ namespace RemoteAgents.Launcher
                 prev = State;
                 State = UpdateButtonState.Checking;
                 StatusText = "Проверяю…";
+                DetailText = "";
                 DownloadPercent = 0;
                 BytesDownloaded = 0;
                 TotalBytes = 0;
@@ -293,7 +327,9 @@ namespace RemoteAgents.Launcher
                 Version = version ?? "";
                 CheckedTime = checkedTime ?? clock();
                 DateTime displayTime = CheckedTime.Value.Kind == DateTimeKind.Utc ? CheckedTime.Value.ToLocalTime() : CheckedTime.Value;
-                StatusText = "У вас последняя версия " + Version + " (проверено " + displayTime.ToString("HH:mm") + ")";
+                StatusText = "✓ Установлена последняя версия";
+                DetailText = "У вас последняя версия " + Version + " (проверено " + displayTime.ToString("HH:mm") + ")";
+                shownTicks = 0;
 
                 DateTime now = clock();
                 elapsedMs = Math.Max(0, (long)(now - phaseStart).TotalMilliseconds);
@@ -322,7 +358,9 @@ namespace RemoteAgents.Launcher
                 prev = State;
                 State = UpdateButtonState.Failed;
                 ErrorText = text ?? "";
-                StatusText = "Ошибка: " + ErrorText;
+                StatusText = "Ошибка: " + Short(ErrorText);
+                DetailText = "Ошибка: " + ErrorText;
+                shownTicks = 0;
 
                 DateTime now = clock();
                 elapsedMs = Math.Max(0, (long)(now - phaseStart).TotalMilliseconds);
@@ -351,7 +389,8 @@ namespace RemoteAgents.Launcher
                 prev = State;
                 State = UpdateButtonState.Deferred;
                 DeferredReason = what ?? "";
-                StatusText = "Отложено: " + DeferredReason + " — начну, как освободится";
+                StatusText = "Отложено: " + Short(DeferredReason);
+                DetailText = "Отложено: " + DeferredReason + " — начну, как освободится";
 
                 DateTime now = clock();
                 elapsedMs = Math.Max(0, (long)(now - phaseStart).TotalMilliseconds);
@@ -437,6 +476,7 @@ namespace RemoteAgents.Launcher
                 prev = State;
                 State = UpdateButtonState.Checking;
                 StatusText = "Проверяю…";
+                DetailText = "";
                 DownloadPercent = 0;
                 BytesDownloaded = 0;
                 TotalBytes = 0;
@@ -475,7 +515,9 @@ namespace RemoteAgents.Launcher
                 prev = State;
                 State = UpdateButtonState.Updated;
                 Version = version ?? "";
-                StatusText = "Обновлено до " + Version;
+                StatusText = "✓ Обновлено";
+                DetailText = "Обновлено до " + Version;
+                shownTicks = 0;
 
                 DateTime now = clock();
                 elapsedMs = Math.Max(0, (long)(now - phaseStart).TotalMilliseconds);
@@ -504,6 +546,7 @@ namespace RemoteAgents.Launcher
                 prev = State;
                 State = UpdateButtonState.Idle;
                 StatusText = "";
+                DetailText = "";
                 DownloadPercent = 0;
                 BytesDownloaded = 0;
                 TotalBytes = 0;

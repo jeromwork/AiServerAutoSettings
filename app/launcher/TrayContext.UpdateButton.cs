@@ -26,7 +26,7 @@ namespace RemoteAgents.Launcher
                 if (from == UpdateButtonState.Deferred && to == UpdateButtonState.Checking) RunOnUi(ButtonProceed);
             };
             updateButton.StateChanged += m => RunOnUi(() => {
-                if (m.StatusText.Length > 0) updateSummary = m.StatusText;
+                if (m.StatusText.Length > 0) updateSummary = m.DetailText.Length > 0 ? m.DetailText : m.StatusText;
                 if (!closing) RefreshMenu();
             });
         }
@@ -75,7 +75,7 @@ namespace RemoteAgents.Launcher
         void ApplyUpdateButton()
         {
             if (mainWindow == null || mainWindow.IsDisposed) return;
-            mainWindow.SetUpdateButton(updateButton.ButtonEnabled && !engine.Pending, updateButton.ShowSpinner, updateButton.StatusText);
+            mainWindow.SetUpdateButton(updateButton.ButtonEnabled && !engine.Pending, updateButton.ShowSpinner, updateButton.StatusText, updateButton.DetailText);
         }
 
         // Если модель занята (кнопку нажали или идёт установка) — переводит её в итоговое состояние; фоновые проверки кнопку не трогают.
