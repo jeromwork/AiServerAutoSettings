@@ -59,7 +59,6 @@ namespace RemoteAgents.Launcher
                 return;
             }
             if (checkRequested && !UpdateOccupied()) { StartUpdateCheck(true); return; }
-            if (updateSchedule.Due(DateTime.UtcNow, config.Update, UpdateOccupied())) StartUpdateCheck(false);
         }
         async void StartUpdateCheck(bool manual)
         {

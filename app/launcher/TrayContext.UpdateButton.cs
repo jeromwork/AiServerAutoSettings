@@ -62,7 +62,7 @@ namespace RemoteAgents.Launcher
             string occupied = UpdateOccupiedReason();
             if (!updateButton.OnClick(occupied.Length > 0 ? occupied : null, () => new ReleaseWait(this), () => UpdateOccupiedReason().Length > 0)) return;
             if (occupied.Length > 0) return; // ждём освобождения: подписка уже есть
-            ButtonProceed();
+            if (bus != null) bus.Publish(BusTopics.UpdateRequested, BusTopics.Sources.Tray, "reason", "button"); else ButtonProceed();
         }
 
         // Кнопка свободна от занятости: либо ставим уже найденную версию, либо проверяем.

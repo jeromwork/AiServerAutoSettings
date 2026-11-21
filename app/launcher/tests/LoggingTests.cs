@@ -189,7 +189,8 @@ namespace RemoteAgents.Launcher
             Check(events.Count == 3 && events[0].To == "ok" && events[1].To == "fail" && events[1].Stage == 4 && events[2].To == "ok", "ok -> fail -> ok gives exactly two transitions after the first state");
             Check(events[2].DownMs == 60000, "down time is measured from the first failure");
             var schedule = new NetSchedule(0);
-            Check(schedule.Due(1000, true) == 0 && schedule.Due(NetSchedule.StartDelayMs, true) == NetLadder.Slow, "first run after the start delay");
+            Check(schedule.Due(0, true) == 0, "no run before block.ready transport");
+            schedule.TransportReady(10000); Check(schedule.Due(10000, true) == NetLadder.Slow, "first run on block.ready transport");
             schedule.Started(10000, true, NetLadder.Slow);
             Check(schedule.Due(30000, true) == 0 && schedule.Due(40000, true) == NetLadder.Quick && schedule.Due(130000, true) == NetLadder.Slow, "VPN on: quick every 30 s, slow every 120 s");
             schedule.Started(130000, false, NetLadder.Quick);

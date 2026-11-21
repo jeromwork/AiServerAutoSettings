@@ -85,7 +85,7 @@ namespace RemoteAgents.Launcher
                 throw;
             }
             readyForCommands = true;
-            timer.Tick += (s, e) => Tick(); timer.Start();
+            StartBus(); // тик трея теперь tick.tray шины (бывший WinForms-таймер 1 с)
             // The folder choice keeps applying after its window closed; the tray reports the result.
             BackgroundWork.Disk.Changed += () => { try { dispatch.BeginInvoke(new Action(DiskFinished)); } catch (InvalidOperationException) { } };
             dispatch.BeginInvoke(new Action(() => {
@@ -155,7 +155,7 @@ namespace RemoteAgents.Launcher
             foreach (var j in actionJobs) j.Dispose(); actionJobs.Clear();
             definition = BundleDefinition.Load(engine.Folder(engine.Current));
             if (mainWindow != null && !mainWindow.IsDisposed) mainWindow.RebindBundle(engine.Folder(engine.Current));
-            foreach (var c in definition.Components.Where(c => Product.VpnEnabled || c.Name != "vpn")) runtimes.Add(new ComponentRuntime(c, Wanted(c), home, engine.Folder(engine.Current), log));
+            foreach (var c in definition.Components.Where(c => Product.VpnEnabled || c.Name != "vpn")) runtimes.Add(new ComponentRuntime(c, Wanted(c), home, engine.Folder(engine.Current), log) { Bus = bus });
             RefreshMenu();
         }
         bool Wanted(Component c) { return c.Name != "vpn" && config.Wanted(c); }
@@ -181,11 +181,9 @@ namespace RemoteAgents.Launcher
                 })) { ok = false; coreFailed = true; }
                 if (restart) return;
                 if (!Step("transport", () => { transport = StatusView.Read(home, "transport", maxAgeSec: 15); })) { ok = false; coreFailed = true; }
-                ok &= Step("netwatch", () => { if (ladder == null) { ladder = new NetLadderService(home, log, () => StatusView.Read(home, "transport", maxAgeSec: 15), () => VpnStatus.Read(home)); ladder.Note = SetNetNote; } ladder.Tick(transport, Json.Str(VpnStatus.Read(home), "state") == "on"); });
+                ok &= Step("netwatch", () => { if (ladder == null) { ladder = new NetLadderService(home, log, () => StatusView.Read(home, "transport", maxAgeSec: 15), () => VpnStatus.Read(home)); ladder.Note = SetNetNote; AttachLadderToBus(); } ladder.Tick(transport, Json.Str(VpnStatus.Read(home), "state") == "on"); });
                 ok &= Step("logship", () => {
                     EnsureLogShipping();
-                    if (mirror != null && DateTime.UtcNow >= nextMirror) { nextMirror = DateTime.UtcNow.AddSeconds(60); Task.Run(() => { try { mirror.Pull(); } catch { } }); }
-                    if (shipper != null) shipper.Tick();
                 });
                 ok &= Step("lan", () => { if (netHelper != null) { netHelper.UpdateLan(config.Data, transport); netHelper.ConnectWhenInstalled(NetHelperSetup.Required(config.Data)); } });
                 ok &= Step("vpn-resume", () => ResumeUpdatedVpn(transport));
@@ -958,7 +956,7 @@ namespace RemoteAgents.Launcher
         {
             if (closing) return;
             bool preserveVpn = RestartRequested && keepVpnOnRestart;
-            closing = true; timer.Stop(); stop.Cancel(); BackgroundWork.Disk.Stop();
+            closing = true; timer.Stop(); StopBus(); stop.Cancel(); BackgroundWork.Disk.Stop();
             if (diskExplorer != null) { diskExplorer.Dispose(); diskExplorer.Wait(3500); }
             if (mainWindow != null && !mainWindow.IsDisposed) mainWindow.Unload();
             lock (pipeGate) { if (server != null) server.Dispose(); }
