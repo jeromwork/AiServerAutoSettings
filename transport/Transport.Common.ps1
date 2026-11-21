@@ -617,13 +617,14 @@ function Read-TransportSettings([string]$Root) {
     $channelPath=[string]$t.channelPath
     if(-not $channelPath){throw 'Нет transport.channelPath в config.json'}
     $channel=Read-TransportJson $channelPath
-    $defaults=@{bindPhysical=$true;stallSeconds=5;probeTimeoutSec=45;metered='auto';restartDelaySec=3;openSsh=$true;singBoxPath=(Join-Path $PSScriptRoot 'sing-box.exe')}
+    $defaults=@{bindPhysical=$true;stallSeconds=5;probeTimeoutSec=45;metered='auto';restartDelaySec=3;openSsh=$true;memSoftLimitMb=400;singBoxPath=(Join-Path $PSScriptRoot 'sing-box.exe')}
     $portDefaults=Get-TransportPortDefaults;foreach($k in $portDefaults.Keys){$defaults[$k]=$portDefaults[$k]}
     $s=@{};foreach($k in $defaults.Keys){$s[$k]=Get-TransportValue $t $k $defaults[$k]}
     foreach($k in @('bindPhysical','openSsh')){if($s[$k] -isnot [bool]){throw 'Нужен логический параметр transport'}}
     foreach($k in @('sshPort','channelSocksPort','syncPort','lanProxyPort','vpnInPort','probePortBase','socksPortBase','apiPort')){if([int]$s[$k] -lt 1 -or [int]$s[$k] -gt 65535){throw 'Неверный порт transport'}}
     if([string]$s.channelSshAddress -notmatch '\A127\.\d{1,3}\.\d{1,3}\.\d{1,3}\z' -or [string]$s.channelSshAddress -eq '127.0.0.1'){throw 'Неверный адрес входа канала'}
     foreach($k in @('stallSeconds','probeTimeoutSec','restartDelaySec')){if([double]$s[$k] -le 0){throw 'Параметры transport должны быть положительными'}}
+    if($s.memSoftLimitMb -is [bool] -or $s.memSoftLimitMb -isnot [ValueType] -or [double]$s.memSoftLimitMb -ne [Math]::Floor([double]$s.memSoftLimitMb) -or [double]$s.memSoftLimitMb -lt 64 -or [double]$s.memSoftLimitMb -gt 16384){throw 'Неверный transport.memSoftLimitMb'}
     $switch=Get-TransportValue $t 'switch' $null
     if($null -ne $switch -and $switch -isnot [Collections.IDictionary] -and $switch -isnot [pscustomobject]){throw 'transport.switch должен быть объектом'}
     foreach($item in @(@('stallSeconds',8,3600),@('stallConns',2,1024))){
@@ -1097,12 +1098,71 @@ function Get-TransportOrdered($Rows) {
 function Get-TransportBest($Rows,[string[]]$Allowed=@(),[switch]$Remembered) {
     Get-TransportOrdered @($Rows|Where-Object {($_.enabled -ne $false) -and ($_.state -eq 'ok' -or ($Remembered -and $_.state -eq 'remembered')) -and (-not $Allowed.Count -or $_.tag -in $Allowed)})|Select-Object -First 1
 }
+# --- Диагностика и защита памяти демона (T0). Переменная RA_TRANSPORT_DIAG: список через запятую.
+$script:TransportDiagKnown=@('no-revision','status-30s','decide-on-event','no-connections','no-metered','no-network','gc-collect','decide-every-tick','status-always')
+$script:TransportDiag=@{}
+function Get-TransportDiagFlags([string]$Raw) {
+    $flags=@{}
+    foreach($part in ([string]$Raw).Split(',')){$name=$part.Trim().ToLowerInvariant();if($name -in $script:TransportDiagKnown){$flags[$name]=$true}}
+    $flags
+}
+function Test-TransportDiag([string]$Name) { [bool]($script:TransportDiag -and $script:TransportDiag.ContainsKey($Name)) }
+function Get-TransportMemIntervalSec { if($script:TransportDiag.Count){10}else{60} }
+function Get-TransportMemSample {
+    $p=[Diagnostics.Process]::GetCurrentProcess()
+    try{[ordered]@{ws=[long]$p.WorkingSet64;private=[long]$p.PrivateMemorySize64;gcHeap=[long][GC]::GetTotalMemory($false);gen2=[int][GC]::CollectionCount(2)}}finally{$p.Dispose()}
+}
+# Поля журнала transport.mem: объёмы в МБ, gen2 — число сборок поколения 2.
+function Get-TransportMemFields($Sample,[int]$LimitMb) {
+    [ordered]@{ws=[long][Math]::Round($Sample.ws/1MB);private=[long][Math]::Round($Sample.private/1MB);gcHeap=[long][Math]::Round($Sample.gcHeap/1MB);gen2=[int]$Sample.gen2;limit=$LimitMb}
+}
+function Test-TransportMemoryHigh([long]$PrivateBytes,[int]$LimitMb) { [bool]($LimitMb -gt 0 -and $PrivateBytes -gt ([long]$LimitMb*1MB)) }
+function Invoke-TransportDiagGc { if(Test-TransportDiag 'gc-collect'){[GC]::Collect();return $true};$false }
+# Решатель: по событию или раз в DecideTick (источник tick.transport-decide), а не на каждом такте цикла.
+function Test-TransportDecisionDue([int]$QueueCount,[long]$NowMs,[long]$NextMs) {
+    if(Test-TransportDiag 'decide-every-tick'){return $true}
+    [bool]($QueueCount -gt 0 -or $NowMs -ge $NextMs)
+}
+# Статус пишется при изменении содержимого; иначе — раз в HeartbeatMs, чтобы читатель видел свежий updatedAt.
+function Test-TransportStatusWrite([string]$Key,[string]$LastKey,[double]$SinceLastMs,[double]$HeartbeatMs) {
+    if(Test-TransportDiag 'status-always'){return $true}
+    if(Test-TransportDiag 'status-30s'){$HeartbeatMs=30000}
+    [bool]($Key -cne $LastKey -or $SinceLastMs -ge $HeartbeatMs)
+}
+function Get-TransportStatusIntervalSec([double]$Base) { if(Test-TransportDiag 'status-30s'){30}else{$Base} }
+# Диагностика строки кандидата в status/transport.json не больше 1 КБ (сжатый JSON).
+function Limit-TransportDiagnostic($Detail,[int]$MaxChars=1024) {
+    if($null -eq $Detail){return $null}
+    $json=ConvertTo-Json -InputObject $Detail -Depth 6 -Compress
+    if($json.Length -le $MaxChars){return $Detail}
+    $copy=ConvertFrom-Json $json
+    foreach($prop in @($copy.PSObject.Properties)){if($prop.Value -is [string] -and $prop.Value.Length -gt 200){$prop.Value=$prop.Value.Substring(0,200)+[string][char]0x2026}}
+    $json=ConvertTo-Json -InputObject $copy -Depth 6 -Compress
+    if($json.Length -gt $MaxChars){foreach($prop in @($copy.PSObject.Properties)){if($prop.Value -is [string]){$prop.Value=''}elseif($null -ne $prop.Value -and $prop.Value -isnot [ValueType]){$prop.Value=$null}}}
+    $copy
+}
+# Поле строки кандидата без накопления членов: обновляет существующее, добавляет только при отсутствии.
+function Set-TransportRowField($Row,[string]$Name,$Value) {
+    if($Row.PSObject.Properties[$Name]){$Row.$Name=$Value}else{$Row|Add-Member -Force $Name $Value}
+}
+# Приоритет процесса транспорта выше обычного; ошибка не фатальна.
+function Set-TransportProcessPriority($Child) {
+    try{if($Child -and $Child.Process -and -not $Child.Process.HasExited){$Child.Process.PriorityClass=[Diagnostics.ProcessPriorityClass]::AboveNormal;return $true}}catch{}
+    $false
+}
 function Get-TransportFingerprint([string]$GatewayMac,[string]$ProfileName) {
     $text=(Convert-TransportLF $GatewayMac).Trim().Replace(':','').Replace('-','').ToUpperInvariant()+"`n"+(Convert-TransportLF $ProfileName).Trim()
     if(-not $GatewayMac -or -not $ProfileName){return $null}
     $sha=[Security.Cryptography.SHA256]::Create();try{([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
 }
 function Get-TransportNetwork {
+    # Диагностика no-network: опрос сети не выполняется, возвращается последний результат.
+    if((Test-TransportDiag 'no-network') -and $script:TransportNetworkStub){return $script:TransportNetworkStub}
+    $result=Get-TransportNetworkProbe
+    $script:TransportNetworkStub=$result
+    $result
+}
+function Get-TransportNetworkProbe {
     try{
         # -Physical отсекает Happ/Wintun/Tailscale; имя и HardwareInterface страхуют от виртуальных адаптеров, помеченных иначе.
         $physical=@(Get-NetAdapter -Physical -ErrorAction Stop|Where-Object {$_.Status -eq 'Up' -and $_.HardwareInterface -ne $false -and ($_.Name+' '+$_.InterfaceDescription) -notmatch '(?i)tailscale|openvpn|happ|wintun|tap|tun|tunnel|hyper-v'})
@@ -1152,14 +1212,16 @@ function Resolve-TransportBind($State,$Network,[bool]$VpnOff) {
     $State.none=$false
     [pscustomobject]@{mode='fail';event=$null}
 }
+function Get-TransportConnectionCost {
+    [void][Windows.Networking.Connectivity.NetworkInformation,Windows,ContentType=WindowsRuntime]
+    $profile=[Windows.Networking.Connectivity.NetworkInformation]::GetInternetConnectionProfile()
+    if($null -eq $profile){return $null};$cost=$profile.GetConnectionCost()
+    switch([string]$cost.NetworkCostType){'Unrestricted'{return [bool]($cost.Roaming -or $cost.OverDataLimit -or $cost.ApproachingDataLimit)}'Fixed'{return $true}'Variable'{return $true}default{return $null}}
+}
 function Get-TransportMetered($Options) {
     $configured=([string]$Options.metered).ToLowerInvariant();if($configured -ne 'auto'){return ($configured -eq 'true')}
-    try{
-        [void][Windows.Networking.Connectivity.NetworkInformation,Windows,ContentType=WindowsRuntime]
-        $profile=[Windows.Networking.Connectivity.NetworkInformation]::GetInternetConnectionProfile()
-        if($null -eq $profile){return $null};$cost=$profile.GetConnectionCost()
-        switch([string]$cost.NetworkCostType){'Unrestricted'{return [bool]($cost.Roaming -or $cost.OverDataLimit -or $cost.ApproachingDataLimit)}'Fixed'{return $true}'Variable'{return $true}default{return $null}}
-    }catch{return $null}
+    if(Test-TransportDiag 'no-metered'){return $null}
+    try{return (Get-TransportConnectionCost)}catch{return $null}
 }
 function Read-TransportMemory([string]$Root) {
     $file=Join-Path $Root 'state/transport-memory.json'
@@ -1261,18 +1323,51 @@ function Get-TransportSelection($Pin,$Rows,$Candidates,[string]$Current='') {
     if($Current -in @($Candidates|ForEach-Object {$_.tag})){return $Current}
     if(@($Candidates).Count){return [string]$Candidates[0].tag};return 'unavailable'
 }
-function Get-TransportRevision([string]$Root) {
+function Get-TransportRevisionInputs([string]$Root) {
     # One spelling of Home for daemon and Bootstrap (relative/trailing separators differ at entry).
     $Root=Get-TransportHome $Root
-    # Содержимое, а не mtime: Syncthing/атомарная замена и одинаковая длина не скрывают изменение.
     $config=Read-TransportJson (Join-Path $Root 'config.json');$files=@()
     foreach($field in @('profilePath','channelPath')){if($config.transport.$field){$files+=[string]$config.transport.$field}}
-    $files=@($files|Select-Object -Unique)
+    $files=@($files|Select-Object -Unique);$fixed=@($files)
     $cache=Join-Path (Get-TransportValue $config.transport 'cacheRoot' $Root) 'secrets/entries';if(Test-Path -LiteralPath $cache){$files+=@(Get-ChildItem -LiteralPath $cache -Filter '*.json'|Sort-Object Name|ForEach-Object {$_.FullName})}
     $route=$config.transport.serverRoute;if(-not $route){$route=$config.wizard.serverRoute}
-    if($route.used -eq 'hop' -and $config.transport.profilePath){$p=Read-TransportJson $config.transport.profilePath;$kh=Join-Path (Split-Path $p.knownHostsPath -Parent) 'known_hosts-hop';if(Test-Path $kh){$files+=$kh}}
+    if($route.used -eq 'hop' -and $config.transport.profilePath){$p=Read-TransportJson $config.transport.profilePath;$kh=Join-Path (Split-Path $p.knownHostsPath -Parent) 'known_hosts-hop';if(Test-Path $kh){$files+=$kh;$fixed+=$kh}}
+    [pscustomobject]@{Root=$Root;Config=$config;Route=$route;Files=@($files);Fixed=@($fixed);CacheDir=$cache}
+}
+function Get-TransportRevisionHash($Inputs) {
+    $config=$Inputs.Config;$route=$Inputs.Route;$files=@($Inputs.Files)
+    # Содержимое, а не mtime: Syncthing/атомарная замена и одинаковая длина не скрывают изменение.
     $sha=[Security.Cryptography.SHA256]::Create()
     try{$text=(ConvertTo-Json -InputObject (Get-TransportLan $config) -Depth 20 -Compress)+(ConvertTo-Json -InputObject (Get-TransportLocalWeb $config) -Depth 5 -Compress)+(ConvertTo-Json -InputObject $route -Depth 20 -Compress)+(ConvertTo-Json -InputObject $config.transport -Depth 40 -Compress)+"`n"+((@($files|ForEach-Object {$(if($env:OS -eq 'Windows_NT'){[IO.Path]::GetFullPath($_).Replace('\','/').ToLowerInvariant()}else{[IO.Path]::GetFullPath($_)})+"`n"+(Convert-TransportLF ([IO.File]::ReadAllText($_)))})) -join "`n");[Convert]::ToBase64String($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))}finally{$sha.Dispose()}
+}
+function Get-TransportRevision([string]$Root) {
+    Get-TransportRevisionHash (Get-TransportRevisionInputs $Root)
+}
+# Штамп файла (длина + время записи): дёшево, без чтения содержимого. Нет файла — отдельная метка.
+function Get-TransportFileStamp([string]$Path) {
+    try{$i=New-Object IO.FileInfo($Path);if($i.Exists){return $Path+'|'+$i.Length+'|'+$i.LastWriteTimeUtc.Ticks}}catch{}
+    $Path+'|-'
+}
+# Первая строка штампа — config.json; затем фиксированные файлы и перечень secrets/entries/*.json.
+function Get-TransportRevisionStamp([string]$Root,$Fixed,[string]$CacheDir) {
+    $parts=New-Object 'Collections.Generic.List[string]'
+    $parts.Add((Get-TransportFileStamp (Join-Path (Get-TransportHome $Root) 'config.json')))
+    foreach($f in @($Fixed)){$parts.Add((Get-TransportFileStamp $f))}
+    try{if($CacheDir -and [IO.Directory]::Exists($CacheDir)){$names=[IO.Directory]::GetFiles($CacheDir,'*.json');[Array]::Sort($names,[StringComparer]::Ordinal);foreach($f in $names){$parts.Add((Get-TransportFileStamp $f))}}}catch{}
+    $parts -join "`n"
+}
+# Ревизия с кэшем по штампу файлов: без изменений на диске содержимое не читается и не хэшируется.
+# $State — hashtable @{stamp;revision;fixed;cacheDir}; пустой при первом вызове.
+function Get-TransportRevisionCached([string]$Root,$State) {
+    if($State.revision -and $State.stamp -ceq (Get-TransportRevisionStamp $Root $State.fixed $State.cacheDir)){return $State.revision}
+    $configStamp=Get-TransportFileStamp (Join-Path (Get-TransportHome $Root) 'config.json')
+    $inputs=Get-TransportRevisionInputs $Root
+    $stamp=Get-TransportRevisionStamp $Root $inputs.Fixed $inputs.CacheDir
+    $revision=Get-TransportRevisionHash $inputs
+    # config.json менялся между чтением и штампом: штамп не доказывает, что хэш свежий — не кэшируем.
+    if($stamp.StartsWith($configStamp+"`n",[StringComparison]::Ordinal) -or $stamp -ceq $configStamp){$State.stamp=$stamp;$State.revision=$revision;$State.fixed=@($inputs.Fixed);$State.cacheDir=$inputs.CacheDir}
+    else{$State.stamp=$null;$State.revision=$null}
+    $revision
 }
 function Test-TransportConfigFile([string]$Exe,[string]$File) {
     $check=Start-TransportProcess $Exe @('check','-c',$File)

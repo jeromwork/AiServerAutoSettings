@@ -83,6 +83,13 @@
       "minimum": 1,
       "default": 3
     },
+    "memSoftLimitMb": {
+      "type": "integer",
+      "minimum": 64,
+      "maximum": 16384,
+      "default": 400,
+      "description": "Предохранитель: при частной памяти демона транспорта выше значения (МБ) он чисто выходит с кодом 75 и перезапускается Supervisor"
+    },
     "entries": {
       "type": "array",
       "default": [],
