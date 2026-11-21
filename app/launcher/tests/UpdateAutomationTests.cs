@@ -104,7 +104,7 @@ namespace RemoteAgents.Launcher
             m.Minimum = "1.0"; m.LauncherVersion = FileVersionInfo.GetVersionInfo(candidate).FileVersion; m.LauncherHash = Files.Hash(candidate);
             UpgradeInstaller.ActivatePrepared(home, engine, m);
             Check(engine.Pending && engine.Current == "2.0.0" && Files.Hash(target) == m.LauncherHash, "EXE and bundle switch together");
-            Check(UpgradeInstaller.ObserveImage(home, engine, false, "", DateTime.UtcNow.AddSeconds(121)) == "rollback" && engine.Current == "1.0.0" && Files.Hash(target) == oldHash && engine.IsBad("2.0.0"), "health deadline rolls back EXE and bundle");
+            Check(UpgradeInstaller.ObserveImage(home, engine, false, "rollback") == "rollback" && engine.Current == "1.0.0" && Files.Hash(target) == oldHash && engine.IsBad("2.0.0"), "failure event rolls back EXE and bundle");
             // Fresh release is accepted only after both module and image health are acknowledged.
             bundle("3.0.0"); File.Copy(candidate, Path.Combine(engine.Folder("3.0.0"), Product.ExeName)); m.Version = "3.0.0";
             UpgradeInstaller.ActivatePrepared(home, engine, m);

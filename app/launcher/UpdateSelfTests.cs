@@ -70,9 +70,9 @@ namespace RemoteAgents.Launcher
                 var fail = Archive(work, "1.5.0"); Reject("failed-selftest", () => Stage(e, fail, work, false)); Check("failed-selftest-is-bad", e.IsBad(fail.Version) && !e.Eligible(fail));
                 Check("prepare-next", Stage(e, two, work) == two.Version); e.Activate(two.Version);
                 Check("pending-written", e.Pending && e.Current == two.Version && e.Previous == one.Version);
-                now = now.AddSeconds(119); Check("grace-window", e.Observe(false) == "" && e.Current == two.Version);
-                now = now.AddSeconds(1); e = new UpdateEngine(home, "1.0.0.0", () => now); e.Recover();
-                Check("restart-retains-deadline", e.Observe(false) == "rollback" && e.Current == one.Version && !e.Pending);
+                Check("waits-for-health-event", e.Observe(false) == "" && e.Current == two.Version);
+                e = new UpdateEngine(home, "1.0.0.0", () => now); e.Recover();
+                Check("explicit-failure-rolls-back-after-restart", e.Observe(false, failed: true) == "rollback" && e.Current == one.Version && !e.Pending);
                 Check("bad-not-reinstalled", e.IsBad(two.Version) && Stage(e, two, work) == null);
                 var three = Archive(work, "3.0.0"); Stage(e, three, work); e.Activate(three.Version);
                 Check("health-accepts", e.Observe(true) == "accepted" && e.Current == three.Version && !e.Pending);
@@ -82,8 +82,8 @@ namespace RemoteAgents.Launcher
                 e.Recover(); Check("interrupted-before-switch", !e.Pending && e.Current == one.Version);
                 for (int n = 4; n <= 8; n++) { var m = Archive(work, n + ".0.0"); Stage(e, m, work); e.Activate(m.Version); e.Observe(true); }
                 Check("at-most-three-versions", Directory.GetDirectories(e.Root).Length <= 3 && Directory.Exists(e.Folder(e.Current)) && Directory.Exists(e.Folder(e.Previous)));
-                var late = Archive(work, "8.5.0"); Stage(e, late, work); e.Activate(late.Version); now = now.AddSeconds(121);
-                Check("late-health-does-not-accept", e.Observe(true) == "rollback" && e.Current == "8.0.0");
+                var late = Archive(work, "8.5.0"); Stage(e, late, work); e.Activate(late.Version);
+                Check("explicit-failure-prevents-acceptance", e.Observe(true, failed: true) == "rollback" && e.Current == "8.0.0");
                 var caseZip = Archive(work, "8.6.0", new Dictionary<string, string> { { "Components.json", "[]" } }); Reject("zip-case-duplicate", () => Stage(e, caseZip, work));
                 var deviceZip = Archive(work, "8.7.0", new Dictionary<string, string> { { "bin/NUL.exe", "bad" } }); Reject("zip-windows-device", () => Stage(e, deviceZip, work));
                 var launcherZip = Archive(work, "8.8.0"); launcherZip.LauncherVersion = "1.1.0.0"; launcherZip.LauncherHash = new string('0', 64); Reject("missing-launcher-payload", () => Stage(e, launcherZip, work));
@@ -207,8 +207,8 @@ namespace RemoteAgents.Launcher
                 Check("upgrade-over-and-previous", ue.Current == u2.Version && ue.Previous == u1.Version && ue.Pending && File.ReadAllText(installedImage) == "new-image");
                 Check("upgrade-preserves-user-data", Files.Hash(Path.Combine(upgradeHome, "config.json")) == configHash && new[] { "state", "secrets", "logs" }.All(dir => File.ReadAllText(Path.Combine(upgradeHome, dir, "keep")) == "keep\r\n"));
                 Check("upgrade-keeps-device-disk-happier-bridge",userFiles.All(pair=>File.ReadAllText(Path.Combine(upgradeHome,pair.Key))==pair.Value));
-                Check("upgrade-119-second-grace", UpgradeInstaller.ObserveImage(upgradeHome, ue, false, "", DateTime.UtcNow.AddSeconds(118)) == "" && ue.Pending);
-                Check("upgrade-restores-image-and-bundle", UpgradeInstaller.ObserveImage(upgradeHome, ue, false, "", DateTime.UtcNow.AddSeconds(121)) == "rollback" && ue.Current == u1.Version && File.ReadAllText(installedImage) == "old-image");
+                Check("upgrade-waits-for-event", UpgradeInstaller.ObserveImage(upgradeHome, ue, false, "") == "" && ue.Pending);
+                Check("upgrade-restores-image-and-bundle", UpgradeInstaller.ObserveImage(upgradeHome, ue, false, "rollback") == "rollback" && ue.Current == u1.Version && File.ReadAllText(installedImage) == "old-image");
                 Check("product-upgrade-and-rollback-preserve-neighbor", File.ReadAllText(neighborImage) == "neighbor" && Files.ReadLine(neighborPointer) == "neighbor-current");
                 Check("product-bundle-storage", ue.Root == Path.Combine(upgradeHome, "bundle"));
                 var u3 = Archive(work, "22.0.0");
@@ -217,7 +217,7 @@ namespace RemoteAgents.Launcher
                 // Unfinished first setup: a version marked bad earlier is reinstalled and accepted at once, without a rollback deadline.
                 UpgradeInstaller.Apply(upgradeHome, image, Path.Combine(work, u3.FileName), "1.1.0", false, f => true, default(CancellationToken), accept: true);
                 Check("first-setup-accepts-bad-version-without-deadline", ue.Current == u3.Version && ue.Previous == u1.Version && !ue.Pending && !File.Exists(Path.Combine(ue.Root, "exe-upgrade.json")) && File.ReadAllText(installedImage) == "new-image");
-                Check("first-setup-accepted-no-rollback", ue.Observe(false) == "" && UpgradeInstaller.ObserveImage(upgradeHome, ue, false, "", DateTime.UtcNow.AddSeconds(121)) == "" && ue.Current == u3.Version);
+                Check("first-setup-accepted-no-rollback", ue.Observe(false) == "" && UpgradeInstaller.ObserveImage(upgradeHome, ue, false, "rollback") == "" && ue.Current == u3.Version);
                 var u4 = Archive(work, "23.0.0");
                 UpgradeInstaller.Apply(upgradeHome, image, Path.Combine(work, u4.FileName), "1.1.0", false, f => true);
                 string accepted = ue.Observe(true);
@@ -228,7 +228,7 @@ namespace RemoteAgents.Launcher
                 File.WriteAllText(image, "launcher-only");
                 UpgradeInstaller.Apply(upgradeHome, image, Path.Combine(work, u1.FileName), "1.2.0", false, f => true);
                 Check("launcher-only-no-bundle-switch", !ue.Pending && ue.Current == u1.Version && File.ReadAllText(installedImage) == "launcher-only");
-                Check("launcher-only-rollback", UpgradeInstaller.ObserveImage(upgradeHome, ue, false, "", DateTime.UtcNow.AddSeconds(121)) == "rollback" && File.ReadAllText(installedImage) == "new-image");
+                Check("launcher-only-rollback", UpgradeInstaller.ObserveImage(upgradeHome, ue, false, "rollback") == "rollback" && File.ReadAllText(installedImage) == "new-image");
                 string statusFile = Path.Combine(upgradeHome, "status", "transport.json");
                 Check("absent-status-is-no-data", StatusView.Title(StatusView.Read(upgradeHome, "transport")) == "нет данных");
                 Json.Write(statusFile, new { active = "direct", title = "Прямой", mode = "auto", kbps = (double?)null, metered = (bool?)null, updatedAt = DateTime.UtcNow.ToString("o"), candidates = new[] { new { tag = "direct", title = "Прямой", state = "ok", kbps = 25 } } });

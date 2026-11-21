@@ -29,6 +29,7 @@ namespace RemoteAgents.Launcher
         public static string Encode(object value) { return JsonSerializer.Serialize(value); }
         public static void Write(string path, object value) { Files.Atomic(path, Encode(value) + "\n"); }
     }
+#if !UPDATE_HEALTH_TESTS
     internal static class TestEntry
     {
 #if DISK_FAST
@@ -37,4 +38,5 @@ namespace RemoteAgents.Launcher
         static int Main(string[] args) { if(args.Length==1 && args[0]=="--happier-web"){HappierWebTests.Run();return 0;} if(args.Length>0 && args[0]=="--proxy-connect")return ProxyRelay.Run(args); if(args.Length>0 && args[0]=="--disk-engine-action")return DiskExplorerTests.EngineAction(args); if(args.Length>0 && args[0]=="--disk-fast"){DiskExplorerTests.Run(false);return 0;} WindowModelTests.Run(); MainWindowSizingTests.Run(); MainScreenModelTests.Run(); VpnTests.Run(args[0]); TrayExtrasTests.Run(); HappierWebTests.Run(); LegacyCleanupTests.Run(); DiskExplorerTests.Run(); WizardStepTests.Run(); ConfigApplyTests.Run(); ProxyRelayTests.Run(); UpdateAutomationTests.Run(args[0]); int code = UpdateSelfTests.Run(args[0]); Console.WriteLine(File.ReadAllText(Path.Combine(args[0], "selftest-result.json"))); return code; }
 #endif
     }
+#endif
 }

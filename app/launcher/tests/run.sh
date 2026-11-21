@@ -267,6 +267,7 @@ timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:T
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:SupervisorStaleTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:VpnReasonsTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:HealthBoardTests=true
+timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:UpdateHealthTests=true -nodeReuse:false -p:UseSharedCompilation=false
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:TransportBusTests=true
 wait_for_memory
 # Uses the launcher assembly just built to exercise both stdio peers in one process.

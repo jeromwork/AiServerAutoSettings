@@ -140,7 +140,7 @@ namespace RemoteAgents.Launcher
                     if(current==version && File.Exists(target) && Files.Hash(target)==Files.Hash(installSource)) {
                         BundleDefinition.Load(engine.Folder(current));installSource=null;log.Write("bundle.bootstrap.resume");return;
                     }
-                    // Unfinished first setup has no healthy components to wait for; a 120 s deadline would roll the new EXE back.
+                    // Unfinished first setup has no healthy components to wait for; waiting for component health would prevent accepting the new EXE.
                     UpgradeInstaller.Apply(home,installSource,zip,Program.Version,false,f=>External.SelfTest(f,home,stop.Token),stop.Token,accept:true);
                     installSource=null;log.Write("bundle.bootstrap.ok");return;
                 }
@@ -167,7 +167,7 @@ namespace RemoteAgents.Launcher
             Icon shown = icon.Icon; // final tray colour of this tick, applied once in finally
             try {
                 Step("updatebutton", () => updateButton.OnTick()); // итог/предохранитель кнопки «Обновить» на UI-потоке; сбой не должен оставить ticking=true
-                bool ok = true, restart = false, coreFailed = false;
+                bool ok = true, coreFailed = false;
                 var transport = Json.Map(null);
                 ok &= Step("settings", () => { RetireConfigSyncTask(); TryDeleteOld(); ReloadSettings(); });
                 if (!Step("components", () => { foreach (var r in runtimes) r.Tick(); })) { ok = false; coreFailed = true; }
@@ -175,17 +175,11 @@ namespace RemoteAgents.Launcher
                     var critical = runtimes.Where(r => r.Definition.Critical).ToArray();
                     bool all = critical.Length > 0 && critical.Where(r => r.Enabled).All(r => r.Healthy);
                     all = all && UpdateHealthReady(); // только цвет значка; приёмку даёт доска готовности (H1, событие health.accepted)
-                    bool accepted = HealthBoard.PickAccepted(healthBoard, all); // нет доски (ручная установка EXE) — прежнее условие
-                    string result = engine.Observe(accepted);
-                    string image = UpgradeInstaller.ObserveImage(home, engine, accepted, result);
-                    if (image == "rollback") { try { PrepareUpdateRestart(); } catch { keepVpnOnRestart = false; log.Write("update.resume.failed"); } UpdateOutcome(Json.Text(UpdateState(), "target", engine.Previous), "здоровье не подтверждено; выполнен откат"); log.Write("launcher.rollback"); RestartRequested = true; ExitThread(); restart = true; return; }
-                    if (result == "rollback") { log.Write("update.rollback"); updateSummary = "обновление откачено: здоровье не подтверждено"; LoadComponents(); foreach (var r in runtimes) r.Tick(); all = false; }
-                    if (result == "accepted" || image == "accepted") { log.Write("update.accepted"); UpdateOutcome(engine.Current, ""); }
                     int count = critical.Count(r => r.Healthy); shown = all ? green : count > 0 ? yellow : red;
                 })) { ok = false; coreFailed = true; }
-                if (restart) return;
                 if (!Step("transport", () => { transport = StatusView.ReadTransport(home); })) { ok = false; coreFailed = true; }
                 ok &= Step("netwatch", () => { if (ladder == null) { ladder = new NetLadderService(home, log, () => StatusView.ReadTransport(home), () => VpnStatus.Read(home)); ladder.Note = SetNetNote; AttachLadderToBus(); } ladder.Tick(transport, Json.Str(VpnStatus.Read(home), "state") == "on"); });
+
                 ok &= Step("logship", () => {
                     EnsureLogShipping();
                 });
@@ -863,18 +857,19 @@ namespace RemoteAgents.Launcher
                 } catch { job.Dispose(); throw; }
             });
         }
-        bool TrySelfUpdate(string version)
+        async Task<bool> TrySelfUpdate(string version)
         {
             string path = Path.Combine(engine.Folder(version), ".launcher-manifest.json");
             if (!File.Exists(path)) return false;
-            var manifest = Manifest.Parse(File.ReadAllText(path));
             // FileVersion can stay equal between daily bundles. Verify and replace by hash for EVERY new bundle.
-            UpgradeInstaller.ActivatePrepared(home, engine, manifest);
+            await Task.Run(() => UpgradeInstaller.ActivatePrepared(home, engine, Manifest.Parse(File.ReadAllText(path)), stop.Token));
+            if (closing) return true;
             try {
                 PrepareUpdateRestart();
-                Process.Start(new ProcessStartInfo(Path.Combine(home, Product.Name + ".previous.exe"), "--watch-update " + Files.Quote(home) + " --watch-parent " + Process.GetCurrentProcess().Id.ToString()) { UseShellExecute = false, CreateNoWindow = true });
+                UpdateWatchdog.Start(home, Path.Combine(home, Product.Name + ".previous.exe"));
             } catch {
-                engine.Rollback(); UpgradeInstaller.ObserveImage(home, engine, false, "rollback"); keepVpnOnRestart = false; throw;
+                await Task.Run(() => { engine.Rollback(); UpgradeInstaller.ObserveImage(home, engine, false, "rollback"); });
+                keepVpnOnRestart = false; throw;
             }
             log.Write("launcher.update.ready"); RestartRequested = true; ExitThread(); return true;
         }
@@ -948,6 +943,7 @@ namespace RemoteAgents.Launcher
         {
             bool applying = actionBusy && !vpnActionBusy && !firstSetup || BackgroundWork.Disk.Busy || Application.OpenForms.Cast<Form>().Any(f => f is ConfigWindow && ((ConfigWindow)f).IsApplying || f is SetupWizard && ((SetupWizard)f).IsApplying);
             if (window.Exit(applying) == WindowExit.ConfirmApplying && MessageBox.Show(mainWindow, "Идёт применение настроек. Прервать?", Product.Name, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            try { UpgradeInstaller.NoteCurrentImageCleanExit(home); } catch { log.Write("update.clean-exit.write.failed"); }
             if (mainWindow != null) mainWindow.Unload();
             foreach (var form in Application.OpenForms.Cast<Form>().ToArray()) { var wizard = form as SetupWizard; if (wizard != null) wizard.CancelEmbedded(); form.Dispose(); }
             ExitThread();

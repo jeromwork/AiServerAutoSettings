@@ -41,7 +41,7 @@ namespace RemoteAgents.Launcher
         [STAThread] internal static int Run(string[] args)
         {
             string watchUpdate = Option(args, "--watch-update");
-            if (watchUpdate != null) return UpdateWatchdog.Run(Path.GetFullPath(watchUpdate), Option(args, "--watch-parent"));
+            if (watchUpdate != null) return UpdateWatchdog.Run(Path.GetFullPath(watchUpdate));
             string checkConfig = Option(args, "--check-update-config");
             if (checkConfig != null) { try { UpdatePolicy.Compatible(checkConfig); return 0; } catch { return 20; } }
             // Before askpass: ssh may carry a password pipe in its environment while running this relay as ProxyCommand.
@@ -49,6 +49,10 @@ namespace RemoteAgents.Launcher
             string passwordPipe=Environment.GetEnvironmentVariable("REMOTEAGENTS_PASSWORD_PIPE");
             if(!string.IsNullOrEmpty(passwordPipe))return PasswordRelay.Answer(passwordPipe);
             Journal log = null;
+            EventWaitHandle updateFailed = null;
+            UnhandledExceptionEventHandler unhandled = null;
+            ThreadExceptionEventHandler threadException = null;
+            SessionEndingEventHandler sessionEnding = null;
             try {
                 if (args.Contains("--net-helper-service")) return NetHelper.Run(args);
                 if (args.Contains("--net-helper-install")) return NetHelperInstall.Install(args);
@@ -136,18 +140,44 @@ namespace RemoteAgents.Launcher
                     }
                     try {
                         if (args.Contains("--uninstall") || args.Contains("--exit")) return 0;
+                        // Наблюдатель вооружён до конструктора трея и любых источников block.ready.
+                        sessionEnding = (s, e) => { try { UpgradeInstaller.NoteCurrentImageCleanExit(home); } catch { log.Write("update.clean-exit.write.failed"); } };
+                        SystemEvents.SessionEnding += sessionEnding;
                         UpgradeInstaller.NoteImageProcess(home);
+                        UpdateWatchdog.Start(home, Exe);
+                        updateFailed = UpdateWatchdog.FailureEvent(home);
+                        Action failUpdate = () => {
+                            if (File.Exists(Path.Combine(home, Product.BundleDirectory, "exe-upgrade.json")) || File.Exists(Path.Combine(home, Product.BundleDirectory, "pending.json"))) { updateFailed.Set(); UpdateWatchdog.SignalFailure(home); }
+                        };
+                        unhandled = (s, e) => { log.Write("unhandled kind=app-domain"); failUpdate(); };
+                        threadException = (s, e) => {
+                            log.Write("unhandled kind=ui-thread"); failUpdate();
+                            // Вне транзакции сохраняем прежнее завершение при необработанной ошибке UI.
+                            if (!File.Exists(Path.Combine(home, Product.BundleDirectory, "exe-upgrade.json")) && !File.Exists(Path.Combine(home, Product.BundleDirectory, "pending.json"))) Environment.Exit(1);
+                        };
+                        AppDomain.CurrentDomain.UnhandledException += unhandled;
+                        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+                        Application.ThreadException += threadException;
                         Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
-                        using (var context = new TrayContext(home, log, name, sid, args, firstInstallSource)) { Application.Run(context); restart = context.RestartRequested; }
+                        using (var context = new TrayContext(home, log, name, sid, args, firstInstallSource)) {
+                            Application.Run(context); restart = context.RestartRequested;
+                            try { UpgradeInstaller.NoteCurrentImageCleanExit(home); } catch { log.Write("update.clean-exit.write.failed"); }
+                        }
                     } finally { if (owned) { mutex.ReleaseMutex(); owned = false; } }
                 }
                 if (restart) StartLauncher(Path.Combine(home, Product.ExeName), home, true);
                 return 0;
             } catch (Exception ex) {
+                if (updateFailed != null) { try { updateFailed.Set(); } catch { } }
                 string reason = ex.GetType().Name + ": " + (ex.Message ?? "").Replace("\r", " ").Replace("\n", " ");
                 if (reason.Length > 300) reason = reason.Substring(0, 300);
                 if (log != null) log.Write("launcher.fatal " + reason);
                 MessageBox.Show("Действие не выполнено: " + (ex.Message ?? ex.GetType().Name) + "\n\nПодробности — logs\\launcher.log в папке RemoteAgents.", "RemoteAgents"); return 1;
+            } finally {
+                if (sessionEnding != null) SystemEvents.SessionEnding -= sessionEnding;
+                if (unhandled != null) AppDomain.CurrentDomain.UnhandledException -= unhandled;
+                if (threadException != null) Application.ThreadException -= threadException;
+                if (updateFailed != null) updateFailed.Dispose();
             }
         }
         static bool WaitMutex(Mutex mutex, int timeout) { try { return mutex.WaitOne(timeout); } catch (AbandonedMutexException) { return true; } }
@@ -175,8 +205,8 @@ namespace RemoteAgents.Launcher
             }
             log.Write("install.shutdown.forced"); if (!WaitMutex(mutex, 10000)) throw new IOException("Экземпляр не завершился");
         }
-        public static void StartLauncher(string exe, string home, bool afterUpdate, bool started = false)
-        { Process.Start(new ProcessStartInfo(exe, "--tray --home " + Files.Quote(home) + (afterUpdate ? " --after-update" : "") + (started ? " --started" : "")) { UseShellExecute = false, CreateNoWindow = true }); }
+        public static void StartLauncher(string exe, string home, bool afterUpdate, bool started = false, bool preserveUpdateFailure = false)
+        { UpgradeInstaller.PrepareImageLaunch(home, DateTime.UtcNow); UpdateWatchdog.Start(home, Exe, preserveUpdateFailure); Process.Start(new ProcessStartInfo(exe, "--tray --home " + Files.Quote(home) + (afterUpdate ? " --after-update" : "") + (started ? " --started" : "")) { UseShellExecute = false, CreateNoWindow = true }); }
         // Preserve a human launch across installation/relaunch; ordinary --tray/--after-update stay quiet.
         static string[] Started(string[] args, bool interactive) { return interactive && !args.Contains("--started") ? args.Concat(new[] { "--started" }).ToArray() : args; }
         [DllImport("kernel32.dll")] static extern bool AttachConsole(uint processId);
