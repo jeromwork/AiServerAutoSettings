@@ -60,6 +60,7 @@ function Get-TransportDecisionReasonText([string]$Code) {
         'local-network-down'='Нет интернета у вас (сеть), жду'
         'no-candidates'='Нет подходящих путей'
         'all-paths-penalized'='Все пути временно недоступны, повторяю'
+        'server-unavailable'='Сервер недоступен'
         'ok'='Связь работает'
     }
     return $texts[$Code]
@@ -71,6 +72,7 @@ function New-TransportDecisionState([long]$Now,[string]$CurrentTag='') {
         localNet='unknown';localNetAt=$null;paths=@{};pending=@{}
         directRequestedAt=$null;history=@();roundSince=$null;consecutiveFailures=0
         switches=@();proposal=$null;reason=@{code='ok';text=(Get-TransportDecisionReasonText 'ok');since=$Now}
+        episode=$null
     }
 }
 
@@ -134,7 +136,16 @@ function Get-TransportDecisionMetric($Candidate,[string]$Name) {
 
 function Invoke-TransportDecision {
     [CmdletBinding()]
-    param($State,$Candidates,[long]$Now,[string]$CurrentTag='', $Events=@(),[switch]$AllowImprovement)
+    param(
+        $State,$Candidates,[long]$Now,[string]$CurrentTag='', $Events=@(),[switch]$AllowImprovement,
+        [switch]$SwitchEpisode, [long]$Stage1Ms=1000, [long]$Stage2Ms=3000, [long]$BlipMs=10000, [long]$HardFailMs=3000, $SwitchConfig=$null
+    )
+    $episode=Get-TransportDecisionValue $State 'episode'
+    $verify=(Get-TransportDecisionValue $episode 'status') -eq 'switched' -and
+        (Get-TransportDecisionValue $episode 'switchedTo') -eq $CurrentTag -and $CurrentTag -ne (Get-TransportDecisionValue $State 'currentTag')
+    if($SwitchEpisode -or (Get-TransportDecisionValue $episode 'open' $false) -or $verify){
+        return Invoke-TransportSwitchEpisode -State $State -Candidates $Candidates -Now $Now -CurrentTag $CurrentTag -Events $Events -Stage1Ms $Stage1Ms -Stage2Ms $Stage2Ms -BlipMs $BlipMs -HardFailMs $HardFailMs -SwitchConfig $SwitchConfig
+    }
     if($null -eq $State){$State=New-TransportDecisionState $Now $CurrentTag}
     $s=Copy-TransportDecisionValue $State
     if($Now -lt $s.now){throw 'Decision time must not move backwards'}
@@ -314,4 +325,183 @@ function Invoke-TransportDecision {
     $penalties=@{}
     foreach($key in $s.paths.Keys){$penalties[$key]=@{step=$s.paths[$key].step;until=$s.paths[$key].until}}
     return @{state=$s;verdict=@{action=$action;tag=$target;reason=(Copy-TransportDecisionValue $s.reason);penalties=$penalties;localNet=$s.localNet;notes=@($notes)}}
+}
+
+# Bounds apply to scalar thresholds and to {default,min,max} config entries.
+function Get-TransportSwitchThreshold($Value,[long]$Fallback) {
+    $lower=100L;$upper=60000L;$parsed=0L
+    if($Value -is [Collections.IDictionary] -or $Value -is [System.Management.Automation.PSCustomObject]){
+        if([long]::TryParse([string](Get-TransportDecisionValue $Value 'min'),[ref]$parsed)){$lower=[Math]::Max(100L,[Math]::Min(60000L,$parsed))}
+        if([long]::TryParse([string](Get-TransportDecisionValue $Value 'max'),[ref]$parsed)){$upper=[Math]::Max(100L,[Math]::Min(60000L,$parsed))}
+        $Value=Get-TransportDecisionValue $Value 'default'
+    }
+    if($lower -gt $upper){$lower=100L;$upper=60000L}
+    if(-not [long]::TryParse([string]$Value,[ref]$parsed)){$parsed=$Fallback}
+    return [Math]::Max($lower,[Math]::Min($upper,$parsed))
+}
+
+function New-TransportSwitchResult($State,[string]$Action,[string]$Tag,$Tags=@(),$Notes=@(),[bool]$Direct=$false) {
+    $penalties=@{}
+    foreach($key in $State.paths.Keys){$penalties[$key]=@{step=$State.paths[$key].step;until=$State.paths[$key].until}}
+    return @{state=$State;verdict=@{action=$Action;tag=$Tag;tags=@($Tags);direct=$Direct;reason=(Copy-TransportDecisionValue $State.reason);penalties=$penalties;localNet=$State.localNet;notes=@($Notes)}}
+}
+
+# Check freshness before a signal is allowed to create (or reopen) an episode.
+function Test-TransportSwitchSignal($State,$Event,[string]$CurrentTag,[long]$Now) {
+    $kind=[string](Get-TransportDecisionValue $Event 'kind' '');$tag=[string](Get-TransportDecisionValue $Event 'tag' '')
+    $code=[string](Get-TransportDecisionValue $Event 'code' '');$at=[long](Get-TransportDecisionValue $Event 'at' $Now)
+    if($kind -in @('win.iface.changed','net.change')){return $true}
+    if(-not $tag){$tag=$CurrentTag}
+    if($tag -ne $CurrentTag){return $false}
+    $p=$State.paths[$tag]
+    if($p -and $null -ne $p.lastResultAt -and $at -lt $p.lastResultAt){return $false}
+    if($kind -eq 'path-check'){
+        if($p -and $null -ne $p.lastCheckAt -and $at -le $p.lastCheckAt){return $false}
+        if($null -ne $State.localNetAt -and $at -lt $State.localNetAt){return $false}
+        return $code -in @('timeout','stalled','refused','process-exited')
+    }
+    return $kind -in @('dial-fail','conn-closed-error','stall-suspect','engine-exit')
+}
+
+function New-TransportSwitchEpisode([long]$At,[long]$ProbeAt,[string]$CurrentTag) {
+    return @{open=$true;openedAt=$At;activeTag=$CurrentTag;hardFail=$false;stage1Done=$false;stage2Done=$false;activeProbeFailed=$false;activeProbeAt=$ProbeAt;responded=@{};status='open';switchedTo=$null}
+}
+
+function Invoke-TransportSwitchEpisode {
+    [CmdletBinding()]
+    param($State,$Candidates,[long]$Now,[string]$CurrentTag='', $Events=@(),
+        [long]$Stage1Ms=1000,[long]$Stage2Ms=3000,[long]$BlipMs=10000,[long]$HardFailMs=3000,$SwitchConfig=$null)
+    if($null -eq $State){$State=New-TransportDecisionState $Now $CurrentTag}
+    $s=Copy-TransportDecisionValue $State
+    if($Now -lt $s.now){throw 'Decision time must not move backwards'}
+    $s.now=$Now
+    $BlipMs=Get-TransportSwitchThreshold (Get-TransportDecisionValue $SwitchConfig 'blipMs' $BlipMs) 10000
+    $HardFailMs=Get-TransportSwitchThreshold (Get-TransportDecisionValue $SwitchConfig 'hardFailMs' $HardFailMs) 3000
+    $st=@(Get-TransportDecisionValue $SwitchConfig 'stageMs' @($Stage1Ms,$Stage2Ms))
+    $Stage1Ms=Get-TransportSwitchThreshold $(if($st.Count -ge 1){$st[0]}) 1000
+    $Stage2Ms=Get-TransportSwitchThreshold $(if($st.Count -ge 2){$st[1]}) 3000
+    if($Stage1Ms -ge $Stage2Ms -or $Stage2Ms -gt $HardFailMs -or $HardFailMs -gt $BlipMs){
+        $Stage1Ms=1000;$Stage2Ms=3000;$HardFailMs=3000;$BlipMs=10000
+    }
+    $rows=@($Candidates|Where-Object {$t=[string](Get-TransportDecisionValue $_ 'tag' '');$t -match '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,95}$' -and $t -ne 'unavailable' -and (Get-TransportDecisionValue $_ 'enabled' $true) -ne $false -and -not (Get-TransportDecisionValue $_ 'buildFailed' $false) -and (Get-TransportDecisionValue $_ 'state' '') -ne 'disabled'})
+    $tags=@($rows|ForEach-Object {[string]$_.tag})
+    foreach($tag in $tags){if(-not $s.paths.ContainsKey($tag)){$s.paths[$tag]=New-TransportDecisionPath}}
+    $ep=$s.episode
+    $acknowledged=$CurrentTag -ne $s.currentTag -and $ep -and $ep.status -eq 'switched' -and $ep.switchedTo -eq $CurrentTag
+    $cancelCodes=@('cancelled','canceled','operation-canceled','operation-cancelled','context-canceled','aborted')
+    $probeCodes=@('ok','timeout','stalled','refused','process-exited')
+    # Discard malformed/future timestamps before sorting; never read a wall clock.
+    $sortedEvents=@(@(foreach($ev in $Events){
+        $at=0L
+        if([long]::TryParse([string](Get-TransportDecisionValue $ev 'at' $Now),[ref]$at) -and $at -ge 0 -and $at -le $Now){$ev}
+    })|Sort-Object {[long](Get-TransportDecisionValue $_ 'at' $Now)})
+    $opened=$false
+    if((-not $ep -or -not $ep.open) -and -not $acknowledged){
+        $triggerAt=$null
+        foreach($ev in $sortedEvents){
+            $code=[string](Get-TransportDecisionValue $ev 'code' '')
+            if($code -in $cancelCodes){continue}
+            if(Test-TransportSwitchSignal $s $ev $CurrentTag $Now){
+                $triggerAt=[long](Get-TransportDecisionValue $ev 'at' $Now);break
+            }
+        }
+        if($null -ne $triggerAt){
+            $ep=New-TransportSwitchEpisode $triggerAt $Now $CurrentTag
+            $s.episode=$ep;$opened=$true
+        }
+    }
+    if(-not $ep -or -not $ep.open){
+        # Closed episodes do not replace the legacy pending/direct/recovery logic.
+        if($acknowledged){$ep.status='verifying'}
+        $r=Invoke-TransportDecision -State $s -Candidates $rows -Now $Now -CurrentTag $CurrentTag -Events $sortedEvents
+        if($acknowledged){
+            # The verification occupies this verdict. Keep other I/O queued for the next call.
+            if($r.verdict.action -eq 'check-direct'){$r.state.directRequestedAt=$null}
+            if($r.verdict.action -eq 'check-path'){$r.state.pending[$r.verdict.tag].requested=$false}
+            return New-TransportSwitchResult $r.state 'post-switch-verify' $CurrentTag @($CurrentTag) @('post-switch-verify')
+        }
+        $action=$r.verdict.action;$target=$r.verdict.tag
+        if($action -eq 'none'){$action='stay';$target=$CurrentTag}
+        return New-TransportSwitchResult $r.state $action $target @() $r.verdict.notes
+    }
+    if($CurrentTag -ne $s.currentTag){
+        $s.switches=@(@($s.switches)+@(@{at=$Now;from=$s.currentTag;to=$CurrentTag;why='ok'})|Select-Object -Last 10)
+        $s.currentTag=$CurrentTag;$s.selectedAt=$Now;$s.lastSwitchAt=$Now;$s.proposal=$null
+    }
+    foreach($ev in $sortedEvents){
+        $at=[long](Get-TransportDecisionValue $ev 'at' $Now)
+        $kind=[string](Get-TransportDecisionValue $ev 'kind' '');$tag=[string](Get-TransportDecisionValue $ev 'tag' '');$code=[string](Get-TransportDecisionValue $ev 'code' '')
+        if($code -in $cancelCodes){continue}
+        $local=(Get-TransportDecisionValue $ev 'local' $false) -eq $true
+        if($kind -eq 'net-down' -or ($local -and $kind -in @('dial-fail','conn-closed-error'))){
+            if($null -eq $s.localNetAt -or $at -ge $s.localNetAt){$s.localNet='down';$s.localNetAt=$at};continue
+        }
+        if($kind -eq 'net-up'){
+            if($null -eq $s.localNetAt -or $at -ge $s.localNetAt){$s.localNet='ok';$s.localNetAt=$at};continue
+        }
+        # Network events above are independent of the episode's opening timestamp.
+        if(-not $ep.open -and (Test-TransportSwitchSignal $s $ev $CurrentTag $Now)){
+            $ep=New-TransportSwitchEpisode $at $Now $CurrentTag
+            $s.episode=$ep;$opened=$true
+        }
+        if($at -lt $ep.openedAt){continue}
+        if(-not $tag -and $kind -in @('engine-exit','engine-ready')){$tag=$CurrentTag}
+        if($tag -notin $tags){continue}
+        $p=$s.paths[$tag]
+        if($null -ne $p.lastResultAt -and $at -lt $p.lastResultAt){continue}
+        if($kind -eq 'engine-exit' -and $tag -eq $ep.activeTag){
+            $exits=@(@(Get-TransportDecisionValue $p 'exitTimes' @())|Where-Object {$at-[long]$_ -lt $script:TransportExitWindowMs})+@($at)
+            $p.exitTimes=@($exits);if($exits.Count -ge 2){$ep.hardFail=$true}
+        }
+        if($kind -ne 'path-check' -or $code -notin $probeCodes){continue}
+        if(($null -ne $p.lastCheckAt -and $at -le $p.lastCheckAt) -or ($null -ne $s.localNetAt -and $at -lt $s.localNetAt)){continue}
+        $p.lastCheckAt=$at
+        if($code -eq 'ok'){
+            Reset-TransportDecisionPath $s $tag $at
+            if($tag -eq $ep.activeTag){$ep.open=$false;$ep.status='closed';Set-TransportDecisionReason $s 'ok' $Now}
+            else{$ep.responded[$tag]=@{at=$at;tag=$tag}}
+        }elseif($tag -eq $ep.activeTag -and $ep.open){
+            # This call has not issued its new probe-round yet; its input cannot answer it.
+            if(-not $opened -and $at -ge (Get-TransportDecisionValue $ep 'activeProbeAt' $ep.openedAt)){$ep.activeProbeFailed=$true}
+            if($code -eq 'refused'){$ep.hardFail=$true}
+        }
+        else{[void]$ep.responded.Remove($tag)}
+    }
+    if(-not $ep.open){
+        if($s.localNet -eq 'down'){
+            Undo-TransportDecisionPenalties $s $Now;Set-TransportDecisionReason $s 'local-network-down' $Now
+            return New-TransportSwitchResult $s 'stay' $CurrentTag @() @('penalties-rolled-back')
+        }
+        return New-TransportSwitchResult $s 'stay' $CurrentTag
+    }
+    $unpenalized=@($rows|Where-Object {$p=$s.paths[[string]$_.tag];$null -eq $p.until -or $Now -ge $p.until}|ForEach-Object {[string]$_.tag})
+    if($opened){return New-TransportSwitchResult $s 'probe-round' $CurrentTag $unpenalized @() $true}
+    $hasActive=$ep.activeTag -in $tags
+    $deadline=$(if($ep.hardFail){$HardFailMs}else{$BlipMs})
+    if(-not $hasActive -or ($Now-$ep.openedAt) -ge $deadline){
+        if($s.localNet -eq 'down'){
+            Undo-TransportDecisionPenalties $s $Now;$ep.open=$false;$ep.status='closed';Set-TransportDecisionReason $s 'local-network-down' $Now
+            return New-TransportSwitchResult $s 'stay' $CurrentTag @() @('penalties-rolled-back')
+        }
+        $responders=@($rows|Where-Object {$t=[string]$_.tag;$t -ne $ep.activeTag -and $ep.responded.ContainsKey($t) -and $t -in $unpenalized})
+        if(-not $responders.Count){
+            $ep.open=$false;$ep.status='closed';Set-TransportDecisionReason $s 'server-unavailable' $Now
+            return New-TransportSwitchResult $s 'stay' $CurrentTag
+        }
+        $ordered=@($responders|Sort-Object @{Expression={Get-TransportDecisionHealth $_ $s.paths[[string]$_.tag]}},@{Expression={Get-TransportDecisionMetric $_ 'latencyMs'}},@{Expression={$s.paths[[string]$_.tag].failures+[double](Get-TransportDecisionValue $_ 'failures' 0)}},@{Expression={Get-TransportDecisionMetric $_ 'maxGapMs'}},@{Expression={[string]$_.tag}})
+        $bestTag=[string]$ordered[0].tag
+        if($hasActive){Add-TransportDecisionPenalty $s $ep.activeTag 'path-dial-failed' $Now $Now}
+        $ep.open=$false;$ep.status='switched';$ep.switchedTo=$bestTag;$s.proposal=@{tag=$bestTag;reason='path-dial-failed'}
+        Set-TransportDecisionReason $s 'path-dial-failed' $Now
+        return New-TransportSwitchResult $s 'switch' $bestTag @() @('post-switch-verify')
+    }
+    if(($Now-$ep.openedAt) -ge $Stage1Ms -and -not $ep.stage1Done){
+        $ep.stage1Done=$true
+        if($ep.activeProbeFailed){$ep.activeProbeFailed=$false;$ep.activeProbeAt=$Now;return New-TransportSwitchResult $s 'probe-active' $ep.activeTag}
+    }
+    if(($Now-$ep.openedAt) -ge $Stage2Ms -and -not $ep.stage2Done){
+        $ep.stage2Done=$true
+        if($ep.activeProbeFailed){$ep.activeProbeFailed=$false;$ep.activeProbeAt=$Now;return New-TransportSwitchResult $s 'probe-active' $ep.activeTag}
+    }
+    return New-TransportSwitchResult $s 'stay' $CurrentTag
 }

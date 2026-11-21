@@ -124,6 +124,32 @@ namespace RemoteAgents.Launcher
             var client = O(clientFields, "name", "share");
             return D("oneOf", new object[] { managed, client });
         }
+        // Q: public, declarative policy only; executable paths stay runtime-only.
+        static Dictionary<string, object> TransportSwitchSchema()
+        {
+            var range = O(D("default", N(1, 300000), "min", N(1, 300000), "max", N(1, 300000)));
+            var coefficient = D("type", "number", "minimum", 0.01, "maximum", 10);
+            var stages = A(N(1, 300000), 2); stages["minItems"] = 2;
+            return O(D("blipMs", range, "hardFailMs", range, "stageMs", stages,
+                "classK", O(D("fixed", coefficient, "wifi", coefficient, "mobile-hotspot", coefficient, "mobile", coefficient)),
+                "minStayMs", N(1, 3600000), "flapWindowMs", N(1, 1800000), "flapSwitches", N(1, 1000),
+                "probeBudgetKiBPer10m", O(D("default", N(1, 1048576), "mobile", N(1, 1048576))),
+                "tspuMemoryHours", N(1, 720), "stallSeconds", N(1, 3600), "stallConns", N(1, 1024)));
+        }
+        static void ValidateTransportSwitch(Dictionary<string, object> root)
+        {
+            var policy = Json.Map(Json.Get(Json.Map(Json.Get(root, "transport")), "switch"));
+            int blip = 10000;
+            foreach (string key in new[] { "blipMs", "hardFailMs" }) {
+                bool isBlip = key == "blipMs";
+                var range = Json.Map(Json.Get(policy, key));
+                int value = Json.Int(range, "default", isBlip ? 10000 : 3000);
+                if (Json.Int(range, "min", isBlip ? 3000 : 1000) > value || value > Json.Int(range, "max", isBlip ? 30000 : 10000)) throw Bad("transport.switch." + key + ": min <= default <= max");
+                if (isBlip) blip = value;
+            }
+            var stages = policy.ContainsKey("stageMs") ? Json.Array(policy["stageMs"]) : new object[] { 1000, 3000 };
+            if (Convert.ToInt32(stages[0], CultureInfo.InvariantCulture) >= Convert.ToInt32(stages[1], CultureInfo.InvariantCulture) || Convert.ToInt32(stages[1], CultureInfo.InvariantCulture) > blip) throw Bad("transport.switch.stageMs: две возрастающие ступени <= blipMs.default");
+        }
         internal static Dictionary<string, object> SchemaDocument()
         {
             var route = O(D("kind", E("direct", "proxy", "hop"), "proxy", Proxy(), "hop", Hop()), "kind");
@@ -145,6 +171,7 @@ namespace RemoteAgents.Launcher
                 "server", O(D("address", Host(), "port", N(1, 65535), "login", User(),
                     "hostKeys", A(S(4096, 1, "^[^\\r\\n\\x00]+$"), 32), "key", Ref("server-key"), "rootPassword", Ref("server-root-password"), "routes", A(route, 32))),
                 "connection", O(D("enabled", B())),
+                "transport", O(D("switch", TransportSwitchSchema())),
                 "update", O(D("enabled", B(), "auto", B(), "intervalHours", N(1, 168), "remoteDir", S(2048, 1))),
                 "bridge", O(D("enabled", B(), "allowShell", B())),
                 "happier", O(D("mode", E("same", "new"), "account", S(64, 64, "^[a-f0-9]{64}$"), "label", S(80, 1), "serverUrl", Url(), "webappUrl", Url(), "key", Ref("happier-key"),
@@ -192,6 +219,7 @@ namespace RemoteAgents.Launcher
                 root = StrictParse(text) as Dictionary<string, object>;
             } catch { throw Bad("Конфиг должен быть корректным JSON без повторяющихся полей"); }
             Validate(root, SchemaDocument(), "конфиг");
+            ValidateTransportSwitch(root);
             var exit = Json.Map(Json.Get(root, "proxyOut"));
             if (root.ContainsKey("proxyOut") && !exit.ContainsKey("ipv6")) exit["ipv6"] = "block";
             var p = new ParsedConfig { Profile = new Dictionary<string, object>(root), Secrets = new Dictionary<string, string>(StringComparer.Ordinal), Protection = new Dictionary<string, object>() };
@@ -262,6 +290,7 @@ namespace RemoteAgents.Launcher
             } else if (type == "array") {
                 if (!(value is System.Collections.IEnumerable) || value is string || value is System.Collections.IDictionary) throw Bad("Нужен список: " + path);
                 var items = Json.Array(value);
+                if (items.Length < Json.Int(schema, "minItems", 0)) throw Bad("Слишком короткий список: " + path);
                 if (items.Length > Json.Int(schema, "maxItems", 256)) throw Bad("Слишком длинный список: " + path);
                 if (Json.Bool(schema, "uniqueItems") && items.Select(Json.Encode).Distinct(StringComparer.Ordinal).Count() != items.Length) throw Bad("Повторяющиеся элементы: " + path);
                 foreach (var item in items) Validate(item, Json.Map(schema["items"]), path);
@@ -279,6 +308,10 @@ namespace RemoteAgents.Launcher
                         u.UserInfo.Length > 0 || u.AbsolutePath != "/" || u.Query.Length > 0 || u.Fragment.Length > 0 || s.Any(c => c < 33))
                         throw Bad("Нужен HTTP(S) origin Happier без пути, пароля и параметров: " + path);
                 }
+            } else if (type == "number") {
+                decimal n;
+                if (value == null || value is bool || value is string || !decimal.TryParse(Convert.ToString(value, CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out n) ||
+                    (schema.ContainsKey("minimum") && n < Convert.ToDecimal(schema["minimum"], CultureInfo.InvariantCulture)) || (schema.ContainsKey("maximum") && n > Convert.ToDecimal(schema["maximum"], CultureInfo.InvariantCulture))) throw Bad("Неверное число: " + path);
             } else if (type == "integer") {
                 decimal n;
                 if (value == null || value is bool || value is string || !decimal.TryParse(Convert.ToString(value, CultureInfo.InvariantCulture), NumberStyles.Number, CultureInfo.InvariantCulture, out n) || n != decimal.Truncate(n) || n < Json.Int(schema, "minimum", int.MinValue) || n > Json.Int(schema, "maximum", int.MaxValue)) throw Bad("Неверное целое число: " + path);

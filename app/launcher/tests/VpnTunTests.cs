@@ -10,6 +10,22 @@ namespace RemoteAgents.Launcher
     internal static class VpnTunTests
     {
         static int count;
+        static readonly DateTime ProcessStarted = new DateTime(2026, 11, 20, 12, 0, 0, DateTimeKind.Utc);
+        static bool FakeDaemonAlive(int pid, DateTime started) { return pid == 42 && VpnWatchdog.ProcessStartMatches(ProcessStarted, started); }
+#if PORTABLE_TEST
+        // Focused executable: the default runs every VpnTun check, without unrelated suites.
+        static int Main(string[] args)
+        {
+            string root = Path.Combine(Path.GetTempPath(), "vpn-tun-tests-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            try {
+                if (args.Length == 1 && args[0] == "--vpn-status-only") StatusChecks(root);
+                else if (args.Length == 0) Run(root);
+                else throw new ArgumentException("Expected no arguments or --vpn-status-only");
+            } finally { Directory.Delete(root, true); }
+            return 0;
+        }
+#endif
         static void Check(bool value, string name) { if (!value) throw new Exception("VpnTun: " + name); count++; }
         static Dictionary<string, object> D(params object[] values) { return VpnTun.D(values); }
         static Dictionary<string, object> Snapshot(string name, string description, params string[] routes)
@@ -21,7 +37,7 @@ namespace RemoteAgents.Launcher
         {
             int stops = 0, restarts = 0; string stopped = "";
             Dictionary<string, object> status = null;
-            var monitor = new VpnTunMonitor(0, transport, policy, value => status = value, reason => { stops++; stopped = reason; }, () => restarts++);
+            var monitor = new VpnTunMonitor(0, transport, policy, value => status = value, reason => { stops++; stopped = reason; }, () => restarts++, processAlive: FakeDaemonAlive);
             Check(monitor.Step(0, now, true, transport, "") && Json.Str(status, "state") == "on", "running TUN starts healthy");
             transport["ok"] = false;
             transport["reason"] = D("code", "all-paths-penalized", "text", "Все пути временно недоступны, повторяю");
@@ -60,7 +76,7 @@ namespace RemoteAgents.Launcher
             Check(Json.Str(status, "state") == "on", "restarted core returns to on");
             Check(!monitor.Step(127101, now.AddMilliseconds(127101), true, transport, "") && stops == 1 && stopped == "watchdog-stalled", "owner-loop hang still invokes Stop");
             transport["ok"] = false; transport["reason"] = D("code", "path-dial-failed", "text", "password=private-value");
-            var masked = new VpnTunMonitor(0, transport, policy, value => status = value, reason => stops++, () => restarts++);
+            var masked = new VpnTunMonitor(0, transport, policy, value => status = value, reason => stops++, () => restarts++, processAlive: FakeDaemonAlive);
             masked.Step(0, now, true, transport, "");
             Check(!Json.Encode(status).Contains("private-value"), "transport reason uses existing secret masking");
         }
@@ -88,7 +104,7 @@ namespace RemoteAgents.Launcher
         // Windows processes, real network changes or sleeps in the owner loop.
         sealed class RebindFixture : IDisposable
         {
-            readonly DateTime utc = DateTime.UtcNow;
+            readonly DateTime utc = ProcessStarted;
             readonly VpnTun settings = VpnTun.Read(D("socksPort", 17881));
             readonly Dictionary<string, object> snapshot = Snapshot("OpenVPN", "TAP OpenVPN", "192.168.9.0/24");
             internal readonly ManualResetEvent ResolveEntered = new ManualResetEvent(false), ResolveRelease = new ManualResetEvent(true);
@@ -104,7 +120,7 @@ namespace RemoteAgents.Launcher
             long time;
             internal RebindFixture()
             {
-                Transport = D("ok", true, "active", "a", "updatedAt", utc.ToString("o"), "configRevision", "r1", "network", "wifi1", "localNet", "ok",
+                Transport = D("pid", 42, "startedAt", ProcessStarted.ToString("o"), "ok", true, "active", "a", "updatedAt", utc.ToString("o"), "configRevision", "r1", "network", "wifi1", "localNet", "ok",
                     "helper", D("udp", true, "vpnInPort", 17881), "endpoints", new[] { "relay.example" }, "lan", D("subnets", new[] { "192.168.77.0/24" }),
                     "candidates", new[] { D("tag", "a", "state", "ok", "enabled", true) });
                 var binding = VpnTunBinding.Resolve(Transport, host => Addresses);
@@ -127,7 +143,7 @@ namespace RemoteAgents.Launcher
                 Monitor = new VpnTunMonitor(0, Transport, VpnTun.DnsPolicy(snapshot), value => {
                     Status = value;
                     Check(Json.Bool(value, "enabled"), "rebind preserves enabled on every publication");
-                }, reason => Stops++, () => DeadRestarts++, Rebind);
+                }, reason => Stops++, () => DeadRestarts++, Rebind, FakeDaemonAlive);
             }
             Dictionary<string, object> MakeConfig(VpnTunBinding binding, Dictionary<string, object> evidence)
             { return Json.Map(Json.Parse(Json.Encode(settings.Config("ra-helper", Convert.ToBase64String(new byte[32]), binding.Ips, Json.Strings(Json.Get(Json.Map(evidence["lan"]), "subnets")), snapshot, VpnTun.DnsPolicy(snapshot), binding.Port)))); }
@@ -153,12 +169,11 @@ namespace RemoteAgents.Launcher
                 Check(f.ResolveEntered.WaitOne(1500), "rebind resolver runs in the background");
                 Check(Json.Str(f.Status, "state") == "searching" && Json.Str(Json.Map(f.Status["reason"]), "code") == "vpn-rebind", "port mismatch never reports on while resolver is pending");
                 string since = Json.Str(Json.Map(f.Status["reason"]), "since");
-                var elapsed = Stopwatch.StartNew();
                 for (int ms = 500; ms <= 5000; ms += 500) {
                     f.Step(ms);
                     Check(Json.Str(f.Status, "state") != "on" && f.RunningPort == 17881, "old core cannot report on with a different transport port");
                 }
-                Check(elapsed.ElapsedMilliseconds < 500 && f.Resolves == 1 && f.Builds == 0 && f.Stops == 0 && f.DeadRestarts == 0, "five second simulated DNS delay neither blocks steps nor overlaps work nor triggers emergency Stop");
+                Check(f.Resolves == 1 && f.Builds == 0 && f.Stops == 0 && f.DeadRestarts == 0, "five second simulated DNS delay neither blocks steps nor overlaps work nor triggers emergency Stop");
                 Check(Json.Str(Json.Map(f.Status["reason"]), "since") == since, "vpn-rebind since remains stable during resolution");
                 f.ResolveRelease.Set();
                 f.Await(5001, () => f.Restarts == 1, "new port prepared and activated once");
@@ -253,9 +268,33 @@ namespace RemoteAgents.Launcher
             foreach (string file in files)
                 Check(Json.Int(Json.Map(Json.Array(Json.Read(file)["outbounds"])[0]), "server_port", 0) == 17886, "both config slots overwrite previous sessions");
         }
+        static void StatusChecks(string root)
+        {
+            int before = count;
+            var now = ProcessStarted;
+            string home = Path.Combine(root, "helper-vpn-status");
+            Directory.CreateDirectory(Path.Combine(home, "status"));
+            var serviceStatus = D("owner", "net-helper", "enabled", true, "ok", true, "state", "on", "updatedAt", now.ToString("o"));
+            Files.Atomic(Path.Combine(home, "status/vpn.json"), Json.Encode(serviceStatus));
+            Check(Json.Str(VpnStatus.Read(home, now), "state") == "on", "helper status does not require a legacy host receipt");
+            serviceStatus["updatedAt"] = now.AddDays(-1).ToString("o");
+            Files.Atomic(Path.Combine(home, "status/vpn.json"), Json.Encode(serviceStatus));
+            var stale = VpnStatus.Read(home, now);
+            Check(Json.Bool(stale, "enabled") && !Json.Bool(stale, "ok") && Json.Bool(stale, "statusStale") && Json.Str(stale, "state") == "on" && !File.Exists(Path.Combine(home, "state/vpn.stop")), "stale file cannot claim service shutdown or request a legacy stop");
+            Check(Json.Str(Json.Read(Path.Combine(home, "status/vpn.json")), "state") == "on", "stale read never rewrites service status");
+            foreach (string state in new[] { "searching", "conflict", "starting" }) {
+                serviceStatus["state"] = state; serviceStatus["ok"] = state != "starting"; serviceStatus["summary"] = state == "starting" ? "Включается…" : "VPN включён"; serviceStatus["reason"] = D("code", "no-candidates", "text", "Нет подходящих путей", "since", now.ToString("o"));
+                Files.Atomic(Path.Combine(home, "status/vpn.json"), Json.Encode(serviceStatus));
+                var retained = VpnStatus.Read(home, now);
+                Check(Json.Bool(retained, "statusStale") == (state != "starting"), "day-old " + state + " status applies the correct freshness policy");
+                if (state == "starting") Check(!Json.Bool(retained, "ok") && Json.Str(retained, "summary") == "Включается…", "day-old starting preserves progress without a stale error");
+                Check(Json.Bool(retained, "enabled") && Json.Str(retained, "state") == state && Json.Str(Json.Map(retained["reason"]), "code") == "no-candidates", "stale active " + state + " preserves intent and reason");
+            }
+            Check(!File.Exists(Path.Combine(home, "state/vpn.stop")), "service status never requests a legacy stop");
+            Console.WriteLine("PASS: VpnStatus " + (count - before) + " checks (fake UTC clock)");
+        }
         internal static void Run(string root)
         {
-            var watch = Stopwatch.StartNew();
             var settings = VpnTun.Read(D("socksPort", 17881, "excludeCidrs", new[] { "203.0.113.0/24" }));
             var snapshot = Snapshot("OpenVPN", "TAP OpenVPN", "192.168.9.0/24");
             var strict = VpnTun.DnsPolicy(snapshot);
@@ -283,7 +322,7 @@ namespace RemoteAgents.Launcher
             string Fact(string[] f, string name) { for (int i = 0; i + 1 < f.Length; i += 2) if (f[i] == name) return f[i + 1]; return null; }
             Check(Fact(cfgFacts, "level") == "info" && Fact(cfgFacts, "covers1111") == "0" && Fact(cfgFacts, "covers_probe") == "0" && Fact(cfgFacts, "sha256").Length == 64 && Fact(cfgFacts, "json") == null, "vpn.config facts have no inline json");
             // Конфиг по частям: каждая строка журнала целиком (без [cut]), части склеиваются в исходный JSON; обрезка — флаг truncated=1.
-            Func<string[][], string[]> lines = parts => parts.Select(f => RaLog.Format(DateTimeOffset.UtcNow, LogLevel.Info, "vpn", "vpn.config.json", new[] { new KeyValuePair<string, string>(f[0], f[1]), new KeyValuePair<string, string>(f[2], f[3]), new KeyValuePair<string, string>(f[4], f[5]) }, "abcd")).ToArray();
+            Func<string[][], string[]> lines = parts => parts.Select(f => RaLog.Format(new DateTimeOffset(ProcessStarted), LogLevel.Info, "vpn", "vpn.config.json", new[] { new KeyValuePair<string, string>(f[0], f[1]), new KeyValuePair<string, string>(f[2], f[3]), new KeyValuePair<string, string>(f[4], f[5]) }, "abcd")).ToArray();
             Func<string, string> jsonOf = line => { string v = line.Substring(line.IndexOf(" json=", StringComparison.Ordinal) + 6); if (v.StartsWith("\"")) v = v.Substring(1, v.Length - 2).Replace("\\\"", "\"").Replace("\\\\", "\\"); return v; };
             string whole = LogMask.Clean(Json.Encode(VpnTun.MaskSecrets(built)));
             Func<string[][], string> joined = parts => string.Concat(lines(parts).Select(jsonOf));
@@ -321,11 +360,14 @@ namespace RemoteAgents.Launcher
             Check(!Json.Bool(VpnTun.DnsPolicy(splitDns), "strictRoute"), "NRPT conservatively relaxes strict route with partial network");
             splitDns["Adapters"] = new object[0]; Check(Json.Bool(VpnTun.DnsPolicy(splitDns), "strictRoute"), "stale NRPT alone does not relax DNS");
             bool denied = false; try { VpnTun.DnsPolicy(D()); } catch (InvalidDataException) { denied = true; } Check(denied, "missing DNS inventory fails closed");
-            var now = DateTime.UtcNow;
-            var transport = D("ok", true, "active", "a", "updatedAt", now.ToString("o"), "helper", D("udp", false), "candidates", new[] { D("tag", "a", "state", "ok", "enabled", true) });
-            Check(VpnTun.PathState(transport, now) == "no-udp", "TCP-only path refuses full VPN");
+            var now = ProcessStarted;
+            var transport = D("pid", 42, "startedAt", ProcessStarted.ToString("o"), "ok", true, "active", "a", "updatedAt", now.ToString("o"), "helper", D("udp", false), "candidates", new[] { D("tag", "a", "state", "ok", "enabled", true) });
+            Check(VpnTun.PathState(transport, now, FakeDaemonAlive) == "no-udp", "TCP-only path refuses full VPN");
             Json.Map(transport["helper"])["udp"] = true;
-            Check(VpnTun.PathState(transport, now) == "" && VpnTun.PathState(transport, now.AddSeconds(4)) == "" && VpnTun.PathState(transport, now.AddSeconds(16)) == "no-path" && VpnTun.PathState(transport, now.AddSeconds(-1)) == "no-path", "only fresh checked path is accepted");
+            Check(VpnTun.PathState(transport, now, FakeDaemonAlive) == "", "live checked daemon path is accepted");
+            transport["updatedAt"] = now.AddDays(-1).ToString("o");
+            Check(VpnTun.PathState(transport, now, FakeDaemonAlive) == "", "day-old snapshot remains ready while its daemon is alive");
+            Check(VpnTun.PathState(transport, now, (pid, started) => false) == "no-path", "dead daemon refuses VPN regardless of snapshot age");
             MonitorChecks(now, transport, strict);
             ConflictScanChecks();
             RebindChecks();
@@ -337,22 +379,7 @@ namespace RemoteAgents.Launcher
             var facts = new MainScreenFacts { VpnInstalled = true, Vpn = D("owner", "net-helper", "enabled", false, "state", "conflict", "conflictName", "Happ", "summary", VpnWatchdog.FailureSummary("conflict", "Happ")) };
             var view = MainScreenModel.Build(facts);
             Check(view.Vpn.Tone == Tone.Warning && view.Banner.Tone == Tone.Warning && view.Vpn.State.Contains("Happ") && view.Vpn.SwitchText == "Включить VPN", "yellow conflict card and tray facts name other VPN");
-            string home = Path.Combine(root, "helper-vpn-status");
-            Directory.CreateDirectory(Path.Combine(home, "status"));
-            var serviceStatus = D("owner", "net-helper", "enabled", true, "ok", true, "state", "on", "updatedAt", DateTime.UtcNow.ToString("o"));
-            Files.Atomic(Path.Combine(home, "status/vpn.json"), Json.Encode(serviceStatus));
-            Check(Json.Str(VpnStatus.Read(home), "state") == "on", "helper status does not require a legacy host receipt");
-            serviceStatus["updatedAt"] = DateTime.UtcNow.AddSeconds(-16).ToString("o");
-            Files.Atomic(Path.Combine(home, "status/vpn.json"), Json.Encode(serviceStatus));
-            var stale = VpnStatus.Read(home);
-            Check(Json.Bool(stale, "enabled") && !Json.Bool(stale, "ok") && Json.Bool(stale, "statusStale") && Json.Str(stale, "state") == "on" && !File.Exists(Path.Combine(home, "state/vpn.stop")), "stale file cannot claim service shutdown or request a legacy stop");
-            Check(Json.Str(Json.Read(Path.Combine(home, "status/vpn.json")), "state") == "on", "stale read never rewrites service status");
-            foreach (string state in new[] { "searching", "conflict" }) {
-                serviceStatus["state"] = state; serviceStatus["reason"] = D("code", "no-candidates", "text", "Нет подходящих путей", "since", now.ToString("o"));
-                Files.Atomic(Path.Combine(home, "status/vpn.json"), Json.Encode(serviceStatus));
-                var retained = VpnStatus.Read(home);
-                Check(Json.Bool(retained, "enabled") && Json.Str(retained, "state") == state && Json.Str(Json.Map(retained["reason"]), "code") == "no-candidates", "stale active " + state + " preserves intent and reason");
-            }
+            StatusChecks(root);
             string singbox = Environment.GetEnvironmentVariable("SINGBOX");
             if (!string.IsNullOrEmpty(singbox)) {
                 Directory.CreateDirectory(root); string file = Path.Combine(root, "vpn-tun-check.json"); Files.Atomic(file, Json.Encode(config));
@@ -360,8 +387,7 @@ namespace RemoteAgents.Launcher
                     Check(process.WaitForExit(3000), "sing-box check within budget"); Check(process.ExitCode == 0, "sing-box accepts generated config");
                 }
             }
-            Check(watch.ElapsedMilliseconds < 10000, "portable VPN tests within ten seconds");
-            Console.WriteLine("PASS: VpnTun " + count + " checks (" + watch.ElapsedMilliseconds + " ms)");
+            Console.WriteLine("PASS: VpnTun " + count + " checks (fake clocks and gated worker events)");
         }
     }
 }

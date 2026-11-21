@@ -193,6 +193,45 @@ def worker_home(c):
         raise Error('Нет пользователя ' + c['workerUser'] + ' (workerUser в настройках выдачи)')
 
 
+# Q: pure policy normalization for explicit invitation policy. No network I/O.
+TRANSPORT_SWITCH_DEFAULTS = {
+    'blipMs': {'default': 10000, 'min': 3000, 'max': 30000},
+    'hardFailMs': {'default': 3000, 'min': 1000, 'max': 10000},
+    'stageMs': [1000, 3000],
+    'classK': {'fixed': 0.5, 'wifi': 0.8, 'mobile-hotspot': 1.3, 'mobile': 1.5},
+    'minStayMs': 30000, 'flapWindowMs': 600000, 'flapSwitches': 3,
+    'probeBudgetKiBPer10m': {'default': 512, 'mobile': 192}, 'tspuMemoryHours': 24,
+}
+
+
+def transport_policy(c):
+    transport = c.get('transport', {})
+    require(isinstance(transport, dict) and set(transport) <= {'switch', 'hint'}, 'transport: разрешена только политика switch')
+    policy = transport.get('switch', {})
+    require(isinstance(policy, dict) and set(policy) <= set(TRANSPORT_SWITCH_DEFAULTS) | {'stallSeconds', 'stallConns', 'hint'}, 'transport.switch: неизвестные поля')
+    result = json.loads(json.dumps(TRANSPORT_SWITCH_DEFAULTS))
+    for key, value in policy.items():
+        if key == 'hint':
+            continue
+        if isinstance(result.get(key), dict):
+            require(isinstance(value, dict) and set(value) <= set(result[key]) | {'hint'}, 'transport.switch.' + key + ': неизвестные поля')
+            result[key].update({k: v for k, v in value.items() if k != 'hint'})
+        else:
+            result[key] = value
+    def integer(value, maximum):
+        return type(value) is int and 1 <= value <= maximum
+    for key in ('blipMs', 'hardFailMs'):
+        r = result[key]
+        require(all(integer(v, 300000) for v in r.values()) and r['min'] <= r['default'] <= r['max'], 'transport.switch.' + key + ': min <= default <= max, 1..300000')
+    stages = result['stageMs']
+    require(isinstance(stages, list) and len(stages) == 2 and all(integer(v, 300000) for v in stages) and stages[0] < stages[1] <= result['blipMs']['default'], 'transport.switch.stageMs: две возрастающие ступени <= blipMs.default')
+    require(all(type(v) in (int, float) and 0.01 <= v <= 10 for v in result['classK'].values()), 'transport.switch.classK: 0.01..10')
+    for key, limit in (('minStayMs', 3600000), ('flapWindowMs', 1800000), ('flapSwitches', 1000), ('tspuMemoryHours', 720), ('stallSeconds', 3600), ('stallConns', 1024)):
+        require(key not in result or integer(result[key], limit), 'transport.switch.' + key + ': неверное целое число')
+    require(all(integer(v, 1048576) for v in result['probeBudgetKiBPer10m'].values()), 'transport.switch.probeBudgetKiBPer10m: 1..1048576')
+    return {'switch': result}
+
+
 def settings(path=None):
     if path is None:
         path = DEFAULT_CONFIG
@@ -209,12 +248,13 @@ def settings(path=None):
     require(isinstance(c, dict) and c.get('schema') == 1 and c.get('version') == 1, 'Неизвестная схема настроек выдачи')
     allowed = {'schema', 'version', '$schema', 'serverAddress', 'serverPort', 'hostKeys', 'hostKeyFiles', 'workerUser',
                'workerAuthorizedKeys', 'stateDir', 'syncFile', 'nodeCatalog', 'routes', 'catalogFile', 'vpnBootstrap',
-               'happier', 'authLog', 'serverConfig', 'lanPcAccess', 'lanRuntimeDir', 'update'}
+               'happier', 'authLog', 'serverConfig', 'lanPcAccess', 'lanRuntimeDir', 'update', 'transport'}
     unknown = set(c) - allowed
     require(not unknown, 'Неизвестные поля в настройках выдачи: ' + ', '.join(sorted(unknown)))
     require(isinstance(c.get('workerUser'), str) and USER_RE.fullmatch(c['workerUser']) and c['workerUser'] != 'root', 'workerUser: рабочий пользователь (не root)')
     require(isinstance(c.get('serverAddress'), str) and HOST_RE.fullmatch(c['serverAddress']), 'serverAddress: адрес сервера')
     require(type(c.get('serverPort')) is int and 1 <= c['serverPort'] <= 65535, 'serverPort: 1–65535')
+    transport_policy(c)
     update = c.get('update', {})
     require(isinstance(update, dict) and not (set(update) - {'enabled', 'auto', 'intervalHours', 'remoteDir'}), 'update: неизвестные поля')
     for field in ('enabled', 'auto'):
@@ -970,6 +1010,7 @@ def bridge_invitation(deployment, values, line):
 def export(c, args, out=sys.stdout, err=sys.stderr):
     if getattr(args, 'include_server_secrets', False):
         require(os.geteuid() == 0 and args.output, '--include-server-secrets требует root и вывод в файл --output.')
+    policy = transport_policy(c) if 'transport' in c else None
     name = clean_name(args.name)
     require(re.fullmatch(r'same(:.+)?|new(:.+)?', args.happier or ''), '--happier: same, same:<подпись или id>, new или new:Название')
     folders = folders_list(args.folders)
@@ -1009,6 +1050,8 @@ def export(c, args, out=sys.stdout, err=sys.stderr):
     else:
         happier.update(mode='new', label=clean_name(args.happier[4:] or name))  # без названия аккаунт подписан именем компьютера
     config['happier'] = happier
+    if policy is not None:
+        config['transport'] = policy
     config['update'] = {'enabled': True, 'auto': True, 'intervalHours': 6, 'remoteDir': '~/.local/share/remote-agents/dist', **c.get('update', {})}
     config['bridge'] = {'enabled': True, 'allowShell': True}  # конституция 6д
     if folders is not None:

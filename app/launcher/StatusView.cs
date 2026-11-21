@@ -13,6 +13,20 @@ namespace RemoteAgents.Launcher
 
     internal static class StatusView
     {
+        public static Dictionary<string, object> ReadSnapshot(string home, string name)
+        {
+            try { return Json.Read(Files.Under(home, "status/" + name + ".json")); }
+            catch { return Json.Map(null); }
+        }
+        internal static Dictionary<string, object> ReadTransport(string home, Func<int, DateTime, bool> processAlive = null)
+        {
+            var status = ReadSnapshot(home, "transport");
+            if (!VpnWatchdog.TransportReady(status, processAlive)) {
+                status["ok"] = false;
+                if (Json.Str(status, "phase") == "ok") status["phase"] = "checking";
+            }
+            return status;
+        }
         public static Dictionary<string, object> Read(string home, string name, DateTime? utcNow = null, int maxAgeSec = 300)
         {
             try {

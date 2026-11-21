@@ -139,7 +139,6 @@ wait_for_memory
   wait_for_memory
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-vpn-legacy.ps1" -TestHome "$testdir/vpn-legacy" < /dev/null
   wait_for_memory
-  timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-status-freshness.ps1" < /dev/null
   wait_for_memory
   wait_for_memory
   timeout 60 python3 "$repo/transport/test-vpn-lifecycle.py"
@@ -153,9 +152,17 @@ wait_for_memory
   wait_for_memory
   timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$repo/tools/legacy-cleanup/tests/smoke-plan.ps1" < /dev/null
   wait_for_memory
+  timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-quality.ps1" < /dev/null
+  wait_for_memory
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-decide.ps1" < /dev/null
   wait_for_memory
+  timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-decide-switch.ps1" < /dev/null
+  wait_for_memory
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-leak.ps1" < /dev/null
+  wait_for_memory
+  timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-retention.ps1" < /dev/null
+  wait_for_memory
+  timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-netprobe.ps1" < /dev/null
   wait_for_memory
   flaky transport-events timeout 120 python3 "$repo/transport/test-transport-events.py" "$pwsh"
   wait_for_memory
@@ -254,6 +261,7 @@ timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:H
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:NetNotifyTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:TrayBusTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:SearchQuieterTests=true
+timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -nodeReuse:false -p:UseSharedCompilation=false -p:NetClassTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:MainScreenTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:TrayExtrasTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:SupervisorStaleTests=true

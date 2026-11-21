@@ -13,9 +13,12 @@ $parent=$null;$mutex=$null;$locked=$false;$settings=$null;$paths=$null;$exitCode
 $pin=[pscustomobject]@{mode='auto';tag=$null};$nextControl=[DateTime]::MinValue;$revision='';$reloadJob=$null;$reloadError=$null;$failedRevision=$null;$pendingRevision=$null;$nextReload=[DateTime]::MinValue
 $portConflict=$null;$bindRetry=$null;$startFailures=0;$bindState=@{failures=0;none=$false};$nextBindRetry=[DateTime]::MinValue;$liveRound=$false;$initialRound=$false
 $reader=$null;$directCheck=$null;$pathChecks=@{};$gateOkUntil=@{};$decision=$null;$verdict=$null;$eventQueue=@();$lastRecoveryAt=$null;$pathCheckStartedAt=@{}
+# §4б: at most 512 pending events; overflow drops the oldest, counted in transport.mem.
+$DaemonEventLimit=512;$script:daemonEventsDropped=[long]0;$script:daemonCheckPolls=[long]0;$script:daemonEventsQueued=[long]0;$script:daemonProbesStarted=[long]0
 $diagnosticContext=$null;$liveDeferred=@();$tunnelReadyUntil=@{};$daemonStarted=[DateTime]::Now;$checkingSince=[DateTime]::UtcNow;$stopping=$false
 try{$daemonStarted=(Get-Process -Id $PID).StartTime}catch{}
 $script:engineAttempted=$false;$checkingSince=$daemonStarted.ToUniversalTime()
+$script:networkRefreshPending=$false
 $holdActive=$false;$lastStatus=[DateTime]::MinValue;$nextNetwork=[DateTime]::MinValue;$retryAt=[DateTime]::MinValue
 $revState=@{};$nextMem=[DateTime]::MinValue;$nextDecideMs=[long]0;$memFuse=$false;$lastStatusKey=$null;$lastStatusWriteMs=[long]0
 # Источники tick (до шины событий — проверка времени в цикле; конституция 4а п.1). Не условия успеха.
@@ -43,6 +46,8 @@ function Reset-DaemonDecision {
     $script:decision=New-TransportDecisionState -Now (Get-DaemonTime) -CurrentTag $active
     if($previous){$decision.switches=$previous.switches;$decision.lastSwitchAt=$previous.lastSwitchAt}
     $script:verdict=$null;$script:lastRecoveryAt=$null
+    # A new generation cannot retain tags removed from configuration.
+    $script:pathLogState=@{}
     foreach($r in $rows){$r.penaltyStep=0;$r.penaltyUntil=$null;$r.suspect=$false}
 }
 function Stop-DaemonObservation([switch]$EngineRestart) {
@@ -57,7 +62,7 @@ function Stop-DaemonObservation([switch]$EngineRestart) {
     }
     foreach($ticket in @($pathChecks.Values)){
         try{Stop-TransportPathCheck $ticket.handle}catch{}
-        if($EngineRestart){$script:eventQueue+=@(New-DaemonEvent 'path-check' $ticket.tag 'cancelled')}
+        if($EngineRestart){Add-DaemonQueuedEvent (New-DaemonEvent 'path-check' $ticket.tag 'cancelled')}
     }
     $pathChecks.Clear();$gateOkUntil.Clear();$pathCheckStartedAt.Clear()
     if(-not $EngineRestart){Reset-DaemonDecision}
@@ -107,6 +112,7 @@ function Start-DaemonPath([string]$Tag,[switch]$Gate) {
     }catch{$ticket.until=Get-DaemonTime}
 }
 function Receive-DaemonChecks {
+    $script:daemonCheckPolls++
     if($directCheck){
         $event=$null
         try{if($directCheck.handle){$event=Receive-TransportDirectCheck $directCheck.handle}}catch{$directCheck.until=Get-DaemonTime}
@@ -115,7 +121,7 @@ function Receive-DaemonChecks {
             try{Stop-TransportDirectCheck $directCheck.handle}catch{};$script:directCheck=$null
             # Timestamp delivery after the reducer's direct-check request.
             $event.at=Get-DaemonTime
-            $script:eventQueue+=@($event)
+            Add-DaemonQueuedEvent $event
         }
     }
     foreach($tag in @($pathChecks.Keys)){
@@ -130,10 +136,33 @@ function Receive-DaemonChecks {
     }
 }
 $script:pathLogState=@{}
+function Add-DaemonQueuedEvent($Event) {
+    # Latch invalidation before the reducer drains or a bounded queue drops the event.
+    if($Event.kind -eq 'net-change'){$script:networkRefreshPending=$true}
+    $script:daemonEventsQueued++
+    if($eventQueue.Count -ge $DaemonEventLimit){
+        [Array]::Copy($eventQueue,1,$eventQueue,0,$DaemonEventLimit-1)
+        $script:eventQueue[$DaemonEventLimit-1]=$Event
+        $script:daemonEventsDropped++
+    }else{$script:eventQueue+=@($Event)}
+}
+function Get-DaemonRetentionFields {
+    # Fixed keys only; counts are sampled on the existing memory tick, never on a new timer.
+    [ordered]@{events=$eventQueue.Count;eventsDropped=$daemonEventsDropped;eventsQueued=$daemonEventsQueued;checkPolls=$daemonCheckPolls;probesStarted=$daemonProbesStarted;
+        probes=$probes.Count;pathChecks=$pathChecks.Count;directChecks=[int][bool]$directCheck;reloadJobs=[int][bool]$reloadJob;
+        pathLog=$pathLogState.Count;deferred=$liveDeferred.Count;tunnels=$tunnelChildren.Count;
+        decisionPaths=$(if($decision){$decision.paths.Count}else{0});decisionHistory=$(if($decision){$decision.history.Count}else{0});
+        decisionPending=$(if($decision){$decision.pending.Count}else{0});networks=$(if($memory){$memory.networks.Count}else{0});
+        wsMessages=$(if($reader){$reader.Messages}else{0});wsSamples=$(if($reader){$reader.RetainedSamples}else{0});
+        wsContexts=$(if($reader){$reader.RetainedContexts}else{0});wsQueued=$(if($reader){$reader.QueuedEvents}else{0});
+        wsDropped=$(if($reader){$reader.Dropped}else{0});wsOversized=$(if($reader){$reader.OversizedSnapshots}else{0})}
+}
 function Write-DaemonPathCheck($E) {
     # path.check: только при смене результата у кандидата или при отказе (иначе журнал заполнят успешные пробы).
     if($E.code -in @('cancelled','canceled','operation-canceled','operation-cancelled','context-canceled','aborted')){return}
     $result=if($E.code -eq 'ok'){'ok'}else{'fail'}
+    # §4б: last-value storage only for the current configured allowlist.
+    if($E.tag -notin @($paths.Candidates.tag)){return}
     $previous=$script:pathLogState[[string]$E.tag];$script:pathLogState[[string]$E.tag]=$result
     if($result -eq 'ok' -and $previous -eq 'ok'){return}
     $level=if($result -eq 'ok'){'INFO'}else{'WARN'}
@@ -154,7 +183,7 @@ function Add-DaemonEvent($Event) {
         $r=$rows|Where-Object {$_.tag -eq $e.tag}|Select-Object -First 1
         if($r){$r.state='ok';$r.checkedAt=[DateTime]::UtcNow.ToString('o');$r.lastOkAt=$r.checkedAt;Save-TransportMemory $root $memory $network.id $rows}
     }
-    $script:eventQueue+=@($e)
+    Add-DaemonQueuedEvent $e
 }
 function Invoke-DaemonDecision {
     Receive-DaemonChecks
@@ -222,7 +251,11 @@ function Publish-TransportStatus {
         if(-not $script:checkingSince){$script:checkingSince=$daemonStarted.ToUniversalTime()}
     }
     $phase=if($starting){'checking'}elseif($stopping){'stopped'}elseif($exitCode -ne 0 -or $reloadError -or $portConflict -or -not $alive){'failed'}elseif($initialRound -and -not $confirmed){'checking'}elseif($searching){'searching'}elseif($degraded){'degraded'}elseif($isOk){'ok'}elseif($script:checkingSince){'checking'}else{'failed'}
-    $doc=[ordered]@{endpoints=@($paths.Outbounds|Where-Object {$_.server -and $_.server -notin @('127.0.0.1','::1')}|ForEach-Object {[string]$_.server}|Sort-Object -Unique);ports=$(if($settings){Get-TransportConfiguredPorts ([pscustomobject]$settings.Options) $settings.Profile}else{$null});localWeb=$(if($settings){$settings.LocalWeb}else{$null});lan=$(if($settings){$settings.Lan}else{$null});helper=$(if($settings){Get-TransportHelperStatus $settings $active $paths.Outbounds}else{$null});portConflict=$portConflict;retryAt=$retryAt.ToUniversalTime().ToString('o');configRevision=$revision;fatal=($exitCode -ne 0 -and $exitCode -ne 75);summary=$summary;reason=$(if($verdict){@{code=$verdict.reason.code;text=$(if($verdict.reason.code -eq 'ok'){''}else{$verdict.reason.text});since=([DateTime]::SpecifyKind([DateTime]'1970-01-01',[DateTimeKind]::Utc)).AddMilliseconds([long]$verdict.reason.since).ToString('o')}}else{@{code='ok';text='';since=$daemonStarted.ToUniversalTime().ToString('o')}});localNet=$(if($verdict){$verdict.localNet}else{'unknown'});switches=@($(if($decision){foreach($item in $decision.switches){@{at=([DateTime]::SpecifyKind([DateTime]'1970-01-01',[DateTimeKind]::Utc)).AddMilliseconds([long]$item.at).ToString('o');from=$item.from;to=$item.to;why=$item.why}}}));ok=$isOk;phase=$phase;checkingSince=$(if($script:checkingSince){$script:checkingSince.ToString('o')}else{$null});active=$active;kbps=$speed;network=$id;metered=$metered;mode=$pin.mode;pinnedTag=$pin.tag;candidates=@($rows);configError=$reloadError;error=$errorText}
+    if(-not $script:transportProcessStartedAt){
+        $process=[Diagnostics.Process]::GetCurrentProcess()
+        try{$script:transportProcessStartedAt=$process.StartTime.ToUniversalTime().ToString('o')}finally{$process.Dispose()}
+    }
+    $doc=[ordered]@{pid=$PID;startedAt=$script:transportProcessStartedAt;endpoints=@($paths.Outbounds|Where-Object {$_.server -and $_.server -notin @('127.0.0.1','::1')}|ForEach-Object {[string]$_.server}|Sort-Object -Unique);ports=$(if($settings){Get-TransportConfiguredPorts ([pscustomobject]$settings.Options) $settings.Profile}else{$null});localWeb=$(if($settings){$settings.LocalWeb}else{$null});lan=$(if($settings){$settings.Lan}else{$null});helper=$(if($settings){Get-TransportHelperStatus $settings $active $paths.Outbounds}else{$null});portConflict=$portConflict;retryAt=$retryAt.ToUniversalTime().ToString('o');configRevision=$revision;fatal=($exitCode -ne 0 -and $exitCode -ne 75);summary=$summary;reason=$(if($verdict){@{code=$verdict.reason.code;text=$(if($verdict.reason.code -eq 'ok'){''}else{$verdict.reason.text});since=([DateTime]::SpecifyKind([DateTime]'1970-01-01',[DateTimeKind]::Utc)).AddMilliseconds([long]$verdict.reason.since).ToString('o')}}else{@{code='ok';text='';since=$daemonStarted.ToUniversalTime().ToString('o')}});localNet=$(if($verdict){$verdict.localNet}else{'unknown'});switches=@($(if($decision){foreach($item in $decision.switches){@{at=([DateTime]::SpecifyKind([DateTime]'1970-01-01',[DateTimeKind]::Utc)).AddMilliseconds([long]$item.at).ToString('o');from=$item.from;to=$item.to;why=$item.why}}}));ok=$isOk;phase=$phase;checkingSince=$(if($script:checkingSince){$script:checkingSince.ToString('o')}else{$null});active=$active;kbps=$speed;network=$id;metered=$metered;mode=$pin.mode;pinnedTag=$pin.tag;candidates=@($rows);configError=$reloadError;error=$errorText}
     # Запись только при изменении содержимого (без updatedAt) или по сердцебиению: не сериализуем и не переписываем файл на каждом такте.
     $key=ConvertTo-Json -InputObject $doc -Depth 40 -Compress;$nowMs=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $heartbeatMs=$StatusHeartbeatMs;if(-not $heartbeatMs){$heartbeatMs=5000}
@@ -287,7 +320,7 @@ function Start-DaemonProbe($Candidate) {
     if($probes.ContainsKey($Candidate.tag)){return}
     $pathCheckStartedAt[$Candidate.tag]=Get-DaemonTime
     Write-DaemonWizardProgress ('Проверяю вариант связи: '+$Candidate.title+'… (до '+$settings.Options.probeTimeoutSec+' с)')
-    try{$probes[$Candidate.tag]=Start-TransportProbe $settings.Profile $Candidate 65536 $settings.Options 'live'}
+    try{$probes[$Candidate.tag]=Start-TransportProbe $settings.Profile $Candidate 65536 $settings.Options 'live';$script:daemonProbesStarted++}
     catch{Add-DaemonEvent (New-DaemonEvent 'path-check' $Candidate.tag 'process-exited')}
 }
 function Start-DaemonRecovery {
@@ -414,7 +447,7 @@ try{
     $settings=Read-TransportSettings $root;Sync-TransportEntryCache $settings $root;$revision=Get-TransportRevision $root;$settings=Read-TransportSettings $root
     $paths=Get-TransportCandidates $settings $root;$secret=Get-TransportSecret $root;$memory=Read-TransportMemory $root
     $diagnosticContext=@(Get-TransportDiagnosticContext $settings $root)
-    $network=Get-TransportNetwork;$metered=Get-TransportMetered $settings.Options
+    $netSnapshot=Get-TransportNetworkSnapshot $settings.Options;$network=$netSnapshot.network;$metered=$netSnapshot.metered
     # Just detected: the loop's 5 s network check need not repeat it before the engine starts (CIM on Windows).
     $nextNetwork=[DateTime]::UtcNow.AddSeconds(5)
     $observedRevision=$revision
@@ -470,6 +503,7 @@ try{
                 if(-not $result -or $reloadJob.State -ne 'Completed'){throw 'Reload failed'}
                 Stop-TransportProbes;Stop-DaemonObservation
                 Stop-TransportProcess $engine;$engine=$null;$settings=$result.Settings;$paths=$result.Paths;$revision=$result.Revision
+                $netSnapshot=Get-TransportNetworkSnapshot $settings.Options;$metered=$netSnapshot.metered
                 $diagnosticContext=@(Get-TransportDiagnosticContext $settings $root)
                 $rows=@(Get-TransportRemembered $memory $network.id $paths.AllCandidates)
                 $desired=Get-TransportSelection $pin $rows $paths.Candidates $active
@@ -481,8 +515,11 @@ try{
             }catch{$reloadError='Новый конфиг не применён; проверьте списки узлов и кэш секретов';$nextReload=[DateTime]::UtcNow.AddSeconds(5)}
             finally{Remove-Job $reloadJob -Force;$reloadJob=$null}
         }
-        if($now -ge $nextNetwork){
-            $nextNetwork=$now.AddSeconds(5);$newNetwork=Get-TransportNetwork;$newMetered=Get-TransportMetered $settings.Options
+        if($networkRefreshPending -or $now -ge $nextNetwork){
+            $forceNetwork=$networkRefreshPending;$networkRefreshPending=$false
+            $nextNetwork=$now.AddSeconds(5)
+            $netSnapshot=Get-TransportNetworkSnapshot $settings.Options -Force:$forceNetwork
+            $newNetwork=$netSnapshot.network;$newMetered=$netSnapshot.metered
             $changed=Test-TransportNetworkChanged $network $newNetwork
             $metered=$newMetered
             if($changed){
@@ -502,7 +539,7 @@ try{
         }
         if($engine -and $bindState.none -and $now -ge $nextBindRetry -and -not $directCheck -and -not $pathChecks.Count -and -not $eventQueue.Count){
             # Резервный режим: раз в 60 с пробуем вернуть привязку; при появлении интерфейса или включении VPN движок пересоздаётся.
-            $nextBindRetry=$now.AddSeconds(60);$probeNet=Get-TransportNetwork
+            $nextBindRetry=$now.AddSeconds(60);$netSnapshot=Get-TransportNetworkSnapshot $settings.Options -Force;$probeNet=$netSnapshot.network;$metered=$netSnapshot.metered
             if($probeNet.interface -or -not (Test-TransportVpnOff $root)){
                 $network=$probeNet;Stop-TransportProbes;Stop-DaemonObservation;$confirmed=$false
                 Stop-TransportProcess $engine;$engine=$null;foreach($child in @($tunnelChildren.Values)){Stop-TransportProcess $child};$tunnelChildren.Clear();$retryAt=$now
@@ -523,8 +560,8 @@ try{
         }
         if(-not $engine -and $now -ge $retryAt -and -not $directCheck -and -not $pathChecks.Count -and -not $eventQueue.Count){
             try{
-                # После неудачи сеть определяется заново, а не ждёт 5-секундной проверки смены сети.
-                if($startFailures -gt 0 -and $settings.Options.bindPhysical){$network=Get-TransportNetwork;$nextNetwork=$now.AddSeconds(5)}
+                # После неудачи повторяем тяжёлую пробу: прежняя ошибка CIM/WMI могла быть временной.
+                if($startFailures -gt 0 -and $settings.Options.bindPhysical){$netSnapshot=Get-TransportNetworkSnapshot $settings.Options -Force;$network=$netSnapshot.network;$metered=$netSnapshot.metered;$nextNetwork=$now.AddSeconds(5)}
                 try{Start-TransportEngine}finally{$script:engineAttempted=$true}
                 $errorText='Ожидается проверка пути'
             }
@@ -604,7 +641,9 @@ try{
             $nextMem=$now.AddSeconds((Get-TransportMemIntervalSec))
             $memLimitMb=400;if($settings){$memLimitMb=[int]$settings.Options.memSoftLimitMb}
             $sample=Get-TransportMemSample
-            Write-RaLog (Join-Path $root 'logs') 'transport' 'INFO' 'transport' 'transport.mem' (Get-TransportMemFields $sample $memLimitMb)
+            $memFields=Get-TransportMemFields $sample $memLimitMb
+            $retention=Get-DaemonRetentionFields;foreach($key in $retention.Keys){$memFields[$key]=$retention[$key]}
+            Write-RaLog (Join-Path $root 'logs') 'transport' 'INFO' 'transport' 'transport.mem' $memFields
             # Предохранитель (конституция 4а): событие утечки памяти недоступно, если демон течёт; при срабатывании — чистый выход с кодом 75 и перезапуск Supervisor, успех не объявляет.
             if(Test-TransportMemoryHigh $sample.private $memLimitMb){
                 Write-RaLog (Join-Path $root 'logs') 'transport' 'WARN' 'transport' 'transport.mem-high' (Get-TransportMemFields $sample $memLimitMb)

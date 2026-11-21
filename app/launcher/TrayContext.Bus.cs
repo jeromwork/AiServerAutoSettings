@@ -31,6 +31,7 @@ namespace RemoteAgents.Launcher
             busParts.Add(new BusJournal(bus, RaLog.DefaultDir));
             // Журнал здоровья (поток health, шаг H3): создаётся за шиной; освобождается раньше неё.
             busParts.Add(new HealthJournal(bus, RaLog.DefaultDir));
+            busParts.Add(new NetClassPublisher(bus)); // Q: win.* / net.change -> class, without polling
             // Подписки раньше источников: готовность блока, уже наступившая к старту, тоже придёт подписчику.
             busParts.Add(TrayBusWiring.WireUpdateRequests(bus, manual => PostUi(() => { if (!closing) ButtonProceed(); })));
             busParts.Add(TrayBusWiring.WireUpdateTick(bus, () => PostUi(() => {
