@@ -41,7 +41,7 @@ namespace RemoteAgents.Launcher
                 // Одна невыполненная доставка за раз: если UI занят, тики не копятся; не смогли отправить — счётчик сброшен.
                 trayTickGate.Deliver(TryPostUi, Tick);
             }));
-            WireRuntimeBus();
+            WireRuntimeBus(); StartVpnGuard();
             updateSchedule.RetryRequested = () => { checkRequested = true; };
             checkRequested = true; // первая проверка при старте; PollUpdates дождётся готовности и безопасного момента
             busParts.Add(bus.Every(BusTopics.Ticks.Update, UpdateTickMs()));
@@ -65,7 +65,7 @@ namespace RemoteAgents.Launcher
             if (m != null && DateTime.UtcNow >= nextMirror) { nextMirror = DateTime.UtcNow.AddSeconds(60); Task.Run(() => { try { m.Pull(); } catch { } }); }
         }
 
-        void AttachLadderToBus() { if (transportReady && ladder != null) ladder.TransportReady(); }
+        void AttachLadderToBus() { if (ladder != null) ladder.Bus = bus; if (transportReady && ladder != null) ladder.TransportReady(); }
         void WireRuntimeBus() { foreach (var r in runtimes) r.Bus = bus; }
 
         void StopBus()

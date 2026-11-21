@@ -251,6 +251,7 @@ timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:E
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:BusJournalTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:NetNotifyTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:TrayBusTests=true
+timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:VpnReasonsTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:HealthBoardTests=true
 wait_for_memory
 # End-to-end on a loopback stand: config export -> paste/vault -> orchestrator -> real Server/Connection -> sync -> revoke.
