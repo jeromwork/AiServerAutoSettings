@@ -73,6 +73,7 @@ namespace RemoteAgents.Launcher
 
             if (startTimer && periodMs > 0)
             {
+                // timer-ok: B — конституция 4а: только источник tick.* шины; готовность и успех таймер не определяет.
                 _timer = new Timer(_ =>
                 {
                     try

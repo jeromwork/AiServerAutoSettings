@@ -1136,7 +1136,7 @@ try{
                 $memFuse=$true;break
             }
         }
-        # While the first path is being proved, probe results are read every 100 ms instead of 300 ms.
+        # timer-ok: B — конституция 4а: сердце демона доставляет события и результаты проб; успех определяется фактами, решения опросом остаются долгом W2.
         Start-Sleep -Milliseconds $(if($liveDeferred.Count){50}elseif(-not $confirmed -and $probes.Count){100}else{300})
     }
     $errorText='Транспорт остановлен';$stopping=$true

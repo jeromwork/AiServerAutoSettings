@@ -41,6 +41,49 @@ class TimerGuardTests(unittest.TestCase):
                 self.write('tests/timer-debt.txt', f'{header}\n[{section}]\napp/A.cs: Task.Delay(1);\n')
                 self.assertTrue(any(expected in e for e in guard.scan(self.root)))
 
+    def test_write_debt(self):
+        self.write('app/A.cs', 'Task.Delay(1);\n' * 2)
+        self.write('app/launcher/VpnStatus.cs', 'file.LastWriteTime;\n')
+        self.write('transport/A.ps1', 'Start-Sleep 1 # timer-ok: D — operation hang protection only\n')
+        self.write('build/Setup.Common.ps1', 'Start-Sleep 1\n')
+        self.write('server/server_components.py', 'time.sleep(1)\n')
+        self.write('tests/a.sh', 'sleep 1\n')
+        self.assertEqual(guard.write_debt(self.root), 6)
+        debt = self.root / 'tests/timer-debt.txt'
+        original = debt.read_bytes()
+        self.assertEqual(guard.scan(self.root), [])
+        for entry in ('# count: 6', '[code]', '[tests]', 'app/A.cs: Task.Delay(1); # W5',
+                      'app/launcher/VpnStatus.cs: file.LastWriteTime; # W3',
+                      'build/Setup.Common.ps1: Start-Sleep 1 # W2',
+                      'server/server_components.py: time.sleep(1) # W4', 'tests/a.sh: sleep 1 # W4'):
+            self.assertIn(entry, original.decode())
+        self.assertEqual(original.decode().count('app/A.cs: Task.Delay(1); # W5'), 2)
+        self.assertNotIn('transport/A.ps1:', original.decode())
+        guard.write_debt(self.root)
+        self.assertEqual(debt.read_bytes(), original)
+        self.write('app/A.cs', 'Task.Delay(1);\n' * 3)
+        self.assertEqual(len(guard.scan(self.root)), 1)
+        self.assertIn('NEW VIOLATION: app/A.cs:3:', guard.scan(self.root)[0])
+        self.write('app/A.cs', 'Task.Delay(1);\n')
+        self.assertIn('STALE DEBT', guard.scan(self.root)[0])
+
+    def test_write_debt_cli(self):
+        self.write('transport/test-transport-bus.ps1', '$stamp.updatedAt\n')
+        debt = self.root / 'custom/debt.txt'
+        args = [sys.executable, '-I', str(SCRIPT), '--root', str(self.root), '--debt-file', str(debt)]
+        result = subprocess.run(args + ['--write-debt'], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('wrote 1 debt entries', result.stdout)
+        self.assertIn('AssertFinalStatus', debt.read_text())
+        self.assertIn('Complete(1000): 1 s', debt.read_text())
+        self.assertFalse((self.root / 'tests/timer-debt.txt').exists())
+        result = subprocess.run(args, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.write('app/New.cs', 'Thread.Sleep(10);\n')
+        result = subprocess.run(args, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('NEW VIOLATION: app/New.cs:1:', result.stdout)
+
     def test_allowed_and_debt_sections(self):
         for path, text in {'app/A.cs': '// timer-ok: B — publishes tick events to bus\nnew Timer();',
                 'build/a.ps1': 'Start-Sleep 1 # timer-ok: C — rollback when event is missing',
