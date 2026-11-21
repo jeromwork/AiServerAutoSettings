@@ -16,6 +16,16 @@
     <IntermediateOutputPath>obj/$(Configuration)/eventbus-tests/</IntermediateOutputPath>
     <OutputPath>bin/$(Configuration)/eventbus-tests/</OutputPath>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(BusJournalTests)' == 'true'">
+    <StartupObject>RemoteAgents.Launcher.BusJournalTests</StartupObject>
+    <IntermediateOutputPath>obj/$(Configuration)/busjournal-tests/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/busjournal-tests/</OutputPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(NetNotifyTests)' == 'true'">
+    <StartupObject>RemoteAgents.Launcher.NetNotifyTests</StartupObject>
+    <IntermediateOutputPath>obj/$(Configuration)/netnotify-tests/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/netnotify-tests/</OutputPath>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(ConfigTests)' == 'true'">
     <IntermediateOutputPath>obj/$(Configuration)/config-tests/</IntermediateOutputPath>
     <OutputPath>bin/$(Configuration)/config-tests/</OutputPath>
@@ -71,6 +81,10 @@
     <Compile Include="../EventBus.cs" />
     <Compile Include="../BusTopics.cs" />
     <Compile Include="EventBusTests.cs" />
+    <Compile Include="../BusJournal.cs" />
+    <Compile Include="BusJournalTests.cs" />
+    <Compile Include="../NetNotify.cs" />
+    <Compile Include="NetNotifyTests.cs" />
     <Compile Include="../RaLog.cs" />
     <Compile Include="../LogLimits.cs" />
     <Compile Include="../LogMask.cs" />

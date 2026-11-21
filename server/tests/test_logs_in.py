@@ -109,6 +109,15 @@ class LogsIn(unittest.TestCase):
         self.assertIn('other-2026-11-20.log', names[0])
         self.assertLessEqual(len(self.files()[names[0]].read_text().splitlines()[0]), logs_in.MAX_LINE + 20)
 
+    def test_bus_stream_is_stored_by_line_date(self):
+        bus_line = '2026-11-20T09:05:00.123Z 12:05:00.123+03:00 INFO  bus       vpn.state      s=1111 seq=1 source=vpn-core state=on'
+        gz, _ = batch([bus_line], stream='bus')
+        self.assertEqual(logs_in.recv(gz, self.root), 'OK batch=b1 stored=1')
+        names = [k for k in self.files() if k.endswith('.log') and not k.endswith('_receiver.log')]
+        self.assertEqual(len(names), 1)
+        self.assertTrue(names[0].endswith('/bus-2026-11-20.log'), names[0])
+        self.assertIn('state=on', self.files()[names[0]].read_text(encoding='utf-8'))
+
     def test_mask_linear_time(self):
         for text in ('.' * 8192, '_-' * 4000):
             logs_in.mask(text)
