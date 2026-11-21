@@ -1,6 +1,7 @@
 ﻿#requires -Version 5.1
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Transport.Decide.ps1')
+. (Join-Path $PSScriptRoot 'Transport.Quality.ps1')
 
 $count=0
 function Assert($Condition,[string]$Message) {
@@ -17,8 +18,38 @@ function Event([long]$At,[string]$Kind,[string]$Tag='a',[string]$Code='timeout',
 }
 
 function DecideSwitch($State,[long]$Now,$Events=@(),$Rows=@((Row 'a'),(Row 'b' 'remembered' 120)),[string]$Current='a',$Config=$null) {
-    return Invoke-TransportSwitchEpisode -State $State -Candidates $Rows -Now $Now -Events $Events -CurrentTag $Current -SwitchConfig $Config
+    return Invoke-TransportDecision -SwitchEpisode:$true -State $State -Candidates $Rows -Now $Now -Events $Events -CurrentTag $Current -SwitchConfig $Config
 }
+
+# Контракт фактических вызовов демона до T2: State/Invoke без SwitchEpisode.
+# none — нейтральный вердикт; все действия исполняются текущим демоном.
+$legacyActions=@('none','check-direct','check-path','switch','searching')
+$daemonRows=@((Row 'a'),(Row 'b' 'remembered' 120))
+$daemonState=New-TransportDecisionState -Now 0 -CurrentTag 'a'
+$daemonResult=Invoke-TransportDecision -State $daemonState -Candidates $daemonRows -CurrentTag 'a' -Now 1 -Events @((Event 1 'stall-suspect'))
+Assert ($daemonResult.verdict.action -eq 'check-path') 'D: сигнал просит исполняемый демоном check-path по умолчанию'
+$daemonResults=@($daemonResult)
+$daemonResult=Invoke-TransportDecision -State $daemonResult.state -Candidates $daemonRows -CurrentTag 'a' -Now 2 -Events @((Event 2 'path-check' 'a' 'timeout'))
+Assert ($daemonResult.verdict.action -eq 'check-direct') 'D: провал path-check просит check-direct, а не probe-round'
+$daemonResults+=@($daemonResult)
+$daemonResult=Invoke-TransportDecision -State $daemonResult.state -Candidates $daemonRows -CurrentTag 'a' -Now 3 -Events @((Event 3 'net-up' ''))
+Assert ($daemonResult.verdict.action -eq 'switch' -and $daemonResult.verdict.tag -eq 'b') 'D: подтверждённая сеть разрешает legacy switch'
+$daemonResults+=@($daemonResult)
+# Confirm-DaemonSelection не передаёт даже Events; затем приходит transport.switch.
+$daemonResult=Invoke-TransportDecision -State $daemonResult.state -Candidates $daemonRows -CurrentTag 'b' -Now 4
+$daemonResults+=@($daemonResult)
+$daemonResult=Invoke-TransportDecision -State $daemonResult.state -Candidates $daemonRows -CurrentTag 'b' -Now 5 -Events @(@{kind='transport.switch';at=5;from='a';to='b';changed=$true})
+$daemonResults+=@($daemonResult)
+$daemonResult=Invoke-TransportDecision -State (New-TransportDecisionState -Now 6 -CurrentTag '') -Candidates @() -CurrentTag '' -Now 6 -Events @()
+Assert ($daemonResult.verdict.action -eq 'searching') 'D: пустой выбор возвращает исполняемый searching'
+$daemonResults+=@($daemonResult)
+foreach($result in $daemonResults){
+    Assert ($result.verdict.action -in $legacyActions -and $result.verdict.action -notin @('probe-round','probe-active','post-switch-verify')) 'D: обычный вызов демона не требует действий T2'
+    Assert (-not $result.state.episodeEnabled -and $null -eq $result.state.episode) 'D: создание, подтверждение и reset без флага остаются legacy'
+}
+$oldState=New-TransportDecisionState -Now 0 -CurrentTag 'a';[void]$oldState.Remove('episodeEnabled')
+$daemonResult=Invoke-TransportDecision -State $oldState -Candidates $daemonRows -CurrentTag 'a' -Now 1 -Events @((Event 1 'path-check' 'a' 'timeout'))
+Assert ($daemonResult.verdict.action -eq 'check-direct' -and -not $daemonResult.state.episodeEnabled) 'D: состояние до T1 без episodeEnabled также использует legacy'
 
 # (1) сигнал -> probe-round сразу (t=0)
 $s = New-TransportDecisionState 0 'a'
@@ -156,7 +187,7 @@ foreach($current in @('', 'x', 'a')){
     Assert ($r.verdict.action -eq 'stay') '1R: без ответивших и активного кандидата остаёмся без исключения'
 }
 
-# Этап B: режим эпизодов сохраняется после закрытия; legacy только по явному opt-out.
+# Этап B: явное включение эпизодов сохраняется после закрытия до opt-out.
 $s=New-TransportDecisionState 0 'a'
 $r=DecideSwitch $s 0 @((Event 0 'dial-fail')) $rows
 $r=DecideSwitch $r.state 1 @((Event 1 'path-check' 'a' 'ok')) $rows
@@ -225,7 +256,7 @@ $r=DecideSwitch $r.state 3000 @((Event 2000 'path-check' 'a' 'timeout')) $rows
 Assert ($r.verdict.action -eq 'probe-active') '8R: полученный провал разрешает повтор активного'
 
 # Ревью 9: скаляры, default=0, границы, неверные типы и порядок безопасны.
-Assert ((Get-TransportSwitchThreshold -5 10000) -eq 100) '9R: отрицательный порог ограничен снизу'
+Assert ((Get-TransportSwitchThreshold -5 10000) -eq 1) '9R: отрицательный порог ограничен снизу'
 Assert ((Get-TransportSwitchThreshold @{default=0;min=3000;max=30000} 10000) -eq 3000) '9R: default=0 не приводит объект к long'
 Assert ((Get-TransportSwitchThreshold @{default=90000;min=3000;max=30000} 10000) -eq 30000) '9R: верхняя граница схемы применяется'
 Assert ((Get-TransportSwitchThreshold @{default='bad';min=3000;max=30000} 10000) -eq 10000) '9R: неверное значение заменяется умолчанием'
@@ -277,17 +308,17 @@ foreach($failure in @((Event 9 'path-check' 'a' 'timeout'), (Event 9 'dial-fail'
     Assert ($r.verdict.action -eq 'stay' -and $r.verdict.reason.code -eq 'ok' -and $r.verdict.penalties.a.step -eq 0) 'F3.3: исправный a не переключён и не оштрафован'
 }
 
-# Замечание 4: вся цепочка через публичный API, флаг только при первом сигнале.
+# Замечание 4: вся цепочка через публичный API с явным включением эпизодов.
 $r=Invoke-TransportDecision -State (New-TransportDecisionState 0 'a') -Candidates $rows -Now 0 -CurrentTag 'a' -Events @((Event 0 'dial-fail')) -SwitchEpisode
 Assert ($r.verdict.action -eq 'probe-round') 'F3.4: публичный API открывает эпизод'
-$r=Invoke-TransportDecision -State $r.state -Candidates $rows -Now 1 -CurrentTag 'a' -Events @((Event 1 'path-check' 'b' 'ok'))
-Assert ($r.state.episode.open) 'F3.4: открытый эпизод продолжается без флага'
-$r=Invoke-TransportDecision -State $r.state -Candidates $rows -Now 10000 -CurrentTag 'a'
+$r=Invoke-TransportDecision -State $r.state -Candidates $rows -Now 1 -CurrentTag 'a' -Events @((Event 1 'path-check' 'b' 'ok')) -SwitchEpisode:$true
+Assert ($r.state.episode.open) 'F3.4: публичный API продолжает открытый эпизод'
+$r=Invoke-TransportDecision -State $r.state -Candidates $rows -Now 10000 -CurrentTag 'a' -SwitchEpisode:$true
 Assert ($r.verdict.action -eq 'switch' -and $r.verdict.tag -eq 'b') 'F3.4: публичный API предлагает b'
-$r=Invoke-TransportDecision -State $r.state -Candidates $rows -Now 10001 -CurrentTag 'b' -Events @((Event 10001 'path-check' 'a' 'ok'))
-Assert ($r.verdict.action -eq 'post-switch-verify' -and $r.verdict.tag -eq 'b' -and $r.state.episode.status -eq 'verifying') 'F3.4: подтверждение без флага запускает post-switch-verify'
+$r=Invoke-TransportDecision -State $r.state -Candidates $rows -Now 10001 -CurrentTag 'b' -Events @((Event 10001 'path-check' 'a' 'ok')) -SwitchEpisode:$true
+Assert ($r.verdict.action -eq 'post-switch-verify' -and $r.verdict.tag -eq 'b' -and $r.state.episode.status -eq 'verifying') 'F3.4: подтверждение в эпизодном режиме запускает post-switch-verify'
 Assert ($r.state.currentTag -eq 'b' -and $r.state.paths.a.step -eq 0) 'F3.4: подтверждение и его события обработаны'
-$r=Invoke-TransportDecision -State $r.state -Candidates $rows -Now 10002 -CurrentTag 'b' -Events @((Event 10002 'path-check' 'b' 'ok'))
+$r=Invoke-TransportDecision -State $r.state -Candidates $rows -Now 10002 -CurrentTag 'b' -Events @((Event 10002 'path-check' 'b' 'ok')) -SwitchEpisode:$true
 Assert ($r.verdict.action -eq 'stay' -and $r.state.paths.b.lastResultAt -eq 10002 -and $r.state.episode.status -eq 'closed') 'F3.4/B: проверка не повторяется, эпизодный решатель закрывает verify'
 
 # Замечание 5: timeout, открывший эпизод, не является результатом probe-round.
@@ -323,13 +354,13 @@ Assert ($r.state.paths.b.step -eq 0 -and $r.state.paths.b.successStreak -eq 1 -a
 Assert (-not $r.state.episode.responded.ContainsKey('b')) 'B3: результат до openedAt не отвечает за новый эпизод'
 Assert ($r.state.episode.open -and $r.verdict.tags -contains 'b') 'B3: восстановленный b доступен для нового раунда'
 
-# Замечание 4: стандартный API по умолчанию эпизодный; opt-out явный и сохраняемый.
+# Явное включение эпизодов не разрешает legacy переключать между эпизодами.
 $s=New-TransportDecisionState 0 'a'
-$r=Invoke-TransportDecision -State $s -Candidates $rows -Now 0 -CurrentTag 'a' -Events @((Event 0 'dial-fail'))
-Assert ($r.verdict.action -eq 'probe-round') 'B4: новый решатель включён по умолчанию'
-$r=Invoke-TransportDecision -State $r.state -Candidates $rows -Now 1 -CurrentTag 'a' -Events @((Event 1 'path-check' 'a' 'ok'))
+$r=Invoke-TransportDecision -State $s -Candidates $rows -Now 0 -CurrentTag 'a' -Events @((Event 0 'dial-fail')) -SwitchEpisode:$true
+Assert ($r.verdict.action -eq 'probe-round') 'B4: новый решатель включён явно'
+$r=Invoke-TransportDecision -State $r.state -Candidates $rows -Now 1 -CurrentTag 'a' -Events @((Event 1 'path-check' 'a' 'ok')) -SwitchEpisode:$true
 $r.state.paths.a.failed=$true
-$r=Invoke-TransportDecision -State $r.state -Candidates $rows -Now 30000 -CurrentTag 'a'
+$r=Invoke-TransportDecision -State $r.state -Candidates $rows -Now 30000 -CurrentTag 'a' -SwitchEpisode:$true
 Assert ($r.verdict.action -eq 'stay' -and $r.state.episodeEnabled) 'B4: закрытый эпизод не разрешает legacy самостоятельный switch'
 $r=Invoke-TransportDecision -State $r.state -Candidates $rows -Now 30001 -CurrentTag 'a' -SwitchEpisode:$false
 Assert ($r.verdict.action -eq 'switch' -and -not $r.state.episodeEnabled) 'B4: явный opt-out возвращает старый решатель'
@@ -350,27 +381,42 @@ $q=@{stage1Ms=2000;stage2Ms=6000;hardFailMs=6000;blipMs=18000;flapping=$true;all
 $r=DecideSwitch (New-TransportDecisionState 0 'a') 100 ($flaps+@((Event 100 'dial-fail'))) $rows 'a' $q
 Assert ($r.state.episode.policy.blipMs -eq 18000 -and -not $r.verdict.allowImprovement) '6: flapK из Q не применяется дважды'
 $s=New-TransportDecisionState 0 'a';$s.flapHistory=$flaps
-$r=Invoke-TransportDecision -State $s -Candidates @((Row 'a' 'ok' 200),(Row 'b' 'ok' 50),(Row 'c')) -Now 30000 -CurrentTag 'a' -Events @((Event 30000 'path-check' 'b' 'ok')) -AllowImprovement
+$r=Invoke-TransportDecision -State $s -Candidates @((Row 'a' 'ok' 200),(Row 'b' 'ok' 50),(Row 'c')) -Now 30000 -CurrentTag 'a' -Events @((Event 30000 'path-check' 'b' 'ok')) -AllowImprovement -SwitchEpisode:$true
 Assert ($r.verdict.action -eq 'stay' -and $r.verdict.flapping) '6: AllowImprovement не обходит моргание'
+
+# Одно подтверждение и позднее событие — одна смена, даже после JSON round-trip.
+$r=DecideSwitch (New-TransportDecisionState 0 'a') 100 @() $rows 'b'
+Assert ($r.state.flapHistory.Count -eq 1 -and $r.state.lastSwitchAt -eq 100) '6R: подтверждение при Now=100 учитывает одну смену'
+$r=DecideSwitch ($r.state|ConvertTo-Json -Depth 30|ConvertFrom-Json) 102 @(@{at=101;kind='transport.switch';from='a';to='b';changed=$true}) $rows 'b'
+Assert ($r.state.flapHistory.Count -eq 1 -and $r.state.flapHistory[0].at -eq 101) '6R: событие at=101 уточняет подтверждение, не добавляя вторую смену'
+Assert ($r.state.selectedAt -eq 101 -and $r.state.lastSwitchAt -eq 101 -and $r.state.switches[-1].at -eq 101) '6R: точное время согласовано с minStay и журналом'
+$r=DecideSwitch $r.state 103 @(@{at=101;kind='transport.switch';from='a';to='b';changed=$true}) $rows 'b'
+Assert ($r.state.flapHistory.Count -eq 1) '6R: повтор уточняющего события тоже не удваивает смену'
+$r=DecideSwitch $r.state 104 @() $rows 'c'
+$r=DecideSwitch $r.state 105 @((Event 105 'dial-fail' 'c')) $rows 'c'
+Assert ($r.state.flapHistory.Count -eq 2 -and -not $r.verdict.flapping -and $r.state.episode.policy.blipMs -eq 10000) '6R: следующая реальная смена не включает моргание раньше третьей'
+$noChanges=@(@{at=1;kind='transport.switch';from='a';to='a';changed=$false},@{at=2;kind='transport.switch';from='a';to='a'},@{at=3;kind='transport.switch';from='a';to='b';changed=$false})
+$r=DecideSwitch (New-TransportDecisionState 0 'a') 100 ($noChanges+@((Event 100 'dial-fail'))) $rows
+Assert ($r.state.flapHistory.Count -eq 0 -and -not $r.verdict.flapping -and $r.verdict.allowImprovement -and $r.state.episode.policy.blipMs -eq 10000) '6R: from=to и changed=false не считаются настоящими сменами'
 
 # (7) Возврат: два успеха подряд, minStay, max(30 мс,20%), маркер переживает reset.
 $returnRows=@((Row 'a' 'ok' 100),(Row 'b' 'ok' 200))
 $s=New-TransportDecisionState 0 'b';$s.paths.a=New-TransportDecisionPath
 Add-TransportDecisionPenalty $s 'a' 'path-dial-failed' 0 0
-$r=Invoke-TransportDecision -State $s -Candidates $returnRows -Now 10000 -CurrentTag 'b' -Events @((Event 10000 'path-check' 'a' 'ok')) -AllowImprovement
+$r=Invoke-TransportDecision -State $s -Candidates $returnRows -Now 10000 -CurrentTag 'b' -Events @((Event 10000 'path-check' 'a' 'ok')) -AllowImprovement -SwitchEpisode:$true
 Assert ($r.verdict.action -eq 'stay' -and $r.state.paths.a.successStreak -eq 1 -and $r.state.paths.a.recentPenaltyAt -eq 0) '7: один успех не разрешает возврат, маркер наказания сохранён'
-$r=Invoke-TransportDecision -State $r.state -Candidates $returnRows -Now 11000 -CurrentTag 'b' -Events @((Event 11000 'path-check' 'a' 'ok')) -AllowImprovement
+$r=Invoke-TransportDecision -State $r.state -Candidates $returnRows -Now 11000 -CurrentTag 'b' -Events @((Event 11000 'path-check' 'a' 'ok')) -AllowImprovement -SwitchEpisode:$true
 Assert ($r.verdict.action -eq 'stay' -and $r.state.paths.a.successStreak -eq 2) '7: два успеха не обходят minStay'
 $ready=Copy-TransportDecisionValue $r.state
-$r=Invoke-TransportDecision -State $ready -Candidates @((Row 'a' 'ok' 180),(Row 'b' 'ok' 200)) -Now 30000 -CurrentTag 'b' -AllowImprovement
+$r=Invoke-TransportDecision -State $ready -Candidates @((Row 'a' 'ok' 180),(Row 'b' 'ok' 200)) -Now 30000 -CurrentTag 'b' -AllowImprovement -SwitchEpisode:$true
 Assert ($r.verdict.action -eq 'stay') '7: улучшение 20 мс недостаточно'
-$r=Invoke-TransportDecision -State $ready -Candidates @((Row 'a' 'ok' 170),(Row 'b' 'ok' 200)) -Now 30000 -CurrentTag 'b' -AllowImprovement
+$r=Invoke-TransportDecision -State $ready -Candidates @((Row 'a' 'ok' 170),(Row 'b' 'ok' 200)) -Now 30000 -CurrentTag 'b' -AllowImprovement -SwitchEpisode:$true
 Assert ($r.verdict.action -eq 'stay') '7: 30 мс не обходят порог 20% от 200 мс'
-$r=Invoke-TransportDecision -State $ready -Candidates $returnRows -Now 30000 -CurrentTag 'b' -AllowImprovement
+$r=Invoke-TransportDecision -State $ready -Candidates $returnRows -Now 30000 -CurrentTag 'b' -AllowImprovement -SwitchEpisode:$true
 Assert ($r.verdict.action -eq 'switch' -and $r.verdict.tag -eq 'a' -and $r.verdict.notes -contains 'improvement') '7: все три условия разрешают возврат'
-$r=Invoke-TransportDecision -State $ready -Candidates $returnRows -Now 12000 -CurrentTag 'b' -Events @((Event 12000 'path-check' 'a' 'timeout')) -AllowImprovement
+$r=Invoke-TransportDecision -State $ready -Candidates $returnRows -Now 12000 -CurrentTag 'b' -Events @((Event 12000 'path-check' 'a' 'timeout')) -AllowImprovement -SwitchEpisode:$true
 Assert ($r.state.paths.a.successStreak -eq 0) '7: провал прерывает серию успехов'
-$r=Invoke-TransportDecision -State $r.state -Candidates $returnRows -Now 30000 -CurrentTag 'b' -Events @((Event 30000 'path-check' 'a' 'ok')) -AllowImprovement
+$r=Invoke-TransportDecision -State $r.state -Candidates $returnRows -Now 30000 -CurrentTag 'b' -Events @((Event 30000 'path-check' 'a' 'ok')) -AllowImprovement -SwitchEpisode:$true
 Assert ($r.verdict.action -eq 'stay' -and $r.state.paths.a.successStreak -eq 1) '7: после провала счёт успехов начинается заново'
 # Тот же запрет действует при аварийном выборе кандидата, а не только improvement.
 $r=DecideSwitch $r.state 30001 @((Event 30001 'dial-fail' 'b'),(Event 30001 'path-check' 'a' 'ok')) $returnRows 'b'
@@ -415,6 +461,20 @@ Assert ($r.verdict.action -eq 'stay' -and $r.state.episode.status -eq 'closed' -
 $r=DecideSwitch $r.state 10006 @((Event 10006 'dial-fail' 'c')) $chainRows 'c'
 Assert ($r.verdict.action -eq 'probe-round') '8/Q: пропущенный verify не блокирует последующие эпизоды'
 
+# Настоящий отказ выбранного пути приходит В ПАЧКЕ подтверждения, Q пропускает verify.
+$r=DecideSwitch $proposal 10002 @((Event 10002 'dial-fail' 'b')) $chainRows 'b'
+Assert ($r.verdict.action -eq 'post-switch-verify' -and $r.state.pending.ContainsKey('b')) '8R: отказ из подтверждающей пачки сохранён до verify'
+$pendingVerify=Copy-TransportDecisionValue $r.state
+$r=DecideSwitch $pendingVerify 10003 @((Event 10003 'post-switch-verify' 'b' 'skipped')) $chainRows 'b'
+Assert ($r.verdict.action -eq 'probe-round' -and $r.state.pending.ContainsKey('b') -and $r.state.episode.openedAt -eq 10002) '8R: skipped обрабатывает сохранённый реальный отказ новым раундом'
+Assert ($r.state.paths.b.step -eq 0 -and $r.state.paths.b.successStreak -eq 0 -and $r.state.paths.b.lastResultAt -eq 0 -and $r.verdict.notes -contains 'post-switch-verify-skipped') '8R: skipped не подменяет отказ успехом или штрафом'
+$retry=Copy-TransportDecisionValue $r.state
+$r=DecideSwitch $retry 10004 @((Event 10004 'path-check' 'b' 'ok')) $chainRows 'b'
+Assert ($r.verdict.action -eq 'stay' -and $r.state.episode.status -eq 'closed' -and -not $r.state.pending.ContainsKey('b')) '8R: только настоящий успех закрывает сохранённый отказ'
+$r=DecideSwitch $retry 10004 @((Event 10004 'path-check' 'b' 'timeout'),(Event 10004 'path-check' 'c' 'ok')) $chainRows 'b'
+$r=DecideSwitch $r.state 20002 @() $chainRows 'b'
+Assert ($r.verdict.action -eq 'switch' -and $r.verdict.tag -eq 'c' -and $r.state.paths.b.step -eq 1) '8R: отказ после skipped доходит до штрафа и переключения'
+
 # Время подтверждённого switch берётся из события, а не из задержанной доставки.
 $r=DecideSwitch $proposal 11000 @(@{at=10010;kind='transport.switch';from='a';to='b'}) $chainRows 'b'
 Assert ($r.state.lastSwitchAt -eq 10010 -and $r.state.selectedAt -eq 10010 -and $r.state.flapHistory.Count -eq 1) '8: задержанный switch не считается дважды и задаёт minStay по at'
@@ -452,8 +512,8 @@ foreach($delay in @(17000,47000,122000,302000,302000)){
 $r=DecideSwitch (New-TransportDecisionState 0 'a') 0 @((Event 0 'dial-fail')) $chainRows
 $r=DecideSwitch $r.state 100 @() $chainRows 'a' $next
 Assert ($r.state.episode.policy.blipMs -eq 10000 -and $r.state.switchPolicy.blipMs -eq 6000) 'Q: изменение SwitchConfig внутри эпизода тоже отложено'
-$r=Invoke-TransportDecision -State $r.state -Candidates $chainRows -Now 200 -CurrentTag 'a' -Events @((Event 200 'path-check' 'a' 'ok')) -BlipMs 9000
-$r=Invoke-TransportDecision -State $r.state -Candidates $chainRows -Now 300 -CurrentTag 'a' -Events @((Event 300 'dial-fail'))
+$r=Invoke-TransportDecision -State $r.state -Candidates $chainRows -Now 200 -CurrentTag 'a' -Events @((Event 200 'path-check' 'a' 'ok')) -BlipMs 9000 -SwitchEpisode:$true
+$r=Invoke-TransportDecision -State $r.state -Candidates $chainRows -Now 300 -CurrentTag 'a' -Events @((Event 300 'dial-fail')) -SwitchEpisode:$true
 Assert ($r.state.episode.policy.blipMs -eq 9000) 'Q: скалярный параметр API сохраняется до нового эпизода'
 $r=DecideSwitch $r.state 400 @(@{at=50;kind='net.quality';fields=@{blipMs=4000}},@{at=500;kind='net.quality';fields=@{blipMs=5000}}) $chainRows
 Assert ($r.state.episode.policy.blipMs -eq 9000) 'Q: старый/будущий net.quality не меняет текущий снимок'
@@ -463,6 +523,22 @@ $r=DecideSwitch (New-TransportDecisionState 0 'a') 2 @((Event 0 'dial-fail'),@{a
 Assert ($r.state.episode.policy.blipMs -eq 10000 -and $r.state.switchPolicy.blipMs -eq 6000) 'Q: качество после сигнала в той же пачке отложено'
 $r=DecideSwitch (New-TransportDecisionState 0 'a') 2 @(@{at=0;kind='net.quality';fields=$next},(Event 1 'dial-fail')) $chainRows
 Assert ($r.state.episode.policy.blipMs -eq 6000) 'Q: качество до сигнала в той же пачке применяется при открытии'
+
+# Публичный snapshot настоящего Q из допустимого config: hardFail независим от stage2/blip.
+foreach($switch in @(
+    @{hardFailMs=@{default=1000;min=1000;max=10000}},
+    @{stageMs=@(1,300000);blipMs=@{default=300000;min=1;max=300000};hardFailMs=@{default=1;min=1;max=300000}},
+    @{stageMs=@(1,2);blipMs=@{default=2;min=1;max=300000};hardFailMs=@{default=300000;min=1;max=300000}}
+)){
+    $quality=New-TransportQualityState @{transport=@{switch=$switch}}
+    $snapshot=Get-TransportQualitySnapshot $quality 0
+    $r=DecideSwitch (New-TransportDecisionState 0 'a') 0 @((Event 0 'dial-fail')) $chainRows 'a' $snapshot
+    foreach($name in @('stage1Ms','stage2Ms','hardFailMs','blipMs')){
+        Assert ($r.state.episode.policy[$name] -eq $snapshot[$name]) ('Q/R: допустимый snapshot Q сохраняет '+$name)
+    }
+    $r=DecideSwitch (New-TransportDecisionState 0 'a') 1 @(@{at=0;kind='net.quality';fields=$snapshot},(Event 1 'dial-fail')) $chainRows
+    Assert ($r.state.episode.policy.hardFailMs -eq $snapshot.hardFailMs -and $r.state.episode.policy.stage2Ms -eq $snapshot.stage2Ms) 'Q/R: тот же snapshot без подмены принимается через net.quality'
+}
 
 # §4б: ограничены накопленные словари/истории и рабочая пачка; старое удаляется.
 $manyRows=@(1..270|ForEach-Object {Row ('p'+$_)})

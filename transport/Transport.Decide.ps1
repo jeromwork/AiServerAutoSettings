@@ -72,7 +72,7 @@ function New-TransportDecisionState([long]$Now,[string]$CurrentTag='') {
         localNet='unknown';localNetAt=$null;paths=@{};pending=@{}
         directRequestedAt=$null;history=@();roundSince=$null;consecutiveFailures=0
         switches=@();proposal=$null;reason=@{code='ok';text=(Get-TransportDecisionReasonText 'ok');since=$Now}
-        episode=$null;episodeEnabled=$true;switchPolicy=$null;qualityAt=$null;flapHistory=@();boundsOverflow=$false
+        episode=$null;episodeEnabled=$false;switchPolicy=$null;qualityAt=$null;flapHistory=@();boundsOverflow=$false
     }
 }
 
@@ -147,8 +147,8 @@ function Invoke-TransportDecision {
         [switch]$SwitchEpisode, [long]$Stage1Ms=1000, [long]$Stage2Ms=3000, [long]$BlipMs=10000, [long]$HardFailMs=3000, $SwitchConfig=$null
     )
     # Once enabled, only the episode reducer may switch, including between episodes.
-    # An explicit -SwitchEpisode:$false is the compatibility opt-out for the legacy daemon.
-    $episodeMode=Get-TransportDecisionValue $State 'episodeEnabled' $true
+    # Legacy is the default until T2 executes episode actions; enable explicitly once.
+    $episodeMode=Get-TransportDecisionValue $State 'episodeEnabled' $false
     if($PSBoundParameters.ContainsKey('SwitchEpisode')){$episodeMode=[bool]$SwitchEpisode}
     if($episodeMode){
         $episodeArgs=@{State=$State;Candidates=$Candidates;Now=$Now;CurrentTag=$CurrentTag;Events=$Events;AllowImprovement=$AllowImprovement}
@@ -336,13 +336,13 @@ function Invoke-TransportDecision {
 
 # Bounds apply to scalar thresholds and to {default,min,max} config entries.
 function Get-TransportSwitchThreshold($Value,[long]$Fallback) {
-    $lower=100L;$upper=60000L;$parsed=0L
+    $lower=1L;$upper=300000L;$parsed=0L
     if($Value -is [Collections.IDictionary] -or $Value -is [System.Management.Automation.PSCustomObject]){
-        if([long]::TryParse([string](Get-TransportDecisionValue $Value 'min'),[ref]$parsed)){$lower=[Math]::Max(100L,[Math]::Min(60000L,$parsed))}
-        if([long]::TryParse([string](Get-TransportDecisionValue $Value 'max'),[ref]$parsed)){$upper=[Math]::Max(100L,[Math]::Min(60000L,$parsed))}
+        if([long]::TryParse([string](Get-TransportDecisionValue $Value 'min'),[ref]$parsed)){$lower=[Math]::Max(1L,[Math]::Min(300000L,$parsed))}
+        if([long]::TryParse([string](Get-TransportDecisionValue $Value 'max'),[ref]$parsed)){$upper=[Math]::Max(1L,[Math]::Min(300000L,$parsed))}
         $Value=Get-TransportDecisionValue $Value 'default'
     }
-    if($lower -gt $upper){$lower=100L;$upper=60000L}
+    if($lower -gt $upper){$lower=1L;$upper=300000L}
     if(-not [long]::TryParse([string]$Value,[ref]$parsed)){$parsed=$Fallback}
     return [Math]::Max($lower,[Math]::Min($upper,$parsed))
 }
@@ -405,7 +405,7 @@ function Get-TransportSwitchPolicy($Config,[long]$Stage1Ms,[long]$Stage2Ms,[long
     $b=Get-TransportSwitchThreshold (Get-TransportDecisionValue $Config 'stage2Ms' $(if($st.Count -ge 2){$st[1]})) 3000
     $blip=Get-TransportSwitchThreshold (Get-TransportDecisionValue $Config 'blipMs' $BlipMs) 10000
     $hard=Get-TransportSwitchThreshold (Get-TransportDecisionValue $Config 'hardFailMs' $HardFailMs) 3000
-    if($a -ge $b -or $b -gt $hard -or $hard -gt $blip){$a=1000L;$b=3000L;$hard=3000L;$blip=10000L}
+    if($a -ge $b -or $b -gt $blip){$a=1000L;$b=3000L;$hard=3000L;$blip=10000L}
     $ladder=@(@(Get-TransportDecisionValue $Config 'penaltyMs' @(5000,15000,45000,120000,300000))|Select-Object -First 6)
     $valid=$ladder.Count -eq 5;$last=0L;$parsed=@()
     foreach($v in $ladder){$n=0L;if(-not [long]::TryParse([string]$v,[ref]$n) -or $n -lt $last -or $n -lt 1 -or $n -gt 3600000){$valid=$false};$parsed+=@($n);$last=$n}
@@ -526,10 +526,13 @@ function Invoke-TransportSwitchEpisode {
         foreach($ev in @($Events|Select-Object -Last 512)){
             $at=0L;$to=[string](Get-TransportDecisionValue $ev 'to' (Get-TransportDecisionValue $ev 'tag' ''))
             if((Get-TransportDecisionValue $ev 'kind') -eq 'transport.switch' -and $to -eq $CurrentTag -and
+                (Get-TransportDecisionValue $ev 'from' '') -eq $s.currentTag -and
+                (Get-TransportDecisionValue $ev 'changed' $true) -ne $false -and
                 [long]::TryParse([string](Get-TransportDecisionValue $ev 'at'),[ref]$at) -and $at -ge $s.selectedAt -and $at -le $Now){$ackAt=$at}
         }
         $why='ok';if($s.proposal -and $s.proposal.tag -eq $CurrentTag){$why=$s.proposal.reason}
-        $change=@{at=$ackAt;from=$s.currentTag;to=$CurrentTag;why=$why}
+        # The bus event may follow confirmation in a later reducer call.
+        $change=@{at=$ackAt;from=$s.currentTag;to=$CurrentTag;why=$why;awaitingEvent=$true;after=$s.selectedAt}
         $s.switches=@(@($s.switches)+@($change)|Select-Object -Last 10)
         if($s.flapHistory.Count -ge 1024){$s.boundsOverflow=$true}
         $s.flapHistory=@(@($s.flapHistory)+@($change)|Select-Object -Last 1024)
@@ -549,7 +552,20 @@ function Invoke-TransportSwitchEpisode {
             $at=[long](Get-TransportDecisionValue $ev 'at' $Now);$tag=[string](Get-TransportDecisionValue $ev 'tag' '')
             $from=[string](Get-TransportDecisionValue $ev 'from' '')
             $to=[string](Get-TransportDecisionValue $ev 'to' $tag)
-            if(($from -eq '' -or $from -match '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,95}$') -and $to -in $tags -and -not @($s.flapHistory|Where-Object {$_.at -eq $at -and $_.to -eq $to}).Count){
+            if($from -eq $to -or (Get-TransportDecisionValue $ev 'changed' $true) -eq $false -or
+                ($from -ne '' -and $from -notmatch '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,95}$') -or $to -notin $tags){continue}
+            $confirmed=@($s.flapHistory|Where-Object {
+                (Get-TransportDecisionValue $_ 'awaitingEvent' $false) -and $_.from -eq $from -and $_.to -eq $to -and $at -ge $_.after
+            }|Select-Object -Last 1)
+            if($confirmed.Count){
+                $change=$confirmed[0];$previousAt=$change.at
+                $change.at=$at;$change.awaitingEvent=$false
+                # switches and flapHistory may no longer share objects after JSON/copy.
+                foreach($entry in $s.switches){
+                    if((Get-TransportDecisionValue $entry 'awaitingEvent' $false) -and $entry.at -eq $previousAt -and $entry.from -eq $from -and $entry.to -eq $to){$entry.at=$at;$entry.awaitingEvent=$false}
+                }
+                if($s.currentTag -eq $to -and $s.lastSwitchAt -eq $previousAt){$s.selectedAt=$at;$s.lastSwitchAt=$at}
+            }elseif(-not @($s.flapHistory|Where-Object {$_.at -eq $at -and $_.from -eq $from -and $_.to -eq $to}).Count){
                 if($s.flapHistory.Count -ge 1024){$s.boundsOverflow=$true}
                 $s.flapHistory=@(@($s.flapHistory)+@(@{at=$at;from=$from;to=$to})|Select-Object -Last 1024)
             }
@@ -601,7 +617,13 @@ function Invoke-TransportSwitchEpisode {
         # Closing a skipped verification records no success and leaves metrics untouched.
         if($kind -eq 'post-switch-verify' -and $code -eq 'skipped'){
             if($ep -and $ep.status -eq 'verifying' -and $tag -eq $CurrentTag -and -not $acknowledged -and $at -ge $ep.verifyAt){
-                $ep.status='closed';$ep.verifySkipped=$true;[void]$s.pending.Remove($tag);$notes+=@('post-switch-verify-skipped')
+                $ep.status='closed';$ep.verifySkipped=$true;$notes+=@('post-switch-verify-skipped')
+                if($s.pending.ContainsKey($tag)){
+                    # Budget refusal is no evidence of recovery. Probe the saved real
+                    # signal in a new episode, using its time and a fresh probe fuse.
+                    $ep=New-TransportSwitchEpisode $s.pending[$tag].at $Now $CurrentTag (Get-TransportEpisodePolicy $s $Now)
+                    $s.episode=$ep;$opened=$true
+                }
             }
             continue
         }
@@ -659,7 +681,7 @@ function Invoke-TransportSwitchEpisode {
     $unpenalized=@($rows|Where-Object {$p=$s.paths[[string]$_.tag];$_.tag -eq $CurrentTag -or $null -eq $p.until -or $Now -ge $p.until}|ForEach-Object {[string]$_.tag})
     if($opened){
         foreach($tag in $unpenalized){$ep.probed[$tag]=1}
-        return New-TransportSwitchResult $s 'probe-round' $CurrentTag $unpenalized @() $true
+        return New-TransportSwitchResult $s 'probe-round' $CurrentTag $unpenalized $notes $true
     }
     $hasActive=$ep.activeTag -in $tags
     $deadline=$(if($ep.hardFail){$ep.policy.hardFailMs}else{$ep.policy.blipMs})
