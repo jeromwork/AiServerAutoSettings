@@ -16,6 +16,8 @@ namespace RemoteAgents.Launcher
         // Focused executable: the default runs every VpnTun check, without unrelated suites.
         static int Main(string[] args)
         {
+            if (args.Length == 1 && args[0] == "--vpn-route-watch-only") { RouteWatchChecks(); return 0; }
+            if (args.Length == 1 && args[0] == "--vpn-scan-events-only") { ScanEventChecks(); NetHelperVersionTests.Run(); return 0; }
             string root = Path.Combine(Path.GetTempPath(), "vpn-tun-tests-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
             try {
@@ -80,24 +82,94 @@ namespace RemoteAgents.Launcher
             masked.Step(0, now, true, transport, "");
             Check(!Json.Encode(status).Contains("private-value"), "transport reason uses existing secret masking");
         }
+        // Synchronous bus dispatch and fake interfaces: no Windows APIs or elapsed-time waits.
+        static void RouteWatchChecks()
+        {
+            foreach (string topic in new[] { BusTopics.WinRouteChanged, BusTopics.WinIfaceChanged, BusTopics.WinAddrChanged, BusTopics.TickVpnScan }) {
+                using (var bus = new EventBus(manualDispatch: true)) {
+                    int best = 7, tun = 7, probes = 0, scans = 0, stops = 0, wakes = 0;
+                    var health = new List<BusEvent>();
+                    using (bus.Subscribe(BusTopics.VpnHealth, e => health.Add(e)))
+                    using (var watch = new VpnRouteWatch(bus, () => { probes++; return best; }, () => tun,
+                        () => scans++, () => stops++, () => wakes++)) {
+                        Check(watch.Process() && probes == 1 && scans == 1, "initial fact check closes subscribe race");
+                        for (int i = 0; i < 8; i++) bus.Publish(topic, BusTopics.Sources.Windows);
+                        bus.DrainOnce();
+                        Check(probes == 1 && stops == 0, "bus callback only queues work");
+                        Check(watch.Process() && probes == 2 && scans == 2 && health.Count == 0 && stops == 0,
+                            "burst with our TUN checks once and does not roll back");
+                        Check(watch.Process() && probes == 2, "idle owner pass does not probe");
+                        best = 9;
+                        for (int i = 0; i < 8; i++) bus.Publish(topic, BusTopics.Sources.Windows);
+                        bus.DrainOnce();
+                        Check(!watch.Process() && probes == 3 && scans == 2 && stops == 1, "lost route rolls back once before scans");
+                        bus.DrainOnce();
+                        Check(health.Count == 1 && health[0].Get("result") == "fail" && health[0].Get("reason") == "routes-lost"
+                            && health[0].Get("best1111") == "9" && health[0].Get("tunIf") == "7", "health contains failed route facts");
+                        bus.Publish(topic, BusTopics.Sources.Windows); bus.DrainOnce();
+                        Check(!watch.Process() && probes == 3 && stops == 1 && health.Count == 1, "later events cannot repeat rollback");
+                        int previousWakes = wakes;
+                        watch.Dispose();
+                        bus.Publish(topic, BusTopics.Sources.Windows); bus.DrainOnce();
+                        Check(wakes == previousWakes, "disposed watch unsubscribes");
+                    }
+                }
+            }
+            foreach (int badTun in new[] { -1, 0, 7 }) {
+                using (var bus = new EventBus(manualDispatch: true)) {
+                    int stops = 0;
+                    using (var watch = new VpnRouteWatch(bus, () => -1, () => badTun, () => { }, () => stops++, () => { }))
+                        Check(!watch.Process() && stops == 1, "missing TUN or failed API fails closed");
+                }
+            }
+            Console.WriteLine("PASS: V5 route watch (manual bus, healthy/lost/missing routes, burst, single rollback, disposal)");
+        }
+        static void ScanEventChecks()
+        {
+            using (var bus = new EventBus(manualDispatch: true)) {
+                var transport = D("pid", 42, "startedAt", ProcessStarted.ToString("o"), "ok", true, "active", "a",
+                    "configRevision", "r1", "helper", D("udp", true, "vpnInPort", 17881), "endpoints", new[] { "198.51.100.7" },
+                    "candidates", new[] { D("tag", "a", "state", "ok", "enabled", true) });
+                var binding = VpnTunBinding.Resolve(transport, host => new[] { host });
+                var rebind = new VpnTunRebind(0, binding, "config", evidence => binding, (b, e, c) => c, c => true);
+                var scan = new VpnTunConflictScan(0, () => Snapshot("OpenVPN", "TAP OpenVPN", "192.168.9.0/24"));
+                // Advancing fake time alone must never start the old five-second scans.
+                foreach (long now in new long[] { 0, 5000, 10000, 60000, 600000 }) {
+                    rebind.Tick(now, ProcessStarted, transport, FakeDaemonAlive); scan.Tick(now);
+                    Check(!rebind.Preparing && !scan.Preparing, "elapsed time does not schedule DNS/inventory");
+                }
+                using (var watch = new VpnRouteWatch(bus, () => 7, () => 7,
+                    () => { rebind.RequestScan(); scan.RequestScan(); }, () => { throw new Exception("unexpected rollback"); }, () => { })) {
+                    bus.Publish(BusTopics.WinIfaceChanged, BusTopics.Sources.Windows);
+                    bus.FireTick(BusTopics.Ticks.VpnScan);
+                    bus.DrainOnce(); Check(watch.Process(), "interface/tick requests coalesce");
+                    Check(!rebind.Preparing && !scan.Preparing, "callbacks do not launch workers");
+                    rebind.Tick(600001, ProcessStarted, transport, FakeDaemonAlive); scan.Tick(600001);
+                    Check(rebind.Preparing && scan.Preparing, "event requests start both workers on owner pass");
+                }
+            }
+            Check(VpnRouteWatch.ScanPeriodMs >= 60000, "periodic fallback is rare");
+            Console.WriteLine("PASS: V5 scan events (fake time, no periodic scans, interface/tick requests start workers)");
+        }
         static void ConflictScanChecks()
         {
             int calls = 0;
             using (var entered = new ManualResetEvent(false))
             using (var release = new ManualResetEvent(false)) {
                 var scan = new VpnTunConflictScan(0, () => { int call = Interlocked.Increment(ref calls); entered.Set(); release.WaitOne(); return call == 1 ? Snapshot("Happ TUN", "Wintun", "0.0.0.0/0") : Snapshot("OpenVPN", "TAP OpenVPN", "192.168.9.0/24"); });
-                scan.Tick(4999); Check(calls == 0, "adapter scan starts at five seconds");
+                scan.Tick(4999); Check(calls == 0, "adapter scan waits for an event");
+                scan.RequestScan();
                 try {
                     scan.Tick(5000); Check(entered.WaitOne(1500), "fixed adapter snapshot starts asynchronously");
                     scan.Tick(15000); Check(calls == 1 && scan.Conflict == "", "slow inventory never blocks the owner tick or overlaps another snapshot");
                 } finally { release.Set(); }
                 Check(SpinWait.SpinUntil(() => { scan.Tick(15001); return scan.Conflict == "Happ TUN"; }, 1500), "completed snapshot detects foreign VPN on the running session");
                 scan.Tick(20000); Check(calls == 1, "slow snapshot cannot queue catch-up scans");
-                scan.Tick(20001);
+                scan.RequestScan(); scan.Tick(20001);
                 Check(SpinWait.SpinUntil(() => { scan.Tick(20002); return scan.Conflict == ""; }, 1500) && calls == 2, "next adapter snapshot detects removal without changing either VPN");
             }
             var failed = new VpnTunConflictScan(0, () => { throw new IOException("inventory unavailable"); });
-            failed.Tick(5000);
+            failed.RequestScan(); failed.Tick(5000);
             Check(SpinWait.SpinUntil(() => { failed.Tick(5001); return failed.Failed; }, 1500), "inventory exception is consumed as status");
         }
         // Fake time and gated workers exercise the production monitor without DNS,
@@ -182,10 +254,10 @@ namespace RemoteAgents.Launcher
                 f.Step(5003, false);
                 Check(f.DeadRestarts == 1 && f.Rebind.Config == Json.Encode(f.RunningConfig), "dead-core restart retains the updated working config");
             }
-            // (b): DNS changes for the same host/revision are picked up periodically.
+            // (b): DNS changes for the same host/revision are picked up on a network/tick event.
             using (var f = new RebindFixture()) {
                 f.Addresses = new[] { "2001:db8::9", "198.51.100.8", "198.51.100.8" };
-                f.Advance(5000); f.Await(5001, () => f.Restarts == 1, "changed resolved endpoint set triggers rebind without revision change");
+                f.Rebind.RequestScan(); f.Advance(5000); f.Await(5001, () => f.Restarts == 1, "changed resolved endpoint set triggers rebind without revision change");
                 var excluded = Json.Strings(Json.Map(Json.Array(f.RunningConfig["inbounds"])[0])["route_exclude_address"]);
                 Check(excluded.Contains("198.51.100.8/32") && excluded.Contains("2001:db8::9/128") && !excluded.Contains("198.51.100.7/32") && excluded.Contains("192.168.77.0/24") && excluded.Contains("192.168.9.0/24"), "new config replaces server exclusions and preserves LAN/foreign-adapter routes");
                 f.Addresses = new[] { "198.51.100.8", "2001:0db8::9" };
@@ -222,7 +294,7 @@ namespace RemoteAgents.Launcher
                 Check(f.Rebind.Config == before && f.RunningPort == 17881 && f.Builds == 0 && f.Restarts == 0 && f.Stops == 0 && Json.Str(f.Status, "state") == "searching", "failed resolution keeps the previous config and never calls Stop");
                 f.Transport["configRevision"] = "r2"; f.Advance(10000);
                 Check(f.Resolves == 1 && !f.Rebind.Preparing && Json.Str(f.Status, "state") != "on", "DNS error retry is delayed ten seconds even when revision changes");
-                f.ResolveFails = false; f.Step(10001); f.Await(10002, () => f.Restarts == 1, "DNS recovers automatically after retry delay");
+                f.ResolveFails = false; f.Rebind.RequestScan(); f.Step(10001); f.Await(10002, () => f.Restarts == 1, "DNS recovers automatically after retry delay");
                 Check(f.RunningPort == 17891 && f.Stops == 0, "recovered binding needs no manual disable or enable");
             }
             // A completed background result may already be obsolete. Also gate
@@ -369,6 +441,7 @@ namespace RemoteAgents.Launcher
             Check(VpnTun.PathState(transport, now, FakeDaemonAlive) == "", "day-old snapshot remains ready while its daemon is alive");
             Check(VpnTun.PathState(transport, now, (pid, started) => false) == "no-path", "dead daemon refuses VPN regardless of snapshot age");
             MonitorChecks(now, transport, strict);
+            RouteWatchChecks(); ScanEventChecks();
             ConflictScanChecks();
             RebindChecks();
             ConfigFileChecks(root, settings, snapshot, strict);

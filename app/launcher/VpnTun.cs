@@ -222,10 +222,65 @@ namespace RemoteAgents.Launcher
         }
     }
 
+    // Bus callbacks only enqueue bounded flags and wake the VPN owner. Windows APIs,
+    // scans and rollback run on the owner thread; a burst needs one route check.
+    internal sealed class VpnRouteWatch : IDisposable
+    {
+        // Редкая проверка (конституция 4а п.1): уведомления Windows могут быть недоступны;
+        // tick только запрашивает проверку фактов, сам по себе успех не объявляет.
+        internal const int ScanPeriodMs = 60000;
+        readonly EventBus bus;
+        readonly Func<int> bestInterface, tunInterface;
+        readonly Action scan, rollback, wake;
+        readonly List<IDisposable> subscriptions = new List<IDisposable>();
+        int requested, ended;
+        internal VpnRouteWatch(EventBus bus, Func<int> bestInterface, Func<int> tunInterface,
+            Action scan, Action rollback, Action wake)
+        {
+            this.bus = bus; this.bestInterface = bestInterface; this.tunInterface = tunInterface;
+            this.scan = scan; this.rollback = rollback; this.wake = wake;
+            subscriptions.Add(bus.Subscribe(BusTopics.WinRouteChanged, e => Request()));
+            subscriptions.Add(bus.Subscribe(BusTopics.WinIfaceChanged, e => Request()));
+            subscriptions.Add(bus.Subscribe(BusTopics.WinAddrChanged, e => Request()));
+            subscriptions.Add(bus.Subscribe(BusTopics.TickVpnScan, e => Request()));
+            Request(); // Закрывает окно между подтверждением маршрутов и подпиской.
+        }
+        void Request()
+        {
+            if (Volatile.Read(ref ended) != 0) return;
+            Interlocked.Exchange(ref requested, 1);
+            wake();
+        }
+        // false means this watch already rolled the session back (or was disposed).
+        internal bool Process()
+        {
+            if (Volatile.Read(ref ended) != 0) return false;
+            if (Interlocked.Exchange(ref requested, 0) == 0) return true;
+            int tun = tunInterface(), best = bestInterface();
+            if (tun <= 0 || best != tun) {
+                if (Interlocked.Exchange(ref ended, 1) == 0) {
+                    bus.Publish(BusTopics.VpnHealth, BusTopics.Sources.Helper, "result", "fail", "reason", "routes-lost",
+                        "best1111", best.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                        "tunIf", tun.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    rollback();
+                }
+                return false;
+            }
+            scan();
+            return true;
+        }
+        public void Dispose()
+        {
+            Interlocked.Exchange(ref ended, 1);
+            foreach (var subscription in subscriptions) subscription.Dispose();
+        }
+    }
+
     // Only the owner thread consumes results or changes the running binding.
     // Resolution, config construction, file I/O and sing-box check run off-loop.
     internal sealed class VpnTunRebind
     {
+        // Limits construction/restarts after a requested change; never schedules a periodic scan.
         internal const int IntervalMs = 5000, RetryMs = 10000;
         sealed class Result { internal VpnTunBinding Binding; internal string Config, Key; }
         sealed class Work { internal Task<Result> Task; internal volatile bool Changed; }
@@ -234,7 +289,8 @@ namespace RemoteAgents.Launcher
         readonly Func<string, bool> activate;
         Work pending;
         Result prepared;
-        long nextScan, nextRestart, nextBuild, retryAfter;
+        long nextRestart, nextBuild, retryAfter;
+        bool scanRequested;
         string lastRequest;
         internal VpnTunBinding Binding { get; private set; }
         internal string Config { get; private set; }
@@ -245,8 +301,9 @@ namespace RemoteAgents.Launcher
             Func<VpnTunBinding, Dictionary<string, object>, string, string> build, Func<string, bool> activate)
         {
             Binding = binding; Config = config; this.resolve = resolve; this.build = build; this.activate = activate;
-            nextScan = now + IntervalMs; lastRequest = binding.Port + "\n" + binding.Revision + "\n" + binding.Hosts;
+            lastRequest = binding.Port + "\n" + binding.Revision + "\n" + binding.Hosts;
         }
+        internal void RequestScan() { scanRequested = true; }
         static bool Ready(Dictionary<string, object> transport, Func<int, DateTime, bool> processAlive)
         { return VpnWatchdog.TransportReady(transport, processAlive) && VpnTunBinding.PortOf(transport) != 0 && Json.Str(transport, "configRevision").Length > 0 && VpnTunBinding.HostsOf(transport).Length > 0; }
         internal bool Searching(Dictionary<string, object> transport)
@@ -265,18 +322,18 @@ namespace RemoteAgents.Launcher
                     if (!Binding.Same(result.Binding)) nextBuild = now + IntervalMs;
                     if (ready && result.Key == key) {
                         Failed = false;
-                        if (Binding.Same(result.Binding)) { Binding = result.Binding; nextScan = now + IntervalMs; }
+                        if (Binding.Same(result.Binding)) { Binding = result.Binding; }
                         else prepared = result;
-                    } else nextScan = now;
-                } catch { Failed = true; retryAfter = nextScan = now + RetryMs; }
+                    } else scanRequested = true;
+                } catch { Failed = true; retryAfter = now + RetryMs; }
                 pending = null;
             }
-            if (prepared != null && (!ready || prepared.Key != key)) { prepared = null; nextScan = now; }
-            if (pending == null && prepared == null && ready && now >= retryAfter && now >= nextRestart && now >= nextBuild && (now >= nextScan || key != lastRequest)) {
+            if (prepared != null && (!ready || prepared.Key != key)) { prepared = null; scanRequested = true; }
+            if (pending == null && prepared == null && ready && now >= retryAfter && now >= nextRestart && now >= nextBuild && (scanRequested || key != lastRequest)) {
                 // Freeze publisher-owned dictionaries before handing them to a worker.
                 var evidence = Json.Map(Json.Parse(Json.Encode(transport)));
                 var running = Binding; string config = Config;
-                var work = new Work(); lastRequest = key; nextScan = nextBuild = now + IntervalMs;
+                var work = new Work(); lastRequest = key; scanRequested = false; nextBuild = now + IntervalMs;
                 work.Task = Task.Run(() => {
                     var binding = resolve(evidence); work.Changed = !running.Same(binding);
                     return new Result { Binding = binding, Key = key, Config = work.Changed ? build(binding, evidence, config) : config };
@@ -292,8 +349,8 @@ namespace RemoteAgents.Launcher
             var result = prepared; prepared = null; nextRestart = now + IntervalMs;
             bool started = false;
             try { started = activate(result.Config); } catch { }
-            if (started) { Binding = result.Binding; Config = result.Config; Failed = false; nextScan = now + IntervalMs; }
-            else { Failed = true; retryAfter = nextScan = now + RetryMs; }
+            if (started) { Binding = result.Binding; Config = result.Config; Failed = false; }
+            else { Failed = true; retryAfter = now + RetryMs; }
             return true;
         }
     }
@@ -358,17 +415,18 @@ namespace RemoteAgents.Launcher
     // fixed snapshot is in flight; results are consumed by the owner thread only.
     internal sealed class VpnTunConflictScan
     {
-        internal const int IntervalMs = 5000;
         readonly Func<Dictionary<string, object>> snapshot;
         readonly Action<Dictionary<string, object>, VpnConflictResult> observe;
         readonly string ownDirectory;
         Task<Dictionary<string, object>> pending;
-        long next;
+        bool requested;
+        internal bool Preparing { get { return pending != null; } }
         internal string Conflict { get; private set; }
         internal string Suspects { get; private set; }
         internal bool Failed { get; private set; }
         internal VpnTunConflictScan(long now, Func<Dictionary<string, object>> snapshot, Action<Dictionary<string, object>, VpnConflictResult> observe = null, string ownDirectory = null)
-        { next = now + IntervalMs; this.snapshot = snapshot; this.observe = observe; this.ownDirectory = ownDirectory; Conflict = ""; Suspects = ""; }
+        { this.snapshot = snapshot; this.observe = observe; this.ownDirectory = ownDirectory; Conflict = ""; Suspects = ""; }
+        internal void RequestScan() { requested = true; }
         internal void Tick(long now)
         {
             if (pending != null && pending.IsCompleted) {
@@ -379,9 +437,9 @@ namespace RemoteAgents.Launcher
                     if (observe != null) try { observe(taken, result); } catch { }
                 }
                 catch { Failed = true; }
-                pending = null; next = now + IntervalMs;
+                pending = null;
             }
-            if (pending == null && now >= next) { next = now + IntervalMs; pending = Task.Run(snapshot); }
+            if (pending == null && requested) { requested = false; pending = Task.Run(snapshot); }
         }
     }
 
@@ -642,6 +700,7 @@ namespace RemoteAgents.Launcher
         {
             string stage = "inventory";
             VpnLease lease = null;
+            VpnRouteWatch routeWatch = null;
             VpnReadyGate readyGate = null; // подписка на шину службы: готовность ядра, fatal, vpn.off, win.route/iface (V3)
             var step = Stopwatch.StartNew();
             try {
@@ -723,6 +782,12 @@ namespace RemoteAgents.Launcher
                     if (!afterLogged) { afterLogged = true; Ev(LogLevel.Info, "vpn.inventory", new[] { "phase", "after" }.Concat(VpnTun.TunRoutes(taken, VpnTun.InterfaceName)).Concat(VpnConflict.Describe(taken)).ToArray()); }
                     if (result.Key != lastConflictKey) { lastConflictKey = result.Key; LogConflicts(result); }
                 }, directory);
+                var watchBus = Bus;
+                if (watchBus != null) routeWatch = new VpnRouteWatch(watchBus,
+                    () => NetRoute.BestInterface(System.Net.IPAddress.Parse("1.1.1.1")),
+                    () => NetRoute.IndexByName(VpnTun.InterfaceName),
+                    () => { rebind.RequestScan(); scan.RequestScan(); },
+                    () => Stop("error", "routes-lost", epoch), () => wake.Set());
                 long nextRead = 0;
                 stage = "monitor"; step.Restart();
                 while (true) {
@@ -730,6 +795,10 @@ namespace RemoteAgents.Launcher
                     if (lease.Expired) return;
                     long now = clock.ElapsedMilliseconds;
                     if (now >= nextRead) { transport = Transport(); nextRead = now + 500; } // timer-ok: B — перечитывание, решение по фактам; замена на наблюдатель в W2
+                    lock (gate) {
+                        if (disposed || epoch != generation) return;
+                        if (routeWatch != null && !routeWatch.Process()) return;
+                    }
                     scan.Tick(now);
                     if (core != null && core.WaitForExit(0) && !coreExitLogged) { coreExitLogged = true; LogCoreExit(core); }
                     { var reader = CoreReader; if (reader != null) reader.Drain(Events); } // очередь строк ядра на каждом проходе (не таймер)
@@ -749,6 +818,7 @@ namespace RemoteAgents.Launcher
                 lock (gate) if (epoch == generation) generation++;
                 CloseJobs();
                 { var reader = CoreReader; if (reader != null) { reader.Drain(Events); reader.WriteStats(Events); } }
+                if (routeWatch != null) routeWatch.Dispose();
                 if (readyGate != null) readyGate.Dispose();
                 if (lease != null) lease.Dispose();
                 if (core != null) { core.Dispose(); core = null; }
