@@ -21,8 +21,8 @@ namespace RemoteAgents.Launcher
             using (var sha = SHA256.Create())
                 return "Global\\RemoteAgents.UpdateReceipt." + BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(canonical))).Replace("-", "");
         }
-        internal const int ReceiptUiWaitMs = 25;
-        const int ReceiptWorkerWaitMs = 1000;
+        internal const int ReceiptUiFuseMs = 25;
+        internal const int ReceiptWorkerFuseMs = 1000;
         internal sealed class ReceiptBusyException : IOException
         { internal ReceiptBusyException() : base("Квитанция обновления занята; повторите действие позже") { } }
         sealed class ReceiptLease : IDisposable
@@ -36,14 +36,10 @@ namespace RemoteAgents.Launcher
                 bool owned = false;
                 try {
                     try {
-                        var deadline = Stopwatch.StartNew();
-                        do {
-                            token.ThrowIfCancellationRequested();
-                            int remaining = Math.Max(0, timeoutMs - (int)deadline.ElapsedMilliseconds);
-                            // timer-ok: C — живой владелец может не отдать mutex; только
-                            // отказ по дедлайну/отмене, никогда запись без владения.
-                            owned = mutex.WaitOne(token.CanBeCanceled ? Math.Min(25, remaining) : remaining);
-                        } while (!owned && deadline.ElapsedMilliseconds < timeoutMs);
+                        // Предохранитель (конституция 4а): событие <освобождение квитанции владельцем> недоступно, если <владелец завис/не отдаёт mutex>; при срабатывании — отказ ReceiptBusyException без записи, успех не объявляет.
+                        owned = token.CanBeCanceled
+                            ? WaitHandle.WaitAny(new WaitHandle[] { mutex, token.WaitHandle }, timeoutMs) == 0
+                            : mutex.WaitOne(timeoutMs);
                     } catch (AbandonedMutexException) { owned = true; }
                     token.ThrowIfCancellationRequested();
                     if (!owned) throw new ReceiptBusyException();
@@ -56,7 +52,7 @@ namespace RemoteAgents.Launcher
         }
         // UI и синхронные записи имеют короткий предел; подготовка может ждать с отменой.
         // При таймауте тело using не выполняется: писать без владения запрещено.
-        internal static IDisposable LockReceipt(string home, CancellationToken token = default(CancellationToken), int timeoutMs = ReceiptUiWaitMs)
+        internal static IDisposable LockReceipt(string home, CancellationToken token = default(CancellationToken), int timeoutMs = ReceiptUiFuseMs)
         { return new ReceiptLease(home, token, timeoutMs); }
         internal static string ReceiptPath(string home) { return Path.Combine(home, Product.BundleDirectory, "exe-upgrade.json"); }
         internal static string RecoveryBlockPath(string home) { return Path.Combine(home, "state", "exe-upgrade-recovery-blocked"); }
@@ -74,8 +70,12 @@ namespace RemoteAgents.Launcher
         // Persist enough identity BEFORE deleting anything to resume after any interrupted step.
         static void BeginReceiptRecovery(string home, UpdateEngine engine, string hash)
         {
-            string target = engine.Pending ? Files.SafeVersion(Json.Str(Json.Read(Path.Combine(engine.Root, "pending.json")), "previous")) : "";
-            Json.Write(RecoveryBlockPath(home), new { format = 1, receiptHash = hash, current = engine.Current, rollbackTarget = target });
+            string pendingPath = Path.Combine(engine.Root, "pending.json");
+            string target = engine.Pending ? Files.SafeVersion(Json.Str(Json.Read(pendingPath), "previous")) : "";
+            // Previous can still be V1 when pending(V3, V2) has been saved but Current is V2.
+            // Keep that identity even after Recover deletes pending or receipt cleanup fails.
+            Json.Write(RecoveryBlockPath(home), new { format = 2, receiptHash = hash, current = engine.Current,
+                rollbackTarget = target, previous = engine.Previous, pendingHash = engine.Pending ? Files.Hash(pendingPath) : "" });
         }
         internal static void RecoverBlockedReceipt(string home, UpdateEngine engine)
         {
@@ -98,13 +98,31 @@ namespace RemoteAgents.Launcher
                     BeginReceiptRecovery(home, engine, File.Exists(evidence) ? Files.Hash(evidence) : "");
                 }
                 var recovery = Json.Read(RecoveryBlockPath(home));
-                if (Json.Int(recovery, "format", 0) != 1 || !recovery.ContainsKey("receiptHash") || !recovery.ContainsKey("current") || !recovery.ContainsKey("rollbackTarget")) throw new InvalidDataException("Неизвестная отметка восстановления");
+                int format = Json.Int(recovery, "format", 0);
+                if ((format != 1 && format != 2) || !recovery.ContainsKey("receiptHash") || !recovery.ContainsKey("current") || !recovery.ContainsKey("rollbackTarget")) throw new InvalidDataException("Неизвестная отметка восстановления");
                 string hash = Json.Str(recovery, "receiptHash"), original = Json.Str(recovery, "current"), target = Json.Str(recovery, "rollbackTarget");
                 if (hash.Length > 0) Files.HashValid(hash);
                 if (original.Length > 0) Files.SafeVersion(original);
                 if (target.Length > 0) {
                     Files.SafeVersion(target);
                     if (original.Length == 0) throw new InvalidDataException("Неверная цель восстановления");
+                }
+                string preservedPrevious = "";
+                if (format == 2) {
+                    if (!recovery.ContainsKey("previous") || !recovery.ContainsKey("pendingHash")) throw new InvalidDataException("Неполная отметка восстановления");
+                    string previous = Json.Str(recovery, "previous"), pendingHash = Json.Str(recovery, "pendingHash");
+                    if (previous.Length > 0) Files.SafeVersion(previous);
+                    if (pendingHash.Length > 0) Files.HashValid(pendingHash);
+                    if ((target.Length > 0) != (pendingHash.Length > 0)) throw new InvalidDataException("Неверная транзакция восстановления");
+                    // Validate the original pending BEFORE receipt deletion or Recover can discard it.
+                    if (engine.Pending && (pendingHash.Length == 0 || Files.Hash(Path.Combine(engine.Root, "pending.json")) != pendingHash))
+                        throw new InvalidDataException("Транзакция активации изменилась");
+                    if (original == target && previous != target) preservedPrevious = previous;
+                    if (engine.Current != original && (target.Length == 0 || engine.Current != target)) throw new InvalidDataException("Бандл восстановления изменился");
+                    // Only recorded state and the actual rollback/normalization states are legal.
+                    if (engine.Previous != previous && !(target.Length > 0 && engine.Previous == target) &&
+                        !(target.Length > 0 && preservedPrevious.Length == 0 && engine.Current == target && !engine.Pending && engine.Previous.Length == 0))
+                        throw new InvalidDataException("Цель отката изменилась");
                 }
                 if (Directory.Exists(receipt) || Directory.Exists(archive)) throw new IOException("Путь квитанции занят каталогом");
                 if (File.Exists(receipt) && (hash.Length == 0 || Files.Hash(receipt) != hash)) throw new InvalidDataException("Квитанция восстановления изменилась");
@@ -128,8 +146,8 @@ namespace RemoteAgents.Launcher
                             engine.Recover();
                         }
                         if (engine.Current != target || engine.Pending) throw new InvalidDataException("Откат бандла не завершён");
-                        if (engine.Previous == target) Files.Atomic(Path.Combine(engine.Root, "previous.txt"), "");
-                        else if (engine.Previous.Length > 0) throw new InvalidDataException("Цель отката изменилась");
+                        if (engine.Previous == target) Files.Atomic(Path.Combine(engine.Root, "previous.txt"), preservedPrevious);
+                        else if (engine.Previous != preservedPrevious) throw new InvalidDataException("Цель отката изменилась");
                         engine.Cleanup();
                     } else if (engine.Current != original || engine.Pending) throw new InvalidDataException("Бандл восстановления изменился");
                     if (engine.Current.Length > 0) BundleDefinition.Load(engine.Folder(engine.Current));
@@ -215,7 +233,7 @@ namespace RemoteAgents.Launcher
             RequireReceiptRecovery(home);
             var engine = new UpdateEngine(home, launcherVersion);
             string version = BundleVersion(zip), sourceHash = Files.Hash(sourceExe), old;
-            using (LockReceipt(home, token, ReceiptWorkerWaitMs)) {
+            using (LockReceipt(home, token, ReceiptWorkerFuseMs)) {
                 RequireReceiptRecovery(home);
                 engine.Recover();
                 if (engine.Pending || File.Exists(ReceiptPath(home))) throw new InvalidOperationException("Предыдущее обновление ещё проверяется");
@@ -229,7 +247,7 @@ namespace RemoteAgents.Launcher
                 if (version != old && staged == null) throw new InvalidDataException("Бандл отклонён");
                 if (version == old && !selftest(engine.Folder(old))) throw new InvalidDataException("Самопроверка бандла не прошла");
                 token.ThrowIfCancellationRequested();
-                using (LockReceipt(home, token, ReceiptWorkerWaitMs)) {
+                using (LockReceipt(home, token, ReceiptWorkerFuseMs)) {
                     RequireReceiptRecovery(home);
                     // Publication and activation share the final state check and mutex.
                     if (engine.Current != old || engine.Pending || File.Exists(ReceiptPath(home)))
@@ -256,9 +274,10 @@ namespace RemoteAgents.Launcher
             }
         }
         // OTA uses the already verified bundle and the same image receipt / rollback as manual upgrades.
-        public static void ActivatePrepared(string home, UpdateEngine engine, Manifest manifest)
+        public static void ActivatePrepared(string home, UpdateEngine engine, Manifest manifest, CancellationToken token = default(CancellationToken))
         {
-            using (LockReceipt(home)) {
+            // Called on the OTA worker; copying, hashing and durable image replacement stay off UI.
+            using (LockReceipt(home, token, ReceiptWorkerFuseMs)) {
                 RequireReceiptRecovery(home);
                 string target = Path.Combine(home, Product.ExeName), backup = Path.Combine(home, Product.Name + ".previous.exe");
                 string source = Path.Combine(engine.Folder(manifest.Version), Product.ExeName);

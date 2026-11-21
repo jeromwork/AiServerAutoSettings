@@ -857,18 +857,19 @@ namespace RemoteAgents.Launcher
                 } catch { job.Dispose(); throw; }
             });
         }
-        bool TrySelfUpdate(string version)
+        async Task<bool> TrySelfUpdate(string version)
         {
             string path = Path.Combine(engine.Folder(version), ".launcher-manifest.json");
             if (!File.Exists(path)) return false;
-            var manifest = Manifest.Parse(File.ReadAllText(path));
             // FileVersion can stay equal between daily bundles. Verify and replace by hash for EVERY new bundle.
-            UpgradeInstaller.ActivatePrepared(home, engine, manifest);
+            await Task.Run(() => UpgradeInstaller.ActivatePrepared(home, engine, Manifest.Parse(File.ReadAllText(path)), stop.Token));
+            if (closing) return true;
             try {
                 PrepareUpdateRestart();
                 UpdateWatchdog.Start(home, Path.Combine(home, Product.Name + ".previous.exe"));
             } catch {
-                engine.Rollback(); UpgradeInstaller.ObserveImage(home, engine, false, "rollback"); keepVpnOnRestart = false; throw;
+                await Task.Run(() => { engine.Rollback(); UpgradeInstaller.ObserveImage(home, engine, false, "rollback"); });
+                keepVpnOnRestart = false; throw;
             }
             log.Write("launcher.update.ready"); RestartRequested = true; ExitThread(); return true;
         }

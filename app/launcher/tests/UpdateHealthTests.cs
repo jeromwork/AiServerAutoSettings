@@ -25,6 +25,11 @@ namespace RemoteAgents.Launcher
                 return prepareRefused && directRefused ? 0 : 3;
             }
             if (args.Length == 2 && args[0] == "--receipt-holder-child") return ReceiptHolderChild(args[1]);
+            if (args.Contains("--review-fixes6")) {
+                ReviewFixes6();
+                Console.WriteLine("PASS: UpdateHealthTests review fixes 6 (" + checks + " checks; three-version recovery and detached cleanup operations)");
+                return 0;
+            }
             if (args.Contains("--review-fixes5")) {
                 ReviewFixes5();
                 Console.WriteLine("PASS: UpdateHealthTests review fixes 5 (" + checks + " checks; real activation races and resumable recovery)");
@@ -51,6 +56,7 @@ namespace RemoteAgents.Launcher
                 Console.WriteLine("PASS: UpdateHealthTests review fixes (" + checks + " checks; manual events, fake clock)");
                 return 0;
             }
+            ReviewFixes6();
             ReviewFixes5();
             ReviewFixes4();
             ReviewFixes3();
@@ -64,6 +70,131 @@ namespace RemoteAgents.Launcher
             ObserverEventsRollbackTransaction();
             Console.WriteLine("PASS: UpdateHealthTests (" + checks + " checks; manual events, fake clock)");
             return 0;
+        }
+        static void ReviewFixes6()
+        {
+            WithHome(RecoveryBeforePreviousWrite);
+            WithHome(RecoveryRejectsChangedSnapshot);
+            WithHome(CleanupDetachesAndRetries);
+        }
+        static UpdateEngine InterruptedThirdActivation(string home)
+        {
+            var engine = SeedBundle(home);
+            WriteBundle(engine.Folder("2.0.0")); engine.Activate("2.0.0"); engine.Observe(true);
+            WriteBundle(engine.Folder("3.0.0"));
+            // Real write boundary: pending is durable, neither previous.txt nor current.txt was written.
+            Json.Write(Path.Combine(engine.Root, "pending.json"), new { version = "3.0.0", previous = "2.0.0", startedUtc = Now.ToString("o") });
+            File.WriteAllText(UpgradeInstaller.ReceiptPath(home), "{broken");
+            Check(engine.Current == "2.0.0" && engine.Previous == "1.0.0" && engine.Pending, "three versions interrupted before previous.txt");
+            return engine;
+        }
+        static void RecoveryBeforePreviousWrite(string home)
+        {
+            var engine = InterruptedThirdActivation(home);
+            string receipt = UpgradeInstaller.ReceiptPath(home), archive = receipt + ".invalid";
+            File.WriteAllText(archive, "old evidence");
+            bool windows = Environment.OSVersion.Platform == PlatformID.Win32NT;
+            FileStream held = null;
+            try {
+                if (windows) held = new FileStream(archive, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+                else File.SetUnixFileMode(archive, UnixFileMode.UserRead);
+                bool failed = false;
+                try { UpgradeInstaller.RollbackObservedImage(home, engine, "invalid-receipt"); } catch (IOException) { failed = true; }
+                catch (UnauthorizedAccessException) { failed = true; }
+                Check(failed && UpgradeInstaller.ReceiptRecoveryBlocked(home) && File.Exists(receipt), "real archive refusal keeps recovery prohibition");
+                Check(engine.Current == "2.0.0" && engine.Previous == "1.0.0" && !engine.Pending, "recovery preserves legitimate V1 after dropping interrupted V3 pending");
+                var marker = Json.Read(UpgradeInstaller.RecoveryBlockPath(home));
+                Check(Json.Int(marker, "format", 0) == 2 && Json.Str(marker, "previous") == "1.0.0" && Json.Str(marker, "pendingHash").Length == 64,
+                    "durable identity survives removal of pending");
+            } finally {
+                if (held != null) held.Dispose();
+                if (!windows) File.SetUnixFileMode(archive, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            }
+            UpgradeInstaller.RequireReceiptRecovery(home);
+            Check(!UpgradeInstaller.ReceiptRecoveryBlocked(home) && !File.Exists(receipt) && engine.Current == "2.0.0" && engine.Previous == "1.0.0",
+                "fixed permissions resume exact recovery after original pending was removed");
+            UpgradeInstaller.Apply(home, Path.Combine(home, Product.ExeName), BundleZip(home, "3.0.0"), "1.0.0", false, f => true);
+            Check(engine.Current == "3.0.0" && engine.Pending && File.Exists(receipt), "new Apply succeeds after genuine three-version interruption");
+        }
+        static void RecoveryRejectsChangedSnapshot(string home)
+        {
+            foreach (string changed in new[] { "previous", "pending", "current" }) {
+                string folder = Path.Combine(home, changed); var engine = InterruptedThirdActivation(folder);
+                string receipt = UpgradeInstaller.ReceiptPath(folder), archive = receipt + ".invalid";
+                // A blocked archive preserves the actual pending so the next attempt can detect tampering.
+                Directory.CreateDirectory(archive);
+                try { UpgradeInstaller.RollbackObservedImage(folder, engine, "invalid-receipt"); } catch (IOException) { }
+                Directory.Delete(archive);
+                string pending = Path.Combine(engine.Root, "pending.json"), originalPending = File.ReadAllText(pending);
+                if (changed == "previous") Files.Atomic(Path.Combine(engine.Root, "previous.txt"), "3.0.0");
+                if (changed == "current") Files.Atomic(Path.Combine(engine.Root, "current.txt"), "3.0.0");
+                if (changed == "pending") Json.Write(pending, new { version = "3.0.0", previous = "1.0.0", startedUtc = Now.ToString("o") });
+                bool refused = false;
+                try { UpgradeInstaller.RequireReceiptRecovery(folder); } catch (InvalidDataException) { refused = true; }
+                Check(refused && UpgradeInstaller.ReceiptRecoveryBlocked(folder) && File.Exists(receipt) && engine.Pending,
+                    "changed " + changed + " is rejected before deleting receipt/pending");
+                Files.Atomic(Path.Combine(engine.Root, "previous.txt"), "1.0.0");
+                Files.Atomic(Path.Combine(engine.Root, "current.txt"), "2.0.0"); Files.Atomic(pending, originalPending);
+                UpgradeInstaller.RequireReceiptRecovery(folder);
+                Check(!UpgradeInstaller.ReceiptRecoveryBlocked(folder) && engine.Previous == "1.0.0" && !engine.Pending,
+                    "restoring recorded identity permits recovery: " + changed);
+            }
+        }
+        static void RunCleanupWorker(Action worker)
+        {
+            Exception failure = null;
+            var thread = new Thread(() => { try { worker(); } catch (Exception ex) { failure = ex; } });
+            thread.Start(); Check(thread.Join(10000) && failure == null, "queued cleanup worker completes");
+        }
+        static void CleanupDetachesAndRetries(string home)
+        {
+            var work = new Queue<Action>(); int moves = 0, deletes = 0;
+            int caller = Thread.CurrentThread.ManagedThreadId;
+            var io = new UpdateEngine.CleanupOperations {
+                Queue = action => work.Enqueue(action),
+                Move = (source, target) => {
+                    Check(Path.GetFileName(target).StartsWith(".trash-", StringComparison.Ordinal), "cleanup uses individual service paths");
+                    bool acquired = false;
+                    var probe = new Thread(() => {
+                        using (var gate = new Mutex(false, UpgradeInstaller.ReceiptMutexName(home))) {
+                            acquired = gate.WaitOne(0); if (acquired) gate.ReleaseMutex();
+                        }
+                    });
+                    probe.Start(); Check(probe.Join(10000) && !acquired, "detach remains under receipt-mutex");
+                    moves++; Directory.Move(source, target);
+                },
+                Delete = path => { deletes++; throw new IOException("antivirus denied detached deletion"); }
+            };
+            var engine = new UpdateEngine(home, "1.0.0", () => Now, io);
+            for (int i = 1; i <= 6; i++) WriteBundle(engine.Folder(i + ".0.0"));
+            Files.Atomic(Path.Combine(engine.Root, "current.txt"), "2.0.0"); Files.Atomic(Path.Combine(engine.Root, "previous.txt"), "1.0.0");
+            Json.Write(Path.Combine(engine.Root, "pending.json"), new { version = "3.0.0", previous = "2.0.0" });
+            string stage = Path.Combine(engine.Root, ".stage-7-owned.tmp"); WriteBundle(stage);
+            engine.Cleanup();
+            Check(moves == 3 && deletes == 0 && work.Count == 1, "under lock Cleanup only renames, recursive deletion is queued/coalesced");
+            Check(Directory.Exists(engine.Folder("1.0.0")) && Directory.Exists(engine.Folder("2.0.0")) && Directory.Exists(engine.Folder("3.0.0")) && Directory.Exists(stage),
+                "Current, Previous, both pending references and active staging survive");
+            Check(Directory.GetDirectories(engine.Root, ".trash-*").Length == 3, "detached versions remain until worker runs");
+            RunCleanupWorker(work.Dequeue());
+            Check(deletes == 3 && Directory.GetDirectories(engine.Root, ".trash-*").Length == 3, "failed recursive deletes leave resumable trash");
+            io.Delete = path => {
+                Check(Thread.CurrentThread.ManagedThreadId != caller, "recursive deletion runs off caller/UI thread");
+                // An independent thread/process can acquire the mutex during the delete operation.
+                var holder = StartHolder(home); ReleaseHolder(holder);
+                deletes++; Directory.Delete(path, true);
+            };
+            var restarted = new UpdateEngine(home, "1.0.0", () => Now, io);
+            Check(work.Count == 1, "next startup queues remaining trash without an activation");
+            RunCleanupWorker(work.Dequeue());
+            Check(deletes == 6 && Directory.GetDirectories(engine.Root, ".trash-*").Length == 0, "next startup retries and removes all leftovers");
+            Check(restarted.Current == "2.0.0" && restarted.Previous == "1.0.0" && restarted.Pending && Directory.Exists(stage), "trash retry preserves transaction and staging");
+            // CommitHealth and manual Rollback use the same rename-only cleanup path.
+            Files.Atomic(Path.Combine(engine.Root, "current.txt"), "3.0.0");
+            for (int i = 4; i <= 6; i++) WriteBundle(engine.Folder(i + ".0.0"));
+            int before = deletes;
+            Check(engine.Observe(true) == "accepted" && deletes == before, "health commit never recursively deletes on caller");
+            engine.Rollback(); Check(engine.Current == "1.0.0" && deletes == before, "manual rollback never recursively deletes on caller");
+            while (work.Count > 0) RunCleanupWorker(work.Dequeue());
         }
         static void ReviewFixes5()
         {

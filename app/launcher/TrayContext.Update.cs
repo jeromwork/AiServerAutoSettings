@@ -123,7 +123,7 @@ namespace RemoteAgents.Launcher
                 if (SettingsHash() != hash) { updateSchedule.Retry(); updateSummary = "Конфиг изменился; обновление будет проверено снова"; ButtonDo(b => b.OnFailed("конфиг изменился; обновление будет проверено снова")); return; }
                 offeredVersion = ready; PrepareUpdateRestart();
                 SaveUpdateState("Обновляется до " + ready, pending: true); updateButton.OnInstalling();
-                if (!TrySelfUpdate(ready)) throw new InvalidDataException();
+                if (!await TrySelfUpdate(ready)) throw new InvalidDataException();
             } catch (ConfigCompatibilityException) {
                 try { var state = UpdateState(); state["blockedVersion"] = manifest.Version; state["blockedConfig"] = SettingsHash(); Json.Write(UpdateStatePath, state); } catch { log.Write("update.state.write.failed"); }
                 UpdateOutcome(manifest.Version, new ConfigCompatibilityException().Message); log.Write("update.config.refused"); }

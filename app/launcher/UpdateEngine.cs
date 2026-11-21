@@ -32,8 +32,54 @@ namespace RemoteAgents.Launcher
     {
         public readonly string Home, Root; readonly string launcherVersion;
         readonly Func<DateTime> now;
-        public UpdateEngine(string home, string launcherVersion, Func<DateTime> clock = null)
-        { Home = home; Root = Path.Combine(home, Product.BundleDirectory); this.launcherVersion = launcherVersion; now = clock ?? (() => DateTime.UtcNow); Directory.CreateDirectory(Root); }
+        // Injection keeps cleanup tests about operations / ownership, independent of disk speed.
+        internal sealed class CleanupOperations
+        {
+            internal Action<string, string> Move = Directory.Move;
+            internal Action<string> Delete = path => Directory.Delete(path, true);
+            internal Action<Action> Queue = work => ThreadPool.QueueUserWorkItem(_ => work());
+        }
+        readonly CleanupOperations cleanup;
+        int cleanupQueued, cleanupRequested;
+        public UpdateEngine(string home, string launcherVersion, Func<DateTime> clock = null, CleanupOperations cleanup = null)
+        {
+            Home = home; Root = Path.Combine(home, Product.BundleDirectory); this.launcherVersion = launcherVersion;
+            now = clock ?? (() => DateTime.UtcNow); this.cleanup = cleanup ?? new CleanupOperations(); Directory.CreateDirectory(Root);
+            QueueTrashCleanup(); // Retry detached leftovers after an interrupted / denied deletion.
+        }
+        static bool IsTrash(string path)
+        {
+            string name = Path.GetFileName(path); Guid id;
+            return name.StartsWith(".trash-", StringComparison.Ordinal) && Guid.TryParseExact(name.Substring(7), "N", out id);
+        }
+        void QueueTrashCleanup()
+        {
+            Interlocked.Exchange(ref cleanupRequested, 1);
+            if (Interlocked.CompareExchange(ref cleanupQueued, 1, 0) != 0) return;
+            cleanup.Queue(() => {
+                try {
+                    do {
+                        Interlocked.Exchange(ref cleanupRequested, 0);
+                        try {
+                            // .trash paths cannot be Current/Previous/Pending (SafeVersion rejects them).
+                            // No receipt lease is held here; failures leave resumable detached leftovers.
+                            foreach (string path in Directory.GetDirectories(Root, ".trash-*")) if (IsTrash(path)) {
+                                try { cleanup.Delete(path); }
+                                catch (IOException) { }
+                                catch (UnauthorizedAccessException) { }
+                            }
+                        } catch (IOException) { }
+                        catch (UnauthorizedAccessException) { }
+                    } while (Volatile.Read(ref cleanupRequested) != 0);
+                } finally {
+                    Interlocked.Exchange(ref cleanupQueued, 0);
+                    // Do not lose a detach arriving between the final scan and releasing worker ownership.
+                    if (Volatile.Read(ref cleanupRequested) != 0) QueueTrashCleanup();
+                }
+            });
+        }
+        void DetachTrash(string path)
+        { cleanup.Move(path, Path.Combine(Root, ".trash-" + Guid.NewGuid().ToString("N"))); }
         public string Current { get { var s = Files.ReadLine(Path.Combine(Root, "current.txt")); return s.Length == 0 ? "" : Files.SafeVersion(s); } }
         public string Previous { get { var s = Files.ReadLine(Path.Combine(Root, "previous.txt")); return s.Length == 0 ? "" : Files.SafeVersion(s); } }
         public string Folder(string version) { return Path.Combine(Root, Files.SafeVersion(version)); }
@@ -95,8 +141,10 @@ namespace RemoteAgents.Launcher
                 throw new InvalidOperationException("Состояние обновления изменилось; повторите установку");
             token.ThrowIfCancellationRequested();
             // Only unreferenced leftovers can be rebuilt. Active and rollback bundles are immutable.
-            if (Directory.Exists(Folder(m.Version))) Directory.Delete(Folder(m.Version), true);
-            Directory.Move(staged.BundlePath, Folder(m.Version)); return m.Version;
+            try {
+                if (Directory.Exists(Folder(m.Version))) DetachTrash(Folder(m.Version));
+                Directory.Move(staged.BundlePath, Folder(m.Version)); return m.Version;
+            } finally { QueueTrashCleanup(); }
         }
         public string Prepare(Manifest m, Action<string> fetch, Func<string, bool> selftest, Action<BundleDefinition, string> binaries, CancellationToken token, bool downgrade = false)
         {
@@ -156,13 +204,18 @@ namespace RemoteAgents.Launcher
         }
         public void Cleanup()
         {
-            using (UpgradeInstaller.LockReceipt(Home)) {
-                var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Current, Previous };
-                if (Pending) { var p = Json.Read(PendingPath); keep.Add(Json.Str(p, "version")); keep.Add(Json.Str(p, "previous")); }
-                var versions = Directory.GetDirectories(Root).Where(d => File.Exists(Path.Combine(d, "components.json")) && !d.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)).OrderByDescending(d => Path.GetFileName(d), Comparer<string>.Create(Files.Compare)).ToList();
-                foreach (var dir in versions) if (keep.Count(v => v.Length > 0) < 3) keep.Add(Path.GetFileName(dir));
-                foreach (var dir in versions) if (!keep.Contains(Path.GetFileName(dir))) Directory.Delete(dir, true);
-            }
+            try {
+                using (UpgradeInstaller.LockReceipt(Home)) {
+                    var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Current, Previous };
+                    if (Pending) { var p = Json.Read(PendingPath); keep.Add(Json.Str(p, "version")); keep.Add(Json.Str(p, "previous")); }
+                    var versions = Directory.GetDirectories(Root).Where(d => !Path.GetFileName(d).StartsWith(".", StringComparison.Ordinal) &&
+                        File.Exists(Path.Combine(d, "components.json")) && !d.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase))
+                        .OrderByDescending(d => Path.GetFileName(d), Comparer<string>.Create(Files.Compare)).ToList();
+                    foreach (var dir in versions) if (keep.Count(v => v.Length > 0) < 3) keep.Add(Path.GetFileName(dir));
+                    // Under receipt-mutex only detach unreferenced versions, never traverse/delete files.
+                    foreach (var dir in versions) if (!keep.Contains(Path.GetFileName(dir))) DetachTrash(dir);
+                }
+            } finally { QueueTrashCleanup(); }
         }
         public static void Extract(string zip, string folder)
         {
