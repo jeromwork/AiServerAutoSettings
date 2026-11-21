@@ -47,7 +47,7 @@ _FIELD = re.compile(r'''(?<![A-Za-z0-9_.-])(["']?)([A-Za-z0-9_.-]{1,256})\1(\s*[
 _UUID = re.compile(r'\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b')
 _BLOB = re.compile(r'[A-Za-z0-9+/=_-]{41,}')
 _SUBSTR = re.compile(r'token|password|passwd|passphrase|secret|authorization|cookie|uuid', re.I)
-_WORDS = re.compile(r'(?:^|[_.-])(?:key|pass|auth|psk|private|apikey)(?:$|[_.-])', re.I)
+_WORDS = re.compile(r'(?:^|[_.-])(?:key|pass|auth|psk|apikey)(?:$|[_.-])', re.I)
 
 
 def _secret_name(name):

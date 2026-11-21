@@ -26,6 +26,8 @@ namespace RemoteAgents.Launcher
         static int ArchivesFor(string stream) { int n; lock (ArchivesByStream) return ArchivesByStream.TryGetValue(stream, out n) ? n : MaxArchives; }
         internal static long TotalLimit = 60L * 1024 * 1024;
         internal static Func<DateTimeOffset> Clock = () => DateTimeOffset.Now;
+        // Дедупликация и частота только launcher-шума ниже Warn; VPN/сеть/помощник/ядро/конфиг без ограничений.
+        internal static LogLimits Limits = new LogLimits();
         internal static readonly string Session = NewSession();
         static string defaultDir;
         internal static string DefaultDir => defaultDir;
@@ -116,8 +118,23 @@ namespace RemoteAgents.Launcher
             try {
                 if (string.IsNullOrEmpty(dir)) return;
                 if (level == LogLevel.Debug && comp == "ship") return; // Отправщик не создаёт себе новые данные.
-                AppendLine(dir, stream, Format(Clock(), level, comp, evt, fields, Session));
+                var now = Clock(); var repeats = new List<LogLimits.Summary>();
+                bool write = Limits.Allow(dir, stream, level, comp, evt, fields, now, repeats);
+                WriteRepeats(now, repeats);
+                if (write) AppendLine(dir, stream, Format(now, level, comp, evt, fields, Session));
             } catch { /* Журнал не должен ронять работу. */ }
+        }
+
+        // При штатном выходе: счётчики всех каталогов, включая явно переданные в WriteTo, до отправки журналов.
+        internal static void FlushLimits()
+        {
+            try { WriteRepeats(Clock(), Limits.Drain()); } catch { /* Журнал не должен ронять завершение. */ }
+        }
+
+        static void WriteRepeats(DateTimeOffset now, IEnumerable<LogLimits.Summary> repeats)
+        {
+            foreach (var r in repeats)
+                AppendLine(r.Dir, r.Stream, Format(now, LogLevel.Info, r.Component, "repeat", LogLimits.SummaryFields(r), Session));
         }
 
         // Строка уже в формате (зеркало журнала помощника, ядра).
@@ -125,7 +142,9 @@ namespace RemoteAgents.Launcher
         {
             string path = Path.Combine(dir, stream + ".log");
             object gate;
-            lock (gates) { if (!gates.TryGetValue(path, out gate)) { gate = new object(); gates[path] = gate; } }
+            bool firstUse = false;
+            lock (gates) { if (!gates.TryGetValue(path, out gate)) { gate = new object(); gates[path] = gate; firstUse = true; } }
+            if (firstUse) LogLimits.PurgeArchives(dir, Clock()); // старые архивы чистятся при первой записи потока, а не по таймеру
             lock (gate) {
                 Mutex mutex = null; bool held = false;
                 try {
@@ -166,6 +185,7 @@ namespace RemoteAgents.Launcher
                 if (File.Exists(from)) File.Move(from, to);
             }
             File.Move(path, path + ".1");
+            LogLimits.PurgeArchives(Path.GetDirectoryName(path), Clock());
             EnforceTotal(Path.GetDirectoryName(path));
         }
 

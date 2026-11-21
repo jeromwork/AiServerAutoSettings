@@ -20,7 +20,7 @@ namespace RemoteAgents.Launcher
         static readonly Regex Uuid = new Regex(@"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b");
         static readonly Regex Blob = new Regex(@"[A-Za-z0-9+/=_-]{41,}");
         static readonly Regex SubstringNames = new Regex("token|password|passwd|passphrase|secret|authorization|cookie|uuid", RegexOptions.IgnoreCase);
-        static readonly Regex WordNames = new Regex(@"(?:^|[_.-])(?:key|pass|auth|psk|private|apikey)(?:$|[_.-])", RegexOptions.IgnoreCase);
+        static readonly Regex WordNames = new Regex(@"(?:^|[_.-])(?:key|pass|auth|psk|apikey)(?:$|[_.-])", RegexOptions.IgnoreCase);
 
         internal static bool IsSecretName(string name)
         {

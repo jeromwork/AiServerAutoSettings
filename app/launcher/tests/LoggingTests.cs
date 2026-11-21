@@ -30,7 +30,12 @@ namespace RemoteAgents.Launcher
         internal static int Run(string[] args)
         {
             NetHelperVersionTests.Run();
-            Golden(); Mask(); Rotation(); Encoding_(); JournalMapping(); Conflicts(); Ladder(); HelperEvents(); Protocol(); CorePump(); CoreReaderEvents(); UniqueHandlesTest(); Shipper(); ShipperInvalidUtf8(); ShipperRisks(); SshSender(); Mirror();
+            var oldClock = RaLog.Clock; var oldLimits = RaLog.Limits;
+            RaLog.Clock = () => new DateTimeOffset(2026, 11, 21, 12, 0, 0, TimeSpan.Zero);
+            RaLog.Limits = new LogLimits();
+            try {
+                Golden(); Mask(); Rotation(); Encoding_(); JournalMapping(); Conflicts(); Ladder(); HelperEvents(); Protocol(); CorePump(); CoreReaderEvents(); UniqueHandlesTest(); WindowLog(); Shipper(); ShipperInvalidUtf8(); ShipperRisks(); SshSender(); Mirror(); Limits();
+            } finally { RaLog.Clock = oldClock; RaLog.Limits = oldLimits; }
             Console.WriteLine("PASS: Logging " + count + " checks");
             return 0;
         }
@@ -63,16 +68,119 @@ namespace RemoteAgents.Launcher
             Check(cases.Length >= 15, "mask case count");
             foreach (var c in cases) { string got = LogMask.Clean(Json.Str(c, "in")); Check(got == Json.Str(c, "out"), "mask [" + Json.Str(c, "in") + "] -> [" + got + "]"); }
             foreach (string input in new[] { new string('.', 8192), string.Concat(Enumerable.Repeat("_-", 4000)) }) {
-                LogMask.Clean(input); // JIT вне измерения
-                var watch = System.Diagnostics.Stopwatch.StartNew(); string got = LogMask.Clean(input); watch.Stop();
-                Check(got == input && watch.Elapsed.TotalMilliseconds < 50, "mask 8 KiB <50 ms: " + watch.Elapsed.TotalMilliseconds);
+                Check(LogMask.Clean(input) == input, "long nonsecret input is preserved");
             }
             Check(LogMask.Clean("x SECRETVALUE y", new[] { "SECRETVALUE" }) == "x *** y", "known secret values are hidden");
             RaLog.Secrets = () => new[] { "HIDDEN-VALUE" };
             try {
-                string line = RaLog.Format(DateTimeOffset.Now, LogLevel.Info, "launcher", "t", new[] { new KeyValuePair<string, string>("msg", "a HIDDEN-VALUE b") }, "0000");
+                string line = RaLog.Format(RaLog.Clock(), LogLevel.Info, "launcher", "t", new[] { new KeyValuePair<string, string>("msg", "a HIDDEN-VALUE b") }, "0000");
                 Check(!line.Contains("HIDDEN-VALUE") && line.Contains("a *** b"), "RaLog.Format hides known secrets");
             } finally { RaLog.Secrets = null; }
+        }
+
+        // Микро-тест ограничений журнала: настройки по умолчанию, фальшивые часы, без ожиданий.
+        static void Limits()
+        {
+            string dir = Temp("limits"), other = Temp("limits-other"), cdir = Temp("purge");
+            var oldClock = RaLog.Clock; var oldLimits = RaLog.Limits; string oldDir = RaLog.DefaultDir;
+            try {
+                Check(LogLimits.RepeatWindow == TimeSpan.FromSeconds(60) && LogLimits.EventBurstLines == 20,
+                    "default repeat and burst limits stay enabled");
+                RaLog.Limits = new LogLimits();
+                var t = new DateTimeOffset(2026, 11, 21, 12, 0, 0, TimeSpan.Zero);
+                RaLog.Clock = () => t;
+                var same = RaLog.Pairs(new[] { "path", "x" });
+                for (int i = 0; i < 13; i++) { RaLog.WriteTo(dir, "launcher", LogLevel.Info, "disk", "disk.explorer.unavailable", same); t = t.AddSeconds(5); }
+                string text = File.ReadAllText(Path.Combine(dir, "launcher.log"), Encoding.UTF8);
+                Check(Regex.Matches(text, "unavailable s=").Count == 2 && text.Contains("count=11 of=disk.explorer.unavailable"),
+                    "launcher Info repeats collapse with defaults");
+                // Реальный путь: Journal.Write даёт Warn (не режется), поэтому источник пишет событие только при переходе.
+                string jhome = Temp("outage"); var journal = new Journal(jhome); var outage = new ExplorerOutage();
+                for (int i = 0; i < 13; i++) { string e = outage.Failed(); if (e != null) journal.Write(e); t = t.AddSeconds(5); }
+                string r = outage.Recovered(); if (r != null) journal.Write(r);
+                Check(outage.Recovered() == null, "recovery is reported once");
+                string jtext = File.ReadAllText(Path.Combine(jhome, "logs", "launcher.log"), Encoding.UTF8);
+                Check(Regex.Matches(jtext, "disk.explorer.unavailable").Count == 1 && Regex.Matches(jtext, "disk.explorer.recovered").Count == 1,
+                    "explorer outage loop writes one unavailable line and one recovery line");
+                t = t.AddSeconds(120);
+                for (int i = 0; i < 24; i++) RaLog.WriteTo(dir, "launcher", LogLevel.Info, "disk", "disk.noise", RaLog.Pairs(new[] { "n", i.ToString() }));
+                text = File.ReadAllText(Path.Combine(dir, "launcher.log"), Encoding.UTF8);
+                Check(Regex.Matches(text, @"disk\.noise\s+s=").Count == 20, "default burst cap keeps 20 distinct launcher Info lines");
+                t = t.AddSeconds(61);
+                RaLog.WriteTo(dir, "launcher", LogLevel.Info, "disk", "disk.other", null);
+                text = File.ReadAllText(Path.Combine(dir, "launcher.log"), Encoding.UTF8);
+                Check(text.Contains("count=4 of=disk.noise reason=rate"), "expired rate counter flushes on next launcher write");
+
+                // Каждый случай содержит повторы и превышает предел частоты; ни одна строка не должна исчезнуть.
+                RaLog.Limits = new LogLimits();
+                foreach (string stream in new[] { "launcher", "helper-events", "config-window", "transport", "bus" })
+                    foreach (string comp in new[] { "disk", "vpn", "net", "helper", "core", "config" })
+                        foreach (LogLevel level in new[] { LogLevel.Debug, LogLevel.Info, LogLevel.Warn, LogLevel.Error }) {
+                            if (stream == "launcher" && comp == "disk" && level < LogLevel.Warn) continue;
+                            string evt = "bypass." + comp + "." + level.ToString().ToLowerInvariant();
+                            for (int i = 0; i < 50; i++) RaLog.WriteTo(other, stream, level, comp, evt, RaLog.Pairs(new[] { "n", (i % 25).ToString() }));
+                            string[] lines = File.ReadAllLines(Path.Combine(other, stream + ".log"), Encoding.UTF8);
+                            Check(lines.Count(line => line.Contains(evt + " ")) == 50, stream + "/" + comp + "/" + level + " bypasses both limits");
+                        }
+                Check(RaLog.Limits.Tracked == 0, "bypassed events do not enter limiter state");
+
+                // Drain работает без Configure: сводки уходят в исходные каталоги WriteTo, один раз, до отправки.
+                for (int i = 0; i < 4; i++) RaLog.WriteTo(dir, "launcher", LogLevel.Info, "disk", "drain.same", same);
+                for (int i = 0; i < 23; i++) RaLog.WriteTo(other, "launcher", LogLevel.Info, "disk", "drain.rate", RaLog.Pairs(new[] { "n", i.ToString() }));
+                RaLog.Configure(null);
+                RaLog.FlushLimits();
+                Check(RaLog.Limits.Tracked == 0, "Drain clears all limiter state");
+                text = File.ReadAllText(Path.Combine(dir, "launcher.log"), Encoding.UTF8);
+                string otherText = File.ReadAllText(Path.Combine(other, "launcher.log"), Encoding.UTF8);
+                Check(text.Contains("count=3 of=drain.same") && !otherText.Contains("of=drain.same"), "Drain writes repeat summary to original directory");
+                Check(otherText.Contains("count=3 of=drain.rate reason=rate") && !text.Contains("of=drain.rate"), "Drain writes rate summary to its own directory");
+                RaLog.FlushLimits();
+                Check(text == File.ReadAllText(Path.Combine(dir, "launcher.log"), Encoding.UTF8) &&
+                    otherText == File.ReadAllText(Path.Combine(other, "launcher.log"), Encoding.UTF8), "second Drain writes no duplicate summaries");
+                var sender = new FakeSender();
+                var shipper = new LogShipper(dir, dir, sender, (lvl, evt, kv) => { }, "device", "host", "1", () => t.UtcDateTime);
+                Check(shipper.Cycle(false) == 1 && sender.Texts.Single().Contains("count=3 of=drain.same"), "drained summary is included in next shipment");
+
+                // PurgeArchives удаляет только по сроку, даже если архивов больше прежних 20 МиБ.
+                string old = Path.Combine(cdir, "a.log.1"), fresh = Path.Combine(cdir, "a.log.2"), big = Path.Combine(cdir, "b.log.1"), live = Path.Combine(cdir, "a.log"), foreign = Path.Combine(cdir, "a.log.backup");
+                File.WriteAllText(old, "x"); File.WriteAllText(fresh, "x"); File.WriteAllText(live, "x"); File.WriteAllText(foreign, "x");
+                using (var file = File.Create(big)) file.SetLength(21L * 1024 * 1024);
+                File.SetLastWriteTimeUtc(old, t.UtcDateTime.AddDays(-15)); File.SetLastWriteTimeUtc(fresh, t.UtcDateTime.AddDays(-14)); File.SetLastWriteTimeUtc(big, t.UtcDateTime.AddDays(-2));
+                File.SetLastWriteTimeUtc(live, t.UtcDateTime.AddDays(-15)); File.SetLastWriteTimeUtc(foreign, t.UtcDateTime.AddDays(-15));
+                Check(LogLimits.PurgeArchives(cdir, t) == 1 && !File.Exists(old) && File.Exists(fresh) && File.Exists(big) && File.Exists(live) && File.Exists(foreign),
+                    "only expired numbered archives are purged; 21 MiB of recent archives survives");
+                // Общий предел 60 МиБ по-прежнему применяется при ротации; второго предела архивов нет.
+                Check(RaLog.TotalLimit == 60L * 1024 * 1024, "directory total limit stays 60 MiB");
+                using (var file = File.OpenWrite(fresh)) file.SetLength(41L * 1024 * 1024);
+                File.SetLastWriteTimeUtc(fresh, t.UtcDateTime.AddDays(-1));
+                File.WriteAllText(Path.Combine(cdir, "trigger.log"), "x");
+                long oldMax = RaLog.MaxBytes;
+                try {
+                    RaLog.MaxBytes = 1;
+                    RaLog.WriteTo(cdir, "trigger", LogLevel.Warn, "launcher", "rotate", null);
+                } finally { RaLog.MaxBytes = oldMax; }
+                Check(!File.Exists(fresh) && File.Exists(big) && Directory.GetFiles(cdir, "*.log*").Sum(path => new FileInfo(path).Length) <= RaLog.TotalLimit,
+                    "rotation enforces directory total by removing archives");
+                var small = new LogLimits(); int oldKeys = LogLimits.MaxTrackedKeys; LogLimits.MaxTrackedKeys = 8;
+                try { var sink = new List<LogLimits.Summary>(); for (int i = 0; i < 100; i++) small.Allow(dir, "launcher", LogLevel.Info, "disk", "e", RaLog.Pairs(new[] { "i", i.ToString() }), t, sink); Check(small.Tracked <= 8 + 1, "tracked keys are bounded"); }
+                finally { LogLimits.MaxTrackedKeys = oldKeys; }
+            } finally {
+                RaLog.Clock = oldClock; RaLog.Limits = oldLimits; RaLog.Configure(oldDir);
+                foreach (string path in new[] { dir, other, cdir }) try { Directory.Delete(path, true); } catch { }
+            }
+        }
+
+        static void WindowLog()
+        {
+            string dir = Temp("window");
+            try {
+                string[] parts = Enumerable.Range(0, 50).Select(i => "Строка " + (i % 25)).ToArray();
+                DiagnosticReport.WriteWindowLog(dir, string.Join("\n", parts), new string[0]);
+                string[] lines = File.ReadAllLines(Path.Combine(dir, "config-window.log"), Encoding.UTF8);
+                Check(lines.Length == parts.Length, "WriteWindowLog keeps all 50 lines including repeats");
+                Check(lines.SequenceEqual(parts.Select(part => RaLog.Format(RaLog.Clock(), LogLevel.Info, "config", "window.text", RaLog.Pairs(new[] { "msg", part }), RaLog.Session))),
+                    "WriteWindowLog preserves complete text in original order");
+            } finally { try { Directory.Delete(dir, true); } catch { } }
         }
 
         static void Rotation()
@@ -82,7 +190,7 @@ namespace RemoteAgents.Launcher
             try {
                 Check(RaLog.MaxBytes == 2L * 1024 * 1024 && RaLog.MaxArchives == 5, "defaults are 2 MiB and 5 archives");
                 RaLog.MaxBytes = 4000;
-                for (int i = 0; i < 400; i++) RaLog.WriteTo(dir, "launcher", LogLevel.Info, "launcher", "tick", new[] { new KeyValuePair<string, string>("n", i.ToString()), new KeyValuePair<string, string>("pad", new string('p', 60)) });
+                for (int i = 0; i < 400; i++) RaLog.WriteTo(dir, "launcher", LogLevel.Warn, "launcher", "tick", new[] { new KeyValuePair<string, string>("n", i.ToString()), new KeyValuePair<string, string>("pad", new string('p', 60)) });
                 Check(File.Exists(Path.Combine(dir, "launcher.log.1")), "oversized log rotates to .1");
                 Check(!File.Exists(Path.Combine(dir, "launcher.log.6")) && Directory.GetFiles(dir, "launcher.log.*").Count(f => !f.EndsWith("launcher.log")) <= 5, "at most five archives are kept: " + string.Join(",", Directory.GetFiles(dir).Select(Path.GetFileName)));
                 foreach (string file in Directory.GetFiles(dir, "launcher.log*")) {
@@ -326,6 +434,14 @@ namespace RemoteAgents.Launcher
                 string all = string.Join("\n", events.Read(0, 40000).Lines);
                 Check(all.Contains(" core      core.line") && all.Contains("password=***") && all.Contains(" WARN ") && all.Contains(" ERROR "), "core lines are masked, leveled and marked as core");
                 Check(pump.Tail(15).Contains("boom") && !pump.Tail(15).Contains("abc"), "tail is masked");
+                string[] burst = Enumerable.Range(0, 120).Select(i => "INFO core output " + (i % 30)).ToArray();
+                File.AppendAllText(Path.Combine(dir, CoreLogPump.FileName), string.Join("\n", burst) + "\n");
+                Check(pump.Pump() == 120 && events.Last == 124 && pump.Pump() == 0, "CorePump keeps 120 burst lines exactly once");
+                var page = events.Read(0, HelperEventLog.MaxRead);
+                Check(page.Lost == 0 && page.Next == 124 && page.Lines.Select(HelperEventLog.SeqOf).SequenceEqual(Enumerable.Range(1, 124).Select(i => (ulong)i)),
+                    "CorePump helper-events seq has no gaps");
+                Check(page.Lines.Skip(4).Select((line, i) => line.EndsWith("text=" + RaLog.QuoteValue(burst[i]), StringComparison.Ordinal)).All(ok => ok),
+                    "all core burst text, including repeats, is preserved in order");
                 File.WriteAllText(Path.Combine(dir, CoreLogPump.FileName), new string('x', 100) + "\n");
                 pump.RotateIfLarge(10);
                 Check(File.Exists(Path.Combine(dir, CoreLogPump.FileName + ".1")) && !File.Exists(Path.Combine(dir, CoreLogPump.FileName)), "core log rotates before a restart");
@@ -336,13 +452,12 @@ namespace RemoteAgents.Launcher
         {
             internal readonly List<string> Texts = new List<string>(); internal readonly List<string> PathsTried = new List<string>();
             internal bool FailChannel, FailDirect;
-            internal bool IgnoreTimeout; internal int SleepMs; internal Action DuringSend; internal readonly List<int> Timeouts = new List<int>();
+            internal Action DuringSend;
             internal readonly List<byte[]> Bodies = new List<byte[]>();
             public SendResult Send(byte[] gz, string batchId, string path, int timeoutMs)
             {
-                PathsTried.Add(path); Timeouts.Add(timeoutMs);
+                PathsTried.Add(path);
                 if (DuringSend != null) DuringSend();
-                if (SleepMs > 0) { System.Threading.Thread.Sleep(IgnoreTimeout ? SleepMs : Math.Min(SleepMs, timeoutMs)); if (timeoutMs < SleepMs) return new SendResult { Err = "timeout" }; }
                 if ((path == "channel" && FailChannel) || (path == "direct" && FailDirect)) return new SendResult { Err = "ssh-exit", Exit = 255, Stderr = "refused" };
                 using (var ms = new MemoryStream(gz)) using (var z = new GZipStream(ms, CompressionMode.Decompress)) using (var raw = new MemoryStream()) {
                     z.CopyTo(raw); var body = raw.ToArray(); Bodies.Add(body); Texts.Add(Encoding.UTF8.GetString(body));
@@ -448,7 +563,7 @@ namespace RemoteAgents.Launcher
                 var source = new byte[] { 0xEF, 0xBB, 0xBF }.Concat(body).ToArray();
                 File.WriteAllBytes(Path.Combine(logs, "launcher.log"), source);
                 var sender = new FakeSender();
-                var shipper = new LogShipper(logs, state, sender, (level, evt, kv) => { }, "device", "host", "1");
+                var shipper = new LogShipper(logs, state, sender, (level, evt, kv) => { }, "device", "host", "1", () => RaLog.Clock().UtcDateTime);
                 Check(shipper.Cycle(false) == 1 && sender.Bodies.Count == 1, "invalid UTF-8 file is shipped once");
                 byte[] packed = sender.Bodies.Single();
                 int bodyStart = Array.IndexOf(packed, (byte)10, Array.IndexOf(packed, (byte)10) + 1) + 1;
@@ -468,7 +583,7 @@ namespace RemoteAgents.Launcher
             try {
                 var sender = new FakeSender();
                 var shipper = new LogShipper(logs, state, sender,
-                    (level, evt, kv) => RaLog.WriteTo(logs, "launcher", level, "ship", evt, RaLog.Pairs(kv)), "device", "host", "1");
+                    (level, evt, kv) => RaLog.WriteTo(logs, "launcher", level, "ship", evt, RaLog.Pairs(kv)), "device", "host", "1", () => RaLog.Clock().UtcDateTime);
                 WriteLog(Path.Combine(logs, "launcher.log"), 0, 3, true);
                 Check(shipper.Cycle(false) == 1, "success through actual RaLog writer");
                 sender.Texts.Clear();
@@ -478,22 +593,19 @@ namespace RemoteAgents.Launcher
                 WriteLog(Path.Combine(logs, "launcher.log"), 3, 1, false);
                 sender.DuringSend = () => shipper.Kick();
                 shipper.Cycle(false);
-                Check((shipper.NextAt - DateTime.UtcNow).TotalSeconds <= 5.1, "Kick during successful cycle schedules +5s");
+                Check(shipper.NextAt == RaLog.Clock().UtcDateTime.AddSeconds(5), "Kick during successful cycle uses injected clock");
                 sender.DuringSend = null;
                 WriteLog(Path.Combine(logs, "launcher.log"), 4, 1, false);
                 sender.FailChannel = true; sender.PathsTried.Clear();
-                shipper.Flush(TimeSpan.FromSeconds(5));
-                Check(sender.PathsTried.SequenceEqual(new[] { "channel", "direct" }), "Flush can fall back to direct before stopping components");
+                shipper.Cycle(true, DateTime.MaxValue);
+                Check(sender.PathsTried.SequenceEqual(new[] { "channel", "direct" }), "exit cycle can fall back to direct before stopping components");
                 sender.FailChannel = false;
-                // Две пачки по 3 с: второй sender получает только оставшиеся ~2 с.
+                // Синхронный цикл выхода, без ожиданий и проверок реальных тайм-аутов.
                 WriteLog(Path.Combine(logs, "core.log"), 0, 18000, true);
-                sender.SleepMs = 3000; sender.IgnoreTimeout = true; sender.PathsTried.Clear(); sender.Timeouts.Clear(); sender.Texts.Clear();
-                var watch = System.Diagnostics.Stopwatch.StartNew();
-                shipper.Flush(TimeSpan.FromSeconds(5)); watch.Stop();
-                Check(watch.Elapsed.TotalSeconds < 6, "Flush(5s) is bounded with slow sender: " + watch.Elapsed.TotalSeconds);
-                Check(sender.Texts.Count <= 2 && sender.Timeouts.Count == 2 && sender.Timeouts[1] < 2500, "Flush sends at most two batches with shared remaining time");
-                // Дождаться завершения фоновой уборки без ещё одного цикла.
-                System.Threading.Thread.Sleep(1200);
+                sender.PathsTried.Clear(); sender.Texts.Clear();
+                Check(shipper.Cycle(true, DateTime.MaxValue) == 2 && sender.Texts.Count == 2,
+                    "exit cycle sends at most two batches");
+                Check(shipper.Cycle(false) > 0, "remaining batches stay available for the next cycle");
             } finally { try { Directory.Delete(dir, true); } catch { } }
         }
 

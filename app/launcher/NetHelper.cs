@@ -108,6 +108,7 @@ namespace RemoteAgents.Launcher
             if (busSender != null) busSender.Dispose();
             if (bus != null) bus.Dispose();
             if (log != null) log.Write("stopped", 0);
+            RaLog.FlushLimits();
         }
         protected override void OnStop()
         {

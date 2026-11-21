@@ -18,6 +18,7 @@ namespace RemoteAgents.Launcher
         readonly Task worker; readonly TaskCompletionSource<bool> initialized = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         int pendingCommands;
         internal bool Busy { get { return Volatile.Read(ref pendingCommands) != 0; } }
+        readonly ExplorerOutage outage = new ExplorerOutage();
         DiskSnapshot last = new DiskSnapshot(); string lastRoot; bool iconFailed;
         internal DiskExplorerController(string home, Func<string> root, Func<string> bundle, Func<bool> enabled, Func<bool> cleanup, Action<string, bool> notify, Action<string> log,
             DiskExplorerService metadata, DiskExplorerRegistry registry, string diskHome = null)
@@ -73,6 +74,7 @@ namespace RemoteAgents.Launcher
                         long since = model.Events(0, stop.Token, true).Select(DiskRestModel.EventId).DefaultIfEmpty(0).Max();
                         DateTime xmlTime = File.GetLastWriteTimeUtc(Path.Combine(diskHome, "state", "config.xml"));
                         Refresh(rest, currentRoot);
+                        string up = outage.Recovered(); if (up != null) log(up);
                         while (!stop.IsCancellationRequested && enabled() && DiskPaths.Same(root(), currentRoot)) {
                             var events = model.Events(since, stop.Token, pollSeconds: DiskTiming.Seconds("MONITOR_POLL", 2));
                             if (File.ReadAllText(Path.Combine(diskHome, "server.txt")).TrimStart('\uFEFF').Replace("\r", "").Trim() != rest.Peer) break;
@@ -102,7 +104,7 @@ namespace RemoteAgents.Launcher
                     } catch (OperationCanceledException) { break; }
                     catch (Exception) {
                         missing.Reset();
-                        log("disk.explorer.unavailable");
+                        string down = outage.Failed(); if (down != null) log(down);
                         gate.Wait(stop.Token);
                         try { Unavailable(); } finally { gate.Release(); }
                         if (stop.Token.WaitHandle.WaitOne(DiskTiming.Milliseconds("MONITOR_RETRY", 5000))) break;
@@ -183,5 +185,13 @@ namespace RemoteAgents.Launcher
                 File.Delete(manifest);
             }
         }
+    }
+    // Повторы 5-секундного цикла при недоступном Syncthing не должны шуметь: событие недоступности пишется
+    // только при переходе из рабочего состояния, при восстановлении - одно событие о восстановлении.
+    internal sealed class ExplorerOutage
+    {
+        bool down;
+        internal string Failed() { if (down) return null; down = true; return "disk.explorer.unavailable"; }
+        internal string Recovered() { if (!down) return null; down = false; return "disk.explorer.recovered"; }
     }
 }

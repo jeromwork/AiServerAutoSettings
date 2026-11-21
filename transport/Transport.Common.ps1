@@ -89,7 +89,7 @@ function Test-RaLogSecretName([string]$Name) {
     if(-not $Name -or $Name -cmatch '^\w*(?:Error|Exception)$'){return $false}
     if($Name -match '(?i)token|password|passwd|passphrase|secret|authorization|cookie|uuid'){return $true}
     $words=[regex]::Replace($Name,'([a-z0-9])([A-Z])','$1_$2')
-    [bool]($words -match '(?i)(?:^|[_.-])(?:key|pass|auth|psk|private|apikey)(?:$|[_.-])')
+    [bool]($words -match '(?i)(?:^|[_.-])(?:key|pass|auth|psk|apikey)(?:$|[_.-])')
 }
 # Компилируем регулярки и преобразуем MatchEvaluator один раз при загрузке, а не для каждой строки.
 $script:RaLogMaskRegex=@{

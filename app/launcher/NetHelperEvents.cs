@@ -58,6 +58,7 @@ namespace RemoteAgents.Launcher
         }
 
         // seq стоит первым среди полей: так его находит разбор даже при длинных значениях.
+        // helper-events целиком обходит LogLimits: выделенный seq не теряется из-за дедупа/частоты.
         internal ulong Write(LogLevel level, string comp, string evt, params string[] kv)
         {
             lock (gate) {

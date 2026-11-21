@@ -749,6 +749,7 @@ namespace RemoteAgents.Launcher
             try {
                 var end = DateTime.UtcNow.AddSeconds(5);
                 if (mirror != null) { var pull = Task.Run(() => { try { mirror.Pull(); } catch { } }); pull.Wait(3000); }
+                RaLog.FlushLimits();
                 if (shipper != null) shipper.Flush(end > DateTime.UtcNow ? end - DateTime.UtcNow : TimeSpan.Zero);
             } catch { }
         }

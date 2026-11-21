@@ -100,6 +100,7 @@
     <Compile Include="../HelperBusBridge.cs" />
     <Compile Include="HelperBusTests.cs" />
     <Compile Include="../RaLog.cs" />
+    <Compile Include="../LogLimits.cs" />
     <Compile Include="../LogMask.cs" />
     <Compile Include="../NetLadder.cs" />
     <Compile Include="../LogShipper.cs" />
