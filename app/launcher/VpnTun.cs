@@ -464,6 +464,7 @@ namespace RemoteAgents.Launcher
             var off = Stopwatch.StartNew();
             lock (gate) { CloseJobs(); generation++; pending = false; requested = null; Set("off", "button"); }
             Ev(LogLevel.Info, "vpn.off.step", "step", "close-jobs", "ms", Ms(off), "result", "ok");
+            { var offBus = Bus; if (offBus != null) { try { offBus.Publish(BusTopics.VpnOff, BusTopics.Sources.Helper, "reason", "button"); } catch { } } } // ворота готовности ждут vpn.off
             wake.Set();
         }
         void CloseJobs()
@@ -577,6 +578,7 @@ namespace RemoteAgents.Launcher
         {
             string stage = "inventory";
             VpnLease lease = null;
+            VpnReadyGate readyGate = null; // подписка на шину службы: готовность ядра, fatal, vpn.off, win.route/iface (V3)
             var step = Stopwatch.StartNew();
             try {
                 Ev(LogLevel.Info, "vpn.on.step", "step", "preflight", "ms", "0", "result", "begin");
@@ -612,9 +614,13 @@ namespace RemoteAgents.Launcher
                     CloseJobs(); // No network/file/log I/O in the independent cutoff.
                     lock (gate) if (epoch == generation) Set("watchdog-stalled", "lease-expired");
                 });
+                // Подписка на шину — ДО запуска ядра, чтобы singbox.started не потерялось.
+                var gateBus = Bus; if (gateBus != null) readyGate = new VpnReadyGate(gateBus);
                 // Never hold the status/command lock across CreateProcess.
                 core = StartCore(launchJob, config); coreStarted = DateTime.UtcNow;
                 Ev(LogLevel.Info, "vpn.on.step", "step", "core-start", "ms", Ms(step), "result", "ok");
+                // Ворота (V3): пока нет готовности ядра и маршрута на TUN, vpn.state on не объявляется (monitor создаётся только после них).
+                if (readyGate != null) { stage = "ready"; if (!AwaitReadyAndRoute(readyGate, options, epoch, lease)) return; stage = "monitor"; }
                 var rebind = new VpnTunRebind(clock.ElapsedMilliseconds, binding, config,
                     evidence => ResolveBinding(evidence, epoch, options.SocksPort),
                     (updated, evidence, current) => PrepareConfig(options, updated, evidence, snapshot, policy, epoch, ConfigPath(directory, current)),
@@ -678,9 +684,48 @@ namespace RemoteAgents.Launcher
                 lock (gate) if (epoch == generation) generation++;
                 CloseJobs();
                 { var reader = CoreReader; if (reader != null) { reader.Drain(Events); reader.WriteStats(Events); } }
+                if (readyGate != null) readyGate.Dispose();
                 if (lease != null) lease.Dispose();
                 if (core != null) { core.Dispose(); core = null; }
             }
+        }
+        // Шаги 1.3 и 1.4 (V3). true — можно создавать monitor; false — состояние уже выставлено (Stop) или это обычное выключение.
+        // Каждый шаг пишется в журнал сразу (vpn.on.step -> и в шину как vpn.step).
+        bool AwaitReadyAndRoute(VpnReadyGate ready, VpnTun options, int epoch, VpnLease lease)
+        {
+            var watch = Stopwatch.StartNew();
+            Func<bool> cancelled = () => { lock (gate) return disposed || epoch != generation || lease.Expired; };
+            Func<bool> exited = () => { var c = core; try { return c == null || c.WaitForExit(0); } catch { return true; } };
+            lock (gate) if (epoch == generation) Set("starting", "wait-core");
+            // Предохранитель (конституция 4а): singbox.started недоступно, если ядро зависло внутри Start; при срабатывании — остановить ядро, error/core-not-ready, успех не объявляет.
+            var coreOutcome = ready.AwaitCore(exited, cancelled, lease.Pulse, VpnReadyGate.FuseAfter(VpnReadyGate.CoreReadyFuseMs));
+            string ms = Ms(watch);
+            if (coreOutcome == VpnGateOutcome.Off) { Ev(LogLevel.Info, "vpn.on.step", "step", "ready", "ms", ms, "result", "cancel", "reason", "off"); return false; }
+            if (coreOutcome == VpnGateOutcome.Ready) Ev(LogLevel.Info, "vpn.on.step", "step", "ready", "ms", ms, "result", "ok", "line", ready.ReadyLine);
+            else {
+                string code = "?"; try { var c = core; if (c != null && c.WaitForExit(0)) code = c.ExitCode.ToString(System.Globalization.CultureInfo.InvariantCulture); } catch { }
+                string fatalLine = ready.FatalLine; if (fatalLine.Length > 500) fatalLine = fatalLine.Substring(0, 500);
+                string reason = coreOutcome == VpnGateOutcome.Fuse ? "core-not-ready" : "core-exited";
+                Ev(LogLevel.Warn, "vpn.on.step", "step", "ready", "ms", ms, "result", "fail", "reason", reason, "code", code, "fatal", fatalLine);
+                if (coreOutcome == VpnGateOutcome.Fuse) Stop("error", "core-not-ready", epoch); else Stop("core-exited", "ready", epoch);
+                return false;
+            }
+            watch.Restart();
+            lock (gate) if (epoch == generation) Set("starting", "wait-routes");
+            System.Net.IPAddress probeAddress = System.Net.IPAddress.Parse(options.ProbeAddress);
+            VpnRouteResult route;
+            // Предохранитель (конституция 4а): win.route/iface.changed недоступны, если маршрут на TUN так и не подтверждён; при срабатывании — остановить ядро, error/routes-not-ours, успех не объявляет.
+            var routeOutcome = ready.AwaitRoute(() => VpnReadyGate.ProbeRoute(NetRoute.BestInterface, NetRoute.IndexByName, NetRoute.NameOf, probeAddress, VpnTun.InterfaceName),
+                cancelled, lease.Pulse, VpnReadyGate.FuseAfter(VpnReadyGate.RouteFuseMs), out route);
+            ms = Ms(watch);
+            if (routeOutcome == VpnGateOutcome.Off) { Ev(LogLevel.Info, "vpn.on.step", "step", "routes", "ms", ms, "result", "cancel", "reason", "off"); return false; }
+            var fields = new List<string> { "step", "routes", "ms", ms, "result", routeOutcome == VpnGateOutcome.RoutesOk ? "ok" : "fail" };
+            if (routeOutcome != VpnGateOutcome.RoutesOk) { fields.Add("reason"); fields.Add("routes-not-ours"); }
+            if (route != null) fields.AddRange(route.Fields());
+            Ev(routeOutcome == VpnGateOutcome.RoutesOk ? LogLevel.Info : LogLevel.Warn, "vpn.on.step", fields.ToArray());
+            if (routeOutcome == VpnGateOutcome.RoutesOk) return true;
+            Stop("error", "routes-not-ours", epoch);
+            return false;
         }
         void LogConflicts(VpnConflictResult result)
         {

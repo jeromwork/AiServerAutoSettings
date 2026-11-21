@@ -23,7 +23,6 @@ namespace RemoteAgents.Launcher
         { this.home = home; this.transport = transport; this.vpn = vpn; }
         bool ChannelFirst()
         { try { return Json.Bool(Json.Map(Json.Get(Json.Read(Path.Combine(home, "config.json")), "transport")), "channelFirst"); } catch { return false; } }
-        [DllImport("iphlpapi.dll")] static extern int GetBestInterface(uint address, out uint index);
 
         static StageResult Timed(int stage, Func<string> body, string code)
         {
@@ -95,9 +94,8 @@ namespace RemoteAgents.Launcher
         public StageResult Route()
         {
             var watch = Stopwatch.StartNew();
-            uint index;
-            int code = GetBestInterface(BitConverter.ToUInt32(IPAddress.Parse("1.1.1.1").GetAddressBytes(), 0), out index);
-            if (code != 0) return StageResult.Fail(6, watch.ElapsedMilliseconds, "route-not-ours", "GetBestInterface=" + code);
+            int index = NetRoute.BestInterface(IPAddress.Parse("1.1.1.1"));
+            if (index < 0) return StageResult.Fail(6, watch.ElapsedMilliseconds, "route-not-ours", "GetBestInterface=failed");
             string name = NetworkInterface.GetAllNetworkInterfaces().Where(n => { try { return n.GetIPProperties().GetIPv4Properties().Index == (int)index; } catch { return false; } })
                 .Select(n => n.Name).FirstOrDefault() ?? ("ifIndex" + index);
             return name.StartsWith("RemoteAgents-", StringComparison.OrdinalIgnoreCase) ? StageResult.Pass(6, watch.ElapsedMilliseconds, name)
