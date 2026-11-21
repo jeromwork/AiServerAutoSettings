@@ -131,10 +131,13 @@ namespace RemoteAgents.Launcher
             choosePath = selectPath;
             foreach (var action in actions) {
                 var a = action;
+                if (a.Key == "Проверить обновления на сервере" && mainWindow) {
+                    // Общая кнопка в заголовке показывает прогресс и блокируется на любой странице.
+                    updateCheck = a.Value; updateButton.Visible = true; continue;
+                }
                 AddButton(serviceActions, a.Key, a.Value);
                 if (a.Key == "Журналы" || a.Key == "Перезапустить компоненты" || a.Key == "Проверить обновления на сервере")
                     AddButton(aboutBody, a.Key == "Проверить обновления на сервере" ? "Проверить обновления" : a.Key, a.Value);
-                if (a.Key == "Проверить обновления на сервере" && mainWindow) { updateCheck = a.Value; updateButton.Visible = currentPage == "Главная"; }
             }
             serviceActions.Controls.Add(technicalStatus);
             AddButton(serviceActions, "Скопировать отчёт", () => {

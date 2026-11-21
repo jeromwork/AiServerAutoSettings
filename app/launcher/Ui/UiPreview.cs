@@ -19,6 +19,7 @@ namespace RemoteAgents.Launcher
             form.Controls.Add(scroll);
             scroll.Controls.Add(stack);
             Add(stack, new Label { Text = "Главное окно", Font = Theme.Big, AutoSize = true });
+            AddUpdateHeaders(stack, form);
 
             var switches = Stack();
             Add(switches, new Label { Text = "VPN", Font = Theme.Title, AutoSize = true });
@@ -60,6 +61,30 @@ namespace RemoteAgents.Launcher
             Add(stack, openExpander);
             WindowChrome.Apply(form);
             return form;
+        }
+
+        // Static snapshots of the actual header, including its widest caption. No timers or downloads.
+        static void AddUpdateHeaders(TableLayoutPanel stack, Form form)
+        {
+            var tooltip = new ToolTip();
+            form.Disposed += (s, e) => tooltip.Dispose();
+            foreach (var state in new[] { UpdateButtonState.Idle, UpdateButtonState.Downloading,
+                UpdateButtonState.Installing, UpdateButtonState.UpToDate, UpdateButtonState.Failed }) {
+                using (var model = new UpdateButtonModel(() => new System.DateTime(2026, 11, 21, 12, 0, 0))) {
+                    if (state == UpdateButtonState.Downloading || state == UpdateButtonState.Installing) {
+                        model.OnClick(); model.OnDownloadProgress(100, 100);
+                        if (state == UpdateButtonState.Installing) model.OnInstalling();
+                    }
+                    if (state == UpdateButtonState.UpToDate) model.OnUpToDate("20261121.preview");
+                    if (state == UpdateButtonState.Failed) model.OnFailed("Не удалось связаться с сервером обновлений");
+                    var header = new MainWindowHeader();
+                    header.UpdateButton.Visible = true;
+                    header.UpdateButton.Text = model.ButtonText;
+                    header.UpdateButton.Enabled = model.ButtonEnabled;
+                    tooltip.SetToolTip(header.UpdateButton, model.DetailText.Length > 0 ? model.DetailText : model.StatusText);
+                    Add(stack, header);
+                }
+            }
         }
 
         static TableLayoutPanel Stack()
