@@ -3,6 +3,7 @@
   "components": [
     {
       "name": "transport",
+      "bus": true,
       "title": "Связь с сервером",
       "exe": "powershell.exe",
       "args": [

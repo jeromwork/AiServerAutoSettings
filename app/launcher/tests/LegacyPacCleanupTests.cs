@@ -38,6 +38,7 @@ namespace RemoteAgents.Launcher
         {
             // Focused source-pin check; no LAN/Windows fixtures or other suites.
             if (args.Length == 1 && args[0] == "--helper-version-only") { NetHelperVersionTests.Run(); return 0; }
+            if (args.Length == 1 && args[0] == "--net-helper-version-only") { NetHelperVersionTests.Run(); return 0; }
             Run(); LanTunTests.Run(); LanHostsTests.Run(); NetHelperTests.Run(); return 0;
         }
     }

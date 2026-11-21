@@ -139,6 +139,7 @@ wait_for_memory
   wait_for_memory
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-vpn-legacy.ps1" -TestHome "$testdir/vpn-legacy" < /dev/null
   wait_for_memory
+  timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-status-freshness.ps1" < /dev/null
   wait_for_memory
   wait_for_memory
   timeout 60 python3 "$repo/transport/test-vpn-lifecycle.py"
@@ -255,8 +256,10 @@ timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:T
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:SearchQuieterTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:MainScreenTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:TrayExtrasTests=true
+timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:SupervisorStaleTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:VpnReasonsTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:HealthBoardTests=true
+timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:TransportBusTests=true
 wait_for_memory
 # End-to-end on a loopback stand: config export -> paste/vault -> orchestrator -> real Server/Connection -> sync -> revoke.
 wait_for_memory

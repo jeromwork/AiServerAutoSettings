@@ -14,9 +14,10 @@ namespace RemoteAgents.Launcher
         public const string BlockDegraded = "block.degraded";
         public const string BlockFailed = "block.failed";
 
-        // Supervisor: component.start|component.exit {name, code}
+        // Supervisor: component.start|component.exit|component.stale-restart {name, code}
         public const string ComponentStart = "component.start";
         public const string ComponentExit = "component.exit";
+        public const string ComponentStaleRestart = "component.stale-restart";
 
         // Аварийные топики
         public const string Unhandled = "unhandled";
@@ -40,6 +41,8 @@ namespace RemoteAgents.Launcher
         public const string NetE2E = "net.e2e";
 
         // Транспорт (T0/T2): transport.status, transport.episode, transport.switch, transport.mem, transport.command, transport.mem-high
+        // Демон объявляет готовность после запуска UTF-8 читателя stdin (B4).
+        public const string TransportReady = "transport.ready";
         public const string TransportStatus = "transport.status";
         public const string TransportEpisode = "transport.episode";
         public const string TransportSwitch = "transport.switch";

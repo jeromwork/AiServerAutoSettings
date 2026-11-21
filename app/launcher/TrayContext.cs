@@ -184,8 +184,8 @@ namespace RemoteAgents.Launcher
                     int count = critical.Count(r => r.Healthy); shown = all ? green : count > 0 ? yellow : red;
                 })) { ok = false; coreFailed = true; }
                 if (restart) return;
-                if (!Step("transport", () => { transport = StatusView.Read(home, "transport", maxAgeSec: 15); })) { ok = false; coreFailed = true; }
-                ok &= Step("netwatch", () => { if (ladder == null) { ladder = new NetLadderService(home, log, () => StatusView.Read(home, "transport", maxAgeSec: 15), () => VpnStatus.Read(home)); ladder.Note = SetNetNote; AttachLadderToBus(); } ladder.Tick(transport, Json.Str(VpnStatus.Read(home), "state") == "on"); });
+                if (!Step("transport", () => { transport = StatusView.Read(home, "transport", maxAgeSec: VpnWatchdog.TransportStatusMaxAgeSec); })) { ok = false; coreFailed = true; }
+                ok &= Step("netwatch", () => { if (ladder == null) { ladder = new NetLadderService(home, log, () => StatusView.Read(home, "transport", maxAgeSec: VpnWatchdog.TransportStatusMaxAgeSec), () => VpnStatus.Read(home)); ladder.Note = SetNetNote; AttachLadderToBus(); } ladder.Tick(transport, Json.Str(VpnStatus.Read(home), "state") == "on"); });
                 ok &= Step("logship", () => {
                     EnsureLogShipping();
                 });
@@ -293,7 +293,7 @@ namespace RemoteAgents.Launcher
         async void CheckSync()
         {
             if(!Json.Bool(Json.Map(Json.Get(config.Data,"wizard")),"configured") || !Json.Map(Json.Get(config.Data,"profile")).ContainsKey("server"))return;
-            bool connected=Json.Bool(StatusView.Read(home,"transport",maxAgeSec:15),"ok");
+            bool connected=Json.Bool(StatusView.Read(home,"transport",maxAgeSec:VpnWatchdog.TransportStatusMaxAgeSec),"ok");
             bool occupied = !syncTaskRetired || syncRunning || actionBusy || busy || closing || operationChecking || BackgroundWork.Disk.Busy || mainWindow != null && mainWindow.IsApplying;
             if (!syncSchedule.Due(connected, DateTime.UtcNow, occupied)) return;
             syncRunning=true; syncSchedule.Started(DateTime.UtcNow);
@@ -317,7 +317,7 @@ namespace RemoteAgents.Launcher
             if (closing || engine.Current.Length == 0) return;
             bool occupied = serverHealthRunning || syncRunning || actionBusy || busy || operationChecking || mainWindow != null && mainWindow.IsApplying;
             string serverId = ServerHealthView.Identity(home);
-            if (!healthSchedule.Due(DateTime.UtcNow, Json.Bool(StatusView.Read(home, "transport", maxAgeSec: 15), "ok"), occupied, serverId)) return;
+            if (!healthSchedule.Due(DateTime.UtcNow, Json.Bool(StatusView.Read(home, "transport", maxAgeSec: VpnWatchdog.TransportStatusMaxAgeSec), "ok"), occupied, serverId)) return;
             serverHealthRunning = true; healthSchedule.Started(DateTime.UtcNow);
             string bundle = engine.Folder(engine.Current);
             try {
@@ -380,7 +380,7 @@ namespace RemoteAgents.Launcher
         }
         TrayMenuEntry VpnMenu()
         {
-            var transport = StatusView.Read(home, "transport", maxAgeSec: 15);
+            var transport = StatusView.Read(home, "transport", maxAgeSec: VpnWatchdog.TransportStatusMaxAgeSec);
             var vpn = VpnStatus.Read(home);
             var card = MainScreenModel.Build(new MainScreenFacts { VpnInstalled = true, Transport = transport, Vpn = vpn, SearchView = SearchView(transport, vpn), VpnBusy = vpnActionBusy, VpnWanted = vpnActionWanted, Operation = MutationConflict() }).Vpn;
             return new TrayMenuEntry("vpn", card.On ? "Выключить VPN" : "Включить VPN", card.SwitchEnabled) { Hint = card.State };
@@ -406,7 +406,7 @@ namespace RemoteAgents.Launcher
         { try { return Json.Read(Path.Combine(home, "state", "happier-account.json")); } catch { return Json.Map(null); } }
         TrayMenuEntry[] TrayEntries()
         {
-            var link = SearchView(StatusView.Read(home, "transport", maxAgeSec: 15), VpnStatus.Read(home));
+            var link = SearchView(StatusView.Read(home, "transport", maxAgeSec: VpnWatchdog.TransportStatusMaxAgeSec), VpnStatus.Read(home));
             var entries = TrayMenuModel.Build(config.Data, AccountState(), link.Transport, ServerHealthView.Read(home), DiskSummary()).ToList();
             var lanStatus = LocalLanStatus();
             if (Json.Bool(lanStatus, "enabled")) entries.Insert(0, new TrayMenuEntry("lan-status", StatusView.Lan(lanStatus), false));
@@ -445,7 +445,7 @@ namespace RemoteAgents.Launcher
             try {
                 for(int i=0;i<20 && !closing;i++){
                     await Task.Delay(15000,stop.Token);
-                    if(Json.Bool(StatusView.Read(home,"transport",maxAgeSec:15),"ok")){
+                    if(Json.Bool(StatusView.Read(home,"transport",maxAgeSec:VpnWatchdog.TransportStatusMaxAgeSec),"ok")){
                         // VPN is enabled only by an explicit card/tray action; never by setup or autostart.
                         return;
                     }
@@ -580,7 +580,7 @@ namespace RemoteAgents.Launcher
         void RefreshMain()
         {
             if (mainWindow == null || mainWindow.IsDisposed) return;
-            var transport = StatusView.Read(home, "transport", maxAgeSec: 15);
+            var transport = StatusView.Read(home, "transport", maxAgeSec: VpnWatchdog.TransportStatusMaxAgeSec);
             var health = ServerHealthView.Read(home);
             var vpn = VpnStatus.Read(home);
             HappierAccountModel account;
@@ -730,7 +730,7 @@ namespace RemoteAgents.Launcher
                 log.Write("vpn.helper.ready att=" + att + " ready=" + helperReady + " ms=" + vpnWatch.ElapsedMilliseconds);
                 log.Write(LogLevel.Info, "vpn", "vpn.on.step", "att", att, "step", "helper-ready", "ms", vpnWatch.ElapsedMilliseconds.ToString(), "result", helperReady ? "ok" : "fail");
                 if (!helperReady) { log.Write("vpn.on.refused att=" + att + " reason=helper-not-ready"); VpnAttemptEnd(att, "helper-not-ready"); VpnFailure(HelperClient.SetupWarning, fromCard); return; }
-                var transport = StatusView.Read(home, "transport", maxAgeSec: 3);
+                var transport = StatusView.Read(home, "transport", maxAgeSec: VpnWatchdog.TransportStatusMaxAgeSec);
                 var options = new System.Collections.Generic.Dictionary<string, object>(Json.Map(Json.Get(config.Data, "vpn")));
                 // Intent/interface names are not part of the privileged command.
                 options = options.Where(p => new[] { "address", "excludeCidrs", "directDomains", "dnsServer", "checkUrl", "probeAddress" }.Contains(p.Key)).ToDictionary(p => p.Key, p => p.Value);

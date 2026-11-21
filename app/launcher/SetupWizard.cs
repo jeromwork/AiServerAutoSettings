@@ -387,7 +387,7 @@ namespace RemoteAgents.Launcher
                 if(!Product.VpnEnabled){applied[5]=true;results[5]="Отключено в этой версии";}
                 var server=Json.Map(Json.Get(result,"server"));
                 results[0]=applied[0]?"Подключено ✓":Json.Text(server,"reason","Укажите сервер и проверьте вход");
-                var current=StatusView.Read(home,"transport",maxAgeSec:15);
+                var current=StatusView.Read(home,"transport",maxAgeSec:VpnWatchdog.TransportStatusMaxAgeSec);
                 results[1]=WizardStep.ConnectionResult(new Configuration(home).Data,current,applied[1],results[1]);
                 var services=Json.Map(Json.Get(server,"services"));if(api.Text.Length==0)api.Text=Json.Str(services,"serverUrl");if(web.Text.Length==0)web.Text=Json.Str(services,"webappUrl");
                 pendingAccount=Json.Bool(result,"pendingAccount");TrackServer(Json.Map(Json.Get(server,"operations")));
