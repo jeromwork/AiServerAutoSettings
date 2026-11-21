@@ -3,6 +3,7 @@ from contextlib import redirect_stdout, redirect_stderr
 from datetime import datetime
 import importlib.machinery
 import importlib.util
+import hashlib
 import io
 import json
 import os
@@ -24,6 +25,7 @@ from pathlib import Path
 p = argparse.ArgumentParser()
 p.add_argument('-C'); p.add_argument('-f'); p.add_argument('--model')
 p.add_argument('--name'); p.add_argument('--max-min')
+p.add_argument('--continue', dest='conversation')
 a = p.parse_args()
 work = Path(a.C)
 assert str(work) in Path(a.f).read_text()
@@ -33,15 +35,28 @@ def event(kind):
         f.write(kind + '\n')
 event('start')
 time.sleep(0.04)
-(work / 'old.txt').write_text('after\nextra\n')
-(work / 'new file.txt').write_text('one\ntwo')
+if a.conversation:
+    assert a.conversation == 'fixture-conversation'
+    assert (work / 'old.txt').read_text() == ('after\nextra\n' if a.name.endswith('-r2') else 'fixed\n')
+    assert (work / 'new file.txt').read_text() == 'one\ntwo'
+    assert 'Исправь по замечаниям ревьюера' in Path(a.f).read_text()
+    assert 'недостаточно покрытия' in Path(a.f).read_text()
+    (work / 'old.txt').write_text('fixed\n')
+else:
+    (work / 'old.txt').write_text('after\nextra\n')
+    (work / 'new file.txt').write_text('one\ntwo')
+if os.environ.get('FAKE_BIG'):
+    (work / 'new file.txt').write_text('x' * 1000 + '\n')
 if os.environ.get('FAKE_FORBIDDEN'):
     (work / 'forbidden.txt').write_text('outside scope\n')
 logs = Path(os.environ['FAKE_LOG_HOME'])
 logs.mkdir(exist_ok=True)
 progress = logs / (a.name + '.progress')
 status = os.environ.get('FAKE_STATUS', 'ГОТОВО')
-text = '[00:00] → read_file old.txt\n[00:01] → run_command edit\n[00:02] ' + status + '\n'
+text = ('[00:00] → read_file old.txt\n[00:01] → run_command edit\n'
+        '===== ОТВЕТ GEMINI =====\nИТОГ: готово\nФАЙЛЫ: old.txt\n'
+        'ПРОВЕРКИ: синтаксис\nПРОБЛЕМЫ: нет\n[00:02] ' + status +
+        '; продолжить: gemini-task -C ' + str(work) + ' --continue fixture-conversation "..."\n')
 progress.write_text(text)
 progress.with_suffix('.jsonl').write_text(json.dumps({'result': {'usage': {'total_tokens': 123}}}) + '\n')
 print('[00:00] журнал: ' + str(progress), flush=True)
@@ -83,7 +98,9 @@ class BenchTests(unittest.TestCase):
         self.events = self.root / 'events'
         env = dict(GEMINI_BENCH_HOME=str(self.storage), GEMINI_BENCH_REPO=str(self.repository),
                    GEMINI_TASK_BIN=str(fake), FAKE_LOG_HOME=str(self.root / 'logs'),
-                   FAKE_EVENTS=str(self.events), FAKE_STATUS='ГОТОВО', FAKE_FORBIDDEN='')
+                   FAKE_EVENTS=str(self.events), FAKE_STATUS='ГОТОВО', FAKE_FORBIDDEN='', FAKE_BIG='',
+                   GEMINI_BENCH_PATCH_MAX_BYTES=str(bench.PATCH_MAX_BYTES),
+                   GEMINI_BENCH_RUNS_MAX_BYTES=str(bench.RUNS_MAX_BYTES))
         self.env = patch.dict(os.environ, env)
         self.env.start()
         self.addCleanup(self.env.stop)
@@ -205,7 +222,7 @@ class BenchTests(unittest.TestCase):
         self.assertIn(row['worktree'], review)
         self.assertIn('Только чтение', review)
         self.assertEqual(self.cli('add-verdict', row['runid'], self.task_id, 'low', 'ЗАМЕЧАНИЯ', 'нет покрытия')[0], 0)
-        self.assertEqual(bench.verdict_map()[(row['runid'], self.task_id, 'low')], 'ЗАМЕЧАНИЯ')
+        self.assertEqual(bench.verdict_for(row, bench.verdict_map())['verdict'], 'ЗАМЕЧАНИЯ')
         self.assertEqual(self.cli('add-verdict', 'missing', self.task_id, 'low', 'ПРИНЯТО')[0], 2)
         self.assertEqual(self.cli('review', '../../missing')[0], 2)
 
@@ -272,6 +289,268 @@ class BenchTests(unittest.TestCase):
                 self.assertEqual(self.cli(*args)[0], 2)
         self.assertFalse(self.events.exists())
         self.assertFalse((self.storage / 'results.jsonl').exists())
+
+    def verdict(self, row, value='ЗАМЕЧАНИЯ', *extra):
+        return self.cli('add-verdict', row['runid'], self.task_id, row['mode'],
+                        '--round', str(row.get('round', 1)), '--reviewer', 'codex',
+                        '--verdict', value, *extra)
+
+    def test_artifacts_saved_before_cleanup_without_jsonl(self):
+        self.assertEqual(self.cli('run', '--modes', 'low')[0], 0)
+        row = self.rows()[0]
+        folder = bench.artifact_dir(row)
+        self.assertTrue({'patch.diff', 'report.txt', 'check.txt', 'gemini.progress', 'meta.json'}
+                        .issubset(p.name for p in folder.iterdir()))
+        self.assertFalse(list(folder.rglob('*.jsonl')))
+        self.assertIn('new file.txt', (folder / 'patch.diff').read_text())
+        self.assertIn('ИТОГ: готово', (folder / 'report.txt').read_text())
+        self.assertIn('ПРОБЛЕМЫ: нет', (folder / 'report.txt').read_text())
+        self.assertNotIn('--continue', (folder / 'report.txt').read_text())
+        self.assertIn('--continue fixture-conversation', (folder / 'gemini.progress').read_text())
+        self.assertIn('acceptance-details', (folder / 'check.txt').read_text())
+        meta = json.loads((folder / 'meta.json').read_text())
+        self.assertFalse(meta['patch_dropped'])
+        self.assertEqual(meta['patch_sha256'], hashlib.sha256((folder / 'patch.diff').read_bytes()).hexdigest())
+        self.assertEqual(meta['patch_bytes'], (folder / 'patch.diff').stat().st_size)
+        self.assertFalse(Path(row['worktree']).exists())
+
+    def test_patch_roundtrip_binary_symlink_commits_and_index_unchanged(self):
+        (self.repository / 'old.txt').write_text('committed\n')
+        self.git('add', 'old.txt')
+        self.git('commit', '-m', 'agent edit')
+        (self.repository / 'staged').write_text('stage\n')
+        self.git('add', 'staged')
+        (self.repository / 'staged').write_text('stage plus worktree\n')
+        (self.repository / 'binary').write_bytes(b'new\x00binary\xff')
+        (self.repository / 'link').symlink_to('old.txt')
+        index_before = (self.repository / '.git/index').read_bytes()
+        folder = self.root / 'artifacts'
+        folder.mkdir()
+        row = dict(runid='fixture', task=self.task_id, mode='low', repeat=1, round=1,
+                   ts='2026-11-21T12:00:00+01:00', base_commit=self.base)
+        bench.save_patch(self.repository, self.base, folder, row)
+        self.assertEqual((self.repository / '.git/index').read_bytes(), index_before)
+        restored = self.root / 'restored'
+        self.git('worktree', 'add', '--detach', str(restored), self.base)
+        bench.git(restored, 'apply', '--binary', str(folder / 'patch.diff'))
+        for name in ('old.txt', 'staged', 'binary'):
+            self.assertEqual((restored / name).read_bytes(), (self.repository / name).read_bytes())
+        self.assertEqual(os.readlink(restored / 'link'), 'old.txt')
+        self.assertEqual(bench.git(restored, 'diff', '--cached'), '')
+
+    def test_patch_size_limit_and_retry_refusal(self):
+        with patch.dict(os.environ, GEMINI_BENCH_PATCH_MAX_BYTES='100', FAKE_BIG='1'):
+            self.assertEqual(self.cli('run', '--modes', 'low')[0], 0)
+        row = self.rows()[0]
+        folder = bench.artifact_dir(row)
+        meta = json.loads((folder / 'meta.json').read_text())
+        self.assertTrue(meta['patch_dropped'])
+        self.assertGreater(meta['patch_bytes'], 100)
+        self.assertEqual(len(meta['patch_sha256']), 64)
+        self.assertEqual(meta['patch_drop_reason'], 'size_limit')
+        self.assertFalse((folder / 'patch.diff').exists())
+        self.assertEqual(self.verdict(row, 'ЗАМЕЧАНИЯ', '--note', 'недостаточно покрытия')[0], 0)
+        code, _, error = self.cli('retry', row['runid'], self.task_id, 'low')
+        self.assertEqual(code, 2)
+        self.assertIn('patch_dropped', error)
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(self.events.read_text().splitlines(), ['start', 'end'])
+
+    def test_rounds_reason_files_and_legacy_format(self):
+        self.cli('run', '--modes', 'low', '--repeat', '2')
+        row = self.rows()[0]
+        self.assertEqual(self.verdict(row)[0], 2)  # отказ без причины запрещён
+        self.assertFalse((self.storage / 'verdicts.jsonl').exists())
+        blockers = self.root / 'blockers.txt'
+        blockers.write_text('недостаточно покрытия\nриск пропущен')
+        self.assertEqual(self.verdict(row, 'ЗАМЕЧАНИЯ', '--blockers', '@' + str(blockers),
+                                     '--minor', 'имена', '--tag', 'пропущен риск')[0], 0)
+        verdicts = bench.read_jsonl(self.storage / 'verdicts.jsonl')
+        self.assertEqual({v['repeat'] for v in verdicts}, {1, 2})
+        self.assertTrue(all(v['round'] == 1 and v['reviewer'] == 'codex' for v in verdicts))
+        self.assertEqual(verdicts[0]['blockers'], blockers.read_text())
+        self.assertEqual(verdicts[0]['minor'], 'имена')
+        self.assertEqual(self.cli('add-verdict', row['runid'], self.task_id, 'low',
+                                  'ОТВЕРГНУТО', 'исполнитель так и не смог')[0], 0)
+        verdicts = bench.read_jsonl(self.storage / 'verdicts.jsonl')
+        self.assertEqual(len(verdicts), 4)
+        self.assertEqual(verdicts[-1]['reviewer'], 'human')
+        self.assertEqual(verdicts[-1]['round'], 1)
+        self.assertEqual(self.cli('add-verdict', row['runid'], self.task_id, 'low',
+                                  '--round', '7', '--reviewer', 'opus', '--verdict', 'ПРИНЯТО')[0], 2)
+        self.assertEqual(self.cli('retry', row['runid'], self.task_id, 'low')[0], 2)
+        self.assertEqual(self.cli('retry', row['runid'], self.task_id, 'low', '--repeat', '1')[0], 2)
+
+    def test_retry_restores_patch_and_conversation_in_new_worktree(self):
+        self.assertEqual(self.cli('run', '--modes', 'low', '--label', 'retry-label')[0], 0)
+        first = self.rows()[0]
+        self.assertEqual(self.verdict(first, 'ЗАМЕЧАНИЯ', '--blockers', 'недостаточно покрытия')[0], 0)
+        # Оригинальные журналы уже не нужны; используется сохранённая копия progress.
+        for path in (self.root / 'logs').iterdir():
+            path.unlink()
+        self.assertEqual(self.cli('retry', first['runid'], self.task_id, 'low')[0], 0)
+        second = self.rows()[1]
+        self.assertEqual(second['round'], 2)
+        self.assertEqual(second['runid'], first['runid'])
+        self.assertEqual(second['label'], 'retry-label')
+        self.assertEqual(second['repeat'], first['repeat'])
+        self.assertNotEqual(second['worktree'], first['worktree'])
+        self.assertNotEqual(second['artifact_dir'], first['artifact_dir'])
+        self.assertTrue(second['check_ok'])
+        self.assertIn('+fixed', (bench.artifact_dir(second) / 'patch.diff').read_text())
+        self.assertFalse(Path(second['worktree']).exists())
+        self.assertEqual(self.git('branch', '--format=%(refname:short)'), 'main')
+        self.assertEqual(self.git('status', '--porcelain'), '')
+        self.assertEqual(self.verdict(second, 'ПРИНЯТО', '--note', 'проверено')[0], 0)
+        verdicts = bench.read_jsonl(self.storage / 'verdicts.jsonl')
+        self.assertEqual([v['round'] for v in verdicts], [1, 2])
+        self.assertEqual(self.cli('retry', first['runid'], self.task_id, 'low')[0], 2)
+        code, text, err = self.cli('show', first['runid'], self.task_id, 'low')
+        self.assertEqual((code, err), (0, ''))
+        self.assertIn('круг 1', text)
+        self.assertIn('круг 2', text)
+        self.assertIn('недостаточно покрытия', text)
+        self.assertIn('Финал повтора 1: ПРИНЯТО', text)
+        self.assertIn(str(bench.artifact_dir(first) / 'patch.diff'), text)
+
+    def test_retry_refuses_missing_id_and_corrupt_patch_without_live_call(self):
+        self.cli('run', '--modes', 'low')
+        row = self.rows()[0]
+        self.verdict(row, 'ЗАМЕЧАНИЯ', '--note', 'недостаточно покрытия')
+        folder = bench.artifact_dir(row)
+        progress = folder / 'gemini.progress'
+        original = progress.read_text()
+        progress.write_text('[00:01] ГОТОВО; --continue None')
+        code, _, error = self.cli('retry', row['runid'], self.task_id, 'low')
+        self.assertEqual(code, 2)
+        self.assertIn('conversation id', error)
+        progress.write_text(original)
+        (folder / 'patch.diff').write_text('corrupt')
+        code, _, _ = self.cli('retry', row['runid'], self.task_id, 'low')
+        self.assertEqual(code, 1)
+        self.assertIn('Хеш', self.rows()[-1]['check_detail'])
+        self.assertEqual(self.events.read_text().splitlines(), ['start', 'end'])
+
+    def test_quota_prunes_oldest_accepted_only_and_records_hash(self):
+        self.cli('run', '--modes', 'low,medium,high', '--parallel', '1')
+        rows = self.rows()
+        for row in rows:
+            if row['mode'] == 'medium':
+                self.verdict(row, 'ЗАМЕЧАНИЯ', '--note', 'недостаточно покрытия')
+            elif row['mode'] == 'high':
+                self.verdict(row, 'ОТВЕРГНУТО', '--note', 'пропущен риск')
+            else:
+                self.verdict(row, 'ПРИНЯТО')
+        low = next(r for r in rows if r['mode'] == 'low')
+        folder = bench.artifact_dir(low)
+        before = json.loads((folder / 'meta.json').read_text())
+        with patch.dict(os.environ, GEMINI_BENCH_RUNS_MAX_BYTES='1'), redirect_stderr(io.StringIO()) as err:
+            bench.prune_patches()
+        self.assertIn('защищённые артефакты сохранены', err.getvalue())
+        for row in rows:
+            self.assertEqual((bench.artifact_dir(row) / 'patch.diff').exists(), row['mode'] != 'low')
+        after = json.loads((folder / 'meta.json').read_text())
+        self.assertEqual(after['patch_sha256'], before['patch_sha256'])
+        self.assertEqual(after['patch_bytes'], before['patch_bytes'])
+        self.assertEqual(after['patch_drop_reason'], 'runs_limit')
+        self.assertTrue(after['patch_dropped'])
+        self.assertTrue((folder / 'report.txt').exists())
+
+    def test_quota_order_pending_and_previously_challenged_protected(self):
+        self.cli('run', '--modes', 'low', '--repeat', '4', '--parallel', '1')
+        rows = sorted(self.rows(), key=lambda r: r['repeat'])
+        for row in rows[:2]:
+            self.verdict(row, 'ПРИНЯТО', '--repeat', str(row['repeat']))
+        self.verdict(rows[2], 'ЗАМЕЧАНИЯ', '--repeat', '3', '--note', 'неполно')
+        self.verdict(rows[2], 'ПРИНЯТО', '--repeat', '3')
+        root = self.storage / 'runs'
+        total = sum(p.stat().st_size for p in root.rglob('*') if p.is_file())
+        size = (bench.artifact_dir(rows[0]) / 'patch.diff').stat().st_size
+        # Запас для записи причины очистки: лимита хватает после удаления только старейшего.
+        with patch.dict(os.environ, GEMINI_BENCH_RUNS_MAX_BYTES=str(total - size + 200)):
+            bench.prune_patches()
+        self.assertFalse((bench.artifact_dir(rows[0]) / 'patch.diff').exists())
+        for row in rows[1:]:
+            self.assertTrue((bench.artifact_dir(row) / 'patch.diff').exists())
+
+    def test_patch_exact_limit_and_save_failure_preserves_worktree(self):
+        self.cli('run', '--modes', 'low')
+        first = self.rows()[0]
+        size = (bench.artifact_dir(first) / 'patch.diff').stat().st_size
+        with patch.dict(os.environ, GEMINI_BENCH_PATCH_MAX_BYTES=str(size)):
+            self.assertEqual(self.cli('run', '--modes', 'low')[0], 0)
+        equal = self.rows()[-1]
+        self.assertTrue((bench.artifact_dir(equal) / 'patch.diff').is_file())
+        with patch.object(bench, 'save_patch', side_effect=OSError('fixture disk error')):
+            self.assertEqual(self.cli('run', '--modes', 'low')[0], 1)
+        failed = self.rows()[-1]
+        self.assertEqual(failed['artifact_error'], 'fixture disk error')
+        self.assertTrue(failed['retained'])
+        self.assertTrue(Path(failed['worktree']).is_dir())
+        self.assertFalse(failed['check_ok'])
+
+    def test_retry_conflicting_current_main_records_error_without_call(self):
+        self.cli('run', '--modes', 'low')
+        first = self.rows()[0]
+        self.verdict(first, 'ЗАМЕЧАНИЯ', '--note', 'недостаточно покрытия')
+        (self.repository / 'old.txt').write_text('upstream changed\n')
+        self.git('add', 'old.txt')
+        self.git('commit', '-m', 'main moved')
+        current = self.git('rev-parse', 'HEAD')
+        self.assertEqual(self.cli('retry', first['runid'], self.task_id, 'low')[0], 1)
+        second = self.rows()[-1]
+        self.assertEqual(second['round'], 2)
+        self.assertEqual(second['base_commit'], current)
+        self.assertFalse(second['check_ok'])
+        self.assertIn('patch', second['check_detail'])
+        self.assertEqual(self.events.read_text().splitlines(), ['start', 'end'])
+        self.assertEqual(self.git('status', '--porcelain'), '')
+        self.assertEqual((self.repository / 'old.txt').read_text(), 'upstream changed\n')
+
+    def test_third_round_and_opus_final(self):
+        self.cli('run', '--modes', 'low')
+        first = self.rows()[0]
+        for n in (1, 2):
+            row = self.rows()[-1]
+            self.assertEqual(row['round'], n)
+            self.assertEqual(self.verdict(row, 'ЗАМЕЧАНИЯ', '--note', 'недостаточно покрытия')[0], 0)
+            self.assertEqual(self.cli('retry', first['runid'], self.task_id, 'low')[0], 0)
+        last = self.rows()[-1]
+        self.assertEqual(last['round'], 3)
+        code, _, _ = self.cli('add-verdict', last['runid'], self.task_id, 'low', '--round', '3',
+                              '--reviewer', 'opus', '--verdict', 'ОТВЕРГНУТО',
+                              '--note', 'исполнитель так и не смог')
+        self.assertEqual(code, 0)
+        _, output, _ = self.cli('show', last['runid'], self.task_id, 'low')
+        self.assertIn('круг 3, opus', output)
+        self.assertIn('исполнитель так и не смог', output)
+        self.assertIn('Финал повтора 1: ОТВЕРГНУТО', output)
+
+    def test_report_round_outcomes_and_false_confidence(self):
+        common = dict(ts='2026-11-21T12:00:00+01:00', weekday=5, hour=12,
+                      task=self.task_id, mode='low', repeat=1, label='rounds',
+                      status='ГОТОВО', error_kind=None, seconds=10, check_ok=True)
+        for runid, round_number, ok, value in [('fixed', 1, True, 'ЗАМЕЧАНИЯ'),
+                                               ('fixed', 2, True, 'ПРИНЯТО'),
+                                               ('first', 1, True, 'ПРИНЯТО'),
+                                               ('reject', 1, True, 'ОТВЕРГНУТО'),
+                                               ('mechanics', 1, False, None)]:
+            row = dict(common, runid=runid, round=round_number, check_ok=ok)
+            bench.append_json(self.storage / 'results.jsonl', row)
+            if value:
+                self.verdict(row, value, '--note', 'недостаточно покрытия', '--tag', 'пропущен риск')
+        code, text, err = self.cli('report', '--label', 'rounds')
+        self.assertEqual((code, err), (0, ''))
+        self.assertIn('| 01-fixture | low | 1 | 1 | 1 | 1 | 0 | 1.25 |', text)
+        self.assertIn('| low | 1 | 1 | 1 | 1 | 0 | 1.25 |', text)
+        self.assertIn('| пропущен риск | 2 |', text)
+        self.assertIn('Ложная уверенность', text)
+        self.assertIn('| low | 1 |', text)  # различные задачи, даже при нескольких runid
+        # Чтение старых вердиктов без round/repeat сохраняет смысл круга 1.
+        bench.append_json(self.storage / 'verdicts.jsonl', dict(runid='fixed', task=self.task_id,
+                          mode='low', verdict='ОТВЕРГНУТО', text='старый формат', ts=common['ts']))
+        second = dict(common, runid='fixed', round=2)
+        self.assertEqual(bench.verdict_for(second, bench.verdict_map())['verdict'], 'ПРИНЯТО')
 
     def test_timeout_kills_child_in_separate_session(self):
         child_pid = self.root / 'child-pid'

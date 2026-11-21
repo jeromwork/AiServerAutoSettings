@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from datetime import datetime
 import fcntl
+import hashlib
 import itertools
 import json
 import math
@@ -16,6 +17,7 @@ import signal
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
@@ -23,6 +25,8 @@ KIT = Path(__file__).resolve().parent
 MODES = ('low', 'medium', 'high')
 VERDICTS = ('ПРИНЯТО', 'ЗАМЕЧАНИЯ', 'ОТВЕРГНУТО')
 DAYS = ('Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс')
+PATCH_MAX_BYTES = 200 * 1024
+RUNS_MAX_BYTES = 200 * 1024 * 1024
 
 
 def home():
@@ -70,9 +74,9 @@ def read_jsonl(path):
     return rows
 
 
-def git(directory, *args, binary=False):
+def git(directory, *args, binary=False, env=None):
     result = subprocess.run(['git', '-C', str(directory), *args], stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, timeout=120)
+                            stderr=subprocess.PIPE, timeout=120, env=env)
     if result.returncode:
         raise RuntimeError(result.stderr.decode(errors='replace').strip())
     return result.stdout if binary else result.stdout.decode(errors='surrogateescape').strip()
@@ -169,6 +173,130 @@ def change_stats(directory, base, allowed_files):
                 forbidden_files=sorted(set(changed) - set(allowed_files)))
 
 
+def artifact_dir(row):
+    root = home() / 'runs' / row['runid'] / f'{row["task"]}-{row["mode"]}-{row["repeat"]}'
+    return root if row.get('round', 1) == 1 else root / f'round-{row["round"]}'
+
+
+def limit(name, default):
+    value = int(os.environ.get(name, default))
+    if value < 0:
+        raise ValueError(f'{name}: лимит должен быть >= 0')
+    return value
+
+
+def write_meta(folder, meta):
+    temporary = folder / 'meta.json.tmp'
+    temporary.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + '\n')
+    temporary.replace(folder / 'meta.json')
+
+
+def save_patch(directory, base, folder, row):
+    """Отдельный индекс: ни index worktree, ни индекс основного дерева не меняются."""
+    with tempfile.TemporaryDirectory(prefix='gbench-index-') as temp:
+        env = dict(os.environ, GIT_INDEX_FILE=str(Path(temp) / 'index'))
+        git(directory, 'read-tree', 'HEAD', env=env)
+        git(directory, 'add', '-N', '--all', '--', env=env)
+        temporary = folder / 'patch.diff.tmp'
+        try:
+            with temporary.open('wb') as output:
+                result = subprocess.run(['git', '-C', str(directory), 'diff', '--binary',
+                                         '--no-ext-diff', '--no-textconv', '--no-renames', base, '--'],
+                                        env=env, stdout=output, stderr=subprocess.PIPE, timeout=120)
+            if result.returncode:
+                raise RuntimeError(result.stderr.decode(errors='replace'))
+            digest = hashlib.sha256()
+            with temporary.open('rb') as stream:
+                for chunk in iter(lambda: stream.read(65536), b''):
+                    digest.update(chunk)
+            size = temporary.stat().st_size
+            dropped = size > limit('GEMINI_BENCH_PATCH_MAX_BYTES', PATCH_MAX_BYTES)
+            meta = {key: row[key] for key in ('runid', 'task', 'mode', 'repeat', 'round', 'ts', 'base_commit')}
+            meta.update(patch_bytes=size, patch_sha256=digest.hexdigest(), patch_dropped=dropped,
+                        patch_drop_reason='size_limit' if dropped else None)
+            if not dropped:
+                temporary.replace(folder / 'patch.diff')
+            else:
+                (folder / 'patch.diff').unlink(missing_ok=True)
+            write_meta(folder, meta)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def round_key(row):
+    return (row['runid'], row['task'], row['mode'], row.get('repeat', 1), row.get('round', 1))
+
+
+def verdict_for(row, verdicts):
+    # Старые записи без repeat относились ко всем повторам, но только к кругу 1.
+    key = round_key(row)
+    matches = [v for v in (verdicts.get(key), verdicts.get((*key[:3], None, key[4]))) if v]
+    return max(matches, key=lambda v: v.get('_order', 0)) if matches else None
+
+
+def verdict_map():
+    latest = {}
+    for order, row in enumerate(read_jsonl(home() / 'verdicts.jsonl')):
+        row = dict(row, _order=order)
+        key = (row['runid'], row['task'], row['mode'], row.get('repeat'), row.get('round', 1))
+        latest[key] = row
+    return latest
+
+
+def prune_patches():
+    """Лимит мягкий: замечания/отказы/непроверенное не удаляем даже при превышении."""
+    root = home() / 'runs'
+    if not root.exists():
+        return
+    maximum = limit('GEMINI_BENCH_RUNS_MAX_BYTES', RUNS_MAX_BYTES)
+    with locked(home() / 'artifacts.lock'):
+        total = sum(p.stat().st_size for p in root.rglob('*') if p.is_file())
+        if total <= maximum:
+            return
+        verdicts = verdict_map()
+        history = read_jsonl(home() / 'verdicts.jsonl')
+        candidates = []
+        for path in root.rglob('meta.json'):
+            meta = json.loads(path.read_text())
+            patch = path.parent / 'patch.diff'
+            verdict = verdict_for(meta, verdicts)
+            # Сохранить и ранее отмеченные замечания этого круга, даже если оценку исправили.
+            challenged = any(v['runid'] == meta['runid'] and v['task'] == meta['task']
+                             and v['mode'] == meta['mode'] and v.get('repeat') in (None, meta['repeat'])
+                             and v.get('round', 1) == meta['round'] and v['verdict'] != 'ПРИНЯТО'
+                             for v in history)
+            if patch.is_file() and verdict and verdict['verdict'] == 'ПРИНЯТО' and not challenged:
+                candidates.append((meta['ts'], path, meta))
+        for _, path, meta in sorted(candidates, key=lambda item: (item[0], str(item[1]))):
+            if total <= maximum:
+                break
+            patch = path.parent / 'patch.diff'
+            size = patch.stat().st_size
+            previous = path.stat().st_size
+            meta.update(patch_dropped=True, patch_drop_reason='runs_limit',
+                        patch_pruned_ts=datetime.now().astimezone().isoformat())
+            write_meta(path.parent, meta)
+            patch.unlink()
+            total += path.stat().st_size - previous - size
+        if total > maximum:
+            print(f'Предупреждение: runs занимает {total} байт при лимите {maximum}; '
+                  'защищённые артефакты сохранены.', file=sys.stderr)
+
+
+def save_artifacts(directory, base, folder, row, progress_text):
+    (folder / 'gemini.progress').write_text(progress_text)
+    answer = progress_text.split('===== ОТВЕТ GEMINI =====', 1)
+    report_text = answer[1] if len(answer) == 2 else progress_text
+    # Обёртка дописывает служебный финальный статус после ответа.
+    report_text = re.sub(r'^\[\d+:\d+\].*$', '', report_text, flags=re.M).strip()
+    (folder / 'report.txt').write_text(report_text + '\n')
+    (folder / 'check.txt').write_text(row['check_detail'])
+    with locked(home() / 'artifacts.lock'):
+        save_patch(directory, base, folder, row)
+    row['artifact_dir'] = str(folder)
+    row['progress_file'] = str(folder / 'gemini.progress')
+
+
 def descendants(pid):
     """agy создаёт собственную сессию: одного killpg обёртки недостаточно (Linux)."""
     children = defaultdict(list)
@@ -222,49 +350,72 @@ def execute(command, cwd, output, seconds, env=None):
             raise
 
 
-def run_one(args, task, mode, repeat, runid, base, work_root, git_lock):
+def run_one(args, task, mode, repeat, runid, base, work_root, git_lock,
+            round_number=1, previous=None, conversation=None, feedback=None):
     name = f'{runid}-{task["id"]}-{mode}-{repeat}'
+    if round_number > 1:
+        name += f'-r{round_number}'
     directory = work_root / f'wt-gb-{name}'
     branch = f'gb/{name}'
-    artifacts = home() / 'runs' / runid / f'{task["id"]}-{mode}-{repeat}'
-    artifacts.mkdir(parents=True, exist_ok=True)
-    plan = artifacts / 'task.md'
-    plan.write_text((task['folder'] / 'task.md').read_text().replace('WORKDIR', str(directory)))
-    check = artifacts / 'check.sh'
-    check.write_bytes((task['folder'] / 'check.sh').read_bytes())
     now = datetime.now().astimezone()
     row = dict(runid=runid, ts=now.isoformat(), weekday=now.weekday(), hour=now.hour,
-               task=task['id'], mode=mode, repeat=repeat, label=args.label,
+               task=task['id'], mode=mode, repeat=repeat, round=round_number, label=args.label,
                status='ОШИБКА', error_kind='прочее', seconds=0, turns=0, tokens=None,
                check_ok=False, check_detail='', files_changed=0, lines_added=0, lines_removed=0,
                forbidden_files=[], worktree=str(directory), progress_file=None,
-               plan_file=str(plan), base_commit=base, branch=branch, retained=False)
+               base_commit=base, branch=branch, retained=False, allowed_files=task['allowed_files'])
+    artifacts = artifact_dir(row)
+    artifacts.mkdir(parents=True, exist_ok=False)
+    plan = artifacts / 'task.md'
+    row['plan_file'] = str(plan)
     started = time.monotonic()
-    created = False
+    created = saved = False
+    progress_text = ''
     try:
+        if previous:
+            original = Path(previous['plan_file']).read_text().replace(previous['worktree'], str(directory))
+            plan.write_text(original + '\n\nИсправь по замечаниям ревьюера. Сейчас круг ' + str(round_number)
+                            + '. Работай только в ' + str(directory) + '.\n'
+                            + 'Тесты не запускать: их один раз запустит набор после отчёта.\n'
+                            + json.dumps(feedback, ensure_ascii=False, indent=2) + '\n')
+            check_source = artifact_dir(previous) / 'check.sh'
+        else:
+            plan.write_text((task['folder'] / 'task.md').read_text().replace('WORKDIR', str(directory)))
+            check_source = task['folder'] / 'check.sh'
+        check = artifacts / 'check.sh'
+        check.write_bytes(check_source.read_bytes())
+        row['plan_file'] = str(plan)
         with locked(git_lock):
             git(repo(), 'worktree', 'add', '-b', branch, str(directory), base)
             created = True
+        if previous:
+            source = artifact_dir(previous)
+            meta = json.loads((source / 'meta.json').read_text())
+            data = (source / 'patch.diff').read_bytes()
+            if hashlib.sha256(data).hexdigest() != meta['patch_sha256']:
+                raise ValueError('Хеш сохранённого patch.diff не совпадает; продолжение остановлено')
+            if data:
+                git(directory, 'apply', '--binary', str(source / 'patch.diff'))
         start = time.monotonic()
         output = artifacts / 'runner.log'
-        code, timed_out = execute([os.environ.get('GEMINI_TASK_BIN', 'gemini-task'),
-                                   '-C', str(directory), '-f', str(plan),
-                                   '--model', f'gemini-3.8-flash-{mode}', '--name', name,
-                                   '--max-min', str(args.max_min)], directory, output,
-                                  args.max_min * 60)
+        command = [os.environ.get('GEMINI_TASK_BIN', 'gemini-task'),
+                   '-C', str(directory), '-f', str(plan),
+                   '--model', f'gemini-3.8-flash-{mode}', '--name', name,
+                   '--max-min', str(args.max_min)]
+        if conversation:
+            command += ['--continue', conversation]
+        code, timed_out = execute(command, directory, output, args.max_min * 60)
         row['seconds'] = round(time.monotonic() - start, 3)
         console = output.read_text(errors='replace')
         journals = re.findall(r'^\[\d+:\d+\]\s+журнал:\s*(.+\.progress)\s*$', console, re.M)
         progress = Path(journals[-1]).expanduser() if journals else output
-        row['progress_file'] = str(progress)
+        row['source_progress_file'] = str(progress)
         progress_text = progress.read_text(errors='replace') if progress.is_file() else console
         raw_path = progress.with_suffix('.jsonl')
         raw = raw_path.read_text(errors='replace') if raw_path.is_file() else ''
         row.update(parse_logs(progress_text, raw, code, timed_out))
-        # Даже незавершённое выполнение может оставить полезные для оценки изменения.
-        check_output = artifacts / 'check.log'
-        code, expired = execute(['bash', str(check)], directory, check_output, 120)
-        row['check_detail'] = check_output.read_text(errors='replace')
+        code, expired = execute(['bash', str(check)], directory, artifacts / 'check.txt', 120)
+        row['check_detail'] = (artifacts / 'check.txt').read_text(errors='replace')
         if expired:
             row['check_detail'] += '\nПриёмка превысила 120 секунд.'
         row['check_ok'] = code == 0 and not expired
@@ -278,8 +429,18 @@ def run_one(args, task, mode, repeat, runid, base, work_root, git_lock):
         if not row['seconds']:
             row['seconds'] = round(time.monotonic() - started, 3)
     finally:
+        if created:
+            try:
+                save_artifacts(directory, base, artifacts, row, progress_text)
+                saved = True
+            except Exception as error:
+                row['artifact_error'] = str(error)
+                row['check_ok'] = False
+                row['check_detail'] += f'\nОшибка сохранения артефактов: {error}'
+        else:
+            (artifacts / 'check.txt').write_text(row['check_detail'])
         failed = row['status'] != 'ГОТОВО' or not row['check_ok']
-        row['retained'] = created and (args.keep_all or (args.keep_failed and failed))
+        row['retained'] = created and (not saved or args.keep_all or (args.keep_failed and failed))
         if created and not row['retained']:
             try:
                 with locked(git_lock):
@@ -289,8 +450,65 @@ def run_one(args, task, mode, repeat, runid, base, work_root, git_lock):
                 row['retained'] = directory.exists()
                 row['cleanup_error'] = str(error)
                 row['check_detail'] += f'\nОшибка очистки: {error}'
+        (artifacts / 'check.txt').write_text(row['check_detail'])
         append_json(home() / 'results.jsonl', row)
+        prune_patches()
     return row
+
+
+def run_context():
+    limit('GEMINI_BENCH_PATCH_MAX_BYTES', PATCH_MAX_BYTES)
+    limit('GEMINI_BENCH_RUNS_MAX_BYTES', RUNS_MAX_BYTES)
+    base = git(repo(), 'rev-parse', '--verify', 'main^{commit}')
+    common = Path(git(repo(), 'rev-parse', '--git-common-dir'))
+    if not common.is_absolute():
+        common = repo() / common
+    git_lock = common.resolve() / 'gemini-bench-worktree.lock'
+    work_root = home() / 'worktrees' if 'GEMINI_BENCH_HOME' in os.environ else Path.home() / 'work'
+    work_root.mkdir(parents=True, exist_ok=True)
+    return base, work_root, git_lock
+
+
+def selected_rows(args):
+    rows = [r for r in read_jsonl(home() / 'results.jsonl')
+            if (r['runid'], r['task'], r['mode']) == (args.runid, args.task, args.mode)
+            and (args.repeat is None or r['repeat'] == args.repeat)]
+    if not rows:
+        raise ValueError('Такой тройки runid/task/mode (и повтора) нет в results.jsonl')
+    return rows
+
+
+def retry(args):
+    # Блокировка предотвращает два одновременных продолжения одного круга.
+    with locked(home() / 'retry.lock'):
+        rows = selected_rows(args)
+        if len({r['repeat'] for r in rows}) != 1:
+            raise ValueError('Несколько повторов: выберите один через --repeat N')
+        previous = max(rows, key=lambda r: r.get('round', 1))
+        verdict = verdict_for(previous, verdict_map())
+        if not verdict or verdict['verdict'] != 'ЗАМЕЧАНИЯ':
+            raise ValueError('retry требует вердикт ЗАМЕЧАНИЯ для последнего круга')
+        source = artifact_dir(previous)
+        if not (source / 'meta.json').is_file():
+            raise ValueError('Нет сохранённых артефактов; нужен новый run')
+        meta = json.loads((source / 'meta.json').read_text())
+        if meta.get('patch_dropped') or not (source / 'patch.diff').is_file():
+            raise ValueError('patch.diff не сохранён (patch_dropped или удалён по лимиту); retry невозможен')
+        progress = (source / 'gemini.progress').read_text()
+        ids = re.findall(r'^\[\d+:\d+\].*продолжить:.*--continue\s+([A-Za-z0-9_-]+)', progress, re.M)
+        if not ids or ids[-1] in ('None', 'null'):
+            raise ValueError('В сохранённом .progress нет conversation id для --continue')
+        if not any(str(verdict.get(k, '')).strip() for k in ('blockers', 'minor', 'note', 'text')):
+            raise ValueError('У последнего вердикта нет замечаний: сначала запишите причину')
+        # Снимок check.sh и allowed_files берём из предыдущего круга.
+        task = dict(id=args.task, allowed_files=previous.get('allowed_files') or tasks()[args.task]['allowed_files'])
+        args.label = previous['label']
+        base, work_root, git_lock = run_context()
+        row = run_one(args, task, args.mode, previous['repeat'], args.runid, base, work_root,
+                      git_lock, previous.get('round', 1) + 1, previous, ids[-1],
+                      {k: v for k, v in verdict.items() if not k.startswith('_')})
+        print(f'Круг {row["round"]}: {row["status"]}; механика={row["check_ok"]}; {artifact_dir(row)}')
+        return 1 if row['status'] != 'ГОТОВО' or not row['check_ok'] or row.get('cleanup_error') else 0
 
 
 def run(args):
@@ -301,14 +519,7 @@ def run(args):
         raise ValueError('Неизвестные или повторные задачи; см. list')
     if not modes or len(set(modes)) != len(modes) or set(modes) - set(MODES):
         raise ValueError('Режимы: low,medium,high (без повторов)')
-    base = git(repo(), 'rev-parse', '--verify', 'main^{commit}')
-    common = Path(git(repo(), 'rev-parse', '--git-common-dir'))
-    if not common.is_absolute():
-        common = repo() / common
-    git_lock = common.resolve() / 'gemini-bench-worktree.lock'
-    # Подмена HOME результатов изолирует также тестовые worktree от настоящего ~/work.
-    work_root = home() / 'worktrees' if 'GEMINI_BENCH_HOME' in os.environ else Path.home() / 'work'
-    work_root.mkdir(parents=True, exist_ok=True)
+    base, work_root, git_lock = run_context()
     runid = datetime.now().strftime('%Y%m%d-%H%M%S-') + uuid.uuid4().hex[:8]
     print(f'Прогон {runid}; main={base}; параллельность={args.parallel}', flush=True)
     combinations = itertools.product(selected, modes, range(1, args.repeat + 1))
@@ -335,15 +546,8 @@ def table(headers, rows):
                       *['| ' + ' | '.join(map(cell, row)) + ' |' for row in rows]])
 
 
-def verdict_map():
-    latest = {}
-    for row in read_jsonl(home() / 'verdicts.jsonl'):
-        latest[(row['runid'], row['task'], row['mode'])] = row['verdict']
-    return latest
-
-
 def summarize(rows, verdicts):
-    reviewed = [verdicts.get((r['runid'], r['task'], r['mode'])) for r in rows]
+    reviewed = [(verdict_for(r, verdicts) or {}).get('verdict') for r in rows]
     errors = Counter(r['error_kind'] for r in rows if r.get('error_kind'))
     return [f'{sum(bool(r["check_ok"]) for r in rows)}/{len(rows)}',
             f'{reviewed.count("ПРИНЯТО")}/{sum(v is not None for v in reviewed)}',
@@ -365,7 +569,7 @@ def report(args):
         return 0
     verdicts = verdict_map()
     print('Механика: check.sh + разрешённые файлы. Ревью: ПРИНЯТО / с вердиктом; 0/0 = ревью нет.\n'
-          'Вердикт относится ко всем повторам данной задачи и режима внутри runid.\n'
+          'Оценки привязаны к повтору и кругу; старые записи без repeat — ко всем повторам круга 1.\n'
           'Время — только gemini-task, без создания worktree и приёмки. Часы — местное время запуска.\n')
     for title, key, headers in (
         ('Задача × режим', lambda r: (r['task'], r['mode']), ['Задача', 'Режим']),
@@ -383,52 +587,175 @@ def report(args):
                 labels[0] = DAYS[labels[0]]
             output.append(labels + summarize(items, verdicts))
         print(title + '\n\n' + table(headers + ['Механика', 'Ревью', 'Медиана, с', 'Ошибки'], output) + '\n')
+    quality_report(rows, verdicts)
     slow = [r for r in rows if r['seconds'] > 300]
     print('Запуски дольше 5 минут\n')
-    print(table(['runid', 'Задача', 'Режим', 'Повтор', 'Секунды', 'Статус'],
-                [[r['runid'], r['task'], r['mode'], r['repeat'], r['seconds'], r['status']]
+    print(table(['runid', 'Задача', 'Режим', 'Повтор', 'Секунды', 'Статус', 'Круг'],
+                [[r['runid'], r['task'], r['mode'], r['repeat'], r['seconds'], r['status'], r.get('round', 1)]
                  for r in sorted(slow, key=lambda r: r['seconds'], reverse=True)]) if slow else 'Нет.')
     return 0
+
+
+def quality_report(rows, verdicts):
+    chains = defaultdict(list)
+    for row in rows:
+        chains[round_key(row)[:4]].append(row)
+    outcomes = []
+    for attempts in chains.values():
+        final = max(attempts, key=lambda r: r.get('round', 1))
+        verdict = verdict_for(final, verdicts)
+        rounds = max(r.get('round', 1) for r in attempts)
+        if verdict and verdict['verdict'] == 'ПРИНЯТО':
+            outcome = 'first' if rounds == 1 else 'fixed'
+        elif verdict and verdict['verdict'] == 'ОТВЕРГНУТО':
+            outcome = 'rejected'
+        elif final['status'] != 'ГОТОВО' or not final['check_ok']:
+            outcome = 'mechanics'
+        else:
+            outcome = 'pending'
+        outcomes.append((final, outcome, rounds))
+    for title, by_task in (('Итоги ревью по задачам и режимам', True), ('Итоги ревью по режимам', False)):
+        groups = defaultdict(list)
+        for final, outcome, rounds in outcomes:
+            key = (final['task'], final['mode']) if by_task else (final['mode'],)
+            groups[key].append((outcome, rounds))
+        output = []
+        for key, items in sorted(groups.items()):
+            counts = Counter(outcome for outcome, _ in items)
+            output.append([*key, *[counts[k] for k in ('first', 'fixed', 'rejected', 'mechanics', 'pending')],
+                           round(statistics.mean(n for _, n in items), 2)])
+        print(title + '\n\n' + table((['Задача', 'Режим'] if by_task else ['Режим']) +
+              ['Принято с 1-го круга', 'После правок', 'Отвергнуто', 'Не прошёл механику',
+               'Ожидает ревью/правок', 'Среднее число кругов'], output) + '\n')
+    reasons = Counter()
+    mismatches = defaultdict(set)
+    seen = set()
+    for row in rows:
+        verdict = verdict_for(row, verdicts)
+        if not verdict or verdict['verdict'] == 'ПРИНЯТО':
+            continue
+        # Несколько старых строк результата одного круга не удваивают причину.
+        key = round_key(row)
+        if key not in seen:
+            seen.add(key)
+            reason = verdict.get('tag') or ' '.join((verdict.get('blockers') or verdict.get('note')
+                                                    or verdict.get('text') or verdict.get('minor')
+                                                    or 'причина не записана').lower().split()[:4])
+            reasons[reason] += 1
+        if row['check_ok']:
+            mismatches[row['mode']].add(row['task'])
+    print('Топ причин отказа / замечаний (последняя оценка каждого круга)\n\n' +
+          table(['Причина / тег', 'Число'], reasons.most_common(10)) + '\n')
+    print('Ложная уверенность: механика ок, ревью ЗАМЕЧАНИЯ/ОТВЕРГНУТО хотя бы в одном круге.\n'
+          'Число различных задач в выбранных прогонах, а не число повторов.\n\n' +
+          table(['Режим', 'Число задач с расхождением'],
+                [[mode, len(mismatches[mode])] for mode in sorted({r['mode'] for r in rows})]) + '\n')
 
 
 def review(args):
     rows = [r for r in read_jsonl(home() / 'results.jsonl') if r['runid'] == args.runid]
     if not rows:
         raise ValueError('Прогон не найден')
-    content = ['# Задание Codex-ревьюеру', '', f'Прогон: {args.runid}', '',
+    content = ['# Задание ревьюеру (Codex сейчас, Opus или человек позже)', '', f'Прогон: {args.runid}', '',
                'Только чтение. Не менять код/ветки, не коммитить, не обращаться к сети или Gemini.',
-               'Сопоставить план и diff относительно base_commit, проверить корректность и полноту тестов.',
-               'Механическая приёмка не доказывает качество. Отдельно проверить allowed_files и ограничения.',
-               'Вердикт на задачу × режим: ПРИНЯТО, ЗАМЕЧАНИЯ или ОТВЕРГНУТО; указать причины и строки.',
-               'Учитывать все повторы. Мутационные проверки по желанию — только в изолированном временном',
-               'каталоге, без изменений сохранённых worktree; тесты один раз, только затронутой части, timeout 120.',
-               'Живые Gemini, полные server/tests/run.sh и app/launcher/tests/run.sh не запускать.', '']
+               'Сопоставить план и patch.diff относительно base_commit, проверить корректность и полноту тестов.',
+               'Механическая приёмка не доказывает качество. Проверить allowed_files и ограничения.',
+               'Вердикт на каждый повтор и круг: ПРИНЯТО, ЗАМЕЧАНИЯ или ОТВЕРГНУТО.',
+               'Причина отказа обязательна. Блокеры и мелочи записывать отдельно; не стирать прежние круги.',
+               'Финал: ПРИНЯТО или ОТВЕРГНУТО; если исполнитель так и не смог — ОТВЕРГНУТО с этой причиной.',
+               'Мутационные проверки по желанию — только во временном каталоге; тесты один раз,',
+               'только затронутой части под timeout 120. Полные наборы тестов не запускать.', '']
     for row in rows:
-        exists = Path(row['worktree']).is_dir()
-        content += [f'## {row["task"]} / {row["mode"]} / повтор {row["repeat"]}', '',
+        folder = artifact_dir(row)
+        content += [f'## {row["task"]} / {row["mode"]} / повтор {row["repeat"]} / круг {row.get("round", 1)}', '',
                     f'- План: `{row["plan_file"]}`', f'- Worktree: `{row["worktree"]}`',
-                    f'- base_commit: `{row["base_commit"]}`',
-                    f'- Прогресс: `{row["progress_file"]}`',
-                    f'- Приёмка: `{Path(row["plan_file"]).parent / "check.log"}`',
+                    f'- base_commit: `{row["base_commit"]}`', f'- Патч: `{folder / "patch.diff"}`',
+                    f'- Итог Gemini: `{folder / "report.txt"}`', f'- Прогресс: `{row["progress_file"]}`',
+                    f'- Приёмка: `{folder / "check.txt"}`', f'- Метаданные: `{folder / "meta.json"}`',
                     f'- Статус: {row["status"]}; механика: {row["check_ok"]}',
                     f'- Запрещённые файлы: {row["forbidden_files"]}',
-                    '- Worktree доступен.' if exists else '- Worktree удалён; полноценное ревью невозможно. Для нового прогона нужен --keep-all.', '']
+                    '- Worktree доступен.' if Path(row['worktree']).is_dir() else
+                    '- Worktree удалён: читать сохранённый патч; если патч отброшен, полноценное ревью невозможно.', '']
     content += ['После чтения записать вердикты командой:', '',
-                f'`gemini-bench add-verdict {args.runid} <task> <mode> <ПРИНЯТО|ЗАМЕЧАНИЯ|ОТВЕРГНУТО> "причины"`',
-                '', 'Запись вердикта делает человек или отдельно уполномоченный агент; этот файл ничего не запускает.', '']
+                f'`gemini-bench add-verdict {args.runid} <task> <mode> --repeat N --round N '
+                '--reviewer codex --verdict ПРИНЯТО|ЗАМЕЧАНИЯ|ОТВЕРГНУТО '
+                '--blockers "текст" --minor "текст" --note "итог" [--tag "класс причины"]`',
+                '', 'При замечаниях: retry, затем снова review и add-verdict следующего круга.',
+                'Этот файл ничего не запускает.', '']
     path = home() / f'review-{args.runid}.md'
     path.write_text('\n'.join(content))
     print(path)
     return 0
 
 
+def text_or_file(value):
+    return Path(value[1:]).expanduser().read_text() if value.startswith('@') else value
+
+
 def add_verdict(args):
-    if not any((r['runid'], r['task'], r['mode']) == (args.runid, args.task, args.mode)
-               for r in read_jsonl(home() / 'results.jsonl')):
-        raise ValueError('Такой тройки runid/task/mode нет в results.jsonl')
-    append_json(home() / 'verdicts.jsonl', dict(ts=datetime.now().astimezone().isoformat(),
-                runid=args.runid, task=args.task, mode=args.mode, verdict=args.verdict, text=args.text))
-    print('Вердикт записан (последний заменяет прежний в отчёте).')
+    rows = selected_rows(args)
+    legacy = args.legacy_verdict is not None
+    if legacy:
+        if args.verdict or args.round is not None or args.reviewer:
+            raise ValueError('Не смешивайте короткий формат с --verdict/--round/--reviewer')
+        verdict, round_number, reviewer = args.legacy_verdict, 1, 'human'
+    else:
+        if not args.verdict or args.round is None or not args.reviewer:
+            raise ValueError('Нужны --round N --reviewer codex|opus|human --verdict ВЕРДИКТ')
+        verdict, round_number, reviewer = args.verdict, args.round, args.reviewer
+    selected = [r for r in rows if r.get('round', 1) == round_number]
+    if not selected:
+        raise ValueError('Такого круга нет в results.jsonl')
+    blockers, minor = text_or_file(args.blockers), text_or_file(args.minor)
+    note = args.note or args.text
+    if not legacy and args.text:
+        raise ValueError('В новом формате используйте --note вместо позиционного текста')
+    if verdict != 'ПРИНЯТО' and not any(t.strip() for t in (blockers, minor, note)):
+        raise ValueError('Причина отказа/замечаний обязательна: --blockers, --minor или --note')
+    for repeat in sorted({r['repeat'] for r in selected}):
+        append_json(home() / 'verdicts.jsonl', dict(ts=datetime.now().astimezone().isoformat(),
+                    runid=args.runid, task=args.task, mode=args.mode, repeat=repeat,
+                    round=round_number, reviewer=reviewer, verdict=verdict, blockers=blockers,
+                    minor=minor, note=note, tag=args.tag))
+    prune_patches()
+    print(f'Вердикт записан: круг {round_number}; история сохранена.')
+    return 0
+
+
+def show(args):
+    rows = selected_rows(args)
+    history = read_jsonl(home() / 'verdicts.jsonl')
+    for row in sorted(rows, key=lambda r: (r['repeat'], r.get('round', 1))):
+        folder = artifact_dir(row)
+        print(f'\n{row["task"]} / {row["mode"]} / повтор {row["repeat"]} / круг {row.get("round", 1)}')
+        path = folder / 'report.txt'
+        print(path.read_text() if path.is_file() else 'Отчёт Gemini отсутствует (старый или незавершённый прогон).')
+        print(f'patch.diff: {folder / "patch.diff"}')
+        if (folder / 'meta.json').is_file():
+            meta = json.loads((folder / 'meta.json').read_text())
+            if meta.get('patch_dropped'):
+                print(f'Патч отброшен: {meta.get("patch_drop_reason")}; '
+                      f'{meta["patch_bytes"]} байт; sha256={meta["patch_sha256"]}')
+        for verdict in history:
+            if (verdict['runid'], verdict['task'], verdict['mode']) != (args.runid, args.task, args.mode):
+                continue
+            if verdict.get('repeat') not in (None, row['repeat']) or verdict.get('round', 1) != row.get('round', 1):
+                continue
+            print(f'Ревью: круг {verdict.get("round", 1)}, {verdict.get("reviewer", "human")}, '
+                  f'{verdict["verdict"]} ({verdict["ts"]})')
+            print('Блокеры: ' + verdict.get('blockers', ''))
+            print('Мелочи: ' + verdict.get('minor', ''))
+            print('Итог/причина: ' + (verdict.get('note') or verdict.get('text', '')))
+            if verdict.get('tag'):
+                print('Тег: ' + verdict['tag'])
+    verdicts = verdict_map()
+    for repeat in sorted({r['repeat'] for r in rows}):
+        last = max((r for r in rows if r['repeat'] == repeat), key=lambda r: r.get('round', 1))
+        final = verdict_for(last, verdicts)
+        state = final['verdict'] if final else 'Ожидает ревью'
+        if state == 'ЗАМЕЧАНИЯ':
+            state += ' (финал пока не записан)'
+        print(f'Финал повтора {repeat}: {state}')
     return 0
 
 
@@ -471,8 +798,29 @@ def main(argv=None):
     verdict.add_argument('runid')
     verdict.add_argument('task')
     verdict.add_argument('mode', choices=MODES)
-    verdict.add_argument('verdict', choices=VERDICTS)
+    verdict.add_argument('legacy_verdict', choices=VERDICTS, nargs='?')
     verdict.add_argument('text', nargs='?', default='')
+    verdict.add_argument('--verdict', choices=VERDICTS)
+    verdict.add_argument('--round', type=positive)
+    verdict.add_argument('--reviewer', choices=('codex', 'opus', 'human'))
+    verdict.add_argument('--repeat', type=positive)
+    verdict.add_argument('--blockers', default='')
+    verdict.add_argument('--minor', default='')
+    verdict.add_argument('--note', default='')
+    verdict.add_argument('--tag', default='')
+    retrier = commands.add_parser('retry', help='Живой вызов: только после явного «да» владельца')
+    retrier.add_argument('runid')
+    retrier.add_argument('task')
+    retrier.add_argument('mode', choices=MODES)
+    retrier.add_argument('--repeat', type=positive)
+    retrier.add_argument('--max-min', type=minutes, default=20)
+    retrier.add_argument('--keep-all', action='store_true')
+    retrier.add_argument('--keep-failed', action='store_true')
+    viewer = commands.add_parser('show')
+    viewer.add_argument('runid')
+    viewer.add_argument('task')
+    viewer.add_argument('mode', choices=MODES)
+    viewer.add_argument('--repeat', type=positive)
     importer = commands.add_parser('import')
     importer.add_argument('directory')
     args = parser.parse_args(argv)
@@ -484,7 +832,8 @@ def main(argv=None):
         if args.command == 'import':
             raise ValueError('Автоимпорт gt2-N.md пока отключён: формат команд и allowed_files требует ручной проверки. '
                              'Ничего не создано. См. раздел «Добавление задачи» в README.md.')
-        return {'run': run, 'report': report, 'review': review, 'add-verdict': add_verdict}[args.command](args)
+        return {'run': run, 'retry': retry, 'show': show, 'report': report,
+                'review': review, 'add-verdict': add_verdict}[args.command](args)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         print(f'Ошибка: {error}', file=sys.stderr)
         return 2
