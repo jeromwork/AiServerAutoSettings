@@ -42,6 +42,9 @@ check_channel_isolation() {
       echo "Для test разрешён только ~/.local/share/remote-agents/dist-test ($dist)" >&2
       return 1
     fi
+  elif [[ "$channel" == "main" && "$dist" == *dist-test ]]; then
+    echo "Для main запрещён путь test-канала ($dist)" >&2
+    return 1
   fi
   return 0
 }

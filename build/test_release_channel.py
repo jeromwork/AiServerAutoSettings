@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline channel regressions: real packaging, disposable fixtures, no external tools."""
+"""Offline channel regressions: real packaging/Git, disposable fixtures, mocked services."""
 import contextlib
 import hashlib
 import importlib.util
@@ -18,6 +18,25 @@ import zipfile
 ROOT = Path(__file__).resolve().parent
 HEAD = 'fixture-head'
 TEST_DIST = '~/.local/share/remote-agents/dist-test'
+
+
+class GitIgnoreTests(unittest.TestCase):
+    def test_test_build_output_is_ignored_by_real_git(self):
+        with tempfile.TemporaryDirectory(prefix='remoteagents-channel-git-') as tmp:
+            repo = Path(tmp)
+            build = repo / 'build'
+            (build / 'out-test').mkdir(parents=True)
+            shutil.copy2(ROOT / '.gitignore', build / '.gitignore')
+            (build / 'out-test/x').write_text('build output')
+            # Use the original PATH, outside ChannelTests' fake-Git environment.
+            subprocess.run(['git', 'init', '--quiet', str(repo)], check=True,
+                           capture_output=True, text=True, timeout=30)
+            result = subprocess.run(['git', '-C', str(repo), 'check-ignore', '-v',
+                                     'build/out-test/x'], capture_output=True,
+                                    text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('build/.gitignore:', result.stdout)
+            self.assertIn('/out-test/\tbuild/out-test/x', result.stdout)
 
 
 class ChannelTests(unittest.TestCase):
@@ -276,6 +295,20 @@ exec ''' + shlex.quote(sys.executable) + ' "$@"\n')
         for path in (paths[1], TEST_DIST + '/../dist'):
             self.run_script('release.sh', '--channel', 'test', 'fixture.invalid', path, ok=False)
         self.assertEqual(self.events(), [])
+
+    def test_main_rejects_test_dist_before_external_commands(self):
+        for path in (TEST_DIST, '/home/owner/.local/share/remote-agents/dist-test',
+                     '/tmp/dist-test', 'dist-test'):
+            with self.subTest(path=path):
+                self.run_script('release.sh', '--channel', 'main', 'fixture.invalid', path,
+                                ok=False)
+                self.assertEqual(self.events(), [])
+        script = 'source "$1"; shift; for path in "$@"; do check_channel_isolation main "$path" || exit; done'
+        result = subprocess.run(['bash', '-c', script, 'fixture',
+                                 str(self.build / 'release-lib.sh'),
+                                 TEST_DIST.removesuffix('-test'), '/tmp/custom-dist'],
+                                env=self.env, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_test_source_guards(self):
         out, _ = self.prepare('test')
