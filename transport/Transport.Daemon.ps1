@@ -34,8 +34,8 @@ $LightProbeFuseMs=3000
 $VerifyProbeFuseMs=12000
 # Предохранитель (конституция 4а): engine-ready недоступно при зависшем запуске; закрывает эпизод и перезапускает движок, успех не объявляет. Проверяется существующим главным циклом.
 $EngineReadyFuseMs=20000;$script:engineWait=$null;$script:engineApiCheck=$null
-# Один повтор после readiness-timeout; существующий startFailures сбрасывается только подтверждённым API.
-$EngineReadyFailureLimit=2
+# Один повтор после readiness-timeout; ошибки до создания процесса имеют отдельную серию startFailures.
+$EngineReadyFailureLimit=2;$script:engineReadyTimeouts=0
 # tick.transport-revision-full: полный пересчёт хэша содержимого раз в столько секунд, запасной ход на правку той же длины и того же времени записи (кэш по штампу её не видит). Не условие успеха.
 $RevisionFullTickSec=60;$nextRevisionFull=[DateTime]::MinValue
 # Сердцебиение статуса: файл переписывается без изменений содержимого не реже этого, чтобы Supervisor и читатели видели свежий updatedAt (предел устаревания 15 с).
@@ -87,7 +87,7 @@ function Stop-DaemonObservation([switch]$EngineRestart) {
         }
     }
     $pathChecks.Clear();$gateOkUntil.Clear();$pathCheckStartedAt.Clear()
-    if(-not $EngineRestart){Reset-DaemonDecision}
+    if(-not $EngineRestart){$script:engineReadyTimeouts=0;Reset-DaemonDecision}
 }
 function Start-DaemonReader([switch]$NewEngine) {
     Stop-TransportEvents $reader;$script:reader=$null
@@ -347,7 +347,7 @@ function Receive-DaemonChecks {
 $script:pathLogState=@{}
 function Add-DaemonQueuedEvent($Event) {
     # Latch invalidation before the reducer drains or a bounded queue drops the event.
-    if($Event.kind -in @('net-change','net.change','win.route.changed','win.iface.changed','win.addr.changed')){$script:networkRefreshPending=$true}
+    if($Event.kind -in @('net-change','net.change','win.route.changed','win.iface.changed','win.addr.changed')){$script:networkRefreshPending=$true;$script:engineReadyTimeouts=0}
     $script:daemonEventsQueued++
     if($eventQueue.Count -ge $DaemonEventLimit){
         [Array]::Copy($eventQueue,1,$eventQueue,0,$DaemonEventLimit-1)
@@ -559,13 +559,19 @@ function Confirm-DaemonSelection([string]$Tag) {
     if($verdict.action -eq 'check-direct'){Start-DaemonDirect}
     elseif($verdict.action -eq 'check-path'){Start-DaemonPath $verdict.tag}
 }
+function Get-DaemonSelectorTarget([string]$Tag) {
+    if($Tag -in @($paths.Candidates.tag)){return $Tag}
+    return 'unavailable'
+}
 function Switch-TransportActive([string]$Tag,[bool]$Verified,[string]$Why='selection') {
     if($pin.mode -eq 'pinned' -and $Tag -ne $pin.tag){return $false}
     if($pin.mode -eq 'auto' -and $Why -notlike 'verdict-*' -and $Tag -ne $active -and $decision -and $null -ne $decision.lastSwitchAt -and ((Get-DaemonTime)-$decision.lastSwitchAt) -lt 10000){return $false}
     if(-not $Tag){$script:confirmed=$false;$script:errorText='Нет проверенного пути';return $false}
     try{
-        $target=$Tag;if($Tag -notin @($paths.Candidates.tag)){$target='unavailable';$Verified=$false}
+        $target=Get-DaemonSelectorTarget $Tag;if($target -eq 'unavailable'){$Verified=$false}
         Set-TransportSelector $settings.Options $secret $target
+        $script:engineApiTarget=$target
+        Stop-DaemonEngineApiCheck
         $changed=($Tag -ne $active);$previousActive=[string]$active
         $script:active=$Tag;$script:confirmed=$Verified
         if($changed){Publish-DaemonSwitch $previousActive $Tag $Why;Confirm-DaemonSelection $Tag}
@@ -639,37 +645,51 @@ function Test-TransportEngineListener([int]$Port) {
 }
 function Stop-DaemonEngineApiCheck {
     if(-not $engineApiCheck){return}
-    try{
-        if($engineApiCheck.task.IsFaulted){[void]$engineApiCheck.task.Exception}
-        if($engineApiCheck.task.IsCompleted -and -not $engineApiCheck.task.IsFaulted -and -not $engineApiCheck.task.IsCanceled){$engineApiCheck.task.Result.Dispose()}
-    }finally{$engineApiCheck.client.Dispose();$engineApiCheck.content.Dispose();$script:engineApiCheck=$null}
+    try{if($engineApiCheck.task.IsFaulted){[void]$engineApiCheck.task.Exception}}
+    finally{$engineApiCheck.client.Dispose();$script:engineApiCheck=$null}
+}
+function New-TransportEngineApiClient {
+    Add-Type -AssemblyName System.Net.Http
+    $handler=New-Object Net.Http.HttpClientHandler;$handler.UseProxy=$false
+    $client=New-Object Net.Http.HttpClient($handler);$client.Timeout=[Threading.Timeout]::InfiniteTimeSpan
+    $client.DefaultRequestHeaders.Authorization=New-Object Net.Http.Headers.AuthenticationHeaderValue('Bearer',$secret)
+    return $client
 }
 function Test-TransportEngineApiReady {
-    # One nonblocking observation per main-loop iteration. Authenticate the selector just
-    # as at startup, but never wait for HTTP in the loop (a foreign listener is not ready).
+    # GET authenticates the live selector without changing it. GetStringAsync buffers
+    # the body and disposes the response; neither HTTP nor body reads wait in the loop.
+    $target=Get-DaemonSelectorTarget $active
+    if($engineApiCheck -and ($engineApiCheck.generation -ne $checkGeneration -or $engineApiCheck.target -ne $target -or $engineApiCheck.active -ne $active)){
+        Stop-DaemonEngineApiCheck
+    }
     if(-not $engineApiCheck){
         if(-not (Test-TransportEngineListener ([int]$settings.Options.apiPort))){return $false}
-        Add-Type -AssemblyName System.Net.Http
-        $handler=New-Object Net.Http.HttpClientHandler;$handler.UseProxy=$false
-        $client=New-Object Net.Http.HttpClient($handler);$client.Timeout=[Threading.Timeout]::InfiniteTimeSpan
-        $client.DefaultRequestHeaders.Authorization=New-Object Net.Http.Headers.AuthenticationHeaderValue('Bearer',$secret)
-        $content=New-Object Net.Http.StringContent((ConvertTo-Json -Compress @{name=$engineApiTarget}),[Text.Encoding]::UTF8,'application/json')
+        $client=New-TransportEngineApiClient
         try{
-            $task=$client.PutAsync(('http://127.0.0.1:'+$settings.Options.apiPort+'/proxies/active'),$content)
-            $script:engineApiCheck=@{client=$client;content=$content;task=$task}
-        }catch{$client.Dispose();$content.Dispose()}
+            $task=$client.GetStringAsync(('http://127.0.0.1:'+$settings.Options.apiPort+'/proxies/active'))
+            $script:engineApiCheck=@{client=$client;task=$task;target=$target;active=$active;generation=$checkGeneration}
+        }catch{$client.Dispose()}
         return $false
     }
     if(-not $engineApiCheck.task.IsCompleted){return $false}
     try{
-        return (-not $engineApiCheck.task.IsFaulted -and -not $engineApiCheck.task.IsCanceled -and $engineApiCheck.task.Result.IsSuccessStatusCode)
-    }finally{Stop-DaemonEngineApiCheck}
+        if($engineApiCheck.task.IsFaulted -or $engineApiCheck.task.IsCanceled){return $false}
+        $selector=ConvertFrom-Json -InputObject $engineApiCheck.task.Result -ErrorAction Stop
+        if($selector.now -ne $target -or $selector.name -ne 'active'){return $false}
+        return @{target=$target;active=$active;generation=$checkGeneration}
+    }catch{return $false}
+    finally{Stop-DaemonEngineApiCheck}
 }
-function Complete-DaemonEngineReady {
+function Complete-DaemonEngineReady([string]$Target=$engineApiTarget,[int]$Generation=$checkGeneration,[string]$ActiveTag=$active) {
     if(-not $engine -or $engine.Process.HasExited -or $script:busEngineReady){return}
+    if($Generation -ne $checkGeneration -or $ActiveTag -ne $active -or $Target -ne $engineApiTarget -or $Target -ne (Get-DaemonSelectorTarget $active)){
+        Stop-DaemonEngineApiCheck
+        [void](Test-TransportEngineApiReady)
+        return
+    }
     $script:busEngineReady=$true
-    if($engineApiTarget -eq $active){Confirm-DaemonSelection $active}
-    $script:bindRetry=$null;$script:portConflict=$null;$script:startFailures=0
+    Confirm-DaemonSelection $active
+    $script:bindRetry=$null;$script:portConflict=$null;$script:engineReadyTimeouts=0
     Write-TransportLog $root 'ready'
     Add-DaemonEvent (New-DaemonEvent 'engine-ready' ([string]$active) 'ready')
     Start-DaemonReader -NewEngine
@@ -755,6 +775,7 @@ function Start-TransportEngine {
     if($ready -and -not $engine.Process.HasExited){
         try{Set-TransportSelector $settings.Options $secret $engineApiTarget;Complete-DaemonEngineReady}catch{}
     }
+    $script:startFailures=0
     if(-not $script:busEngineReady){
         Suspend-DaemonEpisode
         # Each process gets its own fuse; a previous timeout keeps the episode closed.
@@ -778,23 +799,23 @@ function Update-DaemonEngine([DateTime]$Now) {
     }
     if($engineWait -and $engine -and -not $engine.Process.HasExited){
         if($script:busEngineReady){Resume-DaemonEpisode}
-        elseif(Test-TransportEngineApiReady){Complete-DaemonEngineReady}
+        elseif(($readyProof=Test-TransportEngineApiReady)){Complete-DaemonEngineReady $readyProof.target $readyProof.generation $readyProof.active}
         if($engineWait){
             Suspend-DaemonEpisode
             if($engineWait.expired){
                 Stop-TransportEngine
-                $script:startFailures++;$script:checkingSince=$null
+                $script:engineReadyTimeouts++;$script:checkingSince=$null
                 $script:errorText='Движок не готов: engine-ready-timeout'
-                Write-TransportLog $root 'process-failed' ([ordered]@{reason='engine-ready-timeout';failures=$startFailures})
-                if($startFailures -lt $EngineReadyFailureLimit){
-                    $script:retryAt=$now.AddSeconds((Get-TransportStartPause $startFailures))
-                    Write-TransportLog $root 'restart' ([ordered]@{why='engine-ready-timeout';retry_in_s=(Get-TransportStartPause $startFailures)})
+                Write-TransportLog $root 'process-failed' ([ordered]@{reason='engine-ready-timeout';failures=$engineReadyTimeouts})
+                if($engineReadyTimeouts -lt $EngineReadyFailureLimit){
+                    $script:retryAt=$now.AddSeconds((Get-TransportStartPause $engineReadyTimeouts))
+                    Write-TransportLog $root 'restart' ([ordered]@{why='engine-ready-timeout';retry_in_s=(Get-TransportStartPause $engineReadyTimeouts)})
                 }
                 Publish-TransportStatus;Publish-DaemonBusStatus
             }
         }
     }
-    if(-not $engine -and (-not $engineWait -or $startFailures -lt $EngineReadyFailureLimit) -and $now -ge $retryAt -and -not $directCheck -and -not $pathChecks.Count -and (-not $eventQueue.Count -or $engineWait)){
+    if(-not $engine -and ($engineReadyTimeouts -lt $EngineReadyFailureLimit) -and $now -ge $retryAt -and -not $directCheck -and -not $pathChecks.Count -and (-not $eventQueue.Count -or $engineWait)){
         try{
             # После неудачи повторяем тяжёлую пробу: прежняя ошибка CIM/WMI могла быть временной.
             if($startFailures -gt 0 -and $settings.Options.bindPhysical){$netSnapshot=Get-TransportNetworkSnapshot $settings.Options -Force;$script:network=$netSnapshot.network;$script:metered=$netSnapshot.metered;$script:nextNetwork=$now.AddSeconds(5)}

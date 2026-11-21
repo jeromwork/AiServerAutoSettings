@@ -23,7 +23,7 @@ function Publish-DaemonBusReady {}
 function Publish-TransportStatus {}
 function Publish-DaemonBusStatus {}
 function Stop-TransportEvents {}
-function Set-TransportSelector($Options,$Secret,$Tag){$script:selectorCalls+=,$Tag}
+function Set-TransportSelector($Options,$Secret,$Tag){$script:selectorCalls+=,$Tag;$script:actualSelector=$Tag}
 function Start-TransportProbe {throw 'Unexpected full legacy probe'}
 function Stop-TransportProbe {}
 function Start-TransportPathCheck {
@@ -44,12 +44,16 @@ function Write-TransportJson {
     & $script:writeTransportJson @PSBoundParameters
 }
 function Reset-DaemonPorts {$false}
-function New-TransportConfig { @{outbounds=@(@{tag='active';default=$active})} }
+function New-TransportConfig {
+    param($Settings,$Paths,$Secret,$Tag,$Interface)
+    $script:configBinds+=,[bool]$Settings.Options.bindPhysical
+    @{outbounds=@(@{tag='active';default=(Get-DaemonSelectorTarget $Tag)})}
+}
 function Test-TransportConfigFile {}
 function Set-TransportProcessPriority {$true}
 function Save-TransportOwner {}
 function Start-TransportProcess {
-    $script:engineStarts++
+    $script:engineStarts++;$script:actualSelector=Get-DaemonSelectorTarget $active
     @{Process=@{HasExited=$false;ExitCode=1};stopped=$false}
 }
 function Stop-TransportProcess($Child){if($Child){$Child.stopped=$true;$script:engineStops++}}
@@ -62,8 +66,27 @@ function Wait-TransportEngineReady([int]$Port,[int]$TimeoutMs){
 }
 function Test-TransportEngineApiReady {
     $script:apiChecks++
-    return ($script:apiChecks -gt $script:apiFalseChecks)
+    if($script:realApiObserver){return (& $script:testEngineApiReady)}
+    if($script:apiChecks -gt $script:apiFalseChecks){return @{target=$engineApiTarget;active=$active;generation=$checkGeneration}}
+    return $false
 }
+# External HTTP boundary: tasks finish only when the test supplies an answer.
+# All request selection, generation checks, JSON parsing and completion remain real.
+function Test-TransportEngineListener {param([int]$Port) return $true}
+function New-TransportEngineApiClient {
+    $completion=New-Object 'Threading.Tasks.TaskCompletionSource[string]'
+    $client=[pscustomobject]@{disposed=$false;completion=$completion;method=$null;uri=$null}
+    $client|Add-Member ScriptMethod GetStringAsync {
+        param($Uri)
+        $this.method='GET';$this.uri=$Uri
+        return $this.completion.Task
+    }
+    $client|Add-Member ScriptMethod Dispose {$this.disposed=$true}
+    $script:apiClients+=,$client
+    return $client
+}
+function Test-TransportVpnOff {return $script:vpnOff}
+function Get-TransportNetworkSnapshot {param($Options,[switch]$Force) $script:networkRefreshes++;@{network=$network;metered=$false}}
 function Start-DaemonReader {param([switch]$NewEngine) $script:readerStarts++}
 function Write-DaemonWizardProgress {}
 function New-TransportDiagnostic($Child,$Candidate,$Reason){
@@ -97,7 +120,8 @@ function Fixture([int]$Candidates=3){
     $script:LightProbeFuseMs=3000;$script:VerifyProbeFuseMs=12000;$script:published=@();$script:logged=@();$script:started=@();$script:selectorCalls=@();$script:directStarts=0
     $script:fakeEngineIO=$true;$script:engineStarts=0;$script:engineStops=0;$script:initialWaits=0;$script:readerStarts=0
     $script:apiChecks=0;$script:apiFalseChecks=0;$script:engineApiCheck=$null;$script:engineApiTarget='p0'
-    $script:startFailures=0;$script:EngineReadyFailureLimit=2;$script:engineAttempted=$false
+    $script:realApiObserver=$false;$script:apiClients=@();$script:actualSelector='p0';$script:configBinds=@();$script:vpnOff=$true;$script:networkRefreshes=0
+    $script:startFailures=0;$script:engineReadyTimeouts=0;$script:EngineReadyFailureLimit=2;$script:engineAttempted=$false
     $script:retryAt=[DateTime]::MinValue;$script:bindRetry=$null;$script:portConflict=$null;$script:errorText=$null
     $script:daemonStarted=[DateTime]::Now;$script:bindState=@{failures=0;none=$false}
     Initialize-DaemonQuality
@@ -120,25 +144,32 @@ function Select-Second {
     $script:clockMs=3100;Invoke-DaemonDecision
     Assert ($active -eq 'p1' -and $decision.episode.status -eq 'verifying') 'selector acknowledgement did not start verification'
 }
-# Actual asynchronous API observer: pending/auth failure is never readiness.
-# Completed responses are consumed only after IsCompleted and all resources released.
-Add-Type -AssemblyName System.Net.Http
-foreach($status in @(401,204)){
-    $completion=New-Object 'Threading.Tasks.TaskCompletionSource[Net.Http.HttpResponseMessage]'
-    $client=[pscustomobject]@{disposed=$false};$client|Add-Member ScriptMethod Dispose {$this.disposed=$true}
-    $content=[pscustomobject]@{disposed=$false};$content|Add-Member ScriptMethod Dispose {$this.disposed=$true}
-    $script:engineApiCheck=@{client=$client;content=$content;task=$completion.Task}
+# Actual asynchronous observer: pending/401/empty or invalid body/wrong selector,
+# faults and cancellation never prove readiness; successful GET proves current now.
+foreach($outcome in @('401','204','invalid','foreign','wrong-target','fault','cancelled','ok')){
+    Fixture
+    Assert (-not (& $script:testEngineApiReady)) 'new API request was accepted immediately'
+    $client=$apiClients[-1]
+    Assert ($client.method -eq 'GET' -and $client.uri -eq 'http://127.0.0.1:29095/proxies/active') 'readiness request changed selector or used wrong endpoint'
     Assert (-not (& $script:testEngineApiReady) -and $engineApiCheck -and -not $client.disposed) 'pending API request was awaited or accepted'
-    $response=New-Object Net.Http.HttpResponseMessage([Net.HttpStatusCode]$status)
-    $completion.SetResult($response)
+    switch($outcome){
+        '401' {$client.completion.SetException([Net.Http.HttpRequestException]::new('401'))}
+        '204' {$client.completion.SetResult('')}
+        'invalid' {$client.completion.SetResult('{')}
+        'foreign' {$client.completion.SetResult('{"name":"foreign","now":"p0"}')}
+        'wrong-target' {$client.completion.SetResult('{"name":"active","now":"p1"}')}
+        'fault' {$client.completion.SetException([InvalidOperationException]::new('fake fault'))}
+        'cancelled' {[void]$client.completion.SetCanceled()}
+        'ok' {$client.completion.SetResult('{"name":"active","now":"p0"}')}
+    }
     $ready=& $script:testEngineApiReady
-    Assert ($ready -eq ($status -eq 204) -and -not $engineApiCheck -and $client.disposed -and $content.disposed) 'API authentication result/cleanup lost'
+    Assert ([bool]$ready -eq ($outcome -eq 'ok') -and -not $engineApiCheck -and $client.disposed) ('API result/cleanup lost: '+$outcome)
 }
-# Cancellation of an in-flight request does not read its unfinished Result.
-$completion=New-Object 'Threading.Tasks.TaskCompletionSource[Net.Http.HttpResponseMessage]'
-$script:engineApiCheck=@{client=$client;content=$content;task=$completion.Task}
+# Stopping an in-flight request does not read its unfinished Result.
+Fixture
+[void](& $script:testEngineApiReady);$client=$apiClients[-1]
 Stop-DaemonEngineApiCheck
-Assert (-not $engineApiCheck) 'engine stop retained pending API request'
+Assert (-not $engineApiCheck -and $client.disposed -and -not $client.completion.Task.IsCompleted) 'engine stop retained pending API request or read Result'
 # All production creation/invocation sites explicitly opt in, including startup/reset/ack.
 $sites=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -in @('New-TransportDecisionState','Invoke-TransportDecision')},$true))
 Assert ($sites.Count -eq 4) 'decision call sites changed; audit all opt-ins'
@@ -184,6 +215,22 @@ $before=$apiChecks;Engine-Step
 Assert ($apiChecks -eq $before -and $readerStarts -eq 1) 'ready engine kept polling or repeated engine-ready'
 $script:clockMs=8400;Deliver 'p0' 'ok';Invoke-DaemonDecision
 Assert ($confirmed -and $decision.episode.status -eq 'closed' -and $verdict.reason.code -ne 'server-unavailable') 'network round did not recover after engine-ready'
+# Missing physical interface + VPN off: two real Resolve-TransportBind errors,
+# the third attempt must reach its normal unbound fallback despite engineWait.
+Fixture
+$script:settings.Options.bindPhysical=$true;$script:network.interface='';$script:network.ip='';$script:engine=$null
+for($attempt=1;$attempt -le 2;$attempt++){
+    Engine-Step;Invoke-DaemonDecision
+    Assert (-not $engine -and $startFailures -eq $attempt -and $bindState.failures -eq $attempt -and $engineReadyTimeouts -eq 0) 'bind error consumed readiness allowance or lost normal retries'
+    $delay=Get-TransportStartPause $attempt
+    Assert ($retryAt -eq ([DateTime]'2026-01-01Z').AddMilliseconds($clockMs).AddSeconds($delay)) 'ordinary start retry pause changed'
+    $script:clockMs+=$delay*1000
+}
+Engine-Step
+Assert ($engine -and $bindState.none -and $bindState.failures -eq 3 -and $engineStarts -eq 1 -and $networkRefreshes -eq 2) 'third bind attempt never reached mode=none/process creation'
+Assert ($configBinds.Count -eq 1 -and -not $configBinds[0] -and $startFailures -eq 0 -and $engineReadyTimeouts -eq 0) 'unbound config/start counter differs from original successful-start behavior'
+Engine-Step
+Assert ($busEngineReady -and -not $engineWait) 'fallback process could not become ready'
 # An already open episode resumes with fresh clocks/tickets; stale refused is discarded.
 Fixture;Open-Episode
 $old=$pathChecks.p0.handle;$oldGeneration=$checkGeneration;$oldEpisode=$episodeId
@@ -203,24 +250,24 @@ $script:apiFalseChecks=[int]::MaxValue
 Start-TransportEngine
 $firstEngine=$engine
 $script:clockMs=$engineWait.at+$EngineReadyFuseMs;Engine-Step
-Assert ($firstEngine.stopped -and -not $engine -and $engineWait.expired -and $startFailures -eq 1) 'fuse did not stop hung engine/count failure'
+Assert ($firstEngine.stopped -and -not $engine -and $engineWait.expired -and $engineReadyTimeouts -eq 1) 'fuse did not stop hung engine/count failure'
 Assert ($decision.episode.status -eq 'closed' -and -not $confirmed -and -not $busEngineReady -and $errorText -match 'engine-ready-timeout') 'readiness timeout announced success or left episode open'
 Assert (@($logged|Where-Object {$_.name -eq 'restart' -and $_.fields.why -eq 'engine-ready-timeout'}).Count -eq 1) 'timeout restart reason not logged exactly once'
 Engine-Step
 Assert ($engineStarts -eq 1) 'timeout bypassed existing restart backoff'
 $script:clockMs+=3000;Engine-Step
-Assert ($engineStarts -eq 2 -and $initialWaits -eq 2 -and $startFailures -eq 1 -and -not $engineWait.expired) 'real restart reset failures before readiness or failed to rearm fuse'
+Assert ($engineStarts -eq 2 -and $initialWaits -eq 2 -and $engineReadyTimeouts -eq 1 -and -not $engineWait.expired) 'real restart reset failures before readiness or failed to rearm fuse'
 $script:clockMs=$engineWait.at+$EngineReadyFuseMs;Engine-Step
-Assert (-not $engine -and $startFailures -eq $EngineReadyFailureLimit -and -not $confirmed -and -not $checkingSince) 'restart exhaustion did not leave failed status'
+Assert (-not $engine -and $engineReadyTimeouts -eq $EngineReadyFailureLimit -and -not $confirmed -and -not $checkingSince) 'restart exhaustion did not leave failed status'
 for($i=0;$i -lt 5;$i++){$script:clockMs+=30000;Engine-Step;Invoke-DaemonDecision}
 Assert ($engineStarts -eq 2 -and $engineStops -eq 2 -and -not $confirmed -and $decision.episode.status -eq 'closed') 'readiness failure caused an endless restart/success loop'
 Assert (@($logged|Where-Object {$_.name -eq 'ready'}).Count -eq 0) 'unready process was logged ready'
-# A retry that really becomes ready resets the existing failure counter.
+# A retry that really becomes ready resets the readiness timeout series.
 Fixture;Open-Episode;$script:apiFalseChecks=1
 Start-TransportEngine
 $script:clockMs=$engineWait.at+$EngineReadyFuseMs;Engine-Step
 $script:clockMs+=3000;Engine-Step;Engine-Step
-Assert ($busEngineReady -and -not $engineWait -and $startFailures -eq 0 -and -not $confirmed) 'authenticated readiness did not reset failures without claiming path success'
+Assert ($busEngineReady -and -not $engineWait -and $engineReadyTimeouts -eq 0 -and -not $confirmed) 'authenticated readiness did not reset failures without claiming path success'
 # Dead process takes the original exit path, never the API/fuse path.
 Fixture;Open-Episode;Answer-Round;Select-Second
 $dead=$engine;$dead.Process.HasExited=$true;$before=$apiChecks
@@ -232,14 +279,68 @@ Assert (@($eventQueue|Where-Object {$_.kind -eq 'engine-exit'}).Count -eq 1 -and
 Fixture;Open-Episode;Answer-Round
 $script:clockMs=3100
 # Simulate selector acknowledgement arriving as engine readiness is invalidated.
-$script:active='p1';$decision.currentTag='p1';$decision.episode.open=$false;$decision.episode.status='verifying';$decision.episode.verifyAt=3100
+$script:busEngineReady=$false
+Assert (Switch-TransportActive 'p1' $false 'verdict-test') 'real switch failed during deferred verification'
+$decision.currentTag='p1';$decision.episode.open=$false;$decision.episode.status='verifying';$decision.episode.verifyAt=3100
 $script:busEngineReady=$false;Start-DaemonVerification 'p1'
 Assert (-not $q.verified -and @($started|Where-Object {$_.verify}).Count -eq 0) 'unready verification consumed Q or started I/O'
-$script:clockMs=6000;$script:engineApiTarget='p1'
+$script:clockMs=6000
 Engine-Step
 Assert ($pathChecks.p1.purpose -eq 'post-switch-verify' -and $pathChecks.p1.generation -eq $checkGeneration -and $decision.episode.verifyAt -eq 6000) 'engine-ready did not resume deferred verification'
 $script:clockMs=6100;Deliver 'p1' 'ok';Invoke-DaemonDecision
 Assert ($confirmed -and $decision.episode.status -eq 'closed') 'resumed verification did not close on its real result'
+# Execute the real control-pass pin branch and real switch, without assigning its target.
+$pinControl=$ast.Find({param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Extent.Text.StartsWith('if($newPin.mode -ne $pin.mode')},$true)
+$pinControlBlock=[scriptblock]::Create($pinControl.Extent.Text)
+foreach($tag in @('p1','disabled')){
+    Fixture
+    $script:realApiObserver=$true
+    Start-TransportEngine
+    Assert ($initialWaits -eq 1 -and -not $busEngineReady -and $engineApiTarget -eq 'p0') 'pin fixture did not start p0 with false initial wait'
+    Engine-Step;$oldClient=$apiClients[-1]
+    $newPin=@{mode='pinned';tag=$tag};$now=([DateTime]'2026-01-01Z').AddMilliseconds($clockMs)
+    . $pinControlBlock
+    $expected=if($tag -eq 'disabled'){'unavailable'}else{'p1'}
+    Assert ($active -eq $tag -and $engineApiTarget -eq $expected -and $actualSelector -eq $expected -and $oldClient.disposed) 'control pin did not update selector/target or cancel old check'
+    # A late old HTTP result cannot undo the pin, even after cancellation.
+    $oldClient.completion.SetResult('{"name":"active","now":"p0"}')
+    Engine-Step
+    Assert (-not $busEngineReady -and $engineApiCheck.target -eq $expected) 'stale p0 result confirmed a different selector'
+    $apiClients[-1].completion.SetResult((ConvertTo-Json -Compress @{name='active';now=$expected}))
+    Engine-Step
+    Assert ($busEngineReady -and -not $engineWait -and $actualSelector -eq $expected -and $selectorCalls.Count -eq 1 -and $selectorCalls[0] -eq $expected) 'late readiness overwrote pinned selector or did not resume'
+    Assert (@($apiClients|Where-Object {$_.method -ne 'GET'}).Count -eq 0) 'readiness sent a mutating request'
+    $readyEvents=@($eventQueue|Where-Object {$_.kind -eq 'engine-ready'})
+    Assert ($readyEvents.Count -eq 1 -and $readyEvents[0].tag -eq $tag) 'engine-ready used an obsolete selector tag'
+}
+# Completed results also need target + generation validation when no control cancellation runs.
+foreach($change in @('generation','target')){
+    Fixture;$script:realApiObserver=$true;Start-TransportEngine;Engine-Step
+    $client=$apiClients[-1];$client.completion.SetResult('{"name":"active","now":"p0"}')
+    if($change -eq 'generation'){$script:checkGeneration++}
+    else{Assert (Switch-TransportActive 'p1' $false 'verdict-test') 'test switch failed'}
+    Engine-Step
+    Assert (-not $busEngineReady -and $client.disposed -and $apiClients.Count -eq 2) 'obsolete completed API result was accepted instead of rechecked'
+}
+# Even a proof already returned to the caller is rejected after a switch/generation change.
+foreach($change in @('generation','target')){
+    Fixture;$script:realApiObserver=$true;Start-TransportEngine;Engine-Step
+    $apiClients[-1].completion.SetResult('{"name":"active","now":"p0"}')
+    $proof=& $script:testEngineApiReady
+    if($change -eq 'generation'){$script:checkGeneration++}
+    else{Assert (Switch-TransportActive 'p1' $false 'verdict-test') 'proof test switch failed'}
+    Complete-DaemonEngineReady $proof.target $proof.generation $proof.active
+    Assert (-not $busEngineReady -and $engineApiCheck -and $engineApiCheck.active -eq $active -and $engineApiCheck.generation -eq $checkGeneration) 'Complete accepted obsolete proof instead of starting a fresh check'
+}
+# Condition changes reopen the readiness allowance; process failures keep the series.
+Fixture;$script:engineReadyTimeouts=2;$script:startFailures=4
+Stop-DaemonObservation -EngineRestart
+Assert ($engineReadyTimeouts -eq 2 -and $startFailures -eq 4) 'process exit reset the readiness/start error series'
+Stop-DaemonObservation
+Assert ($engineReadyTimeouts -eq 0 -and $startFailures -eq 4) 'network/pin/reload generation failed to reset only readiness allowance'
+$script:engineReadyTimeouts=2
+Add-DaemonQueuedEvent (New-DaemonEvent 'net.change' 'p0' 'network-change')
+Assert ($engineReadyTimeouts -eq 0 -and $startFailures -eq 4) 'network event failed to reopen readiness allowance'
 # Q annotations survive parallel probes and choose healthy p2 over faster TSPU p1.
 Fixture
 $q.networks[$network.id].tspu.p1=@{count=2;until=999999}
