@@ -75,6 +75,55 @@ namespace RemoteAgents.Launcher
                 }
             }
         }
+        // Duplex stdio stays inside the same atomic job/explicit handle-list launch as StartPiped.
+        public Process StartDuplex(string exe, string[] args, string cwd,
+            out SafeFileHandle readEnd, out SafeFileHandle writeEnd)
+        {
+            return StartDuplexCore(OpenPipe, (input, output) => StartCore(exe, args, cwd,
+                new StartupInfo { cb = Marshal.SizeOf(typeof(StartupInfo)), flags = 0x100,
+                    stdInput = input, stdOutput = output, stdError = output }, true), out readEnd, out writeEnd);
+        }
+
+        // Factory seam exercises ownership/failure paths without starting processes or invoking Win32.
+        internal static T StartDuplexCore<T>(Func<bool, SafeFileHandle[]> openPipe, Func<IntPtr, IntPtr, T> start,
+            out SafeFileHandle readEnd, out SafeFileHandle writeEnd)
+        {
+            lock (inheritGate) {
+                SafeFileHandle[] stdout = null, stdin = null;
+                readEnd = writeEnd = null;
+                try {
+                    stdout = openPipe(true);
+                    stdin = openPipe(false);
+                    T process = start(stdin[0].DangerousGetHandle(), stdout[1].DangerousGetHandle());
+                    readEnd = stdout[0]; writeEnd = stdin[1];
+                    return process;
+                } catch {
+                    if (stdout != null) stdout[0].Dispose();
+                    if (stdin != null) stdin[1].Dispose();
+                    throw;
+                } finally {
+                    if (stdout != null) stdout[1].Dispose();
+                    if (stdin != null) stdin[0].Dispose();
+                }
+            }
+        }
+
+        static SafeFileHandle[] OpenPipe(bool parentReads)
+        {
+            IntPtr read = IntPtr.Zero, write = IntPtr.Zero;
+            try {
+                var security = new SecurityAttributes { length = Marshal.SizeOf(typeof(SecurityAttributes)), inherit = true };
+                if (!CreatePipe(out read, out write, ref security, 64 * 1024)) throw new Win32Exception();
+                if (!SetHandleInformation(parentReads ? read : write, 1, 0)) throw new Win32Exception();
+                var ends = new[] { new SafeFileHandle(read, true), new SafeFileHandle(write, true) };
+                read = write = IntPtr.Zero;
+                return ends;
+            } finally {
+                if (read != IntPtr.Zero) CloseHandle(read);
+                if (write != IntPtr.Zero) CloseHandle(write);
+            }
+        }
+
         // Чистая функция: дескрипторы без повторов и нулей, порядок сохраняется.
         internal static IntPtr[] UniqueHandles(params IntPtr[] all)
         {

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.IO;
 using System.Text;
@@ -14,38 +15,46 @@ namespace RemoteAgents.Launcher
         const string BusPrefix = "@bus ";
 
         readonly Stream input;
-        readonly StreamWriter output;
+        readonly Stream output;
         readonly EventBus bus;
         readonly string logsDir;
-        readonly int queueLimit;
-        readonly object writeLock = new object();
+        readonly BlockingCollection<string> outgoing;
         IDisposable subscription;
-        Thread readerThread;
-        int disposed;
-        long lines, parsed, rejected, dropped, sent;
+        Thread readerThread, writerThread;
+        int disposed, started, ready, inOverflow, tooLongReported;
+        long lines, parsed, rejected, dropped, sent, tooLong, writeErrors;
 
         public long Lines => Interlocked.Read(ref lines);
         public long Parsed => Interlocked.Read(ref parsed);
         public long Rejected => Interlocked.Read(ref rejected);
         public long Dropped => Interlocked.Read(ref dropped);
         public long Sent => Interlocked.Read(ref sent);
+        public long TooLong => Interlocked.Read(ref tooLong);
+        public long WriteErrors => Interlocked.Read(ref writeErrors);
+        public bool Ready => Volatile.Read(ref ready) != 0;
 
-        public TransportBusBridge(Stream stdout, StreamWriter stdin, EventBus bus, string logsDir = null, int queueLimit = DefaultQueueLimit)
+        public TransportBusBridge(Stream stdout, Stream stdin, EventBus bus, string logsDir = null, int queueLimit = DefaultQueueLimit)
         {
             this.input = stdout;
             this.output = stdin;
             this.bus = bus;
             this.logsDir = logsDir;
-            this.queueLimit = queueLimit > 0 ? queueLimit : DefaultQueueLimit;
+            outgoing = new BlockingCollection<string>(queueLimit > 0 ? queueLimit : DefaultQueueLimit);
             if (bus != null && output != null)
                 subscription = bus.Subscribe("*", OnBusEvent);
         }
 
         public void Start()
         {
-            if (input == null) return;
-            readerThread = new Thread(ReadLoop) { IsBackground = true, Name = "transport-bus-reader" };
-            readerThread.Start();
+            if (Interlocked.Exchange(ref started, 1) != 0) return;
+            if (output != null) {
+                writerThread = new Thread(WriteLoop) { IsBackground = true, Name = "transport-bus-writer" };
+                writerThread.Start();
+            }
+            if (input != null) {
+                readerThread = new Thread(ReadLoop) { IsBackground = true, Name = "transport-bus-reader" };
+                readerThread.Start();
+            }
         }
 
         public bool Join(int ms)
@@ -54,10 +63,17 @@ namespace RemoteAgents.Launcher
             return t == null || t.Join(ms);
         }
 
+        internal bool JoinWriter(int ms)
+        {
+            var t = writerThread;
+            return t == null || t.Join(ms);
+        }
+
         public static bool IsAllowedIncoming(string topic)
         {
             if (string.IsNullOrEmpty(topic)) return false;
-            return topic == BusTopics.TransportStatus ||
+            return topic == BusTopics.TransportReady ||
+                   topic == BusTopics.TransportStatus ||
                    topic == BusTopics.TransportEpisode ||
                    topic == BusTopics.TransportSwitch ||
                    topic == BusTopics.TransportMem ||
@@ -87,7 +103,7 @@ namespace RemoteAgents.Launcher
             if (fields != null)
             {
                 foreach (var pair in fields)
-                    safeFields[pair.Key] = LogMask.Clean(pair.Value ?? "");
+                    safeFields[pair.Key] = LogMask.IsSecretKey(pair.Key) ? "***" : LogMask.Clean(pair.Value ?? "");
             }
             var payload = new Dictionary<string, object>(StringComparer.Ordinal)
             {
@@ -109,13 +125,16 @@ namespace RemoteAgents.Launcher
             {
                 NetHelperProtocol.ValidateJson(json);
                 var map = Json.Map(Json.Parse(json));
-                string t = Json.Str(map, "topic");
+                string t = Json.Get(map, "topic") as string;
                 if (string.IsNullOrEmpty(t) || !IsAllowedIncoming(t)) return false;
                 var fObj = Json.Get(map, "fields") as Dictionary<string, object>;
                 if (fObj == null) return false;
                 var res = new Dictionary<string, string>(StringComparer.Ordinal);
-                foreach (var p in fObj)
-                    res[p.Key] = p.Value != null ? LogMask.Clean(Convert.ToString(p.Value, CultureInfo.InvariantCulture)) : "";
+                foreach (var p in fObj) {
+                    if (string.IsNullOrEmpty(p.Key) || !IsScalar(p.Value)) return false;
+                    res[p.Key] = LogMask.IsSecretKey(p.Key) ? "***" :
+                        p.Value != null ? LogMask.Clean(Convert.ToString(p.Value, CultureInfo.InvariantCulture)) : "";
+                }
                 topic = t;
                 fields = res;
                 return true;
@@ -126,47 +145,73 @@ namespace RemoteAgents.Launcher
             }
         }
 
+        static bool IsScalar(object value)
+        {
+            return value == null || value is string || value is bool || value is byte || value is sbyte ||
+                value is short || value is ushort || value is int || value is uint || value is long ||
+                value is ulong || value is float || value is double || value is decimal;
+        }
+
+        void WriteLog(string action, string text)
+        {
+            if (string.IsNullOrEmpty(logsDir)) return;
+            try { RaLog.WriteTo(logsDir, "transport", LogLevel.Info, "transport", action,
+                new[] { new KeyValuePair<string, string>("line", LogMask.Clean(text)) }); } catch { }
+        }
+
         void ReadLoop()
         {
             var buf = new byte[4096];
-            var pending = new MemoryStream();
-            try
-            {
-                while (Volatile.Read(ref disposed) == 0)
-                {
+            var utf8 = new UTF8Encoding(false, true);
+            bool skipping = false;
+            using (var pending = new MemoryStream())
+            try {
+                while (Volatile.Read(ref disposed) == 0) {
                     int n;
                     try { n = input.Read(buf, 0, buf.Length); } catch { break; }
                     if (n <= 0) break;
-                    for (int i = 0; i < n; i++)
-                    {
-                        if (buf[i] == (byte)'\n')
-                        {
-                            ConsumeLine(Encoding.UTF8.GetString(pending.ToArray()).TrimEnd('\r'));
+                    for (int i = 0; i < n; i++) {
+                        if (buf[i] == (byte)'\n') {
+                            if (!skipping) ConsumeBytes(pending, utf8);
                             pending.SetLength(0);
-                        }
-                        else
-                        {
+                            skipping = false;
+                        } else if (!skipping) {
                             pending.WriteByte(buf[i]);
-                            if (pending.Length > MaxLineBytes * 2)
-                            {
-                                ConsumeLine(Encoding.UTF8.GetString(pending.ToArray()).TrimEnd('\r'));
+                            // Allow one trailing CR in a maximum-size CRLF line.
+                            if (pending.Length > MaxLineBytes &&
+                                !(pending.Length == MaxLineBytes + 1 && buf[i] == (byte)'\r')) {
+                                Interlocked.Increment(ref lines);
+                                Interlocked.Increment(ref rejected);
+                                WriteLog("stdout.rejected", "line exceeds 8192 bytes; discarded through newline");
                                 pending.SetLength(0);
+                                skipping = true;
                             }
                         }
                     }
                 }
-                if (pending.Length > 0)
-                    ConsumeLine(Encoding.UTF8.GetString(pending.ToArray()).TrimEnd('\r'));
-            }
-            finally
-            {
+                if (!skipping && pending.Length > 0 && Volatile.Read(ref disposed) == 0)
+                    ConsumeBytes(pending, utf8);
+            } finally {
                 try { input.Dispose(); } catch { }
+            }
+        }
+
+        void ConsumeBytes(MemoryStream pending, Encoding utf8)
+        {
+            var bytes = pending.ToArray();
+            int count = bytes.Length;
+            if (count > 0 && bytes[count - 1] == (byte)'\r') count--;
+            try { ConsumeLine(utf8.GetString(bytes, 0, count)); }
+            catch (DecoderFallbackException) {
+                Interlocked.Increment(ref lines);
+                Interlocked.Increment(ref rejected);
+                WriteLog("stdout.rejected", "invalid UTF-8");
             }
         }
 
         public void ConsumeLine(string line)
         {
-            if (string.IsNullOrEmpty(line)) return;
+            if (Volatile.Read(ref disposed) != 0 || string.IsNullOrEmpty(line)) return;
             Interlocked.Increment(ref lines);
             if (line.StartsWith(BusPrefix, StringComparison.Ordinal))
             {
@@ -177,39 +222,66 @@ namespace RemoteAgents.Launcher
                     Interlocked.Increment(ref rejected);
                     return;
                 }
-                if (Parsed >= queueLimit)
-                {
-                    Interlocked.Increment(ref dropped);
-                    return;
-                }
                 Interlocked.Increment(ref parsed);
-                try { bus?.Publish(topic, BusTopics.Sources.Transport, fields); } catch { }
+                if (topic == BusTopics.TransportReady) Volatile.Write(ref ready, 1);
+                // EventBus owns the bounded incoming queue; Parsed is a lifetime statistic.
+                try {
+                    if (bus != null && bus.Publish(topic, BusTopics.Sources.Transport, fields) < 0)
+                        Interlocked.Increment(ref dropped);
+                } catch { Interlocked.Increment(ref dropped); }
             }
             else
             {
                 string clean = LogMask.Clean(line);
                 if (clean.Length > 2000) clean = clean.Substring(0, 2000);
-                if (!string.IsNullOrEmpty(logsDir))
-                {
-                    try { RaLog.WriteTo(logsDir, "transport", LogLevel.Info, "transport", "stdout", new[] { new KeyValuePair<string, string>("line", clean) }); } catch { }
-                }
+                WriteLog("stdout", clean);
             }
         }
 
         void OnBusEvent(BusEvent e)
         {
-            if (Volatile.Read(ref disposed) != 0 || output == null) return;
+            if (Volatile.Read(ref disposed) != 0 || output == null || !Ready || !IsAllowedOutgoing(e.Topic)) return;
             string line = FormatOutgoing(e);
-            if (line == null) return;
-            lock (writeLock)
-            {
-                try
-                {
-                    output.WriteLine(line);
-                    output.Flush();
+            if (line == null) {
+                Interlocked.Increment(ref tooLong);
+                if (Interlocked.Exchange(ref tooLongReported, 1) == 0)
+                    WriteLog("stdin.rejected", "outgoing event exceeds 8192 bytes");
+                return;
+            }
+            Interlocked.Exchange(ref tooLongReported, 0);
+            try {
+                if (outgoing.TryAdd(line)) return;
+            } catch (InvalidOperationException) { return; } // Dispose raced dispatch.
+            Interlocked.Increment(ref dropped);
+            if (Interlocked.Exchange(ref inOverflow, 1) == 0) {
+                bus?.Publish(BusTopics.BusOverflow, BusTopics.Sources.Transport,
+                    "queue", "transport.stdin", "dropped", Dropped.ToString(CultureInfo.InvariantCulture));
+            }
+        }
+
+        void WriteLoop()
+        {
+            // Explicit UTF-8 without BOM: StandardInput uses the console code page on net48.
+            StreamWriter writer = null;
+            try {
+                writer = new StreamWriter(output, new UTF8Encoding(false)) { NewLine = "\n" };
+                foreach (var line in outgoing.GetConsumingEnumerable()) {
+                    if (Volatile.Read(ref disposed) != 0) break;
+                    writer.WriteLine(line);
+                    writer.Flush();
                     Interlocked.Increment(ref sent);
+                    if (outgoing.Count <= outgoing.BoundedCapacity / 2)
+                        Interlocked.Exchange(ref inOverflow, 0);
                 }
-                catch { /* запись не роняет шину */ }
+            } catch {
+                Interlocked.Increment(ref writeErrors);
+                WriteLog("stdin.failed", "transport stdin closed");
+                Dispose();
+            } finally {
+                // StreamWriter.Dispose may flush: it belongs ONLY to this background thread.
+                // Supervisor closes the job, releasing blocked pipe I/O on shutdown/restart.
+                try { writer?.Dispose(); } catch { }
+                try { output.Dispose(); } catch { }
             }
         }
 
@@ -217,8 +289,10 @@ namespace RemoteAgents.Launcher
         {
             if (Interlocked.Exchange(ref disposed, 1) != 0) return;
             try { subscription?.Dispose(); } catch { }
-            try { output?.Dispose(); } catch { }
-            try { input?.Dispose(); } catch { }
+            outgoing.CompleteAdding();
+            // Never close/flush a StreamWriter or wait for pipe I/O on the caller/UI thread.
+            // Also starts cleanup threads if construction was followed by Dispose before Start.
+            Start();
         }
     }
 }

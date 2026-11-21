@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using Microsoft.Win32.SafeHandles;
 
 namespace RemoteAgents.Launcher
 {
@@ -38,24 +39,21 @@ namespace RemoteAgents.Launcher
                 try {
                     started = now;
                     if (Definition.Elevated) { elevated = new ElevatedTask(home, Definition.Name); elevated.Start(); }
-                    else if (Definition.Name == "transport") {
-                        var psi = new ProcessStartInfo {
-                            FileName = Files.Executable(Expand(Definition.Exe)),
-                            Arguments = Files.Arguments(Definition.Args.Select(Expand).ToArray()),
-                            WorkingDirectory = Expand(Definition.Cwd),
-                            UseShellExecute = false,
-                            CreateNoWindow = true,
-                            RedirectStandardInput = true,
-                            RedirectStandardOutput = true
-                        };
-                        process = Process.Start(psi);
-                        ApplyPriority();
-                        transportBridge = new TransportBusBridge(process.StandardOutput.BaseStream, process.StandardInput, Bus, Path.Combine(home, "logs"));
-                        transportBridge.Start();
+                    else if (Definition.Bus) {
+                        job = new NativeJob();
+                        SafeFileHandle readEnd, writeEnd;
+                        process = job.StartDuplex(Expand(Definition.Exe), Definition.Args.Select(Expand).ToArray(),
+                            Expand(Definition.Cwd), out readEnd, out writeEnd);
+                        try {
+                            transportBridge = new TransportBusBridge(new FileStream(readEnd, FileAccess.Read),
+                                new FileStream(writeEnd, FileAccess.Write), Bus, Path.Combine(home, "logs"));
+                            transportBridge.Start();
+                            ApplyPriority();
+                        } catch { readEnd.Dispose(); writeEnd.Dispose(); throw; }
                     }
                     else { job = new NativeJob(); process = job.Start(Expand(Definition.Exe), Definition.Args.Select(Expand).ToArray(), Expand(Definition.Cwd)); ApplyPriority(); }
                     log.Write("component." + Definition.Name + ".start"); TrayBusWiring.ComponentStart(Bus, Definition.Name);
-                } catch { if (elevated != null) elevated.Dispose(); elevated = null; if (job != null) job.Dispose(); job = null; if (transportBridge != null) { transportBridge.Dispose(); transportBridge = null; } process = null; next = now.AddSeconds(delay); delay = Math.Min(60, delay * 2); log.Write("component." + Definition.Name + ".start.failed"); }
+                } catch { if (elevated != null) elevated.Dispose(); elevated = null; if (job != null) job.Dispose(); job = null; if (transportBridge != null) { transportBridge.Dispose(); transportBridge = null; } if (process != null) process.Dispose(); process = null; next = now.AddSeconds(delay); delay = Math.Min(60, delay * 2); log.Write("component." + Definition.Name + ".start.failed"); }
             }
             Alive = elevated != null ? elevated.Alive : process != null && !process.HasExited; Healthy = false; Summary = "нет данных";
             try {
