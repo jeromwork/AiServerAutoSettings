@@ -51,6 +51,20 @@ $oldState=New-TransportDecisionState -Now 0 -CurrentTag 'a';[void]$oldState.Remo
 $daemonResult=Invoke-TransportDecision -State $oldState -Candidates $daemonRows -CurrentTag 'a' -Now 1 -Events @((Event 1 'path-check' 'a' 'timeout'))
 Assert ($daemonResult.verdict.action -eq 'check-direct' -and -not $daemonResult.state.episodeEnabled) 'D: состояние до T1 без episodeEnabled также использует legacy'
 
+# T2: явный opt-in при создании и перенос настройки при reset.
+$s=New-TransportDecisionState -Now 0 -CurrentTag 'a' -SwitchEpisode:$true
+Assert ($s.episodeEnabled) 'D/R: создание состояния принимает явное включение эпизодов'
+$r=Invoke-TransportDecision -State $s -Candidates $daemonRows -CurrentTag 'a' -Now 1 -Events @((Event 1 'dial-fail'))
+Assert ($r.state.episodeEnabled -and $r.verdict.action -eq 'probe-round') 'D/R: созданный opt-in работает без флага на следующем вызове'
+$s=New-TransportDecisionState -Now 2 -CurrentTag 'a' -SwitchEpisode:$r.state.episodeEnabled
+Assert ($s.episodeEnabled -and $null -eq $s.episode) 'D/R: reset с переносом настройки очищает эпизод, сохраняя режим'
+$r=Invoke-TransportDecision -State $s -Candidates $daemonRows -CurrentTag 'a' -Now 3 -Events @((Event 3 'dial-fail'))
+Assert ($r.state.episodeEnabled -and $r.verdict.action -eq 'probe-round') 'D/R: после reset с переносом настройки эпизоды остаются включены'
+$s=New-TransportDecisionState -Now 4 -CurrentTag 'a'
+Assert (-not $s.episodeEnabled) 'D/R: пересоздание без переноса настройки по умолчанию возвращает legacy'
+$r=Invoke-TransportDecision -State $s -Candidates $daemonRows -CurrentTag 'a' -Now 5 -Events @((Event 5 'dial-fail'))
+Assert (-not $r.state.episodeEnabled -and $r.verdict.action -eq 'check-direct') 'D/R: reset без opt-in возвращает прежний контракт действий'
+
 # (1) сигнал -> probe-round сразу (t=0)
 $s = New-TransportDecisionState 0 'a'
 $rows = @((Row 'a'), (Row 'b' 'remembered' 120), (Row 'c' 'ok' 150))
@@ -399,6 +413,53 @@ $noChanges=@(@{at=1;kind='transport.switch';from='a';to='a';changed=$false},@{at
 $r=DecideSwitch (New-TransportDecisionState 0 'a') 100 ($noChanges+@((Event 100 'dial-fail'))) $rows
 Assert ($r.state.flapHistory.Count -eq 0 -and -not $r.verdict.flapping -and $r.verdict.allowImprovement -and $r.state.episode.policy.blipMs -eq 10000) '6R: from=to и changed=false не считаются настоящими сменами'
 
+# Ревью C: две старые смены и две новые с повторными парами не склеиваются.
+$r=DecideSwitch (New-TransportDecisionState 0 'a') 100000 @() $rows 'b'
+$r=DecideSwitch $r.state 200000 @() $rows 'a'
+$late=@(@{at=300000;kind='transport.switch';from='a';to='b'},@{at=400000;kind='transport.switch';from='b';to='a'})
+$r=DecideSwitch ($r.state|ConvertTo-Json -Depth 30|ConvertFrom-Json) 400000 $late $rows 'a'
+Assert ($r.state.flapHistory.Count -eq 4 -and $r.verdict.flapping) '6C: поздние новые a-b/b-a добавляются к двум старым подтверждениям'
+Assert ($r.state.flapHistory[0].at -eq 100000 -and $r.state.flapHistory[1].at -eq 200000) '6C: новые события не переписывают время старых подтверждений'
+Assert ($r.state.selectedAt -eq 400000 -and $r.state.lastSwitchAt -eq 400000 -and $r.state.switches[-1].at -eq 400000) '6C: minStay и журнал используют последнюю фактическую смену'
+# Три подтверждения без Events, затем ещё две фактические смены.
+$r=DecideSwitch (New-TransportDecisionState 0 'a') 100000 @() $rows 'b'
+$r=DecideSwitch $r.state 200000 @() $rows 'a'
+$r=DecideSwitch $r.state 300000 @() $rows 'b'
+$late=@(@{at=400000;kind='transport.switch';from='b';to='a'},@{at=500000;kind='transport.switch';from='a';to='b'})
+$r=DecideSwitch $r.state 500000 $late $rows 'b'
+Assert ($r.state.flapHistory.Count -eq 5 -and $r.state.switches.Count -eq 5 -and $r.verdict.flapping) '6C: три подтверждения и два новых события остаются пятью сменами'
+Assert ($r.state.selectedAt -eq 500000 -and $r.state.lastSwitchAt -eq 500000 -and $r.state.switches[-1].at -eq 500000) '6C: последняя из пяти смен задаёт время выбора'
+
+# Одна пачка с повторной парой: подтверждение соответствует последнему a-b.
+$batch=@(@{at=100000;kind='transport.switch';from='a';to='b'},@{at=200000;kind='transport.switch';from='b';to='a'},@{at=300000;kind='transport.switch';from='a';to='b'})
+foreach($events in @(@{items=$batch},@{items=@($batch[2],$batch[0],$batch[1])})){
+    $r=DecideSwitch (New-TransportDecisionState 0 'a') 300000 $events.items $rows 'b'
+    Assert ($r.state.flapHistory.Count -eq 3 -and $r.state.switches.Count -eq 3) '6C: повторная пара в одной пачке даёт три отдельные смены'
+    Assert (($r.state.switches.at -join ',') -eq '100000,200000,300000') '6C: журнал сохраняет фактический порядок независимо от порядка входной пачки'
+    Assert ($r.state.selectedAt -eq 300000 -and $r.state.lastSwitchAt -eq 300000) '6C: раннее a-b не подменяет selectedAt последнего a-b'
+    Assert (@($r.state.flapHistory|Where-Object {$_.awaitingEvent}).Count -eq 0) '6C: точное событие поглощает своё подтверждение'
+    $r=DecideSwitch $r.state 300001 $batch $rows 'b'
+    Assert ($r.state.flapHistory.Count -eq 3 -and $r.state.selectedAt -eq 300000) '6C: повтор всей пачки не меняет историю и minStay'
+}
+
+# Перекрывающиеся допуски: ближайшее подтверждение, дедуп ДО поглощения другого.
+$r=DecideSwitch (New-TransportDecisionState 0 'a') 100 @() $rows 'b'
+$r=DecideSwitch $r.state 102 @() $rows 'a'
+$r=DecideSwitch $r.state 104 @() $rows 'b'
+$first=@{at=101;kind='transport.switch';from='a';to='b'}
+$r=DecideSwitch ($r.state|ConvertTo-Json -Depth 30|ConvertFrom-Json) 105 @($first,$first) $rows 'b'
+Assert ($r.state.flapHistory.Count -eq 3 -and $r.state.flapHistory[0].at -eq 101) '6C: ближайшее a-b уточняется ровно один раз, дубль не добавляет смену'
+Assert ($r.state.flapHistory[-1].awaitingEvent -and $r.state.selectedAt -eq 104) '6C: дубль не поглощает второе ожидающее a-b даже внутри допуска'
+$r=DecideSwitch $r.state 106 @(@{at=105;kind='transport.switch';from='a';to='b'}) $rows 'b'
+Assert ($r.state.flapHistory.Count -eq 3 -and -not $r.state.flapHistory[-1].awaitingEvent -and $r.state.selectedAt -eq 105) '6C: следующее a-b уточняет своё подтверждение'
+# Верхняя граница исключена; небольшой отрицательный сдвиг разрешён допуском.
+$r=DecideSwitch (New-TransportDecisionState 0 'a') 10000 @() $rows 'b'
+$r=DecideSwitch $r.state 11000 @() $rows 'a'
+$r=DecideSwitch $r.state 12000 @() $rows 'b'
+$r=DecideSwitch $r.state 12001 @(@{at=11000;kind='transport.switch';from='a';to='b'}) $rows 'b'
+Assert ($r.state.flapHistory.Count -eq 3 -and $r.state.flapHistory[0].awaitingEvent -and $r.state.flapHistory[0].at -eq 10000) '6C: at следующего подтверждения исключён из интервала предыдущего'
+Assert ($r.state.selectedAt -eq 11000 -and $r.state.lastSwitchAt -eq 11000 -and $r.state.switches[-1].at -eq 11000) '6C: событие в допуске до ackAt уточняет последнее подтверждение'
+
 # (7) Возврат: два успеха подряд, minStay, max(30 мс,20%), маркер переживает reset.
 $returnRows=@((Row 'a' 'ok' 100),(Row 'b' 'ok' 200))
 $s=New-TransportDecisionState 0 'b';$s.paths.a=New-TransportDecisionPath
@@ -538,6 +599,20 @@ foreach($switch in @(
     }
     $r=DecideSwitch (New-TransportDecisionState 0 'a') 1 @(@{at=0;kind='net.quality';fields=$snapshot},(Event 1 'dial-fail')) $chainRows
     Assert ($r.state.episode.policy.hardFailMs -eq $snapshot.hardFailMs -and $r.state.episode.policy.stage2Ms -eq $snapshot.stage2Ms) 'Q/R: тот же snapshot без подмены принимается через net.quality'
+}
+
+# Настоящий адаптивный Q: stage2 > blip допустимо после net.change mobile.
+$quality=New-TransportQualityState @{transport=@{switch=@{blipMs=@{default=3000;min=3000;max=3000}}}}
+$null=Update-TransportQuality $quality 'net.change' @{id='mobile-test';class='mobile'} 0
+$snapshot=Get-TransportQualitySnapshot $quality 0
+Assert ($snapshot.stage1Ms -eq 1500 -and $snapshot.stage2Ms -eq 4500 -and $snapshot.hardFailMs -eq 4500 -and $snapshot.blipMs -eq 3000) 'Q/C: адаптация mobile даёт настоящий снимок со stage2 выше blip'
+$r=DecideSwitch (New-TransportDecisionState 0 'a') 0 @((Event 0 'dial-fail')) $chainRows 'a' $snapshot
+foreach($name in @('stage1Ms','stage2Ms','hardFailMs','blipMs')){
+    Assert ($r.state.switchPolicy[$name] -eq $snapshot[$name] -and $r.state.episode.policy[$name] -eq $snapshot[$name]) ('Q/C: SwitchConfig сохраняет адаптивный '+$name)
+}
+$r=DecideSwitch (New-TransportDecisionState 0 'a') 1 @(@{at=0;kind='net.quality';fields=$snapshot},(Event 1 'dial-fail')) $chainRows
+foreach($name in @('stage1Ms','stage2Ms','hardFailMs','blipMs')){
+    Assert ($r.state.switchPolicy[$name] -eq $snapshot[$name] -and $r.state.episode.policy[$name] -eq $snapshot[$name]) ('Q/C: net.quality сохраняет адаптивный '+$name)
 }
 
 # §4б: ограничены накопленные словари/истории и рабочая пачка; старое удаляется.
