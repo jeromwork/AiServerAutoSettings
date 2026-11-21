@@ -70,7 +70,9 @@ namespace RemoteAgents {
   bool drained;
   bool networkPending;
   int started;
-  long rejected, inputDropped, outputDropped, outputRejected, writeErrors;
+  long rejected, rejectedCommands, inputDropped, outputDropped, outputRejected, writeErrors;
+  readonly bool testBuild;
+  public long RejectedCommands {get {return Interlocked.Read(ref rejectedCommands);}}
   public bool Connected {get {return connected;}}
   public bool InputClosed {get {return inputClosed;}}
   public long Rejected {get {return Interlocked.Read(ref rejected);}}
@@ -78,22 +80,23 @@ namespace RemoteAgents {
   public long OutputDropped {get {return Interlocked.Read(ref outputDropped);}}
   public long OutputRejected {get {return Interlocked.Read(ref outputRejected);}}
   public long WriteErrors {get {return Interlocked.Read(ref writeErrors);}}
-  public TransportBus(Stream input,TextWriter output) {this.input=input; this.output=output;}
+  public TransportBus(Stream input,TextWriter output) : this(input,output,false) {}
+  public TransportBus(Stream input,TextWriter output,bool testBuild) {this.input=input; this.output=output;this.testBuild=testBuild;}
   public void Start() {
    if(Interlocked.Exchange(ref started,1)!=0) return;
    if(input!=null) {Thread t=new Thread(ReadInput);t.IsBackground=true;t.Name="transport-stdin";t.Start();} else inputClosed=true;
    if(output!=null) {writer=new Thread(WriteLoop);writer.IsBackground=true;writer.Name="transport-stdout";writer.Start();}
   }
-  static bool AllowedInput(string topic) {
+  bool AllowedInput(string topic) {
    return topic!=null && (topic.StartsWith("win.",StringComparison.Ordinal) || topic=="net.change" ||
-    topic.StartsWith("tick.transport-",StringComparison.Ordinal) || topic=="transport.command");
+    topic.StartsWith("tick.transport-",StringComparison.Ordinal) || (testBuild && topic=="transport.command"));
   }
   static bool AllowedOutput(string topic) {
    return topic=="transport.stdin.ready" || topic=="transport.status" || topic=="transport.ready" || topic=="transport.mem" ||
     topic=="transport.switch" || topic=="transport.episode" || topic=="net.quality";
   }
   static string Name(XmlElement e) {return e.HasAttribute("item")?e.GetAttribute("item"):e.LocalName;}
-  static TransportBusEvent Parse(string line) {
+  TransportBusEvent Parse(string line) {
    if(!line.StartsWith("@bus ",StringComparison.Ordinal)) return null;
    byte[] bytes=Encoding.UTF8.GetBytes(line.Substring(5));
    using(XmlDictionaryReader reader=JsonReaderWriterFactory.CreateJsonReader(bytes,new XmlDictionaryReaderQuotas {MaxDepth=16,MaxStringContentLength=8192,MaxArrayLength=8192,MaxBytesPerRead=8192,MaxNameTableCharCount=16384})) {
@@ -114,6 +117,7 @@ namespace RemoteAgents {
       }
      } else return null;
     }
+    if(topic=="transport.command" && !testBuild) Interlocked.Increment(ref rejectedCommands);
     return AllowedInput(topic) && fields!=null?new TransportBusEvent {topic=topic,fields=fields}:null;
    }
   }
@@ -499,11 +503,12 @@ function Stop-TransportPathCheck($Check) {
 }
 
 function Start-TransportBus {
+    param([bool]$TestBuild=$false)
     Initialize-TransportEvents
     try{[Console]::InputEncoding=New-Object Text.UTF8Encoding($false)}catch{}
     [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
     $inputStream=$null;try{$inputStream=[Console]::OpenStandardInput()}catch{}
-    $bus=[RemoteAgents.TransportBus]::new($inputStream,[Console]::Out)
+    $bus=[RemoteAgents.TransportBus]::new($inputStream,[Console]::Out,$TestBuild)
     $bus.Start()
     $bus
 }

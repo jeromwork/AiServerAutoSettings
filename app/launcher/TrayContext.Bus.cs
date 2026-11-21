@@ -59,6 +59,8 @@ namespace RemoteAgents.Launcher
             busParts.Add(bus.Every(BusTopics.Ticks.Tray, 1000));
             // 5 с, а не 1: сторож зависших компонентов; предохранитель сам ≥30 с (SupervisorStale.StaleRestartFuseMs), точность в секунды не нужна.
             busParts.Add(bus.Every(BusTopics.Ticks.Supervisor, 5000));
+            // Test-only tick source: blip removal is an event, never proof of connectivity.
+            if (UpdateChannel.IsTest) busParts.Add(bus.Every(BusTopics.Ticks.TransportDecide, 250));
             StartHealth(); // H1: подписки доски раньше источников (tracker.ScanAll сразу может опубликовать block.ready)
             try {
                 blocks = new BlockStatusTracker(bus, busStartedUtc);

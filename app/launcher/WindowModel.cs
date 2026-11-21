@@ -30,7 +30,7 @@ namespace RemoteAgents.Launcher
         }
         internal static bool ShouldShow(string[] args)
         {
-            if (args.Any(a => new[] { "--exit", "--uninstall", "--identify", "--install-stop", "--restart-components", "--rollback", "--rollback-previous", "--logs", "--check-updates", "--disk-shell" }.Contains(a))) return false;
+            if (args.Any(a => new[] { "--exit", "--uninstall", "--identify", "--install-stop", "--restart-components", "--rollback", "--rollback-previous", "--logs", "--check-updates", "--disk-shell", "--transport-fault" }.Contains(a))) return false;
             if (args.Any(a => new[] { "--show", "--started", "--settings" }.Contains(a))) return true;
             return !args.Contains("--tray") && !args.Contains("--after-update") && !args.Contains("--setup-check");
         }

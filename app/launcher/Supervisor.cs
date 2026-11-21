@@ -42,7 +42,10 @@ namespace RemoteAgents.Launcher
                     else if (Definition.Bus) {
                         job = new NativeJob();
                         SafeFileHandle readEnd, writeEnd;
-                        process = job.StartDuplex(Expand(Definition.Exe), Definition.Args.Select(Expand).ToArray(),
+                        // The build channel is passed explicitly; inherited environment/config cannot enable faults in Main.
+                        var busArgs = Definition.Args.Select(Expand).ToArray();
+                        if (Definition.Name == "transport") busArgs = TransportFaultCommand.DaemonArguments(busArgs, UpdateChannel.IsTest);
+                        process = job.StartDuplex(Expand(Definition.Exe), busArgs,
                             Expand(Definition.Cwd), out readEnd, out writeEnd);
                         try {
                             transportBridge = new TransportBusBridge(new FileStream(readEnd, FileAccess.Read),

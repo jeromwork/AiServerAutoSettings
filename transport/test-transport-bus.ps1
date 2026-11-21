@@ -56,13 +56,15 @@ function New-TestBus([string]$Text,$Output){
     [void]$Output.GetStringBuilder().Clear()
     $handle
 }
-$functions=@('New-DaemonEvent','Add-DaemonQueuedEvent','Receive-DaemonBus','Publish-DaemonBusStatus','Publish-DaemonBusReady','Add-DaemonEvent')
+$functions=@('New-DaemonEvent','Add-DaemonQueuedEvent','Receive-DaemonBus','Publish-DaemonBusStatus','Publish-DaemonBusReady','Add-DaemonEvent','Test-DaemonFault','Update-DaemonFaults')
 foreach($fn in $ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in $functions},$true)){. ([scriptblock]::Create($fn.Extent.Text))}
 function Get-DaemonTime {[long]1234}
 function Write-DaemonPathCheck($Event){}
 function Save-TransportMemory {}
 $script:eventQueue=@();$DaemonEventLimit=512;$script:daemonEventsQueued=[long]0;$script:daemonEventsDropped=[long]0
-$script:networkRefreshPending=$false;$script:TransportBusConnected=$false
+$script:networkRefreshPending=$false;$script:TransportBusConnected=$false;$script:faultRejectedSeen=0L
+$script:faultRejections=@()
+function Write-TransportLog($Root,$Name,$Fields){$script:faultRejections+=@{name=$Name;fields=$Fields}}
 # Pump the real reader entry and send its frame through the actual launcher EventBus/bridge.
 $handshakeWriter=[IO.StringWriter]::new()
 $handshakeBus=[RemoteAgents.TransportBus]::new([IO.MemoryStream]::new(),$handshakeWriter)
@@ -72,7 +74,7 @@ Assert ((ConvertFrom-Json $handshake.Substring(5)).topic -eq 'transport.stdin.re
 $earlyRoute=[RemoteAgents.Launcher.TransportBusTests]::ForwardRouteBeforePathReady($handshake)
 $script:busReadySent=$false;$script:busEngineReady=$false
 $route='@bus {"topic":"win.route.changed","fields":{"family":"IPv4","ifIndex":7}}'
-$command='@bus {"topic":"transport.command","fields":{"command":"inspect","text":"Привет"}}'
+$command='@bus {"topic":"win.test","fields":{"text":"Привет"}}'
 $writer=[IO.StringWriter]::new()
 $bus=New-TestBus ($earlyRoute+$command) $writer
 Receive-DaemonBus
@@ -125,7 +127,18 @@ Receive-DaemonBus
 Assert ($eventQueue.Count -eq 512 -and $bus.InputDropped -eq 89 -and $networkRefreshPending) 'input queue bound/invalidation latch wrong'
 for($i=0;$i -lt 600;$i++){Add-DaemonQueuedEvent (New-DaemonEvent 'manual' '' 'ok')}
 Assert ($eventQueue.Count -eq 512 -and $daemonEventsDropped -eq 600 -and $networkRefreshPending) 'daemon queue bound/invalidation lost'
-'B4B stdin / garbage / UTF-8 / bounds / EOF / forced snapshot PASS'
+$script:eventQueue=@()
+$bus=New-TestBus '@bus {"topic":"transport.command","fields":{"fault":"drop","tag":"a","password":"sentinel-secret"}}' $writer
+Receive-DaemonBus
+Assert ($bus.Rejected -eq 1 -and $bus.RejectedCommands -eq 1 -and $eventQueue.Count -eq 0) 'Main command allowlist not enforced'
+Assert ($faultRejections[-1].name -eq 'fault.reject' -and (ConvertTo-Json $faultRejections -Depth 10 -Compress) -notmatch 'sentinel-secret') 'Main rejection missing or leaked payload'
+$testInput=[IO.MemoryStream]::new([Text.Encoding]::UTF8.GetBytes('@bus {"topic":"transport.command","fields":{"fault":"drop","tag":"a"}}'))
+$testBus=[RemoteAgents.TransportBus]::new($testInput,[IO.StringWriter]::new(),$true)
+Pump $testBus 'ReadInput'
+$testEvents=$testBus.Drain([ref]$refresh)
+Assert ($testEvents.Count -eq 1 -and $testEvents[0].fields['fault'] -eq 'drop') 'Test command not admitted'
+$testBus.Dispose()
+'B4B stdin / garbage / UTF-8 / bounds / EOF / forced snapshot / Main-Test command gate PASS'
 # Outgoing format, change-only status (no updatedAt), ready only after engine and a valid path success.
 $writer=[IO.StringWriter]::new();$bus=New-TestBus '' $writer
 $script:busStatusKey=$null;$script:lastStatusKey='{"phase":"checking","ok":false,"active":"a","reason":{"code":"startup"}}'

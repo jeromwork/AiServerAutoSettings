@@ -645,3 +645,41 @@ timeout 120 dotnet run --project app/launcher/tests/PortableTests.csproj -nodeRe
 timeout 120 pwsh -NoProfile -File transport/test-transport-quality.ps1
 timeout 120 python3 server/tests/test_transport_quality_config.py
 ```
+
+## Инъекция отказа в тестовой сборке (T3)
+
+В установленной и запущенной тестовой программе (`-p:UpdateChannel=test`, источник
+обновлений `dist-test`) доступны команды, в том числе в аргументах ярлыка:
+
+```powershell
+.\RemoteAgents.exe --transport-fault drop <tag>
+.\RemoteAgents.exe --transport-fault blip <tag> 5000
+.\RemoteAgents.exe --transport-fault clear <tag>
+```
+
+`tag` — включённый кандидат из `transport.json`; `blip` принимает 1–60000 мс.
+Можно указать `--home <каталог>` для уже запущенного экземпляра с этим Home.
+CLI передаёт команду работающему трею через IPC; трей публикует
+`transport.command {fault, tag, ms}` в B4B-канал stdin демона. Код 0 означает,
+что тестовый трей принял команду в очередь. Применение проверяется по
+`fault.apply` / `fault.clear` в журнале и `faults` в статусе транспорта.
+Ошибки CLI, включая Main и недоступный трей, возвращают код 21.
+
+`drop` действует до `clear` (либо удаления кандидата/перезапуска демона).
+`blip` снимается по `tick.transport-decide`; при потере событий существующий
+цикл решателя снимает его по предохранителю через 2000 мс сверх заданного срока.
+Снятие не подтверждает связь: новая реальная проверка проходит через решатель.
+Повторная инъекция того же тега заменяет предыдущую, повторный `clear` безопасен.
+В памяти не более 32 инъекций, состояние не сохраняется на диск для восстановления.
+
+Активный fault направляет selector в `unavailable`; пробы этого кандидата
+дают решателю `timeout`, не обходя его пороги, бюджет и проверку после переключения.
+Нормальные `transport.episode` (`open/decide/close`) и `transport.status`
+содержат снимок `faults`. После `clear` возврат с другого пути возможен только
+по обычной политике улучшения, после реальных успешных результатов и `minStay`.
+
+В Main лаунчер отвергает CLI и IPC сообщением «только тестовая сборка»;
+мост не отправляет `transport.command`. Лаунчер явно передаёт демону
+`-UpdateChannel main|test`; по умолчанию демон работает как Main. В Main
+`transport.command` отсутствует в списке разрешённых входов, а попытка
+приёма записывается как `fault.reject` без исходных полей команды.
