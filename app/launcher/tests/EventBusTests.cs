@@ -39,6 +39,7 @@ namespace RemoteAgents.Launcher
             TestPublishFireTickAfterDispose();
             TestUnsubscribeDuringDispatch();
             TestHandlerErrorThrowingDoesNotRecurse();
+            TestTickSelfRemoval();
 
             Console.WriteLine($"PASS: EventBusTests ({_assertions} assertions passed)");
         }
@@ -48,6 +49,9 @@ namespace RemoteAgents.Launcher
         {
             using (var bus = new EventBus(manualDispatch: true))
             {
+                int handlerErrors = 0;
+                bus.Subscribe(BusTopics.BusHandlerError, _ => Interlocked.Increment(ref handlerErrors));
+
                 var received = new List<int>();
                 bus.Subscribe("test.fifo", evt =>
                 {
@@ -63,6 +67,7 @@ namespace RemoteAgents.Launcher
                 }
 
                 int drained = bus.DrainOnce();
+                Assert(handlerErrors == 0, "No handler errors should occur in FIFO test");
                 Assert(drained == 100, "DrainOnce count should match published");
                 Assert(received.Count == 100, "Received count should be 100");
 
@@ -78,6 +83,9 @@ namespace RemoteAgents.Launcher
         {
             using (var bus = new EventBus(manualDispatch: true))
             {
+                int handlerErrors = 0;
+                bus.Subscribe(BusTopics.BusHandlerError, _ => Interlocked.Increment(ref handlerErrors));
+
                 var vpnEvents = new List<string>();
                 var stateEvents = new List<string>();
                 var allEvents = new List<string>();
@@ -92,6 +100,7 @@ namespace RemoteAgents.Launcher
 
                     bus.DrainOnce();
 
+                    Assert(handlerErrors == 0, "No handler errors in prefix subscription test");
                     Assert(vpnEvents.Count == 2, "vpn. should match vpn.state and vpn.step");
                     Assert(vpnEvents.Contains("vpn.state"), "vpn. should contain vpn.state");
                     Assert(vpnEvents.Contains("vpn.step"), "vpn. should contain vpn.step");
@@ -147,6 +156,9 @@ namespace RemoteAgents.Launcher
         {
             using (var bus = new EventBus(manualDispatch: true))
             {
+                int handlerErrors = 0;
+                bus.Subscribe(BusTopics.BusHandlerError, _ => Interlocked.Increment(ref handlerErrors));
+
                 int count = 0;
                 var sub = bus.Subscribe("test.unsub", evt => count++);
 
@@ -159,6 +171,7 @@ namespace RemoteAgents.Launcher
                 bus.Publish("test.unsub", "tray");
                 bus.DrainOnce();
                 Assert(count == 1, "Handler should not be called after Dispose()");
+                Assert(handlerErrors == 0, "No handler errors in unsubscribe test");
             }
         }
 
@@ -167,6 +180,9 @@ namespace RemoteAgents.Launcher
         {
             using (var bus = new EventBus(manualDispatch: true))
             {
+                int handlerErrors = 0;
+                bus.Subscribe(BusTopics.BusHandlerError, _ => Interlocked.Increment(ref handlerErrors));
+
                 Assert(!bus.TryGetLast("vpn.state", out _), "TryGetLast should return false for nonexistent topic");
 
                 // Белый список: vpn.state, net.quality, transport.status, helper.version
@@ -188,6 +204,9 @@ namespace RemoteAgents.Launcher
 
                 bus.Publish("custom.topic", "tray", "data", "test");
                 Assert(!bus.TryGetLast("custom.topic", out _), "custom.topic is not retained, TryGetLast must return false");
+
+                bus.DrainOnce();
+                Assert(handlerErrors == 0, "No handler errors in retained test");
             }
         }
 
@@ -196,6 +215,9 @@ namespace RemoteAgents.Launcher
         {
             using (var bus = new EventBus(manualDispatch: true, queueLimit: 10))
             {
+                int handlerErrors = 0;
+                bus.Subscribe(BusTopics.BusHandlerError, _ => Interlocked.Increment(ref handlerErrors));
+
                 var overflows = new List<BusEvent>();
                 bus.Subscribe(BusTopics.BusOverflow, evt => overflows.Add(evt));
 
@@ -242,6 +264,7 @@ namespace RemoteAgents.Launcher
 
                 Assert(overflows.Count == 2, $"Expected exactly 2 bus.overflow events total, got {overflows.Count}");
                 Assert(overflows[1]["dropped"] == "1", $"Second overflow dropped must be 1, was {overflows[1]["dropped"]}");
+                Assert(handlerErrors == 0, "No handler errors in overflow test");
             }
         }
 
@@ -250,6 +273,9 @@ namespace RemoteAgents.Launcher
         {
             using (var bus = new EventBus(manualDispatch: true))
             {
+                int handlerErrors = 0;
+                bus.Subscribe(BusTopics.BusHandlerError, _ => Interlocked.Increment(ref handlerErrors));
+
                 var ticks = new List<BusEvent>();
                 bus.Subscribe("tick.update", evt => ticks.Add(evt));
 
@@ -265,6 +291,7 @@ namespace RemoteAgents.Launcher
                     Assert(ticks[0].Source == BusTopics.Sources.Timer, "Source must be timer");
                     Assert(ticks[1].Topic == "tick.update", "Topic must be tick.update");
                     Assert(ticks[1].Source == BusTopics.Sources.Timer, "Source must be timer");
+                    Assert(handlerErrors == 0, "No handler errors in tick test");
                 }
             }
         }
@@ -278,24 +305,42 @@ namespace RemoteAgents.Launcher
                 int lastI1 = -1;
                 int lastI2 = -1;
                 int count = 0;
+                int seqViolations = 0;
+                int orderViolations = 0;
+                int handlerErrors = 0;
+
+                bus.Subscribe(BusTopics.BusHandlerError, _ => Interlocked.Increment(ref handlerErrors));
 
                 bus.Subscribe("concurrent.item", evt =>
                 {
                     count++;
-                    Assert(evt.Seq > lastSeq, $"Seq must be strictly monotonic: current {evt.Seq} <= last {lastSeq}");
+                    if (evt.Seq <= lastSeq)
+                    {
+                        seqViolations++;
+                    }
                     lastSeq = evt.Seq;
 
                     string threadId = evt["t"];
-                    int i = int.Parse(evt["i"]);
-                    if (threadId == "1")
+                    if (int.TryParse(evt["i"], out int i))
                     {
-                        Assert(i == lastI1 + 1, $"Thread 1 order mismatch: expected {lastI1 + 1}, got {i}");
-                        lastI1 = i;
+                        if (threadId == "1")
+                        {
+                            if (i != lastI1 + 1) orderViolations++;
+                            lastI1 = i;
+                        }
+                        else if (threadId == "2")
+                        {
+                            if (i != lastI2 + 1) orderViolations++;
+                            lastI2 = i;
+                        }
+                        else
+                        {
+                            orderViolations++;
+                        }
                     }
-                    else if (threadId == "2")
+                    else
                     {
-                        Assert(i == lastI2 + 1, $"Thread 2 order mismatch: expected {lastI2 + 1}, got {i}");
-                        lastI2 = i;
+                        orderViolations++;
                     }
                 });
 
@@ -323,6 +368,9 @@ namespace RemoteAgents.Launcher
 
                 int drained = bus.DrainOnce();
 
+                Assert(seqViolations == 0, $"Seq violations must be 0, was {seqViolations}");
+                Assert(orderViolations == 0, $"Order violations must be 0, was {orderViolations}");
+                Assert(handlerErrors == 0, $"Handler errors must be 0, was {handlerErrors}");
                 Assert(bus.DroppedCount == 0, $"Dropped count should be 0, was {bus.DroppedCount}");
                 Assert(drained == 20000, $"Drained count should be 20000, was {drained}");
                 Assert(count == 20000, $"Subscribed handler count should be 20000, was {count}");
@@ -354,6 +402,9 @@ namespace RemoteAgents.Launcher
         {
             using (var bus = new EventBus(manualDispatch: true))
             {
+                int handlerErrors = 0;
+                bus.Subscribe(BusTopics.BusHandlerError, _ => Interlocked.Increment(ref handlerErrors));
+
                 int bCallCount = 0;
                 IDisposable subB = null;
 
@@ -377,6 +428,7 @@ namespace RemoteAgents.Launcher
                 bus.Publish("test.unsub_during", "tray");
                 bus.DrainOnce();
                 Assert(bCallCount == 1, "Handler B must not receive the subsequent event after unsubscription");
+                Assert(handlerErrors == 0, "No handler errors in unsub during dispatch test");
             }
         }
 
@@ -411,6 +463,20 @@ namespace RemoteAgents.Launcher
                 bus.DrainOnce();
 
                 Assert(normalHandlerCalled, "Normal handler must be called, bus remains alive without recursion crash");
+            }
+        }
+
+        // 12. 1000 раз Every(...).Dispose(), внутренний счётчик тиков == 0
+        private static void TestTickSelfRemoval()
+        {
+            using (var bus = new EventBus(manualDispatch: true))
+            {
+                for (int i = 0; i < 1000; i++)
+                {
+                    var tick = bus.Every("tick" + i, 1000);
+                    tick.Dispose();
+                }
+                Assert(bus.ActiveTickCount == 0, $"ActiveTickCount must be 0, was {bus.ActiveTickCount}");
             }
         }
     }

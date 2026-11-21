@@ -8,6 +8,7 @@ namespace RemoteAgents.Launcher
     /// </summary>
     public static class BusTopics
     {
+        // TODO (B2): retained block.ready хранит один ключ на топик ("block.ready"), для нескольких блоков нужен ключ на блок (например, "block.ready." + block).
         // Готовность блоков: block.ready|block.degraded|block.failed {block, reason}
         public const string BlockReady = "block.ready";
         public const string BlockDegraded = "block.degraded";
@@ -112,6 +113,7 @@ namespace RemoteAgents.Launcher
             public const string Timer = "timer";
         }
 
+        // TODO (B2): retained block.ready хранит один ключ на топик ("block.ready"), для нескольких блоков нужен ключ на блок.
         private static readonly HashSet<string> RetainedTopicSet = new HashSet<string>(StringComparer.Ordinal)
         {
             VpnState,

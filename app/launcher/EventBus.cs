@@ -112,6 +112,7 @@ namespace RemoteAgents.Launcher
                 {
                 }
                 _timer = null;
+                _bus.RemoveTick(this);
             }
         }
     }
@@ -176,7 +177,32 @@ namespace RemoteAgents.Launcher
 
         public long DroppedCount => Volatile.Read(ref _droppedCount);
         public long LastSeq => Volatile.Read(ref _seqCounter);
-        public int QueueCount => _queue.Count;
+
+        public int QueueCount
+        {
+            get
+            {
+                try
+                {
+                    return _queue.Count;
+                }
+                catch
+                {
+                    return 0;
+                }
+            }
+        }
+
+        internal int ActiveTickCount
+        {
+            get
+            {
+                lock (_ticks)
+                {
+                    return _ticks.Count;
+                }
+            }
+        }
 
         public EventBus(bool manualDispatch = false, int queueLimit = DefaultQueueLimit, string defaultSource = BusTopics.Sources.Tray)
         {
@@ -198,6 +224,15 @@ namespace RemoteAgents.Launcher
                     IsBackground = true
                 };
                 _dispatchThread.Start();
+            }
+        }
+
+        internal void RemoveTick(BusTick tick)
+        {
+            if (tick == null) return;
+            lock (_ticks)
+            {
+                _ticks.Remove(tick);
             }
         }
 
@@ -261,19 +296,19 @@ namespace RemoteAgents.Launcher
             {
                 if (_disposed != 0) return -1;
 
-                if (_queueLimit > 0 && _queue.Count >= _queueLimit)
-                {
-                    Interlocked.Increment(ref _droppedCount);
-                    _droppedInEpisode++;
-                    _inOverflow = 1;
-                    return -1;
-                }
-
-                long seq = ++_seqCounter;
-                var evt = new BusEvent(seq, topic, actualSource, utc, fields);
-
                 try
                 {
+                    if (_queueLimit > 0 && _queue.Count >= _queueLimit)
+                    {
+                        Interlocked.Increment(ref _droppedCount);
+                        _droppedInEpisode++;
+                        _inOverflow = 1;
+                        return -1;
+                    }
+
+                    long seq = ++_seqCounter;
+                    var evt = new BusEvent(seq, topic, actualSource, utc, fields);
+
                     if (!_queue.TryAdd(evt))
                     {
                         Interlocked.Increment(ref _droppedCount);
@@ -281,6 +316,13 @@ namespace RemoteAgents.Launcher
                         _inOverflow = 1;
                         return -1;
                     }
+
+                    if (BusTopics.IsRetainedTopic(topic))
+                    {
+                        _retained[topic] = evt;
+                    }
+
+                    return seq;
                 }
                 catch (ObjectDisposedException)
                 {
@@ -290,13 +332,6 @@ namespace RemoteAgents.Launcher
                 {
                     return -1;
                 }
-
-                if (BusTopics.IsRetainedTopic(topic))
-                {
-                    _retained[topic] = evt;
-                }
-
-                return seq;
             }
         }
 
@@ -342,11 +377,22 @@ namespace RemoteAgents.Launcher
             while (maxCount <= 0 || count < maxCount)
             {
                 CheckRecovery();
-                if (!_queue.TryTake(out var evt))
-                    break;
+                try
+                {
+                    if (!_queue.TryTake(out var evt))
+                        break;
 
-                Dispatch(evt);
-                count++;
+                    Dispatch(evt);
+                    count++;
+                }
+                catch (ObjectDisposedException)
+                {
+                    break;
+                }
+                catch (InvalidOperationException)
+                {
+                    break;
+                }
             }
             CheckRecovery();
             return count;
@@ -354,33 +400,38 @@ namespace RemoteAgents.Launcher
 
         private void CheckRecovery()
         {
-            if (_inOverflow != 0 && (_queue.Count <= _queueLimit / 2 || _queue.Count == 0))
+            try
             {
-                lock (_publishLock)
+                if (Volatile.Read(ref _disposed) != 0) return;
+                if (_inOverflow != 0 && (_queue.Count <= _queueLimit / 2 || _queue.Count == 0))
                 {
-                    if (_inOverflow != 0 && (_queue.Count <= _queueLimit / 2 || _queue.Count == 0))
+                    lock (_publishLock)
                     {
-                        _inOverflow = 0;
-                        long dropped = _droppedInEpisode;
-                        _droppedInEpisode = 0;
-                        if (dropped > 0)
+                        if (_disposed != 0) return;
+                        if (_inOverflow != 0 && (_queue.Count <= _queueLimit / 2 || _queue.Count == 0))
                         {
-                            long seq = ++_seqCounter;
-                            var fields = new Dictionary<string, string>(StringComparer.Ordinal)
+                            _inOverflow = 0;
+                            long dropped = _droppedInEpisode;
+                            _droppedInEpisode = 0;
+                            if (dropped > 0)
                             {
-                                { "dropped", dropped.ToString() }
-                            };
-                            var overflowEvt = new BusEvent(seq, BusTopics.BusOverflow, _defaultSource, DateTime.UtcNow, fields);
-                            try
-                            {
+                                long seq = ++_seqCounter;
+                                var fields = new Dictionary<string, string>(StringComparer.Ordinal)
+                                {
+                                    { "dropped", dropped.ToString() }
+                                };
+                                var overflowEvt = new BusEvent(seq, BusTopics.BusOverflow, _defaultSource, DateTime.UtcNow, fields);
                                 _queue.TryAdd(overflowEvt);
-                            }
-                            catch
-                            {
                             }
                         }
                     }
                 }
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+            catch (InvalidOperationException)
+            {
             }
         }
 
@@ -496,18 +547,23 @@ namespace RemoteAgents.Launcher
             if (Interlocked.Exchange(ref _disposed, 1) != 0)
                 return;
 
+            BusTick[] activeTicks;
             lock (_ticks)
             {
-                for (int i = 0; i < _ticks.Count; i++)
+                activeTicks = _ticks.ToArray();
+            }
+            for (int i = 0; i < activeTicks.Length; i++)
+            {
+                try
                 {
-                    try
-                    {
-                        _ticks[i].Dispose();
-                    }
-                    catch
-                    {
-                    }
+                    activeTicks[i].Dispose();
                 }
+                catch
+                {
+                }
+            }
+            lock (_ticks)
+            {
                 _ticks.Clear();
             }
 
@@ -517,11 +573,20 @@ namespace RemoteAgents.Launcher
             }
             catch { }
 
-            try
+            lock (_publishLock)
             {
-                _queue.CompleteAdding();
+                try
+                {
+                    _queue.CompleteAdding();
+                }
+                catch { }
+
+                try
+                {
+                    _queue.Dispose();
+                }
+                catch { }
             }
-            catch { }
 
             if (_dispatchThread != null && _dispatchThread.IsAlive)
             {
@@ -531,12 +596,6 @@ namespace RemoteAgents.Launcher
                 }
                 catch { }
             }
-
-            try
-            {
-                _queue.Dispose();
-            }
-            catch { }
 
             try
             {
