@@ -33,6 +33,7 @@ namespace RemoteAgents.Launcher
             log.Write("health.expected blocks=" + string.Join(",", healthBoard.Expected));
             busParts.Add(bus.Subscribe(BusTopics.BlockReady, e => HealthReport(e, true)));
             busParts.Add(bus.Subscribe(BusTopics.BlockDegraded, e => HealthReport(e, false)));
+            busParts.Add(bus.Subscribe(BusTopics.BlockFailed, e => HealthReport(e, false))); // failed тоже снимает прежнюю готовность до приёмки
             busParts.Add(bus.Subscribe(BusTopics.VpnState, e => {
                 bool on = e.Get("state") == "on";
                 if (on && !vpnReadyPublished) bus.Publish(BusTopics.BlockReady, BusTopics.Sources.Tray, "block", "vpn", "via", "vpn-state");

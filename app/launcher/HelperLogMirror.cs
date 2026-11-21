@@ -12,6 +12,7 @@ namespace RemoteAgents.Launcher
     {
         internal const int MinHelperVersion = 10, Iterations = 10, MaxBytes = 40000;
         readonly string logsDir, cursorFile;
+        readonly CoreJournal coreJournal;
         readonly Func<bool> ready;
         readonly Func<string> helperVersion;
         readonly Func<ulong, int, Dictionary<string, object>> read;
@@ -21,7 +22,7 @@ namespace RemoteAgents.Launcher
         internal HelperLogMirror(string logsDir, string stateDir, Func<bool> ready, Func<string> helperVersion,
             Func<ulong, int, Dictionary<string, object>> read, Action<LogLevel, string, string[]> log)
         {
-            this.logsDir = logsDir; cursorFile = Path.Combine(stateDir, "helper-log-cursor.json");
+            this.logsDir = logsDir; coreJournal = new CoreJournal(line => RaLog.AppendLine(logsDir, "core", line)); cursorFile = Path.Combine(stateDir, "helper-log-cursor.json");
             this.ready = ready; this.helperVersion = helperVersion; this.read = read; this.log = log;
         }
 
@@ -54,7 +55,13 @@ namespace RemoteAgents.Launcher
                         if (Json.Bool(reply, "reset")) { log(LogLevel.Warn, "helper.log-reset", new[] { "was", after.ToString(CultureInfo.InvariantCulture), "now", next.ToString(CultureInfo.InvariantCulture) }); after = next; SaveCursor(after); break; }
                         if (lost > 0) log(LogLevel.Warn, "helper.log-lost", new[] { "lines", lost.ToString(CultureInfo.InvariantCulture) });
                         var lines = Json.Strings(Json.Get(reply, "lines"));
-                        foreach (string line in lines) { RaLog.AppendLine(logsDir, Component(line) == "core" ? "core" : "helper", line); total++; }
+                        foreach (string line in lines) {
+                            if (Component(line) == "core") coreJournal.Write(line);
+                            else RaLog.AppendLine(logsDir, "helper", line);
+                            total++;
+                        }
+                        // Итог повторов на диске ДО продвижения курсора (и при последующей ошибке pipe).
+                        coreJournal.Flush();
                         if (next > after) { after = next; SaveCursor(after); }
                         if (lines.Length == 0) break;
                     }

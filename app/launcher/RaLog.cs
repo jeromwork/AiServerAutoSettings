@@ -157,9 +157,15 @@ namespace RemoteAgents.Launcher
                         pending = Format(Clock(), LogLevel.Warn, "launcher", "log.write-failed", new[] { new KeyValuePair<string, string>("n", failed.ToString(CultureInfo.InvariantCulture)) }, Session) + "\n";
                     try {
                         System.IO.Directory.CreateDirectory(dir);
-                        string text = pending + line + "\n";
-                        byte[] bytes = new UTF8Encoding(false).GetBytes(text);
-                        try { Rotate(path, bytes.Length); } catch { /* ротация не удалась: строку всё равно пишем */ }
+                        byte[] body = LineBytes(line);
+                        byte[] marker = pending.Length == 0 ? new byte[0] : LineBytes(pending);
+                        byte[] bytes = new byte[marker.Length + body.Length];
+                        Buffer.BlockCopy(marker, 0, bytes, 0, marker.Length);
+                        Buffer.BlockCopy(body, 0, bytes, marker.Length, body.Length);
+                        if (bytes.Length + 3 > MaxBytes) bytes = body;
+                        // Резервируем BOM до ротации: каждый из шести файлов строго <= MaxBytes.
+                        // Если ротация недоступна, рост запрещён; следующая успешная запись сообщит log.write-failed.
+                        Rotate(path, bytes.Length + 3);
                         bool fresh = !File.Exists(path) || new FileInfo(path).Length == 0;
                         using (var f = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete)) {
                             if (fresh) f.Write(new byte[] { 0xEF, 0xBB, 0xBF }, 0, 3);
@@ -172,6 +178,26 @@ namespace RemoteAgents.Launcher
                     if (mutex != null) { try { if (held) mutex.ReleaseMutex(); } catch { } mutex.Dispose(); }
                 }
             }
+        }
+
+        static byte[] LineBytes(string line)
+        {
+            // Внешние журналы тоже ограничены; сравнение повторов происходит до этого обрезания.
+            string safe = Regex.Replace(line ?? "", @"[\x00-\x1F\x7F]", "");
+            int budget = (int)Math.Min(8192, MaxBytes - 3);
+            byte[] suffix = Encoding.UTF8.GetBytes("…[cut]");
+            if (budget <= suffix.Length + 1) throw new IOException("Log size limit is too small");
+            // Не выделяем массив пропорционально произвольно длинной внешней строке.
+            if (safe.Length > budget) safe = safe.Substring(0, budget);
+            byte[] bytes = Encoding.UTF8.GetBytes(safe + "\n");
+            if (bytes.Length <= budget) return bytes;
+            int end = budget - suffix.Length - 1;
+            while (end > 0 && (bytes[end] & 0xC0) == 0x80) end--;
+            var result = new byte[end + suffix.Length + 1];
+            Buffer.BlockCopy(bytes, 0, result, 0, end);
+            Buffer.BlockCopy(suffix, 0, result, end, suffix.Length);
+            result[result.Length - 1] = 10;
+            return result;
         }
 
         static void Rotate(string path, int incoming)

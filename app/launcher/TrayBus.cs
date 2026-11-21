@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text.RegularExpressions;
 
 namespace RemoteAgents.Launcher
 {
@@ -10,6 +11,8 @@ namespace RemoteAgents.Launcher
     internal sealed class BlockStatusTracker
     {
         readonly EventBus bus; readonly object gate = new object();
+        internal const int MaxBlocks = 64; // неизвестные имена сверх лимита игнорируются до перезапуска трекера
+        readonly Dictionary<string, string> states = new Dictionary<string, string>(StringComparer.Ordinal);
         readonly Dictionary<string, string> reasons = new Dictionary<string, string>(StringComparer.Ordinal);
         readonly Dictionary<string, bool> ready = new Dictionary<string, bool>(StringComparer.Ordinal);
         // Файл статуса учитывается, только если записан не раньше since: запуска трея или последнего component.start/exit блока.
@@ -26,8 +29,12 @@ namespace RemoteAgents.Launcher
         }
         internal void Reset(string block)
         {
-            if (string.IsNullOrEmpty(block)) return;
-            lock (gate) { ready.Remove(block); reasons.Remove(block); since[block] = clock(); }
+            block = BlockName(block);
+            if (block.Length == 0) return;
+            lock (gate) {
+                if (!since.ContainsKey(block) && since.Count >= MaxBlocks) return;
+                ready.Remove(block); reasons.Remove(block); states.Remove(block); since[block] = clock();
+            }
         }
         bool Fresh(string block, DateTime modified)
         {
@@ -42,22 +49,34 @@ namespace RemoteAgents.Launcher
             if (phase.Length > 0 && phase != "ok") return false;
             return block != "vpn" || Json.Str(status, "state") == "on";
         }
-        internal bool IsBlockReady(string block) { lock (gate) { bool v; return ready.TryGetValue(block, out v) && v; } }
+        static string BlockName(string block)
+        {
+            block = (block ?? "").ToLowerInvariant();
+            if (!Regex.IsMatch(block, @"^[a-z0-9_-]{1,64}$")) return "";
+            return block == "bridge" ? "control" : block;
+        }
+        internal int TrackedBlocks { get { lock (gate) return ready.Count; } }
+        internal bool IsBlockReady(string block) { lock (gate) { bool v; return ready.TryGetValue(BlockName(block), out v) && v; } }
 
         internal void Observe(string block, Dictionary<string, object> status)
         {
-            if (string.IsNullOrEmpty(block)) return;
+            block = BlockName(block);
+            if (block.Length == 0) return;
             bool now = IsReady(block, status);
+            string topic = now ? BusTopics.BlockReady : Json.Str(status, "phase") == "failed" ? BusTopics.BlockFailed : BusTopics.BlockDegraded;
             // Факт отсутствия локальной сети из статуса транспорта (Р8), без возраста файла и текста summary.
             string reason = block == "transport" && Json.Str(status, "localNet") == "down" ? "no-network" : Json.Text(status, "summary", "not-ok");
             lock (gate) {
-                bool was; bool known = ready.TryGetValue(block, out was);
+                bool known = ready.ContainsKey(block);
+                if (!known && ready.Count >= MaxBlocks) return;
+                string previousState; states.TryGetValue(block, out previousState);
                 string previousReason; reasons.TryGetValue(block, out previousReason);
-                if (known && was == now && (now || previousReason == reason)) return;
+                if (known && previousState == topic && (now || previousReason == reason)) return;
+                states[block] = topic;
                 reasons[block] = reason;
                 ready[block] = now;
                 if (now) bus.Publish(BusTopics.BlockReady, BusTopics.Sources.Tray, "block", block);
-                else if (known || reason == "no-network") bus.Publish(BusTopics.BlockDegraded, BusTopics.Sources.Tray, "block", block, "reason", reason);
+                else if (known || reason == "no-network" || topic == BusTopics.BlockFailed) bus.Publish(topic, BusTopics.Sources.Tray, "block", block, "reason", reason);
                 // Первый no-network тоже публикуется: отсутствие сети засчитывается доской здоровья.
             }
         }
@@ -66,8 +85,15 @@ namespace RemoteAgents.Launcher
         internal void ScanFile(string path)
         {
             try {
+                // ReplaceFile (Files.Atomic) на Windows создаёт служебные *.json~RF<hex>.TMP.
+                // DOS/8.3-маска FileSystemWatcher может пропустить их даже с фильтром *.json.
+                // Такой сигнал лишь перечитывает конечный .json; содержимое временного файла не есть готовность.
+                var match = Regex.Match(Path.GetFileName(path), @"^([a-z0-9_-]{1,64})\.json(?:~RF[0-9a-f]+(?:\.tmp)?)?$", RegexOptions.IgnoreCase);
+                if (!match.Success) return;
+                string name = match.Groups[1].Value;
+                path = Path.Combine(Path.GetDirectoryName(path), name + ".json");
                 if (!File.Exists(path)) return;
-                string block = Path.GetFileNameWithoutExtension(path);
+                string block = BlockName(name);
                 if (!Fresh(block, lastWrite(path))) return; // файл от прошлого запуска: не факт о текущем
                 Observe(block, Json.Read(path));
             } catch (Exception) { } // файл пойман посреди записи или недоступен: ждём следующего события
@@ -88,7 +114,7 @@ namespace RemoteAgents.Launcher
             watcher = new FileSystemWatcher(dir, "*.json") { NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size, InternalBufferSize = 32768 };
             watcher.Changed += (s, e) => tracker.ScanFile(e.FullPath);
             watcher.Created += (s, e) => tracker.ScanFile(e.FullPath);
-            watcher.Renamed += (s, e) => tracker.ScanFile(e.FullPath);
+            watcher.Renamed += (s, e) => { tracker.ScanFile(e.FullPath); tracker.ScanFile(e.OldFullPath); };
             watcher.Error += (s, e) => tracker.ScanAll(dir); // переполнение буфера: пересмотреть все файлы
             watcher.EnableRaisingEvents = true;
             tracker.ScanAll(dir); // текущее состояние до первых изменений
