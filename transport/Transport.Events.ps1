@@ -65,7 +65,9 @@ namespace RemoteAgents {
   readonly AutoResetEvent wake=new AutoResetEvent(false);
   readonly Stream input;
   readonly TextWriter output;
-  volatile bool stopped, connected, inputClosed;
+  volatile bool stopped, connected, inputClosed, completing;
+  Thread writer;
+  bool drained;
   bool networkPending;
   int started;
   long rejected, inputDropped, outputDropped, outputRejected, writeErrors;
@@ -80,14 +82,14 @@ namespace RemoteAgents {
   public void Start() {
    if(Interlocked.Exchange(ref started,1)!=0) return;
    if(input!=null) {Thread t=new Thread(ReadInput);t.IsBackground=true;t.Name="transport-stdin";t.Start();} else inputClosed=true;
-   if(output!=null) {Thread t=new Thread(WriteLoop);t.IsBackground=true;t.Name="transport-stdout";t.Start();}
+   if(output!=null) {writer=new Thread(WriteLoop);writer.IsBackground=true;writer.Name="transport-stdout";writer.Start();}
   }
   static bool AllowedInput(string topic) {
    return topic!=null && (topic.StartsWith("win.",StringComparison.Ordinal) || topic=="net.change" ||
     topic.StartsWith("tick.transport-",StringComparison.Ordinal) || topic=="transport.command");
   }
   static bool AllowedOutput(string topic) {
-   return topic=="transport.status" || topic=="transport.ready" || topic=="transport.mem" ||
+   return topic=="transport.stdin.ready" || topic=="transport.status" || topic=="transport.ready" || topic=="transport.mem" ||
     topic=="transport.switch" || topic=="transport.episode";
   }
   static string Name(XmlElement e) {return e.HasAttribute("item")?e.GetAttribute("item"):e.LocalName;}
@@ -129,6 +131,8 @@ namespace RemoteAgents {
    } catch(Exception) {Interlocked.Increment(ref rejected);}
   }
   void ReadInput() {
+   // Announce from the reader itself, before waiting for the first input or a working path.
+   Queue("transport.stdin.ready", "@bus {\"topic\":\"transport.stdin.ready\",\"fields\":{}}");
    byte[] chunk=new byte[4096],line=new byte[MaxLineBytes+1];int used=0;bool skipping=false;
    try {
     while(!stopped) {
@@ -149,13 +153,15 @@ namespace RemoteAgents {
   public TransportBusEvent[] Drain(out bool refresh) {
    lock(gate) {TransportBusEvent[] result=incoming.ToArray();incoming.Clear();refresh=networkPending;networkPending=false;return result;}
   }
-  public bool Queue(string topic,string line) {
+  public bool Queue(string topic,string line) {return Enqueue(topic,line,false);}
+  public bool QueueFinalStatus(string line) {return Enqueue("transport.status",line,true);}
+  bool Enqueue(string topic,string line,bool final) {
    if(!AllowedOutput(topic) || line==null || Encoding.UTF8.GetByteCount(line)>MaxLineBytes || line.IndexOfAny(new[]{'\r','\n'})>=0) {Interlocked.Increment(ref outputRejected);return false;}
    lock(gate) {
-    if(stopped) return false;
-    string previous;if(last.TryGetValue(topic,out previous) && previous==line) return true;
-    if(outgoing.Count>=MaxQueuedEvents) {Interlocked.Increment(ref outputDropped);return false;}
-    outgoing.Enqueue(line);last[topic]=line;wake.Set();return true;
+    if(stopped || completing) return false;
+    string previous;if(!final && last.TryGetValue(topic,out previous) && previous==line) return true;
+    if(outgoing.Count>=MaxQueuedEvents) {Interlocked.Increment(ref outputDropped);if(final) outgoing.Dequeue();else return false;}
+    outgoing.Enqueue(line);last[topic]=line;if(final) completing=true;wake.Set();return true;
    }
   }
   void WritePending() {
@@ -165,8 +171,22 @@ namespace RemoteAgents {
    }
   }
   void WriteLoop() {
-   try {while(!stopped) {wake.WaitOne();WritePending();}}
+   try {while(!stopped) {
+    wake.WaitOne();WritePending();
+    lock(gate) {if(completing && outgoing.Count==0 && !stopped) {drained=true;return;}}
+   }}
    catch(Exception) {Interlocked.Increment(ref writeErrors);}
+  }
+  public bool Complete(int timeoutMs) {
+   // Shutdown only: reject further publications, drain through Flush, then join with a hard fuse.
+   // Dispose remains non-blocking for aborts; blocked pipe workers are background threads.
+   lock(gate) {completing=true;wake.Set();}
+   Start();
+   Thread t=writer;
+   bool done=t!=null && t.Join(Math.Max(0,Math.Min(timeoutMs,1000)));
+   bool delivered;lock(gate) {delivered=done && drained;}
+   Dispose();
+   return delivered;
   }
   public void Dispose() {
    // No Join/Flush/pipe close on the daemon thread: a full stdout or open stdin may block forever.
@@ -487,7 +507,7 @@ function Start-TransportBus {
     $bus.Start()
     $bus
 }
-function Send-TransportBusEvent($Bus,[string]$Topic,[Collections.IDictionary]$Fields,[switch]$PassThru) {
+function Send-TransportBusEvent($Bus,[string]$Topic,[Collections.IDictionary]$Fields,[switch]$PassThru,[switch]$Final) {
     if(-not $Bus){return}
     # Receiver accepts scalar fields only. Structured status values are JSON strings.
     $safe=[ordered]@{}
@@ -511,6 +531,6 @@ function Send-TransportBusEvent($Bus,[string]$Topic,[Collections.IDictionary]$Fi
             $line='@bus '+(ConvertTo-Json -InputObject ([ordered]@{topic=$Topic;fields=$safe}) -Depth 4 -Compress)
         }
     }
-    $sent=$Bus.Queue($Topic,$line)
+    $sent=if($Final -and $Topic -eq 'transport.status'){$Bus.QueueFinalStatus($line)}else{$Bus.Queue($Topic,$line)}
     if($PassThru){$sent}
 }

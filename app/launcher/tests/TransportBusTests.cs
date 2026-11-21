@@ -16,6 +16,7 @@ namespace RemoteAgents.Launcher
         // при срабатывании — падение теста, успех не объявляет.
         const int TestHangFuseMs = 5000;
         const string Status = "@bus {\"topic\":\"transport.status\",\"fields\":{\"phase\":\"готов\"}}";
+        const string StdinReady = "@bus {\"topic\":\"transport.stdin.ready\",\"fields\":{}}";
         const string Ready = "@bus {\"topic\":\"transport.ready\",\"fields\":{}}";
         static void Check(bool ok, string what) { if (!ok) throw new Exception("Assertion failed: " + what); assertions++; }
         static void Await(WaitHandle signal) { if (!signal.WaitOne(TestHangFuseMs)) throw new Exception("Test thread deadlocked"); }
@@ -31,6 +32,8 @@ namespace RemoteAgents.Launcher
                 ReadLoopFramesAndRejectsOversizedTails();
                 ReadLoopBoundariesAndEof();
                 FormatAndUtf8Forwarding();
+                ForwardRouteBeforePathReady(StdinReady);
+                PathReadyDoesNotOpenStdin();
                 BlockedStdinDoesNotBlockBusOrDispose();
                 OutgoingOverflowRecovers();
                 OversizedOutgoingIsCountedAndLogged();
@@ -164,8 +167,8 @@ namespace RemoteAgents.Launcher
                 using (bridge = new TransportBusBridge(null, sink, bus)) {
                     bus.Publish(BusTopics.NetChange, BusTopics.Sources.Tray, "id", "ignored-before-ready");
                     bus.DrainOnce();
-                    Check(bridge.Sent == 0 && !bridge.Ready, "no forwarding until daemon ready");
-                    bridge.ConsumeLine(Ready);
+                    Check(bridge.Sent == 0 && !bridge.Ready, "no forwarding until stdin reader ready");
+                    bridge.ConsumeLine(StdinReady);
                     bridge.ConsumeLine("@bus {bad}");
                     bus.Publish(BusTopics.NetChange, BusTopics.Sources.Tray, "id", "сеть");
                     bus.Publish(BusTopics.VpnState, BusTopics.Sources.Tray);
@@ -183,6 +186,56 @@ namespace RemoteAgents.Launcher
                 bus.Publish(BusTopics.NetChange, BusTopics.Sources.Tray);
                 bus.DrainOnce();
                 Check(bridge.Sent == 1, "disposed bridge unsubscribed");
+            }
+        }
+
+        // Called by the PowerShell microtest with the actual daemon reader's announcement.
+        public static string ForwardRouteBeforePathReady(string handshake)
+        {
+            using (var bus = new EventBus(manualDispatch: true))
+            using (var delivered = new ManualResetEvent(false)) {
+                var sink = new SignalledStream(delivered);
+                using (var bridge = new TransportBusBridge(null, sink, bus)) {
+                    bridge.ConsumeLine(handshake);
+                    Check(bridge.InputReady && !bridge.Ready, "reader handshake opens forwarding before path proof");
+                    bus.Publish(BusTopics.WinRouteChanged, BusTopics.Sources.Windows, "family", "IPv4", "ifIndex", "7");
+                    bus.DrainOnce();
+                    bridge.Start();
+                    Await(delivered);
+                    bridge.Dispose();
+                    Check(bridge.JoinWriter(TestHangFuseMs) && bridge.Sent == 1, "route reaches daemon stdin before first path success");
+                    return Encoding.UTF8.GetString(sink.ToArray());
+                }
+            }
+        }
+
+        static void PathReadyDoesNotOpenStdin()
+        {
+            using (var bus = new EventBus(manualDispatch: true))
+            using (var bridge = new TransportBusBridge(null, new MemoryStream(), bus, queueLimit: 1)) {
+                bridge.ConsumeLine(Ready);
+                bus.Publish(BusTopics.NetChange, "test");
+                bus.Publish(BusTopics.NetChange, "test");
+                bus.DrainOnce();
+                Check(bridge.Ready && !bridge.InputReady && bridge.Dropped == 0, "path-ready alone never opens stdin forwarding");
+                bridge.Dispose();
+                Check(bridge.JoinWriter(TestHangFuseMs) && bridge.Sent == 0, "no outgoing event queued without reader confirmation");
+            }
+        }
+
+        public static void AssertFinalStatus(string frames, string phase)
+        {
+            using (var bus = new EventBus(manualDispatch: true))
+            using (var bridge = new TransportBusBridge(null, null, bus)) {
+                var phases = new List<string>();
+                bus.Subscribe(BusTopics.TransportStatus, e => phases.Add(e.Get("phase")));
+                bridge.ConsumeLine("@bus {\"topic\":\"transport.status\",\"fields\":{\"phase\":\"ok\"}}");
+                bus.DrainOnce();
+                foreach (string line in frames.Split('\n')) bridge.ConsumeLine(line.TrimEnd('\r'));
+                bus.DrainOnce();
+                BusEvent retained;
+                Check(phases.Last() == phase && bus.TryGetLast(BusTopics.TransportStatus, out retained) && retained.Get("phase") == phase,
+                    "final status reaches subscribers and replaces retained ok");
             }
         }
 
@@ -218,7 +271,7 @@ namespace RemoteAgents.Launcher
                 bus.Subscribe(BusTopics.BusOverflow, e => { if (e.Get("queue") == "transport.stdin") overflow++; });
                 bus.Subscribe("test.event", e => unrelated++);
                 try {
-                    bridge.ConsumeLine(Ready);
+                    bridge.ConsumeLine(StdinReady);
                     bridge.Start();
                     bus.Publish(BusTopics.NetChange, BusTopics.Sources.Tray);
                     DispatchOnThread(bus);
@@ -248,7 +301,7 @@ namespace RemoteAgents.Launcher
                     using (var bridge = new TransportBusBridge(null, stream, bus, queueLimit: 1)) {
                         int overflow = 0;
                         bus.Subscribe(BusTopics.BusOverflow, e => overflow++);
-                        bridge.ConsumeLine(Ready);
+                        bridge.ConsumeLine(StdinReady);
                         bus.Publish(BusTopics.NetChange, "test");
                         bus.Publish(BusTopics.NetChange, "test");
                         bus.DrainOnce(); // worker has not started: deterministic capacity overflow.
@@ -272,7 +325,7 @@ namespace RemoteAgents.Launcher
             try {
                 using (var bus = new EventBus(manualDispatch: true))
                 using (var bridge = new TransportBusBridge(null, new MemoryStream(), bus, dir)) {
-                    bridge.ConsumeLine(Ready);
+                    bridge.ConsumeLine(StdinReady);
                     for (int i = 0; i < 2; i++) bus.Publish(BusTopics.NetChange, "test", "id", new string('.', 9000));
                     bus.DrainOnce();
                     Check(bridge.TooLong == 2 && bridge.Sent == 0, "oversized outgoing events counted");
@@ -292,7 +345,7 @@ namespace RemoteAgents.Launcher
         {
             using (var bus = new EventBus(manualDispatch: true))
             using (var bridge = new TransportBusBridge(null, new BrokenStream(), bus)) {
-                bridge.ConsumeLine(Ready);
+                bridge.ConsumeLine(StdinReady);
                 bus.Publish(BusTopics.NetChange, "test"); bus.DrainOnce();
                 bridge.Start();
                 Check(bridge.JoinWriter(TestHangFuseMs) && bridge.WriteErrors == 1, "broken pipe and disposal flush exceptions contained");

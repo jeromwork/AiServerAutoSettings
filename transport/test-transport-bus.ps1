@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 # B4B: memory pipes, explicit events and manually pumped workers; no network, processes or real-time assertions.
-param([switch]$CompileOnly)
+param([switch]$CompileOnly,[string]$LauncherAssembly=(Join-Path $PSScriptRoot '../app/launcher/tests/bin/Release/transportbus-tests/net10.0/PortableTests.dll'))
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Transport.Events.ps1')
 Initialize-TransportEvents
@@ -24,18 +24,36 @@ namespace B4BTests {
  public sealed class BlockedOutput : TextWriter {
   public readonly ManualResetEvent Entered=new ManualResetEvent(false), Release=new ManualResetEvent(false);
   public override Encoding Encoding {get{return new UTF8Encoding(false);}}
-  public override void WriteLine(string s) {Entered.Set();Release.WaitOne();}
+  readonly StringBuilder text=new StringBuilder();
+  public int Flushes;
+  public string Text {get {lock(text) return text.ToString();}}
+  public override void WriteLine(string s) {Entered.Set();Release.WaitOne();lock(text) text.AppendLine(s);}
+  public override void Flush() {Interlocked.Increment(ref Flushes);}
+ }
+ public sealed class Completion {
+  readonly object bus;
+  readonly Thread thread;
+  public bool Result;
+  public Completion(object bus) {this.bus=bus;thread=new Thread(Run);thread.IsBackground=true;}
+  void Run() {Result=(bool)bus.GetType().GetMethod("Complete").Invoke(bus,new object[]{1000});}
+  public void Start() {thread.Start();}
+  public bool Join() {return thread.Join(5000);}
  }
 }
 '@
 Add-Type -TypeDefinition $fixture
 if($CompileOnly){'B4B syntax / C# compilation PASS';return}
+if(-not (Test-Path -LiteralPath $LauncherAssembly)){throw 'Build PortableTests.csproj -c Release -p:TransportBusTests=true before running this integration microtest'}
+[void][Reflection.Assembly]::LoadFrom((Resolve-Path -LiteralPath $LauncherAssembly).Path)
 function Assert($Value,[string]$Message){if(-not $Value){throw ('B4B: '+$Message)}}
 function Pump($Bus,[string]$Method){[void]$Bus.GetType().GetMethod($Method,[Reflection.BindingFlags]'Instance,NonPublic').Invoke($Bus,@())}
 function New-TestBus([string]$Text,$Output){
     $stream=[IO.MemoryStream]::new([Text.Encoding]::UTF8.GetBytes($Text))
     $handle=[RemoteAgents.TransportBus]::new($stream,$Output)
     Pump $handle 'ReadInput'
+    # Most parser fixtures ignore the separate handshake, tested end-to-end below.
+    Pump $handle 'WritePending'
+    [void]$Output.GetStringBuilder().Clear()
     $handle
 }
 $functions=@('New-DaemonEvent','Add-DaemonQueuedEvent','Receive-DaemonBus','Publish-DaemonBusStatus','Publish-DaemonBusReady','Add-DaemonEvent')
@@ -45,14 +63,23 @@ function Write-DaemonPathCheck($Event){}
 function Save-TransportMemory {}
 $script:eventQueue=@();$DaemonEventLimit=512;$script:daemonEventsQueued=[long]0;$script:daemonEventsDropped=[long]0
 $script:networkRefreshPending=$false;$script:TransportBusConnected=$false
+# Pump the real reader entry and send its frame through the actual launcher EventBus/bridge.
+$handshakeWriter=[IO.StringWriter]::new()
+$handshakeBus=[RemoteAgents.TransportBus]::new([IO.MemoryStream]::new(),$handshakeWriter)
+Pump $handshakeBus 'ReadInput';Pump $handshakeBus 'WritePending'
+$handshake=$handshakeWriter.ToString().Trim()
+Assert ((ConvertFrom-Json $handshake.Substring(5)).topic -eq 'transport.stdin.ready') 'reader did not announce stdin readiness'
+$earlyRoute=[RemoteAgents.Launcher.TransportBusTests]::ForwardRouteBeforePathReady($handshake)
+$script:busReadySent=$false;$script:busEngineReady=$false
 $route='@bus {"topic":"win.route.changed","fields":{"family":"IPv4","ifIndex":7}}'
 $command='@bus {"topic":"transport.command","fields":{"command":"inspect","text":"Привет"}}'
 $writer=[IO.StringWriter]::new()
-$bus=New-TestBus ($route+"`r`n"+$command) $writer
+$bus=New-TestBus ($earlyRoute+$command) $writer
 Receive-DaemonBus
 Assert ($bus.Connected -and $bus.InputClosed -and $TransportBusConnected) 'valid input/EOF did not latch bridge'
 Assert ($eventQueue.Count -eq 2 -and $eventQueue[0].kind -eq 'net-change' -and $eventQueue[0].topic -eq 'win.route.changed') 'stdin did not enter daemon queue'
 Assert ($eventQueue[1].fields['text'] -ceq 'Привет') 'UTF-8 or fields lost'
+Assert (-not $busReadySent -and -not $busEngineReady) 'early route fixture already had a path proof'
 Assert $networkRefreshPending 'route event did not request forced network snapshot'
 # Run the actual daemon network branch with an injected source. No files or network calls.
 $branch=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Clauses[0].Item1.Extent.Text -eq '$networkRefreshPending -or (-not $script:TransportBusConnected -and $now -ge $nextNetwork)'},$true))
@@ -142,6 +169,42 @@ Assert ($bus.OutputDropped -eq 88) 'output queue unbounded'
 Pump $bus 'WritePending'
 Assert (@($writer.ToString().Trim() -split '\r?\n').Count -eq 512) 'bounded output drain wrong'
 'B4B stdout / status changes / ready / dedup / bounds PASS'
+# Deterministic shutdown: hold writer before it records anything, fill its queue,
+# publish through the real daemon function, then release and join the graceful completion.
+foreach($phase in @('stopped','failed')){
+    $outputGate=[B4BTests.BlockedOutput]::new()
+    $bus=[RemoteAgents.TransportBus]::new($null,$outputGate)
+    try{
+        Send-TransportBusEvent $bus 'transport.mem' ([ordered]@{n=-1})
+        $bus.Start()
+        Assert ($outputGate.Entered.WaitOne(5000)) 'controlled writer did not enter'
+        for($i=0;$i -lt 512;$i++){Send-TransportBusEvent $bus 'transport.mem' ([ordered]@{n=$i})}
+        $script:lastStatusKey='{"phase":"'+$phase+'","ok":false}'
+        # Final must bypass status dedup and reserve room even when outgoing is full.
+        $script:busStatusKey=$script:lastStatusKey
+        Publish-DaemonBusStatus -Final
+        Assert ($bus.OutputDropped -eq 1) 'full queue did not reserve the final status slot'
+        Assert (-not $bus.Queue('transport.mem','late')) 'shutdown accepted publication after final status'
+        $completion=[B4BTests.Completion]::new($bus);$completion.Start()
+        [void]$outputGate.Release.Set()
+        Assert ($completion.Join() -and $completion.Result) 'graceful completion did not finish after final flush'
+        $finalLines=@($outputGate.Text.Trim() -split '\r?\n')
+        $finalFrame=ConvertFrom-Json $finalLines[-1].Substring(5)
+        Assert ($finalLines.Count -eq 513 -and $outputGate.Flushes -eq 513 -and $finalFrame.topic -eq 'transport.status' -and $finalFrame.fields.phase -eq $phase) 'final status lost or not flushed last'
+        [RemoteAgents.Launcher.TransportBusTests]::AssertFinalStatus($outputGate.Text,$phase)
+    }finally{[void]$outputGate.Release.Set();$bus.Dispose()}
+}
+'B4B final stopped/failed publication / flush / retained status PASS'
+# Never release this writer until Complete has returned: a zero-budget fuse must report failure.
+$outputGate=[B4BTests.BlockedOutput]::new()
+$bus=[RemoteAgents.TransportBus]::new($null,$outputGate)
+try{
+    $bus.Start();$script:busStatusKey=$null;$script:lastStatusKey='{"phase":"stopped","ok":false}'
+    Publish-DaemonBusStatus -Final
+    Assert ($outputGate.Entered.WaitOne(5000)) 'fuse writer did not enter'
+    Assert (-not $bus.Complete(0) -and $outputGate.Text.Length -eq 0) 'blocked output declared delivered or shutdown did not abort'
+}finally{[void]$outputGate.Release.Set();$bus.Dispose()}
+'B4B blocked stdout bounded shutdown reports failure PASS'
 # Real worker entry is signalled by barriers. Wait limits ONLY fail a hung fixture, never prove success.
 $inputGate=[B4BTests.BlockedInput]::new();$outputGate=[B4BTests.BlockedOutput]::new()
 $bus=[RemoteAgents.TransportBus]::new($inputGate,$outputGate)

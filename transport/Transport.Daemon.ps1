@@ -160,13 +160,13 @@ function Receive-DaemonBus {
         Add-DaemonQueuedEvent $queued
     }
 }
-function Publish-DaemonBusStatus {
+function Publish-DaemonBusStatus([switch]$Final) {
     # Publish-TransportStatus owns file format/heartbeat; reuse its content key without changing it.
-    if(-not $bus -or -not $script:lastStatusKey -or $script:busStatusKey -ceq $script:lastStatusKey){return}
+    if(-not $bus -or -not $script:lastStatusKey -or (-not $Final -and $script:busStatusKey -ceq $script:lastStatusKey)){return}
     $status=ConvertFrom-Json $script:lastStatusKey
     $fields=[ordered]@{}
     foreach($property in $status.PSObject.Properties){if($property.Name -ne 'updatedAt'){$fields[$property.Name]=$property.Value}}
-    if(Send-TransportBusEvent $bus 'transport.status' $fields -PassThru){$script:busStatusKey=$script:lastStatusKey}
+    if(Send-TransportBusEvent $bus 'transport.status' $fields -PassThru -Final:$Final){$script:busStatusKey=$script:lastStatusKey}
 }
 function Publish-DaemonBusReady {
     if($bus -and $script:busEngineReady -and $engine -and -not $engine.Process.HasExited -and -not $script:busReadySent){
@@ -704,9 +704,14 @@ try{
     if($reloadJob){Stop-Job $reloadJob;Remove-Job $reloadJob -Force}
     Stop-TransportProbes;Stop-DaemonObservation
     foreach($child in @($tunnelChildren.Values)){Stop-TransportProcess $child};Stop-TransportProcess $engine;$engine=$null;$confirmed=$false
-    if($locked){try{Publish-TransportStatus;Publish-DaemonBusStatus;Write-TransportLog $root 'stop'}finally{$mutex.ReleaseMutex()}}
-    if($bus){$bus.Dispose()}
-    if($mutex){$mutex.Dispose()};if($parent){$parent.Dispose()}
+    try{
+        if($locked){try{Publish-TransportStatus;Publish-DaemonBusStatus -Final;Write-TransportLog $root 'stop'}finally{$mutex.ReleaseMutex()}}
+    }finally{
+        # Only shutdown waits for stdout, with a one-second fuse; the main loop only queues.
+        try{if($bus){[void]$bus.Complete(1000)}}finally{
+            if($mutex){$mutex.Dispose()};if($parent){$parent.Dispose()}
+        }
+    }
 }
 
 exit $exitCode

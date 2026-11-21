@@ -21,7 +21,7 @@ namespace RemoteAgents.Launcher
         readonly BlockingCollection<string> outgoing;
         IDisposable subscription;
         Thread readerThread, writerThread;
-        int disposed, started, ready, inOverflow, tooLongReported;
+        int disposed, started, ready, inputReady, inOverflow, tooLongReported;
         long lines, parsed, rejected, dropped, sent, tooLong, writeErrors;
 
         public long Lines => Interlocked.Read(ref lines);
@@ -31,6 +31,7 @@ namespace RemoteAgents.Launcher
         public long Sent => Interlocked.Read(ref sent);
         public long TooLong => Interlocked.Read(ref tooLong);
         public long WriteErrors => Interlocked.Read(ref writeErrors);
+        public bool InputReady => Volatile.Read(ref inputReady) != 0;
         public bool Ready => Volatile.Read(ref ready) != 0;
 
         public TransportBusBridge(Stream stdout, Stream stdin, EventBus bus, string logsDir = null, int queueLimit = DefaultQueueLimit)
@@ -72,7 +73,8 @@ namespace RemoteAgents.Launcher
         public static bool IsAllowedIncoming(string topic)
         {
             if (string.IsNullOrEmpty(topic)) return false;
-            return topic == BusTopics.TransportReady ||
+            return topic == BusTopics.TransportStdinReady ||
+                   topic == BusTopics.TransportReady ||
                    topic == BusTopics.TransportStatus ||
                    topic == BusTopics.TransportEpisode ||
                    topic == BusTopics.TransportSwitch ||
@@ -224,6 +226,7 @@ namespace RemoteAgents.Launcher
                 }
                 Interlocked.Increment(ref parsed);
                 if (topic == BusTopics.TransportReady) Volatile.Write(ref ready, 1);
+                if (topic == BusTopics.TransportStdinReady) Volatile.Write(ref inputReady, 1);
                 // EventBus owns the bounded incoming queue; Parsed is a lifetime statistic.
                 try {
                     if (bus != null && bus.Publish(topic, BusTopics.Sources.Transport, fields) < 0)
@@ -240,7 +243,7 @@ namespace RemoteAgents.Launcher
 
         void OnBusEvent(BusEvent e)
         {
-            if (Volatile.Read(ref disposed) != 0 || output == null || !Ready || !IsAllowedOutgoing(e.Topic)) return;
+            if (Volatile.Read(ref disposed) != 0 || output == null || !InputReady || !IsAllowedOutgoing(e.Topic)) return;
             string line = FormatOutgoing(e);
             if (line == null) {
                 Interlocked.Increment(ref tooLong);
