@@ -64,6 +64,16 @@ namespace RemoteAgents {
   readonly int port,stallConns;
   readonly double stallSeconds;
   readonly string secret;
+  // §4б: snapshots larger than this are rejected, clearing the previous baseline.
+  public const int MaxConnectionSamples=4096;
+  public const int MaxLogContexts=2048;
+  public const int MaxQueuedEvents=512;
+  long messages,oversizedSnapshots;
+  public long Messages {get {return Interlocked.Read(ref messages);}}
+  public long OversizedSnapshots {get {return Interlocked.Read(ref oversizedSnapshots);}}
+  public int RetainedSamples {get {return samples.Count;}}
+  public int RetainedContexts {get {return contexts.Count;}}
+  public int QueuedEvents {get {lock(gate) return queue.Count;}}
   public int Dropped {get;private set;}
   public string LogsStatus {get;private set;}
   public string ConnectionsStatus {get;private set;}
@@ -103,6 +113,7 @@ namespace RemoteAgents {
          if(part.MessageType!=WebSocketMessageType.Text || message.Length+part.Count>4*1024*1024) throw new IOException();
          message.Write(buffer,0,part.Count);
         } while(!part.EndOfMessage);
+        Interlocked.Increment(ref messages);
         message.Position=0;
         try {
          if(n==0) ParseLog((ClashLog)serializer.ReadObject(message));
@@ -119,7 +130,7 @@ namespace RemoteAgents {
    }
    Status(n,"stopped");
   }
-  void Enqueue(TransportEvent e) {lock(gate) {if(queue.Count>=512) {queue.Dequeue(); Dropped++;} queue.Enqueue(e);}}
+  void Enqueue(TransportEvent e) {lock(gate) {if(queue.Count>=MaxQueuedEvents) {queue.Dequeue(); if(Dropped<Int32.MaxValue) Dropped++;} queue.Enqueue(e);}}
   public TransportEvent[] Drain() {lock(gate) {TransportEvent[] all=queue.ToArray(); queue.Clear(); return all;}}
   static readonly Regex Outbound=new Regex(@"outbound/[^\s\[]+\[([^\]]+)\]",RegexOptions.IgnoreCase);
   static readonly Regex LogContext=new Regex(@"\[(\d+)\s+[^\]]+\]");
@@ -134,14 +145,14 @@ namespace RemoteAgents {
    if(Regex.IsMatch(text,@"refused|10061",RegexOptions.IgnoreCase)) return "refused";
    return "dial-error";
   }
-  void ParseLog(ClashLog log) {
+  void ParseLog(ClashLog log) {ParseLogAt(log,Clock());}
+  void ParseLogAt(ClashLog log,double now) {
    if(log==null || String.IsNullOrEmpty(log.Payload)) return;
    string text=Regex.Replace(log.Payload,@"\x1b\[[0-9;]*m","");
    Match outbound=Outbound.Match(text), context=LogContext.Match(text);
    string tag=outbound.Success && tags.Contains(outbound.Groups[1].Value)?outbound.Groups[1].Value:"";
-   double now=Clock();
    if(context.Success) {
-    if(contexts.Count>2048) contexts.Clear();
+    if(contexts.Count>=MaxLogContexts) contexts.Clear();
     Context known;
     if(tag!="") contexts[context.Groups[1].Value]=new Context {Tag=tag,Seen=now};
     else if(contexts.TryGetValue(context.Groups[1].Value,out known) && now-known.Seen<120) tag=known.Tag;
@@ -156,13 +167,26 @@ namespace RemoteAgents {
    // Never retain arbitrary log text, URLs, credentials, addresses or exception messages.
    Enqueue(TransportEvent.Make(kind,tag,code,code=="local-network" || code=="system-dns",code));
   }
-  void ParseConnections(ClashConnections snapshot) {
+  static bool ValidConnection(ClashConnection c) {
+   return c!=null && !String.IsNullOrEmpty(c.Id) && !String.IsNullOrEmpty(c.Start) && c.Upload>=0 && c.Download>=0 && c.Chains!=null;
+  }
+  void ParseConnections(ClashConnections snapshot) {ParseConnectionsAt(snapshot,Clock());}
+  void ParseConnectionsAt(ClashConnections snapshot,double now) {
    if(snapshot==null || snapshot.Connections==null) {samples.Clear(); return;}
-   double now=Clock();
+   if(snapshot.Connections.Length>MaxConnectionSamples) {
+    samples.Clear(); suspected.Clear(); Interlocked.Increment(ref oversizedSnapshots);
+    throw new SerializationException("Connection snapshot exceeds retention limit");
+   }
    HashSet<string> seen=new HashSet<string>();
+   // Remove departed IDs BEFORE adding the new generation: even during churn the map stays <= the snapshot limit.
+   foreach(ClashConnection c in snapshot.Connections) if(ValidConnection(c)) seen.Add(c.Id);
+   List<string> remove=new List<string>();
+   foreach(string id in samples.Keys) if(!seen.Contains(id)) remove.Add(id);
+   foreach(string id in remove) samples.Remove(id);
+   seen.Clear();
    Dictionary<string,int> counts=new Dictionary<string,int>();
    foreach(ClashConnection c in snapshot.Connections) {
-    if(c==null || String.IsNullOrEmpty(c.Id) || String.IsNullOrEmpty(c.Start) || c.Upload<0 || c.Download<0 || c.Chains==null || !seen.Add(c.Id)) continue;
+    if(!ValidConnection(c) || !seen.Add(c.Id)) continue;
     // Candidate allowlist chooses the path even with selector/detour chains in either order.
     string tag=""; foreach(string chain in c.Chains) if(tags.Contains(chain)) {tag=chain; break;}
     if(tag=="" || (c.Metadata!=null && (c.Metadata.Type ?? "").Contains("/probe-"))) continue;
@@ -172,9 +196,6 @@ namespace RemoteAgents {
     samples[c.Id]=new Sample {Tag=tag,Start=c.Start,Up=c.Upload,Down=c.Download,Since=since,Seen=now};
     if(now-since>=stallSeconds) {int count; counts.TryGetValue(tag,out count); counts[tag]=count+1;}
    }
-   List<string> remove=new List<string>();
-   foreach(string id in samples.Keys) if(!seen.Contains(id)) remove.Add(id);
-   foreach(string id in remove) samples.Remove(id);
    foreach(string tag in tags) {
     int count; counts.TryGetValue(tag,out count); double last;
     if(count>=stallConns) {
