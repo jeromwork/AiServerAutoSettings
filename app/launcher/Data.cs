@@ -263,13 +263,13 @@ namespace RemoteAgents.Launcher
     }
     internal sealed class Component
     {
-        public string Name, Title, Exe, Cwd, Restart, HealthFile, StopFile, Priority; public string[] Args, RequiredConfig; public bool Default, Critical, Elevated, CommandManaged, HasPeriodicStatus; public int MaxAge; public MenuAction[] Menu;
+        public string Name, Title, Exe, Cwd, Restart, HealthFile, StopFile, Priority; public string[] Args, RequiredConfig; public bool Default, Critical, Elevated, CommandManaged, HasPeriodicStatus, Bus; public int MaxAge; public MenuAction[] Menu;
         public static Component Read(object value)
         {
             var d = Json.Map(value); var c = new Component {
                 Name = Json.Str(d, "name"), Title = Json.Str(d, "title"), Exe = Json.Str(d, "exe"), Args = Json.Strings(Json.Get(d, "args")),
                 Cwd = Json.Text(d, "cwd", "{bundle}"), Restart = Json.Text(d, "restart", "never"), HealthFile = Json.Str(d, "healthFile"),
-                MaxAge = Json.Int(d, "healthMaxAgeSec", 90), Default = Json.Bool(d, "enabledByDefault"), Critical = Json.Bool(d, "critical"), Elevated = Json.Bool(d, "elevated"), CommandManaged = Json.Bool(d, "commandManaged"), StopFile = Json.Str(d, "stopFile"), Priority = Json.Text(d, "priority", "normal"),
+                MaxAge = Json.Int(d, "healthMaxAgeSec", 90), Default = Json.Bool(d, "enabledByDefault"), Critical = Json.Bool(d, "critical"), Elevated = Json.Bool(d, "elevated"), CommandManaged = Json.Bool(d, "commandManaged"), Bus = Json.Bool(d, "bus"), StopFile = Json.Str(d, "stopFile"), Priority = Json.Text(d, "priority", "normal"),
                 RequiredConfig = Json.Strings(Json.Get(d, "requiresConfig")),
                 Menu = Json.Array(Json.Get(d, "menu")).Select(MenuAction.Read).ToArray()
             };
