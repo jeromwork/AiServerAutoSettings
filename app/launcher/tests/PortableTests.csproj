@@ -36,6 +36,11 @@
     <IntermediateOutputPath>obj/$(Configuration)/vpnreasons-tests/</IntermediateOutputPath>
     <OutputPath>bin/$(Configuration)/vpnreasons-tests/</OutputPath>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(HealthBoardTests)' == 'true'">
+    <StartupObject>RemoteAgents.Launcher.HealthBoardTests</StartupObject>
+    <IntermediateOutputPath>obj/$(Configuration)/healthboard-tests/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/healthboard-tests/</OutputPath>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(HelperBusTests)' == 'true'">
     <StartupObject>RemoteAgents.Launcher.HelperBusTests</StartupObject>
     <IntermediateOutputPath>obj/$(Configuration)/helperbus-tests/</IntermediateOutputPath>
@@ -99,11 +104,16 @@
     <Compile Include="../BusJournal.cs" />
     <Compile Include="BusJournalTests.cs" />
     <Compile Include="../NetNotify.cs" />
+    <Compile Include="../NetRoute.cs" />
+    <Compile Include="../VpnReady.cs" />
+    <Compile Include="VpnReadyTests.cs" />
     <Compile Include="NetNotifyTests.cs" />
     <Compile Include="../TrayBus.cs" />
     <Compile Include="TrayBusTests.cs" />
     <Compile Include="../VpnAttemptGuard.cs" />
     <Compile Include="VpnReasonsTests.cs" />
+    <Compile Include="../HealthBoard.cs" />
+    <Compile Include="HealthBoardTests.cs" />
     <Compile Include="../HelperBusBridge.cs" />
     <Compile Include="HelperBusTests.cs" />
     <Compile Include="../RaLog.cs" />

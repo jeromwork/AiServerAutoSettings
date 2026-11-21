@@ -26,8 +26,7 @@ namespace RemoteAgents.Launcher
         async Task<bool> Check(Uri url, IPAddress address, int tunIndex)
         {
             try {
-                uint index;
-                if (GetBestInterface(BitConverter.ToUInt32(address.GetAddressBytes(), 0), out index) != 0 || index != tunIndex) return false;
+                if (NetRoute.BestInterface(address) != tunIndex) return false;
                 await client.ConnectAsync(address, url.Port).ConfigureAwait(false);
                 using (var tls = new SslStream(client.GetStream(), false)) {
                     await tls.AuthenticateAsClientAsync(url.DnsSafeHost).ConfigureAwait(false);
@@ -45,6 +44,5 @@ namespace RemoteAgents.Launcher
             finally { deadline.Dispose(); }
         }
         public void Dispose() { client.Close(); deadline.Dispose(); }
-        [DllImport("iphlpapi.dll")] static extern uint GetBestInterface(uint destination, out uint index);
     }
 }

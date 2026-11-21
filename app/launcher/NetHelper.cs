@@ -72,6 +72,7 @@ namespace RemoteAgents.Launcher
         Thread worker, eventsWorker;
         EventBus bus;
         HelperBusSender busSender; BusJournal busJournal;
+        NetNotify netNotify; // уведомления Windows о маршрутах/интерфейсах -> win.* в шину (W1); нужны воротам VPN (V3)
         // Предохранитель (конституция 4а): событие «клиент прислал hello» недоступно, если клиент подключился и молчит; при срабатывании — канал событий закрывается, успех не объявляет.
         internal const int EventsHelloFuseMs = 10000;
         const int EventsQueueLimit = 2000;
@@ -105,6 +106,7 @@ namespace RemoteAgents.Launcher
             try { if (lan != null) lan.Dispose(); else NetHelperInstall.RemoveNrpt(); if (log != null) log.Write("cleanup", 0); }
             catch { if (log != null) log.Write("cleanup", 1); }
             lock (pipeGate) { if (pipe != null) { pipe.Dispose(); pipe = null; } if (eventsPipe != null) { eventsPipe.Dispose(); eventsPipe = null; } }
+            if (netNotify != null) netNotify.Dispose(); // источник Windows — до остановки шины
             if (busJournal != null) busJournal.Dispose(); // итог повторов и шума — до остановки шины
             if (busSender != null) busSender.Dispose();
             if (bus != null) bus.Dispose();
@@ -132,6 +134,7 @@ namespace RemoteAgents.Launcher
                 busJournal = new BusJournal(bus, sink: l => log.Events.WriteLine(l), excludeTopics: new[] { BusTopics.SingboxLine }); // журнал шины службы: helper-events (singbox.line исключён: уже есть как core.line), на сервере helper.log (comp bus)
                 HelperBus.Bus = bus; // читатель вывода ядра (V1) публикует singbox.* через неё
                 log.Core.Bus = bus;
+                netNotify = NetNotify.CreateWindows(bus); netNotify.Start(); // сбой регистрации не роняет службу: событие win.notify.error
                 bus.Publish(BusTopics.HelperVersion, BusTopics.Sources.Helper, "version", NetHelperInstall.HelperVersion);
                 bus.Publish(BusTopics.VpnState, BusTopics.Sources.Helper, "state", "off", "reason", "helper-start", "enabled", "false", "ok", "false", "name", "");
                 var lanClock = Stopwatch.StartNew();
