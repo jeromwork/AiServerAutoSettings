@@ -92,7 +92,7 @@ Assert ($r.state.episode.hardFail -eq $true) '5: refused ставит отмет
 $r = DecideSwitch $r.state 500 @((Event 500 'path-check' 'b' 'ok')) $rows 'a'
 # 1000 мс - ступень 1
 $r = DecideSwitch $r.state 1000 @() $rows 'a'
-Assert ($r.verdict.action -eq 'probe-active') '5: на 1000 мс probe-active'
+Assert ($r.verdict.action -eq 'stay') '5: исходный refused не является результатом нового раунда'
 # 2999 мс - ещё stay
 $r = DecideSwitch $r.state 2999 @() $rows 'a'
 Assert ($r.verdict.action -eq 'stay') '5: на 2999 мс stay'
@@ -243,5 +243,64 @@ Assert ($r.verdict.localNet -eq 'ok' -and $r.state.episode.responded.Count -eq 1
 $r=DecideSwitch $r.state 10000 @() $rows
 Assert ($r.verdict.action -eq 'switch' -and $r.verdict.tag -eq 'b') '10R: после b ok отдельный net-up не нужен'
 Assert ($r.verdict.ContainsKey('tags') -and $r.verdict.ContainsKey('direct')) '11R: форма вердиктов едина'
+
+# Правка 3, замечание 1: сеть до открытия эпизода, с РАЗНЫМИ at; откат реального штрафа.
+foreach($networkEvent in @((Event 1 'net-down' ''), (Event 1 'dial-fail' 'b' 'timeout' $true))){
+    $s=New-TransportDecisionState 0 'a';$s.paths.a=New-TransportDecisionPath
+    Add-TransportDecisionPenalty $s 'a' 'path-dial-failed' 0 0
+    $r=DecideSwitch $s 2 @($networkEvent, (Event 2 'dial-fail')) $rows
+    Assert ($r.state.episode.openedAt -eq 2 -and $r.verdict.localNet -eq 'down') 'F3.1: ранний net-down/local-сигнал сохранён'
+    Assert ($r.verdict.penalties.a.step -eq 1) 'F3.1: до решения штраф существует'
+    $r=DecideSwitch $r.state 10002 @() $rows
+    Assert ($r.verdict.action -eq 'stay' -and $r.verdict.reason.code -eq 'local-network-down') 'F3.1: без сети переключения нет'
+    Assert ($r.verdict.penalties.a.step -eq 0 -and $null -eq $r.verdict.penalties.a.until) 'F3.1: прежний штраф откатан'
+}
+$s=New-TransportDecisionState 0 'a';$s.localNet='down';$s.localNetAt=0
+$r=DecideSwitch $s 2 @((Event 1 'net-up' ''), (Event 2 'dial-fail')) $rows
+Assert ($r.verdict.localNet -eq 'ok' -and $r.state.localNetAt -eq 1) 'F3.1: ранний net-up тоже сохранён'
+
+# Замечание 2: успех закрывает старый эпизод, следующий провал открывает новый.
+$r=DecideSwitch (New-TransportDecisionState 0 'a') 0 @((Event 0 'dial-fail')) $rows
+$r=DecideSwitch $r.state 3 @((Event 1 'path-check' 'a' 'ok'), (Event 2 'path-check' 'a' 'timeout'), (Event 3 'path-check' 'b' 'ok')) $rows
+Assert ($r.verdict.action -eq 'probe-round' -and $r.state.episode.open -and $r.state.episode.openedAt -eq 2) 'F3.2: провал после успеха открывает следующий эпизод'
+Assert ($r.state.episode.responded.ContainsKey('b') -and -not $r.state.episode.activeProbeFailed) 'F3.2: хвост пачки сохранён, новый раунд ещё не провалился'
+$r=DecideSwitch $r.state 10002 @() $rows
+Assert ($r.verdict.action -eq 'switch' -and $r.verdict.tag -eq 'b' -and $r.verdict.penalties.a.step -eq 1) 'F3.2: новый эпизод действительно участвует в решении'
+
+# Замечание 3: запоздавший провал после свежего успеха не наказывает исправный путь.
+foreach($failure in @((Event 9 'path-check' 'a' 'timeout'), (Event 9 'dial-fail'))){
+    $r=DecideSwitch (New-TransportDecisionState 0 'a') 0 @((Event 0 'dial-fail')) $rows
+    $r=DecideSwitch $r.state 10 @((Event 10 'path-check' 'a' 'ok')) $rows
+    $r=DecideSwitch $r.state 11 @($failure, (Event 11 'path-check' 'b' 'ok')) $rows
+    Assert (-not $r.state.episode.open -and $r.state.pending.Count -eq 0) 'F3.3: старый провал не открывает эпизод/pending'
+    $r=DecideSwitch $r.state 10011 @() $rows
+    Assert ($r.verdict.action -eq 'stay' -and $r.verdict.reason.code -eq 'ok' -and $r.verdict.penalties.a.step -eq 0) 'F3.3: исправный a не переключён и не оштрафован'
+}
+
+# Замечание 4: вся цепочка через публичный API, флаг только при первом сигнале.
+$r=Invoke-TransportDecision -State (New-TransportDecisionState 0 'a') -Candidates $rows -Now 0 -CurrentTag 'a' -Events @((Event 0 'dial-fail')) -SwitchEpisode
+Assert ($r.verdict.action -eq 'probe-round') 'F3.4: публичный API открывает эпизод'
+$r=Invoke-TransportDecision -State $r.state -Candidates $rows -Now 1 -CurrentTag 'a' -Events @((Event 1 'path-check' 'b' 'ok'))
+Assert ($r.state.episode.open) 'F3.4: открытый эпизод продолжается без флага'
+$r=Invoke-TransportDecision -State $r.state -Candidates $rows -Now 10000 -CurrentTag 'a'
+Assert ($r.verdict.action -eq 'switch' -and $r.verdict.tag -eq 'b') 'F3.4: публичный API предлагает b'
+$r=Invoke-TransportDecision -State $r.state -Candidates $rows -Now 10001 -CurrentTag 'b' -Events @((Event 10001 'path-check' 'a' 'ok'))
+Assert ($r.verdict.action -eq 'post-switch-verify' -and $r.verdict.tag -eq 'b' -and $r.state.episode.status -eq 'verifying') 'F3.4: подтверждение без флага запускает post-switch-verify'
+Assert ($r.state.currentTag -eq 'b' -and $r.state.paths.a.step -eq 0) 'F3.4: подтверждение и его события обработаны'
+$r=Invoke-TransportDecision -State $r.state -Candidates $rows -Now 10002 -CurrentTag 'b' -Events @((Event 10002 'path-check' 'b' 'ok'))
+Assert ($r.verdict.action -eq 'none' -and $r.state.paths.b.lastResultAt -eq 10002) 'F3.4: проверка не повторяется, общий решатель обрабатывает результат'
+
+# Замечание 5: timeout, открывший эпизод, не является результатом probe-round.
+$r=DecideSwitch (New-TransportDecisionState 0 'a') 0 @((Event 0 'path-check' 'a' 'timeout')) $rows
+Assert ($r.verdict.action -eq 'probe-round' -and -not $r.state.episode.activeProbeFailed) 'F3.5: начальный timeout только открывает раунд'
+$r=DecideSwitch $r.state 1000 @() $rows
+Assert ($r.verdict.action -eq 'stay') 'F3.5: без результата раунда нет дублирующей пробы ступени 1'
+$r=DecideSwitch $r.state 1500 @((Event 1500 'path-check' 'a' 'timeout')) $rows
+Assert ($r.state.episode.activeProbeFailed) 'F3.5: новый результат раунда разрешает повтор'
+$r=DecideSwitch $r.state 3000 @() $rows
+Assert ($r.verdict.action -eq 'probe-active' -and -not $r.state.episode.activeProbeFailed) 'F3.5: ступень 2 повторяет пробу после её провала'
+$r=DecideSwitch (New-TransportDecisionState 0 'a') 900 @((Event 0 'path-check' 'a' 'timeout')) $rows
+$r=DecideSwitch $r.state 1000 @((Event 500 'path-check' 'a' 'timeout')) $rows
+Assert ($r.verdict.action -eq 'stay' -and -not $r.state.episode.activeProbeFailed) 'F3.5: задержанный результат до запроса раунда не разрешает повтор'
 
 Write-Host ('PASS: switch episode reducer, '+$count+' assertions; scenarios 1-5 and review regressions')

@@ -140,7 +140,10 @@ function Invoke-TransportDecision {
         $State,$Candidates,[long]$Now,[string]$CurrentTag='', $Events=@(),[switch]$AllowImprovement,
         [switch]$SwitchEpisode, [long]$Stage1Ms=1000, [long]$Stage2Ms=3000, [long]$BlipMs=10000, [long]$HardFailMs=3000, $SwitchConfig=$null
     )
-    if($SwitchEpisode -or (Get-TransportDecisionValue (Get-TransportDecisionValue $State 'episode') 'open' $false)){
+    $episode=Get-TransportDecisionValue $State 'episode'
+    $verify=(Get-TransportDecisionValue $episode 'status') -eq 'switched' -and
+        (Get-TransportDecisionValue $episode 'switchedTo') -eq $CurrentTag -and $CurrentTag -ne (Get-TransportDecisionValue $State 'currentTag')
+    if($SwitchEpisode -or (Get-TransportDecisionValue $episode 'open' $false) -or $verify){
         return Invoke-TransportSwitchEpisode -State $State -Candidates $Candidates -Now $Now -CurrentTag $CurrentTag -Events $Events -Stage1Ms $Stage1Ms -Stage2Ms $Stage2Ms -BlipMs $BlipMs -HardFailMs $HardFailMs -SwitchConfig $SwitchConfig
     }
     if($null -eq $State){$State=New-TransportDecisionState $Now $CurrentTag}
@@ -343,6 +346,27 @@ function New-TransportSwitchResult($State,[string]$Action,[string]$Tag,$Tags=@()
     return @{state=$State;verdict=@{action=$Action;tag=$Tag;tags=@($Tags);direct=$Direct;reason=(Copy-TransportDecisionValue $State.reason);penalties=$penalties;localNet=$State.localNet;notes=@($Notes)}}
 }
 
+# Check freshness before a signal is allowed to create (or reopen) an episode.
+function Test-TransportSwitchSignal($State,$Event,[string]$CurrentTag,[long]$Now) {
+    $kind=[string](Get-TransportDecisionValue $Event 'kind' '');$tag=[string](Get-TransportDecisionValue $Event 'tag' '')
+    $code=[string](Get-TransportDecisionValue $Event 'code' '');$at=[long](Get-TransportDecisionValue $Event 'at' $Now)
+    if($kind -in @('win.iface.changed','net.change')){return $true}
+    if(-not $tag){$tag=$CurrentTag}
+    if($tag -ne $CurrentTag){return $false}
+    $p=$State.paths[$tag]
+    if($p -and $null -ne $p.lastResultAt -and $at -lt $p.lastResultAt){return $false}
+    if($kind -eq 'path-check'){
+        if($p -and $null -ne $p.lastCheckAt -and $at -le $p.lastCheckAt){return $false}
+        if($null -ne $State.localNetAt -and $at -lt $State.localNetAt){return $false}
+        return $code -in @('timeout','stalled','refused','process-exited')
+    }
+    return $kind -in @('dial-fail','conn-closed-error','stall-suspect','engine-exit')
+}
+
+function New-TransportSwitchEpisode([long]$At,[long]$ProbeAt,[string]$CurrentTag) {
+    return @{open=$true;openedAt=$At;activeTag=$CurrentTag;hardFail=$false;stage1Done=$false;stage2Done=$false;activeProbeFailed=$false;activeProbeAt=$ProbeAt;responded=@{};status='open';switchedTo=$null}
+}
+
 function Invoke-TransportSwitchEpisode {
     [CmdletBinding()]
     param($State,$Candidates,[long]$Now,[string]$CurrentTag='', $Events=@(),
@@ -375,24 +399,22 @@ function Invoke-TransportSwitchEpisode {
     if((-not $ep -or -not $ep.open) -and -not $acknowledged){
         $triggerAt=$null
         foreach($ev in $sortedEvents){
-            $kind=[string](Get-TransportDecisionValue $ev 'kind' '');$tag=[string](Get-TransportDecisionValue $ev 'tag' '');$code=[string](Get-TransportDecisionValue $ev 'code' '')
+            $code=[string](Get-TransportDecisionValue $ev 'code' '')
             if($code -in $cancelCodes){continue}
-            if(-not $tag){$tag=$CurrentTag}
-            if($kind -in @('win.iface.changed','net.change') -or ($tag -eq $CurrentTag -and
-                ($kind -in @('dial-fail','conn-closed-error','stall-suspect','engine-exit') -or ($kind -eq 'path-check' -and $code -in $probeCodes -and $code -ne 'ok')))){
+            if(Test-TransportSwitchSignal $s $ev $CurrentTag $Now){
                 $triggerAt=[long](Get-TransportDecisionValue $ev 'at' $Now);break
             }
         }
         if($null -ne $triggerAt){
-            $ep=@{open=$true;openedAt=$triggerAt;activeTag=$CurrentTag;hardFail=$false;stage1Done=$false;stage2Done=$false;activeProbeFailed=$false;responded=@{};status='open';switchedTo=$null}
+            $ep=New-TransportSwitchEpisode $triggerAt $Now $CurrentTag
             $s.episode=$ep;$opened=$true
         }
     }
     if(-not $ep -or -not $ep.open){
         # Closed episodes do not replace the legacy pending/direct/recovery logic.
+        if($acknowledged){$ep.status='verifying'}
         $r=Invoke-TransportDecision -State $s -Candidates $rows -Now $Now -CurrentTag $CurrentTag -Events $sortedEvents
         if($acknowledged){
-            $r.state.episode.status='verifying'
             # The verification occupies this verdict. Keep other I/O queued for the next call.
             if($r.verdict.action -eq 'check-direct'){$r.state.directRequestedAt=$null}
             if($r.verdict.action -eq 'check-path'){$r.state.pending[$r.verdict.tag].requested=$false}
@@ -408,7 +430,6 @@ function Invoke-TransportSwitchEpisode {
     }
     foreach($ev in $sortedEvents){
         $at=[long](Get-TransportDecisionValue $ev 'at' $Now)
-        if($at -lt $ep.openedAt){continue}
         $kind=[string](Get-TransportDecisionValue $ev 'kind' '');$tag=[string](Get-TransportDecisionValue $ev 'tag' '');$code=[string](Get-TransportDecisionValue $ev 'code' '')
         if($code -in $cancelCodes){continue}
         $local=(Get-TransportDecisionValue $ev 'local' $false) -eq $true
@@ -418,6 +439,12 @@ function Invoke-TransportSwitchEpisode {
         if($kind -eq 'net-up'){
             if($null -eq $s.localNetAt -or $at -ge $s.localNetAt){$s.localNet='ok';$s.localNetAt=$at};continue
         }
+        # Network events above are independent of the episode's opening timestamp.
+        if(-not $ep.open -and (Test-TransportSwitchSignal $s $ev $CurrentTag $Now)){
+            $ep=New-TransportSwitchEpisode $at $Now $CurrentTag
+            $s.episode=$ep;$opened=$true
+        }
+        if($at -lt $ep.openedAt){continue}
         if(-not $tag -and $kind -in @('engine-exit','engine-ready')){$tag=$CurrentTag}
         if($tag -notin $tags){continue}
         $p=$s.paths[$tag]
@@ -433,7 +460,11 @@ function Invoke-TransportSwitchEpisode {
             Reset-TransportDecisionPath $s $tag $at
             if($tag -eq $ep.activeTag){$ep.open=$false;$ep.status='closed';Set-TransportDecisionReason $s 'ok' $Now}
             else{$ep.responded[$tag]=@{at=$at;tag=$tag}}
-        }elseif($tag -eq $ep.activeTag){$ep.activeProbeFailed=$true;if($code -eq 'refused'){$ep.hardFail=$true}}
+        }elseif($tag -eq $ep.activeTag -and $ep.open){
+            # This call has not issued its new probe-round yet; its input cannot answer it.
+            if(-not $opened -and $at -ge (Get-TransportDecisionValue $ep 'activeProbeAt' $ep.openedAt)){$ep.activeProbeFailed=$true}
+            if($code -eq 'refused'){$ep.hardFail=$true}
+        }
         else{[void]$ep.responded.Remove($tag)}
     }
     if(-not $ep.open){
@@ -466,11 +497,11 @@ function Invoke-TransportSwitchEpisode {
     }
     if(($Now-$ep.openedAt) -ge $Stage1Ms -and -not $ep.stage1Done){
         $ep.stage1Done=$true
-        if($ep.activeProbeFailed){$ep.activeProbeFailed=$false;return New-TransportSwitchResult $s 'probe-active' $ep.activeTag}
+        if($ep.activeProbeFailed){$ep.activeProbeFailed=$false;$ep.activeProbeAt=$Now;return New-TransportSwitchResult $s 'probe-active' $ep.activeTag}
     }
     if(($Now-$ep.openedAt) -ge $Stage2Ms -and -not $ep.stage2Done){
         $ep.stage2Done=$true
-        if($ep.activeProbeFailed){$ep.activeProbeFailed=$false;return New-TransportSwitchResult $s 'probe-active' $ep.activeTag}
+        if($ep.activeProbeFailed){$ep.activeProbeFailed=$false;$ep.activeProbeAt=$Now;return New-TransportSwitchResult $s 'probe-active' $ep.activeTag}
     }
     return New-TransportSwitchResult $s 'stay' $CurrentTag
 }
