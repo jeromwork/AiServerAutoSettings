@@ -39,6 +39,8 @@ namespace RemoteAgents.Launcher
             TestLongValueAndLineCut();
             TestDisposeWritesNoiseRemainder();
             TestKeySanitized();
+            TestTrayTickNoiseOnlySummary();
+            TestHelperSinkGetsSeqAndIsReadable();
 
             Console.WriteLine($"PASS: BusJournalTests ({_assertions} assertions passed)");
         }
@@ -324,6 +326,46 @@ namespace RemoteAgents.Launcher
                 bus.DrainOnce();
                 Assert(lines[0].Contains(" a_b_c_d=1"), "Key sanitized: " + lines[0]);
                 Assert(lines[0].Contains(" ok-name.1=2"), "Good key kept: " + lines[0]);
+            }
+        }
+
+        // 12. tick.tray не превращается в строки: 2500 тиков дают только 2 сводки (каждые 1000), событие рядом пишется сразу
+        private static void TestTrayTickNoiseOnlySummary()
+        {
+            var lines = new List<string>();
+            using (var bus = new EventBus(manualDispatch: true))
+            using (var journal = new BusJournal(bus, sink: lines.Add))
+            {
+                for (int i = 0; i < 2500; i++) bus.Publish(BusTopics.TickTray, "tray");
+                bus.Publish("vpn.state", "vpn-core", "state", "on");
+                bus.DrainOnce();
+                Assert(lines.Count == 3, "2 summaries + 1 event expected, got " + lines.Count);
+                Assert(lines[0].Contains(BusTopics.BusNoiseSummary) && lines[1].Contains(BusTopics.BusNoiseSummary), "summaries first");
+                Assert(!lines.Exists(l => l.Contains(" " + BusTopics.TickTray)), "no tick.tray line");
+            }
+        }
+
+        // 13. Журнал шины службы: строка получает seq журнала помощника, читается через Read, bus-seq остаётся в строке
+        private static void TestHelperSinkGetsSeqAndIsReadable()
+        {
+            string dir = Path.Combine(Path.GetTempPath(), "bus-journal-helper-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            try
+            {
+                var events = new HelperEventLog(dir);
+                using (var bus = new EventBus(manualDispatch: true))
+                using (var journal = new BusJournal(bus, sink: l => events.WriteLine(l)))
+                {
+                    bus.Publish("vpn.state", "vpn-core", "state", "on");
+                    bus.DrainOnce();
+                }
+                var page = events.Read(0, 40000);
+                Assert(page.Lines.Count == 1, "one line readable, got " + page.Lines.Count);
+                Assert(HelperEventLog.SeqOf(page.Lines[0]) == 1, "helper seq first: " + page.Lines[0]);
+                Assert(page.Lines[0].Contains(" bus ") && page.Lines[0].Contains(" vpn.state "), "bus component kept: " + page.Lines[0]);
+            }
+            finally
+            {
+                try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { }
             }
         }
     }

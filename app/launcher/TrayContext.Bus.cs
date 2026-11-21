@@ -26,6 +26,8 @@ namespace RemoteAgents.Launcher
         {
             bus = new EventBus();
             busParts.Add(bus);
+            // Журнал шины (поток bus): создаётся сразу за шиной; освобождается раньше неё (busParts снимаются с конца), итог повторов пишется до остановки шины.
+            busParts.Add(new BusJournal(bus, RaLog.DefaultDir));
             // Подписки раньше источников: готовность блока, уже наступившая к старту, тоже придёт подписчику.
             busParts.Add(TrayBusWiring.WireUpdateRequests(bus, manual => PostUi(() => { if (!closing) ButtonProceed(); })));
             busParts.Add(TrayBusWiring.WireUpdateTick(bus, () => PostUi(() => {

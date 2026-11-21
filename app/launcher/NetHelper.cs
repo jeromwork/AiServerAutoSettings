@@ -71,7 +71,7 @@ namespace RemoteAgents.Launcher
         NamedPipeServerStream pipe, eventsPipe;
         Thread worker, eventsWorker;
         EventBus bus;
-        HelperBusSender busSender;
+        HelperBusSender busSender; BusJournal busJournal;
         // Предохранитель (конституция 4а): событие «клиент прислал hello» недоступно, если клиент подключился и молчит; при срабатывании — канал событий закрывается, успех не объявляет.
         internal const int EventsHelloFuseMs = 10000;
         const int EventsQueueLimit = 2000;
@@ -105,6 +105,7 @@ namespace RemoteAgents.Launcher
             try { if (lan != null) lan.Dispose(); else NetHelperInstall.RemoveNrpt(); if (log != null) log.Write("cleanup", 0); }
             catch { if (log != null) log.Write("cleanup", 1); }
             lock (pipeGate) { if (pipe != null) { pipe.Dispose(); pipe = null; } if (eventsPipe != null) { eventsPipe.Dispose(); eventsPipe = null; } }
+            if (busJournal != null) busJournal.Dispose(); // итог повторов и шума — до остановки шины
             if (busSender != null) busSender.Dispose();
             if (bus != null) bus.Dispose();
             if (log != null) log.Write("stopped", 0);
@@ -128,6 +129,7 @@ namespace RemoteAgents.Launcher
                 log = new NetHelperLog(NetHelperInstall.DataDirectory); log.Write("starting", 0);
                 bus = new EventBus(defaultSource: BusTopics.Sources.Helper);
                 busSender = new HelperBusSender(bus);
+                busJournal = new BusJournal(bus, sink: log.Events.WriteLine); // журнал шины службы: helper-events, на сервере helper.log (comp bus)
                 HelperBus.Bus = bus; // читатель вывода ядра (V1) публикует singbox.* через неё
                 log.Core.Bus = bus;
                 bus.Publish(BusTopics.HelperVersion, BusTopics.Sources.Helper, "version", NetHelperInstall.HelperVersion);
