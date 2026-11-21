@@ -535,7 +535,7 @@ try{
         }
         if($engine -and $bindState.none -and $now -ge $nextBindRetry -and -not $directCheck -and -not $pathChecks.Count -and -not $eventQueue.Count){
             # Резервный режим: раз в 60 с пробуем вернуть привязку; при появлении интерфейса или включении VPN движок пересоздаётся.
-            $nextBindRetry=$now.AddSeconds(60);$netSnapshot=Get-TransportNetworkSnapshot $settings.Options;$probeNet=$netSnapshot.network;$metered=$netSnapshot.metered
+            $nextBindRetry=$now.AddSeconds(60);$netSnapshot=Get-TransportNetworkSnapshot $settings.Options -Force;$probeNet=$netSnapshot.network;$metered=$netSnapshot.metered
             if($probeNet.interface -or -not (Test-TransportVpnOff $root)){
                 $network=$probeNet;Stop-TransportProbes;Stop-DaemonObservation;$confirmed=$false
                 Stop-TransportProcess $engine;$engine=$null;foreach($child in @($tunnelChildren.Values)){Stop-TransportProcess $child};$tunnelChildren.Clear();$retryAt=$now
@@ -556,8 +556,8 @@ try{
         }
         if(-not $engine -and $now -ge $retryAt -and -not $directCheck -and -not $pathChecks.Count -and -not $eventQueue.Count){
             try{
-                # После неудачи проверяем .NET-сигнатуру сразу; неизменная сеть берётся из кэша.
-                if($startFailures -gt 0 -and $settings.Options.bindPhysical){$netSnapshot=Get-TransportNetworkSnapshot $settings.Options;$network=$netSnapshot.network;$metered=$netSnapshot.metered;$nextNetwork=$now.AddSeconds(5)}
+                # После неудачи повторяем тяжёлую пробу: прежняя ошибка CIM/WMI могла быть временной.
+                if($startFailures -gt 0 -and $settings.Options.bindPhysical){$netSnapshot=Get-TransportNetworkSnapshot $settings.Options -Force;$network=$netSnapshot.network;$metered=$netSnapshot.metered;$nextNetwork=$now.AddSeconds(5)}
                 try{Start-TransportEngine}finally{$script:engineAttempted=$true}
                 $errorText='Ожидается проверка пути'
             }

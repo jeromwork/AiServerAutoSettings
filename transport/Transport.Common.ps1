@@ -1104,6 +1104,8 @@ $script:TransportDiag=@{}
 $script:TransportNetProbes=[long]0;$script:TransportNetFingerprintChecks=[long]0;$script:TransportMeteredCalls=[long]0
 # §4б: один последний снимок сети/стоимости; старое поколение заменяется, история не хранится.
 $script:TransportNetworkSnapshot=$null
+# Предохранитель (конституция 4а): событие net-change недоступно, пока нет доставки в демон; при срабатывании — замена снимка повторной пробой, успех не объявляет.
+$script:TransportNetworkSuccessFuseMs=[long]300000;$script:TransportNetworkFailureFuseMs=[long]30000
 function Get-TransportDiagFlags([string]$Raw) {
     $flags=@{}
     foreach($part in ([string]$Raw).Split(',')){$name=$part.Trim().ToLowerInvariant();if($name -in $script:TransportDiagKnown){$flags[$name]=$true}}
@@ -1176,6 +1178,7 @@ function Get-TransportNetworkSignature {
     try{
         $interfaces=New-Object 'Collections.Generic.List[string]'
         foreach($nic in @(Get-TransportNetworkInterfaces)){
+            if($nic.NetworkInterfaceType -in @([Net.NetworkInformation.NetworkInterfaceType]::Tunnel,[Net.NetworkInformation.NetworkInterfaceType]::Loopback)){continue}
             $properties=$nic.GetIPProperties()
             $addresses=[string[]]@($properties.UnicastAddresses|ForEach-Object {[string]$_.Address})
             $gateways=[string[]]@($properties.GatewayAddresses|ForEach-Object {[string]$_.Address})
@@ -1202,14 +1205,16 @@ function Get-TransportNetwork {
     $result
 }
 function Get-TransportNetworkSnapshot($Options,[switch]$Force) {
-    # Called by the existing daemon pass. Heavy sources run only on startup, signature change or net-change.
+    # Called by the existing daemon pass; no separate refresh loop or wait.
     $signature=if(Test-TransportDiag 'no-network'){'net:disabled'}else{Get-TransportNetworkSignature}
-    $cached=$script:TransportNetworkSnapshot
-    if($Force -or -not $cached -or $signature -cne $cached.signature){
+    $cached=$script:TransportNetworkSnapshot;$now=Get-DaemonTime
+    $snapshotFuseMs=if($cached -and -not $cached.network.available){$script:TransportNetworkFailureFuseMs}else{$script:TransportNetworkSuccessFuseMs}
+    $expired=$cached -and ($now-$cached.at) -ge $snapshotFuseMs # timer-ok: C — перепроверка снимка сети: net-change в демон не доставляется (B4/B не сделан); не объявляет успех, ничего не блокирует
+    if($Force -or -not $cached -or $expired -or $signature -cne $cached.signature){
         $net=Get-TransportNetwork
         # Keep the automatic cost with the network generation, independent of the config override.
         $autoMetered=Get-TransportMetered ([pscustomobject]@{metered='auto'})
-        $cached=[pscustomobject]@{signature=$signature;network=$net;autoMetered=$autoMetered;metered=$null}
+        $cached=[pscustomobject]@{at=$now;signature=$signature;network=$net;autoMetered=$autoMetered;metered=$null}
         $script:TransportNetworkSnapshot=$cached
     }
     $configured=([string]$Options.metered).ToLowerInvariant()

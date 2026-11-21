@@ -12,30 +12,34 @@ foreach($name in @('Transport.Common.ps1','Transport.Daemon.ps1','test-transport
 if($CompileOnly){'M0b syntax PASS';return}
 . (Join-Path $PSScriptRoot 'Transport.Common.ps1')
 function Assert($Value,[string]$Message){if(-not $Value){throw ('M0b: '+$Message)}}
+$script:fakeNow=[long]1000000
+function Get-DaemonTime {$script:fakeNow}
 foreach($fn in $daemonAst.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in @('Add-DaemonQueuedEvent','Start-DaemonReader')},$true)){
     . ([scriptblock]::Create($fn.Extent.Text))
 }
 $networkPass=$daemonAst.FindAll({param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Clauses[0].Item1.Extent.Text -eq '$networkRefreshPending -or $now -ge $nextNetwork'},$true)
 Assert ($networkPass.Count -eq 1) 'daemon network pass not found'
 $networkPass=[scriptblock]::Create($networkPass[0].Extent.Text)
-function New-FakeNic([string]$Id,[string]$Name,[string]$Status,[string[]]$Addresses,[string[]]$Gateways){
-    $nic=[pscustomobject]@{Id=$Id;Name=$Name;OperationalStatus=$Status;Properties=[pscustomobject]@{
+function New-FakeNic([string]$Id,[string]$Name,[string]$Status,[string[]]$Addresses,[string[]]$Gateways,[Net.NetworkInformation.NetworkInterfaceType]$Type='Wireless80211'){
+    $nic=[pscustomobject]@{Id=$Id;Name=$Name;OperationalStatus=$Status;NetworkInterfaceType=$Type;Properties=[pscustomobject]@{
         UnicastAddresses=@($Addresses|ForEach-Object {[pscustomobject]@{Address=$_}})
         GatewayAddresses=@($Gateways|ForEach-Object {[pscustomobject]@{Address=$_}})}}
     $nic|Add-Member ScriptMethod GetIPProperties {$this.Properties}
     $nic
 }
 $script:source=@{nicCalls=0;cimCalls=0;profileCalls=0;released=(New-Object 'Collections.Generic.List[string]');
-    index=7;name='Wi-Fi';ip='192.0.2.20';gateway='192.0.2.1';throwCost=$false;throwInterfaces=$false;noProfile=$false}
+    index=7;name='Wi-Fi';ip='192.0.2.20';gateway='192.0.2.1';throwCost=$false;throwInterfaces=$false;throwNetwork=$false;noProfile=$false}
 $script:cost=[pscustomobject]@{kind='cost';NetworkCostType='Fixed';Roaming=$false;OverDataLimit=$false;ApproachingDataLimit=$false}
 $script:profile=[pscustomobject]@{kind='profile'}
 $profile|Add-Member ScriptMethod GetConnectionCost {if($script:source.throwCost){throw 'fake cost failure'};$script:cost}
 $wifi=New-FakeNic 'wifi-id' 'Wi-Fi' 'Up' @('192.0.2.20','2001:db8::1') @('192.0.2.1','2001:db8::2')
-$loopback=New-FakeNic 'lo-id' 'Loopback' 'Up' @('127.0.0.1') @()
+$loopback=New-FakeNic 'lo-id' 'Loopback' 'Up' @('127.0.0.1') @() -Type Loopback
+$tunnel=New-FakeNic 'tun-id' 'Wintun' 'Up' @('198.18.0.1') @() -Type Tunnel
 $script:source.nics=@($wifi,$loopback)
 function Get-TransportNetworkInterfaces {$script:source.nicCalls++;if($source.throwInterfaces){throw 'fake interfaces failure'};$script:source.nics}
 function Get-NetAdapter {param([switch]$Physical,$ErrorAction)
     Assert ([bool]$Physical) 'physical adapter filter lost';$script:source.cimCalls++
+    if($source.throwNetwork){throw 'fake CIM not ready'}
     [pscustomobject]@{ifIndex=$source.index;Name=$source.name;InterfaceDescription='Physical NIC';Status='Up';HardwareInterface=$true}
     [pscustomobject]@{ifIndex=99;Name='Tailscale';InterfaceDescription='Tailscale';Status='Up';HardwareInterface=$true}
 }
@@ -74,6 +78,15 @@ foreach($field in @('Id','Name','OperationalStatus')){
 $old=$wifi.Properties.GatewayAddresses[0].Address;$wifi.Properties.GatewayAddresses[0].Address='203.0.113.1'
 Assert ((Get-TransportNetworkSignature) -cne $sig) 'signature ignores gateway'
 $wifi.Properties.GatewayAddresses[0].Address=$old
+# Recreating tunnel/loopback interfaces must not invalidate a physical signature.
+$script:source.nics=@($wifi,$loopback,$tunnel)
+Assert ((Get-TransportNetworkSignature) -ceq $sig) 'tunnel addition changes signature'
+$loopback.Id='new-loopback';$loopback.Properties.UnicastAddresses[0].Address='127.0.0.2'
+$tunnel.Id='new-tunnel';$tunnel.Name='Recreated TUN';$tunnel.OperationalStatus='Down'
+$tunnel.Properties.UnicastAddresses[0].Address='198.18.0.2'
+Assert ((Get-TransportNetworkSignature) -ceq $sig) 'virtual adapter churn changes signature'
+$script:source.nics=@($wifi)
+Assert ((Get-TransportNetworkSignature) -ceq $sig) 'virtual adapter removal changes signature'
 Reset-Counters
 $first=Get-TransportNetworkSnapshot $auto
 Assert ($first.network.available -and $first.network.ip -eq '192.0.2.20' -and $first.network.ifIndex -eq 7 -and $first.metered -eq $true) 'initial heavy result/fields lost'
@@ -120,6 +133,56 @@ Assert ($TransportNetProbes -eq 4) 'unavailable fingerprint retriggers heavy cal
 $source.throwInterfaces=$false
 [void](Get-TransportNetworkSnapshot $auto)
 Assert ($TransportNetProbes -eq 5) 'fingerprint recovery not detected'
+# A real probe exception (fake CIM) is cached briefly, then Force can recover with the same signature.
+$script:TransportNetworkSnapshot=$null;Reset-Counters
+$source.throwNetwork=$true
+$failed=Get-TransportNetworkSnapshot $auto
+Assert (-not $failed.network.available -and $failed.at -eq $fakeNow -and $TransportNetProbes -eq 1) 'probe exception not captured'
+$source.throwNetwork=$false
+$cached=Get-TransportNetworkSnapshot $auto
+Assert ([object]::ReferenceEquals($failed,$cached) -and $TransportNetProbes -eq 1) 'failed snapshot not cached'
+$recovered=Get-TransportNetworkSnapshot $auto -Force
+Assert ($recovered.network.available -and $recovered.signature -ceq $failed.signature -and $TransportNetProbes -eq 2) 'Force did not recover with unchanged signature'
+# Failed-generation safeguard uses only a manually supplied clock.
+$source.throwNetwork=$true
+$failed=Get-TransportNetworkSnapshot $auto -Force
+$source.throwNetwork=$false;$before=$TransportNetProbes
+$script:fakeNow=$failed.at+29999
+$cached=Get-TransportNetworkSnapshot $auto
+Assert ([object]::ReferenceEquals($failed,$cached) -and $TransportNetProbes -eq $before) 'failed snapshot refreshed before safeguard'
+$script:fakeNow=$failed.at+30000
+$recovered=Get-TransportNetworkSnapshot $auto
+Assert ($recovered.network.available -and $recovered.signature -ceq $failed.signature -and $recovered.at -eq $fakeNow -and $TransportNetProbes -eq ($before+1)) 'failed safeguard did not recover'
+[void](Get-TransportNetworkSnapshot $auto)
+Assert ($TransportNetProbes -eq ($before+1)) 'failed safeguard repeated without clock change'
+'probe exception / Force recovery / failed snapshot safeguard PASS'
+# Cost changes are invisible to the signature; the successful-generation safeguard refreshes both sources.
+$cost.NetworkCostType='Unrestricted'
+$unmetered=Get-TransportNetworkSnapshot $auto -Force
+Assert ($unmetered.network.available -and $unmetered.metered -eq $false) 'initial unmetered snapshot lost'
+$cost.NetworkCostType='Fixed';$before=$TransportNetProbes;$meteredBefore=$TransportMeteredCalls
+$script:fakeNow=$unmetered.at+299999
+$cached=Get-TransportNetworkSnapshot $auto
+Assert ([object]::ReferenceEquals($unmetered,$cached) -and $cached.metered -eq $false -and $TransportNetProbes -eq $before -and $TransportMeteredCalls -eq $meteredBefore) 'successful snapshot refreshed before safeguard'
+$script:fakeNow=$unmetered.at+300000
+$meteredSnapshot=Get-TransportNetworkSnapshot $auto
+Assert ($meteredSnapshot.signature -ceq $unmetered.signature -and $meteredSnapshot.metered -eq $true -and $meteredSnapshot.at -eq $fakeNow) 'stale metered cost did not refresh'
+Assert ($TransportNetProbes -eq ($before+1) -and $TransportMeteredCalls -eq ($meteredBefore+1)) 'successful safeguard must refresh exactly once'
+[void](Get-TransportNetworkSnapshot $auto)
+Assert ($TransportNetProbes -eq ($before+1) -and $TransportMeteredCalls -eq ($meteredBefore+1)) 'successful safeguard repeated without clock change'
+'stale metered cost / successful snapshot safeguard PASS'
+# Both existing daemon recovery paths must force a fresh probe.
+$recoveryTests=@{
+    bind='$engine -and $bindState.none -and $now -ge $nextBindRetry -and -not $directCheck -and -not $pathChecks.Count -and -not $eventQueue.Count'
+    start='$startFailures -gt 0 -and $settings.Options.bindPhysical'
+}
+foreach($condition in $recoveryTests.Values){
+    $branch=@($daemonAst.FindAll({param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Clauses[0].Item1.Extent.Text -eq $condition},$true))
+    Assert ($branch.Count -eq 1) ('daemon recovery branch not found: '+$condition)
+    $calls=@($branch[0].FindAll({param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Get-TransportNetworkSnapshot'},$true))
+    Assert ($calls.Count -eq 1 -and @($calls[0].CommandElements|Where-Object {$_ -is [Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -eq 'Force'}).Count -eq 1) 'daemon recovery uses stale cache'
+}
+'daemon recovery Force paths PASS'
 # Diagnostic flags suppress their source, including startup and explicit invalidation.
 $script:TransportDiag=Get-TransportDiagFlags 'no-network,no-metered';$script:TransportNetworkSnapshot=$null;$script:TransportNetworkStub=$null
 Reset-Counters
