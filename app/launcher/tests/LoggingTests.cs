@@ -30,7 +30,7 @@ namespace RemoteAgents.Launcher
         internal static int Run(string[] args)
         {
             NetHelperVersionTests.Run();
-            Golden(); Mask(); Rotation(); Encoding_(); JournalMapping(); Conflicts(); Ladder(); HelperEvents(); Protocol(); CorePump(); Shipper(); ShipperInvalidUtf8(); ShipperRisks(); SshSender(); Mirror();
+            Golden(); Mask(); Rotation(); Encoding_(); JournalMapping(); Conflicts(); Ladder(); HelperEvents(); Protocol(); CorePump(); CoreReaderEvents(); UniqueHandlesTest(); Shipper(); ShipperInvalidUtf8(); ShipperRisks(); SshSender(); Mirror();
             Console.WriteLine("PASS: Logging " + count + " checks");
             return 0;
         }
@@ -244,6 +244,73 @@ namespace RemoteAgents.Launcher
             Check(!NetHelperProtocol.TryRequest("{\"cmd\":\"log.read\",\"max\":99999}", out command, out map), "max above 40000 is rejected");
             Check(!NetHelperProtocol.TryRequest("{\"cmd\":\"log.read\",\"path\":\"C:\\\\x\"}", out command, out map), "extra fields are rejected");
             Check(!NetHelperProtocol.TryRequest("{\"cmd\":\"log.read\",\"after\":\"1\"}", out command, out map), "string cursor is rejected");
+        }
+
+        static void CoreReaderEvents()
+        {
+            string dir = Temp("corereader");
+            try {
+                var events = new HelperEventLog(dir); var bus = new EventBus(true); var seen = new List<string>();
+                bus.Subscribe("singbox.", e => seen.Add(e.Topic + "|" + e["core"] + "|" + e["line"]));
+                Action<string, string[]> publish = (t, kv) => bus.Publish(t, BusTopics.Sources.VpnCore, kv);
+                string path = Path.Combine(dir, CoreLogPump.FileName);
+                string text = "+0300 INFO router: rules password=abc\r\n+0300 INFO inbound connection from x\r\n+0300 WARN dns: slow\r\n+0300 INFO sing-box started (0.5s)\r\n+0300 FATAL start service: boom\r\npart";
+                var bytes = Encoding.UTF8.GetBytes(text + "ial\n");
+                var reader = new CoreOutputReader(new ChunkedStream(bytes, 7), path, "vpn", publish);
+                reader.Start();
+                Check(reader.Join(5000) && reader.Eof.WaitOne(0), "reader ends at end of stream");
+                Check(reader.Ready.WaitOne(0) && reader.ReadyLine.Contains("sing-box started ("), "ready is set by the started line");
+                Check(reader.LastFatal.Contains("boom"), "fatal line is remembered");
+                Check(reader.Lines == 6, "split chunks are glued into lines, got " + reader.Lines);
+                Check(reader.Drain(events) == 4 && reader.Sent == 4 && reader.Dropped == 0, "only router/WARN/started/FATAL lines are queued, inbound connection is filtered");
+                bus.DrainOnce();
+                Check(seen.Count(x => x.StartsWith("singbox.started|vpn|")) == 1 && seen.Count(x => x.StartsWith("singbox.fatal|vpn|")) == 1 && seen.Count(x => x.StartsWith("singbox.line|vpn|")) == 4, "bus got started, fatal and filtered lines: " + string.Join(";", seen));
+                string all = string.Join("\n", events.Read(0, 40000).Lines);
+                Check(all.Contains("core.line") && all.Contains("password=***") && !all.Contains("inbound connection"), "helper events are masked and filtered");
+                Check(File.ReadAllText(path).Contains("inbound connection") && File.ReadAllText(path).Contains("partial"), "the local file keeps every line");
+                reader.WriteStats(events); reader.WriteStats(events);
+                Check(string.Join("\n", events.Read(0, 40000).Lines).Split(new[] { "core.stats" }, StringSplitOptions.None).Length == 2, "stats are written once");
+                CoreReaderRotation();
+                Check(reader.Tail(2).Contains("partial"), "in-memory tail is available without the file");
+                var many = new StringBuilder(); for (int i = 0; i < CoreOutputReader.QueueLimit + 5; i++) many.Append("WARN x\n");
+                var flood = new CoreOutputReader(new ChunkedStream(Encoding.UTF8.GetBytes(many.ToString()), 4096), null, "vpn", null); flood.Start(); flood.Join(5000);
+                Check(flood.Sent == CoreOutputReader.QueueLimit && flood.Dropped == 5, "the queue is bounded, overflow is counted");
+            } finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+        static void CoreReaderRotation()
+        {
+            string dir = Temp("corerotate");
+            try {
+                string path = Path.Combine(dir, CoreLogPump.FileName);
+                string line = "INFO router: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n";
+                var data = Encoding.UTF8.GetBytes(string.Concat(Enumerable.Repeat(line, 6)));
+                var r = new CoreOutputReader(new ChunkedStream(data, line.Length), path, "vpn", null, 120);
+                r.Start();
+                Check(r.Join(5000) && r.Lines == 6, "rotation: every line is still read");
+                Check(File.Exists(path + ".1") && new FileInfo(path).Length < new FileInfo(path + ".1").Length + line.Length && File.ReadAllText(path).StartsWith("INFO"), "rotation: .1 appears and the file starts anew");
+                // Move не удаётся (.1 — каталог): одна запись в шину, файл усекается, а не растёт.
+                string dir2 = Temp("corerotate2");
+                try {
+                    string path2 = Path.Combine(dir2, CoreLogPump.FileName); Directory.CreateDirectory(path2 + ".1");
+                    var seen = new List<string>();
+                    var r2 = new CoreOutputReader(new ChunkedStream(Encoding.UTF8.GetBytes(string.Concat(Enumerable.Repeat(line, 20))), line.Length), path2, "vpn", (t, kv) => seen.Add(t), 120);
+                    r2.Start();
+                    Check(r2.Join(5000) && r2.Lines == 20, "rotation failure: reading continues");
+                    Check(seen.Count(x => x == BusTopics.SingboxLine) == 1, "rotation failure: reported once, got " + seen.Count);
+                    Check(new FileInfo(path2).Length <= 120 + line.Length, "rotation failure: file is truncated, growth is bounded");
+                } finally { try { Directory.Delete(dir2, true); } catch { } }
+            } finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+        static void UniqueHandlesTest()
+        {
+            var u = NativeJob.UniqueHandles(new IntPtr(4), new IntPtr(8), new IntPtr(8), IntPtr.Zero);
+            Check(u.Length == 2 && u[0] == new IntPtr(4) && u[1] == new IntPtr(8), "inherited handle list has no duplicates");
+        }
+        sealed class ChunkedStream : MemoryStream
+        {
+            readonly int chunk;
+            internal ChunkedStream(byte[] data, int chunk) : base(data) { this.chunk = chunk; }
+            public override int Read(byte[] buffer, int offset, int count) { return base.Read(buffer, offset, Math.Min(count, chunk)); }
         }
 
         static void CorePump()

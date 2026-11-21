@@ -53,6 +53,35 @@ namespace RemoteAgents.Launcher
                 }
             }
         }
+        // stdout и stderr процесса — в анонимный pipe; читатель (CoreOutputReader) получает события по мере записи.
+        // Конец чтения не наследуется; конец записи закрывается в родителе сразу после старта.
+        public Process StartPiped(string exe, string[] args, string cwd, out SafeFileHandle readEnd)
+        {
+            lock (inheritGate) {
+                IntPtr input = IntPtr.Zero, read = IntPtr.Zero, write = IntPtr.Zero;
+                bool started = false;
+                try {
+                    var security = new SecurityAttributes { length = Marshal.SizeOf(typeof(SecurityAttributes)), inherit = true };
+                    if (!CreatePipe(out read, out write, ref security, 64 * 1024)) throw new Win32Exception();
+                    if (!SetHandleInformation(read, 1, 0)) throw new Win32Exception(); // HANDLE_FLAG_INHERIT off
+                    input = OpenInherited("NUL", 0x80000000, 3);
+                    var process = StartCore(exe, args, cwd, new StartupInfo { cb = Marshal.SizeOf(typeof(StartupInfo)), flags = 0x100, stdInput = input, stdOutput = write, stdError = write }, true);
+                    started = true;
+                    readEnd = new SafeFileHandle(read, true); read = IntPtr.Zero;
+                    return process;
+                } finally {
+                    foreach (var h in new[] { input, write }) if (h != IntPtr.Zero && h != new IntPtr(-1)) CloseHandle(h);
+                    if (!started && read != IntPtr.Zero) CloseHandle(read);
+                }
+            }
+        }
+        // Чистая функция: дескрипторы без повторов и нулей, порядок сохраняется.
+        internal static IntPtr[] UniqueHandles(params IntPtr[] all)
+        {
+            var list = new System.Collections.Generic.List<IntPtr>();
+            foreach (var h in all) if (h != IntPtr.Zero && !list.Contains(h)) list.Add(h);
+            return list.ToArray();
+        }
         static IntPtr OpenInherited(string path, uint access, uint disposition)
         {
             var security = new SecurityAttributes { length = Marshal.SizeOf(typeof(SecurityAttributes)), inherit = true };
@@ -81,11 +110,11 @@ namespace RemoteAgents.Launcher
                 // between CreateProcess(CREATE_SUSPENDED) and a later Assign call.
                 if (!UpdateProcThreadAttribute(attributes, 0, new IntPtr(0x0002000D), jobs, new IntPtr(IntPtr.Size), IntPtr.Zero, IntPtr.Zero)) throw new Win32Exception();
                 if (inherit) {
-                    handles = Marshal.AllocHGlobal(3 * IntPtr.Size);
-                    Marshal.WriteIntPtr(handles, 0, startup.stdInput);
-                    Marshal.WriteIntPtr(handles, IntPtr.Size, startup.stdOutput);
-                    Marshal.WriteIntPtr(handles, 2 * IntPtr.Size, startup.stdError);
-                    if (!UpdateProcThreadAttribute(attributes, 0, new IntPtr(0x00020002), handles, new IntPtr(3 * IntPtr.Size), IntPtr.Zero, IntPtr.Zero)) throw new Win32Exception();
+                    // Повторы в списке наследуемых дескрипторов дают ERROR_INVALID_PARAMETER (stdout == stderr у pipe).
+                    var unique = UniqueHandles(startup.stdInput, startup.stdOutput, startup.stdError);
+                    handles = Marshal.AllocHGlobal(unique.Length * IntPtr.Size);
+                    for (int i = 0; i < unique.Length; i++) Marshal.WriteIntPtr(handles, i * IntPtr.Size, unique[i]);
+                    if (!UpdateProcThreadAttribute(attributes, 0, new IntPtr(0x00020002), handles, new IntPtr(unique.Length * IntPtr.Size), IntPtr.Zero, IntPtr.Zero)) throw new Win32Exception();
                 }
                 startup.cb = Marshal.SizeOf(typeof(StartupInfoEx));
                 var extended = new StartupInfoEx { Startup = startup, Attributes = attributes };
@@ -129,6 +158,8 @@ namespace RemoteAgents.Launcher
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool CreateProcess(string app, StringBuilder command, IntPtr processAttributes, IntPtr threadAttributes, bool inherit, uint flags, IntPtr environment, string cwd, ref StartupInfoEx startup, out ProcessInfo info);
         [DllImport("kernel32.dll", SetLastError = true)] static extern uint ResumeThread(IntPtr thread);
         [DllImport("kernel32.dll")] static extern bool TerminateProcess(IntPtr process, uint code);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern bool CreatePipe(out IntPtr read, out IntPtr write, ref SecurityAttributes security, uint size);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
         [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
     }
 }

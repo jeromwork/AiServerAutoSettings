@@ -1,10 +1,12 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 
 namespace RemoteAgents.Launcher
 {
@@ -129,6 +131,165 @@ namespace RemoteAgents.Launcher
         }
     }
 
+    // Доступ службы к шине событий. Шина помощника (B3) при создании ставит сюда свой EventBus;
+    // пока она не подключена, Bus == null и публикации молча пропускаются (журнал helper-events пишется как раньше).
+    internal static class HelperBus
+    {
+        internal static volatile EventBus Bus;
+        internal static void Publish(string topic, params string[] kv)
+        {
+            try { var bus = Bus; if (bus != null) bus.Publish(topic, BusTopics.Sources.VpnCore, kv); } catch { }
+        }
+    }
+
+    // Читает вывод ядра из pipe в отдельной нити: ReadFile блокируется до появления данных, опроса нет.
+    // Нить только читает, дописывает vpn-core.log, режет строки и публикует события; любая ошибка разбора
+    // не останавливает чтение (иначе ядро зависнет на записи в полный pipe).
+    internal sealed class CoreOutputReader
+    {
+        internal const int QueueLimit = 2000, RingLines = 40, MaxLineChars = 1000;
+        internal const long RotateBytes = 5L * 1024 * 1024;
+        readonly long rotateBytes;
+        bool rotateFailed, writesStopped;
+        readonly Stream input;
+        readonly string filePath, core;
+        readonly Action<string, string[]> publish;
+        readonly ConcurrentQueue<string> queue = new ConcurrentQueue<string>();
+        readonly Queue<string> ring = new Queue<string>();
+        readonly object ringGate = new object();
+        readonly ManualResetEvent ready = new ManualResetEvent(false), eof = new ManualResetEvent(false);
+        long lines, sent, dropped, queued;
+        int statsWritten;
+        volatile string readyLine = "", lastFatal = "";
+        FileStream file;
+        Thread thread;
+
+        internal CoreOutputReader(Stream input, string filePath, string core, Action<string, string[]> publish, long rotateBytes = RotateBytes)
+        {
+            this.rotateBytes = rotateBytes;
+            this.input = input; this.filePath = filePath; this.core = core ?? "vpn"; this.publish = publish ?? ((t, kv) => { });
+        }
+        internal WaitHandle Ready { get { return ready; } }
+        internal WaitHandle Eof { get { return eof; } }
+        internal string ReadyLine { get { return readyLine; } }
+        internal string LastFatal { get { return lastFatal; } }
+        internal long Lines { get { return Interlocked.Read(ref lines); } }
+        internal long Sent { get { return Interlocked.Read(ref sent); } }
+        internal long Dropped { get { return Interlocked.Read(ref dropped); } }
+
+        internal void Start()
+        {
+            thread = new Thread(Run) { IsBackground = true, Name = "core-output" };
+            thread.Start();
+        }
+        // Для тестов: дождаться конца потока.
+        internal bool Join(int ms) { var t = thread; return t == null || t.Join(ms); }
+
+        void Run()
+        {
+            var buffer = new byte[16 * 1024];
+            var pending = new MemoryStream();
+            try {
+                while (true) {
+                    int read;
+                    try { read = input.Read(buffer, 0, buffer.Length); } catch { break; }
+                    if (read <= 0) break;
+                    try {
+                        AppendFile(buffer, read);
+                        for (int i = 0; i < read; i++) {
+                            if (buffer[i] != 10) { pending.WriteByte(buffer[i]); if (pending.Length > 64 * 1024) { Line(pending); } continue; }
+                            Line(pending);
+                        }
+                    } catch { pending.SetLength(0); }
+                }
+                try { if (pending.Length > 0) Line(pending); } catch { }
+            } finally {
+                try { if (file != null) file.Dispose(); } catch { }
+                try { input.Dispose(); } catch { }
+                eof.Set();
+            }
+        }
+        void AppendFile(byte[] data, int count)
+        {
+            if (writesStopped) return;
+            try {
+                if (file != null && file.Length > rotateBytes) {
+                    file.Dispose(); file = null;
+                    if (!rotateFailed) {
+                        try { if (File.Exists(filePath + ".1")) File.Delete(filePath + ".1"); File.Move(filePath, filePath + ".1"); }
+                        catch {
+                            // Один раз: запись в шину; дальше при переполнении файл просто усекается, без повторных Move.
+                            rotateFailed = true;
+                            try { publish(BusTopics.SingboxLine, new[] { "core", core, "line", "WARN vpn-core.log: rotation failed, file will be truncated at the limit" }); } catch { }
+                        }
+                    }
+                    if (rotateFailed) {
+                        // Усечение; если и оно не удалось, ниже file == null и запись пропускается (рост ограничен).
+                        try { using (new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete)) { } }
+                        catch { writesStopped = true; return; }
+                    }
+                }
+                if (file == null && filePath != null) file = new FileStream(filePath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
+                if (file != null) { file.Write(data, 0, count); file.Flush(); }
+            } catch { try { if (file != null) file.Dispose(); } catch { } file = null; }
+        }
+        void Line(MemoryStream pending)
+        {
+            string text = Encoding.UTF8.GetString(pending.GetBuffer(), 0, (int)pending.Length).TrimEnd('\r');
+            pending.SetLength(0);
+            if (text.Trim().Length == 0) return;
+            Interlocked.Increment(ref lines);
+            string clean = LogMask.Clean(text);
+            if (clean.Length > MaxLineChars) clean = clean.Substring(0, MaxLineChars);
+            lock (ringGate) { ring.Enqueue(clean); while (ring.Count > RingLines) ring.Dequeue(); }
+            if (text.IndexOf("sing-box started (", StringComparison.Ordinal) >= 0) {
+                bool first = !ready.WaitOne(0);
+                readyLine = clean; ready.Set();
+                if (first) publish(BusTopics.SingboxStarted, new[] { "core", core, "line", clean });
+            }
+            if (Regex.IsMatch(text, @"\b(FATAL|PANIC)\b")) {
+                lastFatal = clean.Length > 500 ? clean.Substring(0, 500) : clean;
+                publish(BusTopics.SingboxFatal, new[] { "core", core, "line", clean });
+            }
+            if (!ShouldSend(text)) return;
+            if (Interlocked.Read(ref queued) >= QueueLimit) { Interlocked.Increment(ref dropped); return; }
+            queue.Enqueue(clean); Interlocked.Increment(ref queued); Interlocked.Increment(ref sent);
+        }
+        // WARN/ERROR/FATAL/PANIC — всегда; INFO — только служебные строки. Остальное остаётся лишь в vpn-core.log.
+        internal static bool ShouldSend(string line)
+        {
+            var level = CoreLogPump.LevelOf(line);
+            if (level != LogLevel.Info) return true;
+            foreach (var noisy in new[] { "inbound connection", "outbound connection", "connection to", "dns:" })
+                if (line.IndexOf(noisy, StringComparison.Ordinal) >= 0) return false;
+            foreach (var keep in new[] { "sing-box started", "started at", "updated default interface", "updated available networks", "restful api", "network:", "router:" })
+                if (line.IndexOf(keep, StringComparison.Ordinal) >= 0) return true;
+            return false;
+        }
+        // Из цикла monitor: переносит накопленные строки в helper-events (core.line) и шину (singbox.line).
+        internal int Drain(HelperEventLog events, int max = 500)
+        {
+            int count = 0; string line;
+            while (count < max && queue.TryDequeue(out line)) {
+                Interlocked.Decrement(ref queued); count++;
+                try { if (events != null) events.Write(CoreLogPump.LevelOf(line), "core", "core.line", "text", line); } catch { }
+                publish(BusTopics.SingboxLine, new[] { "core", core, "line", line });
+            }
+            return count;
+        }
+        // Один раз за запуск ядра: итоговый счётчик строк.
+        internal void WriteStats(HelperEventLog events)
+        {
+            if (Interlocked.Exchange(ref statsWritten, 1) != 0) return;
+            long total = Lines, s = Sent, d = Dropped;
+            try { if (events != null) events.Write(LogLevel.Info, "core", "core.stats", "lines", total.ToString(CultureInfo.InvariantCulture), "sent", s.ToString(CultureInfo.InvariantCulture), "dropped", d.ToString(CultureInfo.InvariantCulture), "filtered", Math.Max(0, total - s - d).ToString(CultureInfo.InvariantCulture)); } catch { }
+        }
+        internal string Tail(int count)
+        {
+            lock (ringGate) { var all = ring.ToArray(); return string.Join("\n", all.Skip(Math.Max(0, all.Length - count))); }
+        }
+    }
+
     // Строки vpn-core.log (вывод sing-box) переносятся в helper-events как core.line со своим seq.
     internal sealed class CoreLogPump
     {
@@ -143,6 +304,9 @@ namespace RemoteAgents.Launcher
             try { string path = Path.Combine(dir, FileName); offset = File.Exists(path) ? new FileInfo(path).Length : 0; } catch { }
         }
         internal string FilePath { get { return Path.Combine(dir, FileName); } }
+        // Читатель вывода текущего ядра VPN (событийный путь). Пока он задан, файл построчно не перечитывается: Pump() — только для тестов.
+        internal volatile CoreOutputReader Reader;
+        internal void Flush() { var reader = Reader; if (reader != null) reader.Drain(events); }
 
         // Перед (пере)запуском ядра: файл больше 5 МБ уходит в .1, прежний .1 заменяется.
         internal void RotateIfLarge(long limit = 5L * 1024 * 1024)
@@ -151,7 +315,7 @@ namespace RemoteAgents.Launcher
                 try {
                     string path = FilePath;
                     if (File.Exists(path) && new FileInfo(path).Length > limit) {
-                        Pump();
+                        if (Reader == null) Pump();
                         if (File.Exists(path + ".1")) File.Delete(path + ".1");
                         File.Move(path, path + ".1"); offset = 0;
                     }
@@ -185,6 +349,7 @@ namespace RemoteAgents.Launcher
                 return count;
             }
         }
+        internal static LogLevel LevelOf(string line) { return Level(line); }
         static LogLevel Level(string line)
         {
             return Regex.IsMatch(line, @"\b(FATAL|PANIC)\b") ? LogLevel.Error : Regex.IsMatch(line, @"\bERROR\b") ? LogLevel.Error : Regex.IsMatch(line, @"\bWARN\b") ? LogLevel.Warn : LogLevel.Info;
