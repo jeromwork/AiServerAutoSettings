@@ -56,6 +56,11 @@
     <IntermediateOutputPath>obj/$(Configuration)/vpnreasons-tests/</IntermediateOutputPath>
     <OutputPath>bin/$(Configuration)/vpnreasons-tests/</OutputPath>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(RollbackTests)' == 'true'">
+    <StartupObject>RemoteAgents.Launcher.RollbackTests</StartupObject>
+    <IntermediateOutputPath>obj/$(Configuration)/rollback-tests/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/rollback-tests/</OutputPath>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(UpdateHealthTests)' == 'true'">
     <StartupObject>RemoteAgents.Launcher.UpdateHealthTests</StartupObject>
     <DefineConstants>$(DefineConstants);UPDATE_HEALTH_TESTS</DefineConstants>
@@ -221,6 +226,10 @@
     <Compile Include="ProxyRelayTests.cs" />
     <Compile Include="../ProxyRelay.cs" Link="ProxyRelay.cs" />
     <Compile Include="../UpgradeInstaller.cs" Link="UpgradeInstaller.cs" />
+    <Compile Include="../UpgradeInstaller.Rollback.cs" />
+    <Compile Include="../NetHelperInstall.Version.cs" />
+    <Compile Include="RollbackTests.cs" />
+    <Compile Include="../Program.Startup.cs" />
     <Compile Include="../StatusView.cs" Link="StatusView.cs" />
     <Compile Include="../Data.cs" Link="Data.cs" />
     <Compile Include="UpdateAutomationTests.cs" />
@@ -272,6 +281,9 @@
     <Compile Include="../UpdatePolicy.cs" />
     <Compile Include="../UpdateChannel.cs" />
     <Compile Include="../UpgradeInstaller.cs" />
+    <Compile Include="../UpgradeInstaller.Rollback.cs" />
+    <Compile Include="../NetHelperInstall.Version.cs" />
+    <Compile Include="../Program.Startup.cs" />
     <Compile Include="../UpdateEngine.cs" />
     <Compile Include="../Data.cs" />
     <Compile Include="../ConfigBundle.cs" />
@@ -306,6 +318,8 @@
     <Compile Include="../UpdatePolicy.cs" />
     <Compile Include="../UpdateChannel.cs" />
     <Compile Include="../UpgradeInstaller.cs" />
+    <Compile Include="../UpgradeInstaller.Rollback.cs" />
+    <Compile Include="../NetHelperInstall.Version.cs" />
     <Compile Include="../UpdateEngine.cs" />
     <Compile Include="../HealthBoard.cs" />
     <Compile Include="../UpdateObservation.cs" />

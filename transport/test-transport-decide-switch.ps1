@@ -685,6 +685,17 @@ Assert ($r.state.paths.Count -eq 1 -and $r.state.history.Count -eq 0 -and $r.sta
 $r=DecideSwitch (New-TransportDecisionState 0 'a') 1000 @(1..700|ForEach-Object {Event $_ 'engine-exit'}) $chainRows
 Assert ($r.state.paths.a.exitTimes.Count -eq 2 -and $r.verdict.boundsOverflow) '4б: переполнение входной пачки ограничено и отражено в вердикте'
 
+# Optional Q row annotation dominates latency; absent annotation keeps old ordering.
+$qRows=@((Row 'a'),(Row 'b' 'ok' 10),(Row 'c' 'ok' 200))
+$qRows[1].qualityPenalty=$true
+$r=DecideSwitch (New-TransportDecisionState 0 'a') 0 @((Event 0 'dial-fail')) $qRows
+$r=DecideSwitch $r.state 3000 @((Event 100 'path-check' 'a' 'refused'),(Event 200 'path-check' 'b' 'ok'),(Event 200 'path-check' 'c' 'ok')) $qRows
+Assert ($r.verdict.action -eq 'switch' -and $r.verdict.tag -eq 'c') 'Q: fast penalized b selected before healthy c'
+[void]$qRows[1].Remove('qualityPenalty')
+$r=DecideSwitch (New-TransportDecisionState 0 'a') 0 @((Event 0 'dial-fail')) $qRows
+$r=DecideSwitch $r.state 3000 @((Event 100 'path-check' 'a' 'refused'),(Event 200 'path-check' 'b' 'ok'),(Event 200 'path-check' 'c' 'ok')) $qRows
+Assert ($r.verdict.tag -eq 'b') 'Q: absent annotation changed original latency preference'
+
 # JSON-состояние, чистота входов и никаких подробностей событий в результате.
 $s=New-TransportDecisionState 0 'a';$events=@((Event 0 'dial-fail'));$before=ConvertTo-Json -InputObject @($s,$chainRows,$events) -Depth 30 -Compress
 $r=DecideSwitch $s 0 $events $chainRows

@@ -82,6 +82,8 @@ namespace RemoteAgents.Launcher
 
     internal static class MainScreenModel
     {
+        internal static TrayMenuEntry Rollback(string previousVersion, bool occupied)
+        { return TrayMenuModel.Rollback(previousVersion, occupied); }
         // Shared with TrayContext.Tick; a VPN refusal must remain visible during search.
         internal static Tone LinkTone(Dictionary<string, object> transport, Dictionary<string, object> vpn, bool awaitingSearchProof = false)
         {

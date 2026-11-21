@@ -27,7 +27,7 @@ done
 
 resolve_channel "$channel" || exit 1
 
-[[ ${#args[@]} -ge 1 ]] || { echo "Использование: build/release.sh [--channel main|test] SSH-алиас [remote-dist] [--prepared папка-сборки]" >&2; exit 2; }
+[[ ${#args[@]} -ge 1 ]] || { echo "Использование: build/release.sh [--channel main|test] local|SSH-алиас [dist] [--prepared папка-сборки]" >&2; exit 2; }
 server="${args[0]}"
 [[ $server != -* && $server != *$'\n'* && $server != *$'\r'* ]] || exit 2
 
@@ -47,7 +47,11 @@ if [[ ${#remaining[@]} -gt 0 ]]; then
   prepared="${remaining[1]}"
 fi
 
-check_channel_isolation "$RELEASE_CHANNEL" "$dist" || exit 1
+if [[ "$server" == local ]]; then
+  python3 "$here/release-dist.py" local-check "$dist" --channel "$RELEASE_CHANNEL"
+else
+  check_channel_isolation "$RELEASE_CHANNEL" "$dist" || exit 1
+fi
 
 "$here/require-main.sh" --channel "$RELEASE_CHANNEL"
 if [[ -n "$prepared" ]]; then
@@ -86,8 +90,15 @@ if [[ -n "$prepared" ]]; then
 else
   cp -- "$stage/release-info.json" "$out/release-info.json"
 fi
+if [[ "$server" == local ]]; then
+  tar -C "$stage" -cf - agents | python3 "$here/release-dist.py" local-verify "$dist" --product "$RELEASE_PRODUCT" --channel "$RELEASE_CHANNEL"
+fi
 "$here/release-github.sh" --channel "$RELEASE_CHANNEL" "$out"
 # tar stdin contains only local staged payloads; no command/config/credentials cross the shell unquoted.
+if [[ "$server" == local ]]; then
+  tar -C "$stage" -cf - agents | python3 "$here/release-dist.py" local-publish "$dist" --product "$RELEASE_PRODUCT" --channel "$RELEASE_CHANNEL"
+else
 remote_command=$(python3 "$here/release-dist.py" command "$dist" --product "$RELEASE_PRODUCT" --channel "$RELEASE_CHANNEL")
 tar -C "$stage" -cf - agents | ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -- "$server" "$remote_command"
+fi
 echo "Оба источника проверены по SHA-256; версия и EXE совпадают ($RELEASE_CHANNEL)."

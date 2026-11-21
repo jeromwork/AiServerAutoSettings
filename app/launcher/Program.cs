@@ -14,7 +14,7 @@ using Microsoft.Win32;
 
 namespace RemoteAgents.Launcher
 {
-    internal static class Program
+    internal static partial class Program
     {
         public static string Version { get { return Assembly.GetExecutingAssembly().GetName().Version.ToString(); } }
         public static string Exe { get { return Assembly.GetExecutingAssembly().Location; } }
@@ -100,9 +100,17 @@ namespace RemoteAgents.Launcher
                             owned = WaitMutex(mutex, 0);
                             string target = Path.Combine(home, Product.ExeName);
                             bool external = !Path.GetFullPath(Exe).Equals(target, StringComparison.OrdinalIgnoreCase);
-                            bool command = args.Any(a => new[] { "--exit", "--uninstall", "--logs", "--rollback", "--restart-components", "--check-updates", "--settings", "--disk-shell" }.Contains(a));
+                            bool command = args.Any(a => new[] { "--exit", "--uninstall", "--logs", "--rollback", "--rollback-previous", "--restart-components", "--check-updates", "--settings", "--disk-shell" }.Contains(a));
                             // --tray with --home is also the isolated development/smoke entry point.
                             bool install = external && !command && !(args.Contains("--tray") && args.Contains("--home"));
+                            if (ResumePreviousRollbackAtStartup(home, owned, launch)) return 0;
+                            if (owned && args.Contains("--rollback-previous")) {
+                                var engine = new UpdateEngine(home, Version);
+                                string previous = UpgradeInstaller.PreviousVersion(home, engine); bool blockCurrent;
+                                if (!TrayContext.ConfirmPreviousRollback(previous, out blockCurrent)) return 0;
+                                UpgradeInstaller.RollbackPrevious(home, engine, blockCurrent, previous, "Global\\" + name + ".Install");
+                                launch(target, false); return 0;
+                            }
                             // First setup owns a visible wizard before extraction, selftest or binary downloads.
                             if (install && home.Equals(DefaultHome,StringComparison.OrdinalIgnoreCase) && FirstInstall.Required(home)) {
                                 if(!owned){if(TryForward(name,new[]{"--setup-check"},log)){return 0;}StopInstalled(name,target,home,mutex,log);owned=true;}
