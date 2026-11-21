@@ -20,7 +20,8 @@ namespace RemoteAgents.Launcher
             Directory.CreateDirectory(dir);
             var oldClock = RaLog.Clock; RaLog.Clock = () => new DateTimeOffset(Now);
             try {
-                StatusTransitions(dir); BusRepeats(); CoreRepeats(); WriteRecovery(dir); Mirror(dir); MirrorRecovery(dir); MirrorSummaryRecovery(dir); ParallelWrites(dir); Rotation(dir);
+                NetHelperVersionTests.Run(); BusJournalTests.Run();
+                StatusTransitions(dir); BusRepeats(); CoreRepeats(); WriteRecovery(dir); HelperBusRecovery(dir); Mirror(dir); MirrorRecovery(dir); MirrorSummaryRecovery(dir); MirrorCursorRecovery(dir); ParallelWrites(dir); Rotation(dir);
                 Console.WriteLine("PASS: JournalFloodTests (" + checks + " checks, manual events, no timers)");
                 return 0;
             } finally { RaLog.Clock = oldClock; Directory.Delete(dir, true); }
@@ -223,6 +224,36 @@ namespace RemoteAgents.Launcher
             }
         }
 
+        static void HelperBusRecovery(string dir)
+        {
+            string logs = Path.Combine(dir, "helper-bus-recovery"), path = Path.Combine(logs, HelperEventLog.Stream + ".log");
+            Directory.CreateDirectory(path);
+            var events = new HelperEventLog(logs);
+            using (var bus = new EventBus(manualDispatch: true))
+            using (var journal = new BusJournal(bus, trySink: events.TryWriteLine, excludeTopics: new[] { BusTopics.SingboxLine })) {
+                bus.Publish("vpn.failed", "helper", "reason", "original helper bus error", "code", "E_ROUTE"); bus.DrainOnce();
+                Check(events.Last == 1 && journal.PendingCount == 0, "service sink does not confirm failed first diagnostic");
+                bus.Publish("tick.vpn", "helper"); bus.DrainOnce();
+                Directory.Delete(path);
+                bus.Publish("vpn.failed", "helper", "reason", "original helper bus error", "code", "E_ROUTE"); bus.DrainOnce();
+                var page = events.Read(0, HelperEventLog.MaxRead);
+                Check(page.Lines.Count == 1 && page.Lines[0].Contains("vpn.failed") && page.Lines[0].Contains("original helper bus error") && page.Lines[0].Contains("code=E_ROUTE") && !page.Lines[0].Contains("first_seq="), "BusJournal -> HelperEventLog -> RaLog recovery retains original fields through log.read");
+                Check(HelperEventLog.SeqOf(page.Lines[0]) == 2 && page.Lost == 1 && File.ReadAllText(path).Contains("log.write-failed"), "failed helper write retains allocated sequence gap and failure marker");
+
+                bus.Publish("vpn.failed", "helper", "reason", "original helper bus error", "code", "E_ROUTE"); bus.DrainOnce();
+                File.Move(path, path + ".saved"); Directory.CreateDirectory(path);
+                journal.Flush();
+                Check(journal.PendingCount == 1, "service sink retains failed repeat summary");
+                for (int i = 0; i < BusJournal.NoiseSummaryThreshold; i++) { bus.Publish("tick.vpn", "helper"); bus.DrainOnce(); }
+                Directory.Delete(path);
+                journal.Flush();
+                Check(journal.PendingCount == 0, "service sink confirms recovered repeat summary");
+            }
+            string text = File.ReadAllText(path);
+            Check(text.Split('\n').Count(l => l.Contains(" repeat ") && l.Contains("count=1")) == 1, "service sink writes retained repeat exactly once");
+            Check(text.Split('\n').Count(l => l.Contains("bus.noise-summary") && l.Contains("suppressed=1001") && l.Contains("tick=1001")) == 1, "service sink retains failed noise summary until disposal");
+        }
+
         static void MirrorRecovery(string dir)
         {
             foreach (string stream in new[] { "core", "helper" }) {
@@ -271,6 +302,43 @@ namespace RemoteAgents.Launcher
                 string text = File.ReadAllText(path);
                 Check(text.Contains("count=1") && text.Contains("suppressed=1") && text.Contains("log.write-failed"), "repeat/noise counters survive failed batch flush exactly once");
             } finally { RaLog.OnError = oldOnError; }
+        }
+
+        static void MirrorCursorRecovery(string dir)
+        {
+            string logs = Path.Combine(dir, "mirror-cursor"), state = logs + "-state", cursor = Path.Combine(state, "helper-log-cursor.json");
+            Directory.CreateDirectory(state);
+            Json.Write(cursor, new Dictionary<string, object> { { "after", "5" } });
+            var requested = new List<ulong>();
+            var mirror = new HelperLogMirror(logs, state, () => true, () => "15", (after, max) => {
+                requested.Add(after);
+                if (after == 5) {
+                    File.Delete(cursor); Directory.CreateDirectory(cursor); // Отказ замены cursor-файла после его загрузки.
+                    return new Dictionary<string, object> { { "next", 7 }, { "lines", new[] {
+                        Core(6, "ERROR cursor diagnostic"),
+                        RaLog.Format(new DateTimeOffset(Now), LogLevel.Warn, "vpn", "vpn.failed", RaLog.Pairs(new[] { "seq", "7", "reason", "cursor diagnostic" }), RaLog.Session) } } };
+                }
+                return new Dictionary<string, object> { { "next", 7 }, { "lines", new string[0] } };
+            }, (level, evt, fields) => { });
+            Check(mirror.Pull() == 2 && Directory.Exists(cursor), "mirror accepts page despite failed cursor replacement");
+            Check(mirror.Pull() == 0 && requested.SequenceEqual(new ulong[] { 5, 7, 7 }), "mirror uses confirmed in-memory cursor across Pulls without replay");
+            Check(File.ReadAllLines(Path.Combine(logs, "core.log")).Length == 1 && File.ReadAllLines(Path.Combine(logs, "helper.log")).Length == 1, "cursor storage failure duplicates neither core nor helper diagnostics");
+            Directory.Delete(cursor);
+            Check(mirror.Pull() == 0 && Json.Str(Json.Read(cursor), "after") == "7", "next Pull persists confirmed cursor after storage recovers without new lines");
+
+            bool reset = true;
+            var restarted = new HelperLogMirror(logs, state, () => true, () => "15", (after, max) => {
+                if (reset) {
+                    Check(after == 7, "new mirror loads recovered disk cursor");
+                    reset = false; File.Delete(cursor); Directory.CreateDirectory(cursor);
+                    return new Dictionary<string, object> { { "next", 0 }, { "reset", true } };
+                }
+                Check(after == 0, "helper reset also replaces confirmed in-memory cursor");
+                return new Dictionary<string, object> { { "next", 0 }, { "lines", new string[0] } };
+            }, (level, evt, fields) => { });
+            Check(restarted.Pull() == 0 && restarted.Pull() == 0, "failed reset cursor persistence does not repeat reset or old page");
+            Directory.Delete(cursor);
+            Check(restarted.Pull() == 0 && Json.Str(Json.Read(cursor), "after") == "0", "reset cursor persists on subsequent Pull after recovery");
         }
 
         static void ParallelWrites(string dir)

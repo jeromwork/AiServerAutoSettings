@@ -23,6 +23,8 @@ namespace RemoteAgents.Launcher
         // не перечитывая уже принятые CoreJournal повторы и не сохраняя курсор раньше сводки.
         string[] pending;
         ulong pendingNext;
+        ulong? confirmedCursor;
+        bool cursorDirty;
         int pendingIndex, writeAttempts;
         long coreLost, helperLost;
         internal HelperLogMirror(string logsDir, string stateDir, Func<bool> ready, Func<string> helperVersion,
@@ -33,7 +35,16 @@ namespace RemoteAgents.Launcher
         }
 
         ulong LoadCursor() { try { ulong n; return ulong.TryParse(Json.Str(Json.Read(cursorFile), "after"), NumberStyles.None, CultureInfo.InvariantCulture, out n) ? n : 0; } catch { return 0; } }
-        void SaveCursor(ulong after) { try { Json.Write(cursorFile, new Dictionary<string, object> { { "after", after.ToString(CultureInfo.InvariantCulture) } }); } catch { } }
+        void SaveCursor(ulong after)
+        {
+            // Подтверждённая пачка не перечитывается в этом процессе, даже если cursor-файл недоступен.
+            confirmedCursor = after;
+            cursorDirty = true;
+            try {
+                Json.Write(cursorFile, new Dictionary<string, object> { { "after", after.ToString(CultureInfo.InvariantCulture) } });
+                cursorDirty = false;
+            } catch { }
+        }
         void State(string state, params string[] kv)
         {
             if (state == lastState) return;
@@ -60,7 +71,9 @@ namespace RemoteAgents.Launcher
                 if (!ready()) { State("not-connected"); return -1; }
                 int total = 0;
                 try {
-                    ulong after = LoadCursor();
+                    ulong after = confirmedCursor ?? LoadCursor();
+                    confirmedCursor = after;
+                    if (cursorDirty) SaveCursor(after); // Повтор сохранения только при очередном Pull.
                     for (int i = 0; i < Iterations; i++) {
                         if (pending == null) {
                             var reply = read(after, MaxBytes);

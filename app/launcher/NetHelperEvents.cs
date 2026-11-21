@@ -61,16 +61,28 @@ namespace RemoteAgents.Launcher
         // helper-events целиком обходит LogLimits: выделенный seq не теряется из-за дедупа/частоты.
         // Готовая строка формата RaLog (журнал шины службы): получает свой seq сразу после s=<сессия>, пишется как есть.
         // Так она доезжает до трея тем же log.read и попадает на сервер как helper.log с компонентом bus.
+        // Прежний API возвращает выделенный seq, в том числе при отказе записи.
         internal ulong WriteLine(string line)
         {
-            if (string.IsNullOrEmpty(line)) return 0;
+            ulong allocatedSeq;
+            TryWriteLine(line, out allocatedSeq);
+            return allocatedSeq;
+        }
+        internal bool TryWriteLine(string line)
+        {
+            ulong allocatedSeq;
+            return TryWriteLine(line, out allocatedSeq);
+        }
+        bool TryWriteLine(string line, out ulong allocatedSeq)
+        {
+            allocatedSeq = 0;
+            if (string.IsNullOrEmpty(line)) return true;
             lock (gate) {
-                seq++;
-                string tag = " seq=" + seq.ToString(CultureInfo.InvariantCulture);
+                allocatedSeq = ++seq;
+                string tag = " seq=" + allocatedSeq.ToString(CultureInfo.InvariantCulture);
                 var m = Regex.Match(line, @" s=\S+");
                 string text = m.Success ? line.Insert(m.Index + m.Length, tag) : line + tag;
-                RaLog.AppendLine(dir, Stream, text);
-                return seq;
+                return RaLog.AppendLine(dir, Stream, text);
             }
         }
 

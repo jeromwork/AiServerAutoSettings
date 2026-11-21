@@ -277,6 +277,9 @@
     <Compile Remove="@(Compile)" />
     <Compile Include="PortableJson.cs" />
     <Compile Include="JournalFloodTests.cs" />
+    <Compile Include="../NetHelperEvents.cs" />
+    <Compile Include="NetHelperVersionTests.cs" />
+    <Compile Include="BusJournalTests.cs" />
     <Compile Include="../UpdateObservation.cs" />
     <Compile Include="../UpdatePolicy.cs" />
     <Compile Include="../UpdateChannel.cs" />
