@@ -34,7 +34,12 @@ namespace RemoteAgents.Launcher
             } finally { if (Directory.Exists(home)) Directory.Delete(home, true); }
         }
         // -p:LanTests=true includes helper setup/protocol regressions alongside the LAN suites.
-        static int Main(string[] args) { Run(); LanTunTests.Run(); LanHostsTests.Run(); NetHelperTests.Run(); return 0; }
+        static int Main(string[] args)
+        {
+            // Focused source-pin check; no LAN/Windows fixtures or other suites.
+            if (args.Length == 1 && args[0] == "--helper-version-only") { NetHelperVersionTests.Run(); return 0; }
+            Run(); LanTunTests.Run(); LanHostsTests.Run(); NetHelperTests.Run(); return 0;
+        }
     }
     internal static class Stage6PortableEntry
     {

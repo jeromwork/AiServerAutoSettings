@@ -31,6 +31,11 @@
     <IntermediateOutputPath>obj/$(Configuration)/netnotify-tests/</IntermediateOutputPath>
     <OutputPath>bin/$(Configuration)/netnotify-tests/</OutputPath>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(TrayExtrasTests)' == 'true'">
+    <StartupObject>RemoteAgents.Launcher.TrayExtrasTests</StartupObject>
+    <IntermediateOutputPath>obj/$(Configuration)/tray-extras-tests/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/tray-extras-tests/</OutputPath>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(TrayBusTests)' == 'true'">
     <StartupObject>RemoteAgents.Launcher.TrayBusTests</StartupObject>
     <IntermediateOutputPath>obj/$(Configuration)/traybus-tests/</IntermediateOutputPath>
@@ -141,6 +146,8 @@
     <Compile Include="../MainScreenModel.cs" Link="MainScreenModel.cs" />
     <Compile Include="../MainScreenRender.cs" Link="MainScreenRender.cs" />
     <Compile Include="TrayExtrasTests.cs" />
+    <Compile Include="TrayNotificationTests.cs" />
+    <Compile Include="../TrayStatusLog.cs" />
     <Compile Include="../TrayMenuModel.cs" Link="TrayMenuModel.cs" />
     <Compile Include="../TrayBridge.cs" Link="TrayBridge.cs" />
     <Compile Include="../WindowModel.cs" Link="WindowModel.cs" />

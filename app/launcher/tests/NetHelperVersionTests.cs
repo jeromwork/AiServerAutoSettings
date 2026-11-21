@@ -65,6 +65,7 @@ namespace RemoteAgents.Launcher
             var pin = Json.Read(Path.Combine(root, "app", "launcher", "NetHelperSources.json"));
             string[] sources = Sources(root);
             string actual = Fingerprint(sources, path => File.ReadAllText(Path.Combine(root, path)));
+            Console.WriteLine("NetHelperVersion: version=" + NetHelperInstall.HelperVersion + ", SHA-256=" + actual);
             RequireMatch(NetHelperInstall.HelperVersion, actual, Json.Str(pin, "helperVersion"), Json.Str(pin, "sha256"));
 
             // Regression checks run in memory; the real source tree is never modified.

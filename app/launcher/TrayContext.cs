@@ -25,7 +25,6 @@ namespace RemoteAgents.Launcher
         readonly List<ComponentRuntime> runtimes = new List<ComponentRuntime>(); readonly List<NativeJob> actionJobs = new List<NativeJob>();
         readonly Stopwatch trayClickClock = Stopwatch.StartNew();
         readonly TrayMenuState menuState = new TrayMenuState();
-        readonly TrayStatusNotifications statusNotifications = new TrayStatusNotifications();
         readonly TickFailureLog tickFailures = new TickFailureLog();
         long lastTrayClick = -SystemInformation.DoubleClickTime - 1L;
         ConfigWindow mainWindow;
@@ -199,8 +198,6 @@ namespace RemoteAgents.Launcher
                     icon.Text = vpnReason.Length > 0 && !searching && !conflict ? TrayMenuModel.Short(StatusView.DisplayText(vpnReason), 63)
                         : TrayMenuModel.Tooltip(transport, ServerHealthView.Read(home), vpnStatus);
                     if (netNote.Length > 0 && Json.Str(vpnStatus, "state") == "on") icon.Text = TrayMenuModel.Short(netNote, 63);
-                    var notice = statusNotifications.Observe(transport, vpnStatus, DateTime.UtcNow);
-                    if (notice != null) icon.ShowBalloonTip(8000, Product.Name, notice.Text, notice.Recovered ? ToolTipIcon.Info : ToolTipIcon.Warning);
                 });
                 ok &= Step("operations", () => { if (DateTime.UtcNow >= nextOperationCheck) CheckOperations(); });
                 ok &= Step("menu", RefreshMenuItems);
@@ -213,7 +210,15 @@ namespace RemoteAgents.Launcher
                 // Honest icon: a broken core step is red; any other broken step must not leave it green.
                 if (coreFailed) shown = red; else if (!ok && shown == green) shown = yellow;
             } catch (Exception ex) { tickFailures.Write(log, ex, "tick"); shown = red; }
-            finally { ticking = false; if (!closing && icon.Icon != shown) icon.Icon = shown; }
+            finally {
+                ticking = false;
+                if (!closing && icon.Icon != shown) {
+                    string previous = icon.Icon == green ? "ok" : icon.Icon == red ? "error" : "warn";
+                    icon.Icon = shown;
+                    // Connectivity changes stay in the tray/window; journal only the final colour transition once.
+                    TrayStatusLog.Write(log, previous, shown == green ? "ok" : shown == red ? "error" : "warn");
+                }
+            }
         }
         bool Step(string name, Action action) { return tickFailures.Run(log, name, action); }
         // Tooltip «Идёт установка: x из y» and a «Готово» balloon. While the wizard window is closed the tray
@@ -418,7 +423,7 @@ namespace RemoteAgents.Launcher
         bool healthWatching;
         async void WatchHealth()
         {
-            // Boot can take a while (network, Syncthing): retry quietly before reporting once.
+            // Boot can take a while (network, Syncthing): retry quietly before logging once.
             if (healthWatching) return; healthWatching = true;
             try {
                 for(int i=0;i<20 && !closing;i++){
@@ -428,7 +433,7 @@ namespace RemoteAgents.Launcher
                         return;
                     }
                 }
-                if(!closing){log.Write("setup.health.unconfirmed");icon.ShowBalloonTip(10000,Product.Name,"Связь с сервером не подтверждена за 5 минут. Откройте RemoteAgents и проверьте состояние.",ToolTipIcon.Warning);}
+                if(!closing)log.Write("setup.health.unconfirmed");
             }catch(OperationCanceledException){}
             finally{healthWatching=false;}
         }
