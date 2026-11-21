@@ -55,7 +55,7 @@ namespace RemoteAgents.Launcher
                 ReplaceImage(sourceExe, target);
                 // Write before current.txt: recovery can also restore the image after interrupted activation.
                 if (old.Length != 0 && hadExe && !accept) Json.Write(Path.Combine(engine.Root, "exe-upgrade.json"), new {
-                    version, previous = old, launcherVersion, startedUtc = DateTime.UtcNow.ToString("o"), previousHash = Files.Hash(backup)
+                    version, previous = old, launcherVersion, startedUtc = DateTime.UtcNow.ToString("o"), previousHash = Files.Hash(backup), currentHash = Files.Hash(sourceExe)
                 });
                 if (version != old) engine.Activate(version, accept);
             } catch {
@@ -113,13 +113,11 @@ namespace RemoteAgents.Launcher
                 catch { if (File.Exists(retired)) File.Move(retired, target); throw; }
             } finally { if (File.Exists(tmp)) File.Delete(tmp); }
         }
-        public static string ObserveImage(string home, UpdateEngine engine, bool healthy, string bundleResult, DateTime? utcNow = null)
+        public static string ObserveImage(string home, UpdateEngine engine, bool healthy, string bundleResult)
         {
             string record = Path.Combine(engine.Root, "exe-upgrade.json"); if (!File.Exists(record)) return "";
-            var p = Json.Read(record); DateTime start;
-            if (!DateTime.TryParse(Json.Str(p, "startedUtc"), null, System.Globalization.DateTimeStyles.RoundtripKind, out start)) throw new InvalidDataException();
-            bool expired = ((utcNow ?? DateTime.UtcNow) - start.ToUniversalTime()).TotalSeconds >= 120;
-            if (bundleResult == "rollback" || expired || engine.Current != Json.Str(p, "version")) {
+            var p = Json.Read(record);
+            if (bundleResult == "rollback" || engine.Current != Json.Str(p, "version")) {
                 string backup = Path.Combine(home, Product.Name + ".previous.exe");
                 if (!File.Exists(backup) || !Files.Hash(backup).Equals(Json.Str(p, "previousHash"), StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Нет прежнего EXE");
                 if (engine.Pending || (engine.Current == Json.Str(p, "version") && engine.Current != Json.Str(p, "previous"))) engine.Rollback();

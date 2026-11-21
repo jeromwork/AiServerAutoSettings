@@ -51,6 +51,12 @@
     <IntermediateOutputPath>obj/$(Configuration)/vpnreasons-tests/</IntermediateOutputPath>
     <OutputPath>bin/$(Configuration)/vpnreasons-tests/</OutputPath>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(UpdateHealthTests)' == 'true'">
+    <StartupObject>RemoteAgents.Launcher.UpdateHealthTests</StartupObject>
+    <DefineConstants>$(DefineConstants);UPDATE_HEALTH_TESTS</DefineConstants>
+    <IntermediateOutputPath>obj/$(Configuration)/update-health-tests/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/update-health-tests/</OutputPath>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(HealthBoardTests)' == 'true'">
     <StartupObject>RemoteAgents.Launcher.HealthBoardTests</StartupObject>
     <IntermediateOutputPath>obj/$(Configuration)/healthboard-tests/</IntermediateOutputPath>
@@ -149,6 +155,8 @@
     <Compile Include="SupervisorStaleTests.cs" />
     <Compile Include="../VpnAttemptGuard.cs" />
     <Compile Include="VpnReasonsTests.cs" />
+    <Compile Include="../UpdateObservation.cs" />
+    <Compile Include="UpdateHealthTests.cs" />
     <Compile Include="../HealthBoard.cs" />
     <Compile Include="HealthBoardTests.cs" />
     <Compile Include="../TransportBusBridge.cs" />
@@ -237,4 +245,27 @@
     <IntermediateOutputPath>obj/$(Configuration)/helper-update-tests/</IntermediateOutputPath>
     <OutputPath>bin/$(Configuration)/helper-update-tests/</OutputPath>
   </PropertyGroup>
+  <!-- H2 is a micro-suite: compile its production dependencies, not every portable test. -->
+  <ItemGroup Condition="'$(UpdateHealthTests)' == 'true'">
+    <Compile Remove="@(Compile)" />
+    <Compile Include="PortableJson.cs" />
+    <Compile Include="UpdateHealthTests.cs" />
+    <Compile Include="../Data.cs" />
+    <Compile Include="../RaLog.cs" />
+    <Compile Include="../LogLimits.cs" />
+    <Compile Include="../LogMask.cs" />
+    <Compile Include="../ConfigBundle.cs" />
+    <Compile Include="../SecretVault.cs" />
+    <Compile Include="../LanAccess.cs" />
+    <Compile Include="../DiskChoice.cs" />
+    <Compile Include="../UpdatePolicy.cs" />
+    <Compile Include="../UpdateChannel.cs" />
+    <Compile Include="../UpgradeInstaller.cs" />
+    <Compile Include="../UpdateEngine.cs" />
+    <Compile Include="../HealthBoard.cs" />
+    <Compile Include="../UpdateObservation.cs" />
+    <Compile Include="../EventBus.cs" />
+    <Compile Include="../BusTopics.cs" />
+    <Compile Include="../TrayBus.cs" />
+  </ItemGroup>
 </Project>

@@ -88,14 +88,12 @@ namespace RemoteAgents.Launcher
             try { BundleDefinition.Load(Folder(Current)); }
             catch { Rollback(); } // A broken components.json must not prevent reaching the recovery path.
         }
-        public string Observe(bool allCriticalHealthy)
+        public string Observe(bool allCriticalHealthy, bool failed = false)
         {
             if (!Pending) return "";
             var p = Json.Read(PendingPath);
             if (Current != Json.Str(p, "version")) { Recover(); return ""; }
-            DateTime start;
-            if (!DateTime.TryParse(Json.Str(p, "startedUtc"), null, System.Globalization.DateTimeStyles.RoundtripKind, out start)) throw new InvalidDataException("Неверная запись обновления");
-            if ((now() - start.ToUniversalTime()).TotalSeconds >= 120) { Rollback(); return "rollback"; }
+            if (failed) { Rollback(); return "rollback"; }
             if (allCriticalHealthy) { File.Delete(PendingPath); Cleanup(); return "accepted"; }
             return "";
         }

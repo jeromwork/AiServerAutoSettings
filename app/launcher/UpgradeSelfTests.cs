@@ -50,9 +50,10 @@ namespace RemoteAgents.Launcher
                 try { UpgradeInstaller.Apply(home, source, Fixture(work, "0.0.4", true), Program.Version, false, f => false); } catch { rejected = true; }
                 check("failed-selftest-keeps-installation", rejected && e.Current == "0.0.2" && Files.Hash(target) == Files.Hash(source));
                 phase = "install-unhealthy"; UpgradeInstaller.Apply(home, source, badZip, Program.Version, false, f => External.SelfTest(f, home, CancellationToken.None));
-                tray = Start(target, home); var watch = Stopwatch.StartNew();
-                phase = "real-120-second-rollback"; Wait(() => e.Current == "0.0.2" && !e.Pending && !File.Exists(Path.Combine(e.Root, "exe-upgrade.json")), 150000);
-                check("real-health-deadline", watch.Elapsed.TotalSeconds >= 118);
+                tray = Start(target, home);
+                phase = "inject-update-failure"; Program.Forward(Program.InstanceName(home, System.Security.Principal.WindowsIdentity.GetCurrent().User), new[] { "--identify" });
+                UpdateWatchdog.SignalFailure(home);
+                phase = "event-rollback"; Wait(() => e.Current == "0.0.2" && !e.Pending && !File.Exists(Path.Combine(e.Root, "exe-upgrade.json")), 150000);
                 check("unhealthy-version-rejected", e.IsBad("0.0.3"));
                 check("neighbor-product-untouched", File.ReadAllText(neighborExe) == "neighbor-image" && Files.ReadLine(neighborBundle) == "neighbor-version");
                 phase = "restored-tray"; Wait(() => Healthy(home, "0.0.2"), 20000);

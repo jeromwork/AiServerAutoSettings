@@ -10,6 +10,7 @@ namespace RemoteAgents.Launcher
     internal sealed class BlockStatusTracker
     {
         readonly EventBus bus; readonly object gate = new object();
+        readonly Dictionary<string, string> reasons = new Dictionary<string, string>(StringComparer.Ordinal);
         readonly Dictionary<string, bool> ready = new Dictionary<string, bool>(StringComparer.Ordinal);
         // Файл статуса учитывается, только если записан не раньше since: запуска трея или последнего component.start/exit блока.
         readonly Dictionary<string, DateTime> since = new Dictionary<string, DateTime>(StringComparer.Ordinal);
@@ -26,7 +27,7 @@ namespace RemoteAgents.Launcher
         internal void Reset(string block)
         {
             if (string.IsNullOrEmpty(block)) return;
-            lock (gate) { ready.Remove(block); since[block] = clock(); }
+            lock (gate) { ready.Remove(block); reasons.Remove(block); since[block] = clock(); }
         }
         bool Fresh(string block, DateTime modified)
         {
@@ -47,13 +48,17 @@ namespace RemoteAgents.Launcher
         {
             if (string.IsNullOrEmpty(block)) return;
             bool now = IsReady(block, status);
+            // Факт отсутствия локальной сети из статуса транспорта (Р8), без возраста файла и текста summary.
+            string reason = block == "transport" && Json.Str(status, "localNet") == "down" ? "no-network" : Json.Text(status, "summary", "not-ok");
             lock (gate) {
                 bool was; bool known = ready.TryGetValue(block, out was);
-                if (known && was == now) return;
+                string previousReason; reasons.TryGetValue(block, out previousReason);
+                if (known && was == now && (now || previousReason == reason)) return;
+                reasons[block] = reason;
                 ready[block] = now;
                 if (now) bus.Publish(BusTopics.BlockReady, BusTopics.Sources.Tray, "block", block);
-                else if (known) bus.Publish(BusTopics.BlockDegraded, BusTopics.Sources.Tray, "block", block, "reason", Json.Text(status, "summary", "not-ok"));
-                // Первое наблюдение «не готов» ничего не публикует: готовность блока — единственный факт, который ждут подписчики.
+                else if (known || reason == "no-network") bus.Publish(BusTopics.BlockDegraded, BusTopics.Sources.Tray, "block", block, "reason", reason);
+                // Первый no-network тоже публикуется: отсутствие сети засчитывается доской здоровья.
             }
         }
 

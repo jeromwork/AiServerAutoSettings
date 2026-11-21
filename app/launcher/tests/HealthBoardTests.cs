@@ -20,7 +20,6 @@ namespace RemoteAgents.Launcher
             RepeatsDoNotDuplicateAccepted();
             OtherDegradedUnreports();
             BridgeAliasAndOutsiders();
-            PickAcceptedWithoutBoard();
             ExpectedBlocksFromState();
             Console.WriteLine("PASS: HealthBoardTests (" + assertions + " assertions passed)");
             return 0;
@@ -81,15 +80,6 @@ namespace RemoteAgents.Launcher
             Check(!b.Ready("update", T0).Counted, "block outside the set is ignored");
             b.Ready("tray", T0);
             Check(b.Ready("control", T0).Completed, "control is the bridge block");
-        }
-
-        static void PickAcceptedWithoutBoard()
-        {
-            Check(HealthBoard.PickAccepted(null, true) && !HealthBoard.PickAccepted(null, false), "no board: legacy condition decides");
-            var b = new HealthBoard(new[] { "tray" }, T0);
-            Check(!HealthBoard.PickAccepted(b, true), "board present and incomplete: legacy condition ignored");
-            b.Ready("tray", T0);
-            Check(HealthBoard.PickAccepted(b, false), "board accepted: its verdict decides");
         }
 
         static void ExpectedBlocksFromState()
