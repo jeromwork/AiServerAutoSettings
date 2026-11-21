@@ -145,6 +145,7 @@ namespace RemoteAgents.Launcher
             Check(TrayMenuModel.SwitchLines(search).Length == 1 && !TrayMenuModel.SwitchLines(search)[0].Contains("-secret"), "malformed rows ignored and history text masked");
             conflict["summary"] = "Сейчас работает Happ. token=conflict-secret";
             Check(!TrayMenuModel.Tooltip(ok, empty, conflict).Contains("conflict-secret"), "conflict text is masked in tooltip");
+            TrayNotificationTests.Run();
             Console.WriteLine("PASS: switch UI status/tray menu and tooltip");
         }
         static void RunBridgeEntry()

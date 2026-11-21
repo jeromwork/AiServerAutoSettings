@@ -216,8 +216,7 @@ namespace RemoteAgents.Launcher
                     string previous = icon.Icon == green ? "ok" : icon.Icon == red ? "error" : "warn";
                     icon.Icon = shown;
                     // Connectivity changes stay in the tray/window; journal only the final colour transition once.
-                    log.Write(LogLevel.Info, "net", "status.changed", "from", previous,
-                        "to", shown == green ? "ok" : shown == red ? "error" : "warn");
+                    TrayStatusLog.Write(log, previous, shown == green ? "ok" : shown == red ? "error" : "warn");
                 }
             }
         }
