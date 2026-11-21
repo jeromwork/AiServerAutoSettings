@@ -709,18 +709,29 @@ RemoteAgents сохраняет проверенный принцип сохра
 
 `python3 tools/health-check.py /путь/к/logs/health.log` (либо журнал через stdin)
 печатает русский вердикт OK/FAIL, возвращает 0/1 и не выводит содержимое строк.
-Проверяется последняя сессия RaLog (`s=`): `block.ready → health.accepted`,
-`unhandled`, сообщения об отказах crash-loop/fuse и три выхода одного компонента
-без промежуточной готовности (консервативный признак crash-loop).
+Без дополнительного журнала проверяется последняя сессия RaLog (`s=`):
+`block.ready → health.accepted`, `unhandled`, сообщения об отказах crash-loop/fuse.
+В OK-выводе явно указано «launcher.log не проверялся».
+Три выхода критичного компонента до приёмки без промежуточного `block.ready`
+означают FAIL; после приёмки выходы не учитываются. Как и HealthBoard, проверка
+нормализует `bridge → control`; список критичных берётся из `build/components.json`
+(сейчас `transport`). HealthBoard получает этот список из включённых runtime-компонентов;
+проверяйте журнал с соответствующей версией манифеста.
 Повреждённая строка последней сессии означает FAIL. Поддерживается также JSONL:
 `{"event":"block.ready","s":"session-id","fields":{"block":"tray"}}`.
 
-Ограничения текущего кода: HealthJournal пишет текст RaLog, не JSONL; событий
-`start`, `config-loaded`, `tray-loop`, `supervisor-started` в этом потоке нет.
-`launcher.start` существует в launcher.log и может служить границей при проверке
-объединённого журнала. Без `s`/границы запуска проверяется весь вход.
-H2 пишет crash-loop/no-progress-fuse в launcher.log, не в health.log;
-`health.fuse`/`health.rollback` объявлены, но H2 их не публикует.
-Поэтому OK подтверждает только наблюдаемую цепочку, а не отсутствие всех падений.
+Для проверки падений лаунчера:
+`python3 tools/health-check.py /путь/health.log --launcher-log /путь/launcher.log`.
+Граница — последний `launcher.start` в launcher.log; события обоих потоков до его
+времени игнорируются. Отдельная сессия `s` внешнего наблюдателя не сбрасывает
+проверку: любой `update.failed` после границы, включая crash-loop/no-progress-fuse
+и отказ наблюдателя, а также `unhandled` и `launcher.fatal` означают FAIL.
+Нет `launcher.start` или не удаётся сопоставить время — FAIL. Для JSONL при
+сопоставлении требуется `timestamp` (также принимаются `ts`/`time`) в ISO 8601
+с часовым поясом; RaLog уже содержит UTC-время.
+
+HealthJournal пишет текст RaLog; событий `start`, `config-loaded`, `tray-loop`,
+`supervisor-started` в этом потоке нет. Без `s`/границы проверяется весь вход.
+OK подтверждает наблюдаемую цепочку и отсутствие доступных признаков отказа.
 `health.accepted` появляется при ожидающей приёмки транзакции обновления;
 обычный запуск без неё даст FAIL из-за отсутствия приёмки.
