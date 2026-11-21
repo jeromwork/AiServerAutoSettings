@@ -476,10 +476,17 @@ namespace RemoteAgents.Launcher
                 catch (UpgradeInstaller.ReceiptBusyException) { busy = true; }
                 Check(busy && elapsed.ElapsedMilliseconds < 500, "observer retirement cannot wait forever outside outcome fuse");
                 using (var cancel = new CancellationTokenSource()) {
-                    elapsed.Restart(); cancel.CancelAfter(80); bool canceled = false;
-                    try { using (UpgradeInstaller.LockReceipt(home, cancel.Token, 5000)) { throw new Exception("canceled transaction ran"); } }
+                    cancel.Cancel(); elapsed.Restart(); bool canceled = false;
+                    try { using (UpgradeInstaller.LockReceipt(home, cancel.Token, UpgradeInstaller.ReceiptWorkerFuseMs)) { File.WriteAllText(receipt, "unowned write"); } }
                     catch (OperationCanceledException) { canceled = true; }
-                    Check(canceled && elapsed.ElapsedMilliseconds < 1500 && !child.HasExited, "cancellation interrupts live-holder wait before long deadline");
+                    Check(canceled && elapsed.ElapsedMilliseconds < 500 && !child.HasExited, "cancellation before entry refuses immediately without waiting for live holder");
+                }
+                using (var cancel = new CancellationTokenSource()) {
+                    elapsed.Restart(); cancel.CancelAfter(80); bool canceled = false;
+                    try { using (UpgradeInstaller.LockReceipt(home, cancel.Token, UpgradeInstaller.ReceiptWorkerFuseMs)) { File.WriteAllText(receipt, "unowned write"); } }
+                    catch (OperationCanceledException) { canceled = true; }
+                    Check(canceled && elapsed.ElapsedMilliseconds <= UpgradeInstaller.ReceiptWorkerFuseMs + 500 && !child.HasExited,
+                        "cancellation during live-holder wait completes by receipt fuse plus scheduling tolerance");
                 }
                 Check(File.ReadAllText(receipt) == original, "timeout and cancellation never permit receipt writes");
                 File.Delete(receipt); elapsed.Restart();

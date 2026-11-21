@@ -37,9 +37,8 @@ namespace RemoteAgents.Launcher
                 try {
                     try {
                         // Предохранитель (конституция 4а): событие <освобождение квитанции владельцем> недоступно, если <владелец завис/не отдаёт mutex>; при срабатывании — отказ ReceiptBusyException без записи, успех не объявляет.
-                        owned = token.CanBeCanceled
-                            ? WaitHandle.WaitAny(new WaitHandle[] { mutex, token.WaitHandle }, timeoutMs) == 0
-                            : mutex.WaitOne(timeoutMs);
+                        // Отмена во время ожидания замка срабатывает не позже предохранителя (UI 25 мс, worker 1000 мс).
+                        owned = mutex.WaitOne(timeoutMs);
                     } catch (AbandonedMutexException) { owned = true; }
                     token.ThrowIfCancellationRequested();
                     if (!owned) throw new ReceiptBusyException();
