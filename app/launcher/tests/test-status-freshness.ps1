@@ -8,6 +8,10 @@ function Assert($Value,[string]$Name){if(-not $Value){throw ('FAIL: '+$Name)};$s
 $root=Join-Path ([IO.Path]::GetTempPath()) ('status-freshness-'+[Guid]::NewGuid().ToString('N'))
 $now=[DateTime]::SpecifyKind([DateTime]::Parse('2026-11-21T12:00:00',[Globalization.CultureInfo]::InvariantCulture),[DateTimeKind]::Utc)
 try{
+    # Guard the full-run wiring without executing the full suite.
+    $runner=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'run.sh'))
+    $invocation='timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$here/test-status-freshness.ps1" < /dev/null'
+    Assert ([regex]::Matches($runner,('(?m)^  '+[regex]::Escape($invocation)+'\r?$')).Count -eq 1) 'full runner invokes freshness regression exactly once with bounded noninteractive PowerShell'
     [void][IO.Directory]::CreateDirectory((Join-Path $root 'status'))
     foreach($name in @('transport','vpn','disk','bridge')){
         $file=Join-Path $root ('status/'+$name+'.json')
