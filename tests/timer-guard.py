@@ -1,18 +1,28 @@
 #!/usr/bin/env python3
 """§4а: scan timer sites; debt format: # count: N, [code], [tests], path: text # W2."""
 import argparse
+from collections import Counter
 import re
 from pathlib import Path
 
 PATTERNS = {
-    '.cs': r'Thread\.Sleep|Task\.Delay|new\s+Timer\b|System\.Timers|DispatcherTimer|Forms\.Timer|GetLastWriteTime|maxAgeSec|MaxAge|Stale|UtcNow.*\.TotalSeconds|\.TotalSeconds.*UtcNow',
+    '.cs': r'Thread\.Sleep|Task\.Delay|new\s+(?:[\w.]+\.)?Timer\b|PeriodicTimer|System\.Timers|DispatcherTimer|Forms\.Timer|GetLastWriteTime|\.LastWriteTime|maxAgeSec|MaxAge|Stale|UtcNow.*\.TotalSeconds|\.TotalSeconds.*UtcNow',
     '.ps1': r'(?i)Start-Sleep|\[Threading\.Thread\]::Sleep|LastWriteTime|TotalSeconds\s+-(?:gt|ge|lt|le)\b|updatedAt',
-    '.py': r'time\.sleep|\bsleep\s+|st_mtime|getmtime',
-    '.sh': r'time\.sleep|\bsleep\s+|st_mtime|getmtime',
+    '.py': r'time\.sleep|asyncio\.sleep\s*\(|threading\.Timer\b|\bsleep\s+|st_mtime|getmtime',
+    '.sh': r'time\.sleep|\bsleep\s+|st_mtime|getmtime|\bstat\s+-c\s+[\"\']?%Y|\bfind\b.*\s-(?:mmin|newer)\b',
 }
 PATTERNS['.psm1'] = PATTERNS['.psd1'] = PATTERNS['.ps1']
 PATTERNS = {ext: re.compile(pattern) for ext, pattern in PATTERNS.items()}
 OK = re.compile(r'timer-ok:\s*([BCDE])\s*[—–-]\s*(.{15,})')
+
+
+def comment_only(text):
+    if text.startswith(('/*', '<#')):
+        closing = '*/' if text.startswith('/*') else '#>'
+        return closing not in text or not text.split(closing, 1)[1].strip()
+    if text.startswith('*') and '*/' in text:
+        return not text.split('*/', 1)[1].strip()
+    return text.startswith(('#', '//', '*'))
 
 
 def scan(root, debt_file=None):
@@ -34,7 +44,8 @@ def scan(root, debt_file=None):
             errors.append('DEBT HEADER MISSING: expected # count: N')
         elif len(debt) > count:
             errors.append(f'DEBT COUNT EXCEEDED: {len(debt)} > {count}')
-    found = set()
+    debt = Counter(debt)
+    found = Counter()
     for directory in ('app', 'transport', 'build', 'server', 'tests'):
         for path in sorted((root / directory).rglob('*')):
             rel = path.relative_to(root)
@@ -43,21 +54,25 @@ def scan(root, debt_file=None):
                     or rel.parts[:2] == ('server', 'agent-tools')
                     or rel.as_posix() in ('tests/timer-guard.py', 'tests/test-timer-guard.py')):
                 continue
-            kind = 'tests' if any(p.lower() in ('test', 'tests') for p in rel.parts[:-1]) else 'code'
+            kind = 'tests' if (any(p.lower() in ('test', 'tests') or p.lower().endswith('.tests')
+                                   for p in rel.parts[:-1])
+                               or rel.name.startswith(('test-', 'test_'))
+                               or rel.name.endswith(('Tests.cs', '_test.py'))) else 'code'
             lines = path.read_text(encoding='utf-8-sig').splitlines()
             for index, line in enumerate(lines):
                 text = line.strip()
                 if text.startswith(('#', '//', '/*', '*', '<#')) or not PATTERNS[path.suffix.lower()].search(line):
                     continue
                 signature = (kind, f'{rel.as_posix()}: {text}')
-                found.add(signature)
-                annotations = (text, lines[index - 1].strip() if index else '')
+                found[signature] += 1
+                previous = lines[index - 1].strip() if index else ''
+                annotations = (text, previous if comment_only(previous) else '')
                 allowed = any((m := OK.search(value)) and m[1] in ('E' if kind == 'tests' else 'BCD')
                               and len(m[2].strip()) >= 15 for value in annotations)
-                if not allowed and signature not in debt:
+                if not allowed and found[signature] > debt[signature]:
                     errors.append(f'NEW VIOLATION: {rel.as_posix()}:{index + 1}: {text}')
-    for kind, signature in debt:
-        if (kind, signature) not in found:
+    for (kind, signature), missing in (debt - found).items():
+        for _ in range(missing):
             errors.append(f'STALE DEBT ENTRY [{kind}]: {signature} (remove it)')
     return errors
 
