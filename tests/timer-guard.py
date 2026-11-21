@@ -39,13 +39,13 @@ def lex(line, ext, block):
                 # Python f-string braces are not escaped by a backslash.
                 i += 1 if braces and line[i:i + 2] in ('\\{', '\\}') else 2
             elif expanded and line.startswith('$(', i):
-                i = walk(i + 2, ')')
+                i = embedded(i + 2, ')')
             elif expanded and ext == '.sh' and line[i] == '`':
-                i = walk(i + 1, '`')
+                i = embedded(i + 1, '`')
             elif braces and line[i:i + 2] in ('{{', '}}'):
                 i += 2
             elif braces and line[i] == '{':
-                i = walk(i + 1, '}', True)
+                i = embedded(i + 1, '}', True)
             else:
                 i += 1
         return i
@@ -53,9 +53,16 @@ def lex(line, ext, block):
     def format_text(i):
         # Format specifiers are literal text; Python permits nested replacement fields.
         while i < len(line) and line[i] != '}':
-            i = walk(i + 1, '}', True) if ext == '.py' and line[i] == '{' else i + 1
+            i = embedded(i + 1, '}', True) if ext == '.py' and line[i] == '{' else i + 1
         code.append(' ')
         return i + 1
+
+    def embedded(i, stop, field=False):
+        # Substitutions execute separately from the surrounding word or literal.
+        code.append(' ')
+        i = walk(i, stop, field)
+        code.append(' ')
+        return i
 
     def walk(i, stop=None, field=False):
         nonlocal block
@@ -78,8 +85,10 @@ def lex(line, ext, block):
                 return len(line)
             elif line[i] in ('"', "'"):
                 i = quoted(i)
+            elif (ps or ext == '.sh') and line.startswith('$(', i):
+                i = embedded(i + 2, ')')
             elif ext == '.sh' and line[i] == '`':
-                i = walk(i + 1, '`')
+                i = embedded(i + 1, '`')
             elif line[i] == ('`' if ps else '\\') and ext != '.cs':
                 code.append(' ')
                 i += 2

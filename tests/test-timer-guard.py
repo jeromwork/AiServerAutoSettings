@@ -113,13 +113,17 @@ class TimerGuardTests(unittest.TestCase):
     def test_executable_interpolations(self):
         fixtures = {
             '.sh': ['echo "$(sleep 1)"', 'echo "`sleep 1`"', 'echo `sleep 1`',
+                    'echo prefix`sleep 1`', 'echo x$(sleep 1)y', 'echo "pre`sleep 1`post"',
                     'echo "$(echo "$(sleep 1)")"', 'echo "$(echo "safe") $(sleep 1)"'],
-            '.ps1': ['Write-Output "$(Start-Sleep 1)"', 'Write-Output "$(if ($true) { Start-Sleep 1 })"'],
+            '.ps1': ['"a$(Start-Sleep 1)b"', 'Write-Output "$(Start-Sleep 1)"',
+                     'Write-Output "$(if ($true) { Start-Sleep 1 })"'],
             '.py': ['text = f"{time.sleep(1)}"', "text = f'{time.sleep(1)}'",
+                    'f"a{time.sleep(1)}b"',
                     'text = f"{dict(x=time.sleep(1))}"', 'text = rf"{time.sleep(1)}"',
                     'text = f"{value:{time.sleep(1)}}"', 'text = f"{{{time.sleep(1)}}}"',
                     'text = f"{len("safe")} {time.sleep(1)}"'],
             '.cs': ['var text = $"{Task.Delay(1)}";', 'var text = $@"{Task.Delay(1)}";',
+                    '$"a{Task.Delay(1)}b"',
                     'var text = @$"{Task.Delay(1)}";', 'var text = $"{{literal}} {Task.Delay(1)}";',
                     'var text = $"{F("safe")} {Task.Delay(1)}";',
                     'var url = "http://example"; Task.Delay(1);']}
@@ -133,8 +137,10 @@ class TimerGuardTests(unittest.TestCase):
     def test_interpolation_literal_text(self):
         fixtures = {
             '.sh': ['echo "sleep 1"', "echo '$(sleep 1)'", "echo '`sleep 1`'",
+                    "echo 'prefix`sleep 1`'", "echo 'x$(sleep 1)y'",
                     r'echo "\$(sleep 1)"', r'echo "\`sleep 1\`"', 'echo "$(echo \'sleep 1\')"'],
             '.ps1': ['Write-Output "Start-Sleep 1"', "Write-Output '$(Start-Sleep 1)'",
+                     "'a$(Start-Sleep 1)b'",
                      'Write-Output "`$(Start-Sleep 1)"', 'Write-Output "$(echo \'Start-Sleep 1\')"'],
             '.py': ['text = f"time.sleep(1) {value}"', 'text = f"{{time.sleep(1)}}"',
                     'text = f"{value:time.sleep(1)}"',
