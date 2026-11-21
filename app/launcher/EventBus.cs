@@ -73,12 +73,17 @@ namespace RemoteAgents.Launcher
 
             if (startTimer && periodMs > 0)
             {
-                // Таймер только публикует tick.<имя> в шину, логику вызывает подписчик.
                 _timer = new Timer(_ =>
                 {
-                    if (Volatile.Read(ref _disposed) == 0)
+                    try
                     {
-                        _bus.Publish(BusTopics.TickPrefix + _name, BusTopics.Sources.Timer);
+                        if (Volatile.Read(ref _disposed) == 0)
+                        {
+                            _bus.Publish(BusTopics.TickPrefix + _name, BusTopics.Sources.Timer);
+                        }
+                    }
+                    catch
+                    {
                     }
                 }, null, periodMs, periodMs);
             }
@@ -86,22 +91,33 @@ namespace RemoteAgents.Launcher
 
         public void Fire()
         {
-            _bus.FireTick(_name);
+            try
+            {
+                _bus.FireTick(_name);
+            }
+            catch
+            {
+            }
         }
 
         public void Dispose()
         {
             if (Interlocked.Exchange(ref _disposed, 1) == 0)
             {
-                _timer?.Dispose();
+                try
+                {
+                    _timer?.Dispose();
+                }
+                catch
+                {
+                }
                 _timer = null;
             }
         }
     }
 
     /// <summary>
-    /// Ядро шины событий (EventBus). Потокобезопасная очередь FIFO, retained-состояния,
-    /// префиксная подписка, защита от переполнения и изоляция ошибок подписчиков.
+    /// Ядро шины событий (EventBus).
     /// </summary>
     public sealed class EventBus : IDisposable
     {
@@ -144,6 +160,8 @@ namespace RemoteAgents.Launcher
         private readonly bool _manualDispatch;
         private readonly string _defaultSource;
         private readonly ConcurrentDictionary<string, BusEvent> _retained;
+        private readonly List<BusTick> _ticks;
+        private readonly object _publishLock = new object();
 
         private readonly Thread _dispatchThread;
         private readonly CancellationTokenSource _cts;
@@ -152,6 +170,7 @@ namespace RemoteAgents.Launcher
         private long _subIdCounter;
         private long _seqCounter;
         private long _droppedCount;
+        private long _droppedInEpisode;
         private int _inOverflow;
         private int _disposed;
 
@@ -165,8 +184,8 @@ namespace RemoteAgents.Launcher
             _queueLimit = queueLimit;
             _defaultSource = string.IsNullOrEmpty(defaultSource) ? BusTopics.Sources.Tray : defaultSource;
             _retained = new ConcurrentDictionary<string, BusEvent>(StringComparer.Ordinal);
+            _ticks = new List<BusTick>();
 
-            // Резервируем небольшой буфер сверх лимита для размещения служебного bus.overflow
             int boundedCapacity = _queueLimit > 0 ? _queueLimit + 100 : int.MaxValue;
             _queue = new BlockingCollection<BusEvent>(boundedCapacity);
 
@@ -233,48 +252,52 @@ namespace RemoteAgents.Launcher
         public long Publish(string topic, string source, IReadOnlyDictionary<string, string> fields)
         {
             if (topic == null) throw new ArgumentNullException(nameof(topic));
+            if (Volatile.Read(ref _disposed) != 0) return -1;
+
             string actualSource = !string.IsNullOrEmpty(source) ? source : _defaultSource;
+            DateTime utc = DateTime.UtcNow;
 
-            // Проверка переполнения очереди
-            if (_queueLimit > 0 && _queue.Count >= _queueLimit)
+            lock (_publishLock)
             {
-                long dropped = Interlocked.Increment(ref _droppedCount);
-                if (Interlocked.CompareExchange(ref _inOverflow, 1, 0) == 0)
+                if (_disposed != 0) return -1;
+
+                if (_queueLimit > 0 && _queue.Count >= _queueLimit)
                 {
-                    long overflowSeq = Interlocked.Increment(ref _seqCounter);
-                    var overflowFields = new Dictionary<string, string>(StringComparer.Ordinal)
-                    {
-                        { "dropped", dropped.ToString() },
-                        { "topic", topic }
-                    };
-                    var overflowEvt = new BusEvent(overflowSeq, BusTopics.BusOverflow, _defaultSource, DateTime.UtcNow, overflowFields);
-                    _queue.TryAdd(overflowEvt);
+                    Interlocked.Increment(ref _droppedCount);
+                    _droppedInEpisode++;
+                    _inOverflow = 1;
+                    return -1;
                 }
-                return -1;
-            }
 
-            long seq = Interlocked.Increment(ref _seqCounter);
-            var evt = new BusEvent(seq, topic, actualSource, DateTime.UtcNow, fields);
+                long seq = ++_seqCounter;
+                var evt = new BusEvent(seq, topic, actualSource, utc, fields);
 
-            if (!_queue.TryAdd(evt))
-            {
-                long dropped = Interlocked.Increment(ref _droppedCount);
-                if (Interlocked.CompareExchange(ref _inOverflow, 1, 0) == 0)
+                try
                 {
-                    long overflowSeq = Interlocked.Increment(ref _seqCounter);
-                    var overflowFields = new Dictionary<string, string>(StringComparer.Ordinal)
+                    if (!_queue.TryAdd(evt))
                     {
-                        { "dropped", dropped.ToString() },
-                        { "topic", topic }
-                    };
-                    var overflowEvt = new BusEvent(overflowSeq, BusTopics.BusOverflow, _defaultSource, DateTime.UtcNow, overflowFields);
-                    _queue.TryAdd(overflowEvt);
+                        Interlocked.Increment(ref _droppedCount);
+                        _droppedInEpisode++;
+                        _inOverflow = 1;
+                        return -1;
+                    }
                 }
-                return -1;
-            }
+                catch (ObjectDisposedException)
+                {
+                    return -1;
+                }
+                catch (InvalidOperationException)
+                {
+                    return -1;
+                }
 
-            _retained.AddOrUpdate(topic, evt, (k, old) => evt.Seq > old.Seq ? evt : old);
-            return seq;
+                if (BusTopics.IsRetainedTopic(topic))
+                {
+                    _retained[topic] = evt;
+                }
+
+                return seq;
+            }
         }
 
         public bool TryGetLast(string topic, out BusEvent evt)
@@ -289,12 +312,28 @@ namespace RemoteAgents.Launcher
 
         public BusTick Every(string name, int periodMs)
         {
-            return new BusTick(this, name, periodMs, startTimer: !_manualDispatch);
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                return new BusTick(this, name, periodMs, startTimer: false);
+            }
+
+            var tick = new BusTick(this, name, periodMs, startTimer: !_manualDispatch);
+            lock (_ticks)
+            {
+                _ticks.Add(tick);
+            }
+            return tick;
         }
 
         public void FireTick(string name)
         {
-            Publish(BusTopics.TickPrefix + (name ?? string.Empty), BusTopics.Sources.Timer);
+            try
+            {
+                Publish(BusTopics.TickPrefix + (name ?? string.Empty), BusTopics.Sources.Timer);
+            }
+            catch
+            {
+            }
         }
 
         public int DrainOnce(int maxCount = -1)
@@ -302,13 +341,47 @@ namespace RemoteAgents.Launcher
             int count = 0;
             while (maxCount <= 0 || count < maxCount)
             {
+                CheckRecovery();
                 if (!_queue.TryTake(out var evt))
                     break;
 
                 Dispatch(evt);
                 count++;
             }
+            CheckRecovery();
             return count;
+        }
+
+        private void CheckRecovery()
+        {
+            if (_inOverflow != 0 && (_queue.Count <= _queueLimit / 2 || _queue.Count == 0))
+            {
+                lock (_publishLock)
+                {
+                    if (_inOverflow != 0 && (_queue.Count <= _queueLimit / 2 || _queue.Count == 0))
+                    {
+                        _inOverflow = 0;
+                        long dropped = _droppedInEpisode;
+                        _droppedInEpisode = 0;
+                        if (dropped > 0)
+                        {
+                            long seq = ++_seqCounter;
+                            var fields = new Dictionary<string, string>(StringComparer.Ordinal)
+                            {
+                                { "dropped", dropped.ToString() }
+                            };
+                            var overflowEvt = new BusEvent(seq, BusTopics.BusOverflow, _defaultSource, DateTime.UtcNow, fields);
+                            try
+                            {
+                                _queue.TryAdd(overflowEvt);
+                            }
+                            catch
+                            {
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         private void DispatchLoop()
@@ -319,29 +392,22 @@ namespace RemoteAgents.Launcher
                 {
                     if (_queue.TryTake(out var evt, Timeout.Infinite, _cts.Token))
                     {
+                        CheckRecovery();
                         Dispatch(evt);
                     }
                 }
             }
             catch (OperationCanceledException)
             {
-                // Штатная остановка при Dispose
             }
             catch
             {
-                // Защита фонового потока от падения
             }
         }
 
         private void Dispatch(BusEvent evt)
         {
             if (evt == null) return;
-
-            // Завершение эпизода переполнения, когда очередь опустилась ниже предела
-            if (_inOverflow != 0 && _queueLimit > 0 && _queue.Count < _queueLimit)
-            {
-                Interlocked.Exchange(ref _inOverflow, 0);
-            }
 
             var subs = _subscriptions;
             for (int i = 0; i < subs.Length; i++)
@@ -365,18 +431,27 @@ namespace RemoteAgents.Launcher
         {
             if (string.Equals(failingTopic, BusTopics.BusHandlerError, StringComparison.Ordinal))
             {
-                // Предотвращение рекурсии при ошибке в обработчике bus.handler-error
                 return;
             }
+
+            string err = "unknown error";
+            if (ex != null)
+            {
+                err = $"{ex.GetType().Name}: {ex.Message}";
+                if (err.Length > 300)
+                {
+                    err = err.Substring(0, 300);
+                }
+            }
+
             try
             {
                 Publish(BusTopics.BusHandlerError, _defaultSource,
                     "topic", failingTopic ?? string.Empty,
-                    "err", ex != null ? ex.ToString() : "unknown error");
+                    "err", err);
             }
             catch
             {
-                // Подавление ошибок во время сообщения об ошибке
             }
         }
 
@@ -421,6 +496,21 @@ namespace RemoteAgents.Launcher
             if (Interlocked.Exchange(ref _disposed, 1) != 0)
                 return;
 
+            lock (_ticks)
+            {
+                for (int i = 0; i < _ticks.Count; i++)
+                {
+                    try
+                    {
+                        _ticks[i].Dispose();
+                    }
+                    catch
+                    {
+                    }
+                }
+                _ticks.Clear();
+            }
+
             try
             {
                 _cts?.Cancel();
@@ -442,8 +532,17 @@ namespace RemoteAgents.Launcher
                 catch { }
             }
 
-            _queue.Dispose();
-            _cts?.Dispose();
+            try
+            {
+                _queue.Dispose();
+            }
+            catch { }
+
+            try
+            {
+                _cts?.Dispose();
+            }
+            catch { }
         }
     }
 }

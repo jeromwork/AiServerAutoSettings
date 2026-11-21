@@ -5,8 +5,7 @@
     <OutputType>Exe</OutputType>
     <StartupObject Condition="'$(ConfigTests)' == 'true'">RemoteAgents.Launcher.DiagnosticReportTests</StartupObject>
     <StartupObject Condition="'$(ConfigE2E)' == 'true'">RemoteAgents.Launcher.ConfigE2E</StartupObject>
-    <StartupObject Condition="'$(EventBusTests)' == 'true'">RemoteAgents.Launcher.EventBusTests</StartupObject>
-    <StartupObject Condition="'$(ConfigTests)' != 'true' And '$(ConfigE2E)' != 'true' And '$(EventBusTests)' != 'true'">RemoteAgents.Launcher.Stage6PortableEntry</StartupObject>
+    <StartupObject Condition="'$(ConfigTests)' != 'true' And '$(ConfigE2E)' != 'true'">RemoteAgents.Launcher.Stage6PortableEntry</StartupObject>
     <DefineConstants>PORTABLE_TEST</DefineConstants>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <NoWarn>SYSLIB0014;SYSLIB0057;CA1416</NoWarn>

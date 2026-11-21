@@ -32,10 +32,13 @@ namespace RemoteAgents.Launcher
             TestPrefixSubscription();
             TestHandlerExceptionIsolation();
             TestUnsubscribe();
-            TestRetainedTryGetLast();
-            TestOverflowSingleEventPerEpisode();
+            TestRetainedWhitelistAndTryGetLast();
+            TestOverflowHysteresisAndFinalDropped();
             TestFireTick();
-            TestConcurrentPublishDrain();
+            TestConcurrentPublishDrainMonotonicSeq();
+            TestPublishFireTickAfterDispose();
+            TestUnsubscribeDuringDispatch();
+            TestHandlerErrorThrowingDoesNotRecurse();
 
             Console.WriteLine($"PASS: EventBusTests ({_assertions} assertions passed)");
         }
@@ -101,7 +104,7 @@ namespace RemoteAgents.Launcher
             }
         }
 
-        // 3. Исключение в обработчике не мешает следующему (bus.handler-error)
+        // 3. Исключение в обработчике не мешает следующему (bus.handler-error) и обрезка err до 300 симв.
         private static void TestHandlerExceptionIsolation()
         {
             using (var bus = new EventBus(manualDispatch: true))
@@ -112,10 +115,11 @@ namespace RemoteAgents.Launcher
 
                 bus.Subscribe(BusTopics.BusHandlerError, evt => errors.Add(evt));
 
+                string longMessage = new string('A', 500);
                 bus.Subscribe("fault.topic", evt =>
                 {
                     firstCalled = true;
-                    throw new InvalidOperationException("Test handler exception");
+                    throw new InvalidOperationException(longMessage);
                 });
 
                 bus.Subscribe("fault.topic", evt =>
@@ -131,7 +135,10 @@ namespace RemoteAgents.Launcher
                 Assert(errors.Count == 1, "Exactly one bus.handler-error must be published");
                 Assert(errors[0].Topic == BusTopics.BusHandlerError, "Topic must be bus.handler-error");
                 Assert(errors[0]["topic"] == "fault.topic", "Error event must specify failing topic");
-                Assert(errors[0]["err"].Contains("Test handler exception"), "Error event must contain exception message");
+
+                string err = errors[0]["err"];
+                Assert(err.Length <= 300, $"err length must be <= 300, was {err.Length}");
+                Assert(err.StartsWith("InvalidOperationException: "), "err must start with exception type");
             }
         }
 
@@ -155,71 +162,86 @@ namespace RemoteAgents.Launcher
             }
         }
 
-        // 5. Retained-значение TryGetLast
-        private static void TestRetainedTryGetLast()
+        // 5. Retained-значение TryGetLast только для белого списка в BusTopics
+        private static void TestRetainedWhitelistAndTryGetLast()
         {
             using (var bus = new EventBus(manualDispatch: true))
             {
                 Assert(!bus.TryGetLast("vpn.state", out _), "TryGetLast should return false for nonexistent topic");
 
+                // Белый список: vpn.state, net.quality, transport.status, helper.version
                 bus.Publish("vpn.state", "vpn-core", "state", "on", "seq", "1");
-                Assert(bus.TryGetLast("vpn.state", out var last1), "TryGetLast should find retained vpn.state");
-                Assert(last1["state"] == "on", "last1['state'] should be 'on'");
-                Assert(last1["seq"] == "1", "last1['seq'] should be '1'");
-
-                bus.Publish("vpn.state", "vpn-core", "state", "off", "seq", "2");
-                Assert(bus.TryGetLast("vpn.state", out var last2), "TryGetLast should find updated retained vpn.state");
-                Assert(last2["state"] == "off", "last2['state'] should be 'off'");
-                Assert(last2["seq"] == "2", "last2['seq'] should be '2'");
+                Assert(bus.TryGetLast("vpn.state", out var lastState), "TryGetLast should find retained vpn.state");
+                Assert(lastState["state"] == "on", "lastState['state'] should be 'on'");
 
                 bus.Publish("net.quality", "transport", "score", "95");
-                Assert(bus.TryGetLast("net.quality", out var netLast), "TryGetLast should find net.quality");
+                Assert(bus.TryGetLast("net.quality", out var netLast), "TryGetLast should find retained net.quality");
                 Assert(netLast["score"] == "95", "netLast['score'] should be '95'");
-                Assert(bus.TryGetLast("vpn.state", out var vpnLast) && vpnLast["state"] == "off", "vpn.state still retained");
+
+                bus.Publish("helper.version", "helper", "ver", "11");
+                Assert(bus.TryGetLast("helper.version", out var helperLast), "TryGetLast should find retained helper.version");
+                Assert(helperLast["ver"] == "11", "helperLast['ver'] should be '11'");
+
+                // Не в белом списке: vpn.step, custom.topic не должны сохраняться в _retained
+                bus.Publish("vpn.step", "vpn-core", "step", "init");
+                Assert(!bus.TryGetLast("vpn.step", out _), "vpn.step is not retained, TryGetLast must return false");
+
+                bus.Publish("custom.topic", "tray", "data", "test");
+                Assert(!bus.TryGetLast("custom.topic", out _), "custom.topic is not retained, TryGetLast must return false");
             }
         }
 
-        // 6. Переполнение даёт ровно одно bus.overflow на эпизод
-        private static void TestOverflowSingleEventPerEpisode()
+        // 6. Переполнение с гистерезисом (Count <= limit/2) и итоговым dropped в bus.overflow
+        private static void TestOverflowHysteresisAndFinalDropped()
         {
-            // Очередь с лимитом 5: первые 5 событий принимаются, 6-е, 7-е, 8-е отбрасываются
-            using (var bus = new EventBus(manualDispatch: true, queueLimit: 5))
+            using (var bus = new EventBus(manualDispatch: true, queueLimit: 10))
             {
                 var overflows = new List<BusEvent>();
-                var regulars = new List<BusEvent>();
-
                 bus.Subscribe(BusTopics.BusOverflow, evt => overflows.Add(evt));
-                bus.Subscribe("test.fill", evt => regulars.Add(evt));
 
-                for (int i = 0; i < 5; i++)
+                // Заполняем очередь до предела (10 событий)
+                for (int i = 0; i < 10; i++)
                 {
-                    long seq = bus.Publish("test.fill", "tray", "i", i.ToString());
-                    Assert(seq > 0, $"Event {i} should be accepted");
+                    long s = bus.Publish("test.fill", "tray", "i", i.ToString());
+                    Assert(s > 0, $"Event {i} should be accepted");
                 }
 
-                // Очередь заполнена. Следующие публикации приводят к отбрасыванию и ровно одному bus.overflow
-                long drop1 = bus.Publish("test.fill", "tray", "i", "5");
-                long drop2 = bus.Publish("test.fill", "tray", "i", "6");
-                long drop3 = bus.Publish("test.fill", "tray", "i", "7");
+                // 11-е событие отбрасывается
+                long drop1 = bus.Publish("test.fill", "tray", "i", "10");
+                Assert(drop1 == -1, "11th event must drop");
 
-                Assert(drop1 == -1, "Drop 1 should return -1");
-                Assert(drop2 == -1, "Drop 2 should return -1");
-                Assert(drop3 == -1, "Drop 3 should return -1");
-                Assert(bus.DroppedCount == 3, $"DroppedCount should be 3, was {bus.DroppedCount}");
+                // Откачиваем ровно 1 событие (в очереди остаётся 9 > 10/2). Порог гистерезиса не достигнут.
+                int d1 = bus.DrainOnce(1);
+                Assert(d1 == 1, "Drained 1 event");
+
+                // Добавляем событие (очередь снова 10) и следующее отбрасывается
+                long s1 = bus.Publish("test.fill", "tray", "i", "extra");
+                Assert(s1 > 0, "Extra event fits");
+                long drop2 = bus.Publish("test.fill", "tray", "i", "extra_drop");
+                Assert(drop2 == -1, "Must drop");
+
+                // Так как порог гистерезиса не был пройден, нового bus.overflow быть не должно
+                Assert(overflows.Count == 0, "bus.overflow not emitted before reaching recovery threshold");
+
+                // Откачиваем всю очередь. Порог <= limit/2 (<=5) будет пройден
+                bus.DrainOnce();
+
+                // Проверяем: ровно один bus.overflow на весь эпизод, и dropped равен суммарно 2
+                Assert(overflows.Count == 1, $"Expected exactly 1 bus.overflow for first episode, got {overflows.Count}");
+                Assert(overflows[0]["dropped"] == "2", $"Final dropped must be 2, was {overflows[0]["dropped"]}");
+
+                // Очередь пуста. Новое заполнение и переполнение должно дать ровно один НОВЫЙ bus.overflow
+                for (int i = 0; i < 10; i++)
+                {
+                    bus.Publish("test.fill2", "tray", "i", i.ToString());
+                }
+                long drop3 = bus.Publish("test.fill2", "tray", "i", "drop3");
+                Assert(drop3 == -1, "Must drop in second episode");
 
                 bus.DrainOnce();
 
-                Assert(regulars.Count == 5, $"Regular events delivered should be 5, was {regulars.Count}");
-                Assert(overflows.Count == 1, $"Overflow events should be exactly 1 per episode, was {overflows.Count}");
-                Assert(overflows[0].Topic == BusTopics.BusOverflow, "Overflow event topic must be bus.overflow");
-
-                // После откачки очередь свободна. Новые события принимаются
-                long nextSeq = bus.Publish("test.fill", "tray", "i", "8");
-                Assert(nextSeq > 0, "Event after drain should be accepted");
-                bus.DrainOnce();
-
-                Assert(regulars.Count == 6, "Regular count should now be 6");
-                Assert(overflows.Count == 1, "No new overflow event should be emitted without new overflow");
+                Assert(overflows.Count == 2, $"Expected exactly 2 bus.overflow events total, got {overflows.Count}");
+                Assert(overflows[1]["dropped"] == "1", $"Second overflow dropped must be 1, was {overflows[1]["dropped"]}");
             }
         }
 
@@ -247,15 +269,34 @@ namespace RemoteAgents.Launcher
             }
         }
 
-        // 8. Два потока публикуют по 10 000 — все доставлены через DrainOnce (детерминированно)
-        private static void TestConcurrentPublishDrain()
+        // 8. Два потока публикуют по 10 000 — Seq монотонен в порядке FIFO, порядок i внутри потока сохранён
+        private static void TestConcurrentPublishDrainMonotonicSeq()
         {
             using (var bus = new EventBus(manualDispatch: true, queueLimit: 25000))
             {
+                long lastSeq = 0;
+                int lastI1 = -1;
+                int lastI2 = -1;
                 int count = 0;
+
                 bus.Subscribe("concurrent.item", evt =>
                 {
-                    Interlocked.Increment(ref count);
+                    count++;
+                    Assert(evt.Seq > lastSeq, $"Seq must be strictly monotonic: current {evt.Seq} <= last {lastSeq}");
+                    lastSeq = evt.Seq;
+
+                    string threadId = evt["t"];
+                    int i = int.Parse(evt["i"]);
+                    if (threadId == "1")
+                    {
+                        Assert(i == lastI1 + 1, $"Thread 1 order mismatch: expected {lastI1 + 1}, got {i}");
+                        lastI1 = i;
+                    }
+                    else if (threadId == "2")
+                    {
+                        Assert(i == lastI2 + 1, $"Thread 2 order mismatch: expected {lastI2 + 1}, got {i}");
+                        lastI2 = i;
+                    }
                 });
 
                 var t1 = new Thread(() =>
@@ -285,6 +326,91 @@ namespace RemoteAgents.Launcher
                 Assert(bus.DroppedCount == 0, $"Dropped count should be 0, was {bus.DroppedCount}");
                 Assert(drained == 20000, $"Drained count should be 20000, was {drained}");
                 Assert(count == 20000, $"Subscribed handler count should be 20000, was {count}");
+                Assert(lastI1 == 9999, "Thread 1 completed all 10000 items in order");
+                Assert(lastI2 == 9999, "Thread 2 completed all 10000 items in order");
+            }
+        }
+
+        // 9. Publish / FireTick после bus.Dispose() не бросает исключений и возвращает -1
+        private static void TestPublishFireTickAfterDispose()
+        {
+            var bus = new EventBus(manualDispatch: true);
+            var tick = bus.Every("tray", 5000);
+
+            bus.Dispose();
+
+            long res = bus.Publish("any.topic", "tray", "k", "v");
+            Assert(res == -1, "Publish after Dispose must return -1");
+
+            // FireTick не должен бросать
+            bus.FireTick("tray");
+            tick.Fire();
+            tick.Dispose();
+            Assert(true, "FireTick after Dispose did not throw");
+        }
+
+        // 10. Отписка B обработчиком A во время диспетчеризации (текущее событие B ещё получает, следующее нет)
+        private static void TestUnsubscribeDuringDispatch()
+        {
+            using (var bus = new EventBus(manualDispatch: true))
+            {
+                int bCallCount = 0;
+                IDisposable subB = null;
+
+                bus.Subscribe("test.unsub_during", evt =>
+                {
+                    // Обработчик A отписывает обработчик B во время первого события
+                    subB?.Dispose();
+                });
+
+                subB = bus.Subscribe("test.unsub_during", evt =>
+                {
+                    bCallCount++;
+                });
+
+                // Первое событие: B ещё должен получить в текущей волне диспетчеризации
+                bus.Publish("test.unsub_during", "tray");
+                bus.DrainOnce();
+                Assert(bCallCount == 1, "Handler B must still receive the current event during which it was unsubscribed");
+
+                // Второе событие: B уже отписан и не должен получить
+                bus.Publish("test.unsub_during", "tray");
+                bus.DrainOnce();
+                Assert(bCallCount == 1, "Handler B must not receive the subsequent event after unsubscription");
+            }
+        }
+
+        // 11. Обработчик bus.handler-error бросает — шина жива, рекурсии нет
+        private static void TestHandlerErrorThrowingDoesNotRecurse()
+        {
+            using (var bus = new EventBus(manualDispatch: true))
+            {
+                bool normalHandlerCalled = false;
+
+                // Подписчик на bus.handler-error сам выбрасывает исключение
+                bus.Subscribe(BusTopics.BusHandlerError, evt =>
+                {
+                    throw new InvalidOperationException("Handler error listener threw exception");
+                });
+
+                // Подписчик на целевой топик выбрасывает исключение
+                bus.Subscribe("fault.recurse", evt =>
+                {
+                    throw new InvalidOperationException("Original error");
+                });
+
+                bus.Subscribe("normal.topic", evt =>
+                {
+                    normalHandlerCalled = true;
+                });
+
+                // Публикуем ошибочный топик, затем нормальный
+                bus.Publish("fault.recurse", "tray");
+                bus.Publish("normal.topic", "tray");
+
+                bus.DrainOnce();
+
+                Assert(normalHandlerCalled, "Normal handler must be called, bus remains alive without recursion crash");
             }
         }
     }

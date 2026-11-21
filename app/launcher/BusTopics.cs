@@ -1,3 +1,6 @@
+using System;
+using System.Collections.Generic;
+
 namespace RemoteAgents.Launcher
 {
     /// <summary>
@@ -25,20 +28,32 @@ namespace RemoteAgents.Launcher
         public const string WinIfaceChanged = "win.iface.changed";
         public const string WinAddrChanged = "win.addr.changed";
 
-        // Сеть (Q): net.change {id, class} и net.quality {...}
+        // Сеть (Q): net.change {id, class}, net.quality {...}, net.e2e
         public const string NetChange = "net.change";
         public const string NetQuality = "net.quality";
+        public const string NetE2E = "net.e2e";
 
-        // Транспорт (T0/T2): transport.status, transport.episode, transport.switch, transport.mem
+        // Транспорт (T0/T2): transport.status, transport.episode, transport.switch, transport.mem, transport.command, transport.mem-high
         public const string TransportStatus = "transport.status";
         public const string TransportEpisode = "transport.episode";
         public const string TransportSwitch = "transport.switch";
         public const string TransportMem = "transport.mem";
+        public const string TransportCommand = "transport.command";
+        public const string TransportMemHigh = "transport.mem-high";
 
-        // VPN: vpn.state {state, reason, seq}, vpn.step, vpn.rollback
+        // VPN: vpn.state {state, reason, seq}, vpn.step, vpn.rollback, vpn.off, vpn.on, vpn.health, vpn.config
         public const string VpnState = "vpn.state";
         public const string VpnStep = "vpn.step";
         public const string VpnRollback = "vpn.rollback";
+        public const string VpnOff = "vpn.off";
+        public const string VpnOn = "vpn.on";
+        public const string VpnHealth = "vpn.health";
+        public const string VpnConfig = "vpn.config";
+
+        // Помощник (Helper): helper.version, helper.updated, helper.update.rejected
+        public const string HelperVersion = "helper.version";
+        public const string HelperUpdated = "helper.updated";
+        public const string HelperUpdateRejected = "helper.update.rejected";
 
         // Обновление: update.requested|update.phase|update.progress {pct, bytes}|update.result
         public const string UpdateRequested = "update.requested";
@@ -54,9 +69,34 @@ namespace RemoteAgents.Launcher
         // Периодика: tick.<имя>
         public const string TickPrefix = "tick.";
 
+        // Константы тиков (полные имена топиков)
+        public const string TickTray = "tick.tray";
+        public const string TickSupervisor = "tick.supervisor";
+        public const string TickVpnScan = "tick.vpn-scan";
+        public const string TickTransportMem = "tick.transport-mem";
+        public const string TickTransportEpisode = "tick.transport-episode";
+        public const string TickTransportDecide = "tick.transport-decide";
+        public const string TickUpdate = "tick.update";
+        public const string TickLogship = "tick.logship";
+
         // Внутренние события шины: bus.overflow, bus.handler-error
         public const string BusOverflow = "bus.overflow";
         public const string BusHandlerError = "bus.handler-error";
+
+        /// <summary>
+        /// Имена тиков без префикса (для вызова Every/FireTick).
+        /// </summary>
+        public static class Ticks
+        {
+            public const string Tray = "tray";
+            public const string Supervisor = "supervisor";
+            public const string VpnScan = "vpn-scan";
+            public const string TransportMem = "transport-mem";
+            public const string TransportEpisode = "transport-episode";
+            public const string TransportDecide = "transport-decide";
+            public const string Update = "update";
+            public const string Logship = "logship";
+        }
 
         /// <summary>
         /// Источники событий (BusEvent.Source): tray|helper|transport|vpn-core|transport-core|windows|timer
@@ -70,6 +110,28 @@ namespace RemoteAgents.Launcher
             public const string TransportCore = "transport-core";
             public const string Windows = "windows";
             public const string Timer = "timer";
+        }
+
+        private static readonly HashSet<string> RetainedTopicSet = new HashSet<string>(StringComparer.Ordinal)
+        {
+            VpnState,
+            VpnHealth,
+            NetQuality,
+            TransportStatus,
+            TransportMem,
+            TransportMemHigh,
+            HelperVersion,
+            BlockReady,
+            BlockDegraded,
+            BlockFailed
+        };
+
+        /// <summary>
+        /// Проверка, входит ли топик в белый список сохраняемых (retained) состояний.
+        /// </summary>
+        public static bool IsRetainedTopic(string topic)
+        {
+            return topic != null && RetainedTopicSet.Contains(topic);
         }
     }
 }

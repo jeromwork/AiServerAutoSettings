@@ -243,6 +243,8 @@ timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$here/test-ralog.ps1" "$re
 wait_for_memory
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:ConfigTests=true
 wait_for_memory
+timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:EventBusTests=true
+wait_for_memory
 # End-to-end on a loopback stand: config export -> paste/vault -> orchestrator -> real Server/Connection -> sync -> revoke.
 wait_for_memory
 timeout 300 python3 "$here/test_config_e2e.py"
