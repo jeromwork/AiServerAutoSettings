@@ -29,4 +29,4 @@ fi
 
 product=${product:-RemoteAgents}
 # Forward to bundle.py with supported product flag
-exec python3 "$here/bundle.py" make "${args[@]}" --product "RemoteAgents"
+exec python3 "$here/bundle.py" make "${args[@]}" --product "$product"

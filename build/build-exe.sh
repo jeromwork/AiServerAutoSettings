@@ -20,9 +20,20 @@ done
 resolve_channel "$channel" || exit 1
 
 version=${REMOTEAGENTS_BUNDLE_VERSION:-$(date -u +%Y%m%d.%H%M%S)-$(git -C "$repo" rev-parse --short HEAD)}
-out=${REMOTEAGENTS_BUILD_OUT:-$here/out}
+default_out="$here/out"
+[[ "$RELEASE_CHANNEL" != "test" ]] || default_out="$here/out-test"
+out=${REMOTEAGENTS_BUILD_OUT:-$default_out}
 dotnet=${DOTNET:-$HOME/.dotnet/dotnet}
-mkdir -p "$out" "$repo/release"
+if [[ "$RELEASE_CHANNEL" == "test" ]]; then
+  test_out=$(realpath -m -- "$out")
+  main_out=$(realpath -m -- "$here/out")
+  release_dir=$(realpath -m -- "$repo/release")
+  if [[ "$test_out" == "$main_out" || "$test_out" == "$main_out/"* || "$test_out" == "$release_dir" || "$test_out" == "$release_dir/"* ]]; then
+    echo 'Выходная папка test не может находиться в build/out или release' >&2
+    exit 1
+  fi
+fi
+mkdir -p "$out"
 out=$(cd "$out" && pwd)
 
 product="$RELEASE_PRODUCT"
@@ -46,14 +57,13 @@ cp "$out/$product/$version.zip" "$out/initial-bundle.zip"
   -o "$out/$product/publish"
 
 cp "$out/$product/publish/$exe_name" "$out/$exe_name"
-cp "$out/$exe_name" "$repo/release/$exe_name"
+if [[ "$RELEASE_CHANNEL" == "main" ]]; then
+  mkdir -p "$repo/release"
+  cp "$out/$exe_name" "$repo/release/$exe_name"
+  cp "$here/Start.cmd" "$repo/release/Start.cmd"
+fi
 
 # One program, one OTA root.
-if [[ "$RELEASE_CHANNEL" == "test" ]]; then
-  python3 "$here/bundle.py" attach "$out/$product/$version.zip" "$out/$exe_name" "$out/$version.zip" || cp "$out/$product/$version.zip" "$out/$version.zip"
-else
-  python3 "$here/bundle.py" attach "$out/RemoteAgents/$version.zip" "$out/RemoteAgents.exe" "$out/$version.zip"
-fi
+python3 "$here/bundle.py" attach "$out/$product/$version.zip" "$out/$exe_name" "$out/$version.zip" --product "$product"
 cp "$out/$version.zip" "$out/bundle.zip"
-cp "$here/Start.cmd" "$repo/release/Start.cmd"
-sha256sum "$repo/release/$exe_name"
+sha256sum "$out/$exe_name"

@@ -13,6 +13,12 @@ import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
+PRODUCTS = ('RemoteAgents', 'RemoteAgentsTest')
+
+def check_product(product):
+    if product not in PRODUCTS:
+        raise ValueError('Неизвестный продукт: ' + product)
+    return product
 
 def safe_version(value):
     if not re.fullmatch(r'[0-9][A-Za-z0-9._-]{0,79}', value) or '..' in value or value.endswith('.'):
@@ -118,8 +124,7 @@ def verify_initial(archive, pins=None):
     return True
 
 def make(version, outdir, launcher=None, product="RemoteAgents", binaries=False):
-    if product != "RemoteAgents":
-        raise ValueError("Поддерживается только RemoteAgents")
+    check_product(product)
     safe_version(version)
     outdir = Path(outdir).resolve()
     outdir.mkdir(parents=True, exist_ok=True)
@@ -180,7 +185,8 @@ def make(version, outdir, launcher=None, product="RemoteAgents", binaries=False)
     print(dest)
     return dest
 
-def attach_launcher(archive, launcher, output):
+def attach_launcher(archive, launcher, output, product='RemoteAgents'):
+    check_product(product)
     # Preserve the exact modules embedded in EXE even if another task edits transport during compilation.
     archive, output = Path(archive), Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -191,7 +197,6 @@ def attach_launcher(archive, launcher, output):
             # SSH/OTA updates never carry the embedded third-party binaries: the first run copied them
             # out of the initial bundle (transport-bin), an update must stay small.
             pinned_targets = {row['target'] for row in pinned()}
-            product = 'RemoteAgents'
             exe_name = product + '.exe'
             names = (set(source.namelist()) - pinned_targets) | {exe_name}
             for name in sorted(names):
@@ -227,7 +232,8 @@ def file_version(exe):
             return text
     raise ValueError('Не удалось прочитать FileVersion')
 
-def publish(archive, dest, minimum='1.0.0', launcher=None):
+def publish(archive, dest, minimum='1.0.0', launcher=None, product='RemoteAgents'):
+    check_product(product)
     safe_version(minimum)
     archive = Path(archive).resolve()
     dest = Path(dest).expanduser().resolve()
@@ -238,7 +244,6 @@ def publish(archive, dest, minimum='1.0.0', launcher=None):
     with zipfile.ZipFile(archive) as z:
         version = safe_version(z.read('bundle-version.txt').decode('utf-8-sig').strip())
         json.loads(z.read('components.json').decode('utf-8-sig'))
-        product = 'RemoteAgents'
         embedded_exe = z.read(product + '.exe') if product + '.exe' in z.namelist() else None
     manifest = dict(version=version, file=version+'.zip', sha256=digest(archive), size=archive.stat().st_size, minLauncher=minimum, configSchema=1, product=product)
     if embedded_exe:
@@ -265,14 +270,16 @@ def main():
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest='command', required=True)
     b = sub.add_parser('make')
-    b.add_argument('version'); b.add_argument('outdir'); b.add_argument('--launcher'); b.add_argument('--product', choices=['RemoteAgents'], default='RemoteAgents')
+    b.add_argument('version'); b.add_argument('outdir'); b.add_argument('--launcher'); b.add_argument('--product', choices=PRODUCTS, default='RemoteAgents')
     b.add_argument('--binaries', action='store_true', help='embed pinned binaries of build/bundle-binaries.json (EXE only)')
     sub.add_parser('fetch')
     v = sub.add_parser('verify-initial'); v.add_argument('archive')
     a = sub.add_parser('attach')
     a.add_argument('archive'); a.add_argument('launcher'); a.add_argument('output')
+    a.add_argument('--product', choices=PRODUCTS, default='RemoteAgents')
     d = sub.add_parser('publish')
     d.add_argument('archive'); d.add_argument('dest', nargs='?', default=str(Path.home()/'.local/share/remote-agents/dist'))
+    d.add_argument('--product', choices=PRODUCTS, default='RemoteAgents')
     d.add_argument('--min-launcher', default='1.0.0'); d.add_argument('--launcher')
     a = p.parse_args()
     if a.command == 'make':
@@ -283,9 +290,9 @@ def main():
         verify_initial(a.archive)
         print('verified initial bundle', a.archive)
     elif a.command == 'attach':
-        attach_launcher(a.archive, a.launcher, a.output)
+        attach_launcher(a.archive, a.launcher, a.output, a.product)
     else:
-        publish(a.archive, a.dest, a.min_launcher, a.launcher)
+        publish(a.archive, a.dest, a.min_launcher, a.launcher, a.product)
 
 if __name__ == '__main__':
     main()

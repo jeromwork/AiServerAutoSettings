@@ -37,9 +37,9 @@ check_channel_isolation() {
   local channel="$1"
   local dist="$2"
   if [[ "$channel" == "test" ]]; then
-    # Test channel must physically not write to main dist
-    if [[ "$dist" == '~/.local/share/remote-agents/dist' || "$dist" == "$HOME/.local/share/remote-agents/dist" || "$dist" =~ /remote-agents/dist$ ]]; then
-      echo "Тестовая сборка физически не может писать в основной dist ($dist)" >&2
+    # Only the literal canonical remote path is accepted; never normalize aliases or '..'.
+    if [[ "$dist" != '~/.local/share/remote-agents/dist-test' ]]; then
+      echo "Для test разрешён только ~/.local/share/remote-agents/dist-test ($dist)" >&2
       return 1
     fi
   fi
@@ -61,13 +61,12 @@ require_channel_commit() {
     git -C "$repo" merge-base --is-ancestor "$commit" origin/main || { echo 'Коммит ещё не в origin/main' >&2; return 1; }
   elif [[ "$channel" == "test" ]]; then
     local ref="origin/int/vpn-master"
-    if ! git -C "$repo" rev-parse --verify "$ref" >/dev/null 2>&1; then
-      ref="int/vpn-master"
-    fi
+    local current_branch
+    current_branch=$(git -C "$repo" branch --show-current)
+    [[ "$current_branch" == "int/vpn-master" ]] || { echo "Выкладка test разрешена только из ветки int/vpn-master (текущая: $current_branch)" >&2; return 1; }
+    git -C "$repo" rev-parse --verify "$ref" >/dev/null 2>&1 || { echo "Нет обязательной ссылки $ref" >&2; return 1; }
     [[ $(git -C "$repo" rev-parse "$commit") == $(git -C "$repo" rev-parse HEAD) ]] || { echo 'Коммит не совпадает с HEAD' >&2; return 1; }
-    if git -C "$repo" rev-parse --verify "$ref" >/dev/null 2>&1; then
-      [[ $(git -C "$repo" rev-parse HEAD) == $(git -C "$repo" rev-parse "$ref") ]] || { echo "Коммит test-канала должен совпадать с $ref" >&2; return 1; }
-    fi
+    [[ $(git -C "$repo" rev-parse HEAD) == $(git -C "$repo" rev-parse "$ref") ]] || { echo "Коммит test-канала должен совпадать с $ref" >&2; return 1; }
     [[ -z $(git -C "$repo" status --porcelain) ]] || { echo 'Перед сборкой test-канала нужно чистое дерево' >&2; return 1; }
   fi
   return 0

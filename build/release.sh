@@ -35,15 +35,16 @@ dist="${RELEASE_DIST_DEFAULT}"
 prepared=""
 out=""
 
-if [[ ${#args[@]} -ge 2 ]]; then
-  if [[ "${args[1]}" == "--prepared" ]]; then
-    prepared="${args[2]:?Требуется папка сборки после --prepared}"
-  else
-    dist="${args[1]}"
-    if [[ ${#args[@]} -ge 3 && "${args[2]}" == "--prepared" ]]; then
-      prepared="${args[3]:?Требуется папка сборки после --prepared}"
-    fi
-  fi
+# Accept exactly alias [dist] [--prepared directory]; reject trailing/unknown arguments.
+remaining=("${args[@]:1}")
+if [[ ${#remaining[@]} -gt 0 && "${remaining[0]}" != "--prepared" ]]; then
+  [[ "${remaining[0]}" != -* ]] || exit 2
+  dist="${remaining[0]}"
+  remaining=("${remaining[@]:1}")
+fi
+if [[ ${#remaining[@]} -gt 0 ]]; then
+  [[ ${#remaining[@]} -eq 2 && "${remaining[0]}" == "--prepared" && -n "${remaining[1]}" && "${remaining[1]}" != -* ]] || { echo "Ожидается --prepared папка-сборки без лишних аргументов" >&2; exit 2; }
+  prepared="${remaining[1]}"
 fi
 
 check_channel_isolation "$RELEASE_CHANNEL" "$dist" || exit 1
@@ -55,11 +56,13 @@ if [[ -n "$prepared" ]]; then
 else
   [[ -z $(git -C "$repo" status --porcelain) ]] || { echo "Перед сборкой нужен чистый $RELEASE_CHANNEL" >&2; exit 1; }
   "$here/build-exe.sh" --channel "$RELEASE_CHANNEL"
-  out=${REMOTEAGENTS_BUILD_OUT:-$here/out}
+  default_out="$here/out"
+  [[ "$RELEASE_CHANNEL" != "test" ]] || default_out="$here/out-test"
+  out=${REMOTEAGENTS_BUILD_OUT:-$default_out}
 fi
 stage=$(mktemp -d); trap 'rm -rf -- "$stage"' EXIT
-python3 "$here/bundle.py" publish "$out/bundle.zip" "$stage/agents" --launcher "$out/$RELEASE_EXE"
-python3 "$here/release-dist.py" metadata "$stage" "$stage/release-info.json" "$(git -C "$repo" rev-parse HEAD)"
+python3 "$here/bundle.py" publish "$out/bundle.zip" "$stage/agents" --launcher "$out/$RELEASE_EXE" --product "$RELEASE_PRODUCT"
+python3 "$here/release-dist.py" metadata "$stage" "$stage/release-info.json" "$(git -C "$repo" rev-parse HEAD)" --product "$RELEASE_PRODUCT"
 if [[ -n "$prepared" ]]; then
   cmp -- "$stage/release-info.json" "$out/release-info.json" || { echo "Подготовленная сборка не совпадает с HEAD или файлами" >&2; exit 1; }
 else
@@ -67,6 +70,6 @@ else
 fi
 "$here/release-github.sh" --channel "$RELEASE_CHANNEL" "$out"
 # tar stdin contains only local staged payloads; no command/config/credentials cross the shell unquoted.
-remote_command=$(python3 "$here/release-dist.py" command "$dist")
+remote_command=$(python3 "$here/release-dist.py" command "$dist" --product "$RELEASE_PRODUCT")
 tar -C "$stage" -cf - agents | ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -- "$server" "$remote_command"
 echo "Оба источника проверены по SHA-256; версия и EXE совпадают ($RELEASE_CHANNEL)."

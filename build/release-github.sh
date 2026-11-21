@@ -33,7 +33,7 @@ exe_name="$RELEASE_EXE"
 
 "$here/require-main.sh" --channel "$RELEASE_CHANNEL" "$commit"
 [[ -f "$dir/release-info.json" ]] || { echo "Нужна общая сборка: build/release.sh --channel $RELEASE_CHANNEL" >&2; exit 1; }
-python3 "$here/release-dist.py" verify "$dir" "$commit" || true
+python3 "$here/release-dist.py" verify "$dir" "$commit" --product "$RELEASE_PRODUCT"
 sums=$(cd "$dir" && sha256sum "$exe_name")
 
 if [[ "$RELEASE_CHANNEL" == "test" ]]; then
