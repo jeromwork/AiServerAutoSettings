@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Проверка health.log (RaLog или JSONL); исходные строки не выводятся."""
+import argparse
+from datetime import datetime
+from pathlib import Path
 import json
 import re
 import sys
@@ -35,7 +38,40 @@ def parse(line):
     return event, session, fields
 
 
+def normalize(name):
+    return 'control' if name.lower() == 'bridge' else name.strip()
+
+
+def stamp(line):
+    if line.lstrip('\ufeff ').startswith('{'):
+        row = json.loads(line.lstrip('\ufeff'))
+        value = row.get('timestamp', row.get('ts', row.get('time')))
+    else:
+        value = line.lstrip('\ufeff').split()[0]
+    when = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    if when.tzinfo is None:
+        raise ValueError()
+    return when
+
+
+def correlate(health, launcher):
+    starts = [i for i, line in enumerate(launcher)
+              if line.strip() and parse(line)[0] == 'launcher.start']
+    if not starts:
+        raise ValueError()
+    launcher = launcher[starts[-1]:]
+    boundary = stamp(launcher[0])
+    health = [line for line in health if line.strip() and stamp(line) >= boundary]
+    # Не объединяем s наблюдателя с s лаунчера: его отказы проверяются отдельно.
+    failures = [line for line in launcher if line.strip() and stamp(line) >= boundary
+                and parse(line)[0] in ('unhandled', 'launcher.fatal', 'update.failed')]
+    return health, failures
+
+
 def check(stream):
+    manifest = Path(__file__).resolve().parents[1] / 'build/components.json'
+    critical = {normalize(c['name']) for c in json.loads(manifest.read_text())['components']
+                if c.get('critical')}
     session = None
     ready = accepted = seen = False
     errors = []
@@ -62,18 +98,19 @@ def check(stream):
             ready = True
             block = fields.get('block')
             if isinstance(block, str):
-                exits[block] = 0
+                exits[normalize(block)] = 0
         elif event == 'health.accepted':
             if not ready:
                 errors.append('health.accepted получено раньше block.ready.')
             accepted = True
-        elif event == 'unhandled':
+        elif event in ('unhandled', 'launcher.fatal', 'update.failed'):
             errors.append('Обнаружено необработанное исключение (unhandled).')
         elif event == 'health.fuse':
             errors.append('Сработал предохранитель (fuse).')
         elif event == 'component.exit':
             name = fields.get('name')
-            if isinstance(name, str) and fields.get('code') is not None:
+            if isinstance(name, str) and not accepted and normalize(name) in critical:
+                name = normalize(name)
                 exits[name] = exits.get(name, 0) + 1
                 if exits[name] == 3:
                     errors.append('Три выхода компонента без готовности: возможный crash-loop.')
@@ -94,17 +131,25 @@ def check(stream):
 
 
 def main():
-    if len(sys.argv) > 2:
-        print('FAIL: укажите путь к health.log или передайте журнал через stdin.')
-        return 1
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('health', nargs='?', default='-')
+    parser.add_argument('--launcher-log')
+    args = parser.parse_args()
     try:
-        if len(sys.argv) == 2 and sys.argv[1] != '-':
-            with open(sys.argv[1], encoding='utf-8-sig') as stream:
-                errors = check(stream)
+        if args.health != '-':
+            with open(args.health, encoding='utf-8-sig') as stream:
+                health = list(stream)
         else:
-            errors = check(sys.stdin)
-    except (OSError, UnicodeError):
-        print('FAIL: не удалось прочитать журнал в UTF-8.')
+            health = list(sys.stdin)
+        failures = []
+        if args.launcher_log:
+            with open(args.launcher_log, encoding='utf-8-sig') as stream:
+                health, failures = correlate(health, list(stream))
+        errors = check(health)
+        if failures:
+            errors.append('В launcher.log обнаружен отказ запуска или обновления.')
+    except (OSError, UnicodeError, ValueError, TypeError, IndexError, AttributeError):
+        print('FAIL: не удалось прочитать или сопоставить журналы.')
         return 1
     if errors:
         print('FAIL: здоровье последнего запуска не подтверждено.')
@@ -112,6 +157,8 @@ def main():
             print('- ' + error)
         return 1
     print('OK: block.ready → health.accepted; признаков отказа в журнале нет.')
+    if not args.launcher_log:
+        print('launcher.log не проверялся')
     return 0
 
 
