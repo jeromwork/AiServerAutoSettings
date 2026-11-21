@@ -41,8 +41,9 @@ namespace RemoteAgents.Launcher
         volatile bool eventsConnected;
         // Период синхронизации состояния ЛВС (tick-источник; события ЛВС от службы вне шага B3): § 4а-долг, см. отчёт.
         internal const int LanSyncPeriodMs = 2000;
-        // Предохранитель (конституция 4а): событие vpn.state недоступно, если помощник завис при включении; при срабатывании — VPN выключается, успех не объявляет.
-        internal const int VpnStartFuseMs = 45000;
+        // Предохранитель (конституция 4а): событие vpn.state недоступно, если помощник завис при включении; при срабатывании — VPN выключается (vpn.off), успех не объявляет.
+        // 70 с = сумма предохранителей помощника (исключения 15 + проверка конфига 15 + готовность ядра 20) с запасом.
+        internal const int VpnStartFuseMs = 70000;
         // Предохранитель (конституция 4а): pipe событий недоступен, если помощник старой версии; при срабатывании — остаёмся на прежнем опросе status, успех не объявляет.
         internal const int EventsConnectFuseMs = 5000;
         internal bool EventsConnected { get { return eventsConnected; } }

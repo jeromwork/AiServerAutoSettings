@@ -31,6 +31,11 @@
     <IntermediateOutputPath>obj/$(Configuration)/traybus-tests/</IntermediateOutputPath>
     <OutputPath>bin/$(Configuration)/traybus-tests/</OutputPath>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(VpnReasonsTests)' == 'true'">
+    <StartupObject>RemoteAgents.Launcher.VpnReasonsTests</StartupObject>
+    <IntermediateOutputPath>obj/$(Configuration)/vpnreasons-tests/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/vpnreasons-tests/</OutputPath>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(HelperBusTests)' == 'true'">
     <StartupObject>RemoteAgents.Launcher.HelperBusTests</StartupObject>
     <IntermediateOutputPath>obj/$(Configuration)/helperbus-tests/</IntermediateOutputPath>
@@ -97,6 +102,8 @@
     <Compile Include="NetNotifyTests.cs" />
     <Compile Include="../TrayBus.cs" />
     <Compile Include="TrayBusTests.cs" />
+    <Compile Include="../VpnAttemptGuard.cs" />
+    <Compile Include="VpnReasonsTests.cs" />
     <Compile Include="../HelperBusBridge.cs" />
     <Compile Include="HelperBusTests.cs" />
     <Compile Include="../RaLog.cs" />

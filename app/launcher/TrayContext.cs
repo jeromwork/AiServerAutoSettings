@@ -696,7 +696,7 @@ namespace RemoteAgents.Launcher
             if (!vpn.Definition.CommandManaged) { VpnFailure("Обновите компоненты программы перед включением VPN", fromCard); return; }
             string att = RaLog.Attempt.New("on");
             if (!AllowMutation()) { log.Write("vpn.click.ignored att=" + att + " msg=busy-or-closing"); return; }
-            actionBusy = vpnActionBusy = true; vpnActionWanted = true; vpnError = ""; netNote = ""; RefreshMain();
+            actionBusy = vpnActionBusy = true; vpnActionWanted = true; vpnError = ""; netNote = ""; VpnAttemptBegin(att); RefreshMain();
             log.Write("vpn.click.on att=" + att + " fromCard=" + fromCard); LogNetSnapshot("vpn.on.before", att);
             var vpnWatch = System.Diagnostics.Stopwatch.StartNew();
             try {
@@ -704,7 +704,7 @@ namespace RemoteAgents.Launcher
                 bool helperReady = await netHelper.EnsureReady(stop.Token);
                 log.Write("vpn.helper.ready att=" + att + " ready=" + helperReady + " ms=" + vpnWatch.ElapsedMilliseconds);
                 log.Write(LogLevel.Info, "vpn", "vpn.on.step", "att", att, "step", "helper-ready", "ms", vpnWatch.ElapsedMilliseconds.ToString(), "result", helperReady ? "ok" : "fail");
-                if (!helperReady) { log.Write("vpn.on.refused att=" + att + " reason=helper-not-ready"); VpnFailure(HelperClient.SetupWarning, fromCard); return; }
+                if (!helperReady) { log.Write("vpn.on.refused att=" + att + " reason=helper-not-ready"); VpnAttemptEnd(att, "helper-not-ready"); VpnFailure(HelperClient.SetupWarning, fromCard); return; }
                 var transport = StatusView.Read(home, "transport", maxAgeSec: 3);
                 var options = new System.Collections.Generic.Dictionary<string, object>(Json.Map(Json.Get(config.Data, "vpn")));
                 // Intent/interface names are not part of the privileged command.
@@ -719,12 +719,12 @@ namespace RemoteAgents.Launcher
                     "helperVersion", NetHelperInstall.InstalledVersion, "ms", vpnWatch.ElapsedMilliseconds.ToString());
                 LogNetSnapshot("vpn.on.after", att);
                 if (closing) return;
-                if (Json.Str(status, "state") != "on") { log.Write("vpn.on.not-on att=" + att + " state=" + Json.Str(status, "state")); if (!fromCard) MessageBox.Show(Json.Text(status, "summary", "VPN не включён: соединение не подтверждено"), Product.Name); return; }
+                if (Json.Str(status, "state") != "on") { VpnRefused(att, status, fromCard); return; }
                 config.SetVpnIntent(true); config.SetEnabled(vpn.Definition, true); log.Write("vpn.on.ok att=" + att + " ms=" + vpnWatch.ElapsedMilliseconds);
-                if (ladder != null) ladder.RunE2E(att);
+                VpnAttemptOn(att); // e2e запускает VpnAttemptGuard (один раз на попытку; vpn.state on мог прийти раньше)
                 if (mirror != null) Task.Run(() => { try { mirror.Pull(); } catch { } });
-            } catch (OperationCanceledException) { log.Write("vpn.on.cancelled att=" + att); }
-            catch (Exception error) { if (!closing) { log.Write("vpn.helper.failed att=" + att + " " + TickFailureLog.HelperFailure("vpn-on", error)); VpnFailure(NetHelperSetup.VpnFailureMessage(error), fromCard); } }
+            } catch (OperationCanceledException) { log.Write("vpn.on.cancelled att=" + att); VpnAttemptEnd(att, "cancelled"); }
+            catch (Exception error) { VpnAttemptEnd(att, "error"); if (!closing) { log.Write("vpn.helper.failed att=" + att + " " + TickFailureLog.HelperFailure("vpn-on", error)); VpnFailure(NetHelperSetup.VpnFailureMessage(error), fromCard); } }
             finally { actionBusy = vpnActionBusy = false; if (!closing) RefreshMenu(); }
         }
         // Заметка проверки сети — только в подсказку трея, пока VPN включён; не пишется после выключения.
