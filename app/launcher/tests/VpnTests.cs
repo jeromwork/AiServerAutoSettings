@@ -81,7 +81,45 @@ namespace RemoteAgents.Launcher
                     && Json.Str(published, "state") == "on", "heartbeat gap does not flicker at fake millisecond " + ms);
             }
             Check(stops == 0 && restarts == 0, "heartbeat gaps never stop or restart the core");
-            Console.WriteLine("PASS: VPN freshness (" + (count - before) + " checks, fake clocks; Watchdog/Status/TUN/tray, heartbeat gaps)");
+            // Freeze the last successful heartbeat, but keep the owner loop progressing.
+            // A single 16 s Step jump would trip the owner lease instead of testing stale evidence.
+            int lastHeartbeatMs = 4 * heartbeatMs;
+            string lastHeartbeat = Json.Str(transport, "updatedAt");
+            for (int age = 1; age <= 18; age++) {
+                int ms = lastHeartbeatMs + age * 1000;
+                Check(monitor.Step(ms, now.AddMilliseconds(ms), true, transport, ""),
+                    "live owner keeps monitoring stopped heartbeats at age " + age);
+                bool fresh = age <= 15;
+                Check(published != null && Json.Str(published, "state") == (fresh ? "on" : "searching")
+                    && Json.Bool(published, "ok") == fresh && Json.Bool(published, "enabled"),
+                    "published VPN keeps intent and loses proof only after 15 s at age " + age);
+                Check(Json.Str(Json.Map(Json.Get(published, "reason")), "code") == (fresh ? "ok" : "no-path"),
+                    "stopped transport heartbeat reason at age " + age);
+                Check(stops == 0 && restarts == 0, "stale heartbeat never stops or restarts live core at age " + age);
+                Check(Json.Bool(transport, "ok") && Json.Str(transport, "updatedAt") == lastHeartbeat,
+                    "last successful transport snapshot remains frozen at age " + age);
+            }
+            int recoveredMs = lastHeartbeatMs + 19000;
+            transport["updatedAt"] = now.AddMilliseconds(recoveredMs).ToString("o");
+            Check(monitor.Step(recoveredMs, now.AddMilliseconds(recoveredMs), true, transport, "")
+                && Json.Bool(published, "ok") && Json.Bool(published, "enabled") && Json.Str(published, "state") == "on"
+                && Json.Str(Json.Map(Json.Get(published, "reason")), "code") == "ok",
+                "new heartbeat restores published on without toggling VPN");
+            Check(stops == 0 && restarts == 0, "heartbeat recovery retains the running core");
+            // Guard policy wiring in UI-only consumers, which the portable build cannot execute.
+            foreach (string source in new[] { "TrayContext.cs", "LanTun.cs", "SetupWizard.cs" }) {
+                var reads = System.Text.RegularExpressions.Regex.Matches(
+                    File.ReadAllText(Path.Combine(repo, "app/launcher", source)),
+                    @"StatusView\.Read\(home,\s*""transport"",\s*maxAgeSec:\s*([^)]*)\)");
+                Check(reads.Count > 0, source + " transport readers found");
+                foreach (System.Text.RegularExpressions.Match read in reads) {
+                    // The one-hour snapshot is diagnostic logging, not readiness evidence.
+                    if (source == "TrayContext.cs" && read.Groups[1].Value == "3600") continue;
+                    Check(read.Groups[1].Value == "VpnWatchdog.TransportStatusMaxAgeSec",
+                        source + " working transport read uses shared freshness policy");
+                }
+            }
+            Console.WriteLine("PASS: VPN freshness (" + (count - before) + " checks, fake clocks; Watchdog/Status/TUN/tray, heartbeat gaps/stall/recovery)");
         }
         internal static void Run(string root)
         {

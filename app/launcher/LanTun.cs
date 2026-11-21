@@ -511,7 +511,7 @@ namespace RemoteAgents.Launcher
         }
         public bool Nrpt(string command)
         { try { Run(@"WindowsPowerShell\v1.0\powershell.exe", new[] { "-NoProfile", "-NonInteractive", "-Command", command }, 10000, command == LanTun.RemoveNrpt); return true; } catch { return false; } }
-        public bool ChannelReady() { return Json.Bool(StatusView.Read(home, "transport", maxAgeSec: 15), "ok"); }
+        public bool ChannelReady() { return Json.Bool(StatusView.Read(home, "transport", maxAgeSec: VpnWatchdog.TransportStatusMaxAgeSec), "ok"); }
         public LanDnsProbe ProbeDns(string dnsServer)
         {
             // Through our TUN the connect reaches the Windows filtering platform: a protective VPN client answers 10013.
