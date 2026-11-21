@@ -28,7 +28,11 @@ namespace RemoteAgents.Launcher
 
         public static int Main(string[] args)
         {
-            if (args.Length == 1 && args[0] == "--update-ui") {
+            if (args.Length == 1 && args[0] == "--update-ui2") {
+                FixedHeaderCaptions();
+                Console.WriteLine("PASS: " + count + " update UI2 caption checks");
+                MainWindowSizingTests.HeaderLayout();
+            } else if (args.Length == 1 && args[0] == "--update-ui") {
                 ShortButtonCaptions();
                 Console.WriteLine("PASS: " + count + " update button UI checks");
                 MainWindowSizingTests.Run();
@@ -39,6 +43,7 @@ namespace RemoteAgents.Launcher
         internal static void Run()
         {
             ShortButtonCaptions();
+            FixedHeaderCaptions();
             SequenceWithFakeSourceAndManualBytes();
             SecondClickIgnoredWhileBusy();
             SizeZeroModeWithoutPercent();
@@ -76,7 +81,7 @@ namespace RemoteAgents.Launcher
                 }
                 Check(model.StatusText.Contains("100%") && model.StatusText.Contains("МБ"), "byte details retained for tooltip");
                 model.OnVerifying();
-                Check(model.ButtonText == "Проверяю сборку…" && !model.ButtonEnabled, "verifying stays disabled");
+                Check(model.ButtonText == "Проверка…" && !model.ButtonEnabled, "verifying stays disabled");
                 model.OnInstalling();
                 Check(model.ButtonText == "Установка" && !model.ButtonEnabled && !model.OnClick(), "installing short caption and disabled");
                 Check(model.StatusText.Contains("перезапустится"), "installation details retained for tooltip");
@@ -94,12 +99,50 @@ namespace RemoteAgents.Launcher
                 model.OnInstalling();
                 Check(model.ButtonText == "Установка" && !model.ButtonEnabled, "unknown size install has no percent");
                 model.OnFailed("нет связи");
-                Check(model.ButtonEnabled && model.ButtonText.StartsWith("Ошибка:"), "failure enables retry");
+                Check(model.ButtonEnabled && model.ButtonText == "Ошибка", "failure enables retry");
                 model.OnClick();
                 model.OnUpToDate("20261121.123456-very-long-version");
                 Check(model.ButtonEnabled && !model.ButtonText.Contains("20261121"), "current result enables button without version");
                 model.OnIdle();
                 Check(model.ButtonText == "Обновить" && model.ButtonEnabled, "idle restores default caption");
+            }
+        }
+
+        // Regression: every phase fits the same button, even with unbounded version/reason details.
+        // All inputs are manual and the clock is fixed; no waits, I/O or timer assertions.
+        static void FixedHeaderCaptions()
+        {
+            var states = new HashSet<UpdateButtonState>();
+            using (var model = new UpdateButtonModel(() => new DateTime(2026, 11, 21, 12, 0, 0))) {
+                Action<string, bool> caption = (expected, enabled) => {
+                    Check(model.ButtonText == expected && model.ButtonEnabled == enabled, "caption/enabled: " + model.State);
+                    Check(model.ButtonText.Length <= UpdateButtonModel.MaxButtonTextChars &&
+                        !model.ButtonText.Contains("\n") && !model.ButtonText.Contains("\r"), "bounded single line: " + model.State);
+                    states.Add(model.State);
+                };
+                caption("Обновить", true);
+                model.OnClick(); caption("Проверяю…", false);
+                foreach (int percent in new[] { 0, 45, 100 }) {
+                    model.OnDownloadProgress(percent, 100); caption("Загрузка " + percent + "%", false);
+                    Check(!model.OnClick(), "download rejects second click");
+                }
+                model.OnVerifying(); caption("Проверка…", false);
+                model.OnInstalling(); caption("Установка", false);
+                Check(!model.OnClick(), "installation rejects second click");
+                string version = "20261121." + new string('9', 160);
+                model.OnUpdated(version); caption("✓ Обновлено", true);
+                Check(model.DetailText.Contains(version), "full updated version remains in tooltip detail");
+                model.OnClick(); model.OnUpToDate(version); caption("✓ Последняя", true);
+                Check(model.DetailText.Contains(version), "full installed version remains in tooltip detail");
+                model.OnIdle(); caption("Обновить", true);
+                model.OnClick(); model.OnDownloadProgress(1048576, 0); caption("Загрузка…", false);
+                string reason = new string('я', 240) + "\r\nПодробности";
+                model.OnFailed(reason); caption("Ошибка", true);
+                Check(model.DetailText.Contains(reason), "full error remains in tooltip detail");
+                model.OnClick(reason); caption("Отложено", false);
+                Check(model.DetailText.Contains(reason), "full busy reason remains in tooltip detail");
+                model.OnReleased(); caption("Проверяю…", false);
+                Check(states.Count == Enum.GetValues(typeof(UpdateButtonState)).Length, "every update state covered");
             }
         }
 

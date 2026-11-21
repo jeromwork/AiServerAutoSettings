@@ -3,6 +3,19 @@ using System.Drawing;
 
 namespace RemoteAgents.Launcher
 {
+    // Logical pixels (96 DPI); update phases never change these dimensions.
+    internal static class MainWindowHeaderMetrics
+    {
+        internal const int TitleWidth = 160;
+        internal const int UpdateWidth = 136;
+        internal const int SettingsWidth = 36;
+        internal const int BackWidth = 76;
+        internal const int ControlHeight = 32;
+        internal const int Gap = 8;
+        internal const int HorizontalPadding = 12;
+        internal const int MinClientWidth = 2 * HorizontalPadding + TitleWidth + UpdateWidth + SettingsWidth + 2 * Gap;
+    }
+
     // Outer window bounds throughout: the non-client frame must fit the work area too.
     internal sealed class MainWindowSizing
     {

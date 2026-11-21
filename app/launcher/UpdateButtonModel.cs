@@ -34,7 +34,7 @@ namespace RemoteAgents.Launcher
         public const int FailedShowTicks = 15;
         // Предохранитель (конституция 4а): событие «освобождено» недоступно, если занятость залипла; при срабатывании — переход в Failed «Не дождался освобождения: <причина>», успех не объявляет.
         public const int DeferredFuseTicks = 300;
-        // Предел длины текста причины в строке статуса (чтобы метка в окне не обрезалась); полный текст — в DetailText.
+        // Предел краткой причины для журнала; полный текст — в DetailText.
         public const int MaxReasonChars = 40;
 
         public UpdateButtonModel(Func<DateTime> clock = null)
@@ -45,7 +45,7 @@ namespace RemoteAgents.Launcher
 
         public UpdateButtonState State { get; private set; } = UpdateButtonState.Idle;
         public string StatusText { get; private set; } = "";
-        // Полный текст (версия, время, причина целиком): для подсказки и журнала, в строку статуса не выводится.
+        // Полный текст (версия, время, причина целиком): только для подсказки и журнала.
         public string DetailText { get; private set; } = "";
         public int DownloadPercent { get; private set; }
         public long BytesDownloaded { get; private set; }
@@ -77,6 +77,7 @@ namespace RemoteAgents.Launcher
         public bool IsBusy => !ButtonEnabled;
 
         public const string IdleButtonText = "Обновить";
+        public const int MaxButtonTextChars = 13;
 
         // Только подпись кнопки: объём, версия и подробности остаются в подсказке.
         public string ButtonText
@@ -85,10 +86,18 @@ namespace RemoteAgents.Launcher
             {
                 lock (sync)
                 {
-                    if (State == UpdateButtonState.Downloading)
-                        return TotalBytes > 0 ? "Загрузка " + DownloadPercent + "%" : "Загрузка…";
-                    if (State == UpdateButtonState.Installing) return "Установка";
-                    return StatusText.Length > 0 ? StatusText : IdleButtonText;
+                    switch (State) {
+                        case UpdateButtonState.Checking: return "Проверяю…";
+                        case UpdateButtonState.Downloading:
+                            return TotalBytes > 0 ? "Загрузка " + DownloadPercent + "%" : "Загрузка…";
+                        case UpdateButtonState.Verifying: return "Проверка…";
+                        case UpdateButtonState.Installing: return "Установка";
+                        case UpdateButtonState.UpToDate: return "✓ Последняя";
+                        case UpdateButtonState.Updated: return "✓ Обновлено";
+                        case UpdateButtonState.Failed: return "Ошибка";
+                        case UpdateButtonState.Deferred: return "Отложено";
+                        default: return IdleButtonText;
+                    }
                 }
             }
         }

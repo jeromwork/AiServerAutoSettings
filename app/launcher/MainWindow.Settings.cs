@@ -14,17 +14,11 @@ namespace RemoteAgents.Launcher
         readonly MainWindowSizing mainSizing = new MainWindowSizing();
         Control pageHeader; Size resizeStart;
         readonly FlowLayoutPanel settingsBody = Stack(), aboutBody = Stack();
-        readonly Label pageTitle = WrapLabel();
-        readonly Button pageBack = new Button { Text = "← Назад", AutoSize = true }, settingsButton = new Button { Text = "⚙", AutoSize = true, AccessibleName = "Настройки" };
-        // Одна кнопка на всех страницах: смена фазы не меняет ширину строки заголовка.
-        readonly Button updateButton = new Button {
-            Text = UpdateButtonModel.IdleButtonText, AutoSize = false, AutoEllipsis = true,
-            Size = new Size(128, 30), MinimumSize = new Size(128, 30),
-            AccessibleName = "Проверить обновления", Visible = false
-        };
+        readonly MainWindowHeader mainHeader = new MainWindowHeader();
+        Button updateButton { get { return mainHeader.UpdateButton; } }
         Action updateCheck;
         readonly ToolTip updateTip = new ToolTip();
-        // Подпись целиком приходит из модели; длинный текст обрезается внутри кнопки.
+        // Только короткая подпись модели; версия и подробности — в tooltip.
         internal void SetUpdateButton(bool enabled, string text, string detail = null)
         {
             if (IsDisposed) return;
@@ -39,17 +33,12 @@ namespace RemoteAgents.Launcher
         { return "Версия: " + Program.Version + "\r\nБандл: " + Path.GetFileName(bundle) + "\r\nПапка: " + home; }
         void BuildPages()
         {
-            var top = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 3, Padding = new Padding(12, 8, 12, 8) };
-            top.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); top.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            pageTitle.Font = Theme.Big; pageTitle.Anchor = AnchorStyles.Left; pageBack.Visible = false;
-            top.Controls.Add(pageBack, 0, 0); top.Controls.Add(pageTitle, 1, 0); var corner = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
-            corner.Controls.Add(updateButton); corner.Controls.Add(settingsButton); top.Controls.Add(corner, 2, 0);
-            updateTip.SetToolTip(updateButton, "Проверить обновления"); new ToolTip().SetToolTip(settingsButton, "Настройки");
+            updateTip.SetToolTip(updateButton, "Проверить обновления"); new ToolTip().SetToolTip(mainHeader.SettingsButton, "Настройки");
             updateButton.Click += (s, e) => updateCheck?.Invoke();
-            pageBack.Click += (s, e) => ShowPage(currentPage == "Настройки" ? "Главная" : "Настройки");
-            settingsButton.Click += (s, e) => ShowPage("Настройки");
-            pageHeader = top;
-            Controls.Add(pageHost); Controls.Add(top);
+            mainHeader.BackButton.Click += (s, e) => ShowPage(currentPage == "Настройки" ? "Главная" : "Настройки");
+            mainHeader.SettingsButton.Click += (s, e) => ShowPage("Настройки");
+            pageHeader = mainHeader;
+            Controls.Add(pageHost); Controls.Add(mainHeader);
             ResizeBegin += (s, e) => resizeStart = Size;
             ResizeEnd += (s, e) => { if (Size != resizeStart) mainSizing.UserResized(); };
             Resize += (s, e) => { if (WindowState == FormWindowState.Maximized) mainSizing.UserResized(); };
@@ -164,8 +153,8 @@ namespace RemoteAgents.Launcher
             SuspendLayout();
             foreach (var page in pages) page.Value.Visible = page.Key == name;
             pages[name].BringToFront(); FitPage(pages[name]);
-            pageTitle.Text = name == "Главная" ? Product.Name : name;
-            pageBack.Visible = name != "Главная"; settingsButton.Visible = name == "Главная"; updateButton.Visible = updateCheck != null;
+            mainHeader.ShowPage(name == "Главная" ? Product.Name : name, name == "Главная");
+            updateButton.Visible = updateCheck != null;
             ResumeLayout(true);
             SizeForPage(name);
             if (name != "Раздел настроек" && detailsWindow != null && !detailsWindow.IsApplying) {
@@ -176,7 +165,8 @@ namespace RemoteAgents.Launcher
         {
             if (!mainLaidOut || WindowState != FormWindowState.Normal) return;
             var area = Screen.FromControl(this).WorkingArea;
-            MinimumSize = new Size(Math.Min(Theme.Px(this, 360), area.Width), Math.Min(Theme.Px(this, 440), area.Height));
+            int headerWidth = SizeFromClientSize(new Size(pageHeader.MinimumSize.Width, 0)).Width;
+            MinimumSize = new Size(Math.Min(Math.Max(Theme.Px(this, 360), headerWidth), area.Width), Math.Min(Theme.Px(this, 440), area.Height));
             Size content = Size.Empty;
             if (name == "Раздел настроек")
                 content = new Size(Theme.Px(this, 780) + SystemInformation.VerticalScrollBarWidth,
