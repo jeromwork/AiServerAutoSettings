@@ -6,6 +6,8 @@ param([Alias('Home')][string]$TransportHome=(Join-Path $env:LOCALAPPDATA 'Remote
 . (Join-Path $PSScriptRoot 'Transport.Common.ps1')
 . (Join-Path $PSScriptRoot 'Transport.Decide.ps1')
 . (Join-Path $PSScriptRoot 'Transport.Events.ps1')
+# Диагностические выключатели (бисекция утечки): только из переменной окружения; Main-лаунчер её не передаёт.
+$script:TransportDiag=Get-TransportDiagFlags $env:RA_TRANSPORT_DIAG
 $root=(Get-TransportHome $TransportHome);$engine=$null;$tunnelChildren=@{};$probes=@{};$rows=@();$active=$null;$confirmed=$false;$errorText='Запуск';$network=$null;$memory=$null;$secret=$null
 $parent=$null;$mutex=$null;$locked=$false;$settings=$null;$paths=$null;$exitCode=0
 $pin=[pscustomobject]@{mode='auto';tag=$null};$nextControl=[DateTime]::MinValue;$revision='';$reloadJob=$null;$reloadError=$null;$failedRevision=$null;$pendingRevision=$null;$nextReload=[DateTime]::MinValue
@@ -15,6 +17,14 @@ $diagnosticContext=$null;$liveDeferred=@();$tunnelReadyUntil=@{};$daemonStarted=
 try{$daemonStarted=(Get-Process -Id $PID).StartTime}catch{}
 $script:engineAttempted=$false;$checkingSince=$daemonStarted.ToUniversalTime()
 $holdActive=$false;$lastStatus=[DateTime]::MinValue;$nextNetwork=[DateTime]::MinValue;$retryAt=[DateTime]::MinValue
+$revState=@{};$nextMem=[DateTime]::MinValue;$nextDecideMs=[long]0;$memFuse=$false;$lastStatusKey=$null;$lastStatusWriteMs=[long]0
+# Источники tick (до шины событий — проверка времени в цикле; конституция 4а п.1). Не условия успеха.
+# tick.transport-decide: решатель вызывается по непустой очереди событий или раз в это число мс.
+$DecideTickMs=1000
+# tick.transport-revision-full: полный пересчёт хэша содержимого раз в столько секунд, запасной ход на правку той же длины и того же времени записи (кэш по штампу её не видит). Не условие успеха.
+$RevisionFullTickSec=60;$nextRevisionFull=[DateTime]::MinValue
+# Сердцебиение статуса: файл переписывается без изменений содержимого не реже этого, чтобы Supervisor и читатели видели свежий updatedAt (предел устаревания 15 с).
+$StatusHeartbeatMs=5000
 function Test-TransportStop {
     try{if([IO.File]::Exists((Join-Path $root 'stop')) -or [IO.File]::Exists((Join-Path $root 'state/transport.stop'))){return $true}}catch{}
     if($parent){try{return $parent.HasExited}catch{return $true}};return $false
@@ -54,6 +64,7 @@ function Stop-DaemonObservation([switch]$EngineRestart) {
 }
 function Start-DaemonReader([switch]$NewEngine) {
     Stop-TransportEvents $reader;$script:reader=$null
+    if(Test-TransportDiag 'no-connections'){return}
     $tags=@($paths.Candidates|Where-Object {$pin.mode -ne 'pinned' -or $_.tag -eq $pin.tag}|ForEach-Object {[string]$_.tag})
     # Never pass an empty allowlist to the event subscription.
     if($tags.Count){$script:reader=Start-TransportEvents -ApiPort $settings.Options.apiPort -Secret $secret -Tags $tags -StallSeconds $settings.Options.switchStallSeconds -StallConns $settings.Options.switchStallConns}
@@ -177,7 +188,7 @@ function Invoke-DaemonDecision {
     foreach($r in $rows){
         $step=0;$until=$null
         if($verdict.penalties.ContainsKey($r.tag)){$penalty=$verdict.penalties[$r.tag];$step=$penalty.step;if($null -ne $penalty.until){$until=([DateTime]::SpecifyKind([DateTime]'1970-01-01',[DateTimeKind]::Utc)).AddMilliseconds([long]$penalty.until).ToString('o')}}
-        $r|Add-Member -Force penaltyStep $step;$r|Add-Member -Force penaltyUntil $until
+        Set-TransportRowField $r penaltyStep $step;Set-TransportRowField $r penaltyUntil $until
     }
     if($verdict.localNet -eq 'ok' -and $active -and $decision.paths.ContainsKey($active) -and -not $decision.paths[$active].failed -and -not $decision.pending.ContainsKey($active)){
         $r=$rows|Where-Object {$_.tag -eq $active}|Select-Object -First 1
@@ -192,7 +203,7 @@ function Invoke-DaemonDecision {
     }
 }
 function Publish-TransportStatus {
-    $script:rows=@(Get-TransportOrdered $rows);$order=0;foreach($r in $rows){$order++;$r|Add-Member -Force order $order}
+    $script:rows=@(Get-TransportOrdered $rows);$order=0;foreach($r in $rows){$order++;Set-TransportRowField $r order $order}
     $speed=$null;$row=$rows|Where-Object {$_.tag -eq $active}|Select-Object -First 1
     if($confirmed -and $row){$speed=$row.kbps}
     $alive=$false;if($engine){try{$alive=-not $engine.Process.HasExited}catch{}}
@@ -211,7 +222,15 @@ function Publish-TransportStatus {
         if(-not $script:checkingSince){$script:checkingSince=$daemonStarted.ToUniversalTime()}
     }
     $phase=if($starting){'checking'}elseif($stopping){'stopped'}elseif($exitCode -ne 0 -or $reloadError -or $portConflict -or -not $alive){'failed'}elseif($initialRound -and -not $confirmed){'checking'}elseif($searching){'searching'}elseif($degraded){'degraded'}elseif($isOk){'ok'}elseif($script:checkingSince){'checking'}else{'failed'}
-    Write-TransportJson (Join-Path $root 'status/transport.json') ([ordered]@{endpoints=@($paths.Outbounds|Where-Object {$_.server -and $_.server -notin @('127.0.0.1','::1')}|ForEach-Object {[string]$_.server}|Sort-Object -Unique);ports=$(if($settings){Get-TransportConfiguredPorts ([pscustomobject]$settings.Options) $settings.Profile}else{$null});localWeb=$(if($settings){$settings.LocalWeb}else{$null});lan=$(if($settings){$settings.Lan}else{$null});helper=$(if($settings){Get-TransportHelperStatus $settings $active $paths.Outbounds}else{$null});portConflict=$portConflict;retryAt=$retryAt.ToUniversalTime().ToString('o');configRevision=$revision;fatal=($exitCode -ne 0);summary=$summary;reason=$(if($verdict){@{code=$verdict.reason.code;text=$(if($verdict.reason.code -eq 'ok'){''}else{$verdict.reason.text});since=([DateTime]::SpecifyKind([DateTime]'1970-01-01',[DateTimeKind]::Utc)).AddMilliseconds([long]$verdict.reason.since).ToString('o')}}else{@{code='ok';text='';since=[DateTime]::UtcNow.ToString('o')}});localNet=$(if($verdict){$verdict.localNet}else{'unknown'});switches=@($(if($decision){foreach($item in $decision.switches){@{at=([DateTime]::SpecifyKind([DateTime]'1970-01-01',[DateTimeKind]::Utc)).AddMilliseconds([long]$item.at).ToString('o');from=$item.from;to=$item.to;why=$item.why}}}));ok=$isOk;phase=$phase;checkingSince=$(if($script:checkingSince){$script:checkingSince.ToString('o')}else{$null});active=$active;kbps=$speed;network=$id;metered=$metered;mode=$pin.mode;pinnedTag=$pin.tag;candidates=@($rows);configError=$reloadError;updatedAt=[DateTime]::UtcNow.ToString('o');error=$errorText})
+    $doc=[ordered]@{endpoints=@($paths.Outbounds|Where-Object {$_.server -and $_.server -notin @('127.0.0.1','::1')}|ForEach-Object {[string]$_.server}|Sort-Object -Unique);ports=$(if($settings){Get-TransportConfiguredPorts ([pscustomobject]$settings.Options) $settings.Profile}else{$null});localWeb=$(if($settings){$settings.LocalWeb}else{$null});lan=$(if($settings){$settings.Lan}else{$null});helper=$(if($settings){Get-TransportHelperStatus $settings $active $paths.Outbounds}else{$null});portConflict=$portConflict;retryAt=$retryAt.ToUniversalTime().ToString('o');configRevision=$revision;fatal=($exitCode -ne 0 -and $exitCode -ne 75);summary=$summary;reason=$(if($verdict){@{code=$verdict.reason.code;text=$(if($verdict.reason.code -eq 'ok'){''}else{$verdict.reason.text});since=([DateTime]::SpecifyKind([DateTime]'1970-01-01',[DateTimeKind]::Utc)).AddMilliseconds([long]$verdict.reason.since).ToString('o')}}else{@{code='ok';text='';since=$daemonStarted.ToUniversalTime().ToString('o')}});localNet=$(if($verdict){$verdict.localNet}else{'unknown'});switches=@($(if($decision){foreach($item in $decision.switches){@{at=([DateTime]::SpecifyKind([DateTime]'1970-01-01',[DateTimeKind]::Utc)).AddMilliseconds([long]$item.at).ToString('o');from=$item.from;to=$item.to;why=$item.why}}}));ok=$isOk;phase=$phase;checkingSince=$(if($script:checkingSince){$script:checkingSince.ToString('o')}else{$null});active=$active;kbps=$speed;network=$id;metered=$metered;mode=$pin.mode;pinnedTag=$pin.tag;candidates=@($rows);configError=$reloadError;error=$errorText}
+    # Запись только при изменении содержимого (без updatedAt) или по сердцебиению: не сериализуем и не переписываем файл на каждом такте.
+    $key=ConvertTo-Json -InputObject $doc -Depth 40 -Compress;$nowMs=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $heartbeatMs=$StatusHeartbeatMs;if(-not $heartbeatMs){$heartbeatMs=5000}
+    if(Test-TransportStatusWrite $key $script:lastStatusKey ($nowMs-$script:lastStatusWriteMs) $heartbeatMs){
+        $doc['updatedAt']=[DateTime]::UtcNow.ToString('o')
+        Write-TransportJson (Join-Path $root 'status/transport.json') $doc
+        $script:lastStatusKey=$key;$script:lastStatusWriteMs=$nowMs
+    }
     $script:lastStatus=[DateTime]::UtcNow
 }
 function Update-DaemonNetworkRows($PreviousPaths) {
@@ -350,6 +369,7 @@ function Start-TransportEngine {
     Publish-TransportStatus
     Test-TransportConfigFile $settings.Options.singBoxPath $file
     $script:engine=Start-TransportProcess $settings.Options.singBoxPath @('run','-c',$file)
+    [void](Set-TransportProcessPriority $engine)
     Publish-TransportStatus
     Save-TransportOwner $root 'transport' $engine $settings.Options.singBoxPath $file
     foreach($tunnel in $paths.Tunnels){
@@ -417,9 +437,11 @@ try{
                 $checkingSince=$now
                 if($engine){Start-DaemonReader;Start-TransportLiveness}
             }
-            if(-not $reloadJob -and $now -ge $nextReload){
+            if(-not $reloadJob -and $now -ge $nextReload -and -not (Test-TransportDiag 'no-revision')){
                 try{
-                    $newRevision=Get-TransportRevision $root
+                    # Кэш по штампу файлов: без изменений на диске config и secrets/entries не читаются и не хэшируются.
+                    if($now -ge $nextRevisionFull){$nextRevisionFull=$now.AddSeconds($RevisionFullTickSec);$newRevision=Get-TransportRevisionCached $root $revState -Force}
+                    else{$newRevision=Get-TransportRevisionCached $root $revState}
                     if($newRevision -ne $observedRevision){$bindRetry=$null;$portConflict=$null;$retryAt=$now;$observedRevision=$newRevision}
                     if($newRevision -eq $revision){$reloadError=$null}
                     if($newRevision -ne $revision){
@@ -437,6 +459,7 @@ try{
                             [pscustomobject]@{Settings=$newSettings;Paths=$newPaths;Revision=$stableRevision}
                         }
                     }
+                    $nextReload=$now.AddSeconds(1)
                 }catch{$reloadError='Изменённый конфиг не прочитан; сохранена рабочая конфигурация'}
             }
         }
@@ -488,7 +511,7 @@ try{
         if($engine -and $engine.Process.HasExited){
             $detail=New-TransportDiagnostic $engine 'sing-box' 'process-exited' $diagnosticContext
             Write-TransportLog $root 'process-failed' $detail
-            foreach($row in $rows){if($row.enabled){$perRow=Copy-TransportObject $detail;$perRow.candidate=$row.tag;$row|Add-Member -Force diagnostic $perRow}}
+            foreach($row in $rows){if($row.enabled){$perRow=Copy-TransportObject $detail;$perRow.candidate=$row.tag;$row|Add-Member -Force diagnostic (Limit-TransportDiagnostic $perRow)}}
             Stop-TransportProbes;Stop-DaemonObservation -EngineRestart;if(-not $detail.portConflict){Add-DaemonEvent (New-DaemonEvent 'engine-exit' '' 'exited')};Stop-TransportProcess $engine;$engine=$null;$confirmed=$false;$errorText='sing-box завершился, ожидается перезапуск';$checkingSince=$now
             foreach($child in @($tunnelChildren.Values)){Stop-TransportProcess $child};$tunnelChildren.Clear()
             foreach($row in $rows){if($row.state -eq 'ok'){$row.state='remembered'}}
@@ -511,7 +534,7 @@ try{
                 if(-not $detail){$detail=New-TransportDiagnostic $engine 'sing-box' 'engine-start-failed' $diagnosticContext}
                 $detail.stderr=Protect-TransportDiagnostic $detail.stderr $diagnosticContext
                 $detail|Add-Member -Force error $startError
-                foreach($row in $rows){if($row.enabled){$perRow=Copy-TransportObject $detail;$perRow.candidate=$row.tag;$row|Add-Member -Force diagnostic $perRow}}
+                foreach($row in $rows){if($row.enabled){$perRow=Copy-TransportObject $detail;$perRow.candidate=$row.tag;$row|Add-Member -Force diagnostic (Limit-TransportDiagnostic $perRow)}}
                 Write-TransportLog $root 'process-failed' $detail
                 Stop-TransportProcess $engine;$engine=$null;foreach($child in @($tunnelChildren.Values)){Stop-TransportProcess $child};$tunnelChildren.Clear()
                 $confirmed=$false;$errorText='Не удалось запустить транспорт: '+$startError;$checkingSince=$now
@@ -530,7 +553,7 @@ try{
                     $detail=New-TransportDiagnostic $tunnelChildren[$tunnel.tag] $tunnel.tag 'process-exited' $diagnosticContext
                     Write-TransportLog $root 'process-failed' $detail
                     Stop-TransportProcess $tunnelChildren[$tunnel.tag];$tunnelChildren.Remove($tunnel.tag)
-                    $row=$rows|Where-Object {$_.tag -eq $tunnel.tag}|Select-Object -First 1;$row.state='fail';$row.kbps=$null;$row|Add-Member -Force diagnostic $detail
+                    $row=$rows|Where-Object {$_.tag -eq $tunnel.tag}|Select-Object -First 1;$row.state='fail';$row.kbps=$null;$row|Add-Member -Force diagnostic (Limit-TransportDiagnostic $detail)
                     Add-DaemonEvent (New-DaemonEvent 'engine-exit' $tunnel.tag 'process-exited')
                 }
                 if(-not $tunnelChildren.ContainsKey($tunnel.tag) -and $now -ge $retryAt){
@@ -552,7 +575,7 @@ try{
                 $r.latencyMs=$probe.state.latencyMs;$r.kbps=$probe.state.kbps;$r.checkedAt=[DateTime]::UtcNow.ToString('o')
                 $r|Add-Member -Force maxGapMs $probe.state.maxGapMs
                 $code=switch($r.state){'ok' {'ok'} 'frozen' {'stalled'} 'slow' {'timeout'} default {'process-exited'}};if($r.state -eq 'ok'){$r.lastOkAt=$r.checkedAt}else{$r.lastFailAt=$r.checkedAt}
-                $detail=New-TransportDiagnostic $probe.child $key $code $diagnosticContext;$r|Add-Member -Force diagnostic $detail
+                $detail=New-TransportDiagnostic $probe.child $key $code $diagnosticContext;$r|Add-Member -Force diagnostic (Limit-TransportDiagnostic $detail)
                 Stop-TransportProbe $probe;$probes.Remove($key)
                 Add-DaemonEvent (New-DaemonEvent 'path-check' $key $code)
                 Write-DaemonWizardProgress ('Вариант связи: '+$r.title+$(if($code -eq 'ok'){' ✓'}else{' ✗'}))
@@ -569,15 +592,30 @@ try{
             }
             if($liveRound -and -not $probes.Count -and -not $liveDeferred.Count){$liveRound=$false;$initialRound=$false;$checkingSince=$null}
         }
-        Invoke-DaemonDecision
+        if(Test-TransportDecisionDue $eventQueue.Count (Get-DaemonTime) $nextDecideMs){$nextDecideMs=(Get-DaemonTime)+$DecideTickMs;Invoke-DaemonDecision}
         if($pin.mode -eq 'pinned' -and $pin.tag -notin @($paths.Candidates|ForEach-Object {$_.tag})){$confirmed=$false;$errorText='Закреплённый путь не работает: отключён или отсутствует';$checkingSince=$null}
         if($portConflict){$errorText=$portConflict.message}
         $statusInterval=1;if($portConflict -and $now -lt $retryAt){$statusInterval=5}
+        $statusInterval=Get-TransportStatusIntervalSec $statusInterval
         if(($now-$lastStatus).TotalSeconds -ge $statusInterval){Publish-TransportStatus}
+        [void](Invoke-TransportDiagGc)
+        # tick.transport-mem: журнал памяти демона (раз в 60 с, в режиме диагностики раз в 10 с).
+        if($now -ge $nextMem){
+            $nextMem=$now.AddSeconds((Get-TransportMemIntervalSec))
+            $memLimitMb=400;if($settings){$memLimitMb=[int]$settings.Options.memSoftLimitMb}
+            $sample=Get-TransportMemSample
+            Write-RaLog (Join-Path $root 'logs') 'transport' 'INFO' 'transport' 'transport.mem' (Get-TransportMemFields $sample $memLimitMb)
+            # Предохранитель (конституция 4а): событие утечки памяти недоступно, если демон течёт; при срабатывании — чистый выход с кодом 75 и перезапуск Supervisor, успех не объявляет.
+            if(Test-TransportMemoryHigh $sample.private $memLimitMb){
+                Write-RaLog (Join-Path $root 'logs') 'transport' 'WARN' 'transport' 'transport.mem-high' (Get-TransportMemFields $sample $memLimitMb)
+                $memFuse=$true;break
+            }
+        }
         # While the first path is being proved, probe results are read every 100 ms instead of 300 ms.
         Start-Sleep -Milliseconds $(if($liveDeferred.Count){50}elseif(-not $confirmed -and $probes.Count){100}else{300})
     }
     $errorText='Транспорт остановлен';$stopping=$true
+    if($memFuse){$exitCode=75;$errorText='Перезапуск: превышен предел памяти'}
 }catch{
     $exitCode=1;$checkingSince=$null
     # Текст чужого исключения может содержать адрес/пароль — публикуем только категорию.
