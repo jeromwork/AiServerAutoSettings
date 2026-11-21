@@ -29,6 +29,11 @@
     <IntermediateOutputPath>obj/$(Configuration)/lan-tests/</IntermediateOutputPath>
     <OutputPath>bin/$(Configuration)/lan-tests/</OutputPath>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(UpdateButtonTests)' == 'true'">
+    <StartupObject>RemoteAgents.Launcher.UpdateButtonModelTests</StartupObject>
+    <IntermediateOutputPath>obj/$(Configuration)/update-button-tests/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/update-button-tests/</OutputPath>
+  </PropertyGroup>
   <ItemGroup>
     <Compile Include="../HelperUpdate.cs" />
     <Compile Include="HelperUpdateTests.cs" />
@@ -103,6 +108,8 @@
     <Compile Include="../StatusView.cs" Link="StatusView.cs" />
     <Compile Include="../Data.cs" Link="Data.cs" />
     <Compile Include="UpdateAutomationTests.cs" />
+    <Compile Include="../UpdateButtonModel.cs" Link="UpdateButtonModel.cs" />
+    <Compile Include="UpdateButtonModelTests.cs" />
     <Compile Include="../UpdateProbe.cs" />
     <Compile Include="../UpdatePolicy.cs" />
     <Compile Include="../UpdateEnvironment.cs" />
