@@ -13,6 +13,7 @@ namespace RemoteAgents.Launcher
         public const int MaxLineBytes = 8192;
         public const int DefaultQueueLimit = 2000;
         const string BusPrefix = "@bus ";
+        const int ExitDrainTimeoutMs = 1000;
 
         readonly Stream input;
         readonly Stream output;
@@ -20,8 +21,8 @@ namespace RemoteAgents.Launcher
         readonly string logsDir;
         readonly BlockingCollection<string> outgoing;
         IDisposable subscription;
-        Thread readerThread, writerThread;
-        int disposed, started, ready, inputReady, inOverflow, tooLongReported;
+        Thread readerThread, writerThread, completionThread;
+        int disposed, sendingStopped, completing, started, ready, inputReady, inOverflow, tooLongReported;
         long lines, parsed, rejected, dropped, sent, tooLong, writeErrors;
 
         public long Lines => Interlocked.Read(ref lines);
@@ -68,6 +69,30 @@ namespace RemoteAgents.Launcher
         {
             var t = writerThread;
             return t == null || t.Join(ms);
+        }
+
+        internal bool JoinCompletion(int ms)
+        {
+            var t = completionThread;
+            return t == null || t.Join(ms);
+        }
+
+        // Process exit is not EOF: the reader may still have buffered final status frames.
+        // Stop stdin immediately, but let stdout drain on its own background thread.
+        public void CompleteAfterProcessExit(int drainTimeoutMs = ExitDrainTimeoutMs)
+        {
+            if (Interlocked.Exchange(ref completing, 1) != 0 || Volatile.Read(ref disposed) != 0) return;
+            StopSending();
+            Start();
+            int timeout = Math.Max(0, Math.Min(ExitDrainTimeoutMs, drainTimeoutMs));
+            completionThread = new Thread(() => {
+                // Fuse: a descendant may keep stdout open after the daemon exits. Never wait
+                // on the UI thread or forever; on timeout abort delivery, without claiming EOF.
+                bool drained = Join(timeout);
+                Dispose();
+                if (!drained) WriteLog("stdout.drain.timeout", "process exited; stdout did not reach EOF within drain budget");
+            }) { IsBackground = true, Name = "transport-bus-completion" };
+            completionThread.Start();
         }
 
         public static bool IsAllowedIncoming(string topic)
@@ -243,7 +268,7 @@ namespace RemoteAgents.Launcher
 
         void OnBusEvent(BusEvent e)
         {
-            if (Volatile.Read(ref disposed) != 0 || output == null || !InputReady || !IsAllowedOutgoing(e.Topic)) return;
+            if (Volatile.Read(ref sendingStopped) != 0 || output == null || !InputReady || !IsAllowedOutgoing(e.Topic)) return;
             string line = FormatOutgoing(e);
             if (line == null) {
                 Interlocked.Increment(ref tooLong);
@@ -269,7 +294,7 @@ namespace RemoteAgents.Launcher
             try {
                 writer = new StreamWriter(output, new UTF8Encoding(false)) { NewLine = "\n" };
                 foreach (var line in outgoing.GetConsumingEnumerable()) {
-                    if (Volatile.Read(ref disposed) != 0) break;
+                    if (Volatile.Read(ref sendingStopped) != 0) break;
                     writer.WriteLine(line);
                     writer.Flush();
                     Interlocked.Increment(ref sent);
@@ -278,8 +303,9 @@ namespace RemoteAgents.Launcher
                 }
             } catch {
                 Interlocked.Increment(ref writeErrors);
+                // Broken stdin is normal at process exit and must not abort pending stdout.
+                StopSending();
                 WriteLog("stdin.failed", "transport stdin closed");
-                Dispose();
             } finally {
                 // StreamWriter.Dispose may flush: it belongs ONLY to this background thread.
                 // Supervisor closes the job, releasing blocked pipe I/O on shutdown/restart.
@@ -288,11 +314,17 @@ namespace RemoteAgents.Launcher
             }
         }
 
+        void StopSending()
+        {
+            if (Interlocked.Exchange(ref sendingStopped, 1) != 0) return;
+            try { subscription?.Dispose(); } catch { }
+            outgoing.CompleteAdding();
+        }
+
         public void Dispose()
         {
             if (Interlocked.Exchange(ref disposed, 1) != 0) return;
-            try { subscription?.Dispose(); } catch { }
-            outgoing.CompleteAdding();
+            StopSending();
             // Never close/flush a StreamWriter or wait for pipe I/O on the caller/UI thread.
             // Also starts cleanup threads if construction was followed by Dispose before Start.
             Start();
