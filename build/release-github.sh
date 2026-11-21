@@ -31,9 +31,10 @@ commit=${args[1]:-$(git rev-parse HEAD)}
 tag="$RELEASE_TAG"
 exe_name="$RELEASE_EXE"
 
+check_build_channel "$RELEASE_CHANNEL" "$dir" || exit 1
 "$here/require-main.sh" --channel "$RELEASE_CHANNEL" "$commit"
 [[ -f "$dir/release-info.json" ]] || { echo "Нужна общая сборка: build/release.sh --channel $RELEASE_CHANNEL" >&2; exit 1; }
-python3 "$here/release-dist.py" verify "$dir" "$commit" --product "$RELEASE_PRODUCT"
+python3 "$here/release-dist.py" verify "$dir" "$commit" --product "$RELEASE_PRODUCT" --channel "$RELEASE_CHANNEL"
 sums=$(cd "$dir" && sha256sum "$exe_name")
 
 if [[ "$RELEASE_CHANNEL" == "test" ]]; then

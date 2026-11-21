@@ -52,6 +52,7 @@ check_channel_isolation "$RELEASE_CHANNEL" "$dist" || exit 1
 "$here/require-main.sh" --channel "$RELEASE_CHANNEL"
 if [[ -n "$prepared" ]]; then
   out="$prepared"
+  check_build_channel "$RELEASE_CHANNEL" "$out" || exit 1
   git -C "$repo" diff --quiet -- . ':!release' || { echo "Исходники $RELEASE_CHANNEL изменены" >&2; exit 1; }
 else
   [[ -z $(git -C "$repo" status --porcelain) ]] || { echo "Перед сборкой нужен чистый $RELEASE_CHANNEL" >&2; exit 1; }
@@ -59,10 +60,11 @@ else
   default_out="$here/out"
   [[ "$RELEASE_CHANNEL" != "test" ]] || default_out="$here/out-test"
   out=${REMOTEAGENTS_BUILD_OUT:-$default_out}
+  check_build_channel "$RELEASE_CHANNEL" "$out" || exit 1
 fi
 stage=$(mktemp -d); trap 'rm -rf -- "$stage"' EXIT
-python3 "$here/bundle.py" publish "$out/bundle.zip" "$stage/agents" --launcher "$out/$RELEASE_EXE" --product "$RELEASE_PRODUCT"
-python3 "$here/release-dist.py" metadata "$stage" "$stage/release-info.json" "$(git -C "$repo" rev-parse HEAD)" --product "$RELEASE_PRODUCT"
+python3 "$here/bundle.py" publish "$out/bundle.zip" "$stage/agents" --launcher "$out/$RELEASE_EXE" --product "$RELEASE_PRODUCT" --channel "$RELEASE_CHANNEL"
+python3 "$here/release-dist.py" metadata "$stage" "$stage/release-info.json" "$(git -C "$repo" rev-parse HEAD)" --product "$RELEASE_PRODUCT" --channel "$RELEASE_CHANNEL"
 if [[ -n "$prepared" ]]; then
   cmp -- "$stage/release-info.json" "$out/release-info.json" || { echo "Подготовленная сборка не совпадает с HEAD или файлами" >&2; exit 1; }
 else
@@ -70,6 +72,6 @@ else
 fi
 "$here/release-github.sh" --channel "$RELEASE_CHANNEL" "$out"
 # tar stdin contains only local staged payloads; no command/config/credentials cross the shell unquoted.
-remote_command=$(python3 "$here/release-dist.py" command "$dist" --product "$RELEASE_PRODUCT")
+remote_command=$(python3 "$here/release-dist.py" command "$dist" --product "$RELEASE_PRODUCT" --channel "$RELEASE_CHANNEL")
 tar -C "$stage" -cf - agents | ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -- "$server" "$remote_command"
 echo "Оба источника проверены по SHA-256; версия и EXE совпадают ($RELEASE_CHANNEL)."

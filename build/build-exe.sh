@@ -47,6 +47,8 @@ mkdir -p "$out/$product"
 "$here/make-bundle.sh" "$version" "$out/$product" --product "$product" --channel "$RELEASE_CHANNEL" --binaries
 python3 "$here/bundle.py" verify-initial "$out/$product/$version.zip"
 cp "$out/$product/$version.zip" "$out/initial-bundle.zip"
+# Channel marker: release scripts refuse a build whose channel differs from the requested one.
+rm -f -- "$out/channel.txt"
 
 "$dotnet" publish "$repo/app/launcher/RemoteAgents.Launcher.csproj" -c Release \
   -p:ProductName="$product" \
@@ -66,3 +68,4 @@ fi
 python3 "$here/bundle.py" attach "$out/$product/$version.zip" "$out/$exe_name" "$out/$version.zip" --product "$product"
 cp "$out/$version.zip" "$out/bundle.zip"
 sha256sum "$out/$exe_name"
+printf '%s\n' "$RELEASE_CHANNEL" > "$out/channel.txt"

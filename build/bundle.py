@@ -232,8 +232,9 @@ def file_version(exe):
             return text
     raise ValueError('Не удалось прочитать FileVersion')
 
-def publish(archive, dest, minimum='1.0.0', launcher=None, product='RemoteAgents'):
+def publish(archive, dest, minimum='1.0.0', launcher=None, product='RemoteAgents', channel=None):
     check_product(product)
+    if channel not in (None, 'main', 'test'): raise ValueError('Неизвестный канал: ' + str(channel))
     safe_version(minimum)
     archive = Path(archive).resolve()
     dest = Path(dest).expanduser().resolve()
@@ -246,6 +247,7 @@ def publish(archive, dest, minimum='1.0.0', launcher=None, product='RemoteAgents
         json.loads(z.read('components.json').decode('utf-8-sig'))
         embedded_exe = z.read(product + '.exe') if product + '.exe' in z.namelist() else None
     manifest = dict(version=version, file=version+'.zip', sha256=digest(archive), size=archive.stat().st_size, minLauncher=minimum, configSchema=1, product=product)
+    if channel: manifest['channel'] = channel
     if embedded_exe:
         manifest['launcher'] = dict(version=file_version(embedded_exe), sha256=hashlib.sha256(embedded_exe).hexdigest())
     if launcher and embedded_exe != Path(launcher).read_bytes():
@@ -280,7 +282,7 @@ def main():
     d = sub.add_parser('publish')
     d.add_argument('archive'); d.add_argument('dest', nargs='?', default=str(Path.home()/'.local/share/remote-agents/dist'))
     d.add_argument('--product', choices=PRODUCTS, default='RemoteAgents')
-    d.add_argument('--min-launcher', default='1.0.0'); d.add_argument('--launcher')
+    d.add_argument('--channel', choices=('main', 'test')); d.add_argument('--min-launcher', default='1.0.0'); d.add_argument('--launcher')
     a = p.parse_args()
     if a.command == 'make':
         make(a.version, a.outdir, a.launcher, a.product, a.binaries)
@@ -292,7 +294,7 @@ def main():
     elif a.command == 'attach':
         attach_launcher(a.archive, a.launcher, a.output, a.product)
     else:
-        publish(a.archive, a.dest, a.min_launcher, a.launcher, a.product)
+        publish(a.archive, a.dest, a.min_launcher, a.launcher, a.product, a.channel)
 
 if __name__ == '__main__':
     main()

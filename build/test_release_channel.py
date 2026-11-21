@@ -208,9 +208,10 @@ exec ''' + shlex.quote(sys.executable) + ' "$@"\n')
         with contextlib.redirect_stdout(io.StringIO()):
             initial = bundle.make('20261121.120000-fixture', out, launcher=exe, product=product)
             bundle.attach_launcher(initial, exe, out / 'bundle.zip', product=product)
-            bundle.publish(out / 'bundle.zip', stage / 'agents', launcher=exe, product=product)
-            dist.metadata(stage, out / 'release-info.json', HEAD, product=product)
+            bundle.publish(out / 'bundle.zip', stage / 'agents', launcher=exe, product=product, channel=channel)
+            dist.metadata(stage, out / 'release-info.json', HEAD, product=product, channel=channel)
         self.assertEqual(json.loads((stage / 'agents/manifest.json').read_text())['product'], product)
+        (out / 'channel.txt').write_text(channel + '\n')
         self.reset_calls()
         return out, product
 
@@ -253,12 +254,40 @@ exec ''' + shlex.quote(sys.executable) + ' "$@"\n')
                 self.assert_publication(channel, product, out)
                 command = self.events('ssh')[0][-1]
                 expected = TEST_DIST if channel == 'test' else TEST_DIST.removesuffix('-test')
-                self.assertEqual(shlex.split(command)[-2:], [expected, product])
+                self.assertEqual(shlex.split(command)[-3:], [expected, product, channel])
                 if channel == 'test':self.assertNotIn('dist/', command)
                 remote = Path(self.env['HOME']) / '.local/share/remote-agents' / ('dist-test' if channel == 'test' else 'dist')
                 self.assertEqual(json.loads((remote / 'manifest.json').read_text())['product'], product)
                 self.assertEqual((remote / (product + '.exe')).read_bytes(), (out / (product + '.exe')).read_bytes())
                 self.assertFalse(self.events('dotnet'))
+
+    def test_wrong_channel_build_refused_before_gh_ssh_tag(self):
+        # Same HEAD on both branches: only the channel marker/metadata can tell the builds apart.
+        for built, asked in (('test', 'main'), ('main', 'test')):
+            with self.subTest(built=built, asked=asked):
+                out, product = self.prepare(built)
+                self.env['BRANCH'] = 'int/vpn-master' if asked == 'test' else 'main'
+                opts = ['--channel', 'test'] if asked == 'test' else []
+                self.run_script('release.sh', *opts, 'fixture.invalid', '--prepared', out, ok=False)
+                self.run_script('release-github.sh', *opts, out, ok=False)
+                self.assertEqual(self.events('gh'), [])
+                self.assertEqual(self.events('ssh'), [])
+                self.assertFalse([a for a in self.events('git') if any('refs/tags/' in x for x in a)])
+                # Marker forged, metadata still says the other channel: refused by release-info.json.
+                (out / 'channel.txt').write_text(asked + '\n')
+                self.run_script('release-github.sh', *opts, out, ok=False)
+                self.assertEqual(self.events('gh'), [])
+                self.assertEqual(self.events('ssh'), [])
+
+    def test_remote_refuses_channel_destination_mismatch(self):
+        dist = self.load('release-dist.py')
+        for channel, path, bad in (('test', '/tmp/x/dist', True), ('main', '/tmp/x/dist-test', True),
+                                   ('main', '/tmp/x/dist-test/.', True), ('test', '/tmp/x/dist-test', False),
+                                   ('main', '/tmp/x/dist', False)):
+            cmd = dist.command(path, 'RemoteAgents', channel)
+            r = subprocess.run(['bash', '-c', cmd], input=b'', capture_output=True)
+            if bad: self.assertIn(b'Channel does not match destination', r.stderr)
+            else: self.assertNotIn(b'Channel does not match destination', r.stderr)
 
     def test_stale_metadata_stops_before_gh_or_tag(self):
         for channel in ('main', 'test'):
@@ -280,7 +309,7 @@ exec ''' + shlex.quote(sys.executable) + ' "$@"\n')
                         self.run_script('release-github.sh', '--channel', channel, out, ok=False)
                     else:
                         with self.assertRaises((ValueError, KeyError)):
-                            self.load('release-dist.py').verify(out, HEAD, product=product)
+                            self.load('release-dist.py').verify(out, HEAD, product=product, channel=channel)
                     self.assertFalse(self.events('gh'))
                     self.assertFalse(any('tag' in args or 'push' in args for args in self.events('git')))
 
@@ -302,7 +331,8 @@ exec ''' + shlex.quote(sys.executable) + ' "$@"\n')
 
     def test_main_rejects_test_dist_before_external_commands(self):
         for path in (TEST_DIST, '/home/owner/.local/share/remote-agents/dist-test',
-                     '/tmp/dist-test', 'dist-test'):
+                     '/tmp/dist-test', 'dist-test', TEST_DIST + '/', TEST_DIST + '/.',
+                     TEST_DIST + '//', TEST_DIST + '/./.', '/tmp/dist-test/'):
             with self.subTest(path=path):
                 self.run_script('release.sh', '--channel', 'main', 'fixture.invalid', path,
                                 ok=False)

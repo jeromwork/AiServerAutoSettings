@@ -31,16 +31,31 @@ resolve_channel() {
   export RELEASE_CHANNEL RELEASE_PRODUCT RELEASE_EXE RELEASE_TAG RELEASE_DIST_DEFAULT RELEASE_SOURCE_BRANCH RELEASE_SOURCE_REF
 }
 
+# The build directory must carry the marker of the requested channel (written by build-exe.sh).
+check_build_channel() {
+  local channel="$1" dir="$2" mark=""
+  [[ -f "$dir/channel.txt" ]] && mark=$(<"$dir/channel.txt")
+  if [[ "$mark" != "$channel" ]]; then
+    echo "Сборка в $dir относится к каналу '${mark:-неизвестен}', а запрошен '$channel': выкладка отменена" >&2
+    return 1
+  fi
+}
+
 check_channel_isolation() {
   local channel="$1"
   local dist="$2"
+  # Compare the normalized path: trailing '/' and '/.' do not make dist-test another place.
+  local norm="$dist"
+  while [[ "$norm" == */ || "$norm" == */. ]]; do
+    [[ "$norm" == */. ]] && norm="${norm%/.}" || norm="${norm%/}"
+  done
   if [[ "$channel" == "test" ]]; then
     # Only the literal canonical remote path is accepted; never normalize aliases or '..'.
     if [[ "$dist" != '~/.local/share/remote-agents/dist-test' ]]; then
       echo "Для test разрешён только ~/.local/share/remote-agents/dist-test ($dist)" >&2
       return 1
     fi
-  elif [[ "$channel" == "main" && "$dist" == *dist-test ]]; then
+  elif [[ "$channel" == "main" && "$norm" == *dist-test ]]; then
     echo "Для main запрещён путь test-канала ($dist)" >&2
     return 1
   fi
