@@ -1104,6 +1104,11 @@ function Get-TransportBest($Rows,[string[]]$Allowed=@(),[switch]$Remembered) {
 # --- Диагностика и защита памяти демона (T0). Переменная RA_TRANSPORT_DIAG: список через запятую.
 $script:TransportDiagKnown=@('no-revision','status-30s','decide-on-event','no-connections','no-metered','no-network','gc-collect','decide-every-tick','status-always')
 $script:TransportDiag=@{}
+$script:TransportNetProbes=[long]0;$script:TransportNetFingerprintChecks=[long]0;$script:TransportMeteredCalls=[long]0
+# §4б: один последний снимок сети/стоимости; старое поколение заменяется, история не хранится.
+$script:TransportNetworkSnapshot=$null
+# Предохранитель (конституция 4а): событие net-change недоступно, пока нет доставки в демон; при срабатывании — замена снимка повторной пробой, успех не объявляет.
+$script:TransportNetworkSuccessFuseMs=[long]300000;$script:TransportNetworkFailureFuseMs=[long]30000
 function Get-TransportDiagFlags([string]$Raw) {
     $flags=@{}
     foreach($part in ([string]$Raw).Split(',')){$name=$part.Trim().ToLowerInvariant();if($name -in $script:TransportDiagKnown){$flags[$name]=$true}}
@@ -1116,12 +1121,19 @@ function Get-TransportMemSample {
     try{
         $ws=[long]$p.WorkingSet64
         $private=if([Environment]::OSVersion.Platform -eq 'Win32NT'){[long]$p.PrivateMemorySize64}else{$ws}
-        [ordered]@{ws=$ws;private=$private;gcHeap=[long][GC]::GetTotalMemory($false);gen2=[int][GC]::CollectionCount(2)}
+        $sample=[ordered]@{ws=$ws;private=$private;gcHeap=[long][GC]::GetTotalMemory($false)}
+        if(Test-TransportDiag 'gc-collect'){$sample.gcHeapAfterCollect=[long][GC]::GetTotalMemory($true)}
+        $sample.gen0=[int][GC]::CollectionCount(0);$sample.gen1=[int][GC]::CollectionCount(1);$sample.gen2=[int][GC]::CollectionCount(2)
+        $sample
     }finally{$p.Dispose()}
 }
-# Поля журнала transport.mem: объёмы в МБ, gen2 — число сборок поколения 2.
+# Поля журнала transport.mem: объёмы в МБ, gen0/1/2 — число сборок соответствующего поколения.
 function Get-TransportMemFields($Sample,[int]$LimitMb) {
-    [ordered]@{ws=[long][Math]::Round($Sample.ws/1MB);private=[long][Math]::Round($Sample.private/1MB);gcHeap=[long][Math]::Round($Sample.gcHeap/1MB);gen2=[int]$Sample.gen2;limit=$LimitMb}
+    $fields=[ordered]@{ws=[long][Math]::Round($Sample.ws/1MB);private=[long][Math]::Round($Sample.private/1MB);gcHeap=[long][Math]::Round($Sample.gcHeap/1MB);
+        gen0=[int]$Sample.gen0;gen1=[int]$Sample.gen1;gen2=[int]$Sample.gen2;limit=$LimitMb;
+        netProbes=$script:TransportNetProbes;netFingerprintChecks=$script:TransportNetFingerprintChecks;meteredCalls=$script:TransportMeteredCalls}
+    if((Test-TransportDiag 'gc-collect') -and $null -ne $Sample.gcHeapAfterCollect){$fields.gcHeapAfterCollect=[long][Math]::Round($Sample.gcHeapAfterCollect/1MB)}
+    $fields
 }
 function Test-TransportMemoryHigh([long]$PrivateBytes,[int]$LimitMb) { [bool]($LimitMb -gt 0 -and $PrivateBytes -gt ([long]$LimitMb*1MB)) }
 function Invoke-TransportDiagGc { if(Test-TransportDiag 'gc-collect'){[GC]::Collect();return $true};$false }
@@ -1162,12 +1174,55 @@ function Get-TransportFingerprint([string]$GatewayMac,[string]$ProfileName) {
     if(-not $GatewayMac -or -not $ProfileName){return $null}
     $sha=[Security.Cryptography.SHA256]::Create();try{([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
 }
+# Источник отделён для микро-теста: только .NET, без CIM/WinRT и подписок.
+function Get-TransportNetworkInterfaces { [Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() }
+function Get-TransportNetworkSignature {
+    $script:TransportNetFingerprintChecks++
+    try{
+        $interfaces=New-Object 'Collections.Generic.List[string]'
+        foreach($nic in @(Get-TransportNetworkInterfaces)){
+            if($nic.NetworkInterfaceType -in @([Net.NetworkInformation.NetworkInterfaceType]::Tunnel,[Net.NetworkInformation.NetworkInterfaceType]::Loopback)){continue}
+            $properties=$nic.GetIPProperties()
+            $addresses=[string[]]@($properties.UnicastAddresses|ForEach-Object {[string]$_.Address})
+            $gateways=[string[]]@($properties.GatewayAddresses|ForEach-Object {[string]$_.Address})
+            [Array]::Sort($addresses,[StringComparer]::Ordinal);[Array]::Sort($gateways,[StringComparer]::Ordinal)
+            # Length prefixes avoid ambiguity in interface names; enumeration order is irrelevant.
+            $parts=@([string]$nic.Id,[string]$nic.Name,[string]$nic.OperationalStatus,($addresses -join ','),($gateways -join ','))
+            $record=New-Object Text.StringBuilder
+            foreach($part in $parts){[void]$record.Append($part.Length).Append(':').Append($part)}
+            $interfaces.Add($record.ToString())
+        }
+        $sorted=$interfaces.ToArray();[Array]::Sort($sorted,[StringComparer]::Ordinal)
+        'net:'+($sorted -join '|')
+    }catch{'net:unavailable'}
+}
 function Get-TransportNetwork {
-    # Диагностика no-network: опрос сети не выполняется, возвращается последний результат.
-    if((Test-TransportDiag 'no-network') -and $script:TransportNetworkStub){return $script:TransportNetworkStub}
+    # no-network suppresses even the first CIM call; keep the old scalar result if one exists.
+    if(Test-TransportDiag 'no-network'){
+        if($script:TransportNetworkStub){return $script:TransportNetworkStub}
+        return [pscustomobject]@{id=$null;name=$null;interface=$null;ip=$null;ifIndex=0;available=$false}
+    }
+    $script:TransportNetProbes++
     $result=Get-TransportNetworkProbe
     $script:TransportNetworkStub=$result
     $result
+}
+function Get-TransportNetworkSnapshot($Options,[switch]$Force) {
+    # Called by the existing daemon pass; no separate refresh loop or wait.
+    $signature=if(Test-TransportDiag 'no-network'){'net:disabled'}else{Get-TransportNetworkSignature}
+    $cached=$script:TransportNetworkSnapshot;$now=Get-DaemonTime
+    $snapshotFuseMs=if($cached -and -not $cached.network.available){$script:TransportNetworkFailureFuseMs}else{$script:TransportNetworkSuccessFuseMs}
+    $expired=$cached -and ($now-$cached.at) -ge $snapshotFuseMs # timer-ok: C — перепроверка снимка сети: net-change в демон не доставляется (B4/B не сделан); не объявляет успех, ничего не блокирует
+    if($Force -or -not $cached -or $expired -or $signature -cne $cached.signature){
+        $net=Get-TransportNetwork
+        # Keep the automatic cost with the network generation, independent of the config override.
+        $autoMetered=Get-TransportMetered ([pscustomobject]@{metered='auto'})
+        $cached=[pscustomobject]@{at=$now;signature=$signature;network=$net;autoMetered=$autoMetered;metered=$null}
+        $script:TransportNetworkSnapshot=$cached
+    }
+    $configured=([string]$Options.metered).ToLowerInvariant()
+    $cached.metered=if($configured -eq 'auto'){$cached.autoMetered}else{$configured -eq 'true'}
+    $cached
 }
 function Get-TransportNetworkProbe {
     try{
@@ -1219,15 +1274,28 @@ function Resolve-TransportBind($State,$Network,[bool]$VpnOff) {
     $State.none=$false
     [pscustomobject]@{mode='fail';event=$null}
 }
-function Get-TransportConnectionCost {
+function Get-TransportInternetConnectionProfile {
     [void][Windows.Networking.Connectivity.NetworkInformation,Windows,ContentType=WindowsRuntime]
-    $profile=[Windows.Networking.Connectivity.NetworkInformation]::GetInternetConnectionProfile()
-    if($null -eq $profile){return $null};$cost=$profile.GetConnectionCost()
-    switch([string]$cost.NetworkCostType){'Unrestricted'{return [bool]($cost.Roaming -or $cost.OverDataLimit -or $cost.ApproachingDataLimit)}'Fixed'{return $true}'Variable'{return $true}default{return $null}}
+    [Windows.Networking.Connectivity.NetworkInformation]::GetInternetConnectionProfile()
+}
+function Release-TransportComObject($Value) {
+    if($null -ne $Value -and [Runtime.InteropServices.Marshal]::IsComObject($Value)){
+        try{[void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($Value)}catch{}
+    }
+}
+function Get-TransportConnectionCost {
+    $profile=$null;$cost=$null
+    try{
+        $profile=Get-TransportInternetConnectionProfile
+        if($null -eq $profile){return $null}
+        $cost=$profile.GetConnectionCost()
+        switch([string]$cost.NetworkCostType){'Unrestricted'{return [bool]($cost.Roaming -or $cost.OverDataLimit -or $cost.ApproachingDataLimit)}'Fixed'{return $true}'Variable'{return $true}default{return $null}}
+    }finally{Release-TransportComObject $cost;Release-TransportComObject $profile}
 }
 function Get-TransportMetered($Options) {
     $configured=([string]$Options.metered).ToLowerInvariant();if($configured -ne 'auto'){return ($configured -eq 'true')}
     if(Test-TransportDiag 'no-metered'){return $null}
+    $script:TransportMeteredCalls++
     try{return (Get-TransportConnectionCost)}catch{return $null}
 }
 function Read-TransportMemory([string]$Root) {
