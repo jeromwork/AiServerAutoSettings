@@ -562,22 +562,29 @@ Assert (@($logged|Where-Object {$_.name -eq 'fault.clear'}).Count -eq $clears) '
 Fixture;Open-Episode;Answer-Round;Select-Second;$script:TransportTestBuild=$true
 Fault-Input (Fault-Frame 'drop' 'p1');Invoke-DaemonDecision
 Assert ($active -eq 'p2') 'fault during verification stranded episode'
-# One stdin drain can cancel verify and clear the fault before the reducer runs.
-# Model the old race: if clear starts a light probe, its real success arrives first.
-Fixture;Open-Episode;Answer-Round;Select-Second;$script:TransportTestBuild=$true
-$cancelledVerify=$pathChecks.p1.handle;$before=$started.Count
-$script:clockMs=3200
-Fault-Input ((Fault-Frame 'drop' 'p1')+"`n"+(Fault-Frame 'clear' 'p1'))
-$script:clockMs=3300
-if($pathChecks.ContainsKey('p1') -and $pathChecks.p1.purpose -eq 'light'){Deliver 'p1' 'ok'}
-Assert ($cancelledVerify.stopped -and -not (Test-DaemonFault 'p1') -and -not $confirmed) 'drop/clear lost verify cancellation or manufactured success'
-Assert (@($eventQueue|Where-Object {$_.kind -eq 'post-switch-verify' -and $_.tag -eq 'p1' -and $_.code -eq 'timeout'}).Count -eq 1) 'clear discarded cancelled verify failure'
-Invoke-DaemonDecision
-Assert (-not $confirmed -and $active -eq 'p2' -and $decision.episode.status -eq 'verifying') 'drop/clear confirmed cancelled verify via light success instead of normal failure handling'
-Assert (@($started|Select-Object -Skip $before|Where-Object {$_.tag -eq 'p1' -and -not $_.verify}).Count -eq 0) 'clear launched light probe before cancelled verify was reduced'
-Assert (@($eventQueue|Where-Object {$_.kind -eq 'post-switch-verify' -and $_.tag -eq 'p2' -and $_.code -eq 'skipped'}).Count -eq 1) 'next selected path bypassed ordinary Q verification budget'
-$script:clockMs=3400;Invoke-DaemonDecision
-Assert (-not $confirmed -and $decision.episode.verifySkipped) 'Q refusal after cancelled verify manufactured confirmation'
+# A single Drain must retain cancelled verify across repeated injections/clears.
+# If clear starts a light probe by mistake, deliver its success before the reducer.
+foreach($sequence in @('drop,clear','drop,drop,clear','blip,blip,clear','drop,blip,clear','blip,drop,clear','drop,clear,drop,clear')){
+    Fixture;Open-Episode;Answer-Round;Select-Second;$script:TransportTestBuild=$true
+    $cancelledVerify=$pathChecks.p1.handle;$before=$started.Count
+    $script:clockMs=3200
+    $commands=@(foreach($fault in $sequence.Split(',')){
+        $ms=0;if($fault -eq 'blip'){$ms=5000}
+        Fault-Frame $fault 'p1' $ms
+    })
+    Fault-Input ($commands -join "`n")
+    $script:clockMs=3300
+    if($pathChecks.ContainsKey('p1') -and $pathChecks.p1.purpose -eq 'light'){Deliver 'p1' 'ok'}
+    Assert ($cancelledVerify.stopped -and -not (Test-DaemonFault 'p1') -and -not $confirmed) 'drop/clear lost verify cancellation or manufactured success'
+    Assert (@($eventQueue|Where-Object {$_.kind -eq 'post-switch-verify' -and $_.tag -eq 'p1' -and $_.code -eq 'timeout'}).Count -eq 1) 'clear discarded cancelled verify failure'
+    Invoke-DaemonDecision
+    Assert ($decision.paths.p1.lastCheckAt -eq 3200 -and $decision.paths.p1.successStreak -eq 0) 'cancelled verify failure did not reach reducer'
+    Assert (-not $confirmed -and $active -eq 'p2' -and $decision.episode.status -eq 'verifying') 'drop/clear confirmed cancelled verify via light success instead of normal failure handling'
+    Assert (@($started|Select-Object -Skip $before|Where-Object {$_.tag -eq 'p1' -and -not $_.verify}).Count -eq 0) 'clear launched light probe before cancelled verify was reduced'
+    Assert (@($eventQueue|Where-Object {$_.kind -eq 'post-switch-verify' -and $_.tag -eq 'p2' -and $_.code -eq 'skipped'}).Count -eq 1) 'next selected path bypassed ordinary Q verification budget'
+    $script:clockMs=3400;Invoke-DaemonDecision
+    Assert (-not $confirmed -and $decision.episode.verifySkipped) 'Q refusal after cancelled verify manufactured confirmation'
+}
 # Invalid metadata never changes state and is never echoed to logs/bus.
 Fixture;$script:TransportTestBuild=$true
 foreach($fields in @(@{fault='drop';tag='foreign'},@{fault='DROP';tag='p0'},@{fault='blip';tag='p0';ms='60001'},@{fault='blip';tag='p0';ms='NaN'},@{fault='drop';tag='p0';password='sentinel-secret'},@{fault='drop';tag="p0`nforged"})){

@@ -109,10 +109,12 @@ function Invoke-DaemonFaultCommand($Fields) {
     $nowMs=Get-DaemonTime
     $script:transportFaults[$tag]=@{fault=$fault;at=$nowMs;until=$(if($fault -ceq 'blip'){$nowMs+$ms}else{$null})}
     # Retire in-flight successes for this tag. Do not reset episode/Q/generation history.
-    $verifyFault=$false
+    # A previous command in the same Drain may already have cancelled the ticket.
+    # Replace any queued verify result with one failure until the reducer consumes it.
+    $verifyFault=@($eventQueue|Where-Object {$_.kind -eq 'post-switch-verify' -and $_.tag -eq $tag}).Count -gt 0
     if($pathChecks.ContainsKey($tag)){
         $ticket=$pathChecks[$tag];Stop-TransportPathCheck $ticket.handle;$pathChecks.Remove($tag)
-        $verifyFault=($ticket.purpose -eq 'post-switch-verify')
+        $verifyFault=$verifyFault -or ($ticket.purpose -eq 'post-switch-verify')
     }
     if($probes.ContainsKey($tag)){Stop-TransportProbe $probes[$tag];$probes.Remove($tag)}
     $script:eventQueue=@($eventQueue|Where-Object {$_.tag -ne $tag -or $_.kind -notin @('path-check','post-switch-verify')})
