@@ -14,7 +14,7 @@ using Microsoft.Win32;
 
 namespace RemoteAgents.Launcher
 {
-    internal static class Program
+    internal static partial class Program
     {
         public static string Version { get { return Assembly.GetExecutingAssembly().GetName().Version.ToString(); } }
         public static string Exe { get { return Assembly.GetExecutingAssembly().Location; } }
@@ -103,9 +103,7 @@ namespace RemoteAgents.Launcher
                             bool command = args.Any(a => new[] { "--exit", "--uninstall", "--logs", "--rollback", "--rollback-previous", "--restart-components", "--check-updates", "--settings", "--disk-shell" }.Contains(a));
                             // --tray with --home is also the isolated development/smoke entry point.
                             bool install = external && !command && !(args.Contains("--tray") && args.Contains("--home"));
-                            if (owned && UpgradeInstaller.RecoverPreviousRollback(home)) {
-                                launch(target, false); return 0;
-                            }
+                            if (ResumePreviousRollbackAtStartup(home, owned, launch)) return 0;
                             if (owned && args.Contains("--rollback-previous")) {
                                 var engine = new UpdateEngine(home, Version);
                                 string previous = UpgradeInstaller.PreviousVersion(home, engine); bool blockCurrent;

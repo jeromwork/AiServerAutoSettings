@@ -93,7 +93,7 @@ namespace RemoteAgents.Launcher
                     new PreviousReplacement(PreviousImage(home), Path.Combine(home, Product.ExeName), Json.Str(p, "exeSha256"))) {
                     Json.Write(ManualRollbackPath(home), p);
                     PreviousRollbackBoundary("journal");
-                    CompletePreviousRollback(home, engine, p, image);
+                    CompletePreviousRollback(home, engine, p, image, starting: true);
                 }
                 return version;
             }
@@ -103,8 +103,12 @@ namespace RemoteAgents.Launcher
             if (!File.Exists(ManualRollbackPath(home))) return false;
             using (LockReceipt(home, default(CancellationToken), ReceiptWorkerFuseMs)) {
                 if (!File.Exists(ManualRollbackPath(home))) return false;
-                CompletePreviousRollback(home, new UpdateEngine(home, "0.0.0"), UpdateObservation.ReadReceipt(ManualRollbackPath(home)));
-                return true;
+                try {
+                    return CompletePreviousRollback(home, new UpdateEngine(home, "0.0.0"), UpdateObservation.ReadReceipt(ManualRollbackPath(home)));
+                } catch (Exception ex) {
+                    new Journal(home).Write("update.rollback.manual.journal.failed kind=" + ex.GetType().Name);
+                    throw;
+                }
             }
         }
 #if PORTABLE_TEST && !UPDATE_HEALTH_TESTS
@@ -151,8 +155,24 @@ namespace RemoteAgents.Launcher
             }
             public void Dispose() { if (File.Exists(temp)) File.Delete(temp); }
         }
-        static void CompletePreviousRollback(string home, UpdateEngine engine, Dictionary<string, object> p, PreviousReplacement prepared = null)
+        // Only the initiating call may advance Current from the source version. After a restart,
+        // Current must already be the target AND the EXE must still belong to this transaction.
+        // A pre-Current interruption is cancelled; a later pre-H4 update owns its own H2 state.
+        static bool CompletePreviousRollback(string home, UpdateEngine engine, Dictionary<string, object> p, PreviousReplacement prepared = null, bool starting = false)
         {
+            string target = Path.Combine(home, Product.ExeName);
+            // A different Current alone proves staleness; do not require access to its EXE.
+            bool targetCurrent = engine.Current == Json.Str(p, "ver");
+            string actual = (starting || targetCurrent) && File.Exists(target) ? Files.Hash(target) : "";
+            if (!starting && (!targetCurrent || actual.Length == 0 ||
+                (!actual.Equals(Json.Str(p, "fromHash"), StringComparison.OrdinalIgnoreCase) &&
+                 !actual.Equals(Json.Str(p, "exeSha256"), StringComparison.OrdinalIgnoreCase)))) {
+                // Caller owns receipt-mutex. Do not inspect or consume another transaction's
+                // receipt/pending, previous descriptor or backup before retiring stale evidence.
+                File.Delete(ManualRollbackPath(home));
+                new Journal(home).Write("update.rollback.manual.journal.stale");
+                return false;
+            }
             if (ReceiptRecoveryBlocked(home) || File.Exists(ReceiptPath(home)) || engine.Pending)
                 throw new InvalidOperationException("Ручной откат заблокирован другой квитанцией обновления");
             string version = Files.SafeVersion(Json.Str(p, "ver")), from = Files.SafeVersion(Json.Str(p, "fromVersion"));
@@ -166,9 +186,7 @@ namespace RemoteAgents.Launcher
             BundleDefinition.Load(engine.Folder(version));
             if (File.Exists(PreviousPath(home)) && Files.Hash(PreviousPath(home)) != descriptorHash)
                 throw new InvalidDataException("Описание предыдущей версии изменилось");
-            string target = Path.Combine(home, Product.ExeName);
             if (!File.Exists(target)) throw new InvalidDataException("Установленный EXE ручного отката отсутствует");
-            string actual = Files.Hash(target);
             bool installed = actual.Equals(hash, StringComparison.OrdinalIgnoreCase);
             if (!actual.Equals(fromHash, StringComparison.OrdinalIgnoreCase) && !installed)
                 throw new InvalidDataException("Установленный EXE изменился во время отката");
@@ -200,6 +218,7 @@ namespace RemoteAgents.Launcher
                 PreviousRollbackBoundary("before-journal-delete");
                 File.Delete(ManualRollbackPath(home));
             }
+            return true;
         }
     }
 }

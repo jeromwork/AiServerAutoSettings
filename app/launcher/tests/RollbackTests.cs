@@ -142,7 +142,8 @@ namespace RemoteAgents.Launcher
             // Execute the actual installed managed image after a crash, using the fixture's runtime config.
             var start = new ProcessStartInfo("dotnet") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
             start.ArgumentList.Add("exec"); start.ArgumentList.Add("--runtimeconfig");
-            start.ArgumentList.Add(Path.ChangeExtension(Image, ".runtimeconfig.json"));
+            string runtimeConfig = Environment.GetEnvironmentVariable("RA_H4_RUNTIME_CONFIG") ?? Path.ChangeExtension(Image, ".runtimeconfig.json");
+            start.ArgumentList.Add(runtimeConfig); start.Environment["RA_H4_RUNTIME_CONFIG"] = runtimeConfig;
             start.ArgumentList.Add(installed ? Target(home) : Image);
             start.ArgumentList.Add(mode); start.ArgumentList.Add(home); start.ArgumentList.Add(extra);
             using (var process = Process.Start(start)) {
@@ -196,17 +197,49 @@ namespace RemoteAgents.Launcher
                 // Emulate an EXE predating H4: ordinary bundle/state reads, NO manual journal recovery.
                 ConsistentTargetState(home, extra, legacy: true); return 0;
             }
+            if (mode.StartsWith("--legacy-", StringComparison.Ordinal)) {
+                // d1dc5b4's activation algorithm: no call to H4 recovery, SavePrevious or
+                // current H4 Apply/Activate. The journal is never read, moved or hidden.
+                string version = mode == "--legacy-image" ? "1.0.0" : "3.0.0";
+                if (mode == "--legacy-bundle") LegacyActivate(home, version, accept: true);
+                else LegacyActivatePrepared(home, version);
+                return 0;
+            }
+            if (mode == "--cancel-start") {
+                var before = DurableSnapshot(home); before.Remove(Path.DirectorySeparatorChar + "state" + Path.DirectorySeparatorChar + "rollback-previous.json");
+                Check(!Program.ResumePreviousRollbackAtStartup(home, true, (_, __) => { throw new Exception("cancelled rollback relaunched"); }), "pre-Current journal does not request relaunch");
+                Engine(home).Recover();
+                Check(Engine(home).Current == "2.0.0" && Files.Hash(Target(home)) == extra, "pre-Current startup keeps source EXE/version");
+                var after = DurableSnapshot(home);
+                Check(before.Count == after.Count && before.All(p => after.ContainsKey(p.Key) && after[p.Key] == p.Value), "cancelled intent only removes journal");
+                return 0;
+            }
+            if (mode == "--stale-start") {
+                var before = DurableSnapshot(home); before.Remove(Path.DirectorySeparatorChar + "state" + Path.DirectorySeparatorChar + "rollback-previous.json");
+                Check(!Program.ResumePreviousRollbackAtStartup(home, true, (_, __) => { throw new Exception("stale rollback relaunched"); }), "stale startup continues to the current image");
+                Engine(home).Recover();
+                Check(!File.Exists(UpgradeInstaller.ManualRollbackPath(home)), "startup removes stale journal");
+                Check(!Program.ResumePreviousRollbackAtStartup(home, true, (_, __) => { throw new Exception("stale relaunch loop"); }), "stale cleanup is idempotent");
+                var after = DurableSnapshot(home);
+                Check(before.Count == after.Count && before.All(p => after.ContainsKey(p.Key) && after[p.Key] == p.Value), "startup preserves newer EXE, H2 receipt/pending and all durable files");
+                Check(HasDiagnostic(home, "update.rollback.manual.journal.stale"), "stale journal has diagnostic");
+                return 0;
+            }
             if (mode == "--start") {
-                // Exactly the recovery entry used by Program before normal startup/StartLauncher.
-                UpgradeInstaller.RecoverPreviousRollback(home);
+                // Production Program startup branch, including a real installed-image relaunch.
+                Program.ResumePreviousRollbackAtStartup(home, true, (path, after) => {
+                    Check(path == Target(home) && !after, "startup relaunches the installed rollback target");
+                    Child(home, "--legacy-start", extra, installed: true);
+                });
                 Engine(home).Recover(); ConsistentTargetState(home, extra);
-                UpgradeInstaller.RecoverPreviousRollback(home); ConsistentTargetState(home, extra); return 0;
+                Check(!Program.ResumePreviousRollbackAtStartup(home, true, (_, __) => { throw new Exception("relaunch loop"); }), "next startup continues normally");
+                ConsistentTargetState(home, extra); return 0;
             }
             if (mode.StartsWith("--blocked-", StringComparison.Ordinal)) {
                 bool refused = false;
                 try {
                     var blockedEngine = Engine(home);
-                    if (mode == "--blocked-start") UpgradeInstaller.RecoverPreviousRollback(home);
+                    if (mode == "--blocked-start") Program.ResumePreviousRollbackAtStartup(home, true, (_, __) => { throw new Exception("blocked startup relaunched"); });
                     else if (mode == "--blocked-apply") UpgradeInstaller.Apply(home, Image, Path.Combine(home, "next.zip"), "1.0.0", false, _ => true);
                     else if (mode == "--blocked-ota") UpgradeInstaller.ActivatePrepared(home, blockedEngine, new Manifest { Version = "3.0.0" });
                     else blockedEngine.Activate("3.0.0");
@@ -254,10 +287,13 @@ namespace RemoteAgents.Launcher
                     // Committed recovery must not depend on retaining the old backup image.
                     if (mode == "--start") File.Delete(Backup(sub));
                 }
-                if (boundary == "preflight") {
-                    Check(!File.Exists(UpgradeInstaller.ManualRollbackPath(sub)) && engine.Current == "2.0.0", "preflight crash leaves old state intact");
-                    // No transaction was started: explicitly retry the requested rollback in a fresh process.
-                    Child(sub, "--interrupt", "journal");
+                if (boundary == "preflight" || boundary == "journal") {
+                    // Current has not committed the rollback intent yet. The new live-journal
+                    // criterion cancels this attempt; it must not replay a source-version journal.
+                    Child(sub, "--cancel-start", Files.Hash(Image), installed: true);
+                    Check(!File.Exists(UpgradeInstaller.ManualRollbackPath(sub)) && engine.Current == "2.0.0", "pre-Current crash leaves old state intact");
+                    // Explicitly retry the user's request, then interrupt a live journal.
+                    Child(sub, "--interrupt", "current");
                 }
                 if (mode == "--apply") WriteZip(Path.Combine(sub, "next.zip"), "3.0.0");
                 if (mode == "--ota" || mode == "--bundle") {
@@ -265,6 +301,144 @@ namespace RemoteAgents.Launcher
                 }
                 Child(sub, mode, oldHash, installed: true);
                 if (mode == "--start") Child(sub, "--legacy-start", oldHash, installed: true);
+            }
+        }
+        // Snapshot durable data separately from the diagnostic output a refusal must append.
+        static Dictionary<string, string> DurableSnapshot(string home)
+        { return Snapshot(home).Where(p => !p.Key.StartsWith(Path.DirectorySeparatorChar + "logs" + Path.DirectorySeparatorChar, StringComparison.Ordinal)).ToDictionary(p => p.Key, p => p.Value); }
+        static bool HasDiagnostic(string home, string code)
+        { return Directory.GetFiles(Path.Combine(home, "logs"), "*", SearchOption.AllDirectories).Any(p => File.ReadAllText(p).Contains(code)); }
+
+        // Frozen pre-H4 activation semantics from d1dc5b4. These deliberately do not call the
+        // production H4 activation methods: the restored old image knows nothing of the journal.
+        static void LegacyActivate(string home, string version, bool accept = false)
+        {
+            using (UpgradeInstaller.LockReceipt(home)) {
+                var engine = Engine(home);
+                Files.SafeVersion(version); BundleDefinition.Load(engine.Folder(version));
+                if (engine.Pending) throw new InvalidOperationException("Уже ожидается проверка здоровья");
+                string old = engine.Current;
+                if (accept && old.Length != 0) {
+                    Files.Atomic(Path.Combine(engine.Root, "previous.txt"), old + "\n");
+                    Files.Atomic(Path.Combine(engine.Root, "current.txt"), version + "\n"); engine.Cleanup(); return;
+                }
+                if (old.Length == 0) { Files.Atomic(Path.Combine(engine.Root, "current.txt"), version + "\n"); engine.Cleanup(); return; }
+                Json.Write(Path.Combine(engine.Root, "pending.json"), new { version, previous = old, startedUtc = DateTime.UtcNow.ToString("o") });
+                Files.Atomic(Path.Combine(engine.Root, "previous.txt"), old + "\n");
+                Files.Atomic(Path.Combine(engine.Root, "current.txt"), version + "\n"); engine.Cleanup();
+            }
+        }
+        static void LegacyActivatePrepared(string home, string version)
+        {
+            using (UpgradeInstaller.LockReceipt(home, default(CancellationToken), UpgradeInstaller.ReceiptWorkerFuseMs)) {
+                var engine = Engine(home); string source = Path.Combine(engine.Folder(version), Product.ExeName);
+                // The fixture has no blocked receipt. Like pre-H4 RequireReceiptRecovery,
+                // this does not inspect a manual journal.
+                if (UpgradeInstaller.ReceiptRecoveryBlocked(home) || engine.Pending || File.Exists(UpgradeInstaller.ReceiptPath(home)))
+                    throw new InvalidOperationException("Обновление ещё проверяется");
+                Check(File.Exists(Target(home)) && File.Exists(source), "legacy OTA has both real executable images");
+                string sourceHash = Files.Hash(source);
+                File.Copy(Target(home), Backup(home), true);
+                Json.Write(UpgradeInstaller.ReceiptPath(home), new { version, previous = engine.Current,
+                    launcherVersion = FileVersionInfo.GetVersionInfo(source).FileVersion, startedUtc = DateTime.UtcNow.ToString("o"),
+                    previousHash = Files.Hash(Backup(home)), currentHash = sourceHash });
+                try { UpgradeInstaller.ReplaceImage(source, Target(home)); LegacyActivate(home, version); }
+                catch {
+                    if (engine.Pending && engine.Current == version) engine.Rollback(); else engine.Recover();
+                    UpgradeInstaller.ReplaceImage(Backup(home), Target(home)); File.Delete(UpgradeInstaller.ReceiptPath(home)); throw;
+                }
+            }
+        }
+        static void LegacyUpdateAfterCompletedRollback(string home)
+        {
+            foreach (string legacy in new[] { "--legacy-ota", "--legacy-bundle", "--legacy-image" })
+            foreach (string next in new[] { "--stale-start", "--apply", "--ota", "--bundle" }) {
+                string sub = Path.Combine(home, legacy + next); var engine = Seed(sub);
+                File.Copy(Image, Target(sub), true); using (var f = new FileStream(Target(sub), FileMode.Append)) f.WriteByte(0);
+                string oldHash = Files.Hash(Target(sub)); Upgrade(sub, engine, "2.0.0"); Accept(sub, engine);
+                Json.Write(Path.Combine(engine.Root, "update-state.json"), new { resumeVpn = true });
+                Child(sub, "--interrupt", "before-journal-delete");
+                string journal = Files.Hash(UpgradeInstaller.ManualRollbackPath(sub));
+                string version = legacy == "--legacy-image" ? "1.0.0" : "3.0.0";
+                Bundle(engine, version); string source = Path.Combine(engine.Folder(version), Product.ExeName);
+                File.Copy(Image, source); using (var f = new FileStream(source, FileMode.Append)) f.WriteByte(1);
+                Child(sub, legacy, oldHash, installed: true);
+                Check(File.Exists(UpgradeInstaller.ManualRollbackPath(sub)) && Files.Hash(UpgradeInstaller.ManualRollbackPath(sub)) == journal, "pre-H4 update leaves completed manual journal untouched");
+                Check(engine.Current == version && (legacy == "--legacy-bundle" || engine.Pending), "pre-H4 update really activates another transaction");
+                var receipt = legacy == "--legacy-bundle" ? null : Files.ReadSharedText(UpgradeInstaller.ReceiptPath(sub));
+                var pending = legacy == "--legacy-bundle" ? null : Files.ReadSharedText(Path.Combine(engine.Root, "pending.json"));
+                Action update = () => {
+                    if (next == "--apply") UpgradeInstaller.Apply(sub, Image, Path.Combine(sub, "next.zip"), "1.0.0", false, _ => true);
+                    else if (next == "--ota") UpgradeInstaller.ActivatePrepared(sub, engine, new Manifest { Version = "4.0.0", LauncherHash = Files.Hash(Image), LauncherVersion = FileVersionInfo.GetVersionInfo(Image).FileVersion });
+                    else engine.Activate("4.0.0");
+                };
+                // First action after the legacy process exits is the production startup branch
+                // or Apply/OTA/Activate itself. Never pre-clean through RequireReceiptRecovery.
+                if (next == "--stale-start") Child(sub, next, "", installed: true);
+                else {
+                    if (next == "--apply") WriteZip(Path.Combine(sub, "next.zip"), "4.0.0");
+                    else { Bundle(engine, "4.0.0"); File.Copy(Image, Path.Combine(engine.Folder("4.0.0"), Product.ExeName)); }
+                    bool refused = false;
+                    try { update(); } catch (InvalidOperationException) { refused = true; }
+                    Check(refused == (receipt != null), "only a live H2 health check may defer the next update");
+                }
+                Check(!File.Exists(UpgradeInstaller.ManualRollbackPath(sub)) && HasDiagnostic(sub, "update.rollback.manual.journal.stale"), "stale journal retired before next startup/update checks");
+                if (receipt != null) {
+                    Check(Files.ReadSharedText(UpgradeInstaller.ReceiptPath(sub)) == receipt && Files.ReadSharedText(Path.Combine(engine.Root, "pending.json")) == pending, "H2 receipt/pending are byte-for-byte intact");
+                    // H2 can still accept the newer image after H4 cleaned the stale journal.
+                    Accept(sub, engine);
+                    Check(engine.Current == version && !engine.Pending, "new H2 transaction completes normally");
+                    if (next != "--stale-start") {
+                        update();
+                        Check(engine.Current == "4.0.0" && engine.Previous == version && engine.Pending, "next H4 update proceeds after H2 health acceptance");
+                    }
+                } else if (next != "--stale-start") Check(engine.Current == "4.0.0" && engine.Previous == "3.0.0", "new H4 operation proceeds after legacy bundle activation");
+            }
+        }
+        static void StaleJournalWithForeignRecovery(string home)
+        {
+            var engine = Seed(home); File.Copy(Image, Target(home), true);
+            using (var f = new FileStream(Target(home), FileMode.Append)) f.WriteByte(0);
+            Upgrade(home, engine, "2.0.0"); Accept(home, engine);
+            Json.Write(Path.Combine(engine.Root, "update-state.json"), new { resumeVpn = true });
+            Child(home, "--interrupt", "before-journal-delete");
+            Bundle(engine, "3.0.0"); Files.Atomic(Path.Combine(engine.Root, "current.txt"), "3.0.0\n");
+            Files.Atomic(Path.Combine(engine.Root, "previous.txt"), "2.0.0\n");
+            // None of these foreign recovery records or rollback inputs may prevent stale
+            // journal cleanup or be consumed while doing it. H2 owns their eventual recovery.
+            File.WriteAllText(UpgradeInstaller.ReceiptPath(home), "foreign receipt");
+            File.WriteAllText(UpgradeInstaller.RecoveryBlockPath(home), "foreign recovery");
+            Json.Write(Path.Combine(engine.Root, "pending.json"), new { version = "3.0.0", previous = "2.0.0" });
+            File.WriteAllText(UpgradeInstaller.PreviousPath(home), "foreign descriptor"); File.Delete(Backup(home));
+            Child(home, "--stale-start", "", installed: true);
+            Check(UpgradeInstaller.ReceiptRecoveryBlocked(home) && engine.Pending && engine.Current == "3.0.0", "stale cleanup leaves foreign H2 recovery owned by H2");
+        }
+        static void ImpossibleLiveJournal(string home)
+        {
+            foreach (string boundary in new[] { "before-exe", "before-journal-delete" })
+            foreach (string failure in new[] { "previous", "bundle", "descriptor", "backup", "receipt", "pending", "recovery" }) {
+                if (boundary == "before-journal-delete" && failure == "backup") continue; // Installed target needs no backup.
+                string sub = Path.Combine(home, boundary + failure); var engine = Seed(sub);
+                File.Copy(Image, Target(sub), true); using (var f = new FileStream(Target(sub), FileMode.Append)) f.WriteByte(0);
+                Upgrade(sub, engine, "2.0.0"); Accept(sub, engine);
+                Json.Write(Path.Combine(engine.Root, "update-state.json"), new { resumeVpn = true });
+                Child(sub, "--interrupt", boundary);
+                if (failure == "previous") Files.Atomic(Path.Combine(engine.Root, "previous.txt"), "9.0.0\n");
+                if (failure == "bundle") File.WriteAllText(Path.Combine(engine.Folder("1.0.0"), "components.json"), "[]");
+                if (failure == "descriptor") File.WriteAllText(UpgradeInstaller.PreviousPath(sub), "changed");
+                if (failure == "backup") File.Delete(Backup(sub));
+                if (failure == "receipt") File.WriteAllText(UpgradeInstaller.ReceiptPath(sub), "other receipt");
+                if (failure == "pending") Json.Write(Path.Combine(engine.Root, "pending.json"), new { version = "1.0.0", previous = "2.0.0" });
+                if (failure == "recovery") File.WriteAllText(UpgradeInstaller.RecoveryBlockPath(sub), "other recovery");
+                var before = DurableSnapshot(sub); bool refused = false;
+                try { Program.ResumePreviousRollbackAtStartup(sub, true, (_, __) => { throw new Exception("impossible rollback relaunched"); }); }
+                catch (Exception ex) {
+                    if (!(ex is InvalidDataException) && !(ex is InvalidOperationException) && !(ex is IOException) && !(ex is ArgumentException)) throw;
+                    refused = true;
+                }
+                var after = DurableSnapshot(sub);
+                Check(refused && before.Count == after.Count && before.All(p => after.ContainsKey(p.Key) && after[p.Key] == p.Value), "impossible live recovery refuses without changing durable data: " + boundary + failure);
+                Check(HasDiagnostic(sub, "update.rollback.manual.journal.failed"), "impossible live recovery diagnostic");
             }
         }
         static void AtomicReplaceRefusal(string home)
@@ -290,10 +464,10 @@ namespace RemoteAgents.Launcher
             // Crash scratch files are disposable, not durable recovery inputs. Start without one:
             // each failed retry must clean its own scratch and preserve EVERY existing file below.
             File.Delete(Target(home) + ".rollback.tmp");
-            var before = Snapshot(home);
+            var before = DurableSnapshot(home);
             foreach (string mode in new[] { "--blocked-start", "--blocked-apply", "--blocked-ota", "--blocked-bundle" }) {
                 Child(home, mode, hash, installed: true);
-                var after = Snapshot(home);
+                var after = DurableSnapshot(home);
                 Check(before.Count == after.Count && before.All(p => after.ContainsKey(p.Key) && after[p.Key] == p.Value), "failed recovery preserves files before " + mode);
             }
             Directory.Delete(denied);
@@ -362,6 +536,7 @@ namespace RemoteAgents.Launcher
             if (args.Length > 0) return ChildMain(args);
             WithHome(ActivationAndRetention); WithHome(h => SuccessfulRollback(h, false)); WithHome(h => SuccessfulRollback(h, true));
             WithHome(Refusals); WithHome(h => BusyMutex(h, false)); WithHome(h => BusyMutex(h, true)); WithHome(RecoverInterrupted); WithHome(AtomicReplaceRefusal); WithHome(RecoveryReplaceRefusal); WithHome(FinalReplaceFailure); WithHome(RealWriteFailure);
+            WithHome(LegacyUpdateAfterCompletedRollback); WithHome(StaleJournalWithForeignRecovery); WithHome(ImpossibleLiveJournal);
             WithHome(AutoRollbackConsumesDescriptor); WithHome(ApplyAndBundleOnly); Presentation();
             NetHelperVersionTests.Run();
             Console.WriteLine("PASS: RollbackTests (" + checks + " checks; manual events, local transactions, no Windows/network)"); return 0;

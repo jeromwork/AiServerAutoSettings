@@ -228,6 +228,7 @@
     <Compile Include="../UpgradeInstaller.Rollback.cs" />
     <Compile Include="../NetHelperInstall.Version.cs" />
     <Compile Include="RollbackTests.cs" />
+    <Compile Include="../Program.Startup.cs" />
     <Compile Include="../StatusView.cs" Link="StatusView.cs" />
     <Compile Include="../Data.cs" Link="Data.cs" />
     <Compile Include="UpdateAutomationTests.cs" />
