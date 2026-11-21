@@ -33,7 +33,7 @@ namespace RemoteAgents.Launcher
                 try {
                     started = now;
                     if (Definition.Elevated) { elevated = new ElevatedTask(home, Definition.Name); elevated.Start(); }
-                    else { job = new NativeJob(); process = job.Start(Expand(Definition.Exe), Definition.Args.Select(Expand).ToArray(), Expand(Definition.Cwd)); }
+                    else { job = new NativeJob(); process = job.Start(Expand(Definition.Exe), Definition.Args.Select(Expand).ToArray(), Expand(Definition.Cwd)); ApplyPriority(); }
                     log.Write("component." + Definition.Name + ".start");
                 } catch { if (elevated != null) elevated.Dispose(); elevated = null; if (job != null) job.Dispose(); job = null; process = null; next = now.AddSeconds(delay); delay = Math.Min(60, delay * 2); log.Write("component." + Definition.Name + ".start.failed"); }
             }
@@ -49,6 +49,9 @@ namespace RemoteAgents.Launcher
             } catch { Summary = "нет данных"; }
             if (Healthy && (now - started).TotalSeconds >= 120) delay = 5;
         }
+        // Связь не должна отставать от обычных программ при нехватке процессора/памяти; сбой установки приоритета не фатален.
+        void ApplyPriority()
+        { if (Definition.Priority == "above-normal") { try { process.PriorityClass = ProcessPriorityClass.AboveNormal; } catch { log.Write("component." + Definition.Name + ".priority.failed"); } } }
         public object Snapshot() { return new { name = Definition.Name, title = Definition.Title, enabled = Enabled, critical = Definition.Critical, alive = Alive, ok = Healthy, summary = Summary, pid = Alive && process != null ? (int?)process.Id : null }; }
         public void SetEnabled(bool enabled) { Dispose(); Enabled = enabled; attempted = false; next = DateTime.MinValue; delay = 5; Tick(); }
         public void Dispose() { Dispose(false); }
