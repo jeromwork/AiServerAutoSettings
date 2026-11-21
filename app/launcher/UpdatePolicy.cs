@@ -45,7 +45,8 @@ namespace RemoteAgents.Launcher
     internal sealed class UpdateSchedule
     {
         DateTime next = DateTime.MinValue;
-        internal void Retry() { next = DateTime.MinValue; }
+        internal Action RetryRequested; // шина: «проверить снова» без опроса расписания
+        internal void Retry() { next = DateTime.MinValue; var r = RetryRequested; if (r != null) r(); }
         internal bool Due(DateTime now, Dictionary<string, object> update, bool occupied)
         { return Json.Bool(update, "enabled", true) && !occupied && now >= next; }
         internal void Started(DateTime now, Dictionary<string, object> update) { next = now.AddHours(UpdatePolicy.Interval(update)); }

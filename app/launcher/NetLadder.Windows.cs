@@ -221,6 +221,8 @@ namespace RemoteAgents.Launcher
         static string Stages(LadderResult r)
         { return string.Join(",", r.Stages.Where(s => !s.Skipped).Select(s => s.Stage + ":" + (s.Ok ? "ok" : s.Code) + "/" + s.Ms)); }
         internal void Kick() { schedule.Kick(); }
+        // block.ready transport: первый прогон сторожа (вызывать из потока трея, как и Tick).
+        internal void TransportReady() { schedule.TransportReady(clock.ElapsedMilliseconds); }
 
         // После vpn.on.ok: полная лестница в фоне; ждёт свободного места среди прогонов сторожа (до 30 с).
         internal void RunE2E(string att)

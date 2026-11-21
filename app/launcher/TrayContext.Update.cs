@@ -49,7 +49,7 @@ namespace RemoteAgents.Launcher
                 Application.OpenForms.Cast<Form>().Any(f => f is ConfigWindow && ((ConfigWindow)f).IsApplying || f is SetupWizard && ((SetupWizard)f).IsApplying), false);
         }
         string SettingsHash() { return Files.Hash(Path.Combine(home, "config.json")); }
-        void CheckUpdates() { StartUpdateCheck(true); }
+        void CheckUpdates() { if (bus != null) bus.Publish(BusTopics.UpdateRequested, BusTopics.Sources.Tray, "reason", "button"); else StartUpdateCheck(true); }
         void PollUpdates()
         {
             if (engine.Pending || File.Exists(Path.Combine(engine.Root, "exe-upgrade.json")) || updateChecking || closing) return;
@@ -59,7 +59,6 @@ namespace RemoteAgents.Launcher
                 return;
             }
             if (checkRequested && !UpdateOccupied()) { StartUpdateCheck(true); return; }
-            if (updateSchedule.Due(DateTime.UtcNow, config.Update, UpdateOccupied())) StartUpdateCheck(false);
         }
         async void StartUpdateCheck(bool manual)
         {

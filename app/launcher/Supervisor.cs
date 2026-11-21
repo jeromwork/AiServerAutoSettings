@@ -10,6 +10,7 @@ namespace RemoteAgents.Launcher
     {
         public readonly Component Definition; readonly string home, bundle; readonly Journal log;
         NativeJob job; Process process; ElevatedTask elevated; bool attempted; int delay = 5; DateTime next = DateTime.MinValue, started;
+        internal EventBus Bus; // шина: component.start|exit (ставит TrayContext)
         public bool Enabled; public bool Healthy; public string Summary = "нет данных"; public bool Alive;
         public ComponentRuntime(Component c, bool enabled, string home, string bundle, Journal log)
         { Definition = c; Enabled = c.CommandManaged ? false : enabled; this.home = home; this.bundle = bundle; this.log = log; }
@@ -27,7 +28,7 @@ namespace RemoteAgents.Launcher
                 int exitCode = -1; try { exitCode = process.ExitCode; } catch { }
                 process.Dispose(); process = null; if (job != null) job.Dispose(); job = null;
                 // Код выхода в журнал: перезапуск по предохранителю памяти (75) отличается от падений; пауза общая, 5 с до 60 с.
-                next = now.AddSeconds(delay); delay = Math.Min(60, delay * 2); log.Write("component." + Definition.Name + ".exit code=" + exitCode);
+                next = now.AddSeconds(delay); delay = Math.Min(60, delay * 2); log.Write("component." + Definition.Name + ".exit code=" + exitCode); TrayBusWiring.ComponentExit(Bus, Definition.Name, exitCode);
             }
             if (elevated != null && !elevated.Alive) { elevated.Dispose(); elevated = null; next = now.AddSeconds(delay); delay = Math.Min(60, delay * 2); }
             if (Enabled && process == null && elevated == null && now >= next && (!attempted || Definition.Restart == "always")) {
@@ -36,7 +37,7 @@ namespace RemoteAgents.Launcher
                     started = now;
                     if (Definition.Elevated) { elevated = new ElevatedTask(home, Definition.Name); elevated.Start(); }
                     else { job = new NativeJob(); process = job.Start(Expand(Definition.Exe), Definition.Args.Select(Expand).ToArray(), Expand(Definition.Cwd)); ApplyPriority(); }
-                    log.Write("component." + Definition.Name + ".start");
+                    log.Write("component." + Definition.Name + ".start"); TrayBusWiring.ComponentStart(Bus, Definition.Name);
                 } catch { if (elevated != null) elevated.Dispose(); elevated = null; if (job != null) job.Dispose(); job = null; process = null; next = now.AddSeconds(delay); delay = Math.Min(60, delay * 2); log.Write("component." + Definition.Name + ".start.failed"); }
             }
             Alive = elevated != null ? elevated.Alive : process != null && !process.HasExited; Healthy = false; Summary = "нет данных";
