@@ -54,6 +54,7 @@ namespace RemoteAgents.Launcher
                 statusWatcher = new StatusDirWatcher(Path.Combine(home, "status"), blocks);
                 busParts.Add(statusWatcher);
             } catch (Exception ex) { log.Write("bus.status-watcher.failed err=" + ex.GetType().Name); }
+            StartHealth(); // H1: доска готовности после обновления
         }
 
         // tick.logship: отправка журналов и подтяжка журнала помощника (работа сама уходит в фон).
