@@ -17,6 +17,8 @@ namespace RemoteAgents.Launcher
             FuseMinimumThirtySeconds();
             HangBeforeFirstWriteIsKilled();
             ClockJumpDoesNotKill();
+            BusyUiGapSkipsOnceThenWorks();
+            SkippedStatusStillTracksResume();
             WireSupervisorTickAndEvent();
             Console.WriteLine("PASS: SupervisorStaleTests (" + assertions + " assertions passed)");
             return 0;
@@ -89,12 +91,70 @@ namespace RemoteAgents.Launcher
         {
             var started = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
             var file = started.AddSeconds(10);
-            var last = started.AddSeconds(15);
-            var afterSleep = started.AddHours(3);
-            Check(SupervisorStale.ClockJumped(last, afterSleep, 5), "gap > fuse/2 is a clock jump");
-            Check(SupervisorStale.Decide(file, afterSleep, 5, started, last) == SupervisorDecision.None, "after sleep -> only resync");
-            Check(SupervisorStale.Decide(file, afterSleep, 5, started, afterSleep.AddSeconds(-5)) == SupervisorDecision.KillAndRestart, "regular cadence, stale -> kill");
-            Check(!SupervisorStale.ClockJumped(DateTime.MinValue, afterSleep, 5), "first check is not a jump");
+            var t = started.AddSeconds(15);
+            int maxAge = 5; // fuse 30 s
+            var c = new StaleChecker();
+            // регулярные проверки раз в 5 с, статус свежий
+            Check(c.Check(file, t, maxAge, started) == SupervisorDecision.None, "first check none");
+            for (int i = 0; i < 3; i++) { t = t.AddSeconds(5); file = t; Check(c.Check(file, t, maxAge, started) == SupervisorDecision.None, "regular fresh " + i); }
+            Check(!SupervisorStale.ClockJumped(DateTime.MinValue, t, 5), "first check is not a jump");
+            // сон 3 ч: файл старый, но не убиваем
+            var woke = t.AddHours(3);
+            Check(SupervisorStale.ClockJumped(t, woke, maxAge), "gap > fuse/2 is a clock jump");
+            Check(c.Check(file, woke, maxAge, started) == SupervisorDecision.None, "after sleep -> none");
+            Check(c.AgeMs(file, woke, started) == 0, "age starts at resume");
+            // +5 с и +10 с без записи — снова не убиваем (полный предохранитель от возобновления)
+            Check(c.Check(file, woke.AddSeconds(5), maxAge, started) == SupervisorDecision.None, "+5s no write -> none");
+            Check(c.Check(file, woke.AddSeconds(10), maxAge, started) == SupervisorDecision.None, "+10s no write -> none");
+            for (int seconds = 15; seconds <= 30; seconds += 5)
+                Check(c.Check(file, woke.AddSeconds(seconds), maxAge, started) == SupervisorDecision.None, "regular check after resume " + seconds);
+            Check(c.AgeMs(file, woke.AddSeconds(30), started) == 30000, "regular ticks preserve resume origin");
+            // превышение предохранителя без записи от возобновления — убийство
+            Check(c.Check(file, woke.AddSeconds(35), maxAge, started) == SupervisorDecision.KillAndRestart, "fuse exceeded since resume -> kill");
+
+            // запись файла после возобновления — не убиваем
+            var c2 = new StaleChecker();
+            c2.Check(file, t, maxAge, started);
+            c2.Check(file, woke, maxAge, started);
+            c2.Check(file, woke.AddSeconds(5), maxAge, started);
+            var written = woke.AddSeconds(8);
+            for (int seconds = 10; seconds <= 35; seconds += 5)
+                Check(c2.Check(written, woke.AddSeconds(seconds), maxAge, started) == SupervisorDecision.None, "write after resume -> none " + seconds);
+            Check(c2.Check(written, woke.AddSeconds(38), maxAge, started) == SupervisorDecision.None, "age from write 30 s -> none");
+            Check(c2.Check(written, woke.AddSeconds(43), maxAge, started) == SupervisorDecision.KillAndRestart, "no further writes -> kill later");
+        }
+
+        static void BusyUiGapSkipsOnceThenWorks()
+        {
+            var started = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            int maxAge = 5; // fuse 30 s, порог скачка > 15 s
+            var file = started.AddSeconds(1);
+            foreach (int gap in new[] { 16, 20 }) {
+                var cc = new StaleChecker();
+                var t0 = started.AddSeconds(5);
+                cc.Check(file, t0, maxAge, started);
+                var t1 = t0.AddSeconds(gap); // UI занят, тик пропущен
+                Check(cc.Check(file, t1, maxAge, started) == SupervisorDecision.None, "gap " + gap + " skipped");
+                Check(cc.Check(file, t1.AddSeconds(5), maxAge, started) == SupervisorDecision.None, "gap " + gap + " next regular none");
+                for (int seconds = 10; seconds <= 30; seconds += 5)
+                    Check(cc.Check(file, t1.AddSeconds(seconds), maxAge, started) == SupervisorDecision.None, "gap " + gap + " regular check " + seconds);
+                Check(cc.Check(file, t1.AddSeconds(35), maxAge, started) == SupervisorDecision.KillAndRestart, "gap " + gap + " no permanent block, kill after fuse");
+                var written = t1.AddSeconds(36);
+                Check(cc.Check(written, t1.AddSeconds(40), maxAge, started) == SupervisorDecision.None, "gap " + gap + " fresh status restores normal work");
+            }
+        }
+
+        static void SkippedStatusStillTracksResume()
+        {
+            var started = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            var c = new StaleChecker();
+            Check(c.Check(null, started, 5, started) == SupervisorDecision.None, "no status -> none");
+            var woke = started.AddHours(3);
+            Check(c.Check(null, woke, 5, started) == SupervisorDecision.None, "resume without status -> none");
+            Check(c.AgeMs(started, woke, started) == 0, "resume remembered without status");
+            for (int seconds = 5; seconds <= 30; seconds += 5)
+                Check(c.Check(started, woke.AddSeconds(seconds), 5, started) == SupervisorDecision.None, "status becomes available after resume " + seconds);
+            Check(c.Check(started, woke.AddSeconds(35), 5, started) == SupervisorDecision.KillAndRestart, "missing status does not block later stale decision");
         }
 
         static void WireSupervisorTickAndEvent()

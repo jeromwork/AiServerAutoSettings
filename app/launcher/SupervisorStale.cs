@@ -18,10 +18,17 @@ namespace RemoteAgents.Launcher
             return Math.Max(StaleRestartFuseMs, 3 * maxAgeSec * 1000);
         }
 
-        // Возраст статуса: от более позднего из «файл записан» и «процесс запущен» (зависший до первой записи тоже стареет).
+        // Возраст статуса: от самого позднего из «файл записан», «процесс запущен» и «проверки возобновились после сна» (resyncUtc);
+        // зависший до первой записи тоже стареет, а после сна компонент снова получает полный предохранитель.
         public static double AgeMs(DateTime fileModifiedUtc, DateTime nowUtc, DateTime startedUtc)
         {
+            return AgeMs(fileModifiedUtc, nowUtc, startedUtc, DateTime.MinValue);
+        }
+
+        public static double AgeMs(DateTime fileModifiedUtc, DateTime nowUtc, DateTime startedUtc, DateTime resyncUtc)
+        {
             DateTime from = fileModifiedUtc > startedUtc ? fileModifiedUtc : startedUtc;
+            if (resyncUtc > from) from = resyncUtc;
             return (nowUtc - from).TotalMilliseconds;
         }
 
@@ -31,7 +38,8 @@ namespace RemoteAgents.Launcher
         }
 
         // Сон/пауза: если с прошлой проверки прошло больше половины предохранителя, настенные часы скакнули (выход из сна,
-        // подвисший UI-поток) — возраст файла недостоверен; только обновить точку отсчёта (lastCheckUtc), не убивать.
+        // подвисший UI-поток) — возраст файла недостоверен; не убивать, а запомнить время возобновления (resyncUtc),
+        // от которого дальше считается возраст.
         public static bool ClockJumped(DateTime lastCheckUtc, DateTime nowUtc, int maxAgeSec)
         {
             if (lastCheckUtc == DateTime.MinValue) return false;
@@ -44,11 +52,29 @@ namespace RemoteAgents.Launcher
                 ? SupervisorDecision.KillAndRestart
                 : SupervisorDecision.None;
         }
+    }
 
-        public static SupervisorDecision Decide(DateTime fileModifiedUtc, DateTime nowUtc, int maxAgeSec, DateTime startedUtc, DateTime lastCheckUtc)
+    // Состояние проверок одного компонента (чистая логика, без часов и файлов — тестируется на фальшивых часах).
+    public sealed class StaleChecker
+    {
+        DateTime lastCheckUtc = DateTime.MinValue;
+        DateTime resyncUtc = DateTime.MinValue;
+
+        // null: нет проверяемого статуса; время тика всё равно учитывается, решение об убийстве не принимается.
+        public SupervisorDecision Check(DateTime? fileModifiedUtc, DateTime nowUtc, int maxAgeSec, DateTime startedUtc)
         {
-            if (ClockJumped(lastCheckUtc, nowUtc, maxAgeSec)) return SupervisorDecision.None;
-            return Decide(fileModifiedUtc, nowUtc, maxAgeSec, startedUtc);
+            bool jumped = SupervisorStale.ClockJumped(lastCheckUtc, nowUtc, maxAgeSec);
+            lastCheckUtc = nowUtc;
+            if (jumped) resyncUtc = nowUtc;
+            if (jumped || !fileModifiedUtc.HasValue) return SupervisorDecision.None;
+            return AgeMs(fileModifiedUtc.Value, nowUtc, startedUtc) > SupervisorStale.FuseMs(maxAgeSec)
+                ? SupervisorDecision.KillAndRestart
+                : SupervisorDecision.None;
+        }
+
+        public double AgeMs(DateTime fileModifiedUtc, DateTime nowUtc, DateTime startedUtc)
+        {
+            return SupervisorStale.AgeMs(fileModifiedUtc, nowUtc, startedUtc, resyncUtc);
         }
     }
 }

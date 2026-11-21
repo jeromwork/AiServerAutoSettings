@@ -53,19 +53,22 @@ namespace RemoteAgents.Launcher
             if (Healthy && (now - started).TotalSeconds >= 120) delay = 5;
         }
         public void CheckStale() { CheckStale(DateTime.UtcNow); }
-        DateTime lastStaleCheck = DateTime.MinValue;
+        readonly StaleChecker staleChecker = new StaleChecker();
         // Только в UI-потоке (доставка tick.supervisor через TryPostUi): работает с process/job и теми же полями, что Tick().
         public void CheckStale(DateTime now)
         {
-            DateTime prevCheck = lastStaleCheck; lastStaleCheck = now;
-            if (!Enabled || Definition.Restart != "always" || (!Alive && process == null && elevated == null)) return;
+            DateTime? modified = null;
             try {
-                string file = Definition.HealthFile.Contains("{home}") ? Expand(Definition.HealthFile) : Files.Under(home, Definition.HealthFile);
-                if (!File.Exists(file)) return;
-                DateTime modified = File.GetLastWriteTimeUtc(file);
-                if (SupervisorStale.Decide(modified, now, Definition.MaxAge, started, prevCheck) == SupervisorDecision.KillAndRestart) {
+                if (Enabled && Definition.Restart == "always" && (Alive || process != null || elevated != null)) {
+                    string file = Definition.HealthFile.Contains("{home}") ? Expand(Definition.HealthFile) : Files.Under(home, Definition.HealthFile);
+                    if (File.Exists(file)) modified = File.GetLastWriteTimeUtc(file);
+                }
+            } catch { }
+            // Учитываем каждый тик, даже без доступного статуса; после сна запоминаем resyncUtc на полный предохранитель.
+            try {
+                if (staleChecker.Check(modified, now, Definition.MaxAge, started) == SupervisorDecision.KillAndRestart) {
                     // Предохранитель (конституция 4а): свежий статус компонента недоступен, если процесс завис; при срабатывании — убить процесс и перезапустить, успех не объявляет.
-                    KillStale(now, SupervisorStale.AgeMs(modified, now, started) / 1000);
+                    KillStale(now, staleChecker.AgeMs(modified.Value, now, started) / 1000);
                 }
             } catch { }
         }
