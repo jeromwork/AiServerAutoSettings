@@ -10,6 +10,7 @@ namespace RemoteAgents.Launcher
     {
         public readonly Component Definition; readonly string home, bundle; readonly Journal log;
         NativeJob job; Process process; ElevatedTask elevated; bool attempted; int delay = 5; DateTime next = DateTime.MinValue, started;
+        TransportBusBridge transportBridge;
         internal EventBus Bus; // шина: component.start|exit (ставит TrayContext)
         public bool Enabled; public bool Healthy; public string Summary = "нет данных"; public bool Alive;
         public ComponentRuntime(Component c, bool enabled, string home, string bundle, Journal log)
@@ -26,6 +27,7 @@ namespace RemoteAgents.Launcher
             }
             if (process != null && process.HasExited) {
                 int exitCode = -1; try { exitCode = process.ExitCode; } catch { }
+                if (transportBridge != null) { transportBridge.Dispose(); transportBridge = null; }
                 process.Dispose(); process = null; if (job != null) job.Dispose(); job = null;
                 // Код выхода в журнал: перезапуск по предохранителю памяти (75) отличается от падений; пауза общая, 5 с до 60 с.
                 next = now.AddSeconds(delay); delay = Math.Min(60, delay * 2); log.Write("component." + Definition.Name + ".exit code=" + exitCode); TrayBusWiring.ComponentExit(Bus, Definition.Name, exitCode);
@@ -36,9 +38,24 @@ namespace RemoteAgents.Launcher
                 try {
                     started = now;
                     if (Definition.Elevated) { elevated = new ElevatedTask(home, Definition.Name); elevated.Start(); }
+                    else if (Definition.Name == "transport") {
+                        var psi = new ProcessStartInfo {
+                            FileName = Files.Executable(Expand(Definition.Exe)),
+                            Arguments = Files.Arguments(Definition.Args.Select(Expand).ToArray()),
+                            WorkingDirectory = Expand(Definition.Cwd),
+                            UseShellExecute = false,
+                            CreateNoWindow = true,
+                            RedirectStandardInput = true,
+                            RedirectStandardOutput = true
+                        };
+                        process = Process.Start(psi);
+                        ApplyPriority();
+                        transportBridge = new TransportBusBridge(process.StandardOutput.BaseStream, process.StandardInput, Bus, Path.Combine(home, "logs"));
+                        transportBridge.Start();
+                    }
                     else { job = new NativeJob(); process = job.Start(Expand(Definition.Exe), Definition.Args.Select(Expand).ToArray(), Expand(Definition.Cwd)); ApplyPriority(); }
                     log.Write("component." + Definition.Name + ".start"); TrayBusWiring.ComponentStart(Bus, Definition.Name);
-                } catch { if (elevated != null) elevated.Dispose(); elevated = null; if (job != null) job.Dispose(); job = null; process = null; next = now.AddSeconds(delay); delay = Math.Min(60, delay * 2); log.Write("component." + Definition.Name + ".start.failed"); }
+                } catch { if (elevated != null) elevated.Dispose(); elevated = null; if (job != null) job.Dispose(); job = null; if (transportBridge != null) { transportBridge.Dispose(); transportBridge = null; } process = null; next = now.AddSeconds(delay); delay = Math.Min(60, delay * 2); log.Write("component." + Definition.Name + ".start.failed"); }
             }
             Alive = elevated != null ? elevated.Alive : process != null && !process.HasExited; Healthy = false; Summary = "нет данных";
             try {
@@ -65,6 +82,7 @@ namespace RemoteAgents.Launcher
                 try { Files.Atomic(Files.Under(home, Definition.StopFile), "stop\n"); } catch { log.Write("component." + Definition.Name + ".stop.failed"); }
             }
             if (elevated != null) { elevated.Dispose(); elevated = null; }
+            if (transportBridge != null) { transportBridge.Dispose(); transportBridge = null; }
             if (job != null) { job.Dispose(); job = null; }
             if (process != null) { try { process.WaitForExit(5000); } catch { } process.Dispose(); process = null; }
             Alive = Healthy = false;
