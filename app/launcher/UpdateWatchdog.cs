@@ -74,8 +74,15 @@ namespace RemoteAgents.Launcher
                             watcher.Changed += (s, e) => wake(); watcher.Created += (s, e) => wake();
                             watcher.Deleted += (s, e) => wake(); watcher.Renamed += (s, e) => wake(); watcher.Error += (s, e) => wake();
                             watcher.EnableRaisingEvents = true; ready.Set();
-                            string reason = WaitForOutcome(home, receipt, changed, failed);
-                            if (reason.Length == 0) return 0;
+                            string reason;
+                            while (true) {
+                                reason = WaitForOutcome(home, receipt, changed, failed);
+                                if (reason.Length != 0) break;
+                                if (UpgradeInstaller.TryFinishObservation(home, () => {
+                                    ready.Reset(); singleton.ReleaseMutex(); held = false;
+                                })) return 0;
+                                // B успел зарегистрироваться после чистого выхода A: продолжаем за B.
+                            }
                             failed.Set(); // исключить приёмку, пока внешний наблюдатель останавливает новый EXE
                             var log = new Journal(home); log.Write("update.failed reason=" + reason);
                             restart = true;
@@ -88,16 +95,7 @@ namespace RemoteAgents.Launcher
                                             catch (Exception ex) { log.Write("update.stop.failed kind=" + ex.GetType().Name); throw; }
                                         }
                                         if (owned) try {
-                                            if (File.Exists(receipt)) {
-                                                var record = Json.Read(receipt);
-                                                if (!Json.Bool(record, "healthAccepted")) {
-                                                    string version = Json.Str(record, "version");
-                                                    UpgradeInstaller.ObserveImage(home, engine, false, "rollback");
-                                                    string path = Path.Combine(engine.Root, "update-state.json");
-                                                    var state = File.Exists(path) ? Json.Read(path) : Json.Map(null);
-                                                    state["queuedFailure"] = version; state["pending"] = false; state["failureReason"] = reason; Json.Write(path, state);
-                                                }
-                                            }
+                                            UpgradeInstaller.RollbackObservedImage(home, engine, reason);
                                         } finally { mutex.ReleaseMutex(); }
                                     }
                                 }, reasonFailed => UpdateObservation.RecordRollbackFailure(home, reasonFailed));
@@ -107,7 +105,7 @@ namespace RemoteAgents.Launcher
                             }
                             return preserveFailure ? 0 : 1;
                         }
-                    } finally { singleton.ReleaseMutex(); }
+                    } finally { if (held) singleton.ReleaseMutex(); }
                 }
             } catch (Exception ex) { new Journal(home).Write("update.observer.failed kind=" + ex.GetType().Name); return 1; }
             finally {
@@ -120,65 +118,30 @@ namespace RemoteAgents.Launcher
         {
             internal ProcessWaitHandle(IntPtr handle) { SafeWaitHandle = new SafeWaitHandle(handle, false); }
         }
-        static string ProcessExitOutcome(string home, Process process, int pid, string processStarted)
+        sealed class ImageProcess : UpdateObservation.IImageProcess
         {
-            bool clean = process.ExitCode == 0;
-            int count = clean ? UpgradeInstaller.NoteCleanExit(home, pid, processStarted) : 0;
-            if (count < 0) return null;
-            return UpdateObservation.Decide(true, false, true, false, clean, count);
+            readonly Process process; readonly WaitHandle exited;
+            internal ImageProcess(int pid, string started)
+            {
+                process = Process.GetProcessById(pid);
+                try {
+                    var pinned = process.Handle;
+                    if (process.StartTime.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture) != started)
+                        throw new InvalidOperationException("Process identity changed");
+                    exited = new ProcessWaitHandle(pinned);
+                } catch { process.Dispose(); throw; }
+            }
+            public WaitHandle Exited { get { return exited; } }
+            public bool HasExited { get { return process.HasExited; } }
+            public bool CleanExit { get { return process.ExitCode == 0; } }
+            public void Dispose() { exited.Dispose(); process.Dispose(); }
         }
         static string WaitForOutcome(string home, string receipt, WaitHandle changed, WaitHandle failed)
         {
-            Process process = null; WaitHandle exited = null; int pid = 0; string processStarted = ""; bool exitSignaled = false;
-            try {
-                while (File.Exists(receipt)) {
-                    var record = UpdateObservation.TryRead(() => {
-                        // Одно чтение с разрешённой атомарной заменой; без скрытых повторов/Sleep.
-                        using (var stream = new FileStream(receipt, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-                        using (var reader = new StreamReader(stream)) return Json.Map(Json.Parse(reader.ReadToEnd()));
-                    });
-                    if (record == null) {
-                        // Ошибка доступа во время Replace — ждём следующую доставку changed, это не исход.
-                        if (!File.Exists(receipt)) return "";
-                        int signal = WaitHandle.WaitAny(UpdateObservation.OutcomeHandles(failed, changed, exitSignaled ? null : exited));
-                        if (signal == 0) return "UpdateFailed";
-                        // Перечитываем актуальную пару до решения; уже доставленный exited не создаёт цикл при ошибке чтения.
-                        if (signal == 2) exitSignaled = true;
-                        continue;
-                    }
-                    if (Json.Bool(record, "healthAccepted")) return "";
-                    if (failed.WaitOne(0)) return "UpdateFailed";
-                    if (Json.Bool(record, "cleanExit")) return UpdateObservation.Decide(true, false, false, false, true, Json.Int(record, "cleanExitCount", 0));
-                    if (!UpdateObservation.SameProcess(record, pid, processStarted)) {
-                        exitSignaled = false;
-                        if (exited != null) { exited.Dispose(); exited = null; }
-                        if (process != null) { process.Dispose(); process = null; }
-                        pid = Json.Int(record, "pid", 0); processStarted = Json.Str(record, "processStarted");
-                        if (pid > 0) try {
-                            process = Process.GetProcessById(pid); var pinned = process.Handle;
-                            if (process.StartTime.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture) != processStarted) return "process-exited";
-                            exited = new ProcessWaitHandle(pinned);
-                        } catch (ArgumentException) { return "process-exited"; }
-                        catch (InvalidOperationException) { return "process-exited"; }
-                        catch (System.ComponentModel.Win32Exception) { return "process-unavailable"; }
-                    }
-                    if (process != null && process.HasExited) {
-                        string outcome = ProcessExitOutcome(home, process, pid, processStarted);
-                        if (outcome != null) return outcome;
-                        continue; // квитанция уже принадлежит другому процессу
-                    }
-                    DateTime progress;
-                    if (!DateTime.TryParse(Json.Text(record, "lastHealthUtc", Json.Str(record, "startedUtc")), null, System.Globalization.DateTimeStyles.RoundtripKind, out progress)) return "invalid-receipt";
-                    var board = new HealthBoard(new string[0], progress.ToUniversalTime());
-                    DateTime now = DateTime.UtcNow;
-                    if (board.FuseExpired(now)) return UpdateObservation.Decide(File.Exists(receipt), false, false, true);
-                    int remaining = (int)Math.Max(1, Math.Min(HealthBoard.UpdateNoProgressFuseMs, Math.Ceiling(HealthBoard.UpdateNoProgressFuseMs - (now - board.LastEventUtc).TotalMilliseconds)));
-                    var handles = UpdateObservation.OutcomeHandles(failed, changed, exited);
-                    WaitHandle.WaitAny(handles, remaining); // timer-ok: C — health.accepted недоступен при зависшем новом EXE; UpdateNoProgressFuseMs от последней готовности даёт только откат.
-                    // После ЛЮБОГО сигнала сначала перечитываем квитанцию: PID мог смениться, приёмка/штатный выход — завершиться.
-                }
-                return "";
-            } finally { if (exited != null) exited.Dispose(); if (process != null) process.Dispose(); }
+            return UpdateObservation.WaitForOutcome(() => File.Exists(receipt), () => UpdateObservation.ReadReceipt(receipt),
+                changed, failed, (pid, started) => new ImageProcess(pid, started),
+                (pid, started) => UpgradeInstaller.NoteCleanExit(home, pid, started), () => DateTime.UtcNow,
+                (handles, remaining) => WaitHandle.WaitAny(handles, remaining));
         }
     }
 }

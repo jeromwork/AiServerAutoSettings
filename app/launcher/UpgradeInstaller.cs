@@ -1,9 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Reflection;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 
 namespace RemoteAgents.Launcher
@@ -11,7 +14,74 @@ namespace RemoteAgents.Launcher
     // Shared by the downloaded-EXE installer and the upgrade selftest. Never replaces user directories.
     internal static class UpgradeInstaller
     {
-        static readonly object ReceiptGate = new object();
+        // Один замок на home для установщика, трея и внешнего наблюдателя; Mutex рекурсивен.
+        internal static string ReceiptMutexName(string home)
+        {
+            string canonical = Path.GetFullPath(home).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).ToUpperInvariant();
+            using (var sha = SHA256.Create())
+                return "Global\\RemoteAgents.UpdateReceipt." + BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(canonical))).Replace("-", "");
+        }
+        sealed class ReceiptLease : IDisposable
+        {
+            readonly Mutex mutex;
+            internal ReceiptLease(string home)
+            {
+                mutex = new Mutex(false, ReceiptMutexName(home));
+                try { mutex.WaitOne(); } catch (AbandonedMutexException) { } // прежний писатель мог погибнуть
+            }
+            public void Dispose() { mutex.ReleaseMutex(); mutex.Dispose(); }
+        }
+        internal static IDisposable LockReceipt(string home) { return new ReceiptLease(home); }
+        internal static string ReceiptPath(string home) { return Path.Combine(home, Product.BundleDirectory, "exe-upgrade.json"); }
+        // Писатели не чинят повреждение самостоятельно: старый EXE обработает его до запуска доски.
+        static Dictionary<string, object> ReadForWriter(string home, string path)
+        {
+            try { return UpdateObservation.ReadReceipt(path); }
+            catch (UpdateObservation.InvalidReceiptException) { new Journal(home).Write("update.receipt.invalid"); return null; }
+        }
+        // Завершение наблюдателя и регистрация следующей пары должны иметь общий порядок.
+        internal static bool TryFinishObservation(string home, Action releaseObserver)
+        {
+            using (LockReceipt(home)) {
+                string path = ReceiptPath(home);
+                if (File.Exists(path)) {
+                    Dictionary<string, object> record;
+                    try { record = UpdateObservation.TryRead(() => UpdateObservation.ReadReceipt(path)); }
+                    catch (UpdateObservation.InvalidReceiptException) { return false; }
+                    if (record == null || (!Json.Bool(record, "healthAccepted") &&
+                        (!Json.Bool(record, "cleanExit") || Json.Int(record, "cleanExitCount", 0) >= UpdateObservation.CleanExitLimit))) return false;
+                }
+                releaseObserver(); return true;
+            }
+        }
+        internal static void RollbackObservedImage(string home, UpdateEngine engine, string reason)
+        {
+            using (LockReceipt(home)) {
+                string receipt = ReceiptPath(home);
+                if (!File.Exists(receipt)) return;
+                Dictionary<string, object> record;
+                try {
+                    record = UpdateObservation.ReadReceipt(receipt);
+                    DateTime progress;
+                    if (reason == "invalid-receipt" && !DateTime.TryParse(Json.Text(record, "lastHealthUtc", Json.Str(record, "startedUtc")), null,
+                        System.Globalization.DateTimeStyles.RoundtripKind, out progress))
+                        throw new UpdateObservation.InvalidReceiptException("Receipt progress is invalid");
+                }
+                catch (UpdateObservation.InvalidReceiptException) {
+                    // Без previousHash нельзя доверять резервному EXE. Сохраняем одну улику,
+                    // снимаем блокирующую квитанцию, откатываем бандл по его отдельной транзакции.
+                    File.Copy(receipt, receipt + ".invalid", true); File.Delete(receipt);
+                    if (engine.Pending) engine.Rollback();
+                    throw new UpdateObservation.InvalidReceiptException("EXE rollback unavailable: receipt is invalid");
+                }
+                if (Json.Bool(record, "healthAccepted")) return;
+                string version = Json.Str(record, "version");
+                ObserveImage(home, engine, false, "rollback");
+                string path = Path.Combine(engine.Root, "update-state.json");
+                var state = File.Exists(path) ? Json.Read(path) : Json.Map(null);
+                state["queuedFailure"] = version; state["pending"] = false; state["failureReason"] = reason; Json.Write(path, state);
+            }
+        }
         public static string ExtractEmbedded(string destination)
         {
             using (var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("RemoteAgents.InitialBundle.zip")) {
@@ -35,53 +105,57 @@ namespace RemoteAgents.Launcher
         }
         public static void Apply(string home, string sourceExe, string zip, string launcherVersion, bool downgrade, Func<string, bool> selftest, CancellationToken token = default(CancellationToken), bool accept = false)
         {
-            var engine = new UpdateEngine(home, launcherVersion); engine.Recover();
-            if (engine.Pending) throw new InvalidOperationException("Предыдущее обновление ещё проверяется");
-            string version = BundleVersion(zip), old = engine.Current;
-            if (!downgrade && !accept && IsRejectedImage(home, Files.Hash(sourceExe))) throw new InvalidDataException("Этот EXE ранее отклонён");
-            string target = Path.Combine(home, Product.ExeName), backup = Path.Combine(home, Product.Name + ".previous.exe");
-            if (File.Exists(Path.Combine(engine.Root, "exe-upgrade.json"))) throw new InvalidOperationException("Лаунчер ещё проверяется");
-            if (version != old) {
-                var manifest = Manifest.Parse(Json.Encode(new { version, file = "embedded.zip", sha256 = Files.Hash(zip), size = new FileInfo(zip).Length, minLauncher = launcherVersion }));
-                string ready = engine.Prepare(manifest, p => File.Copy(zip, p, true), selftest,
-                    (d, f) => UpdateEngine.InstallBinaries(d, f, home, token), token, downgrade || accept || old.Length==0);
-                if (ready == null) throw new InvalidDataException("Бандл отклонён");
-            } else {
-                // Even a launcher-only release must check the installed modules before switching images.
-                if (!selftest(engine.Folder(old))) throw new InvalidDataException("Самопроверка бандла не прошла");
-            }
-            token.ThrowIfCancellationRequested();
-            bool hadExe = File.Exists(target);
-            if (hadExe) File.Copy(target, backup, true);
-            try {
-                ReplaceImage(sourceExe, target);
-                // Write before current.txt: recovery can also restore the image after interrupted activation.
-                if (old.Length != 0 && hadExe && !accept) Json.Write(Path.Combine(engine.Root, "exe-upgrade.json"), new {
-                    version, previous = old, launcherVersion, startedUtc = DateTime.UtcNow.ToString("o"), previousHash = Files.Hash(backup), currentHash = Files.Hash(sourceExe)
-                });
-                if (version != old) engine.Activate(version, accept);
-            } catch {
-                if (hadExe) ReplaceImage(backup, target);
-                else if (File.Exists(target)) File.Delete(target);
-                if (File.Exists(Path.Combine(engine.Root, "exe-upgrade.json"))) File.Delete(Path.Combine(engine.Root, "exe-upgrade.json"));
-                throw;
+            using (LockReceipt(home)) {
+                var engine = new UpdateEngine(home, launcherVersion); engine.Recover();
+                if (engine.Pending) throw new InvalidOperationException("Предыдущее обновление ещё проверяется");
+                string version = BundleVersion(zip), old = engine.Current;
+                if (!downgrade && !accept && IsRejectedImage(home, Files.Hash(sourceExe))) throw new InvalidDataException("Этот EXE ранее отклонён");
+                string target = Path.Combine(home, Product.ExeName), backup = Path.Combine(home, Product.Name + ".previous.exe");
+                if (File.Exists(Path.Combine(engine.Root, "exe-upgrade.json"))) throw new InvalidOperationException("Лаунчер ещё проверяется");
+                if (version != old) {
+                    var manifest = Manifest.Parse(Json.Encode(new { version, file = "embedded.zip", sha256 = Files.Hash(zip), size = new FileInfo(zip).Length, minLauncher = launcherVersion }));
+                    string ready = engine.Prepare(manifest, p => File.Copy(zip, p, true), selftest,
+                        (d, f) => UpdateEngine.InstallBinaries(d, f, home, token), token, downgrade || accept || old.Length==0);
+                    if (ready == null) throw new InvalidDataException("Бандл отклонён");
+                } else {
+                    // Even a launcher-only release must check the installed modules before switching images.
+                    if (!selftest(engine.Folder(old))) throw new InvalidDataException("Самопроверка бандла не прошла");
+                }
+                token.ThrowIfCancellationRequested();
+                bool hadExe = File.Exists(target);
+                if (hadExe) File.Copy(target, backup, true);
+                try {
+                    ReplaceImage(sourceExe, target);
+                    // Write before current.txt: recovery can also restore the image after interrupted activation.
+                    if (old.Length != 0 && hadExe && !accept) Json.Write(Path.Combine(engine.Root, "exe-upgrade.json"), new {
+                        version, previous = old, launcherVersion, startedUtc = DateTime.UtcNow.ToString("o"), previousHash = Files.Hash(backup), currentHash = Files.Hash(sourceExe)
+                    });
+                    if (version != old) engine.Activate(version, accept);
+                } catch {
+                    if (hadExe) ReplaceImage(backup, target);
+                    else if (File.Exists(target)) File.Delete(target);
+                    if (File.Exists(Path.Combine(engine.Root, "exe-upgrade.json"))) File.Delete(Path.Combine(engine.Root, "exe-upgrade.json"));
+                    throw;
+                }
             }
         }
         // OTA uses the already verified bundle and the same image receipt / rollback as manual upgrades.
         public static void ActivatePrepared(string home, UpdateEngine engine, Manifest manifest)
         {
-            string target = Path.Combine(home, Product.ExeName), backup = Path.Combine(home, Product.Name + ".previous.exe");
-            string source = Path.Combine(engine.Folder(manifest.Version), Product.ExeName);
-            if (engine.Pending || File.Exists(Path.Combine(engine.Root, "exe-upgrade.json"))) throw new InvalidOperationException("Обновление ещё проверяется");
-            if (!File.Exists(target) || !Files.Hash(source).Equals(manifest.LauncherHash, StringComparison.OrdinalIgnoreCase) ||
-                Files.Compare(FileVersionInfo.GetVersionInfo(source).FileVersion, manifest.LauncherVersion) != 0) throw new InvalidDataException("Проверка EXE не прошла");
-            File.Copy(target, backup, true);
-            Json.Write(Path.Combine(engine.Root, "exe-upgrade.json"), new { version = manifest.Version, previous = engine.Current,
-                launcherVersion = manifest.LauncherVersion, startedUtc = DateTime.UtcNow.ToString("o"), previousHash = Files.Hash(backup), currentHash = Files.Hash(source) });
-            try { ReplaceImage(source, target); engine.Activate(manifest.Version); }
-            catch {
-                if (engine.Pending && engine.Current == manifest.Version) engine.Rollback(); else engine.Recover();
-                ReplaceImage(backup, target); File.Delete(Path.Combine(engine.Root, "exe-upgrade.json")); throw;
+            using (LockReceipt(home)) {
+                string target = Path.Combine(home, Product.ExeName), backup = Path.Combine(home, Product.Name + ".previous.exe");
+                string source = Path.Combine(engine.Folder(manifest.Version), Product.ExeName);
+                if (engine.Pending || File.Exists(Path.Combine(engine.Root, "exe-upgrade.json"))) throw new InvalidOperationException("Обновление ещё проверяется");
+                if (!File.Exists(target) || !Files.Hash(source).Equals(manifest.LauncherHash, StringComparison.OrdinalIgnoreCase) ||
+                    Files.Compare(FileVersionInfo.GetVersionInfo(source).FileVersion, manifest.LauncherVersion) != 0) throw new InvalidDataException("Проверка EXE не прошла");
+                File.Copy(target, backup, true);
+                Json.Write(Path.Combine(engine.Root, "exe-upgrade.json"), new { version = manifest.Version, previous = engine.Current,
+                    launcherVersion = manifest.LauncherVersion, startedUtc = DateTime.UtcNow.ToString("o"), previousHash = Files.Hash(backup), currentHash = Files.Hash(source) });
+                try { ReplaceImage(source, target); engine.Activate(manifest.Version); }
+                catch {
+                    if (engine.Pending && engine.Current == manifest.Version) engine.Rollback(); else engine.Recover();
+                    ReplaceImage(backup, target); File.Delete(Path.Combine(engine.Root, "exe-upgrade.json")); throw;
+                }
             }
         }
         public static void NoteImageProcess(string home)
@@ -92,10 +166,10 @@ namespace RemoteAgents.Launcher
         }
         internal static void NoteImageProcess(string home, int pid, string processStarted, DateTime utc, string imageHash)
         {
-            lock (ReceiptGate) {
+            using (LockReceipt(home)) {
                 string root = Path.Combine(home, Product.BundleDirectory), receipt = Path.Combine(root, "exe-upgrade.json");
                 if (!File.Exists(receipt)) return;
-                var record = Json.Read(receipt);
+                var record = ReadForWriter(home, receipt); if (record == null) return;
                 if (!imageHash.Equals(Json.Str(record, "currentHash"), StringComparison.OrdinalIgnoreCase)) return;
                 // Любая новая сессия, в том числе после питания/BSOD, получает свой отсчёт.
                 if (!UpdateObservation.SameProcess(record, pid, processStarted)) {
@@ -108,10 +182,10 @@ namespace RemoteAgents.Launcher
         }
         internal static void PrepareImageLaunch(string home, DateTime utc)
         {
-            lock (ReceiptGate) {
+            using (LockReceipt(home)) {
                 string receipt = Path.Combine(home, Product.BundleDirectory, "exe-upgrade.json");
                 if (!File.Exists(receipt)) return;
-                var record = Json.Read(receipt);
+                var record = ReadForWriter(home, receipt); if (record == null) return;
                 // Наблюдатель стартует раньше EXE: не оставляем ему старый PID/отсчёт даже после обрыва.
                 record.Remove("cleanExit"); record.Remove("pid"); record.Remove("processStarted"); record.Remove("lastHealthUtc");
                 record["startedUtc"] = utc.ToString("o"); Json.Write(receipt, record);
@@ -119,36 +193,42 @@ namespace RemoteAgents.Launcher
         }
         internal static void NoteHealthProgress(string home, DateTime utc)
         {
-            lock (ReceiptGate) {
+            using (LockReceipt(home)) {
                 string receipt = Path.Combine(home, Product.BundleDirectory, "exe-upgrade.json");
                 if (!File.Exists(receipt)) return;
-                var record = Json.Read(receipt); record["lastHealthUtc"] = utc.ToString("o"); Json.Write(receipt, record);
+                var record = ReadForWriter(home, receipt); if (record == null) return;
+                record["lastHealthUtc"] = utc.ToString("o"); Json.Write(receipt, record);
             }
         }
         internal static bool ImageHealthAccepted(string home)
         {
-            lock (ReceiptGate) {
+            using (LockReceipt(home)) {
                 string receipt = Path.Combine(home, Product.BundleDirectory, "exe-upgrade.json");
-                return File.Exists(receipt) && Json.Bool(Json.Read(receipt), "healthAccepted");
+                return File.Exists(receipt) && Json.Bool(ReadForWriter(home, receipt), "healthAccepted");
             }
         }
         internal static void NoteHealthAccepted(string home)
         {
-            lock (ReceiptGate) {
+            using (LockReceipt(home)) {
                 string receipt = Path.Combine(home, Product.BundleDirectory, "exe-upgrade.json");
                 if (!File.Exists(receipt)) return;
-                var record = Json.Read(receipt); if (Json.Bool(record, "healthAccepted")) return;
+                var record = ReadForWriter(home, receipt); if (record == null || Json.Bool(record, "healthAccepted")) return;
                 record["healthAccepted"] = true; Json.Write(receipt, record);
             }
         }
-        internal static int NoteCleanExit(string home, int pid = 0, string processStarted = null)
+        internal static void NoteCurrentImageCleanExit(string home)
         {
-            lock (ReceiptGate) {
+            using (var process = Process.GetCurrentProcess())
+                NoteCleanExit(home, process.Id, process.StartTime.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+        internal static int NoteCleanExit(string home, int pid, string processStarted)
+        {
+            using (LockReceipt(home)) {
                 string receipt = Path.Combine(home, Product.BundleDirectory, "exe-upgrade.json");
                 if (!File.Exists(receipt)) return 0;
-                var record = Json.Read(receipt);
+                var record = ReadForWriter(home, receipt); if (record == null) return -1;
                 // Хэндл мог завершиться одновременно с регистрацией уже следующего процесса.
-                if (pid > 0 && !UpdateObservation.SameProcess(record, pid, processStarted)) return -1;
+                if (pid <= 0 || string.IsNullOrEmpty(processStarted) || !UpdateObservation.SameProcess(record, pid, processStarted)) return -1;
                 int count = Math.Max(0, Math.Min(UpdateObservation.CleanExitLimit, Json.Int(record, "cleanExitCount", 0)));
                 if (!Json.Bool(record, "healthAccepted") && !Json.Bool(record, "cleanExit"))
                     count = Math.Min(UpdateObservation.CleanExitLimit, count + 1);
@@ -183,9 +263,9 @@ namespace RemoteAgents.Launcher
         }
         public static string ObserveImage(string home, UpdateEngine engine, bool healthy, string bundleResult)
         {
-            lock (ReceiptGate) {
+            using (LockReceipt(home)) {
                 string record = Path.Combine(engine.Root, "exe-upgrade.json"); if (!File.Exists(record)) return "";
-                var p = Json.Read(record);
+                var p = UpdateObservation.ReadReceipt(record);
                 if (bundleResult == "rollback" || engine.Current != Json.Str(p, "version")) {
                     string backup = Path.Combine(home, Product.Name + ".previous.exe");
                     if (!File.Exists(backup) || !Files.Hash(backup).Equals(Json.Str(p, "previousHash"), StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Нет прежнего EXE");

@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Reflection;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
@@ -15,6 +17,12 @@ namespace RemoteAgents.Launcher
         static void Check(bool value, string message) { if (!value) throw new Exception(message); checks++; }
         public static int Main(string[] args)
         {
+            if (args.Length == 2 && args[0] == "--receipt-race-child") return ReceiptRaceChild(args[1]);
+            if (args.Contains("--review-fixes3")) {
+                ReviewFixes3();
+                Console.WriteLine("PASS: UpdateHealthTests review fixes 3 (" + checks + " checks; manual events, fake clock, child process)");
+                return 0;
+            }
             if (args.Contains("--review-fixes2")) {
                 ReviewFixes2();
                 Console.WriteLine("PASS: UpdateHealthTests review fixes 2 (" + checks + " checks; manual events, fake clock)");
@@ -25,6 +33,7 @@ namespace RemoteAgents.Launcher
                 Console.WriteLine("PASS: UpdateHealthTests review fixes (" + checks + " checks; manual events, fake clock)");
                 return 0;
             }
+            ReviewFixes3();
             ReviewFixes2();
             ReviewFixes();
             NoNetworkSourceAccepts();
@@ -35,6 +44,166 @@ namespace RemoteAgents.Launcher
             ObserverEventsRollbackTransaction();
             Console.WriteLine("PASS: UpdateHealthTests (" + checks + " checks; manual events, fake clock)");
             return 0;
+        }
+        static void ReviewFixes3()
+        {
+            WithHome(UnreadableReceiptKeepsFuse);
+            WithHome(ReceiptWritersSerializeAcrossProcesses);
+            WithHome(OtaReceiptIgnoresPreviousImageExit);
+            WithHome(CorruptReceiptHasTerminalRecovery);
+        }
+        sealed class ManualImageProcess : UpdateObservation.IImageProcess
+        {
+            internal readonly ManualResetEvent Exit = new ManualResetEvent(false);
+            internal bool Clean;
+            public WaitHandle Exited { get { return Exit; } }
+            public bool HasExited { get { return Exit.WaitOne(0); } }
+            public bool CleanExit { get { return Clean; } }
+            public void Dispose() { Exit.Dispose(); }
+        }
+        static void UnreadableReceiptKeepsFuse(string home)
+        {
+            string receipt = UpgradeInstaller.ReceiptPath(home);
+            foreach (string outcome in new[] { "clean", "crash", "unavailable" }) {
+                Json.Write(receipt, new { version = "2.0.0", currentHash = "image", pid = 42, processStarted = "123", startedUtc = Now.ToString("o") });
+                DateTime now = Now; bool blocked = false; int waits = 0, reads = 0;
+                var process = new ManualImageProcess { Clean = outcome == "clean" };
+                using (var changed = new AutoResetEvent(false))
+                using (var failed = new ManualResetEvent(false)) {
+                    string result = UpdateObservation.WaitForOutcome(() => File.Exists(receipt), () => {
+                        reads++;
+                        if (blocked) throw new IOException("incompatible FileShare");
+                        return UpdateObservation.ReadReceipt(receipt);
+                    }, changed, failed, (pid, started) => process,
+                    (pid, started) => UpgradeInstaller.NoteCleanExit(home, pid, started), () => now, (handles, remaining) => {
+                        Check(remaining > 0 && remaining <= HealthBoard.UpdateNoProgressFuseMs, "every wait, including read errors, retains a finite fuse");
+                        switch (waits++) {
+                            case 0:
+                                blocked = true; changed.Set(); return WaitHandle.WaitAny(handles, 0);
+                            case 1:
+                                now = now.AddMilliseconds(100); process.Exit.Set();
+                                Check(handles.Length == 3, "first failed read still observes the process");
+                                return WaitHandle.WaitAny(handles, 0);
+                            case 2:
+                                Check(handles.Length == 2 && !changed.WaitOne(0), "delivered exit is remembered without a busy loop or new changed");
+                                Check(remaining == HealthBoard.UpdateNoProgressFuseMs - 100, "second read error does not restart the deadline");
+                                if (outcome != "unavailable") blocked = false; // release the reader WITHOUT changed
+                                now = now.AddMilliseconds(remaining); return WaitHandle.WaitTimeout;
+                            default: throw new Exception("observer waited beyond the fuse");
+                        }
+                    });
+                    Check(waits == 3 && reads == 4, "actual loop consumes read-error -> exited -> read-error -> silent release/timeout");
+                    Check(result == (outcome == "clean" ? "" : outcome == "crash" ? "process-exited" : "receipt-unavailable"), "bounded result processes the already delivered exit: " + outcome);
+                }
+            }
+        }
+        static int ReceiptRaceChild(string home)
+        {
+            using (var gate = new Mutex(false, UpgradeInstaller.ReceiptMutexName(home))) {
+                bool owned; try { owned = gate.WaitOne(0); } catch (AbandonedMutexException) { owned = true; }
+                if (owned) { gate.ReleaseMutex(); Console.WriteLine("unlocked"); return 2; }
+                Console.WriteLine("blocked"); Console.Out.Flush();
+            }
+            // Реальные писатели в другом процессе: должны дождаться окончания R/M/W наблюдателя A.
+            UpgradeInstaller.NoteImageProcess(home, 43, "B", Now.AddTicks(1), "image");
+            UpgradeInstaller.NoteHealthProgress(home, Now.AddTicks(2));
+            return 0;
+        }
+        static void ReceiptWritersSerializeAcrossProcesses(string home)
+        {
+            string receipt = UpgradeInstaller.ReceiptPath(home);
+            Json.Write(receipt, new { version = "2.0.0", currentHash = "image", pid = 42, processStarted = "A", startedUtc = Now.ToString("o") });
+            Process child = null;
+            try {
+                using (UpgradeInstaller.LockReceipt(home)) {
+                    var snapshot = UpdateObservation.ReadReceipt(receipt); // наблюдатель прочёл A до конкурентного B
+                    child = Process.Start(new ProcessStartInfo("dotnet", Files.Quote(Assembly.GetExecutingAssembly().Location) + " --receipt-race-child " + Files.Quote(home)) {
+                        UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true
+                    });
+                    Check(child.StandardOutput.ReadLine() == "blocked", "same named mutex is held across processes");
+                    Check(UpgradeInstaller.NoteCleanExit(home, Json.Int(snapshot, "pid", 0), Json.Str(snapshot, "processStarted")) == 1, "observer finishes A's read/check/write while B is blocked");
+                    Check(UpdateObservation.SameProcess(UpdateObservation.ReadReceipt(receipt), 42, "A") && !child.HasExited, "B cannot overwrite the receipt inside A's transaction");
+                }
+                Check(child.WaitForExit(10000), "B finishes after shared transaction releases");
+                Check(child.ExitCode == 0, "B registration succeeds: " + child.StandardError.ReadToEnd());
+                var record = UpdateObservation.ReadReceipt(receipt);
+                Check(UpdateObservation.SameProcess(record, 43, "B") && !Json.Bool(record, "cleanExit") && Json.Str(record, "lastHealthUtc") == Now.AddTicks(2).ToString("o"), "new B identity and progress survive the race");
+                Check(UpgradeInstaller.NoteCleanExit(home, 42, "A") == -1 && UpdateObservation.SameProcess(UpdateObservation.ReadReceipt(receipt), 43, "B"), "late A write cannot replace registered B");
+                bool released = false;
+                Check(!UpgradeInstaller.TryFinishObservation(home, () => released = true) && !released, "observer cannot retire when B replaced A's clean marker");
+                using (var changed = new ManualResetEvent(false))
+                using (var failed = new ManualResetEvent(false)) {
+                    var processB = new ManualImageProcess(); processB.Exit.Set();
+                    Check(UpdateObservation.WaitForOutcome(() => File.Exists(receipt), () => UpdateObservation.ReadReceipt(receipt), changed, failed,
+                        (pid, started) => { Check(pid == 43 && started == "B", "continuation binds the registered B"); return processB; },
+                        (pid, started) => UpgradeInstaller.NoteCleanExit(home, pid, started), () => Now,
+                        (handles, ms) => { throw new Exception("B crash must be delivered immediately"); }) == "process-exited", "B crash remains observable after A clean exit race");
+                }
+                UpgradeInstaller.NoteCleanExit(home, 43, "B");
+                Check(UpgradeInstaller.TryFinishObservation(home, () => {
+                    using (var gate = new Mutex(false, UpgradeInstaller.ReceiptMutexName(home))) {
+                        Check(gate.WaitOne(0), "observer retirement runs inside shared recursive mutex"); gate.ReleaseMutex();
+                    }
+                    released = true;
+                }) && released, "observer releases singleton atomically before later registration can start");
+            } finally {
+                if (child != null) { if (!child.HasExited) { child.Kill(); child.WaitForExit(10000); } child.Dispose(); }
+            }
+        }
+        static void OtaReceiptIgnoresPreviousImageExit(string home)
+        {
+            string receipt = UpgradeInstaller.ReceiptPath(home);
+            Json.Write(receipt, new { version = "2.0.0", currentHash = "new-image", startedUtc = Now.ToString("o") });
+            UpgradeInstaller.NoteCurrentImageCleanExit(home); // тот же путь, что у трея/Application.Run/SessionEnding
+            Check(UpgradeInstaller.NoteCleanExit(home, 41, "old") == -1 && UpgradeInstaller.NoteCleanExit(home, 0, null) == -1, "OTA receipt without PID rejects old image and missing identity");
+            Check(Json.Int(Json.Read(receipt), "cleanExitCount", 0) == 0 && !Json.Bool(Json.Read(receipt), "cleanExit"), "old image exit leaves the new transaction count at zero");
+            UpgradeInstaller.PrepareImageLaunch(home, Now);
+            for (int n = 1; n <= 3; n++) {
+                UpgradeInstaller.NoteImageProcess(home, 42, n.ToString(), Now, "new-image");
+                int count = UpgradeInstaller.NoteCleanExit(home, 42, n.ToString());
+                Check(count == n && UpgradeInstaller.NoteCleanExit(home, 42, n.ToString()) == n, "only a registered new image counts, once per identity");
+                Check(UpdateObservation.Decide(true, false, true, false, true, count) == (n == 3 ? "clean-exit-loop" : ""), "OTA rollback starts on third new-image exit");
+                UpgradeInstaller.PrepareImageLaunch(home, Now);
+            }
+        }
+        static void CorruptReceiptHasTerminalRecovery(string home)
+        {
+            foreach (bool signaled in new[] { false, true }) {
+                string folder = Path.Combine(home, signaled ? "failed" : "quiet");
+                var engine = new UpdateEngine(folder, "1.0.0", () => Now);
+                foreach (string version in new[] { "1.0.0", "2.0.0" }) {
+                    Directory.CreateDirectory(engine.Folder(version));
+                    Json.Write(Path.Combine(engine.Folder(version), "components.json"), new[] { new { name = "transport", exe = "unused", critical = true } });
+                }
+                engine.Activate("1.0.0"); engine.Activate("2.0.0");
+                string receipt = UpgradeInstaller.ReceiptPath(folder), target = Path.Combine(folder, Product.ExeName);
+                File.WriteAllText(target, "current image"); File.WriteAllText(Path.Combine(folder, Product.Name + ".previous.exe"), "unverified backup");
+                File.WriteAllText(receipt, "{broken\r\n");
+                UpgradeInstaller.PrepareImageLaunch(folder, Now);
+                UpgradeInstaller.NoteImageProcess(folder, 42, "123", Now, "image");
+                Check(!UpgradeInstaller.ImageHealthAccepted(folder), "damaged receipt does not block startup before observer can recover");
+                using (var changed = new ManualResetEvent(false))
+                using (var failed = new ManualResetEvent(signaled)) {
+                    string reason = UpdateObservation.WaitForOutcome(() => File.Exists(receipt), () => UpdateObservation.ReadReceipt(receipt), changed, failed,
+                        (pid, started) => { throw new Exception("unexpected process bind"); }, (pid, started) => 0, () => Now,
+                        (handles, ms) => { throw new Exception("corrupt JSON must never wait for changed"); });
+                    Check(reason == "invalid-receipt", "real malformed JSON has priority even with UpdateFailed already set");
+                    failed.Set(); bool preserveFailure = false;
+                    try {
+                        preserveFailure = UpdateObservation.TryRollback(() => UpgradeInstaller.RollbackObservedImage(folder, engine, reason),
+                            failure => UpdateObservation.RecordRollbackFailure(folder, failure));
+                    } finally { if (!preserveFailure) failed.Reset(); }
+                    Check(!preserveFailure && !failed.WaitOne(0), "invalid receipt enters rollback failure path and disarms restart");
+                    Check(!File.Exists(receipt) && File.ReadAllText(receipt + ".invalid") == "{broken\r\n", "one diagnostic copy replaces the blocking receipt");
+                    Check(!engine.Pending && engine.Current == "1.0.0" && engine.IsBad("2.0.0"), "bundle recovers using its independent transaction");
+                    var state = Json.Read(Path.Combine(engine.Root, "update-state.json"));
+                    Check(!Json.Bool(state, "pending") && Json.Str(state, "failureReason") == "rollback-failed:InvalidReceiptException", "invalid receipt diagnostic is durable before restart");
+                    Check(File.ReadAllText(target) == "current image", "missing trustworthy previousHash never installs unverified EXE");
+                    UpgradeInstaller.PrepareImageLaunch(folder, Now); UpgradeInstaller.NoteImageProcess(folder, 43, "124", Now, "image");
+                    Check(UpdateObservation.WaitForOutcome(() => File.Exists(receipt), () => UpdateObservation.ReadReceipt(receipt), changed, failed,
+                        (pid, started) => null, (pid, started) => 0, () => Now, (handles, ms) => { throw new Exception("unexpected repeat observation"); }) == "", "restart neither reparses corrupt receipt nor rearms failure");
+                }
+            }
         }
         static void ReviewFixes2()
         {
@@ -101,12 +270,12 @@ namespace RemoteAgents.Launcher
             }
             UpgradeInstaller.NoteImageProcess(home, 42, "4", Now, "image");
             Check(UpgradeInstaller.NoteCleanExit(home, 42, "old") == -1 && !Json.Bool(Json.Read(receipt), "cleanExit"), "old process handle cannot mark new process clean");
-            Check(UpgradeInstaller.NoteCleanExit(home) == 3, "clean-exit count saturates at three under repeated launches");
+            Check(UpgradeInstaller.NoteCleanExit(home, 42, "4") == 3, "clean-exit count saturates at three under repeated launches");
             UpgradeInstaller.PrepareImageLaunch(home, Now);
             UpgradeInstaller.NoteHealthAccepted(home);
             Check(UpdateObservation.Decide(false, true, true, true, true, 3) == "", "completed transaction ignores old clean-exit count");
-            Json.Write(receipt, new { healthAccepted = true });
-            Check(UpgradeInstaller.NoteCleanExit(home) == 0, "accepted receipt does not accumulate clean exits");
+            Json.Write(receipt, new { healthAccepted = true, pid = 42, processStarted = "accepted" });
+            Check(UpgradeInstaller.NoteCleanExit(home, 42, "accepted") == 0, "accepted receipt does not accumulate clean exits");
         }
         static void ReceiptReadWaitsForProcessExit()
         {
@@ -205,7 +374,7 @@ namespace RemoteAgents.Launcher
             UpgradeInstaller.NoteHealthProgress(home, progress);
             var record = Json.Read(receipt);
             Check(Json.Str(record, "lastHealthUtc") == progress.ToString("o") && Json.Int(record, "pid", 0) == 42 && Json.Str(record, "version") == "2.0.0", "lastHealthUtc is durably saved without losing transaction/process fields");
-            UpgradeInstaller.NoteCleanExit(home);
+            UpgradeInstaller.NoteCleanExit(home, 42, "123");
             // Поздний отчёт готовности сохраняет отметку штатного выхода.
             UpgradeInstaller.NoteHealthProgress(home, progress);
             Check(File.Exists(receipt) && Json.Bool(Json.Read(receipt), "cleanExit"), "clean exit keeps receipt and survives subsequent progress");

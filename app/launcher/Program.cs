@@ -141,7 +141,7 @@ namespace RemoteAgents.Launcher
                     try {
                         if (args.Contains("--uninstall") || args.Contains("--exit")) return 0;
                         // Наблюдатель вооружён до конструктора трея и любых источников block.ready.
-                        sessionEnding = (s, e) => { try { UpgradeInstaller.NoteCleanExit(home); } catch { log.Write("update.clean-exit.write.failed"); } };
+                        sessionEnding = (s, e) => { try { UpgradeInstaller.NoteCurrentImageCleanExit(home); } catch { log.Write("update.clean-exit.write.failed"); } };
                         SystemEvents.SessionEnding += sessionEnding;
                         UpgradeInstaller.NoteImageProcess(home);
                         UpdateWatchdog.Start(home, Exe);
@@ -161,7 +161,7 @@ namespace RemoteAgents.Launcher
                         Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
                         using (var context = new TrayContext(home, log, name, sid, args, firstInstallSource)) {
                             Application.Run(context); restart = context.RestartRequested;
-                            try { UpgradeInstaller.NoteCleanExit(home); } catch { log.Write("update.clean-exit.write.failed"); }
+                            try { UpgradeInstaller.NoteCurrentImageCleanExit(home); } catch { log.Write("update.clean-exit.write.failed"); }
                         }
                     } finally { if (owned) { mutex.ReleaseMutex(); owned = false; } }
                 }
