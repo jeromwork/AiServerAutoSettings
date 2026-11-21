@@ -76,6 +76,23 @@ namespace RemoteAgents.Launcher
 
         public bool IsBusy => !ButtonEnabled;
 
+        public const string IdleButtonText = "Обновить";
+
+        // Только подпись кнопки: объём, версия и подробности остаются в подсказке.
+        public string ButtonText
+        {
+            get
+            {
+                lock (sync)
+                {
+                    if (State == UpdateButtonState.Downloading)
+                        return TotalBytes > 0 ? "Загрузка " + DownloadPercent + "%" : "Загрузка…";
+                    if (State == UpdateButtonState.Installing) return "Установка";
+                    return StatusText.Length > 0 ? StatusText : IdleButtonText;
+                }
+            }
+        }
+
         public bool ShowSpinner => State == UpdateButtonState.Checking ||
                                    State == UpdateButtonState.Downloading ||
                                    State == UpdateButtonState.Verifying ||

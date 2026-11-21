@@ -28,12 +28,17 @@ namespace RemoteAgents.Launcher
 
         public static int Main(string[] args)
         {
-            Run();
+            if (args.Length == 1 && args[0] == "--update-ui") {
+                ShortButtonCaptions();
+                Console.WriteLine("PASS: " + count + " update button UI checks");
+                MainWindowSizingTests.Run();
+            } else Run();
             return 0;
         }
 
         internal static void Run()
         {
+            ShortButtonCaptions();
             SequenceWithFakeSourceAndManualBytes();
             SecondClickIgnoredWhileBusy();
             SizeZeroModeWithoutPercent();
@@ -55,6 +60,47 @@ namespace RemoteAgents.Launcher
             ShowSpinnerFlag();
             CountingStreamClosesSource();
             Console.WriteLine("PASS: " + count + " update button model checks");
+        }
+
+        // Только ручные события и фиксированные часы; без ожиданий и реального скачивания.
+        static void ShortButtonCaptions()
+        {
+            using (var model = new UpdateButtonModel(() => new DateTime(2026, 11, 21, 12, 0, 0))) {
+                Check(model.ButtonText == "Обновить" && model.ButtonEnabled, "idle caption and enabled");
+                model.OnClick();
+                Check(model.ButtonText == "Проверяю…" && !model.ButtonEnabled, "checking caption and disabled");
+                foreach (int percent in new[] { 0, 45, 100 }) {
+                    model.OnDownloadProgress(percent, 100);
+                    Check(model.ButtonText == "Загрузка " + percent + "%", "known size caption " + percent);
+                    Check(!model.ButtonEnabled && !model.OnClick(), "download disables another click " + percent);
+                }
+                Check(model.StatusText.Contains("100%") && model.StatusText.Contains("МБ"), "byte details retained for tooltip");
+                model.OnVerifying();
+                Check(model.ButtonText == "Проверяю сборку…" && !model.ButtonEnabled, "verifying stays disabled");
+                model.OnInstalling();
+                Check(model.ButtonText == "Установка" && !model.ButtonEnabled && !model.OnClick(), "installing short caption and disabled");
+                Check(model.StatusText.Contains("перезапустится"), "installation details retained for tooltip");
+                model.OnUpdated("20261121.123456-very-long-version");
+                Check(model.ButtonText == "✓ Обновлено" && model.ButtonEnabled, "updated caption and enabled");
+                Check(model.DetailText.Contains("20261121.123456-very-long-version"), "version retained only in detail");
+                for (int i = 0; i < UpdateButtonModel.UpdatedShowTicks; i++) model.OnTick();
+                Check(model.ButtonText == "Обновить" && model.ButtonEnabled, "manual result ticks restore caption");
+
+                model.OnClick();
+                foreach (long bytes in new long[] { 0, 1048576, 5242880 }) {
+                    model.OnDownloadProgress(bytes, 0);
+                    Check(model.ButtonText == "Загрузка…" && !model.ButtonEnabled, "unknown size has no percent or bytes " + bytes);
+                }
+                model.OnInstalling();
+                Check(model.ButtonText == "Установка" && !model.ButtonEnabled, "unknown size install has no percent");
+                model.OnFailed("нет связи");
+                Check(model.ButtonEnabled && model.ButtonText.StartsWith("Ошибка:"), "failure enables retry");
+                model.OnClick();
+                model.OnUpToDate("20261121.123456-very-long-version");
+                Check(model.ButtonEnabled && !model.ButtonText.Contains("20261121"), "current result enables button without version");
+                model.OnIdle();
+                Check(model.ButtonText == "Обновить" && model.ButtonEnabled, "idle restores default caption");
+            }
         }
 
         static void SequenceWithFakeSourceAndManualBytes()
