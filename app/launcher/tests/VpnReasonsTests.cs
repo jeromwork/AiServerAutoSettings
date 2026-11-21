@@ -18,6 +18,9 @@ namespace RemoteAgents.Launcher
             DiskFailureRollsBack();
             StaleAttemptAndNoAttemptIgnored();
             VpnStateOnStartsE2eOnce();
+            TwoSignalsOneRollback();
+            ButtonOffMakesE2eStale();
+            BridgeFailureRollsBack();
             ReasonTextsEverywhere();
             Console.WriteLine("PASS: VpnReasonsTests (" + assertions + " assertions passed)");
             return 0;
@@ -49,7 +52,7 @@ namespace RemoteAgents.Launcher
                 r.Pub(BusTopics.BlockDegraded, "block", "transport");
                 Check(r.Rollbacks.Count == 1 && r.Rollbacks[0] == "a1|0|broke-transport", "transport.status fail -> one rollback broke-transport");
                 Check(r.Notes.Count == 1 && r.Notes[0].Contains("транспорт"), "owner note in plain words");
-                Check(r.Log.Contains("vpn.rollback") && r.Log.Contains("vpn.rollback.ignored") == false, "rollback logged; no attempt left for repeats");
+                Check(r.Log.Contains("vpn.rollback") && r.Log.Contains("vpn.rollback.ignored"), "rollback logged; repeats logged as ignored");
             }
         }
 
@@ -60,10 +63,11 @@ namespace RemoteAgents.Launcher
                 r.Pub(BusTopics.NetE2E, "att", "a2", "result", "fail", "stage", "7", "reason", "dns", "detail", "timeout");
                 r.Pub(BusTopics.NetE2E, "att", "a2", "result", "fail", "stage", "8", "reason", "http");
                 Check(r.Rollbacks.Count == 1 && r.Rollbacks[0] == "a2|7|e2e-fail", "e2e fail stage 7 -> one rollback e2e-fail");
-                Check(r.Notes[0].Contains("интернет через него не шёл") && r.Notes[0].Contains("timeout"), "note names the detail");
+                Check(r.Notes[0].Contains("интернет через него не шёл") && r.Notes[0].Contains("не определяются адреса сайтов") && !r.Notes[0].Contains("timeout"), "note in plain words, no raw detail");
                 r.Guard.Begin("a3");
-                r.Pub(BusTopics.NetE2E, "att", "a3", "result", "fail", "stage", "6", "reason", "routes-not-ours");
-                Check(r.Rollbacks.Count == 2 && r.Rollbacks[1] == "a3|6|routes-not-ours", "stage 6 routes-not-ours keeps its code");
+                r.Pub(BusTopics.NetE2E, "att", "a3", "result", "fail", "stage", "6", "reason", "route-not-ours");
+                Check(r.Rollbacks.Count == 2 && r.Rollbacks[1] == "a3|6|route-not-ours", "stage 6 route-not-ours keeps its code");
+                Check(r.Notes[1].Contains("трафик идёт мимо VPN"), "stage 6 plain words");
             }
         }
 
@@ -118,9 +122,41 @@ namespace RemoteAgents.Launcher
             }
         }
 
+        static void TwoSignalsOneRollback()
+        {
+            using (var r = new Rig()) {
+                r.Guard.Begin("d1");
+                r.Pub(BusTopics.NetE2E, "att", "d1", "result", "fail", "stage", "7", "reason", "dns");
+                r.Pub(BusTopics.BlockFailed, "block", "disk");
+                r.Pub(BusTopics.BlockDegraded, "block", "transport");
+                Check(r.Rollbacks.Count == 1 && r.Rollbacks[0] == "d1|7|e2e-fail", "two signals of one attempt -> one rollback");
+                Check(r.Log.Contains("vpn.rollback.ignored"), "repeat signal logged as ignored");
+            }
+        }
+
+        static void ButtonOffMakesE2eStale()
+        {
+            using (var r = new Rig()) {
+                r.Guard.Begin("e1");
+                r.Pub(BusTopics.VpnState, "state", "off", "reason", "button");
+                r.Pub(BusTopics.NetE2E, "att", "e1", "result", "fail", "stage", "7");
+                Check(r.Rollbacks.Count == 0, "e2e after button off does not roll back");
+                Check(r.Log.Contains("vpn.attempt.e2e-stale"), "late e2e logged as stale");
+            }
+        }
+
+        static void BridgeFailureRollsBack()
+        {
+            using (var r = new Rig()) {
+                r.Guard.Begin("f1");
+                r.Pub(BusTopics.BlockFailed, "block", "control");
+                Check(r.Rollbacks.Count == 1 && r.Rollbacks[0] == "f1|0|broke-bridge", "block.failed control -> broke-bridge, one rollback");
+            }
+        }
+
         static void ReasonTextsEverywhere()
         {
-            foreach (var code in new[] { "core-not-ready", "routes-not-ours", "e2e-fail", "broke-transport", "broke-disk", "broke-bridge" }) {
+            foreach (var code in new[] { "core-not-ready", "route-not-ours", "e2e-fail", "broke-transport", "broke-disk", "broke-bridge" }) {
                 Check(VpnReasons.Text(code).Length > 0, "text for " + code);
                 Check(VpnWatchdog.FailureSummary(code).Length > 0, "FailureSummary state " + code);
                 Check(VpnWatchdog.FailureSummary("error", code) == VpnReasons.Text(code), "FailureSummary error/stage " + code);

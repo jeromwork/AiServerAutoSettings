@@ -7,7 +7,7 @@ namespace RemoteAgents.Launcher
     // Причины отказа VPN простыми словами для владельца (шаг V4). Коды те же в журнале, статусе и тексте.
     internal static class VpnReasons
     {
-        internal const string CoreNotReady = "core-not-ready", RoutesNotOurs = "routes-not-ours", E2eFail = "e2e-fail",
+        internal const string CoreNotReady = "core-not-ready", RoutesNotOurs = "route-not-ours", E2eFail = "e2e-fail",
             BrokeTransport = "broke-transport", BrokeDisk = "broke-disk", BrokeBridge = "broke-bridge";
 
         internal static bool Known(string code)
@@ -26,12 +26,14 @@ namespace RemoteAgents.Launcher
             }
         }
 
-        // Заметка в трее при автоматическом откате.
-        internal static string RollbackNote(string reason, string detail)
+        // Заметка в трее при автоматическом откате: только простые слова, сырой detail остаётся в журнале.
+        internal static string RollbackNote(string reason, int stage)
         {
             string text = Text(reason);
-            if (reason == E2eFail || reason == RoutesNotOurs)
-                return "VPN выключен автоматически: интернет через него не шёл (" + (text.Length > 0 && reason == RoutesNotOurs ? "маршрут чужой" : detail.Length > 0 ? detail : "проверка не прошла") + "). Подробности в журнале.";
+            if (reason == E2eFail || reason == RoutesNotOurs) {
+                string why = stage == 6 ? "трафик идёт мимо VPN" : stage == 7 ? "не определяются адреса сайтов" : stage == 8 ? "сайты не открываются" : "проверка не прошла";
+                return "VPN выключен автоматически: интернет через него не шёл (" + why + "). Подробности в журнале.";
+            }
             return (text.Length > 0 ? text : "VPN выключен автоматически") + ". Подробности в журнале.";
         }
 
@@ -70,7 +72,7 @@ namespace RemoteAgents.Launcher
             subs.Add(bus.Subscribe(BusTopics.BlockDegraded, e => OnBlock(e, false)));
         }
 
-        internal bool Active { get { lock (gate) return att.Length > 0; } }
+        internal bool Active { get { lock (gate) return att.Length > 0 && !rolledBack; } }
 
         // Нажали «Включить»: новая попытка (прежняя, если была, закрыта).
         internal void Begin(string attempt)
@@ -97,7 +99,7 @@ namespace RemoteAgents.Launcher
         void OnVpnState(BusEvent e)
         {
             string state = e.Get("state"), current;
-            lock (gate) current = att;
+            lock (gate) current = rolledBack ? "" : att;
             if (current.Length == 0) return;
             if (state == "on") { VpnOn(current); return; }
             if (state == "starting" || state == "searching") return;
@@ -150,11 +152,11 @@ namespace RemoteAgents.Launcher
         void Rollback(string current, int stage, string reason, string detail)
         {
             bool first;
-            lock (gate) { first = att == current && !rolledBack; if (first) { rolledBack = true; att = ""; } }
+            lock (gate) { first = att == current && !rolledBack; if (first) rolledBack = true; } // att остаётся: повторные сигналы этой попытки попадут в журнал как ignored
             if (!first) { Log("vpn.rollback.ignored", "att", current, "reason", reason); return; }
             Log("vpn.rollback", "att", current, "stage", stage.ToString(CultureInfo.InvariantCulture), "reason", reason, "detail", detail);
             try { bus.Publish(BusTopics.VpnRollback, BusTopics.Sources.Tray, "att", current, "stage", stage.ToString(CultureInfo.InvariantCulture), "reason", reason); } catch { }
-            if (note != null) note(VpnReasons.RollbackNote(reason, detail));
+            if (note != null) note(VpnReasons.RollbackNote(reason, stage));
             rollback(current, stage, reason, detail);
         }
 
