@@ -17,7 +17,7 @@ namespace RemoteAgents.Launcher
     {
         // Предохранитель (конституция 4а): событие singbox.started недоступно, если ядро зависло внутри Start;
         // при срабатывании — остановить ядро, состояние error/core-not-ready, успех не объявляет.
-        // Сумма предохранителей службы при включении: exclusions 15 + check 15 + ready 20 + routes 10 с (меньше VpnOnFuseMs трея).
+        // Сумма предохранителей службы при включении: exclusions 15 + check 15 + ready 20 + routes 10 = 60 с; предохранитель клиента HelperClient.VpnStartFuseMs должен быть больше этой суммы.
         internal const int CoreReadyFuseMs = 20000;
         // Предохранитель (конституция 4а): события win.route/iface.changed недоступны (уведомление не зарегистрировано
         // или маршрут так и не появился), если за это время маршрут на TUN не подтверждён; при срабатывании — остановить ядро,
@@ -51,7 +51,8 @@ namespace RemoteAgents.Launcher
         {
             var handles = new WaitHandle[] { ready, fatal, off };
             while (true) {
-                if (off.WaitOne(0) || cancelled()) return VpnGateOutcome.Off;
+                if (cancelled()) return VpnGateOutcome.Off;
+                off.Reset(); // vpn.off без реальной отмены этой попытки (устаревшее событие прошлого Disable) игнорируется
                 if (fatal.WaitOne(0)) return VpnGateOutcome.Fatal;
                 if (coreExited()) return VpnGateOutcome.CoreExited;
                 if (ready.WaitOne(0)) return VpnGateOutcome.Ready;
@@ -66,19 +67,20 @@ namespace RemoteAgents.Launcher
         internal VpnGateOutcome AwaitRoute(Func<VpnRouteResult> probe, Func<bool> cancelled, Action pulse, Func<bool> fuse, out VpnRouteResult result, int sliceMs = VpnWatchdog.PollMs)
         {
             var handles = new WaitHandle[] { netChanged, off };
-            bool first = true;
+            bool probeNow = true; // первая проверка сразу; дальше — по событию (флаг берётся из WaitAny: он сбрасывает AutoResetEvent)
             result = null;
             while (true) {
-                if (off.WaitOne(0) || cancelled()) return VpnGateOutcome.Off;
-                if (first || netChanged.WaitOne(0)) {
-                    first = false;
+                if (cancelled()) return VpnGateOutcome.Off; // устаревший vpn.off без отмены не считается
+                off.Reset();
+                if (probeNow) {
+                    probeNow = false;
                     result = probe();
                     if (result != null && result.Ok) return VpnGateOutcome.RoutesOk;
-                    continue;
                 }
-                if (fuse()) return VpnGateOutcome.RoutesFuse;
+                if (fuse()) return VpnGateOutcome.RoutesFuse; // на каждом проходе, в том числе после неудачной проверки
                 pulse();
-                WaitHandle.WaitAny(handles, sliceMs); // пульс аренды, не условие
+                int hit = WaitHandle.WaitAny(handles, sliceMs); // пульс аренды, не условие
+                if (hit == 0) probeNow = true;
             }
         }
 

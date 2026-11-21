@@ -32,7 +32,9 @@ namespace RemoteAgents.Launcher
             Check(g.FatalLine == "FATAL boom", "fatal line kept");
             Check(Core(b => b.Publish(BusTopics.SingboxFatal, BusTopics.Sources.VpnCore, "core", "transport", "line", "FATAL"), No, No, Yes, out g) == VpnGateOutcome.Fuse, "fatal of another core ignored");
             Check(Core(b => { }, Yes, No, No, out g) == VpnGateOutcome.CoreExited, "process exit -> CoreExited");
-            Check(Core(b => b.Publish(BusTopics.VpnOff, BusTopics.Sources.Helper, "reason", "button"), No, No, No, out g) == VpnGateOutcome.Off, "vpn.off -> Off");
+            Check(Core(b => b.Publish(BusTopics.VpnOff, BusTopics.Sources.Helper, "reason", "button"), No, Yes, No, out g) == VpnGateOutcome.Off, "vpn.off with a real cancel -> Off");
+            int offFuse = 0;
+            Check(Core(b => b.Publish(BusTopics.VpnOff, BusTopics.Sources.Helper, "reason", "button"), No, No, () => ++offFuse > 2, out g) == VpnGateOutcome.Fuse, "stale vpn.off (cancelled() false) is ignored, not stuck in starting");
             Check(g.OffReason == "button", "off reason kept");
             Check(Core(b => { }, No, Yes, No, out g) == VpnGateOutcome.Off, "cancelled generation -> Off");
             Check(Core(b => b.Publish(BusTopics.SingboxStarted, BusTopics.Sources.VpnCore, "core", "vpn", "line", "s"), No, Yes, No, out g) == VpnGateOutcome.Off, "off has priority over ready");
@@ -55,7 +57,11 @@ namespace RemoteAgents.Launcher
                 calls = 0;
                 Func<VpnRouteResult> okSecond = () => { calls++; return VpnReadyGate.ProbeRoute(calls >= 2 ? bestTun : bestOther, index, name, probe, "x"); };
                 bus2.Publish(BusTopics.WinRouteChanged, BusTopics.Sources.Windows, "family", "ipv4", "ifIndex", "7"); bus2.DrainOnce();
-                Check(rg.AwaitRoute(okSecond, No, Nop, Yes, out last, 1) == VpnGateOutcome.RoutesOk && calls == 2, "win.route.changed triggers the re-probe (fuse already true, not consulted before the event)");
+                int fuseCalls = 0, pulses = 0;
+                Check(rg.AwaitRoute(okSecond, No, () => pulses++, () => ++fuseCalls > 1, out last, 1) == VpnGateOutcome.RoutesOk && calls == 2 && fuseCalls >= 1 && pulses >= 1, "win.route.changed triggers the re-probe; fuse and pulse are consulted after the failed probe");
+                bus2.Publish(BusTopics.VpnOff, BusTopics.Sources.Helper, "reason", "button"); bus2.DrainOnce();
+                calls = 0;
+                Check(rg.AwaitRoute(() => { calls++; return VpnReadyGate.ProbeRoute(bestOther, index, name, probe, "x"); }, No, Nop, Yes, out last, 1) == VpnGateOutcome.RoutesFuse, "stale vpn.off without cancel does not abort the route wait");
                 calls = 0;
                 Check(rg.AwaitRoute(() => { calls++; return VpnReadyGate.ProbeRoute(bestOther, index, name, probe, "x"); }, No, Nop, Yes, out last, 1) == VpnGateOutcome.RoutesFuse && calls == 1 && !last.Ok, "no event: one probe, then fuse -> fail");
                 Check(rg.AwaitRoute(okNow, Yes, Nop, No, out last, 1) == VpnGateOutcome.Off && last == null, "cancelled before the probe -> Off");
