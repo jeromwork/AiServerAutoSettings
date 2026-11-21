@@ -32,8 +32,10 @@ $script:q=$null;$script:qualitySnapshot=$null;$script:qualityClass='unknown';$sc
 $LightProbeFuseMs=3000
 # Предохранитель (конституция 4а): событие результата 64 КиБ недоступно, если SSH завис; при срабатывании — timeout решателю, успех не объявляет.
 $VerifyProbeFuseMs=12000
-# Предохранитель (конституция 4а): engine-ready недоступно при зависшем запуске; закрывает ожидающий эпизод с engine-ready-timeout, успех не объявляет. Проверяется существующим tick решателя.
-$EngineReadyFuseMs=20000;$script:engineWait=$null
+# Предохранитель (конституция 4а): engine-ready недоступно при зависшем запуске; закрывает эпизод и перезапускает движок, успех не объявляет. Проверяется существующим главным циклом.
+$EngineReadyFuseMs=20000;$script:engineWait=$null;$script:engineApiCheck=$null
+# Один повтор после readiness-timeout; существующий startFailures сбрасывается только подтверждённым API.
+$EngineReadyFailureLimit=2
 # tick.transport-revision-full: полный пересчёт хэша содержимого раз в столько секунд, запасной ход на правку той же длины и того же времени записи (кэш по штампу её не видит). Не условие успеха.
 $RevisionFullTickSec=60;$nextRevisionFull=[DateTime]::MinValue
 # Сердцебиение статуса: файл переписывается без изменений содержимого не реже этого, чтобы Supervisor и читатели видели свежий updatedAt (предел устаревания 15 с).
@@ -61,6 +63,7 @@ function Reset-DaemonDecision {
     foreach($r in $rows){$r.penaltyStep=0;$r.penaltyUntil=$null;$r.suspect=$false}
 }
 function Stop-DaemonObservation([switch]$EngineRestart) {
+    Stop-DaemonEngineApiCheck
     $script:engineWait=$null
     $script:checkGeneration++;$script:episodeDeferred=@();$script:lightProof=@{}
     if(-not $EngineRestart -and $decision -and $decision.episode -and $decision.episode.status -ne 'closed'){
@@ -631,12 +634,60 @@ function Test-DaemonTunnelReady([string]$Tag) {
     try{if(@([Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()|Where-Object {$_.Port -eq [int]$outbound.server_port}).Count){$script:tunnelReadyUntil.Remove($Tag);return $true}}catch{}
     return $false
 }
+function Test-TransportEngineListener([int]$Port) {
+    try{return @([Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()|Where-Object {$_.Port -eq $Port}).Count -gt 0}catch{return $false}
+}
+function Stop-DaemonEngineApiCheck {
+    if(-not $engineApiCheck){return}
+    try{
+        if($engineApiCheck.task.IsFaulted){[void]$engineApiCheck.task.Exception}
+        if($engineApiCheck.task.IsCompleted -and -not $engineApiCheck.task.IsFaulted -and -not $engineApiCheck.task.IsCanceled){$engineApiCheck.task.Result.Dispose()}
+    }finally{$engineApiCheck.client.Dispose();$engineApiCheck.content.Dispose();$script:engineApiCheck=$null}
+}
+function Test-TransportEngineApiReady {
+    # One nonblocking observation per main-loop iteration. Authenticate the selector just
+    # as at startup, but never wait for HTTP in the loop (a foreign listener is not ready).
+    if(-not $engineApiCheck){
+        if(-not (Test-TransportEngineListener ([int]$settings.Options.apiPort))){return $false}
+        Add-Type -AssemblyName System.Net.Http
+        $handler=New-Object Net.Http.HttpClientHandler;$handler.UseProxy=$false
+        $client=New-Object Net.Http.HttpClient($handler);$client.Timeout=[Threading.Timeout]::InfiniteTimeSpan
+        $client.DefaultRequestHeaders.Authorization=New-Object Net.Http.Headers.AuthenticationHeaderValue('Bearer',$secret)
+        $content=New-Object Net.Http.StringContent((ConvertTo-Json -Compress @{name=$engineApiTarget}),[Text.Encoding]::UTF8,'application/json')
+        try{
+            $task=$client.PutAsync(('http://127.0.0.1:'+$settings.Options.apiPort+'/proxies/active'),$content)
+            $script:engineApiCheck=@{client=$client;content=$content;task=$task}
+        }catch{$client.Dispose();$content.Dispose()}
+        return $false
+    }
+    if(-not $engineApiCheck.task.IsCompleted){return $false}
+    try{
+        return (-not $engineApiCheck.task.IsFaulted -and -not $engineApiCheck.task.IsCanceled -and $engineApiCheck.task.Result.IsSuccessStatusCode)
+    }finally{Stop-DaemonEngineApiCheck}
+}
+function Complete-DaemonEngineReady {
+    if(-not $engine -or $engine.Process.HasExited -or $script:busEngineReady){return}
+    $script:busEngineReady=$true
+    if($engineApiTarget -eq $active){Confirm-DaemonSelection $active}
+    $script:bindRetry=$null;$script:portConflict=$null;$script:startFailures=0
+    Write-TransportLog $root 'ready'
+    Add-DaemonEvent (New-DaemonEvent 'engine-ready' ([string]$active) 'ready')
+    Start-DaemonReader -NewEngine
+    Write-DaemonWizardProgress ('· модуль связи готов '+[int]([DateTime]::Now-$daemonStarted).TotalMilliseconds+' мс от запуска процесса')
+    Start-TransportLiveness
+}
+function Stop-TransportEngine {
+    Stop-DaemonEngineApiCheck
+    Stop-TransportEvents $reader;$script:reader=$null
+    Stop-TransportProcess $engine;$script:engine=$null;$script:busEngineReady=$false;$script:confirmed=$false
+    foreach($child in @($tunnelChildren.Values)){Stop-TransportProcess $child};$tunnelChildren.Clear()
+}
 function Wait-TransportEngineReady([int]$Port,[int]$TimeoutMs) {
     # sing-box 1.14 binds the Clash API after all inbounds: its listener means the probe ports accept connections.
     # Listener table, not a connect: no stray connection, and no ~1 s refused-connect retries of Windows loopback.
     $watch=[Diagnostics.Stopwatch]::StartNew()
     while($watch.ElapsedMilliseconds -lt $TimeoutMs -and -not $engine.Process.HasExited){
-        try{if(@([Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()|Where-Object {$_.Port -eq $Port}).Count){return $true}}catch{return $false}
+        if(Test-TransportEngineListener $Port){return $true}
         Start-Sleep -Milliseconds 50
     }
     return $false
@@ -663,6 +714,7 @@ function Get-DaemonRestartDelay($Detail) {
     Get-TransportRestartDelay ([double]$settings.Options.restartDelaySec) $(if($bindRetry){$bindRetry.failures}else{0})
 }
 function Start-TransportEngine {
+    Stop-DaemonEngineApiCheck
     $script:busEngineReady=$false
     Stop-TransportEvents $reader;$script:reader=$null
     [void](Reset-DaemonPorts)
@@ -680,6 +732,7 @@ function Start-TransportEngine {
         }
     }
     $cfg=New-TransportConfig $cfgSettings $paths $secret $active $interface
+    $script:engineApiTarget=($cfg.outbounds|Where-Object {$_.tag -eq 'active'}|Select-Object -First 1).default
     $file=Join-Path $root 'state/transport-sing-box.json';Write-TransportJson $file $cfg -Private
     # Валидация до запуска; stdout/stderr не публикуются, т.к. могут содержать адреса и секреты.
     Publish-TransportStatus
@@ -699,26 +752,77 @@ function Start-TransportEngine {
     }
     # Start health probes as soon as the listener is ready; no fixed post-start pause.
     $ready=Wait-TransportEngineReady ([int]$settings.Options.apiPort) 3000
-    # Успешный запуск сбрасывает серию bind, даже если сеть ещё не прошла пробу.
     if($ready -and -not $engine.Process.HasExited){
-        # Чужой слушатель API ещё не доказывает запуск нашего процесса. Подтверждаем API его секретом.
-        try{
-            $target=($cfg.outbounds|Where-Object {$_.tag -eq 'active'}|Select-Object -First 1).default
-            Set-TransportSelector $settings.Options $secret $target
-            $script:busEngineReady=$true
-            if($target -eq $active){Confirm-DaemonSelection $active}
-            $script:bindRetry=$null;$script:portConflict=$null
-        }catch{}
+        try{Set-TransportSelector $settings.Options $secret $engineApiTarget;Complete-DaemonEngineReady}catch{}
     }
-    $script:startFailures=0;Write-TransportLog $root 'ready'
-    # Restart finished: tell the reducer, so a prior engine-exit is not a path failure. The reducer decides about switching.
-    if($script:busEngineReady -and -not $engine.Process.HasExited){Add-DaemonEvent (New-DaemonEvent 'engine-ready' ([string]$active) 'ready')}
-    if($script:busEngineReady -and -not $engine.Process.HasExited){
-        Start-DaemonReader -NewEngine
-        Write-DaemonWizardProgress ('· модуль связи готов '+[int]([DateTime]::Now-$daemonStarted).TotalMilliseconds+' мс от запуска процесса')
-        Start-TransportLiveness
+    if(-not $script:busEngineReady){
+        Suspend-DaemonEpisode
+        # Each process gets its own fuse; a previous timeout keeps the episode closed.
+        $engineWait.at=Get-DaemonTime;$engineWait.expired=$false
     }
 }
+
+function Update-DaemonEngine([DateTime]$Now) {
+    if($engine -and $engine.Process.HasExited){
+        $detail=New-TransportDiagnostic $engine 'sing-box' 'process-exited' $diagnosticContext
+        Write-TransportLog $root 'process-failed' $detail
+        foreach($row in $rows){if($row.enabled){$perRow=Copy-TransportObject $detail;$perRow.candidate=$row.tag;$row|Add-Member -Force diagnostic (Limit-TransportDiagnostic $perRow)}}
+        Stop-TransportProbes;Stop-DaemonObservation -EngineRestart;if(-not $detail.portConflict){Add-DaemonEvent (New-DaemonEvent 'engine-exit' '' 'exited')};Stop-TransportEngine;$script:errorText='sing-box завершился, ожидается перезапуск';$script:checkingSince=$now
+        foreach($row in $rows){if($row.state -eq 'ok'){$row.state='remembered'}}
+        $script:portConflict=$detail.portConflict
+        if($portConflict){$script:errorText=$portConflict.message}
+        $script:bindRetry=Get-TransportBindRetry $bindRetry $detail
+        $script:retryAt=$now.AddSeconds((Get-DaemonRestartDelay $detail));Write-TransportLog $root 'restart' ([ordered]@{why='process-failed';reason=[string]$detail.reason;retry_in_s=[int](Get-DaemonRestartDelay $detail)})
+        Publish-TransportStatus
+        Publish-DaemonBusStatus
+    }
+    if($engineWait -and $engine -and -not $engine.Process.HasExited){
+        if($script:busEngineReady){Resume-DaemonEpisode}
+        elseif(Test-TransportEngineApiReady){Complete-DaemonEngineReady}
+        if($engineWait){
+            Suspend-DaemonEpisode
+            if($engineWait.expired){
+                Stop-TransportEngine
+                $script:startFailures++;$script:checkingSince=$null
+                $script:errorText='Движок не готов: engine-ready-timeout'
+                Write-TransportLog $root 'process-failed' ([ordered]@{reason='engine-ready-timeout';failures=$startFailures})
+                if($startFailures -lt $EngineReadyFailureLimit){
+                    $script:retryAt=$now.AddSeconds((Get-TransportStartPause $startFailures))
+                    Write-TransportLog $root 'restart' ([ordered]@{why='engine-ready-timeout';retry_in_s=(Get-TransportStartPause $startFailures)})
+                }
+                Publish-TransportStatus;Publish-DaemonBusStatus
+            }
+        }
+    }
+    if(-not $engine -and (-not $engineWait -or $startFailures -lt $EngineReadyFailureLimit) -and $now -ge $retryAt -and -not $directCheck -and -not $pathChecks.Count -and (-not $eventQueue.Count -or $engineWait)){
+        try{
+            # После неудачи повторяем тяжёлую пробу: прежняя ошибка CIM/WMI могла быть временной.
+            if($startFailures -gt 0 -and $settings.Options.bindPhysical){$netSnapshot=Get-TransportNetworkSnapshot $settings.Options -Force;$script:network=$netSnapshot.network;$script:metered=$netSnapshot.metered;$script:nextNetwork=$now.AddSeconds(5)}
+            try{Start-TransportEngine}finally{$script:engineAttempted=$true}
+            $script:errorText='Ожидается проверка пути'
+        }
+        catch{
+            $startError=Format-TransportStartError $_ $diagnosticContext
+            $detail=$_.Exception.Data['transportDiagnostic']
+            if(-not $detail){$detail=New-TransportDiagnostic $engine 'sing-box' 'engine-start-failed' $diagnosticContext}
+            $detail.stderr=Protect-TransportDiagnostic $detail.stderr $diagnosticContext
+            $detail|Add-Member -Force error $startError
+            foreach($row in $rows){if($row.enabled){$perRow=Copy-TransportObject $detail;$perRow.candidate=$row.tag;$row|Add-Member -Force diagnostic (Limit-TransportDiagnostic $perRow)}}
+            Write-TransportLog $root 'process-failed' $detail
+            Stop-TransportEngine
+            $script:confirmed=$false;$script:errorText='Не удалось запустить транспорт: '+$startError;$script:checkingSince=$now
+            $script:portConflict=$detail.portConflict
+            if($portConflict){$script:errorText=$portConflict.message}
+            $script:bindRetry=Get-TransportBindRetry $bindRetry $detail
+            $script:startFailures++
+            $script:retryAt=$now.AddSeconds((Get-DaemonRestartDelay $detail))
+            if(-not $portConflict){$script:retryAt=$now.AddSeconds((Get-TransportStartPause $startFailures))}
+            Publish-TransportStatus
+            Publish-DaemonBusStatus
+        }
+    }
+}
+
 $metered=$null
 try{
     [void][IO.Directory]::CreateDirectory($root)
@@ -838,47 +942,7 @@ try{
                 Stop-TransportProcess $engine;$engine=$null;foreach($child in @($tunnelChildren.Values)){Stop-TransportProcess $child};$tunnelChildren.Clear();$retryAt=$now
             }
         }
-        if($engine -and $engine.Process.HasExited){
-            $detail=New-TransportDiagnostic $engine 'sing-box' 'process-exited' $diagnosticContext
-            Write-TransportLog $root 'process-failed' $detail
-            foreach($row in $rows){if($row.enabled){$perRow=Copy-TransportObject $detail;$perRow.candidate=$row.tag;$row|Add-Member -Force diagnostic (Limit-TransportDiagnostic $perRow)}}
-            Stop-TransportProbes;Stop-DaemonObservation -EngineRestart;if(-not $detail.portConflict){Add-DaemonEvent (New-DaemonEvent 'engine-exit' '' 'exited')};Stop-TransportProcess $engine;$engine=$null;$confirmed=$false;$errorText='sing-box завершился, ожидается перезапуск';$checkingSince=$now
-            foreach($child in @($tunnelChildren.Values)){Stop-TransportProcess $child};$tunnelChildren.Clear()
-            foreach($row in $rows){if($row.state -eq 'ok'){$row.state='remembered'}}
-            $portConflict=$detail.portConflict
-            if($portConflict){$errorText=$portConflict.message}
-            $bindRetry=Get-TransportBindRetry $bindRetry $detail
-            $retryAt=$now.AddSeconds((Get-DaemonRestartDelay $detail));Write-TransportLog $root 'restart' ([ordered]@{why='process-failed';reason=[string]$detail.reason;retry_in_s=[int](Get-DaemonRestartDelay $detail)})
-            Publish-TransportStatus
-            Publish-DaemonBusStatus
-        }
-        if(-not $engine -and $now -ge $retryAt -and -not $directCheck -and -not $pathChecks.Count -and (-not $eventQueue.Count -or $engineWait)){
-            try{
-                # После неудачи повторяем тяжёлую пробу: прежняя ошибка CIM/WMI могла быть временной.
-                if($startFailures -gt 0 -and $settings.Options.bindPhysical){$netSnapshot=Get-TransportNetworkSnapshot $settings.Options -Force;$network=$netSnapshot.network;$metered=$netSnapshot.metered;$nextNetwork=$now.AddSeconds(5)}
-                try{Start-TransportEngine}finally{$script:engineAttempted=$true}
-                $errorText='Ожидается проверка пути'
-            }
-            catch{
-                $startError=Format-TransportStartError $_ $diagnosticContext
-                $detail=$_.Exception.Data['transportDiagnostic']
-                if(-not $detail){$detail=New-TransportDiagnostic $engine 'sing-box' 'engine-start-failed' $diagnosticContext}
-                $detail.stderr=Protect-TransportDiagnostic $detail.stderr $diagnosticContext
-                $detail|Add-Member -Force error $startError
-                foreach($row in $rows){if($row.enabled){$perRow=Copy-TransportObject $detail;$perRow.candidate=$row.tag;$row|Add-Member -Force diagnostic (Limit-TransportDiagnostic $perRow)}}
-                Write-TransportLog $root 'process-failed' $detail
-                Stop-TransportProcess $engine;$engine=$null;foreach($child in @($tunnelChildren.Values)){Stop-TransportProcess $child};$tunnelChildren.Clear()
-                $confirmed=$false;$errorText='Не удалось запустить транспорт: '+$startError;$checkingSince=$now
-                $portConflict=$detail.portConflict
-                if($portConflict){$errorText=$portConflict.message}
-                $bindRetry=Get-TransportBindRetry $bindRetry $detail
-                $startFailures++
-                $retryAt=$now.AddSeconds((Get-DaemonRestartDelay $detail))
-                if(-not $portConflict){$retryAt=$now.AddSeconds((Get-TransportStartPause $startFailures))}
-                Publish-TransportStatus
-                Publish-DaemonBusStatus
-            }
-        }
+        Update-DaemonEngine $now
         if($engine){
             foreach($tunnel in $paths.Tunnels){
                 if($tunnelChildren.ContainsKey($tunnel.tag) -and $tunnelChildren[$tunnel.tag].Process.HasExited){
@@ -961,6 +1025,7 @@ try{
     $errorText='Ошибка транспорта: проверьте настройки, файлы профиля и бинарные файлы'
     if($locked){Write-TransportLog $root 'fatal' (Get-TransportErrorDetail $_);Write-TransportLog $root 'process-failed' (New-TransportDiagnostic $null 'transport' 'initialization-failed')}else{Write-Error 'Транспорт уже запущен или блокировка недоступна' -ErrorAction Continue}
 }finally{
+    Stop-DaemonEngineApiCheck
     if($reloadJob){Stop-Job $reloadJob;Remove-Job $reloadJob -Force}
     Stop-TransportProbes;Stop-DaemonObservation
     foreach($child in @($tunnelChildren.Values)){Stop-TransportProcess $child};Stop-TransportProcess $engine;$engine=$null;$confirmed=$false
