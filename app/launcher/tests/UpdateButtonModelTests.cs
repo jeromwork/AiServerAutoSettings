@@ -46,6 +46,7 @@ namespace RemoteAgents.Launcher
             TerminalStatesIgnoreLateEvents();
             DeferredUnsubscribesOnFailed();
             InjectedClockUsedForUpToDate();
+            SubscribeFailureTransitionsToFailed();
             DeadlockFreedomWithStateChangedAndOtherThread();
             PhaseChangedEventFires();
             ShowSpinnerFlag();
@@ -378,12 +379,58 @@ namespace RemoteAgents.Launcher
 
         static void InjectedClockUsedForUpToDate()
         {
-            var fixedTime = new DateTime(2026, 11, 21, 18, 42, 0, DateTimeKind.Utc);
+            var fixedTime = new DateTime(2026, 11, 21, 18, 42, 0, DateTimeKind.Local);
             var model = new UpdateButtonModel(() => fixedTime);
             model.OnClick();
             Check(model.OnUpToDate("3.0.0"), "uptodate accepted without explicit time");
             Check(model.CheckedTime == fixedTime, "injected clock time used");
             Check(model.StatusText == "У вас последняя версия 3.0.0 (проверено 18:42)", "status text matches injected clock: " + model.StatusText);
+
+            var unspecTime = new DateTime(2026, 11, 21, 19, 15, 0, DateTimeKind.Unspecified);
+            var modelUnspec = new UpdateButtonModel(() => unspecTime);
+            modelUnspec.OnClick();
+            modelUnspec.OnUpToDate("3.1.0");
+            Check(modelUnspec.StatusText == "У вас последняя версия 3.1.0 (проверено 19:15)", "status text matches unspecified time: " + modelUnspec.StatusText);
+
+            var utcTime = new DateTime(2026, 11, 21, 12, 0, 0, DateTimeKind.Utc);
+            var modelUtc = new UpdateButtonModel(() => utcTime);
+            modelUtc.OnClick();
+            modelUtc.OnUpToDate("3.2.0");
+            string expectedLocal = utcTime.ToLocalTime().ToString("HH:mm");
+            Check(modelUtc.StatusText == "У вас последняя версия 3.2.0 (проверено " + expectedLocal + ")", "utc time converted to local: " + modelUtc.StatusText);
+        }
+
+        static void SubscribeFailureTransitionsToFailed()
+        {
+            // Case 1: subscribe throws exception
+            var modelThrow = new UpdateButtonModel();
+            bool res1 = modelThrow.OnClick("диск", () => throw new InvalidOperationException("шина недоступна"));
+            Check(!res1, "OnClick returned false on subscribe exception");
+            Check(modelThrow.State == UpdateButtonState.Failed, "state is failed on subscribe exception");
+            Check(modelThrow.ErrorText.Contains("не удалось дождаться освобождения: шина недоступна"), "error text matches exception: " + modelThrow.ErrorText);
+            Check(modelThrow.StatusText == "Ошибка: не удалось дождаться освобождения: шина недоступна", "status text matches: " + modelThrow.StatusText);
+            Check(modelThrow.ButtonEnabled, "button enabled after failed subscribe");
+
+            // Case 2: subscribe returns null
+            var modelNull = new UpdateButtonModel();
+            bool res2 = modelNull.OnClick("диск", () => null);
+            Check(!res2, "OnClick returned false on subscribe null");
+            Check(modelNull.State == UpdateButtonState.Failed, "state is failed on subscribe null");
+            Check(modelNull.ErrorText.StartsWith("не удалось дождаться освобождения:"), "error text starts with failure message: " + modelNull.ErrorText);
+            Check(modelNull.StatusText.StartsWith("Ошибка: не удалось дождаться освобождения:"), "status text starts with failure message: " + modelNull.StatusText);
+            Check(modelNull.ButtonEnabled, "button enabled after null subscribe");
+
+            // Case 3: OnDeferred directly with exception
+            var modelDefThrow = new UpdateButtonModel();
+            bool res3 = modelDefThrow.OnDeferred("конфиг", () => throw new Exception("сбой соединения"));
+            Check(!res3, "OnDeferred returned false on exception");
+            Check(modelDefThrow.State == UpdateButtonState.Failed, "OnDeferred state is failed on exception");
+
+            // Case 4: OnDeferred directly with null
+            var modelDefNull = new UpdateButtonModel();
+            bool res4 = modelDefNull.OnDeferred("конфиг", () => null);
+            Check(!res4, "OnDeferred returned false on null");
+            Check(modelDefNull.State == UpdateButtonState.Failed, "OnDeferred state is failed on null");
         }
 
         static void DeadlockFreedomWithStateChangedAndOtherThread()

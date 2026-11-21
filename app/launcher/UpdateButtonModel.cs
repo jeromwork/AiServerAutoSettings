@@ -27,7 +27,7 @@ namespace RemoteAgents.Launcher
 
         public UpdateButtonModel(Func<DateTime> clock = null)
         {
-            this.clock = clock ?? (() => DateTime.UtcNow);
+            this.clock = clock ?? (() => DateTime.Now);
             this.phaseStart = this.clock();
         }
 
@@ -207,6 +207,7 @@ namespace RemoteAgents.Launcher
 
         public bool OnDownloadProgress(long bytes, long size)
         {
+            // TODO (этап 2): обработчик прогресса не должен бросать исключения
             int pct = size > 0 ? (int)Math.Min(100, Math.Max(0, bytes * 100 / size)) : 0;
             return OnDownloading(pct, bytes, size);
         }
@@ -283,7 +284,8 @@ namespace RemoteAgents.Launcher
                 State = UpdateButtonState.UpToDate;
                 Version = version ?? "";
                 CheckedTime = checkedTime ?? clock();
-                StatusText = "У вас последняя версия " + Version + " (проверено " + CheckedTime.Value.ToString("HH:mm") + ")";
+                DateTime displayTime = CheckedTime.Value.Kind == DateTimeKind.Utc ? CheckedTime.Value.ToLocalTime() : CheckedTime.Value;
+                StatusText = "У вас последняя версия " + Version + " (проверено " + displayTime.ToString("HH:mm") + ")";
 
                 DateTime now = clock();
                 elapsedMs = Math.Max(0, (long)(now - phaseStart).TotalMilliseconds);
@@ -352,9 +354,27 @@ namespace RemoteAgents.Launcher
             toDispose?.Dispose();
 
             IDisposable sub = null;
+            string failureReason = null;
             if (subscribe != null)
             {
-                try { sub = subscribe(); } catch { }
+                try
+                {
+                    sub = subscribe();
+                    if (sub == null)
+                    {
+                        failureReason = "подписка вернула null";
+                    }
+                }
+                catch (Exception ex)
+                {
+                    failureReason = ex.Message;
+                }
+            }
+
+            if (failureReason != null)
+            {
+                OnFailed("не удалось дождаться освобождения: " + failureReason);
+                return false;
             }
 
             lock (sync)
@@ -363,6 +383,7 @@ namespace RemoteAgents.Launcher
                 {
                     activeSubscription = sub;
                     sub = null;
+                    // TODO (этап 2): после подписки перепроверить занятость и при свободном вызвать OnReleased()
                 }
             }
             sub?.Dispose();
@@ -585,6 +606,7 @@ namespace RemoteAgents.Launcher
             }
             if (shouldReport)
             {
+                // TODO (этап 2): обработчик прогресса не должен бросать исключения
                 onProgress?.Invoke(current, expectedSize);
             }
         }
