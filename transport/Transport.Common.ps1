@@ -1110,7 +1110,11 @@ function Test-TransportDiag([string]$Name) { [bool]($script:TransportDiag -and $
 function Get-TransportMemIntervalSec { if($script:TransportDiag.Count){10}else{60} }
 function Get-TransportMemSample {
     $p=[Diagnostics.Process]::GetCurrentProcess()
-    try{[ordered]@{ws=[long]$p.WorkingSet64;private=[long]$p.PrivateMemorySize64;gcHeap=[long][GC]::GetTotalMemory($false);gen2=[int][GC]::CollectionCount(2)}}finally{$p.Dispose()}
+    try{
+        $ws=[long]$p.WorkingSet64
+        $private=if([Environment]::OSVersion.Platform -eq 'Win32NT'){[long]$p.PrivateMemorySize64}else{$ws}
+        [ordered]@{ws=$ws;private=$private;gcHeap=[long][GC]::GetTotalMemory($false);gen2=[int][GC]::CollectionCount(2)}
+    }finally{$p.Dispose()}
 }
 # Поля журнала transport.mem: объёмы в МБ, gen2 — число сборок поколения 2.
 function Get-TransportMemFields($Sample,[int]$LimitMb) {

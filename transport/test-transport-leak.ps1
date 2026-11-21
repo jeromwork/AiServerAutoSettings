@@ -72,6 +72,9 @@ try{
     # --- строка transport.mem и предохранитель
     $sample=Get-TransportMemSample
     Assert ($sample.ws -gt 0 -and $sample.private -gt 0 -and $sample.gcHeap -gt 0 -and $sample.gen2 -ge 0) 'образец памяти заполнен'
+    if([Environment]::OSVersion.Platform -ne 'Win32NT'){
+        Assert ($sample.private -eq $sample.ws) 'память вне Windows: private берётся из WorkingSet64'
+    }
     $fields=Get-TransportMemFields $sample 400
     $line=Format-RaLogLine ([DateTimeOffset]::Now) 'INFO' 'transport' 'transport.mem' $fields
     foreach($k in @('ws=','private=','gcHeap=','gen2=','limit=400')){Assert ($line.Contains($k)) ('transport.mem содержит '+$k)}
