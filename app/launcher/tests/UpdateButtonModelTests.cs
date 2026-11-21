@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading;
 
 namespace RemoteAgents.Launcher
 {
@@ -12,6 +13,17 @@ namespace RemoteAgents.Launcher
         {
             if (!condition) throw new Exception("UpdateButtonModel: " + name);
             count++;
+        }
+
+        static void ReadExact(Stream stream, byte[] buffer)
+        {
+            int offset = 0;
+            while (offset < buffer.Length)
+            {
+                int read = stream.Read(buffer, offset, buffer.Length - offset);
+                if (read <= 0) throw new EndOfStreamException();
+                offset += read;
+            }
         }
 
         public static int Main(string[] args)
@@ -31,6 +43,13 @@ namespace RemoteAgents.Launcher
             CountingStreamStepByStepThrottling();
             CountingStreamWriteSupport();
             UpdatedState();
+            TerminalStatesIgnoreLateEvents();
+            DeferredUnsubscribesOnFailed();
+            InjectedClockUsedForUpToDate();
+            DeadlockFreedomWithStateChangedAndOtherThread();
+            PhaseChangedEventFires();
+            ShowSpinnerFlag();
+            CountingStreamClosesSource();
             Console.WriteLine("PASS: " + count + " update button model checks");
         }
 
@@ -40,6 +59,10 @@ namespace RemoteAgents.Launcher
             Check(model.State == UpdateButtonState.Idle, "initial state is idle");
             Check(model.ButtonEnabled, "idle button is enabled");
             Check(!model.IsBusy, "idle is not busy");
+            Check(!model.ShowSpinner, "idle has no spinner");
+
+            Check(model.OnClick(), "click accepted");
+            Check(model.State == UpdateButtonState.Checking, "state is checking");
 
             long totalSize = 10 * 1024 * 1024; // 10 MB
             byte[] fakeData = new byte[totalSize];
@@ -53,38 +76,41 @@ namespace RemoteAgents.Launcher
                 Check(model.StatusText == "Скачиваю: 0% (0 из 10 МБ)", "status text matches: " + model.StatusText);
                 Check(!model.ButtonEnabled, "button disabled while downloading");
                 Check(model.IsBusy, "busy while downloading");
+                Check(model.ShowSpinner, "spinner visible while downloading");
 
-                // Manual read / feed of 5 MB (50%)
+                // Manual read of 5 MB (50%) in exact chunks
                 byte[] buffer = new byte[5 * 1024 * 1024];
-                int read1 = stream.Read(buffer, 0, buffer.Length);
-                Check(read1 == buffer.Length, "read 5 MB");
+                ReadExact(stream, buffer);
                 Check(model.DownloadPercent == 50, "percent is 50%");
                 Check(model.StatusText.Contains("50%"), "status contains 50%: " + model.StatusText);
                 Check(model.StatusText == "Скачиваю: 50% (5 из 10 МБ)", "status text matches 50%: " + model.StatusText);
+                Check(model.ShowSpinner, "spinner still visible at 50%");
 
-                // Manual read / feed of remaining 5 MB (100%)
-                int read2 = stream.Read(buffer, 0, buffer.Length);
-                Check(read2 == buffer.Length, "read remaining 5 MB");
+                // Manual read of remaining 5 MB (100%)
+                ReadExact(stream, buffer);
                 Check(model.DownloadPercent == 100, "percent is 100%");
                 Check(model.StatusText.Contains("100%"), "status contains 100%: " + model.StatusText);
                 Check(model.StatusText == "Скачиваю: 100% (10 из 10 МБ)", "status text matches 100%: " + model.StatusText);
+                Check(model.ShowSpinner, "spinner still visible at 100%");
             }
 
             // Sequence transitions to Verifying:
-            model.OnVerifying();
+            Check(model.OnVerifying(), "transition to verifying accepted");
             Check(model.State == UpdateButtonState.Verifying, "state is verifying");
             Check(model.StatusText.Contains("Проверяю сборку"), "status contains Проверяю сборку: " + model.StatusText);
             Check(model.StatusText == "Проверяю сборку…", "verifying text matches");
             Check(!model.ButtonEnabled, "button disabled while verifying");
             Check(model.IsBusy, "busy while verifying");
+            Check(model.ShowSpinner, "spinner visible while verifying");
 
             // Sequence transitions to Installing:
-            model.OnInstalling();
+            Check(model.OnInstalling(), "transition to installing accepted");
             Check(model.State == UpdateButtonState.Installing, "state is installing");
             Check(model.StatusText.Contains("Устанавливаю"), "status contains Устанавливаю: " + model.StatusText);
             Check(model.StatusText == "Устанавливаю, программа перезапустится", "installing text matches");
             Check(!model.ButtonEnabled, "button disabled while installing");
             Check(model.IsBusy, "busy while installing");
+            Check(model.ShowSpinner, "spinner visible while installing");
         }
 
         static void SecondClickIgnoredWhileBusy()
@@ -95,6 +121,7 @@ namespace RemoteAgents.Launcher
             Check(model.StatusText == "Проверяю…", "checking text");
             Check(!model.ButtonEnabled, "button disabled during checking");
             Check(model.IsBusy, "busy during checking");
+            Check(model.ShowSpinner, "spinner visible during checking");
 
             // Second click during checking: ignored
             Check(!model.OnClick(), "second click during checking is ignored");
@@ -119,31 +146,44 @@ namespace RemoteAgents.Launcher
             model.OnDeferred("конфиг");
             Check(!model.OnClick(), "click during deferred ignored");
             Check(model.State == UpdateButtonState.Deferred, "state remains deferred");
+            Check(!model.ShowSpinner, "spinner not visible when deferred");
         }
 
         static void SizeZeroModeWithoutPercent()
         {
             var model = new UpdateButtonModel();
+            Check(model.OnClick(), "click accepted");
+            Check(model.State == UpdateButtonState.Checking, "state is checking");
+            var reports = new List<long>();
             using (var fakeSource = new MemoryStream(new byte[15 * 1024 * 1024]))
-            using (var stream = model.CreateCountingStream(fakeSource, 0)) // size = 0
+            using (var stream = new CountingStream(fakeSource, 0, (bytes, size) => { reports.Add(bytes); model.OnDownloadProgress(bytes, size); }, reportInitial: true))
             {
                 Check(model.State == UpdateButtonState.Downloading, "downloading state with size 0");
                 Check(model.DownloadPercent == 0, "percent is 0");
                 Check(!model.StatusText.Contains("%"), "status text has no percent at 0: " + model.StatusText);
                 Check(model.StatusText == "Скачиваю: 0 МБ", "matches zero text: " + model.StatusText);
+                Check(reports.Count == 1 && reports[0] == 0, "initial 0 report");
 
-                byte[] buf = new byte[5 * 1024 * 1024];
-                int r1 = stream.Read(buf, 0, buf.Length);
-                Check(r1 == buf.Length, "read 5 MB chunk");
-                Check(model.BytesDownloaded == 5 * 1024 * 1024, "downloaded 5 MB");
+                // Small reads (< 1 MB total) should NOT trigger progress
+                byte[] chunk = new byte[100 * 1024]; // 100 KB
+                for (int i = 0; i < 5; i++)
+                {
+                    ReadExact(stream, chunk);
+                }
+                Check(reports.Count == 1, "small reads under 1 MB do not trigger progress (reports=" + reports.Count + ")");
+
+                // Read enough to reach exactly 1 MB (total 1024 * 1024)
+                byte[] chunkRestTo1Mb = new byte[1024 * 1024 - 500 * 1024];
+                ReadExact(stream, chunkRestTo1Mb);
+                Check(reports.Count == 2, "crossing 1 MB triggers progress (reports=" + reports.Count + ")");
+                Check(model.StatusText == "Скачиваю: 1 МБ", "matches 1 MB text: " + model.StatusText);
+
+                // Read 4 MB more (to reach 5 MB)
+                byte[] chunk4mb = new byte[4 * 1024 * 1024];
+                ReadExact(stream, chunk4mb);
+                Check(model.BytesDownloaded >= 5 * 1024 * 1024, "downloaded >= 5 MB");
                 Check(!model.StatusText.Contains("%"), "status text has no percent at 5 MB: " + model.StatusText);
                 Check(model.StatusText == "Скачиваю: 5 МБ", "matches 5 MB text: " + model.StatusText);
-
-                int r2 = stream.Read(buf, 0, buf.Length);
-                Check(r2 == buf.Length, "read second 5 MB chunk");
-                Check(model.BytesDownloaded == 10 * 1024 * 1024, "downloaded 10 MB");
-                Check(!model.StatusText.Contains("%"), "status text has no percent at 10 MB: " + model.StatusText);
-                Check(model.StatusText == "Скачиваю: 10 МБ", "matches 10 MB text: " + model.StatusText);
             }
         }
 
@@ -154,10 +194,11 @@ namespace RemoteAgents.Launcher
             Check(!model.ButtonEnabled, "busy checking");
 
             var time = new DateTime(2026, 11, 21, 14, 30, 0);
-            model.OnUpToDate("1.5.0", time);
+            Check(model.OnUpToDate("1.5.0", time), "uptodate accepted");
             Check(model.State == UpdateButtonState.UpToDate, "state is uptodate");
             Check(model.ButtonEnabled, "button is enabled when up to date");
             Check(!model.IsBusy, "not busy when up to date");
+            Check(!model.ShowSpinner, "no spinner when up to date");
             Check(model.StatusText == "У вас последняя версия 1.5.0 (проверено 14:30)", "uptodate status text: " + model.StatusText);
 
             // Can click again when up to date
@@ -169,23 +210,25 @@ namespace RemoteAgents.Launcher
         {
             var model = new UpdateButtonModel();
             bool subscribed = false;
-            model.OnDeferred("применение конфига", () => subscribed = true);
+            Check(model.OnDeferred("применение конфига", () => { subscribed = true; return new TestDisposable(); }), "deferred accepted");
 
             Check(model.State == UpdateButtonState.Deferred, "state is deferred");
             Check(model.StatusText == "Отложено: применение конфига — начну, как освободится", "deferred text matches: " + model.StatusText);
             Check(!model.ButtonEnabled, "button disabled when deferred");
             Check(model.IsBusy, "busy when deferred");
+            Check(!model.ShowSpinner, "no spinner when deferred");
             Check(subscribed, "subscribed to release event");
-            Check(model.IsReleaseSubscribed, "model reports release subscribed");
+            Check(model.HasReleaseSubscription, "model reports release subscribed");
 
             // Second click during deferred is ignored
             Check(!model.OnClick(), "click during deferred is ignored");
 
             // Release triggers transition to Checking
             Check(model.OnReleased(), "release transitions state");
-            Check(!model.IsReleaseSubscribed, "subscription cleared after release");
+            Check(!model.HasReleaseSubscription, "subscription cleared after release");
             Check(model.State == UpdateButtonState.Checking, "now checking");
             Check(model.StatusText == "Проверяю…", "status is checking: " + model.StatusText);
+            Check(model.ShowSpinner, "spinner visible after release");
 
             // Calling OnReleased when not deferred returns false
             Check(!model.OnReleased(), "release returns false when not deferred");
@@ -201,11 +244,12 @@ namespace RemoteAgents.Launcher
         {
             var model = new UpdateButtonModel();
             model.OnClick();
-            model.OnFailed("нет связи с сервером");
+            Check(model.OnFailed("нет связи с сервером"), "failed accepted");
 
             Check(model.State == UpdateButtonState.Failed, "state is failed");
             Check(model.ButtonEnabled, "button enabled after failure");
             Check(!model.IsBusy, "not busy after failure");
+            Check(!model.ShowSpinner, "no spinner when failed");
             Check(model.StatusText == "Ошибка: нет связи с сервером", "failed text matches: " + model.StatusText);
 
             // Can retry after failure
@@ -266,10 +310,203 @@ namespace RemoteAgents.Launcher
         static void UpdatedState()
         {
             var model = new UpdateButtonModel();
-            model.OnUpdated("1.6.0");
+            Check(model.OnUpdated("1.6.0"), "updated accepted");
             Check(model.State == UpdateButtonState.Updated, "state is updated");
             Check(model.ButtonEnabled, "button enabled when updated");
+            Check(!model.ShowSpinner, "no spinner when updated");
             Check(model.StatusText == "Обновлено до 1.6.0", "updated status text");
+        }
+
+        static void TerminalStatesIgnoreLateEvents()
+        {
+            // 1. After OnFailed:
+            var failedModel = new UpdateButtonModel();
+            failedModel.OnClick();
+            failedModel.OnFailed("таймаут загрузки");
+            Check(failedModel.State == UpdateButtonState.Failed, "is failed");
+
+            Check(!failedModel.OnDownloading(50, 50, 100), "late downloading rejected after failed");
+            Check(failedModel.State == UpdateButtonState.Failed, "state unchanged after late downloading");
+
+            Check(!failedModel.OnDownloadProgress(75, 100), "late progress rejected after failed");
+            Check(failedModel.State == UpdateButtonState.Failed, "state unchanged after late progress");
+
+            Check(!failedModel.OnVerifying(), "late verifying rejected after failed");
+            Check(failedModel.State == UpdateButtonState.Failed, "state unchanged after late verifying");
+
+            Check(!failedModel.OnInstalling(), "late installing rejected after failed");
+            Check(failedModel.State == UpdateButtonState.Failed, "state unchanged after late installing");
+
+            // 2. After OnUpToDate:
+            var upToDateModel = new UpdateButtonModel();
+            upToDateModel.OnClick();
+            upToDateModel.OnUpToDate("1.5.0");
+            Check(upToDateModel.State == UpdateButtonState.UpToDate, "is uptodate");
+
+            Check(!upToDateModel.OnDownloading(50, 50, 100), "late downloading rejected after uptodate");
+            Check(upToDateModel.State == UpdateButtonState.UpToDate, "state unchanged after late downloading");
+
+            Check(!upToDateModel.OnDownloadProgress(75, 100), "late progress rejected after uptodate");
+            Check(upToDateModel.State == UpdateButtonState.UpToDate, "state unchanged after late progress");
+
+            Check(!upToDateModel.OnVerifying(), "late verifying rejected after uptodate");
+            Check(upToDateModel.State == UpdateButtonState.UpToDate, "state unchanged after late verifying");
+
+            Check(!upToDateModel.OnInstalling(), "late installing rejected after uptodate");
+            Check(upToDateModel.State == UpdateButtonState.UpToDate, "state unchanged after late installing");
+        }
+
+        static void DeferredUnsubscribesOnFailed()
+        {
+            var model = new UpdateButtonModel();
+            bool subscribed = false;
+            bool disposed = false;
+
+            var sub = new ActionDisposable(() => disposed = true);
+            Check(model.OnClick("диск", () => { subscribed = true; return sub; }), "click occupied accepted");
+            Check(model.State == UpdateButtonState.Deferred, "state is deferred");
+            Check(subscribed, "subscribed called");
+            Check(!disposed, "not disposed yet");
+            Check(model.HasReleaseSubscription, "has active subscription");
+
+            // Failure while deferred should unsubscribe / dispose
+            Check(model.OnFailed("ошибка отмены"), "failed accepted while deferred");
+            Check(model.State == UpdateButtonState.Failed, "state is failed");
+            Check(disposed, "subscription was disposed on failed");
+            Check(!model.HasReleaseSubscription, "no active subscription");
+        }
+
+        static void InjectedClockUsedForUpToDate()
+        {
+            var fixedTime = new DateTime(2026, 11, 21, 18, 42, 0, DateTimeKind.Utc);
+            var model = new UpdateButtonModel(() => fixedTime);
+            model.OnClick();
+            Check(model.OnUpToDate("3.0.0"), "uptodate accepted without explicit time");
+            Check(model.CheckedTime == fixedTime, "injected clock time used");
+            Check(model.StatusText == "У вас последняя версия 3.0.0 (проверено 18:42)", "status text matches injected clock: " + model.StatusText);
+        }
+
+        static void DeadlockFreedomWithStateChangedAndOtherThread()
+        {
+            var model = new UpdateButtonModel();
+            int notifications = 0;
+            bool threadSucceeded = false;
+
+            // Handler starts another thread calling model.OnClick() while StateChanged is in progress.
+            // If NotifyChanged was called under lock(sync), this would deadlock!
+            model.StateChanged += m =>
+            {
+                notifications++;
+                if (notifications == 1)
+                {
+                    var thread = new Thread(() =>
+                    {
+                        // Calling model from another thread during notification
+                        model.OnClick();
+                        threadSucceeded = true;
+                    });
+                    thread.Start();
+
+                    // Предохранитель (конституция 4а): событие завершения потока недоступно, если возник взаимный захват блокировок; при срабатывании — прерывание теста, успех не объявляет.
+                    const int DeadlockFuseMs = 5000;
+                    bool joined = thread.Join(DeadlockFuseMs);
+                    Check(joined, "other thread completed without deadlock");
+                }
+            };
+
+            Check(model.OnClick(), "initial click");
+            Check(threadSucceeded, "thread completed safely inside StateChanged");
+            Check(notifications >= 1, "notifications fired");
+        }
+
+        static void PhaseChangedEventFires()
+        {
+            DateTime current = new DateTime(2026, 11, 21, 10, 0, 0, DateTimeKind.Utc);
+            var model = new UpdateButtonModel(() => current);
+
+            var phases = new List<Tuple<UpdateButtonState, UpdateButtonState, long, long>>();
+            model.PhaseChanged += (prev, next, ms, bytes) => phases.Add(Tuple.Create(prev, next, ms, bytes));
+
+            model.OnClick(); // Idle -> Checking
+            current = current.AddMilliseconds(250);
+
+            model.OnDownloading(10, 1024 * 1024, 10 * 1024 * 1024); // Checking -> Downloading
+            current = current.AddMilliseconds(1200);
+
+            model.OnVerifying(); // Downloading -> Verifying
+            current = current.AddMilliseconds(800);
+
+            model.OnInstalling(); // Verifying -> Installing
+
+            Check(phases.Count == 4, "4 phase transitions recorded (actual=" + phases.Count + ")");
+            Check(phases[0].Item1 == UpdateButtonState.Idle && phases[0].Item2 == UpdateButtonState.Checking, "transition 1");
+            Check(phases[1].Item1 == UpdateButtonState.Checking && phases[1].Item2 == UpdateButtonState.Downloading && phases[1].Item3 == 250, "transition 2 elapsed 250ms");
+            Check(phases[2].Item1 == UpdateButtonState.Downloading && phases[2].Item2 == UpdateButtonState.Verifying && phases[2].Item3 == 1200, "transition 3 elapsed 1200ms");
+            Check(phases[3].Item1 == UpdateButtonState.Verifying && phases[3].Item2 == UpdateButtonState.Installing && phases[3].Item3 == 800, "transition 4 elapsed 800ms");
+        }
+
+        static void ShowSpinnerFlag()
+        {
+            var model = new UpdateButtonModel();
+            Check(!model.ShowSpinner, "idle has no spinner");
+
+            model.OnChecking();
+            Check(model.ShowSpinner, "checking has spinner");
+
+            model.OnDownloading(50, 50, 100);
+            Check(model.ShowSpinner, "downloading has spinner");
+
+            model.OnVerifying();
+            Check(model.ShowSpinner, "verifying has spinner");
+
+            model.OnInstalling();
+            Check(model.ShowSpinner, "installing has spinner");
+
+            model.OnUpToDate("1.0.0");
+            Check(!model.ShowSpinner, "uptodate has no spinner");
+
+            model.OnFailed("ошибка");
+            Check(!model.ShowSpinner, "failed has no spinner");
+
+            model.OnDeferred("занято");
+            Check(!model.ShowSpinner, "deferred has no spinner");
+
+            model.OnUpdated("1.1.0");
+            Check(!model.ShowSpinner, "updated has no spinner");
+        }
+
+        static void CountingStreamClosesSource()
+        {
+            bool sourceClosed = false;
+            var memory = new TrackedMemoryStream(() => sourceClosed = true);
+            using (var cs = new CountingStream(memory, 100))
+            {
+                Check(!sourceClosed, "source open while CountingStream active");
+            }
+            Check(sourceClosed, "CountingStream.Dispose closes underlying stream");
+        }
+
+        private sealed class TestDisposable : IDisposable
+        {
+            public void Dispose() { }
+        }
+
+        private sealed class ActionDisposable : IDisposable
+        {
+            private readonly Action onDispose;
+            public ActionDisposable(Action onDispose) { this.onDispose = onDispose; }
+            public void Dispose() { onDispose?.Invoke(); }
+        }
+
+        private sealed class TrackedMemoryStream : MemoryStream
+        {
+            private readonly Action onClose;
+            public TrackedMemoryStream(Action onClose) { this.onClose = onClose; }
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing) onClose?.Invoke();
+                base.Dispose(disposing);
+            }
         }
     }
 }

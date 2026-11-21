@@ -18,9 +18,18 @@ namespace RemoteAgents.Launcher
         Updated
     }
 
-    public sealed class UpdateButtonModel
+    public sealed class UpdateButtonModel : IDisposable
     {
         private readonly object sync = new object();
+        private readonly Func<DateTime> clock;
+        private DateTime phaseStart;
+        private IDisposable activeSubscription;
+
+        public UpdateButtonModel(Func<DateTime> clock = null)
+        {
+            this.clock = clock ?? (() => DateTime.UtcNow);
+            this.phaseStart = this.clock();
+        }
 
         public UpdateButtonState State { get; private set; } = UpdateButtonState.Idle;
         public string StatusText { get; private set; } = "";
@@ -31,11 +40,20 @@ namespace RemoteAgents.Launcher
         public DateTime? CheckedTime { get; private set; }
         public string ErrorText { get; private set; } = "";
         public string DeferredReason { get; private set; } = "";
-        public Action ReleaseSubscription { get; set; }
-        public bool IsReleaseSubscribed { get; private set; }
+
+        public bool HasReleaseSubscription
+        {
+            get
+            {
+                lock (sync)
+                {
+                    return activeSubscription != null;
+                }
+            }
+        }
 
         public event Action<UpdateButtonModel> StateChanged;
-        public event Action Changed;
+        public event Action<UpdateButtonState, UpdateButtonState, long, long> PhaseChanged;
 
         public bool ButtonEnabled => State == UpdateButtonState.Idle ||
                                      State == UpdateButtonState.UpToDate ||
@@ -44,48 +62,117 @@ namespace RemoteAgents.Launcher
 
         public bool IsBusy => !ButtonEnabled;
 
-        public bool OnClick(string occupiedReason = null)
+        public bool ShowSpinner => State == UpdateButtonState.Checking ||
+                                   State == UpdateButtonState.Downloading ||
+                                   State == UpdateButtonState.Verifying ||
+                                   State == UpdateButtonState.Installing;
+
+        public bool OnClick(string occupiedReason = null, Func<IDisposable> subscribe = null)
         {
+            if (!string.IsNullOrEmpty(occupiedReason))
+            {
+                lock (sync)
+                {
+                    if (IsBusy)
+                    {
+                        return false;
+                    }
+                }
+                return OnDeferred(occupiedReason, subscribe);
+            }
+
+            UpdateButtonState prev;
+            long elapsedMs;
+            long currentBytes;
+            IDisposable toDispose;
+
             lock (sync)
             {
                 if (IsBusy)
                 {
                     return false;
                 }
-                if (!string.IsNullOrEmpty(occupiedReason))
+
+                toDispose = activeSubscription;
+                activeSubscription = null;
+
+                prev = State;
+                State = UpdateButtonState.Checking;
+                StatusText = "Проверяю…";
+                DownloadPercent = 0;
+                BytesDownloaded = 0;
+                TotalBytes = 0;
+                ErrorText = "";
+                DeferredReason = "";
+
+                DateTime now = clock();
+                elapsedMs = Math.Max(0, (long)(now - phaseStart).TotalMilliseconds);
+                phaseStart = now;
+                currentBytes = 0;
+            }
+
+            toDispose?.Dispose();
+            PhaseChanged?.Invoke(prev, UpdateButtonState.Checking, elapsedMs, currentBytes);
+            StateChanged?.Invoke(this);
+            return true;
+        }
+
+        public bool OnChecking()
+        {
+            UpdateButtonState prev;
+            long elapsedMs;
+            long currentBytes;
+            IDisposable toDispose;
+
+            lock (sync)
+            {
+                if (State == UpdateButtonState.Checking ||
+                    State == UpdateButtonState.Downloading ||
+                    State == UpdateButtonState.Verifying ||
+                    State == UpdateButtonState.Installing)
                 {
-                    OnDeferredInternal(occupiedReason, null);
-                    return true;
+                    return false;
                 }
-                OnCheckingInternal();
-                return true;
+
+                toDispose = activeSubscription;
+                activeSubscription = null;
+
+                prev = State;
+                State = UpdateButtonState.Checking;
+                StatusText = "Проверяю…";
+                DownloadPercent = 0;
+                BytesDownloaded = 0;
+                TotalBytes = 0;
+                ErrorText = "";
+                DeferredReason = "";
+
+                DateTime now = clock();
+                elapsedMs = Math.Max(0, (long)(now - phaseStart).TotalMilliseconds);
+                phaseStart = now;
+                currentBytes = 0;
             }
+
+            toDispose?.Dispose();
+            PhaseChanged?.Invoke(prev, UpdateButtonState.Checking, elapsedMs, currentBytes);
+            StateChanged?.Invoke(this);
+            return true;
         }
 
-        public void OnChecking()
+        public bool OnDownloading(int pct, long bytes, long size)
         {
+            UpdateButtonState prev;
+            long elapsedMs = 0;
+            long currentBytes;
+            bool stateChanged = false;
+
             lock (sync)
             {
-                OnCheckingInternal();
-            }
-        }
+                if (State != UpdateButtonState.Checking && State != UpdateButtonState.Downloading)
+                {
+                    return false;
+                }
 
-        private void OnCheckingInternal()
-        {
-            State = UpdateButtonState.Checking;
-            StatusText = "Проверяю…";
-            DownloadPercent = 0;
-            BytesDownloaded = 0;
-            TotalBytes = 0;
-            ErrorText = "";
-            DeferredReason = "";
-            NotifyChanged();
-        }
-
-        public void OnDownloading(int pct, long bytes, long size)
-        {
-            lock (sync)
-            {
+                prev = State;
                 State = UpdateButtonState.Downloading;
                 DownloadPercent = Math.Max(0, Math.Min(100, pct));
                 BytesDownloaded = Math.Max(0, bytes);
@@ -99,99 +186,233 @@ namespace RemoteAgents.Launcher
                 {
                     StatusText = "Скачиваю: " + FormatMegaBytes(BytesDownloaded) + " МБ";
                 }
-                NotifyChanged();
+
+                if (prev != State)
+                {
+                    DateTime now = clock();
+                    elapsedMs = Math.Max(0, (long)(now - phaseStart).TotalMilliseconds);
+                    phaseStart = now;
+                    stateChanged = true;
+                }
+                currentBytes = BytesDownloaded;
             }
+
+            if (stateChanged)
+            {
+                PhaseChanged?.Invoke(prev, UpdateButtonState.Downloading, elapsedMs, currentBytes);
+            }
+            StateChanged?.Invoke(this);
+            return true;
         }
 
-        public void OnDownloadProgress(long bytes, long size)
+        public bool OnDownloadProgress(long bytes, long size)
         {
             int pct = size > 0 ? (int)Math.Min(100, Math.Max(0, bytes * 100 / size)) : 0;
-            OnDownloading(pct, bytes, size);
+            return OnDownloading(pct, bytes, size);
         }
 
-        public void OnVerifying()
+        public bool OnVerifying()
         {
+            UpdateButtonState prev;
+            long elapsedMs;
+            long currentBytes;
+
             lock (sync)
             {
+                if (State != UpdateButtonState.Checking && State != UpdateButtonState.Downloading)
+                {
+                    return false;
+                }
+
+                prev = State;
                 State = UpdateButtonState.Verifying;
                 StatusText = "Проверяю сборку…";
-                NotifyChanged();
+
+                DateTime now = clock();
+                elapsedMs = Math.Max(0, (long)(now - phaseStart).TotalMilliseconds);
+                phaseStart = now;
+                currentBytes = BytesDownloaded;
             }
+
+            PhaseChanged?.Invoke(prev, UpdateButtonState.Verifying, elapsedMs, currentBytes);
+            StateChanged?.Invoke(this);
+            return true;
         }
 
-        public void OnInstalling()
+        public bool OnInstalling()
         {
+            UpdateButtonState prev;
+            long elapsedMs;
+            long currentBytes;
+
             lock (sync)
             {
+                if (State != UpdateButtonState.Verifying && State != UpdateButtonState.Downloading)
+                {
+                    return false;
+                }
+
+                prev = State;
                 State = UpdateButtonState.Installing;
                 StatusText = "Устанавливаю, программа перезапустится";
-                NotifyChanged();
+
+                DateTime now = clock();
+                elapsedMs = Math.Max(0, (long)(now - phaseStart).TotalMilliseconds);
+                phaseStart = now;
+                currentBytes = BytesDownloaded;
             }
+
+            PhaseChanged?.Invoke(prev, UpdateButtonState.Installing, elapsedMs, currentBytes);
+            StateChanged?.Invoke(this);
+            return true;
         }
 
-        public void OnUpToDate(string version, DateTime? checkedTime = null)
+        public bool OnUpToDate(string version, DateTime? checkedTime = null)
         {
+            UpdateButtonState prev;
+            long elapsedMs;
+            long currentBytes;
+            IDisposable toDispose;
+
             lock (sync)
             {
+                toDispose = activeSubscription;
+                activeSubscription = null;
+
+                prev = State;
                 State = UpdateButtonState.UpToDate;
                 Version = version ?? "";
-                CheckedTime = checkedTime ?? DateTime.Now;
+                CheckedTime = checkedTime ?? clock();
                 StatusText = "У вас последняя версия " + Version + " (проверено " + CheckedTime.Value.ToString("HH:mm") + ")";
-                NotifyChanged();
+
+                DateTime now = clock();
+                elapsedMs = Math.Max(0, (long)(now - phaseStart).TotalMilliseconds);
+                phaseStart = now;
+                currentBytes = BytesDownloaded;
             }
+
+            toDispose?.Dispose();
+            PhaseChanged?.Invoke(prev, UpdateButtonState.UpToDate, elapsedMs, currentBytes);
+            StateChanged?.Invoke(this);
+            return true;
         }
 
-        public void OnFailed(string text)
+        public bool OnFailed(string text)
         {
+            UpdateButtonState prev;
+            long elapsedMs;
+            long currentBytes;
+            IDisposable toDispose;
+
             lock (sync)
             {
+                toDispose = activeSubscription;
+                activeSubscription = null;
+
+                prev = State;
                 State = UpdateButtonState.Failed;
                 ErrorText = text ?? "";
                 StatusText = "Ошибка: " + ErrorText;
-                NotifyChanged();
+
+                DateTime now = clock();
+                elapsedMs = Math.Max(0, (long)(now - phaseStart).TotalMilliseconds);
+                phaseStart = now;
+                currentBytes = BytesDownloaded;
             }
+
+            toDispose?.Dispose();
+            PhaseChanged?.Invoke(prev, UpdateButtonState.Failed, elapsedMs, currentBytes);
+            StateChanged?.Invoke(this);
+            return true;
         }
 
-        public void OnDeferred(string what, Action subscribe = null)
+        public bool OnDeferred(string what, Func<IDisposable> subscribe = null)
         {
+            UpdateButtonState prev;
+            long elapsedMs;
+            long currentBytes;
+            IDisposable toDispose;
+
             lock (sync)
             {
-                OnDeferredInternal(what, subscribe);
+                toDispose = activeSubscription;
+                activeSubscription = null;
+
+                prev = State;
+                State = UpdateButtonState.Deferred;
+                DeferredReason = what ?? "";
+                StatusText = "Отложено: " + DeferredReason + " — начну, как освободится";
+
+                DateTime now = clock();
+                elapsedMs = Math.Max(0, (long)(now - phaseStart).TotalMilliseconds);
+                phaseStart = now;
+                currentBytes = BytesDownloaded;
             }
-        }
 
-        public void OnOccupied(string what, Action subscribe = null)
-        {
-            OnDeferred(what, subscribe);
-        }
+            toDispose?.Dispose();
 
-        private void OnDeferredInternal(string what, Action subscribe)
-        {
-            State = UpdateButtonState.Deferred;
-            DeferredReason = what ?? "";
-            StatusText = "Отложено: " + DeferredReason + " — начну, как освободится";
+            IDisposable sub = null;
             if (subscribe != null)
             {
-                ReleaseSubscription = subscribe;
-                IsReleaseSubscribed = true;
-                try { subscribe(); } catch { }
+                try { sub = subscribe(); } catch { }
             }
-            NotifyChanged();
+
+            lock (sync)
+            {
+                if (State == UpdateButtonState.Deferred)
+                {
+                    activeSubscription = sub;
+                    sub = null;
+                }
+            }
+            sub?.Dispose();
+
+            PhaseChanged?.Invoke(prev, UpdateButtonState.Deferred, elapsedMs, currentBytes);
+            StateChanged?.Invoke(this);
+            return true;
+        }
+
+        public bool OnOccupied(string what, Func<IDisposable> subscribe = null)
+        {
+            return OnDeferred(what, subscribe);
         }
 
         public bool OnReleased()
         {
+            UpdateButtonState prev;
+            long elapsedMs;
+            long currentBytes;
+            IDisposable toDispose;
+
             lock (sync)
             {
                 if (State != UpdateButtonState.Deferred)
                 {
                     return false;
                 }
-                IsReleaseSubscribed = false;
-                ReleaseSubscription = null;
-                OnCheckingInternal();
-                return true;
+
+                toDispose = activeSubscription;
+                activeSubscription = null;
+
+                prev = State;
+                State = UpdateButtonState.Checking;
+                StatusText = "Проверяю…";
+                DownloadPercent = 0;
+                BytesDownloaded = 0;
+                TotalBytes = 0;
+                ErrorText = "";
+                DeferredReason = "";
+
+                DateTime now = clock();
+                elapsedMs = Math.Max(0, (long)(now - phaseStart).TotalMilliseconds);
+                phaseStart = now;
+                currentBytes = 0;
             }
+
+            toDispose?.Dispose();
+            PhaseChanged?.Invoke(prev, UpdateButtonState.Checking, elapsedMs, currentBytes);
+            StateChanged?.Invoke(this);
+            return true;
         }
 
         public bool OnUnblocked()
@@ -199,25 +420,71 @@ namespace RemoteAgents.Launcher
             return OnReleased();
         }
 
-        public void OnUpdated(string version)
+        public bool OnUpdated(string version)
         {
+            UpdateButtonState prev;
+            long elapsedMs;
+            long currentBytes;
+            IDisposable toDispose;
+
             lock (sync)
             {
+                toDispose = activeSubscription;
+                activeSubscription = null;
+
+                prev = State;
                 State = UpdateButtonState.Updated;
                 Version = version ?? "";
                 StatusText = "Обновлено до " + Version;
-                NotifyChanged();
+
+                DateTime now = clock();
+                elapsedMs = Math.Max(0, (long)(now - phaseStart).TotalMilliseconds);
+                phaseStart = now;
+                currentBytes = BytesDownloaded;
             }
+
+            toDispose?.Dispose();
+            PhaseChanged?.Invoke(prev, UpdateButtonState.Updated, elapsedMs, currentBytes);
+            StateChanged?.Invoke(this);
+            return true;
         }
 
-        public void OnIdle()
+        public bool OnIdle()
         {
+            UpdateButtonState prev;
+            long elapsedMs = 0;
+            long currentBytes = 0;
+            IDisposable toDispose;
+
             lock (sync)
             {
+                toDispose = activeSubscription;
+                activeSubscription = null;
+
+                prev = State;
                 State = UpdateButtonState.Idle;
                 StatusText = "";
-                NotifyChanged();
+                DownloadPercent = 0;
+                BytesDownloaded = 0;
+                TotalBytes = 0;
+                ErrorText = "";
+                DeferredReason = "";
+
+                DateTime now = clock();
+                if (prev != UpdateButtonState.Idle)
+                {
+                    elapsedMs = Math.Max(0, (long)(now - phaseStart).TotalMilliseconds);
+                    phaseStart = now;
+                }
             }
+
+            toDispose?.Dispose();
+            if (prev != UpdateButtonState.Idle)
+            {
+                PhaseChanged?.Invoke(prev, UpdateButtonState.Idle, elapsedMs, currentBytes);
+            }
+            StateChanged?.Invoke(this);
+            return true;
         }
 
         public CountingStream CreateCountingStream(Stream inner, long expectedSize, bool reportInitial = true)
@@ -232,18 +499,15 @@ namespace RemoteAgents.Launcher
             return mb.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
         }
 
-        private void NotifyChanged()
+        public void Dispose()
         {
-            var sc = StateChanged;
-            var ch = Changed;
-            if (sc != null)
+            IDisposable toDispose;
+            lock (sync)
             {
-                try { sc(this); } catch { }
+                toDispose = activeSubscription;
+                activeSubscription = null;
             }
-            if (ch != null)
-            {
-                try { ch(); } catch { }
-            }
+            toDispose?.Dispose();
         }
     }
 
@@ -255,6 +519,7 @@ namespace RemoteAgents.Launcher
         private readonly object sync = new object();
         private long bytesTransferred;
         private int lastReportedPct = -1;
+        private long lastReportedMb = -1;
 
         public CountingStream(Stream inner, long expectedSize = 0, Action<long, long> onProgress = null, bool reportInitial = true)
         {
@@ -270,6 +535,7 @@ namespace RemoteAgents.Launcher
                 }
                 else
                 {
+                    lastReportedMb = 0;
                     onProgress(0, 0);
                 }
             }
@@ -309,7 +575,12 @@ namespace RemoteAgents.Launcher
                 }
                 else
                 {
-                    shouldReport = true;
+                    long currentMb = current / (1024 * 1024);
+                    if (currentMb > lastReportedMb || lastReportedMb < 0)
+                    {
+                        lastReportedMb = currentMb;
+                        shouldReport = true;
+                    }
                 }
             }
             if (shouldReport)
@@ -373,6 +644,7 @@ namespace RemoteAgents.Launcher
             }
         }
 
+        // CountingStream закрывает оборачиваемый поток при Dispose.
         protected override void Dispose(bool disposing)
         {
             if (disposing)
