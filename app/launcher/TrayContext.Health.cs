@@ -11,21 +11,12 @@ namespace RemoteAgents.Launcher
     {
         HealthBoard healthBoard; bool vpnReadyPublished, diskReadyPublished;
 
-        // Блоки, работавшие до обновления: tray и transport всегда, остальные (disk, control=bridge, vpn) — из update-state.json.
-        static string[] ExpectedBlocks(Dictionary<string, object> state)
-        {
-            var set = new List<string> { "tray", "transport" };
-            set.AddRange(Json.Strings(Json.Get(state, "runningComponents")));
-            if (Json.Bool(state, "vpnOn")) set.Add("vpn");
-            return set.Where(x => x.Length > 0).Distinct(StringComparer.Ordinal).ToArray();
-        }
-
         // Вызывается из StartBus после подписок: доска нужна, только пока обновление ждёт приёмки.
         void StartHealth()
         {
             var state = UpdateState();
-            if (!Json.Bool(state, "pending") && !engine.Pending) return;
-            healthBoard = new HealthBoard(ExpectedBlocks(state), DateTime.UtcNow);
+            if (!Json.Bool(state, "pending") && !engine.Pending) return; // доски нет: приёмку решает прежнее условие (HealthBoard.PickAccepted)
+            healthBoard = new HealthBoard(HealthBoard.ExpectedBlocks(state), DateTime.UtcNow);
             log.Write("health.expected blocks=" + string.Join(",", healthBoard.Expected));
             busParts.Add(bus.Subscribe(BusTopics.BlockReady, e => HealthReport(e, true)));
             busParts.Add(bus.Subscribe(BusTopics.BlockDegraded, e => HealthReport(e, false)));

@@ -15,6 +15,18 @@ namespace RemoteAgents.Launcher
         // В плане блок «bridge» — это компонент control бандла; имена приводятся к одному виду.
         internal static string Normalize(string block) { return string.Equals(block, "bridge", StringComparison.OrdinalIgnoreCase) ? "control" : (block ?? "").Trim(); }
 
+        // Блоки, работавшие до обновления: tray и transport всегда, остальные (disk, control=bridge, vpn) — из update-state.json.
+        internal static string[] ExpectedBlocks(Dictionary<string, object> state)
+        {
+            var set = new List<string> { "tray", "transport" };
+            set.AddRange(Json.Strings(Json.Get(state, "runningComponents")));
+            if (Json.Bool(state, "vpnOn")) set.Add("vpn");
+            return set.Select(Normalize).Where(x => x.Length > 0).Distinct(StringComparer.Ordinal).ToArray();
+        }
+
+        // Выбор признака приёмки: есть доска — её итог; доски нет (обновление не через engine.Activate, например ручная установка EXE) — прежнее условие.
+        internal static bool PickAccepted(HealthBoard board, bool legacyAll) { return board != null ? board.Accepted : legacyAll; }
+
         readonly object gate = new object();
         readonly HashSet<string> expected = new HashSet<string>(StringComparer.Ordinal);
         readonly HashSet<string> reported = new HashSet<string>(StringComparer.Ordinal);

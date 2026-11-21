@@ -173,7 +173,7 @@ namespace RemoteAgents.Launcher
                     var critical = runtimes.Where(r => r.Definition.Critical).ToArray();
                     bool all = critical.Length > 0 && critical.Where(r => r.Enabled).All(r => r.Healthy);
                     all = all && UpdateHealthReady(); // только цвет значка; приёмку даёт доска готовности (H1, событие health.accepted)
-                    bool accepted = healthBoard != null && healthBoard.Accepted;
+                    bool accepted = HealthBoard.PickAccepted(healthBoard, all); // нет доски (ручная установка EXE) — прежнее условие
                     string result = engine.Observe(accepted);
                     string image = UpgradeInstaller.ObserveImage(home, engine, accepted, result);
                     if (image == "rollback") { try { PrepareUpdateRestart(); } catch { keepVpnOnRestart = false; log.Write("update.resume.failed"); } UpdateOutcome(Json.Text(UpdateState(), "target", engine.Previous), "здоровье не подтверждено; выполнен откат"); log.Write("launcher.rollback"); RestartRequested = true; ExitThread(); restart = true; return; }
