@@ -21,6 +21,8 @@ $revState=@{};$nextMem=[DateTime]::MinValue;$nextDecideMs=[long]0;$memFuse=$fals
 # Источники tick (до шины событий — проверка времени в цикле; конституция 4а п.1). Не условия успеха.
 # tick.transport-decide: решатель вызывается по непустой очереди событий или раз в это число мс.
 $DecideTickMs=1000
+# tick.transport-revision-full: полный пересчёт хэша содержимого раз в столько секунд, запасной ход на правку той же длины и того же времени записи (кэш по штампу её не видит). Не условие успеха.
+$RevisionFullTickSec=60;$nextRevisionFull=[DateTime]::MinValue
 # Сердцебиение статуса: файл переписывается без изменений содержимого не реже этого, чтобы Supervisor и читатели видели свежий updatedAt (предел устаревания 15 с).
 $StatusHeartbeatMs=5000
 function Test-TransportStop {
@@ -438,7 +440,8 @@ try{
             if(-not $reloadJob -and $now -ge $nextReload -and -not (Test-TransportDiag 'no-revision')){
                 try{
                     # Кэш по штампу файлов: без изменений на диске config и secrets/entries не читаются и не хэшируются.
-                    $newRevision=Get-TransportRevisionCached $root $revState
+                    if($now -ge $nextRevisionFull){$nextRevisionFull=$now.AddSeconds($RevisionFullTickSec);$newRevision=Get-TransportRevisionCached $root $revState -Force}
+                    else{$newRevision=Get-TransportRevisionCached $root $revState}
                     if($newRevision -ne $observedRevision){$bindRetry=$null;$portConflict=$null;$retryAt=$now;$observedRevision=$newRevision}
                     if($newRevision -eq $revision){$reloadError=$null}
                     if($newRevision -ne $revision){

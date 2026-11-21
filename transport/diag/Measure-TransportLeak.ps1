@@ -3,25 +3,17 @@
 # Без сети, без таймеров (счёт итераций); пишет только во временный каталог, из home — только читает.
 # Запуск: powershell.exe -NoProfile -File Measure-TransportLeak.ps1 [-TransportHome <home>] [-Iterations 200] [-DryRun] [-Only revision,status-publish] [-ApartmentMatrix]
 [CmdletBinding()]
-param([Alias('Home')][string]$TransportHome='',[int]$Iterations=0,[switch]$DryRun,[string[]]$Only=@(),[switch]$ApartmentMatrix,[double]$ThresholdKb=20)
+param([Alias('Home')][string]$TransportHome='',[int]$Iterations=0,[switch]$DryRun,[string[]]$Only=@(),[switch]$ApartmentMatrix,[double]$ThresholdKb=20,[switch]$PassThru)
 $ErrorActionPreference='Stop'
 $transportDir=Split-Path $PSScriptRoot -Parent
 . (Join-Path $transportDir 'Transport.Common.ps1')
 . (Join-Path $transportDir 'Transport.Decide.ps1')
-$allCases=@('revision','revision-cached','decision','status-publish-same','status-publish-changing','metered','network')
+. (Join-Path $transportDir 'Transport.Events.ps1')
+. (Join-Path $PSScriptRoot 'Measure-Retention.ps1')
+$allCases=@('revision','revision-cached','decision','status-publish-same','status-publish-changing','metered','network','reader','reader-fresh')
 if($Iterations -le 0){$Iterations=$(if($DryRun){20}else{200})}
 $work=Join-Path ([IO.Path]::GetTempPath()) ('ra-leak-'+[guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($work)
-function Get-PrivateBytes { $p=[Diagnostics.Process]::GetCurrentProcess();try{[long]$p.PrivateMemorySize64}finally{$p.Dispose()} }
-function Invoke-FullGc { [GC]::Collect();[GC]::WaitForPendingFinalizers();[GC]::Collect() }
-function Measure-Case([string]$Name,[scriptblock]$Body,[int]$Count) {
-    for($i=0;$i -lt 5;$i++){$null=& $Body}
-    Invoke-FullGc;$m0=[GC]::GetTotalMemory($true);$p0=Get-PrivateBytes
-    for($i=0;$i -lt $Count;$i++){$null=& $Body}
-    Invoke-FullGc;$m1=[GC]::GetTotalMemory($true);$p1=Get-PrivateBytes
-    $managed=[Math]::Round(($m1-$m0)/1024/$Count,2);$private=[Math]::Round(($p1-$p0)/1024/$Count,2)
-    [pscustomobject]@{function=$Name;managedKbPerCall=$managed;privateKbPerCall=$private;leaks=[bool]($managed -gt $ThresholdKb)}
-}
 function New-SyntheticHome([string]$Dir) {
     # Выдуманные данные нужного размера: содержимое реального конфига не используется.
     [void][IO.Directory]::CreateDirectory((Join-Path $Dir 'secrets/entries'))
@@ -35,6 +27,7 @@ function New-SyntheticHome([string]$Dir) {
 try{
     if($DryRun -or -not $TransportHome){$testHome=Join-Path $work 'home';New-SyntheticHome $testHome;$source='synthetic'}
     else{$testHome=Get-TransportHome $TransportHome;if(-not [IO.File]::Exists((Join-Path $testHome 'config.json'))){throw 'В home нет config.json'};$source='real-readonly'}
+    $Only=@($Only|ForEach-Object {([string]$_) -split ','}|Where-Object {$_})  # powershell -File передаёт «a,b» одной строкой
     $selected=@($allCases);if($Only.Count){$selected=@($allCases|Where-Object {$_ -in $Only})}
     $apartment=[string][Threading.Thread]::CurrentThread.GetApartmentState()
     if($ApartmentMatrix -and -not $DryRun){
@@ -64,12 +57,27 @@ try{
         'status-publish-changing'={$script:statusCounter++;$errorText='n'+$script:statusCounter;Publish-TransportStatus}
         'metered'={Get-TransportMetered ([pscustomobject]@{metered='auto'})}
         'network'={Get-TransportNetwork}
+        'reader'={$snapMsg.SetLength(0);$snapMsg.Write($snapBytes,0,$snapBytes.Length);$snapMsg.Position=0;[void]$parseConnections.Invoke($readerObj,@(,$snapSer.ReadObject($snapMsg)))}
+        'reader-fresh'={$m=New-Object IO.MemoryStream;$m.Write($snapBytes,0,$snapBytes.Length);$m.Position=0;$s=New-Object Runtime.Serialization.Json.DataContractJsonSerializer([RemoteAgents.ClashConnections]);[void]$parseConnections.Invoke($readerObj,@(,$s.ReadObject($m)))}
     }
     $results=@()
-    foreach($name in $selected){$results+=Measure-Case $name $bodies[$name] $Iterations}
+    if($selected -match '^reader'){
+        # Читатель /connections без сети: настоящий разбор снимка (ParseConnections) на имитированном снимке ~1 МБ.
+        # 'reader' — буфер и сериализатор переиспользуются (как в цикле чтения сейчас), 'reader-fresh' — прежний путь с новым потоком на снимок.
+        Initialize-TransportEvents
+        $json=New-Object Text.StringBuilder;[void]$json.Append('{"connections":[')
+        for($i=0;$i -lt 3000;$i++){if($i){[void]$json.Append(',')};[void]$json.Append('{"id":"conn-'+$i+'","start":"2000-01-01T00:00:00Z","upload":'+(100+$i)+',"download":'+(200+$i)+',"chains":["p1","active"],"metadata":{"type":"socks/in","host":"'+('h'*180)+'","note":"'+('n'*100)+'"}}')}
+        [void]$json.Append(']}');$snapBytes=[Text.Encoding]::UTF8.GetBytes($json.ToString());$json.Clear()|Out-Null
+        # Порт 1 на loopback: рабочие потоки получают отказ мгновенно, внешней сети нет.
+        $readerObj=[RemoteAgents.TransportEvents]::new(1,'',[string[]]@('p1'),8,2)
+        $parseConnections=[RemoteAgents.TransportEvents].GetMethod('ParseConnections',[Reflection.BindingFlags]'NonPublic,Instance')
+        $snapSer=New-Object Runtime.Serialization.Json.DataContractJsonSerializer([RemoteAgents.ClashConnections]);$snapMsg=New-Object IO.MemoryStream
+    }
+    foreach($name in $selected){$results+=Measure-Case $name $bodies[$name] $Iterations $ThresholdKb}
+    if($PassThru){return $results}
     'stand source='+$source+' apartment='+$apartment+' iterations='+$Iterations+' thresholdKb='+$ThresholdKb
-    'connections-reader: не измеряется стендом (нужен живой sing-box и /connections)'
-    ($results|Format-Table function,managedKbPerCall,privateKbPerCall,leaks -AutoSize|Out-String).TrimEnd()
+        ($results|Format-Table function,managedKbPerCall,privateKbPerCall,leaks -AutoSize|Out-String).TrimEnd()
 }finally{
+    if($readerObj){try{$readerObj.Dispose()}catch{}}
     try{[IO.Directory]::Delete($work,$true)}catch{}
 }

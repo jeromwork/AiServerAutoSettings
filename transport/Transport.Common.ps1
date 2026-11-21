@@ -1331,12 +1331,14 @@ function Get-TransportRevisionInputs([string]$Root) {
     $files=@($files|Select-Object -Unique);$fixed=@($files)
     $cache=Join-Path (Get-TransportValue $config.transport 'cacheRoot' $Root) 'secrets/entries';if(Test-Path -LiteralPath $cache){$files+=@(Get-ChildItem -LiteralPath $cache -Filter '*.json'|Sort-Object Name|ForEach-Object {$_.FullName})}
     $route=$config.transport.serverRoute;if(-not $route){$route=$config.wizard.serverRoute}
-    if($route.used -eq 'hop' -and $config.transport.profilePath){$p=Read-TransportJson $config.transport.profilePath;$kh=Join-Path (Split-Path $p.knownHostsPath -Parent) 'known_hosts-hop';if(Test-Path $kh){$files+=$kh;$fixed+=$kh}}
+    # known_hosts-hop отслеживается всегда: появившийся позже файл меняет штамп (у отсутствующего штамп с `|-`).
+    if($route.used -eq 'hop' -and $config.transport.profilePath){$p=Read-TransportJson $config.transport.profilePath;$kh=Join-Path (Split-Path $p.knownHostsPath -Parent) 'known_hosts-hop';$fixed+=$kh;if(Test-Path $kh){$files+=$kh}}
     [pscustomobject]@{Root=$Root;Config=$config;Route=$route;Files=@($files);Fixed=@($fixed);CacheDir=$cache}
 }
 function Get-TransportRevisionHash($Inputs) {
     $config=$Inputs.Config;$route=$Inputs.Route;$files=@($Inputs.Files)
-    # Содержимое, а не mtime: Syncthing/атомарная замена и одинаковая длина не скрывают изменение.
+    # Хэш по содержимому всех файлов. Кэш Get-TransportRevisionCached опирается на штамп (длина + время записи), поэтому
+    # правку той же длины с тем же временем он не видит: демон раз в минуту пересчитывает хэш полностью (-Force).
     $sha=[Security.Cryptography.SHA256]::Create()
     try{$text=(ConvertTo-Json -InputObject (Get-TransportLan $config) -Depth 20 -Compress)+(ConvertTo-Json -InputObject (Get-TransportLocalWeb $config) -Depth 5 -Compress)+(ConvertTo-Json -InputObject $route -Depth 20 -Compress)+(ConvertTo-Json -InputObject $config.transport -Depth 40 -Compress)+"`n"+((@($files|ForEach-Object {$(if($env:OS -eq 'Windows_NT'){[IO.Path]::GetFullPath($_).Replace('\','/').ToLowerInvariant()}else{[IO.Path]::GetFullPath($_)})+"`n"+(Convert-TransportLF ([IO.File]::ReadAllText($_)))})) -join "`n");[Convert]::ToBase64String($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))}finally{$sha.Dispose()}
 }
@@ -1358,8 +1360,8 @@ function Get-TransportRevisionStamp([string]$Root,$Fixed,[string]$CacheDir) {
 }
 # Ревизия с кэшем по штампу файлов: без изменений на диске содержимое не читается и не хэшируется.
 # $State — hashtable @{stamp;revision;fixed;cacheDir}; пустой при первом вызове.
-function Get-TransportRevisionCached([string]$Root,$State) {
-    if($State.revision -and $State.stamp -ceq (Get-TransportRevisionStamp $Root $State.fixed $State.cacheDir)){return $State.revision}
+function Get-TransportRevisionCached([string]$Root,$State,[switch]$Force) {
+    if(-not $Force -and $State.revision -and $State.stamp -ceq (Get-TransportRevisionStamp $Root $State.fixed $State.cacheDir)){return $State.revision}
     $configStamp=Get-TransportFileStamp (Join-Path (Get-TransportHome $Root) 'config.json')
     $inputs=Get-TransportRevisionInputs $Root
     $stamp=Get-TransportRevisionStamp $Root $inputs.Fixed $inputs.CacheDir

@@ -90,9 +90,12 @@ namespace RemoteAgents {
       if(n==1) {samples.Clear(); suspected.Clear();} else contexts.Clear();
       Status(n,"connected"); delay=1000;
       byte[] buffer=new byte[8192];
+      // One buffer per connection: a /connections snapshot (up to 4 MB) arrives every second; a new MemoryStream each time would churn the LOH.
+      MemoryStream message=new MemoryStream();
       DataContractJsonSerializer serializer=new DataContractJsonSerializer(n==0?typeof(ClashLog):typeof(ClashConnections));
       while(!stop.IsCancellationRequested) {
-       using(MemoryStream message=new MemoryStream()) {
+       message.SetLength(0);
+       {
         WebSocketReceiveResult part;
         do {
          part=ws.ReceiveAsync(new ArraySegment<byte>(buffer),stop.Token).GetAwaiter().GetResult();

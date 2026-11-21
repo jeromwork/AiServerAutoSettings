@@ -24,8 +24,10 @@ namespace RemoteAgents.Launcher
                 Healthy = Alive && Json.Bool(status, "ok") && (Definition.Name != "vpn" || Json.Str(status, "state") == "on"); Summary = StatusView.Summary(status); return;
             }
             if (process != null && process.HasExited) {
+                int exitCode = -1; try { exitCode = process.ExitCode; } catch { }
                 process.Dispose(); process = null; if (job != null) job.Dispose(); job = null;
-                next = now.AddSeconds(delay); delay = Math.Min(60, delay * 2); log.Write("component." + Definition.Name + ".exit");
+                // Код выхода в журнал: перезапуск по предохранителю памяти (75) отличается от падений; пауза общая, 5 с до 60 с.
+                next = now.AddSeconds(delay); delay = Math.Min(60, delay * 2); log.Write("component." + Definition.Name + ".exit code=" + exitCode);
             }
             if (elevated != null && !elevated.Alive) { elevated.Dispose(); elevated = null; next = now.AddSeconds(delay); delay = Math.Min(60, delay * 2); }
             if (Enabled && process == null && elevated == null && now >= next && (!attempted || Definition.Restart == "always")) {

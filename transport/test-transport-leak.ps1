@@ -104,6 +104,7 @@ try{
     $original=${function:Get-TransportRevisionInputs};$script:inputsCalls=0
     function Get-TransportRevisionInputs([string]$Root) { $script:inputsCalls++; & $original $Root }
     $state=@{}
+    $daemonTextEarly=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'Transport.Daemon.ps1'))
     $r1=Get-TransportRevisionCached $h $state
     Assert ($r1 -ceq (Get-TransportRevision $h)) 'кэш: первая ревизия равна полной'
     $base=$script:inputsCalls
@@ -124,6 +125,40 @@ try{
     $cfg.transport['probePortBase']=26001;[IO.File]::WriteAllText((Join-Path $h 'config.json'),(ConvertTo-Json -InputObject $cfg -Depth 5))
     $r7=Get-TransportRevisionCached $h $state
     Assert ($r7 -cne $r6 -and $r7 -ceq (Get-TransportRevision $h) -and $script:inputsCalls -gt $base) 'кэш: изменение config.json видно'
+
+    # --- кэш: файл known_hosts-hop появился позже (маршрут hop отслеживает его всегда)
+    $h2=Join-Path $work 'hop';[void][IO.Directory]::CreateDirectory((Join-Path $h2 'secrets/entries'))
+    [IO.File]::WriteAllText((Join-Path $h2 'profile.json'),('{"knownHostsPath":"'+((Join-Path $h2 'known_hosts').Replace('\','/'))+'"}'));[IO.File]::WriteAllText((Join-Path $h2 'channel.json'),'{"c":1}')
+    $cfg2=[ordered]@{transport=[ordered]@{profilePath=(Join-Path $h2 'profile.json');channelPath=(Join-Path $h2 'channel.json');serverRoute=[ordered]@{used='hop'}}}
+    [IO.File]::WriteAllText((Join-Path $h2 'config.json'),(ConvertTo-Json -InputObject $cfg2 -Depth 6))
+    $state2=@{};$h2a=Get-TransportRevisionCached $h2 $state2
+    Assert (@($state2.fixed|Where-Object {$_ -like '*known_hosts-hop'}).Count -eq 1) 'hop: known_hosts-hop в списке отслеживаемых, даже когда файла нет'
+    Assert ($h2a -ceq (Get-TransportRevision $h2) -and (Get-TransportRevisionCached $h2 $state2) -ceq $h2a) 'hop: без файла кэш стабилен'
+    [IO.File]::WriteAllText((Join-Path $h2 'known_hosts-hop'),'host ssh-ed25519 AAAA')
+    $h2b=Get-TransportRevisionCached $h2 $state2
+    Assert ($h2b -cne $h2a -and $h2b -ceq (Get-TransportRevision $h2)) 'hop: появившийся позже known_hosts-hop меняет ревизию'
+
+    # --- кэш: правка той же длины и того же времени записи видна только полному пересчёту (-Force)
+    $pf=Join-Path $h 'profile.json';[IO.File]::WriteAllText($pf,'{"p":11111}');$stamp0=(Get-Item $pf).LastWriteTimeUtc
+    $sameState=@{};$s1=Get-TransportRevisionCached $h $sameState
+    [IO.File]::WriteAllText($pf,'{"p":22222}');(Get-Item $pf).LastWriteTimeUtc=$stamp0
+    Assert ((Get-TransportRevisionCached $h $sameState) -ceq $s1) 'та же длина и время: кэш по штампу не замечает правку (поэтому нужен полный пересчёт)'
+    $s2=Get-TransportRevisionCached $h $sameState -Force
+    Assert ($s2 -cne $s1 -and $s2 -ceq (Get-TransportRevision $h)) '-Force пересчитывает по содержимому и видит правку'
+    Assert ((Get-TransportRevisionCached $h $sameState) -ceq $s2) 'после -Force кэш обновлён'
+    Assert ($daemonTextEarly.Contains('Get-TransportRevisionCached $root $revState -Force') -and $daemonTextEarly.Contains('$RevisionFullTickSec=60')) 'демон: полный пересчёт раз в 60 с'
+
+    # --- удержание памяти на вызов: тест падает, если остаток > порога (стенд -DryRun, основные функции)
+    . (Join-Path $PSScriptRoot 'diag/Measure-Retention.ps1')
+    $script:sink=New-Object Collections.ArrayList
+    $bad=Measure-Case 'artificial-leak' {[void]$script:sink.Add((New-Object byte[] 40960))} 100 20
+    Assert ($bad.leaks -and $bad.managedKbPerCall -gt 20) 'проверка самого теста: намеренная утечка 40 КБ/вызов обнаружена'
+    $script:sink=$null
+    $good=Measure-Case 'no-leak' {$x=New-Object byte[] 40960;$x.Length} 100 20
+    Assert (-not $good.leaks) 'проверка самого теста: временные данные не считаются утечкой'
+    $stand=& (Join-Path $PSScriptRoot 'diag/Measure-TransportLeak.ps1') -DryRun -PassThru -Iterations 100 -Only @('revision-cached','decision','status-publish-same','status-publish-changing','reader')
+    Assert (@($stand).Count -eq 5) 'стенд вернул все основные случаи'
+    foreach($m in $stand){Assert (-not $m.leaks) ('удержание памяти '+$m.function+': '+$m.managedKbPerCall+' КБ/вызов не выше порога 20')}
 
     # --- Publish-TransportStatus: запись при изменении или по сердцебиению (функция берётся из демона по AST)
     $daemonPath=Join-Path $PSScriptRoot 'Transport.Daemon.ps1'
