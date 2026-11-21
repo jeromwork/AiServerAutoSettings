@@ -697,7 +697,7 @@ namespace RemoteAgents.Launcher
             if (!vpn.Definition.CommandManaged) { VpnFailure("Обновите компоненты программы перед включением VPN", fromCard); return; }
             string att = RaLog.Attempt.New("on");
             if (!AllowMutation()) { log.Write("vpn.click.ignored att=" + att + " msg=busy-or-closing"); return; }
-            actionBusy = vpnActionBusy = true; vpnActionWanted = true; vpnError = ""; netNote = ""; VpnAttemptBegin(att); RefreshMain();
+            actionBusy = vpnActionBusy = true; vpnActionWanted = true; vpnError = ""; netNote = ""; VpnAttemptBegin(att); vpnOps.Enter(); RefreshMain();
             log.Write("vpn.click.on att=" + att + " fromCard=" + fromCard); LogNetSnapshot("vpn.on.before", att);
             var vpnWatch = System.Diagnostics.Stopwatch.StartNew();
             try {
@@ -720,14 +720,17 @@ namespace RemoteAgents.Launcher
                     "helperVersion", NetHelperInstall.InstalledVersion, "ms", vpnWatch.ElapsedMilliseconds.ToString());
                 LogNetSnapshot("vpn.on.after", att);
                 if (closing) return;
-                if (Json.Str(status, "state") != "on") { VpnRefused(att, status, fromCard); return; }
+                if (Json.Str(status, "state") != "on") {
+                    if (VpnAttemptRolledBack(att)) { log.Write("vpn.on.rolledback att=" + att + " state=" + Json.Str(status, "state") + " msg=refused-after-rollback"); return; } // откат уже объяснил причину: без окна и без перезаписи заметки
+                    VpnRefused(att, status, fromCard); return;
+                }
                 if (VpnAttemptRolledBack(att)) { log.Write("vpn.on.rolledback att=" + att + " msg=intent-not-written"); return; } // откат уже выключил VPN: конфиг не включать
                 config.SetVpnIntent(true); config.SetEnabled(vpn.Definition, true); log.Write("vpn.on.ok att=" + att + " ms=" + vpnWatch.ElapsedMilliseconds);
                 VpnAttemptOn(att); // e2e запускает VpnAttemptGuard (один раз на попытку; vpn.state on мог прийти раньше)
                 if (mirror != null) Task.Run(() => { try { mirror.Pull(); } catch { } });
             } catch (OperationCanceledException) { log.Write("vpn.on.cancelled att=" + att); VpnAttemptEnd(att, "cancelled"); }
-            catch (Exception error) { VpnAttemptEnd(att, "error"); if (!closing) { log.Write("vpn.helper.failed att=" + att + " " + TickFailureLog.HelperFailure("vpn-on", error)); VpnFailure(NetHelperSetup.VpnFailureMessage(error), fromCard); } }
-            finally { if (rollbackRunning == 0) actionBusy = vpnActionBusy = false; if (!closing) RefreshMenu(); }
+            catch (Exception error) { VpnAttemptEnd(att, "error"); if (!closing) { log.Write("vpn.helper.failed att=" + att + " " + TickFailureLog.HelperFailure("vpn-on", error)); if (VpnAttemptRolledBack(att)) log.Write("vpn.on.rolledback att=" + att + " msg=failure-after-rollback"); else VpnFailure(NetHelperSetup.VpnFailureMessage(error), fromCard); } }
+            finally { if (vpnOps.Exit()) actionBusy = vpnActionBusy = false; if (!closing) RefreshMenu(); }
         }
         // Заметка проверки сети — только в подсказку трея, пока VPN включён; не пишется после выключения.
         void SetNetNote(string text)

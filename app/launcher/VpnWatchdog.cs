@@ -37,7 +37,7 @@ namespace RemoteAgents.Launcher
                 case "prepare-timeout": return "Подготовка VPN заняла больше 30 секунд";
                 case "exclusions-dns": return "Не удалось узнать адрес узла связи. Проверьте интернет";
                 case "error":
-                    if (VpnReasons.Known(stage)) return VpnReasons.Text(stage); // core-not-ready, routes-not-ours, e2e-fail, broke-*
+                    if (VpnReasons.Known(stage)) return VpnReasons.Text(stage); // core-not-ready, route-not-ours (лестница) / routes-not-ours (помощник V3), e2e-fail, broke-*
                     return !string.IsNullOrEmpty(stage)
                         ? "VPN не включён: ошибка на шаге «" + stage + "». Скопируйте диагностику"
                         : "VPN не включён: проверьте настройки и разрешение Windows";

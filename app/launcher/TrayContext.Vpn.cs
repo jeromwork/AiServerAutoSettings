@@ -9,7 +9,7 @@ namespace RemoteAgents.Launcher
     // за попытку -> один откат (vpn.off). Логика — в VpnAttemptGuard; здесь только связка с трей-действиями. Таймеров нет.
     internal sealed partial class TrayContext
     {
-        VpnAttemptGuard vpnGuard; int rollbackRunning;
+        VpnAttemptGuard vpnGuard; readonly VpnOpCounter vpnOps = new VpnOpCounter();
 
         void StartVpnGuard()
         {
@@ -57,7 +57,7 @@ namespace RemoteAgents.Launcher
             var watch = System.Diagnostics.Stopwatch.StartNew();
             log.Write(LogLevel.Warn, "vpn", "vpn.rollback.start", "att", att, "stage", stage.ToString(), "reason", reason, "detail", MainScreenModel.CleanSecrets(detail ?? ""));
             if (closing) { log.Write("vpn.rollback.skipped att=" + att + " msg=closing"); return; }
-            vpnActionWanted = false; rollbackRunning++; actionBusy = vpnActionBusy = true; // как DisableVpn: повторное «Включить» ждёт конца отката
+            vpnActionWanted = false; vpnOps.Enter(); actionBusy = vpnActionBusy = true; // как DisableVpn: повторное «Включить» ждёт конца отката
             try {
                 if (netHelper == null) throw new System.IO.IOException(HelperClient.PermissionRequired);
                 await netHelper.VpnOff();
@@ -69,7 +69,7 @@ namespace RemoteAgents.Launcher
             } catch (Exception error) {
                 log.Write("vpn.rollback.failed att=" + att + " reason=" + reason + " " + TickFailureLog.HelperFailure("vpn-off", error));
                 vpnError = "VPN не удалось выключить автоматически. Выключите его кнопкой в трее и откройте журналы.";
-            } finally { if (--rollbackRunning <= 0) { rollbackRunning = 0; actionBusy = vpnActionBusy = false; } if (!closing) { RefreshMenu(); RefreshMain(); } }
+            } finally { if (vpnOps.Exit()) { actionBusy = vpnActionBusy = false; } if (!closing) { RefreshMenu(); RefreshMain(); } }
         }
     }
 }

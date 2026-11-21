@@ -24,6 +24,8 @@ namespace RemoteAgents.Launcher
             RollbackBeforeVpnOnBlocksE2e();
             SnapshotOffDoesNotEndAttempt();
             ReasonTextsEverywhere();
+            OpCounterReleasesOnlyOnLast();
+            HelperRoutesCodeRollsBackAsRoutes();
             Console.WriteLine("PASS: VpnReasonsTests (" + assertions + " assertions passed)");
             return 0;
         }
@@ -181,9 +183,29 @@ namespace RemoteAgents.Launcher
             }
         }
 
+        static void OpCounterReleasesOnlyOnLast()
+        {
+            var c = new VpnOpCounter();
+            c.Enter(); c.Enter(); // включение (ждёт ответа) + откат
+            Check(!c.Exit() && c.Running == 1, "rollback end keeps busy while enable still waits");
+            Check(c.Exit() && c.Running == 0, "last op end releases busy");
+            c.Enter(); Check(c.Exit(), "single op releases");
+            Check(c.Exit() && c.Running == 0, "extra exit does not go negative");
+        }
+
+        static void HelperRoutesCodeRollsBackAsRoutes()
+        {
+            using (var r = new Rig()) {
+                r.Guard.Begin("h1");
+                r.Pub(BusTopics.NetE2E, "att", "h1", "result", "fail", "stage", "6", "reason", "routes-not-ours");
+                Check(r.Rollbacks.Count == 1 && r.Rollbacks[0] == "h1|6|route-not-ours", "helper plural code maps to ladder code");
+                Check(VpnReasons.IsRoutesNotOurs("routes-not-ours") && VpnReasons.IsRoutesNotOurs("route-not-ours") && !VpnReasons.IsRoutesNotOurs("e2e-fail"), "both codes accepted");
+            }
+        }
+
         static void ReasonTextsEverywhere()
         {
-            foreach (var code in new[] { "core-not-ready", "route-not-ours", "e2e-fail", "broke-transport", "broke-disk", "broke-bridge" }) {
+            foreach (var code in new[] { "core-not-ready", "route-not-ours", "routes-not-ours", "e2e-fail", "broke-transport", "broke-disk", "broke-bridge" }) {
                 Check(VpnReasons.Text(code).Length > 0, "text for " + code);
                 Check(VpnWatchdog.FailureSummary(code).Length > 0, "FailureSummary state " + code);
                 Check(VpnWatchdog.FailureSummary("error", code) == VpnReasons.Text(code), "FailureSummary error/stage " + code);

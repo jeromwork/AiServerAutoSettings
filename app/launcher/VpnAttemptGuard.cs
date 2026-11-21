@@ -4,11 +4,25 @@ using System.Globalization;
 
 namespace RemoteAgents.Launcher
 {
+    // Число VPN-операций в работе (включение + откат): занятость снимает только последняя завершившаяся. Без времени.
+    internal sealed class VpnOpCounter
+    {
+        int running;
+        internal void Enter() { running++; }
+        // true — это была последняя операция, занятость можно снять.
+        internal bool Exit() { if (running > 0) running--; return running == 0; }
+        internal int Running { get { return running; } }
+    }
+
     // Причины отказа VPN простыми словами для владельца (шаг V4). Коды те же в журнале, статусе и тексте.
     internal static class VpnReasons
     {
         internal const string CoreNotReady = "core-not-ready", RoutesNotOurs = "route-not-ours", E2eFail = "e2e-fail",
             BrokeTransport = "broke-transport", BrokeDisk = "broke-disk", BrokeBridge = "broke-bridge";
+
+        // V3-помощник выдаёт множественное "routes-not-ours", лестница V4 — "route-not-ours": принимаем оба.
+        internal const string RoutesNotOursHelper = "routes-not-ours";
+        internal static bool IsRoutesNotOurs(string code) { return code == RoutesNotOurs || code == RoutesNotOursHelper; }
 
         internal static bool Known(string code)
         { return Text(code).Length > 0; }
@@ -17,7 +31,7 @@ namespace RemoteAgents.Launcher
         {
             switch (code) {
                 case CoreNotReady: return "Ядро VPN не подтвердило запуск";
-                case RoutesNotOurs: return "Трафик не пошёл через VPN (маршрут чужой)";
+                case RoutesNotOurs: case RoutesNotOursHelper: return "Трафик не пошёл через VPN (маршрут чужой)";
                 case E2eFail: return "VPN выключен: проверка интернета через него не прошла";
                 case BrokeTransport: return "VPN выключен: он нарушил связь с сервером (транспорт)";
                 case BrokeDisk: return "VPN выключен: он нарушил работу Диска";
@@ -30,7 +44,7 @@ namespace RemoteAgents.Launcher
         internal static string RollbackNote(string reason, int stage)
         {
             string text = Text(reason);
-            if (reason == E2eFail || reason == RoutesNotOurs) {
+            if (reason == E2eFail || IsRoutesNotOurs(reason)) {
                 string why = stage == 6 ? "трафик идёт мимо VPN" : stage == 7 ? "не определяются адреса сайтов" : stage == 8 ? "сайты не открываются" : "проверка не прошла";
                 return "VPN выключен автоматически: интернет через него не шёл (" + why + "). Подробности в журнале.";
             }
@@ -132,7 +146,7 @@ namespace RemoteAgents.Launcher
             string result = e.Get("result"); int stage;
             int.TryParse(e.Get("stage"), NumberStyles.Integer, CultureInfo.InvariantCulture, out stage);
             if (result == "fail" && stage >= 6 && stage <= 8) {
-                string reason = e.Get("reason") == VpnReasons.RoutesNotOurs ? VpnReasons.RoutesNotOurs : VpnReasons.E2eFail;
+                string reason = VpnReasons.IsRoutesNotOurs(e.Get("reason")) ? VpnReasons.RoutesNotOurs : VpnReasons.E2eFail;
                 Rollback(current, stage, reason, e.Get("detail"));
                 return;
             }
