@@ -107,6 +107,8 @@ namespace RemoteAgents.Launcher
                 } finally { listener.Stop(); server.GetAwaiter().GetResult(); Directory.Delete(dir, true); }
             }
         }
+        // Focused pure UI/status checks; excludes the disk REST integration suite.
+        static int Main() { RunSwitchStatus(); return 0; }
         internal static void RunSwitchStatus()
         {
             var empty = Data("{}"); var ok = Data("{\"ok\":true,\"phase\":\"ok\"}");

@@ -15,6 +15,7 @@ namespace RemoteAgents.Launcher
     internal sealed class MainScreenFacts
     {
         internal Dictionary<string, object> Transport = new Dictionary<string, object>();  // status/transport.json (maxAge 15 s)
+        internal SearchPresentation SearchView; // shared quiet presentation; null = show raw facts (diagnostics/tests)
         internal Dictionary<string, object> Vpn = new Dictionary<string, object>();        // status/vpn.json (maxAge 15 s)
         internal Dictionary<string, object> Control = new Dictionary<string, object>();    // status/control.json (maxAge 30 s), the bridge
         internal Dictionary<string, object> Health = new Dictionary<string, object>();     // ServerHealthView.Read(home)
@@ -84,8 +85,9 @@ namespace RemoteAgents.Launcher
         internal static MainScreenView Build(MainScreenFacts facts)
         {
             facts = facts ?? new MainScreenFacts();
-            var transport = facts.Transport ?? Json.Map(null);
-            var vpn = facts.Vpn ?? Json.Map(null);
+            var link = facts.SearchView ?? new SearchPresentation(facts.Transport, facts.Vpn);
+            var transport = link.Transport;
+            var vpn = link.Vpn;
             var control = facts.Control ?? Json.Map(null);
             var view = new MainScreenView();
             // Keep this identical to TrayContext.Tick; a deliberately off VPN is grey in its card only.

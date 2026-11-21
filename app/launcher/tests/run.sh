@@ -252,6 +252,9 @@ timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:B
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:HealthJournalTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:NetNotifyTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:TrayBusTests=true
+timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:SearchQuieterTests=true
+timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:MainScreenTests=true
+timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:TrayExtrasTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:VpnReasonsTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:HealthBoardTests=true
 wait_for_memory

@@ -26,6 +26,9 @@ namespace RemoteAgents.Launcher
         readonly Stopwatch trayClickClock = Stopwatch.StartNew();
         readonly TrayMenuState menuState = new TrayMenuState();
         readonly TrayStatusNotifications statusNotifications = new TrayStatusNotifications();
+        readonly SearchQuieter searchQuieter = new SearchQuieter();
+        readonly Stopwatch searchClock = Stopwatch.StartNew();
+        SearchPresentation connectedSearchView;
         readonly TickFailureLog tickFailures = new TickFailureLog();
         long lastTrayClick = -SystemInformation.DoubleClickTime - 1L;
         ConfigWindow mainWindow;
@@ -190,16 +193,19 @@ namespace RemoteAgents.Launcher
                 ok &= Step("lan", () => { if (netHelper != null) { netHelper.UpdateLan(config.Data, transport); netHelper.ConnectWhenInstalled(NetHelperSetup.Required(config.Data)); } });
                 ok &= Step("vpn-resume", () => ResumeUpdatedVpn(transport));
                 ok &= Step("icon", () => {
-                    var linkPhase = StatusView.Phase(transport); shown = linkPhase == LinkPhase.Ok ? green : linkPhase == LinkPhase.Failed ? red : yellow;
-                    var vpnStatus = VpnStatus.Read(home);
+                    var rawVpn = VpnStatus.Read(home);
+                    ObserveSearch(transport, rawVpn);
+                    var link = SearchView(transport, rawVpn);
+                    var linkPhase = StatusView.Phase(link.Transport); shown = linkPhase == LinkPhase.Ok ? green : linkPhase == LinkPhase.Failed ? red : yellow;
+                    var vpnStatus = link.Vpn;
                     string vpnReason = VpnWatchdog.FailureSummary(Json.Str(vpnStatus, "state"), Json.Str(vpnStatus, "stage"));
                     if (vpnReason.Length > 0 && Json.Str(vpnStatus, "owner") == "net-helper") vpnReason = Json.Text(vpnStatus, "summary", vpnReason);
-                    bool searching = TrayMenuModel.Searching(transport, vpnStatus), conflict = Json.Str(vpnStatus, "state") == "conflict";
+                    bool searching = TrayMenuModel.Searching(link.Transport, vpnStatus), conflict = Json.Str(vpnStatus, "state") == "conflict";
                     if (searching || conflict) shown = yellow;
                     icon.Text = vpnReason.Length > 0 && !searching && !conflict ? TrayMenuModel.Short(StatusView.DisplayText(vpnReason), 63)
-                        : TrayMenuModel.Tooltip(transport, ServerHealthView.Read(home), vpnStatus);
-                    if (netNote.Length > 0 && Json.Str(vpnStatus, "state") == "on") icon.Text = TrayMenuModel.Short(netNote, 63);
-                    var notice = statusNotifications.Observe(transport, vpnStatus, DateTime.UtcNow);
+                        : TrayMenuModel.Tooltip(link.Transport, ServerHealthView.Read(home), vpnStatus);
+                    if (netNote.Length > 0 && !TrayMenuModel.Searching(transport, rawVpn) && Json.Str(vpnStatus, "state") == "on") icon.Text = TrayMenuModel.Short(netNote, 63);
+                    var notice = statusNotifications.Observe(link.Transport, vpnStatus, DateTime.UtcNow);
                     if (notice != null) icon.ShowBalloonTip(8000, Product.Name, notice.Text, notice.Recovered ? ToolTipIcon.Info : ToolTipIcon.Warning);
                 });
                 ok &= Step("operations", () => { if (DateTime.UtcNow >= nextOperationCheck) CheckOperations(); });
@@ -216,6 +222,19 @@ namespace RemoteAgents.Launcher
             finally { ticking = false; if (!closing && icon.Icon != shown) icon.Icon = shown; }
         }
         bool Step(string name, Action action) { return tickFailures.Run(log, name, action); }
+        // One visibility decision for every surface; only tick.tray advances the observation clock.
+        SearchPresentation SearchView(Dictionary<string, object> transport, Dictionary<string, object> vpn)
+        { return SearchPresentation.Build(transport, vpn, searchQuieter.ShowSearching, connectedSearchView); }
+        void ObserveSearch(Dictionary<string, object> transport, Dictionary<string, object> vpn)
+        {
+            bool searching = TrayMenuModel.Searching(transport, vpn);
+            var transition = searchQuieter.Observe(searching, searchClock.ElapsedMilliseconds);
+            if (!searching && StatusView.Phase(transport) == LinkPhase.Ok)
+                connectedSearchView = new SearchPresentation(transport, vpn);
+            if ((transition & SearchTransition.Started) != 0) log.Write("searching.start ms=0");
+            if ((transition & SearchTransition.Shown) != 0) log.Write("searching.shown ms=" + searchQuieter.DurationMs.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            if ((transition & SearchTransition.Ended) != 0) log.Write("searching.end ms=" + searchQuieter.DurationMs.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
         // Tooltip «Идёт установка: x из y» and a «Готово» balloon. While the wizard window is closed the tray
         // follows the installs itself (short status call every 15 s) and connects a saved Happier key.
         async void CheckOperations()
@@ -361,7 +380,9 @@ namespace RemoteAgents.Launcher
         }
         TrayMenuEntry VpnMenu()
         {
-            var card = MainScreenModel.Build(new MainScreenFacts { VpnInstalled = true, Vpn = VpnStatus.Read(home), VpnBusy = vpnActionBusy, VpnWanted = vpnActionWanted, Operation = MutationConflict() }).Vpn;
+            var transport = StatusView.Read(home, "transport", maxAgeSec: 15);
+            var vpn = VpnStatus.Read(home);
+            var card = MainScreenModel.Build(new MainScreenFacts { VpnInstalled = true, Transport = transport, Vpn = vpn, SearchView = SearchView(transport, vpn), VpnBusy = vpnActionBusy, VpnWanted = vpnActionWanted, Operation = MutationConflict() }).Vpn;
             return new TrayMenuEntry("vpn", card.On ? "Выключить VPN" : "Включить VPN", card.SwitchEnabled) { Hint = card.State };
         }
         CardView BridgeCard()
@@ -385,7 +406,8 @@ namespace RemoteAgents.Launcher
         { try { return Json.Read(Path.Combine(home, "state", "happier-account.json")); } catch { return Json.Map(null); } }
         TrayMenuEntry[] TrayEntries()
         {
-            var entries = TrayMenuModel.Build(config.Data, AccountState(), StatusView.Read(home, "transport", maxAgeSec: 15), ServerHealthView.Read(home), DiskSummary()).ToList();
+            var link = SearchView(StatusView.Read(home, "transport", maxAgeSec: 15), VpnStatus.Read(home));
+            var entries = TrayMenuModel.Build(config.Data, AccountState(), link.Transport, ServerHealthView.Read(home), DiskSummary()).ToList();
             var lanStatus = LocalLanStatus();
             if (Json.Bool(lanStatus, "enabled")) entries.Insert(0, new TrayMenuEntry("lan-status", StatusView.Lan(lanStatus), false));
             entries.Insert(entries.Count - 1, new TrayMenuEntry("update-status", updateSummary, false));
@@ -560,12 +582,13 @@ namespace RemoteAgents.Launcher
             if (mainWindow == null || mainWindow.IsDisposed) return;
             var transport = StatusView.Read(home, "transport", maxAgeSec: 15);
             var health = ServerHealthView.Read(home);
+            var vpn = VpnStatus.Read(home);
             HappierAccountModel account;
             try { account = HappierAccountModel.From(config.Data, name => SecretVault.Has(home, name)); }
             catch (Exception) { account = new HappierAccountModel(); }
             var facts = new MainScreenFacts {
                 Transport = transport, Lan = LocalLanStatus(),
-                Vpn = VpnStatus.Read(home),
+                Vpn = vpn, SearchView = SearchView(transport, vpn),
                 Control = StatusView.Read(home, "control", maxAgeSec: 30), Health = health,
                 VpnInstalled = definition != null && definition.Components.Any(c => c.Name == "vpn"),
                 VpnWanted = vpnActionBusy ? vpnActionWanted : Json.Bool(Json.Map(Json.Get(Json.Map(Json.Get(config.Data, "profile")), "vpn")), "enabled"),

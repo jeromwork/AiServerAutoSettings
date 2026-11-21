@@ -74,6 +74,21 @@
     <IntermediateOutputPath>obj/$(Configuration)/update-button-tests/</IntermediateOutputPath>
     <OutputPath>bin/$(Configuration)/update-button-tests/</OutputPath>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(SearchQuieterTests)' == 'true'">
+    <StartupObject>RemoteAgents.Launcher.SearchQuieterTests</StartupObject>
+    <IntermediateOutputPath>obj/$(Configuration)/search-quieter-tests/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/search-quieter-tests/</OutputPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(MainScreenTests)' == 'true'">
+    <StartupObject>RemoteAgents.Launcher.MainScreenModelTests</StartupObject>
+    <IntermediateOutputPath>obj/$(Configuration)/main-screen-tests/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/main-screen-tests/</OutputPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(TrayExtrasTests)' == 'true'">
+    <StartupObject>RemoteAgents.Launcher.TrayExtrasTests</StartupObject>
+    <IntermediateOutputPath>obj/$(Configuration)/tray-extras-tests/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/tray-extras-tests/</OutputPath>
+  </PropertyGroup>
   <ItemGroup>
     <Compile Include="../HelperUpdate.cs" />
     <Compile Include="HelperUpdateTests.cs" />
@@ -87,6 +102,8 @@
     <Compile Include="LanTickTests.cs" />
     <Compile Include="WindowModelTests.cs" />
     <Compile Include="MainScreenModelTests.cs" />
+    <Compile Include="../SearchQuieter.cs" />
+    <Compile Include="SearchQuieterTests.cs" />
     <Compile Include="MainWindowSizingTests.cs" />
     <Compile Include="../MainWindowSizing.cs" Link="MainWindowSizing.cs" />
     <Compile Include="../VpnWatchdog.cs" />
