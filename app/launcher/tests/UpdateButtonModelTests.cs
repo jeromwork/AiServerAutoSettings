@@ -38,6 +38,7 @@ namespace RemoteAgents.Launcher
             SecondClickIgnoredWhileBusy();
             SizeZeroModeWithoutPercent();
             UpToDateStateEnablesButton();
+            ResultAutoReturnsToIdle();
             OccupiedAndDeferredState();
             FailedStateEnablesButton();
             CountingStreamStepByStepThrottling();
@@ -202,11 +203,92 @@ namespace RemoteAgents.Launcher
             Check(model.ButtonEnabled, "button is enabled when up to date");
             Check(!model.IsBusy, "not busy when up to date");
             Check(!model.ShowSpinner, "no spinner when up to date");
-            Check(model.StatusText == "У вас последняя версия 1.5.0 (проверено 14:30)", "uptodate status text: " + model.StatusText);
+            Check(model.StatusText == "✓ Установлена последняя версия" && model.DetailText == "У вас последняя версия 1.5.0 (проверено 14:30)", "uptodate status text: " + model.StatusText);
 
             // Can click again when up to date
             Check(model.OnClick(), "click accepted when up to date");
             Check(model.State == UpdateButtonState.Checking, "re-enters checking");
+        }
+
+        static void ResultAutoReturnsToIdle()
+        {
+            // Последняя версия: короткий текст, через N тиков tick.tray — Idle, кнопка доступна, текст сброшен.
+            var model = new UpdateButtonModel(() => new DateTime(2026, 11, 21, 14, 44, 0));
+            int changes = 0; model.StateChanged += m => changes++;
+            model.OnClick();
+            model.OnUpToDate("20261121.103630-ddcc40d");
+            Check(model.StatusText == "✓ Установлена последняя версия", "short text: " + model.StatusText);
+            Check(!model.StatusText.Contains("2026") && !model.StatusText.Contains("14:44"), "no version/time in main text");
+            Check(model.DetailText.Contains("20261121.103630-ddcc40d") && model.DetailText.Contains("14:44"), "detail has version/time");
+            for (int i = 1; i < UpdateButtonModel.UpToDateShowTicks; i++)
+            {
+                Check(!model.OnTick(), "tick " + i + " keeps result");
+                Check(model.State == UpdateButtonState.UpToDate, "still uptodate " + i);
+            }
+            Check(model.OnTick(), "last tick returns");
+            Check(model.State == UpdateButtonState.Idle && model.ButtonEnabled && model.StatusText == "" && model.DetailText == "", "idle, enabled, cleared");
+            Check(!model.OnTick(), "tick in idle does nothing");
+
+            // Повторный клик во время показа: проверка идёт, лишние тики её не ломают, новый итог считается заново.
+            model.OnUpToDate("1.0", null);
+            model.OnTick(); model.OnTick();
+            Check(model.OnClick(), "click during result accepted");
+            for (int i = 0; i < 40; i++) model.OnTick();
+            Check(model.State == UpdateButtonState.Checking && model.StatusText == "Проверяю…", "ticks do not disturb checking");
+            model.OnUpToDate("1.0", null);
+            for (int i = 1; i < UpdateButtonModel.UpToDateShowTicks; i++) model.OnTick();
+            Check(model.State == UpdateButtonState.UpToDate, "counter restarted after new result");
+            model.OnTick();
+            Check(model.State == UpdateButtonState.Idle, "returns again");
+
+            // Ошибка: короткий текст в одну строку, держится дольше, но возвращается.
+            var f = new UpdateButtonModel();
+            f.OnClick();
+            f.OnFailed("нет связи с сервером обновлений, повторите позже, если проблема не уходит — позвоните\nв поддержку");
+            Check(f.StatusText.Length <= "Ошибка: ".Length + UpdateButtonModel.MaxReasonChars && !f.StatusText.Contains("\n"), "error short single line: " + f.StatusText);
+            Check(f.DetailText.Contains("позвоните"), "error detail full");
+            for (int i = 1; i < UpdateButtonModel.FailedShowTicks; i++) f.OnTick();
+            Check(f.State == UpdateButtonState.Failed, "error held");
+            f.OnTick();
+            Check(f.State == UpdateButtonState.Idle && f.ButtonEnabled && f.ErrorText == "", "error returns to idle");
+
+            // Обновлено: короткое, тоже возвращается. Отложено: ждёт освобождения, тики его не сбрасывают.
+            var u = new UpdateButtonModel();
+            u.OnUpdated("9.9");
+            Check(u.StatusText == "✓ Обновлено", "updated short");
+            for (int i = 0; i < UpdateButtonModel.UpdatedShowTicks; i++) u.OnTick();
+            Check(u.State == UpdateButtonState.Idle, "updated returns");
+            var d = new UpdateButtonModel();
+            d.OnDeferred("диск", () => new TestDisposable());
+            for (int i = 0; i < 100; i++) d.OnTick();
+            Check(d.State == UpdateButtonState.Deferred && d.HasReleaseSubscription, "deferred not reset by ticks");
+
+            // Предохранитель «Отложено»: по счёту тиков (фальшивые тики) -> Failed, подписка закрыта, успех не объявлен.
+            var fz = new UpdateButtonModel();
+            var fzSub = new TestDisposable();
+            fz.OnDeferred("синхронизация диска", () => fzSub);
+            for (int i = 1; i < UpdateButtonModel.DeferredFuseTicks; i++) fz.OnTick();
+            Check(fz.State == UpdateButtonState.Deferred, "fuse not yet");
+            fz.OnTick();
+            Check(fz.State == UpdateButtonState.Failed && fz.ErrorText.StartsWith("Не дождался освобождения: синхронизация диска") && !fz.HasReleaseSubscription && fz.ButtonEnabled, "fuse -> failed: " + fz.ErrorText);
+            for (int i = 1; i < UpdateButtonModel.FailedShowTicks; i++) fz.OnTick();
+            fz.OnTick();
+            Check(fz.State == UpdateButtonState.Idle, "failed after fuse returns to idle");
+
+            // Клик при показе итога: тик не сбрасывает новую проверку/ожидание и не закрывает подписку.
+            var c = new UpdateButtonModel();
+            c.OnUpToDate("1.0", null);
+            for (int i = 1; i < UpdateButtonModel.UpToDateShowTicks; i++) c.OnTick();
+            var cSub = new TestDisposable();
+            Check(c.OnClick("диск", () => cSub, () => true), "click at result -> deferred");
+            Check(c.State == UpdateButtonState.Deferred, "deferred after click");
+            c.OnTick();
+            Check(c.State == UpdateButtonState.Deferred && c.HasReleaseSubscription, "tick after click keeps deferred and subscription");
+            c.OnReleased();
+            c.OnUpToDate("1.0", null);
+            c.OnClick();
+            c.OnTick();
+            Check(c.State == UpdateButtonState.Checking, "tick after click keeps checking");
         }
 
         static void OccupiedAndDeferredState()
@@ -216,7 +298,7 @@ namespace RemoteAgents.Launcher
             Check(model.OnDeferred("применение конфига", () => { subscribed = true; return new TestDisposable(); }), "deferred accepted");
 
             Check(model.State == UpdateButtonState.Deferred, "state is deferred");
-            Check(model.StatusText == "Отложено: применение конфига — начну, как освободится", "deferred text matches: " + model.StatusText);
+            Check(model.StatusText == "Отложено: применение конфига" && model.DetailText == "Отложено: применение конфига — начну, как освободится", "deferred text matches: " + model.StatusText);
             Check(!model.ButtonEnabled, "button disabled when deferred");
             Check(model.IsBusy, "busy when deferred");
             Check(!model.ShowSpinner, "no spinner when deferred");
@@ -240,7 +322,7 @@ namespace RemoteAgents.Launcher
             var model2 = new UpdateButtonModel();
             Check(model2.OnClick("диск"), "click with occupied reason sets deferred");
             Check(model2.State == UpdateButtonState.Deferred, "state deferred");
-            Check(model2.StatusText == "Отложено: диск — начну, как освободится", "text matches");
+            Check(model2.StatusText == "Отложено: диск", "text matches");
         }
 
         static void FailedStateEnablesButton()
@@ -317,7 +399,7 @@ namespace RemoteAgents.Launcher
             Check(model.State == UpdateButtonState.Updated, "state is updated");
             Check(model.ButtonEnabled, "button enabled when updated");
             Check(!model.ShowSpinner, "no spinner when updated");
-            Check(model.StatusText == "Обновлено до 1.6.0", "updated status text");
+            Check(model.StatusText == "✓ Обновлено" && model.DetailText == "Обновлено до 1.6.0", "updated status text");
         }
 
         static void TerminalStatesIgnoreLateEvents()
@@ -386,20 +468,20 @@ namespace RemoteAgents.Launcher
             model.OnClick();
             Check(model.OnUpToDate("3.0.0"), "uptodate accepted without explicit time");
             Check(model.CheckedTime == fixedTime, "injected clock time used");
-            Check(model.StatusText == "У вас последняя версия 3.0.0 (проверено 18:42)", "status text matches injected clock: " + model.StatusText);
+            Check(model.DetailText == "У вас последняя версия 3.0.0 (проверено 18:42)", "status text matches injected clock: " + model.StatusText);
 
             var unspecTime = new DateTime(2026, 11, 21, 19, 15, 0, DateTimeKind.Unspecified);
             var modelUnspec = new UpdateButtonModel(() => unspecTime);
             modelUnspec.OnClick();
             modelUnspec.OnUpToDate("3.1.0");
-            Check(modelUnspec.StatusText == "У вас последняя версия 3.1.0 (проверено 19:15)", "status text matches unspecified time: " + modelUnspec.StatusText);
+            Check(modelUnspec.DetailText == "У вас последняя версия 3.1.0 (проверено 19:15)", "status text matches unspecified time: " + modelUnspec.StatusText);
 
             var utcTime = new DateTime(2026, 11, 21, 12, 0, 0, DateTimeKind.Utc);
             var modelUtc = new UpdateButtonModel(() => utcTime);
             modelUtc.OnClick();
             modelUtc.OnUpToDate("3.2.0");
             string expectedLocal = utcTime.ToLocalTime().ToString("HH:mm");
-            Check(modelUtc.StatusText == "У вас последняя версия 3.2.0 (проверено " + expectedLocal + ")", "utc time converted to local: " + modelUtc.StatusText);
+            Check(modelUtc.DetailText == "У вас последняя версия 3.2.0 (проверено " + expectedLocal + ")", "utc time converted to local: " + modelUtc.StatusText);
         }
 
         static void SubscribeFailureTransitionsToFailed()
@@ -410,7 +492,7 @@ namespace RemoteAgents.Launcher
             Check(!res1, "OnClick returned false on subscribe exception");
             Check(modelThrow.State == UpdateButtonState.Failed, "state is failed on subscribe exception");
             Check(modelThrow.ErrorText.Contains("не удалось дождаться освобождения: шина недоступна"), "error text matches exception: " + modelThrow.ErrorText);
-            Check(modelThrow.StatusText == "Ошибка: не удалось дождаться освобождения: шина недоступна", "status text matches: " + modelThrow.StatusText);
+            Check(modelThrow.DetailText == "Ошибка: не удалось дождаться освобождения: шина недоступна", "status text matches: " + modelThrow.StatusText);
             Check(modelThrow.ButtonEnabled, "button enabled after failed subscribe");
 
             // Case 2: subscribe returns null

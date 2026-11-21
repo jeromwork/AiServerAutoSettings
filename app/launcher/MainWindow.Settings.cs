@@ -23,14 +23,16 @@ namespace RemoteAgents.Launcher
         readonly Label updateStatus = new Label { AutoSize = true, Visible = false, Margin = new Padding(0, 6, 8, 0), ForeColor = SystemColors.GrayText };
         int updateSpin;
         // Состояние кнопки «Обновить» из модели: недоступна на время работы, значок «крутится» по событиям прогресса (без таймера).
-        internal void SetUpdateButton(bool enabled, bool spinning, string text)
+        internal void SetUpdateButton(bool enabled, bool spinning, string text, string detail = null)
         {
             if (IsDisposed) return;
             updateButton.Enabled = enabled;
             updateButton.Text = spinning ? new[] { "◐", "◓", "◑", "◒" }[updateSpin++ & 3] : "⟳";
+            // Строка статуса короткая, в одну строку: длинное режем, полный текст — в подсказке.
+            if (text != null && text.Length > 60) text = text.Substring(0, 59) + "…";
             updateStatus.Text = text ?? ""; updateStatus.Visible = updateStatus.Text.Length > 0;
             updateStatus.MaximumSize = new Size(Theme.Px(this, 320), 0);
-            updateTip.SetToolTip(updateButton, string.IsNullOrEmpty(text) ? "Проверить обновления" : text);
+            updateTip.SetToolTip(updateButton, string.IsNullOrEmpty(text) ? "Проверить обновления" : string.IsNullOrEmpty(detail) ? text : detail);
         }
         Expander advanced;
         Label aboutInfo;

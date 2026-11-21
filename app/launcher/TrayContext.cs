@@ -164,6 +164,7 @@ namespace RemoteAgents.Launcher
             if (closing || ticking || definition == null) return; ticking = true;
             Icon shown = icon.Icon; // final tray colour of this tick, applied once in finally
             try {
+                Step("updatebutton", () => updateButton.OnTick()); // итог/предохранитель кнопки «Обновить» на UI-потоке; сбой не должен оставить ticking=true
                 bool ok = true, restart = false, coreFailed = false;
                 var transport = Json.Map(null);
                 ok &= Step("settings", () => { RetireConfigSyncTask(); TryDeleteOld(); ReloadSettings(); });
