@@ -52,6 +52,38 @@ namespace RemoteAgents.Launcher
             } catch { Summary = "нет данных"; }
             if (Healthy && (now - started).TotalSeconds >= 120) delay = 5;
         }
+        public void CheckStale() { CheckStale(DateTime.UtcNow); }
+        readonly StaleChecker staleChecker = new StaleChecker();
+        // Только в UI-потоке (доставка tick.supervisor через TryPostUi): работает с process/job и теми же полями, что Tick().
+        public void CheckStale(DateTime now)
+        {
+            bool expected = Enabled && !Definition.CommandManaged && Definition.HasPeriodicStatus
+                && Definition.Restart == "always" && (Alive || process != null || elevated != null);
+            DateTime? modified = null;
+            try {
+                if (expected) {
+                    string file = Definition.HealthFile.Contains("{home}") ? Expand(Definition.HealthFile) : Files.Under(home, Definition.HealthFile);
+                    if (File.Exists(file)) modified = File.GetLastWriteTimeUtc(file);
+                }
+            } catch { }
+            // Учитываем каждый тик, даже без доступного статуса; после сна запоминаем resyncUtc на полный предохранитель.
+            try {
+                if (staleChecker.Check(modified, now, Definition.MaxAge, started, expected) == SupervisorDecision.KillAndRestart) {
+                    // Предохранитель (конституция 4а): свежий статус компонента недоступен, если процесс завис; при срабатывании — убить процесс и перезапустить, успех не объявляет.
+                    KillStale(now, staleChecker.AgeMs(modified, now, started) / 1000);
+                }
+            } catch { }
+        }
+        void KillStale(DateTime now, double ageSec)
+        {
+            if (process != null) { try { process.Kill(); } catch { } try { process.WaitForExit(5000); } catch { } process.Dispose(); process = null; }
+            if (job != null) { try { job.Dispose(); } catch { } job = null; }
+            if (elevated != null) { try { elevated.Dispose(); } catch { } elevated = null; }
+            Alive = Healthy = false;
+            next = now.AddSeconds(delay); delay = Math.Min(60, delay * 2);
+            log.Write("component." + Definition.Name + ".stale-restart age=" + (int)ageSec + "s");
+            TrayBusWiring.ComponentStaleRestart(Bus, Definition.Name);
+        }
         // Связь не должна отставать от обычных программ при нехватке процессора/памяти; сбой установки приоритета не фатален.
         void ApplyPriority()
         { if (Definition.Priority == "above-normal") { try { process.PriorityClass = ProcessPriorityClass.AboveNormal; } catch { log.Write("component." + Definition.Name + ".priority.failed"); } } }

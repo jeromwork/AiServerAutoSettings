@@ -14,9 +14,10 @@ namespace RemoteAgents.Launcher
         public const string BlockDegraded = "block.degraded";
         public const string BlockFailed = "block.failed";
 
-        // Supervisor: component.start|component.exit {name, code}
+        // Supervisor: component.start|component.exit|component.stale-restart {name, code}
         public const string ComponentStart = "component.start";
         public const string ComponentExit = "component.exit";
+        public const string ComponentStaleRestart = "component.stale-restart";
 
         // Аварийные топики
         public const string Unhandled = "unhandled";

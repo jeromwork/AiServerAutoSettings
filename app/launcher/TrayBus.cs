@@ -114,6 +114,12 @@ namespace RemoteAgents.Launcher
         { if (bus != null) bus.Publish(BusTopics.ComponentStart, BusTopics.Sources.Tray, "name", name); }
         internal static void ComponentExit(EventBus bus, string name, int code)
         { if (bus != null) bus.Publish(BusTopics.ComponentExit, BusTopics.Sources.Tray, "name", name, "code", code.ToString(System.Globalization.CultureInfo.InvariantCulture)); }
+        internal static void ComponentStaleRestart(EventBus bus, string name)
+        { if (bus != null) bus.Publish(BusTopics.ComponentStaleRestart, BusTopics.Sources.Tray, "name", name); }
+
+        // tick.supervisor -> периодическая проверка зависших компонентов.
+        internal static IDisposable WireSupervisorTick(EventBus bus, Action onTick)
+        { return bus.Subscribe(BusTopics.TickSupervisor, e => onTick()); }
 
         // update.requested (кнопка «Проверить обновления», запуск) -> проверка. start вызывается в нужном потоке самим вызывающим.
         internal static IDisposable WireUpdateRequests(EventBus bus, Action<bool> startUpdateCheck)
