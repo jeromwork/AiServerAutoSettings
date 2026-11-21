@@ -162,6 +162,7 @@ namespace RemoteAgents.Launcher
         void Tick()
         {
             if (closing || ticking || definition == null) return; ticking = true;
+            updateButton.OnTick(); // итог/предохранитель кнопки «Обновить» считаются на UI-потоке, рядом с PollButtonRelease
             Icon shown = icon.Icon; // final tray colour of this tick, applied once in finally
             try {
                 bool ok = true, restart = false, coreFailed = false;

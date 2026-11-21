@@ -262,6 +262,33 @@ namespace RemoteAgents.Launcher
             d.OnDeferred("диск", () => new TestDisposable());
             for (int i = 0; i < 100; i++) d.OnTick();
             Check(d.State == UpdateButtonState.Deferred && d.HasReleaseSubscription, "deferred not reset by ticks");
+
+            // Предохранитель «Отложено»: по счёту тиков (фальшивые тики) -> Failed, подписка закрыта, успех не объявлен.
+            var fz = new UpdateButtonModel();
+            var fzSub = new TestDisposable();
+            fz.OnDeferred("синхронизация диска", () => fzSub);
+            for (int i = 1; i < UpdateButtonModel.DeferredFuseTicks; i++) fz.OnTick();
+            Check(fz.State == UpdateButtonState.Deferred, "fuse not yet");
+            fz.OnTick();
+            Check(fz.State == UpdateButtonState.Failed && fz.ErrorText.StartsWith("Не дождался освобождения: синхронизация диска") && !fz.HasReleaseSubscription && fz.ButtonEnabled, "fuse -> failed: " + fz.ErrorText);
+            for (int i = 1; i < UpdateButtonModel.FailedShowTicks; i++) fz.OnTick();
+            fz.OnTick();
+            Check(fz.State == UpdateButtonState.Idle, "failed after fuse returns to idle");
+
+            // Клик при показе итога: тик не сбрасывает новую проверку/ожидание и не закрывает подписку.
+            var c = new UpdateButtonModel();
+            c.OnUpToDate("1.0", null);
+            for (int i = 1; i < UpdateButtonModel.UpToDateShowTicks; i++) c.OnTick();
+            var cSub = new TestDisposable();
+            Check(c.OnClick("диск", () => cSub, () => true), "click at result -> deferred");
+            Check(c.State == UpdateButtonState.Deferred, "deferred after click");
+            c.OnTick();
+            Check(c.State == UpdateButtonState.Deferred && c.HasReleaseSubscription, "tick after click keeps deferred and subscription");
+            c.OnReleased();
+            c.OnUpToDate("1.0", null);
+            c.OnClick();
+            c.OnTick();
+            Check(c.State == UpdateButtonState.Checking, "tick after click keeps checking");
         }
 
         static void OccupiedAndDeferredState()

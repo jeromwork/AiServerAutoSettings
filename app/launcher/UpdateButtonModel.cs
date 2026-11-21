@@ -25,12 +25,15 @@ namespace RemoteAgents.Launcher
         private DateTime phaseStart;
         private IDisposable activeSubscription;
         private int shownTicks;
+        private int deferredTicks;
 
         // Сколько тиков tick.tray (1 с каждый, B2) итог остаётся на кнопке, потом она сама возвращается в Idle.
         // Считаем по событиям шины, а не таймером (конституция 4а). Ошибку держим дольше, но не навсегда.
         public const int UpToDateShowTicks = 5;
         public const int UpdatedShowTicks = 5;
         public const int FailedShowTicks = 15;
+        // Предохранитель (конституция 4а): событие «освобождено» недоступно, если занятость залипла; при срабатывании — переход в Failed «Не дождался освобождения: <причина>», успех не объявляет.
+        public const int DeferredFuseTicks = 300;
         // Предел длины текста причины в строке статуса (чтобы метка в окне не обрезалась); полный текст — в DetailText.
         public const int MaxReasonChars = 40;
 
@@ -79,18 +82,61 @@ namespace RemoteAgents.Launcher
                                    State == UpdateButtonState.Installing;
 
         // Событие tick.tray: итоговое состояние (последняя версия/ошибка/обновлено) показывается N тиков и сбрасывается в Idle.
+        // Вызывать из UI-потока (Tick трея). Проверка и сброс — под одним lock: клик между ними итог не затрёт.
         public bool OnTick()
         {
-            int limit;
+            string deferredReason = null;
+            UpdateButtonState prev;
+            long elapsedMs = 0;
+            IDisposable toDispose;
             lock (sync)
             {
-                if (State == UpdateButtonState.UpToDate) limit = UpToDateShowTicks;
+                int limit;
+                if (State == UpdateButtonState.Deferred)
+                {
+                    if (++deferredTicks < DeferredFuseTicks) return false;
+                    deferredReason = DeferredReason;
+                    limit = 0;
+                }
+                else if (State == UpdateButtonState.UpToDate) limit = UpToDateShowTicks;
                 else if (State == UpdateButtonState.Updated) limit = UpdatedShowTicks;
                 else if (State == UpdateButtonState.Failed) limit = FailedShowTicks;
                 else return false;
-                if (++shownTicks < limit) return false;
+                if (deferredReason == null)
+                {
+                    if (++shownTicks < limit) return false;
+                    toDispose = ResetToIdleLocked(out prev, out elapsedMs);
+                }
+                else { toDispose = null; prev = State; }
             }
-            return OnIdle();
+            if (deferredReason != null)
+            {
+                return OnFailed("Не дождался освобождения: " + Short(deferredReason));
+            }
+            toDispose?.Dispose();
+            PhaseChanged?.Invoke(prev, UpdateButtonState.Idle, elapsedMs, 0);
+            StateChanged?.Invoke(this);
+            return true;
+        }
+
+        // Вызывать только под lock(sync).
+        private IDisposable ResetToIdleLocked(out UpdateButtonState prev, out long elapsedMs)
+        {
+            IDisposable toDispose = activeSubscription;
+            activeSubscription = null;
+            prev = State;
+            State = UpdateButtonState.Idle;
+            StatusText = "";
+            DetailText = "";
+            DownloadPercent = 0;
+            BytesDownloaded = 0;
+            TotalBytes = 0;
+            ErrorText = "";
+            DeferredReason = "";
+            DateTime now = clock();
+            elapsedMs = Math.Max(0, (long)(now - phaseStart).TotalMilliseconds);
+            phaseStart = now;
+            return toDispose;
         }
 
         static string Short(string text)
@@ -389,6 +435,7 @@ namespace RemoteAgents.Launcher
                 prev = State;
                 State = UpdateButtonState.Deferred;
                 DeferredReason = what ?? "";
+                deferredTicks = 0;
                 StatusText = "Отложено: " + Short(DeferredReason);
                 DetailText = "Отложено: " + DeferredReason + " — начну, как освободится";
 
