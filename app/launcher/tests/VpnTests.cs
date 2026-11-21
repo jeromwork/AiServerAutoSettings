@@ -14,7 +14,7 @@ namespace RemoteAgents.Launcher
         {
             string root = args.Length > 0 ? args[0] : Path.Combine(Path.GetTempPath(), "vpn-tests-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
-            Run(root); VpnTunTests.Run(root); return 0;
+            Run(root); VpnTunTests.Run(root); VpnReadyTests.Run(); return 0;
         }
 #endif
         internal static void Run(string root)

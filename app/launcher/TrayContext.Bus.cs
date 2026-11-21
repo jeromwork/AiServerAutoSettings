@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,7 +12,7 @@ namespace RemoteAgents.Launcher
     {
         EventBus bus; BlockStatusTracker blocks; StatusDirWatcher statusWatcher;
         readonly List<IDisposable> busParts = new List<IDisposable>();
-        readonly TickGate trayTickGate = new TickGate(); bool transportReady; readonly DateTime busStartedUtc = DateTime.UtcNow;
+        readonly TickGate trayTickGate = new TickGate(), supervisorTickGate = new TickGate(); bool transportReady; readonly DateTime busStartedUtc = DateTime.UtcNow;
 
         // Период плановой проверки обновлений — из конфига на момент запуска (intervalHours).
         int UpdateTickMs() { return UpdatePolicy.Interval(config.Update) * 3600 * 1000; }
@@ -28,6 +29,8 @@ namespace RemoteAgents.Launcher
             busParts.Add(bus);
             // Журнал шины (поток bus): создаётся сразу за шиной; освобождается раньше неё (busParts снимаются с конца), итог повторов пишется до остановки шины.
             busParts.Add(new BusJournal(bus, RaLog.DefaultDir));
+            // Журнал здоровья (поток health, шаг H3): создаётся за шиной; освобождается раньше неё.
+            busParts.Add(new HealthJournal(bus, RaLog.DefaultDir));
             // Подписки раньше источников: готовность блока, уже наступившая к старту, тоже придёт подписчику.
             busParts.Add(TrayBusWiring.WireUpdateRequests(bus, manual => PostUi(() => { if (!closing) ButtonProceed(); })));
             busParts.Add(TrayBusWiring.WireUpdateTick(bus, () => PostUi(() => {
@@ -37,12 +40,15 @@ namespace RemoteAgents.Launcher
             })));
             busParts.Add(TrayBusWiring.WireTransportReady(bus, () => PostUi(() => { transportReady = true; if (ladder != null) ladder.TransportReady(); })));
             busParts.Add(bus.Subscribe(BusTopics.TickLogship, e => PumpLogs()));
-            busParts.Add(bus.Subscribe(BusTopics.TickSupervisor, e => { foreach (var r in runtimes) r.CheckStale(); }));
+            busParts.Add(TrayBusWiring.WireSupervisorTick(bus, () => {
+                // CheckStale трогает process/job и runtimes: только в UI-потоке, одна ждущая доставка за раз.
+                supervisorTickGate.Deliver(TryPostUi, () => { if (closing) return; foreach (var r in runtimes.ToArray()) r.CheckStale(); });
+            }));
             busParts.Add(bus.Subscribe(BusTopics.TickTray, e => {
                 // Одна невыполненная доставка за раз: если UI занят, тики не копятся; не смогли отправить — счётчик сброшен.
                 trayTickGate.Deliver(TryPostUi, Tick);
             }));
-            WireRuntimeBus();
+            WireRuntimeBus(); StartVpnGuard();
             updateSchedule.RetryRequested = () => { checkRequested = true; };
             checkRequested = true; // первая проверка при старте; PollUpdates дождётся готовности и безопасного момента
             busParts.Add(bus.Every(BusTopics.Ticks.Update, UpdateTickMs()));
@@ -50,7 +56,9 @@ namespace RemoteAgents.Launcher
             busParts.Add(bus.Every(BusTopics.Ticks.Logship, 5000));
             // Тик трея 1 с (§4а-долг: остальное содержимое Tick пока опрашивает состояние само).
             busParts.Add(bus.Every(BusTopics.Ticks.Tray, 1000));
-            busParts.Add(bus.Every(BusTopics.Ticks.Supervisor, 1000));
+            // 5 с, а не 1: сторож зависших компонентов; предохранитель сам ≥30 с (SupervisorStale.StaleRestartFuseMs), точность в секунды не нужна.
+            busParts.Add(bus.Every(BusTopics.Ticks.Supervisor, 5000));
+            StartHealth(); // H1: подписки доски раньше источников (tracker.ScanAll сразу может опубликовать block.ready)
             try {
                 blocks = new BlockStatusTracker(bus, busStartedUtc);
                 statusWatcher = new StatusDirWatcher(Path.Combine(home, "status"), blocks);
@@ -66,7 +74,7 @@ namespace RemoteAgents.Launcher
             if (m != null && DateTime.UtcNow >= nextMirror) { nextMirror = DateTime.UtcNow.AddSeconds(60); Task.Run(() => { try { m.Pull(); } catch { } }); }
         }
 
-        void AttachLadderToBus() { if (transportReady && ladder != null) ladder.TransportReady(); }
+        void AttachLadderToBus() { if (ladder != null) ladder.Bus = bus; if (transportReady && ladder != null) ladder.TransportReady(); }
         void WireRuntimeBus() { foreach (var r in runtimes) r.Bus = bus; }
 
         void StopBus()

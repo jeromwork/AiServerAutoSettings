@@ -15,6 +15,8 @@ namespace RemoteAgents.Launcher
             FreshStatusGivesNothing();
             ProcessJustStartedGivesNothing();
             FuseMinimumThirtySeconds();
+            HangBeforeFirstWriteIsKilled();
+            ClockJumpDoesNotKill();
             WireSupervisorTickAndEvent();
             Console.WriteLine("PASS: SupervisorStaleTests (" + assertions + " assertions passed)");
             return 0;
@@ -72,6 +74,27 @@ namespace RemoteAgents.Launcher
             Check(SupervisorStale.FuseMs(90) == 270000, "fuse for maxAge 90 is 270000 ms");
             Check(SupervisorStale.Decide(fileWritten, started.AddSeconds(269), 90, started) == SupervisorDecision.None, "269s < 270s fuse -> None");
             Check(SupervisorStale.Decide(fileWritten, started.AddSeconds(271), 90, started) == SupervisorDecision.KillAndRestart, "271s > 270s fuse -> KillAndRestart");
+        }
+
+        static void HangBeforeFirstWriteIsKilled()
+        {
+            var started = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            var oldFile = started.AddMinutes(-10); // файл от прошлого запуска, новый процесс ничего не записал
+            Check(SupervisorStale.Decide(oldFile, started.AddSeconds(29), 5, started) == SupervisorDecision.None, "old file, 29s after start -> None");
+            Check(SupervisorStale.Decide(oldFile, started.AddSeconds(31), 5, started) == SupervisorDecision.KillAndRestart, "old file, 31s after start -> kill");
+            Check(Math.Abs(SupervisorStale.AgeMs(oldFile, started.AddSeconds(31), started) - 31000) < 1, "age counted from start");
+        }
+
+        static void ClockJumpDoesNotKill()
+        {
+            var started = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            var file = started.AddSeconds(10);
+            var last = started.AddSeconds(15);
+            var afterSleep = started.AddHours(3);
+            Check(SupervisorStale.ClockJumped(last, afterSleep, 5), "gap > fuse/2 is a clock jump");
+            Check(SupervisorStale.Decide(file, afterSleep, 5, started, last) == SupervisorDecision.None, "after sleep -> only resync");
+            Check(SupervisorStale.Decide(file, afterSleep, 5, started, afterSleep.AddSeconds(-5)) == SupervisorDecision.KillAndRestart, "regular cadence, stale -> kill");
+            Check(!SupervisorStale.ClockJumped(DateTime.MinValue, afterSleep, 5), "first check is not a jump");
         }
 
         static void WireSupervisorTickAndEvent()

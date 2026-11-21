@@ -172,9 +172,10 @@ namespace RemoteAgents.Launcher
                 if (!Step("update", () => {
                     var critical = runtimes.Where(r => r.Definition.Critical).ToArray();
                     bool all = critical.Length > 0 && critical.Where(r => r.Enabled).All(r => r.Healthy);
-                    all = all && UpdateHealthReady();
-                    string result = engine.Observe(all);
-                    string image = UpgradeInstaller.ObserveImage(home, engine, all, result);
+                    all = all && UpdateHealthReady(); // только цвет значка; приёмку даёт доска готовности (H1, событие health.accepted)
+                    bool accepted = HealthBoard.PickAccepted(healthBoard, all); // нет доски (ручная установка EXE) — прежнее условие
+                    string result = engine.Observe(accepted);
+                    string image = UpgradeInstaller.ObserveImage(home, engine, accepted, result);
                     if (image == "rollback") { try { PrepareUpdateRestart(); } catch { keepVpnOnRestart = false; log.Write("update.resume.failed"); } UpdateOutcome(Json.Text(UpdateState(), "target", engine.Previous), "здоровье не подтверждено; выполнен откат"); log.Write("launcher.rollback"); RestartRequested = true; ExitThread(); restart = true; return; }
                     if (result == "rollback") { log.Write("update.rollback"); updateSummary = "обновление откачено: здоровье не подтверждено"; LoadComponents(); foreach (var r in runtimes) r.Tick(); all = false; }
                     if (result == "accepted" || image == "accepted") { log.Write("update.accepted"); UpdateOutcome(engine.Current, ""); }
@@ -528,7 +529,7 @@ namespace RemoteAgents.Launcher
                     string summary = session.Read(stop.Token);
                     return Tuple.Create(session, summary, session.FolderCount);
                 });
-                if (!closing && root == DiskTraySession.Home(config.Data) && runtimes.Any(r => r.Definition.Name == "disk" && r.Enabled)) { diskSession = result.Item1; diskSummary = result.Item2; diskFolders = result.Item3; diskUpdated = DateTime.UtcNow; }
+                if (!closing && root == DiskTraySession.Home(config.Data) && runtimes.Any(r => r.Definition.Name == "disk" && r.Enabled)) { diskSession = result.Item1; diskSummary = result.Item2; diskFolders = result.Item3; diskUpdated = DateTime.UtcNow; HealthDiskSeen(result.Item1.ServerConnected); }
             } catch (Exception) { diskSession = null; diskFolders = -1; diskSummary = "Диск: локальный Syncthing недоступен"; diskUpdated = DateTime.UtcNow; }
             finally { diskReading = false; }
         }
@@ -696,15 +697,16 @@ namespace RemoteAgents.Launcher
             if (!vpn.Definition.CommandManaged) { VpnFailure("Обновите компоненты программы перед включением VPN", fromCard); return; }
             string att = RaLog.Attempt.New("on");
             if (!AllowMutation()) { log.Write("vpn.click.ignored att=" + att + " msg=busy-or-closing"); return; }
-            actionBusy = vpnActionBusy = true; vpnActionWanted = true; vpnError = ""; netNote = ""; RefreshMain();
+            actionBusy = vpnActionBusy = true; vpnActionWanted = true; vpnError = ""; netNote = ""; VpnAttemptBegin(att); RefreshMain();
             log.Write("vpn.click.on att=" + att + " fromCard=" + fromCard); LogNetSnapshot("vpn.on.before", att);
             var vpnWatch = System.Diagnostics.Stopwatch.StartNew();
+            vpnOps.Enter(); // прямо перед try: finally всегда сделает Exit
             try {
                 if (netHelper == null) throw new IOException(HelperClient.PermissionRequired);
                 bool helperReady = await netHelper.EnsureReady(stop.Token);
                 log.Write("vpn.helper.ready att=" + att + " ready=" + helperReady + " ms=" + vpnWatch.ElapsedMilliseconds);
                 log.Write(LogLevel.Info, "vpn", "vpn.on.step", "att", att, "step", "helper-ready", "ms", vpnWatch.ElapsedMilliseconds.ToString(), "result", helperReady ? "ok" : "fail");
-                if (!helperReady) { log.Write("vpn.on.refused att=" + att + " reason=helper-not-ready"); VpnFailure(HelperClient.SetupWarning, fromCard); return; }
+                if (!helperReady) { log.Write("vpn.on.refused att=" + att + " reason=helper-not-ready"); VpnAttemptEnd(att, "helper-not-ready"); VpnFailure(HelperClient.SetupWarning, fromCard); return; }
                 var transport = StatusView.Read(home, "transport", maxAgeSec: 3);
                 var options = new System.Collections.Generic.Dictionary<string, object>(Json.Map(Json.Get(config.Data, "vpn")));
                 // Intent/interface names are not part of the privileged command.
@@ -719,13 +721,17 @@ namespace RemoteAgents.Launcher
                     "helperVersion", NetHelperInstall.InstalledVersion, "ms", vpnWatch.ElapsedMilliseconds.ToString());
                 LogNetSnapshot("vpn.on.after", att);
                 if (closing) return;
-                if (Json.Str(status, "state") != "on") { log.Write("vpn.on.not-on att=" + att + " state=" + Json.Str(status, "state")); if (!fromCard) MessageBox.Show(Json.Text(status, "summary", "VPN не включён: соединение не подтверждено"), Product.Name); return; }
+                if (Json.Str(status, "state") != "on") {
+                    if (VpnAttemptRolledBack(att)) { log.Write("vpn.on.rolledback att=" + att + " state=" + Json.Str(status, "state") + " msg=refused-after-rollback"); return; } // откат уже объяснил причину: без окна и без перезаписи заметки
+                    VpnRefused(att, status, fromCard); return;
+                }
+                if (VpnAttemptRolledBack(att)) { log.Write("vpn.on.rolledback att=" + att + " msg=intent-not-written"); return; } // откат уже выключил VPN: конфиг не включать
                 config.SetVpnIntent(true); config.SetEnabled(vpn.Definition, true); log.Write("vpn.on.ok att=" + att + " ms=" + vpnWatch.ElapsedMilliseconds);
-                if (ladder != null) ladder.RunE2E(att);
+                VpnAttemptOn(att); // e2e запускает VpnAttemptGuard (один раз на попытку; vpn.state on мог прийти раньше)
                 if (mirror != null) Task.Run(() => { try { mirror.Pull(); } catch { } });
-            } catch (OperationCanceledException) { log.Write("vpn.on.cancelled att=" + att); }
-            catch (Exception error) { if (!closing) { log.Write("vpn.helper.failed att=" + att + " " + TickFailureLog.HelperFailure("vpn-on", error)); VpnFailure(NetHelperSetup.VpnFailureMessage(error), fromCard); } }
-            finally { actionBusy = vpnActionBusy = false; if (!closing) RefreshMenu(); }
+            } catch (OperationCanceledException) { log.Write("vpn.on.cancelled att=" + att); VpnAttemptEnd(att, "cancelled"); }
+            catch (Exception error) { bool rolled = VpnAttemptRolledBack(att); VpnAttemptEnd(att, "error"); /* End обнуляет попытку: решение об откате берём ДО него */ if (!closing) { log.Write("vpn.helper.failed att=" + att + " " + TickFailureLog.HelperFailure("vpn-on", error)); if (!VpnAttemptGuard.ShowFailureWindow(rolled)) log.Write("vpn.on.rolledback att=" + att + " msg=failure-after-rollback"); else VpnFailure(NetHelperSetup.VpnFailureMessage(error), fromCard); } }
+            finally { if (vpnOps.Exit()) actionBusy = vpnActionBusy = false; if (!closing) RefreshMenu(); }
         }
         // Заметка проверки сети — только в подсказку трея, пока VPN включён; не пишется после выключения.
         void SetNetNote(string text)
@@ -796,7 +802,7 @@ namespace RemoteAgents.Launcher
             resumeUpdatedVpn = false;
             try { var updateState = UpdateState(); updateState["vpnOn"] = false; updateState.Remove("resumeVpn"); Json.Write(UpdateStatePath, updateState); }
             catch { log.Write("update.resume.cancel.failed"); }
-            actionBusy = vpnActionBusy = true; vpnActionWanted = false; vpnError = ""; netNote = ""; RefreshMain();
+            actionBusy = vpnActionBusy = true; vpnActionWanted = false; vpnError = ""; netNote = ""; VpnAttemptEndCurrent("button-off"); RefreshMain();
             try {
                 if (!vpn.Definition.CommandManaged) { EnableRuntime(vpn, false); return; }
                 if (netHelper == null) throw new IOException(HelperClient.PermissionRequired);

@@ -51,30 +51,32 @@ namespace RemoteAgents.Launcher
                 }
             } catch { Summary = "нет данных"; }
             if (Healthy && (now - started).TotalSeconds >= 120) delay = 5;
-            CheckStale(now);
         }
         public void CheckStale() { CheckStale(DateTime.UtcNow); }
+        DateTime lastStaleCheck = DateTime.MinValue;
+        // Только в UI-потоке (доставка tick.supervisor через TryPostUi): работает с process/job и теми же полями, что Tick().
         public void CheckStale(DateTime now)
         {
+            DateTime prevCheck = lastStaleCheck; lastStaleCheck = now;
             if (!Enabled || Definition.Restart != "always" || (!Alive && process == null && elevated == null)) return;
             try {
                 string file = Definition.HealthFile.Contains("{home}") ? Expand(Definition.HealthFile) : Files.Under(home, Definition.HealthFile);
                 if (!File.Exists(file)) return;
                 DateTime modified = File.GetLastWriteTimeUtc(file);
-                if (SupervisorStale.Decide(modified, now, Definition.MaxAge, started) == SupervisorDecision.KillAndRestart) {
+                if (SupervisorStale.Decide(modified, now, Definition.MaxAge, started, prevCheck) == SupervisorDecision.KillAndRestart) {
                     // Предохранитель (конституция 4а): свежий статус компонента недоступен, если процесс завис; при срабатывании — убить процесс и перезапустить, успех не объявляет.
-                    KillStale(now);
+                    KillStale(now, SupervisorStale.AgeMs(modified, now, started) / 1000);
                 }
             } catch { }
         }
-        void KillStale(DateTime now)
+        void KillStale(DateTime now, double ageSec)
         {
             if (process != null) { try { process.Kill(); } catch { } try { process.WaitForExit(5000); } catch { } process.Dispose(); process = null; }
             if (job != null) { try { job.Dispose(); } catch { } job = null; }
             if (elevated != null) { try { elevated.Dispose(); } catch { } elevated = null; }
             Alive = Healthy = false;
             next = now.AddSeconds(delay); delay = Math.Min(60, delay * 2);
-            log.Write("component." + Definition.Name + ".stale-restart");
+            log.Write("component." + Definition.Name + ".stale-restart age=" + (int)ageSec + "s");
             TrayBusWiring.ComponentStaleRestart(Bus, Definition.Name);
         }
         // Связь не должна отставать от обычных программ при нехватке процессора/памяти; сбой установки приоритета не фатален.

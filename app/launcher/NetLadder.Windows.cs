@@ -23,7 +23,6 @@ namespace RemoteAgents.Launcher
         { this.home = home; this.transport = transport; this.vpn = vpn; }
         bool ChannelFirst()
         { try { return Json.Bool(Json.Map(Json.Get(Json.Read(Path.Combine(home, "config.json")), "transport")), "channelFirst"); } catch { return false; } }
-        [DllImport("iphlpapi.dll")] static extern int GetBestInterface(uint address, out uint index);
 
         static StageResult Timed(int stage, Func<string> body, string code)
         {
@@ -95,9 +94,8 @@ namespace RemoteAgents.Launcher
         public StageResult Route()
         {
             var watch = Stopwatch.StartNew();
-            uint index;
-            int code = GetBestInterface(BitConverter.ToUInt32(IPAddress.Parse("1.1.1.1").GetAddressBytes(), 0), out index);
-            if (code != 0) return StageResult.Fail(6, watch.ElapsedMilliseconds, "route-not-ours", "GetBestInterface=" + code);
+            int index = NetRoute.BestInterface(IPAddress.Parse("1.1.1.1"));
+            if (index < 0) return StageResult.Fail(6, watch.ElapsedMilliseconds, "route-not-ours", "GetBestInterface=failed");
             string name = NetworkInterface.GetAllNetworkInterfaces().Where(n => { try { return n.GetIPProperties().GetIPv4Properties().Index == (int)index; } catch { return false; } })
                 .Select(n => n.Name).FirstOrDefault() ?? ("ifIndex" + index);
             return name.StartsWith("RemoteAgents-", StringComparison.OrdinalIgnoreCase) ? StageResult.Pass(6, watch.ElapsedMilliseconds, name)
@@ -157,6 +155,7 @@ namespace RemoteAgents.Launcher
         long lastBannerMs = -BannerEveryMs;
         // Заметка для трея: текст при отказе ступеней 6–8 при включённом VPN, пустая строка — всё хорошо.
         internal Action<string> Note;
+        internal EventBus Bus; // шина трея: итог e2e уходит событием net.e2e (V4)
         internal event Action<LadderResult> Changed; // ok -> fail / fail -> ok (для LogShipper.Kick)
         internal NetLadderService(string home, Journal log, Func<Dictionary<string, object>> transport, Func<Dictionary<string, object>> vpn)
         {
@@ -210,6 +209,8 @@ namespace RemoteAgents.Launcher
             if (schedule.HeartbeatDue(clock.ElapsedMilliseconds))
                 log.Write(LogLevel.Info, "net", "net.heartbeat", "state", watch.State, "vpn", vpnOn ? "on" : "off", "stages", Stages(result));
         }
+        void PublishE2E(string att, string result, int stage, string reason, string detail)
+        { var b = Bus; if (b != null) try { b.Publish(BusTopics.NetE2E, BusTopics.Sources.Tray, "att", att, "result", result, "stage", stage.ToString(CultureInfo.InvariantCulture), "reason", reason ?? "", "detail", detail ?? ""); } catch { } }
         static StageResult Guarded(Func<StageResult> f) { try { return f(); } catch (Exception e) { return StageResult.Fail(5, 0, "probe-error", e.GetType().Name); } }
         // «Интернет через VPN не идёт» — только при отказе ступеней 6–8.
         void Publish(LadderResult result, bool vpnOn)
@@ -231,7 +232,7 @@ namespace RemoteAgents.Launcher
                 bool entered = false;
                 try {
                     for (int i = 0; i < 60 && !(entered = TryEnter()); i++) Thread.Sleep(500);
-                    if (!entered) { log.Write(LogLevel.Warn, "net", "net.e2e", "att", att, "result", "skipped", "reason", "busy"); return; }
+                    if (!entered) { log.Write(LogLevel.Warn, "net", "net.e2e", "att", att, "result", "skipped", "reason", "busy"); PublishE2E(att, "skipped", 0, "busy", ""); return; }
                     var result = NetLadder.Run(probe, true, NetLadder.Full);
                     var fields = new List<string> { "att", att, "result", result.Ok ? "ok" : "fail", "stage", result.FailStage.ToString(CultureInfo.InvariantCulture), "reason", result.Reason, "detail", result.Detail, "ms_total", result.TotalMs.ToString(CultureInfo.InvariantCulture) };
                     foreach (var s in result.Stages.Where(s => !s.Skipped)) fields.AddRange(new[] { "s" + s.Stage + "ms", s.Ms.ToString(CultureInfo.InvariantCulture) });
@@ -239,7 +240,8 @@ namespace RemoteAgents.Launcher
                     log.Write(result.Ok ? LogLevel.Info : LogLevel.Warn, "net", "net.e2e", fields.ToArray());
                     lastBannerMs = clock.ElapsedMilliseconds;
                     Publish(result, true);
-                } catch (Exception e) { log.Write(LogLevel.Warn, "net", "net.e2e", "att", att, "result", "error", "err", e.GetType().Name); }
+                    PublishE2E(att, result.Ok ? "ok" : "fail", result.FailStage, result.Reason, result.Detail);
+                } catch (Exception e) { log.Write(LogLevel.Warn, "net", "net.e2e", "att", att, "result", "error", "err", e.GetType().Name); PublishE2E(att, "error", 0, e.GetType().Name, ""); }
                 finally { if (entered) Leave(); }
             });
         }
