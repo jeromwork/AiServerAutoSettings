@@ -8,7 +8,7 @@
     <StartupObject Condition="'$(ConfigTests)' != 'true' And '$(ConfigE2E)' != 'true'">RemoteAgents.Launcher.Stage6PortableEntry</StartupObject>
     <DefineConstants>PORTABLE_TEST</DefineConstants>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
-    <NoWarn>SYSLIB0014;SYSLIB0057;CA1416</NoWarn>
+    <NoWarn>SYSLIB0014;SYSLIB0057;CA1416;CA2022</NoWarn>
   </PropertyGroup>
   <!-- A different entry point must not reuse the other build's output (StartupObject alone does not trigger a rebuild). -->
   <PropertyGroup Condition="'$(ConfigTests)' == 'true'">
@@ -28,6 +28,11 @@
     <StartupObject>RemoteAgents.Launcher.LegacyPacCleanupTests</StartupObject>
     <IntermediateOutputPath>obj/$(Configuration)/lan-tests/</IntermediateOutputPath>
     <OutputPath>bin/$(Configuration)/lan-tests/</OutputPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(UpdateButtonTests)' == 'true'">
+    <StartupObject>RemoteAgents.Launcher.UpdateButtonModelTests</StartupObject>
+    <IntermediateOutputPath>obj/$(Configuration)/update-button-tests/</IntermediateOutputPath>
+    <OutputPath>bin/$(Configuration)/update-button-tests/</OutputPath>
   </PropertyGroup>
   <ItemGroup>
     <EmbeddedResource Include="../../../server/lan-pc-access.clinic.example.json" LogicalName="RemoteAgents.ClinicFixture.json" />
@@ -101,6 +106,8 @@
     <Compile Include="../StatusView.cs" Link="StatusView.cs" />
     <Compile Include="../Data.cs" Link="Data.cs" />
     <Compile Include="UpdateAutomationTests.cs" />
+    <Compile Include="../UpdateButtonModel.cs" Link="UpdateButtonModel.cs" />
+    <Compile Include="UpdateButtonModelTests.cs" />
     <Compile Include="../UpdateProbe.cs" />
     <Compile Include="../UpdatePolicy.cs" />
     <Compile Include="../UpdateEnvironment.cs" />
