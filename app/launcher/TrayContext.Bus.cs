@@ -49,6 +49,7 @@ namespace RemoteAgents.Launcher
             busParts.Add(bus.Every(BusTopics.Ticks.Logship, 5000));
             // Тик трея 1 с (§4а-долг: остальное содержимое Tick пока опрашивает состояние само).
             busParts.Add(bus.Every(BusTopics.Ticks.Tray, 1000));
+            StartHealth(); // H1: подписки доски раньше источников (tracker.ScanAll сразу может опубликовать block.ready)
             try {
                 blocks = new BlockStatusTracker(bus, busStartedUtc);
                 statusWatcher = new StatusDirWatcher(Path.Combine(home, "status"), blocks);

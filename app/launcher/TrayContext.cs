@@ -172,9 +172,10 @@ namespace RemoteAgents.Launcher
                 if (!Step("update", () => {
                     var critical = runtimes.Where(r => r.Definition.Critical).ToArray();
                     bool all = critical.Length > 0 && critical.Where(r => r.Enabled).All(r => r.Healthy);
-                    all = all && UpdateHealthReady();
-                    string result = engine.Observe(all);
-                    string image = UpgradeInstaller.ObserveImage(home, engine, all, result);
+                    all = all && UpdateHealthReady(); // только цвет значка; приёмку даёт доска готовности (H1, событие health.accepted)
+                    bool accepted = HealthBoard.PickAccepted(healthBoard, all); // нет доски (ручная установка EXE) — прежнее условие
+                    string result = engine.Observe(accepted);
+                    string image = UpgradeInstaller.ObserveImage(home, engine, accepted, result);
                     if (image == "rollback") { try { PrepareUpdateRestart(); } catch { keepVpnOnRestart = false; log.Write("update.resume.failed"); } UpdateOutcome(Json.Text(UpdateState(), "target", engine.Previous), "здоровье не подтверждено; выполнен откат"); log.Write("launcher.rollback"); RestartRequested = true; ExitThread(); restart = true; return; }
                     if (result == "rollback") { log.Write("update.rollback"); updateSummary = "обновление откачено: здоровье не подтверждено"; LoadComponents(); foreach (var r in runtimes) r.Tick(); all = false; }
                     if (result == "accepted" || image == "accepted") { log.Write("update.accepted"); UpdateOutcome(engine.Current, ""); }
@@ -528,7 +529,7 @@ namespace RemoteAgents.Launcher
                     string summary = session.Read(stop.Token);
                     return Tuple.Create(session, summary, session.FolderCount);
                 });
-                if (!closing && root == DiskTraySession.Home(config.Data) && runtimes.Any(r => r.Definition.Name == "disk" && r.Enabled)) { diskSession = result.Item1; diskSummary = result.Item2; diskFolders = result.Item3; diskUpdated = DateTime.UtcNow; }
+                if (!closing && root == DiskTraySession.Home(config.Data) && runtimes.Any(r => r.Definition.Name == "disk" && r.Enabled)) { diskSession = result.Item1; diskSummary = result.Item2; diskFolders = result.Item3; diskUpdated = DateTime.UtcNow; HealthDiskSeen(result.Item1.ServerConnected); }
             } catch (Exception) { diskSession = null; diskFolders = -1; diskSummary = "Диск: локальный Syncthing недоступен"; diskUpdated = DateTime.UtcNow; }
             finally { diskReading = false; }
         }
