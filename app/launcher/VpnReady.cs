@@ -30,13 +30,15 @@ namespace RemoteAgents.Launcher
         volatile string readyLine = "", fatalLine = "", offReason = "";
         readonly string core;
 
-        internal VpnReadyGate(EventBus bus, string core = "vpn")
+        internal VpnReadyGate(EventBus bus, string core = "vpn", string runId = "")
         {
             if (bus == null) throw new ArgumentNullException("bus");
             this.core = core;
-            long after = bus.LastSeq; // Ignore queued events from the previous process.
-            subs.Add(bus.Subscribe(BusTopics.SingboxStarted, e => { if (e.Seq > after && e.Get("core") == this.core) { readyLine = e.Get("line"); ready.Set(); } }));
-            subs.Add(bus.Subscribe(BusTopics.SingboxFatal, e => { if (e.Seq > after && e.Get("core") == this.core) { fatalLine = e.Get("line"); fatal.Set(); } }));
+            // Sequence excludes queued events; runId also excludes late pipe output
+            // published by a previous reader AFTER these subscriptions were created.
+            long after = bus.LastSeq;
+            subs.Add(bus.Subscribe(BusTopics.SingboxStarted, e => { if (e.Seq > after && e.Get("core") == this.core && e.Get("runId") == runId) { readyLine = e.Get("line"); ready.Set(); } }));
+            subs.Add(bus.Subscribe(BusTopics.SingboxFatal, e => { if (e.Seq > after && e.Get("core") == this.core && e.Get("runId") == runId) { fatalLine = e.Get("line"); fatal.Set(); } }));
             subs.Add(bus.Subscribe(BusTopics.VpnOff, e => { offReason = e.Get("reason"); off.Set(); }));
             subs.Add(bus.Subscribe(BusTopics.WinRouteChanged, e => netChanged.Set()));
             subs.Add(bus.Subscribe(BusTopics.WinIfaceChanged, e => netChanged.Set()));

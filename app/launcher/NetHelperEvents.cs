@@ -168,7 +168,7 @@ namespace RemoteAgents.Launcher
         readonly long rotateBytes;
         bool rotateFailed, writesStopped;
         readonly Stream input;
-        readonly string filePath, core;
+        readonly string filePath, core, runId;
         readonly Action<string, string[]> publish;
         readonly ConcurrentQueue<string> queue = new ConcurrentQueue<string>();
         readonly Queue<string> ring = new Queue<string>();
@@ -180,9 +180,9 @@ namespace RemoteAgents.Launcher
         FileStream file;
         Thread thread;
 
-        internal CoreOutputReader(Stream input, string filePath, string core, Action<string, string[]> publish, long rotateBytes = RotateBytes)
+        internal CoreOutputReader(Stream input, string filePath, string core, Action<string, string[]> publish, long rotateBytes = RotateBytes, string runId = "")
         {
-            this.rotateBytes = rotateBytes;
+            this.rotateBytes = rotateBytes; this.runId = runId;
             this.input = input; this.filePath = filePath; this.core = core ?? "vpn"; this.publish = publish ?? ((t, kv) => { });
         }
         internal WaitHandle Ready { get { return ready; } }
@@ -261,11 +261,11 @@ namespace RemoteAgents.Launcher
             if (text.IndexOf("sing-box started (", StringComparison.Ordinal) >= 0) {
                 bool first = !ready.WaitOne(0);
                 readyLine = clean; ready.Set();
-                if (first) publish(BusTopics.SingboxStarted, new[] { "core", core, "line", clean });
+                if (first) publish(BusTopics.SingboxStarted, new[] { "core", core, "runId", runId, "line", clean });
             }
             if (Regex.IsMatch(text, @"\b(FATAL|PANIC)\b")) {
                 lastFatal = clean.Length > 500 ? clean.Substring(0, 500) : clean;
-                publish(BusTopics.SingboxFatal, new[] { "core", core, "line", clean });
+                publish(BusTopics.SingboxFatal, new[] { "core", core, "runId", runId, "line", clean });
             }
             if (!ShouldSend(text)) return;
             if (Interlocked.Read(ref queued) >= QueueLimit) { Interlocked.Increment(ref dropped); return; }

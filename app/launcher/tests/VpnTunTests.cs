@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
+using System.Text;
 
 namespace RemoteAgents.Launcher
 {
@@ -212,7 +213,11 @@ namespace RemoteAgents.Launcher
             internal readonly VpnRouteWatch Watch;
             internal int Tun = 7, Best1111 = 7, BestProbe = 7, Probes;
             internal string StopReason = "";
-            internal bool QueueOldReady;
+            internal bool QueueOldReady, CoreAlive = true, LastCoreSnapshot;
+            internal string RunId = Guid.NewGuid().ToString("N");
+            internal CoreOutputReader DrainReader;
+            internal Action DuringProbe;
+            internal int HealthFailures;
             long time;
             internal RebindFixture(bool watchRoutes = false)
             {
@@ -243,23 +248,35 @@ namespace RemoteAgents.Launcher
                 }, reason => { Stops++; StopReason = reason; }, () => { DeadRestarts++; BeginCoreRestart(); }, Rebind, FakeDaemonAlive);
                 if (watchRoutes) {
                     Bus = new EventBus(manualDispatch: true);
+                    Bus.Subscribe(BusTopics.VpnHealth, e => { if (e.Get("result") == "fail") HealthFailures++; });
                     Watch = new VpnRouteWatch(Bus, () => {
-                        Probes++; return new VpnRouteResult { TunIf = Tun, Best1111 = Best1111, BestProbe = BestProbe };
+                        Probes++; if (DuringProbe != null) { var action = DuringProbe; DuringProbe = null; action(); }
+                        return new VpnRouteResult { TunIf = Tun, Best1111 = Best1111, BestProbe = BestProbe };
                     }, () => Rebind.RequestScan(), reason => { Stops++; StopReason = reason; }, () => { });
                 }
             }
             void BeginCoreRestart()
             {
                 if (Watch == null) return;
-                if (QueueOldReady) { Bus.Publish(BusTopics.SingboxStarted, BusTopics.Sources.VpnCore, "core", "vpn"); QueueOldReady = false; }
-                Watch.BeginRestart(time);
+                if (QueueOldReady) { Bus.Publish(BusTopics.SingboxStarted, BusTopics.Sources.VpnCore, "core", "vpn", "runId", RunId); QueueOldReady = false; }
+                RunId = Guid.NewGuid().ToString("N");
+                Watch.BeginRestart(time, RunId);
+                CoreAlive = true;
                 Tun = Best1111 = BestProbe = -1;
                 NetworkChanged();
             }
             internal void NetworkChanged()
             { Bus.Publish(BusTopics.WinRouteChanged, BusTopics.Sources.Windows); Bus.DrainOnce(); }
             internal void CoreReady()
-            { Bus.Publish(BusTopics.SingboxStarted, BusTopics.Sources.VpnCore, "core", "vpn", "line", "new ready"); Bus.DrainOnce(); }
+            { Bus.Publish(BusTopics.SingboxStarted, BusTopics.Sources.VpnCore, "core", "vpn", "runId", RunId, "line", "new ready"); Bus.DrainOnce(); }
+            internal CoreOutputReader StartReader(string output, string runId, Action<string, string[]> publish = null)
+            {
+                var reader = new CoreOutputReader(new MemoryStream(Encoding.UTF8.GetBytes(output)), null, "vpn",
+                    publish ?? ((topic, fields) => { Bus.Publish(topic, BusTopics.Sources.VpnCore, fields); }), runId: runId);
+                reader.Start(); return reader;
+            }
+            internal void ExitCore()
+            { CoreAlive = false; Tun = Best1111 = BestProbe = -1; }
             internal void RestoreRoutes()
             { Tun = Best1111 = BestProbe = 7; NetworkChanged(); }
 
@@ -270,8 +287,10 @@ namespace RemoteAgents.Launcher
             internal void Step(long ms, bool alive = true)
             {
                 Interlocked.Exchange(ref time, ms); var now = utc.AddMilliseconds(ms); Transport["updatedAt"] = now.ToString("o");
-                if (Watch != null) { Bus.DrainOnce(); if (!Watch.Process(ms, alive)) return; }
-                Check(Monitor.Step(ms, now, alive, Transport, "", routesReady: Watch == null || Watch.Ready), "rebind owner loop keeps progressing");
+                CoreAlive = alive; LastCoreSnapshot = CoreAlive;
+                if (DrainReader != null) DrainReader.Drain(null);
+                if (Watch != null) { Bus.DrainOnce(); if (!Watch.Process(ms, () => CoreAlive)) return; }
+                Check(Monitor.Step(ms, now, CoreAlive, Transport, "", routesReady: Watch == null || Watch.Ready), "rebind owner loop keeps progressing");
             }
             internal void Advance(long ms)
             { while (time < ms) Step(Math.Min(time + 500, ms)); }
@@ -321,7 +340,87 @@ namespace RemoteAgents.Launcher
                 f.Step(20001); f.Step(20002);
                 Check(f.Stops == 1 && f.StopReason == "core-not-ready", "missing ready fails once at core fuse");
             }
+            CoreExitRaceChecks();
+            LateCoreOutputChecks();
             Console.WriteLine("PASS: Rebind + route watch (new ready, event-driven route recovery, fuses, automatic dead-core restart)");
+        }
+        static void CoreExitRaceChecks()
+        {
+            foreach (bool duringDrain in new[] { true, false }) {
+                using (var f = new RebindFixture(watchRoutes: true)) {
+                    f.Step(0); f.Await(1, () => !f.Rebind.Preparing, "exit-race initial scan finishes");
+                    if (duringDrain) {
+                        // The reader queues WARN first; only Drain publishes singbox.line.
+                        // Its callback exits the fake process AFTER the alive snapshot.
+                        f.DrainReader = f.StartReader("WARN core shutdown\n", f.RunId, (topic, fields) => {
+                            if (topic == BusTopics.SingboxLine) f.ExitCore();
+                            f.Bus.Publish(topic, BusTopics.Sources.VpnCore, fields);
+                        });
+                        Check(f.DrainReader.Join(1500), "exit-race reader has a queued line before owner snapshot");
+                    } else f.DuringProbe = () => f.ExitCore();
+                    f.NetworkChanged(); f.Step(1000); f.Bus.DrainOnce();
+                    Check(f.LastCoreSnapshot && f.DeadRestarts == 1 && f.Stops == 0 && f.HealthFailures == 0 && !f.Watch.Ready,
+                        "exit during " + (duringDrain ? "Drain" : "route probe") + " reaches automatic restart without route rollback");
+                    f.DrainReader = null;
+                    f.RestoreRoutes(); f.Step(1001);
+                    Check(!f.Watch.Ready, "routes alone cannot confirm the replacement after racing exit");
+                    f.CoreReady(); f.Step(1002);
+                    Check(f.Watch.Ready && f.Stops == 0 && Json.Str(f.Status, "state") == "on",
+                        "replacement recovers with its own ready and routes after racing exit");
+                }
+            }
+            Console.WriteLine("PASS: core-exit races after alive snapshot (Drain and route probe), automatic recovery without rollback");
+        }
+        static void LateCoreOutputChecks()
+        {
+            foreach (bool rebind in new[] { false, true }) {
+                using (var f = new RebindFixture(watchRoutes: true))
+                using (var entered = new ManualResetEvent(false))
+                using (var release = new ManualResetEvent(false)) {
+                    f.Step(0); f.Await(1, () => !f.Rebind.Preparing, "late-output initial scan finishes");
+                    string oldRun = f.RunId;
+                    // The old reader is already running, but pipe output publication is
+                    // held until AFTER BeginRestart and creation of the replacement.
+                    var oldReader = f.StartReader("INFO sing-box started (old)\nFATAL old core failed\n", oldRun, (topic, fields) => {
+                        entered.Set(); release.WaitOne();
+                        f.Bus.Publish(topic, BusTopics.Sources.VpnCore, fields);
+                    });
+                    try {
+                        Check(entered.WaitOne(1500), "old reader waits before publishing output");
+                        if (rebind) {
+                            f.Port(17891); f.Advance(5001); f.Await(5002, () => f.Restarts == 1, "late-output rebind launches replacement");
+                        } else f.Step(500, false);
+                        long next = rebind ? 5003 : 501;
+                        Check(f.RunId != oldRun && (rebind ? f.Restarts : f.DeadRestarts) == 1, "replacement has a distinct launch identity");
+                        long afterRestart = f.Bus.LastSeq;
+                        f.RestoreRoutes();
+                        release.Set(); Check(oldReader.Join(1500), "old reader publishes delayed ready and fatal after replacement start");
+                        Check(oldReader.LastFatal.Contains("old core failed") && f.Bus.LastSeq > afterRestart, "delayed fatal is actually published past the old sequence boundary");
+                        f.Step(next);
+                        Check(f.Stops == 0 && !f.Watch.Ready && Json.Str(f.Status, "state") != "on",
+                            "old ready and fatal neither confirm nor stop replacement despite restored routes");
+                        // Even untagged events must not enter gates bound to a launch.
+                        f.Bus.Publish(BusTopics.SingboxStarted, BusTopics.Sources.VpnCore, "core", "vpn");
+                        f.Bus.Publish(BusTopics.SingboxFatal, BusTopics.Sources.VpnCore, "core", "vpn", "line", "FATAL untagged");
+                        f.Step(next + 1);
+                        Check(f.Stops == 0 && !f.Watch.Ready, "launch gates reject untagged ready/fatal");
+                        var replacementReader = f.StartReader("INFO sing-box started (replacement)\n", f.RunId);
+                        Check(replacementReader.Join(1500), "replacement reader publishes its own ready");
+                        f.Step(next + 2); f.Bus.DrainOnce();
+                        Check(f.Watch.Ready && f.Stops == 0 && f.HealthFailures == 0 && Json.Str(f.Status, "state") == "on",
+                            "own ready plus routes confirms replacement after late old-reader fatal");
+                    } finally { release.Set(); oldReader.Join(1500); }
+                }
+            }
+            using (var f = new RebindFixture(watchRoutes: true)) {
+                f.Step(0); f.Step(500, false);
+                var reader = f.StartReader("FATAL replacement failed\n", f.RunId);
+                Check(reader.Join(1500), "replacement fatal is published by its own reader");
+                f.Step(501); f.Bus.DrainOnce();
+                Check(f.Stops == 1 && f.StopReason == "core-exited" && f.HealthFailures == 1,
+                    "fatal of the matching live replacement still rolls back exactly once");
+            }
+            Console.WriteLine("PASS: launch-bound ready/fatal (late old reader after restart/rebind, untagged output rejected, own ready/fatal accepted)");
         }
         static void RebindChecks()
         {
