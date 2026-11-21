@@ -153,6 +153,8 @@ wait_for_memory
   wait_for_memory
   timeout 60 "$pwsh" -NoProfile -NonInteractive -File "$repo/tools/legacy-cleanup/tests/smoke-plan.ps1" < /dev/null
   wait_for_memory
+  timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-quality.ps1" < /dev/null
+  wait_for_memory
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-decide.ps1" < /dev/null
   wait_for_memory
   timeout 120 "$pwsh" -NoProfile -NonInteractive -File "$repo/transport/test-transport-leak.ps1" < /dev/null
@@ -254,6 +256,7 @@ timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:H
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:NetNotifyTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:TrayBusTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:SearchQuieterTests=true
+timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -nodeReuse:false -p:UseSharedCompilation=false -p:NetClassTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:MainScreenTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:TrayExtrasTests=true
 timeout 120 "$dotnet" run --project "$here/PortableTests.csproj" -c Release -p:SupervisorStaleTests=true

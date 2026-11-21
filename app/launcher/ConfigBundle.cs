@@ -132,7 +132,7 @@ namespace RemoteAgents.Launcher
             var stages = A(N(1, 300000), 2); stages["minItems"] = 2;
             return O(D("blipMs", range, "hardFailMs", range, "stageMs", stages,
                 "classK", O(D("fixed", coefficient, "wifi", coefficient, "mobile-hotspot", coefficient, "mobile", coefficient)),
-                "minStayMs", N(1, 3600000), "flapWindowMs", N(1, 3600000), "flapSwitches", N(1, 1000),
+                "minStayMs", N(1, 3600000), "flapWindowMs", N(1, 1800000), "flapSwitches", N(1, 1000),
                 "probeBudgetKiBPer10m", O(D("default", N(1, 1048576), "mobile", N(1, 1048576))),
                 "tspuMemoryHours", N(1, 720), "stallSeconds", N(1, 3600), "stallConns", N(1, 1024)));
         }
@@ -311,7 +311,7 @@ namespace RemoteAgents.Launcher
             } else if (type == "number") {
                 decimal n;
                 if (value == null || value is bool || value is string || !decimal.TryParse(Convert.ToString(value, CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out n) ||
-                    n < Convert.ToDecimal(schema["minimum"], CultureInfo.InvariantCulture) || n > Convert.ToDecimal(schema["maximum"], CultureInfo.InvariantCulture)) throw Bad("Неверное число: " + path);
+                    (schema.ContainsKey("minimum") && n < Convert.ToDecimal(schema["minimum"], CultureInfo.InvariantCulture)) || (schema.ContainsKey("maximum") && n > Convert.ToDecimal(schema["maximum"], CultureInfo.InvariantCulture))) throw Bad("Неверное число: " + path);
             } else if (type == "integer") {
                 decimal n;
                 if (value == null || value is bool || value is string || !decimal.TryParse(Convert.ToString(value, CultureInfo.InvariantCulture), NumberStyles.Number, CultureInfo.InvariantCulture, out n) || n != decimal.Truncate(n) || n < Json.Int(schema, "minimum", int.MinValue) || n > Json.Int(schema, "maximum", int.MaxValue)) throw Bad("Неверное целое число: " + path);

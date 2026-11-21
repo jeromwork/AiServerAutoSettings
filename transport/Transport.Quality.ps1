@@ -6,6 +6,11 @@ function Get-TransportQualityValue($Object,[string]$Name,$Default=$null) {
     elseif($Object.PSObject.Properties[$Name]){return $Object.$Name}
     return $Default
 }
+function Test-TransportQualityNumber($Value,[double]$Min,[double]$Max,[switch]$Integer) {
+    if($Value -is [bool] -or $Value -isnot [ValueType]){return $false}
+    $n=[double]$Value
+    return $n -ge $Min -and $n -le $Max -and (-not $Integer -or $n -eq [Math]::Floor($n))
+}
 function Get-TransportQualityConfig($Config=$null) {
     $result=@{
         blipMs=@{default=10000;min=3000;max=30000};hardFailMs=@{default=3000;min=1000;max=10000}
@@ -17,32 +22,49 @@ function Get-TransportQualityConfig($Config=$null) {
     $profile=Get-TransportQualityValue $Config 'profile'
     $transport=Get-TransportQualityValue $profile 'transport' (Get-TransportQualityValue $Config 'transport')
     $source=Get-TransportQualityValue $transport 'switch'
+    if($null -ne $source){
+        if($source -isnot [Collections.IDictionary] -and $source -isnot [pscustomobject]){throw 'switch must be an object'}
+        $names=if($source -is [Collections.IDictionary]){@($source.Keys)}else{@($source.PSObject.Properties.Name)}
+        foreach($name in $names){if($name -notin @($result.Keys)+@('stallSeconds','stallConns','hint')){throw "switch.$name unknown"}}
+    }
     foreach($name in @($result.Keys)){
         $value=Get-TransportQualityValue $source $name
         if($null -eq $value){continue}
         if($result[$name] -is [Collections.IDictionary]){
+            if($value -isnot [Collections.IDictionary] -and $value -isnot [pscustomobject]){throw "switch.$name must be an object"}
+            $names=if($value -is [Collections.IDictionary]){@($value.Keys)}else{@($value.PSObject.Properties.Name)}
+            foreach($key in $names){if($key -notin @($result[$name].Keys)+@('hint')){throw "switch.${name}.$key unknown"}}
             foreach($key in @($result[$name].Keys)){$v=Get-TransportQualityValue $value $key;if($null -ne $v){$result[$name][$key]=$v}}
         }else{$result[$name]=$value}
     }
     foreach($name in @('blipMs','hardFailMs')){
         $b=$result[$name]
+        foreach($v in $b.Values){if(-not (Test-TransportQualityNumber $v 1 300000 -Integer)){throw "switch.$name must contain integers"}}
         if($b.min -lt 1 -or $b.min -gt $b.default -or $b.default -gt $b.max -or $b.max -gt 300000){throw "switch.${name}: min <= default <= max, 1..300000"}
     }
-    if(@($result.stageMs).Count -ne 2 -or $result.stageMs[0] -lt 1 -or $result.stageMs[0] -ge $result.stageMs[1] -or $result.stageMs[1] -gt $result.blipMs.default){throw 'switch.stageMs: two increasing stages <= blipMs.default'}
-    foreach($k in $result.classK.Values){if([double]$k -le 0 -or [double]$k -gt 10){throw 'switch.classK: 0 < K <= 10'}}
-    foreach($key in @('minStayMs','flapWindowMs','flapSwitches','tspuMemoryHours')){if([double]$result[$key] -lt 1){throw "switch.$key must be positive"}}
-    foreach($v in $result.probeBudgetKiBPer10m.Values){if([double]$v -lt 1){throw 'switch.probeBudgetKiBPer10m must be positive'}}
+    foreach($v in @($result.stageMs)){if(-not (Test-TransportQualityNumber $v 1 300000 -Integer)){throw 'switch.stageMs must contain integers'}}
+    if($result.stageMs -isnot [Array] -or @($result.stageMs).Count -ne 2 -or $result.stageMs[0] -lt 1 -or $result.stageMs[0] -ge $result.stageMs[1] -or $result.stageMs[1] -gt $result.blipMs.default){throw 'switch.stageMs: two increasing stages <= blipMs.default'}
+    foreach($k in $result.classK.Values){if(-not (Test-TransportQualityNumber $k 0.01 10)){throw 'switch.classK: 0 < K <= 10'}}
+    foreach($item in @(@('minStayMs',3600000),@('flapWindowMs',1800000),@('flapSwitches',1000),@('tspuMemoryHours',720))){if(-not (Test-TransportQualityNumber $result[$item[0]] 1 $item[1] -Integer)){throw "switch.$($item[0]) out of range"}}
+    foreach($v in $result.probeBudgetKiBPer10m.Values){if(-not (Test-TransportQualityNumber $v 1 1048576 -Integer)){throw 'switch.probeBudgetKiBPer10m must be positive integers'}}
     return $result
 }
 function New-TransportQualityState($Config=$null) {
     @{config=(Get-TransportQualityConfig $Config);networks=@{};id='';episode='';attempts=@{};verified=$false}
 }
+function Get-TransportQualityOldestNetwork($Networks) {
+    $old=$null
+    foreach($id in $Networks.Keys){
+        if($null -eq $old -or $Networks[$id].last -lt $Networks[$old].last -or ($Networks[$id].last -eq $Networks[$old].last -and [string]::CompareOrdinal($id,$old) -lt 0)){$old=$id}
+    }
+    return $old
+}
 function Get-TransportQualityNetwork($State,[long]$Now) {
     if(-not $State.id){return $null}
     if(-not $State.networks.ContainsKey($State.id)){
         # Bound working-set growth across roaming networks. Persisted TSPU memory is separate.
-        if($State.networks.Count -ge 32){$old=@($State.networks.Keys|Sort-Object {$State.networks[$_].last})[0];$State.networks.Remove($old)}
-        $State.networks[$State.id]=@{class='unknown';since=$Now;last=$Now;stability=1;lastEpisode='';events=@();light=@();bulk=@();traffic=@();banner=@{};seen=@{};tspu=@{}}
+        if($State.networks.Count -ge 32){$old=Get-TransportQualityOldestNetwork $State.networks;$State.networks.Remove($old)}
+        $State.networks[$State.id]=@{class='unknown';since=$Now;last=$Now;stability=1;lastEpisode='';events=@();light=@();bulk=@();traffic=@();banner=@{};seen=@{};tspu=@{};lastBulk=$null}
     }
     $n=$State.networks[$State.id];$n.last=$Now
     foreach($pair in @(@('events',1800000),@('light',600000),@('bulk',600000),@('traffic',600000))){
@@ -82,6 +104,9 @@ function Get-TransportQualitySnapshot($State,[long]$Now) {
         $used=0L;foreach($t in $n.traffic){$used+=$t.bytes};$fields.budgetUsedKiB=$used/1024.0
         if($n.class -in @('mobile','mobile-hotspot')){$fields.budgetKiB=$State.config.probeBudgetKiBPer10m.mobile}
         $fields.budgetExhausted=$fields.budgetUsedKiB -ge $fields.budgetKiB
+        if($fields.budgetExhausted){$fields.status+='; Бюджет проб исчерпан: только активный и два лучших; проверка 64 КиБ пропущена'}
+        elseif($fields.budgetUsedKiB+64 -gt $fields.budgetKiB){$fields.status+='; Остатка бюджета недостаточно: проверка 64 КиБ пропущена'}
+        $fields.status=$fields.status.TrimStart(';',' ')
     }
     $thresholds=Get-TransportQualityThresholds $State $Now;foreach($key in $thresholds.Keys){$fields[$key]=$thresholds[$key]}
     return $fields
@@ -110,7 +135,7 @@ function Update-TransportQuality($State,[string]$Kind,$Fields,[long]$Now,[script
                 $past=@($n.events|Where-Object {$_.kind -eq 'episode'}).Count
                 $target=1.0
                 if($recent+1 -ge 3){$target=1.5;if(@($n.tspu.Values|Where-Object {$_.count -ge 2}).Count){$target=2.0}}
-                elseif($past -eq 0 -and $Now-$n.since -ge 1800000 -and $n.bulk.Count -and $n.bulk[-1].ok -and $n.bulk[-1].ms -lt 1500){$target=0.6}
+                elseif($past -eq 0 -and $Now-$n.since -ge 1800000 -and $n.lastBulk -and $n.lastBulk.ok -and $n.lastBulk.ms -lt 1500){$target=0.6}
                 $steps=@(0.6,1.0,1.5,2.0);$from=[Array]::IndexOf($steps,[double]$n.stability);$to=[Array]::IndexOf($steps,[double]$target)
                 $n.stability=$steps[$from+[Math]::Sign($to-$from)]
                 $n.lastEpisode=$eventId;$State.episode=$eventId;$State.attempts=@{};$State.verified=$false
@@ -134,7 +159,7 @@ function Update-TransportQuality($State,[string]$Kind,$Fields,[long]$Now,[script
                 $paired=$probeId -and $n.banner.ContainsKey($probeId) -and $n.banner[$probeId].ok -and $n.banner[$probeId].tag -eq $tag
                 # Consume the banner proof once, even if a bulk result is repeated with a new eventId.
                 if($probeId){$n.banner.Remove($probeId)}
-                $n.bulk+=@{at=$Now;ok=$ok;ms=$ms;paired=[bool]$paired}
+                $n.lastBulk=@{at=$Now;ok=$ok;ms=$ms};$n.bulk+=@{at=$Now;ok=$ok;ms=$ms;paired=[bool]$paired}
                 if($paired -and -not $ok){
                     if(-not $n.tspu.ContainsKey($tag)){$n.tspu[$tag]=@{count=0;until=0L}}
                     $n.tspu[$tag].count++;$n.tspu[$tag].until=$Now+[long]($State.config.tspuMemoryHours*3600000)
@@ -175,6 +200,7 @@ function Request-TransportQualityProbe($State,[string]$Tag,[string]$Active,[stri
         if($State.verified -or $snapshot.budgetUsedKiB+64 -gt $snapshot.budgetKiB){return $false}
         $State.verified=$true;$bytes=65536
     }elseif($Purpose -eq 'light'){
+        if($snapshot.budgetUsedKiB+1 -gt $snapshot.budgetKiB){return $false}
         $count=0;if($State.attempts.ContainsKey($Tag)){$count=[int]$State.attempts[$Tag]}
         $limit=1;if($Tag -eq $Active){$limit=3}
         if($count -ge $limit){return $false};$State.attempts[$Tag]=$count+1;$bytes=1024
@@ -198,15 +224,24 @@ function Export-TransportQualityMemory($State,[long]$Now) {
 }
 function Import-TransportQualityMemory($State,$Networks,[long]$Now) {
     # Call once after Read-TransportMemory. Each network stores quality.tspu alongside candidates.
-    $previous=$State.id
+    $previous=$State.id;$loaded=@{}
     foreach($id in @($Networks.Keys)){
         $saved=Get-TransportQualityValue (Get-TransportQualityValue $Networks $id) 'quality'
         $saved=Get-TransportQualityValue $saved 'tspu'
         if(-not $saved){continue}
-        $State.id=$id;$n=Get-TransportQualityNetwork $State $Now
+        $n=@{tspu=@{};last=0L}
+        $record=Get-TransportQualityValue $Networks $id
+        $n.last=[long](Get-TransportQualityValue $record 'lastSeenMs' 0)
+        if($null -eq (Get-TransportQualityValue $record 'lastSeenMs')){
+            $date=[DateTimeOffset]::MinValue
+            if([DateTimeOffset]::TryParse([string](Get-TransportQualityValue $record 'updatedAt' ''),[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::AssumeUniversal,[ref]$date)){$n.last=$date.ToUnixTimeMilliseconds()}
+        }
         $keys=if($saved -is [Collections.IDictionary]){@($saved.Keys)}else{@($saved.PSObject.Properties.Name)}
         foreach($tag in $keys){$v=Get-TransportQualityValue $saved $tag;$until=[long](Get-TransportQualityValue $v 'until' 0);$count=[int](Get-TransportQualityValue $v 'count' 0);if($until -gt $Now -and $count -gt 0){$n.tspu[$tag]=@{count=$count;until=$until}}}
+        if($n.tspu.Count){$loaded[$id]=$n}
+        if($loaded.Count -gt 32){$loaded.Remove((Get-TransportQualityOldestNetwork $loaded))}
     }
+    foreach($id in $loaded.Keys){$State.id=$id;$n=Get-TransportQualityNetwork $State $Now;$n.tspu=$loaded[$id].tspu;$n.last=$loaded[$id].last}
     $State.id=$previous
 }
 function Save-TransportQualityMemory([string]$Root,$Memory,$State,[long]$Now) {
@@ -216,10 +251,11 @@ function Save-TransportQualityMemory([string]$Root,$Memory,$State,[long]$Now) {
         if(-not $Memory.networks.ContainsKey($id)){continue}
         $record=$Memory.networks[$id]
         $quality=@{tspu=(Get-TransportQualityValue $export $id @{})}
-        if($record -is [Collections.IDictionary]){$record['quality']=$quality}
-        elseif($record.PSObject.Properties['quality']){$record.quality=$quality}
-        else{$record|Add-Member -NotePropertyName quality -NotePropertyValue $quality}
+        $last=[Math]::Max([long](Get-TransportMemoryLastSeen $record),[long]$State.networks[$id].last)
+        if($record -is [Collections.IDictionary]){$record['quality']=$quality;$record['lastSeenMs']=$last}
+        else{$record|Add-Member -Force -NotePropertyName quality -NotePropertyValue $quality;$record|Add-Member -Force -NotePropertyName lastSeenMs -NotePropertyValue $last}
     }
-    foreach($id in @($export.Keys)){if(-not $Memory.networks.ContainsKey($id)){$Memory.networks[$id]=@{quality=@{tspu=$export[$id]};candidates=@()}}}
+    foreach($id in @($export.Keys)){if(-not $Memory.networks.ContainsKey($id)){$Memory.networks[$id]=@{quality=@{tspu=$export[$id]};candidates=@();lastSeenMs=$State.networks[$id].last}}}
+    Limit-TransportMemory $Memory $Now
     Write-TransportJson (Join-Path $Root 'state/transport-memory.json') $Memory -Private
 }

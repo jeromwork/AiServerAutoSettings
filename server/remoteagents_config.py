@@ -193,7 +193,7 @@ def worker_home(c):
         raise Error('Нет пользователя ' + c['workerUser'] + ' (workerUser в настройках выдачи)')
 
 
-# Q: pure policy normalization, shared by invitations and config-sync. No network I/O.
+# Q: pure policy normalization for explicit invitation policy. No network I/O.
 TRANSPORT_SWITCH_DEFAULTS = {
     'blipMs': {'default': 10000, 'min': 3000, 'max': 30000},
     'hardFailMs': {'default': 3000, 'min': 1000, 'max': 10000},
@@ -226,7 +226,7 @@ def transport_policy(c):
     stages = result['stageMs']
     require(isinstance(stages, list) and len(stages) == 2 and all(integer(v, 300000) for v in stages) and stages[0] < stages[1] <= result['blipMs']['default'], 'transport.switch.stageMs: две возрастающие ступени <= blipMs.default')
     require(all(type(v) in (int, float) and 0.01 <= v <= 10 for v in result['classK'].values()), 'transport.switch.classK: 0.01..10')
-    for key, limit in (('minStayMs', 3600000), ('flapWindowMs', 3600000), ('flapSwitches', 1000), ('tspuMemoryHours', 720), ('stallSeconds', 3600), ('stallConns', 1024)):
+    for key, limit in (('minStayMs', 3600000), ('flapWindowMs', 1800000), ('flapSwitches', 1000), ('tspuMemoryHours', 720), ('stallSeconds', 3600), ('stallConns', 1024)):
         require(key not in result or integer(result[key], limit), 'transport.switch.' + key + ': неверное целое число')
     require(all(integer(v, 1048576) for v in result['probeBudgetKiBPer10m'].values()), 'transport.switch.probeBudgetKiBPer10m: 1..1048576')
     return {'switch': result}
@@ -1010,6 +1010,7 @@ def bridge_invitation(deployment, values, line):
 def export(c, args, out=sys.stdout, err=sys.stderr):
     if getattr(args, 'include_server_secrets', False):
         require(os.geteuid() == 0 and args.output, '--include-server-secrets требует root и вывод в файл --output.')
+    policy = transport_policy(c) if 'transport' in c else None
     name = clean_name(args.name)
     require(re.fullmatch(r'same(:.+)?|new(:.+)?', args.happier or ''), '--happier: same, same:<подпись или id>, new или new:Название')
     folders = folders_list(args.folders)
@@ -1049,7 +1050,8 @@ def export(c, args, out=sys.stdout, err=sys.stderr):
     else:
         happier.update(mode='new', label=clean_name(args.happier[4:] or name))  # без названия аккаунт подписан именем компьютера
     config['happier'] = happier
-    config['transport'] = transport_policy(c)
+    if policy is not None:
+        config['transport'] = policy
     config['update'] = {'enabled': True, 'auto': True, 'intervalHours': 6, 'remoteDir': '~/.local/share/remote-agents/dist', **c.get('update', {})}
     config['bridge'] = {'enabled': True, 'allowShell': True}  # конституция 6д
     if folders is not None:
@@ -1246,7 +1248,7 @@ def revoke(c, ident, out=sys.stdout, err=sys.stderr):
 def sync_document(c):
     values = {}
     server, vpn = common_sections(c, values, 'on' if c.get('vpnBootstrap') else 'off')
-    config = {'kind': CONFIG_KIND, 'schema': 1, 'server': server, 'transport': transport_policy(c)}
+    config = {'kind': CONFIG_KIND, 'schema': 1, 'server': server}
     if vpn:
         vpn.pop('enabled', None)  # включать ли VPN — выбор самого компьютера
         config['vpn'] = vpn

@@ -7,6 +7,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 
 namespace RemoteAgents.Launcher
 {
@@ -56,13 +57,18 @@ namespace RemoteAgents.Launcher
         {
             using (var sha = SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(text))).Replace("-", "").ToLowerInvariant();
         }
+        internal static bool IsOwnTun(string name)
+        {
+            return string.Equals(name, VpnTun.InterfaceName, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(name, LanTun.InterfaceName, StringComparison.OrdinalIgnoreCase);
+        }
         internal static NetClassProfile ReadWindows()
         {
             if (Environment.OSVersion.Platform != PlatformID.Win32NT) return null;
             try {
                 var adapters = new Dictionary<int, NetworkInterface>();
                 foreach (var n in NetworkInterface.GetAllNetworkInterfaces()) {
-                    if (n.OperationalStatus != OperationalStatus.Up || Classify(new NetClassProfile { AdapterType = n.NetworkInterfaceType }) == "unknown") continue;
+                    if (IsOwnTun(n.Name) || n.OperationalStatus != OperationalStatus.Up || Classify(new NetClassProfile { AdapterType = n.NetworkInterfaceType }) == "unknown") continue;
                     string desc = (n.Name + " " + n.Description).ToLowerInvariant();
                     if (new[] { "wintun", "tailscale", "openvpn", "hyper-v", "happ", "tunnel", "tap-" }.Any(desc.Contains)) continue;
                     try { adapters[n.GetIPProperties().GetIPv4Properties().Index] = n; } catch { }
@@ -99,35 +105,67 @@ namespace RemoteAgents.Launcher
     {
         readonly EventBus bus;
         readonly Func<NetClassProfile> read;
+        readonly Action<Action> queueWork;
         readonly IDisposable subscription;
-        string lastId = "", lastClass = "";
+        readonly object gate = new object();
+        bool running, dirty, replay, disposed;
+        string pendingId = "", lastId = "", lastClass = "";
         readonly Dictionary<string, string> canonicalIds = new Dictionary<string, string>(StringComparer.Ordinal);
-        internal NetClassPublisher(EventBus bus, Func<NetClassProfile> read = null)
+        internal NetClassPublisher(EventBus bus, Func<NetClassProfile> read = null, Action<Action> queueWork = null)
         {
             this.bus = bus; this.read = read ?? NetClass.ReadWindows;
+            this.queueWork = queueWork ?? (work => ThreadPool.QueueUserWorkItem(_ => work()));
             subscription = bus.Subscribe("*", OnEvent);
         }
         void OnEvent(BusEvent e)
         {
             if (e.Topic == BusTopics.NetChange && e.Get("classifier") == "q") return;
             if (e.Topic != BusTopics.WinIfaceChanged && e.Topic != BusTopics.WinRouteChanged && e.Topic != BusTopics.WinAddrChanged && e.Topic != BusTopics.NetChange && e.Topic != BusTopics.TransportReady) return;
-            NetClassProfile p;
-            try { p = read(); } catch { p = null; }
-            string physicalId = p?.Id ?? "", id = physicalId;
-            if (e.Topic == BusTopics.NetChange && e.Get("id").Length > 0) {
-                id = e.Get("id");
-                if (physicalId.Length > 0) {
-                    if (canonicalIds.Count >= 32 && !canonicalIds.ContainsKey(physicalId)) canonicalIds.Clear();
-                    canonicalIds[physicalId] = id;
-                }
-            } else {
-                string canonical; if (canonicalIds.TryGetValue(physicalId, out canonical)) id = canonical;
+            lock (gate) {
+                if (disposed) return;
+                dirty = true;
+                replay |= e.Topic == BusTopics.TransportReady;
+                // Coalesce bursts in one slot, retaining the latest explicit network identity.
+                if (e.Topic == BusTopics.NetChange && e.Get("id").Length > 0) pendingId = e.Get("id");
+                if (running) return;
+                running = true;
             }
-            string cls = NetClass.Classify(p);
-            if (e.Topic != BusTopics.TransportReady && id == lastId && cls == lastClass) return;
-            lastId = id; lastClass = cls;
-            bus.Publish(BusTopics.NetChange, BusTopics.Sources.Tray, "id", id, "class", cls, "ifIndex", (p?.IfIndex ?? 0).ToString(CultureInfo.InvariantCulture), "classifier", "q");
+            queueWork(Refresh);
         }
-        public void Dispose() { subscription.Dispose(); }
+        void Refresh()
+        {
+            while (true) {
+                string requestedId; bool force;
+                lock (gate) {
+                    if (disposed || !dirty) { running = false; return; }
+                    dirty = false; requestedId = pendingId; pendingId = ""; force = replay; replay = false;
+                }
+                // Windows/WinRT may block: never read in the EventBus dispatch thread.
+                NetClassProfile p;
+                try { p = read(); } catch { p = null; }
+                lock (gate) {
+                    if (disposed) { running = false; return; }
+                    string physicalId = p?.Id ?? "", id = physicalId;
+                    if (requestedId.Length > 0) {
+                        id = requestedId;
+                        if (physicalId.Length > 0) {
+                            if (canonicalIds.Count >= 32 && !canonicalIds.ContainsKey(physicalId)) canonicalIds.Clear();
+                            canonicalIds[physicalId] = id;
+                        }
+                    } else {
+                        string canonical; if (canonicalIds.TryGetValue(physicalId, out canonical)) id = canonical;
+                    }
+                    string cls = NetClass.Classify(p);
+                    if (!force && id == lastId && cls == lastClass) continue;
+                    lastId = id; lastClass = cls;
+                    bus.Publish(BusTopics.NetChange, BusTopics.Sources.Tray, "id", id, "class", cls, "ifIndex", (p?.IfIndex ?? 0).ToString(CultureInfo.InvariantCulture), "classifier", "q");
+                }
+            }
+        }
+        public void Dispose()
+        {
+            lock (gate) { disposed = true; dirty = false; pendingId = ""; canonicalIds.Clear(); }
+            subscription.Dispose();
+        }
     }
 }

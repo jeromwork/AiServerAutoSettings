@@ -2206,7 +2206,7 @@
             "flapWindowMs": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 3600000
+              "maximum": 1800000
             },
             "flapSwitches": {
               "type": "integer",

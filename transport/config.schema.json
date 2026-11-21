@@ -471,7 +471,7 @@
         "flapWindowMs": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 3600000
+          "maximum": 1800000
         },
         "flapSwitches": {
           "type": "integer",
@@ -507,12 +507,14 @@
         "stallSeconds": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 3600
+          "maximum": 3600,
+          "default": 8
         },
         "stallConns": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 1024
+          "maximum": 1024,
+          "default": 2
         },
         "hint": {
           "type": "string",
