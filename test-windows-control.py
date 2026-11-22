@@ -5,6 +5,10 @@ import json
 import os
 import pwd
 import re
+import select
+import shutil
+import signal
+import sys
 from pathlib import Path
 import socket
 import subprocess
@@ -232,6 +236,92 @@ $held=Test-ControlLock $first
             result=json.loads(subprocess.check_output([str(PWSH),'-NoProfile','-Command',script],cwd=ROOT,env=dict(os.environ,HOME=tmp)))
             self.assertTrue(result['old']);self.assertIn('after rotation',result['text']);self.assertLess(len(result['text']),100)
             self.assertEqual((result['user'],result['profile'],result['empty']),('agent','/p/профиль.json',''));self.assertTrue(result['held'])
+
+    def test_install_missing_pid_with_live_mutex_owner(self):
+        # A different process owns the real mutex; a missing PID must not reach WMI Create.
+        with tempfile.TemporaryDirectory() as tmp:
+            home=Path(tmp);base=home/'RemoteAgents/managed-control'
+            env=dict(os.environ,LOCALAPPDATA=tmp,HOME=tmp)
+            script=r"""
+$ErrorActionPreference='Stop'
+. './Start-WindowsControl.ps1' -LibraryOnly
+$lock=New-Object Threading.Mutex($false,'Local\RemoteAgentsControl')
+if(-not (Test-ControlLock $lock)){throw 'fixture mutex busy'}
+[Console]::WriteLine('owner ready');[Console]::Out.Flush()
+try{[void][Console]::ReadLine()}finally{$lock.ReleaseMutex();$lock.Dispose()}
+"""
+            owner=subprocess.Popen([str(PWSH),'-NoProfile','-Command',script],cwd=ROOT,env=env,
+                stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+            try:
+                self.assertTrue(select.select([owner.stdout],[],[],10)[0], 'bounded mutex owner startup')
+                self.assertEqual(owner.stdout.readline().strip(),b'owner ready')
+                for _ in range(2):
+                    result=subprocess.run([str(PWSH),'-NoProfile','-NonInteractive','-File',str(ROOT/'Start-WindowsControl.ps1'),
+                        '-Install','-LauncherHome',str(home/'RemoteAgents')],env=env,capture_output=True,text=True,timeout=10)
+                    self.assertEqual(result.returncode,0,result.stderr)
+                    self.assertIn('ожидается восстановление PID',result.stdout)
+                    self.assertIsNone(owner.poll())
+                    self.assertFalse((base/'control.pid').exists())
+                self.assertFalse((base/'logs/control.log').exists(), 'no install/already-running spawn loop')
+            finally:
+                owner.communicate(input=b'\n',timeout=5)
+            # Probing an unowned mutex must release it.
+            probe=". './Start-WindowsControl.ps1' -LibraryOnly; Test-ControlPidRecoveryPending '"+str(base/'control.pid')+"'"
+            self.assertEqual(subprocess.check_output([str(PWSH),'-NoProfile','-Command',probe],cwd=ROOT,env=env,text=True).strip(),'False')
+
+    def test_running_control_restores_pid_during_connected_bridge(self):
+        # Actual control + bridge loops, isolated profile/server/executor adapters. No network is used.
+        with tempfile.TemporaryDirectory() as tmp:
+            home=Path(tmp);stage=home/'stage';stage.mkdir();bin_dir=home/'bin';bin_dir.mkdir()
+            for name in ('Start-WindowsControl.ps1','Start-CodexWindowsBridge.ps1'):
+                shutil.copyfile(ROOT/name,stage/name)
+            for name in ('key','known','config'):(home/name).write_text('fixture')
+            shim=bin_dir/'powershell.exe';shim.write_text('#!/bin/sh\nexec "'+str(PWSH)+'" "$@"\n');shim.chmod(0o700)
+            ssh=bin_dir/'ssh-fixture'
+            ssh.write_text('#!'+sys.executable+'\nimport json,sys,time\nsys.stdin.readline()\nprint(json.dumps(dict(state="connected")),flush=True)\nwhile True:\n print(json.dumps(dict(state="heartbeat")),flush=True)\n time.sleep(.2)\n')
+            ssh.chmod(0o700)
+            (stage/'windows-bridge-executor.ps1').write_text("""[void][Console]::In.ReadLine();[Console]::Out.WriteLine('{\"state\":\"ready\",\"port\":1}');[Console]::Out.Flush();Start-Sleep 120""",encoding='utf-8-sig')
+            harness=stage/'fixture.ps1'
+            harness.write_text(r"""
+$ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot 'Start-WindowsControl.ps1') -LibraryOnly
+function Read-ControlProfile {
+    [pscustomobject]@{hostId='host-one';profilePath='fixture';sshExecutable=(Join-Path $env:CONTROL_TEST_HOME 'bin/ssh-fixture');configPath=(Join-Path $env:CONTROL_TEST_HOME 'config');keyPath=(Join-Path $env:CONTROL_TEST_HOME 'key');port=22;knownHostsPath=(Join-Path $env:CONTROL_TEST_HOME 'known');login='tester';serverAddress='example.invalid'}
+}
+function New-ControlPayload {''}
+function Invoke-ControlPrepare {[pscustomobject]@{user='tester';home='/home/tester'}}
+$LibraryOnly=$false;$LauncherHome=Join-Path $env:CONTROL_TEST_HOME 'Launcher Home'
+$source=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'Start-WindowsControl.ps1'))
+Invoke-Expression $source.Substring($source.IndexOf('if($LibraryOnly){return}'))
+""",encoding='utf-8-sig')
+            env=dict(os.environ,HOME=tmp,LOCALAPPDATA=str(home/'local'),CONTROL_TEST_HOME=tmp,
+                PATH=str(bin_dir)+os.pathsep+os.environ['PATH'])
+            base=home/'Launcher Home/managed-control';pid_file=base/'control.pid';log=base/'logs/control.log'
+            with (home/'output.log').open('w+') as output:
+                process=subprocess.Popen([str(PWSH),'-NoProfile','-NonInteractive','-File',str(harness)],cwd=ROOT,
+                    env=env,stdout=output,stderr=subprocess.STDOUT,start_new_session=True)
+                def wait_for(predicate):
+                    deadline=time.monotonic()+15
+                    while time.monotonic()<deadline and process.poll() is None:
+                        if predicate():return
+                        time.sleep(.05)
+                    output.flush();output.seek(0)
+                    self.fail('control fixture did not reach expected state: '+output.read())
+                try:
+                    wait_for(lambda:(base/'heartbeat.json').exists())
+                    self.assertEqual(int(pid_file.read_text().strip()),process.pid)
+                    pid_file.unlink()
+                    wait_for(lambda:pid_file.exists() and 'restored pid=' in log.read_text())
+                    self.assertEqual(int(pid_file.read_text().strip()),process.pid)
+                    time.sleep(.6)
+                    self.assertIsNone(process.poll())
+                    text=log.read_text()
+                    self.assertEqual(text.count('restored pid='),1)
+                    self.assertEqual(text.count('prepare server'),1,'recovery occurs inside the connected loop')
+                    self.assertNotIn('already running',text)
+                    self.assertNotIn('error ',text)
+                finally:
+                    os.killpg(process.pid,signal.SIGKILL);process.wait(timeout=5)
 
     def test_install_copies_all_dependencies(self):
         source=(ROOT/'Start-WindowsControl.ps1').read_text(encoding='utf-8-sig')
