@@ -663,7 +663,8 @@ function Invoke-TransportSwitchEpisode {
             $ordered=@(Get-TransportSwitchCandidates $s $rows $candidateEp $Now)
             $cur=@($rows|Where-Object {$_.tag -eq $CurrentTag})|Select-Object -First 1
             if($ordered.Count -and (Test-TransportSwitchImprovement $s $cur $ordered[0] $policy $Now)){
-                $candidateEp.open=$false;$candidateEp.status='switched';$candidateEp.switchedTo=[string]$ordered[0].tag;$candidateEp.attempted[$CurrentTag]=$true
+                # Улучшение: прежний путь рабочий и остаётся откатом, если verify нового провалится (в attempted попадает только провалившийся путь).
+                $candidateEp.open=$false;$candidateEp.status='switched';$candidateEp.switchedTo=[string]$ordered[0].tag
                 $s.episode=$candidateEp
                 return New-TransportSwitchResult $s 'switch' $candidateEp.switchedTo @() @('improvement')
             }
