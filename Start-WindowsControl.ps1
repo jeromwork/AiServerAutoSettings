@@ -101,11 +101,26 @@ function Save-ControlConfig([string]$Path,[string]$User,[string]$ProfilePath) {
 function Test-ControlLock($Lock) {
     try {$Lock.WaitOne(0)} catch [Threading.AbandonedMutexException] {$true}
 }
+# A live owner repairs its own PID; Install must not spawn mutex-rejected copies while it does so.
+function Test-ControlPidRecoveryPending([string]$PidFile) {
+    if(Test-Path -LiteralPath $PidFile){return $false}
+    $probe=New-Object Threading.Mutex($false,'Local\RemoteAgentsControl')
+    $acquired=$false
+    try {$acquired=Test-ControlLock $probe;return (-not $acquired)}
+    finally {if($acquired){$probe.ReleaseMutex()};$probe.Dispose()}
+}
+function Repair-ControlPidFile([string]$PidFile,[string]$LogFile) {
+    if(-not (Test-Path -LiteralPath $PidFile)){
+        Set-Content -LiteralPath $PidFile -Value $PID -Encoding ASCII
+        Write-ControlLog $LogFile ('restored pid='+$PID)
+    }
+}
 function Stop-ControlInstance([string]$PidFile,[switch]$KeepPid) {
     if(-not (Test-Path -LiteralPath $PidFile)){return}
+    $contents=Get-Content -LiteralPath $PidFile -Raw
     $id=0
-    if([int]::TryParse((Get-Content -LiteralPath $PidFile -Raw).Trim(),[ref]$id)){
-        $found=Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction SilentlyContinue
+    if([int]::TryParse($contents.Trim(),[ref]$id)){
+        $found=Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction Stop
         if($found -and [string]$found.CommandLine -match 'Start-WindowsControl\.ps1'){
             & taskkill.exe /T /F /PID $id *> $null
             if($LASTEXITCODE -ne 0){throw 'Не удалось остановить прежний мост'}
@@ -113,7 +128,11 @@ function Stop-ControlInstance([string]$PidFile,[switch]$KeepPid) {
             if($wait){try{if(-not $wait.WaitForExit(10000)){throw 'Прежний мост ещё работает'}}finally{$wait.Dispose()}}
         }
     }
-    if(-not $KeepPid){Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue}
+    # A failed CIM lookup must preserve the live owner's PID. A concurrent start may also
+    # have replaced this file while we waited for the previous process to exit.
+    if(-not $KeepPid -and (Test-Path -LiteralPath $PidFile) -and (Get-Content -LiteralPath $PidFile -Raw) -ceq $contents){
+        Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
+    }
 }
 # An unfinished wizard may stop only this Home's added bridge, never the original control installation.
 function Test-ManagedControlCommand([string]$Command,[string]$Root) {
@@ -152,6 +171,7 @@ if($Uninstall){
     return
 }
 if($Install){
+    if(Test-ControlPidRecoveryPending $pidFile){Write-Host 'Мост уже работает; ожидается восстановление PID.';return}
     $config=Read-ControlConfig $configPath
     if(-not $Profile){$Profile=$config.profile}
     if(-not $AgentUser){$AgentUser=$config.agentUser}
@@ -178,7 +198,8 @@ if($Install){
     }
     Set-ItemProperty -Path $runKey -Name RemoteAgentsControl -Value $command
     $mark=(Get-Date).AddSeconds(-1)
-    $started=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$command}
+    $hidden=New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ShowWindow=[uint16]0}
+    $started=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$command;ProcessStartupInformation=$hidden}
     if($started.ReturnValue -ne 0){throw ('Не удалось запустить мост: '+$started.ReturnValue)}
     Write-ControlLog $logFile 'install'
     Write-Host 'Мост установлен: работает без окна и запускается при входе в Windows.'
@@ -196,6 +217,7 @@ Set-Content -LiteralPath $pidFile -Value $PID -Encoding ASCII
 Write-ControlLog $logFile ('start pid='+$PID)
 while($true){
     try {
+        Repair-ControlPidFile $pidFile $logFile
         $config=Read-ControlConfig $configPath
         $connection=Read-ControlProfile $(if($Profile){$Profile}else{$config.profile})
         $user=$(if($AgentUser){$AgentUser}else{$config.agentUser})
@@ -205,7 +227,7 @@ while($true){
         if($remote.user -cnotmatch '^[a-z_][a-z0-9_-]*$' -or $remote.home -cnotmatch '^(/[a-zA-Z0-9._-]+)+$'){throw 'Сервер вернул неверного пользователя или HOME'}
         Save-ControlConfig $configPath $remote.user $connection.profilePath
         Write-Host 'Подключение моста: команды агентов выполняются с вашими правами Windows.'
-        & (Join-Path $PSScriptRoot 'Start-CodexWindowsBridge.ps1') -VPSHost $connection.serverAddress -VPSUser $connection.login -IdentityFile $connection.keyPath -SSHPort $connection.port -SSHExecutable $connection.sshExecutable -SSHConfig $connection.configPath -KnownHostsFile $connection.knownHostsPath -ServerUser $remote.user -RemoteBase ($remote.home+'/.local/share/codex-remote') -SocketPath ($remote.home+'/.local/state/codex-remote/'+$label+'.sock') -Workspace $workspace -DeviceLabel $label -ProjectId control -HostId $connection.hostId -AllowShell:(Get-ControlAllowShell) -ControlOnly -RetryForever -LogFile $logFile -HealthFile (Join-Path $base 'heartbeat.json')
+        & (Join-Path $PSScriptRoot 'Start-CodexWindowsBridge.ps1') -VPSHost $connection.serverAddress -VPSUser $connection.login -IdentityFile $connection.keyPath -SSHPort $connection.port -SSHExecutable $connection.sshExecutable -SSHConfig $connection.configPath -KnownHostsFile $connection.knownHostsPath -ServerUser $remote.user -RemoteBase ($remote.home+'/.local/share/codex-remote') -SocketPath ($remote.home+'/.local/state/codex-remote/'+$label+'.sock') -Workspace $workspace -DeviceLabel $label -ProjectId control -HostId $connection.hostId -AllowShell:(Get-ControlAllowShell) -ControlOnly -RetryForever -LogFile $logFile -HealthFile (Join-Path $base 'heartbeat.json') -ControlTick {Repair-ControlPidFile $pidFile $logFile}
         Write-ControlLog $logFile 'bridge returned'
     } catch {
         Write-Host ('Ошибка: '+$_.Exception.Message)

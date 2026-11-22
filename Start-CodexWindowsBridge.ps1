@@ -23,7 +23,8 @@ param(
     [switch]$ManagedSession,
     [switch]$RetryForever,
     [string]$LogFile,
-    [string]$HealthFile
+    [string]$HealthFile,
+    [scriptblock]$ControlTick
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
@@ -77,6 +78,7 @@ function Await-Line($process, [int]$seconds) {
     $task = $process.StandardOutput.ReadLineAsync()
     $deadline = [DateTime]::UtcNow.AddSeconds($seconds)
     while (-not $task.Wait(100)) {
+        if ($ControlTick) { & $ControlTick }
         if ((Is-Stopping) -or [DateTime]::UtcNow -ge $deadline) { throw 'Connection readiness stopped or timed out.' }
     }
     if ([string]::IsNullOrWhiteSpace($task.Result)) { throw 'Connection ended before readiness.' }
@@ -131,6 +133,7 @@ try {
     Write-BridgeStatus 'ready' ('Windows bridge ready: ' + $DeviceLabel + '. Shell enabled: ' + [bool]$AllowShell)
     $attempt = 0
     while (-not $executor.HasExited -and -not (Is-Stopping)) {
+        if ($ControlTick) { & $ControlTick }
         $attempt++
         $portBytes = New-Object byte[] 2
         $rng = [Security.Cryptography.RandomNumberGenerator]::Create(); $rng.GetBytes($portBytes); $rng.Dispose()
@@ -155,6 +158,8 @@ try {
             # Drain broker stdout continuously; only authenticated status round trips renew health.
             $heartbeat=$ssh.StandardOutput.ReadLineAsync();$lastHeartbeat=[Diagnostics.Stopwatch]::StartNew()
             while (-not $ssh.HasExited -and -not $executor.HasExited -and -not (Is-Stopping)) {
+                # The outer control loop is blocked here for the lifetime of the connection.
+                if ($ControlTick) { & $ControlTick }
                 if($heartbeat.IsCompleted){
                     if(-not $heartbeat.Result){throw 'Bridge heartbeat stream ended'}
                     $event=$heartbeat.Result|ConvertFrom-Json
