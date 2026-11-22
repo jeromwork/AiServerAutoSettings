@@ -21,10 +21,72 @@ namespace RemoteAgents.Launcher
             var oldClock = RaLog.Clock; RaLog.Clock = () => new DateTimeOffset(Now);
             try {
                 NetHelperVersionTests.Run(); BusJournalTests.Run();
-                StatusTransitions(dir); BusRepeats(); CoreRepeats(); WriteRecovery(dir); HelperBusRecovery(dir); Mirror(dir); MirrorRecovery(dir); MirrorSummaryRecovery(dir); MirrorCursorRecovery(dir); ParallelWrites(dir); Rotation(dir);
+                StatusTransitions(dir); LauncherStatusWrites(dir); BusRepeats(); CoreRepeats(); WriteRecovery(dir); HelperBusRecovery(dir); Mirror(dir); MirrorRecovery(dir); MirrorSummaryRecovery(dir); MirrorCursorRecovery(dir); ParallelWrites(dir); Rotation(dir);
                 Console.WriteLine("PASS: JournalFloodTests (" + checks + " checks, manual events, no timers)");
                 return 0;
             } finally { RaLog.Clock = oldClock; Directory.Delete(dir, true); }
+        }
+
+        static void LauncherStatusWrites(string dir)
+        {
+            string path = Path.Combine(dir, "publisher", "launcher.json");
+            var now = Now;
+            int attempts = 0, writes = 0;
+            bool fail = false;
+            Func<Dictionary<string, object>> snapshot = () => Status("{\"schema\":1,\"pid\":10,\"launcherVersion\":\"1.6.0.0\",\"bundleVersion\":\"test\",\"previousVersion\":\"old\",\"pending\":true,\"running\":true,\"ok\":true,\"update\":\"ready\",\"components\":[{\"name\":\"transport\",\"pid\":20,\"alive\":true,\"ok\":true,\"summary\":\"ready\"}]}");
+            using (var bus = new EventBus(manualDispatch: true)) {
+                var health = new List<string>(); var journal = new List<string>();
+                using (var hj = new HealthJournal(bus, sink: health.Add))
+                using (var bj = new BusJournal(bus, sink: journal.Add)) {
+                    var tracker = new BlockStatusTracker(bus, Now, () => now, p => now);
+                    Action<string, object> write = (p, value) => {
+                        attempts++;
+                        if (fail) throw new IOException("injected write failure");
+                        Json.Write(p, value); writes++;
+                        // События конечного файла и Windows ReplaceFile доставлены вручную.
+                        tracker.ScanFile(p); tracker.ScanFile(p + "~RF1234.TMP"); bus.DrainOnce();
+                    };
+                    var writer = new LauncherStatusWriter(path, write, () => now);
+                    Check(writer.Write(snapshot()) && writes == 1, "startup publishes launcher snapshot immediately");
+                    string original = File.ReadAllText(path);
+                    for (int i = 0; i < 3600; i++) {
+                        now = now.AddSeconds(1);
+                        var same = snapshot(); same["updatedUtc"] = now.ToString("o");
+                        if (writer.Write(same)) throw new Exception("unchanged launcher tick rewrote status");
+                    }
+                    bj.Flush();
+                    Check(writes == 1 && attempts == 1 && File.ReadAllText(path) == original,
+                        "hour of unchanged ticks performs no writes and preserves updatedUtc");
+                    Check(health.Count == 1 && journal.Count == 1 && tracker.TrackedBlocks == 1,
+                        "launcher write plus RF signals give one stable block in bus/health");
+
+                    var changed = snapshot();
+                    Json.Map(Json.Array(Json.Get(changed, "components"))[0])["pid"] = 21;
+                    Check(writer.Write(changed) && writes == 2 && Json.Int(Json.Map(Json.Array(Json.Get(Json.Read(path), "components"))[0]), "pid", 0) == 21,
+                        "component restart with unchanged overall readiness is saved immediately");
+                    Check(health.Count == 1 && journal.Count == 1, "component snapshot change does not repeat block.ready");
+                    changed["pending"] = false; changed["bundleVersion"] = "next"; changed["update"] = "accepted";
+                    fail = true; int before = attempts;
+                    try { writer.Write(changed); throw new Exception("write failure was hidden"); } catch (IOException) { }
+                    Check(attempts == before + 1 && Json.Bool(Json.Read(path), "pending"), "failed write keeps previous status on disk");
+                    fail = false;
+                    Check(writer.Write(changed) && !Json.Bool(Json.Read(path), "pending") && Json.Str(Json.Read(path), "bundleVersion") == "next",
+                        "identical snapshot retries after failure and records update transition");
+                    Check(!writer.Write(changed), "successful retry is deduplicated");
+                    File.Delete(path);
+                    Check(writer.Write(changed) && File.Exists(path), "deleted status is restored without a state change");
+                    now = now.AddSeconds(1);
+                    var restarted = new LauncherStatusWriter(path, write, () => now);
+                    Check(restarted.Write(changed) && Json.Str(Json.Read(path), "updatedUtc") == now.ToString("o"),
+                        "new launcher process refreshes an identical snapshot from a previous run");
+                    changed["running"] = false; changed["ok"] = false;
+                    Check(restarted.Write(changed) && !Json.Bool(Json.Read(path), "running") && !Json.Bool(Json.Read(path), "ok"),
+                        "shutdown publishes stopped state immediately");
+                    bj.Flush();
+                    Check(health.Count == 2 && health.Last().Contains("block.degraded") && journal.Count == 2,
+                        "shutdown reaches bus and health exactly once");
+                }
+            }
         }
 
         static void StatusTransitions(string dir)
