@@ -702,4 +702,15 @@ $r=DecideSwitch $s 0 $events $chainRows
 Assert ((ConvertTo-Json -InputObject @($s,$chainRows,$events) -Depth 30 -Compress) -ceq $before) 'B: входное состояние/кандидаты/события не изменены'
 $r=DecideSwitch ($r.state|ConvertTo-Json -Depth 30|ConvertFrom-Json) 1 @((Event 1 'path-check' 'b' 'ok')) $chainRows
 Assert ($r.state.episode.responded.ContainsKey('b') -and -not (($r|ConvertTo-Json -Depth 30 -Compress) -match 'test-detail')) 'B: JSON round-trip и фиксированные поля без event detail'
+# (10) Живой отказ 22.11.2026: переключение «улучшением» на путь, провалившийся на verify, должно вернуть прежний рабочий путь.
+# Прежний путь не помечается attempted при улучшении: он ответил ранее и остаётся откатом.
+# Рабочий путь b до улучшения уже отвечал (path-check ok), как relay в живом журнале.
+$imp=Invoke-TransportDecision -State $ready -Candidates $returnRows -Now 30000 -CurrentTag 'b' -Events @((Event 29999 'path-check' 'b' 'ok')) -AllowImprovement -SwitchEpisode:$true
+Assert ($imp.verdict.action -eq 'switch' -and $imp.verdict.tag -eq 'a') '10: улучшение выбирает a'
+$imp=Invoke-TransportDecision -State $imp.state -Candidates $returnRows -Now 30001 -CurrentTag 'a' -SwitchEpisode:$true
+Assert ($imp.verdict.action -eq 'post-switch-verify') '10: после PUT запрашивается verify'
+$imp=Invoke-TransportDecision -State $imp.state -Candidates $returnRows -Now 30002 -CurrentTag 'a' -Events @((Event 30002 'post-switch-verify' 'a' 'timeout')) -SwitchEpisode:$true
+Assert ($imp.verdict.action -eq 'switch' -and $imp.verdict.tag -eq 'b') '10: провал verify после улучшения возвращает прежний рабочий путь b, а не server-unavailable'
+Assert ($imp.state.episode.attempted.ContainsKey('a') -and -not $imp.state.episode.attempted.ContainsKey('b')) '10: провалившийся a исключён, откат b доступен'
+
 Write-Host ('PASS: switch episode reducer, '+$count+' assertions; scenarios 1-9, Q snapshots and bounds')
