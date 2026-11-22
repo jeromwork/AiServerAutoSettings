@@ -19,6 +19,7 @@ namespace RemoteAgents.Launcher
     internal sealed partial class TrayContext : ApplicationContext
     {
         readonly string home; readonly Journal log; readonly Configuration config; readonly UpdateEngine engine;
+        readonly LauncherStatusWriter statusWriter;
         readonly NotifyIcon icon; readonly Control dispatch = new Control();
         readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 1000 };
         readonly CancellationTokenSource stop = new CancellationTokenSource();
@@ -63,6 +64,7 @@ namespace RemoteAgents.Launcher
         public TrayContext(string home, Journal log, string pipeName, SecurityIdentifier sid, string[] args, string installSource = null)
         {
             this.home = home; this.log = log; this.installSource=installSource;
+            statusWriter = new LauncherStatusWriter(Path.Combine(home, "status", Product.StatusName));
             rollbackInstallMutex = "Global\\" + pipeName + ".Install";
             window = new WindowModel(File.Exists(Path.Combine(home, "state", "tray-hint-shown"))); dispatch.CreateControl(); var unused = dispatch.Handle;
             Directory.CreateDirectory(Path.Combine(home, "status"));
@@ -327,9 +329,12 @@ namespace RemoteAgents.Launcher
         }
         void WriteStatus()
         {
-            Json.Write(Path.Combine(home, "status", Product.StatusName), new { schema = 1, pid = Process.GetCurrentProcess().Id, launcherVersion = Program.Version, bundleVersion = engine.Current,
-                previousVersion = engine.Previous, pending = engine.Pending, running = !closing, updatedUtc = DateTime.UtcNow.ToString("o"), update = updateSummary,
-                ok = !closing && (runtimes.Any(r => r.Definition.Critical) && runtimes.Where(r => r.Definition.Critical).All(r => r.Healthy)), components = runtimes.Select(r => r.Snapshot()).ToArray() });
+            statusWriter.Write(new Dictionary<string, object> {
+                { "schema", 1 }, { "pid", Process.GetCurrentProcess().Id }, { "launcherVersion", Program.Version }, { "bundleVersion", engine.Current },
+                { "previousVersion", engine.Previous }, { "pending", engine.Pending }, { "running", !closing }, { "update", updateSummary },
+                { "ok", !closing && (runtimes.Any(r => r.Definition.Critical) && runtimes.Where(r => r.Definition.Critical).All(r => r.Healthy)) },
+                { "components", runtimes.Select(r => r.Snapshot()).ToArray() }
+            });
         }
         bool openingHappier;
         async void OpenHappier()

@@ -171,6 +171,7 @@
     <Compile Include="VpnReadyTests.cs" />
     <Compile Include="NetNotifyTests.cs" />
     <Compile Include="../TrayBus.cs" />
+    <Compile Include="../LauncherStatusWriter.cs" />
     <Compile Include="TrayBusTests.cs" />
     <Compile Include="../Supervisor.cs" />
     <Compile Include="../SupervisorStale.cs" />
@@ -284,6 +285,7 @@
     <Compile Remove="@(Compile)" />
     <Compile Include="PortableJson.cs" />
     <Compile Include="JournalFloodTests.cs" />
+    <Compile Include="../LauncherStatusWriter.cs" />
     <Compile Include="../NetHelperEvents.cs" />
     <Compile Include="NetHelperVersionTests.cs" />
     <Compile Include="BusJournalTests.cs" />
