@@ -90,6 +90,7 @@ namespace RemoteAgents.Lab
 
     internal sealed class Supervisor : IDisposable
     {
+        public const int RestartGraceSeconds = 5;         // ожидание мягкого выхода Python при перезапуске
         public const int PythonSilenceFuseSeconds = 120;   // таймер В
         const int MaxLine = 200000, MaxQueuedLines = 1000, MaxStderrLogged = 200, StderrTail = 30;
         public readonly string Home, Version;
@@ -344,7 +345,13 @@ namespace RemoteAgents.Lab
         }
         public void RestartPython()
         {
-            if (run != null) { run.RestartRequested = true; log.Write("перезапуск Python по просьбе владельца"); job.Terminate(); return; }
+            if (run != null) {
+                var r = run; r.RestartRequested = true; log.Write("перезапуск Python по просьбе владельца: прошу закрыться, жду до " + RestartGraceSeconds + " с");
+                Send("{\"t\":\"exit\"}");   // мягкая остановка TUN: Python сам снимет адаптер, Terminate только по сроку
+                var t = new System.Windows.Forms.Timer { Interval = RestartGraceSeconds * 1000 };
+                t.Tick += (s, e) => { t.Stop(); t.Dispose(); if (run == r) { log.Write("Python не закрылся за " + RestartGraceSeconds + " с: гашу принудительно"); job.Terminate(); } };
+                t.Start(); return;
+            }
             if (stopped && Slots != null) { Slots.ResetAfterStop(); log.Write("запуск после остановки по просьбе владельца"); StartPython(); }
         }
         public void RequestReport()
