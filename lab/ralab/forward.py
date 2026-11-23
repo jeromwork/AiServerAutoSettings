@@ -35,6 +35,14 @@ def parse_nets(cfg):
     return out
 
 
+def with_server(nets, server):
+    """Сам сервер (109) - тоже «сеть»: его порты (админка 3081 и т.п.) с ПК напрямую режет ТСПУ, через канал открываются."""
+    try:
+        return nets + [{'name': 'server', 'nets': [ipaddress.ip_network(str(server) + '/32')], 'domains': []}]
+    except ValueError:
+        return nets
+
+
 def match(nets, host):
     """-> имя сети или None. host - IPv4 или домен."""
     h = host.lower().rstrip('.')
@@ -146,10 +154,10 @@ class Forward:
         st = getattr(self.ctx, 'settings', None)
         if not st or self.started:
             if st:
-                self.nets = parse_nets(st.cfg)
+                self.nets = with_server(parse_nets(st.cfg), st.server)
             return
         self.started, cfg = True, st.cfg
-        self.nets = parse_nets(cfg)
+        self.nets = with_server(parse_nets(cfg), st.server)
         fw = cfg.get('forwards')
         if not isinstance(fw, list):
             web = ((cfg.get('profile') or {}).get('happier') or cfg.get('happier') or {}).get('localWeb') or {}
