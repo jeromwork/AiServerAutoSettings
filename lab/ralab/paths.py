@@ -167,6 +167,6 @@ def make_config(s, ports, clash_port, secret):
             if o.get('type') in TCP_TYPES and not o.get('detour'):  # первое звено цепочки и одиночные TCP-пути
                 o.update(KEEPALIVE)
             outs.append(o)
-    return {'log': {'level': 'info', 'disable_color': True},  # level=info: строка "sing-box started" - событие готовности
+    return {'log': {'level': 'info'},  # level=info: строка "sing-box started" - событие готовности
             'inbounds': ins, 'outbounds': outs, 'route': {'rules': rules},
             'experimental': {'clash_api': {'external_controller': '127.0.0.1:%d' % clash_port, 'secret': secret}}}

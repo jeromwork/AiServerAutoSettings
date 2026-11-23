@@ -4,11 +4,12 @@
 журнала sing-box "sing-box started" (box.go: Start). Таймера ожидания нет: sing-box либо пишет её, либо выходит.
 Конфиг с секретами лежит в <home>\\private\\ (не в state\\ и не в logs\\, их копирует СТОП.cmd).
 """
-import collections, http.client, json, os, secrets, urllib.parse
+import collections, http.client, json, os, re, secrets, urllib.parse
 
 from . import journal, paths as pth, procs
 from .bus import bus
 
+ANSI = re.compile(r'\x1b\[[0-9;]*m')
 RESTARTS_MAX = 5  # перезапусков подряд без "started"
 DELAY_URL = 'https://www.gstatic.com/generate_204'
 
@@ -58,6 +59,7 @@ class SingBox:
             bus.publish('singbox.exited', {'code': None, 'error': e.__class__.__name__})
 
     def _line(self, line):
+        line = ANSI.sub('', line)  # sing-box красит журнал и в канал; отключить цвет в конфиге нельзя (поля нет)
         self.tail.append(line[-200:])
         if 'sing-box started' in line:
             self.fails, self.up = 0, True
