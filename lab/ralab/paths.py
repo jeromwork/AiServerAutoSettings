@@ -170,5 +170,7 @@ def make_config(s, ports, clash_port, secret):
                 o.update(KEEPALIVE)
             outs.append(o)
     return {'log': {'level': 'info'},  # level=info: строка "sing-box started" - событие готовности
-            'inbounds': ins, 'outbounds': outs, 'route': {'rules': rules},
+            # auto_detect_interface: внешние соединения - через физический NIC по умолчанию (bindPhysical старой программы).
+            # Без него ОС увела sparfum:8443 через виртуальный адаптер 172.18.0.1 и получила сброс (журнал 23.11).
+            'inbounds': ins, 'outbounds': outs, 'route': {'rules': rules, 'auto_detect_interface': True},
             'experimental': {'clash_api': {'external_controller': '127.0.0.1:%d' % clash_port, 'secret': secret}}}
