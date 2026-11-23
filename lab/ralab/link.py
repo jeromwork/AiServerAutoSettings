@@ -66,6 +66,10 @@ class Link:
         if up and up.current:
             ms = up.results.get(up.current)
             lines.append('путь: %s %s' % (up.current, '%s мс' % ms if ms is not None else '-'))
+        if up:
+            lines.append(up.over())
+        if getattr(ctx, 'tun', None):
+            lines.append('TUN: %s' % ctx.tun.last)
         for x in (r.get('ranking') or [])[:12]:
             lines.append('%s: %s %s' % (x['path'], x['outcome'], '%d КиБ/с' % (x['down_bps'] // 1024) if x.get('down_bps') else (x.get('reason') or '')[:80]))
         lan = getattr(ctx, 'lan', None)

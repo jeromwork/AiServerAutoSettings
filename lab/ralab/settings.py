@@ -4,12 +4,13 @@
 %LOCALAPPDATA%\\RemoteAgents-lab\\config.json (тот же формат), его разделы главнее, недостающие берутся из установленной.
 known_hosts разбирается своим кодом (без внешних утилит): путь с пробелами и хешированные имена не проблема.
 """
-import base64, fnmatch, glob, hashlib, hmac, json, os, re, shutil, types
+import base64, fnmatch, glob, hashlib, hmac, json, os, re, shutil, threading, time, types
 
 from . import journal
 from .bus import bus
 
 LAN_MAX = 64
+LOAD_GAP = 10  # V5: пересборка путей по смене чужого VPN не чаще раза в 10 с
 KNOWN_HOSTS_MAX = 4 * 1024 * 1024
 
 
@@ -154,6 +155,9 @@ class Settings:
         bus.subscribe('app.start', self._on_start)
         bus.subscribe('net.changed', self._on_net)
         bus.subscribe('channel.down', self._on_down)
+        bus.subscribe('settings.recheck', self._on_recheck)
+        self.last_load, self.waiting, self.stopped = 0.0, False, False
+        bus.subscribe('app.stop', lambda _: setattr(self, 'stopped', True))
 
     def _on_down(self, ev):  # канал оборвался: если VPN за это время сменился - применить сейчас
         if not ev.get('restart') and self.loaded:
@@ -162,21 +166,42 @@ class Settings:
     def _on_start(self, _):
         self._load()
 
-    def _on_net(self, _):  # конфиг не прочитан (установленная программа ещё не настроена) - после смены сети пробуем снова
+    def _on_net(self, _):
+        if self.stopped:  # после app.stop sing-box не стартуем
+            return
+        self._on_net_(_)
+
+    def _on_net_(self, _):  # конфиг не прочитан (установленная программа ещё не настроена) - после смены сети пробуем снова
         if not self.loaded:
             self._load()
             return
         from . import paths as pth
         st = self.ctx.settings
         vpn, old = (pth.vpn_iface(), pth.local_proxies(st.cfg)), (getattr(st, 'vpn', None), getattr(st, 'proxies', []))
-        if vpn != old:  # VPN включили/выключили: пути «через VPN» меняются. При живом канале держимся его (решение владельца)
-            if getattr(self.ctx.rounds, 'channel', None):
-                journal.log('settings', 'vpn.changed', {'from': old, 'to': vpn}, 'VPN изменился, канал жив: пути обновятся после обрыва')
+        if vpn != old:  # V5: чужой VPN/прокси включили или выключили - пути пересобираем сразу, канал переподключит V3
+            left = LOAD_GAP - (time.monotonic() - self.last_load)
+            if left > 0:  # не чаще раза в 10 с: остаток ждёт один таймер (он только публикует, состояние меняется на шине)
+                if not self.waiting:
+                    self.waiting = True
+                    t = threading.Timer(left, lambda: bus.publish('settings.recheck'))
+                    t.daemon = True
+                    t.start()
                 return
-            journal.log('settings', 'vpn.changed', {'from': old, 'to': vpn}, 'VPN изменился: перечитываю пути и перезапускаю sing-box')
+            journal.log('settings', 'vpn.changed', {'from': old, 'to': vpn}, 'VPN/прокси изменился: перечитываю пути и перезапускаю sing-box')
             self._load()
 
+    def _on_recheck(self, _):
+        self.waiting = False
+        self._on_net(None)  # проверка stopped внутри
+
+    def check_net(self):
+        """Без побочных эффектов (можно из любого потока): изменились ли чужой VPN/прокси против загруженных настроек."""
+        from . import paths as pth
+        st = getattr(self.ctx, 'settings', None)
+        return bool(self.loaded and st and (pth.vpn_iface(), pth.local_proxies(st.cfg)) != (getattr(st, 'vpn', None), getattr(st, 'proxies', [])))
+
     def _load(self):
+        self.last_load = time.monotonic()
         try:
             self.ctx.settings = load(self.ctx.home, self.ctx.installed)
         except Exception as e:  # Fail - понятная причина; остальное (битый тип поля и т.п.) - имя ошибки

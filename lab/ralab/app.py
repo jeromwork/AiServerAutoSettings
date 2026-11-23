@@ -28,6 +28,8 @@ class Ctx(types.SimpleNamespace):
         out.append('Состояние: %s (%s)' % (st['state'], st['color']))
         out.append('Настройки: %s' % (st['settings'] and '%d путей, %d сетей, пропущено: %s' % (len(st['settings']['paths']), len(st['settings']['lans']), st['settings']['skipped'])))
         out.append('sing-box: %s' % st['singbox'])
+        out.append(st['uplink']['over'])
+        out.append('TUN: %s' % st['tun']['state'])
         r = st['rounds']
         out.append('Канал: %s' % (r['channel'] or 'нет') + ' (раунд %d)' % r['round'])
         out.append('Рейтинг последнего раунда:')

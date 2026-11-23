@@ -2,7 +2,7 @@
 V3: канал (rounds) всегда ходит через in-chan; при обрыве - полный тест сразу, 2 провала проверки подряд - смена пути и сброс ssh. Таймера bus не используем (он один и занят раундом):
 проверка текущего пути - поток-демон, который ждёт Event остановки.
 """
-import concurrent.futures, threading, time
+import concurrent.futures, re, threading, time
 
 from . import journal
 from .bus import bus
@@ -115,6 +115,8 @@ class Uplink:
 
     def _loop(self, gen):
         while not self._stop.wait(CHECK_S) and gen == self._gen:
+            if self.ctx.settings_part.check_net():  # V5: чужой прокси без смены интерфейса net.changed не даёт; состояние меняет шина
+                bus.publish('net.changed')
             if self.current is None:
                 continue
             ms = self.ctx.singbox.delay(self.current, DELAY_MS)[0]
@@ -137,6 +139,14 @@ class Uplink:
                 else:
                     self._need = True  # раунд идёт: тест по round.done
 
+    def over(self):
+        """V5: поверх чего идёт канал: чужой VPN, чужой локальный прокси или напрямую."""
+        st, cur = getattr(self.ctx, 'settings', None), self.current or ''
+        if cur.endswith('-vpn') and getattr(st, 'vpn', None):
+            return 'поверх: %s' % st.vpn
+        m = re.search(r'socks(\d+)$', cur)
+        return 'поверх: прокси 127.0.0.1:%s' % m.group(1) if m else 'поверх: напрямую'
+
     def status(self):
         top = sorted(((n, ms) for n, ms in self.results.items() if ms is not None), key=lambda kv: kv[1])[:10]
-        return {'current': self.current, 'results': dict(top), 'penalized': self._penalized(), 'last_test': self.last_test}
+        return {'current': self.current, 'results': dict(top), 'penalized': self._penalized(), 'last_test': self.last_test, 'over': self.over()}
