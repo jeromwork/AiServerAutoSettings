@@ -213,7 +213,7 @@ def build_paths(s):
     add('ssh', [{'type': 'direct', 'tag': 'ssh-direct'}], 'ssh-direct')
     if vl:
         add('vless', [vless('vless-direct', server=s.server)], 'vless-direct')
-    # Вход VLESS+WebSocket+TLS (transport.wsEntries: [{name, host, port, path, certificate}]): снаружи обычный HTTPS к имени,
+    # Вход VLESS+WebSocket+TLS (transport.wsEntries: [{name, host, address, port, path, certificate}]; address - IP без DNS): снаружи обычный HTTPS к имени,
     # которое само указывает на сервер, поэтому любой чужой VPN (Happ, Clash...) доставит его на сервер, даже читая SNI.
     ws = []
     for w in t.get('wsEntries') or []:
@@ -228,7 +228,7 @@ def build_paths(s):
                 tls['certificate'] = w['certificate']  # самоподписанный сертификат сервера: доверяем только ему
             else:
                 tls['insecure'] = True
-            o = {'type': 'vless', 'tag': n, 'server': w['host'], 'server_port': int(w['port']), 'uuid': vl['uuid'], 'tls': tls,
+            o = {'type': 'vless', 'tag': n, 'server': w.get('address') or w['host'], 'server_port': int(w['port']), 'uuid': vl['uuid'], 'tls': tls,
                  'transport': {'type': 'ws', 'path': w['path'], 'headers': {'Host': w['host']}}}
             add('ws', [o], n)
             ws.append(o)
