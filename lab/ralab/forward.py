@@ -32,6 +32,10 @@ def parse_nets(cfg):
         doms = [str(d).lower() for d in (sh.get('domains') or []) if isinstance(d, str) and d]
         if nets or doms:
             out.append({'name': str(it['name']), 'nets': nets, 'domains': doms})
+    via = (cfg.get('happier') or {}).get('viaChannel') if isinstance(cfg.get('happier'), dict) else None
+    via = [d.lower() for d in via if isinstance(d, str) and d] if isinstance(via, list) else ['api.happier.dev']
+    if via:
+        out.append({'name': 'happier-api', 'nets': [], 'domains': via})
     return out
 
 
@@ -133,6 +137,7 @@ class Forward:
         self.tun_nets = []  # фактические route_address живого TUN, сохраняются при перезагрузке настроек
         self.lock, self.sem, self.refused, self.count = threading.Lock(), threading.Semaphore(CONN_MAX), [], 0
         self.started = False
+        self.tl = threading.local()  # сокеты, открытые обработчиком этого потока
         bus.subscribe('settings.loaded', self._on_settings)
         bus.subscribe('channel.up', self._on_up)
         bus.subscribe('channel.down', self._on_down)
@@ -206,8 +211,14 @@ class Forward:
         except (OSError, EOFError, ValueError) as e:
             self._refuse('соединение', str(e))
         finally:
+            ups = getattr(self.tl, 'ups', [])
+            self.tl.ups = []
             with self.lock:
                 self.conns.discard(c)
+                for u in ups:
+                    self.conns.discard(u)
+            for u in ups:
+                u.close()
             c.close()
             self.sem.release()
 
@@ -228,6 +239,7 @@ class Forward:
     def _reg(self, s):
         with self.lock:
             self.conns.add(s)
+        self.tl.ups = getattr(self.tl, 'ups', []) + [s]
 
     def _open(self, host, port):
         net = match(self.nets + self.tun_nets, host)
