@@ -337,6 +337,7 @@ namespace RemoteAgents.Lab
             if (run == null) { Finish(); return; }
             if (exitRequested) { log.Write("повторный Выход: гашу всё принудительно"); job.Terminate(); return; }
             exitRequested = true;
+            timerV.Stop(); // Выход ждёт мягкую остановку TUN; таймер запуска не должен оборвать эти 3 секунды.
             log.Write("Выход: прошу Python закрыться");
             SetState("grey", "Выход...", "Жду, пока Python закроется.", "Не закрывается: нажмите Выход ещё раз -- погасит принудительно.");
             Send("{\"t\":\"exit\"}");

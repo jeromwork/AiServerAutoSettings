@@ -1,4 +1,4 @@
-"""TUN-адаптер ralab-tun только для сетей клиники (route_address), второй sing-box (ralab-core) -> SOCKS текущего канала.
+"""TUN-адаптер ralab-tun только для сетей клиники (route_address), второй sing-box (ralab-core) -> постоянный lanProxy.
 По умолчанию ВЫКЛЮЧЕН: включается разделом lab-конфига tun {enabled: true, routes: [...]} (routes - для опытов, например один адрес /32).
 Подсети, пересекающиеся с адресами самого ПК (домашняя сеть), не берутся - иначе TUN перехватил бы локальный трафик.
 Маршруты живут, пока жив процесс (auto_route); умер Python - Job Object гасит sing-box, маршруты снимаются.
@@ -29,31 +29,46 @@ def local_addrs():
 class Tun:
     def __init__(self, ctx):
         self.ctx, self.socks, self.routes, self.skipped, self.last = ctx, None, [], [], 'выключен'
-        bus.subscribe('channel.up', self._on_up)
-        bus.subscribe('channel.down', self._on_down)
-        bus.subscribe('app.stop', lambda _: procs.kill(NAME))
+        self.exe = None
+        bus.subscribe('settings.loaded', self._on_settings)
+        bus.subscribe('app.stop', lambda _: self.stop())
         bus.subscribe('proc.exited', self._on_exit)
 
     def _cfg(self):
         st = getattr(self.ctx, 'settings', None)
         return (st.cfg.get('tun') if st else None) or {}
 
-    def _on_up(self, ev):
-        procs.kill(NAME)  # прежний процесс смотрел на SOCKS предыдущего канала
-        self.socks = ev['socks']
+    def _on_settings(self, _):
         t = self._cfg()
         if t.get('enabled') is not True:
+            self.stop()
             self.last = 'выключен (tun.enabled не true)'
             return
+        if procs.get(NAME):
+            return
+        listener = self.ctx.forward.listeners.get('lanProxy') or {}
+        if not listener.get('ok'):
+            self.last = 'ожидание lanProxy'
+            return
+        self.socks = listener['port']
         self._start(t)
-
-    def _on_down(self, ev):
-        procs.kill(NAME)  # без канала маршруты в никуда не нужны: адаптер снимается
-        self.socks = None
 
     def _on_exit(self, ev):
         if ev.get('name') == NAME:
             self.last = 'процесс вышел (код %s)' % ev.get('code')
+
+    def stop(self):
+        if not self.exe:
+            return
+        p = procs.get(NAME)
+        procs.kill(NAME)
+        try:
+            if p:
+                p.popen.wait(timeout=1)  # после жёсткого kill удалять устройство можно лишь по выходу процесса
+            self._clean_ghosts(self.exe)  # проверяем отсутствие призрака и после штатного выхода
+            self.exe, self.ctx.forward.tun_nets = None, []
+        except subprocess.TimeoutExpired:
+            journal.log('tun', 'ghost.skipped', {'pid': p.pid}, 'TUN ещё жив после kill: устройство не удаляем')
 
     def _start(self, t):
         st = self.ctx.settings
@@ -77,6 +92,7 @@ class Tun:
             self.last = 'нет маршрутов'
             return
         self.routes = routes
+        self.ctx.forward.tun_nets = [{'name': 'tun', 'nets': [ipaddress.ip_network(r) for r in routes], 'domains': []}]
         cfg = {'log': {'level': 'info'},
                'inbounds': [{'type': 'tun', 'tag': 'tun-in', 'interface_name': 'ralab-tun', 'address': [t.get('address') or '172.19.0.1/30'], 'mtu': 1400,
                              'auto_route': True, 'strict_route': False, 'route_address': routes, 'stack': 'system'}],
@@ -86,13 +102,48 @@ class Tun:
         path = os.path.join(d, 'tun.json')
         with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w') as f:
             json.dump(cfg, f)
-        exe = self.ctx.singbox._own_copy(self.ctx.settings.singbox)
+        self.exe = exe = self.ctx.singbox._own_copy(self.ctx.settings.singbox)
         try:
-            procs.start(NAME, [exe, 'run', '-c', path], src='tun', cwd=d)
+            self._clean_ghosts(exe)
+            procs.start(NAME, [exe, 'run', '-c', path], src='tun', cwd=d, graceful=True)
             self.last = 'запущен, маршруты: %s' % ', '.join(routes)
             journal.log('tun', 'start', {'routes': routes, 'socks': self.socks}, 'TUN ralab-tun запускается')
         except (OSError, ValueError) as e:
             self.last = 'не запустить: %s' % e.__class__.__name__
+
+    def _clean_ghosts(self, exe):
+        if not procs.WIN or (procs.get(NAME) and procs.get(NAME).alive()):
+            return
+        # Только свой обычный core заведомо не владеет TUN. Неизвестный core — очистку пропускаем.
+        core = procs.get('singbox')
+        allowed = core.pid if core and core.alive() else 0
+        script = r'''
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$cores = @(Get-CimInstance Win32_Process | Where-Object {
+    $_.Name -in @('ralab-core.exe', 'sing-box.exe', 'singbox.exe', '__EXE__') -and $_.ProcessId -ne __PID__
+})
+if ($cores.Count) { @{ev='ghost.skipped'; pids=@($cores.ProcessId)} | ConvertTo-Json -Compress; exit }
+Get-NetAdapter -IncludeHidden | Where-Object {
+    $_.InterfaceDescription -eq 'Wintun Userspace Tunnel' -and $_.Status -eq 'Disconnected' -and $_.Name -ne 'happ-tun'
+} | ForEach-Object {
+    $a = $_; $id = $a.PnPDeviceID
+    if (-not $id -or $id -notlike 'ROOT\WINTUN\*') { return }
+    $output = & pnputil.exe /remove-device $id 2>&1 | Out-String
+    $code = $LASTEXITCODE
+    @{ev=$(if ($code -eq 0) {'ghost.removed'} else {'ghost.failed'}); name=$a.Name; device=$id; code=$code; output=$output} | ConvertTo-Json -Compress
+}
+'''.replace('__EXE__', os.path.basename(exe).replace("'", "''")).replace('__PID__', str(allowed))
+        try:
+            p = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script],
+                               stdin=subprocess.DEVNULL, capture_output=True, timeout=15, creationflags=procs.NO_WINDOW)
+            for line in p.stdout.decode('utf-8', 'replace').splitlines():
+                data = json.loads(line)
+                journal.log('tun', data.pop('ev'), data)
+            if p.returncode:
+                journal.log('tun', 'ghost.failed', {'code': p.returncode, 'error': p.stderr.decode('utf-8', 'replace')})
+        except (OSError, subprocess.SubprocessError, ValueError) as e:
+            journal.log('tun', 'ghost.failed', {'error': str(e)})
 
     def status(self):
         return {'state': self.last, 'routes': self.routes, 'skipped': self.skipped, 'running': NAME in procs.names()}

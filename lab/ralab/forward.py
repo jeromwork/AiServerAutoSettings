@@ -130,6 +130,7 @@ def pipe(a, b):
 class Forward:
     def __init__(self, ctx):
         self.ctx, self.socks, self.nets, self.listeners, self.conns = ctx, None, [], {}, set()
+        self.tun_nets = []  # фактические route_address живого TUN, сохраняются при перезагрузке настроек
         self.lock, self.sem, self.refused, self.count = threading.Lock(), threading.Semaphore(CONN_MAX), [], 0
         self.started = False
         bus.subscribe('settings.loaded', self._on_settings)
@@ -229,7 +230,7 @@ class Forward:
             self.conns.add(s)
 
     def _open(self, host, port):
-        net = match(self.nets, host)
+        net = match(self.nets + self.tun_nets, host)
         if net:
             up = self._via_channel(host, port)
             journal.log('forward', 'lan', {'net': net, 'target': '%s:%d' % (host, port)})

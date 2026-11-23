@@ -1,9 +1,9 @@
 """Процессы: потоки-читатели stdout/stderr, поток ожидания (событие proc.exited), Job Object (Windows) / killpg (Linux).
 
-Ничего не ждёт по времени: читатели работают до конца потока, ожидание - до выхода процесса.
+Читатели работают до конца потока, ожидание - до выхода процесса. Мягкой остановке TUN даём до 3 с.
 Пределы: живых процессов 64, строка 8 КБ.
 """
-import os, signal, subprocess, sys, threading
+import os, signal, subprocess, sys, threading, time
 
 from . import journal
 from .bus import bus
@@ -57,10 +57,11 @@ def _assign(popen):
 
 
 class Proc:
-    def __init__(self, name, popen, src, binary, on_out, on_err, join_readers):
+    def __init__(self, name, popen, src, binary, on_out, on_err, join_readers, graceful):
         self.name, self.popen, self.src, self.binary = name, popen, src, binary
         self.on_out, self.on_err, self.join_readers = on_out, on_err, join_readers
         self.pid, self.killed = popen.pid, False
+        self.graceful = graceful
         self.readers = [threading.Thread(target=self._read, args=(popen.stdout, True), daemon=True),
                         threading.Thread(target=self._read, args=(popen.stderr, False), daemon=True)]
 
@@ -128,10 +129,35 @@ class Proc:
     def alive(self):
         return self.popen.poll() is None
 
+    def _soft_stop(self):
+        method = 'AttachConsole+CTRL_BREAK' if WIN else 'SIGTERM'
+        try:
+            deadline = time.monotonic() + 3
+            if WIN:
+                # Хелпер не меняет консоль/стандартные handles многопоточного Python из EXE.
+                code = ('import ctypes,sys; k=ctypes.WinDLL("kernel32",use_last_error=True); '
+                        'pid=int(sys.argv[1]); '
+                        'ok=k.AttachConsole(pid) and k.GenerateConsoleCtrlEvent(1,pid); '
+                        'sys.exit(0 if ok else (ctypes.get_last_error() or 1))')
+                r = subprocess.run([sys.executable, '-c', code, str(self.pid)], stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=NO_WINDOW, timeout=1)
+                if r.returncode:
+                    raise OSError('console helper: %s' % r.returncode)
+            else:
+                os.killpg(self.pid, signal.SIGTERM)
+            self.popen.wait(timeout=max(0, deadline - time.monotonic()))
+            journal.log(self.src, 'stop.soft', {'pid': self.pid, 'method': method, 'code': self.popen.returncode})
+            return True
+        except (OSError, subprocess.SubprocessError) as e:
+            journal.log(self.src, 'stop.fallback', {'pid': self.pid, 'method': method, 'error': str(e)})
+            return False
+
     def kill(self):
         if not self.alive():
             return
         self.killed = True
+        if self.graceful and self._soft_stop():
+            return
         journal.log(self.src, 'kill', {'name': self.name, 'pid': self.pid})
         try:
             if WIN:  # дерево процессов: cmd /c и его потомки
@@ -147,7 +173,7 @@ class Proc:
             pass
 
 
-def start(name, argv, src=None, binary=False, on_out=None, on_err=None, stdin=False, cwd=None, env=None, join_readers=True):
+def start(name, argv, src=None, binary=False, on_out=None, on_err=None, stdin=False, cwd=None, env=None, join_readers=True, graceful=False):
     """Запуск процесса. argv - список (или строка командной строки на Windows). Строки stderr (и stdout, если не binary) идут
     в журнал и в колбэки по одной; при binary=True stdout отдаётся колбэку кусками байт."""
     with _lock:
@@ -157,12 +183,16 @@ def start(name, argv, src=None, binary=False, on_out=None, on_err=None, stdin=Fa
             raise ValueError('слишком много процессов (%d)' % MAX_PROCS)
     kw = dict(stdin=subprocess.PIPE if stdin else subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, env=env)
     if WIN:
-        kw['creationflags'] = NO_WINDOW
+        kw['creationflags'] = subprocess.CREATE_NEW_PROCESS_GROUP if graceful else NO_WINDOW
+        if graceful:  # Без NO_WINDOW: консоль нужна для CTRL_BREAK; из EXE Windows создаст её скрытой.
+            si = subprocess.STARTUPINFO()
+            si.dwFlags, si.wShowWindow = subprocess.STARTF_USESHOWWINDOW, subprocess.SW_HIDE
+            kw['startupinfo'] = si
     else:
         kw['start_new_session'] = True
     p = subprocess.Popen(argv, **kw)
     _assign(p)
-    pr = Proc(name, p, src or name.split(':')[0], binary, on_out, on_err, join_readers)
+    pr = Proc(name, p, src or name.split(':')[0], binary, on_out, on_err, join_readers, graceful)
     with _lock:
         _procs[name] = pr
     journal.log(pr.src, 'start', {'name': name, 'pid': p.pid, 'argv': argv if isinstance(argv, str) else list(argv)})
