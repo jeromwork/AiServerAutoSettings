@@ -5,7 +5,7 @@
 на каждый путь вместо одного mixed; (4) Clash API.
 Путь = {name (тег последнего outbound'а), kind, outs, final, node}; node - сервер первого звена (для лимита «3 пробы на узел»).
 """
-import copy, os, re, socket
+import copy, os, re, socket, struct, sys
 
 from . import journal
 from .settings import Fail, known_host_keys, read_json
@@ -85,6 +85,50 @@ def hop_outbound(hop, prof):
     return set_algs({'type': 'ssh', 'tag': 'hop-' + hop['name'], 'server': host, 'server_port': port, 'user': user, 'private_key_path': key, 'host_key': keys})
 
 
+def vpn_iface(probe_ip='1.1.1.1'):
+    """Имя включённого VPN (Happ и т.п.): интерфейс, через который Windows ведёт интернет, если он не железный. Иначе None.
+    GetBestInterfaceEx + GetIfEntry2 (iphlpapi): быстро, без PowerShell; вызывается на старте и по net.changed."""
+    if sys.platform != 'win32':
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class Row(ctypes.Structure):  # начало MIB_IF_ROW2 до InterfaceAndOperStatusFlags; буфер под всю структуру - 4 КиБ
+        _fields_ = [('Luid', ctypes.c_uint64), ('Index', wintypes.ULONG), ('Guid', ctypes.c_byte * 16), ('Alias', ctypes.c_wchar * 257),
+                    ('Description', ctypes.c_wchar * 257), ('PhysLen', wintypes.ULONG), ('Phys', ctypes.c_ubyte * 64), ('Mtu', wintypes.ULONG),
+                    ('Type', wintypes.ULONG), ('Tunnel', ctypes.c_int), ('Media', ctypes.c_int), ('Medium', ctypes.c_int),
+                    ('Access', ctypes.c_int), ('Direction', ctypes.c_int), ('Flags', ctypes.c_ubyte)]
+    try:
+        ip = ctypes.WinDLL('iphlpapi')
+        sa = ctypes.create_string_buffer(struct.pack('<HH4s8x', socket.AF_INET, 0, socket.inet_aton(probe_ip)), 16)
+        idx = wintypes.DWORD()
+        if ip.GetBestInterfaceEx(sa, ctypes.byref(idx)):
+            return None
+        raw = ctypes.create_string_buffer(4096)
+        row = ctypes.cast(raw, ctypes.POINTER(Row)).contents
+        row.Index = idx.value
+        if ip.GetIfEntry2(raw):
+            return None
+        return None if row.Flags & 1 else row.Alias  # бит HardwareInterface: Wi-Fi/Ethernet - не VPN
+    except (OSError, ValueError, AttributeError) as e:
+        journal.log('paths', 'vpn.detect.failed', {'error': e.__class__.__name__})
+        return None
+
+
+def via_vpn(p, vpn):
+    """Тот же путь, но первое звено привязано к интерфейсу VPN (bind_interface главнее auto_detect_interface)."""
+    ren = {o['tag']: o['tag'] + '-vpn' for o in p['outs']}
+    outs = []
+    for o in copy.deepcopy(p['outs']):
+        o['tag'] = ren[o['tag']]
+        if o.get('detour'):
+            o['detour'] = ren.get(o['detour'], o['detour'])
+        else:
+            o['bind_interface'] = vpn
+        outs.append(o)
+    return dict(p, name=ren[p['final']], final=ren[p['final']], outs=outs, node='%s через %s' % (p['node'], vpn), via=vpn)
+
+
 def build_paths(s):
     """settings -> ([путь], {что пропущено: причина}). Порядок: узлы входа, relay, hop, cdn, прямой SSH, прямой VLESS."""
     cfg, prof, outs, t = s.cfg, s.prof, s.outs, s.cfg.get('transport') or {}
@@ -149,6 +193,9 @@ def build_paths(s):
     add('ssh', [{'type': 'direct', 'tag': 'ssh-direct'}], 'ssh-direct')
     if vl:
         add('vless', [vless('vless-direct', server=s.server)], 'vless-direct')
+    s.vpn = vpn_iface()
+    if s.vpn:  # каждый путь ещё и через VPN (Happ): все пробуются одновременно, берётся дошедший
+        paths += [via_vpn(p, s.vpn) for p in paths]
     seen = set()
     paths = [p for p in paths if not (p['name'] in seen or seen.add(p['name']))][:PATHS_MAX]
     return paths, miss

@@ -153,12 +153,26 @@ class Settings:
         self.ctx, self.loaded = ctx, False
         bus.subscribe('app.start', self._on_start)
         bus.subscribe('net.changed', self._on_net)
+        bus.subscribe('channel.down', self._on_down)
+
+    def _on_down(self, ev):  # канал оборвался: если VPN за это время сменился - применить сейчас
+        if not ev.get('restart') and self.loaded:
+            self._on_net(None)
 
     def _on_start(self, _):
         self._load()
 
     def _on_net(self, _):  # конфиг не прочитан (установленная программа ещё не настроена) - после смены сети пробуем снова
         if not self.loaded:
+            self._load()
+            return
+        from . import paths as pth
+        vpn, old = pth.vpn_iface(), getattr(self.ctx.settings, 'vpn', None)
+        if vpn != old:  # VPN включили/выключили: пути «через VPN» меняются. При живом канале держимся его (решение владельца)
+            if getattr(self.ctx.rounds, 'channel', None):
+                journal.log('settings', 'vpn.changed', {'from': old, 'to': vpn}, 'VPN изменился, канал жив: пути обновятся после обрыва')
+                return
+            journal.log('settings', 'vpn.changed', {'from': old, 'to': vpn}, 'VPN изменился: перечитываю пути и перезапускаю sing-box')
             self._load()
 
     def _load(self):

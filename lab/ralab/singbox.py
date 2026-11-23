@@ -17,7 +17,7 @@ DELAY_URL = 'https://www.gstatic.com/generate_204'
 class SingBox:
     def __init__(self, ctx):
         self.ctx, self.ports, self.clash_port, self._secret = ctx, {}, 0, ''
-        self.fails, self.up, self.failed, self.stopping = 0, False, False, False
+        self.fails, self.up, self.failed, self.stopping, self.relaunch = 0, False, False, False, False
         self.tail = collections.deque(maxlen=8)
         bus.subscribe('settings.loaded', self._on_settings)
         bus.subscribe('proc.exited', self._on_proc)
@@ -26,6 +26,12 @@ class SingBox:
         bus.subscribe('app.stop', self._on_stop)
 
     def _on_settings(self, _):
+        if procs.get('singbox'):  # пути изменились (VPN): гасим старый, новый запустится по событию выхода
+            self.relaunch = True
+            journal.log('singbox', 'relaunch', None, 'пути изменились: перезапуск sing-box')
+            procs.kill('singbox')
+            return
+        self.failed, self.fails = False, 0
         self._launch()
 
     def _on_stop(self, _):
@@ -72,6 +78,10 @@ class SingBox:
 
     def _on_exited(self, ev):
         if self.stopping:
+            return
+        if self.relaunch:
+            self.relaunch, self.fails, self.failed = False, 0, False
+            self._launch()
             return
         self.fails += 1
         if self.fails >= RESTARTS_MAX:
