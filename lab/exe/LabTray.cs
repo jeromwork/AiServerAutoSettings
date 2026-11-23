@@ -10,19 +10,20 @@ namespace RemoteAgents.Lab
     {
         readonly Supervisor supervisor; readonly NotifyIcon icon = new NotifyIcon();
         readonly Icon grey = MakeIcon(Color.Gray), yellow = MakeIcon(Color.Goldenrod), green = MakeIcon(Color.ForestGreen), red = MakeIcon(Color.Firebrick);
-        Form window; TextBox box; Button restart;
+        Form window; TextBox box; Button restart; readonly LabDisk disk;
 
         public LabTray(Supervisor supervisor)
         {
             this.supervisor = supervisor;
+            disk = new LabDisk(supervisor.Home, supervisor.WriteLog, (message, ok) => icon.ShowBalloonTip(4000, "Диск", message, ok ? ToolTipIcon.Info : ToolTipIcon.Warning));
             var menu = new ContextMenuStrip();
             menu.Items.Add("Состояние", null, (s, e) => ShowWindow());
             menu.Items.Add("Скопировать отчёт", null, (s, e) => supervisor.RequestReport());
-            menu.Items.Add("Выход", null, (s, e) => supervisor.RequestExit());
+            menu.Items.Add("Выход", null, (s, e) => { disk.Stop(false); supervisor.RequestExit(); });
             icon.ContextMenuStrip = menu; icon.Visible = true;
             icon.DoubleClick += (s, e) => ShowWindow();
             supervisor.StateChanged += Refresh;
-            supervisor.Quit += () => { icon.Visible = false; icon.Dispose(); ExitThread(); };
+            supervisor.Quit += () => { disk.Stop(true); icon.Visible = false; icon.Dispose(); ExitThread(); };
             supervisor.ReportReady += text => {
                 try { Clipboard.SetText(text); icon.ShowBalloonTip(3000, "RemoteAgents-Lab", "Отчёт скопирован в буфер обмена", ToolTipIcon.Info); }
                 catch (Exception) { icon.ShowBalloonTip(3000, "RemoteAgents-Lab", "Буфер обмена занят, нажмите ещё раз", ToolTipIcon.Warning); }
@@ -34,6 +35,7 @@ namespace RemoteAgents.Lab
         {
             var state = supervisor.State;
             icon.Icon = state.Color == "green" ? green : state.Color == "yellow" ? yellow : state.Color == "red" ? red : grey;
+            disk.Sync(supervisor.DiskRunning);
             icon.Text = state.Tip; // NotifyIcon.Text: не больше 63 символов, Supervisor их уже обрезал
             if (window != null && window.Visible) FillWindow();
         }

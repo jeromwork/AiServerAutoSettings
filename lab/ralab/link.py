@@ -77,6 +77,8 @@ class Link:
             lines.append('Сеть %s: %s %s' % (s['name'], s['status'], s['detail']))
         lines = [journal.mask(l)[:LINE_MAX] for l in lines][:LINES_MAX]
         msg = {'t': 'state', 'color': self.color, 'tip': self.tip[:TIP_MAX], 'lines': lines}
+        if getattr(ctx, 'disk', None) and ctx.disk.state == 'running':
+            msg['disk'] = True  # V8: EXE включает значки Проводника только пока Диск ведёт Лаборатория
         key = json.dumps(msg, sort_keys=True)
         if key != self.last:
             self.last = key

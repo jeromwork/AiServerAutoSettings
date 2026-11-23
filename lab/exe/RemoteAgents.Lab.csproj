@@ -33,8 +33,13 @@
     <Reference Include="System.Windows.Forms" />
     <Reference Include="System.Drawing" />
     <Reference Include="System.Web.Extensions" />
+    <Reference Include="System.Xml" />
     <Reference Include="System.IO.Compression" />
     <Reference Include="System.IO.Compression.FileSystem" />
+    <!-- V8: Проводник Диска (дословные копии старой Программы); имена ресурсов как в ней -->
+    <EmbeddedResource Include="disk/app.ico" LogicalName="RemoteAgents.App.ico" />
+    <EmbeddedResource Include="disk/icons/*.ico" LogicalName="RemoteAgents.Icons.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="disk/stignore.txt" LogicalName="RemoteAgents.Lab.stignore.txt" />
     <EmbeddedResource Include="$(PythonEmbedZip)" LogicalName="python-embed.zip" Condition="Exists('$(PythonEmbedZip)')" />
     <EmbeddedResource Include="$(LabCodeZip)" LogicalName="lab-code.zip" Condition="Exists('$(LabCodeZip)')" />
     <EmbeddedResource Include="$(StopCmdPath)" LogicalName="STOP.cmd" Condition="Exists('$(StopCmdPath)')" />
