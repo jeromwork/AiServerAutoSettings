@@ -79,6 +79,26 @@ def notify(pc, version, rollback):
             s.close()
 
 
+def start_shim(pc, st):
+    """MCP-шим windows_* (mcp_shim.py рядом): только у победителя CLAIM; любая ошибка шима сессию не роняет."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import mcp_shim
+        def ag(method, path, body=None, timeout=15):
+            try:
+                return call(st, method, path, body, timeout=timeout)
+            except SystemExit:
+                return None, {}
+        ident = mcp_shim.identity(pc)
+        mcp_shim.register(pc, ident)
+        shim = mcp_shim.Shim(ident, ag)
+        shim.start()
+        return shim
+    except Exception as e:
+        print('ra-lab: шим MCP не поднят: %s' % e.__class__.__name__, file=sys.stderr)
+        return None
+
+
 # --- session: проба 64 КиБ и канал ---
 def cmd_session(a):
     out, inp = sys.stdout.buffer, sys.stdin.buffer
@@ -106,8 +126,15 @@ def cmd_session(a):
     out.write(b'RALAB-CHANNEL-UP %s\n' % a.version.encode())
     out.flush()
     notify(a.pc, a.version, a.rollback)
-    while inp.read(4096):  # держим сессию до EOF (ПК закрыл ssh)
-        pass
+    shim = start_shim(a.pc, st)
+    try:
+        while inp.read(4096):  # держим сессию до EOF (ПК закрыл ssh)
+            pass
+    finally:
+        try:
+            shim and shim.close()
+        except Exception:
+            pass
     try:
         if read_state(a.pc)['token'] == token:
             os.remove(os.path.join(STATE, a.pc + '.json'))

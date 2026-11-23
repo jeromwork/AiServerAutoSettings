@@ -28,6 +28,10 @@ Clash API с secret), одновременно измеряет все пути 
 В Python один таймер - конец раунда измерений `round.end` (60 с, `bus.guard`); замёрзший путь не сообщает о заморозке. Детекторы заморозки
 канала - чужие: ssh `ServerAliveInterval=15` x 2, TCP keepalive sing-box (`tcp_keep_alive 15s / 5s`), QUIC idle у hy2/tuic.
 
+## MCP windows_* через Лабораторию (V6, только сервер)
+`ra-lab session` победителя CLAIM поднимает шим `server/mcp_shim.py`: сокет `~/.local/state/codex-remote/win-<хэш>.sock` и запись `~/.local/share/remote-agents-nodes/lab-<ПК>/lab.json` (projectId `lab`).
+Нет канала - нет шима (статус `tunnel-down`); при закрытии сессии сокет удаляется. Рабочая папка на ПК - `C:\\Users\\user` (переопределение: `RA_LAB_WORKSPACE`).
+
 ## TODO
 TODO(владелец 23.11): переключение на более быстрый путь при работающем канале - решить позже (канал рвётся на секунды).
 Сейчас путь меняется только при обрыве канала или командой `ra-lab switch`; рейтинг задаёт порядок проб в следующем раунде.
