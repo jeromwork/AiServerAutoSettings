@@ -13,7 +13,7 @@ MEM_MAX = 300 * 1024 * 1024
 class Ctx(types.SimpleNamespace):
     def status(self):
         s = getattr(self, 'settings', None)
-        return {'version': self.version, 'exe_version': self.exe_version, 'rollback': self.rollback, 'computer': self.computer,
+        return {'home': self.home, 'version': self.version, 'exe_version': self.exe_version, 'rollback': self.rollback, 'computer': self.computer,
                 'uptime_s': int(time.monotonic() - self.t0), 'rss_mb': round(rss_bytes() / 1048576, 1), 'events': bus.count,
                 'agent_port': self.agent.port, 'color': self.link.color, 'state': self.link.note,
                 'settings': {'paths': [p['name'] for p in s.paths], 'skipped': s.skipped, 'lans': [n['name'] for n in s.lans], 'server': s.server} if s else None,

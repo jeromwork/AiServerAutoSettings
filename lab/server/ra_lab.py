@@ -4,11 +4,12 @@
   ra-lab session ...   служебная: её запускает ssh ПК (проба 64 КиБ и канал), руками не вызывается
   ra-lab wait-up [--deadline 90] [--pc ИМЯ]      ждать подключения ПК
   ra-lab status | log [-n N] | rank | exec "<cmd>" [--shell powershell|cmd] [--max-time S] [--cwd D] | kill <id> |
-         read <удалённый путь> [локальный] | write <удалённый путь> <локальный|-> | restart | switch <путь> | push [--wait]
+         read <удалённый путь> [локальный] | write <удалённый путь> <локальный|-> | restart | switch <путь> | push [--wait] |
+         collect [--every 20]   (долгая: докачивает журнал ПК в ~/work/logs-in/lab/<ПК>/, живёт и после закрытия лаборатории)
 Состояние: ~/.local/state/ra-lab/ (0700): <ПК>.json {port, token, version, rollback} (0600) и <ПК>.events (unix-сокет wait-up).
 Токен агента никогда не печатается. Стандартная библиотека, Python 3.8+.
 """
-import argparse, base64, codecs, glob, hashlib, io, json, os, socket, subprocess, sys, threading, urllib.error, urllib.parse, urllib.request, zipfile
+import argparse, base64, codecs, datetime, glob, hashlib, io, json, os, socket, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request, zipfile
 
 STATE = os.path.expanduser('~/.local/state/ra-lab')
 SIZE = 65536
@@ -277,11 +278,73 @@ def cmd_push(a):
         print('код отклонён:\n  ' + '\n  '.join(r.get('errors') or [r.get('error', str(code))]))
         return 1
     print('код принят: %s (%d файлов), Python перезапускается' % (r['dir'], r['files']))
+    mark(st['pc'], 'push', {'dir': r['dir'], 'git': sha + ('-dirty' if dirty else ''), 'files': r['files']})
     if a.wait:
         n = wait_notice(srv, path, a.deadline)
         if not n:
             sys.exit('ra-lab: за %d с новая версия не подняла канал' % a.deadline)
         say_up(n[0], n[1], expect=r['dir'])
+
+
+def logs_dir(pc):
+    d = os.path.expanduser('~/work/logs-in/lab/%s' % pc)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def mark(pc, ev, data):
+    """Веха: что и когда выложено/случилось, одна строка JSON в ~/work/logs-in/lab/<ПК>/milestones.jsonl."""
+    rec = {'ts': datetime.datetime.now().astimezone().isoformat(timespec='seconds'), 'ev': ev}
+    rec.update(data)
+    with open(os.path.join(logs_dir(pc), 'milestones.jsonl'), 'a', encoding='utf-8') as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + '\n')
+
+
+def collect_once(pc, st):
+    """Дочитывает новые байты журнала ПК. Файл стал меньше записанного - старую копию откладываем (.old-<время>)."""
+    home = ok(st, 'GET', '/status').get('home')
+    if not home:
+        return 0
+    logs = home + '\\logs'
+    d, offp = logs_dir(pc), os.path.join(logs_dir(pc), '.offsets.json')
+    offs = json.load(open(offp)) if os.path.exists(offp) else {}
+    got = 0
+    for e in ok(st, 'GET', '/files?path=' + urllib.parse.quote(logs, safe='')).get('entries', []):
+        n = e['name']
+        if e['dir'] or not n.startswith('lab-') or e.get('size') is None:
+            continue
+        local = os.path.join(d, n)
+        if e['size'] < offs.get(n, 0):  # новый запуск перезаписал файл
+            if os.path.exists(local):
+                os.replace(local, local + '.old-' + str(int(time.time())))
+            offs[n] = 0
+        while offs.get(n, 0) < e['size']:
+            r = ok(st, 'GET', '/read?path=%s&offset=%d' % (urllib.parse.quote(logs + '\\' + n, safe=''), offs.get(n, 0)))
+            b = base64.b64decode(r['b64'])
+            if not b:
+                break
+            with open(local, 'ab') as f:
+                f.write(b)
+            offs[n] = offs.get(n, 0) + len(b)
+            got += len(b)
+        json.dump(offs, open(offp, 'w'))
+    return got
+
+
+def cmd_collect(a):
+    last_version = None
+    while True:
+        try:
+            st = read_state(a.pc)
+            if st.get('version') != last_version:
+                mark(st['pc'], 'version', {'version': st.get('version'), 'rollback': st.get('rollback')})
+                last_version = st.get('version')
+            collect_once(st['pc'], st)
+        except SystemExit:
+            pass  # канала нет: ПК закрыт или переключается - повторим
+        except Exception as e:
+            print('collect: %s' % e, file=sys.stderr, flush=True)
+        time.sleep(a.every)
 
 
 def main():
@@ -306,6 +369,7 @@ def main():
     add('write', cmd_write, P('remote'), P('local'))
     add('restart', cmd_restart)
     add('switch', cmd_switch, P('path'))
+    add('collect', cmd_collect, P('--every', type=int, default=20))
     add('push', cmd_push, P('--wait', action='store_true'), P('--deadline', type=int, default=90))
     a = ap.parse_args()
     sys.exit(a.fn(a) or 0)
