@@ -26,11 +26,26 @@ namespace RemoteAgents.Launcher
         public string Read(string key, string name)
         {
             string k = Map(key); string v = k == null ? null : inner.Read(k, name);
+            if (v != null && IsCommand(key, name)) { string src; lock (sources) { if (sources.TryGetValue(k, out src)) { string exe = ShellExe, a = System.Text.RegularExpressions.Regex.Match(src, @" --disk-shell (\S+) ").Groups[1].Value; if (exe != null && v == "\"" + exe + "\" " + a + " \"%1\"") return src; } } }
             return name == "MUIVerb" && v != null && v.EndsWith(Mark, StringComparison.Ordinal) ? v.Substring(0, v.Length - Mark.Length) : v;
         }
         // Frozen: после остановки поздняя регистрация из потока контроллера не должна вернуть ключи.
         internal volatile bool Frozen;
-        public void Write(string key, string name, string value) { string k = Map(key); if (k != null && !Frozen) inner.Write(k, name, name == "MUIVerb" ? value + Mark : value); }
+        // V9b: команда пункта -- маленький клиент asInvoker (без UAC): "<shell.exe>" <действие> "%1". Нет клиента -- пункт не пишется.
+        internal volatile string ShellExe;
+        readonly System.Collections.Generic.Dictionary<string, string> sources = new System.Collections.Generic.Dictionary<string, string>();
+        static bool IsCommand(string key, string name) { return name == "" && key.EndsWith(@"\command", StringComparison.Ordinal); }
+        public void Write(string key, string name, string value)
+        {
+            string k = Map(key); string exe = ShellExe; if (k == null || Frozen || exe == null) return;
+            if (IsCommand(key, name)) {
+                var m = System.Text.RegularExpressions.Regex.Match(value, @" --disk-shell (\S+) ");
+                if (!m.Success) return;
+                lock (sources) sources[k] = value;
+                value = "\"" + exe + "\" " + m.Groups[1].Value + " \"%1\"";
+            }
+            inner.Write(k, name, name == "MUIVerb" ? value + Mark : value);
+        }
         public void DeleteTree(string key) { string k = Map(key); if (k != null) inner.DeleteTree(k); }
     }
 }
@@ -62,7 +77,9 @@ namespace RemoteAgents.Lab
             try {
                 string assets = Path.Combine(home, "disk-assets"); Unpack(assets);
                 var logger = log;
-                store = new LabVerbsRegistry(); verbs = new DiskExplorerRegistry(store, logger, DiskExplorerNotifier.AssociationsChanged);
+                store = new LabVerbsRegistry();
+                // V9b: без клиента (null) пункты не регистрируем (лучше нет меню, чем UAC); контроллер значков создаётся всё равно.
+                store.ShellExe = UnpackShell(assets); verbs = new DiskExplorerRegistry(store, logger, DiskExplorerNotifier.AssociationsChanged);
                 controller = new DiskExplorerController(home, Root, () => assets, () => enabled && !stopped, () => true,
                     (message, ok) => { var context = ui; if (context != null) context.Post(s => { if (!stopped) balloon(message, ok); }, null); },
                     logger, DiskExplorerNative.CreateService(Path.Combine(diskHome, "explorer-icons"), logger), verbs, diskHome);
@@ -148,6 +165,33 @@ namespace RemoteAgents.Lab
             using (var source = typeof(LabDisk).Assembly.GetManifestResourceStream("RemoteAgents.Lab.stignore.txt"))
             using (var file = new FileStream(target, FileMode.Create, FileAccess.Write)) source.CopyTo(file);
         }
+
+        // V9b: клиент меню из ресурса; имя по хешу содержимого, запись через временный файл. Любая неудача -> null (меню не регистрируем, значки работают).
+        string UnpackShell(string assets)
+        {
+            try {
+                byte[] data;
+                using (var source = typeof(LabDisk).Assembly.GetManifestResourceStream("RemoteAgents.Lab.Shell.exe")) {
+                    if (source == null) return null;
+                    using (var memory = new MemoryStream()) { source.CopyTo(memory); data = memory.ToArray(); }
+                }
+                string hash;
+                using (var sha = System.Security.Cryptography.SHA256.Create()) hash = BitConverter.ToString(sha.ComputeHash(data)).Replace("-", "").Substring(0, 8).ToLowerInvariant();
+                string name = "RemoteAgents-Lab-shell-" + hash + ".exe", target = Path.Combine(assets, name);
+                Directory.CreateDirectory(assets);
+                if (!Same(target, data)) {
+                    string temp = Path.Combine(assets, name + "." + Guid.NewGuid().ToString("N") + ".tmp");
+                    try {
+                        File.WriteAllBytes(temp, data);
+                        try { File.Move(temp, target); } catch (IOException) { if (!Same(target, data)) return null; }
+                    } finally { try { File.Delete(temp); } catch (Exception) { } }
+                }
+                try { foreach (string old in Directory.GetFiles(assets, "RemoteAgents-Lab-shell*")) if (!string.Equals(Path.GetFileName(old), name, StringComparison.OrdinalIgnoreCase)) try { File.Delete(old); } catch (Exception) { } } catch (Exception) { }
+                return target;
+            } catch (Exception e) { log("Проводник Диска: клиент меню не распакован: " + e.Message); return null; }
+        }
+        static bool Same(string path, byte[] data)
+        { try { return File.Exists(path) && System.Linq.Enumerable.SequenceEqual(File.ReadAllBytes(path), data); } catch (Exception) { return false; } }
 
         // wait=false: только велеть остановиться (до Выхода Python); wait=true: дождаться (до 3,5 с) очистки и значков «Недоступно».
         public void Stop(bool wait)

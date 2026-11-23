@@ -26,9 +26,12 @@
     <!-- Пути ниже задаёт build.sh (абсолютные); по умолчанию — lab/out/. -->
     <PythonEmbedZip Condition="'$(PythonEmbedZip)' == ''">$(MSBuildThisFileDirectory)../out/work/python-embed.zip</PythonEmbedZip>
     <LabCodeZip Condition="'$(LabCodeZip)' == ''">$(MSBuildThisFileDirectory)../out/work/lab-code.zip</LabCodeZip>
+    <ShellExePath Condition="'$(ShellExePath)' == ''">$(MSBuildThisFileDirectory)../out/RemoteAgents-Lab-shell.exe</ShellExePath>
     <StopCmdPath Condition="'$(StopCmdPath)' == ''">$(MSBuildThisFileDirectory)../out/RemoteAgents-Lab-STOP.cmd</StopCmdPath>
   </PropertyGroup>
   <ItemGroup>
+    <!-- V9b: клиент меню собирается отдельным проектом -->
+    <Compile Remove="shell/**" />
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
     <Reference Include="System.Windows.Forms" />
     <Reference Include="System.Drawing" />
@@ -42,9 +45,10 @@
     <EmbeddedResource Include="disk/stignore.txt" LogicalName="RemoteAgents.Lab.stignore.txt" />
     <EmbeddedResource Include="$(PythonEmbedZip)" LogicalName="python-embed.zip" Condition="Exists('$(PythonEmbedZip)')" />
     <EmbeddedResource Include="$(LabCodeZip)" LogicalName="lab-code.zip" Condition="Exists('$(LabCodeZip)')" />
+    <EmbeddedResource Include="$(ShellExePath)" LogicalName="RemoteAgents.Lab.Shell.exe" Condition="Exists('$(ShellExePath)')" />
     <EmbeddedResource Include="$(StopCmdPath)" LogicalName="STOP.cmd" Condition="Exists('$(StopCmdPath)')" />
   </ItemGroup>
   <Target Name="RequireLabResources" BeforeTargets="Publish">
-    <Error Condition="!Exists('$(PythonEmbedZip)') Or !Exists('$(LabCodeZip)') Or !Exists('$(StopCmdPath)')" Text="Сначала lab/build.sh: нужны python-embed.zip, lab-code.zip и STOP.cmd" />
+    <Error Condition="!Exists('$(PythonEmbedZip)') Or !Exists('$(LabCodeZip)') Or !Exists('$(StopCmdPath)') Or !Exists('$(ShellExePath)')" Text="Сначала lab/build.sh: нужны python-embed.zip, lab-code.zip, STOP.cmd и клиент меню" />
   </Target>
 </Project>

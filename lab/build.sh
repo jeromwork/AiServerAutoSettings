@@ -65,12 +65,17 @@ PY
 # 4. СТОП.cmd: в репозитории с LF, на выходе строго CRLF (cmd).
 sed 's/\r$//; s/$/\r/' "$here/exe/STOP.cmd" > "$out/RemoteAgents-Lab-STOP.cmd"
 
+# 4б. Клиент меню Проводника (asInvoker): собирается до основного EXE и встраивается в него.
+rm -rf "$out/publish-shell"
+"$dotnet" publish "$here/exe/shell/RemoteAgents.Lab.Shell.csproj" -c Release -o "$out/publish-shell"
+cp "$out/publish-shell/RemoteAgents-Lab-shell.exe" "$out/RemoteAgents-Lab-shell.exe"
+
 # 5. Публикация EXE.
 rm -rf "$out/publish"
 "$dotnet" publish "$here/exe/RemoteAgents.Lab.csproj" -c Release \
-  -p:LabVersion="$version" -p:PythonEmbedZip="$work/python-embed.zip" -p:LabCodeZip="$work/lab-code.zip" -p:StopCmdPath="$out/RemoteAgents-Lab-STOP.cmd" \
+  -p:LabVersion="$version" -p:PythonEmbedZip="$work/python-embed.zip" -p:LabCodeZip="$work/lab-code.zip" -p:StopCmdPath="$out/RemoteAgents-Lab-STOP.cmd" -p:ShellExePath="$out/RemoteAgents-Lab-shell.exe" \
   -o "$out/publish"
 cp "$out/publish/RemoteAgents-Lab.exe" "$out/RemoteAgents-Lab.exe"
 echo "версия: $version"
-ls -l "$out/RemoteAgents-Lab.exe" "$out/RemoteAgents-Lab-STOP.cmd"
+ls -l "$out/RemoteAgents-Lab.exe" "$out/RemoteAgents-Lab-shell.exe" "$out/RemoteAgents-Lab-STOP.cmd"
 sha256sum "$out/RemoteAgents-Lab.exe" "$out/RemoteAgents-Lab-STOP.cmd"
