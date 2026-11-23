@@ -13,7 +13,7 @@ from .settings import Fail, known_host_keys, read_json
 KINDS = ['hy2', 'hy2obfs', 'tuic', 'trojan', 'reality', 'shadowtls', 'ws-direct', 'ws-cdn']
 NAME_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$')
 PATHS_MAX = 64
-TCP_TYPES = ('vless', 'trojan', 'shadowtls', 'ssh', 'vmess', 'shadowsocks')
+TCP_TYPES = ('vless', 'trojan', 'shadowtls', 'ssh', 'vmess', 'shadowsocks', 'direct')
 # детектор заморозки, раздел 2.7: ядро закроет TCP-соединение через ~15 с + 9 x 5 с без ответа вместо 16 минут по умолчанию
 KEEPALIVE = {'tcp_keep_alive': '15s', 'tcp_keep_alive_interval': '5s'}
 HOP_RE = re.compile(r'^(?:([a-z_][a-z0-9_-]{0,31})@)?([a-zA-Z0-9][a-zA-Z0-9.-]{0,252})(?::(\d{1,5}))?$')
@@ -86,7 +86,7 @@ def hop_outbound(hop, prof):
 
 
 def build_paths(s):
-    """settings -> ([путь], {что пропущено: причина}). Порядок: узлы входа, relay, hop, cdn, прямой VLESS."""
+    """settings -> ([путь], {что пропущено: причина}). Порядок: узлы входа, relay, hop, cdn, прямой SSH, прямой VLESS."""
     cfg, prof, outs, t = s.cfg, s.prof, s.outs, s.cfg.get('transport') or {}
     vl, paths, miss = next((o for o in outs if o.get('type') == 'vless'), None), [], {}
     hops = list(t.get('hops') or [])
@@ -145,6 +145,8 @@ def build_paths(s):
                         add(kind, [h, vless(tag, detour=h['tag'], server=s.server)], tag)
             except (KeyError, TypeError, ValueError, Fail) as e:
                 miss['%s:%s' % (kind, it.get('name') or it.get('entry'))] = 'пропущен: ' + (str(e.args[0]) if e.args else e.__class__.__name__)
+    # Прямой SSH к серверу (как openssh-direct / singbox-ssh-direct старой программы): ТСПУ режет VLESS/HTTP к серверу, SSH:22 - нет.
+    add('ssh', [{'type': 'direct', 'tag': 'ssh-direct'}], 'ssh-direct')
     if vl:
         add('vless', [vless('vless-direct', server=s.server)], 'vless-direct')
     seen = set()
