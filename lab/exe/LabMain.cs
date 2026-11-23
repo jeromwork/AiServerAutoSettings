@@ -98,7 +98,7 @@ namespace RemoteAgents.Lab
         readonly ExeLog log; readonly Control ui; readonly LabJob job = new LabJob();
         readonly System.Windows.Forms.Timer timerV = new System.Windows.Forms.Timer();
         public CodeSlots Slots; public LabState State = new LabState();
-        public volatile string DiskHome = ""; public volatile bool DiskRunning;   // Python сообщил «Диск: работает» (поле disk:true в state); читает поток Проводника
+        public volatile int HappierPort; public volatile string DiskHome = ""; public volatile bool DiskRunning;   // Python сообщил «Диск: работает» (поле disk:true в state); читает поток Проводника
         public void WriteLog(string text) { log.Write(text); }
         public event Action StateChanged; public event Action<string> ReportReady; public event Action Quit;
         PyRun run; int generation, queuedLines; bool exitRequested, stopped, disposed;
@@ -288,7 +288,7 @@ namespace RemoteAgents.Lab
         void HandleExit(PyRun r, int code)
         {
             if (r != run) return;
-            run = null; timerV.Stop(); DiskRunning = false; DiskHome = "";
+            run = null; timerV.Stop(); HappierPort = 0; DiskRunning = false; DiskHome = "";
             double seconds = (DateTime.UtcNow - r.Started).TotalSeconds;
             log.Write("Python #" + r.Generation + " вышел с кодом " + code + " за " + (int)seconds + " с" + (r.TimeoutFired ? " (таймер В)" : "") + (r.GoodSeen ? ", канал был" : ""));
             if (exitRequested) { Finish(); return; }
@@ -315,6 +315,7 @@ namespace RemoteAgents.Lab
                     if (array != null) foreach (var item in array) { if (list.Count >= 50) break; string s = Convert.ToString(item) ?? ""; list.Add(s.Length > 300 ? s.Substring(0, 300) : s); }
                     object disk; msg.TryGetValue("disk", out disk); DiskRunning = !exitRequested && disk is bool && (bool)disk;
                     object diskHome; msg.TryGetValue("diskHome", out diskHome); string dh = diskHome as string; DiskHome = DiskRunning && dh != null && dh.Length < 260 && dh.IndexOfAny(new[] { '"', '\r', '\n', '\0' }) < 0 ? dh : "";
+                    object hp; msg.TryGetValue("happierPort", out hp); int hpn; try { hpn = hp == null ? 0 : Convert.ToInt32(hp); } catch (Exception) { hpn = 0; } HappierPort = hpn > 0 && hpn < 65536 ? hpn : 0;
                     SetState(exitRequested ? "grey" : c, exitRequested ? "Выход..." : (tip as string) ?? "", list.ToArray());
                     break;
                 }

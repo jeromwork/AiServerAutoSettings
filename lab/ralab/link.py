@@ -81,6 +81,10 @@ class Link:
             msg['disk'] = True  # V8: EXE включает значки Проводника только пока Диск ведёт Лаборатория
             if (ctx.disk.info or {}).get('home'):
                 msg['diskHome'] = ctx.disk.info['home']  # V9: каталог Диска (с учётом config.disk.home) для контроллера в EXE
+        fw = getattr(ctx, 'forward', None)
+        ports = [int(k.split(':')[1]) for k, v in (getattr(fw, 'listeners', None) or {}).items() if k.startswith('forward:') and k not in (getattr(fw, 'fixed', None) or {}) and v.get('ok')]
+        if ports:
+            msg['happierPort'] = ports[0]  # V10: порт Happier для пункта «Открыть» (первый обычный проброс; без него EXE берёт 47831)
         key = json.dumps(msg, sort_keys=True)
         if key != self.last:
             self.last = key

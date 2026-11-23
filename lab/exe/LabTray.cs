@@ -10,25 +10,46 @@ namespace RemoteAgents.Lab
     {
         readonly Supervisor supervisor; readonly NotifyIcon icon = new NotifyIcon();
         readonly Icon grey = MakeIcon(Color.Gray), yellow = MakeIcon(Color.Goldenrod), green = MakeIcon(Color.ForestGreen), red = MakeIcon(Color.Firebrick);
-        Form window; TextBox box; Button restart; readonly LabDisk disk;
+        ToolStripMenuItem diskItem; Timer clickTimer; Form window; TextBox box; Button restart; readonly LabDisk disk;
 
         public LabTray(Supervisor supervisor)
         {
             this.supervisor = supervisor;
             disk = new LabDisk(supervisor.Home, supervisor.WriteLog, (message, ok) => icon.ShowBalloonTip(4000, "Диск", message, ok ? ToolTipIcon.Info : ToolTipIcon.Warning));
             var menu = new ContextMenuStrip();
+            menu.Items.Add("Открыть", null, (s, e) => OpenHappier());
+            diskItem = (ToolStripMenuItem)menu.Items.Add("Диск", null, (s, e) => OpenDisk());
+            menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Состояние", null, (s, e) => ShowWindow());
             menu.Items.Add("Скопировать отчёт", null, (s, e) => supervisor.RequestReport());
+            menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Выход", null, (s, e) => { disk.Stop(false); supervisor.RequestExit(); });
             icon.ContextMenuStrip = menu; icon.Visible = true;
-            icon.DoubleClick += (s, e) => ShowWindow();
+            menu.Opening += (s, e) => diskItem.Enabled = supervisor.DiskRunning && supervisor.DiskHome.Length > 0;
+            // Одиночный левый клик открывает Happier после паузы DoubleClickTime; двойной клик гасит таймер и открывает только «Состояние».
+            clickTimer = new Timer { Interval = SystemInformation.DoubleClickTime };
+            clickTimer.Tick += (s, e) => { clickTimer.Stop(); OpenHappier(); };
+            icon.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) { clickTimer.Stop(); clickTimer.Start(); } };
+            icon.DoubleClick += (s, e) => { clickTimer.Stop(); ShowWindow(); };
             supervisor.StateChanged += Refresh;
-            supervisor.Quit += () => { disk.Stop(true); icon.Visible = false; icon.Dispose(); ExitThread(); };
+            supervisor.Quit += () => { clickTimer.Stop(); clickTimer.Dispose(); disk.Stop(true); icon.Visible = false; icon.Dispose(); ExitThread(); };
             supervisor.ReportReady += text => {
                 try { Clipboard.SetText(text); icon.ShowBalloonTip(3000, "RemoteAgents-Lab", "Отчёт скопирован в буфер обмена", ToolTipIcon.Info); }
                 catch (Exception) { icon.ShowBalloonTip(3000, "RemoteAgents-Lab", "Буфер обмена занят, нажмите ещё раз", ToolTipIcon.Warning); }
             };
             Refresh();
+        }
+
+        void OpenHappier()
+        {
+            try { int port = supervisor.HappierPort; System.Diagnostics.Process.Start("http://127.0.0.1:" + (port > 0 ? port : 47831)); }
+            catch (Exception ex) { supervisor.WriteLog("Открыть Happier: " + ex.Message); }
+        }
+
+        void OpenDisk()
+        {
+            try { string root = supervisor.DiskHome; if (supervisor.DiskRunning && root.Length > 0) System.Diagnostics.Process.Start("explorer.exe", "\"" + root + "\""); }
+            catch (Exception ex) { supervisor.WriteLog("Открыть Диск: " + ex.Message); }
         }
 
         void Refresh()
