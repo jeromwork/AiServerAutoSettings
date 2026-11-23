@@ -278,7 +278,7 @@ class Rounds:
                 '-o', 'UserKnownHostsFile="%s"' % s.known_hosts.replace('\\', '/'), '-o', 'GlobalKnownHostsFile=none',
                 '-o', 'StrictHostKeyChecking=yes', '-o', 'HostKeyAlias=' + s.server, '-o', 'ProxyCommand=none', '-o', 'ProxyJump=none',
                 '-o', 'ConnectionAttempts=1', '-o', 'LogLevel=ERROR', '-o', 'ExitOnForwardFailure=yes',
-                '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=2',  # детектор заморозки, раздел 2.7: ловит заморозку на любом пути
+                '-o', 'ServerAliveInterval=3', '-o', 'ServerAliveCountMax=3',  # детектор заморозки (23.11: 3 с x 3 = 9 с; шлёт пакет только когда канал молчит, ~3 МБ в сутки)
                 '-R', '127.0.0.1:%d:127.0.0.1:%d' % (rport, self.ctx.agent.port), '-D', '127.0.0.1:%d' % p.socks,
                 '%s@127.0.0.1' % s.login, cmd]
         p.t0 = time.monotonic()
