@@ -258,7 +258,12 @@ def make_config(s, ports, clash_port, secret):
     """Конфиг sing-box: вход direct 127.0.0.1:<порт> -> сервер:порт SSH для каждого пути, Clash API на 127.0.0.1 с secret.
     Нет tun, прокси, DNS и маршрутов системы. ports: {имя пути: порт}."""
     ins, rules, outs, tags = [], [], [], set()
+    names = []
     for p in s.paths:
+        if p['name'] == 'chan':  # тег selector занят именем пути: в in-chan путь не берём (остаётся его in-<путь>)
+            journal.log('paths', 'chan.name.skipped', {'path': p['name']}, 'имя пути совпало с тегом selector chan: путь не включён в selector')
+        elif p['name'] not in names:
+            names.append(p['name'])
         ins.append({'type': 'direct', 'tag': 'in-' + p['name'], 'listen': '127.0.0.1', 'listen_port': ports[p['name']],
                     'override_address': s.server, 'override_port': s.port})
         rules.append({'inbound': 'in-' + p['name'], 'outbound': p['final']})
@@ -269,6 +274,11 @@ def make_config(s, ports, clash_port, secret):
             if o.get('type') in TCP_TYPES and not o.get('detour'):  # первое звено цепочки и одиночные TCP-пути
                 o.update(KEEPALIVE)
             outs.append(o)
+    if 'chan' in ports and names and 'chan' not in tags:  # общий вход канала: selector по всем путям (V2: наблюдение, ssh пока ходит через in-<путь>)
+        ins.append({'type': 'direct', 'tag': 'in-chan', 'listen': '127.0.0.1', 'listen_port': ports['chan'],
+                    'override_address': s.server, 'override_port': s.port})
+        outs.append({'type': 'selector', 'tag': 'chan', 'outbounds': names, 'default': names[0], 'interrupt_exist_connections': False})
+        rules.append({'inbound': 'in-chan', 'outbound': 'chan'})
     return {'log': {'level': 'info'},  # level=info: строка "sing-box started" - событие готовности
             # auto_detect_interface: внешние соединения - через физический NIC по умолчанию (bindPhysical старой программы).
             # Без него ОС увела sparfum:8443 через виртуальный адаптер 172.18.0.1 и получила сброс (журнал 23.11).

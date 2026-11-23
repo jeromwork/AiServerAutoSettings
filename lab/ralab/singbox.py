@@ -50,8 +50,10 @@ class SingBox:
             bus.publish('singbox.failed', {'reason': 'нет путей: %s' % '; '.join('%s - %s' % kv for kv in s.skipped.items())[:300]})
             self.failed = True
             return
-        ps = pth.free_ports(len(s.paths) + 1)
+        ps = pth.free_ports(len(s.paths) + 2)
         self.ports = {p['name']: ps[i] for i, p in enumerate(s.paths)}
+        if 'chan' not in self.ports:
+            self.ports['chan'] = ps[-2]  # общий вход канала (selector chan); имя пути 'chan' в paths.make_config пропускается
         self.clash_port, self._secret = ps[-1], secrets.token_urlsafe(24)
         journal.register(self._secret)
         d = os.path.join(self.ctx.home, 'private')
@@ -84,7 +86,7 @@ class SingBox:
         self.tail.append(line[-200:])
         if 'sing-box started' in line:
             self.fails, self.up = 0, True
-            bus.publish('singbox.started', {'paths': len(self.ports)})
+            bus.publish('singbox.started', {'paths': len(self.ports) - 1})
 
     def _on_proc(self, ev):
         if ev['name'] == 'singbox':
@@ -108,7 +110,7 @@ class SingBox:
 
     # --- Clash API (127.0.0.1, secret): без таймаута на нашей стороне, срок delay задаёт сам sing-box (timeout=5000) ---
     def _req(self, method, url, body=None):
-        c = http.client.HTTPConnection('127.0.0.1', self.clash_port)
+        c = http.client.HTTPConnection('127.0.0.1', self.clash_port, timeout=8)
         try:
             c.request(method, url, body=json.dumps(body) if body is not None else None,
                       headers={'Authorization': 'Bearer ' + self._secret, 'Content-Type': 'application/json'})
@@ -117,10 +119,10 @@ class SingBox:
         finally:
             c.close()
 
-    def delay(self, path):
+    def delay(self, path, timeout_ms=5000):
         """-> (мс|None, http-код). 503/504 - проверка не прошла."""
         try:
-            st, data = self._req('GET', '/proxies/%s/delay?url=%s&timeout=5000' % (urllib.parse.quote(path, safe=''), urllib.parse.quote(DELAY_URL, safe='')))
+            st, data = self._req('GET', '/proxies/%s/delay?url=%s&timeout=%d' % (urllib.parse.quote(path, safe=''), urllib.parse.quote(DELAY_URL, safe=''), timeout_ms))
             return (json.loads(data).get('delay') if st == 200 else None), st
         except (OSError, ValueError, http.client.HTTPException):
             return None, 0
@@ -159,4 +161,4 @@ class SingBox:
                 self.traffic = {'up_bps': 0, 'down_bps': 0, 'active': False}
 
     def status(self):
-        return {'up': self.up, 'failed': self.failed, 'restarts': self.fails, 'paths': len(self.ports), 'traffic': self.traffic}
+        return {'up': self.up, 'failed': self.failed, 'restarts': self.fails, 'paths': len(self.ports) - 1, 'traffic': self.traffic}
