@@ -17,7 +17,7 @@ class Ctx(types.SimpleNamespace):
                 'uptime_s': int(time.monotonic() - self.t0), 'rss_mb': round(rss_bytes() / 1048576, 1), 'events': bus.count,
                 'agent_port': self.agent.port, 'color': self.link.color, 'state': self.link.note,
                 'settings': {'paths': [p['name'] for p in s.paths], 'skipped': s.skipped, 'lans': [n['name'] for n in s.lans], 'server': s.server} if s else None,
-                'singbox': self.singbox.status(), 'rounds': self.rounds.status(), 'lan': self.lan.status(), 'forward': self.forward.status(), 'procs': procs.names()}
+                'singbox': self.singbox.status(), 'rounds': self.rounds.status(), 'lan': self.lan.status(), 'forward': self.forward.status(), 'tun': self.tun.status(), 'procs': procs.names()}
 
     def report(self):
         st = self.status()
@@ -69,10 +69,12 @@ def main(argv):
     from .rounds import Rounds
     from .lan import Lan
     from .forward import Forward
+    from .tun import Tun
     from .netwatch import NetWatch
     from .updater import Updater
     ctx.agent, ctx.updater, ctx.singbox, ctx.netwatch = Agent(ctx), Updater(ctx), SingBox(ctx), NetWatch(ctx)
     ctx.settings_part, ctx.rounds, ctx.lan, ctx.forward = Settings(ctx), Rounds(ctx), Lan(ctx), Forward(ctx)
+    ctx.tun = Tun(ctx)
     ctx.link = Link(ctx)
     done = threading.Event()
 
