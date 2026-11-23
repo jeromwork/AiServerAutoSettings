@@ -96,7 +96,9 @@ def main(argv):
     bus.start()
     bus.publish('app.start')
     done.wait()  # выход - только событие (app.stop, app.restart, память)
-    ctx.tun.stop()  # мягкая остановка также при app.restart/пределе памяти, до Job Object и остальных детей
+    # Мягкая остановка и очистка TUN идут в своём потоке (также при app.restart/пределе памяти); ждём до Job Object и остальных детей.
+    # Худший stop() ~26 с (см. tun.py), EXE ждёт 45 с.
+    ctx.tun.stop().join(timeout=40)
     procs.kill_all()  # sing-box, ssh и команды агента (Job Object убьёт и тех, кого не успели)
     journal.flush()
     return ctx.exit_code

@@ -136,11 +136,11 @@ class Proc:
             if WIN:
                 # Хелпер не меняет консоль/стандартные handles многопоточного Python из EXE.
                 code = ('import ctypes,sys; k=ctypes.WinDLL("kernel32",use_last_error=True); '
-                        'pid=int(sys.argv[1]); '
-                        'ok=k.AttachConsole(pid) and k.GenerateConsoleCtrlEvent(1,pid); '
+                        'pid=int(sys.argv[1]); k.FreeConsole(); '
+                        'ok=k.AttachConsole(pid) and k.SetConsoleCtrlHandler(None,True) and k.GenerateConsoleCtrlEvent(1,pid); '
                         'sys.exit(0 if ok else (ctypes.get_last_error() or 1))')
                 r = subprocess.run([sys.executable, '-c', code, str(self.pid)], stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=NO_WINDOW, timeout=1)
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=NO_WINDOW, timeout=2)
                 if r.returncode:
                     raise OSError('console helper: %s' % r.returncode)
             else:
@@ -162,7 +162,7 @@ class Proc:
         try:
             if WIN:  # дерево процессов: cmd /c и его потомки
                 subprocess.run(['taskkill', '/F', '/T', '/PID', str(self.pid)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL, creationflags=NO_WINDOW)
+                               stderr=subprocess.DEVNULL, creationflags=NO_WINDOW, timeout=2 if self.graceful else None)
             else:
                 os.killpg(self.pid, signal.SIGKILL)
         except (OSError, subprocess.SubprocessError):

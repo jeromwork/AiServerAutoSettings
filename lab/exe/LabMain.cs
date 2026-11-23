@@ -90,7 +90,7 @@ namespace RemoteAgents.Lab
 
     internal sealed class Supervisor : IDisposable
     {
-        public const int RestartGraceSeconds = 5;         // ожидание мягкого выхода Python при перезапуске
+        public const int RestartGraceSeconds = 45;        // ожидание мягкого выхода Python при перезапуске; худший stop() TUN ~26 с, app.py ждёт до 40 с
         public const int PythonSilenceFuseSeconds = 120;   // таймер В
         const int MaxLine = 200000, MaxQueuedLines = 1000, MaxStderrLogged = 200, StderrTail = 30;
         public readonly string Home, Version;
@@ -338,14 +338,15 @@ namespace RemoteAgents.Lab
             if (run == null) { Finish(); return; }
             if (exitRequested) { log.Write("повторный Выход: гашу всё принудительно"); job.Terminate(); return; }
             exitRequested = true;
-            timerV.Stop(); // Выход ждёт мягкую остановку TUN; таймер запуска не должен оборвать эти 3 секунды.
+            timerV.Stop(); // Выход ждёт мягкую остановку и очистку TUN (до ~30 с); таймер запуска не должен её оборвать.
             log.Write("Выход: прошу Python закрыться");
-            SetState("grey", "Выход...", "Жду, пока Python закроется.", "Не закрывается: нажмите Выход ещё раз -- погасит принудительно.");
+            SetState("grey", "Выход...", "Жду, пока Python закроется.", "Очистка TUN может занять до 30 с. Не закрывается: нажмите Выход ещё раз -- погасит принудительно.");
             Send("{\"t\":\"exit\"}");
         }
         public void RestartPython()
         {
             if (run != null) {
+                if (run.RestartRequested) { log.Write("перезапуск уже запрошен: повторный клик игнорирую"); return; }
                 var r = run; r.RestartRequested = true; log.Write("перезапуск Python по просьбе владельца: прошу закрыться, жду до " + RestartGraceSeconds + " с");
                 Send("{\"t\":\"exit\"}");   // мягкая остановка TUN: Python сам снимет адаптер, Terminate только по сроку
                 var t = new System.Windows.Forms.Timer { Interval = RestartGraceSeconds * 1000 };

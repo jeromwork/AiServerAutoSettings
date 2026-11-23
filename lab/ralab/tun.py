@@ -10,13 +10,15 @@ from . import journal, procs
 from .bus import bus
 
 NAME = 'tun'
-WINTUN_ID = re.compile(r'^ROOT\\WINTUN\\\d{1,4}$')
-GUID = re.compile(r'^\{?[0-9A-Fa-f-]{36}\}?$')
+# Формат PnPDeviceID не угадываем: допускаем оба известных вида, строго fullmatch; дополнительно фильтр по InterfaceDescription.
+WINTUN_ID = re.compile(r'ROOT\\(?:WINTUN|NET)\\\d{1,4}')
+GUID = re.compile(r'\{?[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\}?')
 
 
-def local_addrs():
+def local_addrs(cancel):
     try:
-        out = subprocess.run(['ipconfig'], capture_output=True, stdin=subprocess.DEVNULL, timeout=10).stdout.decode('cp866', 'replace')
+        r = _run(['ipconfig'], 3, cancel)
+        out = r[1] if r and r[0] == 0 else ''
     except (OSError, subprocess.SubprocessError):
         return []
     res = []
@@ -31,33 +33,45 @@ def local_addrs():
 ADAPTER_FILE = 'tun-adapter.json'
 GHOST_DESC = 'Wintun Userspace Tunnel'
 RETRY_GAP, MAX_FAILS, STABLE = 30, 5, 60
+# Худший stop(): процесс ~7 с (помощник 2 + ожидание 3 + taskkill 2) + 1 + поток 6 + очистка 12 = ~26 с; EXE и app.py ждут дольше (45 / 40 с).
+CLEANUP_BUDGET, WORKER_WAIT = 12, 6
 
 
-def _run(argv, timeout):
+def _run(argv, timeout, cancel=None):
     """Запуск без PowerShell-обёртки; по таймауту убивается всё дерево. Возвращает (код, текст) или None (не вышло/таймаут)."""
+    if timeout <= 0 or (cancel and cancel.is_set()):
+        return None
     try:
         p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=procs.NO_WINDOW)
     except OSError as e:
         journal.log('tun', 'ghost.failed', {'argv': argv[0], 'error': str(e)})
         return None
+    end = time.monotonic() + timeout
+    while time.monotonic() < end and not (cancel and cancel.is_set()):
+        try:
+            out, _ = p.communicate(timeout=min(0.2, max(0.001, end - time.monotonic())))
+            return p.returncode, out.decode('utf-8', 'replace')
+        except subprocess.TimeoutExpired:
+            pass
     try:
-        out, _ = p.communicate(timeout=max(0.5, timeout))
-        return p.returncode, out.decode('utf-8', 'replace')
-    except subprocess.TimeoutExpired:
-        subprocess.run(['taskkill', '/F', '/T', '/PID', str(p.pid)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, creationflags=procs.NO_WINDOW)
+        if procs.WIN:
+            subprocess.run(['taskkill', '/F', '/T', '/PID', str(p.pid)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, creationflags=procs.NO_WINDOW, timeout=1)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    finally:
         try:
             p.kill()
             p.communicate(timeout=1)
         except (OSError, subprocess.SubprocessError):
             pass
-        journal.log('tun', 'ghost.timeout', {'argv': argv[0], 'timeout': timeout}, 'команда очистки не уложилась в срок и убита')
-        return None
+    journal.log('tun', 'ghost.cancelled' if cancel and cancel.is_set() else 'ghost.timeout', {'argv': argv[0], 'timeout': timeout})
+    return None
 
 
-def _ps(script, timeout):
+def _ps(script, timeout, cancel=None):
     pre = "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); "
-    return _run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', pre + script], timeout)
+    return _run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', pre + script], timeout, cancel)
 
 
 class Tun:
@@ -65,6 +79,8 @@ class Tun:
         self.ctx, self.socks, self.routes, self.skipped, self.last = ctx, None, [], [], 'выключен'
         self.lock, self.busy = threading.Lock(), threading.Lock()
         self.gen, self.fails, self.last_try, self.started, self.worker, self.gave_up = 0, 0, 0.0, 0.0, None, False
+        self.closing, self.stopping, self.stopper = False, False, None
+        self.cancel, self.before, self.owned = threading.Event(), None, {}
         bus.subscribe('settings.loaded', self._on_settings)
         bus.subscribe('channel.up', lambda _: self._ensure())
         bus.subscribe('app.stop', lambda _: self.stop())
@@ -80,7 +96,7 @@ class Tun:
 
     def _on_settings(self, _):
         if self._cfg().get('enabled') is not True:
-            self.stop()
+            self.stop(closing=False)
             self.last = 'выключен (tun.enabled не true)'
             return
         self._ensure()
@@ -98,9 +114,13 @@ class Tun:
                 journal.log('tun', 'retry.error', {'error': repr(e)})
 
     def _ensure(self):
+        with self.lock:
+            self._ensure_locked()
+
+    def _ensure_locked(self):
         """Старт, если TUN включён, а процесса нет. Не чаще раза в 30 с, не больше 5 попыток подряд; живой TUN не трогаем."""
         t = self._cfg()
-        if t.get('enabled') is not True:
+        if self.closing or self.stopping or t.get('enabled') is not True:
             return
         p, now = procs.get(NAME), time.monotonic()
         if p and p.alive():
@@ -121,7 +141,10 @@ class Tun:
             return
         if not self.busy.acquire(False):
             return
+        # Forward открывает lanProxy только один раз (started): порт фиксируется до перезапуска Python,
+        # поэтому перезагрузка lanProxy.port в настройках не требует перезапуска TUN.
         self.socks, self.last_try = listener['port'], now
+        self.cancel = threading.Event()
         self.fails += 1
         self.worker = threading.Thread(target=self._launch, args=(t, self.gen), name='tun-start', daemon=True)
         self.worker.start()
@@ -135,9 +158,29 @@ class Tun:
         finally:
             self.busy.release()
 
-    def stop(self):
+    def stop(self, closing=True):
+        """Быстрый запрос из шины; вызывающий main ждёт возвращённый поток перед kill_all/выходом."""
         with self.lock:
+            self.closing |= closing
+            self.cancel.set()
             self.gen += 1
+            if self.stopping:
+                return self.stopper
+            self.stopping = True
+            self.stopper = threading.Thread(target=self._stop, name='tun-stop', daemon=True)
+            self.stopper.start()
+            return self.stopper
+
+    def _stop(self):
+        try:
+            self._stop_and_clean()
+        except Exception as e:
+            journal.log('tun', 'stop.error', {'error': repr(e)})
+        finally:
+            with self.lock:
+                self.stopping = False
+
+    def _stop_and_clean(self):
         p = procs.get(NAME)
         if p:
             procs.kill(NAME)
@@ -148,11 +191,11 @@ class Tun:
                 return
         w = self.worker
         if w and w.is_alive():
-            w.join(timeout=3)
+            w.join(timeout=WORKER_WAIT)
             if w.is_alive():
-                return
+                journal.log('tun', 'stop.worker_busy', {}, 'поток старта ещё занят; очистку всё равно выполняем, новый старт отменён')
         self.ctx.forward.tun_nets = []
-        self._clean_ghost(3)
+        self._clean_ghost(CLEANUP_BUDGET)
 
     def _start(self, t, gen):
         st = self.ctx.settings
@@ -160,7 +203,7 @@ class Tun:
         if not wanted:
             wanted = [str(n) for it in (st.cfg.get('lan') or (st.cfg.get('profile') or {}).get('lan') or []) if isinstance(it, dict)
                       for n in ((it.get('share') or {}).get('subnets') or []) if (it.get('share') or {}).get('enabled') is not False]
-        local, routes, self.skipped = local_addrs(), [], []
+        local, routes, self.skipped = local_addrs(self.cancel), [], []
         for r in wanted[:128]:
             try:
                 net = ipaddress.ip_network(str(r), strict=False)
@@ -187,12 +230,17 @@ class Tun:
         with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w') as f:
             json.dump(cfg, f)
         exe = self.ctx.singbox._own_copy(self.ctx.settings.singbox)
-        if not self._clean_ghost(20):
+        if not self._clean_ghost(20, self.cancel):
             self.last = 'очистка прошлого адаптера не завершилась, повтор позже'
             return
+        before = self._snapshot(3, self.cancel)
+        if before is None:  # без снимка нельзя доказать, какие устройства появились при нашем запуске
+            self.last = 'не удалось получить снимок адаптеров до запуска'
+            return
         with self.lock:
-            if gen != self.gen:
+            if gen != self.gen or self.closing or self.cancel.is_set():
                 return
+            self.before = before
             self.ctx.forward.tun_nets = [{'name': 'tun', 'nets': [ipaddress.ip_network(r) for r in routes], 'domains': []}]
             try:
                 p = procs.start(NAME, [exe, 'run', '-c', path], src='tun', cwd=d, graceful=True)
@@ -204,72 +252,101 @@ class Tun:
         journal.log('tun', 'start', {'routes': routes, 'socks': self.socks}, 'TUN ralab-tun запускается')
         self._remember(p, gen)
 
+    def _snapshot(self, timeout, cancel=None):
+        """Wintun-адаптеры (включая скрытые): {pnp: {pnp, guid, status}} или None, если спросить не удалось."""
+        if not procs.WIN:
+            return {}
+        script = ("@(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceDescription -eq '%s' } | "
+                  "ForEach-Object { @{pnp=[string]$_.PnPDeviceID; guid=[string]$_.InterfaceGuid; status=[string]$_.Status} }) | ConvertTo-Json -Compress" % GHOST_DESC)
+        r = _ps(script, timeout, cancel)
+        if not r or r[0]:
+            return None
+        txt = r[1].strip()
+        try:
+            data = json.loads(txt) if txt else []
+        except ValueError:
+            return None
+        if isinstance(data, dict):
+            data = [data]
+        res = {}
+        for d in data if isinstance(data, list) else []:
+            if isinstance(d, dict) and WINTUN_ID.fullmatch(str(d.get('pnp', ''))) and GUID.fullmatch(str(d.get('guid', ''))):
+                res[d['pnp']] = {'pnp': d['pnp'], 'guid': d['guid'], 'status': str(d.get('status', ''))}
+        return res
+
     def _remember(self, p, gen):
-        """Запоминаем PnPDeviceID и GUID созданного нами адаптера: потом удаляем только его."""
+        """Запоминаем адаптер, появившийся при нашем запуске (разница снимков, не Disconnected): потом удаляем только его."""
         if not procs.WIN:
             return
-        script = ("Get-NetAdapter -Name 'ralab-tun' -IncludeHidden -ErrorAction SilentlyContinue | Where-Object "
-                  "{ $_.InterfaceDescription -eq '%s' } | Select-Object -First 1 | ForEach-Object "
-                  "{ @{pnp=[string]$_.PnPDeviceID; guid=[string]$_.InterfaceGuid} | ConvertTo-Json -Compress }" % GHOST_DESC)
         for _ in range(12):
-            if gen != self.gen or not p.alive():
+            if gen != self.gen or self.cancel.is_set() or not p.alive():
                 return
-            r = _ps(script, 8)
-            try:
-                data = json.loads(r[1]) if r and r[0] == 0 and r[1].strip() else None
-            except ValueError:
-                data = None
-            if data and WINTUN_ID.match(data.get('pnp', '')) and GUID.match(data.get('guid', '')):
+            now = self._snapshot(4, self.cancel)
+            new = [a for k, a in (now or {}).items() if k not in (self.before or {}) and a['status'] != 'Disconnected']
+            if len(new) == 1:
+                data = {'pnp': new[0]['pnp'], 'guid': new[0]['guid']}
                 with open(self._path(), 'w', encoding='utf-8') as f:
                     json.dump(data, f)
                 journal.log('tun', 'adapter.saved', data)
                 return
-            time.sleep(1)
-        journal.log('tun', 'adapter.unknown', {}, 'адаптер ralab-tun не найден: призрак после падения удалять нечем')
+            if self.cancel.wait(1):
+                return
+        journal.log('tun', 'adapter.unknown', {}, 'новый адаптер не найден: после падения чистим по разнице снимков')
 
-    def _clean_ghost(self, budget):
-        """True - можно стартовать (чужое не трогаем). False - очистка не завершилась. Удаляется только записанный адаптер."""
+    def _targets(self, cancel, deadline):
+        """Что удалять: записанный адаптер + все Wintun-призраки, которых не было в снимке до запуска. Чужие (в снимке до) не трогаем."""
+        targets = {}
+        rec = None
         path = self._path()
-        if not procs.WIN or not os.path.exists(path):
-            if procs.WIN:
-                journal.log('tun', 'ghost.norecord', {}, 'записи о своём адаптере нет: ничего не удаляем')
+        if os.path.exists(path):
+            try:
+                with open(path, encoding='utf-8') as f:
+                    rec = json.load(f)
+                if not WINTUN_ID.fullmatch(rec['pnp']) or not GUID.fullmatch(rec['guid']):
+                    raise ValueError('формат')
+            except (OSError, ValueError, KeyError, TypeError):
+                journal.log('tun', 'ghost.badrecord', {}, 'запись об адаптере испорчена: удаляю запись, адаптеры не трогаю')
+                self._forget()
+                rec = None
+        if rec is None and self.before is None:
+            journal.log('tun', 'ghost.norecord', {}, 'записи и снимка нет: ничего не удаляем')
+            return targets
+        now = self._snapshot(max(0.5, min(10, deadline - time.monotonic())), cancel)
+        if now is None:
+            return None
+        for k, a in now.items():
+            if (rec and k == rec['pnp'] and a['guid'].strip('{}').lower() == rec['guid'].strip('{}').lower()) or \
+                    (self.before is not None and k not in self.before):
+                targets[k] = a
+        return targets
+
+    def _clean_ghost(self, budget, cancel=None):
+        """True - можно стартовать (чужое не трогаем). False - очистка не завершилась. Удаляются только записанный адаптер и новые по разнице снимков."""
+        if not procs.WIN:
             return True
         end = time.monotonic() + budget
         p = procs.get(NAME)
         if p and p.alive():
             return True
-        try:
-            with open(path, encoding='utf-8') as f:
-                rec = json.load(f)
-            pnp, guid = rec['pnp'], rec['guid']
-            if not WINTUN_ID.match(pnp) or not GUID.match(guid):
-                raise ValueError('формат')
-        except (OSError, ValueError, KeyError, TypeError):
-            journal.log('tun', 'ghost.badrecord', {}, 'запись об адаптере испорчена: удаляю запись, адаптеры не трогаю')
-            self._forget()
-            return True
-        r = _ps("Get-NetAdapter -IncludeHidden | Where-Object { $_.PnPDeviceID -eq '%s' -and $_.InterfaceGuid -eq '%s' } | ForEach-Object "
-                "{ @{status=[string]$_.Status; desc=$_.InterfaceDescription} | ConvertTo-Json -Compress }" % (pnp, guid), min(10, end - time.monotonic()))
-        if not r or r[0]:
-            journal.log('tun', 'ghost.failed', {'step': 'query', 'result': r and r[1][:300]})
+        targets = self._targets(cancel, end)
+        if targets is None:
+            journal.log('tun', 'ghost.failed', {'step': 'query'})
             return False
-        if not r[1].strip():
-            self._forget()  # устройства с такими PnP и GUID нет: чисто (или ID занял чужой адаптер с другим GUID)
-            return True
-        try:
-            info = json.loads(r[1].strip().splitlines()[-1])
-        except ValueError:
-            return False
-        if info.get('status') != 'Disconnected' or info.get('desc') != GHOST_DESC:
-            journal.log('tun', 'ghost.skipped', info, 'адаптер не в состоянии призрака: не удаляем')
-            return True
-        r = _run(['pnputil.exe', '/remove-device', pnp], min(5, end - time.monotonic()))
-        if r and r[0] in (0, 3010):
-            journal.log('tun', 'ghost.removed', {'device': pnp, 'guid': guid, 'code': r[0]})
+        ok = True
+        for k, a in targets.items():
+            if a['status'] != 'Disconnected':
+                journal.log('tun', 'ghost.skipped', a, 'адаптер не в состоянии призрака: не удаляем')
+                continue
+            r = _run(['pnputil.exe', '/remove-device', k], min(5, end - time.monotonic()), cancel)
+            if r and r[0] in (0, 3010):
+                journal.log('tun', 'ghost.removed', {'device': k, 'guid': a['guid'], 'code': r[0]})
+            else:
+                journal.log('tun', 'ghost.failed', {'step': 'remove', 'device': k, 'result': r and (r[0], r[1][:300])})
+                ok = False
+        if ok:
             self._forget()
-            return True
-        journal.log('tun', 'ghost.failed', {'step': 'remove', 'device': pnp, 'result': r and (r[0], r[1][:300])})
-        return False
+            self.before = None
+        return ok
 
     def _forget(self):
         try:
