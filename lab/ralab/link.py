@@ -79,6 +79,8 @@ class Link:
         msg = {'t': 'state', 'color': self.color, 'tip': self.tip[:TIP_MAX], 'lines': lines}
         if getattr(ctx, 'disk', None) and ctx.disk.state == 'running':
             msg['disk'] = True  # V8: EXE включает значки Проводника только пока Диск ведёт Лаборатория
+            if (ctx.disk.info or {}).get('home'):
+                msg['diskHome'] = ctx.disk.info['home']  # V9: каталог Диска (с учётом config.disk.home) для контроллера в EXE
         key = json.dumps(msg, sort_keys=True)
         if key != self.last:
             self.last = key

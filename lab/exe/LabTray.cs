@@ -35,7 +35,7 @@ namespace RemoteAgents.Lab
         {
             var state = supervisor.State;
             icon.Icon = state.Color == "green" ? green : state.Color == "yellow" ? yellow : state.Color == "red" ? red : grey;
-            disk.Sync(supervisor.DiskRunning);
+            disk.Sync(supervisor.DiskRunning, supervisor.DiskHome);
             icon.Text = state.Tip; // NotifyIcon.Text: не больше 63 символов, Supervisor их уже обрезал
             if (window != null && window.Visible) FillWindow();
         }

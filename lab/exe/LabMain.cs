@@ -24,6 +24,7 @@ namespace RemoteAgents.Lab
         [STAThread]
         static int Main(string[] args)
         {
+            if (Array.IndexOf(args, "--disk-shell") >= 0) return LabDisk.ForwardShell(args); // V9: запрос из меню Проводника, до проверки mutex
             bool created;
             using (var mutex = new Mutex(true, @"Local\RemoteAgents-Lab", out created))
             {
@@ -97,7 +98,7 @@ namespace RemoteAgents.Lab
         readonly ExeLog log; readonly Control ui; readonly LabJob job = new LabJob();
         readonly System.Windows.Forms.Timer timerV = new System.Windows.Forms.Timer();
         public CodeSlots Slots; public LabState State = new LabState();
-        public volatile bool DiskRunning;   // Python сообщил «Диск: работает» (поле disk:true в state); читает поток Проводника
+        public volatile string DiskHome = ""; public volatile bool DiskRunning;   // Python сообщил «Диск: работает» (поле disk:true в state); читает поток Проводника
         public void WriteLog(string text) { log.Write(text); }
         public event Action StateChanged; public event Action<string> ReportReady; public event Action Quit;
         PyRun run; int generation, queuedLines; bool exitRequested, stopped, disposed;
@@ -287,7 +288,7 @@ namespace RemoteAgents.Lab
         void HandleExit(PyRun r, int code)
         {
             if (r != run) return;
-            run = null; timerV.Stop(); DiskRunning = false;
+            run = null; timerV.Stop(); DiskRunning = false; DiskHome = "";
             double seconds = (DateTime.UtcNow - r.Started).TotalSeconds;
             log.Write("Python #" + r.Generation + " вышел с кодом " + code + " за " + (int)seconds + " с" + (r.TimeoutFired ? " (таймер В)" : "") + (r.GoodSeen ? ", канал был" : ""));
             if (exitRequested) { Finish(); return; }
@@ -313,6 +314,7 @@ namespace RemoteAgents.Lab
                     var array = lines as System.Collections.IEnumerable;
                     if (array != null) foreach (var item in array) { if (list.Count >= 50) break; string s = Convert.ToString(item) ?? ""; list.Add(s.Length > 300 ? s.Substring(0, 300) : s); }
                     object disk; msg.TryGetValue("disk", out disk); DiskRunning = !exitRequested && disk is bool && (bool)disk;
+                    object diskHome; msg.TryGetValue("diskHome", out diskHome); string dh = diskHome as string; DiskHome = DiskRunning && dh != null && dh.Length < 260 && dh.IndexOfAny(new[] { '"', '\r', '\n', '\0' }) < 0 ? dh : "";
                     SetState(exitRequested ? "grey" : c, exitRequested ? "Выход..." : (tip as string) ?? "", list.ToArray());
                     break;
                 }
@@ -342,7 +344,7 @@ namespace RemoteAgents.Lab
         {
             if (run == null) { Finish(); return; }
             if (exitRequested) { log.Write("повторный Выход: гашу всё принудительно"); job.Terminate(); return; }
-            exitRequested = true; DiskRunning = false;
+            exitRequested = true; DiskRunning = false; DiskHome = "";
             timerV.Stop(); // Выход ждёт мягкую остановку и очистку TUN (до ~30 с); таймер запуска не должен её оборвать.
             log.Write("Выход: прошу Python закрыться");
             SetState("grey", "Выход...", "Жду, пока Python закроется.", "Очистка TUN может занять до 30 с. Не закрывается: нажмите Выход ещё раз -- погасит принудительно.");

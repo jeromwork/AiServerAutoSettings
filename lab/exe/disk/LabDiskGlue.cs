@@ -1,5 +1,10 @@
 using System;
 using System.IO;
+using System.IO.Pipes;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using System.Web.Script.Serialization;
+using System.Windows.Forms;
 using System.Reflection;
 using System.Threading;
 
@@ -9,13 +14,24 @@ namespace RemoteAgents.Launcher
     // Заглушки того, что копии берут из Product/Program старой Программы (нужны только пути к EXE в пунктах меню, которых в V8 нет).
     internal static class Product { public const string ExeName = "RemoteAgents.exe"; }
     internal static class Program { public static string Exe { get { return Assembly.GetEntryAssembly().Location; } } }
-    // V8: пункты меню Проводника (shell verbs) не регистрируются (это V9). Реестр-пустышка: Register/Cleanup ничего не пишут и не стирают.
-    internal sealed class NoVerbsRegistry : IDiskExplorerRegistry
+    // V9: реестр пунктов меню Проводника только под СВОИМ префиксом (RemoteAgents.LabDisk.*). Ключи старой Программы
+    // (RemoteAgents.Disk.*) не читаются, не пишутся и не удаляются: любой ключ вне нашего префикса игнорируется.
+    internal sealed class LabVerbsRegistry : IDiskExplorerRegistry
     {
-        public bool Exists(string key) { return false; }
-        public string Read(string key, string name) { return null; }
-        public void Write(string key, string name, string value) { }
-        public void DeleteTree(string key) { }
+        internal const string OwnPrefix = @"Software\Classes\Directory\shell\RemoteAgents.LabDisk.";
+        readonly IDiskExplorerRegistry inner = new DiskExplorerCurrentUserRegistry();
+        static string Map(string key) { return key.StartsWith(DiskExplorerRegistry.Prefix, StringComparison.Ordinal) ? OwnPrefix + key.Substring(DiskExplorerRegistry.Prefix.Length) : null; }
+        public bool Exists(string key) { string k = Map(key); return k != null && inner.Exists(k); }
+        const string Mark = " (Лаборатория)";
+        public string Read(string key, string name)
+        {
+            string k = Map(key); string v = k == null ? null : inner.Read(k, name);
+            return name == "MUIVerb" && v != null && v.EndsWith(Mark, StringComparison.Ordinal) ? v.Substring(0, v.Length - Mark.Length) : v;
+        }
+        // Frozen: после остановки поздняя регистрация из потока контроллера не должна вернуть ключи.
+        internal volatile bool Frozen;
+        public void Write(string key, string name, string value) { string k = Map(key); if (k != null && !Frozen) inner.Write(k, name, name == "MUIVerb" ? value + Mark : value); }
+        public void DeleteTree(string key) { string k = Map(key); if (k != null) inner.DeleteTree(k); }
     }
 }
 
@@ -29,23 +45,86 @@ namespace RemoteAgents.Lab
         readonly string home; readonly Action<string> log; readonly Action<string, bool> balloon;
         readonly SynchronizationContext ui = SynchronizationContext.Current;
         DiskExplorerController controller; volatile bool enabled, stopped;
+        DiskExplorerRegistry verbs; LabVerbsRegistry store; string triedHome;
 
-        public LabDisk(string home, Action<string> log, Action<string, bool> balloon) { this.home = home; this.log = log; this.balloon = balloon; }
+        public LabDisk(string home, Action<string> log, Action<string, bool> balloon) { this.home = home; this.log = log; this.balloon = balloon;
+            // Остатки прошлого запуска: Cleanup трогает только RemoteAgents.LabDisk.* (LabVerbsRegistry.Map), ключи Программы -- никогда.
+            try { new DiskExplorerRegistry(new LabVerbsRegistry(), log, DiskExplorerNotifier.AssociationsChanged).Cleanup(); } catch (Exception) { }
+            StartPipe(); }
 
-        public void Sync(bool diskRunning)
+        // diskHome: каталог Диска от Python (с учётом config.disk.home). Одна попытка создать контроллер на значение каталога.
+        public void Sync(bool diskRunning, string diskHome)
         {
             if (stopped) return;
             enabled = diskRunning;
-            if (!diskRunning || controller != null) return;
+            if (!diskRunning || controller != null || string.IsNullOrEmpty(diskHome) || diskHome == triedHome) return;
+            triedHome = diskHome;
             try {
                 string assets = Path.Combine(home, "disk-assets"); Unpack(assets);
                 var logger = log;
+                store = new LabVerbsRegistry(); verbs = new DiskExplorerRegistry(store, logger, DiskExplorerNotifier.AssociationsChanged);
                 controller = new DiskExplorerController(home, Root, () => assets, () => enabled && !stopped, () => true,
                     (message, ok) => { var context = ui; if (context != null) context.Post(s => { if (!stopped) balloon(message, ok); }, null); },
-                    logger, DiskExplorerNative.CreateService(Path.Combine(DiskExplorerController.DefaultDiskHome, "explorer-icons"), logger),
-                    new DiskExplorerRegistry(new NoVerbsRegistry(), logger));
-                log("Проводник Диска: контроллер запущен (без пунктов меню)");
+                    logger, DiskExplorerNative.CreateService(Path.Combine(diskHome, "explorer-icons"), logger), verbs, diskHome);
+                log("Проводник Диска: контроллер запущен (каталог " + diskHome + ")");
             } catch (Exception e) { log("Проводник Диска: не запустился: " + e.Message); controller = null; }
+        }
+
+        // ---- запросы из меню Проводника (V9): RemoteAgents-Lab.exe --disk-shell <действие> "<путь>" -> pipe -> Submit ----
+        static string PipeName()
+        { var id = WindowsIdentity.GetCurrent(); return "RemoteAgents-Lab-disk-" + (id.User != null ? id.User.Value : id.Name); }
+
+        // Клиент: второй экземпляр (до mutex). Не вышло за 750 мс -- сообщение и код 1.
+        internal static int ForwardShell(string[] args)
+        {
+            try {
+                if (DiskShellRequest.Parse(args) == null) return 1;
+                int at = Array.IndexOf(args, "--disk-shell");
+                using (var pipe = new NamedPipeClientStream(".", PipeName(), PipeDirection.Out)) {
+                    pipe.Connect(750);
+                    var line = new JavaScriptSerializer().Serialize(new[] { args[at + 1], args[at + 2] });
+                    using (var writer = new StreamWriter(pipe, new System.Text.UTF8Encoding(false), 4096, true)) { writer.WriteLine(line); writer.Flush(); }
+                }
+                return 0;
+            } catch (Exception) {
+                MessageBox.Show("Лаборатория не запущена. Запустите RemoteAgents-Lab и повторите.", "RemoteAgents-Lab");
+                return 1;
+            }
+        }
+
+        void StartPipe()
+        {
+            var security = new PipeSecurity(); security.SetAccessRuleProtection(true, false); // только текущий пользователь, без сети
+            security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.NetworkSid, null), PipeAccessRights.ReadWrite, AccessControlType.Deny));
+            security.AddAccessRule(new PipeAccessRule(WindowsIdentity.GetCurrent().User, PipeAccessRights.ReadWrite, AccessControlType.Allow));
+            var thread = new Thread(() => {
+                while (!stopped) {
+                    try {
+                        using (var pipe = new NamedPipeServerStream(PipeName(), PipeDirection.In, 1, PipeTransmissionMode.Byte, PipeOptions.None, 4096, 4096, security)) {
+                            pipe.WaitForConnection();
+                            string line; using (var reader = new StreamReader(pipe, new System.Text.UTF8Encoding(false), false, 4096, true)) {
+                                var buffer = new char[4097]; int n = 0, got;
+                                while (n < buffer.Length && (got = reader.Read(buffer, n, buffer.Length - n)) > 0) n += got;
+                                if (n == 0 || n > 4096) continue;
+                                line = new string(buffer, 0, n).Trim();
+                            }
+                            var parts = new JavaScriptSerializer().Deserialize<string[]>(line);
+                            if (parts == null || parts.Length != 2) continue;
+                            var request = DiskShellRequest.Parse(new[] { "--disk-shell", parts[0], parts[1] });
+                            var context = ui; if (context != null) context.Post(x => Submit(request), null);
+                        }
+                    } catch (Exception e) { if (stopped) return; log("Проводник Диска: pipe: " + e.Message); Thread.Sleep(1000); }
+                }
+            }) { IsBackground = true, Name = "lab-disk-pipe" };
+            thread.Start();
+        }
+
+        void Submit(DiskShellRequest request)
+        {
+            if (stopped) return;
+            var c = controller;
+            if (c != null && enabled) c.Submit(request);
+            else balloon("Диск сейчас ведёт Программа или не запущен", false);
         }
 
         // Корень Диска как у старой Программы: RemoteDisk\base.txt, затем profile.disk.base её config.json, иначе %USERPROFILE%\Disk.
@@ -77,6 +156,9 @@ namespace RemoteAgents.Lab
             var c = controller; if (c == null) return;
             c.Dispose();
             if (wait) { c.Wait(3500); controller = null; }
+            // При выходе свои пункты меню удаляем (только RemoteAgents.LabDisk.*; ключи Программы не трогаем).
+            if (store != null) store.Frozen = true;
+            try { if (verbs != null) verbs.Cleanup(); } catch (Exception e) { log("Проводник Диска: очистка пунктов меню: " + e.Message); }
         }
     }
 }
