@@ -115,6 +115,26 @@ def vpn_iface(probe_ip='1.1.1.1'):
         return None
 
 
+LOCAL_PROXIES = (10808,)  # SOCKS5 xray у Happ (и v2rayN); ещё - transport.localProxies: [порт, ...] в конфиге
+
+
+def local_proxies(cfg):
+    """Открытые локальные SOCKS5 других VPN на 127.0.0.1. Подключение к петле - мгновенный ответ; settimeout - только предохранитель."""
+    ports = list(LOCAL_PROXIES) + [int(x) for x in ((cfg.get('transport') or {}).get('localProxies') or []) if str(x).isdigit()]
+    found = []
+    for port in dict.fromkeys(ports):
+        c = socket.socket()
+        c.settimeout(1)  # предохранитель: петля отвечает сразу
+        try:
+            c.connect(('127.0.0.1', port))
+            found.append(port)
+        except OSError:
+            pass
+        finally:
+            c.close()
+    return found
+
+
 def via_vpn(p, vpn):
     """Тот же путь, но первое звено привязано к интерфейсу VPN (bind_interface главнее auto_detect_interface)."""
     ren = {o['tag']: o['tag'] + '-vpn' for o in p['outs']}
@@ -193,9 +213,18 @@ def build_paths(s):
     add('ssh', [{'type': 'direct', 'tag': 'ssh-direct'}], 'ssh-direct')
     if vl:
         add('vless', [vless('vless-direct', server=s.server)], 'vless-direct')
+    s.proxies = local_proxies(cfg)
+    for port in s.proxies:  # SSH и VLESS к серверу через SOCKS другого VPN (Happ): сам VPN пускает к 109, его интерфейс - нет
+        so = {'type': 'socks', 'tag': 'socks%d' % port, 'server': '127.0.0.1', 'server_port': port, 'version': '5'}
+        paths.append({'name': so['tag'], 'kind': 'proxy', 'outs': [so], 'final': so['tag'], 'node': '127.0.0.1:%d' % port})
+        if vl:
+            tag = 'vless-socks%d' % port
+            paths.append({'name': tag, 'kind': 'proxy', 'outs': [so, vless(tag, detour=so['tag'], server=s.server)], 'final': tag,
+                          'node': '127.0.0.1:%d' % port})
+    base = [p for p in paths if p['kind'] != 'proxy']
     s.vpn = vpn_iface()
     if s.vpn:  # каждый путь ещё и через VPN (Happ): все пробуются одновременно, берётся дошедший
-        paths += [via_vpn(p, s.vpn) for p in paths]
+        paths += [via_vpn(p, s.vpn) for p in base]
     seen = set()
     paths = [p for p in paths if not (p['name'] in seen or seen.add(p['name']))][:PATHS_MAX]
     return paths, miss

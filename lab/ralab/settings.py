@@ -167,7 +167,8 @@ class Settings:
             self._load()
             return
         from . import paths as pth
-        vpn, old = pth.vpn_iface(), getattr(self.ctx.settings, 'vpn', None)
+        st = self.ctx.settings
+        vpn, old = (pth.vpn_iface(), pth.local_proxies(st.cfg)), (getattr(st, 'vpn', None), getattr(st, 'proxies', []))
         if vpn != old:  # VPN включили/выключили: пути «через VPN» меняются. При живом канале держимся его (решение владельца)
             if getattr(self.ctx.rounds, 'channel', None):
                 journal.log('settings', 'vpn.changed', {'from': old, 'to': vpn}, 'VPN изменился, канал жив: пути обновятся после обрыва')
