@@ -34,7 +34,8 @@ cp "$py_cache" "$work/python-embed.zip"
 sha=$(git -C "$here" rev-parse --short HEAD 2>/dev/null || echo nocommit)
 if [[ -n $(git -C "$here" status --porcelain -- . ':!out' 2>/dev/null || true) ]]; then sha=$sha-dirty; fi
 printf '%s\n' "$sha" > "$work/code-version.txt"
-version=$(date -u +%Y%m%d.%H%M%S)-$sha
+stage=$(tr -d ' \r\n' < "$here/STAGE" 2>/dev/null || echo dev)
+version="$stage-$(date -u +%Y%m%d.%H%M%S)-$sha"
 
 # 3. lab-code.zip: run_lab.py, ralab/**/*.py, code-version.txt (тот же состав, что пакует ra-lab push; updater принимает только .py и code-version.txt).
 python3 -I - "$here" "$work/lab-code.zip" "$work/code-version.txt" <<'PY'

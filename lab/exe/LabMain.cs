@@ -123,6 +123,8 @@ namespace RemoteAgents.Lab
         void Post(Action action) { try { if (!disposed) ui.BeginInvoke(action); } catch (InvalidOperationException) { } }
         void SetState(string color, string tip, params string[] lines)
         {
+            var dash = Version.IndexOf('-'); var stage = dash > 0 ? Version.Substring(0, dash) : Version;
+            tip = stage + " \u00b7 " + tip;
             State = new LabState { Color = color, Tip = tip.Length > 63 ? tip.Substring(0, 63) : tip, Lines = lines };
             var handler = StateChanged; if (handler != null) handler();
         }
