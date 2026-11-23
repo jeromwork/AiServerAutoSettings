@@ -15,6 +15,7 @@ SIZE = 65536
 NODE_MAX = 3  # одновременных проб к одному узлу (по исследованию 2026 года частые TLS-подключения к узлу вызывают блокировку)
 RPORTS = list(range(13340, 13400))
 ROUND_SECONDS = 60
+DEBOUNCE_SECONDS = 5  # владелец 23.11: после первого успешного пути ждать 5 с и взять лучший по скорости, а не первый (тот же единственный таймер round.end)
 KNOWN = ('Permission denied', 'Host key verification failed', 'remote port forwarding failed', 'Connection refused', 'Connection reset',
          'Connection closed', 'Connection timed out', 'Could not resolve')
 NULL = 'NUL' if os.name == 'nt' else '/dev/null'
@@ -139,6 +140,7 @@ class Round:
         self.rn, self.nonce, self.only = rn, nonce, only
         self.queues, self.active = {}, collections.Counter()
         self.probes, self.rows, self.winner, self.finished, self.reason_started = [], {}, None, False, ''
+        self.cands = []  # успешные пути, ждущие конца окна дебаунса: (проба, down_bps, событие)
         self.order = order
 
 
@@ -311,12 +313,14 @@ class Rounds:
             return
         self._finalize(p, 'ok')
         if r.winner is None and p.proc and p.proc.alive():
+            # Дебаунс (владелец 23.11): первый успех не берём сразу - 5 с копим успешные пути (их ssh живут), затем _choose берёт самый быстрый.
             # TODO(владелец 23.11): переключение на более быстрый путь при работающем канале - решить позже (канал рвётся на секунды).
-            # Сейчас путь меняется только по событию «канал упал» или команде ассистента; рейтинг лишь задаёт порядок проб.
-            r.winner, p.state = p, 'winner'
-            journal.log('rounds', 'decision', {'path': p.path}, 'победил %s: 64 КиБ вниз за %s с (%s), вверх %s с (%s), задержка %s с; держу канал' % (
-                p.path, fmt(ev['down_s']), kib(ev['down_bps']), fmt(ev['up_s']), kib(ev['up_bps']), fmt(ev['latency'], 2)))
-            p.proc.write(b'CLAIM\n' + self.ctx.agent.token.encode() + b'\n')  # токен только через stdin
+            r.cands.append((p, ev['down_bps'], ev))
+            journal.log('rounds', 'decision', {'path': p.path, 'cands': len(r.cands)}, 'успех %s: %s вниз; кандидат, ждём %d с и берём лучшего' % (p.path, kib(ev['down_bps']), DEBOUNCE_SECONDS))
+            if len(r.cands) == 1:
+                if self.guard:
+                    self.guard.cancel()
+                self.guard = bus.guard('round.end', DEBOUNCE_SECONDS, lambda rn=self.rn: self._on_timer(rn))  # тот же единственный таймер, короче
         else:
             if p.proc:
                 p.proc.write(b'BYE\n')  # «спасибо»: сервер тихо выходит; скорость уже записана в рейтинг
@@ -361,8 +365,27 @@ class Rounds:
         elif r.winner is None:
             self._begin('нет победителя, срок раунда вышел')
 
+    def _choose(self, r):
+        """Конец окна дебаунса: победитель - самый быстрый из живых кандидатов, остальные получают BYE."""
+        alive = [c for c in r.cands if c[0].proc and c[0].proc.alive()]
+        r.cands = []
+        if not alive:
+            return
+        best = max(alive, key=lambda c: c[1])
+        for p, _, ev in alive:
+            if p is best[0]:
+                r.winner, p.state = p, 'winner'
+                journal.log('rounds', 'decision', {'path': p.path}, 'победил %s из %d кандидатов: 64 КиБ вниз за %s с (%s), вверх %s с (%s), задержка %s с; держу канал' % (
+                    p.path, len(alive), fmt(ev['down_s']), kib(ev['down_bps']), fmt(ev['up_s']), kib(ev['up_bps']), fmt(ev['latency'], 2)))
+                p.proc.write(b'CLAIM\n' + self.ctx.agent.token.encode() + b'\n')  # токен только через stdin
+            else:
+                p.proc.write(b'BYE\n')
+                p.proc.close_stdin()
+
     def _finish(self, timer):
         r = self.round
+        if r.winner is None and r.cands:
+            self._choose(r)
         r.finished = True
         now = time.monotonic()
         for p in r.probes:

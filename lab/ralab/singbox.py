@@ -4,7 +4,7 @@
 журнала sing-box "sing-box started" (box.go: Start). Таймера ожидания нет: sing-box либо пишет её, либо выходит.
 Конфиг с секретами лежит в <home>\\private\\ (не в state\\ и не в logs\\, их копирует СТОП.cmd).
 """
-import collections, http.client, json, os, re, secrets, shutil, urllib.parse
+import collections, http.client, json, os, re, secrets, shutil, threading, urllib.parse
 
 from . import journal, paths as pth, procs
 from .bus import bus
@@ -24,6 +24,8 @@ class SingBox:
         bus.subscribe('singbox.exited', self._on_exited)
         bus.subscribe('net.changed', self._on_net)
         bus.subscribe('app.stop', self._on_stop)
+        bus.subscribe('singbox.started', self._on_started)
+        self.traffic = {'up_bps': 0, 'down_bps': 0, 'active': False}
 
     def _on_settings(self, _):
         if procs.get('singbox'):  # пути изменились (VPN): гасим старый, новый запустится по событию выхода
@@ -130,5 +132,31 @@ class SingBox:
         except (OSError, http.client.HTTPException):
             return False
 
+    # --- индикатор передачи: потоковый GET /traffic Clash API (раз в секунду {"up","down"} байт/с, локально, без таймеров) ---
+    def _on_started(self, _):
+        threading.Thread(target=self._traffic_loop, args=(self.clash_port, self._secret), daemon=True).start()
+
+    def _traffic_loop(self, port, secret):
+        c = http.client.HTTPConnection('127.0.0.1', port)
+        try:
+            c.request('GET', '/traffic', headers={'Authorization': 'Bearer ' + secret})
+            r = c.getresponse()
+            while r.status == 200 and port == self.clash_port:  # новый sing-box - новый порт, старый поток завершается сам
+                line = r.readline()
+                if not line:
+                    break
+                d = json.loads(line)
+                up, down = int(d.get('up', 0)), int(d.get('down', 0))
+                was = self.traffic['active']
+                self.traffic = {'up_bps': up, 'down_bps': down, 'active': up + down > 2048}  # выше фона keepalive (~десятки байт/с)
+                if was != self.traffic['active']:
+                    journal.log('singbox', 'traffic', self.traffic, 'идёт передача' if self.traffic['active'] else 'передача закончилась')
+        except (OSError, ValueError, http.client.HTTPException):
+            pass
+        finally:
+            c.close()
+            if port == self.clash_port:
+                self.traffic = {'up_bps': 0, 'down_bps': 0, 'active': False}
+
     def status(self):
-        return {'up': self.up, 'failed': self.failed, 'restarts': self.fails, 'paths': len(self.ports)}
+        return {'up': self.up, 'failed': self.failed, 'restarts': self.fails, 'paths': len(self.ports), 'traffic': self.traffic}
