@@ -11,7 +11,7 @@ from .bus import bus
 
 NAME = 'tun'
 # Формат PnPDeviceID не угадываем: допускаем оба известных вида, строго fullmatch; дополнительно фильтр по InterfaceDescription.
-WINTUN_ID = re.compile(r'ROOT\\(?:WINTUN|NET)\\\d{1,4}|SWD\\WINTUN\\\{[0-9A-Fa-f-]{36}\}')
+WINTUN_ID = re.compile(r'ROOT\\(?:WINTUN|NET)\\\d{1,4}|SWD\\WINTUN\\\{[0-9A-Fa-f-]{36}\}', re.IGNORECASE)
 OUR_NAME = re.compile(r'ralab-tun.*')  # главная защита: чужие sing-box-адаптеры (happ-tun) имеют то же описание, но другое имя
 GUID = re.compile(r'\{?[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\}?')
 
@@ -32,7 +32,7 @@ def local_addrs(cancel):
 
 
 ADAPTER_FILE = 'tun-adapter.json'
-GHOST_DESC = 'Wintun Userspace Tunnel'
+GHOST_DESCS = ('sing-tun Tunnel', 'Wintun Userspace Tunnel')  # реальный sing-box даёт первое; у happ-tun то же описание: защищает имя ralab-tun*
 RETRY_GAP, MAX_FAILS, STABLE = 30, 5, 60
 # Худший stop(): процесс ~7 с (помощник 2 + ожидание 3 + taskkill 2) + 1 + поток 6 + очистка 12 = ~26 с; EXE и app.py ждут дольше (45 / 40 с).
 CLEANUP_BUDGET, WORKER_WAIT = 12, 6
@@ -258,8 +258,8 @@ class Tun:
         """Wintun-адаптеры (включая скрытые): {pnp: {pnp, guid, status}} или None, если спросить не удалось."""
         if not procs.WIN:
             return {}
-        script = ("@(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceDescription -eq '%s' -and $_.Name -like 'ralab-tun*' } | "
-                  "ForEach-Object { @{pnp=[string]$_.PnPDeviceID; guid=[string]$_.InterfaceGuid; status=[string]$_.Status; name=[string]$_.Name} }) | ConvertTo-Json -Compress" % GHOST_DESC)
+        script = ("@(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceDescription -in @(%s) -and $_.Name -like 'ralab-tun*' } | "
+                  "ForEach-Object { @{pnp=[string]$_.PnPDeviceID; guid=[string]$_.InterfaceGuid; status=[string]$_.Status; name=[string]$_.Name} }) | ConvertTo-Json -Compress" % ', '.join("'%s'" % d for d in GHOST_DESCS))
         r = _ps(script, timeout, cancel)
         if not r or r[0]:
             return None
