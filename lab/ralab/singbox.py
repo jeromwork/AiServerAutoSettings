@@ -4,7 +4,7 @@
 журнала sing-box "sing-box started" (box.go: Start). Таймера ожидания нет: sing-box либо пишет её, либо выходит.
 Конфиг с секретами лежит в <home>\\private\\ (не в state\\ и не в logs\\, их копирует СТОП.cmd).
 """
-import collections, http.client, json, os, re, secrets, urllib.parse
+import collections, http.client, json, os, re, secrets, shutil, urllib.parse
 
 from . import journal, paths as pth, procs
 from .bus import bus
@@ -59,10 +59,23 @@ class SingBox:
             json.dump(pth.make_config(s, self.ports, self.clash_port, self._secret), f)
         self.tail.clear()
         try:
-            procs.start('singbox', [s.singbox, 'run', '-c', cfg], on_err=self._line, cwd=d)
+            procs.start('singbox', [self._own_copy(s.singbox), 'run', '-c', cfg], on_err=self._line, cwd=d)
         except (OSError, ValueError) as e:
             self.up = False
             bus.publish('singbox.exited', {'code': None, 'error': e.__class__.__name__})
+
+    def _own_copy(self, exe):
+        """Своя копия под другим именем: чужие VPN (Happ) по имени sing-box.exe считают процесс своим ядром и пускают его мимо туннеля."""
+        dst = os.path.join(self.ctx.home, 'runtime', 'ralab-core.exe' if os.name == 'nt' else 'ralab-core')
+        try:
+            if not os.path.isfile(dst) or os.path.getsize(dst) != os.path.getsize(exe):
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(exe, dst + '.tmp')
+                os.replace(dst + '.tmp', dst)
+            return dst
+        except OSError as e:
+            journal.log('singbox', 'copy.failed', {'error': e.__class__.__name__}, 'копия sing-box не сделана, запускаю как есть')
+            return exe
 
     def _line(self, line):
         line = ANSI.sub('', line)  # sing-box красит журнал и в канал; отключить цвет в конфиге нельзя (поля нет)
