@@ -11,7 +11,8 @@ from .bus import bus
 
 NAME = 'tun'
 # Формат PnPDeviceID не угадываем: допускаем оба известных вида, строго fullmatch; дополнительно фильтр по InterfaceDescription.
-WINTUN_ID = re.compile(r'ROOT\\(?:WINTUN|NET)\\\d{1,4}')
+WINTUN_ID = re.compile(r'ROOT\\(?:WINTUN|NET)\\\d{1,4}|SWD\\WINTUN\\\{[0-9A-Fa-f-]{36}\}')
+OUR_NAME = re.compile(r'ralab-tun.*')  # главная защита: чужие sing-box-адаптеры (happ-tun) имеют то же описание, но другое имя
 GUID = re.compile(r'\{?[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\}?')
 
 
@@ -181,6 +182,7 @@ class Tun:
                 self.stopping = False
 
     def _stop_and_clean(self):
+        self.ctx.forward.tun_nets = []
         p = procs.get(NAME)
         if p:
             procs.kill(NAME)
@@ -256,8 +258,8 @@ class Tun:
         """Wintun-адаптеры (включая скрытые): {pnp: {pnp, guid, status}} или None, если спросить не удалось."""
         if not procs.WIN:
             return {}
-        script = ("@(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceDescription -eq '%s' } | "
-                  "ForEach-Object { @{pnp=[string]$_.PnPDeviceID; guid=[string]$_.InterfaceGuid; status=[string]$_.Status} }) | ConvertTo-Json -Compress" % GHOST_DESC)
+        script = ("@(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceDescription -eq '%s' -and $_.Name -like 'ralab-tun*' } | "
+                  "ForEach-Object { @{pnp=[string]$_.PnPDeviceID; guid=[string]$_.InterfaceGuid; status=[string]$_.Status; name=[string]$_.Name} }) | ConvertTo-Json -Compress" % GHOST_DESC)
         r = _ps(script, timeout, cancel)
         if not r or r[0]:
             return None
@@ -270,19 +272,21 @@ class Tun:
             data = [data]
         res = {}
         for d in data if isinstance(data, list) else []:
-            if isinstance(d, dict) and WINTUN_ID.fullmatch(str(d.get('pnp', ''))) and GUID.fullmatch(str(d.get('guid', ''))):
-                res[d['pnp']] = {'pnp': d['pnp'], 'guid': d['guid'], 'status': str(d.get('status', ''))}
+            if isinstance(d, dict) and WINTUN_ID.fullmatch(str(d.get('pnp', ''))) and GUID.fullmatch(str(d.get('guid', ''))) \
+                    and OUR_NAME.fullmatch(str(d.get('name', ''))):
+                res[d['pnp']] = {'pnp': d['pnp'], 'guid': d['guid'], 'status': str(d.get('status', '')), 'name': d['name']}
         return res
 
     def _remember(self, p, gen):
         """Запоминаем адаптер, появившийся при нашем запуске (разница снимков, не Disconnected): потом удаляем только его."""
         if not procs.WIN:
             return
+        before = dict(self.before or {})
         for _ in range(12):
             if gen != self.gen or self.cancel.is_set() or not p.alive():
                 return
             now = self._snapshot(4, self.cancel)
-            new = [a for k, a in (now or {}).items() if k not in (self.before or {}) and a['status'] != 'Disconnected']
+            new = [a for k, a in (now or {}).items() if k not in before and a['status'] != 'Disconnected']
             if len(new) == 1:
                 data = {'pnp': new[0]['pnp'], 'guid': new[0]['guid']}
                 with open(self._path(), 'w', encoding='utf-8') as f:
@@ -334,8 +338,9 @@ class Tun:
             return False
         ok = True
         for k, a in targets.items():
-            if a['status'] != 'Disconnected':
-                journal.log('tun', 'ghost.skipped', a, 'адаптер не в состоянии призрака: не удаляем')
+            if a['status'] == 'Up':
+                journal.log('tun', 'ghost.skipped', a, 'ВНИМАНИЕ: наш адаптер ещё Up, не удалён; запись сохранена')
+                ok = False
                 continue
             r = _run(['pnputil.exe', '/remove-device', k], min(5, end - time.monotonic()), cancel)
             if r and r[0] in (0, 3010):
