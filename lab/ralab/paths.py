@@ -115,7 +115,7 @@ def vpn_iface(probe_ip='1.1.1.1'):
         return None
 
 
-LOCAL_PROXIES = (10808,)  # SOCKS5 xray у Happ (и v2rayN); ещё - transport.localProxies: [порт, ...] в конфиге
+LOCAL_PROXIES = (10808, 7890, 7891)  # SOCKS5/mixed: xray у Happ и v2rayN 10808, Clash 7890/7891; ещё - transport.localProxies: [порт, ...] в конфиге
 
 
 def local_proxies(cfg):
@@ -213,10 +213,34 @@ def build_paths(s):
     add('ssh', [{'type': 'direct', 'tag': 'ssh-direct'}], 'ssh-direct')
     if vl:
         add('vless', [vless('vless-direct', server=s.server)], 'vless-direct')
+    # Вход VLESS+WebSocket+TLS (transport.wsEntries: [{name, host, port, path, certificate}]): снаружи обычный HTTPS к имени,
+    # которое само указывает на сервер, поэтому любой чужой VPN (Happ, Clash...) доставит его на сервер, даже читая SNI.
+    ws = []
+    for w in t.get('wsEntries') or []:
+        try:
+            if not vl:
+                raise Fail('в channel нет VLESS (uuid)')
+            n = 'ws-' + str(w['name'])
+            if not NAME_RE.match(n):
+                raise Fail('имя пути: только буквы, цифры, _ и -')
+            tls = {'enabled': True, 'server_name': w['host'], 'alpn': ['http/1.1']}
+            if w.get('certificate'):
+                tls['certificate'] = w['certificate']  # самоподписанный сертификат сервера: доверяем только ему
+            else:
+                tls['insecure'] = True
+            o = {'type': 'vless', 'tag': n, 'server': w['host'], 'server_port': int(w['port']), 'uuid': vl['uuid'], 'tls': tls,
+                 'transport': {'type': 'ws', 'path': w['path'], 'headers': {'Host': w['host']}}}
+            add('ws', [o], n)
+            ws.append(o)
+        except (KeyError, TypeError, ValueError, Fail) as e:
+            miss['ws:%s' % w.get('name') if isinstance(w, dict) else 'ws:?'] = 'пропущен: ' + (str(e.args[0]) if e.args else e.__class__.__name__)
     s.proxies = local_proxies(cfg)
     for port in s.proxies:  # SSH и VLESS к серверу через SOCKS другого VPN (Happ): сам VPN пускает к 109, его интерфейс - нет
         so = {'type': 'socks', 'tag': 'socks%d' % port, 'server': '127.0.0.1', 'server_port': port, 'version': '5'}
         paths.append({'name': so['tag'], 'kind': 'proxy', 'outs': [so], 'final': so['tag'], 'node': '127.0.0.1:%d' % port})
+        for o in ws:
+            paths.append({'name': '%s-socks%d' % (o['tag'], port), 'kind': 'proxy', 'final': '%s-socks%d' % (o['tag'], port), 'node': '127.0.0.1:%d' % port,
+                          'outs': [so, dict(copy.deepcopy(o), tag='%s-socks%d' % (o['tag'], port), detour=so['tag'])]})
         if vl:
             tag = 'vless-socks%d' % port
             paths.append({'name': tag, 'kind': 'proxy', 'outs': [so, vless(tag, detour=so['tag'], server=s.server)], 'final': tag,
