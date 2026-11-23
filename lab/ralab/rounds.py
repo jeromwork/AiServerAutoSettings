@@ -371,7 +371,7 @@ class Rounds:
         r.cands = []
         if not alive:
             return
-        best = max(alive, key=lambda c: c[1])
+        best = max(alive, key=lambda c: SIZE / max(c[0].t2 - c[0].t0, 1e-6))  # с учётом задержки старта: «вниз за 0,0 с» у ретранслятора - буфер, а не скорость
         for p, _, ev in alive:
             if p is best[0]:
                 r.winner, p.state = p, 'winner'
