@@ -136,7 +136,7 @@ class Forward:
         self.ctx, self.socks, self.nets, self.listeners, self.conns = ctx, None, [], {}, set()
         self.tun_nets = []  # фактические route_address живого TUN, сохраняются при перезагрузке настроек
         self.lock, self.sem, self.refused, self.count = threading.Lock(), threading.Semaphore(CONN_MAX), [], 0
-        self.started = False
+        self.started, self.fixed = False, {}
         self.tl = threading.local()  # сокеты, открытые обработчиком этого потока
         bus.subscribe('settings.loaded', self._on_settings)
         bus.subscribe('channel.up', self._on_up)
@@ -177,10 +177,26 @@ class Forward:
         pp = (cfg.get('lanProxy') or {}).get('port') or PROXY_PORT
         self._listen('lanProxy', int(pp), lambda c: self._proxy(c, int(pp)))
 
-    def _listen(self, name, port, handler):
+    def add_forward(self, listen, host, port):
+        """Фиксированный проброс 127.0.0.1:listen -> host:port через канал (Диск); повторный вызов меняет только цель.
+        Слушатель эксклюзивный (SO_EXCLUSIVEADDRUSE на Windows): занятый порт честно даёт ошибку. True, если слушатель открыт."""
+        key = 'forward:%d' % listen
+        if key in self.fixed:
+            self.fixed[key] = (host, port)
+            return True
+        self.fixed[key] = (host, port)
+        self._listen(key, listen, lambda c: self._forward(c, *self.fixed[key]), exclusive=True)
+        if not self.listeners[key]['ok']:
+            del self.fixed[key]
+        return self.listeners[key]['ok']
+
+    def _listen(self, name, port, handler, exclusive=False):
         try:
             ls = socket.socket()
-            ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if exclusive and hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
+                ls.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            else:
+                ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             ls.bind(('127.0.0.1', port))
             ls.listen(64)
         except OSError as e:

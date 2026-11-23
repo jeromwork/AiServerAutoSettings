@@ -57,11 +57,11 @@ def _assign(popen):
 
 
 class Proc:
-    def __init__(self, name, popen, src, binary, on_out, on_err, join_readers, graceful):
+    def __init__(self, name, popen, src, binary, on_out, on_err, join_readers, graceful, quiet=False):
         self.name, self.popen, self.src, self.binary = name, popen, src, binary
         self.on_out, self.on_err, self.join_readers = on_out, on_err, join_readers
         self.pid, self.killed = popen.pid, False
-        self.graceful = graceful
+        self.graceful, self.quiet = graceful, quiet
         self.readers = [threading.Thread(target=self._read, args=(popen.stdout, True), daemon=True),
                         threading.Thread(target=self._read, args=(popen.stderr, False), daemon=True)]
 
@@ -99,7 +99,8 @@ class Proc:
 
     def _line(self, b, is_out, cb):
         text = b.decode('utf-8', 'replace').rstrip('\r')
-        journal.log(self.src, 'stdout' if is_out else 'stderr', {'pid': self.pid, 'line': text})
+        if not self.quiet:  # quiet: вывод в журнал не пишется, колбэк решает сам (например, Диск - ПДн в именах файлов)
+            journal.log(self.src, 'stdout' if is_out else 'stderr', {'pid': self.pid, 'line': text})
         cb and cb(text)
 
     def _wait(self):
@@ -173,7 +174,7 @@ class Proc:
             pass
 
 
-def start(name, argv, src=None, binary=False, on_out=None, on_err=None, stdin=False, cwd=None, env=None, join_readers=True, graceful=False):
+def start(name, argv, src=None, binary=False, on_out=None, on_err=None, stdin=False, cwd=None, env=None, join_readers=True, graceful=False, quiet=False):
     """Запуск процесса. argv - список (или строка командной строки на Windows). Строки stderr (и stdout, если не binary) идут
     в журнал и в колбэки по одной; при binary=True stdout отдаётся колбэку кусками байт."""
     with _lock:
@@ -192,7 +193,7 @@ def start(name, argv, src=None, binary=False, on_out=None, on_err=None, stdin=Fa
         kw['start_new_session'] = True
     p = subprocess.Popen(argv, **kw)
     _assign(p)
-    pr = Proc(name, p, src or name.split(':')[0], binary, on_out, on_err, join_readers, graceful)
+    pr = Proc(name, p, src or name.split(':')[0], binary, on_out, on_err, join_readers, graceful, quiet)
     with _lock:
         _procs[name] = pr
     journal.log(pr.src, 'start', {'name': name, 'pid': p.pid, 'argv': argv if isinstance(argv, str) else list(argv)})
