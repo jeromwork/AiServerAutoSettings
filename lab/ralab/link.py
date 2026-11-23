@@ -62,6 +62,10 @@ class Link:
         lines.append(self.note)
         if ch:
             lines.append('Канал: %s (порт сервера %s)' % (ch['path'], ch['rport']))
+        up = getattr(ctx, 'uplink', None)
+        if up and up.current:
+            ms = up.results.get(up.current)
+            lines.append('путь: %s %s' % (up.current, '%s мс' % ms if ms is not None else '-'))
         for x in (r.get('ranking') or [])[:12]:
             lines.append('%s: %s %s' % (x['path'], x['outcome'], '%d КиБ/с' % (x['down_bps'] // 1024) if x.get('down_bps') else (x.get('reason') or '')[:80]))
         lan = getattr(ctx, 'lan', None)
@@ -98,5 +102,5 @@ class Link:
 def attach(link):
     """Подписки с темой: bus передаёт подписчику только данные, поэтому по одной функции на тему."""
     for t in ('settings.loaded', 'settings.failed', 'singbox.started', 'singbox.failed', 'channel.up', 'channel.down', 'round.done',
-              'lan.result', 'path.ok', 'path.failed', 'agent.ready', 'singbox.exited'):
+              'lan.result', 'path.ok', 'path.failed', 'agent.ready', 'singbox.exited', 'uplink.selected'):
         bus.subscribe(t, lambda ev, t=t: link.handle(t, ev or {}))

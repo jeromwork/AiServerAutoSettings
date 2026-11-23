@@ -15,6 +15,9 @@ SIZE = 65536
 NODE_MAX = 3  # одновременных проб к одному узлу (по исследованию 2026 года частые TLS-подключения к узлу вызывают блокировку)
 RPORTS = list(range(13340, 13400))
 ROUND_SECONDS = 60
+SINGLE = True  # V3: канал всегда через общий вход in-chan (selector chan выбирает путь, см. uplink.py); раунды по многим путям отключены (код - до V11)
+BACKOFF_MAX_S, FULL_EVERY_S = 60, 30  # пауза между подряд неудачными ssh 3-6-12..60 с; полный тест не чаще 1 раза в 30 с
+SELECT_WAIT_S, ROUND_GAP_S = 6, 3  # ждать uplink.selected не дольше 6 с; раунды не чаще раза в 3 с
 DEBOUNCE_SECONDS = 5  # владелец 23.11: после первого успешного пути ждать 5 с и взять лучший по скорости, а не первый (тот же единственный таймер round.end)
 KNOWN = ('Permission denied', 'Host key verification failed', 'remote port forwarding failed', 'Connection refused', 'Connection reset',
          'Connection closed', 'Connection timed out', 'Could not resolve')
@@ -46,7 +49,8 @@ class Probe:
         self.phase, self.buf, self.body = 0, bytearray(), 0
         self.sha, self.sent_hex, self.reason = hashlib.sha256(), None, ''
         self.stderr = collections.deque(maxlen=4)
-        self.proc = None
+        self.agent_fail = False
+        self.proc, self.pathfn = None, None  # pathfn: в SINGLE имя пути для channel.up берётся у uplink
 
     def _line(self, data, i):
         """Накопить байты до \\n; -> (строка|None, новый индекс). Строка не длиннее 256 байт."""
@@ -106,8 +110,12 @@ class Probe:
                                     'up_bps': round(SIZE / max(self.t3 - self.t2, 1e-6)), 'down_s': round(self.t2 - self.t1, 3), 'up_s': round(self.t3 - self.t2, 3)})
         elif ph == 5:
             if line.startswith('RALAB-CHANNEL-UP') and self.state == 'winner':
-                bus.publish('channel.up', {'name': self.name, 'path': self.path, 'rport': self.rport, 'socks': self.socks, 'server_version': line[17:60]})
+                ev = {'name': self.name, 'path': self.path, 'rport': self.rport, 'socks': self.socks, 'server_version': line[17:60]}
+                if self.pathfn:
+                    ev.update(path=self.pathfn(), via='chan')
+                bus.publish('channel.up', ev)
             elif line.startswith('RALAB-AGENT-FAIL'):
+                self.agent_fail = True
                 self.reason = 'агент ПК не ответил серверу: ' + line[:40]
                 journal.log('rounds', 'agent.fail', {'path': self.path, 'line': line[:60]})
 
@@ -127,6 +135,11 @@ class Probe:
         bus.publish('path.failed', {'name': self.name, 'path': self.path, 'round': self.rn, 'reason': reason, 'bytes_down': self.rx,
                                     'bytes_up': self.up, 'elapsed': round(time.monotonic() - self.t0, 3)})
 
+    def fatal(self):
+        """Отказ не из-за сети (ключ, агент ПК, порт сервера): путь не штрафуем."""
+        tail = ' | '.join(self.stderr)
+        return self.agent_fail or any(k in tail for k in ('Permission denied', 'Host key verification failed', 'remote port forwarding failed'))
+
     def exit_reason(self, code):
         tail = ' | '.join(self.stderr)
         for k in KNOWN:
@@ -140,6 +153,7 @@ class Round:
         self.rn, self.nonce, self.only = rn, nonce, only
         self.queues, self.active = {}, collections.Counter()
         self.probes, self.rows, self.winner, self.finished, self.reason_started = [], {}, None, False, ''
+        self.single = False
         self.cands = []  # успешные пути, ждущие конца окна дебаунса: (проба, down_bps, событие)
         self.order = order
 
@@ -158,7 +172,74 @@ class Rounds:
                      ('net.changed', self._on_net), ('path.switch', self._on_switch), ('path.ok', self._on_ok), ('path.failed', self._on_failed),
                      ('proc.exited', self._on_exit), ('path.delay', self._on_delay), ('app.stop', self._on_stop)):
             bus.subscribe(t, f)
+        bus.subscribe('uplink.selected', self._on_selected)
+        bus.subscribe('rounds.wake', self._on_wake)
+        bus.subscribe('rounds.drop', self._on_drop)
         self.stopping = False
+        self.wait, self.wait_reason, self.wait_sel, self.wtok, self.not_before = None, '', True, 0, 0.0
+        self.last_begin, self.last_full, self.fails, self._dropping = 0.0, 0.0, 0, None
+
+    def single(self):
+        return SINGLE and 'chan' in getattr(self.ctx.singbox, 'ports', {})
+
+    def _later(self, sec, tok):
+        """Таймер только публикует rounds.wake: состояние Rounds меняется на потоке шины."""
+        t = threading.Timer(max(0.0, sec), lambda: bus.publish('rounds.wake', {'tok': tok}))
+        t.daemon = True
+        t.start()
+
+    def _await_selected(self, reason, pause=0, wait_sel=True):
+        """SINGLE: раунд по uplink.selected (страховка SELECT_WAIT_S); не раньше ROUND_GAP_S после прошлого и не раньше pause."""
+        if self.stopping or self.wait is not None:
+            return  # уже ждём: второго раунда не будет
+        now = time.monotonic()
+        self.wtok += 1
+        self.wait, self.wait_reason, self.wait_sel = self.wtok, reason, wait_sel
+        self.not_before = max(self.last_begin + ROUND_GAP_S, now + pause)
+        self._later(SELECT_WAIT_S if wait_sel else self.not_before - now, self.wait)
+
+    def _on_selected(self, _):
+        if self.wait is not None and self.wait_sel:
+            self._fire(self.wait)
+
+    def _on_wake(self, ev):
+        self._fire(ev.get('tok'))
+
+    def _fire(self, tok):
+        if tok is None or tok != self.wait:
+            return  # устаревший таймер
+        left = self.not_before - time.monotonic()
+        if left > 0:
+            self._later(left, tok)
+            return
+        self.wait = None
+        self._begin(self.wait_reason)
+
+    def _retry(self, reason, r):
+        """ssh через chan вышел без channel.up. Штраф пути - только за сетевые ошибки; пауза 3-6-12..60 с; полный тест не чаще 1 раза в 30 с."""
+        up, now = self.ctx.uplink, time.monotonic()
+        self.fails += 1
+        pause = min(BACKOFF_MAX_S, ROUND_GAP_S * 2 ** (self.fails - 1))
+        if not any(p.fatal() for p in r.probes) and up.current:
+            up.penalize(up.current, 120)
+        full = now - self.last_full >= FULL_EVERY_S
+        if full:
+            self.last_full = now
+            up.refresh()
+        self._await_selected(reason, pause, full)
+
+    def _on_drop(self, ev):
+        self.drop_channel(ev.get('reason', ''))
+
+    def drop_channel(self, reason):
+        """Убить ssh канала (новый поднимется по channel.down); только с потока шины. -> был ли канал."""
+        ch = self.channel
+        if not ch:
+            return False
+        self._dropping = reason
+        journal.log('rounds', 'channel.drop', {'path': ch.get('path')}, 'сбрасываю канал: ' + reason)
+        procs.kill(ch['name'])
+        return True
 
     # --- состояние ---
     def _load_order(self):
@@ -176,7 +257,10 @@ class Rounds:
 
     def _on_sb_up(self, _):
         self.sb_up = True
-        self._begin('sing-box запущен')
+        if self.single():
+            self._await_selected('sing-box запущен')
+        else:
+            self._begin('sing-box запущен')
 
     def _on_sb_down(self, _):
         self.sb_up = False
@@ -197,17 +281,24 @@ class Rounds:
             self.ctx.netwatch.ack()
 
     def _on_switch(self, ev):
+        if self.single():
+            self.ctx.uplink.force(ev.get('path'))
+            return
         self._begin('команда ассистента: путь %s' % ev.get('path'), only=ev.get('path'))
 
     def _on_channel_up(self, ev):
-        self.channel = ev
+        self.channel, self.fails, self._dropping = ev, 0, None
         journal.log('rounds', 'decision', None, 'канал поднят через %s (порт %d, SOCKS %d)' % (ev['path'], ev['rport'], ev['socks']))
 
     def _on_channel_down(self, ev):
         if ev.get('restart'):
             return
         self.channel = None
-        self._begin('канал оборвался (%s): %s' % (ev.get('path'), ev.get('reason')))
+        reason = 'канал оборвался (%s): %s' % (ev.get('path'), ev.get('reason'))
+        if self.single() and not ev.get('dropped'):
+            self._await_selected(reason)  # uplink сам запустит полный тест; dropped - путь уже выбран uplink
+        else:
+            self._begin(reason)
 
     # --- раунд ---
     def _begin(self, reason, only=None):
@@ -216,6 +307,8 @@ class Rounds:
             journal.log('rounds', 'round.deferred', {'reason': reason}, 'sing-box или агент ещё не готовы: раунд начнётся по событию')
             return
         self.pending = None
+        self.wait, self._dropping = None, None
+        self.last_begin = time.monotonic()
         s = self.ctx.settings
         if self.guard:
             self.guard.cancel()
@@ -230,7 +323,10 @@ class Rounds:
             bus.publish('channel.down', {'path': had_channel.get('path'), 'reason': 'новый раунд: ' + reason, 'restart': True})
         names = [p['name'] for p in s.paths]
         order = [n for n in self.order if n in names] + [n for n in names if n not in self.order]  # порядок прошлого рейтинга, остальные по конфигу
-        if only:
+        single = self.single()
+        if single:
+            order, only = ['chan'], None  # путь выбирает selector chan
+        elif only:
             if only not in names:
                 journal.log('rounds', 'switch.unknown', {'path': only}, 'такого пути нет, обычный раунд')
                 only = None
@@ -238,10 +334,11 @@ class Rounds:
                 order = [only]
         self.rn += 1
         r = self.round = Round(self.rn, secrets.token_hex(8), order, only)
+        r.single = single
         self.probes = {}
         byname = {p['name']: p for p in s.paths}
         for n in order:
-            r.queues.setdefault(byname[n]['node'], collections.deque()).append(n)
+            r.queues.setdefault(byname[n]['node'] if n in byname else n, collections.deque()).append(n)
         # Б: у замёрзшего пути нет события «замёрз»; срок закрывает раунд и ограничивает частоту подключений к узлу
         self.guard = bus.guard('round.end', ROUND_SECONDS, lambda rn=self.rn: self._on_timer(rn))
         journal.log('rounds', 'round.begin', {'round': r.rn, 'paths': len(order), 'nodes': len(r.queues), 'only': only}, 'новый раунд: ' + reason)
@@ -270,6 +367,8 @@ class Rounds:
     def _launch(self, r, path, node, rport):
         s, sb = self.ctx.settings, self.ctx.singbox
         p = Probe(r.rn, r.nonce, path, node, rport, pth.free_ports(1)[0])
+        if r.single:
+            p.pathfn = lambda: self.ctx.uplink.current or 'chan'
         self.live[p.name] = self.probes[p.name] = p
         r.probes.append(p)
         r.active[node] += 1
@@ -316,6 +415,10 @@ class Rounds:
             # Дебаунс (владелец 23.11): первый успех не берём сразу - 5 с копим успешные пути (их ssh живут), затем _choose берёт самый быстрый.
             # TODO(владелец 23.11): переключение на более быстрый путь при работающем канале - решить позже (канал рвётся на секунды).
             r.cands.append((p, ev['down_bps'], ev))
+            if r.single:
+                self._choose(r)  # V3: один кандидат (chan), без дебаунса
+                self._after_final()
+                return
             journal.log('rounds', 'decision', {'path': p.path, 'cands': len(r.cands)}, 'успех %s: %s вниз; кандидат, ждём %d с и берём лучшего' % (p.path, kib(ev['down_bps']), DEBOUNCE_SECONDS))
             if len(r.cands) == 1:
                 if self.guard:
@@ -347,7 +450,8 @@ class Rounds:
             p.state = 'run'
             p.fail('EOF на %d байт: %s' % (p.rx, p.exit_reason(ev['code'])))
         elif p.state == 'winner':
-            bus.publish('channel.down', {'path': p.path, 'code': ev['code'], 'reason': p.exit_reason(ev['code']), 'was_up': bool(self.channel)})
+            dropped, self._dropping = self._dropping is not None, None
+            bus.publish('channel.down', {'path': p.path, 'code': ev['code'], 'reason': p.exit_reason(ev['code']), 'was_up': bool(self.channel), 'dropped': dropped})
         self._pump()  # освободился порт 13340-13399
 
     def _after_final(self):
@@ -360,6 +464,8 @@ class Rounds:
         r = self.round
         if not r or r.rn != rn:
             return
+        if self.wait is not None:
+            return  # новый раунд уже ожидает выбора пути
         if not r.finished:
             self._finish(True)
         elif r.winner is None:
@@ -416,6 +522,9 @@ class Rounds:
                 self.guard.cancel()
         elif timer or r.only:
             self._begin('нет победителя' + (' (путь ассистента не сработал, обычный раунд)' if r.only else ', срок раунда вышел'))
+            return
+        elif r.single and not self.stopping:
+            self._retry('ssh через chan не поднял канал', r)
             return
         # раунд кончился раньше срока без победителя: следующий начнёт таймер Б (не чаще раза в 60 с на узел)
         self._start_delays(rows)
