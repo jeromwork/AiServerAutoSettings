@@ -2,3 +2,5 @@ out/
 exe/bin/
 exe/obj/
 __pycache__/
+exe/shell/bin/
+exe/shell/obj/
