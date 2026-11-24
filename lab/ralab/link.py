@@ -2,12 +2,13 @@
 
 stdout: {"t":"state","color":"grey|yellow|green|red","tip":"<=63","lines":[<=50 строк по <=300]},
         {"t":"good","version":"..."} (один раз, на первый channel.up), {"t":"report","text":"..."} (<=64 КБ, ответ на запрос отчёта).
-stdin:  {"t":"exit"}, {"t":"report"}.
+        {"t":"notice","text":"..."} (сообщение для человека), {"t":"restart-exe"} (подмена файла сделана, EXE перезапускается сам).
+stdin:  {"t":"exit"}, {"t":"report"}, {"t":"update"} (проверить релиз и обновить EXE), {"t":"rollback"} (вернуть прежний EXE).
 В stdout пишет только этот модуль (sys.stdout после старта указывает на stderr). Секретов нет: всё проходит journal.mask().
 """
 import json, sys, threading
 
-from . import journal
+from . import journal, update
 from .bus import bus
 
 LINES_MAX, LINE_MAX, TIP_MAX, REPORT_MAX = 50, 300, 63, 64000
@@ -46,6 +47,10 @@ class Link:
                     bus.publish('app.stop', {'reason': 'команда exit от EXE'})
                 elif t == 'report':
                     bus.publish('link.report_request')
+                elif t == 'update':
+                    update.install(self._send)
+                elif t == 'rollback':
+                    update.rollback(self._send)
         except (OSError, ValueError):
             pass
         bus.publish('app.stop', {'reason': 'EOF stdin: EXE закрыл связь'})
