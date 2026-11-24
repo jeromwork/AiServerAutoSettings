@@ -11,14 +11,17 @@ namespace RemoteAgents.Lab
     {
         readonly Supervisor supervisor; readonly NotifyIcon icon = new NotifyIcon();
         readonly Icon grey = MakeIcon(Color.Gray), yellow = MakeIcon(Color.Goldenrod), green = MakeIcon(Color.ForestGreen), red = MakeIcon(Color.Firebrick);
-        ToolStripMenuItem diskItem, updateItem, rollbackItem; Timer clickTimer; Form window; TextBox box; Button restart; readonly LabDisk disk;
+        ToolStripMenuItem diskItem, updateItem, rollbackItem, controlItem; Timer clickTimer; Form window; TextBox box; Button restart; readonly LabDisk disk;
 
         public LabTray(Supervisor supervisor)
         {
             this.supervisor = supervisor;
             disk = new LabDisk(supervisor.Home, supervisor.WriteLog, (message, ok) => icon.ShowBalloonTip(4000, "Диск", message, ok ? ToolTipIcon.Info : ToolTipIcon.Warning));
             var menu = new ContextMenuStrip();
-            menu.Items.Add("Открыть", null, (s, e) => OpenHappier());
+            menu.Items.Add("Открыть окно", null, (s, e) => OpenUi());
+            controlItem = (ToolStripMenuItem)menu.Items.Add("Управление компьютером", null, (s, e) => supervisor.SetControl(!supervisor.ControlEnabled));
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("Открыть Happier", null, (s, e) => OpenHappier());
             diskItem = (ToolStripMenuItem)menu.Items.Add("Диск", null, (s, e) => OpenDisk());
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Состояние", null, (s, e) => ShowWindow());
@@ -29,13 +32,18 @@ namespace RemoteAgents.Lab
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Выход", null, (s, e) => { disk.Stop(false); supervisor.RequestExit(); });
             icon.ContextMenuStrip = menu; icon.Visible = true;
-            menu.Opening += (s, e) => { diskItem.Enabled = supervisor.DiskRunning && supervisor.DiskHome.Length > 0; updateItem.Enabled = supervisor.PythonRunning && !supervisor.UpdateLocked; rollbackItem.Enabled = File.Exists(Supervisor.PrevExePath) && !supervisor.UpdateLocked && !supervisor.ExitInProgress; };
+            menu.Opening += (s, e) => {
+                if (controlItem != null) controlItem.Checked = supervisor.ControlEnabled;
+                diskItem.Enabled = supervisor.DiskRunning && supervisor.DiskHome.Length > 0;
+                updateItem.Enabled = supervisor.PythonRunning && !supervisor.UpdateLocked;
+                rollbackItem.Enabled = File.Exists(Supervisor.PrevExePath) && !supervisor.UpdateLocked && !supervisor.ExitInProgress;
+            };
             supervisor.Notice += text => icon.ShowBalloonTip(5000, "RemoteAgents", text, ToolTipIcon.Info);
-            // Одиночный левый клик открывает Happier после паузы DoubleClickTime; двойной клик гасит таймер и открывает только «Состояние».
+            // Одиночный левый клик или двойной клик открывает страницу (или «Состояние», если адреса ещё нет).
             clickTimer = new Timer { Interval = SystemInformation.DoubleClickTime };
-            clickTimer.Tick += (s, e) => { clickTimer.Stop(); OpenHappier(); };
+            clickTimer.Tick += (s, e) => { clickTimer.Stop(); OpenUi(); };
             icon.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) { clickTimer.Stop(); clickTimer.Start(); } };
-            icon.DoubleClick += (s, e) => { clickTimer.Stop(); ShowWindow(); };
+            icon.DoubleClick += (s, e) => { clickTimer.Stop(); OpenUi(); };
             supervisor.StateChanged += Refresh;
             supervisor.Quit += () => { clickTimer.Stop(); clickTimer.Dispose(); disk.Stop(true); icon.Visible = false; icon.Dispose(); ExitThread(); };
             supervisor.ReportReady += text => {
@@ -43,6 +51,16 @@ namespace RemoteAgents.Lab
                 catch (Exception) { icon.ShowBalloonTip(3000, "RemoteAgents-Lab", "Буфер обмена занят, нажмите ещё раз", ToolTipIcon.Warning); }
             };
             Refresh();
+        }
+
+        void OpenUi()
+        {
+            try {
+                string url = supervisor.WebUiUrl;
+                if (!string.IsNullOrEmpty(url)) System.Diagnostics.Process.Start(url);
+                else ShowWindow();
+            }
+            catch (Exception ex) { supervisor.WriteLog("Открыть окно не удалось: " + ex.GetType().Name); }
         }
 
         void OpenHappier()
@@ -63,6 +81,7 @@ namespace RemoteAgents.Lab
             icon.Icon = state.Color == "green" ? green : state.Color == "yellow" ? yellow : state.Color == "red" ? red : grey;
             disk.Sync(supervisor.DiskRunning, supervisor.DiskHome);
             icon.Text = state.Tip; // NotifyIcon.Text: не больше 63 символов, Supervisor их уже обрезал
+            if (controlItem != null) controlItem.Checked = supervisor.ControlEnabled;
             if (window != null && window.Visible) FillWindow();
         }
 
