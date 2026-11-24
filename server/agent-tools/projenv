@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""Зашифрованное окружение проекта; значения никогда не выводятся."""
+import argparse
+import contextlib
+import os
+from pathlib import Path
+import re
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+
+STORE = Path('/etc/credstore.encrypted')
+NAME = re.compile(r'[a-z0-9-]+\Z')
+KEY = re.compile(r'[A-Za-z_][A-Za-z0-9_]*\Z')
+
+
+class Error(Exception):
+    pass
+
+
+def checked(argv, *, data=None, timeout=60):
+    """Не включать stderr/argv в исключения: они могут содержать секреты."""
+    try:
+        result = subprocess.run(argv, input=data, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        raise Error('Команда недоступна или превышено время ожидания.') from None
+    if result.returncode:
+        raise Error('Операция не выполнена (код %d).' % result.returncode)
+    return result.stdout
+
+
+def credential_name(project, environment='dev'):
+    if not NAME.fullmatch(project) or not NAME.fullmatch(environment):
+        raise Error('Проект и окружение: строчные латинские буквы, цифры, дефисы.')
+    return project + '-' + environment
+
+
+def runtime_dir():
+    directory = Path(os.environ.get('XDG_RUNTIME_DIR', '/run/user/%d' % os.getuid()))
+    info = directory.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise Error('Нужен закрытый XDG_RUNTIME_DIR текущего пользователя.')
+    return directory
+
+
+@contextlib.contextmanager
+def secret_file(data=b''):
+    fd, name = tempfile.mkstemp(prefix='projenv.', dir=runtime_dir())
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(data)
+        yield Path(name)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def parse(data, *, unquote=True):
+    try:
+        content = data.decode('utf-8-sig')
+    except UnicodeError:
+        raise Error('Ожидается UTF-8.') from None
+    result = {}
+    for number, line in enumerate(content.split('\n'), 1):
+        line = line.removesuffix('\r')
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        key, sep, value = line.lstrip().partition('=')
+        if not sep or not KEY.fullmatch(key) or any(c in line for c in ('\0', '\r')):
+            raise Error('Строка %d: требуется KEY=VALUE без export и многострочных значений.' % number)
+        if '${' in value:
+            raise Error('Строка %d: подстановки запрещены.' % number)
+        if unquote and value.startswith(('"', "'")):
+            if len(value) < 2 or value[-1] != value[0]:
+                raise Error('Строка %d: непарные кавычки или многострочное значение.' % number)
+            value = value[1:-1]
+        result[key] = value
+    return result
+
+
+def encode(values):
+    for key, value in values.items():
+        if not KEY.fullmatch(key) or any(c in value for c in ('\n', '\r', '\0')) or '${' in value:
+            raise Error('Окружение содержит недопустимый ключ или значение.')
+    return ''.join('%s=%s\n' % pair for pair in values.items()).encode('utf-8')
+
+
+def exists(name):
+    result = subprocess.run(['sudo', '-n', 'test', '-f', str(STORE / (name + '.cred'))],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+    if result.returncode not in (0, 1):
+        raise Error('Не удалось проверить credential.')
+    # Проверяем sudo отдельно: его отказ тоже может иметь код 1.
+    if result.returncode:
+        checked(['sudo', '-n', 'test', '-d', str(STORE)])
+    return result.returncode == 0
+
+
+def decrypt(name):
+    return checked(['sudo', '-n', 'systemd-creds', 'decrypt', '--name=' + name,
+                    str(STORE / (name + '.cred')), '-'])
+
+
+def store(name, values):
+    data = encode(values)
+    checked(['sudo', '-n', 'install', '-d', '-m', '0700', str(STORE)])
+    target = checked(['sudo', '-n', 'mktemp', str(STORE / '.projenv.XXXXXXXX')]).decode().strip()
+    try:
+        checked(['sudo', '-n', 'systemd-creds', 'encrypt', '--name=' + name, '-', target], data=data)
+        checked(['sudo', '-n', 'chmod', '0600', target])
+        checked(['sudo', '-n', 'chown', 'root:root', target])
+        checked(['sudo', '-n', 'mv', '-f', '--', target, str(STORE / (name + '.cred'))])
+    finally:
+        checked(['sudo', '-n', 'rm', '-f', '--', target])
+
+
+def interrupted(signum, frame):
+    raise SystemExit(128 + signum)
+
+
+def install_signals():
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, interrupted)
+
+
+def run_command(name, command):
+    if not command:
+        raise Error('После -- нужна команда.')
+    with secret_file(decrypt(name)) as filename:
+        environment = os.environ.copy()
+        environment.update({k: v for k, v in parse(filename.read_bytes(), unquote=False).items() if k not in ('PATH', 'HOME')})
+        child = subprocess.Popen(command, env=environment, start_new_session=True)
+        old = {}
+
+        def forward(signum, frame):
+            try:
+                os.killpg(child.pid, signum)
+            except ProcessLookupError:
+                pass
+            raise SystemExit(128 + signum)
+
+        try:
+            for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+                old[sig] = signal.signal(sig, forward)
+            code = child.wait()
+            return code if code >= 0 else 128 - code
+        finally:
+            if child.poll() is None:
+                try:
+                    os.killpg(child.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    child.wait()
+            for sig, handler in old.items():
+                signal.signal(sig, handler)
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        # argparse по умолчанию повторяет ошибочные аргументы, включая KEY=VALUE.
+        self.print_usage(sys.stderr)
+        self.exit(2, 'Ошибка аргументов; см. projenv --help.\n')
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    command = None
+    if argv and argv[0] == 'put' and argv[-1:] == ['-']:
+        argv.pop()
+        argv.insert(2, '-')
+    if argv and argv[0] == 'run' and '--' in argv:
+        boundary = argv.index('--')
+        command, argv = argv[boundary + 1:], argv[:boundary]
+    parser = Parser(description='Секреты проекта: put — записать, add — обновить, keys — ключи, list — список, run — запуск.',
+                    epilog='Пример: projenv run проект --env dev -- команда')
+    subs = parser.add_subparsers(dest='action', parser_class=Parser)
+    for action in ('put', 'add', 'keys', 'run'):
+        sub = subs.add_parser(action)
+        sub.add_argument('project')
+        sub.add_argument('--env', default='dev', dest='environment')
+        if action == 'put':
+            source = sub.add_mutually_exclusive_group()
+            source.add_argument('--from-pc', metavar='ПУТЬ')
+            source.add_argument('--from-file', metavar='ПУТЬ')
+            sub.add_argument('stdin', nargs='?', choices=['-'])
+        elif action == 'add':
+            sub.add_argument('assignments', nargs='+', metavar='KEY=VALUE')
+    subs.add_parser('list')
+    args = parser.parse_args(argv)
+    if not args.action:
+        parser.print_help()
+        return 0
+    if args.action == 'list':
+        files = checked(['sudo', '-n', 'ls', '-1', '--', str(STORE)]).decode().splitlines()
+        for filename in sorted(files):
+            if re.fullmatch(r'[a-z0-9-]+\.cred', filename):
+                print(filename)
+        return 0
+    name = credential_name(args.project, args.environment)
+    if args.action == 'put':
+        if bool(args.from_pc) + bool(args.from_file) + bool(args.stdin) != 1:
+            raise Error('Укажите ровно один источник: --from-pc, --from-file или -.')
+        if args.from_pc:
+            with secret_file() as filename:
+                checked(['ra-lab', 'read', args.from_pc, str(filename)], timeout=45)
+                values = parse(filename.read_bytes())
+        elif args.from_file:
+            values = parse(Path(args.from_file).expanduser().read_bytes())
+        else:
+            values = parse(sys.stdin.buffer.read())
+        store(name, values)
+        print('записано %d ключей' % len(values))
+    elif args.action == 'add':
+        values = parse(decrypt(name), unquote=False)
+        if any('\n' in item or '\r' in item for item in args.assignments):
+            raise Error('Многострочные значения запрещены.')
+        for assignment in args.assignments:
+            updates = parse(assignment.encode())
+            if len(updates) != 1:
+                raise Error('Требуется KEY=VALUE для каждого аргумента.')
+            values.update(updates)
+        store(name, values)
+        print('записано %d ключей' % len(values))
+    elif args.action == 'keys':
+        print('\n'.join(parse(decrypt(name), unquote=False)))
+    elif args.action == 'run':
+        return run_command(name, command)
+    return 0
+
+
+if __name__ == '__main__':
+    os.umask(0o077)
+    install_signals()
+    try:
+        sys.exit(main())
+    except (Error, OSError, ValueError, subprocess.SubprocessError) as error:
+        print(str(error) if isinstance(error, Error) else 'Операция не выполнена; значения скрыты.', file=sys.stderr)
+        sys.exit(1)

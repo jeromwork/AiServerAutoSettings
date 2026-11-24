@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Идемпотентный запуск общей dev-БД без вывода паролей."""
+import fcntl
+import json
+import os
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+import time
+
+api = runpy.run_path(str(Path(__file__).resolve().with_name('projenv')))
+Error, checked = api['Error'], api['checked']
+DOCKER = ['sudo', '-n', 'docker']
+OWNER = 'dev-mysql-up'
+
+
+def docker(*args, data=None, timeout=60):
+    try:
+        return checked(DOCKER + list(args), data=data, timeout=timeout)
+    except Error:
+        if args[:2] == ('pull', 'mysql:8.0'):
+            raise Error('Не удалось загрузить mysql:8.0; запуск остановлен, обходы не выполнялись.') from None
+        raise
+
+
+def inspect_existing():
+    names = docker('ps', '-a', '--filter', 'name=^/dev-mysql$', '--format', '{{.Names}}').decode().splitlines()
+    if not names:
+        return None
+    # Не запрашивать полный inspect: Config.Env содержит пароли.
+    spec = json.loads(docker('inspect', '--format',
+        '{"owner":{{json (index .Config.Labels "dev-mysql.owner")}},'
+        '"image":{{json .Config.Image}},"memory":{{.HostConfig.Memory}},'
+        '"swap":{{.HostConfig.MemorySwap}},"restart":{{json .HostConfig.RestartPolicy.Name}},'
+        '"ports":{{json .HostConfig.PortBindings}},"networks":{{json .NetworkSettings.Networks}},'
+        '"mounts":{{json .Mounts}},"running":{{.State.Running}}}', 'dev-mysql'))
+    path = str(Path.home() / 'work/run/dev-mysql/data')
+    valid = (spec['owner'] == OWNER and spec['image'] == 'mysql:8.0'
+             and spec['memory'] == spec['swap'] == 1073741824
+             and spec['restart'] == 'unless-stopped'
+             and spec['ports'] == {'3306/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '3306'}]}
+             and 'dev-net' in spec['networks']
+             and 'dev-mysql' in (spec['networks']['dev-net'].get('Aliases') or [])
+             and any(m['Source'] == path and m['Destination'] == '/var/lib/mysql' for m in spec['mounts']))
+    if not valid:
+        raise Error('dev-mysql уже существует с другой конфигурацией; контейнер не изменён.')
+    return spec
+
+
+def ready():
+    for _ in range(120):
+        result = subprocess.run(DOCKER + ['exec', 'dev-mysql', 'mysqladmin', '--host=127.0.0.1', 'ping', '--silent'],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        if result.returncode == 0:
+            print('dev-mysql готов: 127.0.0.1:3306, сеть dev-net.')
+            return
+        time.sleep(1)
+    raise Error('MySQL не готов за 120 секунд; контейнер сохранён для диагностики.')
+
+
+def main():
+    # Один запуск на пользователя; одновременно инициализировать пароли нельзя.
+    with open(api['runtime_dir']() / 'dev-mysql-up.lock', 'a') as lock:
+        os.chmod(lock.name, 0o600)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        existing = inspect_existing()
+        if existing:
+            if not existing['running']:
+                docker('start', 'dev-mysql')
+            ready()
+            return
+        values = api['parse'](api['decrypt']('backend-laravel-dev'), unquote=False)
+        if not values.get('DB_DATABASE') or not values.get('DB_USERNAME'):
+            raise Error('Нужны DB_DATABASE и DB_USERNAME в backend-laravel-dev.')
+        if values['DB_USERNAME'] == 'root':
+            raise Error('DB_USERNAME=root: нужен отдельный пользователь приложения.')
+        if not values.get('DB_PASSWORD'):
+            values['DB_PASSWORD'] = checked(['openssl', 'rand', '-base64', '24']).decode().strip()
+            api['main'](['add', 'backend-laravel', 'DB_PASSWORD=' + values['DB_PASSWORD']])
+        if api['exists']('dev-mysql-root'):
+            root = api['parse'](api['decrypt']('dev-mysql-root'), unquote=False)
+        else:
+            root = {'MYSQL_ROOT_PASSWORD': checked(['openssl', 'rand', '-base64', '24']).decode().strip()}
+            checked([sys.executable, str(Path(__file__).resolve().with_name('projenv')),
+                     'put', 'dev-mysql', '--env', 'root', '-'], data=api['encode'](root))
+        if not root.get('MYSQL_ROOT_PASSWORD'):
+            raise Error('В dev-mysql-root отсутствует MYSQL_ROOT_PASSWORD.')
+        networks = docker('network', 'ls', '--format', '{{.Name}}').decode().splitlines()
+        if 'dev-net' not in networks:
+            docker('network', 'create', 'dev-net')
+        # При ошибке pull не подменять образ и не менять сеть.
+        docker('pull', 'mysql:8.0', timeout=300)
+        directory = Path.home() / 'work/run/dev-mysql/data'
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if any(directory.iterdir()):
+            raise Error('Каталог данных уже заполнен, но dev-mysql отсутствует; автоматическая переинициализация запрещена.')
+        environment = {'MYSQL_DATABASE': values['DB_DATABASE'], 'MYSQL_USER': values['DB_USERNAME'],
+                       'MYSQL_PASSWORD': values['DB_PASSWORD'], 'MYSQL_ROOT_PASSWORD': root['MYSQL_ROOT_PASSWORD']}
+        with api['secret_file'](api['encode'](environment)) as filename:
+            docker('run', '-d', '--name', 'dev-mysql', '--label', 'dev-mysql.owner=' + OWNER,
+                   '--network', 'dev-net', '--network-alias', 'dev-mysql',
+                   '--memory', '1g', '--memory-swap', '1g', '--restart', 'unless-stopped',
+                   '--publish', '127.0.0.1:3306:3306', '--mount', 'type=bind,src=%s,dst=/var/lib/mysql' % directory,
+                   '--env-file', str(filename), 'mysql:8.0')
+        ready()
+
+
+if __name__ == '__main__':
+    os.umask(0o077)
+    api['install_signals']()
+    try:
+        main()
+    except Error as error:
+        print(str(error), file=sys.stderr)
+        sys.exit(1)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        print('Не удалось запустить dev-mysql: проверьте credential, Docker и доступность mysql:8.0; секреты скрыты.', file=sys.stderr)
+        sys.exit(1)
