@@ -7,6 +7,7 @@ using System.Reflection;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
@@ -98,7 +99,7 @@ namespace RemoteAgents.Lab
         }
     }
 
-    internal sealed class LabState { public string Color = "grey"; public string Tip = "Запуск"; public string[] Lines = new string[0]; }
+    internal sealed class LabState { public string Color = "grey"; public string Tip = "Запуск"; public string[] Lines = new string[0]; public bool Control; }
 
     internal sealed class PyRun
     {
@@ -111,13 +112,16 @@ namespace RemoteAgents.Lab
     internal sealed class Supervisor : IDisposable
     {
         public const int RestartGraceSeconds = 45;        // ожидание мягкого выхода Python при перезапуске; худший stop() TUN ~26 с, app.py ждёт до 40 с
+        public const int FinalExitGraceSeconds = 80;      // TUN до 40 с + уборка до 30 с
         public const int PythonSilenceFuseSeconds = 120;   // таймер В
         const int MaxLine = 200000, MaxQueuedLines = 1000, MaxStderrLogged = 200, StderrTail = 30;
         public readonly string Home, Version;
         readonly ExeLog log; readonly Control ui; readonly LabJob job = new LabJob();
         readonly System.Windows.Forms.Timer timerV = new System.Windows.Forms.Timer();
+        bool timerVStoppedByNoConfig;
         public CodeSlots Slots; public LabState State = new LabState();
         public volatile int HappierPort; public volatile string DiskHome = ""; public volatile bool DiskRunning;   // Python сообщил «Диск: работает» (поле disk:true в state); читает поток Проводника
+        public volatile string WebUiUrl = ""; public volatile bool ControlEnabled;
         public void WriteLog(string text) { log.Write(text); }
         public event Action StateChanged; public event Action<string> ReportReady, Notice; public event Action Quit;
         public volatile bool RestartExeRequested;
@@ -148,7 +152,7 @@ namespace RemoteAgents.Lab
         {
             var dash = Version.IndexOf('-'); var stage = dash > 0 ? Version.Substring(0, dash) : Version;
             tip = stage + " \u00b7 " + tip;
-            State = new LabState { Color = color, Tip = tip.Length > 63 ? tip.Substring(0, 63) : tip, Lines = lines };
+            State = new LabState { Color = color, Tip = tip.Length > 63 ? tip.Substring(0, 63) : tip, Lines = lines, Control = ControlEnabled };
             var handler = StateChanged; if (handler != null) handler();
         }
         static string Clean(string text, int max)
@@ -165,7 +169,6 @@ namespace RemoteAgents.Lab
             try {
                 foreach (var sub in new[] { "runtime", "code", "logs", "undo", "state" }) Directory.CreateDirectory(Path.Combine(Home, sub));
                 Unpack();
-                WriteStopCmd();
                 Slots = CodeSlots.Load(Path.Combine(Home, "code"), embeddedName, log.Write);
             } catch (Exception ex) {
                 log.Write("не удалось подготовиться: " + ex);
@@ -240,15 +243,6 @@ namespace RemoteAgents.Lab
             if (Directory.Exists(target)) Directory.Delete(target, true);
             Directory.Move(temp, target);
         }
-        void WriteStopCmd()
-        {
-            try {
-                string text = Encoding.UTF8.GetString(ResourceBytes("STOP.cmd")).TrimStart('﻿').Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", "\r\n");
-                byte[] bytes = new UTF8Encoding(false).GetBytes(text);
-                string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "RemoteAgents-Lab СТОП.cmd");
-                if (!File.Exists(path) || !File.ReadAllBytes(path).SequenceEqual(bytes)) File.WriteAllBytes(path, bytes);
-            } catch (Exception ex) { log.Write("СТОП.cmd на рабочий стол не записан: " + ex.Message); }
-        }
 
         // ---- запуск и события Python ----
         void StartPython()
@@ -280,7 +274,27 @@ namespace RemoteAgents.Lab
             r.Err = new Thread(() => ReadErr(r)) { IsBackground = true, Name = "py-err" }; r.Err.Start();
             r.Ready.Set();
             if (assignError != null) { log.Write("Python не помещён в Job Object: " + assignError + "; гашу"); try { process.Kill(); } catch { } }
-            else if (Slots.Unverified) { timerV.Stop(); timerV.Start(); }
+            else if (Slots.Unverified) { timerVStoppedByNoConfig = false; timerV.Stop(); timerV.Start(); }
+        }
+
+        static readonly Regex UrlMaskRegex = new Regex(@"https?://[^\s""'>]+", RegexOptions.IgnoreCase);
+        static readonly Regex TokenMaskRegex = new Regex(@"([?&#]?(?:token|auth|key|secret)=)[^\s""'&]+", RegexOptions.IgnoreCase);
+
+        static string MaskUrl(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return text;
+            try {
+                text = UrlMaskRegex.Replace(text, m => {
+                    string u = m.Value;
+                    int q = u.IndexOfAny(new[] { '?', '#', ';' });
+                    if (q >= 0) u = u.Substring(0, q);
+                    int slash = u.IndexOf('/', 8);
+                    if (slash >= 0 && u.Length - slash > 1) return u.Substring(0, slash + 1) + "***";
+                    return u + "/*";
+                });
+                text = TokenMaskRegex.Replace(text, "$1***");
+            } catch { }
+            return text;
         }
 
         void ReadOut(PyRun r)
@@ -308,6 +322,7 @@ namespace RemoteAgents.Lab
             try {
                 string line;
                 while ((line = r.Proc.StandardError.ReadLine()) != null) {
+                    line = MaskUrl(line);
                     if (line.Length > 500) line = line.Substring(0, 500);
                     lock (stderrTail) { stderrTail.Enqueue(line); if (stderrTail.Count > StderrTail) stderrTail.Dequeue(); }
                     if (logged < MaxStderrLogged) { logged++; log.Write("python stderr: " + line); if (logged == MaxStderrLogged) log.Write("python stderr: дальше в журнал не пишу (предел)"); }
@@ -329,7 +344,7 @@ namespace RemoteAgents.Lab
         void HandleExit(PyRun r, int code)
         {
             if (r != run) return;
-            run = null; timerV.Stop(); HappierPort = 0; DiskRunning = false; DiskHome = "";
+            run = null; timerV.Stop(); timerVStoppedByNoConfig = false; HappierPort = 0; DiskRunning = false; DiskHome = ""; WebUiUrl = "";
             double seconds = (DateTime.UtcNow - r.Started).TotalSeconds;
             log.Write("Python #" + r.Generation + " вышел с кодом " + code + " за " + (int)seconds + " с" + (r.TimeoutFired ? " (таймер В)" : "") + (r.GoodSeen ? ", канал был" : ""));
             if (exitRequested) { Finish(); return; }
@@ -345,9 +360,31 @@ namespace RemoteAgents.Lab
             if (r != run) return;
             Dictionary<string, object> msg;
             try { msg = new JavaScriptSerializer { MaxJsonLength = MaxLine }.Deserialize<Dictionary<string, object>>(line); }
-            catch (Exception) { log.Write("не JSON от Python: " + (line.Length > 120 ? line.Substring(0, 120) : line)); return; }
+            catch (Exception) {
+                string safe = MaskUrl(line);
+                log.Write("не JSON от Python: " + (safe.Length > 120 ? safe.Substring(0, 120) : safe));
+                return;
+            }
             object type; if (msg == null || !msg.TryGetValue("t", out type)) return;
             switch (type as string) {
+                case "noconfig": {
+                    log.Write("Python сообщил noconfig: конфига нет, останавливаю таймер В");
+                    timerVStoppedByNoConfig = true;
+                    timerV.Stop();
+                    break;
+                }
+                case "config-ok": {
+                    log.Write("Python сообщил config-ok");
+                    if (timerVStoppedByNoConfig) {
+                        timerVStoppedByNoConfig = false;
+                        if (Slots != null && Slots.Unverified) {
+                            timerV.Stop();
+                            timerV.Start();
+                            log.Write("таймер В перезапущен после config-ok");
+                        }
+                    }
+                    break;
+                }
                 case "state": {
                     object color, tip, lines; msg.TryGetValue("color", out color); msg.TryGetValue("tip", out tip); msg.TryGetValue("lines", out lines);
                     string c = color as string; if (c != "grey" && c != "yellow" && c != "green" && c != "red") c = "grey";
@@ -357,7 +394,30 @@ namespace RemoteAgents.Lab
                     object disk; msg.TryGetValue("disk", out disk); DiskRunning = !exitRequested && disk is bool && (bool)disk;
                     object diskHome; msg.TryGetValue("diskHome", out diskHome); string dh = diskHome as string; DiskHome = DiskRunning && dh != null && dh.Length < 260 && dh.IndexOfAny(new[] { '"', '\r', '\n', '\0' }) < 0 ? dh : "";
                     object hp; msg.TryGetValue("happierPort", out hp); int hpn; try { hpn = hp == null ? 0 : Convert.ToInt32(hp); } catch (Exception) { hpn = 0; } HappierPort = hpn > 0 && hpn < 65536 ? hpn : 0;
+                    object ctrl;
+                    if (msg.TryGetValue("control", out ctrl) && ctrl != null) {
+                        if (ctrl is bool) ControlEnabled = (bool)ctrl;
+                        else if (ctrl is int) ControlEnabled = (int)ctrl != 0;
+                        else if (bool.TryParse(ctrl.ToString(), out bool b)) ControlEnabled = b;
+                    }
                     SetState(exitRequested ? "grey" : c, exitRequested ? "Выход..." : (tip as string) ?? "", list.ToArray());
+                    break;
+                }
+                case "ui": {
+                    object url; msg.TryGetValue("url", out url);
+                    string u = url as string;
+                    if (!string.IsNullOrEmpty(u)) WebUiUrl = u;
+                    break;
+                }
+                case "open-ui": {
+                    object url; msg.TryGetValue("url", out url);
+                    string u = url as string;
+                    if (!string.IsNullOrEmpty(u)) WebUiUrl = u;
+                    else u = WebUiUrl;
+                    if (!string.IsNullOrEmpty(u)) {
+                        try { Process.Start(u); }
+                        catch (Exception ex) { log.Write("open-ui не удалось: " + ex.GetType().Name); }
+                    }
                     break;
                 }
                 case "good": {
@@ -379,7 +439,7 @@ namespace RemoteAgents.Lab
                     updateLockUntil = DateTime.MinValue;
                     if (exitRequested || RestartExeRequested) { RestartExeRequested = true; break; }   // выход уже идёт: только флаг, без повторного RequestExit
                     RestartExeRequested = true;
-                    var runX = run; RequestExit(); ForceKillAfterGrace(runX);
+                    var runX = run; RequestExit(false); ForceKillAfterGrace(runX);
                     break;
                 }
                 case "report": {
@@ -397,15 +457,26 @@ namespace RemoteAgents.Lab
         }
 
         // ---- команды из трея ----
-        public void RequestExit()
+        public void SetControl(bool enabled)
+        {
+            ControlEnabled = enabled;
+            Send("{\"t\":\"control\",\"enabled\":" + (enabled ? "true" : "false") + "}");
+            SetState(State.Color, State.Tip, State.Lines);
+        }
+        public void RequestExit(bool final = true)
         {
             if (run == null) { Finish(); return; }
             if (exitRequested) { log.Write("повторный Выход: гашу всё принудительно"); job.Terminate(); return; }
             exitRequested = true; DiskRunning = false; DiskHome = "";
             timerV.Stop(); // Выход ждёт мягкую остановку и очистку TUN (до ~30 с); таймер запуска не должен её оборвать.
-            log.Write("Выход: прошу Python закрыться");
-            SetState("grey", "Выход...", "Жду, пока Python закроется.", "Очистка TUN может занять до 30 с. Не закрывается: нажмите Выход ещё раз -- погасит принудительно.");
-            Send("{\"t\":\"exit\"}");
+            int grace = final ? FinalExitGraceSeconds : RestartGraceSeconds;
+            log.Write("Выход: прошу Python закрыться (final=" + final + ", жду до " + grace + " с)");
+            SetState("grey", "Выход...", "Жду, пока Python закроется.", "Очистка может занять до 30 с. Не закрывается: нажмите Выход ещё раз -- погасит принудительно.");
+            Send(final ? "{\"t\":\"exit\",\"final\":true}" : "{\"t\":\"exit\"}");
+            var r = run;
+            var t = new System.Windows.Forms.Timer { Interval = grace * 1000 };
+            t.Tick += (s, e) => { t.Stop(); t.Dispose(); if (run == r) { log.Write("Python не вышел за " + grace + " с при выходе: гашу"); job.Terminate(); } };
+            t.Start();
         }
         public void RestartPython()
         {
@@ -443,7 +514,7 @@ namespace RemoteAgents.Lab
             if (!File.Exists(PrevExePath)) { if (handler != null) handler("Предыдущей версии нет"); return; }
             pendingRollbackFiles = true; RestartExeRequested = true;
             var run0 = run;
-            RequestExit();   // Python нет: сразу Finish, где и меняются файлы; иначе мягкий выход и таймер 45 с
+            RequestExit(false);   // Python нет: сразу Finish, где и меняются файлы; иначе мягкий выход и таймер 45 с
             ForceKillAfterGrace(run0);
         }
         // Меняем местами exe и .prev.exe; вызывается, когда Python уже завершён. Ошибка -- файлы возвращены, причина в RollbackError.
