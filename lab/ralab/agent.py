@@ -127,6 +127,15 @@ class Agent:
             if not fn:
                 code = 404
                 return self.send(h, 404, {'error': 'нет такой ручки'})
+            CTRL = {('POST', 'exec'), ('GET', 'proc'), ('GET', 'procs'), ('POST', 'kill'), ('GET', 'read'), ('POST', 'write'), ('GET', 'files')}
+            if (method, route) in CTRL:
+                try:
+                    from . import control
+                    if not control.enabled(self.ctx.home):
+                        code = 403
+                        return self.send(h, 403, {'error': control.CTRL_TEXT})
+                except ImportError:
+                    pass
             if not self.sem.acquire(blocking=False):
                 code = 503
                 return self.send(h, 503, {'error': 'слишком много запросов (максимум %d)' % CONC})
