@@ -25,6 +25,8 @@ class SingBox:
         bus.subscribe('net.changed', self._on_net)
         bus.subscribe('app.stop', self._on_stop)
         bus.subscribe('singbox.started', self._on_started)
+        bus.subscribe('singbox.tun', self._on_tun)
+        self.with_tun = False
         self.traffic = {'up_bps': 0, 'down_bps': 0, 'active': False}
 
     def _on_settings(self, _):
@@ -35,6 +37,15 @@ class SingBox:
             return
         self.failed, self.fails = False, 0
         self._launch()
+
+    def _on_tun(self, _):
+        """TUN готов войти в общий sing-box (или должен выйти): перезапуск, если состав изменился."""
+        tun = getattr(self.ctx, 'tun', None)
+        if not tun or self.stopping or not procs.get('singbox') or tun.wants() == self.with_tun:
+            return
+        self.relaunch = True
+        journal.log('singbox', 'relaunch', {'tun': tun.wants()}, 'TUN %s общего sing-box: перезапуск' % ('входит в' if tun.wants() else 'выходит из'))
+        procs.kill('singbox')
 
     def _on_stop(self, _):
         self.stopping = True
@@ -59,11 +70,20 @@ class SingBox:
         d = os.path.join(self.ctx.home, 'private')
         os.makedirs(d, exist_ok=True)
         cfg = os.path.join(d, 'singbox.json')
+        conf = pth.make_config(s, self.ports, self.clash_port, self._secret)
+        tun = getattr(self.ctx, 'tun', None)
+        part = tun.launch_part() if tun else None
+        self.with_tun = bool(part)
+        if part:  # V11: TUN в том же процессе; правило TUN первым, чтобы его трафик не ушёл в пути
+            conf['inbounds'].append(part[0])
+            conf['outbounds'].append(part[1])
+            conf['route']['rules'].insert(0, part[2])
         with os.fdopen(os.open(cfg, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w') as f:
-            json.dump(pth.make_config(s, self.ports, self.clash_port, self._secret), f)
+            json.dump(conf, f)
         self.tail.clear()
         try:
-            procs.start('singbox', [self._own_copy(s.singbox), 'run', '-c', cfg], on_err=self._line, cwd=d)
+            # с TUN - мягкая остановка (CTRL_BREAK): sing-box сам снимает адаптер и маршруты
+            procs.start('singbox', [self._own_copy(s.singbox), 'run', '-c', cfg], on_err=self._line, cwd=d, graceful=self.with_tun)
         except (OSError, ValueError) as e:
             self.up = False
             bus.publish('singbox.exited', {'code': None, 'error': e.__class__.__name__})
@@ -100,6 +120,8 @@ class SingBox:
             self.relaunch, self.fails, self.failed = False, 0, False
             self._launch()
             return
+        if self.with_tun and getattr(self.ctx, 'tun', None):
+            self.ctx.tun.crashed(ev.get('code'))  # следующий запуск - без TUN: канал важнее
         self.fails += 1
         if self.fails >= RESTARTS_MAX:
             self.failed = True

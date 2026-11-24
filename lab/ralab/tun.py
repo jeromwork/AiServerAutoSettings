@@ -2,6 +2,8 @@
 По умолчанию ВЫКЛЮЧЕН: включается разделом lab-конфига tun {enabled: true, routes: [...]} (routes - для опытов, например один адрес /32).
 Подсети, пересекающиеся с адресами самого ПК (домашняя сеть), не берутся - иначе TUN перехватил бы локальный трафик.
 Маршруты (сети клиники + адреса доменов канала) живут, пока жив процесс (auto_route); DNS ПК не трогаем (dns_mode disabled); умер Python - Job Object гасит sing-box, маршруты снимаются.
+V11: по умолчанию TUN - входящий tun-in в ОБЩЕМ sing-box канала (один процесс ralab-core). Упал sing-box с TUN - следующий запуск
+без TUN (канал, Диск и управление важнее), TUN снова пробуется при смене настроек/VPN. tun.separate=true - прежний отдельный процесс.
 Отключение: tun.enabled=false или ra-lab exec 'Stop-Process -Name ralab-core' (только лабораторный TUN-процесс называется tun в procs).
 """
 import ipaddress, json, os, re, socket, subprocess, threading, time
@@ -85,10 +87,12 @@ class Tun:
         self.closing, self.stopping, self.stopper = False, False, None
         self.cancel, self.before, self.owned = threading.Event(), None, {}
         self.dom_ips, self.dom_check = [], 0.0
+        self.plan, self.with_tun, self.tun_off, self.planning = None, False, False, False  # общий sing-box (V11)
         bus.subscribe('settings.loaded', self._on_settings)
         bus.subscribe('channel.up', lambda _: self._ensure())
         bus.subscribe('app.stop', lambda _: self.stop())
         bus.subscribe('proc.exited', self._on_exit)
+        bus.subscribe('singbox.started', self._on_sb_started)
         threading.Thread(target=self._loop, name='tun-retry', daemon=True).start()
 
     def _cfg(self):
@@ -98,12 +102,78 @@ class Tun:
     def _path(self):
         return os.path.join(self.ctx.home, 'private', ADAPTER_FILE)
 
+    def embedded(self):
+        return self._cfg().get('separate') is not True
+
     def _on_settings(self, _):
+        was_off, self.tun_off = self.tun_off, False  # новая попытка TUN в общем sing-box после смены настроек/VPN
+        if was_off and self.plan:
+            bus.publish('singbox.tun')
+        if self._cfg().get('enabled') is not True or not self.embedded():
+            if self.plan or self.with_tun:
+                self.plan = None
+                bus.publish('singbox.tun')  # общий sing-box перезапустится без TUN
         if self._cfg().get('enabled') is not True:
             self.stop(closing=False)
             self.last = 'выключен (tun.enabled не true)'
             return
         self._ensure()
+
+    # --- общий sing-box (V11) ---
+    def launch_part(self):
+        """Вызывает SingBox._launch: (inbound, outbound, rule) для общего конфига или None. Запоминает, идёт ли TUN в этом запуске."""
+        t, pl = self._cfg(), self.plan
+        self.with_tun = bool(pl and t.get('enabled') is True and self.embedded() and not self.tun_off and not self.closing)
+        if not self.with_tun:
+            if self.embedded():
+                self.ctx.forward.tun_nets = []
+            return None
+        self.ctx.forward.tun_nets = [{'name': 'tun', 'nets': [ipaddress.ip_network(r) for r in pl['routes']], 'domains': []}]
+        self.routes, self.gen = pl['routes'], self.gen + 1
+        inbound = {'type': 'tun', 'tag': 'tun-in', 'interface_name': 'ralab-tun', 'address': [t.get('address') or '172.19.0.1/30'], 'mtu': 1400,
+                   'auto_route': True, 'strict_route': False, 'route_address': pl['routes'], 'stack': 'system', 'dns_mode': 'disabled'}
+        outbound = {'type': 'socks', 'tag': 'tun-lan', 'server': '127.0.0.1', 'server_port': pl['socks'], 'version': '5'}
+        journal.log('tun', 'start', {'routes': pl['routes'], 'socks': pl['socks'], 'domain_ips': self.dom_ips, 'shared': True}, 'TUN ralab-tun в общем sing-box')
+        return inbound, outbound, {'inbound': 'tun-in', 'outbound': 'tun-lan'}
+
+    def wants(self):
+        return bool(self.plan and self._cfg().get('enabled') is True and self.embedded() and not self.tun_off)
+
+    def crashed(self, code):
+        """sing-box с TUN вышел сам: следующий запуск - без TUN, чтобы не потерять канал."""
+        self.tun_off, self.with_tun = True, False
+        self.ctx.forward.tun_nets = []
+        self.last = 'выключен: sing-box с TUN упал (код %s), канал без TUN; повтор при смене настроек/VPN' % code
+        journal.log('tun', 'shared.crashed', {'code': code}, 'sing-box с TUN упал: перезапуск без TUN')
+
+    def _on_sb_started(self, _):
+        if not self.with_tun:
+            return
+        self.last = 'запущен (общий sing-box), маршруты: %s' % ', '.join(self.routes)
+        p, gen = procs.get('singbox'), self.gen
+        if p:
+            threading.Thread(target=self._remember, args=(p, gen), name='tun-remember', daemon=True).start()
+
+    def _make_plan(self, t, gen):
+        try:
+            routes = self._routes(t)
+            if not routes:
+                return
+            if not self.with_tun:  # адаптер общего sing-box не трогаем; чистим только хвосты прошлых падений
+                if not self._clean_ghost(20, self.cancel):
+                    self.last = 'очистка прошлого адаптера не завершилась, повтор позже'
+                    return
+                self.before = self._snapshot(3, self.cancel)
+            with self.lock:
+                if gen != self.gen or self.closing or self.cancel.is_set():
+                    return
+                self.plan = {'routes': routes, 'socks': self.socks}
+            self.last = 'ждёт перезапуска sing-box с TUN'
+            bus.publish('singbox.tun')
+        except Exception as e:
+            journal.log('tun', 'plan.error', {'error': repr(e)})
+        finally:
+            self.planning = False
 
     def _on_exit(self, ev):
         if ev.get('name') == NAME:
@@ -119,11 +189,16 @@ class Tun:
                 journal.log('tun', 'retry.error', {'error': repr(e)})
 
     def _recheck_domains(self):
-        p = procs.get(NAME)
+        p = procs.get('singbox' if self.with_tun else NAME)
         if not (p and p.alive()) or time.monotonic() - self.dom_check < DOMAIN_RECHECK:
             return
         self.dom_check = time.monotonic()
         ips = self._domain_ips(self.ctx.settings.cfg)
+        if ips and set(ips) != set(self.dom_ips) and self.with_tun:
+            # общий sing-box ради адресов доменов не рвём (канал важнее): новые адреса - при следующем его перезапуске
+            journal.log('tun', 'domains.changed', {'old': self.dom_ips, 'new': ips}, 'адреса доменов сменились: применятся при следующем перезапуске sing-box')
+            self.plan = None
+            return
         if ips and set(ips) != set(self.dom_ips):
             journal.log('tun', 'domains.changed', {'old': self.dom_ips, 'new': ips}, 'адреса доменов канала сменились: TUN перезапускается')
             self.stop(closing=False).join(40)
@@ -161,6 +236,15 @@ class Tun:
         """Старт, если TUN включён, а процесса нет. Не чаще раза в 30 с, не больше 5 попыток подряд; живой TUN не трогаем."""
         t = self._cfg()
         if self.closing or self.stopping or t.get('enabled') is not True:
+            return
+        if self.embedded():
+            listener = self.ctx.forward.listeners.get('lanProxy') or {}
+            if self.plan is None and not self.planning and not self.tun_off and listener.get('ok') and not self.busy.locked():
+                self.planning, self.socks = True, listener['port']
+                self.cancel = threading.Event()
+                threading.Thread(target=self._make_plan, args=(t, self.gen), name='tun-plan', daemon=True).start()
+            elif not listener.get('ok'):
+                self.last = 'ожидание lanProxy'
             return
         p, now = procs.get(NAME), time.monotonic()
         if p and p.alive():
@@ -222,6 +306,9 @@ class Tun:
 
     def _stop_and_clean(self):
         self.ctx.forward.tun_nets = []
+        sb = procs.get('singbox')
+        if self.with_tun and sb and sb.alive():  # адаптер живёт в общем sing-box: он снимет его сам при мягкой остановке
+            return
         p = procs.get(NAME)
         if p:
             procs.kill(NAME)
@@ -238,7 +325,7 @@ class Tun:
         self.ctx.forward.tun_nets = []
         self._clean_ghost(CLEANUP_BUDGET)
 
-    def _start(self, t, gen):
+    def _routes(self, t):
         st = self.ctx.settings
         wanted = t.get('routes')
         if not wanted:
@@ -263,6 +350,13 @@ class Tun:
         if not routes:
             self.last = 'нет маршрутов'
             self.fails = 0  # это не сбой запуска
+            return None
+        return routes
+
+    def _start(self, t, gen):
+        st = self.ctx.settings
+        routes = self._routes(t)
+        if not routes:
             return
         self.routes = routes
         cfg = {'log': {'level': 'info'},
@@ -404,4 +498,5 @@ class Tun:
             pass
 
     def status(self):
-        return {'state': self.last, 'routes': self.routes, 'skipped': self.skipped, 'running': NAME in procs.names()}
+        running = (self.with_tun and bool(getattr(self.ctx, 'singbox', None) and self.ctx.singbox.up)) if self.embedded() else NAME in procs.names()
+        return {'state': self.last, 'routes': self.routes, 'skipped': self.skipped, 'running': running, 'shared': self.embedded()}
