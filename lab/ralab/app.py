@@ -51,7 +51,7 @@ def main(argv):
     ap.add_argument('--exe-version', default='')
     ap.add_argument('--rollback-reason', default='')
     ap.add_argument('--installed')
-    a = ap.parse_args(argv)
+    a = ap.parse_known_args(argv)[0]
     home = os.path.abspath(a.home)
     code_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # <home>\code\<имя>\ : версия кода = имя папки
     ctx = Ctx(home=home, installed=a.installed or os.path.join(os.path.dirname(home), 'RemoteAgents'), exe_version=a.exe_version,
