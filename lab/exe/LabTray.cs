@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
@@ -10,7 +11,7 @@ namespace RemoteAgents.Lab
     {
         readonly Supervisor supervisor; readonly NotifyIcon icon = new NotifyIcon();
         readonly Icon grey = MakeIcon(Color.Gray), yellow = MakeIcon(Color.Goldenrod), green = MakeIcon(Color.ForestGreen), red = MakeIcon(Color.Firebrick);
-        ToolStripMenuItem diskItem; Timer clickTimer; Form window; TextBox box; Button restart; readonly LabDisk disk;
+        ToolStripMenuItem diskItem, updateItem, rollbackItem; Timer clickTimer; Form window; TextBox box; Button restart; readonly LabDisk disk;
 
         public LabTray(Supervisor supervisor)
         {
@@ -23,9 +24,13 @@ namespace RemoteAgents.Lab
             menu.Items.Add("Состояние", null, (s, e) => ShowWindow());
             menu.Items.Add("Скопировать отчёт", null, (s, e) => supervisor.RequestReport());
             menu.Items.Add(new ToolStripSeparator());
+            updateItem = (ToolStripMenuItem)menu.Items.Add("Обновить", null, (s, e) => supervisor.RequestUpdate());
+            rollbackItem = (ToolStripMenuItem)menu.Items.Add("Вернуть предыдущую версию", null, (s, e) => supervisor.RollbackExe());
+            menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Выход", null, (s, e) => { disk.Stop(false); supervisor.RequestExit(); });
             icon.ContextMenuStrip = menu; icon.Visible = true;
-            menu.Opening += (s, e) => diskItem.Enabled = supervisor.DiskRunning && supervisor.DiskHome.Length > 0;
+            menu.Opening += (s, e) => { diskItem.Enabled = supervisor.DiskRunning && supervisor.DiskHome.Length > 0; updateItem.Enabled = supervisor.PythonRunning && !supervisor.UpdateLocked; rollbackItem.Enabled = File.Exists(Supervisor.PrevExePath) && !supervisor.UpdateLocked && !supervisor.ExitInProgress; };
+            supervisor.Notice += text => icon.ShowBalloonTip(5000, "RemoteAgents", text, ToolTipIcon.Info);
             // Одиночный левый клик открывает Happier после паузы DoubleClickTime; двойной клик гасит таймер и открывает только «Состояние».
             clickTimer = new Timer { Interval = SystemInformation.DoubleClickTime };
             clickTimer.Tick += (s, e) => { clickTimer.Stop(); OpenHappier(); };

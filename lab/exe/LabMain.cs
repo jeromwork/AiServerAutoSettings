@@ -16,8 +16,8 @@ namespace RemoteAgents.Lab
 {
     // EXE-сторож: распаковывает Python и код, запускает Python и перезапускает его. Логики связи здесь нет.
     // Протокол с Python (JSON-строки UTF-8): lab/exe/PROTOCOL в отчёте этапа; кратко --
-    //   Python -> EXE (stdout): {"t":"state","color":"grey|yellow|green|red","tip":"..","lines":[..]}, {"t":"good","version":".."}, {"t":"report","text":".."}
-    //   EXE -> Python (stdin):  {"t":"exit"}, {"t":"report"};  EOF stdin = выход.
+    //   Python -> EXE (stdout): {"t":"state","color":"grey|yellow|green|red","tip":"..","lines":[..]}, {"t":"good","version":".."}, {"t":"report","text":".."}, {"t":"notice","text":".."} (подсказка трея), {"t":"restart-exe"} (перезапуск EXE после обновления/отката)
+    //   EXE -> Python (stdin):  {"t":"exit"}, {"t":"report"}, {"t":"update"};  EOF stdin = выход.
     //   Коды выхода Python: 0 выход по просьбе, 3 перезапуск (code\pending.json -- новая версия), 4 память (та же версия), прочее -- падение.
     internal static class LabMain
     {
@@ -43,6 +43,25 @@ namespace RemoteAgents.Lab
                 supervisor.Dispose();
                 log.Write("EXE закрыт");
                 GC.KeepAlive(handle);
+                if (supervisor.RestartExeRequested) {
+                    // Новый файл EXE уже лежит по тому же пути: освобождаем mutex и запускаем его.
+                    try { mutex.ReleaseMutex(); } catch (Exception) { }
+                    try { mutex.Dispose(); } catch (Exception) { }
+                    string exe = Application.ExecutablePath, prev = Supervisor.PrevExePath;
+                    var messages = new List<string>();   // окна показываем только после запуска нового EXE: запуск не ждёт «ОК»
+                    if (supervisor.RollbackError != null) messages.Add("Не удалось вернуть предыдущую версию: " + supervisor.RollbackError);
+                    if (!File.Exists(exe) && File.Exists(prev)) {
+                        try { File.Move(prev, exe); } catch (Exception ex0) { log.Write("не удалось переименовать .prev.exe в EXE: " + ex0.Message); exe = prev; messages.Add("Запущена предыдущая версия: " + Path.GetFileName(prev)); }
+                    }
+                    try { Process.Start(exe); }
+                    catch (Exception ex) {
+                        log.Write("перезапуск EXE не удался: " + ex.Message);
+                        bool ok = false;
+                        if (exe != prev && File.Exists(prev)) { try { Process.Start(prev); ok = true; } catch (Exception ex2) { log.Write("запуск .prev.exe не удался: " + ex2.Message); } }
+                        messages.Add(ok ? "Не удалось запустить новую версию. Запущена предыдущая." : "Запустите " + Path.GetFileName(prev));
+                    }
+                    foreach (var m in messages) MessageBox.Show(m, "RemoteAgents");
+                }
                 return 0;
             }
         }
@@ -100,7 +119,8 @@ namespace RemoteAgents.Lab
         public CodeSlots Slots; public LabState State = new LabState();
         public volatile int HappierPort; public volatile string DiskHome = ""; public volatile bool DiskRunning;   // Python сообщил «Диск: работает» (поле disk:true в state); читает поток Проводника
         public void WriteLog(string text) { log.Write(text); }
-        public event Action StateChanged; public event Action<string> ReportReady; public event Action Quit;
+        public event Action StateChanged; public event Action<string> ReportReady, Notice; public event Action Quit;
+        public volatile bool RestartExeRequested;
         PyRun run; int generation, queuedLines; bool exitRequested, stopped, disposed;
         string pythonExe, embeddedName, stopReason = "";
         readonly Queue<string> stderrTail = new Queue<string>();
@@ -168,7 +188,27 @@ namespace RemoteAgents.Lab
             embeddedName = "emb-" + codeHash;
             string codeDir = Path.Combine(Home, "code", embeddedName);
             if (!File.Exists(Path.Combine(codeDir, ".ok"))) { ExtractResource("lab-code.zip", codeDir); log.Write("распакован встроенный код " + embeddedName); }
+            WriteBinZip();
             foreach (var old in Directory.GetDirectories(Path.Combine(Home, "runtime"), "py-*")) if (Path.GetFileName(old) != "py-" + pyHash) try { Directory.Delete(old, true); } catch { }
+        }
+        // Ресурс bin.zip (если он есть в сборке) кладём на диск как есть: <home>\runtime\bin.zip; пишем, только если файла нет или sha256 отличается.
+        void WriteBinZip()
+        {
+            try {
+                byte[] bytes;
+                using (var stream = typeof(Supervisor).Assembly.GetManifestResourceStream("bin.zip")) {
+                    if (stream == null) return;
+                    var memory = new MemoryStream(); stream.CopyTo(memory); bytes = memory.ToArray();
+                }
+                string path = Path.Combine(Home, "runtime", "bin.zip");
+                using (var sha = SHA256.Create())
+                    if (File.Exists(path) && sha.ComputeHash(File.ReadAllBytes(path)).SequenceEqual(sha.ComputeHash(bytes))) return;
+                string temp = path + ".tmp";
+                File.WriteAllBytes(temp, bytes);
+                if (File.Exists(path)) File.Delete(path);
+                File.Move(temp, path);
+                log.Write("записан bin.zip");
+            } catch (Exception ex) { log.Write("bin.zip не записан: " + ex.Message); }
         }
         static byte[] ResourceBytes(string name)
         {
@@ -224,6 +264,7 @@ namespace RemoteAgents.Lab
                 StandardOutputEncoding = new UTF8Encoding(false), StandardErrorEncoding = new UTF8Encoding(false)
             };
             psi.EnvironmentVariables.Remove("PYTHONPATH"); psi.EnvironmentVariables.Remove("PYTHONHOME");
+            psi.EnvironmentVariables["RA_EXE"] = Application.ExecutablePath; psi.EnvironmentVariables["RA_EXE_VERSION"] = Version;
             lock (stderrTail) stderrTail.Clear();
             log.Write("запуск Python #" + r.Generation + ": код " + Slots.Current + (Slots.Unverified ? " (непроверенный)" : "") + (Slots.RollbackReason != null ? ", откат: " + Slots.RollbackReason : ""));
             SetState("grey", "Запуск Python", "Код: " + Slots.Current);
@@ -326,6 +367,21 @@ namespace RemoteAgents.Lab
                     Slots.MarkGood();
                     break;
                 }
+                case "notice": {
+                    object text; msg.TryGetValue("text", out text);
+                    string t = ((text as string) ?? "").Replace("\r", " ").Replace("\n", " "); if (t.Length > 200) t = t.Substring(0, 200);
+                    if (t.StartsWith("Уже последняя версия") || t.StartsWith("Ошибка") || t.StartsWith("Не удалось") || t.StartsWith("Нет связи")) updateLockUntil = DateTime.MinValue;
+                    if (t.Length > 0) { var handler = Notice; if (handler != null) handler(t); }
+                    break;
+                }
+                case "restart-exe": {
+                    log.Write("Python просит перезапустить EXE: выхожу и запускаю заново");
+                    updateLockUntil = DateTime.MinValue;
+                    if (exitRequested || RestartExeRequested) { RestartExeRequested = true; break; }   // выход уже идёт: только флаг, без повторного RequestExit
+                    RestartExeRequested = true;
+                    var runX = run; RequestExit(); ForceKillAfterGrace(runX);
+                    break;
+                }
                 case "report": {
                     object text; msg.TryGetValue("text", out text);
                     var handler = ReportReady; if (handler != null) handler(((text as string) ?? "") + "\r\n\r\n=== EXE ===\r\n" + BuildExeReport());
@@ -363,6 +419,59 @@ namespace RemoteAgents.Lab
             }
             if (stopped && Slots != null) { Slots.ResetAfterStop(); log.Write("запуск после остановки по просьбе владельца"); StartPython(); }
         }
+        DateTime updateLockUntil = DateTime.MinValue;
+        // После «Обновить» Python сам переставляет exe/.prev/.tmp: 120 с (или до restart-exe/выхода) откат и повторное обновление недоступны.
+        public bool UpdateLocked { get { return DateTime.UtcNow < updateLockUntil; } }
+        public bool ExitInProgress { get { return exitRequested || RestartExeRequested; } }
+        public volatile string RollbackError; bool pendingRollbackFiles;
+        public bool PythonRunning { get { return run != null && !exitRequested; } }
+        public void RequestUpdate() { if (UpdateLocked) return; updateLockUntil = DateTime.UtcNow.AddSeconds(120); Send("{\"t\":\"update\"}"); }
+        void ForceKillAfterGrace(PyRun r)
+        {
+            if (r == null) return;
+            var t = new System.Windows.Forms.Timer { Interval = RestartGraceSeconds * 1000 };
+            t.Tick += (s, e) => { t.Stop(); t.Dispose(); if (run == r) { log.Write("Python не вышел за " + RestartGraceSeconds + " с при перезапуске EXE: гашу"); job.Terminate(); } };
+            t.Start();
+        }
+        public static string PrevExePath { get { string exe = Application.ExecutablePath; return Path.Combine(Path.GetDirectoryName(exe), Path.GetFileNameWithoutExtension(exe) + ".prev.exe"); } }
+        // Откат EXE не зависит от Python. Если Python запущен, файлы не трогаем, пока он не завершится (в Finish), иначе гонка с update.py.
+        public void RollbackExe()
+        {
+            var handler = Notice;
+            if (ExitInProgress) { if (handler != null) handler("Выход уже идёт"); return; }
+            if (UpdateLocked) { if (handler != null) handler("Идёт обновление, подождите"); return; }
+            if (!File.Exists(PrevExePath)) { if (handler != null) handler("Предыдущей версии нет"); return; }
+            pendingRollbackFiles = true; RestartExeRequested = true;
+            var run0 = run;
+            RequestExit();   // Python нет: сразу Finish, где и меняются файлы; иначе мягкий выход и таймер 45 с
+            ForceKillAfterGrace(run0);
+        }
+        // Меняем местами exe и .prev.exe; вызывается, когда Python уже завершён. Ошибка -- файлы возвращены, причина в RollbackError.
+        void DoRollbackFiles()
+        {
+            string exe = Application.ExecutablePath, prev = PrevExePath, tmp = exe + ".tmp";
+            int step = 0;
+            try {
+                if (!File.Exists(prev)) throw new FileNotFoundException("Предыдущей версии нет");
+                if (File.Exists(tmp)) {
+                    string old = tmp + ".old";
+                    if (File.Exists(old)) File.Delete(old);
+                    File.Move(tmp, old);
+                    log.Write("прежний " + Path.GetFileName(tmp) + " переименован в " + Path.GetFileName(old));
+                }
+                File.Move(exe, tmp); step = 1;
+                File.Move(prev, exe); step = 2;
+                File.Move(tmp, prev); step = 3;
+                log.Write("откат EXE: файлы заменены");
+            } catch (Exception ex) {
+                log.Write("откат EXE не удался на шаге " + step + ": " + ex.Message);
+                try {
+                    if (step == 2) { File.Move(exe, prev); step = 1; }
+                    if (step == 1) File.Move(tmp, exe);
+                } catch (Exception ex2) { log.Write("возврат файлов после ошибки отката: " + ex2.Message); }
+                RollbackError = ex.Message;
+            }
+        }
         public void RequestReport()
         {
             var handler = ReportReady;
@@ -371,7 +480,7 @@ namespace RemoteAgents.Lab
             // Пока Python готовит полный отчёт, сразу отдаём отчёт EXE; полный придёт событием report (Python может не ответить).
             if (handler != null) handler("(Python ещё не ответил)\r\n\r\n=== EXE ===\r\n" + BuildExeReport());
         }
-        void Finish() { var handler = Quit; if (handler != null) handler(); }
+        void Finish() { if (pendingRollbackFiles) { pendingRollbackFiles = false; DoRollbackFiles(); } var handler = Quit; if (handler != null) handler(); }
 
         public string BuildExeReport()
         {

@@ -6,7 +6,7 @@ known_hosts разбирается своим кодом (без внешних 
 """
 import base64, fnmatch, glob, hashlib, hmac, json, os, re, shutil, threading, time, types
 
-from . import journal
+from . import bins, journal
 from .bus import bus
 
 LAN_MAX = 64
@@ -73,6 +73,14 @@ def server_port(prof):
 
 
 def find_ssh(installed, prof):
+    if bins.strict():  # только вшитая копия; ключ sshExecutable из профиля не читается
+        found = bins.find('openssh/ssh.exe')
+        if not found:
+            raise Fail('вшитый ssh недоступен: %s' % (bins.why('openssh/ssh.exe') or 'файла нет в папке программы'))
+        if not bins.find('openssh/libcrypto.dll'):
+            raise Fail('вшитый ssh недоступен: нет libcrypto.dll (%s)' % (bins.why('openssh/libcrypto.dll') or 'файла нет в папке программы'))
+        return found
+    bins.warn_old()
     c = [prof.get('sshExecutable'), os.path.join(installed, 'transport-bin', 'openssh', 'ssh.exe')]
     c += sorted(glob.glob(os.path.join(installed, 'bundle', '*', 'transport', 'ssh.exe')), reverse=True)
     c += [os.path.join(os.environ.get('SystemRoot') or r'C:\Windows', 'System32', 'OpenSSH', 'ssh.exe')]
@@ -83,6 +91,12 @@ def find_ssh(installed, prof):
 
 
 def find_singbox(installed, cfg):
+    if bins.strict():  # только вшитая копия; ключ singBoxPath не читается
+        found = bins.find('sing-box.exe')
+        if not found:
+            raise Fail('вшитый sing-box недоступен: %s' % (bins.why('sing-box.exe') or 'файла нет в папке программы'))
+        return found
+    bins.warn_old()
     home = installed or ''  # порядок как в Ensure-WizardTransportBinary / lan_poc.find_singbox
     c = [(cfg.get('transport') or {}).get('singBoxPath'), os.path.join(home, 'transport-bin', 'sing-box.exe')]
     c += sorted(glob.glob(os.path.join(home, 'bundle', '*', 'transport', 'sing-box.exe')), reverse=True)

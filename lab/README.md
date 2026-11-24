@@ -40,3 +40,5 @@ TODO(владелец 23.11): переключение на более быст�
 Правка -> номер в `lab/STAGE` (`V<N>`) -> коммит в ветку `lab` -> ревью -> `bash lab/release.sh`.
 Скрипт собирает EXE, ставит тег `lab-v<N>`, кладёт `RemoteAgents-Lab-V<N>.exe` в GitHub-релиз `lab-latest` (там копятся все версии для отката)
 и проверяет скачиванием sha256. Номер версии виден в подсказке значка (`V<N> ·`) и в окне «Состояние».
+
+Вшитые программы (тексты лицензий лежат в `licenses/` внутри `bin.zip`): sing-box (GPL-3.0, github.com/SagerNet/sing-box), OpenSSH для Windows (github.com/PowerShell/Win32-OpenSSH), syncthingtray (GPL-2.0+, github.com/Martchus/syncthingtray), список сетей geoip-ru (github.com/SagerNet/sing-geoip).

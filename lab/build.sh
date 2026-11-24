@@ -30,6 +30,48 @@ got=$(sha256sum "$py_cache" | cut -d' ' -f1)
 if [[ $got != "$py_sha" ]]; then echo "ОШИБКА: sha256 $py_name = $got, ожидалось $py_sha" >&2; rm -f "$py_cache"; exit 1; fi
 cp "$py_cache" "$work/python-embed.zip"
 
+# 1б. Бинарники (lab/bundle.json): каждый скачивается один раз, принимается только с закреплёнными суммами; всё собирается в bin.zip.
+python3 -I - "$here/bundle.json" "$cache" "$work/bin.zip" <<'PY'
+import hashlib, json, os, sys, urllib.request, zipfile
+spec, cache, target = sys.argv[1:4]
+def sha(b): return hashlib.sha256(b).hexdigest()
+def die(msg):
+    print('ОШИБКА: ' + msg, file=sys.stderr); sys.exit(1)
+items = json.load(open(spec, encoding='utf-8-sig'))['binaries']
+files, manifest = {}, {}
+for b in items:
+    path = os.path.join(cache, 'bin-' + b['sha256'])
+    if os.path.isfile(path) and sha(open(path, 'rb').read()) != b['sha256']:
+        print('В кэше %s не та сумма, скачиваю заново' % path, file=sys.stderr); os.remove(path)
+    if not os.path.isfile(path):
+        with urllib.request.urlopen(b['url'], timeout=300) as r:
+            data = r.read()
+        with open(path + '.part', 'wb') as f: f.write(data)
+        os.replace(path + '.part', path)
+    raw = open(path, 'rb').read()
+    if sha(raw) != b['sha256']:
+        os.remove(path); die('sha256 %s = %s, ожидалось %s' % (b['name'], sha(raw), b['sha256']))
+    if b.get('member'):
+        with zipfile.ZipFile(path) as z: data = z.read(b['member'])
+    else:
+        data = raw
+    if sha(data) != b['memberSha256']:
+        die('sha256 файла %s в %s = %s, ожидалось %s' % (b.get('member') or b['name'], b['name'], sha(data), b['memberSha256']))
+    files[b['target']] = data; manifest[b['target']] = b['memberSha256']
+    if b.get('license'):   # текст лицензии из того же архива -> licenses/<имя>/ (в манифесте тоже)
+        with zipfile.ZipFile(path) as z: lic = z.read(b['license'])
+        lt = 'licenses/%s/%s' % (b['name'], b['license'].rsplit('/', 1)[-1])
+        files[lt] = lic; manifest[lt] = sha(lic)
+files['bin-manifest.json'] = (json.dumps(manifest, sort_keys=True, indent=1) + '\n').encode()
+with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as z:
+    for rel in sorted(files):
+        info = zipfile.ZipInfo(rel, (1980, 1, 1, 0, 0, 0))   # фиксированная дата, как у lab-code.zip
+        info.compress_type = zipfile.ZIP_DEFLATED
+        info.external_attr = 0o644 << 16
+        z.writestr(info, files[rel])
+print('bin.zip: %s %d' % (sha(open(target, 'rb').read()), os.path.getsize(target)))
+PY
+
 # 2. Версия кода (как у ra-lab push: короткий sha, -dirty при незакоммиченном).
 sha=$(git -C "$here" rev-parse --short HEAD 2>/dev/null || echo nocommit)
 if [[ -n $(git -C "$here" status --porcelain -- . ':!out' 2>/dev/null || true) ]]; then sha=$sha-dirty; fi
@@ -73,7 +115,7 @@ cp "$out/publish-shell/RemoteAgents-Lab-shell.exe" "$out/RemoteAgents-Lab-shell.
 # 5. Публикация EXE.
 rm -rf "$out/publish"
 "$dotnet" publish "$here/exe/RemoteAgents.Lab.csproj" -c Release \
-  -p:LabVersion="$version" -p:PythonEmbedZip="$work/python-embed.zip" -p:LabCodeZip="$work/lab-code.zip" -p:StopCmdPath="$out/RemoteAgents-Lab-STOP.cmd" -p:ShellExePath="$out/RemoteAgents-Lab-shell.exe" \
+  -p:LabVersion="$version" -p:PythonEmbedZip="$work/python-embed.zip" -p:LabCodeZip="$work/lab-code.zip" -p:BinZip="$work/bin.zip" -p:StopCmdPath="$out/RemoteAgents-Lab-STOP.cmd" -p:ShellExePath="$out/RemoteAgents-Lab-shell.exe" \
   -o "$out/publish"
 cp "$out/publish/RemoteAgents-Lab.exe" "$out/RemoteAgents-Lab.exe"
 echo "версия: $version"
