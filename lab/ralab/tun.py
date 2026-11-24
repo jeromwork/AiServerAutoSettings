@@ -7,7 +7,6 @@
 import ipaddress, json, os, re, subprocess, threading, time
 
 from . import journal, procs
-from . import paths as pth
 from .bus import bus
 
 NAME = 'tun'
@@ -84,8 +83,6 @@ class Tun:
         self.closing, self.stopping, self.stopper = False, False, None
         self.cancel, self.before, self.owned = threading.Event(), None, {}
         bus.subscribe('settings.loaded', self._on_settings)
-        bus.subscribe('net.changed', self._on_net)
-        self.yielded = None
         bus.subscribe('channel.up', lambda _: self._ensure())
         bus.subscribe('app.stop', lambda _: self.stop())
         bus.subscribe('proc.exited', self._on_exit)
@@ -98,27 +95,11 @@ class Tun:
     def _path(self):
         return os.path.join(self.ctx.home, 'private', ADAPTER_FILE)
 
-    def _vpn(self):
-        """Имя чужого VPN (Happ и т.п.) или None; свой ralab-tun за чужой VPN не считаем. Только читаем, чужое не трогаем."""
-        v = pth.vpn_iface()
-        return None if v is None or OUR_NAME.fullmatch(v) else v
-
     def _on_settings(self, _):
         if self._cfg().get('enabled') is not True:
             self.stop(closing=False)
             self.last = 'выключен (tun.enabled не true)'
             return
-        self._on_net(None)
-
-    def _on_net(self, _):  # шина: чужой VPN появился - мягко останавливаем наш TUN; ушёл - обычный старт
-        if self._cfg().get('enabled') is not True:
-            return
-        vpn = self._vpn()
-        if vpn and NAME in procs.names():
-            journal.log('tun', 'tun.yield', {'vpn': vpn}, 'появился чужой VPN: наш TUN останавливаем')
-            with self.lock:
-                self.fails, self.gave_up = 0, False  # уступка не сбой запуска; last_try не трогаем (пауза 30 с)
-            self.stop(closing=False)
         self._ensure()
 
     def _on_exit(self, ev):
@@ -129,7 +110,7 @@ class Tun:
         while True:
             time.sleep(10)
             try:
-                self._on_net(None)  # заодно: чужой VPN появился без события - мягко остановить
+                self._ensure()
             except Exception as e:  # поток повтора не должен умирать
                 journal.log('tun', 'retry.error', {'error': repr(e)})
 
@@ -142,16 +123,6 @@ class Tun:
         t = self._cfg()
         if self.closing or self.stopping or t.get('enabled') is not True:
             return
-        vpn = self._vpn()
-        if vpn:  # V5: чужой полный VPN - не поднимаем (чужой адаптер не трогаем)
-            self.fails, self.gave_up = 0, False  # lock уже у нас
-            if self.yielded != vpn:
-                self.yielded = vpn
-                journal.log('tun', 'tun.yield', {'vpn': vpn}, 'чужой VPN %s: TUN не поднимаем' % vpn)
-            if NAME not in procs.names():
-                self.last = 'уступил %s' % vpn
-            return
-        self.yielded = None
         p, now = procs.get(NAME), time.monotonic()
         if p and p.alive():
             if self.fails and now - self.started >= STABLE:
