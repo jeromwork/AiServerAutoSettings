@@ -8,7 +8,7 @@ syncPort - <установленная>\\state\\transport-ports.json:effective.s
 """
 import glob, hashlib, json, os, re, socket, subprocess, sys, threading, time
 
-from . import journal, procs
+from . import bins, journal, procs
 from .bus import bus
 
 WIN = sys.platform == 'win32'
@@ -35,7 +35,15 @@ def _port(v):
 def find(installed, cfg):
     """-> dict(exe, state, sync, srv) или None, если Диск не установлен или нет любого из трёх."""
     home = os.path.expandvars((cfg.get('disk') or {}).get('home') or '') or os.path.join(os.environ.get('LOCALAPPDATA') or '', 'RemoteDisk')
-    exe, state = os.path.join(home, 'tray', 'syncthingtray.exe'), os.path.join(home, 'state')
+    state = os.path.join(home, 'state')
+    if bins.strict():  # только вшитая копия
+        exe = bins.find('syncthingtray/syncthingtray.exe')
+        if not exe:
+            bins.report('syncthingtray', 'вшитый значок Диска недоступен: %s' % (bins.why('syncthingtray/syncthingtray.exe') or 'файла нет в папке программы'))
+            return None
+    else:
+        bins.warn_old()
+        exe = os.path.join(home, 'tray', 'syncthingtray.exe')
     if not os.environ.get('LOCALAPPDATA') and not (cfg.get('disk') or {}).get('home'):
         return None
     if not (os.path.isfile(exe) and os.path.isfile(os.path.join(state, 'config.xml'))):

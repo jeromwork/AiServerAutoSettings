@@ -26,6 +26,7 @@
     <!-- Пути ниже задаёт build.sh (абсолютные); по умолчанию — lab/out/. -->
     <PythonEmbedZip Condition="'$(PythonEmbedZip)' == ''">$(MSBuildThisFileDirectory)../out/work/python-embed.zip</PythonEmbedZip>
     <LabCodeZip Condition="'$(LabCodeZip)' == ''">$(MSBuildThisFileDirectory)../out/work/lab-code.zip</LabCodeZip>
+    <BinZip Condition="'$(BinZip)' == ''">$(MSBuildThisFileDirectory)../out/work/bin.zip</BinZip>
     <ShellExePath Condition="'$(ShellExePath)' == ''">$(MSBuildThisFileDirectory)../out/RemoteAgents-Lab-shell.exe</ShellExePath>
     <StopCmdPath Condition="'$(StopCmdPath)' == ''">$(MSBuildThisFileDirectory)../out/RemoteAgents-Lab-STOP.cmd</StopCmdPath>
   </PropertyGroup>
@@ -44,11 +45,12 @@
     <EmbeddedResource Include="disk/icons/*.ico" LogicalName="RemoteAgents.Icons.%(Filename)%(Extension)" />
     <EmbeddedResource Include="disk/stignore.txt" LogicalName="RemoteAgents.Lab.stignore.txt" />
     <EmbeddedResource Include="$(PythonEmbedZip)" LogicalName="python-embed.zip" Condition="Exists('$(PythonEmbedZip)')" />
+    <EmbeddedResource Include="$(BinZip)" LogicalName="bin.zip" Condition="Exists('$(BinZip)')" />
     <EmbeddedResource Include="$(LabCodeZip)" LogicalName="lab-code.zip" Condition="Exists('$(LabCodeZip)')" />
     <EmbeddedResource Include="$(ShellExePath)" LogicalName="RemoteAgents.Lab.Shell.exe" Condition="Exists('$(ShellExePath)')" />
     <EmbeddedResource Include="$(StopCmdPath)" LogicalName="STOP.cmd" Condition="Exists('$(StopCmdPath)')" />
   </ItemGroup>
   <Target Name="RequireLabResources" BeforeTargets="Publish">
-    <Error Condition="!Exists('$(PythonEmbedZip)') Or !Exists('$(LabCodeZip)') Or !Exists('$(StopCmdPath)') Or !Exists('$(ShellExePath)')" Text="Сначала lab/build.sh: нужны python-embed.zip, lab-code.zip, STOP.cmd и клиент меню" />
+    <Error Condition="!Exists('$(PythonEmbedZip)') Or !Exists('$(LabCodeZip)') Or !Exists('$(BinZip)') Or !Exists('$(StopCmdPath)') Or !Exists('$(ShellExePath)')" Text="Сначала lab/build.sh: нужны python-embed.zip, bin.zip, lab-code.zip, STOP.cmd и клиент меню" />
   </Target>
 </Project>

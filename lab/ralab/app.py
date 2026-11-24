@@ -4,7 +4,7 @@
 """
 import argparse, os, re, socket, sys, threading, time, traceback, types
 
-from . import journal, procs
+from . import bins, journal, procs
 from .bus import bus, rss_bytes
 
 MEM_MAX = 300 * 1024 * 1024
@@ -47,6 +47,7 @@ class Ctx(types.SimpleNamespace):
 def main(argv):
     ap = argparse.ArgumentParser()
     ap.add_argument('--home', required=True)
+    ap.add_argument('--exe', default='')
     ap.add_argument('--exe-version', default='')
     ap.add_argument('--rollback-reason', default='')
     ap.add_argument('--installed')
@@ -59,6 +60,11 @@ def main(argv):
     for d in ('logs', 'state', 'code', 'undo', 'private'):
         os.makedirs(os.path.join(home, d), exist_ok=True)
     journal.init(os.path.join(home, 'logs'))
+
+    try:  # вшитые программы: до чтения настроек; ошибка не мешает запуску
+        bins.prepare(home, lambda text: journal.log('app', 'bins', {}, text))
+    except Exception:
+        journal.log('app', 'bins', {'trace': traceback.format_exc()[-800:]}, 'вшитые программы не подготовлены')
 
     def crash(kind, text):
         journal.log('app', 'crash', {'kind': kind, 'trace': text[-1500:]})
