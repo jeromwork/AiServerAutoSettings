@@ -6,14 +6,20 @@
   ra-lab status | log [-n N] | rank | exec "<cmd>" [--shell powershell|cmd] [--max-time S] [--cwd D] | kill <id> |
          read <удалённый путь> [локальный] | write <удалённый путь> <локальный|-> | restart | switch <путь> | vpn [off|auto|only] | push [--wait] |
          collect [--every 20]   (долгая: докачивает журнал ПК в ~/work/logs-in/lab/<ПК>/, живёт и после закрытия лаборатории)
+  ra-lab expose <имя> <порт сервера> [--pc-port N]   открыть TCP-порт на localhost ПК; повтор меняет цель
+  ra-lab unexpose <имя>                            снять проброс и удалить запись
+  ra-lab ports                                    слушатели сервера и действующие пробросы ПК
+  ra-lab free-port [--from 8200] [--to 8999]        выбрать и зарезервировать порт на 10 минут
 Состояние: ~/.local/state/ra-lab/ (0700): <ПК>.json {port, token, version, rollback} (0600) и <ПК>.events (unix-сокет wait-up).
+Реестры exposed.json [{name, serverPort, pcPort, cwd, ts}] и reserved.json [{port, expires}]: атомарно, 0600, под flock.
 Токен агента никогда не печатается. Стандартная библиотека, Python 3.8+.
 """
-import argparse, base64, codecs, datetime, glob, hashlib, io, json, os, socket, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request, zipfile
+import argparse, base64, codecs, contextlib, datetime, fcntl, glob, hashlib, io, json, os, socket, subprocess, sys, tempfile, threading, time, urllib.error, urllib.parse, urllib.request, zipfile
 
 STATE = os.path.expanduser('~/.local/state/ra-lab')
 SIZE = 65536
 CHUNK = 3 << 20
+REGISTRIES = {'exposed.json', 'reserved.json'}
 
 
 def state_dir():
@@ -31,7 +37,8 @@ def write_state(pc, d):
 
 
 def read_state(pc=None):
-    files = [os.path.join(state_dir(), pc + '.json')] if pc else sorted(glob.glob(os.path.join(state_dir(), '*.json')), key=os.path.getmtime)
+    files = [os.path.join(state_dir(), pc + '.json')] if pc else sorted(
+        (p for p in glob.glob(os.path.join(state_dir(), '*.json')) if os.path.basename(p) not in REGISTRIES), key=os.path.getmtime)
     if not files or not os.path.exists(files[-1]):
         sys.exit('ra-lab: ПК не подключался (нет %s)' % (pc or 'состояния'))
     with open(files[-1]) as f:
@@ -192,6 +199,171 @@ def cmd_wait_up(a):
 
 
 # --- команды ассистента ---
+@contextlib.contextmanager
+def registry_lock():
+    """Отдельный неизменяемый inode для flock: блокировка переживает os.replace JSON-файлов."""
+    fd = os.open(os.path.join(state_dir(), 'ports.lock'), os.O_CREAT | os.O_RDWR, 0o600)
+    with os.fdopen(fd, 'a') as f:
+        os.fchmod(f.fileno(), 0o600)
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+
+
+def read_registry(name):
+    try:
+        with open(os.path.join(STATE, name), encoding='utf-8') as f:
+            rows = json.load(f)
+    except FileNotFoundError:
+        return []
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise ValueError('%s: ожидался список записей' % name)
+    for row in rows:
+        if name == 'exposed.json':
+            name_arg(row.get('name'))
+            port_arg(row.get('serverPort'))
+            port_arg(row.get('pcPort'))
+        else:
+            port_arg(row.get('port'))
+            if not isinstance(row.get('expires'), (int, float)):
+                raise ValueError('%s: нужен expires' % name)
+    return rows
+
+
+def write_registry(name, rows):
+    fd, tmp = tempfile.mkstemp(prefix=name + '-', suffix='.tmp', dir=state_dir())
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            os.fchmod(f.fileno(), 0o600)
+            json.dump(rows, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, os.path.join(STATE, name))
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def port_arg(value):
+    try:
+        port = int(value)
+        if isinstance(value, bool) or str(port) != str(value) or not 1 <= port <= 65535:
+            raise ValueError()
+        return port
+    except (ValueError, TypeError):
+        raise argparse.ArgumentTypeError('порт должен быть целым числом от 1 до 65535')
+
+
+def name_arg(value):
+    if not isinstance(value, str) or not value.strip() or len(value) > 128 or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise argparse.ArgumentTypeError('нужно непустое имя до 128 символов без управляющих символов')
+    return value
+
+
+def server_listeners():
+    """ss: IPv4/IPv6, любой bind-адрес; процессы показываем, если текущий пользователь их видит."""
+    try:
+        out = subprocess.check_output(['ss', '-ltnHp'], text=True, stderr=subprocess.PIPE)
+    except (OSError, subprocess.CalledProcessError) as e:
+        raise OSError('не удалось получить слушателей сервера через ss') from e
+    rows = []
+    for line in out.splitlines():
+        cols = line.split(None, 5)
+        if len(cols) < 5:
+            continue
+        addr = cols[3]
+        try:
+            port = int(addr.rsplit(':', 1)[1])
+        except (IndexError, ValueError):
+            continue
+        rows.append({'port': port, 'address': addr, 'process': cols[5] if len(cols) > 5 else '-'})
+    return sorted(rows, key=lambda row: (row['port'], row['address']))
+
+
+def cmd_expose(a):
+    """Открыть порт сервера на localhost ПК; сохранить имя и напечатать URL."""
+    try:
+        if a.server_port not in {row['port'] for row in server_listeners()}:
+            print('ra-lab: предупреждение: порт %d на сервере пока не слушается' % a.server_port, file=sys.stderr)
+    except OSError as e:
+        print('ra-lab: предупреждение: %s' % e, file=sys.stderr)
+    st = read_state(a.pc)
+    with registry_lock():
+        rows = read_registry('exposed.json')
+        body = {'name': a.name, 'serverPort': a.server_port}
+        if a.pc_port is not None:
+            body['pcPort'] = a.pc_port
+        r = ok(st, 'POST', '/expose', body, timeout=15)
+        record = {'name': a.name, 'serverPort': a.server_port, 'pcPort': r['pcPort'],
+                  'cwd': os.getcwd(), 'ts': datetime.datetime.now().astimezone().isoformat(timespec='seconds')}
+        write_registry('exposed.json', [row for row in rows if row['name'] != a.name] + [record])
+    print('http://localhost:%d' % r['pcPort'])
+
+
+def cmd_unexpose(a):
+    """Закрыть именованный проброс на ПК и удалить его из серверного реестра."""
+    st = read_state(a.pc)
+    with registry_lock():
+        rows = read_registry('exposed.json')
+        ok(st, 'POST', '/unexpose', {'name': a.name}, timeout=15)
+        write_registry('exposed.json', [row for row in rows if row['name'] != a.name])
+    print('снят: %s' % a.name)
+
+
+def cmd_ports(a):
+    """Показать TCP-слушателей сервера; при доступном канале — имя, порт и состояние на ПК."""
+    listeners = server_listeners()
+    with registry_lock():
+        registered = read_registry('exposed.json')
+    remote = None
+    try:
+        code, r = call(read_state(a.pc), 'GET', '/exposed', timeout=5)
+        if code == 200 and r.get('channel', True):
+            remote = r['exposed']
+    except (SystemExit, OSError, ValueError):
+        pass
+    if remote is None:
+        print('ra-lab: нет канала; показаны порты сервера и сохранённые имена', file=sys.stderr)
+    # ПК — источник истины для pcPort: после перезапуска он мог выбрать другой порт.
+    by_name = {row['name']: row for row in registered}
+    if remote is not None:
+        by_name.update({row['name']: row for row in remote})
+    live_names = {row['name']: row for row in remote or []}
+    by_port = {}
+    for row in by_name.values():
+        by_port.setdefault(row['serverPort'], []).append(row)
+    listening_ports = {row['port'] for row in listeners}
+    listeners += [{'port': port, 'address': '(не слушает)', 'process': '-'} for port in by_port if port not in listening_ports]
+    table = [['ПОРТ', 'АДРЕС', 'ПРОЦЕСС', 'ИМЯ'] + (['ПОРТ ПК', 'СТАТУС'] if remote is not None else [])]
+    for row in sorted(listeners, key=lambda row: (row['port'], row['address'])):
+        for entry in by_port.get(row['port']) or [None]:
+            cells = [str(row['port']), row['address'], row['process'], entry['name'] if entry else '-']
+            if remote is not None:
+                live = live_names.get(entry['name']) if entry else None
+                cells += [str(live['pcPort']) if live else '-',
+                          ('на ПК слушает' if live.get('listening') else 'на ПК не слушает') if live else '-']
+            table.append(cells)
+    widths = [max(len(row[i]) for row in table) for i in range(len(table[0]))]
+    for row in table:
+        print('  '.join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip())
+
+
+def cmd_free_port(a):
+    """Выдать первый свободный порт в диапазоне и атомарно зарезервировать его на 10 минут."""
+    if a.port_from > a.port_to:
+        sys.exit('ra-lab: --from должен быть не больше --to')
+    with registry_lock():
+        now = time.time()
+        reserved = [row for row in read_registry('reserved.json') if row['expires'] > now]
+        busy = {row['port'] for row in server_listeners()}
+        busy.update(row['serverPort'] for row in read_registry('exposed.json'))
+        busy.update(row['port'] for row in reserved)
+        port = next((p for p in range(a.port_from, a.port_to + 1) if p not in busy), None)
+        if port is None:
+            sys.exit('ra-lab: нет свободного порта в диапазоне %d–%d' % (a.port_from, a.port_to))
+        write_registry('reserved.json', reserved + [{'port': port, 'expires': now + 600}])
+    print(port)
+
+
 def cmd_status(a):
     print(json.dumps(ok(read_state(a.pc), 'GET', '/status'), ensure_ascii=False, indent=2))
 
@@ -389,7 +561,7 @@ def main():
     sub = ap.add_subparsers(dest='cmd', required=True)
 
     def add(name, fn, *args):
-        p = sub.add_parser(name)
+        p = sub.add_parser(name, **({'help': fn.__doc__.splitlines()[0]} if fn.__doc__ else {}))
         for a_ in args:
             p.add_argument(*a_[0], **a_[1])
         p.set_defaults(fn=fn)
@@ -406,10 +578,17 @@ def main():
     add('restart', cmd_restart)
     add('switch', cmd_switch, P('path'))
     add('vpn', cmd_vpn, P('mode', nargs='?', choices=['off', 'auto', 'only']))
+    add('expose', cmd_expose, P('name', type=name_arg), P('server_port', type=port_arg), P('--pc-port', type=port_arg))
+    add('unexpose', cmd_unexpose, P('name', type=name_arg))
+    add('ports', cmd_ports)
+    add('free-port', cmd_free_port, P('--from', dest='port_from', type=port_arg, default=8200), P('--to', dest='port_to', type=port_arg, default=8999))
     add('collect', cmd_collect, P('--every', type=int, default=20))
     add('push', cmd_push, P('--wait', action='store_true'), P('--deadline', type=int, default=90))
     a = ap.parse_args()
-    sys.exit(a.fn(a) or 0)
+    try:
+        sys.exit(a.fn(a) or 0)
+    except (OSError, ValueError, argparse.ArgumentTypeError) as e:
+        sys.exit('ra-lab: %s' % e)
 
 
 if __name__ == '__main__':

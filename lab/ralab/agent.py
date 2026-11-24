@@ -68,7 +68,8 @@ class Agent:
         self.routes = {('GET', 'status'): self.r_status, ('GET', 'log'): self.r_log, ('POST', 'exec'): self.r_exec, ('GET', 'proc'): self.r_proc,
                        ('GET', 'procs'): self.r_procs, ('POST', 'kill'): self.r_kill, ('GET', 'read'): self.r_read, ('POST', 'write'): self.r_write,
                        ('GET', 'files'): self.r_files, ('POST', 'code'): self.r_code, ('POST', 'restart'): self.r_restart, ('POST', 'switch'): self.r_switch,
-                       ('POST', 'vpn'): self.r_vpn}
+                       ('POST', 'vpn'): self.r_vpn, ('POST', 'expose'): self.r_expose,
+                       ('POST', 'unexpose'): self.r_unexpose, ('GET', 'exposed'): self.r_exposed}
         bus.subscribe('app.start', self._on_start)
         bus.subscribe('proc.exited', self._on_exit)
 
@@ -162,6 +163,24 @@ class Agent:
     # --- ручки ---
     def r_status(self, h, q, body):
         return 200, self.ctx.status()
+
+    def r_expose(self, h, q, body):
+        d = self._json(body)
+        try:
+            return 200, self.ctx.forward.expose(d.get('name'), d.get('serverPort'), d.get('pcPort'))
+        except ValueError as e:
+            return 400, {'error': str(e)}
+        except OSError as e:
+            return 409, {'error': str(e)}
+
+    def r_unexpose(self, h, q, body):
+        try:
+            return 200, self.ctx.forward.unexpose(self._json(body).get('name'))
+        except ValueError as e:
+            return 400, {'error': str(e)}
+
+    def r_exposed(self, h, q, body):
+        return 200, {'exposed': self.ctx.forward.exposed_status(), 'channel': self.ctx.forward.socks is not None}
 
     def r_log(self, h, q, body):
         return 200, {'records': journal.tail(int((q.get('n') or ['200'])[0]))}
