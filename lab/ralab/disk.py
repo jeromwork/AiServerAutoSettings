@@ -1,4 +1,4 @@
-"""Диск-движок: тот же Syncthing (та же база и Device ID) под Лабораторией, пока старая Программа выгружена.
+"""Диск-движок: тот же Syncthing (та же база и Device ID) под программой, пока старая Программа выгружена.
 Источники (только чтение): диск - config.json disk.home или %LOCALAPPDATA%\\RemoteDisk (tray\\syncthingtray.exe, state\\config.xml);
 syncPort - <установленная>\\state\\transport-ports.json:effective.syncPort, иначе config.json transport.syncPort, иначе 22001;
 серверный порт - transport.channelPath (или secrets\\channel-disk-*.json) :inbounds[tag=sync].override_port (читается только он).
@@ -10,6 +10,11 @@ import glob, hashlib, json, os, re, socket, subprocess, sys, threading, time
 
 from . import bins, journal, procs
 from .bus import bus
+
+try:
+    from . import diskjoin, v2config
+except ImportError:
+    diskjoin = v2config = None
 
 WIN = sys.platform == 'win32'
 FAILS_MAX, TICK, PROBE_EVERY, STABLE, FRESH = 5, 10, 6, 120, 15
@@ -32,9 +37,13 @@ def _port(v):
     return v if 1 <= v <= 65535 else 0
 
 
+def disk_home(cfg):
+    return os.path.expandvars((cfg.get('disk') or {}).get('home') or '') or os.path.join(os.environ.get('LOCALAPPDATA') or '', 'RemoteDisk')
+
+
 def find(installed, cfg):
     """-> dict(exe, state, sync, srv) или None, если Диск не установлен или нет любого из трёх."""
-    home = os.path.expandvars((cfg.get('disk') or {}).get('home') or '') or os.path.join(os.environ.get('LOCALAPPDATA') or '', 'RemoteDisk')
+    home = disk_home(cfg)
     state = os.path.join(home, 'state')
     if bins.strict():  # только вшитая копия
         exe = bins.find('syncthingtray/syncthingtray.exe')
@@ -59,6 +68,7 @@ def find(installed, cfg):
         srv = next((_port(i.get('override_port')) for i in _json(f).get('inbounds') or [] if isinstance(i, dict) and i.get('tag') == 'sync'), 0)
         if srv:
             break
+    srv = srv or _port(_json(os.path.join(home, 'server.json')).get('listen'))
     return {'home': home, 'exe': exe, 'state': state, 'sync': sync, 'srv': srv} if srv else None
 
 
@@ -125,10 +135,12 @@ class Disk:
         self.fwd, self.running, self.stopping, self.ticker = None, False, False, False  # fwd: (sync, srv) открытого проброса
         self.fails, self.next_at, self.started_at, self.n = 0, 0.0, 0.0, 0
         self.exit_at, self.pending, self.probe_t0, self.probe_done, self.last_log = 0.0, False, 0.0, 0.0, 0.0
+        self._join_busy, self._join_next, self._join_fails = False, 0.0, 0
         bus.subscribe('settings.loaded', self._on_settings)
         bus.subscribe('channel.up', self._on_up)
         bus.subscribe('channel.down', self._on_down)
         bus.subscribe('disk.tick', self._on_tick)
+        bus.subscribe('disk.joined', self._on_joined)
         bus.subscribe('proc.exited', self._on_proc)
         bus.subscribe('net.changed', self._on_net)
         bus.subscribe('app.stop', self._on_stop)
@@ -139,10 +151,99 @@ class Disk:
         return self.info
 
     def _on_settings(self, _):
-        if self._refind() and not self.ticker:
+        if (self._refind() or (diskjoin and self._v2disk() is not None)) and not self.ticker:
             self.ticker = True
             threading.Thread(target=self._tick_loop, daemon=True).start()
         self._eval()
+
+    def _v2disk(self):
+        if v2config is None or not v2config.status(self.ctx.home).get('has'):
+            return None
+        cfg = _json(os.path.join(self.ctx.home, 'config', 'active.json'))
+        if not isinstance(cfg, dict):
+            return None
+        section = cfg.get('disk')
+        section = section if isinstance(section, dict) else {}
+        return None if section.get('enabled') is False else (cfg.get('name') or '', section)
+
+    def _join_due(self) -> bool:
+        if diskjoin is None or self._join_busy or self.running or self.stopping or time.time() < self._join_next:
+            return False
+        v2 = self._v2disk()
+        if v2 is None or not self.ctx.rounds.channel:
+            return False
+        home = disk_home({'disk': v2[1]})
+        exe = bins.find('syncthingtray/syncthingtray.exe')
+        if not exe or not os.path.isfile(exe):
+            return False
+        progress = _json(os.path.join(home, 'join.json'))
+        return (not os.path.isfile(os.path.join(home, 'state', 'config.xml')) or
+                isinstance(progress, dict) and progress.get('stage') in ('identity', 'server'))
+
+    def _join_log(self, text):
+        journal.log('disk', 'join-progress', None, text)
+
+    def _join_failed(self, error):
+        self._join_fails += 1
+        self._join_next = time.time() + (60 if self._join_fails < 3 else 300)
+        text = str(error) if isinstance(error, diskjoin.JoinError) else 'Не удалось подключить Диск (%s).' % type(error).__name__
+        journal.log('disk', 'join-failed', {'fails': self._join_fails}, text)
+
+    def _join_start(self):
+        if not self._join_due():
+            return
+        name, section = self._v2disk()
+        home = disk_home({'disk': section})
+        state, progress = os.path.join(home, 'state'), os.path.join(home, 'join.json')
+        exe = bins.find('syncthingtray/syncthingtray.exe')
+        base = os.path.expandvars(section.get('base') or os.path.join(os.environ.get('USERPROFILE') or os.path.expanduser('~'), 'Disk'))
+        self._join_busy = True
+
+        def run():
+            joined = False
+            try:
+                # Диск старой Программы без нашего маркера не присваиваем.
+                if os.path.isfile(os.path.join(state, 'config.xml')) and not os.path.isfile(progress):
+                    return
+                diskjoin._write(progress, json.dumps({'stage': 'identity'}))
+                identity = diskjoin.make_identity(exe, state, self._join_log)
+                diskjoin._write(progress, json.dumps({'stage': 'server'}))
+                reply = diskjoin.register(self.ctx, identity, name or os.environ.get('COMPUTERNAME') or '', self._join_log)
+                diskjoin.save_server(home, reply, base)
+                diskjoin._write(progress, json.dumps({'stage': 'folders', 'serverId': reply['deviceId']}))
+                self._join_fails, self._join_next = 0, 0.0
+                journal.log('disk', 'joined', reply, 'ПК подключён к Диску сервера')
+                joined = True
+            except Exception as error:
+                self._join_failed(error)
+            finally:
+                self._join_busy = False
+            if joined:
+                bus.publish('disk.joined')
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_joined(self, _):
+        self._refind()
+        self._eval()
+
+    def _join_finish(self, section):
+        i = self.info
+        server = _json(os.path.join(i['home'], 'server.json'))
+        base = os.path.expandvars(section.get('base') or os.path.join(os.environ.get('USERPROFILE') or os.path.expanduser('~'), 'Disk'))
+        self._join_busy = True
+
+        def run():
+            try:
+                result = diskjoin.finish(i['home'], i['state'], server, i['sync'], section, base, self._join_log)
+                self._join_fails = 0
+                self._join_next = time.time() + 120 if result.get('waiting') else 0.0
+            except Exception as error:
+                self._join_failed(error)
+            finally:
+                self._join_busy = False
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _on_up(self, _):
         self.up = True
@@ -185,6 +286,11 @@ class Disk:
             self.fails = 0
         self._eval()
 
+        v2 = self._v2disk() if diskjoin and self.state == 'running' and not self.stopping else None
+        if (v2 is not None and not self._join_busy and time.time() >= self._join_next and
+                self.info and diskjoin.needs_finish(self.info['home'])):
+            self._join_finish(v2[1])
+
     def _failed(self, why):
         self.fails += 1
         self.next_at = time.monotonic() + min(30 * 2 ** (self.fails - 1), 300)
@@ -216,6 +322,14 @@ class Disk:
         if self.running:
             return self._set('running')
         i = self._refind()
+        if self._join_due():
+            self._join_start()
+            return self._set('absent')
+        # Незавершённую регистрацию сначала повторяем, движок ещё не запускаем.
+        if i and self._v2disk() is not None:
+            progress = _json(os.path.join(i['home'], 'join.json'))
+            if isinstance(progress, dict) and progress.get('stage') in ('identity', 'server'):
+                return self._set('absent')
         if not i:
             return self._set('absent')
         if self.pending or self.busy is None or time.monotonic() - self.probe_done > FRESH:
