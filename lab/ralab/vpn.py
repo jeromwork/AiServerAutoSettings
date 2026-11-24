@@ -22,12 +22,41 @@ CHECK_S, CHECK_FAILS, FAILS_MAX, RETRY_S, STABLE_S, START_S = 10, 2, 3, 60, 300,
 CHECK_URL = 'http://www.gstatic.com/generate_204'
 GEOIP_URL = 'https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs'
 ANSI = re.compile(r'\x1b\[[0-9;]*m')
-# .ru .su .рф .рус .москва .дети .онлайн .сайт .орг + российские сервисы на чужих зонах; ещё - vpn.directDomains в конфиге
+# Что идёт напрямую - из конфига vpn.direct {domains: [...], geoip: {url, refreshDays} | null}; здесь только значения по умолчанию,
+# если раздела нет: .ru .su .рф .рус .москва .дети .онлайн .сайт .орг + российские сервисы на чужих зонах.
 RU_DOMAINS = ['ru', 'su', 'xn--p1ai', 'xn--p1acf', 'xn--80adxhks', 'xn--d1acj3b', 'xn--80asehdb', 'xn--80aswg', 'xn--c1avg',
               'yandex.net', 'yandex.com', 'yastatic.net', 'yandexcloud.net', 'ya.cc', 'vk.com', 'vk.me', 'vkuser.net', 'userapi.com',
               'vk-cdn.net', 'mycdn.me', 'okcdn.ru', 'mail.ru', 'avito.st', 'wbstatic.net', 'wbbasket.ru', 'ozone.ru', 'tbank-online.com']
 EXCLUDE = ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '100.64.0.0/10', '169.254.0.0/16', '127.0.0.0/8', '224.0.0.0/4',
            '255.255.255.255/32', '1.1.1.1/32', 'fc00::/7', 'fe80::/10', 'ff00::/8']
+
+
+def _idna(d):
+    """'рф' -> 'xn--p1ai': sing-box сравнивает с именем из TLS/HTTP, а оно всегда в punycode."""
+    d = str(d).strip().strip('.').lower()
+    try:
+        return d.encode('idna').decode('ascii')
+    except UnicodeError:
+        return d
+
+
+def _direct(cfg):
+    d = (cfg.get('vpn') or {}).get('direct')
+    return d if isinstance(d, dict) else {}
+
+
+def _geoip_cfg(cfg):
+    """vpn.direct.geoip: нет ключа - список SagerNet раз в 7 дней; null/false - не использовать; {url, refreshDays} - свой."""
+    d = _direct(cfg)
+    g = d.get('geoip', {}) if 'geoip' in d else {}
+    if not g and 'geoip' in d:
+        return None
+    g = g if isinstance(g, dict) else {}
+    try:
+        days = max(1, int(g.get('refreshDays') or 7))
+    except (TypeError, ValueError):
+        days = 7
+    return {'url': str(g.get('url') or GEOIP_URL), 'days': days}
 
 
 class Vpn:
@@ -271,10 +300,12 @@ class Vpn:
                     if o.get('type') in pth.TCP_TYPES and not o.get('detour'):
                         o.update(pth.KEEPALIVE)
                     outs.append(o)
-        rules = [{'action': 'sniff'}, {'ip_is_private': True, 'outbound': 'direct'},
-                 {'domain_suffix': RU_DOMAINS + [str(d) for d in (st.cfg.get('vpn') or {}).get('directDomains') or []], 'outbound': 'direct'}]
+        doms = [_idna(d) for d in _direct(st.cfg).get('domains', RU_DOMAINS) if str(d).strip('.')]
+        rules = [{'action': 'sniff'}, {'ip_is_private': True, 'outbound': 'direct'}]
+        if doms:
+            rules.append({'domain_suffix': doms, 'outbound': 'direct'})
         route = {'rules': rules, 'final': 'vpn-out', 'auto_detect_interface': True}
-        if os.path.isfile(self._geoip()):
+        if _geoip_cfg(st.cfg) and os.path.isfile(self._geoip()):
             rules.append({'rule_set': ['geoip-ru'], 'outbound': 'direct'})
             route['rule_set'] = [{'type': 'local', 'tag': 'geoip-ru', 'format': 'binary', 'path': self._geoip()}]
         tun = {'type': 'tun', 'tag': 'vpn-in', 'interface_name': IFACE, 'address': ['172.19.8.1/30', 'fdfe:dcba:9877::1/126'], 'mtu': 1400,
@@ -329,16 +360,18 @@ class Vpn:
         if 'sing-box started' in line:
             self.up = True
             journal.log('vpn', 'started', None, 'VPN работает')
-            if not os.path.isfile(self._geoip()):
-                threading.Thread(target=self._fetch_geoip, name='vpn-geoip', daemon=True).start()
+            g = _geoip_cfg(self.ctx.settings.cfg)
+            if g and (not os.path.isfile(self._geoip()) or time.time() - os.path.getmtime(self._geoip()) > g['days'] * 86400):
+                threading.Thread(target=self._fetch_geoip, args=(g['url'],), name='vpn-geoip', daemon=True).start()
             self.kick.set()
         elif 'ERROR' in line or 'FATAL' in line:
             self.tail.append(line[-200:])
 
-    def _fetch_geoip(self):
-        """Список адресов России (rule-set SagerNet) - один раз; потом VPN перезапускается с ним (на секунды)."""
+    def _fetch_geoip(self, url):
+        """Список адресов России (rule-set sing-box, адрес из vpn.direct.geoip.url): нет файла или старше refreshDays - скачать;
+        потом VPN перезапускается с ним (на секунды). Не скачался - работает прежний файл или только домены."""
         try:
-            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(GEOIP_URL, timeout=30) as r:
+            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=30) as r:
                 data = r.read(8 << 20)
             if not data.startswith(b'SRS'):
                 raise ValueError('не rule-set')
@@ -353,4 +386,4 @@ class Vpn:
 
     def status(self):
         return {'mode': self.mode, 'state': self.state, 'running': self._running(), 'up': self.up, 'foreign': self.foreign,
-                'fails': self.fails, 'bridges': [p['name'] for p in self.bridges], 'geoip': os.path.isfile(self._geoip())}
+                'fails': self.fails, 'bridges': [p['name'] for p in self.bridges], 'geoip': os.path.isfile(self._geoip()) and time.strftime('%Y-%m-%d', time.localtime(os.path.getmtime(self._geoip())))}
